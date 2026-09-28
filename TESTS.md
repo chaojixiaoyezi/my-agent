@@ -180,6 +180,29 @@
 - **回归**：定向 144 个文件：引用接管、接替、代理树、持久化与改动模块的 100 个文件，加上新文件、43 个全仓扫描类测试和 3 个读文档的测试。结果 2655 passed、1 skipped、5 xfailed，716.8 秒；没有跑全仓 pytest。
 - **门禁**：ruff、doc_sync、strict code-size（hard=0；`SubAgentBaseService` 从 264 行降到 239 行）、`git diff --check`、check_clean_package 全部退出 0。线上 CI 不作为验收来源。
 
+## G07 Skill 共存与成本对照原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9a-skill-cost-acceptance`）
+
+- **范围**：CAPABILITY_PACK_ACCEPTANCE 第 7 组（G07），包括两部分：
+  - 旧 v3 随包全局 Skill 与能力包共存；
+  - 开关关闭／单包／多包用同一原始需求（A01）做成本对照，每种配置跑一次。
+- **环境**：
+  - 生产 wheel（sha256 `9be2b59f…`），新建 Python 3.12.13 venv。
+  - 每组全新隔离 home，私有 127.0.0.1:8440；被测进程 `env -i` 启动。
+  - 模型目录副本 600、不打印、每组结束删除。
+  - design-lite（v3，随包 Skill design-card）三组都装。
+- **结果**：
+  - v3 随包 Skill 三组都能列出和读取，内容 sha256 与源码一致。
+  - 三组无关包调用都是 0；宿主都没做一次选择，模型都自选 A。
+  - provider 输入：开关关闭 607102、单包 1364685、多包 507355（主调用 14／22／10），差异主要来自轮数。
+  - 与包相关的每轮提示词开销（产品渲染估算）：901／967／1244 token。
+  - 详见 [CAPABILITY_PACK_ACCEPTANCE.md](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#g07-skill-共存与成本对照原生验收2026-09-28)。
+- **偏差**：
+  - 前两次开关文件放错了位置（应放在 owner home 的 `config/`），实际用的是默认开关；已按实际配置归档，没有重跑。
+  - 一次选择开启臂未覆盖。
+- **收尾**：每组都执行了 `/exit` 和 `gateway stop`，PID 已消失，端口空闲；目录副本和 venv 已删除。
+- **证据**：`~/.my-agent/decision-evidence/skill-cost-9f88/`
+- **验证**：纯文档改动；`python3 scripts/check_doc_sync.py`、`git diff --check`、`python3 scripts/check_clean_package.py .`。
+
 ## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
 
 - **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，
