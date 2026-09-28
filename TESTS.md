@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## C21固定8ef组合及原生开发分项（2026-09-28）
+
+- 隔离固定源码的 `test_compact_calibrated_candidate_gate`、`test_compact_capacity_host_chain`、`test_compact_capacity_facts`、`test_active_turn_compact_projection`、`test_compact_request_projection`、`test_compact_source_lifetime`、`test_mixed_compact_contract`、`test_runtime_context_pressure` 共 135 项通过；独立只读复核未发现确定阻断。
+- Claude step14m 的 12 份原始日志合计 23761 passed、21 skipped、32 xfailed、5 xpassed、0 failed；Ruff、doc sync、strict code-size（hard=0）、diff、clean-package 均 0。本地严格 gate 已通过，线上 CI 未作为验收来源；root 没有另跑全仓。
+- 私有安装 1431 个文件与固定源码/wheel 一致，pip check 通过；停稳备份后的 15106 个旧文件在重启前保持。运行后六配置及安装表不变，日用默认未改。
+- 单次 C21、官方 M2.7/131072、576.204 秒自然终态。第 1 代由 `tool_context_overflow` 自动触发，102708→39581；B pin 跨一代保持，提交后继续 19 次工具调用。连续两代、压缩后包 get/原程序执行仍未覆盖。
+- B checker 副本非原字节、A 未采用；输入 project 被代理调试命令损坏。最后 11/11 是被测代理自建测试的实际输出，但不足以证明正确映射、摘要验证、完整报告或可搬迁交接，业务未通过；观察者没有代跑或修复产物。
+- 本轮 root 只更新验收文档和私有证据，不修改产品/测试代码，不推送或部署主线。最终仍 0/27，详见[完整分项](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c21固定8ef的离线交接开发验证2026-09-28)。建议下一步先交接真实缺口，再补必要自然覆盖；只读审阅可并行，私有运行归 root，产品及发布归 Claude。
+
 ## Compact 候选接受门按预检的校准口径计量（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`）
 
 - **来源**：集成者对压缩异常②的决定（候选投影与预检同一校准口径；失败路径不用原始值覆盖线程快照；started 事件带触发来源）
