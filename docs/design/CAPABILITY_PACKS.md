@@ -132,6 +132,7 @@ panels、skills、host_api；脚本文本是私有资源，读取不等于执行
 发现只读已启用安装记录及元数据，不扫描所有正文。读取从原 blob 取得受摘要保护的成员，
 核对当前 owner、package SHA、activation ID，并在内容交付前复核同一代次。
 路径错误、包篡改和停用／重装后的旧快照明确失败，不静默读新版或暴露相邻 owner。
+这类读取失败对外仍统一返回 `SKILL_SNAPSHOT_UNAVAILABLE`，恢复建议不变；包读取的失败回执另带 `details.reason`，只用于诊断：`activation_unavailable` 表示读取开始前代次已失效（停用、换代或卸载），`activation_changed_during_read` 表示成员字节读出后复核时代次已变化（在途切代）。原因来自安装异常的结构化字段，不解析文案，也不据此放行或自动重试。
 大内容使用明确页范围和 continuation，不以静默截断冒充完整读取。
 资源引用排在正文前并进入原 handler envelope；正文被归档时，复用原 `live_prompt_output` 保留
 完整 `source_ref` 和受原预览配置限制的 `body_preview`，`body_preview_complete` 明确当前页是否读全。

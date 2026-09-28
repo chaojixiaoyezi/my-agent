@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 能力包读取失败的结构化原因（2026-09-28，分支 `claude/75-snapshot-reason`，基于 `53477806d`）
+
+- **背景**：G05 脚本模型端到端中，在途切代和普通停用都只返回 `CAPABILITY_RESOURCE_UNAVAILABLE`。原因是 `read_in_package` 读的是 `exc.code`，而 `PluginInstallationError` 只有 `reason`，内部原因因此丢失。
+- **改动**：`read_capability_member` 在读后复核失败时（撤销或代次变化）改报 `activation_changed_during_read`，读前失效仍是 `activation_unavailable`。`SkillSnapshotError` 增加可选的 `reason`。`skill_search` 的失败回执保持 `SKILL_SNAPSHOT_UNAVAILABLE` 和原 `error` 文本，另带 `details.reason`。
+- **测试**：`test_capability_package_discovery.py` 新增 2 项，分别在读取器层和工具层区分读前失效与读中撤销；两项先红后绿。能力包、快照、Skill 服务相关的 18 个文件，加上仓库级守卫（架构、常量唯一、代码尺寸、guardrail）共 459 项通过。
+- **变异**：5 个变异全部被杀：读后仍报旧原因、读前误标为读中、`read_in_package` 丢掉 reason、工具不输出 details、去掉读后复核的包装。
+- 没有覆盖的路径：`write_file.source_ref` 的来源失败仍以 `TOOL_UNAVAILABLE` 的文本报告，没有带出 reason。
+
 ## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
 
 - **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，
