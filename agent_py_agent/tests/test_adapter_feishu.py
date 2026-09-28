@@ -272,7 +272,9 @@ class TestFeishuLifecycle:
     def test_start_stop_clean(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             adapter = FeishuAdapter(
-                config={"feishu_app_id": "", "feishu_app_secret": ""},
+                # 显式 webhook：这里只测回调服务启停。默认长连接会在 daemon 线程里建真实 lark 客户端，
+                # 它的 ExpiringCache 清理任务挂在一个没人关闭的 loop 上，进程退出时报 "Event loop is closed"。
+                config={"feishu_app_id": "", "feishu_app_secret": "", "feishu_connection_mode": "webhook"},
                 callback_port=0,  # 随机端口
                 workspace_root=Path(td),
             )
@@ -285,7 +287,7 @@ class TestFeishuLifecycle:
     def test_double_start_is_noop(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             adapter = FeishuAdapter(
-                config={"feishu_app_id": "", "feishu_app_secret": ""},
+                config={"feishu_app_id": "", "feishu_app_secret": "", "feishu_connection_mode": "webhook"},
                 callback_port=0,
                 workspace_root=Path(td),
             )

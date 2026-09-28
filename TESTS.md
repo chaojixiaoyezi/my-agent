@@ -15,6 +15,25 @@
   rc=0（`@apply` 为既有 CSS 提示）；Bun TSX 转译器转译 `frontend/src` 下 47 个 TS/TSX 全部通过；静态门禁 ruff、doc_sync、
   strict code_size、diff --check、clean_package。
 
+## 飞书启停用例改用 webhook，消除 shard-1 退出时的 lark ExpiringCache 回溯（2026-09-28，分支 `claude/9a-lark-and-capcfg`）
+
+- **原因**：
+  - `test_adapter_feishu.py` 里 `TestFeishuLifecycle` 的两个用例只给了空的 app_id/secret，默认走长连接。
+  - daemon 线程第一次导入 lark_oapi 时会新建一个模块级 loop；`lark.ws.Client` 的 `ExpiringCache` 在这个 loop 上挂了一个清理任务。
+  - `stop()` 关不掉 lark 客户端，这个 loop 从没被关闭。进程退出时先报 "Task was destroyed but it is pending!"，再报
+    "RuntimeError: Event loop is closed"。
+  - Docker 分片按文件大小降序、`n % 12` 轮转分配，这个文件落在 shard-1。
+- **改动**：
+  - 两个用例的 config 加 `"feishu_connection_mode": "webhook"`。它们本意就是测 webhook 回调服务的启停（`callback_port=0`）。
+  - 长连接分支的选择仍由 `test_adapter_feishu_ws.py::test_adapter_connection_mode_selects_long_or_webhook` 覆盖。
+  - 不改产品代码。
+- **验证**：
+  - 本机跑这两个文件：38 passed。
+  - `my-agent-linux-test:py312`（`--network none`）加一个"pytest 收尾时等 5 秒"的临时插件，模拟整片运行时进程存活更久：
+    - 修改前：29 passed 之后出现上述两段回溯；
+    - 修改后：38 passed，lark 相关报错行为 0。
+  - 复现材料在 `~/.my-agent/decision-evidence/lark-expiring-cache-20260928/`。
+
 ## 参数减量杂项批：compact 语义摘要 4 键 + 唤醒消费/合并窗口 2 键降为常量（2026-09-28，分支 `my-agent/self-dev-2`）
 
 - **来源/做法**：dev 在 my-agent-2 开发交流板派的任务 3（做法照 `87e025bb6`）。
