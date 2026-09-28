@@ -27,6 +27,22 @@
 
 脚本模型端到端复核（BR/HI）已通过，见 CAPABILITY_PACK_ACCEPTANCE 的 G03 节。模块细节见 [子代理结构](docs/modules/subagent/04-structure.md#接替关系的唯一落账入口2026-09-28)。
 
+## 主代理同一失败调用的回合硬上限（2026-09-28，分支 `claude/75-repeat-failure-halt`，本地验证通过，待集成）
+
+来源：G05 补测中，脚本模型在一次 Goal 续跑回合里重复同一个失败的 `skill_search get`，共 393 个模型轮，宿主没有硬停。根因是既有机制只给提示：同类失败每满 `repeated_failure_halt_threshold`（15）次就追加一次强返工提示，并清掉失败段；清段的同时也清掉了 action guardrail 的同参计数，于是 3N（30 次）同参拒绝永远到不了。
+
+已实现（状态：本地通过，待集成）：
+- 判定只看结构化事实：主代理（非 `task_local`）同一回合里，工具名、规范化参数摘要（`ToolCall.args_hash`）、归一化 `error_code` 三者都相同，并且连续失败。中间出现任一成功、换参数、换工具或换错误码，都从头计数；同一批里后到的成功会撤销已经写下的收口。
+- 阈值复用 `repeated_failure_halt_threshold`（默认 15，≤0 关闭），不新增参数。主代理路径通过 `task_attributes → runtime_guard_policy → runtime_guard_config.yaml` 读取，单测和 fake LLM 都验证了默认 15 生效。
+- 命中后只结束当前回合：`runtime_status=unfinished`，`runtime_reason=REPEATED_IDENTICAL_TOOL_FAILURE`，`runtime_source=tool_loop`，`turn_end_reason` 按原协议推为 `interrupted`。任务不收成完成，Goal 状态不变。宿主按结构化字段直接写收口文字（含工具名、错误码、次数），不再追加一次收口模型调用，所以 TUI、IM 和历史回放都能看到原因。
+- Goal 不会原样重跑：这个原因不在 `CONTINUABLE_REASONS` 里，前台 finalization 的 `_schedule_typed_unfinished_continuation` 和后台 `goal_continuation_allowed` 都不会自动开下一轮。Goal 保持 active，用户发新消息后才继续；新回合的连续段从空开始。
+- 既有的“连续 2 次失败”软提示、同类失败强返工提示和 action guardrail 提示保留；这个硬上限是最后一道闸。
+
+边界与未做：
+- 子代理不在本片范围，仍只有授权阶段收口。
+- `turn_end_reason` 保持六值协议，没有新增值；工具名和错误码在收口正文和逐调用归档里，没有给 Gateway 结果新增字段。
+- 真实模型下的效果没有验证。
+
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。

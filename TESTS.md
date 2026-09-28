@@ -72,6 +72,24 @@
   （含 `test_architecture_guardrails.py`、`test_constant_names_unique.py`）。
 - **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对基线新增 0、减少 0。
 
+## 主代理同一失败调用的回合硬上限（2026-09-28，分支 `claude/75-repeat-failure-halt`，实现提交 `b81b6f938`）
+
+- **合同单测与 fake LLM**：新增 `agent_py_agent/tests/test_identical_tool_failure_halt.py`，共 14 项。
+  - 连续段只在三元组（工具名、参数摘要、错误码）完全相同时累加；换任一项或成功都清零。
+  - 第 N 次恰好命中；同批后到的成功撤销收口；阈值 0 关闭；`task_local` 子代理跳过；原强返工提示不清掉收口。
+  - 收口为 `unfinished`＋`REPEATED_IDENTICAL_TOOL_FAILURE`：不可续跑，结束原因为 `interrupted`，任务不收成完成。
+  - 主代理路径读到默认阈值 15。
+  - 真实 `SimpleAgent` 工具循环里，同一 `read_file` 连续失败时模型被调用 15 次就结束，没有额外的收口调用；换参数或中间成功一次的 20 轮都正常收尾。
+- **变异**：10 个全部被杀，包括：不调用标记、阈值差一、成功不清零、忽略参数、忽略错误码、同批成功不撤销、原因被列为可续跑、不跳过子代理、收口改回调模型、状态改成 ok。
+- **定向回归**：工具循环、收口、Goal、guardrail、运行门配置和参数相关测试，加 `test_architecture_guardrails`、`test_constant_names_unique`、`test_code_size_script`，共 5971 项通过。其中有一个旧测试的替身缺少新字段，所以实现改用 `getattr` 读可选字段。
+- **脚本模型端到端**：真实 Gateway 8438 加真实 TUI，脚本模型 8448，`env -i` 启动，不使用模型密钥。被测代码是 `b81b6f938` 的 git archive 导出。
+  - H1 前台：同一个失败的 `skill_search get` 模型被调用 15 次后结束。请求记录为 `runtime_status=unfinished`、`runtime_reason=REPEATED_IDENTICAL_TOOL_FAILURE`、`turn_end_reason=interrupted`、`tool_rounds=15`，TUI 显示宿主的收口说明。
+  - H2：换 20 个不同参数后正常 completed，没有被拦。
+  - H3：第一轮 `create_goal` 后正常结束；宿主排了 1 次 Goal 续跑，续跑回合同一失败 15 次后以 interrupted 结束，收口说明作为后台消息送达。随后 90 秒内模型请求为 0，唤醒队列仍只有那 1 条，Goal 与任务都保持 active。
+  - H3B：用户再发一条消息，新回合从 0 计数，15 次后再次结束；之后 45 秒内同样没有自动续跑。
+  - 证据在 `~/.my-agent/decision-evidence/identical-failure-halt-b81b/`（仓库外）。
+- **静态 gate**：ruff、doc_sync、strict code-size（与基线相比没有新的 finding 身份）、`git diff --check`、clean_package 全部通过。真实模型下的效果没有验证。
+
 ## R16 补测：按包选择偏好与 global_index 可读性（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-followup`）
 
 - **范围**：上一轮 R16 留下的两项：跨 owner 的按包选择偏好（`host_capability_selection.v1`），以及主机层
