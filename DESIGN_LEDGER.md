@@ -10,6 +10,12 @@
 
 回归与变异见 `TESTS.md` 同日一节；结构说明见 [Gateway 结构](docs/modules/gateway/04-structure.md)“ConversationTaskLink 与 TaskRun 收口”。
 
+## 固定校准组合与 C21 真实采用（2026-09-28，分项已验，整体未过）
+
+解决问题：把容量口径修复、真实自动恢复、能力包身份以及业务交付分别核实。固定 `8ef68c5fd` 的独立 135 项和私有安装已通过；C21 工具上下文溢出触发第 1 代 102708→39581，B pin 保持，之后继续 19 次工具调用。连续两代和压缩后包 get 未覆盖；B 原脚本被改写、输入损坏及交接映射失败，不能按模型自建 11/11 测试改判业务。没有新增产品合同或领域硬门，详见[本轮范围](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c21固定8ef的离线交接开发验证2026-09-28)。
+
+后续委派验收增加父级生命周期唤醒无重复派工的结构化观察，须等 Claude 原作者的固定补片；按原请求对应的 delegation 和 TOOL_ONE_SHOT 事实，不依据模型说“已派过”。本线不修改 conversation/runtime.py，设计实施与发布保持原作者唯一写入。旧“校准待交付”“C21 未运行”段落保留原时点；当前 Goal 工具 blocked，协作继续，最终 0/27。
+
 ## Compact 候选接受门与预检同一校准口径（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`，本地验证通过，待集成）
 
 **根因（压缩异常②）**：真机单回合多次 `read_file` 后，预检按供应商观测校准过的可见上下文越过触发线（本地估算比供应商实际高约 43%：242,207 对 169,217），恢复压缩却按未校准的本地投影量候选，候选被 `COMPACT_CANDIDATE_TOO_LARGE` 拒掉；压缩开始时 `_gateway_compact_progress_callback` 又把未校准的“压缩前”写成线程 `model_context_usage` 快照。两条链说的不是同一种数。
