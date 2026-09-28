@@ -1,5 +1,55 @@
 # 测试与发布验收
 
+## 会话互通第一期派活链：复验 a646a4885（2026-09-28，分支 `claude/ae-session-task-recheck`，仅文档）
+
+- **性质与结论**：用同一套脚本模型 harness，在真实 Gateway 和真实 TUI 上复验第 6 片的修复，**未通过**。
+  - 场景 1–4、6 通过，场景 5 未通过，另发现 2 个新缺陷；没有改产品代码。
+  - 被测为 `a646a4885` 的 `git archive` 导出，当时它就是 origin/main。
+  - 集成方决定：生产上继续暂停会话互通，`a646a4885` 不部署。
+- **环境**：
+  - Gateway 8437、脚本假模型 8447，全部用 `env -i` 启动，假 HOME 跑完为空，没有模型密钥；
+  - 链深上限写在 `<owner home>/config/capability_config.yaml`：复制产品自带的 YAML，只把 `session_task_max_chain_depth` 改成 2。
+    再按 `resolve_workspace_roots` → `default_capability_config_path` → `capability_config_for_agent` 确认运行时读到 2；
+  - 同一个 local/main 管理员 home 里开 A、B、C 三个真实 TUI 会话，渠道都是 chat。
+- **结果**（判据同上一轮，只读结构化事实）：
+  1. A 派给 B：通过。唤醒 reason=session_task，B 的回合开头是宿主事件；正文回执 consumed，expected_turn_id 为任务号；任务状态 done。
+  2. B 再派给 C：通过。派活回合有 21 个工具，其中包含 4 个会话工具；新任务的 origin_task_id 指向上一层任务。
+  3. C 再往下派：通过。返回 `SESSION_TASK_CHAIN_LIMIT`，details 为 depth=2、limit=2，没有新建任务记录。
+  4. 自动回报：通过。每层都写出 origin_kind=session_task、session_task_status=done 的回报。
+     回报不唤醒派活方，要到派活方的下一回合才被消费。
+  5. B 执行中 A 取消：**未通过**，两种情况都停不下 B 的回合。
+     - 绑定回合之前取消：只能撤队列，但正文已是 submitted，返回 `withdrawn_from_queue=false`。
+     - 绑定回合之后取消：返回 `stop_confirmed=false`，回执说“目标回合已结束或切换”，而这个回合实际仍在执行。
+     - 两种情况下控制操作记录都为 0；B 都把活做完、交付了输出，任务却显示 cancelled。
+  6. 给正在执行前台请求的 B 发普通会话消息：通过。B 的请求为 done，没有错误码；消息回执 consumed，expected_turn_id 就是 B 的这条请求。
+- **新缺陷**（已报集成方，未修）：
+  - **派活回合对模型无上限空转**。
+    - 触发条件：会话处在派活回合里，邮箱中挂着别的任务的完成回报（回报的 metadata 带 `session_task_id`）。
+    - 根因：`claim_for_turn` 按任务归属拒绝认领这条回报，而 `available_for_turn` 不看归属，仍判定“有新输入”。
+      模型的最终回复因此每次都被作废，然后再请求一次，没有上限，只能停 Gateway。
+    - 链深 2 下的复现：A 先派一个快速任务给 B，B 的回报挂在 A 的邮箱里；B 再派一个根任务给 A。
+      A 的派活回合 3.2 秒内请求了 88 次模型。
+    - 默认链深 4 时，A→B→C→A 这条链也会触发：95 秒内请求了 3849 次模型。
+  - **capability 配置文件缺失时，守卫按“不限制”处理**。
+    - agent 根目录下读不到配置时，`capability_config_for_agent` 返回 None。
+    - 这时 `create_session_task` 把链深和每对限额都当成 0（不限制），而不是默认值 4 和 60。
+    - `workspace_root` 为空时，Gateway 的 agent 根目录是 owner home，默认就会落进这条路径。
+  - 场景 5 的根因：
+    - 任务要等第一次模型调用返回、正文被确认消费之后才绑定回合，在这之前取消只能撤队列；
+    - 绑定之后，停止控制只在会话窗口的活动 Gateway 请求里按 expected_turn_id 找回合，而派活回合是后台主代理片，所以永远找不到。
+- **观察**：
+  - done 任务的 `summary` 一直为空；
+  - 完成回报不唤醒空闲的派活方，而取消通知会唤醒；
+  - 目标正忙时发出的会话消息和取消通知的唤醒，会在目标已经消费内容之后，再多跑一轮空的后台回合；
+  - 绑定前取消的回执文案前后矛盾：message 说“还没有开始执行”，withdraw_note 说“目标已经开始处理这条正文”。
+- **harness 更正**：
+  - 上一轮把链深配置放在了 gateway.yaml 旁边；`workspace_root` 为空时，Gateway 的 agent 根目录是 owner home，所以运行时并没有读到那份文件。
+  - 上一轮“已用产品的加载函数确认读到 2”这句不准确。那一轮链路没有走到第三层，结论不受影响。
+  - 本轮第一次运行也因此没有拦住第三层，空转缺陷就是这样暴露的；场景判定以配置正确的第二次运行为准。
+- **本轮验证**：
+  - 只改 Markdown，运行了五项静态门禁，提交前还原了 CODE_SIZE_REPORT.md，没有跑 pytest。
+  - 证据批次 `session-task-chain-e2e/recheck-a646a4885` 保存在本机验收证据目录，不进仓库。
+
 ## 会话互通：第 6 片——真实 gateway 测出的 4 个缺陷修复（2026-09-28，分支 `my-agent/self-dev-3`）
 
 - **来源**：Claude 会话 dsh-ae 用脚本模型在真实 Gateway 上跑三会话派活链（被测 `b938b2a98`），结论未通过，
@@ -38,6 +88,7 @@
     agent_py_agent/tests/test_session_task_cancel_notice.py -q
   ```
 - **未验证**：真实 Gateway 双会话端到端由 dsh-ae 用它的 harness 复跑（dev 安排），本片未做真机验证。
+  2026-09-28 已复验，结论是未通过，见本文件开头的“复验 a646a4885”一节。
 
 ## 会话互通第一期派活链：脚本模型端到端验证（2026-09-28，分支 `claude/ae-session-task-e2e`，仅文档）
 
@@ -47,6 +98,7 @@
 - **环境**：
   - Gateway 8437、脚本假模型 8447，全部用 `env -i` 启动，假 HOME 跑完为空，没有模型密钥；
   - 链深上限写在运行根的 `config/capability_config.yaml`（`session_task_max_chain_depth: 2`），已用产品的加载函数确认读到 2；
+    **更正**：这次确认用错了根目录，运行时其实没有读到这份文件，见“复验 a646a4885”一节。本轮链路没有走到第三层，结论不受影响；
   - 同一个 local/main 管理员 home 里开 A、B、C 三个真实 TUI 会话，渠道都是 chat。
 - **判据**：只读结构化事实，不读会话正文：
   - SessionTaskStore 的状态、origin_task_id、conversation_request_id；
