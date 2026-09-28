@@ -120,6 +120,7 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
 
 
 # LLM: 调用方已冻结模型作用域与提示；执行保持同一请求和活动 sink，异常/取消不提交伪造 final。
+#   turn_trigger 是调用方按唤醒信封构造的回合触发类型（None 为普通回合），原样交给每次模型尝试。
 # 函数用途: 运行一片后台模型并整理显示快照，Compact 公平让出与真实错误分别收尾。
 def invoke_background_turn(
     execution: BackgroundExecutionDependencies,
@@ -129,6 +130,7 @@ def invoke_background_turn(
     user_prompt: str,
     continuation_injection: list[str],
     proactive_delivery_available: bool | None,
+    turn_trigger: object | None = None,
 ) -> tuple[object, dict[str, object]]:
     activity_sink = BackgroundMainActivitySink(
         execution.agent,
@@ -144,6 +146,7 @@ def invoke_background_turn(
             continuation_injection=continuation_injection,
             proactive_delivery_available=proactive_delivery_available,
             activity_sink=activity_sink,
+            turn_trigger=turn_trigger,
         )
     except BackgroundCompactSliceYield:
         activity_sink.finish()
@@ -161,6 +164,7 @@ def invoke_background_turn(
 
 
 # LLM: 本片冻结摘要范围、覆盖和首次解析的请求身份；后续准备复用该 request_id，run/attempt 仍由原绑定。
+#   回合触发类型每次尝试都写进新准备的 RunParams，压缩续跑与首次尝试用同一个。
 # 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，成功提交计入公平让出预算。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
@@ -171,6 +175,7 @@ def run_background_turn_with_compact(
     continuation_injection: list[str],
     proactive_delivery_available: bool | None,
     activity_sink: BackgroundMainActivitySink,
+    turn_trigger: object | None = None,
 ) -> object:
     current = thread
     carried_archive_tool_calls: list[dict[str, object]] | None = None
@@ -213,16 +218,14 @@ def run_background_turn_with_compact(
         run_params.carried_active_turn_user_inputs = list(carried_active_turn_user_inputs)
         run_params.native_compact_carry = native_compact_carry
         run_params.conversation_turn_id = request.conversation_turn_id
+        run_params.turn_trigger = turn_trigger
         if runtime_rejected_actions is None:
             runtime_rejected_actions = run_params.runtime_rejected_actions
         else:
             run_params.runtime_rejected_actions = runtime_rejected_actions
-        prepared_context = prepare_background_context(
-            agent=execution.agent, store=execution.store, thread=current, request=request,
-            proactive_delivery_available=proactive_delivery_available,
-            include_recent_messages=history_seed is None, context_bundle=history.context_bundle,
+        prepared_context = _prepared_slice_context(
+            execution, request, thread=current, history=history, proactive_delivery_available=proactive_delivery_available,
         )
-        prepared_context = apply_background_compact_context(prepared_context, history.compact_context, current.compact_generation)
         run_params.inject = [render_background_context(prepared_context), *continuation_injection]
         run_params.on_chunk = activity_sink
         run_params.partial_turn_callback = partial(_persist_background_native_turn, execution.store, request)
@@ -244,16 +247,8 @@ def run_background_turn_with_compact(
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
             _persist_background_native_turn(execution.store, request, result)
             return result
-        from .compact_carry import native_compact_carry_from_result
-
-        native_compact_carry = native_compact_carry_from_result(result)
-        released_input_ids = native_compact_carry.released_input_ids if native_compact_carry is not None else ()
-        carried_archive_tool_calls, carried_active_turn_user_inputs = compact_overflow_carry(
-            carried_archive_tool_calls=carried_archive_tool_calls,
-            carried_active_turn_user_inputs=carried_active_turn_user_inputs,
-            result_archive_tool_calls=getattr(result, "archive_tool_calls", None),
-            result_active_turn_user_inputs=getattr(result, "active_turn_user_inputs", None),
-            released_input_ids=released_input_ids,
+        native_compact_carry, carried_archive_tool_calls, carried_active_turn_user_inputs = _next_overflow_carry(
+            result, carried_archive_tool_calls, carried_active_turn_user_inputs,
         )
         if committed_generations >= 8:
             raise BackgroundCompactSliceYield(
@@ -265,6 +260,47 @@ def run_background_turn_with_compact(
                                              and native_compact_carry is None):
             raise RuntimeError("background compact has no recoverable source")
         recovering, compact_trigger_source = True, str(getattr(result, "runtime_source", "") or "")
+
+
+# LLM: 每次尝试都按本次线程和已冻结的历史重新准备后台上下文（含本次适用的压缩视图），不跨尝试复用渲染结果；
+#   有历史种子时不渲染 Recent Messages。会读取 store 与任务事实，不写状态。
+# 函数用途: 准备一次后台模型尝试要用的上下文，供注入渲染与压缩恢复共用。
+def _prepared_slice_context(
+    execution: BackgroundExecutionDependencies,
+    request: BackgroundExecutionRequest,
+    *,
+    thread: ConversationThread,
+    history: object,
+    proactive_delivery_available: bool | None,
+) -> object:
+    prepared = prepare_background_context(
+        agent=execution.agent, store=execution.store, thread=thread, request=request,
+        proactive_delivery_available=proactive_delivery_available,
+        include_recent_messages=history.seed is None, context_bundle=history.context_bundle,
+    )
+    return apply_background_compact_context(prepared, history.compact_context, thread.compact_generation)
+
+
+# LLM: 溢出结果只交回同宿主的原生携带与已释放插话编号；工具携带记录与插话按 compact_overflow_carry 的唯一规则合并，
+#   不读正文、不写状态。
+# 函数用途: 从一次上下文溢出结果算出下一次尝试的原生携带、工具携带记录和插话携带。
+def _next_overflow_carry(
+    result: object,
+    carried_archive_tool_calls: list[dict[str, object]],
+    carried_active_turn_user_inputs: list[dict[str, object]],
+) -> tuple[object, list[dict[str, object]], list[dict[str, object]]]:
+    from .compact_carry import native_compact_carry_from_result
+
+    native_carry = native_compact_carry_from_result(result)
+    released_input_ids = native_carry.released_input_ids if native_carry is not None else ()
+    archive, inputs = compact_overflow_carry(
+        carried_archive_tool_calls=carried_archive_tool_calls,
+        carried_active_turn_user_inputs=carried_active_turn_user_inputs,
+        result_archive_tool_calls=getattr(result, "archive_tool_calls", None),
+        result_active_turn_user_inputs=getattr(result, "active_turn_user_inputs", None),
+        released_input_ids=released_input_ids,
+    )
+    return native_carry, archive, inputs
 
 
 # LLM: 原生信封只进入当前 store/thread 的同一 transcript；与公开 final 按宿主回合编号去重，不发消息或修改 wake 生命周期。

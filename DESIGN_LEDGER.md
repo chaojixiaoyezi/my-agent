@@ -1093,16 +1093,21 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   - 名单由配置类声明推出，不另写。
   - 之前列表会原样进入运行配置，或被静默变成空串，`/settings` 里看不到任何告警。
   - 细节见 `docs/modules/gateway/02-progress.md` 同日条目。
-- 进行中（2026-09-28，T3 验收观察 2，集成者批准按 B → C → A 各一个提交）：子代理生命周期唤醒片续接原用户回合。
+- 已实现（2026-09-28，T3 验收观察 2，集成者批准按 B → C → A 各一个提交）：子代理生命周期唤醒片续接原用户回合。
   - B 已实现：唤醒片按精确 `conversation_request_id` 同时读 owner 根索引（owner 取自任务 `run_workspace.json`）和任务
     work 索引，流式过滤，不全量加载。前台轮记录带 `carried_runtime_only`，只进去重、已执行工具和工具轮数，不进本片
     工具账与模型可见交接；新增工具轮额度不变。已知例外：`background_max_tool_rounds=0` 且 `max_tool_rounds` 为正数时，
-    整条活动回合共用全局上限，唤醒片可能一开始就触顶（既有口径，待另开一项）。细节见 `TESTS.md` 同日条目。
+    整条活动回合共用全局上限，唤醒片可能一开始就触顶（既有口径，见下方待做项）。细节见 `TESTS.md` 同日条目。
   - C 已实现：后台整合档与 goal 子代理两档从 `DIRECT_CHILD_CONTROL_TOOLS` 派生，原顺序不变、末尾补上 `list_agents`，
     有锁测；owner/task 策略、显式配置与退休过滤仍只做减法，其它后台档不变。细节见 `TESTS.md` 同日条目。
-  - A 待做：唤醒片记为宿主事件，不再写第二条用户任务。渲染用 `RuntimeFactsTurn`，canonical 用 `# Host Event` 固定首行；
-    推荐节按 kind 给固定短名单，`list_agents` 排第一；唤醒事实块从 Active Wake Signal 字段确定性投影；宿主决策只读
-    `turn_trigger` 和 `wake_signal`。旧数据不迁移。
+  - A 已实现：唤醒片记为宿主事件，不再写第二条用户任务。回合触发类型 `TurnTrigger` 只由后台运行时按唤醒信封构造；
+    原生 IR 以 `RuntimeFactsTurn(source=host.lifecycle_wake)` 开头，canonical 与文本协议用 `# Host Event` 加固定首句；
+    推荐节用固定短名单（`list_agents` 第一）；唤醒事实从唤醒信封字段确定性投影；原任务不在历史里（已核实的 Goal 任务来源，
+    或唤醒没有请求编号）时附有界原任务、首句不声称它在历史里，`origin_request_ids` 只放真实历史请求；
+    唤醒片保存到会话历史时去掉本片的后台上下文注入。宿主决策只读 `turn_trigger` 和 `wake_signal`，旧数据不迁移。
+    细节见 `TESTS.md` 同日条目。
+  - 待做（排在 A 之后，集成者已定语义）：`background_max_tool_rounds` 写 0 回落全局 `max_tool_rounds` 时，唤醒片同样按
+    “基线 + 携带条数”起算，正数与 0 两支都是“每片新增额度”；全局也是 0 或留空时行为不变，三种情形用测试锁住。
 - 进行中（2026-09-27，用户要求）：参数中心。用户指出参数和常数散落、同名不同义、改一个要猜含义，并希望 my-agent 能自助
   修改更多设置。方向：每个可调参数一个权威定义（默认值、范围、说明、安全等级、生效时机、读取方），YAML 与 AgentConfig 由测试
   核对；my-agent 可改全部非安全参数，权限、路径、凭据、宿主控制面继续结构性拒绝；每次修改记账、可回滚；TUI 与 IM 用 `/settings`。

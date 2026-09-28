@@ -48,6 +48,9 @@ class RunParams:
     #   只透传给恢复宿主的压缩进度事件；空串表示尚未溢出（首次准备按预检记）。
     compact_trigger_source: str = ""
     conversation_turn_id: str = ""
+    # 回合触发类型（runtime/turn_trigger.TurnTrigger），None 是普通用户轮；只由后台运行时按唤醒信封构造，
+    # 决定当前回合以“用户任务”还是“宿主事件”开头，不授予权限，也不进持久状态。
+    turn_trigger: object | None = None
     # 宿主在同一活动回合或子代理 attempt 内共享；不从 task_attributes、提示词或模型历史恢复批准。
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
     # Gateway injects one exact-turn transition callback. Runtime invokes it at
@@ -136,6 +139,8 @@ class RuntimeLoopParams:
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None
     native_compact_carry: object | None = None
     conversation_turn_id: str = ""
+    # 同 RunParams.turn_trigger，原样传给工具循环。
+    turn_trigger: object | None = None
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
     active_turn_transition_callback: object = None
     tool_runtime_snapshot: object = None

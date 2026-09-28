@@ -71,6 +71,8 @@ class PromptBuildRequest:
     system_prompt_override: str | None = None
     context_scope: str = "default"
     workspace_context_override: str | None = None
+    # 回合触发类型（agent_core/runtime/turn_trigger.TurnTrigger）；生命周期唤醒时当前回合以“# Host Event”开头。
+    turn_trigger: object | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,8 @@ class PromptRenderInput:
     user_prompt: str
     task_and_transcript: str
     native_tool_use: bool
+    # 只决定当前回合开头用“# User Task”还是“# Host Event”；None 保持原格式与字节。
+    turn_trigger: object | None = None
 
     # LLM: 冻结调用方容器，片段包括空串和内嵌换行；不得按正文去重或猜测历史来源。
     # 函数用途: 避免准备完成后修改原注入列表影响当前请求，只有新候选可以显式替换片段。
@@ -195,7 +199,7 @@ class PromptBuilder:
         return render_prepared_prompt(self.prepare_render_input(request))
 
     # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序（管理员自身开发约定会检查开发工作树是否存在），
-    #   注入列表复制为元组，纯投影只消费返回值。
+    #   注入列表复制为元组，纯投影只消费返回值；回合触发类型原样冻结，只影响当前回合开头的渲染。
     # 函数用途: 把原 build 材料和注入边界冻结成值对象，不发请求、不写状态，也不为缺失输入猜造子代理事实。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
@@ -228,9 +232,11 @@ class PromptBuilder:
             user_prompt=request.user_prompt, native_tool_use=_tools.native_tool_use,
             task_and_transcript=(
                 "" if _tools.native_tool_use else _task_and_transcript_section(
-                    self.config, request.user_prompt, _transcript_tool_context(_tools)
+                    self.config, request.user_prompt, _transcript_tool_context(_tools),
+                    turn_trigger=request.turn_trigger,
                 )
             ),
+            turn_trigger=request.turn_trigger,
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:
@@ -246,8 +252,11 @@ class PromptBuilder:
 
 
 # LLM: 真实 build 和创建前投影必须共用此纯入口；仅格式化已冻结字符串，不能补读宿主、文件或模型状态。
+#   当前回合开头由 turn_trigger 的类型决定（生命周期唤醒是“# Host Event”），普通回合字节不变。
 # 函数用途: 复现原提示字节和原生缓存来源布局，允许同一输入重复投影而不产生副作用。
 def render_prepared_prompt(prepared: PromptRenderInput) -> str:
+    from ..agent_core.runtime.turn_trigger import current_turn_text
+
     if prepared.native_tool_use:
         return CacheStructuredPrompt(
             _native_cache_stable_prefix(
@@ -259,7 +268,7 @@ def render_prepared_prompt(prepared: PromptRenderInput) -> str:
                 workspace_context=prepared.workspace_context, injected=prepared.injected,
                 execution_facts=prepared.execution_facts,
             ),
-            canonical_user_turn=f"# User Task\n{prepared.user_prompt}",
+            canonical_user_turn=current_turn_text(prepared.user_prompt, prepared.turn_trigger),
         )
     return (
         f"# System\n{prepared.system_prompt}\n\n"
@@ -651,8 +660,12 @@ def _transcript_tool_context(tools: ToolSections) -> list[str]:
 
 # LLM: 工具历史之后的尾部指令是慢/长上下文模型最后看到的执行边界；必须明确说明
 # 无工具正文会结束 active turn，但不能解析模型正文、读取 Todo 来替模型裁决完成。
-# 函数用途: 把用户任务、已执行工具记录和“继续还是最终回复”的模型纪律拼成最后一段。
-def _task_and_transcript_section(config: AgentConfig, user_prompt: str, tool_context: list[str]) -> str:
+#   当前回合开头由 turn_trigger 的类型决定（生命周期唤醒是“# Host Event”），普通回合字节不变。
+# 函数用途: 把用户任务（或宿主事件）、已执行工具记录和“继续还是最终回复”的模型纪律拼成最后一段。
+def _task_and_transcript_section(
+    config: AgentConfig, user_prompt: str, tool_context: list[str], *, turn_trigger: object | None = None,
+) -> str:
+    from ..agent_core.runtime.turn_trigger import current_turn_text
     from ..agent_core.tool_context.microcompact import (
         DEFAULT_MICROCOMPACT_KEEP_RECENT,
         DEFAULT_MICROCOMPACT_MIN_CHARS,
@@ -668,10 +681,11 @@ def _task_and_transcript_section(config: AgentConfig, user_prompt: str, tool_con
             min_chars=DEFAULT_MICROCOMPACT_MIN_CHARS,
         )
     )
+    current = current_turn_text(user_prompt, turn_trigger)
     if not tools_history:
-        return "# Tool Transcript\n（无）\n\n" f"# User Task\n{user_prompt}"
+        return "# Tool Transcript\n（无）\n\n" f"{current}"
     return (
-        f"# User Task\n{user_prompt}\n\n"
+        f"{current}\n\n"
         f"# Tool Transcript\n{tools_history}\n\n"
         "# Continue From Tool Transcript\n"
         "从最新的工具结果继续推进，不要重新开始任务。"

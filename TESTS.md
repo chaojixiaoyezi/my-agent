@@ -1,5 +1,69 @@
 # 测试与发布验收
 
+## 生命周期唤醒片记为宿主事件（2026-09-28，分支 `claude/be-wake-turn`，基于 `aa97491f5`）
+
+- **来源**：T3 真实 TUI 验收的观察 2（A 部分）。round2 的唤醒片请求里：
+  - 原任务又被渲染成一条 `# User Task`（第 22 条与第 11 条相同），成了"最新的用户消息"；
+  - 推荐节按原任务文字召回，第一个就是 `create_subagents`；
+  - 30,436 字的后台上下文注入写进会话历史，下一轮前台请求原样重放。
+- **改动**：
+  - 回合触发类型：新增 `agent_core/runtime/turn_trigger.TurnTrigger`，字段为 kind、reason、wake_signal_id、source_agent_id、
+    origin_request_ids 和 event_facts。它只由 `_background_model_inputs` 在生命周期续跑时构造，
+    经 background_execution → RunParams → RuntimeLoopParams → ToolLoopExecuteParams 传递。None 表示普通用户轮。
+    宿主决策只读 turn_trigger 与 wake_signal 的结构化字段。
+  - 唤醒事实：`conversation/lifecycle_wake_event` 从唤醒信封的结构化字段做确定性投影：
+    - 字段有白名单，嵌套字典按键排序；
+    - 字符串最多 600 字，列表最多 8 项，嵌套最多 3 层；
+    - 不收 runner_result_json、output_json、去重键和证据引用。
+  - 渲染：原生 IR 的当前回合以 `RuntimeFactsTurn(source=host.lifecycle_wake)` 开头。缓存布局的 canonical 和文本协议任务节
+    都用 `# Host Event`，下一行是固定首句（"宿主生命周期事件：……不是新的用户请求……"）。普通回合的字节不变。
+    `user_prompt` 仍是原任务，召回、根任务和压缩照旧使用；`[active-turn-continuation]` 注入保留为软提示。
+  - 推荐节：生命周期唤醒改用固定短名单，依次为 `list_agents`、`read_file`、`resolve_capability_requests`、`send_guidance`、
+    `cancel_subagents`。只列本轮可见的工具，不按任务文字检索，也不追加能力包推荐。
+  - 原生历史保存：唤醒片保存时去掉本片的 `prompt.runtime_injection` 快照（即后台上下文注入）。宿主事件、工具往返和其它快照照常保存，
+    下一轮不再重放这 3 万字。代价是下一轮对这一片之后的内容有一次缓存未命中。
+  - 旧数据不迁移：已经持久化的重复 `# User Task` 和注入照原样重放。
+  - 原任务来源：`origin_request_ids` 只放会话历史里真有用户消息的请求。已核实的 Goal 任务来源（`_goal_runtime_context`
+    校验过 Goal 属于本线程、任务编号与唤醒相同，不论是否 active）不是历史请求，不进 `origin_request_ids`，目标原文走
+    `origin_task`；唤醒没有任何请求编号时，解析出的原任务也走 `origin_task`。附了 `origin_task` 时首句换成“原任务见下方
+    origin_task……”，不声称原任务在历史里。这一条是 Codex 审 WIP `51361723d` 时发现的：Goal 子代理唤醒的
+    `conversation_request_id` 可以是持久 Goal.task_id，原实现把它当成历史请求引用并丢了 origin_task
+    （证据 `pending-wake-A-51361723d-goal-origin-probe.json`）。
+- **测试**（`test_lifecycle_wake_host_event.py`，18 项）：
+  - 事实投影：输入顺序不同，输出字节相同；字符串、列表有界；不收原始结果 JSON、去重键和证据引用；固定开头两行；
+    `origin_task` 只在调用方传入时附上，首句随之切换。
+  - Goal 来源矩阵（照 Codex 的复现，active/complete × 有/无普通请求，共 4 例）：`origin_request_ids` 只含真实历史请求，
+    Goal 目标原文走 `origin_task`，首句不声称原任务在历史里；另有一例走真实后台链路的 Goal 唤醒，锁住调用链把已核实的
+    Goal 来源传进来。
+  - 触发类型只按结构化原因与原任务选择：生命周期原因（含能力申请）才有，没有原任务或非生命周期原因为 None。
+  - 原生 IR：当前回合以宿主事件开头，交接摘要紧跟其后，没有 UserTurn；普通回合仍是 `# User Task`。
+  - prompt：原生与文本协议都用宿主事件作为当前回合，缓存布局的 canonical 一致；普通回合字节不变。
+  - 推荐节：固定短名单，按顺序列出且只列可见工具（owner 禁用 list_agents 时第一项变为 read_file）；普通回合仍按任务文字检索。
+  - 原生历史保存：唤醒片去掉本片注入，保留宿主事件、其它快照和工具往返；普通回合不变。
+  - 脚本化假模型走真实后台链路（前台派工记录按 T3 round1 布局写在 owner 根索引，子代理阻塞）：
+    - 按“最新 User Task”行事的假模型不再派工；它收到的消息里当前回合以宿主事件开头，推荐节第一项是 list_agents，
+      诊断 prompt 同口径；会话历史里存的是宿主事件，没有第二条用户任务，也没有后台注入。
+    - 一律派工的变体被 `TOOL_ONE_SHOT_ALREADY_EXECUTED` 拦下；两种情形下根任务的子代理都只有一个。
+  - 既有测试同步：`test_subagent_wake_keeps_objective_in_user_task_slot` 断言三元组；
+    `test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injection` 改为新设计（不再有 `# User Task`，
+    有原回合编号时原任务在历史里、只引用编号，没有编号时宿主事件附原文）。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_lifecycle_wake_host_event.py -q`。
+- **变异验证**：27 个全部被抓出，每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，跑完逐字节恢复并核对哈希。
+  - 传递链：不构造触发类型；执行层不写进 RunParams；RunParams→RuntimeLoopParams、RuntimeLoopParams→ToolLoopExecuteParams
+    各自丢掉触发类型；推荐区请求不带触发类型；循环 prompt 请求不带触发类型；
+  - 渲染：原生开头仍是用户任务；开头项位置不认宿主事件；缓存 canonical 与文本任务节各自忽略触发类型；首句丢失；
+    首句不随 origin_task 切换；
+  - 推荐：不用固定短名单；list_agents 不在第一位；不按本轮可见工具取交集；
+  - 历史保存：唤醒片仍保存注入；普通回合也被去掉注入；
+  - 事实投影：收进原始结果 JSON；不做长度上限；丢掉原回合编号；有历史请求时不再附 origin_task；
+  - 任务来源：Goal 任务编号仍当历史请求；Goal 目标原文不附；active 或非 active 目标的上下文丢掉已核实来源；
+    调用链不传已核实来源；没有请求编号时不附原任务。
+- **相关回归**：与改动路径有关的 219 个测试文件（含 `test_background_main_agent_runtime.py`、
+  `test_architecture_guardrails.py`）5043 passed、2 skipped、27 xfailed、5 xpassed。
+- **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对基线新增 0、
+  减少 1。`run_background_turn_with_compact` 曾因本次两行越过 100 行硬线，已把每次尝试的上下文准备和溢出携带合并抽成
+  两个小函数，行为不变。
+
 ## 两条负载抖动用例改稳：桌面插件超时、慢流存活续期（2026-09-28，分支 `claude/38-stabilize-load-flakes`，基于 `8e82edcc0`，只改测试）
 
 - **来源**：集成者报告 12 片全仓 5 遍里 1 遍出现 `test_desktop_lite_package.py::test_timeout_kills_program`（读不到

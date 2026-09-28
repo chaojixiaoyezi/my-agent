@@ -55,11 +55,13 @@ from .loop_models import (
     RuntimeLoopResult,
     RuntimeToolLoopSeed,
 )
+from .turn_trigger import turn_trigger_recommendation
 
 _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 
 
 # LLM: 范围与选中 ID 仅是当前片展示输入，权限仍从原工具快照和 scoped Skill 快照读取，不可变值不写共享 Agent。
+#   回合触发类型也只影响展示（推荐区是否用固定短名单）。
 # 类用途: 固定本轮工具说明和包候选的渲染条件，不把自然语言建议当成授权。
 @dataclass(frozen=True)
 class ToolSectionsRequest:
@@ -70,6 +72,8 @@ class ToolSectionsRequest:
     protocol_snapshot: object
     context_scope: str = "default"
     selected_skill_ids: tuple[str, ...] | None = None
+    # 回合触发类型；有固定推荐短名单的类型（如生命周期唤醒）不按任务文字检索推荐。
+    turn_trigger: object | None = None
 
 
 # LLM: 只保留有真实运行消费者的字段；工具能力由 allowed_tools 与 runtime snapshot 共同决定。
@@ -140,6 +144,7 @@ def _runtime_loop_params(
         carried_active_turn_user_inputs=params.carried_active_turn_user_inputs,
         native_compact_carry=params.native_compact_carry,
         conversation_turn_id=params.conversation_turn_id,
+        turn_trigger=params.turn_trigger,
         runtime_rejected_actions=params.runtime_rejected_actions,
         active_turn_transition_callback=params.active_turn_transition_callback,
         tool_runtime_snapshot=prepared.tool_runtime_snapshot,
@@ -185,6 +190,7 @@ def _finalize_params(
 
 
 # LLM: 目录和推荐区消费同一工具快照；包建议只从当前授权目录软排序，沿能力配置开关，不重新探测、读正文或扩大权限。
+#   回合触发类型有固定短名单时（生命周期唤醒）推荐区只用它，不按任务文字检索，也不加包建议。
 # 函数用途: 渲染本轮工具说明，按原工具权限追加有界包建议，空建议保持原字节。
 def _resolve_tool_sections(request: ToolSectionsRequest):
     if not request.agent.config.enable_tools:
@@ -200,6 +206,8 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
         tool_protocol=tool_protocol,
         runtime_snapshot=request.runtime_snapshot,
     )
+    if (fixed := turn_trigger_recommendation(request.turn_trigger)) is not None:
+        return tool_catalog, _fixed_recommendations_section(request, fixed, tool_protocol)
     tool_recommendations = request.agent.tools.render_recommended_tools_section(
         request.user_prompt,
         allowed_tools=request.allowed_tools,
@@ -209,6 +217,29 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
     if packages := _package_recommendations(request):
         tool_recommendations = "\n\n".join(part for part in (tool_recommendations, packages) if part)
     return tool_catalog, tool_recommendations
+
+
+# LLM: 名字与理由来自回合触发类型（宿主常量），只在本轮可见工具里按顺序取交集；原生协议只列名字与理由，文本协议沿用
+#   名卡详情格式。不检索任务文字，也不追加能力包推荐；交集为空时给出与检索无命中相同的提示。
+# 函数用途: 渲染生命周期唤醒等宿主事件回合的固定推荐节。
+def _fixed_recommendations_section(
+    request: ToolSectionsRequest, recommendation: tuple[tuple[str, ...], str], tool_protocol: str,
+) -> str:
+    names, reason = recommendation
+    registry = request.agent.tools
+    specs = registry.visible_specs_in_order(
+        names, allowed_tools=request.allowed_tools, runtime_snapshot=request.runtime_snapshot,
+    )
+    if not specs:
+        return "# Recommended Tools\n当前没有明显高相关的工具命中。若要动手操作，请先根据 Tool Catalog 选最接近的工具。"
+    native = str(tool_protocol or "").strip().lower() == "native"
+    detail_max_chars = int(getattr(registry, "tool_detail_max_chars", 0) or 0)
+    blocks = [
+        f"- {spec.name}：{reason}" if native
+        else f"{spec.render_recommended_entry(max_chars=detail_max_chars)}\n推荐理由：{reason}"
+        for spec in specs
+    ]
+    return "# Recommended Tools\n" + "\n\n".join(blocks)
 
 
 # LLM: 这是有配置读取的宿主准备层，不能在后台纯投影重跑；task_local 需原 runner 身份，只交集工具权限/范围/已选集合，不从关键词授权。
@@ -670,6 +701,7 @@ def _runtime_injections_with_bundle(
 # LLM: 原推荐接缝只采用合法展示；工具快照与循环参数逐 run 固定，直接调用唯一循环函数。首请求选模采用的完整参数
 # 由循环结果显式交回；异常先保存当前 IR 再原样抛错（候选只换协议快照、共享同一 IR），需核对原生历史与中断回归。
 # 能力推荐真的发起过决策时回传结构化观测；同一 selected 集合传给包动态建议，不绕过原展示选择或另发请求。
+# 回合触发类型原样交给推荐区与工具循环（当前回合开头、原生历史保存）。
 # 函数用途: 驱动工具循环，正常返回完整结果；溢出时释放未提交插话并冻结IR，异常也经宿主回调保存已发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
@@ -705,6 +737,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             protocol_snapshot=tool_protocol_snapshot,
             context_scope=params.context_scope,
             selected_skill_ids=presentation.selected_skill_ids,
+            turn_trigger=params.turn_trigger,
         )
     )
     loop_params = _tool_loop_execute_params(
@@ -935,21 +968,27 @@ def _loop_attempt_id(agent, params: object) -> str:
     return current_subagent_attempt_id(agent) or str(params.attempt_id or "").strip()
 
 
-# LLM: Current-turn IR starts at the exact user task. Completed conversation messages are carried
-# separately as provider_history_messages so finalization persists only the new turn. Typed media refs remain with their user turn. Carried
-# handoff/input then append in real chronology.
-# 函数用途: 按时间生成当前任务与插话IR；内部ID沿原包保留，供释放核对而不外发。
+# LLM: Current-turn IR starts at the exact user task, or — for a typed lifecycle-wake TurnTrigger — at
+# a host-event RuntimeFactsTurn (source HOST_EVENT_FACTS_SOURCE) instead of a second "# User Task".
+# Completed conversation messages are carried separately as provider_history_messages so finalization
+# persists only the new turn. Typed media refs remain with their user turn. Carried handoff/input then
+# append in real chronology.
+# 函数用途: 按时间生成当前任务（或生命周期唤醒的宿主事件）与插话IR；内部ID沿原包保留，供释放核对而不外发。
 def _native_initial_tool_ir_history(
     params: RuntimeLoopParams,
     *,
     carried_handoff: str,
     carried_user_inputs: list[str],
 ) -> list[object]:
-    from ...backends.tool_ir import CompactionSummary, UserTurn
+    from ...backends.tool_ir import CompactionSummary, RuntimeFactsTurn, UserTurn
+    from .turn_trigger import HOST_EVENT_FACTS_SOURCE, current_turn_text, lifecycle_wake_trigger
 
     history: list[object] = []
     current = str(params.user_prompt or "")
-    if current:
+    trigger = getattr(params, "turn_trigger", None)
+    if lifecycle_wake_trigger(trigger) is not None:
+        history.append(RuntimeFactsTurn(current_turn_text(current, trigger), source=HOST_EVENT_FACTS_SOURCE))
+    elif current:
         history.append(UserTurn(_native_user_task_text(current), media=tuple((params.task_attributes or {}).get("input_media") or ())))
     if carried_handoff:
         history.append(CompactionSummary(carried_handoff))
@@ -959,6 +998,18 @@ def _native_initial_tool_ir_history(
     history.extend(UserTurn(text, input_ids=tuple(packets[index]["input_ids"]) if packets else ())
                    for index, text in enumerate(carried_user_inputs) if str(text or ""))
     return history
+
+
+# LLM: 当前回合的开头项是真实用户轮（UserTurn）或生命周期唤醒的宿主事件（source=HOST_EVENT_FACTS_SOURCE 的
+#   RuntimeFactsTurn）；只按类型与宿主来源判断，不看正文。交接摘要与适用摘要都插在开头项之后。纯计算。
+# 函数用途: 返回当前回合开头项占用的位置数（0 或 1），供摘要与交接的插入位置共用。
+def _current_turn_opener_count(history: list[object]) -> int:
+    from ...backends.tool_ir import RuntimeFactsTurn, UserTurn
+    from .turn_trigger import HOST_EVENT_FACTS_SOURCE
+
+    first = history[0] if history else None
+    host_event = isinstance(first, RuntimeFactsTurn) and first.source == HOST_EVENT_FACTS_SOURCE
+    return 1 if isinstance(first, UserTurn) or host_event else 0
 
 
 # LLM: The transient view must be typed; an arbitrary caller object cannot silently enable
@@ -976,6 +1027,7 @@ def _applied_compact_context(value: object):
 
 # LLM: A narrow history seed may be None even when an applied scoped summary exists. Add that
 # summary to current-turn IR after the media-owning initializer, leaving its carried handoff intact.
+# The initializer is the user turn or the lifecycle host event (_current_turn_opener_count).
 # 函数用途: 无历史种子时把本次适用摘要插入当前原生回合，保留原交接和媒体块。
 def _native_ir_with_applied_summary(
     history: list[object],
@@ -983,7 +1035,7 @@ def _native_ir_with_applied_summary(
     compact_context: object,
     has_history_seed: bool,
 ) -> list[object]:
-    from ...backends.tool_ir import CompactionSummary, UserTurn
+    from ...backends.tool_ir import CompactionSummary
 
     context = _applied_compact_context(compact_context)
     if context is None or has_history_seed or not context.view.summary.strip():
@@ -992,8 +1044,7 @@ def _native_ir_with_applied_summary(
         f"# Earlier Conversation Summary (generation {context.view.generation})\n{context.view.summary}",
         source="applied_compact",
     )
-    insert_at = 1 if history and isinstance(history[0], UserTurn) else 0
-    history.insert(insert_at, summary)
+    history.insert(_current_turn_opener_count(history), summary)
     return history
 
 
@@ -1048,6 +1099,7 @@ def _native_provider_history_messages(
 
 
 # LLM: 原媒体初始化器仍拥有用户IR；以结构类型定位交接并标记source，已覆盖工具隐藏前必须注入同view摘要。
+#   当前回合开头项可以是用户轮或生命周期唤醒的宿主事件，交接紧跟其后（_current_turn_opener_count）。
 # 函数用途: 为原归档交接标记可替换位置，并把窄历史种子的适用摘要放进原生IR或文本上下文。
 def _reconstructed_native_initial_ir(
     agent: object,
@@ -1078,9 +1130,9 @@ def _reconstructed_native_initial_ir(
         carried_user_inputs=carried_user_inputs,
     )
     if handoff:
-        from ...backends.tool_ir import CompactionSummary, UserTurn
+        from ...backends.tool_ir import CompactionSummary
 
-        index = 1 if history and isinstance(history[0], UserTurn) else 0
+        index = _current_turn_opener_count(history)
         if not isinstance(history[index], CompactionSummary):
             raise TypeError("恢复工具交接位置与原IR构造不一致")
         history[index] = replace(history[index], source="carried_tool_handoff")
@@ -1092,7 +1144,8 @@ def _reconstructed_native_initial_ir(
 
 
 # LLM: Persist only this run's provider-neutral IR plus the terminal assistant response. The
-# prior-thread prefix is excluded; ConversationStore and Compact own its lifetime.
+# prior-thread prefix is excluded; ConversationStore and Compact own its lifetime. A lifecycle-wake
+# slice also leaves out its slice-only host snapshots (_replayable_turn_history).
 # 函数用途: 整理一轮结束后可供下一轮精确回放的原生消息，包括工具调用、结果和最终回复。
 def _completed_turn_native_messages(
     params: ToolLoopExecuteParams,
@@ -1104,7 +1157,9 @@ def _completed_turn_native_messages(
 
     if not native_tool_use_active(params):
         return []
-    history = list(getattr(params, "tool_ir_history", None) or [])
+    history = _replayable_turn_history(
+        list(getattr(params, "tool_ir_history", None) or []), getattr(params, "turn_trigger", None),
+    )
     blocks = [
         deepcopy(item)
         for item in list(getattr(final_response, "assistant_content_blocks", None) or [])
@@ -1115,6 +1170,21 @@ def _completed_turn_native_messages(
     if not has_tool_use and (final_text or blocks):
         history.append(AssistantTurn(text=final_text, content_blocks=blocks))
     return strip_orphaned_tool_blocks(AnthropicMessageAdapter().to_provider_messages(history))
+
+
+# LLM: 生命周期唤醒片的后台上下文注入（LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES）只服务本片，按 IR 类型与宿主来源
+#   排除；宿主事件、工具往返和其它快照照常保存，普通回合原样返回。不改原 IR，纯计算。
+# 函数用途: 选出本回合要写进会话历史、供后续回合重放的原生 IR，避免数万字的注入在之后每一轮重复出现。
+def _replayable_turn_history(history: list[object], trigger: object) -> list[object]:
+    from ...backends.tool_ir import RuntimeFactsTurn
+    from .turn_trigger import LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES, lifecycle_wake_trigger
+
+    if lifecycle_wake_trigger(trigger) is None:
+        return history
+    return [
+        item for item in history
+        if not (isinstance(item, RuntimeFactsTurn) and item.source in LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES)
+    ]
 
 
 # LLM: Historical and current ordinary user turns use one deterministic provider representation;
@@ -1224,6 +1294,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         live_archive_state=live_archive_state,
         tool_ir_history=tool_ir_history,
         conversation_turn_id=params.conversation_turn_id,
+        turn_trigger=params.turn_trigger,
         provider_history_messages=_native_provider_history_messages(params, include_compact_summary=not any(
             isinstance(item, CompactionSummary) and item.source == "applied_compact" for item in tool_ir_history)),
         active_turn_user_inputs=active_turn_user_inputs,

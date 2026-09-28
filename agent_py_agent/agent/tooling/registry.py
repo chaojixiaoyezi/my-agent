@@ -697,6 +697,20 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in specs}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
+    # LLM: 按宿主给定顺序从本轮模型可见工具里取交集，可见性口径与检索推荐、目录相同（显式 allowed_tools 全部可见）；
+    #   不检索、不授权、不改 loaded，重复名字只取一次。
+    # 函数用途: 取出宿主指定名字里本轮真正可见的工具说明，供固定推荐节渲染。
+    def visible_specs_in_order(
+        self,
+        names: tuple[str, ...],
+        *,
+        allowed_tools: list[str] | None = None,
+        runtime_snapshot: ToolRuntimeSnapshot | None = None,
+    ) -> list[ToolModelSpec]:
+        visible = self.model_visible_specs(allowed_tools=allowed_tools, runtime_snapshot=runtime_snapshot)
+        by_name = {spec.name: spec for spec in visible}
+        return [by_name[name] for name in dict.fromkeys(names) if name in by_name]
+
     # LLM: 推荐名卡可按宿主短名单做减法，基础发现入口保留；未loaded的原deferred工具不能因此出现在原生Schema。
     # 函数用途: 在原快照内显示本轮相关工具名称，保持搜索可达与权限范围不变。
     def render_recommended_tools_section(

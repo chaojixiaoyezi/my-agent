@@ -97,6 +97,8 @@ class ToolLoopExecuteParams:
     # 由 message_adapter 翻成厂商原生 messages。详见 agent_core/tool_ir_history.py。
     tool_ir_history: list = field(default_factory=list)
     conversation_turn_id: str = ""
+    # 回合触发类型（runtime/turn_trigger.TurnTrigger），None 是普通用户轮；决定当前回合开头、推荐节与原生历史保存。
+    turn_trigger: object | None = None
     # LLM: Completed prior turns stay separate from current-turn IR so finalization can persist
     # only the new turn while provider requests still receive one chronological message list.
     # 字段用途: 保存已结束会话回合的原生消息前缀，当前 run 只在其后追加新 IR。

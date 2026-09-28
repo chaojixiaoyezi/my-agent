@@ -66,6 +66,7 @@ class ToolLoopRequestProjection:
 
 
 # LLM: 参数来自原 ToolLoopExecuteParams；额外三项必须由宿主准备，不能在这里读取 Goal、运行账或执行事实。
+#   回合触发类型原样交给 PromptBuilder，只决定当前回合以用户任务还是宿主事件开头。
 # 函数用途: 统一真实轮次和准备前投影使用的 PromptBuilder 输入，保留原系统、动态段、名卡及上下文作用域。
 def tool_loop_prompt_request(
     params: ToolLoopExecuteParams,
@@ -82,6 +83,7 @@ def tool_loop_prompt_request(
         system_prompt_override=params.system_prompt_override,
         context_scope=params.context_scope,
         workspace_context_override=workspace_context,
+        turn_trigger=getattr(params, "turn_trigger", None),
         tools=ToolSections(
             selected_skill_ids=params.selected_skill_ids,
             required_skill_ids=params.required_skill_ids,

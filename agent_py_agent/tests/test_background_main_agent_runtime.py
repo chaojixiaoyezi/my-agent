@@ -780,14 +780,16 @@ def test_subagent_wake_keeps_objective_in_user_task_slot() -> None:
         reason="subagent_runner_finished",
     )
 
-    prompt, injections = _background_model_inputs(
+    prompt, injections, trigger = _background_model_inputs(
         request,
         task_objective="原始用户任务",
         wake_prompt="读取本次子代理完成事件后继续",
     )
 
+    # 原任务仍是本片 user_prompt（召回、根任务与压缩用），当前回合开头由生命周期触发类型渲染成宿主事件。
     assert prompt == "原始用户任务"
     assert injections == ["[active-turn-continuation]\n读取本次子代理完成事件后继续"]
+    assert (trigger.kind, trigger.reason) == ("lifecycle_wake", "subagent_runner_finished")
 
 
 @pytest.mark.parametrize("tail_count", [0, 180])
@@ -882,61 +884,51 @@ def test_lifecycle_explicit_input_failure_cannot_fall_back_to_old_task(tmp_path,
 def test_subagent_wake_provider_prompt_keeps_original_task_after_runtime_injection(
     tmp_path, explicit_request,
 ) -> None:
-    agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
-        tmp_path,
-    )
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
     store = agent.conversation_store
-    thread = store.threads.get_or_create(
-        {
-            "canonical_user_id": "user-continuation",
-            "channel": "internal",
-            "channel_conversation_id": "thread-continuation",
-            "channel_user_id": "user-continuation",
-        }
-    )
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "user-continuation", "channel": "internal",
+        "channel_conversation_id": "thread-continuation", "channel_user_id": "user-continuation",
+    })
     task_root = tmp_path / "tasks" / "root-continuation"
     task_root.mkdir(parents=True)
     objective = "换一种编程语言完整复刻现有项目，只由子代理编写功能代码。"
-    store.tasks.bind(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "root-continuation",
-            "goal": "旧任务未完成，不能冒充当前请求" if explicit_request else objective,
-            "status": "active",
-            "task_path": str(task_root),
-        }
-    )
+    store.tasks.bind({
+        "thread_id": thread.thread_id, "task_id": "root-continuation", "status": "active", "task_path": str(task_root),
+        "goal": "旧任务未完成，不能冒充当前请求" if explicit_request else objective,
+    })
     if explicit_request:
         store.messages.append({
             "thread_id": thread.thread_id, "role": "user", "content": objective,
             "metadata": {"conversation_request_id": "current-request"},
         })
-    runtime = BackgroundMainAgentRuntime(
-        agent=agent,
-        store=store,
-        channels=FakeDeliveryService(),
-    )
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
 
-    runtime.run_once(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "root-continuation",
-            "reason": "subagent_runner_finished",
-            "wake_signal": {"metadata": {"conversation_request_id": "current-request"}} if explicit_request else {},
-            "now": 20.0,
-        }
-    )
+    runtime.run_once({
+        "thread_id": thread.thread_id, "task_id": "root-continuation", "reason": "subagent_runner_finished",
+        "wake_signal": {"metadata": {"conversation_request_id": "current-request"}} if explicit_request else {},
+        "now": 20.0,
+    })
 
     assert len(backend.prompts) == 1
     prompt = backend.provider_texts[0]
-    continuation_at = prompt.index("[active-turn-continuation]")
-    user_task_at = prompt.index(f"# User Task\n{objective}")
-    assert user_task_at < continuation_at
+    # 唤醒片记为宿主事件（T3 观察 2 的 A）：不再出现第二条 "# User Task"，续跑说明仍在宿主事件之后的注入里。
+    host_event_at = prompt.index("# Host Event\n")
+    assert host_event_at < prompt.index("[active-turn-continuation]")
+    assert "# User Task" not in prompt
     assert "A subagent lifecycle event resumed this same task" in prompt
-    assert "# User Task\n旧任务未完成，不能冒充当前请求" not in prompt
+    canonical = backend.prompts[0]
+    host_event = canonical[canonical.index("# Host Event\n"):]
+    assert "旧任务未完成，不能冒充当前请求" not in host_event
+    if explicit_request:
+        # 原任务在会话历史里按回合编号重放，宿主事件只引用编号。
+        assert prompt.index(objective) < host_event_at
+        assert "current-request" in host_event and "origin_task" not in host_event
+    else:
+        # 没有原回合编号时原任务只来自任务链接，历史里没有这条用户轮，宿主事件附一段有界原文。
+        assert "origin_task" in host_event and objective in host_event
 
 
 def test_claimed_background_turn_can_use_its_own_task_workspace(tmp_path) -> None:

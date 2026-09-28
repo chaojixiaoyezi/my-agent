@@ -123,6 +123,13 @@ owner 禁用表、激活撤销和连接断开仍由注册表与 `runtime_snapsho
 子代理整合档（`subagent_integration`）与 goal 子代理两档不再手写直属下级管理工具，而是由 `_with_direct_child_controls`
 从 `subagents/role_templates.DIRECT_CHILD_CONTROL_TOOLS` 派生，原目录顺序不变、末尾补缺（2026-09-28 补上只读的 `list_agents`，
 T3 观察 2）；其它后台档不变，策略收紧仍只做减法，锁测在 `test_background_child_control_tools.py`。
+子代理生命周期唤醒片记为宿主事件（2026-09-28，T3 观察 2 的 A）：`_background_model_inputs` 在生命周期续跑时构造回合触发类型
+`agent_core/runtime/turn_trigger.TurnTrigger`，事实由 `conversation/lifecycle_wake_event.py` 从唤醒信封字段确定性投影，
+经 background_execution → RunParams → RuntimeLoopParams → ToolLoopExecuteParams 传递。原生 IR 当前回合以
+`RuntimeFactsTurn(source=host.lifecycle_wake)` 开头，缓存布局 canonical 与文本协议任务节用 `# Host Event` 加固定首句；
+推荐区用固定短名单（`list_agents` 第一）；唤醒片保存原生历史时去掉本片的 `prompt.runtime_injection`。`origin_request_ids`
+只放真实历史请求，已核实的 Goal 任务来源与无请求编号的唤醒改附有界 `origin_task`。`user_prompt` 仍是原任务，
+宿主决策只读 `turn_trigger` 与 `wake_signal`；旧数据不迁移。
 
 ## 本地来源与 owner 身份
 

@@ -442,6 +442,8 @@ class BackgroundRunRequest:
 
 
 # LLM: 一次采样冻结精确目标、兄弟目标状态与 child phase；兄弟目标不是本回合的执行范围。
+#   durable_goal_task_id/objective 是 _goal_runtime_context 已核实的 Goal 任务来源（属于本线程、任务编号与本次唤醒相同）：
+#   这个编号不是普通用户请求，没有对应的历史用户消息；目标是否 active 都保留，供宿主事件区分任务来源与历史请求。
 # 类用途: 固定一次后台模型调用所见的目标、任务目录和子代理阶段，避免采样中途漂移。
 @dataclass(frozen=True)
 class GoalRuntimeContext:
@@ -451,12 +453,15 @@ class GoalRuntimeContext:
     subagent_phase: str = ""
     state_error: str = ""
     other_goals: tuple[object, ...] = ()
+    durable_goal_task_id: str = ""
+    durable_goal_objective: str = ""
 
 
 
 
 # LLM: 同一后台轮冻结 Goal/child phase；Goal 的持久任务编号不是普通用户请求编号，先按本线程事实解析归属。
 # 原始用户历史不裁剪；拆开的命名目标不得把整条多目标消息重新作为各自的任务。只读，不改历史或任务账。
+# 已核实的 Goal 任务来源记进 durable_goal_task_id/objective，宿主事件据此区分任务来源与历史请求。
 # 函数用途: 固定后台续接的正确用户要求与子树阶段，避免新任务完成后主代理回去回答旧任务。
 def _goal_runtime_context(
     agent: object,
@@ -488,14 +493,10 @@ def _goal_runtime_context(
             subagent_phase=phase,
             state_error=state_error or "goal_state_load_error",
         )
+    origin_task_id, origin_objective = _durable_goal_origin(goal, request.thread_id, task_id)
     if not link_error and _is_active_turn_lifecycle_continuation(request, task_objective):
-        durable_goal_task_id = task_id if (
-            goal is not None
-            and str(getattr(goal, "thread_id", "") or "") == request.thread_id
-            and str(getattr(goal, "task_id", "") or "") == task_id
-        ) else ""
         task_objective = _background_request_objective(
-            store, request, durable_goal_task_id=durable_goal_task_id,
+            store, request, durable_goal_task_id=origin_task_id,
         ) or task_objective
     if (
         goal is None
@@ -507,6 +508,7 @@ def _goal_runtime_context(
             task_path=task_path,
             subagent_phase=phase,
             state_error=state_error,
+            durable_goal_task_id=origin_task_id, durable_goal_objective=origin_objective,
         )
     if not phase and not state_error:
         phase, state_error = _goal_subagent_phase(agent, task_id)
@@ -518,7 +520,18 @@ def _goal_runtime_context(
         subagent_phase=phase,
         state_error=state_error or ("goal_state_load_error" if goals_error else ""),
         other_goals=tuple(item for item in goals if item.goal_id != goal.goal_id),
+        durable_goal_task_id=origin_task_id, durable_goal_objective=origin_objective,
     )
+
+
+# LLM: Goal 的持久任务编号只有在这个 Goal 属于本线程、且任务编号与本次唤醒任务完全相同时才算已核实；已核实的编号
+#   不是普通用户请求，没有对应的历史用户消息。只读已加载的 Goal 对象，不管目标是否 active。
+# 函数用途: 给出已核实的 Goal 任务来源（任务编号与目标原文），未核实时返回两个空串。
+def _durable_goal_origin(goal: object, thread_id: str, task_id: str) -> tuple[str, str]:
+    if (goal is None or str(getattr(goal, "thread_id", "") or "") != thread_id
+            or str(getattr(goal, "task_id", "") or "") != task_id):
+        return "", ""
+    return task_id, str(getattr(goal, "objective", "") or "").strip()
 
 
 # LLM: Task link owns the durable workspace and the objective of wakes without a request id.
@@ -894,6 +907,7 @@ def _invoke_background_main_agent(
 
 
 # LLM: 后台一整片（包括 Compact）复用作用域模型快照；不因此新建线程、工作片或控制记录。
+#   _background_model_inputs 给出的回合触发类型原样交给执行层，每次模型尝试都写进本片 RunParams。
 # 函数用途: 用当前选定模型继续后台主代理，子代理仍从创建时的配置继承。
 def _invoke_background_main_agent_with_model(
     runtime: BackgroundMainAgentRuntime,
@@ -912,10 +926,11 @@ def _invoke_background_main_agent_with_model(
         proactive_delivery_available=proactive_delivery_available,
         transcript_delivery_available=transcript_delivery_available,
     )
-    user_prompt, continuation_injection = _background_model_inputs(
+    user_prompt, continuation_injection, turn_trigger = _background_model_inputs(
         request,
         task_objective=goal_context.task_objective,
         wake_prompt=wake_prompt,
+        goal_origin=(goal_context.durable_goal_task_id, goal_context.durable_goal_objective),
     )
     execution = BackgroundExecutionDependencies(
         agent=runtime.agent,
@@ -929,23 +944,38 @@ def _invoke_background_main_agent_with_model(
         execution, thread, request, user_prompt=user_prompt,
         continuation_injection=continuation_injection,
         proactive_delivery_available=proactive_delivery_available,
+        turn_trigger=turn_trigger,
     )
 
 
 # LLM: 会话运行时 keeps child completion inside the originating active turn. When an exact task
-# objective exists, keep it in the User Task slot and move the synthetic wake instruction into
-# runtime injection; other background event kinds retain their existing one-shot prompt.
-# 函数用途: 选择后台模型真正看到的用户任务和追加唤醒说明，避免子代理回报后把原任务换掉。
+# objective exists, the objective stays the run's user_prompt (recall, root prompt, compaction), the
+# synthetic wake instruction stays a soft runtime injection, and a typed lifecycle TurnTrigger makes the
+# slice open with a host event instead of a second "# User Task". Other background kinds keep their
+# one-shot prompt and no trigger. Host decisions read the trigger/wake_signal fields, never this prose.
+# The third item is an agent_core.runtime.turn_trigger.TurnTrigger or None. goal_origin is the Goal task
+# source already validated by _goal_runtime_context: that id is task-origin, not a historical request, so it
+# never enters origin_request_ids and its objective travels as origin_task. With no request id at all the
+# resolved objective travels as origin_task as well.
+# 函数用途: 选择后台模型的用户任务、追加唤醒说明和回合触发类型，子代理回报后本片记为宿主事件而不是新的用户请求。
 def _background_model_inputs(
     request: BackgroundRunRequest,
     *,
     task_objective: str,
     wake_prompt: str,
-) -> tuple[str, list[str]]:
+    goal_origin: tuple[str, str] = ("", ""),
+) -> tuple[str, list[str], object | None]:
+    from .lifecycle_wake_event import lifecycle_wake_turn_trigger
+
     objective = str(task_objective or "").strip()
-    if _is_active_turn_lifecycle_continuation(request, objective):
-        return objective, ["[active-turn-continuation]\n" + str(wake_prompt or "").strip()]
-    return str(wake_prompt or ""), []
+    if not _is_active_turn_lifecycle_continuation(request, objective):
+        return str(wake_prompt or ""), [], None
+    goal_task_id, goal_objective = goal_origin
+    wake_ids = _background_active_turn_request_ids(request)
+    history_ids = [item for item in wake_ids if item != goal_task_id]
+    origin_task = (goal_objective or objective) if goal_task_id and goal_task_id in wake_ids else ("" if history_ids else objective)
+    trigger = lifecycle_wake_turn_trigger(request.reason, request.wake_signal, history_ids, origin_task)
+    return objective, ["[active-turn-continuation]\n" + str(wake_prompt or "").strip()], trigger
 
 
 # LLM: Detached Audit quota notices share a lifecycle reason for delivery but are not a slice
