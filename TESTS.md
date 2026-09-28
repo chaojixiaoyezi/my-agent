@@ -146,6 +146,22 @@
 - **变异验证（9 种全部被抓住，逐个字节级还原）**：去掉码行、所有状态都附码、普通路径不记日志、交互路径不记日志、日志降到 INFO、
   每个结果都记日志、日志回显命令原文、去掉非管理员守卫、TUI 只打印第一行。
 
+## 已结束子代理接替修复的脚本模型端到端复核（2026-09-28，分支 `claude/ae-done-takeover-fix`，仅文档）
+
+- **性质**：脚本模型端到端机制已验，真实模型未覆盖。被测为修复 `1d44c9f8f` 的 `git archive` 导出，用上一轮同一套工具：
+  真实 Gateway（8437）、脚本假模型（8447）和 tmux 里的真实 TUI，全部以 `env -i` 启动，假 HOME 跑完为空，不设模型密钥。
+- **BR**：唤醒片接替一个已 DONE 的子代理，得到 `recorded`＋`superseded`；来源保持 DONE，`superseded_by` 指向接替者，
+  有一条 TakeoverRecord 和 TAKEOVER.md。再对同一来源接替一次，得到 `SUBAGENT_REPLACEMENT_INVALID`／`source_already_taken_over`，
+  不产生新子代理。
+- **HI**：测试者把 owner 工具索引改为只写 7.568 秒。唤醒片的普通重派先得到 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`，
+  带 `replacement_for_run_ids` 的接替随后放行，结果同 BR；第二次接替同样被拒。
+- **LS**：之后的前台 list_agents 对两个来源都给出 `replaced_by`（接替者、superseded）。
+- **判据**：只读结构化事实，包括 tool_completed 的错误码与 seq、create_subagents 外置输出的 replacement_records、
+  canonical 状态、TAKEOVER.md 是否存在、wake 队列，以及 Gateway 停止后以 immutable 只读打开的 runtime.db；
+  另从脚本模型收到的工具结果里抽取拒绝原因和 replaced_by 的结构字段。
+- **事件日志**：local_store 与 run 时间线里没有专门的接替条目，已记为后续项。
+- **本轮验证**：只改 Markdown；运行五项静态门禁，并在提交前还原 CODE_SIZE_REPORT.md；没有跑 pytest。
+
 ## 已结束子代理被接替时终态不改写（2026-09-28，分支 `claude/ae-done-takeover-fix`，基于 `53477806d`）
 
 - **来源**：G03 脚本模型端到端验证（9f88e4905）发现，接替 DONE 子代理时回执报 `recorded`、写了 TAKEOVER.md，但持久化边界把

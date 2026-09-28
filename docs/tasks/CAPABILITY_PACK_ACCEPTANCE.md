@@ -290,6 +290,14 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 
 新确认一处宿主缺陷，已带证据报集成方，本轮未修：接替一个已 DONE 的子代理时，create_subagents 的 replacement_records 报 `recorded` 并写出 TAKEOVER.md；但持久化边界 `_restore_newer_closed_state` 把 DONE 视为已关闭状态，静默还原了 TAKEN_OVER，canonical、state 与 owner 投影仍为 DONE，takeover_by 为空。两个场景各复现一次。按代码推断，同一 DONE 来源还能被再次接替，这一点未实测。`TOOL_ONE_SHOT_HISTORY_INCOMPLETE` 的唯一结构化出口正是为已有 run 写 `replacement_for_run_ids`，所以这条路径并不罕见。BLOCKED 来源不受影响。
 
+修复与复核：上述缺陷由 `1d44c9f8f`（分支 `claude/ae-done-takeover-fix`）修复。用同一套脚本模型、真实 Gateway 和真实 TUI 复跑 BR、HI 两个场景，脚本模型端到端机制已验，真实模型未覆盖：
+- 接替已 DONE 的子代理时，回执为 `recorded`、`disposition=superseded`；来源保持 DONE，`superseded_by` 指向接替者，有一条 TakeoverRecord 和 TAKEOVER.md；
+- 对同一来源第二次接替，在创建前被拒，返回 `SUBAGENT_REPLACEMENT_INVALID`／`source_already_taken_over`，不产生新子代理；
+- HI 场景在测试者注入的历史读错下，仍先得到 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`，随后的接替照常放行；
+- 之后的前台 list_agents 对两个来源都标出 `replaced_by`。
+
+追加式事件日志（local_store 的 `subagent_run_saved`、run 时间线）在接替时只多一条普通保存或状态记录，没有专门的接替条目；接管记录目前只在权威状态的 takeover_records 和 TAKEOVER.md 里。证据批次 `bg-subagent-takeover-fix` 保存在本机验收证据目录，不进仓库；判定文件摘要 `cf24eac9980720a04e1e5d709605b06c229e7a7c4c798480284a30a8406b1de0`。
+
 另有两项观察。其一，停机收口后又被接管的子代理，其 runtime.db agent_run 停在 created（attempt 已 done），TaskRun 仍按静止规则关闭。其二，模型在回复里写 `[SUBAGENT_RESULT]` 的 BLOCKED 不改变子代理状态，符合“状态只认宿主事实”的现行合同，不是缺陷。证据批次 `bg-subagent-paths-9f88` 保存在本机验收证据目录，不进仓库；判定文件摘要 `71e289fb51e2f177136235f19e86aa40cb23417c8c895d1b36e13d3a33416fd6`。本轮只改 Markdown，没有产品、测试或配置变更。
 
 ## G05脚本模型端到端机制验证（2026-09-28）
