@@ -648,6 +648,28 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **回归**：`test_runtime_guidance.py`、`test_wake_queue.py`、`test_orchestration_tool_constants.py` 通过。
 - 尚无真实 Gateway 双会话端到端验收（第 3 片用 fake LLM 做；真实环境由 dev 安排）。
 
+## Jev curator invalid_input 快速失败修复（2026-09-28，分支 `my-agent/self-dev-4`）
+
+- **来源**：my-agent-4 开发交流板任务 1。owner 的 `data/decision/outcomes.jsonl` 里 point=curator 有 7 条
+  `status=error, reason=invalid_input`、耗时 5–9ms（从未调用到模型）。dev 裁决按"丙（一次请求里同一份材料只放一次）
+  为主修 + 甲（token 级合同）兜底"，不做乙（不改消息优先的提取缩批契约）。
+- **根因**：`decision_curator._decision_material` 把整批材料放进决策请求 `state`，同时**每个问题都内联整段候选释义**，
+  同一批材料的候选说明按题重复；实测 payload 73480 字符 / 31920 token，超过 32768 窗口的 90% 上限（29491），
+  被 `typesafe_decision_wire.validate_typesafe_request_window` 拒绝 → `decision_service` 映射成 `invalid_input`。
+  另：audit 事件投影里 11 个字段在全部行都是空值，每行仍付约 240 字符的键名开销。
+- **做法**：①候选释义/非选择/need_data 语义上移 `state.annotation_criteria`，每题只留身份引用与 `criteria_key`，
+  wire 层接受 `criteria` 为共享引用字符串（仍用 `_valid_key` 限制长度与控制字符）；②audit 引用的空字段不再发送
+  （证据校验读 dataclass 属性，不读这些键）；③新增窗口兜底：按实际决策模型的 `model_context_window_tokens`
+  （读本点位已授权连接，读不到则不裁）**按整条来源从尾部裁题面**，被裁来源仍在 `state.batch` 原始快照里，
+  留在原游标之后下一轮重放；裁掉时用既有固定码 `memory_curator_input_fitted:decision_window` 报告，条数不进文本。
+  `curator` 也纳入 `_JEV_BOUND_POINTS` 的有界点位。
+- **新测试**：`agent_py_agent/tests/test_decision_curator_window_budget.py`（候选只发一次；请求不再超窗；
+  窗口足够时不因预算丢来源；窗口不足时按 items 前缀整条裁、被裁来源只在题面消失且仍在批次快照里）。
+- **复现**：`PYTHONPATH=. python3 -m pytest agent_py_agent/tests/test_decision_curator_window_budget.py -q`
+  （修复前红：payload token 36308 > 29491）。回归另跑 `test_memory_curator_v2`、
+  `test_decision_curator_plugin_concurrency`、`test_curator_input_budget`、`test_decision_owner_scope` 全过。
+- **变异验证**：①去掉 `_fit_items_to_window` → 2 条红；②把 `criteria` 改回逐题内联 → 2 条红（且 token 回到 36308）。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的

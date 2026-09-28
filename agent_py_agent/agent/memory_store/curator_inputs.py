@@ -133,10 +133,12 @@ class CuratorAuditInput:
             and self.effect_outcome.strip().lower() not in _INCOMPLETE_TOOL_EFFECTS
         )
 
-    # LLM: audit 引用不包含正文，只暴露 typed 状态、ID、hash 和 artifact/source refs。
+    # LLM: 一条 audit 事件的最小证据引用；空字段不发送——56 行里 11 个恒空字段的键名与空值
+    #   要占掉约 240 字符/行，属于同一批材料里的零信息重复。缺失即表示该字段为空，与显式空串语义一致。
+    #   正文仍未进入引用；preview 由 to_model 单独投影。
     # 函数用途: 生成一条运行事件的最小证据引用。
     def ref(self) -> dict[str, object]:
-        return {
+        values: dict[str, object] = {
             "event_id": self.event_id,
             "event_type": self.event_type,
             "created_at": self.created_at,
@@ -158,6 +160,7 @@ class CuratorAuditInput:
             "artifact_hash": self.artifact_hash,
             "artifact_size_bytes": self.artifact_size_bytes,
         }
+        return {key: value for key, value in values.items() if value not in ("", None, 0)}
 
     # LLM: 模型只能看到有界 preview；完整工具大输出继续由 artifact 权威保存。
     # 函数用途: 把一条 audit 事件转成 Curator 输入对象。

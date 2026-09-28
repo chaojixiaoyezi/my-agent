@@ -150,3 +150,5 @@ Curator 的 interval、turn_threshold、max_input_chars、timeout、workers、da
 `_max_input_chars`(12000) 降为 `memory_archive/compact_semantic_summary.py` 既有的 `_DEFAULT_*` 常量，`semantic_summary_config`
 只保留 `enabled` 一个配置读取；配置面（AgentConfig、随包 YAML、`services/_normalize` 规格、说明基线）同步删除，残留只按未知键告警。
 同批还降了 conversation/runtime 的待处理唤醒消费上限与成功完成合并窗口（见 subagent 模块进展）。定向测试与静态门禁见 TESTS。
+
+2026-09-28：Curator 的决策输入（point=curator）按 dev 裁决收口——候选释义/非选择/need_data 语义上移 `state.annotation_criteria`，每题只留身份引用与 `criteria_key`（wire 层 `criteria` 接受共享引用字符串）；audit 事件投影不再发送全行恒空的字段。另增窗口兜底：按本点位已授权决策连接的 `model_context_window_tokens` 按整条来源从尾部裁题面，被裁来源仍在 `state.batch` 原始快照里、留在原游标之后下一轮重放，裁掉时记固定码 `memory_curator_input_fitted:decision_window`；`curator` 纳入 `_JEV_BOUND_POINTS` 有界点位。此前 owner 侧 point=curator 的 7 条 `invalid_input`（5–9ms、从未联网）即由决策请求超模型窗口触发。本地四文件 83 项通过，真机 Gateway 未复验。

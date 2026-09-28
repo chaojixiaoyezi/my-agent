@@ -20,6 +20,8 @@ child历史说明在不展示正文时不再提前读取完整来源或计算展
 
 Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `ToolCancelled` 和取消检查；这是与插件宿主共用的唯一进程内异常类型。已删除的 `tooling/cancellation.py` 不再作为兼容入口，记忆来源、游标和正式写入路径没有变化。
 
+Curator 决策输入（`memory_store/decision_curator.py`）的候选释义只在 `state.annotation_criteria` 出现一次，`questions` 每题只带 `instructions.{source_kind,source_id,criteria_key,required_refs}` 与共享引用 `criteria="annotation_criteria.<tag|priority>"`；`backends/typesafe_decision_wire.py::_validate_question` 因此接受 `criteria` 为共享引用字符串（仍按 `_valid_key` 限长、禁控制字符），`score` 仍须内联等级。`state.batch` 仍保留整批原始材料（提取与证据校验的依据），窗口不足时只裁题面前缀：`_fit_items_to_window` 按本点位已授权连接的 `model_context_window_tokens` 从尾部整条移除，被裁来源留在原游标之后由下一轮重放；`_MAX_ANNOTATED_ITEMS` 仍是本地题量保护。
+
 ## 记忆配置的单一旋钮（参数减量第 2 批）
 
 - 归档级别：`memory_archive_level`（0-3，默认 3）是运行归档（`_finalization_service`、`runtime/live_archive`）和子代理收尾恢复快照（`subagent_mixin._recovery_snapshot_input`）的共同来源，不再有 hook 专用级别。
