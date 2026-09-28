@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+TUI 插话丢失修复（分支 `claude/be-steer-loss`，2026-09-28）：生产结构化事实显示，插话随模型调用提交后，这次调用以
+`ProviderTransientError` 失败。当时两层重试都因为“有未确认插话”不重发，attempt 失败；新 attempt 又不重发“提交不明”的插话，
+入口回执永远停在 `active_pending`，TUI 每 2–3 秒轮询。修复：失败调用按调用编号把插话退回预留，同一 attempt 的重试重新提交；
+重试守卫只看在途提交；没有请求文件的后台目标（定时任务 `srun_*`）在会话任务终态后，未认领的插话转成下一轮。
+结构见 `04-structure.md` 同日一节，回归见 `test_steer_delivery_recovery.py`。
+
 `/settings` 列表隐藏加载器元数据（分支 `claude/9a-batch3-e`，2026-09-27）：`settings_control_service._overview`、`_all` 改用`parameter_registry.listed_parameters()`，总数、“改过”统计与分类清单都不再包含 `config_path/config_sources/config_layers/config_warnings/memory_config_warnings`（加载器写进 AgentConfig 的元数据，不是参数）；参数搜索与 user_config 的可改数量同口径。字段与登记表项不删，`/settings show config_warnings` 仍可查看。回归见 `test_settings_chat_control.py`。
 参数减量第 3 批 B 组（分支 `claude/38-internal-constants-bd`，2026-09-27）：Gateway 心跳节奏、心跳陈旧判定、request worker 空闲轮询、后台普通异常冷却、磁盘级 owner 唤醒重扫间隔、控制命令 HTTP 等待上限、一次 tick 消费的未处理观察上限七项不再是配置项，降级为读取点旁的具名常量（值不变：`lease_service.GATEWAY_HEARTBEAT_INTERVAL_SECONDS`=5、`status_rendering.GATEWAY_STALE_SECONDS`=120、`gateway_loops.GATEWAY_REQUEST_POLL_INTERVAL_SECONDS`=0.2、`gateway_loops.BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS`=30、`gateway_loops.BACKGROUND_OWNER_WAKE_RESCAN_SECONDS`=120、`chat_parts/control_runtime.GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS`=30、`conversation/runtime.CONVERSATION_UNHANDLED_OBSERVATION_LIMIT`=20）；用户配置里残留的旧键只在加载时告警。场景测试与 Live Lab 生成的配置不再写 `gateway_request_poll_interval: 1`（这两处的 Gateway 改按默认 0.2 秒轮询）。相关测试改为 patch 常量（`test_lease`、`test_gateway_loops_resilience`、`test_slow_model_liveness`、`test_chat_control_runtime`、`test_background_main_agent_runtime`）。
 

@@ -59,7 +59,10 @@ from .runner.stage_trace import (
     trace_runner_model_stream_active,
     trace_runner_provider_retry_scheduled,
 )
-from .runtime.guidance import active_turn_input_has_unconfirmed_delivery
+from .runtime.guidance import (
+    active_turn_input_has_unconfirmed_delivery,
+    restore_turn_input_after_failed_provider_call,
+)
 from .tool_ir_guidance import unforwarded_runtime_guidance
 from .tool_ir_history import (
     native_tool_ir_history,
@@ -1008,9 +1011,38 @@ def _trace_model_failure(request: ModelGenerateParams, exc: BaseException) -> No
     )
 
 
+# LLM: 一次模型请求失败（含墙钟超时、用户停止）后，这次调用的回复不会再被采纳：先按这次调用编号退回随它发出的
+#   插话，再把原异常交给上层的超时重试或模型轮重试。流中止会换成合成回复、上下文超限走原恢复链，这两类不在这里退回。
+# 函数用途: 调用模型；失败时把本次调用带出的补充消息退回可重新提交的状态，再原样抛出异常。
+def _generate_with_wall_timeout(
+    request: ModelGenerateParams,
+    state: _ModelGenerationState,
+    first_token_timeout_seconds: float = 0.0,
+):
+    try:
+        return _generate_through_wall_guard(request, state, first_token_timeout_seconds)
+    except (LongToolContentStreamAbort, MalformedToolProtocolStreamAbort):
+        raise
+    except Exception as exc:
+        if not is_context_window_error(exc):
+            _restore_failed_call_turn_input(state)
+        raise
+
+
+# LLM: 退回失败只会让这批插话保持“提交不明”（守卫因此拒绝重试，与改动前一致），绝不能盖住原始模型异常。
+# 函数用途: 尽力把失败调用带出的补充消息退回预留。
+def _restore_failed_call_turn_input(state: _ModelGenerationState) -> None:
+    try:
+        restore_turn_input_after_failed_provider_call(
+            state.agent, state.params, provider_call_id=state.call_id
+        )
+    except Exception:  # noqa: BLE001 - 保留原异常；退回失败按提交不明处理。
+        return
+
+
 # LLM: Both execution paths use the same frozen ContextVars; snapshot before spawning the guard so config/backend/prompts cannot revert to deployment defaults. Preserve submission hooks and typed cancellation.
 # 函数用途: 按配置直接调用模型或启动保护线程；新线程继承当前工作片的模型与身份，停止仍精确传到实际连接。
-def _generate_with_wall_timeout(
+def _generate_through_wall_guard(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
     first_token_timeout_seconds: float = 0.0,

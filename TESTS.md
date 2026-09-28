@@ -1,5 +1,39 @@
 # 测试与发布验收
 
+## TUI 插话丢失修复（2026-09-28，分支 `claude/be-steer-loss`，基于 `f7851cec8`）
+
+- **来源**：集成者派活，用户反馈 TUI 插话经常没进去。按规定只读结构化事实：插话回执的状态、编号和时间，模型提交与确认批次，
+  运行库的 attempt 和事件类型，Gateway 入口回执，TUI 本地待发箱的编号和次数。不读会话或记忆正文。
+  - 生产近 14 天主工作区共 80 条插话：70 条模型确认，9 条在回合结束后按设计拒绝、排到下一轮并已跑完，
+    1 条是 09-27 22:54 的 `guidance-31b4…`。
+  - 这 1 条随 `attempt-1790574840` 的模型调用提交，调用 `ProviderTransientError` 失败，attempt 失败；
+    `attempt-1790575040` 只带了后来的那条插话。它的入口回执至今停在 `active_pending`，TUI 待发箱已查询上千次。
+  - 结构化证据在 scratchpad `steer/evidence/`，汇报时附归档路径。
+- **新增** `test_steer_delivery_recovery.py` 6 项，假后端，零网络（端到端只连进程内 127.0.0.1 临时端口）：
+  - 失败调用把本批插话退回预留，批次记 `rejected`，守卫放行；下一次调用按新编号提交，确认后消费；
+    拿过期调用编号退回是空操作。
+  - 墙钟超时后物理重试重新提交；被放弃的旧调用不被确认。
+  - 工具循环里瞬断后模型轮重试：两次出站各含一次插话，最终回复按插话调整，`active_turn_user_inputs` 只记一次。
+  - 流中止（换成合成回复）不退回，普通失败才退回。
+  - 隔离 Gateway 端到端：用生产同款鉴权中间件起进程内 HTTP 服务，真实 TUI 客户端 `GatewayChatClientAgent` 在模型调用进行中
+    插话；带插话的调用瞬断后本轮重试成功，入口回执收成 `consumed`，`/input-status` 返回 accepted。
+  - 定时任务目标（没有 Gateway 请求文件）：任务运行中回执保持 `active_pending`；任务 `completed` 后插话被拒绝，
+    转成下一轮请求（inbox 出现同编号请求，状态接口 queued/accepted）。
+- **改写** 2 个旧用例，它们锁的是旧规则“只要注入过插话就拒绝重试”：`test_tool_loop_model_turn.py` 的 pending 参数改为可重试；
+  `test_provider_timeout_acceptance.py` 拆成“在途提交拒绝重试”和“只有预留允许重试”两条。
+- **复现**：同一测试文件放到基线 `f7851cec8` 的只读导出上跑，6 项全部失败。端到端用例在基线上回合整体失败，
+  和生产上 attempt 以 ProviderTransientError 失败一致。
+- **结果**：用到插话、生成层、Gateway 入口、瞬断重试的 141 个测试文件（含架构守卫），共 8379 passed、1 skipped、5 xfailed、1 xpassed。
+  xpassed 的是 `test_timeout_budget_locked.py::test_native_protocol_unified_counts_ir`（token 计量存量漂移），在基线上同样 xpass，
+  与本改动无关。ruff、doc sync、strict code-size（与基线逐条比较，新增 0、少 1 项 high-risk）、`git diff --check`、clean-package
+  见提交前检查。
+- **变异验证**：11 个全部被抓出。
+  - 重试守卫把预留也算在途；失败调用不退回；过期编号也退回；包装层不退回；流中止也退回；退回出错盖住原异常。
+  - 不回退到任务状态；任何任务都算终态；没有记录算终态；读不出算终态；周期对账仍用旧判定。
+  每个都在 `PYTHONDONTWRITEBYTECODE=1` 子进程里跑，并逐字节恢复。两个等价变异没列入：
+  - 清在途编号时不核对是否仍是这次调用：失败路径进入前已核对过；
+  - 超限错误也在包装层退回：原恢复链会再退回一次，结果相同。
+
 ## 压缩失败诊断增加实测"固定开销"与保留 IR 计量（2026-09-27，dev 派活，my-agent 实现）
 
 - **来源**：G2 复验里第二代自动 Compact 报 `COMPACT_CANDIDATE_TOO_LARGE` 时，只有候选总量、输入上限和摘要占比，

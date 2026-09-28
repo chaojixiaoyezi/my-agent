@@ -27,15 +27,13 @@ _ACTIVE_TURN_REPLY_REQUIRED_IDS = "_active_turn_reply_required_guidance_ids"
 
 
 # LLM: 只读取当前工作片的原输入投递字段；模型轮和物理超时重试必须共用此判据，不能据此确认或重发消息。
-# 函数用途: 判断补充消息是否仍未获得明确消费确认，避免两层重试把同一用户消息再次发给模型。
+#   只有“已随某次模型调用发出、既未确认也未退回”的批次（_guidance_submission_id）才算歧义。已注入但还没提交的
+#   预留，以及失败调用已退回的预留，都没有被任何被采纳的回复用过，重试会按新调用重新提交，不会二次投递。
+# 函数用途: 判断是否有一批补充消息已随模型调用发出但尚未确认或退回，此时两层重试都不得再发请求。
 def active_turn_input_has_unconfirmed_delivery(live_archive_state: object) -> bool:
     if not isinstance(live_archive_state, dict):
         return False
-    pending = live_archive_state.get("_guidance_ack_ids")
-    return bool(
-        str(live_archive_state.get("_guidance_submission_id") or "").strip()
-        or (isinstance(pending, set) and pending)
-    )
+    return bool(str(live_archive_state.get("_guidance_submission_id") or "").strip())
 
 
 # LLM: This volatile suffix is rebuilt from canonical direct-child rows at every provider safe
@@ -395,10 +393,41 @@ def mark_injected_turn_input_submitted(
     return submitted
 
 
-# LLM: A typed provider context rejection proves no prompt execution. Only that caller may restore
-# this attempt's submitted rows to reserved for a smaller retry; transport failures never call it.
+# LLM: A typed provider context rejection proves no prompt execution. The caller restores the batch
+# of the current submission to reserved for a smaller retry; a failed call uses the exact-id variant below.
 # 函数用途: 模型明确拒绝当前上下文时，将本批补充消息恢复为同一尝试可再次提交。
 def restore_injected_turn_input_for_provider_retry(agent: object, params: object) -> int:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return 0
+    return _restore_submitted_turn_input(
+        agent, params, str(state.get("_guidance_submission_id") or "").strip()
+    )
+
+
+# LLM: 模型调用抛出异常就没有被采纳的回复：确认批次没写、插话也没进历史，模型的持久上下文里没有这批消息
+#   （后端不保存服务端会话）。所以只把“这一次”调用的提交批次退回本尝试的预留，供模型轮重试或下一个尝试重新提交；
+#   当前在途的已是别的调用时不动。进程崩溃来不及走到这里，仍按提交不明处理。副作用：改写提交批次与回执。
+# 函数用途: 模型调用失败后，把随这次调用发出的补充消息退回可重新提交的状态，返回退回条数。
+def restore_turn_input_after_failed_provider_call(
+    agent: object,
+    params: object,
+    *,
+    provider_call_id: str,
+) -> int:
+    state = getattr(params, "live_archive_state", None)
+    call_id = str(provider_call_id or "").strip()
+    if not isinstance(state, dict) or not call_id:
+        return 0
+    if str(state.get("_guidance_submission_id") or "").strip() != call_id:
+        return 0
+    return _restore_submitted_turn_input(agent, params, call_id)
+
+
+# LLM: 两种退回共用同一条账本迁移（submissions.restore_for_retry）；只在当前在途编号仍是这次调用时清掉它，
+#   不能把之后另一次调用的在途标记一并清除。副作用：改写提交批次、回执与工作片状态。
+# 函数用途: 在宿主转换锁内把指定调用的补充消息退回本尝试的预留，并返回退回条数。
+def _restore_submitted_turn_input(agent: object, params: object, provider_call_id: str) -> int:
     state = getattr(params, "live_archive_state", None)
     store = getattr(agent, "conversation_store", None)
     if store is None or not isinstance(state, dict):
@@ -415,9 +444,8 @@ def restore_injected_turn_input_for_provider_retry(agent: object, params: object
         or str(getattr(params, "run_id", "") or "").strip()
         or turn_id
     )
-    provider_call_id = str(state.get("_guidance_submission_id") or "").strip()
-    # LLM: 模型结构化拒绝后仍在宿主转换锁内恢复同批预留；不能重放网络结果不明的消息。
-    # 函数用途: 把已拒绝的模型请求内插话恢复到本尝试可重试状态。
+    # LLM: 在宿主转换锁内恢复同批预留；批次与回执都按这次调用编号核对，不匹配时账本层报错而不是猜测。
+    # 函数用途: 把这次模型调用里的插话恢复到本尝试可重试状态。
     def restore() -> int:
         return len(
             store.guidance.submissions.restore_for_retry(
@@ -429,7 +457,7 @@ def restore_injected_turn_input_for_provider_retry(agent: object, params: object
         )
 
     restored = int(_run_active_turn_transition(params, "restore", restore))
-    if restored:
+    if restored and str(state.get("_guidance_submission_id") or "").strip() in {"", provider_call_id}:
         state.pop("_guidance_submission_id", None)
     return restored
 

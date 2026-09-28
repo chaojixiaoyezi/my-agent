@@ -357,6 +357,21 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 
 # Gateway Structure
 
+## 插话随失败调用退回、后台目标收尾（2026-09-28，分支 `claude/be-steer-loss`）
+
+- 模型调用失败即退回：`tool_model_generation._generate_with_wall_timeout` 在一次调用抛异常后（含墙钟超时、用户停止；
+  流中止换成合成回复、上下文超限走原恢复链，这两类除外），按**这次调用编号**调
+  `runtime.guidance.restore_turn_input_after_failed_provider_call`：提交批次记 `rejected`，回执回到本尝试的 `reserved`，
+  清掉在途编号 `_guidance_submission_id`。失败调用的回复从未被采纳、插话也没进历史（后端 `store: False`，不存服务端
+  会话），所以同一尝试的重试按新调用编号重新提交，模型只看到一次。当前在途已是别的调用时不动。
+- 重试守卫：`active_turn_input_has_unconfirmed_delivery` 只看在途提交编号。已注入未提交的预留、以及失败调用退回的预留
+  都不再挡住模型轮瞬断重试和物理超时重试。进程崩溃来不及退回，仍按提交不明处理，不自动重发。
+- 后台目标收尾：`input_delivery_service._input_target_lifecycle` 在目标回合没有 Gateway 请求文件（定时任务 `srun_*`）时，
+  改按会话任务链接判断：`task_state.conversation_task_link_is_terminal` 为真才算终态，读不到或未终态（包括两次尝试之间）
+  一律按未知处理。周期对账因此能把终态目标里未认领的插话拒绝并转成下一轮请求。以前这类回执永远停在 `active_pending`，
+  TUI 会一直轮询。
+- 回归：`test_steer_delivery_recovery.py`。
+
 ## R270 插话三段状态：排队 / 已提交 / 已确认
 
 - 插话（active turn input）有**三个**彼此独立的结构化边界，展示层必须分开表达，禁止合并成一个"已送入"：
@@ -374,7 +389,8 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
   回合终态仍未确认时降级为"已送入但未获模型确认；不会自动重发"。重连靠持久事件重放
   （`active_turn_input_submitted` + `active_turn_input_consumed`），按块 ID 去重，不丢不重。
 - 禁止事项：不得把已提交当成已消费（会让回复欠账提前消失）、不得为了显示提前置 `consumed`、
-  不得在未确认时自动重发同一条插话。
+  不得自动重发结果不明（在途或进程崩溃）的插话。调用已明确失败的批次按上一节退回预留，由同一尝试的重试重新提交，
+  这不算重发。
 
 # Gateway Structure
 

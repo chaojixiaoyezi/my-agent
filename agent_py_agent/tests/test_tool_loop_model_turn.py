@@ -112,7 +112,8 @@ def test_transient_retry_reads_current_delivery_state_before_replay(monkeypatch,
             acknowledge_input=lambda _params: events.append("ack"),
         )
 
-    if submitted == "none":
+    if submitted in {"none", "pending"}:
+        # 只注入、没随调用发出（或失败调用已退回）的预留不算歧义：重试会按新调用重新提交。
         turn = sample()
         assert turn.prompt == "重试后的原请求"
         assert turn.response is response

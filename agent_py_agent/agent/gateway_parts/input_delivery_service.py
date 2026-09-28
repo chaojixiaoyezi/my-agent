@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .io import (
     gateway_response_path,
@@ -431,11 +432,7 @@ def reconcile_gateway_input_receipts(
             from .request_worker import _resolve_request_agent
 
             scoped = _resolve_request_agent(agent, receipt.prepared_request)
-            lifecycle = (
-                _gateway_turn_lifecycle(paths, receipt.target_turn_id)
-                if receipt.target_turn_id
-                else "unknown"
-            )
+            lifecycle = _input_target_lifecycle(paths, scoped, receipt.target_turn_id)
             if lifecycle == "terminal" and receipt.target_turn_id:
                 # The owner store is now available, so a never-claimed row can
                 # be rejected safely and promoted. Claimed remains unknown.
@@ -673,6 +670,23 @@ def _write_terminal_unknown(
         reconcile_error=report,
     )
     write_json_file_atomic(gateway_input_receipt_path(paths, receipt.request_id), updated.to_dict())
+
+
+# LLM: Gateway 请求文件是前台回合的权威事实，有文件时照旧只看它。没有请求文件的目标（如定时任务 srun_*）只由
+#   同名会话任务的尝试读取插话：任务链接进入规范终态（task_state.conversation_task_link_is_terminal）后
+#   不会再有尝试认领，才算 terminal；读不到、没有记录或未终态（例如两次尝试之间）一律 unknown。只读。
+# 函数用途: 判定一条插话的目标回合是否已经结束，前台看请求文件，后台看会话任务状态。
+def _input_target_lifecycle(paths: GatewayPaths, agent: object, target_turn_id: str) -> str:
+    if not target_turn_id:
+        return "unknown"
+    lifecycle = _gateway_turn_lifecycle(paths, target_turn_id)
+    if lifecycle != "unknown":
+        return lifecycle
+    try:
+        link = agent.conversation_store.tasks.load(target_turn_id)
+    except Exception:
+        return "unknown"
+    return "terminal" if link is not None and conversation_task_link_is_terminal(link.status) else "unknown"
 
 
 # LLM: Reconciliation distinguishes a live provider turn, a recoverable inbox claim, canonical

@@ -760,18 +760,25 @@ def test_gate_stream_stage_refuses_retry(tmp_path) -> None:
 
 
 def test_gate_ambiguous_active_turn_input_refuses_retry(tmp_path) -> None:
-    """闸门2：带未确认的用户补充输入时，重发会二次投递 -> 拒绝。"""
-    for state_update in (
-        {"_guidance_submission_id": "sub-1"},
-        {"_guidance_ack_ids": {"sub-2"}},
-    ):
-        params = _params(run_id=f"run-gate-ambiguous-{sorted(state_update)[0]}")
-        params.live_archive_state.update(state_update)
-        request, backend, _agent = _gate_request(params, tmp_path)
+    """闸门2：已随调用发出、既未确认也未退回的补充输入，重发会二次投递 -> 拒绝。"""
+    params = _params(run_id="run-gate-ambiguous-submission")
+    params.live_archive_state.update({"_guidance_submission_id": "sub-1"})
+    request, backend, _agent = _gate_request(params, tmp_path)
 
-        assert _retry_once_after_timeout(request, ProviderTimeoutError("t", stage="wall_clock")) is None
-        assert backend.calls == 0
-        assert "_provider_timeout_resume_turns" not in params.live_archive_state
+    assert _retry_once_after_timeout(request, ProviderTimeoutError("t", stage="wall_clock")) is None
+    assert backend.calls == 0
+    assert "_provider_timeout_resume_turns" not in params.live_archive_state
+
+
+def test_gate_reserved_only_active_turn_input_allows_retry(tmp_path) -> None:
+    """闸门2 的边界：只注入、没有在途提交的预留（或失败调用已退回的）不歧义，超时后照常重试一次。"""
+    params = _params(run_id="run-gate-reserved-only")
+    params.live_archive_state.update({"_guidance_ack_ids": {"sub-2"}})
+    request, backend, _agent = _gate_request(params, tmp_path)
+
+    retried = _retry_once_after_timeout(request, ProviderTimeoutError("t", stage="wall_clock"))
+    assert retried is not None
+    assert backend.calls == 1
 
 
 def test_gate_unconfirmed_tool_use_refuses_retry(tmp_path) -> None:
