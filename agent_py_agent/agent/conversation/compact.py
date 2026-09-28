@@ -1486,7 +1486,7 @@ def _media_digest_for_summary(
     if decision.policy != MEDIA_POLICY_VISION_SUMMARY or call.provider_surface is None:
         return decision, ""
     final, digest = summarize_media_turns(
-        agent, _media_digest_context(call), rows, decision, max_requests=vision_digest_max_requests(agent),
+        agent, _media_digest_context(call), rows, decision, max_requests=vision_digest_max_requests(),
     )
     if call.media_outcome is not None:
         call.media_outcome.append(final)

@@ -171,7 +171,7 @@ def test_applied_value_with_hands_the_rule_the_loaded_type(monkeypatch):
 
 # 名字里带 token/prompt/path/owner/home/audit/command，但只是数量、上限、间隔或超时的参数（2026-09-27 前被误判为边界）
 _NUMERIC_KNOBS = [
-    "input_media_token_reserve", "decision_model_selection_prompt_max_chars",
+    "decision_model_selection_prompt_max_chars",
     "memory_resume_recommended_read_paths_limit", "home_lesson_stale_caveat_days",
     "background_owner_workers", "background_threads_per_owner",
     "owner_agent_idle_seconds", "owner_agent_pool_max_agents",

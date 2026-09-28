@@ -61,7 +61,9 @@
 
 ## 配置与错误码
 
-- `agent_config.yaml`/`AgentConfig`：`compact_media_policy`（默认 `auto`）、`input_media_token_reserve`（默认 1600，每个图块的摘要预算预留；仅 B 使用）。两处同时更新并加中文注释。
+- `agent_config.yaml`/`AgentConfig`：`compact_media_policy`（默认 `auto`）。每个图块的预留 token 数与看图小请求次数自参数减量第 3 批 D 组（2026-09-27）起是
+  `compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE`（1600）与 `COMPACT_VISION_DIGEST_MAX_REQUESTS`（4）两个代码常量，读取点经 `media_token_reserve()` /
+  `vision_digest_max_requests()` 取值，测试 patch 常量即可；原配置项 `input_media_token_reserve`、`compact_vision_digest_max_requests` 已删除。
 - 错误码：保留 `COMPACT_REQUEST_NON_TEXT`（unknown 非文本或 `policy=off`）；新增 `COMPACT_VISION_SUMMARY_FAILED`（不可重试、建议保留原文），登记到错误分类表与 `gateway_client_error_message`。
 
 ## 验收
@@ -106,7 +108,7 @@
 - **新做法**：把“看图”和“总结”拆成两步，`conversation/compact_media_digest.py` 负责第一步：
   1. `media_turn_groups` 按结构化回合身份把范围里含媒体块的回合挑出来（只读 canonical 信封，不读正文）；
   2. `plan_media_digest` 贪心打包成若干“看图小请求”：每请求 `该请求文字估算 + 图块数 × input_media_token_reserve ≤ 摘要预算`，
-     请求数 ≤ `compact_vision_digest_max_requests`（默认 4，最小 1）；单回合装不下按 `summary_budget_exceeded` 跳过，超次数按上限跳过；
+     请求数 ≤ `COMPACT_VISION_DIGEST_MAX_REQUESTS`（代码常量 4，最小 1）；单回合装不下按 `summary_budget_exceeded` 跳过，超次数按上限跳过；
   3. `generate_media_digest` 逐个发送（`purpose=conversation_compact_media_digest`，同一缓存面前缀/工具/系统指令，指令只要求写图中要点），
      每段要点前加宿主按 sha 前缀生成的 `[附件组 n｜k 个图块｜sha256:…]` 标签；typed `COMPACT_VISION_SUMMARY_FAILED`、空回复或工具调用即停止；
   4. 文字摘要请求照旧走 `generate_bounded_compact_response` 的文字路径（可分段），图块统一投影为 `[附件引用 …]`，要点文字作为指令末尾的

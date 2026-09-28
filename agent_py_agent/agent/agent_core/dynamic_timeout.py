@@ -17,6 +17,10 @@ from ..model_speed import SpeedProfile, load_speed_profile
 if TYPE_CHECKING:
     from ..settings import AgentConfig
 
+# 参数减量第 3 批 D 组（2026-09-27）：动态超时的安全边际不再是配置项 dynamic_timeout_safety_margin，这里是唯一定义；
+# 请求总超时（本模块）与首包预算（agent_core/model/call_runtime.first_token_timeout_options）都乘这个倍数。
+DYNAMIC_TIMEOUT_SAFETY_MARGIN = 2.0
+
 
 @dataclass(frozen=True)
 class DynamicTimeoutParams:
@@ -27,6 +31,9 @@ class DynamicTimeoutParams:
     max_timeout: float | None = None
 
 
+# LLM: 超时 = 基础时延（速度画像插值或经验公式）× 安全边际，再夹在 dynamic_timeout_min/max 之间；安全边际默认取本模块常量，
+#   显式 safety_margin / params.safety_margin 仍优先。只读配置与画像文件，不写盘。
+# 函数用途: 按输入/输出 token 估算一次模型请求该给多长超时。
 def calculate_dynamic_timeout(
     config: AgentConfig,
     estimated_input_tokens: int = 0,
@@ -45,8 +52,7 @@ def calculate_dynamic_timeout(
         min_timeout=min_timeout,
         max_timeout=max_timeout,
     )
-    effective_safety_margin = safety_margin if safety_margin is not None else config.dynamic_timeout_safety_margin
-    effective_safety_margin = values.safety_margin if values.safety_margin is not None else config.dynamic_timeout_safety_margin
+    effective_safety_margin = values.safety_margin if values.safety_margin is not None else DYNAMIC_TIMEOUT_SAFETY_MARGIN
     effective_min_timeout = values.min_timeout if values.min_timeout is not None else float(config.dynamic_timeout_min)
     effective_max_timeout = values.max_timeout if values.max_timeout is not None else float(config.dynamic_timeout_max)
 

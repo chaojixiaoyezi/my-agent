@@ -168,12 +168,12 @@ def test_set_and_show_tell_the_reasoning_effect_on_the_default_model(monkeypatch
 
 def test_default_view_lists_only_the_common_parameters(monkeypatch, user_config):
     """用户说“把用户当傻瓜”：/settings 默认只列常用参数，说清总数，全部参数在 /settings all。"""
-    user_config.write_text('request_timeout: 300\nmax_protocol_repairs: 3\n', encoding="utf-8")
+    user_config.write_text('request_timeout: 300\ndynamic_timeout_min: 40\n', encoding="utf-8")
     shown = _run(monkeypatch, user_config, "/settings")
     listed = [line[2:].split(" = ", 1)[0] for line in shown.message.splitlines() if line.startswith("- ")]
     assert shown.ok and listed == list(COMMON_KEYS)
     assert "- request_timeout = 300（改过，默认 240）：HTTP 基础超时秒数" in shown.message
-    assert "max_protocol_repairs" not in shown.message and "另外你还改过 1 个其它参数" in shown.message
+    assert "dynamic_timeout_min" not in shown.message and "另外你还改过 1 个其它参数" in shown.message
     assert f"一共 {len(listed_parameters())} 项参数" in shown.message and "/settings all" in shown.message
     assert "- memory_compact_auto_trigger_percent = 90：" in shown.message
     # 布尔值按配置文件写法显示，不能因为 False 是假值就显示成“（空）”。
@@ -189,12 +189,12 @@ def test_default_view_marks_a_change_that_waits_for_restart(monkeypatch, user_co
 
 
 def test_all_view_lists_every_parameter_with_changes_and_boundaries(monkeypatch, user_config):
-    assert _run(monkeypatch, user_config, "/settings set max_protocol_repairs 3").ok
+    assert _run(monkeypatch, user_config, "/settings set dynamic_timeout_min 40").ok
     shown = _run(monkeypatch, user_config, "/settings all")
     lines = shown.message.splitlines()
     assert shown.ok and len([line for line in lines if line.startswith("- ")]) >= len(listed_parameters())
     assert str(user_config) in shown.message and "最近修改：" in shown.message and "与默认值不同的参数：2 个" in shown.message
-    assert "- request_timeout = 300［改过］" in lines and "- max_protocol_repairs = 2［改过］" in lines
+    assert "- request_timeout = 300［改过］" in lines and "- dynamic_timeout_min = 30［改过］" in lines
     assert any(line.startswith("- api_base = ") and line.endswith("［安全边界］") for line in lines)
     headers = [line for line in lines if line.startswith("【")]
     assert any(line.startswith("【模型请求】") for line in headers) and headers[-1].startswith("【其它】")

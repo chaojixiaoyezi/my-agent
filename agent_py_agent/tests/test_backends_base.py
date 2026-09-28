@@ -673,7 +673,6 @@ class TestGetBackend:
         config.temperature = "0.7"
         config.top_p = None
         config.stream_enabled = True
-        config.anthropic_version = "2023-06-01"
 
         backend = get_backend("openai_compatible", config)
         assert isinstance(backend, OpenAICompatibleBackend)
@@ -690,7 +689,6 @@ class TestGetBackend:
         config.temperature = "0.7"
         config.top_p = None
         config.stream_enabled = True
-        config.anthropic_version = "2023-06-01"
         config.anthropic_prompt_cache_enabled = False
 
         backend = get_backend("anthropic_compatible", config)

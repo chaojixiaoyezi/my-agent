@@ -154,7 +154,7 @@ def test_tool_search_and_view_mark_the_common_parameters(tmp_path, monkeypatch):
     tool = UserConfigTool(_main_agent(_user(tmp_path)))
     found = json.loads(tool.execute({"action": "search", "query": "max_tokens"}).output)["parameters"]
     assert found[0]["key"] == "max_tokens" and found[0]["common"] is True
-    advanced = json.loads(tool.execute({"action": "search", "query": "max_protocol_repairs"}).output)["parameters"]
-    assert advanced[0]["key"] == "max_protocol_repairs" and advanced[0]["common"] is False
+    advanced = json.loads(tool.execute({"action": "search", "query": "dynamic_timeout_min"}).output)["parameters"]
+    assert advanced[0]["key"] == "dynamic_timeout_min" and advanced[0]["common"] is False
     view = json.loads(tool.execute({"action": "view", "key": "request_timeout"}).output)
     assert view["parameter"]["common"] is True

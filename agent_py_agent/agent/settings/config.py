@@ -186,9 +186,6 @@ class _ToolConfigFields:
     # 一次最多同时执行几个工具（原 max_tool_calls_per_round 已并入）：空 = 8，正数 = 上限，0 = 不限制；
     # 任务属性 max_parallel_tool_calls 可单任务覆盖，后台工作片另有 max_tool_calls_per_round 任务属性封顶。
     max_parallel_tool_calls: int | None = None
-    # 模型输出格式偶发抖动（把工具调用写进正文/代码块/XML 标签）时，
-    # 协议违规先给几次结构化修复机会再 break；1=只修一次就断（旧行为）。
-    max_protocol_repairs: int = 2
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
@@ -208,7 +205,6 @@ class _ToolConfigFields:
     # 上下文余量不足时立刻外置本条工具输出并要求下一次请求前压缩；关掉则只按 tool_output_externalize_min_chars 外置。
     tool_output_externalize_on_low_headroom: bool = True
     tool_context_microcompact_keep_recent: int = 8
-    tool_context_microcompact_min_chars: int = 1500
     tool_context_ptl_retry_max: int = 3
     tool_read_max_chars: int = 16_000
     tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
@@ -335,10 +331,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     compact_media_policy: str = "auto"
     # 当前模型声明的输入模态（如 text、image、video），来自模型档案的 input_modalities；空表示未知，压缩策略会用一次结构化视觉探针判断，不按模型名猜。
     model_input_modalities: list[str] = field(default_factory=list)
-    # 每个已知图块折进上下文估算的 token 数：预检/自动压缩判定按图块数乘以该值计入；随图摘要时也是每块在摘要预算里的预留。
-    input_media_token_reserve: int = 1600
-    # 随图摘要一次压缩最多发几次"看图"小请求；含图回合按摘要预算打包，超过次数的图块本次按归档引用（checkpoint 记 vision_digest_partial）。最小 1。
-    compact_vision_digest_max_requests: int = 4
     # 压缩摘要末尾“原话备份”（用户原话优先、最新优先，放不下的那条保留头尾）最多占多少 token；实际上限还不超过模型窗口的 10%。0 表示不附原话，只保留被省略消息的编号与回查说明。
     compact_landmark_max_tokens: int = 20000
     # 压缩摘要末尾是否告诉模型：被压缩的原话仍在会话记录里，可用 session_search 按 message_id 分段读回（本 agent 注册了 session_search 时才附）。
@@ -419,20 +411,14 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     enable_gateway_restart_tool: bool = True
     # TUI 发现 Gateway 换了安装（runtime_prefix 不同）且自身空闲时在同一终端原地换成同版客户端（同会话、不退出全屏）；关闭后只在 footer 提示。
     tui_follow_gateway_upgrade: bool = True
-    dynamic_timeout_safety_margin: float = 2.0
     # 主会话后台命令完成后进入既有持久唤醒队列；关闭后仍可主动查询或长等待。
     background_process_notifications: bool = True
     # 只在调用账本记录无正文请求摘要，不改变请求前缀；服务端缓存状态仍为未知。
     cache_diagnostics_enabled: bool = True
     dynamic_timeout_min: int = 30
     dynamic_timeout_max: int = 10800
-    # 未取得稳定 probe 样本时的保守吞吐估计；只用于本次请求的首包/非流式预算。
-    estimated_prefill_tokens_per_second: float = 200.0
+    # 未取得稳定 probe 样本时输出吞吐的保守估计；只决定非流式请求总预算（预填充吞吐与 probe 统计参数已是代码常量）。
     estimated_output_tokens_per_second: float = 20.0
-    # 门槛4: probe 统计参数——每点最小样本数/滑窗上限/异常值去极值开关
-    probe_min_samples: int = 2
-    probe_window_samples: int = 5
-    probe_outlier_trim: bool = True
     model_speed_profile_path: str = ""
     user_id: str = "admin"
     # 多租户鉴权配置
@@ -550,7 +536,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     reasoning_control_auto_probe: bool = True
     # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。
     model_structured_output: str = "auto"
-    anthropic_version: str = "2023-06-01"
     # Anthropic-compatible 原生多轮工具请求是否写 cache_control 断点。仅影响 native
     # 工具循环；普通单次聊天不额外创建主动缓存，兼容端点不支持时可显式关闭。
     anthropic_prompt_cache_enabled: bool = True

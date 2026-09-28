@@ -80,13 +80,6 @@ export default function SettingsModel() {
       >
         <div className="grid grid-cols-2 gap-4">
           <StringField
-            label="anthropic_version（API 版本）"
-            description="Anthropic API 版本号"
-            value={model.anthropic_version}
-            onChange={(v) => { setModel({ anthropic_version: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <StringField
             label="api_key_env（密钥环境变量名）"
             description="读取 API Key 的环境变量名称"
             value={model.api_key_env}

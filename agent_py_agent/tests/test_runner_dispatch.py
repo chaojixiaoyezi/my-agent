@@ -409,7 +409,6 @@ class TestRunnerTaskTimeout:
         config = MagicMock()
         config.runner_timeout_seconds = runner_timeout_seconds
         config.runner_timeout_by_role = {}
-        config.dynamic_timeout_safety_margin = 2.0
         config.dynamic_timeout_min = 30
         config.dynamic_timeout_max = 600
         config.model_speed_profile_path = ""

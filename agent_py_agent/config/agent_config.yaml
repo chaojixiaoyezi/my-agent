@@ -239,15 +239,6 @@ memory_compact_semantic_summary_max_input_chars: 12000
 # 视觉能力事实只来自两处：模型档案的输入模态声明（/model 表单"输入模态"，运行时为 model_input_modalities），
 # 或未声明时宿主发起的一次结构化探针（8×8 纯色图 + 结构化工具回答，进程内缓存）；模型口头说"能看图"无效。
 compact_media_policy: "auto"
-# 每个已知图块（owner 附件目录里的 image/video 引用）按多少 token 计入上下文估算。两处使用：
-# 1) 每次模型请求前的上下文预检与自动压缩判定，把图块数乘以该值折进估算，避免多图上下文被低估而不触发压缩；
-# 2) 随图摘要时每个图块在摘要预算里的预留（仅 auto 且视觉能力事实为支持时使用），
-#    文字估算加图块数乘以该值超过摘要预算时，本次改走归档引用并在 checkpoint 记原因。
-input_media_token_reserve: 1600
-# 随图摘要一次压缩最多发几次"看图"小请求：含图回合按摘要预算打包（每次请求：该回合文字 + 图块数 × 上面的预留 ≤ 预算），
-# 一次装不完就分多次；超过次数的图块本次按归档引用，checkpoint 记 media_policy_reason=vision_digest_partial。
-# 最小 1；只在 compact_media_policy=auto 且视觉能力事实为支持时使用。自动阈值压缩与手动 /compact 走同一条路。
-compact_vision_digest_max_requests: 4
 # 压缩摘要末尾的“原话备份”（Exact Conversation Landmarks）最多占多少 token：
 # - 用户原话优先、最新优先，放不下的那条保留开头和结尾、截掉中间并写明原长度，每条都带消息编号；
 # - 实际上限取本值与模型窗口 10% 中较小者（最少 500），窗口越大能留的原话越多；
@@ -440,7 +431,6 @@ runner_timeout_seconds: "off"
 # 留空表示不给任何角色单独设限，所有运行统一听 runner_timeout_seconds；某一角色可以填秒数、填 `off` 表示这一角色不限制时长、填 `auto` 表示交回系统自动判断。
 runner_timeout_by_role: []
 
-dynamic_timeout_safety_margin: 2.0
 # 主会话后台命令结束后主动通知，复用持久唤醒队列；关闭不影响 process_session 查询/长等待。
 background_process_notifications: true
 # 保存无正文请求摘要，用于区分系统/工具/模型/历史前缀变化；不额外调用模型或截短上下文。
@@ -449,20 +439,10 @@ dynamic_timeout_min: 30
 # 自动估算请求超时时允许的最大值（秒）。
 # 只有合法任务确实需要跑更久、却被超时打断时才需要调大。
 dynamic_timeout_max: 10800
-# 没有足够实测 probe 样本时使用的保守吞吐估计：
-# - prefill 只决定当前请求等待首个有效流事件的预算；
-# - output 只决定非流式请求总预算；流式输出只受滚动 idle 和显式 /stop 约束。
-# 200/20 与 10800 秒上限可覆盖约 1M 输入、数百 token/s 预填充的极慢场景；
-# 小请求仍按真实 token 估算，不会一律等待 3 小时。
-estimated_prefill_tokens_per_second: 200.0
+# 没有足够实测 probe 样本时输出吞吐的保守估计（token/s）：只决定非流式请求总预算；流式输出只受滚动 idle 和显式 /stop 约束。
+# 预填充吞吐（200 token/s）、安全边际（2.0）与 probe 统计参数已是代码常量（agent_core/dynamic_timeout、model/call_monitor）。
+# 20 与 10800 秒上限可覆盖极慢场景；小请求仍按真实 token 估算，不会一律等待 3 小时。
 estimated_output_tokens_per_second: 20.0
-# 门槛4: probe 统计参数(动态超时探针估计)。
-# - probe_min_samples: 每个 probe token 点最少样本数, 不足则回退 fixed-rate 估计。
-# - probe_window_samples: 滑窗上限, 每点最多取最近 N 条样本(防陈旧样本主导)。
-# - probe_outlier_trim: 异常值去极值开关, 开启且窗口>=3 时去掉最小最大取均值。
-probe_min_samples: 2
-probe_window_samples: 5
-probe_outlier_trim: true
 # 「模型速度画像」文件的路径。
 # my-agent 用其中的实测速度数据来估算每次请求该给多长超时。
 # 一般不需要改，只有你手上有自定义的速度画像文件、或想让它固定指向某一份数据时才设；留空则用缓存目录下的默认位置并回退到内置的经验估算。
@@ -833,9 +813,6 @@ embedding_api_key: ""
 # 存放嵌入服务 key 的环境变量名，比把 key 直接写进这个文件更安全；留空就沿用聊天的 key。
 embedding_api_key_env: ""
 
-# Anthropic API 版本
-anthropic_version: "2023-06-01"
-
 # Anthropic-compatible 原生多轮工具请求主动缓存：
 # - true：在稳定工具清单、首条任务提示和最新历史块写 cache_control 断点，长任务可增量复用旧前缀。
 # - false：不写主动缓存字段，供不支持该标准字段的兼容端点使用。
@@ -870,9 +847,6 @@ max_tool_rounds:
 # - 只有能安全并行的调用（比如只读、互不冲突的写）才会同时跑，这里只是上限。
 # - 一般不用改；工具慢又互不干扰时可以调大，机器吃紧时调小。
 max_parallel_tool_calls:
-# 协议违规的修复机会次数（默认 2 = 3 次尝试后才 break）。模型输出格式偶发抖动
-# （工具调用混进正文/代码块）时，多给两次机会能显著提高长任务成活率。
-max_protocol_repairs: 2
 # 每个代理最近 10 分钟最多调用几次工具，默认留空 = 不限制：
 # - 写数字 = 超过就暂时拒绝新的工具调用，等时间窗口滚过去自动恢复；主代理、每个子代理各算各的。
 # - 留空或 0 = 不限制。只有想防止某个代理空转、狂调工具烧钱时才设，比如 200。
@@ -922,9 +896,8 @@ tool_output_externalize_on_low_headroom: true
 #   只保留最近 N 个完整结果；解决"单条结果不大、但几十轮累积撑满 context"的问题。
 # - 只回收带可取回锚点且正文足够大的条目；系统提示、近窗口结果、无锚点条目原样保留。
 # - tool_context_microcompact_keep_recent: 保留最近多少个完整工具结果；0 表示关闭回收。
-# - tool_context_microcompact_min_chars: 正文达到多少字符才回收，低于该值的条目原样保留。
+# - 正文达到 1500 字符（代码常量 DEFAULT_MICROCOMPACT_MIN_CHARS）才回收，低于该值的条目原样保留。
 tool_context_microcompact_keep_recent: 8
-tool_context_microcompact_min_chars: 1500
 
 # 单轮 PTL（prompt-too-long）重试：
 # - 模型接口实报"上下文超限"时，先回收最老 20% 工具结果正文直接重试本轮，

@@ -84,7 +84,6 @@ class TestCalculateDynamicTimeout:
         from agent_py_agent.agent.settings import AgentConfig
 
         return AgentConfig(
-            dynamic_timeout_safety_margin=2.0,
             dynamic_timeout_min=30,
             dynamic_timeout_max=600,
             model_speed_profile_path="/tmp/test_profile.json",

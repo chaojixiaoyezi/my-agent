@@ -70,7 +70,8 @@ class AnthropicCompatibleBackend(HttpBackend):
     def _tool_endpoint(self) -> str:
         return "".join(endpoint_parts(self.api_base, "/v1/messages"))
 
-    # LLM: Messages 复用公共冻结连接选项，仅附加明确协议版本；需核对工厂及 OAuth 构造调用。
+    # LLM: Messages 复用公共冻结连接选项；anthropic-version 头的默认值就在本构造参数上（参数减量第 3 批 D 组起不再是配置项
+    #   anthropic_version，工厂与 OAuth 构造不再传入），只有测试会显式改。
     # 函数用途: 初始化后端与版本头配置，不发网络请求。
     def __init__(
         self,

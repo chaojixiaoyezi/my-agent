@@ -123,16 +123,6 @@ export default function SettingsDispatch() {
             disabled={!isAdmin}
           />
           <NumberField
-            label="dynamic_timeout_safety_margin（动态安全边际）"
-            description="动态超时 = 预估耗时 × 这个倍率"
-            value={runner.dynamic_timeout_safety_margin}
-            onChange={(v) => { setRunner({ dynamic_timeout_safety_margin: v }); markDirty(); }}
-            min={1}
-            max={10}
-            unit="倍"
-            disabled={!isAdmin}
-          />
-          <NumberField
             label="dynamic_timeout_max（动态上限）"
             description="动态算出来再长，也最多给这么多秒"
             value={runner.dynamic_timeout_max}

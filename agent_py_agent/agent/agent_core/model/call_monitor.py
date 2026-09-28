@@ -7,7 +7,8 @@ from dataclasses import dataclass, replace
 from ...contracts.model_call_ledger import ModelCallLedger, ModelCallRecord
 
 
-# LLM: 首事件估计和显式排队预算均为请求级参数；排队预算不能变成健康流的总时限。
+# LLM: 首事件估计和显式排队预算均为请求级参数；排队预算不能变成健康流的总时限。参数减量第 3 批 D 组（2026-09-27）起
+#   estimated_prefill_tokens_per_second 与 probe_* 的字段默认值就是生产值（原配置项已删除），call_runtime 不再传入。
 # 类用途: 保存首 token 预算所需的吞吐、上下限与 probe 采样策略。
 @dataclass(frozen=True)
 class FirstTokenTimeoutOptions:

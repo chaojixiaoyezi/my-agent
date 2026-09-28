@@ -68,8 +68,6 @@ _PROD_TIMEOUT = dict(
     request_timeout=240,
     dynamic_timeout_min=30.0,
     dynamic_timeout_max=10800.0,
-    dynamic_timeout_safety_margin=2.0,
-    estimated_prefill_tokens_per_second=200.0,
     estimated_output_tokens_per_second=20.0,
     max_tokens=8192,
 )

@@ -24,6 +24,7 @@ from ...conversation.context_usage import record_model_context_usage
 from ...conversation.model_metrics import publish_model_metrics
 from ...memory_archive import estimate_tokens
 from ...settings.defaults import context_window_or_default, output_cap_for_window
+from ..dynamic_timeout import DYNAMIC_TIMEOUT_SAFETY_MARGIN
 from ..tool_stream import ToolBoundaryChunkFilter
 from .call_monitor import (
     FirstTokenTimeoutOptions,
@@ -407,29 +408,23 @@ def model_request_timeout_seconds(agent: object) -> float:
     return timeout if timeout > 0 else 0.0
 
 
+# LLM: 只看仍是配置项的上下限两个字段（安全边际自参数减量第 3 批 D 组起是代码常量，不再作为判据）。
+# 函数用途: 判断当前代理配置是否带动态超时上下限，决定请求超时走动态估算还是固定值。
 def has_dynamic_timeout_config(agent: object) -> bool:
     config = getattr(agent, "config", None)
-    return any(hasattr(config, name) for name in ("dynamic_timeout_min", "dynamic_timeout_max", "dynamic_timeout_safety_margin"))
+    return any(hasattr(config, name) for name in ("dynamic_timeout_min", "dynamic_timeout_max"))
 
 
-# LLM: 超时参数来自当前工作片，包括该模型显式排队预算；不修改共享 backend 的流式 idle。
-# 函数用途: 从当前代理配置读取慢模型首事件预算参数，供主代理和各级子代理共用。
+# LLM: 上下限与排队预算来自当前工作片配置；预填充吞吐（200 token/s）与 probe 统计参数就是 FirstTokenTimeoutOptions 的字段默认值，
+#   安全边际取 dynamic_timeout.DYNAMIC_TIMEOUT_SAFETY_MARGIN（参数减量第 3 批 D 组起都不再是配置项）；不修改共享 backend 的流式 idle。
+# 函数用途: 从当前代理配置读取慢模型首事件预算的上下限与排队预算，其余用代码常量，供主代理和各级子代理共用。
 def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
     config = getattr(agent, "config", None)
     return FirstTokenTimeoutOptions(
-        estimated_prefill_tokens_per_second=float_config(
-            config,
-            "estimated_prefill_tokens_per_second",
-            200.0,
-        ),
-        safety_margin=float_config(config, "dynamic_timeout_safety_margin", 1.5),
+        safety_margin=DYNAMIC_TIMEOUT_SAFETY_MARGIN,
         min_timeout_seconds=float_config(config, "dynamic_timeout_min", 5.0),
         max_timeout_seconds=float_config(config, "dynamic_timeout_max", 120.0),
         queue_wait_seconds=float_config(config, "model_queue_wait_seconds", 0.0),
-        # 门槛4: probe 统计参数(最小样本数/滑窗上限/去极值开关), 默认 2/5/True
-        probe_min_samples=int(float_config(config, "probe_min_samples", 2)),
-        probe_window_samples=int(float_config(config, "probe_window_samples", 5)),
-        probe_outlier_trim=bool_config(config, "probe_outlier_trim", True),
     )
 
 
@@ -505,14 +500,6 @@ def float_config(config: object, name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
 
-
-def bool_config(config: object, name: str, default: bool) -> bool:
-    raw = getattr(config, name, None)
-    if raw is None:
-        return default
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(raw)
 
 
 __all__ = [

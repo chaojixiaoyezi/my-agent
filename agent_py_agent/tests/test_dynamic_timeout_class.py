@@ -15,7 +15,6 @@ class TestCalculateDynamicTimeout:
         from agent_py_agent.agent.agent_core.dynamic_timeout import calculate_dynamic_timeout
 
         class MockConfig:
-            dynamic_timeout_safety_margin = 1.2
             dynamic_timeout_min = 10.0
             dynamic_timeout_max = 300.0
             model_speed_profile_path = ""
@@ -24,8 +23,8 @@ class TestCalculateDynamicTimeout:
 
         result = calculate_dynamic_timeout(config, 1000, 500)
 
-        # 应该使用经验公式：total_tokens/1000 * 10 * safety_margin
-        # total_tokens = 1500, base = 15, with margin = 18
+        # 应该使用经验公式：total_tokens/1000 * 10 * 安全边际常量 2.0
+        # total_tokens = 1500, base = 15, with margin = 30
         assert result >= 10.0
         assert result <= 300.0
 
@@ -34,7 +33,6 @@ class TestCalculateDynamicTimeout:
         from agent_py_agent.agent.agent_core.dynamic_timeout import calculate_dynamic_timeout
 
         class MockConfig:
-            dynamic_timeout_safety_margin = 1.0
             dynamic_timeout_min = 30.0
             dynamic_timeout_max = 300.0
             model_speed_profile_path = ""
@@ -51,7 +49,6 @@ class TestCalculateDynamicTimeout:
         from agent_py_agent.agent.agent_core.dynamic_timeout import calculate_dynamic_timeout
 
         class MockConfig:
-            dynamic_timeout_safety_margin = 1.0
             dynamic_timeout_min = 10.0
             dynamic_timeout_max = 100.0
             model_speed_profile_path = ""
@@ -68,7 +65,6 @@ class TestCalculateDynamicTimeout:
         from agent_py_agent.agent.agent_core.dynamic_timeout import calculate_dynamic_timeout
 
         class MockConfig:
-            dynamic_timeout_safety_margin = 1.2
             dynamic_timeout_min = 10.0
             dynamic_timeout_max = 300.0
             model_speed_profile_path = ""
@@ -78,7 +74,7 @@ class TestCalculateDynamicTimeout:
         result = calculate_dynamic_timeout(config, 0, 0)
 
         # 零 token 时使用默认值 2000
-        # base = 2000/1000 * 10 = 20, * 1.2 = 24
+        # base = 2000/1000 * 10 = 20, * 2.0 = 40
         assert result >= 10.0
 
     def test_custom_safety_margin(self, tmp_path: Path):
@@ -86,7 +82,6 @@ class TestCalculateDynamicTimeout:
         from agent_py_agent.agent.agent_core.dynamic_timeout import calculate_dynamic_timeout
 
         class MockConfig:
-            dynamic_timeout_safety_margin = 2.0
             dynamic_timeout_min = 10.0
             dynamic_timeout_max = 300.0
             model_speed_profile_path = ""

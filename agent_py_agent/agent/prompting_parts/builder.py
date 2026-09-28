@@ -660,12 +660,12 @@ def _task_and_transcript_section(config: AgentConfig, user_prompt: str, tool_con
     )
 
     # 渲染 prompt 时回收窗口外的旧工具结果正文（保留 read_artifact 锚点），省 context；
-    # 不改累积的 tool_context 历史本身。keep_recent 配置为 0 表示关闭回收。
+    # 不改累积的 tool_context 历史本身。keep_recent 配置为 0 表示关闭回收；回收门槛字符数是代码常量（参数减量第 3 批 D 组）。
     tools_history = "\n\n".join(
         microcompact_tool_context(
             tool_context,
             keep_recent=int(getattr(config, "tool_context_microcompact_keep_recent", DEFAULT_MICROCOMPACT_KEEP_RECENT) or 0),
-            min_chars=int(getattr(config, "tool_context_microcompact_min_chars", DEFAULT_MICROCOMPACT_MIN_CHARS) or 0),
+            min_chars=DEFAULT_MICROCOMPACT_MIN_CHARS,
         )
     )
     if not tools_history:

@@ -177,7 +177,7 @@ class PreparedCompactRecovery:
                 raise ConversationCompactError("完整恢复投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
             # 原请求视图的材料来自已解绑历史的冻结输入，计量改用解绑前的完整大小；候选照常按自身投影计量。
             tokens = projected_model_context_components(
-                material.projection, media_token_reserve=media_token_reserve(self.agent),
+                material.projection, media_token_reserve=media_token_reserve(),
             )[0] if view.is_candidate else before_tokens
             return ConversationCompactProjection(tokens, material)
 
@@ -232,7 +232,7 @@ class PreparedCompactRecovery:
         return self.committed_request
 
     # LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
-    #   已知图块按配置 input_media_token_reserve 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
+    #   已知图块按常量 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
     # 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型。
     def _automatic_noop(self, frozen: ToolLoopRequestInput, tool_source) -> bool:
         from ..conversation.compact import _compact_request_input_ceiling
@@ -242,7 +242,7 @@ class PreparedCompactRecovery:
             raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
         if not compact_request_source_supported(frozen, media_policy=configured_media_policy(self.agent)):
             return True
-        tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve(self.agent))
+        tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve())
         if tokens < _compact_request_input_ceiling(self.agent, self.source.policy):
             return True
         return not self.source.messages and tool_source is None
@@ -275,7 +275,7 @@ class PreparedCompactRecovery:
             if material.projection.status != "ready" or material.params.compact_context != expected:
                 raise ConversationCompactError("活动恢复候选未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
             tokens, _ = projected_model_context_components(
-                material.projection, media_token_reserve=media_token_reserve(self.agent),
+                material.projection, media_token_reserve=media_token_reserve(),
             )
             return ConversationCompactProjection(tokens, material)
 
@@ -297,7 +297,7 @@ def _full_request_tokens(agent: object, frozen: ToolLoopRequestInput) -> int:
     projection = project_tool_loop_request(frozen)
     if projection.status != "ready":
         raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-    tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve(agent))
+    tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve())
     return tokens
 
 

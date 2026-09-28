@@ -1027,7 +1027,8 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   `self_dev_worktree`（边界项）——管理员 Full Access 时提示词写明正在运行的代码位置与开发工作树，改完提交到该分支由集成者合并部署。
   参数减量第 3 批（internal 字段降级为读取点旁常量）：A 组 24 项命令/展示默认值（分支 `claude/38-internal-constants`）、
   E 组 14 项后台上下文预算/终态工具折叠/工具目录与详情上限/合同状态扫描预算（分支 `claude/9a-batch3-e`）已完成，
-  加载器元数据（config_* 四项与 memory_config_warnings）已从 /settings 列表、计数与搜索隐藏；B 组 19 项 gateway/后台节奏与 daemon/dispatch 默认值（分支 `claude/38-internal-constants-bd`）已完成，C、D 组进行中，见参数中心 §6。
+  加载器元数据（config_* 四项与 memory_config_warnings）已从 /settings 列表、计数与搜索隐藏；B 组 19 项 gateway/后台节奏与 daemon/dispatch 默认值、D 组 10 项动态超时探针/anthropic_version/媒体预留/微压缩/协议修复次数
+  （分支 `claude/38-internal-constants-bd`）已完成，C 组进行中，见参数中心 §6。
   参数减量第 1 批已在分支 `claude/38-delete-dead-config` 完成（2026-09-27，待集成者审核合并）：按逐项分类删除 43 个没有产品读取方的配置项，
   参数减量第 1 批已在分支 `claude/38-delete-dead-config` 完成（2026-09-27，已合入 main `8f73a512c`，双机 step13s）：按逐项分类删除 43 个没有产品读取方的配置项，
   连同只被测试引用的 `agent_core/watchdog.py`、`concurrency/task_lock.py`、`external_knowledge/` 模块；`tool_protocol` 改为代码常量 native，

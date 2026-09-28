@@ -290,6 +290,16 @@
     `dispatch_default_max_runners` / `dispatch_default_limit` / `dispatch_default_watch_interval` → `DispatchRuntimePolicy` 的字段默认值
     （`from_config` 与两个 `_non_negative_*_attr` 删除，loop/watch/CLI 三个调用方直接 `DispatchRuntimePolicy()`；snapshot 仍是 v2，
     `source` 固定 `code-defaults`）。场景测试、Live Lab、`tests/run_tests.py` 模板不再写 daemon 三行（它们不启动 daemon）。
+  - 已完成 D 组（10 项，同一分支）：`dynamic_timeout_safety_margin` → `agent_core/dynamic_timeout.DYNAMIC_TIMEOUT_SAFETY_MARGIN`（2.0，
+    请求总超时与首包预算共用；原首包预算在缺字段时的 1.5 兜底随之消失）；`estimated_prefill_tokens_per_second`、`probe_min_samples`、
+    `probe_window_samples`、`probe_outlier_trim` → `model/call_monitor.FirstTokenTimeoutOptions` 的字段默认值（200/2/5/True），
+    `call_runtime.first_token_timeout_options` 不再传入（`bool_config` 随之删除）；`anthropic_version` → `backends/anthropic.AnthropicCompatibleBackend`
+    构造参数默认值（2023-06-01），工厂与 OAuth 构造不再传入，`model_scope` 缓存键去掉该字段；`input_media_token_reserve`、
+    `compact_vision_digest_max_requests` → `conversation/compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE`（1600）/
+    `COMPACT_VISION_DIGEST_MAX_REQUESTS`（4），`media_token_reserve()` / `vision_digest_max_requests()` 不再收 agent；
+    `tool_context_microcompact_min_chars` → 已有的 `tool_context/microcompact.DEFAULT_MICROCOMPACT_MIN_CHARS`（1500）；`max_protocol_repairs`
+    → `agent_core/_runtime_params.MAX_PROTOCOL_REPAIRS`（2，`ToolLoopExecuteParams` 字段默认值同源）。`/settings` 与 `user_config`
+    测试里原来拿 `max_protocol_repairs` 当“非常用参数”样例，改用 `dynamic_timeout_min`。
   - 用户可能真会调、保留为 advanced 不降级（集成者已同意）：`memory_curator_daily_finalize_hour`、`home_lesson_stale_caveat_days`、
     `memory_lesson_min_occurrences`、`memory_hot_min_occurrences`、`chat_history_max_turns`、`estimated_output_tokens_per_second`、
     `dynamic_timeout_min`、`local_store_fts_enabled`。
@@ -311,8 +321,7 @@
       参数搜索里隐藏（`parameter_registry.LOADER_METADATA_KEYS` + `listed_parameters()`，user_config 的可改数量同口径）；字段与
       登记表项不删，`/settings show` 仍可查看、仍是安全边界。
     - 回归见 `test_param_reduction_e_group.py` 与 `test_settings_chat_control.py`；原来通过配置对象改这些值的测试改为 patch 常量。
-  - 未完成：C 组（memory 归档预览/语义摘要/恢复/策展批次）、
-    D 组（动态超时探针、anthropic_version、媒体预留、微压缩、协议修复次数、决策选模字数）。
+  - 未完成：C 组（memory 归档预览/语义摘要/恢复/策展批次）、决策选模字数（D 组范围内的决策点位字段，按集成者要求不碰）。
   - E 组范围外、分类为 internal 但未归入任何一组的：`tool_write_inline_max_chars`（写文件指引的软建议）、`conversation_pending_wake_limit`、
     `memory_artifact_default_read_chars`，留给集成者分派（`conversation_unhandled_observation_limit` 已随 B 组前半降级）。
 

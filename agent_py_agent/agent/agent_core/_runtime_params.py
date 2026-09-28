@@ -10,6 +10,10 @@ from ..action_protocol import RunScope
 from ..common.cancellation import CancellationToken
 from ..concurrency.interrupt import is_interrupted
 
+# 参数减量第 3 批 D 组（2026-09-27）：协议违规修复机会次数不再是配置项 max_protocol_repairs，这里是唯一定义；
+# ToolLoopExecuteParams.max_protocol_repairs 的字段默认值与 runtime/loop_support 装配参数都用它，response_decision 只读 params。
+MAX_PROTOCOL_REPAIRS = 2
+
 
 @dataclass(frozen=True)
 class FinalizeContext:
@@ -126,8 +130,8 @@ class ToolLoopExecuteParams:
     # 会话运行时 turn snapshot: volatile wall-clock fields must not rewrite the
     # first provider message on every tool round and invalidate prompt caching.
     workspace_context_snapshot: str = ""
-    # 协议违规修复机会次数：模型输出格式偶发抖动时先给几次结构化重试再 break。
-    max_protocol_repairs: int = 2
+    # 协议违规修复机会次数：模型输出格式偶发抖动时先给几次结构化重试再 break（代码常量，见模块顶部）。
+    max_protocol_repairs: int = MAX_PROTOCOL_REPAIRS
     # 部署者显式开启 hard_failure_halt 后，同一工具同类失败连续达硬阈值的
     # 收口标记(tool_name, failure_class, count)。默认可恢复失败只返给模型
     # 换策略，不写本字段；同一批后续成功还会撤销早到的旧标记。

@@ -56,7 +56,6 @@ def _write_real_model_config(tmp_path: Path) -> Path | None:
         f"request_timeout: {request_timeout}\n"
         "max_tokens: 1024\n"
         "temperature: 0.2\n"
-        'anthropic_version: "2023-06-01"\n'
         'subagent_workspace: ".my_agent/subagents"\n'
         'gateway_workspace: ".my_agent/gateway"\n'
         'memory_path: ".my_agent/memory.jsonl"\n'

@@ -40,6 +40,9 @@ if str(PKG_ROOT) not in sys.path:
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams  # noqa: E402
 from agent_py_agent.agent.agent_core._tool_loop_service import _record_tool_call  # noqa: E402
+from agent_py_agent.agent.agent_core.dynamic_timeout import (
+    DYNAMIC_TIMEOUT_SAFETY_MARGIN,  # noqa: E402
+)
 from agent_py_agent.agent.agent_core.model.call_monitor import (  # noqa: E402
     FirstTokenTimeoutOptions,
     FirstTokenTimeoutParams,
@@ -77,12 +80,11 @@ from agent_py_agent.tests._tool_runtime_harness import (  # noqa: E402
 )
 
 # 生产配置值(config.py): request_timeout=240, dynamic_timeout_min=30,
-# dynamic_timeout_max=10800, dynamic_timeout_safety_margin=2.0, max_output_tokens=8192
+# dynamic_timeout_max=10800, max_output_tokens=8192；安全边际是代码常量 DYNAMIC_TIMEOUT_SAFETY_MARGIN
 _PROD_TIMEOUT_CONFIG = dict(
     request_timeout=240,
     dynamic_timeout_min=30.0,
     dynamic_timeout_max=10800.0,
-    dynamic_timeout_safety_margin=2.0,
     max_tokens=8192,
 )
 
@@ -162,7 +164,7 @@ def _timeout_estimates(agent, params, prompt: str) -> dict[str, object]:
     outbound = ledger_estimate + estimate_tokens(messages or [])  # 出站近似: prompt + IR messages
 
     options = FirstTokenTimeoutOptions(
-        safety_margin=_PROD_TIMEOUT_CONFIG["dynamic_timeout_safety_margin"],
+        safety_margin=DYNAMIC_TIMEOUT_SAFETY_MARGIN,
         min_timeout_seconds=_PROD_TIMEOUT_CONFIG["dynamic_timeout_min"],
         max_timeout_seconds=_PROD_TIMEOUT_CONFIG["dynamic_timeout_max"],
     )

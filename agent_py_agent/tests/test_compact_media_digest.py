@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.conversation import compact_media_policy as media_policy_module
 from agent_py_agent.agent.conversation import compact_request_budget as budget_module
 from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
@@ -154,7 +155,7 @@ def test_partial_digest_writes_both_counts_and_partial_reason_to_checkpoint(visi
     groups = media_turn_groups(rows)
     per_group = 40 * _messages(groups[0]) + 50
     monkeypatch.setattr(budget_module, "compact_summary_budget", lambda _agent: per_group + 30)
-    case.agent.config.compact_vision_digest_max_requests = 1
+    monkeypatch.setattr(media_policy_module, "COMPACT_VISION_DIGEST_MAX_REQUESTS", 1)
     result = _compact(case, rows)
     assert result.compacted
     digest_calls = [call for call in case.calls if call["vision_summary"]]

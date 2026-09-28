@@ -208,7 +208,6 @@ class TestParameterBoundaryCases:
         class MockConfig:
             runner_timeout_seconds = 0
             dynamic_timeout_enabled = False
-            dynamic_timeout_safety_margin = 1.2
             dynamic_timeout_min = 10.0
             dynamic_timeout_max = 300.0
             model_speed_profile_path = ""

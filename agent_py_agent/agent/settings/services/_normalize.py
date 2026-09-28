@@ -525,16 +525,7 @@ class SubagentAdvancedFieldsService:
                 ("dynamic_timeout_max", 60, None),
             ),
         )
-        value, warn = CoercionService.coerce_float(
-            "dynamic_timeout_safety_margin", out.get("dynamic_timeout_safety_margin"),
-            defaults.dynamic_timeout_safety_margin, min_val=1.0, max_val=10.0,
-        )
-        out["dynamic_timeout_safety_margin"] = value
-        _append_warning(warnings, warn)
-        for name in (
-            "estimated_prefill_tokens_per_second",
-            "estimated_output_tokens_per_second",
-        ):
+        for name in ("estimated_output_tokens_per_second",):
             value, warn = CoercionService.coerce_float(
                 name,
                 out.get(name),

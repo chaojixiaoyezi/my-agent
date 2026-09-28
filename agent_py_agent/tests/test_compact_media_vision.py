@@ -26,6 +26,7 @@ from agent_py_agent.agent.backends.vision_capability import (
 )
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation import compact as compact_module
+from agent_py_agent.agent.conversation import compact_media_policy as media_policy_module
 from agent_py_agent.agent.conversation import compact_request_budget as budget_module
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
@@ -250,10 +251,12 @@ def vision_case(tmp_path, monkeypatch):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create({"canonical_user_id": "owner", "now": 1.0})
     backend = _Backend()
+    # 图块预留是代码常量；这个夹具的窗口只有 1000 token，按 50 试算才能装下看图小请求
+    monkeypatch.setattr(media_policy_module, "INPUT_MEDIA_TOKEN_RESERVE", 50)
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_compact_dir=tmp_path / "compact"), backend=backend,
         config=SimpleNamespace(compact_media_policy="auto", model_input_modalities=["image"],
-                               input_media_max_bytes=10_000, input_media_token_reserve=50),
+                               input_media_max_bytes=10_000),
         conversation_store=store,
     )
     policy = RuntimeCompactPolicy(

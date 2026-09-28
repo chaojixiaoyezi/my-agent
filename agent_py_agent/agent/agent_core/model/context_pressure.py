@@ -535,7 +535,7 @@ def _model_visible_context_components(
         messages=messages, tools=tools or None, tool_choice=choice,
     )
     current, components = projected_model_context_components(
-        projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve(agent),
+        projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve(),
     )
     return (
         "native",
@@ -552,7 +552,7 @@ def _model_visible_context_components(
 
 
 # LLM: 只消费已准备投影与分类引导，未知拒绝计数；不读宿主/校准、不改状态或发请求，provider组包和输出预留仍由调用方核验。
-#   media_token_reserve 由调用方从配置 input_media_token_reserve 传入：运输层会展开的已知图块按每块该值折进
+#   media_token_reserve 由调用方传入（常量 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE）：运输层会展开的已知图块按每块该值折进
 #   messages_tokens 与总量（预检、_automatic_noop 与恢复候选计量同口径），0 表示不折。
 # 函数用途: 以原 estimate_tokens 估算 system、prompt、原生消息和schema占比，并把已知图块按固定预留计入；
 #   这不是供应商精确token或完整容量准入证明。

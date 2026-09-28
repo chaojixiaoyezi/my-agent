@@ -16,8 +16,6 @@
       "reason": "暂缺中文说明，等配置减量分类：多数将删除、合并或降级为代码常数，保留下来的再补说明",
       "keys": [
         "dynamic_timeout_min",
-        "dynamic_timeout_safety_margin",
-        "estimated_output_tokens_per_second",
         "home_lesson_stale_caveat_days",
         "local_store_fts_enabled",
         "memory_archive_preview_level_0_chars",
@@ -39,10 +37,7 @@
         "memory_query_content_preview_chars",
         "memory_resume_archive_scan_limit",
         "memory_resume_auto_context_limit",
-        "memory_resume_recommended_read_paths_limit",
-        "probe_outlier_trim",
-        "probe_window_samples",
-        "tool_context_microcompact_min_chars"
+        "memory_resume_recommended_read_paths_limit"
       ]
     }
   ]

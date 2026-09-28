@@ -40,7 +40,7 @@ from ...tooling.runtime_facts import render_tool_runtime_facts
 from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
-from .._runtime_params import ToolLoopExecuteParams
+from .._runtime_params import MAX_PROTOCOL_REPAIRS, ToolLoopExecuteParams
 from .._tool_loop_service import execute_tool_loop
 from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
@@ -1230,9 +1230,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         context_scope=params.context_scope,
         loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),
-        max_protocol_repairs=max(
-            1, int(getattr(getattr(agent, "config", None), "max_protocol_repairs", 2) or 2)
-        ),
+        max_protocol_repairs=MAX_PROTOCOL_REPAIRS,
     )
 
 

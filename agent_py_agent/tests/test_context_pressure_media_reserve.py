@@ -1,4 +1,4 @@
-"""已知图块按 input_media_token_reserve 折进上下文估算：预检与自动压缩判定不再低估多图上下文。"""
+"""已知图块按 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE 折进上下文估算：预检与自动压缩判定不再低估多图上下文。"""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -8,6 +8,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     projected_model_context_components,
 )
 from agent_py_agent.agent.agent_core.tool_request_projection import ToolLoopRequestProjection
+from agent_py_agent.agent.conversation import compact_media_policy
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
@@ -45,24 +46,25 @@ def test_media_outside_transport_expansion_set_and_zero_reserve_do_not_count():
     assert zero == plain
 
 
-def test_preflight_estimate_reads_configured_reserve_through_real_entry(monkeypatch):
+def test_preflight_estimate_reads_the_reserve_constant_through_real_entry(monkeypatch):
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True, enable_tools=True, model_name="native-test-model",
-            model_context_window_tokens=200_000, input_media_token_reserve=1600,
+            model_context_window_tokens=200_000,
         ),
         backend=SimpleNamespace(context_window_tokens=200_000, name="anthropic_compatible"),
     )
     monkeypatch.setattr("agent_py_agent.agent.agent_core.model.context_pressure.resolve_native_tools", lambda _a, _p: [])
     history = [{"role": "user", "content": [{"type": "text", "text": "图在这里"}, _image_block(1), _image_block(2), _image_block(3)]}]
 
-    def params(reserve: int) -> SimpleNamespace:
-        agent.config.input_media_token_reserve = reserve
+    def params() -> SimpleNamespace:
         return SimpleNamespace(
             context_scope="conversation", tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="native"),
             live_archive_state={}, tool_context=[], tool_ir_history=[], provider_history_messages=list(history),
         )
 
-    without = model_visible_context_tokens(agent, params(0), "继续")
-    with_reserve = model_visible_context_tokens(agent, params(1600), "继续")
+    monkeypatch.setattr(compact_media_policy, "INPUT_MEDIA_TOKEN_RESERVE", 0)
+    without = model_visible_context_tokens(agent, params(), "继续")
+    monkeypatch.setattr(compact_media_policy, "INPUT_MEDIA_TOKEN_RESERVE", 1600)
+    with_reserve = model_visible_context_tokens(agent, params(), "继续")
     assert with_reserve - without == 3 * 1600

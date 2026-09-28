@@ -693,7 +693,6 @@ def test_model_generate_records_model_call_ledger_for_streaming_response():
             request_timeout=10,
             dynamic_timeout_min=1,
             dynamic_timeout_max=20,
-            dynamic_timeout_safety_margin=1.2,
         ),
         _current_subagent_run_id="",
     )
@@ -750,7 +749,6 @@ def test_effective_model_timeout_uses_dynamic_config_only_when_present():
             request_timeout=1,
             dynamic_timeout_min=1,
             dynamic_timeout_max=60,
-            dynamic_timeout_safety_margin=2,
         ),
         backend=SimpleNamespace(),
     )
@@ -765,7 +763,6 @@ def test_effective_model_timeout_includes_output_generation_budget():
             request_timeout=1,
             dynamic_timeout_min=1,
             dynamic_timeout_max=120,
-            dynamic_timeout_safety_margin=2,
         ),
         backend=SimpleNamespace(max_tokens=1200),
     )
@@ -781,7 +778,6 @@ def test_model_generate_applies_dynamic_timeout_to_backend_request():
             request_timeout=1,
             dynamic_timeout_min=1,
             dynamic_timeout_max=120,
-            dynamic_timeout_safety_margin=2,
         ),
         _current_subagent_run_id="",
     )
@@ -813,8 +809,6 @@ def test_stream_model_uses_request_local_first_event_budget_without_backend_muta
             request_timeout=7,
             dynamic_timeout_min=1,
             dynamic_timeout_max=10800,
-            dynamic_timeout_safety_margin=2,
-            estimated_prefill_tokens_per_second=200,
             estimated_output_tokens_per_second=20,
         ),
         _current_subagent_run_id="",

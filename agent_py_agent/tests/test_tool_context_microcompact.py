@@ -63,12 +63,11 @@ def test_disabled_with_zero_or_negative_keep() -> None:
 
 
 def test_builder_wires_config_values() -> None:
-    # prompt 拼装层从 AgentConfig 读 microcompact 配置；keep_recent=0 时透传不回收
+    # prompt 拼装层从 AgentConfig 读 keep_recent（回收门槛是代码常量 1500，_entry 的正文 3000 字符够回收）；keep_recent=0 时透传不回收
     from agent_py_agent.agent.prompting_parts.builder import _task_and_transcript_section
 
     class _Cfg:
         tool_context_microcompact_keep_recent = 2
-        tool_context_microcompact_min_chars = 100
 
     ctx = [_entry(r) for r in range(5)]
     section = _task_and_transcript_section(_Cfg(), "任务", ctx)
@@ -76,7 +75,6 @@ def test_builder_wires_config_values() -> None:
 
     class _CfgOff:
         tool_context_microcompact_keep_recent = 0
-        tool_context_microcompact_min_chars = 100
 
     section_off = _task_and_transcript_section(_CfgOff(), "任务", ctx)
     assert "microcompacted" not in section_off

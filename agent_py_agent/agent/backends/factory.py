@@ -75,8 +75,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
                     "anthropic_compatible": OAuthMessagesBackend}
         if name not in adapters or (auth_ref.get("mode") == "chatgpt" and name != "openai_responses"):
             raise ValueError("登录类型与模型接口不匹配。")
-        extra = {"anthropic_version": config.anthropic_version} if name == "anthropic_compatible" else {}
-        return adapters[name](common, auth_ref=auth_ref, **extra)
+        return adapters[name](common, auth_ref=auth_ref)
 
     if name == "openai_compatible":
         return OpenAICompatibleBackend(common)
@@ -85,10 +84,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
 
         return OpenAIResponsesBackend(common)
     if name == "anthropic_compatible":
-        return AnthropicCompatibleBackend(
-            common,
-            anthropic_version=config.anthropic_version,
-        )
+        return AnthropicCompatibleBackend(common)
 
     raise ValueError(
         "未知模型后端: %s。当前内置 echo / openai_compatible / openai_responses / anthropic_compatible。" % name
