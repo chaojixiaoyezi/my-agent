@@ -31,6 +31,15 @@
   还原后 42 项全绿。
 - **复现**：`cd agent_py_agent && python3 -m pytest tests/test_capability_selection_authority.py -q`。
 
+## step14w Linux 容器 wheel 冒烟（2026-09-28，Linux 真机仍未部署（测试机下线）；容器内 wheel 安装、入口、gateway 健康已验证，非真机部署）
+
+- **来源**：`git archive 9f88e490576f5c2ffc37393fb2d9b5ebd9fc8b06`（与生产 step14w 同源），按 `build_release.py` 的做法 `pip wheel --no-deps --no-build-isolation` 重建，rc=0。
+- **wheel 对比**：重建 sha256 `f42c3ed3b8096b85669c5d28ae2eaa6cc66d5b09ca90a06ebc2c77e13eaf3c66`，生产 `9be2b59f704f3c2a347063c55b2c25ab8e38fb0e8ed8d0b25a233f644e032136`，不一致；1440 个条目同名同字节，只有 7 个 dist-info 条目的 zip 时间戳不同（构建未设 `SOURCE_DATE_EPOCH`）。
+- **容器**：`my-agent-linux-test:py312`（arm64、Python 3.12.13），`--network none --rm --entrypoint bash`；容器内 `python3 -m venv --system-site-packages`，`pip install --no-deps --no-index` 装 wheel，依赖用镜像已有的；隔离的 `MY_AGENT_HOME`，无模型配置、不复制 catalog。
+- **结果**：三个入口 `--help`（`python -m agent_py_agent`、`my-agent`、`my-agent chat`）、`gateway start`、容器内 `127.0.0.1:8420/status`、`gateway status`、`gateway stop` 全部 rc=0；`/status` 原文 `{"status": "running", "pid": 26, "uptime": 0.65, "requests": {"pending": 0, "processing": 0}, "runtime_prefix": "/tmp/venv"}`，停止后 `stopped`、`exit_code` 0、`planned_stop`。
+- **证据**：`~/.my-agent/releases/step14w-9be2b59f/linux-lane/wheel-smoke/`（README、commands.txt、rc.txt、status_raw.json、wheel_compare.txt、gateway 日志）。
+- **边界**：arm64 容器不是真机，只验安装、入口与 gateway 健康，不含模型请求与 TUI 交互；不代替 Linux 真机部署。
+
 ## 能力包收口缺项复核（2026-09-28，仅文档）
 
 十二步骤对照及 77 项冻结引用摘要复核已完成；原 27 次结果不改判，也不重跑。完整七组未覆盖／部分覆盖范围见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。原 R10/R11/R12/R14/R16 的未齐分支不能被最新四项摘要遮掉；普通 Skill、零包核心任务和目录规模夹具也不能外推全部组合通过。
