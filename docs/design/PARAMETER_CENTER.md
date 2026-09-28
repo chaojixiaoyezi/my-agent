@@ -321,6 +321,13 @@
       登记表项不删，`/settings show` 仍可查看、仍是安全边界。
     - 回归见 `test_param_reduction_e_group.py` 与 `test_settings_chat_control.py`；原来通过配置对象改这些值的测试改为 patch 常量。
   - 未完成：C 组（memory 归档预览/语义摘要/恢复/策展批次）、决策选模字数（D 组范围内的决策点位字段，按集成者要求不碰）。
+  - 前端目录（C 组第 2、3 批与杂项批合入后，main `3d76ac687`，分支 `claude/9b-frontend-catalog-c`）：
+    `frontend/config/backend-config-catalog.json` 按当前随包 YAML 重新生成为 264 项（agent_config 222、capability_config 22、
+    log_analysis_config 20），`node` 与 `bun` 跑同一脚本输出逐字相同，`--check` 两种都通过。相对上次生成（278 项）只有：
+    删掉 C 组的 14 个键、其后字段的全局 `order` 与组内位置顺移、`background_context_max_total_tokens` 一条说明变化——
+    杂项批删掉 `conversation_pending_wake_limit` 后，原来挂在它上面的分组标题注释与该键自己的注释连成一段，前后端解析器都把
+    整段并进说明（后端 /settings 在 main 上已是同一文本）。设置页清掉 `memory_resume_auto_context_limit` 表单项；store 默认值
+    暂留（沿 3af7c94df 的做法）。
   - `tool_write_inline_max_chars`（写文件指引的软建议，集成者追加，分支 `claude/38-internal-constants-bd`）：常量统一到
     `tooling/content_transport_policy.MAX_INLINE_WRITE_CONTENT_CHARS`（12000），`settings/defaults` 里重复的
     `DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS` 删除；`core.py` 不再传入，`tool_model_generation` 两处直接用常量；`ToolRegistryParams`
