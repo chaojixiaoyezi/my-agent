@@ -99,8 +99,8 @@ def _call(stage, *, experiment: bool = False) -> _DecideCall:
 # LLM: 把“真正发模型请求”这一步换成返回合法响应的替身；其余 _invoke_call 步骤保持真实现。
 # 函数用途: 给一个用例装好 decide 的替身链路（路由、连接摘要、冷却、后端解析、模型调用）。
 def _patch_decide(monkeypatch, agent, settings, row):
-    from agent_py_agent.agent.conversation import decision_service as svc
     import agent_py_agent.agent.conversation.decision_model_call as dmc
+    from agent_py_agent.agent.conversation import decision_service as svc
 
     monkeypatch.setattr(svc, "_route", lambda *a, **k: ("observe", None, (settings, row, "rev", object())))
     # 本用例只验采样：把“设置仍有效/连接摘要”固定住，避免真实现去读盘上的会话设置（需要 conversation_store）。
@@ -158,8 +158,30 @@ def test_failures_and_timeouts_do_not_consume_the_quota(tmp_path):
     agent = _agent(tmp_path)
     for _ in range(50):
         note_decision_reach(agent, POINT, "provider_failed")
+        note_decision_reach(agent, POINT, "deadline")
     assert observe_sample_success_count(agent.home_paths, POINT) == 0
     assert _observe_sampled_out(agent, POINT, {"effective_mode": "observe"}, _settings(enabled=True)) is False
+    # 失败/超时只能落在原因码键上，不能混进成功样本键（否则失败会吃掉观察名额）。
+    summary = decision_reach_summary(agent.home_paths, since=time.time() - 3600)["points"][POINT]
+    assert summary["called"] == 0
+    assert {item["reason"] for item in summary["not_called"]} == {"provider_failed", "deadline"}
+
+
+def test_sample_quota_boundary_is_exactly_the_named_constant(tmp_path):
+    """钉住边界本身：满 N 次仍不跳，第 N+1 次才跳；否则阈值写错 1 也测不出来。"""
+    agent = _agent(tmp_path)
+    row = {"effective_mode": "observe"}
+    settings = _settings(enabled=True)
+    for index in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT):
+        assert _observe_sampled_out(agent, POINT, row, settings) is False, f"第 {index + 1} 次就跳了，阈值偏小"
+        note_observe_sample_success(agent, POINT)
+    assert observe_sample_success_count(agent.home_paths, POINT) == limits.OBSERVE_SAMPLED_SUCCESS_LIMIT
+    assert _observe_sampled_out(agent, POINT, row, settings) is True
+
+
+def test_observe_sample_limit_is_the_frozen_six(tmp_path):
+    """上限是内部常量：值本身被钉住，避免有人顺手调大/调小而没人发现。"""
+    assert limits.OBSERVE_SAMPLED_SUCCESS_LIMIT == 6
 
 
 def test_quota_resets_in_the_next_natural_hour(tmp_path):

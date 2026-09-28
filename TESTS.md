@@ -30,6 +30,58 @@
   - 改善但未继续拆：`subagents/services/base.py::SubAgentBaseService` 今天从 soft（大于 250 行）降到 high-risk（239 行），属于改善；压到 200 行以下要移出约 40 行建 run 权威写入逻辑，本片不动。
 - **验证**：相关 33 个测试文件共 675 项通过，覆盖 agent_tree、插件管理与命令、artifact 读取、后台主代理、architecture_guardrails、constant_names_unique、code_size_script。五项静态 gate 全部通过。
 
+## Jev observe 采样开关：成功满 6 次后本小时不再调用（2026-09-28，分支 `my-agent/self-dev-2`，基点 `ca756b5db`）
+
+- **来源/做法**：dev 派活任务 4（从 my-agent-1 队列转来）。背景是 11 个点位全 observe、48 小时 276 次调用只换来观察记录。
+- **开关**：通用字段 `observe_sampling_enabled`（默认 false），走 decision_settings 的 GENERAL_FIELDS，与 `enabled`/
+  `experiment_enabled` 同一套布尔校验；`AgentConfig`、随包 YAML（中文注释）、`services/_normalize` 运行布尔表同步。
+- **上限**：`conversation/decision_point_limits.OBSERVE_SAMPLED_SUCCESS_LIMIT = 6`，内部常量、不进用户参数。
+- **判定**：`decision_service._sampled_outcome` 只对 `observe_sampling_enabled=true` 且点位 `effective_mode == "observe"` 生效；
+  命中返回 `DecisionOutcome("observe", "skipped", reason="observe_sampled_out")`（`may_apply=False`，保留原业务方案）。
+  apply 与实验路径不进（`_decide_outcome` 里 `not stage.experiment and ...` 两个前置条件）。
+- **只统计成功**：记账在 `_invoke_call` 的 success 分支（`mode == "observe" and not stage.experiment`），调
+  `decision_reach_counts.note_observe_sample_success`，与到达计数共用同一账本/节流/保留期，用独立内部码
+  `SAMPLE_SUCCESS="observe_sample_ok"`；`_point_row` 把它排除，`reached/called/not_called` 诊断口径不变（0=不限等旧语义也保持）。
+
+### 复现
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
+  agent_py_agent/tests/test_decision_reach_counts.py agent_py_agent/tests/test_decision_settings_scope.py \
+  agent_py_agent/tests/test_decision_model_call.py agent_py_agent/tests/test_decision_background_deadline.py \
+  agent_py_agent/tests/test_decision_service.py agent_py_agent/tests/test_packaging.py -q
+```
+
+10 条采样用例 + 相邻决策/打包用例共 116 passed（rebase 到 `ca756b5db` 后重跑）。
+
+### 变异验证（每条用例都能杀掉一个变异体，8/8 KILLED）
+
+| 变异体 | 结果 | 被杀它的用例 |
+|---|---|---|
+| 判定忽略开关（关着也按点数跳） | KILLED | `test_sampling_off_never_skips_even_with_many_successes` |
+| 判定忽略点位模式（apply 也被采样） | KILLED | `test_apply_point_is_not_sampled` |
+| 上限调小 1（阈值写错） | KILLED | `test_observe_sample_limit_is_the_frozen_six` |
+| 判定改用全部到达数（失败也吃名额） | KILLED | `test_failures_and_timeouts_do_not_consume_the_quota` 等 3 条 |
+| 失败原因码也写进成功样本键 | KILLED | `test_seventh_successful_call_is_skipped_and_reported_with_a_reason` |
+| 样本计数混进 reached 诊断 | KILLED | `test_sample_counter_does_not_change_reach_diagnostics` |
+| 跳过不返回结构化原因（标成普通 error） | KILLED | 同上第 7 次用例 |
+| 跳过结果误标 `may_apply=True` | KILLED | 同上第 7 次用例 |
+
+两次迭代：第一版只有 5 个变异体，其中「阈值差 1」和「失败也吃名额」**活下来了**——说明用例只测了“第 7 次会跳”，
+没钉住“第 N 次必须不跳”和“失败事件不落到成功样本键”。补了 `test_sample_quota_boundary_is_exactly_the_named_constant`、
+`test_observe_sample_limit_is_the_frozen_six`，并加强失败用例的键断言后，8 个变异体全部被杀。
+
+### 写决策用例的坑（dev 要求记下，供其他人省时间）
+
+- `_decide_outcome` 会把内部异常吞成 `error/enhancement_failed`，表面看像采样逻辑坏了，其实是入参不合法。定位方法：
+  临时把 `_failure_outcome` 换成把 `type(exc).__name__` 带进 `reason` 的替身，一条命令就能看到真实异常。
+- `DecisionRequest` 的三个硬约束：`state` 必须是 JSON 数据（裸 `object()` 报 `invalid_input`）、`questions` 必须非空、
+  `DecisionResponse` 必须补齐 `(binding, input_digest, requested_model, model, answers, _usage_json)` 六个位置参数。
+- 真实 `_stale → _snapshot` 会读盘上的会话设置（需要 `conversation_store`）。只验采样这类窄逻辑时，要把
+  `_snapshot`/`_stale`/`connection_revision`/`cooldown_state` 固定住，否则替身宿主会在无关步骤上炸。
+- 实验路径不做采样：产品代码用 `not stage.experiment` 明确排除，用例断言“判定函数在 apply/实验路径上不会被问”即可，
+  不要为了跑通去伪造 `decision_experiment` 的独立路由。
+
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
 
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`）
