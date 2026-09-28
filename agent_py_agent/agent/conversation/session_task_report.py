@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 from .session_tasks import (
     SESSION_TASK_DONE,
     SESSION_TASK_FAILED,
     SESSION_TASK_TERMINAL_STATUSES,
+    SessionTaskUpdate,
 )
 
 # 回报正文只写结构化事实；来源用与取消通知相同的 session_task 标记，注入时按宿主事件呈现。
@@ -46,28 +48,36 @@ def task_for_turn(agent: object, turn_id: str) -> object | None:
     return None
 
 
+# LLM: 回合结果只承载结构化事实（成功与否 + 摘要 + 产物 refs），不含正文副本。
+# 类用途: 保存一次回合结束时的结果，供任务终态与回报使用。
+@dataclass(frozen=True)
+class TaskTurnOutcome:
+    ok: bool
+    summary: str = ""
+    result_refs: tuple[str, ...] = ()
+
+
 # LLM: 只在任务已经绑到某个回合时才推进；status 只允许 done/failed（状态机保证 accepted → 二者之一）。
 #   summary 与 result_refs 是结构化结果，正文不复制。
 # 函数用途: 把一条会话任务按回合结果推进到终态。
 def finish_task_for_turn(
     agent: object,
     turn_id: str,
-    *,
-    ok: bool,
-    summary: str = "",
-    result_refs: tuple[str, ...] = (),
+    outcome: TaskTurnOutcome,
 ) -> object | None:
     task = task_for_turn(agent, turn_id)
     if task is None:
         return None
     tasks = agent.conversation_store.session_tasks
-    target_status = SESSION_TASK_DONE if ok else SESSION_TASK_FAILED
+    target_status = SESSION_TASK_DONE if outcome.ok else SESSION_TASK_FAILED
     try:
         updated = tasks.advance(
             str(getattr(task, "task_id", "") or ""),
-            status=target_status,
-            summary=str(summary or ""),
-            result_refs=tuple(result_refs or ()),
+            SessionTaskUpdate(
+                status=target_status,
+                summary=str(outcome.summary or ""),
+                result_refs=tuple(outcome.result_refs or ()),
+            ),
         )
     except (OSError, ValueError, TypeError):
         return None
@@ -117,23 +127,24 @@ def report_task_result(agent: object, task: object) -> bool:
         )
     except Exception:  # noqa: BLE001 - 回报失败不能影响回合已完成的事实
         return False
+    _record_pair(store, str(getattr(task, "target_thread_id", "") or ""), sender)
     return True
+
+
+# LLM: 回报是宿主自动发出、不会被拒的消息，但必须占用每对会话配额，否则回报可以绕过限额。
+#   计数写失败只影响节流精度，不影响回报已投递的事实。
+# 函数用途: 把一条任务回报计入发送方与目标方之间的配额。
+def _record_pair(store: object, sender_thread_id: str, target_thread_id: str) -> None:
+    from .session_pair_rate import record_pair_message
+
+    record_pair_message(store, sender_thread_id, target_thread_id)
 
 
 # LLM: 一次收口只做"推进 + 回报"两件事，且只在真的推进了这条任务时回报。
 #   已经是终态、不是会话任务回合、或读账失败都安静返回 None（不影响回合交付）。
 # 函数用途: 在目标回合正常结束时推进会话任务并把结构化结果回报给发送方。
-def close_out_turn(
-    agent: object,
-    turn_id: str,
-    *,
-    ok: bool,
-    summary: str = "",
-    result_refs: tuple[str, ...] = (),
-) -> object | None:
-    updated = finish_task_for_turn(
-        agent, turn_id, ok=ok, summary=summary, result_refs=result_refs
-    )
+def close_out_turn(agent: object, turn_id: str, outcome: TaskTurnOutcome) -> object | None:
+    updated = finish_task_for_turn(agent, turn_id, outcome)
     if updated is None:
         return None
     report_task_result(agent, updated)
@@ -149,6 +160,7 @@ def outcome_from_error(error: object, *, interrupted: bool = False) -> bool:
 
 
 __all__ = [
+    "TaskTurnOutcome",
     "close_out_turn",
     "finish_task_for_turn",
     "outcome_from_error",

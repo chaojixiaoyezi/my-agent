@@ -67,7 +67,7 @@
 - `turn_end_reason` 保持六值协议，没有新增值；工具名和错误码在收口正文和逐调用归档里，没有给 Gateway 结果新增字段。
 - 真实模型下的效果没有验证。
 
-## 会话间消息与派活（2026-09-28，分支 `my-agent/self-dev-3`，设计中，待 dev 审）
+## 会话间消息与派活（2026-09-28，分支 `my-agent/self-dev-3`，第一期已实现并已上线）
 
 解决问题：同一 owner 下多会话之间不能传消息、不能派活，管理员只能在一个会话里干完所有事。
 第一期只开给管理员（`owner_kind=main`）：同 owner 会话之间可互发消息、可派任务；普通用户两种能力都关闭；
@@ -76,8 +76,12 @@
 仅 task 的状态与结果新增 `SessionTaskStore`。配置放 `capability_config.yaml`
 （`session_messaging_admin_enabled` 默认开、`session_messaging_user_enabled` 默认关、
 `session_task_max_chain_depth`、`session_pair_hourly_limit`）。防循环两道守卫：派活链深度、每对会话每小时上限
-（0 表示不限制）。飞书入口第一期不做，记为缺口。完整方案、权限矩阵、落地坐标与测试计划见
-[SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md)。状态：**设计中**，等 dev 审过才写代码。
+（0 表示不限制；**消息、派活、任务回报与取消通知都计入配额**，模型发起的发送在投递前判断、
+超限返回 `SESSION_TASK_RATE_LIMIT` 且不占配额，宿主自动回报不被拒但占配额）。飞书入口第一期不做，记为缺口。
+完整方案、权限矩阵、落地坐标、实现落点与测试计划见
+[SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md)。状态：**第一期已实现并已上线**
+（模型工具、TUI 命令、权威存储、防循环守卫、结果回报与取消都已交付）。
+
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。

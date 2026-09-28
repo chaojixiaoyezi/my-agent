@@ -9,6 +9,7 @@ from typing import Any
 
 from .goal_clock import shared_goal_clocks
 from .models import MODEL_HIDDEN_THREAD_FIELDS
+from .session_pair_rate import SessionPairRateLimiter
 from .session_tasks import SessionTaskStore
 from .store_audits import AuditStore
 from .store_claims import ClaimStore
@@ -56,6 +57,8 @@ class ConversationStore:
         self.audits = AuditStore(self.storage, tasks=self.tasks)
         # 会话间派活（第一期）：只存派活记录与状态；正文引用 guidance，目标执行链接结构化。
         self.session_tasks = SessionTaskStore(self.storage)
+        # 每对会话每小时限额的计数（结构化节流）：发消息/派活前判断，回报消息只计入不被拒。
+        self.session_pair_rate = SessionPairRateLimiter(self.storage)
         self.goal_clock = shared_goal_clocks(self.storage.root)
         self.observations = ObservationStore(
             self.storage, require_thread=self.threads.require,

@@ -8,6 +8,9 @@
 本切片是第一期：**管理员（`owner_kind=main`）的同 owner 会话之间**可以互发消息、可以派任务；
 普通用户（`owner_kind=user`）两种能力都关闭；跨 owner 一律拒绝并返回明确结构化错误码。
 
+**状态：第一期已实现并已上线**（模型工具、TUI 命令、权威存储、防循环守卫、结果回报与取消都已交付，
+见本文件末尾的"实现落点"）。后续期（IM 目标、普通用户开关、跨 owner 授权）见 `DESIGN_LEDGER.md`。
+
 ## 权威与行为
 
 先复用已有底座，不另起第二套状态。唯一权威划分如下：
@@ -147,7 +150,7 @@
 | `session_messaging_user_enabled` | `false` | 普通用户发消息开关（默认关，用户隔离期再开） |
 | `session_task_admin_enabled` | `true` | 管理员会话之间派任务开关 |
 | `session_task_max_chain_depth` | `4` | 派活链深度上限；0 不限制 |
-| `session_pair_hourly_limit` | `60` | 每对会话每小时上限；0 不限制 |
+| `session_pair_hourly_limit` | `60` | 每对会话每小时上限（任务回报与取消通知也计入）；0 不限制 |
 
 ## 入口
 
@@ -219,3 +222,23 @@
   列为后续项，需要先设计对外副作用的确认与审计。
 - 普通用户发消息开关默认关；用户隔离（跨 owner 如何安全开放）留待后续设计。
 - 跨 owner 发现机制（`owner_wake_discovery.py`）第二期才用。
+
+## 实现落点（第一期，已上线）
+
+| 关注点 | 实现位置 |
+| --- | --- |
+| 权限判定（纯函数，只读结构化字段） | `agent_py_agent/agent/conversation/session_messaging.py`（`decide_session_messaging`、两个可见性判定） |
+| 发消息（模型工具） | `agent_py_agent/agent/agent_core/orchestration/tools/send_session_message.py` |
+| 派活（模型工具） | `agent_py_agent/agent/agent_core/orchestration/tools/create_session_task.py` |
+| 查询 / 取消（模型工具） | `agent_py_agent/agent/agent_core/orchestration/tools/session_task_control.py` |
+| 派活权威记录与状态机 | `agent_py_agent/agent/conversation/session_tasks.py` |
+| 取消时对目标回合发精确停止控制 | `agent_py_agent/agent/gateway_parts/session_task_stop.py` |
+| 目标回合结束时的结构化回报 | `agent_py_agent/agent/conversation/session_task_report.py` |
+| 每对会话每小时限额 | `agent_py_agent/agent/conversation/session_pair_rate.py`（消息、派活、任务回报、取消通知都计入） |
+| 宿主事件呈现 | `agent_py_agent/agent/agent_core/runtime/loop_support.py`（`_native_turn_opener` / `_host_event_source`） |
+| TUI 命令 | `/sessions threads`、`/tell`、`/sessions inbox`（`agent_py_agent/cli/chat_parts/slash_commands.py`） |
+| 配置键 | `agent_py_agent/config/capability_config.yaml` + `agent_py_agent/agent/capability/config.py` |
+
+限额语义：`session_pair_hourly_limit` 按「发送会话 → 接收会话」分桶，小时窗口固定、跨窗口归零；
+模型发起的发送与派活在投递前判断，超限返回 `SESSION_TASK_RATE_LIMIT` 且不投递、不占配额；
+宿主自动发出的任务回报与取消通知**不会被拒**，但同样计入配额（避免回报绕过限额）。

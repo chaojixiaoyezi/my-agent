@@ -151,3 +151,33 @@ def test_sessions_threads_lists_targets() -> None:
     assert "thread-x" in text
     assert "工作会话" in text
     assert "/tell" in text
+
+
+def test_tell_pair_limit_blocks_and_does_not_queue(tmp_path) -> None:
+    """TUI 入口与模型工具共用同一限额：超限时给出稳定错误码且不投递。"""
+    from agent_py_agent.agent.conversation import ConversationStore
+
+    agent = _agent({"thread-b": _FakeThread("thread-b")})
+    limiter = ConversationStore(tmp_path / "conv").session_pair_rate
+    limiter.record("thread-a", "thread-b")
+    agent.conversation_store.session_pair_rate = limiter
+    agent._capability_config_runtime_snapshot.config.session_pair_hourly_limit = 1
+    ctx = _Ctx(agent)
+
+    _run("/tell thread-b 你好", ctx)
+
+    assert "SESSION_TASK_RATE_LIMIT" in "".join(ctx.lines)
+    assert agent.conversation_store.guidance.calls == []
+
+
+def test_tell_success_counts_into_pair_quota(tmp_path) -> None:
+    from agent_py_agent.agent.conversation import ConversationStore
+
+    agent = _agent({"thread-b": _FakeThread("thread-b")})
+    limiter = ConversationStore(tmp_path / "conv").session_pair_rate
+    agent.conversation_store.session_pair_rate = limiter
+    ctx = _Ctx(agent)
+
+    _run("/tell thread-b 你好", ctx)
+
+    assert limiter.count("thread-a", "thread-b") == 1

@@ -48,7 +48,10 @@ from agent_py_agent.agent.conversation.authority import (
 )
 from agent_py_agent.agent.conversation.control_commands import conversation_request_interrupt_name
 from agent_py_agent.agent.conversation.models import ChannelBinding
-from agent_py_agent.agent.conversation.session_task_report import close_out_turn
+from agent_py_agent.agent.conversation.session_task_report import (
+    TaskTurnOutcome,
+    close_out_turn,
+)
 from agent_py_agent.agent.gateway_parts.session_task_stop import stop_session_task_turn
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
@@ -69,13 +72,20 @@ class _Threads:
 
     def resolve(self, *, channel: str, channel_conversation_id: str, channel_user_id: str):
         for thread in self._threads.values():
-            for binding in getattr(thread, "channel_bindings", ()):
-                if (
-                    str(getattr(binding, "channel", "")) == channel
-                    and str(getattr(binding, "channel_conversation_id", "")) == channel_conversation_id
-                ):
-                    return thread
+            if self._binding_matches(thread, channel, channel_conversation_id):
+                return thread
         return None
+
+    @staticmethod
+    def _binding_matches(thread: object, channel: str, channel_conversation_id: str) -> bool:
+        for binding in getattr(thread, "channel_bindings", ()):
+            same_channel = str(getattr(binding, "channel", "")) == channel
+            same_conversation = (
+                str(getattr(binding, "channel_conversation_id", "")) == channel_conversation_id
+            )
+            if same_channel and same_conversation:
+                return True
+        return False
 
 
 class _TaskLinks:
@@ -230,7 +240,7 @@ def test_end_to_end_dispatch_execute_and_report(tmp_path) -> None:
     assert bound.conversation_request_id == _TURN_ID
 
     # 3) 回合结束：D 的收口推进终态并把结构化回报投回发送方。
-    closed = close_out_turn(agent, _TURN_ID, ok=True, summary="报告已生成", result_refs=("out/r.md",))
+    closed = close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True, summary="报告已生成", result_refs=("out/r.md",)))
     assert closed is not None and closed.status == "done"
 
     inbox = agent.conversation_store.guidance.pending("thread", _SENDER_THREAD_ID)
@@ -272,7 +282,7 @@ def test_end_to_end_cancel_while_target_is_running(tmp_path) -> None:
     assert "尚未确认" in payload["message"]
     assert agent.conversation_store.session_tasks.load(task_id).status == "cancelled"
     # 取消后不再有新的工具调用：终态之后收口不会推进、也不会写回报。
-    assert close_out_turn(agent, _TURN_ID, ok=True) is None
+    assert close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True)) is None
 
 
 def test_end_to_end_cancel_before_target_starts_withdraws_body(tmp_path) -> None:

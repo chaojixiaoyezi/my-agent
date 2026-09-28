@@ -14,6 +14,7 @@ from ....conversation.session_messaging import (
     SESSION_KIND_MESSAGE,
     SESSION_MESSAGE_ORIGIN_KIND,
     SESSION_NO_CURRENT_THREAD,
+    SESSION_TASK_RATE_LIMIT,
     SessionMessagingRequest,
     decide_session_messaging,
 )
@@ -104,12 +105,41 @@ class SendSessionMessageTool(BaseTool):
         if not decision.allowed:
             return _denied(decision.error_code, decision.scope_warnings)
 
+        limit_error = _pair_limit_error(
+            self.agent,
+            sender_thread_id,
+            parsed.target_thread_id,
+            config,
+        )
+        if limit_error is not None:
+            return limit_error
+
         return _queue_and_wake(
             self.agent,
             parsed,
             sender_thread_id=sender_thread_id,
             target_thread=target_thread,
         )
+
+
+# LLM: 每对会话每小时限额只按结构化计数与配置判定；0 表示不限制，没有计数器时同样放行。
+#   在真正投递前判断，避免被拒的消息占用配额。
+# 函数用途: 判断这次发消息是否超出每对会话限额，超出时返回结构化失败。
+def _pair_limit_error(
+    agent: object, sender_thread_id: str, target_thread_id: str, config: object
+) -> ToolHandlerOutcome | None:
+    from ....conversation.session_pair_rate import pair_limit_reached
+
+    limit = int(getattr(config, "session_pair_hourly_limit", 0) or 0)
+    store = getattr(agent, "conversation_store", None)
+    if not pair_limit_reached(store, sender_thread_id, target_thread_id, limit):
+        return None
+    return _error(
+        f"这一对会话每小时的消息条数已达上限（{limit}）；消息没有投递。",
+        error_code=SESSION_TASK_RATE_LIMIT,
+        details={"limit": limit, "sender_thread_id": sender_thread_id, "target_thread_id": target_thread_id},
+        effect_outcome="not_started",
+    )
 
 
 # LLM: 缺目标或缺正文都是无副作用的协议失败；不从当前会话或历史正文里推断目标。
@@ -240,6 +270,9 @@ def _queue_and_wake(
             effect_outcome="unknown",
         )
 
+    # 投递成功后计入每对会话配额（与派活、回报共用同一计数），供限额判定。
+    _record_pair(store, sender_thread_id, parsed.target_thread_id)
+
     payload = {
         "ok": True,
         "message_id": entry.guidance_id,
@@ -254,6 +287,14 @@ def _queue_and_wake(
         ),
     }
     return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# LLM: 计数写失败只影响节流精度，不影响已经投递成功的消息，所以这里吞掉异常。
+# 函数用途: 把一条已投递的会话消息计入每对会话配额。
+def _record_pair(store: object, sender_thread_id: str, target_thread_id: str) -> None:
+    from ....conversation.session_pair_rate import record_pair_message
+
+    record_pair_message(store, sender_thread_id, target_thread_id)
 
 
 # LLM: 目标空闲才唤醒；status 不是 active 时不叫醒，避免给不会再消费的目标制造假 pending。

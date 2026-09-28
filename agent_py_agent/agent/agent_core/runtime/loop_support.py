@@ -980,27 +980,12 @@ def _native_initial_tool_ir_history(
     carried_handoff: str,
     carried_user_inputs: list[str],
 ) -> list[object]:
-    from ...backends.tool_ir import CompactionSummary, RuntimeFactsTurn, UserTurn
-    from .turn_trigger import (
-        HOST_EVENT_FACTS_SOURCE,
-        SESSION_TASK_FACTS_SOURCE,
-        current_turn_text,
-        lifecycle_wake_trigger,
-        session_task_trigger,
-    )
+    from ...backends.tool_ir import CompactionSummary, UserTurn
 
     history: list[object] = []
-    current = str(params.user_prompt or "")
-    trigger = getattr(params, "turn_trigger", None)
-    if lifecycle_wake_trigger(trigger) is not None:
-        history.append(RuntimeFactsTurn(current_turn_text(current, trigger), source=HOST_EVENT_FACTS_SOURCE))
-    elif session_task_trigger(trigger) is not None:
-        # LLM: 会话间派活片同样是宿主事件，用独立来源标记：任务正文绝不落在用户原话位置，
-        #   原生历史保存与 Compact 据此识别本片开头不是用户任务。
-        # 函数用途: 把派活回合的开头写成宿主事件而不是用户轮。
-        history.append(RuntimeFactsTurn(current_turn_text(current, trigger), source=SESSION_TASK_FACTS_SOURCE))
-    elif current:
-        history.append(UserTurn(_native_user_task_text(current), media=tuple((params.task_attributes or {}).get("input_media") or ())))
+    opener = _native_turn_opener(params)
+    if opener is not None:
+        history.append(opener)
     if carried_handoff:
         history.append(CompactionSummary(carried_handoff))
     packets = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
@@ -1009,6 +994,42 @@ def _native_initial_tool_ir_history(
     history.extend(UserTurn(text, input_ids=tuple(packets[index]["input_ids"]) if packets else ())
                    for index, text in enumerate(carried_user_inputs) if str(text or ""))
     return history
+
+
+# LLM: 开头项只按结构化触发类型选：生命周期唤醒与会话间派活都是宿主事件（各带自己的来源标记），
+#   普通回合才是用户轮（携带 typed media）。会话间派活的任务正文绝不落在用户原话位置。
+#   纯计算，不写状态、不发请求。
+# 函数用途: 生成当前回合的原生 IR 开头项；没有可放的内容时返回 None。
+def _native_turn_opener(params: RuntimeLoopParams) -> object | None:
+    from ...backends.tool_ir import RuntimeFactsTurn, UserTurn
+    from .turn_trigger import current_turn_text
+
+    current = str(params.user_prompt or "")
+    trigger = getattr(params, "turn_trigger", None)
+    source = _host_event_source(trigger)
+    if source:
+        return RuntimeFactsTurn(current_turn_text(current, trigger), source=source)
+    if current:
+        media = tuple((params.task_attributes or {}).get("input_media") or ())
+        return UserTurn(_native_user_task_text(current), media=media)
+    return None
+
+
+# LLM: 只认两种 typed TurnTrigger；其它情况返回空串，表示这个回合的开头是用户轮。
+# 函数用途: 判断当前回合开头项该用哪个宿主事件来源标记。
+def _host_event_source(trigger: object) -> str:
+    from .turn_trigger import (
+        HOST_EVENT_FACTS_SOURCE,
+        SESSION_TASK_FACTS_SOURCE,
+        lifecycle_wake_trigger,
+        session_task_trigger,
+    )
+
+    if lifecycle_wake_trigger(trigger) is not None:
+        return HOST_EVENT_FACTS_SOURCE
+    if session_task_trigger(trigger) is not None:
+        return SESSION_TASK_FACTS_SOURCE
+    return ""
 
 
 # LLM: 当前回合的开头项是真实用户轮（UserTurn）或生命周期唤醒的宿主事件（source=HOST_EVENT_FACTS_SOURCE 的

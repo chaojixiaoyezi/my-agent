@@ -16,6 +16,10 @@ from agent_py_agent.agent.agent_core.orchestration.tools.session_task_control im
 )
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation.session_tasks import (
+    SessionTaskDraft,
+    SessionTaskUpdate,
+)
 
 
 class _Guidance:
@@ -40,7 +44,9 @@ class _Agent:
 def _agent(tmp_path):
     agent = _Agent(tmp_path)
     task = agent.conversation_store.session_tasks.create(
-        sender_thread_id="A", target_thread_id="B", goal="做 X", body_guidance_id="g-body", now=1.0
+        SessionTaskDraft(
+            sender_thread_id="A", target_thread_id="B", goal="做 X", body_guidance_id="g-body"
+        ), now=1.0,
     )
     return agent, task
 
@@ -87,8 +93,8 @@ def test_cancel_active_task_takes_effect_and_notifies(tmp_path) -> None:
 def test_cancel_terminal_task_is_noop(tmp_path) -> None:
     agent, task = _agent(tmp_path)
     store = agent.conversation_store.session_tasks
-    store.advance(task.task_id, status="accepted", now=2.0)
-    store.advance(task.task_id, status="done", summary="完成", now=3.0)
+    store.advance(task.task_id, SessionTaskUpdate("accepted"), now=2.0)
+    store.advance(task.task_id, SessionTaskUpdate("done", summary="完成"), now=3.0)
     outcome = CancelSessionTaskTool(agent).execute({"task_id": task.task_id})
     assert outcome.ok
     payload = json.loads(outcome.output)

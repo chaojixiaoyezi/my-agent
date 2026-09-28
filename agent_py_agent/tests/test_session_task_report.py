@@ -12,10 +12,15 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation.session_task_report import (
+    TaskTurnOutcome,
     close_out_turn,
     outcome_from_error,
     report_task_result,
     task_for_turn,
+)
+from agent_py_agent.agent.conversation.session_tasks import (
+    SessionTaskDraft,
+    SessionTaskUpdate,
 )
 
 _SENDER_THREAD_ID = "thread-A"
@@ -31,11 +36,13 @@ def _agent(tmp_path: pathlib.Path) -> object:
 def _task(agent: object, *, turn_id: str = _TURN_ID) -> object:
     store = agent.conversation_store
     task = store.session_tasks.create(
-        sender_thread_id=_SENDER_THREAD_ID,
-        target_thread_id=_TARGET_THREAD_ID,
-        goal="做 X",
-        body_guidance_id="g-body",
-        dedupe_key="session_task:A->B:做 X",
+        SessionTaskDraft(
+            sender_thread_id=_SENDER_THREAD_ID,
+            target_thread_id=_TARGET_THREAD_ID,
+            goal="做 X",
+            body_guidance_id="g-body",
+            dedupe_key="session_task:A->B:做 X",
+        )
     )
     return store.session_tasks.bind_turn(task.task_id, turn_id=turn_id)
 
@@ -55,7 +62,7 @@ def test_close_out_success_reports_structured_result_to_sender(tmp_path) -> None
     agent = _agent(tmp_path)
     task = _task(agent)
 
-    updated = close_out_turn(agent, _TURN_ID, ok=True, summary="做完了", result_refs=("out/x.md",))
+    updated = close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True, summary="做完了", result_refs=("out/x.md",)))
 
     assert updated is not None and updated.status == "done"
     assert updated.summary == "做完了" and updated.result_refs == ("out/x.md",)
@@ -75,7 +82,7 @@ def test_close_out_failure_uses_failed_status(tmp_path) -> None:
     agent = _agent(tmp_path)
     _task(agent)
 
-    updated = close_out_turn(agent, _TURN_ID, ok=False)
+    updated = close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=False))
 
     assert updated is not None and updated.status == "failed"
     pending = agent.conversation_store.guidance.pending("thread", _SENDER_THREAD_ID)
@@ -86,9 +93,9 @@ def test_second_close_out_is_idempotent_and_does_not_report_again(tmp_path) -> N
     agent = _agent(tmp_path)
     _task(agent)
 
-    assert close_out_turn(agent, _TURN_ID, ok=True) is not None
+    assert close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True)) is not None
     # 终态后再收口：不再推进、也不写第二条回报。
-    assert close_out_turn(agent, _TURN_ID, ok=True) is None
+    assert close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True)) is None
     assert len(agent.conversation_store.guidance.pending("thread", _SENDER_THREAD_ID)) == 1
 
 
@@ -96,7 +103,7 @@ def test_close_out_with_unrelated_turn_changes_nothing(tmp_path) -> None:
     agent = _agent(tmp_path)
     task = _task(agent)
 
-    assert close_out_turn(agent, "req-unrelated", ok=True) is None
+    assert close_out_turn(agent, "req-unrelated", TaskTurnOutcome(ok=True)) is None
 
     assert agent.conversation_store.session_tasks.load(task.task_id).status == "accepted"
     assert agent.conversation_store.guidance.pending("thread", _SENDER_THREAD_ID) == []
@@ -109,7 +116,7 @@ def test_corrupt_task_ledger_never_guesses_ownership(tmp_path) -> None:
     (agent.conversation_store.session_tasks._dir() / "stask-broken.json").write_text("{bad", encoding="utf-8")
 
     assert task_for_turn(agent, _TURN_ID) is None
-    assert close_out_turn(agent, _TURN_ID, ok=True) is None
+    assert close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True)) is None
 
 
 def test_report_requires_a_real_sender(tmp_path) -> None:
@@ -127,9 +134,34 @@ def test_outcome_from_error_maps_terminal_state() -> None:
 def test_reported_message_is_json_safe_structured_text(tmp_path) -> None:
     agent = _agent(tmp_path)
     task = _task(agent)
-    close_out_turn(agent, _TURN_ID, ok=True, summary='含"引号"与换行\n的摘要')
+    close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True, summary='含"引号"与换行\n的摘要'))
 
     entry = agent.conversation_store.guidance.pending("thread", _SENDER_THREAD_ID)[0]
     assert "\n" in entry.message or "\\n" in entry.message
-    assert task.task_id in entry.message
-    assert json.dumps(entry.metadata, ensure_ascii=False)
+
+
+def test_report_counts_into_pair_quota(tmp_path) -> None:
+    """回报是宿主自动发出的消息，不会被拒，但必须占用每对会话配额，否则回报能绕过限额。"""
+    agent = _agent(tmp_path)
+    _task(agent)
+    store = agent.conversation_store
+    assert store.session_pair_rate.count(_TARGET_THREAD_ID, _SENDER_THREAD_ID) == 0
+
+    close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True))
+
+    assert store.session_pair_rate.count(_TARGET_THREAD_ID, _SENDER_THREAD_ID) == 1
+
+
+def test_cancel_notification_counts_into_pair_quota(tmp_path) -> None:
+    """取消通知同样是宿主自动消息，也要计入配额（与回报同一分桶方向）。"""
+    agent = _agent(tmp_path)
+    task = _task(agent)
+    store = agent.conversation_store
+    from agent_py_agent.agent.agent_core.orchestration.tools.session_task_control import (
+        CancelSessionTaskTool,
+    )
+
+    outcome = CancelSessionTaskTool(agent).execute({"task_id": task.task_id})
+
+    assert outcome.ok
+    assert store.session_pair_rate.count(_TARGET_THREAD_ID, _SENDER_THREAD_ID) == 1

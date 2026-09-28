@@ -103,6 +103,49 @@ class SessionTask:
         )
 
 
+# LLM: 冻结值对象，承载新建一条会话任务所需的全部结构化输入；字段与 SessionTask 一一对应。
+#   用具名对象替代 8 个关键字参数，避免参数表随字段增长。
+# 类用途: 保存一次会话任务创建请求的输入。
+@dataclass(frozen=True)
+class SessionTaskDraft:
+    sender_thread_id: str
+    target_thread_id: str
+    goal: str
+    body_guidance_id: str = ""
+    body_dedupe_key: str = ""
+    dedupe_key: str = ""
+    origin_task_id: str = ""
+
+
+# LLM: 冻结值对象，承载一次状态推进的全部结构化输入；用具名对象替代 6 个关键字参数。
+#   字段语义与 SessionTask 一一对应，空值表示"不改这个字段"（沿用旧值）。
+# 类用途: 保存一次会话任务状态推进请求。
+@dataclass(frozen=True)
+class SessionTaskUpdate:
+    status: str
+    summary: str = ""
+    result_refs: tuple[str, ...] = ()
+    conversation_request_id: str = ""
+    task_run_id: str = ""
+
+
+# LLM: 幂等判定只比结构化身份字段（发送方/目标/正文），不比对时间戳等派生值。
+# 函数用途: 判断同键重放是否是同一份输入。
+def _draft_matches(existing: SessionTask, draft: SessionTaskDraft) -> bool:
+    pairs = (
+        (existing.sender_thread_id, draft.sender_thread_id),
+        (existing.target_thread_id, draft.target_thread_id),
+        (existing.goal, draft.goal),
+    )
+    return all(left == right for left, right in pairs)
+
+
+# LLM: 索引文件只是查找用，权威仍是每任务文件；调用方保证键非空，本函数不做语义判断。
+# 函数用途: 写一个任务索引文件。
+def _write_index(path: Path, schema_version: str, task_id: str) -> None:
+    write_json_file_atomic(path, {"schema_version": schema_version, "task_id": task_id})
+
+
 # LLM: 存储只落 canonical 目录下的每任务一个 JSON 文件；状态变更走 update_json_file_atomic（锁内重读），
 #   避免两个写入方互相覆盖。读取坏文件必须显式报错，不能当成"不存在"。
 # 类用途: 保存、读取与推进会话间派活任务的状态。
@@ -150,52 +193,50 @@ class SessionTaskStore:
     # LLM: 幂等创建：同 dedupe_key 且同输入返回原记录（不新建、不改状态）；同键异文报错。
     #   链深在调用方按 origin_task_id 结构化计算后传入校验结果，本方法不读模型给的深度。
     # 函数用途: 新建一条会话派活记录；同键重放返回原记录。
-    def create(
-        self,
-        *,
-        sender_thread_id: str,
-        target_thread_id: str,
-        goal: str,
-        body_guidance_id: str = "",
-        body_dedupe_key: str = "",
-        dedupe_key: str = "",
-        origin_task_id: str = "",
-        now: float | None = None,
-    ) -> SessionTask:
+    def create(self, draft: SessionTaskDraft, *, now: float | None = None) -> SessionTask:
         current = now if now is not None else time.time()
-        key = str(dedupe_key or "").strip()
-        if key:
-            existing = self._find_by_dedupe_key(key)
-            if existing is not None:
-                if (
-                    existing.sender_thread_id != sender_thread_id
-                    or existing.target_thread_id != target_thread_id
-                    or existing.goal != goal
-                ):
-                    raise ValueError("session task dedupe key reused with different input")
-                return existing
+        key = str(draft.dedupe_key or "").strip()
+        replayed = self._replay_existing(key, draft)
+        if replayed is not None:
+            return replayed
         task = SessionTask(
             task_id=new_id("stask"),
-            sender_thread_id=str(sender_thread_id or ""),
-            target_thread_id=str(target_thread_id or ""),
-            goal=str(goal or ""),
-            body_guidance_id=str(body_guidance_id or ""),
-            body_dedupe_key=str(body_dedupe_key or ""),
+            sender_thread_id=str(draft.sender_thread_id or ""),
+            target_thread_id=str(draft.target_thread_id or ""),
+            goal=str(draft.goal or ""),
+            body_guidance_id=str(draft.body_guidance_id or ""),
+            body_dedupe_key=str(draft.body_dedupe_key or ""),
             dedupe_key=key,
-            origin_task_id=str(origin_task_id or ""),
+            origin_task_id=str(draft.origin_task_id or ""),
             created_at=current,
             updated_at=current,
         )
         write_json_file_atomic(self._path(task.task_id), task.to_dict())
-        if key:
-            write_json_file_atomic(self._dedupe_path(key), {"schema_version": "session_task_dedupe.v1", "task_id": task.task_id})
-        body_key = str(body_dedupe_key or "").strip()
-        if body_key:
-            write_json_file_atomic(
-                self._body_index_path(body_key),
-                {"schema_version": "session_task_body_index.v1", "task_id": task.task_id},
-            )
+        self._write_lookup_indexes(key, str(draft.body_dedupe_key or "").strip(), task.task_id)
         return task
+
+    # LLM: 幂等重放：同 dedupe_key 且同输入返回原记录（不新建、不改状态）；同键异文报错。
+    # 函数用途: 按键重放一条已存在的会话任务；没有可重放的记录时返回 None。
+    def _replay_existing(self, dedupe_key: str, draft: SessionTaskDraft) -> SessionTask | None:
+        if not dedupe_key:
+            return None
+        existing = self._find_by_dedupe_key(dedupe_key)
+        if existing is None:
+            return None
+        if not _draft_matches(existing, draft):
+            raise ValueError("session task dedupe key reused with different input")
+        return existing
+
+    # LLM: 索引只是查找用，权威仍是每任务文件；键为空表示不需要该索引，不写文件。
+    # 函数用途: 写去重索引与正文反向索引。
+    def _write_lookup_indexes(self, dedupe_key: str, body_dedupe_key: str, task_id: str) -> None:
+        pairs = (
+            (self._dedupe_path(dedupe_key), "session_task_dedupe.v1", dedupe_key),
+            (self._body_index_path(body_dedupe_key), "session_task_body_index.v1", body_dedupe_key),
+        )
+        for path, schema_version, key in pairs:
+            if key:
+                _write_index(path, schema_version, task_id)
 
     # LLM: 正文反向索引只做查找，权威仍是每任务文件；坏索引返回 None，不把读坏当"没有任务"处理。
     # 函数用途: 按目标 guidance 队列键找回它对应的会话任务。
@@ -227,15 +268,13 @@ class SessionTaskStore:
         if current.status == SESSION_TASK_QUEUED:
             return self.advance(
                 task_id,
-                status=SESSION_TASK_ACCEPTED,
-                conversation_request_id=bound_turn,
+                SessionTaskUpdate(status=SESSION_TASK_ACCEPTED, conversation_request_id=bound_turn),
                 now=now,
             )
         if current.status == SESSION_TASK_ACCEPTED:
             return self.advance(
                 task_id,
-                status=SESSION_TASK_ACCEPTED,
-                conversation_request_id=bound_turn,
+                SessionTaskUpdate(status=SESSION_TASK_ACCEPTED, conversation_request_id=bound_turn),
                 now=now,
             )
         return current
@@ -243,18 +282,8 @@ class SessionTaskStore:
     # LLM: 状态推进只允许既定迁移；非法迁移不改文件，抛 ValueError 让调用方按结构化错误处理。
     #   终态不可被普通生命周期改写；取消只能从非终态发起。
     # 函数用途: 原子推进一条会话任务的状态与结果字段。
-    def advance(
-        self,
-        task_id: str,
-        *,
-        status: str,
-        summary: str = "",
-        result_refs: tuple[str, ...] = (),
-        conversation_request_id: str = "",
-        task_run_id: str = "",
-        now: float | None = None,
-    ) -> SessionTask:
-        target_status = str(status or "").strip()
+    def advance(self, task_id: str, update: SessionTaskUpdate, *, now: float | None = None) -> SessionTask:
+        target_status = str(update.status or "").strip()
         if target_status not in SESSION_TASK_STATUSES:
             raise ValueError(f"unknown session task status: {target_status}")
         current = now if now is not None else time.time()
@@ -270,10 +299,10 @@ class SessionTaskStore:
             updated = replace(
                 latest,
                 status=target_status,
-                summary=str(summary or latest.summary) if summary else latest.summary,
-                result_refs=tuple(result_refs) if result_refs else latest.result_refs,
-                conversation_request_id=conversation_request_id or latest.conversation_request_id,
-                task_run_id=task_run_id or latest.task_run_id,
+                summary=str(update.summary or latest.summary) if update.summary else latest.summary,
+                result_refs=tuple(update.result_refs) if update.result_refs else latest.result_refs,
+                conversation_request_id=update.conversation_request_id or latest.conversation_request_id,
+                task_run_id=update.task_run_id or latest.task_run_id,
                 updated_at=current,
             )
             return updated.to_dict()
@@ -345,24 +374,34 @@ def bind_session_task_turns(store: object, entries: object, turn_id: str) -> int
         return 0
     bound = 0
     for entry in list(entries or ()):
-        metadata = getattr(entry, "metadata", None)
-        if not isinstance(metadata, dict):
-            continue
-        if str(metadata.get("origin_kind") or "") != SESSION_TASK_ORIGIN_KIND:
-            continue
-        key = str(metadata.get("dedupe_key") or "").strip()
-        if not key:
-            continue
-        try:
-            task = tasks.load_by_body_dedupe_key(key)
-            if task is None or str(task.conversation_request_id or "") == bound_turn:
-                continue
-            updated = tasks.bind_turn(task.task_id, turn_id=bound_turn)
-        except (OSError, ValueError, TypeError):
-            continue
-        if str(getattr(updated, "conversation_request_id", "") or "") == bound_turn:
+        key = _session_task_body_key(entry, SESSION_TASK_ORIGIN_KIND)
+        if key and _bind_one_task_body(tasks, key, bound_turn):
             bound += 1
     return bound
+
+
+# LLM: 单条绑定的失败只影响这一条（读坏索引、非法迁移都不抛给 ack 主流程），返回是否真的绑到了该回合。
+# 函数用途: 把一条任务正文对应的任务绑到目标回合，返回是否绑定成功。
+def _bind_one_task_body(tasks: object, body_key: str, bound_turn: str) -> bool:
+    try:
+        task = tasks.load_by_body_dedupe_key(body_key)
+        if task is None or str(task.conversation_request_id or "") == bound_turn:
+            return False
+        updated = tasks.bind_turn(task.task_id, turn_id=bound_turn)
+    except (OSError, ValueError, TypeError):
+        return False
+    return str(getattr(updated, "conversation_request_id", "") or "") == bound_turn
+
+
+# LLM: 只按结构化 metadata 判定"这条 guidance 是不是某条会话任务的正文"；不解析正文、不看自然语言。
+# 函数用途: 从一条 guidance 条目里取出它引用的会话任务正文队列键；不是任务正文时返回空串。
+def _session_task_body_key(entry: object, origin_kind: str) -> str:
+    metadata = getattr(entry, "metadata", None)
+    if not isinstance(metadata, dict):
+        return ""
+    if str(metadata.get("origin_kind") or "") != origin_kind:
+        return ""
+    return str(metadata.get("dedupe_key") or "").strip()
 
 
 # LLM: 状态机唯一权威：只允许 queued→accepted、accepted→done/failed、queued/accepted→cancelled；

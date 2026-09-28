@@ -17,7 +17,9 @@ from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_TARGET_CHANNEL_UNSUPPORTED,
     SESSION_TARGET_OUT_OF_SCOPE,
     SESSION_TASK_CHAIN_LIMIT,
+    SESSION_TASK_RATE_LIMIT,
 )
+from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
 
 
 class _FakeThread:
@@ -69,6 +71,7 @@ class _FakeStore:
         self.guidance = _FakeGuidance()
         self.wakes = _FakeWakes()
         self.session_tasks = inner.session_tasks
+        self.session_pair_rate = inner.session_pair_rate
 
 
 class _Home:
@@ -153,7 +156,9 @@ def test_chain_limit_rejected(tmp_path) -> None:
     config.session_task_max_chain_depth = 1
     agent, store = _agent(tmp_path, {"thread-b": _FakeThread("thread-b")}, config=config)
     root = store.session_tasks.create(
-        sender_thread_id="X", target_thread_id="Y", goal="根", now=1.0
+        SessionTaskDraft(
+            sender_thread_id="X", target_thread_id="Y", goal="根"
+        ), now=1.0,
     )
     agent.current_session_task_id = root.task_id
     outcome = CreateSessionTaskTool(agent).execute(_params())
@@ -165,6 +170,30 @@ def test_chain_limit_zero_means_unlimited(tmp_path) -> None:
     config = CapabilityConfig()
     config.session_task_max_chain_depth = 0
     agent, store = _agent(tmp_path, {"thread-b": _FakeThread("thread-b")}, config=config)
-    root = store.session_tasks.create(sender_thread_id="X", target_thread_id="Y", goal="根", now=1.0)
+    root = store.session_tasks.create(SessionTaskDraft(sender_thread_id="X", target_thread_id="Y", goal="根"), now=1.0)
     agent.current_session_task_id = root.task_id
     assert CreateSessionTaskTool(agent).execute(_params()).ok
+
+
+def test_pair_limit_blocks_dispatch_and_does_not_create_record(tmp_path) -> None:
+    config = CapabilityConfig()
+    config.session_pair_hourly_limit = 1
+    agent, store = _agent(tmp_path, {"thread-b": _FakeThread("thread-b")}, config=config)
+    store.session_pair_rate.record("thread-a", "thread-b")
+    outcome = CreateSessionTaskTool(agent).execute(_params())
+    assert not outcome.ok
+    assert outcome.error_code == SESSION_TASK_RATE_LIMIT
+    # 被拒的派活不能建记录、不能投正文。
+    assert store.guidance.calls == []
+    assert store.session_tasks.list_report(limit=0)[0] == []
+
+
+def test_dispatch_records_into_pair_quota(tmp_path) -> None:
+    config = CapabilityConfig()
+    config.session_pair_hourly_limit = 1
+    agent, store = _agent(tmp_path, {"thread-b": _FakeThread("thread-b")}, config=config)
+    assert CreateSessionTaskTool(agent).execute(_params()).ok is True
+    assert store.session_pair_rate.count("thread-a", "thread-b") == 1
+    # 配额已被这次派活占满：下一次同样被拒。
+    blocked = CreateSessionTaskTool(agent).execute(_params(goal="另一件事"))
+    assert blocked.error_code == SESSION_TASK_RATE_LIMIT

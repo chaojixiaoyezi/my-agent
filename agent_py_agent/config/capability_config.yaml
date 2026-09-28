@@ -111,5 +111,5 @@ session_messaging_user_enabled: false
 session_task_admin_enabled: true
 # 派活链深度上限：由对端任务触发的任务会沿着 origin_task_id 链累计，超过就拒绝；0 表示不限制。
 session_task_max_chain_depth: 4
-# 每对会话（发送会话, 接收会话）每小时的消息上限；task 完成后的回报消息也计入；0 表示不限制。
+# 每对会话（发送会话, 接收会话）每小时的消息上限；任务回报与取消通知也计入；0 表示不限制。
 session_pair_hourly_limit: 60

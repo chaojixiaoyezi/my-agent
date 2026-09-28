@@ -37,11 +37,11 @@ class CapabilityConfig:
     session_messaging_admin_enabled: bool = True
     # 普通用户（owner_kind=user）发消息开关；默认关，做用户隔离时再打开。
     session_messaging_user_enabled: bool = False
-    # 管理员之间的会话派任务开关；默认开。
+    # 管理员（owner_kind=main）之间的会话派任务开关；默认开。
     session_task_admin_enabled: bool = True
-    # 派活链深度上限：由对端 task 触发的 task 按 origin_task_id 链结构化计算；0 表示不限制。
+    # 派活链深度上限：由对端任务触发的任务会沿着 origin_task_id 链累计，超过就拒绝；0 表示不限制。
     session_task_max_chain_depth: int = 4
-    # 每对会话（发送 thread, 接收 thread）每小时消息上限；0 表示不限制。
+    # 每对会话（发送会话, 接收会话）每小时的消息上限；任务回报与取消通知也计入；0 表示不限制。
     session_pair_hourly_limit: int = 60
     enable_capability_package_recommendations: bool = True
     enable_capability_package_selection: bool = False

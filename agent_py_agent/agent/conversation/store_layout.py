@@ -42,6 +42,8 @@ class ConversationStorage:
         self.tasks_dir = self.root / "tasks"
         # 会话间派活记录（第一期）：每任务一个 JSON，正文仍只存在 guidance 里。
         self.session_tasks_dir = self.root / "session_tasks"
+        # 每对会话每小时的计数（结构化节流，不是业务权威账本）。
+        self.session_pair_rate_dir = self.root / "session_pair_rate"
         self.policies_dir = self.root / "progress_policies"
         self.observations_dir = self.root / "observations"
         self.guidance_dir = self.root / "guidance"
@@ -79,6 +81,7 @@ class ConversationStorage:
             self.tasks_dir,
             self.session_tasks_dir,
             self.session_tasks_dir / "dedupe",
+            self.session_pair_rate_dir,
             self.policies_dir,
             self.observations_dir,
             self.guidance_dir,

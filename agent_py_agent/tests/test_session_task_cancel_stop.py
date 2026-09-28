@@ -25,7 +25,11 @@ from agent_py_agent.agent.concurrency.interrupt import (
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation.control_commands import conversation_request_interrupt_name
 from agent_py_agent.agent.conversation.models import ChannelBinding
-from agent_py_agent.agent.conversation.session_tasks import bind_session_task_turns
+from agent_py_agent.agent.conversation.session_tasks import (
+    SessionTaskDraft,
+    SessionTaskUpdate,
+    bind_session_task_turns,
+)
 from agent_py_agent.agent.gateway_parts.session_task_stop import (
     SessionTaskStopOutcome,
     stop_session_task_turn,
@@ -115,12 +119,14 @@ def _queued_task(agent: object, *, turn_id: str = "") -> object:
         dedupe_key=body_key,
     )
     task = store.session_tasks.create(
-        sender_thread_id=_SENDER_THREAD_ID,
-        target_thread_id=_TARGET_THREAD_ID,
-        goal="做 X",
-        body_guidance_id=body.guidance_id,
-        body_dedupe_key=body_key,
-        dedupe_key=dedupe_key,
+        SessionTaskDraft(
+            sender_thread_id=_SENDER_THREAD_ID,
+            target_thread_id=_TARGET_THREAD_ID,
+            goal="做 X",
+            body_guidance_id=body.guidance_id,
+            body_dedupe_key=body_key,
+            dedupe_key=dedupe_key,
+        )
     )
     if turn_id:
         store.session_tasks.bind_turn(task.task_id, turn_id=turn_id)
@@ -210,7 +216,7 @@ def test_cancel_terminal_task_does_not_send_stop(tmp_path, monkeypatch) -> None:
     agent = _agent(tmp_path)
     task = _queued_task(agent, turn_id=_TURN_ID)
     store = agent.conversation_store.session_tasks
-    store.advance(task.task_id, status="done")
+    store.advance(task.task_id, SessionTaskUpdate("done"))
     called: list[str] = []
     monkeypatch.setattr(
         session_task_control,
@@ -241,7 +247,7 @@ def test_bind_session_task_turns_records_target_turn_once(tmp_path) -> None:
 
     # 同一回合重复确认幂等；终态后不再接受新的回合绑定。
     assert bind_session_task_turns(store, entries, _TURN_ID) == 0
-    store.session_tasks.advance(task.task_id, status="done")
+    store.session_tasks.advance(task.task_id, SessionTaskUpdate("done"))
     assert bind_session_task_turns(store, entries, "req-other") == 0
     assert store.session_tasks.load(task.task_id).conversation_request_id == _TURN_ID
 

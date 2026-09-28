@@ -14,6 +14,7 @@ from agent_py_agent.agent.agent_core.orchestration.tools.send_session_message im
 )
 from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_TARGET_OUT_OF_SCOPE,
+    SESSION_TASK_RATE_LIMIT,
 )
 
 
@@ -147,3 +148,53 @@ def test_inactive_target_is_queued_but_not_woken() -> None:
     assert payload["wake_signal_id"] == ""
     assert len(store.guidance.calls) == 1
     assert store.wakes.signals == []
+
+
+def _limited_store(tmp_path, limit: int, *, used: int = 0) -> _FakeStore:
+    """给 fake store 挂上真实计数器，用来验证限额真的在工具入口生效。"""
+    from agent_py_agent.agent.conversation import ConversationStore
+
+    store = _FakeStore({"thread-b": _FakeThread("thread-b")})
+    store.session_pair_rate = ConversationStore(tmp_path).session_pair_rate
+    for _ in range(used):
+        store.session_pair_rate.record("thread-a", "thread-b")
+    agent_config_limit = limit
+    return store, agent_config_limit
+
+
+def test_pair_limit_blocks_send_and_does_not_queue(tmp_path) -> None:
+    store, limit = _limited_store(tmp_path, 2, used=2)
+    agent = _FakeAgent(store)
+    agent.capability_config = type(
+        "_C", (), {"session_pair_hourly_limit": limit, "session_messaging_admin_enabled": True,
+                   "session_messaging_user_enabled": False, "session_task_admin_enabled": True}
+    )()
+    outcome = SendSessionMessageTool(agent).execute(_params())
+    assert not outcome.ok
+    assert outcome.error_code == SESSION_TASK_RATE_LIMIT
+    # 被拒的消息不能投递，也不能占用配额。
+    assert store.guidance.calls == []
+    assert store.session_pair_rate.count("thread-a", "thread-b") == 2
+
+
+def test_pair_limit_allows_until_limit_then_blocks(tmp_path) -> None:
+    store, limit = _limited_store(tmp_path, 2, used=1)
+    agent = _FakeAgent(store)
+    agent.capability_config = type(
+        "_C", (), {"session_pair_hourly_limit": limit, "session_messaging_admin_enabled": True,
+                   "session_messaging_user_enabled": False, "session_task_admin_enabled": True}
+    )()
+    assert SendSessionMessageTool(agent).execute(_params()).ok is True
+    assert store.session_pair_rate.count("thread-a", "thread-b") == 2
+    blocked = SendSessionMessageTool(agent).execute(_params(message="第二条"))
+    assert blocked.error_code == SESSION_TASK_RATE_LIMIT
+
+
+def test_zero_limit_means_unlimited(tmp_path) -> None:
+    store, _ = _limited_store(tmp_path, 0, used=50)
+    agent = _FakeAgent(store)
+    agent.capability_config = type(
+        "_C", (), {"session_pair_hourly_limit": 0, "session_messaging_admin_enabled": True,
+                   "session_messaging_user_enabled": False, "session_task_admin_enabled": True}
+    )()
+    assert SendSessionMessageTool(agent).execute(_params()).ok is True

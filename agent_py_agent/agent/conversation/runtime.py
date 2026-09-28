@@ -904,7 +904,7 @@ def _close_out_session_task_turn(
     request: BackgroundRunRequest,
     execution: BackgroundExecutionResult,
 ) -> None:
-    from .session_task_report import close_out_turn
+    from .session_task_report import TaskTurnOutcome, close_out_turn
 
     turn_id = str(getattr(request, "task_id", "") or "").strip()
     if not turn_id:
@@ -913,7 +913,7 @@ def _close_out_session_task_turn(
         close_out_turn(
             agent,
             turn_id,
-            ok=not bool(getattr(execution, "error", None)),
+            TaskTurnOutcome(ok=not bool(getattr(execution, "error", None))),
         )
     except Exception:  # noqa: BLE001 - 回报属于附加交付，不能让回合本身失败
         return

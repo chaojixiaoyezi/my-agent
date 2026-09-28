@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from ....conversation.session_tasks import (
     SESSION_TASK_CANCELLED,
     SESSION_TASK_TERMINAL_STATUSES,
+    SessionTaskUpdate,
 )
 from ....runtime_errors import runtime_error_report
 from ....tooling.models import (
@@ -37,6 +38,17 @@ _CANCEL_NAME = "cancel_session_task"
 @dataclass(frozen=True)
 class _TaskRef:
     task_id: str
+
+
+# LLM: 失败形状（错误码 + 影响面 + 面向用户的说明）打包传递，避免每个失败点都重复长参数列表。
+# 类用途: 描述一次会话任务操作的机器可读失败。
+@dataclass(frozen=True)
+class _TaskFailure:
+    error_code: str
+    message: str
+    tool: str = ""
+    details: dict[str, object] | None = None
+    effect_outcome: str = "not_started"
 
 
 # LLM: 只读工具：返回任务的权威状态、正文引用与结果 refs；不改任何状态。
@@ -103,62 +115,114 @@ class CancelSessionTaskTool(BaseTool):
     #   回执只按实际结果写"已停止""已撤销"或"未确认"。
     # 函数用途: 取消一条会话任务、真的叫停目标并把实际结果通知给派活的会话。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
-        ref = _task_ref(params, _CANCEL_NAME)
-        if isinstance(ref, ToolHandlerOutcome):
-            return ref
-        store = _session_task_store(self.agent)
-        if isinstance(store, ToolHandlerOutcome):
-            return store
-        task = _load_task(store, ref.task_id, _CANCEL_NAME)
-        if isinstance(task, ToolHandlerOutcome):
-            return task
-        if task.status in SESSION_TASK_TERMINAL_STATUSES:
-            payload = _task_payload(task)
-            payload["already_terminal"] = True
-            payload["message"] = "任务已经是终态，未做改动。"
-            return ToolHandlerOutcome(_CANCEL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
-        bound_turn_id = str(getattr(task, "conversation_request_id", "") or "").strip()
-        stop_confirmed = False
-        stop_message = ""
-        withdrawn = False
-        withdraw_note = ""
-        try:
-            if bound_turn_id:
-                stop = _stop_target_turn(self.agent, task)
-                stop_confirmed = bool(stop.confirmed)
-                stop_message = str(stop.message or "")
-            else:
-                withdrawn, withdraw_note = _withdraw_queued_body(self.agent, task)
-            cancelled = store.advance(task.task_id, status=SESSION_TASK_CANCELLED)
-            notified = _notify_sender(self.agent, cancelled)
-        except Exception as exc:  # noqa: BLE001
-            return _error(
-                "取消会话任务失败；状态未改变。",
-                tool=_CANCEL_NAME,
+        resolved = _resolve_cancel_target(self.agent, params)
+        if isinstance(resolved, ToolHandlerOutcome):
+            return resolved
+        payload = _cancel_and_describe(self.agent, resolved)
+        if isinstance(payload, ToolHandlerOutcome):
+            return payload
+        return ToolHandlerOutcome(_CANCEL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# LLM: 一次取消的结构化结果：终态记录 + 是否已通知发送方 + 停止/撤队列的实际结果 + 面向用户的说明。
+# 类用途: 保存一次取消的实际影响面，供回执如实呈现。
+@dataclass(frozen=True)
+class _CancelOutcome:
+    task: object
+    notified: bool
+    details: dict[str, object]
+    message: str
+
+
+# LLM: 校验参数 → 取存储 → 读任务 → 终态直接返回当前状态（不改写）。
+# 函数用途: 解析本次要取消的任务；不能取消时返回结构化结果（失败或"已是终态"）。
+def _resolve_cancel_target(agent: object, params: dict[str, object]) -> object | ToolHandlerOutcome:
+    ref = _task_ref(params, _CANCEL_NAME)
+    if isinstance(ref, ToolHandlerOutcome):
+        return ref
+    store = _session_task_store(agent)
+    if isinstance(store, ToolHandlerOutcome):
+        return store
+    task = _load_task(store, ref.task_id, _CANCEL_NAME)
+    if isinstance(task, ToolHandlerOutcome):
+        return task
+    if str(getattr(task, "status", "") or "") in SESSION_TASK_TERMINAL_STATUSES:
+        return _terminal_task_outcome(task)
+    return task
+
+
+# LLM: 已是终态的任务按幂等处理：只回报当前状态，不改写、不发控制。
+# 函数用途: 把"任务已是终态"转成一次成功的只读回执。
+def _terminal_task_outcome(task: object) -> ToolHandlerOutcome:
+    payload = _task_payload(task)
+    payload["already_terminal"] = True
+    payload["message"] = "任务已经是终态，未做改动。"
+    return ToolHandlerOutcome(_CANCEL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# LLM: 取消的实际动作 + 结果描述；异常按"状态未改变"的结构化失败返回，不谎称已停止。
+# 函数用途: 执行取消并生成模型可读的回执载荷。
+def _cancel_and_describe(agent: object, task: object) -> dict[str, object] | ToolHandlerOutcome:
+    store = _session_task_store(agent)
+    if isinstance(store, ToolHandlerOutcome):
+        return store
+    bound_turn_id = str(getattr(task, "conversation_request_id", "") or "").strip()
+    try:
+        outcome = _apply_cancel(agent, store, task, bound_turn_id)
+    except Exception as exc:  # noqa: BLE001
+        return _failure(
+            _TaskFailure(
                 error_code="TOOL_EXECUTION_FAILED",
+                message="取消会话任务失败；状态未改变。",
+                tool=_CANCEL_NAME,
                 details=runtime_error_report(exc, context="cancel_session_task.advance"),
                 effect_outcome="unknown",
             )
-        payload = _task_payload(cancelled)
-        payload["notified_sender"] = notified
-        if bound_turn_id:
-            payload["stop_confirmed"] = stop_confirmed
-            payload["stop_message"] = stop_message
-            payload["message"] = (
-                "任务已取消：已停止目标上正在执行这个任务的回合。"
-                if stop_confirmed
-                else "任务已取消；对目标执行这个任务的回合，停止控制尚未确认。"
-            )
-        else:
-            payload["withdrawn_from_queue"] = withdrawn
-            if withdraw_note:
-                payload["withdraw_note"] = withdraw_note
-            payload["message"] = (
-                "任务还没有开始执行；已从目标队列撤销，不会再被执行。"
-                if withdrawn
-                else "任务还没有开始执行；已标记取消，但目标队列条目未确认撤销。"
-            )
-        return ToolHandlerOutcome(_CANCEL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+        )
+    payload = _task_payload(outcome.task)
+    payload["notified_sender"] = outcome.notified
+    payload.update(outcome.details)
+    payload["message"] = outcome.message
+    return payload
+
+
+# LLM: 已接手 → 对绑定的那个回合发 /stop 同款精确停止控制；还在排队 → 撤掉目标队列里的正文。
+#   两条路径都推进到 cancelled；只有停止控制真的确认生效时文案才说"已停止"。
+# 函数用途: 真的叫停目标（或撤队列）并把任务推进到已取消。
+def _apply_cancel(
+    agent: object, store: object, task: object, bound_turn_id: str
+) -> _CancelOutcome:
+    if bound_turn_id:
+        stop = _stop_target_turn(agent, task)
+        confirmed = bool(stop.confirmed)
+        details: dict[str, object] = {
+            "stop_confirmed": confirmed,
+            "stop_message": str(stop.message or ""),
+        }
+        message = (
+            "任务已取消：已停止目标上正在执行这个任务的回合。"
+            if confirmed
+            else "任务已取消；对目标执行这个任务的回合，停止控制尚未确认。"
+        )
+    else:
+        withdrawn, note = _withdraw_queued_body(agent, task)
+        details = {"withdrawn_from_queue": withdrawn}
+        if note:
+            details["withdraw_note"] = note
+        message = (
+            "任务还没有开始执行；已从目标队列撤销，不会再被执行。"
+            if withdrawn
+            else "任务还没有开始执行；已标记取消，但目标队列条目未确认撤销。"
+        )
+    cancelled = store.advance(
+        str(getattr(task, "task_id", "") or ""), SessionTaskUpdate(status=SESSION_TASK_CANCELLED)
+    )
+    return _CancelOutcome(
+        task=cancelled,
+        notified=_notify_sender(agent, cancelled),
+        details=details,
+        message=message,
+    )
 
 
 # LLM: 只按任务已绑定的回合号发停止控制：回合号来自目标会话确认消费任务正文时写入的记录，
@@ -233,7 +297,13 @@ def _task_payload(task: object) -> dict[str, object]:
 def _task_ref(params: dict[str, object], tool: str) -> _TaskRef | ToolHandlerOutcome:
     task_id = str(params.get("task_id") or "").strip()
     if not task_id:
-        return _error("缺少 task_id（要查询或取消的会话任务编号）。", tool=tool, error_code="TOOL_PARAMETER_REQUIRED")
+        return _failure(
+            _TaskFailure(
+                error_code="TOOL_PARAMETER_REQUIRED",
+                message="缺少 task_id（要查询或取消的会话任务编号）。",
+                tool=tool,
+            )
+        )
     return _TaskRef(task_id=task_id)
 
 
@@ -243,8 +313,12 @@ def _session_task_store(agent: object) -> object | ToolHandlerOutcome:
     store = getattr(agent, "conversation_store", None)
     tasks = getattr(store, "session_tasks", None)
     if tasks is None:
-        return _error(
-            "当前运行环境没有会话任务存储。", tool=_GET_NAME, error_code="TOOL_EXECUTION_FAILED"
+        return _failure(
+            _TaskFailure(
+                error_code="TOOL_EXECUTION_FAILED",
+                message="当前运行环境没有会话任务存储。",
+                tool=_GET_NAME,
+            )
         )
     return tasks
 
@@ -255,14 +329,22 @@ def _load_task(store: object, task_id: str, tool: str) -> object | ToolHandlerOu
     try:
         task = store.load(task_id)
     except (ValueError, TypeError) as exc:
-        return _error(
-            "读取会话任务失败。",
-            tool=tool,
-            error_code="TOOL_EXECUTION_FAILED",
-            details=runtime_error_report(exc, context="session_task.load"),
+        return _failure(
+            _TaskFailure(
+                error_code="TOOL_EXECUTION_FAILED",
+                message="读取会话任务失败。",
+                tool=tool,
+                details=runtime_error_report(exc, context="session_task.load"),
+            )
         )
     if task is None:
-        return _error(f"找不到会话任务：{task_id}。", tool=tool, error_code="SESSION_TASK_NOT_FOUND")
+        return _failure(
+            _TaskFailure(
+                error_code="SESSION_TASK_NOT_FOUND",
+                message=f"找不到会话任务：{task_id}。",
+                tool=tool,
+            )
+        )
     return task
 
 
@@ -293,7 +375,16 @@ def _notify_sender(agent: object, task: object) -> bool:
         )
     except Exception:  # noqa: BLE001 - 通知失败不改变取消已生效的事实
         return False
+    _record_pair(store, str(getattr(task, "target_thread_id", "") or ""), sender)
     return True
+
+
+# LLM: 取消通知也是宿主自动发出、不会被拒的消息，但必须占用每对会话配额；写失败不影响通知已投递。
+# 函数用途: 把一条取消通知计入目标方与发送方之间的配额。
+def _record_pair(store: object, sender_thread_id: str, target_thread_id: str) -> None:
+    from ....conversation.session_pair_rate import record_pair_message
+
+    record_pair_message(store, sender_thread_id, target_thread_id)
 
 
 # LLM: 模型 schema 只暴露 task_id；查询是只读，取消是结构化控制动作。
@@ -347,20 +438,17 @@ def build_cancel_session_task_model_spec() -> ToolModelSpec:
 
 # LLM: 所有失败必须带稳定 error_code；details 只承载结构化诊断。
 # 函数用途: 统一生成这两个工具的机器可读失败。
-def _error(
-    message: str,
-    *,
-    tool: str,
-    error_code: str,
-    details: dict[str, object] | None = None,
-    effect_outcome: str = "not_started",
-) -> ToolHandlerOutcome:
-    payload: dict[str, object] = {"ok": False, "error": "session_task_operation_failed", "message": message}
-    if details:
-        payload["details"] = details
+def _failure(failure: _TaskFailure) -> ToolHandlerOutcome:
+    payload: dict[str, object] = {
+        "ok": False,
+        "error": "session_task_operation_failed",
+        "message": failure.message,
+    }
+    if failure.details:
+        payload["details"] = failure.details
     return ToolHandlerOutcome(
-        tool, False, json.dumps(payload, ensure_ascii=False, indent=2),
-        error_code=error_code, effect_outcome=effect_outcome,
+        failure.tool, False, json.dumps(payload, ensure_ascii=False, indent=2),
+        error_code=failure.error_code, effect_outcome=failure.effect_outcome,
     )
 
 

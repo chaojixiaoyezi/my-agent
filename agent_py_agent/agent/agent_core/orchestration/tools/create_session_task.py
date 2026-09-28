@@ -19,6 +19,7 @@ from ....conversation.session_messaging import (
     SessionMessagingRequest,
     decide_session_messaging,
 )
+from ....conversation.session_tasks import SessionTaskDraft
 from ....runtime_errors import runtime_error_report
 from ....tooling.models import (
     BaseTool,
@@ -109,13 +110,35 @@ class CreateSessionTaskTool(BaseTool):
         if not decision.allowed:
             return _denied(decision.error_code, decision.scope_warnings)
 
+        limit_error = _pair_limit_error(self.agent, sender_thread_id, parsed.target_thread_id, config)
+        if limit_error is not None:
+            return limit_error
+
         return _create_and_dispatch(
             self.agent,
-            parsed,
-            sender_thread_id=sender_thread_id,
-            target_thread=target_thread,
-            config=config,
+            _dispatch_plan(sender_thread_id, parsed, _origin_task_id(self.agent)),
+            target_thread,
+            config,
         )
+
+
+# LLM: 每对会话每小时限额（与发消息共用同一计数与配置键）；0 表示不限制，没有计数器时放行。
+#   在真正建记录前判断，避免被拒的任务占用配额。
+# 函数用途: 判断这次派活是否超出每对会话限额，超出时返回结构化失败。
+def _pair_limit_error(
+    agent: object, sender_thread_id: str, target_thread_id: str, config: object
+) -> ToolHandlerOutcome | None:
+    from ....conversation.session_pair_rate import pair_limit_reached
+
+    limit = int(getattr(config, "session_pair_hourly_limit", 0) or 0)
+    store = getattr(agent, "conversation_store", None)
+    if not pair_limit_reached(store, sender_thread_id, target_thread_id, limit):
+        return None
+    return _error(
+        f"这一对会话每小时的条数已达上限（{limit}）；任务没有派发。",
+        error_code=SESSION_TASK_RATE_LIMIT,
+        details={"limit": limit, "sender_thread_id": sender_thread_id, "target_thread_id": target_thread_id},
+    )
 
 
 # LLM: 缺目标或缺任务描述都是无副作用的协议失败；不从当前会话或历史正文里推断。
@@ -194,51 +217,64 @@ def _chain_limit_error(store: object, origin_task_id: str, config: object) -> To
     return None
 
 
+# LLM: 只承载一次派发的结构化输入；发送方、目标与链来源都来自宿主上下文，不是模型参数。
+# 类用途: 保存一次派发的目标、正文与链路来源。
+@dataclass(frozen=True)
+class _DispatchPlan:
+    sender_thread_id: str
+    target_thread_id: str
+    goal: str
+    origin_task_id: str = ""
+
+
+# LLM: 链来源只读宿主结构化字段；本工具不接受模型传入的链深或父任务。
+# 函数用途: 取当前会话所属的会话任务编号（无则为空串）。
+def _origin_task_id(agent: object) -> str:
+    return str(getattr(agent, "current_session_task_id", "") or "").strip()
+
+
+# LLM: 把已校验的参数与宿主身份合成派发计划；纯计算，不做任何 IO。
+# 函数用途: 组装一次派发的结构化输入。
+def _dispatch_plan(
+    sender_thread_id: str, parsed: _CreateTaskInput, origin_task_id: str
+) -> _DispatchPlan:
+    return _DispatchPlan(
+        sender_thread_id=sender_thread_id,
+        target_thread_id=parsed.target_thread_id,
+        goal=parsed.goal,
+        origin_task_id=origin_task_id,
+    )
+
+
 # LLM: 建记录 → 投正文（guidance，幂等）→ 目标 active 时唤醒。正文只存一份，记录里只留它的 id。
 #   记录先于正文写入，保证记录里引用的 guidance id 一定存在。
 # 函数用途: 落权威记录并把任务正文投递给目标会话。
 def _create_and_dispatch(
     agent: object,
-    parsed: _CreateTaskInput,
-    *,
-    sender_thread_id: str,
+    plan: _DispatchPlan,
     target_thread: object,
     config: object,
 ) -> ToolHandlerOutcome:
     store = agent.conversation_store
-    origin_task_id = str(getattr(agent, "current_session_task_id", "") or "").strip()
-    if limit_error := _chain_limit_error(store, origin_task_id, config):
+    if limit_error := _chain_limit_error(store, plan.origin_task_id, config):
         return limit_error
 
-    dedupe_key = f"session_task:{sender_thread_id}->{parsed.target_thread_id}:{parsed.goal}"
+    dedupe_key = f"session_task:{plan.sender_thread_id}->{plan.target_thread_id}:{plan.goal}"
     body_dedupe_key = f"body:{dedupe_key}"
     try:
-        # 先投正文：它是任务正文的唯一存放处。正文队列键同时写进记录，取消未开始的任务时按它撤队列。
-        body = store.guidance.append_once(
-            {
-                "target_type": "thread",
-                "target_id": parsed.target_thread_id,
-                "message": parsed.goal,
-                "sender": sender_thread_id or "session",
-                "priority": "normal",
-                "delivery": "next_turn",
-                "metadata": {
-                    "origin_kind": SESSION_TASK_ORIGIN_KIND,
-                    "origin_thread_id": sender_thread_id,
-                },
-            },
-            dedupe_key=body_dedupe_key,
-        )
+        body = _queue_body(store, plan, body_dedupe_key)
         task = store.session_tasks.create(
-            sender_thread_id=sender_thread_id,
-            target_thread_id=parsed.target_thread_id,
-            goal=parsed.goal,
-            body_guidance_id=body.guidance_id,
-            body_dedupe_key=body_dedupe_key,
-            dedupe_key=dedupe_key,
-            origin_task_id=origin_task_id,
+            SessionTaskDraft(
+                sender_thread_id=plan.sender_thread_id,
+                target_thread_id=plan.target_thread_id,
+                goal=plan.goal,
+                body_guidance_id=body.guidance_id,
+                body_dedupe_key=body_dedupe_key,
+                dedupe_key=dedupe_key,
+                origin_task_id=plan.origin_task_id,
+            )
         )
-        wake_id = _maybe_wake(store, target_thread, sender_thread_id, task.task_id)
+        wake_id = _maybe_wake(store, target_thread, plan.sender_thread_id, task.task_id)
     except Exception as exc:  # noqa: BLE001
         return _error(
             "派发会话任务失败；任务没有派发。",
@@ -246,11 +282,13 @@ def _create_and_dispatch(
             details=runtime_error_report(exc, context="create_session_task.dispatch"),
             effect_outcome="unknown",
         )
+    # 派发成功后计入每对会话配额（与消息、回报共用同一计数）。
+    _record_pair(store, plan.sender_thread_id, plan.target_thread_id)
     payload = {
         "ok": True,
         "task_id": task.task_id,
         "status": task.status,
-        "target_thread_id": parsed.target_thread_id,
+        "target_thread_id": plan.target_thread_id,
         "body_guidance_id": task.body_guidance_id,
         "wake_signal_id": wake_id,
         "message": (
@@ -259,6 +297,35 @@ def _create_and_dispatch(
         ),
     }
     return ToolHandlerOutcome(_CREATE_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# LLM: 计数写失败只影响节流精度，不影响已派发的任务；吞掉异常。
+# 函数用途: 把一次已派发的任务计入每对会话配额。
+def _record_pair(store: object, sender_thread_id: str, target_thread_id: str) -> None:
+    from ....conversation.session_pair_rate import record_pair_message
+
+    record_pair_message(store, sender_thread_id, target_thread_id)
+
+
+# LLM: 正文是任务正文的唯一存放处；来源标为 session_task，注入时按宿主事件呈现，不冒充用户原话。
+#   队列键同时写进任务记录，取消未开始的任务时按它撤队列。
+# 函数用途: 把任务正文作为一条 guidance 条目投进目标会话队列。
+def _queue_body(store: object, plan: _DispatchPlan, body_dedupe_key: str) -> object:
+    return store.guidance.append_once(
+        {
+            "target_type": "thread",
+            "target_id": plan.target_thread_id,
+            "message": plan.goal,
+            "sender": plan.sender_thread_id or "session",
+            "priority": "normal",
+            "delivery": "next_turn",
+            "metadata": {
+                "origin_kind": SESSION_TASK_ORIGIN_KIND,
+                "origin_thread_id": plan.sender_thread_id,
+            },
+        },
+        dedupe_key=body_dedupe_key,
+    )
 
 
 # LLM: 目标仍 active 才唤醒；返回 wake id 供回执展示，不承诺目标已消费。

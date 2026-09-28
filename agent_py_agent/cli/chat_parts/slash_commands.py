@@ -222,17 +222,8 @@ def _received_session_messages(store: object, thread_id: str) -> tuple[list[str]
         return [], []
     rows: list[str] = []
     for entry in entries:
-        metadata = getattr(entry, "metadata", None)
-        if not isinstance(metadata, dict):
-            continue
-        kind = str(metadata.get("origin_kind") or "")
-        if kind == "session_message":
-            label = "消息"
-        elif kind == "session_task":
-            label = "派活任务"
-        elif kind == "session_task_result":
-            label = "任务回报"
-        else:
+        label = _received_message_label(entry)
+        if not label:
             # 普通用户插话不是"收到的会话消息"，这里不列。
             continue
         source = str(getattr(entry, "sender", "") or "") or "未知来源"
@@ -242,6 +233,19 @@ def _received_session_messages(store: object, thread_id: str) -> tuple[list[str]
         delivered = float(getattr(entry, "delivered_at", 0.0) or 0.0) > 0
         rows.append(f"- [{label}] 来自 {source}：{text}（{'已注入' if delivered else '待注入'}）")
     return rows, list(load_errors or [])
+
+
+# LLM: 只认结构化 origin_kind，不看正文；返回空串表示这条条目不该出现在"收到的会话消息"里。
+# 函数用途: 把一条 guidance 条目的来源类型映射成展示标签。
+def _received_message_label(entry: object) -> str:
+    metadata = getattr(entry, "metadata", None)
+    if not isinstance(metadata, dict):
+        return ""
+    return {
+        "session_message": "消息",
+        "session_task": "派活任务",
+        "session_task_result": "任务回报",
+    }.get(str(metadata.get("origin_kind") or ""), "")
 
 
 # LLM: 任务归属只按结构化 target_thread_id 判断；状态直接来自记录，不推断。
@@ -365,6 +369,11 @@ def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str)
     )
     if not decision.allowed:
         return f"消息没有投递。（{decision.error_code}）"
+    limit = int(getattr(config, "session_pair_hourly_limit", 0) or 0)
+    from ...agent.conversation.session_pair_rate import pair_limit_reached, record_pair_message
+
+    if pair_limit_reached(store, ctx.conversation_id, target_thread_id, limit):
+        return f"这一对会话每小时的消息条数已达上限（{limit}）；消息没有投递。（SESSION_TASK_RATE_LIMIT）"
     try:
         entry = store.guidance.append_once(
             {
@@ -394,6 +403,7 @@ def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str)
                 wake_id = str(getattr(signal, "wake_signal_id", "") or "")
     except Exception:
         return "写入目标会话消息箱失败；消息没有投递。（TOOL_EXECUTION_FAILED）"
+    record_pair_message(store, ctx.conversation_id, target_thread_id)
     suffix = f"，已唤醒 {wake_id}" if wake_id else ""
     return f"消息已耐久排队到 {target_thread_id}（{entry.guidance_id}）{suffix}。目标会在回合边界读取；这不代表已执行。"
 

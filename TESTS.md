@@ -1,5 +1,45 @@
 # 测试与发布验收
 
+## 会话间消息与派活第 4 片：code-size 压回 + 每对会话限额真生效 + 文档收尾（2026-09-28，分支 `my-agent/self-dev-3`，基于 main `059f2bf2e`）
+
+- **来源**：dev 13:15 的第 4 片要求——①压回第 3 片新增的 code-size 发现项（soft 清零、high-risk 尽量清，
+  参数 ≤4、嵌套 ≤2、类 ≤200 行）；②每对会话每小时限额必须真的生效，**回报消息也计入**；
+  ③配置注释一致性；④设计文档状态改成"第一期已实现"。
+- **做法（行为不变的重构）**：
+  - `session_tasks.py`：`SessionTaskDraft` / `SessionTaskUpdate` 打包参数；拆出 `_replay_existing`、
+    `_write_lookup_indexes`、`_bind_one_task_body`、`_session_task_body_key`，`create`/`bind_session_task_turns`
+    的嵌套与参数降下来。
+  - `session_task_control.py`：`execute` 从 59 行降到 13 行——拆出 `_resolve_cancel_target`、
+    `_terminal_task_outcome`、`_cancel_and_describe`、`_apply_cancel`；失败形状收进 `_TaskFailure`
+    （原 `_error` 的 5 个参数降到 1 个），取消结果收进 `_CancelOutcome`。
+  - `session_task_report.py`：新增 `TaskTurnOutcome` 打包回合结果，`finish_task_for_turn` / `close_out_turn`
+    参数 5→2（`runtime.py` 调用点同步）。
+  - `create_session_task.py`：新增 `_DispatchPlan` / `_origin_task_id` / `_dispatch_plan` / `_queue_body`。
+  - `loop_support.py`：把原生 IR 开头项拆成 `_native_turn_opener` + `_host_event_source`（行为不变，
+    仍是"生命周期唤醒/派活 → 宿主事件，普通回合 → 用户轮"）。
+  - `slash_commands.py`：拆出 `_received_message_label`。
+  - `test_session_task_e2e_flow.py`：`_Threads.resolve` 拆出 `_binding_matches`。
+- **code-size 证据**：以 `e726d03ad`（第 3 片之前）为基线，按"发现项身份 + 级别"求差，
+  第 3 片带来的新增发现项从 **13 项（9 high-risk + 4 soft）降到 0 项**。
+- **限额真生效（关键修复）**：`session_pair_hourly_limit` 之前**只有定义、没有任何读取点**——限额其实没生效。
+  新增 `agent_py_agent/agent/conversation/session_pair_rate.py`（`SessionPairRateLimiter` + `pair_limit_reached`
+  + `record_pair_message`），在 `ConversationStore` 组装、`store_layout` 里建 `session_pair_rate/` 目录；
+  接线点四处：
+  - `send_session_message`（模型工具）与 `/tell`（TUI）：投递前判断，超限返回 `SESSION_TASK_RATE_LIMIT` 且**不投递、不占配额**；
+  - `create_session_task`（模型工具）：建记录前判断，同上；
+  - **任务回报（`session_task_report`）与取消通知（`session_task_control`）**：宿主自动消息**不被拒**，但**计入配额**——
+    这是 dev 明确要求的"回报也计入"，否则回报可以绕过限额。
+- **新测试**：
+  - `test_session_pair_rate_limit.py`（7 项）：分桶独立、窗口跨小时归零、`limit=0` 不限制、空 thread id 不计数、
+    没有计数器组件时 helper 不报错。
+  - `test_send_session_message_tool.py` 新增 3 项：超限被拒且不入队不占配额、到上限前放行、`0` 不限制。
+  - `test_create_session_task_tool.py` 新增 2 项：超限不建记录不投正文、派发后占配额。
+  - `test_tell_command.py` 新增 2 项：TUI 入口同样受限、成功后占配额。
+  - `test_session_task_report.py` 新增 2 项：**任务回报**与**取消通知**都计入配额。
+- **变异验证**：把 `over_limit` 临时改成恒 `False`（即限额失效）后，7 项相关测试变红；恢复后全绿。
+- **复现**：
+  `python3 -m pytest agent_py_agent/tests/test_session_pair_rate_limit.py agent_py_agent/tests/test_send_session_message_tool.py agent_py_agent/tests/test_create_session_task_tool.py agent_py_agent/tests/test_tell_command.py agent_py_agent/tests/test_session_task_report.py -q`
+
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`）
 
 ## 会话间消息与派活第 3 片 F：端到端（派活 → 执行 → 回报 / 执行中取消）（2026-09-28，分支 `my-agent/self-dev-3`）
