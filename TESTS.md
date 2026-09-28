@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 参数减量杂项批：compact 语义摘要 4 键 + 唤醒消费/合并窗口 2 键降为常量（2026-09-28，分支 `my-agent/self-dev-2`）
+
+- **来源/做法**：dev 在 my-agent-2 开发交流板派的任务 3（做法照 `87e025bb6`）。
+- **compact 语义摘要 4 键**：`memory_compact_semantic_summary_protect_head`(2)、`_protect_tail`(6)、`_min_middle`(4)、
+  `_max_input_chars`(12000) 直接复用 `agent/memory_archive/compact_semantic_summary.py` 里既有的 `_DEFAULT_*` 常量；
+  `semantic_summary_config` 只从 config 读 `enabled`，配套删掉不再使用的 `_int_field`。
+- **唤醒消费与合并窗口 2 键**：`conversation_pending_wake_limit`(100)、`background_completion_coalesce_seconds`(5) 降为
+  `agent/conversation/runtime.py` 的 `PENDING_WAKE_CONSUME_LIMIT` / `COMPLETION_COALESCE_WINDOW_SECONDS`；消费上限 0 表示不限、
+  合并窗口 0 表示不合并的原语义不变，只替换读这两个键的三行（`_consume_pending_wake_signals`、
+  `_successful_completion_waiting_for_batch`、`_enqueue_scheduler_runs`），没有重构唤醒逻辑。
+- **配置面同步删除**：`AgentConfig` 6 字段、随包 `agent_config.yaml` 6 行与相应注释、`services/_normalize` 6 条规格、说明基线 3 个条目。
+- **测试改动**：`test_compact_semantic_summary.py` 的配置读取用例改成「只有 enabled 生效」；`test_runtime_parameter_config.py`
+  删除该键归一化用例；`test_background_main_agent_runtime.py` 三处改为用默认常量或直接 patch `COMPLETION_COALESCE_WINDOW_SECONDS`（0/30 秒场景）。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_compact_semantic_summary.py tests/test_runtime_parameter_config.py
+  tests/test_background_main_agent_runtime.py tests/test_memory_config.py tests/test_settings_memory.py tests/test_parameter_registry.py
+  tests/test_constant_names_unique.py tests/test_architecture_guardrails.py tests/test_config_field_readers.py -q --tb=short`（396 passed）；
+  仓库根跑 Ruff、`scripts/check_doc_sync.py`、`scripts/check_code_size.py --mode strict`、`git diff --check`、`scripts/check_clean_package.py .`。
+
 ## R16 补测：按包选择偏好与 global_index 可读性（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-followup`）
 
 - **范围**：上一轮 R16 留下的两项：跨 owner 的按包选择偏好（`host_capability_selection.v1`），以及主机层

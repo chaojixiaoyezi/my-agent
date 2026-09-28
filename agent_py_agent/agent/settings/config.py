@@ -257,11 +257,9 @@ class _ToolConfigFields:
 class _RuntimeBudgetConfigFields:
     skill_guard_max_files: int = 50
     skill_guard_max_size_kb: int = 1024
-    conversation_pending_wake_limit: int = 100
     background_context_max_total_tokens: int = 8000
     # 后台会话执行权的租约秒数；续约心跳按它自动推导（原 background_claim_heartbeat_interval_seconds 已并入）。
     background_claim_ttl_seconds: int = 90
-    background_completion_coalesce_seconds: int = 5
     cli_resume_max_rounds: int = 8
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
@@ -355,10 +353,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 蓝本）：默认开，保护首尾、只摘要中段；异常、供应商超时或无 backend 时回退机械重建。
     # 摘要不另设不可取消线程超时，直接沿用统一模型传输超时。enabled=false 即完全关闭。
     memory_compact_semantic_summary_enabled: bool = True
-    memory_compact_semantic_summary_protect_head: int = 2
-    memory_compact_semantic_summary_protect_tail: int = 6
-    memory_compact_semantic_summary_min_middle: int = 4
-    memory_compact_semantic_summary_max_input_chars: int = 12000
     memory_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     local_store_path: str = ""
     local_store_files_dir: str = ""

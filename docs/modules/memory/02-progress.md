@@ -145,3 +145,8 @@ lesson/HOT、截断、缺版本或 audit 正文覆盖未知时保留原批次并
 降为 `memory_store/curator_models.py` 的 `CURATOR_BATCH_MESSAGE_LIMIT` / `CURATOR_MAX_RETRIES`，数值不变；配置面（AgentConfig、
 随包 `agent_config.yaml`、`services/_normalize` 规格、`_memory_types.MemorySettings`、说明基线）同步删除，用户配置残留只按未知键告警。
 Curator 的 interval、turn_threshold、max_input_chars、timeout、workers、daily_finalize_hour 仍是用户参数。定向测试与静态门禁见 TESTS。
+
+2026-09-28 参数减量杂项批：`memory_compact_semantic_summary_protect_head`(2)、`_protect_tail`(6)、`_min_middle`(4)、
+`_max_input_chars`(12000) 降为 `memory_archive/compact_semantic_summary.py` 既有的 `_DEFAULT_*` 常量，`semantic_summary_config`
+只保留 `enabled` 一个配置读取；配置面（AgentConfig、随包 YAML、`services/_normalize` 规格、说明基线）同步删除，残留只按未知键告警。
+同批还降了 conversation/runtime 的待处理唤醒消费上限与成功完成合并窗口（见 subagent 模块进展）。定向测试与静态门禁见 TESTS。

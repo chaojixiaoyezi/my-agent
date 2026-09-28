@@ -67,7 +67,6 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
         {
             "runner_failure_retry_limit": "3",
             "background_context_max_total_tokens": "8000",
-            "conversation_pending_wake_limit": "7",
             "tool_output_externalize_min_chars": "44",
             "tool_output_preview_chars": "12",
             "skill_guard_max_files": "4",
@@ -79,7 +78,6 @@ def test_runtime_parameter_knobs_are_normalized_from_agent_config() -> None:
     assert warnings == []
     assert normalized["runner_failure_retry_limit"] == 3
     assert normalized["background_context_max_total_tokens"] == 8000
-    assert normalized["conversation_pending_wake_limit"] == 7
     assert normalized["tool_output_externalize_min_chars"] == 44
     assert normalized["skill_guard_max_files"] == 4
     assert normalized["background_claim_ttl_seconds"] == 120

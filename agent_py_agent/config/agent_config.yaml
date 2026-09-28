@@ -220,11 +220,6 @@ memory_compact_auto_continue_max_depth: 50
 # - enabled=false 完全关闭（走纯机械重建）；摘要异常、供应商超时或无可用后端时静默回退机械重建。
 # - 不再另起一个无法取消的摘要线程计时器；慢模型沿用统一模型传输的首包和流空闲超时。
 memory_compact_semantic_summary_enabled: true
-memory_compact_semantic_summary_protect_head: 2
-memory_compact_semantic_summary_protect_tail: 6
-memory_compact_semantic_summary_min_middle: 4
-# 同时限制 native carried active-turn handoff 的最大字符数，避免后台 wake 把旧工具轨迹无限塞回上下文。
-memory_compact_semantic_summary_max_input_chars: 12000
 
 # 含图片/视频历史的压缩策略（设计见 docs/design/COMPACT_MEDIA_POLICY.md）：
 # - auto：默认。旧附件在压缩时降级为"[附件引用 sha256 前缀 / 文件名 / 大小]"文字块，只摘要文字；
@@ -618,9 +613,7 @@ session_workspace: ""
 conversation_workspace: ""
 
 # 长期会话读取和后台唤醒 prompt 预算：
-# - conversation_pending_wake_limit 只控制一次读取多少条待处理唤醒记录，不删除原始文件。
 # - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
-conversation_pending_wake_limit: 100
 # 整份后台状态副本的总预算；0 才表示关闭总量约束。原始账本和产物不受影响。
 background_context_max_total_tokens: 8000
 # 后台会话（主代理被唤醒后继续干活）占着执行权的租约秒数，默认 90：
@@ -628,8 +621,6 @@ background_context_max_total_tokens: 8000
 # - 进程意外退出后，最多过这么久别的进程才能接手这个会话。
 # - 一般不用改；机器很慢、经常看到租约过期被接手时才调大。最小 1。
 background_claim_ttl_seconds: 90
-# 多个成功子任务在很短时间内连续结束时，先合并完成信号再唤醒主代理；失败/阻塞不等待。
-background_completion_coalesce_seconds: 5
 # CLI 自动续跑/手动续跑的进程内轮数护栏（总代数上限，含首轮之外的续跑轮）。
 # 0/缺省按 8 处理；长任务无人值守部署可调大（默认防失控语义不变）。
 cli_resume_max_rounds: 8

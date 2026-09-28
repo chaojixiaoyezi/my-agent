@@ -2358,7 +2358,7 @@ def _consume_pending_wake_signals(
     reported: set[str] = set()
     handled: set[str] = set()
     attempted: set[str] = set()
-    wake_limit = scheduler._config_limit("conversation_pending_wake_limit")
+    wake_limit = PENDING_WAKE_CONSUME_LIMIT
     # Store 本来就会读取全部 pending 后再切片；这里保留完整队列，令前排被
     # recovery block 保留的旧事件不占掉新任务的消费窗口。
     wake_signals = scheduler.store.wakes.pending(limit=0)
@@ -2842,7 +2842,7 @@ def _successful_completion_waiting_for_batch(
 ) -> bool:
     if not _successful_completion_signal(signal):
         return False
-    delay = scheduler._config_limit("background_completion_coalesce_seconds")
+    delay = COMPLETION_COALESCE_WINDOW_SECONDS
     created_at = float(signal.created_at or 0.0)
     return delay > 0 and 0 < created_at <= current < created_at + delay
 
@@ -2970,6 +2970,11 @@ def _run_observation_batch(
 # 参数减量第 3 批 B 组（2026-09-27）：一次后台 tick 最多消费多少条需要主代理处理的观察，不再是配置项
 # conversation_unhandled_observation_limit；0 表示不限。
 CONVERSATION_UNHANDLED_OBSERVATION_LIMIT = 20
+
+# 参数减量杂项批（2026-09-28）：待处理唤醒记录的单轮消费上限与成功完成事件的合并窗口不再是配置项，
+# 只在这里保留一处定义；消费上限 0 表示不限，合并窗口 0 表示不合并，语义与降级前一致。
+PENDING_WAKE_CONSUME_LIMIT = 100
+COMPLETION_COALESCE_WINDOW_SECONDS = 5
 
 
 # LLM: 先按 task 隔离再计算限额（上限是代码常量 CONVERSATION_UNHANDLED_OBSERVATION_LIMIT），unknown 来源保留；
@@ -3496,7 +3501,7 @@ class _BackgroundSchedulerTickMixin:
             self.scheduler_service.reconcile_waiting_runs(now=now)
             self.scheduler_service.enqueue_ready_runs(
                 now=now,
-                limit=self._config_limit("conversation_pending_wake_limit"),
+                limit=PENDING_WAKE_CONSUME_LIMIT,
             )
         except Exception:
             _HEARTBEAT_LOGGER.warning("owner scheduler enqueue failed", exc_info=True)

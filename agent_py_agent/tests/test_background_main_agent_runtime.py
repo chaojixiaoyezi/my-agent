@@ -5395,7 +5395,8 @@ def test_successful_result_deadline_is_not_extended_by_a_running_sibling(tmp_pat
     slow = agent.subagents.create_run(goal="较慢部分", thought="", plan=[], parent_id="root", root_id="root")
     agent.subagents.lifecycle.set_status(fast.id, "DONE")
     agent.subagents.lifecycle.set_status(slow.id, "RUNNING")
-    scheduler = SimpleNamespace(runtime=SimpleNamespace(agent=agent), _config_limit=lambda _name: 5)
+    # 合并窗口已是模块常量 COMPLETION_COALESCE_WINDOW_SECONDS(5)，不再经 _config_limit 读取。
+    scheduler = SimpleNamespace(runtime=SimpleNamespace(agent=agent))
     signal = WakeSignal(
         wake_signal_id="fast-result", thread_id="thread", root_task_id="root",
         reason="subagent_runner_finished", source_agent_id=fast.id,
@@ -5416,7 +5417,6 @@ def test_successful_sibling_completion_wakes_are_coalesced_before_one_llm_turn(
             enable_tools=False,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
-            background_completion_coalesce_seconds=5,
         ),
         tmp_path,
     )
@@ -5642,13 +5642,16 @@ def _seed_seven_completion_wakes(agent, store, thread_id: str) -> None:
 
 def _seven_completion_mailbox_fixture(tmp_path, monkeypatch):
     """建立七份长 completion 和一个 4k/5 条有界后台消费者。"""
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+
     _patch_pending_wake_prompt_limit(monkeypatch, 5)
+    # 本 fixture 要求不等待合并窗口：直接 patch 模块常量。
+    monkeypatch.setattr(runtime_module, "COMPLETION_COALESCE_WINDOW_SECONDS", 0)
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
-            background_completion_coalesce_seconds=0,
             background_context_max_total_tokens=4096,
         ),
         tmp_path,
@@ -6121,13 +6124,16 @@ def test_audit_finding_batch_honors_existing_wake_projection_limit(
     assert len(store.wakes.pending()) == 1
 
 
-def test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing(tmp_path) -> None:
+def test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+
+    # 放长合并窗口：常量不再是配置项后由测试直接 patch。
+    monkeypatch.setattr(runtime_module, "COMPLETION_COALESCE_WINDOW_SECONDS", 30)
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,
             memory_path="memory.jsonl",
             orphan_supervision_interval_seconds=0,
-            background_completion_coalesce_seconds=30,
         ),
         tmp_path,
     )

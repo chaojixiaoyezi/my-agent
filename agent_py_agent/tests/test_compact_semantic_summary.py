@@ -953,7 +953,9 @@ def test_stats_record_errors_on_empty_summary() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_semantic_summary_config_reads_agent_config() -> None:
+def test_semantic_summary_config_reads_enabled_and_keeps_module_constants() -> None:
+    # 2026-09-28 参数减量：只有 enabled 仍是配置项；首尾保护/中段阈值/输入预算已是模块常量，
+    # 即使旧配置里还留着这些键也不再生效。
     config = SimpleNamespace(
         memory_compact_semantic_summary_enabled=False,
         memory_compact_semantic_summary_protect_head=3,
@@ -963,10 +965,10 @@ def test_semantic_summary_config_reads_agent_config() -> None:
     )
     parsed = semantic_summary_config(SimpleNamespace(config=config))
     assert parsed.enabled is False
-    assert parsed.protect_head == 3
-    assert parsed.protect_tail == 9
-    assert parsed.min_middle == 5
-    assert parsed.max_input_chars == 8000
+    assert parsed.protect_head == 2
+    assert parsed.protect_tail == 6
+    assert parsed.min_middle == 4
+    assert parsed.max_input_chars == 12_000
 
 
 def test_semantic_summary_config_defaults_when_missing() -> None:

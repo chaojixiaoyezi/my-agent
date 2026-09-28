@@ -33,6 +33,9 @@ Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `To
 - Curator 批次与重试（2026-09-28 参数减量 C 组）：`memory_store/curator_models.CURATOR_BATCH_MESSAGE_LIMIT`(80) 与
   `CURATOR_MAX_RETRIES`(1) 是 `MemoryCuratorConfig` 的唯一来源，已从 AgentConfig、随包 YAML、`services/_normalize` 规格与
   说明基线删除；curator 的 interval、turn_threshold、max_input_chars、timeout、workers、daily_finalize_hour 仍是用户参数。
+- compact 语义摘要的首尾保护、中段阈值与输入预算（2026-09-28 参数减量杂项批）由
+  `memory_archive/compact_semantic_summary.py` 的 `_DEFAULT_PROTECT_HEAD`(2) / `_DEFAULT_PROTECT_TAIL`(6) /
+  `_DEFAULT_MIN_MIDDLE`(4) / `_DEFAULT_MAX_INPUT_CHARS`(12000) 唯一给出，`semantic_summary_config` 只从配置读 `enabled`。
 
 ## 压缩熔断参数的唯一位置
 

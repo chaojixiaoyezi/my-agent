@@ -52,7 +52,8 @@ from .tool_output_externalizer import model_visible_tool_parameters
 
 _LOGGER = logging.getLogger(__name__)
 
-# 续跑历史重建的语义摘要默认参数(均可被 config 覆盖)。
+# 续跑历史重建的语义摘要首尾保护条数、中段最小长度与输入预算：2026-09-28 参数减量后不再是用户参数，
+# 只在这里定义一处；enabled 仍是用户配置项。
 _DEFAULT_PROTECT_HEAD = 2
 _DEFAULT_PROTECT_TAIL = 6
 _DEFAULT_MIN_MIDDLE = 4
@@ -178,17 +179,18 @@ class LiveToolHistorySummaryRequest:
     preserve_complete_fallback: bool = False
 
 
+# LLM: 只从 agent.config 读 enabled；首尾保护、中段阈值和输入预算已是本模块常量（2026-09-28 参数减量），
+#   调用方不要再把它们当配置项去找。
+# 函数用途: 组装一次语义摘要的开关与预算快照;缺配置属性也绝不抛。
 def semantic_summary_config(agent: object) -> SemanticSummaryConfig:
-    """从 agent.config 解析语义摘要配置;任何缺失/坏值退默认,绝不抛。"""
+    """读 enabled（配置项）与摘要预算（模块常量）,任何缺失都退默认,绝不抛。"""
     config = getattr(agent, "config", None)
     return SemanticSummaryConfig(
         enabled=_bool_field(config, "memory_compact_semantic_summary_enabled", True),
-        protect_head=_int_field(config, "memory_compact_semantic_summary_protect_head", _DEFAULT_PROTECT_HEAD),
-        protect_tail=_int_field(config, "memory_compact_semantic_summary_protect_tail", _DEFAULT_PROTECT_TAIL),
-        min_middle=_int_field(config, "memory_compact_semantic_summary_min_middle", _DEFAULT_MIN_MIDDLE),
-        max_input_chars=_int_field(
-            config, "memory_compact_semantic_summary_max_input_chars", _DEFAULT_MAX_INPUT_CHARS
-        ),
+        protect_head=_DEFAULT_PROTECT_HEAD,
+        protect_tail=_DEFAULT_PROTECT_TAIL,
+        min_middle=_DEFAULT_MIN_MIDDLE,
+        max_input_chars=_DEFAULT_MAX_INPUT_CHARS,
     )
 
 
@@ -918,16 +920,6 @@ def _bool_field(config: object, name: str, default: bool) -> bool:
     if value is None:
         return default
     return bool(value)
-
-
-def _int_field(config: object, name: str, default: int) -> int:
-    value = getattr(config, name, None)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 __all__ = [
