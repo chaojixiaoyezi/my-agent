@@ -42,6 +42,16 @@ B 的两项确定业务失败为 B08 第二轮无依据更换原说话人并声�
 
 第三轮 A 的共同缺口属于**通用使用及参数恢复稳定性**：同代资源 get 后，模型把 `source_ref` 与 `content` 一起传入，原写入接口拒绝混合输入；模型随后自行重写或修改检查程序，没有沿原来源复制链恢复。不能据这些自建程序的结果声称原包检查器通过，也不能直接归因为原包程序故障。固定实现的工具 schema 只要求 `path`，描述和运行检查均明确三种内容输入互斥；目前没有确认宿主篡改参数或资源字节，但稳定采用原资源仍未达成。
 
+### 三次互斥参数失败的只读归因（2026-09-28）
+
+逐个 call_id 核对 A05/A08/A10 第三轮的 canonical NativeIR、原工具索引及下一批实际调用，三次均保留完整 340 字符 tool_result：错误码 `TOOL_INVALID_ARGUMENTS`、`repair_tool_arguments`、`failure_stage=execution`、`effect_outcome=not_started`、`retryable=true` 及原错误文字“source_ref 必须单独使用，不能同时提供 content/data_base64，且仅支持 overwrite”。原错误正文均为 95 字节，摘要 `84ef8e6c657610af943599238517e3fbb69e2b79025c3da26b9fe427cac1d687` 与归档索引一致，`output_externalized=false`，未发现回执缺失或截断。模型可见回执含状态／恢复元数据，但没有独立的 `details.conflicting_arguments` 列表。
+
+后续动作也有原记录：A05 去掉 source_ref，以原冲突调用中的同一份 16271 字符 content 重写；A10 改成仅传 16123 字符 content；A08 立即改用 Shell 的 heredoc／Python 字符串重建脚本。三例后续均未再次用 source_ref 调用 write_file。固定写入接口及 Anthropic 组包／缓存转换已只读核对，当前主线对应文件与固定 0c 一致；现有证据归为**完整错误回执后的模型恢复质量失败**，没有确认新的宿主映射缺陷。NativeIR 和同源序列化代码不是 HTTP 抓包，不补称网络报文级核验。
+
+通用互斥参数组单处声明、结构化 conflicting_arguments 仅为未验证候选；三例没有提供“模型会采用新字段并改善恢复”的证据，本轮不实施、不静默丢参数、不增加专项工具或质量硬门。原 11 次业务失败、12/18 原资源执行计数与未覆盖边界不变。只读审计 `final-0c340fe29-source-ref-recovery-audit.json` 摘要 `5ed7041c9931b4c318e7c0532e5e7b0da9e4d3b4afd3fdd46ea614021cc9e6ad` 保留逐条原回执、后继调用摘要和文件哈希，没有重跑模型或修改任务产物。
+
+此前两份最终矩阵／发布文档已合入 `ee4c0ae6ba07114d021b8a1320b21e42235e0d35`，本线核对提交祖先及内容，仅附带删除空旧标题。Claude 回报已推送且五项静态 gate 全过、产品无变化不部署；本线两次只读远端查询均因 `Recv failure: Connection reset by peer` 失败，不将本地 tracking ref 冒作独立在线验证。
+
 ### 版本、隔离与计量
 
 18 个领域任务均选中对应主包，A10 第二轮还选中 B 并留下 `CAPABILITY_SELECTION_ENTRY_PARTIAL`，实际模型只 get A；不能把额外宿主入口算成方法采用。A 九次、B 八次有成功模型 get；B08 第二轮仅宿主入口和普通读写。普通任务九次全部空选；N10 第二轮有一次 provider HTTP 重试和 `CAPABILITY_SELECTION_USAGE_INCOMPLETE`，最终答复正确，无无关包采用。
@@ -60,11 +70,11 @@ B 的两项确定业务失败为 B08 第二轮无依据更换原说话人并声�
 
 root 已只读核对 Mac 两版 `deployment.json`、`installed-verification.json` 并重算 wheel 文件摘要：矩阵同源码 `0c340fe29` 对应 `step14v-11b43707`／`11b43707368b80f42c0d8c1ea34730d7c086a99e34fa750abbaedca9109700fc`；后续 `9f88e4905` 对应 `step14w-9be2b59f`／`9be2b59f704f3c2a347063c55b2c25ab8e38fb0e8ed8d0b25a233f644e032136`。两版记录均为入口已切换、启动时 running 且请求队列空，安装记录均核过 1433 成员；本次未重新哈希生产目录或请求生产健康接口。Claude 另回报 step14w 切换约 27 分钟后仍 running、pending/processing 均 0，作为发布方观察单列。主线后续变更不改写本系列的固定执行版本。
 
-Linux 状态已由 Claude 明确为**未部署（测试机下线）**：0c 和 9f 都没有同版 Linux 部署／健康证据。root 直接读取两版 `linux-lane/out-0..11.txt` 与退出码，每版合计 **23833 passed、60 skipped、32 xfailed、5 xpassed、0 failed/errors**，12 分片退出码均 0。发布方先前的 22056 passed／53 skipped 少计 1777／7，差值与 shard-1 完全一致，以原日志合计为准。容器测试按发布方说明使用源码 editable 安装；本次未独立重算容器源码指纹，不能将容器日志记为 Linux wheel 发布，更不能拿旧 step13w 双机记录替代。Mac/Linux 收集范围不同，数字不相加。
+Linux 状态已由 Claude 明确为**未部署（测试机下线）**：0c 和 9f 都没有同版 Linux 部署／健康证据。root 直接读取两版 `linux-lane/out-0..11.txt` 与退出码，每版合计 **23833 passed、60 skipped、32 xfailed、5 xpassed、0 failed/errors**，12 分片退出码均 0。发布方先前的 22056 passed／53 skipped 少计 1777／7，差值与 shard-1 完全一致，以原日志合计为准。容器测试按发布方说明使用源码 editable 安装；本次未独立重算容器源码指纹，不能将容器日志记为 Linux wheel 发布，更不能拿旧 step13w 双机记录替代。Mac/Linux 收集范围不同，数字不相加。 两版 shard-1 汇总后均有 lark_oapi ExpiringCache 清理阶段的 pending task／`RuntimeError: Event loop is closed` 尾部回溯，原记录保留；这里的 0 failed/errors 仅指 pytest 汇总和分片退出码，不表示运行日志没有异常。
 
 本次发布核对另存 `final-0c340fe29-publication-audit.json`，摘要 `dd7513dcc067ad8fa18ed73a0857726fa7d9787b594af0b7e3018752c52d043d`；原最终矩阵结果文件不覆盖，其当时“待核发布”的状态由本段追加事实补充。Goal 保持 active；“27 次执行结束”不等于完整验收或总目标完成。
 
-建议下一步：交 Claude 集成已封存的完整分项表和发布核对记录，先研判原资源调用失败后的通用恢复缺口；Linux 部署保留为测试机恢复后的独立工作，不再围绕同一领域故事追加开发例。只读复核可并行，产品／主线发布由 Claude 独占，私有运行由 root 独占。
+建议下一步：将本次归因补记交 Claude，按模型恢复限制核对剩余验收与分工；完整分项表和发布核对记录已集成。Linux 部署保留为测试机恢复后的独立工作，不再围绕同一领域故事追加开发例。只读复核可并行，产品／主线发布由 Claude 独占，私有运行由 root 独占。
 
 以下各轮保留原时点；旧“最终 0/27／尚未开始”不覆盖本节状态。
 
