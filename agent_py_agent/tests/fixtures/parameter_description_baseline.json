@@ -1,19 +1,16 @@
 {
-  "schema": "parameter_description_baseline.v1",
-  "note": "说明为空的参数只允许出现在这份名单里；名单外新增空说明、或名单里的参数已有说明/已删除，test_parameter_registry 都会失败。",
   "groups": [
     {
-      "reason": "加载器写入的元数据，不在随包 YAML 里，不是用户参数",
       "keys": [
         "config_layers",
         "config_path",
         "config_sources",
         "config_warnings",
         "memory_config_warnings"
-      ]
+      ],
+      "reason": "加载器写入的元数据，不在随包 YAML 里，不是用户参数"
     },
     {
-      "reason": "暂缺中文说明，等配置减量分类：多数将删除、合并或降级为代码常数，保留下来的再补说明",
       "keys": [
         "dynamic_timeout_min",
         "home_lesson_stale_caveat_days",
@@ -23,7 +20,10 @@
         "memory_curator_provider",
         "memory_hot_min_occurrences",
         "memory_lesson_min_occurrences"
-      ]
+      ],
+      "reason": "暂缺中文说明，等配置减量分类：多数将删除、合并或降级为代码常数，保留下来的再补说明"
     }
-  ]
+  ],
+  "note": "说明为空的参数只允许出现在这份名单里；名单外新增空说明、或名单里的参数已有说明/已删除，test_parameter_registry 都会失败。",
+  "schema": "parameter_description_baseline.v1"
 }

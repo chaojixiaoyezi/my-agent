@@ -1053,14 +1053,9 @@ decision_profile_id: ""  # 原模型目录的 Decision 引用；空表示未绑�
 # 各决策点位的单次期限与决策模型不在配置文件里逐个设置：默认继承上面的通用期限与 decision_profile_id；
 # 需要给某个点位单独设时，用 TUI 决策菜单的“逐接入点设置”，或让 my-agent 用 user_config 的 decision_patch 按点位覆盖。
 decision_model_selection_mode: off  # off 关闭 / observe 仅观察建议与输入 token / apply 采用合法建议；不计算决策模型价格
-# 选模型决策每条消息都会发一次，输入越小越省、越不容易超时。下面两项只删材料，不改变"采用前必须复核"：
-# - 对话摘要只带语义部分（不带原文锚点段），最多这么多字符；截断时请求里如实标 truncated。0 表示不截断。
-decision_model_selection_summary_max_chars: 1500
-# - 当前消息最多带这么多字符；截断时如实标 truncated。0 表示不截断。
-decision_model_selection_prompt_max_chars: 4000
 # - 规划（planning）、交付质量（delivery_quality）、动作候选（action_candidate）三个决策点位发给决策模型的当前请求字数：
 #   更长时自动取开头和结尾的节选（中间写明省略多少字），并如实标注为节选，决策照常进行；一般不用改。
-#   0 表示不截取，但仍受决策协议 256 KB 输入上限约束。选模型点位另用 decision_model_selection_prompt_max_chars（只截开头）。
+#   0 表示不截取，但仍受决策协议 256 KB 输入上限约束。选择模型点位的两段材料上限是内部常量（只截开头），不是用户参数。
 decision_request_max_chars: 2000
 decision_external_material_order_mode: off  # 已归档批量网页的阅读优先级提示；observe 仅观察，apply 追加建议，不删改原页或来源
 decision_planning_mode: off  # 现有 Todo 优先级建议；observe 仅观察，apply 只附软提示，不创建目标、待办或子代理

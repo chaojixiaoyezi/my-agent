@@ -77,6 +77,12 @@ def _bounded_text(value: str, limit: int) -> tuple[str, dict]:
     return value[:limit], {"status": "truncated", "chars": len(value), "kept_chars": limit}
 
 
+# 选模型点位两份材料的字符上限（值与原参数一致；参数减量降为读取点旁的内部常量，不再是用户参数）。
+# 只截开头，截断与否仍如实写进 input_completeness。
+MODEL_SELECTION_PROMPT_MAX_CHARS = 4000
+MODEL_SELECTION_SUMMARY_MAX_CHARS = 1500
+
+
 # LLM: 原提示和原摘要仅供语义判断；完整历史、system/native schemas、图像及真实输出预留尚未准备，必须明确未知。
 #   只删材料：摘要只带语义部分（去掉原文锚点段），摘要与当前消息按主配置字符上限截头，截断如实标注；候选公共声明只写一次。
 # 函数用途: 描述这一新主请求和当前冻结模型，不把不完整输入伪装成可自动切换的容量证明。
@@ -85,9 +91,9 @@ def _observation_input(context: object, thread: object, captured: SelectedModelR
 
     config = context.agent.config
     prompt, prompt_fact = _bounded_text(str(context.request.get("prompt") or context.request.get("goal") or "").strip(),
-                                        config.decision_model_selection_prompt_max_chars)
+                                        MODEL_SELECTION_PROMPT_MAX_CHARS)
     summary, summary_fact = _bounded_text(semantic_summary_text(thread.summary),
-                                          config.decision_model_selection_summary_max_chars)
+                                          MODEL_SELECTION_SUMMARY_MAX_CHARS)
     state = {
         "prompt": prompt,
         "conversation_summary": summary,

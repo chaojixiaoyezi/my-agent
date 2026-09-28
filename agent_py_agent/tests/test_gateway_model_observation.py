@@ -518,8 +518,9 @@ def test_question_explains_usage_tags_and_apply_asks_for_the_best_semantic_match
 def test_selection_input_drops_landmarks_bounds_text_and_states_candidate_facts_once(tmp_path, monkeypatch,
                                                                                    summary_limit, prompt_limit):
     fixture = prepared(tmp_path)
-    fixture.agent.config.decision_model_selection_summary_max_chars = summary_limit
-    fixture.agent.config.decision_model_selection_prompt_max_chars = prompt_limit
+    # 两个字符上限已降为读取点旁的内部常量（参数减量），这里 patch 常量而不是 config 字段。
+    monkeypatch.setattr(model_observation, "MODEL_SELECTION_SUMMARY_MAX_CHARS", summary_limit)
+    monkeypatch.setattr(model_observation, "MODEL_SELECTION_PROMPT_MAX_CHARS", prompt_limit)
     semantic = "语义摘要" * 20
     fixture.agent.conversation_store.threads.update_summary(
         fixture.thread_id, semantic + "\n\n## Exact Conversation Landmarks (non-authoritative)\n- user: LANDMARK-TEXT")
