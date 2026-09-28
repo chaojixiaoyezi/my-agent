@@ -67,16 +67,6 @@ export default function SettingsTools() {
       >
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
           <NumberField
-            label="tool_write_inline_max_chars（写入最大字符数）"
-            description="write_file 内联写入的最大字符数"
-            value={limits.write_inline_max_chars}
-            onChange={(v) => { setLimits({ write_inline_max_chars: v }); markDirty(); }}
-            min={100}
-            max={100000}
-            unit="字符"
-            disabled={!isAdmin}
-          />
-          <NumberField
             label="tool_read_max_chars（读取最大字符数）"
             description="read_file 单次读取的最大字符数"
             value={limits.read_max_chars}

@@ -29,7 +29,6 @@ from .config_sources import (
 from .defaults import (
     DEFAULT_COMMAND_ACCESS_MODE,
     DEFAULT_MODEL_MAX_TOKENS,
-    DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS,
 )
 from .memory import normalize_agent_memory_config
 from .normalize import (
@@ -207,7 +206,6 @@ class _ToolConfigFields:
     tool_context_microcompact_keep_recent: int = 8
     tool_context_ptl_retry_max: int = 3
     tool_read_max_chars: int = 16_000
-    tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     # 三种原生文件修改工具反馈有界 JSON 语法观察；不拦分块写入，不决定任务完成。
     enable_file_syntax_diagnostics: bool = False
     tool_list_max_entries: int = 200

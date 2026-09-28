@@ -226,12 +226,6 @@ class TestNormalizeAgentConfig:
         assert normalized["max_tool_rounds"] is None
         assert len(warnings) > 0
 
-    def test_normalize_agent_config_tool_write_inline_max_chars(self):
-        data = {"tool_write_inline_max_chars": 16384}
-        normalized, warnings = normalize_agent_config(data)
-        assert normalized["tool_write_inline_max_chars"] == 16384
-        assert warnings == []
-
     def test_normalize_agent_config_tool_catalog_fields(self):
         data = {
             "tool_catalog_mode": "full",
@@ -267,12 +261,6 @@ class TestNormalizeAgentConfig:
         normalized, warnings = normalize_agent_config({"access_mode": "god-mode"})
         assert normalized["access_mode"] == AgentConfig().access_mode
         assert warnings
-
-    def test_normalize_agent_config_invalid_tool_write_inline_max_chars(self):
-        data = {"tool_write_inline_max_chars": 10}
-        normalized, warnings = normalize_agent_config(data)
-        assert normalized["tool_write_inline_max_chars"] == AgentConfig().tool_write_inline_max_chars
-        assert len(warnings) > 0
 
     def test_normalize_agent_config_temperature_out_of_range(self):
         """验证超出范围的 temperature 回退到默认值。"""
@@ -315,18 +303,6 @@ class TestLoadConfig:
             config = load_config(path)
             assert config.model_backend == "echo"
             assert config.max_tool_rounds == 10
-        finally:
-            path.unlink()
-
-    def test_load_config_with_tool_write_inline_max_chars(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            f.write("model_backend: echo\ntool_write_inline_max_chars: 16000\n")
-            f.flush()
-            path = Path(f.name)
-
-        try:
-            config = load_config(path)
-            assert config.tool_write_inline_max_chars == 16000
         finally:
             path.unlink()
 

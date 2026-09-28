@@ -322,8 +322,12 @@
       登记表项不删，`/settings show` 仍可查看、仍是安全边界。
     - 回归见 `test_param_reduction_e_group.py` 与 `test_settings_chat_control.py`；原来通过配置对象改这些值的测试改为 patch 常量。
   - 未完成：C 组（memory 归档预览/语义摘要/恢复/策展批次）、决策选模字数（D 组范围内的决策点位字段，按集成者要求不碰）。
-  - E 组范围外、分类为 internal 但未归入任何一组的：`tool_write_inline_max_chars`（写文件指引的软建议）、`conversation_pending_wake_limit`、
-    `memory_artifact_default_read_chars`，留给集成者分派（`conversation_unhandled_observation_limit` 已随 B 组前半降级）。
+  - `tool_write_inline_max_chars`（写文件指引的软建议，集成者追加，分支 `claude/38-internal-constants-bd`）：常量统一到
+    `tooling/content_transport_policy.MAX_INLINE_WRITE_CONTENT_CHARS`（12000），`settings/defaults` 里重复的
+    `DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS` 删除；`core.py` 不再传入，`tool_model_generation` 两处直接用常量；`ToolRegistryParams`
+    仍保留同名字段（默认即常量，只有测试显式传）。设置页表单项与 DEVELOPMENT_RULES 的说明同步。
+  - E 组范围外、分类为 internal 但未归入任何一组的：`conversation_pending_wake_limit`、`memory_artifact_default_read_chars`，
+    留给集成者分派（`conversation_unhandled_observation_limit` 已随 B 组前半降级）。
 
 ## 7. 验收
 

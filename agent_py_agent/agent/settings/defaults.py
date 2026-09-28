@@ -5,7 +5,6 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
 DEFAULT_COMMAND_ACCESS_MODE = "workspace-write"
 # 模型单次回答的输出上限（含推理），所有模型统一 64K（用户 2026-09-27 要求）；随包 YAML 的 max_tokens 必须同值。
 DEFAULT_MODEL_MAX_TOKENS = 65_536
@@ -94,7 +93,6 @@ def default_config_bool(key: str) -> bool:
 __all__ = [
     "DEFAULT_COMMAND_ACCESS_MODE",
     "DEFAULT_MODEL_MAX_TOKENS",
-    "DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS",
     "MODEL_OUTPUT_WINDOW_DIVISOR",
     "effective_max_output_tokens",
     "output_cap_for_window",

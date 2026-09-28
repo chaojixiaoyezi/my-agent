@@ -10,7 +10,6 @@ TOOL_INT_FIELDS = (
     ("tool_output_externalize_min_chars", 0, None),
     ("tool_output_preview_chars", 0, None),
     ("tool_read_max_chars", 100, None),
-    ("tool_write_inline_max_chars", 100, 100_000),
     ("tool_web_max_chars", 0, None),
     ("tool_http_timeout", 1, None),
     ("tool_shell_timeout", 1, None),

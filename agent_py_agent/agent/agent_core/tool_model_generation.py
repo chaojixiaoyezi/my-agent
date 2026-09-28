@@ -22,6 +22,7 @@ from ..concurrency.interrupt import (
 )
 from ..conversation.model_metrics import publish_model_metrics
 from ..model_guidance import provider_system_instruction
+from ..tooling.content_transport_policy import MAX_INLINE_WRITE_CONTENT_CHARS
 from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
@@ -906,6 +907,9 @@ def _provider_thinking_projection_enabled(params: object) -> bool:
     return str(getattr(params, "context_scope", "") or "").strip().lower() != "isolated"
 
 
+# LLM: 非流式回复里没闭合的长写文件按 content_transport_policy.MAX_INLINE_WRITE_CONTENT_CHARS 裁决（参数减量第 3 批起是代码常量，
+#   不再读 agent.config）；native 直通不在这里裁决 text 协议标记。
+# 函数用途: 完整回复收到后，把超出内联上限且没闭合的写文件调用换成结构化中止回复。
 def _recover_unclosed_long_write_response(request: ModelGenerateParams, response):
     if native_tool_use_active(request.params):
         # native 直通：正文不裁决 text 协议标记（写内容走 tool_use blocks；
@@ -914,7 +918,7 @@ def _recover_unclosed_long_write_response(request: ModelGenerateParams, response
     text = str(getattr(response, "text", "") or "")
     abort = long_write_response_abort(
         text,
-        max_inline_content_chars=_tool_write_inline_max_chars(request) or 0,
+        max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS,
     )
     if abort is None:
         return response
@@ -924,13 +928,15 @@ def _recover_unclosed_long_write_response(request: ModelGenerateParams, response
     return long_write_abort_response(abort, backend=backend)
 
 
+# LLM: 流式边界过滤器的内联上限同样取 MAX_INLINE_WRITE_CONTENT_CHARS 常量；native 直通只 bypass，不改 payload。
+# 函数用途: 为一次流式生成装配工具边界过滤器（超长内联写内容时中止本次流）。
 def _build_tool_boundary_chunk_filter(request: ModelGenerateParams) -> ToolBoundaryChunkFilter:
     # native 直通：text parser 不解析 native 正文（裁决归 _native_prose_violation，
     # 仅完整伪调用成对才拦），防止正文【提及】marker 被流式中途误杀
     # （真机 2026-08-06 MiniMax 形态）。
     return ToolBoundaryChunkFilter(
         _model_chunk_callback(request.params.effective_on_chunk),
-        max_inline_content_chars=_tool_write_inline_max_chars(request),
+        max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS,
         bypass=native_tool_use_active(request.params),
     )
 
@@ -1328,7 +1334,3 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             flush=True,
         )
     return result
-
-
-def _tool_write_inline_max_chars(request: ModelGenerateParams) -> int | None:
-    return getattr(getattr(request.agent, "config", None), "tool_write_inline_max_chars", None)

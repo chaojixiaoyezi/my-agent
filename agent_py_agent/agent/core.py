@@ -906,7 +906,6 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             path_access_mode=effective_path_access_mode,
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,
-            tool_write_inline_max_chars=config.tool_write_inline_max_chars,
             enable_file_syntax_diagnostics=config.enable_file_syntax_diagnostics,
             file_source_resolver=source_resolver,
             file_source_ref_schema=source_ref_schema,

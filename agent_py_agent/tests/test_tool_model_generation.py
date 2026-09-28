@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core import tool_model_generation as generation_module
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
@@ -470,11 +471,12 @@ def test_model_generate_relays_named_task_interrupt_to_timeout_guard_thread():
     assert time.monotonic() - started < 2
 
 
-def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
+def test_model_generate_aborts_streaming_write_file_content_over_inline_limit(monkeypatch):
+    monkeypatch.setattr(generation_module, "MAX_INLINE_WRITE_CONTENT_CHARS", 200)
     backend = _StreamingLongWriteBackend()
     agent = SimpleNamespace(
         backend=backend,
-        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=200),
+        config=SimpleNamespace(request_timeout=10),
         _current_subagent_run_id="",
     )
 
@@ -496,11 +498,12 @@ def test_model_generate_aborts_streaming_write_file_content_over_inline_limit():
     assert "site/index.html" not in str(response.tool_protocol_violations)
 
 
-def test_model_generate_allows_unclosed_write_below_configured_stream_limit():
+def test_model_generate_allows_unclosed_write_below_stream_limit_constant(monkeypatch):
+    monkeypatch.setattr(generation_module, "MAX_INLINE_WRITE_CONTENT_CHARS", 50_000)
     backend = _StreamingRecoveryLongWriteBackend()
     agent = SimpleNamespace(
         backend=backend,
-        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=50_000),
+        config=SimpleNamespace(request_timeout=10),
         _current_subagent_run_id="",
     )
     params = _tool_loop_params()
@@ -520,11 +523,12 @@ def test_model_generate_allows_unclosed_write_below_configured_stream_limit():
     assert len(response.text) > RECOVERY_WRITE_CHUNK_CHARS
 
 
-def test_model_generate_uses_configured_stream_limit_for_unclosed_write():
+def test_model_generate_uses_stream_limit_constant_for_unclosed_write(monkeypatch):
+    monkeypatch.setattr(generation_module, "MAX_INLINE_WRITE_CONTENT_CHARS", 4_000)
     backend = _StreamingRecoveryLongWriteBackend()
     agent = SimpleNamespace(
         backend=backend,
-        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=4_000),
+        config=SimpleNamespace(request_timeout=10),
         _current_subagent_run_id="",
     )
     params = _tool_loop_params()
@@ -614,11 +618,12 @@ def test_successful_model_generate_records_provider_context_observation() -> Non
     assert len(observation["context_surface_fingerprint"]) == 64
 
 
-def test_model_generate_rejects_unclosed_long_write_after_full_response():
+def test_model_generate_rejects_unclosed_long_write_after_full_response(monkeypatch):
+    monkeypatch.setattr(generation_module, "MAX_INLINE_WRITE_CONTENT_CHARS", 120)
     backend = _NonStreamingUnclosedLongWriteBackend()
     agent = SimpleNamespace(
         backend=backend,
-        config=SimpleNamespace(request_timeout=0, tool_write_inline_max_chars=120),
+        config=SimpleNamespace(request_timeout=0),
         _current_subagent_run_id="",
     )
 
@@ -644,7 +649,7 @@ def test_model_generate_keeps_all_complete_streaming_tool_blocks():
     backend = _StreamingRepeatedToolBackend()
     agent = SimpleNamespace(
         backend=backend,
-        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=12_000),
+        config=SimpleNamespace(request_timeout=10),
         _current_subagent_run_id="",
     )
 
@@ -668,7 +673,7 @@ def test_model_generate_does_not_strip_prose_to_promote_text_tool_block():
     backend = _StreamingToolThenProseBackend()
     agent = SimpleNamespace(
         backend=backend,
-        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=12_000),
+        config=SimpleNamespace(request_timeout=10),
         _current_subagent_run_id="",
     )
 
@@ -721,7 +726,7 @@ def test_model_generate_keeps_literal_protocol_markers_inside_write_content():
     backend = _StreamingLiteralProtocolMarkerContentBackend()
     agent = SimpleNamespace(
         backend=backend,
-        config=SimpleNamespace(request_timeout=10, tool_write_inline_max_chars=12_000),
+        config=SimpleNamespace(request_timeout=10),
         _current_subagent_run_id="",
     )
 

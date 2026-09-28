@@ -599,9 +599,10 @@ do_write()
   prompts or default tool catalogs.
 - Large generated file bodies must not travel as one giant tool-call JSON
   argument. `write_file.content` goes through `content_transport_policy.py`; the
-  default recommended inline size is 12,000 characters and can be tuned with
-  `tool_write_inline_max_chars`. If a valid parsed tool call exceeds that
-  configured recommendation, the tool should preserve the content and return a
+  recommended inline size is the code constant
+  `content_transport_policy.MAX_INLINE_WRITE_CONTENT_CHARS` (12,000 characters;
+  `tool_write_inline_max_chars` is no longer a config key since 2026-09-27). If a
+  valid parsed tool call exceeds that recommendation, the tool should preserve the content and return a
   warning; future calls should use smaller `write_file` writes, explicit
   `write_file mode=append` chunks for long reports, `WRITE_FILE_RAW
   mode="append"` blocks for raw text chunks, `apply_patch` for local diffs, or

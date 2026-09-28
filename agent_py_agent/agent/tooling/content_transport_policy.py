@@ -6,9 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from ..settings.defaults import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
-
-MAX_INLINE_WRITE_CONTENT_CHARS = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+# 写文件内联正文的建议上限：参数减量第 3 批（2026-09-27）起不再是配置项 tool_write_inline_max_chars，也不再经 settings/defaults 转一手，
+# 这里是唯一定义；模型生成侧的流式截断、写文件工具的提示与工具注册表都从这里 import。
+MAX_INLINE_WRITE_CONTENT_CHARS = 12_000
 STREAMING_INLINE_WRITE_ABORT_CHARS = 32_000
 RECOMMENDED_WRITE_CHUNK_CHARS = "1500-2000"
 RECOVERY_WRITE_CHUNK_CHARS = 2000
