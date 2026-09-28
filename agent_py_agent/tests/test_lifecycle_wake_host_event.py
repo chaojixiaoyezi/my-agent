@@ -30,7 +30,13 @@ from agent_py_agent.agent.agent_core.runtime.turn_trigger import (
     HOST_EVENT_FACTS_SOURCE,
     HOST_EVENT_FIRST_LINE,
     HOST_EVENT_FIRST_LINE_ORIGIN_TASK,
+    SESSION_TASK_FACTS_SOURCE,
+    SESSION_TASK_FIRST_LINE,
+    TURN_TRIGGER_SESSION_TASK,
+    TurnTrigger,
     current_turn_text,
+    session_task_trigger,
+    turn_trigger_recommendation,
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.tool_ir import (
@@ -199,6 +205,36 @@ def test_native_turn_opens_with_the_host_event_instead_of_a_second_user_task() -
 
     ordinary = _native_initial_tool_ir_history(_loop_params(None), carried_handoff="", carried_user_inputs=[])
     assert ordinary == [UserTurn(f"# User Task\n{_OBJECTIVE}")]
+
+
+def test_session_task_turn_opens_with_the_host_event_and_never_a_user_turn() -> None:
+    """会话间派活片同样是宿主事件：派来的任务正文不能落在用户原话位置，来源标记也要可区分。"""
+    trigger = session_task_trigger(
+        TurnTrigger(
+            kind=TURN_TRIGGER_SESSION_TASK,
+            reason="session_task",
+            event_facts='{"origin_thread_id": "thread-A", "task_id": "stask-1"}',
+        )
+    )
+    assert trigger is not None
+
+    history = _native_initial_tool_ir_history(_loop_params(trigger), carried_handoff="", carried_user_inputs=[])
+
+    assert isinstance(history[0], RuntimeFactsTurn)
+    assert history[0].source == SESSION_TASK_FACTS_SOURCE
+    assert history[0].source != HOST_EVENT_FACTS_SOURCE
+    assert SESSION_TASK_FIRST_LINE in history[0].text
+    assert not any(isinstance(item, UserTurn) for item in history)
+    assert _current_turn_opener_count(history) == 1
+
+
+def test_session_task_turn_uses_its_own_fixed_recommendation() -> None:
+    """派活回合用固定的推荐短名单与理由，不按任务文字做检索。"""
+    trigger = TurnTrigger(kind=TURN_TRIGGER_SESSION_TASK, reason="session_task")
+    names, reason = turn_trigger_recommendation(trigger) or ((), "")
+
+    assert "get_session_task" in names and "send_session_message" in names
+    assert "派活" in reason
 
 
 @pytest.mark.parametrize("native", [True, False])

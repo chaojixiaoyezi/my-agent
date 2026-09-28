@@ -981,13 +981,24 @@ def _native_initial_tool_ir_history(
     carried_user_inputs: list[str],
 ) -> list[object]:
     from ...backends.tool_ir import CompactionSummary, RuntimeFactsTurn, UserTurn
-    from .turn_trigger import HOST_EVENT_FACTS_SOURCE, current_turn_text, lifecycle_wake_trigger
+    from .turn_trigger import (
+        HOST_EVENT_FACTS_SOURCE,
+        SESSION_TASK_FACTS_SOURCE,
+        current_turn_text,
+        lifecycle_wake_trigger,
+        session_task_trigger,
+    )
 
     history: list[object] = []
     current = str(params.user_prompt or "")
     trigger = getattr(params, "turn_trigger", None)
     if lifecycle_wake_trigger(trigger) is not None:
         history.append(RuntimeFactsTurn(current_turn_text(current, trigger), source=HOST_EVENT_FACTS_SOURCE))
+    elif session_task_trigger(trigger) is not None:
+        # LLM: 会话间派活片同样是宿主事件，用独立来源标记：任务正文绝不落在用户原话位置，
+        #   原生历史保存与 Compact 据此识别本片开头不是用户任务。
+        # 函数用途: 把派活回合的开头写成宿主事件而不是用户轮。
+        history.append(RuntimeFactsTurn(current_turn_text(current, trigger), source=SESSION_TASK_FACTS_SOURCE))
     elif current:
         history.append(UserTurn(_native_user_task_text(current), media=tuple((params.task_attributes or {}).get("input_media") or ())))
     if carried_handoff:
@@ -1005,10 +1016,13 @@ def _native_initial_tool_ir_history(
 # 函数用途: 返回当前回合开头项占用的位置数（0 或 1），供摘要与交接的插入位置共用。
 def _current_turn_opener_count(history: list[object]) -> int:
     from ...backends.tool_ir import RuntimeFactsTurn, UserTurn
-    from .turn_trigger import HOST_EVENT_FACTS_SOURCE
+    from .turn_trigger import HOST_EVENT_FACTS_SOURCE, SESSION_TASK_FACTS_SOURCE
 
     first = history[0] if history else None
-    host_event = isinstance(first, RuntimeFactsTurn) and first.source == HOST_EVENT_FACTS_SOURCE
+    host_event = isinstance(first, RuntimeFactsTurn) and first.source in {
+        HOST_EVENT_FACTS_SOURCE,
+        SESSION_TASK_FACTS_SOURCE,
+    }
     return 1 if isinstance(first, UserTurn) or host_event else 0
 
 
