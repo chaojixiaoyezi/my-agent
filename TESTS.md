@@ -154,6 +154,25 @@
   - 整数也按类型不符处理；留空也告警；名单推导为空；
   - 服务排在飞书/QQ 字符串还原之后（错误类型会被先静默变成空串）；布尔被当成整数还原。
 
+## 后台唤醒 B 读账异常离线复核（2026-09-28）
+
+固定 `43cd72e3d` 的原运行入口和三个 reader 函数 AST 未改写，以合成 iterator 复核两种情况：正常返回 owner/task 两条 carry；只有 owner 抛 OSError 时，外层返回空列表且 task 根未被访问。确认读账事实丢失，不声称真实重复派工或停止失效；没有制造真实故障、发模型或改产品。
+
+C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 checkout，实际调用 `pytest.main`，参数包含下列两文件、`-q --tb=short -p no:cacheprovider` 及私有临时 `--basetemp`：
+
+- `agent_py_agent/tests/test_background_active_turn_carry.py`：5 项通过。
+- `agent_py_agent/tests/test_background_child_control_tools.py`：8 项通过。
+
+合计 13 项、退出 0，runtime import 路径已核，前后 checkout 干净；仅覆盖原作者已有组件用例，不含 A 和读账异常修复，不代表原生委派或整组通过。私有报告摘要 `b2f0d9bddc86b1fcc3cbdef02830e36a11c70f1eeeda7bce90d22258ad5c70d5`。A 未固定，C23 仍零提交，详见[边界与原作者交接](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#后台唤醒前置补片审阅2026-09-28整组未交付)。建议下一步由 Claude 补读失败边界并固定整组，root 再做必要组合与原生委派；只读审阅可并行。
+
+## C22连续压缩后的原资源执行复验（2026-09-28）
+
+- 固定 8ef 的 G02 修复复验，沿用原输入/普通需求和既有 65536 profile，新 CAP06 仅提交一次，336.314 秒自然终态，18 HTTP/0 重试；原始账本及产物摘要经独立审阅和 root 核对。
+- 同请求四代自动提交，0→1→2→3→4 链及 thread head 一致。第 2 代后两次 get、完整 source_ref 复制及原检查器执行通过；两份脚本与固定 A/B 同字节，pins、输入、六配置和安装表保持。第 4 代后没有工具调用，不补算默认 262144 长任务。
+- 实际命令退出 1/2/1，捕获完整；A 是未知来源引用，B 是先错参数后错输入 schema。保存报告 JSON 与 stdout 值相等，A 重排、B 仅尾换行不同；检查程序执行通过不等于检查数据合格。
+- 交接错误经独立确认，业务未过；既有 C17/C21 失败与最终 0/27 保持。本轮无产品/测试/配置变更，固定 8ef 的相关 135 项结果保持，不新增镜像测试或重复全仓。本轮 Ruff、doc sync、strict code-size（hard=0）、diff、clean-package 均退出 0；线上 CI 未作为验收来源。
+- 详见[真实分项和私有证据摘要](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c22固定校准后的连续压缩与原资源执行2026-09-28)。建议下一步核 Claude 固定唤醒补片并完成委派复验，再执行最终矩阵；只读审阅可并行，私有运行归 root，发布归 Claude。
+
 ## C21固定8ef组合及原生开发分项（2026-09-28）
 
 - 隔离固定源码的 `test_compact_calibrated_candidate_gate`、`test_compact_capacity_host_chain`、`test_compact_capacity_facts`、`test_active_turn_compact_projection`、`test_compact_request_projection`、`test_compact_source_lifetime`、`test_mixed_compact_contract`、`test_runtime_context_pressure` 共 135 项通过；独立只读复核未发现确定阻断。
