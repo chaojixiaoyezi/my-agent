@@ -686,6 +686,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "不要继续往下派，改为在当前会话里自己完成或回报给上级。"
         ),
     ),
+    "SESSION_TASK_NOT_FOUND": ErrorContract(
+        code="SESSION_TASK_NOT_FOUND",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "找不到这个会话任务编号：可能不是本用户的任务，或编号写错了。"
+            "请用 create_session_task 回执里的 task_id，不要凭名称猜。"
+        ),
+    ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(
         code="SESSION_TASK_RATE_LIMIT",
         category="orchestration",

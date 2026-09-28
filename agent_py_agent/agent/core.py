@@ -16,6 +16,10 @@ from .agent_core.models import AgentRunResult
 from .agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
 from .agent_core.orchestration.tools.create_session_task import CreateSessionTaskTool
 from .agent_core.orchestration.tools.send_session_message import SendSessionMessageTool
+from .agent_core.orchestration.tools.session_task_control import (
+    CancelSessionTaskTool,
+    GetSessionTaskTool,
+)
 from .agent_core.orchestration_tools import (
     CODING_SUBAGENT_TOOLS,
     READ_ONLY_SUBAGENT_TOOLS,
@@ -1085,6 +1089,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 会话间派活:第一期只开给管理员,并单独看派活开关;条件不满足时工具不进 registry。
     if session_task_tool_visible(agent.home_paths, capability_config_for_agent(agent)):
         agent.tools.register(CreateSessionTaskTool(agent))
+        agent.tools.register(GetSessionTaskTool(agent))
+        agent.tools.register(CancelSessionTaskTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
     if not agent.config.enable_subagents:

@@ -2,6 +2,23 @@
 
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`）
 
+## 会话间消息与派活第 3 片 C+D：任务查询与取消（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：第 3 片 C（取消）与 D（结果回报的控制侧）。
+- **做法**：
+  - 新增 `agent_core/orchestration/tools/session_task_control.py`：
+    - `GetSessionTaskTool`（只读）：返回任务状态、正文引用（`body_guidance_id`）与结果 refs；
+      任务不存在返回 `SESSION_TASK_NOT_FOUND`。
+    - `CancelSessionTaskTool`（结构化控制）：只在非终态推进到 `cancelled`（复用 `SessionTaskStore` 的状态机，
+      不重复实现迁移规则）；已是终态时**幂等返回当前状态、不改写**；成功后把"已取消"作为一条来源明确
+      的消息排队回发送方（`guidance.append_once`，`origin_kind=session_task`）。
+  - 新增错误码 `SESSION_TASK_NOT_FOUND` 并登记；`core.py` 在同一 `session_task_tool_visible` 条件下注册三个工具。
+- **新测试**：`test_session_task_control_tool.py`（6 项）——查询返回结构化状态、任务不存在、
+  缺参数失败、取消非终态生效并把通知排队、取消终态任务不改写（幂等）、取消不存在任务。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_task_control_tool.py -q`（6 项）。
+- **未完成**：结果回报的自动接线（任务结束时把结构化结果回给发送方）、接收方 TUI 展示（E）、
+  fake LLM 端到端（F）。
+
 ## 会话间消息与派活第 3 片 B：TurnTrigger 新 kind + create_session_task 工具（2026-09-28，分支 `my-agent/self-dev-3`）
 
 - **来源**：第 3 片 B（管理员派任务），dev 要求功能完整（派任务 + 结果回报 + 取消 + 两侧可见）。
