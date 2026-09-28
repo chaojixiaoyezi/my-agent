@@ -27,6 +27,8 @@ from . import decision_point_limits as limits
 
 SCHEMA = "decision_reach.v1"
 CALLED = "called"
+# observe 采样的成功样本计数用独立内部码：只服务采样判定，不进 reached/called/not_called 诊断（_point_row 里排除）。
+SAMPLE_SUCCESS = "observe_sample_ok"
 # 本片接入到达计数的点位；其余点位展示时明确写“未统计”，不显示成 0 次。
 COVERED_POINTS = ("planning", "delivery_quality", "action_candidate", "external_material_order",
                   "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation", "model_selection",
@@ -44,6 +46,7 @@ _LAST_FLUSH: dict[str, float] = {}
 # 原因码 → 给不懂技术的用户看的大白话；键是宿主短标识。
 _LABELS = {
     CALLED: "已调用决策模型",
+    "observe_sampled_out": "这个点位本小时的观察样本已经够了，本小时不再调用决策模型（observe 采样）",
     "point_off": "这个点位没打开（或决策模型总开关关着）",
     "admin_disabled": "管理员关闭了你使用决策模型的权限",
     "settings_busy": "那一刻决策设置正在保存，跳过了这一次",
@@ -112,6 +115,28 @@ def note_decision_reach(agent: object, point: str, reason: str, *, flush: bool =
         due = flush and time.monotonic() - _LAST_FLUSH.get(str(path), float("-inf")) >= _FLUSH_SECONDS
     if due:
         _flush(str(path))
+
+
+# LLM: observe 采样只统计“成功调用”：拿到合法响应后才记一次，失败/超时/被挡下都不记，所以出问题的点位会一直被试。
+#   与到达计数共用同一账本、同一节流和保留期，但用独立内部码，不改变 reached/called/not_called 的口径。
+# 函数用途: 记一次 observe 点位的成功调用样本（写盘由同一节流负责）。
+def note_observe_sample_success(agent: object, point: str, *, flush: bool = True) -> None:
+    note_decision_reach(agent, point, SAMPLE_SUCCESS, flush=flush)
+
+
+# LLM: 只读本进程与盘上计数，取当前自然小时的样本数；路径缺失、文件损坏一律按 0 处理，采样判定不能因诊断数据缺失而改动主链路。
+# 函数用途: 返回某个点位本自然小时里成功调用决策模型了几次。
+def observe_sample_success_count(home_paths: object, point: str, *, now: float | None = None) -> int:
+    path = getattr(home_paths, "owner_decision_reach_counts_json", None)
+    if not isinstance(path, Path) or not point:
+        return 0
+    hour = int((time.time() if now is None else float(now)) // _HOUR) * _HOUR
+    hours = _read_hours(path)
+    with _LOCK:
+        pending = dict(_PENDING.get(str(path), {}))
+    for key, count in pending.items():
+        _add(hours, key, count)
+    return int(((hours.get(hour) or {}).get(str(point)) or {}).get(SAMPLE_SUCCESS, 0) or 0)
 
 
 # LLM: 只包材料构建这一步：材料不合规或超出协议上限（DecisionInputError）时记一次 bad_material 再原样上抛，
@@ -207,8 +232,10 @@ def decision_point_diagnostics(points: tuple[str, ...], modes: Mapping | None, r
 
 # 函数用途: 把一个点位的原因计数整理成 reached/called/not_called（按次数从多到少，带大白话）。
 def _point_row(counts: Mapping[str, int]) -> dict[str, object]:
-    missed = sorted(((reason, count) for reason, count in counts.items() if reason != CALLED), key=lambda item: (-item[1], item[0]))
-    return {"reached": sum(counts.values()), "called": int(counts.get(CALLED, 0)),
+    # 采样成功计数不是“到达/未调用”，不计入 reached，也不进 not_called。
+    diagnostics = {reason: count for reason, count in counts.items() if reason != SAMPLE_SUCCESS}
+    missed = sorted(((reason, count) for reason, count in diagnostics.items() if reason != CALLED), key=lambda item: (-item[1], item[0]))
+    return {"reached": sum(diagnostics.values()), "called": int(diagnostics.get(CALLED, 0)),
             "not_called": [{"reason": reason, "label": miss_reason_label(reason), "count": count} for reason, count in missed]}
 
 
@@ -279,6 +306,7 @@ def _add(hours: dict[int, dict[str, dict[str, int]]], key: tuple[int, str, str],
 __all__ = [
     "CALLED",
     "COVERED_POINTS",
+    "SAMPLE_SUCCESS",
     "SCHEMA",
     "counted_material",
     "decision_point_diagnostics",
@@ -286,5 +314,7 @@ __all__ = [
     "flush_decision_reach_counts",
     "miss_reason_label",
     "note_decision_reach",
+    "note_observe_sample_success",
+    "observe_sample_success_count",
     "stage_miss_reason",
 ]

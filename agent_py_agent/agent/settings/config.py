@@ -272,6 +272,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 决策增强默认关闭；有限正秒数只作用后续请求，不重置已开始阶段的预算。
     decision_enabled: bool = False
     decision_experiment_enabled: bool = False
+    # observe 采样（默认关）：打开后只作用于 observe 点位——每个点位每自然小时成功调用满 6 次就不再调用决策模型，
+    # 失败和超时不计名额，所以出问题的点位会一直被观察；apply 点位不受影响。
+    decision_observe_sampling_enabled: bool = False
     # 决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数）：关闭时既不在结果日志记 skipped（原因码、无正文），
     # 也不累计 decision_reach_counts 的到达/未触发原因计数。
     decision_skip_records_enabled: bool = True

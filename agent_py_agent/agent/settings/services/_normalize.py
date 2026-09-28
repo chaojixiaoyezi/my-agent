@@ -384,6 +384,7 @@ class UserFieldsService:
 _RUNTIME_BOOL_FIELDS = (
     "auto_save_memory", "local_store_fts_enabled",
     "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
+    "decision_observe_sampling_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning",
     "audit_enabled",

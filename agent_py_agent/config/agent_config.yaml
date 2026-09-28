@@ -1038,6 +1038,9 @@ cli_audit_cleanup_days: 90
 # 决策增强：默认关闭；保存设置不发网络请求。修改时间只作用后续请求，不重置已开始阶段的预算。
 decision_enabled: false
 decision_experiment_enabled: false  # 仅实验能力开关；另需宿主显式有界授权，当前缺可靠输入上界时禁止实验联网
+# observe 采样：开着只会给 observe 点位按自然小时限流，每点位每小时成功调用满 6 次就先停，这一小时不再问决策模型；
+# 失败和超时不算名额（出问题的点位会一直被观察），apply 点位完全不受影响。默认关=现在行为不变。
+decision_observe_sampling_enabled: false
 decision_timeout_seconds: 2.0  # 前台单次等待；必须为有限正秒数
 decision_stage_timeout_seconds: 4.0  # 同一阶段累计等待；必须为有限正秒数
 decision_background_timeout_seconds: 4.0  # 后台单次等待；必须为有限正秒数

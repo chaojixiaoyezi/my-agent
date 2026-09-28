@@ -22,3 +22,6 @@ SKILL_PROPOSALS_MIN = 2
 SKILL_PROPOSALS_MAX = 30
 # 召回重排：普通（非 HOT/lesson）记忆至少几条。
 RECALL_MEMORIES_MIN = 2
+# observe 采样：开关打开后，每个点位每个自然小时里成功调用达到这个次数就不再调用决策模型
+# （失败与超时不计入）。只是内部观察节奏，不是用户参数。
+OBSERVE_SAMPLED_SUCCESS_LIMIT = 6

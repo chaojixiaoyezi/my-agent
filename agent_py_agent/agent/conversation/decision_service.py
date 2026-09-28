@@ -35,7 +35,9 @@ from ..settings.decision_settings_schema import POINT_RUNTIME_SCOPES
 from ..settings.model_profiles import model_profiles_path, read_model_profiles
 from ..settings.model_provider_schema import ModelProfileError
 from ..user_space.owner_admin_controls import owner_decision_model_allowed
+from . import decision_point_limits as decision_limits
 from .decision_outcome_log import append_decision_outcome, decision_outcome_row
+from .decision_reach_counts import note_observe_sample_success, observe_sample_success_count
 from .decision_policy import (
     ActiveDecision,
     connection_revision,
@@ -276,6 +278,25 @@ def decide(agent: object, params: object, stage: DecisionStage, *, point: str, s
     return outcome
 
 
+# LLM: observe 采样只作用于普通 observe 点位：开关关闭、点位不是 observe、或走实验路径时永远返回 False，默认行为与原来完全一致；
+#   计数只统计本自然小时的成功调用，失败与超时不计名额。
+# 函数用途: 判断某个 observe 点位本小时的成功样本是否已经够多，够多就跳过这次调用。
+def _observe_sampled_out(agent: object, point: str, row: dict, settings: dict) -> bool:
+    return _sampled_outcome(agent, point, row, settings) is not None
+
+
+# LLM: 跳过结果本身也走同一条判定，避免“判定”和“返回的结果”各自演化；判定不成立返回 None，调用方照原路继续。
+# 函数用途: 采样判定命中时给出结构化跳过结果，未命中返回 None。
+def _sampled_outcome(agent: object, point: str, row: dict, settings: dict) -> DecisionOutcome | None:
+    if not bool((settings.get("effective") or {}).get("observe_sampling_enabled")):
+        return None
+    if str(row.get("effective_mode") or "") != "observe":
+        return None
+    if observe_sample_success_count(agent.home_paths, point) < decision_limits.OBSERVE_SAMPLED_SUCCESS_LIMIT:
+        return None
+    return DecisionOutcome("observe", "skipped", reason="observe_sampled_out")
+
+
 # LLM: decide 的实现；返回语义与原 decide 完全一致。冷却先看整条连接，再看本点位（超时只冷却本点位，见 _failure_key）。
 # 函数用途: 校验身份与范围、解析路由和期限、检查冷却后调用决策模型，任何失败都保留原业务方案。
 def _decide_outcome(agent: object, params: object, call: _DecideCall) -> DecisionOutcome:
@@ -299,6 +320,8 @@ def _decide_outcome(agent: object, params: object, call: _DecideCall) -> Decisio
         if refused is not None:
             return refused
         settings, row, revision, config = route
+        if not stage.experiment and (sampled := _sampled_outcome(agent, point, row, settings)) is not None:
+            return replace(sampled, mode=mode)
         deadline = _point_deadline(stage, started, row["timeout_seconds"], caller)
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
@@ -420,6 +443,8 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
             return revoked
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="late_validation")
+        if mode == "observe" and not stage.experiment:
+            note_observe_sample_success(agent, point)
         return DecisionOutcome(mode, "success", response, mode == "apply", connection_revision=key[2], deadline=deadline)
     except InterruptedError:
         _check_interrupted()
