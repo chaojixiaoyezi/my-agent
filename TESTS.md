@@ -2,6 +2,28 @@
 
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`）
 
+## 会话间消息与派活第 3 片 A：SessionTaskStore 权威存储（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：第 3 片（管理员派任务）。设计文档要求 task 状态只有**一个权威**、**单一写入方**，正文只存一份。
+- **做法**：
+  - 新增 `conversation/session_tasks.py`：`SessionTask` 值对象 + `SessionTaskStore`。
+    - 状态机唯一权威：`queued → accepted → done | failed | cancelled`；终态不可被普通生命周期改写；
+      `queued` 可直接取消；同状态重复写入视为幂等。
+    - **正文只存一份**：`body_guidance_id` 引用既有 guidance 条目，本 store 不复制正文。
+    - **状态推进走 `update_json_file_atomic` 锁内重读**再校验迁移，避免两个写入方互相覆盖（双账）。
+    - **幂等**：同 `dedupe_key` 同输入返回原记录；同键异文抛错。
+    - **链深**：`chain_depth()` 按 `origin_task_id` 结构化遍历（带环保护），**不信任模型传入的深度**。
+  - `store_layout.py` 新增 `session_tasks_dir`（含 `dedupe` 子目录）并入 `managed_dirs`；
+    `store.py` 组装 `self.session_tasks`。
+- **新测试**：`test_session_task_store.py`（12 项）——创建、幂等重放、同键异文报错、合法/非法迁移、
+  queued 直接取消、终态保护、同状态幂等、链深（含环）、缺失返回 None、列表排序。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_task_store.py -q`（12 项）；
+  回归 `test_conversation_store.py`（52 项）通过。
+- **未完成**：本片只做权威存储；派活工具、TurnTrigger 新 kind、取消、结果回报、接收方 TUI 展示、
+  fake LLM 端到端在后续片。
+
+## 会话间消息与派活第 2 片：TUI 命令 /tell 与 /sessions threads（2026-09-28，分支 `my-agent/self-dev-3`）
+
 - **来源**：生产 runtime-step15c 上，my-agent 调 Jev 等待时间，`decision_patch` 连续被拒三次；dsh-9b 早先也遇到过。
   回执都是 `TOOL_INVALID_ARGUMENTS`「决策设置请求包含未知字段」，`handler_executed=true`、`effect_outcome=not_started`。
 - **复现与根因**：

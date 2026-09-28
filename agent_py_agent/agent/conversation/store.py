@@ -9,6 +9,7 @@ from typing import Any
 
 from .goal_clock import shared_goal_clocks
 from .models import MODEL_HIDDEN_THREAD_FIELDS
+from .session_tasks import SessionTaskStore
 from .store_audits import AuditStore
 from .store_claims import ClaimStore
 from .store_goals import GoalStore
@@ -53,6 +54,8 @@ class ConversationStore:
             disable_task_progress_policies=self.progress.disable_task,
         )
         self.audits = AuditStore(self.storage, tasks=self.tasks)
+        # 会话间派活（第一期）：只存派活记录与状态；正文引用 guidance，目标执行链接结构化。
+        self.session_tasks = SessionTaskStore(self.storage)
         self.goal_clock = shared_goal_clocks(self.storage.root)
         self.observations = ObservationStore(
             self.storage, require_thread=self.threads.require,

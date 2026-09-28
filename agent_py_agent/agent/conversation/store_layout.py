@@ -40,6 +40,8 @@ class ConversationStorage:
         self.messages_dir = self.root / "messages"
         self.model_usage_dir = self.root / "model_usage"
         self.tasks_dir = self.root / "tasks"
+        # 会话间派活记录（第一期）：每任务一个 JSON，正文仍只存在 guidance 里。
+        self.session_tasks_dir = self.root / "session_tasks"
         self.policies_dir = self.root / "progress_policies"
         self.observations_dir = self.root / "observations"
         self.guidance_dir = self.root / "guidance"
@@ -75,6 +77,8 @@ class ConversationStorage:
             self.messages_dir,
             self.model_usage_dir,
             self.tasks_dir,
+            self.session_tasks_dir,
+            self.session_tasks_dir / "dedupe",
             self.policies_dir,
             self.observations_dir,
             self.guidance_dir,
