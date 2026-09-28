@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## R10 三类控制独立原生实测（2026-09-28，分支 `claude/be-r10-acceptance`，基于 `7249a1ebd`，只改文档）
+
+- **来源**：能力包收口缺项 G04。暂停 Goal、中断当前回合、明确停止资源三类控制，之前只有 `/stop` 组合状态和 REOPEN03 的旧证据；
+  集成方把 R10 的真实验收从 Codex 转给 Claude。判据沿用 R10 原行，详见 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md` 同名一节。
+- **被测**：`9f88e4905`（与生产 step14w 产品代码相同，与当前 main 的 Python 代码相同）。`git archive` 构建 wheel，摘要
+  `3c34d1c4a2a71572d6e67642bd06ac995b1d5de29413ecdb1ebc235580c6a24b`，clean-package 通过，装入全新 Python 3.11 venv。
+  隔离 home，Gateway 只在 127.0.0.1:8434；模型为 Codex 27 次矩阵所用的私有档案（官方 MiniMax-M2.7，窗口 262144）。
+- **做法**：每项一个新 TUI 会话、一条原始中文需求，控制命令按用户方式在 TUI 里输入，只在结构化就绪条件满足后发出。
+  判定只读控制记录、请求状态、runtime.db（只读 immutable）、后台进程登记与 PID 存活、心跳文件行数，不读对话正文。
+- **结果**：
+  - 暂停 Goal：通过。在跑的 attempt 以 done 结束，暂停时正在执行的工具 SUCCEEDED；目标 paused 后 12 分钟内没有新 attempt。
+  - 中断当前回合：通过。请求 interrupted，run 与 attempt cancelled，之后没有新的工具操作；本任务后台进程保持 running，
+    心跳继续增长，没有停止请求。
+  - 明确停止资源：通过。本任务后台进程被回收（`reason=stop_requested`、SIGTERM、confirmed），任务关闭为 cancelled；
+    其它任务的后台进程和已暂停的目标不受影响。
+- **未计判定**：B1 是测试侧就绪条件写错路径，控制没有发出；C1 发出了 `/stop`，但本任务的后台进程在冻结前已自行退出，
+  资源停止分项未覆盖。两次都如实保留，C2 重跑时加严了就绪条件。长前台工具执行中途的 `/interrupt` 与 `/goal resume` 对照未覆盖。
+- **用量**：23 次主模型调用（MiniMax-M2.7），决策与辅助调用为 0。
+- **证据**：`~/.my-agent/decision-evidence/r10-controls-9f88/`（仓库外）。`r10-results.json` 摘要
+  `93642c201a66d0620e70981df4ee50ecc8a5e3de0f3edb7819f1c2cee8d4a3e8`，`MANIFEST.sha256` 摘要
+  `e25c67ea2567a255af25439a0bb6b7283bb248f945a8554f615d589efd127484`。
+- **门禁**：只改文档，跑了 doc sync、`git diff --check`、clean package；没有产品或测试代码变更，不跑 pytest。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的
