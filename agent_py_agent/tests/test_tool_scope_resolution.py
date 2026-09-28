@@ -81,8 +81,28 @@ def test_empty_explicit_target_is_denied_even_without_current_identity(tmp_path)
     assert tpt._unmatched_explicit_run_target(agent, tmp_path, "", {}) is None
 
 
+# 函数用途: 造一个具备真实 subagents 契约的 cancel 宿主——`load` 对不存在的 run 抛
+#   FileNotFoundError（与 authorization_gate 的既定契约一致），而不是让加载器整体不可用。
+def _cancel_agent(runs, *, load_error: Exception | None = None) -> SimpleNamespace:
+    by_id = {str(getattr(run, "id", "")): run for run in runs}
+
+    def _load(run_id: str):
+        if load_error is not None:
+            raise load_error
+        target = by_id.get(str(run_id))
+        if target is None:
+            raise FileNotFoundError(f"子代理记录不存在: {run_id}")
+        return target
+
+    return SimpleNamespace(
+        subagents=SimpleNamespace(list_runs=lambda: list(runs), load=_load),
+        _current_run_params=None,
+        home_paths=SimpleNamespace(root=Path("/tmp")),
+    )
+
+
 def test_cancel_invisible_explicit_target_is_judged_at_resolution():
-    agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: []))
+    agent = _cancel_agent([])
     result = cancel_tool._resolve_run_ids(agent, {"run_id": "ghost-run-9999"})
     # 不可见的显式目标在解析阶段就被判掉：不给 run_ids，只给结构化原因。
     assert result.ok is True and result.run_ids == []
@@ -92,21 +112,30 @@ def test_cancel_invisible_explicit_target_is_judged_at_resolution():
 
 def test_cancel_visible_explicit_target_is_not_denied():
     visible = SimpleNamespace(id="child-1", status="RUNNING")
-    agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: [visible]))
+    agent = _cancel_agent([visible])
     result = cancel_tool._resolve_run_ids(agent, {"run_id": "child-1"})
     assert result.ok is True and result.run_ids == ["child-1"] and result.error_payload == {}
 
 
+def test_cancel_corrupt_explicit_target_stays_on_the_failed_path():
+    """存在但加载失败（账本损坏）不能判成"不存在"——它要走既有的 failed 路径带上具体错误。
+
+    实测（2026-09-28）：真实宿主上账本损坏时加载抛 JSONDecodeError，`list_runs()` 可能整批返回空，
+    所以"可见集合"不能当存在性判据。这里用抛解析错的桩钉住该口径。
+    """
+    agent = _cancel_agent([], load_error=ValueError("Extra data: line 15 column 1"))
+    assert cancel_tool._explicit_target_is_absent(agent, "child-1") is False
+
+
 def test_cancel_without_any_target_keeps_parameter_required_semantics():
-    agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: []))
+    agent = _cancel_agent([])
     for params in ({}, {"run_ids": []}, {"root_id": ""}):
         result = cancel_tool._resolve_run_ids(agent, params)
         assert result.error_payload == {}, f"{params} 不该被当成范围裁决"
 
 
 def test_cancel_empty_explicit_target_returns_structured_receipt():
-    agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: []),
-                            _current_run_params=None, home_paths=SimpleNamespace(root=Path("/tmp")))
+    agent = _cancel_agent([])
     outcome = cancel_tool.execute_cancel_subagents(agent, {"run_id": "ghost-run-9999"})
     payload = json.loads(outcome.output)
     assert outcome.ok is False
@@ -115,8 +144,7 @@ def test_cancel_empty_explicit_target_returns_structured_receipt():
 
 
 def test_cancel_missing_parameters_keeps_tool_parameter_required():
-    agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: []),
-                            _current_run_params=None, home_paths=SimpleNamespace(root=Path("/tmp")))
+    agent = _cancel_agent([])
     outcome = cancel_tool.execute_cancel_subagents(agent, {})
     assert outcome.error_code == "TOOL_PARAMETER_REQUIRED"
 

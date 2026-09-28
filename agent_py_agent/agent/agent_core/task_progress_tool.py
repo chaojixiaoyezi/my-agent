@@ -448,16 +448,24 @@ def _invalid_write_target(agent: object, root: Path, target: str, params: dict) 
 # LLM: 显式 run_id 在当前 owner 可见账本里找不到对应行时的唯一裁决：不猜目标、不新建账本，直接把
 #   "请求的 id 不在可见范围"作为结构化事实返回；调用方据此换用当前账本或先 read 拿正确 id。
 #   判定只看宿主事实（当前身份、coverage 来源与磁盘上的账本文件），不解析自然语言、不按前缀猜。
+#   "当前身份"必须覆盖所有合法形态：`_current_run_params` 缺失（如只有 _main_agent_run_id 的会话）时，
+#   `_target_run_id(allow_explicit=False)` 的回退链（scoped/subagent/_main_agent_run_id/_current_request_id）
+#   返回的就是当前账本键，把它当不可见会误伤合法调用。
+#   当前账本键只在这一处解析：`_current_run_params` 的 run/task/durable 别名另有语义（历史计划别名），
+#   所以单独判；不做第二次回退链拼接，避免同一个"当前身份"有两套实现各自漂移。
 # 函数用途: 判断显式 run_id 是否不在可见范围，是则给出拒绝结果，否则返回 None 继续原链。
 def _unmatched_explicit_run_target(agent: object, root: Path, target: str, params: dict) -> ToolHandlerOutcome | None:
     if not target:
+        return None
+    # 当前账本键的权威解析：不依赖 _current_run_params 是否存在（它只是其中一种来源）。
+    # 这条已覆盖 scoped/子代理/_main_agent_run_id/_current_request_id 全部回退来源。
+    if target == _target_run_id(agent, params, allow_explicit=False):
         return None
     current = getattr(agent, "_current_run_params", None)
     if current is not None and target in {
         str(getattr(current, "run_id", "") or ""),
         str(getattr(current, "task_id", "") or ""),
         durable_task_id(current),
-        _target_run_id(agent, params, allow_explicit=False),
     }:
         return None
     if progress_path(root, target).is_file():

@@ -311,20 +311,43 @@ def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveR
         tasks = tasks_result.tasks
         ids.extend(str(task.id) for task in tasks if task_status_in(task.status, status_filter))
     if explicit:
-        # LLM: 显式点名的 id 必须真的在当前可见树里；解析阶段就判掉不可见目标，别让它走到取消执行层
-        #   变成 "programmer_b..." 这类无意义错误。用与 list_agents 相同的裁决码，不区分不存在/无权看。
-        tasks_result = _list_runs_for_cancel(agent)
-        if not tasks_result.ok:
-            return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
-        visible = {str(task.id) for task in tasks_result.tasks}
-        unmatched = [item for item in explicit if item not in visible]
-        if unmatched:
+        # LLM: 显式点名的 id 若本 owner 存储里确实没有这条 run，就在解析阶段给裁决码，别让它走到取消
+        #   执行层变成 "programmer_b..." 这类无意义错误。
+        #   关键口径（dev 2026-09-28 确认）：判定只依据**已有的加载结果**——`_load_cancel_target` 已经
+        #   区分了"加载失败（run 存在但 locator/元数据损坏）"与"本 owner 根本查不到"：
+        #     - 加载抛错（task 为 None、带 error）→ 存在但坏了，原样放行到既有 failed 路径，带上具体错误；
+        #     - 加载成功 → 正常目标。
+        #   不在这里另算第二套"可见集合"（`list_runs()` 只返回能解析成功的行，会把损坏 run 误判成不存在）。
+        missing = [item for item in explicit if _explicit_target_is_absent(agent, item)]
+        if missing:
             return _ResolveRunIdsResult(True, [], {
                 "reason": UNMATCHED_RUN_SCOPE_CODE,
-                "requested_run_ids": unmatched,
+                "requested_run_ids": missing,
                 "message": "这些 run_id 不在当前可见范围内（不存在或无权查看，两者答复相同）。",
             })
     return _ResolveRunIdsResult(True, _dedupe(ids), {})
+
+
+# LLM: 判定"这条显式 run_id 在本 owner 里确实不存在"。只看既有加载结果，不另算可见集合。
+#   权威判据来自 authorization_gate（该文件 85-89 行的既定契约）：
+#     - `manager.load` 对不存在的 run 透传 FileNotFoundError → 确实没有这条 run，返回 True（给裁决码）；
+#     - AuthorizationError（存在但无权）/ 其他加载错误（如 JSONDecodeError 账本损坏）→ 存在，返回 False，
+#       原样放行到既有 failed 路径，带上具体错误。
+#   `list_runs()` 不能作为"不存在"的判据：账本损坏时它可能整批返回空，会把损坏 run 误判成不存在。
+#   判定复用 `_load_cancel_target` 已有的那次加载，不额外读盘。
+# 函数用途: 给解析阶段的可见性裁决提供"确实不存在"判据（只认 FileNotFoundError）。
+def _explicit_target_is_absent(agent: SimpleAgent, run_id: str) -> bool:
+    item = _load_cancel_target(agent, run_id)
+    if item.get("task") is not None:
+        return False
+    error = item.get("error")
+    if isinstance(error, dict):
+        return (
+            str(error.get("error_type") or "") == "FileNotFoundError"
+            or str(error.get("category") or "") == "io"
+        )
+    # 没有结构化错误信息时保守放行：宁可让下层报具体错误，也不误判"不存在"。
+    return False
 
 
 def _list_runs_for_cancel(agent: SimpleAgent) -> _ListRunsForCancelResult:

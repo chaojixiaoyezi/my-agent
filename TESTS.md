@@ -76,6 +76,41 @@ python3 -m pytest agent_py_agent/tests/test_tool_scope_resolution.py \
 - 写 `pytest` 探针时注意：`agent_py_agent` 是 editable 安装的命名空间包，在仓库根目录外跑脚本会 import 到别处的安装包；
   探针写成临时 `tests/test_*.py` 再跑，和现有测试同一环境。
 
+## 任务 5 回归修复：cancel 的"存在"判据与 task_progress 的当前身份链（2026-09-28，分支 `my-agent/self-dev-2`）
+
+- **来源**：dev 派活任务 6。`aba69ef47` 在全量集成里弄坏 2 个既有测试，我的定向测试范围太窄没覆盖它们。
+- **缺陷 1（cancel）**：原判定把"可见集合"算成 `{t.id for t in list_runs()}`。账本损坏的 run **存在但加载失败**
+  （实测抛 `JSONDecodeError`），此时 `list_runs()` 甚至整批返回空，于是它被误判"不可见"拦掉，回执丢了 `failed` 段。
+  **修法（dev 确认的口径）**：判定只依据既有加载结果，不另算第二套可见集合。按 `authorization_gate` 的既定契约，
+  `manager.load` 对不存在的 run 透传 `FileNotFoundError`（→ 给裁决码），其余加载错误（损坏/无权）一律**存在**，
+  原样放行到既有 failed 路径。实测对照表：
+  | 情形 | error_type / category | 判据结果 |
+  |---|---|---|
+  | 真不存在 | `FileNotFoundError` / `io` | 不存在 → 裁决码 |
+  | 账本损坏 | `JSONDecodeError` / `data_parse` | 存在 → failed 路径 |
+  | 健康 | 能加载出 task | 存在 → 正常取消 |
+- **缺陷 2（task_progress）**：判定集合只从 `_current_run_params` 派生；宿主只有 `_main_agent_run_id` 时它为空，
+  合法的当前目标被拒成 `task_progress_scope_mismatch`。**修法**：当前账本键统一由
+  `_target_run_id(allow_explicit=False)` 解析（其回退链已覆盖 scoped/子代理/`_main_agent_run_id`/`_current_request_id`），
+  不再另拼一套同源集合——第一次实现里确实多写了一段冗余集合，变异验证暴露它没被任何测试钉住（M5/M6 存活），
+  删掉后改用单一权威判据才 8/8 KILLED。
+- **复现**：
+  ```bash
+  python3 -m pytest agent_py_agent/tests/test_orchestration_cancel_subagents_tool.py \
+    agent_py_agent/tests/test_task_progress_advisory.py agent_py_agent/tests/test_tool_scope_resolution.py -q
+  ```
+  dev 要求另按调用点全量跑：grep 出构造 `TaskProgressTool` / 调 `cancel_subagents` 的 **29 个测试文件**，共
+  **810 passed / 1 xfailed**。
+- **既有失败（非本次引入，已在干净 `origin/main` 复核）**：
+  `test_gateway_chat_conversation_context.py::test_first_gateway_shell_keeps_explicit_working_dir`
+  在 `origin/main` 的独立 worktree 上同样失败，与本次改动无关。
+- **变异验证 8/8 KILLED**：存在性判据忽略 FileNotFoundError / 判据恒 False / 解析阶段不裁决 /
+  判据退回 `list_runs` 可见集合 / 当前身份改用 `_current_run_params` / 回退链被截断 / 判定恒不拒绝 / 判定恒拒绝。
+- **排查坑（供复用）**：这两个既有测试用 `SimpleNamespace(subagents=...)` 只桩 `list_runs`，改判定后必须在桩上补
+  真实的 `load` 契约（不存在 → `FileNotFoundError`）；否则加载器整体不可用会退化成 `programmer_bug`，
+  判据失去可分辨信号。**测桩也要反映真实契约，不能只桩被测函数恰好用到的那一个方法。**
+
+
 ## Jev observe 采样开关：成功满 6 次后本小时不再调用（2026-09-28，分支 `my-agent/self-dev-2`，基点 `ca756b5db`）
 
 - **来源/做法**：dev 派活任务 4（从 my-agent-1 队列转来）。背景是 11 个点位全 observe、48 小时 276 次调用只换来观察记录。
