@@ -16,7 +16,6 @@ import json
 import threading
 from types import SimpleNamespace
 
-from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.orchestration.tools.create_session_task import (
     CreateSessionTaskTool,
@@ -51,6 +50,7 @@ from agent_py_agent.agent.conversation.control_commands import conversation_requ
 from agent_py_agent.agent.conversation.models import ChannelBinding
 from agent_py_agent.agent.conversation.session_task_report import close_out_turn
 from agent_py_agent.agent.gateway_parts.session_task_stop import stop_session_task_turn
+from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 _SENDER_THREAD_ID = "thread-A"
 _TARGET_THREAD_ID = "thread-B"
