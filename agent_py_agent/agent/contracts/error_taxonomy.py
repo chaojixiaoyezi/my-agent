@@ -2179,7 +2179,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="tool",
         retryable=False,
         recommended_action=RecoveryAction.CONTINUE.value,
-        recovery_hint="同一轮的一次性工具已经执行；读取前一个配对 ToolResult 继续，不要重复调用。",
+        recovery_hint=(
+            "同一轮（含子代理唤醒后的续跑）的一次性工具已经执行；读取前一个配对 ToolResult 继续，不要重复调用；"
+            "确需接替已有子代理时在 replacement_for_run_ids 里写明被接替的 run_id。"
+        ),
     ),
     "VERIFICATION_FAILED": ErrorContract(
         code="VERIFICATION_FAILED",

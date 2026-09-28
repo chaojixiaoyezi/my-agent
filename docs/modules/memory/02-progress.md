@@ -1,5 +1,7 @@
 # 记忆与上下文维护状态
 
+生命周期唤醒片续接前台轮的工具事实（分支 `claude/be-wake-turn`，2026-09-28，T3 验收观察 2）：`compact_tool_output_refs` 新增 `carried_tool_call_records_for_requests`，按（索引根, 是否只用于运行时状态）读 owner 根和任务 work 两处索引，每个根只读自己的 index.jsonl，按精确请求编号流式过滤，不全量加载；与 `carried_tool_call_records` 共用四元身份去重。owner 索引的记录带 `CARRIED_RUNTIME_ONLY_FIELD`，工具循环只用它重建去重、已执行工具和工具轮数，不进本片工具账和模型可见交接，溢出压缩携带时原样保留。修复前前台轮成功的 `create_subagents` 不在唤醒片的去重集合里，同内容派工会多出一个子代理。见 TESTS.md 顶部。
+
 Gateway 用户的记忆总闸按各自 home 生效（分支 `claude/9b-owner-path-scope`，2026-09-27）：`owner_resolver.home_paths_with_owner` 原先没有按用户重设 `owner_memory_policy_json`，Gateway 里其它用户经 `owner_policy` 读到的是本机主用户的 `memory_policy.json`，与只按 owner home 读的 `owner_wake_discovery` 不一致；现已按用户重设，新用户按自己 home 里的默认种子（开启）生效。`test_gateway_per_user_scoping.py` 按字段全集守卫所有 owner_* 路径都在该用户 home 内。同分支：召回重排的普通记忆下限改读 `conversation/decision_point_limits.RECALL_MEMORIES_MIN`，与诊断大白话共用一处。
 参数减量第 2 批（分支 `claude/9a-merge-config`，2026-09-27）：记忆配置三组各只留一个旋钮。`memory_archive_level` 同时决定运行归档与子代理收尾快照的级别（原 `memory_hook_archive_level` 删除，子代理快照改读它）；`memory_rule_routing_mode` 的 `off` 是规则路由唯一开关（原 `memory_rule_routing_enabled` 删除；决策点召回在 `off` 下直接关闭路由，不再报“off 不是合法模式”的 finding）；`memory_resume_auto_context_mode` 默认改为 `off`（等于原默认 enabled=false），单次 `--resume-context` 仍强制 always。旧键写在用户配置里只告警并忽略；回归见 `test_merged_config_knobs.py`。
 

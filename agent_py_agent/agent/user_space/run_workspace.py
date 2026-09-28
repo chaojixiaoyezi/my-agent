@@ -492,6 +492,19 @@ def _workspace_identity(root: Path) -> dict[str, object]:
     return _read_json_object(root / "work" / "run_workspace.json")
 
 
+# LLM: 只读任务根下 run_workspace.json（schema run_workspace.v1）的 owner_home，并要求任务根确实位于该 owner_home
+#   之内；元数据缺失、版本不符、字段为空或指向别处都返回 None，调用方不得据此扩大查找范围。不写文件。
+# 函数用途: 从任务工作区的身份元数据里找出它所属 owner 的家目录，供后台续跑查 owner 级工具索引。
+def run_workspace_owner_home(task_root: str | Path) -> Path | None:
+    root = Path(task_root).expanduser().resolve(strict=False)
+    identity = _workspace_identity(root)
+    owner_home = str(identity.get("owner_home") or "").strip()
+    if identity.get("schema_version") != "run_workspace.v1" or not owner_home:
+        return None
+    owner = Path(owner_home).expanduser().resolve(strict=False)
+    return owner if owner in root.parents else None
+
+
 def _read_json_object(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -646,5 +659,6 @@ __all__ = [
     "ensure_run_workspace",
     "finish_run_workspace",
     "remove_unmodified_run_workspace",
+    "run_workspace_owner_home",
     "run_workspace_paths",
 ]

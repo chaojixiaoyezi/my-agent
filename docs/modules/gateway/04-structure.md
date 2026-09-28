@@ -1418,7 +1418,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   TUI activity 必须复用同一 ledger id，不能按 durable request id 另读一本空账。
 - `agent/agent_core/parameters.py`、`tool_call_runtime.py`、`runtime/loop_support.py`：一次性编排工具同时使用
   exact payload key 和结构化 child intent key 去重；同一 assistant turn 的 batch + overlapping singles
-  只执行首份副作用，compact continuation 重建相同 key 集合。
+  只执行首份副作用，compact continuation 重建相同 key 集合。子代理生命周期唤醒片按唤醒信封的精确
+  `conversation_request_id` 从 owner 根索引（前台 Gateway 轮）和任务 work 索引重建同一回合的 key 集合；owner
+  根只取任务 `run_workspace.json` 的 `owner_home`，前台记录带 `carried_runtime_only`，只进运行时状态，不进本片
+  工具账与模型可见交接（2026-09-28，T3 观察 2）。
 - `agent/local_storage/tool_operations.py`、`agent/tooling/tool_operation_coordinator.py`：所有模型可调用的
   mutating/dangerous 工具在真实实现前共用 owner/run/operation 原子 claim；成功或失败结果可精确重放，
   活跃副本不并发执行，持有者死亡或终态不明时 fail-closed 为 unknown。Gateway audit ledger 只观测，

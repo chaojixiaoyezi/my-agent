@@ -1727,6 +1727,9 @@ def _run_params(
 
 # LLM: Only child lifecycle events continue the originating active turn. Restore rows by the
 # child envelope's conversation request id; the durable task id is only a legacy fallback.
+#   原回合的工具事实分两处：前台 Gateway 轮写在 owner 根自己的索引（owner 由任务 run_workspace.json 的结构化
+#   owner_home 给出，且任务根必须位于其内），唤醒片写在任务 work 索引。两处都按精确 conversation_request_id 流式
+#   过滤；owner 索引的记录已随前台轮写进会话历史，只标记为运行时状态（去重、已执行工具、工具轮数），不进本片工具账。
 # 函数用途: 为子代理完成后的主代理工作片恢复原用户回合的工具调用、去重键和执行轨迹。
 def _background_active_turn_tool_calls(
     request: BackgroundRunRequest,
@@ -1739,17 +1742,20 @@ def _background_active_turn_tool_calls(
     if not task_id or not task_path:
         return []
     try:
-        from ..memory_archive.compact_tool_output_refs import carried_tool_call_records
-
-        active_turn_request_ids = _background_active_turn_request_ids(request)
-        scope: dict[str, object] = (
-            {"conversation_request_id": active_turn_request_ids}
-            if active_turn_request_ids
-            else {"run_id": task_id, "task_id": task_id}
+        from ..memory_archive.compact_tool_output_refs import (
+            carried_tool_call_records,
+            carried_tool_call_records_for_requests,
         )
-        return carried_tool_call_records(
-            Path(task_path).expanduser().resolve(strict=False) / "work",
-            scope,
+        from ..user_space.run_workspace import run_workspace_owner_home
+
+        task_root = Path(task_path).expanduser().resolve(strict=False)
+        active_turn_request_ids = _background_active_turn_request_ids(request)
+        if not active_turn_request_ids:
+            return carried_tool_call_records(task_root / "work", {"run_id": task_id, "task_id": task_id})
+        owner_home = run_workspace_owner_home(task_root)
+        owner_source = [(owner_home, True)] if owner_home is not None else []
+        return carried_tool_call_records_for_requests(
+            [*owner_source, (task_root / "work", False)], active_turn_request_ids,
         )
     except (OSError, RuntimeError, ValueError):
         return []

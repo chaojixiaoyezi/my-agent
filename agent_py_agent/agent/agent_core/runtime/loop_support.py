@@ -19,6 +19,7 @@ from ...conversation.authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
 )
 from ...memory_archive import build_auto_resume_context
+from ...memory_archive.compact_tool_output_refs import CARRIED_RUNTIME_ONLY_FIELD
 from ...memory_archive.tool_output_externalizer import model_visible_tool_parameters
 from ...memory_routing import (
     RouteContextOptions,
@@ -1128,6 +1129,7 @@ def _native_user_task_text(value: object) -> str:
 # Never use the bounded model projection as runtime authority. Exact rejection memory
 # remains the same host-owned list across automatic continuations, independent of model history.
 # Skill presentation travels with this seed only; it cannot mutate the original grant or loaded-tool facts.
+#   带 CARRIED_RUNTIME_ONLY_FIELD 的携带记录（回合已写进会话历史）只进运行时状态重建，不进本片 archive_tool_calls。
 # 函数用途: 从新权限快照及完整归档恢复执行状态；同进程carry保留原IR，不重跑归档摘要或用户轮初始化。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
@@ -1139,7 +1141,9 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
 
         raise InputMediaError("附件需要支持原生多模态消息的模型连接，当前连接未启用原生协议。")
     native_carry = restore_native_compact_carry(agent, params)
-    archive_tool_calls: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
+    carried_records: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
+    # 已写进会话历史的回合记录（例如前台轮）只重建运行时状态，不进本片工具账、模型可见交接或压缩来源。
+    archive_tool_calls = [record for record in carried_records if not record.get(CARRIED_RUNTIME_ONLY_FIELD)]
     from ...conversation.active_turn_compact import model_visible_active_turn_tool_calls
 
     model_visible_archive_tool_calls = model_visible_active_turn_tool_calls(
@@ -1157,7 +1161,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     #   - tool_context：归零 → 历史轨迹丢失（_has_previous_tool_context 等守卫失明）。
     # 这是已有 pending_deferred 重建（_live_archive_state_from_carried_archive_tool_calls）的同源补全。
     reconstructed = _reconstructed_runtime_state(
-        archive_tool_calls,
+        carried_records,
         model_visible_records=[] if native_carry is not None else model_visible_archive_tool_calls,
         agent=None if native_carry is not None else agent,
         request_id=params.request_id,

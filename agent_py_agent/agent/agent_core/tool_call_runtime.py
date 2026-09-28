@@ -300,13 +300,17 @@ def _promote_conversation_task_for_work_tool(
 
 
 
+# LLM: 一次性编排去重的拦截结果。去重范围是整个活动回合（前台轮加子代理唤醒后的续跑片），拦截与放行只由
+#   结构化去重键决定，这里的文字只是软引导；改文案时同步 test_background_active_turn_carry。
+# 函数用途: 生成重复派工被拦时返回给模型的失败结果，并说明确需接替旧子代理时要在 replacement_for_run_ids 里写明。
 def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolHandlerOutcome:
     tool_name = str(payload.get("tool") or "unknown")
     return ToolHandlerOutcome(
         tool_name,
         False,
-        "本轮已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
-        "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
+        "本轮（含子代理唤醒后的续跑）已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
+        "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具；"
+        "确需另派子代理接替已有 run 时，在 replacement_for_run_ids 里精确写出被接替的 run_id。",
         error_code="TOOL_ONE_SHOT_ALREADY_EXECUTED",
     )
 

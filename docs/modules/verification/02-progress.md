@@ -1,5 +1,11 @@
 # Verification：开发推进
 
+## 2026-09-28 一次性编排拦截覆盖整个活动回合（分支 `claude/be-wake-turn`，T3 观察 2）
+
+子代理唤醒片现在能看到前台轮成功的 `create_subagents`，唤醒片里同内容的派工会被 `TOOL_ONE_SHOT_ALREADY_EXECUTED` 拦下。
+拦截文字与错误合同的恢复提示补了一句：确需另派子代理接替已有 run 时，在 `replacement_for_run_ids` 里写明被接替的 run_id。
+放行仍只看结构化去重键，带接替关系的意图键不同。回归见 `test_background_active_turn_carry.py` 与 TESTS.md 顶部。
+
 ## 2026-09-27 直接展示工具结果只保留逻辑续读锚点（移植自 Codex b496e1a0c，分支 `claude/port-b496-reducer`）
 
 reducer 在直接展示分支里，从临时副本省略本次归档文件的物理 ref，模型只看到带 scoped call id 的逻辑锚点；原结果、执行事实和外置摘要选择不变。

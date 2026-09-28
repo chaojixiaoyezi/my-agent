@@ -819,6 +819,7 @@ agent_py_agent/
 |   |-- test_background_scoped_compact.py # 独立任务与窄事件原Store压缩及实际模型材料回归
 |   |-- test_background_context_budget.py # 后台上下文预算只估算将渲染的节、有种子时不计最近消息及节集合合同
 |   |-- test_background_compact_recovery.py # 后台transcript及活动归档候选和实际HTTP材料对照、失败不恢复发送
+|   |-- test_background_active_turn_carry.py # 生命周期唤醒片按精确请求编号续接前台轮工具事实：owner记录只进运行时状态、同内容派工判重复、预算不缩水
 |   |-- test_compact_active_projection.py # 原生交接纯替换、媒体插话与guidance保留、未知IR拒绝
 |   |-- test_active_turn_compact_projection.py # 活动归档完整容量、取消、CAS及局部证据继承
 |   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离
@@ -1702,6 +1703,7 @@ docs/
 - `agent_py_agent/tests/test_compact_text_source.py`：编码源完整性、有限窗口、取消与迭代器释放、纠正请求预算及大批消息峰值验证。
 
 - `agent_py_agent/tests/test_compact_capacity_facts.py`：两条压缩链候选过大时的容量计量，从错误对象、failed 进度、公开白名单一直到 TUI 失败行；包括选中最小候选、无候选或已接受时不带计量。
+- `agent_py_agent/tests/test_background_active_turn_carry.py`：子代理生命周期唤醒片续接原用户回合的工具事实；锁 owner 根与任务两处索引按精确请求编号流式读取、别的请求与别的 run 不进来，前台记录只进运行时状态（去重、已执行工具、工具轮数），溢出压缩携带保留，本片新增工具轮额度不变。
 - `agent_py_agent/tests/test_compact_capacity_host_chain.py`：走真实 `PreparedCompactRecovery` 两个入口（三宿主 transcript、联合来源、活动回合），只替身摘要与末端 HTTP；锁固定开销经宿主只计量入口只在失败时量一次、测不出缺失，保留 IR 按候选实际发送材料计，以及与候选替换规则的等价。
 - `agent_py_agent/tests/test_task_run_settle_quiescent_children.py`：`settle_task_run_if_agent_tree_terminal` 的树判定回归：根终态 + BLOCKED 子 run 能关 TaskRun 并在 `task_run.closed` 留静止子 run 证据；子 run 再起 attempt 经 `task_run.reopened` 重开；attempt 在跑/仍持锁/根未终态/无 attempt 都保持开放；发现扫描能关掉存量；pending 激活的 started 事件按各自列写。
 - `agent_py_agent/tests/test_compact_calibrated_candidate_gate.py`：候选接受门与预检同一校准口径的回归：纯校准函数与预检逐项相等、宿主边界按 fingerprint/代次冻结观测、transcript 与活动回合两条门在估算偏高 43% 时接受候选且恰好等于上限仍拒绝、进度事件的结构化触发来源，以及隔离 home 两回合假 LLM 复现（接受后下一次真实预检与接受基准一致、失败路径线程快照不被原始值误导、无观测行为不变）。

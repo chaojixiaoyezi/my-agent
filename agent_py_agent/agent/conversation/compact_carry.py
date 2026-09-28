@@ -10,6 +10,8 @@ from .active_turn_input import exclude_active_turn_user_input_ids, merge_active_
 
 
 # LLM: 最新非空完整归档替换旧快照；插话按原 ID 合并并排除已释放编号，不能从正文恢复或合并工具增量。
+#   只用于运行时状态的携带记录（CARRIED_RUNTIME_ONLY_FIELD）从不进入结果归档，替换时原样保留在最前面，
+#   否则溢出恢复后原回合的去重键与工具轮数会丢。
 # 函数用途: 为同一轮压缩重试计算工具和插话携带内容，不修改传入快照；同步前后台超窗及插话恢复回归。
 def compact_overflow_carry(
     *,
@@ -19,12 +21,17 @@ def compact_overflow_carry(
     result_active_turn_user_inputs: object,
     released_input_ids: Iterable[str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    from ..memory_archive.compact_tool_output_refs import CARRIED_RUNTIME_ONLY_FIELD
+
     result_archive = [dict(item) for item in list(result_archive_tool_calls or []) if isinstance(item, dict)]
     next_inputs = exclude_active_turn_user_input_ids(
         merge_active_turn_user_inputs(carried_active_turn_user_inputs, result_active_turn_user_inputs),
         released_input_ids,
     )
-    return result_archive or carried_archive_tool_calls, next_inputs
+    if not result_archive:
+        return carried_archive_tool_calls, next_inputs
+    runtime_only = [item for item in carried_archive_tool_calls if item.get(CARRIED_RUNTIME_ONLY_FIELD)]
+    return [*runtime_only, *result_archive], next_inputs
 
 
 # LLM: 只在同进程同宿主请求的overflow边界传递；旧attempt仅作来源，不授予当前执行权，不进入持久checkpoint。

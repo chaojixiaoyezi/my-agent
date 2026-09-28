@@ -23,6 +23,60 @@
   只认 done attempt、unknown 也算静止、活跃判定取反、锁 scope 不带前缀、活跃原因改名、run started 事件仍写 running、
   无 attempt 也算静止。
 
+## 生命周期唤醒片续接前台轮的工具事实（2026-09-28，分支 `claude/be-wake-turn`，基于 `d0318486e`）
+
+- **来源**：T3 真实 TUI 验收的观察 2。round1 归档复现：前台 Gateway 轮成功的 `create_subagents`（call_ac_3）只写在
+  owner 根自己的工具索引 `blobs/tool_outputs/index.jsonl`；唤醒片只读任务 `work/blobs/tool_outputs/index.jsonl`，
+  续跑重建的一次性编排去重集合里没有它，唤醒片里同样内容的派工照样成功，多出一个子代理。
+- **改动**：
+  - 查找根：`_background_active_turn_tool_calls` 有请求编号时同时读 owner 根索引和任务 work 索引。owner 根只取任务
+    `run_workspace.json`（`run_workspace.v1`）的 `owner_home`，且任务根必须在它下面（`run_workspace_owner_home`），
+    否则不读 owner 索引。
+  - 范围：`carried_tool_call_records_for_requests` 按精确 `conversation_request_id` 过滤（旧记录沿用 request_id
+    同值规则）。每个根只读自己的 index.jsonl，不展开到其它 runs；逐行流式读取，先按请求编号做字节预筛（只省解析），
+    再按结构化 scope 精确匹配，不把整份索引读进内存。
+  - 用途分层：owner 索引的记录带 `carried_runtime_only=True`，只进运行时状态重建（一次性编排去重、已执行工具、
+    已加载工具、工具轮数），不进本片 `archive_tool_calls`、模型可见交接和压缩来源；前台轮的原生工具对已经在会话
+    历史里重放。片内溢出压缩替换携带内容时，这些记录原样保留（`compact_overflow_carry`）。
+  - 没有请求编号的旧唤醒仍按 task_id 只读任务 work 索引，行为不变。
+  - 拦截提示：去重范围变成整个活动回合后，`TOOL_ONE_SHOT_ALREADY_EXECUTED` 的拦截文字与错误合同恢复提示补一句：
+    确需另派子代理接替已有 run 时，在 `replacement_for_run_ids` 里写明被接替的 run_id。放行只看结构化意图键。
+- **工具轮预算**：
+  - 工作片起点 `tool_rounds` 等于携带条数（现在含前台轮记录）；`_extend_background_slice_tool_budget` 把本片绝对上限
+    加上同样的条数，新增额度仍是 `background_max_tool_rounds`（随包 5000，代码缺省 32），不会一开始就触顶。
+    测试锁定上限 = 基线 + 携带条数。
+  - 长会话：每次生命周期唤醒都顺序读一遍 owner 索引，内存只放命中行，读取时间随索引大小线性增长；前台轮工具越多，
+    起点和绝对上限一起抬高，新增额度不变。重复调用门、完成提醒看到的已执行工具包含前台轮，这是同一回合的本来语义。
+  - 例外（按代码推断，未单独跑）：`background_max_tool_rounds` 显式写 0 时不写片上限，`_effective_max_tool_rounds`
+    回落到全局 `max_tool_rounds`；它是正数 N 时整条活动回合（前台加各唤醒片）共用 N，且不加携带条数，前台已用满
+    N 轮时唤醒片会一开始触顶。这个口径在本次之前就存在（多次唤醒累计也会触发），本次让单个前台轮就能触发。
+    修它要改 `_apply_internal_background_tool_budget`，不在本次允许改动的函数里，记为后续项。
+- **测试**（`test_background_active_turn_carry.py`，5 项）：
+  - 精确范围：owner 索引与任务索引只取本请求的记录；别的请求、只在参数里提到本请求编号的记录、坏行、别的 run 的
+    索引都不进来；owner 记录带运行时标记，任务记录不带；空请求编号返回空。
+  - owner 根：取自 `run_workspace.json`；指向别处、版本不符、字段为空、文件缺失都返回 None。
+  - 真实 `_run_params` 链：携带记录顺序和标记正确，本片上限 = 基线 + 2。
+  - 工具循环参数：前台那次 `create_subagents` 进一次性编排去重（同内容派工判为重复），写明 `replacement_for_run_ids`
+    的重派不算重复，拦截结果带错误码并指出这条路径；工具轮数和已执行工具都计入；本片工具账和 tool_context
+    只有唤醒片自己的记录。
+  - 溢出压缩携带：结果归档替换旧快照时运行时记录保留在最前；结果为空时原样返回。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_background_active_turn_carry.py -q`。
+- **变异验证**：17 个全部被抓出，每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，
+  跑完逐字节恢复并核对哈希。
+  - 读取：丢掉 scope 精确匹配；字节预筛取反；owner 查找改用会展开到所有 runs 的旧读取；关掉去重（由既有
+    `test_memory_compact_tool_output_refs.py` 抓出，去重口径随读取入口拆分后不变）；
+  - 标记：不加运行时标记；owner 记录不标；任务记录也标；不读 owner 索引；
+  - owner 根：去掉“任务根必须在 owner 下”；去掉版本检查；
+  - 循环：本片工具账不过滤；运行时状态只从本片工具账重建；
+  - 压缩携带：替换时丢掉运行时记录；替换时整份旧携带都留下（重复）；
+  - 预算：上限只按非运行时记录加；
+  - 拦截：意图键忽略 `replacement_for_run_ids`（接替重派也被拦）；拦截文字去掉接替路径。
+- **相关回归**：与改动路径有关的 142 个测试文件（含 `test_background_main_agent_runtime.py`、
+  `test_architecture_guardrails.py`，以及引用一次性编排去重、错误合同的测试）3301 passed、1 skipped、27 xfailed、
+  5 xpassed。
+- **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对
+  `d0318486e` 新增 0 条、减少 1 条（`carried_tool_call_records` 的嵌套项随拆分消失）。
+
 ## 凭据类字符串配置补类型校验（2026-09-28，分支 `claude/be-credential-types`，基于 `8ef68c5fd`）
 
 - **来源**：T3 真实 TUI 验收。凭据键写错类型时没有任何配置告警：`embedding_api_key` 写成列表会原样进入运行配置，

@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import jsonl_lines
-from ..common.tool_output_paths import tool_output_index_paths_for_lookup
+from ..common.tool_output_paths import tool_output_index_paths_for_lookup, tool_output_root
 from ..tooling.runtime_facts import project_process_runtime_facts
 from .tool_output_externalizer import model_visible_tool_parameters
 
 _INTERNAL_LEDGER_TOOLS = {"task_progress"}
 # 与 conversation/compact_tool_identity.TOOL_REF_FIELDS 同一四元身份；本层不上引 conversation。
 _CALL_IDENTITY_FIELDS = ("run_id", "attempt_id", "turn_id", "call_id")
+# 携带记录上的结构化标记：值为 True 表示这条记录属于已经写进会话历史的回合（历史里已有它的原生工具对），
+# 续跑只用它重建运行时状态（一次性编排去重、已执行工具、工具轮数），不进本片工具账、模型可见交接或压缩来源。
+CARRIED_RUNTIME_ONLY_FIELD = "carried_runtime_only"
 
 
 # LLM: Child lifecycle wakes share the originating conversation turn. Deduplicate only complete
@@ -26,26 +30,73 @@ def carried_tool_call_records(
     scope: dict[str, Any],
 ) -> list[dict[str, Any]]:
     rows = _read_tool_output_index(Path(workspace))
+    return _carried_records((row, False) for row in rows if _is_indexed_call_fact(row) and _matches_scope(row, scope))
+
+
+# LLM: 生命周期续跑要看到原活动回合的全部工具事实：前台 Gateway 轮写在 owner 根自己的索引，唤醒片写在任务 work
+#   索引。sources 是（索引根, 是否只用于运行时状态）对，每个根只读它自己的 blobs/tool_outputs/index.jsonl，不展开到
+#   其它 runs；逐行流式读取，先用精确请求编号做字节预筛（只省解析开销），再按结构化 scope 精确匹配，身份去重与
+#   carried_tool_call_records 同一口径，先出现者保留。不把整份索引载入内存，只读。
+# 函数用途: 从 owner 索引与任务索引里取出属于指定用户回合的工具调用记录，供后台续跑重建去重、预算与交接。
+def carried_tool_call_records_for_requests(
+    sources: Sequence[tuple[str | Path, bool]],
+    request_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    wanted = tuple(dict.fromkeys(str(item or "").strip() for item in request_ids if str(item or "").strip()))
+    if not wanted:
+        return []
+    scope = {"conversation_request_id": wanted}
+    return _carried_records(
+        (row, runtime_only)
+        for root, runtime_only in sources
+        for row in _stream_index_rows(Path(root), wanted)
+        if _is_indexed_call_fact(row) and _matches_scope(row, scope)
+    )
+
+
+# LLM: 输入是已过滤的（索引行, 是否只用于运行时状态）；完整四元身份去重，身份未知时只合并字节相同的行，
+#   先出现者保留；只用于运行时状态的记录带 CARRIED_RUNTIME_ONLY_FIELD=True，其它记录不加这个键。纯计算。
+# 函数用途: 把索引行转成携带记录并去重，两个读取入口共用同一口径。
+def _carried_records(rows: Iterable[tuple[dict[str, Any], bool]]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    seen_unknown_rows: set[str] = set()
-    for row in rows:
-        if not _is_indexed_call_fact(row) or not _matches_scope(row, scope):
-            continue
+    seen: set[tuple[str, ...]] = set()
+    for row, runtime_only in rows:
         record = _carried_tool_call_record(row)
-        values = tuple(record.get(key) for key in _CALL_IDENTITY_FIELDS)
-        if all(isinstance(item, str) and item.strip() for item in values):
-            identity = tuple(item.strip() for item in values)
-            if identity in seen:
-                continue
-            seen.add(identity)
-        else:
-            raw_row = json.dumps(row, ensure_ascii=False, sort_keys=True)
-            if raw_row in seen_unknown_rows:
-                continue
-            seen_unknown_rows.add(raw_row)
-        records.append(record)
+        key = _carried_record_key(row, record)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append({**record, CARRIED_RUNTIME_ONLY_FIELD: True} if runtime_only else record)
     return records
+
+
+# LLM: 四元身份完整时键是去空白后的身份，否则是整行按键排序的 JSON；两类键带不同前缀，互不相撞。纯计算。
+# 函数用途: 给一条携带记录算去重键，身份未知的行只和字节完全相同的行合并。
+def _carried_record_key(row: dict[str, Any], record: dict[str, Any]) -> tuple[str, ...]:
+    values = tuple(record.get(key) for key in _CALL_IDENTITY_FIELDS)
+    if all(isinstance(item, str) and item.strip() for item in values):
+        return ("identity", *(item.strip() for item in values))
+    return ("raw", json.dumps(row, ensure_ascii=False, sort_keys=True))
+
+
+# LLM: 只读 root 自己的索引文件，二进制逐行读取，记录边界只认物理 LF（与 jsonl_lines 同一规则），行尾一个 CR 去掉；
+#   不含任一请求编号字节的行直接跳过，不解析。文件不存在时不产出任何行。
+# 函数用途: 流式读出一个索引里可能属于指定请求的行，避免把整份 owner 索引读进内存。
+def _stream_index_rows(root: Path, wanted: tuple[str, ...]) -> Iterator[dict[str, Any]]:
+    path = tool_output_root(root) / "index.jsonl"
+    if not path.exists():
+        return
+    needles = tuple(item.encode("utf-8") for item in wanted)
+    with path.open("rb") as handle:
+        yield from filter(None, (_index_line_row(raw, needles) for raw in handle))
+
+
+# LLM: 字节预筛只省解析开销，不是归属判断；归属仍由调用方按结构化 scope 精确匹配。坏行返回空字典。纯计算。
+# 函数用途: 把索引里的一行原始字节转成记录；不含任何请求编号的行直接跳过。
+def _index_line_row(raw: bytes, needles: tuple[bytes, ...]) -> dict[str, Any]:
+    if not any(needle in raw for needle in needles):
+        return {}
+    return _json_line(raw.decode("utf-8", errors="replace").removesuffix("\n").removesuffix("\r"))
 
 
 def tool_output_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
