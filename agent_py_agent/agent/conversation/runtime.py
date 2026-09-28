@@ -891,9 +891,15 @@ class BackgroundMainAgentRuntime:
         )
         execution = collect_background_execution_result(self.agent, result, display_snapshot)
         # LLM: 会话间派活：本次回合若属于某条会话任务，就在这里推进到终态并把结构化结果回报给发送方。
-        #   只读结构化字段（request.task_id + 任务记录里的绑定），不解析正文；回报失败不影响本回合交付。
+        #   只读结构化字段（唤醒信封的回合号 + 任务记录里的绑定），不解析正文；回报失败不影响本回合交付。
+        #   回合号必须与注入正文时用的同一个，所以按与 `_run_params` 相同的来源算，而不是另取一路。
         # 函数用途: 把目标回合的正常结束变成发送方可见的任务回报。
-        _close_out_session_task_turn(self.agent, request, execution)
+        _close_out_session_task_turn(
+            self.agent,
+            request,
+            execution,
+            turn_id=_scheduler_run_id(request) or _session_task_run_id(request),
+        )
         return execution
 
 
@@ -904,16 +910,20 @@ def _close_out_session_task_turn(
     agent: object,
     request: BackgroundRunRequest,
     execution: BackgroundExecutionResult,
+    *,
+    turn_id: str = "",
 ) -> None:
     from .session_task_report import TaskTurnOutcome, close_out_turn
 
-    turn_id = str(getattr(request, "task_id", "") or "").strip()
-    if not turn_id:
+    # 回合号必须与注入正文时用的同一个：定时/派活唤醒来自结构化唤醒信封，
+    # 其余后台片回落到 request.task_id（原来唯一来源）。
+    resolved_turn_id = str(turn_id or "").strip() or str(getattr(request, "task_id", "") or "").strip()
+    if not resolved_turn_id:
         return
     try:
         close_out_turn(
             agent,
-            turn_id,
+            resolved_turn_id,
             TaskTurnOutcome(ok=not bool(getattr(execution, "error", None))),
         )
     except Exception:  # noqa: BLE001 - 回报属于附加交付，不能让回合本身失败
@@ -1737,7 +1747,8 @@ def _run_params(
         if agent is not None and conversation_store is not None
         else GoalRuntimeContext()
     )
-    scheduler_run_id = _scheduler_run_id(request)
+    # 定时唤醒与派活唤醒都能提供精确回合号；两者都为空时保持原来的 task_id 兜底。
+    scheduler_run_id = _scheduler_run_id(request) or _session_task_run_id(request)
     task_attributes = _background_task_attributes(
         thread_id,
         request,
@@ -2006,6 +2017,19 @@ def _scheduler_run_id(request: BackgroundRunRequest) -> str:
     return str(metadata.get("scheduler_run_id") or "").strip()
 
 
+# LLM: 派活唤醒必须像定时唤醒一样自带精确回合号，否则本片 request_id/run_id/task_id 全为空串：
+#   正文注入的 `if entries and turn_id` 会短路（正文永不认领、永不确认），收尾的
+#   `_close_out_session_task_turn` 也会因空 turn_id 直接返回——目标空闲时既不接单也不回报。
+#   回合号只取宿主唤醒信封里的结构化 session_task_id，不从正文或摘要推断。
+# 函数用途: 从派活唤醒信封读出这条会话任务的回合号。
+def _session_task_run_id(request: BackgroundRunRequest) -> str:
+    if str(request.reason or "").strip().lower() != "session_task":
+        return ""
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    return str(metadata.get("session_task_id") or "").strip()
+
+
 # LLM: 后台续跑白名单 = 策略决策的核心目录 + （decision.extension_tools=inherit 时）注册表当前的插件/普通 MCP
 #   代理工具名。扩展名来自 ToolRegistry.extension_tool_names 的结构化类型事实，不按名称前缀猜；显式配置或任务
 #   白名单（extension_tools=none）不并入。真实断链：子代理生命周期唤醒后的 attempt 只拿到 17 个核心工具，模型继续
@@ -2064,6 +2088,8 @@ def _background_task_attributes(
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
     scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
+    # 派活唤醒同样自带精确回合号；本片也必须带上自己的会话身份，thread 邮箱才查得到正文。
+    session_task_run_id = _session_task_run_id(request)
     task_id = str(request.task_id or "").strip()
     lifecycle_reason = str(request.reason or "").strip().lower()
     _apply_internal_background_tool_budget(attributes, request, agent)
@@ -2071,7 +2097,7 @@ def _background_task_attributes(
         attributes[CONVERSATION_BACKGROUND_EVENT_REASON_ATTR] = (
             str(request.reason or "").strip().lower()
         )
-    if thread_id and (task_id or scheduler_run_id):
+    if thread_id and (task_id or scheduler_run_id or session_task_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
     _apply_background_wake_attributes(attributes, request, agent)
     # 会话间派活：本回合由哪条任务触发，只从唤醒信封的结构化 metadata 取；链深守卫据此回溯上级任务。

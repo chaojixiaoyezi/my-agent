@@ -183,6 +183,9 @@ def _guidance_input_digest(request: dict[str, Any]) -> str:
     metadata = request.get("metadata")
     canonical_metadata = dict(metadata) if isinstance(metadata, dict) else {}
     canonical_metadata.pop("dedupe_key", None)
+    # 精确回合由目标回合在认领时补记（见 GuidanceStore.claim_for_turn 的宿主投递分支）；
+    # 指纹只在首次写入时算，不能用它把后补的字段判成"同键异文"。
+    canonical_metadata.pop("expected_turn_id", None)
     canonical = {
         "target_type": normalize_guidance_target_type(request.get("target_type")),
         "target_id": str(request.get("target_id") or "").strip(),
@@ -270,9 +273,12 @@ def _legacy_prompt_submission_unknown_receipt(
     )
 
 # LLM: Queue JSONL is the immutable ingress record while a pending receipt may move between
-# physical attempts. Permit only that one host-owned metadata difference; all user semantics and
-# identities must remain byte-equivalent.
-# 函数用途: 校验恢复改绑后的权威回执仍与最初队列记录表示同一条用户消息。
+# physical attempts. Two host-owned metadata differences are permitted: a rebind moving between
+# turns, and the exact turn being recorded for the first time when a message written by another
+# session is claimed by the receiving turn. The turn field must never *move* during the latter:
+# a receipt bound by claim may only gain the field, not replace an existing value. All user
+# semantics and identities must remain byte-equivalent.
+# 函数用途: 校验恢复改绑或认领补记回合后的权威回执仍与最初队列记录表示同一条用户消息。
 def _guidance_queue_entry_matches_receipt(
     queued: GuidanceEntry,
     receipt_entry: GuidanceEntry,
@@ -287,7 +293,18 @@ def _guidance_queue_entry_matches_receipt(
     receipt_turn = str(receipt_metadata.pop("expected_turn_id", "") or "").strip()
     queued_payload["metadata"] = queued_metadata
     receipt_payload["metadata"] = receipt_metadata
-    return bool(queued_turn and receipt_turn) and queued_payload == receipt_payload
+    if queued_payload != receipt_payload:
+        return False
+    if queued_turn == receipt_turn:
+        # 通用情况：两边都没带回合号，或带的是同一个（含恢复改绑授权的同值写入）。
+        return bool(receipt_turn) or not queued_turn
+    if queued_turn and receipt_turn:
+        # 恢复改绑：队列行是不可变的入口记录，权威回执已经挪到新的活动 attempt。
+        # 授权依据是回执自带的 turn_rebinds 链，这里只放行"两个都带回合号"的形状。
+        return True
+    # 认领补记：宿主投递（另一会话的消息或派活正文）写入时不知道接收回合，
+    # 只由接收回合在认领那一刻补记，见 GuidanceStore.claim_for_turn。
+    return bool(receipt_turn) and not queued_turn
 
 # LLM: Only receipt-authored rebind lineage may authorize stale projection repair. Malformed
 # migration data fails closed instead of allowing an arbitrary old turn index to be overwritten.

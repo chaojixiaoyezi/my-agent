@@ -253,6 +253,24 @@ class SessionTaskStore:
         task_id = str((report.payload or {}).get("task_id") or "")
         return self.load(task_id) if task_id else None
 
+    # LLM: 正文要在记录之后写入才能带上任务编号，所以记录先以空正文 id 落盘，随后由这里补上。
+    #   只补这一次、只补空值；已绑定或终态记录不改写，重放返回当前记录不报错。
+    # 函数用途: 把刚写入的正文 id 绑到它所属的会话任务记录上。
+    def bind_body(self, task_id: str, body_guidance_id: str) -> SessionTask | None:
+        guidance_id = str(body_guidance_id or "").strip()
+        current = self.load(task_id)
+        if current is None:
+            return None
+        if not guidance_id or current.body_guidance_id:
+            return current
+        updated = replace(
+            current,
+            body_guidance_id=guidance_id,
+            updated_at=time.time(),
+        )
+        write_json_file_atomic(self._path(task_id), updated.to_dict())
+        return updated
+
     # LLM: 绑定只在非终态且尚未绑定其它回合时生效；同回合重复确认幂等，不覆盖已有绑定。
     #   目标回合结束（任务转终态）后不再绑定新回合，避免把取消打到后来的一轮上。
     # 函数用途: 把一条任务绑定到目标会话正在执行它的那个回合。

@@ -1,5 +1,44 @@
 # 测试与发布验收
 
+## 会话互通：第 6 片——真实 gateway 测出的 4 个缺陷修复（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：Claude 会话 dsh-ae 用脚本模型在真实 Gateway 上跑三会话派活链（被测 `b938b2a98`），结论未通过，
+  共 4 个缺陷 + 3 个观察。我的既有单测没覆盖，因为它们没走真实的后台唤醒路径。
+- **修复与证据**（每条都走真实入口，并做了变异验证）：
+  1. **缺陷 4（最严重）**：目标正忙时注入正文会让目标自己的请求失败（提交批次校验要求回执带 `expected_turn_id`，
+     而宿主投递写入时没有接收回合）。修法：`claim_for_turn` 在**认领那一刻**给宿主投递补记目标回合号，
+     并同步补精确回合索引；`_guidance_input_digest` 排除该字段；队列/回执校验只新增"队列无值、回执补记"这一种形状。
+     测试 `tests/test_session_message_busy_target.py`（11 项，真实 store + 真实注入/提交）。
+     **变异**：关掉认领补记 → 8 项变红。
+  2. **缺陷 2**：派活唤醒没有回合号，导致正文永不认领、收尾直接返回、发送方收不到回报。修法：新增
+     `_session_task_run_id(request)` 只从唤醒信封 `metadata.session_task_id` 取（缺值 fail closed），
+     `_run_params` 的 `request_id/run_id/task_id` 采用它，`_background_task_attributes` 据此写会话身份，
+     guidance 主代理分支回退读 `task_attributes.conversation_thread_id`，收尾用同一回合号。
+     测试 `tests/test_session_task_turn_binding.py`（5 项）。**变异**：撤销接线 → 3 项变红。
+  3. **缺陷 1**：后台工具策略没有 `session_task` 档，派活回合只有 17 个工具。修法：新增
+     `SESSION_TASK_WAKE_REASON` + `SESSION_TASK_WAKE_ALLOWED_TOOLS` + `_is_session_task_wake` 分支。
+     注：设计与分片规格点名的 `list_owner_sessions` **未实现**，本期只放行实际存在的 4 个会话工具。
+  4. **缺陷 3**：未确认正文会在后来的回合里被再次注入。修好缺陷 2 后仍有**跨回合抢正文**：任何回合都能认领
+     线程邮箱里任意未绑定的宿主投递。修法：正文写入时自带 `metadata.session_task_id`，派活回合用
+     `owning_task_id` 只在编号一致时认领。测试 `tests/test_session_task_body_replay.py`（3 项）。
+     **变异**：关掉归属核对 → 2 项变红。
+- **顺手修的观察项**：
+  - 派活正文之前渲染成"来自未知来源"，现在按 `origin_thread_id` 显示来源会话（文案区分"消息/任务"）；
+  - `create_session_task` 的幂等键不再嵌入完整正文（改摘要入键）；
+  - 取消通知一直 pending：`_notify_sender` 只写消息箱、**从不唤醒发送方**；现在比照派活投递在发送方空闲时唤醒它。
+    测试 `tests/test_session_task_cancel_notice.py`（4 项）。**变异**：关掉唤醒 → 1 项变红。
+- **回归**：会话互通全部定向测试 + `test_runtime_guidance` + `test_lifecycle_wake_host_event` +
+  `test_conversation_store` + `test_packaging` + `test_architecture_guardrails` + 错误码守卫全绿；
+  五项静态门禁通过（ruff / DOC_SYNC_PASS / strict code-size `blocked=False` / clean package / `git diff --check`）。
+- **复现**：
+  ```
+  python3 -m pytest agent_py_agent/tests/test_session_message_busy_target.py \
+    agent_py_agent/tests/test_session_task_turn_binding.py \
+    agent_py_agent/tests/test_session_task_body_replay.py \
+    agent_py_agent/tests/test_session_task_cancel_notice.py -q
+  ```
+- **未验证**：真实 Gateway 双会话端到端由 dsh-ae 用它的 harness 复跑（dev 安排），本片未做真机验证。
+
 ## 会话互通第一期派活链：脚本模型端到端验证（2026-09-28，分支 `claude/ae-session-task-e2e`，仅文档）
 
 - **性质与结论**：用脚本模型在真实 Gateway 和真实 TUI 上做机制验证，**未通过**，共发现 4 个产品缺陷，未改代码。

@@ -247,8 +247,14 @@
 | 每对会话每小时限额 | `agent_py_agent/agent/conversation/session_pair_rate.py`（消息、派活、任务回报、取消通知都计入） |
 | 宿主事件呈现 | `agent_py_agent/agent/agent_core/runtime/loop_support.py`（`_native_turn_opener` / `_host_event_source`）；派活回合触发由 `agent_py_agent/agent/agent_core/runtime/turn_trigger.py` 的 `session_task_turn_trigger` 构造 |
 | 派活回合的结构化身份 | `agent_py_agent/agent/conversation/runtime.py`（`_session_task_id_from_wake` 写入 `conversation_session_task_id`；`_background_model_inputs` 分流派活触发） |
+| 派活回合的精确回合号 | 同文件 `_session_task_run_id`（只读唤醒信封 `metadata.session_task_id`）→ `_run_params` 的 `request_id/run_id/task_id`；收尾用同一编号 |
+| 宿主投递的回合绑定 | `agent_py_agent/agent/conversation/store_guidance.py`（`claim_for_turn` 在认领时补记接收回合的 `expected_turn_id`，并做正文归属核对） |
+| 后台工具档（含会话工具） | `agent_py_agent/agent/conversation/background_tool_policy.py`（`SESSION_TASK_WAKE_ALLOWED_TOOLS`） |
 | TUI 命令 | `/sessions threads`、`/tell`、`/sessions inbox`（`agent_py_agent/cli/chat_parts/slash_commands.py`） |
 | 配置键 | `agent_py_agent/config/capability_config.yaml` + `agent_py_agent/agent/capability/config.py` |
+
+**第一期缺口**：模型工具 `list_owner_sessions` 未实现（模型拿不到可发送会话列表，需人工用
+`/sessions threads` 查），见 `DESIGN_LEDGER.md`。
 
 限额语义：`session_pair_hourly_limit` 按「发送会话 → 接收会话」分桶，小时窗口固定、跨窗口归零；
 模型发起的发送与派活在投递前判断，超限返回 `SESSION_TASK_RATE_LIMIT` 且不投递、不占配额；

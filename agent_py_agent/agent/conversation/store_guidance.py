@@ -15,6 +15,7 @@ from ..gateway_parts.io import (
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .models import GuidanceEntry, MessageLogEntry, normalize_guidance_target_type
+from .session_messaging import SESSION_MESSAGE_ORIGIN_KIND, SESSION_TASK_ORIGIN_KIND
 from .store_guidance_acknowledgements import GuidanceAcknowledgements
 from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
@@ -27,6 +28,31 @@ from .store_guidance_recovery import GuidanceRecovery
 from .store_guidance_submission import GuidanceSubmissions
 from .store_io import read_jsonl_report
 from .store_layout import ConversationStorage
+
+
+# LLM: 会话消息与派活正文由没有 subscribe/ack 的发送方写入，写时无法知道接收回合；只有目标回合
+#   真正认领这条消息时才知道该绑到哪个精确回合。缺失该标记的回执在提交校验里必然不匹配，
+#   会把接收方自己的请求打断（真实链路上测出的"目标正忙时发消息就让目标请求失败"）。
+# 函数用途: 判断一条回执是否由另一会话的宿主投递写入，需要在认领时补记目标回合。
+def _host_delivery_receipt(metadata: object) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    origin_kind = str(metadata.get("origin_kind") or "").strip()
+    if origin_kind not in {SESSION_MESSAGE_ORIGIN_KIND, SESSION_TASK_ORIGIN_KIND}:
+        return False
+    return str(metadata.get("origin_thread_id") or "").strip() != ""
+
+
+# LLM: 派活正文的幂等键形状是 `body:session_task:<发送方>-><目标>:<正文摘要>`，里面带着它属于
+#   哪条任务吗——不，任务编号由 create_session_task 在创建记录时写进别处。正文条目本身只带
+#   origin_kind/origin_thread_id，所以"哪一轮该认领它"只能由**会话任务记录**回答，不能从键里猜。
+# 函数用途: 判断一条投递正文是否允许被指定回合认领（当前只对派活正文做归属核对）。
+def _body_belongs_to_task(metadata: dict[str, Any], owning_task_id: str) -> bool:
+    task_id = str(metadata.get("session_task_id") or "").strip()
+    if not task_id:
+        # 正文写入时没记任务编号（旧数据/普通消息）：保持原行为，不新增拒绝。
+        return True
+    return task_id == owning_task_id
 
 
 # LLM: 提供插话入队、认领和读取；修改须核对 Gateway、主子运行循环与精确回合隔离测试。
@@ -161,6 +187,7 @@ class GuidanceStore:
         *,
         expected_turn_id: str,
         attempt_id: str,
+        owning_task_id: str = "",
     ) -> bool:
         metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
         dedupe_key = str(metadata.get("dedupe_key") or "").strip()
@@ -186,6 +213,11 @@ class GuidanceStore:
                     return False
             if receipt.status != "pending":
                 return False
+            # 派活正文在写入时就带着"这条正文属于哪条任务"（幂等键里有任务编号），而派活回合自带
+            # 同一个编号。两者不一致时这一轮不许认领：否则先到的回合会把别人（往往是更早那条）的
+            # 正文抢走做完，就是真实链路上"B 做掉了更早的 B1"的成因。
+            if owning_task_id and not _body_belongs_to_task(receipt_metadata, owning_task_id):
+                return False
             normalized_attempt_id = str(attempt_id or "").strip()
             if not normalized_attempt_id:
                 raise ValueError("guidance reservation requires attempt_id")
@@ -195,6 +227,17 @@ class GuidanceStore:
                 attempt_id=normalized_attempt_id,
                 updated_at=time.time(),
             )
+            if not receipt_turn_id and _host_delivery_receipt(receipt_metadata):
+                # 宿主投递（另一会话的消息或派活正文）写时没有接收回合；在认领这一刻补记，
+                # 与交互式插话共用同一条预约语义，提交校验才能对得上这条回执。
+                bound_metadata = dict(receipt_metadata)
+                bound_metadata["expected_turn_id"] = requested_turn_id
+                updated = replace(
+                    updated,
+                    entry=replace(receipt.entry, metadata=bound_metadata),
+                )
+                # 精确回合索引是"这一轮有哪些补充消息"的投影；绑定时一起补，回合收尾才能按它找到。
+                self.ledger.ensure_turn_index(updated)
             write_json_file_atomic(receipt_path, updated.to_dict())
             return True
 

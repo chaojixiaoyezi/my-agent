@@ -82,6 +82,10 @@
 [SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md)。状态：**第一期已实现并已上线**
 （模型工具、TUI 命令、权威存储、防循环守卫、结果回报与取消都已交付）。
 
+**第一期遗留缺口（2026-09-28 dev 决定，本期不做）**：设计里点名的 `list_owner_sessions`
+模型工具**没有实现**，模型目前拿不到"可发送的会话列表"，只能靠人用 `/sessions threads` 查。
+等这批派活链缺陷验收通过后单独排一片来做。
+
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。

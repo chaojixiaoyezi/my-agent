@@ -5,6 +5,7 @@
 # 模块用途: 让管理员会话把任务派给另一个本地会话，并在结束前提供状态查询与取消入口。
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -267,21 +268,26 @@ def _create_and_dispatch(
     if limit_error := _chain_limit_error(store, plan.origin_task_id, config):
         return limit_error
 
-    dedupe_key = f"session_task:{plan.sender_thread_id}->{plan.target_thread_id}:{plan.goal}"
+    dedupe_key = _task_dedupe_key(plan)
     body_dedupe_key = f"body:{dedupe_key}"
     try:
-        body = _queue_body(store, plan, body_dedupe_key)
+        # 记录先建（拿到任务编号），正文再带着自己的任务编号入队：正文写入时就知道它属于哪条任务，
+        # 接收回合据此只认领自己的那条。记录里仍只引用正文 id，正文只存一份。
         task = store.session_tasks.create(
             SessionTaskDraft(
                 sender_thread_id=plan.sender_thread_id,
                 target_thread_id=plan.target_thread_id,
                 goal=plan.goal,
-                body_guidance_id=body.guidance_id,
+                body_guidance_id="",
                 body_dedupe_key=body_dedupe_key,
                 dedupe_key=dedupe_key,
                 origin_task_id=plan.origin_task_id,
             )
         )
+        body = _queue_body(store, plan, body_dedupe_key, task.task_id)
+        bound = store.session_tasks.bind_body(task.task_id, body.guidance_id)
+        if bound is not None:
+            task = bound
         wake_id = _maybe_wake(store, target_thread, plan.sender_thread_id, task.task_id)
     except Exception as exc:  # noqa: BLE001
         return _error(
@@ -318,7 +324,15 @@ def _record_pair(store: object, sender_thread_id: str, target_thread_id: str) ->
 # LLM: 正文是任务正文的唯一存放处；来源标为 session_task，注入时按宿主事件呈现，不冒充用户原话。
 #   队列键同时写进任务记录，取消未开始的任务时按它撤队列。
 # 函数用途: 把任务正文作为一条 guidance 条目投进目标会话队列。
-def _queue_body(store: object, plan: _DispatchPlan, body_dedupe_key: str) -> object:
+# LLM: 幂等键要稳定、可重试，又不能把任务正文抄一份进去（"正文只存一份"）。目标、发送方和
+#   正文本就是任务身份；正文用摘要入键，键里不再出现原句，重试与内容变化都仍然可区分。
+# 函数用途: 生成一条会话任务的稳定幂等键，键里不嵌入完整正文。
+def _task_dedupe_key(plan: _DispatchPlan) -> str:
+    goal_digest = hashlib.sha256(str(plan.goal or "").encode("utf-8")).hexdigest()[:16]
+    return f"session_task:{plan.sender_thread_id}->{plan.target_thread_id}:{goal_digest}"
+
+
+def _queue_body(store: object, plan: _DispatchPlan, body_dedupe_key: str, task_id: str) -> object:
     return store.guidance.append_once(
         {
             "target_type": "thread",
@@ -329,6 +343,9 @@ def _queue_body(store: object, plan: _DispatchPlan, body_dedupe_key: str) -> obj
             "delivery": "next_turn",
             "metadata": {
                 "origin_kind": SESSION_TASK_ORIGIN_KIND,
+                # 正文自带它属于哪条任务：接收回合据此只认领自己的那条，不会把别人
+                # （往往是更早的）正文抢来做完。
+                "session_task_id": task_id,
                 "origin_thread_id": plan.sender_thread_id,
             },
         },

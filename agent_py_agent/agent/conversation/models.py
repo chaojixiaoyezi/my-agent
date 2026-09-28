@@ -82,6 +82,10 @@ SUBAGENT_LIFECYCLE_WAKE_REASONS = frozenset(
     }
 )
 
+# 会话间派活唤醒的权威 reason：由 create_session_task 写进唤醒信封，目标会话据此开一轮。
+#   值与 agent_core.runtime.turn_trigger.TURN_TRIGGER_SESSION_TASK 相同；改名前先全局搜索两处。
+SESSION_TASK_WAKE_REASON = "session_task"
+
 # Audit findings and capacity notices are independently delivered events from a
 # detached named workload.  They remain in the owner-visible transcript and in
 # the Audit ledgers, but they are not prior replies authored by the foreground
@@ -842,6 +846,7 @@ __all__ = [
     "ProgressPolicy",
     "SCHEMA_VERSION",
     "SUBAGENT_LIFECYCLE_WAKE_REASONS",
+    "SESSION_TASK_WAKE_REASON",
     "ThreadTaskLink",
     "ThreadGoal",
     "THREAD_GOAL_OBJECTIVE_MAX_CHARS",

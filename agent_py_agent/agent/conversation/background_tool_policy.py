@@ -10,7 +10,7 @@ from ..subagents.role_templates import (
     SHELL_SESSION_TOOLS,
     active_model_subagent_tools,
 )
-from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
+from .models import SESSION_TASK_WAKE_REASON, SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 # 后台唤醒继续同一 Agent；本表提供默认目录，owner/task 策略在此基础上收紧。
 _BACKGROUND_WORK_TOOLS = (
@@ -43,6 +43,17 @@ AUDIT_FINDING_ALLOWED_TOOLS = (
 
 # 唤醒原因选择上下文标签，实际能力仍由 owner/task 策略收紧。
 SCHEDULED_BACKGROUND_ALLOWED_TOOLS = DEFAULT_BACKGROUND_ALLOWED_TOOLS
+
+# 会话间派活唤醒：目标会话要在这个回合里"接单、干活、回报"，所以除了通用后台工具，
+#   还要能看到会话互通那组工具（与交互式入口共用同一套 owner/权限判定；这里只给候选目录）。
+#   缺了这组工具，派活链就到不了第二层，链深守卫在真实链路上也永远不会触发。
+SESSION_TASK_WAKE_ALLOWED_TOOLS = (
+    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
+    "create_session_task",
+    "send_session_message",
+    "get_session_task",
+    "cancel_session_task",
+)
 
 GOAL_BACKGROUND_ALLOWED_TOOLS = (
     *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
@@ -233,6 +244,9 @@ def _default_profile_for_request(
         return "audit_finding", AUDIT_FINDING_ALLOWED_TOOLS
     if _is_subagent_lifecycle_wake(request):
         return "subagent_integration", SUBAGENT_INTEGRATION_ALLOWED_TOOLS
+    # 会话间派活：目标会话要接单、干活、回报，必须拿到会话互通那组工具。
+    if _is_session_task_wake(request):
+        return "session_task", SESSION_TASK_WAKE_ALLOWED_TOOLS
     if _is_urgent_wake(request):
         return "urgent", DEFAULT_BACKGROUND_ALLOWED_TOOLS
     if _is_scheduled_progress(request):
@@ -298,7 +312,15 @@ def _is_scheduled_progress(request: BackgroundToolPolicyRequest) -> bool:
     return str(request.reason or "").strip().lower() in SCHEDULED_WAKE_REASONS
 
 
-# 子代理→主代理的"生命周期"推送:完成/卡住/失败(subagent_runner_finished)、申请能力
+# LLM: 会话间派活原因来自派活工具写进唤醒信封的结构化 reason，不是报告文字；供目录策略选择使用。
+# 函数用途: 判断本轮是否由会话间派活唤醒。
+def _is_session_task_wake(request: BackgroundToolPolicyRequest) -> bool:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    reason = str(request.reason or wake.get("reason") or "").strip().lower()
+    return reason == SESSION_TASK_WAKE_REASON
+
+
+# LLM: 子代理→主代理的"生命周期"推送:完成/卡住/失败(subagent_runner_finished)、申请能力
 # (subagent_capability_request_open)、能力获批可续跑(subagent_capability_granted)。
 # 这些唤醒叫回主代理是为了真整合收口/批能力,所以要给整合工具集(见 SUBAGENT_INTEGRATION_ALLOWED_TOOLS)。
 # LLM: 子代理生命周期原因来自既有模型合同，不能用报告文字推断结束、失败或能力变更。

@@ -373,10 +373,39 @@ def _notify_sender(agent: object, task: object) -> bool:
             },
             dedupe_key=f"session_task_cancelled:{getattr(task, 'task_id', '')}",
         )
+        # 只写消息箱、不唤醒，发送方空闲时这条通知会一直停在 pending，直到它碰巧跑下一轮。
+        # 与派活投递同一条语义：目标空闲就唤起它，让它这一轮就能读到取消通知。
+        _wake_sender(store, sender, str(getattr(task, "target_thread_id", "") or ""))
     except Exception:  # noqa: BLE001 - 通知失败不改变取消已生效的事实
         return False
     _record_pair(store, str(getattr(task, "target_thread_id", "") or ""), sender)
     return True
+
+
+# LLM: 通知的投递语义必须和派活正文一致（写消息箱 + 空闲时唤醒）。唤醒只表达"有新消息"，
+#   通知正文仍走同一条 guidance 注入路径，不另开一条投递通道。
+# 函数用途: 发送方会话空闲时，为刚写入的取消通知唤醒它一轮。
+def _wake_sender(store: object, sender_thread_id: str, target_thread_id: str) -> str:
+    wakes = getattr(store, "wakes", None)
+    threads = getattr(store, "threads", None)
+    if wakes is None or threads is None:
+        return ""
+    thread, _error = threads.load_report(sender_thread_id)
+    if thread is None or str(getattr(thread, "status", "") or "active").strip() != "active":
+        return ""
+    signal = wakes.raise_signal(
+        {
+            "thread_id": sender_thread_id,
+            "urgency": "normal",
+            "reason": "session_message",
+            "summary": "派出的任务已被取消",
+            "metadata": {
+                "origin_kind": "session_message",
+                "origin_thread_id": target_thread_id,
+            },
+        }
+    )
+    return str(getattr(signal, "wake_signal_id", "") or "")
 
 
 # LLM: 取消通知也是宿主自动发出、不会被拒的消息，但必须占用每对会话配额；写失败不影响通知已投递。
