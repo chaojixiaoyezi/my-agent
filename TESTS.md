@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## R10 深度切片：长前台工具中途中断与 `/goal resume` 对照（2026-09-28，分支 `claude/be-r10-depth`，基于 `53477806d`，只改文档）
+
+- **来源**：补 R10 实测留下的两项未覆盖，环境与判定方式同上一轮（`9f88e4905` 的 wheel、8434、Codex 那份官方 MiniMax-M2.7 档案、`env -i`）。
+  详见 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md` 的“R10深度切片”一节。
+- **长前台工具执行中途 `/interrupt`：通过**。就绪条件为本任务后台进程存活 7 秒以上，其后的前台 run_command 已执行 3 秒以上。
+  中断后请求 interrupted，run 与 attempt cancelled；执行中的工具记为 UNKNOWN、未结算，也没有残留的 sleep 进程；此后没有新的工具操作。
+  本任务后台进程仍 running、`stop_requested=false`，心跳继续增长。
+- **`/goal resume` 对照：通过**。在原会话恢复上一轮暂停的目标后，目标回到 active，同一 agent_run 起了第 2 代 attempt，并实际执行了工具。
+  随后用已验证的 `/goal pause` 截住后续续跑，这一步不计入判定。
+- **观察**：被中断任务留下的后台进程，在同一会话里用 `/stop` 回收不了（ok=false，“当前没有运行中的内容”），交集成方判断。
+- **更正上一轮收尾**：上一轮只结束了 B1、B2 登记的 pid 和 child_pid，写心跳的孙进程一直运行到本轮收尾，才按登记进程组结束。
+  残留进程的核对已从按命令行匹配改为按工作目录核对，本轮收尾后测试根目录下没有进程。
+- **用量**：8 次主模型调用（MiniMax-M2.7），决策与辅助调用为 0。
+- **证据**：`~/.my-agent/decision-evidence/r10-depth-9f88/`（仓库外）。`r10-depth-results.json` 摘要
+  `5dc55097ecad5c481f0783bd7d237a028eb51a2ba09c75833fd40971d6462a4e`，`MANIFEST.sha256` 摘要
+  `24fe9dfe1671754c8f56036155d06280a00c0cce0cf77a7958fbec60c85416b9`。
+- **门禁**：只改文档，跑了 doc sync、`git diff --check`、clean package；没有产品或测试代码变更，不跑 pytest。
+
 ## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
 
 - **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，
