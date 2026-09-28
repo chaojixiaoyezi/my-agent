@@ -91,8 +91,9 @@ def dispatch_scope_resolution(
 
 def scope_resolution_payload(resolution: ScopeResolution) -> dict[str, object]:
     payload = {"scope_resolution": resolution.to_dict()}
-    if resolution.warnings:
-        payload["scope_warnings"] = list(resolution.warnings)
+    # LLM: scope_warnings 是调用方最容易扫到的顶层裁决字段；没有告警时也给空列表，让"没有告警"和
+    #   "这个字段没接线"能被区分开，不靠键是否存在表达状态。
+    payload["scope_warnings"] = list(resolution.warnings)
     return payload
 
 

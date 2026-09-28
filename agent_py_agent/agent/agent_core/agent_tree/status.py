@@ -8,13 +8,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ...model_visible_refs import current_model_ref
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...subagents.kernel import SubagentKernelQuery
 from ..orchestration.child_result_index import child_result_index_from_nodes
 from ..orchestration.run_scope import remembered_orchestration_run_ids
-from ..orchestration.scope_resolution import scope_resolution_payload, tree_scope_resolution
+from ..orchestration.scope_resolution import (
+    ScopeResolution,
+    scope_resolution_payload,
+    tree_scope_resolution,
+)
 from .node_rendering import attach_task_progress, node_from_kernel_run
 from .scope_filter import (
     coordination_advice,
@@ -25,6 +31,10 @@ from .scope_filter import (
 
 _SCHEMA_VERSION = "agent_tree_status.v1"
 
+# LLM: 显式 run_id 在当前 owner 可见范围内没有任何匹配行时的唯一裁决码。它同时覆盖"这个 id 不存在"
+#   和"这个 id 不属于你可见范围"两种情况，两者必须给出完全相同的答复，绝不泄漏目标是否存在。
+_UNMATCHED_RUN_SCOPE_CODE = "requested_run_id_not_in_visible_scope"
+
 
 # LLM: 从规范 kernel 生成一次只读快照，保留 owner/thread/run 范围及裁决，不驱动生命周期。
 # 函数用途: 为界面、诊断与模型适配器提供同一事实源，任务结束后的会话查询仍不串其它窗口。
@@ -33,6 +43,13 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
     query = _kernel_query(agent, params)
     snapshot = _kernel_snapshot(agent, query)
     warnings = list(snapshot.warnings)
+    # LLM: 显式 run_id 可能指向别的 owner 或根本不存在。kernel 只返回空行、不回显原因，所以这里把它
+    #   折成"请求的 id 不在当前可见范围"这一条结构化裁决；两种原因共用同一答复，不泄漏存在性。
+    unmatched_run_query = _unmatched_explicit_run_query(agent, params, query, snapshot)
+    if unmatched_run_query:
+        query = replace(query, run_id="", scope="root_tree")
+        snapshot = _kernel_snapshot(agent, query)
+        warnings = [item for item in list(snapshot.warnings) if item != "run_not_found"]
     if not snapshot.runs and _is_main_run_query(agent, query):
         snapshot = _kernel_snapshot(agent, SubagentKernelQuery(scope="root_tree"))
         snapshot = scope_main_visible_snapshot(agent, snapshot, remembered_orchestration_run_ids(agent))
@@ -45,6 +62,8 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
         effective_scope=query.scope,
         effective_thread_id=query.conversation_thread_id,
     )
+    if unmatched_run_query:
+        resolution = _with_unmatched_run_warning(resolution)
     nodes = [node_from_kernel_run(agent, row) for row in snapshot.runs]
     nodes = visible_nodes(nodes, params.get("visible_run_ids"))
     main = _main_agent_node(agent, nodes)
@@ -73,6 +92,31 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
     }
     payload.update(scope_resolution_payload(resolution))
     return payload
+
+
+# LLM: 只有显式查询、查询链里没有正在运行的子 runner（那种身份冲突由 scope_resolution 的既有告警表达）、
+#   且 kernel 在整棵可见树里找不到这个 run_id 时才触发；不读提示正文、不额外查权限存储。
+# 函数用途: 判断显式 run_id 是否可以被安全地折成"不在可见范围"的结构化裁决。
+def _unmatched_explicit_run_query(
+    agent: object,
+    params: dict[str, object],
+    query: SubagentKernelQuery,
+    snapshot: object,
+) -> bool:
+    if not query.run_id or current_subagent_run_id(agent):
+        return False
+    if _is_main_run_query(agent, query):
+        return False
+    return snapshot is not None and not snapshot.runs
+
+
+# LLM: 在既有裁决上只追加一个告警码，保留 source/explicit/ignored_explicit 事实；不伪造 effective 值，
+#   也不把被告警的 id 写进 effective，避免把不可见的 id 冒充成有效范围。
+# 函数用途: 给已经被折成不可见范围的查询补上结构化告警码。
+def _with_unmatched_run_warning(resolution: ScopeResolution) -> ScopeResolution:
+    if _UNMATCHED_RUN_SCOPE_CODE in resolution.warnings:
+        return resolution
+    return replace(resolution, warnings=[*resolution.warnings, _UNMATCHED_RUN_SCOPE_CODE])
 
 
 def _current_source_refs(source_refs: object) -> dict[str, object]:

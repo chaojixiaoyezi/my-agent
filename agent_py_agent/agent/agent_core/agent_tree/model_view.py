@@ -62,6 +62,7 @@ def agent_tree_model_payload(snapshot: dict[str, object]) -> dict[str, object]:
         "main": _pick(main, ("run_id", "status", "current_tool")),
         "nodes": [_model_node(node, results.get(node.get("run_id"), {})) for node in _rows(snapshot.get("nodes"))],
         "scope_resolution": snapshot.get("scope_resolution", {}),
+        "scope_warnings": snapshot.get("scope_warnings", []),
         "warnings": snapshot.get("warnings", []),
         "policy": {"read_only": True, "does_not_dispatch": True, "does_not_clear_pending_work": True},
         "guidance": advice.get("next_step_zh", "") if isinstance(advice, dict) else "",
