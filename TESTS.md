@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## 前端目录生成器不再把 YAML 文件头算进第一个键（2026-09-28，分支 `claude/9a-catalog-header`，基于 `ca756b5db`）
+
+- **问题**：`frontend/scripts/sync-backend-config.mjs` 取键上方注释时空行不打断，所以每份 YAML 的第一个键都吸进了文件头，
+  例如 `agent_name`、capability 的第一个键、log_analysis 的 `enabled`。
+- **规则**：
+  - 第一个键出现前遇到空行，就丢弃已累积的注释。以空行结束的首段注释说明的是整份文件，不算进第一个键。
+  - 第一个键之后，归属规则不变。
+  - 后端 `parameter_registry._descriptions_from_lines` 遇空行即清空注释块，本来就没有这个问题，对第一个键的结果与新规则一致，
+    所以后端代码没改；只在 `test_parameter_registry.py` 补一例文件头用例，钉住两边共同的规则。
+- **验证**：
+  - 用旧、新生成器对同一份 YAML 各生成一次，逐叶比对：只有 3 个第一个键的描述不同，其余字段（包括排序号）完全一致。
+    - `agent_name` 和 capability 的第一个键：只剩自己的说明；
+    - log_analysis 的 `enabled`：它没有自己的注释，回落成通用占位文字。
+  - node 和 bun 的 `--check` 都是 rc=0，两者输出逐字节相同。
+  - main 上已提交的目录原本就过期（`--check` rc=1）。这次重新生成顺带补进了 main 上新增的 5 个 `session_*` 键。
+
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
 
 - **node 与 bun 的差别**：没有差别。同一基线上 `node frontend/scripts/sync-backend-config.mjs` 与 `bun …` 生成的目录逐字相同，

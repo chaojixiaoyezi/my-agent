@@ -47,6 +47,9 @@
 - 写文件内联上限是后端代码常量 `content_transport_policy.MAX_INLINE_WRITE_CONTENT_CHARS`（12000，2026-09-27 起不再是配置项，设置页不再提供表单项）；`tool_read_max_chars` 前后端统一为 `50000`，`tool_web_max_chars` 统一为 `100000`。
 - 工具目录相关配置也从 `frontend/config/frontend-runtime-config.json` 读取，包括 `tool_catalog_mode`、`tool_catalog_categories` 和 `tool_catalog_include_examples`。目录条数、分页偏移、单条与详情截断、分页提示已在参数减量第 3 批降为后端代码常量，设置页不再展示（2026-09-27）。
 - 后端真实配置目录由 `frontend/scripts/sync-backend-config.mjs` 从 `agent_py_agent/config/*.yaml` 生成到 `frontend/config/backend-config-catalog.json`。前端配置页读取这个生成文件，避免 UI 和后端默认值各写一份。
+  - 键的说明取它上方的注释（空行不打断，最多最后 8 行）。
+  - 例外是文件头：第一个键出现前遇到空行，就丢弃已累积的注释。以空行结束的首段注释说明的是整份文件，不算进第一个键；这和后端 `parameter_registry._descriptions_from_lines` 对第一个键的结果一致。
+  - 所以 YAML 的文件头和第一个键的注释之间要空一行；第一个键要有自己的注释，否则说明会回落成通用占位文字。
 - 以后改后端配置字段时，前端验收必须跑 `npm run check:config`，确认生成目录没有漏同步。
 
 ## 子代理参数保护
