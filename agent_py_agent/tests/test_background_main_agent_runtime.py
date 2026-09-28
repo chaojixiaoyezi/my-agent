@@ -6129,26 +6129,15 @@ def test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing(tm
 
     # 放长合并窗口：常量不再是配置项后由测试直接 patch。
     monkeypatch.setattr(runtime_module, "COMPLETION_COALESCE_WINDOW_SECONDS", 30)
-    agent = SimpleAgent(
-        AgentConfig(
-            enable_tools=False,
-            memory_path="memory.jsonl",
-            orphan_supervision_interval_seconds=0,
-        ),
-        tmp_path,
-    )
+    config = AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0)
+    agent = SimpleAgent(config, tmp_path)
     backend = _CapturingBackend()
     agent.backend = backend
     store = ConversationStore(tmp_path / "conversations")
-    thread = store.threads.get_or_create(
-        {
-            "canonical_user_id": "user-1",
-            "channel": "internal",
-            "channel_conversation_id": "thread-1",
-            "channel_user_id": "user-1",
-            "now": 10.0,
-        }
-    )
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "user-1", "channel": "internal",
+        "channel_conversation_id": "thread-1", "channel_user_id": "user-1", "now": 10.0,
+    })
     store.tasks.bind(
         {"thread_id": thread.thread_id, "task_id": "task-root", "goal": "失败立即处理", "now": 11.0}
     )

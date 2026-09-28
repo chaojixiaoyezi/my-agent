@@ -16,6 +16,20 @@
   - node 和 bun 的 `--check` 都是 rc=0，两者输出逐字节相同。
   - main 上已提交的目录原本就过期（`--check` rc=1）。这次重新生成顺带补进了 main 上新增的 5 个 `session_*` 键。
 
+## 当日新增 code-size 发现项清理（2026-09-28，分支 `claude/75-codesize-cleanup`，基于 `ca756b5db`，行为不变）
+
+- **比较口径**：用 `check_code_size.py --write-baseline` 按发现项身份和级别比较今早的 main `0c340fe29` 与 `ca756b5db`。strict 口径下 high-risk 从 1518 升到 1524，soft 从 708 降到 705。
+- **已清掉 6 项**：相对 `ca756b5db` 新增 0 项、消失 6 项；strict high-risk 降到 1519。
+  - `agent_tree/status.py::agent_tree_status_payload`：函数 52 行。把快照解析拆到 `_resolved_kernel_snapshot`。
+  - `agent_tree/status.py::_unmatched_explicit_run_query`：参数 5 个。删掉未使用的 `params` 参数。
+  - `plugin_management.py::_reply`：函数 57 行、嵌套 3 层。拆出 `_attach_catalog`、`_reply_message`、`_release_message`、`_enable_use_card`，两张说明表提为模块常量，elif 链改为提前返回。
+  - `tooling/artifact.py::ReadArtifactTool.__init__`：函数 60 行。运行时策略提为 `_read_artifact_runtime_policy`，可信绑定提为常量。新旧 `runtime_policy` 的 repr 摘要一致。
+  - `tests/test_background_main_agent_runtime.py::test_failed_subagent_completion_wake_is_not_delayed_by_success_coalescing`：函数 49 行。只压缩构造语句的排版。
+- **跳过 4 项**：
+  - 有人在改，跳过：`session_messaging.decide_session_messaging`、`send_session_message._queue_and_wake`、`runtime/guidance._render_guidance_user_input` 的嵌套（my-agent-3 在改）。
+  - 改善但未继续拆：`subagents/services/base.py::SubAgentBaseService` 今天从 soft（大于 250 行）降到 high-risk（239 行），属于改善；压到 200 行以下要移出约 40 行建 run 权威写入逻辑，本片不动。
+- **验证**：相关 33 个测试文件共 675 项通过，覆盖 agent_tree、插件管理与命令、artifact 读取、后台主代理、architecture_guardrails、constant_names_unique、code_size_script。五项静态 gate 全部通过。
+
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
 
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`）

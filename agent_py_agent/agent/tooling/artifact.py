@@ -90,6 +90,33 @@ class ArtifactReadBudget:
                 self._events_by_run.setdefault(entry[0], []).append((time.monotonic(), int(chars)))
 
 
+# 常量用途: read_artifact 的 run/task/request 身份只绑定宿主 run_scope 的同名字段，模型参数不能覆盖。
+_READ_ARTIFACT_TRUSTED_BINDINGS = tuple(
+    (name, TrustedParameterBinding(source_refs=(f"run_scope.{name}",), authority="host_authoritative"))
+    for name in ("run_id", "task_id", "request_id")
+)
+
+
+# LLM: 只读、可并行、按逻辑 artifact_ref 声明资源域；身份字段只由宿主绑定，默认读取长度随工具实例传入。
+#   改动时联查 ReadArtifactTool 与归档读取测试，不能放宽 internal_parameters 或可信绑定。
+# 函数用途: 构造 read_artifact 的唯一运行时策略。
+def _read_artifact_runtime_policy(default_read_chars: int) -> ToolRuntimePolicy:
+    return ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy("read_only"),
+        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
+        resource_scopes=ResourceScopePolicy(
+            parameter_names=("artifact_ref",),
+            parameter_kinds={"artifact_ref": "logical"},
+        ),
+        output_policy=OutputPolicy(trust="external_data"),
+        input_policy=ToolInputPolicy(
+            internal_parameters=("__artifact_read_scope_mode", "run_id", "task_id", "request_id"),
+            safe_parameter_defaults=(("offset", 0), ("mode", "slice"), ("max_chars", default_read_chars)),
+            trusted_parameter_bindings=_READ_ARTIFACT_TRUSTED_BINDINGS,
+        ),
+    )
+
+
 # LLM: This is the sole model-facing reader for archived tool output. Host paths and run identity
 # stay inside the reader/audit layer; the model receives only a logical ref, content window, and
 # an exact continuation call when more suffix content exists.
@@ -154,51 +181,7 @@ class ReadArtifactTool(BaseTool):
     ):
         self.root = Path(root)
         self.default_read_chars = _artifact_read_chars(default_read_chars)
-        self.runtime_policy = ToolRuntimePolicy(
-            effect_resolver=EffectResolverPolicy("read_only"),
-            concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-            resource_scopes=ResourceScopePolicy(
-                parameter_names=("artifact_ref",),
-                parameter_kinds={"artifact_ref": "logical"},
-            ),
-            output_policy=OutputPolicy(trust="external_data"),
-            input_policy=ToolInputPolicy(
-                internal_parameters=(
-                    "__artifact_read_scope_mode",
-                    "run_id",
-                    "task_id",
-                    "request_id",
-                ),
-                safe_parameter_defaults=(
-                    ("offset", 0),
-                    ("mode", "slice"),
-                    ("max_chars", self.default_read_chars),
-                ),
-                trusted_parameter_bindings=(
-                    (
-                        "run_id",
-                        TrustedParameterBinding(
-                            source_refs=("run_scope.run_id",),
-                            authority="host_authoritative",
-                        ),
-                    ),
-                    (
-                        "task_id",
-                        TrustedParameterBinding(
-                            source_refs=("run_scope.task_id",),
-                            authority="host_authoritative",
-                        ),
-                    ),
-                    (
-                        "request_id",
-                        TrustedParameterBinding(
-                            source_refs=("run_scope.request_id",),
-                            authority="host_authoritative",
-                        ),
-                    ),
-                ),
-            ),
-        )
+        self.runtime_policy = _read_artifact_runtime_policy(self.default_read_chars)
         self.read_budget = ArtifactReadBudget(
             window_seconds=_ARTIFACT_READ_BUDGET_WINDOW_SECONDS,
             max_chars=_config_int(

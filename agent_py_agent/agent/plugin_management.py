@@ -426,13 +426,7 @@ class PluginManagement:
         if business:
             payload["details"] = envelope
         state = payload.get("state", "")
-        messages = {"succeeded": "插件管理请求已完成。", "failed": "插件管理请求失败，请核对原因。",
-                    "cancelled": "插件管理请求已取消，请查看原请求结果。", "rejected": "插件管理请求被拒绝，没有开始执行。",
-                    "approval_required": "插件管理需要审批，尚未执行。", "pending": "请求已登记，尚未开始执行。",
-                    "running": "请求正在执行。", "outcome_unknown": "插件管理结果尚未确认，请查询原请求。",
-                    "not_found": "当前会话没有查到该请求；这不证明其他会话或未确认请求没有执行。"}
         result = {"kind": "plugin_command", "request_id": request_id, **payload}
-        message = messages.get(state, "插件命令已处理。")
         details = payload.get("details", {})
         if details.get("reason") == "confirmation_required" and isinstance(details.get("confirmation"), dict):
             # 非 Python 插件启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明
@@ -440,42 +434,88 @@ class PluginManagement:
         elif runtime_reason_message(details.get("reason")):
             # 平台不符、解释器缺失或被替换：按结构化原因码给出具体说明与下一步
             result["message"] = runtime_reason_message(details.get("reason"))
-        if state == "succeeded" and details.get("removed") is True:
-            message = "插件已卸载，用户产物与操作历史保留。"
-        elif state == "succeeded" and details.get("release_pending"):
-            message = "插件已停用，原准备执行器尚未确认退出；请稍后再次停用以完成环境释放。"
-        elif state == "succeeded" and details.get("released") is True:
-            message = "插件已停用并释放，可以再次启用。"
-        if payload.get("cleanup_consumption", {}).get("state") == "pending":
-            message += "资源或包回收尚未确认；重送原请求可继续收尾。"
-        if business:
-            message = {"succeeded": "插件调用已完成。", "failed": "插件调用失败，请核对原结果。",
-                       "approval_required": "插件调用需要审批，尚未执行。",
-                       "outcome_unknown": "插件调用结果尚未确认，请查询原请求。"}.get(state, message)
-            if payload.get("output"):
-                message += "\n" + readable_plugin_output(str(payload["output"]))
-        if state in {"succeeded", "failed", "cancelled"} and payload.get("finalization_pending"):
-            message = "插件调用已有结果，连接收尾尚未确认。" if business else "插件管理操作已有结果，运行收尾尚未确认。"
-        if payload.get("connection_cleanup", {}).get("confirmed") is False:
-            message += "\n本次插件连接退出尚未确认；原调用结果保持，请核对资源。"
-        result.setdefault("message", _outcome_message(payload, state, message))
+        result.setdefault("message", _outcome_message(payload, state, _reply_message(payload, state, business)))
+        self._attach_catalog(result, payload)
+        if request_id:
+            result["message"] += f"\n查询：/plugins status {request_id}"
+        return result
+
+    # LLM: 目录与使用卡都从同一次安装快照投影；读取或渲染失败只标 catalog_error，不改变原结果与已生成的说明。
+    # 函数用途: 给回执附上当前目录，启用确实完成时在说明末尾追加该插件的使用卡。
+    def _attach_catalog(self, result: dict, payload: dict) -> None:
         try:
             entries = self.installations.snapshot()
             catalog = self._catalog(entries)
             result["catalog"] = catalog.to_payload()
-            if (state == "succeeded" and payload.get("tool_name") == PLUGIN_ENABLE_TOOL
-                    and details.get("enabled") is True and not payload.get("finalization_pending")):
-                plugin_id = details.get("plugin_id")
-                plugin = next((item for item in catalog.plugins if item.plugin_id == plugin_id and item.enabled
-                               and item.activation_id == details.get("activation_id")), None)
-                entry = next((item for item in entries if item.manifest.plugin_id == plugin_id), None)
-                if plugin is not None and entry is not None:
-                    result["message"] += "\n" + render_plugin_use_card(plugin, entry.manifest.settings_schema)
+            card = _enable_use_card(catalog, entries, payload)
         except (OSError, ValueError):
             result["catalog_error"] = True
-        if request_id:
-            result["message"] += f"\n查询：/plugins status {request_id}"
-        return result
+            return
+        if card:
+            result["message"] += "\n" + card
+
+
+# 常量用途: 插件管理请求各结构化状态的默认中文说明；不在表里的状态用通用说明。
+_PLUGIN_REPLY_STATE_MESSAGES = {
+    "succeeded": "插件管理请求已完成。", "failed": "插件管理请求失败，请核对原因。",
+    "cancelled": "插件管理请求已取消，请查看原请求结果。", "rejected": "插件管理请求被拒绝，没有开始执行。",
+    "approval_required": "插件管理需要审批，尚未执行。", "pending": "请求已登记，尚未开始执行。",
+    "running": "请求正在执行。", "outcome_unknown": "插件管理结果尚未确认，请查询原请求。",
+    "not_found": "当前会话没有查到该请求；这不证明其他会话或未确认请求没有执行。",
+}
+# 常量用途: 插件业务调用（非管理动作）各状态的中文说明；不在表里的状态沿用管理说明。
+_PLUGIN_BUSINESS_REPLY_MESSAGES = {
+    "succeeded": "插件调用已完成。", "failed": "插件调用失败，请核对原结果。",
+    "approval_required": "插件调用需要审批，尚未执行。", "outcome_unknown": "插件调用结果尚未确认，请查询原请求。",
+}
+
+
+# LLM: 只读回执里的结构化状态与收尾字段选说明，不解析正文；业务调用的输出只经可读化投影后附在说明后面。
+# 函数用途: 按状态、卸载/停用释放、资源回收、业务调用与运行收尾事实拼出插件命令的默认说明。
+def _reply_message(payload: dict, state: str, business: bool) -> str:
+    details = payload.get("details", {})
+    message = _PLUGIN_REPLY_STATE_MESSAGES.get(state, "插件命令已处理。")
+    if state == "succeeded":
+        message = _release_message(details) or message
+    if payload.get("cleanup_consumption", {}).get("state") == "pending":
+        message += "资源或包回收尚未确认；重送原请求可继续收尾。"
+    if business:
+        message = _PLUGIN_BUSINESS_REPLY_MESSAGES.get(state, message)
+    if business and payload.get("output"):
+        message += "\n" + readable_plugin_output(str(payload["output"]))
+    if state in {"succeeded", "failed", "cancelled"} and payload.get("finalization_pending"):
+        message = "插件调用已有结果，连接收尾尚未确认。" if business else "插件管理操作已有结果，运行收尾尚未确认。"
+    if payload.get("connection_cleanup", {}).get("confirmed") is False:
+        message += "\n本次插件连接退出尚未确认；原调用结果保持，请核对资源。"
+    return message
+
+
+# LLM: 只按成功回执里的卸载/停用释放结构化字段选择说明，先命中者优先；都不满足时返回空串交调用方沿用默认说明。
+# 函数用途: 给成功的卸载、停用待释放和停用已释放三种结果选对应说明。
+def _release_message(details: dict) -> str:
+    if details.get("removed") is True:
+        return "插件已卸载，用户产物与操作历史保留。"
+    if details.get("release_pending"):
+        return "插件已停用，原准备执行器尚未确认退出；请稍后再次停用以完成环境释放。"
+    if details.get("released") is True:
+        return "插件已停用并释放，可以再次启用。"
+    return ""
+
+
+# LLM: 只有启用成功、宿主已发布且运行收尾已确认时才出使用卡；插件与安装记录都须来自同一次快照且激活代次一致。
+# 函数用途: 返回刚启用插件的使用卡文字，不满足条件时返回空串。
+def _enable_use_card(catalog, entries, payload: dict) -> str:
+    details = payload.get("details", {})
+    if (payload.get("state", "") != "succeeded" or payload.get("tool_name") != PLUGIN_ENABLE_TOOL
+            or details.get("enabled") is not True or payload.get("finalization_pending")):
+        return ""
+    plugin_id = details.get("plugin_id")
+    plugin = next((item for item in catalog.plugins if item.plugin_id == plugin_id and item.enabled
+                   and item.activation_id == details.get("activation_id")), None)
+    entry = next((item for item in entries if item.manifest.plugin_id == plugin_id), None)
+    if plugin is None or entry is None:
+        return ""
+    return render_plugin_use_card(plugin, entry.manifest.settings_schema)
 
 
 # 常量用途: 插件命令错误码的中文说明；不在表里的码沿用按状态给出的通用说明。
