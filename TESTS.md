@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## 后台唤醒 A 草稿组件与 Goal 来源投影（2026-09-28）
+
+固定 WIP `51361723d`（父 `72f23d0d9`）上运行原作者 A 测试、后台主代理 runtime 及 B/C 两文件，共 224 项通过、0 failure/error/skip；实际 runtime import 与测试文件均在固定独立 checkout，前后干净。调用 `pytest.main`，参数为上述四文件、`-q --tb=short -p no:cacheprovider`、私有 `--basetemp` 和 JUnit 文件。没有产品/测试代码修改或模型请求。
+
+独立审阅另发现合法 Goal 的 task ID 被新事件误标为历史 request 引用。真实隔离 store 的纯解析复核中，4 个合法 Goal 场景误标，2 个缺失普通请求场景仍按原合同拒绝；原目标仍在 user_prompt，不声称整个请求丢目标。224 项没有断言这处角色区别，不能用组件通过覆盖它。详见[固定草稿、证据摘要和范围](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#后台唤醒-a-草稿来源角色审阅2026-09-28未正式交付)。建议下一步由原作者修复 A 来源角色及 B 读失败，root 等正式固定组合后做 C23；只读复核可并行，最终仍 0/27。
+
 ## 后台唤醒 B 读账异常离线复核（2026-09-28）
 
 固定 `43cd72e3d` 的原运行入口和三个 reader 函数 AST 未改写，以合成 iterator 复核两种情况：正常返回 owner/task 两条 carry；只有 owner 抛 OSError 时，外层返回空列表且 task 根未被访问。确认读账事实丢失，不声称真实重复派工或停止失效；没有制造真实故障、发模型或改产品。

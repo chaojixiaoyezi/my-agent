@@ -1,5 +1,17 @@
 # 能力内化：来源盘点与验收矩阵
 
+## 后台唤醒 A 草稿来源角色审阅（2026-09-28，未正式交付）
+
+不可变草稿 `51361723db3ca514c0630db26d70e47b9848300a` 的父提交是 B/C 固定 `72f23d0d9`，提交明确标记文档和 gate 待完成。本线只在独立审阅 checkout 核代码与现有组件，没有安装到私有 Gateway。两位只读审阅者分别检查 conversation 身份/触发与模型投影/Compact：正常生命周期轮使用 `host.lifecycle_wake` RuntimeFactsTurn，原 user/root 目标语义保留；历史只移除本片 runtime injection，工具往返仍保存；Compact/overflow/retry 继续传同一 trigger，固定推荐与本轮可见工具取交集。
+
+确认一处来源角色错误：既有 resolver 允许已核实 Goal 的持久 task ID 出现在唤醒 `conversation_request_id`，该 ID 不对应历史 user 消息。新事件构造却直接把它写进 `origin_request_ids`，并因列表非空省略 `origin_task`；固定首句还声称原任务在此前历史。该合法例外见原 `test_background_main_agent_runtime.py` 的 Goal child wake 用例，现有新测试只断言有/无 ID，未核验来源角色。
+
+root 使用固定源码、隔离 store 和 echo 配置的 Agent 做纯解析复核，无模型调用：active/complete Goal × 无普通请求/有普通请求共 4 例均接受，但事件多出没有历史消息的 task ID，并省略 origin_task；另 2 例缺失普通请求仍按原合同抛 DataCorruptionError。原目标仍在 run user_prompt，不能扩大为整个请求丢目标或任务失败。探针摘要 `25da4da3e6e101d344002de23ac78a77b79c41ea77234bc1f883561022d9ed6c`，两线独立审阅汇总摘要 `a8c99a87a86fcf0a030bdabc61cfc4cea57f9cfea93da1bc9e8dd2f3225eadae`。
+
+固定该草稿后，`test_lifecycle_wake_host_event.py`、`test_background_main_agent_runtime.py`、`test_background_active_turn_carry.py`、`test_background_child_control_tools.py` 共 224 项通过，JUnit 0 failures/errors/skipped，98.364 秒；实际 import 来自固定 checkout，前后源码干净。报告摘要 `030ba84440f4b01a2aca903526235c049d0967e4827dc6b1db6388c87b3c9b93`。组件通过不关闭未断言的 Goal 来源错误或已报 B 读失败，也不代表正式交付、真实模型或多代 Compact 通过。
+
+建议下一步：A 原作者复用已经核实的 Goal/Task 来源事实区分 task-origin 与真实历史 request 引用，保持原 wake 和 B 工具账过滤身份不变；B 原作者处理读失败。整组固定与门禁交付后由 root 做 C23 原生委派，当前零提交，最终 0/27。只读修订复核可并行，产品写入、主线集成和发布仍归 Claude。
+
 ## 后台唤醒前置补片审阅（2026-09-28，整组未交付）
 
 Claude 已确认 C22 的两项受控机制缺口关闭，文档 `2a407b8cc` 进入其下一批集成。主线固定 B `43cd72e3d7693bd430be9db9b5e6dbfa5f617a09` 和 C `72f23d0d9460dc5895340832a78661e0e04fbeac` 已可只读审阅；A 宿主事件片尚未固定交付，本线没有据此安装或发新模型任务。
