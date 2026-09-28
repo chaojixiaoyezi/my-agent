@@ -1,5 +1,17 @@
 # 设计台账
 
+## Jev 后台点位改用独立期限（2026-09-28，分支 `claude/be-jev-bg-deadline`，基于 `60f6f485a`，本地验证通过，待集成）
+
+- **起因**：my-agent-1 实测近 48 小时：后台点位 95 次，成功 49%、超时 39%；前台点位 181 次，成功 74%、超时 22%。同一后台阶段里各点位共用阶段倒计时，排在后面的 `curator_relation` 只拿到残值，19 次超时的中位耗时只有 1930ms。
+- **语义（已实现）**：
+  - 普通后台（`owner_background`）阶段：每个点位从自己的开始时刻起算完整点位预算（点位 `timeout_seconds`，缺省继承 `background_timeout_seconds`），不再受阶段倒计时残值约束。
+  - 调用方绝对期限（建阶段时给的，如 Curator 租约派生期限，以及单次调用给的）更小时，仍取更小的。
+  - 采用前复核（`decision_outcome_is_current`）同口径：普通后台建议只看自带的点位期限。
+  - 前台（`thread`）阶段和实验阶段保留阶段总上限，行为不变。
+  - 设置视图里后台点位的 `max_request_seconds`、`limiting_field` 同步为点位自己的预算。
+- **取舍**：一个 Curator 批次的决策总等待从“阶段预算”变为“各点位预算之和”，仍受租约派生期限约束。后台等待值（如调到 15 秒）由 my-agent-1 部署后经 `decision_patch` 调整，本次不改任何设置。
+- 细节见 `TESTS.md` 同日条目。
+
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。

@@ -63,7 +63,9 @@ def _profile_status(context: object, data: dict, profile_id: str) -> dict:
 
 
 # LLM: 缺点值按原作用层继承；实验授权只读当前 thread 的完整信封，绝不拼接 owner/thread 或从开关推导许可。
-# 函数用途: 返回可写范围、真实字段来源和静态等待上限，运行服务仍须扣除原阶段已耗时间。
+#   静态等待上限与 decision_service._point_deadline 同口径：前台点位取点位预算与 stage_timeout_seconds 的较小值；
+#   普通后台点位只看自己的 timeout_seconds（缺省继承 background_timeout_seconds），不再受阶段预算封顶。
+# 函数用途: 返回可写范围、真实字段来源和静态等待上限；前台运行服务仍须扣除原阶段已耗时间，后台点位各自完整计时。
 def decision_settings_projection(context: object, data: dict, thread: object = None, *, scope: str = "owner") -> dict:
     owner = validate_decision_settings(data["decision_settings"])
     temporary = validate_decision_settings(thread.decision_settings) if thread is not None else empty_decision_settings()
@@ -84,7 +86,7 @@ def decision_settings_projection(context: object, data: dict, thread: object = N
         origins = owner_sources if runtime_scope == "owner_background" else sources
         prefix = f"points.{point}."
         time_key = "background_timeout_seconds" if runtime_scope == "owner_background" else "timeout_seconds"
-        budget_key = "background_timeout_seconds" if runtime_scope == "owner_background" else "stage_timeout_seconds"
+        budget_key = prefix + "timeout_seconds" if runtime_scope == "owner_background" else "stage_timeout_seconds"
         for field, fallback in (("timeout_seconds", time_key), ("profile_id", "profile_id")):
             if prefix + field not in values:
                 values[prefix + field] = values[fallback]

@@ -385,7 +385,8 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
   `decision_service`；每次原 lease 批次只创建一次阶段。`core._wire_memory_curator` 注入既有 agent 的
   callable，不创建第二 Agent、配置库、后台 worker 或记忆写服务。
 - 使用宿主关键字 `scope="owner_background"`，params 的 run_id 为原 Curator run，thread/task/request
-  为空。决策只读 owner 设置，阶段读取 `background_timeout_seconds`，不能借材料中的会话身份
+  为空。决策只读 owner 设置；每个后台点位缺省用 `background_timeout_seconds` 作自己的完整预算，从调用开始计时
+  （2026-09-28 起不再共享阶段倒计时），不能借材料中的会话身份
   读取 thread 覆盖。活动会话 runner 与 owner 后台身份冲突时，不允许调用。
 - `DecisionStage.enabled_points` 来自 begin 的同一次设置读取，明确关闭时立即返回原批次，不准备或编码材料；
   它只决定是否准备，发送/采用仍由共用服务复读原设置，不能作为采用权限。
@@ -414,13 +415,13 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 上述验证限本地 fake 决策、原有界 worker/账本及原提取/提交组合；真实 Jev 质量、服务端时延、实际 TUI
 和部署尚未验收，不能据此宣称正式记忆提取质量提升。
 
-Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致：后台阶段预算不受前台 stage_timeout_seconds 限制，
-线程 enabled/profile 不覆盖 owner 后台有效值。历史线程后台覆盖只展示供清理，实际标注不消费它们。
+Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致：后台点位预算不受前台 stage_timeout_seconds 限制，
+也不共享后台阶段倒计时；线程 enabled/profile 不覆盖 owner 后台有效值。历史线程后台覆盖只展示供清理，实际标注不消费它们。
 
 ## P5-B 来源与正式条目关系提示（第一片，本地实现）
 
 `decision_curator.py::annotate_curator_batch` 只创建一个后台阶段，独立检查 `curator` 和 `curator_relation`。
-标签与关系共用绝对 caller deadline；后续关系等待结束后还会复核较早标签的配置与期限。
+标签与关系各自拿完整点位预算，共用绝对 caller deadline；后续关系等待结束后还会按标签自己的点位期限复核较早标签的配置与期限。
 `decision_curator_relation.py` 只消费当前批次，不新建候选 store、后台代理、提取入口或晋升动作。
 
 到达计数：`decision_recall`、`decision_curator`、`decision_curator_relation` 在每次到达时调用 `conversation/decision_reach_counts.note_decision_reach` 记原因码或 `called`，材料构建包在 `counted_material` 里（输入不合格记 `bad_material` 后原样上抛）。Curator 的阶段只建一次，`_note_stage_misses` 为两个点位各记一次阶段原因。计数不参与任何召回、标注或游标判断，开关 `decision_skip_records_enabled` 关闭时不记。召回重排“普通记忆至少几条”读 `conversation/decision_point_limits.RECALL_MEMORIES_MIN`（调用时现读，诊断标签同源）。按用户作用域的 `owner_memory_policy_json` 由 `owner_resolver.home_paths_with_owner` 重设到该用户 home，记忆总闸不再借用本机主用户的策略文件。
