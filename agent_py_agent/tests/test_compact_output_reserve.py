@@ -28,7 +28,11 @@ OUTPUT = 50_000
 # LLM: 复用隔离宿主和完整真实提示/schema；large 输入须落在触发线下、输出预留线上，不能通过删 schema 校准。
 # 函数用途: 为三种宿主构造输出预留才会拒绝的候选；下方双边容量断言验证输入校准，不替换模型准备流程。
 def _case(tmp_path, host, backend, large):
-    requirement = "CURRENT_REQUIREMENT_BEGIN " + "a" * (425_000 if large else 1000) + " CURRENT_REQUIREMENT_END"
+    # 大例要让最小候选落在“窗口−输出预留”与 90% 触发线之间。gateway/background 的完整请求比 child 多约 3 万 tokens
+    # （工具 schema 等固定部分），同一填充放不进同一区间：2026-09-27 合入能力包资源纠错后 gateway 例 180,106 越过
+    # 180,000，而 child 例只高出下沿很少，所以按宿主分开定填充，各自留余量。
+    padding = (425_000 if host == "child" else 413_000) if large else 1000
+    requirement = "CURRENT_REQUIREMENT_BEGIN " + "a" * padding + " CURRENT_REQUIREMENT_END"
     if host == "gateway":
         fixture = _history_request(tmp_path, mode="disabled", tools=True, original_window=WINDOW)
         agent, tid = fixture.agent, fixture.thread_id
