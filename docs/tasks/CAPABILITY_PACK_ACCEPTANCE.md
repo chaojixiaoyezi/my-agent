@@ -127,7 +127,7 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 | G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过。五项已有[脚本模型端到端机制证据](#g05脚本模型端到端机制验证2026-09-28)，真实模型仍未覆盖 |
 | G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据。**2026-09-28 补跨 owner 原生验收**（`9f88e4905`，隔离 home、私有 8436、local/main 与 local/user 两个 owner）：包、设置、task、偏好四项均取得原生结构化证据，未发现隔离缺陷，见[R16 跨 owner 隔离原生验收](#r16-跨-owner-隔离原生验收2026-09-28)；按包选择偏好（capability_selection）本轮两边都未形成可比记录，仍未单独覆盖 |
 
-| G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证 |
+| G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证。**2026-09-28 补原生对照**（`9f88e4905`，隔离 home、私有 8440，A01 每种配置一次）：旧 v3 随包 Skill 三组都能列出和读取；三组都没有无关包调用；宿主都未做一次选择，模型都自选 A；开关关闭只去掉推荐段，已装包仍在静态索引里可见，见[G07 Skill 共存与成本对照原生验收](#g07-skill-共存与成本对照原生验收2026-09-28)；一次选择开启臂仍未覆盖 |
 
 ### R16 跨 owner 隔离原生验收（2026-09-28）
 
@@ -155,6 +155,67 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 - **未覆盖**：按包选择偏好（capability_selection）本轮两边都未形成记录；实际调用的 profile 未单独核对；主机层
   `global_index`（active_runs、active_tasks）会记录两个 owner 的运行，本轮没有探测 owner 工具能否读到它。
 - **证据**：`~/.my-agent/decision-evidence/r16-isolation-9f88/`（结构化快照、差异、发送记录与测试脚本；不含对话正文和目录内容）。
+
+### G07 Skill 共存与成本对照原生验收（2026-09-28）
+
+- **被测**：生产 wheel `9f88e4905`（sha256 `9be2b59f…`，与生产 step14w 相同），新建 Python 3.12.13 venv 安装。
+- **环境**：
+  - 每组都是全新的 scratchpad 隔离 home，Gateway 依次只在 127.0.0.1:8440 运行；owner 为 local/main，workspace-write，审批 auto。
+  - 模型目录复制自 Codex 27 次所用副本（600、不打印、每组停机即删），实际模型是 MiniMax-M2.7（262144）。
+  - 记忆策展和自学习关闭，三组相同；被测进程用 `env -i` 启动，外网只走代理。
+- **包**：
+  - 三组都装 design-lite 0.1.0（`plugin_package.v3`，随包 Skill design-card，由本提交源码构建），作为旧 v3 随包 Skill 的代表。
+  - A／B／C 用 Codex 冻结的 zip，sha256 已核。
+  - 全部通过 TUI 的 `/plugins install`、`/plugins enable` 安装，安装账本 phase=active。
+- **需求**：冻结用例 A01（此前未跑过），每组只提交一次原始中文需求，不挑成功；TUI 以
+  `chat --gateway --workspace <用例目录>` 启动。
+- **做法**：
+  - 只读结构化事实：usage 账本（按用途）、task 的 `host_capability_selection.v1` 与 `skill_snapshot_refs`、runtime.db（只读）、
+    工具输出索引、原生 tool_use 的工具名和参数、线程 `model_context_usage`、安装账本。
+  - Gateway 停止后，用与 `gateway run` 相同的构造调用产品自己的 Skill 快照和 `skill_search` 核对 v3 Skill。
+  - 不读对话正文。
+
+| 组 | Gateway 实际开关（推荐／一次选择） | 包 | 主调用 | provider 输入（其中缓存读） | 输出 | 选包结果 | 包调用 | 无关包调用 | v3 Skill 列出／读取 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 开关关闭 | 关／关 | A+B+C | 14 | 607102（532216） | 6419 | 宿主未选；模型自选并钉住 A | A：get 5、search 3（1 次 `TOOL_INVALID_ARGUMENTS`） | 0 | 是／是 |
+| 单包 | 开／关（默认） | A | 22 | 1364685（1231092） | 14469 | 同上 | A：get 9、search 1 | 0 | 是／是 |
+| 多包 | 开／关（默认） | A+B+C | 10 | 507355（431450） | 10891 | 同上 | A：get 8 | 0 | 是／是 |
+
+- **结论**：
+  - **旧 v3 随包 Skill 共存正常**：
+    - 三组的 Skill 快照都列出 `plugin:design-lite:design-card`（27 个 builtin 加 1 个插件 Skill），没有加载错误。
+    - 检索时它排第一；get 成功，内容 sha256 与仓库里的 SKILL.md 一致；builtin Skill 读取正常。
+    - 三组的模型都没有调用 design-lite 的工具或读取该 Skill（与任务无关）。
+  - **没有无关包调用**：C 三组都没被调用，也不在 A01 的推荐候选里；B 属于可接受集合，但两组都没用它。
+  - **选包**：三组 task 都没有 `host_capability_selection.v1`（一次选择默认关闭，开关关闭组也关）；模型都自选 A，即冻结清单里的主意图包。
+  - **开关关闭的实际效果**：只去掉每轮的推荐段；静态 Skill 索引照样列出已装包，模型仍读取并使用了 A。
+  - **成本**：
+    - provider 输入总量主要随模型轮数（14／22／10）变化，每种配置只有一个样本，不能把总量差异归因到包配置。
+    - 产品渲染的与包相关的每轮开销（estimate_tokens 估算，窗口 262144）：静态索引里的包元数据三包 901、单包 774；
+      推荐段三包 343（候选 A、B）、单包 193。
+    - 每轮合计：开关关闭 901、单包 967、多包 1244，约占平均每次输入（43K–62K）的 2%。
+- **执行偏差**：
+  - 前两次原计划是"开关关闭"和"单包、开启一次选择"，但开关文件写在了 Gateway 配置目录下。
+  - `gateway run` 经 `make_agent` 以 owner home 为 root，只读 `<owner home>/config/capability_config.yaml`，所以这两次实际都用默认开关；
+    事后用产品同一构造核对，文件确实没被加载。
+  - 这两次按实际配置归为"多包"和"单包"，没有重跑；随后修正位置，启动前核对文件已加载，再跑了一次"开关关闭"。
+- **随附发现**：
+  - Gateway 读取的 capability 配置是 `<Gateway agent root>/config/capability_config.yaml`，没配 `workspace_root` 时即 owner home。
+  - 缺这个文件时，各读取方用 dataclass 默认值；wheel 自带的 `agent_py_agent/config/capability_config.yaml` 不会被 Gateway 读取。
+    目前两者取值一致，行为没有差别。
+  - 单包组模型先对 owner home 做 find_files，再按 owner 相对路径写文件，结果产物进了用例目录下重复嵌套的 `workspace/validation/...`。
+- **未覆盖**：
+  - 一次选择开启（Codex 私有开启臂）本轮没跑，宿主选包结果仍没有原生证据。
+  - 业务质量未评分；每种配置只有一个样本。
+- **收尾**：
+  - 每组都执行了 TUI `/exit` 和原 CLI `gateway stop`，登记的 PID 已消失，8440 无监听，没有残留进程。
+  - 删除目录副本前扫描过，其它文件不含密钥。
+  - 三份目录副本和全部 venv（含插件激活环境）已删除，假 HOME 为空，私有 tmux 已关。
+- **证据**：`~/.my-agent/decision-evidence/skill-cost-9f88/`
+  - `results.json` 摘要 `795955fbe140f146c37453f7b5c84b0b64f31d5870d757e1d59aa1f5a278dff9`；清单 `MANIFEST.sha256` 摘要
+    `db8810b187caad507465cb79fbc5172e517aa9ea79db98996692cc1a6df79cc9`。
+  - 目录里有各组结构化快照、渲染测量、发送记录和测试脚本，包括出错的 `stage_v1.py`。
+  - 不含对话正文、产物正文和目录内容。
 
 ### Compact 的机制与规模分别记账
 
