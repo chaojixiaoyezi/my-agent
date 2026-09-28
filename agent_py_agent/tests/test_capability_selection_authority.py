@@ -362,3 +362,50 @@ def test_model_digest_uses_current_binding_and_never_profile_or_secret_fields(bo
     assert "private-fixture-secret" not in original(observed)
     fixture.agent.backend.model_name = "different-actual-model"
     assert package_selection_model_digest(fixture.agent) != first
+
+
+# LLM: 决策对象本身不可直接读回，所以用一个只做记录的包装类替换模块里的 ActionPolicy；包装类把真正的
+#   ActionPolicy 类提前抓在闭包里再调用，避免 monkeypatch 之后自己调到自己。断言只看 workspace_roots /
+#   owner_scope_root 这两个与权限边界直接相关的结构化字段，不看 message 或自然语言。
+# 函数用途: 记录 package_entry_policy 实际用哪组结构化边界去问原 ActionPolicy。
+def _capture_policy_request(monkeypatch, authority_module):
+    real_policy_cls = authority_module.ActionPolicy
+    captured = {}
+
+    class _RecordingPolicy:
+        def decide(self, request):
+            captured["workspace_roots"] = tuple(request.workspace_roots)
+            captured["owner_scope_root"] = request.owner_scope_root
+            captured["workspace_root"] = request.workspace_root
+            return real_policy_cls().decide(request)
+
+    monkeypatch.setattr(authority_module, "ActionPolicy", _RecordingPolicy)
+    return captured
+
+
+# LLM: 墙外授权根来自本 run 冻结的 write_boundary，不是 registry 自己的值；registry.workspace_roots 里没有这个根，
+#   把它改回“忽略冻结值”这条用例就会红（变异验证见 TESTS.md 同日条目）。
+# 函数用途: 证明包入口读取判定用的是冻结下来的墙外授权根与冻结 owner 墙。
+def test_entry_policy_uses_frozen_boundary_not_registry_scope(bound_execution, tmp_path, monkeypatch):
+    fixture = bound_execution
+    agent, params = fixture.agent, fixture.params
+    frozen_root = tmp_path / "frozen-worktree"
+    frozen_root.mkdir(parents=True, exist_ok=True)
+    frozen_scope = str(tmp_path / "frozen-owner-home")
+    assert str(frozen_root) not in {str(item) for item in agent.tools.workspace_roots}
+    agent.tools.approval_mode_reader = lambda: "ask"
+    tools = agent.tools.runtime_snapshot(allowed_tools=["skill_search"], run_id=params.run_id)
+    monkeypatch.setattr(ToolExecutor, "execute", _unexpected)
+    monkeypatch.setattr(agent.tools.tools["skill_search"], "execute", _unexpected)
+    monkeypatch.setattr(authority_module, "write_boundary_with_runtime_ledger", lambda *_: {
+        "execution_workspace_roots": [str(frozen_root)],
+        "effective_owner_scope_root": frozen_scope,
+    })
+    captured = _capture_policy_request(monkeypatch, authority_module)
+
+    package_entry_policy(agent, params, tools, {"action": "get", "package_id": "authority-package"}, claim_id="claim")
+
+    assert str(frozen_root) in {str(item) for item in captured["workspace_roots"]}
+    assert captured["owner_scope_root"] == frozen_scope
+    # 冻结的墙外根生效：包入口之外的默认根一个没多。
+    assert {str(item) for item in captured["workspace_roots"]} != {str(item) for item in agent.tools.workspace_roots}

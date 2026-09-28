@@ -15,6 +15,22 @@
     官方历史版本逐字相同，store 的展开赋值口径不变。
 - 没有检查前端文件的 pytest；仓库静态门禁（ruff、doc_sync、strict code_size、diff --check、clean_package）照常跑。
 
+## 包入口读取判定补结构断言用例（2026-09-28，dev 派活任务 3，my-agent 实现）
+
+- **来源**：dsh-9b 做变异时发现 `capability/package_selection_authority.py` 的墙判定没有用例——把
+  `package_entry_policy` 里两处"从冻结边界取值"改成忽略冻结值，测试全绿，没人抓得住。
+- **实测结论**：该变异在 `skill_search` 入口上本来就不可观测（`skill_search` 参数表里没有任何命中
+  `_PATH_KEYS` 的键，且 schema 门排在路径门之前），所以按集成者的裁定改用最简形态：直接对
+  `package_entry_policy` 产出的策略做结构断言，不改产品语义、不动 `_PATH_KEYS`。
+- **做法**：`tests/test_capability_selection_authority.py` 新增 `_capture_policy_request`（用只做记录的包装类
+  替换模块内 `ActionPolicy`，真类提前抓进闭包再调用，避免自递归）与
+  `test_entry_policy_uses_frozen_boundary_not_registry_scope`：把 `write_boundary_with_runtime_ledger` 打桩成带
+  `execution_workspace_roots` + `effective_owner_scope_root` 的冻结边界，断言传给 ActionPolicyRequest 的
+  `workspace_roots` 含冻结的墙外根、`owner_scope_root` 等于冻结值，且不等于 registry 自己的根集合。
+- **变异验证**：把两处改回"忽略冻结值"，该用例两次都红（`AssertionError`：冻结根不在 workspace_roots 里）；
+  还原后 42 项全绿。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_capability_selection_authority.py -q`。
+
 ## 能力包收口缺项复核（2026-09-28，仅文档）
 
 十二步骤对照及 77 项冻结引用摘要复核已完成；原 27 次结果不改判，也不重跑。完整七组未覆盖／部分覆盖范围见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。原 R10/R11/R12/R14/R16 的未齐分支不能被最新四项摘要遮掉；普通 Skill、零包核心任务和目录规模夹具也不能外推全部组合通过。
