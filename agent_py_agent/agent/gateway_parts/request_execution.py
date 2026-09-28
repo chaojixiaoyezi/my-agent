@@ -38,6 +38,7 @@ from ..conversation.authority import (
     CONVERSATION_WORKSPACE_TASK_STATUS_ATTR,
 )
 from ..conversation.compact_carry import compact_overflow_carry
+from ..conversation.compact_progress import COMPACT_TRIGGER_PREFLIGHT
 from ..conversation.control_commands import conversation_task_attributes
 from ..conversation.host_notices import HostNotice, host_notices_from, pending_host_notices
 from ..gateway_compact_context import build_gateway_compact_load_request
@@ -345,8 +346,9 @@ def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *
                 _require_gateway_conversation_ready(request, conversation)
                 from ..gateway_compact_recovery import prepare_gateway_compact_recovery
 
+                # 首次准备是发送前按完整请求的自动阈值预检：触发来源记为 preflight。
                 observer.compact_recovery = (
-                    prepare_gateway_compact_recovery(context, conversation, force=False)
+                    prepare_gateway_compact_recovery(context, conversation, force=False, trigger_source=COMPACT_TRIGGER_PREFLIGHT)
                     if conversation.compact_source is not None else None
                 )
                 _configure_gateway_main_activity(context, conversation)
@@ -617,6 +619,8 @@ def _run_gateway_turn_with_conversation_compact(
             result_active_turn_user_inputs=getattr(result, "active_turn_user_inputs", None),
             released_input_ids=released_input_ids,
         )
+        # 溢出结果的 runtime_source 就是结构化触发来源（preflight / provider_error / tool_context_overflow）。
+        run_params.compact_trigger_source = str(getattr(result, "runtime_source", "") or "")
         current = _gateway_compact_overflowing_turn(
             context,
             prompt,
@@ -630,6 +634,7 @@ def _run_gateway_turn_with_conversation_compact(
 
 # LLM: 有宿主时transcript或活动工具都只刷新来源，下一真实render/select才计量和CAS；无宿主不能粗估压活动归档。
 # 每次overflow清前一恢复载体，不借持久结果重建展示选择；唯一产品调用方始终提供observer。
+# 触发来源从 run_params.compact_trigger_source（调用方按溢出结果的 runtime_source 写入）透传给恢复宿主。
 # 函数用途: 给同轮下一模型请求安装完整恢复，缺少可压来源时明确停止而不账外重试。
 def _gateway_compact_overflowing_turn(
     context: request_context.GatewayAskRunContext,
@@ -651,7 +656,9 @@ def _gateway_compact_overflowing_turn(
             and (refreshed.compact_source.messages or carried_archive_tool_calls or run_params.native_compact_carry is not None)):
         from ..gateway_compact_recovery import prepare_gateway_compact_recovery
 
-        observer.compact_recovery = prepare_gateway_compact_recovery(context, refreshed)
+        observer.compact_recovery = prepare_gateway_compact_recovery(
+            context, refreshed, trigger_source=str(getattr(run_params, "compact_trigger_source", "") or ""),
+        )
         return refreshed
     if refreshed.compact_generation > current.compact_generation:
         _publish_gateway_compact_boundary(context.on_chunk, refreshed.compact_generation)

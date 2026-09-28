@@ -10,7 +10,16 @@ from dataclasses import dataclass
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...backends.request_content import classify_nontext_content
 from ...backends.tool_protocol_adapter import tools_for_choice
+from ...conversation.compact_calibration import (
+    CALIBRATION_SCOPE_CURRENT_RUN,
+    CALIBRATION_SCOPE_DURABLE_THREAD,
+    CompactRequestCalibration,
+)
 from ...conversation.compact_media_policy import configured_media_policy, media_token_reserve
+from ...conversation.compact_progress import (
+    COMPACT_TRIGGER_PREFLIGHT,
+    COMPACT_TRIGGER_TOOL_CONTEXT_OVERFLOW,
+)
 from ...memory_archive import estimate_tokens
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
@@ -27,8 +36,11 @@ from .usage import provider_visible_input_token_usage
 _PROVIDER_CONTEXT_OBSERVATION_KEY = "_provider_context_observation"
 _PROVIDER_CONTEXT_HYDRATION_KEY = "_provider_context_observation_hydrated_surfaces"
 _PROVIDER_CONTEXT_OBSERVATION_SCHEMA = "provider_context_observation.v3"
-_DURABLE_CALIBRATION_SCOPE = "durable_thread"
-_CURRENT_RUN_CALIBRATION_SCOPE = "current_run"
+# 作用域词表的唯一权威在 conversation.compact_calibration；这里只是本模块的短别名。
+_DURABLE_CALIBRATION_SCOPE = CALIBRATION_SCOPE_DURABLE_THREAD
+_CURRENT_RUN_CALIBRATION_SCOPE = CALIBRATION_SCOPE_CURRENT_RUN
+# 压缩提交后派生观测的结构化标记：它不是供应商实测，而是“已接受候选按同一观测折算”的本轮基线。
+_COMPACT_CANDIDATE_OBSERVATION_BASIS = "compact_candidate"
 
 
 @dataclass(frozen=True)
@@ -173,6 +185,8 @@ def safe_inline_tool_result_tokens(
 # max_tokens 时，另检查本次请求可容纳性。OAuth Responses 不发送输出上限，不能猜测。
 # 请求含 unknown 非文本块、或媒体策略为 off 且含媒体时，压缩链不可用，压缩点不再是客观门槛，此时只守窗口与输出预留的硬上限；
 # 已知媒体在策略不为 off 时压缩链可用（归档引用/随图摘要），门槛照常取压缩点。与 compact_request_recovery 的 _automatic_noop/select 同口径，改动须同步。
+# 返回的 runtime_source 是结构化触发来源（compact_progress.COMPACT_TRIGGER_*）：工具窗口溢出与普通预检越线分开报，
+# 下游不得从 detail 文本区分。
 # 函数用途: 每次模型请求前检查输入压缩点和已知协议容量，超出时沿原 Compact 链恢复。
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     params = getattr(request, "params", None)
@@ -194,7 +208,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     if policy.allow_persistent_apply and (overflow := _tool_context_window_overflow(request)):
         return context_pressure_response(
             request,
-            source="preflight",
+            source=COMPACT_TRIGGER_TOOL_CONTEXT_OVERFLOW,
             prompt_tokens=prompt_tokens,
             detail=(
                 "tool_context_window_overflow=true "
@@ -222,7 +236,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     capacity = "" if compact_chain_available else "compact_capacity=non_text "
     return context_pressure_response(
         request,
-        source="preflight",
+        source=COMPACT_TRIGGER_PREFLIGHT,
         prompt_tokens=prompt_tokens,
         detail=(
             f"model_visible_tokens={prompt_tokens} "
@@ -331,6 +345,75 @@ def invalidate_provider_context_observation(params: object) -> bool:
     if not isinstance(state, dict):
         return False
     return state.pop(_PROVIDER_CONTEXT_OBSERVATION_KEY, None) is not None
+
+
+# LLM: 宿主边界（PreparedCompactRecovery.select）在冻结完整请求后调用一次：沿用 _provider_context_observation 的
+#   本轮/耐久水合规则（同 fingerprint；耐久观测须同压缩代次），把可用观测冻结成纯数据交给候选门、压缩前计量和
+#   自动判定。找不到、表面或代次不符、数字不可用都返回 None，调用方保持原始口径，不猜系数。水合是与预检相同的
+#   一次读盘副作用；投影本身仍是纯函数。
+# 函数用途: 为一次压缩恢复冻结“本地估算 / 供应商实际”的校准事实。
+def frozen_compact_request_calibration(
+    agent: object,
+    params: object,
+    *,
+    context_surface_fingerprint: str,
+) -> CompactRequestCalibration | None:
+    fingerprint = str(context_surface_fingerprint or "").strip()
+    observation = _provider_context_observation(agent, params, context_surface_fingerprint=fingerprint)
+    if not observation:
+        return None
+    try:
+        observed_raw = int(observation.get("raw_estimated_tokens") or 0)
+        provider_input = int(observation.get("provider_input_tokens") or 0)
+        recorded_generation = int(observation.get("compact_generation") or 0)
+    except (TypeError, ValueError):
+        return None
+    if observed_raw <= 0 or provider_input <= 0:
+        return None
+    scope = str(observation.get("_calibration_scope") or _CURRENT_RUN_CALIBRATION_SCOPE)
+    if scope != _DURABLE_CALIBRATION_SCOPE:
+        _store, _thread_id, thread = _provider_observation_thread(agent, params)
+        recorded_generation = max(0, int(getattr(thread, "compact_generation", 0) or 0))
+    return CompactRequestCalibration(
+        raw_estimated_tokens=observed_raw,
+        provider_input_tokens=provider_input,
+        context_surface_fingerprint=fingerprint,
+        compact_generation=recorded_generation,
+        calibration_scope=scope,
+    )
+
+
+# LLM: 压缩提交后由恢复宿主调用：已接受候选的原始计量与校准值成为下一次真实预检的本轮基线（同 fingerprint，仍是
+#   provider + 追加增量口径），让“候选通过 → 提交 → 下一次预检”说同一种数，而不是清掉观测后按原始值立刻再压一次。
+#   写入的是派生观测（basis/derived_from_generation 结构化标记），只存本轮内存状态、不持久化到线程；下一次真实
+#   供应商响应照常覆盖。没有校准的提交仍走 invalidate_provider_context_observation。
+# 函数用途: 压缩提交后把本轮校准基线改写成接受基准，避免刚接受的候选被另一口径立刻判为超限。
+def rebase_provider_context_observation(
+    params: object,
+    *,
+    calibration: CompactRequestCalibration | None,
+    raw_estimated_tokens: int,
+    calibrated_tokens: int,
+) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict) or calibration is None:
+        return False
+    raw = max(0, int(raw_estimated_tokens or 0))
+    calibrated = max(0, int(calibrated_tokens or 0))
+    fingerprint = str(calibration.context_surface_fingerprint or "").strip()
+    if raw <= 0 or calibrated <= 0 or not fingerprint:
+        return False
+    state[_PROVIDER_CONTEXT_OBSERVATION_KEY] = {
+        "schema": _PROVIDER_CONTEXT_OBSERVATION_SCHEMA,
+        "raw_estimated_tokens": raw,
+        "provider_input_tokens": calibrated,
+        "context_surface_fingerprint": fingerprint,
+        "observed_at": time.time(),
+        "basis": _COMPACT_CANDIDATE_OBSERVATION_BASIS,
+        "derived_from_generation": max(0, int(calibration.compact_generation or 0)),
+        "_calibration_scope": _CURRENT_RUN_CALIBRATION_SCOPE,
+    }
+    return True
 
 
 # LLM: Current-run observations use 会话运行时 provider baseline plus append-only local growth.
@@ -495,18 +578,7 @@ def _model_visible_context_components(
             "ready", provider_prompt=str(prompt or ""), system_instruction=system_instruction,
         )
         current, components = projected_model_context_components(projection)
-        return (
-            "text",
-            current,
-            components,
-            _stable_context_surface_fingerprint(
-                agent,
-                protocol="text",
-                system_instruction=system_instruction,
-                prompt_surface=str(prompt or ""),
-                tools=None,
-            ),
-        )
+        return "text", current, components, request_projection_surface_fingerprint(agent, projection)
 
     from ..tool_ir_guidance import unforwarded_runtime_guidance
     from ..tool_ir_history import project_native_prompt_history, project_native_provider_messages
@@ -537,17 +609,23 @@ def _model_visible_context_components(
     current, components = projected_model_context_components(
         projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve(),
     )
-    return (
-        "native",
-        current,
-        components,
-        _stable_context_surface_fingerprint(
-            agent,
-            protocol="native",
-            system_instruction=system_instruction,
-            prompt_surface=provider_prompt,
-            tools=tools,
+    return "native", current, components, request_projection_surface_fingerprint(agent, projection)
+
+
+# LLM: 预检与恢复宿主共用的稳定表面指纹入口：从同一 ToolLoopRequestProjection 取协议、系统提示、稳定提示附件与
+#   工具清单，与实际出站完全同源；冻结请求与预检算出同一指纹，观测才能在两边同时适用。只读，不写状态。
+# 函数用途: 给一份完整请求投影算稳定请求表面指纹，供恢复宿主查找适用的供应商观测。
+def request_projection_surface_fingerprint(agent: object, projection: ToolLoopRequestProjection) -> str:
+    native = projection.messages is not None
+    provider_prompt = projection.provider_prompt
+    return _stable_context_surface_fingerprint(
+        agent,
+        protocol="native" if native else "text",
+        system_instruction=str(projection.system_instruction or ""),
+        prompt_surface=(
+            _native_provider_prompt_adjunct(provider_prompt) if native else str(provider_prompt or "")
         ),
+        tools=projection.tools if native else None,
     )
 
 
@@ -840,6 +918,9 @@ __all__ = [
     "is_context_window_error",
     "model_visible_context_budget",
     "model_visible_context_snapshot",
+    "frozen_compact_request_calibration",
+    "rebase_provider_context_observation",
+    "request_projection_surface_fingerprint",
     "model_visible_context_tokens",
     "model_request_input_ceiling",
     "invalidate_provider_context_observation",

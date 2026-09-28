@@ -44,6 +44,9 @@ class RunParams:
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None
     # 同进程overflow的原生历史，只用于相同宿主请求恢复；不恢复执行权、快照或持久状态。
     native_compact_carry: object | None = None
+    # LLM: 本轮上下文压力的结构化触发来源（compact_progress.COMPACT_TRIGGER_*），由溢出结果的 runtime_source 写入，
+    #   只透传给恢复宿主的压缩进度事件；空串表示尚未溢出（首次准备按预检记）。
+    compact_trigger_source: str = ""
     conversation_turn_id: str = ""
     # 宿主在同一活动回合或子代理 attempt 内共享；不从 task_attributes、提示词或模型历史恢复批准。
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)

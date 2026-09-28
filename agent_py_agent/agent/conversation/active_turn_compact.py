@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ..common.cancellation import ToolCancelled
@@ -16,6 +16,7 @@ from .authority import (
     AGENT_THREAD_ID_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
+from .compact_calibration import CompactRequestCalibration, calibrated_compact_request_tokens
 from .compact_checkpoint import committed_live_tool_compact_source_refs
 from .compact_guard import (
     CompactCapacityFacts,
@@ -161,6 +162,10 @@ class ActiveTurnArchiveCompactRequest:
     tool_source: CarriedToolCompactSource | None = None
     # 宿主的“只计量、不提交”入口：按预计代次投影空摘要、无保留的完整请求，只用于失败诊断的固定开销；缺失即测不出。
     fixed_request_projector: Callable[[int], ConversationCompactProjection] | None = None
+    # LLM: 宿主边界冻结的校准事实：套在 request_projector/fixed_request_projector 交回的完整请求计量与 projected_tokens_before
+    #   上（与预检同一观测）；None 即原始口径。trigger_source 是结构化触发来源，只进进度事件。
+    calibration: CompactRequestCalibration | None = None
+    trigger_source: str = ""
 
 
 # LLM: This candidate freezes one exact checkpoint boundary before the summary model call. The
@@ -274,10 +279,23 @@ def compact_carried_active_turn_archive(
         )
     if source is None:
         return ActiveTurnArchiveCompactResult(thread=thread)
-    plan = _build_active_turn_compact_plan(
+    plan = _apply_request_calibration(_build_active_turn_compact_plan(
         binding, policy, visible, source, projected_tokens_before=request.projected_tokens_before,
-    )
+    ), request)
     return _execute_active_turn_compact(agent, plan, request)
+
+
+# LLM: 压缩前计量与候选同一口径：宿主传入的 projected_tokens_before 是原始投影，这里按冻结校准折算后写进计划与进度；
+#   触发来源只进进度事件。无校准时原样保留，不猜系数；计划是不可变对象，返回新计划。
+# 函数用途: 把宿主冻结的校准与触发来源套到已建好的活动回合压缩计划上。
+def _apply_request_calibration(
+    plan: _ActiveTurnArchiveCompactPlan, request: ActiveTurnArchiveCompactRequest,
+) -> _ActiveTurnArchiveCompactPlan:
+    before_tokens = calibrated_compact_request_tokens(plan.projected_tokens_before, request.calibration)
+    progress = {**plan.progress, "before_tokens": before_tokens}
+    if request.trigger_source:
+        progress["trigger_source"] = str(request.trigger_source)
+    return replace(plan, projected_tokens_before=before_tokens, progress=progress)
 
 
 # LLM: 来源边界在摘要调用前冻结，未知身份保留原顺序且不授覆盖权；宿主前计量坏值不能退回局部估算。
@@ -346,11 +364,14 @@ def _execute_active_turn_compact(
         replacement = _active_turn_replacement_summary(agent, plan, request)
         raise_if_compact_interrupted(request.interrupt_check)
         projection = _project_active_turn_request(agent, plan, request, replacement)
-        after_tokens = projection.projected_tokens if projection is not None else estimate_tokens(
-            {
+        # 接受门与提交记的是折算后的值；projection 本身保留原始纯投影，供宿主提交后改写本轮观测基线。
+        after_tokens = (
+            calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
+            if projection is not None
+            else estimate_tokens({
                 "compact_summary": replacement,
                 "retained_active_turn_tool_calls": plan.retained_records,
-            }
+            })
         )
         _emit_progress(
             callback,
@@ -424,7 +445,8 @@ def _execute_active_turn_compact(
     )
 
 
-# LLM: 宿主返回原完整候选，类型与计量未知必须失败；接受门复用 transcript 的阈值和已知输出预留。
+# LLM: 宿主返回原完整候选，类型与计量未知必须失败；接受门复用 transcript 的阈值和已知输出预留，比较的是按宿主
+#   冻结校准折算后的计量（无校准即原始投影），改判据要同步 compact._RejectedCandidates 的同一接受门。
 #   被拒时的保留 IR 取投影交回的实际发送 IR（没交回才按 sent_retained_ir 同一口径从计划保留区推出），固定开销走宿主只计量入口。
 # 函数用途: 在写任何检查点前校验完整请求，保留恰好获选的材料对象给同次发送。
 def _project_active_turn_request(
@@ -446,7 +468,8 @@ def _project_active_turn_request(
             or projection.projected_tokens < 0 or projection.material is None):
         raise ConversationCompactError("完整恢复请求投影不可用", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     ceiling = _compact_request_input_ceiling(agent, plan.policy)
-    if projection.projected_tokens >= ceiling:
+    candidate_tokens = calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
+    if candidate_tokens >= ceiling:
         from .compact_tool_summary import retained_ir_facts, sent_retained_ir
 
         sent = projection.retained_ir_history
@@ -454,7 +477,7 @@ def _project_active_turn_request(
         raise ConversationCompactError(
             "完整恢复请求仍超出输入阈值或已知输出预留", code="COMPACT_CANDIDATE_TOO_LARGE",
             capacity=CompactCapacityFacts(
-                candidate_tokens=projection.projected_tokens, input_ceiling_tokens=ceiling,
+                candidate_tokens=candidate_tokens, input_ceiling_tokens=ceiling,
                 summary_tokens=estimate_tokens(replacement), fixed_tokens=_active_turn_fixed_tokens(request, plan),
                 retained_items=len(plan.retained_records), retained_ir_items=ir_items,
                 retained_ir_tokens=ir_tokens, candidates_tried=1,
@@ -481,7 +504,7 @@ def _active_turn_fixed_tokens(
     if (not isinstance(projection, ConversationCompactProjection)
             or type(projection.projected_tokens) is not int or projection.projected_tokens < 0):
         return None
-    return projection.projected_tokens
+    return calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
 
 
 # LLM: 摘要读取全部选中工具的原逐条模型投影，不使用截短handoff；scope/base与provider面保持，过长沿原分段器。

@@ -31,7 +31,7 @@ class BackgroundRecoveryState:
 # LLM: 首次与恢复共用同一宿主身份和来源；force=False仅按原完整请求阈值裁决，force=True仍由overflow要求压缩。
 # 函数用途: 给后台一次模型尝试安装公共Compact宿主，不执行模型或修改持久状态。
 def prepare_background_compact_recovery(agent, history, context, *, request_id, progress_callback, interrupt_check,
-                                        force=True):
+                                        force=True, trigger_source=""):
     source = history.compact_source
 
     current = BackgroundRecoveryState(history, context, source.thread.compact_generation, history.compact_context)
@@ -46,6 +46,7 @@ def prepare_background_compact_recovery(agent, history, context, *, request_id, 
         agent, source, current, matches, partial(_project_background_candidate, agent, current),
         project_active_candidate=partial(_project_background_active_candidate, agent, current),
         progress_callback=progress_callback, interrupt_check=interrupt_check, force=force,
+        trigger_source=str(trigger_source or ""),
     )
 
 

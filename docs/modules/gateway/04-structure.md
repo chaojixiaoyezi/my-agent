@@ -15,7 +15,7 @@ Gateway Compact的原visible范围规则现编译成逐行selector，公共messa
 
 后台上下文的 `prepare_background_context` 保留原事实读取与进度对账，`render_background_context` 只消费冻结值并调用原预算器；`BackgroundHistoryProjection` 保存同次任务范围与摘要投影，纯种子投影不重读任务。完整后台Compact接线仍待作用域检查点边界闭合，不能把全局新摘要给detached或窄审计事件。
 
-`gateway_compact_recovery.py` 只构造原来源和Gateway历史投影回调；一次冻结/摘要/原CAS及历史参数替换共用 `agent_core/compact_request_recovery.py`。普通Gateway选模和child首请求也共用 `tool_request_capture.py`，纯renderer与目录仍各自唯一。
+`gateway_compact_recovery.py` 只构造原来源和Gateway历史投影回调，并把调用方给出的结构化触发来源（`trigger_source`，来自溢出结果的 `runtime_source` 或首次准备的 `preflight`）透传给公共恢复器；一次冻结/摘要/原CAS及历史参数替换共用 `agent_core/compact_request_recovery.py`，校准观测在其 `select` 冻结。普通Gateway选模和child首请求也共用 `tool_request_capture.py`，纯renderer与目录仍各自唯一。
 `request_execution.py` 的首次准备与 overflow 入口都只在 `conversation.compact_source` 存在时调用 `prepare_gateway_compact_recovery`；无会话来源的请求没有恢复宿主，也不参与自动 Compact。
 
 `bounded_http_server.py` 统一 HTTP 容量、传输空闲和排队期限；`io.gateway_request_counts` 只读目录类型计数，不派生准入。`owner_scoped_pool.py` 合并同身份首次构建并记录精确实例租用；`owner_retention.py` 复核原持久硬事实、在途线程及版本时刻，只回收进程内引用。`gateway_loops.py` 限频触发回收，巡检通过 `touch=False` 不把自身变成用户活动。任务、权限和副作用仍由原 request/attempt 合同管理。

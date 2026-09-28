@@ -1,5 +1,20 @@
 # 设计台账
 
+## Compact 候选接受门与预检同一校准口径（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`，本地验证通过，待集成）
+
+**根因（压缩异常②）**：真机单回合多次 `read_file` 后，预检按供应商观测校准过的可见上下文越过触发线（本地估算比供应商实际高约 43%：242,207 对 169,217），恢复压缩却按未校准的本地投影量候选，候选被 `COMPACT_CANDIDATE_TOO_LARGE` 拒掉；压缩开始时 `_gateway_compact_progress_callback` 又把未校准的“压缩前”写成线程 `model_context_usage` 快照。两条链说的不是同一种数。
+
+**规则**：
+- 唯一校准口径在 `conversation/compact_calibration.py`（纯函数，不读宿主、不写状态）：请求不小于观测请求时与预检完全一致（本轮作用域 `provider + 追加增量`，耐久作用域取比例折算与增量口径的较大者）；请求比观测请求小时按观测比例折算、下限 50%（预检的本轮口径对压小后的请求原样返回，候选门不能直接复用它，Codex 审阅第 1 点）。没有观测就是原始值，不猜系数。
+- 观测在宿主边界冻结一次：`PreparedCompactRecovery.select` 冻结完整请求后按同一表面指纹（`context_pressure.request_projection_surface_fingerprint`，与预检同源）取本轮/耐久观测（`frozen_compact_request_calibration`：同 fingerprint，耐久观测须同代次），冻结成 `CompactRequestCalibration` 交给自动判定、压缩前计量和两条接受门；纯投影不做水合（Codex 第 3 点）。表面不符、代次不符、缺观测都保持原始口径。
+- 两条接受门都用折算值与输入上限比较：transcript 的 `_measure_candidate`/`_RejectedCandidates`（候选、压缩前、失败诊断的固定开销都折算）和活动回合的 `_project_active_turn_request`/`_apply_request_calibration`；`ConversationCompactProjection.projected_tokens` 仍是原始纯投影。恰好等于上限仍拒绝，输出预留照旧生效。
+- **旧观测失效语义的显式改动**（Codex 第 2 点）：提交恢复候选后不再一律清掉本轮观测。有冻结校准时，`rebase_provider_context_observation` 把已接受候选（原始投影 → 折算值）改写成本轮基线（同 fingerprint，带 `basis=compact_candidate`、`derived_from_generation` 结构化标记，只存内存、不持久化），同轮下一次真实预检按 `折算值 + 追加增量` 算，与接受基准一致，不会刚接受就按原始口径再压一次；没有校准的提交仍 `invalidate_provider_context_observation`。线程上的耐久观测仍由提交 CAS 清掉，新进程在下一次真实响应前按原始口径。
+- 线程快照：压缩开始事件的 `before_tokens` 就是折算后的压缩前大小，失败路径留下的 `model_context_usage` 不再是原始估算；无观测时两者本来就相同。
+- `conversation_compaction_progress` 每个事件（含 started）带结构化 `trigger_source`：`preflight`（发送前按可见上下文或完整请求判定越线，含各宿主首次准备的自动阈值预检）、`provider_error`（供应商已报溢出）、`tool_context_overflow`（工具上下文窗口裁剪器登记溢出，`preflight_context_pressure_response` 的 `runtime_source` 随之从 `preflight` 改为独立值，`finalization_compact_auto` 词表同步）。三宿主都从溢出结果的 `runtime_source` 透传（Gateway 经 `RunParams.compact_trigger_source`）；白名单在 `compact_progress.COMPACT_TRIGGER_SOURCES`，手动或旧事件没有该字段。
+- 历史数据注意：2026-09-26 `_full_request_tokens` 修复之前写入的 v3 checkpoint，其 `projected_tokens_before` 不可信（解绑历史后只量到系统提示与工具，例如 35,915 对实际约 31.3 万），不能拿它证明“压缩前更小/更大”；真实大小以同期 Gateway 请求记录的供应商 usage 或 `provider_context_observation` 为准。
+
+**不在范围**：after ≥ before 不告警（集成方决定）；派生基线不持久化到线程；`/compact` 手动路径与阈值以外的旧事件不带 `trigger_source`。回归见 `test_compact_calibrated_candidate_gate.py`（含隔离 home 假 LLM 两回合复现），详见 [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md#压缩候选与预检同一校准口径2026-09-28分支-claude38-compact-calibration)。
+
 ## TUI插话：失败调用退回重提交、后台目标按任务终态收尾（2026-09-28，分支`claude/be-steer-loss`，待集成）
 
 **根因**：生产结构化记录显示，09-27 22:54 一条插话随模型调用提交，这次调用随即 `ProviderTransientError`。旧规则里，两层重试都因为“有未确认插话”不重发，attempt 失败；新 attempt 又不重发“提交不明”的插话。入口回执因此永远停在 `active_pending`，TUI 已轮询上千次。定时任务目标 `srun_*` 没有 Gateway 请求文件，回合生命周期永远判成未知，所以回合结束后插话也从不收尾。

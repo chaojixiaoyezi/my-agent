@@ -17,6 +17,8 @@ _CONTEXT_OVERFLOW_REASONS = {
     "maximum_context_length",
     "tool_output_context_overflow",
 }
+# 结构化上下文压力来源：与 compact_progress.COMPACT_TRIGGER_* 同一词表（工具窗口溢出单列），外加运行态自报。
+_CONTEXT_OVERFLOW_SOURCES = {"preflight", "provider_error", "tool_context_overflow", "runtime_status"}
 _MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS = 3
 # H2 绝对硬顶：单次 run 内 compact→自动续跑的最大深度。no-tool 软顶只数「连续无工具进展」的
 # 续跑（某轮调了工具就清零），无法拦住「持续高于阈值且每轮都调工具」的任务无限续跑——depth 一路
@@ -198,8 +200,8 @@ def _should_auto_continue_after_cycle(ctx: FinalizeContext, trigger_payload: dic
     runtime_reason = _runtime_code(getattr(ctx.final_response, "runtime_reason", ""))
     runtime_source = _runtime_code(getattr(ctx.final_response, "runtime_source", ""))
     return (
-        source in {"preflight", "provider_error", "runtime_status"}
-        or runtime_source in {"preflight", "provider_error", "runtime_status"}
+        source in _CONTEXT_OVERFLOW_SOURCES
+        or runtime_source in _CONTEXT_OVERFLOW_SOURCES
         or reason in _CONTEXT_OVERFLOW_REASONS
         or status in _CONTEXT_OVERFLOW_REASONS
         or runtime_reason in _CONTEXT_OVERFLOW_REASONS

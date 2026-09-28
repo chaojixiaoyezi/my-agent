@@ -19,6 +19,7 @@ from .background_context import (
 )
 from .background_history_seed import prepare_background_history_or_raise, refresh_background_history
 from .compact_carry import compact_overflow_carry
+from .compact_progress import COMPACT_TRIGGER_PREFLIGHT
 from .local_run_control import LocalRunControl
 from .models import ConversationThread
 from .store import ConversationStore
@@ -178,7 +179,8 @@ def run_background_turn_with_compact(
     runtime_rejected_actions: list[dict[str, str]] | None = None
     capability_presentation = None
     presentation_evaluated = False
-    recovering = False
+    # 首次尝试是发送前按完整请求的自动预检；之后由溢出结果的 runtime_source 说明每次恢复的触发来源。
+    recovering, compact_trigger_source = False, COMPACT_TRIGGER_PREFLIGHT
     committed_generations = 0
     slice_request_id = ""
 
@@ -231,7 +233,7 @@ def run_background_turn_with_compact(
         activity_sink.begin_model_attempt(_attempt + 1)
         result, run_params, recovery = _run_background_recovery_attempt(
             execution, user_prompt, run_params, history, prepared_context,
-            recovering=recovering, activity_sink=activity_sink,
+            recovering=recovering, activity_sink=activity_sink, trigger_source=compact_trigger_source,
         )
         slice_request_id = slice_request_id or run_params.request_id
         if recovering and (recovery is None or not recovery.committed):
@@ -262,7 +264,7 @@ def run_background_turn_with_compact(
         if history.compact_source is None or (not history.compact_source.messages and not carried_archive_tool_calls
                                              and native_compact_carry is None):
             raise RuntimeError("background compact has no recoverable source")
-        recovering = True
+        recovering, compact_trigger_source = True, str(getattr(result, "runtime_source", "") or "")
 
 
 # LLM: 原生信封只进入当前 store/thread 的同一 transcript；与公开 final 按宿主回合编号去重，不发消息或修改 wake 生命周期。
@@ -301,7 +303,8 @@ def _refresh_background_compact_source(execution, current, history):
 
 # LLM: 首次自动和溢出恢复均绑定同次已冻结来源；force只区分阈值与已报溢出，完整准备前不得另路粗估提交。
 # 函数用途: 执行后台一次原模型尝试，并将可能获胜的Compact线程及原运行身份交回宿主。
-def _run_background_recovery_attempt(execution, prompt, params, history, context, *, recovering, activity_sink):
+def _run_background_recovery_attempt(execution, prompt, params, history, context, *, recovering, activity_sink,
+                                     trigger_source=""):
     from ..agent_core.runtime.run_params import run_params_with_request_id
     from ..model_request_selection import model_request_selection_scope
     from .background_compact_recovery import prepare_background_compact_recovery
@@ -312,7 +315,7 @@ def _run_background_recovery_attempt(execution, prompt, params, history, context
         recovery = prepare_background_compact_recovery(
             execution.agent, history, context, request_id=params.request_id,
             progress_callback=activity_sink.write_conversation_compact_progress, interrupt_check=is_interrupted,
-            force=recovering,
+            force=recovering, trigger_source=trigger_source,
         )
     with model_request_selection_scope(recovery) if recovery is not None else nullcontext():
         result, resolved = _run_background_model_attempt(execution.agent, prompt, params)

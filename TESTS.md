@@ -1,5 +1,33 @@
 # 测试与发布验收
 
+## Compact 候选接受门按预检的校准口径计量（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`）
+
+- **来源**：集成者对压缩异常②的决定（候选投影与预检同一校准口径；失败路径不用原始值覆盖线程快照；started 事件带触发来源）
+  和 Codex 的三条生命周期接缝审阅（本轮追加口径不会压小候选；提交后清观测会让下一次预检换口径；校准水合有副作用、投影须保持纯函数）。
+- **新测试** `test_compact_calibrated_candidate_gate.py`，26 项：
+  - 纯校准函数：候选比观测小按比例折算（8_000 → 5_600）、下限 50%、比观测大沿追加口径；与预检 `_provider_calibrated_context_tokens`
+    对同类输入逐项相等，并明确记下本轮口径对压小请求原样返回的分歧；无观测/坏观测原样返回。
+  - 宿主边界冻结：同 fingerprint 的本轮观测、同代次的耐久观测才冻结；表面不符、代次不符、缺观测都是 None，冻结不改写状态。
+  - transcript 接受门（`_transcript_case`，上限 6_000）：估算偏高 43% 时原始 8_000 的候选被接受，checkpoint/进度记 5_600、压缩前 9_000，
+    原始纯投影保留；无校准仍按 8_000 拒绝；折算后恰好等于上限（8_571 → 6_000）拒绝；折算后低于触发线但超过输出预留线仍拒绝。
+  - 活动回合接受门（`carried_case`）：原始 9_500 折算 6_650 接受、压缩前 20_000 沿追加口径 17_000；比观测大的候选按追加口径
+    11_999 → 8_999 接受、12_000 → 9_000 拒绝；输出上限 7_000 时 4_284/4_285/4_286 → 2_999 接受、3_000 拒绝、3_001 拒绝。
+  - 触发来源：白名单只收 `preflight` / `provider_error` / `tool_context_overflow`，未知与缺失整项不带；两条链的 started 事件带它；
+    工具窗口溢出的 `runtime_source` 是结构化的 `tool_context_overflow`。
+  - Gateway 全链两回合假 LLM 复现（隔离 home，窗口 90K、输出预留 10K、上限 80K，供应商 usage 改成本地估算 × 0.7）：
+    第一回合放得下并留下耐久观测；第二回合大段新需求越线。`calibrated_fit`：压缩前原始 ≈ 104K/折算 ≈ 85K、候选原始 ≈ 92K/折算 ≈ 73K，
+    候选被接受，只多一次业务发送，正文带摘要不带旧资料，提交后真实预检写下的线程快照正好等于接受时的折算值（接缝 2）；
+    `calibrated_too_large`：折算后仍超上限，失败事件 `candidate_tokens` 是折算值，线程快照是折算后的压缩前大小而不是原始估算；
+    `no_observation`：全部原始口径，行为与修复前相同。修复前 `calibrated_fit` 同样报 `COMPACT_CANDIDATE_TOO_LARGE`（先红后绿）。
+  - 探针复核（提交前删除的临时用例，同一夹具）：第一回合原始 63,152 → 观测 44,206；两回合之间要按 Gateway 终态同一结构化调用
+    `claims.finish` 释放请求钉住的执行车道，否则第二个请求会一直等车道（这是测试直接调 `_run_gateway_ask` 的约束，不是产品问题）。
+- **改写的旧断言**：`test_runtime_context_pressure.py::test_preflight_context_pressure_uses_tool_context_window_signal` 的
+  `runtime_source` 从 `preflight` 改为 `tool_context_overflow`（结构化来源单列，detail 文本不变）。
+- **门禁**：`test_compact_calibrated_candidate_gate.py`、`test_compact_capacity_facts.py`、`test_compact_output_reserve.py`、
+  `test_active_turn_compact_projection.py`、`test_compact_capacity_host_chain.py`、`test_runtime_context_pressure.py`、`test_compact_progress.py`、
+  三宿主恢复与原生 IR 压缩用例、`test_memory_runtime_compact_auto_continuation.py`、`test_architecture_guardrails.py`；
+  ruff、doc sync、strict code-size（对 main 的发现身份不新增）、`git diff --check`、clean package。
+
 ## Compact 容量计量改走宿主“只计量、不提交”入口（2026-09-28，分支 `claude/be-compact-capacity`，基于 `f5036c15a`）
 
 - **来源**：集成者转来 Codex 的离线复现（`compact-2214052`）和对中间补丁的复核（`compact-author-patch-review-20260928T080805Z`）。

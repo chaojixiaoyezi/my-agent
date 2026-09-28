@@ -321,7 +321,7 @@ def test_rejected_candidate_records_fixed_overhead_and_retained_ir_separately() 
     request = SimpleNamespace(
         thread=SimpleNamespace(thread_id="thread-1", compact_generation=0),
         policy=SimpleNamespace(trigger_tokens=9_000), current_prompt="继续核对",
-        request_projector=projector, tool_source=source,
+        request_projector=projector, tool_source=source, calibration=None,
     )
     candidate = compact_module._CompactCandidate(
         summary="候选摘要", operation_evidence={}, compact_rows=(), retained_tail=(), projected_tokens_after=7_500,

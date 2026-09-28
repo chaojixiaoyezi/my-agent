@@ -278,7 +278,8 @@ def test_preflight_context_pressure_uses_tool_context_window_signal() -> None:
 
     assert response is not None
     assert response.runtime_status == "context_overflow"
-    assert response.runtime_source == "preflight"
+    # 工具窗口溢出是独立的结构化触发来源，不再和普通预检越线共用 "preflight"。
+    assert response.runtime_source == "tool_context_overflow"
     assert response.text.startswith("[RUN_CONTEXT_PRESSURE]")
     assert project_user_reply(response.text).internal_signal is True
     assert project_user_reply(response.text).content == ""

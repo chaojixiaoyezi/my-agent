@@ -17,6 +17,7 @@ from ..backends.request_content import compact_source_supported
 from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
+from .compact_calibration import CompactRequestCalibration, calibrated_compact_request_tokens
 from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
 from .compact_guard import (
     CompactCapacityFacts,
@@ -189,6 +190,11 @@ class ConversationCompactOptions:
     # LLM: force 表示"整段已完成前缀一次压完"（恢复宿主与手动 /compact 都这样用）；pressure_forced 才表示窗口上限/供应商施压的
     #   恢复——媒体策略只按它决定是否禁用随图摘要，阈值自动压缩与手动 /compact 都可走 B。
     pressure_forced: bool = False
+    # LLM: 宿主边界冻结的校准事实（同 fingerprint、同代次的供应商观测）：只套在 request_projector 交回的完整请求计量上
+    #   （压缩前与每个候选），本地估算路径不用它；None 表示没有可用观测，按原始投影值判定，不猜系数。
+    calibration: CompactRequestCalibration | None = None
+    # LLM: 结构化触发来源（compact_progress.COMPACT_TRIGGER_*），只进进度事件，不参与任何判定；空串表示手动或未知。
+    trigger_source: str = ""
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
@@ -219,6 +225,9 @@ class _CompactRunRequest:
     compact_context: AppliedCompactContext | None = field(default=None, repr=False)
     # LLM: 只有窗口上限/供应商施压的恢复为真；options.force（整段压完）不等于施压，媒体策略据此决定是否关闭随图摘要。
     pressure_forced: bool = field(default=False, kw_only=True)
+    # LLM: 与 ConversationCompactOptions 同义：冻结校准只套在投影器计量上；触发来源只进进度事件。
+    calibration: CompactRequestCalibration | None = field(default=None, kw_only=True, repr=False)
+    trigger_source: str = field(default="", kw_only=True)
 
 
 # LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
@@ -229,6 +238,7 @@ class _CompactCandidate:
     operation_evidence: dict[str, object]
     compact_rows: Sequence[MessageLogEntry]
     retained_tail: Sequence[MessageLogEntry]
+    # 接受门用的计量：有投影器且有冻结校准时是折算后的值，request_projection.projected_tokens 仍是原始纯投影。
     projected_tokens_after: int
     request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
     tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
@@ -410,13 +420,18 @@ def _prepare_compact_request(
         thread.thread_id, thread.compact_generation, base_summary, source.messages,
         base_evidence, source.recent_operation_evidence, policy.trigger_tokens, False,
     ))
-    projected = initial_projection.projected_tokens if initial_projection is not None else _projected_context_tokens(
-        agent,
-        base_summary,
-        pending,
-        options.current_prompt,
-        operation_evidence=base_evidence,
-        recent_operation_evidence=_recent_operation_evidence(pending),
+    # 压缩前计量与候选同一口径：投影器给的原始值按冻结校准折算；本地估算路径没有对应观测，原样使用。
+    projected = (
+        calibrated_compact_request_tokens(initial_projection.projected_tokens, options.calibration)
+        if initial_projection is not None
+        else _projected_context_tokens(
+            agent,
+            base_summary,
+            pending,
+            options.current_prompt,
+            operation_evidence=base_evidence,
+            recent_operation_evidence=_recent_operation_evidence(pending),
+        )
     )
     if projected < _compact_request_input_ceiling(agent, policy) and not options.force:
         return ConversationCompactResult(
@@ -489,6 +504,8 @@ def _prepare_compact_request(
         provider_surface=options.provider_surface,
         compact_context=compact_context,
         tool_source=options.tool_source,
+        calibration=options.calibration,
+        trigger_source=str(options.trigger_source or "").strip(),
     )
     return request
 
@@ -843,7 +860,7 @@ def _fixed_request_tokens(request: _CompactRunRequest) -> int | None:
     except Exception:
         return None
     if projection is not None:
-        return projection.projected_tokens
+        return calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
     return _projected_context_tokens(request.agent, "", (), request.current_prompt)
 
 
@@ -857,8 +874,9 @@ class _RejectedCandidates:
     smallest: CompactCapacityFacts | None = None
     count: int = 0
 
-    # LLM: 接受门与候选循环原判据一致：完整下一请求 ≥ 输入上限即拒绝。只读候选的计量与摘要文本；摘要 token 用与
-    #   会话估算同一 estimate_tokens 口径，是估算值。返回值决定候选是否被丢弃，改判据要同步 active_turn 的同一接受门。
+    # LLM: 接受门与候选循环原判据一致：完整下一请求 ≥ 输入上限即拒绝；候选计量已在 _measure_candidate 按宿主冻结的
+    #   校准折算（无校准即原始投影）。只读候选的计量与摘要文本；摘要 token 用与会话估算同一 estimate_tokens 口径，
+    #   是估算值。返回值决定候选是否被丢弃，改判据要同步 active_turn 的同一接受门。
     # 函数用途: 判断候选是否超过输入上限；超过就记下来（只保留完整下一请求最小的那个的计量）并返回 True。
     def reject_if_over(self, candidate: _CompactCandidate, ceiling: int) -> bool:
         if candidate.projected_tokens_after < ceiling:
@@ -1050,7 +1068,8 @@ def _candidate_limits(request: _CompactRunRequest) -> _CandidateLimits:
     return _CandidateLimits(request.policy.recovery_target_tokens, _compact_request_input_ceiling(request.agent, request.policy))
 
 
-# LLM: 与提交前的容量门同一口径：有宿主投影器时用完整下一请求计量，否则用本地会话估算；只读，不写状态。
+# LLM: 与提交前的容量门同一口径：有宿主投影器时用完整下一请求计量并按冻结校准折算（与预检同一观测），否则用本地
+#   会话估算（不套校准）；只读，不写状态。projection 里保留原始纯投影，供提交后改写本轮观测基线。
 # 函数用途: 计量“某个摘要文本 + 保留尾部”组成的下一请求有多大。
 def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summary: str) -> _MeasuredSummary:
     raise_if_compact_interrupted(request.interrupt_check)
@@ -1061,9 +1080,13 @@ def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summar
         retained_tool_records=request.tool_source.retained_records if request.tool_source is not None else None,
         retained_ir_history=request.tool_source.retained_ir_history if request.tool_source is not None else None,
     ))
-    tokens = projection.projected_tokens if projection is not None else _projected_context_tokens(
-        request.agent, summary, retained_tail, request.current_prompt, operation_evidence=evidence,
-        recent_operation_evidence=_recent_operation_evidence(retained_tail),
+    tokens = (
+        calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
+        if projection is not None
+        else _projected_context_tokens(
+            request.agent, summary, retained_tail, request.current_prompt, operation_evidence=evidence,
+            recent_operation_evidence=_recent_operation_evidence(retained_tail),
+        )
     )
     return _MeasuredSummary(summary, projection, tokens)
 
@@ -1183,7 +1206,8 @@ def _commit_compact_candidate(
     )
 
 
-# LLM: 进度回调仅作展示，普通错误不改提交；显式取消透传，失败只展示结构化错误码及冻结窗口。
+# LLM: 进度回调仅作展示，普通错误不改提交；显式取消透传，失败只展示结构化错误码及冻结窗口。宿主给出的
+#   trigger_source 随每个事件带出（started 事件即可看到触发来源），空串不带；字段值由 compact_progress 白名单核验。
 # 函数用途: 将真实Compact阶段发送给TUI，断连可忽略，但不能吞掉用户停止信号。
 def _emit_compact_progress(
     request: _CompactRunRequest,
@@ -1213,6 +1237,8 @@ def _emit_compact_progress(
         "commit_authority": COMPACT_AUTHORITY_CONVERSATION,
         "error_code": "",
     }
+    if request.trigger_source:
+        payload["trigger_source"] = request.trigger_source
     if failure is not None:
         payload.update(compact_failure_progress_fields(failure))
     try:

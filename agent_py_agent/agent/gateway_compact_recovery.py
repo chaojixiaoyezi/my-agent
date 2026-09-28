@@ -19,8 +19,9 @@ from .gateway_parts import request_binding, request_context, request_prompt
 
 
 # LLM: 初次自动准备和原overflow入口共用；作用域绑定准确agent/request/thread，摘要和child不能消费Gateway来源。
+#   trigger_source 是调用方给出的结构化触发来源（compact_progress.COMPACT_TRIGGER_*），只透传到压缩进度事件。
 # 函数用途: 为一次Gateway恢复组装原历史投影和成功边界回调，公共恢复器负责实际提交。
-def prepare_gateway_compact_recovery(context, conversation, *, force=True):
+def prepare_gateway_compact_recovery(context, conversation, *, force=True, trigger_source=""):
     from .gateway_parts.request_execution import _publish_gateway_compact_boundary
 
     # LLM: 匹配结构化身份，不从提示正文认领来源，task_local保持独立。
@@ -38,6 +39,7 @@ def prepare_gateway_compact_recovery(context, conversation, *, force=True):
         progress_callback=request_context._gateway_compact_progress_callback(
             context.on_chunk, store=context.agent.conversation_store, thread=conversation.compact_source.thread,
         ), on_commit=partial(_publish_gateway_compact_boundary, context.on_chunk), force=force,
+        trigger_source=str(trigger_source or ""),
     )
 
 

@@ -159,7 +159,7 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
   - 请求大小基本不变（指令从 `prompt` 移进同一条消息），分段预算、纠正、机械摘录、覆盖核对和取消边界都不变；文案只是软约束，不参与机器判定。
 - **真机复测**（同一场景，worktree 代码）：模型摘要部分 602 字，5 条规则全部在内；两段输出 1,052 token；不再写缓存；压缩后主请求 28,812 token，回答逐条列出 5 条规则。
 - **两个遗留问题的原因**（同日查明）：
-  - `projected_tokens_before` 偏小：强制恢复在决定摘要后先解绑旧请求历史（12.4-2b，`911d0d14d`），再用解绑后的冻结输入量“压缩前”，只量到系统提示和工具。已改为解绑前量一次，见 [决策模型集成](DECISION_MODEL_INTEGRATION.md) 2b 一节。宿主估算器本身偏保守：同一份资料估 63,562 token，DeepSeek 实测约 57,650。
+  - `projected_tokens_before` 偏小：强制恢复在决定摘要后先解绑旧请求历史（12.4-2b，`911d0d14d`），再用解绑后的冻结输入量“压缩前”，只量到系统提示和工具。已改为解绑前量一次，见 [决策模型集成](DECISION_MODEL_INTEGRATION.md) 2b 一节；修复前写入的 v3 checkpoint 该字段不可信（见下文“压缩候选与预检同一校准口径”）。宿主估算器本身偏保守：同一份资料估 63,562 token，DeepSeek 实测约 57,650。
   - 最早的用户原话进不了地标：地标段上限是 min(6000, max(800, 窗口/12)) 字，窗口不小于 72K token 时一律 6000 字。扣掉标题和省略说明后剩 5,706 字；每条长用户消息截到 1,200 字，连前缀共 1,209 字，按“最新优先”选，4 条占 4,836 字后剩 870 字，第 5 条（最早的一条）放不下。这是有意的固定成本设计（与会话运行时保留最近用户消息一致），语义摘要才是主载体；修好分段顺序后，本场景 5 条规则都已由语义摘要保住，因此暂不改地标策略。
 
 ## 压缩后查回原话与原话备份（2026-09-26，集成方，分支 `claude/curator-budget`）
@@ -194,6 +194,23 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
 最初（`527bcdd99`）只在收缩能改变判定时才缩：会被拒而缩小后能回到上限以下，或缩到最小能达到目标。CI 暴露了这条规则的缺口：1.6 万窗口里候选约 1.43 万、离输入上限只有约 100 token，达不到目标就保留整段备份，压缩刚提交下一轮又要压缩；是否越过上限还取决于上下文里临时路径的长短，测试随路径长度确定性失败。改为超目标就缩之后，同一场景候选降到约 1.24 万，1.95 万窗口的后台用例从 1.45 万降到 1.22 万。大窗口候选通常远低于目标，不受影响。
 
 **配置**：`compact_landmark_max_tokens`（默认 20000，0 表示只留编号与回查说明）、`compact_recall_hint_enabled`（默认 true）。
+
+## 压缩候选与预检同一校准口径（2026-09-28，分支 `claude/38-compact-calibration`）
+
+**问题**（压缩异常②，真机 2026-09-28）：单回合多次 `read_file` 后，预检用经供应商观测校准的可见上下文判定越线（本地估算 242,207，供应商实际 169,217，估算偏高约 43%），恢复压缩却按未校准的本地投影量候选，候选被 `COMPACT_CANDIDATE_TOO_LARGE` 拒掉；压缩开始时把未校准的“压缩前”写进线程 `model_context_usage` 快照，事后看到的是一个从未发给供应商的数字。
+
+**口径**（`conversation/compact_calibration.py`，纯函数）：给定观测“本地估算 `observed`、供应商实际 `provider`”，
+- 请求 `raw ≥ observed`：本轮作用域 `provider + (raw − observed)`；耐久作用域 `max(比例折算, provider + (raw − observed))`——与预检 `_provider_calibrated_context_tokens` 完全相同。
+- 请求 `raw < observed`（压缩候选的常态）：`ceil(raw × max(provider, ceil(observed / 2)) / observed)`，下限 50%。预检的本轮口径对这种请求原样返回原始值，候选门不能直接复用它。
+- 没有观测、数字不可用：原始值。不猜系数。
+
+**冻结点**：`PreparedCompactRecovery.select` 冻结完整请求后，用 `request_projection_surface_fingerprint`（与 `_model_visible_context_components` 同源）算稳定表面指纹，经 `frozen_compact_request_calibration` 取本轮或耐久观测（同 fingerprint；耐久观测还须同压缩代次）冻结成 `CompactRequestCalibration`。自动判定 `_automatic_noop`、压缩前（`_full_request_tokens` 的原始值在 `prepare_conversation_context` / `_apply_request_calibration` 里折算）、每个候选（`_measure_candidate`、`_project_active_turn_request`）和失败诊断的固定开销都用同一份冻结值；投影本身不读宿主状态。
+
+**提交后的生命周期**：有冻结校准时，`rebase_provider_context_observation` 把已接受候选的原始投影与折算值写成本轮基线（同 fingerprint，`basis=compact_candidate`、`derived_from_generation` 标记，只在 `live_archive_state`，不持久化）。同轮下一次真实预检于是按“折算值 + 追加增量”算，与接受基准一致；隔离真机复现里提交后立刻发送的恢复请求快照正好等于接受时的折算值。没有校准的提交仍清掉本轮观测。线程上的耐久观测由提交 CAS 清掉，新进程在下一次真实响应前回到原始口径。
+
+**触发来源**：`conversation_compaction_progress` 每个事件带 `trigger_source ∈ {preflight, provider_error, tool_context_overflow}`（`compact_progress.COMPACT_TRIGGER_SOURCES`），由三宿主从溢出结果的 `runtime_source` 透传，首次准备的自动阈值预检记 `preflight`；工具窗口溢出改为独立的结构化 `runtime_source`，不再靠 detail 文本区分。
+
+**历史数据**：2026-09-26 之前（`_full_request_tokens` 修复前）写入的 v3 checkpoint，其 `projected_tokens_before` 是解绑历史后只含系统提示与工具的值（例如 35,915 对实际约 31.3 万），不可信；判断当时的真实大小要看同期 Gateway 请求记录里的供应商 usage 或线程 `provider_context_observation`。
 
 ## Cache economics
 

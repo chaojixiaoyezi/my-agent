@@ -484,6 +484,7 @@ agent_py_agent/
 |   |   |-- store_progress.py           # 进度策略、到期投影、失败退避落账与旧策略归档
 |   |   |-- process_events.py           # 受管后台命令终态到原会话 wake 的去重交接
 |   |   |-- compact_progress.py       # transcript/live-tool/turn-local Compact 来源与提交权的唯一公开进度协议
+|   |   |-- compact_calibration.py    # 压缩候选/压缩前计量的唯一校准口径：按宿主冻结的供应商观测折算，无观测原样返回
 |   |   |-- compact_carry.py           # 同宿主溢出原生IR携带、精确插话释放与归档归并
 |   |   |-- context_usage.py          # 主/子 preflight 数字的 canonical thread 保存、代次检查与无正文展示
 |   |   |-- model_metrics.py          # 主/子模型调用账与历史用量的只读显示投影，不回灌模型上下文
@@ -833,6 +834,7 @@ agent_py_agent/
 |   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
 |   |-- test_compact_capacity_facts.py # 候选过大失败带出最小候选/上限/摘要占比/保留条数/候选数，白名单与TUI失败行
 |   |-- test_compact_capacity_host_chain.py # 真实恢复宿主两入口：固定开销经只计量入口只在失败时量一次，保留IR按实际发送材料
+|   |-- test_compact_calibrated_candidate_gate.py # 候选接受门按预检校准口径：纯函数、宿主冻结、两条门、触发来源、两回合假LLM复现
 |   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
 |   |-- test_conversation_history_seed.py # 具体种子与只读来源两边界逐项等价、冻结时刻与追加、互斥及改写/截短/替换/删除失败
 |   |-- test_host_history_seed_lifetime.py # 三宿主4.2M字符种子准备只驻留地址、解析后完整hash不变
@@ -1635,6 +1637,7 @@ docs/
 - `agent_py_agent/agent/gateway_compact_context.py`：原 Gateway 恢复请求与 core 展示之间的应用层编排，同 turn 重载不复活已失效的展示建议。
 - `agent_py_agent/agent/gateway_compact_recovery.py`：Gateway 已绑定请求溢出后，冻结原恢复准备，只替换候选历史与证据；原 CAS 后用同一请求继续生成。
 - `agent_py_agent/agent/conversation/compact_projection.py`：只读来源与完整候选投影的临时值合同；获选材料只随原 CAS 成功返回，不形成第二持久状态。
+- `agent_py_agent/agent/conversation/compact_calibration.py`：压缩候选与压缩前计量的唯一校准口径（纯函数）。宿主在 `PreparedCompactRecovery.select` 按同一表面指纹冻结供应商观测后传入；候选比观测小按比例折算（下限 50%），不小于观测沿预检追加口径，无观测原样返回。改公式要同步预检 `_provider_calibrated_context_tokens` 的注释与 `test_compact_calibrated_candidate_gate.py`。
 - `agent_py_agent/agent/runtime_context.py`：当前 runner 的线程本地属性权威供 Tooling、Conversation 与 core 共用，作用域退出清理；不保存持久任务身份。
 - `agent_py_agent/agent/settings/decision_experiment_schema.py`、`decision_experiment.py`、`agent_py_agent/agent/conversation/decision_experiment.py`、`agent_py_agent/agent/contracts/model_call_budget.py`：宿主专用有限许可（v2 信封记录用户接受的经验上界口径）、原账带标签上界预留、单次发送许可消费与保守结算。
 - `agent_py_agent/agent/gateway_parts/request_experiment.py`：`/experiment` 的唯一产品授权入口；只读入口冻结的 system_task，在主轮绑定 run/attempt 后、首个模型调用前于原回合锁内写 granting→granted/rejected 回执，失败只提示用户。
@@ -1699,6 +1702,7 @@ docs/
 
 - `agent_py_agent/tests/test_compact_capacity_facts.py`：两条压缩链候选过大时的容量计量，从错误对象、failed 进度、公开白名单一直到 TUI 失败行；包括选中最小候选、无候选或已接受时不带计量。
 - `agent_py_agent/tests/test_compact_capacity_host_chain.py`：走真实 `PreparedCompactRecovery` 两个入口（三宿主 transcript、联合来源、活动回合），只替身摘要与末端 HTTP；锁固定开销经宿主只计量入口只在失败时量一次、测不出缺失，保留 IR 按候选实际发送材料计，以及与候选替换规则的等价。
+- `agent_py_agent/tests/test_compact_calibrated_candidate_gate.py`：候选接受门与预检同一校准口径的回归：纯校准函数与预检逐项相等、宿主边界按 fingerprint/代次冻结观测、transcript 与活动回合两条门在估算偏高 43% 时接受候选且恰好等于上限仍拒绝、进度事件的结构化触发来源，以及隔离 home 两回合假 LLM 复现（接受后下一次真实预检与接受基准一致、失败路径线程快照不被原始值误导、无观测行为不变）。
 - `agent_py_agent/tests/test_compact_output_reserve.py`：真实冻结请求与本地输出预留门组合，当前要求和工具schema保留，过界零业务发送/覆盖提交，Responses普通及OAuth未知上限分开验证。
 
 - `agent_py_agent/tests/test_model_selection_isolation.py`：复用原Gateway、线程CAS、模型目录与校准入口验证并发隔离和窗口变化；仅HTTP与决策回复为替身。

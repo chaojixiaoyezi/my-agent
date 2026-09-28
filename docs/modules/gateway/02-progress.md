@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+压缩触发来源与校准口径（分支 `claude/38-compact-calibration`，2026-09-28）：`request_execution` 首次准备按 `preflight` 安装恢复宿主；
+溢出循环把结果的 `runtime_source`（`preflight` / `provider_error` / `tool_context_overflow`）写进 `RunParams.compact_trigger_source`，
+`_gateway_compact_overflowing_turn` 再经 `prepare_gateway_compact_recovery(trigger_source=…)` 交给公共恢复器，压缩进度事件（含 started）
+带 `trigger_source`。恢复器在 `select` 冻结校准观测后，候选与压缩前都按同一口径折算，压缩开始时写进线程快照的 `before_tokens`
+不再是未校准值。设计见 `DESIGN_LEDGER.md` 同日一节，回归见 `test_compact_calibrated_candidate_gate.py`（含两回合假 LLM 复现）。
+
 TUI 插话丢失修复（分支 `claude/be-steer-loss`，2026-09-28）：生产结构化事实显示，插话随模型调用提交后，这次调用以
 `ProviderTransientError` 失败。当时两层重试都因为“有未确认插话”不重发，attempt 失败；新 attempt 又不重发“提交不明”的插话，
 入口回执永远停在 `active_pending`，TUI 每 2–3 秒轮询。修复：失败调用按调用编号把插话退回预留，同一 attempt 的重试重新提交；

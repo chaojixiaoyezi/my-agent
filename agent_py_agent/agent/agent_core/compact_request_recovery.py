@@ -8,6 +8,10 @@ from dataclasses import dataclass, field, replace
 
 from ..common.cancellation import ToolCancelled
 from ..conversation.compact import ConversationCompactOptions, prepare_conversation_context
+from ..conversation.compact_calibration import (
+    CompactRequestCalibration,
+    calibrated_compact_request_tokens,
+)
 from ..conversation.compact_guard import (
     ConversationCompactError,
     compact_exception_code,
@@ -24,8 +28,11 @@ from ..conversation.compact_tool_summary import sent_retained_ir
 from ..prompting_parts.builder import PromptBuilder, PromptRenderInput, render_prepared_prompt
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from .model.context_pressure import (
+    frozen_compact_request_calibration,
     invalidate_provider_context_observation,
     projected_model_context_components,
+    rebase_provider_context_observation,
+    request_projection_surface_fingerprint,
 )
 from .runtime.conversation_state import conversation_runtime_state_section
 from .runtime.loop_support import _native_provider_history_messages
@@ -63,6 +70,10 @@ class PreparedCompactRecovery:
     interrupt_check: Callable[[], bool] | None = field(default=None, repr=False)
     on_commit: Callable[[int], object] | None = field(default=None, repr=False)
     force: bool = True
+    # LLM: 宿主给出的结构化触发来源（compact_progress.COMPACT_TRIGGER_*）：只透传给两条压缩链的进度事件。
+    trigger_source: str = ""
+    # LLM: select 在冻结完整请求后按 fingerprint/代次冻结的校准事实；自动判定、压缩前、候选门与提交后基线改写都只用它。
+    calibration: CompactRequestCalibration | None = field(default=None, repr=False)
     resolved_input: ToolLoopRequestInput | None = field(default=None, repr=False)
     consumed: bool = False
     prompt_input: PromptRenderInput | None = field(default=None, repr=False)
@@ -113,7 +124,8 @@ class PreparedCompactRecovery:
     # 强制恢复遇 unknown 非文本内容（或媒体策略 off 且含媒体）报 COMPACT_REQUEST_NON_TEXT（preflight 此时只在窗口上限触发）；自动遇同类内容走 noop。
     # 已知媒体在策略不为 off 时进入压缩链，由 compact 按策略投影为归档引用或随图摘要。
     # 自动 noop 先原样返回原请求；决定摘要后先量一次完整旧请求（“压缩前”大小），再解绑原参数与冻结输入的完整原生历史，
-    # 失败/取消/超限收尾都不得再读它。
+    # 失败/取消/超限收尾都不得再读它。冻结完整请求后先按其表面指纹冻结一次校准观测（同 fingerprint、同代次），自动判定、
+    # 压缩前与候选都按它折算；提交后用已接受候选改写本轮观测基线，让同轮下一次真实预检与接受基准一致。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
         if self.consumed or not (agent is self.agent and self.matches_request(params)):
@@ -134,6 +146,7 @@ class PreparedCompactRecovery:
             # 结构化原因单列：无法摘要的非文本内容使压缩不可用，宿主和 TUI 据此说明为何不能继续，不与内部投影失配混码。
             raise ConversationCompactError("会话包含无法摘要的非文本内容，当前无法压缩上下文；原始记录已保留", code="COMPACT_REQUEST_NON_TEXT")
         tool_source = _recovery_tool_source(agent, source, params, frozen)
+        self.calibration = _frozen_recovery_calibration(agent, params, frozen)
         if self.force and not source.messages and tool_source is None:
             if _recovery_tool_records_present(agent, source, params, frozen):
                 # 有工具记录但身份无法证明（旧索引缺 attempt/turn、歧义或孤立）：原记录保持可见，报结构化原因而不是"没有来源"。
@@ -195,6 +208,7 @@ class PreparedCompactRecovery:
                         tool_source=tool_source,
                         progress_callback=self.progress_callback,
                         interrupt_check=interrupted,
+                        calibration=self.calibration, trigger_source=self.trigger_source,
                     ),
                 )
             else:
@@ -211,7 +225,7 @@ class PreparedCompactRecovery:
                 or agent.backend is not backend or agent.config is not config):
             raise ConversationCompactError("压缩后的请求材料不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
         material = _committed_recovery_material(agent, source, result, material)
-        invalidate_provider_context_observation(material.params)
+        _rebase_recovery_observation(material, self.calibration, result.request_projection.projected_tokens)
         self.resolved_input = material.request_input
         self.host_state = material.host_state
         self.committed = True
@@ -233,21 +247,10 @@ class PreparedCompactRecovery:
             return None
         return self.committed_request
 
-    # LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
-    #   已知图块按常量 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
-    # 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型。
+    # LLM: 自动阈值判定的类入口只做转发（测试按此名旁听/替换）；判定本身在模块函数 _automatic_recovery_noop，读同一冻结校准。
+    # 函数用途: 首次准备时判断完整请求是否已经放得下，放得下就原样发送原请求。
     def _automatic_noop(self, frozen: ToolLoopRequestInput, tool_source) -> bool:
-        from ..conversation.compact import _compact_request_input_ceiling
-
-        projection = project_tool_loop_request(frozen)
-        if projection.status != "ready":
-            raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-        if not compact_request_source_supported(frozen, media_policy=configured_media_policy(self.agent)):
-            return True
-        tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve())
-        if tokens < _compact_request_input_ceiling(self.agent, self.source.policy):
-            return True
-        return not self.source.messages and tool_source is None
+        return _automatic_recovery_noop(self, frozen, tool_source)
 
     # LLM: 同次归档和原生IR来源复用原active-turn摘要与CAS；projector只替换已证明完整的冻结来源。
     #   before_tokens 是 select 在解绑旧历史前量得的完整旧请求大小，这里不能再用已解绑的冻结输入重量。
@@ -286,8 +289,51 @@ class PreparedCompactRecovery:
                 compact_context=self.source.compact_context, request_projector=project,
                 projected_tokens_before=before_tokens, provider_surface=_summary_surface(frozen), tool_source=tool_source,
                 fixed_request_projector=_active_fixed_projector(self, params, frozen),
+                calibration=self.calibration, trigger_source=self.trigger_source,
             ),
         )
+
+
+# LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
+#   已知图块按常量 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
+#   纯投影的原始计量再按 select 冻结的校准（recovery.calibration）折算后才与上限比较（与预检同一观测）；投影本身不读宿主状态。
+# 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型；recovery 是恢复宿主本身。
+def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source) -> bool:
+    from ..conversation.compact import _compact_request_input_ceiling
+
+    projection = project_tool_loop_request(frozen)
+    if projection.status != "ready":
+        raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    if not compact_request_source_supported(frozen, media_policy=configured_media_policy(recovery.agent)):
+        return True
+    tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve())
+    if calibrated_compact_request_tokens(tokens, recovery.calibration) < _compact_request_input_ceiling(recovery.agent, recovery.source.policy):
+        return True
+    return not recovery.source.messages and tool_source is None
+
+
+# LLM: 宿主边界唯一的观测冻结点：按冻结请求的完整投影算稳定表面指纹（与预检 request_projection_surface_fingerprint
+#   同源），再按 fingerprint/代次取可用观测。只在 select 里调用一次；投影未知时不冻结（None），后续按原始口径。
+# 函数用途: 在冻结完整请求后取得本次恢复适用的校准事实。
+def _frozen_recovery_calibration(agent, params, frozen) -> CompactRequestCalibration | None:
+    projection = project_tool_loop_request(frozen)
+    if projection.status != "ready":
+        return None
+    return frozen_compact_request_calibration(
+        agent, params, context_surface_fingerprint=request_projection_surface_fingerprint(agent, projection),
+    )
+
+
+# LLM: 提交后的观测处理：有冻结校准时把已接受候选（原始投影 → 校准值）改写成本轮基线，让同轮下一次真实预检与
+#   接受基准一致；没有校准或改写不成立时沿原合同清掉本轮观测（历史改写破坏追加口径）。派生基线不持久化。
+# 函数用途: 压缩提交后更新本轮供应商观测，避免刚接受的候选被另一口径立刻再压一次。
+def _rebase_recovery_observation(material, calibration, raw_tokens: int) -> None:
+    rebased = rebase_provider_context_observation(
+        material.params, calibration=calibration, raw_estimated_tokens=raw_tokens,
+        calibrated_tokens=calibrated_compact_request_tokens(raw_tokens, calibration),
+    )
+    if not rebased:
+        invalidate_provider_context_observation(material.params)
 
 
 # LLM: 两个恢复入口的候选计量共用：默认按完整投影 + 已知媒体预留计量（原请求视图由调用方传入解绑前大小），并附上

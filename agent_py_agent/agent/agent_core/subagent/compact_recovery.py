@@ -18,8 +18,10 @@ from ..tool_request_projection import project_tool_loop_request
 
 
 # LLM: 绑定原task/run/attempt与thread；首轮用完整请求自动阈值预检，溢出恢复仍强制提交。
+#   trigger_source 是调用方给出的结构化触发来源（compact_progress.COMPACT_TRIGGER_*），只透传到压缩进度事件。
 # 函数用途: 给原子代理模型轮构造公共压缩器，不发网络或改持久状态。
-def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_callback, interrupt_check, force=True):
+def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_callback, interrupt_check, force=True,
+                                      trigger_source=""):
     # LLM: 只允许当前child的真实参数消费来源，其他局部任务和摘要保持各自路径。
     # 函数用途: 核对子代理、执行轮与独立会话身份。
     def matches(params):
@@ -33,7 +35,7 @@ def prepare_subagent_compact_recovery(agent, current, task, turn, *, progress_ca
             _project_subagent_active_candidate, (agent, current),
         ),
         exclude_request_id=turn.turn_id or turn.attempt_id, progress_callback=progress_callback,
-        interrupt_check=interrupt_check, force=force,
+        interrupt_check=interrupt_check, force=force, trigger_source=str(trigger_source or ""),
     )
 
 
