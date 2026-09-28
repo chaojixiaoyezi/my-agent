@@ -122,16 +122,6 @@ export default function SettingsMemory() {
             disabled={!isAdmin}
           />
           <NumberField
-            label="memory_resume_auto_context_limit（恢复条数限制）"
-            description="自动恢复时加载的最大上下文条数"
-            value={adv.resume_auto_context_limit}
-            onChange={(v) => { setAdv({ resume_auto_context_limit: v }); markDirty(); }}
-            min={1}
-            max={200}
-            unit="条"
-            disabled={!isAdmin}
-          />
-          <NumberField
             label="memory_compact_auto_trigger_percent（自动压缩阈值）"
             description="上下文使用到多少百分比时自动压缩，0 表示 100%"
             value={adv.compact_auto_trigger_percent}
