@@ -37,6 +37,12 @@
 | `created_at` | `GuidanceEntry.created_at` |
 | `dedupe_key` | 幂等键，重发返回原 `message_id` |
 | `status` | `queued` / `delivered` / `failed`，映射既有 `GuidanceOnceReceipt` 状态：`pending`→queued、`consumed`→delivered、`rejected`→failed |
+| **`origin_kind`** | **`user_steering`（既有用户插话）/ `session_message`（会话消息），落 `GuidanceEntry.metadata`** |
+| **`origin_thread_id`** | **发送方 thread_id，落 metadata；注入时据此渲染“来自会话 X 的消息”** |
+
+**来源不得混同用户插话（dev 审阅点 1）**：`GuidanceEntry` 必须有结构化来源类型（用户插话 / 会话消息）
+和发送方 thread_id。注入时，会话消息以"来自会话 X 的消息"这种**宿主事件**形式呈现，
+**绝不能渲染成用户原话**，否则目标模型会把别的会话的话当成用户指令。
 
 ### task（kind = `session_task`）
 
@@ -49,6 +55,16 @@
 | 产物 `refs` | 结束时由目标会话填入 |
 | `summary` | 结束时填入，回报给发送方 |
 | `origin_task_id` | 防循环：由对端 task 触发的 task 记下上级 task |
+
+**task 状态只能有一个权威（dev 审阅点 2）**：`SessionTaskStore` 只存派活记录
+（发送方、接收方、任务正文的引用、`dedupe_key`、`origin_task_id`），加上指向目标执行的链接
+（`conversation_request_id` 或 `task_run_id`）。
+- `accepted`：目标 `TurnTrigger` 被消费时写入；
+- `done` / `failed` / `cancelled`：**只由目标请求的终态事件写入，写入方只有一个**；
+- 不允许出现"SessionTaskStore 说 done，但目标请求其实 failed"这种双账。
+
+**任务正文只存一份（dev 审阅点 3）**：正文放一条 guidance 条目（或 artifact），
+`SessionTaskStore` 只存它的 id。目标轮从这个 id 取正文来呈现，不再复制第二份正文。
 
 身份冲突：发送方身份只从当前 runner 上下文取；显式参数与上下文冲突时返回 `scope_warnings`，
 不静默猜、不冒充别的会话（遵循架构铁律"并发代理身份必须显式"）。
@@ -92,12 +108,19 @@
 `SESSION_TARGET_OUT_OF_SCOPE`、`SESSION_TASK_TARGET_SELF`、`SESSION_TASK_CHAIN_LIMIT`、
 `SESSION_PAIR_RATE_LIMIT`、`SESSION_TARGET_NOT_FOUND`。
 
+**不泄露存在性（dev 审阅点 4）**：目标 thread 不存在，或属于别的 owner，
+都返回**同一个错误码** `SESSION_TARGET_OUT_OF_SCOPE` 和**同样的** `scope_warnings`，
+不区分"不存在"和"没权限"。发给自己也要拒绝。
+
 ## 防循环
 
 - **派活链深度上限**：由对端 task 触发的 task 携带 `origin_task_id` 链；
   深度超过 `session_task_max_chain_depth` 拒绝 `SESSION_TASK_CHAIN_LIMIT`。
+  **深度按 `origin_task_id` 链结构化计算，不信任模型传入的深度。**
 - **每对会话每小时上限**：按 `(发送 thread, 接收 thread)` 分桶计数；
   超过 `session_pair_hourly_limit` 拒绝 `SESSION_PAIR_RATE_LIMIT`。
+  **task 完成后的回报消息也计入这个上限。**
+- **回报不得升级为 task**：task 完成后回报给发送方的是 message，**不能自动变成新 task**。
 - 两数字 `0` 表示不限制（能力配置统一约定）。
 
 ## 配置
@@ -121,6 +144,11 @@
   - `send_session_message`：发消息；
   - `create_session_task`：派任务；
   - `get_session_task`：查任务状态。
+
+**关闭时的可见性（dev 审阅点 6）**：普通用户或开关关闭时，这几个工具**不进模型工具列表**
+（用结构化可用性控制，不靠模型自觉）；TUI 命令返回 `SESSION_MESSAGING_DISABLED`。
+两边的 TUI 都要显示：目标 TUI 显示收到的消息或任务及来源，发送方 TUI 显示投递和任务状态
+（显示放第 2、3 片）。
 - **TUI 命令**：扩展 `/sessions`（列会话，需把目标列表从 Session 改成 ConversationThread 或建立映射）、
   新增 `/tell <thread> <msg>`、`/delegate <thread> <task>`。
 - **飞书入口**：第一期不做，记入 DESIGN_LEDGER 缺口。
@@ -148,12 +176,18 @@
 1. **权限矩阵合同单测**：管理员/普通用户 × message/task × 同 owner/跨 owner，8 格全覆盖，
    逐格核对返回码或成功。
 2. **幂等**：同 `dedupe_key` 重发返回原 `message_id`，不产生第二条。
-3. **防循环**：链深超限、每小时超限各一条；`0` 表示不限制的分支。
-4. **fake tool**：写入后目标 guidance 队列可见；状态机 `queued→delivered`、task `queued→accepted→done` 流转。
-5. **fake LLM 端到端**：一个 Gateway 两个会话，A 派活 → B 执行 → B 回报（既有 fake LLM 脚手架）。
-6. **变异验证**：人为改坏权限判定/去重/链深，确认对应测试会红。
-7. 定向回归：`test_wake_queue.py`、`test_runtime_guidance.py`、`test_lifecycle_wake_host_event.py`、
-   `test_collaboration_owner_isolation.py` 作为调用链样板。
+3. **防循环**：链深超限、每小时超限各一条；`0` 表示不限制的分支；
+   回报 message 不能升级成新 task；链深按 `origin_task_id` 结构化计算（改坏模型传的深度不影响判定）。
+4. **不泄露存在性**：目标不存在 vs 目标属于别的 owner 返回同一错误码与同样 warnings。
+5. **空闲目标唤醒注入（dev 审阅点 1 附加测试）**：空闲目标被唤醒的**新一轮**，
+   开头能取到排队的消息，确认**回合开始时也会注入**，而不是只在中途的安全点注入。
+6. **来源不混同用户插话**：会话消息以"来自会话 X 的消息"宿主事件呈现，测试断言它
+   **不会被渲染成用户原话**（`# User Task`）。
+7. **fake tool**：写入后目标 guidance 队列可见；状态机 `queued→delivered`、task `queued→accepted→done` 流转。
+8. **fake LLM 端到端**：一个 Gateway 两个会话，A 派活 → B 执行 → B 回报（既有 fake LLM 脚手架）。
+9. **变异验证**：人为改坏权限判定/去重/链深，确认对应测试会红。
+10. 定向回归：`test_wake_queue.py`、`test_runtime_guidance.py`、`test_lifecycle_wake_host_event.py`、
+    `test_collaboration_owner_isolation.py` 作为调用链样板。
 
 ## 交付切片
 
