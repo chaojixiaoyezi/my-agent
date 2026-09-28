@@ -41,7 +41,7 @@
 ## 前端配置集中化
 
 - 前端默认值、工具目录和角色模板统一放在 `frontend/config/frontend-runtime-config.json`。
-- `frontend/src/data/runtimeConfig.ts` 只做类型包装和导出，不再保存业务默认值。注意：该文件在 2026-09-09 的合并（83bc92860）中丢失，`settingsStore.ts` 对它的导入目前是断的，前端 `npm run build` 需要先补回这个文件。
+- `frontend/src/data/runtimeConfig.ts` 只做类型包装和导出，不再保存业务默认值；类型由 JSON 推导，不手写字段清单。
 - 页面、store、mock API 不应该再各自写死工具上限、角色模板、工具列表等参数。
 - 后续如果配置文件变大，只在 `frontend/config/` 下按模块拆分，例如 `tools.json`、`subagents.json`、`memory.json`，不要拆散到页面目录。
 - 写文件内联上限是后端代码常量 `content_transport_policy.MAX_INLINE_WRITE_CONTENT_CHARS`（12000，2026-09-27 起不再是配置项，设置页不再提供表单项）；`tool_read_max_chars` 前后端统一为 `50000`，`tool_web_max_chars` 统一为 `100000`。

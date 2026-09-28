@@ -327,6 +327,11 @@ pending 插话重放已按原 mailbox 锁内最新状态和准确 DB 预留收�
    长思考折叠计数真实流式更新已验；慢模型单槽位排队超时与推理耗尽输出预算仍待分别治理。
    方案见 [并行执行](design/SUBAGENT_PARALLEL_EXECUTION.md)。
 
+- **前端设置页 30 个非 AgentConfig 标签键（未排期）**：设置页表单项标签里有 30 个键从来不是 AgentConfig 字段（如 `qq_*`、`enable_watchdog`、`scheduler_mode`），可能属于别的配置或早已失效，需逐个核对归属再决定删改；用户主要用 TUI 和 IM，优先级低。
+- **前端 JSON 与 store 残留已删后端键的旧字段（等能跑 tsc 时再清）**：`frontend/config/frontend-runtime-config.json` 与
+  `frontend/src/stores/settingsStore.ts` 里仍有参数减量删掉的后端键对应的默认值（设置页表单项已清）。本机没有
+  `frontend/node_modules`，删字段后查不出引用断裂，所以现在不删；`runtimeConfig.ts` 的类型由 JSON 推导，清 JSON 时自动跟上。
+
 发布资料清理已落地，含文档断链与旧状态说明整理；不宣称以上运行时问题已修复，当前证据边界见 [STATUS](../STATUS.md)。
 
 ## 下一轮验收

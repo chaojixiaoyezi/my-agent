@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
+
+- **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的
+  `settingsStore.ts` 仍在引用；09-09 的合并 `83bc92860` 采用了新仓库一侧的树（官方历史一侧 `4e276ed21` 仍有这两个文件）。
+  引用方一直在用：`settingsStore`、`pages/Tools`、`pages/Templates`、`api/mockApi`。
+- **验证方式**（本机没有 `frontend/node_modules`，不装依赖、不跑 tsc/vite build）：
+  - import 链：`bun build frontend/src/main.tsx --packages external --target browser --outdir <临时目录>`，第三方包记为外部依赖，
+    只解析相对导入与 JSON。修复前 rc=1，恰好 5 处 `Could not resolve`（4 × `../data/runtimeConfig`、1 × `../data/mockConfig`）；修复后 rc=0。
+  - 语法：用 Bun 的 TSX 转译器（`new Bun.Transpiler({loader: "tsx"}).transformSync`）转译 `frontend/src` 下全部 47 个 TS/TSX，全部通过；只查语法，不查类型。
+  - 配置目录：`node frontend/scripts/sync-backend-config.mjs --check`。本基线上目录已过期，先重新生成（278 项）后 rc=0；
+    `mockConfig` 只从这个生成目录派生。
+  - 类型：`runtimeConfig` 的类型由 `frontend-runtime-config.json` 推导（`resolveJsonModule` 已开）；该 JSON 自 08-15 未改，与丢失前
+    官方历史版本逐字相同，store 的展开赋值口径不变。
+- 没有检查前端文件的 pytest；仓库静态门禁（ruff、doc_sync、strict code_size、diff --check、clean_package）照常跑。
+
 ## 能力包收口缺项复核（2026-09-28，仅文档）
 
 十二步骤对照及 77 项冻结引用摘要复核已完成；原 27 次结果不改判，也不重跑。完整七组未覆盖／部分覆盖范围见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。原 R10/R11/R12/R14/R16 的未齐分支不能被最新四项摘要遮掉；普通 Skill、零包核心任务和目录规模夹具也不能外推全部组合通过。
