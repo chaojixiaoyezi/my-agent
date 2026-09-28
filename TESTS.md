@@ -1069,6 +1069,11 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
   `test_uncorrectable_suggestion_falls_back_to_the_permission_code`（建议无纠正价值时按权限码上报）。
   断言只读结构化字段 `error_code` / `target` / 有无 `suspected_path_typo`——账本条目本来就没有
   `failure_stage`（它只出现在渲染后的回执文本头里）。
+- **为什么"真拼写"那条只能做函数级断言**：拼写分支针对的是"工作区根的**位置**写错"（根名出现在路径
+  中段），不是"文件名拼错"；且它只在"策略已拒绝 + 不在任何 workspace_root 下 + 建议非空且不同"三者
+  同时成立时才抛出。子代理端到端能构造的只有那个窄组合（即核心用例），"根内拼错、旁边有真文件"这条
+  路在现有实现里走不通（`check_path_access` 对根内路径直接放行、不看文件是否存在），所以真拼写用
+  函数级断言钉语义，不假装端到端验证过。
 - **变异验证**：①去掉 `_raise_for_typo_hint` 的根内判断 → 核心用例红（旧行为抛拼写错误 ValueError）；
   ②去掉 `Path(suggested) != candidate` → 核心用例与"无纠正价值"用例同时红；③重构后重跑变异①仍红。
   三次均还原后复绿。

@@ -232,6 +232,11 @@ class FileSystemTool(BaseTool):
     # LLM: 路径已经落在某个已知工作区根下时，它本身不可能写错前缀（根名就是在这条路径里匹配到的），
     #   所谓的"拼写提示"只会给出同一个路径、诱导调用方原地重试并盖住真实的权限拒绝（2026-09-28 集成者裁定）。
     #   只有不在任何已知根下、且建议目标确实不同于原路径时，才保留拼写提示。
+    #   实测（2026-09-28）：本方法的拼写分支只在**三者同时成立**时才真正抛出——
+    #   ① check_path_access 已拒绝该路径（在根内、或文件不存在时策略放行，都到不了这里）；
+    #   ② 该路径不在任何 workspace_root 之下；
+    #   ③ suggest_workspace_typo_target 给出的建议非空且不同于原路径。
+    #   所以它覆盖的是"把工作区根的**位置**写错"（根名出现在路径中段），不是"文件名拼错"。
     # 函数用途: 命中"真拼写"场景时抛出对应异常；根内路径与拿不到建议的路径直接返回，交给权限拒绝处理。
     def _raise_for_typo_hint(self, raw_text: str, candidate: Path) -> None:
         if any(_path_is_under(candidate, root) for root in self.workspace_roots):
