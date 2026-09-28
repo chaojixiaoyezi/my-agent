@@ -768,6 +768,7 @@ agent_py_agent/
 |   |-- test_decision_settings_scope.py  # owner后台范围、前台覆盖隔离和历史覆盖清理
 |   |-- test_tui_decision_menu.py        # 真实按键的决策设置、CAS、取消和显式测试
 |   |-- test_user_config_decision_operations.py # 主代理读取已保存决策目录及显式测试，拒绝伪造身份
+|   |-- test_user_config_decision_patch.py # decision_patch 经真实执行器落盘、多带字段仍拒并写明 unknown_fields、假模型自然语言调等待时间
 |   |-- test_decision_settings.py       # 决策覆盖继承、双版本 CAS、权限隔离及原配置迁移
 |   |-- test_decision_settings_notifications.py # 设置逆序通知、覆盖恢复继承及精准取消
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离

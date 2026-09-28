@@ -1,5 +1,35 @@
 # 测试与发布验收
 
+## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`）
+
+- **来源**：生产 runtime-step15c 上，my-agent 调 Jev 等待时间，`decision_patch` 连续被拒三次；dsh-9b 早先也遇到过。
+  回执都是 `TOOL_INVALID_ARGUMENTS`「决策设置请求包含未知字段」，`handler_executed=true`、`effect_outcome=not_started`。
+- **复现与根因**：
+  - 合法请求一直能用：经真实工具执行器（schema 校验、授权门、handler），只改 `background_timeout_seconds` 的干净请求在旧代码上就能落盘，不是红的。
+  - 同样的请求多带一个 schema 允许、但属于别的动作的字段（`reason`、`fields`、`profile_id`、顶层 `timeout_seconds`）时，
+    得到与生产完全一致的回执。可选字段全填 null 会在 schema 层就被拦下，回执不同，已排除。
+  - 根因：`user_config` 各动作共用一份扁平 schema，工具把除 action 外的字段全部转给设置服务；服务按操作严格拒收多余字段，
+    但报错不写字段名。模型只会改 `changes`，所以改什么都失败。生产那三次具体带了哪个字段，要看仓库外的工具账才能确认。
+- **改动**：
+  - 设置服务改抛 `DecisionSettingsUnknownFields`（仍是 `ModelProfileError`，原捕获点不变），带未知字段和本操作接受的字段。
+  - 工具回执与 `handler_details` 写明 `unknown_fields`、`allowed_fields`；效果仍是 not_started，什么都不写。
+  - 工具说明写清 patch、reset 各接受哪些字段。不放宽校验，也不替模型删字段。
+- **测试**（`test_user_config_decision_patch.py`，8 项）：
+  - 合法 patch 经真实执行器落盘，owner revision 加一；
+  - 4 种多带字段仍被拒：与生产同形（handler 已执行、效果未开始），回执写明 `unknown_fields`、`allowed_fields`，消息里有字段名，什么都没写；
+  - reset 多带 `changes` 时同样指名；
+  - 设置服务本身仍严格拒绝，异常仍是 `ModelProfileError`；
+  - 假模型按“把后台决策等待时间调到 15 秒”行事：先按生产写法多带 `reason` 被拒，按回执删掉该字段重试后落盘。
+- **旧代码对照**：同一测试文件（去掉新异常的导入）放到 `fc494da3f` 上跑，干净请求通过；4 种多带字段、reset 和假模型各项失败。
+  旧回执是纯文本、没有字段名，假模型无从纠正，设置也没有落盘。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_user_config_decision_patch.py -q`。
+- **变异验证**：10 个全部抓出，每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，跑完逐字节恢复并核对哈希。
+  - 服务端：拒绝时不写字段名；放宽字段检查；异常不再是 `ModelProfileError`；消息不含字段名。
+  - 工具端：替模型删掉多带字段；不捕获新异常；回执缺 unknown_fields；allowed_fields 写错；信封丢失；效果状态写错。
+- **相关回归**：253 个测试文件 5680 passed、1 skipped、24 xfailed、5 xpassed。清单包括所有涉及 user_config、决策设置与服务、
+  工具目录与 schema 的测试，以及全部扫描产品代码的守卫测试（含 `test_architecture_guardrails.py`、`test_constant_names_unique.py`）。
+- **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对基线新增 0、减少 0。
+
 ## 前端目录生成器不再把 YAML 文件头算进第一个键（2026-09-28，分支 `claude/9a-catalog-header`，基于 `ca756b5db`）
 
 - **问题**：`frontend/scripts/sync-backend-config.mjs` 取键上方注释时空行不打断，所以每份 YAML 的第一个键都吸进了文件头，

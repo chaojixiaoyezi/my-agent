@@ -1,5 +1,19 @@
 # 设计台账
 
+## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`，本地验证通过，待集成）
+
+- **起因**：生产上 my-agent 调 Jev 等待时间，`decision_patch` 连续被拒三次，回执都是 `TOOL_INVALID_ARGUMENTS`「决策设置请求包含未知字段」。
+- **根因（已复现）**：
+  - 合法请求本身一直能用：经真实工具执行器、只改 `background_timeout_seconds` 的 patch 落盘成功。
+  - `user_config` 各动作共用一份扁平 schema，`reason`、`fields`、`profile_id`、顶层 `timeout_seconds` 等别的动作的字段都能过 schema。
+  - 工具把这些字段原样转给设置服务，服务按操作严格拒收，但报错不说是哪个字段。模型只会改 `changes`，所以无论怎么改都失败。
+- **已实现**：
+  - 不放宽校验：多带字段仍整笔拒绝、不写入，也不替模型删字段。
+  - 设置服务改抛结构化的 `DecisionSettingsUnknownFields`（仍是 `ModelProfileError`，原捕获点不变），带未知字段和本操作接受的字段。
+  - 工具回执与 `handler_details` 写明 `unknown_fields`、`allowed_fields`；工具说明写清 patch/reset 各接受哪些字段。
+- **待确认**：生产那三次具体带了哪个字段，仓库外的工具账才能确认；本修复对任何多带字段都给出同样的结构化回执。
+- 细节见 `TESTS.md` 同日条目。
+
 ## Jev 后台点位改用独立期限（2026-09-28，分支 `claude/be-jev-bg-deadline`，基于 `60f6f485a`，本地验证通过，待集成）
 
 - **起因**：my-agent-1 实测近 48 小时：后台点位 95 次，成功 49%、超时 39%；前台点位 181 次，成功 74%、超时 22%。同一后台阶段里各点位共用阶段倒计时，排在后面的 `curator_relation` 只拿到残值，19 次超时的中位耗时只有 1930ms。

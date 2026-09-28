@@ -26,6 +26,10 @@
   `capability_config.yaml` 的 `decision_agent_timeout_min_seconds`（默认 1）与 `decision_agent_timeout_max_seconds`（默认 30）之间，
   0 表示该侧不限制。越界直接拒绝（`DECISION_TIMEOUT_OUT_OF_BOUNDS`），不夹取、不保存同批其它字段；
   `decision_read` 回显 `agent_timeout_bounds`，模型先知道能调的范围。
+- 请求字段（2026-09-28 修）：`decision_patch` 只接受 `scope`、`expected_revision`、`changes`，`decision_reset` 只接受
+  `scope`、`expected_revision`、`fields`。`user_config` 各动作共用一份扁平 schema，`reason` 等别的动作的字段也能过 schema；
+  多带时设置服务仍整笔拒绝、不替模型删字段，但回执（`TOOL_INVALID_ARGUMENTS`，未写入）现在给出
+  `unknown_fields` 与 `allowed_fields`，模型按回执删掉字段即可重试。此前回执只说“包含未知字段”，生产上连续被拒三次。
 - 选这个入口而不是给 `manage_models` 加动作：`user_config` 本来就是决策设置的模型入口（普通用户也有，只能改自己），
   少一个工具、少一套身份裁决。
 

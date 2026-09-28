@@ -59,6 +59,20 @@ class DecisionSettingsAccessError(ModelProfileError):
     code = "decision_settings_access_denied"
 
 
+# LLM: 请求顶层带了本操作不接受的字段时抛出；fields/allowed 是结构化事实（排序后的字段名），
+#   调用方据此告诉模型具体删哪个字段，不解析中文文本。仍是 ModelProfileError 子类，原有捕获点照常失败关闭。
+# 类用途: 表示决策设置请求含未知字段，并列出未知字段与本操作接受的字段。
+class DecisionSettingsUnknownFields(ModelProfileError):
+    code = "decision_settings_unknown_fields"
+
+    # LLM: 只保存字段名，不保存字段值（值可能是模型随手填的长文本）；消息与属性同源。
+    # 函数用途: 记下未知字段与允许字段，并生成指名道姓的错误说明。
+    def __init__(self, fields: list[str], allowed: list[str]) -> None:
+        self.fields = tuple(sorted(fields))
+        self.allowed = tuple(sorted(allowed))
+        super().__init__(f"决策设置请求包含未知字段：{'、'.join(self.fields)}；本操作只接受：{'、'.join(self.allowed)}。")
+
+
 # LLM: 缺配置只产生空覆盖及空实验授权，默认值由原模块拥有；此函数不写文件或建立实验预算。
 # 函数用途: 为新 owner 或迁移的旧线程构造初始覆盖信封。
 def empty_decision_settings() -> dict:

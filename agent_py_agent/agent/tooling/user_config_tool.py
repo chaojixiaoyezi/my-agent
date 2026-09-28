@@ -72,6 +72,8 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
         name=full_spec.name,
         description=("读取或修改当前用户自己的决策设置。先 decision_read 获取 owner/thread revision，"
                      "再用 decision_patch 或 decision_reset 修改并读回生效值；scope=thread 只用于当前可信会话。"
+                     "decision_patch 只填 scope、expected_revision、changes，decision_reset 只填 scope、expected_revision、fields，"
+                     "多带的字段会被拒绝并在回执 unknown_fields 里列出。"
                      "等待时间只能在 decision_read 返回的 agent_timeout_bounds 范围内调整，越界会被拒绝。"
                      "decision_models 只读脱敏目录；decision_probe 仅在用户明确要求测试连接时使用，会联网并产生用量。"
                      "decision_experiment_revoke 只能撤销当前会话已有授权，不能建立授权。"
@@ -120,6 +122,16 @@ def _timeout_refusal(agent: object, operation: str, changes: object) -> ToolHand
     return ToolHandlerOutcome("user_config", False, json.dumps(refusal, ensure_ascii=False),
                               error_code="DECISION_TIMEOUT_OUT_OF_BOUNDS", effect_outcome="not_started",
                               result_envelope={"decision_timeout_bounds": refusal})
+
+
+# LLM: 设置服务按操作拒收多余顶层字段时调用；回执与 handler_details 同写 unknown_fields/allowed_fields（字段名，不含值），
+#   效果 not_started。不替模型删字段、不重试，模型按回执去掉字段后自己重提。
+# 函数用途: 把 DecisionSettingsUnknownFields 转成指名道姓的工具拒绝回执。
+def _unknown_fields_refusal(exc: object) -> ToolHandlerOutcome:
+    refusal = {"reason": "unknown_request_fields", "message": str(exc),
+               "unknown_fields": list(exc.fields), "allowed_fields": list(exc.allowed)}
+    return ToolHandlerOutcome("user_config", False, json.dumps(refusal, ensure_ascii=False), error_code="TOOL_INVALID_ARGUMENTS",
+                              effect_outcome="not_started", result_envelope={"decision_request_fields": refusal})
 
 
 # LLM: 读回附加两项只读事实：模型可自调的等待时间范围，以及管理员是否允许本用户使用 Jev（关了则各点都不会调用）；
@@ -187,6 +199,7 @@ class UserConfigTool(BaseTool):
             "action=reset 删除覆盖恢复默认；action=history 查看修改记录；action=revert 按记录编号（change_id）回滚。"
             "修改在重启 Gateway 后生效（当前进程不会热加载）。安全边界（凭据、权限、身份、路径、外部地址、会运行代码的设置）永远不可写。"
             "decision_read/decision_patch/decision_reset 读取、字段修改或恢复决策设置继承；"
+            "decision_patch 只填 scope/expected_revision/changes，decision_reset 只填 scope/expected_revision/fields，多带的字段会被拒并在回执 unknown_fields 列出；"
             "decision_experiment_revoke 可用当前授权编号撤销本会话实验；本工具不能建立实验授权，能力开关不代表用户授权。"
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
             "时间使用有限正秒数，且须在 decision_read 返回的 agent_timeout_bounds 范围内（越界拒绝、不自动夹取）；"
@@ -214,7 +227,7 @@ class UserConfigTool(BaseTool):
                 },
                 "query": {"type": "string", "description": "action=search 的关键词，匹配参数名与中文说明。"},
                 "change_id": {"type": "string", "description": "action=revert 要回滚的修改记录编号（history 返回的 id，至少 6 位）。"},
-                "reason": {"type": "string", "description": "set/reset/revert 可选：这次修改的原因，记入修改记录。"},
+                "reason": {"type": "string", "description": "set/reset/revert 可选：这次修改的原因，记入修改记录；decision_* 动作不接受。"},
                 "scope": {"type": "string", "enum": ["owner", "thread"], "description": "决策设置范围，默认 owner；thread 只指当前可信运行会话。"},
                 "expected_revision": {"type": "object", "properties": {"owner": {"type": "integer", "minimum": 0}, "thread": {"type": "integer", "minimum": 0}}, "required": ["owner", "thread"], "additionalProperties": False},
                 "changes": {"type": "object", "properties": _decision_change_properties(), "additionalProperties": False, "minProperties": 1},
@@ -286,12 +299,15 @@ class UserConfigTool(BaseTool):
     #   read 在本会话已有实验授权时附只读实验证据评估（_with_experiment_evaluation），模型无法据此授权或晋升。
     #   patch 的等待时间先按能力配置上下限检查，越界直接拒绝（DECISION_TIMEOUT_OUT_OF_BOUNDS），不进设置服务；
     #   read 回显该范围与管理员是否允许本用户使用 Jev（admin_decision_model_allowed，只读，模型改不了）。
+    #   本工具各动作共用一份扁平 schema，reason/key/value 等别的动作的字段也能过 schema；这里不替模型删字段，
+    #   服务拒绝时回执写明 unknown_fields 与 allowed_fields（2026-09-28 生产上连续被拒三次，旧回执看不出是哪个字段）。
     # 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖，自调等待时间受上下限约束。
     def _decision(self, operation: str, params: dict) -> ToolHandlerOutcome:
         from ..settings.decision_settings import execute_decision_settings_operation
         from ..settings.decision_settings_schema import (
             DecisionSettingsAccessError,
             DecisionSettingsConflict,
+            DecisionSettingsUnknownFields,
         )
         from ..settings.model_provider_schema import ModelProfileError
 
@@ -310,6 +326,8 @@ class UserConfigTool(BaseTool):
             return ToolHandlerOutcome("user_config", False, str(exc), error_code="STALE_VERSION", reported_error_code="DECISION_SETTINGS_CONFLICT", effect_outcome="not_started")
         except DecisionSettingsAccessError as exc:
             return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+        except DecisionSettingsUnknownFields as exc:
+            return _unknown_fields_refusal(exc)
         except ModelProfileError as exc:
             return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
         except OSError:

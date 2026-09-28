@@ -11,6 +11,7 @@ from .decision_settings_projection import decision_profile, decision_settings_pr
 from .decision_settings_schema import (
     DecisionSettingsAccessError,
     DecisionSettingsConflict,
+    DecisionSettingsUnknownFields,
     decision_field_scopes,
     empty_decision_settings,
     validate_decision_field,
@@ -22,6 +23,7 @@ from .thread_model_selection import _require_owner
 
 
 # LLM: 入口上下文必须来自原认证 owner；restore 只提供同事务 set/unset，不接受路径、owner 或 store。
+#   多出的顶层字段一律拒绝（不静默丢弃），异常 DecisionSettingsUnknownFields 带未知字段与本操作接受的字段，供调用方指给模型。
 # 函数用途: 在进行任何文件访问前检查可信 owner 上下文和明确请求结构。
 def _validate_request(context: object, operation: str, payload: dict, thread_id: str) -> str:
     home = context.home_paths
@@ -38,8 +40,9 @@ def _validate_request(context: object, operation: str, payload: dict, thread_id:
         allowed.update(("set", "unset"))
     elif operation == "experiment_revoke":
         allowed.add("authorization_id")
-    if set(payload) - allowed:
-        raise ModelProfileError("决策设置请求包含未知字段。")
+    unknown = set(payload) - allowed
+    if unknown:
+        raise DecisionSettingsUnknownFields(sorted(unknown), sorted(allowed))
     scope = payload.get("scope", "owner")
     if type(scope) is not str or scope not in {"owner", "thread"} or scope == "thread" and not thread_id:
         raise ModelProfileError("会话临时设置需要当前会话编号。")
