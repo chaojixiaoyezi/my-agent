@@ -1,5 +1,12 @@
 # Subagent Structure
 
+## 显式能力包申请的原裁决链
+
+- `agent_core/capability_request_tool.py` 用原`requested_skills`字段记录`capability:<package_id>`，不从包名或资源路径另建授权。
+- `services/capability_service.py::_route_capability_request` 保留原owner路径判断；显式包及混合申请复用`_parent_resolution_record`保持OPEN，不由语义候选部分结清。原search仍运行，报告不冒充grant。
+- `agent_core/orchestration/tools/capability.py` 的原直属父级resolve继续解析当前快照、写canonical grant；`capability/task_references.py`与原restricted快照消费完整七字段引用，本片不新增状态存储。
+- `agent_core/orchestration/tool_spec_data.py` 明确创建时包stable_id和逐项列表，批量未单列项继续使用顶层默认值；相关111项组件通过，真实模型与父子唤醒另验。
+
 ## 已授权能力包的首请求入口
 
 - `capability/subagent_entry_authority.py` 提供仅新建时使用的typed初始化材料，并按canonical run/attempt、原权限和同代引用核对读取范围，不另存状态。

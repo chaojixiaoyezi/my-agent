@@ -92,6 +92,8 @@ refs。用户可以通过 `/status` 和 TUI 看，恢复器可以读，模型也
 
 ## capability 阻塞与续跑
 
+`requested_skills`中的显式`capability:<package_id>`使用既有包命名域。自动路由完成原owner路径判断后，保持整条OPEN并返回PARENT_RESOLUTION_REQUIRED，等待原直属父级resolve；包含工具的混合申请也不能局部自动结清。父级当前快照与原grant持久化仍决定实际授权，前缀不是批准事实。未知包可拒绝收口，裸包名不自动转包引用，重复裁决不重复授予。创建时可通过各item.allowed_skills指定包，未单列项沿用顶层默认列表，goal/input_refs不产生权限。
+
 OPEN 或非法未闭合 capability request 是宿主掌握的结构化阻塞事实，优先于 provider 的普通
 `turn_end=completed`：本轮 child 必须保持 `BLOCKED/UNVERIFIED`，不能因为模型结束了这一轮就变成
 `DONE`。直属父级 grant 或 deny 后，宿主把同一个 run 重排为 `PENDING`、恢复 conversation link，并由
@@ -148,6 +150,8 @@ ToolExecutor 对原 ToolCall 原地重试，不新造工具参数；拒绝/取�
 见 `docs/design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md`。
 
 ## 路径与写权限
+
+runner对required_read_paths和hint_read_paths的exists/resolve查询仅生成资料线索投影。单候选的文件系统OSError归为未解析，仍检查其它根及其它引用；InterruptedError作为停止信号继续传播。该投影不读正文、不授予权限，实际工具和创建前可见性仍执行原判定；expanduser及可信根规范化的其它异常仍按原行为处理。
 
 普通 child 自动继承直接父级的结构化产品写区；孙代理继续逐层继承同一上界，不能扩大到父级之外。
 因此项目目录本来就在父级 workspace 内时，父级无需为 child 重复申请或声明权限。

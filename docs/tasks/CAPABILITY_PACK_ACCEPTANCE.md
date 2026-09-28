@@ -1,5 +1,71 @@
 # 能力内化：来源盘点与验收矩阵
 
+## C19三助手资料交接（2026-09-27，分项通过，整体未过）
+
+固定`cb40cc4a8ed1611c9f0d297fef55a2132a7017e3`已精确安装私有唯一Gateway；1430成员与源码及wheel一致，wheel SHA256为`cd715e81be6ed0c0320b1bcf7b784ae7e3d804c79a1f974e4db847ff29129f65`。安装前六客户端正常退出、原Gateway正常停止并保留备份；14353份非目录显示缓存文件保持，10份`.DS_Store`在备份期间变化单独记录，未宣称全部14365份字节不变。
+
+新CAP02、官方M2.7默认262144窗口、同A0.3.0/B0.1.4只发一次原G05需求。请求`gwreq-1790532921-b56a60d7f5b04dc3b2f3645d08b33bac`对应taskrun历时264.981秒，三子均DONE，真实attempt重叠88.800秒；父背景接续读回三份记录后终态，active_task_ids为空。首Gateway response的43.631秒仅为等待子代理的首父片，不当整轮时长或最终回复。
+
+前两个孩子被明确授予各自包，canonical属性中的摘要/activation与父级固定版本相同，已成功get当前私有方法、模板并写各自记录；父级也真实读取这些记录。第三子创建时未给包授权，两次包search按原范围拒绝；没有申请或父级resolve，随后Shell读了旧源码树中的A0.1.1/B0.1.0检查器和入口。旧B没有`--handoff`的结论被用于当前B0.1.4，不能记为当前包原资源链通过。此处仅记录实际版本归属错误，不新增自动授权或领域专项运行门。
+
+实际业务文件只有三份核对记录及`example-project.json`。父最终回复声称的汇总文件和A两份示例均不存在；未由观察者补写。A孩子取得当前checker的第一页也不等于完整脚本已读。整体资料交接未通过，C18成员路径纠错分支本轮未命中，显式包申请修复也未走到；两片组件结果不能冒充真实恢复验证。generation0，不覆盖Compact。
+
+独立有限审计`candidate-19-general-delegation-independent-audit.json`摘要`44a52d2bcea120f1c8f2ab493460e14f0be1f977e474713d493349393c118b81`进一步核对A/B分别9/4次get，B示例通过同代`source_ref`原样复制且SHA一致。第三子四次Shell读取的stdout逐字节匹配旧源码；审计逐项版本字段确认当前B0.1.4，汇总verdict中写作B0.1.3是笔误，以逐项事实为准。A检查器只取16000/20440字符首资源页，模型正文preview仅4000字符，未续读。三子原用量事件均有purpose_breakdown，辅助选择logical/HTTP均0，主模型HTTP分别13/8/12；不据此推算未核对范围或声明脚本全文已读取。
+
+321份旧验证文件、133份旧任务pins/selection、六份配置及安装账保持，Gateway出生身份保持。私有`candidate-19-general-delegation-observation.json`摘要`ed75515958ce38c4e561faec3469481594fe9c7b23a7985b56fe3db241c35190`固定原索引、父子身份、任务时长、分线程用量、产物及保护集；不把子canonical的used_tools摘要替代完整工具索引。最终仍0/27，不通过重复同一prompt挑选成功。
+
+建议下一步：保留已验的显式授包与同代私有读取，优先核定通用资源归属及交付事实边界；Claude并行完成连续Compact并交固定SHA，再做最终矩阵与发布确认。root只观察实际模型行为，不替它补授权或产物，不扩展样包领域功能。
+
+### C19责任核定（2026-09-27，未确认新的宿主缺陷）
+
+原派工顶层没有`allowed_skills`，第三项也省略该字段；canonical空授权及空包refs符合显式传递合同，没有发现宿主丢失已给授权。第三子实际runner提示明确列出`capability_request`及申请要求，原生失败回执保留`recommended_action=request_capability`；后者是恢复动作枚举，不是工具名。没有错误名字调用或任何申请调用，不能把字序差异当根因。原同源registry与native schema接线未发现隐藏分支，但未保存完整HTTP tools载荷，不冒称抓包证明。
+
+三个子任务的结构化`output_files`均已落盘。缺失汇总/A示例只在父最终正文声称，未形成父级结构化交付声明；最后canonical上下文仍保留真实read-only工具事实。普通会话合同不解析回复正文生成文件门，不能为了本例恢复旧推断式验收。既有收尾合同8项通过，验证声明子任务的有界纠偏及普通父会话原语义；没有产品修改或新真实调用。私有`candidate-19-responsibility-review.json`摘要`abc33e7df98fac3deb03b0c4b884984dbf2215750ce5f46d4b4043d47a91813e`固定原派工、canonical、提示、源码与测试证据。
+
+归因核定在此收口，整体任务失败、完整读取和模型自然采用缺项保持。后续优先取得Claude的固定Compact补片，组合后继续原生验收；不自动授包、不按goal/角色文本推断能力、不增加父完成硬门或第二模型循环，也不重复本例挑成功。
+
+## C18错误资源路径与恢复分类（2026-09-27）
+
+私有运行已从51dac精确切为`def6483976a4392403a7a772d6bda93538ab4097`，含runner资料引用及显式包申请两片修复。源码、wheel及安装1430成员一致；wheel摘要`ceb106a53205795ced346156b1d430b990b57abd0631a5b1b6cb9e789f2be8b1`。安装过程14286份停机配置/数据文件保持，原Gateway正常停止后仍只有一个私有Gateway；没有切换日用环境。
+
+新CAP02继续使用同一A0.3.0/B0.1.4、官方MiniMax-M2.7默认262144窗口，仅提交一次原G05资料交接需求。请求`gwreq-1790530522-3cf1bfbe6a8242f2b7a71bab9419f565`在31.574秒后done，4 HTTP/0重试；业务失败、没有孩子或交接产物，generation0，不能据运行终态记验收通过。
+
+两次get均把`resource_path`猜成未声明的`SKILL.md`，实际两包声明入口为`CAPABILITY.md`。原生返回正文为`CAPABILITY_RESOURCE_NOT_AVAILABLE`，外层错误码却是`SKILL_SNAPSHOT_UNAVAILABLE`，原恢复合同因此建议重新授权。模型复述外层码并非凭空造错；真实缺口是成员参数错误与快照失效混在一起。一次选择empty、pins为空是观测事实，不是已证明的失败原因。两片委派修复尚未被本例执行到，仍须真实复验。
+
+321份旧验证文件、132份旧任务的pins/selection、六份配置和安装账保持；观察者没有补需求、修改授权、重装包或代写产物。私有`candidate-18-general-delegation-observation.json`摘要`125dc21c06cd2ae590cd30d5e8fbf51828fbde61127e8419b8ffe9d9f0f6fa85`，保留参数、原生工具结果、模型用量和终态。此例为开发验证，最终仍0/27。
+
+本地修复仅改原`skill_search_tool`：在受限包和预期代次核验后按声明判成员，未命中返回原`TOOL_INVALID_ARGUMENTS`及同代入口建议，原恢复动作为`repair_tool_arguments`。新显式调用才进入reader和pin；错误本身不读正文，取消/中断和实际读取失效仍保持。失败get仍可能沿原策略晋升任务，不能误报没有任何状态写入。
+
+旧实现最小4/4红已冻结；新10例覆盖任意入口、同代建议、实际ToolExecutor/TaskStore、旧代、读取损坏和取消。最终相关6文件119 passed，0失败/错误/跳过，6.083秒，源码指纹无漂移，独立末审无阻断；Ruff、doc-sync、strict-size、diff及clean-package全部通过，线上CI未作为依据。无新配置、权限账或重要文件结构，未改包内容/格式；组件证据不能改判C18或最终0/27。准确命令与日志摘要见[测试记录](../../TESTS.md#c18包成员参数纠错2026-09-27)。
+
+建议下一步：固定本地补片交接，以新运行候选复验委派；Claude的连续Compact修复可并行。保留C18原失败，不调整包内容或业务prompt。
+
+## C17显式包申请回到原父级裁决（2026-09-27）
+
+G05后的独立组件复现确认：即便使用合法`capability:story-a`，语义无命中或真实包卡已命中都会提前GAP；混合write_file申请则仅授工具却GRANTED。5例旧4失败1通过；裸包名不转换为包引用的原行为保持。这不是原生G05的追加需求或替被测模型补授权。
+
+产品在原owner路径判断之后保留含包引用的整条OPEN申请，复用PARENT_RESOLUTION_REQUIRED交原直属父级resolve。父级按当前快照生成原七字段引用并写canonical grant；未知包批准失败后可deny，混合申请不部分自动结清。schema同步明确包stable_id与批量item.allowed_skills，不改变安装账、快照持久化或首请求资格。
+
+完整7文件最终111项通过，0失败/错误/跳过，15.315秒，源码前后指纹相同；合法链已实际执行原创建、孩子申请、自动route、父级grant、同代私有get及重复resolve。私有最终证据为candidate-17-package-request-focused-02.json/.xml/.log，准确命令见[测试记录](../../TESTS.md#c17显式包申请组件链2026-09-27)。这是组件证据，无真实模型/Gateway；私有运行仍51dac，G05原失败和最终0/27保持。
+
+独立末审无阻断，三项边界保留：mixed用例只验证自动路由不部分结清，未动态覆盖混合授予后的执行；原search/选候选仍会运行；批量顶层allowed_skills仍可作为未单列项的默认值，说明已澄清。组件证据不代替真实父子唤醒闭环。
+
+本地严格gate已通过：首轮doc-sync缺模块结构文档，补齐后复核通过；其余Ruff、strict-size、diff和clean-package通过，线上CI未作为依据。无新配置或重要文件结构，故不改YAML/dataclass或CODEBASE_TREE。
+
+建议下一步：root固定提交交Claude；Claude的Compact修复可并行。组合固定版本后先做原生委派复验，再推进27次最终矩阵，主线推送部署由Claude唯一负责。
+
+## C17并发资料交接与输入引用修复（2026-09-27）
+
+G05在固定51dac、A0.3.0/B0.1.4和默认262144窗口的新原生CAP02仅提交一次普通资料交接需求。请求`gwreq-1790525978-c5ad82927ef04546841a8e165c8990f1`约160.91秒结束，29 HTTP/0重试；父级先派三子，首检查程序子失败后自行替换一子。
+
+四次派工均省略`allowed_skills`，三个实际运行孩子8次包get全部为`SKILL_SNAPSHOT_UNAVAILABLE`，没有三份记录或最终汇总，本例失败。三条申请使用裸包名，均落GAP；父级三次resolve都是`no_pending_requests`、`resolved=[]`，公开答复“授权已下达”不符合原账。真实并发、replacement、父级唤醒、全部attempt结束和资源收口已证，不能据执行done或口头等待判业务通过。282旧文件、127旧Task绑定、6配置与安装记录保持；测试者未补需求、代写或重放业务。
+
+首检查程序子将长说明放进`input_refs`，原runner在首次提示准备的路径存在查询抛`ENAMETOOLONG`，模型请求尚未发送。本地沿原builder复现；现仅对每个候选的`exists/resolve`文件系统异常保留既有unresolved投影，继续处理其它根/引用，`InterruptedError`仍传播。8例旧实现6失败/2通过，修后全通过；四份相关测试65项通过，独立窄审无阻断。此修复不解析说明为路径或授权，不改变创建前可见性判断，尚未安装到私有运行版。
+
+包申请自动路由另存在只接受`kind=skill`的覆盖缺口，不能把本例GAP唯一归因于裸包名；合法包申请需另修复验证，不隐式补授权。私有观察`candidate-17-general-delegation-observation.json`摘要`3e41d3fb5a04834606711a58a9a8f7d293b5a36d0202f89fec42ac26e6f5292f`；独立机制审阅摘要`c72b47bbdcf4a081648ce6dc7dba671c4fab6528282cb35d4bad53dd7686d2f4`，合法申请链窄审摘要`6bfdc3d35370a1ae0c295943341dc4afeb0129c17d6059837910bb8ffb30ffe7`。后两份只读报告未运行模型或测试。
+
+回归命令及范围见[测试记录](../../TESTS.md#c17子代理资料路径异常隔离2026-09-27)。G05不计最终27次，原失败保留。建议下一步：root收口通用输入修复，再补原包申请/父级裁决链；Claude并行负责Compact及主线发布，只读复核可并行，私有TUI仍由root单人操作。
+
 ## C17固定发布与原生开发验收（2026-09-27）
 
 固定源码`51dac1b815acf74a76fa79ef7f93f2f4228b3d4b`已由Claude双机部署step13w。本线核对12份原始分片日志23639 passed、0 failed/0 errors（另21 skipped、32 xfailed、5 xpassed）及本地严格gate，通过部署日志和本机发行清单核对版本；线上CI未作为依据，本轮未另做远端在线健康探测。私有环境1430成员与固定源码/wheel/安装一致，安装和回退依据见[测试记录](../../TESTS.md#c17能力包组合证据核对2026-09-27)。

@@ -1,6 +1,6 @@
 # 能力包与内化合同
 
-状态：2026-09-27 通用安装、隔离发现、选包/入口准备、私有资源和原任务引用已有分项真实证据；自动 Compact 的 G02 仍失败，稳定自然采用及完整验收未完成，尚未发布。
+状态：2026-09-27 基础实现已随51dac组合发布，通用安装、隔离发现、选包/入口准备、私有资源和原任务引用已有分项真实证据；G02连续Compact及G05子任务用包仍失败，稳定自然采用和完整验收未完成。G05输入引用隔离及包申请路由已有本地组件修复，待组合原生复验，最终0/27保持。
 执行入口：[完整 Goal 与唯一 TODO](../tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
 验收入口：[来源、能力矩阵与测试计划](../tasks/CAPABILITY_PACK_ACCEPTANCE.md)。
 操作入口：[来源迁移、候选构建、启停与版本回退](CAPABILITY_MIGRATION.md)。
@@ -111,6 +111,14 @@ panels、skills、host_api；脚本文本是私有资源，读取不等于执行
 即使空串，也在读取快照前返回 `TOOL_INVALID_ARGUMENTS`；不能忽略它后返回成功、自动改成读取或查询词。
 参数错误只说明正确用法，不暴露未授权包身份、成员或正文，不改变当前任务引用。
 
+`get`的包可见性及预期代次核验后，若`package.resolve(resource_path)`未命中声明成员，
+沿既有`TOOL_INVALID_ARGUMENTS`返回`CAPABILITY_RESOURCE_NOT_AVAILABLE`及同代入口`next_read`，
+让原恢复合同选择`repair_tool_arguments`。入口名由包声明决定，建议省略成员路径并带准确摘要和activation；
+须再次显式调用才进入原reader并在成功后pin，错误本身不读取或改引用。原get任务晋升策略仍可先发生。
+未知/未授权包、预期代次不符及声明成员真实缺字节/摘要变化保持原快照错误；取消和中断继续传播。
+本片参考Free-Code固定`6b25ab68`的FileReadTool结构化缺文件回执、Codex固定`578c1b22`的精确资源身份读取；
+只复用本仓已有参数错误与`package_read_parameters`，不移植参考项目的自动重试或模糊路径猜测。
+
 成功的包范围 search/get 同时返回 `resource_namespace` 和限页的同代 `next_search`。
 命名空间只描述清单中已经声明的包根相对成员；正文提到的业务输入、交付路径不因此变成包成员。
 模型先检索声明，再使用匹配项 `next_read`，不能把虚拟成员当工作区文件或猜安装位置。
@@ -207,6 +215,8 @@ claimed绑定实际请求/run/attempt与候选指纹；旧缺键、claimed、fin
 选择assistant/schema信封不入业务历史；有界入口作为原`RuntimeFactsTurn`进入原预算、历史、Compact、自动选模捕获及实际请求。
 
 ## 主任务、子代理和长任务
+
+显式能力包经`allowed_skills=["capability:<package_id>"]`传给孩子；批量可逐项填写`item.allowed_skills`，未单列项沿用顶层默认列表，goal或input_refs提及包不授予读取范围。缺少能力时孩子沿原`capability_request.requested_skills`申请同一stable_id。自动路由先完成原owner路径判断，遇到包命名域后整条保留OPEN/PARENT_RESOLUTION_REQUIRED；包与工具混合申请也不能部分自动结清。该记录不证明父级有权批准；原直属父级resolve继续按当前快照验证，生成完整七字段ref并写原canonical grant。未知包批准失败时保持OPEN，可由原deny关闭；不隐式转换裸包名或资源路径，不补首请求marker、不增加安装或授权账。对应组件111项通过，模型自然采用仍须原生复验。
 
 ### 子代理首请求的已授权入口准备（2026-09-27，已实现，组合及真实入口已验）
 

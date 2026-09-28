@@ -1,6 +1,7 @@
 
 # LLM: 子代理能力申请只负责记录结构化缺口与安全范围；常规自动授权一旦改变
 # 可用工具集合，必须结束当前不可变工具快照，并在下一耐久工作片重建运行上下文。
+# 包申请通过 requested_skills 的保留命名域交给原父级 resolve，不从裸包名或资源路径推断授权。
 # 模块用途: 提供 child-only capability_request 工具，把常规沙箱内能力自动授权、
 # 外部能力交给直属父级裁决，并保证授权不会在旧工具快照中被误用。
 from __future__ import annotations
@@ -303,6 +304,8 @@ def _object_dict(value: object) -> dict[str, object]:
     return {}
 
 
+# LLM: schema 只声明现有申请字段；包引用与 Skill 共用 requested_skills，解析和授权仍由父级快照负责。
+# 函数用途: 返回模型可见的能力申请参数说明，不创建授权、不写任务或安装状态。
 def _capability_request_input_schema() -> dict[str, object]:
     string_list_schema = {"type": "array", "items": {"type": "string"}}
     properties: dict[str, object] = {
@@ -320,7 +323,13 @@ def _capability_request_input_schema() -> dict[str, object]:
                 "宿主会把它规范到 requested_mcp_tools；重名或未知时不会猜。"
             ),
         },
-        "requested_skills": {**string_list_schema, "description": "任务确实需要的 skill 名。"},
+        "requested_skills": {
+            **string_list_schema,
+            "description": (
+                "任务确实需要的 Skill 名或 stable_id；能力包须填写 capability:<package_id>。"
+                "裸包名和包内资源路径不能替代包 stable_id。"
+            ),
+        },
         "requested_mcp_tools": {
             **string_list_schema,
             "description": (

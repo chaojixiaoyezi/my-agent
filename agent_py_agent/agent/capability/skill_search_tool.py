@@ -7,6 +7,7 @@
 #   next_read/next_search 只投影同代显式调用参数；包命名空间仅指已声明成员，不从正文推断业务路径归属。
 #   search 显式携带 resource_path 时在快照读取前报参数错，不静默丢条件或改成 get。
 #   错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
+#   get 的未声明成员沿原参数错误与同代入口建议纠正，不误报快照失效；取消、中断和真实读取失败保持原边界。
 #   正文读取及 pin 共用 package_read；本工具仍沿原 ToolExecutor 准入，宿主加载不伪造工具回执。
 #   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
@@ -16,6 +17,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from ..common.cancellation import raise_if_cancelled
 from ..settings.defaults import default_agent_config
 from ..tooling.models import (
     BaseTool,
@@ -95,8 +97,8 @@ def build_skill_search_model_spec() -> ToolModelSpec:
     )
 
 
-# LLM: 同一快照承接公开 Skill 与显式包范围；包成员读取前后复核原安装且成功后固定原任务引用。
-# 类用途: 为模型提供只读方法检索和分页正文读取，任务引用写入不代表执行或扩权。
+# LLM: 同一快照承接公开 Skill 与显式包范围；未声明成员仅给同代建议，成功读取后才固定原引用，真实失效不降为参数错。
+# 类用途: 为模型提供方法检索、路径纠错和分页正文读取，引用写入不代表执行或扩权。
 class SkillSearchTool(BaseTool):
     model_spec = build_skill_search_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -179,8 +181,8 @@ class SkillSearchTool(BaseTool):
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    # LLM: scoped 成员只来自本轮包声明，错误 fail closed；正文共用 package_read 的取消、字节校验和原 pin，不改工具准入或回执。
-    # 函数用途: 执行包范围检索或读取，让小结果和归档大结果都能定位原包；同代导航不读取其它成员。
+    # LLM: 原受限包与代次核验后，用同一 resolve 判未声明成员并仅给参数纠错；取消/中断传播，真实读取仍共用 reader 和原 pin。
+    # 函数用途: 检索或读取包资源；路径猜错时提供须重新显式调用的同代入口，不自动换路径、读正文或改任务引用。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
             return _invalid("包范围只接受 search/get，不能同时传 skill_id")
@@ -198,14 +200,24 @@ class SkillSearchTool(BaseTool):
             if action == "search":
                 payload = _package_matches(package, params, offset)
             else:
+                raise_if_cancelled()
+                resource_path = str(params.get("resource_path") or "")
+                if package.resolve(resource_path) is None:
+                    return _invalid(
+                        "CAPABILITY_RESOURCE_NOT_AVAILABLE",
+                        hint="resource_path 不在当前包的声明清单中；按 next_read 显式读取包入口，再检索并读取所需成员。",
+                        next_read=package_read_parameters(package.to_ref()),
+                    )
                 payload = read_package_page(
-                    self.agent, snapshot, package_id, resource_path=str(params.get("resource_path") or ""),
+                    self.agent, snapshot, package_id, resource_path=resource_path,
                     offset=offset, max_chars=_nonnegative_int(params, "max_chars", max(1, int(config.tool_read_max_chars))),
                 )
             payload = {**_package_navigation(package), **payload}
             return _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)
+        except InterruptedError:
+            raise
         except (OSError, ValueError) as exc:
             return _invalid(str(exc))
 

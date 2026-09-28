@@ -74,6 +74,48 @@
 - **变异**：把 helper 里 `contract.category == "permission"` 判据改成恒假（等同改动前行为），9 项失败、5 项仍绿
   （正是那些断言"回落"的用例），证明这批测试真的钉住了新行为而不是恒真。变异后已还原并复跑通过。
 
+## C19原生三助手分项（2026-09-27）
+
+- 固定cb40cc4a8已私有安装，1430源码/wheel/安装成员一致，pip check通过。停止态14353份非`.DS_Store`文件保持；备份时10份目录显示缓存变化有原始失败与差异记录，未覆盖原快照。无日用环境或主线部署操作。
+- 新CAP02仅一次原普通需求；taskrun整体264.981秒、三子attempt重叠88.800秒、自然终态、父背景读回三记录。A/B两名显式授权孩子已get当前同代方法/模板并保存记录，包引用与父级相同。
+- 第三子没有包授权，两次search被拒后没有请求能力，转读旧源码A0.1.1/B0.1.0。实际只落三记录和B示例，父声称的汇总及A两示例不存在；整体交接未过。未触发未声明成员get纠错、父resolve或Compact，不把本轮计为这些分支的真实通过。
+- 原工具索引与canonical分别核对；首父response为43.631秒等待回复，不作为整个任务或最终回复。私有`candidate-19-general-delegation-observation.json`摘要`ed75515958ce38c4e561faec3469481594fe9c7b23a7985b56fe3db241c35190`保留父子身份/调用/文件/分线程用量。321旧文件、133旧绑定、六配置及安装账保持。
+- 独立审计`candidate-19-general-delegation-independent-audit.json`确认A/B分别9/4次同代get，B示例source_ref复制字节一致；A检查器首资源页及preview均未续读，不算完整阅读。三子原用量账辅助logical/HTTP均0，主HTTP分别13/8/12；真实结果仍以各分项和整体交付分别判定。
+- 本轮没有继续修改产品或新增测试；119项及严格gate属于已安装cb40补片的本地证据。最终0/27保持，原C18失败和当前部分成功分别记账，详见[当前验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c19三助手资料交接2026-09-27分项通过整体未过)。
+- 后续责任核定未发现新的宿主缺陷：原派工遗漏授权，实际子提示和错误回执均保留申请入口；三个结构化子交付路径全部存在，父额外声称不是结构化声明。仅运行既有`test_deliverable_closeout_gate.py`，8项通过、源码指纹保持、零真实模型调用；证据`candidate-19-closeout-contract-check-01.json`摘要`016369fbc5d9c73cc0d6f4c1b9c17c85e8482523edf6ddb48d02b165ce348c4e`，不计为C19业务通过。
+
+建议下一步：保留当前候选，按通用机制与模型交付限制分别收口；Claude可并行完成Compact，收到固定修复后再验连续压缩及最终矩阵，不追加需求救本轮产物。
+
+## C18包成员参数纠错（2026-09-27）
+
+- 原生C18失败保留；旧产品最小反例4/4失败，均把未声明成员报为`SKILL_SNAPSHOT_UNAVAILABLE`。真实ToolExecutor同样失败，红证据`candidate-18-resource-path-red-01`未改写；其中第三路径为当时的`../CAPABILITY.md`，最终覆盖改用`inputs/story.json`。中断吞异常是另一个静态发现，不冒充这4项的失败原因。
+- 产品只改`skill_search_tool.py`：原包/代次核验之后按声明判成员，返回原参数错误及同代入口建议；保留原reader、任务pin与取消语义，明确重抛`InterruptedError`。无新增状态、配置、依赖、权限或模型循环。
+- `.venv/bin/python -B -m pytest agent_py_agent/tests/test_capability_package_resource_scope.py agent_py_agent/tests/test_capability_package_selector_recovery.py agent_py_agent/tests/test_capability_package_read.py agent_py_agent/tests/test_capability_package_discovery.py agent_py_agent/tests/test_capability_package_runtime_binding.py agent_py_agent/tests/test_capability_package_native_pipeline.py -q --tb=short`：119 passed，0失败/错误/跳过，6.083秒。实际使用原checkout的Python 3.12 venv、当前工作树源码、隔离MY_AGENT_HOME和临时目录，无真实模型/Gateway。
+- 新10例覆盖三个错成员路径、任意声明入口名、同代建议的显式重读、真实ToolExecutor恢复动作及原TaskStore pin、旧代拒绝、真实缺字节/摘要错误和取消。原未知/未授权例加强断言；不声称失败get不会沿原策略晋升任务。
+- 测试前后所有受核Python源码指纹一致，私有证据`candidate-18-resource-path-focused-01.json/.xml/.log`保留准确argv与摘要，日志SHA256 `3967a3470f7eac359388222b353644d0c76efe416477cf10067638da7e665570`。独立只读末审无阻断；成熟参考与边界记录在`candidate-18-resource-path-readonly-review.json`。
+- 本地严格gate已通过：Ruff、doc-sync、strict-size（hard=0）、diff和clean-package全部退出0，记录为`candidate-18-resource-path-strict-01.json`；生成尺寸报告已恢复原字节。随后只更新通过记录并复核doc-sync/diff，未重跑组件。线上CI未作为验收来源。无新增重要文件或配置，不改CODEBASE_TREE、YAML/dataclass；未改变子代理模块，模块四件套无需更新。当前私有运行仍def648397，真实模型纠错和委派待固定新版复验，最终0/27保持。
+
+建议下一步：固定补片交Claude集成，root在私有新版用新会话验证原需求；Claude可并行完成Compact，双方不同时写产品入口，不补救C18旧业务产物。
+
+## C17显式包申请组件链（2026-09-27）
+
+- 真实隔离安装/创建/申请组件先证明旧产品5例4失败1通过：合法包申请在无候选及真实包卡命中时均提前GAP，未知包也提前GAP，混合申请只授工具却GRANTED；裸包名不会自动变成包授权。
+- 修复仅在原owner路径判断之后，将含`capability:`引用的请求保留OPEN/PARENT_RESOLUTION_REQUIRED；原父级resolve负责快照解析、完整ref与canonical grant。两个模型参数说明明确包stable_id和批量item.allowed_skills，不新增配置、权限账、首请求marker或兼容别名。
+- `.venv/bin/python -m pytest agent_py_agent/tests/test_capability_package_task_refs.py agent_py_agent/tests/test_agent/test_subagent_action_and_route.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_resolve_capability_requests_tool.py agent_py_agent/tests/test_capability_auto_grant.py agent_py_agent/tests/test_orchestration_tool_specs.py agent_py_agent/tests/test_manager_runner_capability_requests.py -q --tb=short`：最终111项通过，0失败/错误/跳过，15.315秒。使用原checkout的Python 3.12 venv、当前工作树源码与隔离home，无真实模型或Gateway。
+- 新合法链已走到父级grant、七字段引用、孩子同代私有方法get和重复resolve无重复授权；混合申请不局部结清，未知包批准失败后可deny关闭。测试前后源码指纹一致。
+- 私有`candidate-17-package-request-focused-02.json/.xml/.log`保留最终准确命令与指纹，日志SHA256为`e9e93bf6ce99e361311c2f70ba62d9ecf3e7ce0c72664f23da96aebf4f90392e`。旧红例及首轮绿验另存，不覆盖。独立末审无阻断，明确mixed仅验自动路由、原search仍运行、批量顶层默认值保持；澄清参数说明后重跑上述最终111项。严格gate首轮仅doc-sync要求补模块结构文档，补齐后通过；Ruff、strict-size（hard=0）、diff和clean-package通过，最终组合记录为candidate-17-package-request-strict-02.json，生成的size报告恢复原字节。线上CI未作为依据，原G05和最终0/27不改判。
+- 建议下一步：固定补片交Claude集成，与其Compact修复可并行；root在新固定运行版本做一次原生委派复验，再进入最终矩阵。
+
+## C17子代理资料路径异常隔离（2026-09-27）
+
+- G05首子请求被长input_refs的ENAMETOOLONG中断，原始失败及包授权缺项见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17并发资料交接与输入引用修复2026-09-27)。本地旧builder用临时文件及超长引用再次复现，没有真实模型或运行环境操作。
+- 生产仅修改`prompt_context_summary._resolve_read_paths`：逐候选隔离exists/resolve的OSError，沿原unresolved计数；保留其它根/引用并重抛InterruptedError。无新授权、状态、配置或依赖；expanduser和根目录规范化仍沿原行为，不宣称覆盖所有路径异常。
+- 新8例旧实现6失败/2通过，修后8通过：required/hint各覆盖exists/resolve异常、多根中的可用替代候选及中断传播。
+- 完整相关命令：`.venv/bin/python -m pytest agent_py_agent/tests/test_runner_prompts.py agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py agent_py_agent/tests/test_create_subagents_input_read_scope.py agent_py_agent/tests/test_subagent_context_bundle.py -q --tb=short`，65项通过，7.054秒，两份变更源码前后指纹相同。实际使用原checkout的Python 3.12 venv执行，源码来自本能力分支。
+- 成熟参考仅核本地Hermes `agent/context_references.py`逐引用独立展开和异常警告；本仓复用原unresolved，仅捕获对应文件系统异常，不引入解析器或宽泛Exception捕获。
+- 私有`candidate-17-readrefs-focused-01.json/.log`保留命令、源码及日志摘要；日志SHA256 `55c823246eb78aa7433a1726dc60eafc4b2d57bcf5526ee5a7307de2bfb3651b`。独立窄审无阻断；最终Ruff、doc-sync、strict code-size（hard=0）、diff和clean-package全部通过，记录为candidate-17-readrefs-strict-02.json。首轮Ruff的长导入排版错误已修，测试AST与已测版本相同；首轮失败记录保留。线上CI未作为依据，私有Gateway仍51dac。
+- 建议下一步：固定本地补片交Claude，再补合法包申请链的确定性覆盖；原生复验绑定新固定版本，旧G05失败和最终0/27保持。
+
 ## B0.1.4字段映射资料纠正（2026-09-27）
 
 - 本地候选只修改B方法与来源说明，并将声明版本从0.1.3升为0.1.4；两个既有构建版本断言同步更新，没有新增测试、schema、校验规则或宿主逻辑。组件阶段原安装版B0.1.3及G04业务文件保持，随后原生更新另记如下。

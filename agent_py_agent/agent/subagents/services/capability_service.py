@@ -1,6 +1,6 @@
-# LLM: This service routes only OPEN typed requests. Objective owner-scope violations become GAP
-# before semantic card selection and can never create a grant or continuation wake.
-# 模块用途: 为子代理能力申请匹配工具/技能，并把无法授权的范围记录为结构化缺口。
+# LLM: 本服务只路由 OPEN 申请，先校验 owner 路径范围；显式包申请保留给原直属父级裁决，
+# 不能用语义候选替代完整包引用。修改时同步核对 resolve、任务快照与能力申请组件测试。
+# 模块用途: 为子代理匹配工具/技能；越界路径记缺口，需要父级裁决的申请保持原状态。
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -49,6 +49,8 @@ def _iter_open_capability_requests(tasks):
     )
 
 
+# LLM: 路由复用 manager 的 canonical request/grant；只有原 apply 分支会写状态，待父级裁决记录不写账。
+# 类用途: 汇总子代理的开放能力申请，生成观察报告或应用既有工具、技能授权。
 class SubAgentCapabilityService:
     """Route OPEN capability requests to available skill/tool cards."""
 
@@ -102,9 +104,9 @@ class SubAgentCapabilityService:
         write_capability_route_report_files(self.manager, report, apply=options.apply)
         return report
 
-    # LLM: Owner scope is checked before existing-grant reuse or semantic hit application. Keep
-    # this ordering so no broad historical grant can bypass the current tenant boundary.
-    # 函数用途: 路由一条能力申请，越过用户目录时直接记缺口，否则再匹配或复用能力卡。
+    # LLM: owner 路径裁决先于包申请、历史授权和语义候选；包与其它能力的混合申请必须整条
+    # 留给父级 resolve，避免局部自动授权提前结清请求。保持父级快照解析和 grant 持久化为原权威。
+    # 函数用途: 路由一条申请；路径越界可记缺口，显式包申请只报告待裁决，其余走原匹配链。
     def _route_capability_request(
         self,
         task: SubAgentTask,
@@ -132,6 +134,9 @@ class SubAgentCapabilityService:
                     apply=apply,
                 ),
             )
+        if any(reference.startswith("capability:") for reference in request.requested_skills or []):
+            # 前缀只标识包命名域，不证明父级拥有该包；可用性和完整引用由原 resolve 校验。
+            return _parent_resolution_record(task, request, query, hits)
         requested_tool_names = requested_capability_tool_names(request)
         if requested_tool_names:
             parent_authority = direct_parent_tool_authority(
@@ -177,16 +182,20 @@ class SubAgentCapabilityService:
         )
 
 
-# LLM: This record is observational even in an applying sweep. It preserves the OPEN request for
-# the direct parent and prevents semantic no-hit routing from racing the parent's structured wake.
-# 函数用途: 记录“直属父级可裁决”但不改申请状态，避免自动路由先把 OPEN 误关成 GAP。
+# LLM: 即使 apply=True，本记录也不写申请或授权；包前缀不代表可授权，不能伪造工具权限事实。
+# 函数用途: 说明原申请正在等待直属父级 grant/deny，保留已有 OPEN 与唤醒链，避免语义路由抢先结清。
 def _parent_resolution_record(
     task: SubAgentTask,
     request: CapabilityRequest,
     query: str,
     hits: list[CapabilitySearchHit],
-    authority: object,
+    authority: object | None = None,
 ) -> CapabilityRouteRecord:
+    request_scope = {"capability_request": request_scope_snapshot(request)}
+    message = "申请包含显式能力包引用；保留 OPEN，等待直属父级按当前快照结构化 grant/deny。"
+    if authority is not None:
+        request_scope["parent_tool_authority"] = authority.to_dict()
+        message = "申请工具均在直属父级当前权限内；保留 OPEN，等待直属父级结构化 grant/deny。"
     return CapabilityRouteRecord(
         id=f"parent-resolution:{request.id}",
         run_id=task.id,
@@ -195,11 +204,8 @@ def _parent_resolution_record(
         dry_run=True,
         query=query,
         candidate_count=len(hits),
-        request_scope={
-            "capability_request": request_scope_snapshot(request),
-            "parent_tool_authority": authority.to_dict(),
-        },
-        message="申请工具均在直属父级当前权限内；保留 OPEN，等待直属父级结构化 grant/deny。",
+        request_scope=request_scope,
+        message=message,
     )
 
 
