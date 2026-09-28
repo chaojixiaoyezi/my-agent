@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from queue import Queue
@@ -1504,6 +1505,71 @@ def test_gateway_queued_active_input_attaches_exact_next_turn_without_resubmit(
     assert queued_job.inject_complete is True
     assert runtime.store.snapshot().pending_steers == ()
     assert params.pending_jobs_ref_for_enqueue == [1]
+    params.stop_event.set()
+
+
+# 类用途: 提交时只拿到入口编号（结果未知），状态查询给出“最终未确认”的假 Gateway 客户端，并记录查询次数。
+class _UnconfirmedGatewayAgent:
+    def __init__(self) -> None:
+        self.status_calls: list[str] = []
+
+    # 函数用途: 首次提交只返回稳定入口编号，投递结果未知。
+    def request_active_turn_input(self, *_args, **_kwargs):
+        from agent_py_agent.cli.chat_client_context import (
+            ActiveTurnInputDelivery,
+            ActiveTurnInputResult,
+        )
+
+        return ActiveTurnInputResult(ActiveTurnInputDelivery.UNKNOWN, request_id="gwreq-msg-unconfirmed",
+                                     disposition="active_turn_input")
+
+    # 函数用途: 状态查询返回服务端 terminal_unknown 解出的最终未确认。
+    def request_active_turn_input_status(self, request_id):
+        from agent_py_agent.cli.chat_client_context import (
+            ActiveTurnInputDelivery,
+            ActiveTurnInputResult,
+        )
+
+        self.status_calls.append(request_id)
+        return ActiveTurnInputResult(ActiveTurnInputDelivery.UNCONFIRMED, request_id=request_id,
+                                     disposition="active_turn_input")
+
+
+# 函数用途: 组一份主回合运行中的 TUI 按键参数，供活动回合插话对账测试使用。
+def _running_turn_params(agent, runtime: TuiRuntime, jobs: Queue, root) -> SimpleNamespace:
+    return SimpleNamespace(media_importing=False, use_gateway=True, state_lock=threading.Lock(),
+                           is_running_ref=[True], running_request_id_ref=["gwreq-active"],
+                           pending_jobs_ref_for_enqueue=[0], runtime_inject=[], prompt_files=[],
+                           args=SimpleNamespace(no_save=False, resume_context=None), jobs=jobs,
+                           tui_runtime=runtime, current_session_id="session-unconfirmed",
+                           stop_event=threading.Event(), agent=agent, paths=SimpleNamespace(root=root),
+                           active_input_reconciler=None)
+
+
+def test_terminal_unknown_active_input_stops_polling_and_shows_final_state(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from agent_py_agent.cli.chat_parts.tui_input_delivery import tui_active_input_outbox_path
+
+    runtime, jobs, agent = TuiRuntime("active-turn-unconfirmed"), Queue(), _UnconfirmedGatewayAgent()
+    params = _running_turn_params(agent, runtime, jobs, tmp_path)
+    monkeypatch.setattr(tui_actions, "ACTIVE_TURN_RETRY_INITIAL_SECONDS", 0.05)
+
+    text = "这条插话最后没有得到模型确认"
+    assert tui_actions._tui_submit_active_turn_input(params, text, display_text=text)
+    deadline = time.time() + 3.0
+    while runtime.store.snapshot().pending_steers and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.4)  # 终态之后不能再查询
+
+    system = [block.text for block in runtime.store.snapshot().stable_blocks if block.role == "system"]
+    assert runtime.store.snapshot().pending_steers == ()
+    assert any("未获模型确认" in line and "不会自动重发" in line for line in system)
+    assert agent.status_calls == ["gwreq-msg-unconfirmed"]
+    outbox = json.loads(tui_active_input_outbox_path(tmp_path, "session-unconfirmed").read_text(encoding="utf-8"))
+    assert outbox["entries"] == {}
+    assert jobs.empty() and params.pending_jobs_ref_for_enqueue == [0]  # 不排队、不重发
     params.stop_event.set()
 
 

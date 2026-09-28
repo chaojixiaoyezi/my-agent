@@ -622,3 +622,42 @@ def test_gateway_chat_client_preserves_unknown_transport_result(monkeypatch, tmp
         expected_turn_id="gwreq-active-unknown",
     )
     assert result.delivery is ActiveTurnInputDelivery.UNKNOWN
+
+
+def test_input_status_terminal_unknown_is_a_final_unconfirmed_result(monkeypatch, tmp_path) -> None:
+    from agent_py_agent.cli.chat_client_context import (
+        ActiveTurnInputDelivery,
+        GatewayChatClientAgent,
+    )
+
+    payloads: list[dict[str, object]] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(payloads.pop(0)).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda _request, timeout: Response())
+    client = GatewayChatClientAgent(
+        SimpleNamespace(),
+        SimpleNamespace(gateway_port=18420),
+        tmp_path,
+        [tmp_path],
+        SimpleNamespace(),
+    )
+    base = {"request_id": "gwreq-msg-1", "disposition": "active_turn_input", "delivery_status": "unknown"}
+    payloads.extend([{**base, "input_state": "terminal_unknown"}, {**base, "input_state": "active_pending"}])
+
+    final = client.request_active_turn_input_status("gwreq-msg-1")
+    pending = client.request_active_turn_input_status("gwreq-msg-1")
+
+    # 服务端回执已终态未知：不是拒绝（不重发），但不会再变，客户端停止对账；仍在途的继续按未知对账。
+    assert (final.delivery, final.request_id) == (ActiveTurnInputDelivery.UNCONFIRMED, "gwreq-msg-1")
+    assert pending.delivery is ActiveTurnInputDelivery.UNKNOWN

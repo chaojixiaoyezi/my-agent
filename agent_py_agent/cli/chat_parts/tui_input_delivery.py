@@ -108,6 +108,7 @@ class TuiActiveInputReconciler:
         on_queued: Callable[[TuiActiveInputOutboxEntry, str], None],
         on_rejected: Callable[[TuiActiveInputOutboxEntry], None],
         on_conflict: Callable[[TuiActiveInputOutboxEntry], None],
+        on_unconfirmed: Callable[[TuiActiveInputOutboxEntry], None],
         on_error: Callable[[BaseException], None],
         stop_event: threading.Event,
         initial_delay: float,
@@ -120,6 +121,7 @@ class TuiActiveInputReconciler:
         self.on_queued = on_queued
         self.on_rejected = on_rejected
         self.on_conflict = on_conflict
+        self.on_unconfirmed = on_unconfirmed
         self.on_error = on_error
         self.stop_event = stop_event
         self.initial_delay = max(0.05, float(initial_delay))
@@ -199,7 +201,8 @@ class TuiActiveInputReconciler:
 
     # LLM: Once Gateway returns a stable ingress id, retries switch to read-only /input-status;
     # only a response-loss row without that id repeats POST with the same immutable message id.
-    # 函数用途: 对账一条消息，并按 accepted、queued、rejected 或 unknown 更新持久状态。
+    # UNCONFIRMED (server terminal_unknown) is final: finish the row once and never resend it.
+    # 函数用途: 对账一条消息，并按 accepted、queued、rejected、conflict、最终未确认或 unknown 更新持久状态。
     def _reconcile_one(self, entry: TuiActiveInputOutboxEntry) -> None:
         try:
             result = self.status(entry.request_id) if entry.request_id else self.submit(entry)
@@ -219,6 +222,9 @@ class TuiActiveInputReconciler:
                 return
         elif result.delivery is ActiveTurnInputDelivery.CONFLICT:
             if self._finish(entry.message_id, lambda: self.on_conflict(entry)):
+                return
+        elif result.delivery is ActiveTurnInputDelivery.UNCONFIRMED:
+            if self._finish(entry.message_id, lambda: self.on_unconfirmed(entry)):
                 return
         request_id = str(result.request_id or entry.request_id).strip()
         attempts = entry.attempts + 1

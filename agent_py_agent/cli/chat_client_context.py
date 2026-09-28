@@ -44,13 +44,16 @@ from .workspace_resolution import (
 
 # LLM: Transport delivery is deliberately tri-state. UNKNOWN is never false/rejected because the
 # Gateway may have committed the same client id after the HTTP response path was lost.
-# 类用途: 表示活动回合补充消息已接收、明确拒绝或仍需对账。
+# UNCONFIRMED is the server's terminal_unknown receipt: still not rejected (never resend), but final,
+# so the client stops reconciling and shows the unconfirmed outcome.
+# 类用途: 表示活动回合补充消息已接收、明确拒绝、仍需对账，或已最终定为未获确认。
 class ActiveTurnInputDelivery(str, Enum):
     ACCEPTED = "accepted"
     QUEUED = "queued"
     REJECTED = "rejected"
     CONFLICT = "conflict"
     UNKNOWN = "unknown"
+    UNCONFIRMED = "unconfirmed"
 
 
 # LLM: The client must retain the server's canonical queued request id; a bare enum cannot attach
@@ -546,8 +549,8 @@ def post_gateway_json(
 
 
 # LLM: POST /ask and GET /input-status share one result decoder. Client UI decisions rely only on
-# typed disposition/delivery fields and retain the server's canonical request id.
-# 函数用途: 把 Gateway 普通消息状态转换成 TUI 使用的四态结果。
+# typed disposition/delivery/input_state fields and retain the server's canonical request id.
+# 函数用途: 把 Gateway 普通消息状态转换成 TUI 使用的结果（接收、排队、拒绝、冲突、未知或最终未确认）。
 def _active_turn_input_result(
     status: int,
     body: dict[str, object],
@@ -575,8 +578,10 @@ def _active_turn_input_result(
             disposition=disposition,
         )
     if disposition == "active_turn_input" and delivery_status == "unknown":
+        # 服务端回执已收成 terminal_unknown：目标回合结束、确认无从证明，之后不会再变，客户端据此停止对账。
+        terminal = str(body.get("input_state") or "").strip() == "terminal_unknown"
         return ActiveTurnInputResult(
-            ActiveTurnInputDelivery.UNKNOWN,
+            ActiveTurnInputDelivery.UNCONFIRMED if terminal else ActiveTurnInputDelivery.UNKNOWN,
             request_id=request_id,
             disposition=disposition,
         )

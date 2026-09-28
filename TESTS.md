@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## TUI 插话终态未确认时停止轮询（2026-09-28，分支 `claude/be-steer-terminal`，基于 `d786e14bb`）
+
+- **来源**：`claude/be-steer-loss` 的尾巴。Gateway 入口回执收成 `terminal_unknown`（目标回合已结束、无法证明模型确认过）以后不会再变，
+  TUI 却一直按“未知”重试查询。生产上那条丢失的插话已经查询了上千次。
+- **改动**：解码函数看到 `input_state=terminal_unknown` 时给出新的终态 `UNCONFIRMED`；对账器收到后删掉待发箱这一行、停止查询；
+  界面撤下等待项，在历史里写一行“插话未获模型确认，已停止等待，不会自动重发”，附简短原文。不排队、不重发、不碰 guidance 账本。
+- **新测试**：
+  - `test_chat_client_context.py::test_input_status_terminal_unknown_is_a_final_unconfirmed_result`：`terminal_unknown` 解成
+    UNCONFIRMED，`active_pending` 仍是 UNKNOWN。
+  - `test_tui_input.py::test_terminal_unknown_active_input_stops_polling_and_shows_final_state`：真实对账线程只查询一次，
+    等待项撤下，历史有终态行，待发箱清空，不产生排队任务。
+- **变异验证**：6 个全部被抓出，包括解码忽略终态、所有未知都当终态、对账器继续轮询、不写终态行、不撤等待项、当成拒绝重新排队。
+  每个都在 `PYTHONDONTWRITEBYTECODE=1` 子进程里跑，并逐字节恢复。
+
 ## TUI 插话丢失修复（2026-09-28，分支 `claude/be-steer-loss`，基于 `f7851cec8`）
 
 - **来源**：集成者派活，用户反馈 TUI 插话经常没进去。按规定只读结构化事实：插话回执的状态、编号和时间，模型提交与确认批次，

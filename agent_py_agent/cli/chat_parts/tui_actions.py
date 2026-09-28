@@ -682,6 +682,13 @@ def _ensure_active_input_reconciler(
         runtime.cancel_active_turn_input(entry.message_id)
         runtime.set_notice("Message identity conflict · please send again", duration_seconds=3.0)
 
+    # LLM: Server terminal_unknown is final but not a rejection: resending or queueing could deliver twice.
+    # Only the local pending row is removed and one history line records the unconfirmed outcome.
+    # 函数用途: 停止等待这条补充消息，并在历史里标明它最终未获模型确认、不会自动重发。
+    def on_unconfirmed(entry) -> None:
+        runtime.cancel_active_turn_input(entry.message_id)
+        runtime.write_console(_steer_unconfirmed_notice(entry.display_text))
+
     # LLM: Disk/corruption errors must not kill the sole reconciler silently; the durable row stays
     # untouched while the user receives a non-authoritative diagnostic notice.
     # 函数用途: 提示补充消息对账暂时失败，后台继续按退避重试。
@@ -697,6 +704,7 @@ def _ensure_active_input_reconciler(
         on_queued=on_queued,
         on_rejected=on_rejected,
         on_conflict=on_conflict,
+        on_unconfirmed=on_unconfirmed,
         on_error=on_error,
         stop_event=params.stop_event,
         initial_delay=ACTIVE_TURN_RETRY_INITIAL_SECONDS,
@@ -803,6 +811,17 @@ def _tui_submit_agent_input(
     runtime.set_notice("正在确认子代理消息…", duration_seconds=1.2)
     threading.Thread(target=deliver, daemon=True).start()
     app.invalidate()
+
+
+# LLM: Terminal history line for a server terminal_unknown steer. The preview only identifies the
+# message for the user; it carries no delivery authority and never triggers a resend.
+# 函数用途: 生成“插话最终未获模型确认、不会自动重发”的历史提示，附一段简短原文便于辨认。
+def _steer_unconfirmed_notice(text: str) -> str:
+    preview = " ".join(str(text or "").split())
+    if len(preview) > 32:
+        preview = preview[:31].rstrip() + "…"
+    base = "插话未获模型确认，已停止等待，不会自动重发；如仍需要请重新发送"
+    return f"{base}：{preview}" if preview else base
 
 
 # LLM: The acknowledgement is a bounded preview of one mailbox-accepted but not
