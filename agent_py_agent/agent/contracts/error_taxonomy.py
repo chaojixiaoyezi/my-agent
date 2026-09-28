@@ -696,6 +696,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "请用 create_session_task 回执里的 task_id，不要凭名称猜。"
         ),
     ),
+    "SESSION_TASK_STOP_UNCONFIRMED": ErrorContract(
+        code="SESSION_TASK_STOP_UNCONFIRMED",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint=(
+            "任务记录已取消，但对目标执行回合的停止控制没有确认生效：可能目标回合刚结束、"
+            "渠道身份不可确认，或当前不在 Gateway 队列里。不要声称目标已停止；"
+            "请用 get_session_task 看任务状态，必要时在目标会话里人工确认。"
+        ),
+    ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(
         code="SESSION_TASK_RATE_LIMIT",
         category="orchestration",

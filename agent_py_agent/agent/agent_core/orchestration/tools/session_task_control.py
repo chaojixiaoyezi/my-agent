@@ -98,8 +98,10 @@ class CancelSessionTaskTool(BaseTool):
         self.agent = agent
         self.model_spec = build_cancel_session_task_model_spec()
 
-    # LLM: 终态直接返回当前状态（不改写）；非终态推进到 cancelled 并回报发送方。
-    # 函数用途: 取消一条会话任务并把结果通知给派活的会话。
+    # LLM: 终态直接返回当前状态（不改写）；非终态按目标是否已接手分流：已接手就对它绑定的那个回合发
+    #   /stop 同款精确停止控制，还在排队就撤掉目标队列里的正文。两条路径都推进到 cancelled，
+    #   回执只按实际结果写"已停止""已撤销"或"未确认"。
+    # 函数用途: 取消一条会话任务、真的叫停目标并把实际结果通知给派活的会话。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         ref = _task_ref(params, _CANCEL_NAME)
         if isinstance(ref, ToolHandlerOutcome):
@@ -115,7 +117,18 @@ class CancelSessionTaskTool(BaseTool):
             payload["already_terminal"] = True
             payload["message"] = "任务已经是终态，未做改动。"
             return ToolHandlerOutcome(_CANCEL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+        bound_turn_id = str(getattr(task, "conversation_request_id", "") or "").strip()
+        stop_confirmed = False
+        stop_message = ""
+        withdrawn = False
+        withdraw_note = ""
         try:
+            if bound_turn_id:
+                stop = _stop_target_turn(self.agent, task)
+                stop_confirmed = bool(stop.confirmed)
+                stop_message = str(stop.message or "")
+            else:
+                withdrawn, withdraw_note = _withdraw_queued_body(self.agent, task)
             cancelled = store.advance(task.task_id, status=SESSION_TASK_CANCELLED)
             notified = _notify_sender(self.agent, cancelled)
         except Exception as exc:  # noqa: BLE001
@@ -128,8 +141,73 @@ class CancelSessionTaskTool(BaseTool):
             )
         payload = _task_payload(cancelled)
         payload["notified_sender"] = notified
-        payload["message"] = "任务已取消；这不代表目标已经停止正在执行的工作。"
+        if bound_turn_id:
+            payload["stop_confirmed"] = stop_confirmed
+            payload["stop_message"] = stop_message
+            payload["message"] = (
+                "任务已取消：已停止目标上正在执行这个任务的回合。"
+                if stop_confirmed
+                else "任务已取消；对目标执行这个任务的回合，停止控制尚未确认。"
+            )
+        else:
+            payload["withdrawn_from_queue"] = withdrawn
+            if withdraw_note:
+                payload["withdraw_note"] = withdraw_note
+            payload["message"] = (
+                "任务还没有开始执行；已从目标队列撤销，不会再被执行。"
+                if withdrawn
+                else "任务还没有开始执行；已标记取消，但目标队列条目未确认撤销。"
+            )
         return ToolHandlerOutcome(_CANCEL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# LLM: 只按任务已绑定的回合号发停止控制：回合号来自目标会话确认消费任务正文时写入的记录，
+#   不读模型参数、不猜"目标当前那一个回合"。目标 thread 只用于取结构化渠道身份。
+# 函数用途: 请求停止目标会话上执行这个任务的精确回合。
+def _stop_target_turn(agent: object, task: object) -> object:
+    from ....gateway_parts.session_task_stop import SessionTaskStopOutcome, stop_session_task_turn
+
+    target_thread = None
+    store = getattr(agent, "conversation_store", None)
+    threads = getattr(store, "threads", None)
+    target_thread_id = str(getattr(task, "target_thread_id", "") or "").strip()
+    if threads is not None and target_thread_id:
+        try:
+            target_thread, _load_error = threads.load_report(target_thread_id)
+        except Exception:  # noqa: BLE001 - 读不到目标会话就不能确认停止
+            target_thread = None
+    try:
+        return stop_session_task_turn(
+            agent,
+            target_thread=target_thread,
+            turn_id=str(getattr(task, "conversation_request_id", "") or ""),
+        )
+    except Exception:  # noqa: BLE001 - 异常不等于目标已停止
+        return SessionTaskStopOutcome(False, "停止控制执行失败；目标是否已停止未确认。")
+
+
+# LLM: 任务还没被目标接手时，撤队列就是把正文那条 guidance 的回执标成 rejected——回执一旦不是 pending，
+#   注入层就不会再取到它，任务不会再被执行。已越过认领边界（reserved/submitted/consumed）时如实返回未撤销，
+#   让回执写明"可能已经开始执行"，绝不谎称已撤销。
+# 函数用途: 把还没开始执行的会话任务正文从目标队列撤掉。
+def _withdraw_queued_body(agent: object, task: object) -> tuple[bool, str]:
+    store = getattr(agent, "conversation_store", None)
+    guidance = getattr(store, "guidance", None)
+    key = str(getattr(task, "body_dedupe_key", "") or "").strip()
+    if guidance is None or not key:
+        return False, "没有可定位的队列条目。"
+    try:
+        receipt = guidance.receipt(key)
+        if receipt is None:
+            return False, "目标队列里找不到这条任务的正文。"
+        if receipt.status == "pending":
+            guidance.mark_status(key, "rejected")
+            return True, ""
+        if receipt.status == "rejected":
+            return True, ""
+    except Exception:  # noqa: BLE001 - 撤队列失败不影响取消本身已记录
+        return False, "撤销队列条目失败。"
+    return False, "目标已经开始处理这条正文，取消只能标记状态。"
 
 
 # LLM: 任务正文只存一份在 guidance；payload 只暴露引用与状态，不复制正文。

@@ -211,8 +211,9 @@ def _create_and_dispatch(
         return limit_error
 
     dedupe_key = f"session_task:{sender_thread_id}->{parsed.target_thread_id}:{parsed.goal}"
+    body_dedupe_key = f"body:{dedupe_key}"
     try:
-        # 先投正文：它是任务正文的唯一存放处。
+        # 先投正文：它是任务正文的唯一存放处。正文队列键同时写进记录，取消未开始的任务时按它撤队列。
         body = store.guidance.append_once(
             {
                 "target_type": "thread",
@@ -226,13 +227,14 @@ def _create_and_dispatch(
                     "origin_thread_id": sender_thread_id,
                 },
             },
-            dedupe_key=f"body:{dedupe_key}",
+            dedupe_key=body_dedupe_key,
         )
         task = store.session_tasks.create(
             sender_thread_id=sender_thread_id,
             target_thread_id=parsed.target_thread_id,
             goal=parsed.goal,
             body_guidance_id=body.guidance_id,
+            body_dedupe_key=body_dedupe_key,
             dedupe_key=dedupe_key,
             origin_task_id=origin_task_id,
         )

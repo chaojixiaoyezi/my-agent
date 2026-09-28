@@ -1,7 +1,9 @@
 # LLM: 会话间派活的唯一权威存储。SessionTaskStore 只存派活记录（发送方、接收方、正文引用、dedupe_key、
-#   origin_task_id）和指向目标执行的链接；任务正文只存一份（作为 guidance 条目），这里只存它的 id。
-#   状态机只有一个写入方：accepted 由目标 TurnTrigger 消费时写入；done/failed/cancelled 只由目标请求的
-#   终态事件写入。禁止出现"这里说 done、目标请求其实 failed"的双账。
+#   body_dedupe_key、origin_task_id）和指向目标执行的链接；任务正文只存一份（作为 guidance 条目），
+#   这里只存它的 id 与队列键。
+#   状态机只有一个写入方：accepted 由目标会话确认消费任务正文（guidance ack）时写入，同时把该回合的
+#   request id 绑成 conversation_request_id；done/failed/cancelled 只由目标请求的终态事件写入。
+#   禁止出现"这里说 done、目标请求其实 failed"的双账。
 # 模块用途: 保存会话间派活的任务记录与状态，供派活工具、状态查询、取消和结果回报共用。
 from __future__ import annotations
 
@@ -41,6 +43,8 @@ class SessionTask:
     goal: str
     # 任务正文只存一份：作为目标 thread 的 guidance 条目，这里只存它的 id。
     body_guidance_id: str = ""
+    # 任务正文在目标 guidance 队列里的幂等键：撤队列（取消未开始的任务）按它定位那一条正文。
+    body_dedupe_key: str = ""
     status: str = SESSION_TASK_QUEUED
     dedupe_key: str = ""
     # 防循环：由对端 task 触发的 task 记下上级 task；链深按这个字段结构化计算。
@@ -62,6 +66,7 @@ class SessionTask:
             "target_thread_id": self.target_thread_id,
             "goal": self.goal,
             "body_guidance_id": self.body_guidance_id,
+            "body_dedupe_key": self.body_dedupe_key,
             "status": self.status,
             "dedupe_key": self.dedupe_key,
             "origin_task_id": self.origin_task_id,
@@ -84,6 +89,7 @@ class SessionTask:
             target_thread_id=str(data.get("target_thread_id") or ""),
             goal=str(data.get("goal") or ""),
             body_guidance_id=str(data.get("body_guidance_id") or ""),
+            body_dedupe_key=str(data.get("body_dedupe_key") or ""),
             status=str(data.get("status") or SESSION_TASK_QUEUED),
             dedupe_key=str(data.get("dedupe_key") or ""),
             origin_task_id=str(data.get("origin_task_id") or ""),
@@ -151,6 +157,7 @@ class SessionTaskStore:
         target_thread_id: str,
         goal: str,
         body_guidance_id: str = "",
+        body_dedupe_key: str = "",
         dedupe_key: str = "",
         origin_task_id: str = "",
         now: float | None = None,
@@ -173,6 +180,7 @@ class SessionTaskStore:
             target_thread_id=str(target_thread_id or ""),
             goal=str(goal or ""),
             body_guidance_id=str(body_guidance_id or ""),
+            body_dedupe_key=str(body_dedupe_key or ""),
             dedupe_key=key,
             origin_task_id=str(origin_task_id or ""),
             created_at=current,
@@ -181,7 +189,56 @@ class SessionTaskStore:
         write_json_file_atomic(self._path(task.task_id), task.to_dict())
         if key:
             write_json_file_atomic(self._dedupe_path(key), {"schema_version": "session_task_dedupe.v1", "task_id": task.task_id})
+        body_key = str(body_dedupe_key or "").strip()
+        if body_key:
+            write_json_file_atomic(
+                self._body_index_path(body_key),
+                {"schema_version": "session_task_body_index.v1", "task_id": task.task_id},
+            )
         return task
+
+    # LLM: 正文反向索引只做查找，权威仍是每任务文件；坏索引返回 None，不把读坏当"没有任务"处理。
+    # 函数用途: 按目标 guidance 队列键找回它对应的会话任务。
+    def load_by_body_dedupe_key(self, body_dedupe_key: str) -> SessionTask | None:
+        key = str(body_dedupe_key or "").strip()
+        if not key:
+            return None
+        path = self._body_index_path(key)
+        if not path.exists():
+            return None
+        report = read_json_file_report(path, context="conversation.session_task.body_index")
+        if report.load_error is not None or not report.payload:
+            return None
+        task_id = str((report.payload or {}).get("task_id") or "")
+        return self.load(task_id) if task_id else None
+
+    # LLM: 绑定只在非终态且尚未绑定其它回合时生效；同回合重复确认幂等，不覆盖已有绑定。
+    #   目标回合结束（任务转终态）后不再绑定新回合，避免把取消打到后来的一轮上。
+    # 函数用途: 把一条任务绑定到目标会话正在执行它的那个回合。
+    def bind_turn(self, task_id: str, *, turn_id: str, now: float | None = None) -> SessionTask | None:
+        bound_turn = str(turn_id or "").strip()
+        current = self.load(task_id)
+        if current is None:
+            return None
+        if current.status in SESSION_TASK_TERMINAL_STATUSES or current.conversation_request_id:
+            return current
+        if not bound_turn:
+            return current
+        if current.status == SESSION_TASK_QUEUED:
+            return self.advance(
+                task_id,
+                status=SESSION_TASK_ACCEPTED,
+                conversation_request_id=bound_turn,
+                now=now,
+            )
+        if current.status == SESSION_TASK_ACCEPTED:
+            return self.advance(
+                task_id,
+                status=SESSION_TASK_ACCEPTED,
+                conversation_request_id=bound_turn,
+                now=now,
+            )
+        return current
 
     # LLM: 状态推进只允许既定迁移；非法迁移不改文件，抛 ValueError 让调用方按结构化错误处理。
     #   终态不可被普通生命周期改写；取消只能从非终态发起。
@@ -270,6 +327,43 @@ class SessionTaskStore:
     def _dedupe_path(self, key: str) -> Path:
         return self._dir() / "dedupe" / f"{safe_file_stem(str(key or ''))}.json"
 
+    # LLM: 正文索引与 dedupe 索引分开，避免两套键互相覆盖；文件名同样经 safe_file_stem 归一。
+    # 函数用途: 返回任务正文队列键的反向索引文件路径。
+    def _body_index_path(self, key: str) -> Path:
+        return self._dir() / "body" / f"{safe_file_stem(str(key or ''))}.json"
+
+
+# LLM: 目标会话确认消费任务正文（guidance ack）后调用；只按结构化字段（origin_kind + 正文队列键）认任务，
+#   不解析正文。绑定失败不抛给调用方（ack 主流程不能被任务账本影响），返回真正绑定到该回合的条数。
+# 函数用途: 把已被目标回合消费的会话任务正文绑到该回合，完成 accepted 与 request id 的写入。
+def bind_session_task_turns(store: object, entries: object, turn_id: str) -> int:
+    from .session_messaging import SESSION_TASK_ORIGIN_KIND
+
+    tasks = getattr(store, "session_tasks", None)
+    bound_turn = str(turn_id or "").strip()
+    if tasks is None or not bound_turn:
+        return 0
+    bound = 0
+    for entry in list(entries or ()):
+        metadata = getattr(entry, "metadata", None)
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("origin_kind") or "") != SESSION_TASK_ORIGIN_KIND:
+            continue
+        key = str(metadata.get("dedupe_key") or "").strip()
+        if not key:
+            continue
+        try:
+            task = tasks.load_by_body_dedupe_key(key)
+            if task is None or str(task.conversation_request_id or "") == bound_turn:
+                continue
+            updated = tasks.bind_turn(task.task_id, turn_id=bound_turn)
+        except (OSError, ValueError, TypeError):
+            continue
+        if str(getattr(updated, "conversation_request_id", "") or "") == bound_turn:
+            bound += 1
+    return bound
+
 
 # LLM: 状态机唯一权威：只允许 queued→accepted、accepted→done/failed、queued/accepted→cancelled；
 #   终态不再改；同状态重复写入视为幂等（幂等重放返回原记录，不算非法迁移）。
@@ -296,4 +390,5 @@ __all__ = [
     "SESSION_TASK_TERMINAL_STATUSES",
     "SessionTask",
     "SessionTaskStore",
+    "bind_session_task_turns",
 ]

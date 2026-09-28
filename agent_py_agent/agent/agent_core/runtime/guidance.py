@@ -277,6 +277,16 @@ def acknowledge_injected_turn_input(
                 params,
                 consumed_entries,
             )
+            # LLM: 会话间派活：目标会话确认消费了任务正文，就把该任务绑到这一轮（accepted + request id），
+            #   供发送方取消时按精确回合发停止控制。任务账本失败不能影响本轮已生效的消息确认。
+            # 函数用途: 把本轮确实消费的会话任务正文绑到当前回合。
+            if consumed_entries:
+                try:
+                    from ...conversation.session_tasks import bind_session_task_turns
+
+                    bind_session_task_turns(store, consumed_entries, turn_id)
+                except Exception:  # noqa: BLE001 - 绑定失败只影响取消的精确性，不让消息确认回滚
+                    pass
         if delivered_ids:
             guidance_pending.difference_update(delivered_ids)
             _forget_guidance_ack_entries(state, delivered_ids)
