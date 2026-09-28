@@ -656,6 +656,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "不能把任务派给当前会话自己；需要自己继续的工作直接用普通回合，不要绕道会话间派活。"
         ),
     ),
+    "SESSION_TARGET_CHANNEL_UNSUPPORTED": ErrorContract(
+        code="SESSION_TARGET_CHANNEL_UNSUPPORTED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "第一期不支持把会话消息投给 IM 渠道的会话；请选择本机 TUI 会话作为目标，"
+            "不要对同一个 IM 目标反复重试。"
+        ),
+    ),
     "SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING": ErrorContract(
         code="SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING",
         category="orchestration",

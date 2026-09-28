@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ....conversation.session_messaging import (
     SESSION_KIND_MESSAGE,
+    SESSION_MESSAGE_ORIGIN_KIND,
     SessionMessagingRequest,
     decide_session_messaging,
 )
@@ -95,6 +96,7 @@ class SendSessionMessageTool(BaseTool):
                 messaging_admin_enabled=bool(getattr(config, "session_messaging_admin_enabled", True)),
                 messaging_user_enabled=bool(getattr(config, "session_messaging_user_enabled", False)),
                 task_admin_enabled=bool(getattr(config, "session_task_admin_enabled", True)),
+                target_channel=_thread_channel(target_thread),
             )
         )
         if not decision.allowed:
@@ -179,6 +181,18 @@ def _load_target_thread(
     return thread, sender_identity
 
 
+# LLM: 目标会话的渠道从 canonical thread 的 channel_bindings 取第一个非空 channel；没有绑定时返回空串
+#   （本机会话）。IM 渠道第一期不作为会话消息目标，判定层返回 SESSION_TARGET_CHANNEL_UNSUPPORTED。
+# 函数用途: 读取目标会话的渠道标识，供权限判定拒绝 IM 目标。
+def _thread_channel(thread: object) -> str:
+    bindings = getattr(thread, "channel_bindings", ()) or ()
+    for binding in bindings:
+        channel = str(getattr(binding, "channel", "") or "").strip()
+        if channel:
+            return channel
+    return ""
+
+
 # LLM: 写入用 append_once 带稳定 dedupe_key，保证重试返回同一条；来源类型与发送方 thread 落 metadata，
 #   便于注入时渲染成"来自会话 X 的消息"而不是用户原话。目标空闲时补一次 wake，不改其它队列语义。
 # 函数用途: 耐久保存一条会话消息，并在目标空闲时唤醒它。
@@ -192,7 +206,7 @@ def _queue_and_wake(
     store = agent.conversation_store
     dedupe_key = f"session_message:{sender_thread_id}->{parsed.target_thread_id}"
     metadata = {
-        "origin_kind": "session_message",
+        "origin_kind": SESSION_MESSAGE_ORIGIN_KIND,
         "origin_thread_id": sender_thread_id,
     }
     try:

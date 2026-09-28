@@ -11,11 +11,14 @@ import pytest
 
 from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_MESSAGING_DISABLED,
+    SESSION_TARGET_CHANNEL_UNSUPPORTED,
     SESSION_TARGET_OUT_OF_SCOPE,
     SESSION_TASK_NOT_ALLOWED,
     SESSION_TASK_TARGET_SELF,
     SessionMessagingRequest,
     decide_session_messaging,
+    session_messaging_tool_visible,
+    session_task_tool_visible,
 )
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 
@@ -147,6 +150,63 @@ def test_user_message_open_allows_for_user() -> None:
         _req(kind="message", sender_identity=_USER, target_owner_identity=_USER, messaging_user_enabled=True)
     )
     assert decision.allowed
+
+
+# --- IM 目标拒绝（dev 审阅点 3）---
+
+def test_im_target_channel_rejected() -> None:
+    decision = decide_session_messaging(_req(kind="message", target_channel="feishu"))
+    assert not decision.allowed
+    assert decision.error_code == SESSION_TARGET_CHANNEL_UNSUPPORTED
+
+
+def test_user_im_target_rejected_channel_code_first() -> None:
+    # 普通用户 + IM 目标：渠道路径先于开关判定，返回渠道码。
+    decision = decide_session_messaging(
+        _req(kind="message", sender_identity=_USER, target_owner_identity=_USER, target_channel="feishu")
+    )
+    assert not decision.allowed
+    assert decision.error_code == SESSION_TARGET_CHANNEL_UNSUPPORTED
+
+
+def test_local_target_channel_allowed() -> None:
+    decision = decide_session_messaging(_req(kind="message", target_channel="chat"))
+    assert decision.allowed
+
+
+# --- 关闭时工具不可见（dev 审阅点 1）---
+
+def test_admin_tool_visible_when_admin_switch_on() -> None:
+    assert session_messaging_tool_visible(_Home("main"), _Cfg(admin=True, user=False)) is True
+
+
+def test_admin_tool_hidden_when_admin_switch_off() -> None:
+    assert session_messaging_tool_visible(_Home("main"), _Cfg(admin=False, user=True)) is False
+
+
+def test_user_tool_hidden_by_default() -> None:
+    assert session_messaging_tool_visible(_Home("user"), _Cfg(admin=True, user=False)) is False
+
+
+def test_user_tool_visible_when_user_switch_on() -> None:
+    assert session_messaging_tool_visible(_Home("user"), _Cfg(admin=True, user=True)) is True
+
+
+def test_task_tool_visible_only_for_admin() -> None:
+    assert session_task_tool_visible(_Home("main"), _Cfg(admin=True, user=False)) is True
+    assert session_task_tool_visible(_Home("user"), _Cfg(admin=True, user=True)) is False
+
+
+class _Home:
+    def __init__(self, owner_kind: str) -> None:
+        self.owner_kind = owner_kind
+
+
+class _Cfg:
+    def __init__(self, *, admin: bool, user: bool) -> None:
+        self.session_messaging_admin_enabled = admin
+        self.session_messaging_user_enabled = user
+        self.session_task_admin_enabled = admin
 
 
 # --- kind 非法 ---

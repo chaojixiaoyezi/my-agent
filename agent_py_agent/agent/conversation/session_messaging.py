@@ -18,6 +18,17 @@ SESSION_MESSAGING_DISABLED = "SESSION_MESSAGING_DISABLED"
 SESSION_TASK_NOT_ALLOWED = "SESSION_TASK_NOT_ALLOWED"
 SESSION_TARGET_OUT_OF_SCOPE = "SESSION_TARGET_OUT_OF_SCOPE"
 SESSION_TASK_TARGET_SELF = "SESSION_TASK_TARGET_SELF"
+# 目标是 IM 渠道的会话：第一期不支持把普通会话消息投进 IM 目标，返回明确错误码。
+SESSION_TARGET_CHANNEL_UNSUPPORTED = "SESSION_TARGET_CHANNEL_UNSUPPORTED"
+
+# IM 渠道集合：这些渠道的会话第一期不做会话间消息目标（第一期只服务本机会话）。
+IM_CHANNELS = frozenset({"feishu", "qq", "wecom", "dingtalk"})
+
+# guidance metadata 里标记来源的结构化键与取值；注入渲染据此把会话消息呈现为宿主事件而非用户原话。
+SESSION_MESSAGE_ORIGIN_KIND = "session_message"
+SESSION_MESSAGE_ORIGIN_THREAD_KEY = "origin_thread_id"
+# 宿主事件标记：渲染会话消息时写在最前面，明确它不是用户原话。
+SESSION_MESSAGE_HOST_EVENT_MARKER = "[SESSION_MESSAGE_HOST_EVENT]"
 
 # owner_kind 结构化取值；main 是管理员（含 IM 绑定管理员私聊），user/group 是普通用户。
 OWNER_KIND_MAIN = "main"
@@ -41,6 +52,8 @@ class SessionMessagingRequest:
     messaging_admin_enabled: bool
     messaging_user_enabled: bool
     task_admin_enabled: bool
+    # 目标会话的渠道（来自 canonical thread 的 channel_bindings）；IM 渠道第一期不作为目标。
+    target_channel: str = ""
 
 
 # LLM: 判定结果只有"允许/拒绝 + 稳定错误码 + 结构化 warnings"，没有自然语言结论；调用方据此决定是否继续。
@@ -80,6 +93,10 @@ def decide_session_messaging(request: SessionMessagingRequest) -> SessionMessagi
         == str(request.sender_thread_id or "").strip()
     )
 
+    # 目标是 IM 渠道的会话：第一期不支持作为会话消息目标，返回明确码。
+    if str(request.target_channel or "").strip().lower() in IM_CHANNELS:
+        return SessionMessagingDecision(False, SESSION_TARGET_CHANNEL_UNSUPPORTED, ())
+
     if kind == SESSION_KIND_TASK:
         if not sender_is_admin:
             # 普通用户派任务第一期直接拒绝，不提供开关。
@@ -112,6 +129,25 @@ def _owner_key(identity: OwnerIdentity) -> tuple[str, str, str]:
     )
 
 
+# LLM: 只读 home_paths 的 owner_kind 与开关，不读文本、不做 IO；注册处据此决定工具是否进 registry。
+#   返回 False 时工具根本不进模型工具列表（结构化可用性），而不是"调用时才拒绝"。
+# 函数用途: 判断当前 owner 是否应该看到"发会话消息"工具。
+def session_messaging_tool_visible(home_paths: object, config: object) -> bool:
+    owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip()
+    if owner_kind == OWNER_KIND_MAIN:
+        return bool(getattr(config, "session_messaging_admin_enabled", True))
+    return bool(getattr(config, "session_messaging_user_enabled", False))
+
+
+# LLM: 派任务第一期只开给管理员，且没有普通用户开关；返回 False 时工具不进 registry。
+# 函数用途: 判断当前 owner 是否应该看到"派会话任务"工具。
+def session_task_tool_visible(home_paths: object, config: object) -> bool:
+    owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip()
+    return owner_kind == OWNER_KIND_MAIN and bool(
+        getattr(config, "session_task_admin_enabled", True)
+    )
+
+
 __all__ = [
     "OWNER_KIND_MAIN",
     "SESSION_KINDS",
@@ -119,9 +155,13 @@ __all__ = [
     "SESSION_KIND_TASK",
     "SESSION_MESSAGING_DISABLED",
     "SESSION_TARGET_OUT_OF_SCOPE",
+    "SESSION_TARGET_CHANNEL_UNSUPPORTED",
+    "IM_CHANNELS",
     "SESSION_TASK_NOT_ALLOWED",
     "SESSION_TASK_TARGET_SELF",
     "SessionMessagingDecision",
     "SessionMessagingRequest",
     "decide_session_messaging",
+    "session_messaging_tool_visible",
+    "session_task_tool_visible",
 ]

@@ -1,5 +1,32 @@
 # 测试与发布验收
 
+## 会话间消息与派活第 1 片补丁：关闭可见性 + 呈现不冒充用户 + IM 目标拒绝（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：dev 审阅第 1 片后提的 3 处要求（每处要测试）。
+- **做法**：
+  1. **关闭时工具不可见**：新增纯函数 `session_messaging_tool_visible` / `session_task_tool_visible`
+     （`conversation/session_messaging.py`），只读 `home_paths.owner_kind` 与开关；`core.py` 的
+     `_register_orchestration_tools` 改为**条件注册**——判定为 False 时工具根本不进 registry，
+     模型工具列表里不出现（不是"调用时才拒绝"）。配置经既有 `capability_config_for_agent(agent)` 读取。
+  2. **呈现不冒充用户**：改 `agent_core/runtime/guidance.py` 的 `_render_guidance_user_input`：
+     带 `metadata.origin_kind=session_message` 的 guidance 渲染成宿主事件
+     `[SESSION_MESSAGE_HOST_EVENT]` 并写明来源会话（`origin_thread_id`），用户插话保持原样。
+     分类只看结构化 metadata，不看正文。
+  3. **IM 目标拒绝**：新增错误码 `SESSION_TARGET_CHANNEL_UNSUPPORTED`（已注册进 `error_taxonomy`）；
+     判定层新增 `target_channel` 入参，命中 `IM_CHANNELS`（feishu/qq/wecom/dingtalk）即拒绝；
+     工具用 `_thread_channel` 从 canonical thread 的 `channel_bindings` 取渠道。
+- **新测试**：
+  - `test_session_messaging_permissions.py` 增 8 项：IM 渠道拒绝（含普通用户优先级）、本地渠道放行、
+    工具可见性 5 项（管理员开关开/关、普通用户默认、用户开关开、派任务仅管理员）。
+  - `test_session_message_rendering.py`（5 项，新增文件）：会话消息渲染成宿主事件并带来源、用户插话保持原样、
+    未知 origin_kind 按用户处理、混合条目顺序、缺来源仍有标记。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py agent_py_agent/tests/test_session_message_rendering.py -q`（36 项）。
+- **变异验证**：把 `_render_guidance_user_input` 的会话消息分流改成恒假 → 3 条渲染测试全红；恢复后全绿。
+- **回归**：`test_runtime_guidance.py`、`test_wake_queue.py` 通过。修复过程中发现真实缺陷
+  （`SimpleAgent` 没有 `capability_config` 属性，正确入口是 `capability_config_for_agent(agent)`），
+  已被回归测试捕获并修正。
+- 五项静态 gate（ruff/doc_sync/strict code-size/diff --check/clean_package）全过。
+
 ## 会话间消息与派活第 1 片：权限判定 + 管理员发消息工具（2026-09-28，分支 `my-agent/self-dev-3`）
 
 - **来源**：开发交流板任务「会话之间的消息与派活（第一期只开放给管理员）」；设计经 dev 审过，6 处补充已并入
