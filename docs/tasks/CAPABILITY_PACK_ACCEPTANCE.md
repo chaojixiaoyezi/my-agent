@@ -123,6 +123,9 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 | G02 | 第四代提交后再 get／执行原资源 | C22 第二代后已真实 get、复制和执行原程序；第四代后只有最终答复。历史多代提交也没有后继原资源链。“必须第四代后执行”不是原 Goal 的独立次数门槛，保留未覆盖而不加任务凑数；65536 不补算生产规模 |
 | G03 | ONE_SHOT／历史不完整、BLOCKED 接替、后台续接后的前台新请求 | C23 只证明正常三子完成、一次原派工、两次后台续接及父级保存；原父自动选择为空。既有组件和正常路径不替代实际拒绝／接替分支，全文消费和资料准确性失败保持 |
 | G04 | Goal 暂停、回合中断、明确资源停止三类独立控制 | **已由 [R10 独立实测](#r10三类控制独立原生实测2026-09-28)闭合，三项分别通过**。已有 /stop 组合状态和 REOPEN03 同代续读仍只是旧证据，不替代这三次实测；长前台工具执行中途的 `/interrupt` 未单独覆盖，见该节边界 |
+
+| G03 | ONE_SHOT／历史不完整、BLOCKED 接替、后台续接后的前台新请求 | C23 只证明正常三子完成、一次原派工、两次后台续接及父级保存；原父自动选择为空。既有组件和正常路径不替代实际拒绝／接替分支，全文消费和资料准确性失败保持。四条宿主分支已用脚本模型在真实 Gateway／TUI 端到端验证（[见下文](#g03后台子代理四条特殊路径的脚本模型端到端2026-09-28)），真实模型仍未覆盖 |
+| G04 | Goal 暂停、回合中断、明确资源停止三类独立控制 | 已有 /stop 的组合状态、资源退出和 REOPEN03 同代续读，不能据此声称三类控制各自独立实测；R10 的原判据保持 |
 | G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过 |
 | G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据。**2026-09-28 补跨 owner 原生验收**（`9f88e4905`，隔离 home、私有 8436、local/main 与 local/user 两个 owner）：包、设置、task、偏好四项均取得原生结构化证据，未发现隔离缺陷，见[R16 跨 owner 隔离原生验收](#r16-跨-owner-隔离原生验收2026-09-28)；按包选择偏好（capability_selection）本轮两边都未形成可比记录，仍未单独覆盖 |
 | G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证 |
@@ -173,6 +176,24 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 建议下一步：先由 Claude 核对并集成完整缺项文档，保持 Goal 未完成；未覆盖项先记录，不自动安排新运行或代用户豁免。只读核对可并行，产品、主线和发布由 Claude 独占。本轮无产品／测试／配置及文件树变更，不重复真实任务或全仓 pytest。
 
 以下各轮保留原时点；旧“最终 0/27／尚未开始”不覆盖本节状态。
+
+## G03后台子代理四条特殊路径的脚本模型端到端（2026-09-28）
+
+结论：**脚本模型端到端机制已验，真实模型未覆盖。** 本节只证明宿主在真实 Gateway、真实 TUI 和真实持久化下能走通四条分支，不证明真实模型会走到这些分支或正确使用 `replacement_for_run_ids`；G03 在真实模型下的拒绝／接替分支仍未覆盖，本节不改判任何真实验收。
+
+- 被测源码 `9f88e490576f5c2ffc37393fb2d9b5ebd9fc8b06`，与 Mac 生产 step14w 同源，`git archive` 导出（tar SHA256 `041a0ce23064408e85cddfa34933006e994181873ea645c7b86d67ff88588468`）后在专用 venv 运行。模型是回环地址上的脚本化 OpenAI 兼容服务，按测试者提示标记、当前回合开头（User Task／Host Event）、Host Event 结构化事实、工具集和本回合工具结果出剧本。Gateway 与 TUI 用 `env -i`、假 HOME 和隔离 home 启动，没有模型密钥；跑完假 HOME 为空。五个提示在同一线程顺序提交，全部请求 done。
+- 判定只读结构化事实：tool_completed 的错误码、失败阶段与 handler_executed，create_subagents 外置输出的 replacement_records，子代理 canonical 状态与 takeover_by，wake 队列，请求终态，TaskRun 与 runtime.db（Gateway 停止后以 immutable 只读打开）。没有读会话正文。
+
+| 路径 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| ONE_SHOT 拒绝 | 通过 | 子代理 DONE 后，唤醒片（Host Event）再发同参 create_subagents，得到 `TOOL_ONE_SHOT_ALREADY_EXECUTED`，failure_stage=runtime_gate，handler_executed=false；该请求只有 1 个子代理、1 条 delegation，wake handled，TaskRun done |
+| 历史不完整 | 通过（故障由测试者注入） | 测试者把 owner 工具索引改为只写 6.04 秒，读取报 PermissionError（产品文档中的 OSError 触发条件），随后恢复原权限。该期间唤醒片的同参 create 得到 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`（runtime_gate、handler 未执行），带 `replacement_for_run_ids` 的 create 放行并创建接替子代理；两条 wake handled，TaskRun done |
+| BLOCKED 后接替 | 通过 | 子代理连续 15 次读墙外路径被授权门拦下，宿主停机收口为 BLOCKED（REPEATED_TOOL_AUTHORIZATION_FAILURE），wake 为 status=BLOCKED、turn_end_reason=blocked。唤醒片带 `replacement_for_run_ids` 另派成功，replacement_records 为 recorded；原子代理 canonical 为 TAKEN_OVER，takeover_by 指向新子代理，新子代理 DONE；两条 wake handled，TaskRun done |
+| 后台续接后的前台新请求 | 通过 | 新请求在此前三个 TaskRun 关闭后提交并 done。首个模型请求为 User Task，34 个工具，含 list_agents，历史带此前五次后台续跑的父级答复；list_agents 成功。与 ONE_SHOT 场景同 goal 的派工在新回合正常执行，没有被上一活动回合的一次性键误拦；新子代理的 wake handled，TaskRun done |
+
+新确认一处宿主缺陷，已带证据报集成方，本轮未修：接替一个已 DONE 的子代理时，create_subagents 的 replacement_records 报 `recorded` 并写出 TAKEOVER.md；但持久化边界 `_restore_newer_closed_state` 把 DONE 视为已关闭状态，静默还原了 TAKEN_OVER，canonical、state 与 owner 投影仍为 DONE，takeover_by 为空。两个场景各复现一次。按代码推断，同一 DONE 来源还能被再次接替，这一点未实测。`TOOL_ONE_SHOT_HISTORY_INCOMPLETE` 的唯一结构化出口正是为已有 run 写 `replacement_for_run_ids`，所以这条路径并不罕见。BLOCKED 来源不受影响。
+
+另有两项观察。其一，停机收口后又被接管的子代理，其 runtime.db agent_run 停在 created（attempt 已 done），TaskRun 仍按静止规则关闭。其二，模型在回复里写 `[SUBAGENT_RESULT]` 的 BLOCKED 不改变子代理状态，符合“状态只认宿主事实”的现行合同，不是缺陷。证据批次 `bg-subagent-paths-9f88` 保存在本机验收证据目录，不进仓库；判定文件摘要 `71e289fb51e2f177136235f19e86aa40cb23417c8c895d1b36e13d3a33416fd6`。本轮只改 Markdown，没有产品、测试或配置变更。
 
 ## C23三助手后台续接与交接（2026-09-28）
 
