@@ -9,7 +9,8 @@
   - 同样的请求多带一个 schema 允许、但属于别的动作的字段（`reason`、`fields`、`profile_id`、顶层 `timeout_seconds`）时，
     得到与生产完全一致的回执。可选字段全填 null 会在 schema 层就被拦下，回执不同，已排除。
   - 根因：`user_config` 各动作共用一份扁平 schema，工具把除 action 外的字段全部转给设置服务；服务按操作严格拒收多余字段，
-    但报错不写字段名。模型只会改 `changes`，所以改什么都失败。生产那三次具体带了哪个字段，要看仓库外的工具账才能确认。
+    但报错不写字段名。模型只会改 `changes`，所以改什么都失败。生产那三次都多带了 `reason`（来源：my-agent-1 作为调用方的记录，
+    三次同因；audit 只记工具名和状态、不记参数）。
 - **改动**：
   - 设置服务改抛 `DecisionSettingsUnknownFields`（仍是 `ModelProfileError`，原捕获点不变），带未知字段和本操作接受的字段。
   - 工具回执与 `handler_details` 写明 `unknown_fields`、`allowed_fields`；效果仍是 not_started，什么都不写。
