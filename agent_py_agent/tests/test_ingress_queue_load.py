@@ -4,11 +4,13 @@
 路径(claim 的 SKIP LOCKED / lane 排他 / 心跳 / complete),断言契约在高并发下成立:
 ① 精确一次(每条处理且仅一次,不丢不重)② 全部 drain 无残留 ③ 同 lane 串行(不并发)④ 背压(满则 429)。
 无 PG(localhost:5432 + psycopg)则 skip。
+PG 表按 pytest 进程隔离在各自 schema（`_postgres_test_schema`）：12 分片并行时本文件的 DROP TABLE 和
+test_ingress_queue 的 fixture 原来互相清掉 public 里同一张 ingress_messages，worker 线程报 UndefinedTable
+死掉，出现“未在超时内 drain”。drain 判定改读队列自己的终态计数，不再等内存计数后再 stop。
 """
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 from collections import defaultdict
@@ -26,13 +28,12 @@ from agent_py_agent.agent.ingress_queue import (  # noqa: E402
 )
 from agent_py_agent.agent.queue_worker import WorkerPool  # noqa: E402
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
-
-_PG_URL = os.environ.get("TEST_POSTGRES_URL", "postgresql+psycopg://localhost:5432/postgres")
+from agent_py_agent.tests._postgres_test_schema import isolated_postgres_url  # noqa: E402
 
 
 def _fresh_queue(cfg: QueueConfig) -> IngressQueue:
     try:
-        backend = StorageBackend(_PG_URL)
+        backend = StorageBackend(isolated_postgres_url())
         with backend.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS ingress_messages"))
     except Exception as exc:  # pragma: no cover - 无 PG 环境
@@ -83,10 +84,11 @@ def test_load_exactly_once_and_lane_serial_under_concurrency() -> None:
 
     pool = WorkerPool(queue, handler, workers=8, lease_seconds=30)
     pool.start()
-    drained = _wait_until(lambda: len(processed) >= total, timeout=90.0)
+    # 等队列自己的终态计数：handler 返回后 complete 才落库，只等内存计数会在最后一条 complete 前就 stop。
+    drained = _wait_until(lambda: queue.stats().get("completed", 0) >= total, timeout=90.0)
     pool.stop()
 
-    assert drained, f"未在超时内 drain:processed={len(processed)}/{total}"
+    assert drained, f"未在超时内 drain:processed={len(processed)}/{total} stats={queue.stats()}"
     assert len(processed) == total  # 不丢
     assert len(set(processed)) == total  # ⭐ 精确一次:无重复处理
     assert all(v == 1 for v in lane_max.values())  # ⭐ 同 lane 串行:任一 lane 从不并发

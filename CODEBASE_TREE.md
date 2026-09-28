@@ -837,6 +837,7 @@ agent_py_agent/
 |   |-- test_compact_capacity_facts.py # 候选过大失败带出最小候选/上限/摘要占比/保留条数/候选数，白名单与TUI失败行
 |   |-- test_compact_capacity_host_chain.py # 真实恢复宿主两入口：固定开销经只计量入口只在失败时量一次，保留IR按实际发送材料
 |   |-- test_task_run_settle_quiescent_children.py # TaskRun 收口：静止但未终态的子 run（attempt 终态且无锁）不再拦住父 TaskRun，closed 带证据、reopened 可逆、发现扫描能关存量
+|   |-- _postgres_test_schema.py       # 测试专用：每个 pytest 进程一个 PostgreSQL schema（URL options 设 search_path），并行分片不互删表
 |   |-- test_compact_calibrated_candidate_gate.py # 候选接受门按预检校准口径：纯函数、宿主冻结、两条门、触发来源、两回合假LLM复现
 |   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
 |   |-- test_conversation_history_seed.py # 具体种子与只读来源两边界逐项等价、冻结时刻与追加、互斥及改写/截短/替换/删除失败

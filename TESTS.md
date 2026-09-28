@@ -1,5 +1,33 @@
 # 测试与发布验收
 
+## 入站队列 PostgreSQL 真测按 pytest 进程隔离 schema（2026-09-28，分支 `claude/38-stabilize-ingress-tests`，基于 `72f23d0d9`，只改测试）
+
+- **来源**：集成者报告 main `72f23d0d9` 上 12 片并行时三条用例偶发失败、单独跑 3/3 通过：
+  `test_ingress_queue_load.py::test_load_exactly_once_and_lane_serial_under_concurrency`、
+  `test_ingress_queue_load.py::test_load_retry_and_dlq_under_concurrent_failures`、
+  `test_ingress_queue.py::test_heartbeat_extends_lease_prevents_recovery[postgres]`。
+- **满载复现**（8 个 CPU 忙循环 + 6 个共用本机 postgres 的测试文件各起一个 pytest 进程并行，3 轮）：修复前 3/3 轮
+  `test_load_exactly_once…` 失败，日志里 worker 线程报 `relation "ingress_messages" does not exist`，只 drain 到 60/800。
+  被打破的不是租约/心跳间隔，也不是连接数（本机 max_connections=100，峰值几十）：两个文件的 PG 用例都在 `public`
+  里建同一张 `ingress_messages`——`test_ingress_queue.py` 的 fixture 每个用例前后 `drop_all`，`test_ingress_queue_load.py`
+  每个用例开头 `DROP TABLE`——落到不同分片同时跑时互相删表。心跳用例用注入的 `now_ms`，本身没有计时假设，同样是被删表。
+- **改法**：新增测试专用 `agent_py_agent/tests/_postgres_test_schema.py::isolated_postgres_url()`：每个 pytest 进程建一个
+  `pytest_ingress_<pid>_<8hex>` schema，通过连接 URL 的 libpq `options=-csearch_path=…` 让产品侧不带 schema 前缀的建表、
+  迁移、索引语句都落进本进程 schema；退出时 `atexit` 删本进程 schema，建 schema 时顺手清掉 pid 已死的同前缀残留；
+  `TEST_POSTGRES_URL` 已带 `options=` 时原样返回。两个文件的 PG 后端都改走它，连不上仍按原来的方式 skip。
+  产品代码、表名、迁移都没动。
+- **drain 判定**：精确一次用例原来等内存里的 `processed` 计数到 800 就 `pool.stop()`，而 `complete()` 在 handler 返回后才
+  落库，最后一条可能还在 claimed；改为等队列自己的 `completed` 终态计数（结构化事实），断言本意不变（不丢、不重、
+  同 lane 串行、无残留）。90 秒超时保留：修复后满载下整文件 4 项 11 秒跑完，余量足够。
+- **修复后满载**：同一复现脚本 3 轮全过（`test_ingress_queue_load.py` 4 passed ≈ 11 s，`test_ingress_queue.py` 15 passed）；
+  12 片全仓并行（1204 个测试文件按大小轮转分片，本机 Mac）连跑 5 遍：三条目标用例及其所在文件 5/5 全绿，5 遍全仓 0 失败
+  4 遍、1 遍有 2 个与入站队列无关的负载抖动（`test_desktop_lite_package.py::test_timeout_kills_program` 超时子进程没来得及写
+  记录文件、`test_slow_model_liveness.py::test_slow_stream_renews_wait_beyond_total_deadline` 慢流被判死），单遍 292–383 秒。
+  跑完本机 postgres 没有残留 `pytest_ingress_%` schema，我起的进程全部退出。
+- **负向验证**（改坏产品契约，独立子进程、逐字节恢复核哈希，5/5 被抓出）：跳过 lane advisory 锁（同 lane 并发被抓）、
+  心跳不续租（被回收被抓）、失败直接进死信不重试、失败永远重试不进死信、`complete` 不校验 claim token。
+- **门禁**：三条用例所在文件、`_postgres_test_schema` ruff、doc sync、strict code-size、`git diff --check`、clean package。
+
 ## 后台整合档与 goal 子代理档补齐直属下级管理面（2026-09-28，分支 `claude/be-wake-turn`，基于 `2163629df`）
 
 - **来源**：T3 真实 TUI 验收的观察 2（C 部分）。子代理生命周期唤醒走 `subagent_integration` 档，也就是手写的

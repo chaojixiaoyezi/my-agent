@@ -1,11 +1,11 @@
 """Tier 1.2 入站队列测试:墓碑去重/lane 串行/lease 恢复/毒丸/背压。SQLite 与真 PostgreSQL 双跑。
 
 时间用可注入的 now_ms 确定性控制(不靠真 sleep)。PG 真测验 SKIP-LOCKED 路径。
+PG 表按 pytest 进程隔离在各自 schema（`_postgres_test_schema`）：12 分片并行时本文件的 fixture 和
+test_ingress_queue_load 原来在 public 里互相 DROP 同一张 ingress_messages，心跳续租等用例偶发失败。
 """
 
 from __future__ import annotations
-
-import os
 
 import pytest
 
@@ -22,9 +22,10 @@ from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 def _pg_backend() -> StorageBackend:
     from sqlalchemy import text
 
-    url = os.environ.get("TEST_POSTGRES_URL", "postgresql+psycopg://localhost:5432/postgres")
+    from agent_py_agent.tests._postgres_test_schema import isolated_postgres_url
+
     try:
-        db = StorageBackend(url)
+        db = StorageBackend(isolated_postgres_url())
         with db.connect() as conn:
             conn.execute(text("SELECT 1"))
         return db
