@@ -1,5 +1,10 @@
 # Verification：开发推进
 
+## 2026-09-28 携带记录没读全时一次性编排 fail-closed（分支 `claude/be-wake-fix`，Codex 审查 B）
+
+生命周期续跑读不到 owner 根或任务索引时，本片 task_attributes 带 `conversation_active_turn_carry_incomplete`。运行时门据此拦下没写 `replacement_for_run_ids` 的 create_subagents，错误码 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`（已登记恢复提示），不把读不到的前台副作用当成没发生；
+非一次性工具不受影响。回归见 `test_background_active_turn_carry.py` 与 TESTS.md 顶部。
+
 ## 2026-09-28 一次性编排拦截覆盖整个活动回合（分支 `claude/be-wake-turn`，T3 观察 2）
 
 子代理唤醒片现在能看到前台轮成功的 `create_subagents`，唤醒片里同内容的派工会被 `TOOL_ONE_SHOT_ALREADY_EXECUTED` 拦下。

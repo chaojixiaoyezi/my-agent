@@ -428,3 +428,18 @@ def test_goal_wake_through_the_real_chain_carries_the_goal_origin(tmp_path) -> N
     assert host_event.splitlines()[1] == HOST_EVENT_FIRST_LINE_ORIGIN_TASK
     facts = json.loads(host_event.split("\n", 2)[2])
     assert facts["origin_request_ids"] == [] and facts["origin_task"] == _OBJECTIVE
+
+
+def test_scripted_model_is_stopped_when_the_foreground_history_is_unreadable(tmp_path) -> None:
+    backend = _LatestUserTaskBackend(always_dispatch=True)
+    agent, store, thread, child = _blocked_child_scene(tmp_path, backend)
+    # owner 根索引读不到（同名目录产生真实 OSError）：前台那次派工无法证明没做过，去重必须 fail-closed。
+    index = agent.home_paths.owner_home_dir / "blobs" / "tool_outputs" / "index.jsonl"
+    index.unlink()
+    index.mkdir()
+
+    _run_wake(agent, store, thread, child)
+
+    assert backend.dispatched == 1 and len(backend.requests) == 2
+    assert "TOOL_ONE_SHOT_HISTORY_INCOMPLETE" in _tool_result_text(backend.requests[1], "wake-create")
+    assert [run.id for run in agent.subagents.list_runs() if run.root_id == _TASK] == [child.id]

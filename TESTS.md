@@ -1,5 +1,46 @@
 # 测试与发布验收
 
+## 生命周期续跑读错分支 fail-closed（2026-09-28，分支 `claude/be-wake-fix`，基于 A `c035e9812`）
+
+- **来源**：Codex 审查 B（证据 `capability-validation/evidence/pending-wake-B-read-error-probe.json`）：
+  `_background_active_turn_tool_calls` 外层捕获 OSError/RuntimeError/ValueError 后直接返回空。两处索引在同一个生成器里
+  先后读取，owner 索引一抛 OSError，任务索引根本不会被访问，已知的任务工具事实跟着丢掉，一次性编排去重变成空集合（fail-open）。
+- **改动**：
+  - 读取：`carried_tool_call_records_for_requests` 改收 `CarriedIndexSource`（索引根、结构化来源名、是否只用于运行时状态），
+    每个来源独立读取、各自捕获 OSError，读到一半失败的来源整份丢弃；返回 `CarriedToolCallRead`（records 加 unreadable_sources）。
+  - 来源判定：身份文件存在却给不出包含任务根的 owner 时，记为 owner_index 不完整（`run_workspace_identity_unusable`）；
+    没有请求编号的旧式唤醒读错记为 task_index 不完整；其它意外（RuntimeError/ValueError）记为 active_turn_carry 不完整。
+    都不再静默返回空。
+  - 结构化事实：不完整时写进本片 task_attributes 的 `conversation_active_turn_carry_incomplete`（列表，每项 source 与
+    error_type），读全时不写这个键。压缩重试沿用首次读取的结论：首次没读全时，之后每次尝试都写回同一事实。
+  - fail-closed：不完整时只要有一个待建子代理没有有效的 `replacement_for_run_ids`，这次 create_subagents 就在运行时门拦下，
+    错误码 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`（已登记错误合同与恢复提示）；全部写明接替关系的照常走原去重，非一次性工具不受影响。
+    “父级结构化确认”目前没有现成机制，这次只实现 replacement_for_run_ids 这一条结构化出口，留作后续。
+  - 与创建边界同口径（Codex 复核修补后又指出两种空值绕过：`[" "]` 去空白后为空；item 的空列表会盖掉顶层默认）：
+    守卫改用 `create_payload.effective_replacement_ids_per_child`，它直接调用创建边界的 `create_items_from_params`
+    （item 覆盖顶层），编号走 `replacements.replacement_source_ids`（去空白后非空）；创建前预检与接管落账也改用这一个
+    归一化函数，不再各判各的。创建边界会整批拒绝的调用同样拦下。
+- **测试**：
+  - `test_background_active_turn_carry.py` 新增 6 项，读错都用真实文件系统错误（把索引换成同名目录，产生 IsADirectoryError）：
+    owner 索引读不到时任务索引照常读到并报告来源；本片 task_attributes 写入结构化不完整事实；身份文件给不出 owner 时记为
+    owner_index 不完整；旧式唤醒读错记为 task_index 不完整；fail-closed 只作用于一次性编排且认 replacement_for_run_ids
+    （批量里有一项没写就拦）；压缩重试沿用首次读取的不完整结论（重试时重读成功也不改）。原有两项改用新接口，并补“读全时
+    不写不完整事实”的断言。
+  - 同口径矩阵 6 例：两个反例（空白编号、item 空列表覆盖顶层）和创建边界会拒绝的批次被拦；无标记时不拦、有效顶层默认、
+    有效 item 照常放行；同时锁住共用函数给出的每个子代理有效接替编号。
+  - `test_lifecycle_wake_host_event.py` 新增 1 项端到端：owner 索引读不到时，一律派工的脚本化假模型在真实后台链路里被
+    `TOOL_ONE_SHOT_HISTORY_INCOMPLETE` 拦下，根任务的子代理仍只有一个。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_background_active_turn_carry.py agent_py_agent/tests/test_lifecycle_wake_host_event.py -q`。
+- **变异验证**：17 个全部被抓出，每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，跑完逐字节恢复并核对哈希。
+  - 读取：owner 读错后停止读任务索引；读不到的来源不记录；不完整事实不写；身份文件给不出 owner 时不标；旧式唤醒读错吞掉；
+  - 守卫：不看不完整事实；接替出口去掉；对所有工具生效；批量只要一个写了接替就放行；守卫没接进运行时门；新错误码没登记；
+  - 同口径：编号不做归一化；item 不覆盖顶层；归一化保留空白项；创建边界会拒绝的批次放行；
+  - 压缩重试：不冻结首次结论；后续重读成功就改成完整。
+- **相关回归**：与改动路径有关的 225 个测试文件（含 `test_background_main_agent_runtime.py`、
+  `test_architecture_guardrails.py`）5211 passed、2 skipped、28 xfailed、5 xpassed。
+- **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对 `aa97491f5`
+  新增 0、减少 1。
+
 ## 生命周期唤醒片记为宿主事件（2026-09-28，分支 `claude/be-wake-turn`，基于 `aa97491f5`）
 
 - **来源**：T3 真实 TUI 验收的观察 2（A 部分）。round2 的唤醒片请求里：

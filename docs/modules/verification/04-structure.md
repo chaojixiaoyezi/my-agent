@@ -4,7 +4,7 @@
 
 `tool_call_runtime`继续按原ToolRuntimePolicy判断是否晋升，然后调用`promote_conversation_task_for_run`；该原会话入口承担T锁和权威参数单向同步，宿主选包准备共用同一事务。执行与工具账仍归原ToolExecutor，选包本身不进入工具账。
 
-`tool_call_runtime._duplicate_one_shot_result` 是一次性编排去重的拦截结果（`TOOL_ONE_SHOT_ALREADY_EXECUTED`）。去重集合覆盖整个活动回合：子代理生命周期唤醒片从 owner 根与任务两处索引重建前台轮与此前各片的去重键（2026-09-28，T3 观察 2）。拦截只看结构化键，写明 `replacement_for_run_ids` 的接替重派意图键不同、照常放行；拦截文字和错误合同的恢复提示都指出这条路径，只作软引导。
+`tool_call_runtime._duplicate_one_shot_result` 是一次性编排去重的拦截结果（`TOOL_ONE_SHOT_ALREADY_EXECUTED`）。去重集合覆盖整个活动回合：子代理生命周期唤醒片从 owner 根与任务两处索引重建前台轮与此前各片的去重键（2026-09-28，T3 观察 2）。拦截只看结构化键，写明 `replacement_for_run_ids` 的接替重派意图键不同、照常放行；拦截文字和错误合同的恢复提示都指出这条路径，只作软引导。携带记录没读全（task_attributes 的 `conversation_active_turn_carry_incomplete`）时，`_one_shot_blocked_by_incomplete_carry` 让一次性编排 fail-closed：只要有一个待建子代理没有有效的 `replacement_for_run_ids` 就以 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE` 拦下；“有效”复用创建边界的 `create_payload.effective_replacement_ids_per_child`（item 覆盖顶层）与 `replacements.replacement_source_ids`（去空白后非空），与创建前预检同一口径。
 
 能力包沿 `tooling/models.py` 的 `ToolParameterCondition` 声明条件晋升，
 `agent_core/tool_call_runtime.py` 在原晋升入口读取 typed 参数，`contracts/tool_manifest_contract.py` 投影同一策略。

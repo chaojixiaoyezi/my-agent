@@ -1674,6 +1674,7 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 
 
 # LLM: 后台执行使用精确持久任务作为输入回合编号；定时任务保留自己的 run ID，attempt 仍逐次独立。
+#   生命周期续跑的携带记录读不全时，task_attributes 带结构化不完整事实（见 _active_turn_carry_records）。
 # 函数用途: 构造后台模型执行参数，让普通插话、消费回执、归档和续跑共享同一任务身份。
 def _run_params(
     thread_id: str,
@@ -1702,9 +1703,8 @@ def _run_params(
     )
     if resolved_goal_context.goal is not None and isinstance(task_attributes, dict):
         task_attributes["thread_goal_id"] = resolved_goal_context.goal.goal_id
-    carried_tool_calls = _background_active_turn_tool_calls(
-        request,
-        resolved_goal_context,
+    carried_tool_calls = _active_turn_carry_records(
+        task_attributes, _background_active_turn_tool_calls(request, resolved_goal_context),
     )
     _extend_background_slice_tool_budget(task_attributes, len(carried_tool_calls))
     return RunParams(
@@ -1760,35 +1760,74 @@ def _run_params(
 #   原回合的工具事实分两处：前台 Gateway 轮写在 owner 根自己的索引（owner 由任务 run_workspace.json 的结构化
 #   owner_home 给出，且任务根必须位于其内），唤醒片写在任务 work 索引。两处都按精确 conversation_request_id 流式
 #   过滤；owner 索引的记录已随前台轮写进会话历史，只标记为运行时状态（去重、已执行工具、工具轮数），不进本片工具账。
-# 函数用途: 为子代理完成后的主代理工作片恢复原用户回合的工具调用、去重键和执行轨迹。
+#   读不到的来源不再当成空历史：结果的 unreadable_sources 如实列出，由 _active_turn_carry_records 写成不完整事实。
+#   返回值是 memory_archive.compact_tool_output_refs.CarriedToolCallRead。
+# 函数用途: 为子代理完成后的主代理工作片恢复原用户回合的工具调用、去重键和执行轨迹，并报告是否读全。
 def _background_active_turn_tool_calls(
     request: BackgroundRunRequest,
     context: GoalRuntimeContext,
-) -> list[dict[str, object]]:
+) -> object:
+    from ..memory_archive.compact_tool_output_refs import CarriedToolCallRead
+
     if not _is_active_turn_lifecycle_continuation(request, context.task_objective):
-        return []
+        return CarriedToolCallRead()
     task_id = str(request.task_id or "").strip()
     task_path = str(context.task_path or "").strip()
     if not task_id or not task_path:
-        return []
+        return CarriedToolCallRead()
+    task_root = Path(task_path).expanduser().resolve(strict=False)
     try:
-        from ..memory_archive.compact_tool_output_refs import (
-            carried_tool_call_records,
-            carried_tool_call_records_for_requests,
-        )
-        from ..user_space.run_workspace import run_workspace_owner_home
-
-        task_root = Path(task_path).expanduser().resolve(strict=False)
         active_turn_request_ids = _background_active_turn_request_ids(request)
         if not active_turn_request_ids:
-            return carried_tool_call_records(task_root / "work", {"run_id": task_id, "task_id": task_id})
-        owner_home = run_workspace_owner_home(task_root)
-        owner_source = [(owner_home, True)] if owner_home is not None else []
-        return carried_tool_call_records_for_requests(
-            [*owner_source, (task_root / "work", False)], active_turn_request_ids,
-        )
-    except (OSError, RuntimeError, ValueError):
-        return []
+            return _legacy_task_carry(task_root, task_id)
+        return _request_scoped_carry(task_root, active_turn_request_ids)
+    except (RuntimeError, ValueError) as exc:
+        return CarriedToolCallRead(unreadable_sources=({"source": "active_turn_carry", "error_type": type(exc).__name__},))
+
+
+# LLM: 旧唤醒没有请求编号时只按 task_id 读任务索引；读不到记为 task_index 不完整，不再静默返回空。
+# 函数用途: 读取旧式唤醒的任务工具索引，并如实报告能否读全。
+def _legacy_task_carry(task_root: Path, task_id: str) -> object:
+    from ..memory_archive.compact_tool_output_refs import (
+        CarriedToolCallRead,
+        carried_tool_call_records,
+    )
+
+    try:
+        return CarriedToolCallRead(carried_tool_call_records(task_root / "work", {"run_id": task_id, "task_id": task_id}))
+    except OSError as exc:
+        return CarriedToolCallRead(unreadable_sources=({"source": "task_index", "error_type": type(exc).__name__},))
+
+
+# LLM: owner 根只取任务 run_workspace.json 的 owner_home 且必须包含任务根；身份文件存在却给不出这样的 owner 时，
+#   前台轮记录的位置未知，记为 owner_index 不完整。两处索引各自读取，一处失败不影响另一处。只读。
+# 函数用途: 按精确请求编号读取 owner 根与任务两处工具索引，并汇总读不到的来源。
+def _request_scoped_carry(task_root: Path, request_ids: list[str]) -> object:
+    from ..memory_archive.compact_tool_output_refs import (
+        CarriedIndexSource,
+        carried_tool_call_records_for_requests,
+    )
+    from ..user_space.run_workspace import run_workspace_owner_home
+
+    owner_home = run_workspace_owner_home(task_root)
+    owner = [CarriedIndexSource(owner_home, "owner_index", runtime_only=True)] if owner_home is not None else []
+    read = carried_tool_call_records_for_requests([*owner, CarriedIndexSource(task_root / "work", "task_index")], request_ids)
+    if owner_home is None and (task_root / "work" / "run_workspace.json").exists():
+        unusable = {"source": "owner_index", "error_type": "run_workspace_identity_unusable"}
+        return replace(read, unreadable_sources=(unusable, *read.unreadable_sources))
+    return read
+
+
+# LLM: 携带记录读不全时，把读不到的来源写进本片 task_attributes 的结构化不完整事实
+#   （CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR），一次性编排去重据此 fail-closed；读全时不写这个键。
+# 函数用途: 把携带读取结果拆成可放进 RunParams 的记录列表，并如实留下“没读全”的事实。
+def _active_turn_carry_records(task_attributes: object, carry: object) -> list[dict[str, object]]:
+    from .authority import CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR
+
+    unreadable = tuple(getattr(carry, "unreadable_sources", ()) or ())
+    if unreadable and isinstance(task_attributes, dict):
+        task_attributes[CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR] = [dict(item) for item in unreadable]
+    return list(getattr(carry, "records", ()) or ())
 
 
 # LLM: A durable task id and an originating conversation turn id are distinct. Child wake

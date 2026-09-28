@@ -1,5 +1,7 @@
 # 记忆与上下文维护状态
 
+生命周期续跑读错分支（分支 `claude/be-wake-fix`，2026-09-28，Codex 审查 B）：`carried_tool_call_records_for_requests` 改收 `CarriedIndexSource`，每个来源独立读取、各自捕获 OSError，读到一半失败的来源整份丢弃，返回 `CarriedToolCallRead`（records 与 unreadable_sources）。修复前 owner 索引一抛错，任务索引就不会被访问，携带记录与一次性编排去重一起变空。见 TESTS.md 顶部。
+
 生命周期唤醒片续接前台轮的工具事实（分支 `claude/be-wake-turn`，2026-09-28，T3 验收观察 2）：`compact_tool_output_refs` 新增 `carried_tool_call_records_for_requests`，按（索引根, 是否只用于运行时状态）读 owner 根和任务 work 两处索引，每个根只读自己的 index.jsonl，按精确请求编号流式过滤，不全量加载；与 `carried_tool_call_records` 共用四元身份去重。owner 索引的记录带 `CARRIED_RUNTIME_ONLY_FIELD`，工具循环只用它重建去重、已执行工具和工具轮数，不进本片工具账和模型可见交接，溢出压缩携带时原样保留。修复前前台轮成功的 `create_subagents` 不在唤醒片的去重集合里，同内容派工会多出一个子代理。见 TESTS.md 顶部。
 
 Gateway 用户的记忆总闸按各自 home 生效（分支 `claude/9b-owner-path-scope`，2026-09-27）：`owner_resolver.home_paths_with_owner` 原先没有按用户重设 `owner_memory_policy_json`，Gateway 里其它用户经 `owner_policy` 读到的是本机主用户的 `memory_policy.json`，与只按 owner home 读的 `owner_wake_discovery` 不一致；现已按用户重设，新用户按自己 home 里的默认种子（开启）生效。`test_gateway_per_user_scoping.py` 按字段全集守卫所有 owner_* 路径都在该用户 home 内。同分支：召回重排的普通记忆下限改读 `conversation/decision_point_limits.RECALL_MEMORIES_MIN`，与诊断大白话共用一处。

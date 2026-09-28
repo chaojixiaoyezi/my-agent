@@ -164,7 +164,7 @@ def invoke_background_turn(
 
 
 # LLM: 本片冻结摘要范围、覆盖和首次解析的请求身份；后续准备复用该 request_id，run/attempt 仍由原绑定。
-#   回合触发类型每次尝试都写进新准备的 RunParams，压缩续跑与首次尝试用同一个。
+#   回合触发类型每次尝试都写进新准备的 RunParams，压缩续跑与首次尝试用同一个；携带记录及其是否读全按首次尝试冻结。
 # 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，成功提交计入公平让出预算。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
@@ -179,6 +179,7 @@ def run_background_turn_with_compact(
 ) -> object:
     current = thread
     carried_archive_tool_calls: list[dict[str, object]] | None = None
+    carry_incomplete: list[dict[str, str]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] = []
     native_compact_carry = None
     runtime_rejected_actions: list[dict[str, str]] | None = None
@@ -215,6 +216,7 @@ def run_background_turn_with_compact(
             carried_archive_tool_calls = list(run_params.carried_archive_tool_calls or [])
         else:
             run_params.carried_archive_tool_calls = list(carried_archive_tool_calls)
+        carry_incomplete = _freeze_carry_completeness(run_params, carry_incomplete)
         run_params.carried_active_turn_user_inputs = list(carried_active_turn_user_inputs)
         run_params.native_compact_carry = native_compact_carry
         run_params.conversation_turn_id = request.conversation_turn_id
@@ -301,6 +303,21 @@ def _next_overflow_carry(
         released_input_ids=released_input_ids,
     )
     return native_carry, archive, inputs
+
+
+# LLM: 携带记录只在首次尝试读取并冻结，是否读全也按首次结论冻结：首次没读全时，之后每次尝试都写回同一条不完整事实，
+#   即使重读成功也不能把首次的半份携带当成完整；首次读全时保留后续尝试自己的事实（后续读错只会更保守）。只改本次
+#   RunParams 的 task_attributes。
+# 函数用途: 在压缩重试之间保持“本片携带记录是否读全”的首次结论，返回冻结值供下一次尝试使用。
+def _freeze_carry_completeness(run_params: RunParams, frozen: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    from .authority import CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR as carry_key
+
+    attributes = run_params.task_attributes if isinstance(run_params.task_attributes, dict) else {}
+    if frozen is None:
+        return [dict(item) for item in attributes.get(carry_key) or []]
+    if frozen:
+        attributes[carry_key] = [dict(item) for item in frozen]
+    return frozen
 
 
 # LLM: 原生信封只进入当前 store/thread 的同一 transcript；与公开 final 按宿主回合编号去重，不发消息或修改 wake 生命周期。

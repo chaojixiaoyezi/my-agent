@@ -40,6 +40,11 @@ CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR = "conversation_background_wake_sig
 # sampling fence. Deferred members wait for a later full mailbox slice; only
 # mail arriving after this snapshot may enter the active-turn safe point.
 CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR = "conversation_background_wake_snapshot_ids"
+# A lifecycle continuation rebuilds the originating turn's tool facts from structured
+# indexes. When a source cannot be read this lists {"source", "error_type"} entries, so
+# the one-shot orchestration dedupe fails closed instead of treating a partial carry as
+# complete. Absent means every source was read; it never carries prose.
+CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR = "conversation_active_turn_carry_incomplete"
 # A prepare turn is scoped to one exact durable Audit without activating its
 # long-running guarantee.  The stable id and workspace are injected by the
 # gateway after owner/thread-scoped resolution; user prose never supplies them.
@@ -122,6 +127,7 @@ __all__ = [
     "CONVERSATION_BACKGROUND_SUBAGENT_PHASE_ATTR",
     "CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR",
     "CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR",
+    "CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR",
     "CONVERSATION_AUDIT_PREPARE_ATTR",
     "CONVERSATION_TRANSIENT_WORKSPACE_ATTR",
     "CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR",

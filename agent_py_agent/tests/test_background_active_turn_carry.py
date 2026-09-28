@@ -8,6 +8,10 @@
   和任务 work 索引，都按精确请求编号流式过滤，别的请求、别的 run 的索引不会进来；
 - owner 索引的记录只标记为运行时状态：进一次性编排去重、已执行工具和工具轮数，不进本片工具账与模型可见交接；
 - 片内溢出压缩替换携带内容时，这些记录保留；工作片的新增工具轮额度不因携带记录而缩水。
+读错分支（Codex 审查 B 后补，2026-09-28）：
+- 两个来源各自读取、各自捕获异常，owner 索引读不到时任务索引照常读到；
+- 读不到时 task_attributes 留下结构化不完整事实（来源与错误类型），压缩重试沿用首次读取的结论；
+- 不完整时一次性编排去重 fail-closed：没写 replacement_for_run_ids 的 create_subagents 一律拦下，其它工具不受影响。
 """
 from __future__ import annotations
 
@@ -15,23 +19,39 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from agent_py_agent.agent.agent_core.orchestration.create_payload import (
+    effective_replacement_ids_per_child,
+)
 from agent_py_agent.agent.agent_core.parameters import _one_shot_tool_call_is_duplicate
 from agent_py_agent.agent.agent_core.runtime.loop_models import (
+    RunParams,
     RuntimeLoopParams,
     RuntimeToolLoopSeed,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
-from agent_py_agent.agent.agent_core.tool_call_runtime import _duplicate_one_shot_result
+from agent_py_agent.agent.agent_core.tool_call_runtime import (
+    _duplicate_one_shot_result,
+    _one_shot_blocked_by_incomplete_carry,
+)
+from agent_py_agent.agent.contracts.error_taxonomy import ERROR_CONTRACTS
+from agent_py_agent.agent.conversation import background_execution as execution_module
+from agent_py_agent.agent.conversation.authority import (
+    CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR,
+)
 from agent_py_agent.agent.conversation.compact_carry import compact_overflow_carry
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundRunRequest,
     GoalRuntimeContext,
+    _background_active_turn_tool_calls,
     _goal_runtime_context,
     _run_params,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
     CARRIED_RUNTIME_ONLY_FIELD,
+    CarriedIndexSource,
     carried_tool_call_records_for_requests,
 )
 from agent_py_agent.agent.settings import AgentConfig
@@ -84,18 +104,22 @@ def _owner_layout(tmp_path: Path) -> tuple[Path, Path]:
     return owner, task_root
 
 
+def _sources(owner: Path, task_root: Path) -> list[CarriedIndexSource]:
+    return [CarriedIndexSource(owner, "owner_index", runtime_only=True), CarriedIndexSource(task_root / "work", "task_index")]
+
+
 def test_owner_and_task_indexes_are_read_by_exact_request_only(tmp_path) -> None:
     owner, task_root = _owner_layout(tmp_path)
 
-    records = carried_tool_call_records_for_requests(
-        [(owner, True), (task_root / "work", False)], [_FOREGROUND],
-    )
+    read = carried_tool_call_records_for_requests(_sources(owner, task_root), [_FOREGROUND])
+    records = read.records
 
     # 别的请求、只在参数里提到本请求编号的记录、坏行、别的 run 的索引都不会进来。
     assert [(item["call_id"], item.get(CARRIED_RUNTIME_ONLY_FIELD)) for item in records] == [
         ("call-create", True), ("call-wake", None),
     ]
-    assert carried_tool_call_records_for_requests([(owner, True)], []) == []
+    assert read.unreadable_sources == ()
+    assert carried_tool_call_records_for_requests(_sources(owner, task_root), []).records == []
 
 
 def test_owner_home_comes_from_run_workspace_and_must_contain_the_task(tmp_path) -> None:
@@ -140,6 +164,8 @@ def test_wake_slice_carries_the_foreground_turn_from_the_owner_index(tmp_path) -
     ]
     # 携带记录按条数抬高本片的绝对上限，新增工具轮额度仍是配置值，不会一开始就触顶。
     assert params.task_attributes["max_tool_rounds"] == baseline.task_attributes["max_tool_rounds"] + 2
+    # 两处都读到时不写不完整事实。
+    assert CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR not in params.task_attributes
 
 
 # 函数用途: 用携带记录构造一次工具循环参数，只替身 agent，不跑模型。
@@ -156,7 +182,7 @@ def _loop(carried: list[dict]) -> object:
 
 def test_runtime_only_records_rebuild_dedupe_but_not_the_slice_archive(tmp_path) -> None:
     owner, task_root = _owner_layout(tmp_path)
-    carried = carried_tool_call_records_for_requests([(owner, True), (task_root / "work", False)], [_FOREGROUND])
+    carried = carried_tool_call_records_for_requests(_sources(owner, task_root), [_FOREGROUND]).records
 
     loop = _loop(carried)
 
@@ -190,3 +216,160 @@ def test_overflow_carry_keeps_runtime_only_records() -> None:
         result_archive_tool_calls=[], result_active_turn_user_inputs=None, released_input_ids=(),
     )
     assert unchanged == carried
+
+
+# ---- 读错分支：一处读不到不能跳过另一处，也不能把半份携带当成完整 ----
+
+_UNREADABLE_OWNER = [{"source": "owner_index", "error_type": "IsADirectoryError"}]
+
+
+# 函数用途: 把一个根的工具索引换成同名目录，读取时产生真实的 OSError（IsADirectoryError），不替身文件系统。
+def _break_index(root: Path) -> None:
+    index = root / "blobs" / "tool_outputs" / "index.jsonl"
+    if index.exists():
+        index.unlink()
+    index.mkdir(parents=True)
+
+
+# 函数用途: 按 B 的真实布局准备线程、任务链接与原用户消息，返回本片的后台运行参数。
+def _wake_params(tmp_path: Path, task_root: Path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "user-1", "channel": "internal", "channel_conversation_id": "thread-wake-error",
+        "channel_user_id": "user-1",
+    })
+    objective = "请派一个子代理去读父项目目录里的资料并写出要点。"
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": _FOREGROUND, "goal": objective,
+                      "status": "active", "task_path": str(task_root)})
+    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": objective,
+                           "metadata": {"conversation_request_id": _FOREGROUND}})
+    request = BackgroundRunRequest(
+        thread_id=thread.thread_id, task_id=_FOREGROUND, reason="subagent_runner_finished",
+        wake_signal={"metadata": {"conversation_request_id": _FOREGROUND}},
+    )
+    return _run_params(thread.thread_id, request, agent, goal_context=_goal_runtime_context(agent, store, request),
+                       thread=thread)
+
+
+def test_an_unreadable_owner_index_does_not_hide_the_task_index(tmp_path) -> None:
+    owner, task_root = _owner_layout(tmp_path)
+    _break_index(owner)
+
+    read = carried_tool_call_records_for_requests(_sources(owner, task_root), [_FOREGROUND])
+
+    assert [item["call_id"] for item in read.records] == ["call-wake"]
+    assert list(read.unreadable_sources) == _UNREADABLE_OWNER
+
+
+def test_wake_slice_records_the_unreadable_source_as_a_structured_fact(tmp_path) -> None:
+    owner, task_root = _owner_layout(tmp_path)
+    _break_index(owner)
+
+    params = _wake_params(tmp_path, task_root)
+
+    assert [item["call_id"] for item in params.carried_archive_tool_calls] == ["call-wake"]
+    assert params.task_attributes[CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR] == _UNREADABLE_OWNER
+
+
+def test_an_unusable_workspace_identity_marks_the_owner_source_unknown(tmp_path) -> None:
+    owner, task_root = _owner_layout(tmp_path)
+    identity_path = task_root / "work" / "run_workspace.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity_path.write_text(json.dumps({**identity, "owner_home": str(tmp_path / "elsewhere")}), encoding="utf-8")
+
+    params = _wake_params(tmp_path, task_root)
+
+    assert [item["call_id"] for item in params.carried_archive_tool_calls] == ["call-wake"]
+    assert params.task_attributes[CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR] == [
+        {"source": "owner_index", "error_type": "run_workspace_identity_unusable"},
+    ]
+
+
+def test_a_legacy_wake_reports_an_unreadable_task_index(tmp_path) -> None:
+    _owner, task_root = _owner_layout(tmp_path)
+    _break_index(task_root / "work")
+    request = BackgroundRunRequest(thread_id="thread-1", task_id=_FOREGROUND, reason="subagent_runner_finished")
+
+    read = _background_active_turn_tool_calls(
+        request, GoalRuntimeContext(task_objective="原任务", task_path=str(task_root)),
+    )
+
+    assert read.records == []
+    assert list(read.unreadable_sources) == [{"source": "task_index", "error_type": "IsADirectoryError"}]
+
+
+def test_incomplete_carry_fails_closed_only_for_one_shot_orchestration() -> None:
+    incomplete = SimpleNamespace(task_attributes={CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR: _UNREADABLE_OWNER})
+    create = {"tool": "create_subagents", "goal": _CHILD_GOAL}
+    batch = {"tool": "create_subagents", "items": [
+        {"goal": "甲", "replacement_for_run_ids": ["subagent-old"]}, {"goal": "乙"},
+    ]}
+
+    assert _one_shot_blocked_by_incomplete_carry(incomplete, create)
+    assert _one_shot_blocked_by_incomplete_carry(incomplete, batch)
+    assert not _one_shot_blocked_by_incomplete_carry(incomplete, {**create, "replacement_for_run_ids": ["subagent-old"]})
+    assert not _one_shot_blocked_by_incomplete_carry(incomplete, {"tool": "read_file", "path": "a.txt"})
+    assert not _one_shot_blocked_by_incomplete_carry(SimpleNamespace(task_attributes={}), create)
+    assert "replacement_for_run_ids" in ERROR_CONTRACTS["TOOL_ONE_SHOT_HISTORY_INCOMPLETE"].recovery_hint
+
+
+def test_compact_retry_keeps_the_first_reads_incomplete_carry(tmp_path, monkeypatch) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"channel": "tui", "channel_conversation_id": "carry-retry"})
+    request = BackgroundRunRequest(thread_id=thread.thread_id)
+    seen: list[dict] = []
+
+    # 首次准备读到不完整；压缩后的重试重读成功，但携带记录仍是首次那份，结论必须沿用首次。
+    def prepare_run(*_args, **kwargs):
+        attributes = {"conversation_thread_id": thread.thread_id}
+        if not seen:
+            attributes[CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR] = [dict(item) for item in _UNREADABLE_OWNER]
+        return RunParams(source="background_main_agent", request_id="carry-retry", task_attributes=attributes,
+                         carried_archive_tool_calls=[{"call_id": "call-wake", "tool": "read_file", "ok": True}],
+                         conversation_history_seed=kwargs.get("history_seed"))
+
+    # 替身沿用被替换函数的调用形状：位置参数依次是 execution、prompt、params、history、context。
+    def attempt(*args, **_kwargs):
+        params = args[2]
+        seen.append(dict(params.task_attributes or {}))
+        if len(seen) == 1:
+            return SimpleNamespace(runtime_status="context_overflow", archive_tool_calls=[],
+                                   active_turn_user_inputs=None), params, None
+        return SimpleNamespace(runtime_status="completed"), params, SimpleNamespace(committed=True, committed_thread=thread)
+
+    def refresh(_execution, current, history):
+        return current, SimpleNamespace(seed=history.seed, compact_context=history.compact_context,
+                                        compact_source=SimpleNamespace(messages=["earlier"]),
+                                        context_bundle=history.context_bundle)
+
+    monkeypatch.setattr(execution_module, "_run_background_recovery_attempt", attempt)
+    monkeypatch.setattr(execution_module, "_refresh_background_compact_source", refresh)
+    execution_module.run_background_turn_with_compact(
+        execution_module.BackgroundExecutionDependencies(agent=agent, store=store, prepare_run=prepare_run),
+        thread, request, user_prompt="继续", continuation_injection=[], proactive_delivery_available=False,
+        activity_sink=execution_module.BackgroundMainActivitySink(agent, thread_id=thread.thread_id, task_id=""),
+    )
+
+    assert [item.get(CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR) for item in seen] == [_UNREADABLE_OWNER] * 2
+
+
+# 守卫与创建边界同口径（Codex 复核的两个反例）：item 的字段覆盖顶层，接替编号去掉空白后必须非空。
+@pytest.mark.parametrize(("carry_incomplete", "payload", "expected_ids", "blocked"), [
+    (True, {"goal": "返回一句确认", "replacement_for_run_ids": [" "]}, [[]], True),
+    (True, {"replacement_for_run_ids": ["old"], "items": [{"goal": "返回一句确认", "replacement_for_run_ids": []}]},
+     [[]], True),
+    (True, {"items": [{"replacement_for_run_ids": ["old"]}]}, [[]], True),
+    (False, {"goal": "返回一句确认"}, [[]], False),
+    (True, {"replacement_for_run_ids": ["old"], "items": [{"goal": "返回一句确认"}]}, [["old"]], False),
+    (True, {"items": [{"goal": "返回一句确认", "replacement_for_run_ids": ["old"]}]}, [["old"]], False),
+])
+def test_fail_closed_guard_reads_replacements_like_the_creation_boundary(
+    carry_incomplete, payload, expected_ids, blocked,
+) -> None:
+    attributes = {CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR: _UNREADABLE_OWNER} if carry_incomplete else {}
+    call = {"tool": "create_subagents", **payload}
+
+    assert effective_replacement_ids_per_child(call) == expected_ids
+    assert _one_shot_blocked_by_incomplete_carry(SimpleNamespace(task_attributes=attributes), call) is blocked

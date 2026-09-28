@@ -20,6 +20,7 @@ from ..tooling.runtime_contracts import ToolCall, ToolResult
 from .audit_dispatch import audit_privileged_tool_call
 from .parameters import (
     _one_shot_tool_call_is_duplicate,
+    _one_shot_tool_call_key,
     _one_shot_tool_call_keys,
 )
 from .runner.stage_trace import RunnerToolStageTraceRequest, trace_runner_tool_call_finished
@@ -68,6 +69,9 @@ class ToolCallRuntimeRequest:
         return self.request.model_call or self.call
 
 
+# LLM: 运行时门在注册表 handler 之前拒绝调用，依次是审计来源工作者范围、一次性编排去重、携带记录没读全时的一次性编排
+#   fail-closed、过期子代理 attempt 和工具预算；每个拒绝都标 RUNTIME_GATE 且 handler 未执行。只读结构化参数与宿主事实。
+# 函数用途: 在真正执行工具前做运行时拦截，返回拦截结果；全部放行时交给预算门。
 def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
     # Runtime guards reject before Registry handlers; keep that boundary explicit for recovery and audit.
     request = runtime_request.request
@@ -90,6 +94,12 @@ def guarded_tool_call_result(runtime_request: ToolCallRuntimeRequest):
             handler_executed=False,
         )
         return result
+    if _one_shot_blocked_by_incomplete_carry(request.params, payload):
+        return apply_tool_execution_facts(
+            _incomplete_carry_one_shot_result(payload),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
     stale_result = stale_subagent_attempt_result(runtime_request.agent, payload)
     if stale_result is not None:
         apply_tool_execution_facts(
@@ -298,6 +308,36 @@ def _promote_conversation_task_for_work_tool(
         error_code="CONVERSATION_TASK_BINDING_FAILED",
     )
 
+
+
+# LLM: 生命周期续跑的携带记录没读全（task_attributes 里的结构化不完整事实）时，一次性编排去重 fail-closed：只要有一个
+#   待建子代理没有有效的 replacement_for_run_ids，这次 create_subagents 就拦下，不把读不到的前台副作用当成没发生；
+#   “有效”直接复用创建边界的口径（create_payload.effective_replacement_ids_per_child：item 覆盖顶层、去空白后非空），
+#   不另写一套判断。全部写明接替关系的照常走原去重，非一次性工具不受影响。只读结构化字段，不看正文。
+# 函数用途: 判断本次一次性编排调用是否因为本轮工具历史没读全而必须拦下。
+def _one_shot_blocked_by_incomplete_carry(params: object, payload: dict[str, object]) -> bool:
+    from ..conversation.authority import CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR
+    from .orchestration.create_payload import effective_replacement_ids_per_child
+
+    attributes = getattr(params, "task_attributes", None)
+    if not isinstance(attributes, dict) or not attributes.get(CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR):
+        return False
+    if not _one_shot_tool_call_key(payload):
+        return False
+    return any(not ids for ids in effective_replacement_ids_per_child(payload))
+
+
+# LLM: 本轮工具历史没读全时的一次性编排拦截结果；拦截只由结构化事实决定，这里的文字只是软引导。
+# 函数用途: 生成因为历史读不全而拦下派工的失败结果，并说明唯一的结构化出口 replacement_for_run_ids。
+def _incomplete_carry_one_shot_result(payload: dict[str, object]) -> ToolHandlerOutcome:
+    tool_name = str(payload.get("tool") or "unknown")
+    return ToolHandlerOutcome(
+        tool_name,
+        False,
+        "本轮（含子代理唤醒后的续跑）的工具历史没有读全，无法证明同内容的派工没有做过，系统已拦下这次一次性编排调用。"
+        "不要换个说法重复派工；确需另派子代理接替已有 run 时，在 replacement_for_run_ids 里精确写出被接替的 run_id。",
+        error_code="TOOL_ONE_SHOT_HISTORY_INCOMPLETE",
+    )
 
 
 # LLM: 一次性编排去重的拦截结果。去重范围是整个活动回合（前台轮加子代理唤醒后的续跑片），拦截与放行只由

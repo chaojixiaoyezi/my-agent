@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,25 +34,50 @@ def carried_tool_call_records(
     return _carried_records((row, False) for row in rows if _is_indexed_call_fact(row) and _matches_scope(row, scope))
 
 
+# LLM: 生命周期续跑要读的一个工具索引：只读 root 自己的 blobs/tool_outputs/index.jsonl。label 是结构化来源名
+#   （例如 owner_index、task_index），读不到时原样写进不完整事实；runtime_only 表示这些记录只用于运行时状态。
+# 类用途: 描述生命周期续跑要读的一个工具索引来源。
+@dataclass(frozen=True)
+class CarriedIndexSource:
+    root: Path
+    label: str
+    runtime_only: bool = False
+
+
+# LLM: records 是按请求过滤、去重后的携带记录；unreadable_sources 列出读不到的来源（{"source", "error_type"}），
+#   非空就表示 records 不完整，调用方不得把它当成完整的原回合工具事实。
+# 类用途: 承载一次携带记录读取的结果，以及是否读全。
+@dataclass(frozen=True)
+class CarriedToolCallRead:
+    records: list[dict[str, Any]] = field(default_factory=list)
+    unreadable_sources: tuple[dict[str, str], ...] = ()
+
+
 # LLM: 生命周期续跑要看到原活动回合的全部工具事实：前台 Gateway 轮写在 owner 根自己的索引，唤醒片写在任务 work
-#   索引。sources 是（索引根, 是否只用于运行时状态）对，每个根只读它自己的 blobs/tool_outputs/index.jsonl，不展开到
-#   其它 runs；逐行流式读取，先用精确请求编号做字节预筛（只省解析开销），再按结构化 scope 精确匹配，身份去重与
-#   carried_tool_call_records 同一口径，先出现者保留。不把整份索引载入内存，只读。
-# 函数用途: 从 owner 索引与任务索引里取出属于指定用户回合的工具调用记录，供后台续跑重建去重、预算与交接。
+#   索引。每个来源只读它自己的 index.jsonl，不展开到其它 runs；逐行流式读取，先用精确请求编号做字节预筛（只省
+#   解析开销），再按结构化 scope 精确匹配，身份去重与 carried_tool_call_records 同一口径，先出现者保留。
+#   每个来源独立读取、各自捕获 OSError：一个来源读不到只记进 unreadable_sources，不跳过其它来源；读到一半失败的
+#   来源整份丢弃，不留半份。不把整份索引载入内存，只读。
+# 函数用途: 从 owner 索引与任务索引里取出属于指定用户回合的工具调用记录，并如实报告哪些来源没读到。
 def carried_tool_call_records_for_requests(
-    sources: Sequence[tuple[str | Path, bool]],
+    sources: Sequence[CarriedIndexSource],
     request_ids: Sequence[str],
-) -> list[dict[str, Any]]:
+) -> CarriedToolCallRead:
     wanted = tuple(dict.fromkeys(str(item or "").strip() for item in request_ids if str(item or "").strip()))
     if not wanted:
-        return []
+        return CarriedToolCallRead()
     scope = {"conversation_request_id": wanted}
-    return _carried_records(
-        (row, runtime_only)
-        for root, runtime_only in sources
-        for row in _stream_index_rows(Path(root), wanted)
-        if _is_indexed_call_fact(row) and _matches_scope(row, scope)
-    )
+    rows: list[tuple[dict[str, Any], bool]] = []
+    unreadable: list[dict[str, str]] = []
+    for source in sources:
+        try:
+            matched = [row for row in _stream_index_rows(Path(source.root), wanted)
+                       if _is_indexed_call_fact(row) and _matches_scope(row, scope)]
+        except OSError as exc:
+            unreadable.append({"source": source.label, "error_type": type(exc).__name__})
+            continue
+        rows.extend((row, source.runtime_only) for row in matched)
+    return CarriedToolCallRead(_carried_records(rows), tuple(unreadable))
 
 
 # LLM: 输入是已过滤的（索引行, 是否只用于运行时状态）；完整四元身份去重，身份未知时只合并字节相同的行，
@@ -382,7 +408,10 @@ def _json_line(line: str) -> dict[str, Any]:
 
 
 __all__ = [
+    "CarriedIndexSource",
+    "CarriedToolCallRead",
     "carried_tool_call_records",
+    "carried_tool_call_records_for_requests",
     "tool_call_refs",
     "tool_call_source_refs",
     "tool_output_artifact_refs",

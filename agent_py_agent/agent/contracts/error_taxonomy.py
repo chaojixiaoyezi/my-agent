@@ -2184,6 +2184,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "确需接替已有子代理时在 replacement_for_run_ids 里写明被接替的 run_id。"
         ),
     ),
+    "TOOL_ONE_SHOT_HISTORY_INCOMPLETE": ErrorContract(
+        code="TOOL_ONE_SHOT_HISTORY_INCOMPLETE",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.CONTINUE.value,
+        recovery_hint=(
+            "本轮（含子代理唤醒后的续跑）的工具历史没有读全，无法证明同内容派工没有做过；不要重复派工。"
+            "确需接替已有子代理时在 replacement_for_run_ids 里写明被接替的 run_id。"
+        ),
+    ),
     "VERIFICATION_FAILED": ErrorContract(
         code="VERIFICATION_FAILED",
         category="acceptance",

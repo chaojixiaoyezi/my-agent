@@ -116,13 +116,20 @@ def cancel_unstarted_replacement_tasks(
     return results
 
 
+# LLM: 接替编号的唯一归一化口径：只认结构化列表或逗号串，逐项去掉首尾空白并丢掉空项；不认别名、不看正文。
+#   创建前预检、接管落账与运行时一次性编排守卫都走这一个函数，不能各判各的。纯计算。
+# 函数用途: 把 replacement_for_run_ids 的原始值归一成非空的 run_id 列表。
+def replacement_source_ids(values: object) -> list[str]:
+    return string_list(values, TOOL_TEXT_LIST_OPTIONS)
+
+
 # LLM: CreateRunParams stores replacement ids inside its structured attributes;
 # this reader accepts no aliases and does not inspect goal text.
 # 函数用途: 从规范化创建参数里读取要接管的旧 run_id。
 def _params_replacement_source_ids(params: object) -> list[str]:
     attrs = getattr(params, "attributes", None)
     values = attrs.get("replacement_for_run_ids") if isinstance(attrs, dict) else None
-    return string_list(values, TOOL_TEXT_LIST_OPTIONS)
+    return replacement_source_ids(values)
 
 
 # LLM: Takeover edges are persisted from explicit structured ids only; callers must gate lifecycle publication on every returned status.
@@ -147,7 +154,7 @@ def _replacement_source_ids(task: object) -> list[str]:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict):
         return []
-    values = string_list(attrs.get("replacement_for_run_ids"), TOOL_TEXT_LIST_OPTIONS)
+    values = replacement_source_ids(attrs.get("replacement_for_run_ids"))
     task_id = str(getattr(task, "id", "") or "").strip()
     unique: list[str] = []
     for value in values:

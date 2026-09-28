@@ -367,6 +367,21 @@ class CreateSubagentItem:
     params: dict[str, object]
 
 
+# LLM: 一次 create_subagents 调用里每个待建子代理实际生效的接替来源，直接复用创建边界：批量 item 走
+#   create_items_from_params（顶层默认值在前、item 字段覆盖在后，item 的空列表会盖掉顶层），items 缺失或为空时按单个
+#   子代理用顶层参数；编号走 replacements.replacement_source_ids（去掉空白后必须非空）。创建边界会整批拒绝的调用返回
+#   一个空列表项。只读参数，不创建、不落账。
+# 函数用途: 列出每个待建子代理的有效 replacement_for_run_ids，供运行时一次性编排守卫与创建边界用同一口径判断。
+def effective_replacement_ids_per_child(params: dict[str, object]) -> list[list[str]]:
+    from .replacements import replacement_source_ids
+
+    items = create_items_from_params(params)
+    if isinstance(items, str):
+        return [[]]
+    views = [item.params for item in items] or [params]
+    return [replacement_source_ids(view.get("replacement_for_run_ids")) for view in views]
+
+
 def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentItem] | str:
     protocol_error = _batch_protocol_error(params)
     if protocol_error:
