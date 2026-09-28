@@ -359,3 +359,7 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
     - `None` 与留空读成的 `[]` 按没填取默认值，不告警；
     - 其它类型告警 `<键>: expected a string, got 已隐藏（凭据不显示原值）; using default`，并回落默认值。
   - `/settings` 总览的“配置告警 N 条”因此会列出这些键，原值不出现。
+- 2026-09-28：插件命令执行前被拒（rejected）时，回执在中文说明后另起一行“错误码：X”（如普通用户执行仅管理员子命令得到
+  `PLUGIN_PERMISSION_DENIED`），Gateway 普通回执与交互命令流两条路径都按 WARNING 记 `PLUGIN_COMMAND_REJECTED error_code=… action=…
+  request_id=…`。此前服务层已有码，但只转成中文说明、TUI 只打印说明、Gateway 不记日志，面板与日志都看不到码（R16 实测）。
+  管理员执行行为与执行后的失败/成功文案不变；合同测试见 test_plugin_management、test_gateway_plugin_management、test_host_command_stream。

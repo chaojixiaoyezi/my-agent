@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,9 +45,36 @@ def plugin_http_response(handler, server, body: dict, *, text: str | None = None
         revision = body.get("catalog_revision", "")
         if not isinstance(revision, str):
             raise ValueError("目录版本必须是字符串")
-        return manager.command(text, revision=revision, request_id=request_id)
+        return _log_rejection(manager.command(text, revision=revision, request_id=request_id), text, request_id)
     except Exception:  # noqa: BLE001 回包失败不能推断已接受命令未执行，也不能泄露私有路径
         return plugin_catalog_unavailable() if text is None else plugin_command_unknown(request_id)
+
+
+# LLM: 只在结构化 state=rejected 时记一行，只含错误码、子命令名和请求编号，不记命令原文、路径或 owner 目录；
+#   用 WARNING 是因为 Gateway 进程不配置日志级别，只有 WARNING 及以上会进 gateway.log。管理员正常执行不产生这行。
+# 函数用途: 把执行前被拒的插件命令写进 Gateway 日志，方便按错误码检索；原样返回结果。
+def _log_rejection(result: dict, text: str, request_id: str) -> dict:
+    code = result.get("error_code") if isinstance(result, dict) else None
+    if isinstance(code, str) and code and result.get("state") == "rejected":
+        logging.getLogger(__name__).warning("PLUGIN_COMMAND_REJECTED error_code=%s action=%s request_id=%s",
+                                            code, _action_name(text), request_id or "-")
+    return result
+
+
+# LLM: 子命令名只取解析器给出的结构化动作名，业务调用统一记 plugin_call；解析失败记 "-"，不回显原文。
+# 函数用途: 为拒绝日志给出不含参数的子命令名。
+def _action_name(text: str) -> str:
+    from ..command_arguments import CommandArgumentError
+    from ..plugin_commands import parse_plugin_command, plugin_namespace
+
+    namespace = plugin_namespace(text)
+    if namespace is not None and namespace.plugin_id:
+        return "plugin_call"
+    try:
+        parsed = parse_plugin_command(text)
+    except CommandArgumentError:
+        return "-"
+    return parsed.action.name if parsed is not None and parsed.action else "-"
 
 
 # LLM: 使用原认证中间件裁决角色；无认证模式仅在显式关闭 auth 且监听及对端均为本机时授权，不信任正文 user/channel。
@@ -156,8 +184,9 @@ def _interactive_command(handler, server, body: dict, text: str) -> None:
     # 函数用途: 在 HTTP 执行区间提交命令并保留无法确认的原结果。
     def execute(request_permission, cancellation_token) -> dict:
         try:
-            return manager.command(text, revision=revision, request_id=request_id,
-                                   request_permission=request_permission, cancellation_token=cancellation_token)
+            return _log_rejection(manager.command(text, revision=revision, request_id=request_id,
+                                                  request_permission=request_permission,
+                                                  cancellation_token=cancellation_token), text, request_id)
         except Exception:  # noqa: BLE001 已执行与清理状态只由原账本裁决
             return plugin_command_unknown(request_id)
 
