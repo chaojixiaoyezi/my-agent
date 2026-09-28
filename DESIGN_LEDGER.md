@@ -8,7 +8,12 @@
 - 防重复接替：接替预检、回执、接管 run 幂等查找统一读 `models.task_replacement_successor`（takeover_by／superseded_by），第二次接替同一来源得 `SUBAGENT_REPLACEMENT_INVALID`／`source_already_taken_over` 并带 disposition。
 - 父级视图：kernel 节点新增 `replaced_by`（接替者与处置），经代理树节点进入 list_agents 模型视图与大树预览；HISTORY_INCOMPLETE 的唯一出口（为已有 run 写 `replacement_for_run_ids`）接替 DONE run 保持可用。
 
-未做：TUI board 等其它展示面还没标 superseded；真实模型下的接替行为未验。模块细节见 [子代理结构](docs/modules/subagent/04-structure.md#接替关系的唯一落账入口2026-09-28)。
+未做：
+- TUI board 等其它展示面还没标 superseded；
+- 追加式事件日志（local_store `subagent_run_saved`、run 时间线）没有专门的接替条目，接管记录只在权威状态和 TAKEOVER.md 里；
+- 真实模型下的接替行为未验。
+
+脚本模型端到端复核（BR/HI）已通过，见 CAPABILITY_PACK_ACCEPTANCE 的 G03 节。模块细节见 [子代理结构](docs/modules/subagent/04-structure.md#接替关系的唯一落账入口2026-09-28)。
 
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
 
