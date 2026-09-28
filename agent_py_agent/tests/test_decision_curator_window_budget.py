@@ -65,14 +65,18 @@ def oversized_batch() -> CuratorInputBatch:
     return _batch(56)
 
 
-def test_shared_criteria_is_sent_once_not_per_question(oversized_batch):
-    """同一批材料的候选释义只发送一次：题面用引用指向 state.annotation_criteria。"""
-    state, questions, _sources, _revision = _decision_material(oversized_batch)
-    assert set(state["annotation_criteria"]["tag"])
+def test_request_stays_within_window_with_existing_inline_criteria(oversized_batch):
+    """题面保持既有内联候选合同（不改成引用），体积由整条来源的窗口裁剪控制。
+
+    说明：早期版本把候选释义改成 `state.annotation_criteria` 引用以省字节，但那与既有测试
+    把 criteria 当完整 dict 的合同冲突；改为保留内联形态，只做窗口兜底裁剪。
+    """
+    state, questions, sources, _revision = _decision_material(oversized_batch, window_tokens=32768)
     for question in questions.values():
-        # 逐题内联整段候选释义会让每个问题重复 4 条说明文本（真机实测 489 字符/题）。
-        assert isinstance(question["criteria"], str)
-        assert question["criteria"] == "annotation_criteria." + question["instructions"]["criteria_key"]
+        assert isinstance(question["criteria"], dict)
+        assert {"not_needed", "need_data", "no_match", "abstain"} <= question["criteria"].keys()
+        assert "required_refs" in question["criteria"]["need_data"]
+    assert sources
 
 
 def test_request_fits_model_window_without_dropping_material(oversized_batch):

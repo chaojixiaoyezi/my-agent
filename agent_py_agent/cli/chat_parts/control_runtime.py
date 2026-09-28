@@ -488,17 +488,17 @@ def _stop_session_background_resources(
     thread_id = str(execution.state.session_id or "").strip()
     try:
         from ...agent.gateway_parts.background_resource_report import (
+            background_store_root,
             list_running_background_processes,
             session_background_processes,
             stop_background_processes,
         )
-        from ...agent.tooling.process_session_store import process_session_store_root
 
         owner_home = str(getattr(getattr(execution.agent, "home_paths", None), "owner_home_dir", "") or "")
         # 与后台进程写入端同源：ShellTool 用 effective_workspace_root 构造 store 根
         # （tooling/shell.py:1199），这里不能换成 agent.root 或 owner_home，否则会读错目录。
         workspace = str(getattr(execution.agent, "effective_workspace_root", "") or "")
-        store_root = process_session_store_root(workspace, owner_home)
+        store_root = background_store_root(workspace, owner_home)
         running, errors = list_running_background_processes(store_root)
         mine = session_background_processes(running, thread_id)
     except (OSError, RuntimeError, TypeError, ValueError, KeyError):

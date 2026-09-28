@@ -99,24 +99,16 @@ def _validate_question(key: str, question: object) -> None:
     if set(question) - {"type", "instructions", "criteria"}:
         raise DecisionInputError("决策题目包含未支持字段。")
     kind, criteria = question.get("type"), question.get("criteria")
-    # LLM: 候选集合可以按引用共享（state.<key>.<field>），这样同一批材料的候选释义只发送一次；
-    #   引用形态复用 _valid_key 的界限，仍拒绝空串、超长和含控制字符的值。
-    shared_criteria = type(criteria) is str
-    if shared_criteria and not _valid_key(criteria):
-        raise DecisionInputError("决策题目的候选引用无效。")
     if kind == "choice":
-        if not shared_criteria and (type(criteria) is not dict or not 1 <= len(criteria) <= 255
+        if (type(criteria) is not dict or not 1 <= len(criteria) <= 255
                 or any(not _valid_key(k) or (v is not None and not _entry(v)) for k, v in criteria.items())):
             raise DecisionInputError("选择题须有 1 至 255 个明确候选。")
     elif kind == "score":
-        if shared_criteria:
-            raise DecisionInputError("评分题须内联有序等级。")
         if type(criteria) is not list or not 2 <= len(criteria) <= 10 or not all(_entry(v) for v in criteria):
             raise DecisionInputError("评分题须有 2 至 10 个有序等级。")
     elif kind == "noul":
-        if "criteria" in question and not shared_criteria and (
-                type(criteria) is not dict or set(criteria) - {"true", "false"}
-                or not all(_entry(v) for v in criteria.values())):
+        if "criteria" in question and (type(criteria) is not dict or set(criteria) - {"true", "false"}
+                                       or not all(_entry(v) for v in criteria.values())):
             raise DecisionInputError("是非题说明只接受 true/false 两个字段。")
     else:
         raise DecisionInputError("尚未支持这种决策题目类型。")

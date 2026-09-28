@@ -37,6 +37,7 @@ from ..agent.gateway_parts import (
 )
 from ..agent.gateway_parts.background_resource_report import (
     DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS,
+    background_store_root,
     list_running_background_processes,
     stop_background_processes,
 )
@@ -68,7 +69,6 @@ from ..agent.gateway_parts.status_rendering import (
     wait_for_gateway_readiness,
 )
 from ..agent.runtime_errors import runtime_error_report
-from ..agent.tooling.process_session_store import process_session_store_root
 from .common import ROOT, make_agent
 from .gateway_host_guard import mark_hosting_gateway_process, refuse_stopping_hosting_gateway
 from .gateway_loops import (
@@ -1140,7 +1140,7 @@ def _report_background_processes(args, agent, background: tuple[list, list]) -> 
 # 函数用途: 返回本 gateway owner 的托管后台进程登记表根目录。
 def _background_store_root(agent) -> str:
     home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
-    return str(process_session_store_root(getattr(agent, "root", ""), home))
+    return background_store_root(getattr(agent, "root", ""), home)
 
 
 # LLM: 只读一次登记表供停止后的报告复用，不在失败路径重复扫描；读取异常按空结果 + 错误列表返回。

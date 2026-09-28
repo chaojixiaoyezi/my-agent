@@ -13,6 +13,15 @@ MAX_DECISION_JSON_DEPTH = 16
 MAX_DECISION_JSON_NODES = 16_384
 
 
+# LLM: 决策输入窗口判断需要与后端发送前同一套 token 估算口径；估算实现留在 memory_archive.tokens
+#   （那层的既有职责），这里只做转发，让 memory_store 等下游层不必直接依赖 memory_archive。
+# 函数用途: 用与后端一致的口径估算一段决策载荷的输入 token 上界。
+def decision_input_tokens(payload: object) -> int:
+    from ..memory_archive.tokens import estimate_tokens
+
+    return estimate_tokens(payload)
+
+
 # LLM: 错误只带固定文案，不能泄漏原 state、候选材料或私有配置；运行失败不等于 not_needed。
 # 类用途: 表示本地决策输入不符合合同，请调用方保留原业务方案。
 class DecisionInputError(ValueError):

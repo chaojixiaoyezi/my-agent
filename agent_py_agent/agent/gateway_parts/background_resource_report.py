@@ -12,7 +12,7 @@ from ..tooling.process_session_records import (
     MANAGED_PROCESS_SESSION_SCHEMAS,
     PROCESS_TERMINAL_STATUSES,
 )
-from ..tooling.process_session_store import ProcessSessionStore
+from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
 
 # 停止意图落到记录后，原 host 的监控循环按自己的轮询间隔发现；等待回收要留足余量。
 DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS = 10.0
@@ -141,8 +141,16 @@ def session_background_processes(
     return [row for row in processes if str(row.get("thread_id") or "").strip() == target]
 
 
+# LLM: 受管后台登记表地址只由产品那一个函数决定（写入端见 tooling/shell.py）；cli 层不得直接依赖
+#   tooling，因此由本模块（gateway_parts）转发同一个函数，避免第二套地址推导。
+# 函数用途: 返回受管后台进程登记表根目录，供 CLI 与本地控制使用。
+def background_store_root(workspace_root: str | Path, owner_home: object = "") -> str:
+    return str(process_session_store_root(workspace_root, owner_home))
+
+
 __all__ = [
     "DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS",
+    "background_store_root",
     "background_process_facts",
     "list_running_background_processes",
     "session_background_processes",
