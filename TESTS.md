@@ -84,6 +84,21 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
 
+## /stop 回执列出实际停掉的资源（pid + task/run 归属）（2026-09-28，分支 `my-agent/self-dev-4`，基点 `fc494da3f`）
+
+- **来源**：dev 在开发交流板 11:22 的要求——"停止之后要把实际停掉的资源（task/run、PID）列给用户看，别只回一个 ok"。
+  核对结果：`gateway stop --stop-background` 侧本来就打印结构化事实（所属 task/run、pid、启动时间），
+  但会话内 `/stop` 只回"已停止本会话遗留的 N 个后台资源。"，只有数量、没有 pid 与归属。
+- **做法**：`cli/chat_parts/control_runtime._background_resource_lines(processes, results)` 把
+  `session_background_processes` 过滤出的行（含 `pid` / `root_task_id` / `run_id`）与 `stop_background_processes`
+  的回执按 `session_id` 配对，输出 `- pid 54321（task task-1 / run run-1）` 形态的明细；只有确认未退出时才追加
+  "尚未确认退出"。配对不上的行不编造停止状态；pid 缺失写"pid 未知"、不写 0。停止逻辑与如实报未确认的判定分支未改。
+- **新测试/断言**：`test_stop_without_running_turn_reclaims_session_resources` 增断言（pid、task、run、"尚未确认退出"）；
+  新增 `test_stop_lists_stopped_resources_with_pid_and_ownership` 覆盖全停成功路径（此前没有用例覆盖 ok=True 分支）。
+- **复现**：`PYTHONPATH=. python3 -m pytest agent_py_agent/tests/test_session_stop_background_resources.py -q`
+- **变异验证**：把 `_background_resource_lines` 改成返回空列表（等价"只给数量"）→ 上述 2 条用例变红（`.FF..`），
+  实测消息退回 `已停止本会话遗留的 1 个后台资源：\n`；还原后 6 项全绿。
+
 ## 会话内 /stop 回收被中断任务的后台资源（2026-09-28，分支 `my-agent/self-dev-4`）
 
 - **来源**：my-agent-4 开发交流板任务 3 后半截（dsh-be 的 R10 深度验收）。回合被 /interrupt 后托管后台进程

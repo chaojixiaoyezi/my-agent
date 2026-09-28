@@ -522,12 +522,49 @@ def _stop_session_background_resources(
         )
     if any(not row["stopped"] for row in results):
         return ConversationControlResult(
-            "stop", False, f"已受理停止 {len(results)} 个后台资源，部分尚未确认退出。",
+            "stop", False,
+            f"已受理停止 {len(results)} 个后台资源，部分尚未确认退出：\n"
+            + "\n".join(_background_resource_lines(mine, results)),
             delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
         )
     return ConversationControlResult(
-        "stop", True, f"已停止本会话遗留的 {len(results)} 个后台资源。", delivery_status="accepted",
+        "stop", True,
+        f"已停止本会话遗留的 {len(results)} 个后台资源：\n"
+        + "\n".join(_background_resource_lines(mine, results)),
+        delivery_status="accepted",
     )
+
+
+# LLM: 用户要能看见"到底停了谁"，所以回执不再只给数量：这里把 pid 与 task/run 归属拼成明细行。
+#   只读传入事实，不改任何状态；processes 是 session_background_processes 过滤后的行，
+#   results 是 stop_background_processes 的回执，两者按 session_id 配对；配对不上的行不编造停止状态
+#   （没有 host 回执就不写"已确认退出"）。
+# 函数用途: 生成本次已停/未确认后台资源的可读明细行。
+def _background_resource_lines(
+    processes: list[dict[str, object]], results: list[dict[str, object]],
+) -> list[str]:
+    stopped_by_session = {
+        str(row.get("session_id") or ""): bool(row.get("stopped")) for row in results
+    }
+    lines: list[str] = []
+    for facts in processes:
+        session_id = str(facts.get("session_id") or "")
+        try:
+            pid = int(facts.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        task = str(facts.get("root_task_id") or "")
+        run = str(facts.get("run_id") or "")
+        owner = " / ".join(
+            part for part in (f"task {task}" if task else "", f"run {run}" if run else "") if part
+        )
+        line = f"- pid {pid}" if pid > 0 else "- pid 未知"
+        if owner:
+            line += f"（{owner}）"
+        if session_id in stopped_by_session and not stopped_by_session[session_id]:
+            line += "，尚未确认退出"
+        lines.append(line)
+    return lines
 
 
 # LLM: 插话持久操作经 guidance 领域组件； Local stop retires only the interrupted request's pending steer inputs.
