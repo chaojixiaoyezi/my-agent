@@ -255,11 +255,6 @@ compact_recall_hint_enabled: true
 # - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
 # - 用户后续觉得太保守或太激进时，可以只改这里，不需要改 Python 代码。
 memory_artifact_default_read_chars: 4000
-memory_archive_preview_level_0_chars: 2048
-memory_archive_preview_level_1_chars: 1024
-memory_archive_preview_level_2_chars: 512
-memory_archive_preview_level_3_chars: 160
-memory_archive_summary_chars: 96
 memory_archive_search_file_limit: 30
 memory_query_content_preview_chars: 500
 memory_resume_archive_scan_limit: 0

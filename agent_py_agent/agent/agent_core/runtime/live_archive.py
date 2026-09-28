@@ -71,8 +71,8 @@ def archive_assistant_tool_round_if_enabled(
                     response_text=response_text,
                     tool_calls=tool_calls,
                     archive_level=_archive_level(agent),
-                    preview_limits=_archive_preview_limits(agent),
-                    summary_chars=_summary_chars(agent),
+                    preview_limits=dict(ARCHIVE_PREVIEW_LIMITS),
+                    summary_chars=ARCHIVE_SUMMARY_CHARS,
                 )
             )
     except Exception as exc:
@@ -103,7 +103,7 @@ def archive_tool_call_if_enabled(
                     tool_index=tool_index,
                     tool_record=dict(archive_record),
                     archive_level=_archive_level(agent),
-                    preview_limits=_archive_preview_limits(agent),
+                    preview_limits=dict(ARCHIVE_PREVIEW_LIMITS),
                 )
             )
         if result is not None:
@@ -242,18 +242,11 @@ def _archive_level(agent: object) -> int:
     return parsed if 0 <= parsed <= 3 else 3
 
 
-def _summary_chars(agent: object) -> int:
-    return int(getattr(getattr(agent, "config", None), "memory_archive_summary_chars", 96) or 96)
-
-
-def _archive_preview_limits(agent: object) -> dict[int, int]:
-    config = getattr(agent, "config", None)
-    return {
-        0: int(getattr(config, "memory_archive_preview_level_0_chars", 2048) or 0),
-        1: int(getattr(config, "memory_archive_preview_level_1_chars", 1024) or 0),
-        2: int(getattr(config, "memory_archive_preview_level_2_chars", 512) or 0),
-        3: int(getattr(config, "memory_archive_preview_level_3_chars", 160) or 0),
-    }
+# LLM: 归档摘要长度与四个预览档位只是内部显示预算，2026-09-28 参数减量 C 组后不再作为用户参数；活动归档与回合
+#   收尾共用这一份定义，改值要一起发版，不要再退回成两个模块各写一份默认值。
+# 函数用途: 给出归档摘要字符数与按归档等级的预览字符预算。
+ARCHIVE_SUMMARY_CHARS = 96
+ARCHIVE_PREVIEW_LIMITS: dict[int, int] = {0: 2048, 1: 1024, 2: 512, 3: 160}
 
 
 __all__ = [

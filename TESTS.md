@@ -1,5 +1,24 @@
 # 测试与发布验收
 
+## 参数减量第三批 C 组 · 第 1 批：归档预览档位与摘要长度降为常量（2026-09-28，dev 派活，my-agent 实现）
+
+- **来源**：dev 06:12 派 C 组（记忆相关的内部参数降级为常量，做法照 A 组 `f82e0e9f6` / E 组 `796a43e02`）：值不变、降到读取点旁
+  具名常量；从 AgentConfig、随包 YAML、归一化表、字段规格表、说明基线、测试里删掉；用户配置里残留的旧键只告警、不迁移。
+- **本批范围（5 键）**：`memory_archive_preview_level_0_chars` / `_1` / `_2` / `_3`、`memory_archive_summary_chars`。
+- **做法**：
+  - 常量落在读取点旁：`agent/agent_core/runtime/live_archive.py` 新增 `ARCHIVE_SUMMARY_CHARS = 96` 与
+    `ARCHIVE_PREVIEW_LIMITS = {0: 2048, 1: 1024, 2: 512, 3: 160}`，活动归档两处调用点直接使用常量。
+  - 原先 `live_archive` 与 `agent/agent_core/_finalization_service.py` 各写一份同值默认值，本批**统一成一处**：
+    `_finalization_service` 从 `live_archive` import 常量，本地 `_memory_archive_preview_limits` 删除。
+  - 配置面按 E 组口径清理：`AgentConfig` 五个字段、`config/agent_config.yaml` 五行、`services/_normalize.py` 五条规格、
+    `tests/fixtures/parameter_description_baseline.json` 五个条目全部删除（`memory_archive_level` 保留，它是用户可见项）。
+  - `tests/test_memory_archive_runtime.py` 的归档等级用例改为 patch 常量（原先给 config 赋那两个键，已失效）。
+- **复现/门禁**：`cd agent_py_agent && python3 -m pytest tests -k archive -q`（645 passed）；守卫
+  `test_parameter_registry.py` / `test_config_field_readers.py` / `test_constant_names_unique.py` / `test_architecture_guardrails.py` 全绿；
+  `ruff check`、`check_doc_sync.py`、`git diff --check`、`check_clean_package.py . --mode worktree` 全部通过。
+- **剩余**：C 组还有 15 键（恢复与检索条数 5 个、curator 内部批次 8 个、`memory_artifact_default_read_chars`）与保留项确认，
+  清单见交流板 2026-09-28 06:20 那条。
+
 ## 后台唤醒片工具轮预算：写 0 回落全局时同样按携带条数平移（2026-09-28，分支 `claude/be-wake-budget`，基于 `315cd81ef`）
 
 - **来源**：B（唤醒片续接前台回合的工具账）留下的例外。`background_max_tool_rounds` 写 0 时不写片上限，

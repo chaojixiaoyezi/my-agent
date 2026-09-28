@@ -34,6 +34,7 @@ from .models import AgentRunResult
 from .run_task_workspace_writer import (
     write_run_task_workspace_if_needed,
 )
+from .runtime.live_archive import ARCHIVE_PREVIEW_LIMITS, ARCHIVE_SUMMARY_CHARS
 from .runtime.owner_roots import runtime_archive_roots
 
 
@@ -229,10 +230,8 @@ class FinalizationService:
                         tool_calls=params.archive_tool_calls or [],
                         source=params.source,
                         archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
-                        preview_limits=_memory_archive_preview_limits(self._agent.config),
-                        summary_chars=int(
-                            getattr(self._agent.config, "memory_archive_summary_chars", 96) or 96
-                        ),
+                        preview_limits=dict(ARCHIVE_PREVIEW_LIMITS),
+                        summary_chars=ARCHIVE_SUMMARY_CHARS,
                     ),
                 ),
             )
@@ -634,15 +633,6 @@ def _resume_context_fields(ctx: FinalizeContext) -> dict:
         if resume and resume.injected
         else 0,
         "memory_resume_context_error": resume.error if resume else "",
-    }
-
-
-def _memory_archive_preview_limits(config) -> dict[int, int]:
-    return {
-        0: int(getattr(config, "memory_archive_preview_level_0_chars", 2048) or 0),
-        1: int(getattr(config, "memory_archive_preview_level_1_chars", 1024) or 0),
-        2: int(getattr(config, "memory_archive_preview_level_2_chars", 512) or 0),
-        3: int(getattr(config, "memory_archive_preview_level_3_chars", 160) or 0),
     }
 
 

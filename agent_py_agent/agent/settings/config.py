@@ -363,11 +363,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_semantic_summary_min_middle: int = 4
     memory_compact_semantic_summary_max_input_chars: int = 12000
     memory_artifact_default_read_chars: int = 4000
-    memory_archive_preview_level_0_chars: int = 2048
-    memory_archive_preview_level_1_chars: int = 1024
-    memory_archive_preview_level_2_chars: int = 512
-    memory_archive_preview_level_3_chars: int = 160
-    memory_archive_summary_chars: int = 96
     memory_archive_search_file_limit: int = 30
     memory_query_content_preview_chars: int = 500
     memory_resume_archive_scan_limit: int = 0

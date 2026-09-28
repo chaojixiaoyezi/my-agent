@@ -235,12 +235,12 @@ def test_archive_live_tool_round_writes_before_turn_finalization():
         assert tool.event_count == 1
 
 
-def test_live_archive_respects_archive_level_zero(tmp_path: Path) -> None:
+def test_live_archive_respects_archive_level_zero(tmp_path: Path, monkeypatch) -> None:
     config = AgentConfig(
     )
     config.memory_archive_level = 0
-    config.memory_archive_preview_level_0_chars = 1000
-    config.memory_archive_preview_level_3_chars = 20
+    # 四个预览档位已降级成 live_archive 的模块常量（2026-09-28 参数减量 C 组），测试改 patch 常量而不是配置。
+    monkeypatch.setattr(runtime_live_archive, "ARCHIVE_PREVIEW_LIMITS", {0: 1000, 1: 1024, 2: 512, 3: 20})
     agent = SimpleNamespace(root=tmp_path, config=config, session_id="session-live")
     params = SimpleNamespace(
         request_id="req-live",
