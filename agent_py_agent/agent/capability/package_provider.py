@@ -34,6 +34,8 @@ def _package_snapshot(store: PluginInstallStore, installation: PluginInstallatio
 
 
 # LLM: 同 owner Store 的原准入事实先读后读；归档字节已经完整复验，返回前完整 installation 必须仍相等。
+#   reason 区分读前已失效（activation_unavailable：停用、换代或卸载早于本次读取）与读中变化
+#   （activation_changed_during_read），只供诊断；两者都拒绝交付，调用方对外错误码不因此改变。
 # 函数用途: 有界读取一个包内成员；撤销、换代、包篡改和未声明路径都失败，不启动或执行资源。
 def read_capability_member(store: PluginInstallStore, expected: PluginInstallation, member_path: str) -> bytes:
     from ..plugin_package import PackageReadLimits, PluginPackageSnapshot, read_plugin_member
@@ -43,7 +45,10 @@ def read_capability_member(store: PluginInstallStore, expected: PluginInstallati
         raise PluginInstallationError("activation_unavailable", "能力包原安装代次已变化。")
     package = PluginPackageSnapshot(before.manifest, store.package_bytes(before))
     content = read_plugin_member(package, member_path, max_bytes=PackageReadLimits().member_bytes)
-    after = store.require_activation(expected.manifest.plugin_id, expected.activation_id)
+    try:
+        after = store.require_activation(expected.manifest.plugin_id, expected.activation_id)
+    except PluginInstallationError as exc:
+        raise PluginInstallationError("activation_changed_during_read", "能力包读取期间安装代次已变化。") from exc
     if after != before:
-        raise PluginInstallationError("activation_unavailable", "能力包读取期间安装代次已变化。")
+        raise PluginInstallationError("activation_changed_during_read", "能力包读取期间安装代次已变化。")
     return content

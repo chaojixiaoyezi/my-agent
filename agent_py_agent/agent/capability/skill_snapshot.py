@@ -20,8 +20,17 @@ PACKAGE_PIN_ERROR_MESSAGES = {
 }
 
 
+# LLM: 消息文本保持原格式（调用方和既有回执沿用）；reason 是可选的结构化内部原因，只用于诊断，
+#   不参与授权或恢复判定，空串表示没有可区分的原因。改动时联查 skill_search_tool._snapshot_unavailable。
+# 类用途: 表示当轮快照里选定的 Skill 或能力包已不能读取，并可附带读取失败的内部原因。
 class SkillSnapshotError(RuntimeError):
     """A selected Skill can no longer be read from the immutable turn snapshot."""
+
+    # LLM: reason 只能由宿主内部异常的结构化字段填入，不从消息或模型文本解析。
+    # 函数用途: 保存原错误消息和可选的内部原因。
+    def __init__(self, message: str = "", *, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -156,7 +165,8 @@ class SkillSnapshot:
             raise
         except (OSError, ValueError) as exc:
             code = str(getattr(exc, "code", "") or "CAPABILITY_RESOURCE_UNAVAILABLE")
-            raise SkillSnapshotError(f"{code} package={package_id}") from exc
+            reason = str(getattr(exc, "reason", "") or "")
+            raise SkillSnapshotError(f"{code} package={package_id}", reason=reason) from exc
 
     # LLM: 仅主任务合法旧 pin 的可用性投影使用此入口；剔除同 ID 的当前包但不写 pin，也不影响公开 Skill 或其它包。
     # 函数用途: 生成带结构化失效诊断的新快照和指纹，让正常对话继续而旧包不能静默换代。

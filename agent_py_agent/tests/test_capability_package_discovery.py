@@ -1,6 +1,7 @@
 """能力包发现与读取合同：只用本地快照和临时原安装表，不调用模型或执行包内脚本。"""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import replace
@@ -251,3 +252,59 @@ def test_read_rechecks_original_installation_after_member_bytes(tmp_path, monkey
     monkeypatch.setattr(plugin_package, "read_plugin_member", revoke_after_read)
     with pytest.raises(PluginInstallationError):
         package.read("CAPABILITY.md")
+
+
+def test_read_labels_revoked_before_read_apart_from_change_during_read(tmp_path, monkeypatch):
+    from agent_py_agent.agent import plugin_package
+
+    owner, store, _, request = content_activation_fixture(tmp_path)
+    active = store.change_activation(request).installation
+    package = enabled_capability_packages(owner)[0]
+    stale = copy.copy(active)  # 绕过构造校验，只模拟“同代次但冻结行已不等于当前行”的防御分支
+    object.__setattr__(stale, "settings_json", "{}")
+    with pytest.raises(PluginInstallationError) as stale_row:
+        read_capability_member(store, stale, "CAPABILITY.md")
+    assert stale_row.value.reason == "activation_unavailable"
+    original = plugin_package.read_plugin_member
+
+    def revoke_after_read(*args, **kwargs):
+        content = original(*args, **kwargs)
+        store.change_activation(PluginActivationRequest("disable", active.revision, replace(active.activation, phase="revoked")))
+        return content
+
+    monkeypatch.setattr(plugin_package, "read_plugin_member", revoke_after_read)
+    with pytest.raises(PluginInstallationError) as during:
+        package.read("CAPABILITY.md")
+    assert during.value.reason == "activation_changed_during_read"
+    monkeypatch.setattr(plugin_package, "read_plugin_member", original)
+    with pytest.raises(PluginInstallationError) as before:
+        package.read("CAPABILITY.md")
+    assert before.value.reason == "activation_unavailable"
+
+
+def test_skill_search_keeps_snapshot_code_and_reports_structured_revocation_reason(
+    tmp_path, skill_catalog_factory, monkeypatch,
+):
+    from agent_py_agent.agent import plugin_package
+
+    owner, store, _, request = content_activation_fixture(tmp_path / "pack")
+    active = store.change_activation(request).installation
+    package = enabled_capability_packages(owner)[0]
+    _, _, _, tool = discovery_fixture(tmp_path, skill_catalog_factory, [package])
+    original = plugin_package.read_plugin_member
+
+    def revoke_after_read(*args, **kwargs):
+        content = original(*args, **kwargs)
+        store.change_activation(PluginActivationRequest("disable", active.revision, replace(active.activation, phase="revoked")))
+        return content
+
+    monkeypatch.setattr(plugin_package, "read_plugin_member", revoke_after_read)
+    params = {"action": "get", "package_id": package.package_id}
+    during = tool.execute(params)
+    monkeypatch.setattr(plugin_package, "read_plugin_member", original)
+    before = tool.execute(params)
+    for outcome, reason in ((during, "activation_changed_during_read"), (before, "activation_unavailable")):
+        payload = json.loads(outcome.output)
+        assert not outcome.ok and outcome.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+        assert payload["error"].startswith("CAPABILITY_RESOURCE_UNAVAILABLE package=")
+        assert payload["details"] == {"reason": reason} and "body" not in payload

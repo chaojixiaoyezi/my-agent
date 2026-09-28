@@ -393,11 +393,17 @@ def _unavailable() -> ToolHandlerOutcome:
     )
 
 
+# LLM: 对外错误码固定为 SKILL_SNAPSHOT_UNAVAILABLE，恢复建议不变；details.reason 只投影异常上的结构化内部原因，
+#   用于区分读中换代与读前已停用，不能据此放行或自动重试。改动时联查 test_capability_package_discovery。
+# 函数用途: 把快照读取失败转成统一的失败回执，有内部原因时一并带出，不返回任何正文。
 def _snapshot_unavailable(exc: SkillSnapshotError) -> ToolHandlerOutcome:
+    payload: dict[str, object] = {"error": str(exc)}
+    if exc.reason:
+        payload["details"] = {"reason": exc.reason}
     return ToolHandlerOutcome(
         "skill_search",
         False,
-        json.dumps({"error": str(exc)}, ensure_ascii=False),
+        json.dumps(payload, ensure_ascii=False),
         error_code="SKILL_SNAPSHOT_UNAVAILABLE",
     )
 
