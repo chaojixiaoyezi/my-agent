@@ -314,3 +314,24 @@ def test_accepted_completion_keeps_original_revision_across_parameter_edits_and_
     assert binding.revision == ""
     buffer.reset()
     assert binding.revision == "" and binding.namespace == ""
+
+
+# TUI 命令层：普通用户在本地 TUI 输入仅管理员子命令，面板打印的就是“中文说明 + 错误码”，且不产生插件账本或文件。
+def test_tui_plugins_command_prints_denial_code_for_a_normal_user(tmp_path):
+    from pathlib import Path
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContext
+    from agent_py_agent.cli.chat_parts.slash_commands import handle_common_slash_command
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home"), my_agent_owner_provider="local",
+                                    my_agent_owner_kind="user", my_agent_owner_id="tui-tester"), root=workspace)
+    output = []
+    ctx = SlashCommandContext(agent, 5, [], [], output.append, conversation_id="tui-denial")
+    assert handle_common_slash_command('/plugins install "missing.zip"', ctx=ctx)
+    assert len(output) == 1 and output[0].startswith("当前身份没有插件管理权限。\n错误码：PLUGIN_PERMISSION_DENIED")
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    assert not (owner_home / "data" / "plugins").exists()

@@ -432,15 +432,6 @@ class PluginManagement:
                     "running": "请求正在执行。", "outcome_unknown": "插件管理结果尚未确认，请查询原请求。",
                     "not_found": "当前会话没有查到该请求；这不证明其他会话或未确认请求没有执行。"}
         result = {"kind": "plugin_command", "request_id": request_id, **payload}
-        explanations = {
-            "PLUGIN_PERMISSION_DENIED": "当前身份没有插件管理权限。",
-            "PLUGIN_DISABLED": "插件管理已关闭，原请求结果仍可查询。",
-            "PLUGIN_NOT_ENABLED": "插件尚未启用，请先启用后再调用。",
-            "PLUGIN_CATALOG_STALE": "目录已经变化或尚未读取，请重新查看帮助后确认输入。",
-            "INVALID_COMMAND_ARGUMENTS": "插件命令参数或请求编号无效。",
-            "TOOL_DISABLED": "当前用户策略禁止此插件管理操作。",
-            "TOOL_INVALID_ARGUMENTS": "插件、来源文件或配置无效，或读取未获授权。",
-        }
         message = messages.get(state, "插件命令已处理。")
         details = payload.get("details", {})
         if details.get("reason") == "confirmation_required" and isinstance(details.get("confirmation"), dict):
@@ -467,7 +458,7 @@ class PluginManagement:
             message = "插件调用已有结果，连接收尾尚未确认。" if business else "插件管理操作已有结果，运行收尾尚未确认。"
         if payload.get("connection_cleanup", {}).get("confirmed") is False:
             message += "\n本次插件连接退出尚未确认；原调用结果保持，请核对资源。"
-        result.setdefault("message", explanations.get(payload.get("error_code"), message))
+        result.setdefault("message", _outcome_message(payload, state, message))
         try:
             entries = self.installations.snapshot()
             catalog = self._catalog(entries)
@@ -485,6 +476,27 @@ class PluginManagement:
         if request_id:
             result["message"] += f"\n查询：/plugins status {request_id}"
         return result
+
+
+# 常量用途: 插件命令错误码的中文说明；不在表里的码沿用按状态给出的通用说明。
+_ERROR_EXPLANATIONS = {
+    "PLUGIN_PERMISSION_DENIED": "当前身份没有插件管理权限。",
+    "PLUGIN_DISABLED": "插件管理已关闭，原请求结果仍可查询。",
+    "PLUGIN_NOT_ENABLED": "插件尚未启用，请先启用后再调用。",
+    "PLUGIN_CATALOG_STALE": "目录已经变化或尚未读取，请重新查看帮助后确认输入。",
+    "INVALID_COMMAND_ARGUMENTS": "插件命令参数或请求编号无效。",
+    "TOOL_DISABLED": "当前用户策略禁止此插件管理操作。",
+    "TOOL_INVALID_ARGUMENTS": "插件、来源文件或配置无效，或读取未获授权。",
+}
+
+
+# LLM: 只按结构化 state 与 error_code 取说明，不解析文案。rejected（没有开始执行）时在中文说明后附一行“错误码：X”，
+#   TUI、IM 与 Gateway 回执读到的是同一句；其它状态的文案保持原样。改动须联查插件命令的回执文案测试。
+# 函数用途: 生成插件命令回执的默认说明句，被拒时附上结构化错误码，方便用户和运维按码核对。
+def _outcome_message(payload: dict, state: str, fallback: str) -> str:
+    code = payload.get("error_code")
+    text = _ERROR_EXPLANATIONS.get(code, fallback) if isinstance(code, str) else fallback
+    return f"{text}\n错误码：{code}" if state == "rejected" and isinstance(code, str) and code else text
 
 
 # LLM: 公共请求编号限制为可直接输入查询命令的结构化 token，不解析自然语言决定身份或操作。

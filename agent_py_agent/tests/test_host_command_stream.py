@@ -1,6 +1,7 @@
 """临时 HTTP、真实执行器/MCP 与 TUI 控制器组件测试；不计真实产品 TUI 或模型验收。"""
 
 import asyncio
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -346,3 +347,35 @@ def test_management_uses_original_cancel_token_before_install_side_effect(tmp_pa
                              request_id="cancelled-install", cancellation_token=token)
     assert result["state"] == "rejected" and result["error_code"] == "CANCELLED", result
     assert not service.installations.snapshot() and source.exists()
+
+
+# 函数用途: 经真实交互命令流提交一次业务调用，并在 TUI 审批面板上拒绝它，返回原结果。
+def _denied_interactive_call(client, paths, command, request_id):
+    runtime = TuiRuntime("command-ui")
+    runtime.begin_turn("core-turn")
+    controller = runtime.command_permission_controller(request_id)
+    token = CancellationToken()
+    interaction = CommandInteraction(request_id, controller.request_permission, token, paths)
+    revision = client.refresh()["catalog"]["revision"]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.command, command, revision=revision, interaction=interaction)
+        try:
+            overlay = wait_until(lambda: runtime.store.snapshot().permission or future.done())
+            assert overlay is not True, future.result()
+            assert controller.resolve(overlay.permission_id, "denied")
+            return future.result(timeout=10)
+        finally:
+            token.cancel()
+            controller.cancel_pending()
+
+
+# 交互路径（带审批的 chat --gateway TUI 走这里）：执行前被拒的结果同样带码，并按同一格式写进 Gateway 日志。
+def test_interactive_rejection_is_logged_with_its_code(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="agent_py_agent.agent.gateway_parts.plugin_command_service")
+    with plugin_host(tmp_path, monkeypatch) as (client, paths, _source, command):
+        result = _denied_interactive_call(client, paths, command, "denied-call")
+    assert result["state"] == "rejected" and result["error_code"], result
+    assert f"\n错误码：{result['error_code']}" in result["message"], result["message"]
+    logged = [(r.levelno, r.getMessage()) for r in caplog.records if r.name.endswith("plugin_command_service")]
+    assert logged == [(logging.WARNING, f"PLUGIN_COMMAND_REJECTED error_code={result['error_code']} "
+                                        "action=plugin_call request_id=denied-call")]

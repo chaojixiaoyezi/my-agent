@@ -177,3 +177,32 @@ def test_explicit_command_output_is_shown_as_readable_text():
     assert readable_plugin_output("纯文本结果") == "纯文本结果"
     plain = _json.dumps({"content": [{"type": "text", "text": "第一行"}]})
     assert readable_plugin_output(plain) == "第一行"
+
+
+# 普通用户执行任何仅管理员子命令：同一个拒绝码、中文说明后附“错误码”行，且在建 owner 目录之前就拒绝（不会有安装账本、
+# 插件文件或 host_command）。
+@pytest.mark.parametrize("command", [
+    '/plugins install "{source}"', '/plugins configure sample-peek --file "{source}"', "/plugins enable sample-peek",
+    "/plugins disable sample-peek", "/plugins remove sample-peek", '/plugins update sample-peek "{source}"',
+    "/plugins status request-a",
+])
+def test_nonadmin_admin_only_commands_share_one_denial_code_without_side_effects(tmp_path, command):
+    service, source = manager(tmp_path, is_admin=False)
+    result = service.command(command.format(source=source), revision=service.catalog().revision, request_id="request-b")
+    assert (result["state"], result["error_code"]) == ("rejected", "PLUGIN_PERMISSION_DENIED"), result
+    assert result["message"].startswith("当前身份没有插件管理权限。\n错误码：PLUGIN_PERMISSION_DENIED"), result["message"]
+    assert not service.context.owner.home_dir.exists()
+
+
+# 只有执行前被拒（rejected）附码：管理员被拒同样带码；执行后失败的原文案与成功回执都不带错误码行（管理员的执行行为不变）。
+def test_only_rejections_show_their_code_for_admin_too(tmp_path):
+    service, source = manager(tmp_path)
+    stale = service.command(f'/plugins install "{source}"', revision="stale", request_id="request-c")
+    assert stale["error_code"] == "PLUGIN_CATALOG_STALE" and "\n错误码：PLUGIN_CATALOG_STALE" in stale["message"]
+    bad = tmp_path / "bad.zip"
+    bad.write_bytes(b"invalid package")
+    failed = service.command(f'/plugins install "{bad}"', revision=service.catalog().revision, request_id="request-e")
+    assert (failed["state"], failed["error_code"]) == ("failed", "TOOL_INVALID_ARGUMENTS"), failed
+    assert "错误码" not in failed["message"], failed["message"]
+    done = service.command(f'/plugins install "{source}"', revision=service.catalog().revision, request_id="request-d")
+    assert done["state"] == "succeeded" and "错误码" not in done["message"], done

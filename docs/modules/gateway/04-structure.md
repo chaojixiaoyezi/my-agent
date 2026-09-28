@@ -43,6 +43,8 @@ HTTP ask/control 在原鉴权之后先经 `plugin_command_service.py` 读取可�
 `request_execution.py` 在追加用户历史和调用模型前再次校验旧队列。三处沿原入口顺序，不增加队列或控制类型。
 `/client/plugins` 使用同一服务提供显式 catalog/command，目录反序列化共用 `agent/plugin_command_catalog.py`；
 帮助、参数和补全同源，只读目录不初始化冷 owner、不写会话或任务。摘要绑定当前 owner/通道/会话及完整声明，不是授权或持久安装状态。
+普通回执与交互命令流两条命令路径都经 `plugin_command_service._log_rejection`：结果为 rejected 时按 WARNING 记一行
+`PLUGIN_COMMAND_REJECTED error_code=… action=… request_id=…`（只含码、子命令名和请求编号），进入 gateway.log。
 旧或缺失业务版本明确拒绝并返回新目录；客户端不能改版本自动重放。原认证和群聊路由保持，不能从 argv 取得权限。
 本地管理安装由 `agent/plugin_management.py` 接原运行与执行器；当前管理员检查与来源读取授权分别执行，正文不能提供管理身份。
 配置共用同一管理链，`plugin_configure_tool.py` 在内部读一次文件并按原 schema 验证；`plugin_sources.py` 统一安装/配置的授权读取。

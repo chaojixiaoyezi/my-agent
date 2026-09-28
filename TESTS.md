@@ -1,5 +1,25 @@
 # 测试与发布验收
 
+## 插件命令被拒时带结构化码（2026-09-28，分支 `claude/9b-plugins-denial-code`，基于 `53477806d`）
+
+- **根因**：普通用户执行仅管理员的 `/plugins` 子命令时，服务层其实返回了 `PLUGIN_PERMISSION_DENIED`（TUI 命令路径和 Gateway 路径
+  用的是同一个 `PluginManagement`），但 `_reply` 只把码换成中文说明放进 `message`，TUI 只打印 `message`，Gateway 也不记日志，
+  所以面板和日志里都看不到码（R16 实测）。
+- **做法**：`plugin_management._outcome_message` 统一生成默认说明句，结果为 rejected（没有开始执行）且带码时在中文说明后另起一行
+  “错误码：X”，TUI、IM 与 Gateway 回执共用这一句；执行后的失败与成功文案不变。Gateway 的普通回执与交互命令流两条路径都经
+  `plugin_command_service._log_rejection`，对 rejected 结果按 WARNING 记 `PLUGIN_COMMAND_REJECTED error_code=… action=… request_id=…`
+  （Gateway 进程不配置日志级别，只有 WARNING 及以上会进 gateway.log），不记命令原文或路径。
+- **新测试**：
+  - `test_plugin_management.py`：普通用户执行 install、configure、enable、disable、remove、update、status 七个仅管理员子命令，都返回
+    同一个 `PLUGIN_PERMISSION_DENIED`，文案带码，且不建 owner 目录（没有安装账本、插件文件或 host_command）；只有 rejected 附码：
+    管理员目录过期被拒带码，无效包执行失败（failed）与安装成功都不带。
+  - `test_gateway_plugin_management.py`：Gateway 普通路径被拒时回执带码、日志恰好一行 WARNING；管理员安装成功不记。
+  - `test_host_command_stream.py`：真实 HTTP 交互路径上业务调用审批被拒，回执带码，日志按同一格式记一行。
+  - `test_plugin_command_client.py`：TUI 命令层用真实普通用户 Agent 输入 `/plugins install`，面板打印的就是“中文说明 + 错误码”，
+    不产生插件目录。
+- **变异验证（9 种全部被抓住，逐个字节级还原）**：去掉码行、所有状态都附码、普通路径不记日志、交互路径不记日志、日志降到 INFO、
+  每个结果都记日志、日志回显命令原文、去掉非管理员守卫、TUI 只打印第一行。
+
 ## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
 
 - **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，

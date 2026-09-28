@@ -1,5 +1,6 @@
 """Gateway 管理分路合同：真实原执行器和临时 owner，HTTP handler 不进入模型队列。"""
 
+import logging
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -176,3 +177,24 @@ def test_remove_http_reuses_original_chain_and_keeps_user_files(tmp_path, auth):
     assert request(server, body)[1]["details"] == removed["details"]
     assert request(server, {"operation": "command", "command": "/plugins status remove"})[1]["details"] == removed["details"]
     assert not hasattr(server.agent, "tools") and not hasattr(server.agent, "_owner_pool")
+
+
+# Gateway 普通回执路径：普通用户被拒时回执带码，Gateway 日志按 WARNING 记下同一个码；管理员成功安装不记。
+def test_gateway_logs_rejections_with_their_code_but_not_admin_success(tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="agent_py_agent.agent.gateway_parts.plugin_command_service")
+    server = host(tmp_path)
+    denied = request(server, {"operation": "command", "command": "/plugins install missing.zip",
+                              "plugin_request_id": "new-a"}, user="alice", channel="local")[1]
+    assert denied["message"].startswith("当前身份没有插件管理权限。\n错误码：PLUGIN_PERMISSION_DENIED"), denied
+    assert list(tmp_path.iterdir()) == []
+    owner = resolve_owner_home(tmp_path)
+    owner.home_dir.mkdir(parents=True)
+    source = owner.home_dir / "sample.zip"
+    source.write_bytes(_bundle())
+    catalog = request(server, {"operation": "catalog"})[1]["catalog"]
+    installed = request(server, {"operation": "command", "command": f'/plugins install "{source}"',
+                                 "catalog_revision": catalog["revision"], "plugin_request_id": "install"})[1]
+    assert installed["state"] == "succeeded" and "错误码" not in installed["message"], installed
+    logged = [(r.levelno, r.getMessage()) for r in caplog.records if r.name.endswith("plugin_command_service")]
+    assert logged == [(logging.WARNING,
+                       "PLUGIN_COMMAND_REJECTED error_code=PLUGIN_PERMISSION_DENIED action=install request_id=new-a")]
