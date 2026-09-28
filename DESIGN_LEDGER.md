@@ -58,7 +58,6 @@
 `session_task_max_chain_depth`、`session_pair_hourly_limit`）。防循环两道守卫：派活链深度、每对会话每小时上限
 （0 表示不限制）。飞书入口第一期不做，记为缺口。完整方案、权限矩阵、落地坐标与测试计划见
 [SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md)。状态：**设计中**，等 dev 审过才写代码。
-
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。
@@ -80,7 +79,6 @@
   - 用户配置里残留这些键只告警、照常加载。
   - 测试进一步锁定：dataclass 的每个字段都必须写进模板。不用的字段直接删，不在模板外保留。
 - **不变**：读取逻辑和路径解析都不变；Gateway 找不到文件时的行为也不变。
-
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。

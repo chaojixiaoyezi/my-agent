@@ -83,7 +83,6 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
   不要为了跑通去伪造 `decision_experiment` 的独立路由。
 
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
-
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`）
 
 - **来源**：my-agent-4 开发交流板任务 2（Claude 会话 dsh-9b 的 R16 跨 owner 隔离验收随附发现）。隔离本身通过，
@@ -647,7 +646,6 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **变异验证**：把跨 owner 判定改成恒真 → 5 条跨 owner 测试全红；把自派任务判定改成恒假 → 自派测试变红；恢复后全绿。
 - **回归**：`test_runtime_guidance.py`、`test_wake_queue.py`、`test_orchestration_tool_constants.py` 通过。
 - 尚无真实 Gateway 双会话端到端验收（第 3 片用 fake LLM 做；真实环境由 dev 安排）。
-
 ## Jev curator invalid_input 快速失败修复（2026-09-28，分支 `my-agent/self-dev-4`）
 
 - **来源**：my-agent-4 开发交流板任务 1。owner 的 `data/decision/outcomes.jsonl` 里 point=curator 有 7 条
