@@ -1,5 +1,34 @@
 # 测试与发布验收
 
+## 后台子代理四条特殊路径：脚本模型端到端（2026-09-28，分支 `claude/ae-bg-subagent-e2e`，仅文档）
+
+- **性质**：脚本模型端到端机制已验，真实模型未覆盖；不是真实模型验收，不改判能力包 G03。详见
+  [验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#g03后台子代理四条特殊路径的脚本模型端到端2026-09-28)。
+- **被测与环境**：
+  - 源码 `9f88e4905`，与生产 step14w 同源，经 `git archive` 导出；专用 venv 用 `.pth` 引入导出源码和 ci-venv 依赖。
+  - 脚本化 OpenAI 兼容假模型（回环 8447）、真实 Gateway（8437）和 tmux 里的真实 TUI，三者都用 `env -i` 启动。
+  - HOME 指向假家目录，跑完为空；保留代理变量，`NO_PROXY=127.0.0.1`，不设模型密钥。
+- **剧本只看结构**：
+  - 判定依据是测试者提示标记、当前回合开头（`# User Task`／`# Host Event`）、Host Event 的 JSON 事实、工具集
+    （叶子子代理没有 create_subagents）和本回合工具结果。
+  - 子代理状态只认宿主事实，模型输出 `[SUBAGENT_RESULT]` 不能让子代理变 BLOCKED；BLOCKED 由宿主授权停机
+    （15 次同码授权失败）产生。
+- **历史不完整的触发**：
+  - 测试者在隔离 home 里把 owner 工具索引改为只写（0200），读取报 PermissionError；
+  - 然后放行被脚本挂起的子代理，等父代理收到拒绝后恢复原权限，窗口 6.04 秒；
+  - 不完整事实只存在于该唤醒片的内存里，所以靠拒绝码 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE` 和注入账本判定。
+- **判据**：只读以下结构化事实，不读会话正文：
+  - tool_completed 的错误码、failure_stage 和 handler_executed；
+  - replacement_records；
+  - canonical 状态与 takeover_by；
+  - wake 队列、请求终态和 TaskRun；
+  - Gateway 停止后以 immutable 只读打开的 runtime.db。
+- **结果**：ONE_SHOT 拒绝、历史不完整、BLOCKED 后接替、后台续接后的前台新请求四条全部通过。5 个请求全部 done，
+  8 条 wake 全部 handled。
+- **发现（未修，已报集成方）**：接替 DONE 子代理时，回执报 `recorded` 并写出 TAKEOVER.md；但
+  `_restore_newer_closed_state` 把 TAKEN_OVER 静默还原为 DONE，takeover_by 为空。共复现两次。
+- **本轮验证**：只改 Markdown；运行 doc_sync、`git diff --check` 和 `check_clean_package`，没有跑 pytest。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的
