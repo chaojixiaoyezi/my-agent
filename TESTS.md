@@ -84,6 +84,30 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
 
+## 会话内 /stop 回收被中断任务的后台资源（2026-09-28，分支 `my-agent/self-dev-4`）
+
+- **来源**：my-agent-4 开发交流板任务 3 后半截（dsh-be 的 R10 深度验收）。回合被 /interrupt 后托管后台进程
+  按设计继续运行（这一点不能改），但用户在**同一会话**再执行 /stop 只会收到"当前没有运行中的内容"，
+  没有任何入口能回收它们。
+- **做法（为什么选扩展 /stop 而不是新命令）**：新增独立命令会让用户先知道"有遗留资源"才能想到用第二条命令，
+  而 /stop 本来就是该会话的"停止"入口、用户的第一反应就是它；因此让 /stop 在**没有运行中回合**时
+  再退一步回收本会话登记的资源。代价是 /stop 语义从"停止本回合"扩展到"停止本会话在跑的东西"，
+  与 gateway 侧 `--stop-background` 是同一条资源路径，不存在第二套停止实现。
+- **实现**：`cli/chat_parts/control_runtime._stop_session_background_resources` 在无 `request_id` 时：
+  按 `process_session_store_root(effective_workspace_root, owner_home)`（与 ShellTool 写入端同源，
+  `tooling/shell.py:1199`）定位登记表 → 用 `session_background_processes` 按**精确 thread_id** 筛本会话资源
+  → 复用 gateway 侧同一 `stop_background_processes`（登记表冻结意图，实际回收由原 host
+  `terminate_process_tree` 按进程组完成）。没有登记就如实回"没有运行中的内容"；登记表损坏或读不了、
+  停止未确认都报 `TASK_RESOURCE_STOP_UNCONFIRMED`，不伪报已停。
+- **新测试**：`agent_py_agent/tests/test_session_stop_background_resources.py` 4 项——会话过滤只保留精确
+  thread（空 thread 不当"全部"）、无回合时真的回收本会话资源（不再回"没有运行中的内容"；没有真实 host
+  时如实报未确认退出）、无资源时仍回"没有运行中的内容"、登记表不可读时报 unknown。
+- **复现**：`PYTHONPATH=. python3 -m pytest agent_py_agent/tests/test_session_stop_background_resources.py -q`
+- **变异验证**：①把无 `request_id` 分支改回直接返回"当前没有运行中的内容" → 2 条红；
+  ②把 `session_background_processes` 放宽成不过滤 → 会话隔离用例变红。
+- **环境说明**：与 gateway 侧同一约定——沙箱拿不到本进程出生身份，测试对 `capture_process_birth_token`
+  打桩，其余字段走真实校验器与真实 Store。
+
 ## gateway stop 的遗留后台进程事实与停止入口（2026-09-28，分支 `my-agent/self-dev-4`）
 
 - **来源**：my-agent-4 开发交流板任务 3（dsh-be 的 R10 验收观察）。Gateway 退出不停止托管后台进程是设计行为，

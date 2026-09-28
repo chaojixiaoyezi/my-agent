@@ -129,9 +129,22 @@ def _is_terminal(store: ProcessSessionStore, session_id: str) -> bool:
     return record.get("status") in PROCESS_TERMINAL_STATUSES
 
 
+# LLM: 会话内停止入口只筛出属于本会话的记录，再交给上面对话级逻辑停止；不新增第二种停止路径，
+#   也不把"会话"放宽成 owner 全量——thread_id 必须精确相等，避免误停同 owner 其它窗口的资源。
+# 函数用途: 从已列出的运行中资源里筛出指定会话的那一批，保持原记录顺序。
+def session_background_processes(
+    processes: list[dict[str, object]], thread_id: str,
+) -> list[dict[str, object]]:
+    target = str(thread_id or "").strip()
+    if not target:
+        return []
+    return [row for row in processes if str(row.get("thread_id") or "").strip() == target]
+
+
 __all__ = [
     "DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS",
     "background_process_facts",
     "list_running_background_processes",
+    "session_background_processes",
     "stop_background_processes",
 ]

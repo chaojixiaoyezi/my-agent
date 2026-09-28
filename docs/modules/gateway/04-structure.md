@@ -2052,3 +2052,13 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 停止只按已登记的精确执行身份冻结意图（`ProcessExecutionScope.matches` 要求 owner 加 thread+root task 或 run，
 空目标被拒绝而不是变成通配），实际回收仍由原 host 完成；`cli/gateway_process.py` 默认只打印，`--stop-background`
 才调用它。`gateway restart` 的停止阶段显式传 `stop_background=False`。
+
+## 受管后台资源的两个停止入口（2026-09-28）
+
+`gateway_parts/background_resource_report.py` 是唯一的事实投影与停止入口，被两处复用：
+`cli/gateway_process.cmd_gateway_stop`（默认只列，`--stop-background` 才停）与
+`cli/chat_parts/control_runtime._stop_session_background_resources`（会话内 `/stop` 在无运行中回合时）。
+两者的差别只在**筛选范围**：gateway 侧列出本 gateway 全部登记资源，会话侧用
+`session_background_processes` 按精确 `thread_id` 收窄到本会话，绝不退化成 owner 全量。
+登记表根地址两侧都必须用 `process_session_store_root(workspace, owner_home)`（写入端见
+`tooling/shell.py:1199`），换成 `agent.root` 或 `owner_home` 会读到不同目录。

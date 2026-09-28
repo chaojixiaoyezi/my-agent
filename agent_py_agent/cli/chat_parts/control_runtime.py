@@ -430,14 +430,16 @@ def _execute_local_control(
 
 
 # LLM: interrupt 不关闭执行权和资源；stop 在原 task guard 内关权并冻结，迟到回调由同一调用句柄拒绝。
-# 函数用途: 中断本地当前回合，或受理精确任务资源停止；冻结失败单列未知，不伪报全部退出。
+#   没有运行中回合不代表没有遗留资源：回合被 /interrupt 后托管后台进程按设计继续跑，因此这里再退一步
+#   回收本会话登记的资源，而不是直接回"没有运行中的内容"（D10 验收发现用户当时无路可走）。
+# 函数用途: 中断本地当前回合；无回合时回收本会话遗留资源；冻结失败单列未知，不伪报全部退出。
 def _execute_local_stop(
     execution: ChatControlExecution, command: ConversationControlCommand,
 ) -> ConversationControlResult:
     request_id = str(execution.state.request_id or "").strip()
     control = execution.state.local_run
     if not request_id:
-        return ConversationControlResult("stop", False, "当前没有运行中的内容，无需停止。")
+        return _stop_session_background_resources(execution, command)
     if control is not None and control.request_id != request_id:
         return ConversationControlResult(
             "stop", False, "当前回合控制身份发生变化，请重新查看状态。", request_id=request_id,
@@ -473,6 +475,58 @@ def _execute_local_stop(
     return ConversationControlResult(
         "stop", True, "已受理停止请求，正在清理本任务资源。", request_id=request_id,
         delivery_status="accepted",
+    )
+
+
+# LLM: 只回收本会话（精确 thread_id）登记且仍在运行的托管资源；没有登记就如实回"没有运行中的内容"，
+#   不把空结果说成失败。停止走与 gateway 侧同一条路径（登记表冻结意图 + 原 host 按进程组回收），
+#   不新增第二套停止实现；未确认停止时报 unknown 并给错误码，不伪报已停。
+# 函数用途: 在无运行中回合时，回收本会话遗留的后台资源并返回控制结果。
+def _stop_session_background_resources(
+    execution: ChatControlExecution, command: ConversationControlCommand,
+) -> ConversationControlResult:
+    thread_id = str(execution.state.session_id or "").strip()
+    try:
+        from ...agent.gateway_parts.background_resource_report import (
+            list_running_background_processes,
+            session_background_processes,
+            stop_background_processes,
+        )
+        from ...agent.tooling.process_session_store import process_session_store_root
+
+        owner_home = str(getattr(getattr(execution.agent, "home_paths", None), "owner_home_dir", "") or "")
+        # 与后台进程写入端同源：ShellTool 用 effective_workspace_root 构造 store 根
+        # （tooling/shell.py:1199），这里不能换成 agent.root 或 owner_home，否则会读错目录。
+        workspace = str(getattr(execution.agent, "effective_workspace_root", "") or "")
+        store_root = process_session_store_root(workspace, owner_home)
+        running, errors = list_running_background_processes(store_root)
+        mine = session_background_processes(running, thread_id)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+        return ConversationControlResult(
+            "stop", False, "本会话资源状态暂时不可读，请稍后重试。", delivery_status="unknown",
+            error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
+    if errors:
+        return ConversationControlResult(
+            "stop", False, "本会话资源登记表存在损坏记录，未执行停止。", delivery_status="unknown",
+            error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
+    if not mine:
+        return ConversationControlResult("stop", False, "当前没有运行中的内容，无需停止。")
+    try:
+        results = stop_background_processes(store_root, mine)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+        return ConversationControlResult(
+            "stop", False, "本会话资源停止尚未确认，请查看运行状态。", delivery_status="unknown",
+            error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
+    if any(not row["stopped"] for row in results):
+        return ConversationControlResult(
+            "stop", False, f"已受理停止 {len(results)} 个后台资源，部分尚未确认退出。",
+            delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
+    return ConversationControlResult(
+        "stop", True, f"已停止本会话遗留的 {len(results)} 个后台资源。", delivery_status="accepted",
     )
 
 
