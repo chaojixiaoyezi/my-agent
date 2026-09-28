@@ -143,11 +143,11 @@ class ToolLoopExecuteParams:
     # 子代理(task_local)同一错误码在授权阶段连续失败达阈值时的连续段摘要；非空时本轮按
     # blocked + REPEATED_TOOL_AUTHORIZATION_FAILURE 收口交直属父级，同批后到的任一成功会撤销它。
     authorization_failure_halt: dict[str, object] | None = None
-    # 主代理当前回合“同一调用（工具名＋规范化参数摘要）拿到同一错误码”的连续段；成功或换调用即清零，
+    # 当前回合“同一调用（工具名＋规范化参数摘要）拿到同一错误码”的连续段（主/子代理共用）；成功或换调用即清零，
     # 只活在本回合参数上，新回合从空开始。类型为 tool_guard.identical_failure.IdenticalFailureStreak。
     identical_failure_streak: object | None = None
-    # 上述连续段达到 repeated_failure_halt_threshold 时的收口标记；非空时本轮以 unfinished +
-    # REPEATED_IDENTICAL_TOOL_FAILURE 结束，不属于可续跑原因，Goal 不会因此自动开下一轮。
+    # 上述连续段达到 repeated_failure_halt_threshold 时的收口标记；非空时主代理本轮以 unfinished +
+    # REPEATED_IDENTICAL_TOOL_FAILURE 结束（不可续跑，Goal 不自动开下一轮），子代理以 blocked 交直属父级。
     identical_failure_halt: object | None = None
     # 当前 run 内已由交互审批确认的精确 ActionPolicy binding；不持久化、不按工具名泛化。
     runtime_approved_actions: list[dict[str, str]] = field(default_factory=list)

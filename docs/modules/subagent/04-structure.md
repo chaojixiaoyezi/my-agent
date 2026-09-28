@@ -52,6 +52,7 @@
   达 `repeated_failure_halt_threshold` 写 `ToolLoopExecuteParams.authorization_failure_halt` 与原 `repeated_failure_halt`；同批后到的成功
   由 `_clear_authorization_failure_halt` 撤销。`_final_response_after_repeated_failure` 复用唯一 `_final_response_after_halt`，把收口
   回复改成 `runtime_status=blocked`、`runtime_reason=REPEATED_TOOL_AUTHORIZATION_FAILURE`；`tool_loop/recovery.py` 为该原因给出面向父级的替换文案。
+- 同调用同失败收口（2026-09-28）：`_mark_tool_call_halts` 固定顺序为授权阶段收口 → `_mark_identical_failure_halt` → 原重复失败 → unknown。后者复用 `agent_core/tool_guard/identical_failure.py`，对主/子代理都生效：同一回合里同一调用（工具名＋`args_hash`）以同一错误码连续失败达 `repeated_failure_halt_threshold` 写 `identical_failure_halt`；已有任何收口时不改写原因，所以同一次调用两者都满足时按授权阶段收口。子代理收口回复由 `_identical_failure_response` 宿主自写（blocked＋`turn_end_reason=blocked`＋`REPEATED_IDENTICAL_TOOL_FAILURE`，不调模型）；`finalize_helpers._tool_failure_halt` 对该原因用 `identical_failure_halt_facts` 从 archive 同口径复算，经同一账本、完成信封与 wake 投影交父级；`runner_completion_wake._tool_failure_halt_summary` 按 `reason_code` 选说法。原因码与授权码并列定义在 `subagents/tool_failure_ledger.py`。
 - 交给父级：`agent_core/subagent/finalize_helpers._tool_failure_halt` 只在上述原因时从 archive 复算 → `RecordRunnerResultParams.tool_failure_halt`
   → `record_tool_failure_ledger(..., halt)` 写 `attributes.tool_failure_ledger.halt`（每 attempt 覆盖）。`runner_completion_payload.completion_handoff_payload`
   只在 BLOCKED 时带 `tool_failure_halt`；`runner_completion_wake._summary` 追加一句结构化说明。合同与有界投影在

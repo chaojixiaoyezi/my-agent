@@ -29,6 +29,9 @@ from ..contracts.subagent_completion import (
 TOOL_FAILURE_LEDGER_ATTR = "tool_failure_ledger"
 # 工具循环因授权阶段同码连续失败收口时写入 runtime_reason 的结构化原因码。
 REPEATED_TOOL_AUTHORIZATION_FAILURE = "REPEATED_TOOL_AUTHORIZATION_FAILURE"
+# 工具循环因同一调用（工具名＋规范化参数）以同一错误码连续失败收口时写入 runtime_reason 的结构化原因码；
+# 主代理与子代理共用，判定见 agent_core/tool_guard/identical_failure.py。
+REPEATED_IDENTICAL_TOOL_FAILURE = "REPEATED_IDENTICAL_TOOL_FAILURE"
 # 单次 attempt 最多记录的失败条数;超出截断,防止失控循环把 attributes 撑爆。
 _LEDGER_MAX_ENTRIES = 50
 # 从工具参数里提取"目标路径"时按序尝试的参数名(write_file 用 path)。
@@ -145,7 +148,8 @@ def tool_failure_code_counts(attrs: object) -> dict[str, int]:
 
 
 # LLM: 只读账本里经合同投影校验过的 halt;版本不符或字段损坏按"没有收口事实"处理,不猜不补。
-# 函数用途: 取出最近一次 attempt 因授权阶段连续失败而收口的结构化事实,供完成信封交给父级。
+#   reason_code 区分授权阶段连续失败与同一调用同一失败两种收口,消费方按它选择说明文字。
+# 函数用途: 取出最近一次 attempt 因连续失败而收口的结构化事实,供完成信封交给父级。
 def ledger_tool_failure_halt(attrs: object) -> dict[str, object]:
     ledger = attrs.get(TOOL_FAILURE_LEDGER_ATTR) if isinstance(attrs, dict) else None
     halt = ledger.get("halt") if isinstance(ledger, dict) else None
@@ -356,6 +360,7 @@ def _float_value(value: object) -> float:
 
 
 __all__ = [
+    "REPEATED_IDENTICAL_TOOL_FAILURE",
     "REPEATED_TOOL_AUTHORIZATION_FAILURE",
     "TOOL_FAILURE_LEDGER_ATTR",
     "ToolCallFact",

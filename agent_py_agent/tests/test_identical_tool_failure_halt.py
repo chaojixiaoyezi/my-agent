@@ -91,10 +91,10 @@ class TestMarkIdenticalFailureHalt:
         assert params.identical_failure_halt is None and params.repeated_failure_halt is None
         assert params.repeated_failure_halt_exhausted is False
 
-    def test_disabled_by_zero_threshold_and_skipped_for_task_local_children(self):
+    def test_disabled_by_zero_threshold_and_also_applies_to_task_local_children(self):
         assert _feed(_params(threshold=0), [{}] * 30).identical_failure_halt is None
-        child = _feed(_params(context_scope="task_local"), [{}] * 30)
-        assert child.identical_failure_halt is None and child.identical_failure_streak is None
+        child = _feed(_params(context_scope="task_local"), [{}] * _THRESHOLD)
+        assert child.identical_failure_halt is not None and child.identical_failure_halt.count == _THRESHOLD
 
     def test_existing_repair_hint_does_not_clear_or_contradict_the_halt(self):
         params = _feed(_params(), [{}] * _THRESHOLD)

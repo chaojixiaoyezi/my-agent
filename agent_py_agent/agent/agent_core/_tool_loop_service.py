@@ -2054,14 +2054,14 @@ def _clear_active_repeated_failure_halt(params: object, tool_name: str) -> None:
     object.__setattr__(params, "repeated_failure_halt_exhausted", False)
 
 
-# LLM: 只对主代理（非 task_local）生效；连续段按工具结果的原记录顺序更新，任一成功撤销本回合已写下的同调用收口，
-#   与同批后到成功撤销早到 halt 的既有规则一致。阈值复用 repeated_failure_halt_threshold（≤0 关闭），
-#   命中时沿用 repeated_failure_halt/exhausted 让原有提示与后续标记早退。只改当前回合易失参数，不写持久状态。
-# 函数用途: 主代理原样重复同一个失败调用达到上限时，标记本轮在这批工具结果后结束。
+# LLM: 主代理与子代理共用；连续段按工具结果的原记录顺序更新，任一成功撤销本回合已写下的同调用收口，
+#   与同批后到成功撤销早到 halt 的既有规则一致。阈值复用 repeated_failure_halt_threshold（≤0 关闭）。
+#   优先级：已写下任何收口（含同一次调用先判的子代理授权阶段收口）时只更新连续段、不再改写收口原因，
+#   所以同一次调用两者都满足时按授权阶段收口。命中时沿用 repeated_failure_halt/exhausted 让原有提示与后续标记早退。
+#   只改当前回合易失参数，不写持久状态。
+# 函数用途: 原样重复同一个失败调用达到上限时，标记本轮在这批工具结果后结束。
 def _mark_identical_failure_halt(record: ToolCallRecordParams) -> None:
     params = record.params
-    if _is_subagent_task_local_run(params):
-        return
     if record.result.ok:
         object.__setattr__(params, "identical_failure_streak", None)
         _clear_identical_failure_halt(params)
@@ -2087,18 +2087,21 @@ def _clear_identical_failure_halt(params: object) -> None:
     object.__setattr__(params, "repeated_failure_halt_exhausted", False)
 
 
-# LLM: 宿主自写的结束回复：runtime_status=unfinished 推出 turn_end_reason=interrupted，任务保持活跃；
+# LLM: 宿主自写的结束回复，不再调用模型。主代理：runtime_status=unfinished 推出 turn_end_reason=interrupted，任务保持活跃；
 #   REPEATED_IDENTICAL_TOOL_FAILURE 不在 CONTINUABLE_REASONS，前台 finalization 与后台 Goal 续跑都不会自动开下一轮。
-#   正文只由连续段结构化字段拼出，供 TUI/IM/历史显示，不作状态来源。
-# 函数用途: 生成同调用同失败达上限后的本轮最终回复，不再调用模型。
+#   子代理（task_local）：沿授权阶段收口同一路径写 blocked + turn_end_reason=blocked，runner 收成 BLOCKED，
+#   finalize 从归档复算收口事实交直属父级，不被立即重派。正文只由结构化字段拼出，不作状态来源。
+# 函数用途: 生成同调用同失败达上限后的本轮最终回复。
 def _identical_failure_response(agent, params: ToolLoopExecuteParams) -> ModelResponse:
     backend = str(getattr(getattr(agent, "backend", None), "name", "") or "tool_loop")
+    child = _is_subagent_task_local_run(params)
     return ModelResponse(
-        text=identical_failure_closeout_text(params.identical_failure_halt),
+        text=identical_failure_closeout_text(params.identical_failure_halt, for_child=child),
         backend=backend,
-        runtime_status="unfinished",
+        runtime_status="blocked" if child else "unfinished",
         runtime_reason=REPEATED_IDENTICAL_TOOL_FAILURE,
         runtime_source="tool_loop",
+        turn_end_reason="blocked" if child else "",
     )
 
 
@@ -2320,7 +2323,7 @@ def _final_response_after_halt(
     )
 
 
-# LLM: 顺序即优先级：子代理授权阶段收口先判，主代理同调用同失败上限次之；命中后原重复失败机制按既有 halt 早退，
+# LLM: 顺序即优先级：子代理授权阶段收口先判，同调用同失败上限（主/子代理）次之；命中后原重复失败机制按既有 halt 早退，
 #   不再追加相反的返工提示；unknown 副作用收口最后判。只改当前回合易失参数。
 # 函数用途: 按固定顺序为一次工具结果更新各类本轮收口标记。
 def _mark_tool_call_halts(agent, record: ToolCallRecordParams) -> None:

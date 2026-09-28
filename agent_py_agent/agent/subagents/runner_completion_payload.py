@@ -61,7 +61,7 @@ def completion_handoff_payload(
 
 # LLM: 收口事实只读本 attempt 写入账本的结构化 halt，且仅在结果状态为 BLOCKED 时附带；
 #   后续 attempt 覆盖账本或状态变化后不会把旧事实带进新的完成通知。
-# 函数用途: 子代理因授权阶段同码连续失败被停下时，把原因码、工具、错误码、次数和参数名交给直属父级。
+# 函数用途: 子代理因授权阶段同码连续失败或同一调用同一失败被停下时，把原因码、工具、错误码、次数和参数名交给直属父级。
 def _blocked_tool_failure_halt(task: Any, result: Any) -> dict[str, object]:
     status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip().upper()
     if status != TaskStatus.BLOCKED.value:

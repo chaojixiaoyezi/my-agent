@@ -50,9 +50,10 @@ terminal_block_enabled: false
 # 子代理例外：同一错误码在授权阶段（权限门拦下、工具没执行）连续失败达到本阈值时，
 # 重试改变不了权限，本轮按阻塞收口（BLOCKED，原因码 REPEATED_TOOL_AUTHORIZATION_FAILURE）
 # 并把原因码、工具和参数名通知直属父代理；主代理不受影响。设为 0 时不做这项子代理收口。
-# 主代理例外：同一回合里同一个调用（工具名＋规范化参数）连续以同一错误码失败达到本阈值时，
-# 只结束当前回合（原因码 REPEATED_IDENTICAL_TOOL_FAILURE），任务和持续目标保留、不自动续跑；
-# 中间有别的调用或任一成功即重新计数。设为 0 时也关闭这项主代理收口。
+# 同一调用上限（主代理与子代理）：同一回合里同一个调用（工具名＋规范化参数）连续以同一错误码失败达到本阈值时，
+# 结束当前回合（原因码 REPEATED_IDENTICAL_TOOL_FAILURE）。主代理的任务和持续目标保留、不自动续跑；
+# 子代理按阻塞收口并把原因码、工具、错误码、次数和参数名通知直属父代理。同一次调用同时满足授权阶段收口时
+# 按授权阶段收口。中间有别的调用或任一成功即重新计数。设为 0 时也关闭这项收口。
 repeated_failure_halt_threshold: 15
 hard_failure_halt_enabled: false
 hard_failure_halt_threshold: 15

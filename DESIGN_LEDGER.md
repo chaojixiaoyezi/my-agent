@@ -38,8 +38,12 @@
 - Goal 不会原样重跑：这个原因不在 `CONTINUABLE_REASONS` 里，前台 finalization 的 `_schedule_typed_unfinished_continuation` 和后台 `goal_continuation_allowed` 都不会自动开下一轮。Goal 保持 active，用户发新消息后才继续；新回合的连续段从空开始。
 - 既有的“连续 2 次失败”软提示、同类失败强返工提示和 action guardrail 提示保留；这个硬上限是最后一道闸。
 
+子代理版本（2026-09-28，分支 `claude/75-repeat-failure-halt-subagent`，基于主代理两个提交，本地验证通过，待集成）：
+- 同一 `identical_failure` 模块也对 `task_local` 子代理生效，阈值同样是 `repeated_failure_halt_threshold`。命中后沿授权阶段收口的同一路径结束本轮：`blocked`、`turn_end_reason=blocked`、`runtime_reason=REPEATED_IDENTICAL_TOOL_FAILURE`，宿主自写收口文字，不调用模型；runner 收成 BLOCKED，不会被立即重派。
+- 父级可见：finalize 按工具循环的同一口径，从本 run 归档复算末尾的同调用失败段，写入原有 `tool_failure_halt` 事实（schema `subagent-tool-failure-halt.v1`，含原因码、工具、错误码、阶段、次数、参数名，不带参数值）。完成信封、wake metadata、前台活动回合事件和直属孩子行都经同一合同投影保留这份事实；唤醒摘要按 `reason_code` 区分两种说法。原因码与授权阶段收口码一起唯一定义在 `subagents/tool_failure_ledger.py`。
+- 优先级：同一次调用先判授权阶段收口。两者同时满足时按授权阶段收口，因为授权不会因重试改变，需要父级调整授权。已经写下的收口不会被另一种原因改写；同批后到的成功各自撤销对应收口。
+
 边界与未做：
-- 子代理不在本片范围，仍只有授权阶段收口。
 - `turn_end_reason` 保持六值协议，没有新增值；工具名和错误码在收口正文和逐调用归档里，没有给 Gateway 结果新增字段。
 - 真实模型下的效果没有验证。
 
