@@ -140,6 +140,25 @@
   （含 `test_architecture_guardrails.py`、`test_constant_names_unique.py`）。
 - **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对基线新增 0、减少 0。
 
+## 子代理同一失败调用的回合硬上限（2026-09-28，分支 `claude/75-repeat-failure-halt-subagent`，实现提交 `4aadedf79`）
+
+- **依赖**：基于主代理切片 `b81b6f938`、`40df0c86f`，这两个提交还没进 main。
+- **合同单测与 fake LLM**：新增 `agent_py_agent/tests/test_subagent_identical_failure_halt.py`，共 6 项，另改写主代理测试里原先“跳过子代理”的那一项。
+  - 优先级：经 `_mark_tool_call_halts` 的真实顺序，同一个授权阶段失败调用同时满足两种条件时，按授权阶段收口；非授权失败按同调用收口。
+  - 子代理收口回复为 blocked，结束原因为 blocked，由宿主自写，不调模型。
+  - finalize 从归档同口径复算收口事实：原因码、工具、错误码、阶段、次数、参数名；末尾已经成功时不带事实。
+  - 唤醒摘要按 `reason_code` 区分说法；非 BLOCKED 状态不附带。
+  - 真实子代理 runner 里，同一个工作区内缺失文件的 `read_file` 在阈值 3 时模型只被调用 3 次；结果为 BLOCKED，账本 halt 与 wake metadata 一致，观察摘要写明原因码，不带参数值。
+- **变异**：7 个全部被杀：子代理重新被跳过、优先级对调、子代理收口改成 unfinished、finalize 忽略该原因、唤醒说法不看原因码、归档复算不因成功清零、子代理文案改成等用户。
+- **定向回归**：上一条的全部范围，加上子代理生命周期、runner 结果、工具失败账本与连续段、运行引导与转发等测试，共 6126 项通过、4 项原有 xfail。
+- **脚本模型端到端**：被测代码是 `4aadedf79` 的 git archive。真实 Gateway 8438 加真实 TUI，脚本模型 8448，`env -i` 启动，不使用模型密钥。
+  - 父代理用 `create_subagents` 派出一个孩子，孩子每轮原样发同一个失败的 `skill_search get`。
+  - 孩子的模型请求恰好 15 次（默认阈值）后收口。父级只被唤醒一次：reason 为 `subagent_runner_finished`，status 为 BLOCKED，turn_end 为 blocked。
+  - wake metadata 的 `tool_failure_halt` 为：`reason_code=REPEATED_IDENTICAL_TOOL_FAILURE`、工具 `skill_search`、错误码 `SKILL_SNAPSHOT_UNAVAILABLE`、阶段 `execution`、次数 15、参数名 `action`/`package_id`。摘要写明“以相同参数反复调用”。
+  - 之后 40 秒内没有新的模型请求，孩子没有被重派。
+  - 证据在 `~/.my-agent/decision-evidence/identical-failure-halt-subagent-4aad/`（仓库外）。
+- **静态 gate**：ruff、doc_sync（已同步子代理模块文档）、strict code-size（相对 `b2bfa75af` 没有新的 finding 身份）、`git diff --check`、clean_package 全部通过。真实模型下的效果没有验证。
+
 ## 主代理同一失败调用的回合硬上限（2026-09-28，分支 `claude/75-repeat-failure-halt`，实现提交 `b81b6f938`）
 
 - **合同单测与 fake LLM**：新增 `agent_py_agent/tests/test_identical_tool_failure_halt.py`，共 14 项。
