@@ -28,6 +28,14 @@
 - **附带实测**：普通 `write_file(content)` 在 ask 下也不弹审批，与 README 权限模式表的说明一致。
 - **观察**：脚本模型在同一续跑轮里重复同一个失败的 get，共 393 个模型轮，宿主只给提示、没有硬停，最后由测试者暂停。这个问题留给产品线判断，本条不改产品。证据在 `~/.my-agent/decision-evidence/g05-followup-9f88/`（仓库外）。
 
+## C24固定9f88的131072自然长任务两代压缩（2026-09-28，分支 `claude/38-compact-131072-acceptance`，基于 `60f6f485a`，只改文档）
+
+- 被测 `9f88e4905`（与生产 step14w 产品代码相同）由 git archive 构建 wheel `d3a6e0fd…` 装进新 venv；隔离 home、owner local/main、私有 Gateway 127.0.0.1:8435；catalog 沿用 C21/C22 那份副本（600、未打印、跑完删除），只由脚本把 `selected` profile 窗口 262144 → 131072；A0.3.0/B0.1.4 用原生 `/plugins install`/`enable` 装入，安装账本运行前后一致。
+- 只提交一次 C21 原需求（提交正文 sha256 `888080a2…` 与 C21 记录相同），request `gwreq-1790614047-a53daa92…`，1672.347 秒自然 `done`；86 次物理模型请求、0 重试/失败/超时。
+- 两代自动 Compact 均提交并成链：第 1 代 88347 → 39157，第 2 代 89492 → 46017，进度事件 `trigger_source=tool_context_overflow`，线程 head `compact_generation=2`；可见估算峰值 89492 未越 117964，与 C21 同类触发。
+- 压缩后原资源读取/执行未覆盖：包选择 `outcome=empty`、全程 0 次 `skill_search`，提交后 9 次 `run_command` 只跑模型自建程序；五份输入保持。业务判“未通过”只据“未原样使用原检查程序”这一结构化事实，其余业务质量未独立审阅。
+- 本轮无产品/测试/配置改动，不跑 pytest；doc sync、`git diff --check`、clean-package 按纯文档范围执行，线上 CI 未作来源。详见[C24 分项](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c24固定9f88的131072自然长任务两代压缩2026-09-28)，证据在 `~/.my-agent/decision-evidence/compact-131072-9f88/`。建议下一步：由整合者核对后合入文档；下一次自然任务先核包选择非空再判压缩后原资源链，不改提示或阈值凑证据；产品作者可只读核对空选后包对主线程的可见性。
+
 ## R16 补测：按包选择偏好与 global_index 可读性（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-followup`）
 
 - **范围**：上一轮 R16 留下的两项：跨 owner 的按包选择偏好（`host_capability_selection.v1`），以及主机层
