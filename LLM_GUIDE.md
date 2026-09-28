@@ -1,6 +1,6 @@
 # LLM_GUIDE
 
-当前能力包验收：最终固定 0c340fe29 的 27 次原生执行已全部结束，原输入、配置、安装表、1433 个安装成员及包 pins 保持；普通任务 9/9 通过，制作类业务 7/9 通过，改编类 0/9 通过，合计业务 16/27 通过、11/27 失败。原资源链 12/18 成立，第三轮改编任务的混合写入参数及随后自建检查器另列为通用使用／恢复稳定性缺口，不能全部归为剧情质量。Goal active；Mac 两版部署记录与 wheel 摘要已核，Linux 明确未部署（测试机下线），只有容器源码测试证据。最终矩阵／发布文档已集成到 ee4c0ae6b，远端推送按 Claude 回报记录。 结果、失败和未覆盖项以[最终矩阵](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#固定版本最终矩阵2026-09-28)及[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)为准。建议下一步按已完成的回执归因核对剩余验收与分工；Linux 部署待测试机恢复后的独立验收，只读可并行，产品／发布归 Claude，私有运行归 root。
+当前能力包验收：固定 27 次执行完成，业务 16/27、原资源执行 12/18；原失败保持，Goal active。归因文档已到 3fd3cff4c，当前十二步骤与七组完整缺项见[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)及[收口审计](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。Mac 两版记录已核，Linux 两版未部署；容器源码测试不代替 wheel 发布。C22 的 65536 只证明机制，历史较大窗口提交不能补算当前能力包生产规模。建议下一步先由 Claude 集成缺项文档；只读可并行，产品／发布归 Claude，私有运行归 root，本轮不新开真实模型或 owner 用例。
 
 以下阶段记录保留原时点，其“0/27／待开始”不覆盖当前结果。
 
