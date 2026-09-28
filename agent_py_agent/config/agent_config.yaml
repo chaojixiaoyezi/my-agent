@@ -612,8 +612,6 @@ session_workspace: ""
 # - 不保存真实飞书/微信凭证，也不要求用户按工程字段写任务 prompt。
 conversation_workspace: ""
 
-# 长期会话读取和后台唤醒 prompt 预算：
-# - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。
 # 整份后台状态副本的总预算；0 才表示关闭总量约束。原始账本和产物不受影响。
 background_context_max_total_tokens: 8000
 # 后台会话（主代理被唤醒后继续干活）占着执行权的租约秒数，默认 90：

@@ -843,7 +843,7 @@
           {
             "key": "background_context_max_total_tokens",
             "label": "background_context_max_total_tokens（background context max total tokens）",
-            "description": "长期会话读取和后台唤醒 prompt 预算： - background_context_* 只裁剪注入后台主代理 prompt 的副本，不改消息、observation、case 或 agent tree 原文。 整份后台状态副本的总预算；0 才表示关闭总量约束。原始账本和产物不受影响。",
+            "description": "整份后台状态副本的总预算；0 才表示关闭总量约束。原始账本和产物不受影响。",
             "type": "number",
             "defaultValue": 8000,
             "currentValue": 8000,
