@@ -11,6 +11,7 @@ from agent_py_agent.agent.contracts.tool_approval import (
     ToolApprovalDecision,
     build_tool_approval_request,
 )
+from agent_py_agent.agent.conversation import agent_control as agent_control_module
 from agent_py_agent.agent.conversation.agent_control import (
     AgentControlError,
     enqueue_agent_stop,
@@ -960,6 +961,10 @@ def test_guidance_waits_for_control_then_rejects_terminal_without_reservation(tm
     assert agent.conversation_store.guidance.recent("agent_run", child.id) == []
 
 
+# LLM: 断言本意不变——两条补充消息同时打到一个等待中的父代理，只能启动一个 runner。原来用 Barrier + sleep(0.05) 制造重叠，
+#   并用 2 秒 join 收尾，满载下 send_agent_guidance 本身就要 1 秒以上，join 超时后响应数就少了。现在改成两阶段编排：
+#   第一条消息的 auto_start 被 Event 卡住，等第二条消息确实发出后再放行，重叠不再依赖时间；等待都给足余量，只用来防挂死。
+# 函数用途: 验证并发补充消息只启动一个 runner，两条消息都得到回执。
 def test_concurrent_waiting_parent_guidance_starts_one_runner(
     tmp_path,
     monkeypatch,
@@ -967,12 +972,17 @@ def test_concurrent_waiting_parent_guidance_starts_one_runner(
     agent, scope, child = _bound_agent_tree(tmp_path)
     _park_child_waiting_for_grandchild(agent, child)
     starts: list[str] = []
+    first_start_entered = threading.Event()
+    release_first_start = threading.Event()
 
     def fake_auto_start(_agent, tasks, _request_params, *, expected_attempt_ids):
         target = tasks[0]
         assert expected_attempt_ids[target.id]
         starts.append(target.id)
-        time.sleep(0.05)
+        if len(starts) == 1:
+            # 卡住第一次启动，直到第二条消息已经发出：两条消息一定在同一次启动窗口里相遇。
+            first_start_entered.set()
+            release_first_start.wait(timeout=30.0)
         refreshed = agent.subagents.load(target.id)
         attrs = dict(refreshed.attributes or {})
         attrs["background_start"] = {
@@ -992,13 +1002,11 @@ def test_concurrent_waiting_parent_guidance_starts_one_runner(
         "agent_py_agent.agent.agent_core.orchestration.background.dispatch.auto_start_tasks",
         fake_auto_start,
     )
-    barrier = threading.Barrier(3)
     responses: list[dict[str, object]] = []
     failures: list[BaseException] = []
 
     def send(index: int) -> None:
         try:
-            barrier.wait(timeout=2.0)
             responses.append(
                 send_agent_guidance(
                     agent,
@@ -1011,12 +1019,33 @@ def test_concurrent_waiting_parent_guidance_starts_one_runner(
         except BaseException as exc:  # pragma: no cover - asserted below
             failures.append(exc)
 
+    # 观察同一 run 的准入门：第二条消息一到门口就发信号，测试据此确认两条消息在同一次启动窗口里相遇，再放行第一次启动。
+    original_admission = agent_control_module._agent_guidance_admission
+    admissions: list[str] = []
+    second_arrived = threading.Event()
+
+    @contextmanager
+    def observed_admission(owner_id: str, task_id: str):
+        admissions.append(task_id)
+        if len(admissions) == 2:
+            second_arrived.set()
+        with original_admission(owner_id, task_id):
+            yield
+
+    monkeypatch.setattr(agent_control_module, "_agent_guidance_admission", observed_admission)
+
     workers = [threading.Thread(target=send, args=(index,)) for index in range(2)]
+    try:
+        workers[0].start()
+        assert first_start_entered.wait(timeout=30.0), "第一条补充消息没有走到启动 runner"
+        # 第一次启动还卡在窗口里时发出第二条：它必须排在同一 run 的准入之后，不能再起第二个 runner。
+        workers[1].start()
+        assert second_arrived.wait(timeout=30.0), "第二条补充消息没有到达准入门"
+    finally:
+        release_first_start.set()
     for worker in workers:
-        worker.start()
-    barrier.wait(timeout=2.0)
-    for worker in workers:
-        worker.join(timeout=2.0)
+        worker.join(timeout=60.0)
+    assert not any(worker.is_alive() for worker in workers), "并发补充消息在 60 秒内没有收尾"
 
     assert failures == []
     assert len(responses) == 2

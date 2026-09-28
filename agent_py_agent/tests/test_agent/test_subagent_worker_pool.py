@@ -56,18 +56,22 @@ class CountingAcceptedBackend(_TestNativeBackend):
         return _accepted_result(f"worker call {call_no}")
 
 
-class OneSlowOneFastBackend(_TestNativeBackend):
+# LLM: 慢 worker 不再靠固定 sleep 去撞 runner 超时（满载下快 worker 的启动也可能超过 3 秒，与超时路径竞争，dispatch 记录会变成
+#   “ignored duplicate / conflicting runner result”）：慢任务按提示词里的 goal 识别，阻塞在 Event 上直到测试释放；快任务立即返回。
+# 类用途: 给“超时不阻塞其他 worker”用例用的假后端——一个永远等到被超时的 worker，一个正常完成的 worker。
+class BlockedSlowOneFastBackend(_TestNativeBackend):
+    SLOW_GOAL = "超时隔离任务 slow"
+
     def __init__(self):
-        self.lock = threading.Lock()
-        self.calls = 0
+        self.release_slow = threading.Event()
+        self.slow_started = threading.Event()
 
     def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
         assert "不要输出 SUBAGENT_RESULT" in prompt
-        with self.lock:
-            self.calls += 1
-            call_no = self.calls
-        if call_no == 1:
-            time.sleep(6.0)
+        if self.SLOW_GOAL in prompt:
+            self.slow_started.set()
+            # 直到测试释放才返回：runner 超时先于它发生，超时后的迟到结果只会被账本当作过期尝试忽略。
+            self.release_slow.wait(timeout=60.0)
             return _accepted_result("slow worker eventually finished")
         return _accepted_result("fast worker finished")
 
@@ -364,45 +368,52 @@ def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch
     assert agent.subagents.load(child.id).status == "PLANNING"
 
 
+# LLM: 断言本意不变——一个 worker 超时不能挡住另一个 worker 完成。超时只按角色给慢任务（runner_timeout_by_role），快任务不套墙钟，
+#   所以满载下快 worker 再慢也不会和超时路径竞争；慢 worker 阻塞在 Event 上，3 秒超时一定先到。改这里要同步看 worker.py 的超时路径。
+# 函数用途: 验证 worker pool 里一个 runner 超时时，另一个 runner 照常完成，且报告里两条记录一条超时一条成功。
 def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monkeypatch, tmp_path):
     root = tmp_path
-    backend = OneSlowOneFastBackend()
+    backend = BlockedSlowOneFastBackend()
     monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
     cfg = AgentConfig(
         model_backend="worker-pool-test",
         subagent_workspace="subs",
         runner_concurrency="2",
         runner_start_rate="2",
-        runner_timeout_seconds="3.0",
+        # 只有慢角色套 3 秒墙钟；快任务沿用默认 off，满载下再慢也只是晚点完成，不会撞超时。
+        runner_timeout_seconds="off",
+        runner_timeout_by_role={"slow-worker": "3"},
     )
     agent = SimpleAgent(cfg, root)
-    tasks = [
-        agent.subagents.create_run(
-            goal=f"超时隔离任务 {index}", thought="等待 worker pool。", plan=["执行", "验收"]
-        )
-        for index in range(2)
-    ]
-
-    router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
-    report = agent.dispatch_subagents(
-        router,
-        CapabilityConfig(),
-        apply=True,
-        start_runners=True,
-        max_runners=2,
-        probe=False,
-        reviewer="worker-pool-timeout-test",
+    slow_task = agent.subagents.create_run(
+        goal=BlockedSlowOneFastBackend.SLOW_GOAL, thought="等待 worker pool。", plan=["执行", "验收"],
+        role="slow-worker",
+    )
+    fast_task = agent.subagents.create_run(
+        goal="超时隔离任务 fast", thought="等待 worker pool。", plan=["执行", "验收"]
     )
 
-    loaded = [agent.subagents.load(task.id) for task in tasks]
-    statuses = sorted(item.status for item in loaded)
+    router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+    try:
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=True,
+            start_runners=True,
+            max_runners=2,
+            probe=False,
+            reviewer="worker-pool-timeout-test",
+        )
+    finally:
+        # dispatch 已按超时收口才放慢 worker 走：它的迟到结果属于已放弃的尝试，只会被账本忽略。
+        backend.release_slow.set()
+
+    loaded = {task.id: agent.subagents.load(task.id) for task in (slow_task, fast_task)}
     runner_records = [item for item in report.records if item.step == "runner"]
-    timeout_task = next(item for item in loaded if item.status == "TIMEOUT")
 
     assert len(runner_records) == 2
-    assert any(item.status == "TIMEOUT" for item in loaded)
-    assert any(item.status == "DONE" for item in loaded)
-    assert statuses == ["DONE", "TIMEOUT"]
-    assert Path(timeout_task.runner_prompt_file).exists()
+    assert loaded[slow_task.id].status == "TIMEOUT"
+    assert loaded[fast_task.id].status == "DONE"
+    assert Path(loaded[slow_task.id].runner_prompt_file).exists()
     assert any(not item.ok and "timed out" in item.message for item in runner_records)
     assert any(item.ok for item in runner_records)
