@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ....conversation.session_messaging import (
+    SESSION_IDENTITY_UNAVAILABLE,
     SESSION_KIND_MESSAGE,
     SESSION_MESSAGE_ORIGIN_KIND,
+    SESSION_NO_CURRENT_THREAD,
     SessionMessagingRequest,
     decide_session_messaging,
 )
@@ -131,19 +133,26 @@ def _send_input(params: dict[str, object]) -> _SendInput | ToolHandlerOutcome:
 
 
 # LLM: 发送方身份只从 agent.home_paths 的结构化 owner 三元组和当前会话 thread_id 取；
-#   没有当前会话（独立命令）时不猜目标，直接报错。
+#   身份三元组任一缺失一律 fail closed（SESSION_IDENTITY_UNAVAILABLE），绝不默认成 main/local；
+#   没有当前会话（独立命令）返回 SESSION_NO_CURRENT_THREAD。
 # 函数用途: 解析当前 runner 的发送方 owner 身份与所在会话编号。
 def _sender_context(agent: object) -> tuple[OwnerIdentity, str] | ToolHandlerOutcome:
     home = getattr(agent, "home_paths", None)
-    provider = str(getattr(home, "owner_provider", "") or "").strip() or "local"
-    owner_kind = str(getattr(home, "owner_kind", "") or "").strip() or "main"
-    owner_id = str(getattr(home, "owner_id", "") or "").strip() or "main"
+    provider = str(getattr(home, "owner_provider", "") or "").strip()
+    owner_kind = str(getattr(home, "owner_kind", "") or "").strip()
+    owner_id = str(getattr(home, "owner_id", "") or "").strip()
+    if not (provider and owner_kind and owner_id):
+        return _error(
+            "无法确定当前会话的 owner 身份；消息没有投递。",
+            error_code=SESSION_IDENTITY_UNAVAILABLE,
+            effect_outcome="not_started",
+        )
     identity = OwnerIdentity(provider=provider, owner_kind=owner_kind, owner_id=owner_id)
     thread_id = _current_thread_id(agent)
     if not thread_id:
         return _error(
             "当前上下文没有会话，不能发送会话消息。",
-            error_code="SESSION_NO_CURRENT_THREAD",
+            error_code=SESSION_NO_CURRENT_THREAD,
             effect_outcome="not_started",
         )
     return identity, thread_id

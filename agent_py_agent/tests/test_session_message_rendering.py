@@ -56,11 +56,22 @@ def test_user_steering_renders_as_plain_user_text() -> None:
     assert SESSION_MESSAGE_HOST_EVENT_MARKER not in rendered
 
 
-def test_unknown_origin_kind_treated_as_user_text() -> None:
-    # 只按结构化 origin_kind 判定；其它值一律按既有用户插话处理（行为不变）。
-    entry = _entry("别的来源", metadata={"origin_kind": "something_else"})
+def test_unknown_origin_kind_rendered_as_host_event_not_user_text() -> None:
+    # dev 审阅点 4：origin_kind 非空但不认识时，按宿主事件呈现（来源未知），**不**渲染成用户原话。
+    entry = _entry("来源不认识的内容", metadata={"origin_kind": "something_else"})
     assert _is_session_message_entry(entry) is False
-    assert _render_guidance_user_input([entry]) == "别的来源"
+    rendered = _render_guidance_user_input([entry])
+    assert SESSION_MESSAGE_HOST_EVENT_MARKER in rendered
+    assert "unknown" in rendered.lower() or "未知" in rendered
+    assert rendered.strip() != "来源不认识的内容"
+
+
+def test_missing_origin_kind_still_plain_user_text() -> None:
+    # origin_kind 缺失是兼容旧数据：仍按用户插话原样渲染，行为不变。
+    entry = _entry("旧数据补充", metadata={})
+    rendered = _render_guidance_user_input([entry])
+    assert rendered == "旧数据补充"
+    assert SESSION_MESSAGE_HOST_EVENT_MARKER not in rendered
 
 
 def test_mixed_entries_keep_session_message_marked() -> None:

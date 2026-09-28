@@ -1,5 +1,24 @@
 # 测试与发布验收
 
+## 会话间消息与派活第 1 片第二补丁：错误码登记 + 身份 fail closed + 渠道白名单 + 未知来源（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：dev 10:37 / 10:41 两条审阅（其中两条我上轮漏读，本轮补齐）。
+- **做法**：
+  1. **错误码登记**：`SESSION_NO_CURRENT_THREAD`、`SESSION_IDENTITY_UNAVAILABLE`、
+     `SESSION_TARGET_CHANNEL_UNSUPPORTED` 全部登记进 `contracts/error_taxonomy.ERROR_CONTRACTS`；
+     定向测试带上守卫 `test_recovery_code_policy.py`。
+  2. **身份 fail closed**：`_sender_context` 删除 `or "main"` / `or "local"` 缺省兜底；
+     身份三元组任一为空返回 `SESSION_IDENTITY_UNAVAILABLE`。判定层也加了 `_identity_complete` 二次校验。
+     顺手核查其他位置，确认没有同类"拿不到就当管理员"的兜底。
+  3. **渠道白名单**：`IM_CHANNELS`（黑名单）改成 `LOCAL_TARGET_CHANNELS`（白名单：chat/cli/local/tui/gateway-cli/http）；
+     空渠道按本地处理；不在白名单的（含以后新增渠道）一律 `SESSION_TARGET_CHANNEL_UNSUPPORTED`，fail closed。
+  4. **未知来源不冒充用户**：`_render_guidance_user_input` 改三分支——`origin_kind` 缺失→按用户插话原样（兼容旧数据）；
+     `=session_message`→宿主事件并写来源；**非空但未知→也按宿主事件呈现（来源"未知"）**，不渲染成用户原话。
+- **新测试**：权限文件增 4 项（未知新渠道 fail closed、空渠道按本地、身份缺 3 参数化 fail closed）；
+  渲染文件增/改 2 项（未知 origin_kind 走宿主事件、缺失 origin_kind 仍原样）。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py agent_py_agent/tests/test_session_message_rendering.py agent_py_agent/tests/test_recovery_code_policy.py -q`（58 项）。
+- **变异验证**：身份检查改恒假 → 3 条身份测试红；白名单退回黑名单 → 未知渠道测试红；恢复后全绿。
+
 ## 会话间消息与派活第 1 片补丁：关闭可见性 + 呈现不冒充用户 + IM 目标拒绝（2026-09-28，分支 `my-agent/self-dev-3`）
 
 - **来源**：dev 审阅第 1 片后提的 3 处要求（每处要测试）。

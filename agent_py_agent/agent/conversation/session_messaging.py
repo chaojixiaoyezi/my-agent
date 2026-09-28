@@ -20,9 +20,14 @@ SESSION_TARGET_OUT_OF_SCOPE = "SESSION_TARGET_OUT_OF_SCOPE"
 SESSION_TASK_TARGET_SELF = "SESSION_TASK_TARGET_SELF"
 # 目标是 IM 渠道的会话：第一期不支持把普通会话消息投进 IM 目标，返回明确错误码。
 SESSION_TARGET_CHANNEL_UNSUPPORTED = "SESSION_TARGET_CHANNEL_UNSUPPORTED"
+# 身份缺失：拿不到结构化 owner 身份时必须 fail closed，绝不默认成 main/local。
+SESSION_IDENTITY_UNAVAILABLE = "SESSION_IDENTITY_UNAVAILABLE"
+# 当前上下文没有会话（独立命令等）。
+SESSION_NO_CURRENT_THREAD = "SESSION_NO_CURRENT_THREAD"
 
-# IM 渠道集合：这些渠道的会话第一期不做会话间消息目标（第一期只服务本机会话）。
-IM_CHANNELS = frozenset({"feishu", "qq", "wecom", "dingtalk"})
+# 第一期允许的接收方渠道白名单：只允许本地渠道（TUI/CLI/本机）。这是**白名单**而非黑名单：
+# 任何不在名单里的渠道（包括以后新增的 IM 渠道）一律拒绝，fail closed，避免封闭枚举漏项。
+LOCAL_TARGET_CHANNELS = frozenset({"chat", "cli", "local", "tui", "gateway-cli", "http"})
 
 # guidance metadata 里标记来源的结构化键与取值；注入渲染据此把会话消息呈现为宿主事件而非用户原话。
 SESSION_MESSAGE_ORIGIN_KIND = "session_message"
@@ -65,14 +70,21 @@ class SessionMessagingDecision:
     scope_warnings: tuple[str, ...] = ()
 
 
-# LLM: 纯函数，无 IO、无副作用；顺序固定：先 kind 合法性，再目标归属，再自派任务，最后按 owner_kind 与开关。
-#   目标不存在（None）与目标属于别的 owner 都返回同一码 SESSION_TARGET_OUT_OF_SCOPE，不泄露存在性；
-#   发送方 target 就是自己时任务拒绝、消息允许（等价于给自己插话）。
+# LLM: 纯函数，无 IO、无副作用；顺序固定：先 kind 合法性，再身份 fail closed，再目标归属，再渠道白名单，
+#   再自派任务，最后按 owner_kind 与开关。目标不存在（None）与目标属于别的 owner 都返回同一码
+#   SESSION_TARGET_OUT_OF_SCOPE，不泄露存在性；发送方 target 就是自己时任务拒绝、消息允许。
+#   身份缺失（provider/owner_kind/owner_id 任一为空）一律 fail closed，绝不默认成 main/local。
 # 函数用途: 按结构化字段判定一次会话间消息或派任务是否允许。
 def decide_session_messaging(request: SessionMessagingRequest) -> SessionMessagingDecision:
     kind = str(request.kind or "").strip().lower()
     if kind not in SESSION_KINDS:
         return SessionMessagingDecision(False, "SESSION_KIND_INVALID", (f"unknown_kind:{kind}",))
+
+    # 身份 fail closed：结构化身份三元组任一缺失都拒绝，不能把"拿不到"当成管理员。
+    if not _identity_complete(request.sender_identity):
+        return SessionMessagingDecision(
+            False, SESSION_IDENTITY_UNAVAILABLE, ("sender_identity_incomplete",)
+        )
 
     warnings: list[str] = []
     sender_kind = str(request.sender_identity.owner_kind or "").strip()
@@ -93,8 +105,10 @@ def decide_session_messaging(request: SessionMessagingRequest) -> SessionMessagi
         == str(request.sender_thread_id or "").strip()
     )
 
-    # 目标是 IM 渠道的会话：第一期不支持作为会话消息目标，返回明确码。
-    if str(request.target_channel or "").strip().lower() in IM_CHANNELS:
+    # 接收方渠道白名单：只允许本地渠道（TUI/CLI/本机）；空渠道按本地处理（无绑定的本机会话）。
+    # 不在白名单里的一律拒绝（fail closed），包括以后新增的 IM 渠道，避免封闭枚举漏项。
+    target_channel = str(request.target_channel or "").strip().lower()
+    if target_channel and target_channel not in LOCAL_TARGET_CHANNELS:
         return SessionMessagingDecision(False, SESSION_TARGET_CHANNEL_UNSUPPORTED, ())
 
     if kind == SESSION_KIND_TASK:
@@ -117,6 +131,15 @@ def decide_session_messaging(request: SessionMessagingRequest) -> SessionMessagi
     if warnings:
         return SessionMessagingDecision(True, "", tuple(warnings))
     return SessionMessagingDecision(True)
+
+
+# LLM: 身份三元组任一为空即视为不可用；这是 fail-closed 判据，不做任何默认值补齐。
+# 函数用途: 判断结构化 owner 身份是否完整可用。
+def _identity_complete(identity: OwnerIdentity) -> bool:
+    return all(
+        str(getattr(identity, field, "") or "").strip()
+        for field in ("provider", "owner_kind", "owner_id")
+    )
 
 
 # LLM: owner 归一键只由结构化 provider/owner_kind/owner_id 组成；不做字符串模糊匹配或 trim 猜测。
@@ -156,7 +179,9 @@ __all__ = [
     "SESSION_MESSAGING_DISABLED",
     "SESSION_TARGET_OUT_OF_SCOPE",
     "SESSION_TARGET_CHANNEL_UNSUPPORTED",
-    "IM_CHANNELS",
+    "SESSION_IDENTITY_UNAVAILABLE",
+    "SESSION_NO_CURRENT_THREAD",
+    "LOCAL_TARGET_CHANNELS",
     "SESSION_TASK_NOT_ALLOWED",
     "SESSION_TASK_TARGET_SELF",
     "SessionMessagingDecision",

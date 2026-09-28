@@ -91,7 +91,16 @@
 
 注意：`owner_kind=main` 不只本机 TUI——IM 管理员身份（`/admin <密码>` 绑定，见
 [ADMIN_CHANNEL_IDENTITY.md](ADMIN_CHANNEL_IDENTITY.md)）让飞书私聊也按 `local/main` 运行。
-因此第一期"管理员"天然覆盖这些绑定私聊，无需额外代码；不要在文案或判定里把"管理员"当成"只有本机 TUI"。
+所以**发送方**可以是任意 local/main 会话，包括 IM 管理员私聊。
+
+**接收方（第一期）只限本地渠道**：用 `channel_bindings` 的结构化字段判断，**白名单**放行
+（`chat`/`cli`/`local`/`tui`/`gateway-cli`/`http`）；任何不在白名单里的渠道——包括 feishu/qq/wecom/dingtalk
+以及**以后新增的渠道**——一律返回 `SESSION_TARGET_CHANNEL_UNSUPPORTED`（fail closed）。
+原因：给 IM 会话发消息或派活会让那边开一轮并把回复真的发到 IM，属于对外副作用，第一期先不开。
+这条也避免了"封闭枚举"——名单只列允许的，不列要拦的。
+
+**身份 fail closed**：结构化 owner 身份三元组（`provider`/`owner_kind`/`owner_id`）任一为空时，
+一律返回 `SESSION_IDENTITY_UNAVAILABLE`，**绝不默认成 main 或 local**。
 
 | 发送方 owner_kind | kind | 目标 | 结果 |
 | --- | --- | --- | --- |
@@ -106,7 +115,11 @@
 
 错误码集合：`SESSION_MESSAGING_DISABLED`、`SESSION_TASK_NOT_ALLOWED`、
 `SESSION_TARGET_OUT_OF_SCOPE`、`SESSION_TASK_TARGET_SELF`、`SESSION_TASK_CHAIN_LIMIT`、
-`SESSION_PAIR_RATE_LIMIT`、`SESSION_TARGET_NOT_FOUND`。
+`SESSION_PAIR_RATE_LIMIT`、`SESSION_TARGET_NOT_FOUND`、`SESSION_TARGET_CHANNEL_UNSUPPORTED`、
+`SESSION_IDENTITY_UNAVAILABLE`、`SESSION_NO_CURRENT_THREAD`。
+
+（自定义错误码必须登记进 `contracts/error_taxonomy.ERROR_CONTRACTS`，否则会被归一成 `UNKNOWN_ERROR`；
+守卫 `test_recovery_code_policy.py` 会检查所有在用的错误码都已登记，定向测试要带上它。）
 
 **不泄露存在性（dev 审阅点 4）**：目标 thread 不存在，或属于别的 owner，
 都返回**同一个错误码** `SESSION_TARGET_OUT_OF_SCOPE` 和**同样的** `scope_warnings`，
@@ -202,5 +215,7 @@
 ## 缺口与后续
 
 - 飞书入口第一期不做。
+- **接收方渠道**：第一期只允许本地渠道白名单；给 IM 会话发消息/派活（会把回复真的发到 IM，属对外副作用）
+  列为后续项，需要先设计对外副作用的确认与审计。
 - 普通用户发消息开关默认关；用户隔离（跨 owner 如何安全开放）留待后续设计。
 - 跨 owner 发现机制（`owner_wake_discovery.py`）第二期才用。

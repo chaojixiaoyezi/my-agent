@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.conversation.session_messaging import (
+    SESSION_IDENTITY_UNAVAILABLE,
     SESSION_MESSAGING_DISABLED,
     SESSION_TARGET_CHANNEL_UNSUPPORTED,
     SESSION_TARGET_OUT_OF_SCOPE,
@@ -152,10 +153,17 @@ def test_user_message_open_allows_for_user() -> None:
     assert decision.allowed
 
 
-# --- IM 目标拒绝（dev 审阅点 3）---
+# --- IM 目标拒绝（dev 审阅点 3 / 白名单改造）---
 
 def test_im_target_channel_rejected() -> None:
     decision = decide_session_messaging(_req(kind="message", target_channel="feishu"))
+    assert not decision.allowed
+    assert decision.error_code == SESSION_TARGET_CHANNEL_UNSUPPORTED
+
+
+def test_unknown_new_channel_rejected_fail_closed() -> None:
+    # 白名单语义：以后新增的任何渠道都不在名单里，一律拒绝（不是只拉黑已知 IM 渠道）。
+    decision = decide_session_messaging(_req(kind="message", target_channel="brand_new_channel"))
     assert not decision.allowed
     assert decision.error_code == SESSION_TARGET_CHANNEL_UNSUPPORTED
 
@@ -172,6 +180,28 @@ def test_user_im_target_rejected_channel_code_first() -> None:
 def test_local_target_channel_allowed() -> None:
     decision = decide_session_messaging(_req(kind="message", target_channel="chat"))
     assert decision.allowed
+
+
+def test_empty_target_channel_treated_as_local() -> None:
+    # 没有渠道绑定的本机会话按本地处理。
+    decision = decide_session_messaging(_req(kind="message", target_channel=""))
+    assert decision.allowed
+
+
+# --- 身份 fail closed（dev 必修 2）---
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        OwnerIdentity(provider="", owner_kind="main", owner_id="main"),
+        OwnerIdentity(provider="local", owner_kind="", owner_id="main"),
+        OwnerIdentity(provider="local", owner_kind="main", owner_id=""),
+    ],
+)
+def test_incomplete_sender_identity_fails_closed(identity) -> None:
+    decision = decide_session_messaging(_req(sender_identity=identity, target_owner_identity=_ADMIN))
+    assert not decision.allowed
+    assert decision.error_code == SESSION_IDENTITY_UNAVAILABLE
 
 
 # --- 关闭时工具不可见（dev 审阅点 1）---

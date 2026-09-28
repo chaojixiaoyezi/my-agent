@@ -662,8 +662,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.STOP.value,
         recovery_hint=(
-            "第一期不支持把会话消息投给 IM 渠道的会话；请选择本机 TUI 会话作为目标，"
-            "不要对同一个 IM 目标反复重试。"
+            "第一期只允许把会话消息发给本地会话（TUI/CLI/本机）；IM 等其它渠道一律拒绝，"
+            "以后新增的渠道同样拒绝，不要对同一目标反复重试。"
+        ),
+    ),
+    "SESSION_IDENTITY_UNAVAILABLE": ErrorContract(
+        code="SESSION_IDENTITY_UNAVAILABLE",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "拿不到完整的 owner 身份（provider/owner_kind/owner_id），按 fail-closed 直接拒绝；"
+            "不要默认成 main 或 local 再重试，先修好调用上下文。"
+        ),
+    ),
+    "SESSION_NO_CURRENT_THREAD": ErrorContract(
+        code="SESSION_NO_CURRENT_THREAD",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "当前上下文没有会话（例如独立命令），不能发送会话消息；请在正常会话回合里调用。"
         ),
     ),
     "SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING": ErrorContract(
