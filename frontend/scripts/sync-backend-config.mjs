@@ -70,14 +70,22 @@ const unitMap = {
   cli_audit_cleanup_days: "天",
 };
 
+// LLM: 键的描述取上一个键之后、本键之前的注释（最多最后 8 行，空行不打断）。唯一例外是文件头：第一个键出现前遇到空行，
+//   就丢弃已累积的注释——以空行结束的首段注释说明整份文件，不属于任何键。后端 parameter_registry._descriptions_from_lines
+//   遇空行即清空注释块，对第一个键得到同样结果；改归属规则要两边一起核对，并逐字段比对重新生成的目录。
+// 函数用途: 按项目的极简 YAML 子集读出每个键的值和上方的中文注释，供生成设置页目录。
 function parseSimpleYaml(text) {
   const entries = [];
   const lines = text.split(/\r?\n/);
   let comments = [];
+  let seenKey = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const trimmed = line.trim();
-    if (!trimmed) continue;
+    if (!trimmed) {
+      if (!seenKey) comments = [];
+      continue;
+    }
     if (trimmed.startsWith("#")) {
       comments.push(trimmed.replace(/^#\s?/, "").trim());
       continue;
@@ -106,6 +114,7 @@ function parseSimpleYaml(text) {
     }
     entries.push({ key, value, comments: comments.slice(-8) });
     comments = [];
+    seenKey = true;
   }
   return entries;
 }

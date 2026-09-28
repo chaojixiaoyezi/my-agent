@@ -57,6 +57,12 @@ def test_descriptions_prefer_the_comment_above_then_the_trailing_comment():
     assert _descriptions_from_lines(lines) == {"a": "上方说明", "b": "行尾说明 b", "c": "真说明", "d": "", "e": "", "f": ""}
 
 
+def test_file_header_block_is_not_the_first_key_description():
+    """以空行结束的首段注释说明整份文件；前端目录生成器用同一规则，两边第一个键的说明一致。"""
+    lines = ["# 某某配置文件", "# 说明：整份文件的用途", "", "# 第一个键自己的说明", "first: 1", "second: 2"]
+    assert _descriptions_from_lines(lines) == {"first": "第一个键自己的说明", "second": ""}
+
+
 def test_empty_descriptions_only_come_from_the_reasoned_baseline():
     """名单外新增空说明失败；名单里的参数有了说明或已删除也失败，逼着名单只减不增。"""
     groups = json.loads(_BASELINE.read_text(encoding="utf-8"))["groups"]
