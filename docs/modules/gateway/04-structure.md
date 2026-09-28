@@ -916,8 +916,14 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
   但已恢复 IR 的候选发送 `superseded/candidate_discarded` 并静默收起，只有真实异常发送红色 `failed`。
   Gateway 和 TUI 都只允许有界字母数字错误码，异常 message、摘要和 prompt 不能穿过该边界。
 - 候选过大失败（`COMPACT_CANDIDATE_TOO_LARGE`）另带白名单里的整数容量计量：最小被拒候选的完整下一请求 token、
-  输入上限、摘要估算 token、保留条数、试过的候选数。计量来自 `ConversationCompactError.capacity`（`CompactCapacityFacts`），
-  字段名以 `compact_progress.COMPACT_CAPACITY_PROGRESS_FIELDS` 为准；TUI 失败行显示“候选 X / 上限 Y tokens（摘要约 Z）”。
+  输入上限、摘要估算 token、实测固定开销、保留条数、保留原生 IR 条数与 token、试过的候选数。计量来自
+  `ConversationCompactError.capacity`（`CompactCapacityFacts`），字段名以 `compact_progress.COMPACT_CAPACITY_PROGRESS_FIELDS` 为准；
+  TUI 失败行显示“候选 X / 上限 Y tokens（摘要约 Z）”，固定开销实测大于 0 时再追加“ · 固定开销约 W”。
+  - 固定开销走恢复宿主的“只计量、不提交”入口：transcript 入口是带 `measure_only` 的视图，活动回合入口是
+    `ActiveTurnArchiveCompactRequest.fixed_request_projector`；只有这条路允许空摘要，交回的材料不能提交。只在真正抛出失败时量一次，
+    成功路径不多投影；测不出为 `None`，公开进度里整项缺失。
+  - 保留 IR 取候选投影交回的 `ConversationCompactProjection.retained_ir_history`（候选实际发送的原生 IR），
+    经 `compact_tool_summary.sent_retained_ir` 去掉 `applied_compact` / `carried_tool_handoff` 两种载体，其它条目照算。
 - 同 thread 前台与后台模型工作片共用 durable run claim，一次只执行一个真实 slice。用户普通输入命中 live
   foreground 时作为 typed steer 在最近 provider 安全点进入；父代理已经让出等待 child 时，新 foreground
   slice 不等待所有 child，最多等待正在执行的单个后台片释放 lane。

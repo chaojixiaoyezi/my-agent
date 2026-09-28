@@ -183,10 +183,10 @@ def test_mixed_fallback_commits_its_own_complete_candidate(mixed_case, monkeypat
     assert view.messages and view.retained_tool_records is case.tool_source.retained_records
     assert view.summary == "候选阶段摘要-1"
     if second_result == "oversized":
-        # 倒数第二个是被拒的候选投影（最后一个属于失败诊断的固定开销实测），提交的必须是更早那个自己的候选。
-        assert len(projections) == 4 and result.request_projection is not projections[-2]
-        assert projections[-2].material["view"].messages == ()
-        assert projections[-2].material["view"].operation_evidence != view.operation_evidence
+        # 最后一个是被拒的候选投影（成功提交不做固定开销实测），提交的必须是更早那个自己的候选。
+        assert len(projections) == 3 and result.request_projection is not projections[-1]
+        assert projections[-1].material["view"].messages == ()
+        assert projections[-1].material["view"].operation_evidence != view.operation_evidence
     else:
         assert len(projections) == 2
     assert all(item[2].tool_source_records == case.tool_source.source_records for item in summaries)

@@ -26,6 +26,8 @@ class ConversationCompactSource:
 
 
 # LLM: is_candidate区分未提交代次；retained_tool_records为None表示不替换工具，空tuple表示已知全压，不可混淆。
+#   measure_only 是显式的“只计量、不提交”入口（失败诊断量固定开销用）：宿主投影器据此放宽空摘要，只交回计量，
+#   交回的材料不能被提交；普通候选一律为 False，非空摘要合同不变。
 # 类用途: 绑定候选摘要、可重放保留原文/IR、证据及预计代次；IR的None是不替换，空元组是已知全压。
 @dataclass(frozen=True)
 class ConversationCompactView:
@@ -39,14 +41,18 @@ class ConversationCompactView:
     is_candidate: bool
     retained_tool_records: tuple[dict[str, object], ...] | None = field(default=None, repr=False)
     retained_ir_history: tuple[object, ...] | None = field(default=None, repr=False)
+    measure_only: bool = field(default=False, kw_only=True)
 
 
 # LLM: 计量必须来自完整请求，unknown 应抛结构化错误而非填零；material 属宿主，Compact 不解释也不持久化。
+#   retained_ir_history 是宿主从本候选实际要发送的材料里取出的原生 IR（不含本候选自己的摘要/交接）；None 表示投影器
+#   没有给出，调用方不得当作空。它只供失败诊断计量，不参与接受门或提交。
 # 类用途: 把每个候选的输入计量与其准备材料绑定，保留候选回退时不误取最后一次投影。
 @dataclass(frozen=True)
 class ConversationCompactProjection:
     projected_tokens: int
     material: object = field(repr=False)
+    retained_ir_history: tuple[object, ...] | None = field(default=None, repr=False)
 
 
 CompactRequestProjector = Callable[[ConversationCompactView], ConversationCompactProjection]

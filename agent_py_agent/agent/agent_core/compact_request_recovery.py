@@ -20,6 +20,7 @@ from ..conversation.compact_projection import (
     ConversationCompactView,
 )
 from ..conversation.compact_provider_surface import ConversationCompactProviderSurface
+from ..conversation.compact_tool_summary import sent_retained_ir
 from ..prompting_parts.builder import PromptBuilder, PromptRenderInput, render_prepared_prompt
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from .model.context_pressure import (
@@ -165,9 +166,13 @@ class PreparedCompactRecovery:
             return _native_compact_interrupted(params) or bool(self.interrupt_check and self.interrupt_check())
 
         # LLM: 候选闭包只读取本次冻结值；不召回记忆、探针、刷新 Goal 或执行原恢复准备。
+        #   measure_only 视图是失败诊断的“只计量、不提交”入口：同一宿主投影后单独计量，不进候选替换与接受门；
+        #   普通候选附上实际发送材料里的保留 IR，只供失败诊断。
         # 函数用途: 将每个摘要候选映射为原请求材料，并沿唯一纯计量入口得到接受数字。
         def project(view: ConversationCompactView) -> ConversationCompactProjection:
             material = self.project_candidate(params, frozen, view)
+            if view.measure_only:
+                return _measure_only_projection(material, view, handoff_max_chars)
             material = _project_mixed_recovery_material(material, view, handoff_max_chars)
             if source.compact_context is not None:
                 expected = project_recovery_compact_context(source.compact_context, view)
@@ -176,10 +181,7 @@ class PreparedCompactRecovery:
             if material.projection.status != "ready":
                 raise ConversationCompactError("完整恢复投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
             # 原请求视图的材料来自已解绑历史的冻结输入，计量改用解绑前的完整大小；候选照常按自身投影计量。
-            tokens = projected_model_context_components(
-                material.projection, media_token_reserve=media_token_reserve(),
-            )[0] if view.is_candidate else before_tokens
-            return ConversationCompactProjection(tokens, material)
+            return _candidate_projection(material, None if view.is_candidate else before_tokens)
 
         try:
             if source.messages:
@@ -274,10 +276,7 @@ class PreparedCompactRecovery:
             ))
             if material.projection.status != "ready" or material.params.compact_context != expected:
                 raise ConversationCompactError("活动恢复候选未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-            tokens, _ = projected_model_context_components(
-                material.projection, media_token_reserve=media_token_reserve(),
-            )
-            return ConversationCompactProjection(tokens, material)
+            return _candidate_projection(material)
 
         return compact_carried_active_turn_archive(
             self.agent, self.agent.conversation_store, self.source.thread, list(params.archive_tool_calls),
@@ -286,8 +285,65 @@ class PreparedCompactRecovery:
                 task_prompt=params.user_prompt, progress_callback=self.progress_callback, interrupt_check=interrupted,
                 compact_context=self.source.compact_context, request_projector=project,
                 projected_tokens_before=before_tokens, provider_surface=_summary_surface(frozen), tool_source=tool_source,
+                fixed_request_projector=_active_fixed_projector(self, params, frozen),
             ),
         )
+
+
+# LLM: 两个恢复入口的候选计量共用：默认按完整投影 + 已知媒体预留计量（原请求视图由调用方传入解绑前大小），并附上
+#   候选实际发送材料里的原生 IR（sent_retained_ir 口径）；这份 IR 只供失败诊断，不参与接受门或提交。
+# 函数用途: 把一个候选材料包装成计量结果，同时交回它实际要发送的保留 IR。
+def _candidate_projection(material, tokens: int | None = None) -> ConversationCompactProjection:
+    if tokens is None:
+        tokens, _ = projected_model_context_components(material.projection, media_token_reserve=media_token_reserve())
+    return ConversationCompactProjection(
+        tokens, material, retained_ir_history=sent_retained_ir(material.params.tool_ir_history),
+    )
+
+
+# LLM: 活动回合入口的“只计量、不提交”入口：同一宿主投影空摘要、无保留工具/IR 的完整请求，只交回计量与不可提交占位；
+#   compact_carried_active_turn_archive 只在候选真被输入上限拒绝、要留下容量诊断时调用一次。
+# 函数用途: 为活动回合压缩生成固定开销的实测回调；recovery 是恢复宿主本身，params/frozen 是同次冻结输入。
+#   交接字符上限与候选投影取自同一 semantic_summary_config，保证两者按同一口径替换工具交接。
+def _active_fixed_projector(recovery, params, frozen):
+    from ..memory_archive.compact_semantic_summary import semantic_summary_config
+
+    source, max_chars = recovery.source, semantic_summary_config(recovery.agent).max_input_chars
+
+    # LLM: 预计代次由活动压缩链按真实 binding 给出；只读冻结值，不写状态。
+    # 函数用途: 按预计代次实测一次“空摘要、无保留”的完整请求。
+    def measure(generation: int) -> ConversationCompactProjection:
+        material = recovery.project_active_candidate(params, frozen, "", (), generation)
+        view = ConversationCompactView(
+            source.thread.thread_id, generation, "", (), {}, {}, source.policy.trigger_tokens, True,
+            retained_tool_records=(), retained_ir_history=(), measure_only=True,
+        )
+        return _measure_only_projection(material, view, max_chars)
+
+    return measure
+
+
+# 只计量投影交回的材料占位：不是 CompactRecoveryMaterial，提交路径按类型核验会直接拒绝，不能冒充候选材料。
+_MEASURE_ONLY_MATERIAL = ("compact_measure_only",)
+
+
+# LLM: 失败诊断专用：在宿主已投影的空摘要材料上，按视图替换工具交接（measure_only 放宽空摘要），再按与候选同一
+#   口径（完整投影 + 已知媒体预留）计量；不经过候选替换入口、不参与接受门，交回的只有计量和不可提交的占位。
+# 函数用途: 计量“空摘要、无保留”那一版完整请求的 token 数，作为压缩失败时的实测固定开销。
+def _measure_only_projection(material, view, max_chars) -> ConversationCompactProjection:
+    params, prepared = material.params, material.request_input
+    if view.retained_tool_records is not None:
+        from .compact_active_projection import replace_recovery_active_tools
+
+        params, prepared = replace_recovery_active_tools(
+            params, prepared, compact_context=params.compact_context, retained_records=view.retained_tool_records,
+            max_chars=max_chars, retained_ir_history=view.retained_ir_history, measure_only=True,
+        )
+    projection = project_tool_loop_request(prepared)
+    if projection.status != "ready":
+        raise ConversationCompactError("固定开销投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve())
+    return ConversationCompactProjection(tokens, _MEASURE_ONLY_MATERIAL)
 
 
 # LLM: 与 _automatic_noop 同一口径（完整冻结投影 + 已知媒体预留）量完整旧请求；只在决定摘要后、解绑历史前调用一次，

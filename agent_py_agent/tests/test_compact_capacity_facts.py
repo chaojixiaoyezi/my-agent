@@ -5,8 +5,9 @@
 锁定：会话 transcript 与活动回合两条压缩链在候选被输入上限拒掉时，错误带 CompactCapacityFacts，failed 进度经公开白名单
 带出 candidate_tokens / input_ceiling_tokens / summary_tokens / fixed_tokens / retained_items / retained_ir_items /
 retained_ir_tokens / candidates_tried；TUI 失败行显示候选、上限与实测固定开销。
-固定开销与保留 IR 只在失败路径实测：固定开销用同一投影器以“空摘要、无保留”再投影一次（宿主投影器缺失时走同一本地
-估算，不用两个估算相减），保留 IR 与只统计工具/会话保留的 retained_items 分开计。
+固定开销只在真正抛出 COMPACT_CANDIDATE_TOO_LARGE 时实测一次：走同一投影器的“只计量、不提交”入口（measure_only 视图，
+空摘要、无保留；宿主投影器缺失时走同一本地估算，不用两个估算相减），测不出时字段缺失（None），不写 0。
+保留 IR 按候选实际要发送的材料计，与只统计工具/会话保留的 retained_items 分开。
 只替身摘要模型与计量值，分区、接受门、熔断记账和进度发射都走生产链。
 """
 
@@ -260,30 +261,46 @@ def test_transcript_failure_measures_fixed_overhead_with_the_host_projector(tmp_
     overhead = [view for view in views if view.is_candidate and not view.summary]
     # 两个分区的候选各投一次，固定开销只多投一次：成功路径不会走到这里。
     assert len(candidates) == 2 and len(overhead) == 1, views
+    assert overhead[0].measure_only and not any(view.measure_only for view in candidates)
     assert overhead[0].retained_tool_records == () and overhead[0].retained_ir_history == ()
     assert overhead[0].messages == ()
     failed = _failed_event(events)
     assert {key: failed[key] for key in COMPACT_CAPACITY_PROGRESS_FIELDS} == asdict(capacity)
 
 
-# LLM: 固定开销投影失败只记 0，不能盖住原候选过大失败，也不能让失败路径少记其它容量计量。
-# 函数用途: 验证固定开销投影不可用时原错误码与候选计量保持不变。
-def test_fixed_overhead_projection_failure_keeps_zero_and_the_original_error(tmp_path, monkeypatch) -> None:
+# LLM: 固定开销测不出时是 None：公开进度字段缺失、TUI 失败行不显示，不写 0；也不能盖住原候选过大失败，
+#   不能让失败路径少记其它容量计量。
+# 函数用途: 验证固定开销投影不可用时原错误码与候选计量保持不变，失败事件与界面都不出现固定开销。
+def test_fixed_overhead_projection_failure_leaves_the_field_missing(tmp_path, monkeypatch) -> None:
     agent, store, thread = _transcript_case(tmp_path, monkeypatch, turns=3)
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "候选摘要")
 
     def projector(view):
-        if view.is_candidate and not view.summary:
+        if view.measure_only:
             raise RuntimeError("固定开销投影不可用")
         return ConversationCompactProjection(7_200, object())
 
+    events = []
     with pytest.raises(ConversationCompactError) as error:
         prepare_conversation_context(agent, store, thread, options=ConversationCompactOptions(
-            current_prompt="继续完整任务", request_projector=projector,
+            current_prompt="继续完整任务", request_projector=projector, progress_callback=events.append,
         ))
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
-    assert error.value.capacity.fixed_tokens == 0
+    assert error.value.capacity.fixed_tokens is None
     assert error.value.capacity.candidate_tokens == 7_200
+    measured = set(COMPACT_CAPACITY_PROGRESS_FIELDS) - {"fixed_tokens"}
+    public = normalize_conversation_compact_progress(_failed_event(events))
+    assert "fixed_tokens" not in public and measured <= set(public)
+    tui = TuiStateStore()
+    seq = TuiEventSequencer("compact-capacity-unknown-fixed", clock=lambda: 12.0)
+    tui.publish(seq.emit("conversation_compaction_started", "started", "compact:req:unknown-fixed",
+                         {"generation": 1, "percent": 5, "stage": "preparing"}))
+    tui.publish(seq.emit("conversation_compaction_failed", "failed", "compact:req:unknown-fixed", {
+        "generation": 1, "percent": 0, "stage": "failed", "error_code": public["error_code"],
+        **{key: public[key] for key in measured},
+    }))
+    rendered = _rendered(tui)
+    assert f"候选 7,200 / 上限 {_CEILING:,} tokens" in rendered and "固定开销" not in rendered
 
 
 # LLM: 保留 IR 与只统计工具/会话保留的 retained_items 必须分开；固定开销与候选共用同一宿主投影器。
@@ -312,6 +329,8 @@ def test_rejected_candidate_records_fixed_overhead_and_retained_ir_separately() 
     rejected = compact_module._RejectedCandidates(request)
 
     assert rejected.reject_if_over(candidate, 6_000) is True
+    # 拒绝记账本身不投影固定开销；只有真要抛出失败时的 capacity() 才实测一次。
+    assert views == []
     facts = rejected.capacity()
     assert facts.candidate_tokens == 7_500 and facts.input_ceiling_tokens == 6_000
     assert facts.summary_tokens == estimate_tokens("候选摘要")
@@ -319,7 +338,7 @@ def test_rejected_candidate_records_fixed_overhead_and_retained_ir_separately() 
     assert (facts.retained_items, facts.retained_ir_items) == (0, 1)
     assert facts.retained_ir_tokens > 0 and facts.candidates_tried == 1
     # 候选投影由生产链的 _measure_candidate 负责；本用例只直接驱动被拒记账，所以固定开销恰好这一次。
-    assert len(views) == 1 and views[0].is_candidate and views[0].summary == ""
+    assert len(views) == 1 and views[0].is_candidate and views[0].summary == "" and views[0].measure_only
     assert views[0].messages == () and views[0].retained_tool_records == ()
     assert views[0].retained_ir_history == ()
 

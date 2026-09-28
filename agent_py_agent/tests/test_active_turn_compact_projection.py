@@ -205,31 +205,56 @@ def test_unknown_projection_never_falls_back_to_small_estimate(carried_case, tok
 @pytest.mark.parametrize("tokens", [9_000, 12_000])
 def test_complete_request_at_or_above_trigger_cannot_commit(carried_case, tokens):
     case = carried_case
-    projected = []
+    projected, measured = [], []
 
     def project(summary, records, _generation):
         projected.append((summary, list(records)))
         return ConversationCompactProjection(tokens, object())
 
+    # 宿主的“只计量、不提交”入口：只在候选真被拒时按预计代次调用一次。
+    def measure(generation):
+        measured.append(generation)
+        return ConversationCompactProjection(3_100, object())
+
     with pytest.raises(ConversationCompactError) as error:
-        _compact(case, request_projector=project, progress_callback=case.progress.append)
+        _compact(case, request_projector=project, fixed_request_projector=measure,
+                 progress_callback=case.progress.append)
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
     _assert_uncommitted(case)
     assert len(case.summaries) == 1 and not case.checkpoint_path.exists()
     # 失败要留下容量计量：完整请求多大、输入上限（触发线 90%×10000）、摘要与固定开销各占多少、保留几条、试了几个候选。
-    (summary, retained), = [item for item in projected if item[0]]
-    overhead = [item for item in projected if not item[0]]
-    assert len(overhead) == 1 and overhead[0][1] == []
+    # 候选投影器只见真实摘要，不再被拿去投影空摘要；固定开销只走只计量入口。
+    (summary, retained), = projected
+    assert summary and measured == [1]
     expected = CompactCapacityFacts(
         candidate_tokens=tokens, input_ceiling_tokens=9_000, summary_tokens=estimate_tokens(summary),
-        # 本例投影器对空摘要那一版返回同一个 tokens；没有工具来源，保留 IR 保持 0。
-        fixed_tokens=tokens, retained_items=len(retained), retained_ir_items=0, retained_ir_tokens=0,
+        # 没有工具来源，保留 IR 保持 0。
+        fixed_tokens=3_100, retained_items=len(retained), retained_ir_items=0, retained_ir_tokens=0,
         candidates_tried=1,
     )
     assert error.value.capacity == expected
     failed, = [event for event in case.progress if event.get("phase") == "failed"]
     assert failed["source_kind"] == "active_turn_tool_archive"
     assert {key: failed[key] for key in COMPACT_CAPACITY_PROGRESS_FIELDS} == asdict(expected)
+
+
+# 只计量入口缺失或投影异常时固定开销如实缺失（None）：failed 进度不带该字段、不补 0，原错误码与其它计量不变。
+@pytest.mark.parametrize("measure", ["missing", "raises"])
+def test_rejected_candidate_without_fixed_measurement_leaves_the_field_missing(carried_case, measure):
+    case = carried_case
+
+    def broken(_generation):
+        raise RuntimeError("只计量入口不可用")
+
+    fields = {} if measure == "missing" else {"fixed_request_projector": broken}
+    with pytest.raises(ConversationCompactError) as error:
+        _compact(case, request_projector=lambda *_: ConversationCompactProjection(12_000, object()),
+                 progress_callback=case.progress.append, **fields)
+    assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
+    assert error.value.capacity.fixed_tokens is None and error.value.capacity.candidate_tokens == 12_000
+    failed, = [event for event in case.progress if event.get("phase") == "failed"]
+    assert "fixed_tokens" not in failed and failed["candidate_tokens"] == 12_000
+    _assert_uncommitted(case)
 
 
 @pytest.mark.parametrize("tokens,accepted", [(2_999, True), (3_000, False), (4_000, False)])

@@ -54,6 +54,24 @@ def compact_tool_summary_text(history: Sequence[HistoryItem]) -> str:
     return json.dumps(AnthropicMessageAdapter().to_provider_messages(history), ensure_ascii=False, sort_keys=True)
 
 
+# 候选投影会整体替换的两种结构化摘要载体（compact_active_projection._replace_compact_history 按这两种来源替换）：
+# 旧的会话摘要与旧的工具交接不会随候选发送，计“保留 IR”时必须排除。
+COMPACT_REPLACED_IR_SOURCES = frozenset({"applied_compact", "carried_tool_handoff"})
+
+
+# LLM: “保留 IR”的唯一口径：候选实际发送的原生 IR 里，去掉任何候选都会整体替换的摘要/交接载体（旧的会被替换，
+#   新的是本候选自己的摘要），其余条目原样计入。只读、不复制正文；None 原样返回 None（没有来源不是空来源）。
+# 函数用途: 从一段原生 IR 里取出随候选真正发出、又不属于摘要/交接的那部分。
+def sent_retained_ir(ir_history: Sequence[HistoryItem] | None) -> tuple[HistoryItem, ...] | None:
+    if ir_history is None:
+        return None
+    from ..backends.tool_ir import CompactionSummary
+
+    return tuple(item for item in ir_history if not (
+        isinstance(item, CompactionSummary) and item.source in COMPACT_REPLACED_IR_SOURCES
+    ))
+
+
 # LLM: 只读入参，把“没被摘要、仍留在请求里的原生 IR”换算成条数与模型可见投影的 token 估算；不复用候选摘要正文，
 #   也不与 retained_items（工具/会话保留条数）混算；空与缺失一律 0，不补造事实、不落盘。
 # 函数用途: 给压缩失败诊断提供非工具归档保留 IR 的条数和 token 估算。

@@ -159,6 +159,8 @@ class ActiveTurnArchiveCompactRequest:
     projected_tokens_before: int | None = None
     provider_surface: ConversationCompactProviderSurface | None = None
     tool_source: CarriedToolCompactSource | None = None
+    # 宿主的“只计量、不提交”入口：按预计代次投影空摘要、无保留的完整请求，只用于失败诊断的固定开销；缺失即测不出。
+    fixed_request_projector: Callable[[int], ConversationCompactProjection] | None = None
 
 
 # LLM: This candidate freezes one exact checkpoint boundary before the summary model call. The
@@ -423,6 +425,7 @@ def _execute_active_turn_compact(
 
 
 # LLM: 宿主返回原完整候选，类型与计量未知必须失败；接受门复用 transcript 的阈值和已知输出预留。
+#   被拒时的保留 IR 取投影交回的实际发送 IR（没交回才按 sent_retained_ir 同一口径从计划保留区推出），固定开销走宿主只计量入口。
 # 函数用途: 在写任何检查点前校验完整请求，保留恰好获选的材料对象给同次发送。
 def _project_active_turn_request(
     agent: object,
@@ -444,9 +447,10 @@ def _project_active_turn_request(
         raise ConversationCompactError("完整恢复请求投影不可用", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     ceiling = _compact_request_input_ceiling(agent, plan.policy)
     if projection.projected_tokens >= ceiling:
-        from .compact_tool_summary import retained_ir_facts
+        from .compact_tool_summary import retained_ir_facts, sent_retained_ir
 
-        ir_items, ir_tokens = retained_ir_facts(plan.retained_ir_history)
+        sent = projection.retained_ir_history
+        ir_items, ir_tokens = retained_ir_facts(sent if sent is not None else sent_retained_ir(plan.retained_ir_history))
         raise ConversationCompactError(
             "完整恢复请求仍超出输入阈值或已知输出预留", code="COMPACT_CANDIDATE_TOO_LARGE",
             capacity=CompactCapacityFacts(
@@ -459,22 +463,24 @@ def _project_active_turn_request(
     return projection
 
 
-# LLM: 固定开销是同一宿主投影器在“空摘要、无保留记录”形态下的实测值；只在失败诊断里算，投影异常记 0 不盖住原失败，
-#   但用户中断必须继续上抛。request_projector 已在调用点保证存在，这里不另造估算或相减。
-# 函数用途: 再投影一次没有替换摘要、没有保留工具的完整请求，量出与保留内容无关的固定部分。
+# LLM: 固定开销是宿主“只计量、不提交”入口（fixed_request_projector）在“空摘要、无保留”形态下的实测值；只在候选
+#   真被拒时算一次。没有入口或投影异常时返回 None（字段缺失），不写 0、不盖住原失败；用户中断必须继续上抛。
+# 函数用途: 按预计代次实测一次与保留内容无关的固定请求开销，测不出就如实缺失。
 def _active_turn_fixed_tokens(
     request: ActiveTurnArchiveCompactRequest,
     plan: _ActiveTurnArchiveCompactPlan,
-) -> int:
+) -> int | None:
+    if request.fixed_request_projector is None:
+        return None
     try:
-        projection = request.request_projector("", (), max(0, int(plan.thread.compact_generation or 0)) + 1)
+        projection = request.fixed_request_projector(max(0, int(plan.thread.compact_generation or 0)) + 1)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
-        return 0
+        return None
     if (not isinstance(projection, ConversationCompactProjection)
             or type(projection.projected_tokens) is not int or projection.projected_tokens < 0):
-        return 0
+        return None
     return projection.projected_tokens
 
 

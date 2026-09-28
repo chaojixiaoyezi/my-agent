@@ -32,10 +32,10 @@ def test_original_fallback_commits_its_own_projection_not_last_candidate(tmp_pat
         agent, agent.conversation_store, thread,
         options=compact.ConversationCompactOptions(current_prompt="继续", source=source, request_projector=project),
     )
-    # 视图序列：初始投影 + 两次候选投影 + 失败诊断用的固定开销实测（空摘要、无保留），最后一个不算候选。
-    assert len(views) == 4 and views[0].is_candidate is False
-    assert views[1].is_candidate and views[2].is_candidate and views[3].is_candidate
-    assert views[3].summary == "" and views[3].messages == ()
+    # 视图序列：初始投影 + 两次候选投影；成功提交不做失败诊断用的固定开销实测。
+    assert len(views) == 3 and views[0].is_candidate is False
+    assert views[1].is_candidate and views[2].is_candidate
+    assert not any(view.measure_only for view in views)
     assert result.compacted and result.thread.compact_generation == 1
     assert result.messages == views[1].messages
     assert result.request_projection.material is materials[1]

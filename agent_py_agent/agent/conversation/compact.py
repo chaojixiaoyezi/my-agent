@@ -827,19 +827,21 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     raise error
 
 
-# LLM: 固定开销是“空摘要、无任何保留”那一版完整下一请求的实测值：有宿主投影器时走同一投影器，没有时走同一本地估算，
-#   不用两个估算相减；只在失败诊断里出现，投影不可用记 0 而不抛，避免诊断盖住原失败（用户中断必须继续上抛）。
-# 函数用途: 再计量一次与保留内容无关的固定请求开销（system/tools/runtime facts/当前轮等）。
-def _fixed_request_tokens(request: _CompactRunRequest) -> int:
+# LLM: 固定开销是“空摘要、无任何保留”那一版完整下一请求的实测值：有宿主投影器时走它的“只计量、不提交”入口
+#   （measure_only 视图，宿主不会据此提交），没有时走同一本地估算，不用两个估算相减。只在候选真被拒、要抛
+#   COMPACT_CANDIDATE_TOO_LARGE 时算一次；测不出返回 None（字段缺失，不写 0），不盖住原失败，用户中断继续上抛。
+#   宿主口径下原生 IR 一条不留，当前轮自己的原生 IR 计在保留 IR 里；本地估算路径没有 IR，当前 prompt 计入固定开销。
+# 函数用途: 再计量一次与保留内容无关的固定请求开销（system、tools、runtime facts 等）。
+def _fixed_request_tokens(request: _CompactRunRequest) -> int | None:
     try:
         projection = project_compact_request(request.request_projector, ConversationCompactView(
             request.thread.thread_id, request.thread.compact_generation + 1, "", (), {}, {},
-            request.policy.trigger_tokens, True, retained_tool_records=(), retained_ir_history=(),
+            request.policy.trigger_tokens, True, retained_tool_records=(), retained_ir_history=(), measure_only=True,
         ))
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
-        return 0
+        return None
     if projection is not None:
         return projection.projected_tokens
     return _projected_context_tokens(request.agent, "", (), request.current_prompt)
@@ -847,14 +849,13 @@ def _fixed_request_tokens(request: _CompactRunRequest) -> int:
 
 # LLM: 只在候选循环里累计被输入上限拒掉的候选，立即取出计量数字、不持有候选对象（其中的完整请求材料要随候选释放）；
 #   结果只进 COMPACT_CANDIDATE_TOO_LARGE 的容量诊断，不参与候选选择、回退或提交。request 只供失败路径上的固定开销与
-#   保留 IR 计量，不参与接受门。
-# 类用途: 记住被上限拒掉的候选里最小那个的大小、摘要与固定开销占比、保留条数（工具/会话与原生 IR 分开），以及一共拒了几个。
+#   保留 IR 计量，不参与接受门；固定开销只在 capacity() 里（即真要抛出失败时）实测一次，成功路径不多投影。
+# 类用途: 记住被上限拒掉的候选里最小那个的大小、摘要占比、保留条数（工具/会话与原生 IR 分开），以及一共拒了几个。
 @dataclass
 class _RejectedCandidates:
     request: _CompactRunRequest = field(repr=False)
     smallest: CompactCapacityFacts | None = None
     count: int = 0
-    fixed_tokens: int | None = field(default=None, repr=False)
 
     # LLM: 接受门与候选循环原判据一致：完整下一请求 ≥ 输入上限即拒绝。只读候选的计量与摘要文本；摘要 token 用与
     #   会话估算同一 estimate_tokens 口径，是估算值。返回值决定候选是否被丢弃，改判据要同步 active_turn 的同一接受门。
@@ -868,31 +869,37 @@ class _RejectedCandidates:
         self.smallest = self._capacity(candidate, ceiling)
         return True
 
-    # LLM: 固定开销与保留 IR 都与候选无关，只在真正要留下容量诊断时实测一次并缓存；保留 IR 取自工具来源的保留区，
-    #   与 retained_items 分开，缺失即 0。只读，不写状态、不改变接受门或熔断记账。
-    # 函数用途: 组装一个被拒候选的完整容量计量（含实测固定开销与保留 IR 条数/token）。
+    # LLM: 保留 IR 取本候选实际要发送的材料（宿主投影交回的 retained_ir_history）；投影器没给出时按同一口径
+    #   （compact_tool_summary.sent_retained_ir）从工具来源保留区推出，都没有记 0。固定开销此处不算，留给 capacity()。
+    #   只读，不写状态、不改变接受门或熔断记账。
+    # 函数用途: 组装一个被拒候选的容量计量（候选、上限、摘要、保留条数与实际发送的保留 IR）。
     def _capacity(self, candidate: _CompactCandidate, ceiling: int) -> CompactCapacityFacts:
-        from .compact_tool_summary import retained_ir_facts
+        from .compact_tool_summary import retained_ir_facts, sent_retained_ir
 
-        if self.fixed_tokens is None:
-            self.fixed_tokens = _fixed_request_tokens(self.request)
-        source = self.request.tool_source
-        ir_items, ir_tokens = retained_ir_facts(None if source is None else source.retained_ir_history)
+        projection = candidate.request_projection
+        sent = projection.retained_ir_history if projection is not None else None
+        if sent is None:
+            source = self.request.tool_source
+            sent = sent_retained_ir(None if source is None else source.retained_ir_history)
+        ir_items, ir_tokens = retained_ir_facts(sent)
         return CompactCapacityFacts(
             candidate_tokens=candidate.projected_tokens_after,
             input_ceiling_tokens=ceiling,
             summary_tokens=estimate_tokens(candidate.summary),
-            fixed_tokens=self.fixed_tokens,
+            fixed_tokens=None,
             retained_items=len(candidate.retained_tail),
             retained_ir_items=ir_items,
             retained_ir_tokens=ir_tokens,
             candidates_tried=0,
         )
 
-    # LLM: 只读累计结果，candidates_tried 取被拒总数；返回值只进 COMPACT_CANDIDATE_TOO_LARGE 的 capacity。
+    # LLM: 只在要抛 COMPACT_CANDIDATE_TOO_LARGE 时调用；candidates_tried 取被拒总数，固定开销在这里实测一次（测不出为
+    #   None）。返回值只进该失败的 capacity。
     # 函数用途: 生成失败要带的容量计量；一个候选都没被拒过时返回 None。
     def capacity(self) -> CompactCapacityFacts | None:
-        return None if self.smallest is None else replace(self.smallest, candidates_tried=self.count)
+        if self.smallest is None:
+            return None
+        return replace(self.smallest, candidates_tried=self.count, fixed_tokens=_fixed_request_tokens(self.request))
 
 
 # LLM: 宿主已备好的 provider_surface 原样沿用；只有给了 model_surface 才在此准备，准备失败先记原失败码再上抛，不进入候选循环。

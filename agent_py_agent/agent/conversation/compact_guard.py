@@ -27,7 +27,7 @@ CompactInterruptCheck: TypeAlias = Callable[[], bool]
 
 # LLM: 只装候选容量的非负整数计量，字段名即公开进度字段名（与 compact_progress.COMPACT_CAPACITY_PROGRESS_FIELDS
 #   由测试锁同步）；不带摘要正文、消息或路径，也不写进线程记录。改字段要同步 normalizer、TUI 白名单和两处生产者。
-#   fixed_tokens 是同一投影器在“空摘要、无保留”形态下的实测值；retained_ir_items/retained_ir_tokens 只统计
+#   fixed_tokens 是同一投影器“只计量”入口在“空摘要、无保留”形态下的实测值，测不出为 None（公开字段里缺失，不写 0）；retained_ir_items/retained_ir_tokens 只统计
 #   没被摘要、仍留在请求里的原生 IR，与只算工具/会话保留条数的 retained_items 分开，三个数都不由估算相减得出。
 # 类用途: 说明“候选为什么装不下”：最小候选的完整下一请求多大、输入上限多少、其中摘要与固定开销各约占多少、
 #   保留了几条（工具/会话、原生 IR 分开）、试了几个候选。
@@ -36,7 +36,7 @@ class CompactCapacityFacts:
     candidate_tokens: int
     input_ceiling_tokens: int
     summary_tokens: int
-    fixed_tokens: int
+    fixed_tokens: int | None
     retained_items: int
     retained_ir_items: int
     retained_ir_tokens: int
@@ -228,13 +228,14 @@ def compact_exception_code(exc: BaseException) -> str:
 
 
 # LLM: 两条压缩链（会话 transcript 与活动回合）的 failed 进度都从这里取失败字段：安全错误码，加上错误自带的
-#   容量计量（若有）。只读异常对象，不改熔断账；字段必须经 compact_progress 白名单才会外发。
+#   容量计量（若有；测不出为 None 的项整项缺失）。只读异常对象，不改熔断账；字段必须经 compact_progress 白名单才会外发。
 # 函数用途: 把一次压缩失败整理成进度事件要带的字段，让“候选过大”失败留下候选大小与上限。
 def compact_failure_progress_fields(exc: BaseException) -> dict[str, object]:
     fields: dict[str, object] = {"error_code": compact_exception_code(exc)}
     capacity = getattr(exc, "capacity", None)
     if isinstance(capacity, CompactCapacityFacts):
-        fields.update(asdict(capacity))
+        # 测不出的计量（None）整项缺失，不交给 normalizer 补成 0。
+        fields.update({key: value for key, value in asdict(capacity).items() if value is not None})
     return fields
 
 

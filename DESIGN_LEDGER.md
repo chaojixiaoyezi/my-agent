@@ -1031,6 +1031,12 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   被输入上限拒掉候选时，错误带 `CompactCapacityFacts`：最小候选的完整下一请求 token、输入上限、摘要估算 token、保留条数、
   试过的候选数。这组计量经 `conversation_compaction_progress.v1` 的可选白名单字段外发，TUI 失败行也会显示。
   不改线程记录 schema、熔断和重试，也不参与候选选择。本轮工具 IR 压缩链不会抛这个错误，所以没有接入。
+  - 已实现（2026-09-28，集成者转 Codex 复现）：固定开销与保留 IR 的口径修正。真实宿主里固定开销那一版空摘要撞上候选替换
+    入口的非空摘要合同，`fixed_tokens` 恒为 0；保留 IR 又按来源保留区计，把候选会整体替换的旧摘要/旧交接算了进去。
+    现在两个恢复入口都有“只计量、不提交”入口（`ConversationCompactView.measure_only`、`fixed_request_projector`），
+    只有它允许空摘要，普通候选的非空摘要合同不变；固定开销只在真正抛出失败时量一次，测不出就缺失，不写 0；
+    保留 IR 按候选实际发送的原生 IR 计，只去掉 `applied_compact` / `carried_tool_handoff` 两种载体。
+    细节与测试见 `TESTS.md` 同日条目和 `docs/modules/gateway/04-structure.md`。
 
 - 进行中（2026-09-27，用户要求）：参数中心。用户指出参数和常数散落、同名不同义、改一个要猜含义，并希望 my-agent 能自助
   修改更多设置。方向：每个可调参数一个权威定义（默认值、范围、说明、安全等级、生效时机、读取方），YAML 与 AgentConfig 由测试

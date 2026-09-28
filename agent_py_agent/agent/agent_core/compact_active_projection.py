@@ -21,6 +21,8 @@ from .tool_request_projection import ToolLoopRequestInput
 
 
 # LLM: 只认原构造点source；IR使用同一来源精确保留区，完整原生回放去重交接；没有交接标记时插入残留归档，不丢未覆盖材料。
+#   measure_only 只给失败诊断量“空摘要、无保留”的固定开销：仅此时允许空摘要，调用方只能取计量、不得提交返回的材料；
+#   普通候选（默认 False）仍要求非空摘要。
 # 函数用途: 以保留的归档记录重建模型可见交接，并同步IR、工具文本和Compact代次的冻结副本。
 def replace_recovery_active_tools(
     params: object,
@@ -30,6 +32,7 @@ def replace_recovery_active_tools(
     retained_records: list[dict[str, object]] | tuple[dict[str, object], ...],
     max_chars: int,
     retained_ir_history: tuple[object, ...] | None = None,
+    measure_only: bool = False,
 ) -> tuple[object, ToolLoopRequestInput]:
     if (
         not isinstance(compact_context, AppliedCompactContext)
@@ -42,7 +45,7 @@ def replace_recovery_active_tools(
         or not isinstance(retained_records, (list, tuple))
         or any(not isinstance(record, dict) for record in retained_records)
         or type(compact_context.view.summary) is not str
-        or not compact_context.view.summary.strip()
+        or not (measure_only or compact_context.view.summary.strip())
         or type(compact_context.view.generation) is not int
         or compact_context.view.generation <= 0
     ):

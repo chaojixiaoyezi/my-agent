@@ -29,8 +29,11 @@ Compact 进度是无正文的公开事件，不是提交权本身。Gateway 只�
 归档还是仅本轮工具 IR，`commit_authority` 说明它能否推进 ConversationThread。两字段必须是协议允许的成对
 组合；界面和后台消费者不得从 operation id 前缀或显示文案推断。
 候选被输入上限拒掉（`COMPACT_CANDIDATE_TOO_LARGE`）时，failed 事件另带可选的非负整数容量计量
-`candidate_tokens`、`input_ceiling_tokens`、`summary_tokens`（估算）、`retained_items`、`candidates_tried`，
-取最小的被拒候选；只在生产者给出时出现，缺失不补零，也不写进线程记录。
+`candidate_tokens`、`input_ceiling_tokens`、`summary_tokens`（估算）、`fixed_tokens`、`retained_items`、
+`retained_ir_items`、`retained_ir_tokens`、`candidates_tried`，取最小的被拒候选；只在生产者给出时出现，缺失不补零，
+也不写进线程记录。`fixed_tokens` 是宿主“只计量、不提交”入口（`measure_only` 视图 / `fixed_request_projector`）对
+“空摘要、无保留”完整请求的实测，只在真正抛出该失败时量一次，测不出就缺失；`retained_ir_*` 按候选实际要发送的原生 IR 计，
+只去掉候选会整体替换的 `applied_compact` / `carried_tool_handoff` 两种载体。
 
 Gateway 的“服务地址”和 TUI 的“项目目录”是两种不同事实。前者固定在当前 owner 的
 `workspace/runtime/services/gateway`，决定 pid、heartbeat、请求队列和 HTTP 端口；后者由客户端在

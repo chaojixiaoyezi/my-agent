@@ -1,5 +1,67 @@
 # 测试与发布验收
 
+## Compact 容量计量改走宿主“只计量、不提交”入口（2026-09-28，分支 `claude/be-compact-capacity`，基于 `f5036c15a`）
+
+- **来源**：集成者转来 Codex 的离线复现（`compact-2214052`）和对中间补丁的复核（`compact-author-patch-review-20260928T080805Z`）。
+  - 真实宿主里 `fixed_tokens` 恒为 0：固定开销那一版是空摘要，撞上 `replace_recovery_active_tools` 的非空摘要合同，
+    投影报 `COMPACT_REQUEST_PROJECTION_UNKNOWN`，然后被记成 0。
+  - `retained_ir_*` 按工具来源保留区计，把候选会整体替换的旧会话摘要和旧工具交接也算了进去：来源 7 条 220 tokens，
+    候选实际发送 5 条 148 tokens。
+  - 中间补丁还有两处：活动回合仍记 0；保留 IR 把所有 `CompactionSummary` 都排除了，漏掉来源为空、实际照常发送的那条。
+- **改动**：
+  - 新增显式的“只计量、不提交”入口 `ConversationCompactView.measure_only`，`PreparedCompactRecovery` 两个入口都接上：
+    - transcript 入口：投影器见到 `measure_only` 视图就走 `_measure_only_projection`。它不进候选替换，不参与接受门，
+      交回的是不可提交的占位材料。
+    - 活动回合入口：经新字段 `ActiveTurnArchiveCompactRequest.fixed_request_projector` 传入同样的只计量投影；
+      候选投影器不再被拿去投影空摘要。
+    - `replace_recovery_active_tools(measure_only=True)` 只在这条路上放宽空摘要，普通候选的非空摘要合同不变。
+  - 固定开销只在真正抛出 `COMPACT_CANDIDATE_TOO_LARGE` 时量一次：从 `_RejectedCandidates._capacity()` 挪到 `capacity()`。
+    前者每次拒绝都会走，后者只在抛出前调用，所以成功路径不再多投影。
+  - 测不出时 `fixed_tokens=None`：`compact_failure_progress_fields` 整项省略，normalizer 和 TUI 失败行都不显示。
+    两条压缩链一致，活动回合原来的“记 0”也改掉了。
+  - 保留 IR 按候选实际要发送的材料计：
+    - 宿主投影把候选材料里的原生 IR 放在 `ConversationCompactProjection.retained_ir_history` 交回；
+    - `compact_tool_summary.sent_retained_ir` 只去掉候选会整体替换的 `applied_compact` / `carried_tool_handoff` 两种载体，
+      其它来源（包括来源为空）的 `CompactionSummary` 照算；
+    - 投影器没交回时，按同一口径从来源保留区推出。
+- **新测试** `test_compact_capacity_host_chain.py`，14 项，走真实 `PreparedCompactRecovery`。只替身摘要和末端 HTTP，
+  需要时把输入上限压到 1：
+  - transcript 入口，三宿主（gateway / child / background）都由输出预留自然拒绝候选：
+    - 固定开销经真实联合替换入口只量一次，0 < 固定开销 < 最小候选；
+    - 保留 IR 等于最小候选实际发送的 IR；
+    - 最小候选不留原话尾部时，候选 − 固定开销 − 摘要 − 保留 IR 只剩几百 token 的摘要包装。
+  - 联合来源（历史 + 携带归档）和活动回合入口（原生 IR、携带归档两种）：
+    - 失败时断言同上；
+    - 成功提交时零次只计量投影；
+    - 来源保留区带旧交接时，按来源计会多算，实际计量不算它。
+  - Codex 复核用的同一夹具：来源为空的 `CompactionSummary` 照算，共 5 条，token 也包含它。
+  - 真实联合替换入口不带 `measure_only` 时仍拒绝空摘要。
+  - `sent_retained_ir` 与 `_replace_compact_history` 等价：投影原样保留（按对象身份）的，正好是它留下的条目。
+- `test_active_turn_compact_projection.py` 新增 2 项：只计量入口缺失或抛错时字段缺失。
+- **改写的旧断言**（逐条说明，都不是放宽）：
+  - `test_compact_capacity_facts.py::test_fixed_overhead_projection_failure_keeps_zero_and_the_original_error`
+    改名为 `..._leaves_the_field_missing`。按新规则“测不出不写 0”，`fixed_tokens == 0` 改成 `is None`，
+    并加断言：公开进度没有该字段，TUI 失败行不显示固定开销；其它计量照旧。
+  - `test_active_turn_compact_projection.py::test_complete_request_at_or_above_trigger_cannot_commit`：
+    原先断言候选投影器被拿去投一次空摘要，现在断言它只见真实摘要，固定开销走只计量入口一次。
+  - `test_compact_request_projection.py`、`test_compact_source_lifetime.py`、`test_mixed_compact_contract.py` 三条都是成功提交路径。
+    原来断言多一次固定开销投影（4 / 6 / 4 次），现在改为不多投（3 / 5 / 3 次）；前两条另断言没有 `measure_only` 视图。
+  - `test_compact_capacity_facts.py` 与 `test_compact_output_reserve.py` 的其余用例原样通过。
+- **变异验证**：最终代码上 22 个变异全部被抓出。每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，
+  跑完逐字节恢复并核对哈希。
+  - 只计量入口：不放宽空摘要、对所有候选都放宽、宿主投影器忽略 `measure_only`、活动入口不传只计量回调、
+    活动入口计量时保留工具记录、计量交回可提交材料、计量不做工具/IR 替换、transcript 计量视图不带 `measure_only`；
+  - 计量时机：`capacity()` 丢掉固定开销；每次拒绝都量（成功路径也量）；每次拒绝量一次、失败时再量一次；
+  - 缺失语义：transcript 测不出写 0；活动回合测不出写 0；活动回合没入口写 0；进度字段保留 None；
+  - 保留 IR：`sent_retained_ir` 不过滤；漏掉交接来源；漏掉摘要来源；过滤所有 `CompactionSummary`；
+    transcript 失败忽略实际发送 IR；两个入口共用的候选计量 `_candidate_projection` 不交回实际发送 IR；活动失败退回来源口径。
+  - 过程说明：第一轮“活动失败退回来源口径”存活，因为原生 IR 夹具的来源保留区里没有旧交接；补了携带归档的活动入口用例后被抓出。
+    第一轮还有 1 个等价变异：只让活动宿主不附带实际发送 IR。活动入口一定有工具来源（没有就在 `select` 里 noop 或报错），
+    计划里的保留 IR 就是来源保留区；真实替换原样保留其中的非载体条目，回退口径算出的结果与实际发送相同，由等价用例锁定。
+  - 为守住代码尺寸基线，两个入口的“计量 + 附带实际发送 IR”随后收进共用的 `_candidate_projection`，上面那个单入口变异点随之消失；
+    活动入口的只计量回调挪成模块级 `_active_fixed_projector`。最终的 22 个变异按新位置重跑。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_compact_capacity_host_chain.py agent_py_agent/tests/test_compact_capacity_facts.py agent_py_agent/tests/test_active_turn_compact_projection.py -q`。
+
 ## TUI 插话终态未确认时停止轮询（2026-09-28，分支 `claude/be-steer-terminal`，基于 `d786e14bb`）
 
 - **来源**：`claude/be-steer-loss` 的尾巴。Gateway 入口回执收成 `terminal_unknown`（目标回合已结束、无法证明模型确认过）以后不会再变，
@@ -58,6 +120,7 @@
   - `compact.py` 新增 `_fixed_request_tokens(request)`：用**同一投影器**把"空摘要、无任何保留"那一版完整下一请求再计量
     一次（宿主没给投影器时走同一本地估算），结果缓存在 `_RejectedCandidates`；投影异常记 0 而不抛，
     **绝不盖住原候选过大失败**（用户中断仍继续上抛）。
+    （2026-09-28 已改：真实宿主里这一版恒记 0，现走宿主只计量入口、只在抛出时量一次，测不出为缺失，见本文件同日条目。）
   - `compact_tool_summary.py` 新增 `retained_ir_facts(ir_history)`：只读入参，返回条数与模型可见投影的 token 估算，
     与只统计工具/会话保留的 `retained_items` 分开；空与缺失都返回 0。
   - 活动回合链（`active_turn_compact.py`）：`_ActiveTurnArchiveCompactPlan` 只携带 `retained_ir_history` 供失败诊断，
