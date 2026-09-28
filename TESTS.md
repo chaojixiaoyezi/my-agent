@@ -1,5 +1,32 @@
 # 测试与发布验收
 
+## 会话间消息与派活第 1 片：权限判定 + 管理员发消息工具（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：开发交流板任务「会话之间的消息与派活（第一期只开放给管理员）」；设计经 dev 审过，6 处补充已并入
+  `docs/design/SESSION_MESSAGING.md`。
+- **做法**：
+  - 新增 `agent_py_agent/agent/conversation/session_messaging.py`：权限判定纯函数 `decide_session_messaging`，
+    只读结构化字段（发送方 `OwnerIdentity` 的 owner_kind、kind、是否同 owner/同 thread、三个开关），
+    返回 `(allowed, error_code, scope_warnings)`。目标不存在与跨 owner 返回同一码 `SESSION_TARGET_OUT_OF_SCOPE`（不泄露存在性）；
+    自派任务拒绝 `SESSION_TASK_TARGET_SELF`，自消息允许。
+  - 新增 `agent_py_agent/agent/agent_core/orchestration/tools/send_session_message.py`：`SendSessionMessageTool`，
+    身份只从 `agent.home_paths` 的 owner 三元组与当前会话 thread_id 取；通过后向目标 thread 的 guidance 队列
+    `append_once`（幂等 dedupe_key，来源 `origin_kind/origin_thread_id` 落 metadata），目标 `status=active` 时再 `wake.raise_signal`。
+  - 配置同步：`capability_config.yaml` + `capability/config.py` 加 5 个键（管理员发消息/派活默认开，普通用户发消息默认关，
+    链深上限、每对会话每小时上限，0 表示不限制）。
+  - 错误码注册：`contracts/error_taxonomy.py` 新增 `SESSION_MESSAGING_DISABLED`、`SESSION_TASK_NOT_ALLOWED`、
+    `SESSION_TARGET_OUT_OF_SCOPE`、`SESSION_TASK_TARGET_SELF`（未注册会被归一成 `UNKNOWN_ERROR`，这是既有合同）。
+  - 注册位置：`core.py` 的 `_register_orchestration_tools`，放在 `enable_subagents` 门控**之前**（会话间消息是 owner 级能力）。
+- **新测试**：
+  - `agent_py_agent/tests/test_session_messaging_permissions.py`（18 项）：8 格权限矩阵、不泄露存在性、
+    自派任务/自消息、开关关闭、kind 非法。
+  - `agent_py_agent/tests/test_send_session_message_tool.py`（5 项）：缺参数失败、目标不存在返回统一越界码、
+    成功写入来源结构化消息并唤醒空闲目标、非活跃目标只排队不唤醒。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py -q`。
+- **变异验证**：把跨 owner 判定改成恒真 → 5 条跨 owner 测试全红；把自派任务判定改成恒假 → 自派测试变红；恢复后全绿。
+- **回归**：`test_runtime_guidance.py`、`test_wake_queue.py`、`test_orchestration_tool_constants.py` 通过。
+- 尚无真实 Gateway 双会话端到端验收（第 3 片用 fake LLM 做；真实环境由 dev 安排）。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的

@@ -14,6 +14,7 @@ from pathlib import Path
 from .agent_core.capability_request_tool import CapabilityRequestTool
 from .agent_core.models import AgentRunResult
 from .agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
+from .agent_core.orchestration.tools.send_session_message import SendSessionMessageTool
 from .agent_core.orchestration_tools import (
     CODING_SUBAGENT_TOOLS,
     READ_ONLY_SUBAGENT_TOOLS,
@@ -1067,6 +1068,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 高吞吐数据流盯守摄取层:代码层结构化预聚合/初筛/背压把 100+/s 压成候选批,主代理与
     # 所有 Agent 共用；游标和统计跨轮、跨重启持久，业务定性始终留给模型。
     agent.tools.register(WatchStreamTool(agent))
+    # 会话间消息:同一 owner 内的会话可以互发消息(第一期只开给管理员,判定在 conversation.session_messaging)。
+    # 它是 owner 级能力,注册在 enable_subagents 门控之前,不因子代理总开关关闭而消失。
+    agent.tools.register(SendSessionMessageTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
     if not agent.config.enable_subagents:

@@ -617,6 +617,45 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "后续或替代子代理，不要把同一消息反复排进终态邮箱。"
         ),
     ),
+    "SESSION_MESSAGING_DISABLED": ErrorContract(
+        code="SESSION_MESSAGING_DISABLED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "会话间消息当前对这类身份关闭；这是结构化开关的结果，不要靠改写文本重试，"
+            "需要时由管理员按配置打开。"
+        ),
+    ),
+    "SESSION_TASK_NOT_ALLOWED": ErrorContract(
+        code="SESSION_TASK_NOT_ALLOWED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "第一期只允许管理员会话之间派任务；普通用户没有开关，不要再尝试派任务，"
+            "请改用自己的会话来承载这项工作。"
+        ),
+    ),
+    "SESSION_TARGET_OUT_OF_SCOPE": ErrorContract(
+        code="SESSION_TARGET_OUT_OF_SCOPE",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "目标会话不存在，或不属于当前用户；两种情况都不会透露对方是否存在。"
+            "请先用结构化列表确认本用户下的会话编号，不要盲目重试。"
+        ),
+    ),
+    "SESSION_TASK_TARGET_SELF": ErrorContract(
+        code="SESSION_TASK_TARGET_SELF",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "不能把任务派给当前会话自己；需要自己继续的工作直接用普通回合，不要绕道会话间派活。"
+        ),
+    ),
     "SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING": ErrorContract(
         code="SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING",
         category="orchestration",

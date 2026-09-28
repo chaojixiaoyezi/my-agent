@@ -470,6 +470,7 @@ agent_py_agent/
 |   |   |-- capability_selection_state.py # 原任务内的一次选包标记校验，不另建账
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
+|   |   |-- session_messaging.py        # 会话间消息与派活的权限判定（纯函数，只读结构化身份与开关）
 |   |   |-- store_guidance_records.py   # 插话回执格式、迁移构造与身份校验
 |   |   |-- store_guidance_ledger.py    # 插话回执读取、回合锁及队列与索引修复
 |   |   |-- store_guidance_submission.py # 模型提交批次、执行前拒绝及回执投影修复
