@@ -2043,3 +2043,12 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 `scheduler/service` 对同内容重装后的不同 activation_id 也拒绝自动启动。
 `conversation/models.ThreadTaskLink` 和 `store_tasks.TaskStore.pin_skill_reference` 是主任务包版本的唯一持久位置，
 不复制插件安装状态。`capability/task_references` 组合可信运行身份与原任务库；普通后台沿原任务链接恢复。
+
+## gateway stop 的遗留后台进程事实（2026-09-28）
+
+`gateway_parts/background_resource_report.py` 只读 `ProcessSessionStore`（由 `process_session_store_root(workspace, owner_home)`
+这一条口径算出，与写入端同源），把记录投影成结构化事实：`session_id`、`status`、`pid`、`host_pid`、`started_at`
+与 `execution_scope` 的 `thread_id`/`root_task_id`/`run_id`/`attempt_id`；命令正文、cwd、输出路径一律不进投影。
+停止只按已登记的精确执行身份冻结意图（`ProcessExecutionScope.matches` 要求 owner 加 thread+root task 或 run，
+空目标被拒绝而不是变成通配），实际回收仍由原 host 完成；`cli/gateway_process.py` 默认只打印，`--stop-background`
+才调用它。`gateway restart` 的停止阶段显式传 `stop_background=False`。

@@ -363,3 +363,14 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
   `PLUGIN_PERMISSION_DENIED`），Gateway 普通回执与交互命令流两条路径都按 WARNING 记 `PLUGIN_COMMAND_REJECTED error_code=… action=…
   request_id=…`。此前服务层已有码，但只转成中文说明、TUI 只打印说明、Gateway 不记日志，面板与日志都看不到码（R16 实测）。
   管理员执行行为与执行后的失败/成功文案不变；合同测试见 test_plugin_management、test_gateway_plugin_management、test_host_command_stream。
+
+
+## gateway stop 列出遗留后台进程，并可显式一并停止（2026-09-28，分支 `my-agent/self-dev-4`）
+
+托管后台进程不随 Gateway 退出而停止（生产部署依赖这一点），但原先既看不到它们、也没有回收入口：
+回合被 /interrupt 后后台进程继续运行，用户再 /stop 只会得到"当前没有运行中的内容"。
+`gateway stop` 现在默认按结构化事实列出本 gateway 登记且仍在运行的后台进程（所属 root task/run、pid、启动时间、状态），
+**默认不停止**；加 `--stop-background` 才走既有资源停止路径（`ProcessSessionStore.request_stop` 冻结停止意图，
+原 host 的 `terminate_process_tree` 按进程组回收，孙进程随之结束——只给登记 pid 发信号会漏掉它们），
+`--background-timeout` 控制等待确认的秒数。停止失败按非零退出码如实报告，不谎报已停。
+重启（`gateway restart`）不隐式停止后台资源，只有用户显式要求才停。本地六项合同单测通过，真机未复验。

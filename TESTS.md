@@ -83,6 +83,29 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
   不要为了跑通去伪造 `decision_experiment` 的独立路由。
 
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
+
+## gateway stop 的遗留后台进程事实与停止入口（2026-09-28，分支 `my-agent/self-dev-4`）
+
+- **来源**：my-agent-4 开发交流板任务 3（dsh-be 的 R10 验收观察）。Gateway 退出不停止托管后台进程是设计行为，
+  但用户既看不到遗留进程、也没有回收入口（/interrupt 后再 /stop 只会得到"当前没有运行中的内容"）。
+- **做法**：新增 `agent_py_agent/agent/gateway_parts/background_resource_report.py`——只读 `ProcessSessionStore`
+  （由 `process_session_store_root(workspace, owner_home)` 单一口径算出，与写入端同源），把记录投影成结构化事实
+  （session/status/pid/host_pid/started_at 与所属 thread/root task/run/attempt；命令正文、cwd、输出路径不进投影）；
+  停止复用既有 `request_stop`（按精确执行身份冻结意图，空目标被拒绝而非通配），实际回收仍由原 host 的
+  `terminate_process_tree` 按进程组完成。`gateway stop` 默认只列出并提示"如需一并停止，加 --stop-background"，
+  加该参数才停止；`--background-timeout` 控制等待确认秒数；停止未确认时按非零退出码报告。
+  `gateway restart` 的停止阶段显式传 `stop_background=False`（重启保留后台资源是设计行为）。
+- **为什么选扩展 `gateway stop` 而不是改 TUI 的 /stop**：/stop 是会话级"停止当前回合"入口，语义是回合控制；
+  遗留后台资源是 owner 级进程事实，归 `gateway stop` 更贴切，也避免让 TUI 承担跨会话的资源回收。
+- **新测试**：`agent_py_agent/tests/test_gateway_stop_background_resources.py` 6 项——只列运行中记录（终态被排除）、
+  投影不含命令正文、跨 root task/run 不被一起停、空执行身份被拒绝（不通配）、未进入终态时如实报 stopped=False、
+  按进程组停止时孙进程一起结束（真实 fork 出父子孙进程验证）。
+- **复现**：`PYTHONPATH=. python3 -m pytest agent_py_agent/tests/test_gateway_stop_background_resources.py -q`
+- **变异验证**：去掉 `target.matches(target)` 的执行身份校验 → 空目标用例变红（返回 still_running_after_request
+  而不是 scope_incomplete，即变成了通配停止）。
+- **环境说明**：本机沙箱拿不到本进程出生身份（`ps -p` 不可用），测试按"fake 进程"约定给 `capture_process_birth_token`
+  打桩，其余字段仍走真实校验器与真实 Store。`test_background_handoff.py` / `test_background_stdio.py` 在**基线提交**
+  上同样失败（需要在沙箱内真实 spawn 托管 host），与本改动无关，已用基线工作树对照确认。
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`）
 
 - **来源**：my-agent-4 开发交流板任务 2（Claude 会话 dsh-9b 的 R16 跨 owner 隔离验收随附发现）。隔离本身通过，

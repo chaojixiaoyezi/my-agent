@@ -35,6 +35,11 @@ from ..agent.gateway_parts import (
     wait_for_pid_exit,
     write_json_file,
 )
+from ..agent.gateway_parts.background_resource_report import (
+    DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS,
+    list_running_background_processes,
+    stop_background_processes,
+)
 from ..agent.gateway_parts.daemon_control import (
     _get_process_start_time,
     _utc_now_iso,
@@ -63,6 +68,7 @@ from ..agent.gateway_parts.status_rendering import (
     wait_for_gateway_readiness,
 )
 from ..agent.runtime_errors import runtime_error_report
+from ..agent.tooling.process_session_store import process_session_store_root
 from .common import ROOT, make_agent
 from .gateway_host_guard import mark_hosting_gateway_process, refuse_stopping_hosting_gateway
 from .gateway_loops import (
@@ -1047,15 +1053,18 @@ def _gateway_state_detail_for_display(running: bool, state: dict) -> dict:
 
 
 # LLM: 写停止请求前先经托管自停闸；目标只来自 pid 文件的运行中记录，--kill 与 restart 都不能绕过。
-# 函数用途: 请求正在运行的 Gateway 排水退出，超时后按 --kill 强制结束。
+#   托管后台进程不随 Gateway 退出而停止（生产部署依赖这一点），因此这里默认只列出本 gateway 登记且仍在运行
+#   的后台进程；只有显式 --stop-background 才走既有资源停止路径把它们一并停掉。
+# 函数用途: 请求正在运行的 Gateway 排水退出，超时后按 --kill 强制结束；按显式要求停止遗留后台资源。
 def cmd_gateway_stop(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
+    background = _background_processes_for_stop(agent)
     pid = get_running_pid(paths.pid)
     if not pid:
         remove_pid_file_if_owned(paths.pid)
         print("gateway 未在运行")
-        return 0
+        return _report_background_processes(args, agent, background)
     if refuse_stopping_hosting_gateway(pid):
         return 2
 
@@ -1082,11 +1091,65 @@ def cmd_gateway_stop(args) -> int:
             {"status": "stopped", "pid": pid, "updated_at": time.time()},
         )
         print(f"gateway stopped pid={pid}")
-        return 0
+        return _report_background_processes(args, agent, background)
     if args.kill and _force_kill_gateway(agent, paths, pid):
-        return 0
+        return _report_background_processes(args, agent, background)
     print(f"gateway stop requested but still running pid={pid}", file=sys.stderr)
     return 2
+
+
+# LLM: 默认只打印结构化事实（所属 task/run、pid、启动时间），不改任何资源；--stop-background 才走
+#   既有资源停止路径，并只对本 gateway 登记的那批进程生效。停止失败按非零退出码报告，不谎报已停。
+# 函数用途: 列出（并按显式要求停止）本 gateway 登记的遗留后台进程，返回退出码。
+def _report_background_processes(args, agent, background: tuple[list, list]) -> int:
+    processes, errors = background
+    if not processes and not errors:
+        return 0
+    print(f"仍在运行的后台进程：{len(processes)} 个（Gateway 退出不会停止它们）")
+    for facts in processes:
+        owner = facts.get("root_task_id") or facts.get("run_id") or facts.get("thread_id") or "unknown"
+        print(json.dumps({
+            "session_id": facts.get("session_id"),
+            "owner": owner,
+            "pid": facts.get("pid"),
+            "started_at": facts.get("started_at"),
+            "status": facts.get("status"),
+        }, ensure_ascii=False, sort_keys=True))
+    for error in errors:
+        print(json.dumps({"kind": "record_load_error", "detail": error}, ensure_ascii=False, sort_keys=True))
+    if not getattr(args, "stop_background", False):
+        print("以上进程默认保留；如需一并停止，重新执行并加 --stop-background")
+        return 0
+    results = stop_background_processes(
+        _background_store_root(agent),
+        processes,
+        timeout_seconds=float(getattr(args, "background_timeout", None) or DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS),
+    )
+    failed = [row for row in results if not row["stopped"]]
+    for row in results:
+        print(json.dumps(row, ensure_ascii=False, sort_keys=True))
+    if failed:
+        print(f"有 {len(failed)} 个后台进程未确认停止", file=sys.stderr)
+        return 2
+    print(f"已停止 {len(results)} 个遗留后台进程")
+    return 0
+
+
+# LLM: 托管后台进程登记表的地址只由产品那一个函数决定（同一 owner 的家目录+工作区），
+#   这里不另写第二套推导，避免列出/停止落在与写入不同的目录。
+# 函数用途: 返回本 gateway owner 的托管后台进程登记表根目录。
+def _background_store_root(agent) -> str:
+    home = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
+    return str(process_session_store_root(getattr(agent, "root", ""), home))
+
+
+# LLM: 只读一次登记表供停止后的报告复用，不在失败路径重复扫描；读取异常按空结果 + 错误列表返回。
+# 函数用途: 取本 gateway owner 仍在运行的后台进程事实与读取错误。
+def _background_processes_for_stop(agent) -> tuple[list, list]:
+    try:
+        return list_running_background_processes(_background_store_root(agent))
+    except Exception as exc:
+        return [], [runtime_error_report(exc, context="gateway.stop.background_processes")]
 
 
 def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
@@ -1125,6 +1188,9 @@ def cmd_gateway_restart(args) -> int:
         timeout=args.timeout,
         kill=True,
         reason="gateway restart",
+        # 重启不隐式停止后台资源：重启是设计上保留后台进程的场景，只有用户显式要求才停。
+        stop_background=False,
+        background_timeout=None,
     )
     stop_code = cmd_gateway_stop(stop_args)
     if stop_code not in {0}:

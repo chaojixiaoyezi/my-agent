@@ -121,6 +121,16 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_stop.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
     gateway_stop.add_argument("--kill", action="store_true", help="超时后强制终止进程")
     gateway_stop.add_argument("--reason", help="写入 stop request 的原因")
+    gateway_stop.add_argument(
+        "--stop-background",
+        action="store_true",
+        help="同时停止本 gateway 登记、仍在运行的后台进程（默认只列出，不停止）",
+    )
+    gateway_stop.add_argument(
+        "--background-timeout",
+        type=float,
+        help="等待后台进程确认停止的秒数，默认 10 秒",
+    )
     gateway_stop.set_defaults(func=cmd_gateway_stop)
 
     gateway_restart = gateway_sub.add_parser("restart", help="安全重启 gateway：先排空在跑的回合和工具再换新进程")
