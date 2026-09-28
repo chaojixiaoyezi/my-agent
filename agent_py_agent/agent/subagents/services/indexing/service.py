@@ -269,8 +269,11 @@ def _task_index_list_section(name: str, values: list[str]) -> list[str]:
     return [f"{name}:", *(f"- {item}" for item in values)]
 
 
+# LLM: subagent_run_saved 事件的 payload。接替关系（takeover_by / superseded_by）只在有值时带上，供时间线、审计等投影看到；
+#   权威位置仍是任务记录里的 takeover_records，这里不新增事件类型、不改已有键。改键须同步 test_subagent_done_supersede。
+# 函数用途: 生成写进本地索引和事件日志的子代理状态摘要。
 def _task_index_metadata(task: SubAgentTask) -> dict[str, object]:
-    return {
+    metadata: dict[str, object] = {
         "run_id": task.id,
         "goal": task.goal,
         "status": task.status,
@@ -285,3 +288,8 @@ def _task_index_metadata(task: SubAgentTask) -> dict[str, object]:
         "task_dir": task.task_dir,
         "updated_at": task.updated_at,
     }
+    for key in ("takeover_by", "superseded_by"):
+        value = str(getattr(task, key, "") or "").strip()
+        if value:
+            metadata[key] = value
+    return metadata

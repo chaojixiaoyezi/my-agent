@@ -35,6 +35,7 @@
 - 落盘核对分两道：落账入口保存后重读，接替者与处置不一致就抛 `TakeoverNotPersistedError`，不写 TAKEOVER.md；回执层 `_persisted_replacement_record` 再按重读结果给 `recorded`＋disposition 或 `not_persisted`。
 - 持久化边界：`_restore_newer_closed_state` 整份拷回已关闭记录时，只让 `_closed_record_appends` 白名单（superseded_by 从空到非空、TakeoverRecord 按 id 追加）继续落盘；`_merge_existing_takeover_state` 让同状态旧快照保住已落盘的 superseded_by 与接管记录。
 - 父级视图：`SubagentKernelRun.replaced_by` → 代理树节点 → list_agents 模型视图白名单（含大树预览）。
+- 事件投影：`services/indexing/service.py::_task_index_metadata` 在有值时把 takeover_by／superseded_by 带进 `subagent_run_saved` 的 payload（不新增事件类型），供时间线与审计投影读取；权威仍是 takeover_records。
 
 ## 子代理可观测与授权失败即停（工具失败账本的两种投影）
 

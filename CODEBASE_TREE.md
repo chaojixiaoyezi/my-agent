@@ -827,7 +827,7 @@ agent_py_agent/
 |   |-- test_background_active_turn_carry.py # 生命周期唤醒片按精确请求编号续接前台轮工具事实：owner记录只进运行时状态、同内容派工判重复、预算不缩水
 |   |-- test_background_child_control_tools.py # 后台整合档与goal子代理档从直属管理面唯一定义派生（含list_agents）、原顺序不变、收紧只做减法
 |   |-- test_lifecycle_wake_host_event.py # 唤醒片记为宿主事件：确定性事实投影、原生与文本渲染、固定推荐、历史不重放注入、脚本化假模型不再重复派工、历史不完整时接替已完成子代理
-|   |-- test_subagent_done_supersede.py # 已结束子代理被接替：终态不改写只记 superseded_by、回执按落盘结果、防重复接替、持久化白名单、父级视图 replaced_by
+|   |-- test_subagent_done_supersede.py # 已结束子代理被接替：终态不改写只记 superseded_by、回执按落盘结果、防重复接替、持久化白名单、父级视图 replaced_by、保存事件带接替关系
 |   |-- test_compact_active_projection.py # 原生交接纯替换、媒体插话与guidance保留、未知IR拒绝
 |   |-- test_active_turn_compact_projection.py # 活动归档完整容量、取消、CAS及局部证据继承
 |   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离

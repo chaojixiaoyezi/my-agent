@@ -68,6 +68,17 @@
     - 修改后：38 passed，lark 相关报错行为 0。
   - 复现材料在 `~/.my-agent/decision-evidence/lark-expiring-cache-20260928/`。
 
+## 保存事件带上接替关系（2026-09-28，分支 `claude/ae-tui-superseded-marker` 第 1 个提交，基于 `3e58de8a0`）
+
+- **来源**：修复 `1d44c9f8f` 的脚本模型复核发现，追加式事件日志里看不到接替关系。集成方定的做法是不新增事件类型，
+  只在 `subagent_run_saved` 的 payload 里带上 takeover_by／superseded_by，有值才带。
+- **测试**：`test_subagent_done_supersede.py` 新增 2 例（参数化）。用真实 LocalStore 挂到 SubAgentManager 上：
+  - 接替前的保存事件都不含这两个键；
+  - 接替 DONE 来源后，最新一条保存事件只带 `superseded_by`；接替 BLOCKED 来源后，只带 `takeover_by`。
+- **变异**：2 个变异都变红：不带任何接替键；无论有没有值都带上两个键。
+- **回归**：11 个文件，包括新测试、本地存储与 local_doctor 相关测试、test_architecture_guardrails 和 test_constant_names_unique；结果 146 passed。
+- **门禁**：ruff、doc_sync、strict code-size、`git diff --check`、check_clean_package 全部退出 0，CODE_SIZE_REPORT.md 在提交前已还原。
+
 ## 参数减量杂项批：compact 语义摘要 4 键 + 唤醒消费/合并窗口 2 键降为常量（2026-09-28，分支 `my-agent/self-dev-2`）
 
 - **来源/做法**：dev 在 my-agent-2 开发交流板派的任务 3（做法照 `87e025bb6`）。

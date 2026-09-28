@@ -12,6 +12,7 @@
 - 持久化边界：已关闭记录整份拷回时只允许单调追加接替关系；同状态的旧快照写回不能冲掉已落盘的接替关系。
 - 父级视图（kernel 节点、list_agents 模型视图）对被接替的子代理标出 replaced_by。
 - 接管 run 的幂等查找同样读这组字段：已结束来源被接管后，重复发起直接找回原接管 run。
+- subagent_run_saved 事件的 payload 在有值时带上 takeover_by / superseded_by（不新增事件类型），时间线与审计投影可见。
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ import pytest
 from agent_py_agent.agent.agent_core.agent_tree.model_view import agent_tree_model_payload
 from agent_py_agent.agent.agent_core.agent_tree.node_rendering import node_from_kernel_run
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.subagents.kernel import SubagentKernel, SubagentKernelQuery
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import TakeoverRecord
@@ -209,3 +211,21 @@ def test_takeover_run_on_a_done_source_supersedes_it_and_stays_idempotent(tmp_pa
     source = manager.load(source_id)
     assert source.status == "DONE" and source.superseded_by == first.takeover_run_id
     assert second.created is False and second.takeover_run_id == first.takeover_run_id
+
+
+
+@pytest.mark.parametrize("status,key", [("DONE", "superseded_by"), ("BLOCKED", "takeover_by")])
+def test_saved_event_payload_carries_the_successor_only_when_present(tmp_path, status, key):
+    store = LocalStore(tmp_path / "local.db")
+    manager = SubAgentManager(tmp_path, workspace_root=tmp_path, local_store=store)
+    source = manager.create_run(goal="旧子代理整理三条要点", thought="执行", plan=["整理"], role="worker")
+    manager.lifecycle.set_status(source.id, status)
+    before = [item.payload for item in store.timeline(limit=50, event_type="subagent_run_saved")]
+
+    manager.record_takeover(source.id, take_over_by="subagent-new", reason="接替", locked_files=[])
+
+    events = [item.payload for item in store.timeline(limit=50, event_type="subagent_run_saved")
+              if item.payload.get("run_id") == source.id]
+    assert not any("takeover_by" in payload or "superseded_by" in payload for payload in before)
+    assert events[0][key] == "subagent-new"
+    assert {"takeover_by", "superseded_by"} & set(events[0]) == {key}

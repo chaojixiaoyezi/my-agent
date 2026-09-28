@@ -22,7 +22,7 @@
 
 未做：
 - TUI board 等其它展示面还没标 superseded；
-- 追加式事件日志（local_store `subagent_run_saved`、run 时间线）没有专门的接替条目，接管记录只在权威状态和 TAKEOVER.md 里；
+- 事件日志已补（2026-09-28，分支 `claude/ae-tui-superseded-marker`）：按集成方口径不新增事件类型，`subagent_run_saved` 的 payload 在有值时带上 takeover_by／superseded_by，供时间线、审计投影读取；权威仍是任务记录里的 takeover_records；
 - 真实模型下的接替行为未验。
 
 脚本模型端到端复核（BR/HI）已通过，见 CAPABILITY_PACK_ACCEPTANCE 的 G03 节。模块细节见 [子代理结构](docs/modules/subagent/04-structure.md#接替关系的唯一落账入口2026-09-28)。
