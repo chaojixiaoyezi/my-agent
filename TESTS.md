@@ -264,9 +264,11 @@
 
 ## Compact 计量补片与校准合同只读复核（2026-09-28）
 
-冻结未提交补片的生产 helper 离线复现：transcript 未知固定开销已为缺失值，活动轮仍输出零；原有 fixture 实际保留 5 条 IR、估算 148 tokens，新统计只算 4 条、115 tokens。另在固定 f785 上验证校准生命周期：本轮请求缩小时回原始估算；持久观察对同一候选校准为 105000，清除观察后回 150000。两项均是合成合同检查，零真实模型/网络/Gateway 操作，不是新修复通过或 C17 原因证明。
+修复复验：固定 `b6dafe22ad5f3ef2ce09317a80fbe87a767749ad` 的隔离源码副本运行 `test_compact_capacity_host_chain.py`、`test_compact_capacity_facts.py`、`test_active_turn_compact_projection.py`、`test_compact_request_projection.py`、`test_compact_source_lifetime.py`、`test_mixed_compact_contract.py`，6 文件 **85 passed**。真实恢复宿主的 transcript、活动轮与 mixed callee 均由替身摘要/HTTP 驱动；只计量材料不可提交、普通空摘要仍拒绝、失败才测固定开销、未知省略及非交接摘要保留已覆盖。作者 22 项变异测试未独立重跑，不叠加为本线计数；这不是校准或 C21 通过。
 
-建议下一步：原作者覆盖候选接受到提交后实际预检的一致性，以及非交接摘要保留；Claude 交固定组合，root 再核对并运行 C21。只读审阅可并行，产品代码仍由原作者独占。证据摘要与范围见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#compact-计量与校准待修复边界2026-09-28)。
+修复前的离线复现保留：冻结当时未提交补片的生产 helper，transcript 未知固定开销已为缺失值，活动轮仍输出零；原有 fixture 实际保留 5 条 IR、估算 148 tokens，当时统计只算 4 条、115 tokens。另在固定 f785 上验证校准生命周期：本轮请求缩小时回原始估算；持久观察对同一候选校准为 105000，清除观察后回 150000。两项均是合成合同检查，零真实模型/网络/Gateway 操作，不是校准修复通过或 C17 原因证明。
+
+建议下一步：原作者交付候选接受到提交后实际预检的一致性验证；Claude 交固定组合和 gate，root 再核对并运行 C21。只读审阅可并行，产品代码仍由原作者独占。证据摘要与范围见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#compact-计量与校准待修复边界2026-09-28)。
 
 ## C21离线交接工具开发验证准备（2026-09-28）
 
@@ -274,7 +276,7 @@
 
 建议下一步：核固定版本及安装前提，再由 root 提交和观察；Claude 可并行交付计量修复，其他审阅保持只读。
 
-历史结构化补证已复核：导出线程头下 77 个检查点的同线程前代链闭合，8 对连续代次均为 `forced=False`；其中一条 M2.7/200000 请求同 attempt 连续提交 1–5 代。导出不含当前源码/包 pins/get/执行，不能替代 C21；手动 19/恢复 40 的时间配对分类及进度 553 行口径待原提取方纠正。本轮仅解析已有元数据，零模型/提取器执行；详见[证据范围](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#历史自动-compact-证据复核2026-09-28)。
+历史结构化补证 v2 已复核：25 次手动控制中 23 次成功全部精确关联，主 owner 的 77 次提交分为手动 17、触发未知 60；进度为 534 条 Compact 加 8 条 IR，共 542。v1 保留，检查点共有字段未变，同请求同 attempt 的第 1–5 代提交事实保留；`forced` 不证明自动触发，记录完整性未证。导出没有当前源码/包 pins/get/执行，不能替代 C21。本轮仅解析已有元数据，未重跑提取器；详见[证据范围](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#历史-compact-证据复核2026-09-28)。
 
 ## C20原生128K分项（2026-09-28）
 
