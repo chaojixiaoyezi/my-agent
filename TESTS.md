@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## R16 补测：按包选择偏好与 global_index 可读性（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-followup`）
+
+- **范围**：上一轮 R16 留下的两项：跨 owner 的按包选择偏好（`host_capability_selection.v1`），以及主机层
+  `global_index`（active_runs、active_tasks）能否被普通用户的工具面读到。
+- **环境**：与 R16 相同；另在两个 owner 的能力配置里打开默认关闭的一次选包。
+- **结果**：两项都通过，未发现隔离缺陷，逐项证据见
+  [CAPABILITY_PACK_ACCEPTANCE.md](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#r16-补测按包选择偏好与-global_index-可读性2026-09-28)。
+  A 形成了一条选中 1 个包的选择标记，只存在 A 这边；B 没有包、没有任何选择标记。B 的 `list_agents`、`audit_records`、
+  `schedule` 输出都不含 A 的标识，跨用户审计返回 `AUDIT_ACCESS_DENIED`，直接读索引返回 `PATH_OWNER_SCOPE_BLOCKED`，
+  inspect 类工具和 `gateway_status` 不在普通用户的工具面上。
+- **复现**：`~/.my-agent/decision-evidence/r16-followup-9f88/harness/`（stage_b → run_gateway / run_tui → send →
+  selection / canary / scan）；判定只读结构化标记、错误码和标识命中计数，不读正文。
+
 ## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
 
 - **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，

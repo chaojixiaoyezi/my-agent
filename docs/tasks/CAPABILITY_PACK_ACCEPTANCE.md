@@ -125,7 +125,7 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 | G04 | Goal 暂停、回合中断、明确资源停止三类独立控制 | **已由 [R10 独立实测](#r10三类控制独立原生实测2026-09-28)闭合，三项分别通过**。已有 /stop 组合状态和 REOPEN03 同代续读仍只是旧证据，不替代这三次实测；长前台工具执行中途的 `/interrupt` 未单独覆盖，见该节边界 |
 
 | G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过。五项已有[脚本模型端到端机制证据](#g05脚本模型端到端机制验证2026-09-28)，真实模型仍未覆盖 |
-| G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据。**2026-09-28 补跨 owner 原生验收**（`9f88e4905`，隔离 home、私有 8436、local/main 与 local/user 两个 owner）：包、设置、task、偏好四项均取得原生结构化证据，未发现隔离缺陷，见[R16 跨 owner 隔离原生验收](#r16-跨-owner-隔离原生验收2026-09-28)；按包选择偏好（capability_selection）本轮两边都未形成可比记录，仍未单独覆盖 |
+| G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据。**2026-09-28 补跨 owner 原生验收**（`9f88e4905`，隔离 home、私有 8436、local/main 与 local/user 两个 owner）：包、设置、task、偏好四项均取得原生结构化证据，未发现隔离缺陷，见[R16 跨 owner 隔离原生验收](#r16-跨-owner-隔离原生验收2026-09-28)；按包选择偏好与 global_index 可读性已由同日补测覆盖，均通过（见[补测](#r16-补测按包选择偏好与-global_index-可读性2026-09-28)） |
 
 | G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证 |
 
@@ -152,9 +152,27 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 - **随附发现（都不是隔离缺陷）**：① A 用自然语言要求改决策设置时，`user_config decision_patch` 三次都是
   `TOOL_INVALID_ARGUMENTS`，没有改成（模型给参数的方式与工具不符）；② B 请求读取管理员设置时没有发起任何工具调用，
   这一路没有拒绝码可记；③ 显式查询别的 owner 的 run_id 时，`list_agents` 返回空结果，没有范围告警或拒绝码。
-- **未覆盖**：按包选择偏好（capability_selection）本轮两边都未形成记录；实际调用的 profile 未单独核对；主机层
-  `global_index`（active_runs、active_tasks）会记录两个 owner 的运行，本轮没有探测 owner 工具能否读到它。
+- **未覆盖**：实际调用的 profile 未单独核对。本轮留下的按包选择偏好、global_index 可读性两项已由下面的补测覆盖。
 - **证据**：`~/.my-agent/decision-evidence/r16-isolation-9f88/`（结构化快照、差异、发送记录与测试脚本；不含对话正文和目录内容）。
+
+#### R16 补测：按包选择偏好与 global_index 可读性（2026-09-28）
+
+- **环境**：与上面相同（`9f88e4905` 同一 wheel `1ba17efe…`、新 Python 3.11.15 venv、私有 8436、A = local/main、
+  B = local/user/audit-tester，`env -i` 启动，模型目录副本 600、不打印、结束即删，决策模型关闭）。另在两个 owner 的能力配置
+  里打开默认关闭的一次选包（`enable_capability_package_selection`），否则任务不会进入选包。
+- **做法**：每一步是一条原始需求或一个真实 TUI 操作。选包只看各 owner 会话存储里的 `host_capability_selection.v1` 标记
+  （状态、结果、选中数、摘要）及其文件哈希。global_index 探测把 A 的 run/request/task/thread id 当标记，只统计 B 每次
+  工具输出里的命中数，同时记录 `ok`/`error_code`，不读输出正文。
+
+| 项 | 结论 | 结构化证据 |
+| --- | --- | --- |
+| 按包选择偏好 | 通过 | A 装好 `security-evidence` 后发了两条原始需求，每条都新建任务并完成一次选包：一条 outcome=empty（选中 0），一条 outcome=selected（选中 1）。两条标记都只在 A 的会话存储里。B 发同一需求，B 的会话里没有任何选择标记，B 请求前后 A 两条标记的文件哈希不变。“B 形成的偏好影响 A”在结构上不会发生：包只来自本 owner 的安装账本，插件管理只对管理员开放，B 自己的 `/plugins install` 没有产生安装账本、插件文件或 host_command 事件，B 的快照里没有包 |
+| global_index 可读性 | 通过 | 主机层 `active_runs`、`active_tasks` 同时记录两个 owner（最终各 4 行，其中 A 2 行，`active_tasks` 还带 title）。B 逐个探测：`list_agents` ok、命中 0；`audit_records` 取 scope=owner 时 ok、命中 0，取 scope=all_owners 时 `AUDIT_ACCESS_DENIED`；`schedule list` ok、命中 0；`read_file` 直接读两个索引文件，两次都是 `PATH_OWNER_SCOPE_BLOCKED`；`inspect_agent_tree`、`inspect_failure`、`gateway_status` 不在 B 的工具面上（`tool_search` 返回 0 个工具，下一轮也没有加载任何工具） |
+
+- **随附**：B 的 `/plugins install` 被拒时，面板和 Gateway 日志都没有带码的拒绝（没有 `PLUGIN_*`）；`schedule history`
+  因模型参数不符报 `TOOL_INVALID_ARGUMENTS`（命中 0）。两者都不是隔离缺陷。
+- **证据**：`~/.my-agent/decision-evidence/r16-followup-9f88/`（选择标记、金丝雀计数、逐次扫描结果、快照差异与测试脚本；
+  不含对话正文、工具输出正文和目录内容）。
 
 ### Compact 的机制与规模分别记账
 
