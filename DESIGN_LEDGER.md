@@ -11,11 +11,13 @@
   - 不放宽校验：多带字段仍整笔拒绝、不写入，也不替模型删字段。
   - 设置服务改抛结构化的 `DecisionSettingsUnknownFields`（仍是 `ModelProfileError`，原捕获点不变），带未知字段和本操作接受的字段。
   - 工具回执与 `handler_details` 写明 `unknown_fields`、`allowed_fields`；工具说明写清 patch/reset 各接受哪些字段。
-- **待确认**：生产那三次具体带了哪个字段，仓库外的工具账才能确认；本修复对任何多带字段都给出同样的结构化回执。
+- **已确认**：生产那三次都多带了 `reason`（来源：调用方记录，三次同因）。三次的顶层键都是 action、changes、expected_revision、reason、scope。
+  这来自 my-agent-1 作为调用方的调用记录，不是读工具账得到的：audit 只记工具名和状态，不记参数。本修复对任何多带字段都给出同样的结构化回执。
 - **候选（未排期，集成者 2026-09-28 定本轮不做）**：按动作拆分 `user_config` 的 schema，或给决策动作单开一个工具。
   - 不做的原因：会改模型可见的工具面，部分 provider 对 `oneOf` 的支持也不稳定，当前风险大于收益。
-  - 触发条件：回执指名之后，模型仍经常在第一次调用就传错字段时再评估。判断依据用结构化工具账：统计 `decision_patch`
-    首次调用因 `unknown_fields` 被拒的比例，不按对话文本判断。
+  - 触发条件：回执指名之后，模型仍经常在第一次调用就传错字段时再评估。判断依据须是结构化事实（例如工具结果
+    `handler_details.decision_request_fields`），统计 `decision_patch` 首次调用因 `unknown_fields` 被拒的比例，不按对话文本判断。
+    audit 目前只记工具名和状态、不记参数，真要统计时先确认有可用的结构化记录。
 - 细节见 `TESTS.md` 同日条目。
 
 ## Jev 后台点位改用独立期限（2026-09-28，分支 `claude/be-jev-bg-deadline`，基于 `60f6f485a`，本地验证通过，待集成）
