@@ -888,7 +888,35 @@ class BackgroundMainAgentRuntime:
             resolved_goal_context,
             (proactive_delivery_available, transcript_delivery_available),
         )
-        return collect_background_execution_result(self.agent, result, display_snapshot)
+        execution = collect_background_execution_result(self.agent, result, display_snapshot)
+        # LLM: 会话间派活：本次回合若属于某条会话任务，就在这里推进到终态并把结构化结果回报给发送方。
+        #   只读结构化字段（request.task_id + 任务记录里的绑定），不解析正文；回报失败不影响本回合交付。
+        # 函数用途: 把目标回合的正常结束变成发送方可见的任务回报。
+        _close_out_session_task_turn(self.agent, request, execution)
+        return execution
+
+
+# LLM: 命中条件全部结构化：任务绑定的 conversation_request_id 与本次 request 的 task_id 一致。
+#   不在派活回合、任务已终态、或读账失败都安静返回（不改任何状态、不影响交付）。
+# 函数用途: 按本次后台请求收口它对应的会话任务。
+def _close_out_session_task_turn(
+    agent: object,
+    request: BackgroundRunRequest,
+    execution: BackgroundExecutionResult,
+) -> None:
+    from .session_task_report import close_out_turn
+
+    turn_id = str(getattr(request, "task_id", "") or "").strip()
+    if not turn_id:
+        return
+    try:
+        close_out_turn(
+            agent,
+            turn_id,
+            ok=not bool(getattr(execution, "error", None)),
+        )
+    except Exception:  # noqa: BLE001 - 回报属于附加交付，不能让回合本身失败
+        return
 
 
 # LLM: 后台按 canonical thread 的模型引用冻结一次配置，再交接 typed turn-end；不重读 owner 选择或改生命周期。
