@@ -8,7 +8,9 @@ B 正常路径按精确 conversation_request_id 读取 owner/task 两处索引�
 
 root 从固定 B 提取未经修改的运行入口和三个 reader 函数 AST，以合成索引迭代器作离线最小复核：正常返回两处两条记录；只让 owner 读取抛 OSError 后，返回零条且未访问 task 根。没有制造真实磁盘/权限故障、运行模型或重复派工；因此确认的是携带事实丢失，不是实测重复副作用。InterruptedError 被 OSError 捕获是源码边界，未证明真实停止失效。私有探针摘要 `ee3b57206720ecc777fbd07906a167c1f73c9db50bf4026553b3171bce327034`。
 
-C 只读审阅未发现确定问题：三种子代理 profile 从唯一 DIRECT_CHILD_CONTROL_TOOLS 补缺，显式配置优先，owner/task 限制仍只收紧；新增八项测试仅静态阅读，未由本线执行。私有审阅摘要 `aba2c184592bfea7cf5992f036da4312571549fa40af0dc2c724e3e5dbd227b0`，不据此判整个唤醒组合通过。
+C 首轮只读审阅未发现确定问题：三种子代理 profile 从唯一 DIRECT_CHILD_CONTROL_TOOLS 补缺，显式配置优先，owner/task 限制仍只收紧；当时新增八项测试仅静态阅读。私有审阅摘要 `aba2c184592bfea7cf5992f036da4312571549fa40af0dc2c724e3e5dbd227b0`，不据此判整个唤醒组合通过。
+
+后续独立组件验证：复用已核干净且无进程使用的审阅 worktree，保留原分支，固定 detach 到 `72f23d0d9460dc5895340832a78661e0e04fbeac`。实际 runtime import 来自该 checkout，两个原作者文件 `test_background_active_turn_carry.py` / `test_background_child_control_tools.py` 共 13 项通过，退出 0，前后 checkout 干净；测试 home 使用临时目录。私有报告摘要 `b2f0d9bddc86b1fcc3cbdef02830e36a11c70f1eeeda7bce90d22258ad5c70d5`。这组测试不含 A 或上述读账异常修复，也没有模型、TUI、Gateway 切换或部署；异常发现不因正常路径测试通过而关闭。
 
 C23 复验计划已准备，原三助手普通需求与 C19 逐字节一致，提交次数为 0，测试工作区尚未创建。新增观察按原请求的工具/委派事实核正常完成唤醒后无重复派工；未命中 TOOL_ONE_SHOT 则拒绝分支仍未覆盖，不人为制造 BLOCKED。计划摘要 `6f55ec50509f08ee824756c2243d906a7013274abd6da30707f4a718f289b6bf`，最终仍 0/27。
 

@@ -2,7 +2,14 @@
 
 ## 后台唤醒 B 读账异常离线复核（2026-09-28）
 
-固定 `43cd72e3d` 的原运行入口和三个 reader 函数 AST 未改写，以合成 iterator 复核两种情况：正常返回 owner/task 两条 carry；只有 owner 抛 OSError 时，外层返回空列表且 task 根未被访问。确认读账事实丢失，不声称真实重复派工或停止失效；没有制造真实故障、发模型或改产品。C `72f23d0d9` 的工具目录及八项测试只作静态审阅，未执行。A 未固定，C23 已准备但零提交，详见[边界与原作者交接](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#后台唤醒前置补片审阅2026-09-28整组未交付)。建议下一步由 Claude 补读失败边界并固定整组，root 再做组件与原生委派；只读审阅可并行。
+固定 `43cd72e3d` 的原运行入口和三个 reader 函数 AST 未改写，以合成 iterator 复核两种情况：正常返回 owner/task 两条 carry；只有 owner 抛 OSError 时，外层返回空列表且 task 根未被访问。确认读账事实丢失，不声称真实重复派工或停止失效；没有制造真实故障、发模型或改产品。
+
+C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 checkout，实际调用 `pytest.main`，参数包含下列两文件、`-q --tb=short -p no:cacheprovider` 及私有临时 `--basetemp`：
+
+- `agent_py_agent/tests/test_background_active_turn_carry.py`：5 项通过。
+- `agent_py_agent/tests/test_background_child_control_tools.py`：8 项通过。
+
+合计 13 项、退出 0，runtime import 路径已核，前后 checkout 干净；仅覆盖原作者已有组件用例，不含 A 和读账异常修复，不代表原生委派或整组通过。私有报告摘要 `b2f0d9bddc86b1fcc3cbdef02830e36a11c70f1eeeda7bce90d22258ad5c70d5`。A 未固定，C23 仍零提交，详见[边界与原作者交接](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#后台唤醒前置补片审阅2026-09-28整组未交付)。建议下一步由 Claude 补读失败边界并固定整组，root 再做必要组合与原生委派；只读审阅可并行。
 
 ## C22连续压缩后的原资源执行复验（2026-09-28）
 
