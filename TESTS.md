@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## 凭据类字符串配置补类型校验（2026-09-28，分支 `claude/be-credential-types`，基于 `8ef68c5fd`）
+
+- **来源**：T3 真实 TUI 验收。凭据键写错类型时没有任何配置告警：`embedding_api_key` 写成列表会原样进入运行配置，
+  `feishu_app_secret` 写成列表会被静默变成空串。`/settings` 的“配置告警 N 条”只列出了已删的键。
+- **改动**：`settings/services/_normalize.py` 新增 `CredentialFieldsService`，排在归一服务最前面。
+  - 名单：`credential_string_fields(AgentConfig)` 从配置类声明推出（键名是凭据且声明为 `str`），不另写。
+  - 口径：
+    - 字符串原样保留；
+    - 整数沿用“纯数字没加引号也按字符串还原”；
+    - `None` 与留空读成的 `[]` 取默认值、不告警；
+    - 其它类型告警并回落默认值，告警经 `describe_raw_value` 输出，凭据一律写“已隐藏”。
+  - 之后的飞书/QQ 字符串还原只会看到字符串，不再静默吞掉错误类型。
+- **测试**（`test_config_warning_no_credential_echo.py`）：
+  - 名单锁：已知的 7 个凭据字段都在，且都是凭据键。
+  - 每个凭据字段各测四种错误类型（列表、字典、布尔、浮点）：只出一条告警，文字固定为“已隐藏”，原值不出现，运行值等于默认值。
+  - 整数按字符串还原；None 和 [] 取默认值且不告警；字符串原样保留。
+  - 端到端：真实 `load_config` 后运行值回落默认值，`/settings` 总览显示“配置告警 2 条”，两个键都写“已隐藏”，原值不出现。
+  - 旧用例 `test_settings_overview_shows_a_credential_warning_as_hidden`：原来只断言“不泄露”，现在补上它说明里写的“要留下痕迹”。输入改为带引号的列表，因为项目自带的 YAML 读取只把 `["..."]` 解析成列表，`{nested: ...}` 会读成合法字符串。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_config_warning_no_credential_echo.py -q`。
+- **变异验证**：9 个全部被抓出。每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，跑完逐字节恢复并核对哈希。
+  - 服务没注册；非字符串直接放行；告警回显原值；类型不符仍保留原值；
+  - 整数也按类型不符处理；留空也告警；名单推导为空；
+  - 服务排在飞书/QQ 字符串还原之后（错误类型会被先静默变成空串）；布尔被当成整数还原。
+
 ## Compact 候选接受门按预检的校准口径计量（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`）
 
 - **来源**：集成者对压缩异常②的决定（候选投影与预检同一校准口径；失败路径不用原始值覆盖线程快照；started 事件带触发来源）
@@ -27,6 +51,7 @@
   `test_active_turn_compact_projection.py`、`test_compact_capacity_host_chain.py`、`test_runtime_context_pressure.py`、`test_compact_progress.py`、
   三宿主恢复与原生 IR 压缩用例、`test_memory_runtime_compact_auto_continuation.py`、`test_architecture_guardrails.py`；
   ruff、doc sync、strict code-size（对 main 的发现身份不新增）、`git diff --check`、clean package。
+
 
 ## Compact 容量计量改走宿主“只计量、不提交”入口（2026-09-28，分支 `claude/be-compact-capacity`，基于 `f5036c15a`）
 

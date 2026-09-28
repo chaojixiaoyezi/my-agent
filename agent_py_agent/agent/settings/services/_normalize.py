@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import math
 import os
+from dataclasses import fields
+from functools import cache
 
 from ...backends.reasoning_control import REASONING_CONTROLS, REASONING_LEVELS
 from ...backends.sampling import validate_top_p
@@ -109,6 +111,48 @@ def _string_config_value(value: object) -> str:
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
     return ""
+
+
+# LLM: 名单只从配置类声明推出：键名是凭据（is_credential_key）且声明为 str 的字段；新增凭据字段自动纳入，
+#   别处不得复制这份名单。结果只依赖类定义，按类缓存；只读，不读配置值。
+# 函数用途: 列出配置类里所有声明为字符串的凭据字段，供统一的类型校验使用。
+@cache
+def credential_string_fields(config_cls: type) -> tuple[str, ...]:
+    return tuple(
+        item.name for item in fields(config_cls)
+        if is_credential_key(item.name) and item.type in ("str", str)
+    )
+
+
+# LLM: 返回（归一后的值, 告警或 None）。字符串原样；整数沿用“纯数字没加引号也按字符串还原”的旧口径（bool 除外）；
+#   None 与 YAML 留空读成的 [] 按“没填”取默认值、不告警；其它类型告警并回落默认值。告警只经 describe_raw_value
+#   描述原值，凭据键一律写“已隐藏”，不回显。纯函数，不写日志。
+# 函数用途: 按统一口径把一个凭据字段的原始配置值转成字符串，类型不符时给出不泄露原值的告警。
+def _credential_string_value(key: str, raw: object, default: object) -> tuple[object, str | None]:
+    if isinstance(raw, str):
+        return raw, None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return str(raw), None
+    if raw is None or raw == []:
+        return default, None
+    return default, f"{key}: expected a string, got {describe_raw_value(key, raw)}; using default"
+
+
+# LLM: 必须排在归一服务最前面：之后的服务（例如飞书/QQ 字段的字符串还原）只会看到字符串，不会再把错误类型静默改成
+#   空串，也不会让列表等原样进入运行配置。只处理用户配置里真的写了的键；缺省键保持 dataclass 默认值。
+# 类用途: 统一校验凭据类字符串配置的类型，类型写错时告警（不回显原值）并回落默认值。
+class CredentialFieldsService:
+    # LLM: 输入是正在归一的配置字典与默认配置对象；返回新字典与告警列表，不修改入参。
+    # 函数用途: 对所有凭据字符串字段逐个做类型校验并收集告警。
+    @staticmethod
+    def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
+        out = dict(data)
+        warnings: list[str] = []
+        for key in credential_string_fields(type(defaults)):
+            if key in out:
+                out[key], warn = _credential_string_value(key, out[key], getattr(defaults, key))
+                _append_warning(warnings, warn)
+        return out, warnings
 
 
 def _normalize_string_list(value: object) -> list[str]:
@@ -644,6 +688,7 @@ class TimeoutFieldsService:
 # ---------------------------------------------------------------------------
 
 _NORMALIZE_SERVICES = (
+    CredentialFieldsService,
     ModelFieldsService,
     GatewayFieldsService,
     DaemonFieldsService,

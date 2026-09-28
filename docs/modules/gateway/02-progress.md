@@ -350,3 +350,12 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
 - 2026-09-26：owner 唤醒发现 `owner_wake_discovery._has_pending_memory_curator_work` 的失败退避改为与 Curator 自身同源的 `curator_failure_retry_seconds`。普通失败仍是 300 秒；`CURATOR_MODEL_NOT_CONFIGURED`（owner 没选模型）等一小时，发现层不再按维护周期反复种回登记表、重建 owner 实例（真机：两个未选模型的 owner 每约 7 分钟失败一次）。见 [memory 进度](../memory/02-progress.md)。
 - 2026-09-27：`/settings` 与 `/settings all` 的总览新增“配置告警 N 条”：把 `AgentConfig.config_warnings` 与 `CapabilityConfig.config_warnings` 合并列出，每条注明来源（agent 主配置 / capability 配置），N 为 0 时不显示这一行。此前两个来源都没有展示点，参数减量忽略掉的已删/未知键用户看不到。取告警只读字段，不解析消息文字；memory doctor 的 `memory_config_warnings` 出口未动。
 - 2026-09-27 后续两项同批：①`settings/services/_normalize.py` 新增 `describe_raw_value(key, value)`，告警回显配置值统一走它——凭据键不回显（写“已隐藏”），其他键截到 80 字符并标“已截断”，覆盖原 6 处 `got {value!r}`；②`_config_warning_lines` 改成先压平两个来源再过滤空项（原实现是 for→for→if 三层嵌套，违反“新代码不超过两层”的项目约定，code-size 报 `nesting:...:_config_warning_lines`）。
+- 2026-09-28：凭据类字符串配置补类型校验（T3 真实 TUI 验收发现写错类型时没有任何告警：`embedding_api_key` 写成列表会原样进入运行配置，`feishu_app_secret` 写成列表会被静默变成空串）。
+  - `settings/services/_normalize.py` 新增 `CredentialFieldsService`，排在归一服务最前面。
+  - 字段名单由 `credential_string_fields(AgentConfig)` 从配置类声明推出：键名是凭据且声明为 `str` 的字段，新增凭据字段自动纳入。
+  - 统一口径：
+    - 字符串原样保留；
+    - 整数沿用“纯数字没加引号也按字符串还原”；
+    - `None` 与留空读成的 `[]` 按没填取默认值，不告警；
+    - 其它类型告警 `<键>: expected a string, got 已隐藏（凭据不显示原值）; using default`，并回落默认值。
+  - `/settings` 总览的“配置告警 N 条”因此会列出这些键，原值不出现。

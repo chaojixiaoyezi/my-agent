@@ -133,11 +133,16 @@ def test_settings_overview_never_shows_a_credential_value(monkeypatch, tmp_path)
 
 
 def test_settings_overview_shows_a_credential_warning_as_hidden(monkeypatch, tmp_path) -> None:
-    """凭据键出错时要留下痕迹（写"已隐藏"），不能让用户以为配置没错。"""
+    """凭据键出错时要留下痕迹（写"已隐藏"），不能让用户以为配置没错。
+
+    输入用带引号的列表：项目自带的 YAML 读取只把 `["..."]` 解析成列表，`{nested: ...}` 和不带引号的 `[...]`
+    都会整行读成字符串，本身就是合法字符串值。
+    """
     secret = "sk-live-DO-NOT-LEAK-abcdef1234567890"
-    view = _settings_view(monkeypatch, tmp_path, f"api_key: {{nested: {secret}}}\n")
+    view = _settings_view(monkeypatch, tmp_path, f'api_key: ["{secret}"]\n')
 
     assert secret not in view
+    assert "api_key: expected a string, got 已隐藏（凭据不显示原值）; using default" in view
 
 
 def test_settings_overview_still_shows_ordinary_warnings(monkeypatch, tmp_path) -> None:
@@ -147,3 +152,79 @@ def test_settings_overview_still_shows_ordinary_warnings(monkeypatch, tmp_path) 
     assert "配置告警" in view
     assert "runner_timeout_by_role" in view
     assert "not-a-dict" in view
+
+
+# ===== 凭据字符串字段的类型校验（2026-09-28，T3 真实 TUI 验收发现：凭据键写错类型时没有任何告警） =====
+
+from agent_py_agent.agent.settings.config import AgentConfig, load_config
+from agent_py_agent.agent.settings.services._normalize import credential_string_fields
+
+_CREDENTIAL_FIELDS = credential_string_fields(AgentConfig)
+
+
+def _warnings_about(key: str, warnings: list[str]) -> list[str]:
+    return [warning for warning in warnings if warning.startswith(f"{key}:")]
+
+
+def test_credential_string_fields_come_from_the_config_declaration() -> None:
+    """名单从 AgentConfig 声明推出；锁住已知凭据字段都在里面，防止推导失效后变成空名单。"""
+    assert {
+        "api_key", "embedding_api_key", "gateway_auth_token", "feishu_app_secret",
+        "feishu_verification_token", "feishu_encrypt_key", "qq_app_secret",
+    } <= set(_CREDENTIAL_FIELDS)
+    assert all(is_credential_key(key) for key in _CREDENTIAL_FIELDS)
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_FIELDS)
+@pytest.mark.parametrize("raw", [[_SECRET], {"nested": _SECRET}, True, 1.5], ids=["list", "dict", "bool", "float"])
+def test_wrong_type_credential_warns_without_echo_and_falls_back(key: str, raw: object) -> None:
+    """类型不符：告警一条、写“已隐藏”、不回显原值，运行值回落到默认值（不再原样进入或静默变空）。"""
+    normalized, warnings = normalize_agent_config({key: raw})
+
+    mine = _warnings_about(key, warnings)
+    assert len(mine) == 1, warnings
+    assert mine[0] == f"{key}: expected a string, got 已隐藏（凭据不显示原值）; using default"
+    assert _SECRET not in "\n".join(warnings)
+    assert normalized[key] == getattr(AgentConfig(), key)
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_FIELDS)
+def test_numeric_credential_keeps_the_legacy_string_restore(key: str) -> None:
+    """纯数字没加引号被读成整数时，沿用原来的“按字符串还原”，不算类型错误。"""
+    normalized, warnings = normalize_agent_config({key: 123456})
+
+    assert normalized[key] == "123456"
+    assert not _warnings_about(key, warnings)
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_FIELDS)
+@pytest.mark.parametrize("raw", [None, []], ids=["none", "empty-list"])
+def test_blank_credential_means_default_without_warning(key: str, raw: object) -> None:
+    """留空（YAML 里 `key:` 读成 []）按“没填”取默认值，不告警。"""
+    normalized, warnings = normalize_agent_config({key: raw})
+
+    assert normalized[key] == getattr(AgentConfig(), key)
+    assert not _warnings_about(key, warnings)
+
+
+def test_string_credential_is_kept_verbatim() -> None:
+    normalized, warnings = normalize_agent_config({"embedding_api_key": "sk-plain-value"})
+
+    assert normalized["embedding_api_key"] == "sk-plain-value"
+    assert not _warnings_about("embedding_api_key", warnings)
+
+
+def test_loaded_config_falls_back_and_settings_reports_each_wrong_type(monkeypatch, tmp_path) -> None:
+    """端到端：真实 load_config 后运行值回落默认值；/settings 总览按条数报告，原值不出现。"""
+    secret = "sk-live-DO-NOT-LEAK-abcdef1234567890"
+    raw_yaml = f'embedding_api_key: ["{secret}"]\nfeishu_app_secret: ["{secret}"]\n'
+    config_path = tmp_path / "loaded.yaml"
+    config_path.write_text(raw_yaml, encoding="utf-8")
+    loaded = load_config(config_path)
+    assert loaded.embedding_api_key == "" and loaded.feishu_app_secret == ""
+
+    view = _settings_view(monkeypatch, tmp_path, raw_yaml)
+    assert secret not in view
+    assert "配置告警 2 条" in view
+    assert "embedding_api_key: expected a string, got 已隐藏" in view
+    assert "feishu_app_secret: expected a string, got 已隐藏" in view
