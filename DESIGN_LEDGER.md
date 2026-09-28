@@ -59,6 +59,20 @@
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。
 
+## 能力配置的实际生效位置与随包模板一致性（2026-09-28，分支 `claude/9a-lark-and-capcfg`，基于 `3d76ac687`，本地验证通过，待集成）
+
+- **生效位置**：
+  - Gateway 和本地会话按 agent 根目录找配置：先找 `agent_py_agent/config/capability_config.yaml`，再找 `config/capability_config.yaml`。
+  - agent 根目录是显式工作区；没有指定时就是所配 owner 的 home，local/main 即 `<MY_AGENT_HOME>/owners/local/main/config/capability_config.yaml`。
+  - Gateway 读到的这一份被它服务的所有 owner 共用；找不到文件时按 `CapabilityConfig` 默认值运行。
+  - daemon、gateway scenario 和 subagents 系列 CLI 子命令默认直接读随包文件，可用 `--capability-config` 覆盖。
+  - G07 验收时，开关文件放在 Gateway 配置目录下没有生效，原因就在这里。
+- **随包模板**：
+  - `agent_py_agent/config/capability_config.yaml` 是默认模板。测试锁定：模板里每个键都被 `CapabilityConfig` 认识，值等于默认值，加载无告警。
+  - 本次补上 5 个在用、但模板里缺失的键：2 个下发上限，3 个子代理巡检阈值。
+  - 移除不生效的 `enable_capability_routing`：能力申请链路本来就不受它控制。
+- **不变**：读取逻辑和路径解析都不变；Gateway 找不到文件时的行为也不变。
+
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。

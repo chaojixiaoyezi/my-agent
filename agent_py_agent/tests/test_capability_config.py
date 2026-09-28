@@ -4,6 +4,7 @@
 测试能力配置模块：能力配置加载、默认值、权限控制。
 """
 import tempfile
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,9 @@ from agent_py_agent.agent.capability.config import (
     CapabilityConfig,
     load_capability_config,
 )
+from agent_py_agent.agent.settings.config import load_simple_yaml
+
+SHIPPED_TEMPLATE = Path(__file__).parents[1] / "config" / "capability_config.yaml"
 
 
 class TestCapabilityConfigDefaults:
@@ -205,3 +209,27 @@ class TestCapabilityConfigEdgeCases:
         assert config.capability_candidate_limit == 10
         assert config.capability_bundle_max_tokens == 5000
         assert config.capability_alternative_max_attempts == 5
+
+
+# 函数用途: 列出 CapabilityConfig 里真正的配置键；config_warnings 是加载诊断，不是配置项。
+def _config_field_names() -> set[str]:
+    return {item.name for item in fields(CapabilityConfig)} - {"config_warnings"}
+
+
+class TestShippedCapabilityTemplate:
+    """随包 capability_config.yaml 是默认模板。
+
+    Gateway 找不到 owner 下的配置文件时按 dataclass 默认值运行，daemon/subagents 等 CLI 子命令默认直接读模板，
+    两边必须一致，否则同一台机器上不同入口的行为会互相打架。
+    """
+
+    def test_every_template_key_is_a_field_with_the_dataclass_default(self):
+        """模板里的每个键都要被 CapabilityConfig 认识、加载无告警，且值等于 dataclass 默认值。"""
+        raw = load_simple_yaml(SHIPPED_TEMPLATE)
+        loaded = load_capability_config(SHIPPED_TEMPLATE)
+        defaults = CapabilityConfig()
+        assert loaded.config_warnings == []
+        assert set(raw) <= _config_field_names()
+        mismatched = {key: (getattr(loaded, key), getattr(defaults, key))
+                      for key in raw if getattr(loaded, key) != getattr(defaults, key)}
+        assert mismatched == {}

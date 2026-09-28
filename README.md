@@ -245,7 +245,10 @@ my-agent skills proposals list            # 查看子代理经验 Skill 提案�
 
 - `agent_py_agent/config/agent_config.yaml`：主配置。模型连接、owner home 与记忆路径、Gateway 与 runner 参数、工具开关、
   Compact 与外置阈值、后台进程监听范围、决策模型开关、`enable_self_learning`（默认关）、`enable_model_profile_tool`（默认开）等，每项都有中文注释。
-- `agent_py_agent/config/capability_config.yaml`：子代理能力路由、上抛层数、grant 上限、心跳与超时；数字限制项 `0` 表示不限制。
+- `agent_py_agent/config/capability_config.yaml`：能力配置的随包默认模板，管能力包推荐与选择、能力申请下发上限、
+  子代理巡检阈值与活动提醒；数字限制项 `0` 表示不限制。实际生效的是 agent 根目录下的 `config/capability_config.yaml`：
+  没有指定工作区时就是 owner home，Gateway 读到的这一份被所有 owner 共用；找不到文件时用与模板一致的默认值。
+  daemon、subagents 等 CLI 子命令默认直接读模板，可用 `--capability-config` 覆盖。
 - 用户级配置：`~/.my-agent/config/`，模型目录在 `config/model-profiles/`（0700 目录、0600 文件），权限模式在各用户的 `tool_policy.json`。
 
 ## 安全边界
