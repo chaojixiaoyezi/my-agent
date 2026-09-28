@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## 两条负载抖动用例改稳：桌面插件超时、慢流存活续期（2026-09-28，分支 `claude/38-stabilize-load-flakes`，基于 `8e82edcc0`，只改测试）
+
+- **来源**：集成者报告 12 片全仓 5 遍里 1 遍出现 `test_desktop_lite_package.py::test_timeout_kills_program`（读不到
+  `fake-record.json`）和 `test_slow_model_liveness.py::test_slow_stream_renews_wait_beyond_total_deadline`（慢流被判死）。
+- **满载复现**（12 个 CPU 忙循环 + 6 个 pytest 进程并行各循环跑同一条）：桌面 7/36 失败，慢流 4/90 失败（3 次“被判死”，
+  1 次终态文件读到半截被投影成 load_error 回执、`response` 为空串）。
+- **桌面超时用例被打破的假设**：假程序原来是 Python 脚本，满载下解释器启动慢过 1 秒超时，被杀时还没写下 pid 记录；换成
+  sh 先写记录再 `exec sleep`、超时放到 2 秒后仍 5/36（都发生在 6 个进程同时构建 wheel 那一刻，假程序还没被调度就已超时）。
+  改法：杀掉并回收的直接证据改为“超时后插件服务进程名下没有任何子进程（含僵尸）”，按父 pid 用 `ps` 精确过滤，不依赖
+  假程序是否来得及跑起来；记录存在时再按记录的 pid 复核一次。不 kill 会剩下还在睡的假程序、kill 后不 wait 会剩僵尸，两种
+  都被抓到（负向验证）。
+- **慢流用例被打破的假设**：不活跃窗口 0.12 秒只比轮询采样间隔 0.1 秒多 20 毫秒，另一个线程每 60 毫秒写一条，满载下生产者
+  线程被饿几十毫秒、或轮询一次的文件 IO 超过 20 毫秒，就被判死。改法：流的推进由上一条 chunk 被消费触发（同一线程里写
+  下一条），每次采样只能读到一条，8 条至少 8 个采样周期（约 0.8 秒），远超 0.05 秒的初始 deadline；续期语义仍由“初始
+  deadline 远早于完成时间”证明——续期一失效，第二次采样就因过期返回空（负向验证）。不活跃窗口改为 2 秒只给采样抖动留
+  余量，过期语义由 `test_no_activity_expires_after_inactivity_window` 单独锁定。终态文件 helper `_terminal` 改为先写临时
+  文件再 `replace`，与 Gateway 的原子写法一致，本文件其它用另一线程写终态的用例也不会再读到半截。
+- **修复后满载**：慢流 0/90（改前 4/90）；桌面 0/36（改前 7/36，sh 版中间稿 5/36）。最终代码上慢流满载再跑 0/90；
+  12 片全仓（1204 个文件）1 遍 0 失败、315 秒；我起的进程全部退出。
+- **负向验证**（改坏产品语义，独立子进程、逐字节恢复核哈希，4/4 被抓出）：活动不续期；把 chunk 推进当成不活跃；超时报成
+  COMMAND_FAILED；kill 后不 wait（僵尸）。
+- **门禁**：两个文件 ruff、doc sync、strict code-size、`git diff --check`、clean package。
+
 ## 入站队列 PostgreSQL 真测按 pytest 进程隔离 schema（2026-09-28，分支 `claude/38-stabilize-ingress-tests`，基于 `72f23d0d9`，只改测试）
 
 - **来源**：集成者报告 main `72f23d0d9` 上 12 片并行时三条用例偶发失败、单独跑 3/3 通过：

@@ -126,8 +126,11 @@ def test_provider_http_failure_is_raised_immediately() -> None:
 # ② 客户端等待:只由机器可观测活动续期
 # --------------------------------------------------------------------------------------
 def _terminal(path: Path, request_id: str, response: str) -> None:
+    """按 Gateway 的写法原子落终态文件（先写临时文件再 replace）：直接 write_text 会让另一线程的轮询读到半截文件，
+    被投影成 load_error 回执（2026-09-28 满载复现里 4 次失败有 1 次是这样）。"""
     terminal_response = {"id": request_id, "ok": True, "response": response, "status": "done"}
-    path.write_text(
+    staged = path.with_name(path.name + ".tmp")
+    staged.write_text(
         json.dumps(
             {
                 "schema_version": "gateway_terminal_request.v1",
@@ -139,41 +142,53 @@ def _terminal(path: Path, request_id: str, response: str) -> None:
         ),
         encoding="utf-8",
     )
+    staged.replace(path)
 
 
 def test_slow_stream_renews_wait_beyond_total_deadline(tmp_path) -> None:
-    """慢持续流:总耗时远超初始 deadline,只要 chunk 在推进就必须继续等到终态。"""
+    """慢持续流:总耗时远超初始 deadline,只要 chunk 在推进就必须继续等到终态。
+
+    流的推进由上一条 chunk 被消费触发（同一线程里写下一条），每次采样只能看到一条新 chunk，8 条至少要 8 个采样周期
+    （约 0.8 秒），远超 0.05 秒的初始 deadline；续期一失效，第二次采样就会因过期返回空，断言照样抓到。
+    原来由另一个线程每 60 毫秒写一条、不活跃窗口只有 0.12 秒（仅比 0.1 秒采样间隔多 20 毫秒），12 片满载下生产者线程
+    被饿死几十毫秒就被误判死亡（2026-09-28 复现，90 次里 4 次）。窗口改为 2 秒只是给采样抖动留余量，
+    过期语义由 test_no_activity_expires_after_inactivity_window 单独锁定。
+    """
     chunk_path = tmp_path / "req.chunks.jsonl"
     terminal_path = tmp_path / "req.json"
     seen: list[str] = []
+    total = 8
 
-    def slow_stream() -> None:
-        for index in range(8):
-            with chunk_path.open("a", encoding="utf-8") as handle:
-                # 只要求"文件在推进且该行被消费":行形状用既有 legacy 投影认得的 text 字段。
-                handle.write(json.dumps({"text": f"段{index}"}) + "\n")
-            time.sleep(0.06)
-        _terminal(terminal_path, "req", "慢流完成")
+    def write_chunk(index: int) -> None:
+        with chunk_path.open("a", encoding="utf-8") as handle:
+            # 只要求"文件在推进且该行被消费":行形状用既有 legacy 投影认得的 text 字段。
+            handle.write(json.dumps({"text": f"段{index}"}) + "\n")
 
-    worker = threading.Thread(target=slow_stream)
-    worker.start()
+    def consume(chunk: object) -> bool:
+        seen.append(str(chunk))
+        if len(seen) < total:
+            write_chunk(len(seen))  # 下一条要等本次采样结束后才会被读到：一采样一条，流因此“慢”
+        else:
+            _terminal(terminal_path, "req", "慢流完成")
+        return True
+
+    write_chunk(0)
     response = poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
             terminal_path,
             time.time() + 0.05,  # 初始 deadline 远早于真实完成时间
-            lambda chunk: seen.append(str(chunk)) or True,
+            consume,
             [0],
             [0],
             activity_paths=(chunk_path,),
-            inactivity_timeout_seconds=0.12,
+            inactivity_timeout_seconds=2.0,
         )
     )
-    worker.join(timeout=5)
 
     assert response, "慢流不得因总时长被判死"
     assert response["response"] == "慢流完成"
-    assert seen, "推进期间的 chunk 必须仍然被消费"
+    assert len(seen) == total, "推进期间的 chunk 必须仍然被消费"
 
 
 def test_heartbeat_only_activity_keeps_client_waiting(tmp_path) -> None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from zipfile import ZipFile
@@ -55,9 +56,19 @@ def workspace(tmp_path):
 
 
 # 函数用途: 生成一个可执行的假系统程序；记录 pid/argv/stdin 后按 mode 正常退出、失败退出或长睡。
+#   sleep 模式只需要 pid：用 sh 先写记录再 exec 睡眠。原来也是 Python 脚本，12 片满载下解释器启动慢过超时，
+#   还没写记录就被杀，用例读不到记录文件（2026-09-28 复现）。
 def fake_program(tmp_path, mode: str = "ok"):
     record = tmp_path / "fake-record.json"
     script = tmp_path / f"fake-{mode}"
+    if mode == "sleep":
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '{{\"pid\": %d}}' \"$$\" > {shlex.quote(str(record))}\n"
+            "exec sleep 60\n"
+        )
+        script.chmod(0o755)
+        return script, record
     script.write_text(f"""#!{sys.executable}
 import json, os, sys, time
 data = sys.stdin.buffer.read().decode("utf-8")
@@ -80,6 +91,17 @@ def start(installed, settings=None):
                                    args=["-I", "-m", "desktop_lite"], env=env))
     client.start()
     return client
+
+
+# 函数用途: 列出某个进程名下仍存在的子进程（含僵尸）：(pid, 状态) 列表；用 ps 按父 pid 精确过滤，不做全局匹配。
+def child_processes(parent_pid: int) -> list[tuple[int, str]]:
+    listing = subprocess.run(["ps", "-axo", "pid=,ppid=,stat="], capture_output=True, text=True, check=True).stdout
+    children = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == str(parent_pid):
+            children.append((int(fields[0]), fields[2]))
+    return children
 
 
 # 函数用途: 带逐次读取上下文调用工具并解析 JSON 正文。
@@ -184,16 +206,25 @@ def test_missing_program_and_failure_are_reported(installed_desktop, workspace, 
 
 
 def test_timeout_kills_program(installed_desktop, workspace, tmp_path):
+    """超时必须杀掉并回收程序。
+
+    直接证据是插件进程名下不再有任何子进程（含僵尸）：kill 后不 wait 会留下僵尸，不 kill 会留下还在睡的假程序，两种都被
+    抓到；这条不依赖假程序是否来得及跑起来——12 片满载下它可能还没被调度就已超时（2026-09-28 复现，Python 版假程序 7/36、
+    sh 版 5/36 没写下记录）。记录存在时再按记录的 pid 复核一次。超时取 2 秒给满载下的启动留余量。
+    """
     script, record = fake_program(tmp_path, "sleep")
-    client = start(installed_desktop, {"clipboard_path": str(script), "command_timeout_seconds": 1})
+    client = start(installed_desktop, {"clipboard_path": str(script), "command_timeout_seconds": 2})
     try:
+        server_pid = client._transport.binding.process.pid  # 插件服务进程：超时后它名下不得有子进程
         error, result = invoke(client, workspace, "clipboard", text="hello")
+        assert error and result["code"] == "COMMAND_TIMEOUT" and result["timeout_seconds"] == 2
+        assert result["program"] == str(script)
+        assert child_processes(server_pid) == [], "超时后插件进程名下不得残留子进程或僵尸"
     finally:
         client.stop()
-    assert error and result["code"] == "COMMAND_TIMEOUT" and result["timeout_seconds"] == 1
-    assert result["program"] == str(script)
-    with pytest.raises(ProcessLookupError):
-        os.kill(json.loads(record.read_text())["pid"], 0)
+    if record.exists():
+        with pytest.raises(ProcessLookupError):
+            os.kill(json.loads(record.read_text())["pid"], 0)
 
 
 def test_invalid_settings_fail_startup(installed_desktop):
