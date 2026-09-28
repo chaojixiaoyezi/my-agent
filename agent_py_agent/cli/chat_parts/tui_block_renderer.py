@@ -1120,6 +1120,7 @@ def _render_subagent_activity_row(
         status,
         lifecycle_phase=lifecycle_phase,
     )
+    label = _with_replacement_marker(label, row)
     if lifecycle_phase in {
         "starting",
         "waiting_first_event",
@@ -1181,6 +1182,16 @@ def _render_subagent_activity_row(
         )
     fragments.extend(suffix)
     return (_truncate_formatted_line(tuple(fragments), context.width),)
+
+
+# LLM: 只读行里由 Gateway 摊平的 replaced_by_run_id（来源是 kernel 的 replaced_by 投影），不从状态或正文推断接替；
+#   标注跟在状态标签后，与状态一起预留宽度，不会被职责描述挤掉。
+# 函数用途: 被接替的子代理在状态后标出“已被 X 接替”，X 取接替者 run_id 的末段。
+def _with_replacement_marker(label: str, row: dict[str, object]) -> str:
+    successor = sanitize_terminal_text(str(row.get("replaced_by_run_id") or "").strip())
+    if not successor:
+        return label
+    return f"{label} · 已被 {successor.rsplit('-', 1)[-1]} 接替"
 
 
 # LLM: Status-to-style mapping is a pure display projection of the canonical

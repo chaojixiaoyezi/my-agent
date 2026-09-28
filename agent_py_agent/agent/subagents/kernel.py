@@ -299,13 +299,14 @@ def _task_to_kernel_run(
         recent_tool_trace=_recent_tool_trace(task) if include_refs else [],
         background_start=_background_start(task) if include_refs else {},
         resume_eligibility=user_stopped_resume_eligibility(task),
-        replaced_by=_replaced_by(task),
+        replaced_by=replaced_by_view(task),
     )
 
 
-# LLM: 只读 models.task_replacement_successor 这一组权威字段；没被接替时返回空字典，不猜测、不看正文。纯函数。
-# 函数用途: 生成节点上的“已被谁接替”关系，供 list_agents 和代理树标出 superseded/taken_over。
-def _replaced_by(task: SubAgentTask) -> dict[str, str]:
+# LLM: “已被谁接替”的唯一展示投影：只读 models.task_replacement_successor 这一组权威字段，没被接替时返回空字典，
+#   不猜测、不看正文。kernel 节点、list_agents 与 TUI 子代理名册都用它，改口径须同步三处测试。纯函数。
+# 函数用途: 生成“已被谁接替”关系（接替者 run_id 与处置 superseded/taken_over），供父级视图和界面标注。
+def replaced_by_view(task: object) -> dict[str, str]:
     successor, disposition = task_replacement_successor(task)
     return {"run_id": successor, "disposition": disposition} if successor else {}
 

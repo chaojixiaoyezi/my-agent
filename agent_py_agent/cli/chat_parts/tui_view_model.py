@@ -1547,6 +1547,9 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
         "updated_at",
         "heartbeat_at",
         "ended_at",
+        # 与 runtime 白名单同步：已被接替时的接替者 run_id 与处置。
+        "replaced_by_run_id",
+        "replaced_by_disposition",
     }
 )
 

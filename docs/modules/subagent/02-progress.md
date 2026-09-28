@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-09-28：TUI 子代理名册对被接替的子代理标出“已被 X 接替”（分支 `claude/ae-tui-superseded-marker` 第 2 个提交），数据只来自 kernel 的 `replaced_by_view`，不另外推断；CLI board 暂未标注。
+
 2026-09-28：`subagent_run_saved` 事件的 payload 在有值时带上 takeover_by／superseded_by（分支 `claude/ae-tui-superseded-marker` 第 1 个提交），不新增事件类型，时间线与审计投影能看到接替关系；权威仍是任务记录里的 takeover_records。
 
 2026-09-28：已结束子代理被显式接替时终态不再被静默还原（分支 `claude/ae-done-takeover-fix`，本地回归与变异通过，待集成）。G03 脚本模型端到端发现：接替 DONE 子代理时回执报 recorded、写了 TAKEOVER.md，权威状态却没变。现在已关闭来源只追加 `superseded_by` 与一条 TakeoverRecord、终态保持，未关闭来源照旧 TAKEN_OVER；落账入口与回执两道落盘核对，未落盘报 `not_persisted`；预检、接管 run 去重统一读 takeover_by／superseded_by，第二次接替被拒；代理树与 list_agents 节点带 `replaced_by`。结构见[04-structure](04-structure.md#接替关系的唯一落账入口2026-09-28)，测试见[测试记录](../../../TESTS.md)。

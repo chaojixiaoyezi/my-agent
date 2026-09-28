@@ -68,6 +68,27 @@
     - 修改后：38 passed，lark 相关报错行为 0。
   - 复现材料在 `~/.my-agent/decision-evidence/lark-expiring-cache-20260928/`。
 
+## TUI 子代理名册标出“已被 X 接替”（2026-09-28，分支 `claude/ae-tui-superseded-marker` 第 2 个提交）
+
+- **来源**：集成方要求对被接替的 DONE 子代理在 TUI 展示面标出“已被 X 接替”，数据取 kernel／视图里的 replaced_by，
+  不另外推断。
+- **实现路径**：
+  - `kernel.replaced_by_view` 是唯一投影；
+  - Gateway 名册行（`conversation/agent_activity._subagent_row`）把它摊平成 `replaced_by_run_id`／`replaced_by_disposition`，
+    因为 TUI 白名单只收标量；
+  - TUI 的 runtime 白名单（`tui_runtime._SUBAGENT_ACTIVITY_FIELDS`）与视图模型白名单（`tui_view_model._PUBLIC_SUBAGENT_FIELDS`）
+    放行这两个字段；
+  - 渲染器 `_render_subagent_activity_row` 在状态标签后加“已被 <接替者 run_id 末段> 接替”，标注与状态一起预留宽度。
+- **新增 `test_tui_superseded_marker.py`（4 项）**：
+  - Gateway 行对 DONE 与 BLOCKED 来源摊平出接替者与处置，接替者本身的行不带这两个字段；
+  - 真实接替后的两行经 `TuiRuntime.update_background_activity` 进入渲染，只有来源行出现“已完成 · 已被 X 接替”；
+  - 72 列窄屏下标注仍在。
+- **变异**：5 个变异都变红：Gateway 行不带字段、kernel 投影为空、runtime 白名单漏字段、视图模型白名单漏字段、
+  渲染器不标。
+- **未做**：CLI `subagents board` 仍只带 takeover_by，没有标 superseded。
+- **回归**：定向 143 个文件：引用 TUI 渲染器、运行时、视图模型、agent_activity、kernel、代理树与 list_agents 的测试，加上全仓扫描类测试和读文档的测试。结果 3069 passed、1 skipped、21 xfailed，443.9 秒；没有跑全仓 pytest。
+- **门禁**：ruff、doc_sync、strict code-size、`git diff --check`、check_clean_package 全部退出 0，CODE_SIZE_REPORT.md 在提交前已还原。
+
 ## 保存事件带上接替关系（2026-09-28，分支 `claude/ae-tui-superseded-marker` 第 1 个提交，基于 `3e58de8a0`）
 
 - **来源**：修复 `1d44c9f8f` 的脚本模型复核发现，追加式事件日志里看不到接替关系。集成方定的做法是不新增事件类型，

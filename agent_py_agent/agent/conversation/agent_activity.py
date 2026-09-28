@@ -14,6 +14,7 @@ from typing import Any
 
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
+from ..subagents.kernel import replaced_by_view
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from ..task_progress import (
     read_task_progress_report,
@@ -1258,7 +1259,18 @@ def _subagent_row(
         "updated_at": max(0.0, _safe_float(getattr(task, "updated_at", 0.0))),
         "heartbeat_at": max(0.0, _safe_float(getattr(task, "heartbeat_at", 0.0))),
         "ended_at": max(0.0, _safe_float(getattr(task, "ended_at", 0.0))),
+        **_replaced_by_fields(task),
     }
+
+
+# LLM: 名册行只摊平 kernel 的唯一投影 replaced_by_view（接替者 run_id 与处置）成两个标量，TUI 白名单只收标量；
+#   不从状态或正文推断接替。没被接替时不带这两个键。
+# 函数用途: 给子代理名册行补上“已被谁接替”的字段，供 TUI 面板标注。
+def _replaced_by_fields(task: object) -> dict[str, str]:
+    view = replaced_by_view(task)
+    if not view:
+        return {}
+    return {"replaced_by_run_id": view["run_id"], "replaced_by_disposition": view["disposition"]}
 
 
 # LLM: 子页和名册从同一 agent_thread_id 一次读取代次与数字；旧 run 属性不作为回退事实源。

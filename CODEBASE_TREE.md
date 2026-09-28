@@ -922,6 +922,7 @@ agent_py_agent/
 |   |-- test_shell_foreground_cleanup.py # 前台自然退出后代回收、出生身份与清理未知分账回归
 |   |-- test_tui_ansi_snapshot.py       # ANSI offset 重放、样式/背景、Unicode、resize 和坏账 fail-closed 回归
 |   |-- test_tui_agent_navigation.py    # 子代理选中/进入/返回、详情过程、只读终态与 footer 回归
+|   |-- test_tui_superseded_marker.py   # 子代理名册“已被 X 接替”：Gateway 行摊平 kernel replaced_by、两道白名单放行、窄屏仍保留标注
 |   |-- test_agent_goals.py            # 单代理单 Goal、主子隔离、版本冲突、停止和同执行轮持续工作回归
 |   |-- test_tui_resource_lifetime.py  # 缓存净化、异常退出、事件和冻结阅读预算回归
 |   |-- test_gateway_owner_retention.py # 空闲回收、配置、在途及新消息竞态回归
