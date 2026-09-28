@@ -282,6 +282,12 @@
   - 整数也按类型不符处理；留空也告警；名单推导为空；
   - 服务排在飞书/QQ 字符串还原之后（错误类型会被先静默变成空串）；布尔被当成整数还原。
 
+## 后台唤醒修订独立复核（2026-09-28）
+
+固定 A `c4972cbd0` 的 `test_lifecycle_wake_host_event.py` 独立运行 18 项通过，0 failures/errors/skipped，2.624 秒；实际 import 来自固定独立 checkout，前后源码干净，使用私有 home/basetemp、假模型及 `-q --tb=short -p no:cacheprovider`。新增合法 Goal 来源矩阵及后台组件链断言覆盖原来源问题；不与旧 224 项累加为新组合结果。
+
+B `9882db061` 的新 guard 经固定 AST 纯函数探针确认参数口径不一致：空白接替列表、item 显式空列表覆盖顶层接替，两例均未被拦截，但创建归一化后有效接替 ID 为空，接替预检也未读取任何来源；另三个正常对照保持。没有实际派工、模型调用或真实故障。详见[证据摘要与范围](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#后台唤醒修订复核2026-09-28组合待完成)。建议下一步原作者统一参数口径，整组固定及门禁后由 root 做 C23；只读复核可并行，最终仍 0/27。
+
 ## 后台唤醒 A 草稿组件与 Goal 来源投影（2026-09-28）
 
 固定 WIP `51361723d`（父 `72f23d0d9`）上运行原作者 A 测试、后台主代理 runtime 及 B/C 两文件，共 224 项通过、0 failure/error/skip；实际 runtime import 与测试文件均在固定独立 checkout，前后干净。调用 `pytest.main`，参数为上述四文件、`-q --tb=short -p no:cacheprovider`、私有 `--basetemp` 和 JUnit 文件。没有产品/测试代码修改或模型请求。
