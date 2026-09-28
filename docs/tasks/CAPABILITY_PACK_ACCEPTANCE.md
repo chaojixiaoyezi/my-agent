@@ -58,9 +58,13 @@ B 的两项确定业务失败为 B08 第二轮无依据更换原说话人并声�
 
 本轮只同步九份现有文档，没有产品／测试代码、目录结构或配置变更，因此不新增测试、不重复全仓，也不修改 CODEBASE_TREE。文档交付的 Ruff、doc sync、strict code-size、diff、clean-package 均退出 0，独立只读末审无确定阻断；门禁摘要 `57e4a9deec256874e79e22e05433abebb0b29e08ed55fb148576dc85aaf54fb4`。线上 CI 未作为验收来源。
 
-Claude 回报主线已至 `9f88e4905`，包含后续同值配置减量及前轮文档，Mac 为 `runtime-step14w-9be2b59f`，明确只部署 Mac；这不改变本系列执行版本。Linux 同版证据尚待提供，旧 step13w 双机记录不能补算当前版本。Goal 保持 active；“27 次执行结束”不等于完整验收或总目标完成。
+root 已只读核对 Mac 两版 `deployment.json`、`installed-verification.json` 并重算 wheel 文件摘要：矩阵同源码 `0c340fe29` 对应 `step14v-11b43707`／`11b43707368b80f42c0d8c1ea34730d7c086a99e34fa750abbaedca9109700fc`；后续 `9f88e4905` 对应 `step14w-9be2b59f`／`9be2b59f704f3c2a347063c55b2c25ab8e38fb0e8ed8d0b25a233f644e032136`。两版记录均为入口已切换、启动时 running 且请求队列空，安装记录均核过 1433 成员；本次未重新哈希生产目录或请求生产健康接口。Claude 另回报 step14w 切换约 27 分钟后仍 running、pending/processing 均 0，作为发布方观察单列。主线后续变更不改写本系列的固定执行版本。
 
-建议下一步：提交已封存的完整分项表，交 Claude 核对通用调用恢复缺口、最终文档集成与双机发布；不再围绕同一领域故事追加开发例。只读复核可并行，产品／主线发布由 Claude 独占，私有运行由 root 独占。
+Linux 状态已由 Claude 明确为**未部署（测试机下线）**：0c 和 9f 都没有同版 Linux 部署／健康证据。root 直接读取两版 `linux-lane/out-0..11.txt` 与退出码，每版合计 **23833 passed、60 skipped、32 xfailed、5 xpassed、0 failed/errors**，12 分片退出码均 0。发布方先前的 22056 passed／53 skipped 少计 1777／7，差值与 shard-1 完全一致，以原日志合计为准。容器测试按发布方说明使用源码 editable 安装；本次未独立重算容器源码指纹，不能将容器日志记为 Linux wheel 发布，更不能拿旧 step13w 双机记录替代。Mac/Linux 收集范围不同，数字不相加。
+
+本次发布核对另存 `final-0c340fe29-publication-audit.json`，摘要 `dd7513dcc067ad8fa18ed73a0857726fa7d9787b594af0b7e3018752c52d043d`；原最终矩阵结果文件不覆盖，其当时“待核发布”的状态由本段追加事实补充。Goal 保持 active；“27 次执行结束”不等于完整验收或总目标完成。
+
+建议下一步：交 Claude 集成已封存的完整分项表和发布核对记录，先研判原资源调用失败后的通用恢复缺口；Linux 部署保留为测试机恢复后的独立工作，不再围绕同一领域故事追加开发例。只读复核可并行，产品／主线发布由 Claude 独占，私有运行由 root 独占。
 
 以下各轮保留原时点；旧“最终 0/27／尚未开始”不覆盖本节状态。
 
