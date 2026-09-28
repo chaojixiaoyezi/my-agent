@@ -685,7 +685,7 @@ background_main_agent_allowed_tools: []
 # - 不把日志分析、GitHub 研究、文档生成等任务写成内置专项模板。
 collaboration_workspace: ""
 # 协作请求自动唤醒 responder 的最大并发数。
-# 普通 dispatch 仍按 dispatch_default_max_runners；只有已有 collaboration request
+# 普通 dispatch 仍按代码默认的每轮 runner 上限（DispatchRuntimePolicy，1 个）；只有已有 collaboration request
 # 等待多个代理响应时，才按这个上限一次推进多个 responder，避免协作证据串行排队。
 # 0 表示关闭自动放宽，完全按本轮 max_runners 执行。
 collaboration_auto_dispatch_max_runners: 8
@@ -700,19 +700,9 @@ audit_enabled: true
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 audit_log_path: ""
 
-# 前台 daemon 默认策略（高级 / 过渡期）：
-# - my-agent daemon 会读取这些配置，减少启动时的长参数。
-# - 当前 daemon 还不是完整 gateway/service；它是一个前台 watch 调度循环。
-# - 默认开启自动调度（mutate_state=true, start_runners=true），确保 gateway 启动后自动推进子代理任务。
-# - 安全边界：dry-run 优先；高风险操作（写文件、执行 runner）需要用户确认或显式配置。
-# - daemon_max_runners 是当前前台调度器的”每轮最多推进多少 runner”，不是未来 worker 并发数。
-# - daemon_max_runners: “auto” 当前会映射成保守值 1；未来 gateway 会改成自适应并发。
-# - 数字项里的 0 是显式策略值，不是”未设置”：
-#   daemon_max_cycles=0 表示持续运行
-#   daemon_limit=0 表示每个阶段不设记录条数上限
-#   daemon_max_cards=0 表示不限制能力卡数量
-#   daemon_interval=0 表示每轮之间不等待，通常只用于测试或单轮验证
-daemon_planner: true
+# 前台 daemon（my-agent daemon，前台 watch 调度循环）只保留下面三个配置项；每轮间隔、每轮 runner 数、记录条数、循环次数、
+# 能力卡数、planner 与探针开关、审核者标识都是代码常量（cli/daemon.py），单次启动用命令行参数覆盖。
+
 # 前台 daemon 是否真正改写状态的开关。
 # 开启时前台 daemon 允许真正改写状态；关闭时偏向只给建议、不落盘（类似 dry-run）。
 # 只有当你确定要让后台调度执行真实改动、而不是每次先人工确认时才需要调整。
@@ -724,13 +714,6 @@ daemon_mutate_state: true
 # 只有你确定要让后台调度自动跑起来时才需要开启，且开启时必须同时允许改写状态（见 `daemon_mutate_state`），单次启动可以用命令行 `--start-runners` 覆盖。
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 daemon_start_runners: true
-daemon_interval: 30
-daemon_max_runners: "auto"
-daemon_limit: 0
-daemon_max_cycles: 0
-daemon_max_cards: 0
-daemon_probe: true
-daemon_reviewer: "parent-daemon"
 # 前台 daemon 自动派发 runner 时附加在任务上的额外指令文本。
 # 用来给每轮派发统一补充要求。
 # 只有你想让后台自动派发的任务都带上同样的额外说明时才需要填；留空表示不附加任何指令；单次启动可以用命令行 `--instruction` 覆盖。
@@ -1111,12 +1094,6 @@ conversation_terminal_tool_hot_tail_seconds: 300
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 cli_audit_cleanup_days: 90
 
-# Dispatch 闭环保证配置：
-# - dispatch_max_consecutive_rounds: 最大连续调度轮数，防止无限循环
-dispatch_max_consecutive_rounds: 20
-dispatch_default_max_runners: 1
-dispatch_default_limit: 20
-dispatch_default_watch_interval: 30.0
 # 决策增强：默认关闭；保存设置不发网络请求。修改时间只作用后续请求，不重置已开始阶段的预算。
 decision_enabled: false
 decision_experiment_enabled: false  # 仅实验能力开关；另需宿主显式有界授权，当前缺可靠输入上界时禁止实验联网

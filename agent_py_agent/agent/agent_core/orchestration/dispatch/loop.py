@@ -159,6 +159,8 @@ def _append_dispatch_round(report: DispatchLoopReport, dispatch_report, round_nu
     )
 
 
+# LLM: 只把 dispatch_loop 的显式关键字装进 DispatchLoopParams；缺省数字由 DispatchRuntimePolicy 的代码默认值补齐，不再读 agent.config。
+# 函数用途: 把 dispatch_loop 的 locals() 收成一份循环参数。
 def _dispatch_loop_params_from_locals(values: dict) -> DispatchLoopParams:
     selected = {
         key: values[key]
@@ -166,7 +168,6 @@ def _dispatch_loop_params_from_locals(values: dict) -> DispatchLoopParams:
         if key in values and (key != "locked_files" or values[key] is not None)
     }
     selected["apply"] = values.get("apply", False)
-    selected["policy"] = DispatchRuntimePolicy.from_config(getattr(values.get("agent"), "config", None))
     return _coerce_dispatch_loop_params(values["params"], **selected)
 
 

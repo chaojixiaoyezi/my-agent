@@ -1444,22 +1444,22 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 | 参数 | 默认值来源 | 说明 |
 | --- | --- | --- |
 | `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
-| `--dry-run` | 覆盖 `daemon_apply` | 只生成报告，不写回。 |
-| `--apply` | 覆盖 `daemon_apply` | 写回低风险动作和审计日志。 |
+| `--dry-run` | 覆盖 `daemon_mutate_state` | 只生成报告，不写回。 |
+| `--apply` | 覆盖 `daemon_mutate_state` | 写回低风险动作和审计日志。 |
 | `--start-runners` | 覆盖 `daemon_start_runners` | 配合 apply 调用真实模型执行 runner。 |
 | `--no-start-runners` | 覆盖 `daemon_start_runners` | 不调用真实模型执行 runner。 |
-| `--planner` | 覆盖 `daemon_planner` | 启用父代理 LLM planner。 |
-| `--no-planner` | 覆盖 `daemon_planner` | 关闭父代理 LLM planner。 |
-| `--interval <seconds>` | `daemon_interval` | 每轮调度结束后的等待秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
-| `--max-runners <n|auto>` | `daemon_max_runners` | 每轮最多推进多少个 runner；`auto` 当前映射为保守值 1，未来 gateway 会自适应；`0` 表示不执行 runner。 |
-| `--limit <n>` | `daemon_limit` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
-| `--max-cycles <n>` | `daemon_max_cycles` | 最多循环次数，`0` 表示持续运行。 |
+| `--planner` | 代码默认 `true` | 启用父代理 LLM planner。 |
+| `--no-planner` | 代码默认 `true` | 关闭父代理 LLM planner。 |
+| `--interval <seconds>` | 代码默认 `30` | 每轮调度结束后的等待秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
+| `--max-runners <n|auto>` | 代码默认 `1` | 每轮最多推进多少个 runner；`auto` 映射为保守值 1；`0` 表示不执行 runner。 |
+| `--limit <n>` | 代码默认 `0` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
+| `--max-cycles <n>` | 代码默认 `0` | 最多循环次数，`0` 表示持续运行。 |
 | `--force-lock` | - | 兼容旧命令；不能抢占内核确认仍被持有的 watch lock。 |
-| `--reviewer <name>` | `daemon_reviewer` | patch/acceptance 审核者标识。 |
+| `--reviewer <name>` | 代码默认 `parent-daemon` | patch/acceptance 审核者标识。 |
 | `--note <text>` | - | 写入调度关联审核记录的备注。 |
 | `--instruction <text>` | `daemon_runner_instruction` | 给 runner 的额外指令。 |
-| `--max-cards <n>` | `daemon_max_cards` | runner 最多注入多少张能力卡；`0` 表示不限制。 |
-| `--no-probe` | 覆盖 `daemon_probe` | 执行 runner 前不做通道健康检查。 |
+| `--max-cards <n>` | 代码默认 `0` | runner 最多注入多少张能力卡；`0` 表示不限制。 |
+| `--no-probe` | 代码默认 `true`（做检查） | 执行 runner 前不做通道健康检查。 |
 | `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |
 | `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
 | `--skill-dir <path>` | - | 额外 skill 目录，可多次传入。 |
@@ -1481,17 +1481,10 @@ runner_start_rate: "auto"
 runner_timeout_seconds: "auto"
 runner_failure_retry_limit: 1
 
-# 前台 daemon 过渡期参数：0 是显式策略值，不表示“未设置”
-daemon_planner: true
-daemon_apply: false
-daemon_start_runners: false
-daemon_interval: 30
-daemon_max_runners: "auto"
-daemon_limit: 0
-daemon_max_cycles: 0
-daemon_max_cards: 0
-daemon_probe: true
-daemon_reviewer: "parent-daemon"
+# 前台 daemon 只保留三个配置项；间隔、runner 数、条数、循环次数、能力卡数、planner/探针开关、审核者都是 cli/daemon.py 里的代码常量，
+# 单次启动用命令行参数覆盖（参数减量第 3 批 B 组，2026-09-27）
+daemon_mutate_state: true
+daemon_start_runners: true
 daemon_runner_instruction: ""
 ```
 

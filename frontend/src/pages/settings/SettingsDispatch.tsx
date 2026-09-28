@@ -6,7 +6,6 @@ import {
   StringField,
   ChoiceField,
   ToggleField,
-  Divider,
 } from "../../components/settings/SettingsFieldComponents";
 import { SettingsPageHeader } from "../../components/settings/SettingsPageHeader";
 import { useSettingsSection } from "../../components/settings/useSettingsSection";
@@ -155,13 +154,6 @@ export default function SettingsDispatch() {
         <div className="space-y-4">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <ToggleField
-              label="daemon_planner（启用 Planner）"
-              description="Daemon 是否自动执行规划任务"
-              checked={daemon.planner}
-              onChange={(v) => { setDaemon({ planner: v }); markDirty(); }}
-              disabled={!isAdmin}
-            />
-            <ToggleField
               label="daemon_apply（启用 Apply）"
               description="Daemon 是否自动应用变更"
               checked={daemon.apply}
@@ -173,73 +165,6 @@ export default function SettingsDispatch() {
               description="Daemon 是否自动执行 runner"
               checked={daemon.execute_runners}
               onChange={(v) => { setDaemon({ execute_runners: v }); markDirty(); }}
-              disabled={!isAdmin}
-            />
-            <ToggleField
-              label="daemon_probe（启用探针）"
-              description="Daemon 是否启用探针监控"
-              checked={daemon.probe}
-              onChange={(v) => { setDaemon({ probe: v }); markDirty(); }}
-              disabled={!isAdmin}
-            />
-            <ToggleField
-              label="daemon_reviewer（启用审核者）"
-              description="Daemon 是否启用自动审核"
-              checked={daemon.reviewer}
-              onChange={(v) => { setDaemon({ reviewer: v }); markDirty(); }}
-              disabled={!isAdmin}
-            />
-          </div>
-          <Divider />
-          <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-            <NumberField
-              label="daemon_interval（执行间隔）"
-              description="Daemon 主循环执行间隔"
-              value={daemon.interval}
-              onChange={(v) => { setDaemon({ interval: v }); markDirty(); }}
-              min={5}
-              max={3600}
-              unit="秒"
-              disabled={!isAdmin}
-            />
-            <NumberField
-              label="daemon_max_runners（最大 runners）"
-              description="Daemon 同时启动的最大 runner 数"
-              value={daemon.max_runners}
-              onChange={(v) => { setDaemon({ max_runners: v }); markDirty(); }}
-              min={1}
-              max={50}
-              unit="个"
-              disabled={!isAdmin}
-            />
-            <NumberField
-              label="daemon_limit（处理上限）"
-              description="Daemon 每轮处理的最大任务数"
-              value={daemon.limit}
-              onChange={(v) => { setDaemon({ limit: v }); markDirty(); }}
-              min={1}
-              max={200}
-              unit="个"
-              disabled={!isAdmin}
-            />
-            <NumberField
-              label="daemon_max_cycles（最大周期数）"
-              description="Daemon 最多运行多少周期后自动停止"
-              value={daemon.max_cycles}
-              onChange={(v) => { setDaemon({ max_cycles: v }); markDirty(); }}
-              min={1}
-              max={10000}
-              unit="周期"
-              disabled={!isAdmin}
-            />
-            <NumberField
-              label="daemon_max_cards（最大卡片数）"
-              description="Daemon 维护的最大任务卡片数"
-              value={daemon.max_cards}
-              onChange={(v) => { setDaemon({ max_cards: v }); markDirty(); }}
-              min={1}
-              max={500}
-              unit="张"
               disabled={!isAdmin}
             />
           </div>

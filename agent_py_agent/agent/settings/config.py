@@ -517,16 +517,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     collaboration_auto_dispatch_max_runners: int = 8
     audit_enabled: bool = True
     audit_log_path: str = ""
-    daemon_planner: bool = True
     daemon_mutate_state: bool = True
     daemon_start_runners: bool = True
-    daemon_interval: int = 30
-    daemon_max_runners: str = "auto"
-    daemon_limit: int = 0
-    daemon_max_cycles: int = 0
-    daemon_max_cards: int = 0
-    daemon_probe: bool = True
-    daemon_reviewer: str = "parent-daemon"
     daemon_runner_instruction: str = ""
     lease_stale_without_heartbeat_seconds: int = 300
     log_level: str = "info"
@@ -570,11 +562,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 0 表示立即使用短折叠；不同 provider 的缓存寿命应通过真实 usage 账本校准。
     conversation_terminal_tool_hot_tail_seconds: int = 300
     cli_audit_cleanup_days: int = 90
-    # Dispatch 闭环保证配置
-    dispatch_max_consecutive_rounds: int = 20
-    dispatch_default_max_runners: int = 1
-    dispatch_default_limit: int = 20
-    dispatch_default_watch_interval: float = 30.0
     config_warnings: list[str] = field(default_factory=list)
     config_path: str = ""
     config_sources: dict[str, dict[str, object]] = field(default_factory=dict)

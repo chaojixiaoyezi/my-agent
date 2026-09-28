@@ -141,11 +141,8 @@ max_subagents: {max(self.args.count, 1)}
 gateway_request_timeout: {gateway_timeout}
 gateway_processing_timeout_seconds: {processing_timeout}
 gateway_request_max_attempts: 2
-daemon_planner: false
 daemon_apply: false
 daemon_execute_runners: false
-daemon_max_runners: 0
-daemon_interval: 1
 # live lab keeps runner tool rounds unlimited unless a specific stress case overrides it
 max_tool_rounds: 0
 request_timeout: {request_timeout}

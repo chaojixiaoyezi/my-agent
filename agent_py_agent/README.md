@@ -407,7 +407,7 @@ shell 直接碰三份人格文件都会在任务晋升前被拒，并明确报�
 python3 -m agent_py_agent daemon
 ```
 
-`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。模型根据可独立的工作项自主决定本批子代理数量；当前 root 可用槽位、可选单次限制、每任务、每 owner 和全局并发上限依次取严格最小值。请求超限时整批拒绝，不静默截断或创建一半。默认 `max_subagents=8`、`subagent_hierarchy_max_children_per_tool_call=0`，即只用八个 root 会话槽位而不再额外限制单批为四个；`task_max_subagents=0` 也表示该维度不额外收紧，不取消 owner/并发安全上限。runner 并发、超时和启动速率默认走 `auto`；`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数。
+`daemon` 只从 `agent_config.yaml` 读取 `daemon_mutate_state` / `daemon_start_runners` / `daemon_runner_instruction`；每轮间隔、每轮 runner 数、记录条数、循环次数、能力卡数、planner/探针开关和审核者标识是 `cli/daemon.py` 里的代码常量，单次启动用命令行参数覆盖。模型根据可独立的工作项自主决定本批子代理数量；当前 root 可用槽位、可选单次限制、每任务、每 owner 和全局并发上限依次取严格最小值。请求超限时整批拒绝，不静默截断或创建一半。默认 `max_subagents=8`、`subagent_hierarchy_max_children_per_tool_call=0`，即只用八个 root 会话槽位而不再额外限制单批为四个；`task_max_subagents=0` 也表示该维度不额外收紧，不取消 owner/并发安全上限。runner 并发、超时和启动速率默认走 `auto`；`--max-cycles 0` 表示持续运行，`--limit 0` 表示不限制记录条数。
 
 宿主内部恢复/观察循环（不是模型工具）：
 

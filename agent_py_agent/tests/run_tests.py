@@ -34,9 +34,6 @@ TEST_CONFIG.write_text(
     + f'local_store_events_path: "{_local_store_events}"\n'
     + f'subagent_workspace: "{_subagent_ws}"\n'
     + f'gateway_workspace: "{_gateway_ws}"\n'
-    + "daemon_planner: false\n"
-    + "daemon_max_runners: 0\n"
-    + "daemon_interval: 1\n"
     + "gateway_request_timeout: 180\n",
     encoding="utf-8",
 )

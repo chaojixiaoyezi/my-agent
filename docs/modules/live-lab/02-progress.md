@@ -17,7 +17,7 @@ Live Lab 生成的测试配置不再写已删除的键：`session.py` 去掉 `ru
 
 ## 参数减量第 3 批 B 组（2026-09-27）
 
-`session.py` 生成的测试配置不再写 `gateway_request_poll_interval: 1`：该键已降级为代码常量 `cli/gateway_loops.GATEWAY_REQUEST_POLL_INTERVAL_SECONDS`（0.2 秒），写了只会触发未知键告警；Live Lab 的 Gateway 因此按默认节奏轮询。
+`session.py` 生成的测试配置不再写 `gateway_request_poll_interval: 1`：该键已降级为代码常量 `cli/gateway_loops.GATEWAY_REQUEST_POLL_INTERVAL_SECONDS`（0.2 秒），写了只会触发未知键告警；Live Lab 的 Gateway 因此按默认节奏轮询。B 组后半又删掉 `daemon_planner`、`daemon_max_runners`、`daemon_interval` 三行（已是 `cli/daemon.py` 常量；Live Lab 不启动 daemon，无行为差异）。
 
 ## 发布清理
 

@@ -284,6 +284,12 @@
     轮询与心跳取小再夹到 1～5 秒推导）、`gateway_service_command_timeout_seconds`（`cli/chat_parts/control_runtime`，
     原“最小 10 秒”地板随配置项一起删除）、`conversation_unhandled_observation_limit`（`conversation/runtime`）。场景测试、Live Lab 与
     `tests/run_tests.py` 生成的配置不再写 `gateway_request_poll_interval: 1`（这些测试 Gateway 改按默认 0.2 秒轮询）。
+  - 已完成 B 组后半（12 项，同一分支，daemon/dispatch 默认值）：`daemon_planner/interval/max_runners/limit/max_cycles/max_cards/probe/reviewer`
+    → `cli/daemon.py` 的 `DAEMON_*` 常量（`"auto"` 映射为 `DAEMON_DEFAULT_MAX_RUNNERS`=1），命令行 flag 仍优先，错误文案只提 flag；
+    `daemon_mutate_state` / `daemon_start_runners` / `daemon_runner_instruction` 仍是配置项。`dispatch_max_consecutive_rounds` /
+    `dispatch_default_max_runners` / `dispatch_default_limit` / `dispatch_default_watch_interval` → `DispatchRuntimePolicy` 的字段默认值
+    （`from_config` 与两个 `_non_negative_*_attr` 删除，loop/watch/CLI 三个调用方直接 `DispatchRuntimePolicy()`；snapshot 仍是 v2，
+    `source` 固定 `code-defaults`）。场景测试、Live Lab、`tests/run_tests.py` 模板不再写 daemon 三行（它们不启动 daemon）。
   - 用户可能真会调、保留为 advanced 不降级（集成者已同意）：`memory_curator_daily_finalize_hour`、`home_lesson_stale_caveat_days`、
     `memory_lesson_min_occurrences`、`memory_hot_min_occurrences`、`chat_history_max_turns`、`estimated_output_tokens_per_second`、
     `dynamic_timeout_min`、`local_store_fts_enabled`。
@@ -305,7 +311,7 @@
       参数搜索里隐藏（`parameter_registry.LOADER_METADATA_KEYS` + `listed_parameters()`，user_config 的可改数量同口径）；字段与
       登记表项不删，`/settings show` 仍可查看、仍是安全边界。
     - 回归见 `test_param_reduction_e_group.py` 与 `test_settings_chat_control.py`；原来通过配置对象改这些值的测试改为 patch 常量。
-  - 未完成：B 组后半（daemon_*、dispatch_default_*）、C 组（memory 归档预览/语义摘要/恢复/策展批次）、
+  - 未完成：C 组（memory 归档预览/语义摘要/恢复/策展批次）、
     D 组（动态超时探针、anthropic_version、媒体预留、微压缩、协议修复次数、决策选模字数）。
   - E 组范围外、分类为 internal 但未归入任何一组的：`tool_write_inline_max_chars`（写文件指引的软建议）、`conversation_pending_wake_limit`、
     `memory_artifact_default_read_chars`，留给集成者分派（`conversation_unhandled_observation_limit` 已随 B 组前半降级）。

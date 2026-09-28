@@ -73,11 +73,8 @@ subagent_workspace: ".my_agent/subagents"
 gateway_workspace: ".my_agent/gateway"
 max_subagents: {request.max_subagents}
 gateway_request_timeout: {int(request.request_timeout)}
-daemon_planner: false
 daemon_mutate_state: false
 daemon_start_runners: false
-daemon_max_runners: 0
-daemon_interval: 1
 max_tool_rounds: 0
 """
     if request.runner_concurrency is not None:

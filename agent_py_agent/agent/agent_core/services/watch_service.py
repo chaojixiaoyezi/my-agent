@@ -149,7 +149,7 @@ def watch_subagents(
     lock_path = agent.subagents.workspace / "subagent_dispatch_watch.lock"
     stop_path = Path(params.stop_file) if params.stop_file else None
 
-    policy = DispatchRuntimePolicy.from_config(getattr(agent, "config", None))
+    policy = DispatchRuntimePolicy()
     interval = max(0.0, float(params.interval or 0.0))
 
     agent._reset_dispatch_rounds()

@@ -405,8 +405,3 @@ class TestAgentConfigDefaults:
         assert config.runner_failure_retry_limit == 1
         assert config.access_mode == "workspace-write"
         assert config.tui_mouse_capture_default is True
-
-    def test_agent_config_dispatch_defaults(self):
-        """验证 dispatch 相关默认值。"""
-        config = AgentConfig()
-        assert config.dispatch_max_consecutive_rounds == 20

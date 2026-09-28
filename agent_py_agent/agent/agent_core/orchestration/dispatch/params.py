@@ -34,30 +34,20 @@ class DispatchExecutionPlan:
         )
 
 
-# LLM: 只保留真有读取方的字段；dispatch_active_interval / dispatch_idle_interval 已删除（参数减量第 1 批，2026-09-27），
-#   watch 循环的活跃/空闲间隔一律取 CLI 传入的 interval（见 services/watch_service.py），snapshot 不再回显它们。
-# 类用途: 从已加载配置冻结一份 dispatch 默认值，供 CLI 和调度循环共用。
+# LLM: 参数减量第 3 批 B 组（2026-09-27）起 dispatch 默认值就是这里的字段默认值（原 dispatch_max_consecutive_rounds /
+#   dispatch_default_max_runners / dispatch_default_limit / dispatch_default_watch_interval 配置项已删除，值不变），不再从配置冻结，
+#   CLI 显式参数仍优先。dispatch_active_interval / dispatch_idle_interval 已删除（第 1 批），watch 循环的活跃/空闲间隔一律取
+#   CLI 传入的 interval（见 services/watch_service.py），snapshot 不再回显它们。
+# 类用途: 一份 dispatch 代码默认值，供 CLI 和调度循环共用；测试可显式构造不同值。
 @dataclass(frozen=True)
 class DispatchRuntimePolicy:
-    """Frozen dispatch defaults derived from the loaded agent config."""
+    """Dispatch defaults shared by the CLI and the dispatch loop."""
 
     max_consecutive_rounds: int = 20
     default_max_runners: int = 1
     default_limit: int = 20
     default_watch_interval: float = 30.0
     source: str = "code-defaults"
-
-    @classmethod
-    def from_config(cls, config: object | None) -> DispatchRuntimePolicy:
-        if config is None:
-            return cls()
-        return cls(
-            max_consecutive_rounds=_non_negative_int_attr(config, "dispatch_max_consecutive_rounds", 20),
-            default_max_runners=_non_negative_int_attr(config, "dispatch_default_max_runners", 1),
-            default_limit=_non_negative_int_attr(config, "dispatch_default_limit", 20),
-            default_watch_interval=_non_negative_float_attr(config, "dispatch_default_watch_interval", 30.0),
-            source="agent-config",
-        )
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -185,22 +175,6 @@ def _replace_bundle(params, allowed_keys: tuple[str, ...], updates: dict[str, An
     if not selected:
         return params
     return replace(params, **selected)
-
-
-def _non_negative_int_attr(config: object, field_name: str, default: int) -> int:
-    try:
-        value = int(getattr(config, field_name, default))
-    except (TypeError, ValueError):
-        return max(0, default)
-    return max(0, value)
-
-
-def _non_negative_float_attr(config: object, field_name: str, default: float) -> float:
-    try:
-        value = float(getattr(config, field_name, default))
-    except (TypeError, ValueError):
-        return max(0.0, default)
-    return max(0.0, value)
 
 
 # LLM: Context 只运输当前周期冻结的身份；expected map 不能被 watch 下一周期重解释。

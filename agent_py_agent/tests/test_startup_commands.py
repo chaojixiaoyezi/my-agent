@@ -44,15 +44,7 @@ def _daemon_agent(tmp_path: Path) -> MagicMock:
     mock_agent = MagicMock()
     mock_agent.config.daemon_mutate_state = False
     mock_agent.config.daemon_start_runners = False
-    mock_agent.config.daemon_planner = False
-    mock_agent.config.daemon_interval = 30
-    mock_agent.config.daemon_max_runners = 1
-    mock_agent.config.daemon_limit = 20
-    mock_agent.config.daemon_max_cycles = 0
-    mock_agent.config.daemon_reviewer = "parent-dispatch"
     mock_agent.config.daemon_runner_instruction = ""
-    mock_agent.config.daemon_max_cards = 0
-    mock_agent.config.daemon_probe = True
     mock_agent.watch_subagents.return_value = mock_report
     mock_agent.subagents.workspace = tmp_path / "subs"
     return mock_agent
@@ -102,15 +94,7 @@ class TestCmdDaemon:
         mock_agent = MagicMock()
         mock_agent.config.daemon_mutate_state = False
         mock_agent.config.daemon_start_runners = False
-        mock_agent.config.daemon_planner = False
-        mock_agent.config.daemon_interval = 60
-        mock_agent.config.daemon_max_runners = 1
-        mock_agent.config.daemon_limit = 10
-        mock_agent.config.daemon_max_cycles = 1
-        mock_agent.config.daemon_reviewer = None
         mock_agent.config.daemon_runner_instruction = None
-        mock_agent.config.daemon_max_cards = 0
-        mock_agent.config.daemon_probe = True
 
         # 直接测试 _resolve_daemon_options 函数
         options = _resolve_daemon_options(mock_agent, args)
@@ -267,15 +251,7 @@ class TestResolveDaemonOptions:
         mock_agent = MagicMock()
         mock_agent.config.daemon_mutate_state = False
         mock_agent.config.daemon_start_runners = True
-        mock_agent.config.daemon_planner = False
-        mock_agent.config.daemon_interval = 60
-        mock_agent.config.daemon_max_runners = 1
-        mock_agent.config.daemon_limit = 10
-        mock_agent.config.daemon_max_cycles = 0
-        mock_agent.config.daemon_reviewer = None
         mock_agent.config.daemon_runner_instruction = None
-        mock_agent.config.daemon_max_cards = 0
-        mock_agent.config.daemon_probe = True
 
         args = MagicMock()
         args.apply = False

@@ -15,16 +15,6 @@
     {
       "reason": "暂缺中文说明，等配置减量分类：多数将删除、合并或降级为代码常数，保留下来的再补说明",
       "keys": [
-        "daemon_interval",
-        "daemon_limit",
-        "daemon_max_cards",
-        "daemon_max_cycles",
-        "daemon_max_runners",
-        "daemon_probe",
-        "daemon_reviewer",
-        "dispatch_default_limit",
-        "dispatch_default_max_runners",
-        "dispatch_default_watch_interval",
         "dynamic_timeout_min",
         "dynamic_timeout_safety_margin",
         "estimated_output_tokens_per_second",

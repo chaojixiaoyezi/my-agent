@@ -219,23 +219,13 @@ class GatewayFieldsService:
         return out, warnings
 
 
+# LLM: 参数减量第 3 批 B 组（2026-09-27）起 daemon 只剩两个布尔安全边界项要归一（数字项与 planner/probe 已降级为 cli/daemon 常量）。
+# 类用途: 归一前台 daemon 仍保留的配置开关。
 class DaemonFieldsService:
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
-        warnings = _apply_int_fields(
-            out, defaults,
-            (
-                ("daemon_interval", 1, None),
-                ("daemon_limit", 0, None),
-                ("daemon_max_cycles", 0, None),
-                ("daemon_max_cards", 0, None),
-            ),
-        )
-        warnings.extend(_apply_bool_fields(
-            out, defaults,
-            ("daemon_planner", "daemon_mutate_state", "daemon_start_runners", "daemon_probe"),
-        ))
+        warnings = _apply_bool_fields(out, defaults, ("daemon_mutate_state", "daemon_start_runners"))
         return out, warnings
 
 
@@ -456,19 +446,6 @@ def _normalize_command_access_mode(out: dict[str, object], defaults: object) -> 
     return warnings
 
 
-def _normalize_dispatch_watch_interval(out: dict[str, object], defaults: object) -> list[str]:
-    warnings: list[str] = []
-    value, warn = CoercionService.coerce_float(
-        "dispatch_default_watch_interval",
-        out.get("dispatch_default_watch_interval"),
-        defaults.dispatch_default_watch_interval,
-        min_val=0.0, max_val=None,
-    )
-    out["dispatch_default_watch_interval"] = value
-    _append_warning(warnings, warn)
-    return warnings
-
-
 def _normalize_runner_timeout_by_role(value: object) -> tuple[dict[str, object], str | None]:
     if value in ({}, None, ""):
         return {}, None
@@ -510,7 +487,6 @@ class ToolFieldsService:
         warnings.extend(_normalize_tool_catalog_fields(out, defaults))
         warnings.extend(_normalize_path_access_fields(out, defaults))
         warnings.extend(_normalize_command_access_mode(out, defaults))
-        warnings.extend(_normalize_dispatch_watch_interval(out, defaults))
         warnings.extend(_normalize_background_tool_fields(out, defaults))
         return out, warnings
 
@@ -610,9 +586,7 @@ _TIMEOUT_INT_FIELDS = (
     ("conversation_pending_wake_limit", 0, None),
     ("skill_guard_max_files", 0, None),
     ("skill_guard_max_size_kb", 0, None),
-    ("dispatch_default_max_runners", 0, None),
     ("collaboration_auto_dispatch_max_runners", 0, None),
-    ("dispatch_default_limit", 0, None),
 )
 
 

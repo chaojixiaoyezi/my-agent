@@ -20,11 +20,11 @@ from .dispatch_background import BackgroundLaunchUpdate, mark_background_launch
 from .models import SubagentsDispatchOptions
 
 
-# LLM: CLI 固定身份与可配置默认值分别解析；不得从当前数据库补充遗漏的宿主字段。
+# LLM: CLI 固定身份与代码默认值分别解析（默认值来自 DispatchRuntimePolicy，参数减量第 3 批起不再读配置）；
+#   不得从当前数据库补充遗漏的宿主字段。
 # 函数用途: 把命令行输入变成单次派工选项，严格保留原执行轮映射。
-def _subagents_dispatch_options(args, agent=None) -> SubagentsDispatchOptions:
-    config = getattr(agent, "config", None)
-    policy = DispatchRuntimePolicy.from_config(config)
+def _subagents_dispatch_options(args) -> SubagentsDispatchOptions:
+    policy = DispatchRuntimePolicy()
     return SubagentsDispatchOptions(
         mutate_state=bool(args.apply),
         start_runners=bool(args.start_runners),
@@ -196,7 +196,7 @@ def cmd_subagents_dispatch(args) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     agent = make_agent(args)
-    options = _subagents_dispatch_options(args, agent=agent)
+    options = _subagents_dispatch_options(args)
     if options.start_runners and not options.mutate_state:
         print("--start-runners 必须和 --apply 一起使用。", file=sys.stderr)
         return 2

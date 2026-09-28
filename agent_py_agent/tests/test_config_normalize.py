@@ -204,13 +204,11 @@ class TestNormalizeSubagentAgentConfig:
             "audit_enabled": "false",
             "auto_save_memory": "false",
             "enable_subagents": "false",
-            "daemon_probe": "false",
         }
         normalized, warnings = normalize_agent_config(data)
         assert normalized["audit_enabled"] is False
         assert normalized["auto_save_memory"] is False
         assert normalized["enable_subagents"] is False
-        assert normalized["daemon_probe"] is False
         assert warnings == []
 
     def test_normalize_home_provider_risk_fields(self):

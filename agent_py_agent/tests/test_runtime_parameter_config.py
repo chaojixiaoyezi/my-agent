@@ -108,35 +108,26 @@ def test_simple_agent_keeps_runtime_guard_policy_snapshot(tmp_path: Path) -> Non
     assert "values" in snapshot
 
 
-def test_dispatch_runtime_policy_uses_agent_config_values() -> None:
+def test_dispatch_runtime_policy_defaults_are_code_constants() -> None:
+    """参数减量第 3 批 B 组：dispatch 默认值不再从配置冻结，DispatchRuntimePolicy() 就是唯一的代码默认值。"""
     from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchRuntimePolicy
 
-    policy = DispatchRuntimePolicy.from_config(
-        SimpleNamespace(
-            dispatch_max_consecutive_rounds=7,
-            dispatch_default_max_runners=4,
-            dispatch_default_limit=33,
-            dispatch_default_watch_interval=6.5,
-        )
-    )
+    policy = DispatchRuntimePolicy()
 
     assert policy.snapshot()["schema_version"] == "dispatch_runtime_policy.v2"
-    assert policy.max_consecutive_rounds == 7
-    assert policy.default_max_runners == 4
-    assert policy.default_limit == 33
-    assert policy.default_watch_interval == 6.5
+    assert policy.source == "code-defaults"
+    assert policy.max_consecutive_rounds == 20
+    assert policy.default_max_runners == 1
+    assert policy.default_limit == 20
+    assert policy.default_watch_interval == 30.0
+    assert not hasattr(DispatchRuntimePolicy, "from_config")
 
 
-def test_dispatch_loop_omitted_numbers_follow_agent_config() -> None:
+def test_dispatch_loop_omitted_numbers_follow_code_defaults() -> None:
     from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
     agent = SimpleNamespace(
-        config=SimpleNamespace(
-            runner_failure_retry_limit=1,
-            dispatch_max_consecutive_rounds=1,
-            dispatch_default_max_runners=3,
-            dispatch_default_limit=44,
-        ),
+        config=SimpleNamespace(runner_failure_retry_limit=1),
         has_pending_work=True,
     )
     agent.subagents = SimpleNamespace(list_runs=lambda: [])
@@ -148,6 +139,7 @@ def test_dispatch_loop_omitted_numbers_follow_agent_config() -> None:
 
     def dispatch_subagents(_router, _capability_config, *, params):
         seen_params.append(params)
+        agent.has_pending_work = False
         return Report()
 
     agent.dispatch_subagents = dispatch_subagents
@@ -155,21 +147,16 @@ def test_dispatch_loop_omitted_numbers_follow_agent_config() -> None:
     result = dispatch_loop(agent, router=None)
 
     assert result.rounds_count == 1
-    assert result.stopped_by_limit is True
-    assert seen_params[0].execution_plan.max_runners == 3
-    assert seen_params[0].limit == 44
+    assert result.stopped_by_limit is False
+    assert seen_params[0].execution_plan.max_runners == 1
+    assert seen_params[0].limit == 20
 
 
-def test_dispatch_loop_explicit_numbers_override_config() -> None:
+def test_dispatch_loop_explicit_numbers_override_code_defaults() -> None:
     from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import dispatch_loop
 
     agent = SimpleNamespace(
-        config=SimpleNamespace(
-            runner_failure_retry_limit=1,
-            dispatch_max_consecutive_rounds=1,
-            dispatch_default_max_runners=3,
-            dispatch_default_limit=44,
-        ),
+        config=SimpleNamespace(runner_failure_retry_limit=1),
         has_pending_work=True,
     )
     agent.subagents = SimpleNamespace(list_runs=lambda: [])
