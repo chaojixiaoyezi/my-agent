@@ -1,5 +1,9 @@
 # 设计台账
 
+## 能力包最终固定测量与恢复稳定性（2026-09-28，执行完成、验收未全过）
+
+最终固定 0c340fe29 的 27 次原生执行已全部结束，原输入、配置、安装表、1433 个安装成员及包 pins 保持；普通任务 9/9 通过，制作类业务 7/9 通过，改编类 0/9 通过，合计业务 16/27 通过、11/27 失败。原资源链 12/18 成立，第三轮改编任务的混合写入参数及随后自建检查器另列为通用使用／恢复稳定性缺口，不能全部归为剧情质量。Goal active，Linux 当前同版证据与最终交接尚待完成。 原程序的同字节复制执行、模型全文消费和业务正确性分别计数；互斥参数被正确拒绝不代表恢复行为已稳定。没有为领域样例新增宿主硬门或修改冻结判据。建议下一步将已封存判断交原作者核对通用缺口及发布证据，只读复核可并行；见[最终矩阵](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#固定版本最终矩阵2026-09-28)。
+
 ## TaskRun 收口允许“静止但未终态”的子 run（2026-09-28，分支 `claude/38-taskrun-settle`，基于 `d0318486e`，本地验证通过，待集成）
 
 **问题**（dsh-be 分析，集成方认可）：子代理以 BLOCKED / unfinished 等非终态 runtime_status 结束时，设计上只关闭 attempt、删掉执行锁，`agent_runs.status` 停在 created（展示面读 canonical，不受影响）。`settle_task_run_if_agent_tree_terminal` 要求树上所有 AgentRun 终态，父 TaskRun 因此永远 `closed_at=0`、不写 `task_run.closed`；两个调用方（`runtime_mixin._settle_terminal_conversation_task_run`、`owner_wake_discovery._reconcile_terminal_conversation_task_runs`）忽略返回值，`open_task_runs` 只增不减，发现扫描每轮对这些行白跑一次。
