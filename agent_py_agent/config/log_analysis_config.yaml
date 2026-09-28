@@ -2,6 +2,7 @@
 # 默认关闭，不影响普通 my-agent run/chat/status。
 # 当前文件只使用项目内置的极简 YAML 子集：key: value 和简单列表。
 
+# 是否启用日志分析模块；默认关闭，不影响普通 my-agent run/chat/status。
 enabled: false
 capability_level: L0
 config_version: 1

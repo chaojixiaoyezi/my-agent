@@ -4620,7 +4620,7 @@
           {
             "key": "enabled",
             "label": "enabled（enabled）",
-            "description": "log_analysis_config.yaml 中的 enabled 配置项。",
+            "description": "是否启用日志分析模块；默认关闭，不影响普通 my-agent run/chat/status。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
