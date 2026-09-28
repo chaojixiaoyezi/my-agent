@@ -18,6 +18,16 @@
   tests/test_constant_names_unique.py tests/test_architecture_guardrails.py tests/test_config_field_readers.py -q --tb=short`（396 passed）；
   仓库根跑 Ruff、`scripts/check_doc_sync.py`、`scripts/check_code_size.py --mode strict`、`git diff --check`、`scripts/check_clean_package.py .`。
 
+## 能力包 G05 补测：跨回合 Goal 恢复与工具操作 UNKNOWN（2026-09-28，被测 `9f88e4905`，仅文档）
+
+- **结论**：脚本模型端到端机制已验，真实模型未覆盖。两项都通过，结果表见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#g05补测跨回合-goal-恢复与工具操作-unknown2026-09-28)。
+- **方法**：沿用上一条 G05 的隔离环境（8438/8448、`env -i`、不设模型密钥、两个真实 TUI）。
+  - Goal 场景：脚本模型 `create_goal`，读取并 pin v1 后标记 blocked；用 `/plugins` 更新到 v2；用户执行 `/goal resume`。
+  - UNKNOWN 场景：测试侧暂停点放在 `write_file(source_ref)` 的 handler 返回之后，然后 SIGKILL 本测试 Gateway；重启后按产品提示用 `/recover` 查询，再选 `/recover recorded`。
+- **判据**：只看结构化事实，包括 Goal/task 身份与 `task_run.reopened`、pin 与 get 回执码、hook 记录的 write handler 进入次数、文件 mtime、操作表行数与状态、attempt 状态序列、阻塞期间的模型调用次数。
+- **附带实测**：普通 `write_file(content)` 在 ask 下也不弹审批，与 README 权限模式表的说明一致。
+- **观察**：脚本模型在同一续跑轮里重复同一个失败的 get，共 393 个模型轮，宿主只给提示、没有硬停，最后由测试者暂停。这个问题留给产品线判断，本条不改产品。证据在 `~/.my-agent/decision-evidence/g05-followup-9f88/`（仓库外）。
+
 ## R16 补测：按包选择偏好与 global_index 可读性（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-followup`）
 
 - **范围**：上一轮 R16 留下的两项：跨 owner 的按包选择偏好（`host_capability_selection.v1`），以及主机层
