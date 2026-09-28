@@ -2,6 +2,69 @@
 
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`）
 
+## 会话间消息与派活第 3 片 F：端到端（派活 → 执行 → 回报 / 执行中取消）（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：第 3 片 F：把前面各片串成真实链路验证，包含 dev 要求的"派活 → 执行中取消"。
+- **做法**：新增 `test_session_task_e2e_flow.py`，不启动 Gateway、不发真实模型请求，只用真实组件：
+  - 发送方用**真实** `CreateSessionTaskTool` 派活（真落 `SessionTaskStore`、真投 guidance、真 `wake.raise_signal`）。
+  - 目标会话按派活回合开跑：**真实** `TurnTrigger(kind=session_task)`；接手回合走
+    `SessionTaskStore.bind_turn`（与 guidance ack 的 `bind_session_task_turns` 同一权威入口）。
+  - 回合结束用**真实** `close_out_turn`（D 的收口）推进 `done` 并把结构化回报投回发送方队列。
+  - 取消分两条：未开始时撤队列（`withdrawn_from_queue=True`，目标队列里该正文消失）；
+    已绑定时报告 `stop_confirmed=false` 且文案写"尚未确认"——因为**本测试没有 Gateway 队列**，
+    停止控制在无队列时按设计 fail closed（这一点很关键：不得谎称已停止）。
+- **真实 Gateway 上的补充验证**：用隔离 Gateway（临时 home + 独立配置 + 8510 端口，不碰生产 8420）
+  启动成功（`/status` 返回 `running`、`http_port=8510`），用它验证了"目标回合正在执行时取消"走
+  真实停止控制链路的那一段（请求记录被标记、目标线程被中断）。
+- **新测试**：5 项；`python3 -m pytest agent_py_agent/tests/test_session_task_e2e_flow.py -q`。
+- **遗留**：F 使用隔离 Gateway 的那一段是一次性实测（未固化成自动化用例，因为需要真实后台进程）；
+  收尾按 dev 要求停掉该进程并确认端口空闲。
+
+## 会话间消息与派活第 3 片 E：接收方 TUI 展示（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：dev 第 6 点"接收方 TUI 显示收到的消息及来源"（已同意与第 3 片一起做）。
+- **做法**：新增 `/sessions inbox`（`_print_received_inbox`）：
+  - 只读结构化字段：guidance 的 `origin_kind`（`session_message` / `session_task` / `session_task_result`）
+    与 `SessionTaskStore` 的 `target_thread_id`；**不解析正文猜归属**。
+  - 列出消息/任务/回报的来源会话、状态与"已注入/待注入"；别的会话的内容不显示。
+  - 普通用户插话不列为"收到的会话消息"。命令登记进 `command_catalog.py`。
+- **新测试**：`test_sessions_inbox_command.py`（7 项）；`python3 -m pytest agent_py_agent/tests/test_sessions_inbox_command.py -q`。
+
+## 会话间消息与派活第 3 片 D：任务正常结束自动回报（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：第 3 片 D：任务结束时把结构化结果作为 message 回给发送方（此前只接了取消路径）。
+- **做法**：新增 `agent/conversation/session_task_report.py`：
+  - `task_for_turn`：只按**结构化** `conversation_request_id` 找回属于本回合的任务（不读正文、不猜）。
+  - `close_out_turn`：只在任务非终态时推进 `done`/`failed`，并把状态/摘要/产物 refs 作为一条
+    `origin_kind=session_task` 的消息投回发送方（`guidance.append_once`，幂等键含任务 id + 终态）。
+  - 幂等：终态后再次收口不再推进、不再写第二条回报；**读坏账时不猜归属**（宁可不回报）。
+  - `runtime.py` 在目标回合收口处调用；**回报属于附加交付，失败不影响本回合本身**。
+- **新测试**：`test_session_task_report.py`（9 项）；`python3 -m pytest agent_py_agent/tests/test_session_task_report.py -q`。
+
+## 会话间消息与派活第 3 片 C 补丁 + 派活回合宿主事件（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：dev 12:08 指出"取消只改了账本"；另外自查发现派活回合在原生 IR 里被当成普通用户轮。
+- **做法**：
+  - 新增 `gateway_parts/session_task_stop.py`：按目标会话的**结构化渠道身份 + expected_turn_id**
+    复用 `/stop` 同一条控制通道；拿不到渠道身份或 Gateway 路径就 fail closed（不猜回合）。
+  - `CancelSessionTaskTool` 分流：已绑定回合 → 发精确停止控制；未开始 → 撤目标队列正文
+    （把正文 guidance 回执标 `rejected`，注入层不再取到它）；回执按实际结果写
+    "已停止 / 未开始已撤销 / 已是终态未改动"，**只在确认生效时才说"已停止"**。
+  - `SessionTaskStore` 新增 `body_dedupe_key` / `load_by_body_dedupe_key` / `bind_turn`；
+    guidance ack 时（`bind_session_task_turns`）把被消费的正文绑到该回合，写 `accepted` + request id。
+  - **真实缺陷修复**：`loop_support.py` 构造原生 IR 开头项时只认 `lifecycle_wake`，
+    `session_task` 会被落成 `UserTurn`（任务正文冒充用户原话）；现在用 `SESSION_TASK_FACTS_SOURCE`
+    单独成片，`_current_turn_opener_count` 同步认两种宿主来源。
+- **新测试**：`test_session_task_cancel_stop.py`（6 项）、`test_lifecycle_wake_host_event.py` 新增 2 项。
+- **复现**：
+  `python3 -m pytest agent_py_agent/tests/test_session_task_cancel_stop.py agent_py_agent/tests/test_lifecycle_wake_host_event.py -q`。
+- **变异验证怎么做（踩过的坑）**：这里用过两种方式——
+  ① 临时改坏一行实现、跑测试看是否变红、再改回来（本例验证了 stop_confirmed 恒真、
+  忽略绑定回合、不撤队列、绑定不写回合号四处都会让测试变红）；
+  ② 在测试里内置"变异用例"。**结论：只用①**。②需要在测试运行期改写被测源文件，
+  一旦路径或开关写错就会把实现文件清空（本项目实际发生过一次，靠 git 恢复），
+  代价远大于收益，已移除。
+  
 ## 会话间消息与派活第 3 片 C+D：任务查询与取消（2026-09-28，分支 `my-agent/self-dev-3`）
 
 - **来源**：第 3 片 C（取消）与 D（结果回报的控制侧）。
