@@ -24,9 +24,9 @@ _CHILD_FIELDS = (
     "service_window_incomplete",
     "service_window_remaining_seconds",
 )
-_TEXT_LIMIT = 600
-_LIST_LIMIT = 8
-_DEPTH_LIMIT = 3
+_WAKE_FACT_TEXT_LIMIT = 600
+_WAKE_FACT_LIST_LIMIT = 8
+_WAKE_FACT_DEPTH_LIMIT = 3
 
 
 # LLM: 输入是宿主唤醒原因、唤醒信封、真实历史请求编号和调用方已判定的任务来源原文（都来自结构化事实）；输出冻结值
@@ -67,22 +67,22 @@ def _picked(source: dict, fields: tuple[str, ...]) -> dict[str, object]:
     return {key: _bounded(source[key], 0) for key in fields if key in source and source[key] not in (None, "", [], {})}
 
 
-# LLM: 字符串截到 _TEXT_LIMIT，列表与字典各取前若干项，嵌套超过 _DEPTH_LIMIT 层写占位说明；未知类型转字符串。纯计算。
+# LLM: 字符串截到 _WAKE_FACT_TEXT_LIMIT，列表与字典各取前若干项，嵌套超过 _WAKE_FACT_DEPTH_LIMIT 层写占位说明；未知类型转字符串。纯计算。
 # 函数用途: 把任意 JSON 值压成有界、可稳定序列化的投影。
 def _bounded(value: object, depth: int) -> object:
     if isinstance(value, str):
-        return value if len(value) <= _TEXT_LIMIT else value[:_TEXT_LIMIT] + "…（已截断）"
+        return value if len(value) <= _WAKE_FACT_TEXT_LIMIT else value[:_WAKE_FACT_TEXT_LIMIT] + "…（已截断）"
     if value is None or isinstance(value, bool | int | float):
         return value
-    if depth >= _DEPTH_LIMIT:
+    if depth >= _WAKE_FACT_DEPTH_LIMIT:
         return "…（层级过深，已省略）"
     if isinstance(value, dict):
-        items = sorted(value.items(), key=lambda item: str(item[0]))[: _LIST_LIMIT * 2]
+        items = sorted(value.items(), key=lambda item: str(item[0]))[: _WAKE_FACT_LIST_LIMIT * 2]
         return {str(key): _bounded(item, depth + 1) for key, item in items}
     if isinstance(value, list | tuple):
-        items = [_bounded(item, depth + 1) for item in list(value)[:_LIST_LIMIT]]
-        return items + (["…（其余已省略）"] if len(value) > _LIST_LIMIT else [])
-    return str(value)[:_TEXT_LIMIT]
+        items = [_bounded(item, depth + 1) for item in list(value)[:_WAKE_FACT_LIST_LIMIT]]
+        return items + (["…（其余已省略）"] if len(value) > _WAKE_FACT_LIST_LIMIT else [])
+    return str(value)[:_WAKE_FACT_TEXT_LIMIT]
 
 
 __all__ = ["lifecycle_wake_turn_trigger"]

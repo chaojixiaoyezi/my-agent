@@ -104,6 +104,11 @@
 - **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对基线新增 0、
   减少 1。`run_background_turn_with_compact` 曾因本次两行越过 100 行硬线，已把每次尝试的上下文准备和溢出携带合并抽成
   两个小函数，行为不变。
+- **补修（集成者全仓发现）**：`lifecycle_wake_event` 的上限常数原名 `_TEXT_LIMIT`、`_LIST_LIMIT`，去掉前导下划线后与
+  `host_notices.TEXT_LIMIT`、`settings_control_service.LIST_LIMIT` 撞名（概念不同），`test_constant_names_unique.py` 失败；
+  三个上限统一改名为 `_WAKE_FACT_TEXT_LIMIT`、`_WAKE_FACT_LIST_LIMIT`、`_WAKE_FACT_DEPTH_LIMIT`，行为不变。原门禁清单漏了
+  这类全仓扫描测试；之后的门禁固定带上扫描产品代码的守卫测试（含 `test_constant_names_unique.py`、
+  `test_config_field_readers.py`、`test_main_agent_has_no_case_runtime.py`、`test_orchestration_tool_constants.py`）。
 
 ## 两条负载抖动用例改稳：桌面插件超时、慢流存活续期（2026-09-28，分支 `claude/38-stabilize-load-flakes`，基于 `8e82edcc0`，只改测试）
 
