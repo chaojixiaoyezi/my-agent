@@ -141,6 +141,8 @@ def _handle_sessions_command(
     del include_plain_help
     if user == "/sessions threads":
         return _print_message_targets(ctx)
+    if user == "/sessions inbox":
+        return _print_received_inbox(ctx)
     if user != "/sessions":
         return None
     from ...agent.session.manager import SessionManager
@@ -172,6 +174,98 @@ def _handle_sessions_command(
     )
     ctx.print_line("\n".join(lines))
     return True
+
+
+# LLM: 接收方展示：本会话收到的会话间消息与派活任务。只读结构化回执/记录：
+#   guidance 队列里来源为 session_message 的条目 → 收到的消息（按投递状态标注）；
+#   SessionTaskStore 里目标为本 thread 的任务 → 派活任务（来源会话 + 状态）。
+#   不解析正文猜归属、不跨 owner、不改状态、不冒充当前用户原话。
+# 函数用途: 打印当前 TUI 会话收到的消息与派活任务及其来源。
+def _print_received_inbox(ctx: SlashCommandContext) -> bool:
+    thread_id = str(ctx.conversation_id or "").strip()
+    if not thread_id:
+        ctx.print_line("当前界面没有会话编号，无法列出收到的消息。")
+        return True
+    store = getattr(ctx.agent, "conversation_store", None)
+    if store is None:
+        ctx.print_line("当前运行环境没有会话存储，无法列出收到的消息。")
+        return True
+    lines: list[str] = []
+    messages, message_errors = _received_session_messages(store, thread_id)
+    if messages:
+        lines.append("本会话收到的会话间消息：")
+        lines.extend(messages)
+    tasks, task_errors = _received_session_tasks(store, thread_id)
+    if tasks:
+        lines.append("" if lines else "")
+        lines.append("本会话收到的派活任务：")
+        lines.extend(tasks)
+    if not lines:
+        ctx.print_line("本会话还没有收到会话间消息或派活任务。")
+        return True
+    damaged = len(message_errors) + len(task_errors)
+    if damaged:
+        lines.append(f"另有 {damaged} 条损坏记录未展示。")
+    ctx.print_line("\n".join(lines))
+    return True
+
+
+# LLM: 消息来源只认结构化 origin_kind，不看正文；正文按长度截断避免终端刷屏。
+# 函数用途: 取本会话收到的会话间消息，返回展示行与读取错误。
+def _received_session_messages(store: object, thread_id: str) -> tuple[list[str], list[object]]:
+    guidance = getattr(store, "guidance", None)
+    if guidance is None:
+        return [], []
+    try:
+        entries, load_errors = guidance.recent_report("thread", thread_id, limit=20)
+    except (AttributeError, TypeError, ValueError):
+        return [], []
+    rows: list[str] = []
+    for entry in entries:
+        metadata = getattr(entry, "metadata", None)
+        if not isinstance(metadata, dict):
+            continue
+        kind = str(metadata.get("origin_kind") or "")
+        if kind == "session_message":
+            label = "消息"
+        elif kind == "session_task":
+            label = "派活任务"
+        elif kind == "session_task_result":
+            label = "任务回报"
+        else:
+            # 普通用户插话不是"收到的会话消息"，这里不列。
+            continue
+        source = str(getattr(entry, "sender", "") or "") or "未知来源"
+        text = str(getattr(entry, "message", "") or "").strip().replace("\n", " ")
+        if len(text) > 60:
+            text = text[:60] + "…"
+        delivered = float(getattr(entry, "delivered_at", 0.0) or 0.0) > 0
+        rows.append(f"- [{label}] 来自 {source}：{text}（{'已注入' if delivered else '待注入'}）")
+    return rows, list(load_errors or [])
+
+
+# LLM: 任务归属只按结构化 target_thread_id 判断；状态直接来自记录，不推断。
+# 函数用途: 取本会话收到的派活任务，返回展示行与读取错误。
+def _received_session_tasks(store: object, thread_id: str) -> tuple[list[str], list[object]]:
+    tasks = getattr(store, "session_tasks", None)
+    if tasks is None:
+        return [], []
+    try:
+        records, load_errors = tasks.list_report(limit=0)
+    except (AttributeError, TypeError, ValueError):
+        return [], []
+    rows: list[str] = []
+    for task in records:
+        if str(getattr(task, "target_thread_id", "") or "").strip() != thread_id:
+            continue
+        task_id = str(getattr(task, "task_id", "") or "")
+        source = str(getattr(task, "sender_thread_id", "") or "") or "未知来源"
+        status = str(getattr(task, "status", "") or "")
+        goal = str(getattr(task, "goal", "") or "").strip().replace("\n", " ")
+        if len(goal) > 60:
+            goal = goal[:60] + "…"
+        rows.append(f"- {task_id}  来自 {source}  [{status}]  {goal}")
+    return rows, list(load_errors or [])
 
 
 # LLM: 会话消息目标是 canonical ConversationThread，与 /sessions 的 CLI 恢复记录（SessionManager）

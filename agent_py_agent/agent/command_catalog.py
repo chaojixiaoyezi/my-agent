@@ -38,6 +38,7 @@ COMMAND_CATALOG = (
         "列出当前用户最近会话和精确恢复命令",
         help_variants=(
             ("/sessions threads", "列出可接收会话消息的会话（ConversationThread）"),
+            ("/sessions inbox", "列出本会话收到的会话间消息与派活任务及其来源"),
         ),
         submit_on_enter=True,
     ),
