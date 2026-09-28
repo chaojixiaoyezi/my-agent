@@ -24,13 +24,16 @@
 - **node 与 bun 的差别**：没有差别。同一基线上 `node frontend/scripts/sync-backend-config.mjs` 与 `bun …` 生成的目录逐字相同，
   `--check` 两种都通过；脚本只读仓库里三份 YAML，用自带解析器，没有环境、排序或 locale 依赖。“大量无关差异”其实是目录自
   `8ba5bf013`（278 项）以来没再生成：相对它，新目录只有 C 组删掉的 14 个键、其后 196 个字段的全局 `order` 顺移（77 个组内位置
-  变化），以及 `background_context_max_total_tokens` 一条说明变化。
-- **那条说明为什么变**：杂项批 `35259e86c` 删掉 `conversation_pending_wake_limit` 时，留下的分组标题注释与该键自己的注释连成一段；
-  前端生成器（空行不打断注释）与后端 `parameter_registry._descriptions_from_lines` 都把整段并进说明，后端 /settings 在 main 上
-  已是同一文本。这是删键本身带来的，本分支如实生成、不改 YAML；是否删掉这段孤立的分组标题留给集成者决定。
+  变化）；说明没有变化。
+- **孤立分组标题**：杂项批 `35259e86c` 删掉 `conversation_pending_wake_limit` 时，留下的分组标题注释与
+  `background_context_max_total_tokens` 自己的注释连成一段；前端生成器（空行不打断注释）与后端
+  `parameter_registry._descriptions_from_lines` 都把整段并进说明。第二个提交按集成者决定删掉这段标题：后端 222 个键里只有这一个
+  键的说明变回它自己那句，目录相对 `8ba5bf013` 的说明变化归零；说明基线是空说明名单、不含此键，未改。只加空行不行：
+  后端会恢复，前端生成器不会。
 - **设置页**：14 个键里只有 `memory_resume_auto_context_limit` 还有表单项（`SettingsMemory.tsx`），已删；store 默认值暂留
   （沿 `3af7c94df`）。
-- **验证**：`node … --check` 与 `bun … --check` 均 rc=0；`bun build frontend/src/main.tsx --packages external --target browser`
+- **验证**：两个提交后各跑一次，`node … --check` 与 `bun … --check` 均 rc=0；参数注册表与说明基线等 55 个相关测试文件
+  1075 passed；`bun build frontend/src/main.tsx --packages external --target browser`
   rc=0（`@apply` 为既有 CSS 提示）；Bun TSX 转译器转译 `frontend/src` 下 47 个 TS/TSX 全部通过；静态门禁 ruff、doc_sync、
   strict code_size、diff --check、clean_package。
 
