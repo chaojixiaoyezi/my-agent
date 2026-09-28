@@ -163,6 +163,9 @@ def _make_render_context_factory(
             focused_agent_status=str(
                 getattr(navigation_snapshot, "active_status", "") or ""
             ),
+            focused_agent_replaced_by=str(
+                getattr(navigation_snapshot, "active_replaced_by_run_id", "") or ""
+            ),
             selected_agent_run_id=str(
                 getattr(navigation_snapshot, "selected_run_id", "") or ""
             ),

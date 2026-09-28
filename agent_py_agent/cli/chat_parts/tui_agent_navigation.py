@@ -48,6 +48,9 @@ _ROW_SCALAR_FIELDS = frozenset(
         "updated_at",
         "heartbeat_at",
         "ended_at",
+        # 已被接替时 Gateway 摊平的 kernel replaced_by 投影（接替者 run_id 与处置），子代理页头部据此标注。
+        "replaced_by_run_id",
+        "replaced_by_disposition",
     }
 )
 _GOAL_ROW_SCALAR_FIELDS = frozenset(
@@ -79,6 +82,8 @@ class TuiAgentNavigationSnapshot:
     expanded_goal_id: str = ""
     depth: int = 0
     terminal: bool = False
+    # 当前子代理已被接替时的接替者 run_id（来自行里的 replaced_by_run_id），头部显示“已被 X 接替”。
+    active_replaced_by_run_id: str = ""
 
 
 # LLM: This immutable projection is the only normalized input accepted by the child
@@ -319,6 +324,7 @@ class TuiAgentNavigationState:
                 expanded_goal_id=self._expanded_goal_id,
                 depth=len(self._path),
                 terminal=bool(active and status in _TERMINAL_AGENT_STATUSES),
+                active_replaced_by_run_id=str(row.get("replaced_by_run_id") or "").strip(),
             )
 
     # LLM: The active runtime is a display store selected by the view stack; it

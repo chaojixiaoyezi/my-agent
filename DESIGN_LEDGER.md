@@ -21,7 +21,7 @@
 - 父级视图：kernel 节点新增 `replaced_by`（接替者与处置），经代理树节点进入 list_agents 模型视图与大树预览；HISTORY_INCOMPLETE 的唯一出口（为已有 run 写 `replacement_for_run_ids`）接替 DONE run 保持可用。
 
 未做：
-- TUI 子代理名册已标出“已被 X 接替”（2026-09-28，分支 `claude/ae-tui-superseded-marker` 第 2 个提交）：Gateway 名册行摊平 kernel `replaced_by_view` 为 `replaced_by_run_id`／`replaced_by_disposition` 两个标量，经两道 TUI 白名单后在状态标签后标注；CLI `subagents board` 的条目仍只带 takeover_by，没有标 superseded；
+- TUI 子代理名册已标出“已被 X 接替”（2026-09-28，分支 `claude/ae-tui-superseded-marker` 第 2 个提交）：Gateway 名册行摊平 kernel `replaced_by_view` 为 `replaced_by_run_id`／`replaced_by_disposition` 两个标量，经两道 TUI 白名单后在状态标签后标注。进入子代理页后，头部同样标出“已被 X 接替”（第 3 个提交），数据走导航行白名单、导航快照、渲染上下文和渲染缓存键。CLI `subagents board` 按集成方决定不做，因为用户基本不用 CLI；
 - 事件日志已补（2026-09-28，分支 `claude/ae-tui-superseded-marker`）：按集成方口径不新增事件类型，`subagent_run_saved` 的 payload 在有值时带上 takeover_by／superseded_by，供时间线、审计投影读取；权威仍是任务记录里的 takeover_records；
 - 真实模型下的接替行为未验。
 

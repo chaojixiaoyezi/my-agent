@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-09-28：进入被接替的子代理页后，头部也标出“已被 X 接替”（分支 `claude/ae-tui-superseded-marker` 第 3 个提交），数据仍只来自 kernel 的 `replaced_by_view`；CLI board 按集成方决定不做。
+
 2026-09-28：TUI 子代理名册对被接替的子代理标出“已被 X 接替”（分支 `claude/ae-tui-superseded-marker` 第 2 个提交），数据只来自 kernel 的 `replaced_by_view`，不另外推断；CLI board 暂未标注。
 
 2026-09-28：`subagent_run_saved` 事件的 payload 在有值时带上 takeover_by／superseded_by（分支 `claude/ae-tui-superseded-marker` 第 1 个提交），不新增事件类型，时间线与审计投影能看到接替关系；权威仍是任务记录里的 takeover_records。

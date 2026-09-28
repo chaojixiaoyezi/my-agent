@@ -71,6 +71,23 @@
     - 修改后：38 passed，lark 相关报错行为 0。
   - 复现材料在 `~/.my-agent/decision-evidence/lark-expiring-cache-20260928/`。
 
+## 子代理页头部标出“已被 X 接替”（2026-09-28，分支 `claude/ae-tui-superseded-marker` 第 3 个提交）
+
+- **来源**：集成方要求进入被接替的子代理页后，头部也标出接替者；数据同样取 `replaced_by_view`。CLI board 按决定不做。
+- **实现路径**：
+  - 导航行白名单 `tui_agent_navigation._ROW_SCALAR_FIELDS` 放行 `replaced_by_run_id`／`replaced_by_disposition`；
+  - 导航快照新增 `active_replaced_by_run_id`；
+  - 渲染上下文工厂（`tui_ui_setup._make_render_context_factory`）把它传成 `TuiRenderContext.focused_agent_replaced_by`，
+    该字段放在末尾，并进入 `tui_render_context_key`；
+  - 终态头部标签复用名册的 `_with_replacement_marker`。
+- **新增 3 项**（`test_tui_superseded_marker.py` 现共 7 项）：
+  - 真实接替后的名册行进入导航，进入来源子代理页，经真实上下文工厂渲染，100 列和 50 列下头部都有
+    “已完成 · 已被 X 接替”，快照与上下文都带出接替者；
+  - 渲染缓存键随接替者变化。
+- **变异**：5 个变异都变红：导航白名单漏字段、快照不带接替者、上下文工厂不传、头部不标、缓存键漏字段。
+- **回归**：定向 69 个文件：引用导航、渲染器、上下文工厂、渲染上下文与缓存键的 TUI 测试，加上全仓扫描类测试和读文档的测试。结果 1368 passed、1 skipped，229.2 秒；没有跑全仓 pytest。
+- **门禁**：ruff、doc_sync、strict code-size、`git diff --check`、check_clean_package 全部退出 0，CODE_SIZE_REPORT.md 在提交前已还原。
+
 ## TUI 子代理名册标出“已被 X 接替”（2026-09-28，分支 `claude/ae-tui-superseded-marker` 第 2 个提交）
 
 - **来源**：集成方要求对被接替的 DONE 子代理在 TUI 展示面标出“已被 X 接替”，数据取 kernel／视图里的 replaced_by，

@@ -225,6 +225,8 @@ class TuiRenderContext:
     selected_agent_run_id: str = ""
     expanded_goal_id: str = ""
     agent_view_depth: int = 0
+    # 当前查看的子代理已被接替时的接替者 run_id；放在末尾保留位置参数兼容性。
+    focused_agent_replaced_by: str = ""
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
     # 函数用途: 规范渲染上下文，保证动画索引非负和刷新健康使用布尔标记。
@@ -293,6 +295,7 @@ class TuiRenderContext:
             "agent_view_depth",
             max(0, int(self.agent_view_depth or 0)),
         )
+        object.__setattr__(self, "focused_agent_replaced_by", str(self.focused_agent_replaced_by or "").strip())
 
 
 # LLM: frame provider 必须复用 renderer 的可见上下文规则；Todo 的时钟只在 snapshot.has_active_work 时进入 key。
@@ -375,6 +378,7 @@ def tui_render_context_key(
         context.focused_agent_run_id,
         context.focused_agent_name,
         context.focused_agent_status,
+        context.focused_agent_replaced_by,
         context.selected_agent_run_id,
         context.expanded_goal_id,
         context.agent_view_depth,
@@ -797,6 +801,7 @@ def _render_background_activity(
         terminal_icon, terminal_label, terminal_style = _subagent_status_display(
             focused_status
         )
+        terminal_label = _with_replacement_marker(terminal_label, context.focused_agent_replaced_by)
         prefix = (
             (terminal_style, f"{terminal_icon} "),
             ("class:tui-strong", context.focused_agent_name),
@@ -1120,7 +1125,7 @@ def _render_subagent_activity_row(
         status,
         lifecycle_phase=lifecycle_phase,
     )
-    label = _with_replacement_marker(label, row)
+    label = _with_replacement_marker(label, row.get("replaced_by_run_id"))
     if lifecycle_phase in {
         "starting",
         "waiting_first_event",
@@ -1184,11 +1189,11 @@ def _render_subagent_activity_row(
     return (_truncate_formatted_line(tuple(fragments), context.width),)
 
 
-# LLM: 只读行里由 Gateway 摊平的 replaced_by_run_id（来源是 kernel 的 replaced_by 投影），不从状态或正文推断接替；
-#   标注跟在状态标签后，与状态一起预留宽度，不会被职责描述挤掉。
+# LLM: successor 只来自 Gateway 摊平的 replaced_by_run_id（来源是 kernel 的 replaced_by 投影），名册行与子代理页头部共用；
+#   不从状态或正文推断接替。标注跟在状态标签后，与状态一起预留宽度，不会被职责描述挤掉。
 # 函数用途: 被接替的子代理在状态后标出“已被 X 接替”，X 取接替者 run_id 的末段。
-def _with_replacement_marker(label: str, row: dict[str, object]) -> str:
-    successor = sanitize_terminal_text(str(row.get("replaced_by_run_id") or "").strip())
+def _with_replacement_marker(label: str, successor: object) -> str:
+    successor = sanitize_terminal_text(str(successor or "").strip())
     if not successor:
         return label
     return f"{label} · 已被 {successor.rsplit('-', 1)[-1]} 接替"
