@@ -104,7 +104,8 @@ Linux 状态已由 Claude 明确为**未部署（测试机下线）**：0c 和 9
 
 - 通用机制分项、代表包真实迁移可使用、专业内容质量分别报告。A 最终业务 0/9、B 7/9，三次完整回执后的资源重建和 C22/C23 资料误述均保留原失败；未确认新宿主缺陷，不实施未验证的 conflicting_arguments 候选。
 - 两个来源的完整工作流、媒体、外部服务和其它未迁范围继续按来源清单明示；不将它们扩成当前平台开发。安全样例依既有范围不恢复。
-- **Mac 两版发布记录及 wheel 摘要已核；Linux 两版均未部署，测试机下线是外部阻塞，容器源码测试不代替 wheel 发布。** 本次没有重新验证当前生产目录或在线健康。后续 Linux 发布与安装／入口／健康核验由 Claude 按既有安排负责。
+- **Mac 两版发布记录及 wheel 摘要已核；Linux 真机仍未部署（测试机下线）；容器内 wheel 安装、入口、gateway 健康已验证，非真机部署。** 本次没有重新验证当前生产目录或在线健康。
+  2026-09-28 容器冒烟：`git archive 9f88e4905` 按生产流程重建 wheel（sha256 `f42c3ed3…`，生产 `9be2b59f…`；1440 个条目同名同字节，只有 7 个 dist-info 条目的 zip 时间戳不同），在 `my-agent-linux-test:py312`（arm64、`--network none`）新建 venv 以 `--no-deps --no-index` 安装，`python -m agent_py_agent --help`、`my-agent --help`、`my-agent chat --help`、gateway start → `/status`（running、pending=0、processing=0）→ stop 全部 rc=0；证据 `~/.my-agent/releases/step14w-9be2b59f/linux-lane/wheel-smoke/`。容器不是真机，Linux 真机部署仍待测试机恢复后由 Claude 按既有安排负责。
 - 归因文档 `3fd3cff4c3bd72ea571b1afe71bb92887ccad073` 已由 Claude 回报集成、推送及 fetch 核对；本线 HEAD 和 tracking ref 一致，独立在线 fetch 仍连接重置，不能将缓存当在线验证。本节为其后的文档补记。
 
 建议下一步：先由 Claude 核对并集成完整缺项文档，保持 Goal 未完成；未覆盖项先记录，不自动安排新运行或代用户豁免。只读核对可并行，产品、主线和发布由 Claude 独占。本轮无产品／测试／配置及文件树变更，不重复真实任务或全仓 pytest。
