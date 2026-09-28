@@ -120,6 +120,9 @@ TUI 的控制载荷复用普通消息 workspace 投影；HTTP、持久回执、G
 owner 禁用表、激活撤销和连接断开仍由注册表与 `runtime_snapshot` fail-closed；定时任务续跑继续返回完整目录。
 真实断链（2026-09-24）：子代理生命周期唤醒后的 attempt 只有 17 个核心工具，模型继续调用前台刚用过的插件导出工具，
 三次 `TOOL_UNAVAILABLE` 协议违规后整轮中断；修复后由 `test_background_extension_tools.py` 守住。
+子代理整合档（`subagent_integration`）与 goal 子代理两档不再手写直属下级管理工具，而是由 `_with_direct_child_controls`
+从 `subagents/role_templates.DIRECT_CHILD_CONTROL_TOOLS` 派生，原目录顺序不变、末尾补缺（2026-09-28 补上只读的 `list_agents`，
+T3 观察 2）；其它后台档不变，策略收紧仍只做减法，锁测在 `test_background_child_control_tools.py`。
 
 ## 本地来源与 owner 身份
 

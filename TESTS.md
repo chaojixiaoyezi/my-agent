@@ -1,5 +1,30 @@
 # 测试与发布验收
 
+## 后台整合档与 goal 子代理档补齐直属下级管理面（2026-09-28，分支 `claude/be-wake-turn`，基于 `2163629df`）
+
+- **来源**：T3 真实 TUI 验收的观察 2（C 部分）。子代理生命周期唤醒走 `subagent_integration` 档，也就是手写的
+  `DEFAULT_BACKGROUND_ALLOWED_TOOLS` 这 17 个工具；直属下级管理面 `DIRECT_CHILD_CONTROL_TOOLS`（创建、只读状态、插话、
+  取消、权限答复）只进了 4 个，唯独缺 `list_agents`。原因是 08-21 为防“查树 + sleep”轮询删掉 `inspect_agent_tree` 后，
+  08-30 新增的 `list_agents` 进了前台和协调者目录，后台表没跟上。
+- **改动**：`background_tool_policy` 的整合档与 goal 子代理两档（active/terminal）改由 `_with_direct_child_controls`
+  从 `DIRECT_CHILD_CONTROL_TOOLS` 派生：原目录顺序不变，只在末尾按原顺序补缺，现在补的是 `list_agents`。`list_agents` 有给
+  模型的用途说明（只读、不等待、不推进，变化仍由宿主唤醒送达）。其它档（默认、紧急、定时、审计、无子代理的 goal）不变。
+  owner 禁用、任务白名单、显式配置和退休过滤仍只做减法。
+- **测试**（`test_background_child_control_tools.py`，8 项）：
+  - 三个档在策略收紧前都含全部直属管理工具、没有重复，每个工具都有用途说明，提示行里有 `list_agents`；
+  - 三个档都保持原目录前缀，只在末尾补上缺的管理工具；
+  - 收紧只做减法：owner 禁用能去掉 `list_agents`（`removed_tools` 如实记录），任务白名单只取交集（名单外的名字不会加进来），
+    显式配置是精确名单；
+  - 真实后台 `_run_params` 与注册表 `runtime_snapshot` 里，生命周期唤醒片确实能用 `list_agents`。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_background_child_control_tools.py -q`。
+- **变异验证**：9 个全部被抓出（同样在独立字节码缓存的子进程里跑，按字节恢复并核对哈希）：
+  三个档分别不派生；管理工具加在前面（改了原顺序）；删掉 `list_agents` 的用途说明；任务白名单改成并集；
+  忽略 owner 禁用；显式配置也补管理工具；`list_agents` 被列为退休工具。
+- **相关回归**：引用后台工具策略、后台提示词、生命周期唤醒或 `list_agents` 的 33 个测试文件（含
+  `test_architecture_guardrails.py`）1084 passed、1 skipped、4 xfailed。
+- **门禁**：ruff、doc sync（`--base 2163629df`）、strict code-size、`git diff --check`、clean package 均通过；
+  code-size 身份差集相对 `2163629df` 新增 0、减少 0。
+
 ## TaskRun 收口允许静止但未终态的子 run（2026-09-28，分支 `claude/38-taskrun-settle`，基于 `d0318486e`）
 
 - **来源**：dsh-be 的 TaskRun 收口分析（集成方认可）：子代理 BLOCKED 后 `agent_runs.status` 停在 created 是设计，唯一受影响的是

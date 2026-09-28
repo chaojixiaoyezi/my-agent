@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..subagents.role_templates import SHELL_SESSION_TOOLS, active_model_subagent_tools
+from ..subagents.role_templates import (
+    DIRECT_CHILD_CONTROL_TOOLS,
+    SHELL_SESSION_TOOLS,
+    active_model_subagent_tools,
+)
 from .models import SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 # 后台唤醒继续同一 Agent；本表提供默认目录，owner/task 策略在此基础上收紧。
@@ -46,9 +50,17 @@ GOAL_BACKGROUND_ALLOWED_TOOLS = (
     "update_goal",
 )
 
-SUBAGENT_INTEGRATION_ALLOWED_TOOLS = DEFAULT_BACKGROUND_ALLOWED_TOOLS
-GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
-GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_BACKGROUND_ALLOWED_TOOLS
+# LLM: 直属下级管理面只在子代理角色合同里定义一次（DIRECT_CHILD_CONTROL_TOOLS）；这里只在原目录末尾按原顺序补缺，
+#   原有工具顺序不变。补进来的只是候选目录，owner/task 策略、显式配置与退休过滤仍只做减法。
+# 函数用途: 给子代理整合档和 goal 子代理档补齐创建、只读状态、插话、取消和权限答复这组直属管理工具。
+def _with_direct_child_controls(tools: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*tools, *DIRECT_CHILD_CONTROL_TOOLS)))
+
+
+# 子代理生命周期唤醒与 goal 子代理阶段都在管理直属下级，必须拿到完整一组管理工具（含只读的 list_agents）。
+SUBAGENT_INTEGRATION_ALLOWED_TOOLS = _with_direct_child_controls(DEFAULT_BACKGROUND_ALLOWED_TOOLS)
+GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = _with_direct_child_controls(GOAL_BACKGROUND_ALLOWED_TOOLS)
+GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
 
 # 扩展目录处理方式。默认 profile 只能枚举核心工具，而插件/普通 MCP 代理是开放目录（名字随安装变化），
 # 所以由后台运行构造方按注册表的结构化类型事实并入（inherit）；显式配置或任务 allowed_tools 是精确名单，
@@ -74,6 +86,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "cancel_subagents": "打断并结束一个不应继续运行的直属子代理；它不负责轮询、推动或验收。",
+    "list_agents": "只读查看直属子代理的当前状态和结果引用；不等待、不推进，子代理的变化仍由宿主唤醒送达。",
     "send_message": "向当前 owner 的已绑定通道发送一条模型撰写的消息；证据型后台事件必须原样携带其 evidence_refs。",
     "get_goal": "读取当前 /goal 持续目标及其权威状态。",
     "update_goal": "仅在持续目标真正完成或确实阻塞时写入 complete/blocked 终态。",

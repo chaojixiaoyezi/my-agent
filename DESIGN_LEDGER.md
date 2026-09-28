@@ -1086,7 +1086,8 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
     work 索引，流式过滤，不全量加载。前台轮记录带 `carried_runtime_only`，只进去重、已执行工具和工具轮数，不进本片
     工具账与模型可见交接；新增工具轮额度不变。已知例外：`background_max_tool_rounds=0` 且 `max_tool_rounds` 为正数时，
     整条活动回合共用全局上限，唤醒片可能一开始就触顶（既有口径，待另开一项）。细节见 `TESTS.md` 同日条目。
-  - C 待做：后台集成与目标工具档从 `DIRECT_CHILD_CONTROL_TOOLS` 派生（补上 `list_agents`），加锁测；策略收紧只能做减法。
+  - C 已实现：后台整合档与 goal 子代理两档从 `DIRECT_CHILD_CONTROL_TOOLS` 派生，原顺序不变、末尾补上 `list_agents`，
+    有锁测；owner/task 策略、显式配置与退休过滤仍只做减法，其它后台档不变。细节见 `TESTS.md` 同日条目。
   - A 待做：唤醒片记为宿主事件，不再写第二条用户任务。渲染用 `RuntimeFactsTurn`，canonical 用 `# Host Event` 固定首行；
     推荐节按 kind 给固定短名单，`list_agents` 排第一；唤醒事实块从 Active Wake Signal 字段确定性投影；宿主决策只读
     `turn_trigger` 和 `wake_signal`。旧数据不迁移。
