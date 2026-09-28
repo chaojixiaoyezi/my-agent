@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## 后台唤醒片工具轮预算：写 0 回落全局时同样按携带条数平移（2026-09-28，分支 `claude/be-wake-budget`，基于 `315cd81ef`）
+
+- **来源**：B（唤醒片续接前台回合的工具账）留下的例外。`background_max_tool_rounds` 写 0 时不写片上限，
+  `_effective_max_tool_rounds` 回落全局 `max_tool_rounds`。全局是正数 M 时，整条活动回合共用 M，且不加携带条数，
+  前台已用满 M 轮时唤醒片一开始就触顶。集成者定的语义：写 0 时仍回落全局 M，但唤醒片同样按“基线 + 携带条数”起算，
+  新增额度就是 M；全局也是 0 或留空时行为不变。这样正数与 0 两支都是“每片新增额度”。
+- **改动**：只改 `_apply_internal_background_tool_budget`。后台额度 ≤ 0 时读 `AgentConfig.max_tool_rounds`，是正数就写成
+  片上限，随后 `_extend_background_slice_tool_budget` 照常加上携带条数；0、留空或非法值不写，原口径不变。外部消息与
+  到点计划任务仍不套本预算。`runtime_guard_config.yaml` 注释写明两支语义。
+- **测试**（`test_background_active_turn_carry.py` 新增 5 例矩阵，走真实 `_run_params` 链路，本布局携带 2 条）：
+  - 后台额度 7 → 片上限 9；写 0、全局 40 → 片上限 42；
+  - 写 0、全局 0 → 不写片上限，工具循环按不限制；写 0、全局留空 → 不写，按宿主缺省 5000；写 0、全局非法值 → 不写，按 5000；
+  - 每例同时用 `_effective_max_tool_rounds` 核对工具循环实际生效的上限。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_background_active_turn_carry.py -q`。
+- **变异验证**：6 个全部被抓出（写 0 不回落；留空当成 5000；全局盖掉正数后台额度；0 被写成片上限；不加携带条数；
+  非法值不防护），每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，跑完逐字节恢复并核对哈希。
+- **相关回归**：257 个测试文件 5681 passed、2 skipped、28 xfailed、5 xpassed。清单包括与改动路径有关的文件
+  （含 `test_background_main_agent_runtime.py`、`test_runtime_guard_config_shared.py`），也包括全部扫描产品代码的守卫测试
+  （含 `test_architecture_guardrails.py`、`test_constant_names_unique.py`、`test_config_field_readers.py`）。回归在 rebase 前的
+  同一份代码上跑完；rebase 到 `315cd81ef` 后只有 Markdown 不同。
+- **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对 `315cd81ef`
+  新增 0、减少 0。
+
 ## 生命周期续跑读错分支 fail-closed（2026-09-28，分支 `claude/be-wake-fix`，基于 A `c035e9812`）
 
 - **来源**：Codex 审查 B（证据 `capability-validation/evidence/pending-wake-B-read-error-probe.json`）：
@@ -236,7 +259,7 @@
   - 例外（按代码推断，未单独跑）：`background_max_tool_rounds` 显式写 0 时不写片上限，`_effective_max_tool_rounds`
     回落到全局 `max_tool_rounds`；它是正数 N 时整条活动回合（前台加各唤醒片）共用 N，且不加携带条数，前台已用满
     N 轮时唤醒片会一开始触顶。这个口径在本次之前就存在（多次唤醒累计也会触发），本次让单个前台轮就能触发。
-    修它要改 `_apply_internal_background_tool_budget`，不在本次允许改动的函数里，记为后续项。
+    修它要改 `_apply_internal_background_tool_budget`，不在本次允许改动的函数里，记为后续项（已由同日预算条修掉）。
 - **测试**（`test_background_active_turn_carry.py`，5 项）：
   - 精确范围：owner 索引与任务索引只取本请求的记录；别的请求、只在参数里提到本请求编号的记录、坏行、别的 run 的
     索引都不进来；owner 记录带运行时标记，任务记录不带；空请求编号返回空。

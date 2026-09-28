@@ -12,6 +12,8 @@
 - 两个来源各自读取、各自捕获异常，owner 索引读不到时任务索引照常读到；
 - 读不到时 task_attributes 留下结构化不完整事实（来源与错误类型），压缩重试沿用首次读取的结论；
 - 不完整时一次性编排去重 fail-closed：没写 replacement_for_run_ids 的 create_subagents 一律拦下，其它工具不受影响。
+预算（集成者定语义后补，2026-09-28）：background_max_tool_rounds 为正数，或写 0 回落到全局正数 max_tool_rounds，
+都是“每片新增额度”，片上限按“基线 + 携带条数”起算；全局也是 0 或留空时不写片上限，行为不变。
 """
 from __future__ import annotations
 
@@ -21,6 +23,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core._tool_loop_service import (
+    _DEFAULT_MAX_TOOL_ROUNDS,
+    _effective_max_tool_rounds,
+)
 from agent_py_agent.agent.agent_core.orchestration.create_payload import (
     effective_replacement_ids_per_child,
 )
@@ -55,6 +61,7 @@ from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
     carried_tool_call_records_for_requests,
 )
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.runtime_guard_config import runtime_guard_policy
 from agent_py_agent.agent.user_space.run_workspace import run_workspace_owner_home
 
 _FOREGROUND = "gwreq-foreground-1"
@@ -231,9 +238,14 @@ def _break_index(root: Path) -> None:
     index.mkdir(parents=True)
 
 
-# 函数用途: 按 B 的真实布局准备线程、任务链接与原用户消息，返回本片的后台运行参数。
-def _wake_params(tmp_path: Path, task_root: Path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+# 函数用途: 按 B 的真实布局准备线程、任务链接与原用户消息，返回本片的后台运行参数；
+#   config 覆盖全局配置字段，guard 覆盖随包运行时守卫的取值（预算用例用），都不读真实用户配置。
+def _wake_params(tmp_path: Path, task_root: Path, *, config: dict | None = None, guard: dict | None = None):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), **(config or {})), tmp_path,
+    )
+    if guard:
+        agent.runtime_guard_policy = runtime_guard_policy(overrides=guard)
     store = agent.conversation_store
     thread = store.threads.get_or_create({
         "canonical_user_id": "user-1", "channel": "internal", "channel_conversation_id": "thread-wake-error",
@@ -373,3 +385,26 @@ def test_fail_closed_guard_reads_replacements_like_the_creation_boundary(
 
     assert effective_replacement_ids_per_child(call) == expected_ids
     assert _one_shot_blocked_by_incomplete_carry(SimpleNamespace(task_attributes=attributes), call) is blocked
+
+
+# 预算三情形（集成者定的语义）：后台片额度为正数，或写 0 回落到全局正数上限，都按“基线 + 携带条数”起算；
+#   全局也是 0（不限制）、留空（宿主缺省 5000）或非法值时不写片上限，由全局口径决定。本布局携带 2 条（前台派工与片内读取）。
+#   每例依次是 background_max_tool_rounds、全局 max_tool_rounds、片上限（None = 不写）、工具循环实际生效的上限。
+@pytest.mark.parametrize("case", [
+    (7, 40, 9, 9),
+    (0, 40, 42, 42),
+    (0, 0, None, 0),
+    (0, None, None, _DEFAULT_MAX_TOOL_ROUNDS),
+    (0, "不是数字", None, _DEFAULT_MAX_TOOL_ROUNDS),
+])
+def test_wake_slice_rounds_are_a_per_slice_allowance_on_both_budget_branches(tmp_path, case) -> None:
+    background_rounds, global_rounds, slice_limit, effective = case
+    _owner, task_root = _owner_layout(tmp_path)
+
+    params = _wake_params(tmp_path, task_root, config={"max_tool_rounds": global_rounds},
+                          guard={"background_max_tool_rounds": background_rounds})
+
+    assert len(params.carried_archive_tool_calls) == 2
+    assert params.task_attributes.get("max_tool_rounds") == slice_limit
+    agent = SimpleNamespace(config=SimpleNamespace(max_tool_rounds=global_rounds))
+    assert _effective_max_tool_rounds(agent, SimpleNamespace(task_attributes=params.task_attributes)) == effective

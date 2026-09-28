@@ -2192,6 +2192,11 @@ def _apply_background_audit_link_attributes(
     ]
 
 
+# LLM: 写进 attributes["max_tool_rounds"] 的是“每片新增额度”，_run_params 随后由 _extend_background_slice_tool_budget
+#   按携带条数平移。background_max_tool_rounds 写 0 时回落全局 AgentConfig.max_tool_rounds：正数 M 同样写成片上限
+#   （新增额度就是 M）；0（不限制）、留空（宿主缺省 5000）或非法值不写，_effective_max_tool_rounds 的原有口径不变。
+#   外部消息与到点计划任务不套本预算。改语义要同步 test_background_active_turn_carry 的预算矩阵和 runtime_guard_config.yaml 注释。
+# 函数用途: 给内部后台唤醒片写工具轮上限和执行批大小；只改传入的 attributes 字典，不读写文件。
 def _apply_internal_background_tool_budget(
     attributes: dict[str, object],
     request: BackgroundRunRequest,
@@ -2214,6 +2219,11 @@ def _apply_internal_background_tool_budget(
         4,
         policy=policy,
     )
+    if rounds <= 0:
+        try:
+            rounds = int(getattr(getattr(agent, "config", None), "max_tool_rounds", None) or 0)
+        except (TypeError, ValueError):
+            rounds = 0
     if rounds > 0:
         attributes["max_tool_rounds"] = rounds
     if calls > 0:

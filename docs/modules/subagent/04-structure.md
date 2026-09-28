@@ -709,7 +709,8 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
   `run_id == task_id == root task id` 的 `tool_call/tool_output` 行，按 scoped call id 去重，恢复参数、终态、
   artifact ref、one-shot 派工键和工具轮基线。child 的 task index、sibling/旧 root 和自然语言正文不参加。
 - `background_max_tool_rounds` 仍表示每个新工作片可新增的轮数，因此 absolute limit 在 carried baseline 上
-  平移；这不是放大无限预算。typed Audit provider-quota wake 是 detached 用户通知，继续使用自己的 prompt，
+  平移；这不是放大无限预算。写 0 回落全局正数 `max_tool_rounds` 时同样平移（2026-09-28）；全局也是 0 或留空时
+  不设片上限，照全局口径。typed Audit provider-quota wake 是 detached 用户通知，继续使用自己的 prompt，
   不冒充 active-turn continuation。
 
 ## 2026-08-22 child runner 续跑所有权

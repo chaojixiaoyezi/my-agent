@@ -133,6 +133,9 @@ unknown_command_max_calls: 200
 #   死循环的最后硬顶。每个并发执行批次最多 4 个调用；模型同一回复已经提交的
 #   其余调用会紧接着分批执行，全部获得真实结果后才再次采样模型，不能伪造“未执行失败”。
 #   真实用户新消息与到点计划任务不套这个后台批大小。
+#   background_max_tool_rounds 是“每片新增额度”：唤醒片续接同一回合时，片上限 = 携带的已执行工具条数（基线）
+#   + 额度，不会因为前台已用的轮数一开始就触顶。写 0 表示回落 agent_config.yaml 的 max_tool_rounds：它是正数时
+#   同样按“基线 + 携带条数”起算，新增额度就是它；它也是 0（不限制）或留空（5000）时不设片上限，照全局口径。
 background_max_tool_rounds: 5000
 background_max_tool_calls_per_round: 4
 
