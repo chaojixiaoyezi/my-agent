@@ -28,6 +28,14 @@
 - **附带实测**：普通 `write_file(content)` 在 ask 下也不弹审批，与 README 权限模式表的说明一致。
 - **观察**：脚本模型在同一续跑轮里重复同一个失败的 get，共 393 个模型轮，宿主只给提示、没有硬停，最后由测试者暂停。这个问题留给产品线判断，本条不改产品。证据在 `~/.my-agent/decision-evidence/g05-followup-9f88/`（仓库外）。
 
+## C25 空选后能力包对主线程的可见性核对（2026-09-28，分支 `claude/38-empty-selection-visibility`，基于 `b1d382307`，只改文档）
+
+- 只读核对固定 `9f88e4905`：主线程快照来自 owner 全部已启用包（`core.py:514-520`、`skill_service.py:87-109`），`skill_snapshot_for_run_scope`（`core.py:531-555`）对主线程只剔除失效 pin，不按选择裁剪；`_commit_selection` 空选只写回执，不写 pins、不改工具面；`skill_search` search/get 无 pin 前置，get 成功即写 pin（`package_read.py:52-105`、`task_references.py:120-154`）。
+- 本地合同测试 2 项通过（真实 `SimpleAgent` + 安装表，假 backend 空选后 search 命中两包、get 成功并 pin；直接 get 亦 pin）；文件不入仓，保存在证据目录。
+- 8435 脚本模型端到端：选择请求答 `{"selected_ids": []}`，任务 `outcome=empty`；主轮 search 命中两包，按 `next_read` get 到 B 入口 2651 字符并写 pin；工具账 2/2 成功。首个请求因假模型未答工具探针失败（`TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE`），修正后重开会话一次提交。
+- 结论 (a)：空选后包仍可按需发现、读取、pin，C24 是模型行为，不是设计问题；无产品改动。详见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c25空选后能力包对主线程的可见性只读核对与脚本复现2026-09-28)，证据在 `~/.my-agent/decision-evidence/empty-selection-visibility-9f88/`。
+- 本轮 doc sync、`git diff --check`、clean-package 按纯文档范围执行；不跑仓内 pytest，线上 CI 未作来源。建议下一步：与 C24 一起合入；空选再现时按模型行为记账，不改提示凑证据。
+
 ## C24固定9f88的131072自然长任务两代压缩（2026-09-28，分支 `claude/38-compact-131072-acceptance`，基于 `60f6f485a`，只改文档）
 
 - 被测 `9f88e4905`（与生产 step14w 产品代码相同）由 git archive 构建 wheel `d3a6e0fd…` 装进新 venv；隔离 home、owner local/main、私有 Gateway 127.0.0.1:8435；catalog 沿用 C21/C22 那份副本（600、未打印、跑完删除），只由脚本把 `selected` profile 窗口 262144 → 131072；A0.3.0/B0.1.4 用原生 `/plugins install`/`enable` 装入，安装账本运行前后一致。
