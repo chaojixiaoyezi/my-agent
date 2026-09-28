@@ -3,69 +3,54 @@ from __future__ import annotations
 import time
 
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
-from ...subagents.models import TaskStatus
+from ...subagents.models import TaskStatus, task_replacement_successor
 
 _REPLACEMENT_RECORD_SUCCESS = frozenset({"recorded", "already_recorded"})
 
 
 # LLM: Replacement preflight trusts only explicit source run ids and canonical
 # parent/takeover state. It never treats matching goals, covers, or outputs as authority.
-# 函数用途: 在创建新 child 前确认每个被接管 run 存在、属于同一直属父级且尚未被别人接管。
+# 已被接替的判断统一读 takeover_by/superseded_by（models.task_replacement_successor），第二次接替同一来源一律拒绝。
+# 函数用途: 在创建新 child 前确认每个被接管 run 存在、属于同一直属父级且尚未被别人接管或取代。
 def validate_create_replacements(agent: object, task_params: list[object]) -> list[dict[str, object]]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return [{"reason": "subagent_manager_unavailable"}]
     issues: list[dict[str, object]] = []
     claimed: dict[str, int] = {}
-    for index, params in enumerate(task_params):
-        source_ids = _params_replacement_source_ids(params)
-        parent_id = str(getattr(params, "parent_id", "") or "").strip()
-        for source_id in source_ids:
-            previous_index = claimed.get(source_id)
-            if previous_index is not None:
-                issues.append(
-                    {
-                        "index": index,
-                        "source_run_id": source_id,
-                        "reason": "duplicate_replacement_source",
-                        "first_item_index": previous_index,
-                    }
-                )
-                continue
-            claimed[source_id] = index
-            try:
-                source = manager.load(source_id)
-            except Exception as exc:
-                issues.append(
-                    {
-                        "index": index,
-                        "source_run_id": source_id,
-                        "reason": "source_unavailable",
-                        "error_type": type(exc).__name__,
-                    }
-                )
-                continue
-            source_parent = str(getattr(source, "parent_id", "") or "").strip()
-            if source_parent != parent_id:
-                issues.append(
-                    {
-                        "index": index,
-                        "source_run_id": source_id,
-                        "reason": "source_not_direct_sibling",
-                        "source_parent_id": source_parent,
-                        "expected_parent_id": parent_id,
-                    }
-                )
-            takeover_by = str(getattr(source, "takeover_by", "") or "").strip()
-            if takeover_by:
-                issues.append(
-                    {
-                        "index": index,
-                        "source_run_id": source_id,
-                        "reason": "source_already_taken_over",
-                        "takeover_by": takeover_by,
-                    }
-                )
+    edges = [
+        (index, str(getattr(params, "parent_id", "") or "").strip(), source_id)
+        for index, params in enumerate(task_params)
+        for source_id in _params_replacement_source_ids(params)
+    ]
+    for index, parent_id, source_id in edges:
+        previous_index = claimed.get(source_id)
+        if previous_index is not None:
+            issues.append({"index": index, "source_run_id": source_id, "reason": "duplicate_replacement_source",
+                           "first_item_index": previous_index})
+            continue
+        claimed[source_id] = index
+        issues.extend(_source_issues(manager, source_id, index, parent_id))
+    return issues
+
+
+# LLM: 单个来源的预检：读不到、不是同一直属父级、已被接替（takeover_by 或 superseded_by）各给一条结构化问题。只读。
+# 函数用途: 检查一个被接替的旧 run 能否由当前父级接替，返回发现的问题列表。
+def _source_issues(manager: object, source_id: str, index: int, parent_id: str) -> list[dict[str, object]]:
+    try:
+        source = manager.load(source_id)
+    except Exception as exc:
+        return [{"index": index, "source_run_id": source_id, "reason": "source_unavailable",
+                 "error_type": type(exc).__name__}]
+    issues: list[dict[str, object]] = []
+    source_parent = str(getattr(source, "parent_id", "") or "").strip()
+    if source_parent != parent_id:
+        issues.append({"index": index, "source_run_id": source_id, "reason": "source_not_direct_sibling",
+                       "source_parent_id": source_parent, "expected_parent_id": parent_id})
+    successor, disposition = task_replacement_successor(source)
+    if successor:
+        issues.append({"index": index, "source_run_id": source_id, "reason": "source_already_taken_over",
+                       "takeover_by": successor, "disposition": disposition})
     return issues
 
 
@@ -164,27 +149,22 @@ def _replacement_source_ids(task: object) -> list[str]:
 
 
 # LLM: One takeover write is monotonic and exposes missing/conflicting/storage failures as structured status rather than raising into startup.
+# 只有重新读取的权威状态里接替者确实是本次 replacement 时才回报 recorded，并带 disposition（taken_over/superseded）；
+# 写入被还原或没落盘时回报 not_persisted，不能冒充成功。
 # 函数用途: 精确记录一条旧 run 到新 run 的接管边，供创建闸决定是否允许新 child 启动。
 def _record_single_replacement(manager, source_id: str, replacement_id: str) -> dict[str, object]:
+    from ...subagents.services.takeover.record import TakeoverNotPersistedError
+
+    edge = {"source_run_id": source_id, "replacement_run_id": replacement_id}
     try:
         source = manager.load(source_id)
     except Exception as exc:
-        return {
-            "source_run_id": source_id,
-            "replacement_run_id": replacement_id,
-            "status": "source_missing",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    existing = str(getattr(source, "takeover_by", "") or "").strip()
+        return {**edge, "status": "source_missing", "error": f"{type(exc).__name__}: {exc}"}
+    existing, disposition = task_replacement_successor(source)
     if existing == replacement_id:
-        return {"source_run_id": source_id, "replacement_run_id": replacement_id, "status": "already_recorded"}
-    if existing and existing != replacement_id:
-        return {
-            "source_run_id": source_id,
-            "replacement_run_id": replacement_id,
-            "status": "already_taken_over",
-            "takeover_by": existing,
-        }
+        return {**edge, "status": "already_recorded", "disposition": disposition}
+    if existing:
+        return {**edge, "status": "already_taken_over", "takeover_by": existing, "disposition": disposition}
     try:
         manager.record_takeover(
             source_id,
@@ -192,14 +172,23 @@ def _record_single_replacement(manager, source_id: str, replacement_id: str) -> 
             reason="explicit replacement declared by create_subagents",
             locked_files=[],
         )
+    except TakeoverNotPersistedError as exc:
+        return {**edge, "status": "not_persisted", "disposition": exc.disposition}
     except Exception as exc:
-        return {
-            "source_run_id": source_id,
-            "replacement_run_id": replacement_id,
-            "status": "record_failed",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    return {"source_run_id": source_id, "replacement_run_id": replacement_id, "status": "recorded"}
+        return {**edge, "status": "record_failed", "error": f"{type(exc).__name__}: {exc}"}
+    return _persisted_replacement_record(manager, edge)
+
+
+# LLM: 回报前重新读取来源的权威状态；接替者不是本次 replacement（写入被还原、没落盘或读不到）就回报 not_persisted。只读。
+# 函数用途: 按真实落盘结果生成一条接替回执。
+def _persisted_replacement_record(manager, edge: dict[str, str]) -> dict[str, object]:
+    try:
+        successor, disposition = task_replacement_successor(manager.load(edge["source_run_id"]))
+    except Exception as exc:
+        return {**edge, "status": "not_persisted", "error": f"{type(exc).__name__}: {exc}"}
+    if successor != edge["replacement_run_id"]:
+        return {**edge, "status": "not_persisted", "disposition": disposition}
+    return {**edge, "status": "recorded", "disposition": disposition}
 
 
 __all__ = [

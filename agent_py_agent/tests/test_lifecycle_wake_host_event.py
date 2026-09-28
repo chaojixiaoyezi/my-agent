@@ -325,8 +325,8 @@ class _LatestUserTaskBackend:
         return ModelResponse(text="收到宿主事件：子代理被授权门拦下，等待用户确认。", backend=self.name)
 
 
-# 函数用途: 按 T3 round1 的真实布局搭场景：前台成功派出一个子代理（记录在 owner 根索引），子代理随后阻塞。
-def _blocked_child_scene(tmp_path, backend: _LatestUserTaskBackend):
+# 函数用途: 按 T3 round1 的真实布局搭场景：前台成功派出一个子代理（记录在 owner 根索引），子代理随后进入 status（默认阻塞）。
+def _blocked_child_scene(tmp_path, backend, status: str = "BLOCKED"):
     agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
                                     orphan_supervision_interval_seconds=0), tmp_path)
     agent.backend = backend
@@ -345,7 +345,7 @@ def _blocked_child_scene(tmp_path, backend: _LatestUserTaskBackend):
     ))
     child = agent.subagents.create_run(goal=_CHILD_GOAL, thought="", plan=["读取"], parent_id=_TASK, root_id=_TASK,
                                        attributes={"conversation_request_id": _REQUEST})
-    agent.subagents.lifecycle.set_status(child.id, "BLOCKED")
+    agent.subagents.lifecycle.set_status(child.id, status)
     store = agent.conversation_store
     thread = store.threads.get_or_create({"canonical_user_id": "user-1", "channel": "internal",
                                           "channel_conversation_id": "thread-host-event", "channel_user_id": "user-1"})
@@ -359,11 +359,13 @@ def _blocked_child_scene(tmp_path, backend: _LatestUserTaskBackend):
 
 
 def _run_wake(agent, store, thread, child) -> None:
+    status = agent.subagents.load(child.id).status
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
     runtime.run_once({
         "thread_id": thread.thread_id, "task_id": _TASK, "reason": _CHILD_WAKE,
         "wake_signal": {**_wake(), "source_agent_id": child.id,
-                        "metadata": {"task_id": child.id, "status": "BLOCKED", "turn_end_reason": "tool_failure_halt",
+                        "metadata": {"task_id": child.id, "status": status,
+                                     "turn_end_reason": "tool_failure_halt" if status == "BLOCKED" else "completed",
                                      "conversation_request_id": _REQUEST}},
     })
 
@@ -443,3 +445,55 @@ def test_scripted_model_is_stopped_when_the_foreground_history_is_unreadable(tmp
     assert backend.dispatched == 1 and len(backend.requests) == 2
     assert "TOOL_ONE_SHOT_HISTORY_INCOMPLETE" in _tool_result_text(backend.requests[1], "wake-create")
     assert [run.id for run in agent.subagents.list_runs() if run.root_id == _TASK] == [child.id]
+
+
+# 类用途: 唤醒片先按原参数派工（被历史不完整门拦下），再按拒绝结果给出的唯一出口写 replacement_for_run_ids 接替已完成的子代理。
+class _ReplaceAfterRejectionBackend:
+    name = "replace-after-rejection"
+
+    def __init__(self) -> None:
+        self.requests: list[list[dict]] = []
+        self.source_id = ""
+
+    def probe_tool_capability(self):
+        return _native_probe(self)
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
+        messages = [message for message in list(kwargs.get("messages") or []) if isinstance(message, dict)]
+        self.requests.append(messages)
+        if _tool_result_text(messages, "wake-replace"):
+            return ModelResponse(text="已按接替关系另派子代理。", backend=self.name)
+        if _tool_result_text(messages, "wake-create"):
+            return ModelResponse(text="", backend=self.name, tool_use_blocks=[{
+                "id": "wake-replace", "name": "create_subagents",
+                "input": {"goal": "接替已完成的子代理重新整理要点", "replacement_for_run_ids": [self.source_id]},
+            }])
+        return ModelResponse(text="", backend=self.name, tool_use_blocks=[
+            {"id": "wake-create", "name": "create_subagents", "input": {"goal": _CHILD_GOAL}},
+        ])
+
+
+def test_history_incomplete_exit_can_supersede_a_done_child(tmp_path, monkeypatch) -> None:
+    import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
+
+    # 只替换后台启动这一步：接替子代理照常创建和落账，但不在测试里真的跑它。
+    monkeypatch.setattr(background_dispatch, "_start_background_dispatch",
+                        lambda _agent, run_ids, **_kwargs: {"status": "started", "run_ids": list(run_ids)})
+    backend = _ReplaceAfterRejectionBackend()
+    agent, store, thread, child = _blocked_child_scene(tmp_path, backend, status="DONE")
+    backend.source_id = child.id
+    # owner 根索引读不到：普通重派被 fail-closed 拦下，但写明接替已完成子代理的派工必须照常放行并如实落账。
+    index = agent.home_paths.owner_home_dir / "blobs" / "tool_outputs" / "index.jsonl"
+    index.unlink()
+    index.mkdir()
+
+    _run_wake(agent, store, thread, child)
+
+    assert len(backend.requests) == 3
+    assert "TOOL_ONE_SHOT_HISTORY_INCOMPLETE" in _tool_result_text(backend.requests[1], "wake-create")
+    replaced = _tool_result_text(backend.requests[2], "wake-replace")
+    assert "superseded" in replaced and "not_persisted" not in replaced
+    replacement = next(run for run in agent.subagents.list_runs() if run.id != child.id)
+    source = agent.subagents.load(child.id)
+    assert source.status == "DONE" and source.superseded_by == replacement.id
+    assert replacement.attributes["replacement_for_run_ids"] == [child.id]

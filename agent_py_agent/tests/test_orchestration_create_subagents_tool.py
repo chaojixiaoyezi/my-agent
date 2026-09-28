@@ -694,7 +694,8 @@ class TestCreateSubagentsToolStartControls:
         assert reloaded.status == "TAKEN_OVER"
         assert reloaded.takeover_by == replacement_id
         assert payload["replacement_records"] == [
-            {"source_run_id": source.id, "replacement_run_id": replacement_id, "status": "recorded"}
+            {"source_run_id": source.id, "replacement_run_id": replacement_id, "status": "recorded",
+             "disposition": "taken_over"}
         ]
 
     def test_replacement_preflight_rejects_other_parent_without_creating(self, tmp_path):

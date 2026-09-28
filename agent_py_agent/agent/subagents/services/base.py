@@ -666,6 +666,10 @@ class SubAgentBaseService:
         if parent_id:
             self.manager.add_child(parent_id, task.id)
 
+    # LLM: 所有接管入口（显式接替、手动接管、领导权恢复、接管 run）先过统一授权门，再交 takeover.record 落账：已关闭
+    #   来源只追加 superseded_by、终态不改写，未关闭来源转 TAKEN_OVER；保存后核对落盘，读不到就抛
+    #   TakeoverNotPersistedError 且不写 TAKEOVER.md。返回值仍是 TakeoverRecord，调用方契约不变。
+    # 函数用途: 记录一次接管或接替并写 TAKEOVER.md；不结束子代理进程。
     def record_takeover(
         self,
         run_id: str,
@@ -674,12 +678,11 @@ class SubAgentBaseService:
         reason: str,
         locked_files: list[str] | None = None,
     ) -> TakeoverRecord:
-        """Record a takeover and write TAKEOVER.md.
+        """Record a takeover edge and write TAKEOVER.md.
 
-        This does not actually kill the subagent process, but records ownership and lock files.
+        This does not kill the subagent process; it records ownership, lock files and the successor run.
         """
-        from ..models import TakeoverRecord
-        from ..utils import _merge_list
+        from .takeover.record import TakeoverEdgeRequest, record_takeover_edge
 
         # 3.txt B.4：takeover 落账同样过统一授权查询门（owner 一致性）。
         task = authorize_operation(
@@ -690,32 +693,8 @@ class SubAgentBaseService:
                 requester_owner=str(getattr(self.manager, "owner_id", "") or ""),
             ),
         )
-        record = TakeoverRecord(
-            id=self.manager._new_id("takeover"),
-            run_id=run_id,
-            take_over_by=take_over_by,
-            reason=reason,
-            locked_files=locked_files or [],
-            previous_owner=task.owner,
-            created_at=time.time(),
-        )
-        task.takeover_records.append(record)
-        task.takeover_by = take_over_by
-        task.takeover_reason = reason
-        task.locked_files = _merge_list(task.locked_files, record.locked_files)
-        task.final_owner = take_over_by
-        task.status = "TAKEN_OVER"
-        task.updated_at = time.time()
-        attrs = dict(getattr(task, "attributes", {}) or {})
-        runtime_scope = dict(attrs.get("runtime_config_scope") or runtime_config_scope(task))
-        runtime_scope["takeover_by"] = take_over_by
-        runtime_scope["takeover_record_id"] = record.id
-        runtime_scope["loaded_as"] = "task_layer_after_takeover" if runtime_scope.get("overlay_ref") else "base_config"
-        attrs["runtime_config_scope"] = runtime_scope
-        task.attributes = attrs
-        self.manager.save(task)
-        self.manager._write_takeover_file(task, record)
-        return record
+        request = TakeoverEdgeRequest(take_over_by=take_over_by, reason=reason, locked_files=list(locked_files or []))
+        return record_takeover_edge(self.manager, task, request)
 
 
 def _manager_workspace_attrs(manager: Any) -> dict[str, object]:

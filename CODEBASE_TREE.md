@@ -368,6 +368,7 @@ agent_py_agent/
 |   |   |   |-- executor_recovery.py   # 执行器确证退出后的失败/未知副作用投影与父级通知
 |   |   |   |-- board/                  # board、due-check、action-plan
 |   |   |   |-- actions/                # action-plan 应用、取消/接管动作
+|   |   |   |-- takeover/               # 接管 run、接管就绪包；record.py 是接管/接替边的唯一落账入口（已结束来源只记 superseded_by）
 |   |   |   |-- hierarchy/              # 多层调度和恢复包
 |   |   |   |-- patch_apply/            # patch review/apply/report
 |   |   |   |-- capability_service.py   # 能力请求、grant、gap、路由
@@ -824,7 +825,8 @@ agent_py_agent/
 |   |-- test_background_compact_recovery.py # 后台transcript及活动归档候选和实际HTTP材料对照、失败不恢复发送
 |   |-- test_background_active_turn_carry.py # 生命周期唤醒片按精确请求编号续接前台轮工具事实：owner记录只进运行时状态、同内容派工判重复、预算不缩水
 |   |-- test_background_child_control_tools.py # 后台整合档与goal子代理档从直属管理面唯一定义派生（含list_agents）、原顺序不变、收紧只做减法
-|   |-- test_lifecycle_wake_host_event.py # 唤醒片记为宿主事件：确定性事实投影、原生与文本渲染、固定推荐、历史不重放注入、脚本化假模型不再重复派工
+|   |-- test_lifecycle_wake_host_event.py # 唤醒片记为宿主事件：确定性事实投影、原生与文本渲染、固定推荐、历史不重放注入、脚本化假模型不再重复派工、历史不完整时接替已完成子代理
+|   |-- test_subagent_done_supersede.py # 已结束子代理被接替：终态不改写只记 superseded_by、回执按落盘结果、防重复接替、持久化白名单、父级视图 replaced_by
 |   |-- test_compact_active_projection.py # 原生交接纯替换、媒体插话与guidance保留、未知IR拒绝
 |   |-- test_active_turn_compact_projection.py # 活动归档完整容量、取消、CAS及局部证据继承
 |   |-- test_gateway_child_compact_scope_application.py # Gateway和child共用view、交错游标及Audit范围隔离
@@ -1712,7 +1714,9 @@ docs/
 - `agent_py_agent/tests/test_background_active_turn_carry.py`：子代理生命周期唤醒片续接原用户回合的工具事实；锁 owner 根与任务两处索引按精确请求编号流式读取、别的请求与别的 run 不进来，前台记录只进运行时状态（去重、已执行工具、工具轮数），溢出压缩携带保留，本片新增工具轮额度不变。
 - `agent_py_agent/agent/agent_core/runtime/turn_trigger.py`：回合触发类型 `TurnTrigger` 的唯一定义；只按 kind 决定当前回合用“# User Task”还是“# Host Event”开头、推荐区是否用固定短名单、哪些宿主快照不进后续重放，不解析事实正文，也不授权。
 - `agent_py_agent/agent/conversation/lifecycle_wake_event.py`：把子代理生命周期唤醒信封投影成 `TurnTrigger`（字段白名单、键排序、有界）；不收原始结果 JSON；原任务不在历史里（已核实的 Goal 任务来源或唤醒没有请求编号）时才附有界原任务，`origin_request_ids` 只放真实历史请求。
-- `agent_py_agent/tests/test_lifecycle_wake_host_event.py`：锁唤醒事实投影、原生 IR/文本 prompt/缓存布局的宿主事件开头、固定推荐短名单、唤醒片历史不重放后台注入；并用按“最新 User Task”行事的脚本化假模型走真实后台链路，证明唤醒片不再重复派工、一律派工的变体被去重门拦下。
+- `agent_py_agent/tests/test_lifecycle_wake_host_event.py`：锁唤醒事实投影、原生 IR/文本 prompt/缓存布局的宿主事件开头、固定推荐短名单、唤醒片历史不重放后台注入；并用按“最新 User Task”行事的脚本化假模型走真实后台链路，证明唤醒片不再重复派工、一律派工的变体被去重门拦下；历史读不全时，写明 replacement_for_run_ids 接替已完成子代理的派工照常放行并落账为 superseded。
+- `agent_py_agent/agent/subagents/services/takeover/record.py`：接管/接替边的唯一落账入口。已结束来源（DONE/ABANDONED/CANCELLED）终态不改写，只追加 `superseded_by` 与一条 TakeoverRecord；未结束来源照旧转 TAKEN_OVER；保存后重读核对，未落盘抛 `TakeoverNotPersistedError` 且不写 TAKEOVER.md。
+- `agent_py_agent/tests/test_subagent_done_supersede.py`：锁已结束子代理被接替的完整合同：状态保持并记 superseded、BLOCKED 仍 TAKEN_OVER、落账入口与回执两道落盘核对、第二次接替被预检拒绝、已关闭记录的单调追加白名单与同状态旧快照、接管 run 按 superseded_by 幂等、kernel 与 list_agents 视图的 replaced_by。
 - `agent_py_agent/tests/test_background_child_control_tools.py`：锁后台子代理整合档与 goal 子代理两档在策略收紧前包含 `DIRECT_CHILD_CONTROL_TOOLS` 全部工具（原顺序不变、末尾补缺），owner/task/显式配置收紧只做减法，真实后台运行参数与注册表快照里生命周期唤醒片能用 `list_agents`。
 - `agent_py_agent/tests/test_compact_capacity_host_chain.py`：走真实 `PreparedCompactRecovery` 两个入口（三宿主 transcript、联合来源、活动回合），只替身摘要与末端 HTTP；锁固定开销经宿主只计量入口只在失败时量一次、测不出缺失，保留 IR 按候选实际发送材料计，以及与候选替换规则的等价。
 - `agent_py_agent/tests/test_task_run_settle_quiescent_children.py`：`settle_task_run_if_agent_tree_terminal` 的树判定回归：根终态 + BLOCKED 子 run 能关 TaskRun 并在 `task_run.closed` 留静止子 run 证据；子 run 再起 attempt 经 `task_run.reopened` 重开；attempt 在跑/仍持锁/根未终态/无 attempt 都保持开放；发现扫描能关掉存量；pending 激活的 started 事件按各自列写。
