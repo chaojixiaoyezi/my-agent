@@ -51,6 +51,7 @@ from .decision_policy import (
 
 # LLM: 宿主准备前创建；experiment 只标记路径而非许可，准入通过时 enabled_points 只含普通模式为 off 的授权点；
 # experiment_available 是普通阶段同次读取得到的零 I/O 提示，只决定是否值得再建实验阶段，不代表准入；scope/deadline 不跨身份复用。
+# caller_deadline 单独保存建阶段时调用方给的绝对期限（如 Curator 租约），普通后台点位不再吃阶段预算残值时仍受它约束。
 # 类用途: 保存同一原业务批次共用的绝对预算与可信身份。
 @dataclass(frozen=True)
 class DecisionStage:
@@ -66,6 +67,7 @@ class DecisionStage:
     enabled_points: tuple[str, ...] = ()
     experiment: bool = False
     experiment_available: bool = False
+    caller_deadline: float | None = None
 
 
 # LLM: may_apply仅表示返回时信封有效；消费前用同一helper核验内存连接摘要/绝对期限，逐题error仍由消费者处理，不授予写入权。
@@ -132,6 +134,28 @@ def _deadline(value: object) -> float | None:
     return float(value)
 
 
+# LLM: 前台（thread）阶段与实验阶段保留阶段总上限：前台用户在等，实验另有授权窗口。普通后台（owner_background）阶段
+#   的每个点位从自己的开始时刻起算完整点位预算，不吃同阶段前一点位留下的阶段倒计时残值。两类都不越过调用方绝对期限
+#   （建阶段时的 caller_deadline 与本次调用的取更小）。decide 与 decision_outcome_is_current 必须同口径，
+#   改动同步 test_decision_background_deadline。
+# 函数用途: 算出一次点位调用的绝对截止时刻；纯计算，不读写状态。
+def _point_deadline(stage: DecisionStage, started: float, timeout_seconds: float, caller: float | None) -> float:
+    limits = [started + timeout_seconds]
+    if stage.scope != "owner_background" or stage.experiment:
+        limits.append(stage.deadline)
+    limits.extend(value for value in (stage.caller_deadline, caller) if value is not None)
+    return min(limits)
+
+
+# LLM: 与 _point_deadline 同口径：普通后台阶段的建议只看自带的点位期限（发送时已并入调用方期限），不能在阶段预算到点后
+#   把按完整点位预算拿到的结果判为过期；前台与实验阶段仍取阶段上限与点位期限的较小值。
+# 函数用途: 算出一条建议最晚可被采用的绝对时刻；纯计算，不读写状态。
+def _adoption_deadline(stage: DecisionStage, outcome: DecisionOutcome) -> float:
+    if stage.scope == "owner_background" and not stage.experiment:
+        return outcome.deadline
+    return min(stage.deadline, outcome.deadline)
+
+
 # LLM: 用户停止优先于增强失败降级；复用原线程与工具取消事实，不按异常文本识别停止。
 # 函数用途: 在准备、发送和结果消费边界传播原用户取消。
 def _check_interrupted() -> None:
@@ -143,6 +167,8 @@ def _check_interrupted() -> None:
 # LLM: 开始时刻在读配置前取得；实验资格先于材料准备且不能重置总期限，准入失败时不发布可准备点。
 # 普通阶段顺带给出零 I/O 的 experiment_available 提示（能力开或本线程存在授权信封），默认关闭时不增加任何读取。
 # 管理员禁用本 owner 的 Jev 时直接返回 admin_disabled 阶段（不读设置、不准备材料）；真正的硬门在 invoke_decision_model_call。
+# 后台阶段的 deadline 仍按 background_timeout_seconds 记下，但普通后台点位不以它为上限（见 _point_deadline），
+# 调用方期限另存 caller_deadline 供点位取更小值。
 # 函数用途: 建立原决策阶段；实验关闭、撤销或口径缺失均返回结构化原因，不调用后端或建立预算。
 def begin_decision_stage(agent: object, params: object, *, operation_id: str, caller_deadline: float | None = None,
                          scope: str = "thread", experiment: bool = False) -> DecisionStage:
@@ -172,7 +198,7 @@ def begin_decision_stage(agent: object, params: object, *, operation_id: str, ca
                        if row["effective_mode"] != "off" and POINT_RUNTIME_SCOPES[point] == scope)
         available = bool(settings["effective"]["experiment_enabled"] or settings["experiment_authorization"] is not None)
         return DecisionStage(operation_id, *identity, started, deadline, scope=scope, enabled_points=points,
-                             experiment_available=available)
+                             experiment_available=available, caller_deadline=caller)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception as exc:
@@ -273,7 +299,7 @@ def _decide_outcome(agent: object, params: object, call: _DecideCall) -> Decisio
         if refused is not None:
             return refused
         settings, row, revision, config = route
-        deadline = min(stage.deadline, started + row["timeout_seconds"], caller if caller is not None else stage.deadline)
+        deadline = _point_deadline(stage, started, row["timeout_seconds"], caller)
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
         connection = connection_revision(config)
@@ -482,7 +508,7 @@ def decision_outcome_is_current(agent: object, params: object, stage: DecisionSt
             stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id, stage.operation_id,
         ):
             return False
-        deadline = min(stage.deadline, outcome.deadline)
+        deadline = _adoption_deadline(stage, outcome)
         if time.monotonic() >= deadline:
             return False
         stale = _stale(agent, params, stage, binding.point, binding.policy_revision, outcome.connection_revision)

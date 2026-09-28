@@ -769,6 +769,7 @@ agent_py_agent/
 |   |-- test_decision_settings.py       # 决策覆盖继承、双版本 CAS、权限隔离及原配置迁移
 |   |-- test_decision_settings_notifications.py # 设置逆序通知、覆盖恢复继承及精准取消
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
+|   |-- test_decision_background_deadline.py # 后台点位各自完整计时、前台保留阶段上限、调用方期限取更小（假时钟）
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
 |   |-- test_decision_audit_controls.py # 管理员控制存取/失败关闭/只许管理员写、审计工具范围与时间窗、观察白名单与跨用户许可
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发

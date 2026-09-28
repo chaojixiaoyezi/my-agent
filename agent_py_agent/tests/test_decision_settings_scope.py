@@ -121,12 +121,13 @@ def test_curator_uses_owner_switch_and_profile_while_front_points_inherit_thread
     assert view["sources"]["points.recall.profile_id"] == "inherit:profile_id:thread"
 
 
+# 后台点位各自完整计时（2026-09-28）：点位预算缺省继承 background_timeout_seconds，显式覆盖大于它时不再被阶段预算封顶。
 @pytest.mark.parametrize("point_seconds,expected,limiting_field", [
     (None, 8, "points.curator.timeout_seconds"),
     (1.5, 1.5, "points.curator.timeout_seconds"),
-    (12, 8, "background_timeout_seconds"),
+    (12, 12, "points.curator.timeout_seconds"),
 ])
-def test_curator_upper_bound_uses_background_budget_and_ignores_old_thread_values(configured, point_seconds, expected, limiting_field):
+def test_curator_upper_bound_inherits_background_budget_and_ignores_old_thread_values(configured, point_seconds, expected, limiting_field):
     host, thread, _key = configured
     if point_seconds is not None:
         patch(host, {"points.curator.timeout_seconds": point_seconds})
@@ -213,4 +214,5 @@ def test_curator_original_service_uses_same_background_cap_as_projection(configu
     stage = service.begin_decision_stage(host, params, operation_id="background", scope="owner_background")
     outcome = service.decide(host, params, stage, point="curator", state={}, questions=questions(), candidates_revision="scope-test")
     assert outcome.status == "success" and outcome.may_apply
-    assert captured == [100.0 + view["effective"]["points"]["curator"]["max_request_seconds"]] == [108.0]
+    # 点位覆盖 12 秒大于后台缺省 8 秒：后台点位按自己的完整预算计时，服务与设置投影同为 12。
+    assert captured == [100.0 + view["effective"]["points"]["curator"]["max_request_seconds"]] == [112.0]

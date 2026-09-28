@@ -56,7 +56,7 @@ my-agent 也可根据用户明确要求或既有授权，通过同一配置服�
 | 场景 | 单次调用预算 | 同一阶段累计决策预算 | 请求重试 |
 | --- | --- | --- | --- |
 | 前台模型选择、召回、能力推荐 | 2 秒 | 4 秒 | 默认 0 次 |
-| 后台记忆整理前置标注 | 4 秒 | 4 秒 | 默认 0 次 |
+| 后台记忆整理前置标注 | 4 秒（每个后台点位从自己的调用开始计时） | 不设阶段累计预算，只受调用方绝对期限（如 Curator 租约）约束 | 默认 0 次 |
 | 用户显式测试决策连接 | 由测试操作明确指定，默认 4 秒 | 使用同一测试预算 | 默认 0 次 |
 
 ### 时间可以调，但预算必须真正生效
@@ -403,7 +403,7 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 当前状态：第一片已本地实现并通过离线合同与原 Curator 组合验证，未部署；本片不等同于完整的候选分类或语义合并功能。
 要解决的问题是：原 Curator 已同时拿到新来源与有界正式条目，但可能遗漏二者间的重复、更新或冲突关系。
 增加独立 `curator_relation` 接入点，默认 `off`，只允许 `owner_background` 用户长期设置；
-沿原 `annotate_batch` 的同一阶段和绝对 caller deadline，与现有标签/优先级共享后台时间，沿原模型账本计量。
+沿原 `annotate_batch` 的同一阶段和绝对 caller deadline；与现有标签/优先级各自拿完整点位预算（2026-09-28 起不再共享阶段倒计时），沿原模型账本计量。
 
 - 只比较本批已授权的完整消息与完整、短正文、带原仓库版本的 active long-term 条目。
   消息按原 UTF-8 哈希核对；正式正文按原规范化哈希、精确 authority ref/ID 和 `MemoryRecord.version` 绑定。
@@ -469,7 +469,7 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 要解决的问题：S1 之后，子代理经验会陆续积累待确认的 Skill 提案，用户逐条审核时不知道先看哪条，也不容易发现可能重复的提案。此点只在用户执行 `my-agent skills proposals list` 时，可选地请 Jev 给每条待确认提案一个审核先后建议，宿主据此重排列表并附固定标签。它不是审核门，不决定确认或拒绝。
 
 - **接线**：独立 `owner_background` 接入点，AgentConfig/YAML 三字段 `decision_skill_proposal_review_mode/_timeout_seconds/_profile_id` 默认 off/null/null，超时留空继承 `background_timeout_seconds`；只有用户长期（owner）设置可写，线程覆盖被原设置服务拒绝，线程菜单不显示。配置放 AgentConfig 而不放 CapabilityConfig：此点只排展示、不授予 Skill 或工具权限，和 `enable_self_learning` 同属主配置；CLI 也只加载主配置，放在这里用户改 YAML 才真正生效。TUI 菜单名“Skill 提案审核顺序（用户长期）”。
-- **触发**：`skills proposals list` 列出的提案中，待确认的有 2—30 条，且本点为 observe/apply、决策总开关开启。0—1 条、本点关闭或总开关关闭时零请求，输出逐字节不变（已与 origin/main 的 CLI 子进程逐字节对照）。不要求 `enable_self_learning` 开启：该开关只管自动生成，已有提案在关闭后仍可审核。CLI 没有会话或 runner，宿主以 owner 路径和配置作决策宿主，每次生成一次性 run 编号，以 owner_background 身份建阶段；同一阶段期限覆盖准备、发送和采用。
+- **触发**：`skills proposals list` 列出的提案中，待确认的有 2—30 条，且本点为 observe/apply、决策总开关开启。0—1 条、本点关闭或总开关关闭时零请求，输出逐字节不变（已与 origin/main 的 CLI 子进程逐字节对照）。不要求 `enable_self_learning` 开启：该开关只管自动生成，已有提案在关闭后仍可审核。CLI 没有会话或 runner，宿主以 owner 路径和配置作决策宿主，每次生成一次性 run 编号，以 owner_background 身份建阶段；发送和采用受点位期限约束，点位期限从调用开始计完整点位预算（2026-09-28 起后台点位不再受阶段倒计时约束）。
 - **外发材料**：每条待确认提案只给 `proposal_i` 别名、创建顺序、来源任务数和运行数，以及 description、when_to_use 与经验段前 240 字摘录。三者整体经 `external_data/default` 投影（脱敏加不可信数据边界）。经验摘录按 S1 固定模板的“经验”段截取，不含来源段。提案编号、路径、owner/候选/任务/运行编号和目标 Skill 名只进本地版本摘要。按原渲染函数重算的草稿 hash 与记录不符时整点放弃、零请求。30 条最长草稿仍在 Jev 单题窗口门内（估算约 25.7k/28.8k token）。
 - **题目与采用**：每条提案一道 choice，候选为 `review_first/normal/review_later/possible_duplicate`，非选择为 `not_needed/need_data/abstain`；说明写明只是审核顺序，不决定确认或拒绝。只接受恰好每题一个合法候选；缺题、多答、错题号、逐题错误或任一非选择都整体保留原序。采用前依次核对：候选版本、`decision_outcome_is_current`、重读待确认提案（编号、版本、状态、创建时间、记录和重算的草稿 hash 全等）、同一绝对期限。然后稳定排序：review_first → normal → review_later/possible_duplicate。可能重复与稍后同组，便于先看原提案再对照；组内保持原创建顺序。只替换原列表里待确认提案所在的位置，已确认/已拒绝的条目位置不动。每条附宿主固定标签“建议优先审核/建议稍后/可能与其他提案重复”，不复制模型文字，列表首行下加一行说明。`--json` 增加 `review_order` 块：point、mode、status=applied，以及别名→proposal_id/suggestion/label 的映射。全部为 normal 时顺序不变、没有标签，但仍标明已按建议排列。
 - **边界**：observe 照常请求并记原调用账（CLI 进程内），输出不变；错误、超时、冷却、配置或来源变化都保留原输出。用户取消与中断照常上抛，CLI 以 `SKILL_PROPOSAL_CLI_INTERRUPTEDERROR` 结束，不打印列表。本点只调用 `SkillProposalService.list`，从不确认、拒绝、改写提案或 Skill，也没有模型可调用入口；测试证明提案目录、skills 目录与候选账本逐字节不变。

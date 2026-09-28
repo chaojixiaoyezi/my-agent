@@ -36,6 +36,34 @@
 - 压缩后原资源读取/执行未覆盖：包选择 `outcome=empty`、全程 0 次 `skill_search`，提交后 9 次 `run_command` 只跑模型自建程序；五份输入保持。业务判“未通过”只据“未原样使用原检查程序”这一结构化事实，其余业务质量未独立审阅。
 - 本轮无产品/测试/配置改动，不跑 pytest；doc sync、`git diff --check`、clean-package 按纯文档范围执行，线上 CI 未作来源。详见[C24 分项](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c24固定9f88的131072自然长任务两代压缩2026-09-28)，证据在 `~/.my-agent/decision-evidence/compact-131072-9f88/`。建议下一步：由整合者核对后合入文档；下一次自然任务先核包选择非空再判压缩后原资源链，不改提示或阈值凑证据；产品作者可只读核对空选后包对主线程的可见性。
 
+## Jev 后台点位改用独立期限（2026-09-28，分支 `claude/be-jev-bg-deadline`，基于 `60f6f485a`）
+
+- **来源**：my-agent-1 实测近 48 小时，后台点位超时 39%，前台 22%。
+  - 根因：`decision_service._decide_outcome` 的点位期限是 `min(stage.deadline, 点位开始 + 点位预算, 调用方期限)`。
+  - 后果：同一后台阶段里，排在后面的 `curator_relation` 只拿到阶段倒计时的残值，19 次超时的中位耗时只有 1930ms。
+- **改动**：
+  - `_point_deadline`：普通后台（owner_background）阶段不再并入 `stage.deadline`，点位期限 = 点位开始 + 点位预算，再与调用方期限取更小。
+    调用方期限有两个：建阶段时给的（新字段 `DecisionStage.caller_deadline`）和本次调用给的。前台与实验阶段仍并入阶段上限，公式不变。
+  - `_adoption_deadline`：采用前复核同口径，普通后台建议只看自带的点位期限；前台与实验阶段仍取阶段上限与点位期限的较小值。
+  - 设置视图：后台点位的 `max_request_seconds`、`limiting_field` 改为点位自己的预算，与服务一致。没有改任何设置值。
+- **测试**：新增 `test_decision_background_deadline.py`，共 6 项，用假时钟加假调用边界记录发送期限：
+  - 后台：阶段倒计时只剩 2 秒时，第二个点位仍拿到完整 8 秒（发送期限 114，不是 108）。它的建议在阶段预算到点后、点位期限前仍可采用；
+    第一个点位的建议按它自己的期限到期。
+  - 前台：点位 5 秒仍被阶段上限截到 101，采用期限不超过阶段上限。
+  - 调用方期限：建阶段时给的期限（如租约）对后面的点位同样有效；单次调用给的更小时取更小，前台同样。
+  - 纯函数矩阵：只有普通后台阶段去掉阶段上限；实验后台阶段与前台阶段保留。
+  - 既有 `test_decision_settings_scope.py` 的两项按新语义改写：点位覆盖 12 秒、后台缺省 8 秒时，投影和服务都按 12 秒（原来被 8 秒封顶）。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_decision_background_deadline.py agent_py_agent/tests/test_decision_settings_scope.py -q`。
+- **变异验证**：12 个全部抓出，每个都在 `PYTHONDONTWRITEBYTECODE=1`、独立 `PYTHONPYCACHEPREFIX` 的子进程里跑，跑完逐字节恢复并核对哈希。
+  - 期限口径：后台仍受阶段上限；前台丢掉阶段上限；采用仍用旧口径；后台采用忽略点位期限。
+  - 调用方期限：丢掉阶段级期限；丢掉调用级期限；阶段不保存调用方期限。
+  - 实验阶段：实验后台阶段的发送、采用各丢掉阶段上限。
+  - 接线：投影仍按后台阶段封顶；decide 调用点仍用旧公式；采用门调用点仍用旧公式。
+- **相关回归**：rebase 到 `60f6f485a` 后重跑，126 个测试文件 2677 passed、1 skipped（rebase 前 98 个文件 2158 passed、1 skipped）。
+  清单包括所有涉及决策服务、设置、阶段、curator 的测试，以及全部扫描产品代码的守卫测试
+  （含 `test_architecture_guardrails.py`、`test_constant_names_unique.py`）。
+- **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对基线新增 0、减少 0。
+
 ## R16 补测：按包选择偏好与 global_index 可读性（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-followup`）
 
 - **范围**：上一轮 R16 留下的两项：跨 owner 的按包选择偏好（`host_capability_selection.v1`），以及主机层
