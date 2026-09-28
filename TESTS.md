@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 能力包固定 0c 最终矩阵（2026-09-28，27 次执行结束）
+
+固定源码 `0c340fe295ebe1d725aea1ebb8dd570a360a5183` 独立 229 项定向通过；Ruff、doc sync、strict code-size、diff、clean-package 均退出 0。另只读核作者 12 份原全仓日志，合计 23872 passed、21 skipped、32 xfailed、5 xpassed、0 failed/errors。线上 CI 未作为验收来源，两类验证不混作 root 全仓重跑。
+
+9 个冻结语义各 3 次，共 27 个新原生 TUI／工作区，每次一条原需求，官方 MiniMax-M2.7、原 262144 配置和同一 A0.3.0/B0.1.4 保持；没有补提示或代跑检查器。最终全树终态、269 次完整 NativeIR 工具调用、254 次物理模型 attempts、255 次 HTTP attempts／1 次 retry，27 次 memory 均 0。归档索引不含 read_artifact，不能作为完整工具计数。
+
+最终固定 0c340fe29 的 27 次原生执行已全部结束，原输入、配置、安装表、1433 个安装成员及包 pins 保持；普通任务 9/9 通过，制作类业务 7/9 通过，改编类 0/9 通过，合计业务 16/27 通过、11/27 失败。原资源链 12/18 成立，第三轮改编任务的混合写入参数及随后自建检查器另列为通用使用／恢复稳定性缺口，不能全部归为剧情质量。Goal active；Mac 两版部署记录与 wheel 摘要已核，Linux 明确未部署（测试机下线），只有容器源码测试证据。最终文档已整理待 Claude 集成。 原普通三题的重复只证明已观察结果，不外推一般成功率。本轮仓库只同步文档，没有产品／测试代码或配置变更；文档交付的 Ruff、doc sync、strict code-size、diff、clean-package 全部退出 0，五项静态 gate 已通过，线上 CI 未作来源；不重复全仓。门禁记录 final-0c340fe29-docs-gates.json 摘要 57e4a9deec256874e79e22e05433abebb0b29e08ed55fb148576dc85aaf54fb4。建议下一步先完成分项交接，发布由 Claude 负责；详见[结果和证据](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#固定版本最终矩阵2026-09-28)。
+
 ## 参数减量第三批 C 组 · 第 1 批：归档预览档位与摘要长度降为常量（2026-09-28，dev 派活，my-agent 实现）
 
 - **来源**：dev 06:12 派 C 组（记忆相关的内部参数降级为常量，做法照 A 组 `f82e0e9f6` / E 组 `796a43e02`）：值不变、降到读取点旁
