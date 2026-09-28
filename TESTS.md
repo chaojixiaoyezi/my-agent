@@ -2,6 +2,25 @@
 
 ## 参数减量 C 组合入后重新生成前端参数目录（2026-09-28，分支 `claude/9b-frontend-catalog-c`，基于 `3d76ac687`）
 
+## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`）
+
+- **来源**：my-agent-4 开发交流板任务 2（Claude 会话 dsh-9b 的 R16 跨 owner 隔离验收随附发现）。隔离本身通过，
+  但显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 只返回 `nodes=[]`、`root_id=""`，`scope_resolution`
+  还把请求的 id 回显成 `effective` 范围，没有任何范围告警或拒绝码。
+- **做法**：`agent_tree/status.py` 在显式 run_id 于整棵可见树无匹配行时（且不是 main run、当前无子 runner 身份），
+  把查询折成 `root_tree` 并追加唯一裁决码 `requested_run_id_not_in_visible_scope`；请求的 id 只留在 `explicit`。
+  `orchestration/scope_resolution.py` 的 `scope_warnings` 恒为列表；`agent_tree/model_view.py` 转发该顶层字段。
+  "不存在"和"无权看"共用同一分支、同一个码、同一响应形状，不泄露目标是否存在。
+- **新测试**：`agent_py_agent/tests/test_list_agents_scope_resolution.py`（同 owner 可见且无告警；跨 owner 空+告警；
+  run_id 不存在也空+同样告警，并断言答复里不含目标 id）。
+- **复现**：`PYTHONPATH=. python3 -m pytest agent_py_agent/tests/test_list_agents_scope_resolution.py -q`
+  （改前 2 条红）。回归 `test_agent_tree_model_view.py` / `test_agent_tree_three_layer_status.py` /
+  `test_orchestration_tools.py` 全过。
+- **变异验证**：摘掉 `status.py` 的新判定后，跨 owner 与不存在两条用例重新变红。
+- 同类静默清单（`task_progress`、`cancel_subagents`）见交流板；该项已转由 my-agent-2 统一收口。
+
+## Jev curator invalid_input 快速失败修复（2026-09-28，分支 `my-agent/self-dev-4`）
+
 - **node 与 bun 的差别**：没有差别。同一基线上 `node frontend/scripts/sync-backend-config.mjs` 与 `bun …` 生成的目录逐字相同，
   `--check` 两种都通过；脚本只读仓库里三份 YAML，用自带解析器，没有环境、排序或 locale 依赖。“大量无关差异”其实是目录自
   `8ba5bf013`（278 项）以来没再生成：相对它，新目录只有 C 组删掉的 14 个键、其后 196 个字段的全局 `order` 顺移（77 个组内位置
