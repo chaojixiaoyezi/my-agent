@@ -1,5 +1,34 @@
 # 测试与发布验收
 
+## 会话间消息与派活：修复两个“没真正生效”的接线缺陷（2026-09-28，分支 `my-agent/self-dev-3`，基于 main `7bfe52778`）
+
+- **来源**：2026-09-28 待命前做真实链路核对时发现并报给 dev，dev 批准（高优先级）后修复。两条都属于第一期已上线范围。
+- **缺陷 1：派活链深度守卫完全不生效**。`create_session_task._origin_task_id()` 读 `agent.current_session_task_id`，
+  但全仓生产代码**没有任何写入点**（只有测试手工赋值），`SimpleAgent` 也没有动态属性兜底 → 恒返回空串
+  → `SESSION_TASK_CHAIN_LIMIT` 永不触发。测试之所以绿，是替身补了生产没有的东西。
+- **缺陷 2：派活回合没有 `session_task` 的 `TurnTrigger`**。`TurnTrigger` 生产里唯一构造点只产 `lifecycle_wake`；
+  派活唤醒 `reason="session_task"` 不在任何已知 reason 集合里 → 落到兜底英文 prompt + `turn_trigger=None`
+  → 回合开头被落成用户轮，`loop_support` 的 `SESSION_TASK_FACTS_SOURCE` 分支是死代码。
+  （任务正文**没有**冒充用户原话：`guidance.py` 的“未知 origin_kind → 宿主事件”分支兜住了，所以这条是呈现缺口。）
+- **做法**：
+  - `conversation/authority.py` 新增结构化属性 `CONVERSATION_SESSION_TASK_ID_ATTR`（`conversation_session_task_id`）。
+  - `conversation/runtime.py`：`_session_task_id_from_wake()` 只读 `wake_signal.metadata.session_task_id` 并写进 `task_attributes`；
+    `_background_model_inputs()` 最前面按该信封分流到派活触发。
+  - `agent_core/runtime/turn_trigger.py`：新增 `session_task_turn_trigger(wake_signal)`——只从 metadata 取
+    `session_task_id`/`origin_thread_id`，**缺 id 返回 None**（fail closed，退化成普通后台片，不凭空造派活回合）。
+  - `create_session_task._origin_task_id()` 改为读 `current_conversation_task_attributes(agent)` 里的该属性。
+- **新测试**：`test_session_task_wake_wiring.py`（9 项）——全部走真实入口
+  （真实唤醒信封 → `_background_task_attributes` / `_background_model_inputs`），**不手工给 agent 赋值**；
+  `test_create_session_task_tool.py` 新增 `test_chain_depth_accumulates_across_hops`（A→B→C 两跳真实累积，
+  limit=2 拒 / limit=3 放行），并把原链深用例改为写结构化 `task_attributes`。
+- **变异验证**：把两处接线改回旧实现（读手工属性 / 取消分流）后 **4 项测试变红**；恢复后全绿。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_task_wake_wiring.py agent_py_agent/tests/test_create_session_task_tool.py -q`
+- **顺带排查（只报清单不改代码）**：全仓找“只被 `getattr` 读、无写入点”的 agent 属性，7 个候选逐个定类——
+  `gateway_request_identity` / `request_agent_permission` / `request_agent_view` / `request_background_notices`
+  是按设计的能力探测（对象未实现时走回退）；`_current_request_id` / `_heartbeat_at` / `_last_progress_at`
+  是可选快照字段（缺失有默认值、语义就是“没有就不显示”）；另一个是 `lease_heartbeat_at` 的误匹配。
+  均**不属于**本次那类“守卫读不到东西而静默失效”的缺陷。
+
 ## 会话间消息与派活第 4 片：code-size 压回 + 每对会话限额真生效 + 文档收尾（2026-09-28，分支 `my-agent/self-dev-3`，基于 main `059f2bf2e`）
 
 - **来源**：dev 13:15 的第 4 片要求——①压回第 3 片新增的 code-size 发现项（soft 清零、high-risk 尽量清，

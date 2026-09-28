@@ -45,6 +45,9 @@ CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR = "conversation_background_wake_s
 # the one-shot orchestration dedupe fails closed instead of treating a partial carry as
 # complete. Absent means every source was read; it never carries prose.
 CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR = "conversation_active_turn_carry_incomplete"
+# 本回合是由哪一条会话间派活任务触发的（wake_signal.metadata.session_task_id）。
+# 链深守卫据此沿 origin_task_id 结构化回溯上级任务；缺失表示本回合不是派活回合。
+CONVERSATION_SESSION_TASK_ID_ATTR = "conversation_session_task_id"
 # A prepare turn is scoped to one exact durable Audit without activating its
 # long-running guarantee.  The stable id and workspace are injected by the
 # gateway after owner/thread-scoped resolution; user prose never supplies them.
@@ -128,6 +131,7 @@ __all__ = [
     "CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR",
     "CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR",
     "CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR",
+    "CONVERSATION_SESSION_TASK_ID_ATTR",
     "CONVERSATION_AUDIT_PREPARE_ATTR",
     "CONVERSATION_TRANSIENT_WORKSPACE_ATTR",
     "CONVERSATION_WORKSPACE_EXECUTION_RUNNING_ATTR",

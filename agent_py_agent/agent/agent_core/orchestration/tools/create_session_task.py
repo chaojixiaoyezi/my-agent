@@ -227,10 +227,18 @@ class _DispatchPlan:
     origin_task_id: str = ""
 
 
-# LLM: 链来源只读宿主结构化字段；本工具不接受模型传入的链深或父任务。
-# 函数用途: 取当前会话所属的会话任务编号（无则为空串）。
+# LLM: 链来源只读宿主写入的结构化 task_attributes；本工具不接受模型传入的链深或父任务。
+#   属性由 conversation 运行时按派活唤醒信封写入（conversation_session_task_id），
+#   这样链深守卫在真实链路上才有输入——不能依赖任何手工赋值。
+# 函数用途: 取当前回合所属的会话任务编号（不是派活回合则为空串）。
 def _origin_task_id(agent: object) -> str:
-    return str(getattr(agent, "current_session_task_id", "") or "").strip()
+    from ....conversation.authority import (
+        CONVERSATION_SESSION_TASK_ID_ATTR,
+        current_conversation_task_attributes,
+    )
+
+    attributes = current_conversation_task_attributes(agent)
+    return str(attributes.get(CONVERSATION_SESSION_TASK_ID_ATTR) or "").strip()
 
 
 # LLM: 把已校验的参数与宿主身份合成派发计划；纯计算，不做任何 IO。

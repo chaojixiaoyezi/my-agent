@@ -13,6 +13,7 @@ from agent_py_agent.agent.agent_core.orchestration.tools.create_session_task imp
     CreateSessionTaskTool,
 )
 from agent_py_agent.agent.capability.config import CapabilityConfig
+from agent_py_agent.agent.conversation.authority import CONVERSATION_SESSION_TASK_ID_ATTR
 from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_TARGET_CHANNEL_UNSUPPORTED,
     SESSION_TARGET_OUT_OF_SCOPE,
@@ -80,16 +81,18 @@ class _Home:
 
 
 class _Agent:
-    def __init__(self, store, *, owner=("local", "main", "main"), current_thread="thread-a", config=None):
+    def __init__(self, store, *, owner=("local", "main", "main"), current_thread="thread-a", config=None,
+                 session_task_id=""):
         self.conversation_store = store
         self.home_paths = _Home(owner)
         self._capability_config_runtime_snapshot = type(
             "_S", (), {"config": config or CapabilityConfig()}
         )()
-        self._current_run_params = type(
-            "_P", (), {"task_attributes": {"conversation_thread_id": current_thread}}
-        )()
-        self.current_session_task_id = ""
+        # 链来源只由宿主的结构化 task_attributes 提供（不设任何可被手工赋值的属性）。
+        attributes = {"conversation_thread_id": current_thread}
+        if session_task_id:
+            attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = session_task_id
+        self._current_run_params = type("_P", (), {"task_attributes": attributes})()
 
 
 def _params(**overrides):
@@ -152,6 +155,7 @@ def test_success_creates_record_and_queues_body(tmp_path) -> None:
 
 
 def test_chain_limit_rejected(tmp_path) -> None:
+    """链来源由宿主的结构化 task_attributes 提供（与真实派活回合同一条路径）。"""
     config = CapabilityConfig()
     config.session_task_max_chain_depth = 1
     agent, store = _agent(tmp_path, {"thread-b": _FakeThread("thread-b")}, config=config)
@@ -160,7 +164,7 @@ def test_chain_limit_rejected(tmp_path) -> None:
             sender_thread_id="X", target_thread_id="Y", goal="根"
         ), now=1.0,
     )
-    agent.current_session_task_id = root.task_id
+    agent._current_run_params.task_attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = root.task_id
     outcome = CreateSessionTaskTool(agent).execute(_params())
     assert not outcome.ok
     assert outcome.error_code == SESSION_TASK_CHAIN_LIMIT
@@ -171,8 +175,45 @@ def test_chain_limit_zero_means_unlimited(tmp_path) -> None:
     config.session_task_max_chain_depth = 0
     agent, store = _agent(tmp_path, {"thread-b": _FakeThread("thread-b")}, config=config)
     root = store.session_tasks.create(SessionTaskDraft(sender_thread_id="X", target_thread_id="Y", goal="根"), now=1.0)
-    agent.current_session_task_id = root.task_id
+    agent._current_run_params.task_attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = root.task_id
     assert CreateSessionTaskTool(agent).execute(_params()).ok
+
+
+def test_chain_depth_accumulates_across_hops(tmp_path) -> None:
+    """A→B→C 真实累积：第二跳时链深已到 2，上限 2 就拒绝；上限 3 才放行。"""
+    for limit, expected_ok in ((2, False), (3, True)):
+        config = CapabilityConfig()
+        config.session_task_max_chain_depth = limit
+        agent, store = _agent(
+            tmp_path / str(limit),
+            {
+                "thread-b": _FakeThread("thread-b"),
+                "thread-c": _FakeThread("thread-c"),
+                "thread-d": _FakeThread("thread-d"),
+            },
+            config=config,
+        )
+        first = store.session_tasks.create(
+            SessionTaskDraft(sender_thread_id="thread-a", target_thread_id="thread-b", goal="第一跳"),
+            now=1.0,
+        )
+        # 第二跳：b 在执行第一跳时再派出去，链来源就是第一跳的任务。
+        agent._current_run_params.task_attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = first.task_id
+        second = store.session_tasks.create(
+            SessionTaskDraft(
+                sender_thread_id="thread-b", target_thread_id="thread-c", goal="第二跳",
+                origin_task_id=first.task_id,
+            ),
+            now=2.0,
+        )
+        # 第三跳：c 在执行第二跳时再派，链深按 origin_task_id 链累计到 2。
+        agent._current_run_params.task_attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = second.task_id
+        outcome = CreateSessionTaskTool(agent).execute(_params(target_thread_id="thread-d", goal="第三跳"))
+        assert outcome.ok is expected_ok
+        if expected_ok:
+            assert json.loads(outcome.output)["status"] == "queued"
+        else:
+            assert outcome.error_code == SESSION_TASK_CHAIN_LIMIT
 
 
 def test_pair_limit_blocks_dispatch_and_does_not_create_record(tmp_path) -> None:

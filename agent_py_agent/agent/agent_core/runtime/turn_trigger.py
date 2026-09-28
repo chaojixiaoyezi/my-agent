@@ -4,6 +4,7 @@
 # 模块用途: 定义回合触发类型、宿主事件的固定开头与渲染入口，供原生 IR、文本 prompt、推荐节和原生历史保存共用。
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 TURN_TRIGGER_LIFECYCLE_WAKE = "lifecycle_wake"
@@ -82,6 +83,30 @@ def session_task_trigger(value: object) -> TurnTrigger | None:
     return None
 
 
+# LLM: 派活唤醒信封里的结构化事实投影成派活回合触发：任务编号与来源会话只从 metadata 取，
+#   不解析任务正文、不从 reason 字符串猜。缺 session_task_id 时返回 None，让调用方按普通后台片处理
+#   （fail closed：宁可退化成普通片，也不凭空造一个派活回合）。
+# 函数用途: 由派活唤醒信封生成 kind=session_task 的回合触发。
+def session_task_turn_trigger(wake_signal: object) -> TurnTrigger | None:
+    signal = wake_signal if isinstance(wake_signal, dict) else {}
+    metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
+    task_id = str(metadata.get("session_task_id") or "").strip()
+    if not task_id:
+        return None
+    facts = {
+        "reason": "session_task",
+        "session_task_id": task_id,
+        "origin_thread_id": str(metadata.get("origin_thread_id") or "").strip(),
+        "wake_signal_id": str(signal.get("wake_signal_id") or "").strip(),
+    }
+    return TurnTrigger(
+        kind=TURN_TRIGGER_SESSION_TASK,
+        reason="session_task",
+        wake_signal_id=str(signal.get("wake_signal_id") or "").strip(),
+        event_facts=json.dumps(facts, ensure_ascii=False, sort_keys=True, indent=2),
+    )
+
+
 # LLM: 生命周期唤醒以固定标题和固定首句开头，后接确定性事实；首句只按 origin_task_attached 在两句固定文字里选，
 #   原任务不在历史里时不声称它在历史里。普通用户轮保持原“# User Task”格式与字节。
 #   会话间派活同样是宿主事件，首句写明来源会话，绝不让任务正文落在用户原话位置。纯计算。
@@ -127,5 +152,6 @@ __all__ = [
     "current_turn_text",
     "lifecycle_wake_trigger",
     "session_task_trigger",
+    "session_task_turn_trigger",
     "turn_trigger_recommendation",
 ]

@@ -37,6 +37,7 @@ from .authority import (
     CONVERSATION_EXECUTION_CWD_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
+    CONVERSATION_SESSION_TASK_ID_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
@@ -995,6 +996,12 @@ def _background_model_inputs(
 ) -> tuple[str, list[str], object | None]:
     from .lifecycle_wake_event import lifecycle_wake_turn_trigger
 
+    # 会话间派活优先按结构化唤醒信封分流：它既不是用户轮、也不是子代理生命周期片，
+    #   任务正文已经在目标队列里（guidance 宿主事件），这里只负责让回合开头是宿主事件。
+    session_task_trigger = _session_task_turn_trigger(request)
+    if session_task_trigger is not None:
+        return str(wake_prompt or ""), [], session_task_trigger
+
     objective = str(task_objective or "").strip()
     if not _is_active_turn_lifecycle_continuation(request, objective):
         return str(wake_prompt or ""), [], None
@@ -1004,6 +1011,15 @@ def _background_model_inputs(
     origin_task = (goal_objective or objective) if goal_task_id and goal_task_id in wake_ids else ("" if history_ids else objective)
     trigger = lifecycle_wake_turn_trigger(request.reason, request.wake_signal, history_ids, origin_task)
     return objective, ["[active-turn-continuation]\n" + str(wake_prompt or "").strip()], trigger
+
+
+# LLM: 只按唤醒信封的结构化 metadata 判断"本片是不是会话间派活"；reason 字符串不参与判定。
+#   缺 session_task_id 时返回 None（按普通后台片处理），不凭空造派活回合。
+# 函数用途: 由派活唤醒信封生成派活回合触发；不是派活唤醒时返回 None。
+def _session_task_turn_trigger(request: BackgroundRunRequest) -> object | None:
+    from ..agent_core.runtime.turn_trigger import session_task_turn_trigger
+
+    return session_task_turn_trigger(request.wake_signal)
 
 
 # LLM: Detached Audit quota notices share a lifecycle reason for delivery but are not a slice
@@ -1955,6 +1971,15 @@ def _apply_background_wake_attributes(
     )
 
 
+# LLM: 会话间派活唤醒在 metadata 里带 session_task_id（由 create_session_task 的 raise_signal 写入）。
+#   只读结构化字段，不看正文、不看 reason 字符串；非派活唤醒返回空串。
+# 函数用途: 从唤醒信封取本次派活的任务编号。
+def _session_task_id_from_wake(request: BackgroundRunRequest) -> str:
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    return str(metadata.get("session_task_id") or "").strip()
+
+
 # LLM: background_max_tool_rounds is a per-slice allowance. Carried calls count as the
 # reconstructed baseline, so extend the absolute limit by the same count to preserve the
 # configured number of fresh rounds without resetting same-turn history.
@@ -2049,6 +2074,10 @@ def _background_task_attributes(
     if thread_id and (task_id or scheduler_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
     _apply_background_wake_attributes(attributes, request, agent)
+    # 会话间派活：本回合由哪条任务触发，只从唤醒信封的结构化 metadata 取；链深守卫据此回溯上级任务。
+    session_task_id = _session_task_id_from_wake(request)
+    if session_task_id:
+        attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = session_task_id
     if audit_finding_report_event(request):
         attributes["background_delivery_evidence_refs"] = list(
             background_delivery_evidence_refs(request)

@@ -133,6 +133,14 @@
 - **派活链深度上限**：由对端 task 触发的 task 携带 `origin_task_id` 链；
   深度超过 `session_task_max_chain_depth` 拒绝 `SESSION_TASK_CHAIN_LIMIT`。
   **深度按 `origin_task_id` 链结构化计算，不信任模型传入的深度。**
+  **链来源由宿主提供**：派活唤醒信封的 `metadata.session_task_id` 由 conversation 运行时写入
+  `task_attributes` 的结构化属性 `conversation_session_task_id`，工具只从那里读；
+  不依赖任何可被手工赋值的 agent 属性（这正是 2026-09-28 修掉的缺陷——原实现读一个从未被写入的属性，
+  守卫在生产里一次都不会触发）。
+- **派活回合的开头是宿主事件**：派活唤醒产出 `kind=session_task` 的 `TurnTrigger`
+  （`session_task_turn_trigger`，只从唤醒信封的结构化 metadata 构造；缺 `session_task_id` 时不发触发、
+  退化成普通后台片）。回合开头因此是 `# Host Event` + 固定首句
+  「宿主事件：另一个会话派来一个任务……」，而不是用户轮。
 - **每对会话每小时上限**：按 `(发送 thread, 接收 thread)` 分桶计数；
   超过 `session_pair_hourly_limit` 拒绝 `SESSION_PAIR_RATE_LIMIT`。
   **task 完成后的回报消息也计入这个上限。**
@@ -235,7 +243,8 @@
 | 取消时对目标回合发精确停止控制 | `agent_py_agent/agent/gateway_parts/session_task_stop.py` |
 | 目标回合结束时的结构化回报 | `agent_py_agent/agent/conversation/session_task_report.py` |
 | 每对会话每小时限额 | `agent_py_agent/agent/conversation/session_pair_rate.py`（消息、派活、任务回报、取消通知都计入） |
-| 宿主事件呈现 | `agent_py_agent/agent/agent_core/runtime/loop_support.py`（`_native_turn_opener` / `_host_event_source`） |
+| 宿主事件呈现 | `agent_py_agent/agent/agent_core/runtime/loop_support.py`（`_native_turn_opener` / `_host_event_source`）；派活回合触发由 `agent_py_agent/agent/agent_core/runtime/turn_trigger.py` 的 `session_task_turn_trigger` 构造 |
+| 派活回合的结构化身份 | `agent_py_agent/agent/conversation/runtime.py`（`_session_task_id_from_wake` 写入 `conversation_session_task_id`；`_background_model_inputs` 分流派活触发） |
 | TUI 命令 | `/sessions threads`、`/tell`、`/sessions inbox`（`agent_py_agent/cli/chat_parts/slash_commands.py`） |
 | 配置键 | `agent_py_agent/config/capability_config.yaml` + `agent_py_agent/agent/capability/config.py` |
 
