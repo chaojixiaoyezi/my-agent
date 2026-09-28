@@ -29,7 +29,7 @@
           {
             "key": "agent_name",
             "label": "agent_name（agent name）",
-            "description": "Simple Python Agent 配置文件 说明： - 这个项目只用标准库读取一个“够用版” YAML - 支持的结构主要是 `key: value` 和简单列表 - 追求的是跨平台、轻依赖、够维护，不是完整 YAML 语法 智能体名称：主要用于 CLI 输出和日志标识",
+            "description": "智能体名称：主要用于 CLI 输出和日志标识",
             "type": "string",
             "defaultValue": "myagent",
             "currentValue": "myagent",
@@ -4125,7 +4125,7 @@
           {
             "key": "enable_capability_package_recommendations",
             "label": "enable_capability_package_recommendations（enable capability package recommendations）",
-            "description": "没有指定时就是所配 owner 的 home，例如 local/main 为 <MY_AGENT_HOME>/owners/local/main/config/capability_config.yaml。 - Gateway 读到的这一份被它服务的所有 owner 共用；找不到文件时按 CapabilityConfig 默认值运行，也就是本模板的值。 - 要改能力配置：把本文件复制到上述位置再改。进程内会缓存已加载的配置，改完重启 Gateway 最稳妥。 - daemon、gateway scenario 和 subagents 系列 CLI 子命令默认直接读本随包文件，可用 --capability-config 指定别的文件。 是否按当前任务展示相关能力包摘要，独立于能力申请和可选决策模型开关。 - true: 仅从当前已启用且已授权的包中软排序，复用候选数量和元数据预算；不读正文、不调用模型或执行资源。 - false: 关闭动态包推荐，静态目录、手动检索和显式读取保持可用。",
+            "description": "是否按当前任务展示相关能力包摘要，独立于能力申请和可选决策模型开关。 - true: 仅从当前已启用且已授权的包中软排序，复用候选数量和元数据预算；不读正文、不调用模型或执行资源。 - false: 关闭动态包推荐，静态目录、手动检索和显式读取保持可用。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -4700,7 +4700,7 @@
           {
             "key": "enabled",
             "label": "enabled（enabled）",
-            "description": "日志分析模块独立配置 默认关闭，不影响普通 my-agent run/chat/status。 当前文件只使用项目内置的极简 YAML 子集：key: value 和简单列表。",
+            "description": "是否启用日志分析模块；默认关闭，不影响普通 my-agent run/chat/status。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
