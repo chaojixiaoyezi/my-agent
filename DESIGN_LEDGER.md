@@ -12,6 +12,10 @@
   - 设置服务改抛结构化的 `DecisionSettingsUnknownFields`（仍是 `ModelProfileError`，原捕获点不变），带未知字段和本操作接受的字段。
   - 工具回执与 `handler_details` 写明 `unknown_fields`、`allowed_fields`；工具说明写清 patch/reset 各接受哪些字段。
 - **待确认**：生产那三次具体带了哪个字段，仓库外的工具账才能确认；本修复对任何多带字段都给出同样的结构化回执。
+- **候选（未排期，集成者 2026-09-28 定本轮不做）**：按动作拆分 `user_config` 的 schema，或给决策动作单开一个工具。
+  - 不做的原因：会改模型可见的工具面，部分 provider 对 `oneOf` 的支持也不稳定，当前风险大于收益。
+  - 触发条件：回执指名之后，模型仍经常在第一次调用就传错字段时再评估。判断依据用结构化工具账：统计 `decision_patch`
+    首次调用因 `unknown_fields` 被拒的比例，不按对话文本判断。
 - 细节见 `TESTS.md` 同日条目。
 
 ## Jev 后台点位改用独立期限（2026-09-28，分支 `claude/be-jev-bg-deadline`，基于 `60f6f485a`，本地验证通过，待集成）
