@@ -291,7 +291,11 @@
 
 固定 A `c4972cbd0` 的 `test_lifecycle_wake_host_event.py` 独立运行 18 项通过，0 failures/errors/skipped，2.624 秒；实际 import 来自固定独立 checkout，前后源码干净，使用私有 home/basetemp、假模型及 `-q --tb=short -p no:cacheprovider`。新增合法 Goal 来源矩阵及后台组件链断言覆盖原来源问题；不与旧 224 项累加为新组合结果。
 
-B `9882db061` 的新 guard 经固定 AST 纯函数探针确认参数口径不一致：空白接替列表、item 显式空列表覆盖顶层接替，两例均未被拦截，但创建归一化后有效接替 ID 为空，接替预检也未读取任何来源；另三个正常对照保持。没有实际派工、模型调用或真实故障。详见[证据摘要与范围](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#后台唤醒修订复核2026-09-28组合待完成)。建议下一步原作者统一参数口径，整组固定及门禁后由 root 做 C23；只读复核可并行，最终仍 0/27。
+B `9882db061` 的新 guard 经固定 AST 纯函数探针确认参数口径不一致：空白接替列表、item 显式空列表覆盖顶层接替，两例均未被拦截，但创建归一化后有效接替 ID 为空，接替预检也未读取任何来源；另三个正常对照保持。没有实际派工、模型调用或真实故障。旧失败证据保持。
+
+修订 `24f8accb9` 复用创建层 item 合并和统一 ID 归一化，独立窄审确认两例修复。root 在固定 checkout 以隔离 home/basetemp 运行六文件：`test_lifecycle_wake_host_event.py`、`test_background_main_agent_runtime.py`、`test_background_active_turn_carry.py`、`test_background_child_control_tools.py`、`test_orchestration_create_subagents_items.py`、`test_orchestration_create_subagents_items_policy.py`；272 项通过，0 failures/errors/skipped，26.884 秒，实际 import 来自固定 checkout，源码前后干净。报告摘要 `ba66092fa00fdf57d196fa09e190f6726fa93c82c2436ca749cf603b7784536e`；只覆盖合同及假模型组件，不替代最终整组门禁或原生验收。
+
+12:32 UTC 核实移植 `0714b250c` 的产品目录与两份相关修改测试同字节，作者仍在补 carry 测试。详见[证据摘要与范围](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#后台唤醒修订复核2026-09-28组合待完成)。建议下一步整组固定及门禁后由 root 做 C23；只读复核可并行，最终仍 0/27。
 
 ## 后台唤醒 A 草稿组件与 Goal 来源投影（2026-09-28）
 
