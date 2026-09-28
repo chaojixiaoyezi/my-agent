@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.agent_core.orchestration.create_read_scope import (
     INPUT_PATH_NOT_VISIBLE_ERROR_CODE,
     INPUT_PATH_NOT_VISIBLE_HINT,
@@ -195,9 +197,104 @@ def test_precheck_matches_the_childs_real_read_file_decision(tmp_path, monkeypat
     actually_blocked = {item["target"] for item in failures if item["tool"] == "read_file"}
     assert predicted_blocked == {str(outside), str(project_file)}
     # 预检"看不到"⇔ 子代理真实 read_file 失败；工作区内的文件两边都可读。
-    # 注：父项目目录是子代理的网关根，路径门放行后由 handler 按 owner 墙拒绝，运行时报码是路径笔误提示的
-    # TOOL_INVALID_ARGUMENTS 而非 PATH_OWNER_SCOPE_BLOCKED；预检回执给出的是底层裁决码。
+    # 父项目目录与墙外工作树一样，运行时也报 PATH_OWNER_SCOPE_BLOCKED + authorization（2026-09-28 修：
+    # 原先这里会退化成"路径笔误"的 TOOL_INVALID_ARGUMENTS —— 根内路径永远不该被判成拼写错误）。
     assert actually_blocked == predicted_blocked
+
+
+# 函数用途: 取出一次 read_file 失败回执的结构化字段，供真墙/真拼写两类用例共用。
+# 账本条目只有 tool/call_id/error_code/target/message 五个字段（结构化回执本来就没有 failure_stage，
+# 它只出现在渲染后的回执文本头里），所以断言一律只看 error_code / target / suspected_path_typo。
+def _read_failure(agent, task_id: str) -> dict:
+    failures = agent.subagents.load(task_id).attributes["tool_failure_ledger"]["failures"]
+    return next(item for item in failures if item["tool"] == "read_file")
+
+
+def test_blocked_path_inside_a_known_root_reports_the_permission_code(tmp_path, monkeypatch):
+    """根内路径被 owner 墙拒绝时，必须报权限码，不能退化成"路径拼写错误"（TOOL_INVALID_ARGUMENTS）。
+
+    这是本次改动的核心场景。夹具要点（两面都必须成立，否则用例区分不了新旧实现）：
+      · 目标落在某个 workspace_root（outside）之下 → 命中新加的"根内不报拼写"判断；
+      · 同时拼写建议**确实指向另一个路径**（projects/alpha/x.md）→ 旧实现会真的抛参数错误。
+    用工具层直接构造：子代理端到端造不出这个组合（未授权路径一律先被墙拦）。
+    """
+    from agent_py_agent.agent.path_recovery_hints import suggest_workspace_typo_target
+    from agent_py_agent.agent.tooling._filesystem_read import (
+        FileSystemTool,
+        PathAccessError,
+        filesystem_access_options,
+    )
+
+    owner = tmp_path / "owner"
+    owner.mkdir()
+    project_root = tmp_path / "projects" / "alpha"
+    project_root.mkdir(parents=True)
+    outside = tmp_path / "beta"
+    outside.mkdir()
+    target = outside / "alpha" / "x.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("墙外资料", encoding="utf-8")
+
+    tool = FileSystemTool(
+        outside,
+        workspace_roots=[outside, owner, project_root],
+        access_options=filesystem_access_options(owner_scope_root=str(owner)),
+    )
+    # 前提一：目标确实在某个 workspace_root 之下，且被 owner 墙拒绝。
+    assert tool.check_path_access(target).allowed is False
+    assert any(target.is_relative_to(root) for root in tool.workspace_roots)
+    # 前提二：建议是另一个路径（所以旧实现会把它当拼写提示，真的报成参数错误）。
+    suggestion = suggest_workspace_typo_target(str(target), tool.workspace_roots)
+    assert suggestion == str(project_root / "x.md")
+
+    with pytest.raises(PathAccessError) as excinfo:
+        tool.resolve_path(str(target))
+    assert excinfo.value.access_code == _BLOCKED
+
+
+def test_path_typo_outside_every_known_root_keeps_the_spelling_hint(tmp_path, monkeypatch):
+    """真拼写：前缀写错、建议目标确实不同，才保留拼写提示 + 参数错误。
+
+    端到端这一层现在造不出"能到达拼写分支"的子代理环境（子代理的 workspace_roots 只认已授权写根，
+    未授权路径一律先被 owner 墙拦成 PATH_OWNER_SCOPE_BLOCKED）。因此这里钉的是
+    resolve_path 里拼写分支本身的语义（唯一能真实执行到它的入口）。
+    """
+    from agent_py_agent.agent.path_recovery_hints import suggest_workspace_typo_target
+    from agent_py_agent.agent.tooling._filesystem_read import _workspace_typo_error
+
+    root = (tmp_path / "project").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    typo = tmp_path / "old" / root.name / "README.md"
+    # 路径里含根名但层级错位：建议目标确实不同于原路径 → 有纠正价值，保留提示。
+    assert suggest_workspace_typo_target(str(typo), [root]) == str(root / "README.md")
+    hint = _workspace_typo_error(str(typo), root, [root])
+    assert "suspected_path_typo=true" in hint
+    assert str(typo) in hint and str(root / "README.md") in hint
+
+
+def test_uncorrectable_suggestion_falls_back_to_the_permission_code(tmp_path, monkeypatch):
+    """建议路径等于请求路径时没有纠正价值：入口不再给拼写提示，按真实权限结论上报权限码。"""
+    from agent_py_agent.agent.path_recovery_hints import suggest_workspace_typo_target
+    from agent_py_agent.agent.tooling._filesystem_read import _workspace_typo_error
+
+    root = (tmp_path / "project").resolve()
+    inside = root / "notes.md"
+    # 路径本身就在这个根之下：旧实现给出的"建议"就是它自己，只会诱导调用方原地重试。
+    assert suggest_workspace_typo_target(str(inside), [root]) == ""
+    # 建议为空 ⇒ 拼写分支不成立；resolve_path 只能落到 PathAccessError（权限码），不再退化成参数错误。
+    assert _workspace_typo_error(str(inside), root, [root]) == ""
+
+    # 端到端：一个既不在 owner 墙内、也拿不到可纠正建议的路径，回执必须是权限码且不含拼写提示。
+    agent, _owner_home = _agent(tmp_path, monkeypatch)
+    unreachable = tmp_path / "elsewhere" / "notes.md"
+    task = agent.subagents.create_run(goal="读取墙外文件", thought="", plan=["read_file"], allowed_tools=["read_file"])
+
+    agent.backend = _ReadEachPathBackend([str(unreachable)])
+    agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    failure = _read_failure(agent, task.id)
+    assert "suspected_path_typo" not in str(failure)
+    assert failure["error_code"] == _BLOCKED
 
 
 # 函数用途: 用已创建子代理的真实创建字段重建一份创建参数，保证预检与该子代理的运行边界同源。

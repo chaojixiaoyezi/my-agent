@@ -1050,6 +1050,32 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
     官方历史版本逐字相同，store 的展开赋值口径不变。
 - 没有检查前端文件的 pytest；仓库静态门禁（ruff、doc_sync、strict code_size、diff --check、clean_package）照常跑。
 
+## 根内路径不再误报"拼写错误"（2026-09-28，dev 派活任务 2，my-agent 实现）
+
+- **来源**：dev 06:22 裁定——读工具拿不到"不同且有纠正价值"的拼写建议时，应如实抛
+  `PathAccessError(decision.message, decision.code)` 走权限码，而不是退化成 `TOOL_INVALID_ARGUMENTS`；
+  并补"不在任何根下、且建议等于原路径"也报权限码的用例。
+- **实测结论（先复现再改）**：旧行为在"路径已落在某个 workspace_root 之下、但被 owner 墙拒绝"时，
+  会把拼写建议（此时指向另一个路径）当提示抛出：`ValueError: 路径疑似拼写错误…请使用 suggested_target 重试`，
+  既盖住真实权限拒绝、又诱导调用方原地重试。子代理端到端造不出该组合（未授权路径一律先被墙拦成
+  `PATH_OWNER_SCOPE_BLOCKED`），因此核心用例改用工具层直接构造该组合。
+- **做法**：`agent/tooling/_filesystem_read.py` 把拼写分支收进 `_raise_for_typo_hint`，先判
+  `any(_path_is_under(candidate, root) for root in self.workspace_roots)`：根内路径直接返回，交由
+  `PathAccessError` 报权限码；`agent/path_recovery_hints.py` 的 `suggest_workspace_typo_target` 增加
+  `Path(suggested) != candidate` 过滤——建议等于原路径时没有纠正价值，返回空。
+- **新增用例**（`tests/test_create_subagents_input_read_scope.py`）：
+  `test_blocked_path_inside_a_known_root_reports_the_permission_code`（核心场景，工具层构造）、
+  `test_path_typo_outside_every_known_root_keeps_the_spelling_hint`（真拼写仍保留提示）、
+  `test_uncorrectable_suggestion_falls_back_to_the_permission_code`（建议无纠正价值时按权限码上报）。
+  断言只读结构化字段 `error_code` / `target` / 有无 `suspected_path_typo`——账本条目本来就没有
+  `failure_stage`（它只出现在渲染后的回执文本头里）。
+- **变异验证**：①去掉 `_raise_for_typo_hint` 的根内判断 → 核心用例红（旧行为抛拼写错误 ValueError）；
+  ②去掉 `Path(suggested) != candidate` → 核心用例与"无纠正价值"用例同时红；③重构后重跑变异①仍红。
+  三次均还原后复绿。
+- **门禁**：定向 72 项、四守卫测试 99 项全绿；ruff、`check_doc_sync.py`、`git diff --check`、
+  code-size 身份差集 ADDED 0 / REMOVED 0、`check_clean_package.py . --mode worktree` 全通过。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_create_subagents_input_read_scope.py -q`。
+
 ## 包入口读取判定补结构断言用例（2026-09-28，dev 派活任务 3，my-agent 实现）
 
 - **来源**：dsh-9b 做变异时发现 `capability/package_selection_authority.py` 的墙判定没有用例——把

@@ -226,16 +226,26 @@ class FileSystemTool(BaseTool):
         decision = self.check_path_access(candidate)
         if decision.allowed:
             return candidate
-        hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
-        if hint:
-            if tool_output_artifact_typo_hint(
-                raw_text,
-                self.workspace_root,
-                suggest_workspace_typo_target(raw_text, self.workspace_roots),
-            ):
-                raise ToolOutputArtifactRedirectError(hint)
-            raise ValueError(hint)
+        self._raise_for_typo_hint(raw_text, candidate)
         raise PathAccessError(decision.message or "路径访问被拒绝。", decision.code)
+
+    # LLM: 路径已经落在某个已知工作区根下时，它本身不可能写错前缀（根名就是在这条路径里匹配到的），
+    #   所谓的"拼写提示"只会给出同一个路径、诱导调用方原地重试并盖住真实的权限拒绝（2026-09-28 集成者裁定）。
+    #   只有不在任何已知根下、且建议目标确实不同于原路径时，才保留拼写提示。
+    # 函数用途: 命中"真拼写"场景时抛出对应异常；根内路径与拿不到建议的路径直接返回，交给权限拒绝处理。
+    def _raise_for_typo_hint(self, raw_text: str, candidate: Path) -> None:
+        if any(_path_is_under(candidate, root) for root in self.workspace_roots):
+            return
+        hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
+        if not hint:
+            return
+        if tool_output_artifact_typo_hint(
+            raw_text,
+            self.workspace_root,
+            suggest_workspace_typo_target(raw_text, self.workspace_roots),
+        ):
+            raise ToolOutputArtifactRedirectError(hint)
+        raise ValueError(hint)
 
     # LLM: 只消费 registry 注入的墙外授权，裁决复用原路径策略；workspace_roots 不能自行产生权限，联测 owner/exact 读取边界。
     # 函数用途: 使用核心与插件共用的路径裁决，检查目标是否获准读取。

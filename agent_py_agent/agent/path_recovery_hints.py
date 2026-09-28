@@ -16,6 +16,9 @@ def overlaps_spans(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
     return any(start < span_end and end > span_start for span_start, span_end in spans)
 
 
+# LLM: 只在这个建议真的能纠正路径时才给：建议等于请求路径时它没有纠正价值，只会诱导调用方原地重试，
+#   这种"建议"必须返回空，让上层按真实权限拒绝处理（2026-09-28 集成者裁定，对根内根外一视同仁）。
+# 函数用途: 给出把写错前缀纠正到某个工作区根之后的路径；没有纠正价值时返回空。
 def suggest_workspace_typo_target(raw: str, workspace_roots: Path | list[Path]) -> str:
     if _WINDOWS_ABSOLUTE_RE.match(raw):
         return ""
@@ -24,7 +27,7 @@ def suggest_workspace_typo_target(raw: str, workspace_roots: Path | list[Path]) 
         return ""
     for root in _workspace_roots(workspace_roots):
         suggested = _suggest_workspace_root_tail(root, candidate.parts)
-        if suggested:
+        if suggested and Path(suggested) != candidate:
             return suggested
     return ""
 
