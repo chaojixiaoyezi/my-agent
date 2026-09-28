@@ -100,9 +100,38 @@ def test_stop_without_running_turn_reclaims_session_resources(tmp_path: Path):
     assert "没有运行中的内容" not in result.message
     assert result.kind == "stop"
     assert "已受理停止 1 个后台资源" in result.message
+    # 回执要列出实际停掉的资源（pid + task/run 归属），不能只给一个数量。
+    assert "pid 54321" in result.message
+    assert "task task-1" in result.message
+    assert "run run-1" in result.message
+    assert "尚未确认退出" in result.message
     # 测试里没有真实 host 去回收进程，所以这里必须如实报"未确认退出"，不能伪报已停。
     assert result.ok is False
     assert result.error_code == "TASK_RESOURCE_STOP_UNCONFIRMED"
+
+
+def test_stop_lists_stopped_resources_with_pid_and_ownership(tmp_path: Path):
+    """全停成功路径同样要有明细：pid + task/run 归属，且不能写成"未确认"。"""
+    owner = tmp_path / "owner-ok"
+    _seed_running(tmp_path, "bg-session-ok", thread="t-ok", owner=str(owner))
+    agent = _FakeAgent(tmp_path, owner)
+    execution = ChatControlExecution(
+        agent, False, ChatControlState(
+            running=False, queued_count=0, prompt="", started_at=0.0,
+            session_id="t-ok", request_id="", local_run=None,
+        ),
+    )
+    with patch(
+        "agent_py_agent.agent.gateway_parts.background_resource_report.stop_background_processes",
+        return_value=[{"session_id": "bg-session-ok", "stopped": True, "reason": ""}],
+    ):
+        result = _execute_local_stop(execution, _FakeCommand())
+
+    assert result.ok is True
+    assert "已停止本会话遗留的 1 个后台资源" in result.message
+    assert "pid 54321" in result.message
+    assert "task task-1 / run run-1" in result.message
+    assert "尚未确认退出" not in result.message
 
 
 def test_stop_without_running_turn_and_no_resources_still_says_none(tmp_path: Path):
