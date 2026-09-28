@@ -87,3 +87,18 @@ decision_skill_tool_mode: off
 # - 0: 该侧不限制（统一约定）。
 decision_agent_timeout_min_seconds: 1
 decision_agent_timeout_max_seconds: 30
+
+# 会话间消息与派活（第一期只开给管理员）。
+# - 判定只读结构化 owner_kind 与下面这些开关，不解析任何文本。
+# - 管理员（owner_kind=main，含 IM 里用 /admin 绑定后的私聊）之间的会话可以互发消息、可以派任务。
+# - 普通用户（owner_kind=user）两种能力默认关闭；跨 owner 一律拒绝并返回结构化错误码。
+# 管理员会话之间发消息开关；默认开。
+session_messaging_admin_enabled: true
+# 普通用户发消息开关；默认关（做用户隔离时再打开）。
+session_messaging_user_enabled: false
+# 管理员会话之间派任务开关；默认开。
+session_task_admin_enabled: true
+# 派活链深度上限：由对端任务触发的任务会沿着 origin_task_id 链累计，超过就拒绝；0 表示不限制。
+session_task_max_chain_depth: 4
+# 每对会话（发送会话, 接收会话）每小时的消息上限；task 完成后的回报消息也计入；0 表示不限制。
+session_pair_hourly_limit: 60

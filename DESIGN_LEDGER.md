@@ -43,6 +43,18 @@
 - `turn_end_reason` 保持六值协议，没有新增值；工具名和错误码在收口正文和逐调用归档里，没有给 Gateway 结果新增字段。
 - 真实模型下的效果没有验证。
 
+## 会话间消息与派活（2026-09-28，分支 `my-agent/self-dev-3`，设计中，待 dev 审）
+
+解决问题：同一 owner 下多会话之间不能传消息、不能派活，管理员只能在一个会话里干完所有事。
+第一期只开给管理员（`owner_kind=main`）：同 owner 会话之间可互发消息、可派任务；普通用户两种能力都关闭；
+跨 owner 一律拒绝并返回结构化错误码。复用既有底座、不另起第二套状态——message 正文落 `GuidanceStore`
+（`target_type="thread"`），唤醒复用 `WakeStore`，回合触发复用 `TurnTrigger` 模式新增一种 kind，
+仅 task 的状态与结果新增 `SessionTaskStore`。配置放 `capability_config.yaml`
+（`session_messaging_admin_enabled` 默认开、`session_messaging_user_enabled` 默认关、
+`session_task_max_chain_depth`、`session_pair_hourly_limit`）。防循环两道守卫：派活链深度、每对会话每小时上限
+（0 表示不限制）。飞书入口第一期不做，记为缺口。完整方案、权限矩阵、落地坐标与测试计划见
+[SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md)。状态：**设计中**，等 dev 审过才写代码。
+
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。

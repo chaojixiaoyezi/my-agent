@@ -32,6 +32,17 @@ class CapabilityConfig:
     # my-agent 经 user_config decision_patch 自调决策等待时间的上下限（整数秒）；0 表示该侧不限制，用户菜单修改不受限。
     decision_agent_timeout_min_seconds: int = 1
     decision_agent_timeout_max_seconds: int = 30
+    # 会话间消息与派活（第一期只开给管理员）。判定只读结构化 owner_kind 与这些开关，不看文本。
+    # 管理员（owner_kind=main，含 IM 绑定管理员私聊）之间的会话发消息开关；默认开。
+    session_messaging_admin_enabled: bool = True
+    # 普通用户（owner_kind=user）发消息开关；默认关，做用户隔离时再打开。
+    session_messaging_user_enabled: bool = False
+    # 管理员之间的会话派任务开关；默认开。
+    session_task_admin_enabled: bool = True
+    # 派活链深度上限：由对端 task 触发的 task 按 origin_task_id 链结构化计算；0 表示不限制。
+    session_task_max_chain_depth: int = 4
+    # 每对会话（发送 thread, 接收 thread）每小时消息上限；0 表示不限制。
+    session_pair_hourly_limit: int = 60
     enable_capability_routing: bool = False
     enable_capability_package_recommendations: bool = True
     enable_capability_package_selection: bool = False

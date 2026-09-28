@@ -331,6 +331,77 @@
 - **未包含**：`frontend/config/backend-config-catalog.json` 是随包 YAML 的生成物，本批没有重新生成（重新生成会带出 189/303 行与本批无关的历史差异）；
   该目录在本基线上已 stale，前端线需单独跑 `npm run sync:config`。
 
+## 会话间消息与派活第 1 片第二补丁：错误码登记 + 身份 fail closed + 渠道白名单 + 未知来源（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：dev 10:37 / 10:41 两条审阅（其中两条我上轮漏读，本轮补齐）。
+- **做法**：
+  1. **错误码登记**：`SESSION_NO_CURRENT_THREAD`、`SESSION_IDENTITY_UNAVAILABLE`、
+     `SESSION_TARGET_CHANNEL_UNSUPPORTED` 全部登记进 `contracts/error_taxonomy.ERROR_CONTRACTS`；
+     定向测试带上守卫 `test_recovery_code_policy.py`。
+  2. **身份 fail closed**：`_sender_context` 删除 `or "main"` / `or "local"` 缺省兜底；
+     身份三元组任一为空返回 `SESSION_IDENTITY_UNAVAILABLE`。判定层也加了 `_identity_complete` 二次校验。
+     顺手核查其他位置，确认没有同类"拿不到就当管理员"的兜底。
+  3. **渠道白名单**：`IM_CHANNELS`（黑名单）改成 `LOCAL_TARGET_CHANNELS`（白名单：chat/cli/local/tui/gateway-cli/http）；
+     空渠道按本地处理；不在白名单的（含以后新增渠道）一律 `SESSION_TARGET_CHANNEL_UNSUPPORTED`，fail closed。
+  4. **未知来源不冒充用户**：`_render_guidance_user_input` 改三分支——`origin_kind` 缺失→按用户插话原样（兼容旧数据）；
+     `=session_message`→宿主事件并写来源；**非空但未知→也按宿主事件呈现（来源"未知"）**，不渲染成用户原话。
+- **新测试**：权限文件增 4 项（未知新渠道 fail closed、空渠道按本地、身份缺 3 参数化 fail closed）；
+  渲染文件增/改 2 项（未知 origin_kind 走宿主事件、缺失 origin_kind 仍原样）。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py agent_py_agent/tests/test_session_message_rendering.py agent_py_agent/tests/test_recovery_code_policy.py -q`（58 项）。
+- **变异验证**：身份检查改恒假 → 3 条身份测试红；白名单退回黑名单 → 未知渠道测试红；恢复后全绿。
+
+## 会话间消息与派活第 1 片补丁：关闭可见性 + 呈现不冒充用户 + IM 目标拒绝（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：dev 审阅第 1 片后提的 3 处要求（每处要测试）。
+- **做法**：
+  1. **关闭时工具不可见**：新增纯函数 `session_messaging_tool_visible` / `session_task_tool_visible`
+     （`conversation/session_messaging.py`），只读 `home_paths.owner_kind` 与开关；`core.py` 的
+     `_register_orchestration_tools` 改为**条件注册**——判定为 False 时工具根本不进 registry，
+     模型工具列表里不出现（不是"调用时才拒绝"）。配置经既有 `capability_config_for_agent(agent)` 读取。
+  2. **呈现不冒充用户**：改 `agent_core/runtime/guidance.py` 的 `_render_guidance_user_input`：
+     带 `metadata.origin_kind=session_message` 的 guidance 渲染成宿主事件
+     `[SESSION_MESSAGE_HOST_EVENT]` 并写明来源会话（`origin_thread_id`），用户插话保持原样。
+     分类只看结构化 metadata，不看正文。
+  3. **IM 目标拒绝**：新增错误码 `SESSION_TARGET_CHANNEL_UNSUPPORTED`（已注册进 `error_taxonomy`）；
+     判定层新增 `target_channel` 入参，命中 `IM_CHANNELS`（feishu/qq/wecom/dingtalk）即拒绝；
+     工具用 `_thread_channel` 从 canonical thread 的 `channel_bindings` 取渠道。
+  - `test_session_messaging_permissions.py` 增 8 项：IM 渠道拒绝（含普通用户优先级）、本地渠道放行、
+    工具可见性 5 项（管理员开关开/关、普通用户默认、用户开关开、派任务仅管理员）。
+  - `test_session_message_rendering.py`（5 项，新增文件）：会话消息渲染成宿主事件并带来源、用户插话保持原样、
+    未知 origin_kind 按用户处理、混合条目顺序、缺来源仍有标记。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py agent_py_agent/tests/test_session_message_rendering.py -q`（36 项）。
+- **变异验证**：把 `_render_guidance_user_input` 的会话消息分流改成恒假 → 3 条渲染测试全红；恢复后全绿。
+- **回归**：`test_runtime_guidance.py`、`test_wake_queue.py` 通过。修复过程中发现真实缺陷
+  （`SimpleAgent` 没有 `capability_config` 属性，正确入口是 `capability_config_for_agent(agent)`），
+  已被回归测试捕获并修正。
+- 五项静态 gate（ruff/doc_sync/strict code-size/diff --check/clean_package）全过。
+
+## 会话间消息与派活第 1 片：权限判定 + 管理员发消息工具（2026-09-28，分支 `my-agent/self-dev-3`）
+
+- **来源**：开发交流板任务「会话之间的消息与派活（第一期只开放给管理员）」；设计经 dev 审过，6 处补充已并入
+  `docs/design/SESSION_MESSAGING.md`。
+- **做法**：
+  - 新增 `agent_py_agent/agent/conversation/session_messaging.py`：权限判定纯函数 `decide_session_messaging`，
+    只读结构化字段（发送方 `OwnerIdentity` 的 owner_kind、kind、是否同 owner/同 thread、三个开关），
+    返回 `(allowed, error_code, scope_warnings)`。目标不存在与跨 owner 返回同一码 `SESSION_TARGET_OUT_OF_SCOPE`（不泄露存在性）；
+    自派任务拒绝 `SESSION_TASK_TARGET_SELF`，自消息允许。
+  - 新增 `agent_py_agent/agent/agent_core/orchestration/tools/send_session_message.py`：`SendSessionMessageTool`，
+    身份只从 `agent.home_paths` 的 owner 三元组与当前会话 thread_id 取；通过后向目标 thread 的 guidance 队列
+    `append_once`（幂等 dedupe_key，来源 `origin_kind/origin_thread_id` 落 metadata），目标 `status=active` 时再 `wake.raise_signal`。
+  - 配置同步：`capability_config.yaml` + `capability/config.py` 加 5 个键（管理员发消息/派活默认开，普通用户发消息默认关，
+    链深上限、每对会话每小时上限，0 表示不限制）。
+  - 错误码注册：`contracts/error_taxonomy.py` 新增 `SESSION_MESSAGING_DISABLED`、`SESSION_TASK_NOT_ALLOWED`、
+    `SESSION_TARGET_OUT_OF_SCOPE`、`SESSION_TASK_TARGET_SELF`（未注册会被归一成 `UNKNOWN_ERROR`，这是既有合同）。
+  - 注册位置：`core.py` 的 `_register_orchestration_tools`，放在 `enable_subagents` 门控**之前**（会话间消息是 owner 级能力）。
+  - `agent_py_agent/tests/test_session_messaging_permissions.py`（18 项）：8 格权限矩阵、不泄露存在性、
+    自派任务/自消息、开关关闭、kind 非法。
+  - `agent_py_agent/tests/test_send_session_message_tool.py`（5 项）：缺参数失败、目标不存在返回统一越界码、
+    成功写入来源结构化消息并唤醒空闲目标、非活跃目标只排队不唤醒。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py -q`。
+- **变异验证**：把跨 owner 判定改成恒真 → 5 条跨 owner 测试全红；把自派任务判定改成恒假 → 自派测试变红；恢复后全绿。
+- **回归**：`test_runtime_guidance.py`、`test_wake_queue.py`、`test_orchestration_tool_constants.py` 通过。
+- 尚无真实 Gateway 双会话端到端验收（第 3 片用 fake LLM 做；真实环境由 dev 安排）。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的
