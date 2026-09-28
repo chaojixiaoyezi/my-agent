@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
+
+- **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，
+  不在本轮。
+- **环境**：git archive 构建 wheel（tree `32e0c545…`，wheel sha256 `1ba17efe…`），新 Python 3.11.15 venv；scratchpad
+  隔离 home、私有 127.0.0.1:8436；local/main 管理员与 local/user 普通用户两个 owner，都有 owner 墙；模型目录副本 600、
+  不打印、结束删除；被测进程 `env -i` 启动。
+- **结果**：四项均通过，未发现隔离缺陷，逐项结构化证据见
+  [CAPABILITY_PACK_ACCEPTANCE.md](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#r16-跨-owner-隔离原生验收2026-09-28)。
+  B 读取 A 私有包返回 `SKILL_SNAPSHOT_UNAVAILABLE`；B 申请 Full Access 未生效；B 的 `list_agents` 看不到 A 的子代理；
+  A 的偏好写入只落在 A 的人格文件。
+- **复现**：`~/.my-agent/decision-evidence/r16-isolation-9f88/harness/`（stage → run_gateway / run_tui → send → collect /
+  final_evidence）；判定只读结构化事实，不读对话、人格、记忆正文。
+- **未覆盖**：按包选择偏好（两边都未形成 capability_selection 记录）、实际 profile 核对、主机层 global_index 的可读性探测。
+
 ## 前端 import 链恢复：补回 `frontend/src/data/runtimeConfig.ts` 与 `mockConfig.ts`（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`）
 
 - **根因（误删）**：2026-08-15 建独立仓库的初始化提交 `0b6252590` 没带 `frontend/src/data/` 两个文件，而同一提交里的

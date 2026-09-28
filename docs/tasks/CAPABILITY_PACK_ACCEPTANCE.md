@@ -89,8 +89,35 @@ Linux 状态已由 Claude 明确为**未部署（测试机下线）**：0c 和 9
 | G03 | ONE_SHOT／历史不完整、BLOCKED 接替、后台续接后的前台新请求 | C23 只证明正常三子完成、一次原派工、两次后台续接及父级保存；原父自动选择为空。既有组件和正常路径不替代实际拒绝／接替分支，全文消费和资料准确性失败保持 |
 | G04 | Goal 暂停、回合中断、明确资源停止三类独立控制 | 已有 /stop 的组合状态、资源退出和 REOPEN03 同代续读，不能据此声称三类控制各自独立实测；R10 的原判据保持 |
 | G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过 |
-| G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据；跨 owner 仍以组件为主，未找到后续原生关闭证据，不由一般权限代码推定 R16 通过 |
+| G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据。**2026-09-28 补跨 owner 原生验收**（`9f88e4905`，隔离 home、私有 8436、local/main 与 local/user 两个 owner）：包、设置、task、偏好四项均取得原生结构化证据，未发现隔离缺陷，见[R16 跨 owner 隔离原生验收](#r16-跨-owner-隔离原生验收2026-09-28)；按包选择偏好（capability_selection）本轮两边都未形成可比记录，仍未单独覆盖 |
 | G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证 |
+
+### R16 跨 owner 隔离原生验收（2026-09-28）
+
+- **被测**：`9f88e4905`（与生产 step14w 产品代码相同）。git archive 构建 wheel，tree `32e0c545887741f37c2e46148f1aac12b6de3d76`，
+  源码包 sha256 `041a0ce23064408e85cddfa34933006e994181873ea645c7b86d67ff88588468`，wheel sha256
+  `1ba17efe0394259ecfb7e5465dc9336907492f0c68a83884899bff130ab25f05`，新建 Python 3.11.15 venv。
+- **环境**：scratchpad 隔离 home，Gateway 只在 127.0.0.1:8436；A = local/main 管理员，B = local/user/audit-tester，
+  两者均为 workspace-write（有 owner 墙），审批模式 auto。模型目录复制自 Codex 能力包验收所用副本（600、不打印、结束即删），
+  两个 owner 各放在产品计算出的路径；决策模型经产品 CAS 关闭，只为减少噪声。被测进程用 `env -i` 最小环境启动
+  （不继承 `AGENT_API_KEY`），外网只走本机代理。
+- **做法**：每个检查点一条原始需求或一个真实 TUI 操作；判定只读结构化事实（安装账本、每个 owner 的 runtime.db
+  immutable 只读、工具输出索引的 ok/error_code 与参数名、`list_agents` 的范围字段、产品只读接口给出的设置值、
+  每步前后整个 home 的逐文件 sha256 清单按路径归属），不读对话、人格或记忆正文。
+
+| 项 | 结论 | 结构化证据 |
+| --- | --- | --- |
+| 包 | 通过 | A 用 `/plugins install`、`/plugins enable` 装 `security-evidence` 0.1.0（capability，sha256 `f8f5b2c6…`）：A 的安装账本 phase=active，B 没有安装账本；安装和启用只改动 A 的 owner 目录，shared 与 B 无变化。B 按编号读取：`skill_search get` ok=false、`SKILL_SNAPSHOT_UNAVAILABLE`；A 同一需求 ok=true，且调用带着只有 A 的目录才给出的 activation 与包 sha256 |
+| 设置 | 通过 | A `/permissions ask` 后 A 为 ask、B 仍 auto，只有 A 的 `tool_policy.json` 变化；B `/permissions full-access` 后 B 仍 auto、A 不变，B 的操作只改动 B 自己的输入历史 |
+| task | 通过 | 运行分别记在各自 owner 的 runtime.db：A 8 个（含 worker 子代理），B 只有自己的 5 个。B 调 `list_agents`：不带参数时范围为 B 自己的会话线程，显式给出 A 子代理的 run_id 时为 own_subtree，两次 nodes 都为空、root_id 为空 |
+| 偏好 | 通过 | A `update_persona`（target=user）成功，只改动 A 的 `USER.md` 与人格版本记录；B 随后 `update_persona list`、`remember list` 都成功，只新增 B 自己的上下文快照，A 的文件与 B 的 `USER.md` 均无变化；两边上下文快照的记忆引用只归属各自 owner |
+
+- **随附发现（都不是隔离缺陷）**：① A 用自然语言要求改决策设置时，`user_config decision_patch` 三次都是
+  `TOOL_INVALID_ARGUMENTS`，没有改成（模型给参数的方式与工具不符）；② B 请求读取管理员设置时没有发起任何工具调用，
+  这一路没有拒绝码可记；③ 显式查询别的 owner 的 run_id 时，`list_agents` 返回空结果，没有范围告警或拒绝码。
+- **未覆盖**：按包选择偏好（capability_selection）本轮两边都未形成记录；实际调用的 profile 未单独核对；主机层
+  `global_index`（active_runs、active_tasks）会记录两个 owner 的运行，本轮没有探测 owner 工具能否读到它。
+- **证据**：`~/.my-agent/decision-evidence/r16-isolation-9f88/`（结构化快照、差异、发送记录与测试脚本；不含对话正文和目录内容）。
 
 ### Compact 的机制与规模分别记账
 
