@@ -9,6 +9,10 @@ from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...runtime_context import current_subagent_run_id
 
 _OVERRIDE_WARNING = "explicit_scope_overridden_by_current_runner"
+# LLM: 显式 run_id 在当前可见范围里没有任何匹配行时的唯一裁决码，三处工具共用同一份定义
+#   （list_agents 的树查询、task_progress 的账本裁决、cancel_subagents 的取消目标解析）。
+#   它同时覆盖"这个 id 不存在"和"这个 id 不属于你可见范围"，两种情况必须给出完全相同的答复，不泄漏存在性。
+UNMATCHED_RUN_SCOPE_CODE = "requested_run_id_not_in_visible_scope"
 
 
 @dataclass(frozen=True)

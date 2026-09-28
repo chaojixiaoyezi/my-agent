@@ -33,6 +33,7 @@ from ....tooling.models import (
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
+from ...orchestration.scope_resolution import UNMATCHED_RUN_SCOPE_CODE
 from ..create_policy import current_orchestration_requester_run_id
 from ..tool_specs import build_cancel_subagents_model_spec
 
@@ -158,6 +159,11 @@ def execute_cancel_subagents(
         )
     run_ids = run_ids_result.run_ids
     if not run_ids:
+        # LLM: 空解析结果要有结构化原因：显式给了 id 就用与 list_agents 相同的裁决码（不区分不存在/无权看），
+        #   什么都没给才是"参数不足"。两种情况都不静默。
+        if run_ids_result.error_payload:
+            payload = {"ok": False, **run_ids_result.error_payload}
+            return _cancel_failure(json.dumps(payload, ensure_ascii=False, indent=2), "TOOL_INVALID_ARGUMENTS")
         return _cancel_failure(
             "缺少 run_id/run_ids/root_id/status，未取消任何子代理。",
             "TOOL_PARAMETER_REQUIRED",
@@ -304,7 +310,44 @@ def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveR
             return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
         tasks = tasks_result.tasks
         ids.extend(str(task.id) for task in tasks if task_status_in(task.status, status_filter))
+    if explicit:
+        # LLM: 显式点名的 id 若本 owner 存储里确实没有这条 run，就在解析阶段给裁决码，别让它走到取消
+        #   执行层变成 "programmer_b..." 这类无意义错误。
+        #   关键口径（dev 2026-09-28 确认）：判定只依据**已有的加载结果**——`_load_cancel_target` 已经
+        #   区分了"加载失败（run 存在但 locator/元数据损坏）"与"本 owner 根本查不到"：
+        #     - 加载抛错（task 为 None、带 error）→ 存在但坏了，原样放行到既有 failed 路径，带上具体错误；
+        #     - 加载成功 → 正常目标。
+        #   不在这里另算第二套"可见集合"（`list_runs()` 只返回能解析成功的行，会把损坏 run 误判成不存在）。
+        missing = [item for item in explicit if _explicit_target_is_absent(agent, item)]
+        if missing:
+            return _ResolveRunIdsResult(True, [], {
+                "reason": UNMATCHED_RUN_SCOPE_CODE,
+                "requested_run_ids": missing,
+                "message": "这些 run_id 不在当前可见范围内（不存在或无权查看，两者答复相同）。",
+            })
     return _ResolveRunIdsResult(True, _dedupe(ids), {})
+
+
+# LLM: 判定"这条显式 run_id 在本 owner 里确实不存在"。只看既有加载结果，不另算可见集合。
+#   权威判据来自 authorization_gate（该文件 85-89 行的既定契约）：
+#     - `manager.load` 对不存在的 run 透传 FileNotFoundError → 确实没有这条 run，返回 True（给裁决码）；
+#     - AuthorizationError（存在但无权）/ 其他加载错误（如 JSONDecodeError 账本损坏）→ 存在，返回 False，
+#       原样放行到既有 failed 路径，带上具体错误。
+#   `list_runs()` 不能作为"不存在"的判据：账本损坏时它可能整批返回空，会把损坏 run 误判成不存在。
+#   判定复用 `_load_cancel_target` 已有的那次加载，不额外读盘。
+# 函数用途: 给解析阶段的可见性裁决提供"确实不存在"判据（只认 FileNotFoundError）。
+def _explicit_target_is_absent(agent: SimpleAgent, run_id: str) -> bool:
+    item = _load_cancel_target(agent, run_id)
+    if item.get("task") is not None:
+        return False
+    error = item.get("error")
+    if isinstance(error, dict):
+        return (
+            str(error.get("error_type") or "") == "FileNotFoundError"
+            or str(error.get("category") or "") == "io"
+        )
+    # 没有结构化错误信息时保守放行：宁可让下层报具体错误，也不误判"不存在"。
+    return False
 
 
 def _list_runs_for_cancel(agent: SimpleAgent) -> _ListRunsForCancelResult:
@@ -346,9 +389,11 @@ def _cancel_error_code(error_payload: dict[str, object]) -> str:
     """把 resolve/status 错误 payload 映射到准确分类码（避免无码兜底成 UNKNOWN_ERROR）。
 
     - invalid_status_filter：status 取值非法，改参数可修 → TOOL_INVALID_ARGUMENTS。
+    - requested_run_id_not_in_visible_scope：显式目标不在可见范围，改参数可修 → TOOL_INVALID_ARGUMENTS。
     - 其余（list_runs 抛错产出的 runtime_error_report）：运行时查询异常 → TOOL_EXECUTION_FAILED(可重试)。
     """
-    if str(error_payload.get("error") or "") == "invalid_status_filter":
+    error = str(error_payload.get("error") or "")
+    if error == "invalid_status_filter" or str(error_payload.get("reason") or "") == UNMATCHED_RUN_SCOPE_CODE:
         return "TOOL_INVALID_ARGUMENTS"
     return "TOOL_EXECUTION_FAILED"
 
