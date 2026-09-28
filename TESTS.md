@@ -1,5 +1,33 @@
 # 测试与发布验收
 
+## 会话互通第一期派活链：脚本模型端到端验证（2026-09-28，分支 `claude/ae-session-task-e2e`，仅文档）
+
+- **性质与结论**：用脚本模型在真实 Gateway 和真实 TUI 上做机制验证，**未通过**，共发现 4 个产品缺陷，未改代码。
+  - 被测为 `b938b2a98` 的 `git archive` 导出；当时它就是 origin/main。
+  - 之后 main 前进到 `9af85833e`，新增提交没有改动会话消息相关目录，结论同样适用。
+- **环境**：
+  - Gateway 8437、脚本假模型 8447，全部用 `env -i` 启动，假 HOME 跑完为空，没有模型密钥；
+  - 链深上限写在运行根的 `config/capability_config.yaml`（`session_task_max_chain_depth: 2`），已用产品的加载函数确认读到 2；
+  - 同一个 local/main 管理员 home 里开 A、B、C 三个真实 TUI 会话，渠道都是 chat。
+- **判据**：只读结构化事实，不读会话正文：
+  - SessionTaskStore 的状态、origin_task_id、conversation_request_id；
+  - guidance 条目的 origin_kind 与一次性回执状态；
+  - 唤醒队列、请求记录的状态与错误码、控制操作记录；
+  - runtime.db 的 tool_completed（Gateway 停止后以 immutable 只读打开）；
+  - 脚本模型实际收到的回合开头与工具清单。
+- **结果**：
+  - A 派给 B：投递成功，唤醒元数据和宿主事件开头都正确；但任务始终停在 queued，没有接单和回合号，正文回执是 pending。
+  - B 再派给 C：B 的派活回合只有 17 个工具，没有 create_session_task。原因是后台工具策略没有 session_task 档，落到 default 档。
+  - C 触发 SESSION_TASK_CHAIN_LIMIT：依赖上一步，走不到。
+  - 自动回报：派活方没有收到任何回报。收尾按后台请求的 task_id 匹配，而这个 task_id 为空。
+  - 取消：空闲路径只能从队列撤回，控制操作记录为 0；正忙路径中，目标的前台请求在安全点注入正文时以 `DATACORRUPTIONERROR`
+    失败，原因是正文条目缺少 `expected_turn_id`，正文回执卡在 reserved，请求记录也没有 cancel 字段。
+  - 另见：没确认的旧正文会在后来的回合里被再次注入。
+- **环境事件**：第 1 轮后段本机数据卷曾被写满（`No space left on device`）。受影响的“目标正忙”段已作废，
+  第 2 轮在新的 home 里重跑，复现了上述结果。
+- **本轮验证**：只改 Markdown，运行五项静态门禁，提交前还原 CODE_SIZE_REPORT.md，没有跑 pytest。
+  证据批次 `session-task-chain-e2e` 保存在本机验收证据目录，不进仓库。
+
 ## 会话间消息与派活：修复两个“没真正生效”的接线缺陷（2026-09-28，分支 `my-agent/self-dev-3`，基于 main `7bfe52778`）
 
 - **来源**：2026-09-28 待命前做真实链路核对时发现并报给 dev，dev 批准（高优先级）后修复。两条都属于第一期已上线范围。

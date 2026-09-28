@@ -223,6 +223,8 @@
 | 3 | 管理员派任务、结果回报、取消；fake LLM 端到端 |
 | 4 | 防循环守卫、配置开关、文档收尾（CODEBASE_TREE、TESTS.md） |
 
+**端到端验收（2026-09-28，脚本模型 + 真实 Gateway／TUI，被测 `b938b2a98`）：未通过。**A 能派活并唤醒 B，B 的回合开头是宿主事件；但派活回合的工具集里没有会话工具，所以 B 无法再往下派，链深守卫在真实链路上仍到不了。空闲目标的回合从不接单、不收尾、不回报，任务停在 queued。没确认消费的正文会在后来的回合里被再次注入。目标正忙时，在安全点注入正文会让它的请求以 `DATACORRUPTIONERROR`（guidance submission reservation mismatch）失败。取消只能走“从队列撤回”，停止控制一次也没有发出。证据批次 `session-task-chain-e2e`，详见 TESTS.md。
+
 ## 缺口与后续
 
 - 飞书入口第一期不做。
