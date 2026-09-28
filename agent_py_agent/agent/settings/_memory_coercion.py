@@ -75,10 +75,8 @@ _FIELDS = (
     _FieldSpec("memory_curator_model", "string", max_chars=200),
     _FieldSpec("memory_curator_interval_seconds", "int", 60, 604_800),
     _FieldSpec("memory_curator_turn_threshold", "int", 1, 1_000),
-    _FieldSpec("memory_curator_batch_message_limit", "int", 1, 500),
     _FieldSpec("memory_curator_max_input_chars", "int", 2_000, 500_000),
     _FieldSpec("memory_curator_timeout_seconds", "int", 5, 900),
-    _FieldSpec("memory_curator_max_retries", "int", 0, 5),
     _FieldSpec("memory_curator_daily_finalize_hour", "int", 0, 23),
     _FieldSpec(
         "memory_curator_auto_promotion_policy",

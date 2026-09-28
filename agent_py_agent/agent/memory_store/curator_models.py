@@ -44,6 +44,12 @@ CURATOR_TRIGGER_REASONS = frozenset(
     }
 )
 
+# LLM: Curator 单批消息条数与模型调用重试次数，2026-09-28 参数减量 C 组后不再是用户参数；只在这里保留一份定义，
+#   其他模块要改就从本模块导入，不要再退回成配置读取。
+# 函数用途: 给出后台记忆整理一次最多送多少条消息、单批模型调用失败最多重试几次。
+CURATOR_BATCH_MESSAGE_LIMIT = 80
+CURATOR_MAX_RETRIES = 1
+
 
 # LLM: 这是 Curator 唯一有效配置快照；provider/model 切换不得改变输出 Schema。
 # 类用途: 从 AgentConfig 提取后台策展开关、批量、超时和晋升策略。
@@ -54,10 +60,10 @@ class MemoryCuratorConfig:
     model: str = ""
     interval_seconds: int = 10_800
     turn_threshold: int = 10
-    batch_message_limit: int = 80
+    batch_message_limit: int = CURATOR_BATCH_MESSAGE_LIMIT
     max_input_chars: int = 40_000
     timeout_seconds: int = 90
-    max_retries: int = 1
+    max_retries: int = CURATOR_MAX_RETRIES
     daily_finalize_hour: int = 23
     auto_promotion_policy: str = "conservative_v1"
 
@@ -71,12 +77,8 @@ class MemoryCuratorConfig:
             model=str(getattr(config, "memory_curator_model", "") or "").strip(),
             interval_seconds=int(getattr(config, "memory_curator_interval_seconds", 10_800)),
             turn_threshold=int(getattr(config, "memory_curator_turn_threshold", 10)),
-            batch_message_limit=int(
-                getattr(config, "memory_curator_batch_message_limit", 80)
-            ),
             max_input_chars=int(getattr(config, "memory_curator_max_input_chars", 40_000)),
             timeout_seconds=int(getattr(config, "memory_curator_timeout_seconds", 90)),
-            max_retries=int(getattr(config, "memory_curator_max_retries", 1)),
             daily_finalize_hour=int(
                 getattr(config, "memory_curator_daily_finalize_hour", 23)
             ),

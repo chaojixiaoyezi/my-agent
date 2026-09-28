@@ -140,3 +140,8 @@ lesson/HOT、截断、缺版本或 audit 正文覆盖未知时保留原批次并
 `memory_archive/resume_context.py` 与 `memory_archive/artifact/read_modes.py`，归档检索文件上限直接复用 `query/archive_io.py`
 的既有 `ARCHIVE_SEARCH_FILE_LIMIT`。配置面（AgentConfig、随包 `agent_config.yaml`、`services/_normalize` 规格、说明基线）同步删除，
 用户配置残留只按未知键告警；`memory_resume_archive_scan_limit` 的 0 仍表示不限。定向测试与静态门禁见 TESTS。
+
+2026-09-28 参数减量 C 组第 3 批：Curator 的 `memory_curator_batch_message_limit`(80) 与 `memory_curator_max_retries`(1)
+降为 `memory_store/curator_models.py` 的 `CURATOR_BATCH_MESSAGE_LIMIT` / `CURATOR_MAX_RETRIES`，数值不变；配置面（AgentConfig、
+随包 `agent_config.yaml`、`services/_normalize` 规格、`_memory_types.MemorySettings`、说明基线）同步删除，用户配置残留只按未知键告警。
+Curator 的 interval、turn_threshold、max_input_chars、timeout、workers、daily_finalize_hour 仍是用户参数。定向测试与静态门禁见 TESTS。

@@ -340,10 +340,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_curator_model: str = ""
     memory_curator_interval_seconds: int = 10_800
     memory_curator_turn_threshold: int = 10
-    memory_curator_batch_message_limit: int = 80
     memory_curator_max_input_chars: int = 40_000
     memory_curator_timeout_seconds: int = 90
-    memory_curator_max_retries: int = 1
     # 记忆策展使用独立后台车道；限制并发可避免历史 owner 积压抢占主会话/子代理唤醒线程。
     memory_curator_workers: int = 2
     memory_curator_daily_finalize_hour: int = 23

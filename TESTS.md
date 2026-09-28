@@ -21,6 +21,21 @@
 - **变异**：5 个变异全部被杀：读后仍报旧原因、读前误标为读中、`read_in_package` 丢掉 reason、工具不输出 details、去掉读后复核的包装。
 - 没有覆盖的路径：`write_file.source_ref` 的来源失败仍以 `TOOL_UNAVAILABLE` 的文本报告，没有带出 reason。
 
+## 参数减量 C 组第 3 批：Curator 批大小与重试 2 键降为常量（2026-09-28，分支 `my-agent/self-dev-2`）
+
+- **来源/做法**：dev 在 my-agent-2 开发交流板派的任务 2（做法同 C 组第 2 批 / `87e025bb6`）。`memory_curator_batch_message_limit`(80)
+  与 `memory_curator_max_retries`(1) 数值不变，降为 `agent/memory_store/curator_models.py` 的 `CURATOR_BATCH_MESSAGE_LIMIT` /
+  `CURATOR_MAX_RETRIES`；`MemoryCuratorConfig` 默认值改为这两个常量，`from_agent_config` 不再读 `agent.config`。
+- **保留项**：curator 的 interval、turn_threshold、max_input_chars、timeout、workers、daily_finalize_hour 以及
+  `memory_rule_auto_read_limit` 仍是用户参数，本批未动。
+- **配置面同步删除**：`AgentConfig` 2 字段、随包 `agent_config.yaml` 2 行、`services/_normalize` 的 2 条 `_FieldSpec`、
+  `_memory_types.MemorySettings` 2 字段、说明基线 2 个条目；用户配置残留只按未知键告警。
+- **复现**：`cd agent_py_agent && python3 -m pytest tests/test_memory_curator_v2.py tests/test_curator_*.py tests/test_collect_curator_evidence.py
+  tests/test_decision_curator*.py tests/test_memory_config.py tests/test_settings_memory.py tests/test_parameter_registry.py
+  tests/test_constant_names_unique.py tests/test_architecture_guardrails.py tests/test_config_field_readers.py -q --tb=short`（369 passed）；
+  仓库根跑 Ruff、`scripts/check_doc_sync.py`、`scripts/check_code_size.py --mode strict`、`git diff --check`、`scripts/check_clean_package.py .`。
+- **环境注记**：整目录 `pytest tests` 在本机因缺 dev extra（`hypothesis`、`pyte`）无法收集，本次用显式文件列表；与本批改动无关。
+
 ## R16 跨 owner 隔离原生验收（2026-09-28，被测 `9f88e4905`，文档分支 `claude/9b-r16-acceptance`）
 
 - **范围**：CAPABILITY_PACK_ACCEPTANCE 第 6 组（G06）的跨 owner 部分：包、设置、task、偏好。同 owner 多 TUI 与子授权已有证据，

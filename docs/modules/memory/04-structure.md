@@ -30,6 +30,9 @@ Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `To
   归档检索文件上限复用 `query/archive_io.ARCHIVE_SEARCH_FILE_LIMIT`(30)，artifact 正文默认读取复用
   `artifact/read_modes.ARTIFACT_DEFAULT_READ_CHARS`(4000)。这些键已从 AgentConfig、随包 YAML、`services/_normalize` 规格与
   说明基线删除，用户配置里残留只按未知键告警；CLI 与 runtime 都从同一常量导入，不再读 `agent.config`。
+- Curator 批次与重试（2026-09-28 参数减量 C 组）：`memory_store/curator_models.CURATOR_BATCH_MESSAGE_LIMIT`(80) 与
+  `CURATOR_MAX_RETRIES`(1) 是 `MemoryCuratorConfig` 的唯一来源，已从 AgentConfig、随包 YAML、`services/_normalize` 规格与
+  说明基线删除；curator 的 interval、turn_threshold、max_input_chars、timeout、workers、daily_finalize_hour 仍是用户参数。
 
 ## 压缩熔断参数的唯一位置
 
