@@ -163,3 +163,11 @@ Curator 的 interval、turn_threshold、max_input_chars、timeout、workers、da
 留待 dev 裁决。实测收益（10 条 × 520 字符正文，JSON 字符数/4 估算）：整包 11445→9781（−14.5%），
 memories 7240→5920，其中元数据 2040→720（−65%），questions 3960→3570。正文 `content` 仍占请求 53%，
 是否按 pre_recall 先例（`content[:160]`）截断属决策质量取舍，未做，待 dev 定。定向 66 项通过。
+
+2026-09-28 Jev 2 第 2 步（dev 裁决后）：`recall` 单条正文加安全上限。**不做一刀切截断**——单条超过
+`conversation/decision_point_limits.RECALL_CONTENT_MAX_CHARS`(800) 字符才截，截断处给结构化标记
+`content_truncated: true` + `content_original_chars`，让模型知道这条被截了、原长多少；正常长度原样送，
+不为一刀切省 token 破坏以后评估 apply 时的排序质量。常量出门禁点具名、不新增用户参数。
+dev 同时裁定 `criteria` **不上提**成共享引用：它是与 Jev 决策模型之间的 wire 协议必需字段
+（`typesafe_decision_wire` 要求它是 dict），改协议影响外部模型格式预期；curator 线最后也退回内联形态，两边一致。
+变异验证 5/5 KILLED（不截断/恒定截断/截断不给标记/改上限值/原长标记写错）。定向 81 项通过。

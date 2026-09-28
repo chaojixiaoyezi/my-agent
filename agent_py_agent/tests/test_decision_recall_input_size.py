@@ -76,6 +76,34 @@ def test_recall_choice_criteria_keeps_full_option_set_for_every_question(tmp_pat
         assert question["type"] == "choice"
 
 
+def test_recall_short_content_is_sent_unchanged(tmp_path):
+    """正常长度的记忆原样送：安全上限只防超长条目，不做一刀切截断（dev 定的口径）。"""
+    body = "短正文" * 100  # 300 字符 < 800
+    state, _questions, _revision = _material(_agent(tmp_path), [_record(0, body=body)])
+    row = state["memories"][0]
+    assert row["content"] == body
+    assert "content_truncated" not in row
+
+
+def test_recall_overlong_content_is_capped_with_a_structured_marker(tmp_path):
+    """超长条目才截断，且必须带结构化标记让模型知道这条被截了、原长多少。"""
+    from agent_py_agent.agent.conversation import decision_point_limits as limits
+
+    body = "长正文" * 1000  # 3000 字符 > 800
+    state, _questions, _revision = _material(_agent(tmp_path), [_record(0, body=body)])
+    row = state["memories"][0]
+    assert len(row["content"]) == limits.RECALL_CONTENT_MAX_CHARS
+    assert row["content_truncated"] is True
+    assert row["content_original_chars"] == len(body)
+
+
+def test_recall_content_cap_is_the_frozen_named_constant(tmp_path):
+    """上限必须来自具名常量（不新增用户参数），钉住值防止被顺手改掉。"""
+    from agent_py_agent.agent.conversation import decision_point_limits as limits
+
+    assert limits.RECALL_CONTENT_MAX_CHARS == 800
+
+
 def test_recall_request_shrinks_compared_with_the_metadata_carrying_form(tmp_path):
     """钉住缩小输入的实际收益：去掉元数据后，同一批材料的请求体必须明显更小。"""
     records = [_record(i, body="这是一条比较长的记忆正文。" * 20) for i in range(6)]

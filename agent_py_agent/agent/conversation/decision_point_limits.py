@@ -22,6 +22,9 @@ SKILL_PROPOSALS_MIN = 2
 SKILL_PROPOSALS_MAX = 30
 # 召回重排：普通（非 HOT/lesson）记忆至少几条。
 RECALL_MEMORIES_MIN = 2
+# 召回重排：单条记忆正文送入决策模型的安全上限（字符）。只防超长条目拖慢请求，
+# 正常长度原样送，不为一刀切省 token 破坏以后评估 apply 时的排序质量。
+RECALL_CONTENT_MAX_CHARS = 800
 # observe 采样：开关打开后，每个点位每个自然小时里成功调用达到这个次数就不再调用决策模型
 # （失败与超时不计入）。只是内部观察节奏，不是用户参数。
 OBSERVE_SAMPLED_SUCCESS_LIMIT = 6

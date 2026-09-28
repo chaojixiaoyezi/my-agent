@@ -269,8 +269,18 @@ def _material(agent: object, request: object, records: list, scope: object) -> t
 # 函数用途: 生成请求里 memory 条目的精简投影（与本地一致性校验用的 _record_view 分开，避免为了省流量破坏校验）。
 def _decision_view(row: dict) -> dict:
     # attributes 参与绑定校验（scope 变化须可比对），必须保留；只去掉决策用不到的时间戳与来源渠道。
-    return {"entry_id": row["entry_id"], "kind": row["kind"], "content": row["content"],
-            "attributes": row["attributes"]}
+    view = {"entry_id": row["entry_id"], "kind": row["kind"], "attributes": row["attributes"]}
+    content = row["content"]
+    limit = limits.RECALL_CONTENT_MAX_CHARS
+    if isinstance(content, str) and len(content) > limit:
+        # 安全上限：只防超长条目拖慢请求，正常长度原样送。截断处给结构化标记，
+        # 让模型知道这条被截了、原长多少，而不是把残文当完整正文。
+        view["content"] = content[:limit]
+        view["content_truncated"] = True
+        view["content_original_chars"] = len(content)
+    else:
+        view["content"] = content
+    return view
 
 
 # LLM: 完整材料已在原召回中，任何题级非选择或错误仅放弃这次可选排列，不丢记录、猜补分数或要求新资料。
