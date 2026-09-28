@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..common.cancellation import CancellationToken
 from ..contracts.tool_manifest_contract import tool_manifest_payload
+from ..memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from ..path_access_policy import effective_owner_scope_root, path_scope_regime
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
@@ -127,9 +128,7 @@ class ToolRegistryParams:
     artifact_read_budget_max_chars: int = field(
         default_factory=lambda: _agent_config_int("tool_artifact_read_budget_max_chars")
     )
-    artifact_default_read_chars: int = field(
-        default_factory=lambda: _agent_config_int("memory_artifact_default_read_chars")
-    )
+    artifact_default_read_chars: int = ARTIFACT_DEFAULT_READ_CHARS
     disabled_tools: list[str] = field(default_factory=list)
     artifact_root: Path | None = None
     artifact_backup_root: Path | None = None

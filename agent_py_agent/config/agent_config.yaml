@@ -171,7 +171,6 @@ memory_semantic_recall: false
 # - 这些字段先定义“开关、等级、保留天数和规则路由模式”，具体 hook/routing 业务后续再接。
 # - 如果用户乱填 abcd、乱码、脚本片段、负数或越界数字，程序会自动回到默认值，不会崩溃。
 # - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
-# - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
 # - compact 提前提示优先读取当前模型后端暴露的真实上下文窗口；拿不到时按 128K 估算（见 model_context_window_tokens）。
 # - memory_compact_auto_trigger_percent 控制上下文使用到多少百分比时自动 compact：
 #   不写默认 90；0 表示 100；乱填回默认；大于100 => 100；小于50 => 50；50-100 => 按填写值。
@@ -206,7 +205,6 @@ memory_rule_auto_read_limit: 3
 # - always：每轮都尝试加，适合专门做恢复/排障的会话。
 # 偶尔需要时单次运行加 --resume-context 就行，不用改这里。
 memory_resume_auto_context_mode: "off"
-memory_resume_auto_context_limit: 5
 # 自动压缩对话上下文的触发线：用到这个程度就整理一次，把较早内容压成摘要。
 # 数字调小会压缩得更早、保留的原文更少，调大则更晚压缩、更容易顶到上限；如果你的对话经常被压缩打断，可以调大一点。
 memory_compact_auto_trigger_percent: 90
@@ -250,15 +248,6 @@ compact_landmark_max_tokens: 20000
 # session_search(message_id=..., offset=...) 分段读回，或 current_thread=true 在本会话内检索/浏览。
 # 只在本 agent 注册了 session_search 时附上；关闭后只是不提示，session_search 本身照常可用。
 compact_recall_hint_enabled: true
-
-# Memory / compact / artifact 默认预算：
-# - 这些值只控制“默认读取多少、预览多少、扫描多少”，不是数据保留上限。
-# - 用户后续觉得太保守或太激进时，可以只改这里，不需要改 Python 代码。
-memory_artifact_default_read_chars: 4000
-memory_archive_search_file_limit: 30
-memory_query_content_preview_chars: 500
-memory_resume_archive_scan_limit: 0
-memory_resume_recommended_read_paths_limit: 20
 
 # 沙箱额外可写根（任务 work/output 之外），全局配置、对所有用户生效；测试共享工作区等场景配置。属于安全边界，模型不能改。
 additional_write_roots: []

@@ -24,7 +24,6 @@ class MemorySettings:
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
     memory_resume_auto_context_mode: str = "off"
-    memory_resume_auto_context_limit: int = 5
     memory_compact_auto_trigger_percent: int = 90
     memory_compact_recovery_target_percent: int = 60
     memory_curator_enabled: bool = True

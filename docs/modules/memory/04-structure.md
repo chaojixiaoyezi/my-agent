@@ -25,6 +25,11 @@ Curator 与召回的可选决策入口直接导入 `common.cancellation` 的 `To
 - 归档级别：`memory_archive_level`（0-3，默认 3）是运行归档（`_finalization_service`、`runtime/live_archive`）和子代理收尾恢复快照（`subagent_mixin._recovery_snapshot_input`）的共同来源，不再有 hook 专用级别。
 - 规则路由：`memory_rule_routing_mode`（off/soft/strict）。`runtime/loop_support._routed_memory_context_for_request` 与 `memory_push._route_formal_lessons` 都以 `mode != "off"` 作为开关；CLI `memory route` 的 `routing_enabled` 同样由它算出。
 - 恢复上下文：`memory_archive/resume_context.build_auto_resume_context` 只读 `memory_resume_auto_context_mode`（默认 off）；调用方显式 `enabled=True` 等于本次 always，`enabled=False` 本次关闭。
+- 恢复与归档的条数/预览预算（2026-09-28 参数减量 C 组）：`resume_context.RESUME_AUTO_CONTEXT_LIMIT`(5)、
+  `RESUME_RECOMMENDED_READ_PATHS_LIMIT`(20)、`RESUME_ARCHIVE_SCAN_LIMIT`(0，含义为不限)、`QUERY_CONTENT_PREVIEW_CHARS`(500)，
+  归档检索文件上限复用 `query/archive_io.ARCHIVE_SEARCH_FILE_LIMIT`(30)，artifact 正文默认读取复用
+  `artifact/read_modes.ARTIFACT_DEFAULT_READ_CHARS`(4000)。这些键已从 AgentConfig、随包 YAML、`services/_normalize` 规格与
+  说明基线删除，用户配置里残留只按未知键告警；CLI 与 runtime 都从同一常量导入，不再读 `agent.config`。
 
 ## 压缩熔断参数的唯一位置
 

@@ -133,3 +133,10 @@ lesson/HOT、截断、缺版本或 audit 正文覆盖未知时保留原批次并
 后续外层overflow接续已本地实现：三宿主保留完整原生工具IR，释放失败经原partial出口保存完成事实；prefix接管摘要时移除旧applied_compact，避免transcript-only重复。无任务后台以宿主冻结视图校验线程，不补task属性误建任务。联合验收及剩余边界见TESTS；媒体、超大历史和真实缓存仍未收口。
 
 2026-09-24 深夜：`ExternalizeToolOutputRequest.force_externalize` 接通上下文余量不足的外置指令——余量由 agent_core 归档入口按 preflight 同口径计算，外置层只执行：`read_file` 分页不再豁免、通用输出直接落 artifact，记录写 `output_externalized_reason=tool_result_headroom`；`read_artifact` 分页保持内联。见[验证模块进展](../verification/02-progress.md)。
+
+2026-09-28 参数减量 C 组第 2 批：恢复/归档条数与预览预算 6 键（`memory_resume_auto_context_limit`、
+`memory_resume_recommended_read_paths_limit`、`memory_resume_archive_scan_limit`、`memory_archive_search_file_limit`、
+`memory_query_content_preview_chars`、`memory_artifact_default_read_chars`）降为读取点旁的具名常量，数值不变；常量落在
+`memory_archive/resume_context.py` 与 `memory_archive/artifact/read_modes.py`，归档检索文件上限直接复用 `query/archive_io.py`
+的既有 `ARCHIVE_SEARCH_FILE_LIMIT`。配置面（AgentConfig、随包 `agent_config.yaml`、`services/_normalize` 规格、说明基线）同步删除，
+用户配置残留只按未知键告警；`memory_resume_archive_scan_limit` 的 0 仍表示不限。定向测试与静态门禁见 TESTS。

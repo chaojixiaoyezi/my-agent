@@ -323,7 +323,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
     memory_resume_auto_context_mode: str = "off"
-    memory_resume_auto_context_limit: int = 5
     memory_compact_auto_trigger_percent: int = 90
     # 含图历史的压缩策略：auto 默认走归档引用（视觉能力事实接入后按事实选择随图摘要）；archived_refs 固定归档引用；off 保持从首个媒体回合起保护全部后缀。
     compact_media_policy: str = "auto"
@@ -362,11 +361,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_semantic_summary_protect_tail: int = 6
     memory_compact_semantic_summary_min_middle: int = 4
     memory_compact_semantic_summary_max_input_chars: int = 12000
-    memory_artifact_default_read_chars: int = 4000
-    memory_archive_search_file_limit: int = 30
-    memory_query_content_preview_chars: int = 500
-    memory_resume_archive_scan_limit: int = 0
-    memory_resume_recommended_read_paths_limit: int = 20
     memory_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     local_store_path: str = ""
     local_store_files_dir: str = ""

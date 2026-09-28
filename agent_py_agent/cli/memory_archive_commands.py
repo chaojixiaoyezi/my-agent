@@ -29,6 +29,11 @@ from ..agent.memory_archive.query import (
     resume_local_query,
 )
 from ..agent.memory_archive.resume_brief import build_resume_brief
+from ..agent.memory_archive.resume_context import (
+    ARCHIVE_SEARCH_FILE_LIMIT,
+    QUERY_CONTENT_PREVIEW_CHARS,
+    RESUME_RECOMMENDED_READ_PATHS_LIMIT,
+)
 from .common import int_arg_or_default, make_agent
 from .memory_archive_rendering import print_archive_list, print_archive_search, print_memory_resume
 from .memory_archive_roots import (
@@ -40,6 +45,8 @@ from .memory_resume_compact_rendering import print_memory_resume_from_compact
 
 # 参数减量第 3 批：memory-archive 系列命令默认条数不再是配置项，--limit 仍优先。
 _CLI_MEMORY_ARCHIVE_LIMIT = 20
+# 参数减量 C 组（2026-09-28）：归档检索文件上限、正文预览字符数与恢复推荐路径数也从配置降为常量，
+# 本文件直接从 memory_archive.resume_context / query.archive_io 导入，不再读 agent.config。
 
 
 def cmd_memory_archive_list(args) -> int:
@@ -54,7 +61,7 @@ def cmd_memory_archive_list(args) -> int:
             date_key=args.date,
             limit=args.limit,
             level=getattr(args, "level", None),
-            file_limit=_archive_search_file_limit(agent),
+            file_limit=ARCHIVE_SEARCH_FILE_LIMIT,
         ),
     )
     payload = {
@@ -82,7 +89,7 @@ def cmd_memory_archive_search(args) -> int:
             layer=args.layer,
             date_key=args.date,
             limit=0,
-            file_limit=_archive_search_file_limit(agent),
+            file_limit=ARCHIVE_SEARCH_FILE_LIMIT,
         ),
     )
     filters = archive_filters_from_args(args)
@@ -118,7 +125,7 @@ def _collect_resume_data(agent, args):
             layer=args.layer,
             date_key=args.date,
             limit=0,
-            file_limit=_archive_search_file_limit(agent),
+            file_limit=ARCHIVE_SEARCH_FILE_LIMIT,
         ),
     )
     filters = archive_filters_from_args(args)
@@ -132,7 +139,7 @@ def _collect_resume_data(agent, args):
         if local_query else agent.local_store.list_recent(limit=args.limit)
     )
     local_payloads = [
-        local_hit_payload(hit, preview_chars=int(getattr(agent.config, "memory_query_content_preview_chars", 500) or 0))
+        local_hit_payload(hit, preview_chars=QUERY_CONTENT_PREVIEW_CHARS)
         for hit in local_hits
     ]
     task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
@@ -155,9 +162,7 @@ def cmd_memory_resume(args) -> int:
             local_hits=local_payloads,
             task_payloads=task_payloads,
             gateway_payloads=gateway_payloads,
-            recommended_read_paths_limit=int(
-                getattr(agent.config, "memory_resume_recommended_read_paths_limit", 20) or 0
-            ),
+            recommended_read_paths_limit=RESUME_RECOMMENDED_READ_PATHS_LIMIT,
         )
     )
     brief = build_resume_brief(
@@ -206,10 +211,6 @@ def _compact_resume_exit_ok(payload: dict[str, Any]) -> bool:
         return False
     guard = payload.get("action_guard", {}) if isinstance(payload.get("action_guard"), dict) else {}
     return guard.get("mode") != "auto" or bool(guard.get("allowed_to_continue"))
-
-
-def _archive_search_file_limit(agent) -> int:
-    return int(getattr(agent.config, "memory_archive_search_file_limit", 30) or 0)
 
 
 def _apply_archive_default_limit(args) -> None:

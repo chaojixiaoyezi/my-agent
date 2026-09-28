@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ...settings.defaults import default_config_int
+# LLM: artifact 正文默认读取字符数，2026-09-28 参数减量 C 组后不再是用户参数；tooling 层从本模块导入同一常量，
+#   改值要一起发版，不要再退回成配置读取。
+# 函数用途: 调用方没给 max_chars 时，一次 artifact 正文读取默认读多少字符。
+ARTIFACT_DEFAULT_READ_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -71,7 +74,7 @@ def _read_chars_limit(value: object) -> int:
         parsed = -1
     if parsed >= 0:
         return parsed
-    return default_config_int("memory_artifact_default_read_chars", minimum=0)
+    return ARTIFACT_DEFAULT_READ_CHARS
 
 
 # LLM: Slice continuation advances only toward the end; omitted prefix and remaining suffix are
