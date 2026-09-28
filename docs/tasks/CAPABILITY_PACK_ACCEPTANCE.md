@@ -1,5 +1,17 @@
 # 能力内化：来源盘点与验收矩阵
 
+## 后台唤醒修订复核（2026-09-28，组合待完成）
+
+A 修订固定为 `c4972cbd0638fbc4c704410f548bcde6c97d3320`，父提交 `8e82edcc0`。独立只读审阅确认：已核实的 Goal task ID 从历史请求引用剔除，目标通过有界 origin_task 如实展示，原 user_prompt 保留；普通请求、混合批次及无 ID 来源继续按原事实解析。固定提交的 12 个 Python 文件等于原 WIP 加本次已见修订，没有额外产品变化。
+
+root 在固定独立 checkout 运行现有 `test_lifecycle_wake_host_event.py`，18 项通过，0 failures/errors/skipped，2.624 秒。包含 active/complete × 有/无普通请求的四例及假模型经过真实后台组件链的 Goal 无历史用户消息断言；源码前后干净。报告摘要 `08af8cdde8c79f3cff0c3cfc9dd96579f17048a5ad9340afde14d4d1531abf7d`。原 A 来源问题在此固定修订的组件范围关闭，不替代原生验收。
+
+B 固定 `9882db061fa596c30d444b68cff40f7b9ad092bc` 已改为各索引独立读取、保留可读 task 记录并记录 unreadable_sources；首次不完整事实跨 Compact/overflow 保留。新 guard 仍有一处确定参数口径问题：在历史不完整且未命中旧去重键时，`replacement_for_run_ids=[" "]` 原始值为真，归一化后却为空；顶层有效接替列表加 item 显式 `[]` 时，guard 的 `or` 回退顶层，创建层却由 item 空列表覆盖。两者被 guard 放行后，接替预检没有来源可核。后续移植 `8e974d951fa6ac163fea3689b48a1fc6de0037ba` 以 A 为父提交，guard 字节与 B 固定相同，不能据移植关闭该问题。
+
+root 编译固定源码中未经改写的 guard、item 参数合并、列表归一化和接替预检 AST，复核以上两例及三个正常对照。仅输入路径提取/合并与内存 manager 被替代，未执行真实派工、模型、Gateway 或真实故障；因此确认的是 guard 与创建口径不一致，不声称实测重复派工。探针摘要 `020a9ed7167d37f830902e837b7f23ed9f875f6657f3fcf51351026389ddeb8d`。
+
+建议下一步：原作者复用创建边界的有效 item 参数与非空接替 ID 归一化口径，并补两个反例；Claude 交整组固定提交与门禁后，root 做 C23 原生三助手委派。只读复核可并行，私有运行仍 `8ef68c5fd`，C23 零提交、最终 0/27；本次没有产品修改或部署。
+
 ## 后台唤醒 A 草稿来源角色审阅（2026-09-28，未正式交付）
 
 不可变草稿 `51361723db3ca514c0630db26d70e47b9848300a` 的父提交是 B/C 固定 `72f23d0d9`，提交明确标记文档和 gate 待完成。本线只在独立审阅 checkout 核代码与现有组件，没有安装到私有 Gateway。两位只读审阅者分别检查 conversation 身份/触发与模型投影/Compact：正常生命周期轮使用 `host.lifecycle_wake` RuntimeFactsTurn，原 user/root 目标语义保留；历史只移除本片 runtime injection，工具往返仍保存；Compact/overflow/retry 继续传同一 trigger，固定推荐与本轮可见工具取交集。
