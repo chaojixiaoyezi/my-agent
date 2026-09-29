@@ -589,7 +589,7 @@ def _conversation_actions(
 
 
 # LLM: thread-scoped 文件通过结构化 ID 组成；message JSONL 坏行会阻断整个会话删除。
-# 函数用途: 收集一个会话的原文、任务链接、目标、观察、guidance、claim 和 wake 文件。
+# 函数用途: 收集一个会话的原文、任务链接、目标、观察、guidance、claim、wake 文件，以及唤醒毒丸的尝试账、结案记录和重放留档。
 def _conversation_related_paths(
     root: Path,
     thread: ConversationThread,
@@ -622,23 +622,7 @@ def _conversation_related_paths(
                     "conversation transcript contains unreadable or cross-thread rows",
                 )
             )
-    for queue in (root / "wake_queue" / "urgent", root / "wake_queue" / "normal"):
-        for path in queue.glob("*.json") if queue.exists() else ():
-            report = read_json_object_report(
-                path,
-                context="memory_retention.conversation_wake",
-            )
-            if report.load_error is not None:
-                errors.append(
-                    MemoryRetentionError(
-                        "MEMORY_RETENTION_CONVERSATION_WAKE_INVALID",
-                        str(path),
-                        "wake state is unreadable",
-                    )
-                )
-                continue
-            if str(report.payload.get("thread_id") or "") == thread_id:
-                candidates.append(path)
+    candidates.extend(_thread_wake_files(root / "wake_queue", thread_id, errors))
     paths = tuple(
         sorted(
             {
@@ -650,6 +634,27 @@ def _conversation_related_paths(
         )
     )
     return paths, errors
+
+
+# LLM: 只按每个 JSON 顶层 thread_id 判定归属；读不出的文件记 MEMORY_RETENTION_CONVERSATION_WAKE_INVALID（写入 errors），
+#   不猜归属。目录：待处理的 urgent/normal、毒丸尝试账 attempts、结案 quarantine 和 quarantine/replayed/<id>/ 留档。
+# 函数用途: 收集一个会话在唤醒队列下的全部文件，供会话删除一起清理；只读文件，不删除。
+def _thread_wake_files(wake_root: Path, thread_id: str, errors: list[MemoryRetentionError]) -> list[Path]:
+    replayed = wake_root / "quarantine" / "replayed"
+    directories = (wake_root / "urgent", wake_root / "normal", wake_root / "attempts", wake_root / "quarantine",
+                   *sorted(path for path in replayed.glob("*") if path.is_dir()))
+    paths = [item for directory in directories if directory.exists() for item in directory.glob("*.json")]
+    return [path for path in paths if _wake_file_thread(path, errors) == thread_id]
+
+
+# LLM: 读不出的文件把结构化错误追加进 errors 并返回空串（空串不会等于任何真实 thread_id）。
+# 函数用途: 读出一个唤醒相关文件顶层记录的 thread_id。
+def _wake_file_thread(path: Path, errors: list[MemoryRetentionError]) -> str:
+    report = read_json_object_report(path, context="memory_retention.conversation_wake")
+    if report.load_error is None:
+        return str(report.payload.get("thread_id") or "")
+    errors.append(MemoryRetentionError("MEMORY_RETENTION_CONVERSATION_WAKE_INVALID", str(path), "wake state is unreadable"))
+    return ""
 
 
 # LLM: 普通按龄文件只根据配置 cutoff 和 mtime；symlink 被记录为错误而不是跟随。

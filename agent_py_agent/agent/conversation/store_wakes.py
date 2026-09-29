@@ -28,6 +28,7 @@ from .store_io import (
 )
 from .store_layout import ConversationStorage, wake_urgency
 from .store_observations import observation_from_request
+from .store_wake_attempts import WakeAttemptStore
 from .store_wake_publication import publication_receipt, publish_deduped
 
 
@@ -126,7 +127,7 @@ def _read_wake_signal_entry(
 # 类用途: 保存唤醒和处理回执，提供调度读取及模型投递冻结能力。
 class WakeStore:
     # LLM: 唤醒只接收线程校验/活动更新和观察确认；发布顺序保持，不能反向访问整个 Store。
-    # 函数用途: 连接原唤醒队列及跨领域回调，不注册调度任务或发起模型请求。
+    # 函数用途: 连接原唤醒队列及跨领域回调，并挂上毒丸尝试账子对象 attempts；不注册调度任务或发起模型请求。
     def __init__(
         self,
         storage: ConversationStorage,
@@ -141,6 +142,10 @@ class WakeStore:
         self._require_thread = require_thread
         self._update_thread_atomic = update_thread_atomic
         self._mark_observations_handled = mark_observations_handled
+        # 毒丸尝试账、结案与重放挂在子对象上；pending 定位与观察结案沿用本类同一实现。
+        self.attempts = WakeAttemptStore(
+            storage, find_pending_path=self._find_path, mark_observations_handled=mark_observations_handled,
+        )
 
     # LLM: 回执纯读，prepared 不冒充完整交付，坏账显式报错；重试和保留 handled 由发布锁内裁决。
     # 函数用途: 查询某个键的完整发布是否 pending/handled，不迁移或修复任何记录。

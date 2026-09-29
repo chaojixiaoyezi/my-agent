@@ -24,6 +24,23 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_memory_vector_cache.py agent_py_agent/tests/test_owner_maintenance.py -q`
   与 `python3 scripts/mutate_text_vector_cache.py`（cwd 都必须是工作树根）。
 
+## 唤醒毒丸第 2 步：尝试账、结案、重放与发布层第三位置（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）
+
+- **范围**：新文件 `agent/conversation/store_wake_attempts.py`，以 `store.wakes.attempts` 挂在 WakeStore 上（`mark_handled`
+  的签名与行为不变）；`store_layout.py` 加尝试账／结案／留档路径；发布层把结案当作第三个安装位置，接受
+  `failed_permanently` 状态，同键再发布返回原结案信号；会话删除时的保留扫描一并收走这三类文件。仍未接线。
+- **测试**：`test_wake_attempt_store.py` 16 例，全部走真实 `ConversationStore`：失败累计到上限给出结案判定、成功删账、
+  不计数只清 in_flight；上一次尝试的进程确认已死时补记 `attempt:abandoned`，存活或无法判断（别的主机）都不补记；
+  坏账报数据损坏且原文件不动；结案后 pending 消失、冻结内容不变、关联观察不再出现在待处理观察里；同键再发布不复活
+  （对照：`mark_handled` 后同键会开新一代）；列表只含结构化字段、坏记录进 load_errors；重放写回原信封、留档
+  `replayed/<id>/1.json`、清掉残留旧账，二次结案再重放留档到 2；三种拒绝（领域已终态、pending 冲突、找不到）不改任何文件；
+  会话删除只收本会话的尝试账和留档。
+- **变异验证**：21 个变异体全部被抓住（不结观察、不删 pending／旧账、无法判断当成死亡、不补记 abandoned、成功不删账、
+  不清 in_flight、坏账静默清零、重放忽略领域／冲突、不留档、不删结案记录、列表泄露摘要、重放次数写死、发布层三处、保留扫描三处）。
+- **回归**：涉及唤醒队列、发布层、观察、保留扫描、存储布局和快照错误的 66 个测试文件加护栏：1885 passed、1 skipped、25 xfailed。
+  code-size 与基点逐条比对：新增 0；保留扫描的唤醒文件收集拆成 `_thread_wake_files`／`_wake_file_thread` 后，
+  `_conversation_related_paths` 原有的两条 high-risk 一并消失。
+
 ## 唤醒毒丸第 1 步：纯函数判定模块（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）
 
 - **范围**：新文件 `agent/conversation/wake_poison.py`，只做判定、不接线：admission／异常／报告三类结果分类，

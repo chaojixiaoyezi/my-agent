@@ -23,6 +23,9 @@ WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0
 # 从第一次重投失败起超过 24 小时仍送不出去就结案；足够覆盖一次渠道长时间故障或人工处理。
 WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0
 
+# 唤醒结案后的终态：不再被领取，只能人工重放；发布层把它当作与 pending/handled 并列的状态。
+WAKE_STATUS_FAILED_PERMANENTLY = "failed_permanently"
+
 WAKE_VERDICT_NEUTRAL = "neutral"
 WAKE_VERDICT_FAILURE = "failure"
 WAKE_VERDICT_REDELIVERY_FAILURE = "redelivery_failure"
@@ -266,6 +269,7 @@ __all__ = [
     "WAKE_REDELIVERY_BACKOFF_BASE_SECONDS",
     "WAKE_REDELIVERY_BACKOFF_MAX_SECONDS",
     "WAKE_REDELIVERY_GIVE_UP_SECONDS",
+    "WAKE_STATUS_FAILED_PERMANENTLY",
     "QuarantineDecision",
     "WakeAttemptVerdict",
     "WakePoisonState",

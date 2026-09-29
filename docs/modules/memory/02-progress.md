@@ -62,6 +62,10 @@
 
 旧格式（只按 entry_id，或旧 `textcache:v1:` 前缀）不会被新键命中，视为缺失并全量重算，不做隐式迁移。不新增用户参数，`memory_semantic_recall` 仍是总开关。本机 owner 未配嵌入模型，收益只对开启语义召回的用户生效。见 TESTS.md 顶部。
 
+会话删除时一并收走唤醒毒丸文件（分支 `claude/75-wake-poison-design`，2026-09-28）：`retention_scan._conversation_related_paths`
+除待处理唤醒外，也按 `thread_id` 收集 `wake_queue/attempts/`（尝试账）、`wake_queue/quarantine/`（结案记录）和
+`wake_queue/quarantine/replayed/<id>/`（重放留档）里属于该会话的文件，只收本会话、不碰其它会话。见 `docs/design/WAKE_POISON_PILL.md`。
+
 生命周期续跑读错分支（分支 `claude/be-wake-fix`，2026-09-28，Codex 审查 B）：`carried_tool_call_records_for_requests` 改收 `CarriedIndexSource`，每个来源独立读取、各自捕获 OSError，读到一半失败的来源整份丢弃，返回 `CarriedToolCallRead`（records 与 unreadable_sources）。修复前 owner 索引一抛错，任务索引就不会被访问，携带记录与一次性编排去重一起变空。见 TESTS.md 顶部。
 
 生命周期唤醒片续接前台轮的工具事实（分支 `claude/be-wake-turn`，2026-09-28，T3 验收观察 2）：`compact_tool_output_refs` 新增 `carried_tool_call_records_for_requests`，按（索引根, 是否只用于运行时状态）读 owner 根和任务 work 两处索引，每个根只读自己的 index.jsonl，按精确请求编号流式过滤，不全量加载；与 `carried_tool_call_records` 共用四元身份去重。owner 索引的记录带 `CARRIED_RUNTIME_ONLY_FIELD`，工具循环只用它重建去重、已执行工具和工具轮数，不进本片工具账和模型可见交接，溢出压缩携带时原样保留。修复前前台轮成功的 `create_subagents` 不在唤醒片的去重集合里，同内容派工会多出一个子代理。见 TESTS.md 顶部。

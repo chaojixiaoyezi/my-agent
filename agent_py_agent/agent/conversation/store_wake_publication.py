@@ -16,6 +16,7 @@ from ..runtime_errors import DataCorruptionError
 from .models import ObservationEvent, WakeSignal
 from .store_io import read_jsonl_report
 from .store_layout import ConversationStorage
+from .wake_poison import WAKE_STATUS_FAILED_PERMANENTLY
 
 _SCHEMA = "wake_dedupe.v2"
 _LEGACY_SCHEMA = "wake_dedupe.v1"
@@ -40,7 +41,7 @@ def _read_record(path: Path) -> dict[str, Any] | None:
 def _signal(payload: dict[str, Any]) -> WakeSignal:
     signal = WakeSignal.from_dict(payload)
     validate_opaque_id(signal.wake_signal_id, kind="wake_signal_id")
-    if not signal.thread_id or signal.status not in {"pending", "handled"}:
+    if not signal.thread_id or signal.status not in {"pending", "handled", WAKE_STATUS_FAILED_PERMANENTLY}:
         raise DataCorruptionError("wake publication signal identity is invalid")
     return signal
 
@@ -57,10 +58,12 @@ def _stable_signal(signal: WakeSignal) -> dict[str, Any]:
     return payload
 
 
-# LLM: 先查 pending 再查 handled，消费先落 handled 后删 pending，不能把消费交接误当信号丢失。
-# 函数用途: 严格读回固定信号，保留合法的已消费事实并拒绝同 ID 的内容冲突。
+# LLM: 先查 pending 再查 handled，最后查结案位置；消费和结案都先落终态记录后删 pending，不能把交接误当信号丢失。
+#   结案记录顶层的 quarantine 键不是 WakeSignal 字段，不参与冻结内容对账。
+# 函数用途: 严格读回固定信号，保留合法的已消费或已结案事实并拒绝同 ID 的内容冲突。
 def _installed_signal(storage: ConversationStorage, frozen: WakeSignal) -> WakeSignal | None:
-    paths = (storage.wake_signal_path(frozen), storage.wake_handled_dir / f"{frozen.wake_signal_id}.json")
+    paths = (storage.wake_signal_path(frozen), storage.wake_handled_dir / f"{frozen.wake_signal_id}.json",
+             storage.wake_quarantine_path(frozen.wake_signal_id))
     for path in paths:
         payload = _read_record(path)
         if payload is None:
@@ -143,11 +146,12 @@ def _migrate_legacy(storage: ConversationStorage, record: dict[str, Any], incomi
     return migrated
 
 
-# LLM: 旧版回执和只读查询按原两个队列及 handled 查精确 ID，不全局猜同名或内容。
+# LLM: 旧版回执和只读查询按原两个队列、handled 及结案位置查精确 ID，不全局猜同名或内容。
 # 函数用途: 读取一个旧信号身份，缺失与损坏保持不同结果。
 def _read_existing_identity(storage: ConversationStorage, identity: str) -> WakeSignal | None:
     validate_opaque_id(identity, kind="wake_signal_id")
     paths = [storage.wake_queue_dir / kind / f"{identity}.json" for kind in ("urgent", "normal", "handled")]
+    paths.append(storage.wake_quarantine_path(identity))
     for path in paths:
         payload = _read_record(path)
         if payload is not None:
@@ -197,7 +201,8 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
             existing = _installed_signal(storage, frozen)
             if existing is None:
                 raise DataCorruptionError("published wake signal is missing")
-            if existing.status == "pending" or retain_handled:
+            # 已结案的同一事件不能靠再次发布自己复活，只能人工重放。
+            if existing.status in {"pending", WAKE_STATUS_FAILED_PERMANENTLY} or retain_handled:
                 return previous_observation, existing
         migration = record.get("migration") if record is not None else None
         record = _prepare(signal, observation, retain_handled)

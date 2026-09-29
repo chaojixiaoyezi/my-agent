@@ -161,7 +161,8 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 2. 领域已是终态时拒绝，返回 `WAKE_REPLAY_DOMAIN_TERMINAL`。例如会话任务已按第 6 节转成 failed，
    这时应重新派活，而不是重放；
 3. 用原 wake_signal_id 和冻结内容写回 pending 队列，发布层的不变量保持成立；
-4. 结案记录移到 `quarantine/replayed/<id>-<n>.json` 留档；尝试账清零，replay_count 加 1；
+4. 结案记录移到 `quarantine/replayed/<id>/<n>.json` 留档（每条唤醒一个子目录，避免 ID 前缀互相匹配；
+   留档个数就是重放次数的唯一权威），尝试账清零；
 5. 打一条 `wake_replayed` 事件。
 
 重放后如果还是同因失败，会再次在 N 次后结案，不会自动复活。
@@ -190,7 +191,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 1. **纯函数模块** `conversation/wake_poison.py`（已完成）：负责结果分类、连续段、退避和上限。
    合同单测覆盖：瞬时类型逐个检查、未知 admission 默认计数、原因交替、中间夹瞬时故障不打断。
-2. **WakeStore**：实现尝试账、结案、重放，发布层认识第三个位置。存储单测覆盖：结案和重放前后信封冻结内容不变、
+2. **WakeStore**（已完成，`store_wake_attempts.py` 挂在 `store.wakes.attempts`）：实现尝试账、结案、重放，发布层认识第三个位置。存储单测覆盖：结案和重放前后信封冻结内容不变、
    同键再发布返回已结案的原信号、observation 同步结掉。
 3. **接线**：`run_claimed` 把未执行的 admission 结构化地返回给调用方（现在只写进 claim 文件），runtime 在
    批次消费处记账。这一步改 `background_claim.py`，是 my-agent-3 正在改的区域，要等它合入。

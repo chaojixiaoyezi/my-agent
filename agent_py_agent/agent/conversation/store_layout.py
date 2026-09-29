@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from ..common.opaque_id import validate_path_segment
+from ..common.opaque_id import validate_opaque_id, validate_path_segment
 from .models import WakeSignal
 from .store_index import ScanIndexes
 from .store_io import safe_file_stem
@@ -61,6 +61,10 @@ class ConversationStorage:
         self.user_latest_path = self.root / "user_latest_threads.json"
         self.background_claims_dir = self.root / "background_claims"
         self.wake_dedupe_dir = self.wake_queue_dir / "dedupe"
+        # 唤醒毒丸：每条唤醒的尝试账、已结案记录、人工重放后的留档；按需创建，不进 ensure_dirs。
+        self.wake_attempts_dir = self.wake_queue_dir / "attempts"
+        self.wake_quarantine_dir = self.wake_queue_dir / "quarantine"
+        self.wake_replayed_dir = self.wake_quarantine_dir / "replayed"
         self.indexes = ScanIndexes()
         if initialize:
             self.ensure_dirs()
@@ -189,6 +193,16 @@ class ConversationStorage:
     # 函数用途: 定位待处理唤醒文件，不生成或消费唤醒。
     def wake_signal_path(self, signal: WakeSignal) -> Path:
         return self.wake_queue_dir / wake_urgency(signal.urgency) / f"{signal.wake_signal_id}.json"
+
+    # LLM: 唤醒 ID 按不透明 ID 合同拒绝式校验，不能借 ID 跨出目录；尝试账是该唤醒失败计数的唯一权威。
+    # 函数用途: 定位一条唤醒的尝试账文件。
+    def wake_attempt_path(self, wake_signal_id: str) -> Path:
+        return self.wake_attempts_dir / f"{validate_opaque_id(wake_signal_id, kind='wake_signal_id')}.json"
+
+    # LLM: 已结案唤醒的唯一位置；发布层把它当作与 pending/handled 并列的第三个安装位置。
+    # 函数用途: 定位一条已结案唤醒的记录文件。
+    def wake_quarantine_path(self, wake_signal_id: str) -> Path:
+        return self.wake_quarantine_dir / f"{validate_opaque_id(wake_signal_id, kind='wake_signal_id')}.json"
 
     # LLM: 去重键与线程共同决定原回执路径，不增加第二份投递状态。
     # 函数用途: 定位精确去重键的唤醒回执文件。

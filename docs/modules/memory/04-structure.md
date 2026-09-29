@@ -73,6 +73,13 @@
 **注意：`index_all` 的孤儿回收不会清掉它们。** 回收只作用于 `memory_text_vectors.json`，
 而 v1 遗留项在 `memory_vectors.json` 里；两个文件互不相干。
 
+## 会话删除收集的唤醒文件
+
+`memory_store/retention_scan._conversation_related_paths` 收集一个会话的唤醒相关文件时扫描 `wake_queue/` 下的
+`urgent/`、`normal/`、`attempts/`、`quarantine/` 和 `quarantine/replayed/<wake_signal_id>/`，逐个读 JSON 顶层 `thread_id`
+判定归属；读不出的文件记 `MEMORY_RETENTION_CONVERSATION_WAKE_INVALID`，不猜归属。尝试账与结案记录的权威在
+`conversation/store_wake_attempts.py`。
+
 ## 记忆诊断回显的配置名单
 
 `cli/memory_doctor.py` 与 `cli/memory_commands/memory_doctor_cmd.py` 的 `_memory_config_payload` / `_build_archive_doctor` 只回显
