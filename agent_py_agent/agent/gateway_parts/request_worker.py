@@ -96,6 +96,9 @@ class GatewayInboxScanGate:
 
     _COARSE_MTIME_GUARD_SECONDS = 2.0
 
+    # LLM: 三个字段的唯一定义处：_last_mtime_ns 是"已见过"基线，_scan_started_mtime_ns 是本轮扫描前样本，
+    #   _scan_required 初始为 True 保证新门第一轮必扫。每个派发者一份，不跨线程共享。
+    # 函数用途: 建一个新门，第一轮一定扫描。
     def __init__(self) -> None:
         self._last_mtime_ns: int | None = None
         self._scan_started_mtime_ns: int | None = None

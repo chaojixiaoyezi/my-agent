@@ -7,6 +7,8 @@
   扫描门在扫描前取样 mtime。详见 `docs/modules/gateway/02-progress.md` 同日条目。
 - 长期方向（未落地）：外部判活（supervisor、`gateway status`、TUI 状态栏）目前只看进程与心跳新鲜度，下一步可把 `dispatcher_alive=False`
   或"有 pending 而 `last_dispatch_tick_at` 陈旧"纳入就绪/告警判据，并考虑派发线程死亡时的自动重启或安全重启触发。两项都是新的控制语义，需单独设计。
+- 后续项（9a 建议，未落地）：后台主循环的出错目前也记进 `dispatch_tick_errors`/`last_dispatch_tick_error`，在 /status 看派发健康时会混进
+  后台主循环的错误；以后拆出 `background_tick_errors`，或把字段名改成不绑定某个循环的。
 - 同批（9a 复审跟进）：派发循环与后台主循环共用 `LoopErrorBackoff`（连续出错 0.2s 翻倍封顶 30s、同种错误打印限流），堵住"磁盘刚腾出又被错误日志写满"这一段链。
 - 同批：飞书/QQ 适配器进程的状态写入失败不再杀进程（记账、下一轮重试、原子写），异常退出固定收尾（停适配器 → 删 pid → 状态 failed）；
   `/status` 的 `adapter_alive` 只按 `adapter.pid` 进程存活判定。未落地：supervisor 对"适配器进程死了"的自动拉起仍只看 pid+状态文件，可复用同一事实源。

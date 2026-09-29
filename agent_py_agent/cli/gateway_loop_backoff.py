@@ -15,6 +15,7 @@ LOOP_ERROR_PRINT_EVERY = 10
 #   错误种类的键由调用方给（context + 异常类型名），本类不看异常正文。
 # 类用途: 记住一个循环最近连续失败了几次、每种错误已出现几次，据此给出下一拍等多久、这次要不要打印。
 class LoopErrorBackoff:
+    # LLM: 三个参数都做了下限保护（base≥0、cap≥base、print_every≥1），调用方传坏值也不会出现负等待或除零。
     # 函数用途: 建一份空状态；参数只在测试里改，生产用模块常量。
     def __init__(
         self,
@@ -43,12 +44,14 @@ class LoopErrorBackoff:
         self._consecutive = 0
         self._seen.clear()
 
+    # LLM: 纯函数式读取，不改状态；第 k 次连续失败对应 base·2^(k-1)，用 cap 封顶，调用方把它直接交给 stop_event.wait。
     # 函数用途: 当前该等多久；没有连续失败时是 0。
     def delay(self) -> float:
         if self._consecutive <= 0:
             return 0.0
         return min(self._base * (2 ** (self._consecutive - 1)), self._cap)
 
+    # LLM: 只读投影，不是账本；真实错误次数以 loop_health 为准，这里只反映当前退避档位。
     # 函数用途: 当前连续失败次数（测试与状态展示用）。
     @property
     def consecutive_failures(self) -> int:
