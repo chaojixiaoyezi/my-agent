@@ -246,3 +246,14 @@ dev 同时裁定 `criteria` **不上提**成共享引用：它是与 Jev 决策�
 覆盖声明能区分"全部比过"与"只比了一部分"、同分退回原枚举序、无嵌入入口。变异两处（分数方向反转、去掉同分
 原序兜底）都被杀死，各恰好 1 条红。定向回归 125 项通过（含 relation 原 44 项、curator、架构护栏、打包边界）。
 真机 Jev 样本对比未做，按 dev 安排合入 main 后先不部署、等 Jev 复测取数。
+
+2026-09-28 retention 扫描覆盖新版运行根（dsh-9b 盘点零风险缺口，dev 派单）：`MemoryRetentionService` 原来只扫
+`O/tasks`，新版运行工作区 `O/runs` 不在范围内，那部分恢复材料永远不会被回收。现新增
+`_recovery_roots(home)`（返回 `owner_tasks_dir` 与 `owner_runs_dir` 两个规范根）与 `_iter_task_states(home)`
+（逐个产出「根 + 该根下的 `work/state.json`」），`_task_actions` 与 `_tool_output_actions` 都改用它。
+两个根共用同一套 `work/state.json` 合同，判定逻辑一行未改：状态取自结构化 `state.json`
+（`task_id`/`status`/`updated_at`），不在 `TASK_TERMINAL_STATUSES` 白名单里就整棵保留，
+**不看 mtime、不看目录名**；保留天数沿用现有 `completed_task_days`，未新增参数。新增
+`test_memory_retention_runs.py` 9 项（含"把终态任务所有文件 mtime 改成刚刚仍被回收"这条反证）。
+变异两处（扫描根退回只有 tasks、终态白名单放宽成状态非空）各杀死 4 条与 2 条。定向 23 项通过，
+五项静态 gate 全过。真机 `home-retention --apply` 未跑（会真移生产数据），只验证 plan。

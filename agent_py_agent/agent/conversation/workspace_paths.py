@@ -55,8 +55,33 @@ def validated_durable_work_path(
     return path
 
 
+# LLM: 恢复材料只认这三类规范任务根（新版 runs 第二层、旧版 tasks 第二层、audits 第一层）；深度差异在这里
+#   一次说清，调用方不得自己数层数或从目录名推断。返回 None 表示"不是规范任务根"。
+# 函数用途: 给定路径，判断它是不是某个规范任务根，并返回该根与任务目录。
+def canonical_task_root(owner_home: str | Path, task_path: str | Path) -> tuple[Path, Path] | None:
+    owner = Path(owner_home).expanduser().resolve(strict=False)
+    path = Path(task_path).expanduser().resolve(strict=False)
+    candidates = (
+        # 新版运行工作区：runs/<date>/<key>
+        (durable_work_root(owner, "task"), 2),
+        # 旧版任务工作区：tasks/<date>/<slug>
+        (owner / "tasks", 2),
+        # Audit 工作区：audits/<audit_id>
+        (durable_work_root(owner, "audit"), 1),
+    )
+    for root, depth in candidates:
+        if not path.is_relative_to(root) or path == root:
+            continue
+        parts = path.relative_to(root).parts
+        if len(parts) != depth:
+            continue
+        return root, path
+    return None
+
+
 __all__ = [
     "audit_workspace_path",
+    "canonical_task_root",
     "durable_work_root",
     "validated_durable_work_path",
 ]

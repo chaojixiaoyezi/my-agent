@@ -147,6 +147,56 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
 2. 顺手把 `keys()` 删掉了（替换类尾时截断），被自己的测试立刻打回并补回——
    这次是测试救了，但提醒我改大块代码后要整文件复核，不能只看工具回显的片段。
 
+## R4 隔离：坏的那一棵单独保护，不连累其他类别（2026-09-28，分支 `my-agent/self-dev-4`，基于 `c101d325a`）
+
+- **来源**：dev 2026-09-28 两轮裁定。起因是生产只读预演发现 `O/tasks` 下有 355 个坏 `state.json`，而 **main 上 `apply` 只要 `plan.errors` 非空就拒绝整份计划**——真机数据核实：`owner_retention_applied` 事件 29 条、`applied` 全为 `False`、`actions` 全为 0，`maintenance.json` 的 `last_success_at` 恒为 0.0。**生产的保留清理从来没真正执行过**，每天被同一批错误整份拒掉。
+- **做法**：
+  - `retention.py` 的 `apply` 守卫改成 `plan.legal_hold or _has_policy_level_error(plan.errors)`。只有"读不懂策略本身"才整份拒绝（`_POLICY_LEVEL_ERROR_CODES` = `POLICY_INVALID`/`POLICY_UNREADABLE`/`CANDIDATES_UNREADABLE`）；
+  - 其余错误按**路径前缀重叠**（`_path_overlaps`，含相等；`/a/b` 与 `/a/bc` 不算同一棵）把坏子树从可执行计划里剔除（`_without_errored_subtrees`），被隔离保护的错误原样并入回执，执行过什么、还护着什么都能看见；
+  - 隔离**只按路径**，不按类别名或目录名放宽，也不因为某个类别有错就整类跳过。
+- **审核裁定同步落到代码**：`retention_scan` 的 `audit` 类别（`O/audit/*.jsonl`）**本次一律跳过**，类别名与实际数据不符（那是主代理每轮的记忆归档原始事件、Curator 要读，不是审计日志，删了不可恢复），注释里写明等存储登记表定了语义再处理。
+- **规范根从唯一权威推导**：新增 `conversation/workspace_paths.canonical_task_root(owner_home, path)`，把三类规范任务根与各自深度（`runs/<date>/<key>` 第二层、`tasks/<date>/<slug>` 第二层、`audits/<audit_id>` 第一层）一次说清；`retention_scan` 的恢复根改成 `(durable_work_root(task), owner/tasks, durable_work_root(audit))` 去重，`_iter_task_states` 用 `canonical_task_root` 校验深度——深一层或浅一层都不算任务根，调用方不再自己数层数。tool output 侧维持只扫旧 `O/tasks`，本次不扩。
+- **新增/更新测试**：
+  - `test_memory_retention_isolation.py`（新，5 项）：坏子树被剔除、健康子树保留；祖先/后代两个方向的路径重叠都识别、`/a/b` 与 `/a/bc` 不误判；无错误时计划原样返回（`is` 同一对象，不借隔离之名放宽）；不相关错误不误伤动作；策略级错误码分类。
+  - `test_memory_retention_runs.py`：补 `audits` 首层是任务根、`audits` 深一层不是、`runs` 浅一层不是。
+  - `test_memory_retention_v2.py`：`test_corrupt_policy_fails_closed_but_single_bad_task_is_isolated`——policy 级失败仍 `applied=False`；单棵坏 state 改成 `applied=True` 且坏目录原地保留、`audit` 文件不动。
+- **变异验证**（`_mutate_r4.py`，就地文本替换、跑完自动只还原被变异的那个文件）：
+  - `ignore-errors`（守卫退回"有错误就整份拒绝"）→ 杀死 1 条；
+  - `drop-isolation-semantics`（把错误路径列表清空）→ 杀死 1 条（`test_only_errored_subtree_actions_are_dropped`）；
+  - `ignore-audit`（把 `audit` 类别加回扫描）→ 杀死 2 条；
+  - **`no-isolation`（`executable = plan`）的覆盖情况（dev 2026-09-29 要求核实后更新）**：它**杀不掉**，而且原因是结构性的，已核实清楚：
+    - 用合法输入构造不出"坏子树里带动作"的计划。三类扫描在读不懂父任务 `state.json` 时都整棵跳过：`_task_actions` 记错误后 `continue`；`_tool_output_actions` 同一个 `_read_state` 拿到 `None` 就 `continue`；`_subagent_scratch_actions` 先读父任务 state，`None` 就 `continue`（父状态是授权前提），**连它下面健康且超期的子代理 scratch 也不会进计划**。
+    - 所以 apply 的路径隔离在本仓库里是**纵深防御**：即使把过滤整段拿掉，能进 `apply` 的合法计划里本来就没有落在坏根下的动作。
+    - 新增 `test_unreadable_task_root_yields_no_actions_underneath` 把这条反证钉住：坏任务根 + 健康超期子代理 scratch + 超期 tool output，断言 plan 与 apply 的动作里**没有一个**落在坏根之下，且原件全部保留。
+    - 另一条相关变异的杀法（顺带）：把 `_subagent_scratch_actions` 的父状态校验拿掉（越权放行），上面这条用例**会红**——实测 `FAILED test_unreadable_task_root_yields_no_actions_underneath`，也就是父状态这条授权前提真的有测试守着。
+- **定向回归**：`test_memory_retention_runs.py` + `test_memory_retention_v2.py` + `test_memory_retention_isolation.py` + `test_gateway_owner_retention.py` 共 28 项通过。
+- **复现**：
+  ```
+  cd <worktree>
+  python3 -m pytest agent_py_agent/tests/test_memory_retention_runs.py agent_py_agent/tests/test_memory_retention_v2.py agent_py_agent/tests/test_memory_retention_isolation.py agent_py_agent/tests/test_gateway_owner_retention.py -q
+  python3 <工作目录>/_mutate_r4.py ignore-errors    # 期望 1 条红
+  ```
+- **未覆盖**：没在生产 home 上跑 `--apply`（会真移/真删生产数据）；预演只验证"会规划什么"。
+
+## retention 扫描覆盖新版运行根 O/runs（2026-09-28，分支 `my-agent/self-dev-4`，基于 `80b4afed8`）
+
+- **来源**：dsh-9b 的产品持久数据盘点（`docs/design/STORAGE_RETENTION.md`）零风险缺口之二——`MemoryRetentionService` 的扫描范围写死在 `O/tasks`，新版运行工作区 `O/runs` 不在范围内。
+- **做法**：新增 `_recovery_roots(home)` 返回 `(owner_tasks_dir, owner_runs_dir)`，`_iter_task_states(home)` 逐个产出「根 + 该根下的 `work/state.json`」，`_task_actions` 与 `_tool_output_actions` 都改用它。两个根共用同一套 `work/state.json` 合同，所以判定逻辑一行没改——它也**本来就是结构化状态驱动**：读 `state.json` 的 `task_id`/`status`/`updated_at`，状态不在 `TASK_TERMINAL_STATUSES` 就跳过，不看 mtime、不看目录名。保留天数沿用现有 `completed_task_days`，未新增参数。
+- **新增测试**：`test_memory_retention_runs.py`（9 项）——runs 里超期终态被规划回收、两个根同时被扫、未完成的不动、未知状态的不动、**把终态任务所有文件 mtime 改成"刚刚"仍被回收**（证明不是按 mtime 判）、legal hold 的不动、cutoff 边界内外行为、保留期 0 时不动、runs 根缺失不报错。
+- **变异验证**：`_mutate_retention_runs.py`（工作目录 `tasks/2026-09-28/storage-retention-fixes/`）两处，先 `git diff` 存补丁、`git checkout -- .` + `git apply` 还原：
+  - 扫描根退回只有 `O/tasks`（回到缺口状态）→ 4 条红；
+  - 终态判断放宽成"状态非空即终态"（丢掉白名单）→ 2 条红（未完成/未知状态被误清）；
+  - 还原后 9 项全绿。
+- **定向回归**：`test_memory_retention_runs.py` + `test_memory_retention_v2.py` + `test_gateway_owner_retention.py` 共 23 项通过。
+- **复现**：
+  ```
+  cd <worktree>
+  python3 -m pytest agent_py_agent/tests/test_memory_retention_runs.py agent_py_agent/tests/test_memory_retention_v2.py agent_py_agent/tests/test_gateway_owner_retention.py -q
+  python3 <工作目录>/_mutate_retention_runs.py only-tasks     # 期望 4 条红
+  ```
+- **未覆盖**：没在生产 home 上跑 `home-retention --apply`（会真移生产数据）；本片只验证 plan 的规划范围与判定，apply 路径沿用既有实现未改。
+
+
 ## 非决策调用“缺报”同口径统一，及 ae 复审跟进（2026-09-28，分支 `claude/be-llm-missing-unify`，在 `d802380d8` 之上重做 `dc7fdd8a3`）
 
 - **先核实，再改显示**（没有补记任何账）：

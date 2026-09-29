@@ -238,8 +238,11 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     assert plan.applied is False
     assert _state(tracked) == before
     categories = {action.category for action in plan.actions}
+    # audit 类别按 dev 2026-09-28 裁定一律跳过：O/audit/*.jsonl 是主代理每轮的记忆归档原始事件，
+    # 类别名与实际数据不符、直接删不可恢复，要等存储登记表定了语义再处理。
+    assert "audit" not in categories
+    assert old_audit.exists()
     assert {
-        "audit",
         "daily",
         "curator_run",
         "compact",
@@ -255,7 +258,8 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
 
     assert applied.ok is True
     assert applied.applied is True
-    assert not old_audit.exists()
+    # audit 类别不再参与清理，两个文件都必须原地保留。
+    assert old_audit.exists()
     assert fresh_audit.exists()
     assert not old_daily.exists()
     assert not old_curator.exists()
@@ -290,7 +294,7 @@ def test_global_legal_hold_prevents_every_retention_action(tmp_path: Path):
     assert old_audit.exists()
 
 
-def test_corrupt_policy_or_task_state_fails_closed_for_unrelated_files(tmp_path: Path):
+def test_corrupt_policy_fails_closed_but_single_bad_task_is_isolated(tmp_path: Path):
     home, _candidates, _long_term, service = _runtime(tmp_path)
     old_audit = _old_file(home.owner_audit_dir / "2024-01-01.jsonl", "{}\n")
     policy = _set_policy(home, audit_days="30")
@@ -309,12 +313,17 @@ def test_corrupt_policy_or_task_state_fails_closed_for_unrelated_files(tmp_path:
     state.parent.mkdir(parents=True)
     state.write_text("{broken", encoding="utf-8")
 
-    invalid_state = service.apply(now=NOW)
+    # R4（dev 2026-09-28 裁定）：单棵任务的 state 损坏只保护那一棵，不再连累整份计划——
+    # 否则生产上会被少数坏目录永久卡住（真机已 29/29 次整份被拒）。policy 级失败仍整份拒绝（上面那条）。
+    isolated_state = service.apply(now=NOW)
 
-    assert invalid_state.applied is False
+    assert isolated_state.applied is True
     assert "MEMORY_RETENTION_TASK_STATE_INVALID" in {
-        error.error_code for error in invalid_state.errors
+        error.error_code for error in isolated_state.errors
     }
+    # 坏子树必须原地保留，绝不能被删或移走。
+    assert state.exists()
+    # audit 类别一律跳过（dev 2026-09-28 裁定），这个文件必须原地保留。
     assert old_audit.exists()
 
 

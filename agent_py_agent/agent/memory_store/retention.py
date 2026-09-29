@@ -22,6 +22,12 @@ from .retention_models import (
 )
 from .retention_scan import build_retention_plan
 
+# LLM: 这几类错误表示"读不懂策略/仓库本身"，此时不能动任何数据；其余错误都能定位到某棵子树并单独保护。
+_POLICY_LEVEL_ERROR_CODES = frozenset({
+    "MEMORY_RETENTION_POLICY_INVALID",
+    "MEMORY_RETENTION_POLICY_UNREADABLE",
+    "MEMORY_RETENTION_CANDIDATES_UNREADABLE",
+})
 
 # LLM: Service 持有 owner home、唯一 CandidateService 和可选 JsonlMemory；它不解析自然语言删除范围。
 # 类用途: 为管理员 CLI 和 Gateway owner maintenance 提供同一 retention 计划/执行主链。
@@ -53,14 +59,16 @@ class MemoryRetentionService:
             now=_normalize_now(now),
         )
 
-    # LLM: apply 在 owner retention 锁内重新 plan；策略损坏、legal hold 或任一扫描错误时不执行任何动作。
-    # 函数用途: 应用当前时刻重新验证出的 retention 计划。
+    # LLM: apply 在 owner retention 锁内重新 plan。policy 级损坏仍整份拒绝（读不懂策略就不能动任何数据）；
+    #   但单棵任务的 state 损坏只保护那一棵，不连累其他类别——否则生产上会被少数坏目录永久卡住（2026-09-28
+    #   dev 裁定 R4）。隔离依据是错误路径与动作路径的前缀重叠，绝不按类别名或目录名放宽。
+    # 函数用途: 应用当前时刻重新验证出的 retention 计划，坏的那一棵单独保护。
     def apply(self, *, now: datetime | None = None) -> MemoryRetentionReport:
         current = _normalize_now(now)
         lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
         with locked_json_path(lock_anchor):
             plan = self.plan(now=current)
-            if plan.errors or plan.legal_hold:
+            if plan.legal_hold or _has_policy_level_error(plan.errors):
                 stopped = MemoryRetentionReport(
                     applied=False,
                     actions=(),
@@ -70,13 +78,24 @@ class MemoryRetentionService:
                 )
                 record_retention_report(home=self.home, report=stopped, now=current)
                 return stopped
-            return execute_retention_plan(
+            executable = _without_errored_subtrees(plan)
+            applied = execute_retention_plan(
                 home=self.home,
                 candidates=self.candidates,
-                plan=plan,
+                plan=executable,
                 now=current,
                 allowed_external_roots=self.conversation_roots,
             )
+            # 执行期错误 + 被隔离保护的扫描错误一起回执：执行过什么、还护着什么，都要看得见。
+            if plan.errors and applied.errors != plan.errors:
+                return MemoryRetentionReport(
+                    applied=applied.applied,
+                    actions=applied.actions,
+                    errors=(*applied.errors, *plan.errors),
+                    legal_hold=applied.legal_hold,
+                    policy_fingerprint=applied.policy_fingerprint,
+                )
+            return applied
 
     # LLM: 正式长期记忆删除只按稳定 entry_id/version 调 JsonlMemory 权威链；不得重写 ConversationStore。
     # 函数用途: 硬删除一条正式长期记忆并触发正文、索引、候选 redaction、tombstone 和 ops 清理。
@@ -135,6 +154,44 @@ def _normalize_now(value: datetime | None) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+# LLM: 只有"读不懂策略本身"才是整份拒绝的理由；单棵任务的坏状态属于可隔离错误。
+# 函数用途: 判断错误列表里是否存在策略级（非单棵子树）错误。
+def _has_policy_level_error(errors: tuple[MemoryRetentionError, ...]) -> bool:
+    return any(error.error_code in _POLICY_LEVEL_ERROR_CODES for error in errors)
+
+
+# LLM: 只按"错误路径是否为动作路径的祖先或后代"判断重叠；不按类别名、目录名或文件名放宽，
+#   也不因为某个类别有错就整类跳过。
+# 函数用途: 去掉与任一错误路径重叠的动作，返回可安全执行的计划。
+def _without_errored_subtrees(plan: MemoryRetentionReport) -> MemoryRetentionReport:
+    if not plan.errors:
+        return plan
+    errored = tuple(str(error.path) for error in plan.errors if str(error.path))
+    if not errored:
+        return plan
+    kept = tuple(
+        action for action in plan.actions
+        if not any(_path_overlaps(str(action.path), error_path) for error_path in errored)
+    )
+    if len(kept) == len(plan.actions):
+        return plan
+    return MemoryRetentionReport(
+        applied=False,
+        actions=kept,
+        errors=plan.errors,
+        legal_hold=plan.legal_hold,
+        policy_fingerprint=plan.policy_fingerprint,
+    )
+
+
+# LLM: 用字符串前缀比较，任一侧是另一侧的前缀（含相等）即视为同一棵子树；只做路径文本比较，不读盘。
+# 函数用途: 判断两条路径是否处于同一棵目录树。
+def _path_overlaps(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    return left.startswith(right + "/") or right.startswith(left + "/")
 
 
 OwnerRetentionPlan = MemoryRetentionReport

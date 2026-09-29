@@ -13,6 +13,7 @@ from typing import Any
 
 from ..common.json_io import read_json_object_report, read_jsonl_objects_report
 from ..conversation.models import ConversationThread
+from ..conversation.workspace_paths import canonical_task_root, durable_work_root
 from .candidates import CandidateService
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
@@ -165,7 +166,10 @@ def _aged_file_actions(
     home = context.home
     policy = context.policy
     categories = (
-        ("audit", Path(home.owner_audit_dir), policy.audit_days, "*.jsonl"),
+        # LLM: audit 类别本次一律跳过。类别名与实际数据不符——O/audit/*.jsonl 是主代理每轮的记忆归档
+        #   原始事件，Curator 要读，不是审计日志；直接删不可恢复。等存储登记表定了语义再处理
+        #   （dev 2026-09-28 裁定）。
+        # ("audit", Path(home.owner_audit_dir), policy.audit_days, "*.jsonl"),
         ("daily", Path(home.owner_memory_daily_dir), policy.daily_days, "*.jsonl"),
         ("curator_run", Path(home.owner_memory_curator_runs_dir), policy.curator_run_days, "*.jsonl"),
         ("compact", Path(home.owner_compact_dir), policy.compact_days, "*"),
@@ -265,8 +269,32 @@ def _candidate_actions(
     return actions
 
 
+# LLM: 恢复材料有两个规范根：旧版 O/tasks 与新版运行工作区 O/runs；两者共用同一套 work/state.json 合同。
+#   新增运行根不能让旧根失去保护，也不能凭目录名推断类别。
+# 函数用途: 返回保存恢复材料的全部规范根目录。
+def _recovery_roots(home: object) -> tuple[Path, ...]:
+    owner_home = Path(home.owner_home_dir)
+    roots = (durable_work_root(owner_home, "task"), owner_home / "tasks", durable_work_root(owner_home, "audit"))
+    return tuple(dict.fromkeys(roots))
+
+
+# LLM: 只枚举两个规范根下的 work/state.json；根不存在就跳过，不跟随符号链接，也不解析目录名。
+# 函数用途: 逐个产出恢复根与其下的任务状态文件路径。
+def _iter_task_states(home: object):
+    owner_home = Path(home.owner_home_dir)
+    for root in _recovery_roots(home):
+        if not root.exists():
+            continue
+        for state_path in sorted(root.rglob("work/state.json")):
+            task_root = state_path.parent.parent
+            # 路径必须正好落在 workspace_paths 认定的规范深度上；深一层或浅一层都不算任务根。
+            if canonical_task_root(owner_home, task_root) is None:
+                continue
+            yield root, state_path
+
+
 # LLM: 完成任务必须有明确 terminal status 和 updated_at；未知/运行中状态永远保护整个恢复目录。
-# 函数用途: 规划超过 completed_task_days 的终态任务移入回收站。
+# 函数用途: 规划超过 completed_task_days 的终态任务移入回收站（runs/tasks/audits 三个规范根一视同仁）。
 def _task_actions(
     *,
     home: object,
@@ -277,11 +305,10 @@ def _task_actions(
 ) -> tuple[list[MemoryRetentionAction], frozenset[Path]]:
     if policy.completed_task_days <= 0:
         return [], frozenset()
-    root = Path(home.owner_tasks_dir)
     cutoff = now.timestamp() - policy.completed_task_days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     selected: set[Path] = set()
-    for state_path in sorted(root.rglob("work/state.json")) if root.exists() else ():
+    for root, state_path in _iter_task_states(home):
         task_root = state_path.parent.parent
         state = _read_state(state_path, errors, code="MEMORY_RETENTION_TASK_STATE_INVALID")
         if state is None or not _safe_child(task_root, root) or task_root.is_symlink():
@@ -327,7 +354,7 @@ def _task_actions(
 
 
 # LLM: 工具正文只有在父任务结构化终态且终态时间超过 cutoff 后可清；运行中任务一律保留恢复材料。
-# 函数用途: 规划 task work 下 tool_outputs 大正文目录移入回收站。
+# 函数用途: 规划恢复根下 tool_outputs 大正文目录移入回收站（含旧 tasks 与新版 runs 两个根）。
 def _tool_output_actions(
     *,
     home: object,
@@ -339,9 +366,10 @@ def _tool_output_actions(
 ) -> list[MemoryRetentionAction]:
     if policy.tool_output_days_after_terminal <= 0:
         return []
-    root = Path(home.owner_tasks_dir)
     cutoff = now.timestamp() - policy.tool_output_days_after_terminal * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
+    # 本片只扩 completed_task；tool output 侧维持原范围（仅旧 O/tasks），不随恢复根一起扩。
+    root = Path(home.owner_tasks_dir)
     for state_path in sorted(root.rglob("work/state.json")) if root.exists() else ():
         task_root = state_path.parent.parent
         if task_root.resolve(strict=False) in selected_task_roots:

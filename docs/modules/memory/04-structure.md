@@ -543,3 +543,5 @@ Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致�
 恢复摘要来源扩展至同一次冻结的真实原生工具往返，与归档同ref去重后沿原adapter和有界分段器处理。严格恢复空回复/工具调用的机械回退完整保留旧摘要与原模型可见材料；分段修复失败拒绝提交，避免截断摘录获得完整coverage。不新增记忆库或持久状态，不读取外置全文。此片本地联验中，外层重跑传递原生IR仍待实现；见决策模型容量审计末节与TESTS。
 
 `compact_carry.py`仅在同进程同逻辑回合携带原生IR、tool_context和已转发guidance；源attempt保留调用引用，下一执行身份由原DB发布。`active_turn_compact.py`核对显式线程声明与typed宿主视图；无任务后台不借task属性补身份，原transcript授权门独立保持。
+
+retention 的恢复材料扫描同样按这两个规范根进行（`retention_scan._recovery_roots` 返回 `owner_tasks_dir` 与 `owner_runs_dir`，`_iter_task_states` 逐个产出根与其下的 `work/state.json`）：旧 `O/tasks` 与新版 `O/runs` 共用同一套 `work/state.json` 合同，终态判断只读结构化 `status`（`TASK_TERMINAL_STATUSES` 白名单），不看 mtime 也不看目录名，保留天数沿用 `completed_task_days`；`audits` 与会话恢复材料不在本片范围。
