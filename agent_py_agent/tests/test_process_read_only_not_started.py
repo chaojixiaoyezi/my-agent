@@ -120,6 +120,60 @@ def test_stop_before_any_signal_is_not_started(monkeypatch):
     assert outcome.reported_error_code == "PROCESS_SESSION_AUTHORITY_UNREADABLE"
 
 
+def test_read_only_failure_does_not_halt_the_loop(authority_unreadable):
+    """经真正收口的入口：process_session 只读失败不该让这一轮停摆。
+
+    `_mark_unknown_outcome_halt` 只看 effect_outcome != "unknown"，
+    这是「结果未知就收口」的实际判定点（必做动作的 blocked 判定只是另一条）。
+    这里把真实的 ProcessSessionTool 结果喂进真实入口，断言它没有收口。
+    """
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import _mark_unknown_outcome_halt
+
+    outcome = ProcessSessionTool().execute(
+        {"action": "status", "session_id": "bg-test", "__run_scope": SCOPE}
+    )
+    assert outcome.effect_outcome == "not_started"
+
+    params = SimpleNamespace(repeated_failure_halt=None, unknown_outcome_halt=None, tool_context=[])
+    record = SimpleNamespace(
+        params=params,
+        call=SimpleNamespace(tool_name="process_session"),
+        result=SimpleNamespace(
+            effect_outcome=outcome.effect_outcome,
+            reported_error_code=outcome.reported_error_code,
+            error_code=outcome.error_code,
+            handler_executed=False,
+        ),
+    )
+    _mark_unknown_outcome_halt(None, record)
+    assert params.unknown_outcome_halt is None, "只读失败不该触发收口"
+    assert params.tool_context == [], "不该追加收口提示"
+
+
+def test_unknown_effect_still_halts_the_loop():
+    """对照：effect=unknown 时收口照旧触发 —— 收口机制本身没被放宽。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._tool_loop_service import _mark_unknown_outcome_halt
+
+    params = SimpleNamespace(repeated_failure_halt=None, unknown_outcome_halt=None, tool_context=[])
+    record = SimpleNamespace(
+        params=params,
+        call=SimpleNamespace(tool_name="process_session"),
+        result=SimpleNamespace(
+            effect_outcome="unknown",
+            reported_error_code="PROCESS_SESSION_CLEANUP_UNCONFIRMED",
+            error_code=UNKNOWN,
+            handler_executed=False,
+        ),
+    )
+    _mark_unknown_outcome_halt(None, record)
+    assert params.unknown_outcome_halt is not None
+    assert params.tool_context, "unknown 应当追加收口提示"
+
+
 def test_legacy_stop_failure_after_signal_is_unknown(monkeypatch):
     """v1（legacy）路径：发信号之后的读记录失败必须仍是 unknown。
 

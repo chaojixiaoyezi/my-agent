@@ -45,6 +45,19 @@
 - 代价：未确认的后代可能仍在运行、继续产生副作用；告警写明这一点，不自动重跑。
 - 同分支的定时 waiting 死锁根因修复（`0b04e6fbe` 及其复审跟进）仍在复审，之后单独集成。
 
+## 只读动作的权威读失败以后可换一个可重试码（2026-09-29，待定，尚未落地）
+
+- **背景**：`process_session` 的 `list/status/wait/network_status` 在读不出后台进程权威时，现在记 `effect_outcome=not_started`
+  （2026-09-29 修复，见 `TESTS.md` 同题条目），不再让主代理把这一轮收口。但错误码仍是
+  `TOOL_OPERATION_OUTCOME_UNKNOWN`，而它的合同写的是「**不可重试**、需人工核对」。
+- **问题**：只读动作没有任何副作用，权威读失败其实**可以无害重试**；沿用一个「不可重试」的码，
+  语义上偏严 —— 模型和操作账都会把它当成需要人工介入的情形。
+- **待定方向（未落地，需单独设计）**：给只读动作的权威读失败换一个**可重试**的原因码
+  （例如 `PROCESS_SESSION_AUTHORITY_UNREADABLE_RETRYABLE` 之类），或在 `ErrorContract` 上把
+  「只读场景」标成可重试；同时决定它是否仍要写进 `unknown_reason`、是否影响 `required_actions` 的阻塞判定。
+- **不做什么**：本次不动错误码，只记这一条；换码会牵动 `ERROR_CONTRACTS`、操作账口径和既有测试，
+  属于新的控制语义。
+
 ## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`，本地验证通过，待集成）
 
 - 来源：定时任务停摆排查时，工具操作账的 `unknown_reason` 只剩 `effect_outcome_unknown:TOOL_OPERATION_OUTCOME_UNKNOWN`。`claude/75-scheduler-waiting-deadlock`（`0b04e6fbe`）已补 `run_command` 后台三处，这里补剩下三处。

@@ -233,6 +233,35 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 
 ## 进程工具只读查询在权威读不出时不再记成「结果未知」（2026-09-29，分支 `my-agent/self-dev-proc-effect`，基于 `9a71d8cd5`）
 
+### 9a 复审跟进（第 2、3 个提交）
+
+- **必须改 1（代码）**：v1 legacy 路径上「`AuthorityError` 一定发生在发信号之前」不成立。`_kill_legacy` 的顺序是
+  `_refresh_locked`（发信号前）→ `terminate_process_tree`（发信号）→ **第二次** `_visible_record_locked`；
+  第二次既可能读取失败抛错，也会在记录已不在时显式 raise，两者都在发信号之后。
+  修法：把这两类失败统一翻译成 `ProcessSessionCleanupError`（带本次终止回执、`committed=True`），
+  工具层「`AuthorityError` 即发信号前」的判定因此成立。新增 `_legacy_cleanup_unresolved` 做翻译。
+- **必须改 2**：`test_background_handoff.py::test_refresh_failure_does_not_escape_tool_or_use_running_cache`
+  期望从 `unknown` 改成 `not_started`（只读动作刷新失败时什么都没写，也没有外部副作用），其余两条断言保留。
+- **建议改（9a）**：把「这一轮不再收口」钉在**真正的入口**上。新增两条用例，用真实的 `ProcessSessionTool` 结果
+  喂进真实的 `_mark_unknown_outcome_halt`（`agent_core/_tool_loop_service.py`，它只看 `effect_outcome != "unknown"`）：
+  `test_read_only_failure_does_not_halt_the_loop` 断言不收口、不追加提示；
+  `test_unknown_effect_still_halts_the_loop` 做对照，断言 `unknown` 仍然收口。
+- **DESIGN_LEDGER 待定项**：记了一条「只读动作的权威读失败以后可换一个可重试码」——
+  现在错误码仍是 `TOOL_OPERATION_OUTCOME_UNKNOWN`，而它的合同写的是「不可重试」，对无副作用的只读动作偏严。
+  只记不改，换码会牵动 `ERROR_CONTRACTS`、操作账口径和既有测试。
+
+### 全量回归与沙箱环境说明（重要）
+
+- **定向**：`test_process_read_only_not_started.py` **14 passed**。
+- **全量**：按 9a 的关键词（`ProcessSessionTool`／`process_registry`／`process_session_cleanup`／`required_actions`／
+  `_mark_unknown_outcome_halt`）筛出 **41 个**测试文件全跑，**148 条失败**。
+- **基线对比（关键证据）**：在**回退本改动后**的同批文件上跑，失败也是 **148 条**，
+  用 `comm` 对两个失败集合求差集，**两个方向都是空的** —— 即**本改动没有引入任何新失败**，
+  这 148 条全是沙箱环境的既有失败（需要真实起子进程/进程组，沙箱里 `capture_process_birth_token` 不可用等）。
+  9a 环境里这些文件是绿的，按它那边的结果为准。
+- **门禁**：9 个全仓守卫 **134 passed**；ruff `All checks passed!`；`DOC_SYNC_PASS`；`git diff --check` 干净；
+  `check_code_size.py` hard=0、blocked=False。
+
 - **来源**：dev 09-29 01:15 任务。ae 复审 47bd37d20 时发现既有问题：`process_session` 在读不出后台进程权威时对所有动作一律记 `effect_outcome=unknown`，
   而 `unknown` 会让 `contracts/required_actions.settle_required_action` 把动作标成 `blocked`，主代理据此收口、整轮停止调用工具 ——
   可 `status/wait/network_status` 这类只读查询根本没有副作用，结果其实已知（就是没开始）。
