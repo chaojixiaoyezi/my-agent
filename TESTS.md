@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 测试不再打开真实浏览器，browser-lite 不再残留 Chrome 签名克隆（2026-09-28，分支 `claude/75-no-real-browser-in-tests`，基于 `80b4afed8`）
+
+- **弹窗根因**：`test_web_board_package.py::test_stdin_eof_ends_process_and_releases_port` 直接起插件进程，却把 `MY_AGENT_PLUGIN_SETTINGS` 从环境里删掉了。插件于是按默认 `open_browser=true`，在用户的默认浏览器里打开了带令牌的本机链接。现在这一例显式传 `{"open_browser": false}`，并断言 `served["browser_opened"] is False`；它测的是 stdin EOF 后退出，与默认设置无关。
+- **全仓核查**：只有三个插件自己会打开东西：web-board、harness-console（`open_in_browser`、desktop 回退）、desktop-lite（`open`/`xdg-open`/`osascript`/剪贴板）。测试里没有直接调用 `webbrowser`。
+  - 核查方法：在 PATH 最前面放只记日志、令牌打码的假 `open`/`xdg-open`/`osascript`/`pbcopy`/`notify-send`/`wl-copy`/`xclip`，跑插件相关的 62 个测试文件。MCP 客户端的安全环境会保留 PATH，所以这些假程序覆盖插件子进程。
+  - 修复前，web-board 那一例恰好抓到 1 次 `open`，调用方是 `python -I -m web_board`；修复后全部 921 项通过，假程序调用 0 次。
+- **Chrome 签名克隆**：browser-lite 优先使用 `/Applications/Google Chrome.app`（专属 profile、无头）。macOS 版 Chrome 默认开启 `kMacAppCodeSignClone`，启动时把 `.app` 克隆到 `/var/folders/.../X/com.google.Chrome.code_sign_clone/`，只在正常关闭时由清理子进程删除，被强杀就会残留（依据：Chromium `chrome/browser/mac/code_sign_clone_manager.mm`，`BASE_FEATURE(kMacAppCodeSignClone, FEATURE_ENABLED_BY_DEFAULT)`，清理在析构时拉起 `--type=code-sign-clone-cleanup`）。
+  - 实测：只跑一次 `test_browser_lite_package.py`，克隆从 737 增加到 746（+9），期间没有别的 headless Chrome 或 pytest 在运行。
+  - 修复：launcher 启动参数加 `--disable-features=MacAppCodeSignClone`。修复后同一文件再跑一次新增 0 个，62 个插件测试文件整体再跑一次也是 0 个。
+  - 新增 `test_browser_lite_launcher.py` 合同单测，锁住这个启动参数。
+  - 只数、没有删除现有的克隆；用户日常 Chrome（pid 4415）全程没碰。
+- 只跑相关定向测试，basetemp 跑完即删，测试未生成 pycache。
+
 ## capability 兜底值清理：只认 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-fallback-cleanup`，基于 `54880f8e9`）
 
 - **范围**：6 处调用点改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，删掉各自写的兜底值：

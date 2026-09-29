@@ -239,15 +239,17 @@ def test_stdin_eof_ends_process_and_releases_port(installed_board, workspace):
     requests = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                  "params": {"name": "serve", "arguments": {"path": "site"}, "_meta": meta}}]
+    # 本例只测 stdin EOF 后退出并释放端口，与默认设置无关；显式关掉 open_browser，测试绝不打开真实浏览器。
+    environment = dict(os.environ, MY_AGENT_PLUGIN_SETTINGS=json.dumps({"open_browser": False}))
     process = subprocess.Popen([str(python), "-I", "-m", "web_board"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               env={k: v for k, v in os.environ.items() if k != "MY_AGENT_PLUGIN_SETTINGS"})
+                               env=environment)
     try:
         for item in requests:
             process.stdin.write(json.dumps(item).encode() + b"\n")
         process.stdin.flush()
         process.stdout.readline()
         served = json.loads(json.loads(process.stdout.readline())["result"]["content"][0]["text"])
-        assert port_open(served["port"])
+        assert port_open(served["port"]) and served["browser_opened"] is False
         process.stdin.close()
         assert process.wait(timeout=10) == 0
     finally:

@@ -895,7 +895,7 @@ agent_py_agent/
 |   |-- test_typesafe_decision.py       # 原生请求、绝对期限及本地 HTTP 组合验收
 |   |-- test_gateway_strict_request.py  # 原 HTTP 严格请求的零重试、期限与正文上限回归
 |   |-- test_bounded_call.py            # 启动/取消/超时竞态、未退出资源与进程容量保护
-|   |-- test_browser_lite_launcher.py  # browser-lite 关闭时先等本 profile 子进程再清 profile：假 /proc 与 stat、晚退出网络服务、超时只 SIGKILL 同进程组的精确匹配
+|   |-- test_browser_lite_launcher.py  # browser-lite 关闭时先等本 profile 子进程再清 profile：假 /proc 与 stat、晚退出网络服务、超时只 SIGKILL 同进程组的精确匹配；启动参数关闭 macOS MacAppCodeSignClone
 |   |-- test_decision_call_resources.py # 有界调用与原模型准入的组合、普通模型保留名额
 |   |-- test_subagent_process_control.py # 公共进程树终止覆盖后代、升级、宿主保留及未确认回执
 |   |-- test_subagent_resource_stop.py  # 固定原子树、终态资源、恢复隔离及 Goal/creation 锁序

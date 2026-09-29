@@ -76,6 +76,9 @@ class BrowserProcess:
 
     # LLM: 有副作用：创建 profile 目录、启动子进程。stdin/stdout/stderr 全部接 DEVNULL，绝不污染插件的 MCP 标准输出。
     #   profile 是符号链接时拒绝；启动超时或进程提前退出时回收并抛错。
+    #   macOS 版 Chrome 默认（Chromium 特性 MacAppCodeSignClone）在启动时把整个 .app 克隆到
+    #   /var/folders/.../X/<bundle>.code_sign_clone/，只在浏览器正常关闭时由清理子进程删除；被强杀就永久残留。
+    #   本插件的无头浏览器短命且专属 profile，不需要“运行中被升级”的签名保护，所以显式关掉该特性；其它平台忽略此项。
     # 函数用途: 启动无头浏览器并等待调试端口就绪。
     def start(self) -> None:
         if self.profile.is_symlink():
@@ -86,7 +89,8 @@ class BrowserProcess:
         arguments = [str(self.executable), f"--user-data-dir={self.profile}", "--headless=new",
                      "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check",
                      "--disable-extensions", "--disable-background-networking", "--disable-sync",
-                     "--disable-component-update", "--use-mock-keychain", "--password-store=basic", "about:blank"]
+                     "--disable-component-update", "--use-mock-keychain", "--password-store=basic",
+                     "--disable-features=MacAppCodeSignClone", "about:blank"]
         try:
             self.process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                             stderr=subprocess.DEVNULL, close_fds=True)

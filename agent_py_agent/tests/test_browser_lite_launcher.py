@@ -118,3 +118,21 @@ def test_stop_without_proc_clears_immediately(tmp_path, monkeypatch):
     _exited_browser(profile).stop()
     assert kills == [] and list(profile.iterdir()) == []
     assert time.monotonic() - started < 1
+
+
+def test_start_disables_macos_code_sign_clone_so_killed_browsers_leave_no_bundle_copy(tmp_path, monkeypatch):
+    # macOS Chrome 默认在启动时克隆整个 .app，只在正常关闭时清理；被强杀会永久残留，所以启动参数必须关掉该特性。
+    captured = []
+
+    def refuse(arguments, **_kwargs):
+        captured.append(list(arguments))
+        raise OSError("not started in this test")
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", refuse)
+    browser = launcher.BrowserProcess(Path("/bin/true"), tmp_path / "profile", 1.0)
+    try:
+        browser.start()
+    except launcher.BrowserError:
+        pass
+    assert "--disable-features=MacAppCodeSignClone" in captured[0]
+    assert "--headless=new" in captured[0] and f"--user-data-dir={tmp_path / 'profile'}" in captured[0]

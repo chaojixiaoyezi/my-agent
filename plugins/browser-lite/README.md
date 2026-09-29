@@ -81,7 +81,10 @@ python scripts/build_plugin_package.py \
 
 - **专属上下文**：`--user-data-dir` 固定为插件数据目录（`MY_AGENT_PLUGIN_DATA_DIR`）下的 `profile/`，
   以 `--headless=new --remote-debugging-port=0 --no-first-run --no-default-browser-check` 等参数启动，
-  绝不使用用户日常 Chrome 配置和登录态；`profile/` 是符号链接时拒绝启动。浏览器每次关闭（close、空闲、插件退出）
+  绝不使用用户日常 Chrome 配置和登录态；`profile/` 是符号链接时拒绝启动。启动参数还带
+  `--disable-features=MacAppCodeSignClone`：macOS 版 Chrome 默认会在启动时把整个 `.app` 克隆到
+  `/var/folders/.../X/com.google.Chrome.code_sign_clone/`，只在正常关闭时清理，被强杀就永久残留；
+  无头浏览器短命且专属 profile，不需要这层保护（依据见 Chromium `code_sign_clone_manager.mm` 的 `kMacAppCodeSignClone`）。浏览器每次关闭（close、空闲、插件退出）
   都清空 profile 内容，所以 cookie 等状态不跨会话保留。
 - **可访问地址**：只允许 (1) 本次宿主读取上下文允许读取的工作区内文件页面（插件把路径转成 `file://` 后经 SDK `check` 裁决，
   符号链接按真实目标判断；模型直接写的 `file://` 到不了插件，先被宿主拦）；(2) `allowed_hosts` 里且宿主出站门放行的 http(s) 主机。
