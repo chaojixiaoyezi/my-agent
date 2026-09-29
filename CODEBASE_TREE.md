@@ -481,6 +481,7 @@ agent_py_agent/
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
 |   |   |-- session_messaging.py        # 会话间消息与派活的权限判定（纯函数，只读结构化身份与开关）
+|   |   |-- wake_poison.py              # 唤醒毒丸判定（纯函数）：尝试结果分类、同因连续段、总上限、两类退避与结案判定
 |   |   |-- session_tasks.py            # 会话间派活的唯一权威存储（状态机单一写入方，正文只存 guidance id）
 |   |   |-- session_pair_rate.py        # 每对会话每小时条数计数（消息/派活/回报/取消通知都计入）
 |   |   |-- store_guidance_records.py   # 插话回执格式、迁移构造与身份校验

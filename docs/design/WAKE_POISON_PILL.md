@@ -64,7 +64,8 @@
 
 以下不计数：
 
-- `is_provider_transient_error`：网络、超时、5xx，已由供应退避接管；
+- `is_provider_transient_error`：网络、5xx、限流（含 `ProviderUsageLimitError`），已由供应退避接管；
+- `ProviderTimeoutError`：供应超时，属于网络类；
 - `is_provider_quota_exhausted_error`：走额度分路；
 - `is_model_configuration_unavailable`：等用户配置模型；
 - `RuntimeConflictError` 全族：CAS 或资源占用冲突，包括锁冲突 `RuntimeExecutionBusyError`；
@@ -187,7 +188,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 ## 10. 落地顺序与测试
 
-1. **纯函数模块** `conversation/wake_poison.py`：负责结果分类、连续段、退避和上限。
+1. **纯函数模块** `conversation/wake_poison.py`（已完成）：负责结果分类、连续段、退避和上限。
    合同单测覆盖：瞬时类型逐个检查、未知 admission 默认计数、原因交替、中间夹瞬时故障不打断。
 2. **WakeStore**：实现尝试账、结案、重放，发布层认识第三个位置。存储单测覆盖：结案和重放前后信封冻结内容不变、
    同键再发布返回已结案的原信号、observation 同步结掉。

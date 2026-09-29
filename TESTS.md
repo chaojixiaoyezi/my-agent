@@ -24,6 +24,21 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_memory_vector_cache.py agent_py_agent/tests/test_owner_maintenance.py -q`
   与 `python3 scripts/mutate_text_vector_cache.py`（cwd 都必须是工作树根）。
 
+## 唤醒毒丸第 1 步：纯函数判定模块（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）
+
+- **范围**：新文件 `agent/conversation/wake_poison.py`，只做判定、不接线：admission／异常／报告三类结果分类，
+  同因连续段与总次数，计数失败与只重投两类退避，结案判定（同因 5 次、总 12 次标 mixed、只重投满 24 小时）。
+  常量是内部安全兜底，不进配置。接线要等 my-agent-3 的取消修复合入。
+- **测试**：`test_wake_poison.py` 60 例，正反成对：预期等待 admission 逐个不计数且集合与合同完全相等、未知码默认计数；
+  15 种瞬时类型逐个不计数（含 SQLite 扩展码 517）；其余异常按 `error_code` 或 category+类名计数，换文案不改变原因；
+  上限恰好在第 5／12 次触发、换因重计而总数照加、中间夹不计数结果不打断、成功清账；退避 30/60/120/240/300 与
+  重投 30…900；重投失败不进失败计数、满 24 小时恰好结案；状态读写严格校验；最后用纯函数重放 `7b83c8730`
+  （5 次领取、间隔合计 450 秒后按 `error:SKILL_TASK_BINDING_INVALID` 结案）和 `204f4ddf9`。
+- **变异验证**：26 个变异体全部被抓住（含预期等待集合少一项、瞬时类型各删一项、SQLite 不取低 8 位、忽略 error_code、
+  换因不重计、不计数结果清账、退避按同因而非总数、上限用 > 代替 >=、mixed 标错、重投计入失败、各封顶值改动、状态校验放宽）。
+
+## SkillSnapshotError 整族结构化错误码（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）
+
 ## 前台命令已退出、只是清理未确认（2026-09-29，`84e8db619` + `067d2dd3e`，单独集成）
 
 - `test_shell_foreground_cleanup.py`：原用例 `test_cleanup_unknown_keeps_original_command_result` 按新合同改为 `test_cleanup_unconfirmed_returns_the_real_result_with_a_warning`（退出码 0 → 成功，7 → `COMMAND_FAILED`/`failed`；`cleanup_confirmed=false`、`termination` 回执和正文提示），另加清理已确认不带告警的对照。
