@@ -10,7 +10,7 @@ import select
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -797,7 +797,7 @@ class TerminalSessionTool(BaseTool):
         )
 
     # LLM: close 只访问当前权限，确认进程树退出才返回 closed；无法确认沿用工具未知副作用合同，
-    #   reported_error_code=PTY_CLOSE_UNCONFIRMED 说明是关闭后进程树退出未确认。
+    #   reported_error_code=PTY_CLOSE_UNCONFIRMED 说明是关闭后进程树退出未确认，终止回执结构化放进 process.termination。
     # 函数用途: 关闭终端并返回真实核对结果，缺失句柄与未确认终止分别处理。
     def _close(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
@@ -806,8 +806,12 @@ class TerminalSessionTool(BaseTool):
             return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}",
                                effect_outcome="not_started")
         if session.termination is None or not session.termination.confirmed:
-            return self._error("TOOL_OPERATION_OUTCOME_UNKNOWN", "已请求关闭终端，但尚未确认进程树退出。",
-                               effect_outcome="unknown", reported="PTY_CLOSE_UNCONFIRMED")
+            facts: dict[str, object] = {"session_id": session_id}
+            if session.termination is not None:
+                facts["termination"] = asdict(session.termination)
+            return ToolHandlerOutcome(self.model_spec.name, False, "已请求关闭终端，但尚未确认进程树退出。",
+                                      error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown",
+                                      reported_error_code="PTY_CLOSE_UNCONFIRMED", result_envelope={"process": facts})
         return self._ok(
             {
                 "status": "closed",
@@ -821,12 +825,11 @@ class TerminalSessionTool(BaseTool):
             self.model_spec.name, True, json.dumps(payload, ensure_ascii=False)
         )
 
-    # LLM: effect_outcome 只接受调用点掌握的执行事实，不能按错误文案猜测或统一放宽所有失败；
-    #   reported 是结果未知时的具体原因码（空则沿用 code）。
+    # LLM: effect_outcome 只接受调用点掌握的执行事实，不能按错误文案猜测或统一放宽所有失败。
     # 函数用途: 构造工具失败结果，让执行器正确区分未执行与可能已发生的副作用。
-    def _error(self, code: str, message: str, *, effect_outcome: str = "", reported: str = "") -> ToolHandlerOutcome:
+    def _error(self, code: str, message: str, *, effect_outcome: str = "") -> ToolHandlerOutcome:
         return ToolHandlerOutcome(self.model_spec.name, False, message, error_code=code,
-                                  effect_outcome=effect_outcome, reported_error_code=reported)
+                                  effect_outcome=effect_outcome)
 
 
 # LLM: fd 关闭不等于进程退出；以 poll 优先，PID 保持私有，不能把失去终端输出当作停止成功。

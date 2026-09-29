@@ -96,6 +96,11 @@ def test_unconfirmed_terminal_close_reports_its_cause(tmp_path, monkeypatch):
         outcome = tool.execute({"action": "close", "session_id": session.session_id})
     assert (outcome.error_code, outcome.effect_outcome) == (UNKNOWN, "unknown")
     assert outcome.reported_error_code == "PTY_CLOSE_UNCONFIRMED"
+    # 终止回执结构化附在 process.termination（ae 复审建议 2），与后台进程停止未确认同一形状。
+    facts = outcome.result_envelope["process"]
+    assert facts["session_id"] == session.session_id
+    assert (facts["termination"]["method"], facts["termination"]["confirmed"]) == ("SIGTERM", False)
+    assert tuple(facts["termination"]["unresolved_pids"]) == (session.process.pid,)
     pty_session_registry.close(session.session_id)
     assert session.termination is not None and session.termination.confirmed
 

@@ -1,5 +1,10 @@
 # 测试与发布验收
 
+## 后台进程与终端会话原因码：ae 复审建议 2–5（2026-09-29，分支 `claude/75-process-codes-followups`，基于 `e850ceb04`）
+
+- **建议 2**：`terminal_session` 关闭未确认时，终止回执结构化放进 `result_envelope.process.termination`（与后台进程停止未确认同一形状）；
+  `test_unconfirmed_terminal_close_reports_its_cause` 断言 session_id、method、confirmed 与 unresolved_pids。
+
 ## 向量缓存第五轮：「跳过写」真的实现 + 回收错误可见（2026-09-29，分支 `my-agent/self-dev-2-vcache`，基于 `bac2f176d`）
 
 **起因**：9b 复核 `74da81687` 发现「盘上没变就跳过写」**根本没实现**——`_flush` 仍无条件整文件重写
