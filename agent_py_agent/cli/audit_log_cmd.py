@@ -101,16 +101,16 @@ def _print_audit_entry(entry) -> None:
 
 # LLM: audit-log 命令入口：查询只读；--cleanup 调 AuditQuery.cleanup_old_entries（写文件副作用），天数取 --days 或
 #   配置 cli_audit_cleanup_days，保留期 <= 0 时如实回执“永久保留、未清理”。改动须同步 test_audit.py。
+#   审计路径按 owner 的 canonical 基准解析：进程 cwd 不是所有者事实，相对路径绝不能随启动目录漂移。
 # 函数用途: 查看或清理审计日志的命令行入口。
 def cmd_audit_log(args) -> int:
-    from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
+    from .common import DEFAULT_CONFIG, load_config
+    from .workspace_resolution import owner_home_workspace_root
 
     config_path = getattr(args, "config", str(DEFAULT_CONFIG))
     config = load_config(config_path)
 
-    root = resolve_workspace_root(config, config_path)
-
-    query = AuditQuery(config)
+    query = AuditQuery(config, root=owner_home_workspace_root(config))
 
     # 最近活跃用户
     if getattr(args, "recent_users", False):

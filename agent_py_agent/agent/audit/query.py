@@ -116,9 +116,12 @@ def _timestamp_matches(timestamp: float, params: AuditQueryParams) -> bool:
 
 class AuditQuery:
 
-    def __init__(self, config: AgentConfig):
+    # LLM: root 是调用方的 canonical 基准（owner home）；给了它，配置里的相对路径就不再随进程 cwd 漂移。
+    #   不给时保持旧行为，避免影响既有测试与旧调用方。
+    # 函数用途: 建立审计查询视图，可选地按给定基准解析相对审计路径。
+    def __init__(self, config: AgentConfig, *, root: Path | str | None = None):
         self.config = config
-        paths = resolve_audit_paths(config)
+        paths = resolve_audit_paths(config, root=root)
         self._audit_root = paths.root
         self._audit_file = paths.log_file
 
