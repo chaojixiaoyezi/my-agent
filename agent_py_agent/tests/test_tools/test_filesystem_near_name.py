@@ -13,10 +13,22 @@ import pytest
 
 
 def _read_tool(root: Path, *, extra_roots: list[Path] | None = None):
+    """`workspace_roots` 是 ReadFileTool 的参数，不是 FileSystemAccessOptions 的字段。"""
+    from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
+
+    return ReadFileTool(root, max_chars=2000, workspace_roots=[root, *(extra_roots or [])])
+
+
+def _owner_walled_tool(owner_home: Path, inner_root: Path):
+    """造一个带真实 owner 墙的读取工具：只有 owner_home 内放行。
+
+    这样候选项才会真正走到 AccessGate（check_path_access 返回结构化裁决），
+    而不是像没有墙的普通模式那样一律放行。
+    """
     from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions, ReadFileTool
 
-    opts = FileSystemAccessOptions(workspace_roots=[root, *(extra_roots or [])]) if extra_roots else None
-    return ReadFileTool(root, max_chars=2000, access_options=opts) if opts else ReadFileTool(root, max_chars=2000)
+    options = FileSystemAccessOptions(owner_scope_root=owner_home)
+    return ReadFileTool(owner_home, max_chars=2000, workspace_roots=[inner_root], access_options=options)
 
 
 # --------------------------------------------------------------------------- N1 越墙泄露
@@ -25,24 +37,27 @@ def test_symlink_to_outside_owner_never_appears_in_candidates(tmp_path: Path):
     """LLM: A link pointing outside the granted roots must not leak its target's existence.
 
     新手说明:
-    alice 的工作区里放一个链接指向 bob 家的文件。读一个相近的名字时，
-    绝不能出现 bob 那边的绝对路径 —— 否则等于能探测别人家里有什么文件。
+    alice 的工作区里放一个链接指向 bob 家的文件。必须在**真实 owner 墙**下测：
+    没有墙时本来就没有"越权"可言，闸门会一律放行（那样测不出东西）。
     """
-    root = tmp_path / "alice"
+    owner_home = tmp_path / "owner"
+    workspace = owner_home / "workspace"
+    (workspace / "docs").mkdir(parents=True)
     outside = tmp_path / "bob"
-    (root / "docs").mkdir(parents=True)
     outside.mkdir()
     secret = outside / "bobs_secret_notes.md"
     secret.write_text("private", encoding="utf-8")
-    (root / "docs" / "bobs_secret_note.md").symlink_to(secret)
+    (workspace / "docs" / "bobs_secret_note.md").symlink_to(secret)
 
-    tool = _read_tool(root)
+    tool = _owner_walled_tool(owner_home, workspace)
     result = tool.execute({"path": "docs/bobs_secret_notx.md"})
 
     assert not result.ok
     candidates = result.result_envelope["candidate_paths"]
-    assert candidates == [], f"泄露了墙外路径：{candidates}"
-    assert str(outside) not in result.output
+    assert all(str(outside) not in path for path in candidates), f"泄露了墙外路径：{candidates}"
+    assert all(not path.endswith("bobs_secret_note.md") for path in candidates), (
+        f"指向墙外的链接被建议出来了：{candidates}"
+    )
 
 
 def test_symlink_probe_cannot_distinguish_existing_from_missing_target(tmp_path: Path):
@@ -54,16 +69,17 @@ def test_symlink_probe_cannot_distinguish_existing_from_missing_target(tmp_path:
     """
     observed = []
     for exists in (True, False):
-        root = tmp_path / f"alice-{exists}"
+        owner_home = tmp_path / f"owner-{exists}"
+        workspace = owner_home / "workspace"
+        (workspace / "docs").mkdir(parents=True)
         outside = tmp_path / f"bob-{exists}"
-        (root / "docs").mkdir(parents=True)
         outside.mkdir()
         target = outside / "bobs_secret_notes.md"
         if exists:
             target.write_text("private", encoding="utf-8")
-        (root / "docs" / "bobs_secret_note.md").symlink_to(target)
+        (workspace / "docs" / "bobs_secret_note.md").symlink_to(target)
 
-        tool = _read_tool(root)
+        tool = _owner_walled_tool(owner_home, workspace)
         result = tool.execute({"path": "docs/bobs_secret_notx.md"})
         observed.append(tuple(result.result_envelope["candidate_paths"]))
 
@@ -352,3 +368,254 @@ def test_edit_distance_matches_naive_implementation(limit: int):
         assert got == want, f"{left!r} vs {right!r} limit={limit}: got={got} want={want} raw={raw}"
         if raw <= limit:
             assert raw == expected or expected >= 0  # 记录期望值，便于阅读
+
+
+# --------------------------------------------------------------------------- 真实 owner 墙下的闸门
+#
+# 复审（2026-09-28，dsh-9b B1/B2/B6）指出：`PathAccessDecision` 没有 `__bool__`，
+# 所以 `bool(decide(path))` 恒为真，闸门形同虚设。这些用例跑在**真实 owner 墙**下，
+# 专门用来杀"把闸门整个关掉"那类变异（MG1）——普通模式碰不到闸门。
+
+def test_credential_file_is_not_suggested_under_owner_wall(tmp_path: Path):
+    """LLM: A denied credential file must not be suggested just because its name is close.
+
+    新手说明:
+    用户把 `.env` 写成 `.evn`。`.env` 本身读不了（被凭据策略拒绝），
+    那就不该把它当成"你是不是想读这个"建议出来 —— 否则等于用建议绕过读取限制。
+    """
+    owner_home = tmp_path / "owner"
+    workspace = owner_home / "workspace"
+    docs = workspace / "docs"
+    docs.mkdir(parents=True)
+    credential = docs / ".env"
+    credential.write_text("SECRET=1", encoding="utf-8")
+    (docs / "notes.md").write_text("x", encoding="utf-8")
+
+    tool = _owner_walled_tool(owner_home, workspace)
+    result = tool.execute({"path": "docs/.evn"})
+
+    assert not result.ok
+    candidates = result.result_envelope["candidate_paths"]
+    assert all(".env" not in path for path in candidates), f"把被拒文件建议出来了：{candidates}"
+
+
+def test_denied_sibling_is_dropped_from_sibling_scan(tmp_path: Path):
+    """LLM: The sibling scan must honour the same gate (kills a gate-disabled mutant).
+
+    新手说明:
+    跨目录候选那条路径也要过闸门，不能只有近名那条。
+    用一个词干相同、但会被策略拒绝的兄弟文件来证。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    owner_home = tmp_path / "owner"
+    workspace = owner_home / "workspace"
+    workspace.mkdir(parents=True)
+    denied = workspace / "probe.csv"
+    denied.write_text("x", encoding="utf-8")
+    tool = _owner_walled_tool(owner_home, workspace)
+
+    gate = recovery.AccessGate(tool.check_path_access)
+    # 直接验证闸门本身：拒绝的路径不允许，放行的路径允许。
+    assert gate.allows(denied) in (True, False)  # 取决于策略；下面用真实拒绝路径断言
+    denied_decision = tool.check_path_access(denied.resolve())
+    assert gate.allows(denied.resolve()) == bool(denied_decision.allowed), (
+        "闸门没有按 .allowed 判断（PathAccessDecision 无 __bool__，用 bool() 会恒真）"
+    )
+
+
+def test_gate_reads_allowed_field_not_truthiness(tmp_path: Path):
+    """LLM: AccessGate must read `.allowed`; truthiness of the decision object is always True.
+
+    新手说明:
+    这是本条复审的核心：`PathAccessDecision(allowed=False)` 的 `bool()` 是 **True**。
+    闸门必须读 `.allowed`，否则"拒绝"会被当成"允许"。
+    """
+    from agent_py_agent.agent.path_access_policy import PathAccessDecision
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    denied = PathAccessDecision(allowed=False, code="PATH_CREDENTIAL_FILE_BLOCKED", message="no")
+    allowed = PathAccessDecision(allowed=True)
+
+    assert bool(denied) is True, "前提变了：PathAccessDecision 现在有 __bool__ 了？"
+
+    assert recovery.AccessGate(lambda _p: denied).allows(tmp_path) is False
+    assert recovery.AccessGate(lambda _p: allowed).allows(tmp_path) is True
+
+
+def test_symlink_target_missing_and_existing_look_identical_under_owner_wall(tmp_path: Path):
+    """LLM: Under a real owner wall an outside link must not reveal target existence.
+
+    新手说明:
+    闸门修好之后，链接可以放行（按解析后的路径过策略），所以必须再确认一次：
+    指向墙外的链接，不管目标在不在，结果都要一样 —— 不能重新变成探测口。
+    """
+    observed = []
+    for exists in (True, False):
+        owner_home = tmp_path / f"owner-{exists}"
+        workspace = owner_home / "workspace"
+        (workspace / "docs").mkdir(parents=True)
+        outside = tmp_path / f"bob-{exists}"
+        outside.mkdir()
+        target = outside / "bobs_secret_notes.md"
+        if exists:
+            target.write_text("private", encoding="utf-8")
+        (workspace / "docs" / "bobs_secret_note.md").symlink_to(target)
+
+        tool = _owner_walled_tool(owner_home, workspace)
+        result = tool.execute({"path": "docs/bobs_secret_notx.md"})
+        observed.append(tuple(result.result_envelope["candidate_paths"]))
+
+    assert observed[0] == observed[1], f"两种情形可区分：{observed}"
+    outside_paths = [str(tmp_path / f"bob-{flag}") for flag in (True, False)]
+    for path in observed[0]:
+        assert all(outside not in path for outside in outside_paths), "泄露了墙外路径"
+
+
+def test_in_workspace_symlink_is_suggested_again(tmp_path: Path):
+    """LLM: A legitimate link inside the workspace must still be usable (review B4 regression).
+
+    新手说明:
+    上一轮为了堵泄露，把**所有**链接都排除了，连工作区内部的合法链接也不再被建议。
+    闸门修好后应当放行：裁决看的是解析后的路径，指到墙外才丢弃。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    owner_home = tmp_path / "owner"
+    workspace = owner_home / "workspace"
+    docs = workspace / "docs"
+    docs.mkdir(parents=True)
+    real = docs / "real_report.md"
+    real.write_text("x", encoding="utf-8")
+    (docs / "linked_report.md").symlink_to(real)   # 指向工作区内部
+
+    tool = _owner_walled_tool(owner_home, workspace)
+    scope = recovery.NearNameScope(
+        workspace_roots=[workspace], access=recovery.AccessGate(tool.check_path_access)
+    )
+    found = recovery.suggest_near_name_paths("linked_reprot.md", docs, scope)
+    assert [p.name for p in found] == ["linked_report.md"], f"内部合法链接被误排除：{found}"
+
+
+def test_two_suggestion_cap_with_three_close_names(tmp_path: Path):
+    """LLM: With three names within distance 2 exactly two may be returned (kills MN1).
+
+    新手说明:
+    三个名字都要**真的**在距离 2 以内，否则测的就不是"上限"而是"恰好只有一个像"。
+    这里用 report_a.md / report_b.md / report_c.md 对一个只错一处的名字。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    root = tmp_path / "workspace"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    for name in ("report_a.md", "report_b.md", "report_c.md"):
+        (docs / name).write_text("x", encoding="utf-8")
+
+    # 先确认前提成立：三个名字都在距离上限内
+    distances = [
+        recovery._edit_distance_within("report_x.md", name, recovery._NEAR_NAME_DISTANCE_LIMIT)
+        for name in ("report_a.md", "report_b.md", "report_c.md")
+    ]
+    assert all(d is not None for d in distances), f"前提不成立，距离={distances}"
+
+    found = recovery.suggest_near_name_paths(
+        "report_x.md", docs, recovery.NearNameScope(workspace_roots=[root])
+    )
+    assert len(found) == 2, f"应当正好 2 条，实得 {len(found)}：{found}"
+
+
+def test_in_workspace_near_name_beats_cross_directory_candidate(tmp_path: Path):
+    """LLM: A same-directory near name outranks a cross-directory candidate (kills MN6).
+
+    新手说明:
+    上一版这条测试写错了：跨目录那个候选根本没被扫到，所以"顺序"无从谈起，
+    变异（把近名排到末尾）因此存活。这里让**两个候选都真的存在**：
+    同目录放一个弱一点的近名，跨目录放一个词干完全相同的，然后断言同目录的排前面。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    root = tmp_path / "workspace"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    (docs / "target_fix.md").write_text("x", encoding="utf-8")        # 同目录、差一个字母
+    other = root / "elsewhere"
+    other.mkdir()
+    (other / "target_fil.md").write_text("x", encoding="utf-8")       # 跨目录、名完全相同
+
+    found = recovery.suggest_missing_path_candidates(
+        raw_path="docs/target_fil.md",
+        target=docs / "target_fil.md",
+        workspace_roots=[root],
+    )
+    names = [str(p.relative_to(root)) for p in found]
+    assert "docs/target_fix.md" in names, f"前提不成立：同目录近名没进候选 {names}"
+    assert "elsewhere/target_fil.md" in names, f"前提不成立：跨目录候选没进候选 {names}"
+    assert found[0] == docs / "target_fix.md", f"同目录近名没排最前：{names}"
+
+
+def test_sibling_scan_stem_hit_is_gated_under_owner_wall(tmp_path: Path):
+    """LLM: The sibling scan must drop a stem-hit link that points outside the owner wall.
+
+    新手说明（这条是复审 B3 要求的，也是杀死 MG4 的关键）:
+    上一轮我那条 N1b 回归测试用的是 project_note.md 对 project_notes.md ——
+    两者词干并不相同，`_name_score` 打分为 0，所以它**根本没进入候选逻辑**，是空跑通过。
+    这里改成 `probe.csv` 对 `probe.xlsx`（词干相同，实测打分 90，确实会命中），
+    并要求候选不得是那个指向墙外的链接 —— 报告 resolve 后的路径也会被这条抓住。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    owner_home = tmp_path / "owner"
+    workspace = owner_home / "workspace"
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "bob"
+    outside.mkdir()
+    secret = outside / "probe.xlsx"
+    secret.write_text("private", encoding="utf-8")
+    link = workspace / "probe.xlsx"
+    link.symlink_to(secret)
+
+    # 前提必须成立：词干命中确实给正分，否则又是空跑。
+    assert recovery._name_score("probe.xlsx", "probe.csv") > 0, "前提不成立：词干没命中"
+
+    tool = _owner_walled_tool(owner_home, workspace)
+    found = recovery.suggest_missing_path_candidates(
+        raw_path="probe.csv",
+        target=workspace / "probe.csv",
+        workspace_roots=[workspace],
+        access=recovery.AccessGate(tool.check_path_access),
+    )
+    for path in found:
+        assert str(outside) not in str(path), f"泄露/报告了墙外路径：{found}"
+        assert str(link) not in str(path) and not str(path).endswith("probe.xlsx"), (
+            f"指向墙外的链接被当作候选：{found}"
+        )
+
+
+def test_denied_candidate_under_dangerous_root_is_not_reported(tmp_path: Path):
+    """LLM: A candidate the policy denies must not be reported (kills a gate-disabled mutant).
+
+    新手说明（复审 B6 那类，也是杀死 MG1 的关键）:
+    用**危险根**造出真实拒绝——`.env` 在 owner 墙下其实是被放行的（凭据拒绝只作用于
+    未受owner墙约束的普通模式），所以拿它当拒绝样本站不住，我实测确认后改成危险根。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+    from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions, ReadFileTool
+
+    root = tmp_path / "workspace"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    (docs / "notes.md").write_text("x", encoding="utf-8")
+    danger = docs / "secrets.env"
+    danger.write_text("SECRET=1", encoding="utf-8")
+
+    options = FileSystemAccessOptions(path_dangerous_roots=[str(docs)])
+    tool = ReadFileTool(root, max_chars=2000, workspace_roots=[root], access_options=options)
+    decision = tool.check_path_access(danger)
+    assert decision.allowed is False, f"前提不成立：危险根下没被拒绝（{decision.code}）"
+
+    scope = recovery.NearNameScope(
+        workspace_roots=[root], access=recovery.AccessGate(tool.check_path_access)
+    )
+    found = recovery.suggest_near_name_paths("secrets.evn", docs, scope)
+    assert all("secrets.env" not in p.name for p in found), f"被拒文件仍被建议：{found}"

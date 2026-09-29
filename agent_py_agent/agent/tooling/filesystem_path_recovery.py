@@ -65,8 +65,9 @@ class MissingPathRequest:
     display_path: str
     expected_kind: str = "any"
     retry_tool: str = ""
-    # 工具的路径裁决（通常是 tool.check_path_access）。候选用它过审，规则与 resolve_path 一致。
-    decide_access: Callable[[Path], bool] | None = None
+    # 工具的路径裁决（通常是 tool.check_path_access）。返回 PathAccessDecision，AccessGate 读其
+    # .allowed —— 那个 dataclass 没有 __bool__，不能用 bool() 判断（2026-09-28 复审）。
+    decide_access: Callable[[Path], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,20 +81,26 @@ class CandidateQuery:
 class AccessGate:
     """把工具自己的路径裁决带进候选生成，让候选用和 resolve_path 完全一样的规则过审。
 
-    `decide` 接收一个「已经解析过」的路径，返回是否允许。为 None 时不额外拦截
-    （没有裁决能力的调用方仍然受 workspace_roots 约束）。
+    `decide` 通常是 `check_path_access`：接收一个「已经解析过」的路径，返回
+    `PathAccessDecision`。**必须读它的 `.allowed`**——那个 dataclass 没有定义 `__bool__`，
+    用 `bool(decision)` 会恒为真、闸门形同虚设（2026-09-28 复审实测确认）。
+
+    为 None 时不额外拦截（没有裁决能力的调用方仍受 workspace_roots 约束）。
     """
 
-    decide: Callable[[Path], bool] | None = None
+    decide: Callable[[Path], Any] | None = None
 
     def allows(self, path: Path) -> bool:
         if self.decide is None:
             return True
         try:
-            return bool(self.decide(path))
+            decision = self.decide(path)
         except Exception:
             # 裁决本身出错时按"不允许"处理：宁可少给建议，也不能因为异常泄露路径。
             return False
+        # 兼容两种返回：结构化裁决（读 .allowed）与直接返回布尔。
+        allowed = getattr(decision, "allowed", None)
+        return bool(allowed) if allowed is not None else bool(decision)
 
 
 # LLM: Groups the "where may I look, and how many may I return" inputs of near-name lookup so the
@@ -106,6 +113,18 @@ class NearNameScope:
     limit: int = _NEAR_NAME_MAX_SUGGESTIONS
     # 工具自己的路径裁决；每个候选都过一遍，跟 resolve_path 用同一条规则。
     access: AccessGate = field(default_factory=AccessGate)
+
+    def admits(self, entry: os.DirEntry) -> bool:
+        """目录条目能否作为候选：类型相符 + 解析后的目标通过路径裁决。
+
+        类型判断**跟随链接**：裁决看的是 resolve 之后的路径，所以指向工作区内部的合法链接
+        可以放行，指向墙外的链接会被策略拒掉（不论目标是否存在）——不会重新变成探测口
+        （2026-09-28 复审 B4）。
+        """
+        item = Path(entry.path)
+        if not _kind_matches(item, self.expected_kind, follow_symlinks=True):
+            return False
+        return self.access.allows(item.resolve(strict=False))
 
 
 @dataclass(frozen=True)
@@ -268,16 +287,14 @@ def _score_near_name_entries(
     requested = Path(parent, raw_name).resolve(strict=False)
     scored: list[tuple[int, str, Path]] = []
     for entry in entries:
-        if entry.name == raw_name or not _entry_kind_matches(entry, scope.expected_kind):
+        if entry.name == raw_name or not scope.admits(entry):
             continue
         distance = _edit_distance_within(raw_name.lower(), entry.name.lower(), _NEAR_NAME_DISTANCE_LIMIT)
         if distance is None:
             continue
         # 报告条目自身路径（仍在授权目录内）；不 resolve，避免暴露链接目标。
         candidate = Path(entry.path)
-        if candidate.resolve(strict=False) == requested and not entry.is_symlink():
-            continue
-        if not scope.access.allows(candidate.resolve(strict=False)):
+        if candidate.resolve(strict=False) == requested:
             continue
         scored.append((distance, entry.name.lower(), candidate))
     return scored
@@ -430,8 +447,9 @@ def _score_candidate(
     bonus: int = 0,
     access: AccessGate,
 ) -> None:
-    # 不 resolve：报告条目自身路径。resolve 会把符号链接目标（可能在别人家里）暴露出来。
-    if not _kind_matches(item, query.expected_kind, follow_symlinks=False):
+    # 类型判断跟随链接（裁决看的是 resolve 后的路径，B4），但**报告时用条目自身路径**：
+    # 把 resolve 结果写进候选会把别人家的绝对路径暴露出来。
+    if not _kind_matches(item, query.expected_kind, follow_symlinks=True):
         return
     score = _name_score(item.name, query.raw_name)
     if score <= 0:
