@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 
 import pytest
@@ -639,3 +640,72 @@ def test_failed_first_send_does_not_restore_entry_preparation(tmp_path, monkeypa
     assert marker == markers[0] and marker["status"] == "submitted"
     with subagent_first_request_scope(agent, child.id, marker["attempt_id"]) as preparation:
         assert preparation is None
+
+
+# LLM: 核查用例（不改产品）：能力配置在子请求读入口时读不了（路径成了目录 / 没有读权限）时，统一入口返回 None，
+#   prepare_subagent_package_entries 先经 subagent_entries_enabled 落到默认 CapabilityConfig()（选择开关默认关）直接返回，
+#   _prepare_entries 里的 config.capability_bundle_max_tokens 根本不会拿到 None；即便 TOCTOU 让它拿到 None，
+#   AttributeError 也被 prepare_subagent_package_entries 的 except Exception 接住记成 CAPABILITY_ENTRY_PREPARATION_UNAVAILABLE。
+# 函数用途: 锁定"能力配置读不了时子请求照常发出、不崩"的事实。
+@pytest.mark.parametrize("damage", ["directory", "unreadable", "toctou"])
+def test_child_request_survives_unreadable_capability_config(tmp_path, monkeypatch, damage):
+    from agent_py_agent.agent.capability import subagent_package_entries as entries_module
+    from agent_py_agent.agent.capability.runtime_config_reload import capability_config_for_agent
+    from agent_py_agent.agent.plugin_activation import PluginActivationRequest
+    from agent_py_agent.agent.plugin_content_activation import PluginContentActivation
+    from agent_py_agent.agent.plugin_installation import PluginInstallRequest
+    from agent_py_agent.agent.plugin_package import inspect_plugin_package
+    from agent_py_agent.tests.test_capability_package import content_bundle
+
+    agent, store, _ = _fixture(tmp_path)
+    body = "第一条方法。" * 300
+    package = inspect_plugin_package(content_bundle(files={"CAPABILITY.md": body.encode()},
+                                                    change=lambda row: row.update(plugin_id="short-entry")))
+    row = store.install(PluginInstallRequest(package, "short-install", 0)).installation
+    activation = PluginContentActivation("short-enable", "short-entry", row.package_sha256, row.revision, row.settings_revision)
+    store.change_activation(PluginActivationRequest("short-enable", row.revision, activation))
+    child = _child(agent, allowed=["capability:short-entry"])
+    path = agent.capability_config_path
+    reached = {"prepare_entries": 0}
+    if damage == "directory":
+        path.unlink()
+        path.mkdir()
+    elif damage == "unreadable":
+        if os.geteuid() == 0:
+            pytest.skip("root 不受读权限限制，读不了的情形无法构造")
+        path.chmod(0)
+    else:
+        # TOCTOU：开关检查那次读到了，只有 _prepare_entries 里那次读不到（返回 None）
+        import sys as _sys
+
+        real = entries_module.capability_config_for_agent
+
+        def flaky(target):
+            return None if _sys._getframe(1).f_code.co_name == "_prepare_entries" else real(target)
+
+        monkeypatch.setattr(entries_module, "capability_config_for_agent", flaky)
+    if damage != "toctou":
+        agent._capability_config_runtime_snapshot = None  # 丢掉创建时缓存的快照，逼子请求真的去读文件
+        assert capability_config_for_agent(agent) is None  # 前提：统一入口在这两种情况下返回 None
+    original_prepare = entries_module._prepare_entries
+
+    def counting_prepare(*args, **kwargs):
+        reached["prepare_entries"] += 1
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(entries_module, "_prepare_entries", counting_prepare)
+
+    seen, _ = _provider(agent, child, monkeypatch)
+    agent.run_subagent(child.id, dry_run=False, probe=False)  # 任何情况下都不能炸出 AttributeError
+
+    assert len(seen) == 1, "子请求照常发出"
+    texts = [part["text"] for message in seen[0]["messages"] for part in message["content"]
+             if isinstance(part, dict) and part.get("type") == "text"]
+    assert not [text for text in texts if text.startswith("[能力包入口参考]")], "读不了配置时不带入口正文"
+    if damage == "toctou":
+        assert reached["prepare_entries"] == 1
+        assert any("CAPABILITY_ENTRY_PREPARATION_UNAVAILABLE" in text for text in texts), "AttributeError 被接住并记成结构化提示"
+    else:
+        assert reached["prepare_entries"] == 0, "开关检查已按默认值（关）返回，根本没走到 _prepare_entries"
+    if damage == "unreadable":
+        path.chmod(0o600)
