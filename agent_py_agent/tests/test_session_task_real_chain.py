@@ -29,10 +29,11 @@ import pytest
 
 from agent_py_agent.agent.agent_core._tool_loop_service import PENDING_TURN_INPUT_INVALIDATION_LIMIT
 from agent_py_agent.agent.backends import gateway_helpers, http
+from agent_py_agent.agent.concurrency.interrupt import is_interruptible_registered
 from agent_py_agent.agent.conversation import FakeDeliveryService
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts import request_context, request_execution
+from agent_py_agent.agent.gateway_parts import control_service, request_context, request_execution
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.recovery import terminalize_gateway_request_file
 from agent_py_agent.agent.settings import AgentConfig
@@ -123,6 +124,7 @@ class ScriptedWire:
         self.holding: dict[str, threading.Event] = {}
         self.releases: dict[str, threading.Event] = {}
         self.interrupted: list[str] = []
+        self.ignored_stops: list[str] = []
         self._per_turn: dict[str, int] = {}
 
     # 函数用途: 替换 backends.http.post_json；探测请求照实回答，其余交给脚本并记账。
@@ -150,8 +152,9 @@ class ScriptedWire:
         entry["kind"] = kind
         return self._reply(payload, text, call)
 
-    # 函数用途: 测试者控制的挂起点：先登记与真实传输相同的停止回调，被打断时像断开的连接一样抛出。
-    def hold(self, name: str) -> None:
+    # 函数用途: 测试者控制的挂起点：先登记与真实传输相同的停止回调，被打断时像断开的连接一样抛出；
+    #   honor_stop=False 模拟不响应停止的后端：停止照样送到这次调用，但它只记一笔、继续等放行，放行后正常返回。
+    def hold(self, name: str, *, honor_stop: bool = True) -> None:
         release = self.releases.setdefault(name, threading.Event())
         self.holding.setdefault(name, threading.Event()).set()
         woken = threading.Event()
@@ -159,8 +162,12 @@ class ScriptedWire:
         with gateway_helpers._provider_interrupt_callback(woken.set):
             while not release.is_set():
                 if gateway_helpers._provider_is_interrupted():
-                    self.interrupted.append(name)
-                    raise InterruptedError("模型接口请求已被用户停止")
+                    if honor_stop:
+                        self.interrupted.append(name)
+                        raise InterruptedError("模型接口请求已被用户停止")
+                    if name not in self.ignored_stops:
+                        self.ignored_stops.append(name)
+                    woken.clear()
                 if time.time() > deadline:
                     raise TimeoutError(f"测试挂起点 {name} 超过 {_HOLD_SECONDS} 秒没有放行")
                 woken.wait(0.05)
@@ -253,6 +260,9 @@ class ScriptedWire:
             if "list_files" not in turn.results:
                 return "task-hold-list", None, ("list_files", {"path": "."})
             self.hold("task")
+            return "task-hold-released", _HELD_FINAL, None
+        if marker.startswith("RC-GOAL-HOLD-IGNORES-STOP"):
+            self.hold("task", honor_stop=False)
             return "task-hold-released", _HELD_FINAL, None
         if marker.startswith("RC-GOAL-DONE"):
             return "task-done", "RC-TASK-DONE 任务完成。", None
@@ -506,8 +516,60 @@ def test_busy_target_consumes_message_without_an_extra_empty_turn(tmp_path, monk
 def test_cancel_stops_the_bound_task_turn_during_a_model_call(tmp_path, monkeypatch, window) -> None:
     """绑定后、模型调用进行中取消：停止确认、目标回合停下且不再交付输出、控制记录可查、任务保持 cancelled。"""
     chain = _real_chain(tmp_path, monkeypatch)
-    chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-{window} 耗时较长的任务。")
-    task = chain.task(f"RC-GOAL-{window}")
+    stop, final, delivered = _cancel_bound_task_during_hold(chain, f"RC-GOAL-{window}")
+    # 回合是否真停下只看"放行后的答复有没有被交付"：打断在途调用、或调用返回后丢弃答复，两种停法都成立。
+    assert stop.get("stop_confirmed") is True, f"停止控制没有确认：{stop}"
+    assert delivered == [], "目标回合被取消后仍交付了放行后的答复"
+    assert final.status == "cancelled" and not final.summary, final
+    assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后目标的唤醒没有结案"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="场景 5 未修：取消找不到后台派活回合，stop_confirmed=false（取消修复并入后转正）；"
+                          "这一窗的后端不响应停止，放行后的迟到结果要由模型调用等待关卡丢弃")
+def test_cancel_discards_the_reply_when_the_backend_ignores_the_stop(tmp_path, monkeypatch) -> None:
+    """后端不响应停止：停止送到了在途调用但被忽略，放行后模型照常返回答复；这一片仍不得交付，任务保持 cancelled。
+
+    542139f95 上实测挡住它的是调用方线程等模型结果时的中断检查（tool_model_generation._wait_for_generation_result），
+    交付前的持久检查在它之后，由下面"停止旗丢失"那一窗单独覆盖。
+    """
+    chain = _real_chain(tmp_path, monkeypatch)
+    stop, final, delivered = _cancel_bound_task_during_hold(chain, "RC-GOAL-HOLD-IGNORES-STOP")
+    assert stop.get("stop_confirmed") is True, f"停止控制没有确认：{stop}"
+    assert chain.wire.ignored_stops == ["task"], "前提不成立：停止应当送到在途调用并被它忽略"
+    assert delivered == [], "后端忽略停止、放行后返回的答复仍被交付了"
+    assert final.status == "cancelled" and not final.summary, final
+    assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后唤醒没有结案"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="场景 5 未修：取消找不到后台派活回合，stop_confirmed=false（取消修复并入后转正）；"
+                          "停止旗丢失时只剩交付前按任务已取消的持久检查挡住交付")
+def test_cancel_discards_the_reply_when_the_stop_flag_is_lost(tmp_path, monkeypatch) -> None:
+    """故障注入：停止控制确认了，目标线程的停止旗却丢了，放行后模型照常返回；交付前必须按任务已取消的持久事实丢弃答复。"""
+    real_interrupt_by_name = control_service.interrupt_by_name
+
+    # 函数用途: 派活片的停止只核对名字确实登记在跑、照常回报确认，但不立旗，模拟"确认了、旗子却丢了"；其它名字照旧。
+    def confirm_without_flag(name: str) -> bool:
+        if name.startswith("session-task-turn:"):
+            return is_interruptible_registered(name)
+        return real_interrupt_by_name(name)
+
+    monkeypatch.setattr(control_service, "interrupt_by_name", confirm_without_flag)
+    chain = _real_chain(tmp_path, monkeypatch)
+    stop, final, delivered = _cancel_bound_task_during_hold(chain, "RC-GOAL-HOLD-FIRST")
+    assert stop.get("stop_confirmed") is True, f"停止控制没有确认：{stop}"
+    assert (chain.wire.interrupted, chain.wire.ignored_stops) == ([], []), "前提不成立：在途调用不该收到停止"
+    assert delivered == [], "停止旗丢失时，放行后返回的答复仍被交付了（交付前的持久检查没有生效）"
+    assert final.status == "cancelled" and not final.summary, final
+    assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后唤醒没有结案"
+
+
+# 函数用途: 取消场景的共用流程：A 派活给 B，B 的派活回合挂在模型调用里时 A 取消，放行后等后台排空、唤醒结案；
+#   返回这次取消的工具输出、任务终态和 B 交付出的挂起答复。
+def _cancel_bound_task_during_hold(chain: RealChain, goal: str) -> tuple[dict, object, list[str]]:
+    chain.ask("A", f"RC-DISPATCH {chain.threads['B']} {goal} 耗时较长的任务。")
+    task = chain.task(goal)
     worker, errors = chain.drain_in_background()
     _require(chain.wire.wait_holding("task"), "B 的派活回合没有进入模型调用")
     bound = chain.agent.conversation_store.session_tasks.load(task.task_id)
@@ -532,11 +594,7 @@ def test_cancel_stops_the_bound_task_turn_during_a_model_call(tmp_path, monkeypa
     _require(cancels, "工具操作账本里没有这次取消的记录")
     final = chain.agent.conversation_store.session_tasks.load(task.task_id)
     delivered = [text for text in chain.assistant_texts("B") if "RC-HOLD-FINAL" in text]
-    # 回合是否真停下只看"放行后的答复有没有被交付"：打断在途调用、或调用返回后丢弃答复，两种停法都成立。
-    assert cancels[-1].get("stop_confirmed") is True, f"停止控制没有确认：{cancels[-1]}"
-    assert delivered == [], "目标回合被取消后仍交付了放行后的答复"
-    assert final.status == "cancelled" and not final.summary, final
-    assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后目标的唤醒没有结案"
+    return cancels[-1], final, delivered
 
 
 def test_task_turn_does_not_spin_on_another_tasks_pending_report(tmp_path, monkeypatch) -> None:

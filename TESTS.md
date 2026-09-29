@@ -36,6 +36,8 @@
 
 ## 会话互通真实链路门禁：修掉取消用例的收尾竞态（2026-09-29，分支 `claude/ae-real-chain-cancel-window`，基于 `130dee0ac`，只改测试）
 
+## 会话互通真实链路门禁：修掉取消用例的收尾竞态，补“后端不响应停止”“停止旗丢失”两窗（2026-09-29，分支 `claude/ae-real-chain-cancel-window`，基于 `130dee0ac`，只改测试）
+
 - **起因**：在取消修复 `542139f95` 上，两条 HOLD 取消用例时过时不过。
   - 量化（证据：`~/.my-agent/decision-evidence/session-task-chain-e2e/flaky-542139f95/`）：原样导出 80 次，HOLD-AFTER-TOOL 失败 1 次，HOLD-FIRST 0 次。
   - 唯一挂住的断言是"取消后目标的唤醒没有结案"，残留的是发给 A 的取消通知唤醒。
@@ -51,6 +53,20 @@
 
   同样的延迟下，修法 5/5 通过。
 - **main 上的表现不变**：两条取消用例仍按 strict xfail 挂在 `stop_confirmed`（`--runxfail` 可以确认），新断言和补排空在 main 上都通过。
+- **新增两窗（第二个提交）**：两窗都复用同一套取消流程（`_cancel_bound_task_during_hold`），两条原取消用例也改用它。
+  - `test_cancel_discards_the_reply_when_the_backend_ignores_the_stop`：
+    - 场景：挂起点忽略停止（`hold(honor_stop=False)`），放行后照常返回答复；断言停止确实送到了在途调用并被忽略、没有交付、任务 cancelled、唤醒结案。
+    - 在叠加 542139f95 的导出上，挡住它的是调用方线程等模型结果时的中断检查（`tool_model_generation._wait_for_generation_result`）。
+  - `test_cancel_discards_the_reply_when_the_stop_flag_is_lost`：
+    - 场景（故障注入）：停止控制照常回报确认，但不给目标线程立旗；在途调用没被打断，放行后正常返回。
+    - 只有交付前按任务已取消的持久检查（`_session_task_turn_was_cancelled`）能挡住交付。
+  - 两窗在 main 上都按 strict xfail 挂在 `stop_confirmed`。
+  - 叠加 542139f95 后都转正：strict xfail 报 XPASS，`--runxfail` 下真实通过。
+  - 叠加导出上的变异结果：
+    - 去掉持久检查：只有“停止旗丢失”一窗失败。
+    - 去掉等待关卡、持久检查和 post-run_once 二次检查三者：“不响应停止”仍通过，旗在时还有既有防线。
+    - 只去掉 post-run_once 二次检查：四窗全过。它在答复落账之后，构造不出它是唯一防线的场景，所以不另加用例。
+    - 停止永不确认：四窗全部失败。
 
 ## 旧显示快照的决策失败不再显示成“未发出”（2026-09-28，分支 `claude/be-legacy-unknown`，基于 `c101d325a`）
 
