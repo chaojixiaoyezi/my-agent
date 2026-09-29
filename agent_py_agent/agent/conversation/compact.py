@@ -170,6 +170,8 @@ class ConversationContextUsage:
     terminal_tool_fold_calls: int
     pending_messages: int
     has_summary: bool
+    # 触发线被 memory_compact_auto_trigger_max_tokens 压下来时为 True（取自 RuntimeCompactPolicy.trigger_capped）。
+    trigger_capped: bool = False
 
 
 # LLM: 内部宿主复用原来源/projector/摘要面；tool_source只用于有完整投影的联合候选，不从JSON获取回调或权限。
@@ -654,12 +656,14 @@ def inspect_conversation_context(
         ),
         pending_messages=len(pending),
         has_summary=bool(summary.strip()),
+        trigger_capped=policy.trigger_capped,
     )
 
 
 # LLM: Render only the structured usage snapshot; wording cannot become a trigger or compact
 # authority. Terminal folds must remain visibly distinct from true Compact generations.
 # Token counts remain explicitly estimated because providers may tokenize differently.
+# 触发线被绝对上限封顶时改说“N tokens 触发（绝对上限封顶）”，免得“90%（30 万）”自相矛盾。
 # 函数用途: 把 `/context` 的真实估算、触发线、压缩历史和普通回合工具折叠分栏展示。
 def render_conversation_context_usage(
     usage: ConversationContextUsage,
@@ -686,10 +690,12 @@ def render_conversation_context_usage(
             if remaining == 0
             else f"距触发线约 {remaining:,} tokens"
         )
-        lines.append(
-            f"自动 compact：开启，{usage.trigger_percent}% "
-            f"（{usage.trigger_tokens:,} tokens）触发；{trigger_note}"
+        rule = (
+            f"{usage.trigger_tokens:,} tokens 触发（绝对上限封顶，比 {usage.trigger_percent}% 更早）"
+            if usage.trigger_capped
+            else f"{usage.trigger_percent}% （{usage.trigger_tokens:,} tokens）触发"
         )
+        lines.append(f"自动 compact：开启，{rule}；{trigger_note}")
     else:
         lines.append("自动 compact：缺少可用的模型窗口，当前无法计算触发线")
     generation = (

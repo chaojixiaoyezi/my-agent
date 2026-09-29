@@ -866,6 +866,7 @@ agent_py_agent/
 |   |-- test_task_run_settle_quiescent_children.py # TaskRun 收口：静止但未终态的子 run（attempt 终态且无锁）不再拦住父 TaskRun，closed 带证据、reopened 可逆、发现扫描能关存量
 |   |-- _postgres_test_schema.py       # 测试专用：每个 pytest 进程一个 PostgreSQL schema（URL options 设 search_path），并行分片不互删表
 |   |-- test_compact_calibrated_candidate_gate.py # 候选接受门按预检校准口径：纯函数、宿主冻结、两条门、触发来源、两回合假LLM复现
+|   |-- test_compact_trigger_cap.py # 触发线绝对上限：0/非法不变、封顶后触发线/尾部/recovery、配置解析、请求前预检、后台定时回合先压缩、finalization token 触发线、/context 说明
 |   |-- test_compact_retained_history.py # 三宿主完整保留行、媒体/工具回放和超容量不丢来源
 |   |-- test_conversation_history_seed.py # 具体种子与只读来源两边界逐项等价、冻结时刻与追加、互斥及改写/截短/替换/删除失败
 |   |-- test_host_history_seed_lifetime.py # 三宿主4.2M字符种子准备只驻留地址、解析后完整hash不变

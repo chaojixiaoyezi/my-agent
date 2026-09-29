@@ -125,6 +125,10 @@ Curator 决策输入（`memory_store/decision_curator.py`）的候选释义只�
 `memory_archive/compact_circuit_breaker.py` 定义；`agent_core/runtime/context_compactor.py` 组装压缩策略时导入它们。
 `record_compact_outcome` 标记熔断打开时用的就是这个默认阈值，两边同源才不会出现“判断用 5、打开标记用 3”的错位。
 
+## 自动压缩触发线的绝对上限
+
+触发线只在 `agent_core/runtime/context_compactor.runtime_compact_policy` 算一次：窗口 × `memory_compact_auto_trigger_percent`，`memory_compact_auto_trigger_max_tokens` 大于 0 时再与它取小（`compact_trigger_max_tokens` 规范化，非法与负数按 0）。`RuntimeCompactPolicy.trigger_max_tokens` 记规范化后的上限，`trigger_capped` 表示触发线正好等于上限。近期尾部与 recovery 目标都从封顶后的触发线推出。模型请求前预检、工具循环中途与即时压缩、活动回合压缩、会话压缩都直接用 `trigger_tokens`；finalization 的旧归档周期经 `MemoryCompactAutoCycleOptions.trigger_tokens` → `MemoryCompactSuggestOptions.trigger_tokens` 拿到同一条线（只在 `trigger_capped` 时传，否则为 0、按百分比判断）。
+
 ## 子代理任务工作区的路径与物化边界
 
 `task_workspace/__init__.py::_task_workspace_path_inputs` 统一计算原 root/run/task 身份；

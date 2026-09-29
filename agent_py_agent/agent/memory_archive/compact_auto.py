@@ -1,3 +1,6 @@
+# LLM: 自动 compact/resume 周期的协调器：建议→熔断→apply→resume 的顺序不变；触发判定交给 compact_suggest，
+#   trigger_tokens 只原样透传（runtime 封顶时才非 0），这里不另算触发线。
+# 模块用途: 安全地串起一次自动 compact 周期，供 runtime 的 finalization 自动压缩调用。
 from __future__ import annotations
 
 from ..contracts.protocol_status import COMPACT_STATUS_READY_AFTER_ACTION_GUARD
@@ -25,6 +28,8 @@ from .schema import (
 COMPACT_AUTO_CYCLE_SCHEMA = RuntimeMemorySchemaOptions("compact_auto_cycle")
 
 
+# LLM: trigger_percent 与 trigger_tokens 原样交给 compact_suggest；trigger_tokens 为 0 时按百分比判断（原行为）。
+# 类用途: 一次自动 compact 周期的输入。
 @dataclass(frozen=True)
 class MemoryCompactAutoCycleOptions:
     current_tokens: int
@@ -32,6 +37,8 @@ class MemoryCompactAutoCycleOptions:
     plan_options: MemoryCompactPlanOptions
     # 与 AgentConfig / 包内 YAML 的正式默认保持一致；50 仅由压力测试显式覆盖。
     trigger_percent: int = 90
+    # runtime_compact_policy 封顶后的 token 触发线；0 表示按 trigger_percent 判断。
+    trigger_tokens: int = 0
     allow_apply: bool = False
     owner_type: str = "main_agent"
     owner_id: str = ""
@@ -86,6 +93,8 @@ def _compact_now() -> float:
     return time.time()
 
 
+# LLM: 只把周期输入翻成建议输入，触发线相关字段原样透传。
+# 函数用途: 为本次自动周期生成 compact 建议。
 def _suggestion(workspace: Path, options: MemoryCompactAutoCycleOptions) -> dict[str, Any]:
     return build_memory_compact_suggestion(
         workspace,
@@ -94,6 +103,7 @@ def _suggestion(workspace: Path, options: MemoryCompactAutoCycleOptions) -> dict
             max_context_tokens=options.max_context_tokens,
             plan_options=options.plan_options,
             trigger_percent=options.trigger_percent,
+            trigger_tokens=options.trigger_tokens,
             owner_type=options.owner_type,
             owner_id=options.owner_id,
             trigger_reason=options.trigger_reason,

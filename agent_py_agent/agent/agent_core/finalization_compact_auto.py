@@ -1,3 +1,6 @@
+# LLM: 非会话线程接管的运行在收尾时走旧归档 compact/resume 周期；触发线与窗口一律取 runtime_compact_policy，
+#   触发线被绝对上限封顶时把 token 触发线交给周期判断，不在这里另算阈值。
+# 模块用途: runtime 收尾阶段的自动 compact 周期与自动续跑判定。
 from __future__ import annotations
 
 from ..contracts.protocol_status import COMPACT_STATUS_READY_AFTER_ACTION_GUARD
@@ -26,6 +29,9 @@ _MAX_CONSECUTIVE_NO_TOOL_PREFLIGHT_CONTINUATIONS = 3
 _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH = 50
 
 
+# LLM: 触发判断用 runtime_compact_policy 的同一条触发线：封顶时传 trigger_tokens，否则按 trigger_percent；会话线程接管、
+#   任务已完成或续跑深度到顶时提前返回。副作用：可能执行 compact apply/resume（写归档与恢复包）。
+# 函数用途: 在一次 runtime 收尾时决定是否跑自动 compact 周期，并给出续跑字段。
 def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
     if conversation_task_completed(ctx.task_attributes):
         return _compact_auto_turn_complete_fields()
@@ -52,6 +58,8 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
             current_tokens=int(token_ledger.get("active", token_ledger["turn"])),
             max_context_tokens=policy.context_window_tokens,
             trigger_percent=policy.trigger_percent,
+            # 触发线被绝对上限压下来时改按 token 判断；不封顶时仍按百分比，原行为不变。
+            trigger_tokens=policy.trigger_tokens if policy.trigger_capped else 0,
             plan_options=MemoryCompactPlanOptions(
                 session_id=getattr(agent, "session_id", agent.config.agent_name),
                 request_id=ctx.request_id or request_id,

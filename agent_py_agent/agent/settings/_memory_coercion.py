@@ -65,6 +65,8 @@ _FIELDS = (
     _FieldSpec("memory_rule_auto_read_limit", "int", 0, None),
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
+    # 0 表示不封顶；负数、非整数回到默认 0，与 runtime 的 compact_trigger_max_tokens 同一口径。
+    _FieldSpec("memory_compact_auto_trigger_max_tokens", "int", 0, None),
     _FieldSpec("memory_compact_recovery_target_percent", "compact_recovery_percent"),
     _FieldSpec("memory_curator_enabled", "bool"),
     _FieldSpec(

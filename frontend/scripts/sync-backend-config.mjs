@@ -46,8 +46,15 @@ const choiceMap = {
   capability_level: ["L0", "L1", "L2", "L3", "L4", "L5"],
 };
 
+// 按键名给出的明确取值范围，优先于 rangeForField 的名字猜测：后端没有上限、名字又会被猜成 [0, 200000] 的数字键放这里。
+// 压缩触发线的绝对上限要能填到 1M 以上窗口里的几十万（后端只要求 >= 0，0 表示不封顶）。
+const rangeMap = {
+  memory_compact_auto_trigger_max_tokens: [0, 10_000_000],
+};
+
 const unitMap = {
   max_tokens: "tokens",
+  memory_compact_auto_trigger_max_tokens: "tokens",
   request_timeout: "秒",
   tool_http_timeout: "秒",
   tool_shell_timeout: "秒",
@@ -284,6 +291,7 @@ function riskForField(key, category, type) {
 }
 
 function rangeForField(key) {
+  if (rangeMap[key]) return rangeMap[key];
   if (key.includes("port")) return [0, 65535];
   if (key.includes("temperature")) return [0, 2];
   if (key.includes("timeout") || key.endsWith("_seconds")) return [0, 3600];

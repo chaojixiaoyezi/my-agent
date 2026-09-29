@@ -34,11 +34,22 @@ class RuntimeCompactPolicy:
     recent_tail_tokens: int
     failure_threshold: int
     failure_cooldown_seconds: float
+    # memory_compact_auto_trigger_max_tokens 规范化后的绝对上限；0 表示不封顶。trigger_tokens 已按它取小。
+    trigger_max_tokens: int = 0
+
+    # LLM: 只由结构化字段推出：上限开启且触发线正好等于上限（窗口 × 百分比不低于上限）。finalization 的百分比判定与
+    #   /context 展示据此改用 token 触发线；不开上限时恒为 False，原有行为不变。
+    # 函数用途: 判断这次的触发线是不是被绝对上限压下来的。
+    @property
+    def trigger_capped(self) -> bool:
+        return 0 < self.trigger_max_tokens == self.trigger_tokens
 
 
 # LLM: Resolve every durable compact limit from the model/config snapshot once per invocation.
 # Transcript authority may permit a canonical Compact even when save=False only suppresses the
 # legacy memory/final-response write path; auxiliary no-save calls still remain non-persistent.
+# 触发线 = 窗口 × 百分比；memory_compact_auto_trigger_max_tokens 大于 0 时再与它取小（1M 窗口的长期后台线程靠它把压缩提前），
+# 近期尾部与 recovery 目标都从封顶后的触发线推出。所有自动压缩入口只读这里，不要在调用方另算一条触发线。
 # 函数用途: 为主代理或子代理生成同一口径的压缩策略；会话权威回合即使由别处负责保存回复，也能提交真实压缩。
 def runtime_compact_policy(
     agent: object,
@@ -48,15 +59,11 @@ def runtime_compact_policy(
     task_attributes: object = None,
 ) -> RuntimeCompactPolicy:
     window = resolve_model_context_window_tokens(agent)
-    percent = compact_trigger_percent(getattr(getattr(agent, "config", None), "memory_compact_auto_trigger_percent", None))
-    recovery_percent = compact_recovery_target_percent(
-        getattr(
-            getattr(agent, "config", None),
-            "memory_compact_recovery_target_percent",
-            None,
-        )
-    )
-    trigger_tokens = compact_trigger_tokens(window, percent)
+    config = getattr(agent, "config", None)
+    percent = compact_trigger_percent(getattr(config, "memory_compact_auto_trigger_percent", None))
+    recovery_percent = compact_recovery_target_percent(getattr(config, "memory_compact_recovery_target_percent", None))
+    trigger_max_tokens = compact_trigger_max_tokens(getattr(config, "memory_compact_auto_trigger_max_tokens", None))
+    trigger_tokens = _capped_trigger_tokens(window, percent, trigger_max_tokens)
     recent_tail_tokens = min(
         DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP,
         max(
@@ -82,7 +89,30 @@ def runtime_compact_policy(
         recent_tail_tokens=recent_tail_tokens,
         failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD,
         failure_cooldown_seconds=DEFAULT_COMPACT_COOLDOWN_SECONDS,
+        trigger_max_tokens=trigger_max_tokens,
     )
+
+
+# LLM: 触发线 = 窗口 × 百分比；上限大于 0 时再与它取小。窗口未知（触发线为 0）时不因上限凭空造出触发线。
+# 函数用途: 按窗口、百分比和绝对上限算出自动压缩触发线。
+def _capped_trigger_tokens(window: int, percent: int, trigger_max_tokens: int) -> int:
+    trigger_tokens = compact_trigger_tokens(window, percent)
+    if trigger_max_tokens > 0 and trigger_tokens > 0:
+        return min(trigger_tokens, trigger_max_tokens)
+    return trigger_tokens
+
+
+# LLM: 与配置解析（_memory_coercion 的 int 字段，下限 0、无上限）同一口径：非整数、布尔、负数都按 0（不封顶）；
+#   runtime_compact_policy 只在结果大于 0 时对触发线取小，所以前台、后台和 finalization 自动压缩共用这一处。
+# 函数用途: 规范化自动压缩触发线的绝对 token 上限；0 表示不封顶。
+def compact_trigger_max_tokens(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
 
 
 def compact_trigger_percent(value: object) -> int:
@@ -156,6 +186,7 @@ __all__ = [
     "RuntimeCompactPolicy",
     "compact_recovery_target_percent",
     "compact_recovery_target_tokens",
+    "compact_trigger_max_tokens",
     "compact_trigger_percent",
     "compact_trigger_tokens",
     "runtime_compact_policy",

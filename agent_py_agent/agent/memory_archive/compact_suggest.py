@@ -1,3 +1,6 @@
+# LLM: compact 建议的状态只由结构化 token 事实决定：trigger_tokens>0 时按“当前 token ≥ 触发线”，否则按占窗口的百分比；
+#   runtime 的 finalization 自动压缩在触发线被绝对上限封顶时才传 trigger_tokens，其余调用方不传，行为不变。
+# 模块用途: 生成半自动 compact 建议（该不该压、范围与风险），供 finalization 自动压缩周期和手动建议复用。
 from __future__ import annotations
 
 """semi-automatic compact suggestion helpers."""
@@ -15,6 +18,9 @@ from .schema import (
 COMPACT_SUGGESTION_SCHEMA = RuntimeMemorySchemaOptions("compact_suggestion")
 
 
+# LLM: trigger_tokens 为 0 时按 trigger_percent（规范到 50-100）判断；大于 0 时直接按 token 触发线判断，承接
+#   runtime_compact_policy 的绝对上限（百分比最低 50%，表达不了 1M 窗口下的 30 万）。
+# 类用途: 一次 compact 建议的输入。
 @dataclass(frozen=True)
 class MemoryCompactSuggestOptions:
     current_tokens: int
@@ -22,6 +28,8 @@ class MemoryCompactSuggestOptions:
     plan_options: MemoryCompactPlanOptions
     # 独立 suggestion 调用也必须复用正式 90% 默认，避免旁路重新漂回旧值。
     trigger_percent: int = 90
+    # runtime_compact_policy 封顶后的 token 触发线；0 表示按 trigger_percent 判断。
+    trigger_tokens: int = 0
     owner_type: str = "main_agent"
     owner_id: str = ""
     #  trigger 字段只记录触发来源；正常阈值和强制触发仍走同一个 compact suggestion。
@@ -30,16 +38,16 @@ class MemoryCompactSuggestOptions:
     force_trigger: bool = False
 
 
+# LLM: 只读计划与 token 事实，不写任何文件；状态判定见 _suggestion_status。
+# 函数用途: 生成一次 compact 建议载荷。
 def build_memory_compact_suggestion(
     root: str | Path, options: MemoryCompactSuggestOptions
 ) -> dict[str, Any]:
     workspace = Path(root)
     plan = build_memory_compact_plan(workspace, options.plan_options)
     ratio = _ratio(options.current_tokens, options.max_context_tokens)
-    trigger_ratio = _trigger_ratio(options.trigger_percent)
-    status = _suggestion_status(
-        ratio, trigger_ratio=trigger_ratio, force_trigger=options.force_trigger
-    )
+    trigger_ratio = _effective_trigger_ratio(options)
+    status = _suggestion_status(options, ratio)
     should_prompt = options.force_trigger or status == "ready_to_compact"
     trigger = _trigger_payload(options)
     return {
@@ -62,12 +70,17 @@ def build_memory_compact_suggestion(
     }
 
 
-def _suggestion_status(ratio: float, *, trigger_ratio: float, force_trigger: bool = False) -> str:
-    if force_trigger:
+# LLM: 强制触发优先；否则 trigger_tokens>0 时按 current_tokens ≥ trigger_tokens，不然按占窗口比例 ≥ 规范后的触发比例。
+# 函数用途: 判断这次 compact 建议的状态（ok / ready_to_compact / forced_compact）。
+def _suggestion_status(options: MemoryCompactSuggestOptions, ratio: float) -> str:
+    if options.force_trigger:
         return "forced_compact"
-    if ratio >= trigger_ratio:
-        return "ready_to_compact"
-    return "ok"
+    trigger_tokens = max(0, int(options.trigger_tokens or 0))
+    if trigger_tokens:
+        reached = int(options.current_tokens) >= trigger_tokens
+    else:
+        reached = ratio >= _trigger_ratio(options.trigger_percent)
+    return "ready_to_compact" if reached else "ok"
 
 
 def _recommended_commands(plan: dict[str, Any], should_prompt: bool) -> list[str]:
@@ -87,6 +100,16 @@ def _scope_flags(scope: dict[str, Any]) -> str:
         if value := scope.get(key):
             flags.append(f"--{key.replace('_', '-')} {value}")
     return " " + " ".join(flags) if flags else ""
+
+
+# LLM: 只用于建议消息的文字：有 token 触发线时按它占窗口的比例描述（封顶后的真实触发点），否则按规范后的百分比；
+#   是否触发由 _suggestion_status 直接比 token，不经过这里的浮点比例。
+# 函数用途: 算出这次建议实际使用的触发比例，供消息展示。
+def _effective_trigger_ratio(options: MemoryCompactSuggestOptions) -> float:
+    trigger_tokens = max(0, int(options.trigger_tokens or 0))
+    if trigger_tokens and options.max_context_tokens > 0:
+        return trigger_tokens / options.max_context_tokens
+    return _trigger_ratio(options.trigger_percent)
 
 
 def _message(status: str, ratio: float, trigger_ratio: float) -> str:

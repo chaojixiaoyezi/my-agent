@@ -27,6 +27,40 @@
   - 另两条失败是探针合并带来的：旧假线路没有 `notes` 字段、xfail 标记被带回。
   - 细节与设计待定项见 DESIGN_LEDGER「目标回合在消费前被停止」。
 
+## 压缩触发线的绝对上限（2026-09-29，分支 `claude/be-compact-trigger-cap`，基于 `89af6b07a`）
+
+- **新增** `test_compact_trigger_cap.py`（17 项）：
+  - 上限为 0 或非法值（None、"abc"、负数、布尔、空串、小数）时策略与之前完全一样；
+  - 上限低于窗口 × 百分比时，触发线 = 上限，近期尾部与 recovery 跟着封顶后的触发线，且 recovery ≤ 触发线：
+    - 上限 30 万：尾部 2 万，recovery 28 万；
+    - 上限 10 万：尾部 1 万，recovery 9 万；
+  - 上限高于窗口 × 百分比时不变；
+  - 配置解析：合法值原样生效；"abc"、-1、True 回到 0 并告警；
+  - 模型请求前预检：上限 30 万时 299,999 不触发、300,000 触发（`compact_threshold=300000`）；不封顶时 300,000 不触发；
+  - 后台定时回合（`reason=scheduled_progress_report`）：1M 窗口下，只有封顶到 17,550 时首个请求前先压缩（generation 1，业务请求在压缩之后发出）；不封顶的对照组不压缩；
+  - finalization：
+    - 建议按 token 触发线判断，消息写实际比例（30%）；
+    - 自动周期把 token 触发线透传给建议；
+    - finalization 只在触发线被封顶时传；
+  - `/context`：用量快照带出封顶标记，显示“绝对上限封顶”。
+- **变异**：13 个全部被抓住，只把“rc=1 且有 FAILED 用例”算作抓住。除 3a 点名的“去掉取小”“recovery 不跟随封顶”，还覆盖：
+  - 尾部不跟随封顶；
+  - 封顶判定放宽；
+  - 规范化丢掉上限；
+  - finalization 总传或总不传；
+  - 周期丢透传；
+  - token 判定边界；
+  - 消息比例；
+  - `/context` 两处；
+  - 配置规范化表漏登记。
+- **定向回归**：引用压缩策略、finalization、会话压缩显示、memory 配置、参数中心和上下文压力的 67 个文件，加 9 个全仓守卫，共 74 个文件。
+  - 结果：1733 passed，20 xfailed。另有 1 个 XPASS（`test_timeout_budget_locked.py::test_native_protocol_unified_counts_ir`，非严格 xfail，在 `89af6b07a` 上同样 XPASS，与本改动无关）。
+  - 新测试文件另跑，17 passed。
+- **其它门禁**：
+  - 前端目录用 `node frontend/scripts/sync-backend-config.mjs` 重新生成，`--check` 报 in sync（267 fields）。
+  - strict code-size 与 `89af6b07a` 逐条比对新增 0。`runtime_compact_policy` 一度逼近软上限，已抽出 `_capped_trigger_tokens` 并合并配置读取。
+  - ruff、doc sync、diff check、clean package 通过。
+
 ## 后台进程与终端会话原因码：ae 复审建议 2–5（2026-09-29，分支 `claude/75-process-codes-followups`，基于 `e850ceb04`）
 
 - **建议 2**：`terminal_session` 关闭未确认时，终止回执结构化放进 `result_envelope.process.termination`（与后台进程停止未确认同一形状）；
