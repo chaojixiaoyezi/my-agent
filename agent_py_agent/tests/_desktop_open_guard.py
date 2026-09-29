@@ -1,8 +1,10 @@
 """测试会话的桌面程序防线：任何测试都不能真的打开用户的浏览器、文件、通知或剪贴板。
 
 conftest 在会话开始时把 shim 目录放到 PATH 最前面。shim 同名替换 open、xdg-open、osascript、pbcopy 等程序，
-只记录一行（令牌打码），不执行任何动作。每条测试结束时检查自己期间新增的记录，有就让该测试失败；
-测试之外（后台进程晚到）的记录在会话结束时统一报出并让会话失败。
+只记录一行（令牌打码），不执行任何动作。每条测试完整收尾之后（测试的 monkeypatch 已撤销）检查它期间新增的记录，
+有就让该测试报错；测试之外（后台进程晚到）的记录在会话结束时统一报出并让会话失败。
+防线自己读写记录文件只用导入时抓好的 os 底层函数：测试常在类级别替换 pathlib.Path.read_text/open、builtins.open
+或模块级 os 函数来当 IO 哨兵、伪造文件内容，防线若走这些接口，会被哨兵当成违规或读到伪造的记录。
 确实需要真实程序的测试必须显式加 `real_desktop_programs` marker，这时该测试的 PATH 去掉 shim、Python 内的
 webbrowser 恢复原实现，期间的记录不算违规。
 """
@@ -15,6 +17,12 @@ import stat
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# 导入时抓好的底层读写函数与常量；测试把 os 模块上的同名属性换掉也影响不到这些引用。
+_OS_OPEN, _OS_READ, _OS_WRITE, _OS_CLOSE = os.open, os.read, os.write, os.close
+_OS_FSTAT, _OS_LSEEK, _OS_GETPID = os.fstat, os.lseek, os.getpid
+_O_RDONLY, _O_APPEND_FLAGS, _SEEK_SET = os.O_RDONLY, os.O_WRONLY | os.O_APPEND | os.O_CREAT, os.SEEK_SET
+_READ_CHUNK = 65536
 
 REAL_DESKTOP_MARKER = "real_desktop_programs"
 # 会打开浏览器/文件/应用的程序；Python webbrowser 在 Linux/WSL 上也按这些名字查找。
@@ -57,13 +65,17 @@ class GuardRecord:
                 + f"（调用方 pid={self.parent_pid}：{self.parent_command or '未知'}{current}）")
 
 
-# 类用途: 管理 shim 目录、记录文件和“哪些记录已经归属到某条测试”的游标。
+# 类用途: 管理 shim 目录、记录文件和“哪些记录已经归属到某条测试”的游标（记录文件里的字节偏移）。
 @dataclass
 class DesktopOpenGuard:
     shim_dir: Path
     log: Path
     attributed: int = 0
     originals: dict[str, object] = field(default_factory=dict)
+
+    # 函数用途: 安装时把记录文件路径固定成字符串，之后的读写不再经过 pathlib。
+    def __post_init__(self) -> None:
+        self._log_path = str(self.log)
 
     # 函数用途: 在给定目录写出全部 shim 与空记录文件；不改动环境变量。
     @classmethod
@@ -88,36 +100,72 @@ class DesktopOpenGuard:
     def path_without_shims(self, path: str) -> str:
         return os.pathsep.join(item for item in path.split(os.pathsep) if item and item != str(self.shim_dir))
 
-    # 函数用途: 生成替换 webbrowser.open* 的函数：只记录一行并返回 False，不打开任何东西。
+    # 函数用途: 生成替换 webbrowser.open* 的函数：只用底层 os 写一行记录并返回 False，不打开任何东西。
     def python_opener(self, name: str):
         def refuse(url, *args, **kwargs):
-            with self.log.open("a", encoding="utf-8") as handle:
-                handle.write(f"python-webbrowser.{name}\t{_redact(str(url))[:240]}\t{os.getpid()}\t"
-                             f"pytest 进程内调用\t{os.environ.get('PYTEST_CURRENT_TEST', '')}\n")
+            _append(self._log_path, f"python-webbrowser.{name}\t{_redact(str(url))[:240]}\t{_OS_GETPID()}\t"
+                              f"pytest 进程内调用\t{os.environ.get('PYTEST_CURRENT_TEST', '')}\n")
             return False
         return refuse
 
-    # 函数用途: 返回记录文件当前的行数，作为一条测试开始时的游标。
+    # 函数用途: 返回记录文件当前的字节长度，作为一条测试开始时的游标；只取文件大小，不读内容。
     def mark(self) -> int:
-        return len(self._lines())
+        return _size(self._log_path)
 
-    # 函数用途: 取出游标之后的新记录，并把它们标为已归属（后续会话结束检查不再重复报）。
+    # 函数用途: 取出游标之后的新记录，并把它们标为已归属（后续会话结束检查不再重复报）；文件没变长就不读。
     def take_since(self, mark: int) -> list[GuardRecord]:
-        lines = self._lines()
-        self.attributed = max(self.attributed, len(lines))
-        return [_parse(line) for line in lines[mark:]]
+        lines, end = _complete_lines_after(self._log_path, mark)
+        self.attributed = max(self.attributed, end)
+        return [_parse(line) for line in lines]
 
     # 函数用途: 取出所有还没归属到任何测试的记录（会话结束时使用）。
     def unattributed(self) -> list[GuardRecord]:
-        lines = self._lines()
-        return [_parse(line) for line in lines[self.attributed:]]
+        lines, _end = _complete_lines_after(self._log_path, self.attributed)
+        return [_parse(line) for line in lines]
 
-    # 函数用途: 读取记录文件的全部非空行；文件被外部删掉时按空处理。
-    def _lines(self) -> list[str]:
-        try:
-            return [line for line in self.log.read_text(encoding="utf-8").splitlines() if line.strip()]
-        except OSError:
-            return []
+
+# 函数用途: 用底层 os 取记录文件大小；文件不存在或读不到时按 0 处理。
+def _size(path: str) -> int:
+    try:
+        fd = _OS_OPEN(path, _O_RDONLY)
+    except OSError:
+        return 0
+    try:
+        return _OS_FSTAT(fd).st_size
+    finally:
+        _OS_CLOSE(fd)
+
+
+# 函数用途: 用底层 os 读取偏移之后的完整行，返回非空行和读到的末尾偏移；写了一半的行留给下一次，不会被切断误报。
+def _complete_lines_after(path: str, offset: int) -> tuple[list[str], int]:
+    try:
+        fd = _OS_OPEN(path, _O_RDONLY)
+    except OSError:
+        return [], offset
+    chunks: list[bytes] = []
+    try:
+        remaining = _OS_FSTAT(fd).st_size - offset
+        if remaining <= 0:
+            return [], offset
+        _OS_LSEEK(fd, offset, _SEEK_SET)
+        while remaining > 0 and (chunk := _OS_READ(fd, min(remaining, _READ_CHUNK))):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        _OS_CLOSE(fd)
+    data = b"".join(chunks)
+    complete = data.rfind(b"\n") + 1
+    text = data[:complete].decode("utf-8", errors="replace")
+    return [line for line in text.splitlines() if line.strip()], offset + complete
+
+
+# 函数用途: 用底层 os 以追加方式写一行记录。
+def _append(path: str, line: str) -> None:
+    fd = _OS_OPEN(path, _O_APPEND_FLAGS, 0o600)
+    try:
+        _OS_WRITE(fd, line.encode("utf-8"))
+    finally:
+        _OS_CLOSE(fd)
 
 
 # 函数用途: 把令牌、密钥类查询参数的值打码。

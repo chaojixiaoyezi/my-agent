@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import webbrowser
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,63 @@ def test_python_webbrowser_stand_in_records_and_refuses(tmp_path):
     assert guard.python_opener("open_new_tab")("https://example.invalid/?token=abc") is False
     [record] = guard.take_since(0)
     assert record.program == "python-webbrowser.open_new_tab" and "abc" not in record.arguments
+
+
+def test_guard_io_ignores_patched_path_builtins_and_os(tmp_path, monkeypatch):
+    """测试常把 Path.read_text/open、builtins.open 或 os 函数换成哨兵或假内容；防线的读写必须碰不到它们。"""
+    import builtins
+    import pathlib
+
+    guard = DesktopOpenGuard.install(tmp_path / "guard")
+    touched = []
+
+    def sentinel(*args, **kwargs):
+        touched.append(args[:1])
+        raise AssertionError("防线不该经过被测试替换的 IO 接口")
+
+    for name in ("read_text", "read_bytes", "write_text", "open", "stat", "exists", "is_dir"):
+        monkeypatch.setattr(pathlib.Path, name, sentinel)
+    monkeypatch.setattr(builtins, "open", sentinel)
+    for name in ("open", "read", "write", "fstat", "stat", "lseek", "close"):
+        monkeypatch.setattr(os, name, sentinel)
+
+    mark = guard.mark()
+    assert guard.python_opener("open")("https://example.invalid/?token=abc") is False
+    [record] = guard.take_since(mark)
+    assert record.program == "python-webbrowser.open" and "abc" not in record.arguments
+    assert guard.take_since(guard.mark()) == [] and guard.unattributed() == []
+    assert touched == []
+
+
+def test_half_written_line_waits_for_its_newline(tmp_path):
+    guard = DesktopOpenGuard.install(tmp_path / "guard")
+    with open(guard.log, "a", encoding="utf-8") as handle:
+        handle.write("open\targs\t1\tparent")
+    assert guard.take_since(0) == [] and guard.attributed == 0
+    with open(guard.log, "a", encoding="utf-8") as handle:
+        handle.write("\ttest\n")
+    [record] = guard.take_since(0)
+    assert (record.program, record.pytest_current_test) == ("open", "test")
+
+
+@pytest.mark.parametrize("late_call", [True, False])
+def test_session_end_reads_the_finished_guard(tmp_path, monkeypatch, late_call):
+    """会话级 fixture 在最后一条测试收尾时已结束；会话结束检查必须还能读到它，晚到的记录照样让会话失败。"""
+    import agent_py_agent.tests.conftest as hooks
+
+    guard = DesktopOpenGuard.install(tmp_path / "guard")
+    if late_call:
+        guard.python_opener("open")("https://example.invalid/late")
+    monkeypatch.setattr(hooks, "_DESKTOP_GUARD", None)
+    monkeypatch.setattr(hooks, "_FINISHED_DESKTOP_GUARD", guard)
+    lines: list[str] = []
+    writer = SimpleNamespace(line=lines.append)
+    session = SimpleNamespace(config=SimpleNamespace(get_terminal_writer=lambda: writer), exitstatus=0)
+    hooks.pytest_sessionfinish(session, 0)
+    if late_call:
+        assert session.exitstatus == pytest.ExitCode.TESTS_FAILED and "python-webbrowser.open" in lines[0]
+    else:
+        assert session.exitstatus == 0 and lines == []
 
 
 def test_real_desktop_marker_path_drops_only_the_shim_directory(tmp_path):

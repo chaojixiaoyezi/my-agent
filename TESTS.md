@@ -74,6 +74,30 @@
 
 ## 测试全局防线：任何测试都不能打开用户的浏览器或桌面程序（2026-09-28，分支 `claude/75-test-open-guard`，基于 `80b4afed8`）
 
+- **修复：防线自己的读写不再被测试的 IO 哨兵和打桩碰到（2026-09-28，e9be5de14 之后一个提交）**
+  - 问题：全量分片里 5 条误报。`test_gateway_model_observation` 的关闭观察用例（off、disabled）在类级别把
+    `Path.read_text/write_text` 换成“不得读写盘”的哨兵；`test_shell_foreground_cleanup` 的 zombie 用例把
+    `Path.read_text` 换成假 `/proc` 内容。防线用 `Path.read_text` 读记录文件，检查又发生在测试的打桩窗口之内，
+    于是撞上哨兵（测试 FAILED、teardown 再 ERROR），或把假内容当成一条违规记录。
+  - 修法两步：
+    1. 防线读写只用导入时抓好的 `os.open/read/write/fstat/lseek/close`，记录路径安装时固定成字符串；游标改为记录文件的
+       字节长度，文件没变长就不读；只消费完整行，写了一半的行留到下次。
+    2. 游标在 `pytest_runtest_setup` 最早记下；检查挪到 `pytest_runtest_teardown` 之后，也就是测试的 fixture 与
+       monkeypatch 全部撤销之后，违规测试报为 teardown ERROR。放行标记改用防线自己的 MonkeyPatch，不再借测试的
+       monkeypatch。
+  - 顺带修掉一处失效：会话级 fixture 在最后一条测试收尾时就把全局实例清空，`pytest_sessionfinish` 读到 None，
+    “会话结束报未归属记录”从未生效；现在保留一份不清空的引用。
+  - 验证：
+    - 在 e9be5de14 上复现：observation 两条 FAILED 加 teardown ERROR，zombie 一条 FAILED；修复后三条通过。
+    - 自检新增 4 例：把 `Path` 的 7 个 IO 方法、`builtins.open` 和 `os` 的 7 个函数全换成报错哨兵，防线照样记录与读出；
+      写了一半的行等换行；会话结束检查读得到已结束的防线（有记录让会话失败，无记录不动）。
+    - 负例（临时探针文件，已删）：直接调 `open`；先把 `Path.read_text` 换成假内容、`Path.open` 换成哨兵，再调
+      `webbrowser.open` 和 `osascript`；两者都在 teardown 被拦下并列出每条调用。只打桩 IO、不调桌面程序的测试通过。
+      web_board 原样那条（本分支不含 `8bf9fdcff`）仍被拦下，报 `open http://127.0.0.1:<port>/?token=<redacted>`。
+    - 全仓搜出打桩 `Path.read_text/open/stat/exists/is_dir`、`builtins.open`、`os.open/read/stat/fstat` 等接口或断言“零 IO”
+      的 21 个测试文件，加插件相关 91 个文件（其中 4 个与前者重叠）、3a 点名的 `test_shell_background`、`test_adapter_manager`、
+      `test_gateway_agent_control_service` 和三个护栏，共 114 个文件：2325 项通过，唯一的 ERROR 是上面那条预期负例，误报 0 次。
+
 - **做法**：`agent_py_agent/tests/conftest.py` 在会话开始时把 `_desktop_open_guard.py` 生成的 shim 目录放到 PATH 最前，并把 `webbrowser.open/open_new/open_new_tab` 换成只记录的替身。
   - shim 只追加一行记录（程序名、打码后的参数、调用方进程、当前测试名），不执行任何动作。
   - 记录文件路径在安装时写死进 shim 脚本。原因是插件 MCP 子进程经 `build_safe_env` 只继承 PATH、HOME 等白名单变量，靠环境变量传日志路径会漏记。
