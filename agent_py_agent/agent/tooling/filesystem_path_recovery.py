@@ -40,6 +40,11 @@ _NEAR_NAME_DISTANCE_LIMIT = 2
 _NEAR_NAME_MAX_SUGGESTIONS = 2
 # 按单次查找耗时实测取值（10000 条约 37ms，512 条约 2ms）；真实目录极少超过 133 条。
 _NEAR_NAME_MAX_DIRECTORY_ENTRIES = 512
+# LLM: Edit distance is O(len^2), so a very long name dominates the cost even inside a small
+# directory. Skipping near-name matching for long names bounds the worst case without changing the
+# algorithm (2026-09-28 review, N5). 64 is well above any realistic filename.
+# 常量用途: 超过这个长度的名字不做近名匹配，把最坏耗时卡住（距离计算是 O(长度^2)）。
+_NEAR_NAME_MAX_NAME_LENGTH = 64
 
 
 # LLM: One budget is shared by parent probing and every workspace root so multiple roots cannot
@@ -216,6 +221,10 @@ def _render_missing_path(recovery: MissingPathRecovery, *, retry_tool: str) -> s
 # 函数用途: 用户把文件名写错（少字/多字/串位）时，在同目录里找出最像的两个名字作为提示。
 def suggest_near_name_paths(raw_name: str, parent: Path, scope: NearNameScope) -> list[Path]:
     if not raw_name or not parent.exists() or not parent.is_dir():
+        return []
+    # 超长名字直接不做近名匹配：编辑距离是 O(长度^2)，长名字会把最坏耗时拉起来，
+    # 而真实文件名远短于这个上限（2026-09-28 复审 N5 的便宜解法）。
+    if len(raw_name) > _NEAR_NAME_MAX_NAME_LENGTH:
         return []
     roots = _normalized_roots(scope.workspace_roots)
     # 越权目录直接不扫 —— 不能靠"相近文件名"泄露墙外有哪些文件。

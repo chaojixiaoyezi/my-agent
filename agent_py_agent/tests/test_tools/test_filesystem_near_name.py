@@ -195,6 +195,53 @@ def test_directory_under_cap_is_still_scanned(tmp_path: Path):
     assert [p.name for p in found] == ["final_report.md"]
 
 
+def test_overlong_name_skips_near_name_matching(tmp_path: Path):
+    """LLM: A very long name must not trigger near-name matching at all.
+
+    新手说明:
+    编辑距离是 O(长度^2)，名字越长越慢。名字超过上限时直接不做近名匹配，
+    这样"513 条目录 × 名字长度上限"就把最坏耗时卡住了（复审 N5 的便宜解法）。
+    这里放一个距离 1 的兄弟文件，断言它**不会**被建议出来 —— 证明匹配被跳过，
+    而不只是"没找到"。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    root = tmp_path / "workspace"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    long_name = "a" * recovery._NEAR_NAME_MAX_NAME_LENGTH + ".md"
+    (docs / long_name).write_text("x", encoding="utf-8")
+    # 只差一个字符：若真的做了匹配，它必然被建议出来。
+    typo = "a" * recovery._NEAR_NAME_MAX_NAME_LENGTH + "_x.md"
+
+    found = recovery.suggest_near_name_paths(
+        typo, docs, recovery.NearNameScope(workspace_roots=[root])
+    )
+    assert found == [], f"超长名字仍做了近名匹配：{found}"
+
+
+def test_name_at_the_length_limit_still_matches(tmp_path: Path):
+    """LLM: The length cap must be inclusive, not off-by-one."""
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    root = tmp_path / "workspace"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    limit = recovery._NEAR_NAME_MAX_NAME_LENGTH
+    suffix = ".md"
+    name = "b" * (limit - len(suffix)) + suffix   # 长度正好 = limit
+    assert len(name) == limit
+    (docs / name).write_text("x", encoding="utf-8")
+    # 同样长度、只换一个字符：既在长度上限内，距离又是 1，必然应被建议出来。
+    typo = "b" * (limit - len(suffix) - 1) + "z" + suffix
+    assert len(typo) == limit
+
+    found = recovery.suggest_near_name_paths(
+        typo, docs, recovery.NearNameScope(workspace_roots=[root])
+    )
+    assert [p.name for p in found] == [name], f"边界长度被误跳过：{found}"
+
+
 # --------------------------------------------------------------------------- 原先钉不住的行为
 
 def test_distance_limit_two_and_suggestion_cap_two(tmp_path: Path):
