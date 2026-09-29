@@ -11,7 +11,10 @@ from agent_py_agent.agent.agent_core.subagent import compact_recovery
 from agent_py_agent.agent.agent_core.subagent.model_selection import (
     mark_subagent_business_request_submitted,
 )
-from agent_py_agent.agent.agent_core.tool_model_generation import _invoke_backend_generate
+from agent_py_agent.agent.agent_core.tool_model_generation import (
+    _CallLiveness,
+    _invoke_backend_generate,
+)
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation import compact
 from agent_py_agent.agent.conversation.agent_thread import ensure_subagent_thread
@@ -65,6 +68,7 @@ def _send(child, *, fail=False):
 
     backend = Backend()
     state = SimpleNamespace(agent=agent, params=params, ledger=None, call_id="call-1", tools=None, messages=None,
+                            liveness=_CallLiveness(),
                             on_chunk=None, first_token_timeout_seconds=1, system_instruction="", retry_sink=None)
     return lambda: _invoke_backend_generate(backend, "actual prompt", state), calls
 

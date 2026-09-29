@@ -145,7 +145,8 @@ class _CallLiveness:
         self._lock = Lock()
         self.abandoned = False
 
-    # 函数用途: guard 放弃这次调用时标记；之后的发出前复核都会看到。
+    # 函数用途: guard 放弃这次调用时标记；之后的发出前复核都会看到。worker 正在锁内做发出前登记时会等它做完
+    #   （登记有界、无网络 I/O），这点延迟是正确性所需。
     def abandon(self) -> None:
         with self._lock:
             self.abandoned = True
@@ -1143,13 +1144,12 @@ def _transport_owns_stream_idle_timeout(agent: object) -> bool:
     )
 
 
-# LLM: 放弃标记只来自真实 guard（墙钟超时、用户停止）；替身或旧调用方传入的 state 没有 liveness 时不做任何事，
-#   与改动前行为一致。
+# LLM: 放弃标记只来自真实 guard（墙钟超时、用户停止）。state 必须是带 liveness 的真实 _ModelGenerationState（测试替身
+#   也要带上 _CallLiveness），没有"缺字段就静默跳过复核"的旁路。若 worker 正持有 liveness 锁做发出前登记，这里会等它做完
+#   再置位：登记只含本地登记与一次账本提交、没有网络 I/O，因而有界；这一点等待是正确性所需，不是停止/超时变慢的 bug。
 # 函数用途: guard 放弃这次调用时标记，让迟到的工作线程不再登记、提交或发出。
-def _abandon_call(state: object) -> None:
-    liveness = getattr(state, "liveness", None)
-    if liveness is not None:
-        liveness.abandon()
+def _abandon_call(state: _ModelGenerationState) -> None:
+    state.liveness.abandon()
 
 
 # LLM: Target only the live timeout-guard thread; setting its flag invokes any provider response-close callback already registered there.
@@ -1223,6 +1223,9 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
             try:
                 _register_call_before_send(backend, prompt, state)
                 response = _do_backend_generate(backend, prompt, state)
+            except ModelCallAbandonedError:
+                # 被放弃的调用根本没有发出请求：不记成一次失败的 LLM 调用，免得 RED 指标失真。
+                raise
             except Exception:
                 record_llm_call(label, time.monotonic() - start, None, ok=False)
                 raise
@@ -1234,13 +1237,10 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
 
 
 # LLM: 发出前在 liveness 锁内复核：guard 已放弃（墙钟超时/用户停止）的调用不登记、不提交插话、不发请求，只在账本记
-#   一条结构化事件并以 ModelCallAbandonedError 结束工作线程；否则三步登记保持原顺序。没有 liveness 的替身 state 按仍是当前调用处理。
+#   一条结构化事件并以 ModelCallAbandonedError 结束工作线程；否则三步登记保持原顺序。state 必须带 liveness，不做兜底。
 # 函数用途: 真正发出请求前复核这次调用是否仍是当前调用，是则登记并提交插话，否则记事件并终止。
 def _register_call_before_send(backend, prompt: str, state: _ModelGenerationState) -> None:
-    liveness = getattr(state, "liveness", None)
-    if liveness is None:
-        _mark_call_before_send(backend, prompt, state)
-    elif not liveness.run_if_current(lambda: _mark_call_before_send(backend, prompt, state)):
+    if not state.liveness.run_if_current(lambda: _mark_call_before_send(backend, prompt, state)):
         state.ledger.note_event(state.call_id, MODEL_CALL_SUBMISSION_SKIPPED_EVENT)
         raise ModelCallAbandonedError(state.call_id)
 

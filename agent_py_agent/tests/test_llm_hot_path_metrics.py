@@ -40,6 +40,7 @@ class _RaisingBackend:
 
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
+        liveness=tool_model_generation._CallLiveness(),
         agent=SimpleNamespace(conversation_store=None),
         params=SimpleNamespace(),
         ledger=None,

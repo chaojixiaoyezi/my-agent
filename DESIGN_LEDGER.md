@@ -298,7 +298,7 @@ Goal 工具已核为 active，最终 0/27。下一步按原 conversation_request
 
 结构见 [Gateway 结构](docs/modules/gateway/04-structure.md)，回归见 `test_steer_delivery_recovery.py`。
 
-**被放弃调用的迟到线程（2026-09-29，分支 `claude/38-abandoned-call-steer-race`，待集成）**：墙钟超时或用户停止让 guard 放弃一次物理调用后，它的工作线程可能才走到发出前登记，把插话提交到已作废的调用编号上，重试提交随即撞上账本的 `guidance submission was not reserved`。规则：每次物理调用带一份 liveness；guard 放弃时置位，工作线程在同一把锁内复核“仍是当前调用”后才做发出前登记（子代理业务标记、发送前钩子、插话提交）并发请求；已放弃则三步都不做、不发请求，只在模型调用账本记 `submission_skipped_after_abandon` 事件并以 `ModelCallAbandonedError` 结束该线程。放弃后的退回与重试判据不变，没有 liveness 的替身 state 按仍是当前调用处理。回归见 `test_abandoned_call_steer_race.py`。
+**被放弃调用的迟到线程（2026-09-29，分支 `claude/38-abandoned-call-steer-race`，待集成）**：墙钟超时或用户停止让 guard 放弃一次物理调用后，它的工作线程可能才走到发出前登记，把插话提交到已作废的调用编号上，重试提交随即撞上账本的 `guidance submission was not reserved`。规则：每次物理调用带一份 liveness；guard 放弃时置位，工作线程在同一把锁内复核“仍是当前调用”后才做发出前登记（子代理业务标记、发送前钩子、插话提交）并发请求；已放弃则三步都不做、不发请求，只在模型调用账本记 `submission_skipped_after_abandon` 事件并以 `ModelCallAbandonedError` 结束该线程。放弃后的退回与重试判据不变；state 必须带 liveness（测试替身也要带），没有缺字段兜底；被放弃的调用不记成失败的 LLM 调用；放弃标记会等一次有界的进行中登记做完，这点延迟是正确性所需。回归见 `test_abandoned_call_steer_race.py`。
 
 ## Compact 校准与计量收口（2026-09-28，方案审阅，待原作者实现验收）
 

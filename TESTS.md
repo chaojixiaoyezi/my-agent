@@ -53,7 +53,9 @@
 - **改法（最小）**：`_ModelGenerationState.liveness`（每次物理调用一份，带锁）；`_wait_for_generation_result` 在墙钟超时和用户停止
   两处放弃前置位；`_invoke_backend_generate` 把三步发出前登记收进 `_mark_call_before_send`，只在 `run_if_current` 锁内复核通过时
   执行，已放弃则记账本事件 `submission_skipped_after_abandon`（新增 `ModelCallLedger.note_event`，不改终态/用量/尝试计数）并抛
-  `ModelCallAbandonedError` 结束工作线程，不发请求。不吞 `DataCorruptionError`；没有 liveness 的替身 state 按原路径执行。
+  `ModelCallAbandonedError` 结束工作线程，不发请求。不吞 `DataCorruptionError`。
+- **9b 复审跟进**：去掉 `getattr(state, "liveness", None)` 兜底（缺字段不再静默跳过复核；四个既有测试的替身 state 改为带 `_CallLiveness`）；
+  被放弃的调用不再记成一次失败的 LLM 调用（RED 指标不失真）；注释写明用户停止/墙钟超时会等一次有界的进行中登记做完，这是正确性所需。
 - **新测试** `test_abandoned_call_steer_race.py`（4 项）：迟到线程不提交、不发请求、账本有事件、重试正常提交且批次/回执指向重试；
   用户停止路径也标记放弃；liveness 只执行一次；`note_event` 终态后可追加并去重。
 - **负向验证**（改坏产品语义，独立子进程，逐字节恢复核哈希，3/3 被抓出）：发出前不复核；墙钟超时不标记放弃；跳过时不记事件。

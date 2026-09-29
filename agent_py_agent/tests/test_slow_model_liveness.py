@@ -29,6 +29,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
     _MODEL_INTERRUPT_DRAIN_SECONDS,
     ModelGenerateParams,
     _BackendGenerateResult,
+    _CallLiveness,
     _wait_for_generation_result,
 )
 from agent_py_agent.agent.backends import ProviderTimeoutError
@@ -73,12 +74,17 @@ def _results_after(delay: float, result: _BackendGenerateResult) -> tuple[queue.
     return results, thread
 
 
+# 函数用途: guard 等待用例只需要带 liveness 的 state 替身（放弃标记落在它上面）。
+def _guard_state() -> SimpleNamespace:
+    return SimpleNamespace(liveness=_CallLiveness())
+
+
 def test_streaming_result_after_total_budget_is_not_killed() -> None:
     """流式:结果在总预算之后才到,也必须被接受(总时长不判死正在推进的请求)。"""
     request = _request(stream=True)
     results, worker = _results_after(0.4, _BackendGenerateResult(response="slow but alive"))
 
-    response = _wait_for_generation_result(request, None, results, worker, timeout=0.05)
+    response = _wait_for_generation_result(request, _guard_state(), results, worker, timeout=0.05)
 
     assert response == "slow but alive"
     worker.join(timeout=2)
@@ -90,7 +96,7 @@ def test_non_stream_total_budget_still_fails_explicitly() -> None:
     results, worker = _results_after(0.6, _BackendGenerateResult(response="too late"))
 
     with pytest.raises(ProviderTimeoutError) as excinfo:
-        _wait_for_generation_result(request, None, results, worker, timeout=0.05)
+        _wait_for_generation_result(request, _guard_state(), results, worker, timeout=0.05)
 
     assert excinfo.value.stage == "wall_clock"
     worker.join(timeout=2)
@@ -104,7 +110,7 @@ def test_user_stop_wins_during_slow_generation() -> None:
     try:
         started = time.monotonic()
         with pytest.raises(InterruptedError):
-            _wait_for_generation_result(request, None, results, worker, timeout=30.0)
+            _wait_for_generation_result(request, _guard_state(), results, worker, timeout=30.0)
         # 停止必须在传输收口的有限窗口内生效,而不是等慢结果(5s 后才到)
         assert time.monotonic() - started < _MODEL_INTERRUPT_DRAIN_SECONDS + 0.5
     finally:
@@ -118,7 +124,7 @@ def test_provider_http_failure_is_raised_immediately() -> None:
     results, worker = _results_after(0.05, _BackendGenerateResult(exc=failure))
 
     with pytest.raises(RuntimeError, match="provider 503"):
-        _wait_for_generation_result(request, None, results, worker, timeout=30.0)
+        _wait_for_generation_result(request, _guard_state(), results, worker, timeout=30.0)
     worker.join(timeout=2)
 
 

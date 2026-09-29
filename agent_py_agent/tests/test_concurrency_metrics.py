@@ -62,6 +62,7 @@ def test_enqueue_vs_claim_counters_split_starvation_from_first_turn_stall() -> N
 
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
+        liveness=tool_model_generation._CallLiveness(),
         agent=SimpleNamespace(conversation_store=None),
         params=SimpleNamespace(),
         ledger=None,
