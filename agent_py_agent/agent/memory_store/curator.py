@@ -1024,13 +1024,17 @@ def _corrupt_run_id(quarantine: dict[str, object]) -> str:
 
 # LLM: Failure audit preserves the acquired lease and recovery provenance; the exception message is
 # persisted only after the shared log redaction and a hard 200-char cut, never prompt/response bodies.
-# 函数用途: 构造失败 run audit 的诊断字典(类名、HTTP 状态码、脱敏截断后的异常正文)。
+# 包装异常的根因(_cause_facts)和解析失败的响应形状(CuratorResponseParseError.response_facts)只并入
+# 无正文标量;键集同步 docs/modules/memory/04-structure.md 与 test_curator_failure_attribution.py。
+# 函数用途: 构造失败 run audit 的诊断字典(类名、HTTP 状态码、脱敏截断后的异常正文、根因、响应形状)。
 def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     """提取机器可判定的失败形状：异常类名 + 供应商 HTTP 状态码（能拿到才记）+ 脱敏异常正文。
 
     正文只取 `str(exc)` 经 redact_sensitive_text 脱敏后的前 200 字,便于事后归因(真机 2026-09-13 起
     只有 error_type=ValueError 时看不出是缺会话头);请求体、响应体、记忆内容仍不进入账本。
-    没有状态码/正文就不写对应键,避免伪装成已知。
+    没有状态码/正文就不写对应键,避免伪装成已知。包装异常另记被包住的根因类名/错误号
+    (真机 2026-09-27~28 三次 CURATOR_COMMIT_FAILED 只剩 "curator batch commit failed"),
+    解析失败另记响应字符数、是否截断、结束原因和输出 token。
     """
     diagnostic: dict[str, object] = {"error_type": type(exc).__name__}
     for attr in ("http_status", "status_code"):
@@ -1045,14 +1049,39 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     message = redact_sensitive_text(str(exc or ""))[:200]
     if message:
         diagnostic["message"] = message
+    diagnostic.update(_cause_facts(exc))
+    facts = getattr(exc, "response_facts", None)
+    if isinstance(facts, dict):
+        diagnostic.update({key: value for key, value in facts.items() if isinstance(value, (bool, int, str))})
     return diagnostic
+
+
+# LLM: 只沿显式 __cause__ 链(raise ... from ...)取最底层根因,最多 8 层,不读隐式 __context__。只记根因类名和
+#   两个标准库结构化属性:OSError.errno(如磁盘满 28)、JSONDecodeError.pos(出错位置,与 response_chars
+#   对照可分辨截断/空响应/中途格式坏)。根因正文不入账,它可能带文件路径或响应片段。
+# 函数用途: 从包装异常(如 CuratorBatchCommitError)里取出被包住的根因类名、错误号和解析出错位置。
+def _cause_facts(exc: BaseException) -> dict[str, object]:
+    root = exc.__cause__
+    for _ in range(8):
+        if root is None or root.__cause__ is None:
+            break
+        root = root.__cause__
+    if root is None:
+        return {}
+    facts: dict[str, object] = {"cause_type": type(root).__name__[:60]}
+    if isinstance(root, OSError) and isinstance(root.errno, int):
+        facts["cause_errno"] = root.errno
+    if isinstance(root, json.JSONDecodeError):
+        facts["cause_pos"] = root.pos
+    return facts
 
 
 # LLM: run 账的字段集是**严格 v2 契约**（`from_record` 要求键集合完全一致，历史行必须能读回来），
 # 所以诊断不能新增 dataclass 字段——那会让所有既有行校验失败，把失败记账本身变成
 # CURATOR_RUN_AUDIT_FAILED（本仓库真机踩过）。改为写进既有 `warnings`（v2 字段、有界、可解析）。
-# 单条 warning 上限 300 字符由 curator_run_log._bounded_warnings 把关;超限只缩短 message,
+# 单条 warning 上限 300 字符由 curator_run_log._bounded_warnings 把关;超限先只缩短 message,
 # 绝不裁 JSON 本体(否则账读不回来)。每个字符 JSON 编码后至少占 1 位,砍掉超出的字符数一次就够。
+# 去掉 message 仍超限(类名异常长)时退回只含类名的最小形状:宁缺诊断,也不能让失败记账本身失败。
 # 函数用途: 把失败诊断编码为一条稳定、有界、可解析的 warning 文本，供运维读账定位。
 def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
     text = _encode_failure_diagnostic(diagnostic)
@@ -1063,6 +1092,8 @@ def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
         if not trimmed["message"]:
             del trimmed["message"]
         text = _encode_failure_diagnostic(trimmed)
+    if len(text) > 300:
+        text = _encode_failure_diagnostic({"error_type": str(diagnostic.get("error_type") or "")[:200]})
     return text
 
 

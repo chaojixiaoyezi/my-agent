@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import re
 import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
@@ -40,6 +41,9 @@ from .daily import DAILY_ACTORS, DAILY_EVENT_TYPES
 
 _LOGGER = logging.getLogger(__name__)
 
+# 上游 stop_reason 这类短码的入账形状;不符合的一律记 "other",诊断长度才有上界。
+_SHORT_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
+
 
 # LLM: 超时请求精确取消但调用者不等待清理；仍活着的资源必须用下方子类禁止重叠重试。
 # 类用途: 为 Curator provider 超时提供稳定错误分类，保持游标不推进。
@@ -61,6 +65,19 @@ class CuratorModelStillRunningError(CuratorModelTimeoutError):
 # 类用途: 标记"供应商调用没跑出来"的非超时失败,避免它被误记成 schema 错误。
 class CuratorModelCallError(RuntimeError):
     pass
+
+
+# LLM: 模型已返回、宿主严格解析失败时抛出。仍是 ValueError,curator._failure_code 照旧归
+#   CURATOR_SCHEMA_INVALID,不重试、不缩批;response_facts 只装 _response_facts 产出的无正文标量,
+#   供失败诊断区分截断、空响应和中途格式坏(真机 2026-09-26~28 主 owner 8 次 "not strict JSON" 因缺这些
+#   事实无法归因)。响应正文绝不进本对象。同步 curator._failure_diagnostic 与 test_curator_failure_attribution.py。
+# 类用途: 标记"模型回了但宿主解析不通过",并携带可以安全写进运行账的响应形状。
+class CuratorResponseParseError(ValueError):
+    # LLM: message 必须原样沿用解析错误的 str(exc),失败码分类依赖它(CURATOR_ 前缀约定)。
+    # 函数用途: 保存原解析错误信息和响应形状事实。
+    def __init__(self, message: str, *, response_facts: dict[str, object]) -> None:
+        super().__init__(message)
+        self.response_facts = response_facts
 
 
 # LLM: Curator 原合同按同一个 backend 实例隔离；强引用防对象 ID 复用，通用原语自身不推断服务身份。
@@ -149,6 +166,38 @@ def attempt_shape_payload(attempt: CuratorModelAttempt) -> dict[str, object]:
         "shrunk": attempt.shrunk,
         "outcome": attempt.outcome,
     }
+
+
+# LLM: 只取 ModelResponse 的无正文标量:文本只算长度;stop_reason 是上游短码,超长或含非码字符记 "other",
+#   保证整条诊断不超出运行账 300 字符上限;usage 按 OpenAI(completion_tokens)和 Anthropic(output_tokens)
+#   两种常见键名读输出 token,都没有就不写,不猜。
+# 函数用途: 把一次已返回的模型响应压成可入账的形状事实(字符数、是否截断、结束原因、输出 token)。
+def _response_facts(response: object, text: str) -> dict[str, object]:
+    facts: dict[str, object] = {
+        "response_chars": len(text),
+        "truncated": bool(getattr(response, "truncated", False)),
+    }
+    stop_reason = str(getattr(response, "stop_reason", "") or "")
+    if stop_reason:
+        facts["stop_reason"] = stop_reason if _SHORT_CODE.fullmatch(stop_reason) else "other"
+    usage = getattr(response, "usage", None)
+    for key in ("completion_tokens", "output_tokens"):
+        value = usage.get(key) if isinstance(usage, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            facts["output_tokens"] = value
+            break
+    return facts
+
+
+# LLM: 解析语义不变(仍是 ValueError、仍归 CURATOR_SCHEMA_INVALID、不重试、不缩批),只把失败包成
+#   CuratorResponseParseError 并附响应形状;原异常链保留,JSONDecodeError 的出错位置由失败诊断读取。
+# 函数用途: 严格解析一次已返回的模型响应,失败时抛出带响应形状的解析错误。
+def _parse_response(response: object) -> CuratorExtraction:
+    text = str(getattr(response, "text", "") or "")
+    try:
+        return parse_curator_extraction(text)
+    except ValueError as exc:
+        raise CuratorResponseParseError(str(exc), response_facts=_response_facts(response, text)) from exc
 
 
 # LLM: 超时判定只读异常类型(含 MRO 类名),绝不解析异常正文——供应商正文可能夹带请求体和
@@ -245,7 +294,8 @@ def extraction_budget_seconds(config: MemoryCuratorConfig) -> int:
 
 
 # LLM: 超时只有在旧调用退出后才能缩批重试；仍存活的后端线程禁止重叠调用，游标/证据合同不变。
-# 供应商调用阶段的 ValueError/TypeError 出口前包成 CuratorModelCallError(阶段事实),解析失败原样冒出;
+# 供应商调用阶段的 ValueError/TypeError 出口前包成 CuratorModelCallError(阶段事实),解析失败包成
+# CuratorResponseParseError(仍是 ValueError,只多带无正文响应形状)冒出;
 # 宿主会话头由调用方(curator._execute)在外层绑定,本函数不生成会话身份。
 # 函数用途: 调用后台模型并返回实际使用的输入快照与严格解析的 CuratorExtraction。
 def extract_with_retries(
@@ -304,9 +354,7 @@ def extract_with_retries(
             # 成功形状同样留痕(含 result 类名),失败审计与成功运行都能看出调用形状。
             return CuratorExtractionAttempt(
                 batch=effective,
-                extraction=parse_curator_extraction(
-                    str(getattr(response, "text", "") or "")
-                ),
+                extraction=_parse_response(response),
                 shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
             )
         last_error = failure
@@ -458,6 +506,7 @@ __all__ = [
     "CuratorModelAttempt",
     "CuratorModelCallError",
     "CuratorModelTimeoutError",
+    "CuratorResponseParseError",
     "adaptive_timeout_seconds",
     "attempt_shape_payload",
     "call_backend_with_timeout",

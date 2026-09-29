@@ -278,8 +278,9 @@ def test_non_timeout_failure_records_identical_prompt_shapes(tmp_path: Path) -> 
     assert [row["outcome"] for row in shapes] == ["ValueError"] * 3
     assert len({row["prompt_chars"] for row in shapes}) == 1
     assert {row["shrunk"] for row in shapes} == {False}
+    # 包装异常另记被包住的根因类名(见 test_curator_failure_attribution.py),正文仍只有脱敏后的 message。
     assert records[0].warnings[-1] == (
-        'failure_diagnostic={"error_type":"CuratorModelCallError",'
+        'failure_diagnostic={"cause_type":"ValueError","error_type":"CuratorModelCallError",'
         '"message":"此服务商需要会话编号，但当前请求没有绑定宿主会话。"}'
     )
 

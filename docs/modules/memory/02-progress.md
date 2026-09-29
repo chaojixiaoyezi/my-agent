@@ -1,5 +1,17 @@
 # 记忆与上下文维护状态
 
+记忆整理失败归因（分支 `claude/ae-curator-diagnostics`，2026-09-29，生产主 owner 只读排查）：
+- 9/26 恢复以来，主 owner 有 8 次"not strict JSON"解析失败和 3 次提交失败，都在下一轮从同一游标重做成功，没有丢批次。但运行账分不清解析失败的具体原因，提交失败也只剩外层异常。
+- 现在解析失败包成 `CuratorResponseParseError`，仍是 ValueError，失败码与不重试语义都不变，附带：
+  - 响应字符数、是否截断；
+  - 上游结束原因、输出 token。
+- `_failure_diagnostic` 沿显式 `__cause__` 链记录：
+  - 根因类名；
+  - OSError 的 errno；
+  - JSONDecodeError 的出错位置。
+- 整条诊断仍不超过 300 字符，超出时退回只含类名的形状。运行账键集不变，响应正文和路径都不入账。
+- 截断是否改走缩批重试，等诊断数据确认后再定，见 DESIGN_LEDGER 事实 3。
+
 生命周期续跑读错分支（分支 `claude/be-wake-fix`，2026-09-28，Codex 审查 B）：`carried_tool_call_records_for_requests` 改收 `CarriedIndexSource`，每个来源独立读取、各自捕获 OSError，读到一半失败的来源整份丢弃，返回 `CarriedToolCallRead`（records 与 unreadable_sources）。修复前 owner 索引一抛错，任务索引就不会被访问，携带记录与一次性编排去重一起变空。见 TESTS.md 顶部。
 
 生命周期唤醒片续接前台轮的工具事实（分支 `claude/be-wake-turn`，2026-09-28，T3 验收观察 2）：`compact_tool_output_refs` 新增 `carried_tool_call_records_for_requests`，按（索引根, 是否只用于运行时状态）读 owner 根和任务 work 两处索引，每个根只读自己的 index.jsonl，按精确请求编号流式过滤，不全量加载；与 `carried_tool_call_records` 共用四元身份去重。owner 索引的记录带 `CARRIED_RUNTIME_ONLY_FIELD`，工具循环只用它重建去重、已执行工具和工具轮数，不进本片工具账和模型可见交接，溢出压缩携带时原样保留。修复前前台轮成功的 `create_subagents` 不在唤醒片的去重集合里，同内容派工会多出一个子代理。见 TESTS.md 顶部。

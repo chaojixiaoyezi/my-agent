@@ -102,6 +102,26 @@
   config_field_readers、recovery_actions、main_agent_has_no_case_runtime、subagent_config_inheritance）。
 - **门禁**：ruff、doc sync、strict code-size（identity 对 main 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。
 
+## 记忆策展失败归因：解析失败带响应形状、包装异常带根因（2026-09-29，分支 `claude/ae-curator-diagnostics`，基于 `c101d325a`）
+
+- **起因**：只读排查生产主 owner 自 9/26 以来的 8 次 `CURATOR_SCHEMA_INVALID` 和 3 次 `CURATOR_COMMIT_FAILED`。
+  - 每次失败后，下一轮都从同一游标重做并成功，没有丢批次。
+  - 但运行账分不清解析失败是截断、空内容还是格式坏，提交失败也只剩外层异常。
+  - 事实与取舍见 `DESIGN_LEDGER.md` 记忆 Curator 条目的“事实 3”。
+- **新增** `test_curator_failure_attribution.py` 7 项：
+  - 截断响应：`truncated=true`、`stop_reason=length`、`output_tokens`，`cause_pos` 等于 `response_chars`。仍记 `CURATOR_SCHEMA_INVALID`，只调用一次，游标不动。
+  - 空内容：字符数 0、出错位置 0、未截断。
+  - 正向对照：下一轮给合法输出即成功提交，游标从同一起点推进。
+  - 提交时注入 `ENOSPC`：记 `cause_type=OSError`、`cause_errno=28`，诊断里不含路径；恢复写入后重做成功。
+  - 根因只沿显式 `from` 链查找：`from None` 和隐式上下文不算，三层链取最底层。
+  - 响应形状只收短码与整数：布尔不当 token 数。
+  - 字段全带上时不超过 300 字符；类名异常长时退回只含类名的形状。
+- **改动的既有用例**：`test_curator_timeout_observability.py` 里模型调用失败那条逐字断言，多了 `"cause_type":"ValueError"`。
+- **验证**：
+  - 12 个单点变异全部被新用例抓住：去掉根因、只取一层、改走隐式上下文、去掉 errno、去掉出错位置、不并入响应形状、去掉超长回退、解析失败原样抛出、不遮蔽非码 stop_reason、布尔当 token、截断恒假、字符数恒零。
+  - 相关与全仓扫描类用例共 56 个文件全过。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_curator_failure_attribution.py agent_py_agent/tests/test_curator_timeout_observability.py -q`
+
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 
 - **新增用例**：`test_session_task_real_chain.py` 加了 `test_admin_lists_owner_sessions_and_reaches_the_listed_target`，按派活、发消息参数化成两条。
@@ -6569,6 +6589,8 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   `test_curator_timeout_observability.py`、`test_curator_timeout_adaptive.py` 锁定供应商调用阶段的
   ValueError 归 `CURATOR_MODEL_FAILED`（结果、state.json、失败诊断一致），解析失败仍是
   `CURATOR_SCHEMA_INVALID`；失败诊断附脱敏后 ≤200 字正文，整条 warning ≤300 字符且可解析。
+  `test_curator_failure_attribution.py` 锁定包装异常的根因类名与 errno，以及解析失败的响应形状（长度、截断、
+  结束原因、输出 token、JSONDecodeError 出错位置），均不含正文。
 
 - 状态读取：`test_agent_tree_model_view.py`、`test_agent_tree_three_layer_status.py`、`test_orchestration_tools.py`，
   覆盖规范原状态、scope 裁决、恢复路径不外泄、实际报告与缺失报告、八节点直接可读及大树省略计数；

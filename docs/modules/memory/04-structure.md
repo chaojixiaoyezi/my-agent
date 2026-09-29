@@ -228,12 +228,24 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
 ## R257 策展失败账的字段边界
 - `CuratorRunRecord` 的字段集是**严格 v2 契约**：`from_record` 要求键集合与 dataclass 完全一致，
   因此**绝不允许**为了一时诊断新增字段（会让所有历史行 fail-closed；真机踩过 `CURATOR_RUN_AUDIT_FAILED`）。
-  失败诊断走既有 `warnings`，格式固定为 `failure_diagnostic=` + 紧凑 JSON（sort_keys）；键只有
-  `error_type`、可选 `provider_http_status`、可选 `message`（`str(exc)` 经 `common/log_redaction`
-  脱敏后的前 200 字），超过单条 300 字符时只缩短 `message`，绝不裁 JSON 本体。请求体、响应体、记忆内容仍不入账。
+  失败诊断走既有 `warnings`，格式固定为 `failure_diagnostic=` + 紧凑 JSON（sort_keys）。键：
+  - `error_type`；
+  - 可选 `provider_http_status`；
+  - 可选 `message`：`str(exc)` 经 `common/log_redaction` 脱敏后的前 200 字；
+  - 包装异常（`raise … from …`）另记：
+    - `cause_type`：沿显式 `__cause__` 链找到的最底层根因类名；
+    - `cause_errno`：根因是 OSError 时记，如磁盘满为 28；
+    - `cause_pos`：根因是 JSONDecodeError 时记出错位置。
+  - 模型已返回、解析失败（`CuratorResponseParseError`）时另记：
+    - `response_chars`（响应字符数）、`truncated`；
+    - `stop_reason`（上游短码，不像代码的记 `other`）、`output_tokens`。
+    - 用 `cause_pos` 对照 `response_chars` 能分出截断、空内容和中途格式坏。
+
+  超过单条 300 字符时先缩短 `message`，仍超出就退回只含 `error_type` 的形状，绝不裁 JSON 本体。请求体、响应体、根因正文、记忆内容都不入账。
 
 - `CuratorRunRecord.failure_diagnostic` 是**诊断投影**，不是失败权威：权威仍是 `failure_code` +
-  attempt/lease 状态。字段只允许机器可判定形状（异常类名、可选 HTTP 状态码），
+  attempt/lease 状态。字段只允许机器可判定形状（异常类名、可选 HTTP 状态码、根因类名/errno/解析出错位置、
+  响应字符数/截断/结束原因/输出 token 这类标量），
   任何供应商正文、prompt 片段、记忆内容都不得进入，这条在执行 `_failure_diagnostic` 时强制。
 - 新增诊断字段不改变 run 账 schema_version（v2 追加可选字段），旧账本无需迁移。
 
