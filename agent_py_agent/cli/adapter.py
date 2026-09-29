@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
+from ..agent.common.log_redaction import redact_sensitive_text
 from ..agent.gateway_parts import (
     AdapterPaths,
     adapter_paths,
@@ -293,9 +294,10 @@ def _finish_adapter_process(manager: ChannelManager, gpaths, state: str, extra: 
         _adapter_logger.error("adapter_state_write_failed_at_exit state=%s reason=%s", state, extra.get("reason", ""))
 
 
-# 函数用途: 把异常压成可写进状态文件的小记录（类型、截断的消息）。
+# LLM: 记录会进 adapter_state.json 并被 /status、channel_health 读出，消息先过 redact_sensitive_text 再截断；不存异常对象。
+# 函数用途: 把异常压成可写进状态文件的小记录（类型、脱敏并截断的消息）。
 def _error_record(exc: BaseException) -> dict[str, str]:
-    return {"type": type(exc).__name__, "message": str(exc)[:500]}
+    return {"type": type(exc).__name__, "message": redact_sensitive_text(str(exc))[:500]}
 
 
 def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -> None:

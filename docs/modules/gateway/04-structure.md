@@ -2084,3 +2084,8 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   （删 pid 文件不需要磁盘空间，是磁盘写满时最后的结构化痕迹）。状态文件用 `write_json_file_atomic`，不要改回 `write_text`。
 - `/status` 的适配器存活只信 `channel_health.adapter_process_facts`（按 `adapter.pid` 的进程存活），状态文件的 `state=running`
   不能单独当作"活"；`channel_health.adapter_runtime_health` 仍是 registry 健康投影的入口，两者共用同一套 pid/状态读取，不要再长第三套。
+- 循环出错节奏只由 `cli/gateway_loop_backoff.LoopErrorBackoff` 决定：`_guarded_dispatch_tick` 与 `_supervisor_tick_survives` 都返回
+  "下一拍前要等的秒数"（有活 0、空闲轮询间隔、出错退避），循环体只负责 `stop_event.wait`。新增后台循环要接同一个工具，
+  不要各自 sleep 常量或无限打印；打印限流不影响 `loop_health` 的计数。
+- 对外错误字段：`loop_health`/适配器状态里的 message 一律经 `common.log_redaction.redact_sensitive_text`；`/status` 的读取错误只暴露
+  `category`/`context`（`channel_health._load_error_subset`），不带 `path`/`message`。

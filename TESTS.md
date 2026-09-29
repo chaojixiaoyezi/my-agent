@@ -31,9 +31,14 @@
   （reason/error 结构化）再上抛；磁盘一直满时状态文件不存在但 pid 文件一定已删、有 `adapter_state_write_failed_at_exit` ERROR 日志；
   `/status` 适配器事实：无 pid 文件不算活，状态文件新鲜 running 但 pid 指向已退出子进程仍不算活且不清理 pid 文件，本进程记录算活，
   状态文件损坏只单列错误。
+- **9a 复审跟进用例**（同文件追加）：派发循环连续 12 次出错时等待序列精确为 0.2/0.4/…/25.6/30/30/30/30，成功一次回到轮询间隔、
+  新一段故障从头退避，15 次错误只打印 3 次（第 1、第 10、新一段第 1）；后台主循环同样序列、11 次错误打印 2 次；`LoopErrorBackoff`
+  单测（打印裁决 1/10/20、另一种错误第一次也打、成功清零）；`dispatcher.shutdown()` 抛错记成 `gateway_request_pool.shutdown`；
+  账本与适配器错误消息脱敏（`api_key=…` 变 `<redacted>`）；`/status` 的 pid/状态读取错误只含 category/context 且不含 tmp 路径。
 - **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希）：打印入口去掉保护；tick 守卫去掉；退出不记账本；`/status` 不并入快照；
   心跳不并入快照；存活不看线程是否还在；扫描门改回扫描后取样；适配器周期写入不守卫；异常退出不收尾；收尾不删 pid 文件；
-  适配器存活不看进程。11/11 被抓出。
+  适配器存活不看进程；退避工具不退避；退避工具每次都打；派发循环不用退避时长；后台主循环不用退避时长；关闭阶段记成 run；
+  `/status` 错误泄露整份报告；账本不脱敏；适配器不脱敏。19/19 被抓出。
 - **门禁**：两个新文件 + `test_gateway_loops_resilience.py` + `test_gateway_two_tier_admission.py` + `test_gateway_readiness_generation.py`
   + `test_gateway_http_runtime_errors.py` + `test_gateway_status_tool.py` + `test_adapter_daemon_cli.py` + `test_channel_health.py`
   + `test_supervisor.py` + 七个全仓扫描守卫；ruff、doc sync、strict code-size

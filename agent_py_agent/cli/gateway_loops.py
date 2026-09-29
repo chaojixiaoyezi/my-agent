@@ -59,6 +59,7 @@ from ..agent.user_space.owner_resolver import (
     resolve_owner_home,
 )
 from .gateway_lane_retry import BackgroundLaneRetry
+from .gateway_loop_backoff import LoopErrorBackoff
 from .models import GatewayRunContext
 
 # 参数减量第 3 批 B 组（2026-09-27）：后台车道的三个节奏不再是配置项（原 gateway_request_poll_interval /
@@ -93,6 +94,8 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
         dispatcher = _RequestDispatcher(context, paths)
         stage = "gateway_request_loop.run"
         _run_request_dispatch(dispatcher, stop_event)
+        stage = "gateway_request_pool.shutdown"
+        dispatcher.shutdown()
     except Exception as exc:
         _record_request_loop_exit(context, stage, exc)
         return
@@ -102,30 +105,41 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
     _record_request_loop_exit(context, stage, None)
 
 
-# LLM: 主循环每拍走守卫版 tick，派发到东西就立刻下一拍，否则按空闲间隔等 stop_event；关闭执行池不等在飞任务。
-# 函数用途: 跑派发主循环直到 stop_event 置位，然后关闭执行池。
+# LLM: 主循环每拍走守卫版 tick：派发到东西就立刻下一拍，空闲按轮询间隔等，连续出错按 LoopErrorBackoff 退避
+#   （0.2 秒翻倍封顶 30 秒，成功清零），避免持续出错时每 0.2 秒打一条日志把磁盘再写满。关闭执行池由调用方做。
+# 函数用途: 跑派发主循环直到 stop_event 置位。
 def _run_request_dispatch(dispatcher: _RequestDispatcher, stop_event: threading.Event) -> None:
-    poll_interval = GATEWAY_REQUEST_POLL_INTERVAL_SECONDS
+    backoff = LoopErrorBackoff()
     while not stop_event.is_set():
-        if _guarded_dispatch_tick(dispatcher):
-            continue
-        stop_event.wait(poll_interval)
-    dispatcher.shutdown()
+        wait_seconds = _guarded_dispatch_tick(dispatcher, backoff)
+        if wait_seconds > 0:
+            stop_event.wait(wait_seconds)
 
 
-# LLM: tick 外层守卫：接住从 tick 逃逸的任何 Exception（各段 except 处理里再抛、段外代码抛），记入 loop_health 并打印
-#   （打印本身不会再抛），按"本轮没派发"返回让循环继续。每次 tick 起止都记账本，/status 与心跳据此判断派发是否卡住。
-# 函数用途: 跑一次派发 tick，返回本轮是否派发了请求。
-def _guarded_dispatch_tick(dispatcher: _RequestDispatcher) -> bool:
+# LLM: tick 外层守卫：接住从 tick 逃逸的任何 Exception（各段 except 处理里再抛、段外代码抛），次数一律记入 loop_health，
+#   打印按 backoff 限流（同种错误第 1 次打、之后每 10 次打 1 次），打印本身不会再抛。返回下一拍该等多久：派发到东西 0、
+#   空闲成功轮询间隔、出错则退避时长。每次 tick 起止都记账本，/status 与心跳据此判断派发是否卡住。
+# 函数用途: 跑一次派发 tick，返回下一拍前要等的秒数。
+def _guarded_dispatch_tick(dispatcher: _RequestDispatcher, backoff: LoopErrorBackoff) -> float:
     loop_health.mark_tick_started()
     dispatched = 0
     try:
         dispatched = dispatcher.tick()
     except Exception as exc:
-        loop_health.note_tick_error("gateway_request_dispatch.tick", exc)
-        _print_gateway_loop_error("gateway_request_dispatch.tick", "dispatcher", exc)
+        _note_loop_tick_error("gateway_request_dispatch.tick", "dispatcher", exc, backoff)
+        loop_health.mark_tick_finished(0)
+        return backoff.delay()
+    backoff.record_success()
     loop_health.mark_tick_finished(dispatched)
-    return dispatched > 0
+    return 0.0 if dispatched > 0 else GATEWAY_REQUEST_POLL_INTERVAL_SECONDS
+
+
+# LLM: 派发循环与后台主循环共用的出错记账：loop_health 记每一次，backoff 决定这次打不打印。
+# 函数用途: 记一次从 tick 逃逸的异常，并按限流决定是否打印。
+def _note_loop_tick_error(context: str, worker_id: str, exc: BaseException, backoff: LoopErrorBackoff) -> None:
+    loop_health.note_tick_error(context, exc)
+    if backoff.record_failure(f"{context}:{type(exc).__name__}"):
+        _print_gateway_loop_error(context, worker_id, exc)
 
 
 # LLM: 退出事实三处落：loop_health（内存，/status 与心跳可见）、错误打印（不会抛）、gateway 事件（log_gateway_event
@@ -302,15 +316,18 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
         )
 
 
+# LLM: 后台主循环节奏与派发循环同一套：有活立刻下一拍，空闲等 poll_interval，连续出错按 LoopErrorBackoff 退避并限流打印。
+# 函数用途: 跑后台主循环直到 stop_event 置位。
 def _run_background_main_ticks(
     supervisor: object,
     stop_event: threading.Event,
     poll_interval: float,
 ) -> None:
+    backoff = LoopErrorBackoff()
     while not stop_event.is_set():
-        if _supervisor_tick_survives(supervisor):
-            continue
-        stop_event.wait(poll_interval)
+        wait_seconds = _supervisor_tick_survives(supervisor, backoff, poll_interval)
+        if wait_seconds > 0:
+            stop_event.wait(wait_seconds)
 
 
 def _shutdown_background_main(
@@ -394,16 +411,23 @@ def _start_scheduler_due_loop(
     return thread
 
 
-def _supervisor_tick_survives(supervisor: _BackgroundMainSupervisor) -> bool:
+# LLM: 返回下一拍前要等的秒数：有活 0、空闲 poll_interval、出错退避时长（连续出错翻倍封顶 30 秒，打印限流）。
+#   异常只记账、按限流打印，绝不逃出；循环只随 stop_event 退出。
+# 函数用途: 跑一次后台主循环 tick，返回下一拍前要等的秒数。
+def _supervisor_tick_survives(
+    supervisor: _BackgroundMainSupervisor, backoff: LoopErrorBackoff, poll_interval: float
+) -> float:
     """永不停机硬保障:tick 的编排缝隙(种子重扫/owner 池同步/提交/汇报)不在 _safe_tick
     保护内,曾能把后台主循环线程整个杀死——网关被 systemd 拉着 active,干活的循环却再也
-    不回来(真机 429 断供实锤的死法之一)。任何异常打点后返回 False 等一拍继续,循环只随
+    不回来(真机 429 断供实锤的死法之一)。任何异常打点后退避一拍继续,循环只随
     stop_event 退出。"""
     try:
-        return bool(supervisor.tick())
+        busy = bool(supervisor.tick())
     except Exception as exc:
-        _print_gateway_loop_error("gateway_background_main.tick", "background-main", exc)
-        return False
+        _note_loop_tick_error("gateway_background_main.tick", "background-main", exc, backoff)
+        return backoff.delay()
+    backoff.record_success()
+    return 0.0 if busy else poll_interval
 
 
 def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -> BackgroundMainAgentScheduler:

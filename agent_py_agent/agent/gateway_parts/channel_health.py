@@ -121,7 +121,8 @@ def _utc_now_iso() -> str:
 
 # LLM: /status 用的适配器进程事实：存活只信 adapter.pid 记录对应的进程是否真活着（含启动指纹防 PID 复用），
 #   状态文件只提供 state/updated_at 与是否陈旧；两者分开给出，读者能区分"进程死了但文件还写着 running"
-#   （2026-09-28 飞书事故的形态）。只读，不清理陈旧 pid 文件，不抛异常。
+#   （2026-09-28 飞书事故的形态）。读取错误只给结构化子集（category/context），不带路径或正文；只读，不清理
+#   陈旧 pid 文件，不抛异常。
 # 函数用途: 返回可直接并入 /status 响应的扁平适配器事实。
 def adapter_process_facts(paths: Any) -> dict[str, Any]:
     pid_report = get_running_pid_report(paths.adapter_pid, cleanup_stale=False)
@@ -129,23 +130,31 @@ def adapter_process_facts(paths: Any) -> dict[str, Any]:
     facts: dict[str, Any] = {
         "adapter_alive": bool(pid),
         "adapter_pid": pid,
-        "adapter_pid_error": "" if pid_report.load_error is None else str(pid_report.load_error),
+        "adapter_pid_error": _load_error_subset(pid_report.load_error),
         "adapter_state": "",
         "adapter_state_updated_at": "",
         "adapter_state_stale": True,
-        "adapter_state_error": "",
+        "adapter_state_error": {},
     }
     state_report = read_json_file_report(
         paths.root / "adapter_state.json", context="gateway.status.adapter_state.read"
     )
     if state_report.load_error is not None:
-        facts["adapter_state_error"] = str(state_report.load_error)
+        facts["adapter_state_error"] = _load_error_subset(state_report.load_error)
         return facts
     payload = state_report.payload if isinstance(state_report.payload, dict) else {}
     facts["adapter_state"] = str(payload.get("state") or "")
     facts["adapter_state_updated_at"] = str(payload.get("updated_at") or "")
     facts["adapter_state_stale"] = _state_is_stale(payload)
     return facts
+
+
+# LLM: 读取错误报告里只有 category/context 适合对外展示；path、message 可能含绝对路径或正文，一律不带。
+# 函数用途: 把 JSON/pid 读取错误报告压成 /status 可展示的子集，没有错误返回空字典。
+def _load_error_subset(load_error: object) -> dict[str, str]:
+    if not isinstance(load_error, dict):
+        return {}
+    return {key: str(load_error.get(key) or "") for key in ("category", "context")}
 
 
 __all__ = ["adapter_process_facts", "adapter_runtime_health"]

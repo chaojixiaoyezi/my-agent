@@ -184,4 +184,17 @@ def test_status_adapter_facts_follow_process_liveness_not_state_file(tmp_path) -
 
     state_path.write_text("{not json", encoding="utf-8")  # 状态文件坏了：存活判断不受影响，错误单列
     facts = adapter_process_facts(gpaths)
-    assert facts["adapter_alive"] is True and facts["adapter_state"] == "" and facts["adapter_state_error"]
+    assert facts["adapter_alive"] is True and facts["adapter_state"] == ""
+    assert set(facts["adapter_state_error"]) == {"category", "context"}  # 结构化子集，不带路径与正文
+    assert facts["adapter_state_error"]["context"] == "gateway.status.adapter_state.read"
+    assert str(tmp_path) not in json.dumps(facts)
+
+    gpaths.adapter_pid.write_text("{bad pid record", encoding="utf-8")  # pid 记录坏了：不算活，错误同样是子集
+    facts = adapter_process_facts(gpaths)
+    assert facts["adapter_alive"] is False and set(facts["adapter_pid_error"]) == {"category", "context"}
+
+
+def test_adapter_error_record_is_redacted() -> None:
+    record = adapter._error_record(RuntimeError("feishu api_key=sk-live-123456 rejected"))
+    assert record["type"] == "RuntimeError"
+    assert "sk-live-123456" not in record["message"] and "<redacted>" in record["message"]

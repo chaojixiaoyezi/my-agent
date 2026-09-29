@@ -415,3 +415,10 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
 - `/status` 新增适配器事实（`channel_health.adapter_process_facts`）：`adapter_alive` 只按 `adapter.pid` 记录对应的进程是否真活着
   判定（含启动指纹防 PID 复用），状态文件只给 `adapter_state`/`adapter_state_updated_at`/`adapter_state_stale`；读取失败单列
   `adapter_state_error`/`adapter_pid_error`，只读、不清理陈旧 pid 文件。合同测试 `test_adapter_state_write_resilience.py`。
+- 9a 复审跟进（同分支第二个提交）：tick 持续出错时原来每 0.2 秒打一条 `[gateway-loop-error]`（stdout 追加进 paths.log，一天两百多 MB），
+  正好能把刚腾出的磁盘再写满。派发循环与后台主循环共用 `cli/gateway_loop_backoff.LoopErrorBackoff`：连续出错等
+  min(0.2·2^k, 30) 秒、成功一次清零；同种错误（context + 异常类型）只打第 1 次、之后每 10 次打 1 次，次数仍全部记进
+  `dispatch_tick_errors`。其余：`dispatcher_alive` 改为保存线程对象用 `is_alive()`（ident 在 macOS 上会立即复用）；
+  `dispatcher.shutdown()` 抛错记成 `gateway_request_pool.shutdown` 阶段；`/status` 的 `adapter_pid_error`/`adapter_state_error`
+  改为结构化子集（category、context，不带路径）；账本与适配器状态里的错误消息先过 `redact_sensitive_text`。
+  9a 建议的 hdiutil 小磁盘镜像写满真机复现留作后续验收。

@@ -25,6 +25,7 @@ from agent_py_agent.agent.gateway_parts.http_handlers import handle_status
 from agent_py_agent.agent.gateway_parts.loop_health import GatewayLoopHealth, loop_health
 from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
 from agent_py_agent.cli import gateway_loops
+from agent_py_agent.cli.gateway_loop_backoff import LoopErrorBackoff
 from agent_py_agent.tests.test_gateway_admission_wait import _paths
 
 
@@ -216,6 +217,29 @@ def test_dispatcher_death_is_visible_in_heartbeat_and_status(tmp_path, monkeypat
     assert sent[0][1]["adapter_alive"] is False and sent[0][1]["adapter_pid"] is None  # 没有 adapter.pid → 不算活
 
 
+def test_dispatcher_shutdown_error_is_recorded_with_shutdown_stage(tmp_path, monkeypatch) -> None:
+    paths = _paths(tmp_path)
+    stop_event = threading.Event()
+    stop_event.set()  # 不跑 tick，直接走关闭
+
+    class _Dispatcher:
+        def tick(self) -> int:
+            return 0
+
+        def shutdown(self) -> None:
+            raise RuntimeError("executor shutdown failed")
+
+    monkeypatch.setattr(gateway_loops, "_RequestDispatcher", lambda context, paths: _Dispatcher())
+    monkeypatch.setattr(gateway_loops, "log_gateway_event", lambda agent, event_type, payload: None)
+    monkeypatch.setattr(sys, "stderr", _FailingStderr(failures=0))
+
+    gateway_loops._gateway_request_loop(SimpleNamespace(agent=None), paths, stop_event)  # Exception 按原语义吞掉
+
+    snapshot = loop_health.snapshot()
+    assert snapshot["dispatcher_state"] == "exited"
+    assert snapshot["dispatcher_exit_error"]["context"] == "gateway_request_pool.shutdown"  # 撤修复：记成 run 阶段
+
+
 def test_loop_health_reports_vanished_thread_without_exit_record() -> None:
     health = GatewayLoopHealth()
     assert health.snapshot()["dispatcher_state"] == "not_started"
@@ -265,3 +289,86 @@ def test_scan_gate_rescans_request_renamed_in_after_glob(tmp_path, monkeypatch, 
     assert gate.should_scan(paths.inbox) is True
     assert rw.dispatch_pending_requests(paths, limits, submit, scan_gate=gate) == 1
     assert claimed == ["req-late"]
+
+
+# 类用途: 记录每次等待时长的 stop_event 替身：等够 limit 次就置位，不真的睡，让退避序列可精确断言。
+class _RecordingStop:
+    def __init__(self, limit: int) -> None:
+        self.waits: list[float] = []
+        self.limit = limit
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set
+
+    def wait(self, seconds: float) -> bool:
+        self.waits.append(round(float(seconds), 6))
+        if len(self.waits) >= self.limit:
+            self._set = True
+        return self._set
+
+
+# 类用途: 按脚本决定每次 tick 是抛错还是空闲返回 0 的派发者/监督者替身。
+class _ScriptedTick:
+    def __init__(self, outcomes: list[str]) -> None:
+        self.outcomes = outcomes
+        self.calls = 0
+
+    def tick(self) -> int:
+        outcome = self.outcomes[self.calls]
+        self.calls += 1
+        if outcome == "error":
+            raise RuntimeError("tick keeps failing")
+        return 0
+
+
+def test_dispatch_loop_backs_off_and_throttles_prints_on_continuous_errors(monkeypatch) -> None:
+    stderr = _FailingStderr(failures=0)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    outcomes = ["error"] * 12 + ["idle", "error", "error"]
+    stop = _RecordingStop(limit=len(outcomes))
+
+    gateway_loops._run_request_dispatch(_ScriptedTick(outcomes), stop)
+
+    # 撤修复（无退避）：全是 0.2；成功一次清零，新一段故障从头退避
+    assert stop.waits[:12] == [0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6, 30.0, 30.0, 30.0, 30.0]
+    assert stop.waits[12] == gateway_loops.GATEWAY_REQUEST_POLL_INTERVAL_SECONDS
+    assert stop.waits[13:] == [0.2, 0.4]
+    printed = [text for text in stderr.writes if "[gateway-loop-error]" in text]
+    assert len(printed) == 3, "同种错误只打第 1 次和第 10 次，成功后新一段的第 1 次再打；撤修复：15 次"
+    snapshot = loop_health.snapshot()
+    assert snapshot["dispatch_tick_errors"] == 14 and snapshot["dispatch_tick_count"] == 15
+    assert snapshot["last_dispatch_tick_error"]["type"] == "RuntimeError"
+
+
+def test_background_main_loop_backs_off_and_throttles_prints(monkeypatch) -> None:
+    stderr = _FailingStderr(failures=0)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    outcomes = ["error"] * 11 + ["idle"]
+    stop = _RecordingStop(limit=len(outcomes))
+
+    gateway_loops._run_background_main_ticks(_ScriptedTick(outcomes), stop, 1.0)
+
+    assert stop.waits == [0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6, 30.0, 30.0, 30.0, 1.0]  # 撤修复：全是 1.0
+    assert len([text for text in stderr.writes if "[gateway-loop-error]" in text]) == 2  # 第 1 次与第 10 次
+
+
+def test_loop_error_backoff_delay_and_print_policy() -> None:
+    backoff = LoopErrorBackoff(base_seconds=0.2, cap_seconds=30.0, print_every=10)
+    assert backoff.delay() == 0.0
+    decisions = [backoff.record_failure("k") for _ in range(21)]
+    assert [index + 1 for index, decision in enumerate(decisions) if decision] == [1, 10, 20]
+    assert backoff.delay() == 30.0 and backoff.consecutive_failures == 21
+    assert backoff.record_failure("other") is True  # 另一种错误的第一次也要打
+    backoff.record_success()
+    assert backoff.delay() == 0.0 and backoff.consecutive_failures == 0
+    assert backoff.record_failure("k") is True and backoff.delay() == 0.2
+
+
+def test_loop_health_error_records_are_redacted() -> None:
+    loop_health.note_tick_error("gateway_request_dispatch.tick", RuntimeError("upstream api_key=sk-live-123456 rejected"))
+    record = loop_health.snapshot()["last_dispatch_tick_error"]
+    assert "sk-live-123456" not in record["message"] and "<redacted>" in record["message"]
+    loop_health.mark_exited(RuntimeError("token=ghp_secret_value"), "gateway_request_pool.shutdown")
+    exit_error = loop_health.snapshot()["dispatcher_exit_error"]
+    assert exit_error["context"] == "gateway_request_pool.shutdown" and "ghp_secret_value" not in exit_error["message"]

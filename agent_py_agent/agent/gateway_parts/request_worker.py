@@ -101,6 +101,8 @@ class GatewayInboxScanGate:
         self._scan_started_mtime_ns: int | None = None
         self._scan_required = True
 
+    # LLM: 每次调用都先取样并保存（哪怕这轮不扫），record_scan 只认这份样本；返回 True 的三种情况按顺序：上轮要求重扫、
+    #   目录不可读、mtime 变了；都不满足才看粗粒度保护窗口。取样不能挪到 glob 之后。
     # 函数用途: 判断这一轮要不要 glob；总是先把当前 mtime 记为"本轮扫描前的样本"。
     def should_scan(self, inbox: Path) -> bool:
         mtime_ns = self._inbox_mtime_ns(inbox)
@@ -109,6 +111,8 @@ class GatewayInboxScanGate:
             return True
         return (time.time() - mtime_ns / 1e9) < self._COARSE_MTIME_GUARD_SECONDS
 
+    # LLM: 基线是 should_scan 存的扫描前样本，不是现在的 mtime；这里再 stat 一次只为判"扫描期间变过"。没取过样
+    #   （None）按需要重扫处理，宁多扫不漏扫。processed/deferred_present 语义不变：有活或有延迟请求下轮必扫。
     # 函数用途: 记录本轮结果；以扫描前样本为"已见过"的基线，扫描期间目录又变了就强制下一轮重扫。
     def record_scan(self, inbox: Path, *, processed: int, deferred_present: bool) -> None:
         self._last_mtime_ns = self._scan_started_mtime_ns
