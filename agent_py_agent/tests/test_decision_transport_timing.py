@@ -9,6 +9,7 @@ CONNECT 和 TLS，但阶段耗时只在内存里，分不清慢在代理还是 J
 """
 from __future__ import annotations
 
+import http.client
 import json
 import select
 import socket
@@ -26,6 +27,11 @@ from agent_py_agent.agent.backends.gateway_helpers import (
     GatewayRequest,
     post_json,
     provider_attempt_observer,
+)
+from agent_py_agent.agent.backends.transport_timing import (
+    AttemptTiming,
+    TimedHTTPResponse,
+    instrument_connection,
 )
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallFailureParams,
@@ -241,6 +247,31 @@ def test_direct_http_call_has_no_proxy_or_tls_phase(link):
     assert final["phase"] == "" and tuple(final["phase_ms"]) == ("connect", "request_send", "first_byte", "body_read")
     assert final["phase_ms"]["first_byte"] >= 90
     assert link.connects == [] and link.handshakes == [] and len(link.posts) == 1
+
+
+def test_stdlib_private_hooks_the_timing_relies_on_still_exist():
+    # 计时依赖这些标准库私有接口；升级 Python 后缺了任何一个，这里直接变红，而不是静默丢掉某个阶段。
+    for connection in (http.client.HTTPConnection("127.0.0.1", 1), http.client.HTTPSConnection("127.0.0.1", 1)):
+        assert callable(connection._create_connection) and callable(connection._tunnel)
+        assert hasattr(connection, "_tunnel_host") and connection._tunnel_host is None
+        assert connection.response_class is http.client.HTTPResponse
+    assert callable(getattr(http.client.HTTPResponse, "_read_status", None))
+    assert issubclass(TimedHTTPResponse, http.client.HTTPResponse)
+
+
+def test_a_timing_failure_right_after_connect_closes_the_new_socket():
+    # 函数用途: 观察者回调里冒出的 BaseException（Exception 以外，_emit_provider_attempt 兜不住）。
+    def interrupted(_snapshot):
+        raise KeyboardInterrupt
+
+    created = SimpleNamespace(closed=False)
+    created.close = lambda: setattr(created, "closed", True)
+    connection = http.client.HTTPConnection("127.0.0.1", 1)
+    connection._create_connection = lambda *_args: created
+    instrument_connection(connection, AttemptTiming(interrupted), tls=False)
+    with pytest.raises(KeyboardInterrupt):
+        connection._create_connection(("127.0.0.1", 1), 1.0, None)
+    assert created.closed, "socket 还没交给 connection.sock，推进失败时必须先关掉"
 
 
 def test_calls_without_the_switch_emit_the_original_events(link):

@@ -119,7 +119,7 @@
 
 ## Jev 决策调用的链路分段计时（B 第 0 步）（2026-09-28，分支 `claude/be-jev-transport-timing`，基于 `80b4afed8`）
 
-- **新增测试** `test_decision_transport_timing.py`（20 项）不访问任何真实服务，替身有三个：
+- **新增测试** `test_decision_transport_timing.py`（22 项，含 9b 复审后补的 2 项）不访问任何真实服务，替身有三个：
   - 本机假 CONNECT 代理：可设回复延迟；
   - 假 TLS：握手处按设定时长等待后原样返回 socket，不加密；
   - 假服务端：首字节和正文可以分别延迟。
@@ -145,6 +145,9 @@
     - 估算输入进了 model_usage 快照（线程汇总和 decision 分区都有），`audit_records` 用量行也带出；
     - 供应商输入为 0，发送次数不变；
   - 调用前就结束（没建调用记录）的结果行不带 transport；旧行的最近行形状不变。
+- **复审跟进**（9b，复审通过后的建议项）：
+  - `test_stdlib_private_hooks_the_timing_relies_on_still_exist`：钉住计时依赖的标准库私有接口，升级 Python 缺了会直接变红；
+  - `test_a_timing_failure_right_after_connect_closes_the_new_socket`：推进阶段时抛 KeyboardInterrupt，还没交给连接的新 socket 被关掉。
 - **形状断言更新**：`test_model_call_ledger.py` 3 处、`test_conversation_store.py` 1 处，estimated 的期望值补上两个值为 0 的新键。
 - **定向回归**：共 98 个测试文件：引用改动模块的 92 个，加 5 个扫描守卫（architecture_guardrails、constant_names_unique、
   config_field_readers、recovery_code_policy、orchestration_tool_constants）和本次新文件。

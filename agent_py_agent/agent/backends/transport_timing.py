@@ -2,6 +2,8 @@
 #   只包裹标准库连接已有的步骤（建连、代理隧道、TLS、取响应、读状态行）并读单调时钟，每个包裹先原样执行原步骤、异常原样上抛，
 #   成功后才推进阶段，因此不改变发送字节、重试、期限或连接复用。阶段名是封闭集合 TRANSPORT_PHASES，进度事件状态固定为
 #   PROGRESS_STATUS；新增阶段或改状态须同步账本（超时阶段推导）、决策结果日志与 test_decision_transport_timing.py。
+#   依赖的标准库私有接口（_create_connection、_tunnel、_tunnel_host、response_class、HTTPResponse._read_status）由测试钉住，
+#   升级 Python 时缺了会直接变红。目前只有非流式 post_json 会收尾 body_read（见 finish_body_read）。
 # 模块用途: 给一次真实 HTTP 尝试记下每个网络阶段花了多久、当前卡在哪个阶段，供决策调用落盘分析"慢在代理还是服务端"。
 from __future__ import annotations
 
@@ -73,9 +75,15 @@ def instrument_connection(connection: http.client.HTTPConnection, timing: Attemp
     connect, getresponse = connection.connect, connection.getresponse
 
     # 函数用途: TCP 连接建立后结束建连阶段；走代理隧道时下一阶段是 CONNECT（参数与标准库 connect 的调用一致）。
+    #   新 socket 此刻还没交给 connection.sock：推进时若抛出任何异常（含观察者回调里的 KeyboardInterrupt），先关掉它再上抛，
+    #   测量不能泄漏连接。
     def timed_create(address, timeout, source_address):
         sock = create(address, timeout, source_address)
-        timing.advance("connect", "proxy_connect" if connection._tunnel_host else after_tunnel)
+        try:
+            timing.advance("connect", "proxy_connect" if connection._tunnel_host else after_tunnel)
+        except BaseException:
+            sock.close()
+            raise
         return sock
 
     # 函数用途: 代理回复 CONNECT 成功后结束隧道阶段。
@@ -100,6 +108,8 @@ def instrument_connection(connection: http.client.HTTPConnection, timing: Attemp
 
 
 # LLM: 只由非流式 post_json 在完整读完正文后调用；读失败不调用（阶段停在 body_read 即表示卡在读正文）。
+#   流式调用（post_stream / post_stream_iter）不走这里：今后若对流式调用开启计时，成功的调用也会停在 body_read，
+#   须先在流式读取收尾处补一个等价的结束点，否则 body_read 不能当“卡在读正文”解读。
 # 函数用途: 记下读完正文，原样返回正文字节。
 def finish_body_read(response: object, body: bytes) -> bytes:
     timing = getattr(response, "attempt_timing", None)

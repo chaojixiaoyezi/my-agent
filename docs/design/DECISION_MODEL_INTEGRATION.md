@@ -219,8 +219,12 @@ agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 
 - **进账**：每个阶段结束发一次 `status=progress` 事件，账本只替换该尝试的 `transport`（当前阶段 + 已完成阶段毫秒），
   不改尝试状态、活动时间和事件列表。超时写 `timeout_transport_phase`，即超时那一刻最后一次尝试所处的阶段。
 - **落盘**：建了调用记录的结果日志行带 `transport`（`attempts` 为空表示请求没发出）：`call_status`、`timeout_stage`、`timeout_phase`、`estimated_input_tokens` 和各尝试的
-  `status/http_status/error_type/phase/phase_ms`。caller 超时时 worker 可能还在传输，行里记的是超时那一刻的阶段；
-  之后的迟到事实只留在内存账本。
+  `status/http_status/error_type/phase/phase_ms`。
+- **迟到的进度**：调用方超时之后，worker 仍会继续推进计时（例如 TLS 这时才完成、读到首字节），这些迟到的进度只留在内存账本里；
+  结果日志记的是超时那一刻的阶段。
+- **只有非流式有收尾**：流式调用不走 `finish_body_read`；以后如果对流式调用开启计时，成功的调用也会停在 `body_read`，要先补上结束点。
+- **标准库依赖**：计时依赖的标准库私有接口（`_create_connection`、`_tunnel`、`_tunnel_host`、`response_class`、
+  `HTTPResponse._read_status`）由测试钉住。建连后推进阶段时如果抛出异常，会先关掉还没交给连接的新 socket 再上抛。
 - **估算入账**：超时或失败、且已发起过 HTTP 尝试的调用，把发送前的本地估算输入记进
   `usage_breakdown.estimated.unfinished_input_tokens/unfinished_call_count`（所有用途分区都有），随 model_usage 快照增量落盘，
   与 `provider` 桶分开。没发出尝试的调用（准入忙、许可拒绝、配置错误）不计。TUI 统计行口径不变。
