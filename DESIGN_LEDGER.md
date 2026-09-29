@@ -1,5 +1,18 @@
 # 设计台账
 
+## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案待审，未落地）
+
+- **背景**：`204f4ddf9` 和 `7b83c8730` 都让同一条唤醒约每 30 秒被领取一次、失败或取消后永远重试。
+  唤醒只有 pending/handled 两种状态，所有重试节流都在进程内，重启即清零，session_task 等 reason 没有任何上限。
+- **方向**：
+  - 按唤醒记一份持久尝试账，只数结构化原因（admission 码、异常类型或 `error_code`）；
+  - 同因连续 5 次即结案为 `failed_permanently`，退避依次为 30、60、120、240 秒；
+  - 瞬时类只按类型排除，未知码默认计数；
+  - 结案时同步结掉关联 observation，发布层同键不复活，会话任务转 failed 并回报发送方；
+  - 运维可见：结构化日志、宿主提示、`/wakes` 列表与人工重放。
+- 与回合内兜底（待处理输入作废 8 次、同一失败 15 次熔断）分层：那两条管一个回合内的调用次数，本方案管同一条唤醒被领取几次。
+- 实现等 my-agent-3 的取消修复合入后再做。详见 [WAKE_POISON_PILL.md](docs/design/WAKE_POISON_PILL.md)。
+
 ## 前台命令已退出、只是清理未确认时如实返回执行结果（2026-09-29，`claude/75-scheduler-waiting-deadlock` 的 `84e8db619` + `067d2dd3e`，单独集成）
 
 - 来源：2026-09-28 定时任务停摆的触发点是一次前台同步 `run_command`：命令已经跑完、退出码已知，只是后代进程清理的核对没确认（高负载下清理确认超时），工具却报 `TOOL_OPERATION_OUTCOME_UNKNOWN` / `effect_outcome=unknown`，整轮被叫停。
