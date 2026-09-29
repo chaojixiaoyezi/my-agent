@@ -18,6 +18,12 @@
 - **定向回归**：引用这些函数的 30 个测试文件加护栏测试：470 passed、2 skipped（`--basetemp` 28 字符）。
   - `test_subagent_debug_trace.py::test_subagent_debug_trace_level_five_writes_detail_refs` 在 116 字符的长 basetemp 下，基点和本分支都失败，换短路径后两边都通过，属于已知的路径长度问题，与本改动无关。
 
+## SubAgentBaseService 压到 200 行以下（2026-09-28，分支 `claude/75-subagent-base-slim`，基于 `54880f8e9`，行为不变）
+
+- **改动**：`_write_authority_records` 及其链身份回存移到 `subagents/services/run_authority.py::write_create_run_authority`；`_finalize_task` 改为同文件的模块函数 `_finalize_created_task`。`create_run` 的调用顺序、异常与日志内容不变，只是告警日志的 logger 名随新模块变化。类长 239 → 189。
+- **code-size**：本片涉及的三个文件逐文件比较发现项，只消失 `SubAgentBaseService` 的 high-risk，没有新增。
+- **测试**：`test_decision_subagent.py` 的“线程创建后、权威写入前崩溃再重试”用例改为 patch `services.base.write_create_run_authority`。子代理相关 117 个测试文件（含 `test_runtime_db_main_chain`、`test_decision_subagent`、`architecture_guardrails`、`constant_names_unique`、`code_size_script`）共收集 1345 项，全部通过。按磁盘约束没有跑全仓；basetemp 已删除，测试未生成 pycache。
+
 ## capability 配置缺文件用默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`）
 
 - **新增或修改的测试**：

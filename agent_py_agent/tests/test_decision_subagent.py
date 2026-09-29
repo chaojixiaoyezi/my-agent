@@ -810,8 +810,10 @@ def test_crash_after_thread_creation_retry_cannot_replant_cancelled_pending(prep
 
     agent, (a, _), _ = prepared
     provider(monkeypatch, prepared, {"0": a})
+    from agent_py_agent.agent.subagents.services import base as base_service_module
+
     service = agent.subagents.base_service
-    original_create, original_authority = service.create_run, service._write_authority_records
+    original_create, original_authority = service.create_run, base_service_module.write_create_run_authority
     runs = []
 
     def capture(**kwargs):
@@ -822,14 +824,14 @@ def test_crash_after_thread_creation_retry_cannot_replant_cancelled_pending(prep
         raise OSError("simulated crash between thread and authority publication")
 
     monkeypatch.setattr(service, "create_run", capture)
-    monkeypatch.setattr(service, "_write_authority_records", crash)
+    monkeypatch.setattr(base_service_module, "write_create_run_authority", crash)
     result = CreateSubagentsTool(agent).execute({"goal": "检查材料"})
     assert not result.ok and not agent.subagents.list_runs()
     run = runs[0]
     pending = advice(agent, run.task)
     assert pending["status"] == "pending"
     thread_model_profile_id(agent, run.task.agent_thread_id, select="default")
-    monkeypatch.setattr(service, "_write_authority_records", original_authority)
+    monkeypatch.setattr(base_service_module, "write_create_run_authority", original_authority)
     task = original_create(params=run.params, prepared=run)
     assert task is run.task and len(agent.subagents.list_runs()) == 1
     assert advice(agent, task)["status"] == "retained"

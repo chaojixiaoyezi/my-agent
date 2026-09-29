@@ -7,6 +7,8 @@
 
 行为不变，见 TESTS 顶部本节。
 
+2026-09-28：`SubAgentBaseService` 压到 200 行以下（分支 `claude/75-subagent-base-slim`，行为不变）。建 run 的权威写入`_write_authority_records` 与链身份回存移到新模块 `services/run_authority.py`（`write_create_run_authority`），任务落盘登记 `_finalize_task` 改为同文件模块函数 `_finalize_created_task`；`create_run` 的调用顺序与异常不变。类长 239→189，code-size 只消失该类的 high-risk、无新增；依赖原方法的崩溃重试测试改为 patch 新函数。
+
 2026-09-28：进入被接替的子代理页后，头部也标出“已被 X 接替”（分支 `claude/ae-tui-superseded-marker` 第 3 个提交），数据仍只来自 kernel 的 `replaced_by_view`；CLI board 按集成方决定不做。
 
 2026-09-28：TUI 子代理名册对被接替的子代理标出“已被 X 接替”（分支 `claude/ae-tui-superseded-marker` 第 2 个提交），数据只来自 kernel 的 `replaced_by_view`，不另外推断；CLI board 暂未标注。

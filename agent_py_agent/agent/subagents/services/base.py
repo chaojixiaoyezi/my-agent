@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from agent_py_agent.agent.subagents.model_task import TakeoverRecord
 
-import logging
 import time
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
@@ -26,7 +25,6 @@ from ...capability.subagent_entry_authority import SubagentEntryInitialization
 from ...common.id_generator import new_id as _framework_new_id
 from ...settings.thread_model_selection import PendingSubagentModelAdvice
 from ..authorization_gate import (
-    AuthorizationError,
     OperationRequest,
     authorize_operation,
 )
@@ -38,6 +36,7 @@ from .persistence.model_normalizers import (
     _normalize_context_packs,
     _normalize_quality_contract,
 )
+from .run_authority import write_create_run_authority
 
 if TYPE_CHECKING:
     from ..models import ContextManifest, QualityContract, SubAgentCard
@@ -460,8 +459,8 @@ class SubAgentBaseService:
             task = prepared.task
             self._materialize_agent_thread(task, model_advice=prepared.model_advice,
                                            package_entry_initialization=prepared.package_entry_initialization)
-            self._write_authority_records(task, prepared.params)
-            self._finalize_task(task, prepared.params.parent_id)
+            write_create_run_authority(self.manager, task, prepared.params)
+            _finalize_created_task(self.manager, task, prepared.params.parent_id)
             return task
 
     # LLM: 只读原角色、父任务和 owner 事实并分配正式待提交身份，不写 task/thread/DB；调用方在原创建锁内取得一致快照，锁外等待后仍由 create_run 复核。
@@ -545,53 +544,6 @@ class SubAgentBaseService:
 
         seed_delegated_goal(self.manager, task)
 
-    def _write_authority_records(self, task: SubAgentTask, params: CreateRunParams) -> None:
-        """R1：create_run 权威主链写入（A.4/A.5/A.6/A.7/A.9）。
-
-        单事务落 Task→TaskRun→root AgentRun→第一个 pending AgentAttempt→(child)
-        Delegation→runtime_events；conversation_task_id/thread_id 同事务进
-        tasks 行，ConversationTaskLink 不再独立权威。owner_home_dir 为空
-        （无 home 上下文）时无权威库，只走投影（向后兼容）。
-
-        F8（fail-closed）：有 home 上下文时权威写入不允许静默失败——缺记录
-        的 run 会被授权门按"权威记录缺失"拒绝（B.6），成为不可管理的幻影；
-        故 attach 降级（repo None）或写入失败一律抛错，任务创建不落地。
-        """
-        repo = getattr(self.manager, "runtime_db", None)
-        if repo is None:
-            from ...runtime_db.execution_mode import expects_managed_authority
-
-            if expects_managed_authority(self.manager):
-                raise AuthorizationError(
-                    f"create_run: 权威库不可用（ExecutionMode.MANAGED 但 "
-                    f"runtime.db 未挂载，run={task.id} 拒绝创建）"
-                )
-            return  # LOCAL_UNMANAGED（纯文件层/投影）→ 只走投影（显式选择）
-        attrs = params.attributes if isinstance(params.attributes, dict) else {}
-        owner_id = str(task.owner or params.owner or "").strip()
-        if not owner_id:
-            owner_id = str(getattr(self.manager, "owner_id", "") or "").strip()
-        try:
-            record = repo.record_run_creation(
-                owner_id=owner_id,
-                goal=str(task.goal or "").strip(),
-                conversation_task_id=str(attrs.get("conversation_task_id") or "").strip(),
-                thread_id=str(attrs.get("conversation_thread_id") or "").strip(),
-                run_id=str(task.id or "").strip(),
-                role=str(task.role or "").strip(),
-                parent_run_id=str(params.parent_id or "").strip(),
-                attempt_status="pending",
-            )
-        except (OSError, KeyError) as exc:
-            # 权威写入失败不再吞掉：有 home 时记录缺失 = 门后拒绝（fail-closed）。
-            logging.getLogger(__name__).warning(
-                "runtime.db 权威写入失败(run=%s): %s", task.id, exc, exc_info=True
-            )
-            raise
-        # seq 253 闭合：链身份回存任务属性——runner 启动时激活 pending attempt、
-        # run scope 携带 DB task_id（授权门比对键）都要从这里拿，不另起查询。
-        _persist_runtime_authority_attrs(task, record)
-
     # LLM: 路径来自原 manager 算法，父状态只读一次；复核只使用原准备身份和时间，不调用 ID 生成或物化工作区。
     # 函数用途: 计算一个新任务或原准备对象的创建材料，不写文件、线程或权威数据库。
     def _prepare_run(self, params: CreateRunParams, *, run_id: str | None = None, created_at: float | None = None) -> dict[str, object]:
@@ -647,24 +599,6 @@ class SubAgentBaseService:
         task.inheritance_manifest = build_inheritance_manifest(parent_task, task)
         rebind_task_output_refs_to_run(task)
         return task
-
-    def _finalize_task(self, task: SubAgentTask, parent_id: str) -> None:
-        """Save task, register in local store, and link to parent if needed."""
-        from ..debug_trace import trace_task_created
-
-        self.manager.save(task)
-        register_collaboration_agent_capability(self.manager, task)
-        trace_task_created(self.manager, task)
-        if self.manager.local_store:
-            self.manager.local_store.task_registry.register_task(
-                task_id=task.id,
-                session_id=task.root_id,
-                user_id=task.owner or "",
-                status=task.status,
-                goal=task.goal,
-            )
-        if parent_id:
-            self.manager.add_child(parent_id, task.id)
 
     # LLM: 所有接管入口（显式接替、手动接管、领导权恢复、接管 run）先过统一授权门，再交 takeover.record 落账：已关闭
     #   来源只追加 superseded_by、终态不改写，未关闭来源转 TAKEN_OVER；保存后核对落盘，读不到就抛
@@ -742,18 +676,22 @@ def _task_permission_snapshot(manager: Any, params: CreateRunParams, parent_task
     )
 
 
-def _persist_runtime_authority_attrs(task: SubAgentTask, record: dict[str, object]) -> None:
-    """回存权威链身份到任务属性（save 前调用）。
+# LLM: 权威写入成功之后才调用；保存、协作能力登记、调试追踪、本地任务表和父子链接按原顺序执行，不改写任务身份。
+# 函数用途: 落盘新建的子代理任务并登记到本地索引，需要时挂到父任务下。
+def _finalize_created_task(manager: Any, task: SubAgentTask, parent_id: str) -> None:
+    """Save task, register in local store, and link to parent if needed."""
+    from ..debug_trace import trace_task_created
 
-    只有 record_run_creation 成功返回才调用（LOCAL_UNMANAGED 早退不经过）。
-    子代理 runner 启动（attempt 轮换）、授权门比对（scope task_id）共用这份
-    单一权威来源，不另起查询。
-    """
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    attrs["runtime_authority"] = {
-        "task_id": str(record.get("task_id") or "").strip(),
-        "task_run_id": str(record.get("task_run_id") or "").strip(),
-        "agent_run_id": str(record.get("agent_run_id") or "").strip(),
-        "attempt_id": str(record.get("attempt_id") or "").strip(),
-    }
-    task.attributes = attrs
+    manager.save(task)
+    register_collaboration_agent_capability(manager, task)
+    trace_task_created(manager, task)
+    if manager.local_store:
+        manager.local_store.task_registry.register_task(
+            task_id=task.id,
+            session_id=task.root_id,
+            user_id=task.owner or "",
+            status=task.status,
+            goal=task.goal,
+        )
+    if parent_id:
+        manager.add_child(parent_id, task.id)

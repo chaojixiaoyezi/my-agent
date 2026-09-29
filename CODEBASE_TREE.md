@@ -1296,6 +1296,7 @@ docs/
 - `agent_py_agent/agent/capability/model_profile_tool.py`：`manage_models` 工具；把 TUI /model 的 list/add/save_provider/save_model/select/set_default/delete_model/delete_provider/probe/discover 暴露给主会话代理，唯一写入口仍是 `execute_model_profile_operation`；delete_provider 为 dangerous，子代理不可用，`select` 只读结构化 `conversation_thread_id`，回执只含 `has_key`，开关 `enable_model_profile_tool`。
 - `agent_py_agent/tests/test_decision_skill_proposal_review.py`、`test_decision_skill_proposal_review_integration.py`：前者只替换决策服务边界，覆盖资格、隐私、逐题校验、并发变化与取消；后者经真实 CLI、设置、模型目录、决策服务与调用账，只替换 HTTP 发送，覆盖输出逐字节不变、observe 记账、错误/冷却/超时、中断、30 条窗口门、默认值与 TUI 菜单。
 - `agent_py_agent/agent/agent_core/tool_loop/segment_planning.py`：只接canonical调用、有效批上限、Compact及并发描述查询；审批、线程和provider顺序记账仍归原执行轮。
+- `agent_py_agent/agent/subagents/services/run_authority.py`：子代理创建时 runtime.db 权威运行链（Task/TaskRun/AgentRun/pending Attempt/Delegation）的唯一写入点与链身份回存；有 home 上下文时 fail-closed，由 `SubAgentBaseService.create_run` 调用。
 - `agent_py_agent/agent/agent_core/tool_guard/identical_failure.py`、`agent_py_agent/tests/test_identical_tool_failure_halt.py`、`agent_py_agent/tests/test_subagent_identical_failure_halt.py`：主代理同一回合“同一调用（工具名＋规范化参数摘要）同一错误码”连续段与硬上限（复用 `repeated_failure_halt_threshold`）；命中只结束当前回合（unfinished＋`REPEATED_IDENTICAL_TOOL_FAILURE`，宿主自写收口、不再调模型），任务与 Goal 保留且不自动续跑；子代理同样生效，按 blocked 收口并经 `tool_failure_halt` 事实通知直属父级，同一次调用授权阶段收口优先。
 - `agent_py_agent/agent/agent_core/tool_loop/closeout.py`：统一请求、收口响应处理和延后结束原因读取，不持有Agent或完整回合参数，不执行工具或增加模型重试。
 

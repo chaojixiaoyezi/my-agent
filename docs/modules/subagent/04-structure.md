@@ -672,7 +672,7 @@ findings、artifact refs 和 result payload 阅读子代理工作，再由模型
 
 ## 2026-08-24 Child attempt registration and activation
 
-- `SubAgentBaseService._write_authority_records` 创建 child 时落一条 `pending` generation 1 AgentAttempt。
+- `services/run_authority.py::write_create_run_authority`（原 `SubAgentBaseService._write_authority_records`，2026-09-28 为压类长度移出、行为不变）创建 child 时落一条 `pending` generation 1 AgentAttempt。
   这一步只表达“委托已经存在”，metadata 不含 runner PID，也不取得 execution lock。
 - `lifecycle_runner_attempts._runtime_attempt_identity` 是 child runner 的唯一激活入口。它要求 repository
   原子复用 current pending attempt，写入当前 runner PID/start token、建立 exact generation 的执行锁，
