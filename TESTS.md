@@ -15,6 +15,9 @@
 - **9a 一行建议**：`_kill_legacy` 发信号之后的捕获范围放宽成与托管路径 `stop_process_session` 一致的
   `(OSError, RuntimeError, TypeError, ValueError)`，旧格式写盘失败不再逃出工具变成 TOOL_ERROR；
   `test_process_read_only_not_started.py` 新增两例（写盘抛 OSError / ValueError）：清理未定、effect 为 unknown、报 `PROCESS_SESSION_CLEANUP_UNCONFIRMED`。
+- **9a 复审两条（复审通过后）**：
+  - 对模型的说法与 effect 取同一个 `not_started` 判定：没开始就说“权威读不出”，否则说“停止或清理没有完成确认”；新增 `test_read_only_text_follows_not_started_even_on_cleanup_error`（4 个只读动作用替身抛 CleanupError），在旧代码上 4 例全失败；
+  - `test_registry_stop_raises_authority_missing_and_the_tool_reports_it` 补断言 effect 为 `not_started`，把“托管停止第一事务发现记录不在 → 没发信号 → not_started”直接钉住；把判定改成 `not_started = read_only` 的变异被它抓住。
   改回只接 AuthorityError、或去掉 OSError / ValueError 的 3 个变异都被抓住。
 
 ## 向量缓存第五轮：「跳过写」真的实现 + 回收错误可见（2026-09-29，分支 `my-agent/self-dev-2-vcache`，基于 `bac2f176d`）

@@ -176,4 +176,5 @@ def test_registry_stop_raises_authority_missing_and_the_tool_reports_it(tmp_path
         process_registry.kill(record["session_id"])
     outcome = ProcessSessionTool().execute({"action": "stop", "session_id": record["session_id"], "__run_scope": SCOPE})
     assert outcome.reported_error_code == "PROCESS_SESSION_AUTHORITY_UNREADABLE"
+    assert outcome.effect_outcome == "not_started", "第一事务发现记录不在：没发信号，结果已知是没开始"
     assert outcome.result_envelope["load_error"] == {"error_type": "authority_missing"}

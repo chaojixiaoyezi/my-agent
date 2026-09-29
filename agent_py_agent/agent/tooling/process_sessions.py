@@ -40,6 +40,8 @@ _READ_ONLY_ACTIONS = frozenset({"list", "status", "wait", "network_status"})
 _CLEANUP_UNCONFIRMED_TEXT = (
     "后台进程的停止或清理没有完成确认（持久记录没写完），已发出的信号不会撤回；请用原句柄查看进程状态后再决定是否再次停止。"
 )
+# 没碰过进程树（effect=not_started）时给模型的说法；与上一句按同一个 not_started 判定二选一，正文和 effect 不会各说各的。
+_AUTHORITY_UNREADABLE_TEXT = "后台进程权威暂不可读取，请保留原句柄核对。"
 
 
 # LLM: process_session 是 run_command(run_in_background=true) 的唯一续接入口；
@@ -178,8 +180,10 @@ class ProcessSessionTool(BaseTool):
             # 只读动作永远 not_started。
             # stop 只有「读记录阶段就失败」才是 not_started；清理故障说明已提交过停止意图、可能已发信号。
             not_started = read_only or (action == "stop" and not cleanup_unresolved)
-            return ToolHandlerOutcome(self.model_spec.name, False, _CLEANUP_UNCONFIRMED_TEXT if cleanup_unresolved
-                                      else "后台进程权威暂不可读取，请保留原句柄核对。",
+            # 正文与 effect 取同一个判定（9a 复审）：以后只读动作里若加了会触发清理的逻辑，
+            #   也不会出现 effect=not_started 却对模型说"清理未确认"。
+            return ToolHandlerOutcome(self.model_spec.name, False,
+                                      _AUTHORITY_UNREADABLE_TEXT if not_started else _CLEANUP_UNCONFIRMED_TEXT,
                                       error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
                                       effect_outcome="not_started" if not_started else "unknown",
                                       result_envelope={"load_error": exc.report}, reported_error_code=reported)

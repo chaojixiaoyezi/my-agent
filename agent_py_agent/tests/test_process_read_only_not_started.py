@@ -265,3 +265,15 @@ def test_stop_with_cleanup_failure_stays_unknown(monkeypatch):
     assert outcome.error_code == UNKNOWN
     assert outcome.effect_outcome == "unknown"
     assert outcome.reported_error_code == "PROCESS_SESSION_CLEANUP_UNCONFIRMED"
+
+
+# 9a 复审：正文与 effect 必须取同一个判定。今天只读动作不会抛 CleanupError，这里用替身模拟"以后有人在
+#   status/wait 里加了自动清理"——effect 仍是 not_started 时，对模型的说法也必须是"权威读不出"，不能说"清理未确认"。
+@pytest.mark.parametrize("action", READ_ONLY_ACTIONS)
+def test_read_only_text_follows_not_started_even_on_cleanup_error(monkeypatch, action):
+    error = ProcessSessionCleanupError(RuntimeError("commit failed"), {"session_id": "bg-test"}, (), False)
+    for name in ("list_report", "status", "wait", "get"):
+        monkeypatch.setattr(process_registry, name, _raising(error))
+    outcome = ProcessSessionTool().execute({"action": action, "session_id": "bg-test", "__run_scope": SCOPE})
+    assert outcome.effect_outcome == "not_started"
+    assert "权威暂不可读取" in outcome.output and "停止或清理没有完成确认" not in outcome.output
