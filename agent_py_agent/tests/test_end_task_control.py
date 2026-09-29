@@ -82,6 +82,16 @@ def test_endtask_parses_list_view_apply_and_rejects_extra_text():
     assert "endtask" in COMMAND_INDEX and match_conversation_command("/endtask x confirm") == ("endtask", "x confirm")
 
 
+def test_every_end_task_error_code_is_registered():
+    # 全仓守卫只扫 error_code="X" 字面量；_REFUSALS 字典里的 4 个码它扫不到，这里一并钉住（9a 复审）
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    codes = {code for code, _template in end_task_control._REFUSALS.values()}
+    codes |= {"END_TASK_ADMIN_ONLY", "END_TASK_STATE_CHANGED"}
+    assert len(codes) == 6
+    assert not [code for code in sorted(codes) if error_contract(code).code != code]
+
+
 def test_list_and_preview_are_read_only_and_show_structured_facts(tmp_path):
     agent, run_id, _record = _stuck_scheduled_task(tmp_path)
 
@@ -90,6 +100,7 @@ def test_list_and_preview_are_read_only_and_show_structured_facts(tmp_path):
 
     assert listing.ok is True and f"- {run_id}｜" in listing.message and "｜任务 active｜可结束" in listing.message
     assert preview.ok is True and f"确认请发：/endtask {run_id} confirm" in preview.message
+    assert "不会停止它启动的后台命令" in preview.message, "预览要如实交代不停后台命令的副作用"
     assert "定时整理" not in listing.message + preview.message, "只渲染结构化事实，不带任务正文"
     assert _state(agent, run_id) == ("active", "waiting")
 
@@ -102,6 +113,7 @@ def test_confirm_ends_the_task_and_unblocks_the_job(tmp_path):
     result = execute_end_task_control(agent, parse_conversation_control(f"/endtask {run_id} confirm"))
 
     assert result.ok is True and "已结算" in result.message and "不会被重做" in result.message
+    assert "不会停止它启动的后台命令" in result.message, "确认结果也要交代后台命令的通知会落到已取消的任务上"
     assert str(agent.conversation_store.tasks.load(run_id).status) == "cancelled"
     assert repository.get_active_run(run_id) is None
     history, errors = repository.history(limit=5)

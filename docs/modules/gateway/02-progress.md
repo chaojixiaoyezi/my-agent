@@ -19,6 +19,7 @@
 - 新增会话控制 `/endtask`，由 `control_service` 按 kind 分派到 `gateway_parts/end_task_control.py`，TUI 与飞书共用；仅本机管理员可用。无参数列候选、只给任务 ID 只读预览、带 confirm 才写。
 - 放行只认结构化事实：定时账本里是 waiting、会话任务链接是 active、运行库整棵执行树没有未结束的 attempt（运行库读不到按无法确认拒绝）。确认只写两处：`tasks.update_status(cancelled, expected_status=active)`，再对同一任务调 `reconcile_waiting_run`。
 - 回归见 `test_end_task_control.py`。根因修复（只在确有后续工作时才进 waiting）另排，见 DESIGN_LEDGER。
+- 9a 复审跟进：6 个 `END_TASK_*` 拒绝码登记进 `ERROR_CONTRACTS`（全仓守卫 `test_recovery_code_policy` 转绿，字典里的码另有模块测试钉住）；预览和确认结果固定写明“结束任务不会停止它启动的后台命令；这些命令结束后的通知会落到已取消的任务上”。
 
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。

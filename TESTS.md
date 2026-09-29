@@ -94,6 +94,15 @@
   - CAS：核对之后任务被别的路径改成终态时，确认结束不覆盖（`END_TASK_STATE_CHANGED`）。
   - Gateway 分派按 scope 解析 owner（飞书 scope）；TUI 转发文本保留任务 ID 和 confirm，本地直连模式拒绝并提示用 Gateway。
 - **仓库级守卫抓到一次**：新模块的 `_LIST_LIMIT` 与 `settings_control_service.py` 同名，`test_constant_names_unique` 失败，已改名 `_CANDIDATE_LIMIT`。
+- **9a 复审跟进（新提交）**：
+  - 6 个 `END_TASK_*` 码登记进 `ERROR_CONTRACTS`。原先 `test_recovery_code_policy::test_all_used_error_codes_are_registered`
+    在 `f4a861d3f` 上失败（`END_TASK_ADMIN_ONLY`、`END_TASK_STATE_CHANGED` 未登记）；另外 4 个写在 `_REFUSALS` 字典里，守卫扫不到，
+    新增 `test_every_end_task_error_code_is_registered` 一并钉住。
+  - 预览和确认结果固定写明：结束任务不会停止它启动的后台命令，这些命令结束后的通知会落到已取消的任务上；两处都加了断言。
+  - 教训：聚焦门禁必须带全仓扫描守卫（`test_recovery_code_policy`、`test_architecture_guardrails`、`test_constant_names_unique`、
+    `test_config_field_readers`、`test_parameter_registry`）。上一轮的 80 个文件里漏了第一个。
+  - 跟进提交的回归：原 80 个文件，加上引用错误合同的测试和全仓守卫，共 97 个文件，2424 passed、1 skipped、1 xfailed（均为原有标记）；
+    其余 3 个全仓扫描守卫（`test_main_agent_has_no_case_runtime`、`test_skill_snapshot_error_codes`、`test_subagent_config_inheritance`）另跑，20 passed。
 - **定向回归**：80 个相关文件（控制命令解析、命令目录、Gateway 控制、TUI 控制、运行库、定时服务，含
   `test_architecture_guardrails`、`test_constant_names_unique`）2035 passed、1 skipped、1 xfailed，后两项为原有标记。
 - **变异验证**：19 个全部被抓住（按 pytest rc==1 判定）。覆盖范围：管理员判定、预览误写、CAS、立即结算、三条放行条件、

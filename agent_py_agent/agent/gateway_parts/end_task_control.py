@@ -1,6 +1,7 @@
 # LLM: /endtask 只在已认证 scope 解析出的本机管理员 owner 上执行，只处理“定时执行 waiting、会话任务 active、执行树没有未结束 attempt”的任务。
 #   列表与预览只读；只有 confirm 才写：会话任务按 expected_status=active 改为 cancelled，再对同一任务调 reconcile_waiting_run。
-#   不读任务正文、不改运行库、不重做未确认的操作。改动须同步 test_end_task_control.py 与 CLI_REFERENCE.md 的 /endtask 说明。
+#   不读任务正文、不改运行库、不重做未确认的操作，也不停它启动的后台命令（预览与结果如实交代）；错误码都登记在 ERROR_CONTRACTS。
+#   改动须同步 test_end_task_control.py 与 CLI_REFERENCE.md 的 /endtask 说明。
 # 模块用途: 让管理员在 TUI 或飞书里查看并结束卡在等待中的定时会话任务（结果未知后定时层永远在等的那种），解开被它堵住的定时任务。
 from __future__ import annotations
 
@@ -13,6 +14,8 @@ from ..user_space.approval_mode import is_permission_admin
 
 _KIND = "endtask"
 _CANDIDATE_LIMIT = 20
+# 结束任务只改会话任务与定时账本，不停它启动的受管后台命令；预览和确认结果都如实交代这个副作用（9a 复审）。
+_BACKGROUND_NOTE = "结束任务不会停止它启动的后台命令；这些命令结束后的通知会落到已取消的任务上。"
 _REFUSALS = {
     "not_waiting": (
         "END_TASK_NOT_WAITING_RUN",
@@ -92,7 +95,7 @@ def _end_task(owner_agent: object, facts: _EndTaskFacts) -> ConversationControlR
     tail = ("它堵住的定时执行已结算，定时任务会按计划起新一轮运行。" if settled
             else "它堵住的定时执行会在下一轮定时对账时结算。")
     return ConversationControlResult(
-        _KIND, True, f"已结束会话任务 {facts.task_id}（记为 cancelled）。{tail}未确认的操作不会被重做。",
+        _KIND, True, f"已结束会话任务 {facts.task_id}（记为 cancelled）。{tail}未确认的操作不会被重做。{_BACKGROUND_NOTE}",
     )
 
 
@@ -156,13 +159,14 @@ def _refusal_text(template: str, facts: _EndTaskFacts) -> str:
     )
 
 
-# LLM: 只渲染结构化字段（任务 ID、会话 ID、等待起点），不含任务正文，可以安全投到 IM。
+# LLM: 只渲染结构化字段（任务 ID、会话 ID、等待起点），不含任务正文，可以安全投到 IM；固定交代不停后台命令的副作用。
 # 函数用途: 生成 /endtask <任务ID> 的只读预览：说明确认后会做什么，以及确认命令。
 def _render_plan(facts: _EndTaskFacts) -> str:
     return "\n".join((
         f"定时会话任务 {facts.task_id}（会话 {facts.thread_id}）自 {_clock(facts.waiting_since)} 起停在等待；"
         "会话任务仍是 active，执行树里没有还在跑的执行。",
         "确认结束后：会话任务记为 cancelled，它堵住的定时执行随即结算，定时任务按计划起新一轮运行；未确认的操作不会被重做。",
+        _BACKGROUND_NOTE,
         f"确认请发：/endtask {facts.task_id} confirm",
     ))
 
