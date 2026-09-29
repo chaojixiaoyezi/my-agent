@@ -89,6 +89,14 @@
 - **调度、监听与协作**：`O/data/scheduler/history.jsonl`、`O/watch_state/` 的归档（按设计永不删除）、
   `O/{capability_requests,temporary_grants}/`（只标过期不删）、`WS/collaboration/**`。
 - **其他清理留下的尾巴**：会话 `.ledger_archive/`、长期记忆的 `*.archive.jsonl`、插件更新后被替换的旧包。
+- **旧布局遗留的空会话目录**：`O/conversations/`、`O/data/conversations/`，两处都是空目录，没有保留机制，随旧布局一次性迁移处理（第 6 节第 5 条）。
+  - 当前源码没有产品写入方。会话存储只建在两个规范位置：`O/workspace/runtime/workspaces/<scope>/conversations`
+    （`user_space/runtime_paths.py:128-133`）和 `O/compact/conversations`（`user_space/home_layout_v2.py:75`）。
+  - `O/data/conversations/` 建于 06-01，与当时的默认会话目录吻合：`conversation_workspace` 默认值 `data/conversations` 由 `4685bf62e`
+    在 05-26 加入，`ba3b1537e` 在 06-04 删除。
+  - `O/conversations/` 建于 09-24 20:03，只有 16 个空子目录，形态与 `ConversationStore` 新建时一致（只建空子目录、不写文件）。当前源码里
+    只有验收脚本 `agent_py_agent/scripts/b_acceptance/curator_failure_evidence.py:85,123` 会在所给 home 下这样建，按设计应传隔离 home。
+  - 唤醒发现仍把这两处当作历史形态扫描（`owner_wake_discovery.py:63-68`），迁移时一并确认是否还需要。
 
 ## 5. 现有机制的缺口
 
@@ -141,8 +149,8 @@
      避免拆断恢复链；缺口 4 也按“是否仍被引用”判断，不按 mtime。
 4. **SQLite 库：行级保留加定期整理**。`runtime.db`、`local.db` 对终态行按天数删除，维护时做增量整理（VACUUM），
    避开正在持有的租约和锁。
-5. **旧布局遗留一次性处理**。根目录 `memory_archive/`、`workspace/`、`O/data/workspaces/`、`system/backups/`：由迁移命令先确认
-   不再被引用，再进回收站；不自动静默删除。
+5. **旧布局遗留一次性处理**。根目录 `memory_archive/`、`workspace/`、`O/data/workspaces/`、`system/backups/`，以及空的
+   `O/conversations/`、`O/data/conversations/`：由迁移命令先确认不再被引用，再进回收站；不自动静默删除。
 6. **用户交付物不自动删，改为可见和提示**。`O/tasks`、`O/runs` 里的项目文件属于用户数据：
    - 默认不按时间删；
    - 在设置页、TUI 和 IM 提供“存储占用”视图和一键移入回收站；
