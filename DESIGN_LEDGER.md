@@ -121,9 +121,10 @@
 [SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md)。状态：**第一期已实现并已上线**
 （模型工具、TUI 命令、权威存储、防循环守卫、结果回报与取消都已交付）。
 
-**第一期遗留缺口（2026-09-28 dev 决定，本期不做）**：设计里点名的 `list_owner_sessions`
-模型工具**没有实现**，模型目前拿不到"可发送的会话列表"，只能靠人用 `/sessions threads` 查。
-等这批派活链缺陷验收通过后单独排一片来做。
+**第一期遗留缺口已补上（2026-09-28，分支 `claude/75-list-owner-sessions`，本地验证通过，待集成）**：
+模型工具 `list_owner_sessions` 只给管理员、跟随两个管理员开关，列出本 owner 会话的结构化 id、状态、最近活动、
+渠道、是否当前会话和可用发送类型，不含正文；别的 owner 的会话不列出也不计数。细节见
+[SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md) 实现落点一节。
 
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
 

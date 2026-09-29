@@ -32,6 +32,28 @@
   ```
 - **未覆盖**：没在真实生产 home 上跑 `audit-log --cleanup`（会真删生产审计记录），只在小规模临时目录里验证。
 
+## 会话互通：list_owner_sessions 模型工具（2026-09-28，分支 `claude/75-list-owner-sessions`，基于 `80b4afed8`）
+
+- **范围**：新文件 `orchestration/tools/list_owner_sessions.py`（工具 + 可见性判定）；`core._register_orchestration_tools`
+  加 3 行注册；`SESSION_TASK_WAKE_ALLOWED_TOOLS` 加一项。`conversation/session_messaging.py` 与另外三个会话工具文件未改。
+- **测试**：`test_list_owner_sessions_tool.py` 共 32 例，正反成对：
+  - 可见性：管理员在任一管理员开关打开时可见，两个都关不可见；user / group / 空身份即使全开也不可见；
+  - 真实 `SimpleAgent` 注册：缺配置文件与坏配置文件都按 dataclass 默认值注册；两个开关都关时不注册；
+    普通用户打开用户消息开关后拿到 `send_session_message`（对照）但拿不到本工具；
+  - 真实 `ConversationStore`：按最近活动倒序；每行字段集合固定，标题和摘要不出现在输出里；
+    自己的会话 `is_current=true` 且 `allowed_kinds=[]`，其它本地会话为 `[message, task]`，飞书会话列出但为空；
+    `allowed_kinds` 跟随两个开关；子代理线程不列；`limit` 截断与非法值（0、101、-1、字符串、布尔、小数）；
+    损坏记录只计数不回显；
+  - 跨 owner：记录里写了别的 owner 家目录的会话不列出也不计数，同一记录换成自己的家目录就列出；
+    两个 owner 各自只看到自己的存储；身份三元组缺任一项返回 `SESSION_IDENTITY_UNAVAILABLE`、不列任何会话。
+- **变异验证**：25 个变异体全部被抓住，覆盖去掉管理员判断、各开关、`or CapabilityConfig()`、无条件注册、
+  唤醒档条目、子代理线程过滤、owner 家目录核对、当前会话标记、泄露标题、忽略渠道、排序、截断、损坏计数、
+  limit 类型与上限、身份 fail closed、当前会话编号来源。
+- **定向回归与守卫**：会话互通全部测试、工具注册与协议、后台工具档、配置默认值、护栏等 66 个文件：
+  1207 passed、4 xfailed。ruff、doc sync、strict code-size（发现项与基点逐条一致，无新增）、
+  `git diff --check`、clean-package 全部通过。
+  会话互通在生产上仍然关闭，本工具只在测试里验证。
+
 ## capability 兜底值清理：只认 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-fallback-cleanup`，基于 `54880f8e9`）
 
 - **范围**：6 处调用点改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，删掉各自写的兜底值：
@@ -169,7 +191,8 @@
      测试 `tests/test_session_task_turn_binding.py`（5 项）。**变异**：撤销接线 → 3 项变红。
   3. **缺陷 1**：后台工具策略没有 `session_task` 档，派活回合只有 17 个工具。修法：新增
      `SESSION_TASK_WAKE_REASON` + `SESSION_TASK_WAKE_ALLOWED_TOOLS` + `_is_session_task_wake` 分支。
-     注：设计与分片规格点名的 `list_owner_sessions` **未实现**，本期只放行实际存在的 4 个会话工具。
+     注：当时设计与分片规格点名的 `list_owner_sessions` 未实现，只放行了实际存在的 4 个会话工具；
+     该工具已于 `claude/75-list-owner-sessions` 补上并加入本档（见本文件同名条目）。
   4. **缺陷 3**：未确认正文会在后来的回合里被再次注入。修好缺陷 2 后仍有**跨回合抢正文**：任何回合都能认领
      线程邮箱里任意未绑定的宿主投递。修法：正文写入时自带 `metadata.session_task_id`，派活回合用
      `owning_task_id` 只在编号一致时认领。测试 `tests/test_session_task_body_replay.py`（3 项）。

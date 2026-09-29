@@ -15,6 +15,10 @@ from .agent_core.capability_request_tool import CapabilityRequestTool
 from .agent_core.models import AgentRunResult
 from .agent_core.orchestration.dispatch.mixin import SimpleAgentDispatchMixin
 from .agent_core.orchestration.tools.create_session_task import CreateSessionTaskTool
+from .agent_core.orchestration.tools.list_owner_sessions import (
+    ListOwnerSessionsTool,
+    list_owner_sessions_tool_visible,
+)
 from .agent_core.orchestration.tools.send_session_message import SendSessionMessageTool
 from .agent_core.orchestration.tools.session_task_control import (
     CancelSessionTaskTool,
@@ -44,6 +48,7 @@ from .attempt.sandbox import sandbox_hides_host_paths
 from .backends import get_backend
 from .capability import CapabilityRouter, from_tool_model_spec
 from .capability.channel_message_tool import SendMessageTool
+from .capability.config import CapabilityConfig
 from .capability.memory_tool import RememberTool
 from .capability.model_profile_tool import ManageModelsTool
 from .capability.persona_repository import PersonaRepository
@@ -1091,6 +1096,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
         agent.tools.register(CreateSessionTaskTool(agent))
         agent.tools.register(GetSessionTaskTool(agent))
         agent.tools.register(CancelSessionTaskTool(agent))
+    # 列本 owner 会话:只读清单(无正文),给上面两类发送工具选目标;可见性与它们同源,任一管理员开关开着才注册。
+    if list_owner_sessions_tool_visible(agent.home_paths, capability_config_for_agent(agent) or CapabilityConfig()):
+        agent.tools.register(ListOwnerSessionsTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
     if not agent.config.enable_subagents:

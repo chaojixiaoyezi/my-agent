@@ -164,7 +164,8 @@
 
 - **模型工具**（注册在 `agent/core.py` `_register_orchestration_tools`，
   须在 `enable_subagents` 门控**之前**，因为会话间消息是 owner 级能力）：
-  - `list_owner_sessions`：列出本 owner 的其他会话（结构化 id、状态、最近活动）；
+  - `list_owner_sessions`：列出本 owner 的会话（`thread_id`、状态、最近活动时间、渠道、`is_current`、
+    `allowed_kinds`），只读、不含标题/摘要/正文；调用方自己的会话标 `is_current` 且 `allowed_kinds` 为空；
   - `send_session_message`：发消息；
   - `create_session_task`：派任务；
   - `get_session_task`：查任务状态。
@@ -243,6 +244,7 @@
 | 发消息（模型工具） | `agent_py_agent/agent/agent_core/orchestration/tools/send_session_message.py` |
 | 派活（模型工具） | `agent_py_agent/agent/agent_core/orchestration/tools/create_session_task.py` |
 | 查询 / 取消（模型工具） | `agent_py_agent/agent/agent_core/orchestration/tools/session_task_control.py` |
+| 列本 owner 会话（模型工具） | `agent_py_agent/agent/agent_core/orchestration/tools/list_owner_sessions.py`（含自己的可见性判定 `list_owner_sessions_tool_visible`） |
 | 派活权威记录与状态机 | `agent_py_agent/agent/conversation/session_tasks.py` |
 | 取消时对目标回合发精确停止控制 | `agent_py_agent/agent/gateway_parts/session_task_stop.py` |
 | 目标回合结束时的结构化回报 | `agent_py_agent/agent/conversation/session_task_report.py` |
@@ -255,8 +257,17 @@
 | TUI 命令 | `/sessions threads`、`/tell`、`/sessions inbox`（`agent_py_agent/cli/chat_parts/slash_commands.py`） |
 | 配置键 | `agent_py_agent/config/capability_config.yaml` + `agent_py_agent/agent/capability/config.py` |
 
-**第一期缺口**：模型工具 `list_owner_sessions` 未实现（模型拿不到可发送会话列表，需人工用
-`/sessions threads` 查），见 `DESIGN_LEDGER.md`。
+**`list_owner_sessions`（2026-09-28 补上，原第一期缺口）**：
+- 可见性：只给管理员（`owner_kind=main`），`session_messaging_admin_enabled` 与 `session_task_admin_enabled`
+  至少开一个才注册；普通用户即使打开了 `session_messaging_user_enabled` 也看不到它（第一期只给管理员）。
+  配置经 `capability_config_for_agent(...) or CapabilityConfig()` 读，直接读字段，不自带兜底值。
+- 数据只读本 owner 的 `conversation_store`，并逐条核对记录的 `owner_home` 与当前 owner 家目录的规范路径；
+  写了别的 owner 家目录的记录不列出、不计数，不泄露其存在。子代理内部线程（`metadata.thread_kind=agent`）不列出。
+- 每行只有 `thread_id / status / last_activity_at / channel / is_current / allowed_kinds`；`allowed_kinds` 由
+  `decide_session_messaging` 对 message、task 逐类判定，IM 渠道会话照常列出但为空。损坏记录只计入
+  `unreadable_records`，不回显内容。按最近活动倒序，`limit` 取 1–100（默认 20），超出时 `truncated=true`。
+- 身份三元组任一缺失返回 `SESSION_IDENTITY_UNAVAILABLE`，不列任何会话。派活唤醒档
+  `SESSION_TASK_WAKE_ALLOWED_TOOLS` 同时放行它。
 
 限额语义：`session_pair_hourly_limit` 按「发送会话 → 接收会话」分桶，小时窗口固定、跨窗口归零；
 模型发起的发送与派活在投递前判断，超限返回 `SESSION_TASK_RATE_LIMIT` 且不投递、不占配额；

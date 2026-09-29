@@ -53,6 +53,7 @@ SESSION_TASK_WAKE_ALLOWED_TOOLS = (
     "send_session_message",
     "get_session_task",
     "cancel_session_task",
+    "list_owner_sessions",
 )
 
 GOAL_BACKGROUND_ALLOWED_TOOLS = (

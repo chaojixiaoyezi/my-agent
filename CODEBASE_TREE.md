@@ -331,6 +331,7 @@ agent_py_agent/
 |   |   |   |-- capacity.py           # 根/子/孙代理共用的会话树与 owner 容量事实；超限整批拒绝
 |   |   |   |-- coordinator_policy.py # 主代理/多层 coordinator 共用的 会话运行时 式派工后职责软合同
 |   |   |   |-- tools/list_agents.py  # 会话运行时 式只读代理树查询；复用 canonical 投影，不推进或取消下级
+|   |   |   |-- tools/list_owner_sessions.py # 管理员只读列本 owner 会话（id/状态/最近活动/可用发送类型），不含正文、不列别的 owner
 |   |   |   `-- planned_delegation.py # 已有 Todo 时，创建前原子校验 active exact covers 与父级 workspace 上界
 |   |   |-- agent_tree/status.py        # `/status`、TUI、恢复与诊断共用的内部代理树投影（不是模型工具）
 |   |   |-- agent_tree/model_view.py    # 同一授权快照的模型状态/结果视图；超长摘要保留逻辑归档入口
