@@ -473,6 +473,6 @@ def test_outcome_rows_without_transport_keep_the_original_recent_shape():
     from agent_py_agent.agent.conversation.decision_outcome_log import _recent_row
 
     assert set(_recent_row({"point": "p", "status": "off"})) == {
-        "created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms"}
+        "created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms", "blocking"}
     assert _recent_row({"point": "p", "transport": {"call_status": "finished"}})["transport"] == {
         "call_status": "finished"}

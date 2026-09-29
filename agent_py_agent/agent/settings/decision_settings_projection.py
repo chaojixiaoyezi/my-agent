@@ -64,7 +64,8 @@ def _profile_status(context: object, data: dict, profile_id: str) -> dict:
 
 # LLM: 缺点值按原作用层继承；实验授权只读当前 thread 的完整信封，绝不拼接 owner/thread 或从开关推导许可。
 #   静态等待上限与 decision_service._point_deadline 同口径：前台点位取点位预算与 stage_timeout_seconds 的较小值；
-#   普通后台点位只看自己的 timeout_seconds（缺省继承 background_timeout_seconds），不再受阶段预算封顶。
+#   普通后台点位只看自己的 timeout_seconds（缺省继承 background_timeout_seconds），不再受阶段预算封顶；
+#   observe 转后台的会话点位（observe_nonblocking_enabled）只看 background_timeout_seconds，并标 blocking=false。
 # 函数用途: 返回可写范围、真实字段来源和静态等待上限；前台运行服务仍须扣除原阶段已耗时间，后台点位各自完整计时。
 def decision_settings_projection(context: object, data: dict, thread: object = None, *, scope: str = "owner") -> dict:
     owner = validate_decision_settings(data["decision_settings"])
@@ -93,12 +94,17 @@ def decision_settings_projection(context: object, data: dict, thread: object = N
                 origins[prefix + field] = f"inherit:{fallback}:{origins[fallback]}"
         sources.update({prefix + field: origins[prefix + field] for field in decision_point_fields(point)})
         seconds = values[prefix + "timeout_seconds"]
+        mode = _effective_point_mode(values, point)
+        # 与 decision_service._nonblocking 同口径：会话点位处于 observe 且开关打开时转后台，上限只看后台单次等待，调用方不等。
+        nonblocking = runtime_scope == "thread" and mode == "observe" and values["observe_nonblocking_enabled"] is True
+        if nonblocking:
+            seconds, budget_key = values["background_timeout_seconds"], "background_timeout_seconds"
         points[point] = {field: values[prefix + field] for field in decision_point_fields(point)}
         points[point].update(
             runtime_scope=runtime_scope, enabled=values["enabled"], enabled_source=origins["enabled"],
-            effective_mode=_effective_point_mode(values, point),
+            effective_mode=mode, blocking=not nonblocking,
             max_request_seconds=min(seconds, values[budget_key]),
-            limiting_field=budget_key if values[budget_key] < seconds else prefix + "timeout_seconds",
+            limiting_field=budget_key if nonblocking or values[budget_key] < seconds else prefix + "timeout_seconds",
             connection=_profile_status(context, data, points[point]["profile_id"]),
         )
     return {"ok": True, "schema": "decision_settings_view.v1", "scope": scope,

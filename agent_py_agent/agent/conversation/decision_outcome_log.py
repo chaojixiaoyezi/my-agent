@@ -1,5 +1,6 @@
 # LLM: 决策结果日志属于 conversation 决策服务。decide() 的每个返回（成功、到期、冷却跳过、配置不可用……）按接入点追加一行
-#   结构化记录，只含点位、范围、模式、状态、原因、耗时和宿主身份编号，不含状态、题目、候选或回答正文；建了调用记录的行另带
+#   结构化记录；observe 转后台时 decide 返回的 deferred 占位不写，由后台执行器完成后写这一行（blocking=false）。
+#   只含点位、范围、模式、状态、原因、耗时、是否阻塞调用方和宿主身份编号，不含状态、题目、候选或回答正文；建了调用记录的行另带
 #   transport 链路事实（各次 HTTP 尝试的分段毫秒、超时时所处阶段、发送前本地估算输入；attempts 为空即请求没发出），同样无正文。位置只认 owner 规范路径
 #   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总，
 #   汇总时把请求根本没发出去的失败类结果单列（not_sent），不计入 Jev 的超时率和失败率。
@@ -26,7 +27,7 @@ SKIPPED_STATUS = "skipped"
 _T = TypeVar("_T")
 _MAX_RECORDS = 1000
 _RECENT_ROWS = 20
-_RECENT_FIELDS = ("created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms")
+_RECENT_FIELDS = ("created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms", "blocking")
 # 只有失败类结果才区分“发出去了没有”；成功、关闭、跳过、作废等照原状态计数。
 _FAILURE_STATUSES = frozenset({"deadline", "error", "cooldown", "configuration_required"})
 # 没有链路事实的行（没建调用记录，或链路计时上线前的旧行）按宿主固定原因码认出“没发出去”：发送前期限用完、准入忙、
@@ -38,6 +39,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # LLM: 纯函数，只读阶段身份与结果的结构化字段；不读 response、题目或候选，调用方不得把正文塞进 outcome.reason。
 #   建了调用记录的结果另带 transport（链路事实，见 decision_model_call.decision_transport_facts），调用前就结束的行没有这个键。
+#   blocking 取结果对象的同名字段（缺省为真）：false 表示这次 observe 转到后台执行、调用方没有等待，
+#   这类行的 elapsed_ms 只算后台 worker 开始执行到结束，不含排队。
 # 函数用途: 把一次决策结果投影成一行日志。
 def decision_outcome_row(stage: object, point: str, outcome: object, elapsed_seconds: float) -> dict[str, object]:
     row = {
@@ -47,6 +50,7 @@ def decision_outcome_row(stage: object, point: str, outcome: object, elapsed_sec
         "elapsed_ms": max(0, int(float(elapsed_seconds) * 1000)),
         "thread_id": str(getattr(stage, "thread_id", "") or ""), "run_id": str(getattr(stage, "run_id", "") or ""),
         "task_id": str(getattr(stage, "task_id", "") or ""), "experiment": bool(getattr(stage, "experiment", False)),
+        "blocking": bool(getattr(outcome, "blocking", True)),
     }
     transport = getattr(outcome, "transport", None)
     if isinstance(transport, dict):

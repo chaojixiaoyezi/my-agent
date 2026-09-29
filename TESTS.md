@@ -122,6 +122,44 @@
   - 相关与全仓扫描类用例共 56 个文件全过。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_curator_failure_attribution.py agent_py_agent/tests/test_curator_timeout_observability.py -q`
 
+## observe 不挡主链路（2026-09-28，分支 `claude/9a-jev-observe-async`，基于 `80b4afed8`）
+
+- **新增** `test_decision_observe_nonblocking.py`（29 例）。链路是原设置 → 决策服务 → 后台执行器 → 真实本地 HTTP → 结果日志与用量账：
+  - **主链路先返回**：
+    - 本地服务卡住时，decide 立刻拿到 deferred；放行后后台写一行 `blocking=false` 的成功行，用量事件的 source 为 `decision_observe`。
+    - 发起 run 的请求与 run 累计容器里都没有这次调用，会话汇总只算一次；在途登记已注销，回合的 live 状态和输出流都没被写。
+    - 对照：开关关闭时 observe 仍同步，用量记在 run 里；开关打开时 apply 仍同步。
+  - **期限**：
+    - 后台按 `background_timeout_seconds` 等到了前台单次上限挡不住的回答。
+    - 前台阶段预算已耗尽时后台照常发出；开关关闭时照旧返回 budget_exhausted（两者成对）。
+    - 后台超时照同步口径记 timed_out。
+  - **有界**：同一时刻只有一个后台调用。排队满了记 `skipped/observe_nonblocking_busy` 行和 reach 内部码；上限常量钉为 8。
+  - **停止与撤销**：
+    - 发出前停止的不发送、也不记账；已发出的自然结束并记账（两者成对）。
+    - 设置撤销与宿主关闭时，排队中的调用不发送、不建调用记录。
+  - **身份**：后台线程没有 runner 上下文，靠发起时捕获的 run 身份通过复核。
+  - **资源键**：后台 observe 在途时，同会话的同步 apply 照常发出并成功。
+  - **召回主链**：本地服务卡住时，`rerank_recalled_memories` 立刻返回原顺序和 `observe:deferred`。
+  - **选模型**：
+    - 主模型开始时标记是 deferred；后台在回合内完成后补记成 observed。
+    - 回合结束后不再回写。
+    - 写入器只替换同一观察的 started/deferred 标记，`adopted` 恒为 false。
+  - **设置视图与计数口径**：后台点位标 `blocking=false`，上限显示后台单次等待；忙码不计入 reached/not_called。
+- **修改**：
+  - `test_decision_outcome_log.py`：结果行多了一个 `blocking` 字段。
+  - `test_tui_decision_menu.py`：新增 `scope_index`，按 `_GENERAL` 的口径计算范围菜单的行位置，替换写死的下标，以后再加通用字段不必逐个改；`test_decision_skill_tool_settings.py` 同步改用它。
+- **变异验证**：设 `PYTHONDONTWRITEBYTECODE=1`，每次跑完按 sha256 还原源文件；25 个变异体全部被抓住：
+  - 永不转后台、apply 也转后台、忽略开关；
+  - 预算改用前台单次上限、阶段预算仍然生效；
+  - 不装捕获身份、账本保留 run、共用 run 的请求范围、不结算用量；
+  - 队列上限差一、每条任务起一个线程、在途登记不注销；
+  - 忽略回合取消、发送前不复核撤销；
+  - 占位结果写行、占位结果或最终结果或结果行没标非阻塞；
+  - 共用同步资源键；
+  - 补记只认 deferred、丢完成回调、选模型不挂回调；
+  - 忙码计入诊断、忙码不记 reach、设置视图恒为阻塞。
+- **定向回归**：77 个文件，1834 passed、0 skipped。范围是全部 decision 测试、Gateway 选模型/采用/停机测试、设置与 YAML 同步测试、TUI 决策菜单，以及扫描全仓源码的护栏（architecture_guardrails、constant_names_unique 等）。新文件另外连跑 5 遍、3 进程并发各跑 1 遍，都全部通过。
+
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 
 - **新增用例**：`test_session_task_real_chain.py` 加了 `test_admin_lists_owner_sessions_and_reaches_the_listed_target`，按派活、发消息参数化成两条。

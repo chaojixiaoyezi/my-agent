@@ -40,6 +40,7 @@ from agent_py_agent.tests.test_tui_decision_menu import (
     open_scope,
     press,
     running,
+    scope_index,
     visible,
 )
 
@@ -198,7 +199,7 @@ def test_original_tui_can_edit_delivery_quality_thread_mode(tmp_path):
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui, thread=True)
-            await choose(ui, 5)
+            await choose(ui, scope_index(gateway, "points", thread=True))
             view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             points = [key for key in tui_decision_menu._POINTS if f"points.{key}.mode" in tui_decision_menu._fields(view)]
             assert "交付复核焦点" in visible(ui.app)

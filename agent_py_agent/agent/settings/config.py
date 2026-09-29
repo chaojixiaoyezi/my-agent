@@ -275,6 +275,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # observe 采样（默认关）：打开后只作用于 observe 点位——每个点位每自然小时成功调用满 6 次就不再调用决策模型，
     # 失败和超时不计名额，所以出问题的点位会一直被观察；apply 点位不受影响。
     decision_observe_sampling_enabled: bool = False
+    # observe 不挡主链路（默认关）：打开后普通会话范围的 observe 点位把决策调用交给后台单 worker 执行，回复不再等待决策模型，
+    # 后台等待上限改用 decision_background_timeout_seconds；apply、实验与用户后台点位不受影响，仍同步等待。
+    decision_observe_nonblocking_enabled: bool = False
     # 决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数）：关闭时既不在结果日志记 skipped（原因码、无正文），
     # 也不累计 decision_reach_counts 的到达/未触发原因计数。
     decision_skip_records_enabled: bool = True

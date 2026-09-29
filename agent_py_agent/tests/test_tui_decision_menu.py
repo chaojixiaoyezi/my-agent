@@ -20,6 +20,7 @@ from agent_py_agent.agent.settings.model_profiles import (
     execute_model_profile_operation,
 )
 from agent_py_agent.cli.chat_parts.tui_decision_menu import (
+    _GENERAL,
     _POINTS,
     _diagnosis,
     _field_text_value,
@@ -177,6 +178,16 @@ def point_index(gateway, point, *, thread=False):
     return [key for key in _POINTS if f"points.{key}.mode" in _fields(view)].index(point)
 
 
+# LLM: 行序与 _manage_scope 一致：先是当前作用域可写的通用字段（按 _GENERAL 顺序），再是固定的动作行；不写死下标，
+#   新增通用字段时测试不必逐个改位置。
+# 函数用途: 算出决策设置范围菜单里某个通用字段或动作行（points/reset/providers/provider_add/probe）的位置。
+def scope_index(gateway, action, *, thread=False):
+    view = (settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
+            if thread else settings(gateway.host, "read", {}))
+    rows = [field for field in _GENERAL if field in _fields(view)]
+    return [*rows, "points", "reset", "providers", "provider_add", "probe"].index(action)
+
+
 
 def test_point_diagnosis_line_uses_host_labels_and_marks_uncounted_points():
     view = {"point_diagnostics": {
@@ -214,7 +225,7 @@ def test_pipe_point_rows_show_recent_reach_from_the_real_decision_read(tmp_path,
         gateway.request_models = request_models
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui)
-            await choose(ui, 6)
+            await choose(ui, scope_index(gateway, "points"))
             text = visible(ui.app)
             assert "近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）" in text
             assert "近24小时：未统计未触发原因" not in text, "现有点位都已接入到达计数"
@@ -262,23 +273,23 @@ def test_pipe_owner_fields_model_mode_seconds_reset_and_provider_reuse(tmp_path)
                 await press(ui, number + "\t\r")
             view = settings(gateway.host, "read", {})
             assert [view["effective"][key] for key in ("timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds")] == [2.5, 5.5, 6.5]
-            await choose(ui, 6)  # 接入点；前面有独立实验能力开关
+            await choose(ui, scope_index(gateway, "points"))  # 接入点；前面是全部通用字段
             await choose(ui, point_index(gateway, "recall"))
             await choose(ui, 0)  # mode：两个勾选项"开启 / 观察模式"
             assert "观察模式" in visible(ui.app)
             await press(ui, b" ")  # 勾选开启；新开启默认勾观察
             await press(ui, b"\t\r")  # 保存 → 开 + 观察 = observe
             assert settings(gateway.host, "read", {})["effective"]["points"]["recall"]["mode"] == "observe"
-            await choose(ui, 6)
+            await choose(ui, scope_index(gateway, "points"))
             await choose(ui, point_index(gateway, "recall"))
             await choose(ui, 0)
             await press(ui, b"\x1b[B ")  # 下移到观察模式并取消 → 正式使用
             await press(ui, b"\t\r")
             assert settings(gateway.host, "read", {})["effective"]["points"]["recall"]["mode"] == "apply"
-            await choose(ui, 7)  # reset 列表
+            await choose(ui, scope_index(gateway, "reset"))  # reset 列表
             await choose(ui, 0)  # enabled
             assert "enabled" not in settings(gateway.host, "read", {})["overrides"]["owner"]
-            await choose(ui, 8)  # 原服务商管理入口
+            await choose(ui, scope_index(gateway, "providers"))  # 原服务商管理入口
             assert "服务商列表" in visible(ui.app)
             await press(ui, b"\x1b")
             assert ui.runtime.store.snapshot().selected_model_name == "ordinary-main"
@@ -302,7 +313,7 @@ def test_pipe_thread_scope_hides_owner_background_and_changes_only_current_threa
             current = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             assert owner["effective"]["enabled"] is True and current["effective"]["enabled"] is False
             assert current["sources"]["enabled"] == "thread"
-            await choose(ui, 5)  # thread 接入点菜单
+            await choose(ui, scope_index(gateway, "points", thread=True))  # thread 接入点菜单
             assert "后台记忆整理（用户长期）" not in visible(ui.app)
             await choose(ui, point_index(gateway, "recall", thread=True))
             await choose(ui, 2)  # 单次时间
@@ -341,7 +352,7 @@ def test_pipe_probe_requires_explicit_start_and_hides_price_output_and_secret(tm
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui)
-            await choose(ui, 10)
+            await choose(ui, scope_index(gateway, "probe"))
             await press(ui, b"\x1b[B\r")  # 只选择模型
             assert not any(operation == "decision_probe" for operation, _ in gateway.calls)
             assert "开始测试" in visible(ui.app)
@@ -391,7 +402,7 @@ def test_pipe_invalid_seconds_cancel_and_explicit_model_clear_are_distinct(tmp_p
             await choose(ui, 1)
             await press(ui, "\t\t\r")  # 恢复继承按钮删除覆盖
             assert "profile_id" not in settings(gateway.host, "read", {})["overrides"]["owner"]
-            await choose(ui, 10)
+            await choose(ui, scope_index(gateway, "probe"))
             await press(ui, b"\x1b[B\r")
             await press(ui, b"\x1b")  # 取消探测确认
             assert not any(op == "decision_probe" for op, _ in gateway.calls)
@@ -411,7 +422,7 @@ def test_pipe_thread_can_clean_legacy_background_override_without_offering_new_p
         )
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui, thread=True)
-            await choose(ui, 6)  # 恢复继承仅清理旧存储，不重新授权新覆盖
+            await choose(ui, scope_index(gateway, "reset", thread=True))  # 恢复继承仅清理旧存储，不重新授权新覆盖
             assert "此范围不消费，仅可清理" in visible(ui.app)
             await press(ui, "\r")
             view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
@@ -434,7 +445,7 @@ def test_pipe_experiment_boolean_can_save_and_reset_without_creating_authorizati
             view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             assert view["effective"]["experiment_enabled"] is True
             assert view["experiment_authorization"] is None
-            await choose(ui, 6)  # 原恢复列表也必须能显示新布尔字段
+            await choose(ui, scope_index(gateway, "reset", thread=True))  # 原恢复列表也必须能显示新布尔字段
             assert "实验能力（仍需独立授权）：开启" in visible(ui.app)
             await press(ui, "\r")
             view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)

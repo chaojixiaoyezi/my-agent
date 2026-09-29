@@ -47,6 +47,7 @@ from agent_py_agent.tests.test_tui_decision_menu import (
     open_scope,
     press,
     running,
+    scope_index,
     visible,
 )
 
@@ -218,8 +219,8 @@ def test_original_tui_can_edit_external_material_thread_mode(tmp_path):
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui, thread=True)
-            # 实验能力是新的会话通用字段，接入点菜单跟在五个通用字段之后。
-            await choose(ui, 5)
+            # 接入点菜单跟在本会话可写的全部通用字段之后，位置按菜单口径现算。
+            await choose(ui, scope_index(gateway, "points", thread=True))
             view = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             points = [key for key in tui_decision_menu._POINTS if f"points.{key}.mode" in tui_decision_menu._fields(view)]
             assert "外部材料阅读优先级" in visible(ui.app)

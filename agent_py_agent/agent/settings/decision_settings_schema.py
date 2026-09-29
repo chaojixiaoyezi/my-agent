@@ -18,7 +18,10 @@ POINT_RUNTIME_SCOPES = MappingProxyType({
     "skill_proposal_review": "owner_background",
 })
 POINTS = tuple(POINT_RUNTIME_SCOPES)
-GENERAL_FIELDS = ("enabled", "experiment_enabled", "observe_sampling_enabled", "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
+GENERAL_FIELDS = ("enabled", "experiment_enabled", "observe_sampling_enabled", "observe_nonblocking_enabled",
+                  "timeout_seconds", "stage_timeout_seconds", "background_timeout_seconds", "profile_id")
+# 通用字段里的布尔开关：schema、写入校验和 TUI 决策菜单共用这一份，新增布尔开关只改这里。
+BOOLEAN_FIELDS = frozenset({"enabled", "experiment_enabled", "observe_sampling_enabled", "observe_nonblocking_enabled"})
 POINT_FIELDS = ("mode", "timeout_seconds", "profile_id")
 _POINT_EXTRA_SCHEMAS = {"subagent_model": {
     "candidate_profile_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
@@ -41,7 +44,7 @@ def decision_field_schema(path: str) -> dict:
         _, point, field = path.split(".")
         if field in _POINT_EXTRA_SCHEMAS.get(point, {}):
             return deepcopy(_POINT_EXTRA_SCHEMAS[point][field])
-    return ({"type": "boolean"} if path in {"enabled", "experiment_enabled", "observe_sampling_enabled"} else
+    return ({"type": "boolean"} if path in BOOLEAN_FIELDS else
             {"type": "number", "exclusiveMinimum": 0} if path.endswith("timeout_seconds") else
             {"type": "string", "enum": ["off", "observe", "apply"]} if path.endswith(".mode") else
             {"type": "string", "description": "原模型目录的 Decision 编号或 shared:编号；空字符串明确不绑定。"})
@@ -126,7 +129,7 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
     if scope is not None and scope not in scopes[path]:
         raise ModelProfileError("该决策设置不支持当前作用范围；后台字段请使用用户长期设置，线程旧覆盖仍可恢复继承。")
     field = path.rsplit(".", 1)[-1]
-    if field in {"enabled", "experiment_enabled", "observe_sampling_enabled"}:
+    if field in BOOLEAN_FIELDS:
         if type(value) is not bool:
             raise ModelProfileError("决策总开关必须是布尔值。")
         return value

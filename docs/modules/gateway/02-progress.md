@@ -1,5 +1,12 @@
 # Gateway 维护状态
 
+选模型观察转后台后的补记（分支 `claude/9a-jev-observe-async`，2026-09-28）：
+- 决策设置 `observe_nonblocking_enabled` 打开时，选模型的 observe 当场返回 deferred；请求记录的观察标记先记 `deferred`，主模型不再等 Jev。
+- 后台完成后，由 `GatewayModelObservation._complete_deferred` 经新增的 `GatewayModelObservationWriter.complete_deferred` 补记建议编号：
+  - 只替换同一观察（op/claim 相同）的 started/deferred 标记，`adopted` 恒为 false；
+  - 写入走原 active-turn 事务，回合已结束就不回写。
+- 回归见 `test_decision_observe_nonblocking.py` 的三组选模型用例。
+
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。
 - 现在由 `execute_settings_control` 经 `capability_config_for_agent(base_agent)` 取得 capability 配置，作为关键字参数只交给这两个视图。

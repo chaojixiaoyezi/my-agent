@@ -49,6 +49,8 @@ def connection_revision(config: dict) -> str:
 
 
 # LLM: 在途引用只活到 caller 收口，不能据此释放存活 worker 的槽位；上下文不复制到持久文件。
+#   nonblocking 表示这次 observe 调用交给后台执行器（decision_observe_nonblocking），排队期间也在登记里，
+#   设置撤销与宿主关闭照样能标记它；决策服务据此给它独立的有界调用资源键，不和同会话的同步调用互相占位。
 # 类用途: 记录应通知的准确 owner/thread/point 和一次性取消句柄。
 @dataclass
 class ActiveDecision:
@@ -60,6 +62,7 @@ class ActiveDecision:
     settings: dict = field(repr=False)
     settings_cancelled: bool = False
     shutdown_cancelled: bool = False
+    nonblocking: bool = False
 
 
 # LLM: 索引满或宿主已开始关闭都只拒绝本次可选增强，不等待或建立另一池；关闭标记与登记同锁判断，不留竞态窗口。

@@ -29,6 +29,9 @@ SCHEMA = "decision_reach.v1"
 CALLED = "called"
 # observe 采样的成功样本计数用独立内部码：只服务采样判定，不进 reached/called/not_called 诊断（_point_row 里排除）。
 SAMPLE_SUCCESS = "observe_sample_ok"
+# observe 转后台时队列已满、这次没发出的内部码：到达时调用点已记过 called，这里只按小时留一份拒绝次数供审计核对，
+# 同样不进 reached/called/not_called（避免同一次到达记两遍）；结果日志另有 skipped/observe_nonblocking_busy 一行。
+NONBLOCKING_BUSY = "observe_nonblocking_busy"
 # 本片接入到达计数的点位；其余点位展示时明确写“未统计”，不显示成 0 次。
 COVERED_POINTS = ("planning", "delivery_quality", "action_candidate", "external_material_order",
                   "skill_proposal_review", "pre_recall", "recall", "curator", "curator_relation", "model_selection",
@@ -232,8 +235,8 @@ def decision_point_diagnostics(points: tuple[str, ...], modes: Mapping | None, r
 
 # 函数用途: 把一个点位的原因计数整理成 reached/called/not_called（按次数从多到少，带大白话）。
 def _point_row(counts: Mapping[str, int]) -> dict[str, object]:
-    # 采样成功计数不是“到达/未调用”，不计入 reached，也不进 not_called。
-    diagnostics = {reason: count for reason, count in counts.items() if reason != SAMPLE_SUCCESS}
+    # 采样成功计数与后台队列满的拒绝计数都不是“到达/未调用”，不计入 reached，也不进 not_called。
+    diagnostics = {reason: count for reason, count in counts.items() if reason not in (SAMPLE_SUCCESS, NONBLOCKING_BUSY)}
     missed = sorted(((reason, count) for reason, count in diagnostics.items() if reason != CALLED), key=lambda item: (-item[1], item[0]))
     return {"reached": sum(diagnostics.values()), "called": int(diagnostics.get(CALLED, 0)),
             "not_called": [{"reason": reason, "label": miss_reason_label(reason), "count": count} for reason, count in missed]}
@@ -306,6 +309,7 @@ def _add(hours: dict[int, dict[str, dict[str, int]]], key: tuple[int, str, str],
 __all__ = [
     "CALLED",
     "COVERED_POINTS",
+    "NONBLOCKING_BUSY",
     "SAMPLE_SUCCESS",
     "SCHEMA",
     "counted_material",

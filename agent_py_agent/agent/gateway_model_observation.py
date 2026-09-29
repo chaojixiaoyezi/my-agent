@@ -7,6 +7,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 from types import SimpleNamespace
 
 from .backends.decision_protocol import decision_json
@@ -273,7 +274,7 @@ class GatewayModelObservation:
                  "observed_selection_source": thread.model_selection_source}
         result = {"status": "error", "reason": "enhancement_failed"}
         try:
-            result = self._decide(thread, op, mode)
+            result = self._decide(thread, op, mode, facts)
         except (InterruptedError, ToolCancelled):
             result = {"status": "cancelled", "reason": "user_cancelled"}
             raise
@@ -286,11 +287,13 @@ class GatewayModelObservation:
                 logging.getLogger(__name__).warning("模型观察回执未落盘，保留原一次性标记", exc_info=False)
 
     # LLM: 原 service 复核设置/身份/连接；observe 仅记录，apply 也只创建临时候选，不能跳过首请求/发送检查。
+    #   observe 转后台（observe_nonblocking_enabled）时 decide 当场返回 deferred，标记先记 deferred；后台完成后由
+    #   _complete_deferred 把建议编号补记进同一标记（facts 与候选随回调带过去，不重读材料）。
     #   apply 的问题说明告诉决策模型容量与工具由宿主核对、应按语义挑最合适候选，并同样解释用途标签；采用仍走原验证门。
     #   到达结果计入 decision_reach_counts：阶段原因、no_candidates、材料不合格（bad_material）、提交时轮次已关（turn_closed），
     #   真正调用前记 called；预留标记失败（同一请求重复）不在这里，不算到达。
     # 函数用途: 建立一次原阶段并准备只读候选，超时或无候选时保留原模型。
-    def _decide(self, thread: object, op: str, mode: str) -> dict:
+    def _decide(self, thread: object, op: str, mode: str, facts: dict) -> dict:
         agent = self.context.agent
         stage = decision_service.begin_decision_stage(agent, self.params, operation_id=op)
         reason = stage_miss_reason(stage, "model_selection")
@@ -313,7 +316,9 @@ class GatewayModelObservation:
         self._submit(agent)
         note_decision_reach(agent, "model_selection", CALLED)
         outcome = decision_service.decide(agent, self.params, stage, point="model_selection", state=state,
-                                         questions=questions, candidates_revision=revision, caller_deadline=stage.deadline)
+                                         questions=questions, candidates_revision=revision, caller_deadline=stage.deadline,
+                                         on_background_result=partial(self._complete_deferred,
+                                                                      {**facts, "candidates_revision": revision}, candidates))
         result = _observation_result(outcome, candidates)
         choice = result.get("choice")
         if outcome.may_apply and choice in generations and choice != self.captured.profile_id:
@@ -321,6 +326,18 @@ class GatewayModelObservation:
 
             self.adoption = GatewayModelAdoption(self, thread, stage, outcome, generations[choice])
         return {**result, "candidates_revision": revision}
+
+    # LLM: 只在 observe 转后台后由决策执行器的 worker 线程调用：按与同步路径相同的 _observation_result 生成编号与状态，
+    #   经 complete_deferred 补记进原请求；回合已结束（active-turn 事务拒绝）就放弃回写，结果仍在决策结果日志里。
+    #   不采用、不改线程模型；异常只记日志。
+    # 函数用途: 把后台完成的模型观察补记到本请求记录，替换先写下的 deferred 状态。
+    def _complete_deferred(self, facts: dict, candidates: dict, outcome: object) -> None:
+        try:
+            self.writer.complete_deferred({**facts, **_observation_result(outcome, candidates)})
+        except (InterruptedError, ToolCancelled):
+            return
+        except Exception:
+            logging.getLogger(__name__).warning("后台模型观察未能补记到请求记录；结果仍在决策结果日志", exc_info=False)
 
     # LLM: 发送前在原活跃轮次上登记 submit；轮次已关闭时原样抛 InterruptedError（停止语义不变），并先记一次 turn_closed。
     # 函数用途: 确认本轮还在进行后才发出决策请求，记下“判断前轮次已结束”的到达结果。

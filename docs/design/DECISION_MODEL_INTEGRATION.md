@@ -58,6 +58,7 @@ my-agent 也可根据用户明确要求或既有授权，通过同一配置服�
 | 前台模型选择、召回、能力推荐 | 2 秒 | 4 秒 | 默认 0 次 |
 | 后台记忆整理前置标注 | 4 秒（每个后台点位从自己的调用开始计时） | 不设阶段累计预算，只受调用方绝对期限（如 Curator 租约）约束 | 默认 0 次 |
 | 用户显式测试决策连接 | 由测试操作明确指定，默认 4 秒 | 使用同一测试预算 | 默认 0 次 |
+| observe 转后台（`observe_nonblocking_enabled` 打开） | 后台单次等待 `background_timeout_seconds`，从后台开始执行时起算 | 不占前台阶段预算，调用方不等待 | 默认 0 次 |
 
 ### 时间可以调，但预算必须真正生效
 
@@ -107,6 +108,28 @@ P1-C/D 本地组件已验：原 ConcurrencyLimiter 的占用与保留量由同�
 冷却记录限于决策 profile/连接/凭据归属及其配置版本，不因同一 thread 使用主模型就把主模型一起禁用。
 记录有数量上限和过期清理；跨进程/跨机器共享限制必须走已有资源准入，不能把本进程字典宣称为全局限额。
 这属于请求资源状态，不持久化第二套任务状态，也不擅自把用户的“已开启”改为“永久关闭”。
+
+### observe 不挡主链路（2026-09-28，默认关）
+
+observe 的建议永远不会被采用，同步等待只会拖慢回复（生产数据：用户轮次合计多等中位 4.0 秒、P90 8.0 秒）。
+打开决策设置 `observe_nonblocking_enabled`（AgentConfig 字段 `decision_observe_nonblocking_enabled`，默认 false）后：
+
+- **范围**：只转普通 thread 范围、点位有效模式为 observe 的调用。apply（时序完全不变）、实验、用户后台（owner_background）点位始终同步。
+- **返回**：`decide` 在冷却检查和在途登记之后，当场返回 `deferred` 占位（`may_apply=False`、`blocking=False`），不写结果行。调用点照原有失败路径保留原方案，例如召回会记 `memory_recall_decision:observe:deferred`。
+- **执行器**：`conversation/decision_observe_nonblocking.py`。进程内只有一个后台 worker，串行执行，排队上限 `OBSERVE_NONBLOCKING_MAX_PENDING=8`。队列满时记 `skipped/observe_nonblocking_busy` 结果行，外加一个 reach 内部码（不计入 reached/called）。
+- **期限**：从 worker 开始执行时起算 `background_timeout_seconds`，不占前台阶段预算，也不受调用方期限约束。结果行里的耗时只算执行部分。
+- **身份与复核**：worker 先装入发起时捕获的 runner 身份（run 取阶段身份），发送前后照原 `_invoke` 复核身份、设置和连接，执行完恢复线程上下文。
+- **用量**：
+  - 调用走独立用量范围：request 是 `decision-observe:<uuid>`，run 为空。
+  - 完成后经 `settle_standalone_model_usage` 追加一条 source=`decision_observe` 的会话用量事件；run、task 只作归属字段。
+  - 这次调用不进发起 run 的累计容器，run 收口时不会重复计；超时照同步口径记 timed_out。
+- **停止与关闭**：
+  - 发出前发起回合已停止（取消令牌已取消），就不再发送，记 `stale/turn_cancelled`。
+  - 已发出的请求不跟随回合停止，让它自然结束并照常记账。
+  - 设置撤销、宿主关闭沿原在途登记取消；排队中的调用在发送前复核时作废，不建调用记录。
+- **资源键**：后台调用用 `decision-observe` 命名空间的有界资源键。同会话、同连接的同步调用不会因为它还在途而被拒成 admission_busy。
+- **选模型观察**：请求记录里的观察标记先记 `deferred`。后台完成时，如果回合仍在活动事务内，就经 `GatewayModelObservationWriter.complete_deferred` 把建议编号和状态补记进同一个标记（只接受 started/deferred，`adopted` 恒为 false）。回合已结束则不回写，结果只留在决策结果日志里。
+- **设置视图**：这类点位标 `blocking=false`，`max_request_seconds` 和 `limiting_field` 显示后台单次等待。
 
 ## 4. 最小结构和唯一执行入口
 
@@ -207,6 +230,7 @@ agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 
 
 决策结果日志（2026-09-26）：`decide()` 的每个返回按点位追加一行到 owner 规范路径 `owner_decision_outcomes_jsonl`，即 `<owner_home>/data/decision/outcomes.jsonl`。
 - **内容**：只记点位、范围、模式、状态、原因、耗时和宿主身份编号，不含状态、题目、候选或回答正文。成功、超时、冷却跳过、配置不可用都留痕，用户中断不记。
+- **后台 observe**（2026-09-28）：每行另有 `blocking` 字段。observe 转后台时，decide 当场返回的 deferred 占位不写；后台完成后写一行 `blocking=false`，耗时只算执行部分。
 - **边界**：最多保留 1000 条；写失败只记日志，不改变决策结果。
 - **读取**：`audit_records` 的 decision 主题据此给出每个点位各状态的次数和最近几条。用量账只按用途汇总，不能拿它推断单个点位是否接通。
 

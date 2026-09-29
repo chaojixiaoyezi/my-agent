@@ -27,6 +27,7 @@ from agent_py_agent.tests.test_tui_decision_menu import (
     open_scope,
     press,
     running,
+    scope_index,
     visible,
 )
 from agent_py_agent.tests.test_user_config_decision_operations import configured as configured
@@ -149,13 +150,13 @@ def test_pipe_edits_policy_and_strict_category_array_then_resets(tmp_path):
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui)
-            await choose(ui, 6)
+            await choose(ui, scope_index(gateway, "points"))
             await choose(ui, 2)
             assert "上下文减量策略" in visible(ui.app) and "可选工具类别" in visible(ui.app)
             await choose(ui, 3)
             await press(ui, b"\x1b[A\r")
             assert settings(gateway.host, "read", {})["effective"]["points"]["skill_tool"]["context_policy"] == "metadata"
-            await choose(ui, 6)
+            await choose(ui, scope_index(gateway, "points"))
             await choose(ui, 2)
             await choose(ui, 4)
             await press(ui, b"\x01\x0b")
@@ -166,7 +167,7 @@ def test_pipe_edits_policy_and_strict_category_array_then_resets(tmp_path):
             await press(ui, '["plugins", "custom.extra"]\t\r')
             assert sum(op == "decision_patch" for op, _ in gateway.calls) == before + 1
             assert settings(gateway.host, "read", {})["effective"]["points"]["skill_tool"]["optional_categories"] == ["plugins", "custom.extra"]
-            await choose(ui, 7)
+            await choose(ui, scope_index(gateway, "reset"))
             await choose(ui, 0)
             assert POLICY not in settings(gateway.host, "read", {})["overrides"]["owner"]
             assert not any(op == "decision_probe" for op, _ in gateway.calls)

@@ -1,5 +1,7 @@
 # LLM: 可选决策只有建议权；实验阶段另读原授权，仅在点普通模式 off 时以 observe 经原账预留和发送许可联网，
 # 普通增强保留原路径，期限及身份发送前后复核；发送拒绝与预算拒绝显式映射，不进入连接退避。
+# 普通 thread 范围的 observe 调用在 observe_nonblocking_enabled 打开时交给 decision_observe_nonblocking 后台执行，
+# 调用方当场拿到 deferred 占位、不等待；apply、实验与用户后台点位始终同步。
 # 模块用途: 为原业务批次执行准确会话或用户后台范围的可选决策，不授予业务写入权。
 from __future__ import annotations
 
@@ -8,7 +10,9 @@ import json
 import math
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 
 from ..backends.bounded_call import BoundedCallBusyError, BoundedCallTimeoutError
 from ..backends.decision_protocol import (
@@ -24,11 +28,15 @@ from ..backends.errors import (
 )
 from ..backends.provider_send_gate import ProviderSendRefused
 from ..backends.typesafe_decision import decision_backend_from_profile
-from ..common.cancellation import ToolCancelled, raise_if_cancelled
+from ..common.cancellation import ToolCancelled, current_cancellation_token, raise_if_cancelled
 from ..concurrency.interrupt import InterruptHandle, is_interrupted
 from ..contracts.model_call_budget import ModelCallBudgetError
 from ..llm_scale.concurrency import ConcurrencyTimeout
-from ..runtime_context import current_subagent_run_id, current_task_attributes
+from ..runtime_context import (
+    current_subagent_attempt_id,
+    current_subagent_run_id,
+    current_task_attributes,
+)
 from ..settings.decision_settings import execute_decision_settings_operation
 from ..settings.decision_settings_projection import decision_profile
 from ..settings.decision_settings_schema import POINT_RUNTIME_SCOPES
@@ -36,6 +44,7 @@ from ..settings.model_profiles import model_profiles_path, read_model_profiles
 from ..settings.model_provider_schema import ModelProfileError
 from ..user_space.owner_admin_controls import owner_decision_model_allowed
 from . import decision_point_limits as decision_limits
+from .decision_observe_nonblocking import NonblockingObserve, enqueue_nonblocking_observe
 from .decision_outcome_log import append_decision_outcome, decision_outcome_row
 from .decision_policy import (
     ActiveDecision,
@@ -48,7 +57,15 @@ from .decision_policy import (
     register_active,
     unregister_active,
 )
-from .decision_reach_counts import note_observe_sample_success, observe_sample_success_count
+from .decision_reach_counts import (
+    NONBLOCKING_BUSY,
+    note_decision_reach,
+    note_observe_sample_success,
+    observe_sample_success_count,
+)
+
+# observe 转后台执行时 decide 当场返回的占位状态：调用方不等待、也拿不到建议；最终结果由后台执行器写结果日志。
+DEFERRED_STATUS = "deferred"
 
 
 # LLM: 宿主准备前创建；experiment 只标记路径而非许可，准入通过时 enabled_points 只含普通模式为 off 的授权点；
@@ -75,6 +92,7 @@ class DecisionStage:
 # LLM: may_apply仅表示返回时信封有效；消费前用同一helper核验内存连接摘要/绝对期限，逐题error仍由消费者处理，不授予写入权。
 #   experiment 只在实验调用真正进入原账预留（因而有结算）时才有值：授权编号、设置/策略/连接版本和原账结算视图；
 #   普通调用恒为 None，它只供宿主写实验记录，不参与采用、比较或授权判断。
+#   blocking=False 表示这次 observe 转后台执行、调用方没有等待：当场返回的 deferred 占位、队列满的拒绝和后台最终结果都是 False。
 # 类用途: 明确区分关闭、观察、可用建议、到期、冷却和过期结果，失败时保留原业务方案。
 @dataclass(frozen=True)
 class DecisionOutcome:
@@ -90,6 +108,8 @@ class DecisionOutcome:
     experiment: dict | None = field(default=None, repr=False, compare=False)
     # 字段用途: 建了调用记录的调用才有的链路事实（终态、超时阶段、各尝试分段毫秒、本地估算输入），只写结果日志，不参与采用。
     transport: dict | None = field(default=None, repr=False, compare=False)
+    # 字段用途: false 表示这次 observe 转到后台执行、调用方没有等待；只写结果日志的 blocking 字段，不参与采用。
+    blocking: bool = True
 
 
 # LLM: 身份只取宿主 params/runner；owner_background必须有run且无thread，不能从历史材料取身份或把活跃会话改称后台。
@@ -253,7 +273,7 @@ def _stale(agent: object, params: object, stage: DecisionStage, point: str, revi
 
 
 # LLM: decide 的原参数原样打包，只在 decide 与 _decide_outcome 之间传递，不做任何推断或默认值补全。
-# 类用途: 把一次建议请求的阶段、点位、状态、题目、期限与重试标志作为整体交给内部实现。
+# 类用途: 把一次建议请求的阶段、点位、状态、题目、期限、重试标志与后台完成回调作为整体交给内部实现。
 @dataclass(frozen=True)
 class _DecideCall:
     stage: DecisionStage
@@ -264,19 +284,24 @@ class _DecideCall:
     source_refs: tuple[str, ...]
     caller_deadline: float | None
     explicit_retry: bool
+    on_background_result: Callable[[DecisionOutcome], None] | None = None
 
 
 # LLM: 实验 stage 忽略自带 error_code，在构造请求/后端前复读准入并失败关闭，伪造 stage 不能放行；普通点仍沿原 schema/身份/期限及调用账。
 #   每次返回的结果（含冷却跳过、到期、配置不可用）都按点位写一行决策结果日志（decision_outcome_log，无正文）；
+#   observe 转后台时当场返回 deferred 占位、这里不写，后台执行器完成后写一行并调用 on_background_result（在后台线程）。
 #   用户中断照常上抛、不记录。审计据此区分"点位没触发"和"触发了但被冷却/期限挡住"。
 # 函数用途: 在合法范围请求建议；实验只在点普通模式为 off 时以 observe 运行并经原预算与发送许可联网，结果永不获得采用权。
 def decide(agent: object, params: object, stage: DecisionStage, *, point: str, state: object, questions: dict,
            candidates_revision: str, source_refs: tuple[str, ...] = (), caller_deadline: float | None = None,
-           explicit_retry: bool = False) -> DecisionOutcome:
+           explicit_retry: bool = False,
+           on_background_result: Callable[[DecisionOutcome], None] | None = None) -> DecisionOutcome:
     started = time.monotonic()
     outcome = _decide_outcome(agent, params, _DecideCall(
-        stage, point, state, questions, candidates_revision, source_refs, caller_deadline, explicit_retry))
-    append_decision_outcome(agent, decision_outcome_row(stage, point, outcome, time.monotonic() - started))
+        stage, point, state, questions, candidates_revision, source_refs, caller_deadline, explicit_retry,
+        on_background_result))
+    if outcome.status != DEFERRED_STATUS:
+        append_decision_outcome(agent, decision_outcome_row(stage, point, outcome, time.monotonic() - started))
     return outcome
 
 
@@ -299,8 +324,28 @@ def _sampled_outcome(agent: object, point: str, row: dict, settings: dict) -> De
     return DecisionOutcome("observe", "skipped", reason="observe_sampled_out")
 
 
-# LLM: decide 的实现；返回语义与原 decide 完全一致。冷却先看整条连接，再看本点位（超时只冷却本点位，见 _failure_key）。
-# 函数用途: 校验身份与范围、解析路由和期限、检查冷却后调用决策模型，任何失败都保留原业务方案。
+# LLM: 只有普通 thread 范围、点位有效模式为 observe、且决策设置 observe_nonblocking_enabled 为真才转后台；
+#   apply、实验与用户后台（owner_background）永远同步，时序与原先完全一致。只读本次路由快照，不另读设置。
+# 函数用途: 判断这次决策调用是否交给后台执行、不让调用方等待。
+def _nonblocking(stage: DecisionStage, row: dict, settings: dict) -> bool:
+    return (stage.scope == "thread" and not stage.experiment and row["effective_mode"] == "observe"
+            and (settings.get("effective") or {}).get("observe_nonblocking_enabled") is True)
+
+
+# LLM: 冷却先看整条连接，再看本点位（超时只冷却本点位，见 _failure_key）；显式重试清除准确键。只读写进程内冷却表。
+# 函数用途: 发送前检查连接与点位冷却，被挡住时返回结构化冷却结果，否则返回 None。
+def _cooldown_outcome(key: tuple, revision: str, call: _DecideCall, mode: str) -> DecisionOutcome | None:
+    blocked, remaining = cooldown_state(key, revision, retry=call.explicit_retry)
+    reason = "connection_backoff"
+    if not blocked:
+        blocked, remaining = cooldown_state((*key, call.point), revision, retry=call.explicit_retry)
+        reason = "point_backoff"
+    return DecisionOutcome(mode, blocked, reason=reason, retry_after_seconds=remaining) if blocked else None
+
+
+# LLM: decide 的实现；同步路径返回语义与原 decide 完全一致。observe 转后台时不占前台阶段预算、不查阶段期限，
+#   冷却检查与在途登记仍在调用方线程同步完成，随后交给 _dispatch_nonblocking 立即返回。
+# 函数用途: 校验身份与范围、解析路由和期限、检查冷却后调用决策模型或转交后台，任何失败都保留原业务方案。
 def _decide_outcome(agent: object, params: object, call: _DecideCall) -> DecisionOutcome:
     _check_interrupted()
     mode = "off"
@@ -324,26 +369,25 @@ def _decide_outcome(agent: object, params: object, call: _DecideCall) -> Decisio
         settings, row, revision, config = route
         if not stage.experiment and (sampled := _sampled_outcome(agent, point, row, settings)) is not None:
             return replace(sampled, mode=mode)
-        deadline = _point_deadline(stage, started, row["timeout_seconds"], caller)
+        nonblocking = _nonblocking(stage, row, settings)
+        # 转后台的调用没人在等，不占前台阶段预算：期限由后台 worker 开始执行时按 background_timeout_seconds 另算。
+        deadline = math.inf if nonblocking else _point_deadline(stage, started, row["timeout_seconds"], caller)
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
-        connection = connection_revision(config)
-        key = stage.owner_ref, row["profile_id"], connection
-        blocked, remaining = cooldown_state(key, revision, retry=call.explicit_retry)
-        reason = "connection_backoff"
-        if not blocked:
-            blocked, remaining = cooldown_state((*key, point), revision, retry=call.explicit_retry)
-            reason = "point_backoff"
-        if blocked:
-            return DecisionOutcome(mode, blocked, reason=reason, retry_after_seconds=remaining)
+        key = stage.owner_ref, row["profile_id"], connection_revision(config)
+        if (cooling := _cooldown_outcome(key, revision, call, mode)) is not None:
+            return cooling
         binding = DecisionBinding(point, stage.owner_ref, stage.operation_id, revision, call.candidates_revision,
             stage.thread_id, stage.run_id, stage.task_id, call.source_refs)
         request = DecisionRequest(binding, call.state, call.questions)
         backend = decision_backend_from_profile(config)
-        active = ActiveDecision(stage.owner_ref, stage.thread_id, point, InterruptHandle(), agent, settings)
+        active = ActiveDecision(stage.owner_ref, stage.thread_id, point, InterruptHandle(), agent, settings,
+                                nonblocking=nonblocking)
         token = uuid.uuid4().hex
         if not register_active(token, active):
             return _registration_refused(mode)
+        if nonblocking:
+            return _dispatch_nonblocking(params, call, _Prepared(request, backend, key, active, token))
         try:
             return _invoke(params, stage, request, backend, deadline, key, active)
         finally:
@@ -412,6 +456,73 @@ def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionO
     return replace(outcome, transport=transport[-1]) if transport else outcome
 
 
+# LLM: 发送前已冻结的请求、后端、冷却键与在途登记（连同登记令牌），只在决策服务内部交给同步或后台发送，不跨请求复用。
+# 类用途: 把一次已登记、待发送的决策调用打包。
+@dataclass(frozen=True)
+class _Prepared:
+    request: DecisionRequest
+    backend: object
+    key: tuple
+    active: ActiveDecision
+    token: str
+
+
+# LLM: 在后台执行器的 worker 线程里运行，发起时的身份上下文已由执行器装好。发出前回合已停止（捕获的取消令牌已取消）、
+#   设置撤销或宿主关闭已标记，都直接返回 stale 结果，不发送、不建调用记录；之后沿原 _invoke 发送与复核。已发出的请求不跟随
+#   回合停止，自然结束并照常记账。任何异常都映射成保留原方案的结果，不向执行器抛出。
+# 类用途: 后台执行一次已登记 observe 调用的可调用对象，只收绝对期限。
+@dataclass(frozen=True)
+class _NonblockingSend:
+    params: object
+    stage: DecisionStage
+    prepared: _Prepared
+    cancel_token: object | None
+
+    # LLM: 期限由执行器按 worker 开始时刻加后台预算给出；这里不重算期限、不读发起线程状态。
+    # 函数用途: 按给定绝对期限发送并复核这次 observe 调用，返回结构化结果。
+    def __call__(self, deadline: float) -> DecisionOutcome:
+        prepared = self.prepared
+        try:
+            if self.cancel_token is not None and self.cancel_token.cancelled:
+                return DecisionOutcome("observe", "stale", reason="turn_cancelled")
+            revoked = _revoked(prepared.active, "observe")
+            if revoked is not None:
+                return revoked
+            return _invoke(self.params, self.stage, prepared.request, prepared.backend, deadline, prepared.key,
+                           prepared.active)
+        except (InterruptedError, ToolCancelled):
+            return DecisionOutcome("observe", "stale", reason="interrupted")
+        except Exception:
+            return DecisionOutcome("observe", "error", reason="enhancement_failed")
+
+
+# LLM: 发起线程在这里捕获身份（run 取阶段身份，attempt 与任务属性取当前 runner）和回合取消令牌。后台调用走独立用量范围
+#   （request=decision-observe:*、run 为空），不并入任何 run 的累计容器；会话/任务身份字段原样保留，供 worker 复核身份。
+#   预算取本次路由快照里的 background_timeout_seconds（后台单次等待，同样没人在等）。入队失败当场注销登记、记 reach 内部码，
+#   返回 skipped/observe_nonblocking_busy（decide 照常写结果行）；入队成功返回 deferred 占位（不写行、不可采用）。
+# 函数用途: 把已登记的 observe 调用交给后台执行器，立即返回，不等待决策模型。
+def _dispatch_nonblocking(params: object, call: _DecideCall, prepared: _Prepared) -> DecisionOutcome:
+    agent, stage, active = prepared.active.context, call.stage, prepared.active
+    usage_request_id = "decision-observe:" + uuid.uuid4().hex
+    call_params = SimpleNamespace(request_id=usage_request_id, run_id="", task_id=getattr(params, "task_id", "") or "",
+                                  thread_id=getattr(params, "thread_id", "") or "",
+                                  task_attributes=dict(getattr(params, "task_attributes", None) or {}))
+    job = NonblockingObserve(
+        agent=agent, stage=stage, point=call.point,
+        budget_seconds=float(active.settings["effective"]["background_timeout_seconds"]),
+        usage_request_id=usage_request_id, send=_NonblockingSend(call_params, stage, prepared, current_cancellation_token()),
+        release=lambda: unregister_active(prepared.token, active),
+        identity={"run_id": stage.run_id, "attempt_id": current_subagent_attempt_id(agent),
+                  "task_attributes": current_task_attributes(agent)},
+        on_result=call.on_background_result,
+    )
+    if enqueue_nonblocking_observe(job):
+        return DecisionOutcome("observe", DEFERRED_STATUS, blocking=False)
+    unregister_active(prepared.token, active)
+    note_decision_reach(agent, call.point, NONBLOCKING_BUSY)
+    return DecisionOutcome("observe", "skipped", reason=NONBLOCKING_BUSY, blocking=False)
+
+
 # LLM: 注册取消后再次复查堵住关闭/启动竞态；用户中断必须传播，设置取消与宿主关闭仅使建议失效，不能冒充用户停止。
 # 连接一返回响应就复位该连接的退避阶梯（进程内冷却表），之后的复核失败不算连接故障；实验结果固定 observe、不可采用。
 # transport_facts 原样交给调用边界收集链路分段计时，本函数不读它。
@@ -428,8 +539,10 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
         _check_interrupted()
         if time.monotonic() >= deadline:
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
+        # 后台 observe 调用用独立资源键：同会话同连接的同步（apply）调用不会因为它还在途而被拒成 admission_busy。
+        namespace = "decision-observe" if active.nonblocking else "decision"
         response = invoke_decision_model_call(agent, params, request, backend, deadline=deadline,
-            resource_key=("decision", stage.owner_ref, stage.thread_id, key[1], key[2]), interrupt_handle=active.handle,
+            resource_key=(namespace, stage.owner_ref, stage.thread_id, key[1], key[2]), interrupt_handle=active.handle,
             experiment=experiment, transport_facts=transport_facts)
         record_success(key)
         record_success((*key, point))

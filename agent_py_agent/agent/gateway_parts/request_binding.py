@@ -280,6 +280,23 @@ class GatewayModelObservationWriter:
         saved = self._transition("acknowledge", update)
         self.context.request[MODEL_OBSERVATION_KEY] = saved[MODEL_OBSERVATION_KEY]
 
+    # LLM: 只供 observe 转后台执行后的完成回调（决策执行器的 worker 线程）调用：同 op/claim 的标记仍是 started（发起线程的
+    #   finish 还没写）或 deferred 时才合并最终建议编号与状态，之后 finish 见状态已变就不再覆盖；其它终态或别的 attempt 不动。
+    #   走原 active-turn 事务：回合已结束时原样抛 InterruptedError，由调用方放弃回写，不影响已结束的回合。
+    # 函数用途: 把后台完成的模型建议补记到原请求的观察标记，替换先写下的 deferred 状态。
+    def complete_deferred(self, result: dict) -> None:
+        # LLM: 原 JSON 锁内比较 op/claim/status；adopted 固定为 false，原始回复、配置、密钥不进入标记。
+        # 函数用途: 在原请求里把 deferred 观察换成后台完成的结果。
+        def update(current: dict) -> dict:
+            marker = current.get(MODEL_OBSERVATION_KEY)
+            if (not isinstance(marker, dict) or marker.get("operation_id") != self.operation_id
+                    or marker.get("claim_id") != self.claim_id or marker.get("status") not in {"started", "deferred"}):
+                return current
+            return {**current, MODEL_OBSERVATION_KEY: {**marker, **result, "adopted": False}}
+
+        saved = self._transition("acknowledge", update)
+        self.context.request[MODEL_OBSERVATION_KEY] = saved[MODEL_OBSERVATION_KEY]
+
     # LLM: 仅原观察终态的同一建议可以更新采用投影；线程 CAS 才是模型选择权威，发送意图不能写成 HTTP 已接收。
     # 函数用途: 记录本请求候选保留或发送意图，终态后重试不覆盖既存事实。
     def record_adoption(self, result: dict) -> None:

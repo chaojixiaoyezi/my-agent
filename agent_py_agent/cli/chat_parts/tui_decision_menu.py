@@ -8,7 +8,11 @@ import math
 from prompt_toolkit.layout import HSplit, ScrollablePane
 from prompt_toolkit.widgets import CheckboxList, Label, RadioList, TextArea
 
-from ...agent.settings.decision_settings_schema import POINTS, validate_decision_field
+from ...agent.settings.decision_settings_schema import (
+    BOOLEAN_FIELDS,
+    POINTS,
+    validate_decision_field,
+)
 from .tui_model_menu import _dialog, _request
 
 # 接入点集合以 schema 登记的 POINTS 为唯一权威；这里只配中文显示名，缺显示名时直接显示原键，不能漏项或让菜单崩溃。
@@ -20,7 +24,8 @@ _POINT_NAMES = {"model_selection": "模型选择", "subagent_model": "子代理�
 _POINTS = {point: _POINT_NAMES.get(point, point) for point in POINTS}
 _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout_seconds": "前台单次上限（秒）",
             "stage_timeout_seconds": "前台阶段上限（秒）", "background_timeout_seconds": "后台阶段上限（秒）",
-            "experiment_enabled": "实验能力（仍需独立授权）"}
+            "experiment_enabled": "实验能力（仍需独立授权）",
+            "observe_nonblocking_enabled": "观察不挡回复（observe 点位改在后台问决策模型）"}
 _POINT_FIELDS = {"mode": "模式", "profile_id": "决策模型", "timeout_seconds": "单次上限（秒）",
                  "context_policy": "上下文减量策略", "optional_categories": "可选工具类别",
                  "candidate_profile_ids": "子代理执行模型候选"}
@@ -55,7 +60,7 @@ def _field_label(view: dict, field: str) -> str:
     parts = field.split(".")
     name = _GENERAL[field] if len(parts) == 1 else f"{_POINTS[parts[1]]} · {_POINT_FIELDS[parts[2]]}"
     value = _value(view, field)
-    shown = ("开启" if value else "关闭") if field in {"enabled", "experiment_enabled"} else _MODES.get(value, value) if field.endswith(".mode") else value or "未绑定"
+    shown = ("开启" if value else "关闭") if field in BOOLEAN_FIELDS else _MODES.get(value, value) if field.endswith(".mode") else value or "未绑定"
     if field.endswith((".optional_categories", ".candidate_profile_ids")):
         shown = json.dumps(value, ensure_ascii=False)
     elif field.endswith(".context_policy"):
@@ -209,8 +214,8 @@ def _field_text_value(field: str, text: str):
 # LLM: 开关与上下文策略用单选，其余（秒数、JSON 数组）用单行文本；取值仍由 _field_text_value 与设置服务校验。
 # 函数用途: 为非模式、非模型编号的字段生成编辑控件。
 def _plain_control(field: str, value):
-    if field in {"enabled", "experiment_enabled"} or field.endswith(".context_policy"):
-        rows = ([(False, "关闭"), (True, "开启")] if field in {"enabled", "experiment_enabled"} else
+    if field in BOOLEAN_FIELDS or field.endswith(".context_policy"):
+        rows = ([(False, "关闭"), (True, "开启")] if field in BOOLEAN_FIELDS else
                 list(_CONTEXT_POLICIES.items()))
         return RadioList(rows, default=value, select_on_focus=True)
     return TextArea(text=json.dumps(value, ensure_ascii=False) if isinstance(value, list) else str(value), height=1, multiline=False)
@@ -241,6 +246,8 @@ async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
     else:
         control = _plain_control(field, value)
     notice = Label("这里只开启能力，不建立实验许可；当前联网实验不可用。" if field == "experiment_enabled" else
+                   "开启后观察模式的点位在后台问决策模型，回复不再等它；等待上限用后台阶段上限。正式使用（apply）的点位不受影响。"
+                   if field == "observe_nonblocking_enabled" else
                    "候选请填原模型目录 ID 的 JSON 字符串数组；[] 表示全部当前授权生成模型。" if field.endswith(".candidate_profile_ids") else
                    "类别请填 JSON 字符串数组，如 [\"plugins\", \"自定义类别\"]；[] 不额外收起。" if field.endswith(".optional_categories") else
                    "减量可改变缓存前缀/schema；原搜索和权限不变，仅在开启并采用建议时生效。" if field.endswith(".context_policy") else

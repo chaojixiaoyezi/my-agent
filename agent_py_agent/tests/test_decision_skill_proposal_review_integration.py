@@ -34,6 +34,7 @@ from agent_py_agent.tests.test_tui_decision_menu import (
     point_index,
     press,
     running,
+    scope_index,
     visible,
 )
 
@@ -296,7 +297,7 @@ def test_tui_owner_menu_lists_point_and_saves_mode(tmp_path):
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui)
-            await choose(ui, 6)
+            await choose(ui, scope_index(gateway, "points"))
             assert "Skill 提案审核顺序（用户长期）" in visible(ui.app)
             await choose(ui, point_index(gateway, POINT))
             await choose(ui, 0)
@@ -312,7 +313,7 @@ def test_tui_thread_menu_does_not_offer_owner_only_point(tmp_path):
         gateway = Gateway(tmp_path)
         async with running(tmp_path, gateway) as ui:
             await open_scope(ui, thread=True)
-            await choose(ui, 5)
+            await choose(ui, scope_index(gateway, "points", thread=True))
             assert "Skill 提案审核顺序" not in visible(ui.app)
             assert "交付复核焦点" in visible(ui.app)
     asyncio.run(scenario())

@@ -39,8 +39,12 @@ def test_row_keeps_only_structured_facts():
     row = decision_outcome_row(_stage(), "recall", _outcome("deadline", "provider_failed"), 1.2345)
 
     assert set(row) == {"schema", "created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms",
-                        "thread_id", "run_id", "task_id", "experiment"}
+                        "thread_id", "run_id", "task_id", "experiment", "blocking"}
     assert (row["point"], row["status"], row["reason"], row["elapsed_ms"]) == ("recall", "deadline", "provider_failed", 1234)
+    # 结果对象没有 blocking 字段（旧替身、skipped 行）时按同步记；后台 observe 的结果带 blocking=False 原样投影。
+    assert row["blocking"] is True
+    background = SimpleNamespace(mode="observe", status="success", reason="", blocking=False)
+    assert decision_outcome_row(_stage(), "recall", background, 0.5)["blocking"] is False
 
 
 def test_append_writes_only_the_owner_path_and_stays_bounded(tmp_path, monkeypatch):

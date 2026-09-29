@@ -513,6 +513,7 @@ agent_py_agent/
 |   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
 |   |   |-- decision_policy.py        # 有界连接/点位冷却与同进程设置取消通知，不拥有 worker 或持久状态
 |   |   |-- decision_outcome_log.py   # 决策结果日志：每次 decide 的点位/状态/原因/耗时（无正文），有界落 owner data/decision，审计按点位汇总
+|   |   |-- decision_observe_nonblocking.py # observe 不挡主链路的唯一后台执行器：单 worker、有界排队、捕获身份执行、写结果行与独立用量范围
 |   |   |-- decision_point_limits.py  # 决策点数量界限（焦点/候选/网页/待办/提案/记忆的上下限）：点位判定与诊断大白话共用的唯一定义
 |   |   |-- decision_reach_counts.py  # 决策点到达/未触发原因计数：进程内按小时累加，节流合并落 owner data/decision/reach_counts.json，原因码配大白话；Gateway 正常停止时补写尾巴
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
@@ -784,6 +785,7 @@ agent_py_agent/
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
 |   |-- test_decision_background_deadline.py # 后台点位各自完整计时、前台保留阶段上限、调用方期限取更小（假时钟）
 |   |-- test_decision_service_http.py   # 原配置到真实本地 HTTP、账本与活动用量行的组合
+|   |-- test_decision_observe_nonblocking.py # observe 转后台：主链路先返回、apply 仍同步、有界队列、停止/撤销/停机、独立用量、选模型补记
 |   |-- test_decision_audit_controls.py # 管理员控制存取/失败关闭/只许管理员写、审计工具范围与时间窗、观察白名单与跨用户许可
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
 |   |-- test_decision_outcome_log.py    # 决策结果日志：只记结构化字段、有界、按窗口汇总，decide 的成功/超时/点位冷却落日志，审计按点位报告
@@ -1414,6 +1416,7 @@ docs/
 - `agent_py_agent/tests/test_decision_model_profiles.py`：验证当前模型目录 v4 的用途隔离、显式迁移、凭据复用、共享撤销及主子代理选择不误用决策模型。
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。
 - `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。
+- `agent_py_agent/agent/conversation/decision_observe_nonblocking.py`：observe 不挡主链路（开关 `observe_nonblocking_enabled`）的唯一后台执行器，只执行决策服务交来的已登记调用，负责结果行、独立用量结算与完成回调，不另建决策状态。
 - `agent_py_agent/agent/memory_store/decision_curator.py`：原用户后台批次的临时分类/优先级建议；关闭不准备，失败保留完整输入，原提取/提交仍唯一。
 - `agent_py_agent/agent/memory_store/decision_curator_relation.py`：完整来源和正式 long-term 版本的可选关系注释；复用同一阶段、原仓库和账本，没有直接合并/晋升权限。消息×正式条目对数超过上限时按标准库 BM25 词面相似度挑前 32 对（同分保持原枚举顺序、无嵌入调用），并在 `state.coverage` 声明总对数、展示对数与挑选规则。
 - `agent_py_agent/tests/test_decision_curator_relation.py`：验证关系输入完整性、失效、原模型账本、作用域和 Curator 提取提交，fake 模型不代表真实语义质量。
