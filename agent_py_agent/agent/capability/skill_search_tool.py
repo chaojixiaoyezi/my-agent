@@ -222,6 +222,7 @@ class SkillSearchTool(BaseTool):
             return _invalid(str(exc))
 
     # LLM: 保持普通 Skill resolve 的既有优先级；失败后仅精确匹配当前受限包身份来给建议，不读成员、不 pin、不转换执行。
+    #   读正文失败时回执在 details.error_code 带出快照异常的结构化码，调用方不解析 error 文案。
     # 函数用途: 读取普通 Skill，或为错填包身份的请求返回仍为失败的结构化纠错信息。
     def _get(self, params: dict[str, object]) -> ToolHandlerOutcome:
         skill_id = str(params.get("skill_id") or "").strip()
@@ -246,10 +247,11 @@ class SkillSearchTool(BaseTool):
         try:
             body = snapshot.read_body(skill_id)
         except SkillSnapshotError as exc:
+            payload = {"error": str(exc), "skill_id": skill_id, "details": {"error_code": exc.error_code}}
             return ToolHandlerOutcome(
                 "skill_search",
                 False,
-                json.dumps({"error": str(exc), "skill_id": skill_id}, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
                 error_code="SKILL_SNAPSHOT_UNAVAILABLE",
             )
         payload = {

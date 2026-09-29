@@ -24,7 +24,25 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_memory_vector_cache.py agent_py_agent/tests/test_owner_maintenance.py -q`
   与 `python3 scripts/mutate_text_vector_cache.py`（cwd 都必须是工作树根）。
 
-## 唤醒毒丸第 2 步：尝试账、结案、重放与发布层第三位置（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）
+## 唤醒毒丸与 error_code：9a 复审小改（2026-09-29，分支 `claude/75-wake-poison-design`，基于 `12a532f8b`）
+
+- **error_code**：
+  - 结构化错误码的形状只在一处定义：`runtime_errors.is_structured_error_code`（大写字母开头，只含大写字母、数字、下划线）。
+  - `SkillSnapshotError` 构造时运行时再核一次形状，不合格回落到 `SKILL_SNAPSHOT_ERROR_CODE_INVALID`，原值只放进给人看的消息。
+  - `skill_search` 的 `get` 读正文失败时，回执也带 `details.error_code`。
+  - AST 守卫：扫描整个 `agent_py_agent`（排除 tests）；别名导入与子类迭代并入族名再扫；码参数认第一个位置参数或
+    `error_code=` 关键字；变量码的放行收窄到（文件，函数，变量）。
+- **wake_poison**：8 个函数补 LLM 层注释；原因码里的 `error_code` 用同一条形状规则过滤（空白、小写、带明细的
+  回落到 category+类名）；`next_poison_state` 遇到未知 kind 抛 ValueError；"执行了但没报告"改由
+  `verdict_for_missing_report` 单独表达，`verdict_for_report(None)` 抛 ValueError；`from_dict` 拦 NaN/inf、未知键，
+  以及计数与时间互相矛盾（同因大于总数、原因码与次数不一致、没失败却有时间、首次晚于最近一次）。
+- **测试**：`test_skill_snapshot_error_codes.py` 26 例（守卫正反样例含别名、子类、关键字、同文件他函数；运行时 6 种坏码；
+  `get` 回执）；`test_wake_poison.py` 增加形状过滤、未知 kind、missing report、失败与重投时间逐步推进、10 种坏状态；
+  类型用例建立在自洽的基础状态上，避免被一致性检查盖住。
+- **变异验证**：wake_poison 全集 43 个（原 26 个 + 本次 17 个，含 9a 列出的只重投退避推进、首末失败时间、只有空白的
+  error_code）与 error_code 9 个，全部被抓住。
+
+## 唤醒毒丸第 2 步：尝试账、结案、重放与发布层第三位置（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `12a532f8b`）
 
 - **范围**：新文件 `agent/conversation/store_wake_attempts.py`，以 `store.wakes.attempts` 挂在 WakeStore 上（`mark_handled`
   的签名与行为不变）；`store_layout.py` 加尝试账／结案／留档路径；发布层把结案当作第三个安装位置，接受
@@ -41,7 +59,7 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
   code-size 与基点逐条比对：新增 0；保留扫描的唤醒文件收集拆成 `_thread_wake_files`／`_wake_file_thread` 后，
   `_conversation_related_paths` 原有的两条 high-risk 一并消失。
 
-## 唤醒毒丸第 1 步：纯函数判定模块（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）
+## 唤醒毒丸第 1 步：纯函数判定模块（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `12a532f8b`）
 
 - **范围**：新文件 `agent/conversation/wake_poison.py`，只做判定、不接线：admission／异常／报告三类结果分类，
   同因连续段与总次数，计数失败与只重投两类退避，结案判定（同因 5 次、总 12 次标 mixed、只重投满 24 小时）。
@@ -53,8 +71,6 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
   （5 次领取、间隔合计 450 秒后按 `error:SKILL_TASK_BINDING_INVALID` 结案）和 `204f4ddf9`。
 - **变异验证**：26 个变异体全部被抓住（含预期等待集合少一项、瞬时类型各删一项、SQLite 不取低 8 位、忽略 error_code、
   换因不重计、不计数结果清账、退避按同因而非总数、上限用 > 代替 >=、mixed 标错、重投计入失败、各封顶值改动、状态校验放宽）。
-
-## SkillSnapshotError 整族结构化错误码（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）
 
 ## 前台命令已退出、只是清理未确认（2026-09-29，`84e8db619` + `067d2dd3e`，单独集成）
 

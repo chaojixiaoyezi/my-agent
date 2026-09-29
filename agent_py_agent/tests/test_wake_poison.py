@@ -40,6 +40,7 @@ from agent_py_agent.agent.conversation.wake_poison import (
     redelivery_backoff_seconds,
     verdict_for_admission,
     verdict_for_error,
+    verdict_for_missing_report,
     verdict_for_report,
 )
 from agent_py_agent.agent.runtime_db.operations import (
@@ -136,13 +137,31 @@ class TestReport:
         assert verdict_for_report(SimpleNamespace(wake_handled=True), delivery_frozen=False) == WAKE_ATTEMPT_SUCCESS
 
     def test_missing_report_and_unsettled_rerun_count(self):
-        assert verdict_for_report(None, delivery_frozen=False) == _failure("run:no_report")
+        assert verdict_for_missing_report() == _failure("run:no_report")
         unsettled = SimpleNamespace(wake_handled=False)
         assert verdict_for_report(unsettled, delivery_frozen=False) == _failure("run:delivery_not_committed")
 
     def test_unsettled_with_frozen_delivery_is_a_redelivery_failure(self):
         verdict = verdict_for_report(SimpleNamespace(wake_handled=False), delivery_frozen=True)
         assert verdict == WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+
+
+    def test_none_is_not_a_report(self):
+        with pytest.raises(ValueError):
+            verdict_for_report(None, delivery_frozen=False)
+
+
+class TestErrorCodeShape:
+    @pytest.mark.parametrize("code", ["   ", "lower_case", "HAS SPACE", "X detail=1", ""])
+    def test_malformed_error_codes_fall_back_to_category_and_class(self, code):
+        error = RuntimeError("boom")
+        error.error_code = code
+        assert verdict_for_error(error) == _failure("error:programmer_bug:RuntimeError")
+
+    def test_surrounding_whitespace_is_trimmed_from_a_real_code(self):
+        error = RuntimeError("boom")
+        error.error_code = "  SKILL_TASK_BINDING_INVALID "
+        assert verdict_for_error(error) == _failure("error:SKILL_TASK_BINDING_INVALID")
 
 
 class TestStreak:
@@ -176,6 +195,18 @@ class TestStreak:
         state = _feed([_failure("error:X")] * 4 + [WAKE_ATTEMPT_SUCCESS])
         assert state == WakePoisonState() and quarantine_decision(state) is None
 
+    def test_unknown_verdict_kind_is_rejected(self):
+        with pytest.raises(ValueError):
+            next_poison_state(WakePoisonState(), WakeAttemptVerdict("mystery", "x"), now=1.0)
+
+    def test_failure_timestamps_keep_the_first_and_move_the_last(self):
+        state = next_poison_state(WakePoisonState(), _failure("error:X"), now=100.0)
+        assert (state.first_failed_at, state.last_failed_at) == (100.0, 100.0)
+        state = next_poison_state(state, _failure("error:Y"), now=250.0)
+        assert (state.first_failed_at, state.last_failed_at) == (100.0, 250.0)
+        state = next_poison_state(state, WAKE_ATTEMPT_NEUTRAL, now=400.0)
+        assert (state.first_failed_at, state.last_failed_at, state.next_attempt_at) == (100.0, 250.0, 310.0)
+
     def test_abandoned_attempts_count_as_their_own_cause(self):
         state = _feed([WAKE_ATTEMPT_ABANDONED] * WAKE_POISON_SAME_CAUSE_LIMIT)
         assert quarantine_decision(state).reason_code == "attempt:abandoned"
@@ -192,6 +223,20 @@ class TestBackoff:
         state = next_poison_state(WakePoisonState(), _failure("error:A"), now=100.0)
         state = next_poison_state(state, _failure("error:B"), now=200.0)
         assert (state.same_cause_count, state.next_attempt_at) == (1, 260.0)
+
+    def test_redelivery_next_attempt_advances_with_each_failure(self):
+        redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+        first = next_poison_state(WakePoisonState(), redelivery, now=1000.0)
+        assert (first.next_attempt_at, first.first_redelivery_failed_at, first.last_redelivery_failed_at) == (
+            1030.0, 1000.0, 1000.0)
+        second = next_poison_state(first, redelivery, now=1100.0)
+        assert (second.next_attempt_at, second.first_redelivery_failed_at, second.last_redelivery_failed_at) == (
+            1160.0, 1000.0, 1100.0)
+
+    def test_redelivery_uses_its_own_backoff_not_the_failure_one(self):
+        redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+        state = _feed([redelivery] * 6, start=0.0, step=10.0)
+        assert state.next_attempt_at == 50.0 + 900.0
 
     def test_redelivery_backs_off_to_a_fifteen_minute_cap(self):
         assert [redelivery_backoff_seconds(n) for n in (1, 2, 5, 6, 7, 60)] == [30.0, 60.0, 480.0, 900.0, 900.0, 900.0]
@@ -220,11 +265,33 @@ class TestStateShape:
         state = _feed([_failure("error:X"), _failure("error:X")])
         assert WakePoisonState.from_dict(state.to_dict()) == state
 
+    # 类型用例都建立在一份其它字段完全自洽的状态上，确保拦下它的是类型检查而不是一致性检查。
+    CONSISTENT = {"reason_code": "error:X", "same_cause_count": 1, "total_count": 2,
+                  "first_failed_at": 1.0, "last_failed_at": 2.0}
+
+    def test_the_consistent_base_is_accepted(self):
+        assert WakePoisonState.from_dict({**WakePoisonState().to_dict(), **self.CONSISTENT}).total_count == 2
+
     @pytest.mark.parametrize("patch", [
-        {"same_cause_count": True}, {"same_cause_count": -1}, {"total_count": 1.5}, {"reason_code": 3},
-        {"next_attempt_at": "soon"}, {"first_failed_at": -2.0}, {"last_failed_at": False},
+        {"same_cause_count": True}, {"total_count": 1.5}, {"reason_code": 3}, {"next_attempt_at": "soon"},
+        {"first_failed_at": -2.0}, {"last_failed_at": True}, {"redelivery_failures": -1},
     ])
     def test_bad_fields_are_rejected(self, patch):
+        with pytest.raises(ValueError):
+            WakePoisonState.from_dict({**WakePoisonState().to_dict(), **self.CONSISTENT, **patch})
+
+    @pytest.mark.parametrize("patch", [
+        {"last_failed_at": float("nan")}, {"next_attempt_at": float("inf")}, {"surprise": 1},
+        {"same_cause_count": 3, "total_count": 2, "reason_code": "error:X", "first_failed_at": 1.0, "last_failed_at": 2.0},
+        {"same_cause_count": 1, "total_count": 1, "reason_code": "", "first_failed_at": 1.0, "last_failed_at": 1.0},
+        {"reason_code": "error:X"},
+        {"total_count": 1, "same_cause_count": 1, "reason_code": "error:X", "first_failed_at": 5.0, "last_failed_at": 4.0},
+        {"first_failed_at": 3.0},
+        {"redelivery_failures": 1, "first_redelivery_failed_at": 9.0, "last_redelivery_failed_at": 8.0},
+        {"last_redelivery_failed_at": 2.0},
+    ], ids=["nan", "inf", "unknown-key", "same-over-total", "count-without-code", "code-without-count",
+            "first-after-last", "time-without-failure", "redelivery-first-after-last", "redelivery-time-without-failure"])
+    def test_non_finite_unknown_or_contradictory_states_are_rejected(self, patch):
         with pytest.raises(ValueError):
             WakePoisonState.from_dict({**WakePoisonState().to_dict(), **patch})
 

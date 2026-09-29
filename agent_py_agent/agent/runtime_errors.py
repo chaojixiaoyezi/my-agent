@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,8 @@ from .backends.errors import (
 from .runtime_db.operations import RuntimeExecutionBusyError
 
 _MAX_ERROR_TEXT = 300
+# 结构化错误码的唯一形状：大写字母开头，只含大写字母、数字和下划线。
+STRUCTURED_ERROR_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]+")
 
 _SUBAGENT_LEDGER_CONTEXTS = {
     "background_dispatch.agent_tree",
@@ -41,6 +44,13 @@ _GUIDANCE_CONTEXT_PREFIXES = (
     "send_guidance.",
     "dispatch.guidance.",
 )
+
+
+# LLM: 判定只看形状，不看码是否登记过（开放世界）；空白、小写、带空格或明细的字符串都不算结构化码。
+#   SkillSnapshotError 构造和唤醒毒丸的原因码都用这一条规则，改动时联查 test_skill_snapshot_error_codes 与 test_wake_poison。
+# 函数用途: 判断一个值是不是合规的结构化错误码。
+def is_structured_error_code(value: object) -> bool:
+    return isinstance(value, str) and STRUCTURED_ERROR_CODE_PATTERN.fullmatch(value) is not None
 
 
 class RecoverableRuntimeError(RuntimeError):

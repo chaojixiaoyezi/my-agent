@@ -11,8 +11,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
+from ..runtime_errors import is_structured_error_code
 from .package_snapshot import CapabilityPackageSnapshot
 from .skills import SkillCard
+
+# 抛出点传入的码形状不合格时 SkillSnapshotError 回落到这个固定码；出现它说明抛出点本身有缺陷。
+SKILL_SNAPSHOT_ERROR_CODE_INVALID = "SKILL_SNAPSHOT_ERROR_CODE_INVALID"
 
 PACKAGE_PIN_ERROR_MESSAGES = {
     "CAPABILITY_PACKAGE_PIN_UNAVAILABLE": "原任务固定的能力包当前不可用。",
@@ -29,10 +33,14 @@ class SkillSnapshotError(RuntimeError):
     """A selected Skill can no longer be read from the immutable turn snapshot."""
 
     # LLM: detail 只拼进给人看的消息（例如 package=…、skill=…），不进入 error_code；reason 只能由宿主内部异常的
-    #   结构化字段填入，不从消息或模型文本解析。
+    #   结构化字段填入，不从消息或模型文本解析。码的形状运行时再核一次（is_structured_error_code），不合格时
+    #   error_code 回落到固定的 SKILL_SNAPSHOT_ERROR_CODE_INVALID，原值只放进给人看的消息。
     # 函数用途: 保存结构化错误码、原格式消息和可选的内部原因。
     def __init__(self, error_code: str, detail: str = "", *, reason: str = "") -> None:
         code = str(error_code or "").strip()
+        if not is_structured_error_code(code):
+            detail = f"invalid_code={error_code!r} {detail}".rstrip()
+            code = SKILL_SNAPSHOT_ERROR_CODE_INVALID
         super().__init__(f"{code} {detail}" if detail else code)
         self.error_code = code
         self.reason = reason
@@ -302,6 +310,7 @@ def _content_sha256(text: str) -> str:
 
 
 __all__ = [
+    "SKILL_SNAPSHOT_ERROR_CODE_INVALID",
     "SkillLoadError",
     "SkillSnapshot",
     "SkillSnapshotEntry",

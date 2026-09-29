@@ -92,7 +92,7 @@
 
 - `WAKE_REDELIVERY_BACKOFF_BASE_SECONDS = 30.0`，`WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0`：
   第 n 次重投失败后等 min(30·2^(n−1), 900) 秒，封顶 15 分钟；
-- `WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0`：从第一次重投失败起超过 24 小时，按
+- `WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0`：从第一次重投失败起满 24 小时（>=），按
   `delivery:channel_unavailable` 结案，走同样的结案流程。
 - 理由：重投便宜，但渠道长期不可用时无限重投同样不行；15 分钟封顶让恢复后最多再等 15 分钟，
   24 小时足够覆盖一次渠道长时间故障或人工处理。
@@ -208,7 +208,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 1. 总上限 M=12（不同因也算）：**保留**。
 2. 领域收尾：**覆盖 session_task 和 session_message**（见第 6 节），其它 reason 只发事件和宿主提示。
-3. 只重投路径：**单独设上限**，指数退避封顶 15 分钟，首次重投失败起超过 24 小时按
+3. 只重投路径：**单独设上限**，指数退避封顶 15 分钟，首次重投失败起满 24 小时（>=）按
    `delivery:channel_unavailable` 结案（见第 5 节）。
 4. `SkillSnapshotError` 整族的码**补成结构化 `error_code` 属性**，现有调用方和测试改读该属性；单独一片，
    技能快照模块不在 my-agent-3 的范围内，可以先做。
