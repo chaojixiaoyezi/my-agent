@@ -35,8 +35,12 @@ EOF 后的首次退出探测立即执行，父仍存活时后续探测最多每 
 不按命令、工作目录或同一任务扩大停止范围。Windows 保留原执行路径，本片不声称补齐其资源回收能力。
 
 原命令的 `return_code`、`command_succeeded`、输出采集与 `termination` 清理回执分别保留。
-清理未确认时，工具返回 `TOOL_OPERATION_OUTCOME_UNKNOWN` 和 `effect_outcome=unknown`，
-即使命令返回 0 也不报告整体成功；原命令非零退出码仍原样保留，未知清理不代表命令已回滚或可重放。
+清理未确认时（2026-09-29 起，集成者决定）：命令已经退出、退出码已知，工具如实返回执行结果——退出码 0 为成功，
+非零为 `COMMAND_FAILED`（`effect_outcome=failed`）；清理未确认作为结构化告警附上：`process.cleanup_confirmed=false`、
+`termination` 回执（含 `unresolved_pids`，模型可见事实区投影为 `unresolved_count`）和正文“[进程清理未确认]”提示。
+不报成副作用未知、不叫停整轮，工具操作账按真实结果结算。原因：高负载下清理确认超时，把正常跑完的前台 pytest
+报成 `TOOL_OPERATION_OUTCOME_UNKNOWN`，整轮被叫停，连带定时任务停摆。代价是未确认的后代可能仍在运行、继续产生副作用，
+告警写明这一点并提示需要时核对，不自动重跑。超时后终止未确认、后台会话状态拿不到等真正结果未知的路径不变。
 此修复只收口前台调用，不改变显式后台会话、PTY、Gateway 停止选择或父子通知协议。
 
 本地参考基线：Codex `578c1b223`、Hermes `0a62610f1`、Free-Code `6b25ab68b`。

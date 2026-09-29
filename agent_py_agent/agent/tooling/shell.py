@@ -1617,7 +1617,8 @@ def _shell_execution_target(
     )
 
 
-# LLM: 只读取执行器的进程状态、退出码和终止回执；普通退出后的清理未知不能被零退出码或 COMMAND_FAILED 掩盖。
+# LLM: 只读取执行器的进程状态、退出码和终止回执；超时后终止未确认才是真正的结果未知。
+#   普通退出（退出码已知）后清理未确认由调用方按真实结果返回、另附 cleanup_confirmed=False，不在这里升级成 unknown。
 # 函数用途: 区分未启动、已终止的失败与未知执行；命令失败仍可能有部分写入，不等同于可自动重放。
 def _shell_failure_effect_outcome(
     command: str,
@@ -1654,7 +1655,10 @@ def _shell_failure_effect_outcome(
     return ""
 
 
-# LLM: 命令退出码、成功标志与清理回执分开；清理未确认使工具保持 UNKNOWN，不能改写原命令结果或自动重放。
+# LLM: 命令退出码、成功标志与清理回执分开。命令已退出、退出码已知时如实返回执行结果（成功或 COMMAND_FAILED）；
+#   后代进程清理未确认只作为结构化告警附上（process.cleanup_confirmed=False + termination 回执 + 正文提示），
+#   不报成副作用未知、不叫停整轮（2026-09-29：高负载下清理确认超时把正常跑完的前台命令报成未知，连带定时任务停摆）。
+#   超时、取消等退出码拿不到的路径不在这里，仍按原合同报 TOOL_TIMEOUT/unknown。改动时联查 test_shell_foreground_cleanup。
 # 函数用途: 运行前台命令并保留预览与有界采集原文；命令成功也要明确报告未收回的进程资源。
 def _run_shell_process_text(
     tool: ShellTool,
@@ -1680,25 +1684,29 @@ def _run_shell_process_text(
             output += "\n[输出不完整] 管道采集达到保留上限或读取失败；如需完整内容，请将命令输出重定向到文件后分页读取。"
         command_succeeded = result.returncode == 0
         termination = getattr(result, "termination", None)
-        cleanup_unknown = termination is not None and not termination.confirmed
+        cleanup_confirmed = termination is None or termination.confirmed
         if not command_succeeded:
             output += (
                 f"\n[note] 退出码 {result.returncode} 非零"
                 "(测试失败/grep无匹配/diff有差异等常见,非命令本身故障);"
                 "看上方 stdout/stderr 定位修正,勿当工具不可用。"
             )
-        if cleanup_unknown:
-            output += "\n[进程清理未确认] 命令已退出，但原前台进程资源尚未确认收回；保留本次结果，不自动重放命令。"
+        if not cleanup_confirmed:
+            output += (
+                f"\n[进程清理未确认] 命令已退出（退出码 {result.returncode}），上面就是它的执行结果；"
+                "但它启动的部分进程尚未确认已结束，可能仍在运行。需要时核对这些进程，不要为此重跑命令。"
+            )
         stderr = str(getattr(result, "stderr", "") or "")
         return (
             output,
-            command_succeeded and not cleanup_unknown,
-            "TOOL_OPERATION_OUTCOME_UNKNOWN" if cleanup_unknown else "" if command_succeeded else "COMMAND_FAILED",
+            command_succeeded,
+            "" if command_succeeded else "COMMAND_FAILED",
             {
                 "status": "exited",
                 "return_code": int(result.returncode),
                 "command_succeeded": command_succeeded,
                 **({"termination": asdict(termination)} if termination is not None else {}),
+                **({} if cleanup_confirmed else {"cleanup_confirmed": False}),
                 "stderr_chars": len(stderr),
                 "capture": capture,
                 "stderr_head": stderr[:80],

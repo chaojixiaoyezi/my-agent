@@ -80,8 +80,10 @@ def test_natural_exit_cleans_child_after_outer_pipes_close(tmp_path, exit_code, 
         unrelated.wait(timeout=3)
 
 
-@pytest.mark.parametrize("exit_code", [0, 7])
-def test_cleanup_unknown_keeps_original_command_result(tmp_path, monkeypatch, exit_code):
+# 命令已退出、退出码已知，只是后代进程清理没确认：如实返回执行结果，清理未确认作为结构化告警附上，
+# 不报成副作用未知（effect_outcome 不是 unknown，工具循环就不会叫停整轮）。
+@pytest.mark.parametrize(("exit_code", "expected"), [(0, (True, "", "")), (7, (False, "COMMAND_FAILED", "failed"))])
+def test_cleanup_unconfirmed_returns_the_real_result_with_a_warning(tmp_path, monkeypatch, exit_code, expected):
     completed = subprocess.CompletedProcess("generic-command", exit_code, "original-output", "original-error")
     completed.termination = registry.ProcessTerminationReceipt("identity_unavailable", False, exit_code, 0, (123,))
     tool = shell.ShellTool(tmp_path)
@@ -89,14 +91,65 @@ def test_cleanup_unknown_keeps_original_command_result(tmp_path, monkeypatch, ex
 
     result = tool.execute({"command": "echo generic-command"})
 
-    assert result.ok is False
-    assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
-    assert result.effect_outcome == "unknown"
+    assert (result.ok, result.error_code, result.effect_outcome) == expected
     facts = result.result_envelope["process"]
-    assert facts["return_code"] == exit_code
-    assert facts["command_succeeded"] is (exit_code == 0)
-    assert facts["termination"]["confirmed"] is False
+    assert (facts["return_code"], facts["command_succeeded"]) == (exit_code, exit_code == 0)
+    assert facts["cleanup_confirmed"] is False
+    assert facts["termination"]["confirmed"] is False and tuple(facts["termination"]["unresolved_pids"]) == (123,)
     assert "original-output" in result.output and "original-error" in result.output
+    assert "[进程清理未确认]" in result.output and f"退出码 {exit_code}" in result.output
+
+
+def test_confirmed_cleanup_adds_no_warning(tmp_path, monkeypatch):
+    completed = subprocess.CompletedProcess("generic-command", 0, "original-output", "")
+    completed.termination = registry.ProcessTerminationReceipt("already_gone", True, 0, 1)
+    tool = shell.ShellTool(tmp_path)
+    monkeypatch.setattr(tool, "_run_command", lambda *args: completed)
+
+    result = tool.execute({"command": "echo generic-command"})
+
+    assert result.ok is True and "cleanup_confirmed" not in result.result_envelope["process"]
+    assert "[进程清理未确认]" not in result.output
+
+
+# 函数用途: 把进程树清理的核对结果固定成"未确认"，模拟高负载下清理确认超时；不发任何信号。
+def _unconfirmed_cleanup(monkeypatch):
+    receipt = registry.ProcessTerminationReceipt("SIGTERM->SIGKILL", False, None, 2, (424242,))
+    monkeypatch.setattr(registry, "terminate_process_tree", lambda *args, **kwargs: receipt)
+
+
+# 真实子进程跑完、退出码已知，只有清理确认这一步被固定成未确认（2026-09-29 高负载下的前台 pytest 就是这样被报成未知的）。
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 前台进程树清理")
+@pytest.mark.parametrize(("command", "expected"), [("echo real-output", (True, "")), ("echo real-output; exit 7", (False, "COMMAND_FAILED"))])
+def test_real_foreground_command_with_unconfirmed_cleanup_is_not_unknown(tmp_path, monkeypatch, command, expected):
+    _unconfirmed_cleanup(monkeypatch)
+    result = shell.ShellTool(tmp_path).execute({"command": command, "working_dir": str(tmp_path)})
+    assert (result.ok, result.error_code) == expected
+    assert result.effect_outcome != "unknown"
+    assert "real-output" in result.output
+    assert result.result_envelope["process"]["cleanup_confirmed"] is False
+
+
+# 经工具操作账本走一遍：记录按真实结果结算，不进 unknown，也没有 unknown_reason。
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 前台进程树清理")
+@pytest.mark.parametrize(("command", "status"), [("echo ledger-output", "succeeded"), ("exit 7", "failed")])
+def test_ledger_settles_the_real_result_when_only_cleanup_is_unconfirmed(tmp_path, monkeypatch, command, status):
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.tests.test_tool_operation_idempotency import (
+        _CallSpec,
+        _CountingTool,
+        _execute,
+        _registry,
+    )
+
+    _unconfirmed_cleanup(monkeypatch)
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tools = _registry(tmp_path, store, _CountingTool())  # 注册表自带的 run_command 就是生产 ShellTool
+    call = _CallSpec(tool_name="run_command", arguments={"command": command}, run_id="run-1", call_id="call-1")
+    result = _execute(tools, call)
+    record = store.get_tool_operation(owner_id="owner-a", run_id="run-1", operation_id=call.operation_id)
+    assert result.effect_outcome != "unknown" and result.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert (record.status, record.unknown_reason) == (status, "")
 
 
 def test_foreground_exit_freezes_cleanup_before_reaping(monkeypatch):
