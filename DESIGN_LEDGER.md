@@ -431,6 +431,23 @@
   - 工具返回回执的真实状态。
 - **门禁**：`test_repeated_messages_between_the_same_pair_are_all_delivered` 先按 strict xfail 标出，修好后转正。
 
+**待定：目标回合在消费前被停止，会话消息怎样重新投递**（2026-09-29，真实链路复现；由 dsh-75 在去重改造里一并定，禁令期间不影响生产）：
+- **现象**：B 忙时收到消息，消息在安全点注入；带着它的那次模型调用返回前 B 被 `/stop`。
+  - 回执此时是 `submitted`：模型还没对这次调用作出返回。调用失败后，回执先退回 `reserved`；
+  - 前台收尾 `terminalize_gateway_request_file` 的 `reject_pending(reject_reserved=True)` 再把它改成 `rejected`。
+  - 插话（Gateway 输入回执）被拒后，对账会把它重新排成普通请求；会话消息没有这一步。
+- **当前 main**：消息唤醒回合从后台上下文把这条消息当本回合输入交给 B，所以没有丢，但回执停在 `rejected`、与实际不符。
+- **取消线（`my-agent/self-dev-3-cancel-final`，现由 `claude/75-cancel-line-finish` 收尾）的两处问题**：
+  - 已消费判据把 `rejected`（以及可逆的 `submitted`）算成已消费，于是跳过这条唤醒，B 空闲时消息送不到；
+  - 跳过时只把认领记成 cancelled，没有结案唤醒，每轮 tick 都会再认领一次。
+- **裁定方向**（3a，2026-09-29）：
+  - 已消费只认 `consumed`；
+  - 跳过时复用 `retire_source` 结案唤醒；
+  - rejected 会话消息的重新投递方式（重新排队，或终结时对会话消息 release 而不是 reject）在去重改造里定。
+- **门禁**：
+  - `test_busy_target_stopped_before_consuming_the_message_still_gets_it`：main 上通过，取消线上失败，作为取消线的验收门；
+  - `test_busy_target_consumes_message_without_an_extra_empty_turn` 补断言「B 没有待处理唤醒」。
+
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。

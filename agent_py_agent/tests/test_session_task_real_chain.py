@@ -29,8 +29,15 @@ import pytest
 
 from agent_py_agent.agent.agent_core._tool_loop_service import PENDING_TURN_INPUT_INVALIDATION_LIMIT
 from agent_py_agent.agent.backends import gateway_helpers, http
-from agent_py_agent.agent.concurrency.interrupt import is_interruptible_registered
+from agent_py_agent.agent.concurrency.interrupt import (
+    is_interruptible_registered,
+    register_interruptible,
+)
 from agent_py_agent.agent.conversation import FakeDeliveryService
+from agent_py_agent.agent.conversation.control_commands import (
+    conversation_request_interrupt_name,
+    parse_conversation_control,
+)
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service, request_context, request_execution
@@ -209,7 +216,7 @@ class ScriptedWire:
             return self._user_turn(turn)
         return ("wake-saw-note" if "RC-NOTE-" in turn.turn_text else "other"), "RC-ACK 收到。", None
 
-    # 函数用途: 测试者输入的前台回合：派活、发普通消息、取消、在忙时挂起。
+    # 函数用途: 测试者输入的前台回合：派活、发普通消息、取消、在忙时挂起（含"带着消息的调用挂起等停止"）。
     def _user_turn(self, turn: _Turn) -> tuple[str, str | None, tuple[str, dict] | None]:
         verb, *words = turn.heading.split()
         tool, final = {"RC-DISPATCH": ("create_session_task", "RC-DISPATCH-DONE"),
@@ -224,6 +231,17 @@ class ScriptedWire:
         if verb == "RC-CANCEL":
             return "user-cancel", None, (tool, {"task_id": words[0]})
         if verb == "RC-BUSY":
+            if "list_files" not in turn.results:
+                self.hold("busy")
+                return "user-busy-list", None, ("list_files", {"path": "."})
+            return "user-busy-final", "RC-BUSY-DONE 忙完了。", None
+        if verb == "RC-BUSY-STOP":
+            # 同 RC-BUSY 先挂着保持忙碌；安全点注入消息后，第一次带着它的调用再挂一次，等测试者 /stop
+            # （此时回执是 submitted：模型还没对这次调用作出返回）。只看事件是否已置位：测试者先调
+            # wait_holding 会先建出这个键，不能拿"键在不在"判断挂没挂过。
+            if "RC-NOTE-" in turn.turn_text and not self.holding.get("busy-note", threading.Event()).is_set():
+                self.hold("busy-note")
+                return "user-busy-note-released", "RC-BUSY-DONE 忙完了。", None
             if "list_files" not in turn.results:
                 self.hold("busy")
                 return "user-busy-list", None, ("list_files", {"path": "."})
@@ -289,6 +307,8 @@ class RealChain:
     asks: itertools.count = field(default_factory=lambda: itertools.count(1))
 
     # 函数用途: 以某个会话的身份跑一轮真实 Gateway 前台 ask（与真实 worker 同样落 processing 文件并收尾）。
+    #   执行期间同 request_worker 一样登记 conversation-request: 可中断名；不登记的话 /stop 会被受理，
+    #   却打不到在途的模型调用。
     def ask(self, label: str, prompt: str):
         request_id = f"rc-{label.lower()}-{next(self.asks)}"
         request = {"id": request_id, "kind": "ask", "prompt": prompt, "status": "processing", "turn_phase": "open",
@@ -300,7 +320,8 @@ class RealChain:
         )
         status = "done"
         try:
-            return request_execution._run_gateway_ask(context)
+            with register_interruptible(conversation_request_interrupt_name(request_id)):
+                return request_execution._run_gateway_ask(context)
         except BaseException:
             status = "failed"
             raise
@@ -335,6 +356,13 @@ class RealChain:
         worker = threading.Thread(target=run, name="rc-background-drain", daemon=True)
         worker.start()
         return worker, errors
+
+    # 函数用途: 以某个会话的身份发 /stop，走真实 Gateway 控制入口（与 TUI/渠道的 /stop 同一分派），返回控制结果。
+    def stop(self, label: str):
+        scope = control_service.GatewayControlScope(self.agent.home_paths.owner_id, "chat", f"rc-session-{label}")
+        return control_service.execute_gateway_conversation_control(
+            self.agent, self.paths, parse_conversation_control("/stop"), scope,
+        )
 
     # 函数用途: 渠道会话身份：三个会话都是本机管理员 owner 下的 chat 会话（会话互通白名单内）。
     def _conversation(self, label: str) -> dict:
@@ -510,6 +538,12 @@ def _message_receipt(chain: RealChain, label: str, message_id: str):
     return None
 
 
+# 函数用途: 某个会话线程里仍待处理的唤醒（结构化唤醒队列）；用来断言"跳过或跑完之后唤醒都结案了"。
+def _pending_wakes(chain: RealChain, label: str) -> list:
+    return [wake for wake in chain.agent.conversation_store.wakes.pending(limit=0)
+            if wake.thread_id == chain.threads[label]]
+
+
 @pytest.mark.xfail(strict=True, raises=AssertionError,
                    reason="新缺陷：空闲目标的消息唤醒回合只在后台上下文里看到消息，没有认领/确认，回执仍 pending，"
                           "下一回合会再收到一遍（修复后转正）")
@@ -531,7 +565,7 @@ def test_idle_message_is_acknowledged_once_and_not_redelivered(tmp_path, monkeyp
 @pytest.mark.xfail(strict=True, raises=AssertionError,
                    reason="观察项②未修：目标已在自己回合里消费了消息，唤醒仍再起一轮空回合（第 8 片重做后转正）")
 def test_busy_target_consumes_message_without_an_extra_empty_turn(tmp_path, monkeypatch) -> None:
-    """B 正在执行前台请求时收到消息：请求不失败、消息在本回合被消费；之后唤醒不应再起空回合。"""
+    """B 正在执行前台请求时收到消息：请求不失败、消息在本回合被消费；之后唤醒不应再起空回合，也必须结案。"""
     chain = _real_chain(tmp_path, monkeypatch)
     results: list[object] = []
     busy = threading.Thread(target=lambda: results.append(chain.ask("B", "RC-BUSY 先看看工作目录。")), daemon=True)
@@ -550,6 +584,51 @@ def test_busy_target_consumes_message_without_an_extra_empty_turn(tmp_path, monk
 
     extra = [call.get("kind") for call in chain.wire.calls[before:]]
     assert extra == [], f"内容已被消费，唤醒仍多跑了 {len(extra)} 次模型调用：{extra}"
+    # 跳过空回合时唤醒也必须结案：只把认领记成 cancelled、唤醒仍 pending 的话，每轮 tick 都会再认领一次。
+    assert not _pending_wakes(chain, "B"), f"内容已被消费，B 的消息唤醒却没有结案：{_pending_wakes(chain, 'B')}"
+
+
+def test_busy_target_stopped_before_consuming_the_message_still_gets_it(tmp_path, monkeypatch) -> None:
+    """B 忙时收到消息；消息在安全点注入后、带着它的那次模型调用返回前，B 被 /stop。
+
+    这时模型还没对这次调用作出返回（回执 submitted），停止后收尾把它改成 rejected。消息不能就此丢掉：
+    之后必须作为本回合输入交给 B（main 上由消息唤醒回合送达），B 的消息唤醒也必须结案。
+    把 rejected 当成"已消费"而跳过唤醒，这一窗就会失败。
+    """
+    chain = _real_chain(tmp_path, monkeypatch)
+    errors: list[BaseException] = []
+
+    # 函数用途: 在后台线程跑 B 的忙碌前台回合；被停止时按失败收尾，异常交回测试线程。
+    def run_busy() -> None:
+        try:
+            chain.ask("B", "RC-BUSY-STOP 先看看工作目录。")
+        except BaseException as exc:  # noqa: BLE001 - 被停止的回合按失败收尾，由测试线程判定
+            errors.append(exc)
+
+    busy = threading.Thread(target=run_busy, daemon=True)
+    busy.start()
+    _require(chain.wire.wait_holding("busy"), "B 的前台回合没有进入模型调用")
+    chain.ask("A", f"RC-MESSAGE {chain.threads['B']} RC-NOTE-STOPPED 你好 B。")
+    sent = chain.tool_outputs("send_session_message")[-1]
+    _require(sent.get("ok") is True, f"消息没有发出：{sent}")
+    chain.wire.release("busy")
+    _require(chain.wire.wait_holding("busy-note"), "B 带着这条消息的模型调用没有挂上（消息没有在安全点注入）")
+    held = _message_receipt(chain, "B", str(sent.get("message_id") or ""))
+    _require(getattr(held, "status", "") == "submitted",
+             f"前提不成立：挂住时回执应是 submitted（模型还没返回），实际 {getattr(held, 'status', None)}")
+    stop = chain.stop("B")
+    _require(stop.ok, f"/stop 没有受理：{stop.message}")
+    busy.join(_JOIN_SECONDS)
+    _require(not busy.is_alive(), f"B 的前台请求没有在停止后结束（回合异常：{errors}）")
+    _require(chain.wire.interrupted == ["busy-note"],
+             f"前提不成立：停止应当打断带着消息的那次在途调用，实际 {chain.wire.interrupted}")
+
+    before = len(chain.wire.calls)
+    chain.drain()
+
+    delivered = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-STOPPED" in call["notes"]]
+    assert delivered, "B 在消费这条消息之前被停止，之后它再也没有作为输入交给 B（消息丢了）"
+    assert not _pending_wakes(chain, "B"), f"B 的消息唤醒没有结案：{_pending_wakes(chain, 'B')}"
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,

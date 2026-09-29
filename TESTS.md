@@ -10,6 +10,23 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 会话互通真实链路门禁：忙碌目标在消费前被停止（2026-09-29，分支 `claude/ae-busy-stop-window`，基于 `89af6b07a`，只改测试）
+
+- **新窗口** `test_busy_target_stopped_before_consuming_the_message_still_gets_it`：
+  - 流程：B 忙时收到 A 的消息，消息在安全点注入；带着它的那次模型调用挂住，此时回执是 `submitted`（前提，`_require`），然后对 B 发 `/stop`。
+  - 断言：之后这条消息必须作为本回合输入交给 B，B 的消息唤醒必须结案。
+  - 假线路新动词 `RC-BUSY-STOP`：先像 `RC-BUSY` 一样挂着保持忙碌；第一次带着消息的调用再挂一次（`busy-note`），等测试者停止。
+- **门禁更贴近真实 worker**：
+  - `RealChain.ask` 执行期间按 `request_worker` 的做法登记 `conversation-request:<request_id>` 可中断名。此前不登记，`/stop` 会被受理，却打不到在途调用，前台停止一直是盲区。
+  - 新增 `RealChain.stop(label)`，走真实 `execute_gateway_conversation_control` 的 `/stop` 分派。
+- **忙碌目标用例补断言**：`test_busy_target_consumes_message_without_an_extra_empty_turn` 末尾加「B 没有待处理唤醒」。main 上它仍在「多余模型调用」那一步按原 strict xfail 失败。
+- **自证**：
+  - `89af6b07a` 加本提交：8 passed / 7 xfailed，新窗口通过，其余与改前一致。
+  - 取消线 `50e39eeee` 加本提交：新窗口失败，报「消息丢了」（rejected 被当成已消费、唤醒被跳过）；忙碌目标用例失败，报「唤醒没有结案」（跳过后只把认领记成 cancelled）。
+  - 在取消线上注入两处修法（跳过时 `retire_source`、已消费只认 `consumed`）后，两条都通过。
+  - 另两条失败是探针合并带来的：旧假线路没有 `notes` 字段、xfail 标记被带回。
+  - 细节与设计待定项见 DESIGN_LEDGER「目标回合在消费前被停止」。
+
 ## 后台进程与终端会话原因码：ae 复审建议 2–5（2026-09-29，分支 `claude/75-process-codes-followups`，基于 `e850ceb04`）
 
 - **建议 2**：`terminal_session` 关闭未确认时，终止回执结构化放进 `result_envelope.process.termination`（与后台进程停止未确认同一形状）；
