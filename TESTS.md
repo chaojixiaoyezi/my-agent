@@ -200,7 +200,11 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
 
 - **补充（2026-09-29，同一分支）**：dev 要求把"基准"从配置默认值那条隐式链换成运行时路径的权威值。现在 CLI 除了传 owner home 基准，还把 `runtime_paths_for_config(config)["audit_log_path"]` 交给 `AuditQuery(runtime_audit_path=...)`——这一份与 Agent 启动时注入 config 的值同源（实测都指向 `O/logs/audit/`）。`runtime_paths_for_config` 是新增的 CLI 侧小函数，只做定位、不建目录、不读内容。
   - 新增 3 条断言：给了运行时路径就以它为准（不再落到 `data/audit`）；两套入口解析出的审计文件是同一个；省略运行时路径时保持既有行为。
-  - 变异 `ignore-runtime-path`（`AuditQuery` 忽略运行时权威路径）→ 杀死 2 条。**如实声明**：把 CLI 侧那一行删掉（退回只传 owner home 基准）**当前没有用例能杀**——既有用例都直接构造 `AuditQuery`，没有走 CLI 入口；这条缺口留待补一个 CLI 端到端断言。
+  - 变异 `ignore-runtime-path`（`AuditQuery` 忽略运行时权威路径）→ 杀死 2 条。
+  - **CLI 入口的缺口已补**（dev 2026-09-29 要求）：原来的用例都直接构造 `AuditQuery`，等于只测了查询视图、没测 CLI 那一行——而那一行就是修复本身。新增 `test_cli_entry_uses_runtime_audit_path_regardless_of_cwd` 与 `test_cli_runtime_audit_path_stays_inside_owner_home`：
+    - 走真实入口 `cmd_audit_log`（`--cleanup` 分支），用 `MY_AGENT_HOME` 隔离 owner home，顶替 `AuditQuery` 只记录 CLI 传下来的 `runtime_audit_path`；
+    - 从**两个不同 cwd** 各跑一次，断言两次拿到的权威路径都是同一个 `owner_logs_dir/audit`，且落在 owner home 之内；
+    - **变异验证**：删掉 CLI 里 `runtime_audit_path=...` 那一行 → 该用例变红（`assert None == .../logs/audit`），确认修复本身有测试守着。
 
 - **来源**：dsh-9b 的产品持久数据盘点（`docs/design/STORAGE_RETENTION.md`）零风险缺口之一——`audit-log --cleanup` 按相对路径解析，指到了错误的文件。
 - **根因**：`audit/paths.py:resolve_audit_paths` 把配置里的相对值（默认 `data/audit`）直接 `Path(...)` 展开，于是相对**进程 cwd**。Agent 启动时 `core.py:450 apply_runtime_paths_to_config` 会把 canonical 的绝对 `audit_log_path`（`owner_logs_dir/audit`）注入 config，所以写入端没问题；但 CLI 的 `audit-log` 只 `load_config`、没有走 runtime paths，于是拿到空串 → 落到 `data/audit`，随启动目录漂移。在不同 cwd 下执行会清到不同文件，甚至可能清掉工作区里恰好同名的 `data/audit/audit.jsonl`。

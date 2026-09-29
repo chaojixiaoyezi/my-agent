@@ -6,12 +6,14 @@
 """
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.audit.paths import resolve_audit_paths
 from agent_py_agent.agent.audit.query import AuditQuery
+from agent_py_agent.cli.common import DEFAULT_CONFIG
 
 
 # LLM: 只造本函数需要的最少字段；不读真实配置或密钥。
@@ -165,3 +167,92 @@ def test_without_runtime_path_keeps_config_resolution(tmp_path):
     home = tmp_path / "owner-home"
     query = AuditQuery(config_with("data/audit"), root=home)
     assert query._audit_file == home / "data" / "audit" / "audit.jsonl"
+
+
+# LLM: dev 2026-09-29 指出的缺口——前面几条都直接构造 AuditQuery，等于只测了查询视图、
+#   没测 CLI 那一行（而那一行就是修复本身）。这条走真实入口 cmd_audit_log，在隔离的 owner home 里
+#   断言解析出的审计路径就是运行时权威地址，并且与进程 cwd 无关。
+# 函数用途: 经 CLI 入口验证 audit-log 用的是运行时权威地址、且不随 cwd 漂移。
+def test_cli_entry_uses_runtime_audit_path_regardless_of_cwd(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli import audit_log_cmd
+
+    home_root = tmp_path / "agent-home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(home_root))
+
+    # 隔离的 owner home：用真实解析口径算出来，避免自己拼路径拼错。
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.home_root import configured_home_root
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+    from agent_py_agent.cli.common import load_config
+
+    config = load_config(str(DEFAULT_CONFIG))
+    base = home_paths(configured_home_root(config))
+    owner = resolve_owner_home(base.root, owner_identity_from_config(config))
+    home = home_paths_with_owner(base, owner)
+    expected_dir = Path(home.owner_logs_dir) / "audit"
+
+    seen = {}
+
+    class RecordingQuery:
+        # 函数用途: 顶替真实 AuditQuery，只记录 CLI 传进来的权威路径。
+        def __init__(self, config, *, root=None, runtime_audit_path=None):
+            seen["root"] = root
+            seen["runtime_audit_path"] = runtime_audit_path
+
+        # 函数用途: 顶替清理动作，不去动任何真实文件。
+        def cleanup_old_entries(self, *, days):
+            seen["cleanup_days"] = days
+            return 0
+
+    monkeypatch.setattr(audit_log_cmd, "AuditQuery", RecordingQuery)
+
+    # 走 --cleanup 分支：这正是这次修复的真实用途（清理目标地址）。
+    args = SimpleNamespace(
+        config=str(DEFAULT_CONFIG),
+        recent_users=False,
+        summary=False,
+        cleanup=True,
+        days=30,
+    )
+
+    # 从两个不同 cwd 各跑一次：CLI 拿到的权威路径必须一样，且就是 owner_logs_dir/audit。
+    other_cwd = tmp_path / "some-project"
+    other_cwd.mkdir()
+    for cwd in (tmp_path, other_cwd):
+        monkeypatch.chdir(cwd)
+        seen.clear()
+        assert audit_log_cmd.cmd_audit_log(args) == 0
+        assert seen["runtime_audit_path"] == expected_dir, (
+            f"CLI 必须把运行时权威地址交给 AuditQuery（cwd={cwd}）"
+        )
+
+
+# LLM: 权威地址必须真的落在 owner home 里，不能因为环境变量或配置漂到别处。
+# 函数用途: 验证 CLI 解析出的运行时审计目录位于当前 owner home 之下。
+def test_cli_runtime_audit_path_stays_inside_owner_home(tmp_path, monkeypatch):
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.home_root import configured_home_root
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+    from agent_py_agent.cli.common import load_config
+    from agent_py_agent.cli.workspace_resolution import runtime_paths_for_config
+
+    home_root = tmp_path / "agent-home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(home_root))
+    config = load_config(str(DEFAULT_CONFIG))
+    base = home_paths(configured_home_root(config))
+    owner = resolve_owner_home(base.root, owner_identity_from_config(config))
+    home = home_paths_with_owner(base, owner)
+
+    audit_dir = runtime_paths_for_config(config)["audit_log_path"]
+    assert str(audit_dir).startswith(str(home.owner_home_dir))
+    assert audit_dir.name == "audit"
