@@ -2701,6 +2701,8 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
     ),
     # 以下四个是后台进程 / 终端会话结果未知时的具体原因（reported_error_code），错误码本身仍是 TOOL_OPERATION_OUTCOME_UNKNOWN；
     # 单列是为了 unknown_reason 与排障能说清卡在哪一步，不改变“禁止自动重做”的边界。
+    # 这组码与上面的 BACKGROUND_*_UNCONFIRMED 说的都是进程“退出/清理”这个效果有没有确认；会话任务取消里的
+    # SESSION_TASK_STOP_UNCONFIRMED（stop_confirmed）说的是停止请求有没有送达确认，两者不是一回事。
     "PROCESS_SESSION_AUTHORITY_UNREADABLE": ErrorContract(
         code="PROCESS_SESSION_AUTHORITY_UNREADABLE",
         category="tool",

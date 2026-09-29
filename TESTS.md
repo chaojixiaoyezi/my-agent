@@ -9,6 +9,8 @@
 - **建议 4**：托管停止在第一个事务里发现权威记录已不存在时，一个信号都没发，`ProcessSessionCleanup.authority_missing=True`，
   `process_registry.kill` 抛 `ProcessSessionAuthorityError(authority_missing)`，与旧版路径同一口径（不再报成“停止未确认”）；
   新增两条：清理层断言不发信号、标记为 authority_missing；注册表层断言抛错，工具层报 `PROCESS_SESSION_AUTHORITY_UNREADABLE`。
+- **建议 5**：错误合同注释写明，这组码与 `BACKGROUND_*_UNCONFIRMED` 说的是进程“退出/清理”这个效果有没有确认，和会话任务取消里的
+  `SESSION_TASK_STOP_UNCONFIRMED`（停止请求有没有送达确认）不是一回事；只改注释。
 - 以上三条的新断言在 main 的代码上全部失败；变异 6 个全部被抓住；31 个相关测试文件 524 项通过。
 
 ## 向量缓存第五轮：「跳过写」真的实现 + 回收错误可见（2026-09-29，分支 `my-agent/self-dev-2-vcache`，基于 `bac2f176d`）
