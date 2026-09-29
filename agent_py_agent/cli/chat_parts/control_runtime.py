@@ -368,7 +368,7 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
 
 # LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
 # 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
-# context/compact/recover/effort、/model 文字形式、/skills 与 /settings 依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
+# context/compact/recover/endtask/effort、/model 文字形式、/skills 与 /settings 依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
 # 未列出的类型会落到下面的停止分支，所以新增 Gateway 专用控制必须加进这个集合。
 def _execute_local_control(
     execution: ChatControlExecution,
@@ -376,7 +376,7 @@ def _execute_local_control(
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
-    if command.kind in {"context", "compact", "recover", "model", "effort", "skills", "settings"}:
+    if command.kind in {"context", "compact", "recover", "endtask", "model", "effort", "skills", "settings"}:
         return ConversationControlResult(
             command.kind,
             False,
@@ -692,6 +692,9 @@ def _command_text(command: ConversationControlCommand) -> str:
         return f"/verbose {command.value}".rstrip()
     if command.kind == "recover":
         return f"/recover {command.value}".rstrip()
+    if command.kind == "endtask":
+        # value 是任务 ID，apply 表示带 confirm；Gateway 端按同一解析器重新解析。
+        return f"/endtask {command.value}{' confirm' if command.operation == 'apply' else ''}".rstrip()
     if command.kind == "model":
         prefix = "/model default" if command.operation == "set_default" else "/model"
         return f"{prefix} {command.value}".rstrip()

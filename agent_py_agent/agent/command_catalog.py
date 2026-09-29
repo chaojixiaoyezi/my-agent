@@ -160,6 +160,17 @@ COMMAND_CATALOG = (
         conversation_suffix=r"(?:\s+(.*))?$",
     ),
     CommandSpec(
+        "endtask",
+        "/endtask",
+        "列出卡在等待中的定时会话任务（仅管理员）",
+        help_variants=(
+            ("/endtask <任务ID>", "预览结束这条定时会话任务会做什么，不做改动"),
+            ("/endtask <任务ID> confirm", "确认结束：会话任务记为 cancelled，并结算它堵住的定时执行"),
+        ),
+        submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
+    ),
+    CommandSpec(
         "goal",
         "/goal <时长> <名称> <任务>",
         "启动一个有名称的持续目标",

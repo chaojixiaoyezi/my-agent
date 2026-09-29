@@ -81,6 +81,25 @@
     - 只去掉 post-run_once 二次检查：四窗全过。它在答复落账之后，构造不出它是唯一防线的场景，所以不另加用例。
     - 停止永不确认：四窗全部失败。
 
+## `/endtask`：管理员结束卡在等待中的定时会话任务（2026-09-29，分支 `claude/be-end-session-task`，基于 `130dee0ac`）
+
+- **新增** `test_end_task_control.py`（6 项）。夹具用真实 `SimpleAgent`：经 `create_job` / `reserve_due_runs` / `claim_run` /
+  `park_run_waiting` 与 `record_run_creation`、`settle_agent_attempt` 造出事故形态，即定时执行 waiting、会话任务 active、
+  attempt 已结束而 AgentRun 未关。
+  - 解析：只认任务 ID 和 confirm；多余参数、非法字符都判无效；目录里有 `endtask`。
+  - 列表与预览只读，只渲染 ID、状态和等待起点，不带任务正文。
+  - 确认结束：会话任务记为 `cancelled`，waiting 运行立即结算为 `cancelled`；结束前同一 job 的到期派发被挡住，结束后恢复派发。
+  - 拒绝且不改状态：执行树里还有未结束的 attempt（列表显示“还有执行在跑”）；非管理员（带真实存储，拦住它的是管理员判定本身）；
+    运行库缺失、运行库读取报错；不是等待中的定时执行；会话任务已不是 active。
+  - CAS：核对之后任务被别的路径改成终态时，确认结束不覆盖（`END_TASK_STATE_CHANGED`）。
+  - Gateway 分派按 scope 解析 owner（飞书 scope）；TUI 转发文本保留任务 ID 和 confirm，本地直连模式拒绝并提示用 Gateway。
+- **仓库级守卫抓到一次**：新模块的 `_LIST_LIMIT` 与 `settings_control_service.py` 同名，`test_constant_names_unique` 失败，已改名 `_CANDIDATE_LIMIT`。
+- **定向回归**：80 个相关文件（控制命令解析、命令目录、Gateway 控制、TUI 控制、运行库、定时服务，含
+  `test_architecture_guardrails`、`test_constant_names_unique`）2035 passed、1 skipped、1 xfailed，后两项为原有标记。
+- **变异验证**：19 个全部被抓住（按 pytest rc==1 判定）。覆盖范围：管理员判定、预览误写、CAS、立即结算、三条放行条件、
+  运行库缺失与读取报错、终态判定、列表结论、confirm 识别、参数校验、解析登记、目录登记、Gateway 分派、TUI 本地拒绝与转发文本。
+  其中“绕过管理员判定”一开始是因为替身缺少存储才报错，杀死理由不硬；已改成带真实存储的非管理员并断言状态不变。
+
 ## 旧显示快照的决策失败不再显示成“未发出”（2026-09-28，分支 `claude/be-legacy-unknown`，基于 `c101d325a`）
 
 - **问题**（9b 复审）：失败构成出现前写下的快照没有 `decision_unknown_failures` 键，`public_model_metrics` 补成 0，

@@ -57,6 +57,7 @@ from ..memory_store.lifecycle import (
 )
 from ..user_space.owner_resolver import OwnerIdentity
 from .audit_control_service import AuditControlRequest, execute_audit_control_operation
+from .end_task_control import execute_end_task_control
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
 from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
@@ -355,6 +356,8 @@ def execute_gateway_conversation_control(
         return _execute_recover_control(agent, command, scope)
     if command.kind == "restart":
         return _execute_restart_control(agent, paths, command, scope)
+    if command.kind == "endtask":
+        return _execute_end_task_control(agent, command, scope)
     if command.kind == "model":
         # model_profile_service 在导入期依赖本模块的 owner 解析，这里延迟导入以免循环引用。
         from .model_profile_service import execute_model_text_control
@@ -796,6 +799,19 @@ def _execute_restart_control(
         return execute_restart_control(owner_agent, thread, command, paths=paths)
     except Exception:
         return ConversationControlResult("restart", False, "暂时无法安排 Gateway 重启，请稍后重试。")
+
+
+# LLM: /endtask 按已认证 scope 解析 owner（不创建线程）；管理员判定、只读预览和结束动作都归 end_task_control。
+# 函数用途: 为 /endtask 解析当前会话的 owner，再交给结束会话任务模块查看或结束卡在等待中的定时会话任务。
+def _execute_end_task_control(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    try:
+        return execute_end_task_control(_request_agent_for_scope(base_agent, scope), command)
+    except Exception:
+        return ConversationControlResult("endtask", False, "暂时无法查看或结束定时会话任务，请稍后重试。")
 
 
 # LLM: `/context` is a read-only projection of the same owner/thread, prompt estimator, and

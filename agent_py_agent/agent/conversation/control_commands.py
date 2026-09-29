@@ -40,6 +40,7 @@ ControlKind = Literal[
     "recover",
     "model",
     "restart",
+    "endtask",
     "admin",
     "approve",
     "deny",
@@ -180,7 +181,8 @@ def parse_conversation_control(
 
 # LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
 #   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
-# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，/model 只解析编号，
+# 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
+# /endtask 只解析任务 ID 与 confirm，/model 只解析编号，
 # /restart 的尾随文字只作为展示用原因。
 def parse_conversation_command(
     text: object,
@@ -531,6 +533,28 @@ def persisted_control_command_text(command: ConversationControlCommand, text: ob
     return str(text or "")
 
 
+_ENDTASK_USAGE = ("用法：/endtask 列出卡在等待中的定时会话任务；/endtask <任务ID> 预览结束会做什么；"
+                  "/endtask <任务ID> confirm 确认结束（仅管理员）。")
+_ENDTASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+# LLM: 只认一个任务 ID 和可选的 confirm 词，不接受正文或其它参数；无参数是列候选，只给 ID 是只读预览，带 confirm 才是结束请求。
+#   任务 ID 只做字符集校验，是不是定时执行由执行端按定时账本等结构化事实判断。
+# 函数用途: 把 `/endtask`、`/endtask <任务ID>`、`/endtask <任务ID> confirm` 解析为列表、预览或结束请求。
+def _endtask_command(trailing: object) -> ConversationControlCommand:
+    parts = str(trailing or "").split()
+    if not parts:
+        return ConversationControlCommand("endtask", operation="list", usage=_ENDTASK_USAGE)
+    confirm = [part.lower() for part in parts[1:]] == ["confirm"]
+    return ConversationControlCommand(
+        "endtask",
+        value=parts[0],
+        operation="apply" if confirm else "view",
+        valid=bool(_ENDTASK_ID.fullmatch(parts[0])) and (len(parts) == 1 or confirm),
+        usage=_ENDTASK_USAGE,
+    )
+
+
 # LLM: 处置值只认 runtime_db 的结构化取值表，不接受同义词或正文；无参数只读查看，带参数才会改运行库。
 # 函数用途: 把 `/recover` 解析为查看，或把 `/recover <处置>` 解析为显式恢复请求。
 def _recover_command(trailing: object) -> ConversationControlCommand:
@@ -759,6 +783,7 @@ def _short_text(value: object, limit: int) -> str:
 _TRAILING_PARSERS: dict[str, Callable[[object], ConversationControlCommand | ConversationTaskCommand]] = {
     "goal": _goal_command,
     "recover": _recover_command,
+    "endtask": _endtask_command,
     "model": _model_command,
     "admin": _admin_command,
     "experiment": _experiment_command,

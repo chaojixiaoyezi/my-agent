@@ -43,6 +43,28 @@
 - **默认关的理由**：不打乱 09-29 的同钟点复测。由集成方经 `decision_patch`（owner 级）打开，或在 TUI 决策菜单里打开“观察不挡回复”。
 - 细节见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#observe-不挡主链路2026-09-28默认关)和 TESTS 同日条目。
 
+## `/endtask`：管理员结束卡在等待中的定时会话任务（2026-09-29，分支 `claude/be-end-session-task`，基于 `130dee0ac`，本地验证通过，待集成）
+
+**来源**：2026-09-28 生产事故。两个会话由每 5 分钟一次的定时任务驱动，各有一次定时运行里的 `run_command` 结果未知：
+- 工作片以 `runtime_status=unfinished`（`TOOL_OPERATION_OUTCOME_UNKNOWN`）停下，会话任务仍是 active；
+- `_finish_scheduler_wake_claim` 看到任务 active，就把定时运行停在 waiting 等后续事件；没有子工作也没有后续事件，
+  `reconcile_waiting_run` 只在任务到终态时结算，于是永远 waiting；
+- `_job_has_active_run` 让同一 job 的到期派发一直跳过，会话从此不再被唤醒。
+当晚没有正式入口，只能经 3a 批准、用产品 API 手动把两条会话任务推到 cancelled（记录在 `~/.my-agent/releases/claude-tools/stuck-srun-20260928/`）。
+
+**做法**（已实现）：新增会话控制 `/endtask`，TUI 与飞书共用 Gateway 控制入口，仅本机管理员（含已绑定管理员的 IM 身份）可用。
+- `/endtask` 列出等待中的定时执行及能否结束；`/endtask <任务ID>` 只读预览；`/endtask <任务ID> confirm` 才写。
+- 放行条件全是结构化事实：定时账本里这条运行是 waiting；会话任务链接是 active；运行库里这个任务整棵执行树（含子代理）
+  没有未结束的 attempt（终态判定只用 `runtime_db.operations.attempt_status_is_terminal`）。运行库读不到按“无法确认”拒绝。
+- 确认只写两处：会话任务按 `expected_status=active` 的 CAS 改为 `cancelled`；再对同一任务调 `reconcile_waiting_run`。
+  结算没成时，定时层每轮入队前的批量对账会再收口。不改运行库、不重做未确认的工具操作。
+
+**边界与未做**：
+- 这是事后收口入口，不是根因修复。根因修复另排：定时运行只有在确有后续工作（子代理、后台进程、已登记的续跑事件）时
+  才进 waiting；工作片以“结果未知”停下且没有后续工作时，任务应进入结构化的阻塞终态、定时运行记失败，让 job 继续。
+- 收口后运行库里这次执行的 AgentRun / TaskRun 仍是未关闭状态（attempt 已结束），不影响后续派发；唤醒发现只在代理树终结后才补关。
+- 设计细节见 [CLI 参考](CLI_REFERENCE.md) 的 `/endtask` 说明。
+
 ## 墙钟超时后旧请求仍在途，重试可能向供应商重复发送（2026-09-28，来源：`27283cb76` 复审，基于 `6c2fad4da`，待排期）
 
 **现象**：模型调用的发出前登记（子代理业务标记、发送前钩子、插话提交）已经完成、HTTP 请求正在发出或等待响应时，

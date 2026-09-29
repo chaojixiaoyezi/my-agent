@@ -14,6 +14,12 @@
   - 写入走原 active-turn 事务，回合已结束就不回写。
 - 回归见 `test_decision_observe_nonblocking.py` 的三组选模型用例。
 
+`/endtask` 结束卡在等待中的定时会话任务（分支 `claude/be-end-session-task`，2026-09-29）：
+- 来源：2026-09-28 两个会话的定时运行里 `run_command` 结果未知，工作片停下而会话任务仍 active，定时运行停在 waiting 永不结算，同一 job 的到期派发被一直跳过。
+- 新增会话控制 `/endtask`，由 `control_service` 按 kind 分派到 `gateway_parts/end_task_control.py`，TUI 与飞书共用；仅本机管理员可用。无参数列候选、只给任务 ID 只读预览、带 confirm 才写。
+- 放行只认结构化事实：定时账本里是 waiting、会话任务链接是 active、运行库整棵执行树没有未结束的 attempt（运行库读不到按无法确认拒绝）。确认只写两处：`tasks.update_status(cancelled, expected_status=active)`，再对同一任务调 `reconcile_waiting_run`。
+- 回归见 `test_end_task_control.py`。根因修复（只在确有后续工作时才进 waiting）另排，见 DESIGN_LEDGER。
+
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。
 - 现在由 `execute_settings_control` 经 `capability_config_for_agent(base_agent)` 取得 capability 配置，作为关键字参数只交给这两个视图。

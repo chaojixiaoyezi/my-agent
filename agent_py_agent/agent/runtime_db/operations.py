@@ -83,6 +83,13 @@ def exec_lock_scope(agent_run_id: str) -> str:
     return f"{EXEC_LOCK_SCOPE_PREFIX}{agent_run_id}"
 
 
+# LLM: attempt 终态判定的唯一对外出口，集合仍只在 _ATTEMPT_TERMINAL_STATUSES；unknown/recovered 也算终态（不会再有执行者推进）。
+#   调用方不得自己列举 attempt 状态；新增状态只改集合，未登记的状态按“未结束”处理（宁可拒绝也不误判空闲）。
+# 函数用途: 判断一个 attempt 是否已经结束，供 /endtask 这类控制命令确认执行树里没有还在跑的执行。
+def attempt_status_is_terminal(status: object) -> bool:
+    return str(status or "") in _ATTEMPT_TERMINAL_STATUSES
+
+
 def holder_is_alive(pid: int, start_token: str = "") -> bool:
     """R1-03 持主判死：pid 不存在 → 死；start_token 失配（PID 复用）→ 死。
 
