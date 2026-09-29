@@ -209,6 +209,10 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
 
 ## audit-log --cleanup 按 owner canonical 路径解析（2026-09-28，分支 `my-agent/self-dev-4`，基于 `80b4afed8`）
 
+- **第 6 条修复（dev 2026-09-29）**：`AuditQuery` 拿到运行时权威路径后**又拼了一次** `/audit.jsonl`，而写入端 `audit/logger.py` 用的是 `resolve_audit_paths`（带后缀就是文件本身）。配置成 `.../custom-audit.jsonl` 时，CLI 查的是 `<文件>/audit.jsonl`——查询为空、清理空转。现在查询端复用同一个解析器（经一个只暴露 `audit_log_path` 的最小适配器），两边规则一致。
+  - 新增 2 条断言：带后缀的权威路径就是文件本身（不再拼）；查询端与写入端对同一带后缀路径解析一致。
+  - 变异：退回「无条件拼 `/audit.jsonl`」→ 杀死 2 条，报错现场正是 `custom-audit.jsonl/audit.jsonl`。
+
 - **补充（2026-09-29，同一分支）**：dev 要求把"基准"从配置默认值那条隐式链换成运行时路径的权威值。现在 CLI 除了传 owner home 基准，还把 `runtime_paths_for_config(config)["audit_log_path"]` 交给 `AuditQuery(runtime_audit_path=...)`——这一份与 Agent 启动时注入 config 的值同源（实测都指向 `O/logs/audit/`）。`runtime_paths_for_config` 是新增的 CLI 侧小函数，只做定位、不建目录、不读内容。
   - 新增 3 条断言：给了运行时路径就以它为准（不再落到 `data/audit`）；两套入口解析出的审计文件是同一个；省略运行时路径时保持既有行为。
   - 变异 `ignore-runtime-path`（`AuditQuery` 忽略运行时权威路径）→ 杀死 2 条。

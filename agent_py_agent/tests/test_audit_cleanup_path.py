@@ -256,3 +256,32 @@ def test_cli_runtime_audit_path_stays_inside_owner_home(tmp_path, monkeypatch):
     audit_dir = runtime_paths_for_config(config)["audit_log_path"]
     assert str(audit_dir).startswith(str(home.owner_home_dir))
     assert audit_dir.name == "audit"
+
+
+# LLM: dev 2026-09-29 第 6 条：运行时权威审计路径带后缀时，它本身就是文件，不能再拼一次
+#   "/audit.jsonl"——否则查询会落到 <文件>/audit.jsonl，查询为空、清理空转。写入端
+#   audit/logger.py 用的是 resolve_audit_paths，所以查询端必须复用同一规则。
+# 函数用途: 验证带后缀的运行时权威路径被当成文件本身。
+def test_runtime_audit_path_with_suffix_is_the_file_itself(tmp_path):
+    custom = tmp_path / "owner-home" / "logs" / "custom-audit.jsonl"
+    query = AuditQuery(
+        config_with(""),
+        root=tmp_path / "owner-home",
+        runtime_audit_path=custom,
+    )
+    assert query._audit_file == custom, "带后缀的权威路径就是文件本身，不能再拼 audit.jsonl"
+    assert query._audit_root == custom.parent
+
+
+# LLM: 与写入端对齐：两边拿同一个带后缀的路径，解析出的文件必须一模一样，否则查询查不到写入内容。
+# 函数用途: 验证查询端与写入端对同一带后缀路径解析一致。
+def test_runtime_audit_path_matches_writer_semantics_for_suffixed_path(tmp_path):
+    custom = tmp_path / "owner-home" / "logs" / "custom-audit.jsonl"
+    via_writer = resolve_audit_paths(config_with(str(custom)))
+    via_query = AuditQuery(
+        config_with(""),
+        root=tmp_path / "owner-home",
+        runtime_audit_path=custom,
+    )
+    assert via_query._audit_file == via_writer.log_file
+    assert via_query._audit_root == via_writer.root

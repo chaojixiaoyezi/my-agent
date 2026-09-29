@@ -114,6 +114,15 @@ def _timestamp_matches(timestamp: float, params: AuditQueryParams) -> bool:
     return True
 
 
+# LLM: 运行时权威审计路径（可能带后缀）与配置里的 audit_log_path 语义相同，所以用同一个解析器；
+#   这是一个只暴露 audit_log_path 的最小适配器，不引入第二套路径规则。
+# 类用途: 把运行时权威审计路径包装成 resolve_audit_paths 认识的配置形状。
+class _RuntimeAuditPathConfig:
+    # 函数用途: 保存运行时权威审计路径供解析器读取。
+    def __init__(self, audit_log_path: Path | str) -> None:
+        self.audit_log_path = str(audit_log_path)
+
+
 class AuditQuery:
 
     # LLM: root 是调用方的 canonical 基准（owner home）；给了它，配置里的相对路径就不再随进程 cwd 漂移。
@@ -132,8 +141,12 @@ class AuditQuery:
     ):
         self.config = config
         if runtime_audit_path is not None:
-            resolved = Path(runtime_audit_path).expanduser()
-            paths = AuditPaths(root=resolved, log_file=resolved / "audit.jsonl")
+            # 权威值交给同一个解析器，和写入端 audit/logger.py 走同一条规则：带后缀就是文件本身，
+            # 否则是目录。这里再拼一次 "/audit.jsonl" 会让自定义文件名（如 .../custom-audit.jsonl）
+            # 的查询落到 <文件>/audit.jsonl：查询为空、清理空转（dev 2026-09-29 第 6 条）。
+            paths = resolve_audit_paths(
+                _RuntimeAuditPathConfig(runtime_audit_path), root=root
+            )
         else:
             paths = resolve_audit_paths(config, root=root)
         self._audit_root = paths.root
