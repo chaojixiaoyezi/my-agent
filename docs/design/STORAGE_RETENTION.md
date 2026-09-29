@@ -101,6 +101,19 @@
 5. **移走线程会留下孤儿**：移走时跳过 `model_usage`、引导索引、`display_archives`、压缩检查点和锁文件。
 6. **生产 home 里积累了测试数据**：28 个 provider owner 中多数来自历史验收；`O/data/workspaces/` 里 1252 个工作区以测试函数名命名，
    是早期测试没有隔离 home 时写进来的。owner 生命周期没有“移除测试 owner”的入口。
+7. **审计保留扫的不是审计日志**：`audit_days`（默认 180）只扫 `O/audit/*.jsonl`（`memory_store/retention_scan.py:168`，
+   `owner_audit_dir` 见 `user_space/home_layout_v2.py:264`）。这个目录放的是主代理每轮的记忆归档原始事件
+   （`agent_core/_finalization_service.py:212-217` 调 `memory_archive/storage.py:48-50,112`），也是 Curator 的输入
+   （`memory_store/curator_inputs.py:433`）。审计日志本身不在其中：
+   - `AuditLogger` 写 `O/logs/audit/audit.jsonl`：`audit_log_path` 默认是空串（`agent_py_agent/config/agent_config.yaml:652`），
+     启动时由 `user_space/runtime_paths.py:97-102` 注入 `owner_logs_dir/audit`，写入在 `audit/logger.py:70`；
+     每条还复制一份到 LocalStore 事件（`audit/logger.py:122-128`），随第 4 节第 2 行的 `local_store` 一起只增不减；
+   - owner 审计账本 `O/audit_log.jsonl`（`user_space/home_layout_v2.py:281`），保留服务自己的执行记录也写在这里
+     （`memory_store/retention_apply.py:445`）。
+
+   这几处都没有自动清理，`audit_days` 对它们不生效。唯一的入口是手动 `audit-log --cleanup`（`cli_audit_cleanup_days` 默认 90，
+   `settings/config.py:529`），而它也指不到 `O/logs/audit/audit.jsonl`：见缺口 3；2026-09-28 的修复改成按 owner home 解析，
+   但默认值仍落在 `O/data/audit/`。方向：审计类数据按写入端的规范路径登记进第 6 节第 1 条的登记表，扫描不再另写一份目录。
 
 ## 6. 通用保留方案方向（不写专项分支）
 
