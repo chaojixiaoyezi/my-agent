@@ -28,8 +28,12 @@ from .wake_poison import (
     QuarantineDecision,
     WakeAttemptVerdict,
     WakePoisonState,
+    WakeStallAlert,
+    mark_stall_alerted,
     next_poison_state,
     quarantine_decision,
+    stall_alert,
+    verdict_for_batch,
 )
 
 WAKE_ATTEMPTS_SCHEMA = "wake-attempts.v1"
@@ -41,13 +45,24 @@ WAKE_REPLAY_PENDING_CONFLICT = "WAKE_REPLAY_PENDING_CONFLICT"
 _WAKE_ERROR_SAMPLE_CHARS = 200
 
 
-# LLM: decision 非空表示调用方应结案而不是继续执行；abandoned 表示 begin 发现上次尝试的进程已死并已补记一次失败。
-# 类用途: 一次记账后的结果：最新状态、是否该结案、是否识别出中途死亡的尝试。
+# LLM: claim_id 与 batch_size 写进 in_flight；batch_size 是本次一起执行的唤醒条数，进程中途死亡时据此把 abandoned
+#   改写成批次失败（批大小大于 1 时不计数，只让下一次逐条执行）。
+# 类用途: 描述一次即将开始的尝试。
+@dataclass(frozen=True)
+class WakeAttemptStart:
+    claim_id: str
+    batch_size: int = 1
+
+
+# LLM: decision 非空表示调用方应结案而不是继续执行；abandoned 表示 begin 发现上次尝试的进程已死并已补记；
+#   stall_alert 非空表示连续不计数已满提醒窗口，本次已在尝试账里记下提醒，调用方负责发运维事件与宿主提示。
+# 类用途: 一次记账后的结果：最新状态、是否该结案、是否识别出中途死亡的尝试、是否该发长时间不计数提醒。
 @dataclass(frozen=True)
 class WakeAttemptOutcome:
     state: WakePoisonState
     decision: QuarantineDecision | None
     abandoned: bool = False
+    stall_alert: WakeStallAlert | None = None
 
 
 # LLM: 失败时 ok=False 且 error_code 为 WAKE_REPLAY_*，不改任何文件；成功时 signal 是写回 pending 的原信封。
@@ -87,24 +102,29 @@ class WakeAttemptStore:
         except ValueError as exc:
             return WakePoisonState(), _corruption_report(exc, path)
 
-    # LLM: 在执行前调用；上一条 in_flight 属于已确认死亡的进程时先补记一次 attempt:abandoned，再写入本次 in_flight。
-    #   进程是否存活只看结构化身份（process_identity_is_live 返回 False 才算死），无法判断时不补记。
+    # LLM: 在执行前调用；上一条 in_flight 属于已确认死亡的进程时先补记一次 attempt:abandoned（按那次尝试的批大小
+    #   经 verdict_for_batch 改写，批次中死亡只算批次失败），再写入本次 in_flight。进程是否存活只看结构化身份
+    #   （process_identity_is_live 返回 False 才算死），无法判断时不补记。
     # 函数用途: 标记一次尝试开始，并识别上一次尝试是否在执行中途连同进程一起消失；会写尝试账。
-    def begin(self, signal: WakeSignal, *, claim_id: str, now: float) -> WakeAttemptOutcome:
+    def begin(self, signal: WakeSignal, start: WakeAttemptStart, *, now: float) -> WakeAttemptOutcome:
         path = self.storage.wake_attempt_path(signal.wake_signal_id)
         with locked_file_transition(path):
             ledger = self._read_ledger(path, signal)
             state = _ledger_state(ledger)
-            abandoned = _in_flight_abandoned(ledger.get("in_flight"))
+            previous = ledger.get("in_flight")
+            abandoned = _in_flight_abandoned(previous)
             if abandoned:
-                state = next_poison_state(state, WAKE_ATTEMPT_ABANDONED, now=now)
+                state = next_poison_state(state, verdict_for_batch(WAKE_ATTEMPT_ABANDONED, _batch_size(previous)), now=now)
             ledger.update(state=state.to_dict(), in_flight={
-                "claim_id": str(claim_id or ""), "owner_process": build_process_identity(), "started_at": now})
+                "claim_id": str(start.claim_id or ""), "batch_size": start.batch_size,
+                "owner_process": build_process_identity(), "started_at": now})
             write_json_file_atomic_unlocked(path, ledger)
         return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=abandoned)
 
     # LLM: 按一次尝试的判定推进状态并清掉 in_flight；成功直接删除尝试账。只有计数失败才更新 last_error。
-    # 函数用途: 记下一次尝试的结果，返回最新状态和是否该结案；会写或删尝试账。
+    #   verdict 必须已按本次批大小经 verdict_for_batch 改写。连续不计数满提醒窗口时在同一把锁里记下提醒
+    #   （mark_stall_alerted），随结果返回，调用方负责发事件；这样同一窗口只提醒一次。
+    # 函数用途: 记下一次尝试的结果，返回最新状态、是否该结案和是否该发提醒；会写或删尝试账。
     def record(
         self, signal: WakeSignal, verdict: WakeAttemptVerdict, *, now: float, error: BaseException | None = None,
     ) -> WakeAttemptOutcome:
@@ -115,11 +135,14 @@ class WakeAttemptStore:
             if state == WakePoisonState():
                 unlink_quietly(path)
                 return WakeAttemptOutcome(state, None)
+            alert = stall_alert(state, now=now)
+            if alert is not None:
+                state = mark_stall_alerted(state, now=now)
             ledger.update(state=state.to_dict(), in_flight=None)
             if verdict.kind == WAKE_VERDICT_FAILURE and error is not None:
                 ledger["last_error"] = _error_facts(error)
             write_json_file_atomic_unlocked(path, ledger)
-        return WakeAttemptOutcome(state, quarantine_decision(state))
+        return WakeAttemptOutcome(state, quarantine_decision(state), stall_alert=alert)
 
     # LLM: 只结案仍在 pending 的唤醒（找不到返回 None）；原信封字段原样保留，只改 status/handled_at 并附顶层
     #   quarantine 键。写结案记录 → 删 pending → 删尝试账 → 结掉关联观察，观察不结会被观察车道当成兜底再跑一遍。
@@ -229,6 +252,13 @@ def _archive_count(archive: Path) -> int:
     return len(list(archive.glob("*.json"))) if archive.is_dir() else 0
 
 
+# LLM: in_flight 里的批大小只接受正整数；旧账或坏值按 1（单条）处理，不因缺字段放宽成批次。
+# 函数用途: 读出上一次尝试的批大小。
+def _batch_size(in_flight: object) -> int:
+    value = in_flight.get("batch_size") if isinstance(in_flight, dict) else None
+    return value if type(value) is int and value >= 1 else 1
+
+
 # LLM: 只有结构化进程身份被确认已死（False）才算中途死亡；None（无法判断）与存活都不算。
 # 函数用途: 判断上一条未收尾的尝试是否已随进程消失。
 def _in_flight_abandoned(in_flight: object) -> bool:
@@ -287,6 +317,7 @@ __all__ = [
     "WAKE_REPLAY_NOT_FOUND",
     "WAKE_REPLAY_PENDING_CONFLICT",
     "WakeAttemptOutcome",
+    "WakeAttemptStart",
     "WakeAttemptStore",
     "WakeReplayResult",
 ]

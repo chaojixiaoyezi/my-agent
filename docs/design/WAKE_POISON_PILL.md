@@ -38,10 +38,11 @@
 | --- | --- | --- | --- |
 | 领取前跳过（冷却、恢复阻塞、本 tick 已占用、根任务已终态等） | `_skip_pending_wake_signal` | 不计数（没有尝试） | — |
 | 没领到租约（车道忙） | `claims.acquire` 返回 None | 不计数 | — |
-| 领到但未执行，预期等待类 | admission 为 `turn_interrupted`、`terminal_task_link`、`authority_recovery_required`、`wake_source_not_pending`、`wake_source_changed` | 不计数 | — |
+| 领到但未执行，预期等待类 | admission 为 `turn_interrupted`、`terminal_task_link`、`authority_recovery_required`、`wake_source_not_pending`、`wake_source_changed` | 不计数 | `admission:<码>`（只用于长时间不计数提醒） |
 | 领到但未执行，其它任何 admission（含以后新增的码，如 `host_delivery_consumed`） | `_finish_nonexecuted_claim` 的 admission | 计数 | `admission:<码>` |
-| 执行中抛异常，瞬时类（见第 4 节） | 异常类型 | 不计数 | — |
-| 执行中抛异常，其余 | 异常类型 / `error_code` 属性 | 计数 | 有 `error_code` 用 `error:<码>`，否则 `error:<category>:<异常类名>`（category 取自 `runtime_error_report`） |
+| 执行中抛异常，瞬时类或环境级故障（见第 4 节） | 异常类型 / HTTP 状态 | 不计数 | 与下一行同一规则（只用于提醒） |
+| 执行中抛异常，其余 | 异常类型 / `error_code` 属性 | 计数 | 有形状合规的 `error_code` 用 `error:<码>`，否则 `error:<category>:<异常类名>`（category 取自 `runtime_error_report`）；有结构化 HTTP 状态时再加 `:http_<状态>` |
+| 一次尝试执行了多条唤醒（批大小 > 1），结果是上面任何一种计数失败 | 批大小 | 不计数，记为批次失败，下一次逐条单独执行 | 同上（`batch_failures` 加 1） |
 | 执行完，报告为 None | `run_once` 返回 None | 计数 | `run:no_report` |
 | 执行完，`wake_handled=False` 且没有冻结交付（下次会重跑业务） | 报告 + `cached_owner_delivery` | 计数 | `run:delivery_not_committed` |
 | 执行完，`wake_handled=False` 但有冻结交付（下次只重投，不调模型） | 同上 | 不计入失败次数，单独按重投规则计（见第 5 节） | 结案时为 `delivery:channel_unavailable` |
@@ -50,7 +51,11 @@
 
 **同因**：同一 `wake_signal_id` 上相邻两次**计数**结果的 reason_code 完全相同。
 
-- 不计数的结果既不累加，也不打断连续段：瞬时故障夹在中间，不会把程序错误的计数清零。
+- 不计数的结果既不累加，也不打断连续段：瞬时故障夹在中间，不会把程序错误的计数清零。它们组成"连续不计数段"，
+  满 24 小时发提醒（见第 5 节末尾），但永不结案。
+- **批次隔离**（2026-09-29 裁定，消息队列隔离毒消息的常规做法）：批次失败只让下一次逐条单独执行
+  （`needs_isolation`），只对批大小为 1 的失败计数，避免一条有毒的内容拖着同批健康成员一起结案；
+  直到成功为止都保持逐条执行。批次中途进程死亡同样按批次失败记。
 - 计数结果换了 reason_code，就从 1 重新计。
 - 批次执行时，一次尝试对批内每个成员各记一次。
 
@@ -75,6 +80,11 @@
 - `sqlite3.OperationalError` 仅当 `sqlite_errorcode` 是 SQLITE_BUSY 或 SQLITE_LOCKED。
   Python 3.10 没有这个属性，这时按计数处理。
 
+**环境级故障也不计数**（2026-09-29 裁定）：HTTP 401、403、407（按 `provider_error_http_status` 的整数属性判断），
+以及 `ProviderConfigurationError` 基类（含 `ProviderConnectionError`、`ModelNotConfiguredError`），交给车道级等待，
+和"缺模型配置"走同一套。密钥过期、代理鉴权失败是环境坏了，不是某条唤醒有毒；否则环境坏 7.5 分钟就会把健康的
+session_task 不可逆地判成 failed。`ProviderRequestRejectedError` 在 400、413、422 这类请求本身有问题时照样计数。
+
 其余一律计数，包括 programmer_bug、`DataCorruptionError`、`ValueError`。
 
 误判的控制：N=5，加上退避一共约 7.5 分钟；瞬时类各有自己的退避；真误判了，一条人工重放命令就能恢复。
@@ -97,6 +107,14 @@
 - 理由：重投便宜，但渠道长期不可用时无限重投同样不行；15 分钟封顶让恢复后最多再等 15 分钟，
   24 小时足够覆盖一次渠道长时间故障或人工处理。
 
+**批次失败**后 30 秒（基础间隔）再试，下一次逐条单独执行。
+
+**连续不计数的远端提醒**（2026-09-29 裁定）：`WAKE_UNCOUNTED_STALL_SECONDS = 86400.0`，与只重投路径同一个窗口。
+同一条唤醒连续不计数满 24 小时（>=）时发一次运维事件 `wake_uncounted_stalled`（带最近一次不计数的 reason_code、
+次数和起点），并给受影响的会话排一条宿主提示；之后每满 24 小时再提醒一次。**不自动结案**：这些结果按定义属于
+预期等待、瞬时或环境故障，长时间故障里自动结案会误伤健康的工作。任何一次计数失败都结束当前不计数段（连同提醒记录），
+成功清空一切；只重投失败和批次失败不影响它。领取前就被跳过的时段不算尝试，也不参与这个计时。
+
 取值理由：
 
 - 比进度策略的 3 次宽：唤醒路径并发多（车道切换、来源刷新），要给类型没覆盖到的短暂竞态留余量；
@@ -112,8 +130,11 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 **尝试账**：`wake_queue/attempts/<wake_signal_id>.json`，是唯一权威。它挂在 WakeStore 的新增子对象上，
 不改 `mark_handled` 的签名和行为（my-agent-3 重做第 8 片时可能会改到它附近）。
 
-- 字段：reason_code、same_cause_count、total_count、first_failed_at、last_failed_at、next_attempt_at、
-  in_flight（claim_id、owner_process、started_at）、last_error（异常类型、category、截断的诊断消息，只用于诊断）。
+- 字段：reason_code、same_cause_count、total_count、first_failed_at、last_failed_at、batch_failures、
+  uncounted_reason_code、uncounted_count、uncounted_since、stall_alerts、last_stall_alert_at、只重投三项、next_attempt_at，
+  in_flight（claim_id、batch_size、owner_process、started_at）、last_error（异常类型、category、error_code、截断的诊断消息，
+  只用于诊断）。读回时严格校验：未知键、NaN/inf、计数与时间互相矛盾都按数据损坏处理。
+- `record` 在同一把锁里判定并记下长时间不计数提醒，随结果返回，调用方负责发事件与宿主提示，同一窗口只提醒一次。
 - 尝试开始前写 in_flight，结束后写结果并清掉 in_flight。这样进程在尝试中被杀，下一次也能识别成 `attempt:abandoned`。
 
 **结案**为新终态 `failed_permanently`，顺序比照 `mark_handled`：
@@ -146,6 +167,8 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
   wake_signal_id、thread_id、reason、reason_code、same_cause_count、limit、next_attempt_at。结案时打
   `wake_quarantined`，另带 total_count、首末失败时间、error_type、error_category。
   日志只有结构化字段，不含消息正文或错误文案，和 `[gateway-supply-backoff]` 同一格式族。
+- **长时间不计数**：`wake_uncounted_stalled` 事件（reason_code、uncounted_count、uncounted_since、alert_number），同时给
+  受影响的会话排一条宿主提示；每满 24 小时重复一次，不结案。
 - **宿主提示**：结案时给受影响的会话排一条宿主提示（`queue_host_notice`，source=`wake_poison`，
   code=reason_code），显示在下一次前台回复顶部，TUI 和飞书都能看到。
 - **状态面**：`gateway_status` 工具和 TUI `/status` 显示本 owner 已结案的唤醒数；TUI `/wakes quarantined`
@@ -204,7 +227,17 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
    正向对照：供应瞬时失败连续 20 次不结案；失败 4 次后成功则清账。
    变异点：不计数清单、同因比较、退避写盘、observation 结案、发布层第三位置。
 
-## 11. 待定点的裁定（2026-09-28，3a）
+**第 3 步接线时必须处理的三点**（2026-09-29 复审）：
+
+1. **额度耗尽的回退报告**要单独识别（`_quota_wake_report_after_error` 产出的报告），不能记成
+   `run:delivery_not_committed`；它走额度分路，按不计数处理。
+2. **优雅停机**：Gateway 正常停止时，给在途尝试写一个不计数的结果（清掉 in_flight），否则每次部署都会给在途唤醒
+   记一次 `attempt:abandoned`。只有进程被强杀、来不及收尾时才应该出现 abandoned。
+3. **信封读不出来时的结案**：现在 `quarantine` 遇到读不出的 pending 文件抛数据损坏、原文件不动。接线时要决定：
+   建议把原始字节原样移到 `quarantine/unreadable/<id>.json`，发 `wake_quarantined`（reason_code
+   `admission:wake_source_unreadable`），列表把它放进 load_errors；不在读不出的内容上补字段。
+
+## 11. 待定点的裁定（2026-09-28，3a；2026-09-29 复审补充）
 
 1. 总上限 M=12（不同因也算）：**保留**。
 2. 领域收尾：**覆盖 session_task 和 session_message**（见第 6 节），其它 reason 只发事件和宿主提示。
@@ -212,3 +245,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
    `delivery:channel_unavailable` 结案（见第 5 节）。
 4. `SkillSnapshotError` 整族的码**补成结构化 `error_code` 属性**，现有调用方和测试改读该属性；单独一片，
    技能快照模块不在 my-agent-3 的范围内，可以先做。
+5. **环境级故障不计数**（9a 复审，3a 裁定必须改）：401/403/407 与配置错误基类交给车道级等待（第 4 节）。
+6. **批次隔离**（采纳）：批次失败后逐条单独执行，只对批大小为 1 的失败计数（第 3 节）。
+7. **不计数的远端上限**（采纳，但不自动结案）：连续不计数满 24 小时发 `wake_uncounted_stalled` 并每 24 小时
+   提醒一次（第 5 节）。

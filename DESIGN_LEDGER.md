@@ -13,6 +13,9 @@
 - 与回合内兜底（待处理输入作废 8 次、同一失败 15 次熔断）分层：那两条管一个回合内的调用次数，本方案管同一条唤醒被领取几次。
 - 3a 裁定：保留总上限 12；领域收尾覆盖 session_task 与 session_message；只重投路径封顶 15 分钟、满 24 小时结案；
   `SkillSnapshotError` 整族补结构化 `error_code`。第 1、2 步先做，接线等 my-agent-3 的取消修复合入。
+- 2026-09-29 复审补充：401/403/407 与配置错误基类属于环境级故障、不计数；批次失败后逐条隔离、只对单条失败计数；
+  连续不计数满 24 小时发 `wake_uncounted_stalled` 并每 24 小时提醒，不自动结案。第 3 步接线要额外处理额度回退报告、
+  优雅停机的在途尝试和读不出的信封。
   详见 [WAKE_POISON_PILL.md](docs/design/WAKE_POISON_PILL.md)。
 
 ## 前台命令已退出、只是清理未确认时如实返回执行结果（2026-09-29，`claude/75-scheduler-waiting-deadlock` 的 `84e8db619` + `067d2dd3e`，单独集成）

@@ -18,6 +18,7 @@ from agent_py_agent.agent.conversation.store_wake_attempts import (
     WAKE_REPLAY_DOMAIN_TERMINAL,
     WAKE_REPLAY_NOT_FOUND,
     WAKE_REPLAY_PENDING_CONFLICT,
+    WakeAttemptStart,
 )
 from agent_py_agent.agent.conversation.store_wake_publication import _stable_signal
 from agent_py_agent.agent.conversation.wake_poison import (
@@ -25,7 +26,9 @@ from agent_py_agent.agent.conversation.wake_poison import (
     WAKE_ATTEMPT_SUCCESS,
     WAKE_POISON_SAME_CAUSE_LIMIT,
     WAKE_STATUS_FAILED_PERMANENTLY,
+    WAKE_UNCOUNTED_STALL_SECONDS,
     WAKE_VERDICT_FAILURE,
+    WAKE_VERDICT_NEUTRAL,
     WakeAttemptVerdict,
     WakePoisonState,
 )
@@ -59,9 +62,15 @@ def _with_observation(store):
 def _poison(store, signal, *, verdict=BUG):
     outcome = None
     for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
-        store.wakes.attempts.begin(signal, claim_id=f"claim-{attempt}", now=100.0 + attempt)
+        store.wakes.attempts.begin(signal, WakeAttemptStart(f"claim-{attempt}"), now=100.0 + attempt)
         outcome = store.wakes.attempts.record(signal, verdict, now=100.5 + attempt, error=RuntimeError("boom"))
     return outcome
+
+
+def _dead_pid() -> int:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=10)
+    return child.pid
 
 
 def _json(path):
@@ -73,7 +82,7 @@ class TestLedger:
         store = _store(tmp_path)
         signal = _raise(store)
         for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT - 1):
-            store.wakes.attempts.begin(signal, claim_id="c", now=float(attempt))
+            store.wakes.attempts.begin(signal, WakeAttemptStart("c"), now=float(attempt))
             outcome = store.wakes.attempts.record(signal, BUG, now=float(attempt), error=RuntimeError("x"))
             assert outcome.decision is None
         outcome = _poison(store, signal)
@@ -87,9 +96,9 @@ class TestLedger:
     def test_success_deletes_the_ledger_and_neutral_only_clears_in_flight(self, tmp_path):
         store = _store(tmp_path)
         signal = _raise(store)
-        store.wakes.attempts.begin(signal, claim_id="c1", now=1.0)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("c1"), now=1.0)
         store.wakes.attempts.record(signal, BUG, now=2.0)
-        store.wakes.attempts.begin(signal, claim_id="c2", now=3.0)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("c2"), now=3.0)
         store.wakes.attempts.record(signal, WAKE_ATTEMPT_NEUTRAL, now=4.0)
         ledger = _json(store.storage.wake_attempt_path(signal.wake_signal_id))
         assert ledger["in_flight"] is None and ledger["state"]["same_cause_count"] == 1
@@ -101,8 +110,8 @@ class TestLedger:
         store = _store(tmp_path)
         signal = _raise(store)
         path = store.storage.wake_attempt_path(signal.wake_signal_id)
-        store.wakes.attempts.begin(signal, claim_id="live", now=1.0)
-        live = store.wakes.attempts.begin(signal, claim_id="again", now=2.0)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("live"), now=1.0)
+        live = store.wakes.attempts.begin(signal, WakeAttemptStart("again"), now=2.0)
         assert live.abandoned is False and live.state == WakePoisonState()
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.3)"])
         dead = build_process_identity(child.pid)
@@ -110,21 +119,49 @@ class TestLedger:
         ledger = _json(path)
         ledger["in_flight"]["owner_process"] = dead
         path.write_text(json.dumps(ledger), encoding="utf-8")
-        outcome = store.wakes.attempts.begin(signal, claim_id="after-crash", now=3.0)
+        outcome = store.wakes.attempts.begin(signal, WakeAttemptStart("after-crash"), now=3.0)
         assert outcome.abandoned is True
         assert (outcome.state.reason_code, outcome.state.same_cause_count) == ("attempt:abandoned", 1)
         assert _json(path)["in_flight"]["claim_id"] == "after-crash"
+
+    def test_a_batch_that_died_mid_attempt_only_isolates_its_members(self, tmp_path):
+        store = _store(tmp_path)
+        signal = _raise(store)
+        path = store.storage.wake_attempt_path(signal.wake_signal_id)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("batch", batch_size=3), now=1.0)
+        ledger = _json(path)
+        assert ledger["in_flight"]["batch_size"] == 3
+        ledger["in_flight"]["owner_process"] = {**ledger["in_flight"]["owner_process"], "pid": _dead_pid()}
+        path.write_text(json.dumps(ledger), encoding="utf-8")
+        outcome = store.wakes.attempts.begin(signal, WakeAttemptStart("alone"), now=2.0)
+        assert outcome.abandoned is True and outcome.decision is None
+        assert (outcome.state.batch_failures, outcome.state.total_count) == (1, 0)
 
     def test_unknowable_owner_identity_is_not_treated_as_dead(self, tmp_path):
         store = _store(tmp_path)
         signal = _raise(store)
         path = store.storage.wake_attempt_path(signal.wake_signal_id)
-        store.wakes.attempts.begin(signal, claim_id="elsewhere", now=1.0)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("elsewhere"), now=1.0)
         ledger = _json(path)
         ledger["in_flight"]["owner_process"] = {**ledger["in_flight"]["owner_process"], "host_id": "another-host"}
         path.write_text(json.dumps(ledger), encoding="utf-8")
-        outcome = store.wakes.attempts.begin(signal, claim_id="here", now=2.0)
+        outcome = store.wakes.attempts.begin(signal, WakeAttemptStart("here"), now=2.0)
         assert outcome.abandoned is False and outcome.state == WakePoisonState()
+
+    def test_uncounted_stall_alert_is_persisted_once_per_window(self, tmp_path):
+        store = _store(tmp_path)
+        signal = _raise(store)
+        wait = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:PROVIDER_CONNECTION_FAILED")
+        day = WAKE_UNCOUNTED_STALL_SECONDS
+        first = store.wakes.attempts.record(signal, wait, now=0.0)
+        assert first.stall_alert is None and first.state.uncounted_count == 1
+        due = store.wakes.attempts.record(signal, wait, now=day)
+        assert due.stall_alert is not None and due.stall_alert.alert_number == 1
+        assert _json(store.storage.wake_attempt_path(signal.wake_signal_id))["state"]["stall_alerts"] == 1
+        assert store.wakes.attempts.record(signal, wait, now=day + 60).stall_alert is None
+        again = store.wakes.attempts.record(signal, wait, now=2 * day)
+        assert again.stall_alert is not None and again.stall_alert.alert_number == 2
+        assert again.decision is None
 
     def test_corrupt_ledger_is_reported_not_silently_reset(self, tmp_path):
         store = _store(tmp_path)
@@ -250,9 +287,9 @@ def test_thread_deletion_collects_this_threads_poison_files_only(tmp_path):
     mine, other = _raise(store), _raise(store, thread="thread-b")
     store.wakes.attempts.quarantine(mine.wake_signal_id, _poison(store, mine).decision, now=200.0)
     store.wakes.attempts.replay(mine.wake_signal_id, now=300.0)
-    store.wakes.attempts.begin(mine, claim_id="c", now=400.0)
+    store.wakes.attempts.begin(mine, WakeAttemptStart("c"), now=400.0)
     store.wakes.attempts.record(mine, BUG, now=401.0)
-    store.wakes.attempts.begin(other, claim_id="c", now=400.0)
+    store.wakes.attempts.begin(other, WakeAttemptStart("c"), now=400.0)
     store.wakes.attempts.record(other, BUG, now=401.0)
     paths, errors = _conversation_related_paths(store.storage.root, store.threads.load("thread-a"))
     names = {path.relative_to(store.storage.root.resolve()).as_posix() for path in paths}

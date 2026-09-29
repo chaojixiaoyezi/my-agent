@@ -24,6 +24,23 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_memory_vector_cache.py agent_py_agent/tests/test_owner_maintenance.py -q`
   与 `python3 scripts/mutate_text_vector_cache.py`（cwd 都必须是工作树根）。
 
+## 唤醒毒丸：三条复审设计修改（2026-09-29，分支 `claude/75-wake-poison-design`，基于 `12a532f8b`，仍未接线）
+
+- **环境级故障不计数**：HTTP 401/403/407（`provider_error_http_status`）与 `ProviderConfigurationError` 基类（含连接错误、
+  缺模型配置）归为不计数；`ProviderRequestRejectedError` 的 400/413/422 照样计数。原因码有结构化 HTTP 状态时加 `:http_<状态>`。
+- **批次隔离**：`verdict_for_batch` 把批大小 > 1 的计数失败改写为批次失败（不计数，`batch_failures` 加 1，30 秒后逐条再试，
+  `needs_isolation` 为真直到成功）；尝试账 in_flight 记 `batch_size`，批次中途进程死亡也只记批次失败。
+- **连续不计数的远端提醒**：不计数结果带原因码并组成连续段（次数、起点、最近原因）；满 24 小时（>=，与只重投同一窗口）
+  `stall_alert` 给出提醒，`record` 在同一把锁里记账（`mark_stall_alerted`）并随结果返回，之后每满 24 小时再提醒；
+  计数失败结束该段，成功清空，永不结案。
+- **测试**：`test_wake_poison.py` 与 `test_wake_attempt_store.py` 共 125 例，新增环境级 5 种不计数、3 种请求级计数、
+  批次改写与校验、批次不结案且隔离到成功、不计数段推进、提醒恰好在窗口触发并按窗口重复、计数失败结束该段、
+  窗口常量与只重投窗口相同、4 种新的一致性破坏；存储层批次中途死亡只隔离、提醒写盘且同一窗口只提醒一次。
+- **变异验证**：本次 28 个全部被抓住；第 1 步全集 43 个、第 2 步全集 21 个在新代码上重跑，全部被抓住
+  （`ModelNotConfiguredError` 现在也被配置错误基类挡下，用例补了 `ModelProfileError` 以区分模型配置判定）。
+- **回归**：唤醒、发布层、观察、保留扫描、存储布局、快照与 skill_search 相关 89 个测试文件：2545 passed、1 skipped、
+  25 xfailed。code-size 与 origin/main 逐条比对新增 0。
+
 ## 唤醒毒丸与 error_code：9a 复审小改（2026-09-29，分支 `claude/75-wake-poison-design`，基于 `12a532f8b`）
 
 - **error_code**：

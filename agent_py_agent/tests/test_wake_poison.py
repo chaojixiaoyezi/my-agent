@@ -12,6 +12,8 @@ import pytest
 
 from agent_py_agent.agent.backends.errors import (
     ModelNotConfiguredError,
+    ProviderConfigurationError,
+    ProviderConnectionError,
     ProviderQuotaExhaustedError,
     ProviderRequestRejectedError,
     ProviderResponseError,
@@ -30,15 +32,22 @@ from agent_py_agent.agent.conversation.wake_poison import (
     WAKE_POISON_TOTAL_LIMIT,
     WAKE_REASON_CHANNEL_UNAVAILABLE,
     WAKE_REDELIVERY_GIVE_UP_SECONDS,
+    WAKE_UNCOUNTED_STALL_SECONDS,
+    WAKE_VERDICT_BATCH_FAILURE,
     WAKE_VERDICT_FAILURE,
+    WAKE_VERDICT_NEUTRAL,
     WAKE_VERDICT_REDELIVERY_FAILURE,
     WakeAttemptVerdict,
     WakePoisonState,
+    mark_stall_alerted,
+    needs_isolation,
     next_poison_state,
     poison_backoff_seconds,
     quarantine_decision,
     redelivery_backoff_seconds,
+    stall_alert,
     verdict_for_admission,
+    verdict_for_batch,
     verdict_for_error,
     verdict_for_missing_report,
     verdict_for_report,
@@ -48,6 +57,7 @@ from agent_py_agent.agent.runtime_db.operations import (
     RuntimeRecoveryRequiredError,
 )
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
+from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
 
 
 def _failure(code: str) -> WakeAttemptVerdict:
@@ -76,7 +86,7 @@ EXPECTED_WAITS = ("turn_interrupted", "terminal_task_link", "authority_recovery_
 class TestAdmission:
     @pytest.mark.parametrize("admission", EXPECTED_WAITS)
     def test_expected_waits_are_not_counted(self, admission):
-        assert verdict_for_admission(admission) == WAKE_ATTEMPT_NEUTRAL
+        assert verdict_for_admission(admission) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, f"admission:{admission}")
 
     def test_expected_wait_set_is_exactly_the_contract(self):
         assert frozenset(EXPECTED_WAITS) == WAKE_EXPECTED_WAIT_ADMISSIONS
@@ -97,6 +107,7 @@ class TestError:
         ProviderTimeoutError("slow", stage="first_event"),
         ProviderQuotaExhaustedError("quota"),
         ModelNotConfiguredError(),
+        ModelProfileError("profile missing"),
         RuntimeExecutionBusyError("busy"),
         RuntimeRecoveryRequiredError("unknown run"),
         InterruptedError(),
@@ -109,7 +120,27 @@ class TestError:
         KeyboardInterrupt(),
     ], ids=lambda error: type(error).__name__)
     def test_transient_types_are_not_counted(self, error):
-        assert verdict_for_error(error) == WAKE_ATTEMPT_NEUTRAL
+        verdict = verdict_for_error(error)
+        assert verdict.kind == WAKE_VERDICT_NEUTRAL and verdict.reason_code.startswith("error:")
+
+    @pytest.mark.parametrize(("error", "reason"), [
+        (ProviderRequestRejectedError("expired key", status_code=401), "error:PROVIDER_REQUEST_REJECTED:http_401"),
+        (ProviderRequestRejectedError("forbidden", status_code=403), "error:PROVIDER_REQUEST_REJECTED:http_403"),
+        (ProviderRequestRejectedError("proxy auth", status_code=407), "error:PROVIDER_REQUEST_REJECTED:http_407"),
+        (ProviderConnectionError("dns"), "error:PROVIDER_CONNECTION_FAILED"),
+        (ProviderConfigurationError("bad endpoint"), "error:PROVIDER_CONFIGURATION_INVALID"),
+    ], ids=["401", "403", "407", "connection", "configuration"])
+    def test_environment_faults_are_not_counted(self, error, reason):
+        assert verdict_for_error(error) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, reason)
+
+    @pytest.mark.parametrize("status", [400, 413, 422])
+    def test_request_level_rejections_still_count_with_their_status(self, status):
+        error = ProviderRequestRejectedError("bad request", status_code=status)
+        assert verdict_for_error(error) == _failure(f"error:PROVIDER_REQUEST_REJECTED:http_{status}")
+
+    def test_base_exceptions_are_not_counted(self):
+        assert verdict_for_error(KeyboardInterrupt()) == WakeAttemptVerdict(
+            WAKE_VERDICT_NEUTRAL, "error:base_exception:KeyboardInterrupt")
 
     @pytest.mark.parametrize(("error", "code"), [
         (SkillSnapshotError("SKILL_TASK_BINDING_INVALID"), "error:SKILL_TASK_BINDING_INVALID"),
@@ -212,6 +243,73 @@ class TestStreak:
         assert quarantine_decision(state).reason_code == "attempt:abandoned"
 
 
+class TestBatchIsolation:
+    def test_only_single_member_failures_count(self):
+        failure = _failure("error:X")
+        assert verdict_for_batch(failure, 1) == failure
+        assert verdict_for_batch(failure, 3) == WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        for other in (WAKE_ATTEMPT_NEUTRAL, WAKE_ATTEMPT_SUCCESS):
+            assert verdict_for_batch(other, 3) == other
+
+    @pytest.mark.parametrize("size", [0, -1, True, 2.0])
+    def test_batch_size_must_be_a_positive_integer(self, size):
+        with pytest.raises(ValueError):
+            verdict_for_batch(_failure("error:X"), size)
+
+    def test_batch_failures_isolate_the_next_attempt_but_never_quarantine(self):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = next_poison_state(WakePoisonState(), batch, now=100.0)
+        assert (state.batch_failures, state.next_attempt_at, needs_isolation(state)) == (1, 130.0, True)
+        assert (state.same_cause_count, state.total_count) == (0, 0)
+        assert quarantine_decision(_feed([batch] * 50)) is None
+        assert needs_isolation(WakePoisonState()) is False
+
+    def test_isolated_failures_count_and_keep_isolating_until_success(self):
+        state = _feed([WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")]
+                      + [_failure("error:X")] * (WAKE_POISON_SAME_CAUSE_LIMIT - 1))
+        assert needs_isolation(state) and quarantine_decision(state) is None
+        assert quarantine_decision(next_poison_state(state, _failure("error:X"), now=9999.0)) is not None
+        assert needs_isolation(next_poison_state(state, WAKE_ATTEMPT_SUCCESS, now=9999.0)) is False
+
+
+class TestUncountedStall:
+    WAIT = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:PROVIDER_CONNECTION_FAILED")
+
+    def test_uncounted_run_tracks_count_start_and_latest_reason(self):
+        state = next_poison_state(WakePoisonState(), self.WAIT, now=100.0)
+        state = next_poison_state(state, WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "admission:turn_interrupted"), now=200.0)
+        assert (state.uncounted_count, state.uncounted_since, state.uncounted_reason_code) == (
+            2, 100.0, "admission:turn_interrupted")
+        assert (state.same_cause_count, state.total_count, state.next_attempt_at) == (0, 0, 0.0)
+
+    def test_alert_fires_at_the_window_and_then_every_window(self):
+        state = next_poison_state(WakePoisonState(), self.WAIT, now=0.0)
+        assert stall_alert(state, now=WAKE_UNCOUNTED_STALL_SECONDS - 1) is None
+        alert = stall_alert(state, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert alert is not None and alert.to_dict() == {
+            "reason_code": "error:PROVIDER_CONNECTION_FAILED", "uncounted_count": 1, "uncounted_since": 0.0,
+            "alert_number": 1}
+        state = mark_stall_alerted(state, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert stall_alert(state, now=2 * WAKE_UNCOUNTED_STALL_SECONDS - 1) is None
+        second = stall_alert(state, now=2 * WAKE_UNCOUNTED_STALL_SECONDS)
+        assert second is not None and second.alert_number == 2
+
+    def test_a_counted_failure_ends_the_run_and_its_alerts_but_other_kinds_do_not(self):
+        state = mark_stall_alerted(next_poison_state(WakePoisonState(), self.WAIT, now=0.0), now=5.0)
+        for kind in (WAKE_VERDICT_BATCH_FAILURE, WAKE_VERDICT_REDELIVERY_FAILURE):
+            kept = next_poison_state(state, WakeAttemptVerdict(kind, "x"), now=10.0)
+            assert (kept.uncounted_count, kept.stall_alerts) == (1, 1)
+        ended = next_poison_state(state, _failure("error:X"), now=10.0)
+        assert (ended.uncounted_count, ended.uncounted_since, ended.uncounted_reason_code,
+                ended.stall_alerts, ended.last_stall_alert_at) == (0, 0.0, "", 0, 0.0)
+
+    def test_the_alert_window_is_the_redelivery_window_of_24_hours(self):
+        assert WAKE_UNCOUNTED_STALL_SECONDS == WAKE_REDELIVERY_GIVE_UP_SECONDS == 24 * 3600
+
+    def test_uncounted_results_never_quarantine(self):
+        assert quarantine_decision(_feed([self.WAIT] * 500)) is None
+
+
 class TestBackoff:
     def test_counted_failures_back_off_30_60_120_240_then_cap(self):
         assert [poison_backoff_seconds(n) for n in range(0, 8)] == [0.0, 30.0, 60.0, 120.0, 240.0, 300.0, 300.0, 300.0]
@@ -289,8 +387,13 @@ class TestStateShape:
         {"first_failed_at": 3.0},
         {"redelivery_failures": 1, "first_redelivery_failed_at": 9.0, "last_redelivery_failed_at": 8.0},
         {"last_redelivery_failed_at": 2.0},
+        {"uncounted_reason_code": "error:X"},
+        {"stall_alerts": 1},
+        {"uncounted_count": 1, "uncounted_since": 5.0, "last_stall_alert_at": 6.0},
+        {"uncounted_count": 1, "uncounted_since": 5.0, "stall_alerts": 1, "last_stall_alert_at": 4.0},
     ], ids=["nan", "inf", "unknown-key", "same-over-total", "count-without-code", "code-without-count",
-            "first-after-last", "time-without-failure", "redelivery-first-after-last", "redelivery-time-without-failure"])
+            "first-after-last", "time-without-failure", "redelivery-first-after-last", "redelivery-time-without-failure",
+            "uncounted-reason-without-run", "alerts-without-run", "alert-time-without-alert", "alert-before-run"])
     def test_non_finite_unknown_or_contradictory_states_are_rejected(self, patch):
         with pytest.raises(ValueError):
             WakePoisonState.from_dict({**WakePoisonState().to_dict(), **patch})

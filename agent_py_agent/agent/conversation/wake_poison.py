@@ -1,8 +1,9 @@
-# LLM: 唤醒毒丸判定的纯函数层。把一次领取尝试的结构化结果归成"不计数 / 计数失败 / 只重投失败 / 成功"，
-#   维护同因连续段、总次数和两类退避，并判定是否结案。只读结构化事实：admission 码、异常类型与 error_code 属性、
-#   报告的 wake_handled 与"是否已有冻结交付"；不读错误文案或模型正文，不做 IO、不读配置。
-#   常量是防死循环的安全兜底，不进用户配置。未知 admission 与未知异常类型默认计数（宁可多等几轮后停下，
-#   也不无限重试）；瞬时类只按类型排除。改动时联查 docs/design/WAKE_POISON_PILL.md、尝试账存储与 test_wake_poison。
+# LLM: 唤醒毒丸判定的纯函数层。把一次领取尝试的结构化结果归成"不计数 / 计数失败 / 批次失败 / 只重投失败 / 成功"，
+#   维护同因连续段、总次数、批次隔离、连续不计数段和两类退避，并判定是否结案、是否该发"长时间不计数"提醒。
+#   只读结构化事实：admission 码、异常类型与 error_code / status_code 属性、报告的 wake_handled 与"是否已有冻结交付"、
+#   批大小；不读错误文案或模型正文，不做 IO、不读配置。常量是防死循环的安全兜底，不进用户配置。
+#   未知 admission 与未知异常类型默认计数（宁可多等几轮后停下，也不无限重试）；瞬时类与环境级故障只按类型或
+#   结构化状态码排除，交给车道级等待。改动时联查 docs/design/WAKE_POISON_PILL.md、store_wake_attempts 与 test_wake_poison。
 # 模块用途: 判断同一条后台唤醒是否在以同一原因反复失败，给出下次最早可再试的时间，以及何时该结案不再领取。
 from __future__ import annotations
 
@@ -18,19 +19,24 @@ WAKE_POISON_SAME_CAUSE_LIMIT = 5
 # 不要求同因的总上限：防止两个原因交替出现、逃过连续判定。
 WAKE_POISON_TOTAL_LIMIT = 12
 # 计数失败后的退避：第 k 次后等 min(30·2^(k−1), 300) 秒，同因 5 次从首次失败到结案约 7.5 分钟。
+# 批次失败后也按基础间隔 30 秒再试，下一次逐条单独执行。
 WAKE_POISON_BACKOFF_BASE_SECONDS = 30.0
 WAKE_POISON_BACKOFF_MAX_SECONDS = 300.0
 # 只重投路径（已有冻结交付、不调模型）单独退避：便宜但不能无限循环；封顶 15 分钟，渠道恢复后最多再等 15 分钟。
 WAKE_REDELIVERY_BACKOFF_BASE_SECONDS = 30.0
 WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0
-# 从第一次重投失败起超过 24 小时仍送不出去就结案；足够覆盖一次渠道长时间故障或人工处理。
+# 从第一次重投失败起满 24 小时（>=）仍送不出去就结案；足够覆盖一次渠道长时间故障或人工处理。
 WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0
+# 连续不计数满这么久（与只重投路径同一个窗口）就发一次运维提醒，之后每隔同样时长再提醒；不自动结案，
+# 因为这些结果按定义属于预期等待、瞬时或环境故障，长时间故障里自动结案会误伤健康的工作。
+WAKE_UNCOUNTED_STALL_SECONDS = 86400.0
 
 # 唤醒结案后的终态：不再被领取，只能人工重放；发布层把它当作与 pending/handled 并列的状态。
 WAKE_STATUS_FAILED_PERMANENTLY = "failed_permanently"
 
 WAKE_VERDICT_NEUTRAL = "neutral"
 WAKE_VERDICT_FAILURE = "failure"
+WAKE_VERDICT_BATCH_FAILURE = "batch_failure"
 WAKE_VERDICT_REDELIVERY_FAILURE = "redelivery_failure"
 WAKE_VERDICT_SUCCESS = "success"
 
@@ -48,11 +54,15 @@ WAKE_EXPECTED_WAIT_ADMISSIONS = frozenset({
     "wake_source_not_pending",
     "wake_source_changed",
 })
+# 环境级故障的 HTTP 状态：401 未授权、403 拒绝、407 代理需要鉴权。密钥过期、代理鉴权失败不是某条唤醒有毒，
+# 不计数；400/413/422 这类请求本身的问题照样计数。
+_ENVIRONMENT_HTTP_STATUSES = frozenset({401, 403, 407})
 # SQLite 主结果码 SQLITE_BUSY=5、SQLITE_LOCKED=6（扩展码的低 8 位）；锁冲突属于瞬时类。
 _SQLITE_LOCK_PRIMARY_CODES = frozenset({5, 6})
 
 
-# LLM: kind 取 WAKE_VERDICT_* 之一；reason_code 只在计数失败与只重投失败时非空，是跨尝试比较"是否同因"的唯一依据。
+# LLM: kind 取 WAKE_VERDICT_* 之一；reason_code 是结构化原因，计数失败时是比较"是否同因"的唯一依据，
+#   不计数时只用于长时间不计数的提醒。
 # 类用途: 一次领取尝试的结构化判定结果。
 @dataclass(frozen=True)
 class WakeAttemptVerdict:
@@ -65,8 +75,10 @@ WAKE_ATTEMPT_SUCCESS = WakeAttemptVerdict(WAKE_VERDICT_SUCCESS)
 WAKE_ATTEMPT_ABANDONED = WakeAttemptVerdict(WAKE_VERDICT_FAILURE, WAKE_REASON_ATTEMPT_ABANDONED)
 
 
-# LLM: 持久尝试账里的判定状态；字段全为结构化计数与时间戳，from_dict 严格校验类型，坏值抛 ValueError 交存储层转数据损坏。
-# 类用途: 保存一条唤醒的同因连续段、总失败次数、只重投失败次数和下次最早可再试的时间。
+# LLM: 持久尝试账里的判定状态；字段全为结构化计数、原因码与时间戳，from_dict 严格校验类型与一致性，
+#   坏值抛 ValueError 交存储层转数据损坏。batch_failures>0 表示下一次必须逐条单独执行；uncounted_* 描述当前
+#   连续不计数段，stall_* 记录这一段已经发过几次提醒。
+# 类用途: 保存一条唤醒的同因连续段、总失败次数、批次隔离、连续不计数段、只重投失败和下次最早可再试的时间。
 @dataclass(frozen=True)
 class WakePoisonState:
     reason_code: str = ""
@@ -74,6 +86,12 @@ class WakePoisonState:
     total_count: int = 0
     first_failed_at: float = 0.0
     last_failed_at: float = 0.0
+    batch_failures: int = 0
+    uncounted_reason_code: str = ""
+    uncounted_count: int = 0
+    uncounted_since: float = 0.0
+    stall_alerts: int = 0
+    last_stall_alert_at: float = 0.0
     redelivery_failures: int = 0
     first_redelivery_failed_at: float = 0.0
     last_redelivery_failed_at: float = 0.0
@@ -85,7 +103,7 @@ class WakePoisonState:
         return asdict(self)
 
     # LLM: 只接受本类字段，未知键按数据损坏处理；计数必须是非负 int（bool 不算），时间必须是有限的非负数，
-    #   reason_code 必须是字符串；再核计数与时间之间的一致性（_check_consistency），矛盾同样抛 ValueError。
+    #   原因码必须是字符串；再核计数与时间之间的一致性（_check_consistency），矛盾同样抛 ValueError。
     # 函数用途: 从尝试账读回状态，形状不对或自相矛盾时抛 ValueError。
     @classmethod
     def from_dict(cls, data: object) -> WakePoisonState:
@@ -117,31 +135,40 @@ class QuarantineDecision:
         return asdict(self)
 
 
-# LLM: admission 必须非空；预期等待类不计数，其它任何码计为 admission:<码>，不需要登记新码。
+# LLM: 只描述当前连续不计数段：原因码是最近一次不计数的原因，alert_number 从 1 开始；不含错误消息或正文。
+# 类用途: 表示一条唤醒连续不计数已满提醒窗口、需要发运维事件和宿主提示。
+@dataclass(frozen=True)
+class WakeStallAlert:
+    reason_code: str
+    uncounted_count: int
+    uncounted_since: float
+    alert_number: int
+
+    # LLM: 运维事件与宿主提示只读这些结构化字段。
+    # 函数用途: 转成普通字典。
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+# LLM: admission 必须非空；预期等待类不计数（带 admission:<码> 供提醒使用），其它任何码计为 admission:<码>，不需要登记新码。
 # 函数用途: 判定"领到租约但没执行"这次尝试。
 def verdict_for_admission(admission: str) -> WakeAttemptVerdict:
     code = str(admission or "").strip()
     if not code:
         raise ValueError("admission code is required")
-    if code in WAKE_EXPECTED_WAIT_ADMISSIONS:
-        return WAKE_ATTEMPT_NEUTRAL
-    return WakeAttemptVerdict(WAKE_VERDICT_FAILURE, f"admission:{code}")
+    kind = WAKE_VERDICT_NEUTRAL if code in WAKE_EXPECTED_WAIT_ADMISSIONS else WAKE_VERDICT_FAILURE
+    return WakeAttemptVerdict(kind, f"admission:{code}")
 
 
-# LLM: 瞬时类只按类型排除；其余异常计数，优先用结构化 error_code 属性（须通过 is_structured_error_code，
-#   空白、小写或带明细的都不算），否则用 runtime_error_report 的 category 加异常类名。绝不读异常消息。
-#   非 Exception 的 BaseException（进程退出、键盘中断）不计数，进程中途死亡由尝试账的 in_flight 标记另行识别。
+# LLM: 瞬时类与环境级故障只按类型或结构化状态码排除（_is_uncounted），其余异常计数；原因码见 _error_reason_code，
+#   绝不读异常消息。非 Exception 的 BaseException（进程退出、键盘中断）不计数，进程中途死亡由尝试账的
+#   in_flight 标记另行识别。
 # 函数用途: 判定"执行中抛异常"这次尝试。
 def verdict_for_error(error: BaseException) -> WakeAttemptVerdict:
-    if not isinstance(error, Exception) or _is_transient(error):
-        return WAKE_ATTEMPT_NEUTRAL
-    code = getattr(error, "error_code", "")
-    if isinstance(code, str) and is_structured_error_code(code.strip()):
-        return WakeAttemptVerdict(WAKE_VERDICT_FAILURE, f"error:{code.strip()}")
-    from ..runtime_errors import runtime_error_report
-
-    category = str(runtime_error_report(error).get("category") or "unknown")
-    return WakeAttemptVerdict(WAKE_VERDICT_FAILURE, f"error:{category}:{type(error).__name__}")
+    if not isinstance(error, Exception):
+        return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, f"error:base_exception:{type(error).__name__}")
+    kind = WAKE_VERDICT_NEUTRAL if _is_uncounted(error) else WAKE_VERDICT_FAILURE
+    return WakeAttemptVerdict(kind, _error_reason_code(error))
 
 
 # LLM: report 必须是真实报告对象（None 抛 ValueError）；"确实执行了、却没出报告"走 verdict_for_missing_report，
@@ -164,29 +191,57 @@ def verdict_for_missing_report() -> WakeAttemptVerdict:
     return WakeAttemptVerdict(WAKE_VERDICT_FAILURE, WAKE_REASON_RUN_NO_REPORT)
 
 
-# LLM: 成功清空；不计数的结果原样返回（既不累加也不打断连续段）；计数失败换了原因就从 1 重新计，总次数照加；
-#   只重投失败只动重投字段。next_attempt_at 按本次结果的退避重算。未知 kind 抛 ValueError，不静默当成不计数。
+# LLM: 批次隔离（消息队列隔离毒消息的常规做法）：一次尝试同时执行了多条唤醒（batch_size>1）时，计数失败改记为
+#   批次失败——不计入任何成员的同因与总次数，只让下一次逐条单独执行；只有批大小为 1 的失败才计数。
+#   其它 kind 原样返回。batch_size 小于 1 是调用方缺陷，抛 ValueError。
+# 函数用途: 按本次尝试的批大小改写判定，避免一条有毒的内容拖着同批健康成员一起结案。
+def verdict_for_batch(verdict: WakeAttemptVerdict, batch_size: int) -> WakeAttemptVerdict:
+    if type(batch_size) is not int or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
+    if batch_size > 1 and verdict.kind == WAKE_VERDICT_FAILURE:
+        return WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, verdict.reason_code)
+    return verdict
+
+
+# LLM: 成功清空全部；计数失败推进同因与总次数并结束当前不计数段；不计数推进连续不计数段（既不累加失败，也不打断
+#   同因连续段）；批次失败只推进 batch_failures；只重投失败只动重投字段。next_attempt_at 按本次结果的退避重算
+#   （不计数保持原值）。未知 kind 抛 ValueError，不静默当成不计数。
 # 函数用途: 按一次尝试的判定推进状态，不修改传入对象。
 def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, now: float) -> WakePoisonState:
     if verdict.kind == WAKE_VERDICT_SUCCESS:
         return WakePoisonState()
     if verdict.kind == WAKE_VERDICT_FAILURE:
-        same = state.same_cause_count + 1 if verdict.reason_code == state.reason_code else 1
-        total = state.total_count + 1
-        return replace(state, reason_code=verdict.reason_code, same_cause_count=same, total_count=total,
-                       first_failed_at=now if state.total_count == 0 else state.first_failed_at, last_failed_at=now,
-                       next_attempt_at=now + poison_backoff_seconds(total))
+        return _after_failure(state, verdict.reason_code, now)
+    if verdict.kind == WAKE_VERDICT_NEUTRAL:
+        return replace(state, uncounted_reason_code=verdict.reason_code or state.uncounted_reason_code,
+                       uncounted_count=state.uncounted_count + 1,
+                       uncounted_since=now if state.uncounted_count == 0 else state.uncounted_since)
+    if verdict.kind == WAKE_VERDICT_BATCH_FAILURE:
+        return replace(state, batch_failures=state.batch_failures + 1,
+                       next_attempt_at=now + WAKE_POISON_BACKOFF_BASE_SECONDS)
     if verdict.kind == WAKE_VERDICT_REDELIVERY_FAILURE:
         failures = state.redelivery_failures + 1
         return replace(state, redelivery_failures=failures,
                        first_redelivery_failed_at=now if state.redelivery_failures == 0 else state.first_redelivery_failed_at,
                        last_redelivery_failed_at=now, next_attempt_at=now + redelivery_backoff_seconds(failures))
-    if verdict.kind == WAKE_VERDICT_NEUTRAL:
-        return state
     raise ValueError(f"unknown wake attempt verdict kind: {verdict.kind!r}")
 
 
-# LLM: 判定顺序固定：同因达上限 → 总次数达上限（标 mixed_causes）→ 只重投失败跨度满 24 小时；都不满足返回 None。
+# LLM: 同因比较只看 reason_code；换了原因从 1 重新计，总次数照加；首次失败时间只在第一次失败时写入。
+#   计数失败说明这条唤醒不再处于"连续不计数"，不计数段与它的提醒记录一起清零；batch_failures 保留，
+#   直到成功为止都继续逐条单独执行。
+# 函数用途: 计算一次计数失败之后的状态。
+def _after_failure(state: WakePoisonState, reason_code: str, now: float) -> WakePoisonState:
+    same = state.same_cause_count + 1 if reason_code == state.reason_code else 1
+    total = state.total_count + 1
+    return replace(state, reason_code=reason_code, same_cause_count=same, total_count=total,
+                   first_failed_at=now if state.total_count == 0 else state.first_failed_at, last_failed_at=now,
+                   uncounted_reason_code="", uncounted_count=0, uncounted_since=0.0, stall_alerts=0,
+                   last_stall_alert_at=0.0, next_attempt_at=now + poison_backoff_seconds(total))
+
+
+# LLM: 判定顺序固定：同因达上限 → 总次数达上限（标 mixed_causes）→ 只重投失败跨度满 24 小时（>=）；都不满足返回 None。
+#   批次失败与不计数结果永远不会触发结案。
 # 函数用途: 判断当前状态是否应当结案。
 def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
     if state.same_cause_count >= WAKE_POISON_SAME_CAUSE_LIMIT:
@@ -197,6 +252,30 @@ def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
             state.last_redelivery_failed_at - state.first_redelivery_failed_at >= WAKE_REDELIVERY_GIVE_UP_SECONDS):
         return _decision(state, WAKE_REASON_CHANNEL_UNAVAILABLE, mixed_causes=False)
     return None
+
+
+# LLM: 连续不计数段满窗口（>=）且这一段还没提醒过，或距上次提醒又满一个窗口时返回提醒；否则返回 None。
+#   只判定不写状态，调用方发出提醒后必须用 mark_stall_alerted 记账，否则会重复提醒。
+# 函数用途: 判断一条唤醒是否该发"长时间不计数"的运维提醒。
+def stall_alert(state: WakePoisonState, *, now: float) -> WakeStallAlert | None:
+    if state.uncounted_count == 0 or now - state.uncounted_since < WAKE_UNCOUNTED_STALL_SECONDS:
+        return None
+    if state.stall_alerts and now - state.last_stall_alert_at < WAKE_UNCOUNTED_STALL_SECONDS:
+        return None
+    return WakeStallAlert(reason_code=state.uncounted_reason_code, uncounted_count=state.uncounted_count,
+                          uncounted_since=state.uncounted_since, alert_number=state.stall_alerts + 1)
+
+
+# LLM: 与 stall_alert 成对使用；只动提醒计数与时间，不改变不计数段本身。
+# 函数用途: 记下已经为当前不计数段发过一次提醒。
+def mark_stall_alerted(state: WakePoisonState, *, now: float) -> WakePoisonState:
+    return replace(state, stall_alerts=state.stall_alerts + 1, last_stall_alert_at=now)
+
+
+# LLM: 批次失败后直到成功为止都逐条单独执行；调度层据此拆批。
+# 函数用途: 判断这条唤醒下一次是否必须单独执行。
+def needs_isolation(state: WakePoisonState) -> bool:
+    return state.batch_failures > 0
 
 
 # LLM: n 是计数失败的总次数（不是同因次数），原因交替时退避照样增长；常量改动要同步设计文档第 5 节。
@@ -227,8 +306,45 @@ def _decision(state: WakePoisonState, reason_code: str, *, mixed_causes: bool) -
                               mixed_causes=mixed_causes)
 
 
-# LLM: 只按类型判定：供应瞬时（含限流）、供应超时、额度耗尽、模型配置暂缺、运行库冲突全族（含锁冲突与待恢复）、
-#   取消与压缩让出、本地 IO 的阻塞与超时、SQLite 忙或锁。新增瞬时类型要在这里显式加，不能靠消息匹配。
+# LLM: 优先用结构化 error_code 属性（须通过 is_structured_error_code，空白、小写或带明细的都不算），否则用
+#   runtime_error_report 的 category 加异常类名；有结构化 HTTP 状态（provider_error_http_status）时再追加
+#   :http_<状态>，让 400 与 413 这类不同的请求问题分成不同原因。绝不读异常消息。
+# 函数用途: 为一个异常生成结构化原因码。
+def _error_reason_code(error: Exception) -> str:
+    from ..backends.errors import provider_error_http_status
+    from ..runtime_errors import runtime_error_report
+
+    code = getattr(error, "error_code", "")
+    if isinstance(code, str) and is_structured_error_code(code.strip()):
+        reason = f"error:{code.strip()}"
+    else:
+        reason = f"error:{runtime_error_report(error).get('category') or 'unknown'}:{type(error).__name__}"
+    status = provider_error_http_status(error)
+    return f"{reason}:http_{status}" if status is not None else reason
+
+
+# LLM: 不计数 = 瞬时类或环境级故障，只按类型或结构化状态码判定：
+#   瞬时——供应瞬时（含限流）、供应超时、额度耗尽、模型配置暂缺、运行库冲突全族（含锁冲突与待恢复）、
+#   取消与压缩让出、本地 IO 的阻塞与超时、SQLite 忙或锁；
+#   环境级——HTTP 401/403/407，以及 ProviderConfigurationError 基类（含 ProviderConnectionError），但请求被拒
+#   （ProviderRequestRejectedError）且不是 401/403/407 时属于请求本身的问题，照样计数。
+#   新增类型要在这里显式加，不能靠消息匹配。
+# 函数用途: 判断一个异常是否属于不计数的瞬时类或环境级故障。
+def _is_uncounted(error: Exception) -> bool:
+    from ..backends.errors import (
+        ProviderConfigurationError,
+        ProviderRequestRejectedError,
+        provider_error_http_status,
+    )
+
+    if provider_error_http_status(error) in _ENVIRONMENT_HTTP_STATUSES:
+        return True
+    if isinstance(error, ProviderConfigurationError) and not isinstance(error, ProviderRequestRejectedError):
+        return True
+    return _is_transient(error)
+
+
+# LLM: 瞬时类型清单；与 _is_uncounted 的环境级判定分开，便于逐项测试。
 # 函数用途: 判断一个异常是否属于不计数的瞬时类。
 def _is_transient(error: Exception) -> bool:
     from ..backends.errors import (
@@ -274,7 +390,8 @@ def _checked_field(name: str, value: object, default: object) -> object:
 
 
 # LLM: 计数与时间必须互相吻合：同因不超过总数，原因码与同因次数同时为空或同时非空，
-#   没有失败时失败时间为 0、有失败时首次不晚于最近一次；只重投字段同理。任何矛盾都按数据损坏处理。
+#   没有失败时失败时间为 0、有失败时首次不晚于最近一次；只重投字段同理；没有不计数段时它的原因码、起点和提醒
+#   记录都为空；有提醒时最近一次提醒不早于段起点。任何矛盾都按数据损坏处理。
 # 函数用途: 校验一份状态内部是否自洽，不自洽抛 ValueError。
 def _check_consistency(state: WakePoisonState) -> None:
     problems = [
@@ -282,6 +399,7 @@ def _check_consistency(state: WakePoisonState) -> None:
         (state.reason_code == "") != (state.same_cause_count == 0),
         _window_broken(state.total_count, state.first_failed_at, state.last_failed_at),
         _window_broken(state.redelivery_failures, state.first_redelivery_failed_at, state.last_redelivery_failed_at),
+        _uncounted_broken(state),
     ]
     if any(problems):
         raise ValueError("wake poison state counts and timestamps contradict each other")
@@ -293,35 +411,53 @@ def _window_broken(count: int, first: float, last: float) -> bool:
     return (first, last) != (0.0, 0.0) if count == 0 else first > last
 
 
+# LLM: 不计数段为空时原因码、起点、提醒次数与时间都必须为空；提醒次数为 0 时提醒时间为 0，否则提醒不早于段起点。
+# 函数用途: 判断连续不计数段与提醒记录是否矛盾。
+def _uncounted_broken(state: WakePoisonState) -> bool:
+    if state.uncounted_count == 0:
+        return (state.uncounted_reason_code, state.uncounted_since, state.stall_alerts, state.last_stall_alert_at) != (
+            "", 0.0, 0, 0.0)
+    if state.stall_alerts == 0:
+        return state.last_stall_alert_at != 0.0
+    return state.last_stall_alert_at < state.uncounted_since
+
+
 __all__ = [
     "WAKE_ATTEMPT_ABANDONED",
-    "WAKE_EXPECTED_WAIT_ADMISSIONS",
     "WAKE_ATTEMPT_NEUTRAL",
-    "WAKE_REASON_ATTEMPT_ABANDONED",
-    "WAKE_REASON_CHANNEL_UNAVAILABLE",
-    "WAKE_REASON_DELIVERY_NOT_COMMITTED",
-    "WAKE_REASON_RUN_NO_REPORT",
     "WAKE_ATTEMPT_SUCCESS",
-    "WAKE_VERDICT_FAILURE",
-    "WAKE_VERDICT_NEUTRAL",
-    "WAKE_VERDICT_REDELIVERY_FAILURE",
-    "WAKE_VERDICT_SUCCESS",
+    "WAKE_EXPECTED_WAIT_ADMISSIONS",
     "WAKE_POISON_BACKOFF_BASE_SECONDS",
     "WAKE_POISON_BACKOFF_MAX_SECONDS",
     "WAKE_POISON_SAME_CAUSE_LIMIT",
     "WAKE_POISON_TOTAL_LIMIT",
+    "WAKE_REASON_ATTEMPT_ABANDONED",
+    "WAKE_REASON_CHANNEL_UNAVAILABLE",
+    "WAKE_REASON_DELIVERY_NOT_COMMITTED",
+    "WAKE_REASON_RUN_NO_REPORT",
     "WAKE_REDELIVERY_BACKOFF_BASE_SECONDS",
     "WAKE_REDELIVERY_BACKOFF_MAX_SECONDS",
     "WAKE_REDELIVERY_GIVE_UP_SECONDS",
     "WAKE_STATUS_FAILED_PERMANENTLY",
+    "WAKE_UNCOUNTED_STALL_SECONDS",
+    "WAKE_VERDICT_BATCH_FAILURE",
+    "WAKE_VERDICT_FAILURE",
+    "WAKE_VERDICT_NEUTRAL",
+    "WAKE_VERDICT_REDELIVERY_FAILURE",
+    "WAKE_VERDICT_SUCCESS",
     "QuarantineDecision",
     "WakeAttemptVerdict",
     "WakePoisonState",
+    "WakeStallAlert",
+    "mark_stall_alerted",
+    "needs_isolation",
     "next_poison_state",
     "poison_backoff_seconds",
     "quarantine_decision",
     "redelivery_backoff_seconds",
+    "stall_alert",
     "verdict_for_admission",
+    "verdict_for_batch",
     "verdict_for_error",
     "verdict_for_missing_report",
     "verdict_for_report",
