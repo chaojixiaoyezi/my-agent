@@ -11,6 +11,8 @@
 4. 非管理员、执行树里还有未结束的 attempt、不是 waiting 的定时执行、任务已不是 active、运行库不可读，一律拒绝且不改任何状态。
 5. 核对之后任务被别的路径改了状态时，确认结束不覆盖（expected_status CAS）。
 6. Gateway 分派按 scope 解析 owner；TUI 转发文本与本地模式拒绝与 /recover 同一套约定。
+7. 列表与预览附后续工作事实码（存在的事实码、读不出的“项目:错误码”、没有为“无”），来自 owner 的
+   scheduler_service.follow_up——与定时执行收口同一个判定，不另写一套。
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service, end_task_control
 from agent_py_agent.agent.gateway_parts.end_task_control import execute_end_task_control
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+from agent_py_agent.agent.scheduler.active_run_closeout import SchedulerFollowUpPolicy
 from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.chat_parts import control_runtime
@@ -103,6 +106,57 @@ def test_list_and_preview_are_read_only_and_show_structured_facts(tmp_path):
     assert "不会停止它启动的后台命令" in preview.message, "预览要如实交代不停后台命令的副作用"
     assert "定时整理" not in listing.message + preview.message, "只渲染结构化事实，不带任务正文"
     assert _state(agent, run_id) == ("active", "waiting")
+
+
+def test_list_and_preview_show_follow_up_fact_codes(tmp_path):
+    agent, run_id, _record = _stuck_scheduled_task(tmp_path)
+    thread_id = str(agent.scheduler_repository.get_active_run(run_id)["thread_id"])
+
+    quiet_list = execute_end_task_control(agent, parse_conversation_control("/endtask"))
+    quiet_view = execute_end_task_control(agent, parse_conversation_control(f"/endtask {run_id}"))
+    assert "｜可结束｜后续工作 无" in quiet_list.message and "后续工作事实：无。" in quiet_view.message
+
+    agent.conversation_store.wakes.raise_signal({"thread_id": thread_id, "root_task_id": run_id,
+                                                 "reason": "managed_process_exited", "now": 1_004})
+    listing = execute_end_task_control(agent, parse_conversation_control("/endtask"))
+    preview = execute_end_task_control(agent, parse_conversation_control(f"/endtask {run_id}"))
+    assert "｜可结束｜后续工作 pending_wakes" in listing.message
+    assert "后续工作事实：pending_wakes。" in preview.message
+    assert "定时整理" not in listing.message + preview.message, "只显示事实码，不带任务正文"
+    assert _state(agent, run_id) == ("active", "waiting")
+
+
+def test_unreadable_follow_up_items_show_their_codes(tmp_path):
+    agent, run_id, _record = _stuck_scheduled_task(tmp_path)
+    broken = agent.conversation_store.storage.wake_queue_dir / "normal" / "wake-broken.json"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{truncated", encoding="utf-8")
+
+    preview = execute_end_task_control(agent, parse_conversation_control(f"/endtask {run_id}"))
+    listing = execute_end_task_control(agent, parse_conversation_control("/endtask"))
+
+    assert "后续工作事实：无；读不出 pending_wakes:data_parse:JSONDecodeError。" in preview.message
+    assert "｜后续工作 无；读不出 pending_wakes:data_parse:JSONDecodeError" in listing.message
+
+
+def test_follow_up_comes_from_the_injected_scheduler_policy(tmp_path, monkeypatch):
+    agent, run_id, _record = _stuck_scheduled_task(tmp_path)
+    thread_id = str(agent.scheduler_repository.get_active_run(run_id)["thread_id"])
+    policy = agent.scheduler_service.follow_up
+    seen = []
+
+    # 函数用途: 记下 /endtask 交给调度判定的查询，再转给原判定，证明两边用的是同一个注入的策略。
+    def spy(query):
+        seen.append(query)
+        return policy.facts(query)
+
+    monkeypatch.setattr(agent.scheduler_service, "follow_up", SchedulerFollowUpPolicy(spy, policy.grace_seconds))
+    execute_end_task_control(agent, parse_conversation_control(f"/endtask {run_id}"))
+    assert [(query.thread_id, query.task_id, query.ignore_wake_ids) for query in seen] == [(thread_id, run_id, ())]
+
+    monkeypatch.setattr(agent.scheduler_service, "follow_up", None)
+    listing = execute_end_task_control(agent, parse_conversation_control("/endtask"))
+    assert "｜可结束｜后续工作 判定不可用" in listing.message
 
 
 def test_confirm_ends_the_task_and_unblocks_the_job(tmp_path):

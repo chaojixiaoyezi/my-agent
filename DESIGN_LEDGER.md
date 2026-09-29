@@ -140,7 +140,9 @@
   才进 waiting；工作片以“结果未知”停下且没有后续工作时，任务应进入结构化的阻塞终态、定时运行记失败，让 job 继续。
 - 收口后运行库里这次执行的 AgentRun / TaskRun 仍是未关闭状态（attempt 已结束），不影响后续派发；唤醒发现只在代理树终结后才补关。
 - 结束任务不停止它启动的受管后台命令，命令结束后的完成通知会落到已取消的任务上；预览和确认结果固定写明这一点（9a 复审）。
-  0b04e6fbe 合入后，列表和预览复用 `task_follow_up_facts` 列出后续工作事实码，让管理员看到它为什么还在等（合入那批时必须补）。
+  列表和预览附后续工作事实码（已补，2026-09-29，分支 `claude/be-endtask-follow-up-facts`，基于 `e850ceb04`）：直接调 owner 的
+  `scheduler_service.follow_up`（与定时执行收口同一个 `SchedulerFollowUpPolicy`），按 `FollowUpQuery(会话, 任务)` 取
+  `FollowUpFacts(present, unreadable)`，只显示事实码，读不出的写“项目:错误码”，没有写“无”，判定未注入写“判定不可用”。
 - 从核对 attempt 到做 CAS 之间，可能有唤醒新起一个 attempt（9a 记录，不挡合并）；确认前后都只认结构化事实，CAS 仍只在 active 时改。
 - 设计细节见 [CLI 参考](CLI_REFERENCE.md) 的 `/endtask` 说明。
 

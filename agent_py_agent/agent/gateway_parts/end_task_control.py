@@ -1,6 +1,7 @@
 # LLM: /endtask 只在已认证 scope 解析出的本机管理员 owner 上执行，只处理“定时执行 waiting、会话任务 active、执行树没有未结束 attempt”的任务。
 #   列表与预览只读；只有 confirm 才写：会话任务按 expected_status=active 改为 cancelled，再对同一任务调 reconcile_waiting_run。
 #   不读任务正文、不改运行库、不重做未确认的操作，也不停它启动的后台命令（预览与结果如实交代）；错误码都登记在 ERROR_CONTRACTS。
+#   列表与预览附“后续工作事实码”，直接调 owner 的 scheduler_service.follow_up（与定时执行收口同一个判定），不另写一套。
 #   改动须同步 test_end_task_control.py 与 CLI_REFERENCE.md 的 /endtask 说明。
 # 模块用途: 让管理员在 TUI 或飞书里查看并结束卡在等待中的定时会话任务（结果未知后定时层永远在等的那种），解开被它堵住的定时任务。
 from __future__ import annotations
@@ -9,6 +10,7 @@ import time
 from dataclasses import dataclass
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
+from ..conversation.task_follow_up import FollowUpQuery
 from ..runtime_db.operations import attempt_status_is_terminal
 from ..user_space.approval_mode import is_permission_admin
 
@@ -73,7 +75,7 @@ def execute_end_task_control(
         code, template = _REFUSALS[facts.refusal]
         return ConversationControlResult(_KIND, False, _refusal_text(template, facts), error_code=code)
     if command.operation != "apply":
-        return ConversationControlResult(_KIND, True, _render_plan(facts))
+        return ConversationControlResult(_KIND, True, _render_plan(facts, _follow_up_text(owner_agent, facts)))
     return _end_task(owner_agent, facts)
 
 
@@ -159,35 +161,52 @@ def _refusal_text(template: str, facts: _EndTaskFacts) -> str:
     )
 
 
-# LLM: 只渲染结构化字段（任务 ID、会话 ID、等待起点），不含任务正文，可以安全投到 IM；固定交代不停后台命令的副作用。
-# 函数用途: 生成 /endtask <任务ID> 的只读预览：说明确认后会做什么，以及确认命令。
-def _render_plan(facts: _EndTaskFacts) -> str:
+# LLM: 只渲染结构化字段（任务 ID、会话 ID、等待起点、后续工作事实码），不含任务正文，可以安全投到 IM；
+#   固定交代不停后台命令的副作用。follow_up 由 _follow_up_text 生成。
+# 函数用途: 生成 /endtask <任务ID> 的只读预览：说明它为什么还在等、确认后会做什么，以及确认命令。
+def _render_plan(facts: _EndTaskFacts, follow_up: str) -> str:
     return "\n".join((
         f"定时会话任务 {facts.task_id}（会话 {facts.thread_id}）自 {_clock(facts.waiting_since)} 起停在等待；"
         "会话任务仍是 active，执行树里没有还在跑的执行。",
+        f"后续工作事实：{follow_up}。",
         "确认结束后：会话任务记为 cancelled，它堵住的定时执行随即结算，定时任务按计划起新一轮运行；未确认的操作不会被重做。",
         _BACKGROUND_NOTE,
         f"确认请发：/endtask {facts.task_id} confirm",
     ))
 
 
-# LLM: 候选只来自定时账本里 waiting 的运行，逐条补会话任务状态与执行树事实；最多列 _CANDIDATE_LIMIT 条，账本坏行只计数。
+# LLM: 候选只来自定时账本里 waiting 的运行，逐条补会话任务状态、执行树事实与后续工作事实码；最多列 _CANDIDATE_LIMIT 条，
+#   账本坏行只计数。
 # 函数用途: 生成 /endtask 无参数时的候选清单，标出哪些可以结束、哪些为什么不行。
 def _render_candidates(owner_agent: object) -> str:
     runs, errors = owner_agent.scheduler_repository.waiting_runs()
-    lines = [_candidate_line(_task_facts(owner_agent, str(run.get("run_id") or ""))) for run in runs[:_CANDIDATE_LIMIT]]
+    candidates = [_task_facts(owner_agent, str(run.get("run_id") or "")) for run in runs[:_CANDIDATE_LIMIT]]
+    lines = [_candidate_line(facts, _follow_up_text(owner_agent, facts)) for facts in candidates]
     if not lines:
         return "没有等待中的定时执行。" + (f"（定时账本有 {len(errors)} 条无法解析的记录）" if errors else "")
     head = f"等待中的定时执行 {len(runs)} 条" + (f"，只列前 {_CANDIDATE_LIMIT} 条" if len(runs) > _CANDIDATE_LIMIT else "") + "："
     return "\n".join([head, *lines, "预览：/endtask <任务ID>；结束：/endtask <任务ID> confirm"])
 
 
-# LLM: 一行只含任务 ID、会话 ID、等待起点、任务状态和结论，不含正文。
+# LLM: 一行只含任务 ID、会话 ID、等待起点、任务状态、结论和后续工作事实码（_follow_up_text），不含正文。
 # 函数用途: 渲染候选清单里的一行。
-def _candidate_line(facts: _EndTaskFacts) -> str:
+def _candidate_line(facts: _EndTaskFacts, follow_up: str) -> str:
     verdict = _SHORT_REASONS.get(facts.refusal, "可结束")
     return (f"- {facts.task_id}｜会话 {facts.thread_id}｜等待自 {_clock(facts.waiting_since)}"
-            f"｜任务 {facts.task_status or '不存在'}｜{verdict}")
+            f"｜任务 {facts.task_status or '不存在'}｜{verdict}｜后续工作 {follow_up}")
+
+
+# LLM: 与定时执行收口同一个判定：owner 的 scheduler_service.follow_up（组合根注入的 SchedulerFollowUpPolicy），
+#   按 FollowUpQuery(会话, 任务) 取 FollowUpFacts；只输出事实码——存在的事实码、读不出的“项目:错误码”，
+#   没有任何事实为“无”，判定未注入为“判定不可用”。只读：各项读取错误已由判定收成结构化错误码，不读任何正文。
+# 函数用途: 说明一条定时会话任务为什么还在等（有哪些后续工作事实、哪些读不出来），供列表和预览显示。
+def _follow_up_text(owner_agent: object, facts: _EndTaskFacts) -> str:
+    policy = getattr(getattr(owner_agent, "scheduler_service", None), "follow_up", None)
+    if policy is None:
+        return "判定不可用"
+    found = policy.facts(FollowUpQuery(facts.thread_id, facts.task_id))
+    unreadable = "、".join(f"{item}:{code}" for item, code in found.unreadable)
+    return ("、".join(found.present) or "无") + (f"；读不出 {unreadable}" if unreadable else "")
 
 
 # LLM: 纯格式化，只用本机时区显示，不参与任何判断。

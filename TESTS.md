@@ -628,6 +628,15 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
   - 副作用只有两条控制回执，与用户在 TUI 里敲两次 `/endtask` 相同。
   - 证据目录：`~/.my-agent/decision-evidence/endtask-acceptance/`，含 `endtask_acceptance.py` 与 `result-step16g-20260929.jsonl`。
   - `confirm` 没有在生产上执行过。第一次真正执行，应在确实出现卡住的等待中定时执行时，由管理员按预览提示操作。
+- **后续工作事实码（2026-09-29，分支 `claude/be-endtask-follow-up-facts`，基于 `e850ceb04`）**：列表每行和预览都附“后续工作”，
+  取自 owner 的 `scheduler_service.follow_up`，与定时执行收口同一个判定。新增 3 项：
+  - 事故形态显示“无”；本任务有待处理唤醒时列表和预览都显示 `pending_wakes`；只显示事实码、不带任务正文，仍只读；
+  - 一个归属不明的坏唤醒：显示“无；读不出 pending_wakes:data_parse:JSONDecodeError”；
+  - 用替身包住注入的判定，确认 /endtask 交出去的查询就是 `FollowUpQuery(会话, 任务)`、没有另写一套；判定未注入时显示“判定不可用”。
+  - 变异 7 个全部被抓住（只把“rc=1 且有 FAILED 用例”算抓住）：恒为“无”、丢掉读不出、查询参数对调、绕开注入的判定另调一套、
+    未注入写成“无”、列表行或预览丢掉后续工作。
+  - 定向回归：引用 /endtask、Gateway 控制、TUI 控制、后续工作判定与定时收口的 29 个文件，加 9 个全仓守卫，共 38 个文件
+    1001 passed；strict code-size 与 `e850ceb04` 逐条比对新增 0；ruff、doc sync、diff check、clean package 通过。
 - **新增** `test_end_task_control.py`（6 项）。夹具用真实 `SimpleAgent`：经 `create_job` / `reserve_due_runs` / `claim_run` /
   `park_run_waiting` 与 `record_run_creation`、`settle_agent_attempt` 造出事故形态，即定时执行 waiting、会话任务 active、
   attempt 已结束而 AgentRun 未关。

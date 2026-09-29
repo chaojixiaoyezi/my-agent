@@ -75,6 +75,7 @@ owner 维护顺带回收正文哈希缓存的孤儿键（分支 `my-agent/self-d
 - 放行只认结构化事实：定时账本里是 waiting、会话任务链接是 active、运行库整棵执行树没有未结束的 attempt（运行库读不到按无法确认拒绝）。确认只写两处：`tasks.update_status(cancelled, expected_status=active)`，再对同一任务调 `reconcile_waiting_run`。
 - 回归见 `test_end_task_control.py`。根因修复（只在确有后续工作时才进 waiting）另排，见 DESIGN_LEDGER。
 - 9a 复审跟进：6 个 `END_TASK_*` 拒绝码登记进 `ERROR_CONTRACTS`（全仓守卫 `test_recovery_code_policy` 转绿，字典里的码另有模块测试钉住）；预览和确认结果固定写明“结束任务不会停止它启动的后台命令；这些命令结束后的通知会落到已取消的任务上”。
+- 后续工作事实码（分支 `claude/be-endtask-follow-up-facts`，基于 `e850ceb04`）：列表每行和预览都附“后续工作”，直接调 owner 的 `scheduler_service.follow_up`（与定时执行收口同一个判定），只显示事实码与读不出的“项目:错误码”，没有写“无”，判定未注入写“判定不可用”。
 
 定时执行 waiting 死锁（分支 `claude/75-scheduler-waiting-deadlock`，2026-09-29）：一轮定时执行结束后任务仍是 active 时，
 `_finish_scheduler_wake_claim` 改调 `scheduler/active_run_closeout.close_active_run`：`conversation/task_follow_up` 判定有结构化后续工作才进 waiting；
