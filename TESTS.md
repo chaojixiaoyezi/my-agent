@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`）
+
+- **`test_process_unknown_reason_codes.py`**（先写测试，在旧代码上 9 条失败、2 条对照通过，再改）：
+  - `process_session` 停止时注册表抛权威读不出 / 清理结果未定：错误码与 effect 仍是未知，`reported_error_code` 分别为
+    `PROCESS_SESSION_AUTHORITY_UNREADABLE` / `PROCESS_SESSION_CLEANUP_UNCONFIRMED`，`load_error` 原样保留；
+  - 停止回执未确认 → `PROCESS_STOP_UNCONFIRMED`，回执保留在 `process`；已确认的停止对照不带原因码；
+  - 真实 PTY 会话关闭时把终止回执固定成未确认 → `PTY_CLOSE_UNCONFIRMED`；正常关闭对照不带原因码；
+  - 四个新码都登记在错误合同里、不可自动重试、人工核对；
+  - 经工具操作账走一遍：记录停在 unknown，`unknown_reason` 为 `effect_outcome_unknown:PROCESS_STOP_UNCONFIRMED`。
+- **变异**：8 个（两处原因码丢失、类型判断互换、终端 `_error` 不传原因码、合同缺失或改成可重试）全部被抓住。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_process_unknown_reason_codes.py -q`
+
 ## 非决策调用“缺报”同口径统一，及 ae 复审跟进（2026-09-28，分支 `claude/be-llm-missing-unify`，在 `d802380d8` 之上重做 `dc7fdd8a3`）
 
 - **先核实，再改显示**（没有补记任何账）：

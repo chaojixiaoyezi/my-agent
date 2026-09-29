@@ -2657,6 +2657,36 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="先前操作可能已产生副作用但终态缺失；先核对外部事实，禁止自动重复执行。",
     ),
+    # 以下四个是后台进程 / 终端会话结果未知时的具体原因（reported_error_code），错误码本身仍是 TOOL_OPERATION_OUTCOME_UNKNOWN；
+    # 单列是为了 unknown_reason 与排障能说清卡在哪一步，不改变“禁止自动重做”的边界。
+    "PROCESS_SESSION_AUTHORITY_UNREADABLE": ErrorContract(
+        code="PROCESS_SESSION_AUTHORITY_UNREADABLE",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="后台进程的持久记录暂时读不出，进程实际状态无法确认；保留原 session_id 稍后再查，不要重新启动同一命令。",
+    ),
+    "PROCESS_SESSION_CLEANUP_UNCONFIRMED": ErrorContract(
+        code="PROCESS_SESSION_CLEANUP_UNCONFIRMED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="停止或清理后台进程时持久记录没写完，已发出的信号不会撤回；用原 session_id 核对进程是否还在，不要重复停止或重启。",
+    ),
+    "PROCESS_STOP_UNCONFIRMED": ErrorContract(
+        code="PROCESS_STOP_UNCONFIRMED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="已请求停止后台进程，但进程树退出没有确认；用原 session_id 查看状态，确认仍在运行再决定是否再次停止。",
+    ),
+    "PTY_CLOSE_UNCONFIRMED": ErrorContract(
+        code="PTY_CLOSE_UNCONFIRMED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="已请求关闭终端会话，但进程树退出没有确认，会话仍保留；先查看会话状态，再决定是否再次关闭。",
+    ),
     "TOOL_OPERATION_CANCELLED_NOT_STARTED": ErrorContract(
         code="TOOL_OPERATION_CANCELLED_NOT_STARTED",
         category="tool",

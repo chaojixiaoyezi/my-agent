@@ -151,14 +151,18 @@ class ProcessSessionTool(BaseTool):
     # LLM: action 只分派到 registry 的 scope-aware 方法；持久地址与 shell 同读可信 scope.owner_home，
     # 不能由可变路径权限或 cwd 决定。未知、越界与不存在记录均
     # 返回稳定错误，不泄露其他会话是否存在；stop 沿用 registry 终止回执，status/wait 附宿主进展观测。
+    #   结果未知时错误码保持 TOOL_OPERATION_OUTCOME_UNKNOWN（不自动重做），reported_error_code 按异常类型或停止回执
+    #   说明卡在哪一步：权威读不出 / 清理结果未定 / 停止未确认，让工具操作账的 unknown_reason 可归因。
     # 函数用途: 执行后台进程控制；未确认的停止结果明确 UNKNOWN，保留结果供核对。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             return self._execute_action(params)
         except (ProcessSessionAuthorityError, ProcessSessionCleanupError) as exc:
+            reported = ("PROCESS_SESSION_CLEANUP_UNCONFIRMED" if isinstance(exc, ProcessSessionCleanupError)
+                        else "PROCESS_SESSION_AUTHORITY_UNREADABLE")
             return ToolHandlerOutcome(self.model_spec.name, False, "后台进程权威暂不可读取，请保留原句柄核对。",
                                       error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown",
-                                      result_envelope={"load_error": exc.report})
+                                      result_envelope={"load_error": exc.report}, reported_error_code=reported)
 
     # LLM: 查询与停止仍沿同一访问范围，起始和未知状态属于 pending，不将不可读状态当不存在。
     # 函数用途: 解析显式动作并返回当前会话事实。
@@ -216,6 +220,7 @@ class ProcessSessionTool(BaseTool):
                 self.model_spec.name, False, json.dumps(result, ensure_ascii=False),
                 result_envelope={"process": result},
                 error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown",
+                reported_error_code="PROCESS_STOP_UNCONFIRMED",
             )
         return self._ok(result, observe_progress=action in {"status", "wait"})
 

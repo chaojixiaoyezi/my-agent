@@ -1047,6 +1047,7 @@ agent_py_agent/
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_process_sessions.py       # 后台命令有界等待、进程树停止与 owner/TUI 会话隔离回归
+|   |-- test_process_unknown_reason_codes.py # 后台进程/终端会话结果未知时带出具体原因码，工具操作账 unknown_reason 可归因
 |   |-- test_process_activation_scope.py # 共享激活归属、旧 v2 恢复、任务隔离及退出证据保留
 |   |-- test_background_stdio.py       # 实际字节管道、EOF、交接失败及精确资源隔离组件验证
 |   |-- test_process_completion_events.py # 后台完成通知的重启补发、去重和停止边界

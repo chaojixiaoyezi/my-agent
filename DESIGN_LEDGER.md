@@ -1,5 +1,11 @@
 # 设计台账
 
+## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`，本地验证通过，待集成）
+
+- 来源：定时任务停摆排查时，工具操作账的 `unknown_reason` 只剩 `effect_outcome_unknown:TOOL_OPERATION_OUTCOME_UNKNOWN`。`claude/75-scheduler-waiting-deadlock`（`0b04e6fbe`）已补 `run_command` 后台三处，这里补剩下三处。
+- 已实现：错误码与 `effect_outcome=unknown` 不变（仍不自动重做），只加 `reported_error_code`：`process_session` 权威读不出 → `PROCESS_SESSION_AUTHORITY_UNREADABLE`，清理结果未定（`ProcessSessionCleanupError`）→ `PROCESS_SESSION_CLEANUP_UNCONFIRMED`，停止后进程树退出未确认 → `PROCESS_STOP_UNCONFIRMED`；`terminal_session` 关闭未确认 → `PTY_CLOSE_UNCONFIRMED`。四个码登记进 `ERROR_CONTRACTS`（不可自动重试、人工核对），工具操作账的 `unknown_reason` 随之写成 `effect_outcome_unknown:<具体码>`。
+- 边界：只让原因可归因，不改变结果未知的判定条件和恢复路径。
+
 ## Gateway 派发线程存活成为结构化事实（2026-09-28，分支 `claude/38-gateway-dispatcher-resilience`，基于 `c101d325a`，本地验证通过，待集成）
 
 - 现状：派发线程的起止、每次 tick 起止、逃逸异常与"错误打印本身失败"记在进程内账本 `gateway_parts/loop_health.py`，
