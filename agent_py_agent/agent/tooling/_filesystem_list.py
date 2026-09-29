@@ -96,6 +96,7 @@ class ListFilesTool(FileSystemTool):
                 display_path=self.display_path(target),
                 expected_kind="any",
                 retry_tool="list_files",
+            decide_access=self.check_path_access,
             ))
         internal_ref = _internal_agent_status_ref(target, include_agent_directory=True)
         if internal_ref:

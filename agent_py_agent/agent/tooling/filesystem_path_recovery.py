@@ -3,9 +3,11 @@
 # 模块用途: 给路径不存在错误补充少量安全候选，同时保证大型工作区里也能迅速返回。
 from __future__ import annotations
 
+import itertools
 import os
 from collections import deque
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,8 @@ class MissingPathRequest:
     display_path: str
     expected_kind: str = "any"
     retry_tool: str = ""
+    # 工具的路径裁决（通常是 tool.check_path_access）。候选用它过审，规则与 resolve_path 一致。
+    decide_access: Callable[[Path], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,26 @@ class CandidateQuery:
     raw_name: str
     target: Path
     expected_kind: str
+
+
+@dataclass(frozen=True)
+class AccessGate:
+    """把工具自己的路径裁决带进候选生成，让候选用和 resolve_path 完全一样的规则过审。
+
+    `decide` 接收一个「已经解析过」的路径，返回是否允许。为 None 时不额外拦截
+    （没有裁决能力的调用方仍然受 workspace_roots 约束）。
+    """
+
+    decide: Callable[[Path], bool] | None = None
+
+    def allows(self, path: Path) -> bool:
+        if self.decide is None:
+            return True
+        try:
+            return bool(self.decide(path))
+        except Exception:
+            # 裁决本身出错时按"不允许"处理：宁可少给建议，也不能因为异常泄露路径。
+            return False
 
 
 # LLM: Groups the "where may I look, and how many may I return" inputs of near-name lookup so the
@@ -75,6 +99,8 @@ class NearNameScope:
     workspace_roots: list[Path]
     expected_kind: str = "any"
     limit: int = _NEAR_NAME_MAX_SUGGESTIONS
+    # 工具自己的路径裁决；每个候选都过一遍，跟 resolve_path 用同一条规则。
+    access: AccessGate = field(default_factory=AccessGate)
 
 
 @dataclass(frozen=True)
@@ -106,6 +132,7 @@ def missing_path_result(request: MissingPathRequest) -> ToolHandlerOutcome:
         target=request.target,
         workspace_roots=request.workspace_roots,
         expected_kind=request.expected_kind,
+        access=AccessGate(request.decide_access),
     )
     recovery = MissingPathRecovery(
         requested_path=str(request.raw_path),
@@ -133,19 +160,21 @@ def suggest_missing_path_candidates(
     workspace_roots: list[Path],
     expected_kind: str = "any",
     limit: int = 5,
+    access: AccessGate | None = None,
 ) -> list[Path]:
     roots = _normalized_roots(workspace_roots)
     raw_name = _raw_name(raw_path, target)
     if not raw_name:
         return []
+    gate = access or AccessGate(None)
     query = CandidateQuery(raw_name=raw_name, target=target, expected_kind=expected_kind)
     scored: dict[Path, int] = {}
     budget = CandidateScanBudget()
-    _score_parent_siblings(scored, target.parent, query, roots, budget, limit=limit)
+    _score_parent_siblings(scored, target.parent, query, roots, budget, limit=limit, access=gate)
     for root in roots:
         if budget.remaining_entries <= 0 or budget.remaining_directories <= 0:
             break
-        _score_tree_candidates(scored, root, query, budget, limit=limit)
+        _score_tree_candidates(scored, root, query, budget, limit=limit, access=gate)
         if _enough_exact_candidates(scored, limit) or budget.remaining_entries <= 0:
             break
     ranked = sorted(scored.items(), key=lambda item: (-item[1], len(item[0].parts), item[0].as_posix()))
@@ -155,7 +184,7 @@ def suggest_missing_path_candidates(
     near = suggest_near_name_paths(
         raw_name,
         target.parent,
-        NearNameScope(workspace_roots=roots, expected_kind=expected_kind),
+        NearNameScope(workspace_roots=roots, expected_kind=expected_kind, access=gate),
     )
     seen = set(candidates)
     merged = [path for path in near if path not in seen]
@@ -192,7 +221,7 @@ def suggest_near_name_paths(raw_name: str, parent: Path, scope: NearNameScope) -
     # 越权目录直接不扫 —— 不能靠"相近文件名"泄露墙外有哪些文件。
     if not _is_under_any_root(parent, roots):
         return []
-    entries = _directory_entries_within_cap(parent)
+    entries = _scan_entries_within_cap(parent, _NEAR_NAME_MAX_DIRECTORY_ENTRIES)
     if entries is None:
         return []
     scored = _score_near_name_entries(entries, raw_name, parent, scope)
@@ -200,20 +229,26 @@ def suggest_near_name_paths(raw_name: str, parent: Path, scope: NearNameScope) -
     return [path for _distance, _name, path in scored[: scope.limit]]
 
 
-# LLM: Returns None instead of a huge list when the directory is over the cap, so the caller can
-# simply give up on suggesting rather than paying for a scan it will discard.
-# 函数用途: 读取目录条目；超过上限就返回 None，表示"不扫了"。
-def _directory_entries_within_cap(parent: Path) -> list[os.DirEntry] | None:
+# LLM: Streams at most ``cap + 1`` entries and gives up past the cap, so a huge directory is never
+# fully materialized (same rule as the traversal helper in this module). Returns None to mean
+# "stop, do not suggest" rather than an empty list, which would be indistinguishable from "nothing
+# close enough".
+# 函数用途: 最多读上限 +1 条目录项；超过上限就返回 None，表示"不扫了"。
+def _scan_entries_within_cap(parent: Path, cap: int) -> list[os.DirEntry] | None:
     try:
         with os.scandir(parent) as iterator:
-            entries = list(iterator)
+            entries = list(itertools.islice(iterator, cap + 1))
     except OSError:
         return None
     # 目录太大就完全不扫：宁可不给建议，也不让一次读错路径拖慢整轮。
-    return entries if len(entries) <= _NEAR_NAME_MAX_DIRECTORY_ENTRIES else None
+    return entries if len(entries) <= cap else None
 
 
 # LLM: One pass over the directory entries, keeping only names close enough and of the right kind.
+#   Security: an entry is reported by its OWN path inside the granted directory, never by the path
+#   its symlink resolves to -- resolving first would leak the existence and absolute location of
+#   files in other owners' homes (2026-09-28 review, N1). Types are read with follow_symlinks=False
+#   so a link to a missing target cannot be distinguished from a link to a private file.
 # 函数用途: 挑出与写错名字足够接近的同目录条目，附带距离用于排序。
 def _score_near_name_entries(
     entries: list[os.DirEntry],
@@ -224,20 +259,41 @@ def _score_near_name_entries(
     requested = Path(parent, raw_name).resolve(strict=False)
     scored: list[tuple[int, str, Path]] = []
     for entry in entries:
-        if entry.name == raw_name or not _kind_matches(Path(entry.path), scope.expected_kind):
+        if entry.name == raw_name or not _entry_kind_matches(entry, scope.expected_kind):
             continue
         distance = _edit_distance_within(raw_name.lower(), entry.name.lower(), _NEAR_NAME_DISTANCE_LIMIT)
-        candidate = Path(entry.path).resolve(strict=False)
-        if distance is None or candidate == requested:
+        if distance is None:
+            continue
+        # 报告条目自身路径（仍在授权目录内）；不 resolve，避免暴露链接目标。
+        candidate = Path(entry.path)
+        if candidate.resolve(strict=False) == requested and not entry.is_symlink():
+            continue
+        if not scope.access.allows(candidate.resolve(strict=False)):
             continue
         scored.append((distance, entry.name.lower(), candidate))
     return scored
 
 
+# LLM: Reads an entry's type without following symlinks, so a link can never be classified by what
+# it points at (which may live outside every granted root).
+# 函数用途: 用 follow_symlinks=False 判断条目类型，不因链接目标而分类。
+def _entry_kind_matches(entry: os.DirEntry, expected_kind: str) -> bool:
+    try:
+        if expected_kind == "file":
+            return entry.is_file(follow_symlinks=False)
+        if expected_kind == "directory":
+            return entry.is_dir(follow_symlinks=False)
+        return entry.is_file(follow_symlinks=False) or entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
+
+
 # LLM: Returns None when the distance exceeds ``limit`` so callers can skip cheaply; the early
-# exit matters because this runs once per directory entry. Uses the standard two-row rolling
-# array: the per-row "did anything stay within limit" check happens in a helper, so the nesting
-# stays at two levels and the function stays readable.
+# exit matters because this runs once per directory entry. Two-row rolling array: the per-row
+# "did anything stay within limit" check happens in a helper, so nesting stays at two levels.
+#   Note for future edits: a banded (O(len * limit)) rewrite was attempted and rejected -- it ran
+#   fast but disagreed with the naive DP on 1306/20000 random pairs. Speed here is bounded by the
+#   per-directory entry cap instead, which is both simpler and verified.
 # 函数用途: 算两个名字的编辑距离，超过上限就返回 None（省掉完整计算）。
 def _edit_distance_within(left: str, right: str, limit: int) -> int | None:
     if left == right:
@@ -275,6 +331,7 @@ def _score_parent_siblings(
     budget: CandidateScanBudget,
     *,
     limit: int,
+    access: AccessGate,
 ) -> None:
     if (
         budget.remaining_entries <= 0
@@ -296,7 +353,7 @@ def _score_parent_siblings(
             budget.remaining_entries -= 1
             if entry.name in _DISCOVERY_IGNORES:
                 continue
-            _score_candidate(scored, Path(entry.path), query, bonus=10)
+            _score_candidate(scored, Path(entry.path), query, bonus=10, access=access)
             if _enough_exact_candidates(scored, limit):
                 break
 
@@ -311,9 +368,10 @@ def _score_tree_candidates(
     budget: CandidateScanBudget,
     *,
     limit: int,
+    access: AccessGate,
 ) -> None:
     for item in _walk_candidate_items(root, query.expected_kind, budget):
-        _score_candidate(scored, item, query, bonus=_part_overlap(query.target, item))
+        _score_candidate(scored, item, query, bonus=_part_overlap(query.target, item), access=access)
         if _enough_exact_candidates(scored, limit):
             return
 
@@ -361,14 +419,18 @@ def _score_candidate(
     query: CandidateQuery,
     *,
     bonus: int = 0,
+    access: AccessGate,
 ) -> None:
-    if not _kind_matches(item, query.expected_kind):
+    # 不 resolve：报告条目自身路径。resolve 会把符号链接目标（可能在别人家里）暴露出来。
+    if not _kind_matches(item, query.expected_kind, follow_symlinks=False):
         return
     score = _name_score(item.name, query.raw_name)
     if score <= 0:
         return
-    resolved = item.resolve(strict=False)
-    scored[resolved] = max(scored.get(resolved, 0), score + bonus)
+    # 每个候选都过工具自己的权限裁决；不过审的直接丢弃（含指向墙外的链接）。
+    if not access.allows(item.resolve(strict=False)):
+        return
+    scored[item] = max(scored.get(item, 0), score + bonus)
 
 
 def _name_score(candidate_name: str, raw_name: str) -> int:
@@ -398,12 +460,18 @@ def _enough_exact_candidates(scored: dict[Path, int], limit: int) -> bool:
     return sum(1 for score in scored.values() if score >= 100) >= limit
 
 
-def _kind_matches(item: Path, expected_kind: str) -> bool:
+# LLM: Type checks default to NOT following symlinks. Following them would let a link inside a
+# granted workspace report the type (and therefore the existence) of a file in another owner's
+# home, because stat runs in the Gateway process rather than inside the tool sandbox.
+# 函数用途: 判断路径类型；默认不跟随符号链接，避免用链接探测墙外文件。
+def _kind_matches(item: Path, expected_kind: str, *, follow_symlinks: bool = True) -> bool:
     if expected_kind == "file":
-        return item.is_file()
+        return item.is_file() if follow_symlinks else (item.is_file() and not item.is_symlink())
     if expected_kind == "directory":
-        return item.is_dir()
-    return item.exists()
+        return item.is_dir() if follow_symlinks else (item.is_dir() and not item.is_symlink())
+    if follow_symlinks:
+        return item.exists()
+    return item.exists() and not item.is_symlink()
 
 
 def _raw_name(raw_path: str, target: Path) -> str:

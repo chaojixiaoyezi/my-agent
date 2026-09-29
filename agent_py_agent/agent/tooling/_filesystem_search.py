@@ -243,6 +243,7 @@ class SearchTextTool(FileSystemTool):
                 display_path=self.display_path(target),
                 expected_kind="any",
                 retry_tool="search_text",
+            decide_access=self.check_path_access,
             ))
         return self._search_target(target, request)
 

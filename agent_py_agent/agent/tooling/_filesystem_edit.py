@@ -141,6 +141,7 @@ class EditFileTool(FileSystemTool):
                 display_path=self.display_path(target),
                 expected_kind="file",
                 retry_tool="read_file",
+            decide_access=self.check_path_access,
             ))
         try:
             observed_version = check_file_version(target, params.get("expected_version"))

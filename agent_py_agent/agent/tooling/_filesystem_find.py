@@ -138,6 +138,7 @@ class FindFilesTool(FileSystemTool):
                 display_path=self.display_path(target),
                 expected_kind="any",
                 retry_tool="find_files",
+            decide_access=self.check_path_access,
             ))
         if target.is_file():
             return self._find_in_single_file(target, request)

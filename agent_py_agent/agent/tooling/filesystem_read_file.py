@@ -128,6 +128,7 @@ def _execute_read_file_request(request: ReadFileRequest) -> ToolHandlerOutcome:
             display_path=request.tool.display_path(target),
             expected_kind="file",
             retry_tool="read_file",
+            decide_access=request.tool.check_path_access,
         ))
     if not target.is_file():
         return _not_file_result(request.tool, target)
