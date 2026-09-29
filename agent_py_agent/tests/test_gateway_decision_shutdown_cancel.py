@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core.model.call_runtime import model_call_summary
+from agent_py_agent.agent.conversation import decision_observe_nonblocking as nonblocking
 from agent_py_agent.agent.conversation import decision_policy
 from agent_py_agent.agent.conversation import decision_reach_counts as reach_counts
 from agent_py_agent.cli import gateway_process
@@ -139,6 +141,24 @@ def test_gateway_cleanup_survives_a_failing_decision_module(monkeypatch):
     assert order[:2] == ["stop_event", "http_stop"] and "heartbeat" in order and report["drain_complete"]
     failed = [payload for name, payload in events if name == "gateway_decision_cancel_failed"]
     assert failed == [{"error_type": "RuntimeError"}], "只记异常类型，不记异常正文"
+
+
+@pytest.mark.parametrize(("fault", "error_type"), [("wait_raises", "RuntimeError"), ("import_fails", "ModuleNotFoundError")])
+def test_gateway_cleanup_still_cancels_when_the_observe_drain_fails(monkeypatch, fault, error_type):
+    order = []
+    request, events = _cleanup_request(monkeypatch, order, cancel=lambda: order.append("cancel_decisions") or 0)
+    if fault == "wait_raises":
+
+        def broken(_timeout):
+            raise RuntimeError("secret detail that must not be logged")
+
+        monkeypatch.setattr(nonblocking, "wait_nonblocking_idle", broken)
+    else:
+        monkeypatch.setitem(sys.modules, nonblocking.__name__, None)  # 让执行器模块的导入失败
+    report = gateway_process._cmd_gateway_run_cleanup(request)
+    assert order[:3] == ["stop_event", "cancel_decisions", "http_stop"] and report["drain_complete"], "等待出错不能跳过取消"
+    decision_events = [(name, payload) for name, payload in events if name.startswith("gateway_decision_")]
+    assert decision_events == [("gateway_decision_drain_failed", {"error_type": error_type})], "不能记成取消失败"
 
 
 def test_gateway_cleanup_flushes_pending_reach_counts_after_draining(monkeypatch, tmp_path):

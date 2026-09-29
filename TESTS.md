@@ -168,6 +168,7 @@
   - 开关关闭时决策的逻辑与时序不变，但结果日志每行多一个附加字段 `blocking`，所以不再写“逐字不变”。
   - 变异验证扩到 29 个，全部被抓住。新增的 4 个是：不恢复身份、补记不核对 claim、身份不拷贝、停机不等待。
   - 定向回归：同样 77 个文件，1838 passed、0 skipped。新文件另外连跑 5 遍、3 进程并发各跑 1 遍，都全部通过。
+- **ae 复核后的补丁**：停机时的取消与等待拆成两个 try。新增 `test_gateway_decision_shutdown_cancel.py::test_gateway_cleanup_still_cancels_when_the_observe_drain_fails`，分两组：等待抛异常、执行器模块导入失败（`sys.modules` 置 None）。两组都要求取消照常执行，并且只记 `gateway_decision_drain_failed`。把函数换回单个 try 的旧写法后，这两组都失败。
 
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 

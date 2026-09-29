@@ -523,17 +523,22 @@ _NONBLOCKING_DRAIN_SECONDS = 2.0
 
 # LLM: 决策线停机第一步：只取消本进程内登记的在途决策句柄，让等待中的可选增强立即回到原方案；随后最多等
 #   _NONBLOCKING_DRAIN_SECONDS 让 observe 后台执行器把刚被取消的调用写完结果行与用量（被取消的调用不再等网络，通常几毫秒），
-#   等不到也照常收尾。决策模块出错只记异常类型事件 gateway_decision_cancel_failed（不记异常正文），不能中断收尾。
+#   等不到也照常收尾。取消与等待各在自己的 try 里：取消在前、内容与原来相同，执行器模块导入或等待出错都不能跳过取消。
+#   两步出错都只记异常类型（不记异常正文），分别是 gateway_decision_cancel_failed 与 gateway_decision_drain_failed，不能中断收尾。
 # 函数用途: Gateway 停止时取消本进程在途的决策请求，并有界等待后台 observe 调用落账。
 def _cancel_active_decisions(request: GatewayRunCleanupRequest) -> None:
     try:
-        from ..agent.conversation.decision_observe_nonblocking import wait_nonblocking_idle
         from ..agent.conversation.decision_policy import cancel_active_decisions_for_shutdown
 
         cancel_active_decisions_for_shutdown()
-        wait_nonblocking_idle(_NONBLOCKING_DRAIN_SECONDS)
     except Exception as exc:  # noqa: BLE001 - 停止收尾不能因可选决策模块出错而中断
         log_gateway_event(request.context.agent, "gateway_decision_cancel_failed", {"error_type": type(exc).__name__})
+    try:
+        from ..agent.conversation.decision_observe_nonblocking import wait_nonblocking_idle
+
+        wait_nonblocking_idle(_NONBLOCKING_DRAIN_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - 等待落账只是尽力而为，出错不能影响取消或中断收尾
+        log_gateway_event(request.context.agent, "gateway_decision_drain_failed", {"error_type": type(exc).__name__})
 
 
 # LLM: 决策线停机收尾：排空之后把本进程还没落盘的决策点到达计数写出（平时每个 owner 最多每分钟合并一次，这里补上尾巴）。

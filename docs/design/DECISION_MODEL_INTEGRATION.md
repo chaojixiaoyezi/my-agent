@@ -132,6 +132,7 @@ observe 的建议永远不会被采用，同步等待只会拖慢回复（生产
   - 已发出的请求不跟随回合停止，让它自然结束并照常记账。
   - 设置撤销、宿主关闭沿原在途登记取消；排队中的调用在发送前复核时作废，不建调用记录。
   - Gateway 停机：`_cancel_active_decisions` 取消之后，经 `wait_nonblocking_idle` 最多等 2 秒（`_NONBLOCKING_DRAIN_SECONDS`），让后台执行器写完结果行和用量；等不到也照常收尾。
+    取消与等待各在自己的 try 里，取消在前、与原来一致：执行器模块导入失败或等待出错都不会跳过取消，出错只记异常类型事件 `gateway_decision_drain_failed`，不会记成取消失败。
 - **资源键**：后台调用用 `decision-observe` 命名空间的有界资源键。同会话、同连接的同步调用不会因为它还在途而被拒成 admission_busy。
 - **选模型观察**：请求记录里的观察标记先记 `deferred`。后台完成时，如果回合仍在活动事务内，就经 `GatewayModelObservationWriter.complete_deferred` 把建议编号和状态补记进同一个标记（只接受 started/deferred，`adopted` 恒为 false）。回合已结束则不回写，结果只留在决策结果日志里。
 - **设置视图**：这类点位标 `blocking=false`，`max_request_seconds` 和 `limiting_field` 显示后台单次等待。
