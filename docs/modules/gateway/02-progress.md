@@ -522,6 +522,6 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
   带对账错误的终态未知计入 summary 的 `terminal_unknown_errors` 并记 `last_terminal_unknown_error`，派发者的对账段经
   `raise_if_input_reconcile_unsettled` 抛 `GatewayInputReconcileUnsettledError`（category 取持久化错误的类别），进 loop_health 计数与限流打印，
   只推迟对账段自己的下次到期。
-- **收敛**：修好部署后那条回执不用手工改：旧口径校验通过 → 目标任务已终态 → guidance 被拒绝 → 回执转排队并进 inbox（既有语义，
-  即那条 09-27 的插话正文会作为普通消息迟到送达）。`test_guidance_receipt_digest_compat.py` 用冻结的旧算法写真实形状回执证明这一点。
+- **收敛**：修好部署后那条回执不用手工改：旧口径校验通过 → 目标任务已终态 → guidance 被拒绝 → 回执转排队并进 inbox（既有语义；
+  生产上那条 09-27 的旧回执由集成者在部署前挪到备份目录，不让两天前的指令迟到送达，见 DESIGN_LEDGER 同日裁定）。`test_guidance_receipt_digest_compat.py` 用冻结的旧算法写真实形状回执证明这一点。
 - **规矩**：持久化指纹改口径必须加版本号并保留旧版本的计算，不能原地改；固定样本的指纹十六进制钉在测试里。
