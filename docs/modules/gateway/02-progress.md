@@ -508,3 +508,20 @@ ENOSPC 真机验收（releases/step16e-50651d81/enospc-acceptance/）里 schedul
   `cancel._explicit_target_is_absent` 收紧到它注释里的契约：只认 `error_type == "FileNotFoundError"`（原来 `category == "io"` 会把
   PermissionError、被包装的 sqlite 锁定判成"run 不存在"）。
 - 合同测试 `test_gateway_loop_backoff_coverage.py`（9 条，确定性构造，含"库文件路径是目录"的真实 sqlite 环境错误）。真机未复验。
+
+## 插话幂等回执指纹兼容旧口径，坏账回执不再被静默重写（2026-09-29，分支 `claude/38-guidance-receipt-digest-compat`，基于 `bac2f176d`）
+
+生产实锤（ae 核对 step16g 时发现）：input_receipts 里一条 09-27 发给已结束定时 run 的插话回执 state=terminal_unknown，
+reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒被 reconcile_gateway_input_receipts 重写一次，不进任何计数。
+根因：a646a4885 在 `_guidance_input_digest` 里加了 `canonical_metadata.pop("expected_turn_id")`，改了已落盘指纹的口径却没兼容旧回执；
+插话的元数据一定带 expected_turn_id，所以之前写的幂等回执被 `_validate_guidance_once_receipt` 重算时全部对不上。
+- **指纹分版本**：`GUIDANCE_INPUT_DIGEST_VERSION = 2`；`_guidance_input_digest(request, version=…)` 保留 v1（只去 dedupe_key）与 v2
+  （再去 expected_turn_id）两种计算；回执新增 `input_digest_version`（新写的记 2）。校验统一走 `guidance_receipt_input_matches`：记了版本
+  按版本严格重算；没记版本的旧回执（a646a4885 前后各写过一种口径）两种任一匹配即视为同一条。`append_once` 的同键重试也走它。
+- **对账**：`_write_terminal_unknown` 在状态已是 terminal_unknown 且错误的结构化字段（error_type/category/context）没变时不重写；
+  带对账错误的终态未知计入 summary 的 `terminal_unknown_errors` 并记 `last_terminal_unknown_error`，派发者的对账段经
+  `raise_if_input_reconcile_unsettled` 抛 `GatewayInputReconcileUnsettledError`（category 取持久化错误的类别），进 loop_health 计数与限流打印，
+  只推迟对账段自己的下次到期。
+- **收敛**：修好部署后那条回执不用手工改：旧口径校验通过 → 目标任务已终态 → guidance 被拒绝 → 回执转排队并进 inbox（既有语义，
+  即那条 09-27 的插话正文会作为普通消息迟到送达）。`test_guidance_receipt_digest_compat.py` 用冻结的旧算法写真实形状回执证明这一点。
+- **规矩**：持久化指纹改口径必须加版本号并保留旧版本的计算，不能原地改；固定样本的指纹十六进制钉在测试里。

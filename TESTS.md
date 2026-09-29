@@ -105,6 +105,21 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **变异验证**：26 个变异体全部被抓住（含预期等待集合少一项、瞬时类型各删一项、SQLite 不取低 8 位、忽略 error_code、
   换因不重计、不计数结果清账、退避按同因而非总数、上限用 > 代替 >=、mixed 标错、重投计入失败、各封顶值改动、状态校验放宽）。
 
+## 插话幂等回执指纹兼容旧口径，坏账回执不再被静默重写（2026-09-29，分支 `claude/38-guidance-receipt-digest-compat`，基于 `bac2f176d`）
+
+- **来源**：ae 核对 step16g 时发现 input_receipts 里一条 09-27 的插话回执 terminal_unknown + DataCorruptionError「input digest mismatch」，每 15 秒被重写、
+  不进任何计数；根因是 a646a4885 改了 `_guidance_input_digest` 的口径没兼容旧回执。
+- **用例** `test_guidance_receipt_digest_compat.py`（6 条，结构化判定）：固定样本的 v1/v2 指纹十六进制钉死（v1 用冻结在测试里的旧算法独立算一遍，
+  产品的 v1 或 v2 再被改动都变红）；用旧口径写的真实形状回执（无版本字段）能读出、同键重试回同一条、同键异文仍报错；a646a4885 之后本修复之前
+  写的无版本 v2 回执也能读；记了版本 2 却存 v1 值的回执被严格拒绝；对账遇到旧口径回执且目标任务已结束时自然收敛为排队并进 inbox、
+  `terminal_unknown_errors=0`；真坏账（正文被改）保持 terminal_unknown，第二轮对账文件字节不变、`terminal_unknown_errors=1`、
+  `raise_if_input_reconcile_unsettled` 抛出 category=data_corruption 的结构化异常。
+- **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希）：校验只认当前口径；记了版本也任一匹配；v1 口径漂移；同键重试只认当前口径；
+  新回执不记版本；终态未知每轮重写；带错误的终态未知不计数；不抛给循环守卫。结果见提交说明。
+- **门禁**：新文件 + runtime_guidance + steer_delivery_recovery + session_message_busy_target + gateway_control_operation + tui_control_delivery
+  + chat_client_context + adapter_manager + tui_input + dispatcher/loop 韧性 + session_task turn_binding/body_replay + 九个全仓守卫；
+  ruff、doc sync、strict code-size、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。真机未复验，部署后看那条回执是否转排队。
+
 ## 前台命令已退出、只是清理未确认（2026-09-29，`84e8db619` + `067d2dd3e`，单独集成）
 
 - `test_shell_foreground_cleanup.py`：原用例 `test_cleanup_unknown_keeps_original_command_result` 按新合同改为 `test_cleanup_unconfirmed_returns_the_real_result_with_a_warning`（退出码 0 → 成功，7 → `COMMAND_FAILED`/`failed`；`cleanup_confirmed=false`、`termination` 回执和正文提示），另加清理已确认不带告警的对照。

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..conversation.task_state import conversation_task_link_is_terminal
-from ..runtime_errors import DataCorruptionError, runtime_error_report
+from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError, runtime_error_report
 from .io import (
     gateway_response_path,
     gateway_turn_transition,
@@ -407,14 +407,23 @@ def reconcile_gateway_input_request(
 
 # LLM: 插话持久操作经 guidance 领域组件； The Gateway loop performs bounded durable repair without one thread per message. Owner
 # resolution uses the stored authenticated request and never falls back to another user's store.
-# 函数用途: 周期性扫描少量未完成入口回执，修复进程崩溃留下的 active 或 queued 投影。
+#   返回的 summary 是结构化事实：除各状态计数外，terminal_unknown_errors/last_terminal_unknown_error 表示
+#   "试过但因坏账/IO 无法收口"的回执，调用方（派发者对账段）必须经 raise_if_input_reconcile_unsettled 上报；
+#   单条回执的处理在 _reconcile_unsettled_receipt。
+# 函数用途: 周期性扫描少量未完成入口回执，修复进程崩溃留下的 active 或 queued 投影，并汇总对账结果。
 def reconcile_gateway_input_receipts(
     paths: GatewayPaths,
     agent: object,
     *,
     limit: int = 64,
-) -> dict[str, int]:
-    summary = {"checked": 0, "consumed": 0, "queued": 0, "terminal_unknown": 0, "errors": 0}
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "checked": 0, "consumed": 0, "queued": 0, "terminal_unknown": 0, "errors": 0,
+        # 带对账错误的终态未知：对账"试过但因坏账/IO 失败无法收口"的回执数与最近一条结构化错误，
+        # 供 raise_if_input_reconcile_unsettled 抛给循环守卫，进 loop_health 与日志，不再静默。
+        "terminal_unknown_errors": 0,
+        "last_terminal_unknown_error": {},
+    }
     for path in _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1))):
         try:
             receipt = read_gateway_input_receipt(paths, path.stem)
@@ -429,25 +438,7 @@ def reconcile_gateway_input_receipts(
             if receipt.state == "consumed":
                 summary["consumed"] += 1
                 continue
-            from .request_worker import _resolve_request_agent
-
-            scoped = _resolve_request_agent(agent, receipt.prepared_request)
-            lifecycle = _input_target_lifecycle(paths, scoped, receipt.target_turn_id)
-            if lifecycle == "terminal" and receipt.target_turn_id:
-                # The owner store is now available, so a never-claimed row can
-                # be rejected safely and promoted. Claimed remains unknown.
-                scoped.conversation_store.guidance.recovery.reject_pending(
-                    receipt.target_turn_id,
-                    reject_reserved=True,
-                )
-            state = reconcile_gateway_input_request(
-                paths,
-                request_id=receipt.request_id,
-                conversation_store=scoped.conversation_store,
-                target_terminal=(lifecycle == "terminal"),
-            )
-            if state in summary:
-                summary[state] += 1
+            _reconcile_unsettled_receipt(paths, agent, receipt, summary)
         except Exception:
             summary["errors"] += 1
         finally:
@@ -456,6 +447,75 @@ def reconcile_gateway_input_receipts(
             except Exception:
                 summary["errors"] += 1
     return summary
+
+
+# LLM: 对账一条尚未收口（pending/active_pending/terminal_unknown）的回执：先解析目标 owner 的 agent，目标已终态时
+#   拒绝未领取的 guidance 行，再走 reconcile_gateway_input_request 的结构化状态机并按返回状态计数；返回
+#   terminal_unknown 时把持久化的对账错误记进 summary。异常向上抛，由调用方计入 errors。改动时同步看
+#   test_steer_delivery_recovery 与 test_guidance_receipt_digest_compat。
+# 函数用途: reconcile_gateway_input_receipts 的单条回执处理，把"解析目标 -> 拒绝 -> 状态迁移 -> 计数"从循环里拆出来。
+def _reconcile_unsettled_receipt(
+    paths: GatewayPaths, agent: object, receipt: GatewayInputReceipt, summary: dict[str, Any]
+) -> None:
+    from .request_worker import _resolve_request_agent
+
+    scoped = _resolve_request_agent(agent, receipt.prepared_request)
+    lifecycle = _input_target_lifecycle(paths, scoped, receipt.target_turn_id)
+    if lifecycle == "terminal" and receipt.target_turn_id:
+        # The owner store is now available, so a never-claimed row can
+        # be rejected safely and promoted. Claimed remains unknown.
+        scoped.conversation_store.guidance.recovery.reject_pending(
+            receipt.target_turn_id,
+            reject_reserved=True,
+        )
+    state = reconcile_gateway_input_request(
+        paths,
+        request_id=receipt.request_id,
+        conversation_store=scoped.conversation_store,
+        target_terminal=(lifecycle == "terminal"),
+    )
+    if state in summary:
+        summary[state] += 1
+    if state == "terminal_unknown":
+        _note_terminal_unknown_error(paths, receipt.request_id, summary)
+
+
+# LLM: 只看回执里持久化的结构化 reconcile_error（error_type/category/context），不解析文字；没有错误的终态未知
+#   （目标已结束、无法证明已消费）是合法状态，不计入。
+# 函数用途: 把一条"带对账错误的终态未知"计进 summary，并记下最近一条错误的结构化子集。
+def _note_terminal_unknown_error(paths: GatewayPaths, request_id: str, summary: dict[str, Any]) -> None:
+    receipt = read_gateway_input_receipt(paths, request_id)
+    error = receipt.reconcile_error if receipt is not None and isinstance(receipt.reconcile_error, dict) else {}
+    if not error:
+        return
+    summary["terminal_unknown_errors"] += 1
+    summary["last_terminal_unknown_error"] = {
+        "request_id": request_id,
+        **{key: str(error.get(key) or "") for key in ("error_type", "category", "context")},
+    }
+
+
+# LLM: 对账结果里的错误必须让循环守卫看见（loop_health 计数 + 限流打印），否则坏账回执只会每轮被静默重读。
+#   category 取最近一条持久化错误的类别（data_corruption/io…），而不是笼统的 programmer_bug；派发段守卫接住它后只
+#   推迟对账段自己的下次到期，不影响派发。
+# 类用途: 表示一轮对账里有回执因错误无法收口，携带结构化 summary。
+class GatewayInputReconcileUnsettledError(RecoverableRuntimeError):
+    def __init__(self, summary: dict[str, Any]) -> None:
+        last = summary.get("last_terminal_unknown_error") or {}
+        self.summary = dict(summary)
+        self.category = str(last.get("category") or "") or "recoverable_runtime"
+        super().__init__(
+            "gateway input receipts could not be settled: "
+            f"terminal_unknown_errors={int(summary.get('terminal_unknown_errors') or 0)} "
+            f"errors={int(summary.get('errors') or 0)} "
+            f"last={last.get('request_id', '')}:{last.get('error_type', '')}"
+        )
+
+
+# 函数用途: 对账 summary 里有错误就抛出结构化异常，交给循环守卫记账；没有就什么都不做。
+def raise_if_input_reconcile_unsettled(summary: dict[str, Any]) -> None:
+    if int(summary.get("terminal_unknown_errors") or 0) or int(summary.get("errors") or 0):
+        raise GatewayInputReconcileUnsettledError(summary)
 
 
 # LLM: HTTP status projection exposes stable ingress identity and exact target separately. It never
@@ -652,17 +712,21 @@ def _prepared_payload_digest(payload: dict[str, Any]) -> str:
 
 # LLM: terminal_unknown is a durable no-guess state. It preserves possible provider delivery and
 # records structured reconciliation failure without creating a duplicate queued request.
-# 函数用途: 把无法证明已消费或未消费的消息保存为终态未知。
+#   已经是终态未知、且错误的结构化字段（error_type/category/context）没变时不重写：否则每轮对账都会刷新
+#   updated_at 把同一条坏账回执改写一遍（09-29 生产实锤：一条 09-27 的插话回执每 15 秒被重写一次）。
+# 函数用途: 把无法证明已消费或未消费的消息保存为终态未知；状态与错误都没变时原样保留，返回是否写了。
 def _write_terminal_unknown(
     paths: GatewayPaths,
     receipt: GatewayInputReceipt,
     error: BaseException | None,
-) -> None:
+) -> bool:
     report = (
         runtime_error_report(error, context="gateway.input_receipt.reconcile")
         if error is not None
         else {}
     )
+    if receipt.state == "terminal_unknown" and _same_reconcile_error(receipt.reconcile_error, report):
+        return False
     updated = replace(
         receipt,
         state="terminal_unknown",
@@ -670,6 +734,15 @@ def _write_terminal_unknown(
         reconcile_error=report,
     )
     write_json_file_atomic(gateway_input_receipt_path(paths, receipt.request_id), updated.to_dict())
+    return True
+
+
+# LLM: 只比较结构化字段，不比较 message 文字（文字里可能带路径或计数，每次都不同）；两边都空也算相同。
+# 函数用途: 判断两份对账错误报告是否是同一种错误。
+def _same_reconcile_error(previous: object, current: dict[str, Any]) -> bool:
+    before = previous if isinstance(previous, dict) else {}
+    keys = ("error_type", "category", "context")
+    return all(str(before.get(key) or "") == str(current.get(key) or "") for key in keys)
 
 
 # LLM: Gateway 请求文件是前台回合的权威事实，有文件时照旧只看它。没有请求文件的目标（如定时任务 srun_*）只由

@@ -30,7 +30,10 @@ from ..agent.gateway_parts import (
     recover_gateway_processing_requests,
     write_json_file,
 )
-from ..agent.gateway_parts.input_delivery_service import reconcile_gateway_input_receipts
+from ..agent.gateway_parts.input_delivery_service import (
+    raise_if_input_reconcile_unsettled,
+    reconcile_gateway_input_receipts,
+)
 from ..agent.gateway_parts.lease_service import GATEWAY_HEARTBEAT_INTERVAL_SECONDS
 from ..agent.gateway_parts.loop_health import loop_health
 from ..agent.gateway_parts.queue_service import GatewayClaim
@@ -295,9 +298,13 @@ class _RequestDispatcher:
     def _project_terminals_once(self) -> None:
         repair_gateway_terminal_projections(self.paths, agent=self.bootstrap_agent, limit=16)
 
-    # 函数用途: 输入回执调和段的一次执行。
+    # LLM: 对账结果里的错误（对账抛错、带错误的终态未知）要抛给段守卫：进 loop_health 计数与限流打印，并只推迟本段自己的
+    #   下次到期；不能像以前那样把 summary 丢掉让坏账回执被静默重读。
+    # 函数用途: 输入回执调和段的一次执行，有无法收口的回执就按结构化异常上报。
     def _reconcile_inputs_once(self) -> None:
-        reconcile_gateway_input_receipts(self.paths, self.bootstrap_agent, limit=64)
+        raise_if_input_reconcile_unsettled(
+            reconcile_gateway_input_receipts(self.paths, self.bootstrap_agent, limit=64)
+        )
 
     def _submit(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
         self._executor.submit(self._execute, claim, user_key, conversation_key)

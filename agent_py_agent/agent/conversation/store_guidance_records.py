@@ -28,6 +28,9 @@ class GuidanceOnceReceipt:
     submission_id: str = ""
     submitted_at: float = 0.0
     migration: dict[str, Any] = field(default_factory=dict)
+    # 指纹口径版本：0 = 旧回执没记版本（a646a4885 前后各写过一种口径，校验时两种任一匹配即可），
+    # 1/2 = 明确口径，按版本严格重算。见 GUIDANCE_INPUT_DIGEST_VERSION。
+    input_digest_version: int = 0
 
     # LLM: Receipt serialization stays schema-neutral at the store boundary; callers consume
     # typed fields and must not infer delivery state from filenames or prose.
@@ -43,6 +46,7 @@ class GuidanceOnceReceipt:
             "attempt_id": self.attempt_id,
             "submission_id": self.submission_id,
             "submitted_at": self.submitted_at,
+            "input_digest_version": int(self.input_digest_version),
             **({"migration": dict(self.migration)} if self.migration else {}),
         }
 
@@ -119,6 +123,7 @@ class GuidanceOnceReceipt:
             ),
             submitted_at=float(data.get("submitted_at") or 0.0),
             migration=migration,
+            input_digest_version=_digest_version_from_payload(data.get("input_digest_version")),
         )
         if not receipt.dedupe_key or not receipt.input_digest or not receipt.entry.guidance_id:
             raise DataCorruptionError("conversation guidance receipt identity is invalid")
@@ -176,16 +181,36 @@ def _guidance_entry_from_request(
         metadata=dict(metadata) if isinstance(metadata, dict) else {},
     )
 
+# 持久化指纹口径版本。改口径必须加新版本号并保留旧版本的计算，绝不能原地改：回执落盘后要按写入时的口径重算。
+#   v1（a646a4885 之前）：元数据只去掉 dedupe_key；v2：再去掉认领时补记的 expected_turn_id。
+GUIDANCE_INPUT_DIGEST_VERSION = 2
+_GUIDANCE_INPUT_DIGEST_VERSIONS: tuple[int, ...] = (1, 2)
+
+
+# LLM: 持久化里的版本字段：缺失/非法一律当 0（旧回执，不知道用的哪种口径），不能猜成当前版本。
+# 函数用途: 从回执字典里读指纹口径版本。
+def _digest_version_from_payload(value: object) -> int:
+    try:
+        version = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return version if version in _GUIDANCE_INPUT_DIGEST_VERSIONS else 0
+
+
 # LLM: The digest covers every semantic input that could make reuse unsafe, but excludes time and
-# the generated guidance id so a transport retry remains byte-independent.
+# the generated guidance id so a transport retry remains byte-independent. version 决定元数据里
+# 哪些宿主字段不参与指纹（见 GUIDANCE_INPUT_DIGEST_VERSION）；未知版本抛 ValueError，不静默退回当前口径。
 # 函数用途: 为幂等键计算正文、目标和结构化元数据的稳定指纹。
-def _guidance_input_digest(request: dict[str, Any]) -> str:
+def _guidance_input_digest(request: dict[str, Any], *, version: int = GUIDANCE_INPUT_DIGEST_VERSION) -> str:
+    if version not in _GUIDANCE_INPUT_DIGEST_VERSIONS:
+        raise ValueError(f"unknown guidance input digest version: {version}")
     metadata = request.get("metadata")
     canonical_metadata = dict(metadata) if isinstance(metadata, dict) else {}
     canonical_metadata.pop("dedupe_key", None)
-    # 精确回合由目标回合在认领时补记（见 GuidanceStore.claim_for_turn 的宿主投递分支）；
-    # 指纹只在首次写入时算，不能用它把后补的字段判成"同键异文"。
-    canonical_metadata.pop("expected_turn_id", None)
+    if version >= 2:
+        # 精确回合由目标回合在认领时补记（见 GuidanceStore.claim_for_turn 的宿主投递分支）；
+        # 指纹只在首次写入时算，不能用它把后补的字段判成"同键异文"。
+        canonical_metadata.pop("expected_turn_id", None)
     canonical = {
         "target_type": normalize_guidance_target_type(request.get("target_type")),
         "target_id": str(request.get("target_id") or "").strip(),
@@ -197,6 +222,19 @@ def _guidance_input_digest(request: dict[str, Any]) -> str:
     }
     encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+# LLM: 幂等回执与一份语义请求是否同一条输入的唯一判据：回执记了版本就按该版本严格重算；旧回执（版本 0）在
+#   a646a4885 前后各写过一种口径，两种任一匹配即视为同一条（"持久化的摘要必须稳定"：不能让旧回执全部变成坏账）。
+#   改口径时同步 test_guidance_receipt_digest_compat.py 的固定样本。
+# 函数用途: 判断回执里的指纹是否与这份请求在写入时的口径一致。
+def guidance_receipt_input_matches(receipt: GuidanceOnceReceipt, request: dict[str, Any]) -> bool:
+    version = int(receipt.input_digest_version or 0)
+    if version in _GUIDANCE_INPUT_DIGEST_VERSIONS:
+        return _guidance_input_digest(request, version=version) == receipt.input_digest
+    return receipt.input_digest in {
+        _guidance_input_digest(request, version=candidate) for candidate in _GUIDANCE_INPUT_DIGEST_VERSIONS
+    }
 
 # LLM: Receipt rebind changes only host-owned attempt routing. Reconstructing the semantic request
 # here keeps the input digest and duplicate-ingress validation aligned after recovery.
@@ -238,6 +276,7 @@ def _rebound_guidance_receipt(
     return replace(
         receipt,
         input_digest=_guidance_input_digest(_guidance_request_from_entry(entry)),
+        input_digest_version=GUIDANCE_INPUT_DIGEST_VERSION,
         status="pending",
         entry=entry,
         updated_at=time.time(),
@@ -350,7 +389,7 @@ def _validate_guidance_once_receipt(
         normalize_guidance_target_type(entry.target_type) != entry.target_type
         or not str(entry.target_id or "").strip()
         or not str(entry.message or "").strip()
-        or _guidance_input_digest(reconstructed) != receipt.input_digest
+        or not guidance_receipt_input_matches(receipt, reconstructed)
     ):
         raise DataCorruptionError("conversation guidance receipt input digest mismatch")
     if (

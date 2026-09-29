@@ -2136,3 +2136,13 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   `cause_type`/`cause_category`，**不改 category**（category 参与控制流：`cancel._explicit_target_is_absent` 只认
   `error_type == "FileNotFoundError"`，不要再拿 category 当存在性判据）；不沿 `__context__`。新的包装异常必须 `raise ... from exc`
   保住原因链，不要把根因塞进消息文本再靠文本判断。
+
+# Gateway Structure
+
+## 持久化指纹的版本约束与对账错误的出口（2026-09-29）
+
+- 插话幂等回执的指纹口径由 `store_guidance_records.GUIDANCE_INPUT_DIGEST_VERSION` 定版；改口径 = 加新版本 + 保留旧版本计算 +
+  在 `test_guidance_receipt_digest_compat.py` 钉新的固定样本值。判定是否同一条输入只准调 `guidance_receipt_input_matches`
+  （校验与 `append_once` 重试共用），不要再直接比较 `input_digest` 字符串。
+- `reconcile_gateway_input_receipts` 的 summary 是结构化事实：`terminal_unknown_errors`/`last_terminal_unknown_error` 表示"试过但因坏账/IO
+  无法收口"，派发者对账段必须经 `raise_if_input_reconcile_unsettled` 上报；`_write_terminal_unknown` 只在状态或错误变化时落盘。

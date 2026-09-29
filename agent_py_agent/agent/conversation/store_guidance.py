@@ -19,10 +19,12 @@ from .session_messaging import SESSION_MESSAGE_ORIGIN_KIND, SESSION_TASK_ORIGIN_
 from .store_guidance_acknowledgements import GuidanceAcknowledgements
 from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
+    GUIDANCE_INPUT_DIGEST_VERSION,
     GuidanceOnceReceipt,
     _guidance_entries,
     _guidance_entry_from_request,
     _guidance_input_digest,
+    guidance_receipt_input_matches,
 )
 from .store_guidance_recovery import GuidanceRecovery
 from .store_guidance_submission import GuidanceSubmissions
@@ -103,7 +105,8 @@ class GuidanceStore:
         with locked_file_transition(transition):
             receipt = self.ledger.read_receipt(receipt_path)
             if receipt is not None:
-                if receipt.dedupe_key != key or receipt.input_digest != digest:
+                # 旧回执按写入时的口径比对（见 guidance_receipt_input_matches），同键重试必须回到同一条。
+                if receipt.dedupe_key != key or not guidance_receipt_input_matches(receipt, request):
                     raise DataCorruptionError(
                         f"conversation guidance dedupe key reused with different input: {key}"
                     )
@@ -125,6 +128,7 @@ class GuidanceStore:
                 status="pending",
                 entry=entry,
                 updated_at=time.time(),
+                input_digest_version=GUIDANCE_INPUT_DIGEST_VERSION,
             )
             write_json_file_atomic(receipt_path, receipt.to_dict())
             self.ledger.repair_projections(receipt)

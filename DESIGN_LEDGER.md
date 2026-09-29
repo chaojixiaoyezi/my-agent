@@ -21,6 +21,16 @@
   第 3 步第 4 点；另记三条接线约定（坏账按 `attempt:ledger_corrupt` 结案、`record()` 放 finally、宿主提示按会话与原因合并）。
   详见 [WAKE_POISON_PILL.md](docs/design/WAKE_POISON_PILL.md)。
 
+## 持久化指纹必须分版本、兼容旧数据（2026-09-29，分支 `claude/38-guidance-receipt-digest-compat`，基于 `bac2f176d`，本地验证通过，待集成）
+
+- 已落地：插话幂等回执指纹分 v1/v2，旧回执两种任一匹配、新回执记版本严格校验；对账把"带错误的终态未知"计入 summary 并抛给循环守卫，
+  状态与错误没变不重写。规矩：改持久化指纹口径 = 加版本 + 保留旧计算 + 钉固定样本，不得原地改。
+- 盘点（只列清单，未修）：a) `input_delivery_service._prepared_payload_digest`/`client_input_digest` 自 09-23 起口径未改；b) `store_usage._model_usage_snapshot_digest`
+  611a2923a 未改口径；c) `store_messages.append_once` 去重键 0bb09a76b 只改读取实现；d) 唤醒去重 a127be812（09-23）把发布逻辑挪进 store_wake_publication，
+  去重路径命名未改；e) `session_tasks` 09-28 新增正文反向索引 `session_task_body_index.v1`，此前创建的任务没有该索引（`load_by_body_dedupe_key` 返回 None），
+  属"新索引无回填"，重放旧任务正文时会走新建；f) 插件激活摘要 09-25 已按非 None 字段稳定化；g) `capability_selection_state` 摘要 09-26 新增，无旧数据。
+  除 e) 外未发现其它"改口径未兼容"的持久化指纹。
+
 ## 前台命令已退出、只是清理未确认时如实返回执行结果（2026-09-29，`claude/75-scheduler-waiting-deadlock` 的 `84e8db619` + `067d2dd3e`，单独集成）
 
 - 来源：2026-09-28 定时任务停摆的触发点是一次前台同步 `run_command`：命令已经跑完、退出码已知，只是后代进程清理的核对没确认（高负载下清理确认超时），工具却报 `TOOL_OPERATION_OUTCOME_UNKNOWN` / `effect_outcome=unknown`，整轮被叫停。
