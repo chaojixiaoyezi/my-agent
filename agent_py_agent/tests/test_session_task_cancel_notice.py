@@ -130,3 +130,35 @@ def test_cancel_notice_does_not_break_when_guidance_write_fails(tmp_path) -> Non
     assert payload["status"] == "cancelled"
     assert payload["notified_sender"] is False
     assert store.session_tasks.load(task.task_id).status == "cancelled"
+
+
+def test_cancel_receipt_is_honest_when_body_already_claimed(tmp_path) -> None:
+    """观察项③（5a 回执自相矛盾）：正文已被认领、撤不掉时，不能说"任务还没有开始执行"。
+
+    走真实撤队列路径：正文先被真实认领（reserved，目标已开始处理），再取消。回执必须如实说明
+    队列撤不掉、且当时没有可精确停止的回合。
+    """
+    agent, store, task = _agent(tmp_path)
+    key = f"body:session_task:{_SENDER}->{_TARGET}:把 X 做好"
+    entry = store.guidance.append_once(
+        {
+            "target_type": "thread",
+            "target_id": _TARGET,
+            "message": "把 X 做好",
+            "sender": _SENDER,
+            "priority": "normal",
+            "delivery": "next_turn",
+            "metadata": {"origin_kind": "session_task", "origin_thread_id": _SENDER},
+        },
+        dedupe_key=key,
+    )
+    # 真实认领：目标已经越过认领边界，回执不再是 pending，撤队列不可能成功。
+    assert store.guidance.claim_for_turn(entry, expected_turn_id="", attempt_id="attempt-1") is True
+
+    outcome = CancelSessionTaskTool(agent).execute({"task_id": task.task_id})
+
+    assert outcome.ok
+    payload = json.loads(outcome.output)
+    assert payload["status"] == "cancelled"
+    assert payload["withdrawn_from_queue"] is False
+    assert "还没有开始执行" not in payload["message"]

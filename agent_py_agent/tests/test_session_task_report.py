@@ -19,6 +19,7 @@ from agent_py_agent.agent.conversation.session_task_report import (
     task_for_turn,
 )
 from agent_py_agent.agent.conversation.session_tasks import (
+    SESSION_TASK_CANCELLED,
     SessionTaskDraft,
     SessionTaskUpdate,
 )
@@ -165,3 +166,33 @@ def test_cancel_notification_counts_into_pair_quota(tmp_path) -> None:
 
     assert outcome.ok
     assert store.session_pair_rate.count(_TARGET_THREAD_ID, _SENDER_THREAD_ID) == 1
+
+
+def test_cancelled_task_is_never_revived_and_never_reports_done(tmp_path) -> None:
+    """场景5后半：取消之后，目标晚到的回合收口既不能把任务改回 done，也不能再发一条成功回报。
+
+    走真实顺序：目标已认领并绑定回合（accepted）→ 发送方取消（cancelled）→ 目标回合这才收口。
+    """
+    agent = _agent(tmp_path)
+    task = _task(agent)
+    store = agent.conversation_store
+    tasks = store.session_tasks
+    from agent_py_agent.agent.agent_core.orchestration.tools.session_task_control import (
+        CancelSessionTaskTool,
+    )
+
+    assert tasks.load(task.task_id).status != SESSION_TASK_CANCELLED
+    assert CancelSessionTaskTool(agent).execute({"task_id": task.task_id}).ok
+    assert tasks.load(task.task_id).status == SESSION_TASK_CANCELLED
+    # 取消自己发的通知也进发送方队列；基线取在这里，后面只看增量。
+    before = len(store.guidance.pending("thread", _SENDER_THREAD_ID))
+
+    updated = close_out_turn(agent, _TURN_ID, TaskTurnOutcome(ok=True, summary="目标还是干完了"))
+
+    assert updated is None
+    final = tasks.load(task.task_id)
+    assert final.status == SESSION_TASK_CANCELLED
+    assert final.summary == ""
+    after = store.guidance.pending("thread", _SENDER_THREAD_ID)
+    assert len(after) == before
+    assert not any("状态 done" in entry.message for entry in after)

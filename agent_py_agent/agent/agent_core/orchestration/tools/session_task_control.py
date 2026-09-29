@@ -209,11 +209,17 @@ def _apply_cancel(
         details = {"withdrawn_from_queue": withdrawn}
         if note:
             details["withdraw_note"] = note
-        message = (
-            "任务还没有开始执行；已从目标队列撤销，不会再被执行。"
-            if withdrawn
-            else "任务还没有开始执行；已标记取消，但目标队列条目未确认撤销。"
-        )
+        # 正文已经越过认领边界时目标其实已经在跑，只是还没绑定回合。这时说"还没开始执行"
+        # 与事实矛盾（5a 的回执就是这么自相矛盾的）；按撤销结果如实区分三种情形。
+        if withdrawn:
+            message = "任务还没有开始执行；已从目标队列撤销，不会再被执行。"
+        elif note:
+            message = (
+                "任务已取消；目标已经开始处理这条正文，队列条目未能撤销，"
+                "且当时还没有绑定到具体回合，无法精确停止。"
+            )
+        else:
+            message = "任务已取消；队列条目未确认撤销。"
     cancelled = store.advance(
         str(getattr(task, "task_id", "") or ""), SessionTaskUpdate(status=SESSION_TASK_CANCELLED)
     )

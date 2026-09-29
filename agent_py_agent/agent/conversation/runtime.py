@@ -905,6 +905,8 @@ class BackgroundMainAgentRuntime:
 
 # LLM: 命中条件全部结构化：任务绑定的 conversation_request_id 与本次 request 的 task_id 一致。
 #   不在派活回合、任务已终态、或读账失败都安静返回（不改任何状态、不影响交付）。
+#   摘要取本回合的最终答复（结构化字段 response），让发送方的回报带上"目标到底说了什么"，
+#   不解析正文、不复制任务正文；答复为空时留空，回报照样发出。
 # 函数用途: 按本次后台请求收口它对应的会话任务。
 def _close_out_session_task_turn(
     agent: object,
@@ -924,7 +926,10 @@ def _close_out_session_task_turn(
         close_out_turn(
             agent,
             resolved_turn_id,
-            TaskTurnOutcome(ok=not bool(getattr(execution, "error", None))),
+            TaskTurnOutcome(
+                ok=not bool(getattr(execution, "error", None)),
+                summary=str(getattr(execution, "response", "") or "").strip(),
+            ),
         )
     except Exception:  # noqa: BLE001 - 回报属于附加交付，不能让回合本身失败
         return

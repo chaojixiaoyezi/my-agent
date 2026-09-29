@@ -17,14 +17,17 @@ from types import SimpleNamespace
 from agent_py_agent.agent.agent_core.runtime.guidance import inject_pending_guidance
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation.authority import CONVERSATION_SESSION_TASK_ID_ATTR
+from agent_py_agent.agent.conversation.background_execution import BackgroundExecutionResult
 from agent_py_agent.agent.conversation.models import ConversationThread
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundRunRequest,
     _background_task_attributes,
+    _close_out_session_task_turn,
     _run_params,
     _session_task_run_id,
 )
 from agent_py_agent.agent.conversation.session_messaging import SESSION_TASK_ORIGIN_KIND
+from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
@@ -159,3 +162,57 @@ def test_idle_target_claims_and_acknowledges_task_body(tmp_path) -> None:
     assert receipt is not None
     assert str((receipt.entry.metadata or {}).get("expected_turn_id") or "") == _TASK_ID
     assert receipt.status == "reserved"
+
+
+def test_close_out_reports_target_final_reply_as_summary(tmp_path) -> None:
+    """观察项①：派活任务的回报要带上目标回合的最终答复，而不是空摘要。
+
+    走真实入口：真实 `BackgroundRunRequest` + 真实 `BackgroundExecutionResult`
+    → 真实 `_close_out_session_task_turn`，不手工拼 TaskTurnOutcome。
+    """
+    agent, store = _agent(tmp_path)
+    _queue_body(store)
+    params = _run_params(_TARGET, _request(_wake()), agent)
+    params.tool_protocol_snapshot = make_test_protocol_snapshot(run_id="summary-run")
+    params.live_archive_state = {}
+    assert inject_pending_guidance(agent, params) is True
+
+    # 派活工具的真实写入顺序：先投正文拿 id，再落权威记录（正文只存一份）。
+    body_id = store.guidance.receipt(
+        f"body:session_task:{_SENDER}->{_TARGET}:{_GOAL}"
+    ).entry.guidance_id
+    task = store.session_tasks.create(
+        SessionTaskDraft(
+            sender_thread_id=_SENDER,
+            target_thread_id=_TARGET,
+            goal=_GOAL,
+            body_guidance_id=body_id,
+            body_dedupe_key=f"body:session_task:{_SENDER}->{_TARGET}:{_GOAL}",
+            dedupe_key=f"session_task:{_SENDER}->{_TARGET}:{_GOAL}",
+        )
+    )
+
+    store.session_tasks.bind_turn(task.task_id, turn_id=_TASK_ID)
+    request = _request(_wake())
+    execution = BackgroundExecutionResult(
+        response="X 已经做好了，产物在 out/x.md。",
+        tool_call_count=1,
+        tool_success_count=1,
+        material_progress_count=1,
+        delivery_artifacts=(),
+        message_tool_deliveries=(),
+        operation_verification={},
+        assistant_commentaries=(),
+        display_snapshot={},
+    )
+
+    _close_out_session_task_turn(agent, request, execution, turn_id=_TASK_ID)
+
+    tasks = store.session_tasks
+    try:
+        loaded, load_errors = tasks.list_report(limit=0)
+    except (OSError, ValueError, TypeError):
+        loaded, load_errors = [], []
+    assert not load_errors
+    assert loaded, "收尾必须真的推进了这条任务"
+    assert loaded[0].summary == "X 已经做好了，产物在 out/x.md。"
