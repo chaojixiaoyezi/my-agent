@@ -99,6 +99,10 @@ def test_home_doctor_reports_backup_requests_and_grants(tmp_path: Path) -> None:
     assert report["temporary_grants"]["active_count"] == 1
 
 
+# LLM: 这条原来用 audit 清理来验证"只清超期的"。dev 2026-09-28 裁定 audit 类别一律跳过
+#   （O/audit/*.jsonl 是主代理每轮的记忆归档原始事件，不是审计日志，删了不可恢复），
+#   所以改由 daily 类别承担同一个断言，audit 侧改为反向断言"原地保留"。
+# 函数用途: 验证保留清理只动超期文件、跳过 audit 类别。
 def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.home_retention import (
@@ -107,14 +111,20 @@ def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path
     )
 
     home = ensure_my_agent_home(tmp_path)
-    old_raw = home.owner_audit_dir / "old.jsonl"
-    fresh_raw = home.owner_audit_dir / "fresh.jsonl"
-    old_raw.write_text("old\n", encoding="utf-8")
-    fresh_raw.write_text("fresh\n", encoding="utf-8")
-    _set_mtime(old_raw, "2025-01-01T00:00:00+00:00")
-    _set_mtime(fresh_raw, "2026-05-30T00:00:00+00:00")
+    old_raw = home.owner_memory_daily_dir / "old.jsonl"
+    fresh_raw = home.owner_memory_daily_dir / "fresh.jsonl"
+    # audit 侧的文件：超期也绝不能被动。
+    audit_old = home.owner_audit_dir / "old.jsonl"
+    audit_fresh = home.owner_audit_dir / "fresh.jsonl"
+    for path in (old_raw, fresh_raw, audit_old, audit_fresh):
+        path.write_text(path.name + "\n", encoding="utf-8")
+    for path in (old_raw, audit_old):
+        _set_mtime(path, "2025-01-01T00:00:00+00:00")
+    for path in (fresh_raw, audit_fresh):
+        _set_mtime(path, "2026-05-30T00:00:00+00:00")
 
     retention = json.loads(home.owner_retention_json.read_text(encoding="utf-8"))
+    retention["daily_days"] = 30
     retention["audit_days"] = 30
     home.owner_retention_json.write_text(json.dumps(retention, ensure_ascii=False), encoding="utf-8")
 
@@ -127,6 +137,10 @@ def test_owner_retention_plan_and_apply_delete_only_expired_files(tmp_path: Path
     assert applied.applied is True
     assert not old_raw.exists()
     assert fresh_raw.exists()
+    # audit 类别一律跳过：两个文件都必须原地保留，且计划里不出现 audit 动作。
+    assert audit_old.exists()
+    assert audit_fresh.exists()
+    assert all(action.category != "audit" for action in plan.actions)
     audit_rows = [
         json.loads(line)
         for line in home.owner_audit_log_jsonl.read_text(encoding="utf-8").splitlines()

@@ -150,3 +150,134 @@ def test_unreadable_task_root_yields_no_actions_underneath(tmp_path):
     assert scratch.exists() and (scratch / "data.txt").read_text(encoding="utf-8") == "payload"
     assert blobs.exists() and (blobs / "big.txt").exists()
     assert not [a for a in applied.actions if str(a.path).startswith(str(task_root))]
+
+
+# LLM: MR2（9b 复审 2026-09-29）：_iter_task_states 的规范深度过滤不能去掉。运行中任务的 output
+#   里嵌套一份「像任务」的目录（带终态 state.json）时，它不能被当成任务根、整棵移走。
+# 函数用途: 验证嵌套在非规范深度的「像任务」目录不成为任务根。
+def test_nested_task_like_dir_is_not_treated_as_task_root(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.candidates import CandidateService
+    from agent_py_agent.agent.memory_store.retention import MemoryRetentionService
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    candidates = CandidateService(home.owner_memory_candidates_jsonl)
+    service = MemoryRetentionService(home_paths=home, candidates=candidates)
+
+    # 规范深度上的一个运行中任务（不是终态，所以它自己不会被回收）。
+    outer = Path(home.owner_tasks_dir) / "2026-01-01" / "running-task"
+    (outer / "work").mkdir(parents=True)
+    (outer / "work" / "state.json").write_text(
+        json.dumps({"task_id": "outer", "status": "RUNNING", "updated_at": NOW.timestamp()}),
+        encoding="utf-8",
+    )
+
+    # 它 output 里嵌套一份「像任务」的目录，带终态且超期的 state.json —— 深度是非规范的。
+    nested = outer / "work" / "blobs" / "tool_outputs" / "nested-task"
+    (nested / "work").mkdir(parents=True)
+    (nested / "work" / "state.json").write_text(
+        json.dumps(
+            {"task_id": "nested", "status": "DONE", "updated_at": NOW.timestamp() - 400 * 86400}
+        ),
+        encoding="utf-8",
+    )
+    (nested / "work" / "blobs" / "tool_outputs").mkdir(parents=True)
+    (nested / "work" / "blobs" / "tool_outputs" / "big.txt").write_text("x" * 50, encoding="utf-8")
+
+    report = service.plan(now=NOW)
+
+    # 嵌套的那棵绝不能被规划成任务根移走。
+    assert not [a for a in report.actions if str(a.path).startswith(str(nested))], (
+        "非规范深度的「像任务」目录不能被当成任务根"
+    )
+    assert nested.exists()
+
+
+# LLM: MR4（9b 复审）：_recovery_roots 不能丢掉 O/audits。audits 下的终态任务同样要被规划回收。
+# 函数用途: 验证 audits 根（第一层）确实在扫描范围内。
+def test_audits_root_is_scanned_for_terminal_tasks(tmp_path):
+    from agent_py_agent.agent.memory_store.candidates import CandidateService
+    from agent_py_agent.agent.memory_store.retention import MemoryRetentionService
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    candidates = CandidateService(home.owner_memory_candidates_jsonl)
+    service = MemoryRetentionService(home_paths=home, candidates=candidates)
+
+    audits_root = Path(home.owner_home_dir) / "audits"
+    audit_task = audits_root / "audit-1"
+    (audit_task / "work").mkdir(parents=True)
+    (audit_task / "work" / "state.json").write_text(
+        json.dumps(
+            {"task_id": "audit-1", "status": "DONE", "updated_at": NOW.timestamp() - 400 * 86400}
+        ),
+        encoding="utf-8",
+    )
+
+    report = service.plan(now=NOW)
+
+    assert [a for a in report.actions if str(a.path) == str(audit_task)], (
+        "audits 下的终态任务必须进入计划"
+    )
+
+
+# LLM: MR5（9b 复审）：audits 的规范深度是 1（audits/<audit_id>），不是 2。深一层不算任务根。
+# 函数用途: 验证 audits 深一层不被当成任务根。
+def test_audits_root_deeper_level_is_not_a_task_root(tmp_path):
+    from agent_py_agent.agent.memory_store.candidates import CandidateService
+    from agent_py_agent.agent.memory_store.retention import MemoryRetentionService
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    candidates = CandidateService(home.owner_memory_candidates_jsonl)
+    service = MemoryRetentionService(home_paths=home, candidates=candidates)
+
+    deeper = Path(home.owner_home_dir) / "audits" / "audit-1" / "nested"
+    (deeper / "work").mkdir(parents=True)
+    (deeper / "work" / "state.json").write_text(
+        json.dumps(
+            {"task_id": "deep", "status": "DONE", "updated_at": NOW.timestamp() - 400 * 86400}
+        ),
+        encoding="utf-8",
+    )
+
+    report = service.plan(now=NOW)
+    assert not [a for a in report.actions if str(a.path).startswith(str(deeper))], (
+        "audits 深一层不是规范任务根"
+    )
+
+
+# LLM: 接上一条：写死成 2 时同一情形会被误判为任务根，所以这两条一起把深度锁住。
+# 函数用途: 与上一条互补，确认 audits 第一层才算任务根。
+def test_audits_root_first_level_is_a_task_root(tmp_path):
+    from agent_py_agent.agent.conversation.workspace_paths import canonical_task_root
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    owner_home = Path(home.owner_home_dir)
+
+    assert canonical_task_root(owner_home, owner_home / "audits" / "a1") is not None
+    assert canonical_task_root(owner_home, owner_home / "audits" / "a1" / "deep") is None
+    assert canonical_task_root(owner_home, owner_home / "runs" / "2026-01-01" / "k1") is not None
+    assert canonical_task_root(owner_home, owner_home / "runs" / "2026-01-01") is None
+
+
+# LLM: MR6（9b 复审）：CANDIDATES_UNREADABLE 属于策略级错误，必须留在整份拒绝集合里。
+# 函数用途: 验证候选账本读不懂时整份拒绝。
+def test_candidates_unreadable_is_importable():
+    from agent_py_agent.agent.memory_store.retention import _POLICY_LEVEL_ERROR_CODES
+
+    assert "MEMORY_RETENTION_CANDIDATES_UNREADABLE" in _POLICY_LEVEL_ERROR_CODES
+    assert _has_policy_level_error(
+        (error("MEMORY_RETENTION_CANDIDATES_UNREADABLE", "/candidates.jsonl"),)
+    ) is True
+
+
+# LLM: dev 2026-09-29 第 5 条：_path_overlaps 不能把分隔符写死成 "/"，否则 Windows 路径下
+#   识别不到祖先/后代、隔离静默失效。
+# 函数用途: 验证 Windows 反斜杠路径的重叠判定。
+def test_path_overlaps_handles_windows_separators():
+    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\a\\work\\state.json") is True
+    assert _path_overlaps("C:\\tasks\\a\\work\\state.json", "C:\\tasks\\a") is True
+    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\ab") is False
+    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\a") is True

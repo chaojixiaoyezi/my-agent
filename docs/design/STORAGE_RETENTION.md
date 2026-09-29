@@ -164,3 +164,13 @@
 - 各类数据的默认天数（快照、Gateway 记录、子代理目录）取多少，需要结合恢复与审计需求决定。
 - 用户交付物的“存储占用”视图放在哪个入口（设置页、`/status`、IM 命令），以及回收站的恢复方式。
 - 登记表放在 `settings` 还是 `user_space`，以及它与参数中心（`PARAMETER_CENTER.md`）如何分工。
+
+## 已知设计残留（2026-09-29 记录，本次不改逻辑）
+
+- **subagent_scratch 不看父任务是否已结束**：判定只看子代理自身的终态与时间。父任务仍在运行时，
+  它下面早已结束（超过 `subagent_scratch_days`，默认 30 天）的子代理，其
+  `inbox` / `outbox` / `compactions` / `artifacts/tool_outputs` 仍会被移入回收站
+  （`final_report` 不动，回收站内 30 天内可恢复）。这是本次保留的既有行为，只在此写明。
+- **所有恢复材料扫描都按规范根与规范深度**：`runs/<date>/<key>` 与 `tasks/<date>/<slug>` 第二层、
+  `audits/<audit_id>` 第一层，由 `workspace_paths.canonical_task_root` 统一判定；非规范深度的
+  「像任务」目录一律不算任务根（2026-09-29 起 tool_output 与 subagent_scratch 两处也套用）。

@@ -370,8 +370,13 @@ def _tool_output_actions(
     actions: list[MemoryRetentionAction] = []
     # 本片只扩 completed_task；tool output 侧维持原范围（仅旧 O/tasks），不随恢复根一起扩。
     root = Path(home.owner_tasks_dir)
+    owner_home = Path(home.owner_home_dir)
     for state_path in sorted(root.rglob("work/state.json")) if root.exists() else ():
         task_root = state_path.parent.parent
+        # 只收窄：任务根必须落在规范深度上。运行中任务的 output 里嵌套一份「像任务」的目录
+        # （带终态 state.json）时，它下面的 blobs/tool_outputs 不能被当成任务根移走（dev 2026-09-29）。
+        if canonical_task_root(owner_home, task_root) is None:
+            continue
         if task_root.resolve(strict=False) in selected_task_roots:
             continue
         state = _read_state(state_path, errors, code="MEMORY_RETENTION_TASK_STATE_INVALID")
@@ -431,10 +436,14 @@ def _subagent_scratch_actions(
     if policy.subagent_scratch_days <= 0:
         return []
     task_root_dir = Path(home.owner_tasks_dir)
+    owner_home = Path(home.owner_home_dir)
     cutoff = now.timestamp() - policy.subagent_scratch_days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     for agents_dir in sorted(task_root_dir.rglob("work/agents")) if task_root_dir.exists() else ():
         task_root = agents_dir.parent.parent
+        # 只收窄：同上，嵌套的「像任务」目录不算任务根，它下面的子代理 inbox 不能被动。
+        if canonical_task_root(owner_home, task_root) is None:
+            continue
         if task_root.resolve(strict=False) in selected_task_roots:
             continue
         task_state = _read_state(

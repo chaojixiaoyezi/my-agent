@@ -6,7 +6,7 @@ from __future__ import annotations
 # 模块用途: 组合 typed policy 扫描、锁内重规划、执行重验证，以及正式长期记忆硬删除。
 
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 
 from ..common.json_io import locked_json_path
 from .candidates import CandidateService
@@ -164,6 +164,10 @@ def _has_policy_level_error(errors: tuple[MemoryRetentionError, ...]) -> bool:
 
 # LLM: 只按"错误路径是否为动作路径的祖先或后代"判断重叠；不按类别名、目录名或文件名放宽，
 #   也不因为某个类别有错就整类跳过。
+#   定位说明（dev 2026-09-29）：这是**纵深防御**——三类扫描在读不懂父任务 state.json 时都整棵跳过，
+#   合法输入构造不出"坏子树里带动作"的计划（见 test_unreadable_task_root_yields_no_actions_underneath）。
+#   目前只比较 action.path，不比较 action.related_paths；后者不含任务根，所以暂时没有漏洞，
+#   将来若有动作把任务根放进 related_paths，这里要一并纳入。
 # 函数用途: 去掉与任一错误路径重叠的动作，返回可安全执行的计划。
 def _without_errored_subtrees(plan: MemoryRetentionReport) -> MemoryRetentionReport:
     if not plan.errors:
@@ -186,12 +190,23 @@ def _without_errored_subtrees(plan: MemoryRetentionReport) -> MemoryRetentionRep
     )
 
 
-# LLM: 用字符串前缀比较，任一侧是另一侧的前缀（含相等）即视为同一棵子树；只做路径文本比较，不读盘。
+# LLM: 用 Path 的祖先/后代语义判断是否同一棵子树（含相等），不把分隔符写死成 "/"——Windows 路径下
+#   写死分隔符会让隔离静默失效（dev 2026-09-29）。只做纯路径比较，不读盘。
 # 函数用途: 判断两条路径是否处于同一棵目录树。
 def _path_overlaps(left: str, right: str) -> bool:
     if left == right:
         return True
-    return left.startswith(right + "/") or right.startswith(left + "/")
+    # 当前平台的 Path 只理解本平台分隔符：POSIX 上把 "C:\\tasks\\a" 当成单个文件名，
+    # 所以两边都要按 Windows 语义再比一次，任一命中即算重叠。
+    for make in (PurePath, PureWindowsPath):
+        try:
+            left_path = make(left)
+            right_path = make(right)
+        except (TypeError, ValueError):
+            continue
+        if left_path.is_relative_to(right_path) or right_path.is_relative_to(left_path):
+            return True
+    return False
 
 
 OwnerRetentionPlan = MemoryRetentionReport

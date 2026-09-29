@@ -164,6 +164,17 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
   - `ignore-errors`（守卫退回"有错误就整份拒绝"）→ 杀死 1 条；
   - `drop-isolation-semantics`（把错误路径列表清空）→ 杀死 1 条（`test_only_errored_subtree_actions_are_dropped`）；
   - `ignore-audit`（把 `audit` 类别加回扫描）→ 杀死 2 条；
+
+  - **9b 复审（2026-09-29）补的回归**：4 条关键安全点此前没有测试锁住，4 个变异在相关测试下全部存活。现已补齐并把 4 个变异全部杀死：
+    - MR2（去掉 `_iter_task_states` 的规范深度过滤）→ 杀 2 条（`test_nested_task_like_dir_is_not_treated_as_task_root`、`test_audits_root_deeper_level_is_not_a_task_root`）：运行中任务 output 里嵌套一份带终态 state.json 的「像任务」目录时，它不能被当成任务根整棵移走。
+    - MR4（`_recovery_roots` 丢掉 `O/audits`）→ 杀 1 条（`test_audits_root_is_scanned_for_terminal_tasks`）。
+    - MR5（`audits` 深度 1 改成 2）→ 杀 3 条（audits 首层是任务根 / 深一层不是 / `canonical_task_root` 深度）。
+    - MR6（把 `CANDIDATES_UNREADABLE` 移出整份拒绝集合）→ 杀 1 条（`test_candidates_unreadable_is_importable`）。
+  - **tool_output / subagent_scratch 两处的深度收窄（dev 2026-09-29 第 4 条）**：这两处的 `rglob` 原来不限深度，嵌套的「像任务」目录会让它下面的 `blobs/tool_outputs` 或子代理 `inbox` 被规划移走。现两处都过 `canonical_task_root`，只收窄、不改「tool output 只扫 O/tasks」的范围。
+    - 生产 plan 纯结构化核对（只跑 `plan()`，未 apply）：`tool_output` 71 + `subagent_scratch` 8090 = **8161 条动作，涉及 256 个任务根，任务根不在规范深度上的 0 条**。
+  - **Windows 路径下的隔离（dev 2026-09-29 第 5 条）**：`_path_overlaps` 原来把分隔符写死成 `/`，Windows 路径识别不到祖先/后代、隔离会静默失效。现改成同时用 `PurePath` 与 `PureWindowsPath` 比一遍（POSIX 上 `PurePath("C:\\tasks\\a")` 是单个文件名，这正是原缺陷），`test_path_overlaps_handles_windows_separators` 钉住。
+  - **`test_home_maintenance.py` 按 audit 跳过改写**：它原来用 audit 清理验证「只清超期的」，audit 跳过后就红了（我先前定向没包含它，全仓会红——已修正）。现改由 `daily` 类别承担同一断言，audit 侧改为反向断言「超期也原地保留、计划里不出现 audit 动作」。
+  - **文档补充**：`_without_errored_subtrees` 注释写明它是纵深防御、只比较 `action.path` 不比较 `related_paths`；`docs/design/STORAGE_RETENTION.md` 写明一处保留的设计残留——subagent_scratch 不看父任务是否已结束。
   - **`no-isolation`（`executable = plan`）的覆盖情况（dev 2026-09-29 要求核实后更新）**：它**杀不掉**，而且原因是结构性的，已核实清楚：
     - 用合法输入构造不出"坏子树里带动作"的计划。三类扫描在读不懂父任务 `state.json` 时都整棵跳过：`_task_actions` 记错误后 `continue`；`_tool_output_actions` 同一个 `_read_state` 拿到 `None` 就 `continue`；`_subagent_scratch_actions` 先读父任务 state，`None` 就 `continue`（父状态是授权前提），**连它下面健康且超期的子代理 scratch 也不会进计划**。
     - 所以 apply 的路径隔离在本仓库里是**纵深防御**：即使把过滤整段拿掉，能进 `apply` 的合法计划里本来就没有落在坏根下的动作。
