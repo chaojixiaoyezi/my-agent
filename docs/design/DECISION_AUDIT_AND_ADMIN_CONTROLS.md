@@ -75,15 +75,25 @@
 - 未发出 Z 是一次 HTTP 尝试都没有的失败，例如准入忙、发送前期限就用完了，不计入失败。
 - 进行中的调用都不计。
 
-**总行“缺报”：** 只统计非决策调用，非决策调用的口径不变。决策调用的数据来源已在决策段说明，不重复计。
+**非决策调用（LLM 段，2026-09-28 统一）：** 主模型、辅助调用与决策段同一口径，数字是全部用途的原始累计减去决策分区，
+同一次调用不会在两段都出现。格式：`LLM 估算 N token（未完成） · 未发出 M · 缺报 K`，没有的段不显示。
+- 估算（未完成）：发出去之后超时或失败的，取发送前的本地估算（主模型是发送前的可见上下文估算，辅助调用是请求材料估算）。
+- 未发出：一次 HTTP 尝试都没有就结束的，例如准入等待中超时、发送前就失败。
+- 缺报：只剩旧账里分不清是否发出的失败。成功但供应商没回报用量的调用，已按本地估算计入会话累计（数字前带 `~`），
+  不再算缺报。原先的 `unreported_calls`（没有供应商回报就计）不再有读取方，已删除。
 
 **口径实现：**
 - 口径由 `conversation/model_metrics.py` 的 `unfinished_usage_facts` / `split_unsent_failures` 统一给出，`audit_records` 也用这两个函数。
 - 汇总只累加原始次数，展示时才推导。原因是迟到的尝试可能落在后一条用量事件里，逐条推导会算错。
+- 时间窗边界：迟到的尝试事件还没记进账本或用量快照之前，这次调用会暂时显示成“未发出”；等尝试补记进来，才转成失败并带上估算。统计行和 audit_records 用量行都是这样。
+- 次数互不重叠：决策段的成功、失败、未发出可以直接相加。没有用量数据的调用不另起一个“缺报”数，而是在所属次数后面加说明，例如“成功 2（其中 2 次未回报用量）”“失败 3（其中 3 次分不清是否发出）”（ae 复审建议）。LLM 段没有成功、失败次数，所以保留“缺报 K”。
 - 旧显示快照：失败构成出现前写下的快照（线程上落盘的显示副本、旧 Gateway 推来的统计）没有 `decision_unknown_failures` 键。
   `public_model_metrics` 按旧用量行同一规则把它的失败整体记为分不清是否发出，不补 0；补 0 会把旧失败说成“未发出”（9b 复审，2026-09-28）。
-- 数据取自 `conversation/model_metrics.py` 的白名单字段：原有的 `decision_input_reported_calls/decision_success_count/decision_failure_count`，
-  加上 `decision_unfinished_calls/decision_estimated_tokens/decision_unknown_failures/decision_unreported_calls`。
+  这类快照也没有全部用途的失败构成，LLM 段留空，下一次模型边界从账本重算后恢复。
+- 数据取自 `conversation/model_metrics.py` 的白名单字段：
+  - 决策：原有的 `decision_input_reported_calls/decision_success_count/decision_failure_count`，
+    加上 `decision_unfinished_calls/decision_estimated_tokens/decision_unknown_failures`；
+  - 全部用途：`failure_count/unfinished_calls/unfinished_tokens/unknown_failures`，LLM 段用它减去决策分区。
 
 **不变的部分：** 约数不写回账本，不参与任何预算或调度；没有用途分区的旧账不计入决策。
 
@@ -149,7 +159,7 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
 **做法**（只改汇总口径，结果日志行与用量记账都不变，与 TUI 统计行同一口径）：
 - **用量行**：
   - 新增 `jev_failures`：发出去之后失败或超时的次数，旧账分不清是否发出的也算；
-  - 新增 `not_sent_calls`：一次 HTTP 尝试都没有的次数；
+  - 新增 `not_sent_calls`：建了调用记录、却一次 HTTP 尝试都没有的次数（如准入忙、发送前期限用完）；
   - 新增 `failures_send_unknown`：旧账里的失败次数。
   - 原有的 `failed/timed_out` 原始计数不变。Jev 失败率只用 `jev_failures` 算。
 - **各点位结果**：失败类状态（`deadline`、`error`、`cooldown`、`configuration_required`）里请求没发出去的，不进 `points`，
@@ -159,6 +169,7 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
     `notification_capacity`、`settings_busy`、`invalid_input`、`configuration_unavailable`、`connection_backoff`、`point_backoff`，
     或者 status 本身是 `cooldown`。
   - 最近行照原样保留。
+  - **两种“未发出”范围不同**：`points.not_sent` 还包括根本没建调用记录的结果（冷却、`budget_exhausted` 等），通常比用量的 `not_sent_calls` 大，两个数不要对比或相加。
 - **工具说明**：`audit_records` 的说明同步写明这些字段的含义。
 
 ### 每个点位最近为什么没触发（2026-09-27）

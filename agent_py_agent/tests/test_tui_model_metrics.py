@@ -98,7 +98,9 @@ def test_cache_unknown_is_not_zero_and_protocols_share_denominator(tmp_path, usa
     metrics = publish_model_metrics(agent, params, pending=False, response=response)
     assert metrics["cache_percent"] == expected
     if not usage:
-        assert metrics["estimated_tokens"] > 0 and metrics["unreported_calls"] == 1
+        # 供应商没回报用量：按本地估算计入会话累计（带 ~），不是 0；有估算就不算“缺报”（缺报只留给真的没有数据的调用）
+        text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
+        assert metrics["estimated_tokens"] > 0 and "会话累计 ~" in text and "缺报" not in text
 
 
 def test_previous_requests_accumulate_but_current_persisted_snapshot_not_added_twice(tmp_path):
@@ -292,7 +294,10 @@ def test_standalone_compact_failure_keeps_explicit_unknown_usage(tmp_path):
         request_id=params.request_id, run_id=params.run_id, task_id="task-1", operation_id="failed-compact")
     settle_standalone_model_usage(request)
     metrics = model_metrics_from_thread(agent.conversation_store, thread.thread_id)
-    assert metrics["unreported_calls"] >= 1
+    # 一次 HTTP 尝试都没有就失败：请求没发出去，明确显示“未发出”，不当成 0 用量藏起来
+    assert metrics["failure_count"] >= 1 and metrics["unfinished_calls"] == 0 and metrics["unknown_failures"] == 0
+    text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
+    assert "LLM 未发出" in text
 
 
 @pytest.mark.parametrize("standalone,failed", [(True, False), (True, True), (False, False), (False, True)])

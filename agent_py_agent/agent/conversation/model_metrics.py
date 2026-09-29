@@ -9,16 +9,16 @@ from collections.abc import Mapping
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA = "model_runtime_metrics.v1"
+# 全部用途的计数；failure_count/unfinished_calls/unfinished_tokens/unknown_failures 是跨事件累加的原始次数
+# （口径见 unfinished_usage_facts），展示时减去决策分区得到非决策调用，再按 split_unsent_failures 推导
 _COUNTS = (
-    "model_rounds", "retry_count", "input_tokens", "output_tokens",
-    "estimated_tokens", "unreported_calls", "sampled_at_ns",
+    "model_rounds", "retry_count", "input_tokens", "output_tokens", "estimated_tokens", "sampled_at_ns",
+    "failure_count", "unfinished_calls", "unfinished_tokens", "unknown_failures",
 )
 # 决策分区的显示计数（都是跨事件累加的原始次数，展示时再推导）：已报输入的调用次数（供约数外推）、成功（finished）、
-# 失败（failed + timed_out 原始次数）、其中已发出后未完成的次数与本地估算输入、分不清是否发出的旧账失败次数、
-# 以及决策在原“缺报”计数里所占的份额（决策段自己讲清数据来源，总行不再重复计）
+# 失败（failed + timed_out 原始次数）、其中已发出后未完成的次数与本地估算输入、分不清是否发出的旧账失败次数
 _DECISION_COUNTS = ("decision_input_reported_calls", "decision_success_count", "decision_failure_count",
-                    "decision_unfinished_calls", "decision_estimated_tokens", "decision_unknown_failures",
-                    "decision_unreported_calls")
+                    "decision_unfinished_calls", "decision_estimated_tokens", "decision_unknown_failures")
 
 
 # LLM: 数值白名单不接受 bool、负数和无穷大，调用方不得借此传递提示词或工具参数。
@@ -99,7 +99,8 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
     cached = state.get("_model_metrics_baseline") if isinstance(state, dict) else None
     if isinstance(cached, tuple) and cached[0] == (key, revision):
         return dict(cached[1])
-    totals = {"input_tokens": 0, "output_tokens": 0, "estimated_tokens": 0, "unreported_calls": 0, "totals_known": True,
+    totals = {"input_tokens": 0, "output_tokens": 0, "estimated_tokens": 0, "totals_known": True,
+              "failure_count": 0, "unfinished_calls": 0, "unfinished_tokens": 0, "unknown_failures": 0,
               "decision_call_count": 0, "decision_input_tokens": None, **dict.fromkeys(_DECISION_COUNTS, 0)}
     reader = getattr(usage_store, "events_report", None)
     if thread_id and callable(reader):
@@ -140,8 +141,9 @@ def split_unsent_failures(failures: int, unfinished_calls: int, unknown_failures
 
 # LLM: provider input 已含缓存读写，不再加缓存；决策只是原总量子集，逐字段缺报不能由信封计数猜测。
 #   成功/失败取决策分区 status_counts（finished / failed + timed_out），进行中的调用两边都不计；失败只累加原始次数，
-#   “发出去后失败 / 没发出去”由 split_unsent_failures 在展示时推导。决策在原“缺报”里的份额单独累加，供总行扣除。
-# 函数用途: 汇总原 token 并附加决策输入、成败次数与未完成估算；旧账没有用途分区时不计入决策，也不推断为零。
+#   “发出去后失败 / 没发出去”由 split_unsent_failures 在展示时推导。全部用途的失败构成用同一个 unfinished_usage_facts
+#   累加（没有用途分区的旧账也有根摘要），展示时减去决策分区就是非决策调用，不另写口径。
+# 函数用途: 汇总原 token 并附加全部用途与决策的失败构成、成败次数与未完成估算；旧账没有用途分区时不计入决策，也不推断为零。
 def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None:
     breakdown = summary.get("usage_breakdown")
     breakdown = breakdown if isinstance(breakdown, Mapping) else {}
@@ -149,8 +151,11 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
     for key in ("input_tokens", "output_tokens"):
         totals[key] += int(provider.get(key) or 0)
     totals["estimated_tokens"] += sum(int(estimated.get(key) or 0) for key in ("input_tokens", "output_tokens"))
-    statuses = summary.get("status_counts") or {}
-    totals["unreported_calls"] += int(estimated.get("call_count") or 0) + sum(int(statuses.get(key) or 0) for key in ("failed", "timed_out"))
+    overall = unfinished_usage_facts(summary)
+    totals["failure_count"] += overall["failures"]
+    totals["unfinished_calls"] += overall["unfinished_calls"]
+    totals["unfinished_tokens"] += overall["unfinished_tokens"]
+    totals["unknown_failures"] += overall["unknown_failures"]
     purposes = summary.get("purpose_breakdown")
     if not isinstance(purposes, Mapping):
         return
@@ -165,8 +170,6 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
     totals["decision_unfinished_calls"] += facts["unfinished_calls"]
     totals["decision_estimated_tokens"] += facts["unfinished_tokens"]
     totals["decision_unknown_failures"] += facts["unknown_failures"]
-    estimated_calls = int((decision.get("usage_breakdown", {}).get("estimated") or {}).get("call_count") or 0)
-    totals["decision_unreported_calls"] += estimated_calls + facts["failures"]
     if reported:
         totals["decision_input_tokens"] = int(totals["decision_input_tokens"] or 0) + int(usage.get("input_tokens") or 0)
 

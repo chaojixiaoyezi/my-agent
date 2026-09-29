@@ -78,9 +78,9 @@ def test_purpose_snapshot_delta_counts_input_once_and_keeps_real_output(tmp_path
 @pytest.mark.parametrize("usage,expected,reported,label", [
     ({"input_tokens": 0}, 0, 1, "决策 已报 0 token · 成功 1 · 失败 0"),
     ({"input_tokens": 12, "output_tokens": 3}, 12, 1, "决策 已报 12 token · 成功 1 · 失败 0"),
-    # 成功却一次都没报输入、也没有可外推的已报调用：真的没有数据，才显示“缺报”（不能显示成 0）
-    ({"output_tokens": 3}, None, 0, "决策 缺报 1 · 成功 1 · 失败 0"),
-    ({}, None, 0, "决策 缺报 1 · 成功 1 · 失败 0"),
+    # 成功却一次都没报输入、也没有可外推的已报调用：真的没有数据，挂在成功次数上说明（不能显示成 0，也不另起重复计数）
+    ({"output_tokens": 3}, None, 0, "决策 成功 1（其中 1 次未回报用量） · 失败 0"),
+    ({}, None, 0, "决策 成功 1（其中 1 次未回报用量） · 失败 0"),
 ])
 def test_decision_metrics_preserve_main_rounds_cache_tools_and_unknown(tmp_path, usage, expected, reported, label):
     agent, params, clock, _, _ = fixture(tmp_path)
