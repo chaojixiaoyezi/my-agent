@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -852,23 +853,40 @@ def test_x1b_lock_failure_does_not_write(tmp_path, monkeypatch) -> None:
 # ------------------------------------------------ V1/V2：缓存不可读不能冒泡成业务失败
 
 
-def _make_unreadable(path: Path) -> None:
-    """把一个文件变成「存在但读不了」：chmod 000（macOS/linux 通用）。"""
+# 两种「存在但读不了」的构造：chmod 000 只对非 root 生效（root 不受读权限限制，root 下跳过）；
+# 「缓存路径是一个目录」对 root 同样读不了、写不进，Linux 容器通道以 root 跑 pytest 时靠它把 V1/V2 真正测到。
+_UNREADABLE_DAMAGES = ("chmod", "directory")
+
+
+def _make_unreadable(path: Path, damage: str = "chmod") -> None:
+    """按 damage 把缓存路径变成「存在但读不了」；root 下 chmod 无法构造时跳过该参数。"""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if damage == "directory":
+        if path.is_file():
+            path.unlink()
+        path.mkdir()
+        return
+    if os.geteuid() == 0:
+        pytest.skip("root 不受读权限限制，读不了的情形无法构造")
     path.write_text("{}", encoding="utf-8")
     path.chmod(0o000)
 
 
-def test_v1_add_succeeds_when_cache_unreadable(tmp_path) -> None:
+def _restore_readable(path: Path) -> None:
+    """测试收尾：把 chmod 000 的文件改回可读；目录构造不需要复原。"""
+    if not path.is_dir():
+        path.chmod(0o600)
+
+
+@pytest.mark.parametrize("damage", _UNREADABLE_DAMAGES)
+def test_v1_add_succeeds_when_cache_unreadable(tmp_path, damage: str) -> None:
     """缓存文件读不了时，add 必须正常返回——它在权威 JSONL **已经提交之后**才清缓存，
     读错误冒泡会让调用方以为写入失败而重试（V1）。"""
-    import os as _os
-
     from agent_py_agent.agent.retrieval.text_vector_cache import TextVectorCache as _C
 
     mem = JsonlMemory(tmp_path / "mem.jsonl", embedder=LocalHashingEmbedder(dim=128))
     cache_path = tmp_path / TEXT_CACHE_FILE
-    _make_unreadable(cache_path)
+    _make_unreadable(cache_path, damage)
     # 先确认"读不了"这件事真的被构造出来了，否则测试会假绿
     assert _C(cache_path).last_read_error is not None
     try:
@@ -876,22 +894,25 @@ def test_v1_add_succeeds_when_cache_unreadable(tmp_path) -> None:
         assert record is not None
         assert any(r.content == "团建改到周六上午" for r in mem.all())
     finally:
-        _os.chmod(cache_path, 0o600)
+        _restore_readable(cache_path)
 
 
-def test_v2_search_degrades_when_cache_unreadable(tmp_path) -> None:
+@pytest.mark.parametrize("damage", _UNREADABLE_DAMAGES)
+def test_v2_search_degrades_when_cache_unreadable(tmp_path, damage: str) -> None:
     """缓存文件读不了时检索必须退化为当场嵌入，不能整次失败（V2）。"""
-    import os as _os
+    from agent_py_agent.agent.retrieval.text_vector_cache import TextVectorCache as _C
 
     mem = JsonlMemory(tmp_path / "mem.jsonl", embedder=LocalHashingEmbedder(dim=128))
     _seed(mem, ["团建活动定在周五下午"])
     cache_path = tmp_path / TEXT_CACHE_FILE
-    _make_unreadable(cache_path)
+    _make_unreadable(cache_path, damage)
+    # 前置断言：读不了必须真的构造出来，否则缓存可读时检索照样成功，测试假绿
+    assert _C(cache_path).last_read_error is not None
     try:
         results = mem.search_scoped("团建", top_k=3, predicate=_all)  # 不能抛
         assert results
     finally:
-        _os.chmod(cache_path, 0o600)
+        _restore_readable(cache_path)
 
 
 def test_flush_does_not_overwrite_when_disk_unreadable(tmp_path, monkeypatch) -> None:

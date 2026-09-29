@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 向量缓存「读不了」用例的 root 守卫与目录构造（2026-09-29，分支 `claude/38-vector-cache-root-guard`，基于 `89af6b07a`）
+
+- **来源**：Linux 容器通道以 root 跑 pytest，`chmod 000` 拦不住 root 读，`test_memory_vector_cache.py` 的 V1 用例前置断言失败、
+  V2 用例没有前置断言在容器里假绿（e850ceb04 通道 1 failed）。
+- **改法**：`_make_unreadable(path, damage)` 参数化两种构造——`chmod`（root 下按 `test_subagent_package_entries.py` 的写法 `pytest.skip`）
+  与 `directory`（缓存路径本身是目录，root 同样读不了、写不进）；V1/V2 各跑两种，V2 补前置断言 `last_read_error is not None`。
+- **验证**：Mac 非 root 49 passed（两种构造都跑）；Linux 容器 root 下单跑该文件——chmod 变体 2 条 skip、目录变体照跑、0 failed
+  （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
+  四个变体全部变红。
+
 ## 后台进程与终端会话原因码：ae 复审建议 2–5（2026-09-29，分支 `claude/75-process-codes-followups`，基于 `e850ceb04`）
 
 - **建议 2**：`terminal_session` 关闭未确认时，终止回执结构化放进 `result_envelope.process.termination`（与后台进程停止未确认同一形状）；
