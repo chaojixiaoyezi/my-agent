@@ -1,5 +1,78 @@
 # Memory Structure
 
+## 缓存不可读时的行为（构造宽松、写入严格，2026-09-29）
+
+`TextVectorCache` 对"缓存文件读不了"（权限/EIO/EMFILE，不是"文件不存在"）分两种态度：
+- **构造宽松**：`__init__` 捕获 `OSError`，内存视图从空开始，记 `last_read_error`。读错误**绝不外抛**，
+  因为缓存只是派生数据——`mem.add` 是在权威 JSONL 已提交之后才清缓存，读错误冒泡会被调用方当成
+  "写入失败"而重试；`search_scoped` 冒泡则会让整次检索失败。
+- **写入严格**：`_flush` 读不出磁盘内容时**放弃这次写**，免得把读不出来的缓存当成空、再原子替换成空文件。
+- 四个懒建缓存的调用点（`_cached_vectors_for`、`_remember_cached_vectors`、`_forget_cached_vectors`、
+  `_retain_text_cache_keys`）都把 `_text_vector_cache()` 放进各自的 `try`。
+
+`remove` 在"盘上本来就没有这些键"时跳过整文件重写（32 MB 缓存删一次约 1.6 秒）。
+判据在 **`_flush` 的文件锁内**、比较改动前后的**盘上内容**得出，不能用本实例内存判断"没变"：
+另一个实例（父代理 vs 子代理 worker）写的键，本实例内存里没有、盘上有（P5d）。
+跳过写时仍用盘上内容刷新 `_items`，本实例内存视图与盘上保持一致。
+
+## 检索侧向量缓存（正文哈希键，2026-09-28）
+
+`memory_store/jsonl._search_scoped` 在混合检索前先向 `retrieval/vector_store.VectorStore` 取一次正文向量缓存：
+缓存落在**独立文件** `memory_text_vectors.json`（`retrieval/text_vector_cache.TextVectorCache`），与权威
+`memory_vectors.json` 完全分开：
+- 拆文件的原因：共处一个文件时，缓存项会挤占 `VectorStore.search` 的 top_k，且只做检索的进程整文件写回
+  会把已删除事实的**明文**重新写进 `memory_vectors.json`（违反 `_jsonl_indexing` 的清明文约定）。现在检索路径永不重写该文件。
+- 键由 `text_vector_cache.text_cache_key(fingerprint, text)` 生成，`fingerprint = sha256(实现类名 + api_base + model)[:16]`；
+  正文用 SHA-256。端点与模型名只以指纹落盘，不存明文；换模型/换端点即自然失效。
+- 参与嵌入与缓存键的文本由 `text_vector_cache.index_text(content, attributes)` 统一生成（正文 + `keywords_en`）；
+  检索、写入、清理三处共用同一口径，否则带 `keywords_en` 的事实删不掉。
+- 缓存向量长度必须与当轮 query 向量一致才算命中；不一致（同名模型换维度）一律视为缺失、现场重嵌，
+  避免旧长度向量喂进 `mean_center` 越界导致整轮失败。非 list 值同样按未命中处理。
+- `HybridRetriever.rank(cached_vectors=...)` 与 `_vector_order` 只对缺失项调用 `embed`，
+  本轮现嵌结果放在 `last_fresh_doc_vectors` 供 `_remember_cached_vectors` 回写。
+- 回写前用 active 身份复核：记录已删除或被替换的键不回写（收口"取缓存/写回"之间的竞态）。
+- `apply_batch` 在删除/替换提交后按记录级索引文本清项：已删事实取历史全部版本，`replace` 额外取被覆盖的旧版本。
+- `index_all` 顺带调 `_retain_text_cache_keys` 回收不属于任何 active 记录的键（换模型/迁移遗留）。
+- 孤儿回收也挂进 owner 维护（`user_space/owner_maintenance.run_owner_retention_if_due`，默认 24 小时一次），
+  这样不跑手动命令也能自动收口。
+  - **路径必须是 canonical 的** `home.owner_memory_long_term_jsonl`。
+  - **回收不依赖 embedder**：缓存键形如 `<指纹>:<正文哈希>`，维护进程按 key 里的**正文哈希**比对
+    active 记录的 `index_text` 哈希来算保留集合（`TextVectorCache.retain_content_hashes`）。
+    此前维护里手拼 `memory/memory.jsonl` 且新建的 `JsonlMemory` 没有 embedder，导致回收恒为 0——
+    每天都在 `maintenance.json` 写一个假的 `text_vector_cache_reclaimed: 0`，看起来像"跑过、没有孤儿"。
+- 缓存读/写/清成功都会恢复健康状态（`cache_read` / `cache_write` / `cache_purge`），
+  失败只记语义健康诊断、不影响检索正确性与权威 JSONL。跨进程写在 `locked_json_path` sidecar 锁内重读合并。
+  - `keep()` 判据在**拿到跨进程文件锁之后**才求值；拿锁失败时**不写盘**（只记 `last_write_error`），
+    因为此时磁盘内容不可信，写回会复活别的实例已删的键。
+  - `remove` **一律在文件锁内从磁盘上减掉请求的键**，不要求"本实例内存里有这个键"——父代理与每个
+    子代理 worker 各有自己的缓存实例，只看内存会让子代理删除的事实永久留下孤儿。
+- 跨进程合并**只写本次增量**（本次 put 的键 / 本次 remove 的键），不把整份内存快照叠回磁盘——
+  否则会把别的进程已经删掉的键重新写出来，复活已删除事实的向量。写失败记进 `last_write_error`
+  并反映到健康状态，不静默吞掉。
+- `_load` 逐键跳过坏值：一条脏数据只丢该键，不让整个缓存文件作废（否则缓存被永久关掉、每次都全量重嵌）。
+  只有"文件不存在"才当成空缓存。
+- 旧格式文件（只有 entry_id 键，或旧 `textcache:v1:` 前缀键）不会被新键命中：调用方按缺失处理并全量重算，不做隐式迁移。
+- 两个生产 embedder 暴露只读 `model` 与 `api_base` 属性（参与指纹，不含密钥），MiniMax 与 OpenAI 兼容实现同契约。
+
+### 已知内在限制（不是缺陷，是设计边界）
+
+- **同一 `(实现类, api_base, model)` 背后换成另一个同维度模型时，旧向量会被静默使用。**
+  指纹只认"实现类 + 端点 + 模型名"，不认端点背后真正部署的权重。若运维在同一地址、同一模型名下
+  换了权重而维度不变，缓存命中的是旧权重算出的向量，语义臂仍能工作但排序可能与重算不同。
+  换权重请同时改模型名（或端点），让指纹变化、缓存自然失效。
+- 缓存键不含维度：长度守卫在读取点按"向量长度 vs 当轮 query 长度"比对完成，不靠键区分。
+- **每次 put / remove 都要整文件读一遍、再整文件写一遍**（JSON 单文件形态的固有代价）。
+  实测 1000 条事实 × 1536 维：缓存文件约 **32 MB**，load 约 0.5–0.7 秒，put / remove 各一次同量级。
+  量级再涨需要换分片或追加式存储，当前规模可以接受。
+
+### v1 遗留项的一次性清理（不需要迁移）
+
+第一版实现把正文缓存塞在 `memory_vectors.json` 里、键前缀为 `textcache:v1:`。**生产从未部署过 v1**，
+因此不做自动迁移。若某个开发机残留了这类键：它们是派生数据，直接删掉 `memory_vectors.json` 里所有
+`textcache:v1:` 开头的项即可（或整个删掉该文件，下次检索会按需要重建权威向量）。
+**注意：`index_all` 的孤儿回收不会清掉它们。** 回收只作用于 `memory_text_vectors.json`，
+而 v1 遗留项在 `memory_vectors.json` 里；两个文件互不相干。
+
 ## 记忆诊断回显的配置名单
 
 `cli/memory_doctor.py` 与 `cli/memory_commands/memory_doctor_cmd.py` 的 `_memory_config_payload` / `_build_archive_doctor` 只回显

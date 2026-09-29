@@ -29,6 +29,8 @@ class HybridRetriever:
 
     def __init__(self, embedder: EmbeddingProvider | None = None) -> None:
         self._embedder = embedder
+        # 本轮真正现嵌得到的文档向量（id → vector），供调用方回写缓存；未嵌时为空。
+        self.last_fresh_doc_vectors: dict[str, list[float]] = {}
 
     def rank(
         self,
@@ -37,6 +39,7 @@ class HybridRetriever:
         *,
         top_k: int = 10,
         vector_min_score: float = 0.0,
+        cached_vectors: dict[str, list[float]] | None = None,
     ) -> list[tuple[str, float]]:
         if not docs:
             return []
@@ -45,7 +48,9 @@ class HybridRetriever:
 
         bm25_order = [ids[i] for i in bm25_rank(query, texts)]
 
-        vec_order = self._vector_order(query, ids, texts, min_score=vector_min_score)
+        vec_order = self._vector_order(
+            query, ids, texts, min_score=vector_min_score, cached_vectors=cached_vectors
+        )
         if vec_order is None:
             # 无 embedder 或端点失败 → 纯 BM25(给个递减分,保持可比)
             return [(id, 1.0 / (i + 1)) for i, id in enumerate(bm25_order)][:top_k]
@@ -53,6 +58,9 @@ class HybridRetriever:
         fused = reciprocal_rank_fusion([bm25_order, vec_order])
         return fused[:top_k]
 
+    # LLM: 向量臂按文档 id 复用调用方传入的已有向量，只对缺失项调用 embed；调用方负责保证缓存与
+    #   embedder 的模型/维度一致（不一致时查找落空 → 全量重算，结果不变）。返回顺序仍由 cosine 决定。
+    # 函数用途: 计算向量臂顺序，有缓存时不重复嵌入未变化的正文。
     def _vector_order(
         self,
         query: str,
@@ -60,12 +68,37 @@ class HybridRetriever:
         texts: list[str],
         *,
         min_score: float,
+        cached_vectors: dict[str, list[float]] | None = None,
     ) -> list[str] | None:
         if self._embedder is None:
             return None
+        cache = cached_vectors or {}
+        self.last_fresh_doc_vectors = {}
         try:
             query_vec = self._embedder.embed([query])[0]
-            doc_vecs = self._embedder.embed(texts)
+        except (EmbeddingError, IndexError):
+            return None  # 端点抖动 → 降级纯 BM25
+        # 缓存里确有该 id、值是向量、且长度与本轮 query 一致，才算命中；键缺失、值非法或
+        # **长度不一致**都必须现嵌——同名模型背后实际向量长度变了时，旧向量喂进 mean_center
+        # 会越界抛 IndexError，整轮对话失败（复审探针 P3）。
+        qlen = len(query_vec)
+        missing_positions = [
+            i
+            for i, doc_id in enumerate(ids)
+            if not (isinstance(cache.get(doc_id), list) and len(cache[doc_id]) == qlen)
+        ]
+        try:
+            doc_vecs: list[list[float]] = [
+                list(cache[doc_id]) if isinstance(cache.get(doc_id), list) and len(cache[doc_id]) == qlen else []
+                for doc_id in ids
+            ]
+            if missing_positions:
+                fresh = self._embedder.embed([texts[i] for i in missing_positions])
+                if len(fresh) != len(missing_positions):
+                    return None
+                for slot, vec in zip(missing_positions, fresh):
+                    doc_vecs[slot] = list(vec)
+                    self.last_fresh_doc_vectors[ids[slot]] = list(vec)
         except (EmbeddingError, IndexError):
             return None  # 端点抖动 → 降级纯 BM25
         # 去"通用方向偏置"(某些文档和所有查询都高相似→干扰召回),提升语义召回区分度;通道运行时 也没做这步

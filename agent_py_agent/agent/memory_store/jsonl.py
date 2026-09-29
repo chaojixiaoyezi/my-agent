@@ -195,6 +195,7 @@ class _JsonlMemoryIdentityMixin:
         self._semantic_status = dict(semantic_status or {"state": "configured" if embedder is not None else "disabled"})
         self._semantic_errors: dict[str, str] = {}
         self._vector_store_cache = None
+        self._text_vector_cache_obj = None
         self.quota_enforcer = quota_enforcer
         # 访问信号缓冲:命中先累积内存,随下一次写原子落盘,避免每次召回都写一次文件。
         self._pending_access: dict[str, float] = {}
@@ -375,6 +376,13 @@ class _JsonlMemoryMutationMixin:
                     for record in committed
                     if record.entry_id not in final_removed_ids or record.action == "remove"
                 ]
+                # 被本次提交取代的旧正文：replace 会用新正文覆盖同 entry_id 的旧版本，
+                # 旧正文的缓存键必须在本次一并清掉，否则它只要事实还活着就永远留在缓存里（P2）。
+                superseded_versions = [
+                    prior
+                    for record in committed
+                    if record.action == "replace" and (prior := latest_events.get(record.entry_id)) is not None
+                ]
                 retained_events = [
                     record for record in current_events if record.entry_id not in final_removed_ids
                 ]
@@ -407,6 +415,18 @@ class _JsonlMemoryMutationMixin:
             )
         append_memory_operation_events(self.ops_path, persisted)
         self._after_commit_indexes(persisted)
+        # 派生缓存不留已删除或被替换正文的向量：按与写入相同的键口径清掉，避免缓存只增不减。
+        # 这里必须用记录级索引文本（含 keywords_en），裸正文算出的键和写入键对不上（复审探针 P1）。
+        # 已删事实取历史全部版本（含 final_removed_ids 命中的当前版本与 tombstone）；
+        # replace 只取被覆盖的旧版本，新正文的键留给下次检索重建（P2）。
+        self._forget_cached_vectors(
+            [
+                (record.content, record.attributes)
+                for record in [*current_events, *committed]
+                if record.entry_id in final_removed_ids and record.content
+            ]
+            + [(record.content, record.attributes) for record in superseded_versions if record.content]
+        )
         return committed
 
     # LLM: 此入口仅供显式 Memory schema migration 在已持久备份后清除 legacy active 正文；
@@ -608,26 +628,24 @@ class _JsonlMemorySearchMixin:
         # 索引命中不能复活删除版本;embedder 语义只在本列表内打分,不再走全库 _semantic_records。
         if active:
             from ..retrieval.hybrid import HybridRetriever
+            from ..retrieval.text_vector_cache import index_text
 
             # BM25 臂拼入写路径生成的关键词(keywords_en),让英文查询词面命中中文记忆;
             # embedding 臂本就跨语言(mean centering 实证),两臂互补。
-            def _index_text(record: MemoryRecord) -> str:
-                attrs = record.attributes if isinstance(record.attributes, dict) else {}
-                keywords = attrs.get("keywords_en") or []
-                if isinstance(keywords, list):
-                    suffix = " ".join(str(item) for item in keywords)
-                else:
-                    suffix = str(keywords)
-                return record.content + (" " + suffix if suffix else "")
-
-            ranked = HybridRetriever(self._embedder).rank(
+            # 索引文本必须与缓存键用同一口径（index_text），否则写入键与清理键不一致。
+            docs = [(record.entry_id, index_text(record.content, record.attributes)) for record in active]
+            cached = self._cached_vectors_for(docs)
+            retriever = HybridRetriever(self._embedder)
+            ranked = retriever.rank(
                 query,
-                [(record.entry_id, _index_text(record)) for record in active],
+                docs,
                 top_k=candidate_limit,
                 # 注入侧阈值化:向量臂只留 cosine≥0.30 的真相关,弱相关不凑数带进 prompt。
                 # 词面臂(BM25)不受限——词面重合本身是相关信号;无 embedder 自动降级纯 BM25。
                 vector_min_score=0.30,
+                cached_vectors=cached,
             )
+            self._remember_cached_vectors(docs, retriever, cached)
             by_id = {record.entry_id: record for record in active}
             keyword = [by_id[entry_id] for entry_id, _score in ranked if entry_id in by_id]
         else:
@@ -637,6 +655,117 @@ class _JsonlMemorySearchMixin:
             for record in selected:
                 self._note_access(record.entry_id)
         return selected
+
+    # LLM: 检索侧缓存只是派生索引，读取失败必须静默退化为"没有缓存"（现嵌），结果不变。
+    #   竞态（取缓存之后事实才被删/被替换）统一在回写点用 active 身份复核收口，
+    #   见 `_remember_cached_vectors`，此处不做第二套判定（重复判据会变成不可达的冗余防御）。
+    # 函数用途: 按正文哈希取出已缓存的向量，供本轮检索复用、避免重复嵌入。
+    def _cached_vectors_for(
+        self,
+        docs: list[tuple[str, str]],
+    ) -> dict[str, list[float]]:
+        try:
+            # 懒建缓存必须放进 try：构造缓存时会读盘，读错误不能冒出检索路径
+            # （模块合同：读失败等价于没有缓存，检索结果不变）。
+            cache = self._text_vector_cache()
+            if cache is None or not docs:
+                return {}
+            from ..retrieval.text_vector_cache import embedder_fingerprint
+
+            fingerprint = embedder_fingerprint(self._embedder)
+            keys = {doc_id: self._cache_key(fingerprint, text) for doc_id, text in docs}
+            found = cache.get(list(keys.values()))
+            self._record_semantic_health("cache_read")
+            return {
+                doc_id: found[key]
+                for doc_id, key in keys.items()
+                if isinstance(found.get(key), list)
+            }
+        except Exception as exc:
+            self._record_semantic_health("cache_read", exc)
+            return {}
+
+    # LLM: 缓存写失败不能影响检索结果；只把本轮真正现嵌过的向量按正文哈希写回。
+    #   竞态收口：写回前用 active 身份复核每个 id，索引文本变了或记录已不在 active，
+    #   一律不回写（P5：否则已删事实的向量会被检索回写复活）。
+    # 函数用途: 把本次检索中现嵌得到的向量补进正文哈希缓存。
+    def _remember_cached_vectors(
+        self,
+        docs: list[tuple[str, str]],
+        retriever,
+        cached: dict[str, list[float]],
+    ) -> None:
+        pending = getattr(retriever, "last_fresh_doc_vectors", None)
+        if not isinstance(pending, dict) or not pending:
+            return
+        try:
+            cache = self._text_vector_cache()
+            if cache is None:
+                return
+            from ..retrieval.text_vector_cache import embedder_fingerprint, index_text
+
+            fingerprint = embedder_fingerprint(self._embedder)
+            texts = dict(docs)
+            rows: dict[str, list[float]] = {}
+            for doc_id, vector in pending.items():
+                if doc_id not in texts or doc_id in cached or not isinstance(vector, list):
+                    continue
+                rows[self._cache_key(fingerprint, texts[doc_id])] = vector
+            if not rows:
+                return
+            # 有效性强弱只由**这一处**判据决定：在缓存锁内按最新 active 重算有效键集合。
+            # 锁外再放一套等价复核会变成永远测不到的冗余防御（变异验证会存活），故不做。
+            # 它同时收口两件事：记录已删除/被替换（P5），以及复核之后、写入之前发生的删除（P5b）。
+            cache.put(rows, keep=lambda: self._live_cache_keys(fingerprint))
+            self._record_semantic_health("cache_write")
+            reported = getattr(cache, "last_write_error", None)
+            if reported:
+                self._record_semantic_health("cache_write", reported)
+        except Exception as exc:
+            self._record_semantic_health("cache_write", exc)
+
+    # LLM: 锁内复核判据必须是最新 active 状态；只返回当前仍有效的缓存键集合。
+    # 函数用途: 给 cache.put 提供"写入时刻仍然有效"的键集合。
+    def _live_cache_keys(self, fingerprint: str) -> set[str]:
+        return {self._cache_key(fingerprint, text) for text in self._cache_texts(self.all())}
+
+    # LLM: 清理必须用与写入完全相同的键口径（index_text + 指纹），否则带 keywords_en 的事实删不掉；
+    #   replace 时旧版本正文也一并清，缓存才有上限（复审探针 P1/P2）。
+    # 函数用途: 删除或替换事实时同步清掉对应的正文哈希缓存项。
+    def _forget_cached_vectors(self, contents: Iterable[tuple[str, object]]) -> None:
+        try:
+            # 这个调用点最容易踩坑：它在 apply_batch **已经提交之后**执行，
+            # 懒建缓存若在 try 外读盘失败，会把已落盘的写入报成失败，调用方会重试。
+            cache = self._text_vector_cache()
+            if cache is None:
+                return
+            from ..retrieval.text_vector_cache import embedder_fingerprint, index_text
+
+            fingerprint = embedder_fingerprint(self._embedder)
+            keys = [
+                self._cache_key(fingerprint, index_text(content, attributes))
+                for content, attributes in contents
+                if content
+            ]
+            if keys:
+                cache.remove(keys)
+            self._record_semantic_health("cache_purge")
+        except Exception as exc:
+            self._record_semantic_health("cache_purge", exc)
+
+    # LLM: 指纹与正文哈希的组合只有一个实现，读/写/清理三处共用，避免键口径再次分叉。
+    # 函数用途: 按当前 embedder 指纹拼出一条索引文本的缓存键。
+    def _cache_key(self, fingerprint: str, text: str) -> str:
+        from ..retrieval.text_vector_cache import text_cache_key
+
+        return text_cache_key(fingerprint, text)
+
+    # LLM: 缓存键要跟"写入时用的索引文本"对齐，因此清理时也必须用 index_text 重算，而不是裸正文。
+    # 函数用途: 给出一批记录参与缓存键的索引文本。
+    def _cache_texts(self, records: Iterable[MemoryRecord]) -> list[str]:
+        from ..retrieval.text_vector_cache import index_text
+
+        return [index_text(record.content, record.attributes) for record in records if record.content]
 
     # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。
     # 函数用途: 合并关键词与语义召回顺序。
@@ -881,6 +1010,19 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
             self._vector_store_cache = VectorStore(self.path.parent / "memory_vectors.json")
         return self._vector_store_cache
 
+    # LLM: 正文哈希缓存独立成文件（memory_text_vectors.json），检索路径永不重写含明文向量库；
+    #   无 embedder 时必须完全关闭。它只是派生数据，丢了按"没有缓存"重算。
+    # 函数用途: 获取当前 owner 的正文哈希向量缓存实例。
+    def _text_vector_cache(self):
+        """本地 per-owner 正文哈希缓存(memory_text_vectors.json)。无 embedder 返回 None。"""
+        if self._embedder is None:
+            return None
+        if self._text_vector_cache_obj is None:
+            from ..retrieval.text_vector_cache import TextVectorCache
+
+            self._text_vector_cache_obj = TextVectorCache(self.path.parent / "memory_text_vectors.json")
+        return self._text_vector_cache_obj
+
     # LLM: 向量写失败不改变权威提交；metadata 仍需携带可与 active JSONL 复核的完整身份。
     # 函数用途: 尽力把一条正式记忆写入向量索引，失败进入健康诊断，不回滚正式记忆。
     def _index_vector(self, record: MemoryRecord) -> None:
@@ -923,12 +1065,81 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
         会调用 LocalStore.upsert_record；不会改写 JSONL。"""
 
         if not self.local_store:
+            # 即便没配 LocalStore，正文哈希缓存仍可能积累孤儿键；回收不依赖 FTS 索引。
+            self._retain_text_cache_keys()
             return 0
         count = 0
         for record in self.all():
             self._index_record(record)
             count += 1
+        self._retain_text_cache_keys()
         return count
+
+    # LLM: 缓存会随换模型/迁移/绕过写入路径的改动积累孤儿键；这里按当前 active 事实重算保留集合，
+    #   把不属于任何 active 记录的键丢弃（含旧文件遗留与旧指纹的空 (id) 键），保持缓存有上限。
+    #   保留集合必须用与写入相同的 index_text 口径，否则会把仍有效的键误删（下次只是重嵌，不会出错）。
+    #   与写入路径不同，回收只需**当前** embedder 的指纹：其他指纹的键本就命中不了，一并清掉更省空间。
+    # 函数用途: 回收正文哈希缓存里不属于当前 active 事实的键。
+    def _retain_text_cache_keys(self) -> int:
+        try:
+            cache = self._text_vector_cache()
+            if cache is None:
+                return 0
+            from ..retrieval.text_vector_cache import embedder_fingerprint
+
+            fingerprint = embedder_fingerprint(self._embedder)
+            keep = {self._cache_key(fingerprint, text) for text in self._cache_texts(self.all())}
+            dropped = cache.retain(keep)
+            self._record_semantic_health("cache_purge")
+            return dropped
+        except Exception as exc:
+            self._record_semantic_health("cache_purge", exc)
+            return 0
+
+    # LLM: 供 owner 维护这类**没有嵌入模型**的调用方回收孤儿键。此处刻意不依赖 embedder：
+    #   键的形状是 `<指纹>:<正文哈希>`，保留集合只按**正文哈希**判定——只要某个 active 记录的
+    #   index_text 哈希与键的正文部分一致，该键就保留（无论指纹属于哪个模型/端点；换过模型的旧键
+    #   也会因为正文仍 active 而被保留，下次命不中自然重嵌，不构成正确性问题）。
+    #   这样"键仍属于某条 active 事实"这一判据与 embedder 无关，维护进程无需加载模型即可回收。
+    #   **已知时序**：保留集合是在文件锁**之外**算的（只读 active 记录，不持缓存锁）。
+    #   算完到 `retain_content_hashes` 真正拿锁之间新加的事实，其键可能还没进缓存就被当成孤儿删掉——
+    #   最坏后果是下一次检索多嵌一次，不影响正确性。
+    # 函数用途: 对外暴露孤儿键回收，不要求调用方持有 embedder 上下文。
+    # LLM: 回收**本身失败**（缓存读不了、拿不到锁）必须与"确实没有孤儿"分得开，
+    #   否则维护状态天天写 `reclaimed: 0`，看起来像"跑过、没孤儿"，实际是没跑成——
+    #   这正是上一轮被复审抓到的"假的结构化事实"。失败时返回错误说明由调用方带进维护状态。
+    # 函数用途: 回收孤儿键；返回 (回收条数, 错误说明)，无错误时说明为空串。
+    def reclaim_text_cache_orphans(self) -> tuple[int, str]:
+        cache = self._text_vector_cache_for_reclaim()
+        if cache is None:
+            return 0, "cache_unavailable"
+        try:
+            from ..retrieval.text_vector_cache import index_text, text_content_hash
+
+            keep_hashes = {
+                text_content_hash(index_text(record.content, record.attributes))
+                for record in self.all()
+                if record.content
+            }
+            dropped = cache.retain_content_hashes(keep_hashes)
+        except Exception as exc:
+            return 0, f"{type(exc).__name__}: {exc}"
+        # 键被成功清点但没删掉任何东西，也可能是"读不出缓存、拿不到锁"——两种情况
+        # retain_matching 都只会留下 last_write_error。把它带出来，免得又被当成"没孤儿"。
+        error = getattr(cache, "last_write_error", None) or getattr(cache, "last_read_error", None)
+        if error is not None:
+            return dropped, f"{type(error).__name__}: {error}"
+        return dropped, ""
+
+    # LLM: 回收只需要缓存文件本身，不需要 embedder；这里给出一条不经过 _text_vector_cache() 的取用路径。
+    # 函数用途: 取得用于孤儿回收的正文哈希缓存实例（无 embedder 也返回）。
+    def _text_vector_cache_for_reclaim(self):
+        try:
+            from ..retrieval.text_vector_cache import TextVectorCache
+
+            return TextVectorCache(self.path.parent / "memory_text_vectors.json")
+        except Exception:
+            return None
 
     # LLM: 文件读取先 materialize 版本事件并过滤删除/过期，供正常召回使用。
     # 函数用途: 读取一个长期记忆文件的当前 active 状态。

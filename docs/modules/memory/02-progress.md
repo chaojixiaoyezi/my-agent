@@ -1,5 +1,42 @@
 # 记忆与上下文维护状态
 
+正文哈希向量缓存第四轮修正：构造宽松、写入严格（分支 `my-agent/self-dev-2-vcache`，2026-09-29）：
+- **必须改**：第三轮把 `_load` 改成只有 `FileNotFoundError` 才当空之后，读错误从**构造函数**抛了出去。
+  而 4 个懒建缓存的调用点（`_cached_vectors_for`、`_remember_cached_vectors`、`_forget_cached_vectors`、
+  `_retain_text_cache_keys`）都在各自 `try` **之外**建缓存，于是：
+  - `mem.add` 在权威 JSONL **已经提交之后**抛 `PermissionError`（V1）——调用方会以为写入失败而重试；
+  - `search_scoped` 直接抛异常（V2）——违背模块自己"读失败等价于没有缓存，结果不变"的合同。
+- **修法**：`__init__` 捕获 `OSError`、内存视图从空开始、记 `last_read_error`；`_flush` 保持严格
+  （读不出磁盘内容就不写，免得把整份缓存清空——那才是第三轮那条建议的本意）；4 个调用点把
+  `_text_vector_cache()` 挪进各自 `try`。**不要**把 `_load` 整个改回吞掉所有 `OSError`。
+- 顺手：删掉挤进 `_content_hash_of` return 之后的死代码 `keys()`、无调用方的 `_flush_unlocked`；
+  写失败一路报给语义健康状态。
+- 维护回收改为返回 `(回收数, 错误码)`：错误码写进 `text_vector_cache_reclaim_error`，
+  让"建缓存失败"与"确实没有孤儿"分得开。
+- 测试增至 45 条；变异 `scripts/mutate_text_vector_cache.py` **19/19 KILLED**（含 MY7、MY8）。
+- **⚠️ 更正（2026-09-29 第四轮，9b 复审抓出）**：上一版这里还写着「`remove` 在盘上本来就没有时跳过整文件重写」。
+  **当时没实现**——第一版撤掉后替代实现没写进去，`_flush` 仍无条件整文件重写（探针 V4 实测 inode 照样变），
+  而注释、TESTS.md 和本文档都写着已做。第四轮真的实现了它，见下条。
+
+## 向量缓存第四轮：真的跳过无意义重写 + 回收错误可见（2026-09-29，分支 `my-agent/self-dev-2-vcache`）
+
+- **「盘上没变就跳过写」真的实现**：`_flush` 在**文件锁内**比较改动前后的盘上内容，没变就跳过原子替换，
+  但照常刷新 `_items`。判据必须用盘上内容，不能用本实例内存（P5d：别的实例写的键本实例内存里没有）。
+  补 `test_v4_remove_absent_key_does_not_rewrite_file`（断言 inode 与 mtime 都不变）与删真键的对照。
+- **V5：回收错误带进维护状态**。缓存文件读不出内容（坏 JSON）时 `_load` 记下 `last_read_error`，
+  `reclaim_text_cache_orphans` 改为返回 `(回收数, 错误说明)` 并把它带出来，不再报假的空错误。
+- 测试增至 50 条；变异 **23/23 KILLED, 0 survived**（新增 MY9–MY12 钉住这两条机制）。
+
+正文哈希向量缓存第三轮复审返工（分支 `my-agent/self-dev-2-vcache`，2026-09-29，基于 `64f7ee64e`）：
+- `remove` 改成**一律在文件锁内从磁盘减掉请求的键**，不再要求"本实例内存里有这个键"——
+  父代理与每个子代理 worker 各有缓存实例，只看内存会让子代理删除的事实永久留下孤儿（P5d）。
+- `TextVectorCache._flush` 新增 `keep` 参数：判据在**拿到跨进程文件锁之后**求值（P5c）；
+  拿锁失败时**不写盘**、只记 `last_write_error`；主路径 rename 失败也留下错误并反映到健康状态（W1/X1b）。
+- 新增 `text_content_hash` / `retain_content_hashes`：回收按 key 里的**正文哈希**判定，
+  维护进程无需 embedder 即可回收（此前维护回收因"路径错 + 无 embedder"恒为 0，每天写假的 `reclaimed: 0`）。
+- `_load` 只有"文件不存在"才当成空缓存。
+- 回归见 `test_memory_vector_cache.py`（38 条）与 `scripts/mutate_text_vector_cache.py`（17/17 KILLED）。
+
 记忆整理失败归因（分支 `claude/ae-curator-diagnostics`，2026-09-29，生产主 owner 只读排查）：
 - 9/26 恢复以来，主 owner 有 8 次"not strict JSON"解析失败和 3 次提交失败，都在下一轮从同一游标重做成功，没有丢批次。但运行账分不清解析失败的具体原因，提交失败也只剩外层异常。
 - 现在解析失败包成 `CuratorResponseParseError`，仍是 ValueError，失败码与不重试语义都不变，附带：
@@ -11,6 +48,19 @@
   - JSONDecodeError 的出错位置。
 - 整条诊断仍不超过 300 字符，超出时退回只含类名的形状。运行账键集不变，响应正文和路径都不入账。
 - 截断是否改走缩批重试，等诊断数据确认后再定，见 DESIGN_LEDGER 事实 3。
+检索侧向量按正文哈希缓存（分支 `my-agent/self-dev-2`，2026-09-28，DESIGN_LEDGER「召回前补充查询」缺口 3，第二版）：`_search_scoped` 原先每次检索都把全部 active 事实送 `HybridRetriever._vector_order` 现嵌，事实越多越贵（召回前补充查询还会再翻一倍）。现在 `HybridRetriever.rank` 接受 `cached_vectors`，只对缺失项调用 `embed`，并把本轮现嵌结果经 `last_fresh_doc_vectors` 交给调用方写回。
+
+第一版把缓存和权威向量混在同一个 `memory_vectors.json`，被独立复审驳回（隐私与正确性）：缓存项挤占 `VectorStore.search` 的 top_k；只做检索的进程整文件写回会把已删除事实的**明文**复活；写入键含 `keywords_en` 而清理用裸正文，带关键词的事实删不掉；`replace` 不清被覆盖的旧正文；同名模型换维度时旧长度向量喂进 `mean_center` 越界，整轮失败。第二版据此重做：
+
+- 缓存独立成 `memory_text_vectors.json`（`retrieval/text_vector_cache.TextVectorCache`），检索路径永不重写含明文的权威向量库；
+- 键 = `sha256(实现类名 + api_base + model)[:16]` 指纹 + 正文 SHA-256，不落端点/模型明文；
+- 嵌入与键共用的文本由 `text_vector_cache.index_text(content, attributes)` 统一生成，检索/写入/清理三处同口径；
+- 命中要求向量长度与当轮 query 一致，否则当缺失现场重嵌；
+- 回写前按 active 身份复核，记录已删除或被替换的键不回写（收口竞态）；
+- `index_all` 回收不属于任何 active 记录的孤儿键；缓存读/写/清成功后恢复健康状态；
+- 跨进程写走 `locked_json_path` sidecar 锁并在锁内重读合并。
+
+旧格式（只按 entry_id，或旧 `textcache:v1:` 前缀）不会被新键命中，视为缺失并全量重算，不做隐式迁移。不新增用户参数，`memory_semantic_recall` 仍是总开关。本机 owner 未配嵌入模型，收益只对开启语义召回的用户生效。见 TESTS.md 顶部。
 
 生命周期续跑读错分支（分支 `claude/be-wake-fix`，2026-09-28，Codex 审查 B）：`carried_tool_call_records_for_requests` 改收 `CarriedIndexSource`，每个来源独立读取、各自捕获 OSError，读到一半失败的来源整份丢弃，返回 `CarriedToolCallRead`（records 与 unreadable_sources）。修复前 owner 索引一抛错，任务索引就不会被访问，携带记录与一次性编排去重一起变空。见 TESTS.md 顶部。
 

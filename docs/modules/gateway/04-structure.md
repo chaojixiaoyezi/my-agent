@@ -1,5 +1,17 @@
 # Gateway Structure
 
+`user_space/owner_maintenance.run_owner_retention_if_due` 是 owner 维护的唯一入口（默认 24 小时一次，已在 `locked_json_path` 内执行）：
+它先跑 retention 计划，再调 `_reclaim_text_vector_cache_orphans` 回收 `memory_text_vectors.json` 里不属于任何 active 记忆的键。
+**路径取自 canonical 的 `home.owner_memory_long_term_jsonl`**（此前手拼 `memory/memory.jsonl`，在生产布局下不存在）。
+回收按缓存键里的**正文哈希**比对 active 记录的 `index_text` 哈希，**不加载嵌入模型、不联网**；
+成功时结果写入 `text_vector_cache_reclaimed`。
+
+**失败与"没有孤儿"必须分得开**（2026-09-29 第四轮）：该函数改为返回 `(回收数, 错误码)`，
+建缓存或读记忆失败时回收数同样是 0，但错误码非空并写进 `text_vector_cache_reclaim_error`。
+缓存文件本身读不出内容（坏 JSON）也算这一类：`_load` 记下 `last_read_error`，
+`reclaim_text_cache_orphans` 把读/写错误一并带出，避免"缓存读不了"被误当成"确实没有孤儿"。
+此前只有一个 `text_vector_cache_reclaimed: 0`，两种截然不同的情况看起来一模一样。
+
 `SchedulerService.claim_wake`核对wake与canonical run身份，在原repository领取后准确回读pending，再调用`_prepare_task_link`：原TaskStore任务锁内只为首次新运行建立链接，已有链接只读复核。合法冻结只保留原claim用于原回复交付；无冻结的active任务才标记running并交后台模型，无冻结终态按唯一既有映射结算。无法确认pending时释放claim并保留待处理；准入结算只有原CAS实际成功才返回stale，claim已被接手时返回busy，不能确认掉新持有者的wake。TaskStore仍唯一保存pins/选包marker，不新增调度专用任务账或Skill豁免。
 
 `goal_control_service._create_goal`复用`capability.package_selection_scope.new_task_capability_selection`为真正新建任务提供可选typed pending；原Goal存储、任务bind和wake顺序保持，入口选择在后续真实主业务请求前发生。

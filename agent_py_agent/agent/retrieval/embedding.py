@@ -121,6 +121,18 @@ class OpenAICompatibleEmbedder:
     def dim(self) -> int:
         return self._dim
 
+    # LLM: 缓存键必须能区分不同嵌入模型，模型标识只暴露名字（不含密钥）；改模型名即换缓存键空间。
+    # 函数用途: 供调用方拼装正文哈希缓存键。
+    @property
+    def model(self) -> str:
+        return self._model
+
+    # LLM: 端点也参与缓存指纹；只暴露地址本身，密钥永不出对象。
+    # 函数用途: 供调用方拼装正文哈希缓存指纹。
+    @property
+    def api_base(self) -> str:
+        return self._api_base
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -159,6 +171,18 @@ class MiniMaxEmbedder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    # LLM: 与 OpenAI 兼容实现同契约，模型标识参与正文哈希缓存键，换模型即自然失效。
+    # 函数用途: 供调用方拼装正文哈希缓存键。
+    @property
+    def model(self) -> str:
+        return self._model
+
+    # LLM: 端点也参与缓存指纹；只暴露地址本身，密钥永不出对象。
+    # 函数用途: 供调用方拼装正文哈希缓存指纹。
+    @property
+    def api_base(self) -> str:
+        return self._api_base
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:

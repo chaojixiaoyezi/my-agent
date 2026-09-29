@@ -1,5 +1,27 @@
 # Gateway 维护状态
 
+维护回收的错误码与缓存不可读时的行为（分支 `my-agent/self-dev-2-vcache`，2026-09-29）：
+- **第五轮补充（2026-09-29）**：回收的错误码此前抓不到最可能出的错——缓存文件读不出内容时
+  `_load` 静默返回空、`retain_matching` 把异常吞进 `last_write_error`，维护状态里的错误字段仍是空串
+  （探针 V5）。现在 `_load` 对坏 JSON 记 `last_read_error`，`reclaim_text_cache_orphans` 把读/写错误
+  一并带出来，`_reclaim_text_vector_cache_orphans` 直接透传它的 `(回收数, 错误说明)`。
+  回归见 `test_v5_reclaim_reports_error_when_cache_corrupt`；变异 MY11/MY12 必须被杀掉。
+- `_reclaim_text_vector_cache_orphans` 现在返回 `(回收数, 错误码)`。建缓存/读记忆失败同样返回 0，
+  但与"确实没有孤儿"分得开——错误码写进维护状态 `text_vector_cache_reclaim_error`。
+  此前只有 `text_vector_cache_reclaimed: 0`，两种情况看起来一样，又是一条假的结构化事实。
+- 正文哈希缓存的"构造宽松、写入严格"见 memory 模块 04-structure。
+
+owner 维护回收正文哈希缓存孤儿：改为 canonical 路径 + 不依赖 embedder（分支 `my-agent/self-dev-2-vcache`，2026-09-29）：
+- `user_space/owner_maintenance._reclaim_text_vector_cache_orphans` 此前手拼 `owner_home/memory/memory.jsonl`（**生产实际在
+  `home.owner_memory_long_term_jsonl`**，文件不存在 → 直接返回 0），且新建的 `JsonlMemory` 没有 embedder
+  → `_text_vector_cache()` 为 None → 回收数永远是 0。后果是 `maintenance.json` 每天写
+  `text_vector_cache_reclaimed: 0`，**看起来像"跑过、没有孤儿"，实为假的结构化事实**。
+- 改用 canonical 路径；回收改走 `JsonlMemory.reclaim_text_cache_orphans()`，
+  它按缓存键里的**正文哈希**（`DataTextVectorCache.retain_content_hashes`）比对 active 记录的
+  `index_text` 哈希，不需要 embedder、不联网。
+- 回归见 `test_memory_vector_cache.py::test_maintenance_reclaims_orphan_on_real_layout`；
+  变异 MY1（回收函数开头直接 `return 0`）必须被杀掉——见 `scripts/mutate_text_vector_cache.py`。
+
 停机时等 observe 后台执行器落账（分支 `claude/9a-jev-observe-async`，2026-09-28，dsh-ae 复审跟进）：
 - `cli/gateway_process._cancel_active_decisions` 在 `cancel_active_decisions_for_shutdown` 之后，经 `wait_nonblocking_idle` 最多等 `_NONBLOCKING_DRAIN_SECONDS`（2 秒）。
 - 取消与等待各在自己的 try 里（ae 复核建议）：取消的 try 与原来一致；执行器模块的导入与等待放在第二个 try，出错只记异常类型事件 `gateway_decision_drain_failed`，不会跳过取消，也不会被误记成 `gateway_decision_cancel_failed`。回归见 `test_gateway_decision_shutdown_cancel.py::test_gateway_cleanup_still_cancels_when_the_observe_drain_fails`（等待抛异常、执行器模块导入失败两组）。
@@ -13,6 +35,13 @@
   - 只替换同一观察（op/claim 相同）的 started/deferred 标记，`adopted` 恒为 false；
   - 写入走原 active-turn 事务，回合已结束就不回写。
 - 回归见 `test_decision_observe_nonblocking.py` 的三组选模型用例。
+owner 维护顺带回收正文哈希缓存的孤儿键（分支 `my-agent/self-dev-2-vcache`，2026-09-28）：
+- `user_space/owner_maintenance.run_owner_retention_if_due` 在既有维护事务（默认 24 小时一次、已在 `locked_json_path` 内）里
+  多调一次 `_reclaim_text_vector_cache_orphans`，回收 `memory_text_vectors.json` 中不属于任何 active 记忆的键。
+- 动因：这些孤儿键（换模型、迁移、绕过写入路径改正文留下）原先只有手动 `home-index`/`index_all` 才会清，
+  挂进维护循环后不跑手动命令也能自动收口。回收只读 active 记忆算保留集合，不加载嵌入模型、不联网。
+- 失败只返回 0 并照常写维护状态，绝不影响 retention 结果；新增字段 `text_vector_cache_reclaimed`。
+- 回归见 `test_memory_vector_cache.py::test_index_all_reclaims_even_without_local_store`（无 LocalStore 时也必须回收）。
 
 `/endtask` 结束卡在等待中的定时会话任务（分支 `claude/be-end-session-task`，2026-09-29）：
 - 来源：2026-09-28 两个会话的定时运行里 `run_command` 结果未知，工作片停下而会话任务仍 active，定时运行停在 waiting 永不结算，同一 job 的到期派发被一直跳过。

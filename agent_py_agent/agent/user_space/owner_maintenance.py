@@ -71,6 +71,9 @@ def run_owner_retention_if_due(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
         )
+        # 正文哈希缓存只是派生索引，孤儿键（换模型/迁移/绕过写入路径的改动留下）只有 index_all
+        # 会回收，那是手动命令；挂进这里让它在 owner 维护（默认每天一次）里自动收口。
+        dropped_cache_keys, reclaim_error = _reclaim_text_vector_cache_orphans(home)
         status = _maintenance_status(retention)
         previous = read_json_object_report(
             state_path,
@@ -92,9 +95,33 @@ def run_owner_retention_if_due(
             ),
             "load_errors": list(retention.load_errors),
             "legal_hold": retention.legal_hold,
+            "text_vector_cache_reclaimed": dropped_cache_keys,
+            # 非空表示"这次没能真的回收"（建缓存/读记忆失败），0 不等于"没有孤儿"。
+            "text_vector_cache_reclaim_error": reclaim_error,
         }
         write_json_file_atomic_unlocked(state_path, payload)
         return OwnerMaintenanceResult(True, status, retention)
+
+
+# LLM: 回收只读 active 记忆算出保留集合，不加载嵌入模型、不联网；失败只记 0，绝不影响保留策略结果。
+#   路径必须用 canonical 字段（owner_memory_long_term_jsonl），此前手拼 `memory/memory.jsonl` 在生产布局下
+#   文件根本不存在，于是每天写一个假的 `text_vector_cache_reclaimed: 0`——看起来像"跑过、没有孤儿"。
+# 函数用途: 在 owner 维护里回收正文哈希缓存中不属于任何 active 记忆的键。
+def _reclaim_text_vector_cache_orphans(home: MyAgentHomePaths) -> tuple[int, str]:
+    """返回 (回收数, 错误码)。错误码为空表示这次真的跑过；非空表示"0 不是因为没孤儿"。"""
+    try:
+        from ..memory_store.jsonl import JsonlMemory
+
+        memory_path = home.owner_memory_long_term_jsonl
+        if not memory_path.exists():
+            return 0, "memory_file_missing"
+        # 回收不需要 embedder：保留集合按 active 记录的正文哈希算（见 reclaim_text_cache_orphans）。
+        memory = JsonlMemory(memory_path)
+        # 回收自己也会遇到"读不了缓存 / 拿不到锁"，它把错误说明交回来（V5），不能再被当成空串。
+        return memory.reclaim_text_cache_orphans()
+    except Exception as exc:
+        # 建缓存/读记忆失败也返回 0，但与"确实没有孤儿"必须分得开——否则又是一条假的结构化事实。
+        return 0, f"{type(exc).__name__}: {exc}"
 
 
 def _maintenance_status(retention: OwnerRetentionPlan) -> str:
