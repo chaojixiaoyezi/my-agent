@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
+- `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。
+- 现在由 `execute_settings_control` 经 `capability_config_for_agent(base_agent)` 取得 capability 配置，作为关键字参数只交给这两个视图。
+- 回归见 `test_settings_config_warnings_display.py`：告警来自真实的 capability 文件。
+
 压缩触发来源与校准口径（分支 `claude/38-compact-calibration`，2026-09-28）：`request_execution` 首次准备按 `preflight` 安装恢复宿主；
 溢出循环把结果的 `runtime_source`（`preflight` / `provider_error` / `tool_context_overflow`）写进 `RunParams.compact_trigger_source`，
 `_gateway_compact_overflowing_turn` 再经 `prepare_gateway_compact_recovery(trigger_source=…)` 交给公共恢复器，压缩进度事件（含 started）

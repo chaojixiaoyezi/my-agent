@@ -8,10 +8,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.tools.send_session_message import (
     SendSessionMessageTool,
 )
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_TARGET_OUT_OF_SCOPE,
     SESSION_TASK_RATE_LIMIT,
@@ -73,17 +77,12 @@ class _FakeHome:
     owner_id = "main"
 
 
-class _FakeConfig:
-    session_messaging_admin_enabled = True
-    session_messaging_user_enabled = False
-    session_task_admin_enabled = True
-
-
 class _FakeAgent:
     def __init__(self, store: _FakeStore, *, current_thread: str = "thread-a") -> None:
         self.conversation_store = store
         self.home_paths = _FakeHome()
-        self.capability_config = _FakeConfig()
+        # 与生产同一入口：capability_config_for_agent 读运行时快照里的真 CapabilityConfig。
+        self._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig())
         self._current_run_params = type(
             "_P", (), {"task_attributes": {"conversation_thread_id": current_thread}}
         )()
@@ -165,10 +164,7 @@ def _limited_store(tmp_path, limit: int, *, used: int = 0) -> _FakeStore:
 def test_pair_limit_blocks_send_and_does_not_queue(tmp_path) -> None:
     store, limit = _limited_store(tmp_path, 2, used=2)
     agent = _FakeAgent(store)
-    agent.capability_config = type(
-        "_C", (), {"session_pair_hourly_limit": limit, "session_messaging_admin_enabled": True,
-                   "session_messaging_user_enabled": False, "session_task_admin_enabled": True}
-    )()
+    agent._capability_config_runtime_snapshot.config.session_pair_hourly_limit = limit
     outcome = SendSessionMessageTool(agent).execute(_params())
     assert not outcome.ok
     assert outcome.error_code == SESSION_TASK_RATE_LIMIT
@@ -180,10 +176,7 @@ def test_pair_limit_blocks_send_and_does_not_queue(tmp_path) -> None:
 def test_pair_limit_allows_until_limit_then_blocks(tmp_path) -> None:
     store, limit = _limited_store(tmp_path, 2, used=1)
     agent = _FakeAgent(store)
-    agent.capability_config = type(
-        "_C", (), {"session_pair_hourly_limit": limit, "session_messaging_admin_enabled": True,
-                   "session_messaging_user_enabled": False, "session_task_admin_enabled": True}
-    )()
+    agent._capability_config_runtime_snapshot.config.session_pair_hourly_limit = limit
     assert SendSessionMessageTool(agent).execute(_params()).ok is True
     assert store.session_pair_rate.count("thread-a", "thread-b") == 2
     blocked = SendSessionMessageTool(agent).execute(_params(message="第二条"))
@@ -193,8 +186,38 @@ def test_pair_limit_allows_until_limit_then_blocks(tmp_path) -> None:
 def test_zero_limit_means_unlimited(tmp_path) -> None:
     store, _ = _limited_store(tmp_path, 0, used=50)
     agent = _FakeAgent(store)
-    agent.capability_config = type(
-        "_C", (), {"session_pair_hourly_limit": 0, "session_messaging_admin_enabled": True,
-                   "session_messaging_user_enabled": False, "session_task_admin_enabled": True}
-    )()
+    agent._capability_config_runtime_snapshot.config.session_pair_hourly_limit = 0
     assert SendSessionMessageTool(agent).execute(_params()).ok is True
+
+
+def _agent_reading_file(store, config_path) -> _FakeAgent:
+    """生产 Gateway 的形态：没有运行时快照，只按 capability_config_path 读文件。"""
+    agent = _FakeAgent(store)
+    agent._capability_config_runtime_snapshot = None
+    agent.capability_config_path = config_path
+    return agent
+
+
+def test_reads_the_capability_file_not_an_agent_attribute(tmp_path) -> None:
+    """旧实现读 agent.capability_config（生产上没有这个属性），文件里的限额永远不生效。"""
+    config_path = tmp_path / "capability_config.yaml"
+    config_path.write_text("session_pair_hourly_limit: 1\n", encoding="utf-8")
+    store, _ = _limited_store(tmp_path, 1, used=1)
+    outcome = SendSessionMessageTool(_agent_reading_file(store, config_path)).execute(_params())
+    assert outcome.error_code == SESSION_TASK_RATE_LIMIT
+    assert json.loads(outcome.output)["details"]["limit"] == 1
+
+
+@pytest.mark.parametrize("content", [None, "decision_subagent_model_mode: bogus\n"], ids=["missing", "malformed"])
+def test_unreadable_config_file_falls_back_to_default_pair_limit(tmp_path, content) -> None:
+    """缺文件或文件损坏：每对每小时按 dataclass 默认 60 条，不能落到 0（不限制）。"""
+    assert CapabilityConfig().session_pair_hourly_limit == 60
+    config_path = tmp_path / "capability_config.yaml"
+    if content is not None:
+        config_path.write_text(content, encoding="utf-8")
+    store, _ = _limited_store(tmp_path, 60, used=59)
+    agent = _agent_reading_file(store, config_path)
+    assert SendSessionMessageTool(agent).execute(_params()).ok is True
+    blocked = SendSessionMessageTool(agent).execute(_params(message="第二条"))
+    assert blocked.error_code == SESSION_TASK_RATE_LIMIT
+    assert json.loads(blocked.output)["details"]["limit"] == 60

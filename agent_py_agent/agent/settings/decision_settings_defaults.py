@@ -44,19 +44,20 @@ def validate_config_decision_fields(values: Mapping, *, domain: str) -> dict:
     return normalized
 
 
-# LLM: 轻上下文可注入原 capability_config 或其原文件路径；没有 Agent 构造、provider 探测或持久写入。
+# LLM: 轻上下文可直接注入 capability_config；否则经 capability_config_for_agent 统一入口读（capability_config_path 或根目录，
+#   缺文件为默认实例）。不能读 capability_router.config：路由器构造时拿的是 AgentConfig，决策字段在那上面永远不存在。
+#   没有 Agent 构造、provider 探测或持久写入。
 # 函数用途: 获取各模块当前默认值和来源；点位的期限与模型引用不在这里，由投影按通用设置继承。
 def decision_defaults(context: object) -> tuple[dict, dict]:
-    from ..capability.config import CapabilityConfig, load_capability_config
+    from ..capability.config import CapabilityConfig
+    from ..capability.runtime_config_reload import capability_config_for_agent
     from ._memory_types import MemorySettings
     from .config import AgentConfig
 
     config = context.config
     capability = getattr(context, "capability_config", None)
     if capability is None:
-        capability = getattr(getattr(context, "capability_router", None), "config", None)
-    if capability is None and getattr(context, "capability_config_path", None):
-        capability = load_capability_config(context.capability_config_path)
+        capability = capability_config_for_agent(context)
     defaults = {"agent": AgentConfig(), "capability": CapabilityConfig(), "memory": MemorySettings()}
     inputs = {"agent": config, "memory": config, "capability": capability or defaults["capability"]}
     values, sources = {}, {}

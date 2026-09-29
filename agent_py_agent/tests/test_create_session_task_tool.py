@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_py_agent.agent.agent_core.orchestration.tools.create_session_task import (
     CreateSessionTaskTool,
 )
@@ -238,3 +240,56 @@ def test_dispatch_records_into_pair_quota(tmp_path) -> None:
     # 配额已被这次派活占满：下一次同样被拒。
     blocked = CreateSessionTaskTool(agent).execute(_params(goal="另一件事"))
     assert blocked.error_code == SESSION_TASK_RATE_LIMIT
+
+
+def _agent_reading_file(tmp_path, known, config_path):
+    """生产 Gateway 的形态：没有运行时快照，只按 capability_config_path 读文件。"""
+    agent, store = _agent(tmp_path, known)
+    agent._capability_config_runtime_snapshot = None
+    agent.capability_config_path = config_path
+    return agent, store
+
+
+def _chain(store, length: int):
+    """按 origin_task_id 串起 length 个任务，返回最后一个（它的链深是 length - 1）。"""
+    task = None
+    for hop in range(length):
+        task = store.session_tasks.create(
+            SessionTaskDraft(sender_thread_id=f"t{hop}", target_thread_id=f"t{hop + 1}", goal=f"第{hop + 1}跳",
+                             origin_task_id=task.task_id if task else ""),
+            now=float(hop + 1),
+        )
+    return task
+
+
+@pytest.mark.parametrize("content", [None, "decision_subagent_model_mode: bogus\n"], ids=["missing", "malformed"])
+def test_unreadable_config_file_enforces_default_chain_depth(tmp_path, content) -> None:
+    """缺文件或文件损坏：链深按 dataclass 默认 4 生效，不能落到 0（不限制，防循环守卫失效）。"""
+    assert CapabilityConfig().session_task_max_chain_depth == 4
+    config_path = tmp_path / "capability_config.yaml"
+    if content is not None:
+        config_path.write_text(content, encoding="utf-8")
+    known = {"thread-b": _FakeThread("thread-b")}
+    agent, store = _agent_reading_file(tmp_path, known, config_path)
+    # 从第 3 个任务再派：新任务链深 3，放行。
+    agent._current_run_params.task_attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = _chain(store, 3).task_id
+    assert CreateSessionTaskTool(agent).execute(_params()).ok is True
+    # 从第 4 个任务再派：新任务链深 4，达到默认上限，拒绝。
+    agent._current_run_params.task_attributes[CONVERSATION_SESSION_TASK_ID_ATTR] = _chain(store, 4).task_id
+    outcome = CreateSessionTaskTool(agent).execute(_params(goal="再往下派"))
+    assert outcome.error_code == SESSION_TASK_CHAIN_LIMIT
+
+
+@pytest.mark.parametrize("content", [None, "decision_subagent_model_mode: bogus\n"], ids=["missing", "malformed"])
+def test_unreadable_config_file_falls_back_to_default_pair_limit(tmp_path, content) -> None:
+    """缺文件或文件损坏：派活与发消息共用的每对每小时限额按默认 60 条，不能落到 0（不限制）。"""
+    assert CapabilityConfig().session_pair_hourly_limit == 60
+    config_path = tmp_path / "capability_config.yaml"
+    if content is not None:
+        config_path.write_text(content, encoding="utf-8")
+    agent, store = _agent_reading_file(tmp_path, {"thread-b": _FakeThread("thread-b")}, config_path)
+    for _ in range(60):
+        store.session_pair_rate.record("thread-a", "thread-b")
+    outcome = CreateSessionTaskTool(agent).execute(_params())
+    assert outcome.error_code == SESSION_TASK_RATE_LIMIT
+    assert json.loads(outcome.output)["details"]["limit"] == 60

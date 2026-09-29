@@ -80,9 +80,19 @@ def test_agent_capability_config_ignores_mock_cache_and_uses_file(tmp_path, sele
     assert agent._capability_config_runtime_snapshot.path == path
 
 
-def test_agent_capability_config_unreadable_file_does_not_accept_mock_cache(tmp_path):
+def test_agent_capability_config_missing_file_does_not_accept_mock_cache(tmp_path):
+    # 替身上自动生成的快照不是 CapabilityConfig，不能被当成配置；缺文件时拿 dataclass 默认实例。
     agent = MagicMock()
     agent.capability_config_path = tmp_path / "missing.yaml"
+
+    assert capability_config_for_agent(agent) == CapabilityConfig()
+
+
+def test_agent_capability_config_malformed_file_does_not_accept_mock_cache(tmp_path):
+    # 格式错误仍按原语义返回 None；替身缓存同样不能顶替。
+    agent = MagicMock()
+    agent.capability_config_path = tmp_path / "bad.yaml"
+    agent.capability_config_path.write_text("decision_subagent_model_mode: bogus\n", encoding="utf-8")
 
     assert capability_config_for_agent(agent) is None
 

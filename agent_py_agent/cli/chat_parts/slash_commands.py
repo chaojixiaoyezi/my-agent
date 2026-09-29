@@ -340,7 +340,10 @@ def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str)
     if not (provider and owner_kind and owner_id):
         return "无法确定当前会话的 owner 身份；消息没有投递。（SESSION_IDENTITY_UNAVAILABLE）"
     identity = OwnerIdentity(provider=provider, owner_kind=owner_kind, owner_id=owner_id)
-    config = capability_config_for_agent(agent)
+    from ...agent.capability.config import CapabilityConfig
+
+    # 配置读不到或损坏时也落到默认值（每对每小时 60），不能落到"不限制"。
+    config = capability_config_for_agent(agent) or CapabilityConfig()
     if not session_messaging_tool_visible(home, config):
         return "会话间消息当前对这类身份关闭。（SESSION_MESSAGING_DISABLED）"
 

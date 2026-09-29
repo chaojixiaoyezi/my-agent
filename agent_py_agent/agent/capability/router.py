@@ -308,6 +308,8 @@ class CapabilityRouter:
         `limit=None` 时使用配置里的 `capability_candidate_limit`。
         `limit=0` 表示不限制。"""
 
+        # 注意：路由器构造时 self.config 是 AgentConfig，上面没有 capability_candidate_limit；watch_service 之后才换成
+        # CapabilityConfig 快照。生产调用都显式传 limit，新调用方也必须显式传，不能依赖 limit=None。
         effective_limit = self.config.capability_candidate_limit if limit is None else limit
         hits: list[CapabilitySearchHit] = []
         for card in self.cards(kinds=kinds):
@@ -346,6 +348,8 @@ class CapabilityRouter:
     ) -> str:
         hits = self.search(query, limit=0, kinds={"capability_package"})
         cards = [hit.card for hit in hits if selected_skill_ids is None or hit.card.id in selected_skill_ids]
+        # 注意：路由器构造时 self.config 是 AgentConfig，上面没有 capability_candidate_limit；watch_service 之后才换成
+        # CapabilityConfig 快照。生产调用都显式传 limit，新调用方也必须显式传，不能依赖 limit=None。
         effective_limit = self.config.capability_candidate_limit if limit is None else limit
         if effective_limit:
             cards = cards[:effective_limit]

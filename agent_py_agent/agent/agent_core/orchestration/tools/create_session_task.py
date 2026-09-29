@@ -92,9 +92,11 @@ class CreateSessionTaskTool(BaseTool):
             return target
         target_thread, target_owner = target
 
+        from ....capability.config import CapabilityConfig
         from ....capability.runtime_config_reload import capability_config_for_agent
 
-        config = capability_config_for_agent(self.agent)
+        # 配置读不到或损坏时也落到默认值（链深 4、每对每小时 60），不能落到"不限制"。
+        config = capability_config_for_agent(self.agent) or CapabilityConfig()
         decision = decide_session_messaging(
             SessionMessagingRequest(
                 sender_identity=sender_identity,

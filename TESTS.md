@@ -1,5 +1,27 @@
 # 测试与发布验收
 
+## capability 配置缺文件用默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`）
+
+- **新增或修改的测试**：
+  - `test_capability_config_missing_defaults.py`：
+    - 缺文件拿到默认实例（链深 4、每对 60），且不缓存，事后建文件即生效；
+    - owner home 根目录下没有配置文件时同样是默认值；
+    - 格式错误仍返回 None；
+    - 决策默认值读的是 capability 文件，不是 router 上的 AgentConfig；
+    - 注入的 capability_config 仍然优先。
+  - 会话工具三组（`test_create_session_task_tool.py`、`test_send_session_message_tool.py`、`test_tell_command.py`）对缺文件和损坏文件两种情况做参数化，断言链深按 4 拒绝、每对限额按 60 拒绝。
+  - 发消息工具的测试改为经运行时快照注入配置，并新增“读的是文件、不是 agent 属性”一例。
+  - `/settings` 告警测试改为从真实 capability 文件取告警。
+  - `test_capability_runtime_config.py` 原“缺文件返回 None”一例，改为断言返回默认实例，另补“坏文件返回 None”。
+- **变异验证**：做了 9 个变异体，全部被抓住，每次跑完按 sha256 核对恢复原文件：
+  - 源头缺文件时退回返回 None；
+  - 三个会话调用点去掉 `or CapabilityConfig()`；
+  - 发消息工具退回读不存在的属性；
+  - 决策设置退回读 router.config；
+  - `/settings` 两处退回旧读法；
+  - 默认实例被写入缓存。
+- **定向回归**：132 个文件，2758 passed、1 skipped。范围是引用 capability 配置的全部测试、会话、settings、决策设置相关测试，以及架构护栏、`constant_names_unique`、`test_parameter_registry`。
+
 ## 会话互通第一期派活链：复验 a646a4885（2026-09-28，分支 `claude/ae-session-task-recheck`，仅文档）
 
 - **性质与结论**：用同一套脚本模型 harness，在真实 Gateway 和真实 TUI 上复验第 6 片的修复，**未通过**。

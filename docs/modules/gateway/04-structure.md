@@ -164,6 +164,7 @@ HTTP/IM/未知来源不能凭 rich transcript 获得私有路径展示，后台�
   `skill_control_service.execute_skill_control` 按结构化 operation 区分写入和查询的普通异常：confirm/reject/learned_revert/learned_remove 只报告结果未完整确认，提示先查当前状态；查询异常报告暂时读不到。写后追加事件失败不能据异常倒推出“没有改动”，此层不补偿、不自动重放，也不另建事务状态；原服务的可预期失败原因继续保留。
   `settings` 延迟分派给 `settings_control_service.py`（不带参数只列参数中心常用层级，`all` 列全部参数；列表、计数与搜索都走 `listed_parameters`，不含配置路径/来源/分层/告警这类加载器元数据）：同一 owner 解析，只有完整身份的本机 local/main（含已绑定管理员私聊）可用，读写走参数中心 `settings/parameter_registry.py` 与 `parameter_changes.py`，回执脱敏，普通异常不承诺“没有改动”；`show` 对登记了派生规则的参数（`applied_value`）按默认模型多给一行“实际效果”，`set`/`reset`/`revert` 另附新值在默认模型上的实际效果（`parameter_changes.applied_after_change`）；回显脱敏走 `mask_value` 的结构脱敏（请求头与环境变量只留键名、凭据开关与网址密码遮值），历史行先经 `displayed_change`。`control_operation_service.execute_gateway_control_operation` 在计算摘要、
   写回执之前，用 `control_commands.persisted_control_command_text` 把密码换成 `******`；明文只随内存中的 command 交给执行服务。
+  总览与 `all` 视图的配置告警：capability 来源由 `execute_settings_control` 经 `capability_config_for_agent(base_agent)` 取得后显式传给这两个视图（主配置对象上没有 capability_config）；文件不存在时是默认实例，不出告警行。
 - 审批：`request_execution._gateway_request_interactive_approvals` 在客户端声明 `tool_approval`，或服务端核实为已绑定的
   管理员私聊且执行 owner 为本机管理员时，开启原 `StreamApproval`。`http_handlers._read_public_progress_events` 把
   `permission_requested` 投影成 `{kind, tool, summary}`。`/approve`、`/deny` 经 `pending_tool_approvals` 核对以下各项，

@@ -1,5 +1,23 @@
 # 设计台账
 
+## capability 配置缺文件就用 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`，本地验证通过，待集成）
+
+- **问题**：
+  - 生产 Gateway 的 agent 根目录是 owner home，那里通常没有 `config/capability_config.yaml`。
+  - `capability_config_for_agent` 缺文件时返回 None，调用点各用自己的兜底值：派活链深和每对每小时限额都兜底为 0（不限制），而默认值是 4 和 60，防循环守卫与限流在生产上失效。
+  - 另有三处读错了对象：
+    - `send_session_message` 读 `agent.capability_config`，这个属性不存在，文件存在也不生效；
+    - 决策设置的 `decision_defaults` 退到 `capability_router.config`，那是 AgentConfig；
+    - `/settings` 告警从 AgentConfig 上找 capability 配置。
+- **规则**：
+  - 统一入口在文件不存在时返回 `CapabilityConfig()` 默认实例，且不缓存，事后建文件下一次调用即生效。
+  - 读取失败或格式错误仍返回 None；限流和防循环守卫的调用点另写 `... or CapabilityConfig()`，损坏时也落到默认值，不落到“不限制”。
+  - 运行时读 capability 配置一律经 `capability_config_for_agent`，不从 `agent.config`、`capability_router.config` 或 agent 的其它属性上找。router 在 `limit=None` 时读 `self.config.capability_candidate_limit` 的写法只加了注释，调用方必须显式传 limit。
+- **行为变化**：
+  - 提示词内容和工具列表不变：推荐开、选包关、决策与会话开关，缺文件时原本就等于默认值。
+  - 只有两道守卫真正生效：派活链深 4、每对会话每小时 60 条。
+- **遗留**：各调用点散落的兜底值暂不删，今后逐步清。
+
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`，本地验证通过，待集成）
 
 - **起因**：生产上 my-agent 调 Jev 等待时间，`decision_patch` 连续被拒三次，回执都是 `TOOL_INVALID_ARGUMENTS`「决策设置请求包含未知字段」。

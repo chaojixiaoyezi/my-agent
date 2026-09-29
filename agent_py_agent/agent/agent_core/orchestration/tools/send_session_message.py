@@ -88,7 +88,11 @@ class SendSessionMessageTool(BaseTool):
         if isinstance(target_thread, ToolHandlerOutcome):
             return target_thread
 
-        config = getattr(self.agent, "capability_config", None)
+        from ....capability.config import CapabilityConfig
+        from ....capability.runtime_config_reload import capability_config_for_agent
+
+        # 走统一入口：agent 上没有 capability_config 属性；读不到或损坏时也落到默认值（每对每小时 60），不能落到"不限制"。
+        config = capability_config_for_agent(self.agent) or CapabilityConfig()
         decision = decide_session_messaging(
             SessionMessagingRequest(
                 sender_identity=sender_identity,

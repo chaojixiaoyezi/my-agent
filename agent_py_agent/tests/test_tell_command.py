@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.command_catalog import COMMAND_CATALOG
 from agent_py_agent.cli.chat_parts.slash_commands import (
     CHAT_HELP_TEXT,
@@ -181,3 +183,30 @@ def test_tell_success_counts_into_pair_quota(tmp_path) -> None:
     _run("/tell thread-b 你好", ctx)
 
     assert limiter.count("thread-a", "thread-b") == 1
+
+
+@pytest.mark.parametrize("content", [None, "decision_subagent_model_mode: bogus\n"], ids=["missing", "malformed"])
+def test_tell_unreadable_config_file_falls_back_to_default_pair_limit(tmp_path, content) -> None:
+    """缺文件或文件损坏：/tell 与模型工具一样按默认每对每小时 60 条，不能落到 0（不限制）。"""
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    from agent_py_agent.agent.conversation import ConversationStore
+
+    assert CapabilityConfig().session_pair_hourly_limit == 60
+    config_path = tmp_path / "capability_config.yaml"
+    if content is not None:
+        config_path.write_text(content, encoding="utf-8")
+    agent = _agent({"thread-b": _FakeThread("thread-b")})
+    # 生产形态：没有运行时快照，只按 capability_config_path 读文件。
+    agent._capability_config_runtime_snapshot = None
+    agent.capability_config_path = config_path
+    limiter = ConversationStore(tmp_path / "conv").session_pair_rate
+    for _ in range(60):
+        limiter.record("thread-a", "thread-b")
+    agent.conversation_store.session_pair_rate = limiter
+    ctx = _Ctx(agent)
+
+    _run("/tell thread-b 你好", ctx)
+
+    output = "".join(ctx.lines)
+    assert "SESSION_TASK_RATE_LIMIT" in output and "（60）" in output
+    assert agent.conversation_store.guidance.calls == []

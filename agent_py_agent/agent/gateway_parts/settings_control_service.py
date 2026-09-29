@@ -63,7 +63,11 @@ def execute_settings_control(base_agent: object, command: ConversationControlCom
     try:
         if not _is_admin(_scoped_home(base_agent, scope)):
             return ConversationControlResult(_KIND, False, _NOT_ADMIN)
-        text = run_settings_control(getattr(base_agent, "config", None), command)
+        from ..capability.runtime_config_reload import capability_config_for_agent
+
+        # capability 告警要从统一入口取：AgentConfig 上没有 capability_config，旧写法永远拿不到。
+        text = run_settings_control(getattr(base_agent, "config", None), command,
+                                    capability_config=capability_config_for_agent(base_agent))
     except SettingsControlError as exc:
         return ConversationControlResult(_KIND, False, str(exc))
     except Exception:  # noqa: BLE001 - 控制回执不能带堆栈或本机路径之外的内部细节。
@@ -87,14 +91,18 @@ def _is_admin(home: object) -> bool:
 
 
 # LLM: 按解析器给出的 operation 分派；config 是 Gateway 启动时加载的配置（当前运行值与用户配置路径的来源）。
+#   capability_config 由调用方经统一入口取得，只交给要显示配置告警的总览与全部视图；不传时这两处只显示主配置告警。
 # 函数用途: 对管理员执行 /settings 的一个子命令，返回中文回执。
-def run_settings_control(config: object, command: ConversationControlCommand) -> str:
+def run_settings_control(config: object, command: ConversationControlCommand, *,
+                         capability_config: object = None) -> str:
     if command.operation == "help":
         return command.usage
     handler = _HANDLERS.get(command.operation)
     if handler is None:
         raise SettingsControlError(command.usage)
     _operation, _, argument = command.value.partition(" ")
+    if command.operation in _WARNING_VIEWS:
+        return handler(config, argument.strip(), capability_config=capability_config)
     return handler(config, argument.strip())
 
 
@@ -157,11 +165,12 @@ def _common_line(spec: ParameterSpec, config: object, stored: dict) -> str:
 
 # LLM: 未知/已删配置键只告警不生效，用户看不到就等于白配；这里把两个来源拼成给用户看的几行。只读，不解析消息文字。
 #   两个来源先压成一层扁平列表，再过滤空项；项目约定新代码的嵌套不超过两层，所以不写 for→for→if 三层。
+#   capability 来源由调用方传入（统一入口取得的 CapabilityConfig），不从主配置对象上找。
 # 函数用途: 收集主配置与 capability 配置的告警，排成“配置告警 N 条”加逐条来源。
-def _config_warning_lines(config: object) -> list[str]:
+def _config_warning_lines(config: object, capability_config: object = None) -> list[str]:
     sources = (
         ("agent 主配置", config),
-        ("capability 配置", getattr(config, "capability_config", None)),
+        ("capability 配置", capability_config),
     )
     entries = [
         (source, str(item).strip())
@@ -179,7 +188,7 @@ def _config_warning_lines(config: object) -> list[str]:
 # LLM: 默认视图只列参数中心的常用层级（COMMON_KEYS），再用一句大白话说总数和怎么看全部；常用以外改过的只报个数，
 #   详情在 /settings all。总数与改过的统计只算 listed_parameters（加载器元数据不列出）。只读。
 # 函数用途: /settings —— 列出常用参数与当前值，提示用 /settings all 看全部。
-def _overview(config: object, _argument: str) -> str:
+def _overview(config: object, _argument: str, *, capability_config: object = None) -> str:
     registry = listed_parameters()
     stored = _stored(config)
     common = common_parameters()
@@ -188,7 +197,7 @@ def _overview(config: object, _argument: str) -> str:
     others = [key for key in _changed_keys(registry, stored) if not registry[key].common]
     if others:
         lines.append(f"另外你还改过 {len(others)} 个其它参数，发 /settings all 查看。")
-    lines += _config_warning_lines(config)
+    lines += _config_warning_lines(config, capability_config)
     lines.append(f"一共 {len(registry)} 项参数，这里只列常用的 {len(common)} 项，其余一般不用动；看全部发 /settings all。")
     lines.append("找参数：/settings search <关键词>；看说明：/settings show <参数名>；"
                  "修改：/settings set <参数名> <值>，改完发 /restart 重启 Gateway 后生效。")
@@ -199,7 +208,7 @@ def _overview(config: object, _argument: str) -> str:
 #   改过的标［改过］，不能在这里改的标［安全边界］。值都经 mask_value 脱敏；IM 适配器会按行切成多条消息。
 #   只列 listed_parameters：配置文件路径、来源、分层与告警这类加载器元数据不是参数，不出现在清单和总数里。只读。
 # 函数用途: /settings all —— 给管理员看全部参数。
-def _all(config: object, _argument: str) -> str:
+def _all(config: object, _argument: str, *, capability_config: object = None) -> str:
     registry = listed_parameters()
     path = _user_path(config)
     changed = set(_changed_keys(registry, _stored(config)))
@@ -210,7 +219,7 @@ def _all(config: object, _argument: str) -> str:
     recent = parameter_history(user_path=path, limit=3)
     if recent:
         lines += ["最近修改："] + [_history_line(item) for item in recent]
-    lines += _config_warning_lines(config)
+    lines += _config_warning_lines(config, capability_config)
     lines += _category_lines(registry, config, changed)
     return "\n".join(lines + ["看说明发 /settings show <参数名>；只看常用参数发 /settings。"])
 
@@ -332,7 +341,9 @@ def _revert(config: object, argument: str) -> str:
             f"{report['effect_text']}{_applied_text(report, config)}")
 
 
-_HANDLERS: dict[str, Callable[[object, str], str]] = {
+# 需要显示配置告警的视图：分派时额外交给它们统一入口取得的 capability 配置。
+_WARNING_VIEWS = frozenset({"overview", "all"})
+_HANDLERS: dict[str, Callable[..., str]] = {
     "overview": _overview,
     "all": _all,
     "search": _search,
