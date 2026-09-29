@@ -13,6 +13,32 @@
 - **定向回归**：78 个相关文件（统计行、线程显示副本、Gateway 推流、TUI 渲染及 `test_architecture_guardrails`、
   `test_constant_names_unique`）1722 passed。
 
+## Gateway 派发线程不被错误打印杀死、存活进心跳与 /status、扫描门扫描前取样（2026-09-28，分支 `claude/38-gateway-dispatcher-resilience`，基于 `c101d325a`）
+
+- **来源**：集成者转述 dsh-be 的只读排查：生产 step15t 从 15:11 起没处理过一个前台请求；15:13 磁盘写满时错误打印本身抛错逃出 tick，
+  派发线程静默退出；另有扫描门在扫描结束时取 mtime 的竞态隐患。
+- **用例** `test_gateway_dispatcher_resilience.py`（5 条，全部确定性构造，不靠负载）：
+  - stderr 替身第一次写抛 `OSError(ENOSPC)`；tick 段内错误触发的打印撞上它，下一拍段外错误直接逃出 tick：线程不死，第三拍新入队的
+    请求被认领；账本记 1 次打印失败、1 次 tick 错误、3 次 tick、正常退出无错误；磁盘恢复后打印照常。
+  - `_print_gateway_loop_error` 打印失败不抛、只记账本；第二次正常打印。
+  - tick 卡住时心跳载荷 `dispatcher_alive=True` 且 tick 起始晚于结束；放行后 tick 抛 `SystemExit` 线程退出：账本 exited、退出错误
+    类型/阶段、`gateway_request_loop_exited` 事件，`/status`（state 仍 running）报 `dispatcher_alive=False`。
+  - 账本单测：未登记 not_started；登记线程结束但没记退出 → vanished、不算活；当前线程登记 → running；记退出 → exited。
+  - 扫描门：inbox mtime 先拨旧 10 秒、关掉 2 秒粗粒度保护，`_iter_pending_requests` 包一层在 glob 之后 rename 进一份请求：本轮认领 0，
+    `should_scan` 必须为 True，下一轮认领到它。
+- **适配器用例** `test_adapter_state_write_resilience.py`（4 条）：周期状态写入第一次撞 ENOSPC 不杀等待循环，下一轮恢复并把
+  `state_write_failures=1` 与最近错误写进状态文件、有 WARNING 日志；`start_all` 抛错时先停适配器、删 pid 文件、状态写 `failed`
+  （reason/error 结构化）再上抛；磁盘一直满时状态文件不存在但 pid 文件一定已删、有 `adapter_state_write_failed_at_exit` ERROR 日志；
+  `/status` 适配器事实：无 pid 文件不算活，状态文件新鲜 running 但 pid 指向已退出子进程仍不算活且不清理 pid 文件，本进程记录算活，
+  状态文件损坏只单列错误。
+- **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希）：打印入口去掉保护；tick 守卫去掉；退出不记账本；`/status` 不并入快照；
+  心跳不并入快照；存活不看线程是否还在；扫描门改回扫描后取样；适配器周期写入不守卫；异常退出不收尾；收尾不删 pid 文件；
+  适配器存活不看进程。11/11 被抓出。
+- **门禁**：两个新文件 + `test_gateway_loops_resilience.py` + `test_gateway_two_tier_admission.py` + `test_gateway_readiness_generation.py`
+  + `test_gateway_http_runtime_errors.py` + `test_gateway_status_tool.py` + `test_adapter_daemon_cli.py` + `test_channel_health.py`
+  + `test_supervisor.py` + 七个全仓扫描守卫；ruff、doc sync、strict code-size
+  （identity 对 main 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。真机未复验。
+
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 
 - **新增用例**：`test_session_task_real_chain.py` 加了 `test_admin_lists_owner_sessions_and_reaches_the_listed_target`，按派活、发消息参数化成两条。

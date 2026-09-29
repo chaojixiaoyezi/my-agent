@@ -119,4 +119,33 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-__all__ = ["adapter_runtime_health"]
+# LLM: /status 用的适配器进程事实：存活只信 adapter.pid 记录对应的进程是否真活着（含启动指纹防 PID 复用），
+#   状态文件只提供 state/updated_at 与是否陈旧；两者分开给出，读者能区分"进程死了但文件还写着 running"
+#   （2026-09-28 飞书事故的形态）。只读，不清理陈旧 pid 文件，不抛异常。
+# 函数用途: 返回可直接并入 /status 响应的扁平适配器事实。
+def adapter_process_facts(paths: Any) -> dict[str, Any]:
+    pid_report = get_running_pid_report(paths.adapter_pid, cleanup_stale=False)
+    pid = pid_report.pid if pid_report.load_error is None else None
+    facts: dict[str, Any] = {
+        "adapter_alive": bool(pid),
+        "adapter_pid": pid,
+        "adapter_pid_error": "" if pid_report.load_error is None else str(pid_report.load_error),
+        "adapter_state": "",
+        "adapter_state_updated_at": "",
+        "adapter_state_stale": True,
+        "adapter_state_error": "",
+    }
+    state_report = read_json_file_report(
+        paths.root / "adapter_state.json", context="gateway.status.adapter_state.read"
+    )
+    if state_report.load_error is not None:
+        facts["adapter_state_error"] = str(state_report.load_error)
+        return facts
+    payload = state_report.payload if isinstance(state_report.payload, dict) else {}
+    facts["adapter_state"] = str(payload.get("state") or "")
+    facts["adapter_state_updated_at"] = str(payload.get("updated_at") or "")
+    facts["adapter_state_stale"] = _state_is_stale(payload)
+    return facts
+
+
+__all__ = ["adapter_process_facts", "adapter_runtime_health"]

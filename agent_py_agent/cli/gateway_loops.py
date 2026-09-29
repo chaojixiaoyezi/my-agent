@@ -30,6 +30,7 @@ from ..agent.gateway_parts import (
 )
 from ..agent.gateway_parts.input_delivery_service import reconcile_gateway_input_receipts
 from ..agent.gateway_parts.lease_service import GATEWAY_HEARTBEAT_INTERVAL_SECONDS
+from ..agent.gateway_parts.loop_health import loop_health
 from ..agent.gateway_parts.queue_service import GatewayClaim
 from ..agent.gateway_parts.recovery import repair_gateway_terminal_projections
 from ..agent.gateway_parts.request_worker import (
@@ -76,21 +77,70 @@ def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
     return agent
 
 
+# LLM: 派发线程主体。tick 里任何 Exception（含错误打印本身失败）都由 _guarded_dispatch_tick 接住，线程只随 stop_event
+#   退出；派发者构造/关闭失败与 BaseException 逃逸都经 _record_request_loop_exit 留下结构化退出事实（loop_health +
+#   打印 + gateway 事件），Exception 按原语义吞掉返回，BaseException 原样上抛。2026-09-28 生产事故：磁盘写满时 print 抛
+#   OSError 逃出 tick 的 except 块，while 外没有兜底，派发线程静默退出，pending 堆了一下午没人处理。改动须同步
+#   test_gateway_dispatcher_resilience.py。
+# 函数用途: 请求处理循环：单派发者扫描 pending，按两层限流认领后交执行池；本函数只负责起停、兜底与退出记录。
 def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_event: threading.Event) -> None:
     """请求处理循环:单派发者扫描 pending,按两层限流(每用户小坑+全局大坑)认领,
     交给按需扩张的执行线程池跑(池上限=全局大坑)。取代原「N 个 worker 线程各自扫描」
     的单层总闸——那个 N 就是旧的全局总 10。"""
+    loop_health.mark_started()
+    stage = "gateway_request_pool.initialize"
     try:
         dispatcher = _RequestDispatcher(context, paths)
+        stage = "gateway_request_loop.run"
+        _run_request_dispatch(dispatcher, stop_event)
     except Exception as exc:
-        _print_gateway_loop_error("gateway_request_pool.initialize", "pool", exc)
+        _record_request_loop_exit(context, stage, exc)
         return
+    except BaseException as exc:
+        _record_request_loop_exit(context, stage, exc)
+        raise
+    _record_request_loop_exit(context, stage, None)
+
+
+# LLM: 主循环每拍走守卫版 tick，派发到东西就立刻下一拍，否则按空闲间隔等 stop_event；关闭执行池不等在飞任务。
+# 函数用途: 跑派发主循环直到 stop_event 置位，然后关闭执行池。
+def _run_request_dispatch(dispatcher: _RequestDispatcher, stop_event: threading.Event) -> None:
     poll_interval = GATEWAY_REQUEST_POLL_INTERVAL_SECONDS
     while not stop_event.is_set():
-        if dispatcher.tick():
+        if _guarded_dispatch_tick(dispatcher):
             continue
         stop_event.wait(poll_interval)
     dispatcher.shutdown()
+
+
+# LLM: tick 外层守卫：接住从 tick 逃逸的任何 Exception（各段 except 处理里再抛、段外代码抛），记入 loop_health 并打印
+#   （打印本身不会再抛），按"本轮没派发"返回让循环继续。每次 tick 起止都记账本，/status 与心跳据此判断派发是否卡住。
+# 函数用途: 跑一次派发 tick，返回本轮是否派发了请求。
+def _guarded_dispatch_tick(dispatcher: _RequestDispatcher) -> bool:
+    loop_health.mark_tick_started()
+    dispatched = 0
+    try:
+        dispatched = dispatcher.tick()
+    except Exception as exc:
+        loop_health.note_tick_error("gateway_request_dispatch.tick", exc)
+        _print_gateway_loop_error("gateway_request_dispatch.tick", "dispatcher", exc)
+    loop_health.mark_tick_finished(dispatched)
+    return dispatched > 0
+
+
+# LLM: 退出事实三处落：loop_health（内存，/status 与心跳可见）、错误打印（不会抛）、gateway 事件（log_gateway_event
+#   自吞异常）。正常停止只记账本，不打印不发事件。
+# 函数用途: 派发线程退出时记录结构化事实，stage 说明退在构造、运行还是关闭阶段。
+def _record_request_loop_exit(context: GatewayRunContext, stage: str, error: BaseException | None) -> None:
+    loop_health.mark_exited(error, stage)
+    if error is None:
+        return
+    _print_gateway_loop_error(stage, "dispatcher", error)
+    log_gateway_event(
+        context.agent,
+        "gateway_request_loop_exited",
+        {"status": "exited", "pid": os.getpid(), "stage": stage, **loop_health.snapshot()},
+    )
 
 
 class _RequestDispatcher:
@@ -1697,6 +1747,8 @@ def _write_gateway_heartbeat(
             "queue_ages": gateway_queue_ages(paths),
             # 两层限流在飞快照(全局 total + 每用户计数):压测/排障看"谁占着坑"。
             "inflight": admission.snapshot(),
+            # 派发线程存活与最近一次 tick：有 pending 却没人派发时，先看这里而不是只看 pending 数。
+            **loop_health.snapshot(),
         },
     )
 
@@ -1748,7 +1800,14 @@ def _positive_int(value: object) -> int:
     return parsed if parsed > 0 else 0
 
 
+# LLM: 所有后台循环的错误打印入口，本函数绝不抛异常：stderr 所在磁盘写满时 print 抛 OSError，让它逃出 except 块就会
+#   杀掉调用它的循环线程（2026-09-28 生产事故：派发线程静默退出）。打印失败只在 loop_health 记一笔（不做 IO），
+#   经 /status 与心跳可见；磁盘恢复后打印照常。
+# 函数用途: 把循环里的异常按结构化报告打印到 stderr，打印失败也不影响调用方。
 def _print_gateway_loop_error(context: str, worker_id: str, exc: BaseException) -> None:
-    report = runtime_error_report(exc, context=context)
-    report["worker_id"] = worker_id
-    print("[gateway-loop-error] " + json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    try:
+        report = runtime_error_report(exc, context=context)
+        report["worker_id"] = worker_id
+        print("[gateway-loop-error] " + json.dumps(report, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    except Exception as print_exc:
+        loop_health.note_print_failure(context, print_exc)

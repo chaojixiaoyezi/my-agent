@@ -448,6 +448,7 @@ agent_py_agent/
 |   |   |-- approval_session.py        # owner/thread/cwd/权限精确作用域的有界进程内工具审批缓存
 |   |   |-- owner_retention.py          # 有精确在途保护的空闲 owner 缓存回收
 |   |   |-- bounded_http_server.py     # 单 Gateway 固定 daemon worker、128 在途上限与过载 503 背压
+|   |   |-- loop_health.py             # 派发线程起止/每次 tick/逃逸异常/错误打印失败的进程内账本，心跳与 /status 共用一份快照
 |   |   |-- control_service.py         # owner/thread 持久根任务的即时状态、纠偏和中断
 |   |   |-- control_operation_service.py # slash 控制副作用前置回执、幂等重放与 unknown 对账
 |   |   |-- workspace_scope.py         # 普通请求和控制入口共用的宿主目录与 owner 权限校验
@@ -926,6 +927,8 @@ agent_py_agent/
 |   |-- test_host_command_stream.py    # 临时 HTTP/MCP 与 TUI 审批往返、身份映射和取消隔离
 |   |-- test_host_command_resource_reference.py # 原操作反查、坏链拒绝及资源集合回读
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
+|   |-- test_gateway_dispatcher_resilience.py # 派发线程不被 tick 异常与打印失败杀死、退出事实进心跳与 /status、扫描门扫描前取样 mtime
+|   |-- test_adapter_state_write_resilience.py # 适配器状态写入失败不杀进程并恢复、异常退出写 failed 且删 pid、/status 按进程存活判适配器
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
 |   |-- test_adapter_ingress.py         # adapter POST 前落盘、幂等/隔离、响应丢失与崩溃恢复回归
@@ -1314,6 +1317,7 @@ docs/
 - `agent_py_agent/agent/tooling/listen_scope.py`：后台服务监听范围（loopback/lan）的规范化、child 进程树真实监听观测（Linux /proc、其它 POSIX lsof）与越界判定；host 用它回收越界服务。
 - `agent_py_agent/agent/user_space/operation_grants.py`：owner 级"长期允许某类操作"的唯一权威（tool_policy.json 的 operation_grants），审批面板选 approved_owner 后写入，自主模式据此放行。
 - `agent_py_agent/agent/gateway_parts/background_sessions.py`：Gateway 停机收尾只读列出 owner 后台会话权威目录里仍未终态的受管进程（含监听范围事实），供停机事件与 status 投影；不停止、不改记录。
+- `agent_py_agent/agent/gateway_parts/loop_health.py`：Gateway 派发线程健康的唯一事实源（进程内、不做 IO）——起止、每次 tick 起止与派发数、从 tick 逃逸的异常、循环错误打印本身失败的次数；`dispatcher_alive` 由登记/退出记录加线程仍在 `threading.enumerate()` 判定。心跳与 `/status` 只扁平并入 `snapshot()`，不另算存活。
 - `agent_py_agent/agent/gateway_parts/background_resource_report.py`：`gateway stop` 与本地 `/stop` 共用的受管后台进程事实投影与停止入口；只读登记表（根地址与写入端同用 `process_session_store_root(workspace, owner_home)`），投影不含命令正文/cwd/输出路径，按精确执行身份冻结停止意图、等真实终态后如实报告是否停止。`session_background_processes` 只按精确 `thread_id` 筛本会话资源，不做 owner 全量。
 - `agent_py_agent/tests/test_gateway_stop_background_resources.py`：gateway stop 侧合同（只列运行中、跨 task/run 不误停、空身份被拒、未终态如实报未停、按进程组回收孙进程）。
 - `agent_py_agent/tests/test_session_stop_background_resources.py`：会话内 `/stop` 回收被中断任务遗留后台资源的合同（无回合时不再回"没有运行中的内容"、会话隔离精确匹配、登记表不可读时报 unknown）。
@@ -1616,6 +1620,8 @@ docs/
 - `agent_py_agent/tests/test_tui_injected_input_states.py`：插话三段的展示合同——排队(等待送入当前回合)/已提交(已进入本次提供方调用的 prompt，立即按原提交位置进入可见历史，但未获模型确认)/已确认(唯一能清标记的边界)；身份只用 client message_id/request_id/provider_call_id，重复事件与重连重放按块 ID 去重，不丢不重。
 - `agent_py_agent/tests/test_slow_model_liveness.py`：慢模型/长任务活性合同——提供方层流式只看空闲(总墙钟守卫让位、非流式才显式超时)、客户端等待只由机器可观测活动续期且无总上限、服务端租约心跳在静默期持续推进、长工具滚动续租；四类(连接/首包、流式无进展、总时长、明确服务失败)分开断言。
 - `agent_py_agent/tests/test_gateway_admission_wait.py`：合法排队等待的合同——被准入限流或恢复退避时worker 在请求文件写结构化 admission_wait_*（不写 status/lease/模型字段）、有节流与总预算、超预算留一次性过期事实；客户端仅凭该活动续期，停写/取消/终态/崩溃恢复仍按空闲窗口收口，含真实 worker+客户端端到端与负向对照。
+- `agent_py_agent/tests/test_gateway_dispatcher_resilience.py`：派发线程永不停机合同——注入 ENOSPC 的错误打印失败与段内/段外异常都不杀线程、后续请求照常认领；tick 卡住/线程退出在心跳与 `/status` 里可见（`dispatcher_alive`、退出错误、`gateway_request_loop_exited` 事件）；扫描门对 glob 之后 rename 进来的请求下一轮必扫。
+- `agent_py_agent/tests/test_adapter_state_write_resilience.py`：通道适配器常驻进程合同——周期状态写入撞 ENOSPC 不杀进程、下一轮恢复并把失败次数写进状态文件；异常退出先停适配器、删 pid 文件、状态写 failed，状态写不进去也留 ERROR 日志；`adapter_process_facts` 只按 adapter.pid 进程存活判活、只读不清理。
 - `scripts/bench/`：GW-03 与慢模型 A 项的长期可复跑配对基准（`measure_scheduler_reads.py` 锁内解析成本、`bench_owner_fact_kind.py` 各路径单测、`paired_owner_fact_kind.py` 两 checkout 交替比较）。只含结构化夹具，无真实会话内容；README 说明"锁更短 ≠ 整体更快"与"跨组数字不可相除"的证据边界。
 - `agent_py_agent/tests/test_scheduler_scan_costs.py`：调度账本读取成本的合同——waiting 投影缓存的锁外探针 + 锁内三重校验（命中/外部改写/同 stat 不同内容/缓存清空都不得改变调用方结果）、`runtime_snapshot` 的锁外解析与旧实现参考投影逐字一致且锁内不再做 JSON/逐 run 解析、owner 事实判定缓存的签名失效与 TTL 边界。
 

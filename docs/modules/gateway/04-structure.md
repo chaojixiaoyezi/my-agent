@@ -2063,3 +2063,24 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 `session_background_processes` 按精确 `thread_id` 收窄到本会话，绝不退化成 owner 全量。
 登记表根地址两侧都必须用 `process_session_store_root(workspace, owner_home)`（写入端见
 `tooling/shell.py:1199`），换成 `agent.root` 或 `owner_home` 会读到不同目录。
+
+# Gateway Structure
+
+## 派发线程存活账本与扫描门取样时机（2026-09-28）
+
+- `gateway_parts/loop_health.py` 的模块级 `loop_health` 是派发线程健康的**唯一事实源**：只记内存、不做 IO。
+  `dispatcher_alive` = 已登记、未记退出、登记的线程 ident 仍在 `threading.enumerate()`；四态 not_started/running/vanished/exited。
+  心跳（`_write_gateway_heartbeat`）与 `/status`（`http_handlers.handle_status`）都只是把 `snapshot()` 扁平并入载荷，
+  **不得**各自另算存活或复制第二份状态。
+- `cli/gateway_loops._print_gateway_loop_error` 是所有后台循环错误打印的唯一入口，且**绝不抛异常**；打印失败记入
+  `loop_health.note_print_failure`。新增后台循环的错误处理必须走它，不要自己 print。
+- 派发循环结构：`_gateway_request_loop`（起停、兜底、退出记录）→ `_run_request_dispatch`（主循环）→ `_guarded_dispatch_tick`
+  （tick 守卫 + 起止记账）。tick 各段自己的 except 只负责打印，逃逸出来的一律由守卫接住；线程真的退出只可能是派发者构造/关闭失败
+  （Exception，吞掉）或 BaseException（上抛），两者都留 `gateway_request_loop_exited` 事件。
+- `GatewayInboxScanGate.should_scan` 总是先取样 inbox mtime，`record_scan` 以该扫描前样本为基线；扫描期间目录再变则置
+  `_scan_required`。改扫描门时不要把取样挪回扫描之后；2 秒粗粒度保护只是补充，不是这个竞态的修复。
+- 适配器常驻进程（`cli/adapter.py`）：`_write_adapter_state_guarded` 是常驻循环里**唯一**允许调用的状态写入口（OSError 记账不抛，
+  其它异常照常上抛）；退出收尾只走 `_finish_adapter_process`，顺序固定为停适配器 → 删 pid 文件 → 状态写非 running，不要调换
+  （删 pid 文件不需要磁盘空间，是磁盘写满时最后的结构化痕迹）。状态文件用 `write_json_file_atomic`，不要改回 `write_text`。
+- `/status` 的适配器存活只信 `channel_health.adapter_process_facts`（按 `adapter.pid` 的进程存活），状态文件的 `state=running`
+  不能单独当作"活"；`channel_health.adapter_runtime_health` 仍是 registry 健康投影的入口，两者共用同一套 pid/状态读取，不要再长第三套。

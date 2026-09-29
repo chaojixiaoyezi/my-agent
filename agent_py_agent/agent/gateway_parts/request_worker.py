@@ -81,6 +81,12 @@ class _PendingGatewayRequest:
     payload: dict
 
 
+# LLM: mtime 在扫描**之前**取样（should_scan 里），record_scan 记的就是这份扫描前的值。请求先写 .tmp 再 rename，
+#   rename 若落在 glob 之后、record_scan 之前，目录 mtime 已晚于扫描前取样，下一轮 should_scan 一比对就重扫；
+#   扫描后取样会把这次 rename 记成"已见过"，一轮超过 2 秒粗粒度保护窗口时该文件被永久跳过（2026-09-28 生产事故的
+#   第二个隐患）。扫描前后取样不一致也强制下一轮重扫。改动须同步 test_gateway_dispatcher_resilience.py 与
+#   test_gateway_two_tier_admission.py。
+# 类用途: inbox 空闲扫描门，目录没变且上轮为空时跳过 glob，省掉空闲时的目录遍历。
 class GatewayInboxScanGate:
     """inbox 空闲扫描门：目录 mtime 没变且上轮扫描为空时跳过 glob。
 
@@ -92,19 +98,24 @@ class GatewayInboxScanGate:
 
     def __init__(self) -> None:
         self._last_mtime_ns: int | None = None
+        self._scan_started_mtime_ns: int | None = None
         self._scan_required = True
 
+    # 函数用途: 判断这一轮要不要 glob；总是先把当前 mtime 记为"本轮扫描前的样本"。
     def should_scan(self, inbox: Path) -> bool:
-        if self._scan_required:
-            return True
         mtime_ns = self._inbox_mtime_ns(inbox)
-        if mtime_ns is None or mtime_ns != self._last_mtime_ns:
+        self._scan_started_mtime_ns = mtime_ns
+        if self._scan_required or mtime_ns is None or mtime_ns != self._last_mtime_ns:
             return True
         return (time.time() - mtime_ns / 1e9) < self._COARSE_MTIME_GUARD_SECONDS
 
+    # 函数用途: 记录本轮结果；以扫描前样本为"已见过"的基线，扫描期间目录又变了就强制下一轮重扫。
     def record_scan(self, inbox: Path, *, processed: int, deferred_present: bool) -> None:
-        self._last_mtime_ns = self._inbox_mtime_ns(inbox)
-        self._scan_required = bool(processed or deferred_present or self._last_mtime_ns is None)
+        self._last_mtime_ns = self._scan_started_mtime_ns
+        changed_during_scan = self._inbox_mtime_ns(inbox) != self._last_mtime_ns
+        self._scan_required = bool(
+            processed or deferred_present or changed_during_scan or self._last_mtime_ns is None
+        )
 
     @staticmethod
     def _inbox_mtime_ns(inbox: Path) -> int | None:

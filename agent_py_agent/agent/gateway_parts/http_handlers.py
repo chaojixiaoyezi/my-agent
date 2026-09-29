@@ -49,6 +49,7 @@ from ..conversation.control_commands import (
 from ..conversation.message_stream import NoticeDisplayCapabilities, read_background_response_page
 from ..plugin_commands import plugin_namespace
 from ..runtime_errors import DataCorruptionError, runtime_error_report
+from .channel_health import adapter_process_facts
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
 from .control_operation_service import (
     GatewayControlOperationConflict,
@@ -79,6 +80,7 @@ from .input_delivery_service import (
     reconcile_gateway_input_request,
 )
 from .io import gateway_request_counts, write_json_file_atomic
+from .loop_health import loop_health
 from .paths import gateway_chunk_path, gateway_chunk_path_candidates
 from .plugin_command_service import plugin_http_response
 from .request_client import GatewayAskExecutionOptions
@@ -161,6 +163,13 @@ def handle_status(handler, server) -> None:
         "requests": counts,
         "runtime_prefix": str(state.get("runtime_prefix") or ""),
     }
+    # 派发线程存活与最近一次 tick 直接读进程内账本（不经磁盘）：有 pending 却没人派发时一眼能看出派发已死或卡住。
+    response.update(loop_health.snapshot())
+    # 适配器是否真活着按 adapter.pid 的进程存活判定，状态文件只作补充；事实读取失败不影响 /status 本身。
+    try:
+        response.update(adapter_process_facts(server.paths))
+    except Exception as exc:  # noqa: BLE001 - 状态页不能因为适配器事实读取失败而 500
+        response["adapter_facts_error"] = runtime_error_report(exc, context="gateway.status.adapter_facts")
     if state_load_error:
         response["state_load_error"] = state_load_error
     if isinstance(state.get("server_error"), dict):

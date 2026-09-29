@@ -29,6 +29,7 @@ from ..agent.gateway_parts.daemon_control import (
     remove_pid_file_if_owned,
     write_pid_record,
 )
+from ..agent.gateway_parts.io import write_json_file_atomic
 from .adapter_daemon import (
     AdapterDaemonRequest,
     AdapterStopRequest,
@@ -39,6 +40,12 @@ from .adapter_daemon import (
 from .common import make_agent
 from .gateway_client import ensure_gateway_started
 from .models import AdapterOptions
+
+# 适配器常驻进程每隔多久把自己的状态写进 adapter_state.json（channel_health 按 30 秒判陈旧）。
+ADAPTER_STATE_WRITE_INTERVAL_SECONDS = 5.0
+# 状态写入失败的进程内记录：只记内存，不做 IO；下一次写成功时一并写进状态文件，让恢复过程可见。
+_ADAPTER_STATE_WRITE_HEALTH: dict[str, object] = {"failures": 0, "last_error": {}}
+_adapter_logger = logging.getLogger("agent_py_agent.adapter")
 
 
 @dataclass(frozen=True)
@@ -251,25 +258,44 @@ def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     globals()["_adapter_manager"] = manager
 
     write_pid_record(gpaths.adapter_pid)
-    _write_adapter_state(gpaths, "starting", {"requested_channel": options.channel})
+    _write_adapter_state_guarded(gpaths, "starting", {"requested_channel": options.channel})
     print(f"starting channel adapter: {options.channel}", file=sys.stderr)
-    manager.start_all()
-    _write_adapter_state(
-        gpaths,
-        "running",
-        {
-            "requested_channel": options.channel,
-            "channels": manager.runtime_channel_statuses(),
-        },
-    )
-    print(f"started adapters: {manager.list_adapters()}", file=sys.stderr)
-
-    _wait_for_adapter_shutdown(manager, gpaths)
-    manager.stop_all()
-    remove_pid_file_if_owned(gpaths.adapter_pid)
-    _write_adapter_state(gpaths, "stopped", {"reason": "user request"})
+    # LLM: 2026-09-28 生产事故：磁盘写满时周期状态写入抛 OSError，没人接，适配器进程整个退出，状态文件却还写着
+    #   running，飞书从此不通。现在任何异常逃出启动/等待阶段都先收尾（停适配器、删 pid 文件、状态写成 failed）再上抛，
+    #   进程退出与否由异常类型决定，但结构化痕迹一定留下。
+    try:
+        manager.start_all()
+        _write_adapter_state_guarded(
+            gpaths,
+            "running",
+            {"requested_channel": options.channel, "channels": manager.runtime_channel_statuses()},
+        )
+        print(f"started adapters: {manager.list_adapters()}", file=sys.stderr)
+        _wait_for_adapter_shutdown(manager, gpaths)
+    except BaseException as exc:
+        _finish_adapter_process(manager, gpaths, "failed", {"reason": "unhandled_error", "error": _error_record(exc)})
+        raise
+    _finish_adapter_process(manager, gpaths, "stopped", {"reason": "user request"})
     print("adapter stopped", file=sys.stderr)
     return 0
+
+
+# LLM: 退出收尾顺序固定：先停适配器，再删自己的 pid 文件（不占磁盘空间，磁盘写满也能成），最后把状态写成非 running；
+#   状态写不进去时 pid 文件已经没了，channel_health/ /status 按"进程不在"如实判定，另外再记一条 ERROR 日志留痕。
+# 函数用途: 适配器进程退出（正常停止或异常）时的统一收尾。
+def _finish_adapter_process(manager: ChannelManager, gpaths, state: str, extra: dict) -> None:
+    try:
+        manager.stop_all()
+    except Exception as exc:  # noqa: BLE001 - 收尾阶段任何一步失败都不能挡住后面的痕迹
+        _adapter_logger.error("adapter stop_all failed during %s: %s: %s", state, type(exc).__name__, exc)
+    remove_pid_file_if_owned(gpaths.adapter_pid)
+    if not _write_adapter_state_guarded(gpaths, state, extra):
+        _adapter_logger.error("adapter_state_write_failed_at_exit state=%s reason=%s", state, extra.get("reason", ""))
+
+
+# 函数用途: 把异常压成可写进状态文件的小记录（类型、截断的消息）。
+def _error_record(exc: BaseException) -> dict[str, str]:
+    return {"type": type(exc).__name__, "message": str(exc)[:500]}
 
 
 def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -> None:
@@ -279,8 +305,11 @@ def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -
         _register_channel_adapter(manager, "qq", agent)
 
 
-def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths) -> None:
-    stop_event = threading.Event()
+# LLM: 等待循环里的周期状态写入走守卫版：写失败只记账、下一轮重试，绝不让 OSError 逃出循环杀掉进程。
+#   stop_event 可注入只为测试驱动停止；信号处理照常安装（测试用 monkeypatch 替掉 signal.signal）。
+# 函数用途: 挂住主线程直到收到 SIGINT/SIGTERM（或注入的 stop_event 置位），期间周期刷新状态文件。
+def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths, stop_event: threading.Event | None = None) -> None:
+    stop_event = stop_event if stop_event is not None else threading.Event()
 
     def _sig_handler(signum, frame):
         stop_event.set()
@@ -288,16 +317,15 @@ def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths) -> None:
     signal.signal(signal.SIGINT, _sig_handler)
     signal.signal(signal.SIGTERM, _sig_handler)
     try:
-        while not stop_event.wait(5.0):
-            _write_adapter_state(
-                gpaths,
-                "running",
-                {"channels": manager.runtime_channel_statuses()},
-            )
+        while not stop_event.wait(ADAPTER_STATE_WRITE_INTERVAL_SECONDS):
+            _write_adapter_state_guarded(gpaths, "running", {"channels": manager.runtime_channel_statuses()})
     except KeyboardInterrupt:
         pass
 
 
+# LLM: 状态文件是原子写（temp+replace）：写失败时旧内容保持完整，不会留下半截 JSON 让读者报"状态不可读"。
+#   载荷带上进程内记录的写失败次数与最近一次错误，恢复写入后读者能看出中间断过。会抛 OSError，调用方按需守卫。
+# 函数用途: 把适配器进程的生命周期状态原子写进 adapter_state.json。
 def _write_adapter_state(gpaths, state: str, extra: dict | None = None) -> None:
     from ..agent.gateway_parts.daemon_control import _get_process_start_time, _utc_now_iso
 
@@ -307,12 +335,29 @@ def _write_adapter_state(gpaths, state: str, extra: dict | None = None) -> None:
         "start_time": _get_process_start_time(os.getpid()),
         "state": state,
         "updated_at": _utc_now_iso(),
+        "state_write_failures": int(_ADAPTER_STATE_WRITE_HEALTH["failures"]),
+        "last_state_write_error": dict(_ADAPTER_STATE_WRITE_HEALTH["last_error"]),
     }
     if extra:
         payload.update(extra)
-    state_path = gpaths.root / "adapter_state.json"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    write_json_file_atomic(gpaths.root / "adapter_state.json", payload)
+
+
+# LLM: 唯一允许在常驻循环里调用的状态写入口：OSError（磁盘满、只读、权限）只记内存账并打一条 WARNING，返回 False；
+#   其它异常照常上抛（那是程序错误，不能静默）。
+# 函数用途: 守卫版状态写入，失败不杀进程，下一轮再试。
+def _write_adapter_state_guarded(gpaths, state: str, extra: dict | None = None) -> bool:
+    try:
+        _write_adapter_state(gpaths, state, extra)
+    except OSError as exc:
+        _ADAPTER_STATE_WRITE_HEALTH["failures"] = int(_ADAPTER_STATE_WRITE_HEALTH["failures"]) + 1
+        _ADAPTER_STATE_WRITE_HEALTH["last_error"] = {**_error_record(exc), "state": state}
+        _adapter_logger.warning(
+            "adapter_state_write_failed state=%s failures=%s error=%s: %s",
+            state, _ADAPTER_STATE_WRITE_HEALTH["failures"], type(exc).__name__, exc,
+        )
+        return False
+    return True
 
 
 def cmd_adapter_status(args) -> int:

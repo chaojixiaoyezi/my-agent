@@ -1,5 +1,15 @@
 # 设计台账
 
+## Gateway 派发线程存活成为结构化事实（2026-09-28，分支 `claude/38-gateway-dispatcher-resilience`，基于 `c101d325a`，本地验证通过，待集成）
+
+- 现状：派发线程的起止、每次 tick 起止、逃逸异常与"错误打印本身失败"记在进程内账本 `gateway_parts/loop_health.py`，
+  心跳与 `/status` 扁平并入 `dispatcher_alive`/`dispatcher_state`/`last_dispatch_tick_at` 等字段；所有后台循环共用的错误打印入口不再抛异常；
+  扫描门在扫描前取样 mtime。详见 `docs/modules/gateway/02-progress.md` 同日条目。
+- 长期方向（未落地）：外部判活（supervisor、`gateway status`、TUI 状态栏）目前只看进程与心跳新鲜度，下一步可把 `dispatcher_alive=False`
+  或"有 pending 而 `last_dispatch_tick_at` 陈旧"纳入就绪/告警判据，并考虑派发线程死亡时的自动重启或安全重启触发。两项都是新的控制语义，需单独设计。
+- 同批：飞书/QQ 适配器进程的状态写入失败不再杀进程（记账、下一轮重试、原子写），异常退出固定收尾（停适配器 → 删 pid → 状态 failed）；
+  `/status` 的 `adapter_alive` 只按 `adapter.pid` 进程存活判定。未落地：supervisor 对"适配器进程死了"的自动拉起仍只看 pid+状态文件，可复用同一事实源。
+
 ## 墙钟超时后旧请求仍在途，重试可能向供应商重复发送（2026-09-28，来源：`27283cb76` 复审，基于 `6c2fad4da`，待排期）
 
 **现象**：模型调用的发出前登记（子代理业务标记、发送前钩子、插话提交）已经完成、HTTP 请求正在发出或等待响应时，

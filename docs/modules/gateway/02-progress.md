@@ -388,3 +388,30 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
 先知道"有遗留资源"；两条路径（`/stop` 与 `gateway stop --stop-background`）复用同一实现，不新增第二套停止逻辑。
 没有登记仍如实回"没有运行中的内容"；登记表不可读或停止未确认时报 `TASK_RESOURCE_STOP_UNCONFIRMED`。
 本地四文件通过，真机未复验。
+
+## 派发线程不再被错误打印杀死，心跳与 /status 暴露派发存活（2026-09-28，分支 `claude/38-gateway-dispatcher-resilience`，基于 `c101d325a`）
+
+生产 step15t 从 15:11 启动后一个前台请求都没处理：15:13 磁盘写满时，tick 里某段出错走到 `_print_gateway_loop_error`，
+它直接 `print` 到 stderr 没有任何保护，打印本身抛 OSError 逃出 except 块；`_gateway_request_loop` 的 while 外没有 try，
+派发线程静默退出，连死因都没能写进日志，之后 pending 一直涨，`/status` 只看得到 pending 数。
+- `_print_gateway_loop_error` 现在绝不抛：打印失败只在进程内账本 `gateway_parts/loop_health.py` 记一笔（次数、上下文、错误类型），
+  不做 IO。这个入口被所有后台循环共用，心跳、后台主循环的错误打印同样受益。
+- 派发循环每拍走 `_guarded_dispatch_tick`：从 tick 逃逸的任何 Exception 记账本、打印，按"本轮没派发"继续；派发者构造/关闭失败与
+  BaseException 逃逸经 `_record_request_loop_exit` 留下退出事实（账本 + 打印 + `gateway_request_loop_exited` 事件），
+  Exception 按原语义吞掉返回，BaseException 原样上抛。
+- 心跳载荷与 `/status` 响应并入账本快照：`dispatcher_alive`、`dispatcher_state`（not_started/running/vanished/exited）、
+  `last_dispatch_tick_at`、`last_dispatch_tick_started_at`、`dispatch_tick_count`/`dispatch_tick_errors`、`dispatcher_exit_error`、
+  `loop_error_print_failures` 等。`/status` 直接读内存，磁盘写满时也能看出"有 pending 但派发已死或卡住"。
+- 扫描门 `GatewayInboxScanGate` 改在扫描**之前**取样 inbox mtime，并以它为"已见过"的基线；扫描期间目录再变就强制下一轮重扫。
+  原来在扫描结束时取样：请求先写 .tmp 再 rename，rename 落在 glob 之后、record_scan 之前时被记成已见过，负载高、一轮超过
+  2 秒粗粒度保护窗口时该文件被永久跳过。
+- 合同测试 `test_gateway_dispatcher_resilience.py`：注入 ENOSPC 的 stderr、段内/段外异常、卡住后抛 SystemExit 的 tick、glob 之后的
+  rename，全部确定性构造。真机未复验，部署后在生产心跳里核对这些字段。
+- 同一事故的第二个受害者是飞书适配器：`cli/adapter.py` 每 5 秒写一次 `adapter_state.json`，15:13 写入撞 ENOSPC，异常没人接，
+  进程整个退出，状态文件却还写着 running。现在周期写入走 `_write_adapter_state_guarded`：OSError 只记进程内账（次数、最近错误）并打
+  WARNING，下一轮重试，恢复后把 `state_write_failures`/`last_state_write_error` 写进状态文件；状态文件改为原子写，失败不留半截 JSON。
+  启动/等待阶段任何异常逃出都先 `_finish_adapter_process`（停适配器 → 删 pid 文件 → 状态写 failed 带 reason/error）再上抛；
+  状态写不进去时 pid 文件已经没了（删文件不占空间），另记 `adapter_state_write_failed_at_exit` ERROR 日志。
+- `/status` 新增适配器事实（`channel_health.adapter_process_facts`）：`adapter_alive` 只按 `adapter.pid` 记录对应的进程是否真活着
+  判定（含启动指纹防 PID 复用），状态文件只给 `adapter_state`/`adapter_state_updated_at`/`adapter_state_stale`；读取失败单列
+  `adapter_state_error`/`adapter_pid_error`，只读、不清理陈旧 pid 文件。合同测试 `test_adapter_state_write_resilience.py`。
