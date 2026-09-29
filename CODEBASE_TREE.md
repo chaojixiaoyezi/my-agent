@@ -933,6 +933,7 @@ agent_py_agent/
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
 |   |-- test_gateway_dispatcher_resilience.py # 派发线程不被 tick 异常与打印失败杀死、退出事实进心跳与 /status、扫描门扫描前取样 mtime
 |   |-- test_adapter_state_write_resilience.py # 适配器状态写入失败不杀进程并恢复、异常退出写 failed 且删 pid、/status 按进程存活判适配器
+|   |-- test_gateway_loop_backoff_coverage.py # 维护/调度器到期/孤儿恢复/心跳循环持续出错时退避（不快于自身间隔）、限流、按循环记账；包装异常按原因链归 io
 |   |-- test_scheduler_scan_costs.py    # waiting 投影缓存三重校验、runtime_snapshot 锁外解析与旧实现逐字一致、owner 事实缓存失效回归
 |   |-- fixtures/tui/                   # 固定尺寸/时间线的非敏感 TUI PTY 动作 fixture
 |   |-- test_adapter_ingress.py         # adapter POST 前落盘、幂等/隔离、响应丢失与崩溃恢复回归
@@ -1632,6 +1633,7 @@ docs/
 - `agent_py_agent/tests/test_gateway_admission_wait.py`：合法排队等待的合同——被准入限流或恢复退避时worker 在请求文件写结构化 admission_wait_*（不写 status/lease/模型字段）、有节流与总预算、超预算留一次性过期事实；客户端仅凭该活动续期，停写/取消/终态/崩溃恢复仍按空闲窗口收口，含真实 worker+客户端端到端与负向对照。
 - `agent_py_agent/tests/test_gateway_dispatcher_resilience.py`：派发线程永不停机合同——注入 ENOSPC 的错误打印失败与段内/段外异常都不杀线程、后续请求照常认领；tick 卡住/线程退出在心跳与 `/status` 里可见（`dispatcher_alive`、退出错误、`gateway_request_loop_exited` 事件）；扫描门对 glob 之后 rename 进来的请求下一轮必扫。
 - `agent_py_agent/tests/test_adapter_state_write_resilience.py`：通道适配器常驻进程合同——周期状态写入撞 ENOSPC 不杀进程、下一轮恢复并把失败次数写进状态文件；异常退出先停适配器、删 pid 文件、状态写 failed，状态写不进去也留 ERROR 日志；`adapter_process_facts` 只按 adapter.pid 进程存活判活、只读不清理。
+- `agent_py_agent/tests/test_gateway_loop_backoff_coverage.py`：Gateway 全部后台循环的退避/限流/记账覆盖——维护、调度器到期、孤儿恢复循环出错等 max(自身间隔, 退避)，心跳循环只限流不退避，派发 tick 段内错误空闲时退避、请求在流动时不减速；`runtime_error_report` 对包装异常沿原因链把 OSError/sqlite3.OperationalError 归为 io 并带 cause_type。
 - `scripts/bench/`：GW-03 与慢模型 A 项的长期可复跑配对基准（`measure_scheduler_reads.py` 锁内解析成本、`bench_owner_fact_kind.py` 各路径单测、`paired_owner_fact_kind.py` 两 checkout 交替比较）。只含结构化夹具，无真实会话内容；README 说明"锁更短 ≠ 整体更快"与"跨组数字不可相除"的证据边界。
 - `agent_py_agent/tests/test_scheduler_scan_costs.py`：调度账本读取成本的合同——waiting 投影缓存的锁外探针 + 锁内三重校验（命中/外部改写/同 stat 不同内容/缓存清空都不得改变调用方结果）、`runtime_snapshot` 的锁外解析与旧实现参考投影逐字一致且锁内不再做 JSON/逐 run 解析、owner 事实判定缓存的签名失效与 TTL 边界。
 

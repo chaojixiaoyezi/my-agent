@@ -38,6 +38,29 @@
 - **变异**：8 个（两处原因码丢失、类型判断互换、终端 `_error` 不传原因码、合同缺失或改成可重试）全部被抓住。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_process_unknown_reason_codes.py -q`
 
+## 后台循环退避覆盖到全部循环，包装异常按原因链归类（2026-09-29，分支 `claude/38-loop-backoff-everywhere`，基于 `64f7ee64e`）
+
+- **来源**：ENOSPC 真机验收观察 1——scheduler_due 的 tick 在磁盘写满时打了 `SchedulerDueIndexError` 且归为 programmer_bug；盘点后只有
+  派发循环与后台主循环接了 `LoopErrorBackoff`。
+- **用例** `test_gateway_loop_backoff_coverage.py`（9 条，确定性构造，`_RecordingStop` 记录每次等待、包一层 `_print_gateway_loop_error` 计数）：
+  - 维护循环 interval 60s 连续 11 次出错：等待全是 60（退避不快于自身间隔），打印 2 次，`loop_error_counts={"owner-maintenance": 11}`；
+  - 调度器到期循环 / 孤儿恢复循环 interval 0.2s 连续 11 次出错：等待 0.2/0.4/…/25.6/30/30/30，打印 2 次，各自计数，`dispatch_tick_errors` 仍为 0；
+    孤儿循环结束后线程池仍回收；
+  - 心跳循环连续 11 次写失败：等待全是 5.0（不退避），打印 2 次，`loop_error_counts={"heartbeat": 11}`；
+  - 派发 tick 段内错误：空闲时派发段每拍失败 → 退避序列、打印 2 次、`dispatch_tick_errors=11`、tick 起止照记；恢复段每拍失败但第一拍派发了
+    3 条请求 → 第一拍等 0、后两拍 0.4/0.8；
+  - `_wait_after_loop_error` 下限；
+  - 归类：`SchedulerDueIndexError from OSError(ENOSPC)` → io + cause_type=OSError；`from PermissionError` 也是 io（不特判 ENOSPC）；
+    `from sqlite3.OperationalError` → io；`from ValueError` 与无根因 → programmer_bug；真实场景：库文件路径是个目录，`SchedulerDueIndex()`
+    抛 `SchedulerDueIndexError`，`__cause__` 是 `sqlite3.OperationalError`，报告 io。
+- **改动的既有用例**：后台主循环退避序列改为 `max(1.0, 退避)`；派发用例的段内错误现在也计入 `dispatch_tick_errors`；`note_tick_error` →
+  `note_loop_error(loop, …)`。
+- **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希）：出错等待改 min；循环跑器不退避；记账入口每次都打；心跳绕过记账直接打；
+  段内错误不记账；空闲段失败不退避；各循环计数混在一起；不看原因链；sqlite 运行期错误不算环境类；丢 cause_type。10/10 被抓出。
+- **门禁**：新文件 + dispatcher/adapter 韧性 + loops_resilience + readiness + runtime_error_reports + model_unconfigured + message_scan +
+  two_tier + http_runtime_errors + status_tool + background_main_agent_cli + lane_retry + 九个全仓守卫；ruff、doc sync、strict code-size
+  （identity 对 64f7ee64e 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。真机未复验。
+
 ## 非决策调用“缺报”同口径统一，及 ae 复审跟进（2026-09-28，分支 `claude/be-llm-missing-unify`，在 `d802380d8` 之上重做 `dc7fdd8a3`）
 
 - **先核实，再改显示**（没有补记任何账）：

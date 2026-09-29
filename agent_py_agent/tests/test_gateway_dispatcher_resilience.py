@@ -86,6 +86,8 @@ def _stub_dispatcher(paths: GatewayPaths, claims: list[str], stop_event: threadi
     dispatcher._next_terminal_projection_at = float("inf")
     dispatcher._next_input_reconcile_at = float("inf")
     dispatcher.bootstrap_agent = SimpleNamespace(config=SimpleNamespace())
+    dispatcher.backoff = LoopErrorBackoff()
+    dispatcher.tick_failed = False
 
     def submit(claim, user_key, conversation_key):
         claims.append(claim.request_id)
@@ -133,7 +135,8 @@ def test_dispatch_loop_survives_tick_errors_and_failed_error_printing(tmp_path, 
     assert snapshot["loop_error_print_failures"] == 1
     assert snapshot["last_loop_error_print_failure"]["type"] == "OSError"
     assert snapshot["last_loop_error_print_failure"]["context"] == "gateway_request_dispatch.iteration"
-    assert snapshot["dispatch_tick_errors"] == 1
+    assert snapshot["dispatch_tick_errors"] == 2, "段内错误与逃逸错误都记在 dispatcher 名下"
+    assert snapshot["loop_error_counts"] == {"dispatcher": 2}
     assert snapshot["last_dispatch_tick_error"]["context"] == "gateway_request_dispatch.tick"
     assert snapshot["dispatch_tick_count"] == 3 and snapshot["last_dispatch_tick_dispatched"] == 1
     assert snapshot["dispatcher_state"] == "exited" and snapshot["dispatcher_exit_error"] == {}
@@ -313,6 +316,8 @@ class _ScriptedTick:
     def __init__(self, outcomes: list[str]) -> None:
         self.outcomes = outcomes
         self.calls = 0
+        self.backoff = LoopErrorBackoff()
+        self.tick_failed = False
 
     def tick(self) -> int:
         outcome = self.outcomes[self.calls]
@@ -349,7 +354,8 @@ def test_background_main_loop_backs_off_and_throttles_prints(monkeypatch) -> Non
 
     gateway_loops._run_background_main_ticks(_ScriptedTick(outcomes), stop, 1.0)
 
-    assert stop.waits == [0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6, 30.0, 30.0, 30.0, 1.0]  # 撤修复：全是 1.0
+    # 出错等 max(轮询间隔 1.0, 退避)：退避永远不比循环自己的节奏更快；撤修复：全是 1.0
+    assert stop.waits == [1.0, 1.0, 1.0, 1.6, 3.2, 6.4, 12.8, 25.6, 30.0, 30.0, 30.0, 1.0]
     assert len([text for text in stderr.writes if "[gateway-loop-error]" in text]) == 2  # 第 1 次与第 10 次
 
 
@@ -366,7 +372,7 @@ def test_loop_error_backoff_delay_and_print_policy() -> None:
 
 
 def test_loop_health_error_records_are_redacted() -> None:
-    loop_health.note_tick_error("gateway_request_dispatch.tick", RuntimeError("upstream api_key=sk-live-123456 rejected"))
+    loop_health.note_loop_error("dispatcher", "gateway_request_dispatch.tick", RuntimeError("upstream api_key=sk-live-123456 rejected"))
     record = loop_health.snapshot()["last_dispatch_tick_error"]
     assert "sk-live-123456" not in record["message"] and "<redacted>" in record["message"]
     loop_health.mark_exited(RuntimeError("token=ghp_secret_value"), "gateway_request_pool.shutdown")

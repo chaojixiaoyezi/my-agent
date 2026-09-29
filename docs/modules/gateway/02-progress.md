@@ -443,3 +443,19 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
   `dispatcher.shutdown()` 抛错记成 `gateway_request_pool.shutdown` 阶段；`/status` 的 `adapter_pid_error`/`adapter_state_error`
   改为结构化子集（category、context，不带路径）；账本与适配器状态里的错误消息先过 `redact_sensitive_text`。
   9a 建议的 hdiutil 小磁盘镜像写满真机复现留作后续验收。
+
+## 后台循环退避覆盖到全部循环，包装异常按原因链归类（2026-09-29，分支 `claude/38-loop-backoff-everywhere`，基于 `64f7ee64e`）
+
+ENOSPC 真机验收（releases/step16e-50651d81/enospc-acceptance/）里 scheduler_due 的 tick 在磁盘写满时打了一条 `SchedulerDueIndexError`
+且被归为 programmer_bug；盘点发现 `LoopErrorBackoff` 只接了派发循环与后台主循环。本轮：
+- **盘点**（见 04-structure 的表）：维护循环、调度器到期循环、孤儿恢复循环改走 `_run_loop_with_backoff`（成功等 interval 并清零退避，
+  出错记账、限流打印、等 `max(interval, 退避)`——退避只能放慢，不能把 60 秒一次的维护变成 0.2 秒重试）；心跳循环记账、限流但**不退避**
+  （节奏本身就是限流，退避只会把"磁盘腾出后重新被看见"推迟到 30 秒）；派发 tick 的四个段（派发/恢复/终态投影/输入回执调和）的段内错误
+  也进同一份账本与限流，空闲时按退避等待、请求在流动时不减速。请求租约心跳、supervisor 进程、后台主循环内的 owner 车道不接（各有自己的
+  停机/冷却/一次性语义）。
+- **账本**：`loop_health.note_loop_error(loop, context, exc)` 按 loop id 计数，快照新增 `loop_error_counts`、`last_loop_errors`；
+  `dispatch_tick_errors`/`last_dispatch_tick_error` 现在只投影派发循环（9a 之前指出的"后台错误混进派发计数"就此拆开）。
+- **归类**：`runtime_error_report` 对不认识的包装异常沿 `__cause__`/未抑制的 `__context__` 找环境类根因（`OSError`、
+  `sqlite3.OperationalError`），归为 `io` 并带 `cause_type`；只看类型，不看消息文本，不特判 errno。`SchedulerDueIndexError` 本来就
+  `raise ... from exc` 保住了原因链，没改 scheduler。根因是 ValueError 或没有根因仍是 programmer_bug。
+- 合同测试 `test_gateway_loop_backoff_coverage.py`（9 条，确定性构造，含"库文件路径是目录"的真实 sqlite 环境错误）。真机未复验。

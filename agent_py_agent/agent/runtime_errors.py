@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
@@ -171,6 +172,16 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
             ),
             context=context,
         )
+    cause = _environment_cause(exc)
+    if cause is not None:
+        # 包装异常（如 SchedulerDueIndexError）的原因链里是环境错误：按环境错误归类，外层类型名与原因类型都留在报告里。
+        report = _report(
+            exc,
+            _template("io", _local_failure_model_message(context), "local environment failure"),
+            context=context,
+        )
+        report["cause_type"] = cause.__class__.__name__
+        return report
     return _report(
         exc,
         RuntimeErrorTemplate(
@@ -181,6 +192,25 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
         ),
         context=context,
     )
+
+
+# 环境类原因：进程外部条件导致的失败（磁盘满、权限、IO、SQLite 运行期错误如 disk full/locked/unable to open），
+# 不是代码逻辑错误。只看异常类型，不看消息文本，也不特判某个 errno。
+_ENVIRONMENT_CAUSE_TYPES: tuple[type[BaseException], ...] = (OSError, sqlite3.OperationalError)
+
+
+# LLM: 沿 __cause__（raise ... from）与未被抑制的 __context__ 往里走，找第一个环境类异常；有环 seen 防护。
+#   只在异常本身不是环境类时被调用（环境类异常在上面已直接归类），所以返回值就是"包装之下的真实原因"。
+# 函数用途: 从包装异常的原因链里找出环境类根因，没有就返回 None。
+def _environment_cause(exc: BaseException) -> BaseException | None:
+    seen: set[int] = set()
+    current: BaseException | None = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _ENVIRONMENT_CAUSE_TYPES):
+            return current
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    return None
 
 
 def compact_error_message(exc: BaseException, *, max_chars: int = _MAX_ERROR_TEXT) -> str:

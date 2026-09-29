@@ -9,6 +9,8 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -109,37 +111,75 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
 #   （0.2 秒翻倍封顶 30 秒，成功清零），避免持续出错时每 0.2 秒打一条日志把磁盘再写满。关闭执行池由调用方做。
 # 函数用途: 跑派发主循环直到 stop_event 置位。
 def _run_request_dispatch(dispatcher: _RequestDispatcher, stop_event: threading.Event) -> None:
-    backoff = LoopErrorBackoff()
     while not stop_event.is_set():
-        wait_seconds = _guarded_dispatch_tick(dispatcher, backoff)
+        wait_seconds = _guarded_dispatch_tick(dispatcher)
         if wait_seconds > 0:
             stop_event.wait(wait_seconds)
 
 
-# LLM: tick 外层守卫：接住从 tick 逃逸的任何 Exception（各段 except 处理里再抛、段外代码抛），次数一律记入 loop_health，
-#   打印按 backoff 限流（同种错误第 1 次打、之后每 10 次打 1 次），打印本身不会再抛。返回下一拍该等多久：派发到东西 0、
-#   空闲成功轮询间隔、出错则退避时长。每次 tick 起止都记账本，/status 与心跳据此判断派发是否卡住。
+# LLM: tick 外层守卫：接住从 tick 逃逸的任何 Exception（段外代码抛），次数记入 loop_health，打印按 dispatcher.backoff 限流
+#   （同种错误第 1 次打、之后每 10 次打 1 次），打印本身不会再抛。返回下一拍该等多久：派发到东西 0（哪怕某段失败，
+#   请求在流动就不减速）；整拍无错空闲 → 轮询间隔并清零退避；逃逸异常或段失败且没派发 → max(轮询间隔, 退避)。
+#   每次 tick 起止都记账本，/status 与心跳据此判断派发是否卡住。
 # 函数用途: 跑一次派发 tick，返回下一拍前要等的秒数。
-def _guarded_dispatch_tick(dispatcher: _RequestDispatcher, backoff: LoopErrorBackoff) -> float:
+def _guarded_dispatch_tick(dispatcher: _RequestDispatcher) -> float:
     loop_health.mark_tick_started()
-    dispatched = 0
+    site = _LoopSite("dispatcher", "gateway_request_dispatch.tick", "dispatcher", GATEWAY_REQUEST_POLL_INTERVAL_SECONDS)
     try:
         dispatched = dispatcher.tick()
     except Exception as exc:
-        _note_loop_tick_error("gateway_request_dispatch.tick", "dispatcher", exc, backoff)
+        _note_loop_tick_error(site, exc, dispatcher.backoff)
         loop_health.mark_tick_finished(0)
-        return backoff.delay()
-    backoff.record_success()
+        return _wait_after_loop_error(dispatcher.backoff, site.interval)
     loop_health.mark_tick_finished(dispatched)
-    return 0.0 if dispatched > 0 else GATEWAY_REQUEST_POLL_INTERVAL_SECONDS
+    if dispatched > 0:
+        return 0.0
+    if dispatcher.tick_failed:
+        return _wait_after_loop_error(dispatcher.backoff, site.interval)
+    dispatcher.backoff.record_success()
+    return site.interval
 
 
-# LLM: 派发循环与后台主循环共用的出错记账：loop_health 记每一次，backoff 决定这次打不打印。
-# 函数用途: 记一次从 tick 逃逸的异常，并按限流决定是否打印。
-def _note_loop_tick_error(context: str, worker_id: str, exc: BaseException, backoff: LoopErrorBackoff) -> None:
-    loop_health.note_tick_error(context, exc)
-    if backoff.record_failure(f"{context}:{type(exc).__name__}"):
-        _print_gateway_loop_error(context, worker_id, exc)
+# LLM: 一个后台循环的错误落点：loop 是 loop_health 里的计数键，context 是错误报告上下文，worker_id 是打印里的执行者，
+#   interval 是该循环的正常节奏（只在 _run_loop_with_backoff / 守卫里用）。冻结，只当参数包，不含状态。
+# 类用途: 描述"哪个循环、哪一段、以谁的名义打印、正常间隔多久"。
+@dataclass(frozen=True)
+class _LoopSite:
+    loop: str
+    context: str
+    worker_id: str
+    interval: float = 0.0
+
+
+# LLM: 出错后的等待：连续出错按 LoopErrorBackoff 翻倍封顶 30 秒，但永远不比循环自己的正常间隔更快——退避只能放慢，不能把
+#   60 秒一次的维护循环变成 0.2 秒重试。
+# 函数用途: 算出错后下一拍前要等的秒数。
+def _wait_after_loop_error(backoff: LoopErrorBackoff, interval: float) -> float:
+    return max(float(interval), backoff.delay())
+
+
+# LLM: 所有后台循环共用的出错记账：loop_health 按 loop id 记每一次，backoff 决定这次打不打印，打印本身不会抛。
+# 函数用途: 记一次被守卫接住的异常，并按限流决定是否打印。
+def _note_loop_tick_error(site: _LoopSite, exc: BaseException, backoff: LoopErrorBackoff) -> None:
+    loop_health.note_loop_error(site.loop, site.context, exc)
+    if backoff.record_failure(f"{site.context}:{type(exc).__name__}"):
+        _print_gateway_loop_error(site.context, site.worker_id, exc)
+
+
+# LLM: 单一 tick 的后台循环（维护、调度器到期、孤儿恢复）统一节奏：成功等 interval 并清零退避，出错记账、限流打印、
+#   等 max(interval, 退避)；异常绝不逃出，循环只随 stop_event 退出。新增后台循环必须走这里，不要自己 while+sleep。
+# 函数用途: 按统一的退避/限流节奏跑一个后台循环直到 stop_event 置位。
+def _run_loop_with_backoff(stop_event: threading.Event, tick: Callable[[], object], site: _LoopSite) -> None:
+    backoff = LoopErrorBackoff()
+    while not stop_event.is_set():
+        try:
+            tick()
+        except Exception as exc:
+            _note_loop_tick_error(site, exc, backoff)
+            stop_event.wait(_wait_after_loop_error(backoff, site.interval))
+            continue
+        backoff.record_success()
+        stop_event.wait(site.interval)
 
 
 # LLM: 退出事实三处落：loop_health（内存，/status 与心跳可见）、错误打印（不会抛）、gateway 事件（log_gateway_event
@@ -181,6 +221,9 @@ class _RequestDispatcher:
         self._recover_throttle = _RecoverThrottle(self.bootstrap_agent)
         self._next_input_reconcile_at = 0.0
         self._next_terminal_projection_at = 0.0
+        # 段内错误与逃逸异常共用一份退避/限流：段各自隔离只保证互不拖累，刷屏与节奏由它统一管。
+        self.backoff = LoopErrorBackoff()
+        self.tick_failed = False
 
     # LLM: 安全重启排空期间（restart_service.restart_draining）不再认领新请求，只给它们记结构化等待事实，留给接班进程处理；
     # 恢复、终态投影和输入回执调和照常运行。改动须同步 test_gateway_safe_restart.py。
@@ -188,6 +231,7 @@ class _RequestDispatcher:
     def tick(self) -> int:
         # New work gets the first bounded slice. Historical projection and
         # reconciliation scans must never sit in front of an interactive request.
+        self.tick_failed = False
         dispatched = 0
         try:
             dispatched = dispatch_pending_requests(
@@ -198,7 +242,7 @@ class _RequestDispatcher:
                 hold_reason=RESTART_DRAIN_HOLD_REASON if restart_draining() else "",
             )
         except Exception as exc:
-            _print_gateway_loop_error("gateway_request_dispatch.iteration", "dispatcher", exc)
+            self._note_segment_error("gateway_request_dispatch.iteration", "dispatcher", exc)
         # Recovery and projections are independent durability domains. One
         # damaged receipt must not starve normal jobs or another repair domain.
         if self._recover_throttle.due():
@@ -211,7 +255,7 @@ class _RequestDispatcher:
                     agent=self.bootstrap_agent,
                 )
             except Exception as exc:
-                _print_gateway_loop_error("gateway_request_recovery.iteration", "recovery", exc)
+                self._note_segment_error("gateway_request_recovery.iteration", "recovery", exc)
         now = time.monotonic()
         if now >= self._next_terminal_projection_at:
             self._next_terminal_projection_at = now + 0.75
@@ -222,11 +266,7 @@ class _RequestDispatcher:
                     limit=16,
                 )
             except Exception as exc:
-                _print_gateway_loop_error(
-                    "gateway_terminal_projection.iteration",
-                    "terminal-projector",
-                    exc,
-                )
+                self._note_segment_error("gateway_terminal_projection.iteration", "terminal-projector", exc)
         if now >= self._next_input_reconcile_at:
             self._next_input_reconcile_at = now + 0.75
             try:
@@ -236,12 +276,15 @@ class _RequestDispatcher:
                     limit=64,
                 )
             except Exception as exc:
-                _print_gateway_loop_error(
-                    "gateway_input_reconcile.iteration",
-                    "input-reconciler",
-                    exc,
-                )
+                self._note_segment_error("gateway_input_reconcile.iteration", "input-reconciler", exc)
         return dispatched
+
+    # LLM: 段内错误不逃出 tick（各段是独立的持久化域），但要进同一份账本与限流：次数记在 loop "dispatcher" 下，
+    #   打印按 backoff 限流；tick_failed 让外层守卫在本拍没派发到东西时按退避等待。
+    # 函数用途: 记录 tick 里某一段的失败并按限流打印。
+    def _note_segment_error(self, context: str, worker_id: str, exc: BaseException) -> None:
+        self.tick_failed = True
+        _note_loop_tick_error(_LoopSite("dispatcher", context, worker_id), exc, self.backoff)
 
     def _submit(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
         self._executor.submit(self._execute, claim, user_key, conversation_key)
@@ -324,8 +367,9 @@ def _run_background_main_ticks(
     poll_interval: float,
 ) -> None:
     backoff = LoopErrorBackoff()
+    site = _LoopSite("background-main", "gateway_background_main.tick", "background-main", poll_interval)
     while not stop_event.is_set():
-        wait_seconds = _supervisor_tick_survives(supervisor, backoff, poll_interval)
+        wait_seconds = _supervisor_tick_survives(supervisor, backoff, site)
         if wait_seconds > 0:
             stop_event.wait(wait_seconds)
 
@@ -411,11 +455,11 @@ def _start_scheduler_due_loop(
     return thread
 
 
-# LLM: 返回下一拍前要等的秒数：有活 0、空闲 poll_interval、出错退避时长（连续出错翻倍封顶 30 秒，打印限流）。
+# LLM: 返回下一拍前要等的秒数：有活 0、空闲 site.interval、出错 max(interval, 退避)（连续出错翻倍封顶 30 秒，打印限流）。
 #   异常只记账、按限流打印，绝不逃出；循环只随 stop_event 退出。
 # 函数用途: 跑一次后台主循环 tick，返回下一拍前要等的秒数。
 def _supervisor_tick_survives(
-    supervisor: _BackgroundMainSupervisor, backoff: LoopErrorBackoff, poll_interval: float
+    supervisor: _BackgroundMainSupervisor, backoff: LoopErrorBackoff, site: _LoopSite
 ) -> float:
     """永不停机硬保障:tick 的编排缝隙(种子重扫/owner 池同步/提交/汇报)不在 _safe_tick
     保护内,曾能把后台主循环线程整个杀死——网关被 systemd 拉着 active,干活的循环却再也
@@ -424,10 +468,10 @@ def _supervisor_tick_survives(
     try:
         busy = bool(supervisor.tick())
     except Exception as exc:
-        _note_loop_tick_error("gateway_background_main.tick", "background-main", exc, backoff)
-        return backoff.delay()
+        _note_loop_tick_error(site, exc, backoff)
+        return _wait_after_loop_error(backoff, site.interval)
     backoff.record_success()
-    return 0.0 if busy else poll_interval
+    return 0.0 if busy else site.interval
 
 
 def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -> BackgroundMainAgentScheduler:
@@ -1275,17 +1319,13 @@ class _GatewayOwnerMaintenanceController:
             ),
         )
 
+    # LLM: 节奏交给 _run_loop_with_backoff：出错记账、限流打印、等 max(interval, 退避)。
+    # 函数用途: 跑维护循环直到 stop_event 置位。
     def run(self, stop_event: threading.Event) -> None:
-        while not stop_event.is_set():
-            try:
-                self.tick()
-            except Exception as exc:
-                _print_gateway_loop_error(
-                    "gateway_owner_maintenance.tick",
-                    "owner-maintenance",
-                    exc,
-                )
-            stop_event.wait(self.interval)
+        _run_loop_with_backoff(
+            stop_event, self.tick,
+            _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
+        )
 
     def tick(self, *, now: float | None = None) -> dict[str, int]:
         current = float(now if now is not None else time.time())
@@ -1371,12 +1411,11 @@ class _GatewaySchedulerDueController:
                 )
         except Exception as exc:
             _print_gateway_loop_error("gateway_scheduler_due.repair", "scheduler-due", exc)
-        while not stop_event.is_set():
-            try:
-                self.tick()
-            except Exception as exc:
-                _print_gateway_loop_error("gateway_scheduler_due.tick", "scheduler-due", exc)
-            stop_event.wait(self.interval)
+        # 一次性修复之后的常驻 tick 走统一节奏：出错记账、限流打印、等 max(interval, 退避)。
+        _run_loop_with_backoff(
+            stop_event, self.tick,
+            _LoopSite("scheduler-due", "gateway_scheduler_due.tick", "scheduler-due", self.interval),
+        )
 
     def tick(self, *, now: float | None = None) -> int:
         rows = self._due_index.claim_due_owners(
@@ -1452,16 +1491,11 @@ class _GatewayOrphanReconciler:
         )
         poll_interval = min(1.0, max(0.1, self.interval / 10.0))
         try:
-            while not stop_event.is_set():
-                try:
-                    self._async_tick()
-                except Exception as exc:
-                    _print_gateway_loop_error(
-                        "gateway_orphan_reconcile.tick",
-                        "orphan-reconcile",
-                        exc,
-                    )
-                stop_event.wait(poll_interval)
+            # 常驻 tick 走统一节奏：出错记账、限流打印、等 max(poll_interval, 退避)。
+            _run_loop_with_backoff(
+                stop_event, self._async_tick,
+                _LoopSite("orphan-reconcile", "gateway_orphan_reconcile.tick", "orphan-reconcile", poll_interval),
+            )
         finally:
             self._shutdown_executors()
 
@@ -1735,12 +1769,17 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
     paths = context.paths
     agent = context.agent
 
+    backoff = LoopErrorBackoff()
+    site = _LoopSite("heartbeat", "gateway_heartbeat.write", "heartbeat")
     while not stop_event.is_set():
         # 心跳写失败(磁盘满/瞬时 IO 错)不能杀心跳线程:线程一死,外部把"心跳停更"当网关死。
+        # 心跳不退避：它的节奏本身就是限流（5 秒一次），退避只会把"磁盘腾出后重新被看见"推迟到 30 秒；打印照常限流、计数照常记。
         try:
             _write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
         except Exception as exc:
-            _print_gateway_loop_error("gateway_heartbeat.write", "heartbeat", exc)
+            _note_loop_tick_error(site, exc, backoff)
+        else:
+            backoff.record_success()
         stop_event.wait(max(1, GATEWAY_HEARTBEAT_INTERVAL_SECONDS))
 
 

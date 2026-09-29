@@ -2090,3 +2090,26 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   不要各自 sleep 常量或无限打印；打印限流不影响 `loop_health` 的计数。
 - 对外错误字段：`loop_health`/适配器状态里的 message 一律经 `common.log_redaction.redact_sensitive_text`；`/status` 的读取错误只暴露
   `category`/`context`（`channel_health._load_error_subset`），不带 `path`/`message`。
+
+# Gateway Structure
+
+## 后台循环盘点：谁接了退避/限流/记账（2026-09-29）
+
+| 循环 | 入口 | 接入方式 |
+| --- | --- | --- |
+| 派发循环 | `_gateway_request_loop` → `_run_request_dispatch` → `_guarded_dispatch_tick` | 逃逸异常与段内错误（`_RequestDispatcher._note_segment_error`）同一份 `dispatcher.backoff`；有派发不减速，空闲且出错等 `max(0.2s, 退避)` |
+| 后台主循环 | `_run_background_main_ticks` → `_supervisor_tick_survives` | `LoopErrorBackoff`，出错等 `max(poll_interval, 退避)` |
+| owner 维护循环 | `_GatewayOwnerMaintenanceController.run` | `_run_loop_with_backoff`（interval 默认 60s） |
+| 调度器到期循环 | `_GatewaySchedulerDueController.run` | `_run_loop_with_backoff`；启动时的一次性 legacy 修复仍单独打印一次 |
+| 孤儿恢复循环 | `_GatewayOrphanReconciler.run` | `_run_loop_with_backoff`（poll = interval/10），finally 仍回收线程池 |
+| 心跳循环 | `_gateway_heartbeat_loop` | 记账 + 限流打印，**不退避**（节奏本身就是限流） |
+| 请求租约心跳 | `lease_service._run_heartbeat_loop_body` | 不接：每请求短命线程，自带连续失败停机（`_should_stop_heartbeat`） |
+| supervisor 进程 | `supervisor._monitor_until_stopped` | 不接：独立进程，按 check_interval 一次健康检查最多一条日志 |
+| 后台主循环内的 owner 车道（curator / skill learning / owner_build） | `_BackgroundMainSupervisor` | 不接：`BackgroundLaneRetry` 按车道冷却 30 秒 |
+| 请求执行 / 终态化 | `_RequestDispatcher._execute` | 不接：每请求一次性错误，不是循环 |
+
+- 规则：单一 tick 的后台循环一律走 `_run_loop_with_backoff(stop_event, tick, _LoopSite(...))`；出错等待 = `_wait_after_loop_error(backoff, interval)`
+  = `max(interval, 退避)`，永远不比循环自己的节奏快。`_LoopSite.loop` 是 `loop_health` 的计数键，`context` 是错误报告上下文。
+- `loop_health.snapshot()` 的 `loop_error_counts`/`last_loop_errors` 按 loop id 分开；`dispatch_tick_errors` 只投影 `dispatcher`。
+- 错误归类：`runtime_errors._environment_cause` 沿原因链找 `OSError`/`sqlite3.OperationalError`，命中归 `io` 并带 `cause_type`；
+  新的包装异常必须 `raise ... from exc` 保住原因链，不要把根因塞进消息文本再靠文本判断。

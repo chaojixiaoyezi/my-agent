@@ -1,4 +1,5 @@
-# LLM: Gateway 循环健康账本，进程内唯一事实源：派发线程的起止、每次 tick 的起止时间与派发数、从 tick 逃逸的异常，
+# LLM: Gateway 循环健康账本，进程内唯一事实源：派发线程的起止、每次 tick 的起止时间与派发数、各后台循环（按 loop id：
+#   dispatcher/background-main/scheduler-due/owner-maintenance/orphan-reconcile/heartbeat）被守卫接住的异常次数，
 #   以及循环错误打印（cli/gateway_loops._print_gateway_loop_error）本身失败的次数。只记内存、不做 IO，所以磁盘写满时
 #   仍能记录并经 /status 直接读出；心跳写入把同一份快照落盘。dispatcher_alive 由"已登记、未记退出、登记的线程 ident
 #   仍在 threading.enumerate()"共同判定，线程没走到退出记录（vanished）也不会被误报为活。改动时同步
@@ -52,8 +53,8 @@ class GatewayLoopHealth:
         self._tick_finished_at = 0.0
         self._tick_count = 0
         self._last_tick_dispatched = 0
-        self._tick_errors = 0
-        self._last_tick_error: dict = {}
+        self._loop_errors: dict[str, int] = {}
+        self._last_loop_errors: dict[str, dict] = {}
         self._print_failures = 0
         self._last_print_failure: dict = {}
 
@@ -80,12 +81,13 @@ class GatewayLoopHealth:
             self._tick_count += 1
             self._last_tick_dispatched = int(dispatched)
 
-    # LLM: 每一次逃逸异常都记（打印限流不影响计数），所以 dispatch_tick_errors 是真实次数。
-    # 函数用途: 记录一次从 tick 逃逸、已被外层守卫接住的异常（线程继续跑）。
-    def note_tick_error(self, context: str, exc: BaseException) -> None:
+    # LLM: 每一次被守卫接住的异常都记（打印限流不影响计数），按 loop id 分开计数，所以 loop_error_counts 是各循环的真实次数；
+    #   派发循环（loop="dispatcher"）同时投影成 dispatch_tick_errors/last_dispatch_tick_error 两个对外字段。
+    # 函数用途: 记录某个后台循环里一次已被守卫接住的异常（线程继续跑）。
+    def note_loop_error(self, loop: str, context: str, exc: BaseException) -> None:
         with self._lock:
-            self._tick_errors += 1
-            self._last_tick_error = _error_record(context, exc)
+            self._loop_errors[loop] = self._loop_errors.get(loop, 0) + 1
+            self._last_loop_errors[loop] = _error_record(context, exc)
 
     # LLM: 由 _print_gateway_loop_error 的 except 调用，本方法自己不做任何 IO，磁盘写满时也必须成功。
     # 函数用途: 记录一次"循环错误打印本身失败"（典型是 stderr 所在磁盘写满）。
@@ -117,8 +119,10 @@ class GatewayLoopHealth:
                 "last_dispatch_tick_at": self._tick_finished_at,
                 "last_dispatch_tick_dispatched": self._last_tick_dispatched,
                 "dispatch_tick_count": self._tick_count,
-                "dispatch_tick_errors": self._tick_errors,
-                "last_dispatch_tick_error": dict(self._last_tick_error),
+                "dispatch_tick_errors": self._loop_errors.get("dispatcher", 0),
+                "last_dispatch_tick_error": dict(self._last_loop_errors.get("dispatcher", {})),
+                "loop_error_counts": dict(self._loop_errors),
+                "last_loop_errors": {loop: dict(record) for loop, record in self._last_loop_errors.items()},
                 "loop_error_print_failures": self._print_failures,
                 "last_loop_error_print_failure": dict(self._last_print_failure),
             }
