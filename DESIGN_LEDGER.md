@@ -55,7 +55,7 @@
 - **默认关的理由**：不打乱 09-29 的同钟点复测。由集成方经 `decision_patch`（owner 级）打开，或在 TUI 决策菜单里打开“观察不挡回复”。
 - 细节见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#observe-不挡主链路2026-09-28默认关)和 TESTS 同日条目。
 
-## `/endtask`：管理员结束卡在等待中的定时会话任务（2026-09-29，分支 `claude/be-end-session-task`，基于 `130dee0ac`，本地验证通过，待集成）
+## `/endtask`：管理员结束卡在等待中的定时会话任务（2026-09-29，分支 `claude/be-end-session-task`；已随 step16g（`bac2f176d`，2026-09-29 02:11 PDT）部署，生产只读验收通过）
 
 **来源**：2026-09-28 生产事故。两个会话由每 5 分钟一次的定时任务驱动，各有一次定时运行里的 `run_command` 结果未知：
 - 工作片以 `runtime_status=unfinished`（`TOOL_OPERATION_OUTCOME_UNKNOWN`）停下，会话任务仍是 active；
@@ -70,6 +70,22 @@
   没有未结束的 attempt（终态判定只用 `runtime_db.operations.attempt_status_is_terminal`）。运行库读不到按“无法确认”拒绝。
 - 确认只写两处：会话任务按 `expected_status=active` 的 CAS 改为 `cancelled`；再对同一任务调 `reconcile_waiting_run`。
   结算没成时，定时层每轮入队前的批量对账会再收口。不改运行库、不重做未确认的工具操作。
+
+**部署与验收**（状态：已随 step16g（`bac2f176d`，2026-09-29 02:11 PDT）部署，生产只读验收通过）：
+- 验收只读、不带 confirm。
+  - 调用路径与 TUI 相同：经生产 Gateway 控制入口，以本机管理员身份（`local-agent` / `chat`）提交；回环来源免令牌，不读配置。
+- 两步结果：
+  - `/endtask` 列表：ok，空列表（生产上没有等待中的定时执行）。
+  - `/endtask <不存在的任务ID>` 预览：拒绝码 `END_TASK_NOT_WAITING_RUN`。这说明管理员通路、预览路径和拒绝码在真实 Gateway 上生效。
+- “不停后台命令”这句提示的验收：
+  - 这句只出现在有效候选的预览和确认结果里。
+  - 生产上没有候选，所以改用替代证据：生产 runtime 中 4 个 `/endtask` 文件与 `bac2f176d` 逐字节一致；`test_end_task_control.py` 对预览和确认结果都断言了这句提示。
+- 不为验收人为制造等待中的定时执行。
+- 证据目录：`~/.my-agent/decision-evidence/endtask-acceptance/`，含脚本 `endtask_acceptance.py` 与结果 `result-step16g-20260929.jsonl`。
+- 第一次真正执行 `confirm`：只在生产上确实出现卡住的等待中定时执行时进行，由管理员操作：
+  1. 先发 `/endtask` 看列表；
+  2. 再发 `/endtask <任务ID>` 看预览；
+  3. 按预览末尾的提示发 `/endtask <任务ID> confirm`。
 
 **边界与未做**：
 - 这是事后收口入口，不是根因修复。根因修复另排：定时运行只有在确有后续工作（子代理、后台进程、已登记的续跑事件）时

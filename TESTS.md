@@ -216,8 +216,20 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
     - 只去掉 post-run_once 二次检查：四窗全过。它在答复落账之后，构造不出它是唯一防线的场景，所以不另加用例。
     - 停止永不确认：四窗全部失败。
 
-## `/endtask`：管理员结束卡在等待中的定时会话任务（2026-09-29，分支 `claude/be-end-session-task`，基于 `130dee0ac`）
+## `/endtask`：管理员结束卡在等待中的定时会话任务（2026-09-29，分支 `claude/be-end-session-task`，基于 `130dee0ac`；已随 step16g（`bac2f176d`，2026-09-29 02:11 PDT）部署，生产只读验收通过）
 
+- **生产只读验收（2026-09-29，step16g 切换后）**：状态为已部署、生产只读验收通过。
+  - 前置核对：Gateway 进程跑在 `runtime-step16g-f41b3532` 上；验收脚本用同一 runtime 的 `python -I` 运行，确认导入的模块都在该 runtime 内。
+  - 调用路径：产品自带的 `post_gateway_json(8420, OwnerIdentity.local_main(), "/control", …)`，和 TUI 同一路径；回环来源免令牌，不读配置。
+  - 只看结构化字段，不带 confirm：
+    - `/endtask` 列表：HTTP 200，`ok=true`，空列表，0 条候选。
+    - `/endtask <不存在的任务ID>` 预览：HTTP 200，`ok=false`，`error_code=END_TASK_NOT_WAITING_RUN`。拒绝码不是 `END_TASK_ADMIN_ONLY`，说明管理员通路生效。
+  - “不停后台命令”提示只出现在有效候选的预览和确认结果里。生产上没有候选，改用替代证据：
+    - 切换后复核，生产 runtime 中 `end_task_control.py`、`control_commands.py`、`control_service.py`、`control_runtime.py` 与 `bac2f176d` 逐字节一致；
+    - `bac2f176d` 上 `test_end_task_control.py` 7 项全过，预览与确认结果两处都断言了这句提示。
+  - 副作用只有两条控制回执，与用户在 TUI 里敲两次 `/endtask` 相同。
+  - 证据目录：`~/.my-agent/decision-evidence/endtask-acceptance/`，含 `endtask_acceptance.py` 与 `result-step16g-20260929.jsonl`。
+  - `confirm` 没有在生产上执行过。第一次真正执行，应在确实出现卡住的等待中定时执行时，由管理员按预览提示操作。
 - **新增** `test_end_task_control.py`（6 项）。夹具用真实 `SimpleAgent`：经 `create_job` / `reserve_due_runs` / `claim_run` /
   `park_run_waiting` 与 `record_run_creation`、`settle_agent_attempt` 造出事故形态，即定时执行 waiting、会话任务 active、
   attempt 已结束而 AgentRun 未关。
