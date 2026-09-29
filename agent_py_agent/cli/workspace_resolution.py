@@ -53,6 +53,25 @@ def owner_home_workspace_root(config) -> Path:
     return owner.home_dir.resolve(strict=False)
 
 
+# LLM: CLI 也要拿到运行时权威路径：进程 cwd 与配置默认值都不是所有者事实，Agent 启动时会把同一份值
+#   注入 config。这里只做定位，不创建目录、不读任何内容。
+# 函数用途: 返回当前 owner 的运行时路径字典（键与 agent 启动时注入 config 的字段一一对应）。
+def runtime_paths_for_config(config) -> dict[str, Path]:
+    from ..agent.user_space.home_layout import home_paths
+    from ..agent.user_space.home_root import configured_home_root
+    from ..agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+    from ..agent.user_space.runtime_paths import runtime_paths_for_agent
+
+    base = home_paths(configured_home_root(config))
+    owner = resolve_owner_home(base.root, owner_identity_from_config(config))
+    scoped = home_paths_with_owner(base, owner)
+    return runtime_paths_for_agent(config, owner.home_dir, scoped)
+
+
 # LLM: CLI/config paths are requests, not authority. WorkspaceOnly accepts only owner-home roots;
 # an external root requires the structured local/main identity and access_mode=full-access.
 # 函数用途: 在创建 Agent 前检查显式工作区，避免命令行静默忽略外部目录而 Gateway 却报错。
@@ -169,6 +188,7 @@ __all__ = [
     "owner_home_workspace_root",
     "resolve_workspace_root",
     "resolve_workspace_roots",
+    "runtime_paths_for_config",
     "validate_requested_workspace_roots",
 ]
 

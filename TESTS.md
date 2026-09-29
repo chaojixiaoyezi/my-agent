@@ -196,6 +196,26 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
   ```
 - **未覆盖**：没在生产 home 上跑 `home-retention --apply`（会真移生产数据）；本片只验证 plan 的规划范围与判定，apply 路径沿用既有实现未改。
 
+## audit-log --cleanup 按 owner canonical 路径解析（2026-09-28，分支 `my-agent/self-dev-4`，基于 `80b4afed8`）
+
+- **补充（2026-09-29，同一分支）**：dev 要求把"基准"从配置默认值那条隐式链换成运行时路径的权威值。现在 CLI 除了传 owner home 基准，还把 `runtime_paths_for_config(config)["audit_log_path"]` 交给 `AuditQuery(runtime_audit_path=...)`——这一份与 Agent 启动时注入 config 的值同源（实测都指向 `O/logs/audit/`）。`runtime_paths_for_config` 是新增的 CLI 侧小函数，只做定位、不建目录、不读内容。
+  - 新增 3 条断言：给了运行时路径就以它为准（不再落到 `data/audit`）；两套入口解析出的审计文件是同一个；省略运行时路径时保持既有行为。
+  - 变异 `ignore-runtime-path`（`AuditQuery` 忽略运行时权威路径）→ 杀死 2 条。**如实声明**：把 CLI 侧那一行删掉（退回只传 owner home 基准）**当前没有用例能杀**——既有用例都直接构造 `AuditQuery`，没有走 CLI 入口；这条缺口留待补一个 CLI 端到端断言。
+
+- **来源**：dsh-9b 的产品持久数据盘点（`docs/design/STORAGE_RETENTION.md`）零风险缺口之一——`audit-log --cleanup` 按相对路径解析，指到了错误的文件。
+- **根因**：`audit/paths.py:resolve_audit_paths` 把配置里的相对值（默认 `data/audit`）直接 `Path(...)` 展开，于是相对**进程 cwd**。Agent 启动时 `core.py:450 apply_runtime_paths_to_config` 会把 canonical 的绝对 `audit_log_path`（`owner_logs_dir/audit`）注入 config，所以写入端没问题；但 CLI 的 `audit-log` 只 `load_config`、没有走 runtime paths，于是拿到空串 → 落到 `data/audit`，随启动目录漂移。在不同 cwd 下执行会清到不同文件，甚至可能清掉工作区里恰好同名的 `data/audit/audit.jsonl`。
+- **做法**：`resolve_audit_paths(config, *, root=None)` 新增可选基准；给了基准且配置值是相对路径时，按基准展开，绝对路径原样尊重；不传时保持旧的相对语义（不影响既有测试与旧调用方）。`AuditQuery.__init__` 同样接受 `root`。CLI 用 `workspace_resolution.owner_home_workspace_root(config)` 取 canonical owner home 传入，替换原先取到就没用上的 `resolve_workspace_root`。
+- **新增测试**：`test_audit_cleanup_path.py`（9 项）——相对路径按基准解析、绝对路径不被改写、无基准保持旧语义、**两个不同 cwd 下清的都是 canonical 那一个且工作区同名文件绝不被碰**、保留期 ≤ 0 不删任何记录、清理不越出给定 owner home、查询视图的 root 与 file 两个字段都跟着基准、带后缀的相对路径、生产同形路径落在 owner home 内。
+- **变异验证**：`_mutate_audit_path.py`（工作目录 `tasks/2026-09-28/storage-retention-fixes/`）两处，先 `git diff` 存补丁、`git checkout -- .` + `git apply` 还原：
+  - 完全去掉基准解析（回到随 cwd 漂移）→ 6 条红；
+  - 假装支持基准但实际用 `Path.cwd()` 兜底 → 同样 6 条红；
+  - 还原后 9 项全绿。
+- **定向回归**：`test_audit_cleanup_path.py` + `test_audit_class.py` + `test_audit_redaction.py` 共 26 项通过。
+- **复现**：
+  ```
+  cd <worktree>
+  python3 -m pytest agent_py_agent/tests/test_audit_cleanup_path.py agent_py_agent/tests/test_audit_class.py agent_py_agent/tests/test_audit_redaction.py -q
+
 
 ## 非决策调用“缺报”同口径统一，及 ae 复审跟进（2026-09-28，分支 `claude/be-llm-missing-unify`，在 `d802380d8` 之上重做 `dc7fdd8a3`）
 

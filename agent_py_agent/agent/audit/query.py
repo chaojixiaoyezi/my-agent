@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
 from .logger import AuditAction, AuditEntry
-from .paths import resolve_audit_paths
+from .paths import AuditPaths, resolve_audit_paths
 
 
 @dataclass
@@ -119,9 +119,23 @@ class AuditQuery:
     # LLM: root 是调用方的 canonical 基准（owner home）；给了它，配置里的相对路径就不再随进程 cwd 漂移。
     #   不给时保持旧行为，避免影响既有测试与旧调用方。
     # 函数用途: 建立审计查询视图，可选地按给定基准解析相对审计路径。
-    def __init__(self, config: AgentConfig, *, root: Path | str | None = None):
+    # LLM: root 是调用方的 canonical 基准（owner home）；给了它，相对路径就不再随进程 cwd 漂移。
+    #   runtime_audit_path 是运行时路径的权威值（Agent 启动时注入 config 的那一份），给了它就以它为准——
+    #   审计日志地址不该由"配置恰好空值 → 落到默认 data/audit"这条隐式链决定。
+    # 函数用途: 建立审计查询视图，按给定基准或运行时权威路径解析审计路径。
+    def __init__(
+        self,
+        config: AgentConfig,
+        *,
+        root: Path | str | None = None,
+        runtime_audit_path: Path | str | None = None,
+    ):
         self.config = config
-        paths = resolve_audit_paths(config, root=root)
+        if runtime_audit_path is not None:
+            resolved = Path(runtime_audit_path).expanduser()
+            paths = AuditPaths(root=resolved, log_file=resolved / "audit.jsonl")
+        else:
+            paths = resolve_audit_paths(config, root=root)
         self._audit_root = paths.root
         self._audit_file = paths.log_file
 

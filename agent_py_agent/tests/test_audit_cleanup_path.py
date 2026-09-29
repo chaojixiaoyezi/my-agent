@@ -135,3 +135,33 @@ def test_owner_home_logs_audit_shape(tmp_path):
     paths = resolve_audit_paths(config_with("logs/audit"), root=home)
     assert paths.log_file == home / "logs" / "audit" / "audit.jsonl"
     assert paths.log_file.is_relative_to(home)
+
+# LLM: 运行时路径里有权威审计目录时，必须优先用它；CLI 不能再靠"配置空值 → 默认 data/audit"这条隐式链。
+# 函数用途: 验证 runtime_audit_path 优先于配置解析。
+def test_runtime_audit_path_wins_over_config_defaults(tmp_path):
+    runtime_dir = tmp_path / "owner-home" / "logs" / "audit"
+    query = AuditQuery(
+        config_with(""),
+        root=tmp_path / "owner-home",
+        runtime_audit_path=runtime_dir,
+    )
+    assert query._audit_root == runtime_dir
+    assert query._audit_file == runtime_dir / "audit.jsonl"
+
+
+# LLM: 运行时路径与配置基准指向同一个目录时必须落在一起，CLI 与 Agent 两条入口不能各写各的。
+# 函数用途: 验证两套入口解析出的审计文件是同一个。
+def test_runtime_path_matches_configured_canonical_root(tmp_path):
+    home = tmp_path / "owner-home"
+    runtime_dir = home / "logs" / "audit"
+    via_config = AuditQuery(config_with("logs/audit"), root=home)
+    via_runtime = AuditQuery(config_with(""), root=home, runtime_audit_path=runtime_dir)
+    assert via_config._audit_file == via_runtime._audit_file
+
+
+# LLM: 不给运行时路径时保持既有行为，旧调用方和既有测试不受影响。
+# 函数用途: 验证省略运行时路径时仍按配置与基准解析。
+def test_without_runtime_path_keeps_config_resolution(tmp_path):
+    home = tmp_path / "owner-home"
+    query = AuditQuery(config_with("data/audit"), root=home)
+    assert query._audit_file == home / "data" / "audit" / "audit.jsonl"
