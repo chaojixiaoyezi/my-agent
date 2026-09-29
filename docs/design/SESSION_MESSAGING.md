@@ -217,6 +217,8 @@
     - 走真实 Gateway ask、Gateway 同款后台调度器，以及真实的 唤醒 → 认领 → run_claimed → 回合装配，只替换供应商传输。
     - 已知未修的缺陷用 strict xfail 标出，修好后必须转正。
     - 其中“空闲目标的消息唤醒回合没有认领或确认消息，下一回合会再收到一遍”违反第 5 条，是 2026-09-28 新发现的缺陷。
+    - 2026-09-29 起包含 `list_owner_sessions` 的正向对照：管理员列会话 → 只凭清单挑目标派活或发消息 → 目标执行；
+      并断言清单不含别的 owner 的会话，也不含正文。
     - 细节见 TESTS.md。
 
 ## 交付切片
@@ -273,6 +275,8 @@
   `unreadable_records`，不回显内容。按最近活动倒序，`limit` 取 1–100（默认 20），超出时 `truncated=true`。
 - 身份三元组任一缺失返回 `SESSION_IDENTITY_UNAVAILABLE`，不列任何会话。派活唤醒档
   `SESSION_TASK_WAKE_ALLOWED_TOOLS` 同时放行它。
+- 真实链路验证：`test_session_task_real_chain.py::test_admin_lists_owner_sessions_and_reaches_the_listed_target`
+  （派活、发消息两条）。对普通用户开放之前，必须先补权限用例。
 
 限额语义：`session_pair_hourly_limit` 按「发送会话 → 接收会话」分桶，小时窗口固定、跨窗口归零；
 模型发起的发送与派活在投递前判断，超限返回 `SESSION_TASK_RATE_LIMIT` 且不投递、不占配额；

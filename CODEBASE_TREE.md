@@ -25,7 +25,7 @@
 |-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
 |-- agent_py_agent/tests/test_capability_config_missing_defaults.py # 缺配置文件给默认实例且不缓存、坏文件仍 None、决策默认值读 capability 文件
 |-- agent_py_agent/tests/test_capability_config_single_default_source.py # 各调用点缺文件/坏文件都取 dataclass 默认、文件值生效
-|-- agent_py_agent/tests/test_session_task_real_chain.py # 会话互通真实链路门禁：真实 Gateway ask + 后台调度器 + 只替换供应商传输
+|-- agent_py_agent/tests/test_session_task_real_chain.py # 会话互通真实链路门禁：真实 Gateway ask + 后台调度器 + 只替换供应商传输；含 list_owner_sessions 列会话后按清单派活/发消息
 |-- agent_py_agent/tests/test_capability_package_selection.py # 结构化选择、原调用账与响应隔离
 |-- agent_py_agent/tests/test_capability_package_read.py # 原页回执保持及读取和pin取消边界
 |-- agent_py_agent/tests/test_capability_selection_authority.py # 原执行权和只读准入组合验证
@@ -1745,7 +1745,7 @@ docs/
 - `agent_py_agent/tests/test_task_run_settle_quiescent_children.py`：`settle_task_run_if_agent_tree_terminal` 的树判定回归：根终态 + BLOCKED 子 run 能关 TaskRun 并在 `task_run.closed` 留静止子 run 证据；子 run 再起 attempt 经 `task_run.reopened` 重开；attempt 在跑/仍持锁/根未终态/无 attempt 都保持开放；发现扫描能关掉存量；pending 激活的 started 事件按各自列写。
 - `agent_py_agent/tests/test_compact_calibrated_candidate_gate.py`：候选接受门与预检同一校准口径的回归：纯校准函数与预检逐项相等、宿主边界按 fingerprint/代次冻结观测、transcript 与活动回合两条门在估算偏高 43% 时接受候选且恰好等于上限仍拒绝、进度事件的结构化触发来源，以及隔离 home 两回合假 LLM 复现（接受后下一次真实预检与接受基准一致、失败路径线程快照不被原始值误导、无观测行为不变）。
 - `agent_py_agent/tests/test_compact_output_reserve.py`：真实冻结请求与本地输出预留门组合，当前要求和工具schema保留，过界零业务发送/覆盖提交，Responses普通及OAuth未知上限分开验证。
-- `agent_py_agent/tests/test_session_task_real_chain.py`：会话互通的真实链路门禁，每次交付先用它把关。前台走真实 Gateway ask，后台走 Gateway 同款调度器，唤醒、认领、run_claimed、回合装配都是真实的，只替换供应商传输；覆盖派活与消息唤醒的正向对照、空转回归与兜底、默认链深 4，已知未修项用 strict xfail（只接受 AssertionError，链路断掉抛 RealChainBroken）。
+- `agent_py_agent/tests/test_session_task_real_chain.py`：会话互通的真实链路门禁，每次交付先用它把关。前台走真实 Gateway ask，后台走 Gateway 同款调度器，唤醒、认领、run_claimed、回合装配都是真实的，只替换供应商传输；覆盖派活与消息唤醒的正向对照、list_owner_sessions 列会话后按清单派活或发消息（不含别的 owner、不含正文）、空转回归与兜底、默认链深 4，已知未修项用 strict xfail（只接受 AssertionError，链路断掉抛 RealChainBroken）。
 
 - `agent_py_agent/tests/test_model_selection_isolation.py`：复用原Gateway、线程CAS、模型目录与校准入口验证并发隔离和窗口变化；仅HTTP与决策回复为替身。
 

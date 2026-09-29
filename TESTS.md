@@ -1,5 +1,32 @@
 # 测试与发布验收
 
+## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
+
+- **新增用例**：`test_session_task_real_chain.py` 加了 `test_admin_lists_owner_sessions_and_reaches_the_listed_target`，按派活、发消息参数化成两条。
+  - 正向对照：
+    - A（管理员）在真实 Gateway 前台回合里调用 `list_owner_sessions`；
+    - 假线路只凭返回的清单挑目标：不是当前会话、最近活动、`allowed_kinds` 含所需类型，A 的提示里不出现 B 的 id；
+    - 随后派活或发消息，由 Gateway 同款后台调度器执行；
+    - 派活时断言任务目标是 B 且状态 done；发消息时断言 B 的唤醒回合看到了这条消息。
+  - 清单断言：
+    - 恰好是本 owner 的 A、B、C 三个会话，`current_thread_id` 是 A；
+    - A 行 `is_current=true`、`allowed_kinds=[]`，B 行允许所需类型；
+    - `unreadable_records=0`，每行只有 6 个结构化字段。
+  - 跨 owner：同一个 home 下再建一个普通用户 owner（feishu/user），经真实前台 ask 建出会话，这个会话不出现在清单里。
+    - 真实部署里每个 owner 各有自己的会话存储，所以本用例保护的是“只读本 owner 的存储”。
+    - 同一存储里混入别的 owner_home 记录的情形，由 `test_list_owner_sessions_tool.py` 覆盖。
+  - 不含正文：B 和其它 owner 的会话里各写一个 RC-SECRET 标记，清单序列化后既不含这两个标记，也不含提示原文。
+  - 测试文件里留了待办：将来 `list_owner_sessions` 对普通用户开放时，要补权限用例。
+  - 夹具顺手抽出 `_agent_config`、`_ready_gateway_paths`、`RealChain.open_session` 三个小函数，行为不变。
+- **验证**：
+  - 基于 `6c2fad4da`（已含 `list_owner_sessions`）全文件 7 通过、4 xfail，4 条 xfail 与原来相同。
+  - 上一个提交单独跑也全部符合预期（5 通过、4 xfail），两个提交可以分开并入。
+  - 变异（只改 scratch 导出里的 6933f4c97），两个都被抓住：
+    - 清单行多带 title → 两条都失败在“清单行只能有结构化字段”；
+    - `is_current` 恒为假 → 失败在 A 行的断言。
+  - 测试防线 e9be5de14 上预跑原有 9 条，零拦截；防线尚未并入 main。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_task_real_chain.py -q -rxX`
+
 ## 两条负载敏感用例改稳：交互式停止接纳、插话墙钟重试（2026-09-29，分支 `claude/38-deflake-stop-steer`，基于 `f7a4cc909`，只改测试）
 
 - **来源**：集成者报告 step15y 在 Mac 12 分片时 `test_gateway_agent_control_service.py::test_interactive_stop_freezes_before_ack_and_does_not_wait_for_cleanup`

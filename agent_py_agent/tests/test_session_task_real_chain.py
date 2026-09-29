@@ -220,7 +220,25 @@ class ScriptedWire:
                 self.hold("busy")
                 return "user-busy-list", None, ("list_files", {"path": "."})
             return "user-busy-final", "RC-BUSY-DONE 忙完了。", None
+        if verb == "RC-LIST-THEN":
+            return self._list_then_send(words[0], turn)
         return "user-other", "RC-ACK 好的。", None
+
+    # 函数用途: 先列本 owner 的会话，再只凭清单挑目标（非当前、最近活动、允许该类型），派活或发消息。
+    def _list_then_send(self, kind: str, turn: _Turn) -> tuple[str, str | None, tuple[str, dict] | None]:
+        tool = "create_session_task" if kind == "task" else "send_session_message"
+        if tool in turn.results:
+            return "user-list-then-final", "RC-LIST-THEN-DONE", None
+        if "list_owner_sessions" not in turn.results:
+            return "user-list", None, ("list_owner_sessions", {})
+        rows = turn.results["list_owner_sessions"].get("sessions") or []
+        candidates = [row for row in rows if not row.get("is_current") and kind in (row.get("allowed_kinds") or [])]
+        if not candidates:
+            return "user-list-no-target", "RC-LIST-THEN-NO-TARGET", None
+        target = candidates[0]["thread_id"]
+        if kind == "task":
+            return "user-list-dispatch", None, (tool, {"target_thread_id": target, "goal": "RC-GOAL-DONE 由清单选出的目标执行。"})
+        return "user-list-message", None, (tool, {"target_thread_id": target, "message": "RC-NOTE-LISTED 由清单选出的目标。"})
 
     # 函数用途: 派活回合：按任务正文标记直接完成、沿链继续派、或在模型调用中挂起等取消。
     def _task_turn(self, turn: _Turn) -> tuple[str, str | None, tuple[str, dict] | None]:
@@ -357,31 +375,53 @@ class RealChain:
         messages = self.agent.conversation_store.messages.recent(self.threads[label], limit=200)
         return [str(message.content or "") for message in messages if message.role == "assistant"]
 
+    # 函数用途: 经真实 Gateway 会话预检建出（或取回）一个渠道会话，记下它的 thread_id。
+    def open_session(self, label: str) -> str:
+        request = {"id": f"rc-preflight-{label}", "kind": "ask", "prompt": "RC-INIT",
+                   "conversation": self._conversation(label)}
+        preflight = request_context.preflight_gateway_conversation(request_context.GatewayConversationLoadRequest(
+            self.agent, request, request["id"], request["prompt"],
+        ))
+        self.threads[label] = preflight.thread_id
+        return preflight.thread_id
 
-# 函数用途: 搭一个真实环境：真实 SimpleAgent、真实 Gateway 路径、三个 chat 会话、Gateway 同款后台调度器。
-def _real_chain(tmp_path: Path, monkeypatch) -> RealChain:
-    config = AgentConfig(
+
+# 函数用途: 真实环境的 AgentConfig：只有供应商传输是假的；owner 身份可按用例指定（默认本机管理员）。
+def _agent_config(tmp_path: Path, **owner: str) -> AgentConfig:
+    return AgentConfig(
         model_backend="openai_compatible", api_base="http://127.0.0.1:9/v1", model_name="rc-scripted",
         api_key="rc-fake-key-not-a-credential", stream_enabled=False, model_context_window_tokens=200_000,
         enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
         gateway_workspace="gateway", orphan_supervision_interval_seconds=0, memory_curator_enabled=False,
-        enable_self_learning=False,
+        enable_self_learning=False, **owner,
     )
-    agent = SimpleAgent(config, tmp_path / "root")
+
+
+# 函数用途: 建好某个 agent 的真实 Gateway 请求目录并返回路径。
+def _ready_gateway_paths(agent: SimpleAgent) -> object:
     paths = gateway_paths(agent)
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         folder.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+# 函数用途: 搭一个真实环境：真实 SimpleAgent、真实 Gateway 路径、三个 chat 会话、Gateway 同款后台调度器。
+def _real_chain(tmp_path: Path, monkeypatch) -> RealChain:
+    agent = SimpleAgent(_agent_config(tmp_path), tmp_path / "root")
     wire = ScriptedWire()
     monkeypatch.setattr(http, "post_json", wire)
-    chain = RealChain(agent, paths, wire, {}, _build_background_scheduler(agent, FakeDeliveryService()))
+    chain = RealChain(agent, _ready_gateway_paths(agent), wire, {},
+                      _build_background_scheduler(agent, FakeDeliveryService()))
     for label in ("A", "B", "C"):
-        request = {"id": f"rc-preflight-{label}", "kind": "ask", "prompt": "RC-INIT",
-                   "conversation": chain._conversation(label)}
-        preflight = request_context.preflight_gateway_conversation(request_context.GatewayConversationLoadRequest(
-            agent, request, request["id"], request["prompt"],
-        ))
-        chain.threads[label] = preflight.thread_id
+        chain.open_session(label)
     return chain
+
+
+# 函数用途: 同一个 home 下另一个普通用户 owner（Gateway 多 owner 的真实形态），用来对照"跨 owner 不列出"。
+def _other_owner_chain(chain: RealChain, tmp_path: Path) -> RealChain:
+    agent = SimpleAgent(_agent_config(tmp_path, my_agent_owner_provider="feishu", my_agent_owner_kind="user",
+                                      my_agent_owner_id="rc-other"), tmp_path / "root-other")
+    return RealChain(agent, _ready_gateway_paths(agent), chain.wire, {}, scheduler=None)
 
 
 def test_session_task_wake_opens_a_turn_and_completes(tmp_path, monkeypatch) -> None:
@@ -549,3 +589,46 @@ def test_default_config_stops_the_chain_at_depth_four(tmp_path, monkeypatch) -> 
     rejected = [row for row in chain.tool_outputs("create_session_task") if row.get("error_code")]
     assert [(row.get("error_code"), row.get("details")) for row in rejected] == [
         ("SESSION_TASK_CHAIN_LIMIT", {"depth": 4, "limit": 4})]
+
+
+_LISTED_ROW_KEYS = {"thread_id", "status", "last_activity_at", "channel", "is_current", "allowed_kinds"}
+
+
+# TODO(list_owner_sessions): 目前只对管理员（local/main）开放。将来对普通用户开放时，要补权限用例：
+#   普通用户能否看到工具、只能列出自己 owner 的会话、allowed_kinds 随普通用户开关变化。
+@pytest.mark.parametrize("kind", ["task", "message"])
+def test_admin_lists_owner_sessions_and_reaches_the_listed_target(tmp_path, monkeypatch, kind) -> None:
+    """正向对照：A 调 list_owner_sessions，只凭清单挑出 B 再派活/发消息，B 收到并执行；清单不含别的 owner、不含正文。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    other = _other_owner_chain(chain, tmp_path)
+    other_thread = other.open_session("X")
+    other.ask("X", "RC-PING RC-SECRET-OTHER 其他 owner 会话的正文。")
+    chain.ask("B", "RC-PING RC-SECRET-B B 会话的正文。")  # 让 B 成为最近活动的会话；A 的提示里不出现 B 的 id
+
+    chain.ask("A", f"RC-LIST-THEN {kind} 先列出会话，再找最近活动的那个。")
+
+    listings = [call["results"]["list_owner_sessions"] for call in chain.wire.calls
+                if "list_owner_sessions" in call["results"]]
+    _require(listings, f"A 的回合没有拿到 list_owner_sessions 的结果：{[call.get('kind') for call in chain.wire.calls]}")
+    listing = listings[-1]
+    rows = {row.get("thread_id"): row for row in listing.get("sessions") or []}
+    a, b, c = (chain.threads[label] for label in ("A", "B", "C"))
+    assert set(rows) == {a, b, c} and other_thread not in rows, f"清单应当恰好是本 owner 的三个会话：{sorted(rows)}"
+    assert listing.get("current_thread_id") == a and listing.get("unreadable_records") == 0, listing
+    assert (rows[a]["is_current"], rows[a]["allowed_kinds"]) == (True, []), rows[a]
+    assert not rows[b]["is_current"] and kind in rows[b]["allowed_kinds"], rows[b]
+    assert all(set(row) == _LISTED_ROW_KEYS for row in rows.values()), "清单行只能有结构化字段"
+    serialized = json.dumps(listing, ensure_ascii=False)
+    assert "RC-SECRET" not in serialized and "RC-PING" not in serialized, "清单里出现了会话正文"
+
+    chain.drain()
+
+    if kind == "task":
+        task = chain.task("RC-GOAL-DONE 由清单选出")
+        assert (task.target_thread_id, task.status) == (b, "done"), task
+    else:
+        saw = [call for call in chain.wire.calls if call.get("kind") == "wake-saw-note"]
+        assert len(saw) == 1, f"B 没有收到按清单发出的消息：{[call.get('kind') for call in chain.wire.calls]}"
+        targets = {entry.target_id for entry in chain.agent.conversation_store.guidance.recent(
+            "thread", b, limit=50, include_delivered=True) if "RC-NOTE-LISTED" in str(entry.message)}
+        assert targets == {b}, "按清单发出的消息没有投给 B"
