@@ -1582,11 +1582,31 @@ def _discard_stale_natural_reply_for_pending_turn_input(agent, params: ToolLoopE
     return discard_pending_natural_user_reply(params)
 
 
+# LLM: 结构化兜底：同一回合里因"有待处理输入"把最终回复作废的次数有硬上限。正常路径下每次作废都会
+#   把输入注入本回合，下一轮就不再作废；一旦判据出问题（真实链路上 available 与 claim 判定不一致），
+#   这里会无限重来——3.2 秒 88 次模型调用。到上限就停，并留下结构化结束原因，绝不无限循环。
+PENDING_TURN_INPUT_INVALIDATION_LIMIT = 8
+PENDING_TURN_INPUT_LIMIT_REASON = "pending_turn_input_invalidation_limit"
+
+
 def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParams) -> bool:
     if not has_pending_turn_input(agent, params):
         return False
     discard_pending_natural_user_reply(params)
     return True
+
+
+# LLM: 作废计数存本轮 volatile 状态，随回合销毁；达到上限后本函数返回 True，主循环据此结构化收尾。
+# 函数用途: 累计同一回合内"有待处理输入"导致的作废次数，超过上限时报告应该停止。
+def _pending_turn_input_invalidation_exhausted(params: ToolLoopExecuteParams) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    count = int(state.get("_pending_turn_input_invalidations") or 0) + 1
+    state["_pending_turn_input_invalidations"] = count
+    return count > PENDING_TURN_INPUT_INVALIDATION_LIMIT
+
+
 
 
 # LLM: 本入口直接调用既有采样、工具和记账函数；每次调用独占计数与 params，只从模型轮具名结果显式换用采用后的参数。
@@ -1627,6 +1647,11 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
             break
         # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
         if _pending_turn_input_invalidates_response(agent, params):
+            # 正常情况下下一轮就把输入注入本回合，不会连续作废；连续作废说明判据出了问题，
+            # 到上限就用结构化原因收尾（绝不无限重来）。
+            if _pending_turn_input_invalidation_exhausted(params):
+                params.live_archive_state["turn_end_reason"] = PENDING_TURN_INPUT_LIMIT_REASON
+                break
             continue
         natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
         if natural_reply_verdict == "retry":

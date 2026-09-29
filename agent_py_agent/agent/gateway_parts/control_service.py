@@ -404,6 +404,15 @@ def execute_gateway_conversation_control(
                 if _active_turn_request_id(record) == expected_turn_id
             ]
             if len(live_requests) != 1:
+                # 派活回合跑在后台片里，不在前台窗口请求集合中。按绑定的 request 去后台运行里
+                # 找这个精确回合；找到才说明它确实在跑。少了这一步，"已绑定后再取消"在真实链路上
+                # 永远返回"已结束或切换"（场景 5）。
+                background = _running_background_input_target(agent, scope)
+                if background is not None and _record_id(background) == expected_turn_id:
+                    return _stop_live_window_request(
+                        agent, paths, background, scope,
+                        interrupt_only=command.operation == "interrupt",
+                    )
                 return ConversationControlResult(
                     "stop",
                     False,

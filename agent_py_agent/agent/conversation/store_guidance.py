@@ -241,13 +241,17 @@ class GuidanceStore:
             write_json_file_atomic(receipt_path, updated.to_dict())
             return True
 
-    # LLM: GuidanceStore：与认领使用同一回合及状态规则；读取可修复持久投影，正式准入仍由 claim_for_turn 裁决。
+    # LLM: "有没有可认领的新输入"必须和"能不能认领"用同一个判定。两者不一致时（真实链路上
+    #   `claim_for_turn` 按 owning_task_id 拒绝，而这里不看归属照样说"有待处理"），运行循环会
+    #   每次都判定"有未处理输入"、把已完成的回复作废重来，形成无限空转（3.2 秒 88 次模型调用）。
+    #   所以这里逐条走与认领完全相同的准入判据，只把写操作去掉（无副作用）。
     # 函数用途: 判断一条补充消息能否由指定回合认领，供运行循环做无副作用的待处理检查。
     def available_for_turn(
         self,
         entry: GuidanceEntry,
         *,
         expected_turn_id: str,
+        owning_task_id: str = "",
     ) -> bool:
         metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
         dedupe_key = str(metadata.get("dedupe_key") or "").strip()
@@ -261,6 +265,9 @@ class GuidanceStore:
         )
         receipt_turn_id = str(receipt_metadata.get("expected_turn_id") or "").strip()
         if receipt_turn_id and receipt_turn_id != str(expected_turn_id or "").strip():
+            return False
+        # 与 claim_for_turn 完全同一条归属判据：不属于本回合的投递既不能认领，也不算待处理输入。
+        if owning_task_id and not _body_belongs_to_task(receipt_metadata, owning_task_id):
             return False
         return receipt.status == "pending"
 

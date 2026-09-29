@@ -403,8 +403,12 @@ def bind_session_task_turns(store: object, entries: object, turn_id: str) -> int
 def _bind_one_task_body(tasks: object, body_key: str, bound_turn: str) -> bool:
     try:
         task = tasks.load_by_body_dedupe_key(body_key)
-        if task is None or str(task.conversation_request_id or "") == bound_turn:
+        if task is None:
             return False
+        if str(task.conversation_request_id or "") == bound_turn:
+            # 已经绑到同一个回合：这是幂等命中，不是"没绑上"。调用方按返回值判断是否落账，
+            # 报 False 会让认领时的绑定看起来失败（真实链路上就表现为"任务一直没绑定"）。
+            return True
         updated = tasks.bind_turn(task.task_id, turn_id=bound_turn)
     except (OSError, ValueError, TypeError):
         return False

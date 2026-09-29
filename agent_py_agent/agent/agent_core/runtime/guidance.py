@@ -652,8 +652,13 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
         entries, task_id, _warning = _pending_guidance_for_current_agent(store, params, limit=1)
         candidates = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
         turn_id = request_id or task_id
+        owning_task_id = session_task_id_for_params(params)
         return any(
-            store.guidance.available_for_turn(entry, expected_turn_id=turn_id)
+            store.guidance.available_for_turn(
+                entry,
+                expected_turn_id=turn_id,
+                owning_task_id=owning_task_id,
+            )
             for entry in candidates
         )
     except Exception:
@@ -680,6 +685,16 @@ def _claim_guidance_for_active_turn(
             owning_task_id=owning_task_id,
         ):
             claimed.append(entry)
+    # 认领即绑定：取消要在这段窗口（目标第一次模型调用期间）就能精确停到这个回合。
+    # 放在这里而不是 claim_for_turn 内部，是因为绑定需要会话级账本（session_tasks），
+    # 而 guidance store 只拿到自己的 storage——真实链路上那处调用会静默失败，表现为"任务一直没绑定"。
+    if claimed and turn_id:
+        try:
+            from ...conversation.session_tasks import bind_session_task_turns
+
+            bind_session_task_turns(store, claimed, turn_id)
+        except Exception:  # noqa: BLE001 - 绑定失败只影响取消的精确性，不影响已生效的认领
+            pass
     return claimed
 
 

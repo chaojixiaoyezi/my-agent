@@ -245,8 +245,8 @@ def test_bind_session_task_turns_records_target_turn_once(tmp_path) -> None:
     assert bound.status == "accepted"
     assert bound.conversation_request_id == _TURN_ID
 
-    # 同一回合重复确认幂等；终态后不再接受新的回合绑定。
-    assert bind_session_task_turns(store, entries, _TURN_ID) == 0
+    # 同一回合重复确认幂等：已经绑在同一个回合上算命中（不是"没绑上"）；终态后不再接受新的回合绑定。
+    assert bind_session_task_turns(store, entries, _TURN_ID) == 1
     store.session_tasks.advance(task.task_id, SessionTaskUpdate("done"))
     assert bind_session_task_turns(store, entries, "req-other") == 0
     assert store.session_tasks.load(task.task_id).conversation_request_id == _TURN_ID
