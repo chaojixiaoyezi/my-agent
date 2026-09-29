@@ -580,6 +580,26 @@
   python3 <工作目录>/_mutate_relation_selection.py reverse      # 期望 1 条红
   ```
 - **未覆盖**：本批没做真实 Jev 样本对比（挑选规则只影响哪些对进入请求，语义质量仍由原 Curator 与原验证把关）；真机效果按 dev 安排等 Jev 复测。
+## 读取不存在的文件时给出相近文件名建议（2026-09-28，分支 `my-agent/self-dev`，基于 `54880f8e9`）
+
+- **来源**：集成者派的任务——路径不存在时，如果用户只是把文件名写错（少字/多字/串位），
+  应该给出同目录里最像的名字，而不是直接报"文件不存在"。
+- **做法**：在既有共享模块 `filesystem_path_recovery.py` 里新增 `suggest_near_name_paths`，
+  由 `suggest_missing_path_candidates` 调用并把结果排在候选最前，因此 read_file / list_files /
+  search_text / find_files / edit_file 五个入口自动共用同一份实现，无需逐个改。
+  只在"目标不存在 + 父目录存在 + 同目录内"成立时触发；越权目录、超大目录直接不扫。
+- **边界怎么定的（实测）**：距离上限 **2**（上限 1 时实测 1413 个真实文件名全无候选，等于给不出建议）；
+  最多 **2** 条；目录条目上限 **512**（单次查找 10000 条约 37ms、512 条约 2ms，真实目录最大 133 条）。
+  集成者建议的"长度差预筛"实测无收益（1000 条里预筛后仍要算 23.8%，耗时与朴素持平），未采用。
+- **新增测试**：`test_filesystem_near_name.py` 五例——
+  - 命中：`finl_report.md` 能给出 `final_report.md`，且 `requested_path` 原样保留（不自动改写）；
+  - 不命中：`2026-budget.yaml` 不会去猜 `summary.md`；
+  - 超上限不扫：目录超过 `_NEAR_NAME_MAX_DIRECTORY_ENTRIES` 时直接返回空；
+  - 越权不出现：父目录不在授权根下时返回空（不泄露墙外文件名）；
+  - 条数上限：同目录多个相近名时不超过 `_NEAR_NAME_MAX_SUGGESTIONS`。
+- **变异验证**：注入两个变异并确认都被抓住，随后恢复原文件：
+  - 去掉越权判断 → `test_near_name_never_leaks_outside_granted_roots` 变红；
+  - 去掉目录条目上限 → `test_missing_path_in_huge_directory_skips_near_name_scan` 变红。
 
 ## capability 配置缺文件用默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`）
 
