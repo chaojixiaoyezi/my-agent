@@ -90,6 +90,7 @@ from .background_tool_policy import (
     background_tool_policy_decision,
 )
 from .models import (
+    SESSION_MESSAGE_WAKE_REASON,
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
     THREAD_TASK_LINK_ACTIVE_STATUS,
     ConversationThread,
@@ -895,6 +896,16 @@ class BackgroundMainAgentRuntime:
             resolved_goal_context,
             (proactive_delivery_available, transcript_delivery_available),
         )
+        # LLM: 取消可能在本片进入模型调用之后才到；调用返回时这一片的答复**不得交付**，任务也不许按
+        #   "正常完成"收口。这里是**纵深防线**，不是常规停法：常规停法有两道，都在它之前——
+        #   ①停止控制把旗立到本线程后，在途模型调用在等待关卡里看到旗就丢掉结果并抛中断
+        #     （tool_model_generation._wait_for_generation_result）；
+        #   ②调用返回后，run_with_heartbeat 的二次检查会把认领结算成 cancelled。
+        #   判据**不能用本线程的 is_interrupted()**——它是 per-thread 的，停止旗不在本线程时读不到。
+        #   所以这里读**持久的结构化事实**：这条会话任务是否已被取消（cancelled 是终态，跨线程可见、不会被撤销）。
+        #   实测（故障注入"停止照常回报确认但不立旗"）：去掉这一段，只有这个窗口会交付迟到的答复 → 它确实生效。
+        if _session_task_turn_was_cancelled(self.agent, request):
+            raise InterruptedError("后台回合在交付前发现任务已取消")
         execution = collect_background_execution_result(self.agent, result, display_snapshot)
         # LLM: 会话间派活：本次回合若属于某条会话任务，就在这里推进到终态并把结构化结果回报给发送方。
         #   只读结构化字段（唤醒信封的回合号 + 任务记录里的绑定），不解析正文；回报失败不影响本回合交付。
@@ -904,9 +915,55 @@ class BackgroundMainAgentRuntime:
             self.agent,
             request,
             execution,
-            turn_id=_scheduler_run_id(request) or _session_task_run_id(request),
+            turn_id=_scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request),
         )
         return execution
+
+
+# LLM: 只从唤醒信封里取**结构化**字段（reason 与 metadata.session_task_id）组装一个最小请求对象，
+#   供"这条唤醒对应的会话任务是否已取消"的判定使用；不读正文、不解析摘要、不猜任务号。
+# 函数用途: 把一条唤醒信号转成取消判定所需的回合请求。
+def _background_run_request_for_wake(
+    scheduler: BackgroundMainAgentScheduler,
+    signal: WakeSignal,
+    reason: str,
+    now: float,
+) -> BackgroundRunRequest:
+    return BackgroundRunRequest(
+        thread_id=signal.thread_id,
+        task_id=signal.root_task_id,
+        reason=reason,
+        now=now,
+        wake_signal=signal.to_dict() if hasattr(signal, "to_dict") else None,
+    )
+
+
+# LLM: 交付前的取消判定必须读**跨线程可见且不可撤销**的事实，而不是本线程的 is_interrupted()
+#   （per-thread，停止旗不在本线程时读不到）。
+#   唯一的权威事实是会话任务记录：cancelled 是终态，状态机不允许它回到 done。
+#   命中条件与收口一致：任务绑定的 conversation_request_id 等于本次回合号。
+#   读不到账、没有回合号、任务不存在都返回 False（不因为读不到就当成取消，避免误伤正常交付）。
+# 函数用途: 判断这个后台回合对应的会话任务是否已经被取消（停止旗不在本线程时的纵深防线）。
+def _session_task_turn_was_cancelled(agent: object, request: BackgroundRunRequest) -> bool:
+    turn_id = _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
+    bound_turn = str(turn_id or "").strip()
+    if not bound_turn:
+        return False
+    store = getattr(agent, "conversation_store", None)
+    tasks = getattr(store, "session_tasks", None)
+    if tasks is None:
+        return False
+    try:
+        loaded, load_errors = tasks.list_report(limit=0)
+    except (OSError, ValueError, TypeError):
+        return False
+    if load_errors:
+        return False
+    for task in loaded:
+        if str(getattr(task, "conversation_request_id", "") or "").strip() != bound_turn:
+            continue
+        return str(getattr(task, "status", "") or "") == "cancelled"
+    return False
 
 
 # LLM: 命中条件全部结构化：任务绑定的 conversation_request_id 与本次 request 的 task_id 一致。
@@ -1759,7 +1816,7 @@ def _run_params(
         else GoalRuntimeContext()
     )
     # 定时唤醒与派活唤醒都能提供精确回合号；两者都为空时保持原来的 task_id 兜底。
-    scheduler_run_id = _scheduler_run_id(request) or _session_task_run_id(request)
+    scheduler_run_id = _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
     task_attributes = _background_task_attributes(
         thread_id,
         request,
@@ -2041,6 +2098,19 @@ def _session_task_run_id(request: BackgroundRunRequest) -> str:
     return str(metadata.get("session_task_id") or "").strip()
 
 
+# LLM: 会话消息唤醒和派活一样没有 request_id/task_id/run_id，若不补一个真实回合号，
+#   注入层的 `if entries and turn_id` 会短路——消息只作为后台上下文显示给模型，
+#   **不认领、不确认**，回执一直 pending，到目标下一轮前台回合又被认领注入一遍（同一消息处理两次）。
+#   这里只读唤醒信封自带的**结构化身份**（wake_signal_id，宿主为每次投递生成、天然唯一），
+#   不解析正文、不伪造 task_id、不猜会话任务号。
+# 函数用途: 从会话消息唤醒信封读出这一片的回合号。
+def _session_message_run_id(request: BackgroundRunRequest) -> str:
+    if str(request.reason or "").strip().lower() != SESSION_MESSAGE_WAKE_REASON:
+        return ""
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    return str(wake.get("wake_signal_id") or "").strip()
+
+
 # LLM: 后台续跑白名单 = 策略决策的核心目录 + （decision.extension_tools=inherit 时）注册表当前的插件/普通 MCP
 #   代理工具名。扩展名来自 ToolRegistry.extension_tool_names 的结构化类型事实，不按名称前缀猜；显式配置或任务
 #   白名单（extension_tools=none）不并入。真实断链：子代理生命周期唤醒后的 attempt 只拿到 17 个核心工具，模型继续
@@ -2101,6 +2171,9 @@ def _background_task_attributes(
     scheduler_run_id = str(metadata.get("scheduler_run_id") or "").strip()
     # 派活唤醒同样自带精确回合号；本片也必须带上自己的会话身份，thread 邮箱才查得到正文。
     session_task_run_id = _session_task_run_id(request)
+    # 会话消息唤醒和派活一样要带上本片的会话身份，否则 thread 邮箱查不到目标队列里那条消息：
+    #   消息既不认领也不确认，回执一直 pending，到目标下一轮前台回合又被注入一遍（同一消息处理两次）。
+    session_message_run_id = _session_message_run_id(request)
     task_id = str(request.task_id or "").strip()
     lifecycle_reason = str(request.reason or "").strip().lower()
     _apply_internal_background_tool_budget(attributes, request, agent)
@@ -2108,7 +2181,7 @@ def _background_task_attributes(
         attributes[CONVERSATION_BACKGROUND_EVENT_REASON_ATTR] = (
             str(request.reason or "").strip().lower()
         )
-    if thread_id and (task_id or scheduler_run_id or session_task_run_id):
+    if thread_id and (task_id or scheduler_run_id or session_task_run_id or session_message_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
     _apply_background_wake_attributes(attributes, request, agent)
     # 会话间派活：本回合由哪条任务触发，只从唤醒信封的结构化 metadata 取；链深守卫据此回溯上级任务。
@@ -3787,20 +3860,30 @@ def _execute_wake_signal(
         channel,
         target,
     )
-    return _WakeExecution(
-        background_claim.run_claimed(
-            _background_claim_dependencies(scheduler),
-            {
-                "thread_id": signal.thread_id,
-                "task_id": signal.root_task_id,
-                "reason": reason,
-                "route_channel": channel,
-                "route_target": target,
-                "now": now,
-                "wake_signal": signal,
-            }
-        )
+    report = background_claim.run_claimed(
+        _background_claim_dependencies(scheduler),
+        {
+            "thread_id": signal.thread_id,
+            "task_id": signal.root_task_id,
+            "reason": reason,
+            "route_channel": channel,
+            "route_target": target,
+            "now": now,
+            "wake_signal": signal,
+        },
     )
+    # LLM: 这一片被取消（用户停止打断了派活回合）时，它**不会**产生正常交付，但这条唤醒必须结案：
+    #   否则信封一直留在 pending，调度器每轮重新认领、反复重跑这条已经取消的工作
+    #   （dev 明确要求"跳过/取消时唤醒必须被结算，不能留 pending 被反复认领"）。
+    #   判定只用结构化事实：会话任务已 cancelled（与交付前的取消判据同源）。
+    #   其余情况（正常完成/其它 reason）逐字保持原返回，行为不变。
+    if report is None and _session_task_turn_was_cancelled(
+        scheduler.runtime.agent,
+        _background_run_request_for_wake(scheduler, signal, reason, now),
+    ):
+        scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
+        return _WakeExecution(terminal=True)
+    return _WakeExecution(report)
 
 
 # LLM: 调用方须先准确回读原pending信封；只复用原缓存校验、地址解析和交付器，不创建第二份交付状态。
@@ -4254,7 +4337,11 @@ def _background_claim_dependencies(
             scheduler.runtime.agent, scheduler.store, kwargs,
         ),
         recovery_block=scheduler._recovery_guard.block_for_task,
-        source_admission=partial(_background_wake_source_admission, scheduler.store.wakes.pending_one),
+        source_admission=partial(
+            _background_wake_source_admission,
+            scheduler.store.wakes.pending_one,
+            guidance_store=scheduler.store.guidance,
+        ),
         retire_source=partial(_retire_terminal_background_source, scheduler.store),
         run_once=scheduler.runtime.run_once,
         runtime_facts=scheduler._runtime_facts,
@@ -4284,7 +4371,7 @@ def _refresh_pending_wake_signal(pending_one, signal: WakeSignal) -> WakeSignal 
 
 # LLM: claim 模块只持有本只读来源查询；已处理、变化与损坏不得开模型轮，原 policy/observation 后备语义不变。
 # 函数用途: 在取得精确执行租约后最后核对信封，已消费或冻结内容变化时释放本片，留给原队列重新选择。
-def _background_wake_source_admission(pending_one, signal: object) -> str:
+def _background_wake_source_admission(pending_one, signal: object, *, guidance_store: object = None) -> str:
     if not isinstance(signal, WakeSignal):
         return ""
     try:
@@ -4293,7 +4380,46 @@ def _background_wake_source_admission(pending_one, signal: object) -> str:
         return "wake_source_unreadable"
     if current is None:
         return "wake_source_not_pending"
-    return "wake_source_changed" if current != signal else ""
+    if current != signal:
+        return "wake_source_changed"
+    return _session_message_consumed_admission(current, guidance_store=guidance_store)
+
+
+# 消息回执里"内容确实已被消费掉"的状态集合：只有 consumed（模型已对带着这条消息的调用作出返回）。
+_SESSION_MESSAGE_CONSUMED_STATUSES = frozenset({"consumed"})
+
+
+# LLM: 会话消息唤醒的内容可能**已经被目标自己的前台回合消费掉了**（目标当时正忙，消息在安全点注入并确认）。
+#   这时再为这条唤醒开一轮，只会跑出一次没有新输入的空回合（观察项②）。
+#   判据只用**真实存在的结构化事实**：这条唤醒投递的消息回执是否为 consumed（模型已对带着它的调用作出返回）。
+#   回执状态全集见 store_guidance_records.py：pending / reserved / submitted / consumed / rejected，其余都不算已消费：
+#   - reserved、submitted 可逆：调用失败会退回 reserved，release_reserved 会把提交前死掉的预留写回 pending；
+#   - rejected 不等于送达：B 忙时消息已注入、在途调用未返回就被 /stop，终结时 reject_reserved 把它改成 rejected，
+#     这条消息仍要靠唤醒回合交给 B（ae 在真实链路里复现）；rejected 怎样重新投递随去重改造一起定。
+#   读不到回执或读取抛异常一律照常开回合（fail open，宁可多跑一轮也不误吞真实工作）。
+#   返回 background_claim.SESSION_MESSAGE_CONSUMED_ADMISSION 时，run_claimed 除结 claim 外还经 retire_source 把唤醒结案
+#   （来源已处理完），不留在 pending 每拍被重新认领。
+# 函数用途: 会话消息唤醒的投递若已被消费，就判定本片无需执行。
+def _session_message_consumed_admission(signal: WakeSignal, *, guidance_store: object = None) -> str:
+    if str(signal.reason or "").strip().lower() != SESSION_MESSAGE_WAKE_REASON:
+        return ""
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    sender_thread_id = str(metadata.get("origin_thread_id") or "").strip()
+    target_thread_id = str(signal.thread_id or "").strip()
+    if not (sender_thread_id and target_thread_id):
+        return ""
+    guidance = guidance_store
+    if guidance is None:
+        return ""
+    dedupe_key = f"session_message:{sender_thread_id}->{target_thread_id}"
+    try:
+        receipt = guidance.receipt(dedupe_key)
+    except Exception:  # noqa: BLE001 - 读不到回执不当作"已消费"
+        return ""
+    if receipt is None:
+        return ""
+    status = str(getattr(receipt, "status", "") or "").strip().lower()
+    return background_claim.SESSION_MESSAGE_CONSUMED_ADMISSION if status in _SESSION_MESSAGE_CONSUMED_STATUSES else ""
 
 
 # LLM: 策略执行经独立 claim 组件领取和结算；执行后才重读进度账，来源确认及写账顺序保持。
@@ -4847,8 +4973,12 @@ def _record_recovery_blocked_policy(
     )
 
 
+# LLM: 只结案本次确切的来源：唤醒 mark_handled、进度策略 disable；两种调用时机——任务已终态（terminal_task_link），
+#   或领取后准入判定来源已处理完（会话消息内容已被消费，background_claim._SOURCE_FINISHED_ADMISSIONS）。写失败只吞掉，
+#   来源留在原队列下次再判。副作用：写唤醒 handled 回执 / 停用策略。
+# 函数用途: 把已经不需要再执行的后台来源（任务已终态、内容已被消费）从待处理队列里结掉。
 def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
-    """Consume the exact stale wake/policy that lost a race with task termination."""
+    """Consume the exact wake/policy whose work is already settled: the task is terminal or the content was consumed."""
     wake = kwargs.get("wake_signal")
     if isinstance(wake, WakeSignal):
         try:

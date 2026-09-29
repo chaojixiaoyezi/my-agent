@@ -552,3 +552,34 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **收敛**：修好部署后那条回执不用手工改：旧口径校验通过 → 目标任务已终态 → guidance 被拒绝 → 回执转排队并进 inbox（既有语义；
   生产上那条 09-27 的旧回执由集成者在部署前挪到备份目录，不让两天前的指令迟到送达，见 DESIGN_LEDGER 同日裁定）。`test_guidance_receipt_digest_compat.py` 用冻结的旧算法写真实形状回执证明这一点。
 - **规矩**：持久化指纹改口径必须加版本号并保留旧版本的计算，不能原地改；固定样本的指纹十六进制钉在测试里。
+
+## 会话互通取消：停止后台派活回合 + 消息唤醒不再空转（2026-09-28，分支 `my-agent/self-dev-3`）
+
+`control_service.execute_gateway_conversation_control` 的 `stop` 分派新增一条后台回合停止路径：
+前台窗口请求集合里找不到精确 `expected_turn_id` 时，改按**会话任务的绑定**去后台定位这一轮
+（`task.conversation_request_id == expected_turn_id` **且** 目标会话后台认领仍在 `running`），
+再打这一片自己注册的**专用可中断名** `session-task-turn:{turn_id}`（与前台 `conversation-request:` 不同空间）；
+拿不到绑定、认领已不在跑，或有其它来源占着这个回合，都如实返回未确认（fail closed），不改任务状态、不伪造成功。
+
+为什么要专用名：派活回合跑在后台片里，`task_id` 为空，原逻辑在 `run_claimed` 里退化成 `nullcontext()`
+——**这一轮从来没注册过可中断名**，取消永远打不到东西。`task_id` 在 Skill 快照绑定/持久任务处有既定语义，
+不得挪用（实测挪用会让整片因 `SKILL_TASK_BINDING_INVALID` 开不出来）。
+
+同时补两处交付前的取消判定：`background_claim.run_with_heartbeat` 在 `run_once` 返回后再查一次本线程中断旗，把认领结算成 cancelled；
+`runtime._run_agent` 在交付前按**持久的结构化事实**（该会话任务是否已 `cancelled`）丢弃答复——这一处**不能用本线程的 `is_interrupted()`**：
+它是 per-thread 的，停止旗不在本线程时读不到。交付前的持久检查是**纵深防线**：常规停法有两道在它之前——
+①停止旗立到本线程后，在途模型调用在等待关卡里看到旗就丢掉结果并抛中断
+（`tool_model_generation._wait_for_generation_result`）；②`run_with_heartbeat` 的二次检查把认领结算成 cancelled。
+（注：早先注释里的"嵌套注册退出会清旗"说法**不成立**，集成方用 60 段轨迹否掉了它。）
+`run_with_heartbeat` 的二次检查只对**绑定了会话任务**的回合生效（`_host_delivery_bound_turn` 非空）：
+普通后台运行能被普通 `/stop` 打到，对它套这道检查会丢掉已交付的答复、认领记成 cancelled。
+
+消息唤醒：本片带上会话身份（回合号取唤醒自己的 `wake_signal_id`），消息在唤醒回合里被认领、确认，不会到下一轮再注入一遍；
+目标忙时消息已在它自己的前台回合里被消费（回执为 `consumed`）的，领取后准入 `session_message_consumed` 不开回合，
+并经 `retire_source` 把唤醒结案（2026-09-29 接手收尾时补上：原实现只结 claim，唤醒每拍被重新认领）；
+`submitted`/`rejected`/`reserved` 都不算已消费，照常开回合把消息交给目标（ae 在真实链路里复现了被 /stop 后 `rejected` 的消息）。
+
+回归：`test_session_task_real_chain.py` 的 `HOLD-FIRST` / `HOLD-AFTER-TOOL` 两个窗口，以及忙碌目标消费后断言唤醒已结案；
+另加 `test_background_claim_interrupt_scope.py`（绑定回合 vs 未绑定普通后台的正向对照）、
+`test_session_message_consumed_admission.py`（逐状态判据、读取抛异常放行、只在已消费时结案）。
+2026-09-29 由 75 从 `my-agent/self-dev-3-cancel-final` 接手，压成干净提交落在分支 `claude/75-cancel-line-finish`。真机复验由集成方跟进。

@@ -10,6 +10,32 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 会话派活取消与消息唤醒收尾（2026-09-29，分支 `claude/75-cancel-line-finish`，基于 ae 的门禁提交 `d2a49818a`（main `89af6b07a` 之上）；接手 my-agent-3 的 `my-agent/self-dev-3-cancel-final`）
+
+原分支 8 个提交（`bc3a7a73c`…`50e39eeee`）的最终内容压成两个提交，本条是第一个：取消与消息唤醒。
+- **取消能真的停下后台派活回合**：
+  - 派活片按唤醒信封 `metadata.session_task_id` 注册专用可中断名 `session-task-turn:`，与前台 `conversation-request:` 不同空间；
+  - `/stop` 在前台窗口找不到回合时，按会话任务绑定 + 目标会话后台认领仍 running 定位它（读会话任务全量，`list_report(limit=0)`）；
+  - `run_once` 之后的二次中断检查只对绑定回合生效；交付前按会话任务已 `cancelled` 的持久事实丢弃答复；取消后唤醒结案。
+  - 回归：`test_session_task_real_chain.py` 的取消窗口（HOLD-FIRST、HOLD-AFTER-TOOL、后端忽略停止、停止旗丢失）全部转正；
+    `test_background_claim_interrupt_scope.py`（2 项）互为对照：绑定回合在"答复已交付后才停"时认领结算成 cancelled，
+    未绑定的普通后台运行仍是 finished 并原样返回报告。
+- **消息唤醒**：本片回合号取唤醒自己的 `wake_signal_id`，消息在唤醒回合里被认领和确认，不会到下一轮再注入；
+  空闲目标的消息只送一次（`test_idle_message_is_acknowledged_once_and_not_redelivered` 转正）。
+- **"已消费"准入与唤醒结案**（接手时按 ae 复审改）：
+  - 只有回执 `consumed` 算已消费；`submitted`、`reserved` 可逆，`rejected` 的消息仍要靠唤醒回合交给目标，都照常开回合；
+    读不到回执或读取抛异常也放行；
+  - 准入命中后 `run_claimed` 经 `retire_source`（与 `terminal_task_link` 同一路径）把唤醒结案；
+    原实现只结 claim，唤醒留在 pending 每拍被重新认领（实测 10 拍 10 次认领、0 次模型调用）；
+  - `test_session_message_consumed_admission.py`（8 个用例，12 项）：逐状态判据、读取抛异常放行、
+    `run_claimed` 只在已消费时结案来源，变化/读不出/已不在队列只结 claim；
+  - 真实链路：`d2a49818a` 给忙碌目标用例加的"B 没有待处理唤醒"断言、新窗口 `test_busy_target_stopped_before_consuming_the_message_still_gets_it`
+    （消费前被 /stop、回执转 rejected 后消息仍要交给 B）在本提交上都普通通过；原分支 `50e39eeee` 上两条都失败。
+- **guidance 直取属性**：`_background_claim_dependencies` 直接传 `scheduler.store.guidance`，不用 `getattr` 迁就替身；
+  4 个测试替身补 `guidance = None` 夹具属性，断言未动。
+- **变异**（按 pytest 失败判定，全部被抓住）：去掉 `retire_source` 结案 → 单测与真实链路忙碌目标用例红；
+  已消费集合放回 `{submitted, consumed, rejected}` → submitted/rejected 两例红；对所有准入码都结案 → 变化/读不出/不在队列三例红。
+
 ## 会话互通真实链路门禁：忙碌目标在消费前被停止（2026-09-29，分支 `claude/ae-busy-stop-window`，基于 `89af6b07a`，只改测试）
 
 - **新窗口** `test_busy_target_stopped_before_consuming_the_message_still_gets_it`：

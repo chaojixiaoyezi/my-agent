@@ -386,6 +386,8 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
     class Store:
         claims = Claims()
         wakes = _StoreDomain(pending_one=lambda _wake_id: None)
+        # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
+        guidance = None
 
         def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
             assert type(include_messages) is bool

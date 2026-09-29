@@ -112,6 +112,8 @@ def _claim_fixture(monkeypatch):
         tasks=SimpleNamespace(list_report=links),
         wakes=SimpleNamespace(mark_handled=retire, pending_one=lambda _wake_id: None),
         progress=SimpleNamespace(disable=retire),
+        # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
+        guidance=None,
     )
     agent = SimpleNamespace(subagents=SimpleNamespace(
         load=load_child, runtime_db=SimpleNamespace(main_agent_recovery_block_for_task=recovery),

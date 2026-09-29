@@ -544,9 +544,6 @@ def _pending_wakes(chain: RealChain, label: str) -> list:
             if wake.thread_id == chain.threads[label]]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="新缺陷：空闲目标的消息唤醒回合只在后台上下文里看到消息，没有认领/确认，回执仍 pending，"
-                          "下一回合会再收到一遍（修复后转正）")
 def test_idle_message_is_acknowledged_once_and_not_redelivered(tmp_path, monkeypatch) -> None:
     """消息唤醒回合看到的消息必须被确认消费；目标的下一回合不能再收到同一条消息。"""
     chain = _real_chain(tmp_path, monkeypatch)
@@ -562,8 +559,6 @@ def test_idle_message_is_acknowledged_once_and_not_redelivered(tmp_path, monkeyp
     assert redelivered == [], f"同一条消息在 C 的下一回合又被送了一遍：{[call.get('kind') for call in redelivered]}"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="观察项②未修：目标已在自己回合里消费了消息，唤醒仍再起一轮空回合（第 8 片重做后转正）")
 def test_busy_target_consumes_message_without_an_extra_empty_turn(tmp_path, monkeypatch) -> None:
     """B 正在执行前台请求时收到消息：请求不失败、消息在本回合被消费；之后唤醒不应再起空回合，也必须结案。"""
     chain = _real_chain(tmp_path, monkeypatch)
@@ -631,8 +626,6 @@ def test_busy_target_stopped_before_consuming_the_message_still_gets_it(tmp_path
     assert not _pending_wakes(chain, "B"), f"B 的消息唤醒没有结案：{_pending_wakes(chain, 'B')}"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="场景 5 未修：取消找不到后台派活回合，stop_confirmed=false、目标照常交付（取消修复通过后转正）")
 @pytest.mark.parametrize("window", ["HOLD-FIRST", "HOLD-AFTER-TOOL"])
 def test_cancel_stops_the_bound_task_turn_during_a_model_call(tmp_path, monkeypatch, window) -> None:
     """绑定后、模型调用进行中取消：停止确认、目标回合停下且不再交付输出、控制记录可查、任务保持 cancelled。"""
@@ -645,9 +638,6 @@ def test_cancel_stops_the_bound_task_turn_during_a_model_call(tmp_path, monkeypa
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后目标的唤醒没有结案"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="场景 5 未修：取消找不到后台派活回合，stop_confirmed=false（取消修复并入后转正）；"
-                          "这一窗的后端不响应停止，放行后的迟到结果先由模型调用等待关卡丢弃")
 def test_cancel_discards_the_reply_when_the_backend_ignores_the_stop(tmp_path, monkeypatch) -> None:
     """后端不响应停止：停止送到了在途调用但被忽略，放行后模型照常返回答复；这一片仍不得交付，任务保持 cancelled。
 
@@ -657,16 +647,13 @@ def test_cancel_discards_the_reply_when_the_backend_ignores_the_stop(tmp_path, m
     chain = _real_chain(tmp_path, monkeypatch)
     stop, final, delivered = _cancel_bound_task_during_hold(chain, "RC-GOAL-HOLD-IGNORES-STOP")
     assert stop.get("stop_confirmed") is True, f"停止控制没有确认：{stop}"
-    # 前提检查用 _require（抛 RealChainBroken，strict xfail 吞不掉）；放在停止确认之后，main 上仍先按 xfail 挂在停止确认。
+    # 前提检查用 _require（抛 RealChainBroken，strict xfail 吞不掉）；放在停止确认之后，确保前提失败时报的是链路断而不是断言。
     _require(chain.wire.ignored_stops == ["task"], "前提不成立：停止应当送到在途调用并被它忽略")
     assert delivered == [], "后端忽略停止、放行后返回的答复仍被交付了"
     assert final.status == "cancelled" and not final.summary, final
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后唤醒没有结案"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="场景 5 未修：取消找不到后台派活回合，stop_confirmed=false（取消修复并入后转正）；"
-                          "停止旗丢失时只剩交付前按任务已取消的持久检查挡住交付")
 def test_cancel_discards_the_reply_when_the_stop_flag_is_lost(tmp_path, monkeypatch) -> None:
     """故障注入：停止控制确认了，目标线程的停止旗却丢了，放行后模型照常返回；交付前必须按任务已取消的持久事实丢弃答复。"""
     real_interrupt_by_name = control_service.interrupt_by_name

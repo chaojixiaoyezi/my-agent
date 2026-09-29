@@ -2175,3 +2175,38 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   真实送达延迟 = 对应请求的 `ended_at` − `prepared_request.submitted_at`，不能用回执 `updated_at` 距今的时间当"等待时长"。
 - 模型执行一条被提升的请求时只看到 runtime facts 里的 `current_local_time`，看不到这条输入的提交时间（信封没有 promoted_at/延迟字段，历史消息不带时间戳）。
   迟到送达只发生在"提升时刻远晚于提交"：目标回合跑很久未认领、或回执卡在 pending/terminal_unknown 事后被对账提升（2026-09-27 那条插话）。改法见 DESIGN_LEDGER「普通消息迟到送达」条目（待定）。
+
+## 后台会话任务回合的停止定位与专用可中断名（2026-09-28）
+
+派活/消息回合由 `background_claim.run_claimed` 在**后台片**里执行，不在 `paths.processing` 的前台窗口请求集合中，
+也没有 ConversationThread 的线程任务关联，认领记录的 `task_id` 还是空串——所以
+`_running_background_input_target` 对这类回合**恒不成立**（真实链路实测确认）。
+
+停止定位因此改走 `_bound_background_turn_is_running`：只读两件真实存在的结构化事实——
+①目标会话里某条会话任务的 `conversation_request_id` 等于这个 turn（由 `session_tasks.bind_turn` 在认领时写入）；
+②目标会话的后台认领记录仍在 `running`。两条都成立才算"这一轮确实在跑"。
+
+中断名由 `conversation/control_commands.session_task_interrupt_name` 生成（前缀 `session-task-turn:`），
+**只由这条派活片注册**，与前台 `conversation-request:{id}` 在任何 id 取值下都不可能相等；
+`run_claimed` 一进来就注册（覆盖领取、准入与执行全程），退出 `with` 时自动注销，其它唤醒来源的注册逻辑逐字不变。
+
+另：会话消息唤醒（`SESSION_MESSAGE_WAKE_REASON`）必须和派活一样把本片的会话身份写进
+`task_attributes["conversation_thread_id"]`，否则 thread 邮箱查不到目标队列里那条消息，
+注入被 `if entries and turn_id` 短路——消息不认领、不确认，回执一直 pending，下一轮又被注入一遍（同一消息处理两次）。
+
+`_background_wake_source_admission` 增加一条"内容已被消费就不开回合"的准入 `session_message_consumed`
+（常量 `background_claim.SESSION_MESSAGE_CONSUMED_ADMISSION`）：只有回执为 `consumed`（模型已对带着这条消息的调用作出返回）才算。
+`reserved`、`submitted` 可逆（调用失败退回 `reserved`，`release_reserved` 把提交前死掉的预留写回 `pending`）；
+`rejected` 也不算——目标忙时消息已注入、在途调用未返回就被 `/stop`，终结时 `reject_reserved` 把它改成 `rejected`，
+这条消息仍要靠唤醒回合交给目标。读不到回执或读取抛异常一律照常开回合（fail open）。
+准入命中时 `run_claimed` 结 claim 之后还经 `retire_source`（与 `terminal_task_link` 同一条路径）把唤醒结案——只结 claim 不结唤醒时，
+唤醒会留在 pending 每拍被重新认领（空转，2026-09-29 实测 10 拍 10 次）；其它准入码（变化、读不出、已不在队列）不动来源。
+判据所需的 guidance store 由 `_background_claim_dependencies` 直接传 `scheduler.store.guidance`（不用 `getattr` 兜底，
+替身缺属性由测试夹具补）：早先实现用 `pending_one.__self__` 反查，拿到的是 WakeStore，没有 `.agent`，判据因此从未生效。
+
+交付前的取消判定有两处：`background_claim.run_with_heartbeat` 在 `run_once` 之后再查一次本线程中断旗，把认领结算成 cancelled；
+`runtime._run_agent` 在交付前读持久的结构化事实（会话任务是否已 `cancelled`），不依赖本线程的 `is_interrupted()`
+（per-thread，停止旗不在本线程时读不到）。
+`run_with_heartbeat` 里 `run_once` 之后的二次检查**只对绑定了会话任务的回合生效**
+（`_host_delivery_bound_turn(kwargs)` 非空）；其它唤醒来源逐字保持原返回——普通后台运行能被普通 `/stop` 打到，
+对它套这道检查会丢掉已交付的答复、认领记成 cancelled。

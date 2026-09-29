@@ -681,6 +681,14 @@ def conversation_request_interrupt_name(request_id: object) -> str:
     return f"conversation-request:{str(request_id or '').strip()}"
 
 
+# LLM: 会话间派活片的可中断名必须与前台请求的 `conversation-request:{id}` **不可能撞名**：
+#   前缀带独立的 session-task 标记，名字只由**这条派活片**注册（按认领时写下的会话任务绑定）。
+#   停止控制沿"会话任务 → 绑定的 request → 这个名字"去找；它不碰 task_id 语义。
+# 函数用途: 生成派活片专用的可中断名（与前台请求名不同空间）。
+def session_task_interrupt_name(turn_id: object) -> str:
+    return f"session-task-turn:{str(turn_id or '').strip()}"
+
+
 # LLM: Manual Compact cancellation is scoped by authenticated channel identity, conversation, and
 # the original opaque client message id.  The digest is process-local routing data, never a user
 # or owner lookup, and prevents one TUI from naming another user's Compact worker.

@@ -39,6 +39,7 @@ from ..conversation.control_commands import (
     conversation_request_interrupt_name,
     render_conversation_task_status,
     render_verbose_control,
+    session_task_interrupt_name,
 )
 from ..conversation.models import (
     THREAD_TASK_LINK_INACTIVE_STATUSES,
@@ -407,22 +408,7 @@ def execute_gateway_conversation_control(
                 if _active_turn_request_id(record) == expected_turn_id
             ]
             if len(live_requests) != 1:
-                # 派活回合跑在后台片里，不在前台窗口请求集合中。按绑定的 request 去后台运行里
-                # 找这个精确回合；找到才说明它确实在跑。少了这一步，"已绑定后再取消"在真实链路上
-                # 永远返回"已结束或切换"（场景 5）。
-                background = _running_background_input_target(agent, scope)
-                if background is not None and _record_id(background) == expected_turn_id:
-                    return _stop_live_window_request(
-                        agent, paths, background, scope,
-                        interrupt_only=command.operation == "interrupt",
-                    )
-                return ConversationControlResult(
-                    "stop",
-                    False,
-                    "目标回合已结束或切换，未停止其他回合。",
-                    request_id=expected_turn_id,
-                    delivery_status="rejected",
-                )
+                return _stop_bound_background_turn(agent, paths, scope, command)
         if len(live_requests) > 1:
             return ConversationControlResult(
                 "stop",
@@ -655,6 +641,100 @@ def steer_active_conversation_if_running(
             guidance_dedupe_key=result.guidance_dedupe_key,
         )
     return result
+
+
+# LLM: 派活回合跑在后台片里，不属于前台窗口请求集合。它真实存在的结构化事实是**会话任务的绑定**
+#   （目标会话确认消费正文时把这一轮的 turn_id 写进 task.conversation_request_id），这一片自己就用
+#   同一个 bound turn 注册了专用可中断名。这里只沿绑定 + 后台认领记录确认"它确实在跑"，再打专用名；
+#   拿不到绑定或认领已不在跑就如实不确认（fail closed），不改回 done、不伪造成功。
+#   （`_running_background_input_target` 对派活片恒不成立：那一片没有 ConversationThread 线程任务关联，
+#   认领记录的 task_id 也是空的——已用真实链路实测确认。）
+# 函数用途: 停止一条已绑定但不在前台窗口里的后台会话任务回合。
+def _stop_bound_background_turn(
+    agent: object,
+    paths: GatewayPaths,
+    scope: GatewayControlScope,
+    command: ConversationControlCommand,
+) -> ConversationControlResult:
+    # 与调用方同一个来源：本次停止请求携带的精确回合号。
+    expected_turn_id = _steer_expected_turn_id(scope)
+    if _bound_background_turn_is_running(agent, scope, expected_turn_id):
+        if interrupt_by_name(session_task_interrupt_name(expected_turn_id)):
+            return ConversationControlResult(
+                "stop",
+                True,
+                "已停止目标上执行这个任务的回合。",
+                request_id=expected_turn_id,
+            )
+        return ConversationControlResult(
+            "stop",
+            False,
+            "目标回合已不在执行中，未确认停止。",
+            request_id=expected_turn_id,
+            delivery_status="rejected",
+        )
+    background = _running_background_input_target(agent, scope)
+    if background is not None and _record_id(background) == expected_turn_id:
+        return _stop_live_window_request(
+            agent, paths, background, scope,
+            interrupt_only=command.operation == "interrupt",
+        )
+    return ConversationControlResult(
+        "stop",
+        False,
+        "目标回合已结束或切换，未停止其他回合。",
+        request_id=expected_turn_id,
+        delivery_status="rejected",
+    )
+
+
+# LLM: 派活/消息片的定位不能靠前台窗口请求，也不能靠 `_running_background_input_target`
+#   （它要求 ConversationThread 线程任务关联 + claim.task_id，派活片两条都不满足，实测恒为 None）。
+#   这里只用真实存在的两件结构化事实：①目标会话里**任务记录**绑定了这个 turn
+#   （task.conversation_request_id == expected_turn_id，由 session_tasks.bind_turn 在认领时写入）；
+#   ②目标会话的后台认领记录**正在跑**（status=running，且没有别的来源占用它）。
+#   两条都成立才认为"这个回合确实在跑"；读不到或对不上就返回 False，让调用方如实不确认。
+# 函数用途: 判断某个已绑定的会话任务回合此刻是否正在后台执行。
+def _bound_background_turn_is_running(
+    base_agent: object, scope: GatewayControlScope, expected_turn_id: str,
+) -> bool:
+    turn_id = str(expected_turn_id or "").strip()
+    if not turn_id:
+        return False
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        store = owner_agent.conversation_store
+        thread = store.threads.resolve(
+            channel=scope.channel,
+            channel_conversation_id=scope.conversation_id,
+            channel_user_id=scope.user_id,
+        )
+        if thread is None:
+            return False
+        thread_id = str(getattr(thread, "thread_id", "") or "")
+        if not thread_id:
+            return False
+        # limit=0：全量读；默认只读前 100 条，任务多时会漏掉正在跑的那条。
+        tasks, task_errors = store.session_tasks.list_report(limit=0)
+        if task_errors:
+            return False
+    except Exception:
+        return False
+    bound = [
+        task for task in tasks
+        if str(getattr(task, "conversation_request_id", "") or "").strip() == turn_id
+    ]
+    if len(bound) != 1:
+        return False
+    if str(getattr(bound[0], "status", "") or "") in {"done", "failed", "cancelled"}:
+        return False
+    try:
+        claim = store.claims.load(thread_id)
+    except Exception:
+        return False
+    if claim.get("load_error") or str(claim.get("status") or "") != "running":
+        return False
+    return True
 
 
 # LLM: 只读取本 owner/thread 的原后台执行权；模型文字、Goal active 和 TUI 快照均不能单独证明在运行。

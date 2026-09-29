@@ -177,6 +177,8 @@ def test_run_wake_signal_passes_owner_route(monkeypatch):
                 pending_one=lambda wake_id: signal if wake_id == signal.wake_signal_id else None,
             ),
             threads=SimpleNamespace(load=lambda _tid: None),
+            # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
+            guidance=None,
         ),
     })
     s._pre_wake_capability_sweep = lambda *a, **k: None
