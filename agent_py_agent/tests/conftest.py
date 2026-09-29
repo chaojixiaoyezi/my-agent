@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import webbrowser
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -14,6 +15,78 @@ import pytest
 
 from agent_py_agent.agent.capability import CapabilityRouter, SkillsService
 from agent_py_agent.agent.subagents.models import SubAgentTask
+from agent_py_agent.tests._desktop_open_guard import (
+    REAL_DESKTOP_MARKER,
+    DesktopOpenGuard,
+    failure_message,
+)
+
+_DESKTOP_GUARD: DesktopOpenGuard | None = None
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        f"{REAL_DESKTOP_MARKER}: 测试确实需要调用真实的 open/xdg-open/osascript/通知/剪贴板程序；默认全部被测试防线拦截",
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _desktop_open_guard(tmp_path_factory):
+    """会话级防线：shim 目录放到 PATH 最前，webbrowser.open* 换成只记录的替身，任何测试都打不开用户桌面程序。
+
+    子进程经 PATH 继承 shim（插件 MCP 子进程经 build_safe_env 保留 PATH）；自己改写 PATH 的测试自行负责。
+    """
+    global _DESKTOP_GUARD
+    guard = DesktopOpenGuard.install(tmp_path_factory.mktemp("desktop_open_guard"))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PATH", guard.path_with_shims(os.environ.get("PATH", "")))
+        for name in guard.originals:
+            patch.setattr(webbrowser, name, guard.python_opener(name))
+        _DESKTOP_GUARD = guard
+        try:
+            yield guard
+        finally:
+            _DESKTOP_GUARD = None
+
+
+@pytest.fixture(autouse=True)
+def _desktop_open_guard_per_test(request, _desktop_open_guard, monkeypatch):
+    """每条测试结束时检查自己期间的拦截记录，有就让这条测试失败；声明了真实调用的测试放行。"""
+    guard = _desktop_open_guard
+    real = request.node.get_closest_marker(REAL_DESKTOP_MARKER) is not None
+    if real:
+        monkeypatch.setenv("PATH", guard.path_without_shims(os.environ.get("PATH", "")))
+        for name, original in guard.originals.items():
+            monkeypatch.setattr(webbrowser, name, original)
+    request.node._desktop_guard_mark = guard.mark()
+    yield
+    # 调用阶段已报过的记录不重复报；这里只兜住测试夹具收尾、插件进程退出时才出现的调用。
+    records = guard.take_since(request.node._desktop_guard_mark)
+    if records and not real:
+        pytest.fail(failure_message(records, f"测试 {request.node.nodeid} 收尾时"), pytrace=False)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """测试体正常跑完后立即检查拦截记录，让违规的那条测试本身失败（而不是只在收尾报错）。"""
+    result = yield
+    guard, mark = _DESKTOP_GUARD, getattr(item, "_desktop_guard_mark", None)
+    if guard is None or mark is None or item.get_closest_marker(REAL_DESKTOP_MARKER) is not None:
+        return result
+    records = guard.take_since(mark)
+    item._desktop_guard_mark = guard.mark()
+    if records:
+        pytest.fail(failure_message(records, f"测试 {item.nodeid} "), pytrace=False)
+    return result
+
+
+def pytest_sessionfinish(session, exitstatus):
+    guard = _DESKTOP_GUARD
+    records = guard.unattributed() if guard is not None else []
+    if records:
+        session.config.get_terminal_writer().line(failure_message(records, "测试会话中（未能归属到单条测试的后台进程）"))
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture(autouse=True)

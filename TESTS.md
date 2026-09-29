@@ -72,6 +72,27 @@
   `git diff --check`、clean-package 全部通过。
   会话互通在生产上仍然关闭，本工具只在测试里验证。
 
+## 测试全局防线：任何测试都不能打开用户的浏览器或桌面程序（2026-09-28，分支 `claude/75-test-open-guard`，基于 `80b4afed8`）
+
+- **做法**：`agent_py_agent/tests/conftest.py` 在会话开始时把 `_desktop_open_guard.py` 生成的 shim 目录放到 PATH 最前，并把 `webbrowser.open/open_new/open_new_tab` 换成只记录的替身。
+  - shim 只追加一行记录（程序名、打码后的参数、调用方进程、当前测试名），不执行任何动作。
+  - 记录文件路径在安装时写死进 shim 脚本。原因是插件 MCP 子进程经 `build_safe_env` 只继承 PATH、HOME 等白名单变量，靠环境变量传日志路径会漏记。
+  - 测试体跑完立即检查本测试期间的记录，有就让这条测试失败，报错写明程序、打码参数、调用方命令和测试名。夹具收尾或插件退出时才出现的调用在 teardown 报出。测试之外的后台调用在会话结束时列出，并把会话退出码设为失败。
+- **拦截范围与理由**：
+  - 会打开浏览器、文件或应用的：`open`、`xdg-open`、`gio`、`gnome-open`、`kde-open(5)`、`wslview`、`sensible-browser`、`x-www-browser`、`www-browser`。Python `webbrowser` 在 Linux/WSL 上就按这些名字查找。
+  - `osascript`：macOS 的 `webbrowser` 经它打开网页，它还能弹窗、控制应用。
+  - 通知：`notify-send`、`terminal-notifier`。
+  - 剪贴板读写：`pbcopy`、`pbpaste`、`wl-copy`、`wl-paste`、`xclip`、`xsel`。写会改掉用户剪贴板，读会把用户私有内容带进测试。
+  - 现有测试的情况：desktop-lite 用例经设置注入假程序；TUI 剪贴板用例 stub 了 `subprocess.run` 或 `_run_clipboard_tool`；没有测试依赖“找不到 open”一类分支。所以一起拦截不会误伤。
+- **放行**：确需真实调用的测试必须加 `@pytest.mark.real_desktop_programs`，这时该测试的 PATH 去掉 shim、`webbrowser` 恢复原实现。目前没有测试需要它，只有防线自检用它核对放行后的环境，不调用任何程序。
+- **边界**：测试自己把 PATH 改成不含 shim 的值，或者给子进程一个不含 PATH 的全新环境时，不在防线覆盖内；Python 进程内的直接调用只覆盖 `webbrowser`。
+- **验证**：
+  - 自检 `test_desktop_open_guard.py` 5 项通过，包括只给 PATH 的剥离环境下照样记录。
+  - 在本分支基础 `80b4afed8` 上，web_board 那条 stdin EOF 用例仍是原样（未含 `8bf9fdcff` 的修复），防线让它失败，报出 `open http://127.0.0.1:<port>/?token=<redacted>`，调用方是 `python -I -m web_board`。
+  - 临时把 `start()` 改成 `open_browser=true`，经 MCP 子进程起的插件调用同样被拦下并归到对应测试。
+  - 在工作区临时带上 `8bf9fdcff` 的修复（不提交），把插件相关 62 个测试文件、TUI 剪贴板和输入、guardrails、`constant_names_unique`、`code_size_script` 一起跑，共 68 个文件、1071 项全部通过，防线拦截 0 次（0 误报），耗时约 15 分钟；basetemp 跑完即删，测试未生成 pycache。
+- **合并顺序**：本分支必须和 `8bf9fdcff` 一起或在它之后集成，否则 web_board 那一条会按设计失败。
+
 ## capability 兜底值清理：只认 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-fallback-cleanup`，基于 `54880f8e9`）
 
 - **范围**：6 处调用点改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，删掉各自写的兜底值：
