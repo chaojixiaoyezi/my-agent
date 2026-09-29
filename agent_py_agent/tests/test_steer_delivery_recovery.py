@@ -110,15 +110,18 @@ class _FailThenAcceptBackend:
         self.first = first
         self.calls = 0
         self.release = threading.Event()
+        self.first_call_entered = threading.Event()
 
-    # 函数用途: 按调用次数返回失败、迟到回复或正常回复。
+    # 函数用途: 按调用次数返回失败、迟到回复或正常回复；第一次调用真正进入时置位 first_call_entered。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         del prompt, on_chunk
         self.calls += 1
+        if self.calls == 1:
+            self.first_call_entered.set()
         if self.calls == 1 and self.first == "raise":
             raise ProviderTransientError("临时服务错误")
         if self.calls == 1:
-            self.release.wait(2.0)
+            self.release.wait(10.0)
             return ModelResponse(text="被放弃的迟到回复", backend=self.name)
         return ModelResponse(text="accepted", backend=self.name)
 
@@ -157,15 +160,34 @@ def test_failed_call_returns_its_steer_and_the_next_call_submits_it_again(tmp_pa
     assert store.guidance.receipt("steer-a").status == "consumed"
 
 
-def test_wall_timeout_retry_resubmits_the_steer_under_the_retry_call(tmp_path):
+def test_wall_timeout_retry_resubmits_the_steer_under_the_retry_call(tmp_path, monkeypatch):
+    """第一次物理调用被墙钟放弃后，重试调用重新提交同一条插话。
+
+    墙钟只对第一次调用生效，且只在假后端真正进入（插话已随这次调用提交）之后才开始计 0.05 秒：这样超时必然发生，
+    又不会抢在提交之前；重试调用沿用配置的 10 秒，不会因满载下线程启动慢而被误判为第二次超时。
+    """
     store = ConversationStore(tmp_path / "conversations")
     entry = _steer(store, "req-steer", "steer-a")
     backend = _FailThenAcceptBackend("block")
-    request = _generation_request(store, backend, entry, timeout=0.05)
+    request = _generation_request(store, backend, entry, timeout=10.0)
+    original_wait = generation._wait_for_generation_result
+    wall_timeouts: list[float] = []
+
+    # 函数用途: 第一次物理调用等后端进入后按 0.05 秒墙钟等待；之后的调用原样使用配置超时（参数同原函数）。
+    def wait_with_per_call_wall_clock(*call):
+        *wait_args, timeout = call
+        if not wall_timeouts:
+            assert backend.first_call_entered.wait(timeout=10.0)
+            timeout = 0.05
+        wall_timeouts.append(timeout)
+        return original_wait(*wait_args, timeout)
+
+    monkeypatch.setattr(generation, "_wait_for_generation_result", wait_with_per_call_wall_clock)
     try:
         assert generate_model_response(request).text == "accepted"  # 物理重试不再被“有插话”拦下
     finally:
         backend.release.set()
+    assert wall_timeouts == [0.05, 10.0]
 
     batches = _batches(store, "req-steer")
     assert backend.calls == 2 and [status for _call, status, _ids in batches] == ["rejected", "submitted"]

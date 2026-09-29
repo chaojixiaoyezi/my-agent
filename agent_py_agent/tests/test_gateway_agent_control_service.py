@@ -378,38 +378,52 @@ def test_owner_stop_grandchild_resumes_parent_while_sibling_keeps_running(
     assert delivery["resume_requested"] is True
 
 
+# 函数用途: 返回一个会卡住直到测试放行的清理替身，以及它的进入/放行/结束事件和观察记录，供停止用例按顺序断言。
+def _blocked_cleanup(agent):
+    entered, release, finished = (threading.Event() for _ in range(3))
+    seen: dict[str, list[str]] = {"calls": [], "status": []}
+
+    def slow_cancel(batch, root_id):
+        seen["calls"].append(root_id)
+        seen["status"].append(agent.subagents.load(root_id).status)
+        assert {item.report["run_id"] for item in batch.stops} == {root_id}
+        entered.set()
+        try:
+            release.wait(timeout=10.0)
+        finally:
+            finished.set()
+        return {"run_id": root_id, "status": "CANCELLED"}
+
+    return slow_cancel, SimpleNamespace(entered=entered, release=release, finished=finished, seen=seen)
+
+
 def test_interactive_stop_freezes_before_ack_and_does_not_wait_for_cleanup(
     tmp_path, monkeypatch
 ) -> None:
+    """接纳回执不等待清理：清理被测试扣住（release 未放行）时回执已经返回，且状态在回执前就冻结为 CANCELLED。
+
+    不用墙钟（"回执耗时 < 0.5 秒"在满载下会因准备阶段落盘变慢而误报）；Event 的等待上限只是防挂起的安全网，
+    判定全部来自结构化事实：finished 未置位、release 未放行、状态已冻结、清理线程看到的状态、去重回执。
+    """
     agent, scope, child = _bound_agent_tree(tmp_path)
-    entered = threading.Event()
-    release = threading.Event()
-    calls: list[str] = []
-
-    def slow_cancel(batch, root_id):
-        calls.append(root_id)
-        assert agent.subagents.load(root_id).status == "CANCELLED"
-        assert {item.report["run_id"] for item in batch.stops} == {root_id}
-        entered.set()
-        release.wait(timeout=2.0)
-        return {"run_id": root_id, "status": "CANCELLED"}
-
+    slow_cancel, cleanup = _blocked_cleanup(agent)
     monkeypatch.setattr(
         "agent_py_agent.agent.conversation.agent_control.cleanup_subagent_tree",
         slow_cancel,
     )
 
-    started = time.perf_counter()
     accepted = enqueue_agent_stop(
         agent,
         scope=scope,
         run_id=child.id,
         operation_id="agent-stop-fast-1",
     )
-    elapsed = time.perf_counter() - started
+    # 回执时清理仍被扣住：若接纳等待了清理，这里 finished 已置位（清理只能在 release 超时后结束）。
     assert accepted["status"] == "accepted"
-    assert elapsed < 0.5
-    assert entered.wait(timeout=1.0)
+    assert not cleanup.release.is_set() and not cleanup.finished.is_set()
+    assert agent.subagents.load(child.id).status == "CANCELLED"
+    assert cleanup.entered.wait(timeout=10.0)
+    assert cleanup.seen["status"] == ["CANCELLED"]
 
     duplicate = enqueue_agent_stop(
         agent,
@@ -419,8 +433,9 @@ def test_interactive_stop_freezes_before_ack_and_does_not_wait_for_cleanup(
     )
     assert duplicate["status"] == "accepted"
     assert duplicate["already_active"] is True
-    assert calls == [child.id]
-    release.set()
+    assert cleanup.seen["calls"] == [child.id] and not cleanup.finished.is_set()
+    cleanup.release.set()
+    assert cleanup.finished.wait(timeout=10.0)
 
 
 def test_interactive_stop_eventually_wakes_root_parent(tmp_path) -> None:

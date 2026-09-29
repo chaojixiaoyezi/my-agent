@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 两条负载敏感用例改稳：交互式停止接纳、插话墙钟重试（2026-09-29，分支 `claude/38-deflake-stop-steer`，基于 `f7a4cc909`，只改测试）
+
+- **来源**：集成者报告 step15y 在 Mac 12 分片时 `test_gateway_agent_control_service.py::test_interactive_stop_freezes_before_ack_and_does_not_wait_for_cleanup`
+  与 `test_steer_delivery_recovery.py::test_wall_timeout_retry_resubmits_the_steer_under_the_retry_call` 各失败 1 次，单独重跑 3/3。
+- **满载复现**（8–10 个 CPU 忙循环 + 6 个 pytest 进程各循环 12 次，宿主同时跑集成分片，负载 50–70）：停止用例 68/72 失败，全部是
+  `assert elapsed < 0.5`（实测 0.53–0.81 秒，停止准备阶段落盘变慢）；插话用例 4/72 失败，都是重试调用也被 0.05 秒墙钟判超时，
+  其中一次还观察到第一次调用的工作线程在墙钟放弃之后才提交插话，重试提交时报 `guidance submission was not reserved`。
+- **停止用例改法**：不再用墙钟代理“不等待清理”。清理替身被测试扣住（`release` 未放行）时接纳回执已返回，且 `finished` 未置位、
+  状态已冻结为 `CANCELLED`、清理线程看到的状态、去重回执均为结构化断言；两个 Event 的等待上限只是防挂起安全网。
+- **插话用例改法**：墙钟只对第一次物理调用生效，且在假后端真正进入（插话已随该次调用提交）后才开始计 0.05 秒；重试调用沿用
+  配置的 10 秒。被测行为（墙钟超时 → 插话退回 → 重试重新提交、`calls == 2`、批次 `rejected → submitted`）与断言不变。
+- **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希，5/5 被抓出）：接纳等待清理线程；回执前不冻结；去重失效；
+  失败调用不退回插话；超时后不重试。
+- **修复后满载**：两条各 6 进程 × 20 次并行（8 个忙循环、集成分片同时运行）全部通过；两个文件与 `test_architecture_guardrails` 单跑通过。
+- **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package；basetemp 全部放在本会话 scratchpad 并在跑完后删除。
+- 观察（未改产品）：`request_timeout` 极短时，被墙钟放弃的第一次调用的工作线程仍会在放弃之后提交插话，使重试提交撞上“未预留”；
+  生产超时为秒级，线程启动延迟远小于超时，正常配置下达不到这个窗口，留给产品作者判断是否在提交前复核调用是否仍是当前调用。
+
 ## 测试不再打开真实浏览器，browser-lite 不再残留 Chrome 签名克隆（2026-09-28，分支 `claude/75-no-real-browser-in-tests`，基于 `80b4afed8`）
 
 - **弹窗根因**：`test_web_board_package.py::test_stdin_eof_ends_process_and_releases_port` 直接起插件进程，却把 `MY_AGENT_PLUGIN_SETTINGS` 从环境里删掉了。插件于是按默认 `open_browser=true`，在用户的默认浏览器里打开了带令牌的本机链接。现在这一例显式传 `{"open_browser": false}`，并断言 `served["browser_opened"] is False`；它测的是 stdin EOF 后退出，与默认设置无关。
