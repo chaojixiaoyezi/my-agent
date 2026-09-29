@@ -22,12 +22,15 @@ from .process_session_store import ProcessSessionStore
 
 
 # LLM: confirmed 只说明冻结的已知实例清理；业务文件或外部副作用不因此回滚，不可据此自动重放命令。
+#   authority_missing=True 表示第一个事务里权威记录已不存在：一个信号都没发、什么都没写，调用方按“权威读不出”处理，
+#   不能说成“停止过、没确认”。
 # 类用途: 向启动失败和显式停止入口返回真实清理结果及最新持久记录。
 @dataclass(frozen=True)
 class ProcessSessionCleanup:
     record: dict[str, object]
     confirmed: bool
     terminations: tuple[ProcessTerminationReceipt, ...] = ()
+    authority_missing: bool = False
 
 
 # LLM: 已提交意图与已经发过信号均不可降为未发生；回执只包含原 session，不重新选择资源。
@@ -88,7 +91,7 @@ def stop_process_session(
         with store.transaction() as transaction:
             current = transaction.load(str(selected["session_id"]))
             if current is None:
-                return ProcessSessionCleanup(selected, False)
+                return ProcessSessionCleanup(selected, False, authority_missing=True)
             merge_process_record(selected, current)
             frozen = transaction.write({**current, "stop_requested": True})
             committed = True

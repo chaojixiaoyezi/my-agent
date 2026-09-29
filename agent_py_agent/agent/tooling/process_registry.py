@@ -325,6 +325,9 @@ class ProcessRegistry:
             from .process_session_cleanup import stop_process_session
 
             cleanup = stop_process_session(ProcessSessionStore(root), payload, host_process=process)
+            if cleanup.authority_missing:
+                # 与旧版路径同一口径：权威记录不见了就是权威读不出，不是“停止未确认”（这时一个信号都没发）。
+                raise ProcessSessionAuthorityError({"error_type": "authority_missing"})
             with self._lock:
                 current = self._cache_payload(cleanup.record, root)
                 summary = current.to_summary()

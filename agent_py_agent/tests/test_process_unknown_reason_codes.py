@@ -145,3 +145,35 @@ def test_ledger_unknown_reason_names_the_cause(tmp_path, monkeypatch):
     record = store.get_tool_operation(owner_id="owner-a", run_id="run-1", operation_id=call.operation_id)
     assert result.reported_error_code == "PROCESS_STOP_UNCONFIRMED"
     assert (record.status, record.unknown_reason) == ("unknown", "effect_outcome_unknown:PROCESS_STOP_UNCONFIRMED")
+
+
+# ae 复审建议 4：托管停止在第一个事务里发现权威记录已不存在时，一个信号都没发，按“权威读不出”处理，
+# 与旧版路径（记录消失抛 ProcessSessionAuthorityError）同一口径，不再报成“停止未确认”。
+def test_managed_stop_of_a_vanished_record_sends_nothing_and_reports_authority_missing(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import process_session_cleanup as cleanup_module
+    from agent_py_agent.tests.test_background_handoff import _bound_record
+
+    store, record = _bound_record(tmp_path, "running")
+    monkeypatch.setattr(cleanup_module, "_terminate_frozen_instances",
+                        lambda *_args: pytest.fail("record is gone; no signal may be sent"))
+    result = cleanup_module.stop_process_session(store, {**record, "session_id": "bg-vanished"})
+    assert (result.authority_missing, result.confirmed, result.terminations) == (True, False, ())
+
+
+def test_registry_stop_raises_authority_missing_and_the_tool_reports_it(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling import process_session_cleanup as cleanup_module
+    from agent_py_agent.agent.tooling.process_session_cleanup import ProcessSessionCleanup
+    from agent_py_agent.tests.test_background_handoff import _bound_record
+
+    _store, record = _bound_record(tmp_path, "running")
+    visible = SimpleNamespace(to_record=lambda: dict(record), process=None, store_root=str(tmp_path))
+    monkeypatch.setattr(process_registry, "_visible_record_locked", lambda *_args: visible)
+    monkeypatch.setattr(cleanup_module, "stop_process_session",
+                        lambda *_args, **_kwargs: ProcessSessionCleanup(record, False, authority_missing=True))
+    with pytest.raises(ProcessSessionAuthorityError):
+        process_registry.kill(record["session_id"])
+    outcome = ProcessSessionTool().execute({"action": "stop", "session_id": record["session_id"], "__run_scope": SCOPE})
+    assert outcome.reported_error_code == "PROCESS_SESSION_AUTHORITY_UNREADABLE"
+    assert outcome.result_envelope["load_error"] == {"error_type": "authority_missing"}

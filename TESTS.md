@@ -6,6 +6,10 @@
   `test_unconfirmed_terminal_close_reports_its_cause` 断言 session_id、method、confirmed 与 unresolved_pids。
 - **建议 3**：`process_session` 清理结果未定（`PROCESS_SESSION_CLEANUP_UNCONFIRMED`）改用专门说法（停止或清理没有完成确认、已发信号不撤回），
   不再与“权威读不出”共用一句；`test_process_session_failures_report_their_cause` 两例分别断言各自的说法。
+- **建议 4**：托管停止在第一个事务里发现权威记录已不存在时，一个信号都没发，`ProcessSessionCleanup.authority_missing=True`，
+  `process_registry.kill` 抛 `ProcessSessionAuthorityError(authority_missing)`，与旧版路径同一口径（不再报成“停止未确认”）；
+  新增两条：清理层断言不发信号、标记为 authority_missing；注册表层断言抛错，工具层报 `PROCESS_SESSION_AUTHORITY_UNREADABLE`。
+- 以上三条的新断言在 main 的代码上全部失败；变异 6 个全部被抓住；31 个相关测试文件 524 项通过。
 
 ## 向量缓存第五轮：「跳过写」真的实现 + 回收错误可见（2026-09-29，分支 `my-agent/self-dev-2-vcache`，基于 `bac2f176d`）
 
