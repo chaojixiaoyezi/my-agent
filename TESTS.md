@@ -637,6 +637,11 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
     未注入写成“无”、列表行或预览丢掉后续工作。
   - 定向回归：引用 /endtask、Gateway 控制、TUI 控制、后续工作判定与定时收口的 29 个文件，加 9 个全仓守卫，共 38 个文件
     1001 passed；strict code-size 与 `e850ceb04` 逐条比对新增 0；ruff、doc sync、diff check、clean package 通过。
+  - 跟进提交（3a 定）：`GRACE_BOUND_FACTS` 里的码后面加“（宽限期内才算）”。新增 1 项：同时有活跃 Goal 和待处理唤醒时，
+    列表和预览显示 `active_goal（宽限期内才算）、pending_wakes`；会自己推进的事实不加标注；不带 Goal 正文；
+    /endtask 用的集合就是 `task_follow_up.GRACE_BOUND_FACTS` 同一个对象，不另写一份。
+    变异 9 个全部被抓住（新增“不加标注”“所有码都加标注”）；定向回归 38 个文件 1002 passed；strict code-size 与 `e850ceb04`
+    逐条比对新增 0；ruff、doc sync、diff check、clean package 通过。
 - **新增** `test_end_task_control.py`（6 项）。夹具用真实 `SimpleAgent`：经 `create_job` / `reserve_due_runs` / `claim_run` /
   `park_run_waiting` 与 `record_run_creation`、`settle_agent_attempt` 造出事故形态，即定时执行 waiting、会话任务 active、
   attempt 已结束而 AgentRun 未关。

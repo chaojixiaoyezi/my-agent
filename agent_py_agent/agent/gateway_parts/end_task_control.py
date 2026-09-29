@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
-from ..conversation.task_follow_up import FollowUpQuery
+from ..conversation.task_follow_up import GRACE_BOUND_FACTS, FollowUpQuery
 from ..runtime_db.operations import attempt_status_is_terminal
 from ..user_space.approval_mode import is_permission_admin
 
@@ -18,6 +18,8 @@ _KIND = "endtask"
 _CANDIDATE_LIMIT = 20
 # 结束任务只改会话任务与定时账本，不停它启动的受管后台命令；预览和确认结果都如实交代这个副作用（9a 复审）。
 _BACKGROUND_NOTE = "结束任务不会停止它启动的后台命令；这些命令结束后的通知会落到已取消的任务上。"
+# 定时执行收口过了宽限期就不再计入 GRACE_BOUND_FACTS 里的事实；列表和预览在这些码后面固定加这句，免得被读成“还会自己推进”。
+_GRACE_BOUND_NOTE = "（宽限期内才算）"
 _REFUSALS = {
     "not_waiting": (
         "END_TASK_NOT_WAITING_RUN",
@@ -198,15 +200,17 @@ def _candidate_line(facts: _EndTaskFacts, follow_up: str) -> str:
 
 # LLM: 与定时执行收口同一个判定：owner 的 scheduler_service.follow_up（组合根注入的 SchedulerFollowUpPolicy），
 #   按 FollowUpQuery(会话, 任务) 取 FollowUpFacts；只输出事实码——存在的事实码、读不出的“项目:错误码”，
-#   没有任何事实为“无”，判定未注入为“判定不可用”。只读：各项读取错误已由判定收成结构化错误码，不读任何正文。
+#   没有任何事实为“无”，判定未注入为“判定不可用”。GRACE_BOUND_FACTS（直接引用 task_follow_up 的常量，不另写一份）
+#   里的码后面加 _GRACE_BOUND_NOTE。只读：不经过 active_run_closeout 的计时与节流表；各项读取错误已由判定收成结构化错误码，不读正文。
 # 函数用途: 说明一条定时会话任务为什么还在等（有哪些后续工作事实、哪些读不出来），供列表和预览显示。
 def _follow_up_text(owner_agent: object, facts: _EndTaskFacts) -> str:
     policy = getattr(getattr(owner_agent, "scheduler_service", None), "follow_up", None)
     if policy is None:
         return "判定不可用"
     found = policy.facts(FollowUpQuery(facts.thread_id, facts.task_id))
+    present = "、".join(code + (_GRACE_BOUND_NOTE if code in GRACE_BOUND_FACTS else "") for code in found.present)
     unreadable = "、".join(f"{item}:{code}" for item, code in found.unreadable)
-    return ("、".join(found.present) or "无") + (f"；读不出 {unreadable}" if unreadable else "")
+    return (present or "无") + (f"；读不出 {unreadable}" if unreadable else "")
 
 
 # LLM: 纯格式化，只用本机时区显示，不参与任何判断。

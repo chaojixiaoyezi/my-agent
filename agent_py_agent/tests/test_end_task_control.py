@@ -126,6 +126,25 @@ def test_list_and_preview_show_follow_up_fact_codes(tmp_path):
     assert _state(agent, run_id) == ("active", "waiting")
 
 
+def test_grace_bound_facts_carry_the_fixed_note(tmp_path):
+    from agent_py_agent.agent.conversation import task_follow_up
+
+    agent, run_id, _record = _stuck_scheduled_task(tmp_path)
+    thread_id = str(agent.scheduler_repository.get_active_run(run_id)["thread_id"])
+    agent.conversation_store.goals.create({"thread_id": thread_id, "task_id": run_id, "objective": "持续推进"})
+    agent.conversation_store.wakes.raise_signal({"thread_id": thread_id, "root_task_id": run_id,
+                                                 "reason": "managed_process_exited", "now": 1_004})
+
+    listing = execute_end_task_control(agent, parse_conversation_control("/endtask"))
+    preview = execute_end_task_control(agent, parse_conversation_control(f"/endtask {run_id}"))
+
+    assert "｜后续工作 active_goal（宽限期内才算）、pending_wakes" in listing.message
+    assert "后续工作事实：active_goal（宽限期内才算）、pending_wakes。" in preview.message
+    assert "pending_wakes（" not in listing.message + preview.message, "会自己推进的事实不加标注"
+    assert "持续推进" not in listing.message + preview.message, "只显示事实码，不带 Goal 正文"
+    assert end_task_control.GRACE_BOUND_FACTS is task_follow_up.GRACE_BOUND_FACTS, "直接引用判定的常量，不另写一份"
+
+
 def test_unreadable_follow_up_items_show_their_codes(tmp_path):
     agent, run_id, _record = _stuck_scheduled_task(tmp_path)
     broken = agent.conversation_store.storage.wake_queue_dir / "normal" / "wake-broken.json"
