@@ -646,6 +646,13 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
 - **变异**（`PYTHONDONTWRITEBYTECODE=1`、每个变异独立 pycache 前缀，跑完逐字节还原）：64 个，首轮 59 个被抓住；补了进度策略读失败/跨任务、后台命令跨会话存储、取码顺序两组测试后，5 个存活全部被抓住，64/64；收口逻辑移到 `scheduler/active_run_closeout.py`（`SchedulerService` 触到类长度硬线）后按新位置重跑，仍 64/64。
 - **回归**：46 个相关测试文件（调度、工具操作账本、后台命令、后台运行时、宿主提示、恢复合同及全仓扫描守卫）；`test_recovery_code_policy` 先抓到两个新码未登记进 `ERROR_CONTRACTS`，已补登记。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_scheduler_waiting_deadlock.py agent_py_agent/tests/test_tool_unknown_reason_preservation.py -q`
+- **复审 A 的跟进修复（be 的 M-A1、M-A2 与 nit）**：
+  - 同类“确认存在优先”：本任务有待处理唤醒、另有归属不明的坏唤醒时，满 6 倍宽限期仍 waiting（be 探针 P2 翻转）；
+    唤醒 / 进度策略各加“同类坏记录 + 确认存在 → 仍算存在”；后台命令加三种坏记录（解析不出 / 本任务 / 空目标）下确认存在仍为 True；
+  - 空目标：坏记录的 `completion_target` 为盘上规范空形状 `{}` 时按“不欠任何任务的通知”跳过（be 探针 P1 翻转）；
+    原归属用例改为底记录先发完通知、坏记录按生产形状（合法记录改坏实例字段）写入，并补缺键与 `{}` 两例；
+  - 以上 7 条新用例在修复前的代码上全部失败；变异 5 个全部被抓住；
+  - 告警节流表清理改为先拍快照再遍历（并发插入不再抛 RuntimeError），未单独写并发用例。
 - **复审修复 A（be 的 M1、M2）**：
   - be 的两个反例（坏唤醒文件让收口永远 waiting、CAS 失败后没有退避）在修复后都翻转为失败，已改写成回归：
     `TestUnreadableFollowUp::test_an_unattributable_corrupt_wake_waits_then_settles_at_six_grace_periods`

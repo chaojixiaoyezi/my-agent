@@ -201,6 +201,16 @@ class TestUnreadableFollowUp:
         assert pending_host_notices(store, thread.thread_id)[0].code == SCHEDULED_TASK_FOLLOW_UP_UNREADABLE
         assert len(agent.scheduler_repository.reserve_due_runs(now=NEXT_PERIOD)) == 1
 
+    def test_a_present_wake_is_not_hidden_by_a_corrupt_one_even_after_six_grace_periods(self, tmp_path):
+        agent, store, thread, claim = _setup(tmp_path)
+        _lifecycle_wake(store, thread, claim)
+        _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+        self._corrupt_wake(store)
+        since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + UNREADABLE_DEADLINE) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+
     def test_a_corrupt_wake_of_another_task_does_not_hold_this_task(self, tmp_path):
         agent, store, thread, claim = _setup(tmp_path)
         self._corrupt_wake(store, '{"root_task_id": "another-task", "thread_id": "t", "wake_signal_id": "w", "created_at": "x"}')
@@ -425,6 +435,22 @@ class TestUnreadableScoping:
         facts = task_follow_up_facts(agent, thread.thread_id, "task-1")
         assert [item for item, _code in facts.unreadable] == ([FOLLOW_UP_PENDING_WAKES] if counted else [])
 
+    # be 复审 P2：同类坏记录（无法归属）不能遮住本任务确认存在的唤醒或进度策略。
+    @pytest.mark.parametrize("source", ["wakes", "policies"])
+    def test_a_confirmed_match_wins_over_an_unattributable_corrupt_record(self, tmp_path, source):
+        agent, store, thread = _fact_agent(tmp_path)
+        if source == "wakes":
+            store.wakes.raise_signal({"thread_id": thread.thread_id, "root_task_id": "task-1",
+                                      "reason": "managed_process_exited", "now": 3.0})
+            bad, expected = store.storage.wake_queue_dir / "normal" / "wake-broken.json", FOLLOW_UP_PENDING_WAKES
+        else:
+            store.progress.create({"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 60,
+                                   "route_channel": "internal", "route_target": "t", "now": 2.0})
+            bad, expected = store.storage.policies_dir / "policy-broken.json", FOLLOW_UP_ENABLED_POLICY
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text("{truncated", encoding="utf-8")
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts((expected,))
+
     @pytest.mark.parametrize(("task_id", "counted"), [("task-1", True), ("another-task", False)])
     def test_corrupt_policy_counts_only_when_it_may_belong_to_the_task(self, tmp_path, task_id, counted):
         agent, store, thread = _fact_agent(tmp_path)
@@ -497,6 +523,22 @@ def test_end_to_end_unknown_tool_outcome_does_not_stop_the_schedule(tmp_path, mo
     assert [item["status"] for item in _history(agent)] == ["failed", "failed"]
 
 
+# 函数用途: 以一条合法记录为底写一份实例字段损坏的坏记录（生产形状），completion_target 按参数改写或删掉；
+#   "unparseable" 写成截断的 JSON。确认它真的产生读取错误。
+def _write_broken_process_record(authority, valid, target):
+    path = authority.root / "bg-broken.json"
+    if target == "unparseable":
+        path.write_text("{truncated", encoding="utf-8")
+    else:
+        broken = dict(valid, session_id="bg-broken", launcher_pid="not-an-int")
+        if target == "missing":
+            broken.pop("completion_target", None)
+        else:
+            broken["completion_target"] = target if not target else {**valid["completion_target"], **target}
+        path.write_text(json.dumps(broken), encoding="utf-8")
+    assert authority.list_records()[1], "fixture must actually produce a read error"
+
+
 class TestPendingProcessCompletion:
     def test_real_process_record_counts_until_its_notice_is_sent(self, tmp_path):
         from agent_py_agent.agent.conversation.process_events import (
@@ -523,30 +565,46 @@ class TestPendingProcessCompletion:
                                 home_paths=agent.home_paths, config=agent.config)
         assert task_has_pending_process_completion(other, params.task_id) is False
 
-    # 坏的后台命令记录：能解析出不属于本任务（没有 completion_target，或 target 指向别的任务/会话存储）就不计入。
-    @pytest.mark.parametrize(("record", "raises"), [
-        ("{truncated", True),
-        ({"completion_target": {"task_id": "task-a"}, "schema": "broken"}, True),
-        ({"completion_target": {"task_id": "another-task"}, "schema": "broken"}, False),
-        ({"completion_target": {"task_id": "task-a", "store_root": "/elsewhere"}, "schema": "broken"}, False),
-        ({"schema": "broken"}, False),
-    ], ids=["unparseable", "this-task", "another-task", "another-store", "no-target"])
-    def test_corrupt_records_count_only_when_they_may_belong_to_the_task(self, tmp_path, record, raises):
+    # 坏的后台命令记录：能解析出不属于本任务（没有完成通知目标——缺键或盘上的规范空形状 {}——，或目标指向别的任务 /
+    # 别的会话存储）就不计入。底记录先把完成通知发掉，这样判定只能靠坏记录的归属。
+    @pytest.mark.parametrize(("target", "raises"), [
+        ("unparseable", True),
+        ({"task_id": "task-a"}, True),
+        ({"task_id": "another-task"}, False),
+        ({"task_id": "task-a", "store_root": "/elsewhere"}, False),
+        ("missing", False),
+        ({}, False),
+    ], ids=["unparseable", "this-task", "another-task", "another-store", "missing-target", "empty-target"])
+    def test_corrupt_records_count_only_when_they_may_belong_to_the_task(self, tmp_path, target, raises):
         from agent_py_agent.agent.conversation.process_events import (
+            reconcile_process_completions,
             task_has_pending_process_completion,
         )
         from agent_py_agent.agent.tooling.process_registry import ProcessSessionAuthorityError
         from agent_py_agent.tests.test_process_completion_events import _fixture
 
-        agent, params, authority = _fixture(tmp_path)
-        bad = authority.root / "bg-broken.json"
-        bad.write_text(record if isinstance(record, str) else json.dumps(record), encoding="utf-8")
-        assert authority.list_records()[1], "fixture must actually produce a read error"
+        agent, params, authority = _fixture(tmp_path, managed=True)
+        [valid] = authority.list_records()[0]
+        assert reconcile_process_completions(agent) == 1
+        _write_broken_process_record(authority, valid, target)
         if raises:
             with pytest.raises(ProcessSessionAuthorityError):
                 task_has_pending_process_completion(agent, params.task_id)
         else:
-            assert task_has_pending_process_completion(agent, params.task_id) is True
+            assert task_has_pending_process_completion(agent, params.task_id) is False
+
+    # be 复审 P1/P2：同类坏记录不能遮住本任务确认存在的待通知记录，无论坏记录归属是否可知。
+    @pytest.mark.parametrize("target", ["unparseable", {"task_id": "task-a"}, {}], ids=["unparseable", "this-task", "empty"])
+    def test_a_confirmed_pending_record_wins_over_a_corrupt_one(self, tmp_path, target):
+        from agent_py_agent.agent.conversation.process_events import (
+            task_has_pending_process_completion,
+        )
+        from agent_py_agent.tests.test_process_completion_events import _fixture
+
+        agent, params, authority = _fixture(tmp_path, managed=True)
+        [valid] = authority.list_records()[0]
+        _write_broken_process_record(authority, valid, target)
+        assert task_has_pending_process_completion(agent, params.task_id) is True
 
     def test_unreadable_process_authority_raises_instead_of_reporting_none(self, tmp_path, monkeypatch):
         from agent_py_agent.agent.conversation.process_events import (

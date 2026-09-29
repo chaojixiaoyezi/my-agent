@@ -97,18 +97,20 @@ def _has_open_subagents(agent: object, task_id: str) -> bool:
     return conversation_task_open_subagents_or_raise(agent, task_id)
 
 
-# LLM: 读取全部待处理唤醒；读错误里能解析出 root_task_id 且不是本任务的不计入，其余抛 _Unreadable。
-#   排除调用方正在处理的唤醒和定时触发本身。
+# LLM: 读取全部待处理唤醒；读到的记录里已有匹配就直接算存在，同类坏记录不能遮住确认存在的后续工作；没有匹配时，
+#   读错误里能解析出 root_task_id 且不是本任务的不计入，其余抛 _Unreadable。排除调用方正在处理的唤醒和定时触发本身。
 # 函数用途: 判断是否还有指向该任务、尚未处理的唤醒（子代理生命周期、后台命令完成、Goal 续跑等）。
 def _has_pending_wakes(store: object, task_id: str, ignored: frozenset[str]) -> bool:
     signals, errors = store.wakes.pending_report(limit=0)
-    _raise_unscoped(errors, lambda payload: _owned_elsewhere(payload, "root_task_id", task_id))
-    return any(
+    if any(
         str(getattr(signal, "root_task_id", "") or "").strip() == task_id
         and str(getattr(signal, "wake_signal_id", "") or "") not in ignored
         and str(getattr(signal, "reason", "") or "").strip().lower() != _SCHEDULER_TRIGGER_REASON
         for signal in signals
-    )
+    ):
+        return True
+    _raise_unscoped(errors, lambda payload: _owned_elsewhere(payload, "root_task_id", task_id))
+    return False
 
 
 # LLM: 后台命令的完成义务由 process_events 的权威记录判定（读错误已在那里按归属限定）；仍读不出时它抛出。
@@ -119,12 +121,15 @@ def _has_pending_process(agent: object, task_id: str) -> bool:
     return task_has_pending_process_completion(agent, task_id)
 
 
-# LLM: 只看 enabled 的进度策略；读错误里能解析出 task_id 且不是本任务的不计入，其余抛 _Unreadable。
+# LLM: 只看 enabled 的进度策略；已有匹配直接算存在（同类坏记录不遮住它）；没有匹配时，读错误里能解析出 task_id 且
+#   不是本任务的不计入，其余抛 _Unreadable。
 # 函数用途: 判断任务是否还有启用中的进度策略会定期唤醒它。
 def _has_enabled_policy(store: object, task_id: str) -> bool:
     policies, errors = store.progress.list_report(enabled_only=True)
+    if any(str(getattr(policy, "task_id", "") or "").strip() == task_id for policy in policies):
+        return True
     _raise_unscoped(errors, lambda payload: _owned_elsewhere(payload, "task_id", task_id))
-    return any(str(getattr(policy, "task_id", "") or "").strip() == task_id for policy in policies)
+    return False
 
 
 # LLM: 逐条读错误报告里的 path 指向的那个文件并解析 JSON（只读）；owned_elsewhere 判为别的任务的跳过，

@@ -160,7 +160,9 @@ def _warn_unreadable(run_id: str, facts: FollowUpFacts, now: float) -> None:
     if last is not None and now - last < _UNREADABLE_WARNING_INTERVAL_SECONDS:
         return
     if len(_unreadable_warned_at) >= _UNREADABLE_WARNING_TRACK_LIMIT:
-        for key in [key for key, at in _unreadable_warned_at.items() if now - at >= _UNREADABLE_WARNING_INTERVAL_SECONDS]:
+        # 先拍快照再遍历：Gateway 跨 owner 并发时别的线程可能同时插入，直接遍历共享 dict 会抛 RuntimeError。
+        for key in [key for key, at in list(_unreadable_warned_at.items())
+                    if now - at >= _UNREADABLE_WARNING_INTERVAL_SECONDS]:
             _unreadable_warned_at.pop(key, None)
     _unreadable_warned_at[run_id] = now
     logger.warning("scheduled task follow-up facts are unreadable", extra={

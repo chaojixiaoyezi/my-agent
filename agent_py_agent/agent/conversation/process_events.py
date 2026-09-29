@@ -122,7 +122,8 @@ def owner_has_pending_process_completions(owner_home: Path) -> bool:
 
 # LLM: 只按记录里的结构化 completion_target（store_root + task_id）判断这个任务还欠不欠一次完成通知；
 #   权威读取出错时抛 ProcessSessionAuthorityError，调用方必须按"读不到"处理，不能当成没有后台命令。
-#   读错误先按记录归属限定：坏记录能解析出不属于本任务（见 _record_owned_elsewhere）就不计入，
+#   读到的记录里已有本任务欠通知的就直接返回 True（同类坏记录不遮住它）；否则读错误先按记录归属限定：
+#   坏记录能解析出不属于本任务（见 _record_owned_elsewhere）就不计入，
 #   避免别的会话一条坏记录让所有定时收口都读不到。
 # 函数用途: 判断某个会话任务是否还有尚未发出完成通知的受管后台命令（命令仍在跑或刚结束待通知）。
 def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
@@ -133,20 +134,23 @@ def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
         return False
     records, errors = ProcessSessionStore(root).list_records()
     store_root = str(store.storage.root)
-    unscoped = [error for error in errors if not _record_owned_elsewhere(error, selected, store_root)]
-    if unscoped:
-        raise ProcessSessionAuthorityError(unscoped[0])
-    return any(
+    if any(
         isinstance(record.get("completion_target"), dict)
         and str(record["completion_target"].get("store_root") or "") == store_root
         and str(record["completion_target"].get("task_id") or "") == selected
         and not record.get("completion_notice_id")
         for record in records
-    )
+    ):
+        return True
+    unscoped = [error for error in errors if not _record_owned_elsewhere(error, selected, store_root)]
+    if unscoped:
+        raise ProcessSessionAuthorityError(unscoped[0])
+    return False
 
 
-# LLM: 只读错误报告里的 path 指向的那一个记录文件并解析 JSON，不改任何文件。记录里没有 completion_target
-#   （本来就不欠完成通知）、或 completion_target 写明了别的任务 / 别的会话存储，才算"不属于本任务"；
+# LLM: 只读错误报告里的 path 指向的那一个记录文件并解析 JSON，不改任何文件。记录里没有完成通知目标（缺键、None，
+#   或盘上的规范空形状 {}：v2 校验会把缺失目标归一成 {}，共享插件激活、子代理作用域、无会话线程或通知关闭时也是 {}，
+#   合法路径下 {} 永远不欠任何任务的通知）、或 completion_target 写明了别的任务 / 别的会话存储，才算"不属于本任务"；
 #   文件读不出、不是 JSON 对象、completion_target 形状不对，都按可能属于本任务处理（计入读取错误）。
 # 函数用途: 判断一条后台命令记录的读取错误是否确定与本任务无关。
 def _record_owned_elsewhere(error: object, task_id: str, store_root: str) -> bool:
@@ -158,7 +162,7 @@ def _record_owned_elsewhere(error: object, task_id: str, store_root: str) -> boo
     if not isinstance(payload, dict):
         return False
     target = payload.get("completion_target")
-    if target is None:
+    if target is None or target == {}:
         return True
     if not isinstance(target, dict):
         return False
