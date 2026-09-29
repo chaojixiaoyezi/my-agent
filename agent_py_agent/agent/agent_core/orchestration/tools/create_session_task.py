@@ -104,9 +104,9 @@ class CreateSessionTaskTool(BaseTool):
                 target_thread_id=parsed.target_thread_id,
                 target_owner_identity=target_owner,
                 kind=SESSION_KIND_TASK,
-                messaging_admin_enabled=bool(getattr(config, "session_messaging_admin_enabled", True)),
-                messaging_user_enabled=bool(getattr(config, "session_messaging_user_enabled", False)),
-                task_admin_enabled=bool(getattr(config, "session_task_admin_enabled", True)),
+                messaging_admin_enabled=bool(config.session_messaging_admin_enabled),
+                messaging_user_enabled=bool(config.session_messaging_user_enabled),
+                task_admin_enabled=bool(config.session_task_admin_enabled),
                 target_channel=_thread_channel(target_thread),
             )
         )
@@ -133,7 +133,7 @@ def _pair_limit_error(
 ) -> ToolHandlerOutcome | None:
     from ....conversation.session_pair_rate import pair_limit_reached
 
-    limit = int(getattr(config, "session_pair_hourly_limit", 0) or 0)
+    limit = int(config.session_pair_hourly_limit or 0)
     store = getattr(agent, "conversation_store", None)
     if not pair_limit_reached(store, sender_thread_id, target_thread_id, limit):
         return None
@@ -199,7 +199,7 @@ def _load_target(
 #   超过配置上限拒绝 SESSION_TASK_CHAIN_LIMIT；0 表示不限制。
 # 函数用途: 校验这次派活是否超出派活链深度上限。
 def _chain_limit_error(store: object, origin_task_id: str, config: object) -> ToolHandlerOutcome | None:
-    limit = int(getattr(config, "session_task_max_chain_depth", 0) or 0)
+    limit = int(config.session_task_max_chain_depth or 0)
     if limit <= 0:
         return None
     parent = None

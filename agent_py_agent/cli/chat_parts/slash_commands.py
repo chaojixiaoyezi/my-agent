@@ -364,15 +364,15 @@ def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str)
             target_thread_id=target_thread_id,
             target_owner_identity=target_owner,
             kind=SESSION_KIND_MESSAGE,
-            messaging_admin_enabled=bool(getattr(config, "session_messaging_admin_enabled", True)),
-            messaging_user_enabled=bool(getattr(config, "session_messaging_user_enabled", False)),
-            task_admin_enabled=bool(getattr(config, "session_task_admin_enabled", True)),
+            messaging_admin_enabled=bool(config.session_messaging_admin_enabled),
+            messaging_user_enabled=bool(config.session_messaging_user_enabled),
+            task_admin_enabled=bool(config.session_task_admin_enabled),
             target_channel=target_channel,
         )
     )
     if not decision.allowed:
         return f"消息没有投递。（{decision.error_code}）"
-    limit = int(getattr(config, "session_pair_hourly_limit", 0) or 0)
+    limit = int(config.session_pair_hourly_limit or 0)
     from ...agent.conversation.session_pair_rate import pair_limit_reached, record_pair_message
 
     if pair_limit_reached(store, ctx.conversation_id, target_thread_id, limit):

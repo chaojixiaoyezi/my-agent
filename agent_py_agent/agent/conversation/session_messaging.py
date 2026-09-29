@@ -167,17 +167,15 @@ def _owner_key(identity: OwnerIdentity) -> tuple[str, str, str]:
 def session_messaging_tool_visible(home_paths: object, config: object) -> bool:
     owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip()
     if owner_kind == OWNER_KIND_MAIN:
-        return bool(getattr(config, "session_messaging_admin_enabled", True))
-    return bool(getattr(config, "session_messaging_user_enabled", False))
+        return bool(config.session_messaging_admin_enabled)
+    return bool(config.session_messaging_user_enabled)
 
 
 # LLM: 派任务第一期只开给管理员，且没有普通用户开关；返回 False 时工具不进 registry。
 # 函数用途: 判断当前 owner 是否应该看到"派会话任务"工具。
 def session_task_tool_visible(home_paths: object, config: object) -> bool:
     owner_kind = str(getattr(home_paths, "owner_kind", "") or "").strip()
-    return owner_kind == OWNER_KIND_MAIN and bool(
-        getattr(config, "session_task_admin_enabled", True)
-    )
+    return owner_kind == OWNER_KIND_MAIN and bool(config.session_task_admin_enabled)
 
 
 __all__ = [

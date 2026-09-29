@@ -10,6 +10,26 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 会话 capability 默认值只留一个来源、构造时兜住坏配置（2026-09-29，分支 `claude/75-cancel-line-finish`，接在取消与消息唤醒提交之后；接手 my-agent-3）
+
+原分支压成的第二个提交。
+- **默认值只留 dataclass 一个来源**：会话相关 4 个文件里自带的 `getattr(config, 键, 默认值)` 兜底删掉（16 行：
+  `session_messaging.py` 三个 `*_tool_visible`、`create_session_task.py`、`send_session_message.py`、`slash_commands.py`），
+  改读字段本身；缺文件时统一入口返回 `CapabilityConfig()`，坏配置返回 None 由调用点 `or CapabilityConfig()` 兜到同一个默认实例。
+  - `test_session_capability_defaults.py`（11 个用例）逐处断言"缺文件 = 默认值 / 坏配置 = 默认值 / 文件非默认值生效"，
+    并钉住"读字段本身、不藏兜底"：缺字段的替身让两个 `*_tool_visible` 抛 `AttributeError`。
+- **构造时兜住坏配置**：`core.py` 三类会话工具共用一次 `capability_config_for_agent(agent) or CapabilityConfig()`。
+  `capability_config_for_agent` 在三种情况下返回 None：没有读权限、路径是目录、内容有非法值（决策设置校验抛 ValueError）。
+  原注释"只有读不了才 None"不准确，已更正。
+  - `test_session_capability_unreadable_config.py` 改成**真构造 `SimpleAgent`**（ae 复审）：三种坏配置下构造不崩，
+    注册的会话工具与没有配置文件时相同（非空）；没有读权限那一例在 root 下 skip。
+  - 变异：去掉 `core.py` 的兜底 → 三例在构造时报 `AttributeError: 'NoneType' object has no attribute 'session_messaging_admin_enabled'`。
+- **两个提交的验证**（基点 `d2a49818a`）：定向回归按引用会话派活/消息/取消/认领/控制/capability 的测试文件加 9 个全仓守卫与
+  `test_list_owner_sessions_tool.py`：取消与消息唤醒提交上 64 个文件 1476 passed，本提交上 66 个文件 1504 passed；
+  `test_session_task_real_chain.py` 连跑 20 次，每次 14 passed、1 xfailed（main 上已有的"同一对会话连发三条"strict xfail，去重改造时转正）；
+  逐提交 ruff、doc sync、`git diff --check`、clean package 通过；strict code-size 与 `89af6b07a` 逐条比对没有新增
+  （`execute_gateway_conversation_control` 的嵌套从 4 降到 3，严重度标签随之从 soft 变为 high-risk）。
+
 ## 会话派活取消与消息唤醒收尾（2026-09-29，分支 `claude/75-cancel-line-finish`，基于 ae 的门禁提交 `d2a49818a`（main `89af6b07a` 之上）；接手 my-agent-3 的 `my-agent/self-dev-3-cancel-final`）
 
 原分支 8 个提交（`bc3a7a73c`…`50e39eeee`）的最终内容压成两个提交，本条是第一个：取消与消息唤醒。

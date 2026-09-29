@@ -1105,15 +1105,18 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 会话间消息:同一 owner 内的会话可以互发消息(第一期只开给管理员,判定在 conversation.session_messaging)。
     # 关闭时按结构化可用性判定直接不注册,模型工具列表里根本不出现它(不是"调用时才拒绝");
     # 注册在 enable_subagents 门控之前,不因子代理总开关关闭而消失。
-    if session_messaging_tool_visible(agent.home_paths, capability_config_for_agent(agent)):
+    # 配置读不了(无读权限、路径是目录)或有非法值(校验抛 ValueError)时 capability_config_for_agent 返回 None,这里算一次兜到默认实例,
+    # 三处共用:否则主代理构造会直接崩在属性读取上。
+    session_capability_config = capability_config_for_agent(agent) or CapabilityConfig()
+    if session_messaging_tool_visible(agent.home_paths, session_capability_config):
         agent.tools.register(SendSessionMessageTool(agent))
     # 会话间派活:第一期只开给管理员,并单独看派活开关;条件不满足时工具不进 registry。
-    if session_task_tool_visible(agent.home_paths, capability_config_for_agent(agent)):
+    if session_task_tool_visible(agent.home_paths, session_capability_config):
         agent.tools.register(CreateSessionTaskTool(agent))
         agent.tools.register(GetSessionTaskTool(agent))
         agent.tools.register(CancelSessionTaskTool(agent))
     # 列本 owner 会话:只读清单(无正文),给上面两类发送工具选目标;可见性与它们同源,任一管理员开关开着才注册。
-    if list_owner_sessions_tool_visible(agent.home_paths, capability_config_for_agent(agent) or CapabilityConfig()):
+    if list_owner_sessions_tool_visible(agent.home_paths, session_capability_config):
         agent.tools.register(ListOwnerSessionsTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
