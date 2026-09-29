@@ -1042,7 +1042,8 @@ decision_experiment_enabled: false  # 仅实验能力开关；另需宿主显式
 # 失败和超时不算名额（出问题的点位会一直被观察），apply 点位完全不受影响。默认关=现在行为不变。
 decision_observe_sampling_enabled: false
 # observe 不挡回复：开着时，会话里处于观察模式的决策点改在后台问决策模型，回复不用再等它（观察结果照样记日志和用量）；
-# 后台等待上限用下面的 decision_background_timeout_seconds。apply（正式使用）、实验和后台点位不受影响。默认关=现在行为不变。
+# 后台等待上限用下面的 decision_background_timeout_seconds。apply（正式使用）、实验和后台点位不受影响。
+# 默认关：决策的行为与时序不变，只是结果日志每行多一个附加字段 blocking。
 decision_observe_nonblocking_enabled: false
 decision_timeout_seconds: 2.0  # 前台单次等待；必须为有限正秒数
 decision_stage_timeout_seconds: 4.0  # 同一阶段累计等待；必须为有限正秒数

@@ -124,7 +124,7 @@
 
 ## observe 不挡主链路（2026-09-28，分支 `claude/9a-jev-observe-async`，基于 `80b4afed8`）
 
-- **新增** `test_decision_observe_nonblocking.py`（29 例）。链路是原设置 → 决策服务 → 后台执行器 → 真实本地 HTTP → 结果日志与用量账：
+- **新增** `test_decision_observe_nonblocking.py`（首个提交 29 例，复审跟进后 33 例）。链路是原设置 → 决策服务 → 后台执行器 → 真实本地 HTTP → 结果日志与用量账：
   - **主链路先返回**：
     - 本地服务卡住时，decide 立刻拿到 deferred；放行后后台写一行 `blocking=false` 的成功行，用量事件的 source 为 `decision_observe`。
     - 发起 run 的请求与 run 累计容器里都没有这次调用，会话汇总只算一次；在途登记已注销，回合的 live 状态和输出流都没被写。
@@ -159,6 +159,15 @@
   - 补记只认 deferred、丢完成回调、选模型不挂回调；
   - 忙码计入诊断、忙码不记 reach、设置视图恒为阻塞。
 - **定向回归**：77 个文件，1834 passed、0 skipped。范围是全部 decision 测试、Gateway 选模型/采用/停机测试、设置与 YAML 同步测试、TUI 决策菜单，以及扫描全仓源码的护栏（architecture_guardrails、constant_names_unique 等）。新文件另外连跑 5 遍、3 进程并发各跑 1 遍，都全部通过。
+- **复审跟进**（dsh-ae 复审 `ec3732f49` 后的同分支提交）：
+  - 补杀两个存活变异体：
+    - worker 不恢复 runner 身份：新例在完成回调里读 `current_subagent_run_id`，应当为空；
+    - 补记不核对 claim：补记用例参数化加一组 deferred、同一 op、别的 claim，期望仍是 deferred。
+  - 身份快照真拷贝：发起方在请求已发出、尚未返回时改自己的任务属性，后台身份复核仍通过、照常成功。
+  - 停机有界等待：写行被放慢 0.3 秒时，`gateway_process._cancel_active_decisions` 返回前，`stale/host_shutdown` 行已经落盘。
+  - 开关关闭时决策的逻辑与时序不变，但结果日志每行多一个附加字段 `blocking`，所以不再写“逐字不变”。
+  - 变异验证扩到 29 个，全部被抓住。新增的 4 个是：不恢复身份、补记不核对 claim、身份不拷贝、停机不等待。
+  - 定向回归：同样 77 个文件，1838 passed、0 skipped。新文件另外连跑 5 遍、3 进程并发各跑 1 遍，都全部通过。
 
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 

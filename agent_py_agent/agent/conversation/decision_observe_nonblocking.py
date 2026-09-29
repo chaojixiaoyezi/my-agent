@@ -1,7 +1,8 @@
 # LLM: 决策服务“observe 不挡主链路”的唯一后台执行器，只承接 decision_service 判定为非阻塞的调用（普通 thread 范围、
 #   点位有效模式 observe、决策设置 observe_nonblocking_enabled 为真；apply 与实验永不进来）。整个进程只有一个 worker
 #   串行执行，排队中的调用最多 decision_point_limits.OBSERVE_NONBLOCKING_MAX_PENDING 条，满了入队失败、由决策服务记拒绝。
-#   worker 在执行前装入发起时捕获的 runner 身份，执行完恢复；不继承发起回合的取消（令牌检查由决策服务的 send 做）。
+#   worker 在执行前装入发起时捕获的 runner 身份（让原复核在后台线程算出阶段身份），send 返回后立即恢复，之后的写行、结算
+#   与完成回调都在恢复后的上下文里运行；不继承发起回合的取消（令牌检查由决策服务的 send 做）。
 #   每条调用结束后在这里写一行结果日志（blocking=false）、把独立用量范围结算进会话 model_usage，再交回调方的完成回调；
 #   不写发起回合的 live 状态或输出流。改动须同步 decision_service 的 _dispatch_nonblocking 与 test_decision_observe_nonblocking.py。
 # 模块用途: 让 observe 模式的决策调用在后台完成，用户回合不再等待决策模型，同时保证结果日志和用量账都完整。
@@ -132,8 +133,10 @@ def _job_done() -> None:
         _LOCK.notify_all()
 
 
-# LLM: 期限从 worker 真正开始这一条时起算（排队不吃预算）；结果行的耗时同样只算执行部分。写行、结算用量、回调三步
-#   各自隔离异常，任何一步失败都不影响另外两步。
+# LLM: 期限从 worker 真正开始这一条时起算（排队不吃预算）；结果行的耗时同样只算执行部分。三步的异常隔离靠各自的实现：
+#   写行失败由 append_decision_outcome 吞掉记日志，结算失败由 settle_standalone_model_usage 吞掉，回调异常由 _notify 捕获；
+#   万一仍有异常漏出，_run_guarded 记日志并继续下一条。结算在超时那一刻之后执行：worker 里迟到的供应商事实只留在进程内账本，
+#   不再补进 model_usage（有意的边界）。
 # 函数用途: 执行一条后台 observe 调用并完成它的全部落账（写结果行、结算用量、交回完成回调）。
 def _run(job: NonblockingObserve) -> None:
     started = time.monotonic()

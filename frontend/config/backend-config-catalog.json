@@ -1616,7 +1616,7 @@
           {
             "key": "decision_observe_nonblocking_enabled",
             "label": "decision_observe_nonblocking_enabled（decision observe nonblocking enabled）",
-            "description": "observe 不挡回复：开着时，会话里处于观察模式的决策点改在后台问决策模型，回复不用再等它（观察结果照样记日志和用量）； 后台等待上限用下面的 decision_background_timeout_seconds。apply（正式使用）、实验和后台点位不受影响。默认关=现在行为不变。",
+            "description": "observe 不挡回复：开着时，会话里处于观察模式的决策点改在后台问决策模型，回复不用再等它（观察结果照样记日志和用量）； 后台等待上限用下面的 decision_background_timeout_seconds。apply（正式使用）、实验和后台点位不受影响。 默认关：决策的行为与时序不变，只是结果日志每行多一个附加字段 blocking。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,

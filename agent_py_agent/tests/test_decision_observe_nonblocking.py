@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,8 @@ from agent_py_agent.agent.llm_scale import hot_path
 from agent_py_agent.agent.memory_store import MemoryRecord, decision_recall
 from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
 from agent_py_agent.agent.runtime_context import (
+    current_subagent_run_id,
+    current_task_attributes,
     restore_current_subagent_context,
     set_current_subagent_context,
 )
@@ -404,16 +407,74 @@ def test_model_selection_answer_after_the_turn_closed_is_not_written_back(tmp_pa
     assert json.loads(outcomes.splitlines()[-1])["status"] == "success", "结果仍写进决策结果日志"
 
 
-@pytest.mark.parametrize("initial,operation,expected", [
-    ("started", "op-1", "observed"), ("deferred", "op-1", "observed"),
-    ("error", "op-1", "error"), ("deferred", "op-other", "deferred"),
+@pytest.mark.parametrize("case", [
+    ("started", "op-1", "claim-1", "observed"), ("deferred", "op-1", "claim-1", "observed"),
+    ("error", "op-1", "claim-1", "error"), ("deferred", "op-other", "claim-1", "deferred"),
+    ("deferred", "op-1", "claim-other", "deferred"),
 ])
-def test_backfill_only_replaces_started_or_deferred_marker_of_the_same_observation(tmp_path, initial, operation, expected):
+def test_backfill_only_replaces_started_or_deferred_marker_of_the_same_observation(tmp_path, case):
+    initial, operation, claim, expected = case
     fixture = gateway_prepared(tmp_path)
-    seeded = {"operation_id": operation, "claim_id": "claim-1", "status": initial, "adopted": False}
+    seeded = {"operation_id": operation, "claim_id": claim, "status": initial, "adopted": False}
     update_json_file_atomic(fixture.context.request_path,
                             lambda current: {**current, request_binding.MODEL_OBSERVATION_KEY: seeded}, require_existing=True)
     writer = request_binding.GatewayModelObservationWriter(fixture.context, fixture.thread_id, "claim-1", "op-1")
     writer.complete_deferred({"status": "observed", "choice": "candidate-x", "adopted": True})
     assert marker(fixture)["status"] == expected
     assert marker(fixture)["adopted"] is False, "补记永远不授予采用"
+
+
+def test_completion_callback_runs_after_the_runner_identity_is_restored(tmp_path, server):  # noqa: F811
+    host, params, _thread, stage = nonblocking(tmp_path, server)
+    seen = []
+
+    # 函数用途: 在后台 worker 里读当时的 runner 上下文；执行器应已按快照恢复，回调看不到装入的阶段身份。
+    def on_result(outcome):
+        seen.append((outcome.status, current_subagent_run_id(host), current_task_attributes(host),
+                     threading.current_thread().name))
+
+    decision_service.decide(host, params, stage, point="subagent_model", state={"需求": "整理资料"},
+                            questions=questions(), candidates_revision="candidates-1", on_background_result=on_result)
+    assert wait_nonblocking_idle(5)
+    assert seen == [("success", "", None, "decision-observe")], "写行、结算与回调都要在恢复身份之后运行"
+
+
+def test_identity_snapshot_is_a_copy_of_the_caller_task_attributes(tmp_path, server):  # noqa: F811
+    server.block = True
+    host, params, thread, _stage = nonblocking(tmp_path, server)
+    attributes = {"conversation_thread_id": thread.thread_id}
+    params.run_id = ""          # run 身份由 runner 上下文给，避免与参数里的 run 冲突
+    previous = set_current_subagent_context(host, run_id="run-copy", task_attributes=attributes)
+    try:
+        stage = decision_service.begin_decision_stage(host, params, operation_id="batch-copy")
+        assert decide(host, params, stage).status == "deferred"
+    finally:
+        restore_current_subagent_context(host, previous)
+    assert server.entered.wait(1)
+    attributes["conversation_thread_id"] = "thread-changed-by-the-caller"
+    server.release.set()
+    assert wait_nonblocking_idle(5)
+    assert [(row["status"], row["reason"]) for row in rows(host)] == [("success", "")], "发起回合之后改字典不影响后台复核"
+
+
+def test_gateway_shutdown_waits_briefly_for_background_rows(tmp_path, server, monkeypatch):  # noqa: F811
+    from agent_py_agent.agent.conversation import decision_observe_nonblocking as executor
+    from agent_py_agent.cli import gateway_process
+
+    original = executor.append_decision_outcome
+
+    # 函数用途: 把写结果行放慢一点，证明停机收尾真的等了后台执行器，而不是碰巧赶上。
+    def slow_append(agent, row):
+        time.sleep(0.3)
+        original(agent, row)
+
+    monkeypatch.setattr(executor, "append_decision_outcome", slow_append)
+    server.block = True
+    host, params, _thread, stage = nonblocking(tmp_path, server)
+    decide(host, params, stage)
+    assert server.entered.wait(1)
+    started = time.monotonic()
+    gateway_process._cancel_active_decisions(SimpleNamespace(context=SimpleNamespace(agent=host)))
+    assert time.monotonic() - started < gateway_process._NONBLOCKING_DRAIN_SECONDS + 0.5
+    assert [(row["status"], row["reason"]) for row in rows(host)] == [("stale", "host_shutdown")], "返回前结果行已落盘"
+    server.release.set()

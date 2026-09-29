@@ -118,18 +118,24 @@ observe 的建议永远不会被采用，同步等待只会拖慢回复（生产
 - **返回**：`decide` 在冷却检查和在途登记之后，当场返回 `deferred` 占位（`may_apply=False`、`blocking=False`），不写结果行。调用点照原有失败路径保留原方案，例如召回会记 `memory_recall_decision:observe:deferred`。
 - **执行器**：`conversation/decision_observe_nonblocking.py`。进程内只有一个后台 worker，串行执行，排队上限 `OBSERVE_NONBLOCKING_MAX_PENDING=8`。队列满时记 `skipped/observe_nonblocking_busy` 结果行，外加一个 reach 内部码（不计入 reached/called）。
 - **期限**：从 worker 开始执行时起算 `background_timeout_seconds`，不占前台阶段预算，也不受调用方期限约束。结果行里的耗时只算执行部分。
-- **身份与复核**：worker 先装入发起时捕获的 runner 身份（run 取阶段身份），发送前后照原 `_invoke` 复核身份、设置和连接，执行完恢复线程上下文。
+- **身份与复核**：
+  - worker 先装入发起时捕获的 runner 身份：run 取阶段身份，任务属性取拷贝，发起回合之后再改它也不影响后台。
+  - send 返回后立即恢复线程上下文；写行、结算、回调都在恢复之后运行。
+  - 原 `_invoke` 的身份复核在后台线程里因此恒为真，装入身份只是为了它不因线程上下文为空而误判。真正起作用的是设置版本和连接的复核、在途撤销标记，以及发出前检查的回合取消令牌。
 - **用量**：
   - 调用走独立用量范围：request 是 `decision-observe:<uuid>`，run 为空。
   - 完成后经 `settle_standalone_model_usage` 追加一条 source=`decision_observe` 的会话用量事件；run、task 只作归属字段。
   - 这次调用不进发起 run 的累计容器，run 收口时不会重复计；超时照同步口径记 timed_out。
+  - 有意的边界：结算在超时那一刻之后执行，worker 里迟到的供应商事实（比如超时后才回来的用量）只留在进程内账本，不再补进 model_usage。
 - **停止与关闭**：
   - 发出前发起回合已停止（取消令牌已取消），就不再发送，记 `stale/turn_cancelled`。
   - 已发出的请求不跟随回合停止，让它自然结束并照常记账。
   - 设置撤销、宿主关闭沿原在途登记取消；排队中的调用在发送前复核时作废，不建调用记录。
+  - Gateway 停机：`_cancel_active_decisions` 取消之后，经 `wait_nonblocking_idle` 最多等 2 秒（`_NONBLOCKING_DRAIN_SECONDS`），让后台执行器写完结果行和用量；等不到也照常收尾。
 - **资源键**：后台调用用 `decision-observe` 命名空间的有界资源键。同会话、同连接的同步调用不会因为它还在途而被拒成 admission_busy。
 - **选模型观察**：请求记录里的观察标记先记 `deferred`。后台完成时，如果回合仍在活动事务内，就经 `GatewayModelObservationWriter.complete_deferred` 把建议编号和状态补记进同一个标记（只接受 started/deferred，`adopted` 恒为 false）。回合已结束则不回写，结果只留在决策结果日志里。
 - **设置视图**：这类点位标 `blocking=false`，`max_request_seconds` 和 `limiting_field` 显示后台单次等待。
+- **开关关闭时**：决策的逻辑与时序不变，但结果日志每行会多一个附加字段 `blocking`（值为 true）。
 
 ## 4. 最小结构和唯一执行入口
 

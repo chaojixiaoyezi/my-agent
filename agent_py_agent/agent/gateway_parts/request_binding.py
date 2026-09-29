@@ -283,6 +283,7 @@ class GatewayModelObservationWriter:
     # LLM: 只供 observe 转后台执行后的完成回调（决策执行器的 worker 线程）调用：同 op/claim 的标记仍是 started（发起线程的
     #   finish 还没写）或 deferred 时才合并最终建议编号与状态，之后 finish 见状态已变就不再覆盖；其它终态或别的 attempt 不动。
     #   走原 active-turn 事务：回合已结束时原样抛 InterruptedError，由调用方放弃回写，不影响已结束的回合。
+    #   同时更新内存副本（单键赋值），让同一请求里之后读内存的代码看到同一事实；请求收口读的是盘上文件，不靠内存副本。
     # 函数用途: 把后台完成的模型建议补记到原请求的观察标记，替换先写下的 deferred 状态。
     def complete_deferred(self, result: dict) -> None:
         # LLM: 原 JSON 锁内比较 op/claim/status；adopted 固定为 false，原始回复、配置、密钥不进入标记。
@@ -323,7 +324,8 @@ class GatewayModelObservationWriter:
 
 # LLM: 只在本请求记录里追加能力推荐的结构化观测（码、版本、名称与计数，无模型正文），最多保留最近 8 条，不改任何已有键；
 #   与模型观察同一 active-turn 事务和原子写，回合已终结时按原语义抛 InterruptedError；其它写盘异常只放弃这一条，不影响业务。
-#   内存中的 request 同步更新，避免之后整体回写请求记录时丢掉这个键。
+#   内存中的 request 同步更新，让同一请求里之后读内存副本的代码看到同一事实；已核实请求收口（terminalize）读盘上文件，
+#   Gateway 没有用内存副本整体回写请求记录的路径。
 # 函数用途: 把一次能力推荐（是否采用、为何保留、短名单与延迟名单）写进 Gateway 请求记录，供真实样本核对。
 def record_capability_presentation_observation(context: object, observation: dict) -> None:
     from ..common.cancellation import ToolCancelled

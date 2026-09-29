@@ -516,14 +516,22 @@ def _settle_interrupted_model_calls(request: GatewayRunCleanupRequest, *, drain_
     return len(interrupted)
 
 
-# LLM: 决策线停机第一步：只取消本进程内登记的在途决策句柄，让等待中的可选增强立即回到原方案；不读写任何持久状态。
-#   决策模块出错只记异常类型事件 gateway_decision_cancel_failed（不记异常正文），不能中断收尾。
-# 函数用途: Gateway 停止时取消本进程在途的决策请求。
+# 停机时等 observe 后台执行器落账的上限（秒）：被取消的调用不再等网络（排队的不发送，在途的立即停等），正常几毫秒就写完；
+# 这个等待只是防止丢掉最后一行结果和用量。
+_NONBLOCKING_DRAIN_SECONDS = 2.0
+
+
+# LLM: 决策线停机第一步：只取消本进程内登记的在途决策句柄，让等待中的可选增强立即回到原方案；随后最多等
+#   _NONBLOCKING_DRAIN_SECONDS 让 observe 后台执行器把刚被取消的调用写完结果行与用量（被取消的调用不再等网络，通常几毫秒），
+#   等不到也照常收尾。决策模块出错只记异常类型事件 gateway_decision_cancel_failed（不记异常正文），不能中断收尾。
+# 函数用途: Gateway 停止时取消本进程在途的决策请求，并有界等待后台 observe 调用落账。
 def _cancel_active_decisions(request: GatewayRunCleanupRequest) -> None:
     try:
+        from ..agent.conversation.decision_observe_nonblocking import wait_nonblocking_idle
         from ..agent.conversation.decision_policy import cancel_active_decisions_for_shutdown
 
         cancel_active_decisions_for_shutdown()
+        wait_nonblocking_idle(_NONBLOCKING_DRAIN_SECONDS)
     except Exception as exc:  # noqa: BLE001 - 停止收尾不能因可选决策模块出错而中断
         log_gateway_event(request.context.agent, "gateway_decision_cancel_failed", {"error_type": type(exc).__name__})
 
@@ -541,8 +549,9 @@ def _flush_decision_reach_counts(request: GatewayRunCleanupRequest) -> None:
         log_gateway_event(request.context.agent, "gateway_decision_reach_flush_failed", {"error_type": type(exc).__name__})
 
 
-# LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策，再停 HTTP 与收三条循环，排空窗口后把仍在途的模型调用
-#   记成被停机中断（只记结构化事实，不猜用量），再把决策点到达计数的尾巴落盘，最后清 pid/停止请求并写心跳与收尾事件；
+# LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策（并最多等 2 秒让 observe 后台执行器落账），再停 HTTP 与
+#   收三条循环，排空窗口后把仍在途的模型调用记成被停机中断（只记结构化事实，不猜用量），再把决策点到达计数的尾巴落盘，
+#   最后清 pid/停止请求并写心跳与收尾事件；
 #   决策取消、账本结清或计数落盘出错只记异常类型事件，不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py、
 #   test_gateway_model_call_shutdown_settlement.py 与 Gateway 停止相关回归。
 # 函数用途: Gateway 停止时收尾三条循环、结清在途模型调用、清理 pid/停止请求并写出是否完整排空的状态。

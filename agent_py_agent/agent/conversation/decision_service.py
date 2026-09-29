@@ -467,9 +467,10 @@ class _Prepared:
     token: str
 
 
-# LLM: 在后台执行器的 worker 线程里运行，发起时的身份上下文已由执行器装好。发出前回合已停止（捕获的取消令牌已取消）、
-#   设置撤销或宿主关闭已标记，都直接返回 stale 结果，不发送、不建调用记录；之后沿原 _invoke 发送与复核。已发出的请求不跟随
-#   回合停止，自然结束并照常记账。任何异常都映射成保留原方案的结果，不向执行器抛出。
+# LLM: 在后台执行器的 worker 线程里运行，执行器已按阶段身份装好 runner 上下文，所以原 _invoke 里 _stale 的身份复核在这里恒为真，
+#   装入只是为了它不因线程上下文为空而误判；真正起作用的是：发出前回合已停止（捕获的取消令牌已取消）、设置撤销或宿主关闭已标记
+#   就直接返回 stale 结果，不发送、不建调用记录，以及 _stale 对设置版本与连接的复核。已发出的请求不跟随回合停止，自然结束并照常
+#   记账。任何异常都映射成保留原方案的结果，不向执行器抛出。
 # 类用途: 后台执行一次已登记 observe 调用的可调用对象，只收绝对期限。
 @dataclass(frozen=True)
 class _NonblockingSend:
@@ -496,8 +497,15 @@ class _NonblockingSend:
             return DecisionOutcome("observe", "error", reason="enhancement_failed")
 
 
-# LLM: 发起线程在这里捕获身份（run 取阶段身份，attempt 与任务属性取当前 runner）和回合取消令牌。后台调用走独立用量范围
-#   （request=decision-observe:*、run 为空），不并入任何 run 的累计容器；会话/任务身份字段原样保留，供 worker 复核身份。
+# LLM: 只拷贝一层字典（任务属性里只读结构化值）；不是字典时按“没有任务属性”处理，与 current_task_attributes 的口径一致。
+# 函数用途: 给后台调用做一份任务属性快照，避免与发起回合共用同一个可变字典。
+def _attributes_copy(attributes: object) -> dict | None:
+    return dict(attributes) if isinstance(attributes, dict) else None
+
+
+# LLM: 发起线程在这里捕获身份（run 取阶段身份，attempt 取当前 runner，任务属性取当前 runner 的拷贝，发起回合之后改它不影响后台）
+#   和回合取消令牌。后台调用走独立用量范围（request=decision-observe:*、run 为空），不并入任何 run 的累计容器；
+#   会话/任务身份字段原样保留，让原 _identity 在后台线程算出与阶段相同的身份。
 #   预算取本次路由快照里的 background_timeout_seconds（后台单次等待，同样没人在等）。入队失败当场注销登记、记 reach 内部码，
 #   返回 skipped/observe_nonblocking_busy（decide 照常写结果行）；入队成功返回 deferred 占位（不写行、不可采用）。
 # 函数用途: 把已登记的 observe 调用交给后台执行器，立即返回，不等待决策模型。
@@ -513,7 +521,7 @@ def _dispatch_nonblocking(params: object, call: _DecideCall, prepared: _Prepared
         usage_request_id=usage_request_id, send=_NonblockingSend(call_params, stage, prepared, current_cancellation_token()),
         release=lambda: unregister_active(prepared.token, active),
         identity={"run_id": stage.run_id, "attempt_id": current_subagent_attempt_id(agent),
-                  "task_attributes": current_task_attributes(agent)},
+                  "task_attributes": _attributes_copy(current_task_attributes(agent))},
         on_result=call.on_background_result,
     )
     if enqueue_nonblocking_observe(job):

@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+停机时等 observe 后台执行器落账（分支 `claude/9a-jev-observe-async`，2026-09-28，dsh-ae 复审跟进）：
+- `cli/gateway_process._cancel_active_decisions` 在 `cancel_active_decisions_for_shutdown` 之后，经 `wait_nonblocking_idle` 最多等 `_NONBLOCKING_DRAIN_SECONDS`（2 秒）。
+- 被取消的调用不再等网络（排队中的不发送，在途的立即停止等待），通常几毫秒就写完；这一步只是防止丢掉最后一行结果和一条用量，等不到也照常收尾。
+- 回归见 `test_decision_observe_nonblocking.py::test_gateway_shutdown_waits_briefly_for_background_rows`（写行被放慢时，返回前结果行已落盘）。
+- 另核实：请求收口（terminalize）读的是盘上文件，Gateway 没有用内存副本整体回写请求记录的路径。`record_capability_presentation_observation` 与 `complete_deferred` 里同步更新内存副本，只是让同一请求里之后读内存的代码看到同一事实，注释已改正。
+
 选模型观察转后台后的补记（分支 `claude/9a-jev-observe-async`，2026-09-28）：
 - 决策设置 `observe_nonblocking_enabled` 打开时，选模型的 observe 当场返回 deferred；请求记录的观察标记先记 `deferred`，主模型不再等 Jev。
 - 后台完成后，由 `GatewayModelObservation._complete_deferred` 经新增的 `GatewayModelObservationWriter.complete_deferred` 补记建议编号：
