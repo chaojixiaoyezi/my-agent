@@ -2729,6 +2729,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="已请求关闭终端会话，但进程树退出没有确认，会话仍保留；先查看会话状态，再决定是否再次关闭。",
     ),
+    "SCHEDULED_TASK_FOLLOW_UP_UNREADABLE": ErrorContract(
+        code="SCHEDULED_TASK_FOLLOW_UP_UNREADABLE",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="定时执行停在等待状态，判断后续工作所需的记录（唤醒、进度策略、后台命令或子代理）长期读不出来，"
+                      "这一轮已按受阻结算；先检查并修复损坏的记录，再决定是否重做这一轮。",
+    ),
     # 以下三个是后台 run_command 结果未知时的具体原因（reported_error_code），错误码本身仍是 TOOL_OPERATION_OUTCOME_UNKNOWN；
     # 单列是为了 unknown_reason 与排障能说清卡在哪一步，不改变“禁止自动重做”的边界。
     "BACKGROUND_SESSION_ATTACH_UNCONFIRMED": ErrorContract(

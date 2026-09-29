@@ -56,6 +56,9 @@ owner 维护顺带回收正文哈希缓存的孤儿键（分支 `my-agent/self-d
 其它为 `SCHEDULED_TASK_UNFINISHED`），job 下一周期照常派发。`blocked` 进入任务终态映射；存量 waiting 停满 600 秒且无后续工作时由对账按
 `SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 结算。报告新增 `runtime_status/runtime_reason`，来自 `AgentRunResult`。
 设计见 `DESIGN_LEDGER.md` 同名条目，回归见 `test_scheduler_waiting_deadlock.py`、`test_tool_unknown_reason_preservation.py`。
+复审修复 A：后续工作某一项读不出来时先按记录归属限定，剩下的继续等并按 run 节流打 `scheduler_follow_up_unreadable` 告警，
+停满宽限期 6 倍按 `SCHEDULED_TASK_FOLLOW_UP_UNREADABLE` 结算；`_finish_scheduler_wake_claim` 收口没成（CAS 失败只释放租约）时退避 30 秒。
+管理员的人工出口是 `/endtask`。
 
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。

@@ -132,8 +132,8 @@ class SchedulerRunHeartbeat:
 class SchedulerService:
     """Reserve, publish, claim, and close scheduler runs using durable facts only."""
 
-    # LLM: follow_up_facts(thread_id, task_id, ignore_wake_ids) 由组合根注入（conversation.task_follow_up），
-    #   供 active_run_closeout 判定；未注入时按"读不到后续工作事实"处理，一律保持原来的 waiting 行为（fail closed）。
+    # LLM: follow_up_facts(thread_id, task_id, ignore_wake_ids) -> FollowUpFacts 由组合根注入（conversation.task_follow_up），
+    #   供 active_run_closeout 判定；未注入时一律保持原来的 waiting 行为（fail closed），不走限期结算。
     # 函数用途: 绑定调度账本、会话存储和两个只读查询。
     def __init__(
         self,
@@ -141,7 +141,7 @@ class SchedulerService:
         *,
         conversation_store: Any,
         skill_snapshot_provider: Callable[[], Any] | None = None,
-        follow_up_facts: Callable[[str, str, Iterable[str]], tuple[str, ...]] | None = None,
+        follow_up_facts: Callable[[str, str, Iterable[str]], Any] | None = None,
     ) -> None:
         self.repository = repository
         self.conversation_store = conversation_store

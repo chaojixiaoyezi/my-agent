@@ -7,6 +7,7 @@ job 下一周期照常派发；有后续工作照常 waiting（对照）；存�
 """
 from __future__ import annotations
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -22,11 +23,13 @@ from agent_py_agent.agent.conversation.task_follow_up import (
     FOLLOW_UP_PENDING_GUIDANCE,
     FOLLOW_UP_PENDING_PROCESS,
     FOLLOW_UP_PENDING_WAKES,
-    FOLLOW_UP_UNREADABLE,
+    FOLLOW_UP_TASK_UNAVAILABLE,
+    FollowUpFacts,
     task_follow_up_facts,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.scheduler.active_run_closeout import (
+    SCHEDULED_TASK_FOLLOW_UP_UNREADABLE,
     SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN,
     SCHEDULED_TASK_UNFINISHED,
     SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP,
@@ -39,8 +42,11 @@ from agent_py_agent.agent.scheduler.service import (
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests.test_scheduler_runtime import _create_job
 
+BROKEN_REPORT = {"category": "data_corruption", "error_type": "DataCorruptionError", "path": ""}
+BROKEN_CODE = "data_corruption:DataCorruptionError"
 NEXT_PERIOD = 1_600  # every 600 s，锚点 1000：预约第一次时 next_run_at 已推进到 1600
 GRACE = 600.0
+UNREADABLE_DEADLINE = 6 * GRACE
 
 
 def _setup(tmp_path):
@@ -61,12 +67,13 @@ def _setup(tmp_path):
 
 def _finish(agent, thread, claim, **fields):
     wake_id = fields.pop("wake_id", "wake-diag")
+    scheduler = fields.pop("scheduler", None) or SimpleNamespace(scheduler_service=agent.scheduler_service,
+                                                                 _wake_retry_after={})
     report = BackgroundMainAgentReport(
         thread_id=thread.thread_id, task_id=claim.run_id, reason="scheduled_job_due", response="本轮停下",
         route_channel="internal", route_target="", created_at=1_003, wake_handled=True, task_status="active",
         **fields,
     )
-    scheduler = SimpleNamespace(scheduler_service=agent.scheduler_service, _wake_retry_after={})
     returned = _finish_scheduler_wake_claim(scheduler, SimpleNamespace(wake_signal_id=wake_id), report,
                                             claim=claim, now=1_003)
     return report, returned
@@ -145,11 +152,22 @@ class TestCloseActiveRun:
             raise OSError("task table unreadable")
 
         monkeypatch.setattr(store.tasks, "update_status", broken)
+        scheduler = SimpleNamespace(scheduler_service=agent.scheduler_service, _wake_retry_after={})
         _report, returned = _finish(agent, thread, claim, runtime_status="unfinished",
-                                    runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+                                    runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN", scheduler=scheduler)
         assert returned is None
         assert _history(agent) == [] and pending_host_notices(store, thread.thread_id) == ()
-        assert agent.scheduler_repository.get_active_run(claim.run_id)["claim_id"] == ""
+        run = agent.scheduler_repository.get_active_run(claim.run_id)
+        assert (run["status"], run["claim_id"]) == ("queued", "")
+        # 复审 R2：释放后必须和其它释放分支一样退避 30 秒，否则磁盘满时每拍都会重新领取、再跑一整片模型。
+        assert scheduler._wake_retry_after == {"wake-diag": 1_003 + 30.0}
+
+    def test_a_successful_close_sets_no_backoff(self, tmp_path):
+        agent, _store, thread, claim = _setup(tmp_path)
+        scheduler = SimpleNamespace(scheduler_service=agent.scheduler_service, _wake_retry_after={})
+        _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN",
+                scheduler=scheduler)
+        assert scheduler._wake_retry_after == {}
 
     def test_service_without_follow_up_query_fails_closed_to_waiting(self, tmp_path):
         agent, store, thread, claim = _setup(tmp_path)
@@ -157,6 +175,75 @@ class TestCloseActiveRun:
         _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
         assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
         assert store.tasks.load(claim.run_id).status == "active"
+
+
+# 复审 R1：后续工作事实读不出来时不能永远 waiting。坏记录能归属到别的任务就不计入；归属不明的按读不出处理，
+# 先继续等，停满宽限期的 6 倍才结算为 SCHEDULED_TASK_FOLLOW_UP_UNREADABLE。
+class TestUnreadableFollowUp:
+    def _corrupt_wake(self, store, content="{truncated"):
+        bad = store.storage.wake_queue_dir / "normal" / "wake-of-another-thread.json"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text(content, encoding="utf-8")
+
+    def test_an_unattributable_corrupt_wake_waits_then_settles_at_six_grace_periods(self, tmp_path):
+        agent, store, thread, claim = _setup(tmp_path)
+        self._corrupt_wake(store)
+        _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+        waiting = agent.scheduler_repository.get_active_run(claim.run_id)
+        assert waiting["status"] == "waiting" and store.tasks.load(claim.run_id).status == "active"
+        since = float(waiting["waiting_since"])
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + UNREADABLE_DEADLINE - 1) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + UNREADABLE_DEADLINE) is not None
+        [row] = _history(agent)
+        assert (row["status"], row["error_code"]) == ("failed", SCHEDULED_TASK_FOLLOW_UP_UNREADABLE)
+        assert store.tasks.load(claim.run_id).status == "blocked"
+        assert pending_host_notices(store, thread.thread_id)[0].code == SCHEDULED_TASK_FOLLOW_UP_UNREADABLE
+        assert len(agent.scheduler_repository.reserve_due_runs(now=NEXT_PERIOD)) == 1
+
+    def test_a_corrupt_wake_of_another_task_does_not_hold_this_task(self, tmp_path):
+        agent, store, thread, claim = _setup(tmp_path)
+        self._corrupt_wake(store, '{"root_task_id": "another-task", "thread_id": "t", "wake_signal_id": "w", "created_at": "x"}')
+        _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+        [row] = _history(agent)
+        assert (row["status"], row["error_code"]) == ("failed", SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN)
+
+    def test_a_real_follow_up_still_wins_over_an_unreadable_item(self, tmp_path):
+        agent, store, thread, claim = _setup(tmp_path)
+        self._corrupt_wake(store)
+        _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+        since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
+        store.goals.create({"thread_id": thread.thread_id, "task_id": claim.run_id, "objective": "持续推进"})
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 10 * UNREADABLE_DEADLINE) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+
+    def test_unreadable_items_are_logged_with_their_codes_once_per_interval(self, tmp_path, monkeypatch, caplog):
+        from agent_py_agent.agent.scheduler import active_run_closeout
+
+        monkeypatch.setattr(active_run_closeout, "_unreadable_warned_at", {})
+        agent, store, thread, claim = _setup(tmp_path)
+        self._corrupt_wake(store)
+        caplog.set_level("WARNING", logger=active_run_closeout.__name__)
+        _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+        since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
+        logged = []
+        for offset in (GRACE, GRACE + 1, GRACE + 2, 2 * GRACE + 1):
+            agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + offset)
+            logged.append(len([r for r in caplog.records if getattr(r, "event", "") == "scheduler_follow_up_unreadable"]))
+        # 收口时一条；满宽限期的对账再一条；之后同一节流窗口里的两次不打；过了窗口再一条。
+        assert logged == [2, 2, 2, 3]
+        records = [r for r in caplog.records if getattr(r, "event", "") == "scheduler_follow_up_unreadable"]
+        assert {record.run_id for record in records} == {claim.run_id}
+        assert records[0].unreadable == [{"item": FOLLOW_UP_PENDING_WAKES, "error_code": "data_parse:JSONDecodeError"}]
+
+
+def test_follow_up_unreadable_code_is_registered_for_manual_review():
+    from agent_py_agent.agent.contracts.error_taxonomy import ERROR_CONTRACTS
+    from agent_py_agent.agent.contracts.recovery import RecoveryAction
+
+    contract = ERROR_CONTRACTS[SCHEDULED_TASK_FOLLOW_UP_UNREADABLE]
+    assert (contract.code, contract.retryable) == (SCHEDULED_TASK_FOLLOW_UP_UNREADABLE, False)
+    assert contract.recommended_action == RecoveryAction.MANUAL_REVIEW.value
 
 
 class TestStaleWaitingExit:
@@ -216,71 +303,136 @@ def _fact_agent(tmp_path, *, runs=(), statuses=None):
 class TestFollowUpFacts:
     def test_a_quiet_task_has_no_facts(self, tmp_path):
         agent, _store, thread = _fact_agent(tmp_path)
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == ()
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts()
 
     def test_active_goal_counts_but_a_blocked_goal_does_not(self, tmp_path):
         agent, store, thread = _fact_agent(tmp_path)
         goal = store.goals.create({"thread_id": thread.thread_id, "task_id": "task-1", "objective": "持续推进"})
-        assert FOLLOW_UP_ACTIVE_GOAL in task_follow_up_facts(agent, thread.thread_id, "task-1")
+        assert FOLLOW_UP_ACTIVE_GOAL in task_follow_up_facts(agent, thread.thread_id, "task-1").present
         store.goals.update({"thread_id": thread.thread_id, "goal_id": goal.goal_id, "status": "blocked"})
-        assert FOLLOW_UP_ACTIVE_GOAL not in task_follow_up_facts(agent, thread.thread_id, "task-1")
+        assert FOLLOW_UP_ACTIVE_GOAL not in task_follow_up_facts(agent, thread.thread_id, "task-1").present
 
     def test_pending_guidance_for_the_task_counts(self, tmp_path):
         agent, store, thread = _fact_agent(tmp_path)
         store.guidance.append({"target_type": "task", "target_id": "task-1", "message": "继续", "now": 2.0})
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == (FOLLOW_UP_PENDING_GUIDANCE,)
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts((FOLLOW_UP_PENDING_GUIDANCE,))
 
     def test_open_subagents_count_but_ended_ones_do_not(self, tmp_path):
         agent, _store, thread = _fact_agent(tmp_path, runs=("child-1",))
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == (FOLLOW_UP_OPEN_SUBAGENTS,)
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts((FOLLOW_UP_OPEN_SUBAGENTS,))
         ended, _store2, thread2 = _fact_agent(tmp_path / "ended", runs=("child-1",), statuses={"child-1": "DONE"})
-        assert task_follow_up_facts(ended, thread2.thread_id, "task-1") == ()
+        assert task_follow_up_facts(ended, thread2.thread_id, "task-1") == FollowUpFacts()
 
     def test_pending_wakes_count_except_the_trigger_and_ignored_ids(self, tmp_path):
         agent, store, thread = _fact_agent(tmp_path)
         trigger = store.wakes.raise_signal({"thread_id": thread.thread_id, "root_task_id": "task-1",
                                             "reason": "scheduled_job_due", "now": 2.0})
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == ()
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts()
         lifecycle = store.wakes.raise_signal({"thread_id": thread.thread_id, "root_task_id": "task-1",
                                               "reason": "managed_process_exited", "now": 3.0})
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == (FOLLOW_UP_PENDING_WAKES,)
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts((FOLLOW_UP_PENDING_WAKES,))
         ignored = (lifecycle.wake_signal_id, trigger.wake_signal_id)
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1", ignored) == ()
-        assert task_follow_up_facts(agent, thread.thread_id, "task-2") == ()
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1", ignored) == FollowUpFacts()
+        assert task_follow_up_facts(agent, thread.thread_id, "task-2") == FollowUpFacts()
 
     def test_pending_process_completion_counts(self, tmp_path, monkeypatch):
         from agent_py_agent.agent.conversation import process_events
 
         agent, _store, thread = _fact_agent(tmp_path)
         monkeypatch.setattr(process_events, "task_has_pending_process_completion", lambda _agent, task: task == "task-1")
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == (FOLLOW_UP_PENDING_PROCESS,)
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts((FOLLOW_UP_PENDING_PROCESS,))
 
     def test_enabled_progress_policy_counts(self, tmp_path):
         agent, store, thread = _fact_agent(tmp_path)
         store.progress.create({"thread_id": thread.thread_id, "task_id": "task-1", "interval_seconds": 60,
                                "route_channel": "internal", "route_target": "t", "now": 2.0})
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == (FOLLOW_UP_ENABLED_POLICY,)
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts((FOLLOW_UP_ENABLED_POLICY,))
 
     def test_a_policy_for_another_task_does_not_count(self, tmp_path):
         agent, store, thread = _fact_agent(tmp_path)
         store.progress.create({"thread_id": thread.thread_id, "task_id": "task-2", "interval_seconds": 60,
                                "route_channel": "internal", "route_target": "t", "now": 2.0})
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == ()
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts()
 
     def test_unreadable_progress_policies_fail_closed(self, tmp_path, monkeypatch):
         agent, store, thread = _fact_agent(tmp_path)
-        monkeypatch.setattr(store.progress, "list_report", lambda **_kwargs: ([], [{"code": "BROKEN"}]))
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == (FOLLOW_UP_UNREADABLE,)
+        monkeypatch.setattr(store.progress, "list_report", lambda **_kwargs: ([], [BROKEN_REPORT]))
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts(
+            unreadable=((FOLLOW_UP_ENABLED_POLICY, BROKEN_CODE),))
 
     def test_an_unreadable_source_fails_closed(self, tmp_path, monkeypatch):
         agent, store, thread = _fact_agent(tmp_path)
-        monkeypatch.setattr(store.wakes, "pending_report", lambda **_kwargs: ([], [{"code": "BROKEN"}]))
-        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == (FOLLOW_UP_UNREADABLE,)
+        monkeypatch.setattr(store.wakes, "pending_report", lambda **_kwargs: ([], [BROKEN_REPORT]))
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts(
+            unreadable=((FOLLOW_UP_PENDING_WAKES, BROKEN_CODE),))
+
+    def test_a_failing_subagent_read_is_unreadable_not_an_open_subagent(self, tmp_path):
+        agent, _store, thread = _fact_agent(tmp_path, runs=("child-1",))
+
+        # 函数用途: 模拟子代理目录整体读不出来。
+        def broken():
+            raise OSError("subagent workspace unreadable")
+
+        agent.subagents = SimpleNamespace(list_runs=broken)
+        facts = task_follow_up_facts(agent, thread.thread_id, "task-1")
+        assert facts.present == () and facts.unreadable[0][0] == FOLLOW_UP_OPEN_SUBAGENTS
+        assert facts.unreadable[0][1].endswith(":OSError")
+
+    # 拆出会抛错的版本后，会话任务收尾用的原判据行为不变：读失败仍 fail closed 当成还有子代理。
+    def test_task_closeout_check_still_fails_closed_while_the_strict_one_raises(self, tmp_path):
+        from agent_py_agent.agent.conversation.task_promotion import (
+            _conversation_task_has_open_subagents,
+            conversation_task_open_subagents_or_raise,
+        )
+
+        agent, _store, _thread = _fact_agent(tmp_path, runs=("child-1",))
+
+        # 函数用途: 模拟子代理目录整体读不出来。
+        def broken():
+            raise OSError("subagent workspace unreadable")
+
+        agent.subagents = SimpleNamespace(list_runs=broken)
+        assert _conversation_task_has_open_subagents(agent, "task-1") is True
+        with pytest.raises(OSError):
+            conversation_task_open_subagents_or_raise(agent, "task-1")
+
+    def test_one_unreadable_item_does_not_hide_the_others(self, tmp_path, monkeypatch):
+        agent, store, thread = _fact_agent(tmp_path)
+        store.guidance.append({"target_type": "task", "target_id": "task-1", "message": "继续", "now": 2.0})
+        monkeypatch.setattr(store.wakes, "pending_report", lambda **_kwargs: ([], [BROKEN_REPORT]))
+        assert task_follow_up_facts(agent, thread.thread_id, "task-1") == FollowUpFacts(
+            (FOLLOW_UP_PENDING_GUIDANCE,), ((FOLLOW_UP_PENDING_WAKES, BROKEN_CODE),))
 
     def test_missing_store_or_task_fails_closed(self, tmp_path):
-        assert task_follow_up_facts(SimpleNamespace(), "t", "task-1") == (FOLLOW_UP_UNREADABLE,)
+        missing = FollowUpFacts(unreadable=((FOLLOW_UP_TASK_UNAVAILABLE, "state:missing_store_or_task"),))
+        assert task_follow_up_facts(SimpleNamespace(), "t", "task-1") == missing
         agent, _store, thread = _fact_agent(tmp_path)
-        assert task_follow_up_facts(agent, thread.thread_id, " ") == (FOLLOW_UP_UNREADABLE,)
+        assert task_follow_up_facts(agent, thread.thread_id, " ") == missing
+
+
+# 唤醒、进度策略读的是 owner 全量数据：坏记录能解析出属于别的任务就不计入，解析不出或属于本任务的仍记为读不出。
+class TestUnreadableScoping:
+    @pytest.mark.parametrize(("content", "counted"), [
+        ("{truncated", True),
+        ('{"root_task_id": "task-1", "thread_id": "t", "wake_signal_id": "w", "created_at": "x"}', True),
+        ('{"root_task_id": "another-task", "thread_id": "t", "wake_signal_id": "w", "created_at": "x"}', False),
+    ], ids=["unparseable", "this-task", "another-task"])
+    def test_corrupt_wake_counts_only_when_it_may_belong_to_the_task(self, tmp_path, content, counted):
+        agent, store, thread = _fact_agent(tmp_path)
+        bad = store.storage.wake_queue_dir / "normal" / "wake-broken.json"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text(content, encoding="utf-8")
+        facts = task_follow_up_facts(agent, thread.thread_id, "task-1")
+        assert [item for item, _code in facts.unreadable] == ([FOLLOW_UP_PENDING_WAKES] if counted else [])
+
+    @pytest.mark.parametrize(("task_id", "counted"), [("task-1", True), ("another-task", False)])
+    def test_corrupt_policy_counts_only_when_it_may_belong_to_the_task(self, tmp_path, task_id, counted):
+        agent, store, thread = _fact_agent(tmp_path)
+        bad = store.storage.policies_dir / "policy-broken.json"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text(json.dumps({"task_id": task_id, "next_due_at": "x"}), encoding="utf-8")
+        facts = task_follow_up_facts(agent, thread.thread_id, "task-1")
+        assert [item for item, _code in facts.unreadable] == ([FOLLOW_UP_ENABLED_POLICY] if counted else [])
 
 
 def test_host_notice_merges_per_job_so_repeated_failures_do_not_pile_up(tmp_path):
@@ -370,6 +522,31 @@ class TestPendingProcessCompletion:
         other = SimpleNamespace(conversation_store=ConversationStore(tmp_path / "owner" / "other-conversations"),
                                 home_paths=agent.home_paths, config=agent.config)
         assert task_has_pending_process_completion(other, params.task_id) is False
+
+    # 坏的后台命令记录：能解析出不属于本任务（没有 completion_target，或 target 指向别的任务/会话存储）就不计入。
+    @pytest.mark.parametrize(("record", "raises"), [
+        ("{truncated", True),
+        ({"completion_target": {"task_id": "task-a"}, "schema": "broken"}, True),
+        ({"completion_target": {"task_id": "another-task"}, "schema": "broken"}, False),
+        ({"completion_target": {"task_id": "task-a", "store_root": "/elsewhere"}, "schema": "broken"}, False),
+        ({"schema": "broken"}, False),
+    ], ids=["unparseable", "this-task", "another-task", "another-store", "no-target"])
+    def test_corrupt_records_count_only_when_they_may_belong_to_the_task(self, tmp_path, record, raises):
+        from agent_py_agent.agent.conversation.process_events import (
+            task_has_pending_process_completion,
+        )
+        from agent_py_agent.agent.tooling.process_registry import ProcessSessionAuthorityError
+        from agent_py_agent.tests.test_process_completion_events import _fixture
+
+        agent, params, authority = _fixture(tmp_path)
+        bad = authority.root / "bg-broken.json"
+        bad.write_text(record if isinstance(record, str) else json.dumps(record), encoding="utf-8")
+        assert authority.list_records()[1], "fixture must actually produce a read error"
+        if raises:
+            with pytest.raises(ProcessSessionAuthorityError):
+                task_has_pending_process_completion(agent, params.task_id)
+        else:
+            assert task_has_pending_process_completion(agent, params.task_id) is True
 
     def test_unreadable_process_authority_raises_instead_of_reporting_none(self, tmp_path, monkeypatch):
         from agent_py_agent.agent.conversation.process_events import (

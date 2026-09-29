@@ -3901,7 +3901,11 @@ def _finish_scheduler_wake_claim(
         return None
     task_status = str(report.task_status or "").strip().lower()
     if task_status == "active":
-        return report if _close_active_scheduler_run(scheduler, signal, report, claim) is not None else None
+        if _close_active_scheduler_run(scheduler, signal, report, claim) is not None:
+            return report
+        # 收口没成（任务状态 CAS 失败只释放了租约）：和其它释放分支一样退避 30 秒，不能下一拍立刻再跑一整片模型。
+        scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
+        return None
     from ..scheduler.service import scheduler_terminal_status_for_task
 
     terminal_status = scheduler_terminal_status_for_task(task_status)

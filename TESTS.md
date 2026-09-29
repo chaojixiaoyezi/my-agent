@@ -646,6 +646,16 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
 - **变异**（`PYTHONDONTWRITEBYTECODE=1`、每个变异独立 pycache 前缀，跑完逐字节还原）：64 个，首轮 59 个被抓住；补了进度策略读失败/跨任务、后台命令跨会话存储、取码顺序两组测试后，5 个存活全部被抓住，64/64；收口逻辑移到 `scheduler/active_run_closeout.py`（`SchedulerService` 触到类长度硬线）后按新位置重跑，仍 64/64。
 - **回归**：46 个相关测试文件（调度、工具操作账本、后台命令、后台运行时、宿主提示、恢复合同及全仓扫描守卫）；`test_recovery_code_policy` 先抓到两个新码未登记进 `ERROR_CONTRACTS`，已补登记。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_scheduler_waiting_deadlock.py agent_py_agent/tests/test_tool_unknown_reason_preservation.py -q`
+- **复审修复 A（be 的 M1、M2）**：
+  - be 的两个反例（坏唤醒文件让收口永远 waiting、CAS 失败后没有退避）在修复后都翻转为失败，已改写成回归：
+    `TestUnreadableFollowUp::test_an_unattributable_corrupt_wake_waits_then_settles_at_six_grace_periods`
+    （6 倍宽限期前 1 秒仍 waiting，满 6 倍结算为 `SCHEDULED_TASK_FOLLOW_UP_UNREADABLE`、任务受阻、提示入队、下一周期派发），
+    `test_unreadable_task_authority_only_releases_the_claim`（释放后 `_wake_retry_after` 为 1003+30）与成功收口不设退避的对照；
+  - 归属限定：坏唤醒（解析不出 / 属于本任务 / 属于别的任务）、坏进度策略（本任务 / 别的任务）、坏后台命令记录
+    （解析不出 / 本任务 / 别的任务 / 别的会话存储 / 没有 completion_target）逐一正反；别的任务的坏唤醒不会拖住本任务收口；
+  - 读不出与确认存在并存时，确认存在的后续工作优先；子代理目录整体读不出记为读不出而不是“有子代理”，原收尾判据仍 fail closed；
+  - 结构化告警 `scheduler_follow_up_unreadable` 带项目与错误码，按 run 每 600 秒最多一条；新结算码登记在错误合同。
+  - 变异：本次 30 + 5 个（含把逐项检查拆成 `_run_check` 后重跑）全部被抓住；原 64 个中锚点仍在的 50 个重跑全部被抓住（其余 14 个的语义由本次新变异覆盖）。
 
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 

@@ -122,7 +122,13 @@
 来源：my-agent-2/4 的 300 秒定时任务永久停摆。一次前台 `run_command` 回报 `TOOL_OPERATION_OUTCOME_UNKNOWN`，回合以 unfinished 结束、会话任务仍是 active；`_finish_scheduler_wake_claim` 无条件 `park_waiting`，而 waiting 只在任务终态时对账、`_job_has_active_run` 又让同一 job 有 run 就不派发，于是死锁。两条操作的 `unknown_reason` 都只剩通用码、受管账本的 `result` 为空，排障也无从下手。
 
 已实现（状态：本地通过，待集成）：
-- 进 waiting 的前提是结构化后续工作事实：`conversation/task_follow_up.task_follow_up_facts` 只读活跃 Goal、指向该任务的待处理 guidance、未终态子代理、指向该任务的待处理唤醒（排除定时触发本身和正在处理的唤醒）、未发完成通知的受管后台命令、启用的进度策略。任何一项读取失败记 `follow_up_unreadable`，按仍有后续工作处理（fail closed）。
+- 进 waiting 的前提是结构化后续工作事实：`conversation/task_follow_up.task_follow_up_facts` 只读活跃 Goal、指向该任务的待处理 guidance、未终态子代理、指向该任务的待处理唤醒（排除定时触发本身和正在处理的唤醒）、未发完成通知的受管后台命令、启用的进度策略。某一项读取失败只记这一项（`FollowUpFacts.unreadable`：项目名 + 结构化错误码），按仍有后续工作处理（fail closed）。
+- 读不出来不能变成永远等（be 复审 M1）：
+  - 唤醒、进度策略、后台命令三项读的是 owner 全量数据，读错误先按记录归属限定：坏记录能解析出属于别的任务（唤醒的 `root_task_id`、策略的 `task_id`、后台命令没有 `completion_target` 或指向别的任务/会话存储）就不计入，解析不出归属的仍计入；
+  - 读不出时按 run 节流（600 秒一条）打结构化告警 `scheduler_follow_up_unreadable`，写明项目和错误码；
+  - 只剩读不出、停满宽限期的 6 倍时，按 `SCHEDULED_TASK_FOLLOW_UP_UNREADABLE`（登记在 `ERROR_CONTRACTS`）结算为受阻并排宿主提示；确认存在的后续工作仍然优先。
+- 收口 CAS 失败、只释放租约时，和其它释放分支一样退避 30 秒（be 复审 M2），避免任务写入持续失败时每拍重新领取、再跑一整片模型。
+- 分工：自动收口只处理“确认没有后续工作”（以及长期读不出）；`/endtask` 是管理员的人工出口，只要求执行树里没有正在跑的执行，不看后续工作事实。两边对同一任务都做 `expected_status=active` 的 CAS，输的一方不写任何东西。
 - 没有后续工作时（`scheduler/active_run_closeout.close_active_run`）：会话任务 CAS 成 `blocked`（期望原状态 active），排一条来源为 `scheduler:<job_id>` 的宿主提示，这次定时执行记 failed。结算码按 `runtime_reason` 选：工具结果无法确认 → `SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN`（提示写明需人工确认是否重做），其它 → `SCHEDULED_TASK_UNFINISHED`。job 的周期不动，下一周期照常派发。CAS 没成功只释放租约，交给原路径按新状态收口。
 - `blocked` 进入任务终态映射（→ failed，码 `SCHEDULED_TASK_BLOCKED`），也顺带修好了报告 `task_status=blocked` 时每 30 秒重试一次、永远结不了的情况。
 - 存量 waiting 的出口（`settle_stale_waiting`，由 `reconcile_waiting_run` 调用）：对账时任务仍 active、`waiting_since` 已满 600 秒宽限、且没有任何后续工作，就同样标受阻、排提示，按 `SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 结算。宽限只为盖住子代理刚结束、生命周期唤醒尚未发布的间隙。

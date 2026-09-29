@@ -3,6 +3,7 @@
 # 模块用途: 让后台命令结束后主动叫醒所属主会话，或在活动主回合安全点交接，省掉模型短轮询。
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -121,6 +122,8 @@ def owner_has_pending_process_completions(owner_home: Path) -> bool:
 
 # LLM: 只按记录里的结构化 completion_target（store_root + task_id）判断这个任务还欠不欠一次完成通知；
 #   权威读取出错时抛 ProcessSessionAuthorityError，调用方必须按"读不到"处理，不能当成没有后台命令。
+#   读错误先按记录归属限定：坏记录能解析出不属于本任务（见 _record_owned_elsewhere）就不计入，
+#   避免别的会话一条坏记录让所有定时收口都读不到。
 # 函数用途: 判断某个会话任务是否还有尚未发出完成通知的受管后台命令（命令仍在跑或刚结束待通知）。
 def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
     store = getattr(agent, "conversation_store", None)
@@ -129,9 +132,10 @@ def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
     if store is None or root is None or not selected:
         return False
     records, errors = ProcessSessionStore(root).list_records()
-    if errors:
-        raise ProcessSessionAuthorityError(errors[0])
     store_root = str(store.storage.root)
+    unscoped = [error for error in errors if not _record_owned_elsewhere(error, selected, store_root)]
+    if unscoped:
+        raise ProcessSessionAuthorityError(unscoped[0])
     return any(
         isinstance(record.get("completion_target"), dict)
         and str(record["completion_target"].get("store_root") or "") == store_root
@@ -139,6 +143,27 @@ def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
         and not record.get("completion_notice_id")
         for record in records
     )
+
+
+# LLM: 只读错误报告里的 path 指向的那一个记录文件并解析 JSON，不改任何文件。记录里没有 completion_target
+#   （本来就不欠完成通知）、或 completion_target 写明了别的任务 / 别的会话存储，才算"不属于本任务"；
+#   文件读不出、不是 JSON 对象、completion_target 形状不对，都按可能属于本任务处理（计入读取错误）。
+# 函数用途: 判断一条后台命令记录的读取错误是否确定与本任务无关。
+def _record_owned_elsewhere(error: object, task_id: str, store_root: str) -> bool:
+    path = error.get("path") if isinstance(error, dict) else None
+    try:
+        payload = json.loads(Path(str(path)).read_text(encoding="utf-8")) if path else None
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    target = payload.get("completion_target")
+    if target is None:
+        return True
+    if not isinstance(target, dict):
+        return False
+    return any(isinstance(target.get(key), str) and target[key] != expected
+               for key, expected in (("task_id", task_id), ("store_root", store_root)))
 
 
 # LLM: 终态和收件身份匹配后分辨 ready/receipt_pending；发布间隙或回执写失败须等重投，不能误消费。

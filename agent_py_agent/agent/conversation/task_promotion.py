@@ -1063,14 +1063,21 @@ def complete_named_audit_task_if_settled(agent: object, task_id: str) -> bool:
 # 函数用途: 判断当前根任务是否仍有未终态子代理；状态读取失败时 fail-closed 保持任务活跃。
 def _conversation_task_has_open_subagents(agent: object, task_id: str) -> bool:
     try:
-        from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
-
-        run_ids = set(agent.subagent_run_ids_for_request(task_id))
-        if not run_ids:
-            return False
-        runs = list(agent.subagents.list_runs())
+        return conversation_task_open_subagents_or_raise(agent, task_id)
     except Exception:
         return True
+
+
+# LLM: 与 _conversation_task_has_open_subagents 同一判据，但读取失败原样抛出，供需要区分"读不到"和"有子代理"的
+#   调用方（conversation.task_follow_up）记录结构化告警；不能在这里吞异常。
+# 函数用途: 判断根任务是否仍有未终态子代理，读取失败时抛出。
+def conversation_task_open_subagents_or_raise(agent: object, task_id: str) -> bool:
+    from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+    run_ids = set(agent.subagent_run_ids_for_request(task_id))
+    if not run_ids:
+        return False
+    runs = list(agent.subagents.list_runs())
     indexed = {
         str(getattr(run, "id", "") or "").strip(): run
         for run in runs
