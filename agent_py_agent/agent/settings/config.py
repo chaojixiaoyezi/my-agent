@@ -192,9 +192,7 @@ class _ToolConfigFields:
     # Todo 仍开放时，把 exact-id 收尾软提醒放进模型上下文；只提示模型在最终回复前
     # 自主核对，不自动打勾、不阻断最终回复，也不增加隐藏模型调用。
     task_progress_closeout_guidance_enabled: bool = True
-    # 同一工具的明确网络/能力不可用回执去重后达到阈值，提示核对其它授权来源；
-    # 命令非零、参数/状态/权限错误、取消与未知失败不计数。每工具一次，0=关闭。
-    tool_failure_channel_hint_threshold: int = 2
+    # 软引导阈值已降为读取点旁的具名常量（_CHANNEL_HINT_THRESHOLD），不再是配置项（2026-09-28 参数减量）。
     # 单个代理最近 10 分钟最多调用几次工具（窗口固定 600 秒）；空或 0 = 关闭，默认关闭。
     tool_agent_budget_max_calls: int | None = None
     # 单个 run 最近 10 分钟最多读取多少字符的归档正文（窗口固定 600 秒）；0 = 不限制。
@@ -203,8 +201,8 @@ class _ToolConfigFields:
     tool_output_preview_chars: int = 4_000
     # 上下文余量不足时立刻外置本条工具输出并要求下一次请求前压缩；关掉则只按 tool_output_externalize_min_chars 外置。
     tool_output_externalize_on_low_headroom: bool = True
-    tool_context_microcompact_keep_recent: int = 8
-    tool_context_ptl_retry_max: int = 3
+    # 工具上下文保留条数与 PTL 自救重试次数已降为读取点旁的具名常量
+    # （DEFAULT_MICROCOMPACT_KEEP_RECENT / DEFAULT_PTL_RETRY_MAX），不再是配置项（2026-09-28 参数减量）。
     tool_read_max_chars: int = 16_000
     # 三种原生文件修改工具反馈有界 JSON 语法观察；不拦分块写入，不决定任务完成。
     enable_file_syntax_diagnostics: bool = False
@@ -233,8 +231,7 @@ class _ToolConfigFields:
     tool_catalog_deferred_categories: list[str] = field(
         default_factory=lambda: ["collaboration", "web", "vision", "meta", "mcp"]
     )
-    # 推荐区和 tool_search 的检索容量；search 有 score>0 过滤，不相关不会凑数。
-    tool_retrieval_limit: int = 12
+    # 推荐区和 tool_search 的检索容量已降为 agent/core.py 的具名常量 TOOL_RETRIEVAL_LIMIT（2026-09-28 参数减量）。
     # 工具语义检索开关；向量来自与记忆语义召回共用的嵌入服务 embedding_*（没配模型时只走关键词）。
     tool_vector_search_enabled: bool = True
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)
@@ -260,7 +257,7 @@ class _RuntimeBudgetConfigFields:
     background_context_max_total_tokens: int = 8000
     # 后台会话执行权的租约秒数；续约心跳按它自动推导（原 background_claim_heartbeat_interval_seconds 已并入）。
     background_claim_ttl_seconds: int = 90
-    cli_resume_max_rounds: int = 8
+    # CLI 续跑轮数护栏已降为 cli/resume_loop._RESUME_MAX_ROUNDS（2026-09-28 参数减量）。
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
@@ -350,9 +347,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_curator_auto_promotion_policy: str = "conservative_v1"
     memory_lesson_min_occurrences: int = 2
     memory_hot_min_occurrences: int = 3
-    # 单次 run 内 compact→自动续跑的绝对深度硬顶（与 no-tool 软顶并存）。达到即强制 return，
-    # 防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。0 表示沿用内置默认。
-    memory_compact_auto_continue_max_depth: int = 50
+    # compact 自动续跑深度硬顶已降为读取点旁的具名常量
+    # （finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。
     # compact 续跑时对卸掉的中段历史做一次 LLM 语义摘要（短板6，长期助手 trajectory_compressor
     # 蓝本）：默认开，保护首尾、只摘要中段；异常、供应商超时或无 backend 时回退机械重建。
     # 摘要不另设不可取消线程超时，直接沿用统一模型传输超时。enabled=false 即完全关闭。
@@ -396,8 +392,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     tui_follow_gateway_upgrade: bool = True
     # 主会话后台命令完成后进入既有持久唤醒队列；关闭后仍可主动查询或长等待。
     background_process_notifications: bool = True
-    # 只在调用账本记录无正文请求摘要，不改变请求前缀；服务端缓存状态仍为未知。
-    cache_diagnostics_enabled: bool = True
+    # 请求前缀诊断开关已降为 agent_core/tool_model_generation._CACHE_DIAGNOSTICS_ENABLED（2026-09-28 参数减量）。
     dynamic_timeout_min: int = 30
     dynamic_timeout_max: int = 10800
     # 未取得稳定 probe 样本时输出吞吐的保守估计；只决定非流式请求总预算（预填充吞吐与 probe 统计参数已是代码常量）。

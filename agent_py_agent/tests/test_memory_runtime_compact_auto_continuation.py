@@ -732,7 +732,6 @@ def test_run_auto_compact_apply_can_repeat_when_continuation_makes_tool_progress
             model_backend="echo",
             enable_tools=True,
             my_agent_home=str(tmp_path / "home"),
-            tool_context_ptl_retry_max=0,
         ),
         tmp_path,
     )
@@ -2015,8 +2014,11 @@ def test_compact_auto_continuation_under_hard_cap_still_compacts(tmp_path):
     assert fields["memory_compact_auto_status"] != "returned_after_depth_cap"
 
 
-def test_compact_auto_continuation_hard_cap_is_configurable(tmp_path):
+def test_compact_auto_continuation_hard_cap_is_a_named_constant(tmp_path):
+    """硬顶已从配置降为具名常量（2026-09-28 参数减量）：
+    这里钉住"常量值生效 + 达到该深度即强制收口"两件事，不再测配置可调。"""
     from agent_py_agent.agent.agent_core.finalization_compact_auto import (
+        _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH,
         _max_compact_auto_continue_depth,
     )
 
@@ -2024,17 +2026,16 @@ def test_compact_auto_continuation_hard_cap_is_configurable(tmp_path):
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
-            memory_compact_auto_continue_max_depth=7,
         ),
         tmp_path,
     )
     agent.backend.context_window_tokens = 20_000
 
-    assert _max_compact_auto_continue_depth(agent) == 7
+    assert _max_compact_auto_continue_depth(agent) == _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
 
     ctx = replace(
         _finalize_context_for_continuation(tool_rounds=5, executed_tools=["read_file"]),
-        compact_auto_continue_depth=7,
+        compact_auto_continue_depth=_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH,
         compact_auto_no_tool_continue_depth=0,
         final_response=ModelResponse(
             text="还在继续读材料。",

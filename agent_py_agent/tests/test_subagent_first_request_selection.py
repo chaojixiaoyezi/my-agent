@@ -45,7 +45,8 @@ def child(tmp_path):
     )
     task = manager.create_run(params=params, prepared=replace(prepared, model_advice=advice))
     task = manager.lifecycle.prepare_runner_attempt(task.id)
-    agent = SimpleNamespace(subagents=manager, conversation_store=store, config=SimpleNamespace(cache_diagnostics_enabled=False))
+    # cache_diagnostics_enabled 已降为 tool_model_generation._CACHE_DIAGNOSTICS_ENABLED 常量（2026-09-28 参数减量）。
+    agent = SimpleNamespace(subagents=manager, conversation_store=store, config=SimpleNamespace())
     request = replace(_tool_loop_params(), context_scope="task_local", source="subagent_run_model_turn",
                       run_id=task.id, attempt_id=task.runner_active_attempt_id, request_id=task.runner_active_attempt_id)
     return agent, task, request

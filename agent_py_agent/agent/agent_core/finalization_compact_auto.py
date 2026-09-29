@@ -148,14 +148,10 @@ def _compact_auto_cycle_result_fields(
     }
 
 
+# LLM: compact 自动续跑的绝对深度硬顶是算法护栏，用具名常量（2026-09-28 参数减量），不再读配置。
+# 函数用途: 返回自动续跑深度硬顶常量。
 def _max_compact_auto_continue_depth(agent: object) -> int:
-    config = getattr(agent, "config", None)
-    raw = getattr(config, "memory_compact_auto_continue_max_depth", None)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = 0
-    return value if value > 0 else _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
+    return _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH
 
 
 def _compact_auto_continue_depth_exhausted(agent: object, ctx: FinalizeContext) -> bool:

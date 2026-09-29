@@ -31,7 +31,7 @@ def _child(tmp_path, *, backend: str, tools: bool):
         model_backend=backend, model_name=model_name, api_base=api_base,
         api_key="fake-private-key", stream_enabled=False, enable_tools=tools,
         model_context_window_tokens=200_000,
-        max_tool_rounds=1, tool_context_ptl_retry_max=0,
+        max_tool_rounds=1,
     ), tmp_path)
     task = agent.subagents.create_run(goal="核对材料并给出结论", thought="", plan=[], allowed_tools=["read_file"])
     for role, content in (("user", "之前需要核对的原始材料" * 100), ("assistant", "已核对旧材料，等待下一步" * 100)):

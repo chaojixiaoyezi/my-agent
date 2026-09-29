@@ -673,11 +673,12 @@ def _task_and_transcript_section(
     )
 
     # 渲染 prompt 时回收窗口外的旧工具结果正文（保留 read_artifact 锚点），省 context；
-    # 不改累积的 tool_context 历史本身。keep_recent 配置为 0 表示关闭回收；回收门槛字符数是代码常量（参数减量第 3 批 D 组）。
+    # 不改累积的 tool_context 历史本身。保留条数与回收门槛都是代码常量：这是 compact 内部算法参数，
+    # 用户不可能正确设定（0 会关掉回收），2026-09-28 参数减量降为常量。
     tools_history = "\n\n".join(
         microcompact_tool_context(
             tool_context,
-            keep_recent=int(getattr(config, "tool_context_microcompact_keep_recent", DEFAULT_MICROCOMPACT_KEEP_RECENT) or 0),
+            keep_recent=DEFAULT_MICROCOMPACT_KEEP_RECENT,
             min_chars=DEFAULT_MICROCOMPACT_MIN_CHARS,
         )
     )

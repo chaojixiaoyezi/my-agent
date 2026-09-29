@@ -209,9 +209,7 @@ memory_compact_auto_trigger_percent: 90
 # 自动压缩后的历史收缩目标百分比。
 # 只有当你的模型窗口特别大、或压缩后仍频繁再次触发压缩时，才需要调低它压得更狠；调高会更保守、保留更多历史，但可能很快又触发下一次压缩。
 memory_compact_recovery_target_percent: 60
-# 单次 run 内 compact→自动续跑的绝对深度硬顶（与「连续无工具进展」软顶并存）。达到即强制
-# return 当前结果，防止持续高于阈值且每轮都调工具的任务无限 compact/续跑（H2）。
-memory_compact_auto_continue_max_depth: 50
+# compact 自动续跑深度硬顶已降为代码常量（finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。
 # compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要：
 # - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要
 #   折叠中段、原样保留首尾，把机械截断换成“这段做了什么/学到什么”的叙述，长任务续跑少丢上下文。
@@ -410,8 +408,6 @@ runner_timeout_by_role: []
 
 # 主会话后台命令结束后主动通知，复用持久唤醒队列；关闭不影响 process_session 查询/长等待。
 background_process_notifications: true
-# 保存无正文请求摘要，用于区分系统/工具/模型/历史前缀变化；不额外调用模型或截短上下文。
-cache_diagnostics_enabled: true
 dynamic_timeout_min: 30
 # 自动估算请求超时时允许的最大值（秒）。
 # 只有合法任务确实需要跑更久、却被超时打断时才需要调大。
@@ -619,9 +615,7 @@ background_context_max_total_tokens: 8000
 # - 进程意外退出后，最多过这么久别的进程才能接手这个会话。
 # - 一般不用改；机器很慢、经常看到租约过期被接手时才调大。最小 1。
 background_claim_ttl_seconds: 90
-# CLI 自动续跑/手动续跑的进程内轮数护栏（总代数上限，含首轮之外的续跑轮）。
-# 0/缺省按 8 处理；长任务无人值守部署可调大（默认防失控语义不变）。
-cli_resume_max_rounds: 8
+# CLI 续跑轮数护栏已降为代码常量（cli/resume_loop._RESUME_MAX_ROUNDS，2026-09-28 参数减量）。
 # 后台主代理唤醒时允许看到和调用的控制工具。
 # - 留空表示使用默认控制工具 profile，包含命令、后台进程与交互终端的完整操作入口。
 # - 写了列表就只暴露列表里的工具；执行参数和 prompt 说明共用这一份。
@@ -835,10 +829,7 @@ orphan_supervision_interval_seconds: 60
 # 检索完备性软引导：
 # - 同一工具明确的网络/能力不可用回执按 call_id 去重后达到阈值，提示核对其它授权来源。
 # - 测试/编译非零、参数/状态/权限错误、取消和未知失败不等于工具不可用，不计入该阈值。
-# - 不要求为枚举渠道重复调用，也不允许借换工具绕过审批、安全和 owner 边界。
-# - 只是软提示（每个工具最多提示一次），不拦截任何调用、不做硬门。
-# - 0 表示关闭。
-tool_failure_channel_hint_threshold: 2
+# 软引导阈值已降为代码常量（tool_guard/loop_hints._CHANNEL_HINT_THRESHOLD，2026-09-28 参数减量）。
 
 # 读取“已外置的大工具输出”（artifact 正文）的额度：同一个 run 最近 10 分钟最多读这么多字符，默认 240000：
 # - 超了就暂时拒绝，等时间窗口滚过去自动恢复，防止模型反复整段读大输出把上下文和费用撑爆。
@@ -862,19 +853,11 @@ tool_output_preview_chars: 4000
 # 一般不用改。
 tool_output_externalize_on_low_headroom: true
 
-# 工具上下文回溯回收（microcompact）：
-# - 渲染 prompt 时，把窗口外的旧工具结果正文换成 artifact 锚点占位（read_artifact 可取回完整），
-#   只保留最近 N 个完整结果；解决"单条结果不大、但几十轮累积撑满 context"的问题。
-# - 只回收带可取回锚点且正文足够大的条目；系统提示、近窗口结果、无锚点条目原样保留。
-# - tool_context_microcompact_keep_recent: 保留最近多少个完整工具结果；0 表示关闭回收。
-# - 正文达到 1500 字符（代码常量 DEFAULT_MICROCOMPACT_MIN_CHARS）才回收，低于该值的条目原样保留。
-tool_context_microcompact_keep_recent: 8
+# 工具上下文回溯回收（microcompact）的保留条数与回收门槛都已固定为代码常量
+# （DEFAULT_MICROCOMPACT_KEEP_RECENT / DEFAULT_MICROCOMPACT_MIN_CHARS，2026-09-28 参数减量）。
 
-# 单轮 PTL（prompt-too-long）重试：
-# - 模型接口实报"上下文超限"时，先回收最老 20% 工具结果正文直接重试本轮，
-#   轻量自救成功就不触发重量级 compact/resume；救不回再走原有 compact 路径。
-# - tool_context_ptl_retry_max: 单轮最多重试几次；0 表示关闭，直接走 compact。
-tool_context_ptl_retry_max: 3
+# 单轮 PTL（prompt-too-long）自救重试次数已固定为代码常量
+# （tool_context/ptl_retry.DEFAULT_PTL_RETRY_MAX，2026-09-28 参数减量）。
 
 # read_file 工具最多返回多少字符，避免单次结果太长
 tool_read_max_chars: 16000
@@ -972,11 +955,7 @@ tool_catalog_deferred_categories: ["collaboration", "web", "vision", "meta", "mc
 # 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 list_tools/tool_search 读取。
 tool_catalog_include_examples: false
 
-# 每次只把多少个最相关工具的“详细说明”注入 prompt
-# 这个值越小越省 token，但过小可能漏掉次优工具
-# Recommended Tools 只推荐当前已直接可见的工具；延迟工具由 tool_search 使用同一检索器查找。
-# 这个上限同时作为普通推荐的容量；检索结果要求 score>0，不会用无关工具凑数。
-tool_retrieval_limit: 12
+# 每次注入 prompt 的“工具详细说明”条数已固定为代码常量（agent/core.TOOL_RETRIEVAL_LIMIT，2026-09-28 参数减量）。
 
 # 是否启用真实语义工具检索。向量来自“嵌入服务”一节的 embedding_*（与记忆语义召回共用）；没配 embedding_model 时
 # 语义通道明确标为 unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。

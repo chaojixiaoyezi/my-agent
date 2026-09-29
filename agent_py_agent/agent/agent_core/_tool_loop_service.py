@@ -1449,9 +1449,8 @@ def _request_tool_loop_model_response(
             restore_injected_turn_input_for_provider_retry, agent, model_params
         ),
         recover_context=lambda prompt: _ptl_reclaim_oldest(agent, model_params, prompt=prompt),
-        read_overflow_retry_limit=lambda: int(
-            getattr(getattr(agent, "config", None), "tool_context_ptl_retry_max", DEFAULT_PTL_RETRY_MAX) or 0
-        ),
+        # 单轮 PTL 自救重试次数是内部容错参数，用具名常量（2026-09-28 参数减量）。
+        read_overflow_retry_limit=lambda: DEFAULT_PTL_RETRY_MAX,
         visible_loaded_tools=model_params.loaded_tool_names if consumes_task_tool_surface else None,
     )
 

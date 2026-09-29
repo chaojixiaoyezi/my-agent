@@ -382,6 +382,32 @@
   这是既有设计，只补注释说明、不改代码。
 - **门禁**：定向 27 passed（含新增 2 例）；ruff / `DOC_SYNC_PASS` / `git diff --check` / clean-package 见交付说明。
 
+## 参数减量：7 个内部实现参数降为读取点旁的具名常量（2026-09-28，分支 `my-agent/self-dev-params`，基于 `f7a4cc909`）
+
+- **来源**：dev 18:42 / 20:03 的参数减量任务。`parameter_registry.listed_parameters()` 从 **221 降到 214**（正好 -7）。
+- **做法**：值全部保持不变，只把「没人该去调、调了也没意义」的内部实现参数从配置面挪到读取点旁的模块级具名常量：
+  | 参数 | 常量（位置） | 值 |
+  |---|---|---|
+  | `tool_retrieval_limit` | `agent/core.TOOL_RETRIEVAL_LIMIT` | 12 |
+  | `tool_context_microcompact_keep_recent` | `agent_core/tool_context/microcompact.DEFAULT_MICROCOMPACT_KEEP_RECENT`（原有，改读它） | 8 |
+  | `tool_context_ptl_retry_max` | `agent_core/tool_context/ptl_retry.DEFAULT_PTL_RETRY_MAX`（原有，改读它） | 3 |
+  | `tool_failure_channel_hint_threshold` | `agent_core/tool_guard/loop_hints._CHANNEL_HINT_THRESHOLD`（新增） | 2 |
+  | `memory_compact_auto_continue_max_depth` | `agent_core/finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH`（原有，改读它） | 50 |
+  | `cli_resume_max_rounds` | `cli/resume_loop._RESUME_MAX_ROUNDS`（新增） | 8 |
+  | `cache_diagnostics_enabled` | `agent_core/tool_model_generation._CACHE_DIAGNOSTICS_ENABLED`（新增） | True |
+- **三处同步**：`AgentConfig` 字段、随包 `config/agent_config.yaml` 键、前端目录（`node frontend/scripts/sync-backend-config.mjs` 重新生成 → 265 fields，`--check` 报 in sync）。
+- **`cache_diagnostics_enabled` 的确认条件（dev 要求）**：核对 `backends/cache_diagnostics.py` —— 只对出站请求算**不可逆摘要**（SHA256），不修改请求、不记录正文或密钥；`provider_attempt_observer` 的注释也写明「Observability must never alter the provider request outcome」，出错被吞掉。满足「只做本地诊断、不改变模型请求内容、不产生额外调用或文件写入」→ 与其余 6 个一并降级。
+- **动手前的 pre-check**：7 个键在生产配置里 `grep -c "^<键>:"` **全部为 0**（没有显式写过，可安全删）。
+- **测试改动**（原用例的前提「这个值可由配置调」已不存在，逐条改写成钉常量，没有放宽或删除断言）：
+  - `test_tool_context_ptl_retry.py::test_tool_loop_always_retries_because_the_limit_is_a_named_constant` —— 原 `config 0 = 关闭` 语义已不存在；改为断言常量值 3、`AgentConfig` 已无该字段、溢出时确为 `1 + DEFAULT_PTL_RETRY_MAX` 次调用且回收确实发生。
+  - `test_tool_context_microcompact.py::test_builder_uses_the_named_constant_for_keep_recent` —— 钉常量生效：5 条结果在常量 ≥5 时全保留；再把**定义模块**的常量改成 2，断言正好回收 3 条（证明拼装层读的是这个常量，而不是别的路径）。
+  - `test_memory_runtime_compact_auto_continuation.py::test_compact_auto_continuation_hard_cap_is_a_named_constant` —— 断言返回的深度等于 `_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH`，并保持「达到深度即 `returned_after_depth_cap`」的行为断言。
+  - `test_tool_failure_channel_hint.py` —— 去掉配置项，改用 autouse fixture 在用例前后保存/还原模块常量，避免污染其它用例。
+  - 纯删除式收尾（配置项已无读者）：`test_background_compact_recovery.py`、`test_subagent_runtime_compact.py`、`test_subagent_compact_recovery.py`、`test_cli_manual_resume.py`、`test_subagent_first_request_selection.py`。
+- **一个自查出来的真实差错**：删 `cache_diagnostics_enabled` 的注释块时，误把 `dynamic_timeout_min` 顶到了新注释下面（该键在原 YAML 里本来**没有**注释），于是 `test_parameter_registry.py::test_empty_descriptions_only_come_from_the_reasoned_baseline` 报 `dynamic_timeout_min` 应保留在空说明基线里。**这个失败是本次改动引入的**：用 `git worktree add /tmp/ma-params-base f7a4cc909` 在干净基线上跑同一用例**通过**，对比后确认。修法是把 `dynamic_timeout_min` 恢复成原样的无注释状态（而不是给它补一句注释去迁就断言）。
+- **门禁**：受影响 9 个模块 + 参数登记表/字段读者 + 四守卫全部通过；ruff `All checks passed!`；`DOC_SYNC_PASS`；`git diff --check` 干净；`check_clean_package.py` OK；code-size 身份差集（基线取**本工作树 HEAD**，不是 origin/main）见交付说明。
+- **复现**：`/opt/homebrew/bin/python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_tool_context_ptl_retry.py agent_py_agent/tests/test_tool_context_microcompact.py agent_py_agent/tests/test_tool_failure_channel_hint.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_cli_manual_resume.py`；计数用 `python3 -c "from agent_py_agent.agent.settings.parameter_registry import listed_parameters; print(len(listed_parameters()))"`。
+
 ## 测试不再打开真实浏览器，browser-lite 不再残留 Chrome 签名克隆（2026-09-28，分支 `claude/75-no-real-browser-in-tests`，基于 `80b4afed8`）
 
 - **弹窗根因**：`test_web_board_package.py::test_stdin_eof_ends_process_and_releases_port` 直接起插件进程，却把 `MY_AGENT_PLUGIN_SETTINGS` 从环境里删掉了。插件于是按默认 `open_browser=true`，在用户的默认浏览器里打开了带令牌的本机链接。现在这一例显式传 `{"open_browser": false}`，并断言 `served["browser_opened"] is False`；它测的是 stdin EOF 后退出，与默认设置无关。

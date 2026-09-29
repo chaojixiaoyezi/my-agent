@@ -6,6 +6,10 @@ from __future__ import annotations
 
 from ...contracts.error_taxonomy import error_contract
 
+# 软引导阈值：同一工具明确的网络/能力不可用回执按 call_id 去重后达到该值才提示核对其它来源。
+# 属内部提示逻辑的实现参数，2026-09-28 参数减量从配置降为常量（值不变）。
+_CHANNEL_HINT_THRESHOLD = 2
+
 
 def append_tool_guardrail_action_block_hint(request: object) -> None:
     """Append a model-facing hint when the registry blocks the repeated tool action."""
@@ -92,12 +96,10 @@ def append_tool_failure_channel_hint(request: object) -> None:
         )
 
 
-# 函数用途: 读软引导阈值配置(坏值/缺省按默认 2,0=关闭)。
+# LLM: 软引导阈值是内部提示逻辑的实现参数，用具名常量（2026-09-28 参数减量），不再读配置。
+# 函数用途: 返回软引导阈值常量。
 def _channel_hint_threshold(agent: object) -> int:
-    try:
-        return max(0, int(getattr(getattr(agent, "config", None), "tool_failure_channel_hint_threshold", 2) or 0))
-    except (TypeError, ValueError):
-        return 2
+    return _CHANNEL_HINT_THRESHOLD
 
 
 # LLM: 只认宿主 error_code 对应的现有错误合同；不读 output、提示文字或工具名推断错误性质。

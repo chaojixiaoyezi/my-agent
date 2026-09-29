@@ -81,6 +81,9 @@ from .tool_stream import (
 
 _TOOL_STREAM_POLL_SECONDS = 0.05
 _MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
+# 请求前缀诊断开关：只对出站请求算不可逆摘要（backends/cache_diagnostics.py），不修改请求、
+# 不记录正文或密钥。属内部诊断参数，2026-09-28 参数减量从配置降为常量（值不变）。
+_CACHE_DIAGNOSTICS_ENABLED = True
 _RUNNER_STREAM_ACTIVITY_STATE_KEY = "_runner_model_stream_activity_projection"
 # 门槛5 续跑: 本轮模型调用的结构化失败事实登记在 live_archive_state 上, 只记
 # 「哪个 model turn 序号发生过可恢复的供应商超时」; 消费方(response_decision)
@@ -1215,9 +1218,9 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
 
     # 全局在飞 LLM 并发闸(T4 层4):默认关=nullcontext 零变化;配了 LLM_MAX_INFLIGHT 才封顶,
     # 拿槽在 llm_inflight 计数【之前】(槽满时等待期不算在飞,gauge 只反映真在飞)。
-    with provider_attempt_observer(_observe_provider_attempt, cache_diagnostics=bool(
-        getattr(getattr(state.agent, "config", None), "cache_diagnostics_enabled", True)
-    )):
+    # 请求前缀诊断开关：只算出站请求的不可逆摘要（见 backends/cache_diagnostics.py），
+    # 不修改请求、不记录正文/密钥，是内部诊断参数 —— 2026-09-28 参数减量降为常量。
+    with provider_attempt_observer(_observe_provider_attempt, cache_diagnostics=_CACHE_DIAGNOSTICS_ENABLED):
         with global_llm_admission_slot():
             llm_inflight(1)
             try:
