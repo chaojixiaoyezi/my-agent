@@ -52,6 +52,7 @@ BROKEN_CODE = "data_corruption:DataCorruptionError"
 NEXT_PERIOD = 1_600  # every 600 s，锚点 1000：预约第一次时 next_run_at 已推进到 1600
 GRACE = 600.0
 UNREADABLE_DEADLINE = 6 * GRACE
+CONFIRM = 60.0  # 按"没有后续工作"结算的第二次确认，至少隔一个存量判定周期
 
 
 def _setup(tmp_path, **config):
@@ -97,6 +98,13 @@ def _fresh_throttles(monkeypatch):
     monkeypatch.setattr(active_run_closeout, "_unreadable_warned_at", {})
     monkeypatch.setattr(active_run_closeout, "_stale_checked_at", {})
     monkeypatch.setattr(active_run_closeout, "_unreadable_since", {})
+
+
+# 函数用途: 按"没有后续工作"结算要两次确认：at 时第一次看到只记下、不结算，隔一个 60 秒判定周期再确认才结算。
+def _reconcile_confirmed(agent, run_id, at):
+    assert agent.scheduler_service.reconcile_waiting_run(run_id, now=at) is None
+    assert agent.scheduler_repository.get_active_run(run_id)["status"] == "waiting"
+    return agent.scheduler_service.reconcile_waiting_run(run_id, now=at + CONFIRM)
 
 
 def _lifecycle_wake(store, thread, claim):
@@ -264,13 +272,32 @@ class TestUnreadableFollowUp:
         assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + UNREADABLE_DEADLINE + 1) is not None
         assert [row["error_code"] for row in _history(agent)] == [SCHEDULED_TASK_FOLLOW_UP_UNREADABLE]
 
+    # be 复审 B 的存活变异：坏唤醒一直在（唤醒这一项一直读不出），中间出现一次别的类里会自己推进的事实（在跑的子代理），
+    # 6 倍计时要从那次之后重新起算。
+    def test_a_lasting_fact_of_another_family_restarts_the_unreadable_timer(self, tmp_path):
+        agent, store, thread, claim = _setup(tmp_path)
+        self._corrupt_wake(store)
+        _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+        since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
+        child = _real_child(agent, thread, claim.run_id)
+        facts = _facts(agent, thread.thread_id, claim.run_id, recent=GRACE)
+        assert FOLLOW_UP_OPEN_SUBAGENTS in facts.present and facts.unreadable
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 3 * GRACE) is None
+        _end_child(agent, child.id, ended_at=since + 3 * GRACE + 1)
+        restart = since + 5 * GRACE
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=restart) is None
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + UNREADABLE_DEADLINE + 1) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=restart + UNREADABLE_DEADLINE) is not None
+        assert [row["error_code"] for row in _history(agent)] == [SCHEDULED_TASK_FOLLOW_UP_UNREADABLE]
+
     def test_a_transient_unreadable_observation_does_not_count_once_the_read_is_clean(self, tmp_path):
         agent, store, thread, claim = _setup(tmp_path)
         self._corrupt_wake(store)
         _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
         since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
         (store.storage.wake_queue_dir / "normal" / "wake-of-another-thread.json").unlink()
-        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE) is not None
+        assert _reconcile_confirmed(agent, claim.run_id, since + GRACE) is not None
         assert [row["error_code"] for row in _history(agent)] == [SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP]
 
     def test_a_present_wake_is_not_hidden_by_a_corrupt_one_even_after_six_grace_periods(self, tmp_path):
@@ -342,7 +369,8 @@ class TestStaleWaitingExit:
         store.wakes.mark_handled(wake.wake_signal_id, now=since)
         assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE - 1) is None
         assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
-        assert agent.scheduler_service.reconcile_waiting_runs(now=since + GRACE) == [claim.run_id]
+        assert agent.scheduler_service.reconcile_waiting_runs(now=since + GRACE) == []
+        assert agent.scheduler_service.reconcile_waiting_runs(now=since + GRACE + CONFIRM) == [claim.run_id]
         [row] = _history(agent)
         assert (row["status"], row["error_code"]) == ("failed", SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP)
         assert store.tasks.load(claim.run_id).status == "blocked"
@@ -536,6 +564,22 @@ class TestUnreadableScoping:
         bad.write_text("{truncated", encoding="utf-8")
         assert _facts(agent, thread.thread_id, "task-1") == FollowUpFacts((expected,))
 
+    # 本任务血缘子代理的完成唤醒坏了：它的 root_task_id 是子代理树的根，不能据此判成别处的，仍记读不出；别的子代理的不计入。
+    # 同样带着子代理 id、但不是完成唤醒去重键（前缀不同）的坏唤醒，不算。
+    @pytest.mark.parametrize(("key_owner", "counted"), [("child", True), ("stranger", False), ("other-kind", False)])
+    def test_a_corrupt_finished_wake_of_a_lineage_child_counts(self, tmp_path, key_owner, counted):
+        agent, store, thread, claim = _setup(tmp_path)
+        child = _real_child(agent, thread, claim.run_id)
+        run_id = child.id if key_owner != "stranger" else "stranger-run"
+        prefix = "process-completed:" if key_owner == "other-kind" else "subagent-finished:"
+        bad = store.storage.wake_queue_dir / "normal" / "wake-broken.json"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text(json.dumps({"root_task_id": "main", "thread_id": thread.thread_id, "wake_signal_id": "w",
+                                   "dedupe_key": f"{prefix}{run_id}:DONE", "created_at": "x"}),
+                       encoding="utf-8")
+        facts = _facts(agent, thread.thread_id, claim.run_id)
+        assert (FOLLOW_UP_PENDING_WAKES in {item for item, _code in facts.unreadable}) is counted
+
     @pytest.mark.parametrize(("task_id", "counted"), [("task-1", True), ("another-task", False)])
     def test_corrupt_policy_counts_only_when_it_may_belong_to_the_task(self, tmp_path, task_id, counted):
         agent, store, thread = _fact_agent(tmp_path)
@@ -625,7 +669,7 @@ class TestSubagentCompletion:
         _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
         since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
         _end_child(agent, child.id, ended_at=since + 10)
-        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 2 * GRACE) is not None
+        assert _reconcile_confirmed(agent, claim.run_id, since + 2 * GRACE) is not None
         assert [row["error_code"] for row in _history(agent)] == [SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP]
 
     @pytest.mark.parametrize("status", ["CANCELLED", "ABANDONED"])
@@ -646,6 +690,62 @@ class TestSubagentCompletion:
         assert FOLLOW_UP_UNSETTLED_SUBAGENT not in facts.present
 
 
+# be 复审 B 的 M-B1：Goal 续跑先 mark_handled 上一条唤醒、再发下一条，对账可能恰好落在这个空隙里。按"没有后续工作"
+# 结算要隔一个判定周期两次确认，健康的长 Goal 不会被误结算。
+class TestGoalContinuationGap:
+    def _goal_run(self, tmp_path):
+        agent, store, thread, claim = _setup(tmp_path)
+        store.goals.create({"thread_id": thread.thread_id, "task_id": claim.run_id, "objective": "持续推进"})
+        first = self._continue(store, thread, claim, 1_002.5)
+        _finish(agent, thread, claim, runtime_status="completed", runtime_reason="")
+        waiting = agent.scheduler_repository.get_active_run(claim.run_id)
+        assert waiting["status"] == "waiting"
+        return agent, store, thread, claim, first, float(waiting["waiting_since"])
+
+    @staticmethod
+    def _continue(store, thread, claim, now):
+        return store.wakes.raise_signal({"thread_id": thread.thread_id, "root_task_id": claim.run_id,
+                                         "reason": "thread_goal_continue", "now": now})
+
+    def _assert_still_running(self, agent, store, thread, claim):
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+        assert store.goals.load(thread.thread_id, task_id=claim.run_id).status == "active"
+        assert _history(agent) == [] and pending_host_notices(store, thread.thread_id) == ()
+
+    # be 的探针 P3 改写：对账落在续跑空隙里只记下，下一条续跑唤醒一出现就清掉，任务和 Goal 都不受影响。
+    def test_a_reconcile_in_the_continuation_gap_does_not_settle_a_healthy_goal(self, tmp_path):
+        agent, store, thread, claim, first, since = self._goal_run(tmp_path)
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 7_200) is None
+        store.wakes.mark_handled(first.wake_signal_id)
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 7_200 + 61) is None
+        self._continue(store, thread, claim, since + 7_200 + 62)
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 7_200 + 122) is None
+        self._assert_still_running(agent, store, thread, claim)
+
+    # 正向对照：跨多个宽限期的健康长 Goal，每一片之间都有一次对账落在空隙里，从头到尾都不会被结算。
+    def test_a_healthy_goal_across_many_grace_periods_is_never_settled(self, tmp_path):
+        agent, store, thread, claim, wake, since = self._goal_run(tmp_path)
+        at = since + GRACE
+        for _slice in range(12):
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at) is None
+            store.wakes.mark_handled(wake.wake_signal_id)
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at + 61) is None
+            wake = self._continue(store, thread, claim, at + 62)
+            at += 300
+        self._assert_still_running(agent, store, thread, claim)
+
+    def test_a_confirmed_absence_still_settles_after_the_second_look(self, tmp_path):
+        agent, store, thread, claim, first, since = self._goal_run(tmp_path)
+        store.wakes.mark_handled(first.wake_signal_id)
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE) is None
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE + 59.9) is None
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE + CONFIRM) is not None
+        assert [row["error_code"] for row in _history(agent)] == [SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP]
+        [notice] = pending_host_notices(store, thread.thread_id)
+        assert "不能只靠" in notice.text and "进度策略" in notice.text
+
+
 # be 复审 S4：没有机制保证会自己消失的事实（Goal、guidance、进度策略）只在宽限期内算后续工作。
 class TestGraceBoundFacts:
     @pytest.mark.parametrize("fact", ["goal", "guidance", "policy"])
@@ -661,7 +761,7 @@ class TestGraceBoundFacts:
         _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
         since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
         assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE - 1) is None
-        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE) is not None
+        assert _reconcile_confirmed(agent, claim.run_id, since + GRACE) is not None
         [row] = _history(agent)
         assert (row["status"], row["error_code"]) == ("failed", SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP)
 
@@ -690,7 +790,7 @@ class TestGraceFromConfig:
         since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
         store.wakes.mark_handled(wake.wake_signal_id, now=since)
         assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 999) is None
-        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + 1000) is not None
+        assert _reconcile_confirmed(agent, claim.run_id, since + 1000) is not None
 
 
 def test_host_notice_merges_per_job_so_repeated_failures_do_not_pile_up(tmp_path):

@@ -29,7 +29,7 @@ _LOGGER = logging.getLogger(__name__)
 #   递归父级从 canonical 直属快照和等待调和读取同一诊断，不把孙代理通知越级广播给根。
 # 函数用途: 把长时间没有新活动的观测交给直属父级，让它决定查看、插话或继续等。
 def notify_parent_on_activity_notice(manager: Any, task: Any, notice: dict[str, Any]) -> bool:
-    if _has_persisted_subagent_parent(getattr(manager, "load", None), task):
+    if has_persisted_subagent_parent(getattr(manager, "load", None), task):
         return True
     store = getattr(manager, "conversation_store", None)
     if store is None:
@@ -151,7 +151,7 @@ class RunnerCompletionNotifier:
                 self._project_blocked_attempt(task_id)
             else:
                 self.tasks.update_status({"task_id": task_id, "status": status})
-            if _has_persisted_subagent_parent(self.load_task, task):
+            if has_persisted_subagent_parent(self.load_task, task):
                 return "skipped"
             # 去重身份 = task + status + exact attempt（attempt 未知时保持既有 task+status 形态）。
             # 这样同一 attempt 的重复投递会被识别，而换代后的新 attempt 仍能正常通知父级。
@@ -423,7 +423,7 @@ def notify_parent_on_capability_request(
     store = getattr(manager, "conversation_store", None)
     if store is None:
         return
-    if _has_persisted_subagent_parent(getattr(manager, "load", None), task):
+    if has_persisted_subagent_parent(getattr(manager, "load", None), task):
         return
     run_id = str(getattr(task, "id", "") or "").strip()
     request_id = str(getattr(request, "id", "") or "").strip()
@@ -462,10 +462,11 @@ def notify_parent_on_capability_request(
             _LOGGER.warning("capability request notify error could not be saved for %s", run_id)
 
 
-# LLM: 仅通过显式 load_task 读取原父任务，读取失败不改写任何状态。A parent id is considered nested only when it resolves to a canonical
+# LLM: 仅通过显式 load_task 读取原父任务，读取失败不改写任何状态。公开给 conversation.task_follow_up 复用同一判据
+#   （直属会话的子代理才会给会话发完成唤醒）。A parent id is considered nested only when it resolves to a canonical
 # subagent task; gateway/root request ids deliberately do not resolve here.
 # 函数用途: 判断当前孩子的直属父级是不是另一个真实子代理。
-def _has_persisted_subagent_parent(load_task: Callable[[str], SubAgentTask] | None, task: Any) -> bool:
+def has_persisted_subagent_parent(load_task: Callable[[str], SubAgentTask] | None, task: Any) -> bool:
     parent_id = str(getattr(task, "parent_id", "") or "").strip()
     if not parent_id or not callable(load_task):
         return False
@@ -564,6 +565,7 @@ def _capability_authority_summary(authority: dict[str, object]) -> str:
 
 
 __all__ = [
+    "has_persisted_subagent_parent",
     "notify_parent_on_capability_request",
     "RunnerCompletionNotifier",
 ]

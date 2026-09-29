@@ -45,6 +45,10 @@ _stale_checked_at: dict[str, float] = {}
 # run_id → 首次观察到"只剩读不出"的时间；有会自己消失的后续工作或读全时清掉，进程重启归零。
 # 读不出的限期从这里起算，不从 waiting_since 起算：并发处理移走唤醒这类瞬时读错误只会让计时从头开始。
 _unreadable_since: dict[str, float] = {}
+# run_id → 首次观察到"没有会自己推进的后续工作、也没有读不出"的时间。按"没有后续工作"结算要两次确认：
+# 至少隔一个存量判定周期（60 秒）再次看到才结算，中途出现会自己推进的事实或读不出就清掉，进程重启归零。
+# 用来盖住发布间隙：Goal 续跑先 mark_handled 上一条唤醒、再发下一条；后台命令完成通知等也有同类先后顺序。
+_absent_since: dict[str, float] = {}
 _TOOL_OUTCOME_UNKNOWN_REASON = "TOOL_OPERATION_OUTCOME_UNKNOWN"
 _SCHEDULER_NOTICE_TEXT = {
     SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN: (
@@ -56,8 +60,8 @@ _SCHEDULER_NOTICE_TEXT = {
         "请查看原因；该定时任务之后仍按周期运行。"
     ),
     SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP: (
-        "定时任务 {job} 有一轮长时间停在等待状态、却没有任何后续工作，已结束这一轮并标为受阻；"
-        "该定时任务之后仍按周期运行。"
+        "定时任务 {job} 有一轮长时间停在等待状态、却没有会自己推进的后续工作，已结束这一轮并标为受阻；"
+        "该定时任务之后仍按周期运行。只有进度策略、未处理的插话或没在续跑的 Goal 不算后续工作，定时任务不能只靠它们续命。"
     ),
     SCHEDULED_TASK_FOLLOW_UP_UNREADABLE: (
         "定时任务 {job} 有一轮长时间停在等待状态，但判断它还有没有后续工作所需的记录一直读不出来（可能有文件损坏），"
@@ -129,7 +133,8 @@ def close_active_run(
 #   且确认没有后续工作时，按 SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP 结算；只剩读不出来的项目时要停满宽限期的
 #   6 倍（从首次观察到"只剩读不出"算起，见 _unreadable_since），按 SCHEDULED_TASK_FOLLOW_UP_UNREADABLE 结算。
 #   过了宽限期，GRACE_BOUND_FACTS（不会自己消失的事实）不再计入。
-#   同一个 run 的判定每 _STALE_CHECK_INTERVAL_SECONDS 最多算一次。结算前都先把任务 CAS 成 blocked、排宿主提示；
+#   同一个 run 的判定每 _STALE_CHECK_INTERVAL_SECONDS 最多算一次；按"没有后续工作"结算要两次确认（见 _absent_since）。
+#   结算前都先把任务 CAS 成 blocked、排宿主提示；
 #   CAS 成功但结算冲突时，下次对账会按 blocked→failed 收口。
 # 函数用途: 解开没有后续工作（或后续工作长期读不出）却一直停在 waiting 的定时执行，让 job 恢复按周期派发；
 #   会写调度账本、任务状态和宿主提示。
@@ -144,6 +149,8 @@ def settle_stale_waiting(
     facts = _follow_up(service, run, (), now=current)
     unreadable_for = current - _unreadable_since.get(str(run["run_id"]), current)
     code = _stale_settlement_code(facts, unreadable_for / grace)
+    if not _absence_confirmed(str(run["run_id"]), code, current):
+        return None
     if not code or not _block_task(service, run, code, now=current):
         return None
     try:
@@ -175,6 +182,20 @@ def _has_lasting_follow_up(facts: FollowUpFacts) -> bool:
     from ..conversation.task_follow_up import GRACE_BOUND_FACTS
 
     return any(item not in GRACE_BOUND_FACTS for item in facts.present)
+
+
+# LLM: 只管 WAITING_WITHOUT_FOLLOW_UP：第一次看到只记时间、返回 False；至少隔 _STALE_CHECK_INTERVAL_SECONDS 再次看到
+#   才返回 True。其它结算码（包括继续等的空串）清掉记录并放行，读不出的限期另有 _unreadable_since 计时。副作用：改记录表。
+# 函数用途: 对"没有后续工作"做两次确认，避免对账恰好落在发布间隙里把健康任务结算掉。
+def _absence_confirmed(run_id: str, code: str, now: float) -> bool:
+    if code != SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP:
+        _absent_since.pop(run_id, None)
+        return True
+    if run_id not in _absent_since and len(_absent_since) >= _THROTTLE_TRACK_LIMIT:
+        # sorted 在 C 层一次性取完快照，并发插入不会让遍历出错。
+        for key, _at in sorted(_absent_since.items(), key=lambda item: item[1])[:_THROTTLE_TRACK_LIMIT // 2]:
+            _absent_since.pop(key, None)
+    return now - _absent_since.setdefault(run_id, now) >= _STALE_CHECK_INTERVAL_SECONDS
 
 
 # LLM: 未注入判定策略时按下限；只读 service.follow_up.grace_seconds。

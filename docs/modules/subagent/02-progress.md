@@ -1,5 +1,8 @@
 # 子代理维护状态
 
+2026-09-29（分支 `claude/75-scheduler-waiting-deadlock`）：`runner_completion_wake.has_persisted_subagent_parent` 改为公开函数（原私有名
+`_has_persisted_subagent_parent`，行为不变），供 `conversation/task_follow_up` 判定“直属会话的子代理才会给会话发完成唤醒”时复用同一判据。
+
 2026-09-28（分支 `claude/9a-capcfg-fallback-cleanup`）：巡检阈值不再自带兜底数字。
 - `due_check_settings` 没收到配置时用 `CapabilityConfig()`。
 - 删掉看板里从未命中的 `_make_default_capability_config` 分支：没有任何类定义这个方法。

@@ -124,6 +124,8 @@ pending 是宿主自动验证的中间状态，不是用户审批队列；显式
   另建预览任务或在选择器复制路径/renderer。缺少完整请求面时保留继承，测试中的已知容量只检验绑定合同。
 - 定向入口：`test_subagent_manager_core.py`、`test_subagent_effective_runtime_context.py`、`test_decision_subagent.py`；
   设计和完整容量尚缺的接缝见 [容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+直属父级判定：`runner_completion_wake.py::has_persisted_subagent_parent`（公开）决定一个孩子是给父子代理还是给会话发完成唤醒；定时执行收口的后续工作判定（`conversation/task_follow_up`）复用它，不另写一套。
+
 授权收口的状态所有权：`runner_completion_wake.py::_project_blocked_attempt` 保留原 attempt 通知，
 同时按最新 canonical 修正会话关联；`runner/worker.py::_continue_pending_run_after_session` 只接
 worker/run_id/准确 attempt，读取 canonical 后复用原 auto-start，不再以历史 result 决定下一片。

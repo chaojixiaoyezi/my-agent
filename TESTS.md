@@ -646,6 +646,14 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
 - **变异**（`PYTHONDONTWRITEBYTECODE=1`、每个变异独立 pycache 前缀，跑完逐字节还原）：64 个，首轮 59 个被抓住；补了进度策略读失败/跨任务、后台命令跨会话存储、取码顺序两组测试后，5 个存活全部被抓住，64/64；收口逻辑移到 `scheduler/active_run_closeout.py`（`SchedulerService` 触到类长度硬线）后按新位置重跑，仍 64/64。
 - **回归**：46 个相关测试文件（调度、工具操作账本、后台命令、后台运行时、宿主提示、恢复合同及全仓扫描守卫）；`test_recovery_code_policy` 先抓到两个新码未登记进 `ERROR_CONTRACTS`，已补登记。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_scheduler_waiting_deadlock.py agent_py_agent/tests/test_tool_unknown_reason_preservation.py -q`
+- **复审 B 的跟进（be 的 M-B1 与三条应改）**：
+  - be 的探针 P3 改写为回归（`TestGoalContinuationGap`）：对账落在 Goal 续跑空隙里只记下，下一条续跑唤醒出现即清掉，任务与 Goal 都不受影响；
+    健康长 Goal 跨 12 片、每片之间都有一次空隙对账，从头到尾不被结算；真正没有后续工作时第一次只记下、59.9 秒不结算、60 秒结算，提示写明
+    “只有进度策略……不能只靠它们续命”；
+  - 原 7 条“单次对账即结算”的用例改为隔 60 秒对账两次（`_reconcile_confirmed`）；
+  - be 的存活变异：坏唤醒一直在、中间出现一次在跑的子代理，6 倍计时从那之后重新起算；
+  - 本任务血缘子代理的坏完成唤醒（`root_task_id` 为子代理树根）记读不出，别的子代理的、以及前缀不同的去重键不计入；
+  - 变异 9 个全部被抓住（含 be 列出的“只在读全时清零”）；以上新用例与改写用例在提交 B 的代码上全部失败（跨类计时用例除外，它专门杀那个变异）。
 - **复审修复 B（be 的 S1–S5）**：
   - 真实血缘（S5）：`agent.subagents.create_run` 建真实子代理、`attrs.conversation_task_id` 为 srun；子代理在跑 → waiting；
     子代理结束、完成唤醒待处理 → 过宽限期仍 waiting；唤醒处理、任务收尾 → 对账按 done 结算；

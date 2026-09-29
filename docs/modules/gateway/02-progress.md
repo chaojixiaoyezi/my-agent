@@ -64,6 +64,7 @@ owner 维护顺带回收正文哈希缓存的孤儿键（分支 `my-agent/self-d
 复审修复 B：已终态但完成结果还没交回父级的子代理算后续工作（修掉收口时子代理刚结束被误标受阻）；宽限期改为
 `max(600, 5 × orphan_supervision_interval_seconds)`；Goal、guidance、进度策略只在宽限期内算；存量判定每 run 60 秒最多一次；
 读不出从首次观察到“只剩读不出”起计时；子代理血缘记录按 id 精确读，缺失或损坏记为读不出。
+复审 B 跟进：按“没有后续工作”结算要隔 60 秒两次确认（健康长 Goal 的续跑空隙不再被误结算）；本任务血缘子代理的坏完成唤醒按可能属于本任务处理。
 
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。

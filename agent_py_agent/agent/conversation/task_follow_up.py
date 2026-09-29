@@ -10,7 +10,8 @@
 #     待处理的完成唤醒由后台调度器消费；“刚终态、唤醒还在发布途中”只在 recent_seconds 窗口内计入；
 #   - pending_wakes：后台调度器消费待处理唤醒（反复失败的毒丸由唤醒毒丸结案兜底）；
 #   - pending_process_completion：受管后台命令退出后发完成通知；一直运行的服务按设计持续等待；
-#   - active_goal、pending_guidance、enabled_progress_policy：没有机制保证会消失（Goal 因结果未知收口后仍是 active、
+#   - active_goal、pending_guidance、enabled_progress_policy：没有机制保证会消失（健康的 Goal 在两片之间总有一条待处理的
+#     续跑唤醒——那一项才是会自己推进的事实；Goal 因结果未知收口后仍是 active、
 #     没有活动回合时 guidance 不会变成唤醒、进度唤醒跑完策略仍启用），只算“宽限期内”的后续工作（GRACE_BOUND_FACTS），
 #     过了宽限期由调用方忽略。
 #   改动时联查 scheduler/active_run_closeout.py、conversation/task_promotion 与 test_scheduler_waiting_deadlock。
@@ -85,7 +86,7 @@ def task_follow_up_facts(agent: object, query: FollowUpQuery, *, recent_seconds:
         (FOLLOW_UP_PENDING_GUIDANCE, lambda: bool(store.guidance.pending("task", selected, limit=1))),
         (FOLLOW_UP_OPEN_SUBAGENTS, lambda: _has_open_subagents(agent, selected)),
         (FOLLOW_UP_UNSETTLED_SUBAGENT, lambda: _has_unsettled_subagent(agent, selected, recent_since)),
-        (FOLLOW_UP_PENDING_WAKES, lambda: _has_pending_wakes(store, selected, ignored)),
+        (FOLLOW_UP_PENDING_WAKES, lambda: _has_pending_wakes(agent, selected, ignored)),
         (FOLLOW_UP_PENDING_PROCESS, lambda: _has_pending_process(agent, selected)),
         (FOLLOW_UP_ENABLED_POLICY, lambda: _has_enabled_policy(store, selected)),
     )
@@ -133,12 +134,12 @@ def _has_open_subagents(agent: object, task_id: str) -> bool:
 # 函数用途: 判断任务是否有已结束、但完成结果还没交回父级的子代理。
 def _has_unsettled_subagent(agent: object, task_id: str, recent_since: float) -> bool:
     from ..subagents.models import SUBAGENT_WAKE_STATUSES, task_status_in
-    from ..subagents.runner_completion_wake import _has_persisted_subagent_parent
+    from ..subagents.runner_completion_wake import has_persisted_subagent_parent
     from .task_promotion import conversation_task_lineage_runs_or_raise
 
     finished = [run for run in conversation_task_lineage_runs_or_raise(agent, task_id)
                 if task_status_in(getattr(run, "status", ""), SUBAGENT_WAKE_STATUSES)
-                and not _has_persisted_subagent_parent(agent.subagents.load, run)]
+                and not has_persisted_subagent_parent(agent.subagents.load, run)]
     if not finished:
         return False
     pending_keys = _pending_dedupe_keys(agent.conversation_store)
@@ -168,10 +169,11 @@ def _pending_dedupe_keys(store: object) -> frozenset[str]:
 
 
 # LLM: 读取全部待处理唤醒；读到的记录里已有匹配就直接算存在，同类坏记录不能遮住确认存在的后续工作；没有匹配时，
-#   读错误里能解析出 root_task_id 且不是本任务的不计入，其余抛 _Unreadable。排除调用方正在处理的唤醒和定时触发本身。
+#   读错误里能解析出 root_task_id 且不是本任务的不计入，其余抛 _Unreadable。例外：去重键以 subagent-finished:<本任务血缘
+#   子代理 id>: 开头的坏唤醒（它的 root_task_id 是子代理树的根）仍按可能属于本任务处理。排除调用方正在处理的唤醒和定时触发本身。
 # 函数用途: 判断是否还有指向该任务、尚未处理的唤醒（子代理生命周期、后台命令完成、Goal 续跑等）。
-def _has_pending_wakes(store: object, task_id: str, ignored: frozenset[str]) -> bool:
-    signals, errors = store.wakes.pending_report(limit=0)
+def _has_pending_wakes(agent: object, task_id: str, ignored: frozenset[str]) -> bool:
+    signals, errors = agent.conversation_store.wakes.pending_report(limit=0)
     if any(
         str(getattr(signal, "root_task_id", "") or "").strip() == task_id
         and str(getattr(signal, "wake_signal_id", "") or "") not in ignored
@@ -179,8 +181,20 @@ def _has_pending_wakes(store: object, task_id: str, ignored: frozenset[str]) -> 
         for signal in signals
     ):
         return True
-    _raise_unscoped(errors, lambda payload: _owned_elsewhere(payload, "root_task_id", task_id))
+    if errors:
+        lineage = frozenset(agent.subagent_run_ids_for_request(task_id))
+        _raise_unscoped(errors, lambda payload: _owned_elsewhere(payload, "root_task_id", task_id)
+                        and not _finished_wake_of(payload, lineage))
     return False
+
+
+# LLM: 只看去重键：subagent-finished:<run_id>:… 且 run_id 在本任务血缘里，才算本任务子代理的完成唤醒。
+# 函数用途: 判断一条读不出的唤醒是不是本任务血缘里某个子代理的完成唤醒。
+def _finished_wake_of(payload: dict[str, object], lineage: frozenset[str]) -> bool:
+    key = payload.get("dedupe_key")
+    if not isinstance(key, str) or not key.startswith(_SUBAGENT_FINISHED_KEY_PREFIX):
+        return False
+    return key[len(_SUBAGENT_FINISHED_KEY_PREFIX):].split(":", 1)[0] in lineage
 
 
 # LLM: 后台命令的完成义务由 process_events 的权威记录判定（读错误已在那里按归属限定）；仍读不出时它抛出。

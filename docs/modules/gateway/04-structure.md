@@ -1572,7 +1572,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   存在才进 waiting；已终态但完成结果还没交回父级的子代理也算；读不到按仍有后续工作处理。没有后续工作就把任务 CAS 成
   blocked、排 `scheduler:<job_id>` 宿主提示、run 记 failed（`SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN` / `SCHEDULED_TASK_UNFINISHED`），
   job 周期不变。存量 waiting 停满宽限期（`max(600, 5 × orphan_supervision_interval_seconds)`）且无后续工作时，对账按
-  `SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 结算；Goal、guidance、进度策略过了宽限期不再计入；同一 run 的判定 60 秒最多算一次。某一项读不出来时先按归属限定
+  `SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 结算（要隔 60 秒两次确认，盖住 Goal 续跑等发布间隙）；Goal、guidance、进度策略过了宽限期不再计入；同一 run 的判定 60 秒最多算一次。某一项读不出来时先按归属限定
   （读到本任务的匹配就算存在，坏记录属于别的任务就不计入），剩下的按“仍有后续工作”继续等并打节流告警，从首次观察到“只剩读不出”起满宽限期的 6 倍才按
   `SCHEDULED_TASK_FOLLOW_UP_UNREADABLE` 结算；收口 CAS 失败只释放租约并退避 30 秒。管理员的人工出口是 `/endtask`。
   设计见 `DESIGN_LEDGER.md` 同名条目。
