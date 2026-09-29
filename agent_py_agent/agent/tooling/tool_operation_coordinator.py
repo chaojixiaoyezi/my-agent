@@ -602,6 +602,9 @@ def _reopened_operation_result(
     return result
 
 
+# LLM: 本次调用被未知记录拦下、handler 没有执行（effect_outcome=not_started），错误码保持 TOOL_OPERATION_OUTCOME_UNKNOWN
+#   防重做；reported_error_code 必须带出上一次的原始结论（第一个不是通用未知码的码），不能被通用码覆盖。
+# 函数用途: 生成"上次结果未知、本次不重做"的结构化回执，并保留上次的原始错误结论供排障。
 def _unknown_claim_result(
     request: ToolOperationExecutionRequest,
     claim: ToolOperationClaim,
@@ -610,10 +613,12 @@ def _unknown_claim_result(
     source_ref: str = "",
 ) -> ToolHandlerOutcome:
     prior = _result_from_record(claim.record)
-    reported = (
-        prior.reported_error_code
-        if prior.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN"
-        else claim.record.error_code
+    # 原始结论优先：按"上一次提供方回报的 reported_error_code → 上一次的 error_code → 记录上的 error_code"取第一个
+    # 不是通用未知码的值；都没有才用通用未知码。旧逻辑在上一次已是未知码时直接取记录码，把原始结论覆盖掉了。
+    reported = next(
+        (code for code in (prior.reported_error_code, prior.error_code, claim.record.error_code)
+         if code and code != "TOOL_OPERATION_OUTCOME_UNKNOWN"),
+        "TOOL_OPERATION_OUTCOME_UNKNOWN",
     )
     # 本次未执行(claim 拦截,handler 没被调用)是明确事实——不能算「本次结果未知」。
     # effect_outcome=not_started 让 executor 的最终归档(status=failed)与模型看到的

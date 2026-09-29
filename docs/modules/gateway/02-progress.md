@@ -50,6 +50,13 @@ owner 维护顺带回收正文哈希缓存的孤儿键（分支 `my-agent/self-d
 - 回归见 `test_end_task_control.py`。根因修复（只在确有后续工作时才进 waiting）另排，见 DESIGN_LEDGER。
 - 9a 复审跟进：6 个 `END_TASK_*` 拒绝码登记进 `ERROR_CONTRACTS`（全仓守卫 `test_recovery_code_policy` 转绿，字典里的码另有模块测试钉住）；预览和确认结果固定写明“结束任务不会停止它启动的后台命令；这些命令结束后的通知会落到已取消的任务上”。
 
+定时执行 waiting 死锁（分支 `claude/75-scheduler-waiting-deadlock`，2026-09-29）：一轮定时执行结束后任务仍是 active 时，
+`_finish_scheduler_wake_claim` 改调 `scheduler/active_run_closeout.close_active_run`：`conversation/task_follow_up` 判定有结构化后续工作才进 waiting；
+没有就把任务 CAS 成 blocked、排 `scheduler:<job_id>` 宿主提示、run 记 failed（工具结果无法确认为 `SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN`，
+其它为 `SCHEDULED_TASK_UNFINISHED`），job 下一周期照常派发。`blocked` 进入任务终态映射；存量 waiting 停满 600 秒且无后续工作时由对账按
+`SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 结算。报告新增 `runtime_status/runtime_reason`，来自 `AgentRunResult`。
+设计见 `DESIGN_LEDGER.md` 同名条目，回归见 `test_scheduler_waiting_deadlock.py`、`test_tool_unknown_reason_preservation.py`。
+
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。
 - 现在由 `execute_settings_control` 经 `capability_config_for_agent(base_agent)` 取得 capability 配置，作为关键字参数只交给这两个视图。

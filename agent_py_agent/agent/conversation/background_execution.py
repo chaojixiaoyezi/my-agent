@@ -66,6 +66,8 @@ class BackgroundExecutionResult:
     operation_verification: dict[str, object]
     assistant_commentaries: tuple[str, ...]
     display_snapshot: dict[str, object]
+    runtime_status: str = ""
+    runtime_reason: str = ""
 
 
 # LLM: 仅在同片八次 Compact 都推进 canonical 代次后让出；调度器必须单独处理，不将其记为失败。
@@ -437,4 +439,6 @@ def collect_background_execution_result(
         delivery_artifacts=artifacts, message_tool_deliveries=deliveries,
         operation_verification=operation_verification, assistant_commentaries=assistant_commentaries,
         display_snapshot=display_snapshot,
+        runtime_status=str(getattr(result, "runtime_status", "") or ""),
+        runtime_reason=str(getattr(result, "runtime_reason", "") or ""),
     )

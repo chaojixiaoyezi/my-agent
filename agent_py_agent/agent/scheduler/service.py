@@ -8,12 +8,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from .active_run_closeout import settle_stale_waiting
 from .repository import (
     SchedulerConflictError,
     SchedulerNotFoundError,
@@ -23,6 +24,7 @@ from .repository import (
 
 _SCHEDULER_WAKE_REASON = "scheduled_job_due"
 _DEFAULT_CLAIM_SECONDS = 300
+# blocked 对这一次定时执行是终态（需要人来看），job 的后续周期照常派发；结算码为 SCHEDULED_TASK_BLOCKED。
 _TASK_STATUS_TO_RUN_STATUS = {
     "completed": "done",
     "done": "done",
@@ -31,6 +33,7 @@ _TASK_STATUS_TO_RUN_STATUS = {
     "superseded": "cancelled",
     "taken_over": "cancelled",
     "abandoned": "failed",
+    "blocked": "failed",
     "channel_error": "failed",
     "failed": "failed",
     "timeout": "failed",
@@ -129,16 +132,21 @@ class SchedulerRunHeartbeat:
 class SchedulerService:
     """Reserve, publish, claim, and close scheduler runs using durable facts only."""
 
+    # LLM: follow_up_facts(thread_id, task_id, ignore_wake_ids) 由组合根注入（conversation.task_follow_up），
+    #   供 active_run_closeout 判定；未注入时按"读不到后续工作事实"处理，一律保持原来的 waiting 行为（fail closed）。
+    # 函数用途: 绑定调度账本、会话存储和两个只读查询。
     def __init__(
         self,
         repository: SchedulerRepository,
         *,
         conversation_store: Any,
         skill_snapshot_provider: Callable[[], Any] | None = None,
+        follow_up_facts: Callable[[str, str, Iterable[str]], tuple[str, ...]] | None = None,
     ) -> None:
         self.repository = repository
         self.conversation_store = conversation_store
         self.skill_snapshot_provider = skill_snapshot_provider
+        self.follow_up_facts = follow_up_facts
 
     # LLM: Every queued scheduler run is also the durable root task for its wake. Keep the
     # run id in both typed wake identity and metadata so background lifecycle reads one authority.
@@ -357,7 +365,8 @@ class SchedulerService:
         except (SchedulerConflictError, SchedulerNotFoundError):
             return None
 
-    # LLM: 等待对账只读精确TaskLink并复用领取/交付同一终态映射；缺失、损坏、活动或未知状态不结算。
+    # LLM: 等待对账只读精确TaskLink并复用领取/交付同一终态映射；缺失、损坏或未知状态不结算。
+    #   任务仍是 active 时走 active_run_closeout.settle_stale_waiting 这个结构化出口：停满宽限期且没有任何后续工作才结算，否则继续等。
     # 函数用途: 在对应持久任务真正终结后结算原waiting运行，不负责冻结回复重投或另建执行状态。
     def reconcile_waiting_run(
         self,
@@ -378,7 +387,7 @@ class SchedulerService:
         task_status = str(getattr(link, "status", "") or "").strip().lower()
         terminal_status = scheduler_terminal_status_for_task(task_status)
         if terminal_status is None:
-            return None
+            return settle_stale_waiting(self, run, now=now) if task_status == "active" else None
         error_code = "" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}"
         try:
             return self.repository.finish_waiting_run(

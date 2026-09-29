@@ -630,6 +630,23 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
     - step16b 改过的测试文件（真实链路、桌面防线、账本、会话存储等 6 个）127 passed、4 xfailed，xfail 是约定的严格 xfail；
     - rebase 后的第一个提交单独检出，定向 6 个文件 88 passed。
 
+## 定时执行 waiting 死锁与未知结论保留（2026-09-29，分支 `claude/75-scheduler-waiting-deadlock`，基于 `c101d325a`）
+
+- **来源**：my-agent-2/4 的 300 秒定时任务永久停摆。前台 `run_command` 回报通用 `TOOL_OPERATION_OUTCOME_UNKNOWN` → 回合 unfinished、任务仍 active → 无条件 `park_waiting`；waiting 只在任务终态时对账、同一 job 有 run 就不派发，于是死锁。两条操作的 `unknown_reason` 只剩通用码、`outcome_json.result` 为空。
+- **`test_scheduler_waiting_deadlock.py`**（真实 SimpleAgent、真实调度账本和会话存储）：
+  - 无后续工作 + 工具结果未知：任务 blocked、run 记 failed（`SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN`）、排一条 `scheduler:<job_id>` 宿主提示（写明需人工确认是否重做），下一周期照常预约新 run；
+  - 正向对照：挂着一条真实子代理生命周期唤醒时照常 waiting，任务仍 active、没有提示，下一周期被 active run 挡住（原行为）；
+  - 其它 unfinished 原因用 `SCHEDULED_TASK_UNFINISHED`；正在处理的唤醒不算自己的后续工作；任务被并发改掉或任务权威读写失败时只释放租约；服务没注入判定时 fail closed 保持 waiting；
+  - 存量 waiting 出口：599 秒不动、600 秒结算为 `SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 并放行下一周期；有后续工作时停再久也不动；任务已 blocked 的 waiting 按 `SCHEDULED_TASK_BLOCKED` 结算；
+  - 后续工作判定逐项正反例：活跃/受阻 Goal、guidance、未终态/已结束子代理、唤醒（含定时触发和忽略 id 的排除、别的任务）、后台命令（真实进程记录，完成通知发出前后、别的会话存储、权威读失败抛错）、进度策略（含别的任务、读失败）、缺存储或任务 id；
+  - 提示按 job 合并：同一 job 连续受阻只留一条，不同 job 各留一条；
+  - 端到端：真实 `BackgroundMainAgentRuntime` + 调度器 tick，模型尝试替换为 `runtime_status=unfinished / runtime_reason=TOOL_OPERATION_OUTCOME_UNKNOWN` 的结构化结果，验证报告带出原因、run 记 failed、任务 blocked、提示入队，下一次 tick 照常执行。
+- **`test_tool_unknown_reason_preservation.py`**：受阻重放保留 `TOOL_TIMEOUT`；handler 回报具体码时 `unknown_reason` 带具体码，只回报通用码时保持原样；`_unknown_claim_result` 取码顺序四组参数；受管账本 UNKNOWN 写入 result 与 error_code、空结果不写；后台 attach 失败 / 状态未确认 / 启动清理未确认各自的具体码及对照。
+- `test_scheduler_runtime.py` 原 waiting 用例改为先放一条真实生命周期唤醒：进 waiting 现在必须有后续工作事实。
+- **变异**（`PYTHONDONTWRITEBYTECODE=1`、每个变异独立 pycache 前缀，跑完逐字节还原）：64 个，首轮 59 个被抓住；补了进度策略读失败/跨任务、后台命令跨会话存储、取码顺序两组测试后，5 个存活全部被抓住，64/64；收口逻辑移到 `scheduler/active_run_closeout.py`（`SchedulerService` 触到类长度硬线）后按新位置重跑，仍 64/64。
+- **回归**：46 个相关测试文件（调度、工具操作账本、后台命令、后台运行时、宿主提示、恢复合同及全仓扫描守卫）；`test_recovery_code_policy` 先抓到两个新码未登记进 `ERROR_CONTRACTS`，已补登记。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_scheduler_waiting_deadlock.py agent_py_agent/tests/test_tool_unknown_reason_preservation.py -q`
+
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 
 - **新增用例**：`test_session_task_real_chain.py` 加了 `test_admin_lists_owner_sessions_and_reaches_the_listed_target`，按派活、发消息参数化成两条。

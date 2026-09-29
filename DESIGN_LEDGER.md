@@ -117,6 +117,23 @@
 - 从核对 attempt 到做 CAS 之间，可能有唤醒新起一个 attempt（9a 记录，不挡合并）；确认前后都只认结构化事实，CAS 仍只在 active 时改。
 - 设计细节见 [CLI 参考](CLI_REFERENCE.md) 的 `/endtask` 说明。
 
+## 定时执行没做完时只凭后续工作事实决定 waiting（2026-09-29，分支 `claude/75-scheduler-waiting-deadlock`，基于 `c101d325a`，本地验证通过，待集成）
+
+来源：my-agent-2/4 的 300 秒定时任务永久停摆。一次前台 `run_command` 回报 `TOOL_OPERATION_OUTCOME_UNKNOWN`，回合以 unfinished 结束、会话任务仍是 active；`_finish_scheduler_wake_claim` 无条件 `park_waiting`，而 waiting 只在任务终态时对账、`_job_has_active_run` 又让同一 job 有 run 就不派发，于是死锁。两条操作的 `unknown_reason` 都只剩通用码、受管账本的 `result` 为空，排障也无从下手。
+
+已实现（状态：本地通过，待集成）：
+- 进 waiting 的前提是结构化后续工作事实：`conversation/task_follow_up.task_follow_up_facts` 只读活跃 Goal、指向该任务的待处理 guidance、未终态子代理、指向该任务的待处理唤醒（排除定时触发本身和正在处理的唤醒）、未发完成通知的受管后台命令、启用的进度策略。任何一项读取失败记 `follow_up_unreadable`，按仍有后续工作处理（fail closed）。
+- 没有后续工作时（`scheduler/active_run_closeout.close_active_run`）：会话任务 CAS 成 `blocked`（期望原状态 active），排一条来源为 `scheduler:<job_id>` 的宿主提示，这次定时执行记 failed。结算码按 `runtime_reason` 选：工具结果无法确认 → `SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN`（提示写明需人工确认是否重做），其它 → `SCHEDULED_TASK_UNFINISHED`。job 的周期不动，下一周期照常派发。CAS 没成功只释放租约，交给原路径按新状态收口。
+- `blocked` 进入任务终态映射（→ failed，码 `SCHEDULED_TASK_BLOCKED`），也顺带修好了报告 `task_status=blocked` 时每 30 秒重试一次、永远结不了的情况。
+- 存量 waiting 的出口（`settle_stale_waiting`，由 `reconcile_waiting_run` 调用）：对账时任务仍 active、`waiting_since` 已满 600 秒宽限、且没有任何后续工作，就同样标受阻、排提示，按 `SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 结算。宽限只为盖住子代理刚结束、生命周期唤醒尚未发布的间隙。
+- 原始结论不丢：`run_command` 后台三处原先只报通用码的分支补上具体 `reported_error_code`（`BACKGROUND_SESSION_ATTACH_UNCONFIRMED`、`BACKGROUND_SESSION_STATUS_UNCONFIRMED`、`BACKGROUND_LAUNCH_CLEANUP_UNCONFIRMED`，登记进 `ERROR_CONTRACTS`，均不可自动重试、需人工核对）；受管账本 UNKNOWN 分支写入提供方回报的 `result` 与 `error_code`；`_unknown_claim_result` 取上一次原始结论时顺序反了（上一次已是未知码时直接用记录码，把原结论盖掉），改为取第一个不是通用未知码的值。
+- 报告链路：`AgentRunResult.runtime_status/runtime_reason` 经 `BackgroundExecutionResult`、`_BackgroundSlicePlan` 带到 `BackgroundMainAgentReport`，收口只读这两个结构化值。
+
+边界与未做：
+- 前台 `run_command` 命令已退出、退出码已知、只是清理未确认的分支：已由同分支的 `84e8db619` + `067d2dd3e` 单独先行集成（随 step16g 上线），如实返回执行结果并附结构化告警，见本台账「前台命令已退出、只是清理未确认时如实返回执行结果」一节。
+- `process_sessions.py`、`pty_sessions.py` 里另外几处只报通用未知码的分支：已由 `47bd37d20` 补上具体原因码（随 step16f/step16g 上线），见本台账「后台进程与终端会话结果未知时带出具体原因码」一节。
+- 受阻任务由用户处理；本轮没有新增自动重做或自动恢复。
+
 ## 墙钟超时后旧请求仍在途，重试可能向供应商重复发送（2026-09-28，来源：`27283cb76` 复审，基于 `6c2fad4da`，待排期）
 
 **现象**：模型调用的发出前登记（子代理业务标记、发送前钩子、插话提交）已经完成、HTTP 请求正在发出或等待响应时，

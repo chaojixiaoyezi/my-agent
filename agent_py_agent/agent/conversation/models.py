@@ -678,6 +678,10 @@ class BackgroundMainAgentReport:
     # 路线归属：local(本地会话就是读取面) / external(声明过外发、欠一次真实外送) /
     # undeclared(部署没声明过该通道，永不外发)。排障时用它区分“没发”与“不该发”。
     route_ownership: str = ""
+    # 这片执行的结构化结束状态与原因（AgentRunResult.runtime_status / runtime_reason），定时执行收口据此选择
+    # 结算码（如工具结果无法确认）；只读结构化值，不解析回复正文。冻结重投等没有新执行的报告保持空。
+    runtime_status: str = ""
+    runtime_reason: str = ""
 
 
 # LLM: One immutable event preserves the model-call summary produced by one

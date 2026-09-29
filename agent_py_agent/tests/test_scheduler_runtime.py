@@ -407,6 +407,11 @@ def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_pat
         }
     )
 
+    # 进 waiting 必须有结构化的后续工作事实：这里是一条尚未处理、指向该任务的子代理生命周期唤醒。
+    store.wakes.raise_signal({
+        "thread_id": thread.thread_id, "root_task_id": claim.run_id,
+        "reason": "subagent_runner_finished", "urgency": "normal", "now": 1_002,
+    })
     report = BackgroundMainAgentReport(
         thread_id=thread.thread_id,
         task_id=claim.run_id,

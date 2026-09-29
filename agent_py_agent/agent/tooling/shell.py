@@ -1217,7 +1217,8 @@ class ShellTool(BaseTool):
             # 已交接资源仍归持久 session，查询故障不能把它当未启动或回滚。
             return ToolHandlerOutcome(self.model_spec.name, False,
                                       json.dumps({"status": "unknown", "session_id": hosted.record["session_id"], "error_type": type(exc).__name__}),
-                                      error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown")
+                                      error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown",
+                                      reported_error_code="BACKGROUND_SESSION_ATTACH_UNCONFIRMED")
 
 
     def _run_command(
@@ -1807,7 +1808,9 @@ def _background_start_outcome(
     if status not in {"exited", "killed"} or type(state.get("exit_code")) is not int:
         payload = {"status": status, "session_id": record.session_id, "output_file": str(log_path)}
         return ToolHandlerOutcome(tool_name, False, json.dumps(payload, ensure_ascii=False),
-                                  error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown")
+                                  error_code="TOOL_OPERATION_OUTCOME_UNKNOWN", effect_outcome="unknown",
+                                  reported_error_code="BACKGROUND_SESSION_STATUS_UNCONFIRMED",
+                                  result_envelope={"process": payload})
     exit_code = state["exit_code"]
     payload = {
         "status": status,
@@ -1851,8 +1854,9 @@ def _background_launch_failure(tool_name: str, error: BackgroundLaunchError) -> 
         payload.pop("session_id", None)
     if error.cleanup_error:
         payload["cleanup_error"] = error.cleanup_error
+    reported = "BACKGROUND_LAUNCH_CLEANUP_UNCONFIRMED" if code == "TOOL_OPERATION_OUTCOME_UNKNOWN" else ""
     return ToolHandlerOutcome(tool_name, False, json.dumps(payload, ensure_ascii=False), error_code=code,
-                              effect_outcome=effect, result_envelope={"process": payload})
+                              effect_outcome=effect, result_envelope={"process": payload}, reported_error_code=reported)
 
 
 # LLM: Guidance explains the stable session handle without claiming port or network readiness.

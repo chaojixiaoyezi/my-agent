@@ -53,6 +53,9 @@
   - 同会话其他窗口：`foreground_transcript.write_host_notice` 同步成 system_message 显示事件，并进入最终快照。
   - 历史回放：`history_display._host_notice_events` 从最终消息元数据重建，挂在同片用户消息那一行，排在用户消息之后、回复之前。带快照的最终消息里已经有同一事件，不重复生成。
 - **来源清理**：使用方可以用 `clear_host_notices(store, thread, source)` 清掉某个来源的待送达提示。智能程度检测在两种情况下清：`/effort` 查看结论时，以及开始新一轮检测时。
+- **定时任务受阻**（2026-09-29）：一轮定时执行没做完、又没有任何后续工作时，`scheduler/active_run_closeout._block_task` 以来源
+  `scheduler:<job_id>`、码为结算码（如 `SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN`）排一条提示，说明这一轮已停下、需要人工确认，
+  job 之后仍按周期运行。同一 job 反复受阻只留最新一条，不同 job 各留各的。
 
 ## 4. 边界
 

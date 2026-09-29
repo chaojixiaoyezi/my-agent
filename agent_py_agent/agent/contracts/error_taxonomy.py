@@ -2729,6 +2729,29 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="已请求关闭终端会话，但进程树退出没有确认，会话仍保留；先查看会话状态，再决定是否再次关闭。",
     ),
+    # 以下三个是后台 run_command 结果未知时的具体原因（reported_error_code），错误码本身仍是 TOOL_OPERATION_OUTCOME_UNKNOWN；
+    # 单列是为了 unknown_reason 与排障能说清卡在哪一步，不改变“禁止自动重做”的边界。
+    "BACKGROUND_SESSION_ATTACH_UNCONFIRMED": ErrorContract(
+        code="BACKGROUND_SESSION_ATTACH_UNCONFIRMED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="后台命令已交接给持久会话，但登记或查询这一会话失败；用返回的 session_id 查看进程状态，不要重新启动同一命令。",
+    ),
+    "BACKGROUND_SESSION_STATUS_UNCONFIRMED": ErrorContract(
+        code="BACKGROUND_SESSION_STATUS_UNCONFIRMED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="后台命令已启动，但当前状态或退出码无法确认；用返回的 session_id 查看进程状态和日志，不要重新启动同一命令。",
+    ),
+    "BACKGROUND_LAUNCH_CLEANUP_UNCONFIRMED": ErrorContract(
+        code="BACKGROUND_LAUNCH_CLEANUP_UNCONFIRMED",
+        category="tool",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="后台命令启动中途失败，已启动的进程是否清理干净无法确认；先核对相关进程和产物，再决定是否重新启动。",
+    ),
     "TOOL_OPERATION_CANCELLED_NOT_STARTED": ErrorContract(
         code="TOOL_OPERATION_CANCELLED_NOT_STARTED",
         category="tool",

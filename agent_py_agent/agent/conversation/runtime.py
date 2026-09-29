@@ -623,6 +623,8 @@ class _BackgroundSlicePlan:
     assistant_commentaries: tuple[str, ...] = ()
     display_snapshot: dict[str, object] | None = None
     counters: tuple[int, int, int] = (0, 0, 0)
+    runtime_status: str = ""
+    runtime_reason: str = ""
 
 
 # LLM: 交付收口只有一条路径：能自己外发的走 message-tool 直投镜像，其余交给独立交付入口完成
@@ -698,6 +700,8 @@ def _complete_background_slice(
         delivery_reason=delivery_reason,
         wake_handled=wake_handled,
         task_status=_background_task_link_status(runtime.agent, request, store=runtime.store),
+        runtime_status=plan.runtime_status,
+        runtime_reason=plan.runtime_reason,
         commit_kind=commit.commit_kind,
         message_id=commit.message_id,
         route_ownership=plan.route_ownership,
@@ -790,6 +794,8 @@ class BackgroundMainAgentRuntime:
                     execution_result.tool_success_count,
                     execution_result.material_progress_count,
                 ),
+                runtime_status=execution_result.runtime_status,
+                runtime_reason=execution_result.runtime_reason,
             ),
         )
 
@@ -3873,7 +3879,9 @@ def _handle_nonquota_wake_error(
 
 
 # LLM: 原交付事实先决定是否释放；已交付仍按当前任务状态复用服务映射，未知不得猜done或确认wake。
-# 函数用途: 结算本次原定时claim并保留真实投递结果，活动任务继续waiting，取消和失败保留各自终态。
+#   任务仍 active 时交给 scheduler.active_run_closeout.close_active_run：有结构化后续工作才 waiting，否则结算成受阻、
+#   run 记 failed，job 下一周期照常派发（2026-09-29 修复定时任务永久停在 waiting 的死锁）。
+# 函数用途: 结算本次原定时claim并保留真实投递结果，有后续工作的活动任务进waiting，取消和失败保留各自终态。
 def _finish_scheduler_wake_claim(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3893,14 +3901,7 @@ def _finish_scheduler_wake_claim(
         return None
     task_status = str(report.task_status or "").strip().lower()
     if task_status == "active":
-        waiting = scheduler.scheduler_service.park_waiting(
-            claim,
-            response=report.response,
-            delivery_status=report.delivery_status,
-            delivery_reason=report.delivery_reason,
-            now=time.time(),
-        )
-        return report if waiting is not None else None
+        return report if _close_active_scheduler_run(scheduler, signal, report, claim) is not None else None
     from ..scheduler.service import scheduler_terminal_status_for_task
 
     terminal_status = scheduler_terminal_status_for_task(task_status)
@@ -3919,6 +3920,22 @@ def _finish_scheduler_wake_claim(
         now=time.time(),
     )
     return report if terminal is not None else None
+
+
+# LLM: 只把报告里的结构化字段（投递事实、runtime_status/runtime_reason）和正在处理的唤醒 id 交给
+#   scheduler.active_run_closeout.close_active_run；返回 None 表示租约已释放、这次没有结算。副作用：写调度账本、任务状态、宿主提示。
+# 函数用途: 一轮定时执行结束后任务仍是 active 时，按有无后续工作决定进 waiting 还是结算成受阻。
+def _close_active_scheduler_run(
+    scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, report: BackgroundMainAgentReport, claim: object,
+) -> dict[str, object] | None:
+    from ..scheduler.active_run_closeout import SchedulerRunOutcome, close_active_run
+
+    outcome = SchedulerRunOutcome(
+        response=report.response, delivery_status=report.delivery_status, delivery_reason=report.delivery_reason,
+        runtime_status=report.runtime_status, runtime_reason=report.runtime_reason,
+        ignore_wake_ids=(signal.wake_signal_id,),
+    )
+    return close_active_run(scheduler.scheduler_service, claim, outcome, now=time.time())
 
 
 # LLM: 先确认原 wake，再按精确 Goal 或孩子事实安排续跑，最后对账定时等待；不改变持久顺序。

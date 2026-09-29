@@ -119,6 +119,28 @@ def owner_has_pending_process_completions(owner_home: Path) -> bool:
     return bool(errors) or any(record.get("completion_target") and not record.get("completion_notice_id") for record in records)
 
 
+# LLM: 只按记录里的结构化 completion_target（store_root + task_id）判断这个任务还欠不欠一次完成通知；
+#   权威读取出错时抛 ProcessSessionAuthorityError，调用方必须按"读不到"处理，不能当成没有后台命令。
+# 函数用途: 判断某个会话任务是否还有尚未发出完成通知的受管后台命令（命令仍在跑或刚结束待通知）。
+def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
+    store = getattr(agent, "conversation_store", None)
+    root = _agent_process_root(agent)
+    selected = str(task_id or "").strip()
+    if store is None or root is None or not selected:
+        return False
+    records, errors = ProcessSessionStore(root).list_records()
+    if errors:
+        raise ProcessSessionAuthorityError(errors[0])
+    store_root = str(store.storage.root)
+    return any(
+        isinstance(record.get("completion_target"), dict)
+        and str(record["completion_target"].get("store_root") or "") == store_root
+        and str(record["completion_target"].get("task_id") or "") == selected
+        and not record.get("completion_notice_id")
+        for record in records
+    )
+
+
 # LLM: 终态和收件身份匹配后分辨 ready/receipt_pending；发布间隙或回执写失败须等重投，不能误消费。
 # 函数用途: 核对自然收尾后的欠报通知；返回空表示无此义务，不重新运行命令或恢复 Goal。
 def process_completion_delivery_state(agent: object, signal: object) -> str:

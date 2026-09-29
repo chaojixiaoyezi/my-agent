@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 from .agent_core.capability_request_tool import CapabilityRequestTool
@@ -83,6 +84,7 @@ from .conversation.session_messaging import (
     session_messaging_tool_visible,
     session_task_tool_visible,
 )
+from .conversation.task_follow_up import task_follow_up_facts
 from .delivery import (
     DeliveryContext,
     DeliveryService,
@@ -493,10 +495,12 @@ class SimpleAgent(
                 self.home_paths.global_index_dir / "scheduler_due.sqlite3"
             ),
         )
+        # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性。
         self.scheduler_service = SchedulerService(
             self.scheduler_repository,
             conversation_store=self.conversation_store,
             skill_snapshot_provider=self.current_skill_snapshot,
+            follow_up_facts=partial(task_follow_up_facts, self),
         )
         self.subagents = _build_subagent_manager(self, paths)
         # Adapter daemon health belongs to the shared gateway process, while channel binding,

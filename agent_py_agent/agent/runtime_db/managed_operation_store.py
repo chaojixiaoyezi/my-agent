@@ -263,11 +263,13 @@ class ManagedOperationStore:
         try:
             if request.status == TOOL_OPERATION_UNKNOWN:
                 reason = str(request.unknown_reason or "") or "effect_outcome_unknown"
+                # 结果未知也要把提供方回报的结构化结果和错误码留下（reported_error_code、退出码等），
+                # 否则事后只剩一句 effect_outcome_unknown，排障无从下手；状态仍是 UNKNOWN，不会被重放。
                 _mark_unknown_single_transaction(
                     self._repo,
                     request.operation_id,
                     holder_id=str(request.holder_id or ""),
-                    reason=reason,
+                    mark=_UnknownMark(reason, _json_payload(request.result), str(request.error_code or "")),
                     expected_generation=int(request.generation or 0),
                 )
             else:
@@ -1506,12 +1508,21 @@ def _settle_operation_via_repo(
         conn.commit()
 
 
+# LLM: reason 写进 reason / unknown_reason 双键；result 与 error_code 只在非空时写入，保留提供方回报的结构化事实。
+# 类用途: 一次 UNKNOWN 标记要写进账本的内容。
+@dataclass(frozen=True)
+class _UnknownMark:
+    reason: str
+    result: dict[str, Any] | None = None
+    error_code: str = ""
+
+
 def _mark_unknown_single_transaction(
     repo: Any,
     operation_id: str,
     *,
     holder_id: str,
-    reason: str,
+    mark: _UnknownMark,
     expected_generation: int | None = None,
 ) -> None:
     """finish(UNKNOWN) 单事务内联：行 UNKNOWN + 删锁 + mutation DIRTY 同 commit。
@@ -1564,8 +1575,12 @@ def _mark_unknown_single_transaction(
                 f"UNKNOWN 标记拒绝: operation {operation_id} workspace_epoch "
                 f"已翻新 (claim epoch={claim_epoch}, 当前={row['_current_epoch']})"
             )
-        payload["reason"] = reason
-        payload["unknown_reason"] = reason
+        payload["reason"] = mark.reason
+        payload["unknown_reason"] = mark.reason
+        if mark.result:
+            payload["result"] = mark.result
+        if mark.error_code:
+            payload["error_code"] = mark.error_code
         updated = conn.execute(
             """
             UPDATE tool_operations
@@ -1584,7 +1599,7 @@ def _mark_unknown_single_transaction(
             _mark_mutation_dirty_in_tx(
                 conn,
                 scope,
-                reason=f"settle_failed:{reason[:200]}",
+                reason=f"settle_failed:{mark.reason[:200]}",
                 attempt_id=str(row["attempt_id"] or ""),
                 now=now,
             )
@@ -1634,7 +1649,7 @@ def _mark_settle_failure(
             repo,
             operation_id,
             holder_id=holder_id,
-            reason=reason,
+            mark=_UnknownMark(reason),
             expected_generation=expected_generation,
         )
     except (KeyError, RuntimeConflictError, sqlite3.Error, OSError):

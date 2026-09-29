@@ -499,6 +499,7 @@ agent_py_agent/
 |   |   |-- store_wake_attempts.py      # 唤醒毒丸持久层：尝试账、结案 failed_permanently、人工重放与留档（store.wakes.attempts）
 |   |   |-- store_progress.py           # 进度策略、到期投影、失败退避落账与旧策略归档
 |   |   |-- process_events.py           # 受管后台命令终态到原会话 wake 的去重交接
+|   |   |-- task_follow_up.py           # 会话任务是否还有后续工作的结构化判定（定时执行收口据此决定 waiting）
 |   |   |-- compact_progress.py       # transcript/live-tool/turn-local Compact 来源与提交权的唯一公开进度协议
 |   |   |-- compact_calibration.py    # 压缩候选/压缩前计量的唯一校准口径：按宿主冻结的供应商观测折算，无观测原样返回
 |   |   |-- compact_carry.py           # 同宿主溢出原生IR携带、精确插话释放与归档归并
@@ -1037,6 +1038,8 @@ agent_py_agent/
 |   |-- test_closeout_machine.py      # 收口状态机 truth table 穷举测试(全组合+场景)
 |   |-- test_wake_queue.py             # wake_queue 字条 CRUD、到期弹出、跨进程唤醒、对账与清理边界
 |   |-- test_scheduler_wake_tick.py    # 调度器 tick 新契约: 到期字条→wake_queue_due、对账分频、EXEC-39 门、audit 跳过
+|   |-- test_scheduler_waiting_deadlock.py # 定时执行没做完：无后续工作→受阻+提示+下一周期照常派发，有后续工作才 waiting，存量 waiting 出口
+|   |-- test_tool_unknown_reason_preservation.py # 工具结果未知时 unknown_reason、重放回执、受管账本保留原始结论
 |   |-- test_sleep_tool.py             # clock.sleep 参数边界、字条落盘、唤醒取消与错误码回归
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
@@ -1607,6 +1610,7 @@ docs/
 - `agent/backends/request_scope.py`：同 Gateway 前台端点占用和请求局部预算；外部程序及代理别名不作推断。
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
+- `agent/conversation/task_follow_up.py`：会话任务后续工作事实的唯一判定（活跃 Goal、guidance、子代理、唤醒、后台命令、进度策略），读失败 fail closed；`agent/scheduler/active_run_closeout.py`（`close_active_run` 收口一轮没做完的定时执行、`settle_stale_waiting` 解开存量 waiting）据此决定等待还是结算成受阻。测试 `test_scheduler_waiting_deadlock.py`。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
 - `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。`agent/settings/reasoning_probe.py` 与 `reasoning_probe_judge.py`：宿主侧检测当前模型是否真的支持按档位调节（后台 9 次短请求，只比较 usage 的 token），确认支持后经参数中心写 `reasoning_control: effort`；设计见同文第 8 节，测试 `test_reasoning_probe.py`。`agent/conversation/host_notices.py`：宿主提示的唯一存取点（线程 `pending_host_notices`），Gateway 前台回复提交时取走并随最终回复显示；设计见 `docs/design/HOST_NOTICES.md`，测试 `test_host_notices.py`。
 - `agent/backends/structured_output_mode.py`：结构化输出方式的换算。模型档案 `structured_output`（auto/native/json_object）经 `model_structured_output` 进入后端，`openai_chat.generate_structured` 按它发 `json_schema` 或 JSON 对象模式（schema 写进提示）；记忆整理和自动总结 Skill 都走这里。测试 `test_structured_output_mode.py`。

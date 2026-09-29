@@ -1567,6 +1567,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   per-thread 持久执行 lane。它复用 `ConversationStore` 的 claim 文件、租约、进程身份接管与 heartbeat；
   不按 IM、提示词或任务类型分流。Gateway 可等待当前 lane，scheduler 拿不到 lane 则跳过并由既有 due/wake
   事实重试。claim 终态只说明本次执行权已释放，不替代 task/thread 生命周期。
+- `agent/scheduler/active_run_closeout.py` 与 `agent/conversation/task_follow_up.py`：定时执行一轮结束后任务仍是 active 时，
+  只有结构化后续工作事实（活跃 Goal、待处理 guidance、未终态子代理、指向该任务的待处理唤醒、未通知的后台命令、启用的进度策略）
+  存在才进 waiting；读不到按仍有后续工作处理。没有后续工作就把任务 CAS 成 blocked、排 `scheduler:<job_id>` 宿主提示、
+  run 记 failed（`SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN` / `SCHEDULED_TASK_UNFINISHED`），job 周期不变。存量 waiting
+  停满 600 秒且无后续工作时，对账按 `SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP` 结算。设计见 `DESIGN_LEDGER.md` 同名条目。
 - `agent/scheduler/repository.py`、`agent/scheduler/due_index.py`：前者的 owner-local `store.json`/history
   是 job/run 唯一权威；后者的全局 SQLite 只投影 owner 身份、最早到期时间和短租约。repository 在返回
   create/update 成功前同步投影；Gateway claim 投影后仍必须回到 owner 账本 reserve，不能从投影读取 prompt、
