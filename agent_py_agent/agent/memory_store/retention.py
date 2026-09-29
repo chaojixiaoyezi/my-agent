@@ -168,16 +168,24 @@ def _has_policy_level_error(errors: tuple[MemoryRetentionError, ...]) -> bool:
 #   合法输入构造不出"坏子树里带动作"的计划（见 test_unreadable_task_root_yields_no_actions_underneath）。
 #   目前只比较 action.path，不比较 action.related_paths；后者不含任务根，所以暂时没有漏洞，
 #   将来若有动作把任务根放进 related_paths，这里要一并纳入。
+#   性能（dev 2026-09-29 第 1 条）：不能对每一对「动作 × 错误」现场构造 Path——生产 8161 条动作、
+#   355 条错误时那会慢约 500 倍，而且跑在持 retention 锁的 Gateway 线程里。这里改成：
+#   每条路径只解析一次，错误路径及其全部祖先进集合，动作只做两次 O(深度) 查表。
 # 函数用途: 去掉与任一错误路径重叠的动作，返回可安全执行的计划。
 def _without_errored_subtrees(plan: MemoryRetentionReport) -> MemoryRetentionReport:
     if not plan.errors:
         return plan
-    errored = tuple(str(error.path) for error in plan.errors if str(error.path))
-    if not errored:
+    error_self = _path_keys(error.path for error in plan.errors)
+    error_with_ancestors = _path_and_ancestor_keys(error.path for error in plan.errors)
+    if not error_self:
         return plan
+    # 单向判：错误是动作的祖先（错误的自身落在「动作+其祖先」里），或动作是错误的祖先
+    # （动作的自身落在「错误+其祖先」里）。不能两边都取祖先集合求交——那会命中公共祖先，
+    # 把兄弟目录误判成同一棵树。
     kept = tuple(
         action for action in plan.actions
-        if not any(_path_overlaps(str(action.path), error_path) for error_path in errored)
+        if not (_path_and_ancestor_keys((action.path,)) & error_self)
+        and not (_path_keys(action.path) & error_with_ancestors)
     )
     if len(kept) == len(plan.actions):
         return plan
@@ -190,23 +198,53 @@ def _without_errored_subtrees(plan: MemoryRetentionReport) -> MemoryRetentionRep
     )
 
 
-# LLM: 用 Path 的祖先/后代语义判断是否同一棵子树（含相等），不把分隔符写死成 "/"——Windows 路径下
-#   写死分隔符会让隔离静默失效（dev 2026-09-29）。只做纯路径比较，不读盘。
-# 函数用途: 判断两条路径是否处于同一棵目录树。
-def _path_overlaps(left: str, right: str) -> bool:
-    if left == right:
-        return True
-    # 当前平台的 Path 只理解本平台分隔符：POSIX 上把 "C:\\tasks\\a" 当成单个文件名，
-    # 所以两边都要按 Windows 语义再比一次，任一命中即算重叠。
-    for make in (PurePath, PureWindowsPath):
-        try:
-            left_path = make(left)
-            right_path = make(right)
-        except (TypeError, ValueError):
+# LLM: 本平台的 Path 只理解本平台分隔符（POSIX 上 "C:\tasks\a" 是单个文件名），所以默认用
+#   PurePath 语义；需要按 Windows 语义判定时由调用方显式注入 PureWindowsPath（dev 2026-09-29）。
+#   这样既保留跨平台正确性，又不会在每次比较时多跑一遍另一套语义造成"文件名里的合法反斜杠被当分隔符"。
+_PATH_FLAVOUR = PurePath
+
+
+# LLM: 把一条路径归一成字符串键（相对分隔符差异用本平台语义消解）；拿不出路径语义时退化成原文。
+# 函数用途: 把路径转成可用于集合比较的稳定字符串键。
+def _path_keys(path: object, flavour: type | None = None) -> frozenset[str]:
+    make = flavour or _PATH_FLAVOUR
+    text = str(path or "")
+    if not text:
+        return frozenset()
+    try:
+        return frozenset({str(make(text))})
+    except (TypeError, ValueError):
+        return frozenset({text})
+
+
+# LLM: 一条路径的键，加上它全部祖先的键——用于「错误路径是动作的祖先」方向。
+# 函数用途: 返回一条路径及其全部祖先的字符串键集合。
+def _path_and_ancestor_keys(paths, flavour: type | None = None) -> frozenset[str]:
+    make = flavour or _PATH_FLAVOUR
+    keys: set[str] = set()
+    for path in paths:
+        text = str(path or "")
+        if not text:
             continue
-        if left_path.is_relative_to(right_path) or right_path.is_relative_to(left_path):
-            return True
-    return False
+        try:
+            resolved = make(text)
+        except (TypeError, ValueError):
+            keys.add(text)
+            continue
+        keys.add(str(resolved))
+        keys.update(str(parent) for parent in resolved.parents)
+    return frozenset(keys)
+
+
+# LLM: 保留这个语义函数供测试与单点判定使用；内部实现已改为集合查表，不再逐对构造 Path。
+# 函数用途: 判断两条路径是否处于同一棵目录树。
+def _path_overlaps(left: str, right: str, flavour: type | None = None) -> bool:
+    make = flavour or _PATH_FLAVOUR
+    if str(left) == str(right):
+        return True
+    return bool(_path_and_ancestor_keys((left,), make) & _path_keys(right, make)) or bool(
+        _path_and_ancestor_keys((right,), make) & _path_keys(left, make)
+    )
 
 
 OwnerRetentionPlan = MemoryRetentionReport

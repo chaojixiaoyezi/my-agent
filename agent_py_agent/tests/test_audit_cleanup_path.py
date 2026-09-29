@@ -285,3 +285,73 @@ def test_runtime_audit_path_matches_writer_semantics_for_suffixed_path(tmp_path)
     )
     assert via_query._audit_file == via_writer.log_file
     assert via_query._audit_root == via_writer.root
+
+
+# LLM: dev 2026-09-29 第 2 条：前面的 CLI 用例顶替了 AuditQuery，只断言"传出去的路径"，
+#   抓不到「写入端与 CLI 各算各的路径」这种分叉。这条走完整链路：
+#   按 Agent 的方式解析运行时路径 -> 用写入端 AuditLogger 真写文件 -> 调真实 cmd_audit_log 清理
+#   -> 同一个文件里的过期行被删、新行保留。路径一旦分叉，这里必然红。
+# 函数用途: 端到端验证写入端与 CLI 清理指向同一个文件。
+def test_audit_log_cleanup_end_to_end_uses_the_writer_file(tmp_path, monkeypatch):
+    import json
+    import os
+    import time
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.audit.logger import AuditLogger
+    from agent_py_agent.cli import audit_log_cmd
+    from agent_py_agent.cli.common import load_config
+    from agent_py_agent.cli.workspace_resolution import runtime_paths_for_config
+
+    home_root = tmp_path / "agent-home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(home_root))
+
+    # Agent 启动时会往 config 注入运行时权威路径；这里在「读配置」这一层模拟同一行为，
+    # 让 CLI 内部的 load_config 也拿到同一份值——路径一旦分叉，下面的断言就会红。
+    audit_dir = runtime_paths_for_config(load_config(str(DEFAULT_CONFIG)))["audit_log_path"]
+
+    import agent_py_agent.cli.common as cli_common
+
+    original_load = cli_common.load_config
+
+    def injected_load(path):
+        loaded = original_load(path)
+        loaded.audit_log_path = str(audit_dir)
+        return loaded
+
+    monkeypatch.setattr(cli_common, "load_config", injected_load)
+    config = injected_load(str(DEFAULT_CONFIG))
+
+    # 写入端真写两行：一行超期、一行新鲜。
+    writer = AuditLogger(config)
+    target = Path(writer._audit_file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old_ts = time.time() - 400 * 24 * 3600
+    fresh_ts = time.time()
+    rows = [
+        {"timestamp": old_ts, "action": "read", "user_id": "u1", "status": "success"},
+        {"timestamp": fresh_ts, "action": "read", "user_id": "u1", "status": "success"},
+    ]
+    target.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+
+    # 经真实 CLI 入口清理。
+    args = SimpleNamespace(
+        config=str(DEFAULT_CONFIG),
+        recent_users=False,
+        summary=False,
+        cleanup=True,
+        days=30,
+    )
+    # CLI 内部自己 load_config（函数内导入），上面已经把 common.load_config 换成注入版。
+    assert audit_log_cmd.cmd_audit_log(args) == 0
+
+    # 同一个文件里：过期行没了，新行还在。
+    remaining = [
+        json.loads(line)
+        for line in target.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(remaining) == 1, f"应当只剩新行，实际 {len(remaining)} 行"
+    assert remaining[0]["timestamp"] == fresh_ts

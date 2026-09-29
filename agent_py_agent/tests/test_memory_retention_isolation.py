@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from agent_py_agent.agent.memory_store.retention import (
     _has_policy_level_error,
@@ -277,7 +277,121 @@ def test_candidates_unreadable_is_importable():
 #   识别不到祖先/后代、隔离静默失效。
 # 函数用途: 验证 Windows 反斜杠路径的重叠判定。
 def test_path_overlaps_handles_windows_separators():
-    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\a\\work\\state.json") is True
-    assert _path_overlaps("C:\\tasks\\a\\work\\state.json", "C:\\tasks\\a") is True
-    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\ab") is False
-    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\a") is True
+    # 默认语义是本平台的（POSIX 上 "C:\\tasks\\a" 是单个文件名），所以 Windows 判定要显式注入
+    # Windows 语义——这也避免把文件名里合法的反斜杠误当分隔符（dev 2026-09-29 建议第 5 条）。
+    win = PureWindowsPath
+    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\a\\work\\state.json", win) is True
+    assert _path_overlaps("C:\\tasks\\a\\work\\state.json", "C:\\tasks\\a", win) is True
+    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\ab", win) is False
+    assert _path_overlaps("C:\\tasks\\a", "C:\\tasks\\a", win) is True
+    # 本平台语义仍然正确：POSIX 路径的祖先/后代识别不受影响。
+    assert _path_overlaps("/a/b", "/a/b/work/state.json") is True
+    assert _path_overlaps("/a/b", "/a/bc") is False
+
+
+# LLM: MR12（9b 复核 2026-09-29）：去掉 subagent_scratch 那处深度过滤时，36 个相关文件照样全绿——
+#   因为已有的嵌套用例只造了 blobs/tool_outputs，没造 work/agents。这条补上那个缺口。
+# 函数用途: 验证嵌套在非规范深度的 work/agents 不会被当成任务根下的子代理材料。
+def test_nested_agents_dir_is_not_treated_as_subagent_scratch(tmp_path):
+    from agent_py_agent.agent.memory_store.candidates import CandidateService
+    from agent_py_agent.agent.memory_store.retention import MemoryRetentionService
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    candidates = CandidateService(home.owner_memory_candidates_jsonl)
+    service = MemoryRetentionService(home_paths=home, candidates=candidates)
+
+    outer = Path(home.owner_tasks_dir) / "2026-01-01" / "running-task"
+    (outer / "work").mkdir(parents=True)
+    (outer / "work" / "state.json").write_text(
+        json.dumps({"task_id": "outer", "status": "RUNNING", "updated_at": NOW.timestamp()}),
+        encoding="utf-8",
+    )
+
+    nested = outer / "work" / "blobs" / "tool_outputs" / "nested-task"
+    nested_work = nested / "work"
+    nested_work.mkdir(parents=True)
+    (nested_work / "state.json").write_text(
+        json.dumps(
+            {"task_id": "nested", "status": "DONE", "updated_at": NOW.timestamp() - 400 * 86400}
+        ),
+        encoding="utf-8",
+    )
+    run_root = nested_work / "agents" / "sub-1"
+    inbox = run_root / "inbox"
+    inbox.mkdir(parents=True)
+    (inbox / "data.txt").write_text("payload", encoding="utf-8")
+    (run_root / "state.json").write_text(
+        json.dumps(
+            {"status": "DONE", "updated_at": NOW.timestamp() - 400 * 86400, "task_id": "sub-1"}
+        ),
+        encoding="utf-8",
+    )
+
+    report = service.plan(now=NOW)
+
+    assert not [a for a in report.actions if str(a.path).startswith(str(nested))], (
+        "非规范深度的嵌套任务根下，子代理材料不能被规划移走"
+    )
+    assert inbox.exists()
+
+
+# LLM: dev 2026-09-29 第 1 条：隔离过滤不能是 O(动作×错误) 的现场 Path 构造。
+#   这条按生产量级（8000 动作 × 400 错误）断言耗时有上界，防止再退化回慢 500 倍的实现。
+# 函数用途: 验证隔离过滤在大规模输入下仍是秒级以内。
+def test_isolation_filter_is_fast_at_production_scale():
+    import time
+
+    actions = tuple(action(f"/home/tasks/2026-01-01/task-{i}") for i in range(8000))
+    errors = tuple(
+        error(
+            "MEMORY_RETENTION_TASK_STATE_INVALID",
+            f"/home/tasks/2026-01-01/bad-{i}/work/state.json",
+        )
+        for i in range(400)
+    )
+    plan_input = plan(actions, errors)
+
+    started = time.perf_counter()
+    result = _without_errored_subtrees(plan_input)
+    elapsed = time.perf_counter() - started
+
+    assert len(result.actions) == len(actions), "没有动作落在错误子树上，全部应保留"
+    assert elapsed < 1.0, f"8000 动作 × 400 错误耗时 {elapsed:.3f}s，超过 1 秒上限"
+
+
+# LLM: MR6 的行为面（dev 2026-09-29 建议）：只断言错误码在集合里不够，还要证明候选账本读不懂时
+#   **整份拒绝、磁盘上不动任何东西**。
+# 函数用途: 验证候选账本损坏时 apply 不执行任何动作。
+def test_apply_refuses_everything_when_candidates_ledger_is_unreadable(tmp_path):
+    from agent_py_agent.agent.memory_store.candidates import CandidateService
+    from agent_py_agent.agent.memory_store.retention import MemoryRetentionService
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    candidates = CandidateService(home.owner_memory_candidates_jsonl)
+    service = MemoryRetentionService(home_paths=home, candidates=candidates)
+
+    # 造一棵到期的终态任务：正常应当被回收。
+    task_root = Path(home.owner_tasks_dir) / "2026-01-01" / "done-task"
+    (task_root / "work").mkdir(parents=True)
+    (task_root / "work" / "state.json").write_text(
+        json.dumps(
+            {"task_id": "done", "status": "DONE", "updated_at": NOW.timestamp() - 400 * 86400}
+        ),
+        encoding="utf-8",
+    )
+
+    # 把候选账本弄成读不懂。
+    candidates_path = Path(home.owner_memory_candidates_jsonl)
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_path.write_text("{not json", encoding="utf-8")
+
+    report = service.apply(now=NOW)
+
+    assert report.applied is False, "候选账本读不懂必须整份拒绝"
+    assert tuple(report.actions) == (), "整份拒绝时不能执行任何动作"
+    assert task_root.exists(), "磁盘上必须一个动作都没执行"
+    assert "MEMORY_RETENTION_CANDIDATES_UNREADABLE" in {
+        error.error_code for error in report.errors
+    }

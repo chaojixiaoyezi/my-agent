@@ -149,6 +149,18 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
 
 ## R4 隔离：坏的那一棵单独保护，不连累其他类别（2026-09-28，分支 `my-agent/self-dev-4`，基于 `c101d325a`）
 
+- **9b 复核第 6 批（dev 2026-09-29 转来）**：三条必须改 + 两条建议，全部落地。
+  1. **隔离过滤性能回退（我引入的真问题）**：原实现对每一对「动作 × 错误」现场构造 Path，生产 8161 动作 × 355 错误时 9b 实测 188 秒，而字符串版只要 0.35 秒。现改成：每条路径只解析一次，错误路径及其祖先进集合，动作只做两次 O(深度) 查表。
+     - 实测：8161 × 355 = **0.059 秒**（旧字符串版 0.271 秒；修复前的坏版 188 秒）；8161 × 50 = 0.057 秒。保留条数逐项一致。
+     - 新增规模化断言 `test_isolation_filter_is_fast_at_production_scale`（8000 动作 × 400 错误 < 1 秒）。
+     - **踩过两次方向错误**，都用真实数据定位：① 先写成「双方祖先集合求交」，会命中公共祖先 `/home/tasks/2026-01-01`，把兄弟目录误判成同一棵树；② 正确的单向判据是「错误自身 ∈ 动作的自身+祖先集合」或「动作自身 ∈ 错误的自身+祖先集合」。
+     - 生产 plan 的 `report.errors` 实测 **355 条**（全部 `MEMORY_RETENTION_TASK_STATE_INVALID`），动作 11742 条。
+  2. **audit-log 端到端用例**：新增 `test_audit_log_cleanup_end_to_end_uses_the_writer_file` —— 按 Agent 方式注入运行时路径 → 用写入端 `AuditLogger` 真写一行超期、一行新鲜 → 调真实 `cmd_audit_log(cleanup=True, days=30)` → 同一文件只剩新行。
+     - 变异：让写入端与 CLI 各算各的路径（退回"再拼一次 audit.jsonl"）→ 该用例与另一条共 2 条变红。
+  3. **MR12（去掉 subagent_scratch 的深度过滤）此前存活**：已有嵌套用例只造了 blobs/tool_outputs，没有 work/agents。新增 `test_nested_agents_dir_is_not_treated_as_subagent_scratch`（嵌套 tasks 根 + 健康超期子代理 + inbox）→ **杀死 MR12**（1 条红）。
+  4. **MR6 补行为断言**：新增 `test_apply_refuses_everything_when_candidates_ledger_is_unreadable` —— 候选账本损坏时 `apply` 返回 `applied=False`、`actions` 为空、磁盘上到期任务原样保留。
+  5. **双语义简化**：默认只用本平台 Path 语义，Windows 语义由调用方显式注入（`_path_keys` / `_path_and_ancestor_keys` / `_path_overlaps` 都接受可选 flavour）。Windows 用例改成显式传 `PureWindowsPath`，顺带消掉"文件名里合法的反斜杠被当分隔符"的多判。
+
 - **来源**：dev 2026-09-28 两轮裁定。起因是生产只读预演发现 `O/tasks` 下有 355 个坏 `state.json`，而 **main 上 `apply` 只要 `plan.errors` 非空就拒绝整份计划**——真机数据核实：`owner_retention_applied` 事件 29 条、`applied` 全为 `False`、`actions` 全为 0，`maintenance.json` 的 `last_success_at` 恒为 0.0。**生产的保留清理从来没真正执行过**，每天被同一批错误整份拒掉。
 - **做法**：
   - `retention.py` 的 `apply` 守卫改成 `plan.legal_hold or _has_policy_level_error(plan.errors)`。只有"读不懂策略本身"才整份拒绝（`_POLICY_LEVEL_ERROR_CODES` = `POLICY_INVALID`/`POLICY_UNREADABLE`/`CANDIDATES_UNREADABLE`）；
