@@ -11,6 +11,16 @@
 缓存文件本身读不出内容（坏 JSON）也算这一类：`_load` 记下 `last_read_error`，
 `reclaim_text_cache_orphans` 把读/写错误一并带出，避免"缓存读不了"被误当成"确实没有孤儿"。
 此前只有一个 `text_vector_cache_reclaimed: 0`，两种截然不同的情况看起来一模一样。
+`user_space/home_index_compact.py` 压缩所有者 home 的四份 `global_index/*.jsonl`（纯投影，可重建）：
+`run_owner_retention_if_due` 每次维护 tick 调 `compact_global_indexes_if_due`，对每份文件按
+`max(64 MB, 2 × 上次压缩后大小)` + 6 小时冷却决定是否压缩；压缩为**两遍流式**（第一遍只按 LF 记
+每个 key 最后一次出现的行号，第二遍原字节流式写出），峰值内存与文件大小无关、只与 key 数量同阶
+（实测 145.4 MB 文件峰值增量 22.9 MB）。上次压缩结果记在同目录 `compact_state.json`；坏行计数进
+维护状态的 `indexes_compacted`，"试了但失败"（`io_error` / `identity_changed`）进单列的
+`indexes_compact_failed`，「没到期」不出现。**身份核对在锁内做两次**：扫描前记 `(st_ino, size)`，
+锁外核对一次（挡扫描期间换文件），拿到锁之后再核一次（挡 rebuild 落在核对与拿锁之间）。
+四份索引的键定义只有一处权威：`home_indexes.INDEX_KEY_FIELDS_BY_FILE`，写入侧与压缩侧都从它派生。
+手动 `home-index-rebuild --apply` 仍是权威修复工具，不变。
 
 `SchedulerService.claim_wake`核对wake与canonical run身份，在原repository领取后准确回读pending，再调用`_prepare_task_link`：原TaskStore任务锁内只为首次新运行建立链接，已有链接只读复核。合法冻结只保留原claim用于原回复交付；无冻结的active任务才标记running并交后台模型，无冻结终态按唯一既有映射结算。无法确认pending时释放claim并保留待处理；准入结算只有原CAS实际成功才返回stale，claim已被接手时返回busy，不能确认掉新持有者的wake。TaskStore仍唯一保存pins/选包marker，不新增调度专用任务账或Skill豁免。
 

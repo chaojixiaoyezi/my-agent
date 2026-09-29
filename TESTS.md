@@ -145,6 +145,91 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
   - 叠加 my-agent-3 的 `fd28c2a7a`（含空闲消息确认与已消费判据修复）：不注入仍是 XFAIL，注入后转正。可见只修第 16g 批转不了正，必须修去重。
   - 全文件 main 上 7 通过、7 xfail，连跑 3 次一致。
 - **未覆盖**：同一次工具调用的重试去重。修去重时要保留“同一次调用重试返回同一条”，这一窗管不到。
+## global_index 只追加索引的内部压缩（2026-09-29，分支 `my-agent/self-dev-2-index`，基于 `9a71d8cd5`）
+
+### 复审跟进（38）：锁内再核身份、键定义单一来源、失败原因单列（2026-09-29，基于 `bac2f176d`）
+
+- **读取侧也要从注册表派生（9b 第二轮）**：上一轮「键定义唯一权威」只覆盖了写入侧和压缩侧，
+  **读取侧仍各写一份**——`_IndexSpec` 三处（dangling 检查）与 `latest_*_refs_report` 两处。
+  9b 的变异 **MH12**（把读取侧 runs 的键改成带 `task_id`）在 18 个相关文件下**全部存活**。
+  这条特别要紧：**压缩的正确性取决于「压缩键」和「读取键」一致**——读取键一旦变宽，
+  压缩会把读取侧视为不同的行合并掉，而没有测试会发现。
+  - 修法：读取侧全部改成 `key_fields_for_index_file(...)`；把 dangling 的三处抽成
+    `_dangling_index_specs()` 让测试能直接核对。
+  - 新增 `test_reader_side_key_fields_equal_registry`：用 spy 从真实读取入口反查实际传下去的键，
+    并核对 `_dangling_index_specs`。**MH12 现在真被杀掉**。
+  - 变异脚本顺手加 `Mutant.path`：变异体可落在 `home_indexes.py`（此前只支持默认文件，
+    MH12 的锚点在别的文件里，第一次跑报的是 ANCHOR MISS 而不是静默放过）。
+  - 卫生：脚本跑 pytest 加 `-p no:cacheprovider`，不在树根留 `.pytest_cache`。
+
+- **必须改：文件身份核对原本在锁外，rebuild 换文件的窗口没关严。**
+  `_still_same_file` 通过之后才进 `_append_tail_and_replace` 拿锁，而 rebuild
+  （`home_indexes.replace_home_index_snapshots`，同在 `locked_json_path` 里原子替换）恰好能落在
+  「核对通过 → 拿到锁」之间：实测 `compacted=True`、读回 `['B','A']`，rebuild 写的 `REBUILT` 被陈旧前缀盖掉。
+  上一版的 `test_rebuild_replacing_file_aborts_compaction` 把换文件注入在**扫描阶段**，
+  只覆盖核对之前的窗口；MH8 也只能杀「完全不核对」。
+  - 修法：把 `_still_same_file` 挪进 `_append_tail_and_replace` 的**锁内**（拿到锁之后、`_copy_tail` 之前），
+    不一致就返回 `identity_changed` 并丢弃 tmp。锁外那次保留——它挡的是扫描期间被换文件，两道作用不同。
+  - `test_rebuild_between_identity_check_and_replace`（38 探针转正）：只在前缀快照后的第一次核对里换文件；
+    修前 `['B','A']`，修后 `compacted=False / identity_changed / ['REBUILT']`。
+  - 变异 **MH10**（锁内不再核对）必须被杀掉。
+- **建议改 a）失败原因单列**：`_compact_global_indexes` 原来 `if not result.compacted: continue`，
+  `io_error` / `identity_changed` 这类"试了但失败"被静默丢掉，`maintenance.json` 分不清
+  「没到期」和「压失败」。现在返回 `(成功摘要, 失败摘要)`，失败进 `indexes_compact_failed`；
+  「没动手」的原因（`below_min_bytes` / `below_growth_ratio` / `in_cooldown` / `missing`）不算失败。
+- **建议改 b）键定义单一来源**：四份索引的 key_fields 原先在 `home_indexes` 调用点、
+  `home_index_compact._INDEX_KEY_FIELDS`、测试常量三处各写一份，spec 一改就漂移。
+  现在 `home_indexes.INDEX_KEY_FIELDS_BY_FILE` 是唯一权威，写入侧与压缩侧都从它派生；
+  加 `test_key_fields_come_from_home_indexes_spec` 逐一比对。变异 **MH11** 必须被杀掉。
+- **变异 12/12 KILLED, 0 survived**（新增 MH10 / MH11）。
+
+### 上线说明（生产实测尺寸，38 只读 stat 得到）
+
+生产 `~/.my-agent/global_index/` 下四份索引：`active_tasks` **354.8 MB**、`active_agents` **284.3 MB**、
+`active_runs` **282.2 MB**、`owners` **53.9 MB**。部署后第一个维护 tick 会依次压前三份
+（都超过 64 MB 阈值且无压缩记录），按实测约 200 MB/s 合计约 **4.5 秒**；
+**临时文件需要与压缩后大小相当的空间**（压缩后远小于原文件，实测 1 GB → 4.1 MB，
+但峰值仍需容纳临时文件 + 读缓冲）。
+
+- 压缩路径实测：1.00 GB 假 jsonl（494 万行、2 万 key）→ 输出 2 万行 / 4.1 MB，耗时 **16.3 s**、峰值内存 **42 MB**；
+  145.4 MB 文件版本峰值增量 **22.9 MB / 0.7 秒**（第一版 952 MB）。
+
+- **来源**：dsh-9b 的产品持久数据盘点（`9e6cd738e`，`docs/design/STORAGE_RETENTION.md` 第 5 项）
+  指出 `global_index/{active_tasks,active_agents,active_runs,owners}.jsonl` 合计 0.93 GB、只追加、
+  只有手动 `home-index-rebuild` 才会压缩。
+- **做法**：不读任何权威文件，只在索引文件内部按 key 保留最后一行；挂在既有 owner 维护 tick 上，
+  不新开线程。触发是零扫描判据：`当前大小 ≥ max(64 MB, 2 × 上次压缩后大小)` + 6 小时冷却，
+  上次压缩后的大小持久化到 sidecar（否则 Gateway 每次重启后第一次 tick 都会不受冷却限制地压一遍）。
+  并发窗口按字节长度切：锁内记前缀长度 → 放锁做重扫 → 重拿锁把窗口期新追加的字节原样接上再原子替换。
+- **新增** `agent_py_agent/agent/user_space/home_index_compact.py`、`tests/test_home_index_compact.py`（20 条）。
+- **行序这条踩过坑**：读取侧 `_latest_unique_refs` 是「先 `reversed`，遇到某 key 首次出现就取」，
+  所以压缩后文件行序必须按「每个 key 最后出现的先后倒序」写，读取结果才逐条相同。
+  第一版按正序写，测试立刻打回——**测试拦得对**。
+- **内存测试踩过坑**：第一版用 `bytearray` 攒整份输出仍是 O(文件)，峰值 25.9 MB > 文件 21.7 MB。
+  改成流式写临时文件后降为 O(key)，实测 145.4 MB 文件 → 峰值增量 22.9 MB、0.7 秒
+  （第一版 952 MB / 约 6.5 倍）。
+- **⚠️ 命名空间的坑（dev 2026-09-29 01:42 提醒的同源问题）**：`test_peak_memory_bounded` 用
+  `subprocess.run([sys.executable, "-c", ...])` 量 `ru_maxrss`，原来只设 `cwd=pkg_root`。
+  `agent_py_agent` 是 **namespace package**：子进程只要 cwd 不在工作树根，就落到别处的 editable 安装
+  （本机是 6 月那份旧源码树）。实测同一条导入语句：cwd=工作树根 `rc=0`；cwd=`/tmp`
+  `rc=1 ModuleNotFoundError: No module named 'agent_py_agent.agent.user_space.home_index_compact'`。
+  注意坏掉的是**子模块**导入，顶层 `import agent_py_agent` 照样成功，所以这种失败特别容易静默。
+  修法：子进程 env 显式塞 `PYTHONPATH=<工作树根>`，`pkg_root` 改用 `Path(__file__).resolve().parents[2]`
+  而不是 `Path.cwd().parent`（不依赖调用者 cwd）。
+- **变异验证**：`scripts/mutate_home_index_compact.py`（11 个变异体，锚点/预期/说明都在脚本里）
+  跑出 **10/10 KILLED, 0 survived**。四条曾经存活、暴露的是**测试盲区**而不是实现没问题：
+  - **MH4（不接窗口期尾部字节）**：注入点原本打在**第一次**拿锁时，新行被算进前缀长度，
+    `_copy_tail` 无事可做 → 断言假绿。改成在前缀快照**之后**注入才真正覆盖那条窗口。
+  - **MH8（不做文件身份核对）**：原测试没构造「rebuild 换掉文件（inode 变）」，补了
+    `test_rebuild_replacing_file_aborts_compaction`。
+  - **MH9（坏行不计数）**：原测试只看读取结果，没看 `bad_lines`，补了计数的直接断言。
+  - **MH3（空行当合法记录）**：**这个变异体本身是语义等价的**——去掉空行守卫后，空串仍会被
+    `json.loads` 拒绝，走同一个 `except` 分支，行为不变。诚实结论：空行守卫是防御性的、不是承重的。
+    换成两个真有机制可杀的变异体（非 JSON 对象的行、key 字段缺失时不填空串），并补上对应测试。
+    **教训**：存活的变异体有两种——"测试没钉住机制"和"变异体没改变语义"，要分开判定，
+    不能一律当成测试有问题。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_home_index_compact.py -q`
+  与 `python3 scripts/mutate_home_index_compact.py`（两者 cwd 都必须是工作树根）。
 
 ## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`）
 

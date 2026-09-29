@@ -21,6 +21,32 @@ owner 维护回收正文哈希缓存孤儿：改为 canonical 路径 + 不依赖
   `index_text` 哈希，不需要 embedder、不联网。
 - 回归见 `test_memory_vector_cache.py::test_maintenance_reclaims_orphan_on_real_layout`；
   变异 MY1（回收函数开头直接 `return 0`）必须被杀掉——见 `scripts/mutate_text_vector_cache.py`。
+global_index 只追加索引自动压缩（分支 `my-agent/self-dev-2-index`，2026-09-29，基于 `64f7ee64e`）：
+- `user_space/home_index_compact.py`：四份 `global_index/*.jsonl` 在维护 tick 里按 key 内部压缩
+  （纯投影，**不读任何权威源**；手动 `home-index-rebuild --apply` 仍是权威修复工具，不变）。
+- **两遍流式**：第一遍只按 **LF** 切行、记下每个 key 最后一次出现的行号；第二遍按原顺序把那些行
+  流式写进临时文件，**原字节照抄、不重新序列化**。读取方 `_latest_unique_refs` 是「先 reversed、
+  再遇首次出现即取」，所以压缩后读取结果按构造逐条相同。
+- **每个文件用自己的 key_fields**（owners 只有 owner_id；tasks/runs/agents 各自带自己的 id）。
+  统一成一套 fields 会让 runs 的 task_id 版本被当成两个 key，出现"旧状态复活"。
+- 峰值内存实测：**145.4 MB 文件 → 峰值增量 22.9 MB、0.7 秒**（第一版把整份前缀解析成 dict，
+  同一文件是 952 MB、约 6.5 倍）。旧文档里"峰值 42 MB"是在小文件上量的数，已在 04-structure 更正。
+
+38 复审跟进（2026-09-29）：
+- **必须改：文件身份核对原本在锁外**，`_still_same_file` 通过之后才拿锁，而 rebuild 恰好能落在
+  「核对通过 → 拿到锁」之间，把陈旧前缀盖到 rebuild 的新内容上（实测读回 `['B','A']`，
+  rebuild 写的 `REBUILT` 丢了）。现在拿到锁之后**再核一次**，不一致就 `identity_changed` 并丢 tmp。
+  锁外那次保留——它挡的是扫描期间换文件，两道作用不同。
+- **失败原因单列**：`_compact_global_indexes` 原先只记 `compacted=True` 的结果，
+  `io_error` / `identity_changed` 被静默丢掉，`maintenance.json` 分不清「没到期」和「压失败」。
+  现在返回 `(成功摘要, 失败摘要)`，失败进 **`indexes_compact_failed`**；
+  「没动手」的四个原因（`below_min_bytes` / `below_growth_ratio` / `in_cooldown` / `missing`）不算失败。
+- **键定义单一来源**：`home_indexes.INDEX_KEY_FIELDS_BY_FILE` 是唯一权威，写入侧与压缩侧都从它派生。
+- 触发用**零扫描判据**：当前大小 ≥ `max(64 MB, 2 × 上次压缩后大小)`；冷却 `COMPACT_COOLDOWN_SECONDS = 6 小时`。
+  上次压缩结果**持久化到索引同目录的 `compact_state.json`**，否则 Gateway 每次重启后第一次 tick
+  都会不受冷却限制地压一遍。
+- 并发按长度切：锁内记 `(st_ino, prefix_len)` → 放锁压缩前缀 → 重拿锁核对 inode 与长度，
+  把前缀之后新追加的字节接上，再原子替换。坏行计数上报在结果与维护状态 `indexes_compacted` 里，不静默。
 
 停机时等 observe 后台执行器落账（分支 `claude/9a-jev-observe-async`，2026-09-28，dsh-ae 复审跟进）：
 - `cli/gateway_process._cancel_active_decisions` 在 `cancel_active_decisions_for_shutdown` 之后，经 `wait_nonblocking_idle` 最多等 `_NONBLOCKING_DRAIN_SECONDS`（2 秒）。

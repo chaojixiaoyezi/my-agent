@@ -74,6 +74,9 @@ def run_owner_retention_if_due(
         # 正文哈希缓存只是派生索引，孤儿键（换模型/迁移/绕过写入路径的改动留下）只有 index_all
         # 会回收，那是手动命令；挂进这里让它在 owner 维护（默认每天一次）里自动收口。
         dropped_cache_keys, reclaim_error = _reclaim_text_vector_cache_orphans(home)
+        # global_index 四份只追加索引在这里按 key 内部压缩（纯投影，不读权威源）。
+        # 单份失败不中断维护；成功与"试了但失败"分开汇总进维护状态，便于观察是否真的压过。
+        compacted, compact_failed = _compact_global_indexes(home, now=current)
         status = _maintenance_status(retention)
         previous = read_json_object_report(
             state_path,
@@ -98,6 +101,9 @@ def run_owner_retention_if_due(
             "text_vector_cache_reclaimed": dropped_cache_keys,
             # 非空表示"这次没能真的回收"（建缓存/读记忆失败），0 不等于"没有孤儿"。
             "text_vector_cache_reclaim_error": reclaim_error,
+            "indexes_compacted": compacted,
+            # "试了但失败"（io_error / identity_changed）单列，免得跟"没到期"混成一片。
+            "indexes_compact_failed": compact_failed,
         }
         write_json_file_atomic_unlocked(state_path, payload)
         return OwnerMaintenanceResult(True, status, retention)
@@ -122,6 +128,39 @@ def _reclaim_text_vector_cache_orphans(home: MyAgentHomePaths) -> tuple[int, str
     except Exception as exc:
         # 建缓存/读记忆失败也返回 0，但与"确实没有孤儿"必须分得开——否则又是一条假的结构化事实。
         return 0, f"{type(exc).__name__}: {exc}"
+# LLM: 压缩是派生数据的整理，失败绝不能影响 retention 结果；这里只回传计数与坏行数。
+#   "试了但失败"（io_error / identity_changed）必须与"没到期"分开记：
+#   只记 compacted=True 的话，maintenance.json 分不出"没到期"和"压失败了"，
+#   失败会被静默吞掉——这正是本轮修掉的那类假结构化事实。
+# 函数用途: 在维护事务里对四份 global_index 做"该压就压"，返回 (成功摘要, 失败摘要)。
+def _compact_global_indexes(
+    home: MyAgentHomePaths, *, now: float
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    try:
+        from .home_index_compact import compact_global_indexes_if_due
+
+        results = compact_global_indexes_if_due(home, now=now)
+    except Exception:
+        return [], []
+    compacted: list[dict[str, object]] = []
+    failed: list[dict[str, object]] = []
+    for result in results:
+        entry = {"path": result.path.name, **result.to_dict()}
+        if result.compacted:
+            compacted.append(entry)
+            continue
+        # "没到期"不是失败；只有真的试过却没成功的才算。
+        if result.reason in _COMPACT_NOT_ATTEMPTED_REASONS:
+            continue
+        failed.append(entry)
+    return compacted, failed
+
+
+# LLM: 这些原因表示"这次根本没动手"，不能算失败，否则维护状态天天报假失败。
+# 函数用途: 判断压缩结果是否属于"没尝试"。
+_COMPACT_NOT_ATTEMPTED_REASONS = frozenset(
+    {"below_min_bytes", "below_growth_ratio", "in_cooldown", "missing"}
+)
 
 
 def _maintenance_status(retention: OwnerRetentionPlan) -> str:

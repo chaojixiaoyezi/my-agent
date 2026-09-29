@@ -63,6 +63,24 @@ class _IndexSpec:
     key_fields: tuple[str, ...]
 
 
+# LLM: 四份索引各自的**权威键定义**。写入侧（register_*_ref）与维护侧的按 key 压缩
+#   （home_index_compact.key_fields_for）都从这里取，避免同一概念在多处各抄一份表——
+#   抄两份的后果是 spec 改了以后压缩会把不同实体的行当成同一个 key 合并掉。
+#   键用文件名索引，因为压缩只拿到路径；文件名与 home_layout 的字段一一对应。
+# 函数用途: 按索引文件名取该文件记录的唯一键字段。
+INDEX_KEY_FIELDS_BY_FILE: dict[str, tuple[str, ...]] = {
+    "owners.jsonl": ("owner_id",),
+    "active_tasks.jsonl": ("owner_id", "task_id"),
+    "active_runs.jsonl": ("owner_id", "run_id"),
+    "active_agents.jsonl": ("owner_id", "agent_id"),
+}
+
+
+def key_fields_for_index_file(path: str | Path) -> tuple[str, ...]:
+    """按索引文件名返回权威键定义；未知文件名退化成 owners 的键（最保守的单一键）。"""
+    return INDEX_KEY_FIELDS_BY_FILE.get(Path(path).name, ("owner_id",))
+
+
 @dataclass(frozen=True)
 class _ScopeFilter:
     owner_id: str = ""
@@ -90,7 +108,7 @@ def register_owner_ref(home: MyAgentHomePaths, owner: OwnerHomeResult) -> dict[s
     _append_changed_index_record(
         home.global_index_owners_jsonl,
         payload,
-        key_fields=("owner_id",),
+        key_fields=key_fields_for_index_file(home.global_index_owners_jsonl),
     )
     return payload
 
@@ -103,7 +121,7 @@ def register_task_ref(home: MyAgentHomePaths, ref: TaskIndexRef) -> dict[str, An
     _append_changed_index_record(
         home.global_index_active_tasks_jsonl,
         payload,
-        key_fields=("owner_id", "task_id"),
+        key_fields=key_fields_for_index_file(home.global_index_active_tasks_jsonl),
     )
     return payload
 
@@ -116,7 +134,7 @@ def register_run_ref(home: MyAgentHomePaths, ref: RunIndexRef) -> dict[str, Any]
     _append_changed_index_record(
         home.global_index_active_runs_jsonl,
         payload,
-        key_fields=("owner_id", "run_id"),
+        key_fields=key_fields_for_index_file(home.global_index_active_runs_jsonl),
     )
     return payload
 
@@ -129,7 +147,7 @@ def register_agent_ref(home: MyAgentHomePaths, ref: AgentIndexRef) -> dict[str, 
     _append_changed_index_record(
         home.global_index_active_agents_jsonl,
         payload,
-        key_fields=("owner_id", "agent_id"),
+        key_fields=key_fields_for_index_file(home.global_index_active_agents_jsonl),
     )
     return payload
 
@@ -227,21 +245,25 @@ def replace_home_index_snapshots(
     agent_refs: tuple[AgentIndexRef, ...],
 ) -> None:
     snapshots = (
-        (home.global_index_owners_jsonl, [_owner_payload(item) for item in owners], ("owner_id",)),
+        (
+            home.global_index_owners_jsonl,
+            [_owner_payload(item) for item in owners],
+            key_fields_for_index_file(home.global_index_owners_jsonl),
+        ),
         (
             home.global_index_active_tasks_jsonl,
             [_task_payload(item) for item in task_refs],
-            ("owner_id", "task_id"),
+            key_fields_for_index_file(home.global_index_active_tasks_jsonl),
         ),
         (
             home.global_index_active_runs_jsonl,
             [_run_payload(item) for item in run_refs],
-            ("owner_id", "run_id"),
+            key_fields_for_index_file(home.global_index_active_runs_jsonl),
         ),
         (
             home.global_index_active_agents_jsonl,
             [_agent_payload(item) for item in agent_refs],
-            ("owner_id", "agent_id"),
+            key_fields_for_index_file(home.global_index_active_agents_jsonl),
         ),
     )
     with _INDEX_WRITE_LOCK:
@@ -306,7 +328,7 @@ def latest_owner_refs(home: MyAgentHomePaths, *, limit: int = 20) -> list[dict[s
 def latest_owner_refs_report(home: MyAgentHomePaths, *, limit: int = 20) -> IndexRefsReport:
     return _latest_unique_refs_report(
         home.global_index_owners_jsonl,
-        key_fields=("owner_id",),
+        key_fields=key_fields_for_index_file(home.global_index_owners_jsonl),
         limit=limit,
         context="home_indexes.owners",
     )
@@ -328,7 +350,7 @@ def latest_task_refs_report(
     rows = []
     report = _latest_unique_refs_report(
         home.global_index_active_tasks_jsonl,
-        key_fields=("owner_id", "task_id"),
+        key_fields=key_fields_for_index_file(home.global_index_active_tasks_jsonl),
         limit=0,
         context="home_indexes.active_tasks",
     )
@@ -351,7 +373,7 @@ def latest_run_refs_report(home: MyAgentHomePaths, *, owner_id: str = "", task_i
     return _latest_scoped_refs_report(
         _LatestRefSource(
             home.global_index_active_runs_jsonl,
-            ("owner_id", "run_id"),
+            key_fields_for_index_file(home.global_index_active_runs_jsonl),
             "home_indexes.active_runs",
         ),
         filters=_ScopeFilter(owner_id=owner_id, task_id=task_id),
@@ -367,7 +389,7 @@ def latest_agent_refs_report(home: MyAgentHomePaths, *, owner_id: str = "", task
     return _latest_scoped_refs_report(
         _LatestRefSource(
             home.global_index_active_agents_jsonl,
-            ("owner_id", "agent_id"),
+            key_fields_for_index_file(home.global_index_active_agents_jsonl),
             "home_indexes.active_agents",
         ),
         filters=_ScopeFilter(owner_id=owner_id, task_id=task_id),
@@ -377,16 +399,38 @@ def latest_agent_refs_report(home: MyAgentHomePaths, *, owner_id: str = "", task
 
 def dangling_index_refs(home: MyAgentHomePaths, *, limit: int = 100) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    specs = (
-        _IndexSpec("task", home.global_index_active_tasks_jsonl, "task_path", ("owner_id", "task_id")),
-        _IndexSpec("run", home.global_index_active_runs_jsonl, "run_path", ("owner_id", "run_id")),
-        _IndexSpec("agent", home.global_index_active_agents_jsonl, "run_path", ("owner_id", "agent_id")),
-    )
-    for spec in specs:
+    for spec in _dangling_index_specs(home):
         findings.extend(_dangling_refs_for(spec, remaining=limit - len(findings)))
         if len(findings) >= limit:
             return findings[:limit]
     return findings
+
+
+# LLM: 悬空引用检查要读的三份索引。键一律从 INDEX_KEY_FIELDS_BY_FILE 取：
+#   读取键一旦和压缩用的键不一致，压缩会把读取侧视为不同的行合并掉，而没有测试会发现
+#   （9b 的 MH12 就是这条）。抽成函数是为了让测试能直接核对这三处。
+# 函数用途: 返回悬空引用检查用的三份索引 spec。
+def _dangling_index_specs(home: MyAgentHomePaths) -> tuple[_IndexSpec, ...]:
+    return (
+        _IndexSpec(
+            "task",
+            home.global_index_active_tasks_jsonl,
+            "task_path",
+            key_fields_for_index_file(home.global_index_active_tasks_jsonl),
+        ),
+        _IndexSpec(
+            "run",
+            home.global_index_active_runs_jsonl,
+            "run_path",
+            key_fields_for_index_file(home.global_index_active_runs_jsonl),
+        ),
+        _IndexSpec(
+            "agent",
+            home.global_index_active_agents_jsonl,
+            "run_path",
+            key_fields_for_index_file(home.global_index_active_agents_jsonl),
+        ),
+    )
 
 
 def _dangling_refs_for(
