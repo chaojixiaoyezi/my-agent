@@ -56,11 +56,12 @@
 - **新增两窗（第二个提交）**：两窗都复用同一套取消流程（`_cancel_bound_task_during_hold`），两条原取消用例也改用它。
   - `test_cancel_discards_the_reply_when_the_backend_ignores_the_stop`：
     - 场景：挂起点忽略停止（`hold(honor_stop=False)`），放行后照常返回答复；断言停止确实送到了在途调用并被忽略、没有交付、任务 cancelled、唤醒结案。
-    - 在叠加 542139f95 的导出上，挡住它的是调用方线程等模型结果时的中断检查（`tool_model_generation._wait_for_generation_result`）。
+    - 在叠加 542139f95 的导出上，先由调用方线程等模型结果时的中断检查（`tool_model_generation._wait_for_generation_result`）挡住；旗还在时还有既有防线，所以没有哪个单一变异能让这一窗失败。
   - `test_cancel_discards_the_reply_when_the_stop_flag_is_lost`：
     - 场景（故障注入）：停止控制照常回报确认，但不给目标线程立旗；在途调用没被打断，放行后正常返回。
     - 只有交付前按任务已取消的持久检查（`_session_task_turn_was_cancelled`）能挡住交付。
   - 两窗在 main 上都按 strict xfail 挂在 `stop_confirmed`。
+  - 两窗的“前提不成立”检查用 `_require`（be 复审 must-fix，第三个提交）：注入被改坏时报 RealChainBroken，不会被 strict xfail 吞成 XFAIL；位置在停止确认断言之后，main 上仍先按 xfail 挂在停止确认。
   - 叠加 542139f95 后都转正：strict xfail 报 XPASS，`--runxfail` 下真实通过。
   - 叠加导出上的变异结果：
     - 去掉持久检查：只有“停止旗丢失”一窗失败。

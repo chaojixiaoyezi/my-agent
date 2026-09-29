@@ -526,17 +526,18 @@ def test_cancel_stops_the_bound_task_turn_during_a_model_call(tmp_path, monkeypa
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
                    reason="场景 5 未修：取消找不到后台派活回合，stop_confirmed=false（取消修复并入后转正）；"
-                          "这一窗的后端不响应停止，放行后的迟到结果要由模型调用等待关卡丢弃")
+                          "这一窗的后端不响应停止，放行后的迟到结果先由模型调用等待关卡丢弃")
 def test_cancel_discards_the_reply_when_the_backend_ignores_the_stop(tmp_path, monkeypatch) -> None:
     """后端不响应停止：停止送到了在途调用但被忽略，放行后模型照常返回答复；这一片仍不得交付，任务保持 cancelled。
 
-    542139f95 上实测挡住它的是调用方线程等模型结果时的中断检查（tool_model_generation._wait_for_generation_result），
-    交付前的持久检查在它之后，由下面"停止旗丢失"那一窗单独覆盖。
+    542139f95 上实测先由调用方线程等模型结果时的中断检查（tool_model_generation._wait_for_generation_result）挡住；
+    旗还在时后面还有既有防线，所以没有哪个单一变异能让这一窗失败。交付前的持久检查由下面"停止旗丢失"那一窗单独覆盖。
     """
     chain = _real_chain(tmp_path, monkeypatch)
     stop, final, delivered = _cancel_bound_task_during_hold(chain, "RC-GOAL-HOLD-IGNORES-STOP")
     assert stop.get("stop_confirmed") is True, f"停止控制没有确认：{stop}"
-    assert chain.wire.ignored_stops == ["task"], "前提不成立：停止应当送到在途调用并被它忽略"
+    # 前提检查用 _require（抛 RealChainBroken，strict xfail 吞不掉）；放在停止确认之后，main 上仍先按 xfail 挂在停止确认。
+    _require(chain.wire.ignored_stops == ["task"], "前提不成立：停止应当送到在途调用并被它忽略")
     assert delivered == [], "后端忽略停止、放行后返回的答复仍被交付了"
     assert final.status == "cancelled" and not final.summary, final
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后唤醒没有结案"
@@ -559,7 +560,8 @@ def test_cancel_discards_the_reply_when_the_stop_flag_is_lost(tmp_path, monkeypa
     chain = _real_chain(tmp_path, monkeypatch)
     stop, final, delivered = _cancel_bound_task_during_hold(chain, "RC-GOAL-HOLD-FIRST")
     assert stop.get("stop_confirmed") is True, f"停止控制没有确认：{stop}"
-    assert (chain.wire.interrupted, chain.wire.ignored_stops) == ([], []), "前提不成立：在途调用不该收到停止"
+    # 前提检查用 _require：注入被改坏（照常立旗）时报 RealChainBroken，不能让这一窗悄悄变成 XFAIL。
+    _require((chain.wire.interrupted, chain.wire.ignored_stops) == ([], []), "前提不成立：在途调用不该收到停止")
     assert delivered == [], "停止旗丢失时，放行后返回的答复仍被交付了（交付前的持久检查没有生效）"
     assert final.status == "cancelled" and not final.summary, final
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后唤醒没有结案"
