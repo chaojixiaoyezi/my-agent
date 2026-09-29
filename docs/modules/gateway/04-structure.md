@@ -224,7 +224,9 @@ Gateway 的同一活动请求与后台工作片各自持有 `RunParams.runtime_r
 ## 受管命令完成交接
 
 `cli/gateway_lane_retry.py` 管理会话车道的 typed 失败退避：普通错误记录单调时钟 retry-after，
-本地缺模型/无效模型引用则等待当前 thread 配置恢复；`gateway_loops.py` 只规划、执行与记录诊断。
+本地缺模型/无效模型引用则等待当前 thread 配置恢复；环境级故障（`backends/errors.is_provider_environment_fault`，
+缺模型先归配置等待）按车道暂停，`thread_model_fingerprint` 变化立即放行，否则 60 秒起翻倍、封顶 900 秒探测一次，
+探测失败翻倍、成功清除，暂停与恢复各打一行 `[gateway-lane-retry]`；`gateway_loops.py` 只规划、执行与记录诊断。
 `thread_model_selection.py::thread_model_is_configured` 复用 owner 校验及规范引用，后端工厂共用
 `model_configuration_missing`，不建立默认模型或第二份配置。配置读取失败只影响精确车道。
 候选数只补偿同 owner 的失败条目，保留后排健康会话；进程内短锁保护共享字典，网络不在锁中。
@@ -2136,7 +2138,7 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 | 心跳循环 | `_gateway_heartbeat_loop` | 记账 + 限流打印，**不退避**（节奏本身就是限流） |
 | 请求租约心跳 | `lease_service._run_heartbeat_loop_body` | 不接：每请求短命线程，自带连续失败停机（`_should_stop_heartbeat`） |
 | supervisor 进程 | `supervisor._monitor_until_stopped` | 不接：独立进程，按 check_interval 一次健康检查最多一条日志 |
-| 后台主循环内的 owner 车道（curator / skill learning / owner_build） | `_BackgroundMainSupervisor` | 不接：`BackgroundLaneRetry` 按车道冷却 30 秒 |
+| 后台主循环内的 owner 车道（curator / skill learning / owner_build） | `_BackgroundMainSupervisor` | 不接：`BackgroundLaneRetry` 按车道冷却 30 秒，环境级故障按车道暂停 |
 | 请求执行 / 终态化 | `_RequestDispatcher._execute` | 不接：每请求一次性错误，不是循环 |
 
 - 规则：单一 tick 的后台循环一律走 `_run_loop_with_backoff(stop_event, tick, _LoopSite(...))`；出错等待 = `_wait_after_loop_error(backoff, interval)`

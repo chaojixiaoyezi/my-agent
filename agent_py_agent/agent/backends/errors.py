@@ -63,6 +63,21 @@ def provider_error_http_status(exc: BaseException) -> int | None:
     return status if type(status) is int and 100 <= status <= 599 else None
 
 
+# 环境级故障的 HTTP 状态：401 未授权、402 欠费、403 拒绝、404 端点或模型不存在、407 代理需要鉴权。
+# 密钥过期、账户欠费、端点配错、代理鉴权失败都是环境坏了，不是某次请求有毒；400/413/422 这类请求本身的问题不在内。
+_ENVIRONMENT_HTTP_STATUSES = frozenset({401, 402, 403, 404, 407})
+
+
+# LLM: 环境级故障的唯一权威，唤醒毒丸（不计数）和 Gateway 后台车道（按车道暂停）共用；只读结构化整数状态码与异常类型，
+#   不读正文。ModelNotConfiguredError 是 ProviderConfigurationError 的子类，这里也返回 True；需要"等模型配置"语义的
+#   调用方必须先判 is_model_configuration_unavailable。改动联测 test_wake_poison 与 test_gateway_lane_retry。
+# 函数用途: 判断一次模型错误是不是密钥、欠费、端点、代理或连接配置这类环境问题，而不是这次请求本身的问题。
+def is_provider_environment_fault(exc: BaseException) -> bool:
+    if provider_error_http_status(exc) in _ENVIRONMENT_HTTP_STATUSES:
+        return True
+    return isinstance(exc, ProviderConfigurationError) and not isinstance(exc, ProviderRequestRejectedError)
+
+
 # LLM: Provider timeout stage is a closed machine contract shared with the ledger; user-facing text never selects recovery behavior.
 # 类用途: 表示模型请求在哪个结构化等待阶段超时，供退避、恢复和诊断统一使用。
 class ProviderTimeoutError(ProviderRecoverableError):

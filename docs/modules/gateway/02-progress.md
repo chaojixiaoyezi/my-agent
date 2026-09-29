@@ -583,3 +583,30 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 另加 `test_background_claim_interrupt_scope.py`（绑定回合 vs 未绑定普通后台的正向对照）、
 `test_session_message_consumed_admission.py`（逐状态判据、读取抛异常放行、只在已消费时结案）。
 2026-09-29 由 75 从 `my-agent/self-dev-3-cancel-final` 接手，压成干净提交落在分支 `claude/75-cancel-line-finish`。真机复验由集成方跟进。
+
+## 环境级故障按车道暂停（2026-09-29，分支 `claude/9b-lane-env-pause`，基于 `89af6b07a`，唤醒毒丸第 3 步 C5）
+
+- **一个权威**：`backends/errors.is_provider_environment_fault`：整数 HTTP 状态 401/402/403/404/407，或除 `ProviderRequestRejectedError`
+  以外的 `ProviderConfigurationError`。状态码集合从 `wake_poison` 搬来，毒丸 `_is_uncounted` 改为引用它，判定逐字不变。
+- **车道第三类**：`BackgroundLaneRetry` 增加 waiting_for_environment。分类顺序固定：先等模型配置（`ModelNotConfiguredError` 也命中环境判定，
+  必须先走这条，配好模型立即恢复），再环境暂停，其余仍按 30 秒冷却（400/413 等请求本身的问题不变）。暂停到两件事之一：
+  - `thread_model_fingerprint` 变了：暂停后第一次就绪检查记下基线，之后每次规划比较，变了立即放行并删掉暂停（之后再失败从 60 秒重新计）；
+    失败到下一次规划之间发生的改动不算变化，只能等探测放行（最长 60 秒）。
+  - 到了探测时刻：`LANE_ENVIRONMENT_PROBE_BASE_SECONDS = 60` 起，探测再失败翻倍，`LANE_ENVIRONMENT_PROBE_MAX_SECONDS = 900` 封顶（内部常量）；
+    到点放行一次真实尝试，暂停记录留到探测有结果，成功由 `succeeded` 清除。
+  指纹在锁外读，锁内只推进同一条记录（读指纹期间被成功清除或换成新失败，就不写回旧记录）。状态只在进程内，重启即清。
+- **日志**：`[gateway-lane-retry]` 一行 JSON：`lane_environment_paused`（owner 标签、thread_id、`probe_in_seconds`、异常类名、状态码）与
+  `lane_environment_resumed`（reason 为 `model_fingerprint_changed` 或 `probe_succeeded`）；不含异常正文或配置，打印失败只记 `loop_health`。
+- **指纹**：`thread_model_fingerprint(agent, thread_id)` 直接 `threads.load`，不经会给空引用迁移写库的 `thread_model_profile_id`；由
+  model_profile_id、model_selection_revision 和所选模型的连接字段（协议、模型名、接口地址、密钥、密钥环境变量名、请求头、会话头、登录引用）
+  组成，用 `decision_policy.connection_revision` 的进程盐 HMAC 摘要，不落盘、不打印、不构造后端、不联网。空引用按 owner 默认推算；
+  模型引用失效（删除、停用、撤销共享）记作不可用，指纹随之变化。改 owner 的新会话默认值不影响已选模型的旧会话。
+- **额度耗尽核对（结论，没改代码）**：`ProviderQuotaExhaustedError` 不会被两套进程内机制重复处理。供应退避
+  `_absorb_provider_supply_failure` 只吸收 `is_provider_transient_error`（含 `ProviderUsageLimitError`），额度耗尽原样抛出、不记账；
+  唤醒路径由 `_run_wake_signal` 就地转成额度通知（Goal 转 usage_limited，未送达的只重投通知、不再调模型），tick 正常返回，车道记成功；
+  观察路径抛到 `_safe_thread_tick`，车道按 30 秒普通冷却（不是环境暂停）；策略路径先在 `run_with_heartbeat` 记持久策略失败账（300 秒起、
+  连续 3 次退休），再抛到车道 30 秒冷却——这是持久策略账与进程内车道两层，不是供应退避加车道冷却。
+  跟 9a 改判相邻的影响：每周额度用完的 429 以前是 `ProviderUsageLimitError`，三条路径都走供应退避（30→900 秒）、策略不记失败；改判成额度耗尽后，
+  唤醒路径改走额度通知（预期），观察路径变成车道每 30 秒固定重试一次注定失败的模型请求（直到额度重置），策略路径开始记失败账、3 次后退休。
+  是否让车道把额度耗尽也按环境暂停（毒丸侧本来就不计数，不受影响），待 3a 裁定。
+- 测试与变异见 TESTS.md 同名节。

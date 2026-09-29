@@ -93,6 +93,12 @@
   环境级补 402、404；批次失败也推进连续不计数段。文档更正：环境级故障目前只是不计数、仍由车道冷却重试，按车道暂停列为
   第 3 步第 4 点；另记三条接线约定（坏账按 `attempt:ledger_corrupt` 结案、`record()` 放 finally、宿主提示按会话与原因合并）。
   详见 [WAKE_POISON_PILL.md](docs/design/WAKE_POISON_PILL.md)。
+- 2026-09-29 第 3 步 C5（分支 `claude/9b-lane-env-pause`，基于 `89af6b07a`，本地验证通过，待复审）：环境级故障判定收成
+  `backends/errors.is_provider_environment_fault` 一个权威，毒丸不计数与 Gateway 车道共用；车道对这类故障按车道暂停，会话模型指纹
+  （`thread_model_fingerprint`，只读）变了立即放行，否则 60→900 秒探测一次，成功清除；缺模型仍先走等配置分支；状态只在进程内。
+  核对结论：`ProviderQuotaExhaustedError` 不会被供应退避和车道冷却重复处理——供应退避只吸收瞬时类；唤醒路径就地转额度通知、
+  不抛到车道；观察和策略路径抛到车道按 30 秒普通冷却（策略路径另记持久失败账，3 次退休）。**待裁定**：9a 把每周额度 429 改判为
+  额度耗尽后，观察路径会从供应退避的 30→900 秒变成车道 30 秒固定重试；是否把额度耗尽也并入车道环境暂停，由 3a 定。
 
 ## 持久化指纹必须分版本、兼容旧数据（2026-09-29，分支 `claude/38-guidance-receipt-digest-compat`，基于 `bac2f176d`，本地验证通过，待集成）
 

@@ -12,6 +12,7 @@ from agent_py_agent.agent.conversation.models import ConversationThread
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts import request_context
 from agent_py_agent.agent.settings.model_profiles import (
+    ModelProfileError,
     execute_model_profile_operation,
     inherit_model_profile,
     inherited_model_config,
@@ -23,6 +24,7 @@ from agent_py_agent.agent.settings.thread_model_selection import (
     default_model_profile_id,
     execute_local_model_operation,
     thread_model_config,
+    thread_model_fingerprint,
     thread_model_profile_id,
 )
 from agent_py_agent.tests.test_model_profiles import Host, add
@@ -222,3 +224,42 @@ def test_status_distinguishes_running_snapshot_and_next_selection(tmp_path, monk
         execute_local_model_operation(host, "s", "select", {"profile_id": b})
         assert _status_model_name(host, idle=False, scope=scope) == "A"
     assert _status_model_name(host, idle=True, scope=scope) == "B"
+
+
+def test_thread_model_fingerprint_reads_only_and_tracks_model_changes(tmp_path):
+    host = host_with_store(tmp_path)
+    threads = host.conversation_store.threads
+    first = add(host, model_name="first")[0]
+    threads.write(ConversationThread("legacy", "alice", owner_id="alice"))
+    path = threads.storage.thread_path("legacy")
+    before = path.read_bytes()
+    legacy = thread_model_fingerprint(host, "legacy")
+    # 读指纹不迁移空引用、不前进版本、不改会话文件。
+    assert thread_model_fingerprint(host, "legacy") == legacy
+    assert path.read_bytes() == before and threads.load("legacy").model_profile_id == ""
+    # 空引用跟随 owner 默认：默认换成真实模型，指纹就变。
+    execute_model_profile_operation(host, "set_default", {"profile_id": first})
+    assert thread_model_fingerprint(host, "legacy") != legacy
+    tid = execute_local_model_operation(host, "tui", "select", {"profile_id": first})["thread_id"]
+    seen = [thread_model_fingerprint(host, tid)]
+    # 同值再选一次也前进选择版本。
+    execute_local_model_operation(host, "tui", "select", {"profile_id": first})
+    seen.append(thread_model_fingerprint(host, tid))
+    execute_model_profile_operation(host, "save_provider", {
+        "provider_id": "provider-" + first, "editing": True, "provider": {"api_key": "rotated-secret"},
+    })
+    seen.append(thread_model_fingerprint(host, tid))
+    add(host, model_name="unrelated")
+    assert thread_model_fingerprint(host, tid) == seen[-1]
+    # 所选模型被停用：不抛错，记作不可用，指纹与之前都不同。
+    execute_model_profile_operation(host, "save_provider", {
+        "provider_id": "provider-" + first, "editing": True, "provider": {"enabled": False},
+    })
+    seen.append(thread_model_fingerprint(host, tid))
+    assert len(set(seen)) == len(seen) == 4
+    assert all("rotated-secret" not in value and "only-private-secret" not in value for value in seen)
+    with pytest.raises(ModelProfileError, match="不存在"):
+        thread_model_fingerprint(host, "missing")
+    threads.write(ConversationThread("foreign", "bob", owner_id="bob"))
+    with pytest.raises(ModelProfileError, match="其他用户"):
+        thread_model_fingerprint(host, "foreign")

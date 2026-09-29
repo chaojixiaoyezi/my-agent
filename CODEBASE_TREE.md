@@ -238,7 +238,7 @@ agent_py_agent/
 |   |-- gateway_process.py              # gateway 进程入口
 |   |-- gateway_host_guard.py           # 托管标记：Gateway 托管的工具进程不能停止或重启托管自己的 Gateway
 |   |-- gateway_restart_handover.py     # 安全重启进程接线：服务循环排空、接班进程或退出码 75、启动时续跑与通知
-|   |-- gateway_lane_retry.py           # 后台 owner/thread 配置等待与普通冷却；有界、线程安全、不另存任务状态
+|   |-- gateway_lane_retry.py           # 后台 owner/thread 配置等待、环境故障暂停（指纹变化或 60→900 秒探测放行）与普通冷却；有界、线程安全、不另存任务状态
 |   |-- gateway_loop_backoff.py         # 派发循环与后台主循环共用的连续出错退避（0.2s 翻倍封顶 30s）与打印限流（同种错误第 1 次、之后每 10 次）
 |   `-- _*.py                           # CLI 子命令实现
 |-- skills/builtin/<category>/<name>/   # 内置知识型 skill 树：目录即分类（research/documents/…），递归扫描，类目索引常驻 prompt，skill_search 工具按需检索（千级地基）

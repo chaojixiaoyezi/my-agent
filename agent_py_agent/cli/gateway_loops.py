@@ -56,7 +56,10 @@ from ..agent.owner_wake_discovery import (
 )
 from ..agent.runtime_errors import runtime_error_report
 from ..agent.scheduler import SchedulerDueIndex
-from ..agent.settings.thread_model_selection import thread_model_is_configured
+from ..agent.settings.thread_model_selection import (
+    thread_model_fingerprint,
+    thread_model_is_configured,
+)
 from ..agent.user_space.owner_maintenance import run_owner_retention_if_due
 from ..agent.user_space.owner_resolver import (
     OwnerIdentity,
@@ -583,7 +586,7 @@ class _BackgroundThreadLaneSupervisorMixin:
     # across owners, bounded globally and per owner, and keyed by durable thread id.
     # Gateway's independent orphan reconciler owns recovery scans, so preparation
     # must skip the duplicate inline sweep before ready lanes are submitted.
-    # 函数用途: 公平提交就绪会话；配置等待和普通冷却不占执行工位，不影响其它窗口。
+    # 函数用途: 公平提交就绪会话；配置等待、环境暂停和普通冷却不占执行工位，不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
         global_limit = _background_owner_workers(self._base_agent)
         available = max(0, global_limit - len(self._inflight))
@@ -624,20 +627,21 @@ class _BackgroundThreadLaneSupervisorMixin:
                 candidates.append((owner_key, scheduler, pending[:owner_slots]))
         self._submit_thread_candidates(candidates, available=available)
 
-    # LLM: 配置只在失败车道复查；读取失败也局限于当前线程，不让一份坏配置阻塞同用户其它会话。
+    # LLM: 配置与模型指纹只在失败车道复查（指纹只在环境暂停时读）；读取失败也局限于当前线程，不让一份坏配置阻塞同用户其它会话。
     # 函数用途: 检查一条后台车道是否可以再跑，不构造后端或占用模型执行工位。
     def _thread_lane_can_retry(self, scheduler: BackgroundMainAgentScheduler, label: str, thread_id: str) -> bool:
         try:
             return self._lane_retry.ready(
                 label, thread_id,
                 model_ready=lambda: thread_model_is_configured(scheduler.runtime.agent, thread_id),
+                fingerprint=lambda: thread_model_fingerprint(scheduler.runtime.agent, thread_id),
             )
         except Exception as exc:
             self._record_thread_failure(label, thread_id, exc)
             return False
 
     # LLM: 执行异常与恢复检查异常共用 typed 退避及脱敏日志，不修改持久 wake、claim 或 Goal。
-    # 函数用途: 记录精确失败车道和恢复条件，普通错误按代码常量 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 冷却。
+    # 函数用途: 记录精确失败车道和恢复条件，环境级故障按车道暂停，普通错误按代码常量 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 冷却。
     def _record_thread_failure(self, label: str, thread_id: str, exc: Exception) -> None:
         self._lane_retry.failed(label, thread_id, exc, delay=BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS)
         _print_gateway_loop_error(

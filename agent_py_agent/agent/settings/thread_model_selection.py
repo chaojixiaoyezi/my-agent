@@ -15,6 +15,12 @@ from .model_profiles import (
 from .model_provider_schema import ModelProfileGeneration
 
 SUBAGENT_MODEL_ADVICE_KEY = "host_subagent_model_advice.v1"
+# 模型指纹摘要的连接字段（生成连接版本摘要那一组，另加模型名与会话头）：密钥、接口地址、协议、模型名、请求头或登录代次
+# 换了任何一个，环境级故障都可能已经修好。漏掉的字段只会让放行退回探测时刻，不会误放行。
+_FINGERPRINT_CONNECTION_FIELDS = (
+    "model_backend", "model_name", "api_base", "api_key", "api_key_env",
+    "model_custom_headers", "model_session_header", "model_auth_ref",
+)
 
 
 # LLM: 仅宿主创建准备载体可传递；无响应正文、时钟、连接摘要或授权。序列化只初始化新 thread，不能从 task attributes 反序列化。
@@ -152,3 +158,33 @@ def thread_model_is_configured(agent: object, thread_id: str) -> bool:
     except ModelProfileError:
         return False
     return not model_configuration_missing(config.model_backend, config)
+
+
+# LLM: 只读：直接 threads.load，不经 thread_model_profile_id（它会给空引用迁移写库）；不构造后端、不联网。
+#   由 model_profile_id、model_selection_revision 和所选模型连接字段组成，用 decision_policy.connection_revision 的
+#   进程随机盐 HMAC 摘要，结果只在本进程内比较，不落盘、不打印。会话不存在或属于其他用户时抛 ModelProfileError。
+#   供 Gateway 后台车道判断环境故障暂停期间用户是否改过模型；改动联测 test_gateway_lane_retry。
+# 函数用途: 生成会话当前模型选择的指纹；用户重新选模型、改密钥或接口地址后指纹就会变。
+def thread_model_fingerprint(agent: object, thread_id: str) -> str:
+    from ..conversation.decision_policy import connection_revision
+
+    thread = agent.conversation_store.threads.load(thread_id)
+    if thread is None:
+        raise ModelProfileError("当前会话不存在，请重新打开会话。")
+    _require_owner(agent, thread)
+    return connection_revision({
+        "profile_id": thread.model_profile_id,
+        "revision": thread.model_selection_revision,
+        "connection": _fingerprint_connection(agent, thread.model_profile_id),
+    })
+
+
+# LLM: 空引用按 owner 当前默认推算（真实执行会把它迁移成这个默认），但这里不写回；引用解析失败（已删除、撤销共享、
+#   未启用、目录损坏）记作 None，与可用时的内容必然不同，交给真实尝试归到"等模型配置"。只读模型目录与部署配置。
+# 函数用途: 取出会话所选模型的连接字段，作为模型指纹里"档案内容"那一部分。
+def _fingerprint_connection(agent: object, profile_id: str) -> dict | None:
+    try:
+        config = selected_model_config(agent, profile_id=profile_id or default_model_profile_id(agent))
+    except ModelProfileError:
+        return None
+    return {key: getattr(config, key, None) for key in _FINGERPRINT_CONNECTION_FIELDS}

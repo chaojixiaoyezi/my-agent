@@ -3,7 +3,7 @@
 #   只读结构化事实：admission 码、异常类型与 error_code / status_code 属性、报告的 wake_handled 与"是否已有冻结交付"、
 #   批大小；不读错误文案或模型正文，不做 IO、不读配置。常量是防死循环的安全兜底，不进用户配置。
 #   未知 admission 与未知异常类型默认计数（宁可多等几轮后停下，也不无限重试）；瞬时类与环境级故障只按类型或
-#   结构化状态码排除（目前仍由车道冷却重试，按车道暂停留到接线）。时间只往前走，时钟回拨时账照样读得回来。改动时联查 docs/design/WAKE_POISON_PILL.md、store_wake_attempts 与 test_wake_poison。
+#   结构化状态码排除（环境级故障由 Gateway 后台车道按环境暂停，见 cli/gateway_lane_retry）。时间只往前走，时钟回拨时账照样读得回来。改动时联查 docs/design/WAKE_POISON_PILL.md、store_wake_attempts 与 test_wake_poison。
 # 模块用途: 判断同一条后台唤醒是否在以同一原因反复失败，给出下次最早可再试的时间，以及何时该结案不再领取。
 from __future__ import annotations
 
@@ -54,9 +54,6 @@ WAKE_EXPECTED_WAIT_ADMISSIONS = frozenset({
     "wake_source_not_pending",
     "wake_source_changed",
 })
-# 环境级故障的 HTTP 状态：401 未授权、402 欠费、403 拒绝、404 端点或模型不存在、407 代理需要鉴权。
-# 密钥过期、账户欠费、端点配错、代理鉴权失败都是环境坏了，不是某条唤醒有毒，不计数；400/413/422 这类请求本身的问题照样计数。
-_ENVIRONMENT_HTTP_STATUSES = frozenset({401, 402, 403, 404, 407})
 # SQLite 主结果码 SQLITE_BUSY=5、SQLITE_LOCKED=6（扩展码的低 8 位）；锁冲突属于瞬时类。
 _SQLITE_LOCK_PRIMARY_CODES = frozenset({5, 6})
 
@@ -343,22 +340,15 @@ def _error_reason_code(error: Exception) -> str:
 # LLM: 不计数 = 瞬时类或环境级故障，只按类型或结构化状态码判定：
 #   瞬时——供应瞬时（含限流）、供应超时、额度耗尽、模型配置暂缺、运行库冲突全族（含锁冲突与待恢复）、
 #   取消与压缩让出、本地 IO 的阻塞与超时、SQLite 忙或锁；
-#   环境级——HTTP 401/402/403/404/407，以及 ProviderConfigurationError 基类（含 ProviderConnectionError），但请求被拒
+#   环境级——统一由 backends.errors.is_provider_environment_fault 判定（与 Gateway 车道暂停同一个权威）：HTTP
+#   401/402/403/404/407，以及 ProviderConfigurationError 基类（含 ProviderConnectionError），但请求被拒
 #   （ProviderRequestRejectedError）且不是这几个状态时属于请求本身的问题，照样计数。
 #   新增类型要在这里显式加，不能靠消息匹配。
 # 函数用途: 判断一个异常是否属于不计数的瞬时类或环境级故障。
 def _is_uncounted(error: Exception) -> bool:
-    from ..backends.errors import (
-        ProviderConfigurationError,
-        ProviderRequestRejectedError,
-        provider_error_http_status,
-    )
+    from ..backends.errors import is_provider_environment_fault
 
-    if provider_error_http_status(error) in _ENVIRONMENT_HTTP_STATUSES:
-        return True
-    if isinstance(error, ProviderConfigurationError) and not isinstance(error, ProviderRequestRejectedError):
-        return True
-    return _is_transient(error)
+    return is_provider_environment_fault(error) or _is_transient(error)
 
 
 # LLM: 瞬时类型清单；与 _is_uncounted 的环境级判定分开，便于逐项测试。

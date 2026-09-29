@@ -123,6 +123,32 @@
   `test_provider_transient_auto_resume.py`、`test_background_supply_backoff.py`、`test_background_claim_execution.py`、
   `test_wake_poison.py`、`test_decision_fault_matrix.py` 等）加 11 个全仓守卫，共 32 个文件 1027 项通过。
 
+## 唤醒毒丸第 3 步 C5：环境级故障按车道暂停（2026-09-29，分支 `claude/9b-lane-env-pause`，基于 `89af6b07a`）
+
+- **车道**（`test_gateway_lane_retry.py`，新增 10 个函数 31 例，全文件 44 例）：
+  - 401/402/403/404/407 与 `ProviderConnectionError` 进入暂停，30 秒、59.9 秒后仍不放行；别的车道、别的 owner 不受影响；暂停日志逐字段断言。
+  - 模型指纹一变立即放行并删掉暂停，之后再失败从 60 秒重新计。
+  - 到探测时刻放行一次、暂停记录保留；探测再失败依次 120/240/480/900/900 秒；成功清除，打 `probe_succeeded`。
+  - 400/413 仍是 30 秒冷却，不读指纹、不打日志。
+  - `ModelNotConfiguredError` 虽然命中环境判定，仍归等模型配置：24 小时后、指纹变化都不放行，配好模型才放行。
+  - `is_provider_environment_fault` 真值表：上述环境故障、`ProviderConfigurationError` 基类、只带 `status_code=401` 的对象为真；
+    400/413/422、不带状态码的请求被拒、额度耗尽（details 里的 429 不算）、瞬时类、程序错误为假。
+  - 毒丸与车道共用同一个函数：车道模块引用的就是 `backends.errors` 的函数，`wake_poison` 不再有自己的状态码常量，
+    patch 权威后 `_is_uncounted` 跟着变。
+  - 读指纹期间别的线程报告成功，过期基线不能把暂停写回；日志打印失败（磁盘满）只记 `loop_health`，暂停照旧。
+  - 规划集成：真实 owner 会话与模型目录，401 暂停后 45 秒仍不放行；同值再选、只换当前模型服务商的密钥、改选别的模型都立即放行；
+    改 owner 新会话默认值不放行；stdout/stderr 不含密钥。
+- **指纹**（`test_thread_model_selection.py::test_thread_model_fingerprint_reads_only_and_tracks_model_changes`）：旧会话空引用读指纹不写库；
+  跟随 owner 默认；同值再选、换密钥、停用都改变指纹，增加无关模型不变；指纹不含密钥原文；会话不存在或属于其他用户时报错。
+- **额度耗尽核对探针**（草稿区，不入库）：供应退避不吸收 `ProviderQuotaExhaustedError`（只吸收 `ProviderUsageLimitError`）；
+  车道对它按 30 秒普通冷却；策略失败账记它、不记 UsageLimit。结论见 gateway 02-progress 同名节。
+- **变异**（草稿副本上逐个精确替换、按字节恢复，跑上面两个文件与 `test_wake_poison.py`）：19 个全部被杀，基线与恢复后通过。
+  覆盖：环境级故障退回 30 秒冷却、模型指纹比较恒为相等、探测不翻倍、缺模型先归环境暂停、不封顶、到点不放行、不记基线、
+  Gateway 规划不传指纹、指纹不含选择版本、指纹不含档案内容、指纹经会写库的入口读取、毒丸不引用共享判定、状态码漏 402、
+  请求被拒不再排除、成功不清暂停、恢复日志缺失、暂停日志缺失、日志失败上抛、去掉记录同一性检查。
+- **回归**：原有相关 5 个文件 193 例；9 个全仓守卫与相关文件 357 例；导入改动模块的 90 个测试文件 2127 过、27 预期失败、1 跳过，
+  另 1 条预期失败意外通过（`test_timeout_budget_locked::test_native_protocol_unified_counts_ir`，存量的计数不确定项，与本次无关）。
+
 ## 后台进程与终端会话原因码：ae 复审建议 2–5（2026-09-29，分支 `claude/75-process-codes-followups`，基于 `e850ceb04`）
 
 - **建议 2**：`terminal_session` 关闭未确认时，终止回执结构化放进 `result_envelope.process.termination`（与后台进程停止未确认同一形状）；
@@ -7641,6 +7667,7 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   `test_background_main_wake_recall.py`、`test_model_unconfigured.py` 与会话模型选择联合验证。
   覆盖缺配置长时间不重跑、模型引用删除/恢复、精确旧会话改选、默认选择不串会话、零值冷却、
   远端拒绝不误判本地缺配置、同 owner 健康车道、跨 owner、短锁与有界回收。
+  环境级故障（401/402/403/404/407、连接与配置错误）按车道暂停：模型指纹变化立即放行，否则 60→900 秒探测，见文首 C5 节。
   联合 `test_background_supply_backoff.py` 和 Goal 测试核对 scheduler 不提前关闭目标/消费 wake；
   真实执行错误和额度限制仍受原保护，不把原已暂停或受阻目标无条件激活。
   真 TUI 在未配置会话设置目标，再通过 /model 选模型，核对原目标恢复、唯一最终回复及原 wake；

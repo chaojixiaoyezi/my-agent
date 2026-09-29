@@ -84,8 +84,13 @@
 的整数属性判断），以及 `ProviderConfigurationError` 基类（含 `ProviderConnectionError`、`ModelNotConfiguredError`）。
 密钥过期、账户欠费、端点或模型配错、代理鉴权失败是环境坏了，不是某条唤醒有毒；否则环境坏 7.5 分钟就会把健康的
 session_task 不可逆地判成 failed。`ProviderRequestRejectedError` 在 400、413、422 这类请求本身有问题时照样计数。
-**目前**这些故障只是不计数，仍由 Gateway 车道冷却（30 秒）照常重试，满 24 小时由连续不计数提醒兜底；
-按车道整体暂停（401/403/407/402/404、连接与配置错误）是第 3 步接线的第 4 点，还没有做。
+判定的唯一权威是 `backends/errors.is_provider_environment_fault`，毒丸和 Gateway 车道共用。
+**按车道暂停**（第 3 步第 4 点，C5 已接线，分支 `claude/9b-lane-env-pause`）：这些故障在 `cli/gateway_lane_retry.py`
+里不再按 30 秒冷却重试，而是按车道暂停到两件事之一发生：会话的模型指纹变了（`thread_model_fingerprint`：
+model_profile_id、model_selection_revision 与所选模型连接字段的进程盐摘要，只读、不构造后端、不联网），立即放行；
+或者到了探测时刻（60 秒起、每次探测再失败翻倍、封顶 900 秒，内部常量），放行一次真实尝试，成功由车道成功清掉暂停。
+`ModelNotConfiguredError` 与模型引用失效仍先走"等模型配置"分支。暂停只在进程内，重启即清；暂停和恢复各打一行
+`[gateway-lane-retry]`。对应的唤醒尝试照旧记不计数，满 24 小时由连续不计数提醒兜底。
 
 其余一律计数，包括 programmer_bug、`DataCorruptionError`、`ValueError`。
 
@@ -242,8 +247,8 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 3. **信封读不出来时的结案**：现在 `quarantine` 遇到读不出的 pending 文件抛数据损坏、原文件不动。接线时要决定：
    建议把原始字节原样移到 `quarantine/unreadable/<id>.json`，发 `wake_quarantined`（reason_code
    `admission:wake_source_unreadable`），列表把它放进 load_errors；不在读不出的内容上补字段。
-4. **环境级故障按车道暂停**：401/403/407/402/404、连接与配置错误目前只是不计数，仍按车道冷却每 30 秒重试（第 4 节）。
-   接线时改为按车道暂停，环境恢复（配置变更或下一次探测成功）后再放行，不再对每条唤醒反复尝试。
+4. **环境级故障按车道暂停**（C5 已接线，见第 4 节）：401/402/403/404/407、连接与配置错误不再按车道冷却每 30 秒重试，
+   改为按车道暂停，模型指纹变化或探测成功后再放行，不再对每条唤醒反复尝试。
 
 另外三条接线约定（二次复审）：
 
@@ -260,7 +265,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
    `delivery:channel_unavailable` 结案（见第 5 节）。
 4. `SkillSnapshotError` 整族的码**补成结构化 `error_code` 属性**，现有调用方和测试改读该属性；单独一片，
    技能快照模块不在 my-agent-3 的范围内，可以先做。
-5. **环境级故障不计数**（9a 复审，3a 裁定必须改；二次复审补 402、404）：401/402/403/404/407 与配置错误基类不计数，目前由车道冷却重试，按车道暂停留作第 3 步第 4 点（第 4 节）。
+5. **环境级故障不计数**（9a 复审，3a 裁定必须改；二次复审补 402、404）：401/402/403/404/407 与配置错误基类不计数；按车道暂停已由第 3 步 C5 接线（第 4 节）。
 6. **批次隔离**（采纳）：批次失败后逐条单独执行，只对批大小为 1 的失败计数（第 3 节）。
 7. **不计数的远端上限**（采纳，但不自动结案）：连续不计数满 24 小时发 `wake_uncounted_stalled` 并每 24 小时
    提醒一次（第 5 节）。
