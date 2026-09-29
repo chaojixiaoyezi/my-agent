@@ -96,6 +96,7 @@
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
     |-- PARAMETER_CENTER.md             # 参数中心：一个参数一个权威定义、安全等级、my-agent 自助修改与回滚、分阶段迁移
+    |-- STORAGE_RETENTION.md            # 产品持久数据盘点：写入点、实测大小、现有保留机制与缺口、通用保留方向（未落地）
     |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
     |-- REASONING_EFFORT.md             # 智能程度：各服务商实测、档位与控制方式、会话/子代理档位来源、/effort 与边界
     |-- HOST_NOTICES.md                 # 宿主提示：现有通道查证、线程待送达字段、提交即已读、飞书/TUI/历史显示与边界

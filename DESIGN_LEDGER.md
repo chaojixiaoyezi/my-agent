@@ -1,5 +1,23 @@
 # 设计台账
 
+## 产品持久数据保留策略盘点（2026-09-28，分支 `claude/9b-storage-retention-audit`，基于 `54880f8e9`，未落地）
+
+下午数据盘写满后做的只读盘点。生产 home 里产品自己写的数据约 20 GB（发布备份 24 GB 另行处理），其中管理员 home 约 17.1 GB。按大小排前几位的是：旧版任务工作区 `O/tasks` 8.30 GB（有保留键，但 365 天且只认已完成的目录，基本回收不到，最大的是用户任务里克隆的项目），会话本地库 `local_store` 1.92 GB，每轮上下文快照 1.90 GB，子代理目录 `O/agents` 1.30 GB（13.3 万个条目，几乎都超过 90 天），`global_index` 四个只追加索引 0.93 GB，另有两处旧布局遗留 0.87 GB 和 0.80 GB。
+
+现有的 `MemoryRetentionService` 只在 Gateway 运行时触发，扫描写死在旧版 `O/tasks/`，新的 `O/runs/` 不在其内；工具输出、Gateway 请求记录、`runtime.db`、快照和子代理目录都没有任何清理。方向：
+
+- 一张存储登记表作为唯一保留权威；
+- 只追加的日志和索引按段轮转或整理压缩；
+- 快照和记录在终态后按天数保留，并保护仍被结构化引用的项；
+- SQLite 库做行级保留和定期 VACUUM；
+- 旧布局遗留一次性迁移处理；
+- 用户交付物不自动删，改为提供占用视图和提示；
+- 维护不再依赖 Gateway 运行；
+- 磁盘压力时兜底维护；
+- 测试数据与生产 home 分开。
+
+详见 [STORAGE_RETENTION.md](docs/design/STORAGE_RETENTION.md)。
+
 ## capability 配置缺文件就用 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`，本地验证通过，待集成）
 
 - **问题**：
