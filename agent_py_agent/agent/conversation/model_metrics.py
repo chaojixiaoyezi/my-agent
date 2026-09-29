@@ -34,6 +34,8 @@ def _number(value: object) -> float | None:
 
 
 # LLM: 通道共用数值白名单；决策输入缺报保持 None，另带已报调用数与成败次数，不从空值猜供应商零消耗。
+#   失败构成出现前写下的旧快照没有 decision_unknown_failures 键：与 unfinished_usage_facts 对旧用量行同一规则，
+#   失败整体记为分不清是否发出，不能补 0（补 0 会让 split_unsent_failures 把旧失败说成“根本没发出去”）。
 # 函数用途: 清洗统计条、决策输入与成败次数及缓存诊断，拒绝未知 schema 和任意嵌套正文。
 def public_model_metrics(value: object) -> dict[str, object]:
     from ..backends.cache_diagnostics import public_cache_diagnostic
@@ -43,6 +45,9 @@ def public_model_metrics(value: object) -> dict[str, object]:
     diagnostic = public_cache_diagnostic(value.get("cache_diagnostic"))
     decision_calls = int(_number(value.get("decision_call_count")) or 0)
     decision_input = _number(value.get("decision_input_tokens"))
+    decision = {key: int(_number(value.get(key)) or 0) for key in _DECISION_COUNTS}
+    if "decision_unknown_failures" not in value:
+        decision["decision_unknown_failures"] = decision["decision_failure_count"]
     return {
         "schema": _SCHEMA,
         **{key: int(_number(value.get(key)) or 0) for key in _COUNTS},
@@ -54,7 +59,7 @@ def public_model_metrics(value: object) -> dict[str, object]:
         **({"cache_diagnostic": diagnostic} if diagnostic else {}),
         **({"decision_call_count": decision_calls,
             "decision_input_tokens": int(decision_input) if decision_input is not None else None,
-            **{key: int(_number(value.get(key)) or 0) for key in _DECISION_COUNTS}}
+            **decision}
            if decision_calls else {}),
     }
 

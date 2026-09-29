@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 旧显示快照的决策失败不再显示成“未发出”（2026-09-28，分支 `claude/be-legacy-unknown`，基于 `c101d325a`）
+
+- **问题**（9b 复审）：失败构成出现前写下的快照没有 `decision_unknown_failures` 键，`public_model_metrics` 补成 0，
+  `split_unsent_failures` 就把旧失败全算成“未发出”，例如“失败 0 · 未发出 2”。
+- **修复**：缺这个键时按旧用量行同一规则，把失败整体记为分不清是否发出。
+- **测试** `test_decision_stats_display.py`：
+  - 新增生产形状快照回归（改写自 9b 探针 U3a）：直接渲染与经 `model_metrics_from_thread` 读回落盘快照两条路径，
+    都显示“失败 2”，不出现“未发出”；
+  - 手写的新格式快照 fixture 显式带上 `decision_unfinished_calls` / `decision_unknown_failures`。
+- **反向验证**：去掉默认规则、或对新格式快照也套用默认规则，两个变异都被测试抓住。
+- **定向回归**：78 个相关文件（统计行、线程显示副本、Gateway 推流、TUI 渲染及 `test_architecture_guardrails`、
+  `test_constant_names_unique`）1722 passed。
+
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 
 - **新增用例**：`test_session_task_real_chain.py` 加了 `test_admin_lists_owner_sessions_and_reaches_the_listed_target`，按派活、发消息参数化成两条。

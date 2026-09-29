@@ -80,6 +80,8 @@
 **口径实现：**
 - 口径由 `conversation/model_metrics.py` 的 `unfinished_usage_facts` / `split_unsent_failures` 统一给出，`audit_records` 也用这两个函数。
 - 汇总只累加原始次数，展示时才推导。原因是迟到的尝试可能落在后一条用量事件里，逐条推导会算错。
+- 旧显示快照：失败构成出现前写下的快照（线程上落盘的显示副本、旧 Gateway 推来的统计）没有 `decision_unknown_failures` 键。
+  `public_model_metrics` 按旧用量行同一规则把它的失败整体记为分不清是否发出，不补 0；补 0 会把旧失败说成“未发出”（9b 复审，2026-09-28）。
 - 数据取自 `conversation/model_metrics.py` 的白名单字段：原有的 `decision_input_reported_calls/decision_success_count/decision_failure_count`，
   加上 `decision_unfinished_calls/decision_estimated_tokens/decision_unknown_failures/decision_unreported_calls`。
 

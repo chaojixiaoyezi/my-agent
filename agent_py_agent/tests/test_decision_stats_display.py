@@ -9,13 +9,16 @@ pre_recall 与 recall 共用阶段预算，排在后面的 pre_recall 常常一�
 - 一次 HTTP 尝试都没有的失败单列“未发出”，不计入失败；总行“缺报”不再重复计决策调用；
 - 拆分用跨事件累加后的原始次数推导（迟到的尝试落在后一条事件里也不会算错），旧账分不清是否发出时整体仍算失败；
 - 结果日志按点位汇总时，没发出去的失败类结果单列 not_sent，有链路事实的行按有没有 HTTP 尝试判定；
-- 审计用量行给出与 TUI 同口径的 jev_failures / not_sent_calls。
+- 审计用量行给出与 TUI 同口径的 jev_failures / not_sent_calls；
+- 失败构成出现前写下的旧快照（没有 decision_unknown_failures 键）按旧账规则把失败记为分不清是否发出，
+  不能被补成 0 后说成“未发出”（9b 复审）。下面手写的新格式快照都显式带上失败构成两键。
 """
 from __future__ import annotations
 
 import json
 import time
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.call_runtime import (
@@ -31,6 +34,8 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
 from agent_py_agent.agent.conversation.decision_audit import decision_usage_summary
 from agent_py_agent.agent.conversation.decision_outcome_log import SCHEMA, decision_outcome_summary
 from agent_py_agent.agent.conversation.model_metrics import (
+    model_metrics_from_thread,
+    public_model_metrics,
     split_unsent_failures,
     unfinished_usage_facts,
 )
@@ -46,34 +51,36 @@ def _line(**fields) -> str:
 
 def test_provider_reported_calls_show_only_the_reported_figure():
     text = _line(decision_call_count=1, decision_success_count=1, decision_input_reported_calls=1,
-                 decision_input_tokens=120)
+                 decision_input_tokens=120, decision_unfinished_calls=0, decision_unknown_failures=0)
     assert "决策 已报 120 token · 成功 1 · 失败 0" in text
     assert "估算" not in text and "缺报" not in text and "未发出" not in text
 
 
 def test_estimate_only_is_labelled_unfinished_and_is_not_reported_as_missing():
     text = _line(decision_call_count=1, decision_failure_count=1, decision_unfinished_calls=1,
-                 decision_estimated_tokens=321, unreported_calls=1, decision_unreported_calls=1)
+                 decision_unknown_failures=0, decision_estimated_tokens=321, unreported_calls=1,
+                 decision_unreported_calls=1)
     assert "决策 估算 321 token（未完成） · 成功 0 · 失败 1" in text
     assert "缺报" not in text, "有估算的超时调用不能再算缺报，总行也不能重复计"
 
 
 def test_calls_with_neither_report_nor_estimate_keep_missing_once():
-    text = _line(decision_call_count=1, decision_failure_count=1, decision_unknown_failures=1,
-                 unreported_calls=1, decision_unreported_calls=1)
+    text = _line(decision_call_count=1, decision_failure_count=1, decision_unfinished_calls=0,
+                 decision_unknown_failures=1, unreported_calls=1, decision_unreported_calls=1)
     assert "决策 缺报 1 · 成功 0 · 失败 1" in text
     assert text.count("缺报") == 1, "决策段已讲清，总行不再重复计同一次决策调用"
 
 
 def test_unsent_failures_are_listed_apart_and_not_counted_as_failures():
     text = _line(decision_call_count=3, decision_success_count=1, decision_input_reported_calls=1,
-                 decision_input_tokens=50, decision_failure_count=2)
+                 decision_input_tokens=50, decision_failure_count=2, decision_unfinished_calls=0,
+                 decision_unknown_failures=0)
     assert "决策 已报 50 token · 成功 1 · 失败 0 · 未发出 2" in text
 
 
 def test_other_models_keep_their_missing_count_without_the_decision_share():
     text = _line(unreported_calls=3, decision_unreported_calls=1, decision_call_count=1, decision_failure_count=1,
-                 decision_unfinished_calls=1, decision_estimated_tokens=7)
+                 decision_unfinished_calls=1, decision_unknown_failures=0, decision_estimated_tokens=7)
     assert "决策 估算 7 token（未完成） · 成功 0 · 失败 1" in text and " · 缺报 2" in text
     assert "缺报 2" in _line(unreported_calls=2), "没有决策调用时总行口径与原来相同"
 
@@ -171,3 +178,30 @@ def test_audit_usage_reports_jev_failures_and_unsent_calls_like_the_tui(tmp_path
     assert usage["input_tokens_reported"] == 200
     row = usage["threads"][0]
     assert (row["jev_failures"], row["not_sent_calls"]) == (3, 2)
+
+
+# 生产版（step15t，main 6c2fad4da 及以前）落在 thread.model_metrics 里的快照形状：决策只有三项计数，没有失败构成两键
+_PRODUCTION_SNAPSHOT = {
+    "schema": "model_runtime_metrics.v1", "model_rounds": 3, "retry_count": 0, "input_tokens": 9000,
+    "output_tokens": 800, "estimated_tokens": 0, "unreported_calls": 4, "sampled_at_ns": 1, "tool_count": 2,
+    "cache_percent": 50.0, "output_tps": None, "pending": False, "totals_known": True,
+    "decision_call_count": 5, "decision_input_tokens": 300, "decision_input_reported_calls": 3,
+    "decision_success_count": 3, "decision_failure_count": 2,
+}
+
+
+def test_production_shape_snapshot_keeps_old_failures_as_failures(tmp_path):
+    # 9b 复审：旧快照缺失败构成两键时，若补成 0，2 次旧失败会显示成“失败 0 · 未发出 2”（说成根本没发出去）
+    public = public_model_metrics(dict(_PRODUCTION_SNAPSHOT))
+    assert (public["decision_unfinished_calls"], public["decision_unknown_failures"]) == (0, 2), "与旧用量行同一规则"
+    text = _line(**_PRODUCTION_SNAPSHOT)
+    assert "决策 已报 300 token · 缺报 2 · 成功 3 · 失败 2" in text and "未发出" not in text
+
+    # 重连、切入子代理页面读回的是落盘的原始旧快照，同样按旧账口径显示
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "u", "owner_id": "u"})
+    store.model_usage._update_thread_atomic(thread.thread_id,
+                                            lambda item: replace(item, model_metrics=dict(_PRODUCTION_SNAPSHOT)))
+    persisted = "".join(part[1] for line in render_model_metrics(
+        model_metrics_from_thread(store, thread.thread_id), 400) for part in line)
+    assert "失败 2" in persisted and "未发出" not in persisted

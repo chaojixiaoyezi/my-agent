@@ -64,7 +64,8 @@
 - **飞书**：飞书没有统计行。决策统计由 my-agent 调 `audit_records` 回答，与 TUI 同一口径，工具说明已同步。
 - **已知边界**：
   - 非决策调用的“缺报”仍按“没有供应商回报就计”，包括已有本地估算的调用。要统一口径，另开一件。
-  - 旧账里的失败分不清当时是否发出，整体仍算失败。
+  - 旧账里的失败分不清当时是否发出，整体仍算失败。旧显示快照缺 `decision_unknown_failures` 键时同样按这条规则处理，
+    不能补 0 后显示成“未发出”（9b 复审发现，修复见 `claude/be-legacy-unknown`）。
 - 细节见[审计设计](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md)第 4 节，以及“没发出去与发出去后失败分开”一节。
 
 ## Jev 决策调用的链路分段计时（B 第 0 步）（2026-09-28，分支 `claude/be-jev-transport-timing`，基于 `80b4afed8`，本地验证通过，待集成）
