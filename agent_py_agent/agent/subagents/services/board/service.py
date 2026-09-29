@@ -146,8 +146,6 @@ class SubAgentBoardService:
             root_id = options.root_id
             include_run_ids = options.include_run_ids
             exclude_run_ids = options.exclude_run_ids
-        if config is None and hasattr(self._manager, "_make_default_capability_config"):
-            config = self._manager._make_default_capability_config()
         now = time.time()
         settings = due_check_settings(config, now)
         tasks = scoped_due_check_tasks(self._manager.list_runs(), root_id, include_run_ids, exclude_run_ids)
@@ -261,18 +259,18 @@ def _board_options(
     return SubAgentBoardOptions(recent_limit=recent_limit)
 
 
-# LLM: 巡检阈值只取自 CapabilityConfig 的三个在用字段；没有配置时心跳/运行超时按 0（关闭）、无进展熔断按 4。
-#   不要在这里读已删的完成证据数，改阈值来源须同步随包模板与 test_capability_config 的模板一致性测试。
+# LLM: 巡检阈值只取自 CapabilityConfig 的三个在用字段；调用方没给配置时用 CapabilityConfig() 默认值，
+#   这里不另写兜底数字（唯一权威是 dataclass 默认值）。改阈值来源须同步随包模板与 test_capability_config 的模板一致性测试。
 # 函数用途: 把能力配置换算成一次巡检用的阈值快照，供 due-check 和行动计划共用。
 def due_check_settings(config: Any, now: float) -> DueCheckSettings:
-    heartbeat_timeout = config.subagent_heartbeat_timeout if config else 0
-    run_timeout = config.subagent_run_timeout if config else 0
-    no_progress_attempt_limit = getattr(config, "subagent_no_progress_attempt_limit", 4) if config else 4
+    from ....capability.config import CapabilityConfig
+
+    config = config or CapabilityConfig()
     return DueCheckSettings(
         now=now,
-        heartbeat_timeout=heartbeat_timeout,
-        run_timeout=run_timeout,
-        no_progress_attempt_limit=no_progress_attempt_limit,
+        heartbeat_timeout=config.subagent_heartbeat_timeout,
+        run_timeout=config.subagent_run_timeout,
+        no_progress_attempt_limit=config.subagent_no_progress_attempt_limit,
     )
 
 

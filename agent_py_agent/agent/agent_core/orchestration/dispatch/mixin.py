@@ -253,14 +253,16 @@ def _log_introspection_failure(run_id: str, exc: BaseException, *, stage: str) -
 #   返回 (enabled, max_depth)；max_depth=0 表示不限制（项目统一约定）。
 # 函数用途: 读"自动拆分开关 + 拆分深度上限"两个 capability 配置项。
 def _failure_auto_split_settings(agent) -> tuple[bool, int]:
+    from ....capability.config import CapabilityConfig
     from ....capability.runtime_config_reload import capability_config_for_agent
 
-    config = capability_config_for_agent(agent)
-    enabled = bool(getattr(config, "subagent_failure_auto_split_enabled", False))
+    # 两个值只来自 CapabilityConfig：缺文件是默认实例，坏文件（None）或非法深度也落到 dataclass 默认值。
+    config = capability_config_for_agent(agent) or CapabilityConfig()
+    enabled = bool(config.subagent_failure_auto_split_enabled)
     try:
-        max_depth = int(getattr(config, "subagent_failure_split_max_depth", 2) or 0)
+        max_depth = int(config.subagent_failure_split_max_depth or 0)
     except (TypeError, ValueError):
-        max_depth = 2
+        max_depth = CapabilityConfig().subagent_failure_split_max_depth
     return enabled, max_depth
 
 

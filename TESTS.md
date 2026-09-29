@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## capability 兜底值清理：只认 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-fallback-cleanup`，基于 `54880f8e9`）
+
+- **范围**：6 处调用点改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，删掉各自写的兜底值：
+  - 选包判定、子代理包入口开关；
+  - 流式活动投影（开关、间隔，以及异常分支里的 15 秒）；
+  - 活动提醒（开关，以及首 token、流静默、长工具三种阈值）；
+  - 失败自动拆分（开关、深度，以及非法深度时的兜底）；
+  - 看板巡检阈值（另删一条从未命中的分支，并去掉 `DueCheckSettings` 的默认值 4）。
+  - 会话互通三个工具文件与 `session_messaging.py` 这次没碰。行为不变。
+- **测试**：`test_capability_config_single_default_source.py` 共 23 例，每处都覆盖三种情况：
+  - 缺文件取到 dataclass 默认值；
+  - 坏文件（统一入口返回 None）也取到默认值；
+  - 文件里的非默认值照常生效。
+  - 流式投影用可控时钟证明节流间隔正好是默认的 15 秒：早半秒不发，到点就发。
+- **变异验证**：12 个变异体全部被抓住，包括每处去掉 `or CapabilityConfig()`、写死数值、忽略开关、阈值映射错位。
+- **定向回归**：引用这些函数的 30 个测试文件加护栏测试：470 passed、2 skipped（`--basetemp` 28 字符）。
+  - `test_subagent_debug_trace.py::test_subagent_debug_trace_level_five_writes_detail_refs` 在 116 字符的长 basetemp 下，基点和本分支都失败，换短路径后两边都通过，属于已知的路径长度问题，与本改动无关。
+
 ## capability 配置缺文件用默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`）
 
 - **新增或修改的测试**：

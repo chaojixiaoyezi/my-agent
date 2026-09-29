@@ -24,6 +24,7 @@
 |-- agent_py_agent/tests/test_capability_selection_state.py # 原TaskLink严格标记、损坏隔离和CAS
 |-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
 |-- agent_py_agent/tests/test_capability_config_missing_defaults.py # 缺配置文件给默认实例且不缓存、坏文件仍 None、决策默认值读 capability 文件
+|-- agent_py_agent/tests/test_capability_config_single_default_source.py # 各调用点缺文件/坏文件都取 dataclass 默认、文件值生效
 |-- agent_py_agent/tests/test_capability_package_selection.py # 结构化选择、原调用账与响应隔离
 |-- agent_py_agent/tests/test_capability_package_read.py # 原页回执保持及读取和pin取消边界
 |-- agent_py_agent/tests/test_capability_selection_authority.py # 原执行权和只读准入组合验证

@@ -16,7 +16,10 @@
 - **行为变化**：
   - 提示词内容和工具列表不变：推荐开、选包关、决策与会话开关，缺文件时原本就等于默认值。
   - 只有两道守卫真正生效：派活链深 4、每对会话每小时 60 条。
-- **遗留**：各调用点散落的兜底值暂不删，今后逐步清。
+- **兜底值清理**（`claude/9a-capcfg-fallback-cleanup`）：
+  - 已清 6 处：选包判定、子代理包入口开关、流式活动投影、活动提醒阈值、失败自动拆分、看板巡检阈值。
+    各处改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，唯一权威是 dataclass 默认值。
+  - 会话互通三个工具文件与 `conversation/session_messaging.py` 仍有兜底，值与默认一致，待会话修复合入后再清。
 
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`，本地验证通过，待集成）
 

@@ -26,8 +26,9 @@ class PackageSelectionScope:
 # LLM: 已有 run 使用原冻结工具/Skill 快照；Goal 控制入口传可信 cwd，只生成元数据快照，不准备连接或执行资源。
 # 函数用途: 判断当前主执行是否允许准备包选择；关闭、孩子、无原读权限或无包时直接跳过。
 def package_selection_scope(agent: object, params: object = None, *, workspace_root: object = None) -> PackageSelectionScope | None:
-    config = capability_config_for_agent(agent)
-    if config is None or not config.enable_capability_package_selection or current_subagent_run_id(agent):
+    # 缺文件由统一入口给默认实例，坏文件（None）也落到 dataclass 默认值；这里不另写兜底。
+    config = capability_config_for_agent(agent) or CapabilityConfig()
+    if not config.enable_capability_package_selection or current_subagent_run_id(agent):
         return None
     agent_config = getattr(agent, "config", None)
     if not (getattr(agent_config, "enable_tools", False) and getattr(agent_config, "enable_plugins", False)):

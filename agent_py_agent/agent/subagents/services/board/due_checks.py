@@ -50,6 +50,7 @@ from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_
 
 
 # LLM: 一次巡检的只读阈值快照；0 关闭对应检查。字段只增不猜：新增阈值要从 CapabilityConfig 在用字段经 due_check_settings 传入。
+#   各字段都不设默认值：阈值的唯一权威是 CapabilityConfig 的 dataclass 默认值，不在这里另写一份数字。
 # 类用途: 装心跳停滞、运行超时和无进展熔断三个阈值，外加本次巡检的时间点。
 @dataclass(frozen=True)
 class DueCheckSettings:
@@ -58,7 +59,7 @@ class DueCheckSettings:
     now: float
     heartbeat_timeout: float
     run_timeout: float
-    no_progress_attempt_limit: int = 4
+    no_progress_attempt_limit: int
 
 
 @dataclass(frozen=True)

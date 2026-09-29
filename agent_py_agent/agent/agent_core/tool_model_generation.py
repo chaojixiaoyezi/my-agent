@@ -645,20 +645,18 @@ def _publish_runner_model_stream_activity(
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
         return
+    from ..capability.config import CapabilityConfig
+
     try:
         from ..capability.runtime_config_reload import capability_config_for_agent
 
-        config = capability_config_for_agent(request.agent)
-        if not bool(
-            getattr(config, "subagent_stream_activity_projection_enabled", True)
-        ):
+        # 开关与间隔只来自 CapabilityConfig：缺文件是默认实例，坏文件（None）也落到默认值。
+        config = capability_config_for_agent(request.agent) or CapabilityConfig()
+        if not bool(config.subagent_stream_activity_projection_enabled):
             return
-        interval = max(
-            1.0,
-            float(getattr(config, "subagent_stream_activity_interval_seconds", 15)),
-        )
+        interval = max(1.0, float(config.subagent_stream_activity_interval_seconds))
     except Exception:
-        interval = 15.0
+        interval = float(CapabilityConfig().subagent_stream_activity_interval_seconds)
     now = time.monotonic()
     turn_id = str(state.get("_current_model_turn_id") or "")
     previous = state.get(_RUNNER_STREAM_ACTIVITY_STATE_KEY)

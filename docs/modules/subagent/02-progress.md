@@ -1,5 +1,12 @@
 # 子代理维护状态
 
+2026-09-28（分支 `claude/9a-capcfg-fallback-cleanup`）：巡检阈值不再自带兜底数字。
+- `due_check_settings` 没收到配置时用 `CapabilityConfig()`。
+- 删掉看板里从未命中的 `_make_default_capability_config` 分支：没有任何类定义这个方法。
+- `DueCheckSettings.no_progress_attempt_limit` 去掉默认值 4。
+
+行为不变，见 TESTS 顶部本节。
+
 2026-09-28：进入被接替的子代理页后，头部也标出“已被 X 接替”（分支 `claude/ae-tui-superseded-marker` 第 3 个提交），数据仍只来自 kernel 的 `replaced_by_view`；CLI board 按集成方决定不做。
 
 2026-09-28：TUI 子代理名册对被接替的子代理标出“已被 X 接替”（分支 `claude/ae-tui-superseded-marker` 第 2 个提交），数据只来自 kernel 的 `replaced_by_view`，不另外推断；CLI board 暂未标注。

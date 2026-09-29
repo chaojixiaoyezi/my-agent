@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from ...capability.config import CapabilityConfig
 from ...capability.runtime_config_reload import capability_config_for_agent
 from ...subagents.runner_completion_wake import notify_parent_on_activity_notice
 
@@ -57,24 +58,25 @@ def runner_activity_sample(worker: Any, task: Any, *, wall: float, monotonic: fl
 
 
 # LLM: 通知阈值不是执行超时；0 关闭该阶段提示，配置来自唯一 capability snapshot。
+#   阶段只映射到字段名，秒数只来自 CapabilityConfig；没有配置对象时用 dataclass 默认值，不在这里另写兜底秒数。
 # 函数用途: 为首 token、流静默和长工具分别取提醒时间，健康慢流不会因总时长被提示。
 def activity_notice_threshold(config: object, phase: str) -> float:
-    field, default = {
-        "first_token_wait": ("subagent_first_token_notice_seconds", 600),
-        "stream_idle": ("subagent_stream_idle_notice_seconds", 180),
-        "tool_wait": ("subagent_tool_wait_notice_seconds", 900),
-        "between_steps": ("subagent_stream_idle_notice_seconds", 180),
-        "provider_retry": ("subagent_first_token_notice_seconds", 600),
-    }.get(phase, ("subagent_stream_idle_notice_seconds", 180))
-    return max(0.0, float(getattr(config, field, default)))
+    field = {
+        "first_token_wait": "subagent_first_token_notice_seconds",
+        "stream_idle": "subagent_stream_idle_notice_seconds",
+        "tool_wait": "subagent_tool_wait_notice_seconds",
+        "between_steps": "subagent_stream_idle_notice_seconds",
+        "provider_retry": "subagent_first_token_notice_seconds",
+    }.get(phase, "subagent_stream_idle_notice_seconds")
+    return max(0.0, float(getattr(config or CapabilityConfig(), field)))
 
 
 # LLM: 此入口在既有 heartbeat 中调用；只在阶段异常/恢复时写 canonical 诊断，重复通知由 wake receipt 去重。
 #   出错交由心跳调用方记录并重试，不改变原模型请求、工具执行或权限。
 # 函数用途: 检查一次长等待，必要时提醒父级；没有新证据不周期性调用模型。
 def observe_runner_activity(worker: Any, run_id: str) -> None:
-    config = capability_config_for_agent(worker)
-    if not bool(getattr(config, "subagent_activity_notices_enabled", True)):
+    config = capability_config_for_agent(worker) or CapabilityConfig()
+    if not bool(config.subagent_activity_notices_enabled):
         return
     task = worker.subagents.load(run_id)
     # 命名来源岗位已有专用活动监督，不能再叠加普通子代理提醒策略。

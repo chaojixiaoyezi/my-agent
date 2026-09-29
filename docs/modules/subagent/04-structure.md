@@ -6,7 +6,8 @@
   - `subagent_heartbeat_timeout`：心跳停滞超过该秒数记为问题，超过 3 倍升为 P0；
   - `subagent_run_timeout`：运行超时，记为 P0；
   - `subagent_no_progress_attempt_limit`：无进展熔断，默认 4。
-- 0 关闭对应检查。没有配置对象时，前两个阈值按 0，熔断按 4。
+- 0 关闭对应检查。没有配置对象时用 `CapabilityConfig()` 的默认值，这里不另写数字；`DueCheckSettings` 各字段都没有默认值，
+  只经 `due_check_settings` 构造。
 - 原来的 `min_evidence` 由 `subagent_min_evidence_for_done` 透传进快照，但没有任何检查读取，已随配置字段一起删除。
   以后要新增巡检阈值，先在 `CapabilityConfig` 和随包模板里加在用字段，再经 `due_check_settings` 传入，不在检查函数里另读配置。
 

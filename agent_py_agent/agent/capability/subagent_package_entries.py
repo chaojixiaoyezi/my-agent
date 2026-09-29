@@ -6,6 +6,7 @@ from concurrent.futures import CancelledError
 from dataclasses import replace
 
 from ..common.cancellation import ToolCancelled
+from .config import CapabilityConfig
 from .package_selection_context import prepare_package_entry_context
 from .package_selection_scope import PackageSelectionScope
 from .runtime_config_reload import capability_config_for_agent
@@ -13,11 +14,10 @@ from .subagent_entry_authority import SubagentEntryAuthority, SubagentEntryIniti
 from .task_references import normalize_skill_reference, task_skill_references
 
 
-# LLM: 只读配置；关闭不读取 Skill 快照/包正文，也不初始化原首请求标记。
+# LLM: 只读配置；关闭不读取 Skill 快照/包正文，也不初始化原首请求标记。开关值只来自 CapabilityConfig（坏文件也用默认值）。
 # 函数用途: 根和递归创建共用同一个包入口开关，默认路径保持原样。
 def subagent_entries_enabled(agent: object) -> bool:
-    config = capability_config_for_agent(agent)
-    return bool(config is not None and config.enable_capability_package_selection)
+    return bool((capability_config_for_agent(agent) or CapabilityConfig()).enable_capability_package_selection)
 
 
 # LLM: 当前 scoped 快照只作为权限上界；引用来自孩子 canonical 规格，不从描述、父正文或当前安装猜版本。
