@@ -18,6 +18,7 @@ from agent_py_agent.agent.conversation.decision_observe_nonblocking import (
     USAGE_SOURCE,
     wait_nonblocking_idle,
 )
+from agent_py_agent.agent.conversation.decision_outcome_log import decision_outcome_summary
 from agent_py_agent.agent.gateway_parts import request_binding, request_execution
 from agent_py_agent.agent.gateway_parts.io import read_json_file, update_json_file_atomic
 from agent_py_agent.agent.llm_scale import hot_path
@@ -107,6 +108,10 @@ def test_observe_returns_before_the_provider_answers_then_logs_and_bills_once(tm
     [row] = rows(host)
     assert (row["point"], row["status"], row["mode"], row["blocking"]) == ("subagent_model", "success", "observe", False)
     assert row["run_id"] == params.run_id and row["thread_id"] == thread.thread_id
+    # 后台调用走同一条调用边界，结果行同样带链路分段计时。
+    transport = row["transport"]
+    assert transport["call_status"] == "finished" and transport["estimated_input_tokens"] > 0
+    assert len(transport["attempts"]) == 1 and {"connect", "first_byte"} <= set(transport["attempts"][0]["phase_ms"])
     [event] = observe_usage(host, thread)
     assert event.request_id.startswith("decision-observe:") and event.run_id == params.run_id
     provider = event.model_calls["purpose_breakdown"]["decision"]["usage_breakdown"]["provider"]
@@ -185,10 +190,19 @@ def test_background_timeout_is_billed_like_a_foreground_timeout(tmp_path, server
     assert decide(host, params, stage).status == "deferred"
     assert wait_nonblocking_idle(5)
     server.release.set()
-    assert [(row["status"], row["reason"], row["blocking"]) for row in rows(host)] == [("deadline", "provider_failed", False)]
+    [row] = rows(host)
+    assert (row["status"], row["reason"], row["blocking"]) == ("deadline", "provider_failed", False)
+    transport = row["transport"]
+    assert (transport["call_status"], transport["timeout_phase"]) == ("timed_out", "first_byte") and transport["attempts"]
     [event] = observe_usage(host, thread)
     bucket = event.model_calls["purpose_breakdown"]["decision"]
     assert bucket["physical_model_attempt_count"] == 1 and bucket["status_counts"]["timed_out"] == 1
+    # 发出去之后超时：本地估算输入进独立用量范围，统计口径算 Jev 失败，不进“未发出”。
+    estimated = bucket["usage_breakdown"]["estimated"]
+    assert (estimated["unfinished_call_count"], estimated["unfinished_input_tokens"]) == (
+        1, transport["estimated_input_tokens"])
+    summary = decision_outcome_summary(host.home_paths, since=0)
+    assert summary["points"] == {"subagent_model": {"deadline": 1}} and summary["not_sent"] == {}
 
 
 def test_one_worker_and_a_bounded_queue_refuse_with_a_structured_reason(tmp_path, server, monkeypatch):  # noqa: F811
@@ -212,6 +226,9 @@ def test_one_worker_and_a_bounded_queue_refuse_with_a_structured_reason(tmp_path
     assert wait_nonblocking_idle(5)
     assert [row["status"] for row in rows(host)][1:] == ["success"] * 3
     assert len(server.requests) == 3 and len(observe_usage(host, thread)) == 3
+    # 忙码是 skipped，不是失败，统计口径照原状态计数，不进“未发出”。
+    summary = decision_outcome_summary(host.home_paths, since=0)
+    assert summary["points"] == {"subagent_model": {"skipped": 1, "success": 3}} and summary["not_sent"] == {}
 
 
 def test_queue_limit_is_the_frozen_eight():
@@ -231,6 +248,9 @@ def test_user_stop_before_send_skips_the_request_without_usage(tmp_path, server)
     assert wait_nonblocking_idle(5)
     assert [(row["status"], row["reason"]) for row in rows(host)] == [("success", ""), ("stale", "turn_cancelled")]
     assert len(server.requests) == 1 and len(observe_usage(host, thread)) == 1
+    assert "transport" not in rows(host)[1], "发出前取消的没有调用记录，也就没有链路事实"
+    summary = decision_outcome_summary(host.home_paths, since=0)
+    assert summary["points"] == {"subagent_model": {"success": 1, "stale": 1}} and summary["not_sent"] == {}
 
 
 def test_user_stop_after_send_lets_the_request_finish_and_bill(tmp_path, server):  # noqa: F811

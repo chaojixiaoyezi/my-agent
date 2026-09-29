@@ -137,6 +137,9 @@ observe 的建议永远不会被采用，同步等待只会拖慢回复（生产
 - **选模型观察**：请求记录里的观察标记先记 `deferred`。后台完成时，如果回合仍在活动事务内，就经 `GatewayModelObservationWriter.complete_deferred` 把建议编号和状态补记进同一个标记（只接受 started/deferred，`adopted` 恒为 false）。回合已结束则不回写，结果只留在决策结果日志里。
 - **设置视图**：这类点位标 `blocking=false`，`max_request_seconds` 和 `limiting_field` 显示后台单次等待。
 - **开关关闭时**：决策的逻辑与时序不变，但结果日志每行会多一个附加字段 `blocking`（值为 true）。
+- **与链路计时、统计口径的关系**：
+  - 后台调用走同一条调用边界，结果行同时带 `transport` 与 `blocking=false`；超时的本地估算输入记进独立用量范围（`decision-observe:*`）的 `estimated.unfinished_*`。
+  - 统计汇总里，忙码 `skipped/observe_nonblocking_busy` 与发出前取消的 `stale/turn_cancelled` 都不是失败类，照原状态计数，不进 `not_sent`；deferred 占位不写行。
 
 ## 4. 最小结构和唯一执行入口
 

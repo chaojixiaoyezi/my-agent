@@ -169,6 +169,14 @@
   - 变异验证扩到 29 个，全部被抓住。新增的 4 个是：不恢复身份、补记不核对 claim、身份不拷贝、停机不等待。
   - 定向回归：同样 77 个文件，1838 passed、0 skipped。新文件另外连跑 5 遍、3 进程并发各跑 1 遍，都全部通过。
 - **ae 复核后的补丁**：停机时的取消与等待拆成两个 try。新增 `test_gateway_decision_shutdown_cancel.py::test_gateway_cleanup_still_cancels_when_the_observe_drain_fails`，分两组：等待抛异常、执行器模块导入失败（`sys.modules` 置 None）。两组都要求取消照常执行，并且只记 `gateway_decision_drain_failed`。把函数换回单个 try 的旧写法后，这两组都失败。
+- **rebase 到 step16b 后的语义合并**（与 be 的链路计时、统计口径合并）：
+  - 后台行同样带 transport：成功行 call_status=finished，有一次尝试的分段毫秒；后台超时行 timeout_phase=first_byte，本地估算输入进独立用量范围的 `estimated.unfinished_*`。
+  - 统计口径：忙码 `skipped/observe_nonblocking_busy` 与发出前取消的 `stale/turn_cancelled` 都不是失败类，照原状态计数，`not_sent` 为空；后台超时算 Jev 失败。
+  - `test_decision_transport_timing.py` 的最近行字段集合补上 blocking：最近行的固定字段现在含 blocking，没有 transport 的行仍不带 transport 键。
+  - 回归（rebase 到 `c101d325a` 后）：
+    - 定向 77 个文件加 be 的两个新测试文件，共 79 个文件，1870 passed；
+    - step16b 改过的测试文件（真实链路、桌面防线、账本、会话存储等 6 个）127 passed、4 xfailed，xfail 是约定的严格 xfail；
+    - rebase 后的第一个提交单独检出，定向 6 个文件 88 passed。
 
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 
