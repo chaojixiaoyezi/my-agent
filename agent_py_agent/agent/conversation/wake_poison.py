@@ -3,7 +3,7 @@
 #   只读结构化事实：admission 码、异常类型与 error_code / status_code 属性、报告的 wake_handled 与"是否已有冻结交付"、
 #   批大小；不读错误文案或模型正文，不做 IO、不读配置。常量是防死循环的安全兜底，不进用户配置。
 #   未知 admission 与未知异常类型默认计数（宁可多等几轮后停下，也不无限重试）；瞬时类与环境级故障只按类型或
-#   结构化状态码排除，交给车道级等待。改动时联查 docs/design/WAKE_POISON_PILL.md、store_wake_attempts 与 test_wake_poison。
+#   结构化状态码排除（目前仍由车道冷却重试，按车道暂停留到接线）。时间只往前走，时钟回拨时账照样读得回来。改动时联查 docs/design/WAKE_POISON_PILL.md、store_wake_attempts 与 test_wake_poison。
 # 模块用途: 判断同一条后台唤醒是否在以同一原因反复失败，给出下次最早可再试的时间，以及何时该结案不再领取。
 from __future__ import annotations
 
@@ -54,9 +54,9 @@ WAKE_EXPECTED_WAIT_ADMISSIONS = frozenset({
     "wake_source_not_pending",
     "wake_source_changed",
 })
-# 环境级故障的 HTTP 状态：401 未授权、403 拒绝、407 代理需要鉴权。密钥过期、代理鉴权失败不是某条唤醒有毒，
-# 不计数；400/413/422 这类请求本身的问题照样计数。
-_ENVIRONMENT_HTTP_STATUSES = frozenset({401, 403, 407})
+# 环境级故障的 HTTP 状态：401 未授权、402 欠费、403 拒绝、404 端点或模型不存在、407 代理需要鉴权。
+# 密钥过期、账户欠费、端点配错、代理鉴权失败都是环境坏了，不是某条唤醒有毒，不计数；400/413/422 这类请求本身的问题照样计数。
+_ENVIRONMENT_HTTP_STATUSES = frozenset({401, 402, 403, 404, 407})
 # SQLite 主结果码 SQLITE_BUSY=5、SQLITE_LOCKED=6（扩展码的低 8 位）；锁冲突属于瞬时类。
 _SQLITE_LOCK_PRIMARY_CODES = frozenset({5, 6})
 
@@ -203,41 +203,56 @@ def verdict_for_batch(verdict: WakeAttemptVerdict, batch_size: int) -> WakeAttem
     return verdict
 
 
-# LLM: 成功清空全部；计数失败推进同因与总次数并结束当前不计数段；不计数推进连续不计数段（既不累加失败，也不打断
-#   同因连续段）；批次失败只推进 batch_failures；只重投失败只动重投字段。next_attempt_at 按本次结果的退避重算
-#   （不计数保持原值）。未知 kind 抛 ValueError，不静默当成不计数。
+# 计数失败、批次失败、只重投失败都必须带结构化原因：同因比较、提醒和结案记录都靠它，空原因写进账就读不回来。
+_REASON_REQUIRED_KINDS = frozenset({WAKE_VERDICT_FAILURE, WAKE_VERDICT_BATCH_FAILURE, WAKE_VERDICT_REDELIVERY_FAILURE})
+
+
+# LLM: 成功清空全部；计数失败推进同因与总次数并结束当前不计数段；不计数与批次失败都推进连续不计数段（既不累加失败，
+#   也不打断同因连续段），批次失败另加 batch_failures；只重投失败只动重投字段。next_attempt_at 按本次结果的退避重算
+#   （不计数保持原值）。时间只往前走：本机时钟回拨时各段的"最近一次"取 max(now, 已记的最近时间)，账始终自洽可读。
+#   未知 kind、需要原因的 kind 却给了空原因，都抛 ValueError，不静默写坏账。
 # 函数用途: 按一次尝试的判定推进状态，不修改传入对象。
 def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, now: float) -> WakePoisonState:
+    if verdict.kind in _REASON_REQUIRED_KINDS and not str(verdict.reason_code or "").strip():
+        raise ValueError(f"wake attempt verdict {verdict.kind!r} requires a reason_code")
     if verdict.kind == WAKE_VERDICT_SUCCESS:
         return WakePoisonState()
     if verdict.kind == WAKE_VERDICT_FAILURE:
         return _after_failure(state, verdict.reason_code, now)
     if verdict.kind == WAKE_VERDICT_NEUTRAL:
-        return replace(state, uncounted_reason_code=verdict.reason_code or state.uncounted_reason_code,
-                       uncounted_count=state.uncounted_count + 1,
-                       uncounted_since=now if state.uncounted_count == 0 else state.uncounted_since)
+        return _after_uncounted(state, verdict.reason_code, now)
     if verdict.kind == WAKE_VERDICT_BATCH_FAILURE:
-        return replace(state, batch_failures=state.batch_failures + 1,
+        return replace(_after_uncounted(state, verdict.reason_code, now), batch_failures=state.batch_failures + 1,
                        next_attempt_at=now + WAKE_POISON_BACKOFF_BASE_SECONDS)
     if verdict.kind == WAKE_VERDICT_REDELIVERY_FAILURE:
         failures = state.redelivery_failures + 1
+        at = max(now, state.last_redelivery_failed_at)
         return replace(state, redelivery_failures=failures,
-                       first_redelivery_failed_at=now if state.redelivery_failures == 0 else state.first_redelivery_failed_at,
-                       last_redelivery_failed_at=now, next_attempt_at=now + redelivery_backoff_seconds(failures))
+                       first_redelivery_failed_at=at if state.redelivery_failures == 0 else state.first_redelivery_failed_at,
+                       last_redelivery_failed_at=at, next_attempt_at=at + redelivery_backoff_seconds(failures))
     raise ValueError(f"unknown wake attempt verdict kind: {verdict.kind!r}")
 
 
 # LLM: 同因比较只看 reason_code；换了原因从 1 重新计，总次数照加；首次失败时间只在第一次失败时写入。
 #   计数失败说明这条唤醒不再处于"连续不计数"，不计数段与它的提醒记录一起清零；batch_failures 保留，
-#   直到成功为止都继续逐条单独执行。
+#   直到成功为止都继续逐条单独执行。时钟回拨时按 max(now, last_failed_at) 记，首次失败时间不会晚于最近一次。
 # 函数用途: 计算一次计数失败之后的状态。
 def _after_failure(state: WakePoisonState, reason_code: str, now: float) -> WakePoisonState:
     same = state.same_cause_count + 1 if reason_code == state.reason_code else 1
     total = state.total_count + 1
+    at = max(now, state.last_failed_at)
     return replace(state, reason_code=reason_code, same_cause_count=same, total_count=total,
-                   first_failed_at=now if state.total_count == 0 else state.first_failed_at, last_failed_at=now,
+                   first_failed_at=at if state.total_count == 0 else state.first_failed_at, last_failed_at=at,
                    uncounted_reason_code="", uncounted_count=0, uncounted_since=0.0, stall_alerts=0,
-                   last_stall_alert_at=0.0, next_attempt_at=now + poison_backoff_seconds(total))
+                   last_stall_alert_at=0.0, next_attempt_at=at + poison_backoff_seconds(total))
+
+
+# LLM: 不计数与批次失败共用：段内次数加 1，原因码取最近一次（空原因的不计数结果保留原码），段起点只在段开始时写入。
+# 函数用途: 推进连续不计数段。
+def _after_uncounted(state: WakePoisonState, reason_code: str, now: float) -> WakePoisonState:
+    return replace(state, uncounted_reason_code=reason_code or state.uncounted_reason_code,
+                   uncounted_count=state.uncounted_count + 1,
+                   uncounted_since=now if state.uncounted_count == 0 else state.uncounted_since)
 
 
 # LLM: 判定顺序固定：同因达上限 → 总次数达上限（标 mixed_causes）→ 只重投失败跨度满 24 小时（>=）；都不满足返回 None。
@@ -266,10 +281,12 @@ def stall_alert(state: WakePoisonState, *, now: float) -> WakeStallAlert | None:
                           uncounted_since=state.uncounted_since, alert_number=state.stall_alerts + 1)
 
 
-# LLM: 与 stall_alert 成对使用；只动提醒计数与时间，不改变不计数段本身。
+# LLM: 与 stall_alert 成对使用；只动提醒计数与时间，不改变不计数段本身。时钟回拨时提醒时间取
+#   max(now, 上次提醒, 段起点)，保证"提醒不早于段起点"的一致性。
 # 函数用途: 记下已经为当前不计数段发过一次提醒。
 def mark_stall_alerted(state: WakePoisonState, *, now: float) -> WakePoisonState:
-    return replace(state, stall_alerts=state.stall_alerts + 1, last_stall_alert_at=now)
+    return replace(state, stall_alerts=state.stall_alerts + 1,
+                   last_stall_alert_at=max(now, state.last_stall_alert_at, state.uncounted_since))
 
 
 # LLM: 批次失败后直到成功为止都逐条单独执行；调度层据此拆批。
@@ -326,8 +343,8 @@ def _error_reason_code(error: Exception) -> str:
 # LLM: 不计数 = 瞬时类或环境级故障，只按类型或结构化状态码判定：
 #   瞬时——供应瞬时（含限流）、供应超时、额度耗尽、模型配置暂缺、运行库冲突全族（含锁冲突与待恢复）、
 #   取消与压缩让出、本地 IO 的阻塞与超时、SQLite 忙或锁；
-#   环境级——HTTP 401/403/407，以及 ProviderConfigurationError 基类（含 ProviderConnectionError），但请求被拒
-#   （ProviderRequestRejectedError）且不是 401/403/407 时属于请求本身的问题，照样计数。
+#   环境级——HTTP 401/402/403/404/407，以及 ProviderConfigurationError 基类（含 ProviderConnectionError），但请求被拒
+#   （ProviderRequestRejectedError）且不是这几个状态时属于请求本身的问题，照样计数。
 #   新增类型要在这里显式加，不能靠消息匹配。
 # 函数用途: 判断一个异常是否属于不计数的瞬时类或环境级故障。
 def _is_uncounted(error: Exception) -> bool:
@@ -387,6 +404,13 @@ def _checked_field(name: str, value: object, default: object) -> object:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ValueError(f"wake poison state field {name} must be a finite non-negative number")
     return float(value)
+
+
+# LLM: 与读回同一口径（to_dict → from_dict，含字段类型与 _check_consistency）；存储层写账前调用，
+#   保证写下去的状态一定读得回来，程序缺陷抛 ValueError 而不是留下一份坏账。
+# 函数用途: 校验一份即将写盘的状态，不合法抛 ValueError。
+def ensure_writable_state(state: WakePoisonState) -> WakePoisonState:
+    return WakePoisonState.from_dict(state.to_dict())
 
 
 # LLM: 计数与时间必须互相吻合：同因不超过总数，原因码与同因次数同时为空或同时非空，
@@ -449,6 +473,7 @@ __all__ = [
     "WakeAttemptVerdict",
     "WakePoisonState",
     "WakeStallAlert",
+    "ensure_writable_state",
     "mark_stall_alerted",
     "needs_isolation",
     "next_poison_state",

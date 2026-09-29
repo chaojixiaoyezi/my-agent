@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -39,6 +40,7 @@ from agent_py_agent.agent.conversation.wake_poison import (
     WAKE_VERDICT_REDELIVERY_FAILURE,
     WakeAttemptVerdict,
     WakePoisonState,
+    ensure_writable_state,
     mark_stall_alerted,
     needs_isolation,
     next_poison_state,
@@ -125,11 +127,13 @@ class TestError:
 
     @pytest.mark.parametrize(("error", "reason"), [
         (ProviderRequestRejectedError("expired key", status_code=401), "error:PROVIDER_REQUEST_REJECTED:http_401"),
+        (ProviderRequestRejectedError("billing", status_code=402), "error:PROVIDER_REQUEST_REJECTED:http_402"),
         (ProviderRequestRejectedError("forbidden", status_code=403), "error:PROVIDER_REQUEST_REJECTED:http_403"),
+        (ProviderRequestRejectedError("no such model", status_code=404), "error:PROVIDER_REQUEST_REJECTED:http_404"),
         (ProviderRequestRejectedError("proxy auth", status_code=407), "error:PROVIDER_REQUEST_REJECTED:http_407"),
         (ProviderConnectionError("dns"), "error:PROVIDER_CONNECTION_FAILED"),
         (ProviderConfigurationError("bad endpoint"), "error:PROVIDER_CONFIGURATION_INVALID"),
-    ], ids=["401", "403", "407", "connection", "configuration"])
+    ], ids=["401", "402", "403", "404", "407", "connection", "configuration"])
     def test_environment_faults_are_not_counted(self, error, reason):
         assert verdict_for_error(error) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, reason)
 
@@ -296,12 +300,20 @@ class TestUncountedStall:
 
     def test_a_counted_failure_ends_the_run_and_its_alerts_but_other_kinds_do_not(self):
         state = mark_stall_alerted(next_poison_state(WakePoisonState(), self.WAIT, now=0.0), now=5.0)
-        for kind in (WAKE_VERDICT_BATCH_FAILURE, WAKE_VERDICT_REDELIVERY_FAILURE):
+        for kind, run in ((WAKE_VERDICT_BATCH_FAILURE, 2), (WAKE_VERDICT_REDELIVERY_FAILURE, 1)):
             kept = next_poison_state(state, WakeAttemptVerdict(kind, "x"), now=10.0)
-            assert (kept.uncounted_count, kept.stall_alerts) == (1, 1)
+            assert (kept.uncounted_count, kept.stall_alerts) == (run, 1)
         ended = next_poison_state(state, _failure("error:X"), now=10.0)
         assert (ended.uncounted_count, ended.uncounted_since, ended.uncounted_reason_code,
                 ended.stall_alerts, ended.last_stall_alert_at) == (0, 0.0, "", 0, 0.0)
+
+    # 批次失败同样不计数，所以也推进连续不计数段：一条唤醒一直批次失败，满 24 小时照样提醒。
+    def test_batch_failures_advance_the_uncounted_run_and_raise_the_stall_alert(self):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = next_poison_state(WakePoisonState(), batch, now=100.0)
+        assert (state.uncounted_count, state.uncounted_since, state.uncounted_reason_code) == (1, 100.0, "error:X")
+        state = next_poison_state(state, batch, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        assert state.uncounted_count == 2 and stall_alert(state, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS) is not None
 
     def test_the_alert_window_is_the_redelivery_window_of_24_hours(self):
         assert WAKE_UNCOUNTED_STALL_SECONDS == WAKE_REDELIVERY_GIVE_UP_SECONDS == 24 * 3600
@@ -356,6 +368,60 @@ class TestRedelivery:
         decision = quarantine_decision(at_limit)
         assert decision is not None and decision.reason_code == "delivery:channel_unavailable"
         assert (decision.redelivery_failures, decision.mixed_causes) == (3, False)
+
+
+# 本机时钟回拨（NTP 校时、休眠唤醒）时，"最近一次"的时间不能倒退，否则首次晚于最近一次，账就读不回来。
+class TestClockRollback:
+    def _readable(self, state):
+        assert WakePoisonState.from_dict(state.to_dict()) == state
+        return state
+
+    def test_a_failure_after_a_60_second_rollback_keeps_time_moving_forward(self):
+        state = next_poison_state(WakePoisonState(), _failure("error:X"), now=1000.0)
+        state = self._readable(next_poison_state(state, _failure("error:X"), now=940.0))
+        assert (state.first_failed_at, state.last_failed_at, state.same_cause_count) == (1000.0, 1000.0, 2)
+        assert state.next_attempt_at == 1000.0 + poison_backoff_seconds(2)
+
+    def test_a_redelivery_failure_after_a_rollback_keeps_time_moving_forward(self):
+        redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, "delivery:channel_unavailable")
+        state = next_poison_state(WakePoisonState(), redelivery, now=1000.0)
+        state = self._readable(next_poison_state(state, redelivery, now=940.0))
+        assert (state.first_redelivery_failed_at, state.last_redelivery_failed_at) == (1000.0, 1000.0)
+        assert state.next_attempt_at == 1000.0 + redelivery_backoff_seconds(2)
+
+    def test_a_stall_alert_marked_after_a_rollback_is_not_before_the_run_start(self):
+        state = next_poison_state(WakePoisonState(), TestUncountedStall.WAIT, now=1000.0)
+        state = self._readable(mark_stall_alerted(state, now=940.0))
+        assert state.last_stall_alert_at == 1000.0
+        state = self._readable(mark_stall_alerted(state, now=2000.0))
+        state = self._readable(mark_stall_alerted(state, now=1500.0))
+        assert (state.stall_alerts, state.last_stall_alert_at) == (3, 2000.0)
+
+    def test_uncounted_and_batch_results_after_a_rollback_stay_readable(self):
+        state = next_poison_state(WakePoisonState(), TestUncountedStall.WAIT, now=1000.0)
+        state = self._readable(next_poison_state(state, WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X"), now=940.0))
+        assert (state.uncounted_since, state.uncounted_count) == (1000.0, 2)
+
+
+class TestReasonRequired:
+    @pytest.mark.parametrize("kind", [WAKE_VERDICT_FAILURE, WAKE_VERDICT_BATCH_FAILURE, WAKE_VERDICT_REDELIVERY_FAILURE])
+    @pytest.mark.parametrize("reason", ["", "   "], ids=["empty", "blank"])
+    def test_failures_without_a_reason_are_rejected(self, kind, reason):
+        with pytest.raises(ValueError):
+            next_poison_state(WakePoisonState(), WakeAttemptVerdict(kind, reason), now=1.0)
+
+    def test_neutral_and_success_do_not_need_a_reason(self):
+        assert next_poison_state(WakePoisonState(), WAKE_ATTEMPT_NEUTRAL, now=1.0).uncounted_count == 1
+        assert next_poison_state(WakePoisonState(), WAKE_ATTEMPT_SUCCESS, now=1.0) == WakePoisonState()
+
+
+def test_ensure_writable_state_uses_the_same_rules_as_reading_back():
+    state = _feed([_failure("error:X")])
+    assert ensure_writable_state(state) == state
+    for broken in (replace(state, first_failed_at=state.last_failed_at + 1), replace(state, reason_code=""),
+                   replace(state, total_count=-1)):
+        with pytest.raises(ValueError):
+            ensure_writable_state(broken)
 
 
 class TestStateShape:

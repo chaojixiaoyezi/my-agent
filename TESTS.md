@@ -24,6 +24,22 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_memory_vector_cache.py agent_py_agent/tests/test_owner_maintenance.py -q`
   与 `python3 scripts/mutate_text_vector_cache.py`（cwd 都必须是工作树根）。
 
+## 唤醒毒丸：二次复审跟进（2026-09-29，分支 `claude/75-wake-poison-design`，在 `019e1d9af` 之上，仍未接线）
+
+- **时钟回拨**：`test_wake_poison.py::TestClockRollback` 回拨 60 秒后再记失败、只重投失败、不计数与批次失败、提醒，
+  状态都能经 `from_dict` 读回，"最近一次"时间不倒退（失败与只重投的退避也从不倒退的时间算）；提醒时间不早于段起点，
+  也不早于上一次提醒。存储层 `test_a_60_second_clock_rollback_keeps_the_ledger_readable` 用真实尝试账连记三次（1000、940、900），
+  `state_report` 无错误、同因次数照常累加。
+- **空原因**：计数失败、批次失败、只重投失败的原因为空或全空白都抛 ValueError（6 组），不计数与成功不需要原因；
+  存储层空原因被拒且尝试账逐字节不变。
+- **写前校验**：`ensure_writable_state` 与读回同一口径（3 种矛盾状态被拒）；把判定层替换成返回矛盾状态后，
+  `record` 与 `begin`（上一次尝试进程已死、需补记 abandoned）都抛 ValueError，尝试账逐字节不变。
+- **环境级**：402、404 加进不计数用例（共 7 种）；400/413/422 仍计数。
+- **批次失败推进不计数段**：批次失败带原因推进段次数与起点，一直批次失败满 24 小时照样给出提醒；原"其它类型不结束该段"
+  用例按新语义更新（批次失败后段次数为 2）。
+- **变异**：18 个（时间单调 5、退避起点 2、原因必填 5、批次推进 1、环境 2、写前校验 3）全部被抓住。
+- 两个文件现为 122 + 22 = 144 例。
+
 ## 唤醒毒丸：三条复审设计修改（2026-09-29，分支 `claude/75-wake-poison-design`，基于 `12a532f8b`，仍未接线）
 
 - **环境级故障不计数**：HTTP 401/403/407（`provider_error_http_status`）与 `ProviderConfigurationError` 基类（含连接错误、

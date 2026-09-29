@@ -29,6 +29,7 @@ from .wake_poison import (
     WakeAttemptVerdict,
     WakePoisonState,
     WakeStallAlert,
+    ensure_writable_state,
     mark_stall_alerted,
     next_poison_state,
     quarantine_decision,
@@ -104,7 +105,7 @@ class WakeAttemptStore:
 
     # LLM: 在执行前调用；上一条 in_flight 属于已确认死亡的进程时先补记一次 attempt:abandoned（按那次尝试的批大小
     #   经 verdict_for_batch 改写，批次中死亡只算批次失败），再写入本次 in_flight。进程是否存活只看结构化身份
-    #   （process_identity_is_live 返回 False 才算死），无法判断时不补记。
+    #   （process_identity_is_live 返回 False 才算死），无法判断时不补记。写账前经 ensure_writable_state 校验。
     # 函数用途: 标记一次尝试开始，并识别上一次尝试是否在执行中途连同进程一起消失；会写尝试账。
     def begin(self, signal: WakeSignal, start: WakeAttemptStart, *, now: float) -> WakeAttemptOutcome:
         path = self.storage.wake_attempt_path(signal.wake_signal_id)
@@ -115,7 +116,7 @@ class WakeAttemptStore:
             abandoned = _in_flight_abandoned(previous)
             if abandoned:
                 state = next_poison_state(state, verdict_for_batch(WAKE_ATTEMPT_ABANDONED, _batch_size(previous)), now=now)
-            ledger.update(state=state.to_dict(), in_flight={
+            ledger.update(state=ensure_writable_state(state).to_dict(), in_flight={
                 "claim_id": str(start.claim_id or ""), "batch_size": start.batch_size,
                 "owner_process": build_process_identity(), "started_at": now})
             write_json_file_atomic_unlocked(path, ledger)
@@ -123,7 +124,8 @@ class WakeAttemptStore:
 
     # LLM: 按一次尝试的判定推进状态并清掉 in_flight；成功直接删除尝试账。只有计数失败才更新 last_error。
     #   verdict 必须已按本次批大小经 verdict_for_batch 改写。连续不计数满提醒窗口时在同一把锁里记下提醒
-    #   （mark_stall_alerted），随结果返回，调用方负责发事件；这样同一窗口只提醒一次。
+    #   （mark_stall_alerted），随结果返回，调用方负责发事件；这样同一窗口只提醒一次。写账前经 ensure_writable_state
+    #   校验，状态不自洽时抛 ValueError、原账不动。
     # 函数用途: 记下一次尝试的结果，返回最新状态、是否该结案和是否该发提醒；会写或删尝试账。
     def record(
         self, signal: WakeSignal, verdict: WakeAttemptVerdict, *, now: float, error: BaseException | None = None,
@@ -138,7 +140,7 @@ class WakeAttemptStore:
             alert = stall_alert(state, now=now)
             if alert is not None:
                 state = mark_stall_alerted(state, now=now)
-            ledger.update(state=state.to_dict(), in_flight=None)
+            ledger.update(state=ensure_writable_state(state).to_dict(), in_flight=None)
             if verdict.kind == WAKE_VERDICT_FAILURE and error is not None:
                 ledger["last_error"] = _error_facts(error)
             write_json_file_atomic_unlocked(path, ledger)

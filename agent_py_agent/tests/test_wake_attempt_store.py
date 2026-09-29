@@ -163,6 +163,50 @@ class TestLedger:
         assert again.stall_alert is not None and again.stall_alert.alert_number == 2
         assert again.decision is None
 
+    def test_a_60_second_clock_rollback_keeps_the_ledger_readable(self, tmp_path):
+        store = _store(tmp_path)
+        signal = _raise(store)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("c1"), now=1000.0)
+        store.wakes.attempts.record(signal, BUG, now=1000.0)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("c2"), now=940.0)
+        store.wakes.attempts.record(signal, BUG, now=940.0)
+        state, error = store.wakes.attempts.state_report(signal.wake_signal_id)
+        assert error is None and (state.same_cause_count, state.first_failed_at, state.last_failed_at) == (2, 1000.0, 1000.0)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("c3"), now=900.0)
+        assert store.wakes.attempts.record(signal, BUG, now=900.0).state.same_cause_count == 3
+
+    def test_an_empty_reason_is_rejected_and_the_ledger_is_untouched(self, tmp_path):
+        store = _store(tmp_path)
+        signal = _raise(store)
+        store.wakes.attempts.record(signal, BUG, now=1.0)
+        path = store.storage.wake_attempt_path(signal.wake_signal_id)
+        before = path.read_bytes()
+        with pytest.raises(ValueError):
+            store.wakes.attempts.record(signal, WakeAttemptVerdict(WAKE_VERDICT_FAILURE, ""), now=2.0)
+        assert path.read_bytes() == before
+
+    # 写账前按读回同一口径校验：判定层即使算出自相矛盾的状态，也不会被写成一份读不回来的坏账。
+    @pytest.mark.parametrize("entry", ["record", "begin"])
+    def test_a_contradictory_state_is_never_written(self, tmp_path, monkeypatch, entry):
+        from agent_py_agent.agent.conversation import store_wake_attempts
+
+        store = _store(tmp_path)
+        signal = _raise(store)
+        path = store.storage.wake_attempt_path(signal.wake_signal_id)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("batch", batch_size=1), now=1.0)
+        ledger = _json(path)
+        ledger["in_flight"]["owner_process"] = {**ledger["in_flight"]["owner_process"], "pid": _dead_pid()}
+        path.write_text(json.dumps(ledger), encoding="utf-8")
+        before = path.read_bytes()
+        broken = WakePoisonState(reason_code="", same_cause_count=1, total_count=1, first_failed_at=2.0, last_failed_at=2.0)
+        monkeypatch.setattr(store_wake_attempts, "next_poison_state", lambda *_args, **_kwargs: broken)
+        with pytest.raises(ValueError):
+            if entry == "record":
+                store.wakes.attempts.record(signal, BUG, now=2.0)
+            else:
+                store.wakes.attempts.begin(signal, WakeAttemptStart("after-crash"), now=2.0)
+        assert path.read_bytes() == before
+
     def test_corrupt_ledger_is_reported_not_silently_reset(self, tmp_path):
         store = _store(tmp_path)
         signal = _raise(store)
