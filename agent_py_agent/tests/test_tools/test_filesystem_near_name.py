@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -24,11 +25,27 @@ def _owner_walled_tool(owner_home: Path, inner_root: Path):
 
     这样候选项才会真正走到 AccessGate（check_path_access 返回结构化裁决），
     而不是像没有墙的普通模式那样一律放行。
+
+    **工具根必须是 inner_root，不能是 owner_home。** 请求里的 `docs/...` 是相对工具根解析的；
+    若把根设成 owner_home，而文件实际在 owner_home/workspace/docs 下，请求会指到不存在的
+    owner_home/docs，近名逻辑压根不跑 —— 断言"没有泄露"就会空跑通过（2026-09-28 dsh-9b 复审指出）。
     """
     from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions, ReadFileTool
 
     options = FileSystemAccessOptions(owner_scope_root=owner_home)
-    return ReadFileTool(owner_home, max_chars=2000, workspace_roots=[inner_root], access_options=options)
+    return ReadFileTool(inner_root, max_chars=2000, workspace_roots=[inner_root], access_options=options)
+
+
+def _assert_near_name_logic_actually_ran(result) -> dict:
+    """防空跑：确认这次请求真的走到了"目标不存在、父目录存在"的近名分支。
+
+    没有这道闸，把工具根写错时测试仍会通过（候选为空、断言"没有泄露"恒真）。
+    """
+    envelope = result.result_envelope
+    assert envelope is not None, "没有结构化回执，说明请求没走到缺失路径分支"
+    assert envelope.get("path_not_found") is True, f"没走到缺失路径分支：{envelope}"
+    assert envelope.get("expected_kind") is not None, f"缺少 expected_kind：{envelope}"
+    return envelope
 
 
 # --------------------------------------------------------------------------- N1 越墙泄露
@@ -53,7 +70,8 @@ def test_symlink_to_outside_owner_never_appears_in_candidates(tmp_path: Path):
     result = tool.execute({"path": "docs/bobs_secret_notx.md"})
 
     assert not result.ok
-    candidates = result.result_envelope["candidate_paths"]
+    envelope = _assert_near_name_logic_actually_ran(result)
+    candidates = envelope["candidate_paths"]
     assert all(str(outside) not in path for path in candidates), f"泄露了墙外路径：{candidates}"
     assert all(not path.endswith("bobs_secret_note.md") for path in candidates), (
         f"指向墙外的链接被建议出来了：{candidates}"
@@ -81,7 +99,7 @@ def test_symlink_probe_cannot_distinguish_existing_from_missing_target(tmp_path:
 
         tool = _owner_walled_tool(owner_home, workspace)
         result = tool.execute({"path": "docs/bobs_secret_notx.md"})
-        observed.append(tuple(result.result_envelope["candidate_paths"]))
+        observed.append(tuple(_assert_near_name_logic_actually_ran(result)["candidate_paths"]))
 
     assert observed[0] == observed[1] == (), f"两种情形可区分：{observed}"
 
@@ -376,12 +394,20 @@ def test_edit_distance_matches_naive_implementation(limit: int):
 # 所以 `bool(decide(path))` 恒为真，闸门形同虚设。这些用例跑在**真实 owner 墙**下，
 # 专门用来杀"把闸门整个关掉"那类变异（MG1）——普通模式碰不到闸门。
 
-def test_credential_file_is_not_suggested_under_owner_wall(tmp_path: Path):
-    """LLM: A denied credential file must not be suggested just because its name is close.
+def test_credential_file_blocked_in_normal_mode_but_allowed_under_owner_wall(tmp_path: Path):
+    """LLM: 凭据文件名只被普通模式拦；owner 墙下本来就放行 —— 期望值必须按现行策略写。
 
-    新手说明:
-    用户把 `.env` 写成 `.evn`。`.env` 本身读不了（被凭据策略拒绝），
-    那就不该把它当成"你是不是想读这个"建议出来 —— 否则等于用建议绕过读取限制。
+    新手说明（2026-09-28 dsh-9b 复审更正）:
+    我原先这条断言"owner 墙下 .env 不被建议"，**是错的**。逐条实测确认：
+      - 普通模式（无墙）：`check_path_access(.env).allowed is False`，
+        code=`PATH_CREDENTIAL_FILE_BLOCKED` → 不该被建议；
+      - owner 墙模式：`.allowed is True` → `.env` 会被正常建议出来。
+    原因是 `path_access_policy._credential_file_decision` 只作为「未受 owner 墙约束的
+    普通模式」的遗留闸门，owner-home 与显式 full access 的裁决在它之前就做完了。
+
+    **这是个策略缺口，不是本模块的 bug**：远程多用户场景下 .env 的正文会进入模型上下文、
+    发给模型服务商。已按 9b 要求记进 DESIGN_LEDGER 作为「待用户决策」，
+    本测试只如实地把**两种模式各自的现行行为**钉住，避免以后再写成错期望值。
     """
     owner_home = tmp_path / "owner"
     workspace = owner_home / "workspace"
@@ -391,12 +417,24 @@ def test_credential_file_is_not_suggested_under_owner_wall(tmp_path: Path):
     credential.write_text("SECRET=1", encoding="utf-8")
     (docs / "notes.md").write_text("x", encoding="utf-8")
 
+    # ① owner 墙：放行 → 会被建议（按现行策略，这是已知缺口）
     tool = _owner_walled_tool(owner_home, workspace)
     result = tool.execute({"path": "docs/.evn"})
-
     assert not result.ok
-    candidates = result.result_envelope["candidate_paths"]
-    assert all(".env" not in path for path in candidates), f"把被拒文件建议出来了：{candidates}"
+    envelope = _assert_near_name_logic_actually_ran(result)
+    assert tool.check_path_access(credential).allowed is True, "前提变了：owner 墙下 .env 被拒了"
+    assert any(path.endswith(".env") for path in envelope["candidate_paths"]), (
+        f"owner 墙下 .env 本应放行并被建议（现行策略）：{envelope['candidate_paths']}"
+    )
+
+    # ② 普通模式：被拒 → 不该被建议
+    plain = _read_tool(workspace)
+    assert plain.check_path_access(credential).allowed is False, "前提变了：普通模式不再拦 .env"
+    plain_result = plain.execute({"path": "docs/.evn"})
+    plain_envelope = _assert_near_name_logic_actually_ran(plain_result)
+    assert all(".env" not in path for path in plain_envelope["candidate_paths"]), (
+        f"普通模式下把被拒文件建议出来了：{plain_envelope['candidate_paths']}"
+    )
 
 
 def test_denied_sibling_is_dropped_from_sibling_scan(tmp_path: Path):
@@ -464,7 +502,7 @@ def test_symlink_target_missing_and_existing_look_identical_under_owner_wall(tmp
 
         tool = _owner_walled_tool(owner_home, workspace)
         result = tool.execute({"path": "docs/bobs_secret_notx.md"})
-        observed.append(tuple(result.result_envelope["candidate_paths"]))
+        observed.append(tuple(_assert_near_name_logic_actually_ran(result)["candidate_paths"]))
 
     assert observed[0] == observed[1], f"两种情形可区分：{observed}"
     outside_paths = [str(tmp_path / f"bob-{flag}") for flag in (True, False)]
@@ -619,3 +657,85 @@ def test_denied_candidate_under_dangerous_root_is_not_reported(tmp_path: Path):
     )
     found = recovery.suggest_near_name_paths("secrets.evn", docs, scope)
     assert all("secrets.env" not in p.name for p in found), f"被拒文件仍被建议：{found}"
+
+
+# ------------------------------------------------------- G1：四项回执逐字相同（dsh-9b 复审指定）
+
+def test_outside_target_existence_is_indistinguishable_across_full_receipt(tmp_path: Path):
+    """LLM: Under a real owner wall, the COMPLETE receipt must not reveal whether the outside target exists.
+
+    新手说明（这是 9b 的 G1，专门杀 MG8 —— 在 `admits` 里让符号链接绕过裁决）
+
+    之前几条只比 `candidate_paths`，闸门若被改坏、链接被直接放行，
+    候选照样可能是空（因为对面目录根本没进扫描范围），于是变异存活。
+    这条比的是**完整回执的四个部分**（ok / error_code / output / envelope），
+    临时路径归一化之后要求逐字相同 —— 只要两种情形有任何一处不同，就是探测口。
+    """
+    import re
+
+    runs = []
+    for exists in (True, False):
+        owner_home = tmp_path / f"owner-{exists}"
+        workspace = owner_home / "workspace"
+        (workspace / "docs").mkdir(parents=True)
+        outside = tmp_path / f"bob-{exists}"
+        outside.mkdir()
+        target = outside / "bobs_secret_notes.md"
+        if exists:
+            target.write_text("private", encoding="utf-8")
+        (workspace / "docs" / "bobs_secret_note.md").symlink_to(target)
+
+        tool = _owner_walled_tool(owner_home, workspace)
+        result = tool.execute({"path": "docs/bobs_secret_notx.md"})
+        _assert_near_name_logic_actually_ran(result)
+
+        def _normalize(text: str) -> str:
+            """把这次运行自己的临时路径抹平，否则两个循环天然不同。"""
+            return re.sub(re.escape(str(tmp_path / f"owner-{exists}")), "<OWNER>", re.sub(
+                re.escape(str(tmp_path / f"bob-{exists}")), "<OUTSIDE>", text))
+
+        runs.append({
+            "ok": result.ok,
+            "error_code": getattr(result, "error_code", None),
+            "output": _normalize(str(result.output or "")),
+            "envelope": _normalize(json.dumps(result.result_envelope, sort_keys=True, default=str)),
+        })
+
+    assert runs[0] == runs[1], (
+        "两种情形（墙外目标存在 / 不存在）的完整回执不一致，等于可以探测别人家里有什么：\n"
+        f"存在  : {runs[0]}\n不存在: {runs[1]}"
+    )
+    # 且任何一段里都不许出现 bob 家的真实路径
+    for run in runs:
+        assert str(tmp_path / "bob-True") not in run["envelope"]
+        assert str(tmp_path / "bob-False") not in run["envelope"]
+
+
+def test_sibling_scan_reports_entry_path_not_resolved_target_in_normal_mode(tmp_path: Path):
+    """LLM: The sibling scan must report the entry's own path, not the symlink target (kills MG4).
+
+    新手说明（9b 复审指出 MG4 原先在普通模式下存活）:
+    我的旧测试全在 owner 墙下跑，普通模式没覆盖。而变化 MG4 是"把 `_score_candidate`
+    报告的对象换成 resolve() 后的目标" —— 普通模式下没有任何裁决差异，
+    只有**报告出来的路径**会变，所以必须在普通模式里直接断言路径本身。
+    """
+    from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
+
+    root = tmp_path / "workspace"
+    docs = root / "docs"
+    docs.mkdir(parents=True)
+    real = docs / "real_report.md"
+    real.write_text("real", encoding="utf-8")
+    link = docs / "lnk_report.md"
+    link.symlink_to(real)
+
+    tool = _read_tool(root)
+    scope = recovery.NearNameScope(
+        workspace_roots=[root], access=recovery.AccessGate(tool.check_path_access)
+    )
+    found = recovery.suggest_near_name_paths("lnk_reports.md", docs, scope)
+
+    assert found, "前提不成立：普通模式下这个近名候选没被找到"
+    names = [p.name for p in found]
+    assert "lnk_report.md" in names, f"兄弟扫描应报告条目自身路径，实际：{names}"
+    assert "real_report.md" not in names, f"报告了 resolve 后的目标（MG4 那类）：{names}"

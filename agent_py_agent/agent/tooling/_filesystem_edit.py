@@ -133,6 +133,9 @@ class EditFileTool(FileSystemTool):
         # 反复纠结 old_string 是否匹配，而真正该做的是先创建文件(write_file)或改对路径。
         # 分流到 PATH_NOT_FOUND(retryable，引导 list_files/search_text 重新定位)。
         if not target.exists():
+            # 候选裁决用 check_path_access（**读取**裁决），不是写入范围/写边界 —— 这是既有设计：
+            # "你是不是想改这个文件"只做只读、不落盘，所以按读权限判断即可。写入本身仍受
+            # write_boundary 约束（上面那层）。见 2026-09-28 dsh-9b 复审；此处只补说明、未改行为。
             return missing_path_result(MissingPathRequest(
                 tool_name="edit_file",
                 raw_path=self.display_path(target),
@@ -141,7 +144,7 @@ class EditFileTool(FileSystemTool):
                 display_path=self.display_path(target),
                 expected_kind="file",
                 retry_tool="read_file",
-            decide_access=self.check_path_access,
+                decide_access=self.check_path_access,
             ))
         try:
             observed_version = check_file_version(target, params.get("expected_version"))

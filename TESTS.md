@@ -311,6 +311,37 @@
 - 观察（未改产品）：`request_timeout` 极短时，被墙钟放弃的第一次调用的工作线程仍会在放弃之后提交插话，使重试提交撞上“未预留”；
   生产超时为秒级，线程启动延迟远小于超时，正常配置下达不到这个窗口，留给产品作者判断是否在提交前复核调用是否仍是当前调用。
 
+## 相近文件名建议：修好"owner 墙"用例空跑，并用 MG8 钉住（2026-09-28 第三轮复审，分支 `my-agent/self-dev`，基于 `b409c1b99`）
+
+- **来源**：dsh-9b 20:11 复审。**代码是对的，只改测试。**
+- **空跑根因（我已独立复现）**：`_owner_walled_tool` 把 **`owner_home` 当成了工具根**，而文件在
+  `owner_home/workspace/docs` 下。请求 `docs/...` 相对工具根解析成 `owner_home/docs/...`，**父目录不存在**，
+  于是近名逻辑压根没跑 —— 断言"候选里没有泄露"自然恒真。
+  实测证据：`path_not_found=True` 但 `candidate_paths=[]`、`suspected_typo=None`，
+  且 `owner_home/docs` 不存在、`owner_home/workspace/docs` 存在。
+- **修法**：工具根改成 `inner_root`（请求真正解析到的地方），owner 墙仍是 `owner_home`；
+  并新增 `_assert_near_name_logic_actually_ran()` 作为**防空跑闸门**（断言回执里
+  `path_not_found is True` 且 `expected_kind` 存在）。已反向验证：把工具根改回旧写法，
+  该闸门立刻报错（以前是静默通过）。
+- **MG8 验证（9b 指定的关键一步）**：变异 `admits` 里 `return item.is_symlink() or self.access.allows(...)`
+  —— 即让符号链接绕过裁决。修复前它在 25 条测试下**存活**；修复后**被 4 条用例同时杀掉**
+  （三条原有 N1 用例 + 新增的 G1）。MG2 按 9b 意见不再算变异（跟随链接现在是设计本身），由 MG8 替代。
+- **新增 G1 回归**：`test_outside_target_existence_is_indistinguishable_across_full_receipt`
+  —— 不只比 `candidate_paths`，而是比 **ok / error_code / output / envelope 四项完整回执**，
+  临时路径归一化后要求**逐字相同**；并断言任何一段都不出现墙外真实路径。
+- **两处按现行策略更正的期望值**（实测确认，非照抄结论）：
+  - **`.env` 在 owner 墙下是放行的**（`check_path_access(.env).allowed is True`），
+    所以"owner 墙下不建议 .env"这条**期望值本身是错的**。改为同时钉住两种模式的现行行为：
+    owner 墙下会被建议、普通模式下被拒（`PATH_CREDENTIAL_FILE_BLOCKED`）且不被建议。
+    **这是策略缺口不是本模块 bug**：远程多用户的 owner 墙模式下 .env 正文会进模型上下文并
+    发给模型服务商；已按 9b 要求记入 `DESIGN_LEDGER.md` 作为「待用户决策」。
+  - **MG4 的"已杀"说法更正**（见下面权限闸门那节）：补普通模式用例
+    `test_sibling_scan_reports_entry_path_not_resolved_target_in_normal_mode`，
+    直接断言兄弟扫描报告**条目自身路径**而不是 resolve 后的目标。
+- **`edit_file` 的裁决口径**：候选走的是**读取**裁决（`check_path_access`），不是写入范围；
+  这是既有设计，只补注释说明、不改代码。
+- **门禁**：定向 27 passed（含新增 2 例）；ruff / `DOC_SYNC_PASS` / `git diff --check` / clean-package 见交付说明。
+
 ## 测试不再打开真实浏览器，browser-lite 不再残留 Chrome 签名克隆（2026-09-28，分支 `claude/75-no-real-browser-in-tests`，基于 `80b4afed8`）
 
 - **弹窗根因**：`test_web_board_package.py::test_stdin_eof_ends_process_and_releases_port` 直接起插件进程，却把 `MY_AGENT_PLUGIN_SETTINGS` 从环境里删掉了。插件于是按默认 `open_browser=true`，在用户的默认浏览器里打开了带令牌的本机链接。现在这一例显式传 `{"open_browser": false}`，并断言 `served["browser_opened"] is False`；它测的是 stdin EOF 后退出，与默认设置无关。
@@ -632,7 +663,10 @@
   解析后的路径、不看目标是否存在，所以指到墙外的不论目标在不在都会被丢弃，不会重新变成探测口。
 - **测试怎么钉住的**（上一轮这些变异全部存活）：
   - 闸门整个关掉（**MG1**）→ 被杀；
-  - `_score_candidate` 改成报告 resolve 后的路径（**MG4**）→ 被杀；
+  - `_score_candidate` 改成报告 resolve 后的路径（**MG4**）→ **当时**报"被杀"，但**这个说法是错的**：
+    我全部用例都跑在 owner 墙下，而 MG4 在**普通模式**下没有任何裁决差异、只有报告出来的路径会变，
+    所以它在普通模式下**存活**（dsh-9b 复审指出）。已补普通模式用例
+    `test_sibling_scan_reports_entry_path_not_resolved_target_in_normal_mode`，现在才真的被杀。
   - 去掉 2 条上限（**MN1**）→ 被杀（放 3 个**真的**在距离 2 以内的名字，先断言前提成立）；
   - 近名排到候选末尾（**MN6**）→ 被杀（让同目录与跨目录候选**都真的进候选**再比顺序）。
 - **我自己两处测试写错，都如实改了而不是放宽断言**：
