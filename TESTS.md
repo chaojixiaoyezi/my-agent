@@ -206,6 +206,40 @@
     - 结果不挂 transport；日志行丢 transport；审计最近行丢 transport；审计不加估算；call_runtime 丢快照。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_decision_transport_timing.py -q`。
 
+## 会话互通真实链路集成测试（2026-09-28，分支 `claude/ae-session-real-chain-test`，基于 `80b4afed8`）
+
+- **为什么做**：会话互通连续两次交付都是“单测全绿、真实链路坏掉”：
+  - 7b83c8730 让派活回合全部开不出来（SKILL_TASK_BINDING_INVALID）；
+  - 204f4ddf9 把所有派活和消息唤醒都当作“已消费”跳过。
+  - 原因是既有单测要么替换了线程、任务关联、唤醒，要么手工拼后台回合参数，绕过了真实的 唤醒 → 认领 → run_claimed → 回合装配。
+  - 集成方要求：以后会话互通的每一次交付，都先用这组测试把关。
+- **做法**：`agent_py_agent/tests/test_session_task_real_chain.py`，单文件，全部走产品入口，进程内运行，不走网络。
+  - 前台回合：真实 Gateway ask（`request_execution._run_gateway_ask`），落 processing 文件并收尾，与真实 worker 相同。
+  - 后台回合：Gateway 自己构造的调度器（`gateway_loops._build_background_scheduler`）逐轮 tick。
+  - 模型：只替换供应商传输（`backends.http.post_json`），请求组装、响应解析、工具协议走真实 openai_compatible 后端。
+  - 假线路按结构化标记出招；挂起时登记与真实传输相同的停止回调；同一回合调用超过 40 次按空转打断，不会把测试挂死。
+  - home 放在 tmp_path 下。
+  - 判定只看结构化事实：会话任务记录、guidance 一次性回执、唤醒队列、工具操作账本、模型调用计数。
+- **覆盖场景**：
+  1. 派活唤醒开出回合并完成（正向对照）：任务 done、绑定到派活回合、带回报摘要，派活方收到 done 回报。
+  2. 给空闲会话发消息，唤醒能开出回合并看到消息（正向对照）。
+  3. 空闲目标的消息被确认消费、下一回合不再重复收到：**strict xfail**，是新发现的缺陷。唤醒回合只在后台上下文里看到消息，回执仍是 pending，下一回合会再收到一遍。
+  4. 忙碌目标在自己回合里消费了消息之后，唤醒不再多跑空回合：**strict xfail**（观察项②，第 8 片重做后转正）。
+     - 同一条用例里用前置条件把住：B 的请求不失败，消息在本回合被消费。
+  5. 绑定后在模型调用期间取消，分“第一次调用中”和“调过工具之后”两个窗口：**strict xfail**（场景 5，取消修复通过后转正）。
+     - 断言：stop_confirmed=true，目标不交付放行后的答复，任务保持 cancelled 且没有摘要，唤醒结案，工具操作账本里有这次取消。
+  6. 空转回归：A 的邮箱挂着别的任务的回报时，A 的派活回合只调 1 次模型。
+  7. 空转兜底：人为让“有待处理输入”与“能否认领”判据不一致，调用次数不超过 `PENDING_TURN_INPUT_INVALIDATION_LIMIT + 1`，唤醒结案。
+  8. 默认配置（不放 capability 配置文件）：A→B→C→A→B 放行，第 5 次派活返回 `SESSION_TASK_CHAIN_LIMIT`（depth=4，limit=4）。
+- **xfail 约定**：
+  - 只接受 `AssertionError`；链路本身断掉（没开出回合、后台 tick 抛错、前置条件不成立）抛 `RealChainBroken`，不会被 xfail 吞掉。
+  - 缺陷修好后 strict xfail 会以 XPASS 失败，提醒把标记去掉转正。
+- **验证结果**：
+  - main `80b4afed8`：5 通过、4 xfail，连跑 3 次结果一致，每次 17–33 秒。用 `--runxfail` 核对过，每条 xfail 都失败在预期断言上。
+  - `7b83c8730`：派活正向对照失败，报 `RealChainBroken：后台第 1 轮 tick 在真实链路上抛错（唤醒没能开出回合）：SkillSnapshotError: SKILL_TASK_BINDING_INVALID`；两条取消、空转回归、空转兜底、链深 4 也以 RealChainBroken 失败，没有被 xfail 掩盖；消息正向对照仍通过。
+  - 与真实复验结论一致。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_session_task_real_chain.py -q -rxX`
+
 ## capability 兜底值清理：只认 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-fallback-cleanup`，基于 `54880f8e9`）
 
 - **范围**：6 处调用点改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，删掉各自写的兜底值：

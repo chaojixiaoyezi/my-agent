@@ -213,6 +213,11 @@
 9. **变异验证**：人为改坏权限判定/去重/链深，确认对应测试会红。
 10. 定向回归：`test_wake_queue.py`、`test_runtime_guidance.py`、`test_lifecycle_wake_host_event.py`、
     `test_collaboration_owner_isolation.py` 作为调用链样板。
+11. **真实链路门禁**（2026-09-28 起，会话互通的每一次交付先用它把关）：`test_session_task_real_chain.py`。
+    - 走真实 Gateway ask、Gateway 同款后台调度器，以及真实的 唤醒 → 认领 → run_claimed → 回合装配，只替换供应商传输。
+    - 已知未修的缺陷用 strict xfail 标出，修好后必须转正。
+    - 其中“空闲目标的消息唤醒回合没有认领或确认消息，下一回合会再收到一遍”违反第 5 条，是 2026-09-28 新发现的缺陷。
+    - 细节见 TESTS.md。
 
 ## 交付切片
 
