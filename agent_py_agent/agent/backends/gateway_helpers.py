@@ -99,6 +99,21 @@ _HARD_QUOTA_ERROR_CODES = frozenset(
     }
 )
 _PROVIDER_ERROR_CODE_KEYS = frozenset({"code", "error_code", "reason", "status", "type"})
+# 429 错误体里供应商声明的限额窗口（真机 2026-09-29：metadata.limitName="weekly"）。窗口超过一小时，
+# 回合内重试（默认合计约 6 分钟）和后台供应退避（封顶 15 分钟）都等不到重置，按额度用完处理；
+# 一小时及以内或认不出的写法，保持原来的瞬时限流默认。
+_LONG_QUOTA_WINDOW_SECONDS = 3600.0
+# 只认描述限额本身的键（归一化为小写字母数字后比较），其它键上的时间词不参与判定。
+_QUOTA_WINDOW_KEYS = frozenset(
+    {"limitname", "limitwindow", "limitperiod", "quotawindow", "quotaperiod", "ratelimitwindow", "window"}
+)
+# 单字母单位（5h、7d）必须紧跟数字；数字也可以是前一个词（5_hour）。
+_QUOTA_WINDOW_TOKEN = re.compile(
+    r"(?P<count>\d+(?:\.\d+)?)?"
+    r"(?P<unit>minutes?|minutely|mins?|hours?|hourly|hrs?|days?|daily|weeks?|weekly"
+    r"|months?|monthly|years?|yearly|annual|[mhdw])"
+)
+_QUOTA_WINDOW_UNIT_SECONDS = {"m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
 _HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
 # 本次物理尝试的分段计时器挂在该尝试自己的 urllib Request 上，_gateway_urlopen 的调用形状不变。
 _ATTEMPT_TIMING_ATTR = "_my_agent_attempt_timing"
@@ -1292,11 +1307,19 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     return detail
 
 
+# LLM: 429 分类与传输层是否原地重试共用这一个判定；先看结构化错误码，再看供应商声明的限额窗口。
+#   窗口规则只会把「明显等不到重置」的长窗口改判为额度用完，认不出的写法保持瞬时默认；
+#   改这里要同步检查 _runtime_http_error、_should_retry_http_error 和 test_provider_quota_window.py。
+# 函数用途: 判断一次 429 是不是「同一凭据短期内恢复不了」的额度用完，而不是按分钟的临时限流。
 def _provider_error_indicates_quota_exhausted(detail: str) -> bool:
     """Recognize provider-declared hard quota using error payload facts, not user text."""
     payload = _provider_error_payload(detail)
     codes = _provider_error_codes(payload)
     if codes & _HARD_QUOTA_ERROR_CODES:
+        return True
+    windows = _provider_quota_windows(payload)
+    # 多个窗口时按最短的算：分不清撞的是哪一个，就保持瞬时默认，不把按分钟的限流升级成额度用完。
+    if windows and min(windows) > _LONG_QUOTA_WINDOW_SECONDS:
         return True
     normalized = str(detail or "").lower().replace("-", "_").replace(" ", "_")
     if any(code in normalized for code in _HARD_QUOTA_ERROR_CODES):
@@ -1321,6 +1344,45 @@ def _provider_error_codes(payload: object) -> set[str]:
         for value in payload:
             values.update(_provider_error_codes(value))
     return values
+
+
+# LLM: 只收集限额窗口键上的字符串值（递归到任意层，供应商会放在 metadata 里）；不读 message 文案。
+# 函数用途: 从供应商错误体里读出它声明的限额窗口，换算成秒；一个都认不出时返回空列表。
+def _provider_quota_windows(payload: object) -> list[float]:
+    if isinstance(payload, list):
+        return [seconds for value in payload for seconds in _provider_quota_windows(value)]
+    if not isinstance(payload, dict):
+        return []
+    windows: list[float] = []
+    for key, value in payload.items():
+        windows.extend(_provider_quota_windows(value))
+        if isinstance(value, str) and re.sub(r"[^a-z0-9]", "", str(key).lower()) in _QUOTA_WINDOW_KEYS:
+            windows.extend(_quota_window_seconds(value))
+    return windows
+
+
+# LLM: 开放世界解析：认得的写法换算成秒，认不出返回空，调用方据此保持瞬时默认，绝不因为认不出而判额度用完。
+# 函数用途: 把 "weekly"、"5h"、"5_hour"、"requests_per_day" 这类窗口写法换算成秒。
+def _quota_window_seconds(text: str) -> list[float]:
+    tokens = [token for token in re.split(r"[^a-z0-9.]+", text.lower()) if token]
+    for index, token in enumerate(tokens):
+        match = _QUOTA_WINDOW_TOKEN.fullmatch(token)
+        if match is None or (len(match.group("unit")) == 1 and not match.group("count")):
+            continue
+        previous = tokens[index - 1] if index else ""
+        count = match.group("count") or (previous if re.fullmatch(r"\d+(?:\.\d+)?", previous) else "1")
+        return [float(count) * _quota_window_unit_seconds(match.group("unit"))]
+    return []
+
+
+# LLM: 单位只由正则放行的写法进入；month 必须先于 minute 判断（都以 m 开头）。
+# 函数用途: 把一个时间单位词换算成秒。
+def _quota_window_unit_seconds(unit: str) -> float:
+    if unit.startswith("mo"):
+        return 30 * 86400.0
+    if unit.startswith(("y", "annual")):
+        return 365 * 86400.0
+    return _QUOTA_WINDOW_UNIT_SECONDS[unit[0]]
 
 
 def _provider_error_payload(detail: str) -> object:

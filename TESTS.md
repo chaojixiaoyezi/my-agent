@@ -107,6 +107,22 @@
   - strict code-size 与 `89af6b07a` 逐条比对新增 0。`runtime_compact_policy` 一度逼近软上限，已抽出 `_capped_trigger_tokens` 并合并配置读取。
   - ruff、doc sync、diff check、clean package 通过。
 
+## 429 按限额窗口区分额度用完与临时限流（2026-09-29，分支 `claude/9a-quota-window`，基于 `89af6b07a`）
+
+- 新文件 `test_provider_quota_window.py`，18 项：
+  - 真实错误体的脱敏版（`GoUsageLimitError` + `metadata.limitName=weekly`）经 `post_json` 判为 `ProviderQuotaExhaustedError`，
+    只请求一次、不等待；
+  - daily / monthly / 5h / 5_hour / 7d / requests_per_day 各种写法与键位都判为额度用完；
+  - minute / hourly（边界）/ 1m / 不带数字的单字母 / 认不出的 burst / 多窗口取最短 / 非限额键上的 monthly，都仍是 `ProviderUsageLimitError`；
+  - 按分钟的 429 带 `Retry-After: 3` 仍按 3 秒重试 3 次；
+  - 回合级自动续跑遇到每周额度第一次就上抛，不等待；按分钟的限流仍按默认阶梯重试。
+- 在修复前的 `89af6b07a` 上，8 条长窗口 / 每周额度用例失败，10 条保持瞬时的用例通过。
+- 8 个变异全部被抓住：最短改最长、`>` 改 `>=`、单字母单位不要求数字、键不归一化、忽略前一个词的数字、月份判断后移、
+  删掉窗口判定、不递归。
+- 相关 21 个文件（`test_gateway_helpers.py`、`test_backends_base.py`、`test_provider_error_classifier.py`、
+  `test_provider_transient_auto_resume.py`、`test_background_supply_backoff.py`、`test_background_claim_execution.py`、
+  `test_wake_poison.py`、`test_decision_fault_matrix.py` 等）加 11 个全仓守卫，共 32 个文件 1027 项通过。
+
 ## 后台进程与终端会话原因码：ae 复审建议 2–5（2026-09-29，分支 `claude/75-process-codes-followups`，基于 `e850ceb04`）
 
 - **建议 2**：`terminal_session` 关闭未确认时，终止回执结构化放进 `result_envelope.process.termination`（与后台进程停止未确认同一形状）；

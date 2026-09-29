@@ -1050,6 +1050,7 @@ agent_py_agent/
 |   |-- test_curator_model_not_configured.py # 没配模型的 owner：永久配置错误不原地重试、独立失败码、发现层与 Curator 同源一小时退避
 |   |-- test_curator_failure_attribution.py # Curator 失败归因：解析失败带响应形状（长度/截断/结束原因/出错位置），包装异常带根因类名与 errno，诊断有界
 |   |-- test_provider_request_scope.py # 同端点前台优先、后台预算传递、取消和不重叠重试
+|   |-- test_provider_quota_window.py  # 429 按供应商声明的限额窗口分额度用完/临时限流：长窗口不重试，短窗口和认不出的写法保持瞬时
 |   |-- test_memory_promotion_v2.py    # 证据/冲突/Persona/lesson/HOT 晋升边界
 |   |-- test_memory_recall_v2.py       # 正式来源、scope、陈旧索引、owner 隔离与信封安全
 |   |-- test_memory_migration_v2.py    # v1→v2 dry-run、备份、回滚、幂等与坏数据关闭式失败
