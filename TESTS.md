@@ -44,6 +44,24 @@
   + `test_supervisor.py` + 七个全仓扫描守卫；ruff、doc sync、strict code-size
   （identity 对 main 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。真机未复验。
 
+## 被放弃的模型调用不再迟到提交插话（2026-09-29，分支 `claude/38-abandoned-call-steer-race`，基于 `f7a4cc909`）
+
+- **来源**：改稳插话墙钟用例时在满载复现里看到：第一次调用被 0.05 秒墙钟放弃并转入重试后，它的工作线程才走到发出前登记，
+  把插话提交到作废的调用编号上，重试提交报 `DataCorruptionError: guidance submission was not reserved`。
+- **确定性复现**：钩住 `_generate_backend_response` 把第一次调用的工作线程停在发出前，墙钟 0.05 秒放弃并让重试用 10 秒完成，
+  再放行迟到线程；改前它会调用 `mark_submitted`（作废编号），改后不调用。
+- **改法（最小）**：`_ModelGenerationState.liveness`（每次物理调用一份，带锁）；`_wait_for_generation_result` 在墙钟超时和用户停止
+  两处放弃前置位；`_invoke_backend_generate` 把三步发出前登记收进 `_mark_call_before_send`，只在 `run_if_current` 锁内复核通过时
+  执行，已放弃则记账本事件 `submission_skipped_after_abandon`（新增 `ModelCallLedger.note_event`，不改终态/用量/尝试计数）并抛
+  `ModelCallAbandonedError` 结束工作线程，不发请求。不吞 `DataCorruptionError`；没有 liveness 的替身 state 按原路径执行。
+- **新测试** `test_abandoned_call_steer_race.py`（4 项）：迟到线程不提交、不发请求、账本有事件、重试正常提交且批次/回执指向重试；
+  用户停止路径也标记放弃；liveness 只执行一次；`note_event` 终态后可追加并去重。
+- **负向验证**（改坏产品语义，独立子进程，逐字节恢复核哈希，3/3 被抓出）：发出前不复核；墙钟超时不标记放弃；跳过时不记事件。
+- **回归**：本文件、`test_steer_delivery_recovery`、`test_tool_model_generation`、`test_slow_model_liveness`、`test_runtime_guidance`、
+  `test_model_call_ledger(_partitions)`、`test_subagent_first_request_selection`、`test_llm_hot_path_metrics`、`test_concurrency_metrics`、
+  `test_model_profiles`、`test_architecture_guardrails` 共 285 passed、4 xfailed；新文件满载 6 进程 × 20 次全过。
+- **门禁**：ruff、doc sync、strict code-size（identity 对 main 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。
+
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）
 
 - **新增用例**：`test_session_task_real_chain.py` 加了 `test_admin_lists_owner_sessions_and_reaches_the_listed_target`，按派活、发消息参数化成两条。

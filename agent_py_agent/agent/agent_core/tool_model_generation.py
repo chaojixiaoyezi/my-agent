@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from queue import Empty, Queue
-from threading import Thread
+from threading import Lock, Thread
 
 from ..backends import ModelResponse, ProviderRequestOptions
 from ..backends.errors import ProviderTimeoutError
@@ -128,6 +128,37 @@ class _ProviderTimeoutRecord:
     exc: ProviderTimeoutError
 
 
+MODEL_CALL_SUBMISSION_SKIPPED_EVENT = "submission_skipped_after_abandon"
+
+
+# LLM: 只在 worker 线程内抛出并进入无人读取的结果队列；不是 provider 错误，不参与超时重试或模型轮重试判定。
+# 类用途: 表示这次物理调用在发出前已被 guard 放弃，工作线程据此不再提交插话也不再发请求。
+class ModelCallAbandonedError(RuntimeError):
+    error_code = "MODEL_CALL_ABANDONED_BEFORE_SEND"
+
+
+# LLM: 每次物理模型调用一份；guard 放弃（墙钟超时、用户停止）时置位，worker 在发出前于同一把锁内复核。
+#   只表达"这次调用是否仍是当前调用"，不替代账本终态，不改变重试判据；锁内只做本地登记与一次提交，不做网络 I/O。
+# 类用途: 让被放弃调用的迟到工作线程既不把插话提交到作废的调用编号，也不再发出请求。
+class _CallLiveness:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self.abandoned = False
+
+    # 函数用途: guard 放弃这次调用时标记；之后的发出前复核都会看到。
+    def abandon(self) -> None:
+        with self._lock:
+            self.abandoned = True
+
+    # 函数用途: 在同一把锁内复核仍是当前调用后执行发出前登记；已放弃则不执行并返回 False。
+    def run_if_current(self, operation) -> bool:
+        with self._lock:
+            if self.abandoned:
+                return False
+            operation()
+            return True
+
+
 # LLM: 一次物理模型调用的状态同时持有 filtered model delta 与原始 typed retry sink；两者不可互相冒充。
 # 类用途: 保存单次模型调用的账本、流输出、重连显示出口和 native 工具参数。
 @dataclass(frozen=True)
@@ -156,6 +187,8 @@ class _ModelGenerationState:
     raw_context_estimate_tokens: int = 0
     # 稳定 provider 请求表面的摘要指纹；只用于拒绝跨模型/工具表面的错误校准复用。
     context_surface_fingerprint: str = ""
+    # guard 与 worker 共享的"是否仍是当前调用"事实；放弃后 worker 不再提交插话或发出请求。
+    liveness: _CallLiveness = field(default_factory=_CallLiveness)
 
 
 # LLM: 工具模型轮先按可选真实 child 范围冻结输入，再沿原 IR/preflight/调用/用量路径；冻结未知不改变有效模型。
@@ -1081,11 +1114,13 @@ def _wait_for_generation_result(
     transport_owns_timeout = _transport_owns_stream_idle_timeout(request.agent)
     while True:
         if is_interrupted():
+            _abandon_call(state)
             _interrupt_generation_worker(worker)
             worker.join(timeout=_MODEL_INTERRUPT_DRAIN_SECONDS)
             raise InterruptedError("模型接口请求已被用户停止")
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0 and not transport_owns_timeout:
+            _abandon_call(state)
             raise ProviderTimeoutError(
                 f"模型接口请求超时: request_timeout={timeout:g}s",
                 stage="wall_clock",
@@ -1106,6 +1141,15 @@ def _transport_owns_stream_idle_timeout(agent: object) -> bool:
         getattr(backend, "stream_enabled", False)
         and getattr(backend, "stream_timeout_is_idle", False)
     )
+
+
+# LLM: 放弃标记只来自真实 guard（墙钟超时、用户停止）；替身或旧调用方传入的 state 没有 liveness 时不做任何事，
+#   与改动前行为一致。
+# 函数用途: guard 放弃这次调用时标记，让迟到的工作线程不再登记、提交或发出。
+def _abandon_call(state: object) -> None:
+    liveness = getattr(state, "liveness", None)
+    if liveness is not None:
+        liveness.abandon()
 
 
 # LLM: Target only the live timeout-guard thread; setting its flag invokes any provider response-close callback already registered there.
@@ -1177,23 +1221,7 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
         with global_llm_admission_slot():
             llm_inflight(1)
             try:
-                from .runtime.guidance import mark_injected_turn_input_submitted
-                from .subagent.model_selection import mark_subagent_business_request_submitted
-
-                mark_subagent_business_request_submitted(
-                    state.agent, state.params, provider_call_id=state.call_id,
-                )
-
-                from ..model_request_selection import before_model_request_send
-
-                before_model_request_send(backend, prompt, state)
-                # This is the last local statement before backend.generate may
-                # touch the network. Failure leaves provider I/O unstarted.
-                mark_injected_turn_input_submitted(
-                    state.agent,
-                    state.params,
-                    provider_call_id=state.call_id,
-                )
+                _register_call_before_send(backend, prompt, state)
                 response = _do_backend_generate(backend, prompt, state)
             except Exception:
                 record_llm_call(label, time.monotonic() - start, None, ok=False)
@@ -1203,6 +1231,31 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     record_llm_call(label, time.monotonic() - start, response, ok=True)
     record_llm_cost(model, response)  # 真实 USD 成本按 model 累计(审计 #19 残余)
     return response
+
+
+# LLM: 发出前在 liveness 锁内复核：guard 已放弃（墙钟超时/用户停止）的调用不登记、不提交插话、不发请求，只在账本记
+#   一条结构化事件并以 ModelCallAbandonedError 结束工作线程；否则三步登记保持原顺序。没有 liveness 的替身 state 按仍是当前调用处理。
+# 函数用途: 真正发出请求前复核这次调用是否仍是当前调用，是则登记并提交插话，否则记事件并终止。
+def _register_call_before_send(backend, prompt: str, state: _ModelGenerationState) -> None:
+    liveness = getattr(state, "liveness", None)
+    if liveness is None:
+        _mark_call_before_send(backend, prompt, state)
+    elif not liveness.run_if_current(lambda: _mark_call_before_send(backend, prompt, state)):
+        state.ledger.note_event(state.call_id, MODEL_CALL_SUBMISSION_SKIPPED_EVENT)
+        raise ModelCallAbandonedError(state.call_id)
+
+
+# LLM: 发出前三步（子代理业务请求标记、发送前钩子、插话提交）保持原顺序，插话提交仍是网络 I/O 前最后一条本地语句，
+#   失败即 provider I/O 未开始；只在 _CallLiveness 复核通过时被调用。
+# 函数用途: 在真正发出请求前完成本次调用的登记与插话提交。
+def _mark_call_before_send(backend, prompt: str, state: _ModelGenerationState) -> None:
+    from ..model_request_selection import before_model_request_send
+    from .runtime.guidance import mark_injected_turn_input_submitted
+    from .subagent.model_selection import mark_subagent_business_request_submitted
+
+    mark_subagent_business_request_submitted(state.agent, state.params, provider_call_id=state.call_id)
+    before_model_request_send(backend, prompt, state)
+    mark_injected_turn_input_submitted(state.agent, state.params, provider_call_id=state.call_id)
 
 
 # LLM: transport observer 只按 retry_scheduled 等结构化字段投递显示事件；显示 sink 失败不得改变模型调用结果。

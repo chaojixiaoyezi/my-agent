@@ -737,6 +737,16 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             self._replace(updated)
             return updated
 
+    # LLM: 终态之后仍可追加的结构化事件（例如被放弃调用的迟到线程按复核结果跳过发出）；只进 events，
+    #   不改状态、时钟、用量、错误码或尝试计数，重复同名事件按 _append_event 去重。改动时联查 test_model_call_ledger。
+    # 函数用途: 给一条调用追加一个不改变终态的事件名，供验收按结构化事实核对。
+    def note_event(self, call_id: str, event: str) -> ModelCallRecord:
+        with self._lock:
+            record = self._require_record(call_id)
+            updated = replace(record, events=_append_event(record.events, event))
+            self._replace(updated)
+            return updated
+
     # LLM: 宿主停机时的批量终态：只把仍活动（started/first_token）的调用一次性记为 failed 并带同一结构化原因码；
     #   已终态记录不动，首个终态规则不变，重复调用返回空元组。返回被改写的记录供宿主写停机事件，不在此写盘。
     # 函数用途: Gateway 停止排空窗口过后，把还没结清的模型调用统一标成"被宿主停机中断"，交给收尾写事件。
