@@ -2749,7 +2749,7 @@
           {
             "key": "memory_archive_level",
             "label": "memory_archive_level（memory archive level）",
-            "description": "但候选已经低于真实触发线，仍提交这一代，避免慢模型反复生成并丢弃同一份有效摘要。 - 主代理、子代理和手动 /compact 都显示真实生命周期动画；阶段间只转圈，不按等待时间虚构百分比。 - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。 - 自动 compact 续接有绝对深度硬顶（见下方 memory_compact_auto_continue_max_depth，防无限续跑 H2）；未达硬顶时只要 compact 包可恢复就继续同一任务，不会因普通任务缺少验收/测试备注而停车。 - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。 会话存档记多细（0-3，默认 3）：每次运行结束、子代理收尾时都按这一个级别存档，供以后恢复和回查。 3 = 只存最小恢复快照（最省磁盘，一般就用它）；2 = 摘要加关键事件；1 = 去掉大块工具展示数据；0 = 尽量全量。 只有排查问题需要更完整的历史时才调小；乱填会退回 3。",
+            "description": "但候选已经低于真实触发线，仍提交这一代，避免慢模型反复生成并丢弃同一份有效摘要。 - 主代理、子代理和手动 /compact 都显示真实生命周期动画；阶段间只转圈，不按等待时间虚构百分比。 - 保存型运行默认执行非破坏性 apply + auto resume + guard；save=false 时只生成计划，不写入 compact apply。 - 自动 compact 续接有绝对深度硬顶（内部具名常量，不再暴露为配置项，防无限续跑 H2）；未达硬顶时只要 compact 包可恢复就继续同一任务，不会因普通任务缺少验收/测试备注而停车。 - 运行中 raw archive 和 runtime_fact 是 compact/resume 的基础事实源，随持久化运行默认启用，不提供单独关闭开关。 会话存档记多细（0-3，默认 3）：每次运行结束、子代理收尾时都按这一个级别存档，供以后恢复和回查。 3 = 只存最小恢复快照（最省磁盘，一般就用它）；2 = 摘要加关键事件；1 = 去掉大块工具展示数据；0 = 尽量全量。 只有排查问题需要更完整的历史时才调小；乱填会退回 3。",
             "type": "number",
             "defaultValue": 3,
             "currentValue": 3,

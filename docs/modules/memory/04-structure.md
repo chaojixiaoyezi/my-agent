@@ -121,7 +121,7 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 
 `backends/cache_diagnostics.py` 在 HTTP 实际出站处生成摘要，`ModelCallLedger` 按同 thread 比较。
 只追加、历史缩短及 system/tools/model/选项变化分开，超过 512 消息明确部分比较；不改变 Compact 或记忆。
-配置 `cache_diagnostics_enabled` 控制采集，关闭不计算摘要，不新增另一份用量账。
+采集本身常开：`backends/cache_diagnostics.py` 的开关已降为读取点旁的具名常量，不再可配置，不新增另一份用量账。
 原 context-pressure 的连接校准指纹只把可 JSON 化的连接字段送入进程加盐摘要；非标准后端给出的不透明属性用进程内对象身份区分，
 不序列化其 `repr` 或凭据，且不因测试替身字段不可编码而阻断模型请求。
 

@@ -159,8 +159,8 @@ export default function SettingsTools() {
             disabled={!isAdmin}
           />
           <NumberField
-            label="tool_retrieval_limit（检索限制）"
-            description="知识库检索返回的最大条数"
+            label="检索限制（前端本地设置，不对应后端配置键）"
+            description="知识库检索返回的最大条数；这是前端自己的设置项，不是 my-agent 的配置键"
             value={advanced.retrieval_limit}
             onChange={(v) => { setAdvanced({ retrieval_limit: v }); markDirty(); }}
             min={1}

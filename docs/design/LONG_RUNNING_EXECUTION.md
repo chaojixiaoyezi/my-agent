@@ -141,13 +141,14 @@ native 信封落盘，恢复只读取已有取消账、attempt 和文件事实�
 
 ## 缓存诊断
 
-`cache_diagnostics_enabled=true` 在真正 HTTP 出站处计算不可逆摘要，放入原调用账本的
+常开：在真正 HTTP 出站处计算不可逆摘要，放入原调用账本的
 `request_surface/cache_diagnostic`。不保存正文、密钥或完整地址，不改请求前缀或裁剪记忆。
 
 同 owner/thread 比较；无 thread 时限同 run。端点、模型、system、tools、请求选项、消息前缀
 分别比较。只追加与历史缩短分开；超过 512 条消息标明 `partial=true`，不谎称完整前缀相同。
 数据有界且不进入 UI 排版热路径。客户端摘要稳定不能证明服务端缓存存在，后者保持 unknown。
-关闭开关不计算摘要。同端点普通策展避让继续复用 foreground scope，不控制外部应用或别名端点。
+该开关已降为读取点旁的具名常量，不再可配置，因此没有运行时关闭路径。
+同端点普通策展避让继续复用 foreground scope，不控制外部应用或别名端点。
 
 ## 后台异常退避
 

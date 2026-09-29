@@ -382,6 +382,17 @@
   这是既有设计，只补注释说明、不改代码。
 - **门禁**：定向 27 passed（含新增 2 例）；ruff / `DOC_SYNC_PASS` / `git diff --check` / clean-package 见交付说明。
 
+## 参数减量的清理提交：删键留下的过时文档与死写入（2026-09-29，同分支 `my-agent/self-dev-params`）
+
+- **来源**：dev 09-29 00:53 复审 `92e771b8b` 后的要求（4 处），按「文档同步要和删键一起进 main」的约定补一个提交。
+- **做法**（全是文案/注释/死代码，**行为不变**，没有新增或修改任何断言）：
+  1. `tests/test_subagent_capability_compact.py` 删掉 `agent.config.tool_context_ptl_retry_max = 0` 这行死写入（键已不存在），换成一句说明；
+  2. `agent_py_agent/config/agent_config.yaml` 里的「见下方 memory_compact_auto_continue_max_depth」改成「内部具名常量，不再暴露为配置项」；
+  3. `docs/design/LONG_RUNNING_EXECUTION.md` 与 `docs/modules/memory/04-structure.md` 里把 `cache_diagnostics_enabled` 从「配置开关」改写成「已降为读取点旁的具名常量」，并去掉「关闭开关不计算摘要」这种已不存在的运行时路径说法；
+  4. `frontend/src/pages/settings/SettingsTools.tsx` 那个写死的标签 `tool_retrieval_limit（检索限制）` 改掉 —— 它绑的是前端自己的 `settingsStore.retrieval_limit`，不写后端键，也不在后端 catalog 里。
+- **验证**：`agent_py_agent/config/agent_config.yaml` 一改，前端 catalog 需要同步重新生成 —— 跑 `node frontend/scripts/sync-backend-config.mjs`（265 fields）后 `--check` 报 `Config catalog is in sync (265 fields).`，并确认 catalog 里已无这 7 个键名。
+- **复现门禁**：`ruff check agent_py_agent/`（All checks passed）、`python3 scripts/check_doc_sync.py`（DOC_SYNC_PASS）、`git diff --check`（干净）、相关定向测试 **161 passed**、四个守卫 **98 passed**、`check_code_size.py`（hard=0、blocked=False）。
+
 ## 参数减量：7 个内部实现参数降为读取点旁的具名常量（2026-09-28，分支 `my-agent/self-dev-params`，基于 `f7a4cc909`）
 
 - **来源**：dev 18:42 / 20:03 的参数减量任务。`parameter_registry.listed_parameters()` 从 **221 降到 214**（正好 -7）。
