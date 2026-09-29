@@ -56,14 +56,17 @@ def _raising(error):
     return kill
 
 
-@pytest.mark.parametrize(("error", "reported"), [
-    (ProcessSessionAuthorityError({"error_type": "authority_missing"}), "PROCESS_SESSION_AUTHORITY_UNREADABLE"),
+# LLM: authority-unreadable 走的是「读记录阶段就失败」→ effect 是已知的没开始；
+#   cleanup-unresolved 说明已提交停止意图、可能已发信号 → 保持 unknown。
+@pytest.mark.parametrize(("error", "reported", "effect"), [
+    (ProcessSessionAuthorityError({"error_type": "authority_missing"}), "PROCESS_SESSION_AUTHORITY_UNREADABLE",
+     "not_started"),
     (ProcessSessionCleanupError(RuntimeError("commit failed"), {"session_id": "bg-test"}, (), False),
-     "PROCESS_SESSION_CLEANUP_UNCONFIRMED"),
+     "PROCESS_SESSION_CLEANUP_UNCONFIRMED", "unknown"),
 ], ids=["authority-unreadable", "cleanup-unresolved"])
-def test_process_session_failures_report_their_cause(monkeypatch, error, reported):
+def test_process_session_failures_report_their_cause(monkeypatch, error, reported, effect):
     outcome = _stop(monkeypatch, _raising(error))
-    assert (outcome.ok, outcome.error_code, outcome.effect_outcome) == (False, UNKNOWN, "unknown")
+    assert (outcome.ok, outcome.error_code, outcome.effect_outcome) == (False, UNKNOWN, effect)
     assert outcome.reported_error_code == reported
     assert outcome.result_envelope["load_error"] == error.report
 

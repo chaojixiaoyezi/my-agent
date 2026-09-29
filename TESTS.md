@@ -231,6 +231,28 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_home_index_compact.py -q`
   与 `python3 scripts/mutate_home_index_compact.py`（两者 cwd 都必须是工作树根）。
 
+## 进程工具只读查询在权威读不出时不再记成「结果未知」（2026-09-29，分支 `my-agent/self-dev-proc-effect`，基于 `9a71d8cd5`）
+
+- **来源**：dev 09-29 01:15 任务。ae 复审 47bd37d20 时发现既有问题：`process_session` 在读不出后台进程权威时对所有动作一律记 `effect_outcome=unknown`，
+  而 `unknown` 会让 `contracts/required_actions.settle_required_action` 把动作标成 `blocked`，主代理据此收口、整轮停止调用工具 ——
+  可 `status/wait/network_status` 这类只读查询根本没有副作用，结果其实已知（就是没开始）。
+- **做法**（错误码保持 `TOOL_OPERATION_OUTCOME_UNKNOWN` 不变，只改 effect；判定只看**结构化事实**，不看错误文案）：
+  - 新增模块常量 `_READ_ONLY_ACTIONS = frozenset({"list", "status", "wait", "network_status"})`；
+  - 只读动作 → `not_started`；
+  - `stop` 在读记录阶段就失败（`ProcessSessionAuthorityError`，即 `_visible_record_locked` 一开始就抛）→ 也是 `not_started`（进程树还没被碰过）；
+  - `stop` 在可能已发信号之后失败（`ProcessSessionCleanupError`，或 stop 回执未确认）→ 仍是 `unknown`。
+- **测试**：新增 `agent_py_agent/tests/test_process_read_only_not_started.py`（11 项），含一组**经真实收口函数**的验证
+  （`build_effective_contract_snapshot` + `settle_required_action`，断言 `not_started` 不会把动作标 `blocked`），
+  并配一条对照：`unknown` 仍然会落 `blocked`（收口机制本身没被放宽）。
+- **变异验证**：把 `not_started = read_only or (...)` 改回 `not_started = False`（等价于一律 unknown）后，
+  **6 条测试同时变红**，改回即绿。
+- **既有用例更新**：`test_process_unknown_reason_codes.py::test_process_session_failures_report_their_cause`
+  的 `authority-unreadable` 分支期望从 `unknown` 改成 `not_started`（这是本次任务要改的行为本身），
+  `cleanup-unresolved` 分支保持 `unknown`。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_process_read_only_not_started.py agent_py_agent/tests/test_process_unknown_reason_codes.py -q -k "not terminal_close"`（20 passed）。
+  注：该文件里两条 `terminal_close` 用例在**未改动的基线上同样失败**（沙箱内 pty 子进程退出确认拿不到），与本改动无关。
+- **门禁**：dev 指定的 9 个全仓守卫 **134 passed**；ruff `All checks passed!`；`DOC_SYNC_PASS`；`git diff --check` 干净；`check_code_size.py` hard=0、blocked=False。
+
 ## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`）
 
 - **`test_process_unknown_reason_codes.py`**（先写测试，在旧代码上 9 条失败、2 条对照通过，再改）：
