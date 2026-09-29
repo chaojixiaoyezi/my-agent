@@ -19,6 +19,7 @@ import pytest
 
 from agent_py_agent.agent.gateway_parts import request_worker as rw
 from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+from agent_py_agent.cli.chat_parts import gateway_client
 from agent_py_agent.cli.chat_parts.gateway_client import (
     GatewayChunkPollRequest,
     poll_gateway_chunks,
@@ -230,14 +231,14 @@ def _terminal(path: Path, request_id: str, response: str) -> None:
     )
 
 
-def _client_wait(paths: GatewayPaths, request_id: str, *, window: float) -> dict:
+def _client_wait(paths: GatewayPaths, request_id: str, *, window: float, initial: float = 0.05) -> dict:
     chunk_path = paths.processing / f"{request_id}.chunks.jsonl"
     terminal_path = paths.responses / f"{request_id}.json"
     return poll_gateway_chunks(
         GatewayChunkPollRequest(
             chunk_path,
             terminal_path,
-            time.time() + 0.05,  # 初始 deadline 早于真实完成时间
+            time.time() + initial,  # 初始 deadline 早于真实完成时间
             lambda _chunk: False,
             [0],
             activity_paths=(
@@ -317,12 +318,33 @@ def test_client_closes_out_when_queued_request_is_cancelled(tmp_path) -> None:
     assert elapsed < 3.0, f"取消后必须在窗口内收口,实际 {elapsed:.2f}s"
 
 
+# 函数用途: 把客户端的活动续期变成可观测事件：每次真的续期就放行一次 observed（首次调用先放行一次，
+#   让 worker 在客户端开始采样前写下的第一条信号不至于卡住后续写入）。
+def _extend_observed_by_worker(observed: threading.Semaphore):
+    original_extend = gateway_client._extend_active_request_deadline
+    calls = {"n": 0}
+
+    def extend_and_notify(request, fingerprints, *, deadline):
+        extended = original_extend(request, fingerprints, deadline=deadline)
+        calls["n"] += 1
+        if calls["n"] == 1 or extended > deadline:
+            observed.release()
+        return extended
+
+    return extend_and_notify
+
+
 def test_real_worker_signal_keeps_real_client_waiting(tmp_path, fresh_admission, monkeypatch) -> None:
     """端到端(真实 worker + 真实客户端):车道被长回合占住时,排队请求仍能被客户端持续等到终态。
 
     这是本组最关键的一条:worker 侧真的调用 dispatch_pending_requests 写等待信号,客户端侧真的
     调用 poll_gateway_chunks 读活动。把 worker 的写入关掉,客户端就会在空闲窗口内收口(见下一条
     负向用例),因此两条一起才证明信号是必要条件而非装饰。
+
+    时序由客户端观测驱动,不靠墙钟:worker 每写一次等待信号都等客户端真的续期过一次再写下一次,
+    第 8 次之后才写终态。客户端每次采样至少隔 0.1 秒,所以完成时间不少于 0.8 秒,远晚于 0.5 秒的
+    初始 deadline——续期一失效,客户端在 0.5 秒内就收口(负向验证)。不活跃窗口 2 秒只给满载下的采样
+    抖动留余量,过期语义由下一条负向用例单独锁定。
     """
     monkeypatch.setattr(rw, "_ADMISSION_WAIT_REFRESH_SECONDS", 0.0)  # 测试里不节流
     paths = _paths(tmp_path)
@@ -331,6 +353,8 @@ def test_real_worker_signal_keeps_real_client_waiting(tmp_path, fresh_admission,
     _hold_conversation(fresh_admission, _payload(queued))
     terminal_path = paths.responses / f"{request_id}.json"
     paths.responses.mkdir(parents=True, exist_ok=True)
+    observed = threading.Semaphore(0)
+    monkeypatch.setattr(gateway_client, "_extend_active_request_deadline", _extend_observed_by_worker(observed))
     stop = threading.Event()
     rounds = {"n": 0}
 
@@ -338,18 +362,19 @@ def test_real_worker_signal_keeps_real_client_waiting(tmp_path, fresh_admission,
         while not stop.is_set():
             rw.dispatch_pending_requests(paths, _limits(), lambda p, u, c: None)
             rounds["n"] += 1
-            if rounds["n"] >= 5:
+            if rounds["n"] >= 8:
                 _terminal(terminal_path, request_id, "排队后完成")
                 return
-            time.sleep(0.04)
+            if not observed.acquire(timeout=5.0):  # 等客户端观测到这次信号;5 秒只是防挂起
+                return
 
     thread = threading.Thread(target=worker)
     thread.start()
-    response = _client_wait(paths, request_id, window=0.15)
+    response = _client_wait(paths, request_id, window=2.0, initial=0.5)
     stop.set()
-    thread.join(timeout=3)
+    thread.join(timeout=5)
 
-    assert rounds["n"] >= 2, "worker 必须真的扫描过多轮(否则用例空转)"
+    assert rounds["n"] == 8, "worker 必须真的扫描过多轮并写下终态(否则用例空转)"
     assert _payload(queued)["admission_wait_count"] >= 2, "worker 必须真的写过等待信号"
     assert response, "真实 worker 的等待信号必须让真实客户端继续等待"
     assert response["response"] == "排队后完成"

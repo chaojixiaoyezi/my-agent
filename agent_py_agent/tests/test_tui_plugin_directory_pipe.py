@@ -60,29 +60,27 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
                 app = make_tui_app(params)
                 run_task = asyncio.create_task(app.run_async())
                 try:
-                    await asyncio.sleep(0.06)
                     buffer = app.current_buffer
                     binding = buffer._my_agent_plugin_input
+                    # 起跑和首帧在负载下可能超过固定睡眠；键会留在管道里等应用读取，后面的候选等待才会误判超时。
+                    await wait_app(app, lambda: app.is_running and app.render_counter > 0, "TUI 起跑并画出首帧")
                     pipe.send_text("/plugins@s")
-                    await asyncio.sleep(0.06)
-                    assert requests == [] and buffer.complete_state is None
+                    await wait_app(app, lambda: buffer.text == "/plugins@s" and buffer.complete_state is None,
+                                   "输入到达且边打边补全不留候选")
+                    assert requests == []
                     pipe.send_bytes(b"\t")
-                    for _ in range(100):
-                        if buffer.complete_state is not None:
-                            break
-                        await asyncio.sleep(0.01)
+                    # Tab 先同步建一个空的 complete_state，再到线程里拉目录；候选真的出现才说明目录请求已发出。
+                    await wait_app(app, lambda: bool(getattr(buffer.complete_state, "completions", ())),
+                                   "Tab 拉取目录后出现候选")
                     assert len(requests) == 1 and requests[0]["operation"] == "catalog"
-                    assert buffer.complete_state is not None
                     assert buffer.text == "/plugins@s" and params.jobs.empty()
                     pipe.send_bytes(b"\t")
-                    await asyncio.sleep(0.06)
-                    assert (
-                        buffer.text == "/plugins@sample " and binding.revision == initial.revision
-                    )
+                    await wait_app(app, lambda: buffer.text == "/plugins@sample ", "接受候选并补空格")
+                    assert binding.revision == initial.revision
                     buffer.cancel_completion()
                     pipe.send_bytes(b"\x13")
-                    await asyncio.sleep(0.06)
-                    assert buffer.text == "" and binding.revision == ""
+                    await wait_app(app, lambda: buffer.text == "", "Ctrl-S 暂存草稿")
+                    assert binding.revision == ""
                     current = PluginCommandCatalog(
                         "scope", plugins=(replace(_plugin(), package_version="2.0"),)
                     )
@@ -100,16 +98,15 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
                         buffer.text == "/plugins@sample " and binding.revision == initial.revision
                     )
                     pipe.send_bytes(b"\x12")
-                    await asyncio.sleep(0.06)
+                    await wait_app(app, lambda: app.current_buffer is not buffer, "Ctrl-R 进入历史搜索")
                     pipe.send_bytes(b"\x03")
-                    await asyncio.sleep(0.06)
-                    assert app.current_buffer is buffer and binding.revision == initial.revision
+                    await wait_app(app, lambda: app.current_buffer is buffer, "Ctrl-C 退出历史搜索")
+                    assert binding.revision == initial.revision
                     pipe.send_text("read '中文 文件'")
                     pipe.send_bytes(b"\r")
-                    for _ in range(100):
-                        if requests[-1].get("command", "").startswith("/plugins@sample read"):
-                            break
-                        await asyncio.sleep(0.01)
+                    await wait_app(app, lambda: bool(requests)
+                                   and str(requests[-1].get("command", "")).startswith("/plugins@sample read"),
+                                   "命令按原 revision 提交")
                     command = requests[-1]
                     assert command["command"] == "/plugins@sample read '中文 文件'"
                     assert command["catalog_revision"] == initial.revision != current.revision

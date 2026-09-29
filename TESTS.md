@@ -38,6 +38,32 @@
   原来用 `match=` 或消息前缀断言码的 10 处测试改读 `error_code`，失败回执的整包断言补上 `details.error_code`。
 - **定向回归**：涉及快照、skill_search、任务引用、包读取的 33 个测试文件加护栏：963 passed。
 
+## 两条负载敏感用例改稳：网关排队续期、TUI 插件目录管道（2026-09-29，分支 `claude/38-deflake-shell-adapter`，基于 `6c2fad4da`，只改测试）
+
+- **来源**：集成者报告 12 分片里 `test_gateway_admission_wait.py::test_real_worker_signal_keeps_real_client_waiting` 与
+  `test_tui_plugin_directory_pipe.py::test_native_keybindings_refresh_accept_stash_and_submit_original_revision[manual]`（现象 `requests 为空`）
+  各偶发失败，单独重跑通过。
+- **满载复现**（8 个 CPU 忙循环 + 6–8 个 pytest 进程各循环 12 次）：两条都未复现（排队用例 72 + 96 次、TUI 用例 72 次全部通过），
+  改法按代码里读出的时序窗口做。
+- **排队用例的窗口**：原来 worker 每 0.04 秒写一次等待信号、写满 5 轮就落终态，客户端不活跃窗口 0.15 秒；满载下客户端一次采样
+  （最小间隔 0.1 秒加读盘）就可能超过 0.15 秒而收口，或 worker 五轮在客户端第一次采样前就写完。
+- **排队用例改法**：worker 每写一次等待信号都等客户端真的续期过一次（给 `_extend_active_request_deadline` 包一层，续期成功放行信号量）
+  再写下一次，第 8 轮才写终态；初始 deadline 0.5 秒远小于至少 0.8 秒的完成时间，续期一失效客户端就在 0.5 秒内收口。断言改为
+  `rounds == 8`、`admission_wait_count >= 2`，终态正文不变；不活跃窗口 2 秒只是满载采样抖动的余量，过期语义仍由紧邻的负向用例锁定。
+- **TUI 用例的窗口**：Tab 之后 prompt_toolkit 先同步建一个空的 `complete_state`，再到线程里拉插件目录；原用例一看到 `complete_state`
+  非空就断言目录请求已发出，线程晚一点起步就是 `requests 为空`。起跑、送键后的固定 0.06 秒睡眠在负载下也不够。
+- **TUI 用例改法**：全部改成 `wait_app` 结构化等待（3 秒只是防挂起上限）：起跑等 `is_running` 且首帧已画；送键后等正文到达且
+  边打边补全不留候选；Tab 后等候选真的出现，再断言只发过一次 `catalog` 请求；接受候选、Ctrl-S 暂存、Ctrl-R/Ctrl-C 切换焦点、
+  回车提交都等对应的 buffer/焦点/请求事实。被测行为与断言不变。
+- **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希，7/7 被抓出）：客户端不续期；worker 不写等待信号；Tab 不拉目录；
+  接受候选丢 revision；提交用当前目录 revision；Ctrl-S 不恢复暂存；Ctrl-C 不交还焦点。
+- **修复后满载**：两条各 6 进程 × 20 次并行（8 个忙循环）全部通过（TUI 用例两个参数化变体一起跑）；两个文件与
+  `test_architecture_guardrails` 单跑通过。
+- **门禁**：ruff、doc sync、strict code-size（TUI 用例两个 nesting 项由 hard 降为 soft，无新增 identity）、`git diff --check`、
+  clean package；`CODE_SIZE_REPORT.md` 不入提交。
+- 观察（未改产品、未改用例）：满载复现时 `test_tools/test_shell_background.py::test_background_immediate_failure_is_not_reported_started`
+  1/72 失败：立即退出的子进程在 0.5 秒 settle 内还没退出就被判成 `started`，属于启动观察窗口的设计取舍，交产品作者判断。
+
 ## 两条负载敏感用例改稳：后台命令不阻塞、通道路由立即返回（2026-09-29，分支 `claude/38-deflake-shell-adapter`，基于 `f7a4cc909`，只改测试）
 
 - **来源**：集成者报告 step15z 的 12 分片里 `test_tools/test_shell_background.py::test_background_does_not_block` 与
