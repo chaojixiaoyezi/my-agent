@@ -333,6 +333,8 @@ class ProcessRegistry:
         return self._kill_legacy(record, access_scope)
 
     # LLM: 已发布 v1 仅按原 session 管理，不推导 task 身份；原出生标识必须传入终止快照边界。
+    #   发信号之后的失败（第二次读记录出错，或记录已经不在了）一律改抛 ProcessSessionCleanupError：
+    #   那时信号已经发出，可能已有副作用，不能让它退化成「发信号前失败」的 AuthorityError。
     # 函数用途: 保留旧记录的显式句柄停止，确认失败时不登记 killed。
     def _kill_legacy(self, record: BackgroundProcess, access_scope: ProcessAccessScope | None) -> dict[str, Any]:
         with self._lock:
@@ -341,16 +343,38 @@ class ProcessRegistry:
                 return {"session_id": record.session_id, "status": "already_exited" if record.status == "exited" else record.status,
                         "exit_code": record.exit_code, "message": "进程已经结束，无需终止。"}
         receipt = terminate_process_tree(record.pid, record.process, expected_birth_token=record.pid_birth_token)
+        # 信号已经发出：此后无论读记录还是持久化失败，都属于「清理结果未定」。
         with self._lock:
-            current = self._visible_record_locked(record.session_id, access_scope, record.store_root)
-            if current is None:
-                raise ProcessSessionAuthorityError({"error_type": "authority_missing"})
-            if receipt.confirmed:
-                current.status, current.finished_at, current.exit_code = "killed", time.time(), receipt.return_code
-                self._persist_locked(current)
+            try:
+                current = self._visible_record_locked(record.session_id, access_scope, record.store_root)
+                if current is None:
+                    raise ProcessSessionAuthorityError({"error_type": "authority_missing"})
+                if receipt.confirmed:
+                    current.status, current.finished_at, current.exit_code = "killed", time.time(), receipt.return_code
+                    self._persist_locked(current)
+            except ProcessSessionAuthorityError as exc:
+                raise self._legacy_cleanup_unresolved(record, receipt, exc) from exc
             summary = current.to_summary()
             summary.update(signal=receipt.method, termination=asdict(receipt))
             return summary
+
+    # LLM: 只把「已发信号之后」的权威故障翻译成 cleanup 语义，回执原样带上供人工核对；
+    #   已确认的终止不会被降级成未发生，也不触发自动重做。
+    # 函数用途: 构造 legacy 停止在发信号后失败时的清理未定异常。
+    @staticmethod
+    def _legacy_cleanup_unresolved(
+        record: BackgroundProcess,
+        receipt: ProcessTerminationReceipt,
+        cause: Exception,
+    ) -> Any:
+        from .process_session_cleanup import ProcessSessionCleanupError
+
+        return ProcessSessionCleanupError(
+            cause,
+            record.to_record(),
+            (receipt,),
+            True,
+        )
 
     # LLM: 每轮观察原 Store 的阶段变化，取消仅释放等待；超时仍 pending，不能因 host 不活推断 child 结束。
     # 函数用途: 在宿主取消和超时范围内等待同一个 session 的可信终态。

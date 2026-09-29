@@ -22,6 +22,7 @@ from agent_py_agent.agent.tooling.process_registry import (
     process_registry,
 )
 from agent_py_agent.agent.tooling.process_session_cleanup import ProcessSessionCleanupError
+from agent_py_agent.agent.tooling.process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
 from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall, ToolResult
 
@@ -117,6 +118,41 @@ def test_stop_before_any_signal_is_not_started(monkeypatch):
     assert (outcome.ok, outcome.error_code) == (False, UNKNOWN)
     assert outcome.effect_outcome == "not_started"
     assert outcome.reported_error_code == "PROCESS_SESSION_AUTHORITY_UNREADABLE"
+
+
+def test_legacy_stop_failure_after_signal_is_unknown(monkeypatch):
+    """v1（legacy）路径：发信号之后的读记录失败必须仍是 unknown。
+
+    _kill_legacy 的顺序是 _refresh_locked（发信号前）→ terminate_process_tree（发信号）
+    → 第二次 _visible_record_locked。第二次既可能因读取失败抛错，也可能因记录已不在而显式抛错，
+    两者都发生在发信号之后；registry 会把它们翻译成 ProcessSessionCleanupError，
+    这样工具层「AuthorityError 即发信号前」的判定才成立。
+    """
+    from agent_py_agent.agent.tooling.process_registry import (
+        BackgroundProcess,
+        ProcessTerminationReceipt,
+    )
+    from agent_py_agent.agent.tooling.process_registry import (
+        process_registry as registry,
+    )
+
+    record = BackgroundProcess(
+        session_id="legacy-1",
+        command="true",
+        pid=99999998,
+        started_at=0.0,
+        persisted_snapshot={"schema": LEGACY_PROCESS_SESSION_SCHEMA},
+    )
+    monkeypatch.setattr(registry, "_refresh_locked", lambda _record: None)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.process_registry.terminate_process_tree",
+        lambda *a, **k: ProcessTerminationReceipt("SIGTERM", True, 0, 1, ()),
+    )
+    monkeypatch.setattr(registry, "_visible_record_locked", _authority_unreadable)
+    with pytest.raises(ProcessSessionCleanupError) as excinfo:
+        registry._kill_legacy(record, None)
+    assert excinfo.value.report["committed"] is True
+    assert len(excinfo.value.report["termination_receipts"]) == 1
 
 
 def test_stop_with_cleanup_failure_stays_unknown(monkeypatch):

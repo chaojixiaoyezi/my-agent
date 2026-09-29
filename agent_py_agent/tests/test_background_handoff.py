@@ -523,7 +523,8 @@ def test_refresh_failure_does_not_escape_tool_or_use_running_cache(tmp_path, mon
         }
     )
     assert result.error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN"
-    assert result.effect_outcome == "unknown"
+    # status 是只读动作：刷新失败时什么都没写、也没有外部副作用，按新合同是「已知没开始」而不是「结果未知」。
+    assert result.effect_outcome == "not_started"
     assert result.result_envelope["load_error"]["error_type"] == "OSError"
 
 
