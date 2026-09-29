@@ -128,6 +128,14 @@
   - 读不出时按 run 节流（600 秒一条）打结构化告警 `scheduler_follow_up_unreadable`，写明项目和错误码；
   - 只剩读不出、停满宽限期的 6 倍时，按 `SCHEDULED_TASK_FOLLOW_UP_UNREADABLE`（登记在 `ERROR_CONTRACTS`）结算为受阻并排宿主提示；确认存在的后续工作仍然优先。
 - 收口 CAS 失败、只释放租约时，和其它释放分支一样退避 30 秒（be 复审 M2），避免任务写入持续失败时每拍重新领取、再跑一整片模型。
+- be 复审 S1–S5（复审修复 B）：
+  - 新事实 `unsettled_subagent_completion`：本任务血缘里、直属会话、会发完成唤醒的已终态子代理，只要收口 WAL 还没交付、有去重键前缀 `subagent-finished:<run_id>:` 的待处理唤醒，或刚终态（`ended_at` 在宽限期内，盖住“终态先落盘、WAL 与唤醒后写”的间隙），就算后续工作。这也修掉了收口时子代理刚结束、唤醒还没发就把父任务误标受阻的问题（S2）。
+  - 宽限期不再写死：`max(600, 5 × orphan_supervision_interval_seconds)`（`waiting_grace_seconds`），由组合根注入 `SchedulerFollowUpPolicy`；同一个值也是“刚终态”窗口，读不出的限期是它的 6 倍（门槛和 6 倍用同一个推导值）。没有新增配置项。
+  - 读不出的计时从“首次观察到只剩读不出”算起（按 run 记在进程内，出现会自己推进的后续工作或读全时清掉，重启归零），不从 `waiting_since` 算：扫描时一条唤醒被并发处理移走会产生瞬时读错误，不能让已经合法等了很久的 run 立刻被结算。宽限期内事实不清零这个计时。
+  - 子代理两项改为按 id 精确读血缘记录（`list_runs_by_ids_report`）：血缘里有、记录缺失或损坏的记为读不出（受限期和告警约束），不再被当成“还有子代理在跑”；直属与否复用完成通知器的同一判据。
+  - 每项事实靠什么机制消失写在 `task_follow_up` 模块头：子代理、唤醒、后台命令、子代理完成都有机制推进；活跃 Goal、待处理 guidance、启用的进度策略没有机制保证会消失（`GRACE_BOUND_FACTS`），过了宽限期不再计入（S4）。
+  - 存量 waiting 的后续工作判定每个 run 最多 60 秒算一次（S3）。
+  - 用真实子代理记录和真实血缘（`attrs.conversation_task_id` = srun）覆盖“子代理在跑 → waiting → 子代理结束 → 结算”（S5）。
 - 分工：自动收口只处理“确认没有后续工作”（以及长期读不出）；`/endtask` 是管理员的人工出口，只要求执行树里没有正在跑的执行，不看后续工作事实。两边对同一任务都做 `expected_status=active` 的 CAS，输的一方不写任何东西。
 - 没有后续工作时（`scheduler/active_run_closeout.close_active_run`）：会话任务 CAS 成 `blocked`（期望原状态 active），排一条来源为 `scheduler:<job_id>` 的宿主提示，这次定时执行记 failed。结算码按 `runtime_reason` 选：工具结果无法确认 → `SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN`（提示写明需人工确认是否重做），其它 → `SCHEDULED_TASK_UNFINISHED`。job 的周期不动，下一周期照常派发。CAS 没成功只释放租约，交给原路径按新状态收口。
 - `blocked` 进入任务终态映射（→ failed，码 `SCHEDULED_TASK_BLOCKED`），也顺带修好了报告 `task_status=blocked` 时每 30 秒重试一次、永远结不了的情况。

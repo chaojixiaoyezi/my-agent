@@ -126,6 +126,7 @@ from .prompting_parts import PromptBuilder
 from .runtime_context import ThreadLocalAgentAttribute, current_subagent_run_id
 from .runtime_db.operation_store_selector import select_operation_store
 from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
+from .scheduler.active_run_closeout import SchedulerFollowUpPolicy, waiting_grace_seconds
 from .settings import AgentConfig
 from .settings.model_scope import ModelScopedAttribute
 from .settings.runtime_guard_config import runtime_guard_policy
@@ -495,12 +496,12 @@ class SimpleAgent(
                 self.home_paths.global_index_dir / "scheduler_due.sqlite3"
             ),
         )
-        # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性。
+        # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性，宽限期从配置推出。
         self.scheduler_service = SchedulerService(
             self.scheduler_repository,
             conversation_store=self.conversation_store,
             skill_snapshot_provider=self.current_skill_snapshot,
-            follow_up_facts=partial(task_follow_up_facts, self),
+            follow_up=_scheduler_follow_up_policy(self),
         )
         self.subagents = _build_subagent_manager(self, paths)
         # Adapter daemon health belongs to the shared gateway process, while channel binding,
@@ -776,6 +777,14 @@ def _register_owner_ref_if_possible(paths, owner) -> None:
         register_owner_ref(paths, owner)
     except OSError:
         return
+
+
+# LLM: 宽限期只从现有配置 orphan_supervision_interval_seconds 推出（waiting_grace_seconds），同一个值既是存量 waiting 的
+#   宽限期，也是“子代理刚终态、完成唤醒还在发布途中”的窗口；查询绑定 agent，调用时才读会话存储与子代理。
+# 函数用途: 组装定时执行收口用的后续工作判定策略，注入 SchedulerService。
+def _scheduler_follow_up_policy(agent: SimpleAgent) -> SchedulerFollowUpPolicy:
+    grace = waiting_grace_seconds(getattr(agent.config, "orphan_supervision_interval_seconds", 0))
+    return SchedulerFollowUpPolicy(partial(task_follow_up_facts, agent, recent_seconds=grace), grace)
 
 
 # LLM: Child agents inherit the parent's effective project roots but never inherit an absent

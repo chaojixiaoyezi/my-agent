@@ -646,6 +646,17 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
 - **变异**（`PYTHONDONTWRITEBYTECODE=1`、每个变异独立 pycache 前缀，跑完逐字节还原）：64 个，首轮 59 个被抓住；补了进度策略读失败/跨任务、后台命令跨会话存储、取码顺序两组测试后，5 个存活全部被抓住，64/64；收口逻辑移到 `scheduler/active_run_closeout.py`（`SchedulerService` 触到类长度硬线）后按新位置重跑，仍 64/64。
 - **回归**：46 个相关测试文件（调度、工具操作账本、后台命令、后台运行时、宿主提示、恢复合同及全仓扫描守卫）；`test_recovery_code_policy` 先抓到两个新码未登记进 `ERROR_CONTRACTS`，已补登记。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_scheduler_waiting_deadlock.py agent_py_agent/tests/test_tool_unknown_reason_preservation.py -q`
+- **复审修复 B（be 的 S1–S5）**：
+  - 真实血缘（S5）：`agent.subagents.create_run` 建真实子代理、`attrs.conversation_task_id` 为 srun；子代理在跑 → waiting；
+    子代理结束、完成唤醒待处理 → 过宽限期仍 waiting；唤醒处理、任务收尾 → 对账按 done 结算；
+  - 刚终态（S1/S2）：收口时子代理刚结束、唤醒未发 → waiting 而不是受阻；已终态子代理的“刚终态窗口 / 待处理完成唤醒 /
+    收口 WAL 未交付 / 已交付”逐项正反；取消、放弃等不发完成唤醒的状态和嵌套孙代理不计入；
+  - 宽限期（S1）：`waiting_grace_seconds` 五组取值；组合根把配置 200 秒接成 1000 秒宽限期和同值窗口；宽限期更长时退出相应推迟；
+  - 宽限期内事实（S4）：只有 Goal / guidance / 进度策略时，宽限期前一秒仍 waiting、满宽限期结算；集合钉死为这三项；
+  - 节流（S3，`test_scheduler_scan_costs.py`）：过宽限期后 0、1、30、59.9 秒四次对账只算一次，60 秒再算一次；
+  - 3a 转来的三条：孤儿巡查 1200 秒时推导宽限期 6000 秒，6×6000 前仍 waiting、满 6×6000 结算；读不出从首次观察起计时——
+    中途出现会自己推进的唤醒会让计时重来、读全则按“没有后续工作”正常结算、宽限期内事实（活跃 Goal）不清零计时；
+    血缘里有、记录缺失的子代理记为读不出（`FileNotFoundError`），不当成“还有子代理在跑”；对账时刻一路传到“刚终态”窗口。
 - **复审 A 的跟进修复（be 的 M-A1、M-A2 与 nit）**：
   - 同类“确认存在优先”：本任务有待处理唤醒、另有归属不明的坏唤醒时，满 6 倍宽限期仍 waiting（be 探针 P2 翻转）；
     唤醒 / 进度策略各加“同类坏记录 + 确认存在 → 仍算存在”；后台命令加三种坏记录（解析不出 / 本任务 / 空目标）下确认存在仍为 True；

@@ -132,7 +132,7 @@ class SchedulerRunHeartbeat:
 class SchedulerService:
     """Reserve, publish, claim, and close scheduler runs using durable facts only."""
 
-    # LLM: follow_up_facts(thread_id, task_id, ignore_wake_ids) -> FollowUpFacts 由组合根注入（conversation.task_follow_up），
+    # LLM: follow_up 是组合根注入的 SchedulerFollowUpPolicy（task_follow_up 查询 + 从配置推出的宽限期），
     #   供 active_run_closeout 判定；未注入时一律保持原来的 waiting 行为（fail closed），不走限期结算。
     # 函数用途: 绑定调度账本、会话存储和两个只读查询。
     def __init__(
@@ -141,12 +141,12 @@ class SchedulerService:
         *,
         conversation_store: Any,
         skill_snapshot_provider: Callable[[], Any] | None = None,
-        follow_up_facts: Callable[[str, str, Iterable[str]], Any] | None = None,
+        follow_up: Any | None = None,
     ) -> None:
         self.repository = repository
         self.conversation_store = conversation_store
         self.skill_snapshot_provider = skill_snapshot_provider
-        self.follow_up_facts = follow_up_facts
+        self.follow_up = follow_up
 
     # LLM: Every queued scheduler run is also the durable root task for its wake. Keep the
     # run id in both typed wake identity and metadata so background lifecycle reads one authority.

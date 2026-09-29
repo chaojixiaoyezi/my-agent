@@ -1373,3 +1373,40 @@ def test_scheduler_read_paths_do_not_parse_inside_the_lock(tmp_path, monkeypatch
         "逐 run 解析不得发生在持锁期间"
     )
     assert [name for name, _locked in observed].count("parse_run") > 0, "逐 run 解析必须真的发生过"
+
+
+# be 复审 S3：后台 1 秒一拍，正常的长等待（子代理跑几个小时）不能每拍都全量重算后续工作事实、再开一次进程托管事务；
+# 过了宽限期的存量 waiting，同一个 run 的后续工作判定最多 60 秒算一次，别的 run 不受影响。
+def test_stale_waiting_follow_up_is_checked_at_most_once_a_minute_per_run(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from agent_py_agent.agent.scheduler import active_run_closeout
+    from agent_py_agent.tests.test_scheduler_waiting_deadlock import (
+        GRACE,
+        _finish,
+        _lifecycle_wake,
+        _setup,
+    )
+
+    monkeypatch.setattr(active_run_closeout, "_stale_checked_at", {})
+    agent, store, thread, claim = _setup(tmp_path)
+    _lifecycle_wake(store, thread, claim)
+    _finish(agent, thread, claim, runtime_status="unfinished", runtime_reason="TOOL_OPERATION_OUTCOME_UNKNOWN")
+    since = float(agent.scheduler_repository.get_active_run(claim.run_id)["waiting_since"])
+    policy = agent.scheduler_service.follow_up
+    calls: list[str] = []
+
+    # 函数用途: 记录每次真正执行的后续工作判定，再交给原判定。
+    def counting(query):
+        calls.append(query.task_id)
+        return policy.facts(query)
+
+    monkeypatch.setattr(agent.scheduler_service, "follow_up", replace(policy, facts=counting))
+    for offset in (0.0, 1.0, 30.0, 59.9):
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE + offset) is None
+    assert calls == [claim.run_id]
+    assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE + 60.0) is None
+    assert calls == [claim.run_id, claim.run_id]
+    # 宽限期内根本不算。
+    assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=since + GRACE - 1) is None
+    assert len(calls) == 2

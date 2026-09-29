@@ -1074,20 +1074,32 @@ def _conversation_task_has_open_subagents(agent: object, task_id: str) -> bool:
 def conversation_task_open_subagents_or_raise(agent: object, task_id: str) -> bool:
     from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
-    run_ids = set(agent.subagent_run_ids_for_request(task_id))
-    if not run_ids:
-        return False
-    runs = list(agent.subagents.list_runs())
-    indexed = {
-        str(getattr(run, "id", "") or "").strip(): run
-        for run in runs
-        if str(getattr(run, "id", "") or "").strip()
-    }
     return any(
-        run_id not in indexed
-        or not task_status_in(getattr(indexed[run_id], "status", ""), SUBAGENT_ENDED_STATUSES)
-        for run_id in run_ids
+        not task_status_in(getattr(run, "status", ""), SUBAGENT_ENDED_STATUSES)
+        for run in conversation_task_lineage_runs_or_raise(agent, task_id)
     )
+
+
+# LLM: 血缘 id 仍按 subagent_run_ids_for_request 选，记录按 id 精确读（list_runs_by_ids_report）；血缘里有、记录却
+#   缺失或读不出的，抛 SubagentLineageUnreadable（带第一条结构化错误报告），调用方不能把它当成"子代理还在跑"或"没有"。
+# 函数用途: 读取一个会话任务血缘里的全部子代理记录，缺失或损坏时抛出。
+def conversation_task_lineage_runs_or_raise(agent: object, task_id: str) -> list[object]:
+    run_ids = sorted(set(agent.subagent_run_ids_for_request(task_id)))
+    if not run_ids:
+        return []
+    report = agent.subagents.list_runs_by_ids_report(run_ids)
+    if report.load_errors:
+        raise SubagentLineageUnreadable(dict(report.load_errors[0]))
+    return list(report.runs)
+
+
+# LLM: report 是子代理持久层的结构化读取错误（category/error_type/run_id/path），不含记录正文。
+# 类用途: 会话任务血缘里有子代理记录缺失或读不出。
+class SubagentLineageUnreadable(RuntimeError):
+    # 函数用途: 保存结构化错误报告。
+    def __init__(self, report: dict[str, object]) -> None:
+        super().__init__("subagent lineage record unreadable")
+        self.report = report
 
 
 # LLM: task_path 只接受链接中的结构化路径，解析失败或路径不存在时不伪造 workspace。
