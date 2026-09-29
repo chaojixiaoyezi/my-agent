@@ -20,16 +20,21 @@ PACKAGE_PIN_ERROR_MESSAGES = {
 }
 
 
-# LLM: 消息文本保持原格式（调用方和既有回执沿用）；reason 是可选的结构化内部原因，只用于诊断，
-#   不参与授权或恢复判定，空串表示没有可区分的原因。改动时联查 skill_search_tool._snapshot_unavailable。
-# 类用途: 表示当轮快照里选定的 Skill 或能力包已不能读取，并可附带读取失败的内部原因。
+# LLM: error_code 是这族异常唯一的机器可读码（大写下划线常量），调用方、后台失败分类和测试只读它，不解析消息；
+#   消息仍是"码 + 可选明细"的原格式，只给人看。抛出点的第一个参数必须是码常量或上游异常的结构化码属性，
+#   由 test_skill_snapshot_error_codes 的 AST 守卫钉住。reason 是可选的结构化内部原因，只用于诊断，
+#   不参与授权或恢复判定。改动时联查 skill_search_tool._snapshot_unavailable 与 conversation.wake_poison。
+# 类用途: 表示当轮快照里选定的 Skill 或能力包已不能读取，带结构化错误码，并可附带读取失败的内部原因。
 class SkillSnapshotError(RuntimeError):
     """A selected Skill can no longer be read from the immutable turn snapshot."""
 
-    # LLM: reason 只能由宿主内部异常的结构化字段填入，不从消息或模型文本解析。
-    # 函数用途: 保存原错误消息和可选的内部原因。
-    def __init__(self, message: str = "", *, reason: str = "") -> None:
-        super().__init__(message)
+    # LLM: detail 只拼进给人看的消息（例如 package=…、skill=…），不进入 error_code；reason 只能由宿主内部异常的
+    #   结构化字段填入，不从消息或模型文本解析。
+    # 函数用途: 保存结构化错误码、原格式消息和可选的内部原因。
+    def __init__(self, error_code: str, detail: str = "", *, reason: str = "") -> None:
+        code = str(error_code or "").strip()
+        super().__init__(f"{code} {detail}" if detail else code)
+        self.error_code = code
         self.reason = reason
 
 
@@ -158,7 +163,7 @@ class SkillSnapshot:
     def read_in_package(self, package_id: str, member_path: str = "") -> bytes:
         package = self.resolve_package(package_id)
         if package is None:
-            raise SkillSnapshotError(f"CAPABILITY_PACKAGE_NOT_AVAILABLE package={package_id}")
+            raise SkillSnapshotError("CAPABILITY_PACKAGE_NOT_AVAILABLE", f"package={package_id}")
         try:
             return package.read(member_path)
         except InterruptedError:
@@ -166,7 +171,7 @@ class SkillSnapshot:
         except (OSError, ValueError) as exc:
             code = str(getattr(exc, "code", "") or "CAPABILITY_RESOURCE_UNAVAILABLE")
             reason = str(getattr(exc, "reason", "") or "")
-            raise SkillSnapshotError(f"{code} package={package_id}", reason=reason) from exc
+            raise SkillSnapshotError(code, f"package={package_id}", reason=reason) from exc
 
     # LLM: 仅主任务合法旧 pin 的可用性投影使用此入口；剔除同 ID 的当前包但不写 pin，也不影响公开 Skill 或其它包。
     # 函数用途: 生成带结构化失效诊断的新快照和指纹，让正常对话继续而旧包不能静默换代。
@@ -192,20 +197,20 @@ class SkillSnapshot:
     def read_body(self, reference: str, *, max_chars: int = 0) -> str:
         entry = self.resolve(reference)
         if entry is None:
-            raise SkillSnapshotError(f"SKILL_NOT_AVAILABLE reference={reference}")
+            raise SkillSnapshotError("SKILL_NOT_AVAILABLE", f"reference={reference}")
         path = Path(entry.path)
         try:
             body = path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise SkillSnapshotError(f"SKILL_READ_FAILED skill={entry.stable_id}: {exc}") from exc
+            raise SkillSnapshotError("SKILL_READ_FAILED", f"skill={entry.stable_id}: {exc}") from exc
         if _content_sha256(body) != entry.content_sha256:
-            raise SkillSnapshotError(f"SKILL_SNAPSHOT_STALE skill={entry.stable_id}")
+            raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"skill={entry.stable_id}")
         decision = evaluate_skill_guard_gate(
             path.parent,
             SkillGuardRequest(source=entry.source, skill_name=entry.name),
         )
         if not decision.allowed:
-            raise SkillSnapshotError(f"SKILL_GUARD_DENIED skill={entry.stable_id}")
+            raise SkillSnapshotError("SKILL_GUARD_DENIED", f"skill={entry.stable_id}")
         if max_chars and len(body) > max_chars:
             return body[:max_chars] + "\n... 已截断"
         return body
@@ -232,10 +237,10 @@ class SkillSnapshot:
                 continue
             entry = self.resolve_reference(reference)
             if entry is None:
-                raise SkillSnapshotError(f"SKILL_NOT_AVAILABLE reference={reference}")
+                raise SkillSnapshotError("SKILL_NOT_AVAILABLE", f"reference={reference}")
             wanted_sha = expected.get(entry.stable_id) or expected.get(reference)
             if wanted_sha and wanted_sha != entry.content_sha256:
-                raise SkillSnapshotError(f"SKILL_SNAPSHOT_STALE skill={entry.stable_id}")
+                raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"skill={entry.stable_id}")
             if isinstance(entry, CapabilityPackageSnapshot):
                 _validate_package_reference(entry, refs)
             if entry.stable_id not in seen:
@@ -268,7 +273,7 @@ def _index_expected_refs(values: Iterable[Mapping[str, object]] | None) -> dict[
         previous = refs.get(stable_id)
         if stable_id.startswith("capability:") and previous is not None:
             if any(previous.get(key) != row.get(key) for key in keys):
-                raise SkillSnapshotError(f"SKILL_PACKAGE_REFERENCE_CONFLICT reference={stable_id}")
+                raise SkillSnapshotError("SKILL_PACKAGE_REFERENCE_CONFLICT", f"reference={stable_id}")
         refs[stable_id] = row
     return refs
 
@@ -280,12 +285,12 @@ def _validate_package_reference(package: CapabilityPackageSnapshot, refs: Mappin
         return
     row = refs.get(package.stable_id)
     if not row or any(not row.get(key) for key in ("package_id", "activation_id", "content_sha256")):
-        raise SkillSnapshotError(f"SKILL_PACKAGE_REFERENCE_REQUIRED package={package.package_id}")
+        raise SkillSnapshotError("SKILL_PACKAGE_REFERENCE_REQUIRED", f"package={package.package_id}")
     if any(row.get(key) != value for key, value in (
         ("kind", "capability_package"), ("package_id", package.package_id),
         ("activation_id", package.activation_id), ("content_sha256", package.package_sha256),
     )):
-        raise SkillSnapshotError(f"SKILL_SNAPSHOT_STALE package={package.package_id}")
+        raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"package={package.package_id}")
 
 
 def skill_content_sha256(text: str) -> str:

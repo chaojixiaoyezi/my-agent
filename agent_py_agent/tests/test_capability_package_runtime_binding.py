@@ -201,6 +201,7 @@ def test_same_thread_wrong_task_payload_cannot_supply_another_tasks_pins(tmp_pat
         _gateway_params(agent, tmp_path, thread, {"task_id": first.task_id, "status": "active"})
     agent._current_run_params = RunParams(task_attributes={"conversation_thread_id": thread.thread_id,
                                                         "conversation_task_id": first.task_id})
-    with pytest.raises(SkillSnapshotError, match="BINDING_INVALID"):
+    with pytest.raises(SkillSnapshotError) as rejected:
         agent.current_skill_snapshot()
+    assert rejected.value.error_code == "SKILL_TASK_BINDING_INVALID"
     assert tasks.load(second.task_id) == second

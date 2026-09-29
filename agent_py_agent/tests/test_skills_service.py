@@ -65,8 +65,9 @@ def test_snapshot_is_stable_for_turn_and_reloads_after_file_change(tmp_path, ski
         "---\nname: triage\ndescription: version two\n---\n\nnew body\n",
         encoding="utf-8",
     )
-    with pytest.raises(SkillSnapshotError, match="SKILL_SNAPSHOT_STALE"):
+    with pytest.raises(SkillSnapshotError) as stale:
         first.read_body("triage")
+    assert stale.value.error_code == "SKILL_SNAPSHOT_STALE"
     second = catalog.service.snapshot_for(catalog.workspace)
     assert second is not first
     assert second.resolve("triage").description == "version two"
@@ -151,10 +152,12 @@ def test_restricted_snapshot_is_fail_closed_and_hides_paths(tmp_path, skill_cata
     skill_card = router.cards(kinds={"skill"})[0]
     assert skill_card.path == ""
     assert skill_card.metadata["stable_id"] == one.stable_id
-    with pytest.raises(SkillSnapshotError, match="SKILL_NOT_AVAILABLE"):
+    with pytest.raises(SkillSnapshotError) as missing:
         catalog.snapshot.restricted(["missing"])
-    with pytest.raises(SkillSnapshotError, match="SKILL_SNAPSHOT_STALE"):
+    assert missing.value.error_code == "SKILL_NOT_AVAILABLE"
+    with pytest.raises(SkillSnapshotError) as stale:
         catalog.snapshot.restricted(
             [one.stable_id],
             expected_sha256={one.stable_id: "0" * 64},
         )
+    assert stale.value.error_code == "SKILL_SNAPSHOT_STALE"

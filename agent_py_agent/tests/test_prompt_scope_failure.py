@@ -42,9 +42,10 @@ def test_snapshot_admission_failure_restores_existing_or_removes_new_context(exi
     if existing:
         for name, value in zip(_FIELDS, previous, strict=True):
             setattr(agent, name, value)
-    with pytest.raises(SkillSnapshotError, match="STALE"):
+    with pytest.raises(SkillSnapshotError) as stale:
         with current_prompt_scope(agent, "new prompt", object()):
             pytest.fail("过期快照不应进入正文")
+    assert stale.value.error_code == "SKILL_SNAPSHOT_STALE"
     if existing:
         assert tuple(getattr(agent, name) for name in _FIELDS) == previous
     else:

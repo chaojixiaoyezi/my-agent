@@ -27,6 +27,17 @@
   - 测试防线 e9be5de14 上预跑原有 9 条，零拦截；防线尚未并入 main。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_session_task_real_chain.py -q -rxX`
 
+## SkillSnapshotError 整族结构化错误码（2026-09-28，分支 `claude/75-snapshot-error-code`，基于 `6c2fad4da`，单独先并）
+
+- **改动**：`SkillSnapshotError(error_code, detail=, *, reason=)`，`error_code` 是唯一机器可读码，消息仍是
+  "码 + 明细"原格式；技能快照、包读取、包资源、任务引用各抛出点改为传码常量。引用形状错误改抛
+  `SkillReferenceError(ValueError)`（带 `error_code`），包装时读属性不再 `str(exc)`。`skill_search` 的快照失败回执在
+  `details.error_code` 带出结构化码。供唤醒毒丸分类按 `error:<error_code>` 精确归因（见 `docs/design/WAKE_POISON_PILL.md`）。
+- **测试**：新增 `test_skill_snapshot_error_codes.py`：AST 守卫要求产品代码里整族每个抛出点的第一个参数是码常量或
+  结构化码属性（正反样例各一组，证明守卫不空跑），以及码与消息分离、引用错误仍是 ValueError、包装保留码。
+  原来用 `match=` 或消息前缀断言码的 10 处测试改读 `error_code`，失败回执的整包断言补上 `details.error_code`。
+- **定向回归**：涉及快照、skill_search、任务引用、包读取的 33 个测试文件加护栏：963 passed。
+
 ## 两条负载敏感用例改稳：交互式停止接纳、插话墙钟重试（2026-09-29，分支 `claude/38-deflake-stop-steer`，基于 `f7a4cc909`，只改测试）
 
 - **来源**：集成者报告 step15y 在 Mac 12 分片时 `test_gateway_agent_control_service.py::test_interactive_stop_freezes_before_ack_and_does_not_wait_for_cleanup`

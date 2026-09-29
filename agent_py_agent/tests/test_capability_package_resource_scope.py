@@ -113,7 +113,8 @@ def test_ungranted_or_unknown_package_cannot_obtain_navigation(
         original = deepcopy(arguments)
         outcome = tool.execute(arguments)
         assert not outcome.ok
-        assert json.loads(outcome.output) == {"error": "CAPABILITY_PACKAGE_NOT_AVAILABLE"}
+        assert json.loads(outcome.output) == {"error": "CAPABILITY_PACKAGE_NOT_AVAILABLE",
+                                              "details": {"error_code": "CAPABILITY_PACKAGE_NOT_AVAILABLE"}}
         assert outcome.error_code == "SKILL_SNAPSHOT_UNAVAILABLE" and arguments == original
     assert reads == pins == []
 
@@ -201,7 +202,7 @@ def test_undeclared_member_with_old_generation_cannot_suggest_same_named_new_ent
     original = deepcopy(arguments)
     failed = tool.execute(arguments)
     assert not failed.ok and failed.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
-    assert json.loads(failed.output) == {"error": "SKILL_SNAPSHOT_STALE"}
+    assert json.loads(failed.output) == {"error": "SKILL_SNAPSHOT_STALE", "details": {"error_code": "SKILL_SNAPSHOT_STALE"}}
     assert arguments == original and reads == pins == []
 
 
@@ -220,7 +221,8 @@ def test_declared_member_reader_failure_is_not_wrong_path_recovery(
     original = deepcopy(arguments)
     failed = tool.execute(arguments)
     assert not failed.ok and failed.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
-    assert json.loads(failed.output) == {"error": f"CAPABILITY_RESOURCE_UNAVAILABLE package={package.package_id}"}
+    assert json.loads(failed.output) == {"error": f"CAPABILITY_RESOURCE_UNAVAILABLE package={package.package_id}",
+                                         "details": {"error_code": "CAPABILITY_RESOURCE_UNAVAILABLE"}}
     reader.assert_called_once_with(package.entry_document)
     assert arguments == original and pins == []
 

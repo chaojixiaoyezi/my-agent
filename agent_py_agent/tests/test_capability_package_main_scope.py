@@ -116,14 +116,17 @@ def test_child_remains_strict_after_same_package_is_removed(tmp_path):
     _invalidate(agent, store, entries[0], "removed")
     previous = set_current_subagent_context(agent, run_id=task.id, task_attributes=task.attributes)
     try:
-        with pytest.raises(SkillSnapshotError, match="SKILL_NOT_AVAILABLE"):
+        with pytest.raises(SkillSnapshotError) as missing:
             agent.current_skill_snapshot()
+        assert missing.value.error_code == "SKILL_NOT_AVAILABLE"
     finally:
         restore_current_subagent_context(agent, previous)
 
 
-@pytest.mark.parametrize("invalid", ["malformed", "conflicting"])
-def test_bad_canonical_main_pins_are_not_downgraded_to_availability(tmp_path, invalid):
+@pytest.mark.parametrize(("invalid", "error_code"), [
+    ("malformed", "SKILL_TASK_BINDING_INVALID"), ("conflicting", "SKILL_PACKAGE_REFERENCE_CONFLICT"),
+])
+def test_bad_canonical_main_pins_are_not_downgraded_to_availability(tmp_path, invalid, error_code):
     agent, _store, _entries = _agent(tmp_path)
     _bind_main_task(agent)
     assert SkillSearchTool(agent).execute({"action": "get", "package_id": "story-a"}).ok
@@ -135,8 +138,9 @@ def test_bad_canonical_main_pins_are_not_downgraded_to_availability(tmp_path, in
     else:
         data["skill_snapshot_refs"].append({**reference, "activation_id": "f" * 64})
     path.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(SkillSnapshotError, match="BINDING_INVALID|REFERENCE_CONFLICT"):
+    with pytest.raises(SkillSnapshotError) as rejected:
         agent.current_skill_snapshot()
+    assert rejected.value.error_code == error_code
 
 
 def test_unknown_snapshot_failure_is_not_downgraded_to_missing_package(tmp_path, monkeypatch):

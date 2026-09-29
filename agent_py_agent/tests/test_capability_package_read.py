@@ -116,8 +116,9 @@ def test_old_generation_is_rejected_without_any_member_read_or_pin(monkeypatch, 
     package = package_fixture(reads=reads)
     agent, snapshot = _reader_agent(package)
     pins = _pins(monkeypatch)
-    with pytest.raises(SkillSnapshotError, match="SKILL_SNAPSHOT_STALE"):
+    with pytest.raises(SkillSnapshotError) as stale:
         read_package_page(agent, snapshot, package.package_id, checks=PackagePageChecks(**{field: "f" * 64}))
+    assert stale.value.error_code == "SKILL_SNAPSHOT_STALE"
     assert reads == pins == []
 
 
@@ -129,8 +130,9 @@ def test_host_cannot_expand_scoped_snapshot_or_fall_back_to_agent_catalog(monkey
     agent, broad = _reader_agent(package)
     scoped = replace(broad, packages=())
     pins = _pins(monkeypatch)
-    with pytest.raises(SkillSnapshotError, match="CAPABILITY_PACKAGE_NOT_AVAILABLE"):
+    with pytest.raises(SkillSnapshotError) as missing:
         read_package_page(agent, scoped, package.package_id)
+    assert missing.value.error_code == "CAPABILITY_PACKAGE_NOT_AVAILABLE"
     assert reads == pins == []
 
 

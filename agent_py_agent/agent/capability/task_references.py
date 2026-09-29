@@ -8,15 +8,26 @@ from ..runtime_context import current_subagent_run_id
 from .skill_snapshot import SkillSnapshot, SkillSnapshotError
 
 
+# LLM: 引用形状错误的结构化码只放在 error_code 上；仍是 ValueError 子类，既有 except ValueError 的调用方不变。
+#   包装成 SkillSnapshotError 时读 error_code，不解析消息。改动时联查 test_skill_snapshot_error_codes。
+# 类用途: 表示任务记录里的一条 Skill／能力包引用形状不合法，带结构化错误码。
+class SkillReferenceError(ValueError):
+    # LLM: 只接受大写下划线的码常量；消息就是码本身，调用方和测试都读 error_code，不解析 str(exc)。
+    # 函数用途: 保存结构化错误码，消息与码相同，保持原 str(exc) 输出。
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
+
+
 # LLM: 公开 Skill 保持原摘要引用；能力包必须显式类型、准确包 ID 和激活摘要，未知类型不能被降级成普通 Skill。
 # 函数用途: 从已结构化的任务记录规范一条引用，拒绝不完整包身份，不读取正文或执行任何副作用。
 def normalize_skill_reference(value: object) -> dict[str, str]:
     if not isinstance(value, Mapping):
-        raise ValueError("SKILL_REFERENCE_INVALID")
+        raise SkillReferenceError("SKILL_REFERENCE_INVALID")
     stable_id = value.get("stable_id")
     digest = value.get("content_sha256")
     if not isinstance(stable_id, str) or not stable_id.strip() or not _is_sha256(digest):
-        raise ValueError("SKILL_REFERENCE_INVALID")
+        raise SkillReferenceError("SKILL_REFERENCE_INVALID")
     stable_id = stable_id.strip()
     kind = value.get("kind", "skill")
     if kind == "skill" and not stable_id.startswith("capability:"):
@@ -25,7 +36,7 @@ def normalize_skill_reference(value: object) -> dict[str, str]:
     activation_id = value.get("activation_id")
     if (kind != "capability_package" or not isinstance(package_id, str) or not package_id
             or stable_id != f"capability:{package_id}" or not _is_sha256(activation_id)):
-        raise ValueError("SKILL_PACKAGE_REFERENCE_INVALID")
+        raise SkillReferenceError("SKILL_PACKAGE_REFERENCE_INVALID")
     return {
         "kind": "capability_package", "stable_id": stable_id, "name": package_id,
         "source": "capability_package", "content_sha256": digest,
@@ -59,8 +70,8 @@ def task_skill_references(task: object) -> list[dict[str, object]]:
             if is_package:
                 try:
                     ref = normalize_skill_reference(row)
-                except ValueError as exc:
-                    raise SkillSnapshotError(str(exc)) from exc
+                except SkillReferenceError as exc:
+                    raise SkillSnapshotError(exc.error_code) from exc
                 old = packages.get(ref["stable_id"])
                 if old is not None and old != ref:
                     raise SkillSnapshotError("SKILL_PACKAGE_REFERENCE_CONFLICT")
@@ -98,8 +109,8 @@ def scope_main_task_references(agent: object, snapshot: SkillSnapshot, attrs: ob
     for value in link.skill_snapshot_refs:
         try:
             ref = normalize_skill_reference(value)
-        except ValueError as exc:
-            raise SkillSnapshotError(str(exc)) from exc
+        except SkillReferenceError as exc:
+            raise SkillSnapshotError(exc.error_code) from exc
         stable_id = ref["stable_id"]
         if ref.get("kind") != "capability_package":
             snapshot.restricted([stable_id], expected_refs=[ref])
@@ -126,8 +137,8 @@ def pin_package_reference(
         execution_authority_check()
     try:
         reference = normalize_skill_reference(value)
-    except ValueError as exc:
-        raise SkillSnapshotError(str(exc)) from exc
+    except SkillReferenceError as exc:
+        raise SkillSnapshotError(exc.error_code) from exc
     if reference.get("kind") != "capability_package":
         raise SkillSnapshotError("SKILL_PACKAGE_REFERENCE_REQUIRED")
     run_id = current_subagent_run_id(agent)

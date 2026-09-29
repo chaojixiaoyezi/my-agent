@@ -101,10 +101,11 @@ def test_package_scope_uses_composite_member_identity_and_exact_task_refs(tmp_pa
             snapshot.restricted([first.stable_id], expected_refs=refs)
     with pytest.raises(SkillSnapshotError):
         snapshot.restricted([first.stable_id], expected_sha256={first.stable_id: "0" * 64})
-    with pytest.raises(SkillSnapshotError, match="CONFLICT"):
+    with pytest.raises(SkillSnapshotError) as conflict:
         snapshot.restricted([first.stable_id], expected_refs=[
             {**first.to_ref(), "activation_id": "0" * 64}, first.to_ref(),
         ])
+    assert conflict.value.error_code == "SKILL_PACKAGE_REFERENCE_CONFLICT"
 
 
 def test_canonical_package_reference_cannot_be_shadowed_by_public_skill_name(tmp_path, skill_catalog_factory):
@@ -125,8 +126,9 @@ def test_fingerprint_tracks_reinstall_and_provider_failure_preserves_ordinary_sk
     packages[0] = replace(packages[0], activation_id="f" * 64)
     second = catalog.service.snapshot_for()
     assert second is not first and second.fingerprint != first.fingerprint
-    with pytest.raises(SkillSnapshotError, match="SKILL_SNAPSHOT_STALE"):
+    with pytest.raises(SkillSnapshotError) as stale:
         second.restricted([first.packages[0].stable_id], expected_refs=[first.packages[0].to_ref()])
+    assert stale.value.error_code == "SKILL_SNAPSHOT_STALE"
 
     def broken():
         raise ValueError("unreadable installation table")
@@ -306,5 +308,5 @@ def test_skill_search_keeps_snapshot_code_and_reports_structured_revocation_reas
     for outcome, reason in ((during, "activation_changed_during_read"), (before, "activation_unavailable")):
         payload = json.loads(outcome.output)
         assert not outcome.ok and outcome.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
-        assert payload["error"].startswith("CAPABILITY_RESOURCE_UNAVAILABLE package=")
-        assert payload["details"] == {"reason": reason} and "body" not in payload
+        assert payload["details"] == {"error_code": "CAPABILITY_RESOURCE_UNAVAILABLE", "reason": reason}
+        assert "body" not in payload
