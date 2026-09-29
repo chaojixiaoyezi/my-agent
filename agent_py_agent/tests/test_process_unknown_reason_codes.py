@@ -69,6 +69,10 @@ def test_process_session_failures_report_their_cause(monkeypatch, error, reporte
     assert (outcome.ok, outcome.error_code, outcome.effect_outcome) == (False, UNKNOWN, effect)
     assert outcome.reported_error_code == reported
     assert outcome.result_envelope["load_error"] == error.report
+    # 清理结果未定和权威读不出给模型的说法不同（ae 复审建议 3）。
+    cleanup = reported == "PROCESS_SESSION_CLEANUP_UNCONFIRMED"
+    assert ("停止或清理没有完成确认" in outcome.output) is cleanup
+    assert ("权威暂不可读取" in outcome.output) is not cleanup
 
 
 def test_unconfirmed_stop_reports_its_cause_and_keeps_the_receipt(monkeypatch):

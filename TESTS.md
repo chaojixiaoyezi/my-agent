@@ -4,6 +4,8 @@
 
 - **建议 2**：`terminal_session` 关闭未确认时，终止回执结构化放进 `result_envelope.process.termination`（与后台进程停止未确认同一形状）；
   `test_unconfirmed_terminal_close_reports_its_cause` 断言 session_id、method、confirmed 与 unresolved_pids。
+- **建议 3**：`process_session` 清理结果未定（`PROCESS_SESSION_CLEANUP_UNCONFIRMED`）改用专门说法（停止或清理没有完成确认、已发信号不撤回），
+  不再与“权威读不出”共用一句；`test_process_session_failures_report_their_cause` 两例分别断言各自的说法。
 
 ## 向量缓存第五轮：「跳过写」真的实现 + 回收错误可见（2026-09-29，分支 `my-agent/self-dev-2-vcache`，基于 `bac2f176d`）
 

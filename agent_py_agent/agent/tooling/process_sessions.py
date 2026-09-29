@@ -36,6 +36,10 @@ _MAX_WAIT_SECONDS = 600.0
 # 只读动作：无副作用，因此读不出权威时 effect 是已知的「没开始」而不是 unknown。
 # 新增只读动作时必须一起加进来，否则会退回 unknown 并误触发主代理的「结果未知就收口」。
 _READ_ONLY_ACTIONS = frozenset({"list", "status", "wait", "network_status"})
+# 停止或清理过程中持久记录没写完、结果未定时给模型的说法；和“权威读不出”分开，已发出的信号不会撤回。
+_CLEANUP_UNCONFIRMED_TEXT = (
+    "后台进程的停止或清理没有完成确认（持久记录没写完），已发出的信号不会撤回；请用原句柄查看进程状态后再决定是否再次停止。"
+)
 
 
 # LLM: process_session 是 run_command(run_in_background=true) 的唯一续接入口；
@@ -174,7 +178,8 @@ class ProcessSessionTool(BaseTool):
             # 只读动作永远 not_started。
             # stop 只有「读记录阶段就失败」才是 not_started；清理故障说明已提交过停止意图、可能已发信号。
             not_started = read_only or (action == "stop" and not cleanup_unresolved)
-            return ToolHandlerOutcome(self.model_spec.name, False, "后台进程权威暂不可读取，请保留原句柄核对。",
+            return ToolHandlerOutcome(self.model_spec.name, False, _CLEANUP_UNCONFIRMED_TEXT if cleanup_unresolved
+                                      else "后台进程权威暂不可读取，请保留原句柄核对。",
                                       error_code="TOOL_OPERATION_OUTCOME_UNKNOWN",
                                       effect_outcome="not_started" if not_started else "unknown",
                                       result_envelope={"load_error": exc.report}, reported_error_code=reported)
