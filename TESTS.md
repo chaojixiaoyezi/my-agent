@@ -62,6 +62,10 @@
 - **回归**：本文件、`test_steer_delivery_recovery`、`test_tool_model_generation`、`test_slow_model_liveness`、`test_runtime_guidance`、
   `test_model_call_ledger(_partitions)`、`test_subagent_first_request_selection`、`test_llm_hot_path_metrics`、`test_concurrency_metrics`、
   `test_model_profiles`、`test_architecture_guardrails` 共 285 passed、4 xfailed；新文件满载 6 进程 × 20 次全过。
+- **错误码登记（跟进提交）**：`MODEL_CALL_ABANDONED_BEFORE_SEND` 此前只在 `ModelCallAbandonedError` 上声明、未进 `ERROR_CONTRACTS`，全仓守卫 `test_recovery_code_policy::test_all_used_error_codes_are_registered` 在 step16c 全量里拦下（单独跑 0/3），两个提交被撤出紧急批次。
+  现按真实语义登记：category=model、retryable=True、recommended_action=continue，提示写明请求根本没发出、墙钟重试由放弃方自动做、
+  用户停止按停止处理。教训：定向门禁固定带七个全仓扫描守卫（architecture_guardrails、recovery_code_policy、constant_names_unique、
+  config_field_readers、recovery_actions、main_agent_has_no_case_runtime、subagent_config_inheritance）。
 - **门禁**：ruff、doc sync、strict code-size（identity 对 main 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。
 
 ## 会话互通真实链路测试：补 list_owner_sessions 用例（2026-09-29，分支 `claude/ae-session-real-chain-test`，基于 `6c2fad4da`）

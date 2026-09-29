@@ -2031,6 +2031,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="模型接口超时来自 typed provider error；退避后继续当前未完成部分，不要把它当成任务成功或业务失败。",
     ),
+    "MODEL_CALL_ABANDONED_BEFORE_SEND": ErrorContract(
+        code="MODEL_CALL_ABANDONED_BEFORE_SEND",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.CONTINUE.value,
+        recovery_hint=(
+            "这次物理模型调用在发出前已被守卫放弃（墙钟超时或用户停止），请求根本没有发出，"
+            "不是供应商失败也不是任务失败；墙钟超时的重试由放弃方自动进行，用户停止则按停止处理，不要据此报阻塞或放弃任务。"
+        ),
+    ),
     "UNSUPPORTED_OPERATION": ErrorContract(
         code="UNSUPPORTED_OPERATION",
         category="tool",
