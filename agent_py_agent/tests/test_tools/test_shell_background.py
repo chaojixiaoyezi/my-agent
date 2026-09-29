@@ -87,13 +87,26 @@ def test_background_start_returns_session_handle_and_output_file(tmp_path):
 
 
 def test_background_does_not_block(tmp_path):
-    # 后台跑 1s 真实任务(非纯 sleep,避免被 wait 引导拦),execute 必须立即返回
-    start = time.monotonic()
+    """后台模式的 execute 在子进程还在跑的时候就返回。
+
+    判定只看结构化事实：回执 status=started、没有 exit_code，且返回那一刻登记表里的会话仍是 running；
+    不用墙钟——满载下启动观察（宿主启动 + 0.5 秒 settle）本身就可能超过 1 秒，原来的"耗时 < 1.2 秒"会误报。
+    子进程跑 15 秒（非纯 sleep，避免被 wait 引导拦），用例结束时经登记表杀掉。
+    """
+    process_registry.clear()
     res = ShellTool(tmp_path).execute(
-        {"command": 'python3 -c "import time; time.sleep(1); print(1)"', "run_in_background": True}
+        {"command": 'python3 -c "import time; time.sleep(15); print(1)"', "run_in_background": True}
     )
-    elapsed = time.monotonic() - start
-    assert res.ok and elapsed < 1.2, f"后台模式不得长时间阻塞,实际耗时 {elapsed:.2f}s"
+    assert res.ok, res.output
+    payload = json.loads(res.output)
+    session_id = payload["session_id"]
+    try:
+        assert payload["status"] == "started" and "exit_code" not in payload
+        status = process_registry.status(session_id)
+        assert status is not None and status["status"] == "running"  # 返回时子进程仍在跑：没有等它结束
+    finally:
+        process_registry.kill(session_id)
+        process_registry.clear()
 
 
 def test_background_immediate_success_returns_terminal_result(tmp_path):

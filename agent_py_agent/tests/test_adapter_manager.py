@@ -631,6 +631,26 @@ class TestChannelManagerRouteMessage:
         assert msg.content == "纯文本"
 
 
+# 函数用途: 生成"迟到答案"的两个钩子：轮询超过 65 次且主线程放行（answer_allowed）后才给答案，送达时置位 delivered；
+#   10 秒安全网只针对"route 阻塞等待送达"这类回归，让用例有界失败而不是挂起。返回 (late_poll, finalize, 计数字典)。
+def _late_answer_hooks(delivered: threading.Event, answer_allowed: threading.Event):
+    polls = {"count": 0, "first_at": 0.0}
+
+    def late_poll(_pending: PendingGatewayReply, interval: float) -> str | None:
+        assert interval == 0.0
+        polls["count"] += 1
+        polls["first_at"] = polls["first_at"] or time.monotonic()
+        allowed = answer_allowed.is_set() or time.monotonic() - polls["first_at"] > 10.0
+        return "超过旧等待窗后的真实答案" if polls["count"] > 65 and allowed else None
+
+    def finalize(_user_id: str, _handle: str, outgoing: OutgoingMessage) -> bool:
+        assert outgoing.content == "超过旧等待窗后的真实答案"
+        delivered.set()
+        return True
+
+    return late_poll, finalize, polls
+
+
 class TestChannelManagerDurableDelivery:
     """通道回调只提交；长结果由可恢复 worker 最终且只回送一次。"""
 
@@ -653,20 +673,8 @@ class TestChannelManagerDurableDelivery:
         dummy = DummyAdapter()
         dummy.adapter_name = "feishu"
         manager.register_adapter(dummy)
-        delivered = threading.Event()
-        poll_count = 0
-
-        def late_poll(_pending: PendingGatewayReply, interval: float) -> str | None:
-            nonlocal poll_count
-            assert interval == 0.0
-            poll_count += 1
-            return "超过旧等待窗后的真实答案" if poll_count > 65 else None
-
-        def finalize(_user_id: str, _handle: str, outgoing: OutgoingMessage) -> bool:
-            assert outgoing.content == "超过旧等待窗后的真实答案"
-            delivered.set()
-            return True
-
+        delivered, answer_allowed = threading.Event(), threading.Event()
+        late_poll, finalize, polls = _late_answer_hooks(delivered, answer_allowed)
         with patch.object(
             manager,
             "_submit_gateway_payload",
@@ -677,18 +685,21 @@ class TestChannelManagerDurableDelivery:
              patch.object(dummy, "finalize_response", side_effect=finalize) as finalizer:
             manager.start_all()
             try:
-                started = time.monotonic()
                 assert manager.route_message(self._message()) is True
-                assert time.monotonic() - started < 0.1
+                # route 只登记入口并唤醒 worker：返回时答案还被扣着，不可能已送达。
+                # 原来的"耗时 < 0.1 秒"是墙钟代理，满载下入口落盘（含 fsync）就能超过它。
+                assert not delivered.is_set() and finalizer.call_count == 0
+                answer_allowed.set()
                 # 每次轮询都要持久领取、释放（含 fsync），慢 runner 上 65 次轮询可超过 2 秒；送达即返回。
                 assert delivered.wait(30.0)
                 # 旧实现约 60 次轮询后发一条假超时并永远丢掉真结果；现在没有这个终止窗。
-                assert poll_count > 60
+                assert polls["count"] > 60
                 assert finalizer.call_count == 1
                 time.sleep(0.05)
                 assert finalizer.call_count == 1
             finally:
                 # 失败时也要趁补丁还在就停线程；否则泄漏的投递线程会轮询真实 8420 端口并写盘，污染后续用例。
+                answer_allowed.set()
                 manager.stop_all()
 
     def test_reply_poll_uses_inbound_owner_identity_and_only_returns_public_error(self) -> None:

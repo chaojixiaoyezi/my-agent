@@ -38,6 +38,22 @@
   原来用 `match=` 或消息前缀断言码的 10 处测试改读 `error_code`，失败回执的整包断言补上 `details.error_code`。
 - **定向回归**：涉及快照、skill_search、任务引用、包读取的 33 个测试文件加护栏：963 passed。
 
+## 两条负载敏感用例改稳：后台命令不阻塞、通道路由立即返回（2026-09-29，分支 `claude/38-deflake-shell-adapter`，基于 `f7a4cc909`，只改测试）
+
+- **来源**：集成者报告 step15z 的 12 分片里 `test_tools/test_shell_background.py::test_background_does_not_block` 与
+  `test_adapter_manager.py::TestChannelManagerDurableDelivery::test_route_returns_immediately_and_worker_keeps_polling_past_sixty_misses`
+  各偶发 1 次，单独重跑 3/3。
+- **满载复现**（8 个 CPU 忙循环 + 6 个 pytest 进程各循环 12 次）：后台用例 40/47 失败，全部是 `耗时 < 1.2 秒` 的墙钟断言
+  （实测 1.21–2.25 秒：宿主启动加 0.5 秒 settle 的启动观察本身就超过它）；路由用例本轮 0/72 未复现，集成者记录的失败是
+  `monotonic 差 < 0.1` 的墙钟断言（入口落盘含 fsync）。
+- **后台用例改法**：子进程改为 15 秒任务，判定只看结构化事实——回执 `status=started`、无 `exit_code`、返回那一刻登记表会话
+  `running`；用例结束经登记表 kill。若 execute 等子进程退出，回执会是 exited（负向验证抓出）。
+- **路由用例改法**：答案由主线程放行（Event）：`route_message` 返回后先断言尚未送达、finalize 未调用，再放出答案等待送达；
+  轮询超过 65 次 + 放行才给答案，10 秒安全网只让"route 阻塞"这类回归有界失败。`poll_count > 60`、只送达一次等断言不变。
+- **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希，2/2 被抓出）：后台模式等子进程退出后才返回；route 阻塞 12 秒再返回。
+- **修复后满载**：两条各 6 进程 × 20 次并行（8 个忙循环）全部通过；两个文件与 `test_architecture_guardrails` 单跑通过。
+- **门禁**：ruff、doc sync、strict code-size（identity 对 main 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。
+
 ## 两条负载敏感用例改稳：交互式停止接纳、插话墙钟重试（2026-09-29，分支 `claude/38-deflake-stop-steer`，基于 `f7a4cc909`，只改测试）
 
 - **来源**：集成者报告 step15y 在 Mac 12 分片时 `test_gateway_agent_control_service.py::test_interactive_stop_freezes_before_ack_and_does_not_wait_for_cleanup`
