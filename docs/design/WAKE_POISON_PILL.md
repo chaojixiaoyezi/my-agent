@@ -1,7 +1,9 @@
 # 唤醒认领的毒丸处理
 
-状态：**方案待审，未落地**（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`）。
-实现要等 my-agent-3 这轮取消修复合入 main 之后再做，因为接线会改 `background_claim.py` 和 runtime 的后台认领。
+状态：**方案已审（2026-09-28，3a），分步实现中**（分支 `claude/75-wake-poison-design`）。
+第 1 步（纯函数模块）、第 2 步（尝试账、结案、重放）和 `SkillSnapshotError` 的结构化 `error_code` 先做；
+第 3 步起（接线、运维面、真实链路注入）要等 my-agent-3 这轮取消修复合入 main，因为接线会改 `background_claim.py`
+和 runtime 的后台认领。第 11 节记录了 3a 对待定点的裁定。
 
 ## 1. 背景
 
@@ -42,7 +44,7 @@
 | 执行中抛异常，其余 | 异常类型 / `error_code` 属性 | 计数 | 有 `error_code` 用 `error:<码>`，否则 `error:<category>:<异常类名>`（category 取自 `runtime_error_report`） |
 | 执行完，报告为 None | `run_once` 返回 None | 计数 | `run:no_report` |
 | 执行完，`wake_handled=False` 且没有冻结交付（下次会重跑业务） | 报告 + `cached_owner_delivery` | 计数 | `run:delivery_not_committed` |
-| 执行完，`wake_handled=False` 但有冻结交付（下次只重投，不调模型） | 同上 | 不计数（交付层自己的重试） | — |
+| 执行完，`wake_handled=False` 但有冻结交付（下次只重投，不调模型） | 同上 | 不计入失败次数，单独按重投规则计（见第 5 节） | 结案时为 `delivery:channel_unavailable` |
 | 上一次尝试时进程中途死亡，没有写下结果 | 尝试账的 in_flight 标记 + 进程身份已死 | 计数 | `attempt:abandoned` |
 | 成功确认（`mark_handled`） | — | 清空尝试账 | — |
 
@@ -52,7 +54,7 @@
 - 计数结果换了 reason_code，就从 1 重新计。
 - 批次执行时，一次尝试对批内每个成员各记一次。
 
-**总上限（建议保留，可删）**：同一唤醒累计计数达到 M 次也结案，不要求同因。reason_code 取最后一次，
+**总上限（3a 裁定保留）**：同一唤醒累计计数达到 M 次也结案，不要求同因。reason_code 取最后一次，
 并标 `mixed_causes=true`。这是为了防止两个原因交替出现，逃过"连续同因"的判定。
 
 预期等待类是已知码的优化清单。未知 admission 默认计数，符合"开放世界不封闭枚举"：新码不需要登记就会被兜住，
@@ -85,6 +87,15 @@
 第 k 次计数失败后，下次最早尝试 = 失败时刻 + min(30·2^(k−1), 300) 秒。也就是 30、60、120、240 秒后
 各重试一次，第 5 次同因失败即结案，从首次失败到结案约 7.5 分钟。
 
+**只重投路径**（有冻结交付、不调模型）单独计：
+
+- `WAKE_REDELIVERY_BACKOFF_BASE_SECONDS = 30.0`，`WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0`：
+  第 n 次重投失败后等 min(30·2^(n−1), 900) 秒，封顶 15 分钟；
+- `WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0`：从第一次重投失败起超过 24 小时，按
+  `delivery:channel_unavailable` 结案，走同样的结案流程。
+- 理由：重投便宜，但渠道长期不可用时无限重投同样不行；15 分钟封顶让恢复后最多再等 15 分钟，
+  24 小时足够覆盖一次渠道长时间故障或人工处理。
+
 取值理由：
 
 - 比进度策略的 3 次宽：唤醒路径并发多（车道切换、来源刷新），要给类型没覆盖到的短暂竞态留余量；
@@ -97,7 +108,8 @@
 唤醒信封的内容是冻结的：`_stable_signal` 只放过 status、handled_at 和 owner_delivery，发布层只接受
 pending 和 handled 两种状态。所以尝试账不能写进信封。
 
-**尝试账**：`wake_queue/attempts/<wake_signal_id>.json`，是唯一权威。
+**尝试账**：`wake_queue/attempts/<wake_signal_id>.json`，是唯一权威。它挂在 WakeStore 的新增子对象上，
+不改 `mark_handled` 的签名和行为（my-agent-3 重做第 8 片时可能会改到它附近）。
 
 - 字段：reason_code、same_cause_count、total_count、first_failed_at、last_failed_at、next_attempt_at、
   in_flight（claim_id、owner_process、started_at）、last_error（异常类型、category、截断的诊断消息，只用于诊断）。
@@ -105,8 +117,9 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 **结案**为新终态 `failed_permanently`，顺序比照 `mark_handled`：
 
-1. 先写 `wake_queue/quarantine/<id>.json`：原信封内容不变，status 改为 failed_permanently，附上结案判定
-   （reason_code、次数、首末失败时间、last_error）；
+1. 先写 `wake_queue/quarantine/<id>.json`：原信封内容不变，status 改为 failed_permanently，结案判定
+   （reason_code、次数、首末失败时间、last_error）放在顶层的 `quarantine` 键里。`_stable_signal` 只比较
+   WakeSignal 的字段，顶层附加键不参与对账，所以发布层的冻结不变量不受影响；
 2. 再删 pending 文件；
 3. 最后把关联的 observation 标为已处理。这一步必须做：唤醒一离开 pending，
    `_observation_waits_for_linked_wake` 就会让 observation 车道接手。不结掉 observation，同一件事会从另一条路再跑一遍。
@@ -120,7 +133,8 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 - session_task 唤醒：会话任务转 `failed`，原因码 `SESSION_TASK_WAKE_QUARANTINED`，并沿 `report_task_result`
   回报发送方。否则发送方会一直卡在 accepted，`7b83c8730` 里的 T1 就是这样；
-- 其它 reason 默认不动领域状态。
+- session_message 唤醒：对应的一次性回执转成结构化失败状态（`undeliverable` 加原因码），发送方的回执不能永远停在 pending；
+- 其它 reason 不改领域状态，只发事件和宿主提示。
 
 **调度侧**：`_skip_pending_wake_signal` 和 `ready_thread_ids` 都要尊重持久的 `next_attempt_at`，
 与内存里的 `_wake_retry_after` 取较晚的一个。
@@ -188,12 +202,11 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
    正向对照：供应瞬时失败连续 20 次不结案；失败 4 次后成功则清账。
    变异点：不计数清单、同因比较、退避写盘、observation 结案、发布层第三位置。
 
-## 11. 待定点
+## 11. 待定点的裁定（2026-09-28，3a）
 
-1. 总上限 M=12（不同因也算）要不要保留？
-2. 结案时的领域收尾是只做 session_task，还是覆盖更多 reason？本方案只做 session_task，其它 reason
-   只结唤醒并发宿主提示。
-3. `wake_handled=False` 但有冻结交付的"只重投"路径不计数。渠道长时间不可用时，它会每 30 秒重投一次
-   （不调模型）。要不要给它单独设上限？
-4. `SkillSnapshotError` 和 `store_tasks` 里靠消息携带的码（如 `SKILL_TASK_BINDING_INVALID`）建议补成结构化的
-   `error_code` 属性，这样 reason_code 能精确到具体的码，而不只是 `programmer_bug:SkillSnapshotError`。可以单独做一片。
+1. 总上限 M=12（不同因也算）：**保留**。
+2. 领域收尾：**覆盖 session_task 和 session_message**（见第 6 节），其它 reason 只发事件和宿主提示。
+3. 只重投路径：**单独设上限**，指数退避封顶 15 分钟，首次重投失败起超过 24 小时按
+   `delivery:channel_unavailable` 结案（见第 5 节）。
+4. `SkillSnapshotError` 整族的码**补成结构化 `error_code` 属性**，现有调用方和测试改读该属性；单独一片，
+   技能快照模块不在 my-agent-3 的范围内，可以先做。

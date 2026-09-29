@@ -1,6 +1,6 @@
 # 设计台账
 
-## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案待审，未落地）
+## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案已审，分步实现中）
 
 - **背景**：`204f4ddf9` 和 `7b83c8730` 都让同一条唤醒约每 30 秒被领取一次、失败或取消后永远重试。
   唤醒只有 pending/handled 两种状态，所有重试节流都在进程内，重启即清零，session_task 等 reason 没有任何上限。
@@ -11,7 +11,9 @@
   - 结案时同步结掉关联 observation，发布层同键不复活，会话任务转 failed 并回报发送方；
   - 运维可见：结构化日志、宿主提示、`/wakes` 列表与人工重放。
 - 与回合内兜底（待处理输入作废 8 次、同一失败 15 次熔断）分层：那两条管一个回合内的调用次数，本方案管同一条唤醒被领取几次。
-- 实现等 my-agent-3 的取消修复合入后再做。详见 [WAKE_POISON_PILL.md](docs/design/WAKE_POISON_PILL.md)。
+- 3a 裁定：保留总上限 12；领域收尾覆盖 session_task 与 session_message；只重投路径封顶 15 分钟、满 24 小时结案；
+  `SkillSnapshotError` 整族补结构化 `error_code`。第 1、2 步先做，接线等 my-agent-3 的取消修复合入。
+  详见 [WAKE_POISON_PILL.md](docs/design/WAKE_POISON_PILL.md)。
 
 ## 前台命令已退出、只是清理未确认时如实返回执行结果（2026-09-29，`claude/75-scheduler-waiting-deadlock` 的 `84e8db619` + `067d2dd3e`，单独集成）
 
