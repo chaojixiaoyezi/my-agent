@@ -12,6 +12,10 @@
 - **建议 5**：错误合同注释写明，这组码与 `BACKGROUND_*_UNCONFIRMED` 说的是进程“退出/清理”这个效果有没有确认，和会话任务取消里的
   `SESSION_TASK_STOP_UNCONFIRMED`（停止请求有没有送达确认）不是一回事；只改注释。
 - 以上三条的新断言在 main 的代码上全部失败；变异 6 个全部被抓住；31 个相关测试文件 524 项通过。
+- **9a 一行建议**：`_kill_legacy` 发信号之后的捕获范围放宽成与托管路径 `stop_process_session` 一致的
+  `(OSError, RuntimeError, TypeError, ValueError)`，旧格式写盘失败不再逃出工具变成 TOOL_ERROR；
+  `test_process_read_only_not_started.py` 新增两例（写盘抛 OSError / ValueError）：清理未定、effect 为 unknown、报 `PROCESS_SESSION_CLEANUP_UNCONFIRMED`。
+  改回只接 AuthorityError、或去掉 OSError / ValueError 的 3 个变异都被抓住。
 
 ## 向量缓存第五轮：「跳过写」真的实现 + 回收错误可见（2026-09-29，分支 `my-agent/self-dev-2-vcache`，基于 `bac2f176d`）
 

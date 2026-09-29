@@ -209,6 +209,50 @@ def test_legacy_stop_failure_after_signal_is_unknown(monkeypatch):
     assert len(excinfo.value.report["termination_receipts"]) == 1
 
 
+# 9a 复审：v1 记录发信号之后持久化失败（写盘直接抛 OSError / ValueError）同样是清理结果未定，不能逃出工具变成 TOOL_ERROR。
+@pytest.mark.parametrize("failure", [OSError("disk full"), ValueError("record rejected")], ids=["oserror", "valueerror"])
+def test_legacy_stop_persist_failure_after_signal_is_cleanup_unresolved(monkeypatch, failure):
+    from agent_py_agent.agent.tooling.process_registry import (
+        BackgroundProcess,
+        ProcessTerminationReceipt,
+    )
+    from agent_py_agent.agent.tooling.process_registry import (
+        process_registry as registry,
+    )
+
+    # 函数用途: 每次新建一条 v1 记录（上一次停止会把内存里的状态改成 killed）。
+    def legacy_record():
+        return BackgroundProcess(session_id="legacy-2", command="true", pid=99999997, started_at=0.0,
+                                 persisted_snapshot={"schema": LEGACY_PROCESS_SESSION_SCHEMA})
+
+    record = legacy_record()
+    signals = []
+    monkeypatch.setattr(registry, "_refresh_locked", lambda _record: None)
+    monkeypatch.setattr(
+        "agent_py_agent.agent.tooling.process_registry.terminate_process_tree",
+        lambda *a, **k: signals.append(a) or ProcessTerminationReceipt("SIGTERM", True, 0, 1, ()),
+    )
+    monkeypatch.setattr(registry, "_visible_record_locked", lambda session_id, *_args: current[session_id])
+    current = {"legacy-2": record}
+
+    # 函数用途: 模拟旧格式记录发信号后写盘失败。
+    def broken_persist(_record):
+        raise failure
+
+    monkeypatch.setattr(registry, "_persist_locked", broken_persist)
+    with pytest.raises(ProcessSessionCleanupError) as excinfo:
+        registry._kill_legacy(record, None)
+    assert len(signals) == 1 and excinfo.value.report["committed"] is True
+    assert excinfo.value.report["error_type"] == type(failure).__name__
+
+    current["legacy-2"] = fresh = legacy_record()
+    monkeypatch.setattr(registry, "kill", lambda *_args: registry._kill_legacy(fresh, None))
+    outcome = ProcessSessionTool().execute({"action": "stop", "session_id": "legacy-2", "__run_scope": {
+        "owner_id": "owner-a", "session_id": "thread-a", "run_id": "run-a", "root_task_id": "task-a"}})
+    assert (outcome.error_code, outcome.effect_outcome) == ("TOOL_OPERATION_OUTCOME_UNKNOWN", "unknown")
+    assert outcome.reported_error_code == "PROCESS_SESSION_CLEANUP_UNCONFIRMED"
+
+
 def test_stop_with_cleanup_failure_stays_unknown(monkeypatch):
     """stop 已提交停止意图、清理结果未定 → 仍未知（可能已有副作用，禁止自动重做）。
 

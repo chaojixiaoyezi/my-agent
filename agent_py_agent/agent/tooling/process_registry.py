@@ -346,7 +346,9 @@ class ProcessRegistry:
                 return {"session_id": record.session_id, "status": "already_exited" if record.status == "exited" else record.status,
                         "exit_code": record.exit_code, "message": "进程已经结束，无需终止。"}
         receipt = terminate_process_tree(record.pid, record.process, expected_birth_token=record.pid_birth_token)
-        # 信号已经发出：此后无论读记录还是持久化失败，都属于「清理结果未定」。
+        # 信号已经发出：此后无论读记录还是持久化失败，都属于「清理结果未定」。捕获范围与托管路径 stop_process_session
+        # 一致：旧格式写盘失败会直接抛 OSError / ValueError（write_json_file_atomic_unlocked、validate_process_record），
+        # 不能逃出工具变成 TOOL_ERROR；ProcessSessionAuthorityError 本身属于 RuntimeError。
         with self._lock:
             try:
                 current = self._visible_record_locked(record.session_id, access_scope, record.store_root)
@@ -355,7 +357,7 @@ class ProcessRegistry:
                 if receipt.confirmed:
                     current.status, current.finished_at, current.exit_code = "killed", time.time(), receipt.return_code
                     self._persist_locked(current)
-            except ProcessSessionAuthorityError as exc:
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 raise self._legacy_cleanup_unresolved(record, receipt, exc) from exc
             summary = current.to_summary()
             summary.update(signal=receipt.method, termination=asdict(receipt))
