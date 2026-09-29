@@ -118,9 +118,9 @@ def _run_request_dispatch(dispatcher: _RequestDispatcher, stop_event: threading.
 
 
 # LLM: tick 外层守卫：接住从 tick 逃逸的任何 Exception（段外代码抛），次数记入 loop_health，打印按 dispatcher.backoff 限流
-#   （同种错误第 1 次打、之后每 10 次打 1 次），打印本身不会再抛。返回下一拍该等多久：派发到东西 0（哪怕某段失败，
-#   请求在流动就不减速）；整拍无错空闲 → 轮询间隔并清零退避；逃逸异常或段失败且没派发 → max(轮询间隔, 退避)。
-#   每次 tick 起止都记账本，/status 与心跳据此判断派发是否卡住。
+#   （同种错误第 1 次打、之后每 10 次打 1 次），打印本身不会再抛。返回下一拍该等多久：派发到东西 0；整拍空闲且派发段没失败
+#   → 轮询间隔并清零退避；逃逸异常或派发段失败且没派发 → max(轮询间隔, 退避)。后台修复段（恢复/终态投影/输入回执调和）
+#   的失败不在这里退避，它们只推迟各自的下次到期，派发轮询保持 0.2 秒。每次 tick 起止都记账本。
 # 函数用途: 跑一次派发 tick，返回下一拍前要等的秒数。
 def _guarded_dispatch_tick(dispatcher: _RequestDispatcher) -> float:
     loop_health.mark_tick_started()
@@ -164,6 +164,13 @@ def _note_loop_tick_error(site: _LoopSite, exc: BaseException, backoff: LoopErro
     loop_health.note_loop_error(site.loop, site.context, exc)
     if backoff.record_failure(f"{site.context}:{type(exc).__name__}"):
         _print_gateway_loop_error(site.context, site.worker_id, exc)
+
+
+# 派发 tick 里四个段的落点：计数都在 loop "dispatcher" 下，打印各以自己的 worker_id 出现。
+_DISPATCH_SEGMENT_SITE = _LoopSite("dispatcher", "gateway_request_dispatch.iteration", "dispatcher")
+_RECOVERY_SITE = _LoopSite("dispatcher", "gateway_request_recovery.iteration", "recovery")
+_PROJECTION_SITE = _LoopSite("dispatcher", "gateway_terminal_projection.iteration", "terminal-projector")
+_RECONCILE_SITE = _LoopSite("dispatcher", "gateway_input_reconcile.iteration", "input-reconciler")
 
 
 # LLM: 单一 tick 的后台循环（维护、调度器到期、孤儿恢复）统一节奏：成功等 interval 并清零退避，出错记账、限流打印、
@@ -221,9 +228,13 @@ class _RequestDispatcher:
         self._recover_throttle = _RecoverThrottle(self.bootstrap_agent)
         self._next_input_reconcile_at = 0.0
         self._next_terminal_projection_at = 0.0
-        # 段内错误与逃逸异常共用一份退避/限流：段各自隔离只保证互不拖累，刷屏与节奏由它统一管。
+        # 派发段失败与逃逸异常共用一份循环退避；三个后台修复段各自一份，失败只推迟自己的下次到期，绝不拖慢派发轮询
+        #（tick 的约定：Historical projection and reconciliation scans must never sit in front of an interactive request）。
         self.backoff = LoopErrorBackoff()
         self.tick_failed = False
+        self._recovery_backoff = LoopErrorBackoff()
+        self._projection_backoff = LoopErrorBackoff()
+        self._reconcile_backoff = LoopErrorBackoff()
 
     # LLM: 安全重启排空期间（restart_service.restart_draining）不再认领新请求，只给它们记结构化等待事实，留给接班进程处理；
     # 恢复、终态投影和输入回执调和照常运行。改动须同步 test_gateway_safe_restart.py。
@@ -242,49 +253,51 @@ class _RequestDispatcher:
                 hold_reason=RESTART_DRAIN_HOLD_REASON if restart_draining() else "",
             )
         except Exception as exc:
-            self._note_segment_error("gateway_request_dispatch.iteration", "dispatcher", exc)
+            # 只有派发段自己失败才让外层守卫退避（没请求可派时）；账本记在 loop "dispatcher" 下，打印按循环退避限流。
+            self.tick_failed = True
+            _note_loop_tick_error(_DISPATCH_SEGMENT_SITE, exc, self.backoff)
         # Recovery and projections are independent durability domains. One
         # damaged receipt must not starve normal jobs or another repair domain.
         if self._recover_throttle.due():
-            try:
-                recover_gateway_processing_requests(
-                    self.paths,
-                    startup=False,
-                    max_attempts=self.bootstrap_agent.config.gateway_request_max_attempts,
-                    timeout_seconds=self.bootstrap_agent.config.gateway_processing_timeout_seconds,
-                    agent=self.bootstrap_agent,
-                )
-            except Exception as exc:
-                self._note_segment_error("gateway_request_recovery.iteration", "recovery", exc)
+            self._recover_throttle.defer(self._run_segment(_RECOVERY_SITE, self._recovery_backoff, self._recover_once))
         now = time.monotonic()
         if now >= self._next_terminal_projection_at:
-            self._next_terminal_projection_at = now + 0.75
-            try:
-                repair_gateway_terminal_projections(
-                    self.paths,
-                    agent=self.bootstrap_agent,
-                    limit=16,
-                )
-            except Exception as exc:
-                self._note_segment_error("gateway_terminal_projection.iteration", "terminal-projector", exc)
+            delay = self._run_segment(_PROJECTION_SITE, self._projection_backoff, self._project_terminals_once)
+            self._next_terminal_projection_at = now + max(0.75, delay)
         if now >= self._next_input_reconcile_at:
-            self._next_input_reconcile_at = now + 0.75
-            try:
-                reconcile_gateway_input_receipts(
-                    self.paths,
-                    self.bootstrap_agent,
-                    limit=64,
-                )
-            except Exception as exc:
-                self._note_segment_error("gateway_input_reconcile.iteration", "input-reconciler", exc)
+            delay = self._run_segment(_RECONCILE_SITE, self._reconcile_backoff, self._reconcile_inputs_once)
+            self._next_input_reconcile_at = now + max(0.75, delay)
         return dispatched
 
-    # LLM: 段内错误不逃出 tick（各段是独立的持久化域），但要进同一份账本与限流：次数记在 loop "dispatcher" 下，
-    #   打印按 backoff 限流；tick_failed 让外层守卫在本拍没派发到东西时按退避等待。
-    # 函数用途: 记录 tick 里某一段的失败并按限流打印。
-    def _note_segment_error(self, context: str, worker_id: str, exc: BaseException) -> None:
-        self.tick_failed = True
-        _note_loop_tick_error(_LoopSite("dispatcher", context, worker_id), exc, self.backoff)
+    # LLM: 后台修复段的统一跑法：成功清零该段退避并返回 0；失败记账（loop "dispatcher"）、按该段自己的退避限流打印，
+    #   返回该段应额外推迟的秒数——只推迟这一段的下次到期，不碰派发轮询，也不置 tick_failed。
+    # 函数用途: 跑一个后台修复段，返回它下次到期要额外等的秒数。
+    def _run_segment(self, site: _LoopSite, backoff: LoopErrorBackoff, operation: Callable[[], object]) -> float:
+        try:
+            operation()
+        except Exception as exc:
+            _note_loop_tick_error(site, exc, backoff)
+            return backoff.delay()
+        backoff.record_success()
+        return 0.0
+
+    # 函数用途: 恢复段的一次执行（stale lease 恢复扫描）。
+    def _recover_once(self) -> None:
+        recover_gateway_processing_requests(
+            self.paths,
+            startup=False,
+            max_attempts=self.bootstrap_agent.config.gateway_request_max_attempts,
+            timeout_seconds=self.bootstrap_agent.config.gateway_processing_timeout_seconds,
+            agent=self.bootstrap_agent,
+        )
+
+    # 函数用途: 终态投影段的一次执行。
+    def _project_terminals_once(self) -> None:
+        repair_gateway_terminal_projections(self.paths, agent=self.bootstrap_agent, limit=16)
+
+    # 函数用途: 输入回执调和段的一次执行。
+    def _reconcile_inputs_once(self) -> None:
+        reconcile_gateway_input_receipts(self.paths, self.bootstrap_agent, limit=64)
 
     def _submit(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
         self._executor.submit(self._execute, claim, user_key, conversation_key)
@@ -1760,6 +1773,12 @@ class _RecoverThrottle:
             return False
         self._next_at = now + self._interval
         return True
+
+    # LLM: 恢复段失败时由派发者调用，只把下次到期往后推（取更晚者），不缩短既有节流；0 表示不推。
+    # 函数用途: 恢复扫描失败后按退避推迟下一次扫描。
+    def defer(self, seconds: float) -> None:
+        if seconds > 0:
+            self._next_at = max(self._next_at, time.monotonic() + float(seconds))
 
 
 # LLM: 心跳文件写入循环：节奏是 lease_service.GATEWAY_HEARTBEAT_INTERVAL_SECONDS（至少 1 秒），写失败只记日志不退出；

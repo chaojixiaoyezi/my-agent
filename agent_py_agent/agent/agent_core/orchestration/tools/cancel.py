@@ -342,10 +342,8 @@ def _explicit_target_is_absent(agent: SimpleAgent, run_id: str) -> bool:
         return False
     error = item.get("error")
     if isinstance(error, dict):
-        return (
-            str(error.get("error_type") or "") == "FileNotFoundError"
-            or str(error.get("category") or "") == "io"
-        )
+        # 只认 FileNotFoundError：category == "io" 比契约宽（PermissionError、被包装的 sqlite 锁定也是 io），会把存在的 run 误判成不存在。
+        return str(error.get("error_type") or "") == "FileNotFoundError"
     # 没有结构化错误信息时保守放行：宁可让下层报具体错误，也不误判"不存在"。
     return False
 

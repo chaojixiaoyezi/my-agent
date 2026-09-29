@@ -47,16 +47,20 @@
   - 调度器到期循环 / 孤儿恢复循环 interval 0.2s 连续 11 次出错：等待 0.2/0.4/…/25.6/30/30/30，打印 2 次，各自计数，`dispatch_tick_errors` 仍为 0；
     孤儿循环结束后线程池仍回收；
   - 心跳循环连续 11 次写失败：等待全是 5.0（不退避），打印 2 次，`loop_error_counts={"heartbeat": 11}`；
-  - 派发 tick 段内错误：空闲时派发段每拍失败 → 退避序列、打印 2 次、`dispatch_tick_errors=11`、tick 起止照记；恢复段每拍失败但第一拍派发了
-    3 条请求 → 第一拍等 0、后两拍 0.4/0.8；
+  - 派发 tick 段内错误：空闲时派发段每拍失败 → 退避序列、打印 2 次、`dispatch_tick_errors=11`、tick 起止照记；恢复段每拍失败 → 派发轮询仍是
+    0.0/0.2/0.2、恢复段自己的到期按 0.2/0.4/0.8 推迟；终态投影段每次都失败（假时钟每拍 +1 秒）→ 6 拍等待全是 0.2，投影到期间隔
+    0.75/0.75/0.8/1.6/…（9a 必改 1：一张坏回执不能让新消息等 30 秒）；
   - `_wait_after_loop_error` 下限；
-  - 归类：`SchedulerDueIndexError from OSError(ENOSPC)` → io + cause_type=OSError；`from PermissionError` 也是 io（不特判 ENOSPC）；
-    `from sqlite3.OperationalError` → io；`from ValueError` 与无根因 → programmer_bug；真实场景：库文件路径是个目录，`SchedulerDueIndex()`
-    抛 `SchedulerDueIndexError`，`__cause__` 是 `sqlite3.OperationalError`，报告 io。
+  - 归因（9a 必改 2）：`SchedulerDueIndexError from OSError(ENOSPC)` → category 仍 programmer_bug，另带 cause_type=OSError、cause_category=io；
+    `from PermissionError`、`from sqlite3.OperationalError` 同样带 io 归因（不特判 ENOSPC）；`from ValueError` 与无根因没有归因字段；
+    except OSError 分支里的 KeyError、finally 里的 AttributeError（`__context__` 是 OSError）不带归因；真实场景：库文件路径是个目录，
+    `SchedulerDueIndex()` 抛出的 `__cause__` 是 `sqlite3.OperationalError`，报告与账本都带 cause_category=io；取消工具
+    `_explicit_target_is_absent`：FileNotFoundError → 不存在，被包装的 `database is locked` 与 PermissionError → 存在。
 - **改动的既有用例**：后台主循环退避序列改为 `max(1.0, 退避)`；派发用例的段内错误现在也计入 `dispatch_tick_errors`；`note_tick_error` →
-  `note_loop_error(loop, …)`。
+  `note_loop_error(loop, …)`；`test_tool_scope_resolution` 的取消判定口径未变（FileNotFoundError / 损坏账本）。
 - **负向验证**（改坏产品语义，独立子进程运行，逐字节恢复核哈希）：出错等待改 min；循环跑器不退避；记账入口每次都打；心跳绕过记账直接打；
-  段内错误不记账；空闲段失败不退避；各循环计数混在一起；不看原因链；sqlite 运行期错误不算环境类；丢 cause_type。10/10 被抓出。
+  派发段错误不记账；空闲派发段失败不退避；各循环计数混在一起；不看原因链；sqlite 运行期错误不算环境类；丢 cause_category；后台修复段失败
+  拖慢派发轮询；沿 `__context__` 归因；取消工具重新信 category==io。13/13 被抓出。
 - **门禁**：新文件 + dispatcher/adapter 韧性 + loops_resilience + readiness + runtime_error_reports + model_unconfigured + message_scan +
   two_tier + http_runtime_errors + status_tool + background_main_agent_cli + lane_retry + 九个全仓守卫；ruff、doc sync、strict code-size
   （identity 对 64f7ee64e 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。真机未复验。

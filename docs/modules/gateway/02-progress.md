@@ -451,11 +451,15 @@ ENOSPC 真机验收（releases/step16e-50651d81/enospc-acceptance/）里 schedul
 - **盘点**（见 04-structure 的表）：维护循环、调度器到期循环、孤儿恢复循环改走 `_run_loop_with_backoff`（成功等 interval 并清零退避，
   出错记账、限流打印、等 `max(interval, 退避)`——退避只能放慢，不能把 60 秒一次的维护变成 0.2 秒重试）；心跳循环记账、限流但**不退避**
   （节奏本身就是限流，退避只会把"磁盘腾出后重新被看见"推迟到 30 秒）；派发 tick 的四个段（派发/恢复/终态投影/输入回执调和）的段内错误
-  也进同一份账本与限流，空闲时按退避等待、请求在流动时不减速。请求租约心跳、supervisor 进程、后台主循环内的 owner 车道不接（各有自己的
+  也进同一份账本与限流，但只有派发段失败（没请求可派时）让循环退避；恢复/终态投影/输入回执调和三个后台修复段各自一份退避，失败只推迟
+  自己的下次到期（`max(0.75, 该段退避)`、`_RecoverThrottle.defer`），派发轮询保持 0.2 秒——9a 复审指出一张坏回执不能让新消息等 30 秒才被认领。请求租约心跳、supervisor 进程、后台主循环内的 owner 车道不接（各有自己的
   停机/冷却/一次性语义）。
 - **账本**：`loop_health.note_loop_error(loop, context, exc)` 按 loop id 计数，快照新增 `loop_error_counts`、`last_loop_errors`；
   `dispatch_tick_errors`/`last_dispatch_tick_error` 现在只投影派发循环（9a 之前指出的"后台错误混进派发计数"就此拆开）。
-- **归类**：`runtime_error_report` 对不认识的包装异常沿 `__cause__`/未抑制的 `__context__` 找环境类根因（`OSError`、
-  `sqlite3.OperationalError`），归为 `io` 并带 `cause_type`；只看类型，不看消息文本，不特判 errno。`SchedulerDueIndexError` 本来就
-  `raise ... from exc` 保住了原因链，没改 scheduler。根因是 ValueError 或没有根因仍是 programmer_bug。
+- **归因**：`runtime_error_report` 对不认识的包装异常只沿显式 `__cause__` 找环境类根因（`OSError`、`sqlite3.OperationalError`），
+  **不改 category**（仍是 programmer_bug，因为 category 参与取消工具等控制流），另加 `cause_type`/`cause_category` 两个字段，账本记录
+  （`loop_health._error_record`）同样带上；只看类型，不看消息文本，不特判 errno；不沿 `__context__`（except/finally 里顺带发生的
+  KeyError/AttributeError 会误归环境）。`SchedulerDueIndexError` 本来就 `raise ... from exc`，没改 scheduler。顺手把
+  `cancel._explicit_target_is_absent` 收紧到它注释里的契约：只认 `error_type == "FileNotFoundError"`（原来 `category == "io"` 会把
+  PermissionError、被包装的 sqlite 锁定判成"run 不存在"）。
 - 合同测试 `test_gateway_loop_backoff_coverage.py`（9 条，确定性构造，含"库文件路径是目录"的真实 sqlite 环境错误）。真机未复验。

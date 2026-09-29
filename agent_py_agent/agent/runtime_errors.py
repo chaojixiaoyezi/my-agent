@@ -172,17 +172,7 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
             ),
             context=context,
         )
-    cause = _environment_cause(exc)
-    if cause is not None:
-        # 包装异常（如 SchedulerDueIndexError）的原因链里是环境错误：按环境错误归类，外层类型名与原因类型都留在报告里。
-        report = _report(
-            exc,
-            _template("io", _local_failure_model_message(context), "local environment failure"),
-            context=context,
-        )
-        report["cause_type"] = cause.__class__.__name__
-        return report
-    return _report(
+    report = _report(
         exc,
         RuntimeErrorTemplate(
             category="programmer_bug",
@@ -192,6 +182,10 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
         ),
         context=context,
     )
+    # 包装异常（如 SchedulerDueIndexError）的显式原因链里若是环境错误，只补归因字段，不改 category：
+    # category 参与控制流（取消工具等），环境归因只给循环错误打印与账本看。
+    report.update(environment_cause_fields(exc))
+    return report
 
 
 # 环境类原因：进程外部条件导致的失败（磁盘满、权限、IO、SQLite 运行期错误如 disk full/locked/unable to open），
@@ -199,18 +193,28 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
 _ENVIRONMENT_CAUSE_TYPES: tuple[type[BaseException], ...] = (OSError, sqlite3.OperationalError)
 
 
-# LLM: 沿 __cause__（raise ... from）与未被抑制的 __context__ 往里走，找第一个环境类异常；有环 seen 防护。
-#   只在异常本身不是环境类时被调用（环境类异常在上面已直接归类），所以返回值就是"包装之下的真实原因"。
-# 函数用途: 从包装异常的原因链里找出环境类根因，没有就返回 None。
+# LLM: 只沿显式 __cause__（raise ... from）往里走，不沿 __context__：except/finally 里顺带发生的程序错误（KeyError、
+#   AttributeError）会带着前一个 OSError 的 __context__，沿它走会把程序错误误归成环境。有环 seen 防护。
+# 函数用途: 从包装异常的显式原因链里找出环境类根因，没有就返回 None。
 def _environment_cause(exc: BaseException) -> BaseException | None:
     seen: set[int] = set()
-    current: BaseException | None = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    current: BaseException | None = exc.__cause__
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, _ENVIRONMENT_CAUSE_TYPES):
             return current
-        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+        current = current.__cause__
     return None
+
+
+# LLM: 报告与账本共用的环境归因字段：cause_type 是根因类型名，cause_category 是它按 _builtin_category 的类别（OSError/
+#   sqlite3.OperationalError 都是 io）。不改外层 category；没有环境根因返回空字典，调用方 update 即可保持 schema 稳定。
+# 函数用途: 给包装异常补"根因是什么环境错误"两个字段。
+def environment_cause_fields(exc: BaseException) -> dict[str, str]:
+    cause = _environment_cause(exc)
+    if cause is None:
+        return {}
+    return {"cause_type": cause.__class__.__name__, "cause_category": _builtin_category(cause)}
 
 
 def compact_error_message(exc: BaseException, *, max_chars: int = _MAX_ERROR_TEXT) -> str:

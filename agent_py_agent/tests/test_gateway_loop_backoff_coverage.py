@@ -4,9 +4,11 @@
 盘点后发现只有派发循环和后台主循环接了 LoopErrorBackoff。本文件锁定：
 1. 维护循环、调度器到期循环、孤儿恢复循环、心跳循环持续出错时：线程不死、打印限流、次数按 loop id 进 loop_health；
    出错等待永远不比循环自己的间隔快（max(interval, 退避)），心跳循环不退避只限流；
-2. 派发 tick 的段内错误也进同一份账本与限流：空闲时退避，请求在流动时不减速；
-3. runtime_error_report 对包装异常沿 __cause__/__context__ 找环境类根因（OSError、sqlite3.OperationalError）归为 io，
-   按类型不按消息文本，报告带 cause_type；根因是 ValueError 或没有根因仍是 programmer_bug。
+2. 派发 tick 的四个段都进同一份账本与限流；只有派发段失败（没请求可派时）让循环退避，恢复/终态投影/输入回执调和
+   三个后台修复段失败只推迟各自的下次到期，派发轮询保持 0.2 秒（一张坏回执不能让新消息等 30 秒才被认领）；
+3. runtime_error_report 对包装异常只沿显式 __cause__ 找环境类根因（OSError、sqlite3.OperationalError），category 不变
+   （programmer_bug），另加 cause_type/cause_category 给循环错误打印和账本用；except/finally 里顺带发生的程序错误不沿
+   __context__ 误归；取消工具的"确实不存在"只认 FileNotFoundError，不再把 category == "io" 当不存在。
 撤修复即 FAIL，见各用例注释；全部确定性构造。
 """
 
@@ -151,14 +153,15 @@ def test_dispatcher_segment_errors_back_off_when_idle_and_count(printed, monkeyp
     assert snapshot["dispatch_tick_count"] == 11, "段内出错的 tick 照样记起止"
 
 
-def test_dispatcher_keeps_pace_while_requests_flow_despite_segment_error(printed, monkeypatch, tmp_path) -> None:
+def test_recovery_segment_failures_never_slow_dispatch_polling(printed, monkeypatch, tmp_path) -> None:
     paths = _paths(tmp_path)
     admission = rw.GatewayAdmission()
     monkeypatch.setattr(rw, "admission", admission)
     monkeypatch.setattr(gateway_loops, "admission", admission)
     claims: list[str] = []
     dispatcher = _stub_dispatcher(paths, claims, threading.Event())
-    dispatcher._recover_throttle = SimpleNamespace(due=lambda: True)  # 恢复段每拍都跑、每拍都失败
+    deferred: list[float] = []
+    dispatcher._recover_throttle = SimpleNamespace(due=lambda: True, defer=deferred.append)  # 恢复段每拍都跑、每拍都失败
     dispatcher.bootstrap_agent = SimpleNamespace(
         config=SimpleNamespace(gateway_request_max_attempts=3, gateway_processing_timeout_seconds=120.0)
     )
@@ -170,10 +173,30 @@ def test_dispatcher_keeps_pace_while_requests_flow_despite_segment_error(printed
     waits = [gateway_loops._guarded_dispatch_tick(dispatcher) for _ in range(3)]
 
     assert claims == ["req-flow-0", "req-flow-1", "req-flow-2"] and calls["n"] == 3
-    assert waits[0] == 0.0, "第一拍派发到 3 条请求：恢复段失败也不减速"
-    assert waits[1:] == [0.4, 0.8], "后两拍空闲且恢复段仍失败：按 max(轮询, 退避) 等，退避从第一拍的失败起累计"
+    assert waits == [0.0, 0.2, 0.2], "恢复段失败只推迟恢复自己：派发轮询仍是 0.2 秒；撤修复：后两拍 0.4/0.8"
+    assert deferred == [0.2, 0.4, 0.8], "恢复段自己的下次到期按该段退避推迟"
     assert loop_health.snapshot()["dispatch_tick_errors"] == 3
     assert len(printed) == 1, loop_health.snapshot()
+
+
+def test_projection_segment_failures_never_slow_dispatch_polling(printed, monkeypatch, tmp_path) -> None:
+    paths = _paths(tmp_path)
+    dispatcher = _stub_dispatcher(paths, [], threading.Event())
+    clock = {"t": 100.0}
+    monkeypatch.setattr(gateway_loops.time, "monotonic", lambda: clock["t"])
+    calls = {"n": 0}
+    monkeypatch.setattr(gateway_loops, "repair_gateway_terminal_projections", lambda *a, **k: _always_failing(calls)())
+    dispatcher._next_terminal_projection_at = 0.0
+
+    waits, due_gaps = [], []
+    for _ in range(6):
+        clock["t"] += 1.0
+        waits.append(gateway_loops._guarded_dispatch_tick(dispatcher))
+        due_gaps.append(round(dispatcher._next_terminal_projection_at - clock["t"], 6))
+
+    assert waits == [0.2] * 6, "一张坏回执让投影段每次都失败，派发轮询仍是 0.2 秒；撤修复：0.2/0.4/0.8…"
+    assert calls["n"] == 5 and due_gaps == [0.75, 0.75, 0.8, 1.6, 0.6, 3.2], "投影段只推迟自己：max(0.75, 该段退避)"
+    assert loop_health.snapshot()["dispatch_tick_errors"] == 5 and len(printed) == 1
 
 
 def test_loop_site_and_wait_after_error_floor() -> None:
@@ -199,25 +222,63 @@ def _wrapped(cause: BaseException | None) -> SchedulerDueIndexError:
             return wrapped
 
 
-def test_wrapped_environment_causes_are_classified_io_by_type() -> None:
+def test_wrapped_environment_causes_keep_category_and_add_cause_fields() -> None:
     enospc = _wrapped(OSError(errno.ENOSPC, "No space left on device"))
     report = runtime_error_report(enospc, context="gateway_scheduler_due.tick")
-    assert report["category"] == "io" and report["error_type"] == "SchedulerDueIndexError"  # 撤修复：programmer_bug
-    assert report["cause_type"] == "OSError" and report["recoverable"] is True
+    assert report["category"] == "programmer_bug" and report["error_type"] == "SchedulerDueIndexError"  # category 不变
+    assert report["cause_type"] == "OSError" and report["cause_category"] == "io"  # 撤修复：没有归因字段
 
     permission = _wrapped(PermissionError(errno.EACCES, "Permission denied"))  # 不特判 ENOSPC，任何 OSError 都算
-    assert runtime_error_report(permission, context="x")["category"] == "io"
+    assert runtime_error_report(permission, context="x")["cause_category"] == "io"
 
     disk_full = _wrapped(sqlite3.OperationalError("database or disk is full"))
     report = runtime_error_report(disk_full, context="gateway_scheduler_due.tick")
-    assert report["category"] == "io" and report["cause_type"] == "OperationalError"
+    assert report["cause_type"] == "OperationalError" and report["cause_category"] == "io"
 
     logic = _wrapped(ValueError("bad row"))
     report = runtime_error_report(logic, context="x")
-    assert report["category"] == "programmer_bug" and "cause_type" not in report
+    assert report["category"] == "programmer_bug" and "cause_type" not in report and "cause_category" not in report
 
     plain = _wrapped(None)
-    assert runtime_error_report(plain, context="x")["category"] == "programmer_bug"
+    assert "cause_type" not in runtime_error_report(plain, context="x")
+
+
+def _raised_in_except_branch() -> BaseException:
+    try:
+        try:
+            raise FileNotFoundError("ledger missing")
+        except OSError:
+            return {}["fallback"]  # except 分支里的程序错误：__context__ 是那个 OSError，__cause__ 为空
+    except KeyError as exc:
+        return exc
+
+
+def _raised_in_finally() -> BaseException:
+    try:
+        try:
+            raise FileNotFoundError("ledger missing")
+        finally:
+            None.attribute  # noqa: B018 - finally 里的程序错误，__context__ 是前面的 OSError
+    except AttributeError as exc:
+        return exc
+
+
+def test_context_only_environment_errors_are_not_attributed() -> None:
+    for exc in (_raised_in_except_branch(), _raised_in_finally()):
+        assert isinstance(exc.__context__, OSError) and exc.__cause__ is None
+        report = runtime_error_report(exc, context="x")  # 撤修复（沿 __context__）：这里会带 cause_category=io
+        assert report["category"] == "programmer_bug" and "cause_category" not in report and "cause_type" not in report
+
+
+def test_cancel_absent_target_only_trusts_file_not_found() -> None:
+    from agent_py_agent.agent.agent_core.orchestration.tools import cancel as cancel_tool
+    from agent_py_agent.tests.test_tool_scope_resolution import _cancel_agent
+
+    assert cancel_tool._explicit_target_is_absent(_cancel_agent([]), "ghost") is True  # 真的不存在：FileNotFoundError
+    locked = _wrapped(sqlite3.OperationalError("database is locked"))
+    assert cancel_tool._explicit_target_is_absent(_cancel_agent([], load_error=locked), "child-1") is False
+    denied = PermissionError(errno.EACCES, "Permission denied")  # category 是 io，但 run 存在；撤修复：判成不存在
+    assert cancel_tool._explicit_target_is_absent(_cancel_agent([], load_error=denied), "child-1") is False
 
 
 def test_real_due_index_failure_keeps_cause_chain_and_classifies_io(tmp_path) -> None:
@@ -227,4 +288,8 @@ def test_real_due_index_failure_keeps_cause_chain_and_classifies_io(tmp_path) ->
         SchedulerDueIndex(directory_as_db)  # 库文件路径是个目录：真实的 sqlite 环境错误（root 下也一样），不注入
     assert isinstance(info.value.__cause__, sqlite3.OperationalError)
     report = runtime_error_report(info.value, context="gateway_scheduler_due.initialize")
-    assert report["category"] == "io" and report["cause_type"]
+    assert report["category"] == "programmer_bug" and report["cause_category"] == "io"
+    assert report["cause_type"] == "OperationalError"
+    assert loop_health.snapshot()["loop_error_counts"] == {}
+    loop_health.note_loop_error("scheduler-due", "gateway_scheduler_due.initialize", info.value)
+    assert loop_health.snapshot()["last_loop_errors"]["scheduler-due"]["cause_category"] == "io"  # 账本也带归因

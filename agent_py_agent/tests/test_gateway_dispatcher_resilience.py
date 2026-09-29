@@ -88,6 +88,9 @@ def _stub_dispatcher(paths: GatewayPaths, claims: list[str], stop_event: threadi
     dispatcher.bootstrap_agent = SimpleNamespace(config=SimpleNamespace())
     dispatcher.backoff = LoopErrorBackoff()
     dispatcher.tick_failed = False
+    dispatcher._recovery_backoff = LoopErrorBackoff()
+    dispatcher._projection_backoff = LoopErrorBackoff()
+    dispatcher._reconcile_backoff = LoopErrorBackoff()
 
     def submit(claim, user_key, conversation_key):
         claims.append(claim.request_id)

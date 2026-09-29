@@ -25,7 +25,8 @@
   或"有 pending 而 `last_dispatch_tick_at` 陈旧"纳入就绪/告警判据，并考虑派发线程死亡时的自动重启或安全重启触发。两项都是新的控制语义，需单独设计。
 - 已落地（2026-09-29，分支 `claude/38-loop-backoff-everywhere`）：`loop_health` 改按 loop id 计数（`loop_error_counts`/`last_loop_errors`），
   `dispatch_tick_errors` 只投影派发循环；维护/调度器到期/孤儿恢复/心跳循环全部接入退避（心跳只限流不退避），出错等待不快于循环自身间隔；
-  `runtime_error_report` 沿原因链把 OSError/sqlite3.OperationalError 包装异常归为 io。仍未接：请求租约心跳、supervisor 进程（各有自己的语义）。
+  `runtime_error_report` 对包装异常只沿显式 `__cause__` 补 `cause_type`/`cause_category`（不改 category）；后台修复段失败只推迟各自到期，
+  派发轮询不动；`cancel._explicit_target_is_absent` 只认 FileNotFoundError。仍未接：请求租约心跳、supervisor 进程（各有自己的语义）。
 - 同批（9a 复审跟进）：派发循环与后台主循环共用 `LoopErrorBackoff`（连续出错 0.2s 翻倍封顶 30s、同种错误打印限流），堵住"磁盘刚腾出又被错误日志写满"这一段链。
 - 同批：飞书/QQ 适配器进程的状态写入失败不再杀进程（记账、下一轮重试、原子写），异常退出固定收尾（停适配器 → 删 pid → 状态 failed）；
   `/status` 的 `adapter_alive` 只按 `adapter.pid` 进程存活判定。未落地：supervisor 对"适配器进程死了"的自动拉起仍只看 pid+状态文件，可复用同一事实源。

@@ -11,10 +11,11 @@ import threading
 import time
 
 from ..common.log_redaction import redact_sensitive_text
+from ..runtime_errors import environment_cause_fields
 
 
 # LLM: 只记类型名、脱敏并截断后的消息、上下文和时间，不存异常对象（避免引用链把线程栈和 agent 留在内存里）；
-#   消息会进心跳文件与 /status，所以先过 redact_sensitive_text。
+#   消息会进心跳文件与 /status，所以先过 redact_sensitive_text。包装异常带显式环境根因时补 cause_type/cause_category。
 # 函数用途: 把一个异常压成可 JSON 序列化、可对外展示的小记录。
 def _error_record(context: str, exc: BaseException) -> dict:
     return {
@@ -22,6 +23,7 @@ def _error_record(context: str, exc: BaseException) -> dict:
         "type": type(exc).__name__,
         "message": redact_sensitive_text(str(exc))[:500],
         "at": time.time(),
+        **environment_cause_fields(exc),
     }
 
 

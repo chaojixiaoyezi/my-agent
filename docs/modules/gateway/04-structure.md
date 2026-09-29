@@ -2097,7 +2097,7 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 
 | 循环 | 入口 | 接入方式 |
 | --- | --- | --- |
-| 派发循环 | `_gateway_request_loop` → `_run_request_dispatch` → `_guarded_dispatch_tick` | 逃逸异常与段内错误（`_RequestDispatcher._note_segment_error`）同一份 `dispatcher.backoff`；有派发不减速，空闲且出错等 `max(0.2s, 退避)` |
+| 派发循环 | `_gateway_request_loop` → `_run_request_dispatch` → `_guarded_dispatch_tick` | 逃逸异常与派发段失败共用 `dispatcher.backoff`：有派发不减速，空闲且派发段失败等 `max(0.2s, 退避)`；恢复/终态投影/输入回执调和三段各自一份退避（`_run_segment`），失败只推迟自己的下次到期，派发轮询不动 |
 | 后台主循环 | `_run_background_main_ticks` → `_supervisor_tick_survives` | `LoopErrorBackoff`，出错等 `max(poll_interval, 退避)` |
 | owner 维护循环 | `_GatewayOwnerMaintenanceController.run` | `_run_loop_with_backoff`（interval 默认 60s） |
 | 调度器到期循环 | `_GatewaySchedulerDueController.run` | `_run_loop_with_backoff`；启动时的一次性 legacy 修复仍单独打印一次 |
@@ -2111,5 +2111,7 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - 规则：单一 tick 的后台循环一律走 `_run_loop_with_backoff(stop_event, tick, _LoopSite(...))`；出错等待 = `_wait_after_loop_error(backoff, interval)`
   = `max(interval, 退避)`，永远不比循环自己的节奏快。`_LoopSite.loop` 是 `loop_health` 的计数键，`context` 是错误报告上下文。
 - `loop_health.snapshot()` 的 `loop_error_counts`/`last_loop_errors` 按 loop id 分开；`dispatch_tick_errors` 只投影 `dispatcher`。
-- 错误归类：`runtime_errors._environment_cause` 沿原因链找 `OSError`/`sqlite3.OperationalError`，命中归 `io` 并带 `cause_type`；
-  新的包装异常必须 `raise ... from exc` 保住原因链，不要把根因塞进消息文本再靠文本判断。
+- 错误归因：`runtime_errors.environment_cause_fields` 只沿显式 `__cause__` 找 `OSError`/`sqlite3.OperationalError`，命中补
+  `cause_type`/`cause_category`，**不改 category**（category 参与控制流：`cancel._explicit_target_is_absent` 只认
+  `error_type == "FileNotFoundError"`，不要再拿 category 当存在性判据）；不沿 `__context__`。新的包装异常必须 `raise ... from exc`
+  保住原因链，不要把根因塞进消息文本再靠文本判断。
