@@ -395,3 +395,32 @@ def test_apply_refuses_everything_when_candidates_ledger_is_unreadable(tmp_path)
     assert "MEMORY_RETENTION_CANDIDATES_UNREADABLE" in {
         error.error_code for error in report.errors
     }
+
+
+# LLM: dev 2026-09-29 第 7 条（9b 探针 S1）：动作位于错误路径**之下**时也必须被剔除。之前
+#   `_path_keys` 收到的是生成器，`str(generator)` 成了 "<generator object ...>"，于是
+#   error_self 只装一个垃圾字符串，「错误是动作的祖先」这一半判断恒不命中（方向是死的）。
+#   修复前本用例必须红，修复后必须绿——它就是这个缺口的守门人。
+# 函数用途: 验证错误路径是目录时，它下面的动作同样被隔离过滤剔除。
+def test_action_under_error_directory_is_dropped():
+    inside = action("/home/tasks/2026-01-01/broken/work/blobs/tool_outputs")
+    outside = action("/home/tasks/2026-01-01/healthy")
+    result = _without_errored_subtrees(
+        plan(
+            [inside, outside],
+            [error("MEMORY_RETENTION_TASK_STATE_INVALID", "/home/tasks/2026-01-01/broken")],
+        )
+    )
+    kept = [str(item.path) for item in result.actions]
+    assert kept == ["/home/tasks/2026-01-01/healthy"], (
+        "错误是目录时，它下面的动作必须被剔除（隔离的「错误是祖先」方向）"
+    )
+
+
+# LLM: 接上条：错误路径没有定位信息（空串）时两个键集合都为空，逐条判断也不会剔除任何动作，
+#   所以 `if not error_self` 只是快速路径、不改变语义（dev 要求「顺便确认它的行为」）。
+# 函数用途: 验证无路径的错误不会误删动作。
+def test_errors_without_paths_do_not_drop_actions():
+    item = action("/home/tasks/2026-01-01/healthy")
+    original = plan([item], [error("MEMORY_RETENTION_TASK_STATE_INVALID", "")])
+    assert _without_errored_subtrees(original) is original

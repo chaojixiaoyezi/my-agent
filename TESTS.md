@@ -147,6 +147,54 @@ R-P5b / R-X1 仍然正确（它们是"已验证修好"的断言，继续通过�
 2. 顺手把 `keys()` 删掉了（替换类尾时截断），被自己的测试立刻打回并补回——
    这次是测试救了，但提醒我改大块代码后要整文件复核，不能只看工具回显的片段。
 
+## 2026-09-29 retention 隔离过滤：修复「错误是动作的祖先」方向（第 7 批）
+
+**来源**：dsh-9b 复核 `28783102c`（dev 2026-09-29 02:13 转达）。9b 探针 S1：错误路径是
+`.../e`、动作是 `.../e/work/blobs/tool_outputs`，结果动作没有被剔除；变异 MR16（整个删掉
+这一方向）在 36 个相关文件下存活，印证它是死代码。
+
+**根因**：`retention.py` 的 `_without_errored_subtrees` 里写的是
+
+```python
+error_self = _path_keys(error.path for error in plan.errors)
+```
+
+`_path_keys` 只接受**单条**路径，收到生成器后走 `str(path)`，得到
+`"<generator object ...>"`，于是 `error_self` 永远是只有这一个垃圾字符串的集合，
+`_path_and_ancestor_keys((action.path,)) & error_self` 恒为空——「错误是动作的祖先」这一半
+判断从未生效（注释写的双向语义只成立一半）。
+
+**做法**：改成逐条解析后取并集
+（`frozenset().union(*(_path_keys(error.path) for error in plan.errors))`）。判据仍是单向的
+「错误是动作的祖先」或「动作是错误的祖先」，不改成两边都取祖先集合求交——那会命中公共祖先，
+把兄弟目录误判成同一棵树（MR18）。`if not error_self` 的提前返回保留为快速路径，语义上不改变
+结果：错误路径为空串时两个键集合都为空，逐条判断本来也不会剔除任何动作。
+
+**新测试**（`test_memory_retention_isolation.py`，17 项）：
+- `test_action_under_error_directory_is_dropped`：错误是目录时，它下面的
+  `work/blobs/tool_outputs` 动作必须被剔除——**修复前红、修复后绿**，就是 S1 的形状；
+- `test_errors_without_paths_do_not_drop_actions`：错误路径为空串时不误删动作，
+  顺带确认 `if not error_self` 这个快速路径的行为。
+
+**变异结果**（`_mutate_batch7.py`，跑完自动还原并核对逐字节一致）：
+
+| 变异 | 结果 |
+|---|---|
+| M-A：`error_self` 退回「把生成器传给 `_path_keys`」的原始 bug | **杀死**（1 条红，就是守门用例） |
+| M-B（= MR16）：整个删掉「错误是动作的祖先」这一方向 | **杀死**（4 条红，含守门用例） |
+
+**验证**：定向 216 项通过（含 `test_memory_retention_isolation/v2/runs`、
+`test_home_maintenance`、`test_gateway_owner_retention`、`test_audit_*`、
+`test_packaging`、`test_decision_curator*`）；九个全仓守卫 9/9 通过；五项静态 gate 全过
+（ruff、`DOC_SYNC_PASS`、code-size `hard=0 blocked=False`、`diff --check` 干净、
+clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交。
+
+**文档同步**：`docs/modules/memory/02-progress.md`、`docs/modules/memory/04-structure.md`
+补上扫描根推导、三处 `rglob` 深度过滤、audit 类别跳过、隔离判据与性能口径。
+
+**未覆盖**：没在生产 owner home 上跑 `--apply`/`--cleanup`（会真动生产数据），只在临时 home
+上验证；隔离过滤本身是纵深防御，合法输入构造不出「坏子树里带动作」的计划。
+
 ## R4 隔离：坏的那一棵单独保护，不连累其他类别（2026-09-28，分支 `my-agent/self-dev-4`，基于 `c101d325a`）
 
 - **9b 复核第 6 批（dev 2026-09-29 转来）**：三条必须改 + 两条建议，全部落地。

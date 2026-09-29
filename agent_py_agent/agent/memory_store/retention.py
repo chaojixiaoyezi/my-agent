@@ -175,8 +175,13 @@ def _has_policy_level_error(errors: tuple[MemoryRetentionError, ...]) -> bool:
 def _without_errored_subtrees(plan: MemoryRetentionReport) -> MemoryRetentionReport:
     if not plan.errors:
         return plan
-    error_self = _path_keys(error.path for error in plan.errors)
+    # dev 2026-09-29 第 7 条：error_self 必须逐条解析后再取并集——_path_keys 只接受**单条**路径；
+    # 之前把生成器直接传进来，str(generator) 得到 "<generator object ...>"，集合里永远只有一个
+    # 垃圾字符串，于是下面「错误是动作的祖先」那一半判断恒不命中（隔离的一个方向是死的）。
+    error_self = frozenset().union(*(_path_keys(error.path) for error in plan.errors))
     error_with_ancestors = _path_and_ancestor_keys(error.path for error in plan.errors)
+    # 错误路径都没有定位信息（空串）时两个集合都为空，逐条判断本来也不会剔除任何动作，所以
+    # 这个提前返回只是快速路径、不改变语义（test_errors_without_paths_do_not_drop_actions 守着）。
     if not error_self:
         return plan
     # 单向判：错误是动作的祖先（错误的自身落在「动作+其祖先」里），或动作是错误的祖先

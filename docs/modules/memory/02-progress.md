@@ -257,3 +257,27 @@ dev 同时裁定 `criteria` **不上提**成共享引用：它是与 Jev 决策�
 `test_memory_retention_runs.py` 9 项（含"把终态任务所有文件 mtime 改成刚刚仍被回收"这条反证）。
 变异两处（扫描根退回只有 tasks、终态白名单放宽成状态非空）各杀死 4 条与 2 条。定向 23 项通过，
 五项静态 gate 全过。真机 `home-retention --apply` 未跑（会真移生产数据），只验证 plan。
+
+2026-09-29 retention 扫描根与隔离（dsh-9b 复审第二、三轮跟进，dev 派单）：根列表与各根深度改从
+`conversation/workspace_paths.py` 推导——`canonical_task_root(owner_home, path)` 是唯一权威
+（`O/runs/<date>/<key>` 与旧 `O/tasks/<date>/<key>` 深度 2，`O/audits/<audit_id>` 深度 1，由
+`validated_durable_work_path` 列出全部持久工作根，不在扫描里写死目录名或深度）。`_recovery_roots`
+据此返回三个规范根并去重；三处 `rglob`（`_iter_task_states`、`_tool_output_actions`、
+`_subagent_scratch_actions`）都先过 `canonical_task_root`，深一层或浅一层都不算任务根，运行中任务
+output 里嵌套的"像任务"目录不会被整棵移走；`tool_output` 侧仍只扫旧 `O/tasks`（未扩范围）；
+`audit` 类别（`O/audit/*.jsonl`）一律跳过、原地保留——类别名与实际数据不符，等存储登记表定了语义再处理。
+`apply` 的整份拒绝规则不变（`plan.errors` 或 `legal_hold` 非空即 `applied=False`、一个动作都不执行），
+单棵子树的错误只按"错误路径与动作路径互为祖先/后代"过滤那一棵，被保护的事实随回执如实返回。
+隔离过滤是**纵深防御**：三类扫描在读不懂父任务 `state.json` 时都整棵跳过，合法输入构造不出"坏子树里
+带动作"的计划，所以它只比较 `action.path`、不比较 `related_paths`（后者不含任务根）。
+性能上每条路径只解析一次、错误路径及其全部祖先进集合、动作只做两次 O(深度) 查表（生产 8161 动作 ×
+355 错误从数百秒回到亚秒级；隔离本身只占 0.059 秒，整份 `plan()` 的百秒级开销在扫盘 I/O）。
+双语义默认只用本平台 `Path` 语义，Windows 语义由调用方显式注入 `PureWindowsPath`，避免"文件名里合法的
+反斜杠被当分隔符"的多判。
+
+2026-09-29 隔离过滤"错误是动作的祖先"方向修复（9b 探针 S1）：`error_self` 原来把**生成器**传给了只接受
+单条路径的 `_path_keys`，`str(generator)` 得到 `"<generator object ...>"`，集合里只有一个垃圾字符串，
+于是这一半判断恒不命中（方向是死的，MR16 变异在 36 个相关文件下存活）。现改成
+`frozenset().union(*(_path_keys(error.path) for error in plan.errors))`，逐条解析后取并集；`if not
+error_self` 的提前返回只是快速路径，语义上不改变结果（错误路径为空串时两个键集合都为空，逐条判断本来
+也不会剔除任何动作）。
