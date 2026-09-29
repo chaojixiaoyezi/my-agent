@@ -785,6 +785,7 @@ agent_py_agent/
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
 |   |-- test_decision_outcome_log.py    # 决策结果日志：只记结构化字段、有界、按窗口汇总，decide 的成功/超时/点位冷却落日志，审计按点位报告
 |   |-- test_decision_transport_timing.py # 假代理/假 TLS/假服务端逐段注入延迟：分段计时与超时阶段落结果日志、估算输入入 model_usage、零重试不补发
+|   |-- test_decision_stats_display.py  # 决策统计口径：TUI 已报/估算（未完成）/缺报分开、未发出单列，结果日志与审计把没发出去的失败单列
 |   |-- test_decision_reach_counts.py   # 到达计数：进程内累加、节流合并不覆盖、7 天修剪、开关与写失败、阶段原因与大白话；导出各点位测试共用的 reach_counter
 |   |-- test_capability_presentation_observation.py # 能力推荐观测进 Gateway 请求记录：一回合一条、采用/保留原因、失败码、写入上限与失败语义
 |   |-- test_decision_cooldown_backoff.py # 决策连接连续失败的冷却翻倍、并发同次故障不加级、成功/显式重试复位

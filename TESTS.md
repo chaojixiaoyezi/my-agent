@@ -117,6 +117,39 @@
   - 在工作区临时带上 `8bf9fdcff` 的修复（不提交），把插件相关 62 个测试文件、TUI 剪贴板和输入、guardrails、`constant_names_unique`、`code_size_script` 一起跑，共 68 个文件、1071 项全部通过，防线拦截 0 次（0 误报），耗时约 15 分钟；basetemp 跑完即删，测试未生成 pycache。
 - **合并顺序**：本分支必须和 `8bf9fdcff` 一起或在它之后集成，否则 web_board 那一条会按设计失败。
 
+## 决策统计口径：讲清“缺报”，没发出去的单列（2026-09-28，分支 `claude/be-jev-transport-timing`，在 `b792340e0` 之上）
+
+- **新增测试** `test_decision_stats_display.py`：
+  - TUI 三种数据来源分开：
+    - 供应商有回报：只显示已报；
+    - 只有估算：显示“估算 N token（未完成）”，也不算缺报；
+    - 两者都没有：保留“缺报”，并且整行只出现一次。
+  - 没发出去的失败单列“未发出”，不算失败。
+  - 总行“缺报”扣掉决策那部分；没有决策调用时，总行口径与原来相同。
+  - 拆分按跨事件累加后的原始次数推导。逐条推导会把迟到的尝试误判为“没发出去”；旧账整体仍算失败。
+  - 结果日志按点位汇总，12 种行：
+    - 带 transport 的行，按有没有 HTTP 尝试判定；
+    - 旧行按原因码判定（budget_exhausted、cooldown、admission_busy、backoff 等）；
+    - 成功、跳过、作废照原样计数；最近行不丢。
+  - 审计用量行：用真实账本加一条旧账事件，核对 `jev_failures`/`not_sent_calls`/`failures_send_unknown` 与估算；原始计数不变。
+- **已有测试按新口径更新**：
+  - `test_decision_usage_metrics.py`：
+    - 标签从“≈N / ≈?”改为已报、估算、缺报、未发出；
+    - 原“超时和失败都算失败并放宽约数”的用例，改成“发出去后超时算失败并显示估算，没发出去的单列”，并断言总行不再出现缺报。
+  - `test_decision_outcome_log.py`：冷却从 points 移到 not_sent。
+- **定向回归**：105 个测试文件，2628 passed：
+  - 引用 model_metrics、TUI 统计、决策审计、结果日志、audit_records 的测试；
+  - 全部 `test_decision_*`；
+  - TUI runtime、块渲染、stream_writer 相关的测试；
+  - guardrails、constant_names_unique。
+  补强断言后，另把 3 个目标文件单独跑了一遍，通过。basetemp 已删。
+- **变异验证**：scratchpad 里的 `mut_disp.py` 做了 15 个变异，按 rc==1 判定，全部被抓到。变异点：
+  - 旧账不记 unknown；拆分时忽略 unknown，或忽略 unfinished；
+  - 汇总时不累加未完成次数，或不累加决策在缺报里的份额；
+  - 成功但没报输入的不算缺报；外推改按全部调用算；隐藏“未发出”；总行重复计决策；
+  - 审计不累加旧账失败；审计行不做拆分；
+  - 结果日志忽略链路事实、忽略冷却状态、漏掉 configuration_required、漏掉 budget_exhausted。
+
 ## Jev 决策调用的链路分段计时（B 第 0 步）（2026-09-28，分支 `claude/be-jev-transport-timing`，基于 `80b4afed8`）
 
 - **新增测试** `test_decision_transport_timing.py`（22 项，含 9b 复审后补的 2 项）不访问任何真实服务，替身有三个：

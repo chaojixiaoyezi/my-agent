@@ -73,6 +73,7 @@ def _owner_host(agent: object, home: object) -> SimpleNamespace:
 
 # LLM: 设置读取失败只记结构化原因（设置忙或配置不可读），不影响用量统计。points 取 owner 决策结果日志的按点位汇总，
 #   是判断某接入点是否被调用、被冷却/期限挡住的唯一来源；用量账只按用途汇总，不能拿它推断单个点位。
+#   请求根本没发出去的失败类结果不进 points，单列在 points.not_sent；用量的 jev_failures/not_sent_calls 与 TUI 统计行同一口径。
 #   scope=current_thread 时 points 与用量、观察一样只统计可信的当前会话（不含其它会话与后台点位）。
 #   point_diagnostics 取 decision_reach_counts：每个点位是否开启、检查几次、调用几次、没调用的原因（原因码 + 大白话）与适用范围说明 note；
 #   它按 owner 统计（diagnostics_scope=owner），不随 current_thread 缩小。
@@ -178,8 +179,11 @@ class AuditRecordsTool(BaseTool):
         name=TOOL_NAME,
         description=(
             "统一审计入口：查询当前用户自己的结构化运行记录，回答'到底调没调用、成功失败几次、用了多少 token、设置是什么、为什么失败'。"
-            "topic=decision 汇总决策模型（Jev）：有效设置与各接入点模式、会话用量账本里的调用次数/成功/失败/超时/已报输入 token、"
-            "各接入点的决策结果（成功/超时/冷却跳过等次数与最近几条；status=skipped 表示已到触发点但被条件挡下，"
+            "topic=decision 汇总决策模型（Jev）：有效设置与各接入点模式、会话用量账本里的调用次数/成功/失败/超时/已报输入 token"
+            "（jev_failures 是请求发出去之后失败或超时的次数，not_sent_calls 是请求根本没发出去的次数，算 Jev 失败率只用 jev_failures；"
+            "input_tokens_estimated_unfinished 是未完成调用发送前的本地估算，不是供应商回报）、"
+            "各接入点的决策结果（成功/超时等次数与最近几条；没发出去的结果如 budget_exhausted、冷却、admission_busy 单列在 not_sent，"
+            "不计入超时率和失败率；status=skipped 表示已到触发点但被条件挡下，"
             "reason=privacy_url 指要外发的材料含带查询串的 URL），"
             "以及 point_diagnostics：每个接入点是否开启（enabled）、最近检查了几次（reached）、真正调用几次（called）、"
             "没调用的原因分布（not_called 的 label 是给用户看的大白话）。调用 0 次不代表没接线，向用户解释时请直接用这些 label"

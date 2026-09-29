@@ -1,7 +1,8 @@
 # LLM: 决策结果日志属于 conversation 决策服务。decide() 的每个返回（成功、到期、冷却跳过、配置不可用……）按接入点追加一行
 #   结构化记录，只含点位、范围、模式、状态、原因、耗时和宿主身份编号，不含状态、题目、候选或回答正文；建了调用记录的行另带
 #   transport 链路事实（各次 HTTP 尝试的分段毫秒、超时时所处阶段、发送前本地估算输入；attempts 为空即请求没发出），同样无正文。位置只认 owner 规范路径
-#   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总。
+#   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总，
+#   汇总时把请求根本没发出去的失败类结果单列（not_sent），不计入 Jev 的超时率和失败率。
 #   新增字段须同步 decision_outcome_row、decision_outcome_summary 与 test_decision_outcome_log.py。
 #   另有 status=skipped 行：可选决策点已到触发点、该点已开启，却被结构化条件挡下（材料含 URL 查询串）时记录，
 #   reason 为宿主原因码；配置 decision_skip_records_enabled 关闭时不写。“没满足触发条件”的原因归 decision_reach_counts 计数。
@@ -26,6 +27,12 @@ _T = TypeVar("_T")
 _MAX_RECORDS = 1000
 _RECENT_ROWS = 20
 _RECENT_FIELDS = ("created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms")
+# 只有失败类结果才区分“发出去了没有”；成功、关闭、跳过、作废等照原状态计数。
+_FAILURE_STATUSES = frozenset({"deadline", "error", "cooldown", "configuration_required"})
+# 没有链路事实的行（没建调用记录，或链路计时上线前的旧行）按宿主固定原因码认出“没发出去”：发送前期限用完、准入忙、
+# 在途登记已满、设置忙、输入不合规、配置不可用、连接或点位冷却。
+_UNSENT_REASONS = frozenset({"budget_exhausted", "admission_busy", "notification_capacity", "settings_busy",
+                             "invalid_input", "configuration_unavailable", "connection_backoff", "point_backoff"})
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -88,6 +95,8 @@ def material_or_skip(agent: object, stage: object, point: str, build: Callable[[
 
 
 # LLM: 只读；按时间窗口汇总每个接入点各状态的次数，并给出最近几行（无正文，建了调用记录的行附链路计时）。坏行只计数，不中断审计。
+#   请求根本没发出去的失败类结果（见 _unsent_code）不进 points，单列在 not_sent[点位][原因码]，不计入 Jev 的超时率和失败率；
+#   只改汇总口径，不改日志行本身。
 #   thread_ids 给出时只统计这些会话的行（调用方按可信范围解析，如 current_thread）；后台点位没有会话编号，随之排除。
 #   None 表示 owner 全部（含后台点位）。
 # 函数用途: 为审计工具提供"每个决策点调用了几次、分别是什么结果"。
@@ -95,17 +104,35 @@ def decision_outcome_summary(home_paths: object, *, since: float,
                              thread_ids: list[str] | None = None) -> dict[str, object]:
     path = getattr(home_paths, "owner_decision_outcomes_jsonl", None)
     if not path:
-        return {"available": False, "points": {}, "recent": [], "unreadable_rows": 0}
+        return {"available": False, "points": {}, "not_sent": {}, "recent": [], "unreadable_rows": 0}
     report = read_jsonl_objects_report(Path(path), context="decision_outcome_log.read")
     rows = [row for row in report.records if row.get("schema") == SCHEMA and _created_at(row) >= since
             and (thread_ids is None or str(row.get("thread_id") or "") in thread_ids)]
     points: dict[str, dict[str, int]] = {}
+    unsent: dict[str, dict[str, int]] = {}
     for row in rows:
-        counts = points.setdefault(str(row.get("point") or ""), {})
-        status = str(row.get("status") or "")
-        counts[status] = counts.get(status, 0) + 1
+        code = _unsent_code(row)
+        target, key = (unsent, code) if code else (points, str(row.get("status") or ""))
+        counts = target.setdefault(str(row.get("point") or ""), {})
+        counts[key] = counts.get(key, 0) + 1
     recent = [_recent_row(row) for row in rows[-_RECENT_ROWS:]]
-    return {"available": True, "points": points, "recent": recent, "unreadable_rows": len(report.load_errors)}
+    return {"available": True, "points": points, "not_sent": unsent, "recent": recent,
+            "unreadable_rows": len(report.load_errors)}
+
+
+# LLM: 只看结构化事实：失败类状态才区分；有 transport 的行按有没有 HTTP 尝试判定，没有 transport 的按宿主原因码判定，
+#   不读正文、不看耗时。返回“没发出去”的原因码（缺原因码时用状态名）；发出去了或不是失败类返回空串。
+# 函数用途: 判断一行决策结果是不是“请求根本没发出去”。
+def _unsent_code(row: dict[str, object]) -> str:
+    status, reason = str(row.get("status") or ""), str(row.get("reason") or "")
+    if status not in _FAILURE_STATUSES:
+        return ""
+    transport = row.get("transport")
+    if isinstance(transport, dict):
+        unsent = not transport.get("attempts")
+    else:
+        unsent = status == "cooldown" or reason in _UNSENT_REASONS
+    return (reason or status) if unsent else ""
 
 
 # LLM: 固定字段缺失时给 None（与原先一致）；链路计时只在该行确有 transport 对象时带出，旧行不补键。

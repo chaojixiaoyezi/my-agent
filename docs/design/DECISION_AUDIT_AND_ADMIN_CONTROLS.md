@@ -56,12 +56,34 @@
 
 效果（14 个候选、3000 字语义摘要 + 6000 字锚点段的合成输入，按真实编码与 `estimate_tokens` 估算）：约 7.5k → 2.7k token/次，减少约 63%。
 
-## 4. TUI 统计行："决策 ≈N token · 成功 X · 失败 Y"
+## 4. TUI 统计行：决策段分开标注数据来源（2026-09-28 修订）
 
-- X = 决策分区 `status_counts.finished`，Y = `failed + timed_out`；进行中的调用两边都不计。
-- N 是显示用约数：已报输入按已报调用的平均值外推到全部决策调用（超时/失败的调用没有回报用量）；一次都没报显示 `≈?`，不显示成 0。
-- 约数不写回账本、不参与任何预算或调度。没有用途分区的旧账不计入决策（原先的 `+?` 标记随之去掉）。
-- 数据：`conversation/model_metrics.py` 的 `decision_input_reported_calls/decision_success_count/decision_failure_count`（白名单字段）。
+格式：`决策 已报 ≈N token · 估算 M token（未完成）· 缺报 K · 成功 X · 失败 Y · 未发出 Z`，没有的段不显示。
+
+**Token 来源：**
+- **已报**：供应商回报的输入，按已报调用的平均值外推到全部成功调用；如果有没报输入的成功调用，数字前加 `≈`。
+  原先按全部调用外推，超时调用也被按平均值算了一遍；现在未完成的调用另有估算，不再参与外推。
+- **估算（未完成）**：发出去之后超时或失败的调用，取发送前的本地估算输入（`usage_breakdown.estimated.unfinished_*`），不是供应商回报。
+- **缺报**：只指真的一点数据都没有的调用，有两种：
+  - 成功了但一次都没报输入，也没有已报调用可以外推；
+  - 链路计时上线前的旧账失败，分不清当时有没有发出请求。
+  这类调用不显示成 0。
+
+**次数：**
+- 成功 X 取 `finished`。
+- 失败 Y 只算发出去之后失败或超时的；旧账分不清是否发出的，也算失败。
+- 未发出 Z 是一次 HTTP 尝试都没有的失败，例如准入忙、发送前期限就用完了，不计入失败。
+- 进行中的调用都不计。
+
+**总行“缺报”：** 只统计非决策调用，非决策调用的口径不变。决策调用的数据来源已在决策段说明，不重复计。
+
+**口径实现：**
+- 口径由 `conversation/model_metrics.py` 的 `unfinished_usage_facts` / `split_unsent_failures` 统一给出，`audit_records` 也用这两个函数。
+- 汇总只累加原始次数，展示时才推导。原因是迟到的尝试可能落在后一条用量事件里，逐条推导会算错。
+- 数据取自 `conversation/model_metrics.py` 的白名单字段：原有的 `decision_input_reported_calls/decision_success_count/decision_failure_count`，
+  加上 `decision_unfinished_calls/decision_estimated_tokens/decision_unknown_failures/decision_unreported_calls`。
+
+**不变的部分：** 约数不写回账本，不参与任何预算或调度；没有用途分区的旧账不计入决策。
 
 ## 5. 统一审计工具 `audit_records`
 
@@ -116,6 +138,26 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
   调用前就结束的行（关闭、冷却、设置变化等）没有这个键，旧行不补。
 - 用量行：新增 `input_tokens_estimated_unfinished`、`estimated_unfinished_calls`，来自 `usage_breakdown.estimated.unfinished_*`；
   只统计已发起 HTTP 尝试的超时/失败调用，`input_tokens_reported` 口径不变。
+
+### 没发出去与发出去后失败分开（2026-09-28）
+
+**起因：** pre_recall 和 recall 共用阶段预算，排在后面的 pre_recall 常常一开始就 `budget_exhausted`，1–4 毫秒就返回，请求根本没发出，
+却被算成 Jev 超时，拉低了成功率。
+
+**做法**（只改汇总口径，结果日志行与用量记账都不变，与 TUI 统计行同一口径）：
+- **用量行**：
+  - 新增 `jev_failures`：发出去之后失败或超时的次数，旧账分不清是否发出的也算；
+  - 新增 `not_sent_calls`：一次 HTTP 尝试都没有的次数；
+  - 新增 `failures_send_unknown`：旧账里的失败次数。
+  - 原有的 `failed/timed_out` 原始计数不变。Jev 失败率只用 `jev_failures` 算。
+- **各点位结果**：失败类状态（`deadline`、`error`、`cooldown`、`configuration_required`）里请求没发出去的，不进 `points`，
+  单列到 `not_sent[点位][原因码]`。判定分两种：
+  - 有 `transport` 的行，看有没有 HTTP 尝试；
+  - 没有 `transport` 的行（没建调用记录的，以及链路计时上线前的旧行），看宿主原因码：`budget_exhausted`、`admission_busy`、
+    `notification_capacity`、`settings_busy`、`invalid_input`、`configuration_unavailable`、`connection_backoff`、`point_backoff`，
+    或者 status 本身是 `cooldown`。
+  - 最近行照原样保留。
+- **工具说明**：`audit_records` 的说明同步写明这些字段的含义。
 
 ### 每个点位最近为什么没触发（2026-09-27）
 

@@ -10,7 +10,10 @@ from agent_py_agent.agent.agent_core.model.call_runtime import (
     record_model_call_finished,
     record_model_call_timeout,
 )
-from agent_py_agent.agent.contracts.model_call_ledger import ModelCallStartedParams
+from agent_py_agent.agent.contracts.model_call_ledger import (
+    ModelCallProviderAttemptParams,
+    ModelCallStartedParams,
+)
 from agent_py_agent.agent.conversation.model_metrics import (
     public_model_metrics,
     publish_model_metrics,
@@ -21,13 +24,16 @@ from agent_py_agent.cli.chat_parts.tui_model_metrics import render_model_metrics
 from agent_py_agent.tests.test_tui_model_metrics import fixture, settled
 
 
-# LLM: 在同一原账本写入宿主决策用途与真实字段；不构造生成正文或用估算冒充供应商用量。
+# LLM: 在同一原账本写入宿主决策用途与真实字段；不构造生成正文或用估算冒充供应商用量。attempted=True 时先记一次真实
+#   HTTP 尝试（请求已发出），用来区分“发出去后失败”和“没发出去”。
 # 函数用途: 添加一条决策完成记录，供持久增量与显示验证。
-def decision(agent, params, *, call_id="decision-1", usage=None, outcome="finished"):
+def decision(agent, params, *, call_id="decision-1", usage=None, outcome="finished", attempted=False):
     ledger = agent._model_call_ledger
     ledger.started(ModelCallStartedParams(call_id, "typesafe_decision", "systemone", 42,
         request_id=params.request_id, run_id=params.run_id,
         metadata={"purpose": "decision", "logical_call_id": call_id}))
+    if attempted:
+        ledger.provider_attempt(ModelCallProviderAttemptParams(call_id, f"http-{call_id}", "started"))
     response = SimpleNamespace(usage={} if usage is None else usage)
     settle = {
         "timed_out": lambda: record_model_call_timeout(ledger=ledger, call_id=call_id, timeout_seconds=2.0,
@@ -70,10 +76,11 @@ def test_purpose_snapshot_delta_counts_input_once_and_keeps_real_output(tmp_path
 
 
 @pytest.mark.parametrize("usage,expected,reported,label", [
-    ({"input_tokens": 0}, 0, 1, "决策 ≈0 token · 成功 1 · 失败 0"),
-    ({"input_tokens": 12, "output_tokens": 3}, 12, 1, "决策 ≈12 token · 成功 1 · 失败 0"),
-    ({"output_tokens": 3}, None, 0, "决策 ≈? token · 成功 1 · 失败 0"),
-    ({}, None, 0, "决策 ≈? token · 成功 1 · 失败 0"),
+    ({"input_tokens": 0}, 0, 1, "决策 已报 0 token · 成功 1 · 失败 0"),
+    ({"input_tokens": 12, "output_tokens": 3}, 12, 1, "决策 已报 12 token · 成功 1 · 失败 0"),
+    # 成功却一次都没报输入、也没有可外推的已报调用：真的没有数据，才显示“缺报”（不能显示成 0）
+    ({"output_tokens": 3}, None, 0, "决策 缺报 1 · 成功 1 · 失败 0"),
+    ({}, None, 0, "决策 缺报 1 · 成功 1 · 失败 0"),
 ])
 def test_decision_metrics_preserve_main_rounds_cache_tools_and_unknown(tmp_path, usage, expected, reported, label):
     agent, params, clock, _, _ = fixture(tmp_path)
@@ -105,20 +112,25 @@ def test_partial_decision_usage_is_not_hidden_by_complete_other_call(tmp_path):
     assert metrics["input_tokens"] == 12 and metrics["estimated_tokens"] == 42
     assert metrics["decision_input_tokens"] == 12 and metrics["decision_input_reported_calls"] == 1
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
-    assert "决策 ≈24 token · 成功 2 · 失败 0" in text
+    assert "决策 已报 ≈24 token · 成功 2 · 失败 0" in text
 
 
-def test_timed_out_and_failed_calls_count_as_failures_and_widen_the_estimate(tmp_path):
+def test_sent_failures_show_an_estimate_and_unsent_failures_are_listed_apart(tmp_path):
     agent, params, _, _, _ = fixture(tmp_path)
     decision(agent, params, usage={"input_tokens": 5000})
-    decision(agent, params, call_id="decision-2", outcome="timed_out")
+    decision(agent, params, call_id="decision-2", outcome="timed_out", attempted=True)
     decision(agent, params, call_id="decision-3", outcome="failed")
     decision(agent, params, call_id="decision-4", outcome="started")
     metrics = publish_model_metrics(agent, params, pending=False)
+    # 原始计数不变：失败仍是 failed + timed_out；拆分只在展示时推导
     assert (metrics["decision_call_count"], metrics["decision_success_count"], metrics["decision_failure_count"]) == (4, 1, 2)
+    assert (metrics["decision_unfinished_calls"], metrics["decision_estimated_tokens"]) == (1, 42)
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
-    # 进行中的调用不算成功也不算失败，但它的输入已经发出，约数按 4 次调用外推
-    assert "决策 ≈20.0k token · 成功 1 · 失败 2" in text
+    # 发出去后超时的那次显示估算并算失败；一次 HTTP 尝试都没有的那次单列“未发出”、不算失败；进行中的两边都不计。
+    # 已报只外推到成功调用（未完成的调用另有估算，不再重复外推）。
+    assert "决策 已报 5.0k token · 估算 42 token（未完成） · 成功 1 · 失败 1 · 未发出 1" in text
+    # 这里只有决策调用没有供应商回报，决策段已讲清，总行不再出现“缺报”
+    assert "缺报" not in text
 
 
 def test_all_calls_unreported_shows_unknown_estimate_not_zero(tmp_path):
@@ -127,7 +139,8 @@ def test_all_calls_unreported_shows_unknown_estimate_not_zero(tmp_path):
     metrics = publish_model_metrics(agent, params, pending=False)
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
     assert metrics["decision_input_tokens"] is None
-    assert "决策 ≈? token · 成功 0 · 失败 1" in text
+    # 发送前就超时（没有任何 HTTP 尝试）：请求没发出去，单列“未发出”，不算 Jev 失败，也不编造 0 token
+    assert "决策 成功 0 · 失败 0 · 未发出 1" in text and "已报" not in text and "估算" not in text
 
 
 def test_original_baseline_refreshes_when_background_usage_appends(tmp_path):

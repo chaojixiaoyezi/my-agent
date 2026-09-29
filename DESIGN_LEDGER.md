@@ -18,6 +18,28 @@
 
 详见 [STORAGE_RETENTION.md](docs/design/STORAGE_RETENTION.md)。
 
+## 决策统计口径：讲清“缺报”，没发出去的单列（2026-09-28，分支 `claude/be-jev-transport-timing`，在 `b792340e0` 之上，本地验证通过，待集成）
+
+- **起因**：
+  - 用户看到“决策模型成功 140 多、失败 63，还有一些缺报”。超时调用在用量里是 0 token，被一并算作缺报。
+  - dsh-9a 分析发现：pre_recall 和 recall 共用阶段预算，pre_recall 常在 `budget_exhausted` 时 1–4 毫秒就返回，根本没发请求，却被算成 Jev 超时。
+- **口径**（只改展示与汇总，不改记账，也不改预算逻辑）：
+  - TUI 决策段分开标注三种数据来源：
+    - 已报：供应商回报，外推到成功调用；
+    - 估算（未完成）：发出去之后超时或失败的调用，取本地估算；
+    - 缺报：真的一点数据都没有。
+  - 失败只算发出去之后的；一次 HTTP 尝试都没有的，单列“未发出”，不计入失败。
+  - 总行“缺报”只统计非决策调用。
+  - `audit_records`：
+    - 用量行新增 `jev_failures`、`not_sent_calls`、`failures_send_unknown`；
+    - 各点位结果里，没发出去的失败类结果单列到 `not_sent`，不计入超时率和失败率。
+  - 口径只有一个权威位置：`model_metrics.unfinished_usage_facts` / `split_unsent_failures`。汇总只累加原始次数，展示时推导。
+- **飞书**：飞书没有统计行。决策统计由 my-agent 调 `audit_records` 回答，与 TUI 同一口径，工具说明已同步。
+- **已知边界**：
+  - 非决策调用的“缺报”仍按“没有供应商回报就计”，包括已有本地估算的调用。要统一口径，另开一件。
+  - 旧账里的失败分不清当时是否发出，整体仍算失败。
+- 细节见[审计设计](docs/design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md)第 4 节，以及“没发出去与发出去后失败分开”一节。
+
 ## Jev 决策调用的链路分段计时（B 第 0 步）（2026-09-28，分支 `claude/be-jev-transport-timing`，基于 `80b4afed8`，本地验证通过，待集成）
 
 - **起因**：dsh-9a 查明前台超时主要来自连到 Jev 的链路在某些时段变慢。

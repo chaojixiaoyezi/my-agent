@@ -13,8 +13,12 @@ _COUNTS = (
     "model_rounds", "retry_count", "input_tokens", "output_tokens",
     "estimated_tokens", "unreported_calls", "sampled_at_ns",
 )
-# 决策分区的显示计数：已报输入的调用次数（供约数外推）、成功（finished）与失败（failed + timed_out）次数
-_DECISION_COUNTS = ("decision_input_reported_calls", "decision_success_count", "decision_failure_count")
+# 决策分区的显示计数（都是跨事件累加的原始次数，展示时再推导）：已报输入的调用次数（供约数外推）、成功（finished）、
+# 失败（failed + timed_out 原始次数）、其中已发出后未完成的次数与本地估算输入、分不清是否发出的旧账失败次数、
+# 以及决策在原“缺报”计数里所占的份额（决策段自己讲清数据来源，总行不再重复计）
+_DECISION_COUNTS = ("decision_input_reported_calls", "decision_success_count", "decision_failure_count",
+                    "decision_unfinished_calls", "decision_estimated_tokens", "decision_unknown_failures",
+                    "decision_unreported_calls")
 
 
 # LLM: 数值白名单不接受 bool、负数和无穷大，调用方不得借此传递提示词或工具参数。
@@ -108,9 +112,31 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
     return totals
 
 
+# LLM: 读累计摘要或 model_usage 增量行里一个用途分区的失败构成，不改账。新账 estimated 带 unfinished_call_count 键：
+#   失败里有 HTTP 尝试的有本地估算；旧账没有该键，分不清失败的调用是否发出，整体记为 unknown。TUI 统计行与 audit_records 共用。
+# 函数用途: 从一个用途分区摘要取出失败次数、已发出未完成的次数与估算输入、以及分不清是否发出的失败次数。
+def unfinished_usage_facts(purpose_summary: Mapping[str, object]) -> dict[str, int]:
+    statuses = purpose_summary.get("status_counts") or {}
+    failures = sum(max(0, int(statuses.get(key) or 0)) for key in ("failed", "timed_out"))
+    estimated = (purpose_summary.get("usage_breakdown") or {}).get("estimated") or {}
+    if "unfinished_call_count" not in estimated:
+        return {"failures": failures, "unfinished_calls": 0, "unfinished_tokens": 0, "unknown_failures": failures}
+    return {"failures": failures, "unfinished_calls": max(0, int(estimated.get("unfinished_call_count") or 0)),
+            "unfinished_tokens": max(0, int(estimated.get("unfinished_input_tokens") or 0)), "unknown_failures": 0}
+
+
+# LLM: 入参是跨事件累加后的原始次数（迟到的尝试可能落在后一条事件里，逐条算会错）。没发出去 = 失败 − 分不清的 − 已发出未完成的，
+#   即准入忙、发送前期限用完等一次 HTTP 尝试都没有的调用，不计入 Jev 失败率。只用于展示与汇总，TUI 与 audit_records 共用。
+# 函数用途: 把累计失败次数拆成“Jev 失败（发出去后失败/超时）”和“没发出去”两类。
+def split_unsent_failures(failures: int, unfinished_calls: int, unknown_failures: int) -> tuple[int, int]:
+    not_sent = max(0, int(failures) - int(unknown_failures) - int(unfinished_calls))
+    return max(0, int(failures) - not_sent), not_sent
+
+
 # LLM: provider input 已含缓存读写，不再加缓存；决策只是原总量子集，逐字段缺报不能由信封计数猜测。
-#   成功/失败取决策分区 status_counts（finished / failed + timed_out），进行中的调用两边都不计。
-# 函数用途: 汇总原 token 并附加决策输入与成败次数；旧账没有用途分区时不计入决策，也不推断为零。
+#   成功/失败取决策分区 status_counts（finished / failed + timed_out），进行中的调用两边都不计；失败只累加原始次数，
+#   “发出去后失败 / 没发出去”由 split_unsent_failures 在展示时推导。决策在原“缺报”里的份额单独累加，供总行扣除。
+# 函数用途: 汇总原 token 并附加决策输入、成败次数与未完成估算；旧账没有用途分区时不计入决策，也不推断为零。
 def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None:
     breakdown = summary.get("usage_breakdown")
     breakdown = breakdown if isinstance(breakdown, Mapping) else {}
@@ -126,11 +152,16 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
     decision = purposes.get("decision", {})
     usage = decision.get("usage_breakdown", {}).get("provider", {})
     reported = int(usage.get("input_tokens_reported_call_count") or 0)
-    outcomes = decision.get("status_counts") or {}
+    outcomes, facts = decision.get("status_counts") or {}, unfinished_usage_facts(decision)
     totals["decision_call_count"] += int(decision.get("physical_model_attempt_count") or 0)
     totals["decision_input_reported_calls"] += reported
     totals["decision_success_count"] += int(outcomes.get("finished") or 0)
-    totals["decision_failure_count"] += sum(int(outcomes.get(key) or 0) for key in ("failed", "timed_out"))
+    totals["decision_failure_count"] += facts["failures"]
+    totals["decision_unfinished_calls"] += facts["unfinished_calls"]
+    totals["decision_estimated_tokens"] += facts["unfinished_tokens"]
+    totals["decision_unknown_failures"] += facts["unknown_failures"]
+    estimated_calls = int((decision.get("usage_breakdown", {}).get("estimated") or {}).get("call_count") or 0)
+    totals["decision_unreported_calls"] += estimated_calls + facts["failures"]
     if reported:
         totals["decision_input_tokens"] = int(totals["decision_input_tokens"] or 0) + int(usage.get("input_tokens") or 0)
 

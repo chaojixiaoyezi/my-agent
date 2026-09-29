@@ -1,8 +1,8 @@
 # LLM: 只渲染 model_runtime_metrics.v1，不读取日志、成本文件或模型正文；每帧工作量与固定字段数相关。
-# 模块用途: 在 Context 下沿原统计行显示 LLM 与决策约数（输入 token、成功/失败次数），按宽度简写，缺报保留未知，不显示价格。
+# 模块用途: 在 Context 下沿原统计行显示 LLM 与决策约数（已报/估算/缺报分开标注，成功/失败/未发出次数），按宽度简写，缺报保留未知，不显示价格。
 from __future__ import annotations
 
-from ...agent.conversation.model_metrics import public_model_metrics
+from ...agent.conversation.model_metrics import public_model_metrics, split_unsent_failures
 from .tui_markdown import FormattedLine, display_width_text
 
 
@@ -15,17 +15,37 @@ def _tokens(value: int) -> str:
     return str(value)
 
 
-# LLM: 仅供显示的约数：已报输入按已报调用的平均值外推到全部决策调用（超时/失败的调用没有回报用量），
-#   一次都没报时显示 ≈?，不能显示成 0；约数不写回账本，也不参与任何预算或调度判断。
-# 函数用途: 生成统计行里的"决策 ≈N token · 成功 X · 失败 Y"片段。
+# LLM: 仅供显示，不写回账本、不参与预算或调度。三种数据来源分开标注：
+#   已报 = 供应商回报的输入，按已报调用的平均值外推到全部成功调用（有没报的成功调用时带 ≈）；
+#   估算 = 已发出后超时/失败的调用的发送前本地估算，标“未完成”；
+#   缺报 = 真的一点数据都没有的调用（成功却一次都没报、或分不清是否发出的旧账失败），不能显示成 0。
+#   失败只算发出去之后失败/超时的；一次 HTTP 尝试都没有的另列“未发出”，不计入失败（口径见 split_unsent_failures）。
+# 函数用途: 生成统计行里的“决策 已报 ≈N token · 估算 M token（未完成）· 缺报 K · 成功 X · 失败 Y · 未发出 Z”片段。
 def _decision_part(metrics: dict[str, object]) -> str:
-    calls, reported = int(metrics["decision_call_count"]), int(metrics["decision_input_reported_calls"])
-    value = metrics["decision_input_tokens"]
-    approx = "?" if value is None or not reported else _tokens(round(int(value) * max(calls, reported) / reported))
-    return f"决策 ≈{approx} token · 成功 {metrics['decision_success_count']} · 失败 {metrics['decision_failure_count']}"
+    success, reported = int(metrics["decision_success_count"]), int(metrics["decision_input_reported_calls"])
+    failures, not_sent = split_unsent_failures(metrics["decision_failure_count"], metrics["decision_unfinished_calls"],
+                                               metrics["decision_unknown_failures"])
+    value, estimate = metrics["decision_input_tokens"], int(metrics["decision_estimated_tokens"])
+    parts = []
+    if value is not None and reported:
+        approx = "≈" if success > reported else ""
+        parts.append(f"已报 {approx}{_tokens(round(int(value) * max(success, reported) / reported))} token")
+    if estimate:
+        parts.append(f"估算 {_tokens(estimate)} token（未完成）")
+    unknown = int(metrics["decision_unknown_failures"]) + (0 if reported else success)
+    if unknown:
+        parts.append(f"缺报 {unknown}")
+    parts += [f"成功 {success}", f"失败 {failures}"] + ([f"未发出 {not_sent}"] if not_sent else [])
+    return "决策 " + " · ".join(parts)
 
 
-# LLM: 决策约数是会话累计子集，输出留白但原账保留；不能把全部缺报显示成完整零值。
+# LLM: 决策调用的数据来源已在决策段分开讲清，总行“缺报”只统计其余调用，避免同一次决策调用被报两遍；非决策调用口径不变。
+# 函数用途: 计算总行要显示的缺报次数。
+def _other_unreported(metrics: dict[str, object]) -> int:
+    return max(0, int(metrics["unreported_calls"]) - int(metrics.get("decision_unreported_calls") or 0))
+
+
+# LLM: 决策约数是会话累计子集，输出留白但原账保留；不能把全部缺报显示成完整零值。总行缺报不再重复计决策调用（决策段自己讲清）。
 # 函数用途: 在同一统计行增加决策约数与成败次数；普通轮次/缓存/速度保留原口径，窄屏仍有界裁剪。
 def render_model_metrics(value: object, width: int) -> tuple[FormattedLine, ...]:
     metrics = public_model_metrics(value)
@@ -44,8 +64,8 @@ def render_model_metrics(value: object, width: int) -> tuple[FormattedLine, ...]
         parts.append(_decision_part(metrics))
     if metrics["retry_count"]:
         parts.append(f"重试 {metrics['retry_count']}")
-    if metrics["unreported_calls"]:
-        parts.append(f"缺报 {metrics['unreported_calls']}")
+    if unreported := _other_unreported(metrics):
+        parts.append(f"缺报 {unreported}")
     if metrics["pending"]:
         parts.append("本轮待结算")
     text = "  ▤ " + " · ".join(parts)

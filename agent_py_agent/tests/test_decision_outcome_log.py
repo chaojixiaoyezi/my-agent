@@ -118,7 +118,8 @@ def test_summary_counts_by_point_inside_the_window_and_counts_bad_rows(tmp_path)
 
     summary = decision_outcome_summary(SimpleNamespace(owner_decision_outcomes_jsonl=path), since=now - 3600)
 
-    assert summary["points"] == {"recall": {"success": 1, "cooldown": 1}}
+    # 冷却跳过没发请求，单列在 not_sent，不计入 Jev 的超时率与失败率（2026-09-28 口径）
+    assert summary["points"] == {"recall": {"success": 1}} and summary["not_sent"] == {"recall": {"cooldown": 1}}
     assert summary["unreadable_rows"] == 1 and len(summary["recent"]) == 2
     assert decision_outcome_summary(SimpleNamespace(), since=0)["available"] is False
 
@@ -143,7 +144,8 @@ def test_decide_logs_success_timeout_and_point_backoff_and_audit_reports_points(
 
     query = AuditQuery(topic="decision", scope="owner", thread_id="", since=0.0, limit=20)
     report = _decision_owner_report("alice", env.host, [env.thread.thread_id], query)
-    assert report["points"]["points"] == {"curator": {"deadline": 1, "cooldown": 1}, "skill_tool": {"success": 1}}
+    assert report["points"]["points"] == {"curator": {"deadline": 1}, "skill_tool": {"success": 1}}
+    assert report["points"]["not_sent"] == {"curator": {"point_backoff": 1}}
     # 只看当前会话：与用量、观察同一可信范围，后台 curator 行没有会话编号，不混进来。
     current = AuditQuery(topic="decision", scope="current_thread", thread_id=env.thread.thread_id, since=0.0, limit=20)
     report = _decision_owner_report("alice", env.host, [env.thread.thread_id], current)
