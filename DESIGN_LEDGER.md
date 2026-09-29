@@ -1,10 +1,11 @@
 # 设计台账
 
-## 前台命令已退出、只是清理未确认时如实返回执行结果（2026-09-29，`claude/75-scheduler-waiting-deadlock` 的 `84e8db619`，单独集成）
+## 前台命令已退出、只是清理未确认时如实返回执行结果（2026-09-29，`claude/75-scheduler-waiting-deadlock` 的 `84e8db619` + `067d2dd3e`，单独集成）
 
 - 来源：2026-09-28 定时任务停摆的触发点是一次前台同步 `run_command`：命令已经跑完、退出码已知，只是后代进程清理的核对没确认（高负载下清理确认超时），工具却报 `TOOL_OPERATION_OUTCOME_UNKNOWN` / `effect_outcome=unknown`，整轮被叫停。
 - 已实现（`tooling/shell.py::_run_shell_process_text`）：命令已退出、退出码已知时如实返回——0 为成功，非零为 `COMMAND_FAILED`、`effect_outcome=failed`。工具循环只在 `effect_outcome=unknown` 时叫停，所以不再叫停整轮；工具操作账按真实结果结算（succeeded/failed），不留 `unknown_reason`。
 - 清理未确认作为结构化告警附上：`process.cleanup_confirmed=false`（runtime_facts 白名单字段，模型可见）、`termination` 回执（含 `unresolved_pids`），正文提示“[进程清理未确认]……可能仍在运行，不要为此重跑”。清理已确认时不加任何字段。
+- 正文按 `termination.method` 分两种说法（`067d2dd3e`，9a 复审跟进）：`identity_unavailable`、`identity_changed` 时终止入口一个信号都没发，写“[进程清理未尝试] 无法核对进程身份，没有尝试结束它启动的进程”，并列出最多 8 个相关进程号 / 进程组（更多的写“等”，完整列表在回执里）；发过信号但没确认退出的，保持“[进程清理未确认]”。
 - 真正结果未知的路径不变：超时后终止未确认、没有终止回执的超时、后台会话状态拿不到。
 - 代价：未确认的后代可能仍在运行、继续产生副作用；告警写明这一点，不自动重跑。
 - 同分支的定时 waiting 死锁根因修复（`0b04e6fbe` 及其复审跟进）仍在复审，之后单独集成。

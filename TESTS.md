@@ -1,11 +1,12 @@
 # 测试与发布验收
 
-## 前台命令已退出、只是清理未确认（2026-09-29，`84e8db619`，单独集成）
+## 前台命令已退出、只是清理未确认（2026-09-29，`84e8db619` + `067d2dd3e`，单独集成）
 
 - `test_shell_foreground_cleanup.py`：原用例 `test_cleanup_unknown_keeps_original_command_result` 按新合同改为 `test_cleanup_unconfirmed_returns_the_real_result_with_a_warning`（退出码 0 → 成功，7 → `COMMAND_FAILED`/`failed`；`cleanup_confirmed=false`、`termination` 回执和正文提示），另加清理已确认不带告警的对照。
 - 确定性复现：真实子进程正常跑完，只把 `terminate_process_tree` 的核对结果固定成未确认（模拟高负载下清理确认超时），`effect_outcome` 不是 unknown；再经工具操作账本走一遍，记录按真实结果结算为 `succeeded` / `failed`，没有 `unknown_reason`。这四条在旧代码上全部失败。
 - 真正未知的对照沿用 `test_shell_orphan_kill.py::test_generic_timeout_does_not_claim_termination`（超时且没有终止回执仍是 unknown）。
 - 变异 7 个（含整段恢复成旧的 UNKNOWN 行为）全部被抓住。
+- 措辞分两种（`067d2dd3e`，9a 复审跟进）：`identity_unavailable`、`identity_changed` 时一个信号都没发，参数化断言“[进程清理未尝试]”措辞和进程号上限（前 8 个加“等”，第 9 个不出现）；通用“清理未确认”用例改用发过信号的 `SIGTERM->SIGKILL` 回执；另有没有进程号时不列的对照。变异 8 个全部被抓住，`84e8db619` 原 7 个按新锚点重跑也全部被抓住。
 - 复现：`python3 -m pytest agent_py_agent/tests/test_shell_foreground_cleanup.py agent_py_agent/tests/test_shell_orphan_kill.py -q`
 
 ## 会话互通真实链路门禁：同一对会话连发三条（2026-09-29，分支 `claude/ae-pair-message-window`，基于 `9a71d8cd5`，只改测试与文档）

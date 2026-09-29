@@ -1655,6 +1655,28 @@ def _shell_failure_effect_outcome(
     return ""
 
 
+# 终止入口在这两种核对结果下一个信号都没发：启动时没取到出生标识，或标识对不上。后代进程完全没被碰过。
+_CLEANUP_NOT_ATTEMPTED_METHODS = frozenset({"identity_unavailable", "identity_changed"})
+# 清理没做成时正文最多列这么多个进程号，让“核对”能落地又不撑爆输出；完整列表在 termination 回执里。
+_CLEANUP_WARNING_PID_LIMIT = 8
+
+
+# LLM: 按 termination.method 区分两种说法：没发任何信号（_CLEANUP_NOT_ATTEMPTED_METHODS）时写明“无法核对进程身份，
+#   没有尝试结束”，并列出有上限的进程号；发过信号但没确认退出时保持“尚未确认已结束”的原措辞。只读回执字段，不查进程。
+# 函数用途: 生成前台命令退出后、清理没做成时附在正文末尾的告警。
+def _cleanup_warning_text(return_code: object, termination: object) -> str:
+    if getattr(termination, "method", "") not in _CLEANUP_NOT_ATTEMPTED_METHODS:
+        return (f"\n[进程清理未确认] 命令已退出（退出码 {return_code}），上面就是它的执行结果；"
+                "但它启动的部分进程尚未确认已结束，可能仍在运行。需要时核对这些进程，不要为此重跑命令。")
+    pids = tuple(getattr(termination, "unresolved_pids", ()) or ())
+    listed = "、".join(str(pid) for pid in pids[:_CLEANUP_WARNING_PID_LIMIT])
+    more = "等" if len(pids) > _CLEANUP_WARNING_PID_LIMIT else ""
+    where = f"（相关进程号 / 进程组：{listed}{more}）" if listed else ""
+    return (f"\n[进程清理未尝试] 命令已退出（退出码 {return_code}），上面就是它的执行结果；"
+            f"但无法核对进程身份，没有尝试结束它启动的进程，它们可能仍在运行{where}。"
+            "需要时按进程号核对，不要为此重跑命令。")
+
+
 # LLM: 命令退出码、成功标志与清理回执分开。命令已退出、退出码已知时如实返回执行结果（成功或 COMMAND_FAILED）；
 #   后代进程清理未确认只作为结构化告警附上（process.cleanup_confirmed=False + termination 回执 + 正文提示），
 #   不报成副作用未知、不叫停整轮（2026-09-29：高负载下清理确认超时把正常跑完的前台命令报成未知，连带定时任务停摆）。
@@ -1692,10 +1714,7 @@ def _run_shell_process_text(
                 "看上方 stdout/stderr 定位修正,勿当工具不可用。"
             )
         if not cleanup_confirmed:
-            output += (
-                f"\n[进程清理未确认] 命令已退出（退出码 {result.returncode}），上面就是它的执行结果；"
-                "但它启动的部分进程尚未确认已结束，可能仍在运行。需要时核对这些进程，不要为此重跑命令。"
-            )
+            output += _cleanup_warning_text(result.returncode, termination)
         stderr = str(getattr(result, "stderr", "") or "")
         return (
             output,
