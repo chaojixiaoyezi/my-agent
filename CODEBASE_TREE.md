@@ -879,6 +879,7 @@ agent_py_agent/
 |   |-- test_user_config_owner_scope.py # 普通 owner 决策工具可见性、可信线程与本机全局配置拒绝
 |   |-- test_decision_curator.py        # 原Curator临时建议、完整材料、非选择结果和lease头寸对照
 |   |-- test_decision_curator_relation.py # 正式版本/完整性、独立后台设置、关系注释与原提取提交边界
+|   |-- test_decision_curator_relation_selection.py # 关系对按 BM25 词面相关度挑选：越界对可达、确定性、空材料边界与覆盖声明
 |   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
 |   |-- test_decision_experiment_authorization.py # 设置授权来源、CAS/撤销、v2 上界口径与普通模式互斥
 |   |-- test_decision_experiment_send_gate.py # 本地 HTTP 统计 TCP accept：拒绝/绕过零连接、单次发送结算、超上界与挂起
@@ -1399,8 +1400,9 @@ docs/
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。
 - `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。
 - `agent_py_agent/agent/memory_store/decision_curator.py`：原用户后台批次的临时分类/优先级建议；关闭不准备，失败保留完整输入，原提取/提交仍唯一。
-- `agent_py_agent/agent/memory_store/decision_curator_relation.py`：完整来源和正式 long-term 版本的可选关系注释；复用同一阶段、原仓库和账本，没有直接合并/晋升权限。
+- `agent_py_agent/agent/memory_store/decision_curator_relation.py`：完整来源和正式 long-term 版本的可选关系注释；复用同一阶段、原仓库和账本，没有直接合并/晋升权限。消息×正式条目对数超过上限时按标准库 BM25 词面相似度挑前 32 对（同分保持原枚举顺序、无嵌入调用），并在 `state.coverage` 声明总对数、展示对数与挑选规则。
 - `agent_py_agent/tests/test_decision_curator_relation.py`：验证关系输入完整性、失效、原模型账本、作用域和 Curator 提取提交，fake 模型不代表真实语义质量。
+- `agent_py_agent/tests/test_decision_curator_relation_selection.py`：验证挑对规则——相关对排在顺序枚举第 33 位之后仍被挑中、同输入同输出、空材料边界、覆盖声明与无嵌入调用。
 - `agent_py_agent/agent/settings/decision_settings_schema.py`、`decision_settings_defaults.py`、`decision_settings_projection.py`：分别负责严格结构、原模块默认值映射及脱敏有效值投影，不增加配置权威位置。
 - `agent_py_agent/tests/test_decision_usage_metrics.py`：验证用途分区复用原增量规则，决策输入与 LLM 总量不双计、缺报保留未知、历史基数随原文件更新。
 - `agent_py_agent/agent/backends/decision_protocol.py`：冻结宿主决策材料、来源和候选版本；结果只有建议权，消费者仍要复查。

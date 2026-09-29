@@ -24,6 +24,30 @@
 - **code-size**：本片涉及的三个文件逐文件比较发现项，只消失 `SubAgentBaseService` 的 high-risk，没有新增。
 - **测试**：`test_decision_subagent.py` 的“线程创建后、权威写入前崩溃再重试”用例改为 patch `services.base.write_create_run_authority`。子代理相关 117 个测试文件（含 `test_runtime_db_main_chain`、`test_decision_subagent`、`architecture_guardrails`、`constant_names_unique`、`code_size_script`）共收集 1345 项，全部通过。按磁盘约束没有跑全仓；basetemp 已删除，测试未生成 pycache。
 
+## curator 关系对按词面相关度挑选（2026-09-28，分支 `my-agent/self-dev-4`，基于 `54880f8e9`）
+
+- **来源与问题**：DESIGN_LEDGER「召回前补充查询」条缺口 4——`decision_curator_relation` 取消息×正式条目笛卡尔积的**前 32 对**，不看相关度，相关的那一对若排在第 33 位之后就永远比不到。
+- **做法**：新增 `_select_pairs`，用标准库给每一对算 BM25 词面相似度（正文档词频由该对两侧正文的并集构成，`_TOKEN_PATTERN` 为小写拉丁串 + 单个汉字），按 `(-score, 原枚举序)` 稳定排序取前 32；对数不超过上限时原样全取。上限仍是 32，不引入嵌入调用、不增加网络请求和费用。挑选是纯函数，同批两次构造必须得到同一 `revision`（`annotate_curator_relations` 第 49 行的陈旧复核依赖这一点）。`state.coverage` 新增 `total_pair_count`（全批笛卡尔积对数）、`selection`（规则标识 `bm25_then_source_order`）与 `selection_limit`，明确声明"只展示了对中的一部分"。
+- **新增测试**：`test_decision_curator_relation_selection.py`（9 项）
+  - `test_relevant_pair_beyond_sequential_cutoff_is_selected`：2 消息 × 32 条目 = 64 对，相关的那一对是顺序枚举下的第 33 对（`message-1 × entry-31`），旧逻辑取不到，新逻辑必须取到；
+  - `test_selection_is_deterministic_across_calls`：同一 batch 两次构造得到同一挑对结果与同一 `revision`；
+  - `test_empty_message_or_formal_yields_no_questions`：消息为空、条目为空、两者都为空三种边界都返回空题集与零展示数，不抛异常；
+  - `test_coverage_declares_total_presented_and_rule` / `test_all_pairs_presented_when_under_limit`：覆盖声明能区分"全部比过"与"只比了一部分"；
+  - `test_ties_keep_original_enumeration_order`：全部同分时退回原枚举顺序（消息外层、条目内层）；
+  - `test_selection_has_no_embedding_or_network_calls`：打分是本地算术，没有嵌入入口。
+- **变异验证**：用 `_mutate_relation_selection.py`（工作目录 `tasks/2026-09-28/curator-relation-relevance/`）做两处变异，都先 `git diff` 存现场补丁、还原用 `git checkout -- <文件>`+`git apply`：
+  - 把排序键 `(-scores[...], index)` 翻成 `(scores[...], index)`（分数方向反了）→ 正好 1 条红：`test_relevant_pair_beyond_sequential_cutoff_is_selected`；
+  - 把稳定排序换成 `sorted(..., key=-score, reverse=True)`（去掉同分原序兜底）→ 同样 1 条红；
+  - 还原后 53 项全绿。
+- **定向回归**：`test_decision_curator_relation_selection.py` + `test_decision_curator_relation.py` 共 53 项通过（9 + 44）。
+- **复现**：
+  ```
+  cd <worktree>
+  python3 -m pytest agent_py_agent/tests/test_decision_curator_relation_selection.py agent_py_agent/tests/test_decision_curator_relation.py -q
+  python3 <工作目录>/_mutate_relation_selection.py reverse      # 期望 1 条红
+  ```
+- **未覆盖**：本批没做真实 Jev 样本对比（挑选规则只影响哪些对进入请求，语义质量仍由原 Curator 与原验证把关）；真机效果按 dev 安排等 Jev 复测。
+
 ## capability 配置缺文件用默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`）
 
 - **新增或修改的测试**：
