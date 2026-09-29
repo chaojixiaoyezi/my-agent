@@ -287,6 +287,17 @@
 渠道、是否当前会话和可用发送类型，不含正文；别的 owner 的会话不列出也不计数。细节见
 [SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md) 实现落点一节。
 
+**已知缺陷：同一对会话只能送达一条消息**（2026-09-29 复审发现，待修，排在 step16h；会话互通禁令维持到修好、部署、验收通过）：
+- **原因**：`send_session_message` 的去重键是 `session_message:{发送方}->{目标}`，只区分会话对；`append_once` 对同一个键的处理是同文返回旧记录、异文抛 DataCorruptionError。
+- **后果**：
+  - 第二条不同内容报结果未知，发送方这一轮收口；
+  - 与旧消息同文的一条，返回旧 guidance_id，状态写死为 pending，实际送不到。
+- **修法方向**：
+  - 去重键按单条消息区分，同一次工具调用重试仍去重；
+  - 键写进唤醒 metadata，已消费判据按这个键查回执，不再从会话对拼；
+  - 工具返回回执的真实状态。
+- **门禁**：`test_repeated_messages_between_the_same_pair_are_all_delivered` 先按 strict xfail 标出，修好后转正。
+
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。

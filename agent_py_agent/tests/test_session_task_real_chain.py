@@ -139,7 +139,8 @@ class ScriptedWire:
         # 挂起中被停止控制打断时 _script 会抛出，这次调用的 kind 保持 interrupted。
         entry = {"kind": "interrupted", "trigger": turn.trigger, "task": str(turn.facts.get("session_task_id") or ""),
                  "heading": turn.heading[:60], "tools": turn.tools, "results": turn.results,
-                 "saw_note": "RC-NOTE-" in turn.turn_text}
+                 "saw_note": "RC-NOTE-" in turn.turn_text,
+                 "notes": sorted(set(re.findall(r"RC-NOTE-[A-Z0-9]+", turn.turn_text)))}
         turn_key = entry["task"] or entry["heading"]
         with self._lock:
             self.calls.append(entry)
@@ -466,6 +467,47 @@ def test_message_wakes_an_idle_session(tmp_path, monkeypatch) -> None:
     saw = [call for call in chain.wire.calls if call.get("kind") == "wake-saw-note"]
     assert len(saw) == 1, f"C 的消息唤醒没有开出回合：全部模型调用 {[call.get('kind') for call in chain.wire.calls]}"
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "消息唤醒没有结案"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="新缺陷：send_session_message 的去重键只按会话对区分，同一对会话第二条不同内容的消息报结果未知、"
+                          "与第一条相同的第三条被当成重试返回旧记录，都送不到（去重键按单条消息区分后转正）")
+def test_repeated_messages_between_the_same_pair_are_all_delivered(tmp_path, monkeypatch) -> None:
+    """同一对会话连发三条（第二条内容不同、第三条与第一条相同）：每条独立入队、各有回执，工具返回真实状态、各自送达，
+    发送方这一轮不触发结果未知收口。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    sends = []
+    for note in ("RC-NOTE-ONE 第一条。", "RC-NOTE-TWO 第二条，内容不同。", "RC-NOTE-ONE 第一条。"):
+        before = len(chain.wire.calls)
+        chain.ask("A", f"RC-MESSAGE {chain.threads['B']} {note}")
+        output = chain.tool_outputs("send_session_message")[-1]
+        receipt = _message_receipt(chain, "B", str(output.get("message_id") or ""))
+        chain.drain()
+        seen = [call for call in chain.wire.calls[before:] if call.get("kind") == "wake-saw-note"]
+        sends.append({"output": output, "key": getattr(receipt, "dedupe_key", ""),
+                      "receipt_status": getattr(receipt, "status", None),
+                      "delivered": any(note.split()[0] in call["notes"] for call in seen)})
+        # 前提检查用 _require（抛 RealChainBroken，strict xfail 吞不掉）：第一条在 main 上本来就应当送达。
+        _require(sends[0]["output"].get("ok") is True and sends[0]["delivered"], f"前提不成立：第一条就没有送达：{sends[0]}")
+
+    outputs = [send["output"] for send in sends]
+    assert [output.get("error_code") or "" for output in outputs] == ["", "", ""], \
+        f"发送没有全部成功（结果未知会让发送方这一轮收口）：{[output.get('error_code') for output in outputs]}"
+    assert len({output.get("message_id") for output in outputs}) == 3, "三次发送没有各自入队：消息 id 有重复"
+    assert all(send["key"] for send in sends) and len({send["key"] for send in sends}) == 3, "三条消息没有各自独立的回执"
+    assert [output.get("status") for output in outputs] == [send["receipt_status"] for send in sends], \
+        "工具返回的状态与这条消息回执的真实状态不一致"
+    assert [send["delivered"] for send in sends] == [True, True, True], f"没有每条都送到 B：{[send['delivered'] for send in sends]}"
+
+
+# 函数用途: 按工具返回的消息 id 找到这条消息在目标会话里的独立回执；找不到返回 None。
+def _message_receipt(chain: RealChain, label: str, message_id: str):
+    guidance = chain.agent.conversation_store.guidance
+    for entry in guidance.recent("thread", chain.threads[label], limit=200, include_delivered=True):
+        key = str((entry.metadata or {}).get("dedupe_key") or "")
+        if entry.guidance_id == message_id and key:
+            return guidance.receipt(key)
+    return None
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
