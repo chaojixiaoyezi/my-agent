@@ -210,6 +210,21 @@ agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 
 - **边界**：最多保留 1000 条；写失败只记日志，不改变决策结果。
 - **读取**：`audit_records` 的 decision 主题据此给出每个点位各状态的次数和最近几条。用量账只按用途汇总，不能拿它推断单个点位是否接通。
 
+链路分段计时（2026-09-28，B 第 0 步，只量不改发送）：先拿数据分清慢在本机代理还是 Jev 服务端，再决定要不要做连接复用。
+- **阶段**（`backends/transport_timing.py`，封闭集合）：`connect`（直连含 DNS；走代理时是连到代理）→ `proxy_connect`（CONNECT 隧道，只在 HTTPS 走代理时有）
+  → `tls_handshake`（只在 HTTPS 时有）→ `request_send`（请求写完）→ `first_byte`（读到状态行）→ `body_read`（非流式正文读完）。
+- **开关**：只有观察者显式 `provider_attempt_observer(transport_timing=True)` 才计时，目前只有决策 worker 开启。
+  计时只包裹标准库连接已有的步骤，先原样执行再推进阶段；发送字节、`max_retries=0`、发送许可、绝对期限都不变，也不复用连接。
+  没开启的调用事件与原先完全相同。
+- **进账**：每个阶段结束发一次 `status=progress` 事件，账本只替换该尝试的 `transport`（当前阶段 + 已完成阶段毫秒），
+  不改尝试状态、活动时间和事件列表。超时写 `timeout_transport_phase`，即超时那一刻最后一次尝试所处的阶段。
+- **落盘**：建了调用记录的结果日志行带 `transport`（`attempts` 为空表示请求没发出）：`call_status`、`timeout_stage`、`timeout_phase`、`estimated_input_tokens` 和各尝试的
+  `status/http_status/error_type/phase/phase_ms`。caller 超时时 worker 可能还在传输，行里记的是超时那一刻的阶段；
+  之后的迟到事实只留在内存账本。
+- **估算入账**：超时或失败、且已发起过 HTTP 尝试的调用，把发送前的本地估算输入记进
+  `usage_breakdown.estimated.unfinished_input_tokens/unfinished_call_count`（所有用途分区都有），随 model_usage 快照增量落盘，
+  与 `provider` 桶分开。没发出尝试的调用（准入忙、许可拒绝、配置错误）不计。TUI 统计行口径不变。
+
 故障矩阵（2026-09-24，`test_decision_fault_matrix.py` 经真实传输栈钉住，冷却期内不发起新尝试）：
 
 | 故障 | 本次结果 | 之后 |

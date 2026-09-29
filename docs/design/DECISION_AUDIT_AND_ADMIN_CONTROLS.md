@@ -73,7 +73,8 @@
   且管理员自己开启了 `cross_owner_audit_allowed` 时可用；许可只在管理员名下有效，用户手写同名值无效）。
 - 只读三类权威结构化记录，不 grep 日志、不读对话/记忆正文：
   1. 决策设置读取：总开关、各点有效模式、等待时间、是否绑定模型；
-  2. 各会话 `model_usage` 账本的 decision 用途分区：调用次数、finished/failed/timed_out、已报输入 token、调用最多的会话；
+  2. 各会话 `model_usage` 账本的 decision 用途分区：调用次数、finished/failed/timed_out、已报输入 token、
+     超时/失败调用的发送前本地估算输入（`input_tokens_estimated_unfinished`、`estimated_unfinished_calls`，与已报输入分开）、调用最多的会话；
      用量文件修改时间早于时间窗的会话整份跳过，事件按 `created_at` 过滤，无用途分区的旧账单独计数；
   3. Gateway 请求记录里的 `model_selection_observation` 与 `capability_presentation_observation`：
      按 `conversation_claim.thread_id` 归属 owner，字段白名单投影（不含 prompt、工具名清单等），
@@ -104,6 +105,17 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
 - 未开启的点位、阶段出错（如 `settings_busy`）都不写 skipped 行，避免刷屏（这类原因改由下一节的到达计数统计）；日志仍有界（最近 1000 条）。
 - 配置 `decision_skip_records_enabled`（默认开启）关闭后只是不记，决策行为不变。
 - `audit_records` 的说明写明 `skipped` 与原因码的含义，并强调“某点完全没出现只说明窗口内没到触发点，不代表没接线”。
+
+### 结果日志与用量里的链路计时（2026-09-28，B 第 0 步）
+
+**起因**：前台超时多来自连到 Jev 的链路，但阶段耗时只在内存里，分不清慢在代理还是 Jev 服务端；超时调用在用量里是 0 token。
+
+**做法**（设计见[接入设计](DECISION_MODEL_INTEGRATION.md)“链路分段计时”一节）：
+- 最近结果行：建了调用记录的行附 `transport`（`attempts` 为空表示请求没发出，如准入忙），含调用终态、`timeout_stage`、`timeout_phase`（超时那一刻所处的传输阶段）、
+  `estimated_input_tokens`（发送前本地估算，不是供应商回报），以及各次 HTTP 尝试的状态和分段毫秒 `phase_ms`。
+  调用前就结束的行（关闭、冷却、设置变化等）没有这个键，旧行不补。
+- 用量行：新增 `input_tokens_estimated_unfinished`、`estimated_unfinished_calls`，来自 `usage_breakdown.estimated.unfinished_*`；
+  只统计已发起 HTTP 尝试的超时/失败调用，`input_tokens_reported` 口径不变。
 
 ### 每个点位最近为什么没触发（2026-09-27）
 

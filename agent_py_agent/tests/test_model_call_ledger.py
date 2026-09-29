@@ -172,6 +172,8 @@ def test_finished_model_call_records_provider_usage_and_cache_tokens() -> None:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "call_count": 0,
+                "unfinished_input_tokens": 0,
+                "unfinished_call_count": 0,
             },
         },
     }
@@ -431,6 +433,8 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "call_count": 0,
+                "unfinished_input_tokens": 0,
+                "unfinished_call_count": 0,
             },
         },
     }
@@ -552,6 +556,8 @@ def test_summary_counts_all_calls_after_detail_retention_limit() -> None:
                 "input_tokens": 70,
                 "output_tokens": 7,
                 "call_count": 7,
+                "unfinished_input_tokens": 0,
+                "unfinished_call_count": 0,
             },
         },
     }

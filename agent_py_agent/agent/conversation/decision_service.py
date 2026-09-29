@@ -88,6 +88,8 @@ class DecisionOutcome:
     connection_revision: str = field(default="", repr=False)
     deadline: float = 0.0
     experiment: dict | None = field(default=None, repr=False, compare=False)
+    # 字段用途: 建了调用记录的调用才有的链路事实（终态、超时阶段、各尝试分段毫秒、本地估算输入），只写结果日志，不参与采用。
+    transport: dict | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: 身份只取宿主 params/runner；owner_background必须有run且无thread，不能从历史材料取身份或把活跃会话改称后台。
@@ -400,18 +402,21 @@ def _with_experiment_facts(outcome: DecisionOutcome, call, active: ActiveDecisio
 
 
 # LLM: 普通调用与原先完全相同；实验调用在同一次调用后附上结算事实。用户中断照常传播，不产生结果或记录。
-# 函数用途: 执行一次决策调用并返回结果，实验路径额外带回原账结算视图。
+#   建了调用记录的（成功、超时、失败，含准入忙这类没发出请求的）再附链路事实，供 decide() 写进结果日志；调用前就结束的不带。
+# 函数用途: 执行一次决策调用并返回结果，实验路径额外带回原账结算视图，建了调用记录的额外带回链路分段计时。
 def _invoke(params, stage, request, backend, deadline, key, active) -> DecisionOutcome:
-    call = _experiment_call(request, active, stage=stage, key=key)
+    call, transport = _experiment_call(request, active, stage=stage, key=key), []
     outcome = _invoke_call(params, stage=stage, request=request, backend=backend, deadline=deadline, key=key,
-                           active=active, experiment=call)
-    return _with_experiment_facts(outcome, call, active)
+                           active=active, experiment=call, transport_facts=transport)
+    outcome = _with_experiment_facts(outcome, call, active)
+    return replace(outcome, transport=transport[-1]) if transport else outcome
 
 
 # LLM: 注册取消后再次复查堵住关闭/启动竞态；用户中断必须传播，设置取消与宿主关闭仅使建议失效，不能冒充用户停止。
 # 连接一返回响应就复位该连接的退避阶梯（进程内冷却表），之后的复核失败不算连接故障；实验结果固定 observe、不可采用。
+# transport_facts 原样交给调用边界收集链路分段计时，本函数不读它。
 # 函数用途: 调用原模型边界并核验响应绑定、摘要、请求模型和最新配置；不执行任何业务变更。
-def _invoke_call(params, *, stage, request, backend, deadline, key, active, experiment) -> DecisionOutcome:
+def _invoke_call(params, *, stage, request, backend, deadline, key, active, experiment, transport_facts) -> DecisionOutcome:
     from .decision_model_call import invoke_decision_model_call
 
     agent, point, revision = active.context, request.binding.point, request.binding.policy_revision
@@ -425,7 +430,7 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
             return DecisionOutcome(mode, "deadline", reason="budget_exhausted")
         response = invoke_decision_model_call(agent, params, request, backend, deadline=deadline,
             resource_key=("decision", stage.owner_ref, stage.thread_id, key[1], key[2]), interrupt_handle=active.handle,
-            experiment=experiment)
+            experiment=experiment, transport_facts=transport_facts)
         record_success(key)
         record_success((*key, point))
         _check_interrupted()

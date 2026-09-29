@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ..backends.transport_timing import PROGRESS_STATUS
 from .model_call_budget import (
     ModelCallBudgetError,
     ModelCallInputBudget,
@@ -27,6 +28,8 @@ TIMEOUT_STAGES = frozenset(
     {"first_event", "stream_idle", "wall_clock", "provider_declared", "provider_wall"}
 )
 _TERMINAL_STATUSES = frozenset({"failed", "finished", "timed_out"})
+# 没拿到供应商用量就结束的终态；已发起过 HTTP 尝试时，其本地估算输入单独记在 estimated.unfinished_*。
+_UNFINISHED_STATUSES = frozenset({"failed", "timed_out"})
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens")
 _PURPOSE_BUCKETS = ("main", "auxiliary", "decision")
 
@@ -118,6 +121,8 @@ class ModelCallProviderAttemptParams:
     error_type: str = ""
     retry_scheduled: bool = False
     request_surface: dict[str, Any] = field(default_factory=dict)
+    # 字段用途: 传输分段计时快照（phase 当前阶段、phase_ms 已完成阶段毫秒），只有开启计时的调用才有。
+    transport: dict[str, Any] = field(default_factory=dict)
 
 
 # LLM: 调用身份及首个终态固定；可追加传输事实，provider_usage_fields 缺失仍沿历史全有或全无来源解释。
@@ -154,6 +159,8 @@ class ModelCallRecord:
     output_tokens_seen: int = 0
     timeout_seconds: float | None = None
     timeout_stage: str = ""
+    # 字段用途: 超时那一刻最后一次 HTTP 尝试正处在的传输阶段（transport_timing.TRANSPORT_PHASES 之一），未计时为空串。
+    timeout_transport_phase: str = ""
     # 门槛2: 调用点算出的掐断时刻墙钟经过(now - started_at), 与 total_latency_seconds
     # 双持——total_latency 是 ledger 落账时刻自己算的, elapsed 是掐断时刻调用点算的,
     # 两者同源同值, 互相校验防账本自证。
@@ -200,6 +207,7 @@ class ModelCallRecord:
             "output_tokens_seen": self.output_tokens_seen,
             "timeout_seconds": self.timeout_seconds,
             "timeout_stage": self.timeout_stage,
+            "timeout_transport_phase": self.timeout_transport_phase,
             "elapsed_seconds": self.elapsed_seconds,
             "idle_silence_seconds": self.idle_silence_seconds,
             "error_type": self.error_type,
@@ -236,6 +244,8 @@ class _ModelCallTotals:
     provider_cache_write_input_tokens: int = 0
     estimated_input_tokens: int = 0
     estimated_output_tokens: int = 0
+    estimated_unfinished_input_tokens: int = 0
+    estimated_unfinished_call_count: int = 0
     provider_input_tokens_reported_call_count: int = 0
     provider_output_tokens_reported_call_count: int = 0
     provider_cache_read_input_tokens_reported_call_count: int = 0
@@ -381,13 +391,18 @@ class _ModelCallTotals:
                     "input_tokens": max(0, self.estimated_input_tokens),
                     "output_tokens": max(0, self.estimated_output_tokens),
                     "call_count": max(0, self.estimated_usage_call_count),
+                    # 超时/失败且已发起 HTTP 尝试的调用：发送前本地估算的输入，不是供应商回报
+                    "unfinished_input_tokens": max(0, self.estimated_unfinished_input_tokens),
+                    "unfinished_call_count": max(0, self.estimated_unfinished_call_count),
                 },
             },
         }
 
 
 # LLM: 显式 provider_usage_fields 按字段拆账；None 只为旧调用保留原信封级分类，不能推断旧字段是否真实报告。
-# 函数用途: 将成功调用的每个 token 字段归到供应商或本地估算，并独立记录已报告字段的次数。
+#   超时/失败且已发起过 HTTP 尝试的调用，其发送前本地估算输入单独进 estimated_unfinished_*，不冒充供应商回报；
+#   没发出尝试的（准入忙、许可拒绝、配置错误）不计，因为请求根本没离开本机。
+# 函数用途: 将成功调用的每个 token 字段归到供应商或本地估算，并独立记录已报告字段的次数及未完成调用的估算输入。
 def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
     empty = {
         "provider_input_tokens": 0,
@@ -396,8 +411,13 @@ def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
         "provider_cache_write_input_tokens": 0,
         "estimated_input_tokens": 0,
         "estimated_output_tokens": 0,
+        "estimated_unfinished_input_tokens": 0,
+        "estimated_unfinished_call_count": 0,
         **{f"provider_{name}_reported_call_count": 0 for name in _USAGE_FIELDS},
     }
+    if record.status in _UNFINISHED_STATUSES and record.provider_attempt_count > 0:
+        empty["estimated_unfinished_input_tokens"] = max(0, int(record.input_tokens))
+        empty["estimated_unfinished_call_count"] = 1
     if record.status != "finished":
         return empty
     explicit_fields = record.provider_usage_fields
@@ -683,6 +703,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                 last_activity_at=now,
                 timeout_seconds=max(0.0, float(params.timeout_seconds)),
                 timeout_stage=params.timeout_stage,
+                timeout_transport_phase=_last_transport_phase(record),
                 elapsed_seconds=max(0.0, float(params.elapsed_seconds)),
                 idle_silence_seconds=(
                     max(0.0, float(params.idle_silence_seconds))
@@ -728,13 +749,18 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             )
 
     # LLM: 物理观察允许晚于逻辑终态，但只修改 HTTP 事实及诊断；终态时钟、状态和用量不变，请求面仅按同线程或 run 比较。
-    # 函数用途: 记录真实 HTTP 尝试与缓存前缀变化，保留取消后仍在退出的 worker 观察结果。
+    #   status=PROGRESS_STATUS 只替换该尝试的 transport 分段计时，不改状态、完成/活动时间、尝试数和事件，未知尝试忽略。
+    # 函数用途: 记录真实 HTTP 尝试、传输分段计时与缓存前缀变化，保留取消后仍在退出的 worker 观察结果。
     def provider_attempt(
         self,
         params: ModelCallProviderAttemptParams,
     ) -> ModelCallRecord:
         with self._lock:
             record = self._require_record(params.call_id)
+            if params.status == PROGRESS_STATUS:
+                progressed = replace(record, provider_attempts=_with_transport(record.provider_attempts, params))
+                self._replace(progressed)
+                return progressed
             attempts = [dict(item) for item in record.provider_attempts]
             index = next(
                 (
@@ -757,22 +783,10 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                 metadata["cache_diagnostic"] = compare_request_surfaces(
                     previous.metadata["request_surface"] if previous else {}, params.request_surface,
                 )
-            payload = {
-                "attempt_id": params.attempt_id,
-                "status": params.status,
-                "method": params.method,
-                "path": params.path,
-                "http_status": max(0, int(params.http_status or 0)),
-                "error_type": params.error_type,
-                "retry_scheduled": bool(params.retry_scheduled),
-            }
+            payload = _attempt_payload(params, None if index is None else attempts[index], now)
             if index is None:
-                payload["started_at"] = now
                 attempts.append(payload)
             else:
-                payload["started_at"] = float(attempts[index].get("started_at") or now)
-                if params.status != "started":
-                    payload["finished_at"] = now
                 attempts[index] = payload
             updated = replace(
                 record,
@@ -879,6 +893,43 @@ def _append_event(events: tuple[str, ...], event: str) -> tuple[str, ...]:
     if events and events[-1] == event:
         return events
     return events + (event,)
+
+
+# LLM: 同一 attempt_id 的新事件整体替换旧条目，只沿用首次 started_at；已有条目收到非 started 事件才记 finished_at。
+#   本次事件没带计时快照时沿用该尝试上一份 transport，状态事件不能抹掉已记的分段计时。
+# 函数用途: 生成一次 HTTP 尝试在调用记录里的条目。
+def _attempt_payload(params: ModelCallProviderAttemptParams, previous: dict[str, Any] | None, now: float) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "attempt_id": params.attempt_id,
+        "status": params.status,
+        "method": params.method,
+        "path": params.path,
+        "http_status": max(0, int(params.http_status or 0)),
+        "error_type": params.error_type,
+        "retry_scheduled": bool(params.retry_scheduled),
+        "started_at": now if previous is None else float(previous.get("started_at") or now),
+    }
+    if previous is not None and params.status != "started":
+        payload["finished_at"] = now
+    transport = params.transport or (previous or {}).get("transport")
+    if transport:
+        payload["transport"] = dict(transport)
+    return payload
+
+
+# LLM: 进度事件只换计时快照；找不到同 attempt_id 的条目时原样返回，不凭进度事件新建尝试。
+# 函数用途: 把传输分段计时快照写到对应尝试上。
+def _with_transport(attempts: tuple[dict[str, Any], ...],
+                    params: ModelCallProviderAttemptParams) -> tuple[dict[str, Any], ...]:
+    return tuple({**item, "transport": dict(params.transport)} if str(item.get("attempt_id") or "") == params.attempt_id
+                 else item for item in attempts)
+
+
+# LLM: 只读最后一次尝试的计时快照；没有尝试或没开计时返回空串，不按耗时猜阶段。
+# 函数用途: 取超时那一刻最后一次 HTTP 尝试正处在的传输阶段。
+def _last_transport_phase(record: ModelCallRecord) -> str:
+    transport = record.provider_attempts[-1].get("transport") if record.provider_attempts else None
+    return str(transport.get("phase") or "") if isinstance(transport, dict) else ""
 
 
 # LLM: scope identity 只读结构化 request_id/run_id，禁止从 prompt、错误文案或路径推断。

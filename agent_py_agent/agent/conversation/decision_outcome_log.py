@@ -1,5 +1,6 @@
 # LLM: 决策结果日志属于 conversation 决策服务。decide() 的每个返回（成功、到期、冷却跳过、配置不可用……）按接入点追加一行
-#   结构化记录，只含点位、范围、模式、状态、原因、耗时和宿主身份编号，不含状态、题目、候选或回答正文。位置只认 owner 规范路径
+#   结构化记录，只含点位、范围、模式、状态、原因、耗时和宿主身份编号，不含状态、题目、候选或回答正文；建了调用记录的行另带
+#   transport 链路事实（各次 HTTP 尝试的分段毫秒、超时时所处阶段、发送前本地估算输入；attempts 为空即请求没发出），同样无正文。位置只认 owner 规范路径
 #   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总。
 #   新增字段须同步 decision_outcome_row、decision_outcome_summary 与 test_decision_outcome_log.py。
 #   另有 status=skipped 行：可选决策点已到触发点、该点已开启，却被结构化条件挡下（材料含 URL 查询串）时记录，
@@ -29,9 +30,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # LLM: 纯函数，只读阶段身份与结果的结构化字段；不读 response、题目或候选，调用方不得把正文塞进 outcome.reason。
+#   建了调用记录的结果另带 transport（链路事实，见 decision_model_call.decision_transport_facts），调用前就结束的行没有这个键。
 # 函数用途: 把一次决策结果投影成一行日志。
 def decision_outcome_row(stage: object, point: str, outcome: object, elapsed_seconds: float) -> dict[str, object]:
-    return {
+    row = {
         "schema": SCHEMA, "created_at": round(time.time(), 3), "point": str(point),
         "scope": str(getattr(stage, "scope", "") or ""), "mode": str(getattr(outcome, "mode", "") or ""),
         "status": str(getattr(outcome, "status", "") or ""), "reason": str(getattr(outcome, "reason", "") or ""),
@@ -39,6 +41,10 @@ def decision_outcome_row(stage: object, point: str, outcome: object, elapsed_sec
         "thread_id": str(getattr(stage, "thread_id", "") or ""), "run_id": str(getattr(stage, "run_id", "") or ""),
         "task_id": str(getattr(stage, "task_id", "") or ""), "experiment": bool(getattr(stage, "experiment", False)),
     }
+    transport = getattr(outcome, "transport", None)
+    if isinstance(transport, dict):
+        row["transport"] = transport
+    return row
 
 
 # LLM: 路径只认宿主 home_paths 的规范字段；没有该字段（旧替身或无 owner 的宿主）就不记录。I/O 失败吞掉并记日志，
@@ -81,7 +87,7 @@ def material_or_skip(agent: object, stage: object, point: str, build: Callable[[
         return None
 
 
-# LLM: 只读；按时间窗口汇总每个接入点各状态的次数，并给出最近几行（无正文）。坏行只计数，不中断审计。
+# LLM: 只读；按时间窗口汇总每个接入点各状态的次数，并给出最近几行（无正文，建了调用记录的行附链路计时）。坏行只计数，不中断审计。
 #   thread_ids 给出时只统计这些会话的行（调用方按可信范围解析，如 current_thread）；后台点位没有会话编号，随之排除。
 #   None 表示 owner 全部（含后台点位）。
 # 函数用途: 为审计工具提供"每个决策点调用了几次、分别是什么结果"。
@@ -98,8 +104,17 @@ def decision_outcome_summary(home_paths: object, *, since: float,
         counts = points.setdefault(str(row.get("point") or ""), {})
         status = str(row.get("status") or "")
         counts[status] = counts.get(status, 0) + 1
-    recent = [{key: row.get(key) for key in _RECENT_FIELDS} for row in rows[-_RECENT_ROWS:]]
+    recent = [_recent_row(row) for row in rows[-_RECENT_ROWS:]]
     return {"available": True, "points": points, "recent": recent, "unreadable_rows": len(report.load_errors)}
+
+
+# LLM: 固定字段缺失时给 None（与原先一致）；链路计时只在该行确有 transport 对象时带出，旧行不补键。
+# 函数用途: 把一行结果日志压成审计最近行。
+def _recent_row(row: dict[str, object]) -> dict[str, object]:
+    recent = {key: row.get(key) for key in _RECENT_FIELDS}
+    if isinstance(row.get("transport"), dict):
+        recent["transport"] = row["transport"]
+    return recent
 
 
 # 函数用途: 读取一行的记录时间，缺失或格式不对按 0 处理（落在任何窗口之外）。

@@ -104,6 +104,8 @@ def test_thread_model_usage_is_idempotent_partitioned_and_survives_restart(
             "input_tokens": 0,
             "output_tokens": 0,
             "call_count": 0,
+            "unfinished_input_tokens": 0,
+            "unfinished_call_count": 0,
         },
     }
 

@@ -18,6 +18,25 @@
 
 详见 [STORAGE_RETENTION.md](docs/design/STORAGE_RETENTION.md)。
 
+## Jev 决策调用的链路分段计时（B 第 0 步）（2026-09-28，分支 `claude/be-jev-transport-timing`，基于 `80b4afed8`，本地验证通过，待集成）
+
+- **起因**：dsh-9a 查明前台超时主要来自连到 Jev 的链路在某些时段变慢。
+  - 每次调用都经本机代理重新建 TCP、CONNECT 和 TLS，urllib 不复用连接；09-26 实测握手 0.8–3.6 秒。
+  - `timeout_stage` 只在内存里，各阶段耗时没落盘，分不清慢在代理还是 Jev 服务端。
+  - 超时调用在 model_usage 里 token 为 0，这就是用户看到的“缺报”。
+- **已实现（只量不改发送）**：
+  - 传输层新增 `backends/transport_timing.py`。只有观察者显式开启 `transport_timing` 时，每次 HTTP 尝试才分段计毫秒：
+    connect → proxy_connect → tls_handshake → request_send → first_byte → body_read，每段结束发一次 progress 事件。
+    目前只有决策调用开启；未开启的调用事件与原先完全相同。
+  - 计时只包裹标准库连接已有的步骤；发送字节、`max_retries=0`、发送许可、期限都不变，不复用连接。
+  - 账本：尝试条目带 `transport` 快照；progress 只换计时，不改状态、活动时间和事件；超时记 `timeout_transport_phase`。
+  - 落盘：决策结果日志里建了调用记录的行带 `transport`（`attempts` 为空表示请求没发出），内容是终态、超时阶段、超时时所处的传输阶段、本地估算输入、各尝试分段毫秒。
+  - model_usage：超时或失败、且已发起 HTTP 尝试的调用，本地估算输入记进 `usage_breakdown.estimated.unfinished_*`，
+    与 provider 桶分开。`audit_records` 的 decision 主题同步带出这两项。
+- **不做**：keep-alive 和连接复用，等拿到数据再定（B 后续步骤）；TUI 统计行口径不变。
+- **已知边界**：caller 超时后 worker 可能仍在传输，结果日志记的是超时那一刻的阶段；之后的迟到事实只在内存账本里。
+- 细节见 `TESTS.md` 同日条目与[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)“链路分段计时”一节。
+
 ## capability 配置缺文件就用 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`，本地验证通过，待集成）
 
 - **问题**：

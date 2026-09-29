@@ -238,6 +238,9 @@ def record_model_call_failed(
     )
 
 
+# LLM: 只把传输层观察事件里的结构化字段转成账本参数（含 progress 状态与 transport 分段计时快照），不读正文；
+#   非 dict 的 transport 按未计时处理。事件形状改动须同步 gateway_helpers._gateway_request_attempt 与账本 provider_attempt。
+# 函数用途: 把一次 HTTP 尝试观察事件记到对应模型调用记录上。
 def record_model_provider_attempt(
     ledger: ModelCallLedger,
     call_id: str,
@@ -254,6 +257,7 @@ def record_model_provider_attempt(
             error_type=str(event.get("error_type") or ""),
             retry_scheduled=event.get("retry_scheduled") is True,
             request_surface=dict(event.get("request_surface") or {}),
+            transport=event["transport"] if isinstance(event.get("transport"), dict) else {},
         )
     )
 

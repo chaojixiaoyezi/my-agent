@@ -117,6 +117,59 @@
   - 在工作区临时带上 `8bf9fdcff` 的修复（不提交），把插件相关 62 个测试文件、TUI 剪贴板和输入、guardrails、`constant_names_unique`、`code_size_script` 一起跑，共 68 个文件、1071 项全部通过，防线拦截 0 次（0 误报），耗时约 15 分钟；basetemp 跑完即删，测试未生成 pycache。
 - **合并顺序**：本分支必须和 `8bf9fdcff` 一起或在它之后集成，否则 web_board 那一条会按设计失败。
 
+## Jev 决策调用的链路分段计时（B 第 0 步）（2026-09-28，分支 `claude/be-jev-transport-timing`，基于 `80b4afed8`）
+
+- **新增测试** `test_decision_transport_timing.py`（20 项）不访问任何真实服务，替身有三个：
+  - 本机假 CONNECT 代理：可设回复延迟；
+  - 假 TLS：握手处按设定时长等待后原样返回 socket，不加密；
+  - 假服务端：首字节和正文可以分别延迟。
+- **传输层**：
+  - 代理 + HTTPS 全程：
+    - 六个阶段按顺序出现，各段注入的延迟都体现在对应阶段的毫秒数里；
+    - 事件里 started 一次、response_opened 一次、progress 六次；
+    - CONNECT 一次，POST 一次。
+  - 直连 HTTP 只有 connect、request_send、first_byte、body_read 四段；没开计时的调用，事件仍是原来的两条，不带 transport。
+  - proxy_connect、tls_handshake、first_byte、body_read 四个阶段分别超时：
+    - 最后一份快照停在该阶段，之前的阶段都已计时；
+    - 零重试，超时后不补发。
+- **账本**：
+  - progress 只换计时：状态、事件、活动时间、尝试数都不变，未知尝试不新建；
+  - 状态事件不带快照时，保留上一份计时；
+  - 超时记 `timeout_transport_phase`；
+  - 估算入账分四种情形：超时或失败、且已发出请求的计入，没发出的和成功的不计，供应商桶不受影响；
+  - 超时后迟到的尝试也会补记估算。
+- **全链路**（原配置 → `decide()` → 本机代理 / 假 TLS / 服务端）：
+  - 成功时，结果日志行带齐六段毫秒；
+  - proxy_connect、first_byte 两种超时下：
+    - 行里的 `timeout_phase` 正确；
+    - 估算输入进了 model_usage 快照（线程汇总和 decision 分区都有），`audit_records` 用量行也带出；
+    - 供应商输入为 0，发送次数不变；
+  - 调用前就结束（没建调用记录）的结果行不带 transport；旧行的最近行形状不变。
+- **形状断言更新**：`test_model_call_ledger.py` 3 处、`test_conversation_store.py` 1 处，estimated 的期望值补上两个值为 0 的新键。
+- **定向回归**：共 98 个测试文件：引用改动模块的 92 个，加 5 个扫描守卫（architecture_guardrails、constant_names_unique、
+  config_field_readers、recovery_code_policy、orchestration_tool_constants）和本次新文件。
+  - 结果：2572 passed、1 xfailed、1 xpassed、1 failed。
+  - 失败的是 `test_gateway_model_adoption.py::test_noncooperative_probe_timeout_retains_without_late_adoption`：
+    - 它只给决策 1 秒预算，当时机器 5–15 分钟平均负载 33–34；
+    - 它的 HTTP 发送和决策后端都是替身，走不到本次的传输计时；
+    - 单独连跑 3 次，以及最终复跑，都通过。
+  - 第一轮暴露两个问题，已修：
+    - 测试替身按 `_gateway_urlopen(req, request)` 签名写，接不住新增的计时参数：计时器改挂在本次尝试的 Request 上，签名不变；
+    - `*args/**kwargs` 被架构守卫拦下：响应类改为每次尝试生成的计时子类，建连包裹改用标准库调用时的三个位置参数。
+  - 另在 3.10、3.11 上跑了传输相关的 4 个文件，均通过。
+  - basetemp 跑完即删，未生成 pycache。
+- **变异验证**：scratchpad 里的 `mut_jev.py` 逐个就地改 21 处，跑新测试文件后按哈希核对还原
+  （`PYTHONDONTWRITEBYTECODE=1`，独立 pycache 前缀），21 个全部被抓到。变异点如下：
+  - 传输层：
+    - 去掉阶段推进门（`_tunnel` 读代理回复时会误记首字节）；
+    - 忽略隧道；首字节不推进；把发送阶段挪到取响应之后；毫秒写成秒；
+    - 读完正文不收尾；忽略开启开关；HTTPS 不记 TLS。
+  - 账本：忽略 progress；状态事件抹掉计时；超时不记阶段；没发出也计估算；成功也计估算。
+  - 落盘与审计：
+    - 线程汇总缺新键；不收集链路事实；worker 不开计时；
+    - 结果不挂 transport；日志行丢 transport；审计最近行丢 transport；审计不加估算；call_runtime 丢快照。
+- **复现**：`python3 -m pytest agent_py_agent/tests/test_decision_transport_timing.py -q`。
+
 ## capability 兜底值清理：只认 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-fallback-cleanup`，基于 `54880f8e9`）
 
 - **范围**：6 处调用点改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，删掉各自写的兜底值：

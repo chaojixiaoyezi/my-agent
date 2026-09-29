@@ -37,6 +37,12 @@ from .gateway_request_limits import (
     validate_request_limits,
 )
 from .provider_send_gate import provider_send_attempt
+from .transport_timing import (
+    PROGRESS_STATUS,
+    AttemptTiming,
+    finish_body_read,
+    instrument_connection,
+)
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
 _RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
@@ -94,6 +100,8 @@ _HARD_QUOTA_ERROR_CODES = frozenset(
 )
 _PROVIDER_ERROR_CODE_KEYS = frozenset({"code", "error_code", "reason", "status", "type"})
 _HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
+# 本次物理尝试的分段计时器挂在该尝试自己的 urllib Request 上，_gateway_urlopen 的调用形状不变。
+_ATTEMPT_TIMING_ATTR = "_my_agent_attempt_timing"
 _PROVIDER_ATTEMPT_OBSERVER = threading.local()
 
 
@@ -133,19 +141,23 @@ class GatewayRequest:
 
 
 # LLM: 观测开关仅作用当前 provider 线程；退出恢复嵌套作用域，不修改共享模型配置。
-# 函数用途: 绑定 HTTP 尝试观察者，可附加无正文的请求前缀摘要。
+#   transport_timing=True 时每次尝试另发 status=progress 的分段计时事件，并在尝试事件上附 transport 快照；只量不改发送。
+# 函数用途: 绑定 HTTP 尝试观察者，可附加无正文的请求前缀摘要与网络分段计时。
 @contextmanager
-def provider_attempt_observer(callback, *, cache_diagnostics: bool = False):
+def provider_attempt_observer(callback, *, cache_diagnostics: bool = False, transport_timing: bool = False):
     """Observe physical inference HTTP attempts in the current provider thread."""
 
     previous = getattr(_PROVIDER_ATTEMPT_OBSERVER, "callback", None)
     previous_diagnostics = getattr(_PROVIDER_ATTEMPT_OBSERVER, "cache_diagnostics", False)
+    previous_timing = getattr(_PROVIDER_ATTEMPT_OBSERVER, "transport_timing", False)
     _PROVIDER_ATTEMPT_OBSERVER.cache_diagnostics = cache_diagnostics
+    _PROVIDER_ATTEMPT_OBSERVER.transport_timing = transport_timing
     _PROVIDER_ATTEMPT_OBSERVER.callback = callback
     try:
         yield
     finally:
         _PROVIDER_ATTEMPT_OBSERVER.cache_diagnostics = previous_diagnostics
+        _PROVIDER_ATTEMPT_OBSERVER.transport_timing = previous_timing
         if previous is None:
             try:
                 delattr(_PROVIDER_ATTEMPT_OBSERVER, "callback")
@@ -155,10 +167,14 @@ def provider_attempt_observer(callback, *, cache_diagnostics: bool = False):
             _PROVIDER_ATTEMPT_OBSERVER.callback = previous
 
 
-def _emit_provider_attempt(event: dict[str, object]) -> None:
+# LLM: timing 只在观察者开启分段计时时非空，事件附当前快照；回调异常一律吞掉，观测永远不能改变请求结果。
+# 函数用途: 把一次 HTTP 尝试事件交给当前线程的观察者。
+def _emit_provider_attempt(event: dict[str, object], timing: AttemptTiming | None = None) -> None:
     callback = getattr(_PROVIDER_ATTEMPT_OBSERVER, "callback", None)
     if not callable(callback):
         return
+    if timing is not None:
+        event = {**event, "transport": timing.snapshot()}
     try:
         callback(dict(event))
     except Exception:
@@ -220,12 +236,13 @@ def post_json(
     remaining_deadline_seconds(request.deadline)
 
     # LLM: 读取只使用原响应 guard 和同一绝对期限；取消关闭连接但不赋予传输层任何业务提交权。
+    #   正文完整读完才结束分段计时的读正文阶段（未开启计时时 finish_body_read 原样返回）。
     # 函数用途: 完成一次有界 HTTP 正文读取，所有出口释放当前响应。
     def _once() -> bytes:
         with _gateway_response_scope(_open_gateway_request(request)) as (resp, response_guard):
             with _provider_interrupt_callback(response_guard.abort):
                 with _request_deadline_scope(request, response_guard):
-                    return read_response_body(resp, request)
+                    return finish_body_read(resp, read_response_body(resp, request))
 
     try:
         raw = _retry_unlabeled_rejection(_once) if request.max_retries is None else _once()
@@ -597,6 +614,7 @@ def _open_gateway_request(request: GatewayRequest):
 
 # LLM: 每次物理 open 都发布观察事实；显式重试合并无定位 400 与网络重试，严格错误正文也不能绕过 deadline/大小上限。
 # 带发送许可时，硬门位于最终字节与期限复核之后、started 遥测与任何 DNS/连接之前，不包 try/except。
+# 观察者开启分段计时时，计时器在 started 前创建（建连阶段从此刻起算），每个尝试事件附当时的阶段快照。
 # 函数用途: 发送一次连接及响应头请求，按当前信封限制登记失败或有限退避，不重放半截正文。
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int):
     req = _urllib_request(request)
@@ -614,7 +632,8 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         from .cache_diagnostics import request_surface
 
         base_event["request_surface"] = request_surface(request.payload, request.url)
-    _emit_provider_attempt({**base_event, "status": "started"})
+    timing = _attempt_timing(base_event, req)
+    _emit_provider_attempt({**base_event, "status": "started"}, timing)
     try:
         response = _gateway_urlopen(req, request)
     except InterruptedError:
@@ -632,7 +651,8 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
                 "retry_attempt": attempt + 1 if retry_scheduled else 0,
                 "retry_total": last_attempt,
                 "retry_wait_seconds": retry_wait_seconds,
-            }
+            },
+            timing,
         )
         if not retry_scheduled:
             raise
@@ -650,7 +670,8 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
                 "retry_attempt": attempt + 1 if retry_scheduled else 0,
                 "retry_total": last_attempt,
                 "retry_wait_seconds": retry_wait_seconds,
-            }
+            },
+            timing,
         )
         if not retry_scheduled:
             raise
@@ -661,9 +682,23 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
             **base_event,
             "status": "response_opened",
             "http_status": int(getattr(response, "status", 0) or 0),
-        }
+        },
+        timing,
     )
     return response
+
+
+# LLM: 仅当前线程观察者显式开启 transport_timing 时创建；进度事件沿用同一 attempt_id、状态固定为 PROGRESS_STATUS，
+#   账本只据此更新该尝试的计时字段。计时器挂到本尝试的 urllib Request 上，由 _gateway_urlopen 交给连接；
+#   未开启时返回 None、不碰 Request，传输行为与原先逐字节相同。
+# 函数用途: 为本次物理尝试创建网络分段计时器。
+def _attempt_timing(base_event: dict[str, object], req: urllib.request.Request) -> AttemptTiming | None:
+    if not getattr(_PROVIDER_ATTEMPT_OBSERVER, "transport_timing", False):
+        return None
+    timing = AttemptTiming(lambda snapshot: _emit_provider_attempt(
+        {**base_event, "status": PROGRESS_STATUS, "transport": snapshot}))
+    setattr(req, _ATTEMPT_TIMING_ATTR, timing)
+    return timing
 
 
 # LLM: 重试退避不得绕过请求绝对期限；仍复用原可中断等待，不新增定时任务或给下一次重置预算。
@@ -694,6 +729,7 @@ def _request_http_retry(exc: urllib.error.HTTPError, request: GatewayRequest, at
 
 
 # LLM: JSON/GET/SSE 共用 open 中断边界；期限复核替代已返回响应时仍须关闭它，HTTPError 未被替代则交原分类；DNS 不能强停。
+#   分段计时器只在开启计时的尝试里挂在 req 上，经连接选项交给连接实例；没有时连接与响应类完全是原样。
 # 函数用途: 按连接/读取和可选总期限发送请求，释放停止或到期后才返回的当前响应，保留默认生成合同。
 def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     """Open one provider request with distinct connect and read timeouts.
@@ -709,7 +745,8 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
     connect_timeout = _bounded_connect_timeout(request)
     read_timeout = _request_initial_read_timeout(request)
     open_guard = _GatewayOpenGuard()
-    transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard, request.deadline)
+    transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard, request.deadline,
+                                             getattr(req, _ATTEMPT_TIMING_ATTR, None))
     handlers = [
         _provider_proxy_handler(req.full_url),
         _SplitTimeoutHTTPHandler(transport_options),
@@ -866,19 +903,22 @@ def _abort_http_connection(connection: Any) -> None:
 
 
 # LLM: 双超时、可选绝对期限和 attempt-local guard 向 urllib 连接原样传递，连接完成后只使用剩余时间。
-# 类用途: 汇总一次 provider open 的连接/读取限制及精确中断句柄。
+#   timing 是本尝试的分段计时器（未开启时为 None），只属于当前 attempt。
+# 类用途: 汇总一次 provider open 的连接/读取限制、精确中断句柄及可选分段计时。
 @dataclass(frozen=True)
 class _SplitTimeoutOptions:
     connect_timeout: float
     read_timeout: float
     open_guard: _GatewayOpenGuard | None
     deadline: float | None = None
+    timing: AttemptTiming | None = None
 
 
 # LLM: HTTP 连接必须绑定本 attempt guard，显式总期限不得在连接后重新获得完整读取预算。
 # 类用途: 为 HTTP provider 分离连接和读取限制，保留当前连接取消与总期限事实。
 class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
     # LLM: guard/deadline 只属于当前 attempt；None 保留普通请求合同，不能跨请求共享取消状态。
+    #   分段计时只在选项带 timing 时装到本实例上（没有 TLS 阶段）。
     # 函数用途: 初始化带双超时和可选绝对期限的 HTTPConnection。
     def __init__(
         self,
@@ -903,6 +943,7 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
         self._provider_open_guard = transport_options.open_guard
         if transport_options.open_guard is not None:
             transport_options.open_guard.attach(self)
+        instrument_connection(self, transport_options.timing, tls=False)
 
     # LLM: connect 前后检查 typed abort；已花在 DNS/connect 的时间不会补回读取窗口，迟到连接不能移交。
     # 函数用途: 建立 HTTP 连接，成功后按实际剩余期限设置读取超时。
@@ -922,6 +963,7 @@ class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
 # 类用途: 为 HTTPS provider 分离连接和读取限制，暴露当前 TLS 连接的中断句柄。
 class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
     # LLM: guard/deadline 只绑定本 attempt；TLS context 和代理隧道继续沿标准库入口，不复制第二传输链。
+    #   分段计时只在选项带 timing 时装到本实例上（含 TLS 握手阶段）。
     # 函数用途: 初始化带 TLS、双超时和可选绝对期限的 HTTPSConnection。
     def __init__(
         self,
@@ -948,6 +990,7 @@ class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
         self._provider_open_guard = transport_options.open_guard
         if transport_options.open_guard is not None:
             transport_options.open_guard.attach(self)
+        instrument_connection(self, transport_options.timing, tls=True)
 
     # LLM: TLS 完成后复核 abort 和剩余 deadline，不能把停止或总期限过后才建成的连接移交。
     # 函数用途: 建立 HTTPS/TLS 连接并按本次剩余期限设置读取超时。

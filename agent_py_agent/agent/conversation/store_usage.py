@@ -197,6 +197,7 @@ class ModelUsageStore:
         return events, errors
 
     # LLM: 只累计原事件真值/估算及显式用途分区；旧事件缺用途时保留不可追溯，不反推为零决策消耗。
+    #   estimated.unfinished_* 是超时/失败调用的发送前本地估算，旧事件没有该键按 0 累计，不补算。
     # 函数用途: 汇总会话用量和用途，兼容旧事件且不重新解释旧计费事实。
     def summary(self, thread_id: str) -> dict[str, Any]:
         events, load_errors = self.events_report(thread_id)
@@ -211,7 +212,8 @@ class ModelUsageStore:
             "cache_write_input_tokens": 0,
             "call_count": 0,
         }
-        estimated = {"input_tokens": 0, "output_tokens": 0, "call_count": 0}
+        estimated = {"input_tokens": 0, "output_tokens": 0, "call_count": 0,
+                     "unfinished_input_tokens": 0, "unfinished_call_count": 0}
         for event in events:
             breakdown = event.model_calls.get("usage_breakdown")
             breakdown = breakdown if isinstance(breakdown, dict) else {}

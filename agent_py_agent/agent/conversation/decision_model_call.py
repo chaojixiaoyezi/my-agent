@@ -1,6 +1,7 @@
 # LLM: 普通入口沿原生 decide；实验入口先算经验上界、原账预留并签发单次发送许可，传输层硬门复核后才可联网。
 # 原 worker/终态/普通调用行为保持；实验结算在终态写入后的 finally 中执行，失败不退未知占用。
-# 模块用途: 把短决策接入原有界 worker 与模型调用账，超时及时返回并保留真实后台资源及迟到传输事实。
+# worker 开启传输分段计时（只量不改发送），终态后可把链路事实投影交给决策服务写结果日志。
+# 模块用途: 把短决策接入原有界 worker 与模型调用账，超时及时返回并保留真实后台资源、迟到传输事实及链路分段计时。
 from __future__ import annotations
 
 import hashlib
@@ -60,6 +61,7 @@ class DecisionModelDisallowed(RuntimeError):
 # LLM: experiment=None 保持原普通调用；实验只接受决策服务构造的 DecisionExperimentCall，上界越界或预留失败时不建调用记录。
 # 实验结果仍只是建议，调用方固定按 observe 处理；普通调用仍沿原绝对期限/准入/worker 且不重试。
 # 这是所有 Jev 联网（普通、实验、连接测试）的唯一入口，管理员禁用硬门放在最前：每次现读 owner 策略，拒绝时不建调用记录。
+# transport_facts 给出时，终态写入后把本次调用的链路分段计时投影追加进去（成功、超时、失败都有），供决策结果日志落盘。
 # 函数用途: 执行一次可选决策并记原账；实验路径在联网前完成上界计算、预算预留和发送许可签发。
 def invoke_decision_model_call(
     agent: object,
@@ -70,7 +72,7 @@ def invoke_decision_model_call(
     deadline: float,
     resource_key: Hashable,
     interrupt_handle: InterruptHandle | None = None,
-    experiment: DecisionExperimentCall | None = None,
+    experiment: DecisionExperimentCall | None = None, transport_facts: list[dict] | None = None,
 ) -> DecisionResponse:
     from ..user_space.owner_admin_controls import owner_decision_model_allowed
 
@@ -105,6 +107,7 @@ def invoke_decision_model_call(
             raise
         finally:
             _settle_experiment(ledger, record.call_id, experiment)
+            _collect_transport_facts(ledger, record.call_id, transport_facts)
             _record_metrics(backend, time.monotonic() - started_at, response if succeeded else None)
             publish_model_metrics(agent, params, pending=False, usage_only=True)
 
@@ -153,6 +156,42 @@ def _settle_experiment(ledger: ModelCallLedger, call_id: str, experiment: Decisi
     experiment.settlements.append(settlement)
 
 
+# LLM: 在终态写入后的 finally 中调用，只读原账记录，自身任何异常都吞掉并记日志，不能改变调用结果或掩盖原异常。
+#   caller 超时时 worker 可能仍在传输中继续，这里记下的是超时那一刻的阶段；之后的迟到事实只留在内存账本。
+# 函数用途: 把本次决策调用的链路分段计时投影交给调用方（未要求收集时什么都不做）。
+def _collect_transport_facts(ledger: ModelCallLedger, call_id: str, sink: list[dict] | None) -> None:
+    if sink is None:
+        return
+    try:
+        record = next((item for item in ledger.records() if item.call_id == call_id), None)
+        if record is not None:
+            sink.append(decision_transport_facts(record))
+    except Exception:
+        logging.getLogger(__name__).warning("决策调用的链路计时未能收集；不影响决策结果。")
+
+
+# LLM: 只投影结构化字段：调用终态、超时阶段（封闭集合）与超时时的传输阶段、发送前本地估算输入（不是供应商回报）、
+#   每次 HTTP 尝试的状态/HTTP 码/异常类型与分段毫秒；不含 URL、请求头或正文。改字段须同步决策结果日志文档与测试。
+# 函数用途: 生成一次决策调用写进结果日志的链路事实。
+def decision_transport_facts(record: object) -> dict[str, object]:
+    return {
+        "call_status": str(getattr(record, "status", "") or ""),
+        "timeout_stage": str(getattr(record, "timeout_stage", "") or ""),
+        "timeout_phase": str(getattr(record, "timeout_transport_phase", "") or ""),
+        "estimated_input_tokens": int(getattr(record, "input_tokens", 0) or 0),
+        "attempts": [_attempt_facts(item) for item in getattr(record, "provider_attempts", ())],
+    }
+
+
+# LLM: 条目来自账本 provider_attempts；没开计时的尝试 phase 为空串、phase_ms 为空，不补猜。
+# 函数用途: 把一次 HTTP 尝试条目压成只含状态与分段计时的小字典。
+def _attempt_facts(item: dict) -> dict[str, object]:
+    transport = item.get("transport") if isinstance(item.get("transport"), dict) else {}
+    return {"status": str(item.get("status") or ""), "http_status": int(item.get("http_status") or 0),
+            "error_type": str(item.get("error_type") or ""), "phase": str(transport.get("phase") or ""),
+            "phase_ms": dict(transport.get("phase_ms") or {})}
+
+
 # LLM: 身份只读宿主 params 和冻结绑定；逻辑 ID 来自 operation+digest，真实模型取已配置 decision backend，正文及凭据不进 metadata。
 # 实验调用额外写入授权比较所需的准确身份，run 取决策绑定；普通调用 metadata 与原先一致。
 # 函数用途: 为原账本准备决策调用身份及输入估算，不借用主模型名称或生成请求内容。
@@ -183,7 +222,8 @@ def _started_params(params: object, request: DecisionRequest, backend: object, *
 
 # LLM: thread-local HTTP 观察必须在实际 worker 安装；先领取准确保留再检查取消，准入槽与保留仅在实际退出时释放。
 # operation 由调用方绑定为普通 decide 或携带发送许可的 send，worker 不自行选择路径。
-# 函数用途: 在原可选名额内执行一次决策请求，传播身份上下文并记录真实 HTTP 尝试，不提交逻辑终态。
+# 观察者开启传输分段计时（只量不改发送）：各阶段进度实时进账本，caller 超时那一刻也能读到卡在哪个阶段。
+# 函数用途: 在原可选名额内执行一次决策请求，传播身份上下文并记录真实 HTTP 尝试及其分段计时，不提交逻辑终态。
 def _invoke_worker(
     agent: object, params: object, operation: Callable[[], object],
     ledger: ModelCallLedger, call_id: str, deadline: float,
@@ -201,7 +241,7 @@ def _invoke_worker(
         def observe(event: dict[str, object]) -> None:
             record_model_provider_attempt(ledger, call_id, event)
 
-        with global_llm_admission_slot(optional=True), provider_runtime_scope(agent, params), provider_attempt_observer(observe, cache_diagnostics=False):
+        with global_llm_admission_slot(optional=True), provider_runtime_scope(agent, params), provider_attempt_observer(observe, cache_diagnostics=False, transport_timing=True):
             _record_inflight(1)
             try:
                 _check_active(deadline)
