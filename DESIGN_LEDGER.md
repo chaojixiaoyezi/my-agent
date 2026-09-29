@@ -4,7 +4,7 @@
 
 下午数据盘写满后做的只读盘点。生产 home 里产品自己写的数据约 20 GB（发布备份 24 GB 另行处理），其中管理员 home 约 17.1 GB。按大小排前几位的是：旧版任务工作区 `O/tasks` 8.30 GB（有保留键，但 365 天且只认已完成的目录，基本回收不到，最大的是用户任务里克隆的项目），会话本地库 `local_store` 1.92 GB，每轮上下文快照 1.90 GB，子代理目录 `O/agents` 1.30 GB（13.3 万个条目，几乎都超过 90 天），`global_index` 四个只追加索引 0.93 GB，另有两处旧布局遗留 0.87 GB 和 0.80 GB。
 
-现有的 `MemoryRetentionService` 只在 Gateway 运行时触发，扫描写死在旧版 `O/tasks/`，新的 `O/runs/` 不在其内；工具输出、Gateway 请求记录、`runtime.db`、快照和子代理目录都没有任何清理。`audit_days` 扫的 `O/audit/` 是记忆归档原始事件，真正的审计日志 `O/logs/audit/audit.jsonl` 和 `O/audit_log.jsonl` 也没有任何清理（缺口 7）。方向：
+现有的 `MemoryRetentionService` 只在 Gateway 运行时触发，扫描写死在旧版 `O/tasks/`，新的两个运行工作区根 `O/runs/`、`O/audits/` 都不在其内（根由 `conversation/workspace_paths.py` 决定，扫描应从这里推导；2026-09-28 裁定两个根都纳入 `completed_task_days`，工具输出暂不扩）；工具输出、Gateway 请求记录、`runtime.db`、快照和子代理目录都没有任何清理。`audit_days` 扫的 `O/audit/` 是记忆归档原始事件，真正的审计日志 `O/logs/audit/audit.jsonl` 和 `O/audit_log.jsonl` 也没有任何清理（缺口 7）。方向：
 
 - 一张存储登记表作为唯一保留权威；
 - 只追加的日志和索引按段轮转或整理压缩；

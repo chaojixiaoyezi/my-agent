@@ -83,7 +83,8 @@
 
 - **记忆与运行事实**：`O/memory_archive/{runtime_facts,tokens,task_progress,compact_applies}`、`O/memory/hooks/`（`storage.py:160` 的
   `enforce_retention` 没有调用方）。
-- **审计与日志**：`O/logs/audit/audit.jsonl`、`O/audit_log.jsonl`、`O/audits/`。
+- **审计与日志**：`O/logs/audit/audit.jsonl`、`O/audit_log.jsonl`（见缺口 7）。
+- **审计类运行工作区**：`O/audits/<audit_id>/`，与 `O/runs/` 同为运行工作区根，不是日志（见缺口 1）。
 - **个人与身份数据**：`O/media/input/`、`O/persona/{versions.jsonl,backups/}`、`identity/**`、`O/sessions/`。
 - **调度、监听与协作**：`O/data/scheduler/history.jsonl`、`O/watch_state/` 的归档（按设计永不删除）、
   `O/{capability_requests,temporary_grants}/`（只标过期不删）、`WS/collaboration/**`。
@@ -92,7 +93,13 @@
 ## 5. 现有机制的缺口
 
 1. **保留扫描只看旧布局**：`completed_task_days`、`tool_output_days_after_terminal`、`subagent_scratch_days` 只扫 `O/tasks/`，
-   新的运行工作区都写在 `O/runs/`（`conversation/workspace_paths.py:1-4`、`run_task_workspace_writer.py:551`），实际只清旧布局。
+   实际只清旧布局。新的运行工作区有两个根，走哪个由 `conversation/workspace_paths.py:16-18` 的 `durable_work_root` 按工作类型决定：
+   - 审计类工作写 `O/audits/<audit_id>/`（同文件 `:21-25`），由 `conversation/audit_lifecycle.py:293` 激活，同样带 `work/state.json`；
+   - 其余运行写 `O/runs/<date>/<sha24>/`（`agent_core/run_task_workspace_writer.py:551`，这里直接取 `owner_runs_dir`，与上面是同一个根）。
+
+   同文件的 `validated_durable_work_path`（`:30-55`）已经列出全部持久工作根：`O/runs/`、旧的 `O/tasks/` 和 `O/audits/`。保留扫描的根列表
+   应当从这个权威推导，不在扫描里另写目录。2026-09-28 裁定：`O/runs/` 与 `O/audits/` 都纳入 `completed_task_days`（365 天）；
+   `tool_output_days_after_terminal` 两个根都暂不扩，实现另行提交。
 2. **没有 Gateway 就不清理**：保留只在 Gateway 维护线程里跑，纯 CLI 使用或 Gateway 长期不开时不会自动执行。
 3. **审计清理命令指错文件**：`audit-log --cleanup` 按裸配置组路径（`cli/audit_log_cmd.py:108-131`），解析成当前目录下相对的
    `data/audit/audit.jsonl`（`audit/paths.py:16`），而不是 `O/logs/audit/audit.jsonl`。
