@@ -520,6 +520,13 @@ def test_cancel_stops_the_bound_task_turn_during_a_model_call(tmp_path, monkeypa
     _require(not worker.is_alive(), "后台 drain 没有在时限内结束")
     if errors:
         raise RealChainBroken(f"后台回合在真实链路上抛错：{errors[0]!r}") from errors[0]
+    # 取消工具会给发送方 A 发取消通知并唤醒 A；A 的前台取消回合结束前，这条唤醒在忙通道上只能空等，
+    # 后台 drain 的 10 轮 tick 可能先用完（542139f95 上实测余量 1–4 轮，门禁因此时过时不过）。
+    # B 的派活唤醒必须在这一片结束时就结案，先单独断言；A 的通知唤醒等前台回合结束后在主线程再排空。
+    b_wakes = [wake for wake in chain.agent.conversation_store.wakes.pending(limit=0)
+               if wake.thread_id == chain.threads["B"]]
+    assert not b_wakes, f"取消后 B 的派活唤醒没有结案：{b_wakes}"
+    chain.drain()
 
     cancels = [row for row in chain.tool_outputs("cancel_session_task") if row.get("task_id") == task.task_id]
     _require(cancels, "工具操作账本里没有这次取消的记录")
