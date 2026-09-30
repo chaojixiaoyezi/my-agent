@@ -19,6 +19,12 @@
 
   9 个变异全部被抓住。其中只去掉 effect_outcome 时，操作账复现为 `TOOL_OPERATION_OUTCOME_UNKNOWN`。
 
+## 《模型管理使用说明》更新：子代理实况、逐模型思考档位实测与回执一致性（2026-09-30，文档，已完成）
+
+- **内容**（补进 docs/guides/MODEL_GUIDE.md）：①派子代理后用 `list_agents` 可看子代理实际用的模型和智能程度（节点 `model`＝"名称（编号）"/「继承会话默认」/「未知」，`reasoning_effort`＝档位/「默认」）；②各模型思考档位实际能不能调的 2026-09-30 逐模型实测大白话表（ChatGPT 订阅能调无关闭档、DeepSeek 官方能调能关、opencode v4.1-flash 能关思考档位作用弱、opencode v4-flash 与 MiniMax-M2.7 不支持、MiniMax-M3 只能开/关，只写 REASONING_EFFORT.md 复测表有依据的）；③`/effort` 回执与实际发送一致（不支持关闭思考时如实说「本设置不改变请求」，服务商声明换算时写实际发送档位如「实际发送 high」）；④常见疑问新增「设了 max 回执说实际发送 xhigh/high？——服务商只声明到那一档」。
+- **依据**：agent_py_agent/agent/agent_core/agent_tree/node_rendering.py（list_agents 节点投影）、docs/modules/subagent/ORCHESTRATION_TOOL_REFERENCE.md（节点字段说明）、docs/design/REASONING_EFFORT.md 第 2 节「2026-09-30 复测」表与第 5 节、agent_py_agent/agent/backends/reasoning_control.py（describe_config_reasoning_effect 回执）。
+- **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
+
 ## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`，已实现，待集成）
 
 - **来源**：能力包验收 G03 发现接替已结束子代理时，追加式事件日志里只有普通保存（`subagent_run_saved`）或状态记录，没有专门的“接替”条目；接替事实只在权威 takeover_records 与 TAKEOVER.md 里。要求只读审计投影，不建第二份状态。

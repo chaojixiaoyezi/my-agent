@@ -27,6 +27,15 @@
   - 相关回归（+`test_native_truncated_write_recovery.py` +`test_gateway_model_adoption.py` +`test_compact_media_recovery.py`）→ 62 passed。
 - 未做真实供应商端到端（本组测试只替换 HTTP 入口）；产品行为与“有界纠正”设计描述一致，无需改产品代码。
 
+## 《模型管理使用说明》更新（2026-09-30，纯文档，已完成）
+
+- 更新 `docs/guides/MODEL_GUIDE.md`：新增「各模型实际能不能调（2026-09-30 逐模型实测）」表、「/effort 回执会如实告诉你实际发送什么」、「怎么看子代理实际用的模型和档位」（list_agents 节点 model / reasoning_effort），常见疑问新增「设了 /effort max 回执说实际发送 xhigh/high」一条；同步 DESIGN_LEDGER.md（台账条目）。
+- 未改生产代码，无直接相关的 pytest 用例；本条目记录文档验收命令与结果：
+  - `$PY scripts/check_doc_sync.py`：通过
+  - `git diff --check`：通过
+  - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
+  - 未跑 `check_code_size.py`（纯文档任务，任务明确可不跑）
+
 ## 分段摘要来源不收 Responses 思考密文（2026-09-30，分支 `claude/38-compact-segment-strip-ciphertext`，基于 step16t `10041de02`）
 
 - `test_compact_message_source.py` 新增：
