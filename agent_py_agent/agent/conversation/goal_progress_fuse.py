@@ -32,8 +32,6 @@ def next_idle_slice_count(previous: int, progressed: bool, limit: int) -> tuple[
 def record_goal_continuation_fuse(
     store: GoalStore, request: dict[str, Any]
 ) -> tuple[ThreadGoal | None, bool]:
-    from dataclasses import replace
-
     from ..gateway_parts.io import update_json_file_atomic
     from ..runtime_errors import DataCorruptionError
     from .store_goals import (
@@ -67,43 +65,11 @@ def record_goal_continuation_fuse(
         current = _select_thread_goal(goals, goal_id=goal_id)
         if current is None or current.status != "active" or current.task_id != task_id:
             return data
-        raw_state = current.metadata.get(FUSE_METADATA_KEY)
-        state = dict(raw_state) if isinstance(raw_state, dict) else {}
-        processed = state.get("processed_wake_ids")
-        processed_ids = (
-            [str(value) for value in processed if str(value)]
-            if isinstance(processed, list)
-            else []
-        )
-        if wake_id in processed_ids:
+        next_state, tripped = _next_fuse_state(current, wake_id, progressed, limit)
+        if next_state is None:
             updated_goal = current
             return data
-        try:
-            previous = int(state.get("idle_slices", 0) or 0)
-        except (TypeError, ValueError):
-            previous = 0
-        idle_slices, tripped = next_idle_slice_count(previous, progressed, limit)
-        next_state: dict[str, Any] = {
-            "idle_slices": idle_slices,
-            "processed_wake_ids": [*processed_ids, wake_id][-16:],
-            "reason_code": NO_PROGRESS_REASON_CODE if tripped else "",
-        }
-        metadata = {**current.metadata, FUSE_METADATA_KEY: next_state}
-        time_used = current.time_used_seconds
-        updated_at = current.updated_at
-        revision = current.revision
-        if tripped:
-            time_used += store.clock.take_elapsed_seconds(current)
-            updated_at = current_time
-            revision += 1
-        updated_goal = replace(
-            current,
-            status="paused" if tripped else current.status,
-            time_used_seconds=time_used,
-            updated_at=updated_at,
-            revision=revision,
-            metadata=metadata,
-        )
+        updated_goal = _goal_with_fuse(store, current, next_state, current_time)
         return _goal_collection_payload(
             [updated_goal if goal.goal_id == current.goal_id else goal for goal in goals]
         )
@@ -112,6 +78,51 @@ def record_goal_continuation_fuse(
     if tripped and updated_goal is not None:
         store.clock.clear(thread_id, goal_id=goal_id)
     return updated_goal, tripped
+
+
+# LLM: 纯计算，不读写盘：同一 wake 已记过账返回 (None, False)，调用方不重复计数；否则给出新的 fuse 子对象
+#   （连续空片数、最近 16 个已处理 wake、原因码）与是否熔断。
+# 函数用途: 按上一次计数和本片有无进展，算出新的熔断状态。
+def _next_fuse_state(
+    current: ThreadGoal, wake_id: str, progressed: bool, limit: int
+) -> tuple[dict[str, Any] | None, bool]:
+    raw_state = current.metadata.get(FUSE_METADATA_KEY)
+    state = dict(raw_state) if isinstance(raw_state, dict) else {}
+    processed = state.get("processed_wake_ids")
+    processed_ids = [str(value) for value in processed if str(value)] if isinstance(processed, list) else []
+    if wake_id in processed_ids:
+        return None, False
+    try:
+        previous = int(state.get("idle_slices", 0) or 0)
+    except (TypeError, ValueError):
+        previous = 0
+    idle_slices, tripped = next_idle_slice_count(previous, progressed, limit)
+    return {
+        "idle_slices": idle_slices,
+        "processed_wake_ids": [*processed_ids, wake_id][-16:],
+        "reason_code": NO_PROGRESS_REASON_CODE if tripped else "",
+    }, tripped
+
+
+# LLM: 未熔断只替换 fuse 子对象；熔断（原因码为 NO_PROGRESS_REASON_CODE）时沿既有 paused 状态结算活跃时长、
+#   更新时间并推进内容 revision。副作用：熔断时从共享时钟取走本段已用时长。
+# 函数用途: 生成写回目标集合的新目标记录。
+def _goal_with_fuse(
+    store: GoalStore, current: ThreadGoal, next_state: dict[str, Any], current_time: float
+) -> ThreadGoal:
+    from dataclasses import replace
+
+    metadata = {**current.metadata, FUSE_METADATA_KEY: next_state}
+    if next_state.get("reason_code") != NO_PROGRESS_REASON_CODE:
+        return replace(current, metadata=metadata)
+    return replace(
+        current,
+        status="paused",
+        time_used_seconds=current.time_used_seconds + store.clock.take_elapsed_seconds(current),
+        updated_at=current_time,
+        revision=current.revision + 1,
+        metadata=metadata,
+    )
 
 
 # LLM: 用户消息和恢复只修改 fuse metadata，不改目标正文、内容版本或执行状态。

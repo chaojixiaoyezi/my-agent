@@ -97,50 +97,16 @@ def continue_goal_after_report(
     if not report.goal_continuation_allowed:
         return
     try:
-        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-        goal = dependencies.goals.load(
-            signal.thread_id,
-            goal_id=str(metadata.get("goal_id") or "").strip(),
-        )
-        if (
-            goal is None
-            or goal.goal_id != str(metadata.get("goal_id") or "")
-            or goal.task_id != str(signal.root_task_id or "")
-        ):
+        loaded = _active_goal_for_signal(dependencies, signal)
+        if loaded is None:
             return
-        task_status = dependencies.task_status(signal.thread_id, goal.task_id)
-        if goal.status != "active":
-            if goal.status in {"blocked", "usage_limited", "budget_limited"}:
-                dependencies.tasks.update_status(
-                    {"task_id": goal.task_id, "status": "interrupted"}
-                )
-            return
-        if task_status != "active":
-            return
-        goal, tripped = dependencies.goals.record_continuation_fuse(
-            {
-                "thread_id": goal.thread_id,
-                "goal_id": goal.goal_id,
-                "task_id": goal.task_id,
-                "wake_signal_id": signal.wake_signal_id,
-                "progressed": slice_has_progress(signal, report, goal, task_status),
-                "idle_limit": dependencies.goal_continuation_idle_limit,
-                "now": now,
-            }
-        )
-        if goal is None:
-            return
-        if tripped:
-            if dependencies.queue_no_progress_notice is not None:
-                queued = dependencies.queue_no_progress_notice(goal)
-                if queued is False:
-                    _LOGGER.warning("thread goal no-progress notice was not queued(goal=%s)", goal.goal_id)
-            return
-        if goal.status != "active":
+        goal = _record_continuation_slice(dependencies, signal, report, _GoalSlice(*loaded, now))
+        if goal is None or goal.status != "active":
             return
         subagent_phase, state_error = dependencies.subagent_phase(goal.task_id)
         if subagent_phase == "subagents_active" or state_error:
             return
+        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         dependencies.raise_wake(
             goal,
             channel=str(metadata.get("channel") or ""),
@@ -149,3 +115,54 @@ def continue_goal_after_report(
         )
     except Exception:
         _LOGGER.warning("thread goal continuation failed", exc_info=True)
+
+
+# LLM: 本片续跑判定需要的三项事实：wake 精确匹配的 active 目标、它的任务状态、本次结算时刻。
+# 类用途: 打包一次续跑记账的输入，保持各函数参数不超过 4 个。
+@dataclass(frozen=True)
+class _GoalSlice:
+    goal: object
+    task_status: str
+    now: float
+
+
+# LLM: 只认 wake metadata 里的精确 goal_id 与 root_task_id；目标非 active 时按原规则把 blocked/usage_limited/
+#   budget_limited 的任务标成 interrupted 并返回 None；任务不是 active 也返回 None。副作用：可能更新任务状态。
+# 函数用途: 找到这个 wake 对应、仍在运行的目标及其任务状态，找不到就返回 None。
+def _active_goal_for_signal(dependencies: GoalContinuationDependencies, signal: WakeSignal) -> tuple[object, str] | None:
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    goal = dependencies.goals.load(signal.thread_id, goal_id=str(metadata.get("goal_id") or "").strip())
+    if (goal is None or goal.goal_id != str(metadata.get("goal_id") or "")
+            or goal.task_id != str(signal.root_task_id or "")):
+        return None
+    task_status = dependencies.task_status(signal.thread_id, goal.task_id)
+    if goal.status != "active":
+        if goal.status in {"blocked", "usage_limited", "budget_limited"}:
+            dependencies.tasks.update_status({"task_id": goal.task_id, "status": "interrupted"})
+        return None
+    return (goal, task_status) if task_status == "active" else None
+
+
+# LLM: 按结构化进展记一片（GoalStore.record_continuation_fuse 原子去重落账）；熔断时排入宿主提示并返回 None，
+#   不再续跑；目标已不存在也返回 None。不读正文。
+# 函数用途: 记下本片有没有进展，决定是否还能继续自动续跑。
+def _record_continuation_slice(
+    dependencies: GoalContinuationDependencies, signal: WakeSignal, report: BackgroundMainAgentReport, facts: _GoalSlice,
+) -> object | None:
+    goal, tripped = dependencies.goals.record_continuation_fuse(
+        {
+            "thread_id": facts.goal.thread_id,
+            "goal_id": facts.goal.goal_id,
+            "task_id": facts.goal.task_id,
+            "wake_signal_id": signal.wake_signal_id,
+            "progressed": slice_has_progress(signal, report, facts.goal, facts.task_status),
+            "idle_limit": dependencies.goal_continuation_idle_limit,
+            "now": facts.now,
+        }
+    )
+    if goal is None or not tripped:
+        return goal
+    notify = dependencies.queue_no_progress_notice
+    if notify is not None and notify(goal) is False:
+        _LOGGER.warning("thread goal no-progress notice was not queued(goal=%s)", goal.goal_id)
+    return None
