@@ -23,7 +23,7 @@
   连续同 role 消息不合并、无签名思考不删、后台车道冷却不改（反复失败由毒丸 step16m 收口），理由与边界见
   [docs/design/PROVIDER_WIRE_CONTRACT.md](docs/design/PROVIDER_WIRE_CONTRACT.md)。
 - **证据**：MiniMax-M2.7/M3 官网实测，孤儿结果两者都 400、调用与结果之间夹 user 消息 M3 400；产品组包对 6 段坏历史生成的
-  24 个请求，修整前 5 个 400，修整后全部 200（`~/.my-agent/decision-evidence/wire-contract-2026-09-30/`）。
+  24 个请求，修整前 7 个 400（M2.7 2 个，M3 5 个），修整后全部 200（`~/.my-agent/decision-evidence/wire-contract-2026-09-30/`）。
 - **待定（9a 复审建议，不阻断）**：主链路上还有第二套出站孤儿清扫（`message_adapter.strip_orphaned_tool_blocks`，由
   `tool_ir_history.project_native_provider_messages` 与 `loop_support` 调用），它按全局 id 集合配对且 `discard("")`。空 id 的真实结果
   在上游就被当孤儿删掉，出口修整只能再补一个"结果未知"。现有服务商都会给调用 id，线上没有影响。
