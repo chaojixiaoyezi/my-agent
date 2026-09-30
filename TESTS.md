@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 智能程度逐模型真实审计（2026-09-30，38）
+
+- **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +
+  `provider_runtime_scope`，档位经 `reasoning_request_values` 换算；同一道题、每档 3 次按轮交替，另有同接口其它模型每档 1 次。共 237 次请求。
+- **记录**：实际发出的推理字段、HTTP 状态、异常类型、token 数、思考块字数、答案是否为 64；不存正文与异常原文里的凭据。
+- **结果**：见 `docs/design/REASONING_EFFORT.md` 第 2 节复测表；证据 `~/.my-agent/decision-evidence/reasoning-effort-audit-20260930/`
+  （`matrix.py` 可重跑，`analysis.txt` 为汇总与判定）。
+
 ## /effort 回执与 Responses 实际发送同一换算（2026-09-30，分支 `claude/38-effort-receipt`，基于 main `bf4f740c3`）
 
 - `test_responses_reasoning.py`：

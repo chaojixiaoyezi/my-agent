@@ -1,5 +1,19 @@
 # 设计台账
 
+## 智能程度（/effort）逐模型真实审计（2026-09-30，分支 `claude/38-effort-receipt`，38 执行）
+
+- **范围**：生产 local/main 模型目录里每个对话模型，产品后端真实请求，隔离目录副本（600、令牌不刷新、用完删）。详表见
+  [智能程度设计](docs/design/REASONING_EFFORT.md) 第 2 节“2026-09-30 复测”。
+- **结论**：没有任何字段被服务商拒绝。能真正调档的：ChatGPT 订阅（须档案声明 `reasoning_levels`，否则最高档只发 high），
+  DeepSeek 官方（v4-pro 明显，v4-flash 在这道题上差距小）。只能开 / 关：DeepSeek Anthropic 兼容、opencode v4.1-flash（关思考生效）、
+  MiniMax M3（用 budget）。不支持：opencode v4-flash、MiniMax M2.7。本地 qwen 与 step7 relay 不可达。
+- **已改**：`/effort` 回执与 Responses 实际发送同一换算（`79b398484`）。已知表不改：同一中转 / 服务商下模型表现不同，按档案声明。
+- **待集成者经产品入口写档案（待定）**：
+  - ChatGPT 订阅五个档案补 `reasoning_levels`（从订阅目录重新勾选即可刷新）；
+  - opencode `deepseek-v4.1-flash` 声明 `reasoning_control: effort`（主要为了关思考生效）；
+  - MiniMax `M3` 声明 `reasoning_control: budget`（只开 / 关）；
+  - opencode `deepseek-v4-flash`、MiniMax `M2.7` 保持不声明（none）。
+
 ## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
 
 - **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的

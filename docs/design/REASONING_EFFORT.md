@@ -22,6 +22,33 @@
 
 结论：同一个参数在不同服务商上的效果差别很大，“请求被接受”不等于“生效”。所以控制方式必须按模型如实登记，不能按协议一刀切。
 
+### 2026-09-30 复测（生产目录每个对话模型，产品后端，隔离副本）
+
+同一道题、同一判定口径（`reasoning_probe_judge`），每个档位 3 次（部分同接口的其它模型只跑 1 次看是否被拒），按轮交替。
+请求走 `selected_model_config` + `get_backend` + `provider_runtime_scope`，档位经产品的 `reasoning_request_values` 换算；
+只记实际发出的推理字段、token 数、思考块字数和答案对不对，不存正文。证据 `~/.my-agent/decision-evidence/reasoning-effort-audit-20260930/`。
+
+| 接口 · 模型 | 字段被拒？ | 关闭思考 | low → max（中位） | 结论 |
+|---|---|---|---|---|
+| DeepSeek 官方 OpenAI 兼容 · v4-flash | 没有 | 生效（0 思考） | 推理 1129 → 1424，默认 1308，两组重叠 | 这道题上差别小；v4-pro 单次 1522 → 10292 |
+| DeepSeek 官方 Anthropic 兼容 · v4-flash | 没有（effort、budget 都接受） | 生效 | effort 输出 1163 → 1524，budget 1099 → 1439，重叠 | 开 / 关确定；v4-pro 的 effort 单次 1493 → 10038 |
+| opencode Go · deepseek-v4-flash | 没有 | 不生效（仍在思考） | 输出 1711 → 1372，默认 955 | 不支持调节 |
+| opencode Go · deepseek-v4.1-flash | 没有 | 生效（0 推理、0 思考） | 推理 1068 → 1280，默认 1260 | 能关思考，档位作用弱 |
+| MiniMax 官方 · M2.7（minimaxi.com 与 minimax.cn） | 没有 | 不生效 | 输出 6135 → 5133，默认 5986 | 总是深度思考 |
+| MiniMax 官方 · M3 | 没有 | —— | budget 开启思考：有思考块，12 次答对 11，但量不随档位；effort 不开思考，多次只回 2 个 token 答错 | 只能开 / 关，用 budget |
+| ChatGPT 订阅 · gpt-6-luna（Responses） | 没有（low…max） | 目录没有 none / minimal，不发字段 | 未声明档位时 max 实发 high：312 → 429（分不开）；声明后 max：312 → 580 | 声明档位后判定“支持” |
+| ChatGPT 订阅 · gpt-6.1-sol / gpt-6-astra / gpt-6-sol / gpt-5.6-sol | 没有 | 同上 | 各 1 次，low → 声明后 max：103→207、105→211、146→211、283→345 | 同上 |
+| 本地 qwen（127.0.0.1:8901）、step7 relay（127.0.0.1:18881） | —— | —— | —— | 拒绝连接，不可达 |
+
+与 09-26 相比：DeepSeek 官方 v4-flash 在这道题上 low 和 max 的差距变小（当时推理 919 → 1887）；Anthropic 兼容接口的关闭思考与 opencode
+v4.1-flash 的关闭思考现在都生效。结论不变的：opencode v4-flash 与 MiniMax M2.7 不支持调节；MiniMax M3 只能开 / 关。
+
+**据此的处理**：
+- 已知表不加条目。同一个中转（opencode）、同一个服务商（MiniMax）下不同模型表现不同，域名级默认值会误伤，改按模型档案声明
+  （`reasoning_control`、`reasoning_levels`，由集成者经 `/model` 写入）。
+- 回执如实说明 Responses 实际发送（见第 5 节，分支 `claude/38-effort-receipt`）。
+- 顺带发现：ChatGPT 订阅的 WebSocket 传输 49 次里有 2 次“回复完成前断开”（约 23–24 秒，`ConnectionClosedError`，产品没保留关闭码），已交集成者。
+
 ## 3. 档位和控制方式
 
 - **档位**（用户层）：`auto`（不发任何参数，服务商默认）、`off`（关闭思考）、`low`、`medium`、`high`、`max`。
