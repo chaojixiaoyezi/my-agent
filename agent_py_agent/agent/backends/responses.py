@@ -61,6 +61,13 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["instructions"] = "\n\n".join(item["content"] for item in payload["input"] if item.get("role") == "system")
             payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
         validate_responses_input(payload["input"])
+        from .provider_headers import current_provider_session
+
+        session = current_provider_session()
+        if session:
+            # 参考官方 Codex：同一会话的请求带上稳定缓存键，让服务商把同一会话路由到同一份提示缓存；
+            # 只在绑定宿主会话时写入，绝不生成随机键，避免破坏缓存命中。
+            payload["prompt_cache_key"] = session
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
         if self.stream_enabled:
             payload["stream"] = True

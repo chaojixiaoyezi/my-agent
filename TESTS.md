@@ -43,6 +43,19 @@
   `test_native_tool_ir*`、`test_reasoning*`、`test_message_adapter*`、`test_*context_pressure*`、`test_tool_ir*`、`test_wire_contract*` 共 1274 passed。
 - 变异 6/6 被杀：不认 responses_reasoning、跨模型也放行、不校验 item、不校验 model、分类器沿用旧规则、文字判定沿用旧规则。
 
+## Responses 请求体带会话级提示缓存键 prompt_cache_key（2026-09-30，分支 `worker/ds1-responses-cache-key`）
+
+- **新增** `test_responses_cache_key.py`：
+  - `test_payload_carries_cache_key_inside_session_scope`：`provider_session_scope` 内请求体带 `prompt_cache_key`，值等于 `current_provider_session()`。
+  - `test_payload_omits_cache_key_outside_session_scope`：未绑定会话时不带该键。
+  - `test_same_thread_reuses_the_same_key`：同一线程（同一 scope）两次请求键相同。
+  - `test_different_threads_get_different_keys`：不同 thread_id 的 scope 键不同。
+  - `test_cache_key_contains_no_credentials`：键值不含 api_key / token / 明文密钥子串。
+  - `test_subscription_mode_payload_carries_the_cache_key`：订阅登录（`auth mode=chatgpt`）走同一组包，带键且 `max_output_tokens` 被移除。
+- **抓请求体写法**：与 `test_responses_reasoning.py` 一致，monkeypatch `backend.request_json` / `request_stream_iter` 捕获 payload，不发真实网络。
+- **结果**：`$PY -m pytest agent_py_agent/tests/test_responses_cache_key.py agent_py_agent/tests/test_responses_reasoning.py agent_py_agent/tests/test_responses_websocket.py -q --tb=short` → **27 passed**。
+- 真实服务商端到端缓存命中收益未验证（需上线后用真实 Responses 通道观察用量），本组测试只证明请求体契约正确。
+
 ## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
 
 - `test_runtime_context_pressure.py`：

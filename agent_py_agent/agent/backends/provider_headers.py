@@ -40,6 +40,12 @@ def validate_headers(value: object) -> dict[str, str]:
     return result
 
 
+# LLM: 只读暴露当前线程绑定的稳定会话编号；未绑定时返回空串，绝不生成随机键，供请求体缓存键等公开入口复用。
+# 函数用途: 返回当前 provider 会话编号（owner+thread 的 sha256），未绑定会话时返回空串；Responses 请求体用它做提示缓存键。
+def current_provider_session() -> str:
+    return _SESSION.get()
+
+
 # LLM: 动态会话头名称是配置，值永远来自宿主身份，不能接受静态 UUID 冒充会话。
 # 函数用途: 校验可选会话头；空字符串表示不附加。
 def validate_session_header(value: object) -> str:

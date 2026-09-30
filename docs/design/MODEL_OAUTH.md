@@ -60,7 +60,9 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
 
 通用 OAuth Bearer 复用 Chat、Messages 或 Responses 后端；不另建 Agent、工具循环或 Compact。
 订阅模式固定使用专用 Responses 端点、账号头、流式请求及 `store=false`；system 指令转到 `instructions`，
-不发送该接口不接受的 `max_output_tokens`。通用服务商可按原显式目录发现操作读取 `/v1/models`。
+不发送该接口不接受的 `max_output_tokens`。请求体在绑定宿主会话时带 `prompt_cache_key`（会话级提示缓存键，值与
+`provider_session_scope` 的会话编号一致，参考官方 Codex 的做法，让服务商把同一会话路由到同一份提示缓存）；
+未绑定会话时不带，且绝不生成随机键。通用服务商可按原显式目录发现操作读取 `/v1/models`。
 
 ### 订阅接口改走 WebSocket（2026-09-30）
 

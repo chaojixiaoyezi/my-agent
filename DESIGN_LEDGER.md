@@ -40,6 +40,14 @@
   （修复前失败、修复后通过）；相关 1274 项回归通过；6 个变异全部被抓住。上线后用主会话原任务重跑做真实验收。
 - **待评估**：分段摘要把历史序列化成 JSON 时会带上思考密文（对摘要无用），上线后按真实压缩请求的输入量决定是否在分段来源里剥掉。
 
+## Responses 请求带会话级提示缓存键 prompt_cache_key（2026-09-30，分支 `worker/ds1-responses-cache-key`，基于 main `bf4f740c3`，已实现，待集成）
+
+- **用户要求**（集成负责人 3a）：OpenAI 官方 Codex 在每个 Responses 请求体里带 `prompt_cache_key`（值是会话编号），让服务商把同一会话路由到同一份提示缓存，命中更高、更快、更省额度；我们的 Responses 后端 `_generate` 没有带。
+- **做法**：`provider_headers.py` 新增公开只读函数 `current_provider_session()`，返回当前线程绑定的稳定会话编号（owner+thread 的 sha256，来自 `provider_session_scope` / `provider_runtime_scope`），未绑定时返回空串；其它模块不直接读私有 `_SESSION`。
+  `responses.py` 的 `_generate` 在 `validate_responses_input` 之后、发送之前写入 `payload["prompt_cache_key"] = session`（仅当绑定会话时），API Key 与 ChatGPT 订阅（`auth mode=chatgpt`）两条路径共用同一组包，都生效。绝不生成随机键，避免破坏缓存。
+- **不改**：openai_chat、anthropic 后端行为不变；`session_header` 的既有逻辑不动。
+- **验证**：新增 `test_responses_cache_key.py` 六条用例（scope 内带键、scope 外不带、同线程两次键相同、不同线程键不同、键不含 api_key/token 凭据、订阅模式带键且去 max_output_tokens）；连同 `test_responses_reasoning.py`、`test_responses_websocket.py` 共 27 passed。
+
 ## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
 
 - **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的
