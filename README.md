@@ -43,6 +43,7 @@ my-agent 把这些当成底座问题来解：
 
 ### 模型接入
 
+- 从零配置模型、切换会话模型、设新会话默认、调智能程度、删除、共享与对话式管理，见给用户的 [模型管理使用说明](docs/guides/MODEL_GUIDE.md)，每个功能都有小例子。
 - 三种生成协议：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages；MiniMax、Qwen 以及任何兼容这三种协议的服务都能接。
 - 账号登录：ChatGPT 订阅设备码授权与通用 OAuth 设备码流程，见 [模型账号登录](docs/design/MODEL_OAUTH.md)。
 - 模型目录按用户私有保存；`/model` 顶层五项：新增模型（填地址和密钥后勾选，或登录 ChatGPT 账号）、选择模型（对话/决策）、管理已有模型、连接测试、默认模型与共享；“对话模型”只改当前会话，“我的新会话默认模型”只改以后新开的会话；管理员可逐个共享模型、指定其他用户的初始模型，密钥留在服务端。

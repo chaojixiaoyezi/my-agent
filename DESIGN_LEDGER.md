@@ -48,6 +48,13 @@
 - **不改**：openai_chat、anthropic 后端行为不变；`session_header` 的既有逻辑不动。
 - **验证**：新增 `test_responses_cache_key.py` 六条用例（scope 内带键、scope 外不带、同线程两次键相同、不同线程键不同、键不含 api_key/token 凭据、订阅模式带键且去 max_output_tokens）；连同 `test_responses_reasoning.py`、`test_responses_websocket.py` 共 27 passed。
 
+## 《模型管理使用说明》用户文档（2026-09-30，文档，已完成）
+
+- **内容**：把散落在多份设计文档里的模型能力整理成给用户看的中文大白话说明（每个功能带小例子）：`/model` 五项菜单新增（填地址和密钥后勾选、ChatGPT 订阅浏览器登录/设备码登录后勾选）、切换当前会话与设置新会话默认（含 IM 的 `/model`、`/model <编号>`、`/model default <编号>`）、`/effort` 智能程度档位及其在不同模型上的实际生效方式（effort/budget/none/auto、Responses 档位对应与 max→xhigh→high 回退）、删除模型（TUI 勾选删除与对话式删除）、管理员共享模型与指定其他用户初始模型、派子代理时选模型与 effort 的权限规则（管理员不限、普通用户只能选自己添加的模型）、`manage_models` 对话式管理。
+- **位置**：`docs/guides/MODEL_GUIDE.md`（docs 下无现成使用说明目录，新建 `guides/`）；README.md「模型接入」与 docs/README.md「入口」已加链接。
+- **依据**：`agent/command_catalog.py`（`/model`、`/effort` 声明与 IM 可用性）、`agent/capability/model_profile_tool.py`（`manage_models` 动作）、`agent/settings/model_profiles.py`（`resolve_child_model_profile` 权限、初始模型解析）、`agent/backends/reasoning_control.py`（档位换算），以及 docs/design 下 TUI_MODEL_PROFILES / MODEL_OAUTH / REASONING_EFFORT / SHARED_MODEL_CATALOG / SESSION_MODEL_SELECTION。
+- **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
+
 ## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
 
 - **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的

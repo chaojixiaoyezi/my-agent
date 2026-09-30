@@ -55,6 +55,7 @@
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
 |-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口
 |-- docs/design/FILE_SYNTAX_DIAGNOSTICS.md # 文件原子发布的有界语法观察及工具反馈边界
+|-- docs/guides/MODEL_GUIDE.md        # 给用户的模型管理使用说明：新增/切换/默认/effort/删除/共享/派子代理选模
 |-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
 |-- agent_py_agent/tests/test_capability_package_prompt_guidance.py # 包采用与资源复用软规则、空选择和旧提示不变
 |-- agent_py_agent/tests/test_capability_package_selector_recovery.py # 准确读取参数、错误恢复、受限隔离及换代拒绝
@@ -1297,6 +1298,7 @@ docs/
 
 ### 关键文件说明
 
+- `docs/guides/MODEL_GUIDE.md`：给用户的模型管理使用说明，覆盖新增（含 ChatGPT 订阅登录勾选）、切换与默认、`/effort` 智能程度、删除、管理员共享与初始模型、派子代理选模与 `manage_models` 对话式管理。
 - `docs/design/COMPACT_GENERATION_FACTS.md`：摘要来源与请求关联的交接设计，明确旧检查点未知和诊断不参与恢复权威。
 - `agent_py_agent/agent/capability/task_references.py`：连接原任务 pins、授权 grants 和调度引用，不另建状态库。
 - `agent_py_agent/agent/capability/package_read.py`：原工具与宿主共用准确原字节、分页、来源与任务pin。

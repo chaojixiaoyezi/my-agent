@@ -56,6 +56,15 @@
 - **结果**：`$PY -m pytest agent_py_agent/tests/test_responses_cache_key.py agent_py_agent/tests/test_responses_reasoning.py agent_py_agent/tests/test_responses_websocket.py -q --tb=short` → **27 passed**。
 - 真实服务商端到端缓存命中收益未验证（需上线后用真实 Responses 通道观察用量），本组测试只证明请求体契约正确。
 
+## 《模型管理使用说明》文档任务（2026-09-30，纯文档，已完成）
+
+- 新增 `docs/guides/MODEL_GUIDE.md`（给用户的模型管理使用说明），并更新 README.md、docs/README.md（入口链接）、CODEBASE_TREE.md（Tree 与关键文件说明）、DESIGN_LEDGER.md（台账条目）。
+- 未改生产代码，无直接相关的 pytest 用例；本条目记录文档验收命令与结果：
+  - `$PY scripts/check_doc_sync.py`：通过
+  - `git diff --check`：通过
+  - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
+  - 未跑 `check_code_size.py`（任务明确纯文档可不跑 code-size）。
+
 ## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
 
 - `test_runtime_context_pressure.py`：
