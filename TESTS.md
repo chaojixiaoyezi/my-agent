@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 工具参数无效有界纠正的端到端验证（2026-09-30，分支 `worker/ds1-invalid-args-e2e`）
+
+- **新增** `test_invalid_tool_arguments_e2e.py`（复用 `test_gateway_model_adoption.py` 的 `actual_request`/`fake_http` 夹具，真实工具循环 + 假供应商 HTTP，两种协议 anthropic_compatible / openai_compatible）：
+  - `test_invalid_arguments_are_corrected_then_read_file_runs_once`：假供应商第一次返回坏参数的 read_file（半截 JSON），第二次返回合法 read_file，第三次返回正文。断言本轮最终成功（`result.response == "资料整理完成。"`）、`read_file` 只真正执行一次、业务请求共 3 次、第二次请求体里带 `[tool-arguments-invalid]` 宿主纠正。
+  - `test_four_invalid_argument_responses_fail_with_typed_error_and_no_tool_execution`：假供应商连续 4 次都返回坏参数。断言本轮以 `runtime_reason=MODEL_TOOL_ARGUMENTS_INVALID`、`runtime_status=error`、`runtime_source=model_provider` 失败，一次工具都没执行，业务请求正好 4 次。
+- **验证命令与结果**：
+  - `$PY -m pytest agent_py_agent/tests/test_invalid_tool_arguments_e2e.py -q --tb=short` → 4 passed。
+  - 相关回归（+`test_native_truncated_write_recovery.py` +`test_gateway_model_adoption.py` +`test_compact_media_recovery.py`）→ 62 passed。
+- 未做真实供应商端到端（本组测试只替换 HTTP 入口）；产品行为与“有界纠正”设计描述一致，无需改产品代码。
+
 ## 分段摘要来源不收 Responses 思考密文（2026-09-30，分支 `claude/38-compact-segment-strip-ciphertext`，基于 step16t `10041de02`）
 
 - `test_compact_message_source.py` 新增：

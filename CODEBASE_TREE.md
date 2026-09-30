@@ -828,6 +828,7 @@ agent_py_agent/
 |   |-- test_decision_planning.py      # Todo 优先建议、精确 ID/版本/取消、设置与原 read 回执的回归
 |   |-- test_gateway_model_observation.py # Gateway 主模型观察的零副作用、请求身份与恢复边界
 |   |-- test_gateway_model_adoption.py # 原 Gateway/PromptBuilder/provider builder 的采用、容量、竞态与零 HTTP 回退
+|   |-- test_invalid_tool_arguments_e2e.py # 参数无效有界纠正端到端：坏参数回灌纠正续跑、合法调用执行一次、连续超限按 MODEL_TOOL_ARGUMENTS_INVALID 失败
 |   |-- test_gateway_compact_deferred_source.py # 只读压缩来源、坏原文及当前未完成后缀排除
 |   |-- test_subagent_compact_recovery.py # child真实runner到HTTP载荷等价及取消/冲突/摘要故障隔离
 |   |-- test_subagent_compact_recovery_continuation.py # child恢复后真实工具轮、活动归档提交与其它child隔离
