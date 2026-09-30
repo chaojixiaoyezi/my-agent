@@ -118,6 +118,10 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
         )
         _require_matching_message_metadata(entry, params)
         _index_message_best_effort(agent, store, entry)
+        if not continuation:
+            from ..conversation.goal_progress_fuse import reset_goal_progress_fuse
+
+            reset_goal_progress_fuse(store, thread.thread_id)
     except Exception as exc:
         _LOGGER.error(
             "CLI run 用户消息写入失败(thread=%s, request=%s): %s: %s",

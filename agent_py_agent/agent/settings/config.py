@@ -189,6 +189,8 @@ class _ToolConfigFields:
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
     orphan_supervision_interval_seconds: int = 60
+    # 连续多少个 Goal 自动续跑片既没有工具调用，也没有 Goal/任务结构化状态变化时暂停；0=不限。
+    goal_continuation_idle_limit: int = 3
     # Todo 仍开放时，把 exact-id 收尾软提醒放进模型上下文；只提示模型在最终回复前
     # 自主核对，不自动打勾、不阻断最终回复，也不增加隐藏模型调用。
     task_progress_closeout_guidance_enabled: bool = True

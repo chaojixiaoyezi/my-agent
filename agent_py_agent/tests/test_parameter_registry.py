@@ -140,6 +140,9 @@ def test_registry_covers_every_config_field_with_yaml_descriptions():
     assert set(registry) == {item.name for item in fields(AgentConfig)}
     assert "64K" in registry["max_tokens"].description
     assert registry["max_tokens"].value_type == "int" and registry["enable_self_learning"].value_type == "bool"
+    fuse = registry["goal_continuation_idle_limit"]
+    assert fuse.default == 3 and fuse.value_type == "int" and fuse.writable
+    assert "0 = 不限" in fuse.description
 
 
 @pytest.mark.parametrize("key", [

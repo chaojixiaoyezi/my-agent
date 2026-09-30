@@ -2,6 +2,8 @@
 # 模块用途: 将持续目标的精确身份写入已有 wake 队列，不创建另一套定时轮询或任务状态。
 from __future__ import annotations
 
+from .goal_progress_fuse import WAKE_SNAPSHOT_KEY, goal_progress_snapshot
+
 """Single wake authority for continuing one persisted thread goal."""
 
 
@@ -15,6 +17,12 @@ def raise_goal_continuation_wake(
     conversation_id: str = "",
     now: float | None = None,
 ) -> object:
+    task_status = ""
+    try:
+        link = store.tasks.load(str(getattr(goal, "task_id", "") or ""))
+        task_status = str(getattr(link, "status", "") or "")
+    except Exception:  # noqa: BLE001 - missing baseline is treated as progress, never as an idle slice.
+        pass
     request: dict[str, object] = {
         "thread_id": str(getattr(goal, "thread_id", "") or ""),
         "root_task_id": str(getattr(goal, "task_id", "") or ""),
@@ -26,6 +34,7 @@ def raise_goal_continuation_wake(
             "goal_id": str(getattr(goal, "goal_id", "") or ""),
             "channel": str(channel or ""),
             "conversation_id": str(conversation_id or ""),
+            WAKE_SNAPSHOT_KEY: goal_progress_snapshot(goal, task_status),
         },
     }
     if now is not None:

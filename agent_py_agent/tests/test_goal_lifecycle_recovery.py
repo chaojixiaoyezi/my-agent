@@ -113,6 +113,60 @@ def test_active_goal_with_completed_task_can_be_explicitly_resumed(tmp_path):
     assert len(agent.conversation_store.wakes.pending()) == 1
 
 
+def test_resume_after_goal_no_progress_fuse_starts_a_fresh_count(tmp_path):
+    from agent_py_agent.agent.conversation.goal_progress_fuse import queue_goal_no_progress_notice
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create(
+        {"canonical_user_id": "user-test", "channel": "internal", "channel_conversation_id": "goal-resume-fuse"}
+    )
+    goal = store.goals.create({"thread_id": thread.thread_id, "objective": "继续推进"})
+    store.tasks.bind(
+        {"thread_id": thread.thread_id, "task_id": goal.task_id, "goal": goal.objective, "status": "active"}
+    )
+    for index in range(3):
+        _updated, tripped = store.goals.record_continuation_fuse(
+            {
+                "thread_id": thread.thread_id,
+                "goal_id": goal.goal_id,
+                "task_id": goal.task_id,
+                "wake_signal_id": f"idle-wake-{index}",
+                "progressed": False,
+                "idle_limit": 3,
+            }
+        )
+    assert tripped
+    paused = store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    assert paused.status == "paused"
+    assert paused.metadata["goal_continuation_fuse"]["reason_code"] == "GOAL_CONTINUATION_NO_PROGRESS"
+    assert queue_goal_no_progress_notice(store, paused)
+
+    resumed = _control(agent, thread, "resume")
+
+    assert resumed.ok
+    current = store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    assert current.status == "active"
+    assert current.metadata["goal_continuation_fuse"]["idle_slices"] == 0
+    assert current.metadata["goal_continuation_fuse"]["reason_code"] == ""
+    assert store.threads.load(thread.thread_id).pending_host_notices == ()
+    assert len(store.wakes.pending()) == 1
+
+    _after_first_slice, tripped = store.goals.record_continuation_fuse(
+        {
+            "thread_id": thread.thread_id,
+            "goal_id": goal.goal_id,
+            "task_id": goal.task_id,
+            "wake_signal_id": "first-wake-after-resume",
+            "progressed": False,
+            "idle_limit": 3,
+        }
+    )
+    assert not tripped
+    current = store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    assert current.metadata["goal_continuation_fuse"]["idle_slices"] == 1
+
+
 @pytest.mark.parametrize("action", ["pause", "resume", "clear"])
 def test_goal_command_accepts_exact_identity(action):
     parsed = _goal_command(f"goal-known-id {action}")

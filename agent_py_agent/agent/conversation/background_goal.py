@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .goal_progress_fuse import slice_has_progress
 from .models import BackgroundMainAgentReport, WakeSignal
 
 if TYPE_CHECKING:
@@ -30,6 +31,8 @@ class GoalContinuationDependencies:
     subagent_phase: Callable[[str], tuple[str, str]]
     raise_wake: Callable[..., object]
     task_registry: Callable[[], object | None]
+    goal_continuation_idle_limit: int = 3
+    queue_no_progress_notice: Callable[[object], object] | None = None
 
 
 # LLM: 只更新 wake 精确匹配的 active Goal；原事务内先结算时钟、再 CAS 停目标、改任务并登记注册表。
@@ -113,6 +116,27 @@ def continue_goal_after_report(
                 )
             return
         if task_status != "active":
+            return
+        goal, tripped = dependencies.goals.record_continuation_fuse(
+            {
+                "thread_id": goal.thread_id,
+                "goal_id": goal.goal_id,
+                "task_id": goal.task_id,
+                "wake_signal_id": signal.wake_signal_id,
+                "progressed": slice_has_progress(signal, report, goal, task_status),
+                "idle_limit": dependencies.goal_continuation_idle_limit,
+                "now": now,
+            }
+        )
+        if goal is None:
+            return
+        if tripped:
+            if dependencies.queue_no_progress_notice is not None:
+                queued = dependencies.queue_no_progress_notice(goal)
+                if queued is False:
+                    _LOGGER.warning("thread goal no-progress notice was not queued(goal=%s)", goal.goal_id)
+            return
+        if goal.status != "active":
             return
         subagent_phase, state_error = dependencies.subagent_phase(goal.task_id)
         if subagent_phase == "subagents_active" or state_error:

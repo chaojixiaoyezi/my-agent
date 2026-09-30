@@ -205,7 +205,7 @@ def _pause_goal(request: GoalControlRequest, current: object) -> ConversationCon
     )
 
 
-# LLM: 精确显式 resume 可修复旧共享任务绑定；一般目标保持原身份，active 也需核对任务和续跑事件。
+# LLM: 精确显式 resume 可修复旧共享任务绑定；同时清理无进展计数/原因及旧提示，再按原 Goal 身份发布 wake。
 # 函数用途: 恢复持久目标；不会因表面 active 就跳过已丢失的任务接续，也不会偷偷挑选多目标。
 def _resume_goal(request: GoalControlRequest, current: object) -> ConversationControlResult:
     if current.status not in {"active", "paused", "blocked", "usage_limited"}:
@@ -230,6 +230,11 @@ def _resume_goal(request: GoalControlRequest, current: object) -> ConversationCo
         )
     request.store.tasks.update_status({"task_id": current.task_id, "status": "active"})
     request.resume_registry(current.task_id)
+    from ..conversation.goal_progress_fuse import reset_goal_progress_fuse
+    from ..conversation.host_notices import clear_host_notices
+
+    reset_goal_progress_fuse(request.store, current.thread_id, clear_reason=True)
+    clear_host_notices(request.store, current.thread_id, "goal_continuation")
     _raise_goal_wake(request.store, updated, request.scope)
     return ConversationControlResult(
         "goal",

@@ -397,6 +397,9 @@ class ChannelMessageRuntime:
                 "now": current,
             }
         )
+        from .goal_progress_fuse import reset_goal_progress_fuse
+
+        reset_goal_progress_fuse(self.store, thread.thread_id)
         if request.get("run_background", True):
             self.runtime.run_once(
                 {
@@ -4351,7 +4354,10 @@ def _record_quota_fallback_message(
 def _background_goal_dependencies(
     scheduler: BackgroundMainAgentScheduler,
 ) -> GoalContinuationDependencies:
+    from .goal_progress_fuse import queue_goal_no_progress_notice
     from .goal_runtime import raise_goal_continuation_wake
+
+    config = getattr(scheduler.runtime.agent, "config", None)
 
     return GoalContinuationDependencies(
         goals=scheduler.store.goals,
@@ -4366,6 +4372,10 @@ def _background_goal_dependencies(
         ),
         subagent_phase=lambda task_id: _goal_subagent_phase(scheduler.runtime.agent, task_id),
         raise_wake=partial(raise_goal_continuation_wake, scheduler.store),
+        goal_continuation_idle_limit=max(
+            0, int(getattr(config, "goal_continuation_idle_limit", 3) or 0)
+        ),
+        queue_no_progress_notice=partial(queue_goal_no_progress_notice, scheduler.store),
         task_registry=lambda: getattr(
             getattr(getattr(scheduler.runtime, "agent", None), "local_store", None),
             "task_registry",

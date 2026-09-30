@@ -123,6 +123,19 @@
 - **改动**：`subagents/kernel.py`（SubagentKernelRun 冻结值回退源）、`agent_core/agent_tree/node_rendering.py`（投影与名称解析）、`agent_core/agent_tree/model_view.py`（白名单）；终态回执（completion_message）是纯文本、没有结构化字段区，故只做 list_agents，未改终态回执。
 - **验证**：`test_agent_tree_model_effort.py` 5 项；相邻回归 test_agent_tree_model_view / three_layer_status / list_agents_scope_resolution / test_subagent_kernel / test_reasoning_effort 全部通过（详见 TESTS.md）。
 
+## 持续 Goal 自动续跑连续无进展熔断（2026-09-30，已实现并通过门禁）
+
+- **问题**：Goal 仍为 active 且没有任何结构化变化时，安全边界持续安排新的空模型片，持续消耗用量。
+- **做法**：只看本片工具调用数、成功的状态变更工具数、wake 时保存的 Goal revision/状态与任务状态快照；不解析对话正文。
+  连续次数写入 Goal metadata 并按 wake ID 去重；达到 `goal_continuation_idle_limit` 后沿现有 `paused` 状态停止续跑，记录
+  `GOAL_CONTINUATION_NO_PROGRESS`，用户新消息或 `/goal resume` 清空计数。提示复用待送达 host notice，TUI/IM 按现有最终消息路径呈现。
+- **配置**：`goal_continuation_idle_limit` 默认 3，0 表示不限；随包 YAML 注释同时成为参数中心说明。
+- **验证**：`test_thread_goal_pauses_after_three_empty_continuation_slices` 复现修复前仍 active；定向续跑/恢复/fuse/参数登记/host notice
+  测试通过。Ruff、文档同步、strict code-size（hard=0）与 `git diff --check` 均通过。
+- **补充观察**：更广的 Gateway 控制测试中，PTY 资源生命周期参数化用例有 3 个失败（观察到的子进程退出码 71，或缺少确认终止回执）；
+  单独运行目标相关的 `test_first_work_tool_does_not_resume_explicitly_paused_goal` 通过。该失败原因未确定，不计为熔断覆盖通过。
+- **待复核**：这是隔离替身环境的自动化验证；真实 MiniMax/IM 部署链路与通知的真实接收尚未验证。
+
 ## 智能程度（/effort）逐模型真实审计（2026-09-30，分支 `claude/38-effort-receipt`，38 执行）
 
 - **范围**：生产 local/main 模型目录里每个对话模型，产品后端真实请求，隔离目录副本（600、令牌不刷新、用完删）。详表见

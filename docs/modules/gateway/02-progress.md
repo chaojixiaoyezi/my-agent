@@ -369,6 +369,8 @@ TUI 观察超时不再标记业务失败：canonical terminal 优先检查，同
 
 - 后台工具策略已从 `runtime.py` 独立到纯计算模块，目录、owner/task 收紧及投递限制语义保持。
 - 后台 Goal 状态处理与地址选择分别归 `background_goal.py`、`background_routing.py`；原事务、读取时机和租约顺序保持，删除混合职责 GoalMixin。353 项相关回归通过，新安装版实际 TUI 尚待验。
+  持续 Goal 自动续跑新增结构化连续空片熔断：默认 3 片，配置 0 不限；到限沿既有 paused/`/goal resume` 路径恢复，reason code 与提示入原 host notice 队列。
+  wake 基线与每片工具账只读，不解析回复正文；详见 `docs/design/THREAD_GOAL_LIFECYCLE.md`。定向测试通过，真实 MiniMax 与 TUI/IM 收件仍未验证。
   现有后台运行、观察、进程测试及独立导入边界共 `201 passed`；真实多 TUI 长任务矩阵已留证，边界见可维护性评估。
 - 后续上下文与历史种子拆分保留同一 canonical 历史、任务范围和失败合同；不迁移执行权、锁及投递事务。
   当前候选真实双子代理返回与插话通过，Goal 暂停、压缩、重连后恢复到 8 条唯一记录，平方合计 204。

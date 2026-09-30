@@ -843,6 +843,11 @@ tool_agent_budget_max_calls:
 # - 0=关闭。
 orphan_supervision_interval_seconds: 60
 
+# 持续目标连续多少个自动续跑片没有工具调用、Goal revision 或任务状态变化时暂停：
+# - 达到上限后目标进入可用 /goal resume 恢复的 paused 状态，并通过宿主提示告知用户。
+# - 0 = 不限；默认 3。用户新消息或显式恢复会重新开始计数。
+goal_continuation_idle_limit: 3
+
 
 # 检索完备性软引导：
 # - 同一工具明确的网络/能力不可用回执按 call_id 去重后达到阈值，提示核对其它授权来源。

@@ -581,6 +581,7 @@ agent_py_agent/
 |   |   |-- background_progress_policy.py # 无副作用的进度策略计数与确定性失败退避
 |   |   |-- background_supply_backoff.py  # 会话供应冷却的进程内状态、消费守卫及恢复日志
 |   |   |-- background_goal.py          # 后台 Goal 异常结算与续跑裁决，只持有精确领域和回调能力
+|   |   |-- goal_progress_fuse.py       # Goal 续跑只按工具账、Goal/任务结构快照累计连续空片并复用 host notice 提示
 |   |   |-- background_routing.py       # 线程及 owner 投递地址的只读选择，不消费来源或执行发送
 |   |   |-- background_claim.py         # 后台执行领取、最终准入、共享心跳与精确 claim 结算
 |   |   |-- background_recovery.py      # 按次查询权威恢复阻断，只去重日志、不缓存执行资格
@@ -974,6 +975,7 @@ agent_py_agent/
 |   |-- test_tui_agent_navigation.py    # 子代理选中/进入/返回、详情过程、只读终态与 footer 回归
 |   |-- test_tui_superseded_marker.py   # “已被 X 接替”：Gateway 行摊平 kernel replaced_by、名册与子代理页头部标注（含窄屏）、渲染缓存键
 |   |-- test_agent_goals.py            # 单代理单 Goal、主子隔离、版本冲突、停止和同执行轮持续工作回归
+|   |-- test_goal_progress_fuse.py     # Goal 连续无进展熔断的结构化判据、计数重置、用户消息与通知幂等
 |   |-- test_tui_resource_lifetime.py  # 缓存净化、异常退出、事件和冻结阅读预算回归
 |   |-- test_gateway_owner_retention.py # 空闲回收、配置、在途及新消息竞态回归
 |   |-- test_tui_events.py              # TUI event 信封、sequencer、cursor、重复/冲突/乱序与有界重放

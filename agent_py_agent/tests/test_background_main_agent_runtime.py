@@ -2613,6 +2613,87 @@ def test_thread_goal_turn_with_no_tool_calls_keeps_active_goal_continuation(tmp_
     ]
 
 
+def test_thread_goal_pauses_after_three_empty_continuation_slices(tmp_path) -> None:
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    agent.backend = _CapturingBackend()
+    store = agent.conversation_store
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.threads.get_or_create(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-goal-idle-fuse",
+            "channel_user_id": "user-1",
+            "now": 10.0,
+        }
+    )
+    goal = store.goals.create(
+        {"thread_id": thread.thread_id, "objective": "持续推进且无进展时暂停", "now": 11.0}
+    )
+    store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": goal.task_id,
+            "goal": goal.objective,
+            "status": "active",
+            "now": 12.0,
+        }
+    )
+    from agent_py_agent.agent.conversation.goal_runtime import raise_goal_continuation_wake
+
+    raise_goal_continuation_wake(store, goal, now=13.0)
+
+    reports = [scheduler.tick(now=float(14 + index)) for index in range(3)]
+
+    assert all(len(batch) == 1 and batch[0].tool_call_count == 0 for batch in reports)
+    updated = store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    assert updated is not None and updated.status == "paused"
+    assert updated.metadata["goal_continuation_fuse"]["reason_code"] == "GOAL_CONTINUATION_NO_PROGRESS"
+    assert store.wakes.pending() == []
+    latest_thread = store.threads.load(thread.thread_id)
+    assert latest_thread is not None
+    assert [notice["code"] for notice in latest_thread.pending_host_notices] == [
+        "GOAL_CONTINUATION_NO_PROGRESS"
+    ]
+
+
+def test_zero_goal_continuation_idle_limit_does_not_pause(tmp_path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", goal_continuation_idle_limit=0),
+        tmp_path,
+    )
+    agent.backend = _CapturingBackend()
+    store = agent.conversation_store
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    thread = store.threads.get_or_create(
+        {
+            "canonical_user_id": "user-1",
+            "channel": "internal",
+            "channel_conversation_id": "thread-goal-unlimited",
+            "channel_user_id": "user-1",
+        }
+    )
+    goal = store.goals.create({"thread_id": thread.thread_id, "objective": "无限续跑测试"})
+    store.tasks.bind(
+        {"thread_id": thread.thread_id, "task_id": goal.task_id, "goal": goal.objective, "status": "active"}
+    )
+    from agent_py_agent.agent.conversation.goal_runtime import raise_goal_continuation_wake
+
+    raise_goal_continuation_wake(store, goal)
+
+    reports = [scheduler.tick() for _ in range(4)]
+
+    assert all(len(batch) == 1 and batch[0].tool_call_count == 0 for batch in reports)
+    current = store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    assert current.status == "active"
+    assert current.metadata["goal_continuation_fuse"]["idle_slices"] == 0
+    assert len(store.wakes.pending()) == 1
+    latest_thread = store.threads.load(thread.thread_id)
+    assert latest_thread.pending_host_notices == ()
+
+
 def test_thread_goal_with_tool_progress_schedules_exactly_one_next_turn(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(enable_tools=True, memory_path="memory.jsonl"),

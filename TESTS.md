@@ -163,6 +163,15 @@
 - **证据**：`~/.my-agent/decision-evidence/capability-real-bf4f/`（仓库外），含脚本、hook 事件、facts、故障日志、`host-defect-candidates.json`。
 - **本轮验证**：只改 Markdown，跑了 doc sync、`git diff --check` 等静态门，没有跑 pytest。
 
+## Goal 自动续跑连续无进展熔断（2026-09-30，分支 `worker/luna-goal-progress-fuse`）
+
+- **修复前红测**：`test_thread_goal_pauses_after_three_empty_continuation_slices` 预期第三个空片后为 `paused`，实际仍为 `active`，确认原续跑缺陷。
+- **覆盖**：续跑集成测试校验连续 3 片后暂停与配置 0 不限；合同测试覆盖工具/状态变化清零、用户新消息重置、持久计数、host notice 按来源/原因码去重；恢复用例验证 `/goal resume` 清原因与通知、首片回到计数 1；参数登记测试核对默认值、整数类型、可修改与 YAML 中文说明。
+- **运行（通过）**：`$PY -m pytest agent_py_agent/tests/test_goal_progress_fuse.py agent_py_agent/tests/test_goal_lifecycle_recovery.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_host_notices.py -q --tb=short` → 退出码 0，全部通过。既有 host notice 测试覆盖 TUI 流事件/Gateway 结果与 IM 最终回复前缀。
+- **补充交叉检查**：上述定向套件之外，将 `agent_py_agent/tests/test_gateway_conversation_control.py` 一并运行时，其中 `test_goal_and_task_resource_controls_are_independent` 的 3 个参数化用例失败；观察到两个 PTY 子进程以退出码 71 结束，另一个没有确认终止回执，失败原因未确定。单独重跑目标相关的 `test_first_work_tool_does_not_resume_explicitly_paused_goal` 退出码 0。前述失败不计入本功能通过项。
+- **门禁**：`$PY -m ruff check agent_py_agent scripts`、`$PY scripts/check_doc_sync.py`、`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`、`git diff --check` 均退出码 0；strict code-size 报告 `hard=0`。检查后已按要求还原生成的 `CODE_SIZE_REPORT.md`。
+- **未验证**：没有连接真实 MiniMax 模型或真实 TUI/IM 观察通知抵达；新增用例验证熔断提示入队/去重，通道呈现复用既有 host notice 测试，不宣称真实收件通过。
+
 ## 智能程度逐模型真实审计（2026-09-30，38）
 
 - **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +

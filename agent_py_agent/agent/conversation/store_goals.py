@@ -13,6 +13,13 @@ from ..gateway_parts.io import (
 )
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .goal_clock import GoalClockGroup
+from .goal_progress_fuse import (
+    FUSE_METADATA_KEY,
+    NO_PROGRESS_REASON_CODE,
+    next_idle_slice_count,
+    record_goal_continuation_fuse,
+    reset_goal_continuation_fuse,
+)
 from .models import (
     THREAD_GOAL_OBJECTIVE_MAX_CHARS,
     THREAD_GOAL_STATUSES,
@@ -394,6 +401,16 @@ class GoalStore:
         else:
             self.clock.clear(updated.thread_id, goal_id=updated.goal_id)
         return updated
+
+    # LLM: 延用唯一 GoalStore 公开入口；独立 fuse 模块承接原子持久写，避免持续增长核心 GoalStore。
+    # 函数用途: 记录一次目标续跑片的结构化进展与熔断结果。
+    def record_continuation_fuse(self, request: dict[str, Any]) -> tuple[ThreadGoal | None, bool]:
+        return record_goal_continuation_fuse(self, request)
+
+    # LLM: 延用唯一 GoalStore 公开入口；重置实现独立于目标 CRUD，保持状态机仍只归原 GoalStore。
+    # 函数用途: 清除指定目标的连续空片数，不改内容 revision、状态或任务资源。
+    def reset_continuation_fuse(self, request: dict[str, Any]) -> ThreadGoal | None:
+        return reset_goal_continuation_fuse(self, request)
 
     # LLM: 调用方持有目标迁移锁；内部使用 goal/task 双重 CAS，不重复领取同一文件锁；先准备禁用任务链接。
     # 函数用途: 修复旧数据里多个目标共用任务的冲突，保留目标身份、历史用量与原始记录，不自行唤醒。
