@@ -50,6 +50,15 @@
   `test_*empty*`、`test_*turn_end*` 与 9 个守卫共 855 passed。
 - 变异 7/7 被杀：上限多给一次、成功执行不清零、协议纠正清掉连续计数、不看原因码、不接入裁决、提示不带工具名、计数不增加。
 
+## 《能力包使用说明》文档任务（2026-09-30，纯文档，已完成）
+
+- 新增 `docs/guides/CAPABILITY_PACK_GUIDE.md`（给用户的能力包使用说明），并更新 README.md、docs/README.md（入口链接）、CODEBASE_TREE.md（Tree 与关键文件说明）、DESIGN_LEDGER.md（台账条目）。
+- 未改生产代码，无直接相关的 pytest 用例；本条目记录文档验收命令与结果：
+  - `$PY scripts/check_doc_sync.py`：通过
+  - `git diff --check`：通过
+  - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
+  - 未跑 `check_code_size.py`（纯文档任务，任务明确可不跑；如需全量门禁再补跑）
+
 ## list_agents 显示子代理模型与智能程度（2026-09-30，分支 `worker/ds2-capability-guide`，已实现）
 
 - 新增 `test_agent_tree_model_effort.py` 5 项：显式指定模型和档位的子代理在 list_agents 显示“deepseek-v4.1-flash（536c11f9）”和 low；未指定显示“继承会话默认”/“默认”；档案被删除显示“未知”且 list_agents 不报错；输出不含 api_key/api_base/token/sk-/authorization；线程读取失败回退创建时冻结的任务属性。

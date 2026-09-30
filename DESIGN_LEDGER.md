@@ -34,6 +34,14 @@
   用例；工具循环、协议、截断、终态等 855 项回归通过；7/7 变异被杀。
 - **配置**：未新增开关。协议修复预算在 09-27 参数精简时已改为代码常量，本处沿用同一做法；它替代的是“整轮失败、用户重发”，不是额外功能。
 
+## 《能力包使用说明》用户文档（2026-09-30，文档，已完成）
+
+- **内容**：把散落在多份设计文档里的能力包能力整理成给用户看的中文大白话说明（每个功能带小例子）：能力包是什么（纯内容包，和 MCP/插件/Skill 的区别）、装/启用/停用/更新/回退/卸载（`/plugins` 各动作，安装默认停用、回退=显式指定旧版本包、卸载保留任务产物）、按任务发现与使用（推荐开关默认开、一次选择默认关、新任务才用新版本）、版本固定与派子代理授权（`allowed_skills=["capability:<包ID>"]`）、自制包（`scripts/build_capability_package.py` 用法与声明字段）、安全边界（只按声明读取、改动过的包拒绝、不执行包内代码、不含密钥）、常见疑问。
+- **位置**：`docs/guides/CAPABILITY_PACK_GUIDE.md`（与 MODEL_GUIDE.md 同目录、同风格）；README.md「能力包（开发候选）」与 docs/README.md「入口」已加链接。
+- **明确边界**：`/plugins` 目前只在 TUI 可用，IM 会话控制命令里没有 `/plugins`——说明书写明「IM 暂不支持，请在 TUI 里操作」（3a 已核实）。
+- **依据**：docs/design/CAPABILITY_PACKS.md、PLUGIN_PACKAGES.md、agent/command_catalog.py（/plugins 动作）、scripts/build_capability_package.py、agent_py_agent/config/capability_config.yaml（推荐/选择开关与默认值）；验收过程记录（docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md）只用于确认「哪些已真实验证、哪些还没有」，未写入用户说明。
+- **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
+
 ## list_agents 显示子代理实际使用的模型与智能程度（2026-09-30，已实现，待上线）
 
 - **背景**：功能验收发现——派出去的子代理实际用了哪个模型、哪个智能程度，my-agent 的 list_agents 看不到（节点只有 goal_digest/status 等，无 model/effort）。宿主核实子代理线程 model_profile_id=536c11f9（deepseek-v4.1-flash）、reasoning_effort=low，但工具回执不展示。
