@@ -711,3 +711,10 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - 测试与变异见 TESTS.md 同名节。
 
 - 2026-09-29 唤醒毒丸第 4 步运维面（分支 `claude/be-wake-ops`，待复审）：管理员 `/wakes`、`/wakes replay <ID> [confirm]`（TUI 与飞书共用 Gateway 控制入口），`/status` 与 `gateway_status` 显示已结案唤醒条数，账本整理把满 14 天的结案留档移进 `quarantine/archive/`（发布语义不变，重放拒绝 `WAKE_REPLAY_ARCHIVED`）。测试与变异见 TESTS.md 同名节。
+
+## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
+
+- **起因**：用户长期会话的状态条每次部署后第一次调用偏高 25–29%，下一次调用落回；数据与根因见设计台账同名节。
+- **改动**：`context_pressure._stable_context_surface_fingerprint` 的连接部分改由 `_tokenizer_connection_identity` 给出（模型档案、地址、
+  鉴权方式），不再用进程加盐的 `connection_revision`；密钥与请求头不进指纹。
+- **测试**：`test_runtime_context_pressure.py` 新增重启存活、分词身份两个用例，原“换密钥回到原始估算”断言改为继续校准。

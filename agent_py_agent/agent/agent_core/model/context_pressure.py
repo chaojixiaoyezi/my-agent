@@ -684,7 +684,7 @@ def _media_reserve_tokens(messages: object, reserve: int) -> int:
 
 # LLM: Connection fields from third-party or test backends may be opaque objects; never serialize
 # their repr (which can expose secrets), and keep each unknown object distinct within this process.
-# 函数用途: 将可证明的连接字段保留为 JSON 值，未知对象以进程内身份标记供 HMAC 比较。
+# 函数用途: 将可证明的连接字段保留为 JSON 值，未知对象以进程内身份标记供指纹比较（这类对象只在本进程内可复用校准）。
 def _connection_fact(value: object) -> object:
     if value is None or type(value) in (str, int, bool, float):
         return value
@@ -698,11 +698,15 @@ def _connection_fact(value: object) -> object:
     return {"opaque_type": type(value).__qualname__, "object_id": id(value)}
 
 
-# LLM: This digest names provider request surfaces stable within one process. Conversation messages,
-# current-turn tool results and runtime guidance remain append-only variable input and are excluded;
-# changing the backend, connection profile, model, system prefix, stable prompt adjunct or tool
-# schema invalidates reuse; the process-salted connection revision hides credentials and headers.
-# 函数用途: 为跨后台轮次的模型校准生成稳定指纹，换连接或展示面时失效旧观测，只保存哈希。
+# LLM: This digest is PERSISTED on the thread (provider_context_observation) and must stay equal across
+# Gateway restarts for the same request surface. Conversation messages, current-turn tool results and
+# runtime guidance remain append-only variable input and are excluded; changing the backend, connection
+# profile, endpoint, auth mode, model, system prefix, stable prompt adjunct or tool schema invalidates
+# reuse. Credentials, headers and any per-process salt (decision_policy.connection_revision) must never
+# enter it: the former do not change tokenization, the latter made every restart drop calibration
+# (TUI context number jumped ~28% high on each run's first call, 2026-09-30). test_runtime_context_pressure
+# pins both properties (restart survival and credential rotation).
+# 函数用途: 为跨回合、跨进程的模型校准生成稳定指纹，换连接地址/模型/鉴权方式或展示面时失效旧观测，只保存哈希。
 def _stable_context_surface_fingerprint(
     agent: object,
     *,
@@ -711,13 +715,8 @@ def _stable_context_surface_fingerprint(
     prompt_surface: str,
     tools: object,
 ) -> str:
-    from ...conversation.decision_policy import connection_revision
-
     backend = getattr(agent, "backend", None)
     config = getattr(agent, "config", None)
-    sources = getattr(config, "config_sources", None)
-    model_source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
-    model_source = model_source if isinstance(model_source, dict) else {}
     payload = {
         "backend": str(getattr(backend, "name", "") or ""),
         "model": str(
@@ -726,15 +725,7 @@ def _stable_context_surface_fingerprint(
             or ""
         ),
         "protocol": str(protocol or ""),
-        "connection_revision": connection_revision({
-            "profile_id": str(model_source.get("profile_id") or ""),
-            "backend": {key: _connection_fact(getattr(backend, key, None)) for key in (
-                "name", "api_base", "api_key", "auth_ref", "custom_headers", "session_header",
-            )},
-            "config": {key: _connection_fact(getattr(config, key, None)) for key in (
-                "model_backend", "api_base", "api_key", "api_key_env", "model_custom_headers", "model_auth_ref",
-            )},
-        }),
+        "connection": _tokenizer_connection_identity(backend, config),
         "system_instruction": str(system_instruction or ""),
         "prompt_surface": str(prompt_surface or ""),
         "tools": tools if isinstance(tools, list) else [],
@@ -746,6 +737,33 @@ def _stable_context_surface_fingerprint(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+# LLM: 只收决定“同一请求算多少 token”的连接事实：模型档案、后端地址与鉴权方式（auth_ref 只取 mode）。
+#   api_key、请求头、会话头不改变分词，且会随轮换变化，一律不进；也不能用进程加盐摘要，否则重启后校准全部失效。
+#   新增字段前先确认它跨进程稳定且不含凭据，并同步 test_runtime_context_pressure 的重启与轮换用例。
+# 函数用途: 给持久校准指纹提供跨进程稳定、不含密钥的连接身份。
+def _tokenizer_connection_identity(backend: object, config: object) -> dict[str, object]:
+    sources = getattr(config, "config_sources", None)
+    model_source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
+    model_source = model_source if isinstance(model_source, dict) else {}
+    return {
+        "profile_id": str(model_source.get("profile_id") or ""),
+        "backend_api_base": _connection_fact(getattr(backend, "api_base", None)),
+        "backend_auth_mode": _auth_mode(getattr(backend, "auth_ref", None)),
+        "model_backend": _connection_fact(getattr(config, "model_backend", None)),
+        "config_api_base": _connection_fact(getattr(config, "api_base", None)),
+        "config_auth_mode": _auth_mode(getattr(config, "model_auth_ref", None)),
+    }
+
+
+# LLM: auth_ref 可能带账号或令牌引用，只读结构化 mode 字符串；非 dict 一律视为未声明。
+# 函数用途: 从鉴权引用里取出不含凭据的鉴权方式名。
+def _auth_mode(auth_ref: object) -> str:
+    if not isinstance(auth_ref, dict):
+        return ""
+    mode = auth_ref.get("mode")
+    return mode if isinstance(mode, str) else ""
 
 
 # LLM: CacheStructuredPrompt keeps the canonical current user turn in its diagnostic string, but

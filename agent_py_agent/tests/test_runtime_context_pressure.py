@@ -714,8 +714,9 @@ def test_provider_observation_invalidates_when_connection_changes(monkeypatch) -
     assert model_visible_context_tokens(agent, params, "prompt") == 85_000
     backend.api_base = "https://first.invalid"
     assert model_visible_context_tokens(agent, params, "prompt") == 45_000
+    # 密钥轮换不改变分词，校准继续适用；密钥本身不进指纹、不进状态（2026-09-30 起，见重启用例）。
     backend.api_key = "second-secret"
-    assert model_visible_context_tokens(agent, params, "prompt") == 85_000
+    assert model_visible_context_tokens(agent, params, "prompt") == 45_000
     assert "first-secret" not in str(params.live_archive_state)
 
 
@@ -822,3 +823,85 @@ def test_provider_observation_survives_reconstructed_background_slice(
     assert model_visible_context_tokens(agent, fresh_params, "prompt") == 55_000
     # A different stable prompt surface cannot borrow the earlier calibration.
     assert model_visible_context_tokens(agent, fresh_params, "changed prompt") == 110_000
+
+
+def _thread_backed_calibration_fixture(tmp_path, monkeypatch, raw):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "provider-restart"})
+    backend = SimpleNamespace(
+        context_window_tokens=1_000_000, name="openai_chat", model_name="deepseek-v4-flash",
+        api_base="https://api.example.invalid/v1", api_key="restart-secret-value",
+        custom_headers={"x-session": "restart-header-secret"}, auth_ref={"mode": "api_key"},
+    )
+    agent = SimpleNamespace(
+        config=AgentConfig(auto_save_memory=True, model_context_window_tokens=1_000_000),
+        backend=backend, conversation_store=store,
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.model.context_pressure.estimate_tokens",
+        lambda _payload: raw["tokens"],
+    )
+
+    def fresh_params():
+        return SimpleNamespace(
+            context_scope="conversation", save=True,
+            task_attributes={"conversation_thread_id": thread.thread_id},
+            tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="text"),
+            live_archive_state={},
+        )
+
+    return store, thread, agent, fresh_params
+
+
+def test_provider_observation_survives_gateway_restart(tmp_path, monkeypatch) -> None:
+    # 真机 2026-09-30：每次部署重启 Gateway 后，下一回合第一次调用都显示未校准估算（高 25–29%），
+    # 下一次调用又落回校准值。根因是持久指纹里混了按进程随机加盐的连接摘要，重启后永远对不上。
+    from agent_py_agent.agent.conversation import decision_policy
+
+    raw = {"tokens": 100_000}
+    store, thread, agent, fresh_params = _thread_backed_calibration_fixture(tmp_path, monkeypatch, raw)
+    first = fresh_params()
+    snapshot = model_visible_context_snapshot(agent, first, "prompt")
+    assert record_provider_context_observation(
+        agent, first, raw_estimated_tokens=snapshot.raw_estimated_tokens,
+        context_surface_fingerprint=snapshot.context_surface_fingerprint,
+        response=SimpleNamespace(usage={"prompt_tokens": 78_000}),
+    )
+    persisted = store.threads.load(thread.thread_id).provider_context_observation
+    # 模拟 Gateway 重启：进程级随机盐换新，只剩线程上的耐久观测。
+    monkeypatch.setattr(decision_policy, "_SALT", b"\x01" * 32)
+    raw["tokens"] = 100_000
+    assert model_visible_context_tokens(agent, fresh_params(), "prompt") == 78_000
+    # 持久化的指纹与观测里没有任何凭据或请求头原文。
+    assert "restart-secret-value" not in str(persisted)
+    assert "restart-header-secret" not in str(persisted)
+
+
+def test_provider_observation_keys_on_tokenizer_identity_not_credentials(tmp_path, monkeypatch) -> None:
+    raw = {"tokens": 100_000}
+    _store, _thread, agent, fresh_params = _thread_backed_calibration_fixture(tmp_path, monkeypatch, raw)
+    first = fresh_params()
+    snapshot = model_visible_context_snapshot(agent, first, "prompt")
+    assert record_provider_context_observation(
+        agent, first, raw_estimated_tokens=snapshot.raw_estimated_tokens,
+        context_surface_fingerprint=snapshot.context_surface_fingerprint,
+        response=SimpleNamespace(usage={"prompt_tokens": 78_000}),
+    )
+    # 换密钥、换请求头不改变分词：同一模型同一地址继续沿用校准。
+    agent.backend.api_key = "rotated-secret-value"
+    agent.backend.custom_headers = {"x-session": "rotated-header"}
+    agent.backend.auth_ref = {"mode": "api_key", "account_ref": "rotated-account"}
+    assert model_visible_context_tokens(agent, fresh_params(), "prompt") == 78_000
+    # 换地址、换模型、换鉴权方式都可能换分词或计量口径，必须回到原始估算。
+    agent.backend.auth_ref = {"mode": "chatgpt"}
+    assert model_visible_context_tokens(agent, fresh_params(), "prompt") == 100_000
+    agent.backend.auth_ref = {"mode": "api_key"}
+    agent.backend.api_base = "https://other.example.invalid/v1"
+    assert model_visible_context_tokens(agent, fresh_params(), "prompt") == 100_000
+    agent.backend.api_base = "https://api.example.invalid/v1"
+    agent.config.config_sources = {"model_name": {"profile_id": "another-profile"}}
+    assert model_visible_context_tokens(agent, fresh_params(), "prompt") == 100_000
+    agent.config.config_sources = {}
+    assert model_visible_context_tokens(agent, fresh_params(), "prompt") == 78_000
+    agent.backend.model_name = "deepseek-v4-pro"
+    assert model_visible_context_tokens(agent, fresh_params(), "prompt") == 100_000

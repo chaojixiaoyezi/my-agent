@@ -910,6 +910,8 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
   system/prompt/tools 指纹与 Compact generation；写入使用同 generation CAS，且不推进 thread `updated_at`。
 - context pressure 只在指纹、代次与数值都可信时用它校准 reconstructed durable slice；动态 messages、guidance
   不进稳定指纹。缺失或不匹配时回退原始估算，成本继续由 ModelCallLedger 负责，不能混成第二份 token 总账。
+- 指纹持久化在线程上，必须跨 Gateway 重启不变（2026-09-30 起）：连接部分只收模型档案、地址、鉴权方式等不含凭据的分词身份，
+  不能用 `decision_policy.connection_revision` 这类进程加盐摘要，否则每次部署后第一次调用都显示未校准估算（真机偏高约 28%）。
 
 ## pending conversation 的模型 cwd 投影
 

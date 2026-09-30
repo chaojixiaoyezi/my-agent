@@ -212,6 +212,18 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
 
 **历史数据**：2026-09-26 之前（`_full_request_tokens` 修复前）写入的 v3 checkpoint，其 `projected_tokens_before` 是解绑历史后只含系统提示与工具的值（例如 35,915 对实际约 31.3 万），不可信；判断当时的真实大小要看同期 Gateway 请求记录里的供应商 usage 或线程 `provider_context_observation`。
 
+## 持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`）
+
+**问题**：状态条 Context 在每次 Gateway 重启后的第一次调用偏高 25–29%，下一次调用又落回来。线程上的校准观测按稳定请求表面指纹取用，
+指纹里的连接部分原来是 `decision_policy.connection_revision`（按进程随机盐的 HMAC，只适合进程内比较），重启后永远对不上。
+
+**口径**：`_stable_context_surface_fingerprint` 的连接部分改由 `_tokenizer_connection_identity` 给出，只含跨进程稳定、不含凭据的分词相关事实：
+模型档案 id、后端地址、配置地址、`model_backend`、鉴权方式（`auth_ref` 只取 `mode`）。模型名、协议、系统提示、稳定提示和工具照旧在指纹里。
+密钥、请求头、会话头不影响 token 数，不进指纹；不透明的非标准后端字段仍按进程内对象身份区分，只能在本进程复用。
+预检、压缩候选门（`frozen_compact_request_calibration`）与状态条共用同一个指纹，不产生第二种口径。
+
+**仍会显示一次原始估算的情况**：没有观测（新线程、换模型、压缩提交后）、同一进程内稳定表面变化。后者是否改成“同分词身份按比例折算”待定，见设计台账。
+
 ## Cache economics
 
 系统通道的验证规则只限定证据表述，不要求每个动作前重新运行已有检查。相同版本、输入和观察点

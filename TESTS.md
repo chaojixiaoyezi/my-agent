@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
+
+- `test_runtime_context_pressure.py`：
+  - 新增 `test_provider_observation_survives_gateway_restart`：真实 `ConversationStore` 线程上记一次校准（原始 100K、实际 78K），
+    换掉 `decision_policy._SALT` 模拟重启，新一轮的第一次计量仍是 78K；持久观测里没有密钥和请求头原文。改前这里得到 100K。
+  - 新增 `test_provider_observation_keys_on_tokenizer_identity_not_credentials`：换密钥、换请求头、换 `auth_ref` 里的账号引用仍用校准；
+    换鉴权方式、地址、模型档案、模型都回到原始估算。
+  - 原 `test_provider_observation_invalidates_when_connection_changes` 的“换密钥回到原始估算”改为继续校准（分词不变），换地址仍失效。
+- **两进程探针**：同一请求表面在两个独立进程里算指纹，base `c80c8b5c2` 两次不同，修复后相同（证据目录 `probe_two_process.py`）。
+- **变异**（`mutate_ctx.py`，精确替换、按字节恢复）：8 个全部被杀：回到进程加盐摘要、混入 api_key、混入请求头、去掉地址、
+  去掉鉴权方式、去掉模型档案、`auth_ref` 整个进指纹、连接身份整体丢掉。
+- **回归**：引用上下文计量、校准、连接摘要和上下文用量的 46 个测试文件，加 9 个全仓守卫，1406 过、1 个既有 xpass（base 上同样 xpass）。
+- **生产数据**：证据 `~/.my-agent/decision-evidence/context-number-flicker-20260930/`（只读数字，脚本可重跑，上线后用同一脚本复核首调偏差）。
+
 ## 会话互通最终验收（2026-09-30，step16l `20d642aa8`，3a 执行）
 
 - **第一层**：`test_session_task_real_chain.py` 加 `test_session_task_claim_binding.py`（真实 Gateway 链路、替身模型），连跑 20 次，每次 30 passed。
