@@ -29,7 +29,7 @@ from ..authorization_gate import (
     authorize_operation,
 )
 from ..effective_permissions import effective_permission_snapshot
-from ..models import SubAgentTask
+from ..models import SubAgentTask, TaskStatus
 from .inheritance_manifest import build_inheritance_manifest
 from .persistence.model_normalizers import (
     _normalize_context_manifest,
@@ -602,8 +602,9 @@ class SubAgentBaseService:
 
     # LLM: 所有接管入口（显式接替、手动接管、领导权恢复、接管 run）先过统一授权门，再交 takeover.record 落账：已关闭
     #   来源只追加 superseded_by、终态不改写，未关闭来源转 TAKEN_OVER；保存后核对落盘，读不到就抛
-    #   TakeoverNotPersistedError 且不写 TAKEOVER.md。返回值仍是 TakeoverRecord，调用方契约不变。
-    # 函数用途: 记录一次接管或接替并写 TAKEOVER.md；不结束子代理进程。
+    #   TakeoverNotPersistedError 且不写 TAKEOVER.md。转 TAKEN_OVER 的来源再经 runtime_db.run_takeover 把运行账 agent_run
+    #   收成 cancelled（执行轮已静止时；副作用：写 runtime.db）。返回值仍是 TakeoverRecord，调用方契约不变。
+    # 函数用途: 记录一次接管或接替并写 TAKEOVER.md，被接管来源的运行账同步收口；不结束子代理进程。
     def record_takeover(
         self,
         run_id: str,
@@ -628,7 +629,14 @@ class SubAgentBaseService:
             ),
         )
         request = TakeoverEdgeRequest(take_over_by=take_over_by, reason=reason, locked_files=list(locked_files or []))
-        return record_takeover_edge(self.manager, task, request)
+        record = record_takeover_edge(self.manager, task, request)
+        if task.status == TaskStatus.TAKEN_OVER.value:
+            # 未关闭来源转 TAKEN_OVER 后不会再续跑：运行账的 agent_run 同步收口为 cancelled（执行轮已静止时），
+            # 否则会永远停在 created。补账失败不影响已落盘的接替。
+            from ...runtime_db.run_takeover import settle_taken_over_run_best_effort
+
+            settle_taken_over_run_best_effort(getattr(self.manager, "runtime_db", None), run_id, takeover_by=take_over_by)
+        return record
 
 
 def _manager_workspace_attrs(manager: Any) -> dict[str, object]:

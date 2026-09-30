@@ -285,3 +285,9 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 层级继承只取父任务 canonical attrs 和 grants，忽略 spec 自报引用；后授予能力不再被旧运行参数中的初始列表再次裁掉。
 本地定向测试已覆盖包内读取隔离、父子权限、伪造孙任务 refs、后授予接续；真实多 TUI 尚未开始。
 详见[能力包 Goal](../../tasks/CAPABILITY_INTERNALIZATION_GOAL.md)。
+
+## 被接替的子代理在运行账里补终态（2026-09-30，分支 `claude/38-agent-run-closeout-status`，基于 main `10041de02`）
+
+- **起因**：G03 验收第二条观察，BLOCKED 后被接替的子代理 runtime.db agent_run 永远停在 created。
+- **改动**：新增 `runtime_db/run_takeover.py`，`services/base.record_takeover` 接替落账后调用；只改运行账，不动 `takeover/record.py`。
+- 测试与变异见 TESTS.md 同名节。

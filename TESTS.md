@@ -26,6 +26,18 @@
   - 相关回归：`test_subagent_done_supersede.py + test_orchestration_create_subagents_tool.py + test_local_store.py` → 63 passed。
 - 事件是只读审计投影：权威仍是 takeover_records；未做真实子代理进程级接替的端到端验收（本组测试走 LocalStore 事件通道验证契约）。
 
+## 被接替的子代理在运行账里补终态（2026-09-30，分支 `claude/38-agent-run-closeout-status`，基于 main `10041de02`）
+
+- `test_subagent_takeover_runtime_closeout.py`（新，真实 `SubAgentManager` + owner runtime.db）：
+  - BLOCKED 收口（`settle_agent_attempt`，运行仍 created、attempt done）后用 `create_subagents` 接替：运行收成 cancelled、attempt 仍 done，
+    `agent_run.completed` 事件带 `runtime_source=subagent_takeover`、`runtime_reason=taken_over`、`takeover_by`；改前停在 created；
+  - 执行轮仍在运行时被接管：运行与 attempt 都不动（`source_attempt_active`）；
+  - 已关闭来源被接替（superseded）：运行账保持原终态，不多写事件；
+  - 幂等、排队中的 attempt 不写、没有权威行、没有权威库、仓库抛错都不影响接替（本地非托管来源照常转 TAKEN_OVER）；
+  - 读到的 attempt 状态作为 `expected_attempt_status` 交给 `settle_agent_run`。
+- **变异**（`mutate_agentrun.py`）：7 个全部被杀：接替后不补账、不看执行轮是否静止、收成 done、补账异常向上抛、事件来源丢失、去掉 CAS 条件、已终态也重写。
+- **证据复核**：`bg-subagent-paths-9f88` 的 runtime.db 副本只读打开，13 个 agent_run 中只有被接替的那个停在 created。
+
 ## 智能程度逐模型真实审计（2026-09-30，38）
 
 - **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +

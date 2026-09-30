@@ -30,6 +30,8 @@
 
 ## 接替关系的唯一落账入口（2026-09-28）
 
+- 运行账补终态（2026-09-30）：`SubAgentBaseService.record_takeover` 在落账后，来源确实转成 TAKEN_OVER 时调用 `runtime_db/run_takeover.settle_taken_over_run_best_effort`：执行轮已静止就把 agent_run 收成 cancelled（CAS 核对读到的 attempt 状态），仍在运行、排队或 unknown 不动，已终态与本地非托管跳过，失败只记日志。
+
 - `services/takeover/record.py::record_takeover_edge` 是接管／接替边的唯一落账入口；`SubAgentBaseService.record_takeover` 过授权门后转调，显式接替（`agent_core/orchestration/replacements.py`）、手动接管、领导权恢复与接管 run 共用，返回值仍是 TakeoverRecord。
 - 处置由 `models.task_takeover_disposition` 按来源状态裁决，与持久化边界保护的已关闭集合同一口径：已关闭且还不是 TAKEN_OVER（DONE／ABANDONED／CANCELLED）为 `superseded`，终态不改写，只写 `superseded_by` 与一条 TakeoverRecord；其余为 `taken_over`，保持原语义（TAKEN_OVER、takeover_by、final_owner、锁文件、runtime_config_scope）。
 - 权威读取只有 `models.task_replacement_successor`（takeover_by 优先，其次 superseded_by）：接替预检、落账回执、接管 run 幂等查找、kernel 节点 `replaced_by` 都走它，不看 goal、正文或文件。

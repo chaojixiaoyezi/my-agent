@@ -433,6 +433,7 @@ agent_py_agent/
 |   |   |-- host_command_approval.py    # 同一宿主执行区间的精确审批与拒绝，不复用会话批准
 |   |   |-- operation_resources.py      # 同次只读核对原操作、holder/代数/epoch 与已领取资源锁
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
+|   |   |-- run_takeover.py             # 被接替（TAKEN_OVER）的子代理运行收口为 cancelled：只在执行轮已静止时，CAS 核对 attempt 状态
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- plugin_command_service.py  # 原管理员授权、可信 owner 目录与插件 HTTP 命令入口
@@ -1379,6 +1380,7 @@ docs/
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
+- `agent_py_agent/agent/runtime_db/run_takeover.py`：子代理被接替转 TAKEN_OVER 后的运行账收口。只在当前 attempt 已静止时用 `settle_agent_run` 写 cancelled（读到的 attempt 状态作 CAS 条件），仍在运行／排队／unknown 不动；由 `services/base.record_takeover` 在接替落账后尽力调用，失败不影响接替。
 - `agent_py_agent/agent/runtime_db/run_creation.py`：在调用方原事务内创建 Task→TaskRun→AgentRun→首次 Attempt 及委托/事件，普通调用与显式宿主命令共用，不能另开事务。
 - `agent_py_agent/agent/runtime_db/host_commands.py`：原事件索引与 TaskRun 冻结请求共同绑定唯一运行；本身不授予权限、不启动模型或任务调度。
 - `agent_py_agent/agent/runtime_db/host_command_execution.py`：只领取原 pending，强制原操作 Store，终态沿原运行收口；查询不初始化数据库，UNKNOWN 不重跑。

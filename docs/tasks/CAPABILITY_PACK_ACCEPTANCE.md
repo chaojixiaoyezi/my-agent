@@ -298,7 +298,7 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 
 追加式事件日志（local_store 的 `subagent_run_saved`、run 时间线）在接替时只多一条普通保存或状态记录，没有专门的接替条目；接管记录目前只在权威状态的 takeover_records 和 TAKEOVER.md 里。证据批次 `bg-subagent-takeover-fix` 保存在本机验收证据目录，不进仓库；判定文件摘要 `cf24eac9980720a04e1e5d709605b06c229e7a7c4c798480284a30a8406b1de0`。
 
-另有两项观察。其一，停机收口后又被接管的子代理，其 runtime.db agent_run 停在 created（attempt 已 done），TaskRun 仍按静止规则关闭。其二，模型在回复里写 `[SUBAGENT_RESULT]` 的 BLOCKED 不改变子代理状态，符合“状态只认宿主事实”的现行合同，不是缺陷。证据批次 `bg-subagent-paths-9f88` 保存在本机验收证据目录，不进仓库；判定文件摘要 `71e289fb51e2f177136235f19e86aa40cb23417c8c895d1b36e13d3a33416fd6`。本轮只改 Markdown，没有产品、测试或配置变更。
+另有两项观察。其一，停机收口后又被接管的子代理，其 runtime.db agent_run 停在 created（attempt 已 done），TaskRun 仍按静止规则关闭。（2026-09-30 已修，分支 `claude/38-agent-run-closeout-status`：BLOCKED 收口按设计只结束执行片、保留 created 以便续跑，接替后不会再续跑却没有任何入口给运行终态；现在接替落账后由 `runtime_db/run_takeover.py` 把执行轮已静止的来源收成 cancelled，与 runner 准入的 TAKEN_OVER→cancelled 同一口径。证据批次的 runtime.db 副本复核：13 个 agent_run 里只有 `agentrun-1790613966-be997aae` 停在 created，其 attempt 为 done、事件只有 started 与 attempt.completed、没有 agent_run.completed。）其二，模型在回复里写 `[SUBAGENT_RESULT]` 的 BLOCKED 不改变子代理状态，符合“状态只认宿主事实”的现行合同，不是缺陷。证据批次 `bg-subagent-paths-9f88` 保存在本机验收证据目录，不进仓库；判定文件摘要 `71e289fb51e2f177136235f19e86aa40cb23417c8c895d1b36e13d3a33416fd6`。本轮只改 Markdown，没有产品、测试或配置变更。
 
 ## G05脚本模型端到端机制验证（2026-09-28）
 

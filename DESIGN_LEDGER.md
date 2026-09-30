@@ -7,6 +7,22 @@
 - **边界**：它是审计投影，权威仍是 takeover_records / superseded_by / takeover_by；不改任何状态语义；事件写入失败与同通道其它事件一致（内部吞异常只记 warning），不影响落账主链；二次接替同一来源被预检拒绝时不产生新事件（不会走到落账入口）。
 - **验证**：`test_subagent_done_supersede.py` 新增三用例（DONE→superseded、BLOCKED→taken_over 各一条事件且字段正确；二次接替被拒不新增事件）；连同 orchestration、local_store 相关共 63 passed。
 
+## 被接替的子代理在运行账里补终态（2026-09-30，分支 `claude/38-agent-run-closeout-status`，基于 main `10041de02`，已实现，待集成）
+
+- **现象**（G03 验收第二条观察）：子代理被宿主收口成 BLOCKED 后又被 `replacement_for_run_ids` 接替，canonical 转 TAKEN_OVER，
+  但 runtime.db 的 agent_run 永远停在 created（attempt 已 done）。证据批次 `bg-subagent-paths-9f88` 的 runtime.db 副本：13 个 agent_run
+  只有这一个停在 created，事件只有 `agent_run.started` 和 `agent_attempt.completed`，没有 `agent_run.completed`。
+- **原因**：BLOCKED 收口走 `settle_agent_attempt`，按设计只结束执行片、保留 created 以便续跑；只有 DONE/FAILED/CANCELLED 的 runner 结果
+  会调 `settle_agent_run`。接替落账（`record_takeover_edge`）只改 canonical 状态，从来没有入口给这条运行写终态。这不是有意设计：
+  `runner_result_admission._runner_runtime_terminal_status` 已经把 TAKEN_OVER 映射成运行终态 cancelled，只是接替路径没有落这个账。
+- **修法**：新增 `runtime_db/run_takeover.py`：`settle_taken_over_run` 读权威行，执行轮已静止（终态集去掉 unknown）才用 `settle_agent_run`
+  写 cancelled，并把读到的 attempt 状态作为 CAS 条件；已终态、没有权威行、执行轮仍在运行/排队/未知都不写。
+  `SubAgentBaseService.record_takeover` 在接替落账后、来源确实转成 TAKEN_OVER 时调用它的尽力版本，失败只记日志，不影响已落盘的接替。
+  `agent_run.completed` 事件带 `runtime_source=subagent_takeover`、`runtime_reason=taken_over`、`takeover_by`。
+- **不改**：已关闭来源被接替（只记 superseded）运行账不动；仍在运行的来源被接管时不在这里停执行轮（归取消入口，runner 结果会被准入拒绝），
+  这条运行要等取消入口处理，记为待定；避开了 1 号会话正在改的 `takeover/record.py` 与 Codex 在重构的 `conversation/runtime.py`。
+- **验证**：`test_subagent_takeover_runtime_closeout.py` 6 项；7 个变异全部被杀。见 TESTS.md 同名节。
+
 ## 智能程度（/effort）逐模型真实审计（2026-09-30，分支 `claude/38-effort-receipt`，38 执行）
 
 - **范围**：生产 local/main 模型目录里每个对话模型，产品后端真实请求，隔离目录副本（600、令牌不刷新、用完删）。详表见
