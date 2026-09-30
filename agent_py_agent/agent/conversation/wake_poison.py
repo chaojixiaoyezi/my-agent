@@ -338,7 +338,8 @@ def _error_reason_code(error: Exception) -> str:
 
 
 # LLM: 不计数 = 瞬时类或环境级故障，只按类型或结构化状态码判定：
-#   瞬时——供应瞬时（含限流）、供应超时、额度耗尽、模型配置暂缺、运行库冲突全族（含锁冲突与待恢复）、
+#   瞬时——供应瞬时（含限流）、供应超时、额度耗尽（compact_guard.is_provider_quota_failure，含压缩调用撞额度的包装）、
+#   模型配置暂缺、运行库冲突全族（含锁冲突与待恢复）、
 #   取消与压缩让出、本地 IO 的阻塞与超时、SQLite 忙或锁；
 #   环境级——统一由 backends.errors.is_provider_environment_fault 判定（与 Gateway 车道暂停同一个权威）：HTTP
 #   401/402/403/404/407，以及 ProviderConfigurationError 基类（含 ProviderConnectionError），但请求被拒
@@ -354,19 +355,16 @@ def _is_uncounted(error: Exception) -> bool:
 # LLM: 瞬时类型清单；与 _is_uncounted 的环境级判定分开，便于逐项测试。
 # 函数用途: 判断一个异常是否属于不计数的瞬时类。
 def _is_transient(error: Exception) -> bool:
-    from ..backends.errors import (
-        ProviderTimeoutError,
-        is_provider_quota_exhausted_error,
-        is_provider_transient_error,
-    )
+    from ..backends.errors import ProviderTimeoutError, is_provider_transient_error
     from ..runtime_db.operations import RuntimeConflictError
     from ..settings.thread_model_selection import is_model_configuration_unavailable
     from .background_execution import BackgroundCompactSliceYield
+    from .compact_guard import is_provider_quota_failure
 
     if isinstance(error, (InterruptedError, BlockingIOError, TimeoutError, ProviderTimeoutError,
                           RuntimeConflictError, BackgroundCompactSliceYield)):
         return True
-    if is_provider_transient_error(error) or is_provider_quota_exhausted_error(error):
+    if is_provider_transient_error(error) or is_provider_quota_failure(error):
         return True
     if is_model_configuration_unavailable(error):
         return True

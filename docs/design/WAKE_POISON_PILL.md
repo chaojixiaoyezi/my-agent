@@ -71,7 +71,7 @@
 
 - `is_provider_transient_error`：网络、5xx、限流（含 `ProviderUsageLimitError`），已由供应退避接管；
 - `ProviderTimeoutError`：供应超时，属于网络类；
-- `is_provider_quota_exhausted_error`：走额度分路；
+- `compact_guard.is_provider_quota_failure`：额度用完，含大线程压缩调用撞额度的 `ConversationCompactError` 包装，走额度分路；
 - `is_model_configuration_unavailable`：等用户配置模型；
 - `RuntimeConflictError` 全族：CAS 或资源占用冲突，包括锁冲突 `RuntimeExecutionBusyError`；
   其中 `RuntimeRecoveryRequiredError` 由恢复闸接管；
@@ -90,8 +90,9 @@ session_task 不可逆地判成 failed。`ProviderRequestRejectedError` 在 400�
 model_profile_id、model_selection_revision 与所选模型连接字段的进程盐摘要，只读、不构造后端、不联网），立即放行；
 或者到了探测时刻（60 秒起、每次探测再失败翻倍、封顶 900 秒，内部常量），放行一次真实尝试，成功由车道成功清掉暂停；
 取指纹出错按未知处理，只等探测时刻，暂停和翻倍保持。
-`ModelNotConfiguredError` 与模型引用失效仍先走"等模型配置"分支。额度用完（`ProviderQuotaExhaustedError`）在车道这层
-也显式并入暂停（3a 裁定；共享判定本身不含额度，毒丸侧额度按瞬时类不计数）。暂停只在进程内，重启即清；暂停和恢复各打一行
+`ModelNotConfiguredError` 与模型引用失效仍先走"等模型配置"分支。额度用完在车道这层也显式并入暂停（3a 裁定；共享判定本身不含额度，
+毒丸侧额度按瞬时类不计数）。车道、毒丸、持久策略失败账和唤醒额度分路判额度都只读 `compact_guard.is_provider_quota_failure`，
+压缩调用撞额度的包装也算。暂停只在进程内，重启即清；暂停和恢复各打一行
 `[gateway-lane-retry]`。对应的唤醒尝试照旧记不计数，满 24 小时由连续不计数提醒兜底。
 
 其余一律计数，包括 programmer_bug、`DataCorruptionError`、`ValueError`。

@@ -73,7 +73,7 @@
   传输层原本就把 Retry-After 封顶在 30 秒。等拿到真实响应头证据再决定是否加「Retry-After 超上限即额度用完」。
 - 测试见 [TESTS.md](TESTS.md#429-按限额窗口区分额度用完与临时限流2026-09-29分支-claude9a-quota-window基于-89af6b07a)。
 
-## 定时任务撞模型额度用完：按失败结算，不再每 30 秒重跑（2026-09-29，分支 `claude/be-quota-settle`，基于 step16k `b929d9f02`，待 9a 复审）
+## 定时任务撞模型额度用完：按失败结算，不再每 30 秒重跑（2026-09-29，分支 `claude/be-quota-settle`，基于 step16k `b929d9f02`，9a 已复审，已拣进 step16k）
 
 - **来源**：复审 9a 的限额窗口改判时，用真实 `scheduler.tick` 加可控时钟探出。证据在 `~/.my-agent/decision-evidence/review-9a-quota-window/`。
   - 额度通知报告（`_provider_quota_fallback_report`）没有 `task_status`。`_finish_scheduler_wake_claim` 查不到终态，按「释放租约 + 30 秒后重试」处理，唤醒不确认。
@@ -82,12 +82,15 @@
 - **做法**：
   - 额度通知报告的 `reason` 固定为 `_QUOTA_NOTICE_REPORT_REASON`。通知已送达（`wake_handled`）时，`_finish_scheduler_wake_claim` 交给 `_finish_quota_scheduler_run`：
     run 记 failed，失败码 `PROVIDER_QUOTA_EXHAUSTED`（ERROR_CONTRACTS 已有登记），再把报告交回 `_complete_wake_report`，在同一拍确认唤醒。
-  - 不自动暂停 job，下一个到期照常派发：每次到期最多一次模型调用、一条通知。节奏交给 9b 在补的「额度用完也按车道暂停」（60 秒起翻倍，最长 900 秒探测）。
+  - 不自动暂停 job，下一个到期照常派发：每次到期最多一次模型调用、一条通知。
+  - 车道暂停管不到这里（9a 复审更正）：定时任务走唤醒路径，额度错误在 `_run_wake_signal` 里就转成了额度通知，车道收到的是成功，不会暂停。
+    额度一直不恢复时，每个到期点都会发一条通知。目前生产没有启用中的定时任务，影响为零。
+  - **待定、未落地**：额度通知按线程限频，或连续撞额度时自动暂停 job。
   - 通知没送达的分支语义不变：释放租约，30 秒后经 `_quota_fallback_wakes` 只重投通知，不调用模型；送达后按上面结算。
   - 会话任务本身的状态不改，与非额度失败的结算一致。普通定时任务没有 Goal 授权，唤醒对账（`_reconcile_wake_queue`）不会给它补续跑唤醒。
 - 测试见 [TESTS.md](TESTS.md#定时任务撞额度用完的结算2026-09-29分支-claudebe-quota-settle基于-b929d9f02)。
 
-## 压缩调用撞模型额度用完：后台按额度用完处理（2026-09-29，分支 `claude/be-quota-settle`，基于 step16k `b929d9f02`，待 9a 复审）
+## 压缩调用撞模型额度用完：后台按额度用完处理（2026-09-29，分支 `claude/be-quota-settle`，基于 step16k `b929d9f02`，9a 已复审；共用判定在分支 `claude/be-quota-predicate`）
 
 - **来源**：同一次复审。压缩摘要和业务调用走同一个后端、同一份额度。压缩撞到 429 额度用完时，异常被包成 `ConversationCompactError`，
   错误码 `COMPACT_PROVIDER_QUOTA_EXHAUSTED`。`is_provider_quota_exhausted_error` 只做 isinstance 判断，于是走非额度分路：
@@ -95,8 +98,12 @@
 - **做法**：
   - `compact_guard.compact_error_is_provider_quota` 只认结构化事实：`ConversationCompactError` 的码等于 `COMPACT_PROVIDER_QUOTA_EXHAUSTED`，
     或它的 `__cause__` 链上有 `ProviderQuotaExhaustedError`；不看文案，其它异常类型一律不认。
-  - 只在唤醒的额度分路入口（`_run_wake_signal`）补这一条判定；`is_provider_quota_exhausted_error` 的 isinstance 语义不变，
-    传输层、回合级续跑、供应退避、毒丸计数和错误分类器都不受影响。
+  - 共用判定（9a 复审补充）：车道环境暂停（`cli/gateway_lane_retry._next_failure`）、持久策略失败账（`background_claim._counts_as_policy_failure`）
+    和毒丸不计数（`wake_poison._is_transient`）原来也各用 isinstance 判额度。大线程上的持久策略撞每周额度时，三拍都抛压缩包装错误，
+    结果是第 3 拍策略退休、车道按普通 30 秒冷却、毒丸计数。现在这三处和唤醒入口 `_run_wake_signal` 都只读会话层的唯一判定
+    `compact_guard.is_provider_quota_failure`：直接的额度错误，或 `compact_error_is_provider_quota` 认得的压缩包装。
+  - 判定放在会话层，因为后端层（`backends.errors`）不能反向依赖会话层。`is_provider_quota_exhausted_error` 仍是 isinstance，
+    传输层、回合级续跑、供应退避和错误分类器这些后端内部调用方不受影响。
   - `COMPACT_PROVIDER_QUOTA_EXHAUSTED` 登记进 ERROR_CONTRACTS：不可重试，建议切换后端。
 - **既有问题，待定，未落地**：`_provider_error_indicates_quota_exhausted` 在结构化错误码和限额窗口之后，还对整段错误正文做子串匹配。
   硬额度码出现在任意位置、数字 `2056`、`token_plan` 加上「用量上限」「购买积分」「upgrade」「exhausted」这几个词，都会判成额度用完。

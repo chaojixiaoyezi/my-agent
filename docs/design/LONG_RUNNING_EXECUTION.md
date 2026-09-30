@@ -163,7 +163,8 @@ native 信封落盘，恢复只读取已有取消账、attempt 和文件事实�
 真实组合发现：旧会话模型未配置时，仅延迟 30 秒不能恢复缺失配置，仍会永久重复抢工位和报错。
 `cli/gateway_lane_retry.py` 统一管理进程内 owner/thread 失败：本地缺模型或模型引用无效时，
 等待该会话的规范模型配置可用，再进入原执行车道。只改新会话默认模型不会偷换旧会话；不发网络探针。
-环境级故障（HTTP 401/402/403/404/407、连接与配置错误，判定见 `backends/errors.is_provider_environment_fault`）与额度用完按车道暂停：
+环境级故障（HTTP 401/402/403/404/407、连接与配置错误，判定见 `backends/errors.is_provider_environment_fault`）与额度用完
+（`conversation/compact_guard.is_provider_quota_failure`，含压缩调用撞额度的包装）按车道暂停：
 会话模型指纹（`thread_model_fingerprint`，只读）变了立即放行，否则到探测时刻（60 秒起翻倍、封顶 900 秒）放行一次真实尝试，成功清除。
 普通宿主错误仍按 `cli/gateway_loops.BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS`（30 秒代码常量，参数减量第 3 批起不再是配置项）以单调时钟冷却。
 健康会话及前台消息不被阻塞，失败事件仍留在原持久队列；成功或 owner 淘汰后清除临时记录，

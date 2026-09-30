@@ -117,6 +117,12 @@
     `COMPACT_PROVIDER_QUOTA_EXHAUSTED`，模型只调用 1 次，Goal 记 usage_limited，本地会话落一条额度通知，唤醒确认。
 - 去掉 `_run_wake_signal` 的新判定后，真实链路那一项失败（Goal 记 blocked，异常上抛）。
 - 6 个变异全部被抓住：去掉运行时接线、去掉错误码判定、去掉异常链、只看直接原因、放宽到任意异常类型、改成文案匹配。
+- **共用判定补充**（9a 复审，分支 `claude/be-quota-predicate`，基于 step16k `d77b3ea4a`），同一文件再加 2 项，共 6 项：
+  - `is_provider_quota_failure` 认直接额度错误和压缩包装，不认按分钟限流及其压缩包装；
+  - 真实链路：大线程上的持久策略，请求前先压缩、压缩撞每周额度 429，连续 3 拍：3 次都抛 `COMPACT_PROVIDER_QUOTA_EXHAUSTED`，
+    策略仍 enabled、没有失败账也没退休；车道 3 次都进环境暂停（探测间隔 60、120、240 秒），不是 30 秒普通冷却；
+    毒丸判定 3 次都是不计数。
+  - 5 个变异全部被抓住：唤醒入口、策略失败账、毒丸、车道四处任一处退回 isinstance，以及共用判定去掉压缩分支。
 
 ## 定时任务撞额度用完的结算（2026-09-29，分支 `claude/be-quota-settle`，基于 `b929d9f02`）
 

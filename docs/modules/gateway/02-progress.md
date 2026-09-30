@@ -613,6 +613,9 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
   **3a 裁定（2026-09-29）并入车道暂停**：车道分类改为 `is_provider_environment_fault(exc) or is_provider_quota_exhausted_error(exc)`，
   额度只在车道这层显式加，共享判定 `is_provider_environment_fault` 不变（毒丸那边额度本来就按瞬时类不计数）。观察和策略路径遇到额度用完
   也按车道暂停（60→900 秒探测，换模型立即放行），不再每 30 秒空打一次；唤醒路径仍就地转额度通知，不受影响。
+  **额度共用判定（2026-09-29，9a 复审 be 的压缩额度修复后补充，分支 `claude/be-quota-predicate`）**：大线程请求前先压缩，压缩调用撞额度时
+  抛的是 `ConversationCompactError`（`COMPACT_PROVIDER_QUOTA_EXHAUSTED`），车道分类、策略失败账和毒丸原来都用 isinstance，认不出。
+  现在四处（含唤醒额度分路）都只读 `conversation/compact_guard.is_provider_quota_failure`；后端层的 isinstance 判定不变。
 - **策略失败账不记环境级故障（3a 裁定，C5 补充二）**：现状核实（草稿探针）——401/407/连接失败/额度用完都原样穿过真实后台回合，
   每次记进持久策略失败账（`failure_count` 加 1、退避约 300 秒），连续 3 次策略退休。改为 `background_claim._counts_as_policy_failure`：
   供应瞬时、配置暂缺、环境级故障与额度用完都不记，不因此退休；重试节奏交给车道暂停。普通程序错误 3 次退休不变。只改记账条件，

@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING
 
 from ..backends.errors import (
     is_provider_environment_fault,
-    is_provider_quota_exhausted_error,
     is_provider_transient_error,
 )
 from ..concurrency.interrupt import is_interrupted, register_interruptible
 from ..settings.thread_model_selection import is_model_configuration_unavailable
 from .background_execution import BackgroundCompactSliceYield
+from .compact_guard import is_provider_quota_failure
 from .control_commands import (
     conversation_request_interrupt_name,
     session_task_interrupt_name,
@@ -289,11 +289,12 @@ def _finish_nonexecuted_claim(
 
 
 # LLM: 持久策略失败账只记这条工作本身的问题。不记：供应瞬时（供应退避接管）、模型配置暂缺（等配置）、环境级故障
-#   （backends.errors.is_provider_environment_fault）与额度用完——修好密钥或额度重置后策略还在，不因此退休，重试节奏交给
+#   （backends.errors.is_provider_environment_fault）与额度用完（compact_guard.is_provider_quota_failure，含压缩调用撞额度的包装）
+#   ——修好密钥或额度重置后策略还在，不因此退休，重试节奏交给
 #   Gateway 车道暂停；与车道环境暂停同一组判定（cli/gateway_lane_retry._next_failure），与毒丸"环境级故障不计数"同一原则。
 #   只按异常类型和结构化状态码判断，不读正文；改动联测 test_background_claim_execution 与策略退休测试。
 # 函数用途: 判断一次后台失败要不要记进进度策略的持久失败账（连续 3 次退休）。
 def _counts_as_policy_failure(error: BaseException) -> bool:
     if is_provider_transient_error(error) or is_model_configuration_unavailable(error):
         return False
-    return not (is_provider_environment_fault(error) or is_provider_quota_exhausted_error(error))
+    return not (is_provider_environment_fault(error) or is_provider_quota_failure(error))

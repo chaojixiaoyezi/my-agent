@@ -232,9 +232,8 @@ COMPACT_PROVIDER_QUOTA_EXHAUSTED = "COMPACT_PROVIDER_QUOTA_EXHAUSTED"
 
 
 # LLM: 只认结构化事实：ConversationCompactError 的码等于 COMPACT_PROVIDER_QUOTA_EXHAUSTED，或它的 __cause__ 链上有
-#   ProviderQuotaExhaustedError；不看文案，其它异常类型一律 False。唤醒的额度分路入口（conversation/runtime._run_wake_signal）
-#   用它补上「压缩时撞额度」；backends.errors.is_provider_quota_exhausted_error 的 isinstance 语义不变，其它调用方不受影响。
-#   改动时联测 test_compact_quota_wake.py。
+#   ProviderQuotaExhaustedError；不看文案，其它异常类型一律 False。后台各处不直接调它，统一经 is_provider_quota_failure；
+#   backends.errors.is_provider_quota_exhausted_error 的 isinstance 语义不变。改动时联测 test_compact_quota_wake.py。
 # 函数用途: 判断一次压缩失败是不是因为模型额度用完，让后台按额度用完处理（发额度通知、Goal 记 usage_limited）。
 def compact_error_is_provider_quota(exc: BaseException) -> bool:
     from ..backends.errors import is_provider_quota_exhausted_error
@@ -251,6 +250,19 @@ def compact_error_is_provider_quota(exc: BaseException) -> bool:
         seen.add(id(cause))
         cause = cause.__cause__
     return False
+
+
+# LLM: 会话层「模型额度用完」的唯一判定：直接的 ProviderQuotaExhaustedError，或 compact_error_is_provider_quota 认得的压缩包装
+#   （大线程请求前先压缩，压缩调用撞额度时就是这种形态）。唤醒额度分路（runtime._run_wake_signal）、车道环境暂停
+#   （cli/gateway_lane_retry._next_failure）、持久策略失败账（background_claim._counts_as_policy_failure）和毒丸不计数
+#   （wake_poison._is_transient）都只读这一处。只看类型、结构化错误码和异常链，不看文案。放在会话层是因为后端层
+#   （backends.errors）不能反向依赖会话层；那里的 is_provider_quota_exhausted_error 仍是 isinstance，后端内部调用方不受影响。
+#   改动时联测 test_compact_quota_wake.py。
+# 函数用途: 判断一次后台失败是不是模型额度用完（包括压缩时撞到的），让唤醒、车道、策略失败账和毒丸口径一致。
+def is_provider_quota_failure(exc: BaseException) -> bool:
+    from ..backends.errors import is_provider_quota_exhausted_error
+
+    return is_provider_quota_exhausted_error(exc) or compact_error_is_provider_quota(exc)
 
 
 # LLM: 两条压缩链（会话 transcript 与活动回合）的 failed 进度都从这里取失败字段：安全错误码，加上错误自带的
