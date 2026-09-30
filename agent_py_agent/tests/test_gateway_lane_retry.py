@@ -307,6 +307,39 @@ def test_model_not_configured_still_waits_for_model_configuration(monkeypatch, c
     assert _lane_events(capsys) == []
 
 
+def test_quota_exhausted_pauses_lane_like_environment_fault(monkeypatch, capsys):
+    quota = ProviderQuotaExhaustedError("HTTP 429: weekly quota", details={"status_code": 429})
+    # 共享判定不含额度（毒丸也在用）；额度只在车道这层显式并入暂停。
+    assert not errors.is_provider_environment_fault(quota)
+    retries = gateway_lane_retry.BackgroundLaneRetry()
+    now = _clock(monkeypatch)
+    current = ["same-model"]
+
+    def check():
+        return retries.ready("a", "t", model_ready=lambda: True, fingerprint=lambda: current[0])
+
+    retries.failed("a", "t", quota, delay=30)
+    for moment in (100.0, 130.0, 159.9):
+        now[0] = moment
+        assert not check()
+    now[0] = 160.0
+    assert check()
+    assert retries.count("a") == 1
+    retries.failed("a", "t", quota, delay=30)
+    now[0] = 161.0
+    assert not check()
+    current[0] = "switched-model"
+    assert check()
+    assert retries.count("a") == 0
+    events = _lane_events(capsys)
+    assert [event["event"] for event in events] == [
+        "lane_environment_paused", "lane_environment_paused", "lane_environment_resumed",
+    ]
+    assert [event.get("probe_in_seconds") for event in events[:2]] == [60.0, 120.0]
+    assert events[0]["error_type"] == "ProviderQuotaExhaustedError" and events[0]["http_status"] is None
+    assert events[2]["reason"] == "model_fingerprint_changed"
+
+
 def test_success_during_fingerprint_read_is_not_undone(monkeypatch):
     retries = gateway_lane_retry.BackgroundLaneRetry()
     _clock(monkeypatch)

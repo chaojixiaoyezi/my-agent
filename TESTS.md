@@ -141,7 +141,10 @@
 - **指纹**（`test_thread_model_selection.py::test_thread_model_fingerprint_reads_only_and_tracks_model_changes`）：旧会话空引用读指纹不写库；
   跟随 owner 默认；同值再选、换密钥、停用都改变指纹，增加无关模型不变；指纹不含密钥原文；会话不存在或属于其他用户时报错。
 - **额度耗尽核对探针**（草稿区，不入库）：供应退避不吸收 `ProviderQuotaExhaustedError`（只吸收 `ProviderUsageLimitError`）；
-  车道对它按 30 秒普通冷却；策略失败账记它、不记 UsageLimit。结论见 gateway 02-progress 同名节。
+  C5 初版车道对它按 30 秒普通冷却；策略失败账记它、不记 UsageLimit。结论见 gateway 02-progress 同名节。
+- **额度用完并入车道暂停**（3a 裁定后的补充提交）：`test_quota_exhausted_pauses_lane_like_environment_fault`——共享判定仍不含额度；
+  额度用完进入暂停，30 秒、59.9 秒后不放行，到探测时刻放行一次、暂停记录保留，探测再失败 120 秒，换模型（指纹变化）立即放行；
+  日志 error_type 为 `ProviderQuotaExhaustedError`、状态码为空。
 - **变异**（草稿副本上逐个精确替换、按字节恢复，跑上面两个文件与 `test_wake_poison.py`）：19 个全部被杀，基线与恢复后通过。
   覆盖：环境级故障退回 30 秒冷却、模型指纹比较恒为相等、探测不翻倍、缺模型先归环境暂停、不封顶、到点不放行、不记基线、
   Gateway 规划不传指纹、指纹不含选择版本、指纹不含档案内容、指纹经会写库的入口读取、毒丸不引用共享判定、状态码漏 402、

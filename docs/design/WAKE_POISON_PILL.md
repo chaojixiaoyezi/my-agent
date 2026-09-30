@@ -89,7 +89,8 @@ session_task 不可逆地判成 failed。`ProviderRequestRejectedError` 在 400�
 里不再按 30 秒冷却重试，而是按车道暂停到两件事之一发生：会话的模型指纹变了（`thread_model_fingerprint`：
 model_profile_id、model_selection_revision 与所选模型连接字段的进程盐摘要，只读、不构造后端、不联网），立即放行；
 或者到了探测时刻（60 秒起、每次探测再失败翻倍、封顶 900 秒，内部常量），放行一次真实尝试，成功由车道成功清掉暂停。
-`ModelNotConfiguredError` 与模型引用失效仍先走"等模型配置"分支。暂停只在进程内，重启即清；暂停和恢复各打一行
+`ModelNotConfiguredError` 与模型引用失效仍先走"等模型配置"分支。额度用完（`ProviderQuotaExhaustedError`）在车道这层
+也显式并入暂停（3a 裁定；共享判定本身不含额度，毒丸侧额度按瞬时类不计数）。暂停只在进程内，重启即清；暂停和恢复各打一行
 `[gateway-lane-retry]`。对应的唤醒尝试照旧记不计数，满 24 小时由连续不计数提醒兜底。
 
 其余一律计数，包括 programmer_bug、`DataCorruptionError`、`ValueError`。
