@@ -506,7 +506,7 @@
   - 占用视图；
   - 磁盘压力触发维护。
 - 已知残留：
-  - 已修（step16l）：只要有路径级错误，维护状态就记 `policy_unavailable`、把「其实执行了」掩盖掉。现新增 `apply_outcome` /
+  - 已修（基于 step16l、待合并）：只要有路径级错误，维护状态就记 `policy_unavailable`、把「其实执行了」掩盖掉。现新增 `apply_outcome` /
     `isolated_error_count` / `last_applied_at`，审计事件加隔离计数；Gateway 摘要 `failed` 只算整次被拒与执行期失败，另加
     `refused` / `isolated`（摘要只打印）；持久化旧字段含义不变。
     /status、TUI 展示维护状况待定。

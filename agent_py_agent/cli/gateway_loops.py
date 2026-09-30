@@ -60,7 +60,7 @@ from ..agent.settings.thread_model_selection import (
     thread_model_fingerprint,
     thread_model_is_configured,
 )
-from ..agent.user_space.owner_maintenance import run_owner_retention_if_due
+from ..agent.user_space.owner_maintenance import OwnerMaintenanceResult, run_owner_retention_if_due
 from ..agent.user_space.owner_resolver import (
     OwnerIdentity,
     home_paths_with_owner,
@@ -1352,7 +1352,7 @@ class _GatewayOwnerMaintenanceController:
         )
 
     # LLM: 每拍先跑基础 owner，再按分页游标跑一页 scoped owner，只做到期维护、不构造 owner agent；
-    #   摘要 failed 只算整次被拒与执行期动作失败，refused / isolated 按 OwnerMaintenanceResult.apply_outcome 区分，只打印、不落盘。
+    #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘。
     # 函数用途: 跑一拍 owner 维护并打印一行 [gateway-owner-maintenance] 摘要。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
         current = float(now if now is not None else time.time())
@@ -1382,21 +1382,7 @@ class _GatewayOwnerMaintenanceController:
                     )
                 )
                 _print_gateway_loop_error("gateway_owner_maintenance.owner", label, exc)
-        summary = {
-            "scanned": page.scanned,
-            "ran": sum(report.ran for report in reports),
-            # failed 只算整次被拒（策略级错误，retention 自己的 _POLICY_LEVEL_ERROR_CODES 判定）和执行期动作失败；
-            #   「执行了、只有路径级隔离错误」不算 failed，只进 isolated。持久化的 status 不受影响（摘要只打印、不落盘）。
-            "failed": sum(
-                report.apply_outcome == "refused" or report.failed_action_count > 0
-                for report in reports
-            ),
-            "refused": sum(report.apply_outcome == "refused" for report in reports),
-            "isolated": sum(
-                report.apply_outcome == "applied" and report.isolated_error_count > 0
-                for report in reports
-            ),
-        }
+        summary = _maintenance_summary(reports, page.scanned)
         if summary["ran"] or summary["failed"]:
             print(
                 "[gateway-owner-maintenance] "
@@ -1404,6 +1390,26 @@ class _GatewayOwnerMaintenanceController:
                 flush=True,
             )
         return summary
+
+
+# LLM: 摘要只打印、不落盘，没有持久化读取方。failed 只算整次被拒（apply_outcome=refused，即 retention 用
+#   _POLICY_LEVEL_ERROR_CODES 判定的整份拒绝）和执行期动作失败；「执行了、只有路径级隔离错误」只进 isolated；
+#   持久化的 status 不受影响。从 _GatewayOwnerMaintenanceController.tick 抽出只为控制函数长度，语义不变。
+# 函数用途: 把一拍里各 owner 的维护结果汇总成扫描数、跑了几个、失败、被拒、隔离五个计数。
+def _maintenance_summary(reports: list[OwnerMaintenanceResult], scanned: int) -> dict[str, int]:
+    return {
+        "scanned": scanned,
+        "ran": sum(report.ran for report in reports),
+        "failed": sum(
+            report.apply_outcome == "refused" or report.failed_action_count > 0
+            for report in reports
+        ),
+        "refused": sum(report.apply_outcome == "refused" for report in reports),
+        "isolated": sum(
+            report.apply_outcome == "applied" and report.isolated_error_count > 0
+            for report in reports
+        ),
+    }
 
 
 class _GatewaySchedulerDueController:

@@ -296,3 +296,5 @@ error_self` 的提前返回只是快速路径，语义上不改变结果（错�
 - `errors`、`load_errors`、`ok` 的含义都不变。
 - 同一个坏任务状态会被 completed_task 与 tool_output 两个扫描器各报一次，计数是错误条数、不是子树数（去重待定）。
 - owner 维护侧的新字段见 gateway 02-progress 同名节。
+- 38 复审跟进（同分支补充提交，纯抽取、语义不变）：`execute_retention_plan` 越过函数长度 soft 线，候选批次阶段抽成
+  `retention_apply._apply_candidate_phase(candidates, plan)`，返回结果与错误两个新列表，后续逐条动作继续追加。

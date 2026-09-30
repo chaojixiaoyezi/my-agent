@@ -218,7 +218,7 @@
 
 **已知残留（2026-09-29 核对时发现，待定，不改代码）**：
 
-- （**已修，step16l，分支 `claude/9b-maintenance-apply-outcome`**）`owner_maintenance._maintenance_status` 只要 `load_errors` 非空就记
+- （**已修，基于 step16l、待合并，分支 `claude/9b-maintenance-apply-outcome`**）`owner_maintenance._maintenance_status` 只要 `load_errors` 非空就记
   `policy_unavailable`，哪怕路径级错误已被隔离、其余动作都执行了，`last_success_at` 也因此不前进。修法按持久化字段只加不改：
   - `status` 与 `last_success_at` 含义不变；
   - `maintenance.json` 新增 `apply_outcome`（`applied` / `refused` / `legal_hold`，只看 `report.applied` 与 `legal_hold`）、
@@ -235,6 +235,8 @@
 - `AuditLogQuery.cleanup_old_entries` 先读、写临时文件再替换，全程不持追加锁（`io.jsonl.append_line_locked` 用的锁），
   手动清理期间新追加的审计行可能丢失。
 - 回收站清除注释里说的「散落文件按 mtime 清除」没有实现，只清 tombstone 容器。
+- 候选清理路径（`rejected_candidate_days` / `candidate_delete`）没有任何产品测试。09-29 把 `execute_retention_plan` 的候选阶段抽成
+  `_apply_candidate_phase` 时，「候选结果被丢」这个变异只能靠草稿探针杀掉；补测试待定。
 
 **生产首跑积压（09-29 21:39:50，证据 `~/.my-agent/releases/step16i-df0114f2/first-maintenance/` 第二节）**：
 - local/main 审计事件 `applied=true`、`ok=true`，共 11742 个动作，执行失败 0，与 my-agent-4 的 plan 逐类对上：

@@ -98,27 +98,15 @@ def run_owner_retention_if_due(
         # global_index 四份只追加索引在这里按 key 内部压缩（纯投影，不读权威源）。
         # 单份失败不中断维护；成功与"试了但失败"分开汇总进维护状态，便于观察是否真的压过。
         compacted, compact_failed = _compact_global_indexes(home, now=current)
-        status = _maintenance_status(retention)
-        outcome = _apply_outcome(retention)
-        failed_actions = sum(
-            action.status in {"failed", "collision", "state_changed"}
-            for action in retention.actions
-        )
         previous = read_json_object_report(
             state_path,
             context="owner_maintenance.state",
         ).payload
+        fields = _outcome_fields(retention, previous, current)
         payload = {
             "schema_version": "owner-maintenance.v1",
             "last_attempt_at": current,
-            "last_success_at": (
-                current
-                if status == "success"
-                else _timestamp(previous.get("last_success_at"))
-            ),
-            "status": status,
-            "action_count": len(retention.actions),
-            "failed_action_count": failed_actions,
+            **fields,
             "load_errors": list(retention.load_errors),
             "legal_hold": retention.legal_hold,
             "text_vector_cache_reclaimed": dropped_cache_keys,
@@ -127,18 +115,33 @@ def run_owner_retention_if_due(
             "indexes_compacted": compacted,
             # "试了但失败"（io_error / identity_changed）单列，免得跟"没到期"混成一片。
             "indexes_compact_failed": compact_failed,
-            # status 有路径级错误就记 policy_unavailable，会把"其实执行了"掩盖掉；这三个键说清执行事实。
-            "apply_outcome": outcome,
-            "isolated_error_count": len(retention.isolated_errors),
-            "last_applied_at": (
-                current if outcome == "applied" else _timestamp(previous.get("last_applied_at"))
-            ),
         }
         write_json_file_atomic_unlocked(state_path, payload)
         return OwnerMaintenanceResult(
-            True, status, retention, apply_outcome=outcome, isolated_error_count=len(retention.isolated_errors),
-            failed_action_count=failed_actions,
+            True, fields["status"], retention, apply_outcome=fields["apply_outcome"],
+            isolated_error_count=fields["isolated_error_count"], failed_action_count=fields["failed_action_count"],
         )
+
+
+# LLM: 维护状态里描述「这轮结果」的字段只在这里算：旧口径 status / last_success_at 含义不变；新增的 apply_outcome /
+#   isolated_error_count / last_applied_at 说清执行事实（被拒或法律保留时 last_applied_at 沿用上次，旧文件按 0）。
+#   从 run_owner_retention_if_due 抽出只为控制函数长度，纯计算、不做 IO。
+# 函数用途: 由保留回执、上一次维护状态和本轮时刻算出状态、动作计数与执行结果字段。
+def _outcome_fields(retention: OwnerRetentionPlan, previous: dict[str, Any], current: float) -> dict[str, Any]:
+    status = _maintenance_status(retention)
+    outcome = _apply_outcome(retention)
+    return {
+        "status": status,
+        "last_success_at": current if status == "success" else _timestamp(previous.get("last_success_at")),
+        "action_count": len(retention.actions),
+        "failed_action_count": sum(
+            action.status in {"failed", "collision", "state_changed"} for action in retention.actions
+        ),
+        # status 有路径级错误就记 policy_unavailable，会把"其实执行了"掩盖掉；下面三个键说清执行事实。
+        "apply_outcome": outcome,
+        "isolated_error_count": len(retention.isolated_errors),
+        "last_applied_at": current if outcome == "applied" else _timestamp(previous.get("last_applied_at")),
+    }
 
 
 # LLM: 回收只读 active 记忆算出保留集合，不加载嵌入模型、不联网；失败只记 0，绝不影响保留策略结果。

@@ -674,4 +674,11 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
   （既有行为），所以不等于子树数；按 (错误码, 路径) 去重待定。
 - **同轮处理的两个 v1 策略 owner**（3a 裁定）：`93b8c3ffffb8`（local/users，测试名）用产品 `_migrate_retention_policy` 一次性迁移，
   原文件备份进证据目录；`ebd40e6fc3ec`（feishu/users，像真实用户）不动、交用户决定，状态修复上线后它每天会记为 `refused`。
+- 38 复审跟进（同分支补充提交，纯抽取、语义不变）：代码尺寸身份比对新增了 3 条（`execute_retention_plan` 越 soft 线，
+  `run_owner_retention_if_due` 与维护 `tick` 进 high-risk），分别抽出：
+  - `retention_apply._apply_candidate_phase`；
+  - `owner_maintenance._outcome_fields(retention, previous, current)`，算 status / last_success_at / 动作计数 / 三个新键；
+  - `gateway_loops._maintenance_summary(reports, scanned)`。
+
+  抽取后对比基线 `5ec2db2e0` 的身份比对：新增 0、消失 0。
 - 测试与变异见 TESTS.md 同名节。

@@ -22,7 +22,7 @@
 四份索引的键定义只有一处权威：`home_indexes.INDEX_KEY_FIELDS_BY_FILE`，写入侧与压缩侧都从它派生。
 手动 `home-index-rebuild --apply` 仍是权威修复工具，不变。
 
-**维护状态只加键、不改旧键含义**（2026-09-29，step16l）：`O/data/maintenance.json` 的 `status` / `last_success_at` 仍是旧汇总口径
+**维护状态只加键、不改旧键含义**（2026-09-29，基于 step16l、待合并）：`O/data/maintenance.json` 的 `status` / `last_success_at` 仍是旧汇总口径
 （有任何错误就 `policy_unavailable`）。「到底执行了没有」看三个新键：
 - `apply_outcome`：`applied` / `refused` / `legal_hold`，只由 `report.applied` 与 `legal_hold` 推出，不看错误列表；
 - `isolated_error_count`：`MemoryRetentionReport.isolated_errors` 的条数，是 apply 隔离掉的扫描期路径级错误，按错误条数计，不按子树计；

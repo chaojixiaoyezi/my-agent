@@ -37,18 +37,7 @@ def execute_retention_plan(
     now: datetime,
     allowed_external_roots: tuple[Path, ...] = (),
 ) -> MemoryRetentionReport:
-    results: list[MemoryRetentionAction] = []
-    errors: list[MemoryRetentionError] = []
-    candidate_actions = tuple(
-        action for action in plan.actions if action.operation == "candidate_delete"
-    )
-    if candidate_actions:
-        candidate_results, candidate_errors = _apply_candidate_actions(
-            candidates,
-            candidate_actions,
-        )
-        results.extend(candidate_results)
-        errors.extend(candidate_errors)
+    results, errors = _apply_candidate_phase(candidates, plan)
     for action in plan.actions:
         if action.operation == "candidate_delete":
             continue
@@ -90,6 +79,22 @@ def execute_retention_plan(
     )
     _append_retention_audit(home, report=report, now=now)
     return report
+
+
+# LLM: 计划里的 candidate_delete 动作必须一次批量删除（见 _apply_candidate_actions），不能与其它动作逐条交错；
+#   没有候选动作时返回两个空列表。从 execute_retention_plan 抽出只为控制函数长度，语义不变。
+# 函数用途: 先执行计划中的候选清理批次，返回动作结果与结构化错误两个列表，供后续逐条动作继续追加。
+def _apply_candidate_phase(
+    candidates: CandidateService,
+    plan: MemoryRetentionReport,
+) -> tuple[list[MemoryRetentionAction], list[MemoryRetentionError]]:
+    candidate_actions = tuple(
+        action for action in plan.actions if action.operation == "candidate_delete"
+    )
+    if not candidate_actions:
+        return [], []
+    candidate_results, candidate_errors = _apply_candidate_actions(candidates, candidate_actions)
+    return list(candidate_results), list(candidate_errors)
 
 
 # LLM: policy/legal-hold 阶段未进入 action executor 时，仍通过同一无正文审计格式记录安全停止。

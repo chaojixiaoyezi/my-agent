@@ -80,6 +80,7 @@
 整份拒绝、法律保留、只规划时为空。`apply()` 用 `replace(_without_errored_subtrees(plan), isolated_errors=plan.errors)` 把它随可执行计划
 带进 `retention_apply.execute_retention_plan`，审计事件 `owner_retention_applied` 据此写 `isolated_error_count` 和 `isolated_error_codes`
 （按码计数，不含路径）。owner 维护怎么用它，见 [gateway 结构](../gateway/04-structure.md) 开头「维护状态只加键」一段。
+执行器里候选清理批次由 `_apply_candidate_phase` 先跑（必须一次批量删除），其余动作再逐条执行。
 
 ## 会话删除收集的唤醒文件
 
