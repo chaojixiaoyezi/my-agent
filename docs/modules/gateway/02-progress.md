@@ -732,4 +732,5 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **改动**：`context_pressure._provider_context_observation` 在本轮/线程观测都对不上时回落 `context_calibration_carry` 的 owner 比值；
   成功观测顺手更新；`compact_calibration` 新增 `owner_ratio` 作用域，只按比例折算。新增规范路径 `owner_context_calibration_json`
   （`home_layout` / `home_layout_v2` / `owner_resolver` 同步）。
+- **开关**（同分支追加提交）：`memory_context_calibration_carry_enabled`（默认开，YAML 中文注释、`AgentConfig`、前端配置目录只插入这一项）；关掉时缓存不读不写。
 - 测试与变异见 TESTS.md 同名节。

@@ -214,6 +214,11 @@ memory_compact_auto_trigger_percent: 90
 # 30 万时是 20 万）。填的值不低于“模型窗口 × 百分比”时不起作用。改完需要重启 Gateway 才生效。
 # 乱填、负数会回到 0（不封顶）。
 memory_compact_auto_trigger_max_tokens: 0
+# 上下文用量校准比值跨会话沿用（默认开）。状态条的 Context 数字和自动压缩判断，都会用服务商真实用量去校准本地估算；
+# 这份校准原本只在同一个会话里有效，新开的会话、换过模型的会话、刚压缩完的第一次调用只能用本地估算，常常偏高两三成。
+# 开着时，每次模型调用成功后把“同一个模型的估算 / 实际”比值记在 owner 目录 data/context/calibration.json（只有数字，最多 32 条），
+# 这些场景的第一次调用就按这个比值折算（最多折到一半）。关掉就不读也不写这个文件，回到只用会话内校准。
+memory_context_calibration_carry_enabled: true
 # 自动压缩后的历史收缩目标百分比。
 # 只有当你的模型窗口特别大、或压缩后仍频繁再次触发压缩时，才需要调低它压得更狠；调高会更保守、保留更多历史，但可能很快又触发下一次压缩。
 memory_compact_recovery_target_percent: 60

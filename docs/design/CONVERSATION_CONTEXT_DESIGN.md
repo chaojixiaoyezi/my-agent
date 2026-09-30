@@ -250,6 +250,8 @@ owner 比值只按比例：`ceil(raw × max(provider, ceil(observed/2)) / observ
 压缩恢复冻结校准时同样可能拿到 `owner_ratio`，`calibrated_compact_request_tokens` 对它一律按比例，状态条与候选门数字一致；
 提交后 `rebase_provider_context_observation` 仍把接受基准写成本轮观测。
 
+**配置**：`memory_context_calibration_carry_enabled`（默认 true）。关掉时 `_owner_ratio_carry_enabled` 让读取与写入都跳过，不创建也不更新 `calibration.json`，状态条与压缩判断回到只用本轮/线程观测。
+
 ## Cache economics
 
 系统通道的验证规则只限定证据表述，不要求每个动作前重新运行已有检查。相同版本、输入和观察点

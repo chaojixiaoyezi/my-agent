@@ -325,6 +325,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_auto_trigger_percent: int = 90
     # 自动压缩触发线的绝对 token 上限，与上面的百分比取小；0 表示不封顶（默认，行为不变）。1M 这类大窗口下百分比最低只到 50%，靠它把压缩提前。
     memory_compact_auto_trigger_max_tokens: int = 0
+    # 校准比值跨会话沿用：开着时成功调用写 owner data/context/calibration.json，线程观测对不上时按比值折算；关掉不读不写。
+    memory_context_calibration_carry_enabled: bool = True
     # 含图历史的压缩策略：auto 默认走归档引用（视觉能力事实接入后按事实选择随图摘要）；archived_refs 固定归档引用；off 保持从首个媒体回合起保护全部后缀。
     compact_media_policy: str = "auto"
     # 当前模型声明的输入模态（如 text、image、video），来自模型档案的 input_modalities；空表示未知，压缩策略会用一次结构化视觉探针判断，不按模型名猜。

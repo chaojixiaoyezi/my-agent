@@ -142,3 +142,24 @@ def test_cache_file_is_numbers_only_bounded_and_corruption_falls_back(tmp_path, 
     path.unlink()
     path.mkdir()
     world.observe(world.params(world.thread("still-ok")), 100_000, 78_000)
+
+
+def test_switch_off_neither_reads_nor_writes_the_cache(tmp_path, monkeypatch):
+    world = _World(tmp_path, monkeypatch)
+    world.observe(world.params(world.thread("a")), 100_000, 78_000)
+    path = world.agent.home_paths.owner_context_calibration_json
+    before = path.read_text(encoding="utf-8")
+    world.agent.config.memory_context_calibration_carry_enabled = False
+    # 关掉后：新会话不读缓存（回到原始估算），成功调用也不写缓存。
+    assert world.tokens(world.params(world.thread("b")), 50_000) == 50_000
+    world.observe(world.params(world.thread("c")), 100_000, 90_000)
+    assert path.read_text(encoding="utf-8") == before
+    world.agent.config.memory_context_calibration_carry_enabled = True
+    assert world.tokens(world.params(world.thread("d")), 50_000) == 39_000
+
+
+def test_switch_off_from_the_start_creates_no_file(tmp_path, monkeypatch):
+    world = _World(tmp_path, monkeypatch)
+    world.agent.config.memory_context_calibration_carry_enabled = False
+    world.observe(world.params(world.thread("a")), 100_000, 78_000)
+    assert not world.agent.home_paths.owner_context_calibration_json.exists()

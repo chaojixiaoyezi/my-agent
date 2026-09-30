@@ -346,6 +346,8 @@ def record_provider_context_observation(
 # LLM: 线程观测的派生副本：按本次请求的分词身份写 owner 级比值缓存，并刷新本轮内存副本；写失败只影响缓存，不影响本次调用。
 # 函数用途: 把这次成功调用的“本地估算 / 供应商实际”留给同一模型的新会话、压缩后与换表面后的第一次调用。
 def _carry_owner_ratio(agent: object, params: object, observation: dict[str, object]) -> None:
+    if not _owner_ratio_carry_enabled(agent):
+        return
     raw, provider = int(observation["raw_estimated_tokens"]), int(observation["provider_input_tokens"])
     key = _tokenizer_identity_key(agent, _request_protocol(params))
     if record_owner_ratio(agent, key, raw, provider):
@@ -496,7 +498,7 @@ def _provider_context_observation(
     if exact:
         return exact
     cache = _owner_ratio_cache(params)
-    if cache is None:
+    if cache is None or not _owner_ratio_carry_enabled(agent):
         return {}
     key = _tokenizer_identity_key(agent, _request_protocol(params))
     if key not in cache:
@@ -516,6 +518,12 @@ def _owner_ratio_cache(params: object) -> dict[str, dict] | None:
         cache = {}
         state[_PROVIDER_CONTEXT_OWNER_RATIO_KEY] = cache
     return cache
+
+
+# LLM: 开关 memory_context_calibration_carry_enabled（默认开）；关掉时 owner 比值缓存既不读也不写，回到只用本轮/线程观测。
+# 函数用途: 判断是否允许跨会话沿用 owner 级校准比值。
+def _owner_ratio_carry_enabled(agent: object) -> bool:
+    return bool(getattr(getattr(agent, "config", None), "memory_context_calibration_carry_enabled", True))
 
 
 # 函数用途: 本次请求走原生工具协议还是纯文本协议，与 _model_visible_context_components 同一判定。
