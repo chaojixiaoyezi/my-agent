@@ -19,9 +19,11 @@ from code_size_report import ReportRenderContext, write_report  # noqa: E402
 from code_size_rules import Finding  # noqa: E402
 
 
-def test_check_code_size_warn_generates_report() -> None:
+# 报告写到临时目录：仓库根的 CODE_SIZE_REPORT.md 是被跟踪文件，测试不能改写它（conftest 的仓库树防线会报错）。
+def test_check_code_size_warn_generates_report(tmp_path) -> None:
+    report = tmp_path / "CODE_SIZE_REPORT.md"
     result = subprocess.run(
-        [sys.executable, "scripts/check_code_size.py", "--mode", "warn"],
+        [sys.executable, "scripts/check_code_size.py", "--mode", "warn", "--report", str(report)],
         cwd=repo_root,
         text=True,
         capture_output=True,
@@ -30,7 +32,7 @@ def test_check_code_size_warn_generates_report() -> None:
 
     assert result.returncode == 0
     assert "CODE_SIZE_REPORT.md" in result.stdout
-    assert (repo_root / "CODE_SIZE_REPORT.md").exists()
+    assert report.exists()
 
 
 def test_large_file_size_does_not_create_a_finding(tmp_path, monkeypatch) -> None:

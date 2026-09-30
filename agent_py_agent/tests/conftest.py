@@ -21,10 +21,13 @@ from agent_py_agent.tests._desktop_open_guard import (
     failure_message,
 )
 from agent_py_agent.tests._repo_tree_guard import (
+    REPO_ROOT,
     magicmock_failure_message,
     magicmock_fingerprint,
     magicmock_violation,
     remove_magicmock_dir,
+    tracked_report_failure_message,
+    tracked_report_fingerprint,
 )
 
 _DESKTOP_GUARD: DesktopOpenGuard | None = None
@@ -112,19 +115,23 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture(autouse=True)
 def _repo_tree_guard(request):
-    """仓库树防线：测试不能往起跑目录写 MagicMock/（把 MagicMock 当路径用的后果，见 _repo_tree_guard）。
+    """仓库树防线：测试不能往起跑目录写 MagicMock/，也不能改写仓库根被跟踪的 CODE_SIZE_REPORT.md（见 _repo_tree_guard）。
 
     起跑目录取 pytest 启动时的 cwd，测试里切目录不影响；前后指纹不同就让这条测试在收尾时报错，
-    这条测试新建的目录顺手删掉，会话开始前的残留只比对不删除。
+    这条测试新建的 MagicMock/ 顺手删掉，会话开始前的残留只比对不删除；报告文件只报错、不自动恢复。
     """
     root = str(request.config.invocation_params.dir)
-    before = magicmock_fingerprint(root)
+    before, report_before = magicmock_fingerprint(root), tracked_report_fingerprint(REPO_ROOT)
     yield
-    after = magicmock_fingerprint(root)
+    after, problems = magicmock_fingerprint(root), []
     if magicmock_violation(before, after):
         if before is None:
             remove_magicmock_dir(root)
-        pytest.fail(magicmock_failure_message(request.node.nodeid, root, created=before is None), pytrace=False)
+        problems.append(magicmock_failure_message(request.node.nodeid, root, created=before is None))
+    if tracked_report_fingerprint(REPO_ROOT) != report_before:
+        problems.append(tracked_report_failure_message(request.node.nodeid, REPO_ROOT))
+    if problems:
+        pytest.fail("\n".join(problems), pytrace=False)
 
 
 @pytest.fixture(autouse=True)

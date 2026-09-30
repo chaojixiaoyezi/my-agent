@@ -25,6 +25,19 @@
   发出的 assistant 都带正文或工具调用，只剩有正文的那条且保留思考，历史对象不变。四例在 `4c0edd913` 的原实现上全部失败，
   修复后该文件 37 passed（Linux 容器，Mac 测试 venv 当时不可用）。
 
+## 尺寸脚本自检不再改写被跟踪的 CODE_SIZE_REPORT.md（2026-09-29，分支 `claude/9a-magicmock-guard`）
+
+- **起因**：`test_code_size_script.py::test_check_code_size_warn_generates_report` 在仓库根跑 `scripts/check_code_size.py`，
+  脚本默认把报告写在仓库根，于是每次全量都会改写被跟踪的 `CODE_SIZE_REPORT.md`。
+- **改法**：
+  - 脚本加 `--report <路径>`，不给时仍写仓库根，门禁命令行为不变；汇总行对仓库外的报告显示原路径。
+  - 这条测试改传 `--report tmp_path/CODE_SIZE_REPORT.md`。
+- **防线**：仓库树防线同时比对仓库根 `CODE_SIZE_REPORT.md` 的 (大小, mtime_ns)，测试期间被改写就让这条测试报错。
+  只查这一个文件，不扩成全仓扫描；只报错，不自动恢复。
+- **验证**：
+  - 防线自检加 2 项，连同尺寸脚本测试共 19 项通过，仓库根报告没有被改动；
+  - 临时放一条按老写法跑脚本的测试：收尾时报错，报错里给出了 `--report` 的改法。
+
 ## 仓库树防线：测试不能往起跑目录写 MagicMock/（2026-09-29，分支 `claude/9a-magicmock-guard`，基于 step16l `4078ae3f9`）
 
 - **约定**：测试替身不能当路径用。MagicMock 被当成路径时，`Path(mock)` 是相对路径 `MagicMock/<名字>/<id>`，产品代码照常写盘，

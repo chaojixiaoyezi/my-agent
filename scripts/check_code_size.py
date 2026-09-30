@@ -4,7 +4,7 @@ from __future__ import annotations
 
 """code-size governance checker for functions, classes, imports, and local readability.
 
-这个脚本生成 CODE_SIZE_REPORT.md。文件长度不参与 finding；
+这个脚本生成 CODE_SIZE_REPORT.md（默认写在仓库根，--report 可改写到别处，测试用它把输出落到临时目录）。文件长度不参与 finding；
 strict 模式只阻断生产代码和脚本里的局部可读性问题；
 测试文件里的函数长度、类长度、参数数量和嵌套只进报告，不阻断。
 """
@@ -228,11 +228,15 @@ def _finding_exceeds_baseline(item: Finding, baseline: dict[str, str]) -> bool:
     return _SEVERITY_RANK.get(item.severity, 0) > _SEVERITY_RANK.get(previous, 0)
 
 
+# LLM: --report 只改报告写到哪里，不改扫描范围和判定；不给时仍是仓库根的 CODE_SIZE_REPORT.md，门禁命令行为不变。
+# 函数用途: 解析命令行参数：模式、基线、写基线和报告位置。
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check local complexity guardrails and report file-size signals.")
     parser.add_argument("--mode", choices=["warn", "strict"], default="warn")
     parser.add_argument("--baseline", type=str, default=None, help="Path to baseline JSON file")
     parser.add_argument("--write-baseline", type=str, default=None, help="Write current findings as baseline")
+    parser.add_argument("--report", type=str, default=None,
+                        help="Write the report here instead of CODE_SIZE_REPORT.md at the repository root")
     return parser.parse_args()
 
 
@@ -261,7 +265,9 @@ def _write_requested_baseline(findings: list[Finding], path: str | None) -> None
     print(f"baseline written to {path}")
 
 
-def _print_summary(findings: list[Finding], blocked: bool) -> None:
+# LLM: 报告在仓库内时照旧显示相对路径，在仓库外（测试的临时目录）时显示原路径；统计口径不变。
+# 函数用途: 打印一行汇总：各级别 finding 数、报告位置和是否阻断。
+def _print_summary(findings: list[Finding], blocked: bool, report_path: Path) -> None:
     strict_findings = [item for item in findings if not _is_test_finding(item)]
     hard_count = len([f for f in strict_findings if f.severity == "hard"])
     high_risk_count = len([f for f in strict_findings if f.severity == "high-risk"])
@@ -271,13 +277,24 @@ def _print_summary(findings: list[Finding], blocked: bool) -> None:
         "code-size findings: "
         f"strict_scope_total={len(strict_findings)} hard={hard_count} "
         f"high-risk={high_risk_count} soft={soft_count} "
-        f"test_advisory={test_advisory_count} report={REPORT_PATH.relative_to(ROOT)} "
+        f"test_advisory={test_advisory_count} report={_display_path(report_path)} "
         f"blocked={blocked}"
     )
 
 
+# 函数用途: 报告位置在仓库内时返回相对仓库根的路径，否则原样返回。
+def _display_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+# LLM: 报告写到 --report 给的位置，不给时写仓库根的 CODE_SIZE_REPORT.md；其余流程、返回码与阻断口径不变。
+# 函数用途: 收集 finding、按基线判定阻断、写报告并打印汇总。
 def main() -> int:
     args = _parse_args()
+    report_path = Path(args.report) if args.report else REPORT_PATH
     findings = collect_findings()
     _write_requested_baseline(findings, args.write_baseline)
     baseline_arg = _effective_baseline_arg(args.baseline)
@@ -286,8 +303,8 @@ def main() -> int:
     blocked = args.mode == "strict" and bool(blockers)
     visible_findings = report_findings(findings, baseline)
     context = ReportRenderContext(args.mode, blocked, baseline_arg, baseline_loaded)
-    write_report(REPORT_PATH, visible_findings, context)
-    _print_summary(visible_findings, blocked)
+    write_report(report_path, visible_findings, context)
+    _print_summary(visible_findings, blocked, report_path)
     if blocked:
         for item in blockers:
             print(f"BLOCKED: {item.severity}: {item.kind}: {item.path}:{item.name} {item.message}")

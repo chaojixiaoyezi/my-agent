@@ -7,10 +7,14 @@ from unittest.mock import MagicMock
 
 from agent_py_agent.tests._repo_tree_guard import (
     MAGICMOCK_DIR_NAME,
+    REPO_ROOT,
+    TRACKED_REPORT_NAME,
     magicmock_failure_message,
     magicmock_fingerprint,
     magicmock_violation,
     remove_magicmock_dir,
+    tracked_report_failure_message,
+    tracked_report_fingerprint,
 )
 
 
@@ -55,3 +59,20 @@ def test_failure_message_names_the_test_the_place_and_the_fix(tmp_path):
     assert "tests/test_x.py::test_y" in created and str(tmp_path / MAGICMOCK_DIR_NAME) in created
     assert "monkeypatch.chdir(tmp_path)" in created and "已删除" in created
     assert "不删除" in kept
+
+
+def test_tracked_report_rewrite_changes_the_fingerprint(tmp_path):
+    assert tracked_report_fingerprint(str(tmp_path)) is None
+    report = tmp_path / TRACKED_REPORT_NAME
+    report.write_text("old\n", encoding="utf-8")
+    os.utime(report, ns=(1, 1))
+    before = tracked_report_fingerprint(str(tmp_path))
+    assert tracked_report_fingerprint(str(tmp_path)) == before
+    report.write_text("old\n", encoding="utf-8")
+    assert tracked_report_fingerprint(str(tmp_path)) != before
+
+
+def test_repo_root_matches_the_code_size_script_root():
+    assert (Path(REPO_ROOT) / "scripts" / "check_code_size.py").is_file()
+    message = tracked_report_failure_message("tests/test_x.py::test_y", REPO_ROOT)
+    assert "--report" in message and "tests/test_x.py::test_y" in message
