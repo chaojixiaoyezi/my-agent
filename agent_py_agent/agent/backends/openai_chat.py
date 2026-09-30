@@ -517,7 +517,8 @@ def _openai_messages_from_cache_layout(
 
 
 # LLM: Merge only with an existing trailing user message; tool and assistant ordering must remain
-# untouched so provider tool-call pairing stays valid.
+# untouched so provider tool-call pairing stays valid. 带图片或视频的 user 消息内容是 typed 数组，动态事实作为文本部件
+# 追加在数组末尾；绝不能把数组转成字符串（会丢图并把 base64 当正文发出，9a 复审 P4）。
 # 函数用途: 把本轮变化事实放到 OpenAI 消息尾部，并避免无意义的连续 user 消息。
 def _append_openai_volatile_user_text(
     messages: list[dict[str, Any]],
@@ -526,16 +527,17 @@ def _append_openai_volatile_user_text(
     text = str(volatile_suffix or "")
     if not text:
         return messages
-    if messages and messages[-1].get("role") == "user":
-        prepared = list(messages)
-        tail = prepared[-1]
-        prior = str(tail.get("content") or "")
-        prepared[-1] = {
-            **tail,
-            "content": f"{prior}\n\n{text}" if prior else text,
-        }
+    if not messages or messages[-1].get("role") != "user":
+        return [*messages, {"role": "user", "content": text}]
+    prepared = list(messages)
+    tail = prepared[-1]
+    prior = tail.get("content")
+    if isinstance(prior, list):
+        prepared[-1] = {**tail, "content": [*prior, {"type": "text", "text": text}]}
         return prepared
-    return [*messages, {"role": "user", "content": text}]
+    prior_text = str(prior or "")
+    prepared[-1] = {**tail, "content": f"{prior_text}\n\n{text}" if prior_text else text}
+    return prepared
 
 
 # LLM: Chat 历史转换只接受结构化角色与内容；assistant 和 tool-result 顺序由专属转换函数保持。

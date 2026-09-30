@@ -1,6 +1,7 @@
 # LLM: 视觉能力事实的唯一来源模块。事实只由结构化结果决定：正确颜色的 tool_use → supported；供应商对图片块的 typed 拒绝
 #   （ProviderRequestRejectedError）→ unsupported；答错/不调用工具 → inconclusive（有界重试、不缓存）；工具能力探针未证明原生
-#   工具 → unavailable（不缓存）；网络/额度/认证错误（ProviderRecoverableError/ProviderConfigurationError）原样上抛、不缓存。
+#   工具 → unavailable（不缓存）；网络/额度/认证错误（ProviderRecoverableError/ProviderConfigurationError）原样上抛、不缓存；
+#   出站协议合同在本地拦下的请求（ProviderRequestShapeInvalidError）没有发到服务端，按 unavailable、不缓存，不能记成拒收图片。
 #   缓存是进程级、按 provider endpoint + 模型 + api_base 键控、同键单飞，放在 owner Agent 之外（owner Agent 空闲 60s 会被释放）。
 #   不落盘、不读模型自述、不按模型名猜；每个键最多一次真实请求（约几十 token 加一张 8×8 图）。
 # 模块用途: 判断当前模型到底能不能看图，供含图历史压缩决定走归档引用还是随图摘要。
@@ -18,6 +19,7 @@ from .errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
     ProviderRequestRejectedError,
+    ProviderRequestShapeInvalidError,
 )
 
 VISION_SUPPORTED = "supported"
@@ -138,6 +140,8 @@ def probe_vision_capability(backend: object) -> VisionCapability:
                 _PROBE_PROMPT, tools=[dict(_PROBE_TOOL)], tool_choice=ToolChoice.auto("vision_capability_probe"),
                 messages=[message],
             )
+        except ProviderRequestShapeInvalidError as exc:
+            return VisionCapability(VISION_UNAVAILABLE, "probe_unavailable", f"request_shape_invalid:{exc.details.get('rule', '')}")
         except ProviderRequestRejectedError as exc:
             code = str(getattr(exc, "error_code", "") or "").strip().upper()
             return VisionCapability(VISION_UNSUPPORTED, "probe_unsupported", f"provider_rejected_media{':' + code if code else ''}")

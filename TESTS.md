@@ -11,6 +11,17 @@
 - **Linux 容器全量**：`2c0bb0518` 12/12 分片 rc=0，24989 passed / 65 skipped / 33 xfailed / 5 xpassed / 0 failed。
 - **真实模型**：MiniMax-M2.7/M3 官网，两个探针脚本与只含状态码的输出在 `~/.my-agent/decision-evidence/wire-contract-2026-09-30/`；
   产品组包的 24 个请求修整前 5 个 400、修整后全部 200。
+- **复审跟进（9a）**：新增用例覆盖以下几项：
+  - 空 id 的调用与结果按原样配对，三个出口都能发出；
+  - 同条消息内重复 id 按次数配对，缺的补回执；
+  - 三种校验按次数核对的违规用例；
+  - Chat 动态尾部不把带图消息压成字符串；
+  - 运行错误报告的形状错误类别；
+  - 视觉探针遇到形状错误时判为 `unavailable`，且不缓存。
+
+  性质测试的随机历史加入了空 id 和重复 id。撤回每处修复的 8 个变异全部被杀（证据目录 `mutate_followup.py`）。9a 的原始探针复跑：P1、P2、P4 已解决，P3、P5 按已知边界保持。
+- **真实模型（DeepSeek 官方 / opencode Go，同日补测）**：`deepseek-v4-flash`，同一组 6 段坏历史，修整前 Anthropic 接口 5 段、
+  Chat 接口 4 段 400，修整后全部 200；opencode Go 前后都 200。原始形状探针结论见设计文档「DeepSeek 官方与 opencode Go」一节。
 - **回归**：后端相关 33 个测试文件（`grep -l` 使用三个后端类或 prompt 缓存的全部用例）通过。
 
 ## Chat Completions 不回放「既没正文也没工具调用」的 assistant（2026-09-30，热修分支 `claude/3a-hotfix-empty-assistant`，基于 `4c0edd913`）

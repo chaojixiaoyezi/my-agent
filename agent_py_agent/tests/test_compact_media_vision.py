@@ -15,6 +15,7 @@ from agent_py_agent.agent.backends.errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
     ProviderRequestRejectedError,
+    ProviderRequestShapeInvalidError,
 )
 from agent_py_agent.agent.backends.vision_capability import (
     VISION_INCONCLUSIVE,
@@ -132,6 +133,16 @@ def test_probe_supported_is_cached_per_endpoint_and_model():
     assert request["messages"][0]["content"][1]["source"]["media_type"] == "image/png"
     other = _Backend(model="another-model")
     assert resolve_vision_capability(other).supported and other.calls == 1, "不同模型是不同键"
+
+
+def test_local_request_shape_error_is_unavailable_and_not_cached_as_unsupported():
+    # 出站协议合同在本地拦下的请求没有发到服务端，不能记成"服务商拒收图片"并缓存。
+    blocked = _Backend(raise_exc=ProviderRequestShapeInvalidError(protocol="anthropic", rule="blank_text_block", index=0),
+                       model="shape-model")
+    result = resolve_vision_capability(blocked)
+    assert result.status == VISION_UNAVAILABLE and result.fact_source == "probe_unavailable"
+    blocked.raise_exc = None
+    assert resolve_vision_capability(blocked).supported and blocked.calls == 2, "不缓存，恢复后重探"
 
 
 def test_typed_media_rejection_caches_unsupported_and_transient_errors_are_not_cached():

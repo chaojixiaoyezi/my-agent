@@ -13,6 +13,7 @@ from .backends.errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
     ProviderRequestRejectedError,
+    ProviderRequestShapeInvalidError,
     ProviderResponseError,
     is_provider_timeout_error,
     is_provider_transient_error,
@@ -101,7 +102,8 @@ class RuntimeErrorTemplate:
     operator_message: str
 
 
-# LLM: 分类优先遵循异常类型；请求拒绝必须在配置父类前处理，调用方不得从 model_message 推断重试或执行结果。
+# LLM: 分类优先遵循异常类型；请求拒绝必须在配置父类前处理，本地形状错误（请求拒绝的子类）又在请求拒绝之前；
+#   调用方不得从 model_message 推断重试或执行结果。
 # 函数用途: 生成主代理、子代理和运行账共用的小型错误报告，不推测服务端未返回的拒绝原因。
 def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, Any]:
     """Return the canonical small report for model-visible recoverable errors."""
@@ -141,20 +143,7 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
     if isinstance(exc, ProviderRecoverableError):
         return _report(exc, _provider_supply_template(exc), context=context)
     if isinstance(exc, ProviderRequestRejectedError):
-        report = _report(
-            exc,
-            _template(
-                "provider_request_rejected",
-                "模型服务拒绝了本次请求；具体原因尚未确定，请查看请求诊断。此前已执行的工作不会因此撤销。",
-                "provider rejected this request; cause is not established",
-                recoverable=False,
-            ),
-            context=context,
-        )
-        status = provider_error_http_status(exc)
-        if status is not None:
-            report["http_status"] = status
-        return report
+        return _request_rejected_report(exc, context=context)
     if isinstance(exc, ModelNotConfiguredError):
         return _report(
             exc,
@@ -201,6 +190,38 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
 # 环境类原因：进程外部条件导致的失败（磁盘满、权限、IO、SQLite 运行期错误如 disk full/locked/unable to open），
 # 不是代码逻辑错误。只看异常类型，不看消息文本，也不特判某个 errno。
 _ENVIRONMENT_CAUSE_TYPES: tuple[type[BaseException], ...] = (OSError, sqlite3.OperationalError)
+
+
+# LLM: 本地形状错误（出站协议合同在发送前拦下，请求根本没发出）是请求拒绝的子类，必须先判，不能套"模型服务拒绝了本次请求"
+#   的文案；服务端拒绝才带合法的 HTTP 状态码。只读异常类型和结构化状态码，不读正文。
+# 函数用途: 生成请求拒绝与发送前形状错误两类报告，供 runtime_error_report 调用。
+def _request_rejected_report(exc: ProviderRequestRejectedError, *, context: str) -> dict[str, Any]:
+    if isinstance(exc, ProviderRequestShapeInvalidError):
+        return _report(
+            exc,
+            _template(
+                "provider_request_shape_invalid",
+                "发送前的协议检查发现本次请求的消息结构不合规，请求没有发出；此前已执行的工作不会因此撤销。"
+                "这是请求组装的缺陷，不要原样重试。",
+                "request blocked locally by the outbound wire contract; nothing was sent",
+                recoverable=False,
+            ),
+            context=context,
+        )
+    report = _report(
+        exc,
+        _template(
+            "provider_request_rejected",
+            "模型服务拒绝了本次请求；具体原因尚未确定，请查看请求诊断。此前已执行的工作不会因此撤销。",
+            "provider rejected this request; cause is not established",
+            recoverable=False,
+        ),
+        context=context,
+    )
+    status = provider_error_http_status(exc)
+    if status is not None:
+        report["http_status"] = status
+    return report
 
 
 # LLM: 只沿显式 __cause__（raise ... from）往里走，不沿 __context__：except/finally 里顺带发生的程序错误（KeyError、

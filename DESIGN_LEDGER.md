@@ -12,6 +12,14 @@
   [docs/design/PROVIDER_WIRE_CONTRACT.md](docs/design/PROVIDER_WIRE_CONTRACT.md)。
 - **证据**：MiniMax-M2.7/M3 官网实测，孤儿结果两者都 400、调用与结果之间夹 user 消息 M3 400；产品组包对 6 段坏历史生成的
   24 个请求，修整前 5 个 400，修整后全部 200（`~/.my-agent/decision-evidence/wire-contract-2026-09-30/`）。
+- **复审跟进（9a，同日，进 step16l）**：
+  - 修整改为按出现次数配对，空 id 和同条消息内的重复 id 都算调用。原来空 id 的真实结果会被删掉，Chat 还会在本地永久拦截这个线程，相对改动前是回归。
+  - 运行错误报告单列形状错误，视觉探针不把它缓存成"不支持图片"。
+  - Chat 动态尾部不再把带图消息的内容数组转成字符串（原有 bug）。
+  - P3（调用与结果之间夹 assistant 时，真实结果被当孤儿删掉）和 P5（空白分隔块删掉后正文粘连）记为已知边界，不改。
+- **DeepSeek 实测（同日，用户放开官方 DeepSeek 与 opencode Go 测试）**：DeepSeek 官方两种接口都严格执行配对、相邻和
+  "结果放在同一条消息里"。同一组坏历史用 `deepseek-v4-flash` 发出：修整前 Anthropic 5 段、Chat 4 段 400，修整后全部 200。
+  opencode Go 通道前后都接受。
 
 ## 一条空 assistant 让线程所有请求 400：Chat Completions 回放不再发出无正文无工具调用的消息（2026-09-30，热修，生产事故记录）
 

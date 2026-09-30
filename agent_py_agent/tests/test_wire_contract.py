@@ -142,6 +142,34 @@ def test_duplicate_results_keep_the_first_one():
     assert repair_native_messages(history)[1] == _user(_result("a", "first"))
 
 
+@pytest.mark.parametrize("build", ["chat", "anthropic", "responses"])
+def test_empty_call_id_pairs_with_its_result_like_before(build):
+    # 服务商不给调用 id 时解析层存成空串；空 id 也是一次调用，真实结果要跟它配对发出（9a 复审 P1，改动前的行为）。
+    history = [_user(_text("任务")), _assistant(_call("")), _user(_result("", "真实结果"))]
+    assert repair_native_messages(history) == history
+    payload = {"chat": _chat_payload, "anthropic": _anthropic_payload, "responses": _responses_payload}[build](history)
+    assert "真实结果" in str(payload)
+
+
+def test_duplicate_call_ids_in_one_message_pair_by_occurrence():
+    # 有的兼容服务每轮都从 call_0 编号，同一条消息里也可能重复；按出现次数配对，不丢第二个结果（9a 复审 P2）。
+    both = [_assistant(_call("call_0"), _call("call_0")), _user(_result("call_0", "一"), _result("call_0", "二"))]
+    assert repair_native_messages(both) == both
+    validate_chat_messages(_chat_payload(both)["messages"])
+    one = [_assistant(_call("call_0"), _call("call_0")), _user(_result("call_0", "一"))]
+    assert repair_native_messages(one)[1] == _user(_result("call_0", "一"), _stub("call_0"))
+
+
+def test_chat_volatile_facts_do_not_flatten_a_trailing_media_message():
+    # 最后一条 user 带图时，动态事实作为文本部件追加；此前会把内容数组转成字符串，图丢了、base64 当正文发出（9a 复审 P4）。
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+    messages = _chat_payload([_user(_text("看图"), image)], prompt=CacheStructuredPrompt("稳定规则", "动态事实"))["messages"]
+    tail = messages[-1]["content"]
+    assert isinstance(tail, list)
+    assert [part["type"] for part in tail] == ["text", "image_url", "text"]
+    assert tail[-1]["text"] == "动态事实"
+
+
 def test_same_call_id_in_two_rounds_pairs_by_adjacency():
     history = [_assistant(_call("call_0")), _user(_result("call_0", "one")), _assistant(_call("call_0")),
                _user(_result("call_0", "two"))]
@@ -163,6 +191,8 @@ def test_repair_never_mutates_caller_history():
     ([{"role": "assistant", "content": "ok"}, {"role": "tool", "tool_call_id": "c1", "content": "x"}],
      "tool_reply_without_call", 1),
     ([{"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]}], "tool_calls_without_reply", 1),
+    ([{"role": "assistant", "content": None, "tool_calls": [{"id": "c"}, {"id": "c"}]},
+      {"role": "tool", "tool_call_id": "c", "content": "x"}], "tool_calls_without_reply", 2),
 ])
 def test_chat_validator_rejects_known_provider_400_shapes(messages, rule, index):
     with pytest.raises(ProviderRequestShapeInvalidError) as caught:
@@ -179,6 +209,8 @@ def test_chat_validator_rejects_known_provider_400_shapes(messages, rule, index)
     ([_user(_result("x"))], "tool_result_without_call", 0),
     ([_assistant(_call("a")), _assistant(_text("x"))], "tool_use_without_result", 1),
     ([_assistant(_call("a"))], "tool_use_without_result", 1),
+    ([_assistant(_call("c"), _call("c")), _user(_result("c"))], "tool_use_without_result", 1),
+    ([_assistant(_call("c")), _user(_result("c"), _result("c"))], "tool_result_without_call", 1),
 ])
 def test_anthropic_validator_rejects_protocol_violations(messages, rule, index):
     with pytest.raises(ProviderRequestShapeInvalidError) as caught:
@@ -191,6 +223,10 @@ def test_anthropic_validator_rejects_protocol_violations(messages, rule, index):
     ([{"role": "assistant", "content": "x"}, {"type": "reasoning"}], "reasoning_without_follower", 1),
     ([{"type": "function_call_output", "call_id": "c1", "output": "x"}], "output_without_call", 0),
     ([{"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"}], "call_without_output", 1),
+    ([{"type": "function_call", "call_id": "c"}, {"type": "function_call", "call_id": "c"},
+      {"type": "function_call_output", "call_id": "c"}], "call_without_output", 3),
+    ([{"type": "function_call", "call_id": "c"}, {"type": "function_call_output", "call_id": "c"},
+      {"type": "function_call_output", "call_id": "c"}], "output_without_call", 2),
 ])
 def test_responses_validator_rejects_protocol_violations(items, rule, index):
     with pytest.raises(ProviderRequestShapeInvalidError) as caught:
@@ -305,7 +341,7 @@ def test_exit_validator_blocks_the_send_when_projection_is_broken(monkeypatch, b
     assert sent == []
 
 
-_IDS = st.sampled_from(["a", "b", "c"])
+_IDS = st.sampled_from(["a", "b", "c", ""])
 _TEXTS = st.sampled_from(["", " ", "\n", "正文", "done"])
 _USER_BLOCK = st.one_of(st.builds(_text, _TEXTS), st.builds(_result, _IDS, st.sampled_from(["", "ok"])))
 _THINKING = st.builds(lambda text, signed: {"type": "thinking", "thinking": text, **({"signature": "sig"} if signed else {})},
@@ -314,22 +350,11 @@ _ASSISTANT_BLOCK = st.one_of(st.builds(_text, _TEXTS), _THINKING, st.just({"type
                              st.just(_REASONING), st.builds(_call, _IDS))
 
 
-# LLM: 规范 IR 里同一条助手消息的工具调用 id 唯一（来自 canonical ToolCall）；随机生成时保持这个不变量。
-# 函数用途: 去掉同一条助手消息里重复 id 的工具调用块。
-def _unique_calls(blocks):
-    seen, kept = set(), []
-    for block in blocks:
-        if block.get("type") == "tool_use" and block["id"] in seen:
-            continue
-        seen.add(block.get("id"))
-        kept.append(block)
-    return kept
-
-
 _MESSAGE = st.one_of(
     st.builds(lambda blocks: {"role": "user", "content": blocks}, st.lists(_USER_BLOCK, max_size=4)),
     st.builds(lambda text: {"role": "user", "content": text}, _TEXTS),
-    st.builds(lambda blocks: {"role": "assistant", "content": _unique_calls(blocks)}, st.lists(_ASSISTANT_BLOCK, max_size=4)),
+    # 空 id 与同一条消息里的重复 id 都会进历史（服务商不给 id、每轮从 call_0 编号），随机生成时一并覆盖。
+    st.builds(lambda blocks: {"role": "assistant", "content": blocks}, st.lists(_ASSISTANT_BLOCK, max_size=4)),
 )
 _PROMPTS = st.sampled_from(["", " \n", "继续", CacheStructuredPrompt("稳定规则", "动态事实"), CacheStructuredPrompt("稳定规则"),
                            CacheStructuredPrompt("稳定规则", "  \n", stable_user_prefix=" ")])

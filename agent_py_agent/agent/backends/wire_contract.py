@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from .errors import ProviderRequestShapeInvalidError
@@ -52,8 +53,8 @@ def _is_empty_block(block: dict[str, Any]) -> bool:
     return False
 
 
-# LLM: 相邻配对是三种协议的共同要求（MiniMax-M3 实测也拒绝调用与结果之间夹 user 消息）。每条带 tool_use 的助手轮之后紧跟的连续
-#   user 段由 _paired_segment 重排；不跟在工具调用后面的 user 消息里的结果一定是孤儿，删除（MiniMax 实测孤儿结果 400）。
+# LLM: 相邻配对是三种协议的共同要求（MiniMax-M3、DeepSeek 官方实测也拒绝调用与结果之间夹 user 消息）。每条带 tool_use 的助手轮
+#   之后紧跟的连续 user 段由 _paired_segment 重排；不跟在工具调用后面的 user 消息里的结果一定是孤儿，删除（实测孤儿结果 400）。
 # 函数用途: 保证每个工具调用的结果紧跟在它后面，每个结果都能找到紧挨着的调用。
 def _pair_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     repaired: list[dict[str, Any]] = []
@@ -72,14 +73,14 @@ def _pair_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return repaired
 
 
-# LLM: 只收 assistant 里 id 非空的 tool_use，按出现顺序去重；user 消息和字符串内容返回空列表。
-# 函数用途: 取出一条助手消息发起的全部工具调用 id。
+# LLM: 每个 tool_use 块都是一次调用，按出现顺序原样返回 id：空 id 和同一条消息里的重复 id 也各算一次（有的服务商不给 id，
+#   解析层存成空串；有的每轮都从 call_0 编号）。协议转换与三个校验都按这个口径计数，修整必须一致，否则线程会被本地永久拦截。
+# 函数用途: 取出一条助手消息发起的全部工具调用 id（含空串和重复）。
 def _tool_use_ids(message: dict[str, Any]) -> list[str]:
     content = message.get("content")
     if message.get("role") != "assistant" or not isinstance(content, list):
         return []
-    ids = [str(block.get("id") or "") for block in content if block.get("type") == "tool_use"]
-    return list(dict.fromkeys(call_id for call_id in ids if call_id))
+    return [str(block.get("id") or "") for block in content if block.get("type") == "tool_use"]
 
 
 # LLM: 段落只包含紧跟在助手轮之后、role 为 user 的连续消息；遇到 assistant 或其它角色即停止。
@@ -91,31 +92,45 @@ def _user_segment_end(messages: list[dict[str, Any]], start: int) -> int:
     return end
 
 
-# LLM: 找到的结果保持原出现顺序，缺失的按调用顺序补结构化"结果未知"占位（与 strip_orphaned_tool_blocks 同一占位），全部放在
-#   第一条 user 消息最前面；段内插话、媒体、运行事实保持原顺序接在后面。不属于本轮调用或重复的结果删除。什么都不用动时原样
-#   返回原对象，保持请求字节和前缀缓存稳定。
+# LLM: 按出现次数配对：同一 id 有几次调用就收几个结果，找到的结果保持原出现顺序；还缺的按调用顺序补结构化"结果未知"占位
+#   （与 strip_orphaned_tool_blocks 同一占位），全部放在第一条 user 消息最前面；段内插话、媒体、运行事实保持原顺序接在后面。
+#   不属于本轮调用或超出次数的结果删除。什么都不用动时原样返回原对象，保持请求字节和前缀缓存稳定。
 # 函数用途: 重排一次工具调用之后紧跟的 user 段，让本轮全部结果成为下一条 user 消息的开头。
 def _paired_segment(call_ids: list[str], segment: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    found: dict[str, dict[str, Any]] = {}
-    rests = [_take_results(message, set(call_ids), found) for message in segment]
-    results = [*found.values(), *(_missing_result(call_id) for call_id in call_ids if call_id not in found)]
+    remaining = Counter(call_ids)
+    found: list[dict[str, Any]] = []
+    rests = [_take_results(message, remaining, found) for message in segment]
+    results = [*found, *_missing_results(call_ids, remaining)]
     head = {**(segment[0] if segment else {"role": "user"}), "content": [*results, *(rests[0] if rests else [])]}
     rebuilt = [head, *_segment_tail(segment[1:], rests[1:])]
     return segment if rebuilt == segment else rebuilt
 
 
-# LLM: found 就地登记，同一 id 只收第一次出现；返回这条消息里不是工具结果的剩余块，字符串内容视为一个文本块。
+# LLM: remaining 是本轮每个 id 还能收的结果数，found 按出现顺序就地登记；超出次数或不属于本轮的结果不收。
+#   返回这条消息里不是工具结果的剩余块，字符串内容视为一个文本块。
 # 函数用途: 从一条 user 消息里取出本轮工具结果，返回其余内容块。
-def _take_results(message: dict[str, Any], wanted: set[str], found: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _take_results(message: dict[str, Any], remaining: Counter, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rest: list[dict[str, Any]] = []
     for block in _content_blocks(message):
         if block.get("type") != "tool_result":
             rest.append(block)
             continue
         call_id = str(block.get("tool_use_id") or "")
-        if call_id in wanted and call_id not in found:
-            found[call_id] = block
+        if remaining[call_id] > 0:
+            remaining[call_id] -= 1
+            found.append(block)
     return rest
+
+
+# LLM: 按调用顺序为还没收到结果的每一次调用补一个占位，并就地扣减 remaining。
+# 函数用途: 生成本轮缺失结果的"结果未知"回执列表。
+def _missing_results(call_ids: list[str], remaining: Counter) -> list[dict[str, Any]]:
+    stubs: list[dict[str, Any]] = []
+    for call_id in call_ids:
+        if remaining[call_id] > 0:
+            remaining[call_id] -= 1
+            stubs.append(_missing_result(call_id))
+    return stubs
 
 
 # LLM: 段内第二条起的 user 消息逐条交给 _tail_row，删空的不发。
@@ -220,39 +235,38 @@ def _anthropic_blocks(message: dict[str, Any], index: int) -> list[dict[str, Any
     return content
 
 
-# LLM: 结果块必须全部排在最前；前导结果的 id 集合必须恰好等于上一条助手消息的 tool_use id 集合。
+# LLM: 结果块必须全部排在最前；前导结果按 id 计的次数必须恰好等于上一条助手消息里 tool_use 的次数（与修整同一口径）。
 # 函数用途: 检查一条 Messages user 消息里的工具结果是否与紧挨着的调用一一对应。
 def _check_anthropic_results(calls: list[str], blocks: list[dict[str, Any]], index: int) -> None:
     result_ids = [str(block.get("tool_use_id") or "") for block in blocks if block.get("type") == "tool_result"]
     leading = blocks[:len(result_ids)]
     _require(all(block.get("type") == "tool_result" for block in leading), "anthropic", "tool_result_after_other_content", index)
-    _require(set(calls) <= set(result_ids), "anthropic", "tool_use_without_result", index)
-    _require(set(result_ids) <= set(calls), "anthropic", "tool_result_without_call", index)
+    _require(not Counter(calls) - Counter(result_ids), "anthropic", "tool_use_without_result", index)
+    _require(not Counter(result_ids) - Counter(calls), "anthropic", "tool_result_without_call", index)
 
 
 # LLM: 依据 Responses 规范：reasoning 项（可连续多项）之后第一个非 reasoning 项必须是 function_call 或 assistant 消息；
-#   function_call_output 必须回应此前出现的 function_call；每个 function_call 都要有输出。
+#   function_call_output 必须回应此前出现、尚未回应的 function_call；每个 function_call 都要有输出。按出现次数计，与修整同一口径。
 # 函数用途: 在 Responses 请求发出前复核 input 项序列，违规时抛本地错误。
 def validate_responses_input(items: list[dict[str, Any]]) -> None:
-    calls: set[str] = set()
-    answered: set[str] = set()
+    pending: Counter = Counter()
     for index in range(len(items)):
-        _check_responses_item(items, index, calls, answered)
-    _require(calls <= answered, "responses", "call_without_output", len(items))
+        _check_responses_item(items, index, pending)
+    _require(not +pending, "responses", "call_without_output", len(items))
 
 
-# LLM: calls/answered 由调用方持有并在这里就地登记；其它类型的项（普通消息、未知新类型）不检查。
+# LLM: pending 是还没收到输出的调用次数，由调用方持有并在这里就地登记；其它类型的项（普通消息、未知新类型）不检查。
 # 函数用途: 按类型检查一个 Responses input 项，并登记函数调用与输出。
-def _check_responses_item(items: list[dict[str, Any]], index: int, calls: set[str], answered: set[str]) -> None:
+def _check_responses_item(items: list[dict[str, Any]], index: int, pending: Counter) -> None:
     kind = items[index].get("type")
     call_id = str(items[index].get("call_id") or "")
     if kind == "reasoning":
         _require(_reasoning_has_follower(items, index), "responses", "reasoning_without_follower", index)
     if kind == "function_call":
-        calls.add(call_id)
+        pending[call_id] += 1
     if kind == "function_call_output":
-        _require(call_id in calls, "responses", "output_without_call", index)
-        answered.add(call_id)
+        _require(pending[call_id] > 0, "responses", "output_without_call", index)
+        pending[call_id] -= 1
 
 
 # LLM: 跳过紧随其后的其它 reasoning 项；普通消息项没有 type 字段，按 role 识别助手消息。

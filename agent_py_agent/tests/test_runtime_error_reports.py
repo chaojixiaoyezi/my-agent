@@ -4,6 +4,7 @@ from agent_py_agent.agent.backends.errors import (
     ProviderConfigurationError,
     ProviderContextWindowError,
     ProviderRequestRejectedError,
+    ProviderRequestShapeInvalidError,
     ProviderTimeoutError,
     ProviderTransientError,
 )
@@ -76,6 +77,17 @@ def test_provider_request_rejection_is_not_configuration_or_programmer_bug() -> 
     assert "密钥" not in payload["model_message"]
     assert "此前" in payload["model_message"]
     assert payload["http_status"] == 400
+
+
+def test_request_shape_error_is_reported_as_not_sent() -> None:
+    payload = runtime_error_report(
+        ProviderRequestShapeInvalidError(protocol="chat", rule="assistant_without_content", index=2)
+    )
+
+    assert payload["recoverable"] is False
+    assert payload["category"] == "provider_request_shape_invalid"
+    assert "没有发出" in payload["model_message"] and "拒绝" not in payload["model_message"]
+    assert "http_status" not in payload
 
 
 def test_configuration_error_keeps_configuration_report() -> None:
