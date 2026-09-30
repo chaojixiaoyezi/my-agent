@@ -47,6 +47,7 @@
 - **写入时自带上限**（与保留服务无关）：
   - `O/data/decision/outcomes.jsonl`：1000 行（`conversation/decision_outcome_log.py:25`）；
   - `O/data/decision/reach_counts.json`：按小时分桶，保留 7 天；
+  - `O/data/context/calibration.json`：上下文校准比值缓存，最多 32 个分词身份，只有数字（2026-09-30）；
   - `O/memory/ops.jsonl`：4096 行；
   - 长期记忆：超过 2000 条时削到 1200 条；
   - `data/verification/evidence.sqlite3`：每个任务根 100 条、30 天、总共 1 万条；

@@ -65,6 +65,19 @@
   - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
   - 未跑 `check_code_size.py`（任务明确纯文档可不跑 code-size）。
 
+## 上下文数字第二个来源：owner 级校准比值缓存（2026-09-30，分支 `claude/38-context-calibration-carry`，基于 main `bf4f740c3`）
+
+- `test_context_calibration_carry.py`（新，真实 `ConversationStore` 与 owner home，替身估算器）：
+  - 新会话第一次调用按别的会话的真实比值折算（改前得到原始估算）；
+  - 换模型、换地址不借比值；线程自己的耐久观测优先于更新的 owner 比值；
+  - 压缩提交清掉线程观测后、同一轮稳定表面变化后都用 owner 比值；
+  - 比值不低于 50%，小请求（低于 4096）不更新缓存；
+  - 请求比观测小、比观测大两种情况下，状态条快照与压缩候选门（冻结校准 + `calibrated_compact_request_tokens`）得出同一个数；
+  - 缓存文件只有数字、没有密钥与地址，最多 32 条；文件损坏退回原始估算；写不进去不影响调用成功。
+- **指纹不变**：同一请求表面在 main 与本分支算出的持久指纹逐字相同（两进程探针），已存线程观测继续有效。
+- **变异**（`mutate_carry.py`）：10 个全部被杀：去掉回落、改用增量口径、去掉 50% 下限、身份不含模型名、小请求也写、
+  owner 比值优先于线程观测、不限条数、压缩候选门不认 owner 作用域、写失败向上抛、成功观测不写缓存。
+
 ## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
 
 - `test_runtime_context_pressure.py`：

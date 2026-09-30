@@ -269,6 +269,8 @@ def _owner_workspace_path_fields(owner_home_dir: Path) -> dict[str, Path]:
         "owner_skill_learning_dir": owner_data_dir / "skill_learning",
         "owner_decision_outcomes_jsonl": owner_data_dir / "decision" / "outcomes.jsonl",
         "owner_decision_reach_counts_json": owner_data_dir / "decision" / "reach_counts.json",
+        # 上下文校准比值缓存（按分词身份，只有数字）：context_calibration_carry 唯一读写。
+        "owner_context_calibration_json": owner_data_dir / "context" / "calibration.json",
         "owner_scheduler_dir": scheduler_dir,
         "owner_scheduler_store_json": scheduler_dir / "store.json",
         "owner_scheduler_history_jsonl": scheduler_dir / "history.jsonl",

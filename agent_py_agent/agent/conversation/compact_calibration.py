@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 CALIBRATION_SCOPE_CURRENT_RUN = "current_run"
 CALIBRATION_SCOPE_DURABLE_THREAD = "durable_thread"
+# owner 级按分词身份的比值（别的会话或别的请求表面）：只按比例折算，不做增量口径（两边原始量不在同一基线上）。
+CALIBRATION_SCOPE_OWNER_RATIO = "owner_ratio"
 
 
 # LLM: 冻结后的观测事实；字段直接来自 provider_context_observation.v3 加上冻结时的作用域与代次，不含任何正文。
@@ -25,7 +27,8 @@ class CompactRequestCalibration:
 
 
 # LLM: 纯换算：无观测/坏观测返回原始值；请求比观测小按 ceil(raw × max(provider, ceil(observed/2)) / observed) 折算；
-#   请求不小于观测时本轮作用域按 provider + 增量，耐久作用域取折算与增量口径的较大者——与预检对同类输入的结果相同。
+#   请求不小于观测时本轮作用域按 provider + 增量，耐久作用域取折算与增量口径的较大者——与预检对同类输入的结果相同；
+#   owner_ratio 作用域（别的会话按分词身份的比值）一律只按比例折算。
 #   不能在这里猜系数：没有观测就是没有校准。
 # 函数用途: 把一个请求的本地估算换成“按上次供应商观测校准后”的 token 数。
 def calibrated_compact_request_tokens(raw_tokens: int, calibration: CompactRequestCalibration | None) -> int:
@@ -38,7 +41,7 @@ def calibrated_compact_request_tokens(raw_tokens: int, calibration: CompactReque
         return raw
     conservative_input = max(provider_input, (observed_raw + 1) // 2)
     scaled = (raw * conservative_input + observed_raw - 1) // observed_raw
-    if raw < observed_raw:
+    if raw < observed_raw or calibration.calibration_scope == CALIBRATION_SCOPE_OWNER_RATIO:
         return scaled
     grown = provider_input + (raw - observed_raw)
     if calibration.calibration_scope == CALIBRATION_SCOPE_DURABLE_THREAD:
@@ -49,6 +52,7 @@ def calibrated_compact_request_tokens(raw_tokens: int, calibration: CompactReque
 __all__ = [
     "CALIBRATION_SCOPE_CURRENT_RUN",
     "CALIBRATION_SCOPE_DURABLE_THREAD",
+    "CALIBRATION_SCOPE_OWNER_RATIO",
     "CompactRequestCalibration",
     "calibrated_compact_request_tokens",
 ]

@@ -326,6 +326,7 @@ agent_py_agent/
 |   |   |   |-- record_lesson_tool.py   # 子代理专属 record_lesson：身份取 runner 上下文，把一条可复用做法记进本 run 的 lessons.jsonl
 |   |   |   |-- turn_trigger.py         # 回合触发类型：生命周期唤醒以“# Host Event”开头、固定推荐短名单、本片注入不进后续重放
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
+|   |   |   |-- context_calibration_carry.py # owner 级按分词身份的校准比值缓存（O/data/context/calibration.json），线程观测对不上时回落
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_loop/segment_planning.py # 仅按调用和实时查询选择并发段，不执行工具
 |   |   |-- tool_loop/closeout.py       # 绑定原收口操作，按结构化副作用事实生成未完成交接

@@ -55,6 +55,26 @@
 - **依据**：`agent/command_catalog.py`（`/model`、`/effort` 声明与 IM 可用性）、`agent/capability/model_profile_tool.py`（`manage_models` 动作）、`agent/settings/model_profiles.py`（`resolve_child_model_profile` 权限、初始模型解析）、`agent/backends/reasoning_control.py`（档位换算），以及 docs/design 下 TUI_MODEL_PROFILES / MODEL_OAUTH / REASONING_EFFORT / SHARED_MODEL_CATALOG / SESSION_MODEL_SELECTION。
 - **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
 
+## 上下文数字第二个来源：owner 级按分词身份的校准比值缓存（2026-09-30，分支 `claude/38-context-calibration-carry`，基于 main `bf4f740c3`，已实现，待集成）
+
+- **现象**（3a 用同一只读脚本取数）：09-30 11:07 新开的两个会话第一次调用都显示 44,852，实际 35,806 / 35,807，偏高 25.3%；
+  第二次调用只差 +1.1% / +0.7%。
+- **根因**：供应商校准只存在会话线程上（`provider_context_observation`），要求同线程、同表面指纹、同压缩代次。新会话、刚换过模型的线程、
+  每次压缩提交之后、同进程里稳定表面变了（工具清单、技能卡、人格文件）的第一次调用都只能用原始估算。重启这一种已由 `bf4f740c3` 修掉。
+- **修法**：新增 owner 级派生缓存 `O/data/context/calibration.json`（规范路径 `home_paths.owner_context_calibration_json`，
+  唯一读写 `agent_core/model/context_calibration_carry.py`）。
+  - 键是分词身份摘要（后端名、模型名、native/text 协议、不含凭据的连接身份），值只有“本地估算 / 供应商实际 / 观测时间”三个数；最多 32 条。
+  - 每次成功记录线程观测时顺手更新；本地估算低于 4096 的小请求不更新（固定开销会把比值带偏）。
+  - 取观测的唯一入口 `_provider_context_observation`：本轮与线程的精确观测优先，都对不上时才用缓存，作用域 `owner_ratio`，
+    只按比例折算、不低于 50%，不做跨会话的增量口径。
+  - 预检、状态条快照与压缩候选门（`frozen_compact_request_calibration` → `compact_calibration`）都经同一入口，用同一个数。
+  - 稳定表面指纹的载荷键与取值不变（与 main 逐字相同的摘要），已存的线程观测继续有效。
+- **范围变化**：同进程稳定表面变化那一次（上一版台账记的“可选做法 B”）也随之按比值折算，不再显示原始估算。
+- **不变**：换到从没用过的模型、换地址或鉴权方式，分词身份不同，仍用原始估算（如实）。
+- **待定**：AGENTS.md 对“新增持久文件/长期状态”要求配开关；这里没有加（派生缓存、只有数字、坏了退回原始估算），由集成者定。
+- **验证**：`test_context_calibration_carry.py` 8 个合同用例；10 个变异全部被杀；详见 TESTS.md 同名节与
+  [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md) 同日一节。
+
 ## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
 
 - **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的

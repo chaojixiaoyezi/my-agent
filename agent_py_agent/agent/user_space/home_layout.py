@@ -105,6 +105,7 @@ class MyAgentHomePaths:
     owner_skill_learning_dir: Path
     owner_decision_outcomes_jsonl: Path
     owner_decision_reach_counts_json: Path
+    owner_context_calibration_json: Path
     owner_scheduler_dir: Path
     owner_scheduler_store_json: Path
     owner_scheduler_history_jsonl: Path

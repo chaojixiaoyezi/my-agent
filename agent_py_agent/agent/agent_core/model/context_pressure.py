@@ -13,6 +13,7 @@ from ...backends.tool_protocol_adapter import tools_for_choice
 from ...conversation.compact_calibration import (
     CALIBRATION_SCOPE_CURRENT_RUN,
     CALIBRATION_SCOPE_DURABLE_THREAD,
+    CALIBRATION_SCOPE_OWNER_RATIO,
     CompactRequestCalibration,
 )
 from ...conversation.compact_media_policy import configured_media_policy, media_token_reserve
@@ -31,6 +32,7 @@ from ..native_tool_protocol import (
 )
 from ..runtime.context_compactor import runtime_compact_policy
 from ..tool_request_projection import ToolLoopRequestProjection, compact_request_source_supported
+from .context_calibration_carry import read_owner_ratio, record_owner_ratio
 from .usage import provider_visible_input_token_usage
 
 _PROVIDER_CONTEXT_OBSERVATION_KEY = "_provider_context_observation"
@@ -39,6 +41,9 @@ _PROVIDER_CONTEXT_OBSERVATION_SCHEMA = "provider_context_observation.v3"
 # 作用域词表的唯一权威在 conversation.compact_calibration；这里只是本模块的短别名。
 _DURABLE_CALIBRATION_SCOPE = CALIBRATION_SCOPE_DURABLE_THREAD
 _CURRENT_RUN_CALIBRATION_SCOPE = CALIBRATION_SCOPE_CURRENT_RUN
+_OWNER_RATIO_CALIBRATION_SCOPE = CALIBRATION_SCOPE_OWNER_RATIO
+# 本轮内 owner 比值缓存的内存副本（键 → 记录或空字典），每个分词身份每轮最多读一次盘，本轮成功观测后就地刷新。
+_PROVIDER_CONTEXT_OWNER_RATIO_KEY = "_provider_context_owner_ratio"
 # 压缩提交后派生观测的结构化标记：它不是供应商实测，而是“已接受候选按同一观测折算”的本轮基线。
 _COMPACT_CANDIDATE_OBSERVATION_BASIS = "compact_candidate"
 
@@ -334,7 +339,19 @@ def record_provider_context_observation(
         "_calibration_scope": _CURRENT_RUN_CALIBRATION_SCOPE,
     }
     _persist_provider_context_observation(agent, params, observation)
+    _carry_owner_ratio(agent, params, observation)
     return True
+
+
+# LLM: 线程观测的派生副本：按本次请求的分词身份写 owner 级比值缓存，并刷新本轮内存副本；写失败只影响缓存，不影响本次调用。
+# 函数用途: 把这次成功调用的“本地估算 / 供应商实际”留给同一模型的新会话、压缩后与换表面后的第一次调用。
+def _carry_owner_ratio(agent: object, params: object, observation: dict[str, object]) -> None:
+    raw, provider = int(observation["raw_estimated_tokens"]), int(observation["provider_input_tokens"])
+    key = _tokenizer_identity_key(agent, _request_protocol(params))
+    if record_owner_ratio(agent, key, raw, provider):
+        cache = _owner_ratio_cache(params)
+        if cache is not None:
+            cache[key] = {"raw_estimated_tokens": raw, "provider_input_tokens": provider, "observed_at": time.time()}
 
 
 # LLM: Any history rewrite breaks the current-run append-only delta. The canonical Compact CAS
@@ -443,22 +460,74 @@ def _provider_calibrated_context_tokens(
         return raw
     if observed_raw <= 0 or provider_input <= 0:
         return raw
-    if str(observation.get("_calibration_scope") or "") != _DURABLE_CALIBRATION_SCOPE:
+    scope = str(observation.get("_calibration_scope") or "")
+    if scope == _OWNER_RATIO_CALIBRATION_SCOPE:
+        # 别的会话/表面的观测：两边原始量不在同一基线上，只能按比例折算，不能加减。
+        return _conservative_ratio_tokens(raw, observed_raw, provider_input)
+    if scope != _DURABLE_CALIBRATION_SCOPE:
         if raw < observed_raw:
             return raw
         return provider_input + (raw - observed_raw)
-    conservative_ratio_input = max(provider_input, (observed_raw + 1) // 2)
-    scaled = (raw * conservative_ratio_input + observed_raw - 1) // observed_raw
+    scaled = _conservative_ratio_tokens(raw, observed_raw, provider_input)
     if raw < observed_raw:
         return scaled
     return max(scaled, provider_input + (raw - observed_raw))
+
+
+# LLM: 与 compact_calibration.calibrated_compact_request_tokens 的比例口径相同：ceil(raw × max(provider, ceil(observed/2)) / observed)，
+#   折算比例不低于 50%，估算偏低时比例大于 1 照样放大（保守）。纯函数。
+# 函数用途: 按一次观测的“供应商实际 / 本地估算”比例折算本次原始估算。
+def _conservative_ratio_tokens(raw: int, observed_raw: int, provider_input: int) -> int:
+    conservative_ratio_input = max(provider_input, (observed_raw + 1) // 2)
+    return (raw * conservative_ratio_input + observed_raw - 1) // observed_raw
+
+
+# LLM: 取校准观测的唯一入口（预检、状态条快照、压缩冻结都经这里）：先本轮/线程的精确观测（同表面指纹、同压缩代次），
+#   都对不上时才回落 owner 级按分词身份的比值（作用域 owner_ratio，只按比例折算）。换模型、换连接地址或鉴权方式时
+#   分词身份也变，拿不到就回到原始估算，不借别的模型的比值。
+# 函数用途: 为本次请求找一条可用的“本地估算 / 供应商实际”观测，找不到返回空字典。
+def _provider_context_observation(
+    agent: object,
+    params: object,
+    *,
+    context_surface_fingerprint: str,
+) -> dict[str, object]:
+    exact = _exact_provider_context_observation(agent, params, context_surface_fingerprint=context_surface_fingerprint)
+    if exact:
+        return exact
+    cache = _owner_ratio_cache(params)
+    if cache is None:
+        return {}
+    key = _tokenizer_identity_key(agent, _request_protocol(params))
+    if key not in cache:
+        cache[key] = read_owner_ratio(agent, key)
+    entry = cache[key]
+    return {**entry, "_calibration_scope": _OWNER_RATIO_CALIBRATION_SCOPE} if entry else {}
+
+
+# LLM: live_archive_state 里的本轮 owner 比值副本；没有本轮状态（伪 params）时返回 None，调用方按“没有缓存”处理。
+# 函数用途: 取得本轮内 owner 比值缓存的内存副本。
+def _owner_ratio_cache(params: object) -> dict[str, dict] | None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return None
+    cache = state.get(_PROVIDER_CONTEXT_OWNER_RATIO_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+        state[_PROVIDER_CONTEXT_OWNER_RATIO_KEY] = cache
+    return cache
+
+
+# 函数用途: 本次请求走原生工具协议还是纯文本协议，与 _model_visible_context_components 同一判定。
+def _request_protocol(params: object) -> str:
+    return "native" if native_tool_use_active(params) else "text"
 
 
 # LLM: Hydration reads only the exact structured agent/conversation thread id and validates the
 # compact generation plus stable request-surface fingerprint. Summary prose, cwd and prompt text
 # never select another observation, and a corrupt/missing record simply restores raw estimation.
 # 函数用途: 从当前会话线程按需加载上一次模型真实输入量；每个请求表面每轮最多查一次磁盘。
-def _provider_context_observation(
+def _exact_provider_context_observation(
     agent: object,
     params: object,
     *,
@@ -715,27 +784,37 @@ def _stable_context_surface_fingerprint(
     prompt_surface: str,
     tools: object,
 ) -> str:
-    backend = getattr(agent, "backend", None)
-    config = getattr(agent, "config", None)
     payload = {
-        "backend": str(getattr(backend, "name", "") or ""),
-        "model": str(
-            getattr(backend, "model_name", "")
-            or getattr(getattr(agent, "config", None), "model_name", "")
-            or ""
-        ),
-        "protocol": str(protocol or ""),
-        "connection": _tokenizer_connection_identity(backend, config),
+        **_tokenizer_identity_payload(agent, protocol),
         "system_instruction": str(system_instruction or ""),
         "prompt_surface": str(prompt_surface or ""),
         "tools": tools if isinstance(tools, list) else [],
     }
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return _sha256_json(payload)
+
+
+# LLM: 分词身份 = 后端名、模型名、协议（native/text）与不含凭据的连接身份；稳定表面指纹在它之上再加系统提示、稳定提示与工具。
+#   两者共用这一份载荷，保证 owner 比值缓存的键与线程观测对“同一个模型”的判断一致。键名与取值不能改（会让已存观测全部失配）。
+# 函数用途: 给出“同一个模型、同一种组包方式”的结构化身份。
+def _tokenizer_identity_payload(agent: object, protocol: str) -> dict[str, object]:
+    backend = getattr(agent, "backend", None)
+    config = getattr(agent, "config", None)
+    return {
+        "backend": str(getattr(backend, "name", "") or ""),
+        "model": str(getattr(backend, "model_name", "") or getattr(config, "model_name", "") or ""),
+        "protocol": str(protocol or ""),
+        "connection": _tokenizer_connection_identity(backend, config),
+    }
+
+
+# 函数用途: 分词身份的摘要，作为 owner 比值缓存的键（只存哈希）。
+def _tokenizer_identity_key(agent: object, protocol: str) -> str:
+    return _sha256_json(_tokenizer_identity_payload(agent, protocol))
+
+
+# 函数用途: 按固定序列化规则对结构化载荷取 sha256 十六进制摘要。
+def _sha256_json(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

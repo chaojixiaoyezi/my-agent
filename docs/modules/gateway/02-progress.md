@@ -725,4 +725,11 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
   旧档案没有 `reasoning_levels` 时 `/effort max` 实际发 high，回执写“最高”。
 - **改动**：`control_service._render_effort` 与参数中心 `_reasoning_effect` 都改用 `reasoning_control.describe_config_reasoning_effect`，
   Responses 协议下回执由 `responses_reasoning_field` 的换算结果生成。
+
+## 上下文数字第二个来源：owner 级校准比值缓存（2026-09-30，分支 `claude/38-context-calibration-carry`，基于 main `bf4f740c3`）
+
+- **起因**：新开的会话第一次调用显示 44,852、实际 35,806（偏高 25%）；线程校准只在同线程、同指纹、同代次时可用。
+- **改动**：`context_pressure._provider_context_observation` 在本轮/线程观测都对不上时回落 `context_calibration_carry` 的 owner 比值；
+  成功观测顺手更新；`compact_calibration` 新增 `owner_ratio` 作用域，只按比例折算。新增规范路径 `owner_context_calibration_json`
+  （`home_layout` / `home_layout_v2` / `owner_resolver` 同步）。
 - 测试与变异见 TESTS.md 同名节。

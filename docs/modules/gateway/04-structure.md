@@ -912,6 +912,9 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
   不进稳定指纹。缺失或不匹配时回退原始估算，成本继续由 ModelCallLedger 负责，不能混成第二份 token 总账。
 - 指纹持久化在线程上，必须跨 Gateway 重启不变（2026-09-30 起）：连接部分只收模型档案、地址、鉴权方式等不含凭据的分词身份，
   不能用 `decision_policy.connection_revision` 这类进程加盐摘要，否则每次部署后第一次调用都显示未校准估算（真机偏高约 28%）。
+- 线程观测对不上时（新会话、换过模型的线程、压缩提交后、稳定表面变化）回落 owner 级按分词身份的比值缓存
+  `O/data/context/calibration.json`（`agent_core/model/context_calibration_carry.py` 唯一读写，只有数字、最多 32 条），
+  作用域 `owner_ratio` 只按比例折算、不低于 50%；预检、状态条与压缩候选门同一个数（2026-09-30 起）。
 
 ## pending conversation 的模型 cwd 投影
 

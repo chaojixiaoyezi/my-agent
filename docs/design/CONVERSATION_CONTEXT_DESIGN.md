@@ -234,6 +234,22 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
 
 **仍会显示一次原始估算的情况**：没有观测（新线程、换模型、压缩提交后）、同一进程内稳定表面变化。后者是否改成“同分词身份按比例折算”待定，见设计台账。
 
+## owner 级按分词身份的校准比值缓存（2026-09-30，分支 `claude/38-context-calibration-carry`）
+
+**问题**：线程校准观测只在同线程、同表面指纹、同压缩代次时可用。新会话、换过模型的线程、压缩提交后、同进程稳定表面变化后的第一次调用，
+状态条与预检都只能用原始估算（deepseek-v4-flash 上偏高约 25–28%），调用完才落回。
+
+**缓存**：`O/data/context/calibration.json`（`owner_context_calibration_json`），schema `owner_context_calibration.v1`，
+`entries` 按分词身份摘要保存 `raw_estimated_tokens` / `provider_input_tokens` / `observed_at`，最多 32 条，按最近观测保留。
+分词身份与稳定表面指纹共用 `_tokenizer_identity_payload`（后端名、模型名、协议、不含凭据的连接身份），指纹只在它之上加系统提示、稳定提示与工具。
+写：`record_provider_context_observation` 成功时经 `record_owner_ratio` 在文件锁内读改写，本地估算低于 4096 不写，写失败只丢缓存。
+读：每个分词身份每轮最多读一次盘，本轮成功观测后就地刷新内存副本。
+
+**取用顺序**：本轮观测（同指纹）→ 线程耐久观测（同指纹、同代次）→ owner 比值（作用域 `owner_ratio`）→ 原始估算。
+owner 比值只按比例：`ceil(raw × max(provider, ceil(observed/2)) / observed)`，与耐久作用域的比例口径相同，不加跨会话增量。
+压缩恢复冻结校准时同样可能拿到 `owner_ratio`，`calibrated_compact_request_tokens` 对它一律按比例，状态条与候选门数字一致；
+提交后 `rebase_provider_context_observation` 仍把接受基准写成本轮观测。
+
 ## Cache economics
 
 系统通道的验证规则只限定证据表述，不要求每个动作前重新运行已有检查。相同版本、输入和观察点
