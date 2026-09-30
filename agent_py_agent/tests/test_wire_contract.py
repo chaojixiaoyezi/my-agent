@@ -274,6 +274,19 @@ def test_reasoning_only_assistant_is_not_sent_as_orphan_reasoning_item():
     assert [item.get("type") for item in items][-2:] == ["reasoning", None]
 
 
+@pytest.mark.parametrize("cache", [True, False])
+@pytest.mark.parametrize("prompt", [" \n", CacheStructuredPrompt("稳定规则", "  \n"),
+                                    CacheStructuredPrompt("稳定规则", "动态", stable_user_prefix="  ")])
+def test_whitespace_prompt_parts_are_not_sent_as_blank_text_blocks(prompt, cache):
+    # Anthropic 规范拒收空白文本块；prompt 投影不能产出它们，否则出口校验会把本可发送的请求拦在本地。
+    backend = AnthropicCompatibleBackend(BackendOptions("https://example.test/v1", "test", "model",
+                                                        stream_enabled=False, prompt_cache_enabled=cache))
+    messages = backend.project_generate_payload(prompt, messages=[_user(_text("任务"))])["messages"]
+    validate_anthropic_messages(messages)
+    assert all(block["text"].strip() for m in messages if isinstance(m["content"], list)
+               for block in m["content"] if block.get("type") == "text")
+
+
 def _record_sends(backend):
     sent = []
     backend.request_json = lambda path, payload, headers: sent.append(payload) or {}
@@ -318,7 +331,8 @@ _MESSAGE = st.one_of(
     st.builds(lambda text: {"role": "user", "content": text}, _TEXTS),
     st.builds(lambda blocks: {"role": "assistant", "content": _unique_calls(blocks)}, st.lists(_ASSISTANT_BLOCK, max_size=4)),
 )
-_PROMPTS = st.sampled_from(["", "继续", CacheStructuredPrompt("稳定规则", "动态事实"), CacheStructuredPrompt("稳定规则")])
+_PROMPTS = st.sampled_from(["", " \n", "继续", CacheStructuredPrompt("稳定规则", "动态事实"), CacheStructuredPrompt("稳定规则"),
+                           CacheStructuredPrompt("稳定规则", "  \n", stable_user_prefix=" ")])
 
 
 # LLM: 打平非空白正文，用来确认修整不丢、不重排任何可见文字。

@@ -155,7 +155,7 @@ def _append_only_structured_messages(
     mark_cache: bool = True,
 ) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
-    if stable_user_prefix:
+    if str(stable_user_prefix or "").strip():
         prepared.append(
             {
                 "role": "user",
@@ -170,12 +170,13 @@ def _append_only_structured_messages(
 
 # LLM: Appending volatile text after the sole message marker preserves the cached prefix. Merge
 # into an existing user message only copy-on-write so consecutive user messages stay provider-safe.
+# 只有空白的尾部不追加：Anthropic 规范拒收空白文本块，出口校验（wire_contract）也会拦下。
 # 函数用途: 把本轮变化事实接到消息尾；末条已是 user 时追加文本块，否则新建 user 消息。
 def _append_volatile_user_text(
     messages: list[dict[str, Any]],
     volatile_suffix: str,
 ) -> list[dict[str, Any]]:
-    if not volatile_suffix:
+    if not str(volatile_suffix or "").strip():
         return messages
     volatile_block = {"type": "text", "text": str(volatile_suffix)}
     if not messages or str(messages[-1].get("role") or "") != "user":
@@ -196,6 +197,7 @@ def _append_volatile_user_text(
 
 # LLM: A typed layout becomes ordered text blocks and only its leading stable block is cacheable.
 # Ordinary strings retain the legacy one-block projection for third-party callers and tests.
+# 只有空白的 prompt 或段落不产出文本块（Anthropic 规范拒收空白文本块，出口校验也会拦下）。
 # 函数用途: 把 typed prompt 的全部段落无损投影为供应商文本块。
 def _prompt_prefixed_messages(
     prompt: str,
@@ -203,14 +205,14 @@ def _prompt_prefixed_messages(
     *,
     cache_prompt: bool = True,
 ) -> list[dict[str, Any]]:
-    if not prompt:
+    if not str(prompt or "").strip():
         return list(messages)
     if not cache_prompt:
         return [{"role": "user", "content": str(prompt)}, *messages]
     layout = prompt_cache_layout(prompt)
     if layout is not None:
         content: list[dict[str, Any]] = []
-        if layout.stable_prefix:
+        if layout.stable_prefix.strip():
             content.append(
                 {
                     "type": "text",
@@ -218,21 +220,21 @@ def _prompt_prefixed_messages(
                     "cache_control": dict(_EPHEMERAL_CACHE_CONTROL),
                 }
             )
-        if layout.stable_user_prefix:
+        if layout.stable_user_prefix.strip():
             content.append(
                 {
                     "type": "text",
                     "text": layout.stable_user_prefix,
                 }
             )
-        if layout.volatile_suffix:
+        if layout.volatile_suffix.strip():
             content.append(
                 {
                     "type": "text",
                     "text": layout.volatile_suffix,
                 }
             )
-        return [{"role": "user", "content": content}, *messages]
+        return [{"role": "user", "content": content}, *messages] if content else list(messages)
     return [
         {
             "role": "user",
