@@ -91,6 +91,7 @@ from .background_tool_policy import (
 from .compact_guard import is_provider_quota_failure
 from .models import (
     SESSION_MESSAGE_WAKE_REASON,
+    SESSION_TASK_WAKE_REASON,
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
     THREAD_TASK_LINK_ACTIVE_STATUS,
     ConversationThread,
@@ -3886,6 +3887,8 @@ def _execute_wake_signal(
         )
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
+    if _retire_cancelled_task_wake(scheduler, signal, claim, now):
+        return _WakeExecution(terminal=True)
     channel, target = resolve_background_route(
         _background_route_dependencies(scheduler), signal.thread_id,
     )
@@ -3920,6 +3923,28 @@ def _execute_wake_signal(
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
     return _WakeExecution(report)
+
+
+# LLM: 已取消的派活任务，它的唤醒在重试等待中不能再开跑：真实模型下已取消任务的工具调用会做完（有副作用），答复才在交付前
+#   被丢掉（ae 复审 388194636 的 M2）。在解析交付路线、领取后台租约之前，用与交付前取消判定同一个判据
+#   （_session_task_turn_was_cancelled，读持久的任务状态）先查一次；命中就释放定时租约、把唤醒标记已处理。只对派活唤醒查
+#   （这个判据扫全部会话任务，其它唤醒不可能对上已取消的任务回合）。读不到账时判据返回 False，照常执行，由交付前判定兜底。
+#   副作用：释放定时租约、写唤醒 handled 回执。
+# 函数用途: 派活任务已取消时，在开跑之前把它的唤醒结案。
+def _retire_cancelled_task_wake(
+    scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, claim: object | None, now: float,
+) -> bool:
+    reason = str(signal.reason or "").strip()
+    if reason.lower() != SESSION_TASK_WAKE_REASON:
+        return False
+    if not _session_task_turn_was_cancelled(
+        scheduler.runtime.agent, _background_run_request_for_wake(scheduler, signal, reason, now),
+    ):
+        return False
+    if claim is not None:
+        scheduler.scheduler_service.release(claim, now=now)
+    scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
+    return True
 
 
 # LLM: 调用方须先准确回读原pending信封；只复用原缓存校验、地址解析和交付器，不创建第二份交付状态。

@@ -83,6 +83,17 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 已取消派活任务的唤醒在开跑前结案（2026-09-29，分支 `claude/75-session-message-dedupe`，接在 M1 之后，ae 复审 M2）
+
+- **修的问题**（取消线带进来的既有缺口）：已取消判定原来只在跑完一片之后生效——派活片在重试等待中被取消，下一拍照样开跑，
+  真实模型下已取消任务的工具调用会做完（有副作用），答复才在交付前被丢掉。
+- **修法**：`_execute_wake_signal` 在解析交付路线之前调 `_retire_cancelled_task_wake`：只对派活唤醒，用与交付前取消判定同一个
+  判据 `_session_task_turn_was_cancelled` 查持久的任务状态，命中就释放定时租约、`mark_handled`、返回 terminal。
+- **`test_session_task_real_chain.py`**：新窗 `test_cancelled_task_wake_does_not_run_while_waiting_to_retry`（与 M1 那一窗共用
+  「断线一次 → 取消」的前置）：推过重试间隔后这个任务的回合 0 次模型调用、B 的派活唤醒结案；修复前失败。
+- `test_background_slice_settles_its_turn_input_only_on_abnormal_end[task-cancelled]` 不用改：它走的是会话消息唤醒，开跑前判定只查派活唤醒。
+- **变异**（`sm3/mutate_m2.py`）：去掉开跑前判定、命中后不结案唤醒，都被抓住。
+
 ## 派活任务在重试等待中被取消时撤回已退回的正文（2026-09-29，分支 `claude/75-session-message-dedupe`，接在 `388194636` 之后，ae 复审 M1）
 
 - **修的问题**：B 的派活回合认领正文后断线，正文按 388194636 退回 pending；A 在重试等待期间取消任务（停止控制没有在途回合可停，

@@ -2208,6 +2208,8 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 判据所需的 guidance store 由 `_background_claim_dependencies` 直接传 `scheduler.store.guidance`（不用 `getattr` 兜底，
 替身缺属性由测试夹具补）：早先实现用 `pending_one.__self__` 反查，拿到的是 WakeStore，没有 `.agent`，判据因此从未生效。
 
+开跑前还有一道：`_execute_wake_signal` 解析交付路线之前调 `_retire_cancelled_task_wake`，只对派活唤醒读同一个持久事实（会话任务
+是否已 `cancelled`），命中就释放定时租约、结案唤醒，不开模型回合（重试等待中被取消的任务不再重跑一片）。
 交付前的取消判定有两处：`background_claim.run_with_heartbeat` 在 `run_once` 之后再查一次本线程中断旗，把认领结算成 cancelled；
 `runtime._run_agent` 在交付前读持久的结构化事实（会话任务是否已 `cancelled`），不依赖本线程的 `is_interrupted()`
 （per-thread，停止旗不在本线程时读不到）。

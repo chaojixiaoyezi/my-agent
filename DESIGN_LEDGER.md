@@ -738,6 +738,10 @@
       方向是改成三态（取消/没取消/读不出），读不出时按不退回处理。需要读账失败与取消同时发生才会触发。
     - 派活正文沿用 `SESSION_MESSAGE_RELEASE_LIMIT_REACHED` 这个码名（3a 裁定不改名）：它的含义是"宿主投递释放满上限"，会话消息
       与派活正文共用。
+    - **已取消任务的唤醒在开跑前结案（ae 复审 388194636 的 M2，已实现）**：`runtime._retire_cancelled_task_wake` 在解析交付路线、
+      领取后台租约之前，只对派活唤醒用同一个判据 `_session_task_turn_was_cancelled` 查一次，命中就释放定时租约、结案唤醒；
+      原来要跑完一片才在交付前丢答复，真实模型下已取消任务的工具调用已经做完。交付前判定与 run_once 之后的二次检查保留，兜住
+      开跑后才到的取消。
     - 满上限转 rejected 后派活唤醒仍会没有正文地重跑：**由 C4 收口**（3a 裁定）。领取后准入对派活正文已放弃（rejected 带
       `SESSION_MESSAGE_RELEASE_LIMIT_REACHED`）判为来源已放弃，走 `wake_domain_closeout.py` 同一个领域收尾：任务收成 failed 带码、
       回报发送方、结案唤醒；判据写法与会话消息的 `session_message_abandoned` 同一套。
