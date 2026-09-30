@@ -83,6 +83,18 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 派活任务在重试等待中被取消时撤回已退回的正文（2026-09-29，分支 `claude/75-session-message-dedupe`，接在 `388194636` 之后，ae 复审 M1）
+
+- **修的问题**：B 的派活回合认领正文后断线，正文按 388194636 退回 pending；A 在重试等待期间取消任务（停止控制没有在途回合可停，
+  `stop_confirmed=false`），任务转 cancelled，但正文仍是 pending；下一次重试认领它，把已取消任务的正文当本回合输入再注入。
+- **修法**：`_apply_cancel` 推进到 cancelled 后，对已绑定回合的任务再调 `_withdraw_queued_body`，只把 pending 改成 rejected。
+- **`test_session_task_real_chain.py`**：假线路给每次调用记下本回合自己输入里的任务目标（`own_goals`，与 `own_notes` 同一口径，
+  不看历史尾巴）。新窗 `test_task_cancelled_while_waiting_to_retry_does_not_get_its_body_back`：断线一次 → 取消 → 推过重试间隔，
+  断言正文 rejected、B 之后任何一次派活调用的本回合输入里都没有这个任务目标；修复前失败。
+- **`test_session_message_release_at_turn_end.py`**：`test_other_receipts_are_still_rejected` 加「后台片非取消的失败」参数（T5）：
+  插话在 `release_task_body=True` 下照旧 rejected，这个开关只放行派活正文。
+- **变异**（`sm3/mutate_m1.py`）：去掉取消后的撤回、开关放行任何来源（T5），都被抓住。
+
 ## 派活正文在后台片非取消的失败后退回给同一任务号的重跑（2026-09-29，分支 `claude/75-session-message-dedupe`，接在还原提交之后）
 
 - **修的问题**：B 的派活回合认领正文后，带着正文的模型调用失败（不是取消）。123f6f3b4 的后台收尾把派活正文按方案 A 转 rejected，

@@ -641,3 +641,4 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 
 派活正文在后台片非取消的失败后退回：后台收尾按结构化任务状态传 `release_task_body`，任务没取消时派活正文退回 pending、
 按同一个 `release_count` 计次，不授权跨回合，只有同一 `session_task_id` 的重跑能认领；任务已取消照旧 rejected，前台终态不变。
+取消路径同步撤回：先失败、后取消时正文已退回 pending，`_apply_cancel` 推进到 cancelled 后把它撤成 rejected，重试不再注入已取消任务的正文。

@@ -730,6 +730,14 @@
     按同一个 `release_count` 计次并沿用上限；不记 `released_turn_ids`、不授权跨回合，只有同一个回合号（即同一个 `session_task_id`）
     的重跑能认领，归属任务号仍按 `_body_belongs_to_task` 核对。只有后台收尾会传这个参数，而且按结构化任务状态判定：
     `_session_task_turn_was_cancelled` 为真（任务已取消）时照旧 rejected。前台终态保持默认，派活正文照旧 rejected。
+    - **取消路径的撤回（ae 复审 388194636 的 M1，已实现）**：先失败、后取消时，正文已退回 pending，取消只停回合、不碰正文，重试的
+      派活片会把已取消任务的正文当本回合输入再注入。`session_task_control._apply_cancel` 在推进到 cancelled 之后，对已绑定回合的
+      任务再调一次 `_withdraw_queued_body`，只把 pending 改成 rejected（reserved/submitted/consumed 不动）。三种先后都收得住：
+      先退回后取消（这里撤）；取消先于收尾（收尾读到 cancelled 不退回）；收尾夹在停止与推进之间（推进后这里撤，L1）。
+    - L2（记账，不改）：`_session_task_turn_was_cancelled` 读任务账出错时返回 False，对「是否退回」来说会按"没取消"退回正文；
+      方向是改成三态（取消/没取消/读不出），读不出时按不退回处理。需要读账失败与取消同时发生才会触发。
+    - 派活正文沿用 `SESSION_MESSAGE_RELEASE_LIMIT_REACHED` 这个码名（3a 裁定不改名）：它的含义是"宿主投递释放满上限"，会话消息
+      与派活正文共用。
     - 满上限转 rejected 后派活唤醒仍会没有正文地重跑：**由 C4 收口**（3a 裁定）。领取后准入对派活正文已放弃（rejected 带
       `SESSION_MESSAGE_RELEASE_LIMIT_REACHED`）判为来源已放弃，走 `wake_domain_closeout.py` 同一个领域收尾：任务收成 failed 带码、
       回报发送方、结案唤醒；判据写法与会话消息的 `session_message_abandoned` 同一套。

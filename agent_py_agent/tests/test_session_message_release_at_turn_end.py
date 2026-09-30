@@ -109,13 +109,19 @@ def test_submitted_session_message_is_not_released(tmp_path) -> None:
     assert receipt.status == "submitted" and "released_turn_ids" not in receipt.migration
 
 
-@pytest.mark.parametrize("origin_kind", ["", SESSION_TASK_ORIGIN_KIND], ids=["steer", "session-task-body"])
-def test_other_receipts_are_still_rejected(tmp_path, origin_kind) -> None:
-    """插话照旧 rejected（由 Gateway 输入对账重新排成请求）；派活正文不释放（任务被取消后释放会让前台回合认领到它）。"""
+@pytest.mark.parametrize(("origin_kind", "background"), [
+    ("", False), (SESSION_TASK_ORIGIN_KIND, False), ("", True),
+], ids=["steer", "session-task-body", "steer-background-failure"])
+def test_other_receipts_are_still_rejected(tmp_path, origin_kind, background) -> None:
+    """插话照旧 rejected（由 Gateway 输入对账重新排成请求），后台片非取消的失败（release_task_body=True）也一样——
+    这个开关只放行派活正文；前台终态下派活正文不释放（任务被取消后释放会让前台回合认领到它）。"""
     store = ConversationStore(tmp_path / "conv")
     entry = _append(store, "other-1", origin_kind=origin_kind)
     assert store.guidance.claim_for_turn(entry, expected_turn_id="turn-1", attempt_id="attempt-1")
-    _end_turn(store, "turn-1")
+    if background:
+        _end_background_turn(store, "turn-1")
+    else:
+        _end_turn(store, "turn-1")
     receipt = store.guidance.receipt("other-1")
     assert receipt.status == "rejected" and "released_turn_ids" not in receipt.migration
 

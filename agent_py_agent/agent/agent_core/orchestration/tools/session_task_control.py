@@ -223,6 +223,12 @@ def _apply_cancel(
     cancelled = store.advance(
         str(getattr(task, "task_id", "") or ""), SessionTaskUpdate(status=SESSION_TASK_CANCELLED)
     )
+    if bound_turn_id:
+        # 已绑定回合的任务也可能有一条退回 pending 的正文：派活片非取消的失败会把正文退回给同一任务号的重跑
+        # （release_task_body）。任务转 cancelled 之后再撤一次，只把 pending 改成 rejected（reserved/submitted/consumed 不动），
+        # 否则重试的派活片会把已取消任务的正文当本回合输入再注入。三种先后都收得住：先退回后取消（这里撤）；
+        # 取消先于收尾（收尾读到 cancelled 不退回）；收尾夹在停止与推进之间（推进后这里撤）。
+        _withdraw_queued_body(agent, cancelled)
     return _CancelOutcome(
         task=cancelled,
         notified=_notify_sender(agent, cancelled),

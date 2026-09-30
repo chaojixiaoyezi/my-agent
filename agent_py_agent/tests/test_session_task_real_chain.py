@@ -158,7 +158,8 @@ class ScriptedWire:
                  "heading": turn.heading[:60], "tools": turn.tools, "results": turn.results,
                  "saw_note": "RC-NOTE-" in turn.turn_text,
                  "notes": sorted(set(re.findall(r"RC-NOTE-[A-Z0-9]+", turn.turn_text))),
-                 "own_notes": sorted(set(re.findall(r"RC-NOTE-[A-Z0-9]+", turn.own_text)))}
+                 "own_notes": sorted(set(re.findall(r"RC-NOTE-[A-Z0-9]+", turn.own_text))),
+                 "own_goals": sorted(set(re.findall(r"RC-(?:GOAL|CHAIN)-[A-Z0-9]+", turn.own_text)))}
         turn_key = entry["task"] or entry["heading"]
         with self._lock:
             self.calls.append(entry)
@@ -790,6 +791,32 @@ def test_task_turn_that_fails_before_finishing_gets_its_body_back_on_the_rerun(t
     assert final.status == "done", final
     body = _task_body_receipt(chain, "B", task.task_id)
     assert getattr(body, "status", None) == "consumed", f"正文回执最终应是 consumed，实际 {getattr(body, 'status', None)}"
+
+
+def test_task_cancelled_while_waiting_to_retry_does_not_get_its_body_back(tmp_path, monkeypatch) -> None:
+    """B 的派活回合认领正文后断线（不是取消），正文退回 pending 等同一任务号的重跑；A 在重试等待期间取消任务。
+    取消之后正文必须以 rejected 结束，B 之后任何一次派活调用的本回合输入里都不能再出现这个任务目标——否则重试会把
+    已取消任务的正文当本回合输入再注入（ae 复审 388194636 的 M1）。只看本回合自己的输入，历史尾巴里的旧输入不算。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-FAILONCE 整理三条要点。")
+    task = chain.task("RC-GOAL-FAILONCE")
+    now = time.time()
+    with pytest.raises(ConnectionResetError):
+        chain.scheduler.tick(now=now)
+    _require([call["kind"] for call in chain.wire.calls_for_task(task.task_id)] == ["connection-reset"],
+             f"前提不成立：派活回合带着正文的调用应当断线一次，实际 {[call['kind'] for call in chain.wire.calls]}")
+    _require(getattr(_task_body_receipt(chain, "B", task.task_id), "status", None) == "pending", "前提不成立：正文应已退回 pending")
+    chain.ask("A", f"RC-CANCEL {task.task_id}")
+    _require(chain.agent.conversation_store.session_tasks.load(task.task_id).status == "cancelled", "任务没有转 cancelled")
+    before = len(chain.wire.calls_for_task(task.task_id))
+
+    chain.scheduler.tick(now=now + 31)
+
+    later = chain.wire.calls_for_task(task.task_id)[before:]
+    assert all("RC-GOAL-FAILONCE" not in call["own_goals"] for call in later), (
+        f"已取消任务的正文又作为本回合输入被注入：{[call['kind'] for call in later]}")
+    body = _task_body_receipt(chain, "B", task.task_id)
+    assert getattr(body, "status", None) == "rejected", f"取消后正文应以 rejected 结束，实际 {getattr(body, 'status', None)}"
 
 
 # 函数用途: 按任务号找到派活正文在目标会话里的回执（正文条目 metadata 带 session_task_id）；找不到返回 None。
