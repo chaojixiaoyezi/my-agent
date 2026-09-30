@@ -90,7 +90,9 @@ python3 scripts/build_capability_package.py \
 | `summary` | 一句话说明这个包是做什么的 |
 | `capability` | 包的描述、关键词、入口文档名（`description` / `keywords` / `entry_document`） |
 | `files` | 要打进包的资源，每项只写一个 `path`（相对资源目录的路径） |
-| `settings_schema` | 配置结构（不需要配置就写空对象） |
+| `settings_schema` | 配置结构（不需要配置就写空对象 `{}`） |
+
+注意：`capability.entry_document` 指向的入口文档**必须同时列在 `files` 里**，否则构建会失败（构建时校验入口文档属于已声明资源）。
 
 **包的基本结构**：一个入口文档（如 `CAPABILITY.md`，说明整套方法）+ 若干模板/脚本/示例文件。构建时会为每个文件计算内容摘要、统一不带执行权限，然后打包；构建、安装、读取都不会执行包里的代码。
 

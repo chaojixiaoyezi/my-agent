@@ -43,6 +43,12 @@
   `orchestration/tools/capability.py`（ae 修 D2）。
 - **验证**：`test_task_run_close_without_conversation_task.py` 6 项；5 个变异全部被杀。见 TESTS.md 同名节。
 
+## 能力包使用说明实操核对：补入口文档必须列入 files（2026-09-30，分支 `worker/ds1-guide-qa`，已修正，待集成）
+
+- **做法**：按 `docs/guides/CAPABILITY_PACK_GUIDE.md` 第五节在临时目录实操构建一个小能力包（CAPABILITY.md + 模板 + 示例脚本 + 声明 JSON），用说明书命令 `scripts/build_capability_package.py` 构建成功，并用 `inspect_plugin_package`/`read_plugin_member` 进程内读回核对成员、摘要与声明一致。
+- **发现**：说明书字段表没说入口文档必须同时列入 `files`；实测 `capability.entry_document` 不在 `files` 时构建失败（错误为笼统的"插件包描述无效"）。已在说明书补注意说明。`settings_schema` 写 `{}` 实测可行。
+- **状态**：仅改说明书与测试记录，未改产品代码；未安装、未运行 `/plugins`、未启动 Gateway。
+
 ## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`，已实现，待集成）
 
 - **来源**：能力包验收 G03 发现接替已结束子代理时，追加式事件日志里只有普通保存（`subagent_run_saved`）或状态记录，没有专门的“接替”条目；接替事实只在权威 takeover_records 与 TAKEOVER.md 里。要求只读审计投影，不建第二份状态。

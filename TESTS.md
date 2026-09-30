@@ -49,6 +49,14 @@
 - 原有 `test_run_audit_terminal.py`、`test_task_run_settle_quiescent_children.py` 不改、全部通过。
 - **变异**（`mutate_taskrun.py`）：5 个全部被杀：没有关联仍直接返回、读坏关联当成没有关联、空任务身份当成没有关联、事件原因写错、非终态关联也关闭。
 
+## 能力包说明书实操核对（2026-09-30，分支 `worker/ds1-guide-qa`）
+
+- **按说明书第五节"自己做一个能力包"实操**：在临时目录 `qa-pack/` 建了 `CAPABILITY.md`（入口文档）、`templates/meeting-notes.md`（模板）、`scripts/summarize.py`（示例脚本）和 `declaration.json`（声明），然后用说明书命令构建：
+  - `$PY scripts/build_capability_package.py --declaration qa-pack/declaration.json --files-root qa-pack --output qa-pack/meeting-notes-qa-pack.zip` → **构建成功**，输出 zip。
+  - 用产品现成函数 `inspect_plugin_package` / `read_plugin_member` 进程内读回：`schema_version=plugin_package.v7`、`package_kind=capability`、声明 3 个成员与 zip 成员一致、摘要校验通过、`is_content_only=True`、无执行位。
+- **发现说明书一处没说清**：字段表只写了 `capability.entry_document`，没说入口文档**必须同时列在 `files` 里**。实测 `entry_document` 不在 `files` 时构建失败（报"插件包描述无效"）；`settings_schema` 写空对象 `{}` 实测可行。已在 `docs/guides/CAPABILITY_PACK_GUIDE.md` 第五节补上"入口文档必须同时列在 files 里"的注意说明。
+- **未做**：没有运行 `/plugins`、没有安装到任何 my-agent 目录、没有启动 Gateway；临时目录 `qa-pack/` 构建完成后已删除，未提交。
+
 ## 分段摘要来源不收 Responses 思考密文（2026-09-30，分支 `claude/38-compact-segment-strip-ciphertext`，基于 step16t `10041de02`）
 
 - `test_compact_message_source.py` 新增：
