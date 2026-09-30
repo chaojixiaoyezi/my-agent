@@ -44,6 +44,27 @@ WAKE_REASON_RUN_NO_REPORT = "run:no_report"
 WAKE_REASON_DELIVERY_NOT_COMMITTED = "run:delivery_not_committed"
 WAKE_REASON_ATTEMPT_ABANDONED = "attempt:abandoned"
 WAKE_REASON_CHANNEL_UNAVAILABLE = "delivery:channel_unavailable"
+# 第 3 步接线新增的结构化原因（顺序与 docs/design/WAKE_POISON_PILL.md 第 10 节的四点一致）：
+# 额度分路的回退通知、心跳执行结算成取消、压缩让出——都不计数；报告说唤醒已处理但它还在 pending——计数；
+# 进程带停机标记退出、尝试账读不出——由存储层/接线层按这两个原因记账或结案。
+WAKE_REASON_QUOTA_FALLBACK = "quota:fallback_notice"
+WAKE_REASON_RUN_CANCELLED = "run:cancelled"
+WAKE_REASON_COMPACT_YIELD = "run:compact_yield"
+WAKE_REASON_WAKE_NOT_SETTLED = "run:wake_not_settled"
+WAKE_REASON_GATEWAY_STOPPED = "attempt:gateway_stopped"
+WAKE_REASON_LEDGER_CORRUPT = "attempt:ledger_corrupt"
+
+# 一次尝试走的路径：拿到会话 claim 之后执行；只重投（已有冻结交付，不调模型）；额度分路（只发回退通知）。
+WAKE_ATTEMPT_PATH_CLAIMED = "claimed"
+WAKE_ATTEMPT_PATH_REDELIVERY = "redelivery"
+WAKE_ATTEMPT_PATH_QUOTA_FALLBACK = "quota_fallback"
+WAKE_ATTEMPT_PATHS = frozenset({WAKE_ATTEMPT_PATH_CLAIMED, WAKE_ATTEMPT_PATH_REDELIVERY, WAKE_ATTEMPT_PATH_QUOTA_FALLBACK})
+# claim 路径的结算状态（background_claim 的 claims.finish status）：领到没执行、执行完、取消、压缩让出。
+WAKE_CLAIM_NOT_EXECUTED = "not_executed"
+WAKE_CLAIM_FINISHED = "finished"
+WAKE_CLAIM_CANCELLED = "cancelled"
+WAKE_CLAIM_YIELDED = "yielded"
+WAKE_CLAIM_STATUSES = frozenset({WAKE_CLAIM_NOT_EXECUTED, WAKE_CLAIM_FINISHED, WAKE_CLAIM_CANCELLED, WAKE_CLAIM_YIELDED})
 
 # 领到租约但按预期等待、不算失败的 admission：用户中断、任务已终态、等恢复、来源已消费或已变化。
 # 这是已知码的优化清单；不在清单里的码（包括以后新增的）一律计数。
@@ -70,6 +91,7 @@ class WakeAttemptVerdict:
 WAKE_ATTEMPT_NEUTRAL = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL)
 WAKE_ATTEMPT_SUCCESS = WakeAttemptVerdict(WAKE_VERDICT_SUCCESS)
 WAKE_ATTEMPT_ABANDONED = WakeAttemptVerdict(WAKE_VERDICT_FAILURE, WAKE_REASON_ATTEMPT_ABANDONED)
+WAKE_ATTEMPT_GATEWAY_STOPPED = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_GATEWAY_STOPPED)
 
 
 # LLM: 持久尝试账里的判定状态；字段全为结构化计数、原因码与时间戳，from_dict 严格校验类型与一致性，
@@ -186,6 +208,57 @@ def verdict_for_report(report: object, *, delivery_frozen: bool) -> WakeAttemptV
 # 函数用途: 判定"执行了但没有报告"这次尝试，计为 run:no_report。
 def verdict_for_missing_report() -> WakeAttemptVerdict:
     return WakeAttemptVerdict(WAKE_VERDICT_FAILURE, WAKE_REASON_RUN_NO_REPORT)
+
+
+# LLM: 接线层（wake_attempt_tracking）在一次尝试结束时填好的结构化事实；只有 path=claimed 时 claim_status 有意义。
+#   error 是执行路径抛出的异常（含被供应冷却吸收的瞬时异常）；report 是执行返回的报告对象或 None；
+#   delivery_frozen 由调用方重读 pending 信封后算出（cached_owner_delivery 非空）。"唤醒已不在 pending → 删账"和
+#   "根本没开始尝试 → 不记账"由接线层先判掉，不进本判定。
+# 类用途: 描述一次已经结束的唤醒领取尝试，供 verdict_for_attempt 归类。
+@dataclass(frozen=True)
+class WakeAttemptFacts:
+    path: str = WAKE_ATTEMPT_PATH_CLAIMED
+    claim_status: str = WAKE_CLAIM_FINISHED
+    admission: str = ""
+    report: object = None
+    error: BaseException | None = None
+    delivery_frozen: bool = False
+
+
+# LLM: 第 3 步的判定总表，顺序固定：① 抛了异常 → verdict_for_error；② 额度分路 → 不计数 quota:fallback_notice；
+#   ③ 只重投 → verdict_for_report(delivery_frozen=True)；④ 领到没执行 → verdict_for_admission；⑤ 取消 / 压缩让出 → 不计数；
+#   ⑥ 执行完没报告 → run:no_report；⑦ 报告说 wake_handled=True 但唤醒仍在 pending（调用方保证只在 pending 时调用）→ 计数
+#   run:wake_not_settled；⑧ 其余 → verdict_for_report(按调用方给的 delivery_frozen)。只读结构化字段，不做 IO；
+#   不认识的 path / claim_status 是调用方缺陷，抛 ValueError。改动时同步 docs/design/WAKE_POISON_PILL.md 第 10 节与 test_wake_poison。
+# 函数用途: 把一次尝试的结构化事实归成一个判定结果。
+def verdict_for_attempt(facts: WakeAttemptFacts) -> WakeAttemptVerdict:
+    if facts.path not in WAKE_ATTEMPT_PATHS:
+        raise ValueError(f"unknown wake attempt path: {facts.path!r}")
+    if facts.error is not None:
+        return verdict_for_error(facts.error)
+    if facts.path == WAKE_ATTEMPT_PATH_QUOTA_FALLBACK:
+        return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_QUOTA_FALLBACK)
+    if facts.path == WAKE_ATTEMPT_PATH_REDELIVERY:
+        return verdict_for_report(facts.report, delivery_frozen=True)
+    return _verdict_for_claimed_attempt(facts)
+
+
+# LLM: claim 路径的分支（verdict_for_attempt 的④–⑧），状态词表以 WAKE_CLAIM_STATUSES 为准。
+# 函数用途: 判定一次拿到会话 claim 之后的尝试。
+def _verdict_for_claimed_attempt(facts: WakeAttemptFacts) -> WakeAttemptVerdict:
+    if facts.claim_status not in WAKE_CLAIM_STATUSES:
+        raise ValueError(f"unknown wake claim status: {facts.claim_status!r}")
+    if facts.claim_status == WAKE_CLAIM_NOT_EXECUTED:
+        return verdict_for_admission(facts.admission)
+    if facts.claim_status == WAKE_CLAIM_CANCELLED:
+        return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_RUN_CANCELLED)
+    if facts.claim_status == WAKE_CLAIM_YIELDED:
+        return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_COMPACT_YIELD)
+    if facts.report is None:
+        return verdict_for_missing_report()
+    if getattr(facts.report, "wake_handled", False) is True:
+        return WakeAttemptVerdict(WAKE_VERDICT_FAILURE, WAKE_REASON_WAKE_NOT_SETTLED)
+    return verdict_for_report(facts.report, delivery_frozen=facts.delivery_frozen)
 
 
 # LLM: 批次隔离（消息队列隔离毒消息的常规做法）：一次尝试同时执行了多条唤醒（batch_size>1）时，计数失败改记为
@@ -320,6 +393,14 @@ def _decision(state: WakePoisonState, reason_code: str, *, mixed_causes: bool) -
                               mixed_causes=mixed_causes)
 
 
+# LLM: 尝试账读不出（DataCorruptionError）时的结案判定：原因 attempt:ledger_corrupt，计数全为 0（账已不可信，不冒充次数），
+#   mixed_causes=False。坏账由存储层原样移到 quarantine/ledger/ 留档，不清零重来（清零会让毒丸重新获得无限次机会）。
+# 函数用途: 给"尝试账坏了"这条唤醒一个结案判定。
+def ledger_corrupt_decision() -> QuarantineDecision:
+    return QuarantineDecision(reason_code=WAKE_REASON_LEDGER_CORRUPT, same_cause_count=0, total_count=0,
+                              redelivery_failures=0, mixed_causes=False)
+
+
 # LLM: 优先用结构化 error_code 属性（须通过 is_structured_error_code，空白、小写或带明细的都不算），否则用
 #   runtime_error_report 的 category 加异常类名；有结构化 HTTP 状态（provider_error_http_status）时再追加
 #   :http_<状态>，让 400 与 413 这类不同的请求问题分成不同原因。绝不读异常消息。
@@ -436,8 +517,18 @@ def _uncounted_broken(state: WakePoisonState) -> bool:
 
 __all__ = [
     "WAKE_ATTEMPT_ABANDONED",
+    "WAKE_ATTEMPT_GATEWAY_STOPPED",
     "WAKE_ATTEMPT_NEUTRAL",
+    "WAKE_ATTEMPT_PATHS",
+    "WAKE_ATTEMPT_PATH_CLAIMED",
+    "WAKE_ATTEMPT_PATH_QUOTA_FALLBACK",
+    "WAKE_ATTEMPT_PATH_REDELIVERY",
     "WAKE_ATTEMPT_SUCCESS",
+    "WAKE_CLAIM_CANCELLED",
+    "WAKE_CLAIM_FINISHED",
+    "WAKE_CLAIM_NOT_EXECUTED",
+    "WAKE_CLAIM_STATUSES",
+    "WAKE_CLAIM_YIELDED",
     "WAKE_EXPECTED_WAIT_ADMISSIONS",
     "WAKE_POISON_BACKOFF_BASE_SECONDS",
     "WAKE_POISON_BACKOFF_MAX_SECONDS",
@@ -445,8 +536,14 @@ __all__ = [
     "WAKE_POISON_TOTAL_LIMIT",
     "WAKE_REASON_ATTEMPT_ABANDONED",
     "WAKE_REASON_CHANNEL_UNAVAILABLE",
+    "WAKE_REASON_COMPACT_YIELD",
     "WAKE_REASON_DELIVERY_NOT_COMMITTED",
+    "WAKE_REASON_GATEWAY_STOPPED",
+    "WAKE_REASON_LEDGER_CORRUPT",
+    "WAKE_REASON_QUOTA_FALLBACK",
+    "WAKE_REASON_RUN_CANCELLED",
     "WAKE_REASON_RUN_NO_REPORT",
+    "WAKE_REASON_WAKE_NOT_SETTLED",
     "WAKE_REDELIVERY_BACKOFF_BASE_SECONDS",
     "WAKE_REDELIVERY_BACKOFF_MAX_SECONDS",
     "WAKE_REDELIVERY_GIVE_UP_SECONDS",
@@ -458,10 +555,12 @@ __all__ = [
     "WAKE_VERDICT_REDELIVERY_FAILURE",
     "WAKE_VERDICT_SUCCESS",
     "QuarantineDecision",
+    "WakeAttemptFacts",
     "WakeAttemptVerdict",
     "WakePoisonState",
     "WakeStallAlert",
     "ensure_writable_state",
+    "ledger_corrupt_decision",
     "mark_stall_alerted",
     "needs_isolation",
     "next_poison_state",
@@ -470,6 +569,7 @@ __all__ = [
     "redelivery_backoff_seconds",
     "stall_alert",
     "verdict_for_admission",
+    "verdict_for_attempt",
     "verdict_for_batch",
     "verdict_for_error",
     "verdict_for_missing_report",

@@ -65,6 +65,9 @@ class ConversationStorage:
         self.wake_attempts_dir = self.wake_queue_dir / "attempts"
         self.wake_quarantine_dir = self.wake_queue_dir / "quarantine"
         self.wake_replayed_dir = self.wake_quarantine_dir / "replayed"
+        # 结案时读不出的 pending 信封与读不出的尝试账，原字节原样留档（按需创建，不进 ensure_dirs）。
+        self.wake_quarantine_unreadable_dir = self.wake_quarantine_dir / "unreadable"
+        self.wake_quarantine_ledger_dir = self.wake_quarantine_dir / "ledger"
         self.indexes = ScanIndexes()
         if initialize:
             self.ensure_dirs()
@@ -203,6 +206,16 @@ class ConversationStorage:
     # 函数用途: 定位一条已结案唤醒的记录文件。
     def wake_quarantine_path(self, wake_signal_id: str) -> Path:
         return self.wake_quarantine_dir / f"{validate_opaque_id(wake_signal_id, kind='wake_signal_id')}.json"
+
+    # LLM: 结案时读不出的 pending 信封原字节的留档位置；同一 ID 只有一份，重放遇到它拒绝（WAKE_REPLAY_SOURCE_UNREADABLE）。
+    # 函数用途: 定位一条读不出的唤醒信封留档文件。
+    def wake_quarantine_unreadable_path(self, wake_signal_id: str) -> Path:
+        return self.wake_quarantine_unreadable_dir / f"{validate_opaque_id(wake_signal_id, kind='wake_signal_id')}.json"
+
+    # LLM: 结案时读不出的尝试账原字节的留档位置；结案记录的 ledger_preserved_at 指向它，供排查，不参与任何判定。
+    # 函数用途: 定位一条坏尝试账的留档文件。
+    def wake_quarantine_ledger_path(self, wake_signal_id: str) -> Path:
+        return self.wake_quarantine_ledger_dir / f"{validate_opaque_id(wake_signal_id, kind='wake_signal_id')}.json"
 
     # LLM: 去重键与线程共同决定原回执路径，不增加第二份投递状态。
     # 函数用途: 定位精确去重键的唤醒回执文件。

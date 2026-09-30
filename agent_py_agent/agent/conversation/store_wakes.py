@@ -142,7 +142,8 @@ class WakeStore:
         self._require_thread = require_thread
         self._update_thread_atomic = update_thread_atomic
         self._mark_observations_handled = mark_observations_handled
-        # 毒丸尝试账、结案与重放挂在子对象上；pending 定位与观察结案沿用本类同一实现。
+        # 毒丸尝试账、结案与重放挂在子对象上；pending 定位与观察结案沿用本类同一实现；
+        # 读不出信封时按观察记录上的 wake_signal_id 结观察的回调由 ConversationStore 经 attempts.bind_wake_observation_settler 绑定。
         self.attempts = WakeAttemptStore(
             storage, find_pending_path=self._find_path, mark_observations_handled=mark_observations_handled,
         )

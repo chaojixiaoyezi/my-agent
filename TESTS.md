@@ -185,6 +185,25 @@
   `test_provider_transient_auto_resume.py`、`test_background_supply_backoff.py`、`test_background_claim_execution.py`、
   `test_wake_poison.py`、`test_decision_fault_matrix.py` 等）加 11 个全仓守卫，共 32 个文件 1027 项通过。
 
+## 唤醒毒丸第 3 步 C1：纯函数与存储层补充，不接线（2026-09-29，分支 `claude/38-wake-poison-c1`，基于 `cb08b80dc`）
+
+- **范围**：只加不接线，生产行为不变。`wake_poison`：新原因常量（quota:fallback_notice、run:cancelled、run:compact_yield、
+  run:wake_not_settled、attempt:gateway_stopped、attempt:ledger_corrupt）、`WakeAttemptFacts` + `verdict_for_attempt`（第 3 步判定总表）、
+  `ledger_corrupt_decision`。`store_wake_attempts`：`preflight`（已死进程的在途尝试补记：带 stopping_at 记不计数的 gateway_stopped，否则 abandoned）、
+  `has_ledger`、`mark_stopping`（只标本进程本次尝试）、`discard`（不读内容）、`quarantine` 返回 `WakeQuarantineResult`（信封读不出 → 原字节
+  os.replace 到 quarantine/unreadable/，删账、按观察记录的 wake_signal_id 结观察；尝试账读不出 → 原字节留档到 quarantine/ledger/，结案记录写
+  ledger_preserved_at）、`quarantined()` 把 unreadable/ 列进 load_errors、`replay` 对读不出的来源拒绝（WAKE_REPLAY_SOURCE_UNREADABLE）。
+  `store_observations.mark_handled_for_wake` 按 wake_signal_id 结观察，经 `attempts.bind_wake_observation_settler` 由 ConversationStore 绑定。
+  四个 WAKE_REPLAY_* 码登记进 ERROR_CONTRACTS。
+- **用例**：`test_wake_poison.py` 新增 `TestAttemptFacts`（判定总表逐行、异常优先、未知 path/claim_status 抛 ValueError、账坏判定计数为 0）与
+  环境判定共用断言；`test_wake_attempt_store.py` 新增 `TestPreflightAndStopping`（无账不写、活着不动、死+标记不计数、死无标记计数、批次、begin
+  同样认标记、mark_stopping 四种拒绝、坏账 False 留给 preflight、worker 先记结果不被覆盖、discard 不读）与 `TestQuarantineUnreadableAndCorrupt`
+  （字节原样移走、pending/账消失、观察结掉、列进 load_errors、重放拒绝；坏账留档不清零；健康账原样入记录）。
+- **负向验证**：14 个变异（忽略 stopping_at、活着也写盘、mark_stopping 不认 owner、读不出照旧抛、留档不列出、重放不拒、坏账不留档、discard 读内容、
+  读不出不结观察、异常晚于额度分路、已处理仍 pending 记成功、取消计数、账坏判定带计数、只重投用调用方标志）全部命中。
+- **门禁**：两个测试文件 + 相关 wake/observation/retention 测试 + 九个全仓守卫；ruff、doc sync（--base cb08b80dc）、strict code-size
+  （identity 对比 cb08b80dc）、`git diff --check`、clean package。
+
 ## 唤醒毒丸第 3 步 C5：环境级故障按车道暂停（2026-09-29，分支 `claude/9b-lane-env-pause`，基于 `89af6b07a`）
 
 - **车道**（`test_gateway_lane_retry.py`，新增 10 个函数 31 例，全文件 44 例）：

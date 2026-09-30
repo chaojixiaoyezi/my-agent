@@ -1,6 +1,7 @@
 # LLM: 唤醒毒丸的持久层：每条唤醒一份尝试账（wake_queue/attempts/<id>.json，失败计数的唯一权威）、结案记录
 #   （wake_queue/quarantine/<id>.json）和人工重放留档（quarantine/replayed/<id>/<n>.json，重放次数的唯一权威）。
-#   唤醒信封内容是冻结的，
+#   第 3 步新增：读不出的 pending 信封原字节留档在 quarantine/unreadable/<id>.json，读不出的尝试账原字节留档在
+#   quarantine/ledger/<id>.json；in_flight 可带 stopping_at（优雅停机标记）。唤醒信封内容是冻结的，
 #   计数不能写进信封；结案记录 = 原信封字段原样 + status=failed_permanently + 顶层 quarantine 键，
 #   发布层只比较 WakeSignal 字段，顶层附加键不参与对账。判定全部委托 wake_poison 纯函数，这里只做加锁读写。
 #   结案顺序比照 WakeStore.mark_handled：先写结案记录、再删 pending、最后结掉关联观察，任何时刻至少一份在位。
@@ -9,6 +10,7 @@
 # 模块用途: 记录一条后台唤醒每次被领取的结果，在反复同因失败时把它结案、不再领取，并支持管理员人工重放。
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,7 @@ from .store_io import read_json_object_report, unlink_quietly
 from .store_layout import ConversationStorage
 from .wake_poison import (
     WAKE_ATTEMPT_ABANDONED,
+    WAKE_ATTEMPT_GATEWAY_STOPPED,
     WAKE_STATUS_FAILED_PERMANENTLY,
     WAKE_VERDICT_FAILURE,
     QuarantineDecision,
@@ -42,6 +45,7 @@ WAKE_QUARANTINE_SCHEMA = "wake-quarantine.v1"
 WAKE_REPLAY_NOT_FOUND = "WAKE_REPLAY_NOT_FOUND"
 WAKE_REPLAY_DOMAIN_TERMINAL = "WAKE_REPLAY_DOMAIN_TERMINAL"
 WAKE_REPLAY_PENDING_CONFLICT = "WAKE_REPLAY_PENDING_CONFLICT"
+WAKE_REPLAY_SOURCE_UNREADABLE = "WAKE_REPLAY_SOURCE_UNREADABLE"
 # 尝试账里保留的错误消息只作诊断，截断到这个长度；判定从不读它。
 _WAKE_ERROR_SAMPLE_CHARS = 200
 
@@ -55,7 +59,8 @@ class WakeAttemptStart:
     batch_size: int = 1
 
 
-# LLM: decision 非空表示调用方应结案而不是继续执行；abandoned 表示 begin 发现上次尝试的进程已死并已补记；
+# LLM: decision 非空表示调用方应结案而不是继续执行；abandoned 表示 begin/preflight 发现上次尝试的进程已死并已补记
+#   （带停机标记的记 attempt:gateway_stopped、不计数，没标记的记 attempt:abandoned、计数）；
 #   stall_alert 非空表示连续不计数已满提醒窗口，本次已在尝试账里记下提醒，调用方负责发运维事件与宿主提示。
 # 类用途: 一次记账后的结果：最新状态、是否该结案、是否识别出中途死亡的尝试、是否该发长时间不计数提醒。
 @dataclass(frozen=True)
@@ -75,11 +80,23 @@ class WakeReplayResult:
     signal: WakeSignal | None = None
 
 
-# LLM: 只持有 storage、定位 pending 文件的回调和结掉观察的回调；不访问整个 Store，不做判定、不发事件。
-#   尝试账坏了抛 DataCorruptionError，不静默清零（清零会让毒丸重新获得无限次机会）。
+# LLM: settled 非空 = 正常结案后的信号；source_unreadable=True = pending 信封读不出，原字节已移到 unreadable/、
+#   尝试账已删、关联观察已结，没有结案记录；两者都空 = 唤醒已不在 pending。ledger_preserved_at 非空表示尝试账
+#   读不出、原字节留在 quarantine/ledger/。调用方（接线层）据此发 wake_quarantined 日志与宿主提示，不再读文件。
+# 类用途: 一次结案的结构化结果。
+@dataclass(frozen=True)
+class WakeQuarantineResult:
+    settled: WakeSignal | None
+    source_unreadable: bool = False
+    ledger_preserved_at: str = ""
+
+
+# LLM: 只持有 storage、定位 pending 文件的回调和两个结掉观察的回调（按观察 ID / 按 wake_signal_id）；不访问整个 Store，
+#   不做判定、不发事件。尝试账坏了抛 DataCorruptionError，不静默清零（清零会让毒丸重新获得无限次机会）；
+#   接线层拿到 DataCorruptionError 后按 ledger_corrupt_decision 结案，坏账由 quarantine 原样留档。
 # 类用途: 唤醒尝试账、结案与重放的唯一读写入口，挂在 WakeStore.attempts 上。
 class WakeAttemptStore:
-    # 函数用途: 绑定存储目录与两个窄回调，不读写文件。
+    # 函数用途: 绑定存储目录与两个窄回调，不读写文件；按 wake_signal_id 结观察的回调另经 bind_wake_observation_settler 绑定。
     def __init__(
         self,
         storage: ConversationStorage,
@@ -90,6 +107,13 @@ class WakeAttemptStore:
         self.storage = storage
         self._find_pending_path = find_pending_path
         self._mark_observations_handled = mark_observations_handled
+        self._mark_observations_handled_for_wake: Callable[..., list[str]] | None = None
+
+    # LLM: ConversationStore 装配时调用一次，传观察层的 mark_handled_for_wake；没绑定时读不出信封的结案只移文件、不结观察。
+    #   不改其它回调，不读写文件。
+    # 函数用途: 绑定"按 wake_signal_id 结掉关联观察"的回调。
+    def bind_wake_observation_settler(self, callback: Callable[..., list[str]]) -> None:
+        self._mark_observations_handled_for_wake = callback
 
     # LLM: 纯读，不取锁；没有账返回空状态和 None，坏账返回空状态加结构化错误，调用方不能把错误当成"没失败过"。
     # 函数用途: 读取一条唤醒当前的判定状态，供调度判断下次最早可再试的时间。
@@ -103,8 +127,37 @@ class WakeAttemptStore:
         except ValueError as exc:
             return WakePoisonState(), _corruption_report(exc, path)
 
-    # LLM: 在执行前调用；上一条 in_flight 属于已确认死亡的进程时先补记一次 attempt:abandoned（按那次尝试的批大小
-    #   经 verdict_for_batch 改写，批次中死亡只算批次失败），再写入本次 in_flight。进程是否存活只看结构化身份
+    # LLM: 只看文件在不在，不读内容、不取锁；跳过阶段每拍都要对每条 pending 唤醒判一次，只有账存在才值得加锁 preflight。
+    # 函数用途: 判断一条唤醒有没有尝试账。
+    def has_ledger(self, wake_signal_id: str) -> bool:
+        return self.storage.wake_attempt_path(wake_signal_id).is_file()
+
+    # LLM: 在锁内读账，只处理"上一次 in_flight 属于已确认死亡的进程"这一种情况：in_flight 带 stopping_at 记不计数的
+    #   attempt:gateway_stopped，没有就记 attempt:abandoned（按那次的批大小经 verdict_for_batch 改写），清掉 in_flight
+    #   并写盘；没有账、没有 in_flight、进程还活着或无法判断时不写盘，只返回当前状态与结案判定。账坏抛 DataCorruptionError，
+    #   由接线层按 ledger_corrupt 结案。begin 仍照旧识别中途死亡，用来兜住 preflight 与 begin 之间的竞态。
+    # 函数用途: 领取前先把上一次随进程消失的尝试补记清楚；可能写尝试账。
+    def preflight(self, signal: WakeSignal, *, now: float) -> WakeAttemptOutcome:
+        path = self.storage.wake_attempt_path(signal.wake_signal_id)
+        with locked_file_transition(path):
+            payload, error = read_json_object_report(path, context="conversation.wake_attempts.read")
+            if error is not None:
+                raise DataCorruptionError(f"wake attempts ledger for {signal.wake_signal_id} is unreadable")
+            if not payload:
+                return WakeAttemptOutcome(WakePoisonState(), None)
+            ledger = self._checked_ledger(payload, signal)
+            state, previous = _ledger_state(ledger), ledger.get("in_flight")
+            if not _in_flight_abandoned(previous):
+                return WakeAttemptOutcome(state, quarantine_decision(state))
+            state = next_poison_state(state, verdict_for_batch(_abandoned_verdict(previous), _batch_size(previous)), now=now)
+            alert = stall_alert(state, now=now)
+            state = mark_stall_alerted(state, now=now) if alert is not None else state
+            ledger.update(state=ensure_writable_state(state).to_dict(), in_flight=None)
+            write_json_file_atomic_unlocked(path, ledger)
+        return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=True, stall_alert=alert)
+
+    # LLM: 在执行前调用；上一条 in_flight 属于已确认死亡的进程时先补记一次（同 preflight 的 stopping_at 规则，按那次尝试的
+    #   批大小经 verdict_for_batch 改写，批次中死亡只算批次失败），再写入本次 in_flight。进程是否存活只看结构化身份
     #   （process_identity_is_live 返回 False 才算死），无法判断时不补记。写账前经 ensure_writable_state 校验。
     # 函数用途: 标记一次尝试开始，并识别上一次尝试是否在执行中途连同进程一起消失；会写尝试账。
     def begin(self, signal: WakeSignal, start: WakeAttemptStart, *, now: float) -> WakeAttemptOutcome:
@@ -115,12 +168,33 @@ class WakeAttemptStore:
             previous = ledger.get("in_flight")
             abandoned = _in_flight_abandoned(previous)
             if abandoned:
-                state = next_poison_state(state, verdict_for_batch(WAKE_ATTEMPT_ABANDONED, _batch_size(previous)), now=now)
+                state = next_poison_state(
+                    state, verdict_for_batch(_abandoned_verdict(previous), _batch_size(previous)), now=now)
             ledger.update(state=ensure_writable_state(state).to_dict(), in_flight={
                 "claim_id": str(start.claim_id or ""), "batch_size": start.batch_size,
                 "owner_process": build_process_identity(), "started_at": now})
             write_json_file_atomic_unlocked(path, ledger)
         return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=abandoned)
+
+    # LLM: 优雅停机用：只有 in_flight 的 claim_id 和 owner_process 都是本进程这次尝试的，才在锁内写 stopping_at；
+    #   账不存在、读不出、没有 in_flight 或对不上都不写，返回 False（停机路径不能因坏账失败，坏账留给下次 preflight）。
+    #   不替在途尝试写结果：worker 若在退出前跑完会照常 record 覆盖 in_flight，两边不会并发写同一份结果。
+    # 函数用途: 给本进程在途的一次尝试打上"正在停机"标记；可能写尝试账。
+    def mark_stopping(self, wake_signal_id: str, claim_id: str, *, now: float) -> bool:
+        path = self.storage.wake_attempt_path(wake_signal_id)
+        with locked_file_transition(path):
+            payload, error = read_json_object_report(path, context="conversation.wake_attempts.read")
+            in_flight = payload.get("in_flight") if error is None else None
+            if not _in_flight_owned_here(in_flight, claim_id):
+                return False
+            payload["in_flight"] = {**in_flight, "stopping_at": now}
+            write_json_file_atomic_unlocked(path, payload)
+        return True
+
+    # LLM: 唤醒已离开 pending（被确认、按取消结案、同批顺带确认）时删账，不读内容：坏账也删，唤醒已经结了没有毒丸风险。
+    # 函数用途: 删掉一条唤醒的尝试账；会删文件。
+    def discard(self, wake_signal_id: str) -> None:
+        unlink_quietly(self.storage.wake_attempt_path(wake_signal_id))
 
     # LLM: 按一次尝试的判定推进状态并清掉 in_flight；成功直接删除尝试账。只有计数失败才更新 last_error。
     #   verdict 必须已按本次批大小经 verdict_for_batch 改写。连续不计数满提醒窗口时在同一把锁里记下提醒
@@ -146,32 +220,36 @@ class WakeAttemptStore:
             write_json_file_atomic_unlocked(path, ledger)
         return WakeAttemptOutcome(state, quarantine_decision(state), stall_alert=alert)
 
-    # LLM: 只结案仍在 pending 的唤醒（找不到返回 None）；原信封字段原样保留，只改 status/handled_at 并附顶层
+    # LLM: 只结案仍在 pending 的唤醒（找不到返回空结果）；原信封字段原样保留，只改 status/handled_at 并附顶层
     #   quarantine 键。写结案记录 → 删 pending → 删尝试账 → 结掉关联观察，观察不结会被观察车道当成兜底再跑一遍。
-    # 函数用途: 把一条反复同因失败的唤醒结案为 failed_permanently，不再被领取；会写、删文件并更新观察回执。
-    def quarantine(self, wake_signal_id: str, decision: QuarantineDecision, *, now: float) -> WakeSignal | None:
+    #   pending 信封读不出时走 _quarantine_unreadable（原字节移到 unreadable/，不在坏内容上补字段）；尝试账读不出时
+    #   原字节移到 quarantine/ledger/ 并在结案记录写 ledger_preserved_at，不清零。
+    # 函数用途: 把一条反复同因失败的唤醒结案为 failed_permanently，不再被领取；会写、删、移文件并更新观察回执。
+    def quarantine(self, wake_signal_id: str, decision: QuarantineDecision, *, now: float) -> WakeQuarantineResult:
         target = self.storage.wake_quarantine_path(wake_signal_id)
         attempts = self.storage.wake_attempt_path(wake_signal_id)
         with locked_file_transition(target):
             pending = self._find_pending_path(wake_signal_id)
             if pending is None:
-                return None
+                return WakeQuarantineResult(None)
             payload, error = read_json_object_report(pending, context="conversation.wake_quarantine.read")
             if error is not None:
-                raise DataCorruptionError(f"pending wake {wake_signal_id} is unreadable and cannot be settled")
-            ledger, _ledger_error = read_json_object_report(attempts, context="conversation.wake_quarantine.attempts")
-            replays = _archive_count(self._replay_archive_dir(wake_signal_id))
+                return self._quarantine_unreadable(wake_signal_id, pending, now=now)
+            ledger, preserved = self._ledger_for_quarantine(wake_signal_id, attempts)
+            provenance = {"replay_count": _archive_count(self._replay_archive_dir(wake_signal_id)),
+                          "ledger_preserved_at": preserved}
             record = {**payload, "status": WAKE_STATUS_FAILED_PERMANENTLY, "handled_at": now,
-                      "quarantine": _quarantine_facts(decision, ledger, now, replay_count=replays)}
+                      "quarantine": _quarantine_facts(decision, ledger, now, provenance=provenance)}
             write_json_file_atomic_unlocked(target, record)
             unlink_quietly(pending)
             unlink_quietly(attempts)
         settled = WakeSignal.from_dict(record)
         if settled.observation_id:
             self._mark_observations_handled([settled.observation_id], now=now)
-        return settled
+        return WakeQuarantineResult(settled, ledger_preserved_at=preserved)
 
-    # LLM: 只列结案目录顶层（不含 replayed 留档）；逐条坏账进 load_errors，不静默跳过。只返回结构化字段，不含摘要或正文。
+    # LLM: 只列结案目录顶层（不含 replayed 留档）；逐条坏账进 load_errors，不静默跳过；unreadable/ 下的留档也列进
+    #   load_errors（带 wake_signal_id 与留档路径）。只返回结构化字段，不含摘要或正文。
     # 函数用途: 列出已结案的唤醒，供运维面和 /wakes 命令展示。
     def quarantined(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         rows: list[dict[str, Any]] = []
@@ -183,11 +261,15 @@ class WakeAttemptStore:
                 errors.append(error)
                 continue
             rows.append(_quarantine_row(payload))
+        unreadable = self.storage.wake_quarantine_unreadable_dir
+        errors.extend(_unreadable_source_report(path) for path in
+                      (sorted(unreadable.glob("*.json")) if unreadable.is_dir() else ()))
         return rows, errors
 
     # LLM: 在结案记录的锁内完成：核对仍有结案记录、pending 没有同 ID 文件、领域未终态（由调用方传入判定），
     #   然后按原 ID 和冻结内容写回 pending，结案记录移入 replayed/<id>/<n>.json 留档，尝试账清零。
-    #   领域判定为 None 表示调用方不做领域检查。任何拒绝都不改文件。
+    #   领域判定为 None 表示调用方不做领域检查。任何拒绝都不改文件；来源读不出（信封当初读不出而留在 unreadable/，
+    #   或结案记录本身读不出）拒绝并返回 WAKE_REPLAY_SOURCE_UNREADABLE，不抛异常。
     # 函数用途: 管理员人工重放一条已结案的唤醒；会写 pending、留档和尝试账，并删除结案记录。
     def replay(
         self, wake_signal_id: str, *, now: float, domain_terminal: Callable[[WakeSignal], bool] | None = None,
@@ -195,8 +277,8 @@ class WakeAttemptStore:
         source = self.storage.wake_quarantine_path(wake_signal_id)
         with locked_file_transition(source):
             payload, error = read_json_object_report(source, context="conversation.wake_replay.read")
-            if error is not None:
-                raise DataCorruptionError(f"quarantined wake {wake_signal_id} is unreadable")
+            if error is not None or self._source_unreadable(wake_signal_id, source):
+                return WakeReplayResult(False, WAKE_REPLAY_SOURCE_UNREADABLE)
             if not payload:
                 return WakeReplayResult(False, WAKE_REPLAY_NOT_FOUND)
             facts = payload.pop("quarantine", None)
@@ -215,6 +297,33 @@ class WakeAttemptStore:
             unlink_quietly(self.storage.wake_attempt_path(wake_signal_id))
         return WakeReplayResult(True, "", signal)
 
+    # LLM: 信封读不出时的结案分支（在结案记录的锁内调用）：os.replace 把原字节原样移到 unreadable/<id>.json（同一
+    #   文件系统上原子改名，字节不变），删尝试账，再按观察记录上的 wake_signal_id 结掉关联观察（不读坏信封）。
+    #   不写结案记录、不在坏内容上补字段；quarantined() 把留档列进 load_errors，replay 对它拒绝。
+    # 函数用途: 把一条读不出的 pending 唤醒移出队列并留档；会移、删文件并更新观察回执。
+    def _quarantine_unreadable(self, wake_signal_id: str, pending: Path, *, now: float) -> WakeQuarantineResult:
+        _move_aside(pending, self.storage.wake_quarantine_unreadable_path(wake_signal_id))
+        unlink_quietly(self.storage.wake_attempt_path(wake_signal_id))
+        if self._mark_observations_handled_for_wake is not None:
+            self._mark_observations_handled_for_wake(wake_signal_id, now=now)
+        return WakeQuarantineResult(None, source_unreadable=True)
+
+    # LLM: 结案时读尝试账：读得出且形状合法就原样进结案记录；读不出或形状不对就把原字节 os.replace 到
+    #   quarantine/ledger/<id>.json 留档，结案记录只带留档路径（attempts 为空），不清零重来。
+    # 函数用途: 取结案记录要带的尝试账，坏账留档并返回留档路径。
+    def _ledger_for_quarantine(self, wake_signal_id: str, attempts: Path) -> tuple[dict[str, Any], str]:
+        ledger, error = read_json_object_report(attempts, context="conversation.wake_quarantine.attempts")
+        if error is None and _ledger_shape_ok(ledger):
+            return ledger, ""
+        preserved = self.storage.wake_quarantine_ledger_path(wake_signal_id)
+        _move_aside(attempts, preserved)
+        return {}, str(preserved)
+
+    # LLM: 结案记录不存在而 unreadable/ 下有同 ID 留档，就是"信封当初读不出"的那条；两者都没有由调用方按 NOT_FOUND 处理。
+    # 函数用途: 判断一条唤醒的重放来源是否属于读不出的留档。
+    def _source_unreadable(self, wake_signal_id: str, source: Path) -> bool:
+        return not source.exists() and self.storage.wake_quarantine_unreadable_path(wake_signal_id).exists()
+
     # LLM: 结案 ID 已由 wake_quarantine_path 做过不透明 ID 校验；每条唤醒一个子目录，避免 ID 前缀相互匹配。
     # 函数用途: 定位一条唤醒的重放留档目录。
     def _replay_archive_dir(self, wake_signal_id: str) -> Path:
@@ -228,6 +337,11 @@ class WakeAttemptStore:
             raise DataCorruptionError(f"wake attempts ledger for {signal.wake_signal_id} is unreadable")
         if not payload:
             return _new_ledger(signal)
+        return self._checked_ledger(payload, signal)
+
+    # LLM: 只校验形状（schema 与 state 能读回），不改内容；形状不对抛 DataCorruptionError，由调用方按坏账处理。
+    # 函数用途: 确认一份已读出的尝试账形状合法。
+    def _checked_ledger(self, payload: dict[str, Any], signal: WakeSignal) -> dict[str, Any]:
         try:
             _ledger_state(payload)
         except ValueError as exc:
@@ -247,6 +361,16 @@ def _ledger_state(ledger: dict[str, Any]) -> WakePoisonState:
     if ledger.get("schema", WAKE_ATTEMPTS_SCHEMA) != WAKE_ATTEMPTS_SCHEMA:
         raise ValueError("wake attempts ledger schema is unknown")
     return WakePoisonState.from_dict(ledger.get("state") or {})
+
+
+# LLM: 与 _ledger_state 同一口径，只把 ValueError 折成布尔，给"读得出但坏"的分支用。
+# 函数用途: 判断一份尝试账字典形状是否合法。
+def _ledger_shape_ok(ledger: dict[str, Any]) -> bool:
+    try:
+        _ledger_state(ledger)
+    except ValueError:
+        return False
+    return True
 
 
 # 函数用途: 数一条唤醒已有的重放留档个数。
@@ -269,6 +393,39 @@ def _in_flight_abandoned(in_flight: object) -> bool:
     return process_identity_is_live(in_flight.get("owner_process")) is False
 
 
+# LLM: 随进程消失的尝试怎么记：in_flight 带有效的 stopping_at（优雅停机标记）→ 不计数的 attempt:gateway_stopped；
+#   没有标记（被强杀）→ 计数的 attempt:abandoned。只看结构化字段。
+# 函数用途: 给一次中途消失的尝试选判定。
+def _abandoned_verdict(in_flight: object) -> WakeAttemptVerdict:
+    return WAKE_ATTEMPT_GATEWAY_STOPPED if _stopping_marked(in_flight) else WAKE_ATTEMPT_ABANDONED
+
+
+# LLM: stopping_at 必须是正数时间戳（bool 不算）；缺失、0 或坏值都当没标记。
+# 函数用途: 判断 in_flight 是否带有效的停机标记。
+def _stopping_marked(in_flight: object) -> bool:
+    value = in_flight.get("stopping_at") if isinstance(in_flight, dict) else None
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0
+
+
+# LLM: mark_stopping 的准入：claim_id 相同且 owner_process 与本进程身份完全相同（同 host、同 pid、同启动时间）。
+# 函数用途: 判断一份 in_flight 是不是本进程正在跑的这次尝试。
+def _in_flight_owned_here(in_flight: object, claim_id: str) -> bool:
+    if not isinstance(in_flight, dict):
+        return False
+    return str(in_flight.get("claim_id") or "") == str(claim_id or "") and (
+        in_flight.get("owner_process") == build_process_identity())
+
+
+# LLM: 同一文件系统上的原子改名，字节不变；目标目录按需创建。源文件不存在时静默（没有可留档的内容）。
+# 函数用途: 把一个文件原样移到留档位置。
+def _move_aside(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(source, target)
+    except FileNotFoundError:
+        return
+
+
 # LLM: 类型与 category 是结构化事实；消息只截断保存作诊断，任何判定都不读它。
 # 函数用途: 整理最近一次计数失败的错误事实。
 def _error_facts(error: BaseException) -> dict[str, str]:
@@ -278,13 +435,13 @@ def _error_facts(error: BaseException) -> dict[str, str]:
             "message": compact_error_message(error)[:_WAKE_ERROR_SAMPLE_CHARS]}
 
 
-# 函数用途: 组装结案记录里的判定事实，带上结案时尝试账的状态、最近错误和此前的重放次数。
+# LLM: provenance 带 replay_count（此前重放次数）与 ledger_preserved_at（坏账留档路径，正常为空串）。
+# 函数用途: 组装结案记录里的判定事实，带上结案时尝试账的状态、最近错误和来源事实。
 def _quarantine_facts(
-    decision: QuarantineDecision, ledger: dict[str, Any], now: float, *, replay_count: int,
+    decision: QuarantineDecision, ledger: dict[str, Any], now: float, *, provenance: dict[str, Any],
 ) -> dict[str, Any]:
     return {"schema": WAKE_QUARANTINE_SCHEMA, "quarantined_at": now, "decision": decision.to_dict(),
-            "attempts": ledger.get("state") or {}, "last_error": ledger.get("last_error"),
-            "replay_count": replay_count}
+            "attempts": ledger.get("state") or {}, "last_error": ledger.get("last_error"), **provenance}
 
 
 # 函数用途: 读取非负整数形式的重放次数，其它形状按 0。
@@ -312,14 +469,25 @@ def _corruption_report(exc: BaseException, path: Path) -> dict[str, Any]:
     return report
 
 
+# LLM: 留档文件名就是 wake_signal_id；不读内容（它本来就读不出），只报路径、ID 与结构化类别。
+# 函数用途: 把一份读不出的信封留档整理成列表里的结构化错误项。
+def _unreadable_source_report(path: Path) -> dict[str, Any]:
+    report = runtime_error_report(DataCorruptionError("pending wake envelope was unreadable and moved aside"),
+                                  context="conversation.wake_quarantine.unreadable")
+    report.update(path=str(path), wake_signal_id=path.stem, error_code=WAKE_REPLAY_SOURCE_UNREADABLE)
+    return report
+
+
 __all__ = [
     "WAKE_ATTEMPTS_SCHEMA",
     "WAKE_QUARANTINE_SCHEMA",
     "WAKE_REPLAY_DOMAIN_TERMINAL",
     "WAKE_REPLAY_NOT_FOUND",
     "WAKE_REPLAY_PENDING_CONFLICT",
+    "WAKE_REPLAY_SOURCE_UNREADABLE",
     "WakeAttemptOutcome",
     "WakeAttemptStart",
     "WakeAttemptStore",
+    "WakeQuarantineResult",
     "WakeReplayResult",
 ]

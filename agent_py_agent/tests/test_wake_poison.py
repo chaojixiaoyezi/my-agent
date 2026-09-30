@@ -23,24 +23,41 @@ from agent_py_agent.agent.backends.errors import (
     ProviderUsageLimitError,
 )
 from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotError
+from agent_py_agent.agent.conversation import wake_poison
 from agent_py_agent.agent.conversation.background_execution import BackgroundCompactSliceYield
 from agent_py_agent.agent.conversation.wake_poison import (
     WAKE_ATTEMPT_ABANDONED,
+    WAKE_ATTEMPT_GATEWAY_STOPPED,
     WAKE_ATTEMPT_NEUTRAL,
+    WAKE_ATTEMPT_PATH_CLAIMED,
+    WAKE_ATTEMPT_PATH_QUOTA_FALLBACK,
+    WAKE_ATTEMPT_PATH_REDELIVERY,
     WAKE_ATTEMPT_SUCCESS,
+    WAKE_CLAIM_CANCELLED,
+    WAKE_CLAIM_FINISHED,
+    WAKE_CLAIM_NOT_EXECUTED,
+    WAKE_CLAIM_YIELDED,
     WAKE_EXPECTED_WAIT_ADMISSIONS,
     WAKE_POISON_SAME_CAUSE_LIMIT,
     WAKE_POISON_TOTAL_LIMIT,
     WAKE_REASON_CHANNEL_UNAVAILABLE,
+    WAKE_REASON_COMPACT_YIELD,
+    WAKE_REASON_GATEWAY_STOPPED,
+    WAKE_REASON_LEDGER_CORRUPT,
+    WAKE_REASON_QUOTA_FALLBACK,
+    WAKE_REASON_RUN_CANCELLED,
+    WAKE_REASON_WAKE_NOT_SETTLED,
     WAKE_REDELIVERY_GIVE_UP_SECONDS,
     WAKE_UNCOUNTED_STALL_SECONDS,
     WAKE_VERDICT_BATCH_FAILURE,
     WAKE_VERDICT_FAILURE,
     WAKE_VERDICT_NEUTRAL,
     WAKE_VERDICT_REDELIVERY_FAILURE,
+    WakeAttemptFacts,
     WakeAttemptVerdict,
     WakePoisonState,
     ensure_writable_state,
+    ledger_corrupt_decision,
     mark_stall_alerted,
     needs_isolation,
     next_poison_state,
@@ -49,6 +66,7 @@ from agent_py_agent.agent.conversation.wake_poison import (
     redelivery_backoff_seconds,
     stall_alert,
     verdict_for_admission,
+    verdict_for_attempt,
     verdict_for_batch,
     verdict_for_error,
     verdict_for_missing_report,
@@ -483,3 +501,79 @@ class TestReplaysOfTodaysBadBuilds:
     def test_204f4ddf9_nonexecuted_claim_stops_after_five_claims(self):
         state = _feed([verdict_for_admission("host_delivery_consumed")] * WAKE_POISON_SAME_CAUSE_LIMIT)
         assert quarantine_decision(state).reason_code == "admission:host_delivery_consumed"
+
+
+# 第 3 步 C1：一次尝试的结构化事实 → 判定总表（docs/design/WAKE_POISON_PILL.md 第 10 节；接线层只调这一处）。
+class TestAttemptFacts:
+    HANDLED = SimpleNamespace(wake_handled=True)
+    UNHANDLED = SimpleNamespace(wake_handled=False)
+
+    def test_new_reason_codes_are_exactly_the_contract(self):
+        assert (WAKE_REASON_QUOTA_FALLBACK, WAKE_REASON_RUN_CANCELLED, WAKE_REASON_COMPACT_YIELD,
+                WAKE_REASON_WAKE_NOT_SETTLED, WAKE_REASON_GATEWAY_STOPPED, WAKE_REASON_LEDGER_CORRUPT) == (
+            "quota:fallback_notice", "run:cancelled", "run:compact_yield", "run:wake_not_settled",
+            "attempt:gateway_stopped", "attempt:ledger_corrupt")
+        assert WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "attempt:gateway_stopped") == WAKE_ATTEMPT_GATEWAY_STOPPED
+
+    @pytest.mark.parametrize("path", [WAKE_ATTEMPT_PATH_CLAIMED, WAKE_ATTEMPT_PATH_REDELIVERY, WAKE_ATTEMPT_PATH_QUOTA_FALLBACK])
+    def test_an_error_wins_on_every_path(self, path):
+        facts = WakeAttemptFacts(path=path, error=RuntimeError("boom"), report=self.HANDLED)
+        assert verdict_for_attempt(facts) == verdict_for_error(RuntimeError("boom")) == _failure("error:programmer_bug:RuntimeError")
+        transient = WakeAttemptFacts(path=path, error=ProviderTransientError("overloaded"))
+        assert verdict_for_attempt(transient).kind == WAKE_VERDICT_NEUTRAL
+
+    def test_quota_fallback_is_not_counted_even_when_nothing_was_delivered(self):
+        facts = WakeAttemptFacts(path=WAKE_ATTEMPT_PATH_QUOTA_FALLBACK, report=self.UNHANDLED)
+        assert verdict_for_attempt(facts) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_QUOTA_FALLBACK)
+
+    def test_redelivery_always_uses_the_frozen_delivery_rule(self):
+        facts = WakeAttemptFacts(path=WAKE_ATTEMPT_PATH_REDELIVERY, report=self.UNHANDLED, delivery_frozen=False)
+        assert verdict_for_attempt(facts) == WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+        assert verdict_for_attempt(WakeAttemptFacts(path=WAKE_ATTEMPT_PATH_REDELIVERY, report=self.HANDLED)) == WAKE_ATTEMPT_SUCCESS
+        with pytest.raises(ValueError):
+            verdict_for_attempt(WakeAttemptFacts(path=WAKE_ATTEMPT_PATH_REDELIVERY, report=None))
+
+    def test_not_executed_follows_the_admission_rule(self):
+        waited = WakeAttemptFacts(claim_status=WAKE_CLAIM_NOT_EXECUTED, admission="turn_interrupted")
+        assert verdict_for_attempt(waited) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "admission:turn_interrupted")
+        unknown = WakeAttemptFacts(claim_status=WAKE_CLAIM_NOT_EXECUTED, admission="host_delivery_consumed")
+        assert verdict_for_attempt(unknown) == _failure("admission:host_delivery_consumed")
+        with pytest.raises(ValueError):
+            verdict_for_attempt(WakeAttemptFacts(claim_status=WAKE_CLAIM_NOT_EXECUTED, admission=""))
+
+    @pytest.mark.parametrize(("status", "reason"), [(WAKE_CLAIM_CANCELLED, WAKE_REASON_RUN_CANCELLED),
+                                                    (WAKE_CLAIM_YIELDED, WAKE_REASON_COMPACT_YIELD)])
+    def test_cancelled_and_yielded_are_not_counted(self, status, reason):
+        facts = WakeAttemptFacts(claim_status=status, report=self.UNHANDLED)
+        assert verdict_for_attempt(facts) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, reason)
+
+    def test_finished_without_a_report_counts_as_no_report(self):
+        assert verdict_for_attempt(WakeAttemptFacts(claim_status=WAKE_CLAIM_FINISHED, report=None)) == _failure("run:no_report")
+
+    def test_finished_and_handled_but_still_pending_counts_as_not_settled(self):
+        facts = WakeAttemptFacts(claim_status=WAKE_CLAIM_FINISHED, report=self.HANDLED)
+        assert verdict_for_attempt(facts) == _failure(WAKE_REASON_WAKE_NOT_SETTLED)
+
+    def test_finished_and_unhandled_follows_the_report_rule(self):
+        plain = WakeAttemptFacts(claim_status=WAKE_CLAIM_FINISHED, report=self.UNHANDLED, delivery_frozen=False)
+        assert verdict_for_attempt(plain) == _failure("run:delivery_not_committed")
+        frozen = WakeAttemptFacts(claim_status=WAKE_CLAIM_FINISHED, report=self.UNHANDLED, delivery_frozen=True)
+        assert verdict_for_attempt(frozen) == WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+
+    @pytest.mark.parametrize("facts", [WakeAttemptFacts(path="teleport"), WakeAttemptFacts(claim_status="exploded")])
+    def test_unknown_path_or_claim_status_is_a_caller_bug(self, facts):
+        with pytest.raises(ValueError):
+            verdict_for_attempt(facts)
+
+    def test_ledger_corrupt_decision_carries_no_counts(self):
+        assert ledger_corrupt_decision().to_dict() == {"reason_code": WAKE_REASON_LEDGER_CORRUPT, "same_cause_count": 0,
+                                                       "total_count": 0, "redelivery_failures": 0, "mixed_causes": False}
+
+
+def test_environment_faults_are_judged_by_the_shared_backend_predicate(monkeypatch):
+    from agent_py_agent.agent.backends import errors
+
+    seen = []
+    monkeypatch.setattr(errors, "is_provider_environment_fault", lambda exc: seen.append(type(exc).__name__) or True)
+    assert verdict_for_error(RuntimeError("boom")).kind == WAKE_VERDICT_NEUTRAL
+    assert seen == ["RuntimeError"] and wake_poison._is_uncounted is not None

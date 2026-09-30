@@ -749,6 +749,34 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "请用 get_session_task 看任务状态，必要时在目标会话里人工确认。"
         ),
     ),
+    "WAKE_REPLAY_NOT_FOUND": ErrorContract(
+        code="WAKE_REPLAY_NOT_FOUND",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="没有这条已结案的唤醒；先用结案列表核对 wake_signal_id，不要猜 ID 重试。",
+    ),
+    "WAKE_REPLAY_DOMAIN_TERMINAL": ErrorContract(
+        code="WAKE_REPLAY_DOMAIN_TERMINAL",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="这条唤醒对应的会话任务或消息已经终态，重放没有意义；结案记录保持原样。",
+    ),
+    "WAKE_REPLAY_PENDING_CONFLICT": ErrorContract(
+        code="WAKE_REPLAY_PENDING_CONFLICT",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="同 ID 的唤醒已经在待处理队列里，不能再写回一份；等它处理完或先结掉它。",
+    ),
+    "WAKE_REPLAY_SOURCE_UNREADABLE": ErrorContract(
+        code="WAKE_REPLAY_SOURCE_UNREADABLE",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="这条唤醒结案时信封或结案记录已经读不出，原字节留在 quarantine/unreadable/，无法重放；需要人工核对留档。",
+    ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(
         code="SESSION_TASK_RATE_LIMIT",
         category="orchestration",

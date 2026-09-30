@@ -231,6 +231,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
    合同单测覆盖：瞬时类型逐个检查、未知 admission 默认计数、原因交替、中间夹瞬时故障不打断。
 2. **WakeStore**（已完成，`store_wake_attempts.py` 挂在 `store.wakes.attempts`）：实现尝试账、结案、重放，发布层认识第三个位置。存储单测覆盖：结案和重放前后信封冻结内容不变、
    同键再发布返回已结案的原信号、observation 同步结掉。
+2b. **第 3 步 C1（已完成，`claude/38-wake-poison-c1`）**：`wake_poison` 加六个新原因常量、`WakeAttemptFacts` 与 `verdict_for_attempt`（判定总表：异常 → 额度分路 → 只重投 → 领到没执行 → 取消/让出 → 无报告 → 已处理仍 pending → 报告规则）、`ledger_corrupt_decision`；`store_wake_attempts` 加 `preflight`（死进程在途尝试：带 stopping_at 记不计数的 gateway_stopped，否则 abandoned）、`has_ledger`、`mark_stopping`、`discard`，`quarantine` 处理读不出的信封（原字节移到 quarantine/unreadable/）与坏账（原字节留到 quarantine/ledger/），`quarantined()` 列出留档，`replay` 对读不出来源返回 WAKE_REPLAY_SOURCE_UNREADABLE；WAKE_REPLAY_* 四个码登记进 ERROR_CONTRACTS。
 3. **接线**：`run_claimed` 把未执行的 admission 结构化地返回给调用方（现在只写进 claim 文件），runtime 在
    批次消费处记账。这一步改 `background_claim.py`，是 my-agent-3 正在改的区域，要等它合入。
 4. **运维面**：日志、宿主提示、`/wakes` 两个子命令（TUI 和飞书）、状态计数。

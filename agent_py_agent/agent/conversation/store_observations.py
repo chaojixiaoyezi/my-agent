@@ -229,6 +229,24 @@ class ObservationStore:
         events.sort(key=lambda item: item.observed_at)
         return events if limit <= 0 else events[:limit]
 
+    # LLM: 给读不出信封的唤醒结案用：只靠观察记录自带的 wake_signal_id 链接找关联观察，不读唤醒信封；扫全部分片
+    #   （唤醒的 thread 未知），只标未处理的。返回本次标掉的观察 ID，空列表表示没有关联观察。副作用同 mark_handled。
+    # 函数用途: 把链接到某条唤醒的全部未处理观察标成已处理。
+    def mark_handled_for_wake(self, wake_signal_id: str, *, now: float | None = None) -> list[str]:
+        selected = str(wake_signal_id or "").strip()
+        if not selected:
+            return []
+        handled = self._read_handled()
+        directory = self.storage.observations_dir
+        ids: list[str] = []
+        for path in sorted(directory.glob("*.jsonl")) if directory.is_dir() else ():
+            report = read_jsonl_report(path, context="conversation.observations.read")
+            events, _parse_errors = _observation_events(report.rows, handled)
+            ids.extend(event.observation_id for event in events
+                       if event.wake_signal_id == selected and event.handled_at <= 0)
+        self.mark_handled(ids, now=now)
+        return ids
+
     # LLM: 处理 ID 与时间一次原子合并到原回执，不覆盖其它观察的确认事实。
     # 函数用途: 持久确认一批精确观察 ID 已处理。
     def mark_handled(

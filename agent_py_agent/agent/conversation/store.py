@@ -73,6 +73,8 @@ class ConversationStore:
             update_thread_atomic=self.threads.update_atomic,
             mark_observations_handled=self.observations.mark_handled,
         )
+        # 读不出信封的唤醒结案时按 wake_signal_id 结观察：观察层的方法在这里绑定，WakeStore 不认识观察层。
+        self.wakes.attempts.bind_wake_observation_settler(self.observations.mark_handled_for_wake)
         self.claims = ClaimStore(
             self.storage, require_thread=self.threads.require, load_thread=self.threads.load,
         )
