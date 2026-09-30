@@ -8180,6 +8180,8 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   订阅模型目录与勾选：`test_model_oauth_browser.py` 的目录用例（只列可见且容量合法、带账号头与版本号、不跟随重定向）、
   `test_tui_subscription_models.py`（真实按键勾选两个只存两个、已添加的不再列、以后再说不写入、目录失败给重试提示），
   以及浏览器/验证码登录成功后才弹勾选框。12 个变异全部被杀。
+  `/model` 弹窗按键：`test_tui_pick_models_keys.py` 真实按键走完「登录认证 → 选择模型 → 勾选添加」，覆盖不同窗口高度、
+  长表单 Tab/Esc，以及焦点被鼠标点到弹窗外后由守卫拉回（去掉守卫即失败）。
 - 用量增量：`test_model_call_ledger.py`、`test_tui_model_metrics.py`、`test_reproject_model_usage.py`，
   成功/异常/取消共用结算；累计容器重建换代，来源切换不重复算，旧账与缺报不得估算重写。
   真 TUI 中断后追加、Goal 后台交接、子代理及 Compact 必须按 provider 分项对账。

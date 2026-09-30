@@ -50,12 +50,23 @@ async def _dialog(app, title: str, body, actions: tuple, *, focus=None, completi
     floating = Float(content=HSplit([dialog], key_bindings=bindings, modal=True))
     host = app._my_agent_model_float_container
     previous = app.layout.current_window
+
+    # LLM: 菜单期间聊天按键整体停用，Tab/Esc 只由弹窗自己的绑定处理；鼠标点到弹窗外会把焦点移走，两边都收不到按键。
+    #   每次绘制后，若最上层仍是本弹窗而焦点在外，就拉回来；等待提示浮层在最上层时不动它。
+    # 函数用途: 把输入焦点留在当前弹窗里，避免点了一下外面就卡住。
+    def keep_focus(_app) -> None:
+        if host.floats and host.floats[-1] is floating and not app.layout.has_focus(floating.content):
+            app.layout.focus(focus or buttons[0])
+            app.invalidate()
+
     host.floats.append(floating)
     app.layout.focus(focus or buttons[0])
+    app.after_render += keep_focus
     app.invalidate()
     try:
         return await future
     finally:
+        app.after_render -= keep_focus
         host.floats.remove(floating)
         app.layout.focus(previous)
         app.invalidate()
