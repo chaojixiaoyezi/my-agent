@@ -153,9 +153,15 @@ def test_handshake_failures_reuse_http_classification_and_retries(monkeypatch):
 
 
 def test_send_permit_is_refused_before_any_connection(monkeypatch):
+    import time
+
     monkeypatch.setattr(ws, "_connect", lambda req: pytest.fail("有发送许可时不能建连"))
-    with pytest.raises(ValueError, match="发送许可"):
-        list(ws.iter_responses_websocket(request().__class__(**{**request().__dict__, "send_permit": object()})))
+    from types import SimpleNamespace
+
+    permit = SimpleNamespace(admit=lambda attempt: None)
+    permitted = request(send_permit=permit, max_retries=0, allow_redirects=False, deadline=time.monotonic() + 30)
+    with pytest.raises(ValueError, match="WebSocket 传输不支持实验发送许可"):
+        list(ws.iter_responses_websocket(permitted))
 
 
 def test_only_the_subscription_login_uses_websocket(tmp_path, monkeypatch):

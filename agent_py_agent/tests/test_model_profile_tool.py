@@ -219,6 +219,7 @@ def test_new_catalog_actions_validate_before_writing(tmp_path):
     for params in ({"action": "add_models", "models": [{"model_name": "m", "model_context_window_tokens": 128000}]},
                    {"action": "add_models", "connection": CONNECTION},
                    {"action": "discover"},
+                   {"action": "discover", "connection": CONNECTION, "provider_id": "p"},
                    {"action": "set_shared", "profile_id": "x"}):
         outcome = tool.execute(params)
         assert not outcome.ok and outcome.error_code == "TOOL_INVALID_ARGUMENTS", params

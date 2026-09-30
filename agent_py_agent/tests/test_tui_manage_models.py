@@ -209,6 +209,13 @@ def test_admin_manage_list_ignores_shared_aliases(tmp_path):
             assert visible(app).count("m-one") == 1  # 别名不进可编辑列表
             pipe.send_bytes(b"\x1b")
             await wait_dialog_ready(app, "模型配置 /model", "回到主菜单")
+            pipe.send_bytes(b"\x1b[B\x1b[B\r")  # 再进「管理已有模型」→ 删除模型
+            await wait_dialog_ready(app, "删除模型（勾选一个或多个）", "连接列表")
+            pipe.send_bytes(b"\x1b[B\r")
+            await wait_dialog_ready(app, "空格勾选要删的模型", "删除勾选框")
+            assert visible(app).count("m-one") == 1  # 别名也不进删除列表
+            pipe.send_bytes(b"\x1b")
+            await wait_dialog_ready(app, "模型配置 /model", "回到主菜单")
             pipe.send_bytes(b"\x1b")
             await asyncio.wait_for(menu, 3)
 
