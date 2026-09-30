@@ -594,7 +594,9 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
     失败到下一次规划之间发生的改动不算变化，只能等探测放行（最长 60 秒）。
   - 到了探测时刻：`LANE_ENVIRONMENT_PROBE_BASE_SECONDS = 60` 起，探测再失败翻倍，`LANE_ENVIRONMENT_PROBE_MAX_SECONDS = 900` 封顶（内部常量）；
     到点放行一次真实尝试，暂停记录留到探测有结果，成功由 `succeeded` 清除。
-  指纹在锁外读，锁内只推进同一条记录（读指纹期间被成功清除或换成新失败，就不写回旧记录）。状态只在进程内，重启即清。
+  指纹在锁外读，锁内只推进同一条记录（读指纹期间被成功清除或换成新失败，就不写回旧记录）。取指纹出错（OSError、DataCorruptionError、
+  ModelProfileError 等任何 Exception）按未知处理，只按探测时刻放行，暂停和翻倍保持，不再经 Gateway 记成新失败把暂停冲掉
+  （9a 复审建议 1，C5 补充三）。状态只在进程内，重启即清。
 - **日志**：`[gateway-lane-retry]` 一行 JSON：`lane_environment_paused`（owner 标签、thread_id、`probe_in_seconds`、异常类名、状态码）与
   `lane_environment_resumed`（reason 为 `model_fingerprint_changed` 或 `probe_succeeded`）；不含异常正文或配置，打印失败只记 `loop_health`。
 - **指纹**：`thread_model_fingerprint(agent, thread_id)` 直接 `threads.load`，不经会给空引用迁移写库的 `thread_model_profile_id`；由

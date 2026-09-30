@@ -355,6 +355,60 @@ def test_success_during_fingerprint_read_is_not_undone(monkeypatch):
     assert retries.ready("a", "t", model_ready=lambda: True, fingerprint=lambda: "baseline")
 
 
+def _fingerprint_read_errors():
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+    return [OSError(5, "Input/output error"), DataCorruptionError("会话文件损坏"), ModelProfileError("当前会话不存在")]
+
+
+@pytest.mark.parametrize("error", _fingerprint_read_errors(), ids=["os", "corrupt", "profile"])
+def test_fingerprint_read_failure_keeps_pause_and_doubling(monkeypatch, capsys, error):
+    retries = gateway_lane_retry.BackgroundLaneRetry()
+    now = _clock(monkeypatch)
+    fault = ProviderConnectionError("dns")
+
+    def broken():
+        raise error
+
+    retries.failed("a", "t", fault, delay=30)
+    now[0] = 160.0
+    assert retries.ready("a", "t", model_ready=lambda: True, fingerprint=lambda: "same")
+    retries.failed("a", "t", fault, delay=30)
+    now[0] = 161.0
+    assert not retries.ready("a", "t", model_ready=lambda: True, fingerprint=lambda: "same")
+    # 第二次故障后间隔 120 秒，基线已记下；这期间取指纹出错只当未知：不抛、不当成指纹变化放行、记录仍是环境暂停。
+    now[0] = 200.0
+    assert not retries.ready("a", "t", model_ready=lambda: True, fingerprint=broken)
+    assert retries.count("a") == 1
+    now[0] = 280.0
+    assert retries.ready("a", "t", model_ready=lambda: True, fingerprint=broken)
+    retries.failed("a", "t", fault, delay=30)
+    paused = [event["probe_in_seconds"] for event in _lane_events(capsys) if event["event"] == "lane_environment_paused"]
+    assert paused == [60.0, 120.0, 240.0]
+
+
+def test_planner_fingerprint_failure_is_not_recorded_as_new_lane_failure(monkeypatch, capsys):
+    from agent_py_agent.cli import gateway_loops
+
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._lane_retry = gateway_lane_retry.BackgroundLaneRetry()
+    now = _clock(monkeypatch)
+    supervisor._lane_retry.failed("base", "t", ProviderConnectionError("dns"), delay=30)
+
+    def unreadable(agent, thread_id):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(gateway_loops, "thread_model_fingerprint", unreadable)
+    recorded = []
+    monkeypatch.setattr(supervisor, "_record_thread_failure", lambda *args: recorded.append(args))
+    scheduler = SimpleNamespace(runtime=SimpleNamespace(agent=object()))
+    assert not supervisor._thread_lane_can_retry(scheduler, "base", "t")
+    assert recorded == []
+    now[0] += 60
+    assert supervisor._thread_lane_can_retry(scheduler, "base", "t")
+    assert recorded == []
+
+
 def test_lane_log_failure_does_not_change_pause(monkeypatch):
     from agent_py_agent.agent.gateway_parts.loop_health import loop_health
 

@@ -149,6 +149,10 @@
   （401/407/连接失败/额度用完各一例）经真实后台回合连续失败 3 次，策略仍 enabled、没有 failure_count 与 retired_at、仍在 due 里；改前 4 例全部失败
   （第一次就记 failure_count=1），草稿探针另证改前连续 3 次 401 即退休。`test_background_claim_execution.py` 的错误分流表：额度、401、连接失败不记账，
   400 与不带状态码的请求被拒照样记；普通程序错误 3 次退休仍由 `test_failed_policy_run_records_backoff_and_retires_after_three` 钉住。
+- **取指纹出错按未知**（补充三，9a 复审建议 1）：`test_fingerprint_read_failure_keeps_pause_and_doubling`（OSError、DataCorruptionError、
+  ModelProfileError 各一例）——两次环境故障后间隔 120 秒，先记下正常基线，期间取指纹出错不抛、不放行（不当成指纹变化）、记录仍是环境暂停，
+  到点放行，再失败间隔 240 秒；`test_planner_fingerprint_failure_is_not_recorded_as_new_lane_failure`——Gateway 规划取指纹抛 OSError 时
+  不调 `_record_thread_failure`，到点照常放行。
 - **变异**（草稿副本上逐个精确替换、按字节恢复，跑上面两个文件与 `test_wake_poison.py`）：19 个全部被杀，基线与恢复后通过。
   覆盖：环境级故障退回 30 秒冷却、模型指纹比较恒为相等、探测不翻倍、缺模型先归环境暂停、不封顶、到点不放行、不记基线、
   Gateway 规划不传指纹、指纹不含选择版本、指纹不含档案内容、指纹经会写库的入口读取、毒丸不引用共享判定、状态码漏 402、

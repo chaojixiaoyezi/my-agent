@@ -66,7 +66,7 @@ class BackgroundLaneRetry:
             })
 
     # LLM: model_ready 与 fingerprint 必须从当前会话的 canonical 模型引用只读计算，不构造后端、不请求网络、不切换默认模型，
-    #   两者都在锁外调用；fingerprint 为 None 时环境暂停只按探测时刻放行（Gateway 规划必须传入）。
+    #   两者都在锁外调用；fingerprint 为 None 或读取出错时环境暂停只按探测时刻放行（Gateway 规划必须传入）。
     # 函数用途: 冷却期跳过；缺模型时等用户配置好该会话；环境故障时等模型指纹变化或探测时刻。
     def ready(
         self,
@@ -86,9 +86,9 @@ class BackgroundLaneRetry:
             return False
         return not row.waiting_for_model or model_ready()
 
-    # LLM: 指纹在锁外读取；锁内只在记录仍是同一条时推进：第一次检查记下基线；指纹变了删除暂停、打恢复日志并放行
-    #   （之后再失败从 60 秒重新计）；到探测时刻放行但保留记录，探测再失败由 failed 翻倍，成功由 succeeded 清除。
-    #   记录期间被别处改掉时本轮不放行，交给下一次规划重新判断。
+    # LLM: 指纹在锁外读取，读不到按未知处理（见 _read_fingerprint）；锁内只在记录仍是同一条时推进：第一次检查记下基线；
+    #   指纹变了删除暂停、打恢复日志并放行（之后再失败从 60 秒重新计）；到探测时刻放行但保留记录，探测再失败由 failed
+    #   翻倍，成功由 succeeded 清除。记录期间被别处改掉时本轮不放行，交给下一次规划重新判断。
     # 函数用途: 判断一条因环境故障暂停的车道现在能不能放行。
     def _environment_ready(
         self,
@@ -96,7 +96,7 @@ class BackgroundLaneRetry:
         row: _LaneFailure,
         fingerprint: Callable[[], str] | None,
     ) -> bool:
-        current = fingerprint() if fingerprint is not None else None
+        current = _read_fingerprint(fingerprint)
         with self._lock:
             if self._failures.get(key) is not row:
                 return False
@@ -147,6 +147,19 @@ def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -
     if previous is not None and previous.waiting_for_environment:
         interval = min(previous.probe_interval * 2, LANE_ENVIRONMENT_PROBE_MAX_SECONDS)
     return _LaneFailure(now + interval, False, waiting_for_environment=True, probe_interval=interval)
+
+
+# LLM: 指纹只是"提前放行"的信号：没有读取入口或读取抛任何 Exception（OSError、DataCorruptionError、ModelProfileError 等）都当
+#   未知，只按探测时刻放行，暂停和翻倍保持（9a 复审）；否则异常会经 Gateway 记成新失败，把环境暂停冲成普通冷却或等模型配置、
+#   翻倍从头算。真实问题会在探测那次真实尝试里按原异常暴露。BaseException 不吞。
+# 函数用途: 读取会话模型指纹，读不到时返回 None。
+def _read_fingerprint(fingerprint: Callable[[], str] | None) -> str | None:
+    if fingerprint is None:
+        return None
+    try:
+        return fingerprint()
+    except Exception:
+        return None
 
 
 # LLM: 与供应退避日志同一形态（前缀 + 排序 JSON + flush）；只含 owner 标签、thread_id、原因、间隔、异常类名和状态码，

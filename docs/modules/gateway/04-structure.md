@@ -226,7 +226,7 @@ Gateway 的同一活动请求与后台工作片各自持有 `RunParams.runtime_r
 `cli/gateway_lane_retry.py` 管理会话车道的 typed 失败退避：普通错误记录单调时钟 retry-after，
 本地缺模型/无效模型引用则等待当前 thread 配置恢复；环境级故障（`backends/errors.is_provider_environment_fault`，
 缺模型先归配置等待）与额度用完（车道这层显式并入）按车道暂停，`thread_model_fingerprint` 变化立即放行，否则 60 秒起翻倍、封顶 900 秒探测一次，
-探测失败翻倍、成功清除，暂停与恢复各打一行 `[gateway-lane-retry]`；`gateway_loops.py` 只规划、执行与记录诊断。
+探测失败翻倍、成功清除，取指纹出错按未知只等探测，暂停与恢复各打一行 `[gateway-lane-retry]`；`gateway_loops.py` 只规划、执行与记录诊断。
 `thread_model_selection.py::thread_model_is_configured` 复用 owner 校验及规范引用，后端工厂共用
 `model_configuration_missing`，不建立默认模型或第二份配置。配置读取失败只影响精确车道。
 候选数只补偿同 owner 的失败条目，保留后排健康会话；进程内短锁保护共享字典，网络不在锁中。
