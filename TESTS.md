@@ -107,6 +107,15 @@
   - strict code-size 与 `89af6b07a` 逐条比对新增 0。`runtime_compact_policy` 一度逼近软上限，已抽出 `_capped_trigger_tokens` 并合并配置读取。
   - ruff、doc sync、diff check、clean package 通过。
 
+## 定时任务撞额度用完的结算（2026-09-29，分支 `claude/be-quota-settle`，基于 `b929d9f02`）
+
+- 新文件 `test_scheduler_quota_settle.py`，3 项。用真实 `scheduler.tick` 加可控时钟（monkeypatch `time.time`），定时任务每 300 秒一次，模型后端按真实 `_runtime_http_error` 抛 429：
+  - 每周额度错误体和 `insufficient_quota` 各跑 3 个周期：每次到期恰好一次模型调用、一条通知（幂等键各不相同），会话里一条额度通知；
+    run 都记 failed 且带 `PROVIDER_QUOTA_EXHAUSTED`；到期那一拍里唤醒就已确认，不留给下一拍按 stale 收口。
+  - 通知第一次没送达：租约释放、唤醒保留、run 不结算；30 秒后只重投通知（同一幂等键），不再调用模型；送达后 run 结算、唤醒确认。
+- 在 `b929d9f02` 上 3 项都失败（每 30 秒重跑一次模型）。
+- 6 个变异全部被抓住：去掉结算分支、去掉确认（结算后返回 None）、结算挪到送达判断之前、状态改 done、失败码改错、报告 reason 漂移。
+
 ## 429 按限额窗口区分额度用完与临时限流（2026-09-29，分支 `claude/9a-quota-window`，基于 `89af6b07a`）
 
 - 新文件 `test_provider_quota_window.py`，18 项：

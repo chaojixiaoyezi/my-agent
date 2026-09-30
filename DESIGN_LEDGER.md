@@ -53,7 +53,7 @@
 - **裁定（集成者）**：真正迟到送达只发生过一次且已处理，两项都改变模型请求内容或送达行为，先不做；再出现第二次迟到送达时按本条排期。
   机器判定只准用结构化时间字段（`submitted_at`/`promoted_at`），不看正文；状态改名要走显式迁移记录。
 
-## 429 按供应商声明的限额窗口区分额度用完与临时限流（2026-09-29，分支 `claude/9a-quota-window`，基于 `89af6b07a`，待复审）
+## 429 按供应商声明的限额窗口区分额度用完与临时限流（2026-09-29，分支 `claude/9a-quota-window`，基于 `89af6b07a`，be 已复审，已拣进 step16k `e1ab765c5`）
 
 - **背景**：09-29 04:03 起 local/main 主模型套餐每周额度用完。供应商 429 错误体只有
   `error.type=GoUsageLimitError` 和 `metadata.limitName=weekly`，不命中硬额度错误码表，于是被判成瞬时的
@@ -72,6 +72,20 @@
 - **未采用 Retry-After 规则**：响应头不落盘，只有设置了 `MY_AGENT_PROVIDER_DUMP` 才写诊断文件，这次真实 429 有没有 Retry-After 查不到；
   传输层原本就把 Retry-After 封顶在 30 秒。等拿到真实响应头证据再决定是否加「Retry-After 超上限即额度用完」。
 - 测试见 [TESTS.md](TESTS.md#429-按限额窗口区分额度用完与临时限流2026-09-29分支-claude9a-quota-window基于-89af6b07a)。
+
+## 定时任务撞模型额度用完：按失败结算，不再每 30 秒重跑（2026-09-29，分支 `claude/be-quota-settle`，基于 step16k `b929d9f02`，待 9a 复审）
+
+- **来源**：复审 9a 的限额窗口改判时，用真实 `scheduler.tick` 加可控时钟探出。证据在 `~/.my-agent/decision-evidence/review-9a-quota-window/`。
+  - 额度通知报告（`_provider_quota_fallback_report`）没有 `task_status`。`_finish_scheduler_wake_claim` 查不到终态，按「释放租约 + 30 秒后重试」处理，唤醒不确认。
+  - 结果：每 30 秒重跑一次模型，再发一次通知（幂等键相同，飞书按 uuid 在 1 小时内去重），会话里每 30 秒多一条定时提示和一条额度通知。
+  - 基线上 `insufficient_quota` 早就这样。9a 改判以后，每周额度这种真实场景也会走进来。
+- **做法**：
+  - 额度通知报告的 `reason` 固定为 `_QUOTA_NOTICE_REPORT_REASON`。通知已送达（`wake_handled`）时，`_finish_scheduler_wake_claim` 交给 `_finish_quota_scheduler_run`：
+    run 记 failed，失败码 `PROVIDER_QUOTA_EXHAUSTED`（ERROR_CONTRACTS 已有登记），再把报告交回 `_complete_wake_report`，在同一拍确认唤醒。
+  - 不自动暂停 job，下一个到期照常派发：每次到期最多一次模型调用、一条通知。节奏交给 9b 在补的「额度用完也按车道暂停」（60 秒起翻倍，最长 900 秒探测）。
+  - 通知没送达的分支语义不变：释放租约，30 秒后经 `_quota_fallback_wakes` 只重投通知，不调用模型；送达后按上面结算。
+  - 会话任务本身的状态不改，与非额度失败的结算一致。普通定时任务没有 Goal 授权，唤醒对账（`_reconcile_wake_queue`）不会给它补续跑唤醒。
+- 测试见 [TESTS.md](TESTS.md#定时任务撞额度用完的结算2026-09-29分支-claudebe-quota-settle基于-b929d9f02)。
 
 ## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案已审，分步实现中）
 

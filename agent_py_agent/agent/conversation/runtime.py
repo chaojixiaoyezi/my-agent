@@ -3962,6 +3962,7 @@ def _handle_nonquota_wake_error(
 
 
 # LLM: 原交付事实先决定是否释放；已交付仍按当前任务状态复用服务映射，未知不得猜done或确认wake。
+#   额度通知报告（reason=_QUOTA_NOTICE_REPORT_REASON）已送达时交给 _finish_quota_scheduler_run 记 failed，不走按任务状态的分支。
 #   任务仍 active 时交给 scheduler.active_run_closeout.close_active_run：有结构化后续工作才 waiting，否则结算成受阻、
 #   run 记 failed，job 下一周期照常派发（2026-09-29 修复定时任务永久停在 waiting 的死锁）。
 # 函数用途: 结算本次原定时claim并保留真实投递结果，有后续工作的活动任务进waiting，取消和失败保留各自终态。
@@ -3982,6 +3983,8 @@ def _finish_scheduler_wake_claim(
         scheduler.scheduler_service.release(claim, now=time.time())
         scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
         return None
+    if report.reason == _QUOTA_NOTICE_REPORT_REASON:
+        return _finish_quota_scheduler_run(scheduler, report, claim)
     task_status = str(report.task_status or "").strip().lower()
     if task_status == "active":
         if _close_active_scheduler_run(scheduler, signal, report, claim) is not None:
@@ -4004,6 +4007,28 @@ def _finish_scheduler_wake_claim(
         delivery_reason=report.delivery_reason,
         error_code="" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}",
         error_message="" if terminal_status == "done" else f"scheduled task ended as {task_status}",
+        now=time.time(),
+    )
+    return report if terminal is not None else None
+
+
+# LLM: 定时 run 撞额度用完、额度通知已送达或已落本地会话（wake_handled=True）时的唯一结算：run 记 failed，失败码 PROVIDER_QUOTA_EXHAUSTED，
+#   返回报告交给 _complete_wake_report 确认唤醒。job 周期不动、不自动暂停（节奏交给供应侧的车道暂停），下一个到期照常派发。
+#   这份报告没有 task_status，不能落到按任务状态的「释放 + 30 秒重试」：那会每 30 秒重跑一次模型、再追加一条通知（2026-09-29 复审探针）。
+#   通知没送达的分支在调用方里先释放租约，30 秒后只经 _quota_fallback_wakes 重投通知、不调用模型，语义不变。
+#   结算冲突返回 None：唤醒不确认，下次领取按原 stale/busy 规则收口。改动时联测 test_scheduler_quota_settle.py。
+# 函数用途: 把因模型额度用完而停下的这一轮定时执行记成失败并带额度码，让唤醒被确认、不再 30 秒重跑；会写调度账本。
+def _finish_quota_scheduler_run(
+    scheduler: BackgroundMainAgentScheduler, report: BackgroundMainAgentReport, claim: object,
+) -> BackgroundMainAgentReport | None:
+    terminal = scheduler.scheduler_service.finish(
+        claim,
+        status="failed",
+        response=report.response,
+        delivery_status=report.delivery_status,
+        delivery_reason=report.delivery_reason,
+        error_code="PROVIDER_QUOTA_EXHAUSTED",
+        error_message="model provider quota exhausted; quota notice delivered",
         now=time.time(),
     )
     return report if terminal is not None else None
@@ -4064,7 +4089,12 @@ def _complete_wake_report(
     return report
 
 
+# 额度通知报告的 reason。_finish_scheduler_wake_claim 按它识别「这一轮已因额度用完收尾」，不看通知正文。
+_QUOTA_NOTICE_REPORT_REASON = "provider_quota_exhausted"
+
+
 # LLM: 只沿原额度耗尽分路使用固定通知；地址选择不等于送达，写入和 wake_handled 仍取真实回执。
+#   reason 固定为 _QUOTA_NOTICE_REPORT_REASON，定时 run 据此结算成 failed（_finish_quota_scheduler_run）。
 # 函数用途: 经原通道投递额度通知，完成后写入原会话；不调用模型或新增发送路径。
 def _provider_quota_fallback_report(
     scheduler: BackgroundMainAgentScheduler,
@@ -4103,7 +4133,7 @@ def _provider_quota_fallback_report(
     return BackgroundMainAgentReport(
         thread_id=signal.thread_id,
         task_id=signal.root_task_id,
-        reason="provider_quota_exhausted",
+        reason=_QUOTA_NOTICE_REPORT_REASON,
         response=content,
         route_channel=channel,
         route_target=target,
