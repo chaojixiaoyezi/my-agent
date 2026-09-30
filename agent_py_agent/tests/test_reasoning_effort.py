@@ -52,7 +52,9 @@ DEEPSEEK = "https://api.deepseek.com"
     ("auto", "https://opencode.ai/zen/go/v1", "openai_compatible", "none"),
     ("budget", "https://api.minimaxi.com/anthropic", "anthropic_compatible", "budget"),
     ("none", DEEPSEEK, "openai_compatible", "none"),
-    ("effort", DEEPSEEK, "openai_responses", "none"),
+    ("effort", DEEPSEEK, "openai_responses", "effort"),  # 09-30 起 Responses 按 reasoning.effort 发送
+    ("auto", "https://chatgpt.com/backend-api/codex", "openai_responses", "effort"),
+    ("auto", "https://opencode.ai/zen/go/v1", "openai_responses", "none"),
     ("effort", DEEPSEEK, "typesafe_decision", "none"),
 ])
 def test_control_resolution_uses_declaration_then_verified_hosts(declared, base, backend, expected):

@@ -80,7 +80,8 @@ def _capability(backend: str) -> str:
     return "decision" if backend == "typesafe_decision" else "agentic"
 
 
-# LLM: 同一服务商下已有同名、同接口的模型直接跳过（返回空串）；编号冲突且内容不同明确报错，不覆盖。
+# LLM: 同一服务商下已有同名、同接口的模型不重复添加（返回空串），但若这次条目带了服务商目录声明的 reasoning_levels，
+#   就只刷新它的思考档位（其它字段不动）；编号冲突且内容不同明确报错，不覆盖。reasoning_levels 由 validate_model 校验格式。
 # 函数用途: 校验并加入一个勾选的模型。
 def _add_one(data: dict, provider_id: str, backend: str, item: object) -> str:
     if not isinstance(item, dict):
@@ -91,9 +92,13 @@ def _add_one(data: dict, provider_id: str, backend: str, item: object) -> str:
         raise ModelProfileError("模型编号无效。") from exc
     row = validate_model({"provider_id": provider_id, "model_name": item.get("model_name"), "model_backend": backend,
                           "model_context_window_tokens": item.get("model_context_window_tokens"),
-                          "capability": _capability(backend)})
-    if any(other["provider_id"] == provider_id and other["model_name"] == row["model_name"] and other["model_backend"] == backend
-           for key, other in data["profiles"].items() if key != profile_id):
+                          "capability": _capability(backend), "reasoning_levels": item.get("reasoning_levels")})
+    existing = next((other for key, other in data["profiles"].items() if key != profile_id and other["provider_id"] == provider_id
+                     and other["model_name"] == row["model_name"] and other["model_backend"] == backend), None)
+    if existing is not None:
+        # 已添加的同名模型不重复添加；只用这次带来的服务商声明刷新思考档位（其它字段不动）。
+        if row.get("reasoning_levels"):
+            existing["reasoning_levels"] = row["reasoning_levels"]
         return ""
     if profile_id in data["profiles"] and data["profiles"][profile_id] != row:
         raise ModelProfileError("这个模型编号已被使用，请重新打开新增模型。")

@@ -49,15 +49,17 @@ async def choose_models(app, rows: list[dict], title: str) -> list[dict] | None:
     if not picked:
         return None
     return [{"model_name": row["model_name"], "display_name": row.get("display_name") or row["model_name"],
-             "model_context_window_tokens": row["model_context_window_tokens"] if _window_known(row) else window.text.strip()}
+             "model_context_window_tokens": row["model_context_window_tokens"] if _window_known(row) else window.text.strip(),
+             **({"reasoning_levels": row["reasoning_levels"]} if row.get("reasoning_levels") else {})}
             for row in rows if row["model_name"] in picked]
 
 
-# LLM: 每个模型配一个新 UUID，重试时由 add_models 按同名同接口跳过，不会重复添加。
+# LLM: 每个模型配一个新 UUID，重试时由 add_models 按同名同接口跳过，不会重复添加；目录声明的思考档位原样带上。
 # 函数用途: 把勾选行整理成 add_models 需要的模型条目。
 def with_ids(rows: list[dict]) -> list[dict]:
     return [{"profile_id": str(uuid4()), "model_name": row["model_name"],
-             "model_context_window_tokens": row["model_context_window_tokens"]} for row in rows]
+             "model_context_window_tokens": row["model_context_window_tokens"],
+             **({"reasoning_levels": row["reasoning_levels"]} if row.get("reasoning_levels") else {})} for row in rows]
 
 
 # LLM: 只按回执的 ok 与 added_models 字段组织文字；失败时整批都没写入（add_models 同次落盘）。

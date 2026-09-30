@@ -26,6 +26,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         return "".join(endpoint_parts(self.api_base, "/responses"))
 
     # LLM: Responses 只发送显式采样；订阅登录固定使用流式、不发 max_output_tokens，system 移到 instructions。
+    #   智能程度按 reasoning_control=effort 写 reasoning.effort（档位按模型声明的 reasoning_levels 对应，见 reasoning_control）。
     #   历史先经 wire_contract.repair_native_messages 修整副本，最终 input 由 validate_responses_input 复核，不合规在本地抛错不发送。
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
@@ -47,6 +48,10 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
 
             value = openai_tool_choice(choice or ToolChoice.auto())
             payload["tool_choice"] = {"type": "function", "name": value["function"]["name"]} if isinstance(value, dict) else value
+        from .reasoning_control import responses_reasoning_field
+
+        payload.update(responses_reasoning_field(self.reasoning_control, request.reasoning_effort, self.reasoning_levels,
+                                                 disabled=request.thinking_disabled))
         if request.response_schema is not None:
             payload["text"] = {"format": {"type": "json_schema", "name": "my_agent_output", "strict": True, "schema": request.response_schema}}
         elif request.json_object:

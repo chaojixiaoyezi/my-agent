@@ -73,6 +73,8 @@ class BackendOptions:
     top_p: float | None = None
     # 已解析的思考控制方式（effort/budget/none，见 reasoning_control.py）；随 profile 冻结，档位按请求传入。
     reasoning_control: str = "none"
+    # 模型档案声明的服务商思考档位（Responses 用来把用户档位对应到真实取值）；空表示未声明。
+    reasoning_levels: tuple[str, ...] = ()
     # 已解析的结构化输出方式（native/json_object，见 structured_output_mode.py）；随 profile 冻结。
     structured_output: str = "native"
 

@@ -167,6 +167,7 @@ def validate_model(value: object) -> dict:
             "model_backend": value["model_backend"], "model_context_window_tokens": int(window),
             "capability": capability, "enabled": value.get("enabled", True), **_usage_tags_field(value, capability),
             **_input_modalities_field(value, capability), **_reasoning_control_field(value, capability),
+            **_reasoning_levels_field(value, capability),
             **_structured_output_field(value, capability)}
     temperature = value.get("temperature")
     if temperature not in (None, ""):
@@ -259,6 +260,7 @@ def validate_usage_tags(value: object) -> list[str]:
 # 输入模态是开放的小写标识符列表（text/image/video 是压缩策略认识的值，其它照存不判定）；缺省表示未知。
 _INPUT_MODALITY = re.compile(r"[a-z][a-z0-9_]{0,39}")
 _MAX_INPUT_MODALITIES = 8
+_MAX_REASONING_LEVELS = 12
 
 
 # LLM: 只在填写时返回字段，缺省不写键（未知，由结构化视觉探针判定）；决策模型不接受，与采样字段和用途标签同一口径。
@@ -289,6 +291,34 @@ def validate_input_modalities(value: object) -> list[str]:
     return modalities
 
 
+# LLM: 服务商声明的思考档位（如 ChatGPT 订阅目录的 supported_reasoning_levels），只用于 Responses 请求把用户档位
+#   对应到服务商真实支持的取值；开放世界，只校验格式、保留原顺序、去重，不按模型名推断。缺省不写键（=未声明，
+#   只发通用 low/medium/high）；决策模型不接受。经 resolved_model 以 model_reasoning_levels 进入 AgentConfig。
+# 函数用途: 把列表或逗号分隔文本规范成小写标识符列表，格式不对明确拒绝。
+def validate_reasoning_levels(value: object) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        items = [item for item in re.split(r"[,，\s]+", value) if item]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        items = [item.strip() for item in value if item.strip()]
+    else:
+        raise ModelProfileError("思考档位请填写逗号分隔的小写英文标识，例如 low, medium, high。")
+    levels = list(dict.fromkeys(items))
+    if len(levels) > _MAX_REASONING_LEVELS or any(not _INPUT_MODALITY.fullmatch(item) for item in levels):
+        raise ModelProfileError(f"思考档位最多 {_MAX_REASONING_LEVELS} 个，每个以小写英文字母开头，只含小写字母、数字或下划线。")
+    return levels
+
+
+# LLM: 只在填写时返回字段（缺省不写键，旧记录逐字节不变）；决策模型不接受，与思考控制同一口径。
+# 函数用途: 为模型记录生成可选的思考档位字段，供 validate_model 合并。
+def _reasoning_levels_field(value: dict, capability: str) -> dict:
+    levels = validate_reasoning_levels(value.get("reasoning_levels"))
+    if levels and capability == "decision":
+        raise ModelProfileError("决策模型不使用思考档位，由决策设置管理。")
+    return {"reasoning_levels": levels} if levels else {}
+
+
 # LLM: 扁平输入立即变成 provider 引用；用途必须保留，不能在快捷新增中把 decision 降为 agentic。
 #   快捷新增白名单含可选 usage_tags、input_modalities、reasoning_control（只决定智能程度档位怎样发送）与
 #   structured_output（只决定后台结构化调用用哪种输出格式）。
@@ -301,7 +331,7 @@ def validate_model_profile(value: object) -> dict:
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"]:
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control", "structured_output") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control", "reasoning_levels", "structured_output") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
@@ -371,8 +401,9 @@ def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True,
     result = {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model},
             "api_base": provider["api_base"], "api_key": provider["api_key"],
             "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"],
-            # 未声明即 auto，不继承部署配置里为其它模型写的控制方式。
+            # 未声明即 auto，不继承部署配置里为其它模型写的控制方式；思考档位同理，未声明即空（只发通用档位）。
             "model_reasoning_control": model.get("reasoning_control") or "auto",
+            "model_reasoning_levels": list(model.get("reasoning_levels") or []),
             "model_structured_output": model.get("structured_output") or "auto"}
     if model.get("input_modalities"):
         # 声明的输入模态进入运行时配置，供含图历史压缩判断能否随图摘要；它不是生成参数，也不证明容量。

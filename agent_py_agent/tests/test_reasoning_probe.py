@@ -240,11 +240,10 @@ def test_effort_set_auto_probes_once_writes_the_profile_and_can_be_reverted(tmp_
     assert _KEY not in "".join(result.message for result in (first, view, reverted, again)) + _stored_text(agent)
 
 
-@pytest.mark.parametrize("case", ["switch_off", "auto_level", "declared_none", "known_host", "responses"])
+@pytest.mark.parametrize("case", ["switch_off", "auto_level", "declared_none", "known_host"])
 def test_auto_probe_needs_every_condition(tmp_path, monkeypatch, case):
     base = "https://api.deepseek.com/v1" if case == "known_host" else _UNKNOWN
     extra = {"reasoning_control": "none"} if case == "declared_none" else {}
-    extra.update({"model_backend": "openai_responses"} if case == "responses" else {})
     agent, _profile_id = _agent(tmp_path, base=base, auto_probe=case != "switch_off", **extra)
     wire = _Wire(_DEEPSEEK).install(monkeypatch)
     monkeypatch.setattr(probe, "_spawn", lambda target: target())
@@ -271,12 +270,9 @@ def test_manual_probe_records_unsupported_or_inconclusive_without_touching_the_p
     assert _KEY not in view.message + _stored_text(agent)
 
 
-def test_manual_probe_explains_unprobeable_protocols_and_skips_needless_writes(tmp_path, monkeypatch):
-    wire = _Wire(_DEEPSEEK).install(monkeypatch)
+def test_manual_probe_skips_needless_writes_for_known_hosts(tmp_path, monkeypatch):
+    _Wire(_DEEPSEEK).install(monkeypatch)
     monkeypatch.setattr(probe, "_spawn", lambda target: target())
-    responses, _ = _agent(tmp_path / "responses", model_backend="openai_responses")
-    assert "当前模型的接口协议暂不支持按档位发送推理参数，无法检测" in _run(responses, "/effort probe").message
-    assert wire.payloads == []
     known, profile_id = _agent(tmp_path / "known", base="https://api.deepseek.com/v1")  # 已知表已按档位发送
     _run(known, "/effort probe")
     view = _run(known, "/effort")
@@ -408,3 +404,28 @@ def test_auto_probe_switch_defaults_on_and_normalizes():
     normalized, warnings = normalize_agent_config({"reasoning_control_auto_probe": "maybe"})
     assert normalized["reasoning_control_auto_probe"] is True and any("reasoning_control_auto_probe" in w for w in warnings)
     assert normalize_agent_config({"reasoning_control_auto_probe": "false"})[0]["reasoning_control_auto_probe"] is False
+
+
+class _ResponsesWire(_Wire):
+    """Responses 形状的假传输：按 reasoning.effort 回放推理 token（09-30 起 Responses 也按档位发送、可以检测）。"""
+
+    # 函数用途: 记录载荷，按服务商档位回放 Responses 用量。
+    def request_json(self, path, payload, headers):
+        self.payloads.append(dict(payload))
+        level = str((payload.get("reasoning") or {}).get("effort") or "")
+        values = self.replay[level]
+        count = values[self.counts[level] % len(values)]
+        self.counts[level] += 1
+        return {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "64"}]}],
+                "usage": {"output_tokens": count + 12, "output_tokens_details": {"reasoning_tokens": count}}}
+
+
+def test_responses_models_are_auto_probed_and_confirmed(tmp_path, monkeypatch):
+    # 未声明档位时“最高”按通用 high 发送；推理 token 低档 300、高档 1400（差距超过判定门槛 200），判定支持并写入 effort。
+    wire = _ResponsesWire({"low": [300], "high": [1400], "": [900]}).install(monkeypatch)
+    monkeypatch.setattr(probe, "_spawn", lambda target: target())
+    agent, profile_id = _agent(tmp_path, model_backend="openai_responses")
+    assert "已在后台开始检测" in _run(agent, "/effort high").message
+    assert {str((row.get("reasoning") or {}).get("effort") or "") for row in wire.payloads} == {"low", "high", ""}
+    assert len(wire.payloads) == 9 and _declared(agent, profile_id) == "effort"
+    assert "支持按档位调节" in _run(agent, "/effort").message

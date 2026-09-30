@@ -140,8 +140,11 @@ def test_shared_decision_retains_purpose_owner_and_revocation(tmp_path):
     assert resolve_shared_model(alice.home_paths, shared, capability="decision")["model_name"] == "jev-test"
     with pytest.raises(ModelProfileError, match="用途"):
         resolve_shared_model(alice.home_paths, shared)
-    with pytest.raises(ModelProfileError, match="用途"):
+    # 普通用户点名共享模型先被"只能用自己添加的模型"拒绝；管理员点名决策模型仍按用途拒绝
+    with pytest.raises(ModelProfileError, match="省略 model"):
         resolve_child_model_profile(alice, shared)
+    with pytest.raises(ModelProfileError, match="用途"):
+        resolve_child_model_profile(admin, key)
     set_shared_profile(admin, key, False)
     with pytest.raises(ModelProfileError, match="撤销"):
         resolve_shared_model(alice.home_paths, shared, capability="decision")

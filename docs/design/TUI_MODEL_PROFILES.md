@@ -72,6 +72,10 @@
   以及决策设置里的「管理服务商 / 新增服务商」。决策设置里的「主动测试决策连接」保留。
 - 弹窗按钮宽度按文字显示宽度加宽（原固定 12 列会截断「拉取模型列表」这类长按钮）。
 - 管理员的列表里自己共享出去的模型还有一行 `shared:` 别名；「管理已有模型」的计数和可编辑列表只算原记录，别名不能编辑。
+- 「管理已有模型」列表最后一行是"删除模型（勾选一个或多个）"：只列自己的原记录，确认一次后逐个走 `delete_model`；新会话默认模型
+  由宿主拒绝删除，单个失败不影响其它并在结果里说明原因（09-30 用户要求加删除入口）。
+- 模型编辑「高级」页新增"服务商支持的思考档位"（`reasoning_levels`），Responses 接口据此把 /effort 档位对应到服务商真实取值，
+  见 [智能程度](REASONING_EFFORT.md) 第 3 节。
 - 连接测试不列「默认」行：部署配置没有已保存连接可测（原来选了只会报错）；管理员初始模型另有 `shared:` 行可测。
 - 目录不给上下文时（如 OpenCode Go），勾选框多一栏统一上下文（默认 128000），不按模型名猜，之后可逐个改。
 - 回归：`test_tui_model_add.py`、`test_tui_manage_models.py`、`test_model_connections.py`、`test_tui_model_menu.py`、
@@ -81,7 +85,8 @@
 
 - 用户不必自己进 `/model` 填表：主会话代理可用 `manage_models` 工具执行同一套结构化操作——`list`、`add`（服务商+模型一步保存）、
   `save_provider`/`save_model`（新建或 `editing=true` 编辑）、`select`（只改当前 canonical 会话）、`set_default`（只改新会话默认）、
-  `delete_model`/`delete_provider`、`probe`、`discover`。唯一写入口仍是 `execute_model_profile_operation`，菜单与工具共用同一份
+  `delete_model`/`delete_provider`、`probe`、`discover`（可带未保存的 `connection`），以及 09-30 起的 `add_models`（按连接或已有服务商
+  一次加多个模型）、`set_shared`、`set_initial`（后两项只有管理员能用，由宿主校验）。唯一写入口仍是 `execute_model_profile_operation`，菜单与工具共用同一份
   owner 目录、同一把文件锁和同一套校验；新建时 profile_id 由工具生成 UUID，模型不自造编号。
 - 权限按结构化 effect 裁决：`list/probe/discover` 只读；`delete_provider` 为 dangerous，经统一危险动作审批门（密钥不可恢复）；
   其余为 mutating，由当前 owner 的审批模式决定是否逐次确认。不解析用户自然语言判定授权。
@@ -96,7 +101,10 @@
 ## 子代理单独指定模型
 
 - `create_subagents.model` 或单项 `items[].model` 可填写本 owner 已新增模型的精确名称或配置编号；
-  单项选择优先于批次选择，省略时继承直接父级创建时的模型配置。
+  单项选择优先于批次选择，省略时继承直接父级创建时的模型配置。`effort` 同样可按批次或逐项指定智能程度。
+- **权限（09-30 用户要求）**：管理员（local/main）可点名自己目录里的任意模型；普通用户只能点名自己添加的模型——
+  管理员共享的引用（`shared:`）和按名匹配共享模型都拒绝，并提示省略 model 继承当前会话（父级会话本来就能用，含管理员指定的初始模型）。
+  普通用户可以通过 `manage_models`（在聊天里让代理添加）或 TUI 添加自己的模型。
 - 用户可正常说“你继续用模型 A，把这部分交给用模型 B 的子代理”。由模型填写结构化工具参数，
   运行时不扫描用户正文来猜模型，也不把这句话变成自动派工命令。
 - 子代理引用独立配置，不改变主代理已选模型；孙代理默认继承该 child，恢复继续读取原配置编号。

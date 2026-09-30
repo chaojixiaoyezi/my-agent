@@ -62,6 +62,21 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
 订阅模式固定使用专用 Responses 端点、账号头、流式请求及 `store=false`；system 指令转到 `instructions`，
 不发送该接口不接受的 `max_output_tokens`。通用服务商可按原显式目录发现操作读取 `/v1/models`。
 
+### 订阅接口改走 WebSocket（2026-09-30）
+
+- **现象**：切到 GPT 后 Compact 摘要十几分钟停在"生成摘要"；日志两次 `Compact 摘要响应不可用` 都是 `stop_reason=stream_eof`。
+- **根因（实测）**：订阅接口的普通 SSE 流在长输出时服务端中途停止发送，约 60 秒后连接被干净关闭，没有终态事件。
+  gpt-6-luna 长输出/长输入 4 次 SSE 全部在 33～98 秒处停住（只拿到 443～3153 字）；同一代理下 DeepSeek（OpenCode）长输出 9210 字 43.8 秒正常，
+  所以不是本机代理问题。服务商目录对这些模型都声明 `prefer_websockets: true`，官方命令行（Codex）默认也走 Responses WebSocket。
+  同一请求改走 WebSocket：长输出 9235 字、长输入（10.9 万 tokens）摘要 1.29 万字都完整收到 `response.completed`。
+- **做法**：`backends/responses_websocket.py` 用同一个请求信封（地址、认证头、请求体）连 `wss://…/responses`，头加
+  `OpenAI-Beta: responses_websockets=2026-02-06`，发 `{"type": "response.create", …}`，逐条产出与 SSE 相同的事件文本交原
+  `collect_response`；超时（首事件/滚动空闲）、/stop、握手失败的错误分类与重试、观察事件口径都与 SSE 相同，回复完成前断开抛可恢复错误。
+  只有登录模式 `chatgpt` 的 Responses 走它（`OAuthResponsesBackend.request_stream_iter`），其它服务商与登录模式仍走 SSE。不固定模型、不换模型。
+- **依赖**：直接使用 `websockets`（BSD-3-Clause）。它原已随 `lark-oapi`（飞书长连接）安装，现在 pyproject 显式声明。
+  收益是与服务商推荐的传输一致、长回复不断线；替代方案（标准库自写 RFC 6455 客户端）要自己处理握手、掩码、分片、ping 和代理 CONNECT，
+  代码量与风险更大，不采用。
+
 ### 订阅接口的流式输出（2026-09-30 热修）
 
 - 订阅接口的 `response.completed` 不回带 `output`（实测为 `[]`），函数调用和正文条目只在流里逐条的 `response.output_item.done` 给出。

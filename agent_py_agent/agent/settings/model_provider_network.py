@@ -15,6 +15,7 @@ from .model_provider_schema import (
     resolved_model,
     validate_model,
     validate_provider,
+    validate_reasoning_levels,
 )
 from .shared_model_catalog import resolve_shared_model, shared_profile_key
 
@@ -69,7 +70,8 @@ def _subscription_catalog(provider: dict, key: str, account_headers: dict) -> di
     return {"ok": True, "models": rows, "message": f"这个账号可用 {len(rows)} 个模型。"}
 
 
-# LLM: 形状不对的条目丢弃而不是猜；容量沿用 validate_model 的 4096..2^31-1 口径。
+# LLM: 形状不对的条目丢弃而不是猜；容量沿用 validate_model 的 4096..2^31-1 口径。思考档位取目录的
+#   supported_reasoning_levels[].effort（服务商逐模型声明），格式不合规就不带（按未声明处理），不影响条目本身。
 # 函数用途: 把订阅目录的一条记录整理成可直接保存的模型条目，不合规返回 None。
 def _subscription_row(item: dict) -> dict | None:
     slug, window = item.get("slug"), item.get("context_window")
@@ -79,8 +81,15 @@ def _subscription_row(item: dict) -> dict | None:
         return None
     name = item.get("display_name")
     display = name if isinstance(name, str) and name and len(name) <= 80 and name.isprintable() else slug
-    return {"model_name": slug, "display_name": display, "model_context_window_tokens": window,
-            "model_backend": "openai_responses"}
+    row = {"model_name": slug, "display_name": display, "model_context_window_tokens": window, "model_backend": "openai_responses"}
+    levels = [level.get("effort") for level in item.get("supported_reasoning_levels") or [] if isinstance(level, dict)]
+    try:
+        row["reasoning_levels"] = validate_reasoning_levels([level for level in levels if isinstance(level, str)])
+    except ModelProfileError:
+        pass
+    if not row.get("reasoning_levels"):
+        row.pop("reasoning_levels", None)
+    return row
 
 
 # LLM: 短测复用可信 owner 解析与正式认证后端；仅完整正文算连接可用，不能宣称任务/Plus/Pro 权益已全部验证。

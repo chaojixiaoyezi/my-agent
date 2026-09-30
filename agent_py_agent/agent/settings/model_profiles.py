@@ -430,7 +430,9 @@ def _resolved_profile(agent: object, data: dict, selected: str, *, capability: s
 
 
 # LLM: 子代理 model 只解析有权引用的 agentic 用途；decision 同名不制造歧义，显式错误编号不能换选。
-# 函数用途: 找到子代理的生成模型；私有/共享重名用编号消歧，决策或未知配置在创建前拒绝。
+#   09-30 用户要求：显式指定时，管理员可选自己目录里的任意模型；普通用户只能选自己添加的模型（管理员共享的引用
+#   和按名匹配都不算），想用管理员开放的模型就省略 model 继承父级（父级会话本来就能用）。权限只看宿主 owner 身份。
+# 函数用途: 找到子代理的生成模型；普通用户只认自己的模型，决策、未知或越权配置在创建前拒绝。
 def resolve_child_model_profile(agent: object, model: object) -> str:
     from ..user_space.approval_mode import is_permission_admin
 
@@ -439,12 +441,16 @@ def resolve_child_model_profile(agent: object, model: object) -> str:
     data = read_model_profiles(model_profiles_path(agent.home_paths))
     profiles = data["profiles"]
     model = model.strip()
+    admin = is_permission_admin(agent.home_paths)
+    if shared_profile_key(model) and not admin:
+        raise ModelProfileError("普通用户派子代理只能指定自己添加的模型；想用管理员开放的模型，请省略 model（子代理继承当前会话的模型）。")
     if model in profiles or shared_profile_key(model):
         _resolved_profile(agent, data, model)
         return model
     available = [{"id": key, "model_name": row["model_name"]} for key, row in profiles.items() if row["capability"] == "agentic"]
-    available.extend({"id": row["id"], "model_name": row["model_name"]} for row in public_shared_profiles(agent.home_paths)
-                     if row.get("capability") == "agentic" and not (is_permission_admin(agent.home_paths) and shared_profile_key(row["id"]) in profiles))
+    if admin:
+        available.extend({"id": row["id"], "model_name": row["model_name"]} for row in public_shared_profiles(agent.home_paths)
+                         if row.get("capability") == "agentic" and shared_profile_key(row["id"]) not in profiles)
     matches = [row["id"] for row in available if row["model_name"] == model]
     if len(matches) == 1:
         _resolved_profile(agent, data, matches[0])

@@ -512,6 +512,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_reasoning_effort: str = "auto"
     # 当前模型的思考控制方式 auto/effort/budget/none，通常由 /model 档案带入；auto 只对已核对供应商给默认，其余不发参数。
     model_reasoning_control: str = "auto"
+    # 当前模型声明的服务商思考档位（如 ChatGPT 订阅目录的 low/medium/high/xhigh/max），通常由 /model 档案带入；
+    # 只用于 Responses 请求把 /effort 档位对应到服务商真实取值，留空表示未声明（只发通用 low/medium/high）。
+    model_reasoning_levels: list[str] = field(default_factory=list)
     # /effort 设成 auto 以外的档位、而当前模型未声明思考控制方式且解析为不支持时，宿主是否在后台自动检测一次（9 次短请求）。
     reasoning_control_auto_probe: bool = True
     # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。

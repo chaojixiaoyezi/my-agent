@@ -36,20 +36,23 @@ if TYPE_CHECKING:
 
 TOOL_NAME = "manage_models"
 _ACTIONS = (
-    "list", "add", "save_provider", "save_model", "select", "set_default",
-    "delete_model", "delete_provider", "probe", "discover",
+    "list", "add", "add_models", "save_provider", "save_model", "select", "set_default",
+    "delete_model", "delete_provider", "probe", "discover", "set_shared", "set_initial",
 )
 _PROFILE_ID_ACTIONS = {"select", "set_default", "delete_model", "probe"}
-_PROVIDER_ID_ACTIONS = {"save_provider", "delete_provider", "discover"}
+_PROVIDER_ID_ACTIONS = {"save_provider", "delete_provider"}
 _DESCRIPTION = (
     "直接管理当前用户的模型目录（等价于 TUI /model）：list 列出、add 快捷新增（服务商+模型一步保存）、"
     "save_provider/save_model 保存或编辑、select 切换当前会话模型、set_default 设置新会话默认模型、"
-    "delete_model/delete_provider 删除、probe 连通性测试、discover 读取服务商模型列表。"
+    "delete_model/delete_provider 删除、probe 连通性测试、discover 读取服务商模型列表（可带未保存的 connection 先看有哪些模型）、"
+    "add_models 按一个连接或已有服务商一次加多个模型、set_shared 把自己的模型开放给其他用户、set_initial 指定其他用户的初始模型"
+    "（后两项只有管理员能用，由宿主校验）。"
     "用户说“帮我加/换/改/删模型或服务商”“默认模型改成 X”“测一下这个模型能不能用”时直接调用，不要让用户自己去 /model 填表。"
     "密钥只作为参数传一次；回执和你的回复都不得复述密钥。delete_provider 会经统一危险动作审批门。"
 )
 _USE_CASES = (
     "用户给出模型名、接口地址和密钥要求加模型 → action=add（缺上下文窗口先问用户或用 discover 读取）",
+    "用户给出接口地址和密钥、要加这个服务商的多个模型 → 先 discover 带 connection 读列表，再 add_models 一次加入",
     "用户要求本会话换成某个已保存模型 → 先 list 取精确 id，再 action=select",
     "用户要求以后新会话默认用某模型 → action=set_default",
     "用户怀疑模型配置不可用 → action=probe 用真实请求验证，不凭列表状态下结论",
@@ -59,7 +62,8 @@ _AVOID_WHEN = (
     "用户只是询问当前用哪个模型 → action=list 只读即可，不要顺手 select/set_default",
     "子代理任务里 → 本工具不可用，模型目录只由主会话代理管理",
 )
-_KEYWORDS = ("加模型", "新增模型", "换模型", "切换模型", "默认模型", "删除模型", "服务商", "api key", "密钥", "/model", "上下文窗口")
+_KEYWORDS = ("加模型", "新增模型", "换模型", "切换模型", "默认模型", "删除模型", "服务商", "api key", "密钥", "/model", "上下文窗口",
+             "共享模型", "初始模型")
 _EXAMPLES = (
     '{"tool":"manage_models","action":"list"}',
     '{"tool":"manage_models","action":"add","profile":{"model_name":"MiniMax-M2.7","model_backend":"anthropic_compatible",'
@@ -67,6 +71,10 @@ _EXAMPLES = (
     '{"tool":"manage_models","action":"select","profile_id":"<list 返回的 id>"}',
     '{"tool":"manage_models","action":"save_provider","provider_id":"minimax","editing":true,"provider":{"display_name":"MiniMax 主号"}}',
     '{"tool":"manage_models","action":"probe","profile_id":"<list 返回的 id>"}',
+    '{"tool":"manage_models","action":"add_models","connection":{"model_backend":"openai_compatible",'
+    '"api_base":"https://api.example.com/v1","api_key":"<用户给的密钥>"},'
+    '"models":[{"model_name":"model-a","model_context_window_tokens":128000}]}',
+    '{"tool":"manage_models","action":"set_initial","profile_id":"<list 返回的 id>"}',
 )
 _PARAMETERS = {
     "action": "必填。" + "/".join(_ACTIONS) + "。",
@@ -87,6 +95,16 @@ _PARAMETERS = {
         "决定记忆整理等后台结构化调用用哪种输出格式。"
     ),
     "editing": "save_provider/save_model 修改已存在记录时必须为 true；新建时省略。",
+    "connection": (
+        "discover/add_models 用：一个未保存的连接 {model_backend, api_base, api_key, 可选 custom_headers/session_header/display_name}；"
+        "地址、密钥、请求头与会话头都相同时复用已有服务商。与 provider_id 二选一。"
+    ),
+    "models": (
+        "add_models 必填：[{model_name, model_context_window_tokens, 可选 reasoning_levels}]，一次最多 200 个；"
+        "同一服务商下已有的同名模型不重复添加。"
+    ),
+    "model_backend": "add_models 对已有服务商（provider_id）添加时必填：接口类型。",
+    "enabled": "set_shared 必填：true 开放共享，false 撤销。",
 }
 _PROVIDER_SCHEMA = {
     "type": "object",
@@ -117,12 +135,40 @@ _PROFILE_SCHEMA = {
         "model_queue_wait_seconds": {"type": "integer", "minimum": 0},
         "usage_tags": {"type": "array", "items": {"type": "string"}},
         "input_modalities": {"type": "array", "items": {"type": "string"}},
+        # 服务商声明的思考档位（如 low/medium/high/xhigh/max）；Responses 接口用它对应 /effort 档位。
+        "reasoning_levels": {"type": "array", "items": {"type": "string"}},
         # 思考控制方式；取值与 backends/reasoning_control.REASONING_CONTROLS 一致，缺省 auto。
         "reasoning_control": {"type": "string", "enum": list(REASONING_CONTROLS)},
         # 结构化输出方式；取值与 backends/structured_output_mode.STRUCTURED_OUTPUT_MODES 一致，缺省 auto。
         "structured_output": {"type": "string", "enum": list(STRUCTURED_OUTPUT_MODES)},
     },
     "additionalProperties": False,
+}
+_CONNECTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "model_backend": {"type": "string", "enum": sorted(BACKENDS)},
+        "api_base": {"type": "string"},
+        "api_key": {"type": "string"},
+        "custom_headers": {"type": "object"},
+        "session_header": {"type": "string"},
+        "display_name": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+_MODELS_SCHEMA = {
+    "type": "array",
+    "maxItems": 200,
+    "items": {
+        "type": "object",
+        "properties": {
+            "model_name": {"type": "string"},
+            "model_context_window_tokens": {"type": "integer", "minimum": 4096},
+            "reasoning_levels": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["model_name", "model_context_window_tokens"],
+        "additionalProperties": False,
+    },
 }
 _PARAMETER_SCHEMA = {
     "action": {"type": "string", "enum": list(_ACTIONS)},
@@ -131,6 +177,10 @@ _PARAMETER_SCHEMA = {
     "provider": _PROVIDER_SCHEMA,
     "profile": _PROFILE_SCHEMA,
     "editing": {"type": "boolean"},
+    "connection": _CONNECTION_SCHEMA,
+    "models": _MODELS_SCHEMA,
+    "model_backend": {"type": "string", "enum": sorted(BACKENDS)},
+    "enabled": {"type": "boolean"},
 }
 # 回执里删掉的投影字段：thread_id 是宿主内部编号，can_share 只与管理员共享菜单有关。
 _DROP_RESULT_FIELDS = ("thread_id", "can_share")
@@ -142,6 +192,9 @@ _HINTS = {
     "set_default": "新会话默认模型已更新；当前会话如需立即切换请 select。",
     "delete_model": "模型已删除。",
     "delete_provider": "服务商已删除，其密钥不可恢复。",
+    "add_models": "added_models 是实际新增的模型；已存在的同名模型没有重复添加（带了思考档位时只刷新档位）。本会话使用请 select。",
+    "set_shared": "共享设置已保存；所有会话的模型选择都没有改动。",
+    "set_initial": "其他用户的初始模型已更新（设置时同时开放共享）；只影响没自己选过模型的普通用户。",
 }
 
 
@@ -255,6 +308,8 @@ def _parse_request(params: dict[str, object]) -> _ModelToolRequest | ToolHandler
         if not profile_id:
             return _missing(action, "profile_id")
         return _ModelToolRequest(action, action, {"profile_id": profile_id})
+    if action in {"discover", "add_models", "set_shared", "set_initial"}:
+        return _catalog_request(action, params, profile_id=profile_id, provider_id=provider_id)
     if action in _PROVIDER_ID_ACTIONS:
         if not provider_id:
             return _missing(action, "provider_id")
@@ -274,6 +329,30 @@ def _parse_request(params: dict[str, object]) -> _ModelToolRequest | ToolHandler
         return _err("save_model 编辑已有模型必须提供 list 返回的 profile_id", "TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
     model = {**profile, "provider_id": provider_id or profile.get("provider_id")}
     return _ModelToolRequest(action, "save_model", {"profile_id": profile_id or str(uuid4()), "profile": model, "editing": editing})
+
+
+# LLM: discover/add_models 的来源二选一（未保存的 connection 或已有 provider_id）；models 的模型编号由这里生成 UUID，
+#   不让模型自造编号；set_shared/set_initial 只整理结构化字段，管理员权限由宿主 set_shared_profile/set_initial_profile 校验。
+# 函数用途: 把连接、批量添加、共享与初始模型四个动作整理成配置服务认识的 payload。
+def _catalog_request(action: str, params: dict[str, object], *, profile_id: str, provider_id: str):
+    if action in {"set_shared", "set_initial"}:
+        if action == "set_shared" and (not profile_id or not isinstance(params.get("enabled"), bool)):
+            return _missing(action, "profile_id 和 enabled")
+        payload = {"profile_id": profile_id} if action == "set_initial" else {"profile_id": profile_id, "enabled": params["enabled"]}
+        return _ModelToolRequest(action, action, payload)
+    connection = params.get("connection")
+    if (connection is None) == (not provider_id):
+        return _err(f"{action} 需要 connection 或 provider_id 其中一个", "TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+    source = {"connection": connection} if connection is not None else {"provider_id": provider_id}
+    if action == "discover":
+        return _ModelToolRequest(action, "discover", source)
+    models = params.get("models")
+    if not isinstance(models, list) or not models:
+        return _missing(action, "models")
+    if provider_id:
+        source["model_backend"] = params.get("model_backend")
+    items = [{**item, "profile_id": str(uuid4())} for item in models if isinstance(item, dict)]
+    return _ModelToolRequest(action, "add_models", {**source, "models": items})
 
 
 def _missing(action: str, name: str) -> ToolHandlerOutcome:

@@ -83,7 +83,11 @@ def test_shared_selection_defaults_child_and_private_isolation(tmp_path):
     two = execute_local_model_operation(alice, "two", "list", {})
     assert one["selected"] == shared and two["selected"] == "default"
     assert thread_model_config(alice, one["thread_id"]).model_name == "shared-A"
-    assert resolve_child_model_profile(bob, "shared-A") == shared
+    # 09-30 起普通用户派子代理只能点名自己添加的模型；共享模型要用就省略 model、继承父级会话
+    with pytest.raises(ModelProfileError, match="尚未新增"):
+        resolve_child_model_profile(bob, "shared-A")
+    with pytest.raises(ModelProfileError, match="省略 model"):
+        resolve_child_model_profile(bob, shared)
     assert resolve_child_model_profile(admin, "shared-A") == key  # 同一模型的共享别名不造成重名
     execute_local_model_operation(bob, "existing", "set_default", {"profile_id": shared})
     assert execute_local_model_operation(bob, "fresh", "list", {})["selected"] == shared

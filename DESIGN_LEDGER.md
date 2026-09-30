@@ -1,5 +1,24 @@
 # 设计台账
 
+## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
+
+- **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的
+  都真的可用；派子代理可选模型和智能程度（管理员不限，普通用户只能用自己添加的模型）；补删除模型入口，这些操作 my-agent 自己也能做。
+- **断线根因**：ChatGPT 订阅接口的普通 SSE 长输出会在服务端中途停止发送、约 60 秒后被关（4/4 复现），同代理下其它服务商正常；
+  服务商目录声明这些模型 `prefer_websockets`，官方命令行默认也走 WebSocket。**做法**：订阅登录的 Responses 改走 WebSocket
+  （`backends/responses_websocket.py`），事件交原解析；真实复验长输出 8374 字、长输入摘要 10562 字完整。依赖 `websockets` 显式声明
+  （原随 lark-oapi 安装；自写 RFC 6455 客户端风险更大，不采用）。详见 [模型账号登录 · 订阅接口改走 WebSocket](docs/design/MODEL_OAUTH.md)。
+- **Responses 智能程度**：此前 Responses 协议一律"不支持调节"，GPT 的 /effort 等于没生效。现在按 `reasoning.effort` 发送，
+  档位按模型档案新字段 `reasoning_levels`（服务商声明，订阅模型添加时从目录自动带上；配置 `model_reasoning_levels`）对应；
+  未声明只发通用 low/medium/high。真实核对 gpt-6-luna：low 推理 token 0、high 24、max 59。见 [智能程度](docs/design/REASONING_EFFORT.md) 第 3 节。
+  已添加的同名模型再次添加时只刷新思考档位，my-agent 也能用 `add_models` 刷新。
+- **子代理选模权限**：普通用户点名子代理模型只认自己添加的模型（共享引用和按名匹配共享都拒绝，提示省略 model 继承当前会话）；
+  管理员不变。`effort` 原本就能按批次/逐项指定，现在对 GPT 子代理也真正生效。
+- **my-agent 自己可操作**：`manage_models` 新增 `add_models`、`set_shared`、`set_initial`，`discover` 可带未保存连接。
+- **删除模型**：「管理已有模型」最后一行"删除模型（勾选一个或多个）"，一次确认、逐个删除、失败说明原因。
+- **验证**：`test_responses_websocket.py`、`test_responses_reasoning.py`、`test_model_profile_tool.py`、`test_tui_manage_models.py` 与更新后的
+  共享/决策子代理用例；真实 gpt-6-luna 实验记录在 3a scratchpad `diag-1031/`（e1–e4 SSE 断线、c1 对照、w1–w2 与 f1–f2 WebSocket）。
+
 ## ChatGPT 订阅模型报"工具能力检查未通过"（2026-09-30，热修，已实现）
 
 - **事实**：用户在 step16q 勾选 GPT 模型后一发消息就报 `TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE`。隔离复现：模型其实调用了探针工具，

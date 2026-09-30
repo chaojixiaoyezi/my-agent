@@ -151,6 +151,28 @@ def test_delete_a_model_under_a_connection(tmp_path):
     asyncio.run(scenario())
 
 
+def test_delete_models_from_the_manage_list_with_one_confirmation(tmp_path):
+    host = connection_host(tmp_path)
+
+    async def scenario():
+        async with running_menu(tmp_path, host) as (app, pipe, menu):
+            pipe.send_bytes(b"\x1b[B\x1b[B\r")  # 「管理已有模型」
+            await wait_dialog_ready(app, "删除模型（勾选一个或多个）", "连接列表最后一行是删除模型")
+            pipe.send_bytes(b"\x1b[B\r")
+            await wait_dialog_ready(app, "空格勾选要删的模型", "删除勾选框")
+            pipe.send_bytes(b" ")
+            await asyncio.sleep(0.05)
+            pipe.send_bytes(b"\t\r")
+            await wait_dialog_ready(app, "将删除 1 个模型", "删除确认")
+            pipe.send_bytes(b"\r")
+            await wait_dialog_ready(app, "已删除 1 个模型。", "删除结果")
+            assert saved(host)["profiles"] == {}
+            pipe.send_bytes(b"\x1b")
+            await asyncio.wait_for(menu, 3)
+
+    asyncio.run(scenario())
+
+
 def test_admin_sets_the_initial_model_for_other_users(tmp_path):
     admin = connection_host(tmp_path, "local/main")
     alice = host_with_store(tmp_path)

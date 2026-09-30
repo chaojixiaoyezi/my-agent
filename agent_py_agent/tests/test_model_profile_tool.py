@@ -172,3 +172,57 @@ def test_probe_failure_is_a_provider_fact_without_secret(tmp_path, monkeypatch):
     outcome, result = _run(tool, action="probe", profile_id=body["profile_id"])
     assert not outcome.ok and outcome.error_code == "MODEL_PROBE_FAILED"
     assert result["ok"] is False and result["action"] == "probe" and SECRET not in outcome.output
+
+
+CONNECTION = {"model_backend": "openai_compatible", "api_base": "https://api.example.test/v1", "api_key": SECRET}
+
+
+def test_discover_and_add_models_by_connection_without_echoing_the_key(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import model_provider_network as network
+
+    host = _host(tmp_path)
+    tool = ManageModelsTool(host)
+    monkeypatch.setattr(network, "get_json", lambda request: {"data": [{"id": "model-a"}, {"id": "model-b"}]})
+    outcome, body = _run(tool, action="discover", connection=CONNECTION)
+    assert outcome.ok and [row["model_name"] for row in body["models"]] == ["model-a", "model-b"]
+    assert not model_profiles_path(host.home_paths).exists()
+    models = [{"model_name": "model-a", "model_context_window_tokens": 128000},
+              {"model_name": "model-b", "model_context_window_tokens": 64000}]
+    outcome, body = _run(tool, action="add_models", connection=CONNECTION, models=models)
+    assert outcome.ok and body["added_models"] == ["model-a", "model-b"] and "hint" in body
+    assert SECRET not in outcome.output
+    again_outcome, again = _run(tool, action="add_models", connection=CONNECTION, models=models[:1])
+    assert again_outcome.ok and again["added_models"] == []
+    data = read_model_profiles(model_profiles_path(host.home_paths))
+    assert len(data["providers"]) == 1 and len(data["profiles"]) == 2
+
+
+def test_sharing_and_initial_model_are_admin_only(tmp_path):
+    host = _host(tmp_path)
+    tool = ManageModelsTool(host)
+    _, body = _run(tool, action="add", profile=PROFILE)
+    for params in ({"action": "set_shared", "profile_id": body["profile_id"], "enabled": True},
+                   {"action": "set_initial", "profile_id": body["profile_id"]}):
+        outcome = tool.execute(params)
+        assert not outcome.ok and outcome.error_code == "MODEL_PROFILE_INVALID" and "管理员" in outcome.output
+    admin = _host(tmp_path / "admin", "local/main")
+    admin.home_paths.owner_kind = "main"
+    admin_tool = ManageModelsTool(admin)
+    _, body = _run(admin_tool, action="add", profile=PROFILE)
+    outcome, result = _run(admin_tool, action="set_initial", profile_id=body["profile_id"])
+    assert outcome.ok and result["initial_profile"] == "shared:" + body["profile_id"]
+
+
+def test_new_catalog_actions_validate_before_writing(tmp_path):
+    host = _host(tmp_path)
+    tool = ManageModelsTool(host)
+    for params in ({"action": "add_models", "models": [{"model_name": "m", "model_context_window_tokens": 128000}]},
+                   {"action": "add_models", "connection": CONNECTION},
+                   {"action": "discover"},
+                   {"action": "set_shared", "profile_id": "x"}):
+        outcome = tool.execute(params)
+        assert not outcome.ok and outcome.error_code == "TOOL_INVALID_ARGUMENTS", params
+    policy = ManageModelsTool.runtime_policy
+    assert tool_effect_for_runtime_policy(policy, {"action": "add_models"}) == "mutating"
+    assert tool_effect_for_runtime_policy(policy, {"action": "set_initial"}) == "mutating"
+    assert not model_profiles_path(host.home_paths).exists()

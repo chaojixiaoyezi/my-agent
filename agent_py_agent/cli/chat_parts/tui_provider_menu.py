@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from prompt_toolkit.filters import to_filter
 from prompt_toolkit.layout import HSplit, ScrollablePane
-from prompt_toolkit.widgets import Checkbox, Label, RadioList, TextArea
+from prompt_toolkit.widgets import Checkbox, CheckboxList, Label, RadioList, TextArea
 
 from .tui_model_menu import _choose_interface, _dialog, _request
 
@@ -108,6 +108,7 @@ class _GenerationFields:
         self.queue = _field(data.get("model_queue_wait_seconds", ""))
         self.usage = _field(", ".join(data.get("usage_tags", ())))
         self.modalities = _field(", ".join(data.get("input_modalities", ())))
+        self.levels = _field(", ".join(data.get("reasoning_levels", ())))
         self.reasoning = RadioList(_REASONING_CONTROL_CHOICES, default=data.get("reasoning_control", "auto"), select_on_focus=True)
         self.structured = RadioList(_STRUCTURED_OUTPUT_CHOICES, default=data.get("structured_output", "auto"), select_on_focus=True)
         self.capability = RadioList([("agentic", "Agentic 对话/工具"), ("embedding", "Embedding 目录配置")],
@@ -119,13 +120,14 @@ class _GenerationFields:
             Label("用途标签（可选，逗号分隔的小写英文标识，如 long_document, low_cost；只供决策模型比较候选时参考）"), self.usage,
             Label("输入模态（可选，如 text, image；留空=未知，含图历史压缩时用结构化探针判断能否随图摘要）"), self.modalities,
             Label("思考控制（决定 /effort 智能程度怎样发送；不确定就选自动）"), self.reasoning,
+            Label("服务商支持的思考档位（可选，逗号分隔，如 low, medium, high；Responses 接口用它对应 /effort，留空=未声明）"), self.levels,
             Label("结构化输出（记忆整理等后台调用的输出格式；不确定就选自动）"), self.structured])
 
     # 函数用途: 把高级字段整理成 save_model 的 profile 字段（取值合法性由服务端校验）。
     def values(self) -> dict:
         return {"model_backend": self.backend.current_value, "capability": self.capability.current_value,
                 "temperature": self.temperature.text, "top_p": self.top_p.text, "model_queue_wait_seconds": self.queue.text,
-                "usage_tags": self.usage.text, "input_modalities": self.modalities.text,
+                "usage_tags": self.usage.text, "input_modalities": self.modalities.text, "reasoning_levels": self.levels.text,
                 "reasoning_control": self.reasoning.current_value, "structured_output": self.structured.current_value}
 
 
@@ -182,6 +184,33 @@ async def _delete(app, agent, session: str, operation: str, key: str) -> str:
     return "配置已删除。" if result.get("ok") else str(result.get("message") or "未确认删除。")
 
 
+# 「管理已有模型」列表里"删除模型"一行的动作值；服务商编号不可能以两个下划线开头（validate_provider_id）。
+_DELETE_MODELS = "__delete_models__"
+
+
+# LLM: 只列自己的原记录（不含部署默认行和 shared: 别名）；二次确认后逐个走 delete_model 原入口，宿主拒绝删除当前默认模型，
+#   单个失败不影响其它，结果按回执 ok 区分。删除后引用它的会话下一次明确报"配置不存在"，不偷换模型。
+# 函数用途: 勾选一个或多个模型并删除，返回给用户看的结果文字。
+async def _delete_models(app, agent, session: str, listing: dict) -> str:
+    rows = [row for row in listing.get("profiles", []) if row["id"] != "default" and not row.get("shared")]
+    if not rows:
+        return "还没有可以删除的模型。"
+    box = CheckboxList([(row["id"], f"{row['model_name']} · {row.get('provider_name', '')}") for row in rows])
+    picked = await _dialog(app, "删除模型（可多选）", HSplit([Label("空格勾选要删的模型，Tab 到「删除」再回车；新会话默认模型不能删。"), box]),
+                           (("删除", lambda: list(box.current_values)), ("返回", None)), focus=box)
+    if not picked or not await _dialog(app, "确认删除", Label(f"将删除 {len(picked)} 个模型；引用它们的会话之后会提示重新选择模型。\n确定删除？"),
+                                       (("删除", True), ("取消", None))):
+        return ""
+    names = {row["id"]: row["model_name"] for row in rows}
+    failed = []
+    for key in picked:
+        result = await _request(app, agent, session, "delete_model", {"profile_id": key})
+        if not result.get("ok"):
+            failed.append(f"{names[key]}（{result.get('message') or '未确认'}）")
+    text = f"已删除 {len(picked) - len(failed)} 个模型。"
+    return text + (f"没删成：{'、'.join(failed)}" if failed else "")
+
+
 # LLM: 行文字只给人看，编号是操作对象；登录账号显示登录状态，API 连接显示地址。
 # 函数用途: 生成「管理已有模型」列表里一行连接/账号的文字，如「DeepSeek · https://… · 2 个模型」。
 def _provider_label(row: dict, counts: Counter) -> str:
@@ -198,9 +227,12 @@ async def manage_models(app, agent, session: str) -> str:
     providers = result.get("providers", [])
     # 管理员列表里自己共享出去的模型还会以 shared: 别名再出现一次，管理和计数只算自己的原记录。
     counts = Counter(row.get("provider_id") for row in result["profiles"] if not row.get("shared"))
-    provider = await _choose(app, "管理已有模型 · 选择连接或账号", [(row["id"], _provider_label(row, counts)) for row in providers])
+    provider = await _choose(app, "管理已有模型 · 选择连接或账号", [
+        *[(row["id"], _provider_label(row, counts)) for row in providers], (_DELETE_MODELS, "删除模型（勾选一个或多个）")])
     if provider is None:
         return ""
+    if provider == _DELETE_MODELS:
+        return await _delete_models(app, agent, session, result)
     row = next(row for row in providers if row["id"] == provider)
     if row.get("auth_mode") in {"chatgpt", "oauth_device"}:
         from .tui_model_auth import manage_account

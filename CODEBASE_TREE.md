@@ -751,6 +751,7 @@ agent_py_agent/
 |       |-- structured_output_mode.py  # 结构化输出方式（native/json_object）的唯一换算点；只对实测不接受 json_schema 的供应商改用 json_object
 |       |-- responses.py               # Responses 协议生成入口，复用正式 HTTP/取消/超时主链
 |       |-- responses_wire.py          # typed SSE/items 与既有工具历史映射、加密 reasoning 回放
+|       |-- responses_websocket.py     # ChatGPT 订阅 Responses 的 WebSocket 传输（长回复不断线），事件交 responses_wire
 |       |-- anthropic_prompt_cache.py  # Anthropic tools/system/最新 history 断点与追加式 user 投影
 |       |-- base.py                    # 模型响应、冻结选项和公共后端接口；本地 echo/缺配置实现
 |       |-- http.py                    # HTTP 传输、请求局部控制、工具探针与模型目录读取
@@ -1633,6 +1634,7 @@ docs/
 - `cli/chat_parts/tui_provider_menu.py`：同一个 provider 管理多个模型；敏感字段仅表单暂存，短测试明确提示消耗。
 - `agent/settings/model_provider_*.py`：v2 存储 schema/锁内修改/用户主动网络操作，配置只在 owner 私有文件存在一份。
 - `agent/backends/provider_headers.py`、`responses.py`、`responses_wire.py`：统一身份与三种协议；不复制其他产品认证身份。
+- `agent/backends/responses_websocket.py`：订阅登录的 Responses 走 WebSocket（服务商声明 prefer_websockets，SSE 长输出会断），说明见 `docs/design/MODEL_OAUTH.md`。
 - `agent/backends/base.py`、`http.py`、`openai_chat.py`、`anthropic.py`、`factory.py`：公共合同、网络传输、协议适配和构造分工；包级公开导入指向唯一实现，内部调用方不依赖旧文件转发。
 - `agent/backends/request_scope.py`：同 Gateway 前台端点占用和请求局部预算；外部程序及代理别名不作推断。
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。

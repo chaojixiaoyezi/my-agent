@@ -80,4 +80,14 @@ class OAuthMessagesBackend(_OAuthMixin, AnthropicCompatibleBackend):
 # LLM: ChatGPT 订阅使用 Responses 原循环；协议差异通过显式 mode，不按模型名猜测。
 # 类用途: 使用账号登录的 Responses 接口，支持主代理、子代理及 Compact。
 class OAuthResponsesBackend(_OAuthMixin, OpenAIResponsesBackend):
-    pass
+    # LLM: 订阅登录（auth mode=chatgpt）的流式请求改走 Responses WebSocket：服务商模型目录对这些模型声明 prefer_websockets，
+    #   官方命令行默认也用它；普通 SSE 长输出会在服务端中途卡住（09-30 实测）。请求信封（地址、认证头、请求体）仍由
+    #   _gateway_request 统一生成，事件文本交原 collect_response；其它登录模式保持 SSE。同步 test_responses_websocket。
+    # 函数用途: 按登录模式选择流式传输：订阅账号走 WebSocket，其余走原 SSE。
+    def request_stream_iter(self, path, payload, headers, *, first_event_timeout_seconds=None):
+        if self.auth_ref["mode"] != "chatgpt":
+            return super().request_stream_iter(path, payload, headers, first_event_timeout_seconds=first_event_timeout_seconds)
+        from .responses_websocket import iter_responses_websocket
+
+        return iter_responses_websocket(
+            self._gateway_request(path, payload, headers, first_event_timeout_seconds=first_event_timeout_seconds))

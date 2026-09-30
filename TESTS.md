@@ -8194,6 +8194,14 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   管理员自己不受影响/目录损坏报错/补全空格/连接测试不列默认行/决策走限时测试/请求头校验/模板会话头/统一上下文/表单清密钥/
   高级页 Esc/订阅指定接口/普通用户无初始模型入口/账号分流/共享别名不进管理列表；脚本在 3a scratchpad `menu5/`）。
   真实目录：09-30 用产品 discover 带未保存连接读 OpenCode Go，拿到 30 个模型、结果不含密钥、不落盘（该目录不给上下文）。
+- ChatGPT 订阅 WebSocket 传输：`test_responses_websocket.py`（事件交原 collect_response 且终态后收尾关连接、认证头保留并加协议版本头、
+  回复完成前断开是可恢复错误、首事件/滚动空闲超时阶段与 SSE 一致、/stop 立即停止、握手 503 重试后成功且观察事件口径一致、401/429 沿 HTTP
+  分类、发送许可拒绝建连、只有订阅登录走 WebSocket 其它登录走 SSE）。真实复验：gpt-6-luna 长输出 8374 字 / 长输入摘要 10562 字完整。
+- Responses 智能程度：`test_responses_reasoning.py`（档位对应表、载荷只在支持时带 reasoning、订阅目录档位带入档案与后端、未声明为空列表、
+  坏档位拒绝、再次添加只刷新档位），`test_reasoning_effort.py` 控制方式解析新增 Responses 用例。
+- 子代理选模权限与工具：`test_shared_model_catalog.py`、`test_decision_model_profiles.py`（普通用户点名共享模型拒绝、管理员点名决策模型按用途拒绝）；
+  `test_model_profile_tool.py`（按连接 discover/add_models 不回显密钥、共享与初始模型只限管理员、新动作参数校验先于写入）。
+- 删除模型入口：`test_tui_manage_models.py::test_delete_models_from_the_manage_list_with_one_confirmation`。
 - Responses 流式终态不带 output：`test_responses_backend.py`（终态 output 为 [] 时取 `output_item.done` 条目、终态有 output 不被流内
   条目覆盖、流式能力探针通过）；去掉兜底时第一、三例失败，第二例防止反过来总用流内条目。真实订阅账号复验见 DESIGN_LEDGER 09-30 热修条目。
 - 斜杠补全高亮：`test_tui_input.py::test_fully_typed_command_keeps_its_completion_highlighted`，`/model` 打全后下拉仍高亮、Tab 接受后

@@ -758,6 +758,11 @@ model_reasoning_effort: auto
 # - budget：按思考预算发送（Anthropic 兼容接口写 thinking.budget_tokens；部分服务商只按开/关生效）。
 # - none：不支持调节，不发任何推理参数。
 model_reasoning_control: auto
+# 当前模型声明的服务商思考档位（例如 [low, medium, high, xhigh, max]），通常由 /model 档案带入（ChatGPT 订阅模型添加时
+# 从服务商目录自动带上）；只用于 OpenAI Responses 接口把 /effort 档位对应到服务商真实支持的取值：
+# - 留空（默认）= 未声明，只发通用的 low / medium / high（“最高”也按 high 发），不发可能被拒的取值。
+# - 填写后 = “最高”按 max → xhigh → high 取第一个存在的；“关闭思考”只在声明了 none 或 minimal 时发送。
+model_reasoning_levels: []
 # 智能程度自动检测：用户把 /effort 设成 auto 以外的档位，而当前模型没有声明思考控制方式、又不在上面已核对的名单里时，
 # 宿主用已保存的凭据在后台检测一次：同一道短题按“低”“最高”和不带参数各发 3 次，比较用量里的推理 token
 # （接口不单独报告推理 token 时比较输出 token）。确认支持就把这个模型档案的思考控制改为 effort（可用 /effort revert 撤销），

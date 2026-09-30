@@ -29,7 +29,12 @@
   - `effort`：OpenAI 兼容接口写 `reasoning_effort: <档位>`，Anthropic 兼容接口写 `output_config.effort`；`off` 写 `thinking: disabled`。
   - `budget`：Anthropic 兼容接口写 `thinking: {type: enabled, budget_tokens: N}`。N 取值：low 2048、medium 6144、high 12288、max 为上限，再夹到 `[1024, max_tokens-1024]`。OpenAI 兼容接口只写 `thinking: enabled`。`off` 写 `thinking: disabled`。
   - `none`：不发任何字段。回执如实说明“不支持调节”。
-  - `auto`（默认）：只对实测确认的供应商给默认值——`api.deepseek.com` 的 OpenAI 兼容接口取 `effort`，Anthropic 兼容接口取 `budget`；其余一律 `none`。这张表只是优化，可在 `/model` 编辑里显式声明覆盖（例如把 MiniMax M3 声明为 `budget`）。OpenAI Responses 协议暂未接字段换算，一律 `none`。
+  - `auto`（默认）：只对实测确认的供应商给默认值——`api.deepseek.com` 的 OpenAI 兼容接口取 `effort`，Anthropic 兼容接口取 `budget`，`chatgpt.com` 的 Responses 接口（ChatGPT 订阅）取 `effort`；其余一律 `none`。这张表只是优化，可在 `/model` 编辑里显式声明覆盖（例如把 MiniMax M3 声明为 `budget`）。
+  - **Responses 协议（09-30 接入）**：`effort` 写 `reasoning: {effort: <服务商档位>}`。服务商档位按模型档案的 `reasoning_levels`（服务商声明的可用档位，
+    ChatGPT 订阅模型添加时从目录 `supported_reasoning_levels` 自动带上，其它服务商可在 `/model` 编辑的「高级」里填）对应：
+    low/medium/high 取同名；`max` 依次取 max → xhigh → high 中第一个存在的；`off`（或强制工具要求关闭思考）只在声明了 none 或 minimal 时发送，
+    否则不发字段、交服务商默认。未声明档位时只发通用的 low/medium/high（`max` 发 high），不发可能被拒的取值。
+    09-30 真实核对 gpt-6-luna：`low` 推理 token 0、未声明时 `max`→high 为 24、声明后 `max`→max 为 59，服务商均接受。
 - **优先级**：强制调用工具（原有逻辑）要求关闭思考时，优先于任何档位。DeepSeek 历史里缺 `reasoning_content` 而被迫关思考时，同样不再带档位。
 
 ## 4. 档位从哪里来
@@ -53,7 +58,7 @@
 ## 6. 边界与后续
 
 - 不按模型名、回复正文或模型自述判断能力；已知表只按接口域名加协议。
-- 暂不在 TUI 底栏显示档位（`/effort` 可查看）；Responses 协议的 `reasoning.effort` 待接；Anthropic 官方模型开启思考时要求温度为 1，若显式声明 `budget` 又填了温度，可能被拒，届时再按协议处理。
+- 暂不在 TUI 底栏显示档位（`/effort` 可查看）；Responses 协议已接 `reasoning.effort`（见第 3 节）；Anthropic 官方模型开启思考时要求温度为 1，若显式声明 `budget` 又填了温度，可能被拒，届时再按协议处理。
 - 仓库默认 `model_reasoning_effort: auto`，不改变任何现有请求。
 - 关闭思考或调低档位会降低正确率：真实验收里 DeepSeek `off` 两次有一次答错；MiniMax M3 默认不思考时答错，声明 `budget` 并 `/effort high` 后答对。
 
@@ -134,6 +139,8 @@ my-agent 为了确认 opencode.ai 是否支持 `reasoning_effort`，先后 3 次
 - **不支持或无法判定**：只记录，并如实告诉用户原因和中位数。
 
 ### 边界
+
+- 09-30 起 Responses 协议也按档位发送（第 3 节），所以同样可以检测；未声明档位时“最高”按 high 发送参与比较。判定门槛不变（最高档至少比低档多 200 个推理 token 且 1.5 倍、两组不重叠），题目很简单时即使支持也可能判“不支持”，ChatGPT 订阅由已知表直接按档位发送，不依赖检测。
 
 - 凭据只在正式后端内部使用，不进入模型上下文、工具参数、检测记录或回执。测试断言假密钥不出现在回执、检测记录和账本里。
 - 每次检测会额外发 9 次请求、消耗少量 token（DeepSeek 最高档每次约 2000 推理 token）。
