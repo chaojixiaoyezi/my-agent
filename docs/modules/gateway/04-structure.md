@@ -2227,7 +2227,8 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 `session_task_id` 直接 `session_tasks.load` 读会话任务是否已 `cancelled`（不按绑定反查：排队中取消的任务还没绑定回合），
 命中就释放定时租约、结案唤醒，不开模型回合（重试等待中或排队中被取消的任务都不再开跑一片）。
 交付前的取消判定有两处：`background_claim.run_with_heartbeat` 在 `run_once` 之后再查一次本线程中断旗，把认领结算成 cancelled；
-`runtime._run_agent` 在交付前读持久的结构化事实（会话任务是否已 `cancelled`），不依赖本线程的 `is_interrupted()`
+`runtime._run_agent` 在交付前读持久的结构化事实（会话任务是否已 `cancelled`，按派活唤醒自带的任务号读，与开跑前判定同一个
+`_session_task_turn_was_cancelled`），不依赖本线程的 `is_interrupted()`
 （per-thread，停止旗不在本线程时读不到）。
 `run_with_heartbeat` 里 `run_once` 之后的二次检查**只对绑定了会话任务的回合生效**
 （`_host_delivery_bound_turn(kwargs)` 非空）；其它唤醒来源逐字保持原返回——普通后台运行能被普通 `/stop` 打到，

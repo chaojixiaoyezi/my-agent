@@ -204,6 +204,20 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 派活回合的取消判定统一按任务号读（2026-09-30，分支 `claude/ae-task-wake-fixes`，接在 F 之后，窄窗口，进 step16m）
+
+- **修的问题**：R-a 之后还剩一个窄窗口：开跑前判定放行之后、第一次认领正文之前到的取消。任务还没绑定回合，取消走"撤队列"，
+  派活回合认领不到正文、跑成空回合；交付前判定按绑定反查对不上，答复照样交付到目标会话。
+- **修法**：`_session_task_turn_was_cancelled` 改为派活回合唯一的取消判据：按派活唤醒信封自带的 `session_task_id` 直接
+  `session_tasks.load` 读，不是派活回合返回 False；开跑前（`_retire_cancelled_task_wake` 直接调它）、交付前、后台收尾、跑完一片后
+  的唤醒结案都用它，也不再全量扫描会话任务。已知代价：窗口里那一次没有正文的模型调用仍会发生，答复在交付前丢弃。
+- **`test_session_task_real_chain.py`**：新窗 `test_task_cancelled_after_its_turn_starts_but_before_claiming_the_body_delivers_nothing`
+  （ae 探针 ra-residual-window 转正）：包住 `background_claim.run_claimed`，派活唤醒第一次领取时先按取消工具的两步效果取消（撤回
+  排队中的正文 → 推进到 cancelled），再照常执行。断言只有一次没有正文的模型调用、B 的会话没有派活回合的答复、唤醒结案、任务
+  cancelled；F 之上没有这个修复时失败（答复被交付）。
+- **变异**（4 个，全部被抓住）：判据改回按绑定反查、去掉交付前判定、状态比成 done、开跑前判定去掉 reason 过滤（会话消息唤醒被
+  整个打桩成"已取消"的判据误结案，`test_background_slice_settles_its_turn_input_only_on_abnormal_end[task-cancelled]` 抓住）。
+
 ## R-a/R-b 复审跟进（2026-09-30，分支 `claude/ae-task-wake-fixes`，接在 R-b 之后，75 复审意见）
 
 - **`_retire_cancelled_task_wake` 的 except 去掉 `AttributeError`**：`read_json_file_report` 把根节点不是对象的记录当读取错误返回，

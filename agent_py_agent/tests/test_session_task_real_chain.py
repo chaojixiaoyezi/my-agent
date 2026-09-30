@@ -28,12 +28,13 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.agent_core._tool_loop_service import PENDING_TURN_INPUT_INVALIDATION_LIMIT
+from agent_py_agent.agent.agent_core.orchestration.tools import session_task_control
 from agent_py_agent.agent.backends import gateway_helpers, http
 from agent_py_agent.agent.concurrency.interrupt import (
     is_interruptible_registered,
     register_interruptible,
 )
-from agent_py_agent.agent.conversation import FakeDeliveryService
+from agent_py_agent.agent.conversation import FakeDeliveryService, background_claim
 from agent_py_agent.agent.conversation.control_commands import (
     conversation_request_interrupt_name,
     parse_conversation_control,
@@ -44,6 +45,10 @@ from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
     SESSION_TASK_ORIGIN_KIND,
     SESSION_TASK_STATUS_FIELD,
+)
+from agent_py_agent.agent.conversation.session_tasks import (
+    SESSION_TASK_CANCELLED,
+    SessionTaskUpdate,
 )
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.conversation.wake_domain_closeout import WAKE_POISON_NOTICE_SOURCE
@@ -995,6 +1000,37 @@ def test_task_cancelled_while_queued_does_not_open_an_empty_task_turn(tmp_path, 
         f"排队中取消的任务仍开了派活回合：{[call['kind'] for call in chain.wire.calls_for_task(task.task_id)]}")
     assert not _pending_wakes(chain, "B"), f"取消后 B 的派活唤醒没有结案：{_pending_wakes(chain, 'B')}"
     assert [text for text in chain.assistant_texts("B") if "RC-TASK" in text] == [], "目标会话收到了空派活回合的答复"
+
+
+def test_task_cancelled_after_its_turn_starts_but_before_claiming_the_body_delivers_nothing(tmp_path, monkeypatch) -> None:
+    """开跑前判定放行之后、第一次认领正文之前任务被取消（任务还没绑定回合，取消走"撤队列"）：派活回合认领不到已撤回的正文，
+    那一次模型调用照样发生（已知代价），但答复在交付前按任务号读到 cancelled 被丢弃、唤醒结案，目标会话里没有派活回合的答复
+    （ae 探针 ra-residual-window 转正；原来交付前判定按绑定反查，未绑定的任务对不上，答复照样交付）。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-DONE 整理三条要点。")
+    task = chain.task("RC-GOAL-DONE")
+    real_run_claimed = background_claim.run_claimed
+    withdrawn: list[bool] = []
+
+    # 函数用途: 派活唤醒第一次领取时，先按取消工具的两步效果取消（撤回排队中的正文 → 推进到 cancelled），再照常执行。
+    def cancel_then_run(dependencies, kwargs):
+        signal = kwargs.get("wake_signal")
+        if not withdrawn and getattr(signal, "reason", "") == "session_task":
+            store = chain.agent.conversation_store
+            done, _note = session_task_control._withdraw_queued_body(chain.agent, store.session_tasks.load(task.task_id))
+            store.session_tasks.advance(task.task_id, SessionTaskUpdate(status=SESSION_TASK_CANCELLED))
+            withdrawn.append(done)
+        return real_run_claimed(dependencies, kwargs)
+
+    monkeypatch.setattr(background_claim, "run_claimed", cancel_then_run)
+    chain.drain()
+
+    _require(withdrawn == [True], f"前提不成立：派活回合开跑时正文应已从队列撤回：{withdrawn}")
+    assert [call["own_goals"] for call in chain.wire.calls_for_task(task.task_id)] == [[]], (
+        f"已知代价应当只有一次没有正文的模型调用：{[call['kind'] for call in chain.wire.calls_for_task(task.task_id)]}")
+    assert [text for text in chain.assistant_texts("B") if "RC-TASK" in text] == [], "已取消任务的空回合答复被交付到了目标会话"
+    assert not _pending_wakes(chain, "B"), f"B 的派活唤醒没有结案：{_pending_wakes(chain, 'B')}"
+    assert chain.agent.conversation_store.session_tasks.load(task.task_id).status == "cancelled"
 
 
 # 函数用途: A 派活给 B（RC-GOAL-FAILONCE），B 的派活片带着正文断线一次、正文退回 pending；随后 A 取消任务。返回任务和时钟基准。

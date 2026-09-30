@@ -925,6 +925,8 @@ class BackgroundMainAgentRuntime:
         #   判据**不能用本线程的 is_interrupted()**——它是 per-thread 的，停止旗不在本线程时读不到。
         #   所以这里读**持久的结构化事实**：这条会话任务是否已被取消（cancelled 是终态，跨线程可见、不会被撤销）。
         #   实测（故障注入"停止照常回报确认但不立旗"）：去掉这一段，只有这个窗口会交付迟到的答复 → 它确实生效。
+        #   判据按任务号读（不按绑定反查），所以开跑后、第一次认领正文之前到的取消（任务还没绑定回合）也在这里兜住：
+        #   那一次没有正文的模型调用已经发生（已知代价），答复在这里丢弃，随后按同一判据结案唤醒。
         if _session_task_turn_was_cancelled(self.agent, request):
             raise InterruptedError("后台回合在交付前发现任务已取消")
         execution = collect_background_execution_result(self.agent, result, display_snapshot)
@@ -1002,32 +1004,28 @@ def _wake_turn_id(signal: WakeSignal) -> str:
     return _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
 
 
-# LLM: 交付前的取消判定必须读**跨线程可见且不可撤销**的事实，而不是本线程的 is_interrupted()
-#   （per-thread，停止旗不在本线程时读不到）。
-#   唯一的权威事实是会话任务记录：cancelled 是终态，状态机不允许它回到 done。
-#   命中条件与收口一致：任务绑定的 conversation_request_id 等于本次回合号。
-#   读不到账、没有回合号、任务不存在都返回 False（不因为读不到就当成取消，避免误伤正常交付）。
-# 函数用途: 判断这个后台回合对应的会话任务是否已经被取消（停止旗不在本线程时的纵深防线）。
+# LLM: 派活回合的取消判定只有这一个：开跑前（_retire_cancelled_task_wake）、交付前（_run_agent，停止旗不在本线程时的纵深防线）、
+#   后台片收尾（_settle_unconsumed_background_turn_input 决定派活正文退不退）、跑完一片后的唤醒结案都用它。必须读**跨线程可见且不可撤销**
+#   的事实，而不是本线程的 is_interrupted()（per-thread，停止旗不在本线程时读不到）：唯一的权威事实是会话任务记录，cancelled 是终态，
+#   状态机不允许它回到 done。按派活唤醒信封自带的 session_task_id（_session_task_run_id，与 _run_params 注入正文时的回合号同源）
+#   直接 session_tasks.load 读，不按"任务绑在这一片的回合号上"反查：任务可能还没绑定回合（排队中取消，或开跑后、第一次认领正文
+#   之前取消），按号精确读一次，也不用扫全部会话任务。不是派活回合（定时 run、会话消息唤醒）返回 False：它们跑的是自己的活，
+#   R-b 之后也认领不到派活正文。任务不存在或记录读不出返回 False（不因为读不到就当成取消，避免误伤正常交付）。
+#   已知代价：开跑后、第一次认领正文之前到的取消，派活回合认领不到已撤回的正文，那一次模型调用照样发生，答复在交付前按这里
+#   读到 cancelled 丢弃、唤醒结案（ae 探针 ra-residual-window）。
+# 函数用途: 判断这个后台回合所属的派活任务是否已经被取消。
 def _session_task_turn_was_cancelled(agent: object, request: BackgroundRunRequest) -> bool:
-    turn_id = _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
-    bound_turn = str(turn_id or "").strip()
-    if not bound_turn:
+    task_id = _session_task_run_id(request)
+    if not task_id:
         return False
-    store = getattr(agent, "conversation_store", None)
-    tasks = getattr(store, "session_tasks", None)
+    tasks = getattr(getattr(agent, "conversation_store", None), "session_tasks", None)
     if tasks is None:
         return False
     try:
-        loaded, load_errors = tasks.list_report(limit=0)
+        task = tasks.load(task_id)
     except (OSError, ValueError, TypeError):
         return False
-    if load_errors:
-        return False
-    for task in loaded:
-        if str(getattr(task, "conversation_request_id", "") or "").strip() != bound_turn:
-            continue
-        return str(getattr(task, "status", "") or "") == "cancelled"
-    return False
+    return str(getattr(task, "status", "") or "") == SESSION_TASK_CANCELLED
 
 
 # LLM: 命中条件全部结构化：任务绑定的 conversation_request_id 与本次 request 的 task_id 一致。
@@ -3985,14 +3983,11 @@ def _execute_wake_signal(
 
 # LLM: 已取消的派活任务，它的唤醒不能再开跑：重试等待中被取消的，真实模型下工具调用会做完（有副作用），答复才在交付前被丢掉
 #   （ae 复审 388194636 的 M2）；排队中就被取消的（正文已撤回、从未绑定回合），开跑只会得到一个没有正文的空派活回合，答复还会
-#   交付到目标会话（ae 复审 M2 的 R-a）。在解析交付路线、领取后台租约之前，按唤醒信封自带的 session_task_id
-#   （_session_task_run_id，与 _run_params 注入正文时的回合号同源）直接读这条任务的持久状态，cancelled 就释放定时租约、把唤醒
-#   标记已处理。按任务号读、不按绑定反查（_session_task_turn_was_cancelled 要求任务绑在这一片的回合号上）：任务可能还没绑定
-#   回合，也可能被别的回合认领过；按号精确读一次，也不用扫全部会话任务。只对派活唤醒查，前提（3a 认可）：定时 run 和会话消息
-#   唤醒跑的是自己的回合（回合号是 scheduler_run_id / wake_signal_id），即使这一片曾经认领过某条派活正文（R-b 之后这些回合认领
-#   不到派活正文，只剩之前已绑定的旧数据），这一片也不是那条任务的派活回合，不能因为那条任务被取消就不开跑；它们照旧由交付前
-#   判定兜底。任务不存在或记录读不出时照常执行，由交付前判定兜底。
-#   副作用：释放定时租约、写唤醒 handled 回执。
+#   交付到目标会话（ae 复审 M2 的 R-a）。在解析交付路线、领取后台租约之前，用派活回合唯一的取消判据
+#   _session_task_turn_was_cancelled（按唤醒信封自带的 session_task_id 读任务状态）查一次，cancelled 就释放定时租约、把唤醒标记
+#   已处理。只对派活唤醒查：这里先按 reason 过滤，范围在调用处写明，不依赖判据内部对其它唤醒返回 False。前提（3a 认可）：定时 run
+#   和会话消息唤醒跑的是自己的回合，即使这一片曾经认领过某条派活正文（R-b 之后这些回合认领不到派活正文，只剩之前已绑定的旧数据），
+#   也不能因为那条任务被取消就不开跑。任务不存在或记录读不出时照常执行，由交付前判定兜底。副作用：释放定时租约、写唤醒 handled 回执。
 # 函数用途: 派活任务已取消时，在开跑之前把它的唤醒结案。
 def _retire_cancelled_task_wake(
     scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, claim: object | None, now: float,
@@ -4000,12 +3995,8 @@ def _retire_cancelled_task_wake(
     reason = str(signal.reason or "").strip()
     if reason.lower() != SESSION_TASK_WAKE_REASON:
         return False
-    task_id = _session_task_run_id(_background_run_request_for_wake(scheduler, signal, reason, now))
-    try:
-        task = scheduler.store.session_tasks.load(task_id)
-    except (OSError, ValueError, TypeError):
-        return False
-    if str(getattr(task, "status", "") or "") != SESSION_TASK_CANCELLED:
+    request = _background_run_request_for_wake(scheduler, signal, reason, now)
+    if not _session_task_turn_was_cancelled(scheduler.runtime.agent, request):
         return False
     if claim is not None:
         scheduler.scheduler_service.release(claim, now=now)

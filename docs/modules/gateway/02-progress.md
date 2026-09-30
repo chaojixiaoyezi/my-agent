@@ -661,6 +661,9 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 仍待投递的宿主提示（2026-09-29 3a 以做法 2 取代原裁定 b，消息去留只由回执层上限决定）；派活正文已放弃时准入先收任务再结案唤醒；
 宿主提示按原因码合并。
 
+派活回合的取消判定统一按任务号读（窄窗口，step16m）：开跑前、交付前、后台收尾用同一个判据，开跑后、第一次认领正文之前到的
+取消也会在交付前丢弃答复、结案唤醒（那一次没有正文的模型调用是已知代价）；不再全量扫描会话任务。
+
 ## 维护状态说清「执行了没有」：只加字段、不改旧口径（2026-09-29，分支 `claude/9b-maintenance-apply-outcome`，基于 step16l `5ec2db2e0`）
 
 - **起因**：step16i 首跑积压时，local/main 其实执行了 11742 个动作、失败 0。但 `maintenance.json` 记的是 `policy_unavailable`、
