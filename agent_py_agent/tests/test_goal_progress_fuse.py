@@ -188,3 +188,38 @@ def test_no_progress_notice_is_deduplicated_by_existing_host_notice_queue(tmp_pa
     assert len(current_thread.pending_host_notices) == 1
     assert current_thread.pending_host_notices[0]["code"] == NO_PROGRESS_REASON_CODE
     assert current_thread.pending_host_notices[0]["details"]["reason_code"] == NO_PROGRESS_REASON_CODE
+
+
+# 1 号审查建议：子代理还在跑时，父级这一片不续跑，也不能计成空片（否则父级等子代理期间会被误暂停）。
+def test_slices_while_subagents_are_active_neither_count_nor_continue() -> None:
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.background_goal import (
+        GoalContinuationDependencies,
+        continue_goal_after_report,
+    )
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport, WakeSignal
+
+    goal = SimpleNamespace(goal_id="goal-1", task_id="task-1", thread_id="thread-1", status="active")
+    recorded, raised = [], []
+    dependencies = GoalContinuationDependencies(
+        goals=SimpleNamespace(load=lambda _thread, goal_id="": goal,
+                              record_continuation_fuse=lambda request: recorded.append(request) or (goal, False)),
+        tasks=SimpleNamespace(update_status=lambda _request: None),
+        goal_clock=SimpleNamespace(),
+        task_status=lambda _thread, _task: "active",
+        subagent_phase=lambda _task: ("subagents_active", ""),
+        raise_wake=lambda *args, **kwargs: raised.append(args),
+        task_registry=lambda: None,
+    )
+    signal = WakeSignal(wake_signal_id="wake-1", thread_id="thread-1", root_task_id="task-1",
+                        metadata={"goal_id": "goal-1"})
+    report = BackgroundMainAgentReport(thread_id="thread-1", task_id="task-1", reason="thread_goal_continue",
+                                       response="", route_channel="", route_target="", created_at=1.0,
+                                       goal_continuation_allowed=True)
+    continue_goal_after_report(dependencies, signal, report=report, now=2.0)
+    assert recorded == [] and raised == []
+    # 子代理结束后，同样的空片照常计数并续跑。
+    idle = replace(dependencies, subagent_phase=lambda _task: ("idle", ""))
+    continue_goal_after_report(idle, signal, report=report, now=3.0)
+    assert len(recorded) == 1 and len(raised) == 1

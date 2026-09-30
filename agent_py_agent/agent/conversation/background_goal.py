@@ -100,11 +100,12 @@ def continue_goal_after_report(
         loaded = _active_goal_for_signal(dependencies, signal)
         if loaded is None:
             return
+        # 子代理还在跑时父级不续跑，这一片也不计入空转（父级在等子代理，不是在空烧）。
+        subagent_phase, state_error = dependencies.subagent_phase(loaded[0].task_id)
+        if subagent_phase == "subagents_active" or state_error:
+            return
         goal = _record_continuation_slice(dependencies, signal, report, _GoalSlice(*loaded, now))
         if goal is None or goal.status != "active":
-            return
-        subagent_phase, state_error = dependencies.subagent_phase(goal.task_id)
-        if subagent_phase == "subagents_active" or state_error:
             return
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
         dependencies.raise_wake(
