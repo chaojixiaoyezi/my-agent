@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 分段摘要来源不收 Responses 思考密文（2026-09-30，分支 `claude/38-compact-segment-strip-ciphertext`，基于 step16t `10041de02`）
+
+- `test_compact_message_source.py` 新增：
+  - `test_segment_source_omits_reasoning_ciphertext_but_keeps_its_summary`（列表与可重放两种来源）：分段拼回的来源等于逐条投影后的 JSON，
+    不含密文、有占位，保留可读摘要、id 与用户要求，原消息逐字不变；
+  - `test_fitting_summary_request_still_sends_reasoning_ciphertext_natively`：整请求放得下时原消息（含密文）照发；
+  - `test_projected_source_closes_original_on_early_json_exit`：投影来源早退时关闭上游迭代器；
+  - `test_projection_keeps_two_pass_change_detection_for_readable_content`：每次重放只换密文仍能完成，可读正文变化报 `COMPACT_SOURCE_CHANGED`。
+- **变异**（`mutate_strip.py`）：6 个全部被杀：列表来源不投影、可重放来源不投影、投影丢掉 summary 与 id、原地改写原消息、投影来源不关闭上游、占位不确定。
+- **量级**：生产主会话 17 个 GPT 思考块、60,712 字符密文（约 2 万估算 token，每块约 1,190），可读摘要全空；只数字段长度，不读正文。
+
 ## 智能程度逐模型真实审计（2026-09-30，38）
 
 - **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +

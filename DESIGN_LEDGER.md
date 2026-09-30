@@ -38,7 +38,17 @@
   不可移植。没有新增配置，也不改其它协议的行为。见 [Compact 媒体策略 · 结构化事实与判定](docs/design/COMPACT_MEDIA_POLICY.md)。
 - **验证**：`test_request_content_capacity.py` 新增 5 项，`test_native_tool_ir_compact_and_orphan_sweep.py` 新增回合内压缩端到端用例
   （修复前失败、修复后通过）；相关 1274 项回归通过；6 个变异全部被抓住。上线后用主会话原任务重跑做真实验收。
-- **待评估**：分段摘要把历史序列化成 JSON 时会带上思考密文（对摘要无用），上线后按真实压缩请求的输入量决定是否在分段来源里剥掉。
+- **已评估并实现**（38，分支 `claude/38-compact-segment-strip-ciphertext`，基于 step16t `10041de02`）：分段摘要来源剥掉思考密文。
+  - 量级（生产结构化计量，不读正文）：目前只有主会话有 GPT 思考块，17 块共 60,712 字符密文，产品估算约 2 万 token，平均每块约 3.6K 字符、
+    约 1,190 token；可读摘要（summary_text）全是空的。长 GPT 回合每个助手轮都带一块，100 轮就是十几万 token 的 base64 进摘要文字，
+    摘要模型读不懂，只多出分段次数和费用。DeepSeek 的 thinking 块没有签名，也没有 redacted_thinking，本次不涉及。
+  - 做法：`compact_message_source.summary_source_message` 只把 `responses_reasoning` 块的 `item.encrypted_content` 换成固定占位，保留块位置、
+    model、id 与 summary_text；`_summarize_segments` 的两种来源工厂（列表与可重放来源 `CompactMessageSource.projected`）都经它。
+    整请求按原协议发送的路径照旧带密文（同后端能用它续推理）。
+  - 校验不变：两遍读取都走同一个确定投影，`CompactTextSource` 的两遍摘要一致与覆盖完整都按投影后的来源算；可读内容在两遍之间变化
+    仍报 `COMPACT_SOURCE_CHANGED`，只有密文不同则视为同一来源（密文不进摘要）。
+  - 验证：`test_compact_message_source.py` 新增 4 项（两种来源都剥密文且保留摘要与 id、原消息不改、整请求仍带密文、投影来源早退关闭上游、
+    可读内容变化仍被发现）；6 个变异全部被杀。见 [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md) 同名节。
 
 ## Responses 请求带会话级提示缓存键 prompt_cache_key（2026-09-30，分支 `worker/ds1-responses-cache-key`，基于 main `bf4f740c3`，已实现，待集成）
 

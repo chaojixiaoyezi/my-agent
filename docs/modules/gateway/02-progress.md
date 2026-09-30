@@ -735,3 +735,10 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
   （`home_layout` / `home_layout_v2` / `owner_resolver` 同步）。
 - **开关**（同分支追加提交）：`memory_context_calibration_carry_enabled`（默认开，YAML 中文注释、`AgentConfig`、前端配置目录只插入这一项）；关掉时缓存不读不写。
 - 测试与变异见 TESTS.md 同名节。
+
+## 分段摘要来源不收 Responses 思考密文（2026-09-30，分支 `claude/38-compact-segment-strip-ciphertext`，基于 step16t `10041de02`）
+
+- **起因**：3a 修好 GPT 回合内压缩（`c07823671`）后，分段摘要仍把每个助手轮约 3.6K 字符的思考密文编码进摘要文字。
+- **改动**：`compact_message_source.summary_source_message` + `CompactMessageSource.projected`；`compact_request_budget._summarize_segments`
+  两种来源工厂都经这一投影。整请求原协议发送路径不变。
+- 测试与变异见 TESTS.md 同名节。

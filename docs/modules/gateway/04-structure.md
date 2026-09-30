@@ -576,7 +576,8 @@ PROVIDER_REQUEST_SHAPE_INVALID 是出站协议合同在发送前查出的消息�
 ## R227 跨模型窗口与错误分层
 
 `conversation/compact_guard.py` 用原生请求投影计量近期尾部；`compact_request_budget.py` 负责当前
-窗口的摘要请求预算、连续原文片段和 typed overflow 缩小请求。原 transcript/checkpoint/CAS 仍由
+窗口的摘要请求预算、连续原文片段和 typed overflow 缩小请求；编码进片段的来源经 `compact_message_source.summary_source_message`
+去掉 Responses 思考密文（保留可读摘要，2026-09-30）。原 transcript/checkpoint/CAS 仍由
 `compact.py` 单一入口负责，辅助请求继续进入同一本模型账，不新增工具执行权限或记忆存储。
 `request_context._load_gateway_compact_context` 保留独立压缩异常，`request_errors` 渲染对应安全提示。
 `compact_tool_refs.py` 从原生工具参数与匹配成功回执生成原样路径线索，在同一 checkpoint/CAS 保存；

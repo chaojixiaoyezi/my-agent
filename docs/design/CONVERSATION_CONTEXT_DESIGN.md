@@ -157,6 +157,14 @@ stop/runtime/turn原因及truncated事实，不记录正文、思考内容、参
   额度、认证、请求拒绝、未知错误不重发。分段路径只重发出错的那一段，已完成分段不重做。每次尝试各自进辅助调用账本。
 - **边界**：摘要请求不向界面流式输出，重发不会重复显示内容；不新增配置项，不改变窗口错误和截断的既有处理。
 
+## 分段摘要来源不收思考密文（2026-09-30，分支 `claude/38-compact-segment-strip-ciphertext`）
+
+分段摘要把历史编码成 JSON 文字交给摘要模型。Responses 模型的思考在历史里是 `responses_reasoning` 块，`item.encrypted_content` 是只有原模型
+在原协议里能解开的 base64（生产实测每块约 3.6K 字符、约 1,190 估算 token，可读 `summary_text` 为空）。编码进摘要文字的来源一律经
+`compact_message_source.summary_source_message`：密文换成固定占位 `[encrypted reasoning omitted from summary source]`，块位置、model、id 与
+summary_text 保留，其它块原样；列表来源与可重放来源（`CompactMessageSource.projected`，早退时关闭上游）同一投影。
+两遍来源一致与覆盖完整按投影后的字符流核对；整请求能放进窗口时仍按原协议发送原消息（含密文）。
+
 ## 分段摘要请求的排列顺序（2026-09-26，集成方，分支 `claude/curator-budget`）
 
 大窗口换小窗口时，超出当前窗口的历史按连续片段逐段摘要，每段带上一段的累计摘要。

@@ -31,7 +31,11 @@ from .compact_guard import (
     raise_if_compact_interrupted,
 )
 from .compact_media_policy import COMPACT_VISION_SUMMARY_FAILED
-from .compact_message_source import CompactMessageSource, estimate_compact_payload
+from .compact_message_source import (
+    CompactMessageSource,
+    estimate_compact_payload,
+    summary_source_message,
+)
 from .compact_text_source import CompactTextSource
 from .input_media import InputMediaError
 
@@ -185,6 +189,8 @@ def _request_tokens(request: AuxiliaryModelCallRequest, source=None) -> int:
 
 # LLM: Only complete textual source may be serialized into contiguous ranges. A segment may split
 # JSON for summarization only; non-text native blocks cannot gain coverage through their JSON refs.
+# The serialized source is summary_source_message's projection (Responses reasoning ciphertext replaced by a
+# fixed placeholder, summary text kept); coverage and the two-pass digest are over that projection.
 # Once partitioned, native history no longer shares the main request prefix. Use a summary-only
 # surface instead of the executor's tools/instructions; 可重放来源直接编码，不先物化完整数组；失败不给覆盖。
 # 函数用途: 仅将可完整阅读的文字历史逐段摘要；媒体或未知非文本历史保留给上层原始来源分区。
@@ -215,8 +221,10 @@ def _summarize_segments(
         request, prompt=instruction, tools=[], tool_choice=ToolChoice.none("compact_summary_only"),
         system_instruction=_SUMMARY_SYSTEM_INSTRUCTION,
     )
-    factory = (message_source.json_parts if message_source is not None else
-               (lambda: json.JSONEncoder(ensure_ascii=False).iterencode(request.messages)) if native else
+    # 编码进摘要文字的来源去掉 Responses 加密思考密文（summary_source_message），两遍读取同一投影，一致校验不变。
+    factory = (message_source.projected(summary_source_message).json_parts if message_source is not None else
+               (lambda: json.JSONEncoder(ensure_ascii=False).iterencode(
+                   [summary_source_message(message) for message in request.messages])) if native else
                (lambda: iter((str(request.prompt),))))
     with CompactTextSource(factory, interrupt_check) as source:
         return _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback)

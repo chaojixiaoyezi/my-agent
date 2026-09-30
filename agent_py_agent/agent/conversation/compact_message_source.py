@@ -10,6 +10,10 @@ from typing import Any
 from ..memory_archive import estimate_tokens
 from ..memory_archive.tokens import estimate_tokens_from_json_parts
 
+# 摘要来源里 Responses 加密思考密文的固定占位：密文只有原模型在原协议里能解开，摘要模型读到的只是一段 base64，
+# 每个助手轮约 3.6K 字符（09-30 生产实测 17 块、60712 字符，约 2 万估算 token）。固定字符串保证两遍来源逐字一致。
+REASONING_CIPHERTEXT_PLACEHOLDER = "[encrypted reasoning omitted from summary source]"
+
 
 # LLM: factory是同一冻结来源的准备层投影，可读盘且须关闭上游；容器不缓存正文，不能进入纯请求投影合同。
 # 类用途: 携带可重复读取的原生消息数组，按需物化单请求或流式编码完整摘要来源。
@@ -43,6 +47,21 @@ class CompactMessageSource:
             iterator.close()
         yield ']'
 
+    # LLM: 逐条套用纯函数投影（不改原消息），早退/失败时显式关闭上游迭代器（与 with_tail 同一关闭合同）；
+    #   投影必须确定：同一冻结来源两遍读出逐字相同，CompactTextSource 的两遍一致校验才仍然成立。
+    # 函数用途: 得到一份按消息投影后的同序来源，供分段摘要编码。
+    def projected(self, transform: Callable[[dict[str, Any]], dict[str, Any]]):
+        # 函数用途: 顺序重放原来源并逐条投影，结束或提前关闭都释放原来源。
+        def mapped():
+            iterator = iter(self)
+            try:
+                for message in iterator:
+                    yield transform(message)
+            finally:
+                iterator.close()
+
+        return CompactMessageSource(mapped)
+
     # LLM: tail来自同次已准备的工具投影，追加顺序不变；不把其refs当作文字来源。
     # 函数用途: 将联合工具历史接到原会话来源末尾，不复制已有数组。
     def with_tail(self, tail):
@@ -53,6 +72,27 @@ class CompactMessageSource:
             yield from tail
 
         return CompactMessageSource(combined)
+
+
+# LLM: 分段摘要来源的唯一消息投影：只把 responses_reasoning 块里 item.encrypted_content 换成固定占位，保留块位置、
+#   model、id 与可读的 summary_text；其它块（含 thinking 正文、工具参数与结果）原样。不改原消息，不含它的消息原对象返回。
+#   只用于把历史编码成摘要文字的分段路径；整请求原协议发送的路径照旧带密文（同后端能用它续推理）。
+# 函数用途: 去掉摘要模型读不懂的加密思考密文，减少分段摘要的来源量而不丢可读内容。
+def summary_source_message(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list) or not any(_has_reasoning_ciphertext(block) for block in content):
+        return message
+    return {**message, "content": [
+        {**block, "item": {**block["item"], "encrypted_content": REASONING_CIPHERTEXT_PLACEHOLDER}}
+        if _has_reasoning_ciphertext(block) else block
+        for block in content
+    ]}
+
+
+# 函数用途: 判断一个内容块是不是带加密密文的 Responses 思考块。
+def _has_reasoning_ciphertext(block: object) -> bool:
+    item = block.get("item") if isinstance(block, dict) and block.get("type") == "responses_reasoning" else None
+    return isinstance(item, dict) and isinstance(item.get("encrypted_content"), str)
 
 
 # LLM: 只有显式CompactMessageSource替换数组编码；其余值仍使用原估算器，顶层字段数和原JSON参数保持。
