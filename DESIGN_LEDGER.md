@@ -26,6 +26,20 @@
   [摘要请求的瞬时错误重发](docs/design/CONVERSATION_CONTEXT_DESIGN.md#摘要请求的瞬时错误重发2026-09-30)。
 - **待观察**：去掉客户端 ping 后的断开率要靠上线后的真实请求统计确认；如果仍有断开，下一步参考 Codex 的会话级回退（重试用完后本会话改走 HTTP）。
 
+## GPT 长任务回合内压缩失败：Responses 思考块被当成未知内容（2026-09-30，已实现，待上线）
+
+- **现象**（真实）：主会话切到 gpt-6-luna 后派一个开发任务，开头的会话压缩正常（47.3 万→7.5 万），做了 10 轮工具、1137 秒后整轮
+  失败，`error_code=COMPACT_REQUEST_NON_TEXT`，没有任何产出。
+- **根因**：Responses 模型的加密思考在 canonical 历史里是 `responses_reasoning` 块；“能否按文字计量/能否摘要”的判定
+  （`backends/request_content.py`）只认 `thinking`/`redacted_thinking`，把它算成 unknown。于是回合内的工具 IR 压缩在第一道门
+  `_prepare_native_compact_plan` 就因“容量未知”直接不做，上下文一路涨到窗口上限；被迫恢复时 `compact_request_recovery.select`
+  用同一判定拒绝，报 `COMPACT_REQUEST_NON_TEXT`。所有 GPT（Responses）会话的长回合都会这样失败，与模型无关。
+- **做法**：同一后端时把 `responses_reasoning` 与 `thinking` 同等看待（结构完整才算，判定复用发送回放的 `reasoning_item`）；跨模型仍
+  不可移植。没有新增配置，也不改其它协议的行为。见 [Compact 媒体策略 · 结构化事实与判定](docs/design/COMPACT_MEDIA_POLICY.md)。
+- **验证**：`test_request_content_capacity.py` 新增 5 项，`test_native_tool_ir_compact_and_orphan_sweep.py` 新增回合内压缩端到端用例
+  （修复前失败、修复后通过）；相关 1274 项回归通过；6 个变异全部被抓住。上线后用主会话原任务重跑做真实验收。
+- **待评估**：分段摘要把历史序列化成 JSON 时会带上思考密文（对摘要无用），上线后按真实压缩请求的输入量决定是否在分段来源里剥掉。
+
 ## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
 
 - **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的

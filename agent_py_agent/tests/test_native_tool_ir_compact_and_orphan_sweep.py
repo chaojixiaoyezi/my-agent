@@ -621,6 +621,41 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     assert "真实 rg=/opt/reference/rg" in summaries[0].text
 
 
+def test_gpt_reasoning_blocks_do_not_block_in_turn_compaction(tmp_path):
+    # 09-30 真实故障：Responses（GPT）的加密思考块 responses_reasoning 被当成未知内容，回合内从不压缩，
+    # 涨到窗口上限被迫压缩时报 COMPACT_REQUEST_NON_TEXT、整轮失败。同一场景加上思考块后必须照常压缩。
+    agent = _native_agent(tmp_path)
+    agent.backend = _SummaryBackend(200_000)
+    agent.config.model_context_window_tokens = 200_000
+    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "prompt")
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "local/main", "channel": "test",
+                                          "channel_conversation_id": "conversation-gpt", "channel_user_id": "local/main"})
+    agent.conversation_store = store
+    agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
+    params = replace(_params(), context_scope="conversation", consume_pending_turn_input=False, save=True,
+                     task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
+                                      "conversation_thread_id": thread.thread_id})
+    for i in range(1, 9):
+        _rec(agent, params, rnd=i, idx=1, cid=f"toolu_{i}", body="X" * 120_000)
+    reasoning = {"type": "responses_reasoning", "model": "gpt-x",
+                 "item": {"type": "reasoning", "encrypted_content": "opaque", "summary": []}}
+    params.tool_ir_history[:] = [replace(item, content_blocks=[reasoning, *item.content_blocks])
+                                 if isinstance(item, AssistantTurn) else item for item in params.tool_ir_history]
+    assert sum(isinstance(item, AssistantTurn) and item.content_blocks[0] == reasoning for item in params.tool_ir_history) == 8
+    before = len(params.tool_ir_history)
+
+    build_tool_loop_prompt(agent, params)
+
+    assert len(params.tool_ir_history) < before
+    assert len([item for item in params.tool_ir_history if isinstance(item, CompactionSummary)]) == 1
+    messages = _native_provider_messages(agent, params)
+    assert messages is not None
+    _assert_no_orphans(messages)
+    assert "toolu_1" not in _message_block_ids(messages)[0]
+
+
 def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     agent = _native_agent(tmp_path)
     agent.backend.context_window_tokens = 10_000

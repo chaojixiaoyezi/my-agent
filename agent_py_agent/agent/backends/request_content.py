@@ -4,6 +4,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# 思考信封的三种 canonical 块：Anthropic 的 thinking / redacted_thinking，以及 Responses 的加密思考 responses_reasoning。
+_REASONING_KINDS = frozenset({"thinking", "redacted_thinking", "responses_reasoning"})
+
+
+# LLM: 思考信封只在同一后端（allow_reasoning）可保留，跨模型一律不可移植（不能转移供应商签名或密文）。
+#   thinking/redacted_thinking 要求全部字段是字符串（原签名信封）；responses_reasoning 的 canonical 形态是
+#   {"type","model","item"}，要求 model 是字符串且 item 经 responses_wire.reasoning_item 白名单清洗后非空——与发送回放
+#   （message_adapter/responses_wire）和 has_reasoning_content 同一判定。09-30：此前不认 responses_reasoning，GPT 会话
+#   回合内永远不自动压缩，涨到窗口上限被迫压缩时又报 COMPACT_REQUEST_NON_TEXT，整轮失败。
+# 函数用途: 判断一个思考块在当前用途下能否按原协议完整表示并计量。
+def _reasoning_block_supported(block: dict, allow_reasoning: bool) -> bool:
+    if not allow_reasoning:
+        return False
+    if block.get("type") == "responses_reasoning":
+        from .responses_wire import reasoning_item
+
+        return isinstance(block.get("model"), str) and bool(reasoning_item(block.get("item")))
+    return all(isinstance(value, str) for value in block.values())
+
 
 # LLM: 文字/工具可沿原计量；同后端可保留文字推理，跨模型须关闭allow_reasoning；未知模态返回False，不猜MIME能力。
 # 函数用途: 在适配器可能过滤内容之前判断原块能否由现有文字协议完整表示。
@@ -19,9 +38,9 @@ def text_content_supported(content: object, *, allow_reasoning: bool = True) -> 
         if kind == "tool_result":
             if not text_content_supported(block.get("content", ""), allow_reasoning=allow_reasoning):
                 return False
-        elif allow_reasoning and kind in {"thinking", "redacted_thinking"}:
+        elif kind in _REASONING_KINDS:
             # 同一后端保留原推理信封；跨模型调用方必须关闭此许可，不能转移供应商签名。
-            if any(not isinstance(value, str) for value in block.values()):
+            if not _reasoning_block_supported(block, allow_reasoning):
                 return False
         elif kind not in {"text", "tool_use"}:
             return False
@@ -58,7 +77,7 @@ def is_local_media_block(block: object) -> bool:
     return isinstance(source, dict) and source.get("type") == "local_file" and isinstance(source.get("sha256"), str)
 
 
-# LLM: 与 text_content_supported 同一遍历规则（tool_result 递归、thinking 按 allow_reasoning）；非法 content 或非 dict 块计为 unknown。
+# LLM: 与 text_content_supported 同一遍历规则（tool_result 递归、思考信封按 allow_reasoning）；非法 content 或非 dict 块计为 unknown。
 # 函数用途: 统计消息列表里的媒体块与未知块数量，不修改输入。
 def classify_nontext_content(messages: object, *, allow_reasoning: bool = True) -> NonTextClasses:
     media = unknown = 0
@@ -85,7 +104,7 @@ def _classify_blocks(content: object, allow_reasoning: bool, *, media_allowed: b
     return media, unknown
 
 
-# 函数用途: 单个内容块的分类：text/tool_use 与合法 thinking 不计，tool_result 递归，已知媒体按位置放行，其余 unknown。
+# 函数用途: 单个内容块的分类：text/tool_use 与合法思考信封不计，tool_result 递归，已知媒体按位置放行，其余 unknown。
 def _classify_block(block: object, allow_reasoning: bool, *, media_allowed: bool) -> tuple[int, int]:
     if not isinstance(block, dict):
         return 0, 1
@@ -94,9 +113,8 @@ def _classify_block(block: object, allow_reasoning: bool, *, media_allowed: bool
         return 0, 0
     if kind == "tool_result":
         return _classify_blocks(block.get("content", ""), allow_reasoning, media_allowed=False)
-    if kind in {"thinking", "redacted_thinking"}:
-        reasoning_ok = allow_reasoning and all(isinstance(value, str) for value in block.values())
-        return (0, 0) if reasoning_ok else (0, 1)
+    if kind in _REASONING_KINDS:
+        return (0, 0) if _reasoning_block_supported(block, allow_reasoning) else (0, 1)
     if media_allowed and is_local_media_block(block):
         return 1, 0
     return 0, 1

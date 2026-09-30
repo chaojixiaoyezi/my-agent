@@ -8,9 +8,14 @@ from agent_py_agent.agent.agent_core import _tool_loop_service
 from agent_py_agent.agent.agent_core.runtime import loop_support
 from agent_py_agent.agent.agent_core.tool_request_projection import (
     ToolLoopRequestInput,
+    compact_request_source_supported,
     text_request_capacity_known,
 )
-from agent_py_agent.agent.backends.request_content import text_messages_supported
+from agent_py_agent.agent.backends.request_content import (
+    classify_nontext_content,
+    compact_source_supported,
+    text_messages_supported,
+)
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 from agent_py_agent.agent.conversation.input_media import import_input_media, input_media_root
 from agent_py_agent.agent.settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY
@@ -27,6 +32,38 @@ def test_same_model_reasoning_remains_text_estimable_but_not_cross_model_portabl
     prepared = ToolLoopRequestInput(tool_ir_history=(AssistantTurn(content_blocks=[block]),))
     assert text_request_capacity_known(prepared)
     assert not text_request_capacity_known(prepared, allow_reasoning=False)
+
+
+# Responses 加密思考的 canonical 块（responses_wire 产出、message_adapter 回放的同一形态）。
+RESPONSES_REASONING = {"type": "responses_reasoning", "model": "gpt-x", "item": {
+    "type": "reasoning", "encrypted_content": "opaque-ciphertext", "summary": [{"type": "summary_text", "text": "要点"}]}}
+
+
+def test_responses_reasoning_counts_as_same_model_reasoning_for_capacity_and_compaction():
+    # 09-30 真实故障：GPT 会话带这种块时回合内从不自动压缩，被迫压缩又报 COMPACT_REQUEST_NON_TEXT。
+    prepared = ToolLoopRequestInput(tool_ir_history=(
+        AssistantTurn(content_blocks=[RESPONSES_REASONING, {"type": "text", "text": "先读文件"}]),))
+    assert text_request_capacity_known(prepared)
+    assert compact_request_source_supported(prepared, media_policy="off")
+    assert not text_request_capacity_known(prepared, allow_reasoning=False)
+    assert not compact_request_source_supported(prepared, media_policy="off", allow_reasoning=False)
+    history = [{"role": "assistant", "content": [RESPONSES_REASONING, {"type": "text", "text": "好"}]}]
+    assert text_messages_supported(history) and compact_source_supported(history, media_policy="off")
+    assert classify_nontext_content(history).unknown == 0
+    assert classify_nontext_content(history, allow_reasoning=False).unknown == 1
+
+
+@pytest.mark.parametrize("broken", [
+    {**RESPONSES_REASONING, "model": None},
+    {**RESPONSES_REASONING, "item": {"type": "reasoning", "summary": []}},
+    {**RESPONSES_REASONING, "item": {"type": "function_call", "encrypted_content": "x"}},
+    {"type": "responses_reasoning", "model": "gpt-x"},
+])
+def test_malformed_responses_reasoning_stays_unknown(broken):
+    history = [{"role": "assistant", "content": [broken]}]
+    assert not text_messages_supported(history)
+    assert not compact_source_supported(history, media_policy="archived_refs")
+    assert classify_nontext_content(history).unknown == 1
 
 
 @pytest.mark.parametrize("location", ["current", "prior", "assistant", "unknown"])

@@ -32,6 +32,17 @@
 - 变异（精确替换、按字节恢复）7/7 被杀：恢复客户端 ping、不看服务端关闭帧、断开文本丢阶段、整段摘要不重试、分段摘要不重试、
   什么错都重试、关闭原因不写。
 
+## GPT 思考块不再阻断回合内压缩（2026-09-30，分支 `claude/3a-responses-reasoning-compact`，基于 `bf4f740c3`）
+
+- `test_request_content_capacity.py`：新增 `test_responses_reasoning_counts_as_same_model_reasoning_for_capacity_and_compaction`
+  （同模型可计量、可摘要；跨模型不可）与 `test_malformed_responses_reasoning_stays_unknown`（缺 model、缺密文、item 类型不对、缺 item 共 4 例）。
+- `test_native_tool_ir_compact_and_orphan_sweep.py`：新增 `test_gpt_reasoning_blocks_do_not_block_in_turn_compaction`，20 万窗口、90% 触发、
+  8 轮大工具结果且每个助手轮带 `responses_reasoning`：修复后正常压缩出 1 条摘要、无孤儿工具块；把 `request_content.py` 换回
+  `bf4f740c3` 版本时该用例失败（红绿已核）。
+- 回归：`test_*compact*`、`test_request_content*`、`test_gateway_model_adoption*`、`test_subagent_first_request*`、`test_responses*`、
+  `test_native_tool_ir*`、`test_reasoning*`、`test_message_adapter*`、`test_*context_pressure*`、`test_tool_ir*`、`test_wire_contract*` 共 1274 passed。
+- 变异 6/6 被杀：不认 responses_reasoning、跨模型也放行、不校验 item、不校验 model、分类器沿用旧规则、文字判定沿用旧规则。
+
 ## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
 
 - `test_runtime_context_pressure.py`：

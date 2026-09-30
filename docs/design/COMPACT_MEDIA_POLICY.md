@@ -18,6 +18,10 @@
 ## 结构化事实与判定
 
 1. 块分类（`backends/request_content.py`，新增 `classify_nontext_content(messages) -> NonTextClasses(media=n, unknown=m)`）：`text_messages_supported` 保持严格文字语义不变；新判定 `compact_source_supported(messages, policy)` = 无 unknown 块，且（无 media 块 或 policy 不为 `off`）。三处宿主门改用它判断"能不能摘要"；"能不能计量"另见容量规则。
+   - 思考信封不算 unknown（仅同一后端，`allow_reasoning=True`）：Anthropic 的 `thinking`/`redacted_thinking`（全部字段为字符串）与
+     Responses 的加密思考 `responses_reasoning`（`model` 为字符串、`item` 经 `responses_wire.reasoning_item` 白名单清洗后非空，
+     与发送回放同一判定）。跨模型（`allow_reasoning=False`）一律 unknown，不转移签名或密文。2026-09-30 补上 `responses_reasoning`：
+     此前 GPT 会话回合内的工具 IR 压缩因“容量未知”从不触发，涨到窗口上限被迫压缩又报 `COMPACT_REQUEST_NON_TEXT`，整轮失败。
 2. 媒体策略解析（`conversation/compact_media_policy.py`，新模块）：`resolve_compact_media_policy(agent, media_blocks) -> CompactMediaDecision(policy, fact_source, reserve_tokens)`：
    - 配置 `compact_media_policy: auto | archived_refs | off`（默认 `auto`）。`off` 保持今天的后缀保护；`archived_refs` 永远走 A。
    - `auto`：档案 `input_modalities` 含 `image` → 候选 B；声明不含 → A；未声明（未知）→ 运行一次结构化视觉探针；`supported` → 候选 B，其余 → A。
