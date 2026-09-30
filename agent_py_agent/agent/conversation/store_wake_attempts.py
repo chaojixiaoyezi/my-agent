@@ -50,13 +50,16 @@ WAKE_REPLAY_SOURCE_UNREADABLE = "WAKE_REPLAY_SOURCE_UNREADABLE"
 _WAKE_ERROR_SAMPLE_CHARS = 200
 
 
-# LLM: claim_id 与 batch_size 写进 in_flight；batch_size 是本次一起执行的唤醒条数，进程中途死亡时据此把 abandoned
-#   改写成批次失败（批大小大于 1 时不计数，只让下一次逐条执行）。
+# LLM: claim_id、batch_size、turn_id 写进 in_flight；batch_size 是本次一起执行的唤醒条数，进程中途死亡时据此把 abandoned
+#   改写成批次失败（批大小大于 1 时不计数，只让下一次逐条执行）。turn_id 是这一片的精确回合号（与 _run_params 注入时同源：
+#   定时 run、派活、会话消息唤醒；没有就是空串），进程中途死亡时 C6 按它收尾那一片认领的补充消息——进程内的在途登记随旧进程
+#   消失，所以必须持久化。读旧账时缺这个字段按空串处理。
 # 类用途: 描述一次即将开始的尝试。
 @dataclass(frozen=True)
 class WakeAttemptStart:
     claim_id: str
     batch_size: int = 1
+    turn_id: str = ""
 
 
 # LLM: decision 非空表示调用方应结案而不是继续执行；abandoned 表示 begin/preflight 发现上次尝试的进程已死并已补记
@@ -172,7 +175,7 @@ class WakeAttemptStore:
                     state, verdict_for_batch(_abandoned_verdict(previous), _batch_size(previous)), now=now)
             ledger.update(state=ensure_writable_state(state).to_dict(), in_flight={
                 "claim_id": str(start.claim_id or ""), "batch_size": start.batch_size,
-                "owner_process": build_process_identity(), "started_at": now})
+                "turn_id": str(start.turn_id or ""), "owner_process": build_process_identity(), "started_at": now})
             write_json_file_atomic_unlocked(path, ledger)
         return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=abandoned)
 
@@ -192,9 +195,12 @@ class WakeAttemptStore:
         return True
 
     # LLM: 唤醒已离开 pending（被确认、按取消结案、同批顺带确认）时删账，不读内容：坏账也删，唤醒已经结了没有毒丸风险。
+    #   在同一把账锁里删：停机线程的 mark_stopping 可能同时在写这份账，不持锁的话它的原子写会在删之后把账写回来。
     # 函数用途: 删掉一条唤醒的尝试账；会删文件。
     def discard(self, wake_signal_id: str) -> None:
-        unlink_quietly(self.storage.wake_attempt_path(wake_signal_id))
+        path = self.storage.wake_attempt_path(wake_signal_id)
+        with locked_file_transition(path):
+            unlink_quietly(path)
 
     # LLM: 按一次尝试的判定推进状态并清掉 in_flight；成功直接删除尝试账。只有计数失败才更新 last_error。
     #   verdict 必须已按本次批大小经 verdict_for_batch 改写。连续不计数满提醒窗口时在同一把锁里记下提醒

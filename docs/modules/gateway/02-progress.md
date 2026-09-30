@@ -651,6 +651,12 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 释放只计会让回合崩溃的失败（3a 裁定 (a)）：`reject_pending(failure=...)` 按唤醒毒丸的 `verdict_for_error` 判定，超时、429、连接、
 环境故障、/stop 与取消只释放不计次；前台 `_handle_gateway_request` 的收尾与后台片收尾都把回合抛出的异常交进来。
 
+
+唤醒毒丸第 3 步 C2/C3 接线（分支 `claude/75-wake-poison-wiring`，step16m）：`run_claimed` 支持领取观察者（`begin`/`settled`），
+唤醒车道按尝试写尝试账：计数失败按 30/60/120/240 秒持久退避、同因 5 次按 `failed_permanently` 结案（之后不再领取、换进程也生效），
+瞬时/环境类不计数只退避；批次里有带账成员时逐条执行；进程死亡的在途尝试在跳过阶段补记；尝试账读不出按 `attempt:ledger_corrupt`
+结案。在途记录带这一片的回合号，供 C6 收尾死进程认领的补充消息。领域收尾（派活转 failed、会话消息转 rejected）与宿主提示在 C4。
+
 ## 维护状态说清「执行了没有」：只加字段、不改旧口径（2026-09-29，分支 `claude/9b-maintenance-apply-outcome`，基于 step16l `5ec2db2e0`）
 
 - **起因**：step16i 首跑积压时，local/main 其实执行了 11742 个动作、失败 0。但 `maintenance.json` 记的是 `policy_unavailable`、

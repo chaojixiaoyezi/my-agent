@@ -105,6 +105,18 @@ from .store import ConversationStore
 
 # 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略（阈值只在 store_progress 定义一次）。
 from .store_progress import _POLICY_FAILURE_RETIRE_AFTER
+from .wake_attempt_tracking import (
+    current_wake_attempt,
+    isolate_wake_batch,
+    track_wake_attempt,
+    wake_attempt_deferred,
+    wake_attempt_waiting,
+)
+from .wake_poison import (
+    WAKE_ATTEMPT_PATH_CLAIMED,
+    WAKE_ATTEMPT_PATH_QUOTA_FALLBACK,
+    WAKE_ATTEMPT_PATH_REDELIVERY,
+)
 
 
 # Scheduled wakes resume the same Agent with typed state.  Runtime boundaries
@@ -975,6 +987,18 @@ def _background_run_request_for_wake(
         now=now,
         wake_signal=signal.to_dict() if hasattr(signal, "to_dict") else None,
     )
+
+
+# LLM: 按将要执行的唤醒信封算这一片的精确回合号，判据与 _run_params 注入时完全同源（定时 run、派活、会话消息唤醒三种，
+#   其余为空串）；批次传首条——_batched_wake_signal 以首条为 primary，沿用它的 wake_signal_id、reason 与 metadata。
+#   只读信封结构化字段。写进尝试账的在途记录，进程中途死亡时 C6 按它收尾那一片认领的补充消息。
+# 函数用途: 算出一条唤醒将要执行的那一片的回合号。
+def _wake_turn_id(signal: WakeSignal) -> str:
+    request = BackgroundRunRequest(
+        thread_id=signal.thread_id, task_id=signal.root_task_id, reason=str(signal.reason or ""), now=0.0,
+        wake_signal=signal.to_dict(),
+    )
+    return _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
 
 
 # LLM: 交付前的取消判定必须读**跨线程可见且不可撤销**的事实，而不是本线程的 is_interrupted()
@@ -2582,16 +2606,12 @@ def _consume_pending_wake_signals(
             attempted=attempted,
         ):
             continue
-        _consume_wake_signal_batch(
-            scheduler,
-            signal,
-            wake_signals,
-            reports,
-            reported,
-            handled,
-            attempted,
-            current,
-        )
+        wake_batch = isolate_wake_batch(scheduler, _select_wake_batch(scheduler, signal, wake_signals))
+        # 一批唤醒一次尝试：执行与执行后的确认都在里面，退出时按结构化事实逐条记账（唤醒毒丸第 3 步）。
+        with track_wake_attempt(scheduler, wake_batch, current, turn_id=_wake_turn_id(wake_batch[0])):
+            _consume_wake_signal_batch(
+                scheduler, signal, wake_batch, reports, reported, handled, attempted, current,
+            )
     return reported
 
 
@@ -2609,6 +2629,9 @@ def _skip_pending_wake_signal(
     if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
         return True
     if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
+        return True
+    # 持久的毒丸退避（与进程内 _wake_retry_after 取较晚者）；顺带补记上次在途进程已死的尝试、到上限的结案。
+    if wake_attempt_deferred(scheduler, signal, current):
         return True
     if (
         scheduler._recovery_guard.block_for_task(str(signal.root_task_id or "").strip())
@@ -2640,14 +2663,13 @@ def _skip_pending_wake_signal(
 def _consume_wake_signal_batch(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
-    wake_signals: list[WakeSignal],
+    wake_batch: tuple[WakeSignal, ...],
     reports: list[BackgroundMainAgentReport],
     reported: set[str],
     handled: set[str],
     attempted: set[str],
     current: float,
 ) -> None:
-    wake_batch = _select_wake_batch(scheduler, signal, wake_signals)
     execution_signal = _batched_wake_signal(wake_batch)
     attempted.update(member.wake_signal_id for member in wake_batch)
     report = consume_with_supply_guard(
@@ -3327,9 +3349,7 @@ def _ready_background_thread_ids(
         ready.append(normalized)
 
     for signal in scheduler.store.wakes.pending(limit=0):
-        if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
-            continue
-        if _successful_completion_waiting_for_batch(scheduler, signal, current):
+        if _wake_waits_this_tick(scheduler, signal, current):
             continue
         append(signal.thread_id, signal.root_task_id)
     for observation in scheduler.store.observations.unhandled_requiring_main(limit=0):
@@ -3348,6 +3368,17 @@ def _ready_background_thread_ids(
         append(policy.thread_id, policy.task_id)
     return tuple(ready)
 
+
+
+# LLM: 规划线程用（只读）：进程内重试节流、持久毒丸退避（与跳过阶段 wake_attempt_deferred 同一个"下次最早可试时间"）、
+#   成功完成通知等待合批，任一成立这一拍就不为它排车道；和工作线程的跳过判定保持一致，避免空转排车道。
+# 函数用途: 判断一条待处理唤醒这一拍是否还不能排后台车道。
+def _wake_waits_this_tick(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, current: float) -> bool:
+    return (
+        current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0)
+        or wake_attempt_waiting(scheduler, signal, current)
+        or _successful_completion_waiting_for_batch(scheduler, signal, current)
+    )
 
 # LLM: This mixin owns the public synchronous tick and Gateway's per-thread
 # execution projection; maintenance implementation remains in the tick mixin below.
@@ -3724,6 +3755,8 @@ class _WakeClaimState:
 class _WakeExecution:
     report: BackgroundMainAgentReport | None = None
     terminal: bool = False
+    # 这次执行走的路径（claim / 只重投 / 额度通知），唤醒毒丸记账据此判定；只重投和额度通知不经会话 claim。
+    path: str = WAKE_ATTEMPT_PATH_CLAIMED
 
 
 # LLM: 唤醒执行保留原跳过、能力预扫、定时租约和来源确认顺序，Goal 与地址裁决交给窄能力模块。
@@ -3754,10 +3787,12 @@ class _BackgroundSchedulerWakeMixin:
                 claim=claim_state.claim,
                 now=now,
             )
+            _note_wake_execution(self, signal, execution)
             if execution.terminal:
                 return None
             report = execution.report
         except Exception as exc:
+            _note_wake_error(self, signal, exc)
             if is_provider_quota_failure(exc):
                 report = _quota_wake_report_after_error(
                     self,
@@ -3804,6 +3839,24 @@ class _BackgroundSchedulerWakeMixin:
             auto_capability_sweep(self.runtime.agent, signal)
         except Exception:
             _HEARTBEAT_LOGGER.warning("pre-wake capability sweep failed", exc_info=True)
+
+
+
+# LLM: 只把执行返回的报告与路径交给本会话正在进行的唤醒尝试（不在唤醒车道里执行时什么都不做）；终止分支的报告为 None。
+# 函数用途: 告诉唤醒毒丸记账这次执行拿到了什么结果。
+def _note_wake_execution(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, execution: _WakeExecution) -> None:
+    tracker = current_wake_attempt(scheduler, signal.thread_id)
+    if tracker is not None:
+        tracker.note_execution(execution.report, execution.path)
+
+
+# LLM: 额度耗尽（含压缩调用撞额度）走额度分路，另标路径，判为不计数；其余异常原样交给记账，由 verdict_for_error 分类。
+# 函数用途: 告诉唤醒毒丸记账这次执行抛了什么异常。
+def _note_wake_error(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, error: BaseException) -> None:
+    tracker = current_wake_attempt(scheduler, signal.thread_id)
+    if tracker is not None:
+        quota = is_provider_quota_failure(error)
+        tracker.note_error(error, quota=quota)
 
 
 def _claim_scheduler_wake(
@@ -3868,7 +3921,7 @@ def _execute_wake_signal(
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
         return _WakeExecution(terminal=True)
     if signal.wake_signal_id in scheduler._quota_fallback_wakes:
-        return _WakeExecution(_provider_quota_fallback_report(scheduler, signal, now=now))
+        return _WakeExecution(_provider_quota_fallback_report(scheduler, signal, now=now), path=WAKE_ATTEMPT_PATH_QUOTA_FALLBACK)
     scheduler._pre_wake_capability_sweep(lifecycle_reason, signal)
     refreshed = _refresh_pending_wake_signal(scheduler.store.wakes.pending_one, signal)
     if refreshed is None:
@@ -3904,7 +3957,7 @@ def _execute_wake_signal(
         target,
     )
     report = background_claim.run_claimed(
-        _background_claim_dependencies(scheduler),
+        _background_claim_dependencies(scheduler, attempt=current_wake_attempt(scheduler, signal.thread_id)),
         {
             "thread_id": signal.thread_id,
             "task_id": signal.root_task_id,
@@ -3970,7 +4023,8 @@ def _redeliver_frozen_wake(
         _background_route_dependencies(scheduler), signal.thread_id,
     )
     return _WakeExecution(
-        scheduler.runtime.redeliver_cached_wake(signal, channel=channel, target=target, now=now)
+        scheduler.runtime.redeliver_cached_wake(signal, channel=channel, target=target, now=now),
+        path=WAKE_ATTEMPT_PATH_REDELIVERY,
     )
 
 
@@ -4429,8 +4483,11 @@ def _background_recovery_checker(runtime: object):
 # 函数用途: 为一片后台执行列明依赖，沿原模型入口与 claim 账本运行，避免领取间隙已消费的快照再次执行。
 def _background_claim_dependencies(
     scheduler: BackgroundMainAgentScheduler,
+    *,
+    attempt: background_claim.BackgroundClaimAttempt | None = None,
 ) -> background_claim.BackgroundClaimDependencies:
     return background_claim.BackgroundClaimDependencies(
+        attempt=attempt,
         claims=scheduler.store.claims,
         claim_scope_id=partial(_background_claim_scope_id, scheduler.store),
         child_owns_task=lambda task_id: _subagent_runner_owns_task(

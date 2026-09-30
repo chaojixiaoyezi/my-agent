@@ -216,6 +216,16 @@
 ## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案已审，分步实现中）
 
 - **第 3 步 C1 已落地（2026-09-29，分支 `claude/38-wake-poison-c1`，基于 9b 的 C5 `cb08b80dc`）**：纯函数与存储层补充，不接线。接线层（75 的 C2–C4）依赖的接口：`WakeAttemptFacts`/`verdict_for_attempt(facts)`、`ledger_corrupt_decision()`、`attempts.has_ledger/preflight/mark_stopping/discard`、`quarantine` 返回 `WakeQuarantineResult(settled, source_unreadable, ledger_preserved_at)`、`replay` 对读不出来源返回 WAKE_REPLAY_SOURCE_UNREADABLE。C6（停机标记）待 C3 的在途登记接口。留档目录 quarantine/unreadable、quarantine/ledger 不随线程删除（无法归属线程），由运维清理。
+- **第 3 步 C2/C3 已落地（2026-09-29，分支 `claude/75-wake-poison-wiring`，进 step16m）**：C2 给 `run_claimed` 加领取观察者；C3 新模块
+  `wake_attempt_tracking.py` 在唤醒车道批次消费处记账、结案，跳过阶段与就绪扫描读持久退避（细节见 WAKE_POISON_PILL 第 10 节第 3 点）。
+  - 在途记录持久化回合号（`WakeAttemptStart.turn_id` 写进 `in_flight`，`InflightWakeAttempt.turn_id`）：3a 裁定进程中途被杀时
+    预留卡住的问题由 C6 收口，C6 的 preflight 识别出死进程的在途尝试后，对这个回合号走 `reject_pending(turn_id, reject_reserved=True)`。
+  - 9a 的两条提醒：`discard` 改为在同一把账锁里删（停机线程的 `mark_stopping` 会并发写同一份账，不持锁时它的原子写可能在删之后
+    把账写回来）；C3 不调 `mark_stopping`，它的 `OSError` 由 C6 在停机路径里隔离。
+  - 两层计数在真实链路上的先后（C3，按 3a 裁定 (a) 两层同一判据）：程序错误这类会让回合崩溃的失败每次两层各加一，第 5 次毒丸先
+    结案唤醒，消息刚释放第 5 次、仍 pending，前台回合可跨回合认领消费；超时、连接、环境故障两层都不计次，只退避与释放，不丢消息。
+    回执层自己的上限在唤醒车道上走不到（毒丸先收口），由前台回合反复崩溃触发（C4 的前台窗口与存储层用例覆盖）。
+  - 未做（C4）：领域收尾、宿主提示、`failure_code`；第 4 步（be）：`/wakes`、`/status` 计数、归档、`wake_replayed`。
 - **背景**：`204f4ddf9` 和 `7b83c8730` 都让同一条唤醒约每 30 秒被领取一次、失败或取消后永远重试。
   唤醒只有 pending/handled 两种状态，所有重试节流都在进程内，重启即清零，session_task 等 reason 没有任何上限。
 - **方向**：

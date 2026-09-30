@@ -1,5 +1,30 @@
 # 测试与发布验收
 
+## 唤醒毒丸第 3 步 C3：唤醒车道按尝试记账与结案（2026-09-29，分支 `claude/75-wake-poison-wiring`，step16m）
+
+- **`test_wake_attempt_wiring.py`（新，真实链路：真实 SimpleAgent、会话存储、尝试账与 Gateway 同款后台调度器，只替换供应商传输）**：
+  - 未知准入码按计数失败记：退避 30/60/120/240 秒，第 5 次同因结案、离开 pending，之后不再领取；退避写在账里，换一个调度器实例照样跳过；
+  - `run_once` 抛程序错误 5 次结案，原因码带异常类名；瞬时供应错误连续 20 次不结案；失败后成功清账；唤醒在别处被结掉时删账；
+  - 批次失败不计数、之后逐条执行；就绪扫描与跳过阶段判定一致；
+  - 死进程的在途尝试在跳过阶段补记：被杀（计数的 `attempt:abandoned`）与优雅停机（不计数的 `attempt:gateway_stopped`）两种；
+  - 尝试账读不出时在领取前按 `attempt:ledger_corrupt` 结案、不开模型回合；写账失败不盖住片里的原异常；片外（批次合成）抛错照样计数；
+  - 在途记录持久化这一片的回合号：会话消息唤醒为 `wake_signal_id`、派活为 `session_task_id`，进程内在途登记带同一个值。
+- **`test_background_main_wake_recall.py`、`test_direct_parent_lifecycle.py`**：调度器替身补 `wakes.attempts.has_ledger`（就绪扫描会查
+  尝试账），断言不动（后者是 ae 复审 C3 的 F1：定向清单漏了它）。
+- **只重投路径（ae 复审 C3 的 F2）**：`test_frozen_redelivery_failures_back_off_and_close_after_a_day`——冻结交付的唤醒每次重投失败都
+  记成只重投失败、不计同因，按只重投退避推后、不再调模型；首次重投失败满 24 小时按 `delivery:channel_unavailable` 结案、之后不再重投。
+  ae 的变异 K11（去掉 `_redeliver_frozen_wake` 的只重投路径标记）被它抓住。
+- **`test_session_task_real_chain.py`（两层计数，按裁定 (a) 同一判据）**：
+  - 删掉 step16l 的「唤醒每次程序错误 → 第 6 次 rejected 带码」一窗：接线后程序错误两层都计次，毒丸在第 5 次先结案唤醒，唤醒车道
+    走不到回执层的第 6 次；回执层上限改由存储层用例与 C4 的前台窗口覆盖；
+  - 新窗 `test_message_wake_counted_failures_are_closed_by_the_poison_first`：每次程序错误，两层各记一次；第 5 次毒丸结案唤醒
+    （原因码 `error:programmer_bug:RuntimeError`），消息释放第 5 次、仍 pending，C 的下一次前台回合跨回合认领并消费；
+  - step16l 的「连续超时 7 次不丢」一窗在接线后照样通过：超时两层都不计次，毒丸也不写持久退避。
+- **变异**：`sm3/mutate_c3.py`（scratchpad）12 个，全部被抓住：去掉批次记账、不传回合号、回合号不写进在途记录、回合号只认会话消息、
+  跳过阶段不读尝试账、就绪扫描不读尝试账、批次不隔离、不把观察者交给 `run_claimed`、执行路径不记异常、唤醒已结掉时不删账、
+  坏账不结案、片外异常不保留。`discard` 改为持账锁删除（防停机线程并发写回）没有对应的变异用例：竞态窗口在单测里造不稳定。
+- **定向回归**：`sm3/w2_files.txt` 96 个文件（含 9 个全仓守卫）：2435 passed、4 xfailed；strict code-size 总数与 C2 相同（无新增发现项）。
+
 ## 唤醒毒丸第 3 步 C2：后台领取的尝试观察者（2026-09-29，分支 `claude/75-wake-poison-wiring`）
 
 - `BackgroundClaimDependencies.attempt`（可选，默认 None）：acquire 成功后、任何准入判定之前调一次 `begin(claim_id)`，

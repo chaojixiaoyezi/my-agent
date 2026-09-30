@@ -2232,3 +2232,10 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 `run_with_heartbeat` 里 `run_once` 之后的二次检查**只对绑定了会话任务的回合生效**
 （`_host_delivery_bound_turn(kwargs)` 非空）；其它唤醒来源逐字保持原返回——普通后台运行能被普通 `/stop` 打到，
 对它套这道检查会丢掉已交付的答复、认领记成 cancelled。
+
+唤醒毒丸接线（第 3 步 C2/C3）：唤醒车道的批次消费包在 `wake_attempt_tracking.track_wake_attempt` 里，调度器按会话登记这次尝试，
+`_execute_wake_signal` 经 `current_wake_attempt` 取到它，作为 `BackgroundClaimDependencies.attempt` 交给 `run_claimed`
+（领到 claim 先 `begin`，片结束回调 `settled`）；执行路径用 `_note_wake_execution`/`_note_wake_error` 填入结果路径（claimed、
+只重投、额度回退）与异常。跳过阶段 `_skip_pending_wake_signal` 先问 `wake_attempt_deferred`（持久退避、preflight、坏账结案），
+就绪扫描 `_wake_waits_this_tick` 用只读的 `wake_attempt_waiting`，与跳过阶段同一判据、同一时间基准。尝试账是失败计数的唯一权威；
+内存里的 `_wake_retry_after` 照旧只管本进程的 30 秒重试间隔，两者取较晚的一个。观察、策略车道不经过这里。

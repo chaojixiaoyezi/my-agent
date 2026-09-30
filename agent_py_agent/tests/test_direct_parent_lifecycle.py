@@ -656,7 +656,9 @@ def test_ready_scan_never_uses_tree_as_completion_barrier(monkeypatch) -> None:
                 _root_done_signal("wake-a2", "root-a"),
                 _root_done_signal("wake-a3", "root-a"),
                 _root_done_signal("wake-b1", "root-b"),
-            )
+            ),
+            # 夹具补全：就绪扫描会查唤醒的毒丸尝试账（没有账就放行）；替身也得有这个属性，断言不动。
+            attempts=SimpleNamespace(has_ledger=lambda _wake_id: False),
         ),
         observations=SimpleNamespace(unhandled_requiring_main=lambda limit=0: ()),
         progress=SimpleNamespace(list_report=lambda enabled_only=True: ((), ())),

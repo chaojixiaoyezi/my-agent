@@ -142,7 +142,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 - 字段：reason_code、same_cause_count、total_count、first_failed_at、last_failed_at、batch_failures、
   uncounted_reason_code、uncounted_count、uncounted_since、stall_alerts、last_stall_alert_at、只重投三项、next_attempt_at，
-  in_flight（claim_id、batch_size、owner_process、started_at）、last_error（异常类型、category、error_code、截断的诊断消息，
+  in_flight（claim_id、batch_size、turn_id、owner_process、started_at；turn_id 为这一片的精确回合号，缺省为空串）、last_error（异常类型、category、error_code、截断的诊断消息，
   只用于诊断）。读回时严格校验：未知键、NaN/inf、计数与时间互相矛盾都按数据损坏处理。
 - `record` 在同一把锁里判定并记下长时间不计数提醒，随结果返回，调用方负责发事件与宿主提示，同一窗口只提醒一次。
 - 时间只往前走：本机时钟回拨时，失败、只重投和提醒的"最近一次"时间取 max(当前时间, 已记的时间)，首次时间不会晚于
@@ -232,8 +232,23 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 2. **WakeStore**（已完成，`store_wake_attempts.py` 挂在 `store.wakes.attempts`）：实现尝试账、结案、重放，发布层认识第三个位置。存储单测覆盖：结案和重放前后信封冻结内容不变、
    同键再发布返回已结案的原信号、observation 同步结掉。
 2b. **第 3 步 C1（已完成，`claude/38-wake-poison-c1`）**：`wake_poison` 加六个新原因常量、`WakeAttemptFacts` 与 `verdict_for_attempt`（判定总表：异常 → 额度分路 → 只重投 → 领到没执行 → 取消/让出 → 无报告 → 已处理仍 pending → 报告规则）、`ledger_corrupt_decision`；`store_wake_attempts` 加 `preflight`（死进程在途尝试：带 stopping_at 记不计数的 gateway_stopped，否则 abandoned）、`has_ledger`、`mark_stopping`、`discard`，`quarantine` 处理读不出的信封（原字节移到 quarantine/unreadable/）与坏账（原字节留到 quarantine/ledger/），`quarantined()` 列出留档，`replay` 对读不出来源返回 WAKE_REPLAY_SOURCE_UNREADABLE；WAKE_REPLAY_* 四个码登记进 ERROR_CONTRACTS。
-3. **接线**：`run_claimed` 把未执行的 admission 结构化地返回给调用方（现在只写进 claim 文件），runtime 在
-   批次消费处记账。这一步改 `background_claim.py`，是 my-agent-3 正在改的区域，要等它合入。
+3. **接线**（C2、C3 已完成，`claude/75-wake-poison-wiring`；C4 领域收尾与宿主提示随后）：
+   - C2 `background_claim.py`：`BackgroundClaimDependencies.attempt`（`BackgroundClaimAttempt` 协议：`begin(claim_id) -> str`、
+     `settled(status, admission)`）。领到 claim 后先 `begin`，返回非空码时本片不执行、按该码结算 claim；片结束时回调
+     结束方式（`WAKE_CLAIM_FINISHED/CANCELLED/YIELDED/NOT_EXECUTED`）与领取后的准入码。
+   - C3 新模块 `conversation/wake_attempt_tracking.py`：`track_wake_attempt` 包住批次消费（含执行后的确认与兄弟唤醒结案），
+     退出时逐条记账：成功清账、唤醒已离开 pending 删账（`discard`，与停机线程的 `mark_stopping` 同一把账锁）、
+     begin 被拦下的成员结案、其余按 `verdict_for_batch(verdict_for_attempt(...))` 记账，到上限按 `failed_permanently` 结案，
+     连续不计数满窗口记 `wake_uncounted_stalled`。记账时刻 = 这一拍的 `now` + 单调时钟经过的时长，与跳过阶段同一时间基准。
+   - C3 调度侧：跳过阶段先 `has_ledger` 再 `preflight`（死进程的在途尝试在这里补记；尝试账读不出按 `attempt:ledger_corrupt`
+     结案、坏账保留），`next_attempt_at` 未到就跳过；就绪扫描用只读的同一判据，两边不会一个放行一个跳过。
+     批次里有成员带尝试账时逐条执行（`isolate_wake_batch`）。
+   - C3 在途记录持久化这一片的精确回合号（`WakeAttemptStart.turn_id`，与 `_run_params` 注入补充消息时同源：定时 run、派活、
+     会话消息唤醒），`inflight_attempts()` 的条目也带上。进程中途死亡时 C6 在 preflight 里按它收尾那一片认领的补充消息
+     （`reject_pending(turn_id, reject_reserved=True)`），见 DESIGN_LEDGER 会话消息方案 A 条目。
+   - 记账失败不影响执行结果：写账 `OSError` 只打日志；执行路径的原异常原样上抛。日志为 `[background-wake-poison]` 前缀的
+     一行 JSON：`wake_attempt_failed`、`wake_quarantined`、`wake_uncounted_stalled`、`wake_attempt_facts_invalid`、
+     `wake_attempt_ledger_unwritable`。
 4. **运维面**：日志、宿主提示、`/wakes` 两个子命令（TUI 和飞书）、状态计数。
 5. **真实链路门**：在 ae 的 `claude/ae-session-real-chain-test` 里加两个注入：
    - 技能快照抛 programmer_bug，复现 `7b83c8730`；

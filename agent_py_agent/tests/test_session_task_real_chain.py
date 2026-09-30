@@ -45,6 +45,7 @@ from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_TASK_STATUS_FIELD,
 )
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
+from agent_py_agent.agent.conversation.wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service, request_context, request_execution
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
@@ -764,31 +765,6 @@ def test_message_wake_that_fails_after_claiming_still_delivers_the_message(tmp_p
     assert not _pending_wakes(chain, "C"), f"C 的消息唤醒没有结案：{_pending_wakes(chain, 'C')}"
 
 
-def test_message_wake_failing_every_time_rejects_the_message_after_the_release_limit(tmp_path, monkeypatch) -> None:
-    """同一条唤醒每次认领消息后都遇到程序错误（唤醒毒丸计数的那类失败）：重跑用的是同一个回合号，释放按次计数；计满上限后
-    再失败，回执转 rejected 并带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，下一拍领取后准入判来源已处理完、唤醒结案，不再开模型回合。"""
-    chain = _real_chain(tmp_path, monkeypatch)
-    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-BUGALWAYS 你好 C。")
-    sent = chain.tool_outputs("send_session_message")[-1]
-    _require(sent.get("ok") is True, f"消息没有发出：{sent}")
-    now = time.time()
-    statuses = []
-    for attempt in range(SESSION_MESSAGE_RELEASE_LIMIT + 1):
-        with pytest.raises(RuntimeError):
-            chain.scheduler.tick(now=now + 31 * attempt)
-        statuses.append(getattr(_message_receipt(chain, "C", str(sent.get("message_id") or "")), "status", None))
-    bugs = [call["kind"] for call in chain.wire.calls if call["kind"] == "program-error"]
-    _require(len(bugs) == SESSION_MESSAGE_RELEASE_LIMIT + 1, f"前提不成立：每一拍都应当遇到一次程序错误，实际 {len(bugs)} 次")
-
-    assert statuses == ["pending"] * SESSION_MESSAGE_RELEASE_LIMIT + ["rejected"], f"逐次失败后的回执状态：{statuses}"
-    final = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
-    assert final.migration.get("rejection_code") == SESSION_MESSAGE_RELEASE_LIMIT_REACHED
-    before = len(chain.wire.calls)
-    chain.scheduler.tick(now=now + 31 * (SESSION_MESSAGE_RELEASE_LIMIT + 1))
-    assert chain.wire.calls[before:] == [], "消息已达释放上限，唤醒仍开了模型回合"
-    assert not _pending_wakes(chain, "C"), f"C 的消息唤醒没有结案：{_pending_wakes(chain, 'C')}"
-
-
 def test_foreground_turn_crashing_with_the_message_counts_one_release(tmp_path, monkeypatch) -> None:
     """前台终态与后台收尾用同一判据：C 的前台回合认领这条消息后遇到程序错误，回执释放并计 1 次；之后的唤醒回合照样送到。
     走真实 worker 的请求入口（_handle_gateway_request），回合抛出的异常经它的收尾交给 reject_pending。"""
@@ -831,6 +807,35 @@ def test_message_wake_timing_out_repeatedly_is_never_dropped(tmp_path, monkeypat
     final = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
     assert getattr(final, "status", None) == "consumed", f"回执最终应是 consumed，实际 {getattr(final, 'status', None)}"
     assert not _pending_wakes(chain, "C"), f"C 的消息唤醒没有结案：{_pending_wakes(chain, 'C')}"
+
+
+def test_message_wake_counted_failures_are_closed_by_the_poison_first(tmp_path, monkeypatch) -> None:
+    """同一条唤醒每次认领消息后都遇到程序错误（两层都计次的失败）：每次失败两层各记一次——回执释放计次、尝试账同因加一并持久退避；
+    第 5 次时毒丸先结案唤醒（failed_permanently），这时消息刚释放第 5 次、仍是 pending，C 的下一次前台回合跨回合认领并消费它，
+    隔离唤醒不丢消息。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-BUGALWAYS 你好 C。")
+    sent = chain.tool_outputs("send_session_message")[-1]
+    _require(sent.get("ok") is True, f"消息没有发出：{sent}")
+    (wake,) = _pending_wakes(chain, "C")
+    attempts = chain.agent.conversation_store.wakes.attempts
+    for _attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+        state, _error = attempts.state_report(wake.wake_signal_id)
+        with pytest.raises(RuntimeError):
+            chain.scheduler.tick(now=max(time.time(), state.next_attempt_at) + 1)
+    _require(len([call for call in chain.wire.calls if call["kind"] == "program-error"]) == WAKE_POISON_SAME_CAUSE_LIMIT,
+             "前提不成立：每一拍都应当遇到一次程序错误")
+
+    assert not _pending_wakes(chain, "C"), "同因计数满上限，唤醒应当已结案"
+    rows, errors = attempts.quarantined()
+    assert errors == [] and [row["reason_code"] for row in rows] == ["error:programmer_bug:RuntimeError"]
+    receipt = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+    assert (receipt.status, receipt.migration.get("release_count")) == ("pending", WAKE_POISON_SAME_CAUSE_LIMIT)
+    before = len(chain.wire.calls)
+    chain.ask("C", "RC-PING 你好。")
+    own = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-BUGALWAYS" in call["own_notes"]]
+    assert own, "唤醒被结案后，C 的下一次前台回合没有把被释放的消息作为自己的输入收到"
+    assert getattr(_message_receipt(chain, "C", str(sent.get("message_id") or "")), "status", None) == "consumed"
 
 
 @pytest.mark.parametrize("window", ["HOLD-FIRST", "HOLD-AFTER-TOOL"])

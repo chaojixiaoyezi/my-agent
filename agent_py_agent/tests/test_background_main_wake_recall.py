@@ -499,7 +499,10 @@ def test_scheduler_plans_each_pending_conversation_as_an_independent_lane() -> N
 
     class Store:
         def __init__(self):
-            self.wakes = SimpleNamespace(pending=self._fake_wakes_pending)
+            # 夹具补全：就绪扫描会查唤醒的毒丸尝试账（没有账就放行）；替身也得有这个属性，断言不动。
+            self.wakes = SimpleNamespace(
+                pending=self._fake_wakes_pending, attempts=SimpleNamespace(has_ledger=lambda _wake_id: False)
+            )
             self.observations = SimpleNamespace(
                 unhandled_requiring_main=self._fake_observations_unhandled_requiring_main
             )
@@ -560,7 +563,10 @@ def test_scheduler_does_not_plan_removed_polling_policy_as_a_thread_lane() -> No
 
     class Store:
         def __init__(self):
-            self.wakes = SimpleNamespace(pending=self._fake_wakes_pending)
+            # 夹具补全：就绪扫描会查唤醒的毒丸尝试账（没有账就放行）；替身也得有这个属性，断言不动。
+            self.wakes = SimpleNamespace(
+                pending=self._fake_wakes_pending, attempts=SimpleNamespace(has_ledger=lambda _wake_id: False)
+            )
             self.observations = SimpleNamespace(
                 unhandled_requiring_main=self._fake_observations_unhandled_requiring_main
             )
