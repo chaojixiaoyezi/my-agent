@@ -79,35 +79,21 @@ class ToolLoopRepairCounters:
     # 探针那一枪零工具调用 → 在「探针之前那一枪」与该枪之间原样交付更长的一条（无损 tie-break），
     # 探针本身不再 +1；探针带工具调用则一切按既有工具轮语义走。
     provider_timeout_resume_repairs: int = 0
+    # 09-30：连续收到“工具参数不是合法 JSON 对象”的响应次数；成功执行一轮工具后清零（与累计型的协议修复分开）。
+    invalid_arguments_repairs: int = 0
 
 
 # LLM: 截断续跑与"分块写纠偏"是两件事：前者针对最终答复被输出上限截断，后者针对工具参数被截断。
 #   分开计数，避免互相吃掉预算。
 # 函数用途: 增加一次截断续跑计数，同时保留其他修复计数。
 def _inc_truncated_output(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        protocol_repairs=counters.protocol_repairs,
-        empty_text_repairs=counters.empty_text_repairs,
-        truncated_write_repairs=counters.truncated_write_repairs,
-        truncated_output_repairs=counters.truncated_output_repairs + 1,
-        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
-    )
+    return replace(counters, truncated_output_repairs=counters.truncated_output_repairs + 1)
 
 
 # LLM: 超时续跑同样是有界的一次性修复，计数与截断续跑、协议修复、空正文 nudge 全部独立。
 # 函数用途: 增加一次"供应商超时重试后模型只承诺不动作"的轮内续跑计数。
 def _inc_provider_timeout_resume(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        protocol_repairs=counters.protocol_repairs,
-        empty_text_repairs=counters.empty_text_repairs,
-        truncated_write_repairs=counters.truncated_write_repairs,
-        truncated_output_repairs=counters.truncated_output_repairs,
-        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs + 1,
-    )
+    return replace(counters, provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs + 1)
 
 
 # LLM: 输出上限截断后的续跑指令照抄成熟 harness 的做法（终端交互 query.ts 的
@@ -159,70 +145,30 @@ _PROVIDER_TIMEOUT_RESUME = (
 # LLM: repair counters 只记录真实协议修复次数，不再承载任何工作风格或检查点提醒状态。
 # 函数用途: 增加一次内部工具标记修复计数，同时保留其他错误修复计数。
 def _inc_protected_marker(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs + 1,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        protocol_repairs=counters.protocol_repairs,
-        empty_text_repairs=counters.empty_text_repairs,
-        truncated_write_repairs=counters.truncated_write_repairs,
-        truncated_output_repairs=counters.truncated_output_repairs,
-        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
-    )
+    return replace(counters, protected_marker_repairs=counters.protected_marker_repairs + 1)
 
 
 # LLM: unresolved issue 只允许一次结构化重定向，计数必须与 protected marker 相互独立。
 # 函数用途: 增加一次未解决运行错误的修复计数。
 def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1,
-        protocol_repairs=counters.protocol_repairs,
-        empty_text_repairs=counters.empty_text_repairs,
-        truncated_write_repairs=counters.truncated_write_repairs,
-        truncated_output_repairs=counters.truncated_output_repairs,
-        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
-    )
+    return replace(counters, unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects + 1)
 
 
 def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        protocol_repairs=counters.protocol_repairs + 1,
-        empty_text_repairs=counters.empty_text_repairs,
-        truncated_write_repairs=counters.truncated_write_repairs,
-        truncated_output_repairs=counters.truncated_output_repairs,
-        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
-    )
+    return replace(counters, protocol_repairs=counters.protocol_repairs + 1)
 
 
 # LLM: 截断分块纠偏与协议修复分开计数：两者预算不能互相吞掉，也不能共用一个上限解释。
 # 函数用途: 增加一次"截断长内容写"的分块纠偏计数。
 def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        protocol_repairs=counters.protocol_repairs,
-        empty_text_repairs=counters.empty_text_repairs,
-        truncated_write_repairs=counters.truncated_write_repairs + 1,
-        truncated_output_repairs=counters.truncated_output_repairs,
-        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
-    )
+    return replace(counters, truncated_write_repairs=counters.truncated_write_repairs + 1)
 
 
 # LLM: 空正文 nudge 有界(默认 2 次):工具执行后模型必须产出终态正文或继续调工具,
 # 静默空收口只会让用户收不到回复。计数与协议修复相互独立。
 # 函数用途: 增加一次"执行过工具但空正文"的修复计数。
 def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return ToolLoopRepairCounters(
-        protected_marker_repairs=counters.protected_marker_repairs,
-        unresolved_runtime_issue_redirects=counters.unresolved_runtime_issue_redirects,
-        protocol_repairs=counters.protocol_repairs,
-        empty_text_repairs=counters.empty_text_repairs + 1,
-        truncated_write_repairs=counters.truncated_write_repairs,
-        truncated_output_repairs=counters.truncated_output_repairs,
-        provider_timeout_resume_repairs=counters.provider_timeout_resume_repairs,
-    )
+    return replace(counters, empty_text_repairs=counters.empty_text_repairs + 1)
 
 
 @dataclass(frozen=True)
@@ -327,6 +273,9 @@ def _decided_response(
     )
     if truncated_write is not None:
         return truncated_write
+    invalid_arguments = _invalid_tool_arguments_decision(request)
+    if invalid_arguments is not None:
+        return invalid_arguments
     # G5(2026-08-10 用户裁决):adapter 恒不返回 calls+violations 并存——任何
     # 协议错误(未闭合/截断/JSON 损坏/fence/超限)即「不完整响应」,整轮零执行
     # (calls==()),违规反馈走 _protocol_violation_decision;全好块才执行。
@@ -663,6 +612,52 @@ def _disabled_tools_response(response, has_protected_marker: bool):
 
 # LLM: 有工具调用时只处理协议截断、长内容恢复和内部标记清理；不得按读取轮数注入额外工作。
 # 函数用途: 决定本轮真实工具调用是执行、纠偏后重试，还是因客观错误停止。
+# 连续这么多次都给不出合法工具参数，就按原错误结束本轮（成功执行一轮工具后重新计数）。
+_INVALID_ARGUMENT_REPAIR_LIMIT = 3
+# 回灌给模型的宿主纠正：只带结构化工具名，不复述模型正文或残缺参数。
+_INVALID_ARGUMENTS_REPAIR = (
+    "[tool-arguments-invalid]\n"
+    "上一条回复里的工具调用{names}参数不是完整、合法的 JSON 对象，宿主没有执行其中任何一个调用。"
+    "请重新发出需要的工具调用：参数必须是完整的 JSON 对象，字段名用 Tool Catalog 里该工具自己的参数名；"
+    "内容很长时（例如写大文件）请拆成几次调用分块完成。不要道歉、不要复述。"
+)
+
+
+# LLM: 后端已把参数不是合法 JSON 对象的整组工具调用隔离为零执行（runtime_status=error、runtime_reason=
+#   MODEL_TOOL_ARGUMENTS_INVALID、runtime_source=model_provider）。参照 Codex（解析失败回给模型而不是结束本轮）：
+#   连续未满 _INVALID_ARGUMENT_REPAIR_LIMIT 次时回灌一条宿主纠正并续跑同一轮，零执行、不修复或执行残缺参数、不读正文；
+#   形成可执行调用后计数清零（见 _tool_calls_decision）。达到上限返回 None，沿原无工具分支按原错误结束本轮。
+#   断流、过滤等其它 MODEL_* 错误不在此列。改动同步 test_native_truncated_write_recovery 与 MODEL_TERMINAL_DIAGNOSTICS.md。
+# 函数用途: 模型偶发给出坏工具参数时让它改了重发，而不是让长任务整轮失败。
+def _invalid_tool_arguments_decision(
+    request: ToolLoopResponseDecisionRequest,
+) -> ToolLoopResponseDecision | None:
+    response = request.response
+    if not _is_invalid_tool_arguments(response):
+        return None
+    if request.counters.invalid_arguments_repairs >= _INVALID_ARGUMENT_REPAIR_LIMIT:
+        return None
+    names = _truncated_tool_names_from_response(response)
+    shown = "（" + "、".join(names) + "）" if names else ""
+    request.params.tool_context.append(_INVALID_ARGUMENTS_REPAIR.format(names=shown))
+    _persist_protocol_violation_event(
+        request, [{"code": "MODEL_TOOL_ARGUMENTS_INVALID", "detail": ",".join(names), "source_protocol": "native"}],
+        str(getattr(response, "text", "") or ""),
+    )
+    counters = replace(request.counters, invalid_arguments_repairs=request.counters.invalid_arguments_repairs + 1)
+    return ToolLoopResponseDecision("continue", None, [], counters)
+
+
+# 函数用途: 判断一次响应是否是后端归一的“工具参数无效、整组零执行”终态。
+def _is_invalid_tool_arguments(response: object) -> bool:
+    return (
+        getattr(response, "runtime_status", "") == "error"
+        and getattr(response, "runtime_reason", "") == "MODEL_TOOL_ARGUMENTS_INVALID"
+        and getattr(response, "runtime_source", "") == "model_provider"
+        and not (getattr(response, "tool_use_blocks", None) or [])
+    )
+
+
 def _tool_calls_decision(
     request: ToolLoopResponseDecisionRequest,
     calls: list[ToolCall],
@@ -673,7 +668,9 @@ def _tool_calls_decision(
     clean_response = sanitize_protected_tool_marker_response(
         request.response, native=_native_tool_use_active(request.params)
     )
-    return ToolLoopResponseDecision("run_tools", clean_response, calls, request.counters)
+    # 形成了可执行调用：连续“参数无效”计数清零，下一次坏参数重新获得纠正机会。
+    counters = replace(request.counters, invalid_arguments_repairs=0)
+    return ToolLoopResponseDecision("run_tools", clean_response, calls, counters)
 
 
 # 同一工具循环累计收到第 3 次已确认的长度截断写响应时停止，最多给 2 次分块纠偏。

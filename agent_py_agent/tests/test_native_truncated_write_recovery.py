@@ -12,9 +12,11 @@ import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+    _INVALID_ARGUMENT_REPAIR_LIMIT,
     _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT,
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
+    _inc_protocol,
     tool_loop_response_decision,
 )
 from agent_py_agent.agent.backends import ModelResponse
@@ -129,14 +131,66 @@ def _write_stream_variant(
     )]
 
 
+# 参数不是合法 JSON 对象的四种反例：后端都归一成 MODEL_TOOL_ARGUMENTS_INVALID，整组零执行。
+_INVALID_ARGUMENT_VARIANTS = [
+    ('{"path":"a.md",,"content":"x"}', "tool_use", True, True),
+    ('{"path":"a.md","content":"unfinished', "tool_use", True, True),
+    ('["a.md","x"]', "tool_use", True, True),
+    ('{"path":"a.md","content":"unfinished', None, False, False),
+]
+_INVALID_ARGUMENT_IDS = ["bad-json", "unfinished-json", "non-object-json", "open-eof"]
+
+
+# LLM: 09-30 起参数无效不再直接结束本轮：先回灌宿主纠正让模型重发（零执行），连续达到上限才按原错误结束。
+# 函数用途: 用真实 backend 归一坏参数响应，逐次裁决直到上限，核对纠正次数、零执行与最终保留的原错误。
+@pytest.mark.parametrize("partial_json,stop_reason,close_block,message_stop", _INVALID_ARGUMENT_VARIANTS,
+                         ids=_INVALID_ARGUMENT_IDS)
+def test_invalid_tool_arguments_get_bounded_repairs_then_keep_typed_failure(
+    tmp_path, partial_json, stop_reason, close_block, message_stop,
+):
+    params = _params()
+    counters = ToolLoopRepairCounters()
+    for attempt in range(_INVALID_ARGUMENT_REPAIR_LIMIT + 1):
+        backend, _requests = _stream_backend(_write_stream_variant(
+            partial_json, stop_reason, close_block=close_block, message_stop=message_stop,
+        ))
+        response = backend.generate("写入文件", tools=[{"name": "write_file", "input_schema": {"type": "object"}}])
+        assert response.runtime_reason == "MODEL_TOOL_ARGUMENTS_INVALID" and response.tool_use_blocks == []
+        decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(
+            agent=_decision_agent(tmp_path), params=params, response=response, counters=counters,
+        ))
+        assert decision.calls == [] and params.executed_tools == []
+        if attempt < _INVALID_ARGUMENT_REPAIR_LIMIT:
+            assert decision.action == "continue" and decision.response is None
+            assert decision.counters.invalid_arguments_repairs == attempt + 1
+            assert params.tool_context[-1].startswith("[tool-arguments-invalid]")
+            assert "（write_file）" in params.tool_context[-1]
+            counters = decision.counters
+        else:
+            assert decision.action == "break" and decision.response is response
+            assert decision.response.turn_end_reason == "error"
+    assert len(params.tool_context) == _INVALID_ARGUMENT_REPAIR_LIMIT
+    assert decision.counters.truncated_write_repairs == 0 and decision.counters.protocol_repairs == 0
+
+
+# 函数用途: 形成可执行调用后连续计数清零，下一次坏参数重新获得完整纠正机会；其它纠正不会清掉它。
+def test_invalid_argument_streak_resets_after_executable_calls(tmp_path):
+    params = _params()
+    backend, _requests = _stream_backend(_complete_write_sse_lines())
+    good = backend.generate("写入文件", tools=[{"name": "write_file", "input_schema": {"type": "object"}}])
+    streak = ToolLoopRepairCounters(invalid_arguments_repairs=2, protocol_repairs=1)
+    decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(
+        agent=_decision_agent(tmp_path), params=params, response=good, counters=streak,
+    ))
+    assert decision.action == "run_tools" and decision.calls
+    assert decision.counters.invalid_arguments_repairs == 0 and decision.counters.protocol_repairs == 1
+    assert _inc_protocol(streak).invalid_arguments_repairs == 2
+
+
 @pytest.mark.parametrize("partial_json,stop_reason,close_block,message_stop,expected_reason", [
-    ('{"path":"a.md",,"content":"x"}', "tool_use", True, True, "MODEL_TOOL_ARGUMENTS_INVALID"),
-    ('{"path":"a.md","content":"unfinished', "tool_use", True, True, "MODEL_TOOL_ARGUMENTS_INVALID"),
-    ('["a.md","x"]', "tool_use", True, True, "MODEL_TOOL_ARGUMENTS_INVALID"),
-    ('{"path":"a.md","content":"unfinished', None, False, False, "MODEL_TOOL_ARGUMENTS_INVALID"),
     ('{"path":"a.md","content":"x"}', None, True, False, "MODEL_STREAM_INCOMPLETE"),
     ('{"path":"a.md","content":"x"}', "content_filter", True, True, "MODEL_RESPONSE_CONTENT_FILTERED"),
-], ids=["bad-json", "unfinished-json", "non-object-json", "open-eof", "closed-eof", "content-filter"])
+], ids=["closed-eof", "content-filter"])
 def test_non_length_stream_error_keeps_typed_failure_without_recovery(
     tmp_path, partial_json, stop_reason, close_block, message_stop, expected_reason,
 ):

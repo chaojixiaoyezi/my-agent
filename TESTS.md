@@ -38,6 +38,18 @@
 - **变异**（`mutate_agentrun.py`）：7 个全部被杀：接替后不补账、不看执行轮是否静止、收成 done、补账异常向上抛、事件来源丢失、去掉 CAS 条件、已终态也重写。
 - **证据复核**：`bg-subagent-paths-9f88` 的 runtime.db 副本只读打开，13 个 agent_run 中只有被接替的那个停在 created。
 
+## 工具参数无效有界纠正（2026-09-30，分支 `claude/3a-invalid-args-repair`，基于 `10041de02`）
+
+- `test_native_truncated_write_recovery.py`：
+  - `test_invalid_tool_arguments_get_bounded_repairs_then_keep_typed_failure`（坏 JSON、未完 JSON、非对象 JSON、开放块 EOF 四例）：真实
+    Anthropic 流 backend 归一后逐次裁决，前 3 次 continue、回灌 `[tool-arguments-invalid]`（含“（write_file）”）、零执行；第 4 次 break 并保留原响应与 `turn_end_reason=error`。
+  - `test_invalid_argument_streak_resets_after_executable_calls`：形成可执行调用后连续计数清零、协议修复计数保留；`_inc_protocol` 不清掉连续计数。
+  - 原 `test_non_length_stream_error_keeps_typed_failure_without_recovery` 保留断流与内容过滤两例（仍直接结束）。
+- 回归：`test_*tool_loop*`、`test_*response_decision*`、`test_gateway_request_runtime_errors`、`test_backends_native*`、`test_provider_completion_boundary`、
+  `test_tui_worker_paths`、`test_gateway_chat_conversation_context`、`test_native_*`、`test_*protocol*`、`test_*repair*`、`test_*truncat*`、`test_*terminal*`、
+  `test_*empty*`、`test_*turn_end*` 与 9 个守卫共 855 passed。
+- 变异 7/7 被杀：上限多给一次、成功执行不清零、协议纠正清掉连续计数、不看原因码、不接入裁决、提示不带工具名、计数不增加。
+
 ## 智能程度逐模型真实审计（2026-09-30，38）
 
 - **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +

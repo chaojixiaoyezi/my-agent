@@ -26,6 +26,17 @@
 
 此类结果现在按原结构化错误投影为本轮 `failed`，提示“模型返回的工具调用参数不完整或格式无效，本次调用未执行，本轮已停止；已有工具操作和历史保留。”真实正文与原生历史保持原样；TUI 先显示已有正文，再显示单独错误并关闭 Working。断流、响应过滤以及新增的 `MODEL_*` 供应商错误同样保留原错误码，不猜成配置、密钥或额度问题。没有改动参数解析器、重构缺失参数、执行残缺调用或增加自动续跑。
 
+### 参数无效改为有界纠正（2026-09-30）
+
+- **变化**：上面“本轮已停止”的处理对长时间自主任务代价太大：09-30 真实开发任务里，deepseek-v4-flash 工作会话写了一半测试，一次工具参数
+  不是合法 JSON，474 秒的工作整轮以 `MODEL_TOOL_ARGUMENTS_INVALID` 结束。官方 Codex 的做法是把参数解析失败作为结果回给模型、让它改了重发。
+- **现在**：`response_decision._invalid_tool_arguments_decision` 只认后端归一的 `runtime_status=error / MODEL_TOOL_ARGUMENTS_INVALID /
+  model_provider` 且零工具块的响应：整组仍零执行，回灌一条宿主纠正（`[tool-arguments-invalid]`，只带结构化工具名，要求重发完整 JSON、
+  长内容分块），同一轮续跑。连续 `_INVALID_ARGUMENT_REPAIR_LIMIT`（3）次仍无效时，沿原无工具分支按上面的错误投影结束本轮；
+  形成可执行调用后计数清零（`ToolLoopRepairCounters.invalid_arguments_repairs`，与累计型协议修复分开）。
+- **不变**：不解析正文、不修复或执行残缺参数；断流（`MODEL_STREAM_INCOMPLETE`）、内容过滤等其它 `MODEL_*` 错误照旧直接结束；长度截断的
+  分块写恢复与预算不变；Gateway 错误投影与用户提示不变（仍在超过上限时出现）。纠正事件与协议违规同路写入 runtime_events。
+
 ## 原生写恢复的原因分类（2026-09-26，本地修正）
 
 `truncated=True` 表示整轮工具不得执行，不能单独证明达到了输出长度上限。
