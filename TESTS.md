@@ -198,7 +198,8 @@
 - **用例**：`test_wake_poison.py` 新增 `TestAttemptFacts`（判定总表逐行、异常优先、未知 path/claim_status 抛 ValueError、账坏判定计数为 0）与
   环境判定共用断言；`test_wake_attempt_store.py` 新增 `TestPreflightAndStopping`（无账不写、活着不动、死+标记不计数、死无标记计数、批次、begin
   同样认标记、mark_stopping 四种拒绝、坏账 False 留给 preflight、worker 先记结果不被覆盖、discard 不读）与 `TestQuarantineUnreadableAndCorrupt`
-  （字节原样移走、pending/账消失、观察结掉、列进 load_errors、重放拒绝；坏账留档不清零；健康账原样入记录）。
+  （字节原样移走、pending/账消失、观察结掉、列进 load_errors、重放拒绝；坏账留档不清零；健康账原样入记录；9a 跟进：结案记录先落盘、
+  坏账后移，两步之间崩溃时记录仍在、坏账原地未动，重跑同一结案收口、不会从零计数）。
 - **负向验证**：14 个变异（忽略 stopping_at、活着也写盘、mark_stopping 不认 owner、读不出照旧抛、留档不列出、重放不拒、坏账不留档、discard 读内容、
   读不出不结观察、异常晚于额度分路、已处理仍 pending 记成功、取消计数、账坏判定带计数、只重投用调用方标志）全部命中。
 - **门禁**：两个测试文件 + 相关 wake/observation/retention 测试 + 九个全仓守卫；ruff、doc sync（--base cb08b80dc）、strict code-size

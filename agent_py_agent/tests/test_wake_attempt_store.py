@@ -558,3 +558,34 @@ class TestQuarantineUnreadableAndCorrupt:
         assert not store.storage.wake_quarantine_ledger_path(signal.wake_signal_id).exists()
         record = _json(store.storage.wake_quarantine_path(signal.wake_signal_id))
         assert record["quarantine"]["attempts"]["same_cause_count"] == WAKE_POISON_SAME_CAUSE_LIMIT
+
+
+    def test_crash_between_record_and_ledger_move_keeps_the_record_and_never_resets_the_count(self, tmp_path, monkeypatch):
+        """结案记录先落盘、坏账后移：两步之间崩溃时记录已在、坏账原地未动；重跑同一结案收口，不会从零重新计数。"""
+        from agent_py_agent.agent.conversation import store_wake_attempts
+
+        store = _store(tmp_path)
+        signal = _raise(store)
+        attempts = store.storage.wake_attempt_path(signal.wake_signal_id)
+        attempts.parent.mkdir(parents=True, exist_ok=True)
+        corrupt = b'{"schema": "wake-attempts.v1", "state": {"same_cause_count": "four"}}'
+        attempts.write_bytes(corrupt)
+        pending = store.storage.wake_signal_path(signal)
+        real_move = store_wake_attempts._move_aside
+
+        def crash_before_move(source, target):
+            raise OSError("process died between writing the record and moving the ledger")
+
+        monkeypatch.setattr(store_wake_attempts, "_move_aside", crash_before_move)
+        with pytest.raises(OSError):
+            store.wakes.attempts.quarantine(signal.wake_signal_id, ledger_corrupt_decision(), now=200.0)
+        record_path = store.storage.wake_quarantine_path(signal.wake_signal_id)
+        preserved = store.storage.wake_quarantine_ledger_path(signal.wake_signal_id)
+        assert record_path.exists() and pending.exists() and attempts.read_bytes() == corrupt
+        assert _json(record_path)["quarantine"]["ledger_preserved_at"] == str(preserved) and not preserved.exists()
+        monkeypatch.setattr(store_wake_attempts, "_move_aside", real_move)
+        result = store.wakes.attempts.quarantine(signal.wake_signal_id, ledger_corrupt_decision(), now=201.0)
+        assert result.settled is not None and result.ledger_preserved_at == str(preserved)
+        assert preserved.read_bytes() == corrupt and not attempts.exists() and not pending.exists()
+        assert _json(record_path)["quarantine"]["decision"]["reason_code"] == WAKE_REASON_LEDGER_CORRUPT
+        assert store.wakes.attempts.state_report(signal.wake_signal_id) == (WakePoisonState(), None)

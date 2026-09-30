@@ -221,9 +221,10 @@ class WakeAttemptStore:
         return WakeAttemptOutcome(state, quarantine_decision(state), stall_alert=alert)
 
     # LLM: 只结案仍在 pending 的唤醒（找不到返回空结果）；原信封字段原样保留，只改 status/handled_at 并附顶层
-    #   quarantine 键。写结案记录 → 删 pending → 删尝试账 → 结掉关联观察，观察不结会被观察车道当成兜底再跑一遍。
-    #   pending 信封读不出时走 _quarantine_unreadable（原字节移到 unreadable/，不在坏内容上补字段）；尝试账读不出时
-    #   原字节移到 quarantine/ledger/ 并在结案记录写 ledger_preserved_at，不清零。
+    #   quarantine 键。顺序固定：写结案记录（坏账时已带预先算出的 ledger_preserved_at）→ 移坏账 → 删 pending → 删尝试账 →
+    #   结掉关联观察。结案记录必须最先落盘：若先移账再写记录，两步之间崩溃会留下 pending 而账已不在，这条唤醒会从零重新
+    #   计数（9a 复审）；现在崩溃在记录之后，重来时记录仍在、坏账原地未动，重跑同一结案即可收口。
+    #   pending 信封读不出时走 _quarantine_unreadable（原字节移到 unreadable/，不在坏内容上补字段）。
     # 函数用途: 把一条反复同因失败的唤醒结案为 failed_permanently，不再被领取；会写、删、移文件并更新观察回执。
     def quarantine(self, wake_signal_id: str, decision: QuarantineDecision, *, now: float) -> WakeQuarantineResult:
         target = self.storage.wake_quarantine_path(wake_signal_id)
@@ -241,6 +242,8 @@ class WakeAttemptStore:
             record = {**payload, "status": WAKE_STATUS_FAILED_PERMANENTLY, "handled_at": now,
                       "quarantine": _quarantine_facts(decision, ledger, now, provenance=provenance)}
             write_json_file_atomic_unlocked(target, record)
+            if preserved:
+                _move_aside(attempts, Path(preserved))
             unlink_quietly(pending)
             unlink_quietly(attempts)
         settled = WakeSignal.from_dict(record)
@@ -308,16 +311,14 @@ class WakeAttemptStore:
             self._mark_observations_handled_for_wake(wake_signal_id, now=now)
         return WakeQuarantineResult(None, source_unreadable=True)
 
-    # LLM: 结案时读尝试账：读得出且形状合法就原样进结案记录；读不出或形状不对就把原字节 os.replace 到
-    #   quarantine/ledger/<id>.json 留档，结案记录只带留档路径（attempts 为空），不清零重来。
-    # 函数用途: 取结案记录要带的尝试账，坏账留档并返回留档路径。
+    # LLM: 结案时读尝试账：读得出且形状合法就原样进结案记录（留档路径为空）；读不出或形状不对就只算出留档路径
+    #   quarantine/ledger/<id>.json 返回（attempts 为空），不在这里移文件——移动由 quarantine 在结案记录落盘之后做，不清零重来。
+    # 函数用途: 取结案记录要带的尝试账，坏账时给出预先算好的留档路径。
     def _ledger_for_quarantine(self, wake_signal_id: str, attempts: Path) -> tuple[dict[str, Any], str]:
         ledger, error = read_json_object_report(attempts, context="conversation.wake_quarantine.attempts")
         if error is None and _ledger_shape_ok(ledger):
             return ledger, ""
-        preserved = self.storage.wake_quarantine_ledger_path(wake_signal_id)
-        _move_aside(attempts, preserved)
-        return {}, str(preserved)
+        return {}, str(self.storage.wake_quarantine_ledger_path(wake_signal_id))
 
     # LLM: 结案记录不存在而 unreadable/ 下有同 ID 留档，就是"信封当初读不出"的那条；两者都没有由调用方按 NOT_FOUND 处理。
     # 函数用途: 判断一条唤醒的重放来源是否属于读不出的留档。

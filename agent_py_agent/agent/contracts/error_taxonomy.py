@@ -775,7 +775,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="state",
         retryable=False,
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
-        recovery_hint="这条唤醒结案时信封或结案记录已经读不出，原字节留在 quarantine/unreadable/，无法重放；需要人工核对留档。",
+        recovery_hint=(
+            "这条唤醒的来源读不出，无法重放：结案时信封读不出的，原字节在 quarantine/unreadable/<id>.json；"
+            "结案记录本身读不出的，字节还在 quarantine/<id>.json。需要人工核对这两处留档，不要重试。"
+        ),
     ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(
         code="SESSION_TASK_RATE_LIMIT",
