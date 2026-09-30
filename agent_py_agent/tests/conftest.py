@@ -20,6 +20,12 @@ from agent_py_agent.tests._desktop_open_guard import (
     DesktopOpenGuard,
     failure_message,
 )
+from agent_py_agent.tests._repo_tree_guard import (
+    magicmock_failure_message,
+    magicmock_fingerprint,
+    magicmock_violation,
+    remove_magicmock_dir,
+)
 
 _DESKTOP_GUARD: DesktopOpenGuard | None = None
 # 会话级 fixture 在最后一条测试收尾时就结束了，会话结束检查要用这份不清空的引用。
@@ -102,6 +108,23 @@ def pytest_sessionfinish(session, exitstatus):
     if records:
         session.config.get_terminal_writer().line(failure_message(records, "测试会话中（未能归属到单条测试的后台进程）"))
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.fixture(autouse=True)
+def _repo_tree_guard(request):
+    """仓库树防线：测试不能往起跑目录写 MagicMock/（把 MagicMock 当路径用的后果，见 _repo_tree_guard）。
+
+    起跑目录取 pytest 启动时的 cwd，测试里切目录不影响；前后指纹不同就让这条测试在收尾时报错，
+    这条测试新建的目录顺手删掉，会话开始前的残留只比对不删除。
+    """
+    root = str(request.config.invocation_params.dir)
+    before = magicmock_fingerprint(root)
+    yield
+    after = magicmock_fingerprint(root)
+    if magicmock_violation(before, after):
+        if before is None:
+            remove_magicmock_dir(root)
+        pytest.fail(magicmock_failure_message(request.node.nodeid, root, created=before is None), pytrace=False)
 
 
 @pytest.fixture(autouse=True)

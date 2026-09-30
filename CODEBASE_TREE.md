@@ -917,6 +917,8 @@ agent_py_agent/
 |   |-- test_browser_lite_launcher.py  # browser-lite 关闭时先等本 profile 子进程再清 profile：假 /proc 与 stat、晚退出网络服务、超时只 SIGKILL 同进程组的精确匹配；启动参数关闭 macOS MacAppCodeSignClone
 |   |-- _desktop_open_guard.py  # 测试防线：会话级 shim 顶替 open/xdg-open/osascript/通知/剪贴板程序并记录（令牌打码），conftest 据此让违规测试失败
 |   |-- test_desktop_open_guard.py  # 防线自检：shim 只记录不执行、剥离环境后照样记录、PATH 前置与 webbrowser 替身、real_desktop_programs 放行
+|   |-- _repo_tree_guard.py  # 测试防线：起跑目录下的 MagicMock/ 前后指纹比对（MagicMock 被当路径写进仓库根），conftest 据此让违规测试报错
+|   |-- test_repo_tree_guard.py  # 仓库树防线自检：MagicMock 当路径被识别并清理、残留不动不算违规、残留里新增条目算违规、报错文字
 |   |-- test_decision_call_resources.py # 有界调用与原模型准入的组合、普通模型保留名额
 |   |-- test_subagent_process_control.py # 公共进程树终止覆盖后代、升级、宿主保留及未确认回执
 |   |-- test_subagent_resource_stop.py  # 固定原子树、终态资源、恢复隔离及 Goal/creation 锁序

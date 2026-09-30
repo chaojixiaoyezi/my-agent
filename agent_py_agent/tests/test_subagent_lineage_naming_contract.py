@@ -4,6 +4,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+
+# 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
+# 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
 
 def _create_agent(tmp_path):
     from unittest.mock import MagicMock

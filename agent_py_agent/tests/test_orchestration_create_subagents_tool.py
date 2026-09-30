@@ -9,6 +9,13 @@ from unittest.mock import MagicMock
 import pytest
 
 
+# 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
+# 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+
 # LLM: 参数测试用显式内存任务表；创建与读取返回同一记录，不让 MagicMock 动态属性假装 canonical 状态。
 # 函数用途: 构造不运行模型的批量创建替身，实际启动和并发控制由管理器集成测试覆盖。
 def _mock_create_items_agent(task_count: int = 3):

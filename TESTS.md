@@ -25,6 +25,22 @@
   发出的 assistant 都带正文或工具调用，只剩有正文的那条且保留思考，历史对象不变。四例在 `4c0edd913` 的原实现上全部失败，
   修复后该文件 37 passed（Linux 容器，Mac 测试 venv 当时不可用）。
 
+## 仓库树防线：测试不能往起跑目录写 MagicMock/（2026-09-29，分支 `claude/9a-magicmock-guard`，基于 step16l `4078ae3f9`）
+
+- **约定**：测试替身不能当路径用。MagicMock 被当成路径时，`Path(mock)` 是相对路径 `MagicMock/<名字>/<id>`，产品代码照常写盘，
+  就会写进仓库根；git 检出里被 `.gitignore` 挡住看不见，导出目录里会被架构守卫当成运行产物报出来。
+- **定位**：用 scratchpad 里的 pytest 探针插件（`-p` 加载，不进仓库，包住 `os.mkdir`、按 `PYTEST_CURRENT_TEST` 归属）
+  跑了一次 12 片全量，找出 12 个文件、93 条测试，全是 create_subagents 工具的用例：拿 `MagicMock()` 当 agent，
+  派发种子写任务进度时 `dispatch_progress_seed._progress_root` 把 `agent.home_paths.owner_home_dir` 当路径。
+- **防线**：`conftest.py` 的 autouse 夹具 `_repo_tree_guard`，判定在 `_repo_tree_guard.py`。每条测试前后取起跑目录下
+  `MagicMock/` 的指纹（它自己和直接子项的名字加 mtime_ns）。新出现或有变化，就让这条测试在收尾时报错并给出改法；
+  这条测试新建的目录顺手删掉，会话开始前的残留只比对不删除。取指纹只用导入时抓好的 `os.lstat`、`os.scandir`。
+- **修复**：12 个文件各加模块级 autouse 夹具 `_isolated_cwd`（`monkeypatch.chdir(tmp_path)`）。
+- **验证**：
+  - `test_repo_tree_guard.py` 5 项自检，12 个文件 161 项，共 166 项通过，仓库根没有 `MagicMock/`；
+  - 临时放一条往当前目录写 `MagicMock/` 的测试：收尾时报错并给出改法，目录被删掉，下一条测试看到的是干净目录；
+  - 12 片全量和导出目录验证的结果见本分支最后一个提交。
+
 ## 向量缓存「读不了」用例的 root 守卫与目录构造（2026-09-29，分支 `claude/38-vector-cache-root-guard`，基于 `89af6b07a`）
 
 - **来源**：Linux 容器通道以 root 跑 pytest，`chmod 000` 拦不住 root 读，`test_memory_vector_cache.py` 的 V1 用例前置断言失败、
