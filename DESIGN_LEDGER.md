@@ -24,6 +24,11 @@
   [docs/design/PROVIDER_WIRE_CONTRACT.md](docs/design/PROVIDER_WIRE_CONTRACT.md)。
 - **证据**：MiniMax-M2.7/M3 官网实测，孤儿结果两者都 400、调用与结果之间夹 user 消息 M3 400；产品组包对 6 段坏历史生成的
   24 个请求，修整前 5 个 400，修整后全部 200（`~/.my-agent/decision-evidence/wire-contract-2026-09-30/`）。
+- **待定（9a 复审建议，不阻断）**：主链路上还有第二套出站孤儿清扫（`message_adapter.strip_orphaned_tool_blocks`，由
+  `tool_ir_history.project_native_provider_messages` 与 `loop_support` 调用），它按全局 id 集合配对且 `discard("")`。空 id 的真实结果
+  在上游就被当孤儿删掉，出口修整只能再补一个"结果未知"。现有服务商都会给调用 id，线上没有影响。
+  - 可选做法一：让旧清扫改成与出站合同同口径（不丢空 id、按次数配对）；
+  - 可选做法二：按"一个概念一个权威位置"，工具循环不再做这层清扫，只保留 wire_contract。压缩摘要的流式清扫是为了省内存，要单独评估。
 - **复审跟进（9a，同日，进 step16l）**：
   - 修整改为按出现次数配对，空 id 和同条消息内的重复 id 都算调用。原来空 id 的真实结果会被删掉，Chat 还会在本地永久拦截这个线程，相对改动前是回归。
   - 运行错误报告单列形状错误，视觉探针不把它缓存成"不支持图片"。

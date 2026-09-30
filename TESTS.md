@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 会话互通最终验收（2026-09-30，step16l `20d642aa8`，3a 执行）
+
+- **第一层**：`test_session_task_real_chain.py` 加 `test_session_task_claim_binding.py`（真实 Gateway 链路、替身模型），连跑 20 次，每次 30 passed。
+- **第二层**：MiniMax-M2.7 真实模型一轮。三个真实 TUI，隔离 home，私有端口 8437；catalog 副本只含 MiniMax，决策模型关闭，用完随根目录删除。R1–R6 全部通过：
+  - 派活、给空闲目标发消息；
+  - 取消：`stop_confirmed=true`；
+  - 忙碌时收消息：没有空回合；
+  - 被 /stop 后仍送达：`released_turn_ids`，不计次；
+  - 忙碌目标收派活：正文由派活回合认领。
+- **汇总**：14 个请求 0 失败，9 条回执全部 consumed，唤醒全部结案。判定只看结构化事实和暗号是否命中 assistant 回复。
+- **证据**：`~/.my-agent/decision-evidence/session-task-chain-e2e/final-step16l-20d642aa8/`（README、gate20.txt、m27-round/）。
+
 ## 唤醒毒丸第 3 步 C6 与第 4 步复审跟进（2026-09-30，step16m，3a）
 
 - **C6 用例**：
