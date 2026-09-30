@@ -227,6 +227,32 @@ def compact_exception_code(exc: BaseException) -> str:
     return f"COMPACT_{name or 'FAILED'}"
 
 
+# 压缩调用撞模型额度用完时 compact_exception_code 给出的码：COMPACT_ 前缀加 ProviderQuotaExhaustedError.error_code。
+COMPACT_PROVIDER_QUOTA_EXHAUSTED = "COMPACT_PROVIDER_QUOTA_EXHAUSTED"
+
+
+# LLM: 只认结构化事实：ConversationCompactError 的码等于 COMPACT_PROVIDER_QUOTA_EXHAUSTED，或它的 __cause__ 链上有
+#   ProviderQuotaExhaustedError；不看文案，其它异常类型一律 False。唤醒的额度分路入口（conversation/runtime._run_wake_signal）
+#   用它补上「压缩时撞额度」；backends.errors.is_provider_quota_exhausted_error 的 isinstance 语义不变，其它调用方不受影响。
+#   改动时联测 test_compact_quota_wake.py。
+# 函数用途: 判断一次压缩失败是不是因为模型额度用完，让后台按额度用完处理（发额度通知、Goal 记 usage_limited）。
+def compact_error_is_provider_quota(exc: BaseException) -> bool:
+    from ..backends.errors import is_provider_quota_exhausted_error
+
+    if not isinstance(exc, ConversationCompactError):
+        return False
+    if exc.code == COMPACT_PROVIDER_QUOTA_EXHAUSTED:
+        return True
+    seen: set[int] = set()
+    cause = exc.__cause__
+    while cause is not None and id(cause) not in seen:
+        if is_provider_quota_exhausted_error(cause):
+            return True
+        seen.add(id(cause))
+        cause = cause.__cause__
+    return False
+
+
 # LLM: 两条压缩链（会话 transcript 与活动回合）的 failed 进度都从这里取失败字段：安全错误码，加上错误自带的
 #   容量计量（若有；测不出为 None 的项整项缺失）。只读异常对象，不改熔断账；字段必须经 compact_progress 白名单才会外发。
 # 函数用途: 把一次压缩失败整理成进度事件要带的字段，让“候选过大”失败留下候选大小与上限。

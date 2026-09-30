@@ -107,6 +107,17 @@
   - strict code-size 与 `89af6b07a` 逐条比对新增 0。`runtime_compact_policy` 一度逼近软上限，已抽出 `_capped_trigger_tokens` 并合并配置读取。
   - ruff、doc sync、diff check、clean package 通过。
 
+## 压缩调用撞额度按额度用完处理（2026-09-29，分支 `claude/be-quota-settle`，基于 `b929d9f02`）
+
+- 新文件 `test_compact_quota_wake.py`，4 项：
+  - `compact_exception_code(ProviderQuotaExhaustedError)` 就是 `COMPACT_PROVIDER_QUOTA_EXHAUSTED`，锁住判定和实际产出的码一致；
+  - 错误码命中、`__cause__` 直接或隔一层是额度错误，都认；按分钟限流、只在文案里写了额度码、异常链成环、非压缩异常包着额度错误、
+    裸额度错误，都不认（后两种各走原判定）；
+  - 真实链路：大线程（旧回合远超触发线）的 Goal 续跑唤醒，请求前先压缩，压缩调用撞每周额度 429。线程记下
+    `COMPACT_PROVIDER_QUOTA_EXHAUSTED`，模型只调用 1 次，Goal 记 usage_limited，本地会话落一条额度通知，唤醒确认。
+- 去掉 `_run_wake_signal` 的新判定后，真实链路那一项失败（Goal 记 blocked，异常上抛）。
+- 6 个变异全部被抓住：去掉运行时接线、去掉错误码判定、去掉异常链、只看直接原因、放宽到任意异常类型、改成文案匹配。
+
 ## 定时任务撞额度用完的结算（2026-09-29，分支 `claude/be-quota-settle`，基于 `b929d9f02`）
 
 - 新文件 `test_scheduler_quota_settle.py`，3 项。用真实 `scheduler.tick` 加可控时钟（monkeypatch `time.time`），定时任务每 300 秒一次，模型后端按真实 `_runtime_http_error` 抛 429：

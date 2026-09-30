@@ -87,6 +87,23 @@
   - 会话任务本身的状态不改，与非额度失败的结算一致。普通定时任务没有 Goal 授权，唤醒对账（`_reconcile_wake_queue`）不会给它补续跑唤醒。
 - 测试见 [TESTS.md](TESTS.md#定时任务撞额度用完的结算2026-09-29分支-claudebe-quota-settle基于-b929d9f02)。
 
+## 压缩调用撞模型额度用完：后台按额度用完处理（2026-09-29，分支 `claude/be-quota-settle`，基于 step16k `b929d9f02`，待 9a 复审）
+
+- **来源**：同一次复审。压缩摘要和业务调用走同一个后端、同一份额度。压缩撞到 429 额度用完时，异常被包成 `ConversationCompactError`，
+  错误码 `COMPACT_PROVIDER_QUOTA_EXHAUSTED`。`is_provider_quota_exhausted_error` 只做 isinstance 判断，于是走非额度分路：
+  Goal 记 blocked、不发额度通知、定时 run 记 `CONVERSATIONCOMPACTERROR`。超过压缩触发线的大线程撞额度时会先走这条。
+- **做法**：
+  - `compact_guard.compact_error_is_provider_quota` 只认结构化事实：`ConversationCompactError` 的码等于 `COMPACT_PROVIDER_QUOTA_EXHAUSTED`，
+    或它的 `__cause__` 链上有 `ProviderQuotaExhaustedError`；不看文案，其它异常类型一律不认。
+  - 只在唤醒的额度分路入口（`_run_wake_signal`）补这一条判定；`is_provider_quota_exhausted_error` 的 isinstance 语义不变，
+    传输层、回合级续跑、供应退避、毒丸计数和错误分类器都不受影响。
+  - `COMPACT_PROVIDER_QUOTA_EXHAUSTED` 登记进 ERROR_CONTRACTS：不可重试，建议切换后端。
+- **既有问题，待定，未落地**：`_provider_error_indicates_quota_exhausted` 在结构化错误码和限额窗口之后，还对整段错误正文做子串匹配。
+  硬额度码出现在任意位置、数字 `2056`、`token_plan` 加上「用量上限」「购买积分」「upgrade」「exhausted」这几个词，都会判成额度用完。
+  这些都会读到 message 文案，和「不看文案」的铁律冲突。这段兜底在仓库初始化（`0b6252590`）时就在，9a 的改判没有碰。
+  要不要收掉，等拿到这些供应商的真实结构化错误体再定。
+- 测试见 [TESTS.md](TESTS.md#压缩调用撞额度按额度用完处理2026-09-29分支-claudebe-quota-settle基于-b929d9f02)。
+
 ## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案已审，分步实现中）
 
 - **背景**：`204f4ddf9` 和 `7b83c8730` 都让同一条唤醒约每 30 秒被领取一次、失败或取消后永远重试。

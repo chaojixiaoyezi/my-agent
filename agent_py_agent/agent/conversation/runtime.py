@@ -89,6 +89,7 @@ from .background_tool_policy import (
     BackgroundToolPolicyRequest,
     background_tool_policy_decision,
 )
+from .compact_guard import compact_error_is_provider_quota
 from .models import (
     SESSION_MESSAGE_WAKE_REASON,
     SUBAGENT_LIFECYCLE_WAKE_REASONS,
@@ -3691,6 +3692,8 @@ class _WakeExecution:
 # 类用途: 运行并收口一条唤醒；不拥有 tick 编排，修改时联测定时恢复、冻结重投和 Goal 续跑。
 class _BackgroundSchedulerWakeMixin:
     # LLM: 正常返回先在 finally 停外层心跳，再结束定时 claim 与来源；异常分支仍先按 typed 分类处理 claim。
+    #   额度分路认两类结构化事实：模型调用直接抛的 ProviderQuotaExhaustedError，和压缩调用撞额度后包成的
+    #   ConversationCompactError（compact_error_is_provider_quota）；其它异常照旧走 _handle_nonquota_wake_error。
     # 函数用途: 消费一条已选唤醒，沿原租约执行并结算，不把 Goal 暂停当成当前回合中断。
     def _run_wake_signal(
         self, signal: WakeSignal, *, now: float
@@ -3717,7 +3720,7 @@ class _BackgroundSchedulerWakeMixin:
                 return None
             report = execution.report
         except Exception as exc:
-            if is_provider_quota_exhausted_error(exc):
+            if is_provider_quota_exhausted_error(exc) or compact_error_is_provider_quota(exc):
                 report = _quota_wake_report_after_error(
                     self,
                     signal,

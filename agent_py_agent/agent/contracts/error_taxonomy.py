@@ -1989,6 +1989,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="compact 未能提交；原历史、游标和代次保持不变，短暂退避后重试。",
     ),
+    "COMPACT_PROVIDER_QUOTA_EXHAUSTED": ErrorContract(
+        code="COMPACT_PROVIDER_QUOTA_EXHAUSTED",
+        category="compact",
+        retryable=False,
+        recommended_action=RecoveryAction.SWITCH_BACKEND.value,
+        recovery_hint="压缩摘要调用撞到模型供应商额度用完；原历史、游标和代次保持不变。后台按额度用完处理（发额度通知、Goal 记 usage_limited），"
+                      "不要用同一凭据原地重试；补充额度或切换可用后端后再恢复。",
+    ),
     "COMPACT_VISION_SUMMARY_FAILED": ErrorContract(
         code="COMPACT_VISION_SUMMARY_FAILED",
         category="compact",

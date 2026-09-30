@@ -1042,6 +1042,7 @@ agent_py_agent/
 |   |-- test_scheduler_wake_tick.py    # 调度器 tick 新契约: 到期字条→wake_queue_due、对账分频、EXEC-39 门、audit 跳过
 |   |-- test_scheduler_waiting_deadlock.py # 定时执行没做完：无后续工作→受阻+提示+下一周期照常派发，有后续工作才 waiting，存量 waiting 出口
 |   |-- test_scheduler_quota_settle.py # 定时任务撞额度用完：每次到期一次模型调用、一条通知，run 记 failed 带额度码，唤醒同拍确认；通知没送达只重投
+|   |-- test_compact_quota_wake.py     # 压缩调用撞额度：按错误码或异常链认成额度用完，Goal 记 usage_limited 并发额度通知，不看文案
 |   |-- test_tool_unknown_reason_preservation.py # 工具结果未知时 unknown_reason、重放回执、受管账本保留原始结论
 |   |-- test_sleep_tool.py             # clock.sleep 参数边界、字条落盘、唤醒取消与错误码回归
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
