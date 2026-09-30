@@ -290,6 +290,16 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
      `wake_attempt_ledger_unwritable`。
    - C4 `wake_domain_closeout.py`：结案后的领域收尾与宿主提示、派活正文已放弃的收尾、长时间不计数提醒的提示、
      `wake_domain_status`（领域终态状态，没结束为空串）与 `wake_domain_terminal`（第 6 节）。`background_claim` 加可选依赖 `close_out_source`，来源已处理完或已放弃时先收领域再结案。
+   - C6（已完成，step16m，3a 接手 38 的范围）：
+     - **优雅停机**：后台 supervisor 的 `shutdown()` 关执行池之前调 `mark_inflight_attempts_stopping`，对 `inflight_attempts()`
+       逐条 `mark_stopping`；写失败逐条吞掉、只打 `wake_attempt_ledger_unwritable`（stage=mark_stopping），绝不让停机失败。
+       下次 preflight 看到标记按不计数的 `attempt:gateway_stopped` 补记。
+     - **死进程回合收尾**：preflight/begin 识别出上一片随进程消失时，`WakeAttemptOutcome.abandoned_turn_id` 带出在途记录里持久化
+       的回合号，`wake_domain_closeout.settle_abandoned_turn` 按它 `reject_pending(turn_id, reject_reserved=True,
+       release_task_body=<任务没被取消>)`，与后台片异常结束同一套收尾：会话消息退回、steer 拒绝、已提交不动。
+       进程死亡没有异常对象，这次释放不计次；反复死亡由本步按 `attempt:abandoned` 计数结案兜底。旧账没有回合号时不收尾。
+     - **结案顺序收窄**：写结案记录 → 删 pending → 移坏账 → 删尝试账。任何一步之后崩溃都不会留下"pending 在、账已不在"
+       而从零重新计数，最多留下一份孤儿坏账。
 4. **运维面**（第 4 步，be）：`/wakes` 两个子命令（TUI 和飞书）、状态计数、归档、`wake_replayed`。日志与宿主提示已随第 3 步落地。
 5. **真实链路门**：在 ae 的 `claude/ae-session-real-chain-test` 里加两个注入：
    - 技能快照抛 programmer_bug，复现 `7b83c8730`；
@@ -303,8 +313,8 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 1. **额度耗尽的回退报告**要单独识别（`_quota_wake_report_after_error` 产出的报告），不能记成
    `run:delivery_not_committed`；它走额度分路，按不计数处理。
-2. **优雅停机**：Gateway 正常停止时，给在途尝试写一个不计数的结果（清掉 in_flight），否则每次部署都会给在途唤醒
-   记一次 `attempt:abandoned`。只有进程被强杀、来不及收尾时才应该出现 abandoned。
+2. **优雅停机**（C6 已接线，见第 3 步清单）：Gateway 正常停止时给在途尝试打停机标记，下次 preflight 记不计数的
+   `attempt:gateway_stopped`，部署不再给在途唤醒记 `attempt:abandoned`。只有进程被强杀、来不及收尾时才出现 abandoned。
 3. **信封读不出来时的结案**：现在 `quarantine` 遇到读不出的 pending 文件抛数据损坏、原文件不动。接线时要决定：
    建议把原始字节原样移到 `quarantine/unreadable/<id>.json`，发 `wake_quarantined`（reason_code
    `admission:wake_source_unreadable`），列表把它放进 load_errors；不在读不出的内容上补字段。

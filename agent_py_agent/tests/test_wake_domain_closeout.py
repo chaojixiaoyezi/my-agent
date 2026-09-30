@@ -24,13 +24,14 @@ from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_MESSAGE_RELEASE_LIMIT,
     SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
 )
-from agent_py_agent.agent.conversation.session_tasks import SessionTask
+from agent_py_agent.agent.conversation.session_tasks import SessionTask, SessionTaskUpdate
 from agent_py_agent.agent.conversation.wake_domain_closeout import (
     SESSION_TASK_WAKE_QUARANTINED,
     WAKE_POISON_NOTICE_SOURCE,
     close_out_abandoned_source,
     close_out_quarantined_wake,
     notify_stalled_wake,
+    settle_abandoned_turn,
     wake_domain_status,
     wake_domain_terminal,
 )
@@ -268,3 +269,44 @@ def test_wake_domain_status_reports_the_terminal_state_only(tmp_path, monkeypatc
     shouted = type(wake)(**{**wake.to_dict(), "reason": f"  {wake.reason.upper()} "})
     assert wake_domain_status(store, shouted) == expected
     assert wake_domain_terminal(store, shouted) is bool(expected)
+
+
+# 函数用途: 记下 settle_abandoned_turn 对 reject_pending 的调用（回合号与关键字参数），不真的改回执。
+def _spy_reject_pending(chain, monkeypatch, *, error: BaseException | None = None) -> list:
+    calls: list = []
+    recovery = chain.agent.conversation_store.guidance.recovery
+
+    def spy(turn_id, **kwargs):
+        calls.append((turn_id, kwargs))
+        if error is not None:
+            raise error
+        return {}
+
+    monkeypatch.setattr(recovery, "reject_pending", spy)
+    return calls
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["task-not-cancelled", "task-cancelled"])
+def test_abandoned_turn_releases_the_task_body_only_when_the_task_is_not_cancelled(tmp_path, monkeypatch, cancelled) -> None:
+    """C6：死掉那一片的回合按统一规则收尾，派活正文只在任务没被取消时退回（与后台片异常结束同口径），释放不计次。"""
+    chain, wake = _chain_with_b_wake(tmp_path, monkeypatch, "task")
+    if cancelled:
+        task = chain.task("RC-GOAL-DONE")
+        chain.agent.conversation_store.session_tasks.advance(task.task_id, SessionTaskUpdate(status="cancelled"))
+    calls = _spy_reject_pending(chain, monkeypatch)
+    settle_abandoned_turn(chain.agent, wake, "stask-dead-turn")
+    assert calls == [("stask-dead-turn", {"reject_reserved": True, "release_task_body": not cancelled})]
+
+
+def test_abandoned_turn_without_a_turn_id_is_not_settled(tmp_path, monkeypatch) -> None:
+    chain, wake = _chain_with_b_wake(tmp_path, monkeypatch, "message")
+    calls = _spy_reject_pending(chain, monkeypatch)
+    settle_abandoned_turn(chain.agent, wake, "  ")
+    assert calls == []
+
+
+def test_abandoned_turn_settle_failure_is_only_logged(tmp_path, monkeypatch, capsys) -> None:
+    chain, wake = _chain_with_b_wake(tmp_path, monkeypatch, "message")
+    _spy_reject_pending(chain, monkeypatch, error=OSError("disk full"))
+    settle_abandoned_turn(chain.agent, wake, "wake-dead-turn")
+    assert "wake_abandoned_turn_settle_failed" in capsys.readouterr().out

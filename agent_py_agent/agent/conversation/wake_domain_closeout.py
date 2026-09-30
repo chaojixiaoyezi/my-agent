@@ -4,8 +4,9 @@
 #     消息本身有毒；被释放或还没认领的消息仍能交给目标的下一次回合，消息的去留只由回执层自己的上限
 #     （SESSION_MESSAGE_RELEASE_LIMIT_REACHED）决定。宿主提示的 details 带 message_dedupe_key 与回执当前状态，注明消息仍待投递；
 #   - 其它 reason：不改领域状态。
-#   三个入口：唤醒结案（failed_permanently）后的收尾、领取后准入判为"来源已放弃"时的收尾（派活正文达到释放上限）、
-#   长时间不计数提醒。宿主提示来源 wake_poison、code 为原因码，同一会话同一原因码只留最新一条。
+#   四个入口：唤醒结案（failed_permanently）后的收尾、领取后准入判为"来源已放弃"时的收尾（派活正文达到释放上限）、
+#   长时间不计数提醒，以及上一片随进程消失时按它的回合号收尾补充消息（C6，settle_abandoned_turn）。
+#   宿主提示来源 wake_poison、code 为原因码，同一会话同一原因码只留最新一条。
 #   全部在后台路径上调用：领域写失败只打结构化日志、不抛异常，唤醒结案与否不受影响。第 4 步的人工重放与拒绝提示用
 #   wake_domain_status / wake_domain_terminal 判定"领域已是终态、不必重放"，与收尾同一处判据。改动须同步 test_wake_domain_closeout.py、
 #   test_wake_attempt_wiring.py 与 WAKE_POISON_PILL 第 6 节。
@@ -20,7 +21,12 @@ from .host_notices import HostNotice, host_notice, queue_host_notice
 from .models import SESSION_MESSAGE_WAKE_REASON, SESSION_TASK_WAKE_REASON, WakeSignal
 from .session_messaging import SESSION_MESSAGE_KEY_FIELD, SESSION_MESSAGE_RELEASE_LIMIT_REACHED
 from .session_task_report import report_task_result
-from .session_tasks import SESSION_TASK_FAILED, SESSION_TASK_TERMINAL_STATUSES, SessionTaskUpdate
+from .session_tasks import (
+    SESSION_TASK_CANCELLED,
+    SESSION_TASK_FAILED,
+    SESSION_TASK_TERMINAL_STATUSES,
+    SessionTaskUpdate,
+)
 from .wake_poison import QuarantineDecision, WakeStallAlert
 
 # 唤醒被毒丸结案时派活任务的失败原因码（登记在 ERROR_CONTRACTS）。
@@ -83,6 +89,24 @@ def wake_domain_status(store: Any, signal: WakeSignal) -> str:
         receipt = store.guidance.receipt(key) if key else None
         return receipt.status if receipt is not None and receipt.status in _SESSION_MESSAGE_TERMINAL_STATUSES else ""
     return ""
+
+
+# LLM: C6：尝试账识别出上一片随进程消失（preflight/begin 的 abandoned）且在途记录带回合号时调用。按那一片的回合号收尾它认领过、
+#   还没消费的补充消息，与后台片异常结束同一套规则（runtime._settle_unconsumed_background_turn_input）：会话消息退回给下一回合、
+#   steer 拒绝、已提交（结果未知）的不动；派活正文只在任务没被取消时退回，给同一任务号的重跑（任务是否取消读 wake_domain_status，
+#   与运行时的取消判定读同一条任务记录）。进程死亡没有异常对象，failure 传 None：这次释放不计次；反复死亡由毒丸按
+#   attempt:abandoned 计数、满 5 次结案兜底。空回合号不收尾（旧账没有回合号）。收尾失败只打日志，不影响预检或本次尝试。
+# 函数用途: 把一片随进程消失的回合认领过但没消费的补充消息退回，让下一回合正常投递；会写补充消息回执、删回合索引。
+def settle_abandoned_turn(agent: Any, signal: WakeSignal, turn_id: str) -> None:
+    turn = str(turn_id or "").strip()
+    store = getattr(agent, "conversation_store", None)
+    if not turn or store is None:
+        return
+    try:
+        release_body = wake_domain_status(store, signal) != SESSION_TASK_CANCELLED
+        store.guidance.recovery.reject_pending(turn, reject_reserved=True, release_task_body=release_body)
+    except Exception as exc:  # noqa: BLE001 - 收尾失败只影响这一片的补充消息，不能拖垮预检或本次尝试
+        _log("wake_abandoned_turn_settle_failed", signal, {"error_type": type(exc).__name__})
 
 
 # LLM: 人工重放前的判定：领域已是终态就不必重放；就是 wake_domain_status 是否非空。只读。
@@ -150,6 +174,7 @@ __all__ = [
     "close_out_abandoned_source",
     "close_out_quarantined_wake",
     "notify_stalled_wake",
+    "settle_abandoned_turn",
     "wake_domain_status",
     "wake_domain_terminal",
 ]

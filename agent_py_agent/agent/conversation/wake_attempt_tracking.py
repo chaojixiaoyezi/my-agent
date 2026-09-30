@@ -19,7 +19,11 @@ from ..runtime_errors import DataCorruptionError
 from .background_delivery import cached_owner_delivery
 from .models import WakeSignal
 from .store_wake_attempts import WakeAttemptStart, WakeAttemptStore
-from .wake_domain_closeout import close_out_quarantined_wake, notify_stalled_wake
+from .wake_domain_closeout import (
+    close_out_quarantined_wake,
+    notify_stalled_wake,
+    settle_abandoned_turn,
+)
 from .wake_poison import (
     WAKE_ATTEMPT_PATH_CLAIMED,
     WAKE_ATTEMPT_PATH_QUOTA_FALLBACK,
@@ -66,6 +70,30 @@ class InflightWakeAttempt:
 def inflight_attempts() -> tuple[InflightWakeAttempt, ...]:
     with _INFLIGHT_LOCK:
         return tuple(_INFLIGHT.values())
+
+
+# LLM: C6 优雅停机：Gateway 关后台执行池之前调用。对本进程每一条在途尝试写停机标记（mark_stopping 只在 claim 与进程身份
+#   都对得上时写），下次 preflight 看到标记按不计数的 attempt:gateway_stopped 补记，部署重启不再给在途唤醒计失败。
+#   写失败（OSError 等）逐条吞掉、只打日志，绝不能让停机失败；不等待在途尝试结束，跑完的会照常记账覆盖 in_flight。
+# 函数用途: 停机前给本进程所有在途的唤醒尝试打上"正在停机"标记，返回写上标记的条数；会写尝试账。
+def mark_inflight_attempts_stopping(*, now: float) -> int:
+    marked = 0
+    for item in inflight_attempts():
+        try:
+            marked += bool(item.attempts.mark_stopping(item.wake_signal_id, item.claim_id, now=now))
+        except Exception as exc:  # noqa: BLE001 - 停机路径不能因为记账失败而失败
+            _log_stopping_failure(item, exc)
+    return marked
+
+
+# 函数用途: 停机标记写失败时打一行结构化日志（只有唤醒 ID 与异常类型）。
+def _log_stopping_failure(item: InflightWakeAttempt, exc: BaseException) -> None:
+    payload = {"event": "wake_attempt_ledger_unwritable", "stage": "mark_stopping",
+               "wake_signal_id": item.wake_signal_id, "error_type": type(exc).__name__}
+    try:
+        print(f"{_LOG_PREFIX} {json.dumps(payload, ensure_ascii=False, sort_keys=True)}", flush=True)
+    except (OSError, ValueError, TypeError):
+        pass
 
 
 # 函数用途: 登记一条开始执行的尝试（begin 成功后）。
@@ -132,6 +160,9 @@ class WakeAttemptTracker:
             return
         self._begun.add(member.wake_signal_id)
         _register_inflight(attempts, member.wake_signal_id, start)
+        if outcome.abandoned:
+            # C6：begin 兜住 preflight 与 begin 之间的竞态；这时新的一片还没执行、没认领任何补充消息。
+            settle_abandoned_turn(self._scheduler.runtime.agent, member, outcome.abandoned_turn_id)
         if outcome.decision is not None:
             self._blocked[member.wake_signal_id] = outcome.decision
 
@@ -250,7 +281,8 @@ def current_wake_attempt(scheduler: Any, thread_id: str) -> WakeAttemptTracker |
 
 
 # LLM: 跳过阶段（工作线程里，可以写）：有尝试账才加锁 preflight——上次在途的进程已死时补记（有停机标记记不计数），
-#   坏账按 ledger_corrupt 结案，已到上限的结案；下次最早可试时间未到则跳过。没有账返回 False，零成本。
+#   并按那一片持久化的回合号收尾它认领过的补充消息（C6，settle_abandoned_turn）；坏账按 ledger_corrupt 结案，
+#   已到上限的结案；下次最早可试时间未到则跳过。没有账返回 False，零成本。
 # 函数用途: 判断一条唤醒这一拍要不要因为毒丸记账而跳过（顺带处理中途死亡补记与结案）。
 def wake_attempt_deferred(scheduler: Any, signal: WakeSignal, now: float) -> bool:
     attempts = _attempts(scheduler)
@@ -264,6 +296,8 @@ def wake_attempt_deferred(scheduler: Any, signal: WakeSignal, now: float) -> boo
     except OSError as exc:
         _log("wake_attempt_ledger_unwritable", signal, {"stage": "preflight", "error_type": type(exc).__name__})
         return False
+    if outcome.abandoned:
+        settle_abandoned_turn(scheduler.runtime.agent, signal, outcome.abandoned_turn_id)
     if outcome.stall_alert is not None:
         wake_uncounted_stalled(scheduler, signal, outcome.stall_alert)
     if outcome.decision is not None:
@@ -379,6 +413,7 @@ __all__ = [
     "WakeAttemptTracker",
     "current_wake_attempt",
     "inflight_attempts",
+    "mark_inflight_attempts_stopping",
     "isolate_wake_batch",
     "quarantine_wake",
     "track_wake_attempt",

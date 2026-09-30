@@ -65,15 +65,17 @@ class WakeAttemptStart:
 
 
 # LLM: decision 非空表示调用方应结案而不是继续执行；abandoned 表示 begin/preflight 发现上次尝试的进程已死并已补记
-#   （带停机标记的记 attempt:gateway_stopped、不计数，没标记的记 attempt:abandoned、计数）；
+#   （带停机标记的记 attempt:gateway_stopped、不计数，没标记的记 attempt:abandoned、计数）；abandoned_turn_id 是那次
+#   在途记录里持久化的回合号（旧账或没有回合号时为空串），C6 据此收尾死掉那一片认领过的补充消息；
 #   stall_alert 非空表示连续不计数已满提醒窗口，本次已在尝试账里记下提醒，调用方负责发运维事件与宿主提示。
-# 类用途: 一次记账后的结果：最新状态、是否该结案、是否识别出中途死亡的尝试、是否该发长时间不计数提醒。
+# 类用途: 一次记账后的结果：最新状态、是否该结案、是否识别出中途死亡的尝试及其回合号、是否该发长时间不计数提醒。
 @dataclass(frozen=True)
 class WakeAttemptOutcome:
     state: WakePoisonState
     decision: QuarantineDecision | None
     abandoned: bool = False
     stall_alert: WakeStallAlert | None = None
+    abandoned_turn_id: str = ""
 
 
 # LLM: 失败时 ok=False 且 error_code 为 WAKE_REPLAY_*，不改任何文件；成功时 signal 是写回 pending 的原信封。
@@ -159,7 +161,8 @@ class WakeAttemptStore:
             state = mark_stall_alerted(state, now=now) if alert is not None else state
             ledger.update(state=ensure_writable_state(state).to_dict(), in_flight=None)
             write_json_file_atomic_unlocked(path, ledger)
-        return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=True, stall_alert=alert)
+        return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=True, stall_alert=alert,
+                                  abandoned_turn_id=_turn_id(previous))
 
     # LLM: 在执行前调用；上一条 in_flight 属于已确认死亡的进程时先补记一次（同 preflight 的 stopping_at 规则，按那次尝试的
     #   批大小经 verdict_for_batch 改写，批次中死亡只算批次失败），再写入本次 in_flight。进程是否存活只看结构化身份
@@ -179,7 +182,8 @@ class WakeAttemptStore:
                 "claim_id": str(start.claim_id or ""), "batch_size": start.batch_size,
                 "turn_id": str(start.turn_id or ""), "owner_process": build_process_identity(), "started_at": now})
             write_json_file_atomic_unlocked(path, ledger)
-        return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=abandoned)
+        return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=abandoned,
+                                  abandoned_turn_id=_turn_id(previous) if abandoned else "")
 
     # LLM: 优雅停机用：只有 in_flight 的 claim_id 和 owner_process 都是本进程这次尝试的，才在锁内写 stopping_at；
     #   账不存在、读不出、没有 in_flight 或对不上都不写，返回 False（停机路径不能因坏账失败，坏账留给下次 preflight）。
@@ -229,9 +233,9 @@ class WakeAttemptStore:
         return WakeAttemptOutcome(state, quarantine_decision(state), stall_alert=alert)
 
     # LLM: 只结案仍在 pending 的唤醒（找不到返回空结果）；原信封字段原样保留，只改 status/handled_at 并附顶层
-    #   quarantine 键。顺序固定：写结案记录（坏账时已带预先算出的 ledger_preserved_at）→ 移坏账 → 删 pending → 删尝试账 →
-    #   结掉关联观察。结案记录必须最先落盘：若先移账再写记录，两步之间崩溃会留下 pending 而账已不在，这条唤醒会从零重新
-    #   计数（9a 复审）；现在崩溃在记录之后，重来时记录仍在、坏账原地未动，重跑同一结案即可收口。
+    #   quarantine 键。顺序固定：写结案记录（坏账时已带预先算出的 ledger_preserved_at）→ 删 pending → 移坏账 → 删尝试账 →
+    #   结掉关联观察。结案记录必须最先落盘，pending 紧接着删：若先移账、再删 pending，两步之间崩溃会留下 pending 而账已不在，
+    #   这条唤醒会从零重新计数（9a 复审，C6 收窄窗口）；现在任何一步之后崩溃，最多留下一份没有 pending 对应的孤儿坏账。
     #   pending 信封读不出时走 _quarantine_unreadable（原字节移到 unreadable/，不在坏内容上补字段）。
     # 函数用途: 把一条反复同因失败的唤醒结案为 failed_permanently，不再被领取；会写、删、移文件并更新观察回执。
     def quarantine(self, wake_signal_id: str, decision: QuarantineDecision, *, now: float) -> WakeQuarantineResult:
@@ -250,9 +254,9 @@ class WakeAttemptStore:
             record = {**payload, "status": WAKE_STATUS_FAILED_PERMANENTLY, "handled_at": now,
                       "quarantine": _quarantine_facts(decision, ledger, now, provenance=provenance)}
             write_json_file_atomic_unlocked(target, record)
+            unlink_quietly(pending)
             if preserved:
                 _move_aside(attempts, Path(preserved))
-            unlink_quietly(pending)
             unlink_quietly(attempts)
         settled = WakeSignal.from_dict(record)
         if settled.observation_id:
@@ -444,6 +448,13 @@ def _archive_count(archive: Path) -> int:
 def _batch_size(in_flight: object) -> int:
     value = in_flight.get("batch_size") if isinstance(in_flight, dict) else None
     return value if type(value) is int and value >= 1 else 1
+
+
+# LLM: 回合号只取 in_flight 里持久化的字符串字段（C3 在 begin 时写入）；旧账、缺字段或非字符串按空串，调用方空串不收尾。
+# 函数用途: 读出上一次在途尝试那一片的回合号。
+def _turn_id(in_flight: object) -> str:
+    value = in_flight.get("turn_id") if isinstance(in_flight, dict) else None
+    return value.strip() if isinstance(value, str) else ""
 
 
 # LLM: 只有结构化进程身份被确认已死（False）才算中途死亡；None（无法判断）与存活都不算。

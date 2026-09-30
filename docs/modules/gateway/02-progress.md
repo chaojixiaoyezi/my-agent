@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+唤醒毒丸第 3 步 C6（step16m，3a）：后台 supervisor 停机时先给本进程在途的唤醒尝试打停机标记
+（`wake_attempt_tracking.mark_inflight_attempts_stopping`，写失败逐条吞掉），再关执行池；死进程那一片认领过的补充消息按尝试账里
+持久化的回合号退回（`wake_domain_closeout.settle_abandoned_turn`）；结案顺序改为写记录 → 删 pending → 移坏账 → 删尝试账。
+
 唤醒毒丸第 4 步复审跟进（step16m，3a）：`/wakes` 的领域终态改用 C4 的 `wake_domain_status` / `wake_domain_terminal`（唯一判定），
 删掉本地版本，只在这里把裸状态拼成提示；重放来源的结案记录还原不成同 ID 信封时，重放与预览都返回 `WAKE_REPLAY_SOURCE_UNREADABLE`，
 不再抛异常；归档清理须连同同键去重回执一起删（WAKE_POISON_PILL 第 8 节）。

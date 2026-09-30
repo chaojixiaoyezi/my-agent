@@ -711,8 +711,13 @@ class _BackgroundThreadLaneSupervisorMixin:
 
     # LLM: Shutdown cancels only queued process-local submissions in both lanes;
     # durable conversation and curator sources remain pending for restart recovery.
-    # 函数用途: 停止主会话与记忆策展线程池，不删除任何持久任务或记忆游标。
+    # 关池之前先给本进程在途的唤醒尝试打停机标记（C6，mark_inflight_attempts_stopping 内部逐条吞掉写失败，不会让停机失败），
+    # 下次 preflight 按不计数的 attempt:gateway_stopped 补记，部署重启不给在途唤醒计失败。
+    # 函数用途: 停止主会话与记忆策展线程池，不删除任何持久任务或记忆游标；会给在途唤醒尝试写停机标记。
     def shutdown(self) -> None:
+        from ..agent.conversation.wake_attempt_tracking import mark_inflight_attempts_stopping
+
+        mark_inflight_attempts_stopping(now=time.time())
         executors = (
             getattr(self, "_executor", None),
             getattr(self, "_curator_executor", None),

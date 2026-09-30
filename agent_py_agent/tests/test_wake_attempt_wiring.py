@@ -17,9 +17,13 @@ import pytest
 from agent_py_agent.agent.backends.errors import ProviderTransientError
 from agent_py_agent.agent.conversation import FakeDeliveryService
 from agent_py_agent.agent.conversation import runtime as runtime_module
+from agent_py_agent.agent.conversation import wake_attempt_tracking as tracking
 from agent_py_agent.agent.conversation.background_claim import SESSION_MESSAGE_CONSUMED_ADMISSION
+from agent_py_agent.agent.conversation.session_messaging import SESSION_MESSAGE_KEY_FIELD
+from agent_py_agent.agent.conversation.store_wake_attempts import WakeAttemptStart
 from agent_py_agent.agent.conversation.wake_attempt_tracking import (
     inflight_attempts,
+    mark_inflight_attempts_stopping,
     wake_attempt_deferred,
 )
 from agent_py_agent.agent.conversation.wake_poison import (
@@ -328,3 +332,95 @@ def test_frozen_redelivery_failures_back_off_and_close_after_a_day(tmp_path) -> 
     sent = len(channels.sent)
     scheduler.tick(now=first + WAKE_REDELIVERY_GIVE_UP_SECONDS + 10_000)
     assert len(channels.sent) == sent, "结案后不再重投"
+
+
+# 函数用途: 给这条唤醒写一次在途尝试（带回合号），再把它的进程身份改成已死进程，伪造"那一片连同进程一起没了"。
+def _begin_then_kill(chain, wake, *, turn_id: str) -> None:
+    _attempts(chain).begin(wake, WakeAttemptStart("claim-dead", turn_id=turn_id), now=time.time())
+    path = chain.agent.conversation_store.storage.wake_attempt_path(wake.wake_signal_id)
+    ledger = json.loads(path.read_text(encoding="utf-8"))
+    ledger["in_flight"]["owner_process"] = _dead_process_identity()
+    path.write_text(json.dumps(ledger), encoding="utf-8")
+
+
+@pytest.mark.parametrize("turn_known", [True, False], ids=["turn-id-persisted", "old-ledger-without-turn-id"])
+def test_a_message_claimed_by_a_dead_slice_goes_back_and_is_delivered(tmp_path, monkeypatch, turn_known) -> None:
+    """C6：进程在一片里认领了会话消息后死掉；下一次跳过阶段按尝试账里持久化的回合号把它退回 pending（不计次），
+    之后唤醒回合照常领取、消息正常送到；旧账没有回合号时不收尾，回执保持原状。"""
+    chain, (wake,) = _chain_with_message_wake(tmp_path, monkeypatch)
+    guidance = chain.agent.conversation_store.guidance
+    key = str(wake.metadata.get(SESSION_MESSAGE_KEY_FIELD) or "")
+    turn_id = runtime_module._wake_turn_id(wake)
+    assert key and turn_id, "前提不成立：消息唤醒应带消息键和回合号"
+    assert guidance.claim_for_turn(guidance.receipt(key).entry, expected_turn_id=turn_id, attempt_id="attempt-dead")
+    assert guidance.receipt(key).status == "reserved"
+    _begin_then_kill(chain, wake, turn_id=turn_id if turn_known else "")
+
+    wake_attempt_deferred(chain.scheduler, wake, time.time())
+
+    receipt = guidance.receipt(key)
+    if not turn_known:
+        assert receipt.status == "reserved"
+        return
+    assert receipt.status == "pending" and receipt.migration["released_turn_ids"] == [turn_id]
+    assert "release_count" not in receipt.migration, "进程死亡的退回不计次"
+    _tick_after_backoff(chain, wake)
+    assert guidance.receipt(key).status == "consumed"
+
+
+def test_shutdown_marks_in_flight_attempts_and_isolates_write_failures(tmp_path, monkeypatch) -> None:
+    """C6：停机前给本进程在途的尝试写停机标记；某一条写失败只打日志、其余照写，整体绝不抛出。"""
+    chain, wakes = _chain_with_message_wake(tmp_path, monkeypatch, count=2)
+    attempts = _attempts(chain)
+    starts = {wake.wake_signal_id: WakeAttemptStart(f"claim-{index}") for index, wake in enumerate(wakes)}
+    for wake in wakes:
+        attempts.begin(wake, starts[wake.wake_signal_id], now=time.time())
+        tracking._register_inflight(attempts, wake.wake_signal_id, starts[wake.wake_signal_id])
+    real = attempts.mark_stopping
+
+    def flaky(wake_signal_id, claim_id, *, now):
+        if wake_signal_id == wakes[0].wake_signal_id:
+            raise OSError("disk full")
+        return real(wake_signal_id, claim_id, now=now)
+
+    monkeypatch.setattr(attempts, "mark_stopping", flaky)
+    try:
+        assert mark_inflight_attempts_stopping(now=123.0) == 1
+    finally:
+        for wake in wakes:
+            tracking._unregister_inflight(attempts, wake.wake_signal_id)
+    path = chain.agent.conversation_store.storage.wake_attempt_path(wakes[1].wake_signal_id)
+    assert json.loads(path.read_text(encoding="utf-8"))["in_flight"]["stopping_at"] == 123.0
+
+
+def test_supervisor_shutdown_marks_in_flight_attempts_before_closing_the_pools(monkeypatch) -> None:
+    """C6：后台 supervisor 停机时先打停机标记，再关两个执行池。"""
+    from agent_py_agent.cli import gateway_loops
+
+    order: list[str] = []
+    monkeypatch.setattr(tracking, "mark_inflight_attempts_stopping", lambda *, now: order.append("mark") or 0)
+
+    class _Pool:
+        def shutdown(self, **_kwargs):
+            order.append("pool")
+
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._executor, supervisor._curator_executor = _Pool(), _Pool()
+    supervisor.shutdown()
+    assert order == ["mark", "pool", "pool"]
+
+
+def test_begin_settles_a_dead_slice_that_preflight_did_not_see(tmp_path, monkeypatch) -> None:
+    """C6：preflight 与 begin 之间的竞态由 begin 兜住：begin 识别出上一片的进程已死时同样按回合号收尾，新的一片照常开始。"""
+    chain, (wake,) = _chain_with_message_wake(tmp_path, monkeypatch)
+    guidance = chain.agent.conversation_store.guidance
+    key = str(wake.metadata.get(SESSION_MESSAGE_KEY_FIELD) or "")
+    turn_id = runtime_module._wake_turn_id(wake)
+    assert guidance.claim_for_turn(guidance.receipt(key).entry, expected_turn_id=turn_id, attempt_id="attempt-dead")
+    _begin_then_kill(chain, wake, turn_id=turn_id)
+    tracker = tracking.WakeAttemptTracker(chain.scheduler, (wake,), time.time(), turn_id=turn_id)
+    try:
+        assert tracker.begin("claim-next") == ""
+        assert guidance.receipt(key).status == "pending"
+    finally:
+        tracking._unregister_inflight(_attempts(chain), wake.wake_signal_id)

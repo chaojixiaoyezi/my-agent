@@ -434,6 +434,34 @@ class TestPreflightAndStopping:
         assert outcome.state.uncounted_reason_code == WAKE_REASON_GATEWAY_STOPPED
         assert _json(path)["in_flight"]["claim_id"] == "after-restart"
 
+    # C6：死掉那一片的回合号从持久化的 in_flight 读出来，preflight 与 begin 两条路径都带出；旧账没有回合号时为空串。
+    @pytest.mark.parametrize("path_kind", ["preflight", "begin"])
+    def test_an_abandoned_outcome_carries_the_persisted_turn_id(self, tmp_path, path_kind):
+        store = _store(tmp_path)
+        signal = _raise(store)
+        path = store.storage.wake_attempt_path(signal.wake_signal_id)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("dead", turn_id="stask-dead-turn"), now=1.0)
+        _kill_in_flight(path)
+        if path_kind == "preflight":
+            outcome = store.wakes.attempts.preflight(signal, now=2.0)
+        else:
+            outcome = store.wakes.attempts.begin(signal, WakeAttemptStart("next", turn_id="stask-dead-turn"), now=2.0)
+        assert (outcome.abandoned, outcome.abandoned_turn_id) == (True, "stask-dead-turn")
+
+    def test_an_old_ledger_without_a_turn_id_gives_an_empty_one(self, tmp_path):
+        store = _store(tmp_path)
+        signal = _raise(store)
+        path = store.storage.wake_attempt_path(signal.wake_signal_id)
+        store.wakes.attempts.begin(signal, WakeAttemptStart("old"), now=1.0)
+        ledger = _json(path)
+        ledger["in_flight"].pop("turn_id", None)
+        path.write_text(json.dumps(ledger), encoding="utf-8")
+        _kill_in_flight(path)
+        outcome = store.wakes.attempts.preflight(signal, now=2.0)
+        assert (outcome.abandoned, outcome.abandoned_turn_id) == (True, "")
+        live = store.wakes.attempts.begin(signal, WakeAttemptStart("live", turn_id="t"), now=3.0)
+        assert (live.abandoned, live.abandoned_turn_id) == (False, "")
+
     @pytest.mark.parametrize("case", ["claim_mismatch", "other_process", "no_ledger", "no_in_flight"])
     def test_mark_stopping_only_marks_this_processes_own_attempt(self, tmp_path, case):
         store = _store(tmp_path)
@@ -579,8 +607,9 @@ class TestQuarantineUnreadableAndCorrupt:
         assert record["quarantine"]["attempts"]["same_cause_count"] == WAKE_POISON_SAME_CAUSE_LIMIT
 
 
-    def test_crash_between_record_and_ledger_move_keeps_the_record_and_never_resets_the_count(self, tmp_path, monkeypatch):
-        """结案记录先落盘、坏账后移：两步之间崩溃时记录已在、坏账原地未动；重跑同一结案收口，不会从零重新计数。"""
+    def test_crash_between_removing_pending_and_moving_the_ledger_leaves_only_an_orphan(self, tmp_path, monkeypatch):
+        """顺序为写记录 → 删 pending → 移坏账（C6 收窄窗口）：移坏账那一步崩溃时，结案记录已在、pending 已删（唤醒离开队列，
+        不会从零重新计数），坏账原地未动，成了没有 pending 对应的孤儿；再跑一次结案找不到 pending，什么都不改。"""
         from agent_py_agent.agent.conversation import store_wake_attempts
 
         store = _store(tmp_path)
@@ -593,18 +622,16 @@ class TestQuarantineUnreadableAndCorrupt:
         real_move = store_wake_attempts._move_aside
 
         def crash_before_move(source, target):
-            raise OSError("process died between writing the record and moving the ledger")
+            raise OSError("process died between removing pending and moving the ledger")
 
         monkeypatch.setattr(store_wake_attempts, "_move_aside", crash_before_move)
         with pytest.raises(OSError):
             store.wakes.attempts.quarantine(signal.wake_signal_id, ledger_corrupt_decision(), now=200.0)
         record_path = store.storage.wake_quarantine_path(signal.wake_signal_id)
         preserved = store.storage.wake_quarantine_ledger_path(signal.wake_signal_id)
-        assert record_path.exists() and pending.exists() and attempts.read_bytes() == corrupt
+        assert record_path.exists() and not pending.exists() and attempts.read_bytes() == corrupt
         assert _json(record_path)["quarantine"]["ledger_preserved_at"] == str(preserved) and not preserved.exists()
+        assert store.wakes.pending(limit=0) == []
         monkeypatch.setattr(store_wake_attempts, "_move_aside", real_move)
-        result = store.wakes.attempts.quarantine(signal.wake_signal_id, ledger_corrupt_decision(), now=201.0)
-        assert result.settled is not None and result.ledger_preserved_at == str(preserved)
-        assert preserved.read_bytes() == corrupt and not attempts.exists() and not pending.exists()
-        assert _json(record_path)["quarantine"]["decision"]["reason_code"] == WAKE_REASON_LEDGER_CORRUPT
-        assert store.wakes.attempts.state_report(signal.wake_signal_id) == (WakePoisonState(), None)
+        again = store.wakes.attempts.quarantine(signal.wake_signal_id, ledger_corrupt_decision(), now=201.0)
+        assert again.settled is None and attempts.read_bytes() == corrupt and record_path.exists()

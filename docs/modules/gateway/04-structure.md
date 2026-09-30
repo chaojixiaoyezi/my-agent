@@ -2006,6 +2006,7 @@ generic `create_attempt` 和 `recover_attempt_unknown` 不感知 transport marke
 `gateway_parts/restart_control.py`（`/restart`，只认 local/main owner，使用 control_service 传入的权威 Gateway 路径）。
 管理员另有 `/endtask`（`gateway_parts/end_task_control.py`，同样只认 local/main owner、由 control_service 按 kind 分派；列表与预览附后续工作事实码，直接调 owner 的 `scheduler_service.follow_up`，与定时执行收口同一个判定；`GRACE_BOUND_FACTS` 里的码加“（宽限期内才算）”）：只处理定时账本里 waiting、会话任务 active、运行库执行树没有未结束 attempt 的定时会话任务；确认时会话任务按 `expected_status=active` 改为 `cancelled`，再调 `SchedulerService.reconcile_waiting_run` 结算，不改运行库，也不停止任务启动的受管后台命令（预览与结果如实写明）；拒绝码 `END_TASK_*` 均登记在 `ERROR_CONTRACTS`。
 
+后台 supervisor 的 `shutdown()`（`cli/gateway_loops._BackgroundMainSupervisor`）在关主会话与记忆策展两个执行池之前调 `wake_attempt_tracking.mark_inflight_attempts_stopping(now=...)`（毒丸 C6）：只给本进程在途、claim 与进程身份都对得上的尝试写停机标记，写失败逐条吞掉，停机本身不会因此失败。
 管理员另有 `/wakes`（`gateway_parts/wake_ops_control.py`，同样由 control_service 按 kind 分派、只认管理员 owner）：列出唤醒毒丸已结案的后台唤醒（`store.wakes.attempts.quarantined()`），`/wakes replay <ID>` 只读预览，带 confirm 经 `attempts.replay` 按原 ID 与冻结内容写回 pending；来源（`attempts.replay_source`，结案记录读不出、还原不成信封或 ID 对不上都算读不出）、pending 冲突与领域终态（C4 的 `wake_domain_terminal`，唯一判定）核对不过就拒绝且不改文件，成功打 `[background-wake-poison]` 的 `wake_replayed` 事件。`/status` 的 `ConversationTaskStatus.quarantined_wakes` 与 `gateway_status` 的 `quarantined_wakes` 取 `attempts.quarantined_count()`，只数文件、不含已归档。
 `recover_gateway_processing_requests(planned_restart=True)` 只在消费到新鲜完成标记的启动时使用；
 `_pending_request_entry_sort_key` 按 `active_turn_recovery.cause` 把安全重启续跑排在新请求之前。
