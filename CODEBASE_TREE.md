@@ -209,6 +209,7 @@ agent_py_agent/
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
 |   |   |-- tui_model_auth.py           # 私密设备码登录、通用参数编辑、取消及退出账号
 |   |   |-- tui_browser_login.py        # ChatGPT 订阅浏览器登录：本机临时回调、自动打开浏览器、登录完自动回到 TUI
+|   |   |-- tui_subscription_models.py  # 订阅账号模型勾选：读账号可用模型目录，勾选（可多选）后一次添加
 |   |   |-- tui_model_metrics.py        # Context 下方模型轮、工具数、最近缓存、会话累计与输出速度的一行统计
 |   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销，普通用户只选已开放模型
 |   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认

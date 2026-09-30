@@ -125,6 +125,12 @@ def fake_gateway(monkeypatch, calls, *, browser_returns=True):
         monkeypatch.setattr(module, "open_browser", browser)
     monkeypatch.setattr(tui_model_auth, "browser_login_available", lambda: True)
     monkeypatch.setattr(tui_browser_login, "CALLBACK_PORTS", (0,))
+
+    async def picker(app, agent, session, provider_id):
+        calls.append("picker")
+        return "（勾选模型）"
+
+    monkeypatch.setattr(tui_model_auth, "pick_subscription_models", picker)
     return seen
 
 
@@ -157,8 +163,8 @@ def test_browser_login_completes_when_the_browser_comes_back(tmp_path, monkeypat
     async def scenario(app, pipe, login):
         return await asyncio.wait_for(login, 5)
 
-    assert "登录成功" in run_login(tmp_path, scenario)
-    assert calls == ["auth_browser_start", "auth_browser_complete", "auth_cancel"]
+    assert run_login(tmp_path, scenario) == "登录成功。（勾选模型）"
+    assert calls == ["auth_browser_start", "auth_browser_complete", "auth_cancel", "picker"]
     complete = dict(seen["payloads"])["auth_browser_complete"]
     assert complete == {"provider_id": "account", "attempt_id": "attempt", "code": "c-secret-2", "state": STATE}
 
@@ -193,3 +199,27 @@ def test_busy_callback_ports_fall_back_to_the_device_code(tmp_path, monkeypatch)
 
     assert "已取消" in run_login(tmp_path, scenario)
     assert calls == ["auth_start", "auth_cancel"]
+
+
+def test_device_login_success_for_chatgpt_also_opens_the_model_picker(tmp_path, monkeypatch):
+    calls = []
+    fake_gateway(monkeypatch, calls)
+    monkeypatch.setattr(tui_model_auth, "browser_login_available", lambda: False)
+
+    async def request(app, agent, session, operation, payload):
+        calls.append(operation)
+        return {"ok": True, "status": "pending", "attempt_id": "device", "interval": 1,
+                "verification_uri": "https://example.test/device", "user_code": "DEVICE-CODE"}
+
+    async def data(agent, session, operation, payload):
+        calls.append(operation)
+        return {"ok": True, "status": "connected"} if operation == "auth_poll" else {"ok": True, "status": "signed_out"}
+
+    monkeypatch.setattr(tui_model_auth, "_request", request)
+    monkeypatch.setattr(tui_model_auth, "_request_data", data)
+
+    async def scenario(app, pipe, login):
+        return await asyncio.wait_for(login, 6)
+
+    assert run_login(tmp_path, scenario) == "登录成功。（勾选模型）"
+    assert calls == ["auth_start", "auth_poll", "auth_cancel", "picker"]

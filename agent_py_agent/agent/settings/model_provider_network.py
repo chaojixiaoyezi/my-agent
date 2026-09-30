@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from ..backends import get_backend
 from ..backends.gateway_helpers import GatewayRequest, get_json
 from ..backends.provider_headers import provider_runtime_scope, request_headers
+from .model_oauth_schema import CHATGPT_CATALOG_CLIENT_VERSION
 from .model_provider_schema import (
     ModelProfileError,
     resolved_model,
@@ -18,16 +19,16 @@ from .model_provider_schema import (
 from .shared_model_catalog import resolve_shared_model, shared_profile_key
 
 
-# LLM: 目录只投影 ID/显式容量；OAuth 只在显式动作解析引用，订阅不猜普通 /v1/models 路径。
-# 函数用途: 读取服务商模型目录，供用户挑选后填写接口和上下文。
+# LLM: 目录只投影 ID/显式容量；OAuth 只在显式动作解析引用。ChatGPT 订阅读订阅接口自己的 /models 目录（不猜普通 /v1/models）。
+# 函数用途: 读取服务商模型目录，供用户挑选后填写接口和上下文；订阅账号直接给出可一键添加的完整条目。
 def _discover(provider: dict, *, auth_ref: dict | None = None) -> dict:
     account_headers = {}
     if auth_ref:
         from .model_oauth import request_credentials
 
-        if auth_ref["mode"] == "chatgpt":
-            raise ModelProfileError("订阅模型请按账号可用目录手动填写名称和容量；不会用普通 API 目录探测订阅凭据。")
         key, account_headers = request_credentials(auth_ref, provider["api_base"])
+        if auth_ref["mode"] == "chatgpt":
+            return _subscription_catalog(provider, key, account_headers)
         provider = {**provider, "api_key": key}
     base = provider["api_base"]
     for suffix in ("/chat/completions", "/responses", "/messages"):
@@ -49,6 +50,37 @@ def _discover(provider: dict, *, auth_ref: dict | None = None) -> dict:
     rows = [{"model_name": row["id"], "model_context_window_tokens": _context_window_from_record(row)}
             for row in items[:2000] if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]]
     return {"ok": True, "models": rows, "message": f"读取到 {len(rows)} 个模型；接口类型和容量仍需确认。"}
+
+
+# LLM: 只读订阅目录的结构化字段（slug、display_name、context_window、visibility），服务商标成隐藏的不列；
+#   带账号头与令牌、不跟随重定向；容量不合法的条目不给出，避免一键添加出无效模型。一次 GET，不调用模型、不写配置。
+# 函数用途: 列出 ChatGPT 订阅账号可用的模型（名称、显示名、上下文），供 TUI 勾选后直接添加。
+def _subscription_catalog(provider: dict, key: str, account_headers: dict) -> dict:
+    headers = request_headers({"Authorization": "Bearer " + key, "Accept": "application/json", **account_headers},
+                              provider["custom_headers"], provider["session_header"])
+    obj = get_json(GatewayRequest(api_base=provider["api_base"], api_key=key,
+                                  path="/models?client_version=" + CHATGPT_CATALOG_CLIENT_VERSION, payload={},
+                                  headers=headers, timeout=15, connect_timeout=8, allow_redirects=False))
+    items = obj.get("models") if isinstance(obj, dict) else None
+    if not isinstance(items, list):
+        raise ModelProfileError("订阅接口没有返回模型列表，请稍后重试。")
+    rows = [_subscription_row(item) for item in items[:500] if isinstance(item, dict) and item.get("visibility") != "hide"]
+    rows = [row for row in rows if row]
+    return {"ok": True, "models": rows, "message": f"这个账号可用 {len(rows)} 个模型。"}
+
+
+# LLM: 形状不对的条目丢弃而不是猜；容量沿用 validate_model 的 4096..2^31-1 口径。
+# 函数用途: 把订阅目录的一条记录整理成可直接保存的模型条目，不合规返回 None。
+def _subscription_row(item: dict) -> dict | None:
+    slug, window = item.get("slug"), item.get("context_window")
+    if not isinstance(slug, str) or not slug or len(slug) > 200 or any(ord(c) < 33 for c in slug):
+        return None
+    if isinstance(window, bool) or not isinstance(window, int) or not 4096 <= window <= 2**31 - 1:
+        return None
+    name = item.get("display_name")
+    display = name if isinstance(name, str) and name and len(name) <= 80 and name.isprintable() else slug
+    return {"model_name": slug, "display_name": display, "model_context_window_tokens": window,
+            "model_backend": "openai_responses"}
 
 
 # LLM: 短测复用可信 owner 解析与正式认证后端；仅完整正文算连接可用，不能宣称任务/Plus/Pro 权益已全部验证。

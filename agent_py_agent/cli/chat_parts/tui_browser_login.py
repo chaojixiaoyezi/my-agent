@@ -11,6 +11,7 @@ import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
 from prompt_toolkit.layout import HSplit
@@ -26,6 +27,14 @@ CALLBACK_PORTS = CHATGPT_CALLBACK_PORTS
 _PAGE = ("<!doctype html><html lang=zh><meta charset=utf-8><title>my-agent 登录</title>"
          "<body style='font-family:sans-serif;margin:3em'><p>{}</p></body></html>")
 _ACTIONS = (("重新打开浏览器", "reopen"), ("改用验证码登录", USE_DEVICE_CODE), ("取消登录", None))
+
+
+# LLM: 调用方只按 connected / use_device 两个结构化字段决定下一步，不解析 message 文字。
+# 类用途: 一次登录的结果：给用户看的文字、是否已登录、是否要改走验证码登录。
+class LoginOutcome(NamedTuple):
+    message: str
+    connected: bool = False
+    use_device: bool = False
 
 
 # LLM: 纯判定，只看路径与查询参数的结构化字段；state 不符不产生结果（不结束等待），伪造请求打断不了真实登录。
@@ -141,13 +150,13 @@ def open_browser(url: str) -> bool:
 
 
 # LLM: 开始登录 → 打开浏览器 → 等回调 → 交给 Gateway 兑换；取消、超时、改用验证码都会关监听并撤销本次等待状态。
-#   返回给用户看的结果文字；返回 USE_DEVICE_CODE 表示调用方改走验证码登录。
+#   返回 LoginOutcome：connected 表示已登录，use_device 表示调用方应改走验证码登录。
 # 函数用途: TUI 里 ChatGPT 订阅的"浏览器登录"，登录中不需要用户复制任何东西。
-async def browser_login(app, agent, session: str, provider_id: str) -> str:
+async def browser_login(app, agent, session: str, provider_id: str) -> LoginOutcome:
     try:
         callback = await asyncio.to_thread(LoopbackCallback, CALLBACK_PORTS)
     except OSError:
-        return USE_DEVICE_CODE
+        return LoginOutcome("", use_device=True)
     flow = _BrowserLoginFlow(app, agent, session, callback)
     try:
         final = await flow.run(provider_id)
@@ -156,10 +165,10 @@ async def browser_login(app, agent, session: str, provider_id: str) -> str:
         if flow.attempt:
             await _request_data(agent, session, "auth_cancel", flow.attempt)
     if final == USE_DEVICE_CODE:
-        return USE_DEVICE_CODE
+        return LoginOutcome("", use_device=True)
     if isinstance(final, dict) and final.get("ok") and final.get("status") == "connected":
-        return "登录成功。请添加该账号可用的模型、接口和上下文容量，再选择使用；尚未发送模型请求。"
-    return str((final or {}).get("message") or "已取消本次登录；此前有效登录未被清除。")
+        return LoginOutcome("登录成功。", connected=True)
+    return LoginOutcome(str((final or {}).get("message") or "已取消本次登录；此前有效登录未被清除。"))
 
 
 # LLM: 一次浏览器登录的界面与等待状态；按钮会结算传入对话框的 future，所以每次显示都用新 future，由后台结果转发，

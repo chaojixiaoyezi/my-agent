@@ -10,8 +10,9 @@ from prompt_toolkit.layout import HSplit
 from prompt_toolkit.widgets import Checkbox, Label, RadioList, TextArea
 
 from ...agent.settings.model_oauth_schema import CHATGPT_BASE, oauth_config
-from .tui_browser_login import USE_DEVICE_CODE, browser_login, browser_login_available, open_browser
+from .tui_browser_login import LoginOutcome, browser_login, browser_login_available, open_browser
 from .tui_model_menu import _dialog, _request, _request_data
+from .tui_subscription_models import pick_subscription_models
 
 
 # LLM: 结构化选项值控制动作，Esc 返回不发网络；不把认证菜单作为模型消息。
@@ -87,23 +88,32 @@ async def _edit_parameters(app, agent, session: str, provider: dict) -> str:
 
 
 # LLM: target 是 (服务商编号, 登录类型)。ChatGPT 订阅先走浏览器登录（不需复制），环境不适合、端口被占或用户选择时
-#   再走设备码；通用 OAuth 只走设备码。
+#   再走设备码；通用 OAuth 只走设备码。ChatGPT 登录成功（按 LoginOutcome.connected）后直接弹出账号可用模型的勾选框。
 # 函数用途: 按登录类型选择浏览器或设备码方式发起登录，返回给用户看的结果文字。
 async def _sign_in(app, agent, session: str, target: tuple[str, str]) -> str:
     provider_id, mode = target
+    outcome = LoginOutcome("", use_device=True)
     if mode == "chatgpt" and browser_login_available():
         outcome = await browser_login(app, agent, session, provider_id)
-        if outcome != USE_DEVICE_CODE:
-            return outcome
-    return await _login(app, agent, session, provider_id)
+    if outcome.use_device:
+        outcome = await _device_login(app, agent, session, provider_id)
+    if outcome.connected and mode == "chatgpt":
+        return "登录成功。" + await pick_subscription_models(app, agent, session, provider_id)
+    return outcome.message
+
+
+# LLM: 保留原签名给既有调用方；只取设备码登录结果里给用户看的文字。
+# 函数用途: 设备码登录，返回结果文字。
+async def _login(app, agent, session: str, provider_id: str) -> str:
+    return (await _device_login(app, agent, session, provider_id)).message
 
 
 # LLM: 只在此模态页存续期间轮询，使用上游 interval；取消后 CAS 撤销，迟到响应不能恢复登录。
 # 函数用途: 设备码登录：自动打开确认页并显示验证码，自动等待结果，Esc 退出不会停止代理任务。
-async def _login(app, agent, session: str, provider_id: str) -> str:
+async def _device_login(app, agent, session: str, provider_id: str) -> LoginOutcome:
     result = await _request(app, agent, session, "auth_start", {"provider_id": provider_id})
     if not result.get("ok"):
-        return str(result.get("message") or "发起登录失败。")
+        return LoginOutcome(str(result.get("message") or "发起登录失败。"))
     completion = asyncio.get_running_loop().create_future()
     opened = browser_login_available() and await asyncio.to_thread(open_browser, result["verification_uri"])
     label = Label("已在浏览器打开确认页，请输入下面的验证码并确认…" if opened else "等待网页确认…")
@@ -142,8 +152,8 @@ async def _login(app, agent, session: str, provider_id: str) -> str:
         await _request_data(agent, session, "auth_cancel", attempt)
         code.text = ""
     if final and final.get("ok") and final.get("status") == "connected":
-        return "登录成功。请添加该账号可用的模型、接口和上下文容量，再选择使用；尚未发送模型请求。"
-    return str((final or {}).get("message") or "已取消本次登录；此前有效登录未被清除。")
+        return LoginOutcome("登录成功。请添加该账号可用的模型、接口和上下文容量，再选择使用；尚未发送模型请求。", connected=True)
+    return LoginOutcome(str((final or {}).get("message") or "已取消本次登录；此前有效登录未被清除。"))
 
 
 # LLM: 账号目录与已有 provider 同源；重新登录和退出须显式动作，不以菜单关闭触发 logout。
@@ -163,16 +173,18 @@ async def manage_auth(app, agent, session: str, *, create: bool = False) -> str:
         provider, mode = await _new_provider(app, agent, session)
         return await _sign_in(app, agent, session, (provider, mode)) if provider else ""
     row = next(row for row in rows if row["id"] == provider)
-    choices = [("login", "登录 / 重新登录"), ("model", "添加此账号的模型")]
+    chatgpt = row["auth_mode"] == "chatgpt"
+    choices = [("login", "登录 / 重新登录"), ("model", "选择模型（勾选这个账号能用的模型）" if chatgpt else "添加此账号的模型")]
     if row["auth_mode"] == "oauth_device":
         choices.append(("edit", "编辑认证参数（变化后需重新登录）"))
     choices.append(("logout", "退出登录（后续请求停止使用此凭据）"))
     action = await _choose(app, "账号操作", choices)
     if action == "login":
         return await _sign_in(app, agent, session, (provider, row["auth_mode"]))
+    if action == "model" and chatgpt:
+        return await pick_subscription_models(app, agent, session, provider)
     if action == "model":
-        return await _edit_model(app, agent, session, provider,
-            {"model_backend": "openai_responses"} if row["auth_mode"] == "chatgpt" else None)
+        return await _edit_model(app, agent, session, provider, None)
     if action == "edit":
         return await _edit_parameters(app, agent, session, row)
     if action == "logout" and await _dialog(app, "确认退出登录", Label("将删除本用户保存的访问/刷新令牌。\n不会退出其他应用或其他用户；已经发出的请求无法撤回。"),

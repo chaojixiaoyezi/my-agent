@@ -8177,6 +8177,9 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   浏览器登录另测：state 与请求编号不符拒绝且不打断真实登录、超时清等待状态、兑换期间取消或退出不能复活、
   只认登记的本机回调地址与 ChatGPT 服务商、PKCE 挑战值与兑换表单、本机回调只收本次登录且不打印授权码、端口回退、
   SSH/无图形界面不自动开浏览器、TUI 全流程自动完成/Esc 取消/端口被占退回验证码。15 个变异全部被杀（脚本在 3a scratchpad）。
+  订阅模型目录与勾选：`test_model_oauth_browser.py` 的目录用例（只列可见且容量合法、带账号头与版本号、不跟随重定向）、
+  `test_tui_subscription_models.py`（真实按键勾选两个只存两个、已添加的不再列、以后再说不写入、目录失败给重试提示），
+  以及浏览器/验证码登录成功后才弹勾选框。12 个变异全部被杀。
 - 用量增量：`test_model_call_ledger.py`、`test_tui_model_metrics.py`、`test_reproject_model_usage.py`，
   成功/异常/取消共用结算；累计容器重建换代，来源切换不重复算，旧账与缺报不得估算重写。
   真 TUI 中断后追加、Goal 后台交接、子代理及 Compact 必须按 provider 分项对账。

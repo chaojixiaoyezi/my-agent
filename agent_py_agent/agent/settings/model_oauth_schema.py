@@ -14,6 +14,9 @@ CHATGPT_ISSUER = "https://auth.openai.com"
 # 官方授权服务器只接受这两个本机回调端口（与官方命令行登录登记的回调地址一致），换端口会被拒绝。
 CHATGPT_CALLBACK_PORTS = (1455, 1457)
 CHATGPT_BROWSER_SCOPE = "openid profile email offline_access"
+# 订阅模型目录接口必须带 client_version，并按它筛掉"需要更新客户端"的模型。本产品只用普通 Responses 调用、不用官方命令行
+# 的专用工具协议，这里声明的版本只决定列出哪些模型，不是身份凭据，也不影响计费；09-30 实测 0.124.0 只列 1 个、1.0.0 列全部 9 个。
+CHATGPT_CATALOG_CLIENT_VERSION = "1.0.0"
 _BASE64URL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 

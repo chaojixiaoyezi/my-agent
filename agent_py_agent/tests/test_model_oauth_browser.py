@@ -181,3 +181,43 @@ def test_stored_browser_pending_rejects_tampered_fields():
                          ("code_verifier", "has space " * 6), ("expires_at", float("inf"))):
         with pytest.raises(ModelProfileError):
             stored_oauth({**config, "pending": {"id": "attempt", **pending, field: value}}, CHATGPT_BASE)
+
+
+def connected_owner(tmp_path, monkeypatch):
+    alice = host(tmp_path)
+    setup(alice, "chatgpt")
+    fake_exchange(monkeypatch, [])
+    complete(alice, start(alice))
+    return alice
+
+
+def test_subscription_catalog_lists_only_visible_models_with_valid_windows(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import model_provider_network as network
+    from agent_py_agent.agent.settings.model_oauth_schema import CHATGPT_CATALOG_CLIENT_VERSION
+
+    alice = connected_owner(tmp_path, monkeypatch)
+    sent = []
+
+    def get_json(request):
+        sent.append(request)
+        return {"models": [
+            {"slug": "gpt-a", "display_name": "GPT-A", "context_window": 272000, "visibility": "list"},
+            {"slug": "gpt-hidden", "display_name": "Hidden", "context_window": 272000, "visibility": "hide"},
+            {"slug": "gpt-tiny", "display_name": "Tiny", "context_window": 1000, "visibility": "list"},
+            {"slug": "has space", "context_window": 272000, "visibility": "list"},
+            {"slug": "gpt-b", "context_window": 128000}]}
+
+    monkeypatch.setattr(network, "get_json", get_json)
+    result = execute_model_profile_operation(alice, "discover", {"provider_id": "account"})
+    assert result["ok"] and [row["model_name"] for row in result["models"]] == ["gpt-a", "gpt-b"]
+    assert result["models"][0] == {"model_name": "gpt-a", "display_name": "GPT-A", "model_context_window_tokens": 272000,
+                                   "model_backend": "openai_responses"}
+    assert result["models"][1]["display_name"] == "gpt-b"
+    request = sent[0]
+    assert request.url == CHATGPT_BASE + "/models?client_version=" + CHATGPT_CATALOG_CLIENT_VERSION
+    assert request.headers["Authorization"] == "Bearer browser-access"
+    assert request.headers["ChatGPT-Account-ID"] == "browser-account"
+    assert "x-api-key" not in {key.lower() for key in request.headers} and request.allow_redirects is False
+    monkeypatch.setattr(network, "get_json", lambda request: {"data": []})
+    with pytest.raises(ModelProfileError, match="没有返回模型列表"):
+        execute_model_profile_operation(alice, "discover", {"provider_id": "account"})
