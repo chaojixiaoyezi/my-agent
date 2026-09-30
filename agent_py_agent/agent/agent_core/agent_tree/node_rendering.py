@@ -394,19 +394,31 @@ def _model_label(agent: object, profile_id: str) -> str:
 # 函数用途: 按档案编号解析模型显示名称；查不到或目录不可读时返回空。
 def _resolve_model_name(agent: object, profile_id: str) -> str:
     try:
-        from ...settings.model_profiles import model_profiles_path, read_model_profiles
-        from ...settings.shared_model_catalog import public_shared_profiles, shared_profile_key
+        from ...settings.shared_model_catalog import shared_profile_key
 
         if shared_profile_key(profile_id):
-            for row in public_shared_profiles(agent.home_paths):
-                if row.get("id") == profile_id:
-                    return str(row.get("model_name") or "")
-            return ""
-        data = read_model_profiles(model_profiles_path(agent.home_paths))
-        row = data["profiles"].get(profile_id)
-        return str(row.get("model_name") or "") if isinstance(row, dict) else ""
+            return _shared_model_name(agent, profile_id)
+        return _own_model_name(agent, profile_id)
     except Exception:
         return ""
+
+
+# LLM: 只读管理员公开的共享目录（不含密钥）；没找到返回空串，异常交给调用方统一兜底。
+# 函数用途: 在共享目录里按编号找模型名称。
+def _shared_model_name(agent: object, profile_id: str) -> str:
+    from ...settings.shared_model_catalog import public_shared_profiles
+
+    return next((str(row.get("model_name") or "") for row in public_shared_profiles(agent.home_paths)
+                 if row.get("id") == profile_id), "")
+
+
+# LLM: 只取当前 owner 目录里这条档案的 model_name，不读地址、密钥或请求头；异常交给调用方统一兜底。
+# 函数用途: 在当前用户自己的模型目录里按编号找模型名称。
+def _own_model_name(agent: object, profile_id: str) -> str:
+    from ...settings.model_profiles import model_profiles_path, read_model_profiles
+
+    row = read_model_profiles(model_profiles_path(agent.home_paths))["profiles"].get(profile_id)
+    return str(row.get("model_name") or "") if isinstance(row, dict) else ""
 
 
 # LLM: 档位规范化复用同一入口；空串/非法值按"默认"展示（线程未设置，运行时回落全局默认）。
