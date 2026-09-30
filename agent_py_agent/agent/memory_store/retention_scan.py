@@ -637,11 +637,14 @@ def _conversation_related_paths(
 
 
 # LLM: 只按每个 JSON 顶层 thread_id 判定归属；读不出的文件记 MEMORY_RETENTION_CONVERSATION_WAKE_INVALID（写入 errors），
-#   不猜归属。目录：待处理的 urgent/normal、毒丸尝试账 attempts、结案 quarantine 和 quarantine/replayed/<id>/ 留档。
+#   不猜归属。目录：待处理的 urgent/normal、毒丸尝试账 attempts、结案 quarantine、quarantine/replayed/<id>/ 留档和
+#   quarantine/archive/ 顶层的已归档结案记录（带 thread_id）。archive/ledger、archive/unreadable 与 quarantine/ledger、
+#   quarantine/unreadable 一样无法归属会话，不随会话删除，由运维清理。
 # 函数用途: 收集一个会话在唤醒队列下的全部文件，供会话删除一起清理；只读文件，不删除。
 def _thread_wake_files(wake_root: Path, thread_id: str, errors: list[MemoryRetentionError]) -> list[Path]:
     replayed = wake_root / "quarantine" / "replayed"
     directories = (wake_root / "urgent", wake_root / "normal", wake_root / "attempts", wake_root / "quarantine",
+                   wake_root / "quarantine" / "archive",
                    *sorted(path for path in replayed.glob("*") if path.is_dir()))
     paths = [item for directory in directories if directory.exists() for item in directory.glob("*.json")]
     return [path for path in paths if _wake_file_thread(path, errors) == thread_id]

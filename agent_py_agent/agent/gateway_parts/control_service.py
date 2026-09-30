@@ -64,6 +64,7 @@ from .io import gateway_turn_transition, read_json_file_report, update_json_file
 from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
 from .restart_control import execute_restart_control
 from .turn_recovery_control import execute_turn_recovery_control
+from .wake_ops_control import execute_wake_ops_control
 from .workspace_scope import GatewayWorkspaceScopeError, gateway_request_workspace_scope
 
 _ACTIVE_SUBAGENT_STATUSES = {
@@ -359,6 +360,8 @@ def execute_gateway_conversation_control(
         return _execute_restart_control(agent, paths, command, scope)
     if command.kind == "endtask":
         return _execute_end_task_control(agent, command, scope)
+    if command.kind == "wakes":
+        return _execute_wake_ops_control(agent, command, scope)
     if command.kind == "model":
         # model_profile_service 在导入期依赖本模块的 owner 解析，这里延迟导入以免循环引用。
         from .model_profile_service import execute_model_text_control
@@ -892,6 +895,19 @@ def _execute_end_task_control(
         return execute_end_task_control(_request_agent_for_scope(base_agent, scope), command)
     except Exception:
         return ConversationControlResult("endtask", False, "暂时无法查看或结束定时会话任务，请稍后重试。")
+
+
+# LLM: /wakes 按已认证 scope 解析 owner（不创建线程）；管理员判定、列表、预览和重放都归 wake_ops_control。
+# 函数用途: 为 /wakes 解析当前会话的 owner，再交给唤醒运维模块查看或重放已结案的后台唤醒。
+def _execute_wake_ops_control(
+    base_agent: object,
+    command: ConversationControlCommand,
+    scope: GatewayControlScope,
+) -> ConversationControlResult:
+    try:
+        return execute_wake_ops_control(_request_agent_for_scope(base_agent, scope), command)
+    except Exception:
+        return ConversationControlResult("wakes", False, "暂时无法查看或重放已结案的后台唤醒，请稍后重试。")
 
 
 # LLM: `/context` is a read-only projection of the same owner/thread, prompt estimator, and
@@ -2507,7 +2523,18 @@ def _gateway_task_status(
         compact_generation=compact_generation,
         verbose_level=verbose_level,
         durable_work=_named_durable_statuses(owner_agent, paths, scope),
+        quarantined_wakes=_quarantined_wake_count(owner_agent),
     )
+
+
+# LLM: 只数本 owner 结案目录里的文件（store.wakes.attempts.quarantined_count，不读内容、不含归档）；读不到会话存储时按 0，
+#   /status 不能因为这一行统计失败而整体失败。
+# 函数用途: 给 /status 取本 owner 已结案、不再自动领取的后台唤醒条数。
+def _quarantined_wake_count(owner_agent: object) -> int:
+    try:
+        return int(owner_agent.conversation_store.wakes.attempts.quarantined_count())
+    except Exception:  # noqa: BLE001 - 状态面尽力统计
+        return 0
 
 
 # LLM: 活跃工作片只读实际冻结模型名投影；空闲读取 canonical thread 选择，未绑定才读未来默认；不初始化 backend。

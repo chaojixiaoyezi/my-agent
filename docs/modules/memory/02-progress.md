@@ -298,3 +298,5 @@ error_self` 的提前返回只是快速路径，语义上不改变结果（错�
 - owner 维护侧的新字段见 gateway 02-progress 同名节。
 - 38 复审跟进（同分支补充提交，纯抽取、语义不变）：`execute_retention_plan` 越过函数长度 soft 线，候选批次阶段抽成
   `retention_apply._apply_candidate_phase(candidates, plan)`，返回结果与错误两个新列表，后续逐条动作继续追加。
+
+2026-09-29 唤醒毒丸第 4 步（分支 `claude/be-wake-ops`）：`retention_scan._thread_wake_files` 把 `wake_queue/quarantine/archive/` 顶层（满 14 天归档的结案记录，带 thread_id）加进会话删除清单；`archive/ledger`、`archive/unreadable` 与原来的留档目录一样无法归属会话，不随会话删除。

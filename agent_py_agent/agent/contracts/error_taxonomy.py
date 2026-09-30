@@ -802,6 +802,23 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "先按唤醒结案记录里的原因码排查目标会话（技能快照、模型配置、程序错误等），修好后可人工重放那条唤醒，或重新派活。"
         ),
     ),
+    "WAKE_REPLAY_ARCHIVED": ErrorContract(
+        code="WAKE_REPLAY_ARCHIVED",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "这条唤醒的结案记录已超过 14 天，移进了 quarantine/archive/（只移不删），不再重放；同键再发布仍返回这条结案信号。"
+            "需要的话请重新发起这件事（例如重新派活），不要重试重放。"
+        ),
+    ),
+    "WAKE_OPS_ADMIN_ONLY": ErrorContract(
+        code="WAKE_OPS_ADMIN_ONLY",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="只有本机管理员（或已绑定为管理员的 IM 身份）可以用 /wakes 查看或重放已结案的后台唤醒；请联系管理员处理。",
+    ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(
         code="SESSION_TASK_RATE_LIMIT",
         category="orchestration",

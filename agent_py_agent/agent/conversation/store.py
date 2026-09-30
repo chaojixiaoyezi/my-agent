@@ -22,6 +22,7 @@ from .store_progress import ProgressStore
 from .store_tasks import TaskStore
 from .store_threads import ThreadStore
 from .store_usage import ModelUsageStore
+from .store_wake_quarantine_archive import archive_stale_wake_quarantine
 from .store_wakes import WakeStore
 
 # 策略与已结束租约沿同一维护周期保留七天后归档，文件移动到原账本归档目录，便于诊断和恢复。
@@ -84,8 +85,9 @@ class ConversationStore:
             update_thread_atomic=self.threads.update_atomic,
         )
 
-    # LLM: 跨域维护只在原调度周期调用，两个领域使用同一时间与保留期，保持策略后 claim 的顺序。
-    # 函数用途: 协调策略和租约旧账归档，返回原有分类计数，不新建后台任务。
+    # LLM: 跨域维护只在原调度周期调用，策略与 claim 使用同一时间与保留期，保持策略后 claim 的顺序；
+    #   唤醒结案留档最后归档，用它自己的 14 天保留期（store_wake_quarantine_archive，只移不删）。
+    # 函数用途: 协调策略、租约旧账和唤醒结案留档的归档，返回各类计数，不新建后台任务。
     def gc_stale_ledger_records(
         self, *, now: float | None = None,
         retention_seconds: float = _LEDGER_GC_RETENTION_SECONDS,
@@ -97,7 +99,9 @@ class ConversationStore:
         archived_claims = self.claims.archive_stale(
             current=current, retention_seconds=retention_seconds,
         )
-        return {"archived_policies": archived_policies, "archived_claims": archived_claims}
+        archived_wake_quarantine = archive_stale_wake_quarantine(self.storage, current=current)
+        return {"archived_policies": archived_policies, "archived_claims": archived_claims,
+                "archived_wake_quarantine": archived_wake_quarantine}
 
     # LLM: 只组装既有领域读取结果；严格处理坏账的调用方使用 context_bundle_report，不建立第二份状态。
     # 函数用途: 为旧有正文上下文调用返回跨领域快照，不写盘或标记已消费。

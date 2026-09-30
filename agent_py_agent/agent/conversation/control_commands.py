@@ -41,6 +41,7 @@ ControlKind = Literal[
     "model",
     "restart",
     "endtask",
+    "wakes",
     "admin",
     "approve",
     "deny",
@@ -112,6 +113,8 @@ class ConversationTaskStatus:
     compact_generation: int | None = None
     verbose_level: str = ""
     durable_work: tuple[NamedConversationWorkStatus, ...] = ()
+    # 本 owner 已结案、不再自动领取的后台唤醒条数（唤醒毒丸结案，不含已归档的）；0 时 /status 不显示这一行。
+    quarantined_wakes: int = 0
 
 
 @dataclass(frozen=True)
@@ -182,7 +185,7 @@ def parse_conversation_control(
 # LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
 #   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
-# /endtask 只解析任务 ID 与 confirm，/model 只解析编号，
+# /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
 # /restart 的尾随文字只作为展示用原因。
 def parse_conversation_command(
     text: object,
@@ -555,6 +558,29 @@ def _endtask_command(trailing: object) -> ConversationControlCommand:
     )
 
 
+_WAKES_USAGE = ("用法：/wakes 或 /wakes quarantined 列出已结案的后台唤醒；/wakes replay <唤醒ID> 预览重放会做什么；"
+                "/wakes replay <唤醒ID> confirm 确认重放（仅管理员）。")
+
+
+# LLM: 只认固定子命令词和一个唤醒 ID，不接受正文：无参数或 quarantined 是列表，replay <ID> 是只读预览，
+#   replay <ID> confirm 才是重放请求。唤醒 ID 只做字符集校验（与 /endtask 同一字符集），是否存在、能否重放由执行端按结案记录判断。
+# 函数用途: 把 `/wakes`、`/wakes quarantined`、`/wakes replay <ID>`、`/wakes replay <ID> confirm` 解析为列表、预览或重放请求。
+def _wakes_command(trailing: object) -> ConversationControlCommand:
+    parts = str(trailing or "").split()
+    if not parts or [part.lower() for part in parts] == ["quarantined"]:
+        return ConversationControlCommand("wakes", operation="list", usage=_WAKES_USAGE)
+    if parts[0].lower() != "replay" or len(parts) < 2:
+        return ConversationControlCommand("wakes", operation="list", valid=False, usage=_WAKES_USAGE)
+    confirm = [part.lower() for part in parts[2:]] == ["confirm"]
+    return ConversationControlCommand(
+        "wakes",
+        value=parts[1],
+        operation="apply" if confirm else "view",
+        valid=bool(_ENDTASK_ID.fullmatch(parts[1])) and (len(parts) == 2 or confirm),
+        usage=_WAKES_USAGE,
+    )
+
+
 # LLM: 处置值只认 runtime_db 的结构化取值表，不接受同义词或正文；无参数只读查看，带参数才会改运行库。
 # 函数用途: 把 `/recover` 解析为查看，或把 `/recover <处置>` 解析为显式恢复请求。
 def _recover_command(trailing: object) -> ConversationControlCommand:
@@ -764,6 +790,8 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
             f"- {item.name}｜{_duration_text(item.elapsed_seconds)}｜{item.status}"
             for item in goals
         )
+    if status.quarantined_wakes:
+        lines.append(f"已结案的后台唤醒：{status.quarantined_wakes} 条（反复失败、不再自动领取；管理员可用 /wakes 查看）")
     return "\n".join(lines)
 
 
@@ -792,6 +820,7 @@ _TRAILING_PARSERS: dict[str, Callable[[object], ConversationControlCommand | Con
     "goal": _goal_command,
     "recover": _recover_command,
     "endtask": _endtask_command,
+    "wakes": _wakes_command,
     "model": _model_command,
     "admin": _admin_command,
     "experiment": _experiment_command,

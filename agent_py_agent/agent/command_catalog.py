@@ -171,6 +171,18 @@ COMMAND_CATALOG = (
         conversation_suffix=r"(?:\s+(.*))?$",
     ),
     CommandSpec(
+        "wakes",
+        "/wakes",
+        "列出反复失败、已结案不再领取的后台唤醒（仅管理员）",
+        help_variants=(
+            ("/wakes quarantined", "同上，列出已结案的后台唤醒"),
+            ("/wakes replay <唤醒ID>", "预览重放这条已结案唤醒会做什么，不做改动"),
+            ("/wakes replay <唤醒ID> confirm", "确认重放：按原内容放回待处理队列，失败计数清零"),
+        ),
+        submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
+    ),
+    CommandSpec(
         "goal",
         "/goal <时长> <名称> <任务>",
         "启动一个有名称的持续目标",

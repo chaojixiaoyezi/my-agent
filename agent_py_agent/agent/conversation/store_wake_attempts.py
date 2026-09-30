@@ -46,6 +46,8 @@ WAKE_REPLAY_NOT_FOUND = "WAKE_REPLAY_NOT_FOUND"
 WAKE_REPLAY_DOMAIN_TERMINAL = "WAKE_REPLAY_DOMAIN_TERMINAL"
 WAKE_REPLAY_PENDING_CONFLICT = "WAKE_REPLAY_PENDING_CONFLICT"
 WAKE_REPLAY_SOURCE_UNREADABLE = "WAKE_REPLAY_SOURCE_UNREADABLE"
+# 结案记录已超过保留期移进 quarantine/archive/（store_wake_quarantine_archive）；归档的不再重放。
+WAKE_REPLAY_ARCHIVED = "WAKE_REPLAY_ARCHIVED"
 # 尝试账里保留的错误消息只作诊断，截断到这个长度；判定从不读它。
 _WAKE_ERROR_SAMPLE_CHARS = 200
 
@@ -275,21 +277,28 @@ class WakeAttemptStore:
                       (sorted(unreadable.glob("*.json")) if unreadable.is_dir() else ()))
         return rows, errors
 
-    # LLM: 在结案记录的锁内完成：核对仍有结案记录、pending 没有同 ID 文件、领域未终态（由调用方传入判定），
-    #   然后按原 ID 和冻结内容写回 pending，结案记录移入 replayed/<id>/<n>.json 留档，尝试账清零。
-    #   领域判定为 None 表示调用方不做领域检查。任何拒绝都不改文件；来源读不出（信封当初读不出而留在 unreadable/，
-    #   或结案记录本身读不出）拒绝并返回 WAKE_REPLAY_SOURCE_UNREADABLE，不抛异常。
+    # LLM: 纯读、不取锁；判定在模块函数 wake_replay_source，replay（在锁内）与 /wakes replay 预览共用同一口径。
+    # 函数用途: 读出一条已结案唤醒的结案记录，读不到时说明原因。
+    def replay_source(self, wake_signal_id: str) -> tuple[str, dict[str, Any]]:
+        return wake_replay_source(self.storage, wake_signal_id)
+
+    # LLM: 只数文件、不读内容（quarantined_wake_count），给 /status 与 gateway_status 用。
+    # 函数用途: 数本 owner 当前已结案（未归档）的唤醒条数。
+    def quarantined_count(self) -> int:
+        return quarantined_wake_count(self.storage)
+
+    # LLM: 在结案记录的锁内完成：来源状态经 replay_source 判定（已归档、读不出、不存在各自拒绝），再核对 pending 没有
+    #   同 ID 文件、领域未终态（由调用方传入判定），然后按原 ID 和冻结内容写回 pending，结案记录移入
+    #   replayed/<id>/<n>.json 留档，尝试账清零。领域判定为 None 表示调用方不做领域检查。任何拒绝都不改文件，不抛异常。
     # 函数用途: 管理员人工重放一条已结案的唤醒；会写 pending、留档和尝试账，并删除结案记录。
     def replay(
         self, wake_signal_id: str, *, now: float, domain_terminal: Callable[[WakeSignal], bool] | None = None,
     ) -> WakeReplayResult:
         source = self.storage.wake_quarantine_path(wake_signal_id)
         with locked_file_transition(source):
-            payload, error = read_json_object_report(source, context="conversation.wake_replay.read")
-            if error is not None or self._source_unreadable(wake_signal_id, source):
-                return WakeReplayResult(False, WAKE_REPLAY_SOURCE_UNREADABLE)
-            if not payload:
-                return WakeReplayResult(False, WAKE_REPLAY_NOT_FOUND)
+            code, payload = self.replay_source(wake_signal_id)
+            if code:
+                return WakeReplayResult(False, code)
             facts = payload.pop("quarantine", None)
             facts = facts if isinstance(facts, dict) else {}
             restored = {**payload, "status": "pending", "handled_at": 0.0}
@@ -326,11 +335,6 @@ class WakeAttemptStore:
             return ledger, ""
         return {}, str(self.storage.wake_quarantine_ledger_path(wake_signal_id))
 
-    # LLM: 结案记录不存在而 unreadable/ 下有同 ID 留档，就是"信封当初读不出"的那条；两者都没有由调用方按 NOT_FOUND 处理。
-    # 函数用途: 判断一条唤醒的重放来源是否属于读不出的留档。
-    def _source_unreadable(self, wake_signal_id: str, source: Path) -> bool:
-        return not source.exists() and self.storage.wake_quarantine_unreadable_path(wake_signal_id).exists()
-
     # LLM: 结案 ID 已由 wake_quarantine_path 做过不透明 ID 校验；每条唤醒一个子目录，避免 ID 前缀相互匹配。
     # 函数用途: 定位一条唤醒的重放留档目录。
     def _replay_archive_dir(self, wake_signal_id: str) -> Path:
@@ -354,6 +358,41 @@ class WakeAttemptStore:
         except ValueError as exc:
             raise DataCorruptionError(f"wake attempts ledger for {signal.wake_signal_id} is invalid: {exc}") from exc
         return payload
+
+
+# LLM: 纯读、不取锁；来源状态的唯一判定，WakeAttemptStore.replay（在锁内）与 /wakes replay 预览共用：已移进归档的返回
+#   WAKE_REPLAY_ARCHIVED；信封当初读不出（留在 unreadable/）或结案记录本身读不出返回 WAKE_REPLAY_SOURCE_UNREADABLE；
+#   都没有返回 WAKE_REPLAY_NOT_FOUND；读得出返回空码和记录字典。
+# 函数用途: 读出一条已结案唤醒的结案记录，读不到时说明原因。
+def wake_replay_source(storage: ConversationStorage, wake_signal_id: str) -> tuple[str, dict[str, Any]]:
+    source = storage.wake_quarantine_path(wake_signal_id)
+    if _source_archived(storage, wake_signal_id, source):
+        return WAKE_REPLAY_ARCHIVED, {}
+    payload, error = read_json_object_report(source, context="conversation.wake_replay.read")
+    if error is not None or _source_unreadable(storage, wake_signal_id, source):
+        return WAKE_REPLAY_SOURCE_UNREADABLE, {}
+    return ("", payload) if payload else (WAKE_REPLAY_NOT_FOUND, {})
+
+
+# LLM: 只数文件、不读内容：顶层结案记录加读不出的信封留档，不含已归档与重放留档。
+# 函数用途: 数一个会话存储里当前已结案（未归档）的唤醒条数。
+def quarantined_wake_count(storage: ConversationStorage) -> int:
+    directories = (storage.wake_quarantine_dir, storage.wake_quarantine_unreadable_dir)
+    return sum(1 for directory in directories if directory.is_dir() for path in directory.glob("*.json") if path.is_file())
+
+
+# LLM: 结案记录不存在而 unreadable/ 下有同 ID 留档，就是"信封当初读不出"的那条；两者都没有由调用方按 NOT_FOUND 处理。
+# 函数用途: 判断一条唤醒的重放来源是否属于读不出的留档。
+def _source_unreadable(storage: ConversationStorage, wake_signal_id: str, source: Path) -> bool:
+    return not source.exists() and storage.wake_quarantine_unreadable_path(wake_signal_id).exists()
+
+
+# LLM: 顶层结案记录不在、而归档目录里有同 ID 的记录或读不出的信封留档，就是已归档（store_wake_quarantine_archive 移过去的）。
+# 函数用途: 判断一条唤醒的结案留档是否已经移进归档。
+def _source_archived(storage: ConversationStorage, wake_signal_id: str, source: Path) -> bool:
+    archived = (storage.wake_quarantine_archive_path(wake_signal_id),
+                storage.wake_quarantine_archive_dir / "unreadable" / source.name)
+    return not source.exists() and any(path.exists() for path in archived)
 
 
 # 函数用途: 生成一份新的尝试账。
@@ -488,6 +527,7 @@ def _unreadable_source_report(path: Path) -> dict[str, Any]:
 __all__ = [
     "WAKE_ATTEMPTS_SCHEMA",
     "WAKE_QUARANTINE_SCHEMA",
+    "WAKE_REPLAY_ARCHIVED",
     "WAKE_REPLAY_DOMAIN_TERMINAL",
     "WAKE_REPLAY_NOT_FOUND",
     "WAKE_REPLAY_PENDING_CONFLICT",
@@ -497,4 +537,6 @@ __all__ = [
     "WakeAttemptStore",
     "WakeQuarantineResult",
     "WakeReplayResult",
+    "quarantined_wake_count",
+    "wake_replay_source",
 ]

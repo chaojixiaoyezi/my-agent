@@ -3491,11 +3491,12 @@ class _BackgroundSchedulerTickMixin:
             summary = self.store.gc_stale_ledger_records(now=now)
         except Exception:  # noqa: BLE001 - 归档是增强,失败绝不影响 tick 主流程
             return
-        if summary.get("archived_policies") or summary.get("archived_claims"):
+        if summary.get("archived_policies") or summary.get("archived_claims") or summary.get("archived_wake_quarantine"):
             logging.getLogger("agent.conversation.runtime").info(
-                "ledger gc archived policies=%s claims=%s",
+                "ledger gc archived policies=%s claims=%s wake_quarantine=%s",
                 summary.get("archived_policies"),
                 summary.get("archived_claims"),
+                summary.get("archived_wake_quarantine"),
             )
 
     def _process_collaboration_cases(self, *, now: float) -> None:

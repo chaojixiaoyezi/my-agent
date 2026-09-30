@@ -242,6 +242,12 @@
     结案与长时间不计数提醒都留提示。信封读不出时用选批时冻结的副本收尾（3a 裁定 d）。
   - 领域写失败只打 `[background-wake-poison]` 日志，不影响已落盘的结案。
   - 第 4 步（be）：`/wakes`、`/status` 计数、归档、`wake_replayed`。
+- **第 4 步运维面已落地（2026-09-29，分支 `claude/be-wake-ops`，基于 step16l 候选加 C1 两个提交，待复审）**：
+  - 管理员命令 `/wakes`（列表）与 `/wakes replay <ID> [confirm]`（预览、确认重放），TUI 与飞书共用 Gateway 控制入口；
+    `/status` 与 `gateway_status` 显示已结案条数；重放成功打 `wake_replayed` 事件。日志与宿主提示随第 3 步结案发（75 的 C3/C4）。
+  - 14 天归档：顶层结案记录连同坏账留档、读不出的信封移到 `quarantine/archive/`，只移不删；归档是发布层的只读安装位置，
+    发布语义不变（同键再发布仍返回原结案信号），重放对已归档的记录拒绝（`WAKE_REPLAY_ARCHIVED`）。
+  - 领域终态判定是本地版本，C4 的 `wake_domain_closeout` 落地后改成导入它。详见 `docs/design/WAKE_POISON_PILL.md` 第 7、8 节。
 - **背景**：`204f4ddf9` 和 `7b83c8730` 都让同一条唤醒约每 30 秒被领取一次、失败或取消后永远重试。
   唤醒只有 pending/handled 两种状态，所有重试节流都在进程内，重启即清零，session_task 等 reason 没有任何上限。
 - **方向**：

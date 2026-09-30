@@ -78,6 +78,7 @@ python -m agent_py_agent --help
 | `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。 | 只作用于当前会话的工作任务；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
 | `/restart [<原因>]` | 管理员安全重启 Gateway：先停领新请求、等在跑的回合结束，再等执行中的工具跑完后换新进程；期间的消息排队，重启后自动处理。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；冷却中或同一会话短时间内重复重启会被拒。仅 Gateway 模式。 |
 | `/endtask [<任务ID> [confirm]]` | 管理员处理卡在等待中的定时会话任务：不带参数列出等待中的定时执行、能否结束及后续工作事实码；`/endtask <任务ID>` 只读预览（同样写明后续工作事实码）；`/endtask <任务ID> confirm` 把会话任务记为 cancelled，并立即结算它堵住的定时执行，定时任务按计划起新一轮运行。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；只处理“定时执行 waiting、会话任务 active、执行树没有未结束的执行”的任务，其余一律拒绝且不改动；不改运行库、不重做未确认的操作。仅 Gateway 模式。 |
+| `/wakes [quarantined]`、`/wakes replay <唤醒ID> [confirm]` | 管理员查看反复失败、已结案不再自动领取的后台唤醒：`/wakes` 列出结构化行（ID、会话、reason、原因码、次数、结案时间、已重放次数）；`/wakes replay <唤醒ID>` 只读预览重放会做什么；带 `confirm` 按原 ID 和原内容放回待处理队列、失败计数清零。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；已归档、读不出、待处理队列已有同 ID、对应的会话任务或会话消息已结束的，一律拒绝且不改动。仅 Gateway 模式。 |
 | `/model [<编号>\|default <编号>]` | 不带参数列出本会话模型、新会话默认和可选模型；`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。 | 只选择已保存或管理员共享的模型，不在聊天里新增模型或收发密钥；TUI 里单独输入 `/model` 仍打开菜单。仅 Gateway 模式。 |
 | `/admin <管理员密码>`、`/admin status`、`/admin logout` | 仅 IM 一对一私聊：用本机设置的管理员密码把本私聊绑定为管理员，之后按本机主用户 local/main 运行；`status` 查看、`logout` 解除。 | 绑定写 `config/admin-channel-identities.json`；密码不进回执、记录和日志；群聊与本机终端拒绝。仅 Gateway 模式。 |
 | `/approve <管理员密码>` | 仅已绑定管理员的 IM 私聊：批准本会话当前唯一等待确认的工具操作，只批准这一次。 | 写原 permission bridge 的精确决定文件；没有或多于一个待决时拒绝。 |
@@ -103,6 +104,8 @@ python -m agent_py_agent --help
 模型在下一轮看到的仍是原会话历史。执行链状态不是“执行中断造成的 unknown”时，`/recover` 拒绝处理并提示查看运行诊断。
 
 `/endtask` 说明（Gateway 模式，仅管理员）：定时运行里的工具操作结果未知时，模型工作片会停下，但会话任务仍是 active；定时层把这次运行停在 waiting 等后续事件，没有后续事件时它不会自己结算，同一定时任务也不再派发新运行（2026-09-28 两个会话因此停住）。`/endtask` 先按结构化事实核对：定时账本里这条运行是 waiting、会话任务链接是 active、运行库里这个任务整棵执行树（含子代理）没有未结束的 attempt；运行库读不到时按“无法确认”拒绝。确认结束只写两处：会话任务按 `expected_status=active` 改为 `cancelled`，再对同一任务调 `reconcile_waiting_run`；结算没成时定时层每轮的批量对账会再收口。未确认的工具操作保持原状、不会被重做，它们在外部是否生效需要人工核对。结束任务也不会停止它启动的受管后台命令，这些命令结束后的完成通知会落到已取消的任务上；预览和确认结果都会写明这一点。拒绝时的错误码（`END_TASK_*`）都登记在 `ERROR_CONTRACTS`，带恢复建议。列表每行和预览都附“后续工作事实码”，说明它为什么还在等：与定时执行收口用同一个判定（`scheduler_service.follow_up`），列出存在的事实码（如 `pending_wakes`、`open_subagents`、`active_goal`），读不出的项目写成“项目:错误码”（如 `pending_wakes:data_parse:JSONDecodeError`），没有任何事实写“无”；`active_goal`、`pending_guidance`、`enabled_progress_policy` 后面固定加“（宽限期内才算）”——定时执行收口过了宽限期就不再把它们算作后续工作，免得被读成“还会自己推进”；只显示事实码，不带任务正文。
+
+`/wakes` 说明（Gateway 模式，仅管理员）：后台唤醒同因失败满 5 次（或总计 12 次）会结案为 failed_permanently，不再自动领取（唤醒毒丸，见 `docs/design/WAKE_POISON_PILL.md`）。`/wakes` 列出已结案的唤醒，每行只有结构化字段；原因码后面带中文短说明，认不出的新码只显示原码。`/wakes replay <唤醒ID>` 预览：说明为什么结案、此前重放过几次、确认后会发生什么；`/wakes replay <唤醒ID> confirm` 才重放：按原 ID 和冻结内容放回待处理队列、失败计数清零，这次的结案记录留档到 `replayed/`；如果还是同一原因失败，满 5 次会再次结案，不会自己复活。拒绝码 `WAKE_REPLAY_*` 与 `WAKE_OPS_ADMIN_ONLY` 都登记在 `ERROR_CONTRACTS`：已归档（结案满 14 天移进 `quarantine/archive/`）、信封或结案记录读不出、待处理队列已有同 ID、对应的会话任务已是终态或会话消息回执已是 consumed/rejected（这时应重新派活，而不是重放）。`/status` 在有已结案唤醒时多一行「已结案的后台唤醒：N 条」。
 
 `/admin`、`/approve`、`/deny` 说明：先在本机运行 `my-agent admin-password set` 设置管理员密码，再在飞书里与机器人的
 一对一私聊中发送 `/admin <密码>`。绑定只按渠道和用户 ID 精确匹配，群聊永远不匹配；10 分钟内错 5 次会锁定该身份 10 分钟，

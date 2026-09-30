@@ -58,12 +58,14 @@ def _stable_signal(signal: WakeSignal) -> dict[str, Any]:
     return payload
 
 
-# LLM: 先查 pending 再查 handled，最后查结案位置；消费和结案都先落终态记录后删 pending，不能把交接误当信号丢失。
-#   结案记录顶层的 quarantine 键不是 WakeSignal 字段，不参与冻结内容对账。
+# LLM: 先查 pending 再查 handled，再查结案位置，最后查结案归档（quarantine/archive/，超过保留期的结案记录移到这里，
+#   只换物理位置、不改发布语义：同键再发布仍返回原结案信号，不新开一代）；消费和结案都先落终态记录后删 pending，
+#   不能把交接误当信号丢失。结案记录顶层的 quarantine 键不是 WakeSignal 字段，不参与冻结内容对账。
 # 函数用途: 严格读回固定信号，保留合法的已消费或已结案事实并拒绝同 ID 的内容冲突。
 def _installed_signal(storage: ConversationStorage, frozen: WakeSignal) -> WakeSignal | None:
     paths = (storage.wake_signal_path(frozen), storage.wake_handled_dir / f"{frozen.wake_signal_id}.json",
-             storage.wake_quarantine_path(frozen.wake_signal_id))
+             storage.wake_quarantine_path(frozen.wake_signal_id),
+             storage.wake_quarantine_archive_path(frozen.wake_signal_id))
     for path in paths:
         payload = _read_record(path)
         if payload is None:
@@ -146,12 +148,12 @@ def _migrate_legacy(storage: ConversationStorage, record: dict[str, Any], incomi
     return migrated
 
 
-# LLM: 旧版回执和只读查询按原两个队列、handled 及结案位置查精确 ID，不全局猜同名或内容。
+# LLM: 旧版回执和只读查询按原两个队列、handled、结案位置及结案归档查精确 ID，不全局猜同名或内容。
 # 函数用途: 读取一个旧信号身份，缺失与损坏保持不同结果。
 def _read_existing_identity(storage: ConversationStorage, identity: str) -> WakeSignal | None:
     validate_opaque_id(identity, kind="wake_signal_id")
     paths = [storage.wake_queue_dir / kind / f"{identity}.json" for kind in ("urgent", "normal", "handled")]
-    paths.append(storage.wake_quarantine_path(identity))
+    paths.extend((storage.wake_quarantine_path(identity), storage.wake_quarantine_archive_path(identity)))
     for path in paths:
         payload = _read_record(path)
         if payload is not None:

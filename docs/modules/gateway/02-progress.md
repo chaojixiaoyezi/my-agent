@@ -696,3 +696,5 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 
   抽取后对比基线 `5ec2db2e0` 的身份比对：新增 0、消失 0。
 - 测试与变异见 TESTS.md 同名节。
+
+- 2026-09-29 唤醒毒丸第 4 步运维面（分支 `claude/be-wake-ops`，待复审）：管理员 `/wakes`、`/wakes replay <ID> [confirm]`（TUI 与飞书共用 Gateway 控制入口），`/status` 与 `gateway_status` 显示已结案唤醒条数，账本整理把满 14 天的结案留档移进 `quarantine/archive/`（发布语义不变，重放拒绝 `WAKE_REPLAY_ARCHIVED`）。测试与变异见 TESTS.md 同名节。

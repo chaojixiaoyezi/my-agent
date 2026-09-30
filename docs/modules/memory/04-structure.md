@@ -85,9 +85,11 @@
 ## 会话删除收集的唤醒文件
 
 `memory_store/retention_scan._conversation_related_paths` 收集一个会话的唤醒相关文件时扫描 `wake_queue/` 下的
-`urgent/`、`normal/`、`attempts/`、`quarantine/` 和 `quarantine/replayed/<wake_signal_id>/`，逐个读 JSON 顶层 `thread_id`
-判定归属；读不出的文件记 `MEMORY_RETENTION_CONVERSATION_WAKE_INVALID`，不猜归属。尝试账与结案记录的权威在
-`conversation/store_wake_attempts.py`。
+`urgent/`、`normal/`、`attempts/`、`quarantine/`、`quarantine/archive/`（满 14 天归档的结案记录）和
+`quarantine/replayed/<wake_signal_id>/`，逐个读 JSON 顶层 `thread_id` 判定归属；读不出的文件记
+`MEMORY_RETENTION_CONVERSATION_WAKE_INVALID`，不猜归属。`quarantine/ledger/`、`quarantine/unreadable/` 及其在 `archive/` 下的
+对应目录无法归属会话，不随会话删除，由运维清理。尝试账与结案记录的权威在 `conversation/store_wake_attempts.py`，归档在
+`conversation/store_wake_quarantine_archive.py`。
 
 ## 记忆诊断回显的配置名单
 

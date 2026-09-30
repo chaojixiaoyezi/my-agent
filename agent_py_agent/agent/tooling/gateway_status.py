@@ -58,6 +58,7 @@ class GatewayStatusTool(BaseTool):
                 "检查当前唯一 Gateway 是否存活以及心跳是否新鲜",
                 "确认真实 Gateway 地址、状态端点、模型和配置来源",
                 "检查当前 Gateway 生命周期是否出现异常日志",
+                "查看本 owner 反复失败、已结案不再自动领取的后台唤醒条数（quarantined_wakes；详情由管理员用 /wakes 查看）",
             ),
             avoid_when=(
                 "检查模型自己启动的业务服务时使用 process_session",
@@ -115,11 +116,22 @@ class GatewayStatusTool(BaseTool):
             "source": "calling_agent_execution_config",
             "profile_id": str(source.get("profile_id") or ""),
         }
+        snapshot["quarantined_wakes"] = _quarantined_wake_count(self.agent)
         return ToolHandlerOutcome(
             self.model_spec.name,
             True,
             json.dumps(snapshot, ensure_ascii=False),
         )
+
+
+# LLM: 只数调用方 owner 的结案目录文件（store.wakes.attempts.quarantined_count，不读内容、不含归档）；读不到会话存储时
+#   返回 None，状态工具不能因为这一项失败。
+# 函数用途: 取本 owner 已结案、不再自动领取的后台唤醒条数，读不到时为 None。
+def _quarantined_wake_count(agent: object) -> int | None:
+    try:
+        return int(agent.conversation_store.wakes.attempts.quarantined_count())
+    except Exception:  # noqa: BLE001 - 状态面尽力统计
+        return None
 
 
 __all__ = ["GatewayStatusTool"]

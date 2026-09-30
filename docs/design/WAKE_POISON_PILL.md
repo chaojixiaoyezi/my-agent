@@ -194,6 +194,13 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
   code=reason_code），显示在下一次前台回复顶部，TUI 和飞书都能看到。
 - **状态面**：`gateway_status` 工具和 TUI `/status` 显示本 owner 已结案的唤醒数；TUI `/wakes quarantined`
   列出结构化行（id、thread、reason、reason_code、次数、时间）；飞书提供同名管理员命令。
+  第 4 步已落地（分支 `claude/be-wake-ops`，待复审）：
+  - `/status` 多一行「已结案的后台唤醒：N 条」，为 0 时不显示；`gateway_status` 返回 `quarantined_wakes`。
+    两处都只数结案目录里的文件（`attempts.quarantined_count()`），不读内容，不含已归档的。
+  - `/wakes` 与 `/wakes quarantined` 列出结构化行（id、会话、reason、原因码、同因与总次数、结案时间、已重放次数），
+    按结案时间倒序最多 30 条；读不出的只报条数和留档位置。
+  - 原因码是开放集合：已知码与 `admission:`、`error:` 前缀带中文短说明，认不出的只显示原码。
+  - TUI 与飞书共用 Gateway 控制入口（`gateway_parts/wake_ops_control.py`），仅管理员，不开放给模型。
 
 ## 8. 人工重放
 
@@ -211,7 +218,29 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 
 重放后如果还是同因失败，会再次在 N 次后结案，不会自动复活。
 
-结案记录不自动删除。在现有 6 小时一次的账本整理周期里，超过 14 天的记录移入归档，只移动、不删除。
+命令面（第 4 步）：`/wakes replay <ID>` 只读预览，`/wakes replay <ID> confirm` 才重放。预览和确认前做同一组核对：
+- 来源状态只读 `attempts.replay_source`：已归档返回 `WAKE_REPLAY_ARCHIVED`，信封或结案记录读不出返回 `WAKE_REPLAY_SOURCE_UNREADABLE`，
+  都没有返回 `WAKE_REPLAY_NOT_FOUND`；
+- 待处理队列已有同 ID 唤醒返回 `WAKE_REPLAY_PENDING_CONFLICT`；
+- 领域已结束返回 `WAKE_REPLAY_DOMAIN_TERMINAL`：会话任务唤醒看 `metadata.session_task_id` 对应任务是否已是终态，
+  会话消息唤醒看 `metadata.message_dedupe_key` 对应回执是否 consumed/rejected（没带键的旧唤醒按未结束处理），其它 reason 不检查。
+  这是本地版本，第 3 步 C4 的 `wake_domain_closeout.wake_domain_terminal` 落地后改成导入它，只留一个权威。
+确认时 store 在结案锁里重新核对一遍。`wake_replayed` 事件带 wake_signal_id、thread_id、reason、replay_count。
+拒绝码与 `WAKE_OPS_ADMIN_ONLY` 都登记在 `ERROR_CONTRACTS`。
+
+结案记录不自动删除。在现有 6 小时一次的账本整理周期（`ConversationStore.gc_stale_ledger_records`）里，超过 14 天的记录移入归档，
+只移动、不删除（`conversation/store_wake_quarantine_archive.py`）：
+- 顶层结案记录按 `quarantine.quarantined_at` 判断（读不出或缺字段的按文件时间），移到 `quarantine/archive/<id>.json`；
+  它的坏账留档 `ledger/<id>.json` 随记录一起移到 `archive/ledger/`，有记录对应的坏账不会单独先走。
+- 读不出的信封 `unreadable/<id>.json` 和没有记录对应的孤儿坏账按 max(mtime, ctime) 判断：结案时是 os.replace 移过去的，
+  mtime 还是原文件最后写入的时间，会比结案早很多。
+- `replayed/` 不动，它是重放次数的唯一权威。归档位置已有同名文件时不覆盖；文件名不是合法唤醒 ID 的杂项文件不碰。
+- 归档只换物理位置、不改发布语义：`archive/<id>.json` 是发布层的第四个只读安装位置（`_installed_signal`、
+  `_read_existing_identity`），同键再发布仍返回原结案信号，回执仍是 failed_permanently，不会抛「published wake signal is missing」。
+  重放对已归档的记录拒绝（`WAKE_REPLAY_ARCHIVED`）。「14 天后同键可以重新发布」没有采用：那要连去重回执和观察配对一起动，
+  还会让 `thread-goal:<goal_id>` 这类复用键自己复活，和上面「只能人工重放」冲突；要放开需另立设计项。
+- 列表和计数不含已归档的。会话删除一并清理 `archive/` 顶层带 thread_id 的记录；`archive/ledger/`、`archive/unreadable/`
+  与原来的 `ledger/`、`unreadable/` 一样无法归属会话，由运维清理。
 
 ## 9. 和现有兜底的关系
 

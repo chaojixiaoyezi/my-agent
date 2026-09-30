@@ -508,6 +508,23 @@
   `test_provider_transient_auto_resume.py`、`test_background_supply_backoff.py`、`test_background_claim_execution.py`、
   `test_wake_poison.py`、`test_decision_fault_matrix.py` 等）加 11 个全仓守卫，共 32 个文件 1027 项通过。
 
+## 唤醒毒丸第 4 步：/wakes 命令、状态计数与 14 天归档（2026-09-29，分支 `claude/be-wake-ops`）
+
+- `test_wake_quarantine_archive.py`（9 项）：
+  - 顶层记录按 `quarantined_at` 满 14 天才移（恰好 14 天不移），坏账留档随记录一起移；记录还新时，文件时间已旧的坏账也不单独移；
+  - 读不出的信封、孤儿坏账按 max(mtime, ctime)：把 mtime 改到 30 天前也不提前归档；读不出的顶层记录按文件时间；
+  - `replayed/` 不动；归档位置已有同名文件不覆盖；非法文件名不碰；
+  - 归档后同键再发布返回原结案信号、回执是 failed_permanently、不抛异常；重放已归档记录（含读不出的信封）返回 `WAKE_REPLAY_ARCHIVED`；
+  - 账本整理返回 `archived_wake_quarantine`；会话删除清单含 `archive/` 顶层本会话的记录、不含别的会话。
+- `test_wake_ops_control.py`（9 项）：解析四种写法与无效写法；错误码全部登记；非管理员拒绝；列表只渲染结构化字段、开放集合原因码、
+  读不出的计数；预览只读、确认重放写回 pending、留档 `replayed/<id>/1.json`、打 `wake_replayed` 事件；不存在、已归档、pending 冲突
+  拒绝且不改文件；会话任务 cancelled、会话消息回执 consumed 拒绝，没带消息键的旧唤醒允许重放；`/status` 经 Gateway 分派得到计数并
+  渲染一行，TUI 反序列化带上计数，`gateway_status` 取数；Gateway 分派、TUI 转发文本与本地模式拒绝。
+- 变异 25 个全部被抓住：归档（记录只看文件时间、边界改成小于、坏账不随记录、孤儿过滤去掉、只看 mtime、覆盖同名、非法名照移、
+  无记录留档边界）、store（重放不认归档、计数漏读不出的、读不出的归档看不见）、发布层不认归档、账本整理不归档、会话删除漏 archive、
+  命令（去掉管理员判定、预览也写、领域判定关掉、pending 冲突关掉、consumed 不算结束、不打事件、认不出的码不显示、quarantined 不算列表）、
+  状态面（渲染行、Gateway 计数、TUI 反序列化）。
+
 ## 唤醒毒丸第 3 步 C1：纯函数与存储层补充，不接线（2026-09-29，分支 `claude/38-wake-poison-c1`，基于 `cb08b80dc`）
 
 - **范围**：只加不接线，生产行为不变。`wake_poison`：新原因常量（quota:fallback_notice、run:cancelled、run:compact_yield、

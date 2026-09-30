@@ -464,6 +464,7 @@ agent_py_agent/
 |   |   |-- restart_service.py         # 安全重启唯一状态源：请求/合并、两段排空、完成标记、冷却防循环与发起方通知
 |   |   |-- restart_control.py         # /restart：管理员在 TUI/IM 里安排 Gateway 安全重启
 |   |   |-- end_task_control.py        # /endtask：管理员结束卡在等待中的定时会话任务，并结算它堵住的定时执行
+|   |   |-- wake_ops_control.py        # /wakes：管理员列出已结案的后台唤醒、预览并确认重放
 |   |   |-- admin_control_service.py   # /admin 绑定 IM 管理员身份，/approve、/deny 决定本会话唯一待决审批
 |   |   |-- skill_control_service.py   # 聊天 /skills：TUI 与 IM 里查看、确认、拒绝技能提案，查看、回滚、删除自动总结的 Skill
 |   |   |-- settings_control_service.py # 聊天 /settings（管理员）：TUI 与 IM 里查找、查看、修改、恢复默认、回滚参数
@@ -501,6 +502,7 @@ agent_py_agent/
 |   |   |-- store_wakes.py              # 唤醒入口、观察链接、投递冻结与消费确认
 |   |   |-- store_wake_publication.py   # 原去重记录冻结完整发布、固定身份恢复与纯读回执
 |   |   |-- store_wake_attempts.py      # 唤醒毒丸持久层：尝试账、结案 failed_permanently、人工重放与留档（store.wakes.attempts）
+|   |   |-- store_wake_quarantine_archive.py # 唤醒结案留档满 14 天移进 quarantine/archive/（只移不删，发布语义不变）
 |   |   |-- store_progress.py           # 进度策略、到期投影、失败退避落账与旧策略归档
 |   |   |-- process_events.py           # 受管后台命令终态到原会话 wake 的去重交接
 |   |   |-- task_follow_up.py           # 会话任务是否还有后续工作的结构化判定（定时执行收口据此决定 waiting）
@@ -1024,6 +1026,8 @@ agent_py_agent/
 |   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级原地切换：目标判定、空闲事实、UI 线程两段式、交接载荷、终端兜底
 |   |-- test_turn_recovery_control.py   # /recover 解析、只读查看、显式恢复后可再挂载、拒绝情形、Gateway 分派与 TUI 序列化
 |   |-- test_end_task_control.py      # /endtask 解析、只读列表与预览、确认结束后同一定时任务恢复派发、拒绝不改状态、Gateway 分派与 TUI 序列化
+|   |-- test_wake_ops_control.py      # /wakes 解析、仅管理员、列表与预览只读、确认重放与事件、各类拒绝不改文件、状态计数、Gateway 分派与 TUI 序列化
+|   |-- test_wake_quarantine_archive.py # 唤醒结案留档 14 天归档：判断时间、坏账随记录、max(mtime,ctime)、发布语义不变、重放拒绝、会话删除清单
 |   |-- test_admin_identity_store.py    # 管理员密码私有存储、5 次失败锁定、绑定精确匹配与损坏 fail-closed、本机 CLI
 |   |-- test_admin_identity_gateway.py  # 绑定私聊解析为 local/main、/admin 回执脱敏、服务端审批开关、/approve 与 /deny 精确决定
 |   |-- test_admin_identity_clients.py  # 适配器敏感命令不进持久队列、Gateway 不可达回复、TUI 本地拒绝且不写输入历史
@@ -1561,6 +1565,7 @@ docs/
 - `agent_py_agent/agent/conversation/store_wake_attempts.py`：`store.wakes.attempts`，每条唤醒一份尝试账（失败计数唯一权威）、结案记录与重放留档；判定委托 `wake_poison.py`，结案顺序比照 `mark_handled` 并同步结掉关联观察。设计见 `docs/design/WAKE_POISON_PILL.md`，测试 `test_wake_poison.py`、`test_wake_attempt_store.py`。
 - `agent_py_agent/agent/conversation/wake_attempt_tracking.py`：唤醒车道的毒丸接线。`track_wake_attempt` 包住一批唤醒的执行并在退出时逐条记账、到上限结案；作为 `background_claim` 的领取观察者（`begin`/`settled`）；`wake_attempt_deferred`/`wake_attempt_waiting` 给跳过阶段与就绪扫描用同一判据读持久退避；`inflight_attempts()` 给优雅停机找在途尝试。测试 `test_wake_attempt_wiring.py`（真实链路）、`test_background_claim_attempt_observer.py`。
 - `agent_py_agent/agent/conversation/wake_domain_closeout.py`：唤醒毒丸领域收尾与"领域已是终态"判定的唯一位置。结案后派活任务收成 failed 带 `failure_code` 并回报发送方，会话消息回执不动、只留注明仍待投递的宿主提示（做法 2）；派活正文已放弃时经 `close_out_source` 收任务；长时间不计数提醒留提示；`wake_domain_status`（终态状态，没结束为空串）与 `wake_domain_terminal` 供第 4 步人工重放与拒绝提示判定。测试 `test_wake_domain_closeout.py`。
+- `agent_py_agent/agent/conversation/store_wake_quarantine_archive.py`：账本整理周期里把满 14 天的唤醒结案记录、坏账留档和读不出的信封移进 `quarantine/archive/`，只移不删；归档是发布层的只读安装位置，发布语义不变。测试 `test_wake_quarantine_archive.py`。
 - `agent_py_agent/agent/conversation/store_progress.py`：`store.progress` 负责策略 CRUD、到期读取及失败退避事实落账；策略/claim 跨域归档仍由 Store 原维护入口顺序协调。
 - `agent_py_agent/agent/conversation/goal_clock.py`：前台、后台及控制视图共用同 owner 会话存储的目标时钟，四个计时操作直接归共享对象，整数结算保留小数余量。
 - `agent_py_agent/agent/conversation/goal_binding.py`、`goal_delegation.py`：按代理自身 thread/run 归属目标和用量；显式子目标沿同一运行器续接，不另建执行通道。
@@ -1602,6 +1607,7 @@ docs/
 - `agent/gateway_parts/restart_service.py`：Gateway 安全重启的唯一状态源；工具、`/restart` 只写请求，排空与换进程由服务循环经 `cli/gateway_restart_handover.py` 执行。
 - `agent/gateway_parts/turn_recovery_control.py`：`/recover` 只看当前 thread 工作任务的根主代理执行轮；查看只读，处置经唯一出口 `recover_attempt_unknown`，不重放旧操作。
 - `agent/gateway_parts/end_task_control.py`：`/endtask` 只处理“定时执行 waiting、会话任务 active、执行树没有未结束 attempt”的任务；列表与预览只读，确认后经 `tasks.update_status(cancelled, expected_status=active)` 与 `reconcile_waiting_run` 收口，仅管理员可用。
+- `agent/gateway_parts/wake_ops_control.py`：`/wakes` 列出已结案的后台唤醒，`/wakes replay <ID>` 预览、带 confirm 经 `store.wakes.attempts.replay` 重放；来源、pending 冲突与领域终态核对不过就拒绝且不改文件，仅管理员可用。测试 `test_wake_ops_control.py`。
 - `agent/gateway_parts/admin_control_service.py`：`/admin`、`/approve`、`/deny` 的唯一执行入口；只信任认证 scope 与结构化私聊类型，批准只写原 permission bridge 的精确决定文件。
 - `agent/gateway_parts/skill_control_service.py`：聊天 `/skills` 的唯一执行入口，TUI 与 IM 共用；按控制范围解析 owner（与 `/model` 同一解析），提案确认/拒绝必须带用户看到的版本号并由服务端锁内复核，列提案时调用审核顺序点；自动总结 Skill 走 `skill_learning_report`；回执不含本机路径，不暴露给模型。
 - `agent/capability/skill_learning_report.py`：自动总结 Skill 的状态推导（active/user_modified/missing）、列表、详情与用户回滚/删除，CLI `skills learned` 与聊天 `/skills learned` 共用。
