@@ -161,8 +161,7 @@ class WakeAttemptStore:
             state = mark_stall_alerted(state, now=now) if alert is not None else state
             ledger.update(state=ensure_writable_state(state).to_dict(), in_flight=None)
             write_json_file_atomic_unlocked(path, ledger)
-        return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=True, stall_alert=alert,
-                                  abandoned_turn_id=_turn_id(previous))
+        return _attempt_outcome(state, previous, abandoned=True, alert=alert)
 
     # LLM: 在执行前调用；上一条 in_flight 属于已确认死亡的进程时先补记一次（同 preflight 的 stopping_at 规则，按那次尝试的
     #   批大小经 verdict_for_batch 改写，批次中死亡只算批次失败），再写入本次 in_flight。进程是否存活只看结构化身份
@@ -182,8 +181,7 @@ class WakeAttemptStore:
                 "claim_id": str(start.claim_id or ""), "batch_size": start.batch_size,
                 "turn_id": str(start.turn_id or ""), "owner_process": build_process_identity(), "started_at": now})
             write_json_file_atomic_unlocked(path, ledger)
-        return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=abandoned,
-                                  abandoned_turn_id=_turn_id(previous) if abandoned else "")
+        return _attempt_outcome(state, previous, abandoned=abandoned)
 
     # LLM: 优雅停机用：只有 in_flight 的 claim_id 和 owner_process 都是本进程这次尝试的，才在锁内写 stopping_at；
     #   账不存在、读不出、没有 in_flight 或对不上都不写，返回 False（停机路径不能因坏账失败，坏账留给下次 preflight）。
@@ -448,6 +446,16 @@ def _archive_count(archive: Path) -> int:
 def _batch_size(in_flight: object) -> int:
     value = in_flight.get("batch_size") if isinstance(in_flight, dict) else None
     return value if type(value) is int and value >= 1 else 1
+
+
+# LLM: preflight/begin 共用：识别出中途死亡（abandoned）时从上一次在途记录带出持久化回合号，否则回合号为空；
+#   结案判定按最新状态算。纯函数。
+# 函数用途: 组装一次开始前补记后的结果。
+def _attempt_outcome(
+    state: WakePoisonState, previous: object, *, abandoned: bool, alert: WakeStallAlert | None = None,
+) -> WakeAttemptOutcome:
+    return WakeAttemptOutcome(state, quarantine_decision(state), abandoned=abandoned, stall_alert=alert,
+                              abandoned_turn_id=_turn_id(previous) if abandoned else "")
 
 
 # LLM: 回合号只取 in_flight 里持久化的字符串字段（C3 在 begin 时写入）；旧账、缺字段或非字符串按空串，调用方空串不收尾。
