@@ -102,7 +102,7 @@ def test_release_stops_at_the_limit_with_a_structured_code(tmp_path, same_turn) 
     """一条会让回合崩溃的消息不能无限循环：释放满上限后再没消费就结束，回执转 rejected 并记结构化原因码。
 
     释放按次计数，不按回合去重：同一条唤醒重跑用的是同一个回合号（wake_signal_id），按回合去重的话它反复失败
-    永远到不了上限。同一回合重新认领被释放的消息时也要补回这一回合的索引，否则下次收尾找不到它，消息又卡在 reserved。
+    永远到不了上限。
     """
     store = ConversationStore(tmp_path / "conv")
     _append(store, "msg-1")

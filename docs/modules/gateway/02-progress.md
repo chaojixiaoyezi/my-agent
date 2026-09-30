@@ -637,4 +637,4 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 后台片没有正常结束时同样收尾（`runtime._settle_unconsumed_background_turn_input`）：定时 run、派活、会话消息唤醒这三种自带精确
 回合号的片，模型调用失败、取消或中断时对本片回合号 `reject_pending(reject_reserved=True)`，Compact 公平让出除外；此前消息唤醒
 回合认领后失败，消息卡在 reserved。释放改为按次计数（回执 `migration.release_count`），同一条唤醒重跑（同一回合号）反复失败也会
-到上限；同一回合重新认领被释放的消息时补回回合索引。
+到上限。（更正：123f6f3b4 另写的「同一回合重新认领时补回回合索引」不需要，读回执时的投影修复会补回，下一提交已还原。）

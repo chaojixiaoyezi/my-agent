@@ -39,8 +39,8 @@
 
 - **修的问题**（ae 复审方案 A 时复现）：C 空闲，A 给 C 发消息；C 的消息唤醒回合认领了它（reserved，绑定到唤醒回合号
   `wake_signal_id`），带着它的模型调用失败。前台终态有 `reject_pending(reject_reserved=True)`，后台片没有任何收尾，消息卡在
-  reserved：重跑的唤醒回合看不到它，唤醒照样结案，C 之后的前台回合也拿不到。另两处连带问题：同一条唤醒重跑用同一个回合号，
-  释放按回合去重永远到不了上限；同一回合重新认领被释放的消息时不补回合索引，第二次失败又找不到它。
+  reserved：重跑的唤醒回合看不到它，唤醒照样结案，C 之后的前台回合也拿不到。连带问题：同一条唤醒重跑用同一个回合号，
+  释放按回合去重永远到不了上限。（原先还写了「同一回合重新认领不补回合索引」，经下一提交核实不成立，见本节末的更正。）
 - **`test_session_task_real_chain.py`（门禁补两窗）**：假线路新增断线注入（`RC-NOTE-FAILONCE` 只断第一次、`RC-NOTE-FAILALWAYS`
   每次都断，只在消息作为本回合自己的输入时断）。
   - `test_message_wake_that_fails_after_claiming_still_delivers_the_message`：认领后断线一次，重跑的唤醒回合把消息作为自己的输入
@@ -51,8 +51,11 @@
 - **`test_session_message_release_at_turn_end.py`**：上限用例参数化成「每次换回合」和「同一唤醒重跑」两种，逐次核对
   `migration.release_count`；新增后台片收尾只在异常结束时发生：模型调用失败 → 按唤醒回合号 `reject_pending(reject_reserved=True)`，
   Compact 公平让出 → 不收尾。
-- **变异**（8 个，按 rc==1 且有 FAILED 判定，全部被抓住）：去掉后台收尾、改回按回合去重计数、让出也收尾、同一回合重新认领不补索引、
+- **变异**（8 个，按 rc==1 且有 FAILED 判定，全部被抓住）：去掉后台收尾、改回按回合去重计数、让出也收尾、同一回合重新认领不补索引
+  （更正：这个变异同时破坏了跨回合改绑，被抓住的是跨回合用例，不能说明同回合需要补索引）、
   收尾不释放预留、上限差一、改用 task_id 当回合号、忽略已记次数。脚本 `sm3/mutate_rl.py`（scratchpad）。
+- **更正（下一提交）**：把 `_binds_on_claim` 换回 fc31db60d 的规则后，本节两窗与存储层上限用例（含同一唤醒重跑）全部通过
+  （`sm3/mutate_rebind.py`）——读回执时的投影修复会补回索引，那处改动本不需要，已还原成 fc31db60d 的认领规则。
 
 ## 会话消息在目标回合没消费就结束时释放给下一回合（方案 A，2026-09-29，分支 `claude/75-session-message-dedupe`，接在去重键提交之后）
 

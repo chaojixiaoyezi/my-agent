@@ -54,17 +54,16 @@ def _released_from(receipt: GuidanceOnceReceipt, receipt_turn_id: str) -> bool:
     return receipt_turn_id in {str(item or "").strip() for item in released_ids}
 
 
-# LLM: 认领时补记/改绑接收回合的两种情形：宿主投递回执还没绑定回合（首次认领）；会话消息被回合收尾释放过之后再被认领——
-#   别的回合跨回合认领（改绑到自己名下），或同一回合重新认领（唤醒重跑用同一个回合号，绑定不变）。释放时删了那一回合的
-#   索引，两种都要补回，下次收尾才找得到它、再记一次释放。插话和派活正文的跨回合认领不改绑，行为不变。
+# LLM: 认领时补记/改绑接收回合的两种情形：宿主投递回执还没绑定回合（首次认领）；会话消息被上一回合释放后由别的回合
+#   跨回合认领（调用方已确认它在 released_turn_ids 里）。插话和派活正文的跨回合认领不改绑，行为不变。
 # 函数用途: 判断这次认领是否要把回执的 expected_turn_id 写成当前回合并补回合索引。
-def _binds_on_claim(receipt: GuidanceOnceReceipt, metadata: dict, receipt_turn_id: str) -> bool:
+def _binds_on_claim(metadata: dict, receipt_turn_id: str, requested_turn_id: str) -> bool:
     if not _host_delivery_receipt(metadata):
         return False
     if not receipt_turn_id:
         return True
     origin_kind = str(metadata.get("origin_kind") or "").strip()
-    return origin_kind == SESSION_MESSAGE_ORIGIN_KIND and _released_from(receipt, receipt_turn_id)
+    return origin_kind == SESSION_MESSAGE_ORIGIN_KIND and receipt_turn_id != requested_turn_id
 
 
 # LLM: 派活正文的幂等键形状是 `body:session_task:<发送方>-><目标>:<正文摘要>`，里面带着它属于
@@ -251,11 +250,11 @@ class GuidanceStore:
                 attempt_id=normalized_attempt_id,
                 updated_at=time.time(),
             )
-            if _binds_on_claim(receipt, receipt_metadata, receipt_turn_id):
+            if _binds_on_claim(receipt_metadata, receipt_turn_id, requested_turn_id):
                 # 宿主投递（另一会话的消息或派活正文）写时没有接收回合；在认领这一刻补记，
                 # 与交互式插话共用同一条预约语义，提交校验才能对得上这条回执。
-                # 被回合收尾释放过的会话消息再被认领时同样绑定到这一回合（同一回合重跑时绑定不变）并补索引：
-                # 这一回合再没消费就结束时，回合收尾才能按索引找到它、再记一次释放（释放上限据此计数）。
+                # 被上一回合释放的会话消息跨回合认领时同样改绑到这一回合：这一回合再没消费就结束时，
+                # 回合收尾才能按它的索引找到它、再记一次释放（释放上限据此计数）。
                 bound_metadata = dict(receipt_metadata)
                 bound_metadata["expected_turn_id"] = requested_turn_id
                 updated = replace(
