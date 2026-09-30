@@ -670,8 +670,9 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
   - Gateway 摘要：`failed` 改为只算整次被拒与执行期动作失败，「执行了、只有隔离错误」不算（3a 据 9a 对 355 条的诊断补充裁定；
     摘要只打印、没有持久化读取方）；另加 `refused` 与 `isolated`。`OwnerMaintenanceResult` 同步带出 `failed_action_count`。
 - **不改**：/status、TUI 不读维护状态，展示维护状况属于新功能，记台账待定。
-- **计数口径**：`isolated_error_count` 是错误条数。同一个坏 `state.json` 会被 completed_task 与 tool_output 两个扫描器各报一次
-  （既有行为），所以不等于子树数；按 (错误码, 路径) 去重待定。
+- **计数口径**：`isolated_error_count` 是错误条数。解析不了（坏 JSON）的 `state.json` 会被 completed_task 与 tool_output 两个扫描器
+  各报一次（既有行为），这时不等于子树数，按 (错误码, 路径) 去重待定；生产 local/main 那 355 条是能解析、只缺 status 的旧格式，
+  只由 completed_task 报一次、路径不重复，上线后预期 `isolated_error_count` 约为 355。
 - **同轮处理的两个 v1 策略 owner**（3a 裁定）：`93b8c3ffffb8`（local/users，测试名）用产品 `_migrate_retention_policy` 一次性迁移，
   原文件备份进证据目录；`ebd40e6fc3ec`（feishu/users，像真实用户）不动、交用户决定，状态修复上线后它每天会记为 `refused`。
 - 38 复审跟进（同分支补充提交，纯抽取、语义不变）：代码尺寸身份比对新增了 3 条（`execute_retention_plan` 越 soft 线，

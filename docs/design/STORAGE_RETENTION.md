@@ -228,8 +228,9 @@
   - Gateway 摘要 `[gateway-owner-maintenance]` 的 `failed` 改为只算整次被拒与执行期动作失败，另加 `refused` 与 `isolated`
     （摘要只打印、不落盘；持久化的 `status` 不变）。
   - 仍待定：`partial_failure` 实际到不了（失败动作同时会记一条错误）；/status、TUI 展示维护状况。
-- 同一个坏任务 `state.json` 会被 completed_task 与 tool_output 两个扫描器各报一次 `TASK_STATE_INVALID`，所以错误条数不等于被隔离的
-  子树数（生产 local/main 的 355 条同样如此）；按 (错误码, 路径) 去重待定。
+- 解析不了（坏 JSON）的任务 `state.json` 会被 completed_task 与 tool_output 两个扫描器各报一次 `TASK_STATE_INVALID`，这时错误条数
+  不等于被隔离的子树数；按 (错误码, 路径) 去重待定。生产 local/main 那 355 条是能解析、只缺 status 的旧格式，tool_output 扫描器
+  读得出就直接跳过，只由 completed_task 报一次，路径不重复（9a 诊断），所以那里的 355 就是 355 个文件。
 - `retention_scan._tool_output_actions` 的「函数用途」注释写「含旧 tasks 与新版 runs 两个根」，实际只扫 `O/tasks`；
   `_recovery_roots` 的注释写「两个规范根」，实际返回三个。
 - `AuditLogQuery.cleanup_old_entries` 先读、写临时文件再替换，全程不持追加锁（`io.jsonl.append_line_locked` 用的锁），

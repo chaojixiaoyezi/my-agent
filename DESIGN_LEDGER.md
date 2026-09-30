@@ -510,7 +510,8 @@
     `isolated_error_count` / `last_applied_at`，审计事件加隔离计数；Gateway 摘要 `failed` 只算整次被拒与执行期失败，另加
     `refused` / `isolated`（摘要只打印）；持久化旧字段含义不变。
     /status、TUI 展示维护状况待定。
-  - 待定：同一个坏任务状态被两个扫描器各报一次，错误条数不等于子树数；
+  - 待定：解析不了（坏 JSON）的任务 state.json 会被 completed_task 与 tool_output 两个扫描器各报一次，错误条数不等于子树数；
+    生产那 355 条是能解析、只缺 status 的旧格式，只由 completed_task 报一次，路径不重复；
   - 待定：不活跃 owner 不会自愈迁移，因为 v1→v2 策略迁移只挂在 Curator 上。`93b8c3ffffb8` 已按裁定一次性迁移，
     `ebd40e6fc3ec`（像真实用户）交用户决定；
   - 两处扫描注释与实际扫描的根不一致；

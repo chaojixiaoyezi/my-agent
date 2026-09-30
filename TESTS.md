@@ -50,7 +50,7 @@
 - `test_owner_maintenance.py`：
   - 新增 `test_applied_run_with_isolated_errors_is_not_masked`：一个坏任务 `state.json` 加一个过期缓存。
     - 旧 `status` 仍是 `policy_unavailable`、`last_success_at` 为 0；
-    - 新字段 `apply_outcome=applied`、`isolated_error_count=2`（同一坏状态被两个扫描器各报一次）、`last_applied_at` 为本轮时刻；
+    - 新字段 `apply_outcome=applied`、`isolated_error_count=2`（测试里的 state.json 是解析不了的坏 JSON，completed_task 与 tool_output 两个扫描器各报一次）、`last_applied_at` 为本轮时刻；
     - 过期缓存照常删除；
     - 审计事件 `ok=true`、`errors=[]`，同时 `isolated_error_count=2`、按码计数 `{TASK_STATE_INVALID: 2}`；
     - 回执的 `isolated_errors` 进 `to_dict`。

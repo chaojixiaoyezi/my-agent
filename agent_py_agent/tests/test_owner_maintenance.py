@@ -105,7 +105,8 @@ def test_applied_run_with_isolated_errors_is_not_masked(tmp_path: Path) -> None:
     # 旧口径不变：有路径级错误就还是 policy_unavailable，last_success_at 不前进。
     assert result.status == "policy_unavailable"
     # 新字段说清执行事实：执行了、有被隔离的错误，其余动作照常执行。计数是错误条数、不是子树数：
-    #   同一个坏 state.json 会被 completed_task 与 tool_output 两个扫描器各报一次（既有行为），所以是 2。
+    #   解析不了的坏 state.json 会被 completed_task 与 tool_output 两个扫描器各报一次（既有行为），所以是 2；
+    #   能解析、只缺 status 的旧格式只报一次。
     assert (result.apply_outcome, result.isolated_error_count, result.failed_action_count) == ("applied", 2, 0)
     assert result.to_dict()["failed_action_count"] == 0
     assert not old_cache.exists()
