@@ -1,5 +1,14 @@
 # 设计台账
 
+## ChatGPT 订阅模型报"工具能力检查未通过"（2026-09-30，热修，已实现）
+
+- **事实**：用户在 step16q 勾选 GPT 模型后一发消息就报 `TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE`。隔离复现：模型其实调用了探针工具，
+  但订阅接口的 `response.completed.output` 是 `[]`，条目只在 `response.output_item.done` 里；解析只读终态 output，所以工具和正文都丢了。
+- **做法**：终态 output 为空时改用流里逐条的完整条目（协议层通用处理，不按地址分支）；终态有 output 仍以它为准。
+  详见 [模型账号登录 · 订阅接口的流式输出](docs/design/MODEL_OAUTH.md)。
+- **验证**：`test_responses_backend.py` 三个新用例（终态无 output 取流内条目、终态有 output 不被覆盖、流式能力探针通过）；
+  真实订阅账号 gpt-6.1-sol / gpt-5.6-sol 能力检查通过、短问候有正文（隔离目录副本，不刷新令牌）。
+
 ## /model 菜单改成五项、其他用户的初始模型、补全高亮（2026-09-30，分支 `claude/3a-chatgpt-browser-login`，已实现，待上线）
 
 - **用户反馈**：菜单九项、每项下面又一堆，容易绕晕；OpenCode 这种要加头的服务商在「新增模型」里加就行；希望管理员能给其他

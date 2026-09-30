@@ -58,6 +58,48 @@ def test_stream_requires_terminal_and_preserves_partial():
     assert thinking == ["先", "后"] and closed == ["先后"]
 
 
+# 09-30 实测 ChatGPT 订阅接口：终态 response.output 为 []，条目只在 output_item.done 里逐条给出；
+# 以前只读终态 output，工具能力检查判成"不支持工具"，正文也是空的。
+def test_completed_without_output_uses_streamed_items():
+    call = {"type": "function_call", "id": "fc-1", "call_id": "call-1", "name": "probe", "arguments": '{"nonce":"n1"}',
+            "status": "completed"}
+    message = {"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "好"}]}
+    events = [{"type": "response.output_item.added", "item": {**call, "arguments": "", "status": "in_progress"}},
+              {"type": "response.function_call_arguments.delta", "delta": '{"nonce":"n1"}'},
+              {"type": "response.output_item.done", "item": call},
+              {"type": "response.output_item.added", "item": {**message, "content": [], "status": "in_progress"}},
+              {"type": "response.output_text.delta", "delta": "好"},
+              {"type": "response.output_item.done", "item": message},
+              {"type": "response.completed", "response": completed([])}]
+    result = response_fields(collect_response([json.dumps(e) for e in events], None, None), "m")
+    assert result["tool_use_blocks"] == [{"type": "tool_use", "id": "call-1", "name": "probe", "input": {"nonce": "n1"}}]
+    assert result["text"] == "好" and result["truncated"] is False
+    assert result["usage"]["input_tokens"] == 10
+
+
+def test_completed_output_stays_authoritative_over_streamed_items():
+    streamed = {"type": "message", "content": [{"type": "output_text", "text": "流里的"}]}
+    final = {"type": "message", "content": [{"type": "output_text", "text": "终态的"}]}
+    events = [{"type": "response.output_item.done", "item": streamed}, {"type": "response.completed", "response": completed([final])}]
+    assert response_fields(collect_response([json.dumps(e) for e in events], None, None), "m")["text"] == "终态的"
+
+
+def test_stream_capability_probe_passes_when_completed_omits_output(monkeypatch):
+    backend = OpenAIResponsesBackend(BackendOptions("https://example.test/v1", "secret", "model", stream_enabled=True))
+
+    def stream(path, payload, headers, **kwargs):
+        prompt = payload["input"][-1]["content"]
+        nonce = prompt.split("nonce ", 1)[1].split(".", 1)[0]
+        call = {"type": "function_call", "call_id": "call-1", "name": "my_agent_capability_probe",
+                "arguments": json.dumps({"nonce": nonce}), "status": "completed"}
+        events = [{"type": "response.output_item.done", "item": call}, {"type": "response.completed", "response": completed([])}]
+        return iter(json.dumps(event) for event in events)
+
+    monkeypatch.setattr(backend, "request_stream_iter", stream)
+    capability = backend.probe_tool_capability()
+    assert capability.native_supported and capability.evidence == "live_probe_returned_structured_tool_call"
+
+
 def test_reasoning_encrypted_replay_is_model_scoped_and_not_text():
     obj = completed([{"type": "reasoning", "id": "rs-1", "encrypted_content": "cipher", "summary": []},
                      {"type": "message", "content": [{"type": "output_text", "text": "完成"}]}])

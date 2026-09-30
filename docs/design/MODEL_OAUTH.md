@@ -62,6 +62,13 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
 订阅模式固定使用专用 Responses 端点、账号头、流式请求及 `store=false`；system 指令转到 `instructions`，
 不发送该接口不接受的 `max_output_tokens`。通用服务商可按原显式目录发现操作读取 `/v1/models`。
 
+### 订阅接口的流式输出（2026-09-30 热修）
+
+- 订阅接口的 `response.completed` 不回带 `output`（实测为 `[]`），函数调用和正文条目只在流里逐条的 `response.output_item.done` 给出。
+  原先只读终态 output，工具能力检查判成"不支持原生工具"（`TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE`），正文也是空的。
+- `responses_wire.collect_response` 改为：终态 output 为空时用逐条 `output_item.done` 的完整条目；终态有 output 仍以它为准。
+  这是 Responses 流协议层的通用处理，不按服务商地址分支。09-30 用真实订阅账号复验：gpt-6.1-sol、gpt-5.6-sol 能力检查通过，短问候有正文。
+
 ### 订阅账号的模型目录（2026-09-30）
 
 - 订阅账号的 discover 读订阅接口自己的 `/models` 目录，不猜普通 `/v1/models`：带账号头与令牌、不跟随重定向，一次 GET，不调用模型。

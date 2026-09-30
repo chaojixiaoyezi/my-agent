@@ -8194,6 +8194,8 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
   管理员自己不受影响/目录损坏报错/补全空格/连接测试不列默认行/决策走限时测试/请求头校验/模板会话头/统一上下文/表单清密钥/
   高级页 Esc/订阅指定接口/普通用户无初始模型入口/账号分流/共享别名不进管理列表；脚本在 3a scratchpad `menu5/`）。
   真实目录：09-30 用产品 discover 带未保存连接读 OpenCode Go，拿到 30 个模型、结果不含密钥、不落盘（该目录不给上下文）。
+- Responses 流式终态不带 output：`test_responses_backend.py`（终态 output 为 [] 时取 `output_item.done` 条目、终态有 output 不被流内
+  条目覆盖、流式能力探针通过）；去掉兜底时第一、三例失败，第二例防止反过来总用流内条目。真实订阅账号复验见 DESIGN_LEDGER 09-30 热修条目。
 - 斜杠补全高亮：`test_tui_input.py::test_fully_typed_command_keeps_its_completion_highlighted`，`/model` 打全后下拉仍高亮、Tab 接受后
   是 `/model `；撤掉修复（候选文本不带结尾空格）时该用例失败。
 - 用量增量：`test_model_call_ledger.py`、`test_tui_model_metrics.py`、`test_reproject_model_usage.py`，

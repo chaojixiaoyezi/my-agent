@@ -90,9 +90,11 @@ def _notify(callback, value: str) -> None:
 
 
 # LLM: response.completed/incomplete 是终态事实；EOF 与 failed 不冒充完整回复，工具参数只从最终 output 取。
+#   终态 output 为空时改用流里逐条的 response.output_item.done（同一组完整条目）：ChatGPT 订阅接口终态不回带 output
+#   （09-30 实测：函数调用只在 output_item.done 里，completed.output 为 []），不按服务商地址分支。终态有 output 仍以它为准。
 # 函数用途: 消费 typed SSE，实时显示正文及 reasoning summary，保留最终用量。
 def collect_response(lines, on_chunk, on_thinking) -> dict:
-    text, thinking = [], []
+    text, thinking, done_items = [], [], []
     thinking_closed = False
     terminal = None
     for line in lines:
@@ -118,6 +120,8 @@ def collect_response(lines, on_chunk, on_thinking) -> dict:
             delta = str(event.get("delta") or "")
             text.append(delta)
             _notify(on_chunk, delta)
+        if kind == "response.output_item.done" and isinstance(event.get("item"), dict):
+            done_items.append(event["item"])
         if kind in {"response.completed", "response.incomplete"}:
             terminal = event.get("response")
             break
@@ -126,6 +130,8 @@ def collect_response(lines, on_chunk, on_thinking) -> dict:
     if not isinstance(terminal, dict):
         return {"status": "incomplete", "incomplete_details": {"reason": "stream_eof"},
                 "output": [{"type": "message", "content": [{"type": "output_text", "text": "".join(text)}]}]}
+    if not terminal.get("output") and done_items:
+        return {**terminal, "output": done_items}
     return terminal
 
 
