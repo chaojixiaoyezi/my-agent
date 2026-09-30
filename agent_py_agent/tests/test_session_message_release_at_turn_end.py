@@ -10,8 +10,12 @@ migration.rejection_code 记 SESSION_MESSAGE_RELEASE_LIMIT_REACHED。插话、�
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from agent_py_agent.agent.conversation import runtime as runtime_module
+from agent_py_agent.agent.conversation.background_execution import BackgroundCompactSliceYield
 from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_MESSAGE_ORIGIN_KIND,
     SESSION_MESSAGE_RELEASE_LIMIT,
@@ -19,6 +23,7 @@ from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_TASK_ORIGIN_KIND,
 )
 from agent_py_agent.agent.conversation.store import ConversationStore
+from agent_py_agent.agent.conversation.store_guidance_recovery import GuidanceRecovery
 
 _TARGET = "thread-b"
 _SENDER = "thread-a"
@@ -92,19 +97,59 @@ def test_other_receipts_are_still_rejected(tmp_path, origin_kind) -> None:
     assert receipt.status == "rejected" and "released_turn_ids" not in receipt.migration
 
 
-def test_release_stops_at_the_limit_with_a_structured_code(tmp_path) -> None:
-    """一条会让回合崩溃的消息不能无限循环：释放满上限后再没消费就结束，回执转 rejected 并记结构化原因码。"""
+@pytest.mark.parametrize("same_turn", [False, True], ids=["next-turns", "same-wake-rerun"])
+def test_release_stops_at_the_limit_with_a_structured_code(tmp_path, same_turn) -> None:
+    """一条会让回合崩溃的消息不能无限循环：释放满上限后再没消费就结束，回执转 rejected 并记结构化原因码。
+
+    释放按次计数，不按回合去重：同一条唤醒重跑用的是同一个回合号（wake_signal_id），按回合去重的话它反复失败
+    永远到不了上限。同一回合重新认领被释放的消息时也要补回这一回合的索引，否则下次收尾找不到它，消息又卡在 reserved。
+    """
     store = ConversationStore(tmp_path / "conv")
     _append(store, "msg-1")
+    turn = (lambda _index: "wake-1") if same_turn else (lambda index: f"turn-{index}")
     for index in range(1, SESSION_MESSAGE_RELEASE_LIMIT + 1):
-        assert _claim(store, "msg-1", f"turn-{index}"), f"第 {index} 回合应当能认领"
-        _end_turn(store, f"turn-{index}")
-        assert store.guidance.receipt("msg-1").status == "pending"
-    last = f"turn-{SESSION_MESSAGE_RELEASE_LIMIT + 1}"
+        assert _claim(store, "msg-1", turn(index)), f"第 {index} 回合应当能认领"
+        _end_turn(store, turn(index))
+        released = store.guidance.receipt("msg-1")
+        assert (released.status, released.migration["release_count"]) == ("pending", index)
+    last = turn(SESSION_MESSAGE_RELEASE_LIMIT + 1)
     assert _claim(store, "msg-1", last)
     _end_turn(store, last)
     receipt = store.guidance.receipt("msg-1")
     assert receipt.status == "rejected"
     assert receipt.migration["rejection_code"] == SESSION_MESSAGE_RELEASE_LIMIT_REACHED
-    assert len(receipt.migration["released_turn_ids"]) == SESSION_MESSAGE_RELEASE_LIMIT
+    assert receipt.migration["release_count"] == SESSION_MESSAGE_RELEASE_LIMIT
+    assert len(receipt.migration["released_turn_ids"]) == (1 if same_turn else SESSION_MESSAGE_RELEASE_LIMIT)
     assert not _claim(store, "msg-1", "turn-after"), "转 rejected 后不再有回合能认领"
+
+
+@pytest.mark.parametrize(("raised", "settles"), [
+    (RuntimeError("模型调用失败"), True),
+    (BackgroundCompactSliceYield("Compact 公平让出"), False),
+], ids=["failed", "compact-yield"])
+def test_background_slice_settles_its_turn_input_only_on_abnormal_end(tmp_path, monkeypatch, raised, settles) -> None:
+    """后台片异常结束时按这一片的精确回合号（消息唤醒取 wake_signal_id）走同一条收尾；Compact 公平让出是同一回合
+    换片续跑，预留已退回 pending 等续跑认领，这时收尾会把派活正文和插话误判为 rejected。走真实链路的后台调度器。"""
+    from agent_py_agent.tests import test_session_task_real_chain as rc
+
+    chain = rc._real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-SPY 你好 C。")
+    (wake,) = [row for row in chain.agent.conversation_store.wakes.pending(limit=0) if row.thread_id == chain.threads["C"]]
+    settled: list[tuple[str, dict]] = []
+    original = GuidanceRecovery.reject_pending
+
+    def spy(self, turn_id, **kwargs):
+        settled.append((turn_id, kwargs))
+        return original(self, turn_id, **kwargs)
+
+    def invoke(*_args, **_kwargs):
+        raise raised
+
+    monkeypatch.setattr(GuidanceRecovery, "reject_pending", spy)
+    monkeypatch.setattr(runtime_module, "_invoke_background_main_agent", invoke)
+    try:
+        chain.scheduler.tick(now=time.time())
+    except RuntimeError:
+        pass
+    calls = [call for call in settled if call[0] == wake.wake_signal_id]
+    assert calls == ([(wake.wake_signal_id, {"reject_reserved": True})] if settles else [])

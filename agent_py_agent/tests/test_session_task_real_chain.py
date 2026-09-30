@@ -38,6 +38,10 @@ from agent_py_agent.agent.conversation.control_commands import (
     conversation_request_interrupt_name,
     parse_conversation_control,
 )
+from agent_py_agent.agent.conversation.session_messaging import (
+    SESSION_MESSAGE_RELEASE_LIMIT,
+    SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
+)
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service, request_context, request_execution
@@ -137,6 +141,7 @@ class ScriptedWire:
         self.interrupted: list[str] = []
         self.ignored_stops: list[str] = []
         self._per_turn: dict[str, int] = {}
+        self._reset_once = False
 
     # 函数用途: 替换 backends.http.post_json；探测请求照实回答，其余交给脚本并记账。
     def __call__(self, request) -> dict:
@@ -161,7 +166,11 @@ class ScriptedWire:
         if spinning:
             entry["kind"] = "spin-guard"
             raise InterruptedError(f"RC 假线路：同一回合模型调用超过 {_SPIN_GUARD_CALLS} 次，判定为空转")
-        kind, text, call = self._script(turn)
+        try:
+            kind, text, call = self._script(turn)
+        except ConnectionResetError:
+            entry["kind"] = "connection-reset"
+            raise
         entry["kind"] = kind
         return self._reply(payload, text, call)
 
@@ -219,7 +228,19 @@ class ScriptedWire:
             return self._task_turn(turn)
         if turn.trigger == "user" and turn.heading.startswith("RC-"):
             return self._user_turn(turn)
+        if self._resets_own_note(turn):
+            raise ConnectionResetError("RC 假线路：带着这条消息的模型调用连接被对端重置")
         return ("wake-saw-note" if "RC-NOTE-" in turn.turn_text else "other"), "RC-ACK 收到。", None
+
+    # 函数用途: 失败注入：消息作为本回合自己的输入送来时断线——RC-NOTE-FAILONCE 只断第一次，RC-NOTE-FAILALWAYS 每次都断。
+    def _resets_own_note(self, turn: _Turn) -> bool:
+        if "RC-NOTE-FAILALWAYS" in turn.own_text:
+            return True
+        with self._lock:
+            if "RC-NOTE-FAILONCE" not in turn.own_text or self._reset_once:
+                return False
+            self._reset_once = True
+            return True
 
     # 函数用途: 测试者输入的前台回合：派活、发普通消息、取消、在忙时挂起（含"带着消息的调用挂起等停止"）。
     def _user_turn(self, turn: _Turn) -> tuple[str, str | None, tuple[str, dict] | None]:
@@ -632,6 +653,59 @@ def test_busy_target_stopped_before_consuming_the_message_still_gets_it(tmp_path
     final = _message_receipt(chain, "B", str(sent.get("message_id") or ""))
     assert getattr(final, "status", None) == "consumed", f"回执最终应是 consumed，实际 {getattr(final, 'status', None)}"
     assert not _pending_wakes(chain, "B"), f"B 的消息唤醒没有结案：{_pending_wakes(chain, 'B')}"
+
+
+def test_message_wake_that_fails_after_claiming_still_delivers_the_message(tmp_path, monkeypatch) -> None:
+    """C 空闲时收到消息；C 的消息唤醒回合认领了它（reserved，绑定到唤醒回合），带着它的模型调用断线失败。
+
+    后台片没有正常结束时要走与前台终态同一条收尾：消息释放回 pending，重跑的唤醒回合（同一个回合号）把它作为
+    自己的输入重新认领，回执最终 consumed，唤醒结案。没有这条收尾时消息永远卡在 reserved：重跑回合看不到它，
+    唤醒照样结案，C 之后的前台回合也拿不到（ae 在 4d3558fa4/fc31db60d 上复现）。
+    """
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-FAILONCE 你好 C。")
+    sent = chain.tool_outputs("send_session_message")[-1]
+    _require(sent.get("ok") is True, f"消息没有发出：{sent}")
+    now = time.time()
+    with pytest.raises(Exception):  # noqa: B017,PT011 - 断线原样从后台片抛出，这里只要这一拍失败
+        chain.scheduler.tick(now=now)
+    _require([call["kind"] for call in chain.wire.calls if call["kind"] == "connection-reset"] == ["connection-reset"],
+             f"前提不成立：唤醒回合带着消息的调用应当断线一次，实际 {[call['kind'] for call in chain.wire.calls]}")
+
+    before = len(chain.wire.calls)
+    # 失败的唤醒按调度器的重试间隔（30 秒）再领取；时钟往后推过这个间隔。
+    chain.scheduler.tick(now=now + 31)
+
+    own = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-FAILONCE" in call["own_notes"]]
+    assert own, "唤醒回合认领消息后失败，重跑回合和之后的回合都没有把它作为自己的输入收到（卡在 reserved）"
+    final = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+    assert getattr(final, "status", None) == "consumed", f"回执最终应是 consumed，实际 {getattr(final, 'status', None)}"
+    assert not _pending_wakes(chain, "C"), f"C 的消息唤醒没有结案：{_pending_wakes(chain, 'C')}"
+
+
+def test_message_wake_failing_every_time_rejects_the_message_after_the_release_limit(tmp_path, monkeypatch) -> None:
+    """同一条唤醒每次认领消息后都失败：重跑用的是同一个回合号，释放按次计数；释放满上限后再失败，回执转 rejected
+    并带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，下一拍领取后准入判来源已处理完、唤醒结案，不再开模型回合。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-FAILALWAYS 你好 C。")
+    sent = chain.tool_outputs("send_session_message")[-1]
+    _require(sent.get("ok") is True, f"消息没有发出：{sent}")
+    now = time.time()
+    statuses = []
+    for attempt in range(SESSION_MESSAGE_RELEASE_LIMIT + 1):
+        with pytest.raises(Exception):  # noqa: B017,PT011 - 每一拍都应当是带着消息的调用断线
+            chain.scheduler.tick(now=now + 31 * attempt)
+        statuses.append(getattr(_message_receipt(chain, "C", str(sent.get("message_id") or "")), "status", None))
+    resets = [call["kind"] for call in chain.wire.calls if call["kind"] == "connection-reset"]
+    _require(len(resets) == SESSION_MESSAGE_RELEASE_LIMIT + 1, f"前提不成立：每一拍都应当断线一次，实际 {len(resets)} 次")
+
+    assert statuses == ["pending"] * SESSION_MESSAGE_RELEASE_LIMIT + ["rejected"], f"逐次失败后的回执状态：{statuses}"
+    final = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+    assert final.migration.get("rejection_code") == SESSION_MESSAGE_RELEASE_LIMIT_REACHED
+    before = len(chain.wire.calls)
+    chain.scheduler.tick(now=now + 31 * (SESSION_MESSAGE_RELEASE_LIMIT + 1))
+    assert chain.wire.calls[before:] == [], "消息已达释放上限，唤醒仍开了模型回合"
+    assert not _pending_wakes(chain, "C"), f"C 的消息唤醒没有结案：{_pending_wakes(chain, 'C')}"
 
 
 @pytest.mark.parametrize("window", ["HOLD-FIRST", "HOLD-AFTER-TOOL"])

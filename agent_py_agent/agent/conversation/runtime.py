@@ -889,13 +889,19 @@ class BackgroundMainAgentRuntime:
             self.store,
             request,
         )
-        result, display_snapshot = _invoke_background_main_agent(
-            self,
-            thread,
-            request,
-            resolved_goal_context,
-            (proactive_delivery_available, transcript_delivery_available),
-        )
+        try:
+            result, display_snapshot = _invoke_background_main_agent(
+                self,
+                thread,
+                request,
+                resolved_goal_context,
+                (proactive_delivery_available, transcript_delivery_available),
+            )
+        except BackgroundCompactSliceYield:
+            raise
+        except Exception:
+            _settle_unconsumed_background_turn_input(self.agent, request)
+            raise
         # LLM: 取消可能在本片进入模型调用之后才到；调用返回时这一片的答复**不得交付**，任务也不许按
         #   "正常完成"收口。这里是**纵深防线**，不是常规停法：常规停法有两道，都在它之前——
         #   ①停止控制把旗立到本线程后，在途模型调用在等待关卡里看到旗就丢掉结果并抛中断
@@ -918,6 +924,25 @@ class BackgroundMainAgentRuntime:
             turn_id=_scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request),
         )
         return execution
+
+
+# LLM: 后台片没有正常结束（模型调用失败、被取消或中断）时，对这一片的精确回合号走与前台终态（request_execution.
+#   _settle_pending_gateway_guidance）同一条收尾 reject_pending(turn_id, reject_reserved=True)：会话消息释放回 pending
+#   （方案 A，按次计数，满上限转 rejected），插话和派活正文 rejected，已提交/已消费不动。否则唤醒回合认领的消息永远卡在
+#   reserved：重跑回合看不到它，前台回合也认领不了。Compact 公平让出不走这里（调用方先放行）：那是同一回合换片续跑，
+#   预留已由 compact 续跑退回 pending 等续跑认领。只收自带精确回合号的片（定时 run、派活、会话消息唤醒），与 _run_params
+#   注入时用的回合号同源；task_id 兜底的回合号不收。此时本片已结束、仍持有执行租约，同一回合不会有并发尝试。
+#   收尾失败只吞掉，不能盖住原异常；回执留在原状态。副作用：写补充消息回执、删回合索引。
+# 函数用途: 后台片异常结束时，把它认领了但没消费的补充消息按统一规则收尾（会话消息退回给下一回合或重跑回合）。
+def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundRunRequest) -> None:
+    turn_id = _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
+    store = getattr(agent, "conversation_store", None)
+    if not turn_id or store is None:
+        return
+    try:
+        store.guidance.recovery.reject_pending(turn_id, reject_reserved=True)
+    except Exception:  # noqa: BLE001 - 与前台收尾同口径：收尾失败不阻断原异常上抛
+        pass
 
 
 # LLM: 只从唤醒信封里取**结构化**字段（reason 与 metadata.session_task_id）组装一个最小请求对象，

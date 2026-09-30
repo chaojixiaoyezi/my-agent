@@ -499,7 +499,8 @@ class GuidanceRecovery:
 # LLM: 回合没消费就结束（/stop、报错、崩溃）时，pending/已预留回执的唯一收尾规则：插话等普通回执照旧转 rejected
 #   （Gateway 输入对账会把被拒插话重新排成请求）；会话消息改为释放回 pending，在回执自己的 migration.released_turn_ids 记下
 #   这一回合，下一回合按跨回合例外正式认领（认领时改绑到那一回合）——否则回执永久 rejected，内容只靠被停回合留在历史里的
-#   那段输入碰巧可见（2026-09-29 真实链路实测）。同一条消息已释放 SESSION_MESSAGE_RELEASE_LIMIT 次后转 rejected，
+#   那段输入碰巧可见（2026-09-29 真实链路实测）。释放按次计数（migration.release_count），不按回合去重：同一条唤醒重跑
+#   用同一个回合号，按回合去重时它反复失败永远到不了上限。已释放 SESSION_MESSAGE_RELEASE_LIMIT 次后再收尾转 rejected，
 #   migration.rejection_code 记 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，防止一条会让回合崩溃的消息无限循环。
 #   已提交（submitted）的回执调用方不会传进来：提交结果未知，释放会重复消费。派活正文不释放：任务被取消后释放会让
 #   前台回合认领到已取消任务的正文。只改回执级字段，entry.metadata 不动（参与正文指纹）。纯函数，不写盘。
@@ -510,11 +511,14 @@ def settle_unconsumed_receipt(receipt: GuidanceOnceReceipt, turn_id: str, *, now
         return replace(receipt, status="rejected", submission_id="", updated_at=now)
     migration = dict(receipt.migration)
     released = [str(item) for item in (migration.get("released_turn_ids") or []) if str(item or "").strip()]
-    if len(released) >= SESSION_MESSAGE_RELEASE_LIMIT:
+    release_count = migration.get("release_count")
+    release_count = release_count if type(release_count) is int and release_count > 0 else 0
+    if release_count >= SESSION_MESSAGE_RELEASE_LIMIT:
         migration["rejection_code"] = SESSION_MESSAGE_RELEASE_LIMIT_REACHED
         return replace(receipt, status="rejected", submission_id="", updated_at=now, migration=migration)
     if turn_id not in released:
         released.append(turn_id)
     migration["released_turn_ids"] = released
+    migration["release_count"] = release_count + 1
     return replace(receipt, status="pending", attempt_id="", submission_id="", submitted_at=0.0,
                    updated_at=now, migration=migration)

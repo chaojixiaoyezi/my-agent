@@ -35,6 +35,25 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 后台片没有正常结束时收尾本片认领的补充消息，释放按次计数（2026-09-29，分支 `claude/75-session-message-dedupe`，接在方案 A 之后）
+
+- **修的问题**（ae 复审方案 A 时复现）：C 空闲，A 给 C 发消息；C 的消息唤醒回合认领了它（reserved，绑定到唤醒回合号
+  `wake_signal_id`），带着它的模型调用失败。前台终态有 `reject_pending(reject_reserved=True)`，后台片没有任何收尾，消息卡在
+  reserved：重跑的唤醒回合看不到它，唤醒照样结案，C 之后的前台回合也拿不到。另两处连带问题：同一条唤醒重跑用同一个回合号，
+  释放按回合去重永远到不了上限；同一回合重新认领被释放的消息时不补回合索引，第二次失败又找不到它。
+- **`test_session_task_real_chain.py`（门禁补两窗）**：假线路新增断线注入（`RC-NOTE-FAILONCE` 只断第一次、`RC-NOTE-FAILALWAYS`
+  每次都断，只在消息作为本回合自己的输入时断）。
+  - `test_message_wake_that_fails_after_claiming_still_delivers_the_message`：认领后断线一次，重跑的唤醒回合把消息作为自己的输入
+    收到、回执最终 `consumed`、唤醒结案；
+  - `test_message_wake_failing_every_time_rejects_the_message_after_the_release_limit`：每次都断，前 5 次后回执 pending、
+    第 6 次后 rejected 带 `SESSION_MESSAGE_RELEASE_LIMIT_REACHED`，下一拍不开模型回合、唤醒结案。
+  - 两窗在修复前（`fc31db60d`）都失败。
+- **`test_session_message_release_at_turn_end.py`**：上限用例参数化成「每次换回合」和「同一唤醒重跑」两种，逐次核对
+  `migration.release_count`；新增后台片收尾只在异常结束时发生：模型调用失败 → 按唤醒回合号 `reject_pending(reject_reserved=True)`，
+  Compact 公平让出 → 不收尾。
+- **变异**（8 个，按 rc==1 且有 FAILED 判定，全部被抓住）：去掉后台收尾、改回按回合去重计数、让出也收尾、同一回合重新认领不补索引、
+  收尾不释放预留、上限差一、改用 task_id 当回合号、忽略已记次数。脚本 `sm3/mutate_rl.py`（scratchpad）。
+
 ## 会话消息在目标回合没消费就结束时释放给下一回合（方案 A，2026-09-29，分支 `claude/75-session-message-dedupe`，接在去重键提交之后）
 
 - **修的问题**：B 忙时收到消息、在安全点注入，带着它的调用返回前 B 被 /stop；回合收尾 `reject_pending(reject_reserved=True)`
