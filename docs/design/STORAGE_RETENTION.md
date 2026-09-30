@@ -1,6 +1,6 @@
-# 产品持久数据的保留策略（盘点与方案，未落地）
+# 产品持久数据的保留策略（盘点与方案，部分落地）
 
-状态：**未落地**。本文只做只读盘点和方案方向，不改产品代码。盘点基于 main `54880f8e9` 的源码，测量对象是本机生产 home
+状态：**部分落地**（2026-09-29 按 R4 上线后的代码与生产首跑核对，见第 8 节；第 1–7 节保留 09-28 的原始盘点，不逐段改写）。本文最初只做只读盘点和方案方向，不改产品代码。盘点基于 main `54880f8e9` 的源码，测量对象是本机生产 home
 （`~/.my-agent`，2026-09-28 下午数据盘写满后）。
 
 ## 1. 范围与方法
@@ -174,3 +174,66 @@
 - **所有恢复材料扫描都按规范根与规范深度**：`runs/<date>/<key>` 与 `tasks/<date>/<slug>` 第二层、
   `audits/<audit_id>` 第一层，由 `workspace_paths.canonical_task_root` 统一判定；非规范深度的
   「像任务」目录一律不算任务根（2026-09-29 起 tool_output 与 subagent_scratch 两处也套用）。
+
+## 8. 落地状态（2026-09-29 核对：代码按 main `89af6b07a`，生产按 step16i 首跑）
+
+核对只看源码和生产结构化字段（`O/data/maintenance.json`、`O/audit_log.jsonl` 里的 `owner_retention_applied`），不读正文。
+「待定」表示没有排期、没有裁定，新想法只记在这里和台账，不开工。
+
+**已落地**（R4 owner 保留重做，step16h/16i 上线；global_index 压缩与向量缓存回收同批）：
+
+- 维护入口 `user_space/owner_maintenance.run_owner_retention_if_due`：Gateway 的 owner 维护线程每 60 秒扫一遍
+  （`owner_maintenance_scan_interval_seconds`），每个 owner 到期（`maintenance_interval_seconds`，默认 86400）才跑。一次维护依次做：
+  保留 apply、文本向量缓存回收（`text_vector_cache_reclaimed`）、global_index 压缩。结果写 `O/data/maintenance.json`
+  （`owner-maintenance.v1`），每次 apply（包括拒绝）在 `O/audit_log.jsonl` 追加一条 `owner_retention_applied`。
+- 缺口 1 的一半：`completed_task_days`（365 天）扫描 `O/runs`、`O/tasks`、`O/audits` 三个根，按
+  `workspace_paths.canonical_task_root` 的规范深度认任务根（`retention_scan._recovery_roots` / `_iter_task_states`）。
+  结构化终态加天数后整棵移入回收站。
+- 错误隔离：只有策略级错误（`POLICY_INVALID`、`POLICY_UNREADABLE`、`CANDIDATES_UNREADABLE`）或法律保留才整次拒绝执行；
+  `TASK_STATE_INVALID` 这类路径级错误只剔除与出错子树重叠的动作（`retention._without_errored_subtrees`），其余照常执行。
+- 缺口 3：`audit-log --cleanup` 按 owner home 解析到写入端同一个 `O/logs/audit/audit.jsonl`。
+- 缺口 7 的一半：原来扫错目标的 `audit` 类别（`O/audit/*.jsonl` 是记忆归档原始事件，Curator 要读）已停用，`audit_days` 暂不生效，
+  不再误删。
+- 方向 2 的一部分：global_index 的 active_tasks / active_runs / active_agents / owners 四个只追加索引，在维护里按 key 重写压缩
+  （`home_index_compact`）：文件不小于 64 MiB、且不小于上次压缩后大小的 2 倍、距上次压缩满 6 小时才动。
+  生产首次压缩（09-29 03:57，owner `5324eb9ef8b6` 的维护）：三份索引 355/282/284 MB → 41/56/55 MB，读取侧逐 key 核对 0 差异，派发未受影响
+  （证据 `~/.my-agent/releases/step16i-df0114f2/first-maintenance/`）。
+- 首跑积压的处理方式：`tmp`（7 天）、`cache`（30 天）、`curator_run`（90 天）、`daily`（365 天）、`compact`（365 天）按 mtime 直接删除；
+  子代理 scratch（30 天）在父任务状态可读、未被保留、子代理自身结构化终态时移入回收站；回收站按 tombstone 的 `moved_at` 满 30 天清除。
+
+**部分落地、剩余待定**：
+
+- 缺口 1 的另一半：`tool_output_days_after_terminal` 与 `subagent_scratch_days` 仍只扫旧版 `O/tasks`（09-28 裁定「工具输出暂不扩」）。
+- 缺口 7 的另一半：真正的审计日志 `O/logs/audit/audit.jsonl` 只能手动 `audit-log --cleanup`（`cli_audit_cleanup_days` 默认 90），
+  `O/audit_log.jsonl` 与 LocalStore 里的审计事件副本没有任何清理。
+- 方向 3：只有 `O/runs`、`O/audits` 经 `completed_task_days` 覆盖；上下文快照、`runtime_facts`、Gateway 的 done/terminal/failed/responses、
+  `O/agents`、子代理 `daily/` 仍没有保留规则。另外 `completed_task_days` 是连用户交付物一起整棵移入回收站，与方向 6「交付物不自动删」
+  不一致（09-28 的裁定如此，365 天后才触发），待定。
+
+**未做（待定）**：缺口 2（维护仍只由 Gateway 触发；手动入口 `home-retention [--apply]`、`memory retention plan|apply` 只跑保留，
+不做向量缓存回收、索引压缩，也不写 `maintenance.json`）、缺口 4（`compact` 仍按 mtime 删，没有引用保护，活跃线程的检查点链仍可能被拆断）、
+缺口 5（移走线程的孤儿文件）、缺口 6（没有移除测试 owner 的入口）；方向 1（存储登记表）、方向 2 的其余文件（`local_store/events.jsonl`、
+`blobs/tool_outputs/index.jsonl`、审计日志、`gateway.log` 轮转）、方向 4（SQLite 行级保留与 VACUUM）、方向 5（旧布局迁移）、方向 6（占用视图，
+`max_disk_mb` 种子仍是 0）、方向 7（不依赖 Gateway）、方向 8（磁盘压力触发维护）、方向 9 的移除命令。
+
+**已知残留（2026-09-29 核对时发现，待定，不改代码）**：
+
+- `owner_maintenance._maintenance_status` 只要 `load_errors` 非空就记 `policy_unavailable`，哪怕路径级错误已被隔离、其余动作都执行了；
+  `last_success_at` 也因此不前进。状态名会让人误以为整次被拒（生产 local/main 带 355 条 `TASK_STATE_INVALID` 时就是这样）。
+  `partial_failure` 实际到不了：失败动作同时会记一条错误。
+- `retention_scan._tool_output_actions` 的「函数用途」注释写「含旧 tasks 与新版 runs 两个根」，实际只扫 `O/tasks`；
+  `_recovery_roots` 的注释写「两个规范根」，实际返回三个。
+- `AuditLogQuery.cleanup_old_entries` 先读、写临时文件再替换，全程不持追加锁（`io.jsonl.append_line_locked` 用的锁），
+  手动清理期间新追加的审计行可能丢失。
+- 回收站清除注释里说的「散落文件按 mtime 清除」没有实现，只清 tombstone 容器。
+
+**生产首跑积压（09-29 21:39:50，证据 `~/.my-agent/releases/step16i-df0114f2/first-maintenance/` 第二节）**：
+- local/main 审计事件 `applied=true`、`ok=true`，共 11742 个动作，执行失败 0，与 my-agent-4 的 plan 逐类对上：
+  - tmp 直接删除 3581（约 77 MB）；
+  - subagent_scratch 进回收站 8090（约 73 MB）；
+  - tool_output 进回收站 25，另有 46 条执行时目标已不在（missing）。
+- 355 条 `TASK_STATE_INVALID` 的子树被隔离、没有动，要不要修复或迁移待定。
+- `maintenance.json` 仍记 `policy_unavailable`，这正是上面「已知残留」第一条的实例。
+- 另一个 owner（`86462b8c9517`）执行 146 个动作。
+- 两个 owner（`93b8c3ffffb8`、`ebd40e6fc3ec`）的保留策略本身无效（`POLICY_INVALID`），每天整次拒绝执行，需要有人看它们的
+  `retention.json`（待定）。

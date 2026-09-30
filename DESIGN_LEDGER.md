@@ -208,7 +208,7 @@
   环境级补 402、404；批次失败也推进连续不计数段。文档更正：环境级故障目前只是不计数、仍由车道冷却重试，按车道暂停列为
   第 3 步第 4 点；另记三条接线约定（坏账按 `attempt:ledger_corrupt` 结案、`record()` 放 finally、宿主提示按会话与原因合并）。
   详见 [WAKE_POISON_PILL.md](docs/design/WAKE_POISON_PILL.md)。
-- 2026-09-29 第 3 步 C5（分支 `claude/9b-lane-env-pause`，基于 `89af6b07a`，初版 9a 复审通过，三个补充提交待复审）：环境级故障判定收成
+- 2026-09-29 第 3 步 C5（分支 `claude/9b-lane-env-pause`，基于 `89af6b07a`，四个提交均经 9a 复审通过，已进 step16k）：环境级故障判定收成
   `backends/errors.is_provider_environment_fault` 一个权威，毒丸不计数与 Gateway 车道共用；车道对这类故障按车道暂停，会话模型指纹
   （`thread_model_fingerprint`，只读）变了立即放行，否则 60→900 秒探测一次，成功清除；缺模型仍先走等配置分支；状态只在进程内。
   核对结论：`ProviderQuotaExhaustedError` 不会被供应退避和车道冷却重复处理——供应退避只吸收瞬时类；唤醒路径就地转额度通知、
@@ -216,6 +216,13 @@
   观察路径会从供应退避的 30→900 秒变成车道 30 秒固定重试；**3a 裁定**：额度用完在车道这层显式并入环境暂停（共享判定不变），
   与 9a 的改判同批（step16k）上线。同一原则下持久策略失败账也不记环境级故障与额度用完、不因此退休（改前连续 3 次 401 会退休）。
   9a 复审通过初版，建议 1 已补：取指纹出错按未知处理、只等探测时刻，不把暂停冲成普通冷却。
+  真实验收（MiniMax-M2.7，隔离 home、8436）通过：真实 401 → 暂停 60 秒，探测仍 401 → 翻倍到 120 秒；写回正确密钥 1.8 秒后按指纹变化放行，
+  随后真实调用成功；两次 401 期间策略没有记失败账（证据 `~/.my-agent/decision-evidence/c5-lane-env-pause-2d6e06626/`）。
+  **待定**：成功那一轮的用量事件同时带 1 次「未完成」估算（25985）。它不是上一次 401 探测的估算记到了同一请求上：两次 401 的估算
+  14110、20047 已分别出现在前两条事件里，按累计快照增量算，第三条多出来的是成功那一轮自己一条发过 HTTP 尝试、但没完成的调用记录
+  （最可能是首包超时或连接中断后重放）。验收 home 按规矩已删，无法再取账本确认；下次真实验收删除 home 前，先读 model call ledger
+  各记录的 status、error_code 和 provider_attempt_count。顺带观察（只记，未评估影响）：后台策略运行没有调度 run id 时，
+  turn_id 退回用 task_id（`runtime._run_agent`），同一任务的多次策略运行共用一个 turn 身份。
 
 ## 持久化指纹必须分版本、兼容旧数据（2026-09-29，分支 `claude/38-guidance-receipt-digest-compat`，基于 `bac2f176d`，本地验证通过，待集成）
 
@@ -440,7 +447,7 @@
 - **相关测试**：`test_filesystem_near_name.py::test_credential_file_blocked_in_normal_mode_but_allowed_under_owner_wall`
   已把**两种模式的现行行为**如实钉住，将来无论怎么决策，行为一变就会红。
 
-## 产品持久数据保留策略盘点（2026-09-28，分支 `claude/9b-storage-retention-audit`，基于 `54880f8e9`，未落地）
+## 产品持久数据保留策略盘点（2026-09-28，分支 `claude/9b-storage-retention-audit`，基于 `54880f8e9`；2026-09-29 状态：部分落地）
 
 下午数据盘写满后做的只读盘点。生产 home 里产品自己写的数据约 20 GB（发布备份 24 GB 另行处理），其中管理员 home 约 17.1 GB。按大小排前几位的是：旧版任务工作区 `O/tasks` 8.30 GB（有保留键，但 365 天且只认已完成的目录，基本回收不到，最大的是用户任务里克隆的项目），会话本地库 `local_store` 1.92 GB，每轮上下文快照 1.90 GB，子代理目录 `O/agents` 1.30 GB（13.3 万个条目，几乎都超过 90 天），`global_index` 四个只追加索引 0.93 GB，另有两处旧布局遗留 0.87 GB 和 0.80 GB。
 
@@ -455,6 +462,41 @@
 - 维护不再依赖 Gateway 运行；
 - 磁盘压力时兜底维护；
 - 测试数据与生产 home 分开。
+
+**落地状态（2026-09-29 核对，代码按 main `89af6b07a`，生产按 step16i 首跑）**：
+- 已落地（R4，step16h/16i）：
+  - Gateway 维护线程按 owner 到期跑维护：保留 apply → 文本向量缓存回收 → global_index 压缩，结果写 `O/data/maintenance.json`，
+    每次 apply 在 `O/audit_log.jsonl` 记 `owner_retention_applied`；
+  - `completed_task_days` 覆盖 `O/runs`、`O/tasks`、`O/audits` 三个根（按规范深度认任务根）；
+  - 路径级错误只剔除重叠动作，不再整次拒绝；
+  - `audit-log --cleanup` 指到真实审计日志；扫错目标的 `audit` 类别已停用；
+  - global_index 四个只追加索引按门槛重写压缩，生产首次压缩把三份 355/282/284 MB 的索引压到 41/56/55 MB，读取侧 0 差异。
+- 部分落地、剩余待定：
+  - 工具输出与子代理 scratch 仍只扫 `O/tasks`；
+  - 审计日志只能手动清，`O/audit_log.jsonl` 与 LocalStore 副本没人清；
+  - 快照、runtime_facts、Gateway 记录、`O/agents` 仍无保留规则；
+  - `completed_task_days` 会连交付物一起移入回收站，与「交付物不自动删」的方向不一致。
+- 未做（待定）：
+  - 维护仍只由 Gateway 触发；
+  - `compact` 按 mtime 删、无引用保护；
+  - 移走线程的孤儿文件；
+  - 测试 owner 移除入口；
+  - 存储登记表；
+  - 其余只追加日志的轮转；
+  - SQLite 行级保留与 VACUUM；
+  - 旧布局迁移；
+  - 占用视图；
+  - 磁盘压力触发维护。
+- 已知残留（待定，不改代码）：
+  - 只要有路径级错误，维护状态就记 `policy_unavailable`，哪怕其余动作都执行了；`last_success_at` 也不前进；
+  - 两处扫描注释与实际扫描的根不一致；
+  - 手动审计清理替换文件时不持追加锁。
+- 生产首跑积压（09-29 21:39:50）：
+  - local/main `applied=true`，11742 个动作全部执行、失败 0，与 plan 逐类对上：tmp 删 3581、subagent_scratch 进回收站 8090、tool_output 71
+    （其中 46 条执行时已不在）；
+  - 355 棵 `TASK_STATE_INVALID` 子树被隔离未动（待定）；
+  - 两个 owner 的 `retention.json` 无效，每天整次拒绝执行（待定）。
+- 逐条出处见 STORAGE_RETENTION 第 8 节。
 
 详见 [STORAGE_RETENTION.md](docs/design/STORAGE_RETENTION.md)。
 
