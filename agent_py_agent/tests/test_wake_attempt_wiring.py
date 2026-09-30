@@ -150,7 +150,8 @@ def test_success_after_failures_clears_the_ledger(tmp_path, monkeypatch) -> None
         _tick_after_backoff(chain, wake)
     assert _state(chain, wake).same_cause_count == 2
     monkeypatch.undo()
-    rc.http.post_json = chain.wire  # monkeypatch.undo 也撤掉了假线路，重新装上
+    # monkeypatch.undo 也撤掉了假线路，重新装上；必须经 monkeypatch 登记，测试结束才会还原，否则假线路泄漏给后续测试。
+    monkeypatch.setattr(rc.http, "post_json", chain.wire)
     _tick_after_backoff(chain, wake)
     assert _b_wakes(chain) == [] and not _attempts(chain).has_ledger(wake.wake_signal_id)
 

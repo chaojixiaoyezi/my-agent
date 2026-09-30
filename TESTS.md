@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 测试互相污染修复：唤醒车道测试泄漏假供应商线路（2026-09-30，3a）
+
+- **现象**：`test_wake_attempt_wiring.py` 与 `test_capability_package_recommendations.py` 同进程先后运行时，后者 4 个非流式用例拿到
+  真实链路假服务器的 OpenAI 格式回复（`chatcmpl-rc-N`）而失败；单独运行都通过。main `a8c71f0e0` 上同样复现，不是新改动引入。
+- **根因**：`test_success_after_failures_clears_the_ledger` 在 `monkeypatch.undo()` 后用直接赋值 `rc.http.post_json = chain.wire` 装回假线路，
+  测试结束不会还原，泄漏给之后所有走 `backends.http.post_json` 的测试。
+- **修法**：改为 `monkeypatch.setattr(rc.http, "post_json", chain.wire)`。两文件同进程 59 passed；`agent_py_agent/tests` 下没有其它直接赋值替换传输函数的写法。
+
 ## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`）
 
 - **对应问题**：能力包真实模型验收 O1。被 SIGKILL 的子代理留下 unknown 执行轮，TaskRun 不关，`/recover` 却说没有待核对项。
