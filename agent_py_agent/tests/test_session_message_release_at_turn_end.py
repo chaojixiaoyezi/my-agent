@@ -262,6 +262,42 @@ def test_failures_the_poison_does_not_count_never_drop_the_message(tmp_path, fai
     assert store.guidance.receipt("msg-1").migration["release_count"] == 1
 
 
+@pytest.mark.parametrize(("failure", "counted"), [
+    (RuntimeError("程序错误"), True), (None, False), (TimeoutError("超时"), False), (InterruptedError("用户 /stop 或取消"), False),
+    (ProviderTransientError("429 或连接断开"), False), (ProviderConnectionError("代理配置错误"), False),
+], ids=["program-error", "no-exception", "timeout", "stop-or-cancel", "provider-transient", "provider-environment"])
+@pytest.mark.parametrize("source", ["session-message", "task-body"])
+def test_release_counting_is_the_same_for_messages_and_task_bodies(tmp_path, source, failure, counted) -> None:
+    """会话消息与后台失败退回的派活正文用同一判据计次（ae 的变异 A4：派活正文一支总是计次时原有用例抓不到）。
+    同一条回执连续 6 次没消费就结束：计次的失败在第 6 次转 rejected 带码；不计次的结束一直 pending、不写次数。"""
+    store = ConversationStore(tmp_path / "conv")
+    if source == "session-message":
+        _append(store, "key-1")
+
+        def claim(index: int) -> bool:
+            return _claim(store, "key-1", f"turn-{index}")
+
+        def end(index: int) -> None:
+            _end_turn(store, f"turn-{index}", failure=failure)
+    else:
+        _append_task_body(store, "key-1", "task-1")
+
+        def claim(index: int) -> bool:
+            return _claim_body(store, "key-1", "task-1", "task-1")
+
+        def end(index: int) -> None:
+            store.guidance.recovery.reject_pending("task-1", reject_reserved=True, release_task_body=True, failure=failure)
+    for index in range(1, SESSION_MESSAGE_RELEASE_LIMIT + 2):
+        assert claim(index), f"第 {index} 次应当能认领"
+        end(index)
+    receipt = store.guidance.receipt("key-1")
+    if counted:
+        assert (receipt.status, receipt.migration.get("rejection_code")) == ("rejected", SESSION_MESSAGE_RELEASE_LIMIT_REACHED)
+        assert receipt.migration["release_count"] == SESSION_MESSAGE_RELEASE_LIMIT
+    else:
+        assert receipt.status == "pending" and "release_count" not in receipt.migration
+
+
 def test_only_counted_failures_reach_the_limit_even_when_interleaved(tmp_path) -> None:
     """计次的失败与不计次的结束交替出现：计满上限后，不计次的结束照样只释放；再来一次计次的失败才转 rejected。"""
     store = ConversationStore(tmp_path / "conv")

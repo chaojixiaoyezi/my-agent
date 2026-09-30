@@ -38,6 +38,9 @@
   - 新窗：连续超时 7 次回执一直 pending、不计次，第 8 次恢复后送到并 consumed；
   - 新窗：前台回合带着消息遇到程序错误，释放并计 1 次，之后唤醒回合送到；
   - 忙碌目标被 /stop 的那一窗补断言：这次释放不计次。
+- **来源 × 失败类型（ae 的变异 A4）**：`test_release_counting_is_the_same_for_messages_and_task_bodies` 对会话消息与后台失败退回的派活
+  正文两种来源、程序错误与五种不计次的结束各跑一遍：连续 6 次没消费就结束，计次的第 6 次转 rejected 带码，不计次的一直 pending、
+  不写次数。派活正文一支总是计次（A4）时被抓住。
 - **`test_gateway_verbose_progress.py`**：`_settle_pending_gateway_guidance` 的假 `reject_pending` 接收 `failure`，断言回合异常原样传入。
 - **变异**（`sm3/mutate_cnt.py`，7 个，全部被抓住）：瞬时也计次、/stop 也计次、判据不走 verdict_for_error、计满后不计次的结束也拒、
   前台收尾不传异常、后台收尾不传异常、从不计次。
