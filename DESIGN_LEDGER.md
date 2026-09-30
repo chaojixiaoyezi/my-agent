@@ -37,6 +37,8 @@
 - **DeepSeek 实测（同日，用户放开官方 DeepSeek 与 opencode Go 测试）**：DeepSeek 官方两种接口都严格执行配对、相邻和
   "结果放在同一条消息里"。同一组坏历史用 `deepseek-v4-flash` 发出：修整前 Anthropic 5 段、Chat 4 段 400，修整后全部 200。
   opencode Go 通道前后都接受。
+- **Responses 实测（同日）**：opencode Go 的 `/responses` 用同一把 key 调 `gpt-5.6-luna`，产品 Responses 后端真实发送 7 段坏历史：
+  修整前 2 段 400（孤儿结果、调用缺结果），修整后全部 200。ChatGPT 订阅登录那条路仍未真实验收（见 MODEL_OAUTH）。
 
 ## 一条空 assistant 让线程所有请求 400：Chat Completions 回放不再发出无正文无工具调用的消息（2026-09-30，热修，生产事故记录）
 

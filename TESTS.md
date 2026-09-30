@@ -89,6 +89,7 @@
 - **Linux 容器全量**：`2c0bb0518` 12/12 分片 rc=0，24989 passed / 65 skipped / 33 xfailed / 5 xpassed / 0 failed。
 - **真实模型**：MiniMax-M2.7/M3 官网，两个探针脚本与只含状态码的输出在 `~/.my-agent/decision-evidence/wire-contract-2026-09-30/`；
   产品组包的 24 个请求修整前 7 个 400（M2.7 2 个，M3 5 个）、修整后全部 200。
+  Responses 接口用 opencode Go 的 `gpt-5.6-luna` 真实发送（`probe_responses.py`）：7 段坏历史修整前 2 段 400、修整后全部 200。
 - **复审跟进（9a）**：新增用例覆盖以下几项：
   - 空 id 的调用与结果按原样配对，三个出口都能发出；
   - 同条消息内重复 id 按次数配对，缺的补回执；

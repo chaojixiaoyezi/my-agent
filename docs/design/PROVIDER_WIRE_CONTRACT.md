@@ -142,6 +142,17 @@ prompt 投影同样遵守"空白不成块"：Messages 的缓存层（`anthropic_
   - opencode Go（生产默认通道）很宽松，前后都是 200。
 - **修整后模型的答复也更对**：结果分在两条消息时，opencode Go 在修整前又调了一次工具；修整后模型看到全部结果，直接作答。
 
+## 真实模型校准（Responses 接口，opencode Go，2026-09-30）
+
+opencode Go 通道的 `/responses` 用同一把 key 可以调 GPT 模型（`gpt-5.6-luna`）。脚本 `probe_responses.py` 用产品的
+`OpenAIResponsesBackend` 真实发送，同一组 7 段坏历史（上面 6 段加"只有签名思考的连续 assistant"）各发修整前、修整后两次，
+输出在 `probe_responses_gpt56luna.txt`。
+
+- 修整前 2 段 400：孤儿结果（`No tool call found for function call output`）、调用缺结果（`No tool output found for function call`）。
+- 修整后 7 段全部 200。孤儿结果被删掉后，模型按用户要求自己调用读文件工具，其余各段直接作答。
+- 调用与结果之间夹 user、结果分在两条消息、正文排在结果前，这个通道修整前也接受。
+- 未覆盖：ChatGPT 订阅登录那条路（专用端点、强制流式、`instructions`、不发输出上限），见 [MODEL_OAUTH.md](MODEL_OAUTH.md)。
+
 ## 测试
 
 `test_wire_contract.py` 覆盖三类：
