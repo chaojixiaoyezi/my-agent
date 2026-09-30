@@ -7,7 +7,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ..backends.errors import (
     is_provider_environment_fault,
@@ -24,6 +24,12 @@ from .control_commands import (
 from .models import BackgroundMainAgentReport
 from .run_claim import ConversationRunClaimHeartbeat
 from .store_io import now
+from .wake_poison import (
+    WAKE_CLAIM_CANCELLED,
+    WAKE_CLAIM_FINISHED,
+    WAKE_CLAIM_NOT_EXECUTED,
+    WAKE_CLAIM_YIELDED,
+)
 
 if TYPE_CHECKING:
     from .store_claims import ClaimStore
@@ -38,7 +44,19 @@ SESSION_MESSAGE_ABANDONED_ADMISSION = "session_message_abandoned"
 _SOURCE_FINISHED_ADMISSIONS = frozenset({SESSION_MESSAGE_CONSUMED_ADMISSION, SESSION_MESSAGE_ABANDONED_ADMISSION})
 
 
+# LLM: 唤醒毒丸的尝试记账从这里拿到"领到租约的那一刻"和"这片怎么结束的"两个结构化事实；实现方（唤醒车道）不能抛异常，
+#   返回非空码表示这次不应执行（尝试账坏了或到了上限），run_claimed 按这个码走"领到未执行"结算。观察、策略车道不传。
+# 类用途: 后台领取的尝试观察者接口：领取成功时开始一次尝试，结算时告知结果。
+class BackgroundClaimAttempt(Protocol):
+    # 函数用途: 拿到租约后、任何准入判定之前调用一次；返回非空准入码表示不执行。
+    def begin(self, claim_id: str) -> str: ...
+
+    # 函数用途: 这片结束时告知结构化结果（not_executed/finished/cancelled/yielded）与领取后的准入码；抛异常结束的不调用。
+    def settled(self, status: str, admission: str) -> None: ...
+
+
 # LLM: 状态、任务归属和来源查询在原分支调用；来源只读查询不能消费信封，claims 为唯一持久域。
+#   attempt 是可选的尝试观察者（唤醒车道传入，观察、策略车道为 None，行为逐字不变）。
 # 类用途: 列明一片后台执行需要的能力，不缓存准入结论、不暴露模型权限或其它存储领域。
 @dataclass(frozen=True)
 class BackgroundClaimDependencies:
@@ -54,6 +72,7 @@ class BackgroundClaimDependencies:
     record_policy_failure: Callable[[dict], None]
     lease_seconds: int
     heartbeat_interval_seconds: float
+    attempt: BackgroundClaimAttempt | None = None
 
 
 # LLM: 子代理归属必须来自调用方的 canonical 查询；此回执不调用主模型，也不替孩子续跑。
@@ -122,6 +141,8 @@ def run_claimed(
         )
         if claim is None:
             return None
+        if not _attempt_started(dependencies, kwargs, claim_scope_id=claim_scope_id, claim_id=str(claim.get("claim_id") or "")):
+            return None
         if is_interrupted():
             _finish_nonexecuted_claim(
                 dependencies, kwargs, claim_scope_id=claim_scope_id,
@@ -181,6 +202,7 @@ def run_with_heartbeat(
         claim_scope_id=claim_scope_id,
     )
     status = "finished"
+    attempt_status = WAKE_CLAIM_FINISHED
     error: BaseException | None = None
     try:
         if is_interrupted():
@@ -188,10 +210,11 @@ def run_with_heartbeat(
         return _run_once_with_bound_turn_check(dependencies, kwargs)
     except InterruptedError:
         # 回合中断只关闭本次执行权；目标续跑和任务资源停止分别由原控制入口负责。
-        status = "cancelled"
+        status, attempt_status = "cancelled", WAKE_CLAIM_CANCELLED
         return None
     except BackgroundCompactSliceYield:
         # 本片让出不消费原 wake/observation/policy，下片沿 canonical checkpoint 继续。
+        attempt_status = WAKE_CLAIM_YIELDED
         return None
     except BaseException as exc:
         status = "failed"
@@ -199,20 +222,7 @@ def run_with_heartbeat(
         raise
     finally:
         heartbeat.stop()
-        dependencies.claims.finish(
-            {
-                "thread_id": kwargs["thread_id"],
-                "claim_scope_id": claim_scope_id,
-                "claim_id": claim_id,
-                "task_id": kwargs.get("task_id", ""),
-                "status": status,
-                "error": error,
-                "runtime_facts": dependencies.runtime_facts(),
-                "now": now(),
-            }
-        )
-        if status == "failed" and error is not None and _counts_as_policy_failure(error):
-            dependencies.record_policy_failure(kwargs)
+        _finish_slice(dependencies, kwargs, (claim_id, claim_scope_id), _SliceEnd(status, attempt_status, error))
 
 
 # LLM: 只在准入码属于 _SOURCE_FINISHED_ADMISSIONS 时调用 retire_source（与 terminal_task_link 同一条结案路径，不另起 mark_handled）；
@@ -289,6 +299,63 @@ def _finish_nonexecuted_claim(
             "now": now(),
         }
     )
+    _notify_attempt(dependencies, WAKE_CLAIM_NOT_EXECUTED, admission)
+
+
+# LLM: 没有观察者时直接放行；观察者返回非空码时按这个码走"领到未执行"结算（结 claim 并回调 settled），run_claimed 随即返回。
+# 函数用途: 拿到租约后开始一次尝试记账，判断这次还能不能执行。
+def _attempt_started(
+    dependencies: BackgroundClaimDependencies, kwargs: dict, *, claim_scope_id: str, claim_id: str,
+) -> bool:
+    attempt = dependencies.attempt
+    blocked = attempt.begin(claim_id) if attempt is not None else ""
+    if not blocked:
+        return True
+    _finish_nonexecuted_claim(
+        dependencies, kwargs, claim_scope_id=claim_scope_id, claim_id=claim_id, admission=blocked,
+    )
+    return False
+
+
+# LLM: 只转告结构化结果；观察者为 None 时什么都不做。
+# 函数用途: 把这一片的结束方式告诉尝试观察者。
+def _notify_attempt(dependencies: BackgroundClaimDependencies, status: str, admission: str) -> None:
+    if dependencies.attempt is not None:
+        dependencies.attempt.settled(status, admission)
+
+
+# LLM: run_with_heartbeat 结束时的结算事实：claim 的持久状态（finished/cancelled/failed）、交给尝试观察者的结束方式、失败时的异常。
+# 类用途: 一片后台工作结束时要结算的结构化结果。
+@dataclass(frozen=True)
+class _SliceEnd:
+    status: str
+    attempt_status: str
+    error: BaseException | None = None
+
+
+# LLM: 结算顺序保持：先写 claim 结果（唯一持久结算），普通失败再计入策略失败账，非异常结束（完成/取消/让出）才回调尝试观察者；
+#   异常结束的尝试由调用方（唤醒车道的记账）拿异常自己记。claim 是 (claim_id, claim_scope_id)。副作用：写 claim 账、策略失败账。
+# 函数用途: 一片后台工作结束时写认领结果、记策略失败并告知尝试观察者。
+def _finish_slice(
+    dependencies: BackgroundClaimDependencies, kwargs: dict, claim: tuple[str, str], end: _SliceEnd,
+) -> None:
+    claim_id, claim_scope_id = claim
+    dependencies.claims.finish(
+        {
+            "thread_id": kwargs["thread_id"],
+            "claim_scope_id": claim_scope_id,
+            "claim_id": claim_id,
+            "task_id": kwargs.get("task_id", ""),
+            "status": end.status,
+            "error": end.error,
+            "runtime_facts": dependencies.runtime_facts(),
+            "now": now(),
+        }
+    )
+    if end.status == "failed" and end.error is not None and _counts_as_policy_failure(end.error):
+        dependencies.record_policy_failure(kwargs)
+    if end.status != "failed":
+        _notify_attempt(dependencies, end.attempt_status, "")
 
 
 # LLM: 持久策略失败账只记这条工作本身的问题。不记：供应瞬时（供应退避接管）、模型配置暂缺（等配置）、环境级故障

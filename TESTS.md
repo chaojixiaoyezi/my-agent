@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## 唤醒毒丸第 3 步 C2：后台领取的尝试观察者（2026-09-29，分支 `claude/75-wake-poison-wiring`）
+
+- `BackgroundClaimDependencies.attempt`（可选，默认 None）：acquire 成功后、任何准入判定之前调一次 `begin(claim_id)`，
+  返回非空码时按这个码走"领到未执行"；`_finish_nonexecuted_claim` 回调 `settled(not_executed, 准入码)`，
+  `run_with_heartbeat` 回调 `settled(finished | cancelled | yielded, "")`，抛异常结束的片不回调（异常交给调用方）。
+  观察、策略车道不传观察者，行为逐字不变（原有 background_claim 测试全过）。
+- `test_background_claim_attempt_observer.py`（新，8 项）：没拿到租约不开始尝试；begin 恰在准入判定之前且只调一次；
+  被拦下时不开模型回合并按拦截码结算；跑完、没报告、被取消、压缩让出四种结束方式；抛异常时不回调。
+
 ## 出站协议合同 `test_wire_contract.py`（2026-09-30，分支 `claude/3a-wire-contract`，基于 `622292662`）
 
 - **覆盖**：逐形状修整（空白块、删空消息、插话夹在调用与结果之间、结果前有正文、缺结果补回执、末尾调用、孤儿与错位结果、
