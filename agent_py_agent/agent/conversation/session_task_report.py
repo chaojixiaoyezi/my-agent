@@ -87,7 +87,8 @@ def finish_task_for_turn(
 
 # LLM: 回报是发送方可见的结构化消息：走 guidance 幂等入队，dedupe_key 用任务 id + 终态，
 #   重复收口不会写第二条。投递失败不改变任务已到终态的事实（不回滚状态机）。metadata 带 SESSION_TASK_STATUS_FIELD：
-#   认领判定靠它把回报和派活正文区分开（正文只许它自己的派活回合认领，回报发送方哪一回合都能认领），不能去掉。
+#   认领判定靠它把回报和派活正文区分开（正文只许它自己的派活回合认领，回报发送方哪一回合都能认领），不能去掉。任务带宿主判定的
+#   failure_code 时，metadata 记 session_task_failure_code（只在非空时出现，旧回报的 metadata 形状不变）。
 # 函数用途: 把任务终态作为一条来源明确的消息排队回发送方。
 def report_task_result(agent: object, task: object) -> bool:
     task_id = str(getattr(task, "task_id", "") or "").strip()
@@ -101,9 +102,12 @@ def report_task_result(agent: object, task: object) -> bool:
         return False
     summary = str(getattr(task, "summary", "") or "").strip()
     refs = tuple(str(item) for item in (getattr(task, "result_refs", ()) or ()))
+    failure_code = str(getattr(task, "failure_code", "") or "").strip()
     lines = [
         f"你派出的任务 {task_id} 已结束：状态 {status}。",
     ]
+    if failure_code:
+        lines.append(f"宿主判定的失败原因码：{failure_code}")
     if summary:
         lines.append(f"摘要：{summary}")
     if refs:
@@ -123,6 +127,7 @@ def report_task_result(agent: object, task: object) -> bool:
                     "origin_thread_id": str(getattr(task, "target_thread_id", "") or ""),
                     "session_task_id": task_id,
                     SESSION_TASK_STATUS_FIELD: status,
+                    **({"session_task_failure_code": failure_code} if failure_code else {}),
                 },
             },
             dedupe_key=f"session_task_result:{task_id}:{status}",

@@ -38,6 +38,7 @@ from agent_py_agent.agent.conversation.control_commands import (
     conversation_request_interrupt_name,
     parse_conversation_control,
 )
+from agent_py_agent.agent.conversation.host_notices import pending_host_notices
 from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_MESSAGE_RELEASE_LIMIT,
     SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
@@ -45,6 +46,7 @@ from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_TASK_STATUS_FIELD,
 )
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
+from agent_py_agent.agent.conversation.wake_domain_closeout import WAKE_POISON_NOTICE_SOURCE
 from agent_py_agent.agent.conversation.wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service, request_context, request_execution
@@ -812,7 +814,7 @@ def test_message_wake_timing_out_repeatedly_is_never_dropped(tmp_path, monkeypat
 def test_message_wake_counted_failures_are_closed_by_the_poison_first(tmp_path, monkeypatch) -> None:
     """同一条唤醒每次认领消息后都遇到程序错误（两层都计次的失败）：每次失败两层各记一次——回执释放计次、尝试账同因加一并持久退避；
     第 5 次时毒丸先结案唤醒（failed_permanently），这时消息刚释放第 5 次、仍是 pending，C 的下一次前台回合跨回合认领并消费它，
-    隔离唤醒不丢消息。"""
+    隔离唤醒不丢消息（做法 2：领域收尾不改会话消息回执，只留宿主提示，details 注明仍待投递）。"""
     chain = _real_chain(tmp_path, monkeypatch)
     chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-BUGALWAYS 你好 C。")
     sent = chain.tool_outputs("send_session_message")[-1]
@@ -831,11 +833,41 @@ def test_message_wake_counted_failures_are_closed_by_the_poison_first(tmp_path, 
     assert errors == [] and [row["reason_code"] for row in rows] == ["error:programmer_bug:RuntimeError"]
     receipt = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
     assert (receipt.status, receipt.migration.get("release_count")) == ("pending", WAKE_POISON_SAME_CAUSE_LIMIT)
+    notices = [row for row in pending_host_notices(chain.agent.conversation_store, chain.threads["C"])
+               if row.source == WAKE_POISON_NOTICE_SOURCE]
+    assert [(row.code, dict(row.details).get("message_receipt_status")) for row in notices] == [
+        ("error:programmer_bug:RuntimeError", "pending")], "隔离时应留一条注明消息仍待投递的宿主提示"
     before = len(chain.wire.calls)
     chain.ask("C", "RC-PING 你好。")
     own = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-BUGALWAYS" in call["own_notes"]]
     assert own, "唤醒被结案后，C 的下一次前台回合没有把被释放的消息作为自己的输入收到"
     assert getattr(_message_receipt(chain, "C", str(sent.get("message_id") or "")), "status", None) == "consumed"
+
+
+def test_message_still_failing_in_the_foreground_is_rejected_at_the_release_limit(tmp_path, monkeypatch) -> None:
+    """接上一窗：唤醒被毒丸结案后消息仍 pending（已释放 5 次）；C 的前台回合认领它后也遇到程序错误、没消费就结束——这是第 6 次，
+    回执层按自己的上限转 rejected 并带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，之后的回合不再收到它。消息的去留只由回执层上限决定。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-BUGALWAYS 你好 C。")
+    sent = chain.tool_outputs("send_session_message")[-1]
+    (wake,) = _pending_wakes(chain, "C")
+    attempts = chain.agent.conversation_store.wakes.attempts
+    for _attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+        state, _error = attempts.state_report(wake.wake_signal_id)
+        with pytest.raises(RuntimeError):
+            chain.scheduler.tick(now=max(time.time(), state.next_attempt_at) + 1)
+    _require(not _pending_wakes(chain, "C"), "前提不成立：唤醒应当已被毒丸结案")
+    _require(getattr(_message_receipt(chain, "C", str(sent.get("message_id") or "")), "status", None) == "pending",
+             "前提不成立：隔离后消息应当仍 pending")
+
+    response = chain.ask_via_worker("C", "RC-BUGNOTE 看看。")
+    _require(response.get("ok") is False, f"前提不成立：C 的前台请求应当按失败结束：{response.get('status')}")
+    receipt = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+    assert receipt.status == "rejected", f"第 6 次没消费就结束后应转 rejected，实际 {receipt.status}"
+    assert receipt.migration.get("rejection_code") == SESSION_MESSAGE_RELEASE_LIMIT_REACHED
+    before = len(chain.wire.calls)
+    chain.ask("C", "RC-PING 你好。")
+    assert not [call for call in chain.wire.calls[before:] if "RC-NOTE-BUGALWAYS" in call["own_notes"]], "rejected 后又被投递了"
 
 
 @pytest.mark.parametrize("window", ["HOLD-FIRST", "HOLD-AFTER-TOOL"])

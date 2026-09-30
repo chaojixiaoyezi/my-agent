@@ -7,11 +7,14 @@ begin 返回非空码时按这个码走"领到未执行"。观察者为 None 时
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.conversation.background_claim import (
+    SESSION_MESSAGE_ABANDONED_ADMISSION,
+    SESSION_TASK_BODY_ABANDONED_ADMISSION,
     BackgroundClaimDependencies,
     run_claimed,
 )
@@ -108,3 +111,18 @@ def test_failed_slice_leaves_the_error_to_the_caller() -> None:
     with pytest.raises(RuntimeError):
         run_claimed(dependencies, dict(_KWARGS))
     assert observer.events == [("begin", "claim-1")]
+
+
+@pytest.mark.parametrize(("admission", "expected"), [
+    (SESSION_TASK_BODY_ABANDONED_ADMISSION, [("close_out", SESSION_TASK_BODY_ABANDONED_ADMISSION), "retire"]),
+    (SESSION_MESSAGE_ABANDONED_ADMISSION, [("close_out", SESSION_MESSAGE_ABANDONED_ADMISSION), "retire"]),
+    ("wake_source_changed", []),
+], ids=["task-body-abandoned", "message-abandoned", "other-admission"])
+def test_finished_source_is_closed_out_before_it_is_retired(admission, expected) -> None:
+    """来源已处理完或已放弃时先收领域状态再结案唤醒（先结案的话，收尾失败会留下"唤醒已结、任务还挂着"）；其它准入码两者都不做。"""
+    order: list = []
+    dependencies, _finished, ran = _dependencies(None, admission=admission)
+    dependencies = replace(dependencies, retire_source=lambda _kwargs: order.append("retire"),
+                           close_out_source=lambda _kwargs, code: order.append(("close_out", code)))
+    run_claimed(dependencies, dict(_KWARGS))
+    assert order == expected and ran == []

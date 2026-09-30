@@ -165,12 +165,19 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 - 同一 dedupe_key 再发布时，返回已结案的原信号，不新开一代。同一个事件不能自己复活，只能人工重放；
 - `publication_receipt` 返回 `failed_permanently`。
 
-**领域收尾**走一个窄回调，和 `retire_source` 同类：
+**领域收尾**（第 3 步 C4 已实现，`conversation/wake_domain_closeout.py`，与人工重放的"领域已是终态"判定同一处）：
 
-- session_task 唤醒：会话任务转 `failed`，原因码 `SESSION_TASK_WAKE_QUARANTINED`，并沿 `report_task_result`
-  回报发送方。否则发送方会一直卡在 accepted，`7b83c8730` 里的 T1 就是这样；
-- session_message 唤醒：对应的一次性回执转成结构化失败状态（`undeliverable` 加原因码），发送方的回执不能永远停在 pending；
-- 其它 reason 不改领域状态，只发事件和宿主提示。
+- session_task 唤醒：会话任务转 `failed`，`failure_code` 为 `SESSION_TASK_WAKE_QUARANTINED`，并沿 `report_task_result`
+  回报发送方（metadata 带 `session_task_failure_code`）。否则发送方会一直卡在 accepted，`7b83c8730` 里的 T1 就是这样；
+- session_message 唤醒：**回执不动**，只留宿主提示，`details` 带 `message_dedupe_key` 与回执状态注明仍待投递。
+  这一条原先设想为"回执转 `undeliverable` 加原因码"，之后的裁定 b 改为"只转 rejected、不带原因"，**2026-09-29 3a 以做法 2 取代裁定 b**：
+  毒丸隔离的是唤醒这条执行路径，不代表消息本身有毒；方案 A 与后台片收尾之后，被隔离唤醒的消息是 pending，仍能交给目标的下一次
+  回合，消息的去留只由回执层上限（`SESSION_MESSAGE_RELEASE_LIMIT_REACHED`）决定；
+- 其它 reason 不改领域状态，只发事件和宿主提示；
+- 信封读不出时，用选批时冻结的副本收尾（裁定 d）；
+- 宿主提示来源 `wake_poison`、code 为原因码，同一会话同一原因码只留最新一条；长时间不计数提醒同样留提示；
+- 派活正文达到释放上限被放弃时，领取后准入判 `session_task_body_abandoned`，先收任务（failed，`failure_code` 为
+  `SESSION_MESSAGE_RELEASE_LIMIT_REACHED`）并回报，再结案唤醒。
 
 **调度侧**：`_skip_pending_wake_signal` 和 `ready_thread_ids` 都要尊重持久的 `next_attempt_at`，
 与内存里的 `_wake_retry_after` 取较晚的一个。
@@ -249,7 +256,9 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
    - 记账失败不影响执行结果：写账 `OSError` 只打日志；执行路径的原异常原样上抛。日志为 `[background-wake-poison]` 前缀的
      一行 JSON：`wake_attempt_failed`、`wake_quarantined`、`wake_uncounted_stalled`、`wake_attempt_facts_invalid`、
      `wake_attempt_ledger_unwritable`。
-4. **运维面**：日志、宿主提示、`/wakes` 两个子命令（TUI 和飞书）、状态计数。
+   - C4 `wake_domain_closeout.py`：结案后的领域收尾与宿主提示、派活正文已放弃的收尾、长时间不计数提醒的提示、
+     `wake_domain_status`（领域终态状态，没结束为空串）与 `wake_domain_terminal`（第 6 节）。`background_claim` 加可选依赖 `close_out_source`，来源已处理完或已放弃时先收领域再结案。
+4. **运维面**（第 4 步，be）：`/wakes` 两个子命令（TUI 和飞书）、状态计数、归档、`wake_replayed`。日志与宿主提示已随第 3 步落地。
 5. **真实链路门**：在 ae 的 `claude/ae-session-real-chain-test` 里加两个注入：
    - 技能快照抛 programmer_bug，复现 `7b83c8730`；
    - admission 返回未知码，复现 `204f4ddf9`。

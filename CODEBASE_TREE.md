@@ -485,6 +485,7 @@ agent_py_agent/
 |   |   |-- session_messaging.py        # 会话间消息与派活的权限判定（纯函数，只读结构化身份与开关）
 |   |   |-- wake_poison.py              # 唤醒毒丸判定（纯函数）：尝试结果分类、同因连续段、总上限、两类退避与结案判定
 |   |   |-- wake_attempt_tracking.py    # 唤醒毒丸接线：批次消费处按尝试记账、跳过阶段读持久退避、结案、进程内在途登记
+|   |   |-- wake_domain_closeout.py     # 唤醒毒丸领域收尾：结案/来源已放弃时派活收 failed 并回报、宿主提示、领域终态判定
 |   |   |-- session_tasks.py            # 会话间派活的唯一权威存储（状态机单一写入方，正文只存 guidance id）
 |   |   |-- session_pair_rate.py        # 每对会话每小时条数计数（消息/派活/回报/取消通知都计入）
 |   |   |-- store_guidance_records.py   # 插话回执格式、迁移构造与身份校验
@@ -1559,6 +1560,7 @@ docs/
 - `agent_py_agent/agent/conversation/store_wake_publication.py`：只接原 storage，在原 dedupe 锁内冻结完整发布并安装原 wake／观察，按固定 ID 恢复、显式迁移 v1；查询只读，通用新代与保留 handled 分别由结构化策略决定。已结案（`failed_permanently`）是第三个安装位置，同键再发布返回原结案信号、不新开一代。
 - `agent_py_agent/agent/conversation/store_wake_attempts.py`：`store.wakes.attempts`，每条唤醒一份尝试账（失败计数唯一权威）、结案记录与重放留档；判定委托 `wake_poison.py`，结案顺序比照 `mark_handled` 并同步结掉关联观察。设计见 `docs/design/WAKE_POISON_PILL.md`，测试 `test_wake_poison.py`、`test_wake_attempt_store.py`。
 - `agent_py_agent/agent/conversation/wake_attempt_tracking.py`：唤醒车道的毒丸接线。`track_wake_attempt` 包住一批唤醒的执行并在退出时逐条记账、到上限结案；作为 `background_claim` 的领取观察者（`begin`/`settled`）；`wake_attempt_deferred`/`wake_attempt_waiting` 给跳过阶段与就绪扫描用同一判据读持久退避；`inflight_attempts()` 给优雅停机找在途尝试。测试 `test_wake_attempt_wiring.py`（真实链路）、`test_background_claim_attempt_observer.py`。
+- `agent_py_agent/agent/conversation/wake_domain_closeout.py`：唤醒毒丸领域收尾与"领域已是终态"判定的唯一位置。结案后派活任务收成 failed 带 `failure_code` 并回报发送方，会话消息回执不动、只留注明仍待投递的宿主提示（做法 2）；派活正文已放弃时经 `close_out_source` 收任务；长时间不计数提醒留提示；`wake_domain_status`（终态状态，没结束为空串）与 `wake_domain_terminal` 供第 4 步人工重放与拒绝提示判定。测试 `test_wake_domain_closeout.py`。
 - `agent_py_agent/agent/conversation/store_progress.py`：`store.progress` 负责策略 CRUD、到期读取及失败退避事实落账；策略/claim 跨域归档仍由 Store 原维护入口顺序协调。
 - `agent_py_agent/agent/conversation/goal_clock.py`：前台、后台及控制视图共用同 owner 会话存储的目标时钟，四个计时操作直接归共享对象，整数结算保留小数余量。
 - `agent_py_agent/agent/conversation/goal_binding.py`、`goal_delegation.py`：按代理自身 thread/run 归属目标和用量；显式子目标沿同一运行器续接，不另建执行通道。

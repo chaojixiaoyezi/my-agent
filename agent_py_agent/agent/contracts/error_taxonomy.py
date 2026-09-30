@@ -787,8 +787,19 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint=(
-            "这条会话消息的目标回合已多次没消费就结束（被停止、报错或崩溃），系统不再重新投递。"
-            "先查看目标会话为什么反复停下，处理后再由发送方重新发一条；不要原样重发导致同样的循环。"
+            "这条会话消息（或派活正文）的目标回合已多次没消费就结束（被停止、报错或崩溃），系统不再重新投递；"
+            "派活时任务会以这个原因码收成 failed。先查看目标会话为什么反复停下，处理后再由发送方重新发一条或重新派活；"
+            "不要原样重发导致同样的循环。"
+        ),
+    ),
+    "SESSION_TASK_WAKE_QUARANTINED": ErrorContract(
+        code="SESSION_TASK_WAKE_QUARANTINED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint=(
+            "目标会话执行这条派活的后台唤醒同一原因连续失败到上限，已被结案（failed_permanently），任务收成 failed。"
+            "先按唤醒结案记录里的原因码排查目标会话（技能快照、模型配置、程序错误等），修好后可人工重放那条唤醒，或重新派活。"
         ),
     ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(

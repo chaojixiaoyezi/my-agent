@@ -19,6 +19,7 @@ from ..runtime_errors import DataCorruptionError
 from .background_delivery import cached_owner_delivery
 from .models import WakeSignal
 from .store_wake_attempts import WakeAttemptStart, WakeAttemptStore
+from .wake_domain_closeout import close_out_quarantined_wake, notify_stalled_wake
 from .wake_poison import (
     WAKE_ATTEMPT_PATH_CLAIMED,
     WAKE_ATTEMPT_PATH_QUOTA_FALLBACK,
@@ -302,8 +303,10 @@ def _needs_isolation(scheduler: Any, signal: WakeSignal) -> bool:
     return error is None and needs_isolation(state)
 
 
-# LLM: 结案只经 store.wakes.attempts.quarantine；读不出的信封没有结案后的信号，用选批时读到的冻结副本继续后续动作。
-#   结案后清掉进程内的重试节流与额度待重投标记。副作用：写结案记录、删 pending 与尝试账、结观察、打日志。
+# LLM: 结案只经 store.wakes.attempts.quarantine；读不出的信封没有结案后的信号，用选批时读到的冻结副本继续后续动作（3a 裁定 d）。
+#   结案后清掉进程内的重试节流与额度待重投标记，再经 wake_domain_closeout 收领域状态（派活 failed、会话消息 rejected）并留
+#   宿主提示；唤醒已不在 pending（别处结掉）时不结案也不收尾。副作用：写结案记录、删 pending 与尝试账、结观察、写领域状态与
+#   宿主提示、打日志。
 # 函数用途: 把一条反复失败的唤醒结案，不再被领取。
 def quarantine_wake(scheduler: Any, signal: WakeSignal, decision: QuarantineDecision, *, now: float) -> None:
     try:
@@ -319,12 +322,20 @@ def quarantine_wake(scheduler: Any, signal: WakeSignal, decision: QuarantineDeci
     _log("wake_quarantined", settled, {
         **decision.to_dict(), "source_unreadable": result.source_unreadable,
         "ledger_preserved": bool(result.ledger_preserved_at)})
+    try:
+        close_out_quarantined_wake(scheduler.runtime.agent, settled, decision)
+    except Exception as exc:  # noqa: BLE001 - 领域收尾失败不影响已落盘的结案，只记日志
+        _log("wake_domain_closeout_failed", settled, {"error_type": type(exc).__name__})
 
 
-# LLM: 连续不计数满提醒窗口：store 已在同一把锁里记下这次提醒，这里只负责对外发出。
+# LLM: 连续不计数满提醒窗口：store 已在同一把锁里记下这次提醒，这里只负责对外发出（运维日志 + 会话宿主提示，同原因码替换）。
 # 函数用途: 发出"长时间不计数"的运维提醒。
 def wake_uncounted_stalled(scheduler: Any, signal: WakeSignal, alert: WakeStallAlert) -> None:
     _log("wake_uncounted_stalled", signal, alert.to_dict())
+    try:
+        notify_stalled_wake(scheduler.runtime.agent, signal, alert)
+    except Exception as exc:  # noqa: BLE001 - 提醒写不进去不影响记账，只记日志
+        _log("wake_stall_notice_failed", signal, {"error_type": type(exc).__name__})
 
 
 # 函数用途: 取调度器会话存储上的尝试账入口。

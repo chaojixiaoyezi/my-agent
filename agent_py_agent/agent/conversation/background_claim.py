@@ -39,9 +39,14 @@ SESSION_MESSAGE_CONSUMED_ADMISSION = "session_message_consumed"
 # 领取后准入里"来源已经处理完"的另一个码：会话消息达到释放上限、回执已转 rejected（带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED），
 #   不会再有回合去认领它，为它开回合只会跑出一个没有新输入的空回合。
 SESSION_MESSAGE_ABANDONED_ADMISSION = "session_message_abandoned"
+# 同一判据的派活版：派活正文达到释放上限、回执已转 rejected（带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED），重跑只会是没有任务内容的
+#   空回合；结案唤醒前先经 close_out_source 把任务收成 failed 并回报派活方（wake_domain_closeout.close_out_abandoned_source）。
+SESSION_TASK_BODY_ABANDONED_ADMISSION = "session_task_body_abandoned"
 # 命中这些准入码时，除结 claim 外还要经 retire_source 结案来源，否则唤醒留在 pending 每拍被重新认领（空转）；
 #   其它准入码（来源已变化、读不出、已不在 pending）只结 claim，交还原队列重新选择。
-_SOURCE_FINISHED_ADMISSIONS = frozenset({SESSION_MESSAGE_CONSUMED_ADMISSION, SESSION_MESSAGE_ABANDONED_ADMISSION})
+_SOURCE_FINISHED_ADMISSIONS = frozenset({
+    SESSION_MESSAGE_CONSUMED_ADMISSION, SESSION_MESSAGE_ABANDONED_ADMISSION, SESSION_TASK_BODY_ABANDONED_ADMISSION,
+})
 
 
 # LLM: 唤醒毒丸的尝试记账从这里拿到"领到租约的那一刻"和"这片怎么结束的"两个结构化事实；实现方（唤醒车道）不能抛异常，
@@ -57,6 +62,7 @@ class BackgroundClaimAttempt(Protocol):
 
 # LLM: 状态、任务归属和来源查询在原分支调用；来源只读查询不能消费信封，claims 为唯一持久域。
 #   attempt 是可选的尝试观察者（唤醒车道传入，观察、策略车道为 None，行为逐字不变）。
+#   close_out_source 是可选的领域收尾：来源已处理完/已放弃时在 retire_source 之前调用（收尾失败不能拦住结案，实现方不抛异常）。
 # 类用途: 列明一片后台执行需要的能力，不缓存准入结论、不暴露模型权限或其它存储领域。
 @dataclass(frozen=True)
 class BackgroundClaimDependencies:
@@ -73,6 +79,7 @@ class BackgroundClaimDependencies:
     lease_seconds: int
     heartbeat_interval_seconds: float
     attempt: BackgroundClaimAttempt | None = None
+    close_out_source: Callable[[dict, str], None] | None = None
 
 
 # LLM: 子代理归属必须来自调用方的 canonical 查询；此回执不调用主模型，也不替孩子续跑。
@@ -226,10 +233,13 @@ def run_with_heartbeat(
 
 
 # LLM: 只在准入码属于 _SOURCE_FINISHED_ADMISSIONS 时调用 retire_source（与 terminal_task_link 同一条结案路径，不另起 mark_handled）；
-#   其它准入码不动来源。副作用：经 retire_source 写唤醒 handled 回执。
-# 函数用途: 领取后发现来源已经处理完（会话消息已被消费）时，把这条来源结案，不让它每拍被重新认领。
+#   结案前先调可选的 close_out_source(kwargs, 准入码) 收领域状态（例如派活正文已放弃时任务收成 failed），先收后结，收尾失败
+#   也不会留下"唤醒已结、任务还挂着"。其它准入码不动来源。副作用：经 close_out_source 写领域状态，经 retire_source 写唤醒 handled 回执。
+# 函数用途: 领取后发现来源已经处理完或已放弃时，先收领域状态再把这条来源结案，不让它每拍被重新认领。
 def _retire_finished_source(dependencies: BackgroundClaimDependencies, kwargs: dict, admission: str) -> None:
     if admission in _SOURCE_FINISHED_ADMISSIONS:
+        if dependencies.close_out_source is not None:
+            dependencies.close_out_source(kwargs, admission)
         dependencies.retire_source(kwargs)
 
 

@@ -2239,3 +2239,5 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 只重投、额度回退）与异常。跳过阶段 `_skip_pending_wake_signal` 先问 `wake_attempt_deferred`（持久退避、preflight、坏账结案），
 就绪扫描 `_wake_waits_this_tick` 用只读的 `wake_attempt_waiting`，与跳过阶段同一判据、同一时间基准。尝试账是失败计数的唯一权威；
 内存里的 `_wake_retry_after` 照旧只管本进程的 30 秒重试间隔，两者取较晚的一个。观察、策略车道不经过这里。
+领域收尾（C4）在 `wake_domain_closeout.py`：`quarantine_wake` 结案成功后调 `close_out_quarantined_wake`，停滞提醒调 `notify_stalled_wake`；
+`BackgroundClaimDependencies.close_out_source` 由 runtime 绑定 `close_out_abandoned_source`，在 `retire_source` 之前执行。

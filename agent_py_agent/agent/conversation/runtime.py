@@ -112,6 +112,7 @@ from .wake_attempt_tracking import (
     wake_attempt_deferred,
     wake_attempt_waiting,
 )
+from .wake_domain_closeout import close_out_abandoned_source
 from .wake_poison import (
     WAKE_ATTEMPT_PATH_CLAIMED,
     WAKE_ATTEMPT_PATH_QUOTA_FALLBACK,
@@ -4501,8 +4502,10 @@ def _background_claim_dependencies(
             _background_wake_source_admission,
             scheduler.store.wakes.pending_one,
             guidance_store=scheduler.store.guidance,
+            session_tasks=scheduler.store.session_tasks,
         ),
         retire_source=partial(_retire_terminal_background_source, scheduler.store),
+        close_out_source=partial(close_out_abandoned_source, scheduler.runtime.agent),
         run_once=scheduler.runtime.run_once,
         runtime_facts=scheduler._runtime_facts,
         record_policy_failure=scheduler._record_policy_failure,
@@ -4531,7 +4534,9 @@ def _refresh_pending_wake_signal(pending_one, signal: WakeSignal) -> WakeSignal 
 
 # LLM: claim 模块只持有本只读来源查询；已处理、变化与损坏不得开模型轮，原 policy/observation 后备语义不变。
 # 函数用途: 在取得精确执行租约后最后核对信封，已消费或冻结内容变化时释放本片，留给原队列重新选择。
-def _background_wake_source_admission(pending_one, signal: object, *, guidance_store: object = None) -> str:
+def _background_wake_source_admission(
+    pending_one, signal: object, *, guidance_store: object = None, session_tasks: object = None,
+) -> str:
     if not isinstance(signal, WakeSignal):
         return ""
     try:
@@ -4542,7 +4547,9 @@ def _background_wake_source_admission(pending_one, signal: object, *, guidance_s
         return "wake_source_not_pending"
     if current != signal:
         return "wake_source_changed"
-    return _session_message_consumed_admission(current, guidance_store=guidance_store)
+    return _session_message_consumed_admission(current, guidance_store=guidance_store) or _session_task_body_admission(
+        current, guidance_store=guidance_store, session_tasks=session_tasks,
+    )
 
 
 # 消息回执里"内容确实已被消费掉"的状态集合：只有 consumed（模型已对带着这条消息的调用作出返回）。
@@ -4566,7 +4573,7 @@ _SESSION_MESSAGE_CONSUMED_STATUSES = frozenset({"consumed"})
 def _session_message_consumed_admission(signal: WakeSignal, *, guidance_store: object = None) -> str:
     if str(signal.reason or "").strip().lower() != SESSION_MESSAGE_WAKE_REASON:
         return ""
-    from .session_messaging import SESSION_MESSAGE_KEY_FIELD, SESSION_MESSAGE_RELEASE_LIMIT_REACHED
+    from .session_messaging import SESSION_MESSAGE_KEY_FIELD
 
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
     # 这次唤醒投递的是哪条消息，由发送方写进唤醒 metadata；没有这个键就无法确认，照常开回合，不按会话对拼旧键。
@@ -4583,11 +4590,43 @@ def _session_message_consumed_admission(signal: WakeSignal, *, guidance_store: o
     status = str(getattr(receipt, "status", "") or "").strip().lower()
     if status in _SESSION_MESSAGE_CONSUMED_STATUSES:
         return background_claim.SESSION_MESSAGE_CONSUMED_ADMISSION
+    return background_claim.SESSION_MESSAGE_ABANDONED_ADMISSION if _receipt_abandoned(receipt) else ""
+
+
+# LLM: 派活唤醒的正文已被放弃（后台片反复没消费就结束，回执 rejected 且带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED）时，重跑只会是
+#   没有任务内容的空回合：判为来源已放弃（SESSION_TASK_BODY_ABANDONED_ADMISSION），run_claimed 先经 close_out_source 把任务收成
+#   failed 并回报派活方，再结案唤醒（3a 裁定；与会话消息的 session_message_abandoned 同一判据 _receipt_abandoned）。
+#   正文已消费不算来源处理完：派活回合会跨好几片（例如等子代理完成），后续片照常执行。正文键只从任务记录的 body_dedupe_key 取；
+#   读不到任务或回执、读取抛异常都照常开回合（fail open）。只读。
+# 函数用途: 派活唤醒的正文若已被放弃，就判定这条来源不必再执行。
+def _session_task_body_admission(
+    signal: WakeSignal, *, guidance_store: object = None, session_tasks: object = None,
+) -> str:
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    task_id = str(metadata.get("session_task_id") or "").strip()
+    if str(signal.reason or "").strip().lower() != SESSION_TASK_WAKE_REASON or not task_id:
+        return ""
+    if guidance_store is None or session_tasks is None:
+        return ""
+    try:
+        task = session_tasks.load(task_id)
+        body_key = str(getattr(task, "body_dedupe_key", "") or "").strip()
+        receipt = guidance_store.receipt(body_key) if body_key else None
+    except Exception:  # noqa: BLE001 - 读不到任务或回执不当作"已放弃"
+        return ""
+    return background_claim.SESSION_TASK_BODY_ABANDONED_ADMISSION if _receipt_abandoned(receipt) else ""
+
+
+# LLM: 会话消息与派活正文共用的"已放弃"判据：回执 rejected 且 migration.rejection_code 为 SESSION_MESSAGE_RELEASE_LIMIT_REACHED
+#   （释放满上限）。普通 rejected（被取消、插话被拒等，没有这个码）不算。只读回执对象。
+# 函数用途: 判断一条宿主投递回执是否已因释放满上限被放弃。
+def _receipt_abandoned(receipt: object) -> bool:
+    from .session_messaging import SESSION_MESSAGE_RELEASE_LIMIT_REACHED
+
+    status = str(getattr(receipt, "status", "") or "").strip().lower()
     migration = getattr(receipt, "migration", None)
     rejection_code = str(migration.get("rejection_code") or "") if isinstance(migration, dict) else ""
-    if status == "rejected" and rejection_code == SESSION_MESSAGE_RELEASE_LIMIT_REACHED:
-        return background_claim.SESSION_MESSAGE_ABANDONED_ADMISSION
-    return ""
+    return status == "rejected" and rejection_code == SESSION_MESSAGE_RELEASE_LIMIT_REACHED
 
 
 # LLM: 策略执行经独立 claim 组件领取和结算；执行后才重读进度账，来源确认及写账顺序保持。

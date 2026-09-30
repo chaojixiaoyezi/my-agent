@@ -655,7 +655,11 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 唤醒毒丸第 3 步 C2/C3 接线（分支 `claude/75-wake-poison-wiring`，step16m）：`run_claimed` 支持领取观察者（`begin`/`settled`），
 唤醒车道按尝试写尝试账：计数失败按 30/60/120/240 秒持久退避、同因 5 次按 `failed_permanently` 结案（之后不再领取、换进程也生效），
 瞬时/环境类不计数只退避；批次里有带账成员时逐条执行；进程死亡的在途尝试在跳过阶段补记；尝试账读不出按 `attempt:ledger_corrupt`
-结案。在途记录带这一片的回合号，供 C6 收尾死进程认领的补充消息。领域收尾（派活转 failed、会话消息转 rejected）与宿主提示在 C4。
+结案。在途记录带这一片的回合号，供 C6 收尾死进程认领的补充消息。
+
+唤醒毒丸第 3 步 C4（同分支）：结案后派活任务收成 failed（`SESSION_TASK_WAKE_QUARANTINED`）并回报发送方；会话消息回执不动，只留注明
+仍待投递的宿主提示（2026-09-29 3a 以做法 2 取代原裁定 b，消息去留只由回执层上限决定）；派活正文已放弃时准入先收任务再结案唤醒；
+宿主提示按原因码合并。
 
 ## 维护状态说清「执行了没有」：只加字段、不改旧口径（2026-09-29，分支 `claude/9b-maintenance-apply-outcome`，基于 step16l `5ec2db2e0`）
 

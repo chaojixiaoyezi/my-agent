@@ -70,6 +70,8 @@ def _scheduler(observed: dict):
         claims = Claims()
         wakes = SimpleNamespace(pending_one=lambda _signal_id: None)
         guidance = None
+        # 夹具补全：领取后准入按任务号读 store.session_tasks（派活正文是否已放弃），替身也得有这个属性。
+        session_tasks = None
 
     scheduler = BackgroundMainAgentScheduler({"runtime": Runtime(), "store": Store()})
     scheduler._runtime_facts = lambda: {}

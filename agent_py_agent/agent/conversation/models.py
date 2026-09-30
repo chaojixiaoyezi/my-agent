@@ -470,7 +470,7 @@ class ConversationThread:
     # LLM: 待送达的宿主提示（conversation/host_notices.HostNotice.to_dict），由同一会话下一次前台回复按编号取走；
     #   不进入模型上下文（MODEL_HIDDEN_THREAD_FIELDS），同一来源只留最新一条，最多 HOST_NOTICE_LIMIT 条。
     # 字段用途: 暂存要在下一条回复顶部告诉用户的宿主提示（如智能程度检测结论）。
-    pending_host_notices: tuple[dict[str, str], ...] = ()
+    pending_host_notices: tuple[dict[str, object], ...] = ()
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
@@ -601,13 +601,20 @@ class ConversationThread:
         )
 
 
-# LLM: 旧记录没有这个字段时为空；只保留四个键都是字符串的条目，内容的清洗与校验归 conversation/host_notices。
+# LLM: 旧记录没有这个字段时为空；只保留四个键都是字符串的条目，可选的 details 是字典时原样带上（没有就不出现这个键），
+#   内容的清洗与校验归 conversation/host_notices。
 # 函数用途: 读取线程记录里的待送达宿主提示。
-def _pending_host_notices(value: object) -> tuple[dict[str, str], ...]:
+def _pending_host_notices(value: object) -> tuple[dict[str, object], ...]:
     rows = value if isinstance(value, (list, tuple)) else ()
     keys = ("notice_id", "source", "code", "text")
-    return tuple({key: row[key] for key in keys} for row in rows
+    return tuple({**{key: row[key] for key in keys}, **_notice_details(row)} for row in rows
                  if isinstance(row, dict) and all(isinstance(row.get(key), str) for key in keys))
+
+
+# 函数用途: 取提示条目的 details（字典时原样返回为 {"details": ...}，否则为空）。
+def _notice_details(row: dict) -> dict[str, object]:
+    details = row.get("details")
+    return {"details": dict(details)} if isinstance(details, dict) and details else {}
 
 
 def _verbose_level(value: object) -> str:

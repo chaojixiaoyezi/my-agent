@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## 唤醒毒丸第 3 步 C4：领域收尾、宿主提示与领域终态判定（2026-09-29，分支 `claude/75-wake-poison-wiring`，step16m）
+
+- **`test_wake_domain_closeout.py`（新，真实链路 RealChain）**：
+  - 派活唤醒被结案 → 任务 failed、`failure_code=SESSION_TASK_WAKE_QUARANTINED`，派活方收到一条带 `session_task_failure_code` 的回报；
+    重复收尾不重复回报、提示同码替换；`wake_domain_terminal` 结案前 False、结案后 True；`wake_domain_status` 结束时返回任务或回执状态、
+    没结束或其它 reason 返回空串，reason 大小写与空白不影响判定；
+  - 会话消息唤醒被结案 → 回执仍 pending（做法 2，取代原裁定 b），提示 `details` 带 `message_dedupe_key` 与 `message_receipt_status`；
+  - 其它 reason 只留提示；提示按原因码合并、别的来源默认的同来源替换不变；`details` 随线程记录读回不丢、旧提示形状不变；
+  - 派活正文已放弃 → `close_out_abandoned_source` 把任务收成 failed（`SESSION_MESSAGE_RELEASE_LIMIT_REACHED`）并回报；
+    领取后准入只对"rejected 且带上限码"判放弃，已消费或普通 rejected 照常开回合；经调度器一拍：不开模型回合、先收任务再结案唤醒；
+  - 经调度器逐拍推进：未知准入码同因满上限结案时，派活收 failed 并回报一次，会话消息回执不动，B 有提示；
+  - 领域写失败只打日志、提示照留；唤醒车道的长时间不计数提醒也留提示；`SessionTask.failure_code` 往返与旧记录兼容。
+- **`test_background_claim_attempt_observer.py`**：来源已处理完或已放弃时先 `close_out_source` 再 `retire_source`，其它准入码两者都不做。
+- **替身补全**：`test_background_claim_execution.py`、`test_background_claim_interrupt_scope.py`、`test_background_main_agent_runtime.py`、
+  `test_observation_route.py`、`test_thread_interrupt.py` 的 store 替身补 `session_tasks`（领取后准入按任务号读派活正文是否已放弃），断言不动。
+- **`test_session_task_real_chain.py`**：两层窗口补断言：隔离时留一条 `details` 注明仍待投递的提示；新窗
+  `test_message_still_failing_in_the_foreground_is_rejected_at_the_release_limit`：隔离后前台回合认领消息也遇到程序错误（经真实
+  worker 入口 `ask_via_worker`，前台收尾带着异常才计次），第 6 次没消费就结束转 rejected 带 `SESSION_MESSAGE_RELEASE_LIMIT_REACHED`，
+  之后不再投递。两层窗口都用程序错误（两层都计次），与裁定 (a) 同一判据。
+- **变异**（`sm3/mutate_c4.py`，15 个，全部被抓住）：隔离时改回 rejected、不收派活、不留提示、提示不带 details、提示按整个来源替换、
+  不调 close_out_source、先结案后收尾、去掉派活正文放弃准入、放弃判据不看上限码、记账不调领域收尾、不留停滞提示、
+  线程记录读回丢 details、failure_code 不落盘、回报不带 failure_code、同码替换选项被忽略。
+
 ## 唤醒毒丸第 3 步 C3：唤醒车道按尝试记账与结案（2026-09-29，分支 `claude/75-wake-poison-wiring`，step16m）
 
 - **`test_wake_attempt_wiring.py`（新，真实链路：真实 SimpleAgent、会话存储、尝试账与 Gateway 同款后台调度器，只替换供应商传输）**：

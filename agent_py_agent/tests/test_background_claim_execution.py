@@ -115,6 +115,8 @@ def _claim_fixture(monkeypatch):
         progress=SimpleNamespace(disable=retire),
         # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
         guidance=None,
+        # 夹具补全：领取后准入按任务号读 store.session_tasks（派活正文是否已放弃），替身也得有这个属性。
+        session_tasks=None,
     )
     agent = SimpleNamespace(subagents=SimpleNamespace(
         load=load_child, runtime_db=SimpleNamespace(main_agent_recovery_block_for_task=recovery),

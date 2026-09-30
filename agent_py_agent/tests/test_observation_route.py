@@ -179,6 +179,8 @@ def test_run_wake_signal_passes_owner_route(monkeypatch):
             threads=SimpleNamespace(load=lambda _tid: None),
             # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
             guidance=None,
+            # 夹具补全：领取后准入按任务号读 store.session_tasks（派活正文是否已放弃），替身也得有这个属性。
+            session_tasks=None,
         ),
     })
     s._pre_wake_capability_sweep = lambda *a, **k: None

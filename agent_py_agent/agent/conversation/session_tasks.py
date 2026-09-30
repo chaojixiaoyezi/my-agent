@@ -57,6 +57,9 @@ class SessionTask:
     created_at: float = 0.0
     updated_at: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # 宿主判定任务失败时的结构化原因码（登记在 ERROR_CONTRACTS），例如唤醒被毒丸结案；模型自己报的失败不填。
+    #   读旧记录缺这个字段按空串处理；旧版读新记录会忽略这个多出的键（from_dict 只取已知字段）。
+    failure_code: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +80,7 @@ class SessionTask:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "metadata": dict(self.metadata or {}),
+            "failure_code": self.failure_code,
         }
 
     @classmethod
@@ -100,6 +104,7 @@ class SessionTask:
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
             metadata=metadata if isinstance(metadata, dict) else {},
+            failure_code=str(data.get("failure_code") or ""),
         )
 
 
@@ -127,6 +132,7 @@ class SessionTaskUpdate:
     result_refs: tuple[str, ...] = ()
     conversation_request_id: str = ""
     task_run_id: str = ""
+    failure_code: str = ""
 
 
 # LLM: 幂等判定只比结构化身份字段（发送方/目标/正文），不比对时间戳等派生值。
@@ -321,6 +327,7 @@ class SessionTaskStore:
                 result_refs=tuple(update.result_refs) if update.result_refs else latest.result_refs,
                 conversation_request_id=update.conversation_request_id or latest.conversation_request_id,
                 task_run_id=update.task_run_id or latest.task_run_id,
+                failure_code=update.failure_code or latest.failure_code,
                 updated_at=current,
             )
             return updated.to_dict()

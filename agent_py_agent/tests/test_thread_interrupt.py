@@ -255,6 +255,8 @@ def test_background_main_run_registers_the_durable_task_control_name(monkeypatch
         wakes = SimpleNamespace(pending_one=lambda _signal_id: None)
         # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
         guidance = None
+        # 夹具补全：领取后准入按任务号读 store.session_tasks（派活正文是否已放弃），替身也得有这个属性。
+        session_tasks = None
 
     scheduler = BackgroundMainAgentScheduler({"runtime": Runtime(), "store": Store()})
     monkeypatch.setattr(
@@ -304,6 +306,8 @@ def test_background_main_user_interrupt_closes_claim_without_runtime_failure(mon
         wakes = SimpleNamespace(pending_one=lambda _signal_id: None)
         # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
         guidance = None
+        # 夹具补全：领取后准入按任务号读 store.session_tasks（派活正文是否已放弃），替身也得有这个属性。
+        session_tasks = None
 
     scheduler = BackgroundMainAgentScheduler({"runtime": Runtime(), "store": Store()})
     monkeypatch.setattr(

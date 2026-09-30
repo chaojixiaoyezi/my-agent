@@ -14,10 +14,13 @@ from uuid import uuid4
 HOST_NOTICE_LIMIT = 5
 _TEXT_LIMIT = 500
 _NAME_LIMIT = 64
+_DETAIL_LIMIT = 200
 _LINE_PREFIX = "【提示】"
 
 
 # LLM: 四个字段都是宿主写入的纯文本；notice_id 是取走与去重的唯一依据，source / code 供测试和同来源替换，不参与模型输入。
+#   details 是可选的结构化事实（键、值都是短字符串，例如唤醒毒丸提示里的 message_dedupe_key），给程序读，文案只作展示；
+#   为空时 to_dict 不写这个键，旧提示的字典形状不变。
 # 类用途: 一条要在下一条回复顶部告诉用户的宿主提示。
 @dataclass(frozen=True)
 class HostNotice:
@@ -25,16 +28,28 @@ class HostNotice:
     source: str
     code: str
     text: str
+    details: tuple[tuple[str, str], ...] = ()
 
     # 函数用途: 转成可持久化、可放进结果载荷的字典。
-    def to_dict(self) -> dict[str, str]:
-        return {"notice_id": self.notice_id, "source": self.source, "code": self.code, "text": self.text}
+    def to_dict(self) -> dict[str, object]:
+        row: dict[str, object] = {"notice_id": self.notice_id, "source": self.source, "code": self.code, "text": self.text}
+        if self.details:
+            row["details"] = dict(self.details)
+        return row
 
 
-# LLM: 正文去掉控制字符、合并空白并限长；来源与代码只保留有限长度。生成新的随机编号。
+# LLM: 正文去掉控制字符、合并空白并限长；来源与代码只保留有限长度；details 的键与值同样清洗限长，空键丢弃。生成新的随机编号。
 # 函数用途: 由宿主代码创建一条新提示。
-def host_notice(source: str, code: str, text: str) -> HostNotice:
-    return HostNotice(uuid4().hex[:12], _clean(source, _NAME_LIMIT), _clean(code, _NAME_LIMIT), _clean(text, _TEXT_LIMIT))
+def host_notice(source: str, code: str, text: str, *, details: Mapping[str, object] | None = None) -> HostNotice:
+    return HostNotice(uuid4().hex[:12], _clean(source, _NAME_LIMIT), _clean(code, _NAME_LIMIT), _clean(text, _TEXT_LIMIT),
+                      _details(details))
+
+
+# 函数用途: 把结构化事实清洗成排好序的 (键, 值) 元组；不是映射时为空。
+def _details(value: object) -> tuple[tuple[str, str], ...]:
+    rows = value.items() if isinstance(value, Mapping) else ()
+    cleaned = ((_clean(key, _NAME_LIMIT), _clean(item, _DETAIL_LIMIT)) for key, item in rows)
+    return tuple(sorted((key, item) for key, item in cleaned if key))
 
 
 # 函数用途: 去掉控制字符、合并空白并截到上限。
@@ -54,18 +69,23 @@ def host_notices_from(values: object) -> tuple[HostNotice, ...]:
 # 函数用途: 解析一条提示字典，缺关键字段时返回 None。
 def _notice_from(row: Mapping) -> HostNotice | None:
     notice = HostNotice(*(_clean(row.get(key), _TEXT_LIMIT if key == "text" else _NAME_LIMIT)
-                          for key in ("notice_id", "source", "code", "text")))
+                          for key in ("notice_id", "source", "code", "text")), _details(row.get("details")))
     return notice if notice.notice_id and notice.source and notice.text else None
 
 
-# LLM: 线程锁内读改写；同一来源的旧提示被替换，超过上限丢最旧的。线程不存在或不可写时返回 False，不抛异常
-#   （调用方多在后台线程里，提示是附带信息，不能拖垮主流程）。副作用：改写会话线程记录。
+# LLM: 线程锁内读改写；默认同一来源的旧提示被替换，replace_same_code=True 时只替换同来源且同 code 的旧提示
+#   （同一来源会发几类提示、每类只留最新一条时用，例如唤醒毒丸按原因码合并），超过上限丢最旧的。线程不存在或不可写时
+#   返回 False，不抛异常（调用方多在后台线程里，提示是附带信息，不能拖垮主流程）。副作用：改写会话线程记录。
 # 函数用途: 给一个会话追加一条待送达的宿主提示。
-def queue_host_notice(store: object, thread_id: str, notice: HostNotice) -> bool:
+def queue_host_notice(store: object, thread_id: str, notice: HostNotice, *, replace_same_code: bool = False) -> bool:
+    # 函数用途: 判断一条旧提示是否被这条新提示替换。
+    def replaced(row: HostNotice) -> bool:
+        return row.source == notice.source and (not replace_same_code or row.code == notice.code)
+
     # LLM: 在线程锁内执行；只动 pending_host_notices。
-    # 函数用途: 替换同来源旧提示并追加新提示。
+    # 函数用途: 替换同来源（或同来源同 code）旧提示并追加新提示。
     def update(thread):
-        kept = [row for row in host_notices_from(thread.pending_host_notices) if row.source != notice.source]
+        kept = [row for row in host_notices_from(thread.pending_host_notices) if not replaced(row)]
         rows = (*kept, notice)[-HOST_NOTICE_LIMIT:]
         return replace(thread, pending_host_notices=tuple(row.to_dict() for row in rows))
 
