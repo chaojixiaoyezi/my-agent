@@ -271,7 +271,7 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
 2. **WakeStore**（已完成，`store_wake_attempts.py` 挂在 `store.wakes.attempts`）：实现尝试账、结案、重放，发布层认识第三个位置。存储单测覆盖：结案和重放前后信封冻结内容不变、
    同键再发布返回已结案的原信号、observation 同步结掉。
 2b. **第 3 步 C1（已完成，`claude/38-wake-poison-c1`）**：`wake_poison` 加六个新原因常量、`WakeAttemptFacts` 与 `verdict_for_attempt`（判定总表：异常 → 额度分路 → 只重投 → 领到没执行 → 取消/让出 → 无报告 → 已处理仍 pending → 报告规则）、`ledger_corrupt_decision`；`store_wake_attempts` 加 `preflight`（死进程在途尝试：带 stopping_at 记不计数的 gateway_stopped，否则 abandoned）、`has_ledger`、`mark_stopping`、`discard`，`quarantine` 处理读不出的信封（原字节移到 quarantine/unreadable/）与坏账（原字节留到 quarantine/ledger/），`quarantined()` 列出留档，`replay` 对读不出来源返回 WAKE_REPLAY_SOURCE_UNREADABLE；WAKE_REPLAY_* 四个码登记进 ERROR_CONTRACTS。
-3. **接线**（C2、C3 已完成，`claude/75-wake-poison-wiring`；C4 领域收尾与宿主提示随后）：
+3. **接线**（C2–C4 与 C6 已完成，2026-09-30 随 step16m 上线）：
    - C2 `background_claim.py`：`BackgroundClaimDependencies.attempt`（`BackgroundClaimAttempt` 协议：`begin(claim_id) -> str`、
      `settled(status, admission)`）。领到 claim 后先 `begin`，返回非空码时本片不执行、按该码结算 claim；片结束时回调
      结束方式（`WAKE_CLAIM_FINISHED/CANCELLED/YIELDED/NOT_EXECUTED`）与领取后的准入码。
@@ -300,8 +300,8 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
        进程死亡没有异常对象，这次释放不计次；反复死亡由本步按 `attempt:abandoned` 计数结案兜底。旧账没有回合号时不收尾。
      - **结案顺序收窄**：写结案记录 → 删 pending → 移坏账 → 删尝试账。任何一步之后崩溃都不会留下"pending 在、账已不在"
        而从零重新计数，最多留下一份孤儿坏账。
-4. **运维面**（第 4 步，be）：`/wakes` 两个子命令（TUI 和飞书）、状态计数、归档、`wake_replayed`。日志与宿主提示已随第 3 步落地。
-5. **真实链路门**：在 ae 的 `claude/ae-session-real-chain-test` 里加两个注入：
+4. **运维面**（第 4 步，be，已完成，2026-09-30 随 step16m 上线）：`/wakes` 两个子命令（TUI 和飞书）、状态计数、归档、`wake_replayed`。日志与宿主提示已随第 3 步落地。
+5. **真实链路门**（待做；现在只有 `test_wake_poison.py` 用纯函数重放这两次事故）：在 ae 的 `claude/ae-session-real-chain-test` 里加两个注入：
    - 技能快照抛 programmer_bug，复现 `7b83c8730`；
    - admission 返回未知码，复现 `204f4ddf9`。
 

@@ -89,6 +89,7 @@
 |-- docs/tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md # 交付复核提示的结构化证据与原收口权威审计
 |-- docs/tasks/DECISION_MODEL_P4G_REPORT.md # 决策模型真实验收汇总：延迟分布、各点采用与判断质量、输入 token 与遗漏清单
 |-- docs/tasks/DECISION_MODEL_FINAL_HANDOFF.md # 决策模型 P1—P5 最终交接：18 项状态、合入清单、证据位置、缺口与建议下一步
+|-- docs/tasks/MY_AGENT_WRAPUP_HANDOFF.md # my-agent 停用后的收尾交接：生产现状与上线链、暂停与恢复预案、已上线批次、会话互通禁令解除、待用户决定、清理计划与真实测试规矩
 |-- docs/tasks/DECISION_MODEL_ACTION_CANDIDATE_AUDIT.md # DOM/OCR/工具动作候选的观察来源与原审批边界审计
 |-- docs/tasks/DECISION_MODEL_NATURAL_CONFIG_AUDIT.md # 普通中文配置要求到原 user_config 工具及真实读回的证据边界
 |-- docs/tasks/DECISION_MODEL_NATURAL_CONFIG_LIVE_HANDOFF.md # 普通 user owner 真实中文设置失败的工具快照、原因与隔离收尾
