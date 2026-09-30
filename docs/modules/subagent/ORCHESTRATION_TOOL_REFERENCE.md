@@ -141,6 +141,16 @@ child 生命周期事件到达 root 后，后台模型轮必须继续同一个 a
 OPEN 请求优先于普通 completed 收尾，child 保持 `BLOCKED`。grant/deny 完成后，宿主把同一个 run 自动
 排回 `PENDING` 并通过裁决 lifecycle event 触发续跑；工具不是“推动”按钮，也不会创建第二个 child。
 
+回执与操作账（2026-09-30 起）：
+- 裁决跑完就返回完整的 `resolved`／`errors`，结果是确定的。
+- 有申请没批下来时，回执 `ok=false`，并带错误码登记表里的码。`errors` 每条也带自己的码，回执取第一条的码：
+  - 目录越界：`PATH_OUTSIDE_WORKSPACE`；
+  - 工具或 Skill 超出父级当前可给的范围：`MISSING_CAPABILITY`；
+  - 裁决阶段抛异常：`TOOL_ERROR`。
+- 这种回执同时声明 `effect_outcome=failed`，所以操作账落成 failed，可以只读重放，不再记成 `TOOL_OPERATION_OUTCOME_UNKNOWN`／manual_review。
+- 小例子：申请写 `/etc/hosts` 被拒，回执是 `PATH_OUTSIDE_WORKSPACE`，模型可以换一个合规目录重新裁决，或自己接手。
+- 只有裁决之后的落账或唤醒抛异常时，仍按结果未知处理，不自动重做。
+
 ## 宿主事件回传（不是模型工具）
 
 旧 `raise_event` 已删除。普通 child 不需要调用工具证明自己仍在工作；runner 的模型/工具阶段、能力申请、

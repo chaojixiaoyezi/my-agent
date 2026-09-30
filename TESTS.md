@@ -2,6 +2,23 @@
 
 ## 工具参数无效有界纠正的端到端验证（2026-09-30，分支 `worker/ds1-invalid-args-e2e`）
 
+## 能力申请裁决的确定拒绝不再记成结果未知（2026-09-30，分支 `claude/ae-resolve-refusal-code`，基于 main `a8c71f0e0`）
+
+- **对应缺陷**：能力包真实模型验收 D2。越界 grant 的回执没有错误码，操作账被记成 `TOOL_OPERATION_OUTCOME_UNKNOWN`。
+- **新增测试**（`test_resolve_capability_requests_tool.py`）：
+  - `test_out_of_bounds_grant_settles_operation_failed_not_unknown`、`test_tool_beyond_parent_grant_settles_operation_failed_not_unknown`：经原 ToolExecutor、协调器和 LocalStore 操作账，操作行落成 failed，没有 unknown_reason，错误码分别是 `PATH_OUTSIDE_WORKSPACE`、`MISSING_CAPABILITY`；
+  - `test_unavailable_skill_grant_is_a_coded_deterministic_refusal`、`test_judgment_exception_is_coded_and_grants_nothing`：Skill 不可用、裁决异常；
+  - 原三条拒绝用例补断言错误码和 `effect_outcome=failed`。
+- **红绿与变异**：
+  - 原实现下新用例失败。
+  - 9 个变异全部被抓住：去掉各条码、`_refusal` 不写码、去掉或改空 effect_outcome、固定回执码。
+  - 只去掉 effect_outcome 时，操作账复现为 `TOOL_OPERATION_OUTCOME_UNKNOWN`。
+- **本轮验证**：
+  - 与改动相关的测试文件，加仓库级扫描守卫，共 55 个：962 passed、1 skipped；
+  - Ruff、doc sync、strict code-size、`git diff --check`、clean-package。
+
+## 能力包 G03／G05 真实模型补测、G07 一次选择开启臂与子代理选模权限（2026-09-30，分支 `claude/ae-capability-real-model`，仅文档）
+
 - **新增** `test_invalid_tool_arguments_e2e.py`（复用 `test_gateway_model_adoption.py` 的 `actual_request`/`fake_http` 夹具，真实工具循环 + 假供应商 HTTP，两种协议 anthropic_compatible / openai_compatible）：
   - `test_invalid_arguments_are_corrected_then_read_file_runs_once`：假供应商第一次返回坏参数的 read_file（半截 JSON），第二次返回合法 read_file，第三次返回正文。断言本轮最终成功（`result.response == "资料整理完成。"`）、`read_file` 只真正执行一次、业务请求共 3 次、第二次请求体里带 `[tool-arguments-invalid]` 宿主纠正。
   - `test_four_invalid_argument_responses_fail_with_typed_error_and_no_tool_execution`：假供应商连续 4 次都返回坏参数。断言本轮以 `runtime_reason=MODEL_TOOL_ARGUMENTS_INVALID`、`runtime_status=error`、`runtime_source=model_provider` 失败，一次工具都没执行，业务请求正好 4 次。

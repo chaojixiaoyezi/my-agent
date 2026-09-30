@@ -496,6 +496,8 @@ def test_grant_rejects_tool_outside_parent_runtime_snapshot():
 
         assert result.ok is False and payload["ok"] is False
         assert payload["errors"][0]["unavailable_tools"] == ["not_registered_tool"]
+        assert payload["errors"][0]["error_code"] == result.error_code == "MISSING_CAPABILITY"
+        assert result.effect_outcome == "failed"
         assert reloaded.capability_requests[0].status == "OPEN"
         assert reloaded.capability_grants == []
 
@@ -674,10 +676,101 @@ def test_grant_rejects_out_of_workspace_roots_structurally():
         payload = json.loads(result.output)
         assert not payload["ok"]
         assert payload["errors"][0]["rejected_write_roots"] == ["/etc/cron.d"]
+        # D2：确定的拒绝带登记表里的码并声明确定失败，宿主不能再把它当成结果未知。
+        assert payload["errors"][0]["error_code"] == result.error_code == "PATH_OUTSIDE_WORKSPACE"
+        assert result.effect_outcome == "failed"
         reloaded = agent.subagents.load(task.id)
         # 越界授权不落 grant、请求保持未决
         assert reloaded.capability_requests[0].status == "OPEN"
         assert not reloaded.capability_grants
+
+
+# LLM: 走原 ToolExecutor + tool_operation_coordinator + LocalStore 操作账，只在 tmp_path 内执行；不启动模型或进程。
+# 函数用途: 以固定操作号执行一次 resolve_capability_requests，返回工具结果与持久操作行，供 D2 回归核对终态。
+def _resolve_through_operation_ledger(tmp_path, agent, arguments):
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    execution = execute_canonical_test_call(
+        tmp_path, tools={"resolve_capability_requests": _tool(agent)}, tool_name="resolve_capability_requests",
+        arguments=arguments, operation_store=store, operation_store_required=True, operation_id="op-d2",
+    )
+    return execution.result, store.get_tool_operation(owner_id="test-owner", run_id="test-run", operation_id="op-d2")
+
+
+def test_out_of_bounds_grant_settles_operation_failed_not_unknown(tmp_path):
+    """D2（2026-09-30 真实模型 G03）：越界 grant 经原执行器和操作账落成 failed，不是 UNKNOWN/manual_review。"""
+    agent, task, request = _agent_and_blocked_task(str(tmp_path / "ws"))
+    result, record = _resolve_through_operation_ledger(
+        tmp_path, agent, {"run_id": task.id, "decision": "grant", "reason": "越界", "write_roots": ["/etc/hosts"]},
+    )
+
+    assert result.ok is False and result.handler_executed is True
+    assert result.error_code == "PATH_OUTSIDE_WORKSPACE" and result.effect_outcome == "failed"
+    assert record.status == "failed" and not record.unknown_reason
+    assert record.error_code == "PATH_OUTSIDE_WORKSPACE"
+    reloaded = agent.subagents.load(task.id)
+    assert next(item for item in reloaded.capability_requests if item.id == request.id).status == "OPEN"
+    assert reloaded.capability_grants == []
+
+
+def test_tool_beyond_parent_grant_settles_operation_failed_not_unknown(tmp_path):
+    """MISSING_CAPABILITY 不在执行前确定失败白名单里，只靠 effect_outcome=failed 才不被记成结果未知。"""
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"), tmp_path / "ws",
+    )
+    task = agent.subagents.create_run(goal="调用不存在工具", thought="父级上限", plan=["申请"],
+                                      allowed_tools=["capability_request"])
+    agent.subagents.lifecycle.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(problem="需要未注册工具", needed_capability="not_registered_tool",
+                                      capability_type="tool", requested_tools=["not_registered_tool"]),
+    )
+    result, record = _resolve_through_operation_ledger(
+        tmp_path, agent, {"run_id": task.id, "decision": "grant", "reason": "超出父级"},
+    )
+
+    assert result.error_code == "MISSING_CAPABILITY" and result.effect_outcome == "failed"
+    assert record.status == "failed" and not record.unknown_reason
+    assert agent.subagents.load(task.id).capability_grants == []
+
+
+def test_unavailable_skill_grant_is_a_coded_deterministic_refusal(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"), tmp_path,
+    )
+    task = agent.subagents.create_run(goal="要一个不存在的 Skill", thought="t", plan=["申请"],
+                                      allowed_tools=["capability_request"])
+    agent.subagents.lifecycle.record_capability_request(
+        task.id,
+        RecordCapabilityRequestParams(problem="需要 Skill", needed_capability="skill", capability_type="skill",
+                                      requested_skills=["no-such-skill-d2"]),
+    )
+    result = _tool(agent).execute({"run_id": task.id, "decision": "grant", "reason": "测试"})
+    payload = json.loads(result.output)
+
+    assert payload["errors"][0]["error_code"] == result.error_code == "MISSING_CAPABILITY"
+    assert result.effect_outcome == "failed"
+
+
+def test_judgment_exception_is_coded_and_grants_nothing(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.tools.capability import (
+        ResolveCapabilityRequestsTool,
+    )
+
+    agent, task, _request = _agent_and_blocked_task(str(tmp_path))
+
+    def broken_grant(self, ctx, request):
+        raise RuntimeError("judge failed")
+
+    monkeypatch.setattr(ResolveCapabilityRequestsTool, "_mark_grant", broken_grant)
+    result = _tool(agent).execute({"run_id": task.id, "decision": "grant", "reason": "测试"})
+    payload = json.loads(result.output)
+
+    assert payload["errors"][0]["error_code"] == result.error_code == "TOOL_ERROR"
+    assert result.effect_outcome == "failed"
+    assert agent.subagents.load(task.id).capability_grants == []
 
 
 def test_grant_cannot_use_broad_agent_workspace_to_cross_owner_wall():
@@ -715,6 +808,7 @@ def test_grant_cannot_use_broad_agent_workspace_to_cross_owner_wall():
 
         assert result.ok is False and payload["ok"] is False
         assert payload["errors"][0]["rejected_write_roots"] == [str(host_root)]
+        assert result.error_code == "PATH_OUTSIDE_WORKSPACE" and result.effect_outcome == "failed"
         assert next(item for item in reloaded.capability_requests if item.id == request.id).status == "OPEN"
         assert reloaded.capability_grants == []
 

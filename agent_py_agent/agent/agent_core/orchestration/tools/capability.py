@@ -3,7 +3,8 @@
 #     - decision=grant：走 lifecycle.record_capability_grant（请求状态→GRANTED）；
 #     - decision=deny：请求状态→CLOSED（协议现有终态，不发明新状态）；
 #     grant/deny 都发 wake 唤醒子代理续跑；write_roots 越界（任务工作区与主代理
-#     workspace 之外）必须结构化拒绝，不允许静默放行。
+#     workspace 之外）必须结构化拒绝，不允许静默放行；有拒绝时回执带登记错误码并声明确定失败，
+#     不能让宿主把它记成结果未知（见 _resolution_outcome）。
 #   改动时同步检查 tests/test_resolve_capability_requests_tool.py、
 #   子代理聚合记录与 docs/audits/R4-goattack-20260611.md。
 #   裁决后的排队必须在原 creation guard 内复读控制终态，不能由旧快照复活已停止的孩子。
@@ -170,11 +171,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
             "errors": errors,
             "continuation": continuation,
         }
-        return ToolHandlerOutcome(
-            "resolve_capability_requests",
-            bool(resolved) and not errors,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
+        return _resolution_outcome(payload)
 
     # 函数用途: 逐条裁决未决请求，返回 (resolved, errors, 待落盘的 grant 列表)。
     def _judge_pending(
@@ -194,16 +191,15 @@ class ResolveCapabilityRequestsTool(BaseTool):
             (resolved if record.get("ok") else errors).append(record)
         return resolved, errors, pending_grants
 
-    # 函数用途: 裁决一条请求；异常转结构化 error 记入 errors 并返回 None。
+    # 函数用途: 裁决一条请求；异常转结构化 error（带 TOOL_ERROR 码）记入 errors 并返回 None。
     def _judge_one(self, ctx: _ResolveContext, request: Any, errors: list[dict[str, object]]) -> dict[str, object] | None:
         try:
             if ctx.decision == "grant":
                 return self._mark_grant(ctx, request)
             return _deny_one(request, ctx.reason)
         except Exception as exc:
-            errors.append(
-                {"request_id": getattr(request, "id", ""), **runtime_error_report(exc, context="resolve_capability_requests")}
-            )
+            report = runtime_error_report(exc, context="resolve_capability_requests")
+            errors.append({"request_id": getattr(request, "id", ""), "error_code": "TOOL_ERROR", **report})
             return None
 
     # 函数用途: 把标记通过的 grant 逐条写进任务（副作用：record_capability_grant 落盘）。
@@ -232,17 +228,16 @@ class ResolveCapabilityRequestsTool(BaseTool):
 
     # LLM: Grant judgment is side-effect free. write_roots and direct-parent ToolRuntimeSnapshot
     # are objective hard boundaries; request status and grant commit together later.
+    # 每条拒绝都带错误码登记表里的码（越界目录 PATH_OUTSIDE_WORKSPACE，工具/Skill 超出父级 MISSING_CAPABILITY），
+    # 供 _resolution_outcome 给出确定的拒绝码；不新造分类。
     # 函数用途: 校验目录、工具和 Skill 上限并生成裁决记录，真正结清申请由后续原子落账完成。
     def _mark_grant(self, ctx: _ResolveContext, request: Any) -> dict[str, object]:
         requested_roots = _string_list(ctx.params.get("write_roots")) or _string_list(getattr(request, "path_scope", []))
         allowed_roots, rejected_roots = self._partition_safe_roots(ctx.task, requested_roots)
         if requested_roots and not allowed_roots:
-            return {
-                "ok": False,
-                "request_id": request.id,
-                "error": "write_roots 全部越界（必须在任务工作区或主代理 workspace 内），未授权。",
-                "rejected_write_roots": rejected_roots,
-            }
+            return _refusal(request.id, "PATH_OUTSIDE_WORKSPACE",
+                            "write_roots 全部越界（必须在任务工作区或主代理 workspace 内），未授权。",
+                            {"rejected_write_roots": rejected_roots})
         tools = _string_list(ctx.params.get("tools")) or _string_list(
             getattr(request, "requested_tools", [])
         )
@@ -254,23 +249,15 @@ class ResolveCapabilityRequestsTool(BaseTool):
             requested_tool_names,
         )
         if authority.unavailable_tools:
-            return {
-                "ok": False,
-                "request_id": request.id,
-                "error": "申请工具超出直属父级当前可用工具快照，未授权。",
-                "unavailable_tools": list(authority.unavailable_tools),
-                "parent_tool_authority": authority.to_dict(),
-            }
+            return _refusal(request.id, "MISSING_CAPABILITY", "申请工具超出直属父级当前可用工具快照，未授权。",
+                            {"unavailable_tools": list(authority.unavailable_tools),
+                             "parent_tool_authority": authority.to_dict()})
         skills, capability_cards, skill_error = _resolved_skill_grant(
             self.agent,
             _string_list(getattr(request, "requested_skills", [])),
         )
         if skill_error:
-            return {
-                "ok": False,
-                "request_id": request.id,
-                "error": skill_error,
-            }
+            return _refusal(request.id, "MISSING_CAPABILITY", skill_error)
         if allowed_roots:
             tools = list(dict.fromkeys([*tools, *_FILESYSTEM_WRITE_TOOLS]))
         record: dict[str, object] = {
@@ -651,6 +638,33 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# LLM: 裁决阶段无副作用的单条拒绝记录；error_code 只能取错误码登记表里的现有码，供 _resolution_outcome 汇总。
+# 函数用途: 生成一条“未授权”裁决记录（请求号、登记错误码、说明和附加结构字段）。
+def _refusal(request_id: str, error_code: str, error: str, facts: dict[str, object] | None = None) -> dict[str, object]:
+    return {"ok": False, "request_id": request_id, "error": error, "error_code": error_code, **(facts or {})}
+
+
+# LLM: 裁决已跑完并返回完整 resolved/errors 时，结果是确定的：errors 里的申请在无副作用的裁决阶段就被拒，
+#   resolved 的已原子落账，二者都写在 payload 里。失败时必须带登记表里的错误码（取第一条 error 的码）并声明
+#   effect_outcome="failed"，否则 tool_operation_coordinator 会把“handler 已执行的无码失败”记成
+#   TOOL_OPERATION_OUTCOME_UNKNOWN/manual_review，操作行停在 UNKNOWN（2026-09-30 真实模型 G03 缺陷 D2）。
+#   裁决之后的落账或唤醒抛异常时不走这里，仍由执行器按未知处理。改动时同步 test_resolve_capability_requests_tool.py。
+# 函数用途: 把裁决 payload 包成工具结果；有拒绝时给出确定的拒绝码和“确定失败”事实，而不是让宿主当成结果未知。
+def _resolution_outcome(payload: dict[str, object]) -> ToolHandlerOutcome:
+    output = json.dumps(payload, ensure_ascii=False, indent=2)
+    if payload["ok"]:
+        return ToolHandlerOutcome("resolve_capability_requests", True, output)
+    errors = payload.get("errors") or []
+    error_code = str((errors[0] if errors else {}).get("error_code") or "TOOL_ERROR")
+    return ToolHandlerOutcome(
+        "resolve_capability_requests",
+        False,
+        output,
+        error_code=error_code,
+        effect_outcome="failed",
+    )
 
 
 # 函数用途: 统一的参数错误响应（带准确分类码，避免无码兜底成 UNKNOWN_ERROR 误导模型放弃）。

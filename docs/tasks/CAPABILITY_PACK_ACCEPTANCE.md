@@ -413,7 +413,7 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 
 ### 宿主缺陷候选与观察（只报告，不修）
 - **D1 活动 Goal 续跑空转**：没有工具调用时，每 4–5 秒续跑一片。从 Goal 开始到第二次 `/goal pause`，`agent_run.started` 共 23 次，tokens_used 340838，token_budget 为空。`ensure_goal_progress_continuation` 没有进展判据。3a 已派修。
-- **D2 确定的拒绝被记成结果未知**：`resolve_capability_requests(decision=grant)` 遇到 write_roots 全部越界时（resolved 0，rejected `['/etc/hosts']`），返回 ok=False 但不带错误码。宿主于是把它记成 `TOOL_OPERATION_OUTCOME_UNKNOWN`（effect_reconciliation、manual_review），操作行停在 UNKNOWN，settled_at 为 0。操作号 `tool_operation:39a147a6…`。
+- **D2 确定的拒绝被记成结果未知（已修，2026-09-30，分支 `claude/ae-resolve-refusal-code`，见设计台账“能力申请裁决的确定拒绝不再记成结果未知”；待集成上线后复核）**：`resolve_capability_requests(decision=grant)` 遇到 write_roots 全部越界时（resolved 0，rejected `['/etc/hosts']`），返回 ok=False 但不带错误码。宿主于是把它记成 `TOOL_OPERATION_OUTCOME_UNKNOWN`（effect_reconciliation、manual_review），操作行停在 UNKNOWN，settled_at 为 0。操作号 `tool_operation:39a147a6…`。
 - **D3 没建会话任务的请求，TaskRun 永不关闭**：请求记录里没有 `conversation_runtime`、也没有会话 task 文件时，请求 done，但 TaskRun 一直停在 created。两个版本都复现：
   - `bf4f740c3`：只调了 list_agents 的前台请求；
   - `10041de02`：管理员共享请求，以及普通用户一次不调工具的请求。

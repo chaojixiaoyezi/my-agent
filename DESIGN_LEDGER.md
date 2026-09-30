@@ -1,5 +1,24 @@
 # 设计台账
 
+## 能力申请裁决的确定拒绝不再记成“结果未知”（2026-09-30，分支 `claude/ae-resolve-refusal-code`，基于 main `a8c71f0e0`，已实现，待集成）
+
+- **来源**：能力包真实模型验收 G03 缺陷 D2。父级 `resolve_capability_requests(decision=grant)` 遇到 write_roots 全部越界（`/etc/hosts`），回执 `ok=false` 但不带错误码。
+- **原因**：`tool_operation_coordinator._operation_status_for_result` 的判定是：handler 已执行过的失败，只有显式声明 `effect_outcome=failed/not_started`，或错误码在执行前确定失败白名单里，才落 FAILED；其余一律 UNKNOWN。这个回执两样都没有，于是被包成 `TOOL_OPERATION_OUTCOME_UNKNOWN`／manual_review，操作行停在 UNKNOWN。
+- **做法**：只改工具返回处，不改协调器判定，也不新造分类。
+  - 裁决记录带登记表里的现有码：越界目录 `PATH_OUTSIDE_WORKSPACE`，工具或 Skill 超出父级 `MISSING_CAPABILITY`，裁决阶段异常 `TOOL_ERROR`。
+  - 单条拒绝统一由 `_refusal` 生成（同时让 `_mark_grant` 变短）。
+  - 新增 `_resolution_outcome`：失败时取第一条 error 的码，并声明 `effect_outcome=failed`。裁决跑完时，每条申请批了或没批都写在 payload 里，结果是确定的。
+- **边界**：
+  - 裁决之后的落账或唤醒抛异常时，仍按结果未知处理，不自动重做。
+  - 部分批准、部分拒绝时，已批的照常落账；整体回执为 failed，模型按 payload 看每条结果。
+  - `MISSING_CAPABILITY` 不在白名单里，只靠 `effect_outcome=failed` 才落 FAILED。回归测试专门覆盖这一点。
+- **验证**：`test_resolve_capability_requests_tool.py` 新增：
+  - 经原执行器和 LocalStore 操作账的两条回归：越界、工具超出父级，都落成 failed，没有 unknown_reason；
+  - Skill 不可用、裁决异常各一条；
+  - 原有三条拒绝用例补断言错误码和 effect_outcome。
+
+  9 个变异全部被抓住。其中只去掉 effect_outcome 时，操作账复现为 `TOOL_OPERATION_OUTCOME_UNKNOWN`。
+
 ## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`，已实现，待集成）
 
 - **来源**：能力包验收 G03 发现接替已结束子代理时，追加式事件日志里只有普通保存（`subagent_run_saved`）或状态记录，没有专门的“接替”条目；接替事实只在权威 takeover_records 与 TAKEOVER.md 里。要求只读审计投影，不建第二份状态。
