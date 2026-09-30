@@ -483,6 +483,22 @@
   - `test_busy_target_stopped_before_consuming_the_message_still_gets_it`：main 上通过，取消线上失败，作为取消线的验收门；
   - `test_busy_target_consumes_message_without_an_extra_empty_turn` 补断言「B 没有待处理唤醒」。
 
+**待定，非阻断：交付前的取消判定每片全量扫会话任务**（2026-09-29，ae 复审取消线时提出，随 step16k 上线的是现状；新想法只记账，暂不改）：
+- **现状**：
+  - `runtime._session_task_turn_was_cancelled` 用 `session_tasks.list_report(limit=0)` 全量读取会话任务，找 `conversation_request_id` 等于本片回合号的那条，看它是否已 `cancelled`。
+  - 两处调用：
+    - 交付前（`BackgroundMainAgentRuntime`）：每个带回合号的后台片都会调，包括定时任务 run、派活片和消息唤醒片；
+    - `_execute_wake_signal`：本片报告为 None 时再调一次。
+  - `list_report` 不论 limit 多少，都会先 glob 并解析目录下全部任务文件，limit 只截取返回值。所以每次调用是 O(任务数)，并且会话任务目前没有 retention。
+  - 控制面 `control_service._bound_background_turn_is_running` 同样用 `limit=0`：原来默认只截取最新 100 条，任务超过 100 条时，较早创建、仍在跑的那条会被截掉。改成全量不增加 I/O。
+- **为什么语义上需要扫描**：会话任务的正文由目标会话在安全点认领时绑定到当前回合，这个回合可能是派活片，也可能是定时任务 run、消息唤醒片或前台请求。所以判定「本片对应的任务是否已取消」时，不能只按唤醒信封里的 `session_task_id` 读一条，必须按 `conversation_request_id` 反查。
+- **规模**：09-29 生产 owner 的会话任务文件数为 0（会话互通在禁令下），当前可以忽略；解除禁令后按使用量线性增长。
+- **方向**（三选一或组合）：
+  - 有 `session_task_id` 的片先 `load(task_id)`，命中且绑定一致就直接判定；其它回合类型再扫；
+  - 建 `conversation_request_id → task_id` 索引，绑定回合时同步写；
+  - 给会话任务加 retention，终态后按期归档。
+- **状态**：待定，非阻断；解除禁令前后择机排期。
+
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。
