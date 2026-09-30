@@ -2156,3 +2156,22 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
   （校验与 `append_once` 重试共用），不要再直接比较 `input_digest` 字符串。
 - `reconcile_gateway_input_receipts` 的 summary 是结构化事实：`terminal_unknown_errors`/`last_terminal_unknown_error` 表示"试过但因坏账/IO
   无法收口"，派发者对账段必须经 `raise_if_input_reconcile_unsettled` 上报；`_write_terminal_unknown` 只在状态或错误变化时落盘。
+
+## 普通消息入口回执（input_receipts）的状态语义（2026-09-29）
+
+`GatewayInputReceipt.state` 只有五个值，含义按结构化事实读，不要按字面猜：
+
+| state | 含义 | 是否终态 |
+|---|---|---|
+| `pending` | 已入账，作为 guidance 行等目标会话的活动回合认领（delivery=current_request/next_turn） | 否 |
+| `active_pending` | 已绑定到某个活动回合（`target_turn_id`），等它认领 | 否 |
+| `consumed` | 活动回合认领并消费 | 是 |
+| `queued` | **已提升为普通 inbox 请求**：`queue_gateway_input_locked` 把回执里冻结的 `prepared_request` 原样物化成同 `request_id` 的普通请求，由派发器按前台回合执行（会话被后台 claim 占着就等车道）。不是"还在等送达"；它对应的请求记录在 `requests/{done,failed,terminal}` | 是 |
+| `terminal_unknown` | 已认领但无法证明消费，或回执坏账；不送达，等对账（带 `reconcile_error` 的会计入 summary 并上报循环守卫） | 对账前是 |
+
+- 提升点只有 `queue_gateway_input_locked` 一处：回合结束未被认领（`settle_gateway_inputs_for_turn`）和对账时目标已终态且 guidance 被拒绝
+  （`reconcile_gateway_input_request`）都走它；物化幂等（inbox/processing/terminal 已有同 id 请求就只核对指纹）。
+- 没有任何过期规则：提升与物化不看年龄。回执本身没有 `created_at`，`updated_at` 是状态变更时间；原始提交时间在 `prepared_request.submitted_at`/`created_at`。
+  真实送达延迟 = 对应请求的 `ended_at` − `prepared_request.submitted_at`，不能用回执 `updated_at` 距今的时间当"等待时长"。
+- 模型执行一条被提升的请求时只看到 runtime facts 里的 `current_local_time`，看不到这条输入的提交时间（信封没有 promoted_at/延迟字段，历史消息不带时间戳）。
+  迟到送达只发生在"提升时刻远晚于提交"：目标回合跑很久未认领、或回执卡在 pending/terminal_unknown 事后被对账提升（2026-09-27 那条插话）。改法见 DESIGN_LEDGER「普通消息迟到送达」条目（待定）。

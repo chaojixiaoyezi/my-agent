@@ -38,6 +38,21 @@
   - 没有加进 user_config 的自助修改白名单（`TUNABLE_KEYS`）。
 - **未做**：生产值由 3a 部署后在配置里定（38 建议 25–30 万），这次不改生产配置。
 
+## 普通消息迟到送达：信封带提交时间与提升年龄门（2026-09-29，分支 `claude/38-stale-delivery-docs`，基于 `89af6b07a`，**待定**，只记方案不实现）
+
+- **背景**：2026-09-27 一条发给已结束定时 run 的插话回执因指纹不兼容卡在 terminal_unknown，修好后会被对账提升成普通请求、两天后当作当前指令送达（集成者部署前挪走）。
+  第二次核查（2026-09-29）发现 local/main 32 条 queued 回执并非"还在等"：queued 是终态"已提升为普通请求"，它们对应的请求早已 done/failed，
+  按"提交 → 请求结束"算的真实送达延迟：<1 分钟 22 条、1–10 分钟 5 条、10–60 分钟 4 条、1–6 小时 1 条（中位数 20 秒、最大 1 小时）；
+  当前 pending/active_pending/terminal_unknown 均为 0。分析：`~/.my-agent/decision-evidence/compact-429-20260929/stale-delivery/stale-delivery-analysis.md`。
+- **已做**：`docs/modules/gateway/04-structure.md` 写明 input_receipts 五种状态的真实含义与延迟的正确算法（queued 不是待送达）。
+- **待定 1（无开关，改模型请求内容）**：`queue_gateway_input_locked` 物化时给请求载荷加结构化 `promoted_at`、`delivery_delay_seconds`
+  （= promoted_at − `prepared_request.submitted_at`，旧回执无 submitted_at 记 null），执行时渲染进 runtime facts 紧挨 `current_local_time`，由模型自行判断是否过时；展示是软约束。
+- **待定 2（必须有开关，改送达行为）**：新配置 `gateway_input_promotion_max_age_seconds`（0 = 不限，默认 0，行为不变；生产建议 21600）。超龄时不物化，
+  回执写新结构化状态 `stale_held`（held_at、age_seconds），对账 summary 计数、/status 可见，并写目标会话的 pending_host_notices；放行/丢弃走结构化控制
+  （如 `/inputs release|discard <request_id>`，经 control_operation_service 幂等回执），永不自动放行；无 submitted_at 的旧回执照常提升。
+- **裁定（集成者）**：真正迟到送达只发生过一次且已处理，两项都改变模型请求内容或送达行为，先不做；再出现第二次迟到送达时按本条排期。
+  机器判定只准用结构化时间字段（`submitted_at`/`promoted_at`），不看正文；状态改名要走显式迁移记录。
+
 ## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案已审，分步实现中）
 
 - **背景**：`204f4ddf9` 和 `7b83c8730` 都让同一条唤醒约每 30 秒被领取一次、失败或取消后永远重试。
