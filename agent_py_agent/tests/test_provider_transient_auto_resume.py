@@ -403,3 +403,21 @@ def test_quota_exhaustion_is_persisted_as_manual_recovery_failure_for_subagents(
         _subagent_run_failure_type(ProviderResponseError("malformed provider payload"))
         == FailureType.RUNNER_ERROR.value
     )
+
+
+def test_subagent_compaction_quota_is_quota_exhausted_not_runner_error() -> None:
+    """子代理压缩时撞额度：ConversationCompactError 按错误码或异常链认成额度用完，不能记成 RUNNER_ERROR。"""
+    from agent_py_agent.agent.agent_core.subagent_mixin import _subagent_run_failure_type
+    from agent_py_agent.agent.conversation.compact_guard import (
+        COMPACT_PROVIDER_QUOTA_EXHAUSTED,
+        ConversationCompactError,
+    )
+
+    by_code = ConversationCompactError("上下文压缩未完成", code=COMPACT_PROVIDER_QUOTA_EXHAUSTED)
+    by_cause = ConversationCompactError("上下文压缩未完成", code="COMPACT_FAILED")
+    by_cause.__cause__ = ProviderQuotaExhaustedError("HTTP 429: weekly")
+    other = ConversationCompactError("上下文压缩未完成", code="COMPACT_FAILED")
+
+    assert _subagent_run_failure_type(by_code) == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
+    assert _subagent_run_failure_type(by_cause) == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
+    assert _subagent_run_failure_type(other) == FailureType.RUNNER_ERROR.value

@@ -15,11 +15,16 @@ from agent_py_agent.agent.agent_core import (
 from agent_py_agent.agent.agent_core.subagent import compact_recovery
 from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
-from agent_py_agent.agent.backends.errors import ProviderContextWindowError, ProviderTransientError
+from agent_py_agent.agent.backends.errors import (
+    ProviderContextWindowError,
+    ProviderQuotaExhaustedError,
+    ProviderTransientError,
+)
 from agent_py_agent.agent.conversation import compact
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings.defaults import effective_max_output_tokens
+from agent_py_agent.agent.subagents.models import FailureType
 
 
 # LLM: child、旧历史和 attempt 都由原 store/lifecycle 建立；只在 HTTP 层模拟供应商响应。
@@ -257,6 +262,30 @@ def test_child_uncommitted_recovery_never_sends_restored_business(tmp_path, monk
     assert thread.compact_generation == (1 if failure == "generation" else 0)
     if failure == "generation":
         assert thread.summary == "并发提交已获胜"
+
+
+# LLM: 真实 runner 与恢复压缩；业务第一次按供应商溢出触发恢复压缩，摘要调用撞额度用完。只替换 HTTP 与摘要入口。
+# 函数用途: 验证子代理压缩时撞额度按额度用完收尾（PROVIDER_QUOTA_EXHAUSTED），不记成 RUNNER_ERROR，也不再发业务。
+def test_child_compaction_quota_is_recorded_as_quota_exhausted(tmp_path, monkeypatch):
+    agent, task = _child(tmp_path, backend="anthropic_compatible", tools=False)
+    waits = []
+    monkeypatch.setattr(provider_transient_auto_resume, "_wait_before_retry", lambda *_: waits.append(True))
+
+    def summary(*_args, **_kwargs):
+        raise ProviderQuotaExhaustedError("HTTP 429: weekly usage limit", details={"status_code": 429})
+
+    monkeypatch.setattr(compact, "_summarize", summary)
+
+    def on_business(_wire, number):
+        if number == 1:
+            raise ProviderContextWindowError("测试供应商上下文溢出")
+
+    business, _ = _http(monkeypatch, backend="anthropic_compatible", on_business=on_business)
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    assert not result.ok
+    assert len(business) == 1 and waits == []
+    assert agent.subagents.load(task.id).failure_type == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
 
 
 # LLM: 来源读取失败要沿真实 runner 退出；不能把损坏来源当空历史后继续发业务。

@@ -157,6 +157,8 @@
     `compact_guard.is_provider_quota_failure`：直接的额度错误，或 `compact_error_is_provider_quota` 认得的压缩包装。
   - 判定放在会话层，因为后端层（`backends.errors`）不能反向依赖会话层。`is_provider_quota_exhausted_error` 仍是 isinstance，
     传输层、回合级续跑、供应退避和错误分类器这些后端内部调用方不受影响。
+  - 子代理 failure_type（`agent_core/subagent_mixin._subagent_run_failure_type`）也改读它（3a 裁定）：子代理压缩时撞额度记成
+    `PROVIDER_QUOTA_EXHAUSTED`，不再是 `RUNNER_ERROR`。`contracts/provider_error_classifier` 那处只影响标签，行为上等价，不改。
   - `COMPACT_PROVIDER_QUOTA_EXHAUSTED` 登记进 ERROR_CONTRACTS：不可重试，建议切换后端。
 - **既有问题，待定，未落地**：`_provider_error_indicates_quota_exhausted` 在结构化错误码和限额窗口之后，还对整段错误正文做子串匹配。
   硬额度码出现在任意位置、数字 `2056`、`token_plan` 加上「用量上限」「购买积分」「upgrade」「exhausted」这几个词，都会判成额度用完。

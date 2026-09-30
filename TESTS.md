@@ -194,6 +194,11 @@
     策略仍 enabled、没有失败账也没退休；车道 3 次都进环境暂停（探测间隔 60、120、240 秒），不是 30 秒普通冷却；
     毒丸判定 3 次都是不计数。
   - 5 个变异全部被抓住：唤醒入口、策略失败账、毒丸、车道四处任一处退回 isinstance，以及共用判定去掉压缩分支。
+- **子代理 failure_type**（3a 裁定，分支 `claude/be-compact-cap-followup`）：
+  - `test_provider_transient_auto_resume.py` 加 1 项：压缩包装按错误码或异常链记 `PROVIDER_QUOTA_EXHAUSTED`，其它压缩失败仍记 `RUNNER_ERROR`；
+  - `test_subagent_compact_recovery.py` 加 1 项真实链路：子代理业务第一次按供应商溢出触发恢复压缩，摘要调用撞额度用完，
+    run 失败记 `PROVIDER_QUOTA_EXHAUSTED`，不再发业务，不等待重试；
+  - 2 个变异都被抓住：退回 isinstance（真实链路那一项跟着失败，即修复前记 `RUNNER_ERROR`）、去掉额度分支。
 
 ## 定时任务撞额度用完的结算（2026-09-29，分支 `claude/be-quota-settle`，基于 `b929d9f02`）
 
