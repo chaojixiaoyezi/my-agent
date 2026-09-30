@@ -621,7 +621,7 @@
     同一次调用重试不多发唤醒；已消费判据只按这个键查回执，唤醒里没有键就照常开回合；
   - 工具结果的 `status` 取回执真实状态；门禁那一窗已转正。
 
-**待定：目标回合在消费前被停止，会话消息怎样重新投递**（2026-09-29，真实链路复现；由 dsh-75 在去重改造里一并定，禁令期间不影响生产）：
+**已定并实现：目标回合在消费前被停止，会话消息怎样重新投递**（2026-09-29 真实链路复现；3a 裁定方案 A，dsh-75 在 `claude/75-session-message-dedupe` 实现，待 ae 复审）：
 - **现象**：B 忙时收到消息，消息在安全点注入；带着它的那次模型调用返回前 B 被 `/stop`。
   - 回执此时是 `submitted`：模型还没对这次调用作出返回。调用失败后，回执先退回 `reserved`；
   - 前台收尾 `terminalize_gateway_request_file` 的 `reject_pending(reject_reserved=True)` 再把它改成 `rejected`。
@@ -637,6 +637,28 @@
   - 已消费只认 `consumed`；
   - 跳过时复用 `retire_source` 结案唤醒；
   - rejected 会话消息的重新投递方式（重新排队，或终结时对会话消息 release 而不是 reject）在去重改造里定。
+- **方案 A（3a 裁定，已实现）**：回合没消费就结束（/stop、报错、崩溃）时，唯一收尾规则
+  `store_guidance_recovery.settle_unconsumed_receipt`（`reject_pending` 的所有调用方共用）：
+  - 会话消息的 pending/已预留回执释放回 pending，回执级 `migration.released_turn_ids` 记下这一回合，删这一回合的索引；
+    下一回合按跨回合例外认领，认领时改绑 `expected_turn_id` 并补索引（`store_guidance._binds_on_claim`），
+    注入路径随后用回执里的现行条目（`guidance._entry_as_claimed`），提交与确认才对得上回合；
+  - `claim_for_turn` 与 `available_for_turn` 共用同一条"已被释放"判据（`_released_from`）；
+  - 释放满 `SESSION_MESSAGE_RELEASE_LIMIT` 次（取毒丸同因上限 5）后再没消费就结束，回执转 rejected，`migration.rejection_code`
+    记 `SESSION_MESSAGE_RELEASE_LIMIT_REACHED`（登记在 ERROR_CONTRACTS）；领取后准入把它判为来源已处理完
+    （`session_message_abandoned`），经 `retire_source` 结案唤醒，不开空回合；
+  - 已提交（submitted，结果未知）不释放；插话照旧 rejected（Gateway 输入对账重新排成请求）；派活正文不释放
+    （任务被取消后释放，会让没有归属任务号的前台回合认领到已取消任务的正文）。
+  - 与毒丸第 3 步结案不冲突：两边都终于 rejected，结案的 pending→rejected 对已 rejected 的回执是同状态幂等；
+    上限原因码记在回执 migration，毒丸原因码记在结案记录，各守一处。
+  - 代价（3a 暂时接受）：被停回合写进历史的那段输入还在，下一回合同一个请求里模型会看到两次（尾巴一次 + 正式认领一次）。
+- **条件 1 核查（残留去重只能有一套机制）**：现有机制是注入的 UserTurn 带 `input_ids`，`release_reserved_turn_input_after_attempt`
+  释放后由 `exclude_active_turn_user_input_ids` 从续跑携带里排除——只覆盖同一次运行内的 Compact/溢出续跑。插话被停后
+  重新排成请求、会话消息释放后重新认领，都不会把被停回合写进历史的那段输入排除掉。所以记成通用后续项，这次不做：
+  **"被停回合写进历史的输入，重新投递时如何避免重复出现"**（插话、会话消息共用，将来沿 `input_ids` 这一套做，不另写）。
+- **顺带核实的现有问题（通用后续项，未排期）**：插话被 `release_unclaimed` 释放后跨回合认领，认领时不改绑，
+  存储层的提交（`guidance submission reservation mismatch`）与确认（`guidance provider ack turn mismatch`）都会报错
+  （2026-09-29 存储层探针实测；生产上插话的 target 是旧回合的 task 邮箱，能否走到跨回合认领未核实）。会话消息已按上面的
+  改绑规则处理；插话若也要跨回合认领，应复用同一条改绑规则。
 - **门禁**：
   - `test_busy_target_stopped_before_consuming_the_message_still_gets_it`：main 上通过，取消线上失败，作为取消线的验收门；
   - `test_busy_target_consumes_message_without_an_extra_empty_turn` 补断言「B 没有待处理唤醒」。

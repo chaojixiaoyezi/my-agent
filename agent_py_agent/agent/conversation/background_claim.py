@@ -30,9 +30,12 @@ if TYPE_CHECKING:
 
 # 领取后准入里"来源已经处理完"的码：会话消息的内容已被目标自己的回合消费（runtime._session_message_consumed_admission）。
 SESSION_MESSAGE_CONSUMED_ADMISSION = "session_message_consumed"
+# 领取后准入里"来源已经处理完"的另一个码：会话消息达到释放上限、回执已转 rejected（带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED），
+#   不会再有回合去认领它，为它开回合只会跑出一个没有新输入的空回合。
+SESSION_MESSAGE_ABANDONED_ADMISSION = "session_message_abandoned"
 # 命中这些准入码时，除结 claim 外还要经 retire_source 结案来源，否则唤醒留在 pending 每拍被重新认领（空转）；
 #   其它准入码（来源已变化、读不出、已不在 pending）只结 claim，交还原队列重新选择。
-_SOURCE_FINISHED_ADMISSIONS = frozenset({SESSION_MESSAGE_CONSUMED_ADMISSION})
+_SOURCE_FINISHED_ADMISSIONS = frozenset({SESSION_MESSAGE_CONSUMED_ADMISSION, SESSION_MESSAGE_ABANDONED_ADMISSION})
 
 
 # LLM: 状态、任务归属和来源查询在原分支调用；来源只读查询不能消费信封，claims 为唯一持久域。

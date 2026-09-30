@@ -17,6 +17,11 @@ from ..gateway_parts.io import (
 )
 from ..runtime_errors import DataCorruptionError
 from .models import GuidanceEntry, normalize_guidance_target_type
+from .session_messaging import (
+    SESSION_MESSAGE_ORIGIN_KIND,
+    SESSION_MESSAGE_RELEASE_LIMIT,
+    SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
+)
 from .store_guidance_acknowledgements import GuidanceAcknowledgements
 from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
@@ -175,6 +180,7 @@ class GuidanceRecovery:
         if not turn_id:
             return {
                 "rejected": 0,
+                "released": 0,
                 "reserved": 0,
                 "submitted": 0,
                 "consumed": 0,
@@ -360,6 +366,7 @@ class GuidanceRecovery:
     ) -> dict[str, int]:
         summary = {
             "rejected": 0,
+            "released": 0,
             "reserved": 0,
             "submitted": 0,
             "consumed": 0,
@@ -381,36 +388,15 @@ class GuidanceRecovery:
             if index_report.load_error is not None or not dedupe_key:
                 summary["errors"] += 1
                 continue
-            receipt_path = self.storage.guidance_dedupe_path(dedupe_key)
-            transition = receipt_path.with_name(f".{receipt_path.name}.transition")
             try:
-                with locked_file_transition(transition):
-                    receipt = self.ledger.read_receipt(receipt_path)
-                    if receipt is None:
-                        summary["errors"] += 1
-                        continue
-                    metadata = (
-                        receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
-                    )
-                    if str(metadata.get("expected_turn_id") or "").strip() != turn_id:
-                        summary["errors"] += 1
-                        continue
-                    # Gateway terminalization holds its outer exact-turn lock. A reserved row is
-                    # then proven not to have an atomic submission batch and is safe to reject.
-                    if receipt.status == "pending" or (
-                        reject_reserved and receipt.status == "reserved"
-                    ):
-                        receipt = replace(
-                            receipt,
-                            status="rejected",
-                            submission_id="",
-                            updated_at=time.time(),
-                        )
-                        write_json_file_atomic(receipt_path, receipt.to_dict())
-                    if receipt.status in summary:
-                        summary[receipt.status] += 1
+                outcome = self._settle_turn_receipt(dedupe_key, turn_id, reject_reserved=reject_reserved)
             except Exception:
-                summary["errors"] += 1
+                outcome = "errors"
+            if outcome == "released":
+                # 已释放给下一回合：这一回合的索引不再指向它，下一回合认领时会绑到自己名下。
+                unlink_quietly(index_path)
+            if outcome in summary:
+                summary[outcome] += 1
         # Internal non-idempotent request guidance has no receipt state. The
         # delivered projection is its only durable retirement fact, so close it
         # under the same exact-turn guard instead of letting stop replay it.
@@ -433,6 +419,25 @@ class GuidanceRecovery:
             summary["retired_legacy"] += len(legacy_ids)
         summary["errors"] += len(load_errors)
         return summary
+
+    # LLM: GuidanceRecovery：调用方持回合锁；这里再持回执锁，只处理绑定在本回合上的回执。pending/已预留（reject_reserved）的
+    #   按 settle_unconsumed_receipt 收尾（会话消息释放、其余 rejected），已提交/已消费原样计数。返回用于汇总计数的结果名：
+    #   "released" 表示已释放给下一回合（调用方删本回合索引），"errors" 表示回执缺失或绑定对不上。副作用：写回执。
+    # 函数用途: 回合收尾时结算本回合索引里的一条补充消息回执。
+    def _settle_turn_receipt(self, dedupe_key: str, turn_id: str, *, reject_reserved: bool) -> str:
+        receipt_path = self.storage.guidance_dedupe_path(dedupe_key)
+        with locked_file_transition(receipt_path.with_name(f".{receipt_path.name}.transition")):
+            receipt = self.ledger.read_receipt(receipt_path)
+            metadata = receipt.entry.metadata if receipt is not None and isinstance(receipt.entry.metadata, dict) else {}
+            if receipt is None or str(metadata.get("expected_turn_id") or "").strip() != turn_id:
+                return "errors"
+            # Gateway terminalization holds its outer exact-turn lock. A reserved row is
+            # then proven not to have an atomic submission batch and is safe to settle.
+            if not (receipt.status == "pending" or (reject_reserved and receipt.status == "reserved")):
+                return receipt.status
+            settled = settle_unconsumed_receipt(receipt, turn_id, now=time.time())
+            write_json_file_atomic(receipt_path, settled.to_dict())
+        return "released" if settled.status == "pending" else settled.status
 
     # LLM: GuidanceRecovery：只释放尚未认领的回执；在 migration 记录旧回合，不改参与指纹的 entry，也不释放已提交消息。
     # 函数用途: 回合结束时释放仍未被任何轮次认领的补充消息，使其可被后续轮次接手。
@@ -489,3 +494,27 @@ class GuidanceRecovery:
                 # 释放是兜底恢复动作：单条损坏不能打断回合收口，也不能影响其他插话。
                 continue
         return released
+
+
+# LLM: 回合没消费就结束（/stop、报错、崩溃）时，pending/已预留回执的唯一收尾规则：插话等普通回执照旧转 rejected
+#   （Gateway 输入对账会把被拒插话重新排成请求）；会话消息改为释放回 pending，在回执自己的 migration.released_turn_ids 记下
+#   这一回合，下一回合按跨回合例外正式认领（认领时改绑到那一回合）——否则回执永久 rejected，内容只靠被停回合留在历史里的
+#   那段输入碰巧可见（2026-09-29 真实链路实测）。同一条消息已释放 SESSION_MESSAGE_RELEASE_LIMIT 次后转 rejected，
+#   migration.rejection_code 记 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，防止一条会让回合崩溃的消息无限循环。
+#   已提交（submitted）的回执调用方不会传进来：提交结果未知，释放会重复消费。派活正文不释放：任务被取消后释放会让
+#   前台回合认领到已取消任务的正文。只改回执级字段，entry.metadata 不动（参与正文指纹）。纯函数，不写盘。
+# 函数用途: 决定一条没被消费的回执在回合结束时是释放给下一回合，还是转 rejected。
+def settle_unconsumed_receipt(receipt: GuidanceOnceReceipt, turn_id: str, *, now: float) -> GuidanceOnceReceipt:
+    metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+    if str(metadata.get("origin_kind") or "").strip() != SESSION_MESSAGE_ORIGIN_KIND:
+        return replace(receipt, status="rejected", submission_id="", updated_at=now)
+    migration = dict(receipt.migration)
+    released = [str(item) for item in (migration.get("released_turn_ids") or []) if str(item or "").strip()]
+    if len(released) >= SESSION_MESSAGE_RELEASE_LIMIT:
+        migration["rejection_code"] = SESSION_MESSAGE_RELEASE_LIMIT_REACHED
+        return replace(receipt, status="rejected", submission_id="", updated_at=now, migration=migration)
+    if turn_id not in released:
+        released.append(turn_id)
+    migration["released_turn_ids"] = released
+    return replace(receipt, status="pending", attempt_id="", submission_id="", submitted_at=0.0,
+                   updated_at=now, migration=migration)

@@ -93,6 +93,8 @@ class _Turn:
     results: dict[str, dict]
     tools: tuple[str, ...]
     facts: dict = field(default_factory=dict)
+    # 本回合自己的输入：从本回合开头那条 user 消息起的非助手消息，不含之前回合留在历史尾巴里的内容。
+    own_text: str = ""
 
 
 # 函数用途: 按回合开头（# User Task / # Host Event）切出当前回合，并收集本回合的工具结果。
@@ -119,7 +121,9 @@ def _turn_shape(payload: dict) -> _Turn:
             results[names.get(str(message.get("tool_call_id") or ""), "")] = _parse_json(_text_of(message.get("content")))
     lines = text.split("\n", 2)
     facts = _parse_json(text) if trigger == "host" and "{" in text else {}
-    return _Turn(trigger, lines[1] if len(lines) > 1 else "", turn_text, results, tools, facts)
+    own_text = "\n".join(_text_of(message.get("content")) for message in messages[last:]
+                          if message.get("role") != "assistant")
+    return _Turn(trigger, lines[1] if len(lines) > 1 else "", turn_text, results, tools, facts, own_text)
 
 
 # 类用途: 进程内的供应商假线路：按结构化标记出招、记录每次调用，并能像真实传输一样被停止控制打断。
@@ -147,7 +151,8 @@ class ScriptedWire:
         entry = {"kind": "interrupted", "trigger": turn.trigger, "task": str(turn.facts.get("session_task_id") or ""),
                  "heading": turn.heading[:60], "tools": turn.tools, "results": turn.results,
                  "saw_note": "RC-NOTE-" in turn.turn_text,
-                 "notes": sorted(set(re.findall(r"RC-NOTE-[A-Z0-9]+", turn.turn_text)))}
+                 "notes": sorted(set(re.findall(r"RC-NOTE-[A-Z0-9]+", turn.turn_text))),
+                 "own_notes": sorted(set(re.findall(r"RC-NOTE-[A-Z0-9]+", turn.own_text)))}
         turn_key = entry["task"] or entry["heading"]
         with self._lock:
             self.calls.append(entry)
@@ -620,6 +625,12 @@ def test_busy_target_stopped_before_consuming_the_message_still_gets_it(tmp_path
 
     delivered = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-STOPPED" in call["notes"]]
     assert delivered, "B 在消费这条消息之前被停止，之后它再也没有作为输入交给 B（消息丢了）"
+    # 不能只靠被停回合留在历史尾巴里的那段输入碰巧可见（历史一 Compact 或截断就没了）：
+    # 消息必须作为之后某个回合自己的输入被正式认领，回执最终是 consumed。
+    own = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-STOPPED" in call["own_notes"]]
+    assert own, "消息只出现在被停回合的历史尾巴里，没有被之后的回合作为自己的输入正式认领"
+    final = _message_receipt(chain, "B", str(sent.get("message_id") or ""))
+    assert getattr(final, "status", None) == "consumed", f"回执最终应是 consumed，实际 {getattr(final, 'status', None)}"
     assert not _pending_wakes(chain, "B"), f"B 的消息唤醒没有结案：{_pending_wakes(chain, 'B')}"
 
 

@@ -45,6 +45,27 @@ def _host_delivery_receipt(metadata: object) -> bool:
     return str(metadata.get("origin_thread_id") or "").strip() != ""
 
 
+# LLM: 只读回执级 migration.released_turn_ids（回合收尾释放时写入）；claim_for_turn 与 available_for_turn 共用，
+#   保证"能不能认领"和"算不算待处理输入"是同一条判据。
+# 函数用途: 判断一条绑定在别的回合上的回执，是否已被那一回合释放、允许跨回合认领。
+def _released_from(receipt: GuidanceOnceReceipt, receipt_turn_id: str) -> bool:
+    released = receipt.migration.get("released_turn_ids")
+    released_ids = released if isinstance(released, list) else []
+    return receipt_turn_id in {str(item or "").strip() for item in released_ids}
+
+
+# LLM: 认领时补记/改绑接收回合的两种情形：宿主投递回执还没绑定回合（首次认领）；会话消息被上一回合释放后由别的回合
+#   跨回合认领（调用方已确认它在 released_turn_ids 里）。插话和派活正文的跨回合认领不改绑，行为不变。
+# 函数用途: 判断这次认领是否要把回执的 expected_turn_id 写成当前回合并补回合索引。
+def _binds_on_claim(metadata: dict, receipt_turn_id: str, requested_turn_id: str) -> bool:
+    if not _host_delivery_receipt(metadata):
+        return False
+    if not receipt_turn_id:
+        return True
+    origin_kind = str(metadata.get("origin_kind") or "").strip()
+    return origin_kind == SESSION_MESSAGE_ORIGIN_KIND and receipt_turn_id != requested_turn_id
+
+
 # LLM: 派活正文的幂等键形状是 `body:session_task:<发送方>-><目标>:<正文摘要>`，里面带着它属于
 #   哪条任务吗——不，任务编号由 create_session_task 在创建记录时写进别处。正文条目本身只带
 #   origin_kind/origin_thread_id，所以"哪一轮该认领它"只能由**会话任务记录**回答，不能从键里猜。
@@ -211,9 +232,7 @@ class GuidanceStore:
             if receipt_turn_id and receipt_turn_id != requested_turn_id:
                 # 例外只有一种：那一轮在认领前就结束了，回合终态已把回执标记为"释放"。
                 # 未被释放的回执仍然拒绝跨轮认领（保持"插话只属于当时的活动轮次"）。
-                released = receipt.migration.get("released_turn_ids")
-                released_ids = released if isinstance(released, list) else []
-                if receipt_turn_id not in {str(item or "").strip() for item in released_ids}:
+                if not _released_from(receipt, receipt_turn_id):
                     return False
             if receipt.status != "pending":
                 return False
@@ -231,9 +250,11 @@ class GuidanceStore:
                 attempt_id=normalized_attempt_id,
                 updated_at=time.time(),
             )
-            if not receipt_turn_id and _host_delivery_receipt(receipt_metadata):
+            if _binds_on_claim(receipt_metadata, receipt_turn_id, requested_turn_id):
                 # 宿主投递（另一会话的消息或派活正文）写时没有接收回合；在认领这一刻补记，
                 # 与交互式插话共用同一条预约语义，提交校验才能对得上这条回执。
+                # 被上一回合释放的会话消息跨回合认领时同样改绑到这一回合：这一回合再没消费就结束时，
+                # 回合收尾才能按它的索引找到它、再记一次释放（释放上限据此计数）。
                 bound_metadata = dict(receipt_metadata)
                 bound_metadata["expected_turn_id"] = requested_turn_id
                 updated = replace(
@@ -268,7 +289,9 @@ class GuidanceStore:
             receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
         )
         receipt_turn_id = str(receipt_metadata.get("expected_turn_id") or "").strip()
-        if receipt_turn_id and receipt_turn_id != str(expected_turn_id or "").strip():
+        if receipt_turn_id and receipt_turn_id != str(expected_turn_id or "").strip() and not _released_from(
+            receipt, receipt_turn_id,
+        ):
             return False
         # 与 claim_for_turn 完全同一条归属判据：不属于本回合的投递既不能认领，也不算待处理输入。
         if owning_task_id and not _body_belongs_to_task(receipt_metadata, owning_task_id):

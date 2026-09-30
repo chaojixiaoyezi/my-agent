@@ -4430,13 +4430,15 @@ _SESSION_MESSAGE_CONSUMED_STATUSES = frozenset({"consumed"})
 #   - rejected 不等于送达：B 忙时消息已注入、在途调用未返回就被 /stop，终结时 reject_reserved 把它改成 rejected，
 #     这条消息仍要靠唤醒回合交给 B（ae 在真实链路里复现）；rejected 怎样重新投递随去重改造一起定。
 #   读不到回执或读取抛异常一律照常开回合（fail open，宁可多跑一轮也不误吞真实工作）。
-#   返回 background_claim.SESSION_MESSAGE_CONSUMED_ADMISSION 时，run_claimed 除结 claim 外还经 retire_source 把唤醒结案
+#   会话消息达到释放上限、回执 rejected 且 migration.rejection_code 为 SESSION_MESSAGE_RELEASE_LIMIT_REACHED 时，
+#   不会再有回合认领它，返回 SESSION_MESSAGE_ABANDONED_ADMISSION；普通 rejected（没有这个码）照常开回合。
+#   返回这两个"来源已处理完"的准入码时，run_claimed 除结 claim 外还经 retire_source 把唤醒结案
 #   （来源已处理完），不留在 pending 每拍被重新认领。
 # 函数用途: 会话消息唤醒的投递若已被消费，就判定本片无需执行。
 def _session_message_consumed_admission(signal: WakeSignal, *, guidance_store: object = None) -> str:
     if str(signal.reason or "").strip().lower() != SESSION_MESSAGE_WAKE_REASON:
         return ""
-    from .session_messaging import SESSION_MESSAGE_KEY_FIELD
+    from .session_messaging import SESSION_MESSAGE_KEY_FIELD, SESSION_MESSAGE_RELEASE_LIMIT_REACHED
 
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
     # 这次唤醒投递的是哪条消息，由发送方写进唤醒 metadata；没有这个键就无法确认，照常开回合，不按会话对拼旧键。
@@ -4451,7 +4453,13 @@ def _session_message_consumed_admission(signal: WakeSignal, *, guidance_store: o
     if receipt is None:
         return ""
     status = str(getattr(receipt, "status", "") or "").strip().lower()
-    return background_claim.SESSION_MESSAGE_CONSUMED_ADMISSION if status in _SESSION_MESSAGE_CONSUMED_STATUSES else ""
+    if status in _SESSION_MESSAGE_CONSUMED_STATUSES:
+        return background_claim.SESSION_MESSAGE_CONSUMED_ADMISSION
+    migration = getattr(receipt, "migration", None)
+    rejection_code = str(migration.get("rejection_code") or "") if isinstance(migration, dict) else ""
+    if status == "rejected" and rejection_code == SESSION_MESSAGE_RELEASE_LIMIT_REACHED:
+        return background_claim.SESSION_MESSAGE_ABANDONED_ADMISSION
+    return ""
 
 
 # LLM: 策略执行经独立 claim 组件领取和结算；执行后才重读进度账，来源确认及写账顺序保持。

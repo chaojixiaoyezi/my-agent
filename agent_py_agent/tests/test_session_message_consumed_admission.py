@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.conversation.background_claim import (
+    SESSION_MESSAGE_ABANDONED_ADMISSION,
     SESSION_MESSAGE_CONSUMED_ADMISSION,
     BackgroundClaimDependencies,
     run_claimed,
@@ -24,7 +25,10 @@ from agent_py_agent.agent.conversation.models import (
     WakeSignal,
 )
 from agent_py_agent.agent.conversation.runtime import _session_message_consumed_admission
-from agent_py_agent.agent.conversation.session_messaging import SESSION_MESSAGE_KEY_FIELD
+from agent_py_agent.agent.conversation.session_messaging import (
+    SESSION_MESSAGE_KEY_FIELD,
+    SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
+)
 
 _SENDER = "thread-sender"
 _TARGET = "thread-target"
@@ -34,15 +38,16 @@ _KEY = f"session_message:{_SENDER}->{_TARGET}:op-1"
 
 # 函数用途: 造一个只实现 receipt() 的 guidance 替身，按 dedupe_key 返回给定状态。
 class _Guidance:
-    def __init__(self, status):
+    def __init__(self, status, migration=None):
         self.status = status
+        self.migration = dict(migration or {})
         self.seen_keys: list[str] = []
 
     def receipt(self, dedupe_key):
         self.seen_keys.append(dedupe_key)
         if self.status is None:
             return None
-        return SimpleNamespace(status=self.status)
+        return SimpleNamespace(status=self.status, migration=self.migration)
 
 
 def _signal(key: str = _KEY) -> WakeSignal:
@@ -121,7 +126,7 @@ def _dependencies(admission):
 
 
 @pytest.mark.parametrize(("admission", "retire"), [
-    (SESSION_MESSAGE_CONSUMED_ADMISSION, True),
+    (SESSION_MESSAGE_CONSUMED_ADMISSION, True), (SESSION_MESSAGE_ABANDONED_ADMISSION, True),
     ("wake_source_changed", False), ("wake_source_unreadable", False), ("wake_source_not_pending", False),
 ])
 def test_only_a_consumed_source_is_retired(admission, retire) -> None:
@@ -138,3 +143,14 @@ def test_wake_without_a_message_key_is_not_judged() -> None:
     guidance = _Guidance("consumed")
     assert _session_message_consumed_admission(_signal(key=""), guidance_store=guidance) == ""
     assert guidance.seen_keys == []
+
+
+def test_message_rejected_at_the_release_limit_is_a_finished_source() -> None:
+    """释放到上限后回执转 rejected 并带结构化原因码：不会再有回合认领它，唤醒按来源已处理完结案，不开空回合。"""
+    guidance = _Guidance("rejected", {"rejection_code": SESSION_MESSAGE_RELEASE_LIMIT_REACHED})
+    assert _session_message_consumed_admission(_signal(), guidance_store=guidance) == SESSION_MESSAGE_ABANDONED_ADMISSION
+
+
+def test_plain_rejected_message_still_opens_a_turn() -> None:
+    """没有上限原因码的 rejected 不算来源已处理完：照常开回合（和 consumed 的判据分开）。"""
+    assert _session_message_consumed_admission(_signal(), guidance_store=_Guidance("rejected")) == ""

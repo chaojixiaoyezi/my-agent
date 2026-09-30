@@ -684,7 +684,7 @@ def _claim_guidance_for_active_turn(
             # 派活回合自带它那条任务的编号；正文条目也带着同一个编号，两者必须一致才允许认领。
             owning_task_id=owning_task_id,
         ):
-            claimed.append(entry)
+            claimed.append(_entry_as_claimed(store, entry))
     # 认领即绑定：取消要在这段窗口（目标第一次模型调用期间）就能精确停到这个回合。
     # 放在这里而不是 claim_for_turn 内部，是因为绑定需要会话级账本（session_tasks），
     # 而 guidance store 只拿到自己的 storage——真实链路上那处调用会静默失败，表现为"任务一直没绑定"。
@@ -696,6 +696,20 @@ def _claim_guidance_for_active_turn(
         except Exception:  # noqa: BLE001 - 绑定失败只影响取消的精确性，不影响已生效的认领
             pass
     return claimed
+
+
+# LLM: 认领可能改绑回执的 expected_turn_id（被上一回合释放的会话消息跨回合认领时改绑到本回合）；后续注入、提交和确认
+#   都要用回执里的现行条目，用认领前列出的旧条目会在确认时报"回合不匹配"。只读回执，不改状态。
+# 函数用途: 取一条刚认领成功的补充消息在回执里的现行条目。
+def _entry_as_claimed(store: object, entry: Any) -> Any:
+    metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+    dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+    if not dedupe_key:
+        return entry
+    receipt = store.guidance.receipt(dedupe_key)
+    if receipt is None or receipt.entry.guidance_id != entry.guidance_id:
+        return entry
+    return receipt.entry
 
 
 # LLM: User steering may arrive after the run's first commentary; only the Gateway stream

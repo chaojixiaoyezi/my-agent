@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..user_space.owner_resolver import OwnerIdentity
+from .wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT
 
 # kind 结构化取值：消息与任务。
 SESSION_KIND_MESSAGE = "message"
@@ -46,6 +47,11 @@ SESSION_MESSAGE_HOST_EVENT_MARKER = "[SESSION_MESSAGE_HOST_EVENT]"
 # 唤醒信封 metadata 里记"这次唤醒投递的是哪条消息"的字段：值是那条消息的 guidance 幂等键，
 #   领取后的"已消费"判据按它查回执，不再按会话对拼键。
 SESSION_MESSAGE_KEY_FIELD = "message_dedupe_key"
+# 目标回合没消费就结束（/stop、报错、崩溃）时，会话消息释放回队列、交给下一回合正式认领；同一条消息最多释放这么多次，
+#   和毒丸同因上限一个数（一条会让回合崩溃的消息不能无限循环）。常量不进配置：它是防死循环的安全兜底。
+SESSION_MESSAGE_RELEASE_LIMIT = WAKE_POISON_SAME_CAUSE_LIMIT
+# 达到释放上限后回执转 rejected，并在回执的 migration.rejection_code 里记这个码（登记在 ERROR_CONTRACTS）。
+SESSION_MESSAGE_RELEASE_LIMIT_REACHED = "SESSION_MESSAGE_RELEASE_LIMIT_REACHED"
 
 # owner_kind 结构化取值；main 是管理员（含 IM 绑定管理员私聊），user/group 是普通用户。
 OWNER_KIND_MAIN = "main"
@@ -194,6 +200,8 @@ def session_task_tool_visible(home_paths: object, config: object) -> bool:
 
 __all__ = [
     "SESSION_MESSAGE_KEY_FIELD",
+    "SESSION_MESSAGE_RELEASE_LIMIT",
+    "SESSION_MESSAGE_RELEASE_LIMIT_REACHED",
     "session_message_dedupe_key",
     "OWNER_KIND_MAIN",
     "SESSION_KINDS",

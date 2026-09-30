@@ -35,6 +35,25 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 会话消息在目标回合没消费就结束时释放给下一回合（方案 A，2026-09-29，分支 `claude/75-session-message-dedupe`，接在去重键提交之后）
+
+- **修的问题**：B 忙时收到消息、在安全点注入，带着它的调用返回前 B 被 /stop；回合收尾 `reject_pending(reject_reserved=True)`
+  把回执改成 rejected，之后没有回合认领它，内容只因被停回合留在历史尾巴里碰巧可见。
+- **`test_session_message_release_at_turn_end.py`（新，5 项，真实 GuidanceStore）**：
+  - 没消费就结束 → 回执回到 pending、`released_turn_ids` 记下回合；下一回合"能认领"与"算待处理输入"一致，认领时改绑到自己名下并补索引；
+  - 走真实安全点提交后的 submitted 回执不释放；
+  - 插话、派活正文照旧 rejected，不记释放；
+  - 释放满 `SESSION_MESSAGE_RELEASE_LIMIT`（5）次后再结束 → rejected，`rejection_code` 为 `SESSION_MESSAGE_RELEASE_LIMIT_REACHED`，之后不能再认领。
+- **`test_session_message_consumed_admission.py`**：达到上限的 rejected 判为来源已处理完（`session_message_abandoned`，经 `retire_source` 结案）；
+  没有上限原因码的 rejected 照常开回合。
+- **真实链路**：假线路新增"本回合自己的输入"（`own_notes`，从本回合开头那条 user 消息起，不含之前回合留在历史尾巴里的内容）；
+  `test_busy_target_stopped_before_consuming_the_message_still_gets_it` 加断言：消息出现在之后某个回合自己的输入里、回执最终 `consumed`、
+  唤醒结案——不再依赖历史形状（Compact 或截断掉尾巴后照样成立）。
+- **变异**（7 个，按 rc==1 且有 FAILED 判定，全部被抓住）：release 改回 reject、去掉上限、submitted 也释放、跨回合认领不改绑、
+  注入路径用认领前的旧条目、`available_for_turn` 不认释放、上限 rejected 不算来源已处理完。脚本 `sm3/mutate_a.py`（scratchpad）。
+- **定向回归**：去重键两个提交的 66 个文件，加所有引用 guidance 认领/收尾/确认的测试文件，共 79 个文件 1978 passed（4 skipped）；
+  `test_session_task_real_chain.py` 在本提交上连跑 20 次，每次 15 passed、0 xfail（"连发三条"与"消费前被停止"两窗都普通通过）。
+
 ## 会话消息去重键按单条消息区分（2026-09-29，分支 `claude/75-session-message-dedupe`，接在取消线 `4d3558fa4` 之后）
 
 - **修的缺陷**：去重键原来只按会话对区分（`session_message:{发送方}->{目标}`），同一对会话第二条不同内容报结果未知，

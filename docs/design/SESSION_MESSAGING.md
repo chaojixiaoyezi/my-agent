@@ -229,6 +229,8 @@
       - 已修（分支 `claude/75-session-message-dedupe`）：键 = 会话对 + 这次发送的身份（`session_message_dedupe_key`；模型工具用
         `__operation_id`，同一次调用重试不变；`/tell` 每次新生成），唤醒 metadata 的 `message_dedupe_key` 带上它，已消费判据按它查回执，
         工具返回回执真实状态；这一窗已转正。
+    - 目标回合在消费前被停止：回执不再永久 rejected，释放给下一回合正式认领（方案 A，最多释放 5 次），
+      门禁断言消息出现在之后回合自己的输入里、回执最终 consumed；细节见 DESIGN_LEDGER 对应条目。
     - 细节见 TESTS.md。
 
 ## 交付切片

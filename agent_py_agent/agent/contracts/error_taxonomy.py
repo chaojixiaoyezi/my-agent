@@ -780,6 +780,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "结案记录本身读不出的，字节还在 quarantine/<id>.json。需要人工核对这两处留档，不要重试。"
         ),
     ),
+    # 会话消息的目标回合反复没消费就结束（/stop、报错、崩溃），释放次数到上限后回执转 rejected；码记在回执 migration.rejection_code。
+    "SESSION_MESSAGE_RELEASE_LIMIT_REACHED": ErrorContract(
+        code="SESSION_MESSAGE_RELEASE_LIMIT_REACHED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint=(
+            "这条会话消息的目标回合已多次没消费就结束（被停止、报错或崩溃），系统不再重新投递。"
+            "先查看目标会话为什么反复停下，处理后再由发送方重新发一条；不要原样重发导致同样的循环。"
+        ),
+    ),
     "SESSION_TASK_RATE_LIMIT": ErrorContract(
         code="SESSION_TASK_RATE_LIMIT",
         category="orchestration",

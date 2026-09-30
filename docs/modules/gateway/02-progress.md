@@ -629,3 +629,7 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 会话消息去重键按单条消息区分（分支 `claude/75-session-message-dedupe`）：键 = 会话对 + 这次发送的身份（模型工具的 `__operation_id`、
 `/tell` 每次新生成），唤醒 metadata 的 `message_dedupe_key` 带上它，"已消费"判据按它查回执；同一对会话连发多条各自入队、各自送达，
 工具结果返回回执真实状态。
+
+会话消息在目标回合没消费就结束（/stop、报错、崩溃）时释放给下一回合（方案 A）：`reject_pending` 的唯一收尾规则
+`settle_unconsumed_receipt` 对会话消息改为释放回 pending 并记 `released_turn_ids`，下一回合认领时改绑到自己名下；
+释放满 5 次后转 rejected（`SESSION_MESSAGE_RELEASE_LIMIT_REACHED`），领取后准入按来源已处理完结案唤醒；submitted、插话、派活正文行为不变。
