@@ -11,6 +11,21 @@
 - **变异**（`mutate_strip.py`）：6 个全部被杀：列表来源不投影、可重放来源不投影、投影丢掉 summary 与 id、原地改写原消息、投影来源不关闭上游、占位不确定。
 - **量级**：生产主会话 17 个 GPT 思考块、60,712 字符密文（约 2 万估算 token，每块约 1,190），可读摘要全空；只数字段长度，不读正文。
 
+## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`）
+
+- **新增**（`test_subagent_done_supersede.py`）：
+  - `test_takeover_recorded_event_emitted_with_disposition_and_successor[DONE-superseded]`：接替已 DONE 的来源产生一条
+    `subagent_takeover_recorded` 事件，payload 的 `source_run_id` 是来源、`successor_run_id` 是接替者、`disposition=superseded`、
+    带 `record_id` 与 `created_at`。
+  - `test_takeover_recorded_event_emitted_with_disposition_and_successor[BLOCKED-taken_over]`：接替 BLOCKED 来源
+    `disposition=taken_over`，同样一条事件。
+  - `test_second_replacement_rejected_does_not_emit_another_takeover_event`：第二次接替同一来源被预检拒绝
+    （`SUBAGENT_REPLACEMENT_INVALID`）时不产生新事件，事件仍只有第一次那一条。
+- **验证命令与结果**：
+  - `$PY -m pytest agent_py_agent/tests/test_subagent_done_supersede.py -q --tb=short` → 18 passed（含既有 15 项）。
+  - 相关回归：`test_subagent_done_supersede.py + test_orchestration_create_subagents_tool.py + test_local_store.py` → 63 passed。
+- 事件是只读审计投影：权威仍是 takeover_records；未做真实子代理进程级接替的端到端验收（本组测试走 LocalStore 事件通道验证契约）。
+
 ## 智能程度逐模型真实审计（2026-09-30，38）
 
 - **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +

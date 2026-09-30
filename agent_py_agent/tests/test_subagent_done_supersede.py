@@ -229,3 +229,44 @@ def test_saved_event_payload_carries_the_successor_only_when_present(tmp_path, s
     assert not any("takeover_by" in payload or "superseded_by" in payload for payload in before)
     assert events[0][key] == "subagent-new"
     assert {"takeover_by", "superseded_by"} & set(events[0]) == {key}
+
+
+def _takeover_events(store, source_id: str) -> list[dict[str, object]]:
+    return [item.payload for item in store.timeline(limit=50, event_type="subagent_takeover_recorded")
+            if item.payload.get("source_run_id") == source_id]
+
+
+def _store_replacement(tmp_path: Path, status: str):
+    store = LocalStore(tmp_path / "local.db")
+    manager = SubAgentManager(tmp_path, workspace_root=tmp_path, local_store=store)
+    source = manager.create_run(goal="旧子代理整理三条要点", thought="执行", plan=["整理"], role="worker")
+    manager.lifecycle.set_status(source.id, status)
+    return store, manager, source.id
+
+
+@pytest.mark.parametrize("status,disposition", [("DONE", "superseded"), ("BLOCKED", "taken_over")])
+def test_takeover_recorded_event_emitted_with_disposition_and_successor(tmp_path, status, disposition):
+    store, manager, source_id = _store_replacement(tmp_path, status)
+
+    result, payload = _replace(manager, source_id)
+
+    assert result.ok is True
+    replacement_id = payload["created_run_ids"][0]
+    events = _takeover_events(store, source_id)
+    assert len(events) == 1
+    assert events[0]["successor_run_id"] == replacement_id
+    assert events[0]["disposition"] == disposition
+    assert events[0]["created_at"] > 0
+    assert events[0]["record_id"]
+
+
+def test_second_replacement_rejected_does_not_emit_another_takeover_event(tmp_path):
+    store, manager, source_id = _store_replacement(tmp_path, "DONE")
+    first, first_payload = _replace(manager, source_id)
+    assert first.ok is True
+
+    second, payload = _replace(manager, source_id, goal="再接替一次旧子代理")
+
+    assert second.ok is False
+    assert payload["error_code"] == "SUBAGENT_REPLACEMENT_INVALID"
+    assert len(_takeover_events(store, source_id)) == 1

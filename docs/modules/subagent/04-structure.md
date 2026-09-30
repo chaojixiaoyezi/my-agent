@@ -37,6 +37,7 @@
 - 持久化边界：`_restore_newer_closed_state` 整份拷回已关闭记录时，只让 `_closed_record_appends` 白名单（superseded_by 从空到非空、TakeoverRecord 按 id 追加）继续落盘；`_merge_existing_takeover_state` 让同状态旧快照保住已落盘的 superseded_by 与接管记录。
 - 父级视图：`SubagentKernelRun.replaced_by` → 代理树节点 → list_agents 模型视图白名单（含大树预览）。投影函数是 `kernel.replaced_by_view`，也是 TUI 子代理名册的唯一来源：`conversation/agent_activity._subagent_row` 把它摊平成 `replaced_by_run_id`／`replaced_by_disposition`，TUI 的 runtime 与视图模型白名单放行后，渲染器在状态后标“已被 X 接替”。子代理页头部走同一数据：导航行白名单 `_ROW_SCALAR_FIELDS` → 快照 `active_replaced_by_run_id` → 渲染上下文 `focused_agent_replaced_by`（同时进渲染缓存键）→ 终态头部标签。
 - 事件投影：`services/indexing/service.py::_task_index_metadata` 在有值时把 takeover_by／superseded_by 带进 `subagent_run_saved` 的 payload（不新增事件类型），供时间线与审计投影读取；权威仍是 takeover_records。
+- 专门接替事件（2026-09-30）：`services/takeover/record.py` 在接替落盘核对通过、TAKEOVER.md 写完后，追加一条 `subagent_takeover_recorded` 事件（`manager.log_local_record`），payload 带 `source_run_id`／`successor_run_id`／`disposition`（superseded 或 taken_over）／`record_id`／`created_at`。它是只读审计投影：不建第二份状态、不改任何状态语义；写入失败与 `subagent_run_saved` 一致（内部吞异常只记 warning），不影响落账主链；二次接替同一来源被预检拒绝时不会产生新事件。
 
 ## 子代理可观测与授权失败即停（工具失败账本的两种投影）
 

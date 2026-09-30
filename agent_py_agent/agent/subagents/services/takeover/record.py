@@ -1,7 +1,8 @@
 # LLM: 子代理接管边的唯一落账入口；SubAgentBaseService.record_takeover 授权后转调这里，显式接替、手动接管、领导权恢复
 #   和接管 run 共用。已关闭来源（DONE/ABANDONED/CANCELLED）只追加 superseded_by 与一条 TakeoverRecord，终态不改写；
 #   未关闭来源照旧转 TAKEN_OVER。保存后必须重新读取权威状态核对接替关系确实落盘，读不到就抛 TakeoverNotPersistedError，
-#   且不写 TAKEOVER.md。副作用：写 canonical 状态与 TAKEOVER.md。改动须同步 test_subagent_done_supersede 与接替回执。
+#   且不写 TAKEOVER.md。审计投影：落盘核对通过后同步追加一条 subagent_takeover_recorded 事件，只供时间线展示，不是状态来源。
+#   副作用：写 canonical 状态、TAKEOVER.md 与 LocalStore 审计事件。改动须同步 test_subagent_done_supersede 与接替回执。
 # 模块用途: 记录“旧子代理由哪个新 run 接替”，并保证只有真正写进盘的接替才算成功。
 from __future__ import annotations
 
@@ -41,8 +42,9 @@ class TakeoverEdgeRequest:
 
 
 # LLM: task 必须是刚通过授权门读取的权威记录。先按来源状态定处置，再写同一条 TakeoverRecord；保存后核对落盘，
-#   未落盘时抛 TakeoverNotPersistedError，不写 TAKEOVER.md、不回报成功。副作用：保存 canonical 状态、写 TAKEOVER.md。
-# 函数用途: 把一次接管或接替写进子代理状态，确认写进盘后再写接管说明文件。
+#   未落盘时抛 TakeoverNotPersistedError，不写 TAKEOVER.md、不回报成功。落盘确认后追加审计事件（只读投影，失败不影响主链）。
+#   副作用：保存 canonical 状态、写 TAKEOVER.md、追加 subagent_takeover_recorded 审计事件。
+# 函数用途: 把一次接管或接替写进子代理状态，确认写进盘后再写接管说明文件和审计事件。
 def record_takeover_edge(manager: Any, task: SubAgentTask, request: TakeoverEdgeRequest) -> TakeoverRecord:
     now = time.time()
     record = TakeoverRecord(
@@ -64,7 +66,37 @@ def record_takeover_edge(manager: Any, task: SubAgentTask, request: TakeoverEdge
     manager.save(task)
     _require_persisted(manager, task.id, (request.take_over_by, disposition))
     manager._write_takeover_file(task, record)
+    _log_takeover_recorded_event(manager, task, record, disposition)
     return record
+
+
+# LLM: 追加式事件日志的只读审计投影；事件来源始终是权威任务记录，这里只把接替事实投给时间线，不再建第二份状态。
+#   写入失败与 subagent_run_saved 等事件一致：log_local_record 内部吞掉异常只记 warning，不影响落账主链。
+# 函数用途: 在接替落盘确认后追加一条 subagent_takeover_recorded 事件，字段含来源/接替者 run_id、disposition 与时间。
+def _log_takeover_recorded_event(
+    manager: Any,
+    task: SubAgentTask,
+    record: TakeoverRecord,
+    disposition: str,
+) -> None:
+    from ..indexing.records import LocalRecordParams
+
+    manager.log_local_record(
+        params=LocalRecordParams(
+            source_type="subagent_run",
+            source_id=task.id,
+            title=f"Subagent takeover recorded: {task.id} -> {record.take_over_by}",
+            content="",
+            event_type="subagent_takeover_recorded",
+            metadata={
+                "source_run_id": task.id,
+                "successor_run_id": record.take_over_by,
+                "disposition": disposition,
+                "record_id": record.id,
+                "created_at": record.created_at,
+            },
+        ),
+    )
 
 
 # LLM: 未关闭来源的原接管语义：状态转 TAKEN_OVER、最终负责人和锁文件换成接替者，任务层配置记下接管记录。

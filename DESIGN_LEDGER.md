@@ -1,5 +1,12 @@
 # 设计台账
 
+## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`，已实现，待集成）
+
+- **来源**：能力包验收 G03 发现接替已结束子代理时，追加式事件日志里只有普通保存（`subagent_run_saved`）或状态记录，没有专门的“接替”条目；接替事实只在权威 takeover_records 与 TAKEOVER.md 里。要求只读审计投影，不建第二份状态。
+- **做法**：在接替落账唯一入口 `services/takeover/record.py::record_takeover_edge` 落盘核对通过、TAKEOVER.md 写完后，追加一条 `subagent_takeover_recorded` 事件（复用 `manager.log_local_record`，与 `subagent_run_saved` 同一写入通道）。payload 带 `source_run_id`（来源）、`successor_run_id`（接替者）、`disposition`（superseded 或 taken_over）、`record_id`、`created_at`。
+- **边界**：它是审计投影，权威仍是 takeover_records / superseded_by / takeover_by；不改任何状态语义；事件写入失败与同通道其它事件一致（内部吞异常只记 warning），不影响落账主链；二次接替同一来源被预检拒绝时不产生新事件（不会走到落账入口）。
+- **验证**：`test_subagent_done_supersede.py` 新增三用例（DONE→superseded、BLOCKED→taken_over 各一条事件且字段正确；二次接替被拒不新增事件）；连同 orchestration、local_store 相关共 63 passed。
+
 ## 智能程度（/effort）逐模型真实审计（2026-09-30，分支 `claude/38-effort-receipt`，38 执行）
 
 - **范围**：生产 local/main 模型目录里每个对话模型，产品后端真实请求，隔离目录副本（600、令牌不刷新、用完删）。详表见

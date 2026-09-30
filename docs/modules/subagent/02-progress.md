@@ -1,5 +1,11 @@
 # 子代理维护状态
 
+2026-09-30（分支 `worker/ds1-takeover-event`）：接替已结束或阻塞的子代理时，追加式事件日志新增专门审计事件 `subagent_takeover_recorded`
+（`services/takeover/record.py` 在落盘核对通过、TAKEOVER.md 写完后追加，复用 `manager.log_local_record` 通道），payload 带
+`source_run_id`／`successor_run_id`／`disposition`（superseded 或 taken_over）／`record_id`／`created_at`；只读投影，不改状态语义，
+写入失败与 `subagent_run_saved` 一致（吞异常只记 warning），二次接替被预检拒绝时不产生新事件。结构见
+[04-structure](04-structure.md#接替关系的唯一落账入口2026-09-28)，测试见[测试记录](../../../TESTS.md)。
+
 2026-09-29（分支 `claude/75-scheduler-waiting-deadlock`）：`runner_completion_wake.has_persisted_subagent_parent` 改为公开函数（原私有名
 `_has_persisted_subagent_parent`，行为不变），供 `conversation/task_follow_up` 判定“直属会话的子代理才会给会话发完成唤醒”时复用同一判据。
 
