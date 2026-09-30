@@ -1,5 +1,30 @@
 # 设计台账
 
+## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`，第一步已实现，待集成）
+
+- **现象**（ae 真实模型验收 O1）：子代理 runner 在写操作 handler 返回后被 SIGKILL，attempt 与 agent_run 停在 unknown，write_file 停在
+  EXECUTING；父级用替补接替（来源 TAKEN_OVER），主代理 done。TaskRun 因 unknown 子代理按树规则一直不关，而 `/recover` 只看
+  `thread.workspace_task_id` 的根主代理，回答“没有待核对项”，用户没有任何入口。
+- **做法**（第一步，3a 批准）：
+  - 新增 `runtime_db/child_recovery.py`：只读投影按 `tasks.thread_id` 列出本线程未关 TaskRun 里“当前执行轮为 unknown 的非根代理”；
+    写入口在同一事务里复核目标仍在这个范围内，再走与主链同一个 unknown→recovered CAS，事件带 `recovery_target=child_agent_run`、
+    `thread_id`、`task_run_id`。
+  - `/recover`（`gateway_parts/turn_recovery_control.py`）：主链阻塞时行为不变，查看时多一句“另有 N 个子代理待核对”；主链不阻塞时
+    列出子代理编号、角色、接替情况和未确认操作；恰好一条时才处置，多条拒绝并列清单（沿用 `RUN_RECOVERY_REJECTED`，不新增错误码）。
+  - 子代理恢复后：子代理记录 `status=TAKEN_OVER` 且有 `takeover_by` 时，用现有 `settle_taken_over_run` 收成 cancelled；再经
+    `runtime_mixin.settle_terminal_task_run_for_task` 按任务走 D3 同一条 TaskRun 收口。没被接替的子代理留在 created（执行轮
+    recovered），是否续跑由主代理决定；续跑时 `create_attempt` 会重新打开 TaskRun。
+  - TUI 把 `/recover` 原文转给 Gateway，飞书走同一服务，两边入口一致；命令目录文案不再承诺“接着原任务继续”。
+- **守住的边界**：只有用户显式输入处置才写库；不加任何自动处置或过期规则；静止规则与 TaskRun 树规则不变；范围只到本线程未关
+  TaskRun，不跨线程，不按正文或最近任务猜目标；工具操作行照旧停在 EXECUTING，处置只记在恢复事件上（与主链 `/recover` 一致）。
+- **已知限制**：“恰好一条”规则留有很小的换目标窗口（查看后那条被别处处理掉、又冒出新的一条）。三种处置行为相同，差别只在审计标签。
+- **待定**：
+  - 第二步：`/recover <处置> <编号>` 目标参数，需要改 `conversation/control_commands.py`（Codex 重构区），等重构告一段落再做。
+    有了它才能逐条处理多条子代理（例如整棵树一起被杀），也能消掉上面的换目标窗口。
+  - 不挂会话线程的历史 unknown：09-30 生产库副本里根代理 32 条、子代理 2 条（最新 09-23），任何会话里的 `/recover` 都够不着，
+    需要 owner 级查看与处置入口；另立一项，不和 O1 混做。
+- **验证**：见 TESTS.md 同名节。
+
 ## 能力申请裁决的确定拒绝不再记成“结果未知”（2026-09-30，分支 `claude/ae-resolve-refusal-code`，基于 main `a8c71f0e0`，已实现，待集成）
 
 - **来源**：能力包真实模型验收 G03 缺陷 D2。父级 `resolve_capability_requests(decision=grant)` 遇到 write_roots 全部越界（`/etc/hosts`），回执 `ok=false` 但不带错误码。
@@ -36,7 +61,7 @@
   改由代理树决定，`operator=agent-runtime`、`reason=no_conversation_task`。只认真正的“不存在”：关联读坏、没有会话存储、任务身份为空、
   关联未终态都保持开放。之后若同一 run 再挂 attempt，`task_run.reopened` 照常重开。
 - **不放宽**：unknown attempt 仍不算静止（树判定没改）。被 SIGKILL 的子代理 O1（写操作停在 EXECUTING、agent_run=unknown、TaskRun 不关、
-  /recover 看不到待核对项）是另一个问题，待定。
+  /recover 看不到待核对项）是另一个问题；第一步已单独处理，见上方“/recover 能看到并处置本会话子代理留下的未知执行轮”。
 - **待定**：进程在主 run 收口与 TaskRun 关闭之间崩溃的窗口，发现层 `_reconcile_terminal_conversation_task_runs` 不补——它按文件内容
   收集关联状态，读坏的文件会被跳过，分不出“没有关联”和“关联读坏”，不能据此关闭。
 - **改动范围**：只改 `agent_core/runtime_mixin.py` 一个函数；没动 `conversation/runtime.py`（Codex 重构区）与

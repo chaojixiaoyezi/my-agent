@@ -604,6 +604,13 @@ def _task_run_closeout_reason(link: object) -> tuple[str, str] | None:
         return None
     return "conversation-runtime", f"conversation_task_{link_status}"
 
+# LLM: 给不经过代理执行收口边的显式入口（如 /recover 处置子代理之后）复用同一条 TaskRun 收口：按 task_id 找根主代理，
+#   其余判定（根已终态、会话任务关联终态或确实不存在、整棵树终态或静止）与 _settle_terminal_conversation_task_run 完全相同，
+#   条件不满足时什么也不写。调用方见 gateway_parts/turn_recovery_control.py；改口径同步 test_turn_recovery_child_unknown.py。
+# 函数用途: 按任务身份尝试关闭任务执行总账；有写入时产生 task_run.closed 事件。
+def settle_terminal_task_run_for_task(agent: object, task_id: str) -> None:
+    _settle_terminal_conversation_task_run(agent, SimpleNamespace(run_id="", task_id=str(task_id or "")))
+
 def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseException) -> None:
     """异常路径收口：InterruptedError → 'cancelled'，其余 → 'failed'。"""
     status = "cancelled" if isinstance(exc, InterruptedError) else "failed"

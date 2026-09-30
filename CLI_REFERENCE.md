@@ -75,7 +75,7 @@ python -m agent_py_agent --help
 | `/btw <补充要求>` | 给当前正在运行的任务补充一次要求；若模型正在生成，旧动作会先作废。 | 仅当前 request，投递一次后结束；不会进入下一任务。 |
 | `/stop` | 停止当前轮、暂停当前持续目标并回收活跃子代理；需要继续目标时显式恢复。 | 保留 transcript、工作区、compact 和 memory，不停止 Gateway 服务。 |
 | `/interrupt` | 主代理中断当前轮；已有 active Goal 时沿原调度安全续接，不等同暂停目标。 | 保留目标、任务身份和会话；无 active Goal 时不创建续跑。 |
-| `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。 | 只作用于当前会话的工作任务；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
+| `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。主链不阻塞时也会列出本会话子代理（例如被强杀的子代理）留下的未知执行轮，恰好一条时可以同样处置。 | 只作用于当前会话的工作任务及本会话未关的子代理执行轮；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
 | `/restart [<原因>]` | 管理员安全重启 Gateway：先停领新请求、等在跑的回合结束，再等执行中的工具跑完后换新进程；期间的消息排队，重启后自动处理。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；冷却中或同一会话短时间内重复重启会被拒。仅 Gateway 模式。 |
 | `/endtask [<任务ID> [confirm]]` | 管理员处理卡在等待中的定时会话任务：不带参数列出等待中的定时执行、能否结束及后续工作事实码；`/endtask <任务ID>` 只读预览（同样写明后续工作事实码）；`/endtask <任务ID> confirm` 把会话任务记为 cancelled，并立即结算它堵住的定时执行，定时任务按计划起新一轮运行。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；只处理“定时执行 waiting、会话任务 active、执行树没有未结束的执行”的任务，其余一律拒绝且不改动；不改运行库、不重做未确认的操作。仅 Gateway 模式。 |
 | `/wakes [quarantined]`、`/wakes replay <唤醒ID> [confirm]` | 管理员查看反复失败、已结案不再自动领取的后台唤醒：`/wakes` 列出结构化行（ID、会话、reason、原因码、次数、结案时间、已重放次数）；`/wakes replay <唤醒ID>` 只读预览重放会做什么；带 `confirm` 按原 ID 和原内容放回待处理队列、失败计数清零。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；已归档、读不出、待处理队列已有同 ID、对应的会话任务或会话消息已结束的，一律拒绝且不改动。仅 Gateway 模式。 |
@@ -102,6 +102,8 @@ python -m agent_py_agent --help
 `abandoned` 表示不再核对、接受未知后果。三者都只经 `RuntimeRepository.recover_attempt_unknown` 把 unknown
 执行轮改为 recovered、run 复原为 created 并释放该轮执行锁；区别只记录在事件里。系统不会自动重做那条操作，
 模型在下一轮看到的仍是原会话历史。执行链状态不是“执行中断造成的 unknown”时，`/recover` 拒绝处理并提示查看运行诊断。
+主链阻塞时 `/recover` 只处理主链；主链不阻塞时处理本会话子代理：同时有多条待核对时拒绝并列出编号（暂不支持指定目标）。
+子代理恢复后，如果它已被其它子代理接替，运行记录收口为取消；没被接替的留给主代理决定是否续跑。
 
 `/endtask` 说明（Gateway 模式，仅管理员）：定时运行里的工具操作结果未知时，模型工作片会停下，但会话任务仍是 active；定时层把这次运行停在 waiting 等后续事件，没有后续事件时它不会自己结算，同一定时任务也不再派发新运行（2026-09-28 两个会话因此停住）。`/endtask` 先按结构化事实核对：定时账本里这条运行是 waiting、会话任务链接是 active、运行库里这个任务整棵执行树（含子代理）没有未结束的 attempt；运行库读不到时按“无法确认”拒绝。确认结束只写两处：会话任务按 `expected_status=active` 改为 `cancelled`，再对同一任务调 `reconcile_waiting_run`；结算没成时定时层每轮的批量对账会再收口。未确认的工具操作保持原状、不会被重做，它们在外部是否生效需要人工核对。结束任务也不会停止它启动的受管后台命令，这些命令结束后的完成通知会落到已取消的任务上；预览和确认结果都会写明这一点。拒绝时的错误码（`END_TASK_*`）都登记在 `ERROR_CONTRACTS`，带恢复建议。列表每行和预览都附“后续工作事实码”，说明它为什么还在等：与定时执行收口用同一个判定（`scheduler_service.follow_up`），列出存在的事实码（如 `pending_wakes`、`open_subagents`、`active_goal`），读不出的项目写成“项目:错误码”（如 `pending_wakes:data_parse:JSONDecodeError`），没有任何事实写“无”；`active_goal`、`pending_guidance`、`enabled_progress_policy` 后面固定加“（宽限期内才算）”——定时执行收口过了宽限期就不再把它们算作后续工作，免得被读成“还会自己推进”；只显示事实码，不带任务正文。
 

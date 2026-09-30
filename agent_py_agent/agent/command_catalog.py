@@ -142,11 +142,11 @@ COMMAND_CATALOG = (
     CommandSpec(
         "recover",
         "/recover",
-        "查看结果未确认、正在阻塞本会话的上一轮操作",
+        "查看结果未确认、正在阻塞本会话的操作（含本会话子代理留下的）",
         help_variants=(
-            ("/recover recorded", "已核实操作生效并记下，解除阻塞后接着原任务继续"),
-            ("/recover confirmed_noop", "已核实操作没有生效，解除阻塞后接着原任务继续"),
-            ("/recover abandoned", "不再核对、接受未知后果，解除阻塞后接着原任务继续"),
+            ("/recover recorded", "已核实操作生效并记下，解除阻塞"),
+            ("/recover confirmed_noop", "已核实操作没有生效，解除阻塞"),
+            ("/recover abandoned", "不再核对、接受未知后果，解除阻塞"),
         ),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",

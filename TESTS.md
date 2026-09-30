@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`）
+
+- **对应问题**：能力包真实模型验收 O1。被 SIGKILL 的子代理留下 unknown 执行轮，TaskRun 不关，`/recover` 却说没有待核对项。
+- **新增** `test_turn_recovery_child_unknown.py`（真实 `RuntimeRepository`、真实 `ConversationStore`、真实 `SubAgentTask` 记录）：
+  - 查看列出子代理编号、角色、接替情况和 `write_file` 未确认操作，且不写库；
+  - 恰好一条且已被接替：执行轮 recovered、来源 cancelled（`runtime_reason=taken_over`）、`attempt_recovered` 事件带恢复目标与线程、TaskRun 关闭；
+  - 没被接替：留在 created，TaskRun 关闭后父级续跑会重新打开；子代理记录读不到或状态不是 TAKEN_OVER：不做接替收口；
+  - 主链阻塞时仍只处理主链，并提示还有几个子代理；多于一条时拒绝（`RUN_RECOVERY_REJECTED`）并列清单、不写库；
+  - 投影只到本线程、未关 TaskRun、非根代理，空线程不扫描；写事务内复核目标，处置值非法、线程不符、状态已变都拒绝；
+  - Gateway 分派（飞书 scope）走到子代理分支。
+- **红绿与变异**：原实现下查看回答“无需恢复”；16 个变异全部被抓住（投影去掉非根/线程/未关条件、空线程不短路、写事务不复核、
+  不校验处置值、事件不记目标、多条也处置、主链让位、不做接替收口、不看 TAKEN_OVER 状态、不做 TaskRun 收口、主链不提示子代理、
+  子代理记录一律读不到、处置值写死、收口包装丢任务身份）。
+- **本轮验证**：与改动相关的测试文件 123 个加仓库级扫描守卫：3304 passed、1 skipped、4 xfailed；Ruff、doc sync、strict code-size
+  （与 `199c1933e` 比新增 finding 0）、`git diff --check`、clean-package 全部通过。
+
 ## 工具参数无效有界纠正的端到端验证（2026-09-30，分支 `worker/ds1-invalid-args-e2e`）
 
 ## 能力申请裁决的确定拒绝不再记成结果未知（2026-09-30，分支 `claude/ae-resolve-refusal-code`，基于 main `a8c71f0e0`）

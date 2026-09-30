@@ -749,3 +749,10 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **改动**：`runtime_mixin._settle_terminal_conversation_task_run` 在关联文件确实不存在时，也走同一个树终态 CAS 关闭
   （`reason=no_conversation_task`）；读坏、无存储、空身份、未终态关联保持开放；unknown attempt 仍挡住关闭。
 - 测试与变异见 TESTS.md 同名节。
+
+## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`）
+
+- **起因**：ae 真实模型验收 O1，被 SIGKILL 的子代理留下 unknown 执行轮，TaskRun 不关，`/recover` 只看根主代理，用户没有入口。
+- **改动**：新增 `runtime_db/child_recovery.py`；`/recover` 主链不阻塞时列出本线程子代理，恰好一条才处置，之后做接替收口与
+  TaskRun 收口（`runtime_mixin.settle_terminal_task_run_for_task`）。主链行为不变，没有自动处置；目标参数待定。
+- 测试与变异见 TESTS.md 同名节。
