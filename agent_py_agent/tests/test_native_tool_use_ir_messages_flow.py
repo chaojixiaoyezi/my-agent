@@ -136,7 +136,9 @@ def test_reasoning_only_continue_preserves_each_response_before_next_tool_round(
 
     backend.request_json = reply
     backend.generate("继续", messages=messages)
-    assert [m["reasoning_content"] for m in captured["messages"] if m["role"] == "assistant"] == thoughts
+    # Chat Completions 规范要求 assistant 带正文或 tool_calls；DeepSeek 官网对只带 reasoning_content 的 assistant
+    #   直接 400（生产 2026-09-30，此后每次请求都被拒）。仅思考轮只留在原生历史（上面与下面的断言），不进本次请求。
+    assert [m for m in captured["messages"] if m["role"] == "assistant"] == []
     open_assistant_turn_ir(params, tool_rounds=1, response_text="执行验证")
     _record(agent, params, tool_rounds=1, idx=1, tool_name="read_file", call_id="c1",
             arguments={"path": "a"}, output="真实结果")

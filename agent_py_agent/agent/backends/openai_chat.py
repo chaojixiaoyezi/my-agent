@@ -554,19 +554,23 @@ def _openai_message_from_native(message: dict[str, Any]) -> list[dict[str, Any]]
 
 # LLM: 所有非空真实 thinking 都随 assistant 回放，普通答复也须保留；空块不伪造 reasoning 字段。
 # 普通文本不制造厂商扩展字段。改动须同步检查流式/非流式解析和跨轮 native history。
-# 函数用途: 把规范化 assistant 块恢复成 Chat Completions 消息，避免插话或最终答复后的工具请求丢失思考字段。
+#   Chat Completions 的 assistant 消息必须带正文或 tool_calls（DeepSeek 等上游对两者皆空直接 400）；
+#   只有思考、或正文拼起来为空且没有工具调用的块（如模型只回了思考的空答复）不回放，只影响本次请求，
+#   规范 native history 本身不改写。
+# 函数用途: 把规范化 assistant 块恢复成 Chat Completions 消息，避免插话或最终答复后的工具请求丢失思考字段；
+#   没有可见正文也没有工具调用时返回空列表，防止一条空 assistant 让之后每次请求都被上游拒绝。
 def _openai_assistant_messages(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    texts = [str(block.get("text") or "") for block in blocks if block.get("type") == "text"]
+    text = "".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text")
     # 空思考块必须按"没有思考"处理：写空串会变成上游拒绝的 reasoning_content=""，
     # 也会让"历史是否满足思考模式"的判定失真。
     reasoning = [
-        text
-        for text in (str(block.get("thinking") or "") for block in blocks if block.get("type") == "thinking")
-        if text.strip()
+        thought
+        for thought in (str(block.get("thinking") or "") for block in blocks if block.get("type") == "thinking")
+        if thought.strip()
     ]
     calls = [_openai_function_call(block) for block in blocks if block.get("type") == "tool_use"]
-    if texts or calls or reasoning:
-        message: dict[str, Any] = {"role": "assistant", "content": "".join(texts) or None}
+    if text or calls:
+        message: dict[str, Any] = {"role": "assistant", "content": text or None}
         if calls:
             message["tool_calls"] = calls
         if reasoning:

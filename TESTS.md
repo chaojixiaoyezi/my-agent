@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## Chat Completions 不回放「既没正文也没工具调用」的 assistant（2026-09-30，热修分支 `claude/3a-hotfix-empty-assistant`，基于 `4c0edd913`）
+
+- **来源**：生产 my-agent-4 线程在 Gateway 重启后的第一个后台回合里，模型只回了思考（native history 里是只有 `thinking` 块的
+  assistant）。`openai_chat._openai_assistant_messages` 把它转成 `content=None`、只带 `reasoning_content`、没有 `tool_calls`
+  的消息，DeepSeek 以 `Invalid assistant message: content or tool_calls must be set` 返回 400；这条历史之后每次请求都带着，
+  用户前台消息和「重启完成」唤醒每 30 秒一次的重试全部失败。
+- **改法**：正文拼接后为空且没有工具调用的 assistant 块不进本次请求（返回空列表），只影响发给上游的消息，规范 native history 不改写；
+  有正文或有工具调用时照旧附带非空思考。
+- **用例**：`test_backends_openai_native_tool_use.py` 新增三种形状的单测（只有思考、思考加空正文、只有空正文）与一次完整请求：
+  发出的 assistant 都带正文或工具调用，只剩有正文的那条且保留思考，历史对象不变。四例在 `4c0edd913` 的原实现上全部失败，
+  修复后该文件 37 passed（Linux 容器，Mac 测试 venv 当时不可用）。
+
 ## 向量缓存「读不了」用例的 root 守卫与目录构造（2026-09-29，分支 `claude/38-vector-cache-root-guard`，基于 `89af6b07a`）
 
 - **来源**：Linux 容器通道以 root 跑 pytest，`chmod 000` 拦不住 root 读，`test_memory_vector_cache.py` 的 V1 用例前置断言失败、

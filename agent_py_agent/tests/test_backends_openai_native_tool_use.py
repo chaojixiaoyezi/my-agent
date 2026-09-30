@@ -296,6 +296,46 @@ def test_openai_plain_assistant_does_not_invent_reasoning_metadata() -> None:
     ]
 
 
+# 生产 2026-09-30：模型只回了思考（没有正文、没有工具调用）的一条 assistant 进了 native history，
+#   之后每次请求都被 DeepSeek 以「content or tool_calls must be set」400 拒绝，线程卡死。
+@pytest.mark.parametrize("blocks", [
+    [{"type": "thinking", "thinking": "只有思考，没有可见答复。"}],
+    [{"type": "thinking", "thinking": "思考"}, {"type": "text", "text": ""}],
+    [{"type": "text", "text": ""}],
+])
+def test_openai_assistant_without_text_or_tool_calls_is_not_replayed(blocks) -> None:
+    from agent_py_agent.agent.backends.openai_chat import _openai_assistant_messages
+
+    assert _openai_assistant_messages(blocks) == []
+
+
+def test_openai_request_never_sends_assistant_without_content_or_tool_calls() -> None:
+    backend = OpenAICompatibleBackend(_OPTIONS)
+    captured = {}
+    messages = [
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "只有思考的空答复"}]},
+        {"role": "user", "content": [{"type": "text", "text": "上一条没有答复，请继续。"}]},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "这次有正文"},
+            {"type": "text", "text": "好的，继续处理。"},
+        ]},
+    ]
+    before = json.dumps(messages, ensure_ascii=False)
+
+    def request_json(path, payload, headers):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "继续"}, "finish_reason": "stop"}]}
+
+    backend.request_json = request_json
+    backend.generate("原任务", messages=messages, tools=_TOOLS)
+    assistants = [m for m in captured["messages"] if m["role"] == "assistant"]
+    assert all(m.get("content") or m.get("tool_calls") for m in assistants), assistants
+    assert assistants == [
+        {"role": "assistant", "content": "好的，继续处理。", "reasoning_content": "这次有正文"}
+    ]
+    assert json.dumps(messages, ensure_ascii=False) == before, "历史本身不得被改写"
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("reasoning", [None, "", "已经确认。"])
 def test_openai_response_reasoning_presence_survives_native_replay(stream, reasoning):
