@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..model_visible_refs import has_placeholder_path_segment
+from ..settings.reasoning_effort import child_reasoning_level
 from .context_bundle_refs import workspace_refs as model_workspace_refs
 from .model_capabilities import capability_request_counts_as_open
 from .models import (
@@ -49,6 +50,10 @@ class SubagentKernelRun:
     task_id: str = ""
     session_id: str = ""
     thread_id: str = ""
+    # 创建时冻结的模型引用与智能程度（host_model_profile.v1 / host_reasoning_effort.v1）：
+    # 已物化线程是权威来源，这里只是线程未物化/读取失败时的回退源；展示只读、不含任何凭据。
+    model_profile_id: str = ""
+    reasoning_effort: str = ""
     root_id: str = ""
     root_run_id: str = ""
     parent_task_id: str = ""
@@ -250,6 +255,22 @@ def _ordered_subtree(tasks: list[SubAgentTask], run_id: str) -> list[SubAgentTas
     return selected
 
 
+# LLM: 只读任务创建时冻结的模型引用；host_model_profile.v1 缺失/损坏时按 default（继承）展示，
+#   不从正文或文件名猜模型。与 ensure_subagent_thread 写入线程用的是同一份 attrs。
+# 函数用途: 取出子代理创建时冻结的模型编号，作为线程未物化时的回退源。
+def _child_model_profile_id(task: SubAgentTask) -> str:
+    attrs = task.attributes if isinstance(task.attributes, dict) else {}
+    ref = attrs.get("host_model_profile.v1")
+    return str(ref.get("profile_id") or "default") if isinstance(ref, dict) else "default"
+
+
+# LLM: 档位解析复用 settings.reasoning_effort.child_reasoning_level，避免第二套规范化；
+#   空串表示创建时没冻结档位（运行时回落全局默认），展示层按"默认"显示。
+# 函数用途: 取出子代理创建时冻结的智能程度档位，作为线程未物化时的回退源。
+def _child_reasoning_level(task: SubAgentTask) -> str:
+    return child_reasoning_level(task.attributes)
+
+
 # LLM: kernel 保留宿主记录的精确报告位置，模型交付层另核对终态和存在性；不改变 context bundle 的写入合同。
 # 函数用途: 将规范任务字段投影为界面与状态查询共用节点，不拼接、搬运或生成报告文件。
 def _task_to_kernel_run(
@@ -263,6 +284,8 @@ def _task_to_kernel_run(
         run_id=task.id,
         session_id=task.subagent_session_id,
         thread_id=task.agent_thread_id,
+        model_profile_id=_child_model_profile_id(task),
+        reasoning_effort=_child_reasoning_level(task),
         root_id=_root_for_run(task),
         root_run_id=_root_for_run(task),
         parent_task_id=task.parent_id,

@@ -1,5 +1,11 @@
 # Subagent Structure
 
+## 代理树投影模型与智能程度（2026-09-30，已实现）
+
+- `subagents/kernel.py::SubagentKernelRun` 新增 `model_profile_id` / `reasoning_effort` 两个冻结值字段，从任务属性 `host_model_profile.v1` / `host_reasoning_effort.v1` 投影（线程未物化时的回退源）。
+- `agent_core/agent_tree/node_rendering.py::node_from_kernel_run` 优先读已物化线程（`ConversationThread.model_profile_id` / `reasoning_effort`），读取失败回退 kernel 冻结值，生成 `model`（“名称（编号）”，default→“继承会话默认”，失败→“未知”）与 `reasoning_effort`（档位或“默认”）两个只读字段；任何读取失败都不让 list_agents/status 失败。
+- `agent_core/agent_tree/model_view.py` 的 `_NODE_FIELDS` 白名单同步加入这两个字段，模型可见的 `list_agents` 回执与压缩预览才会带上；只显示名称与编号，绝不含地址、密钥或请求头。
+
 ## 巡检阈值来源（2026-09-28）
 
 - `services/board/service.py::due_check_settings` 从 `CapabilityConfig` 取三个在用字段，组成 `DueCheckSettings`（`services/board/due_checks.py`）：

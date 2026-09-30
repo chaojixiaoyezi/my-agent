@@ -34,6 +34,13 @@
   用例；工具循环、协议、截断、终态等 855 项回归通过；7/7 变异被杀。
 - **配置**：未新增开关。协议修复预算在 09-27 参数精简时已改为代码常量，本处沿用同一做法；它替代的是“整轮失败、用户重发”，不是额外功能。
 
+## list_agents 显示子代理实际使用的模型与智能程度（2026-09-30，已实现，待上线）
+
+- **背景**：功能验收发现——派出去的子代理实际用了哪个模型、哪个智能程度，my-agent 的 list_agents 看不到（节点只有 goal_digest/status 等，无 model/effort）。宿主核实子代理线程 model_profile_id=536c11f9（deepseek-v4.1-flash）、reasoning_effort=low，但工具回执不展示。
+- **做法**：权威来源是已物化子代理线程的 `ConversationThread.model_profile_id` / `reasoning_effort`（创建时从任务属性写入）；线程未物化或读取失败时回退 kernel 快照里冻结的 `host_model_profile.v1` / `host_reasoning_effort.v1`。节点新增 `model`（“名称（编号）”，default→“继承会话默认”，失败→“未知”）与 `reasoning_effort`（档位或“默认”）；任何读取失败显示“未知”且不让 list_agents 失败；输出绝不含密钥、地址或请求头。
+- **改动**：`subagents/kernel.py`（SubagentKernelRun 冻结值回退源）、`agent_core/agent_tree/node_rendering.py`（投影与名称解析）、`agent_core/agent_tree/model_view.py`（白名单）；终态回执（completion_message）是纯文本、没有结构化字段区，故只做 list_agents，未改终态回执。
+- **验证**：`test_agent_tree_model_effort.py` 5 项；相邻回归 test_agent_tree_model_view / three_layer_status / list_agents_scope_resolution / test_subagent_kernel / test_reasoning_effort 全部通过（详见 TESTS.md）。
+
 ## 智能程度（/effort）逐模型真实审计（2026-09-30，分支 `claude/38-effort-receipt`，38 执行）
 
 - **范围**：生产 local/main 模型目录里每个对话模型，产品后端真实请求，隔离目录副本（600、令牌不刷新、用完删）。详表见

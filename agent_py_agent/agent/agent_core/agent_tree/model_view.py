@@ -16,7 +16,7 @@ _NODE_FIELDS = (
     "run_id", "parent_run_id", "root_run_id", "agent_name", "role", "status", "replaced_by",
     "failure_type", "current_tool", "updated_at", "seconds_since_progress",
     "not_done_reason", "goal_digest", "last_progress_summary", "blockers",
-    "recent_tool_failure",
+    "recent_tool_failure", "model", "reasoning_effort",
 )
 _LIVE_CHARS = 12000
 
@@ -83,7 +83,7 @@ def agent_tree_model_preview(payload: dict[str, object]) -> str:
     selected: list[dict[str, object]] = []
     for node in nodes:
         row = _pick(node, ("run_id", "parent_run_id", "status", "replaced_by", "failure_type", "current_tool",
-                           "readiness", "recent_tool_failure"))
+                           "readiness", "recent_tool_failure", "model", "reasoning_effort"))
         row["last_progress_summary"] = str(node.get("last_progress_summary") or "")[:160]
         refs = node.get("read_order")
         refs = refs if isinstance(refs, list) else []

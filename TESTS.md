@@ -50,6 +50,19 @@
   `test_*empty*`、`test_*turn_end*` 与 9 个守卫共 855 passed。
 - 变异 7/7 被杀：上限多给一次、成功执行不清零、协议纠正清掉连续计数、不看原因码、不接入裁决、提示不带工具名、计数不增加。
 
+## list_agents 显示子代理模型与智能程度（2026-09-30，分支 `worker/ds2-capability-guide`，已实现）
+
+- 新增 `test_agent_tree_model_effort.py` 5 项：显式指定模型和档位的子代理在 list_agents 显示“deepseek-v4.1-flash（536c11f9）”和 low；未指定显示“继承会话默认”/“默认”；档案被删除显示“未知”且 list_agents 不报错；输出不含 api_key/api_base/token/sk-/authorization；线程读取失败回退创建时冻结的任务属性。
+- 实现：`subagents/kernel.py`（SubagentKernelRun 冻结值回退源）、`agent_core/agent_tree/node_rendering.py`（投影与名称解析）、`agent_core/agent_tree/model_view.py`（白名单）。
+- 验证命令与结果：
+  - `$PY -m pytest agent_py_agent/tests/test_agent_tree_model_effort.py -q --tb=short`：5 passed
+  - `$PY -m pytest agent_py_agent/tests/test_agent_tree_model_view.py agent_py_agent/tests/test_agent_tree_three_layer_status.py agent_py_agent/tests/test_list_agents_scope_resolution.py -q --tb=short`：46 passed
+  - `$PY -m pytest agent_py_agent/tests/test_subagent_kernel.py agent_py_agent/tests/test_reasoning_effort.py -q --tb=short`：44 passed
+  - `$PY -m ruff check agent_py_agent scripts`：通过
+  - `$PY scripts/check_doc_sync.py`：通过
+  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：通过
+  - `git diff --check`：通过
+
 ## 智能程度逐模型真实审计（2026-09-30，38）
 
 - **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +

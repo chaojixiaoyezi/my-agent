@@ -26,6 +26,9 @@ def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
     node["progress_layer"] = _progress_layer(agent, payload)
     node["evidence_layer"] = _evidence_layer(refs)
     node["guidance_layer"] = _guidance_layer(agent, str(node.get("run_id") or ""))
+    # 模型与智能程度（结构化事实）：显示子代理实际使用的模型与档位，只读投影、不含凭据；
+    # 权威来源是已物化线程，线程未物化/读取失败时回退创建时冻结的任务属性。
+    node["model"], node["reasoning_effort"] = _model_effort_view(agent, payload)
     # 增量结论账行数(结构化事实):>0 提示整合轮"这条 run 有已确认结论,取消/整合前先读账"。
     node["findings_recorded"] = _findings_recorded(payload)
     # 最近工具失败段(结构化事实):让父级分清"被授权门反复拦下"和"模型还在慢慢想"。
@@ -345,6 +348,74 @@ def _safe_float(value: object) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+# LLM: 权威来源是已物化线程上的 model_profile_id / reasoning_effort（创建时从任务属性写入）；
+#   线程读取失败或未物化时回退 kernel 快照里冻结的任务属性值。任何失败显示"未知"，绝不让
+#   list_agents/status 失败，也不输出密钥、地址或请求头。修改须同步 model_view 白名单与测试。
+# 函数用途: 生成节点上的模型与智能程度展示字段（只读投影）。
+def _model_effort_view(agent: object, payload: dict[str, object]) -> tuple[str, str]:
+    profile_id, effort = _thread_model_refs(agent, payload)
+    if not profile_id and not effort:
+        profile_id = str(payload.get("model_profile_id") or "")
+        effort = str(payload.get("reasoning_effort") or "")
+    return _model_label(agent, profile_id), _effort_label(effort)
+
+
+# LLM: 只读已物化线程；store 缺失、线程缺失或损坏一律返回空，由调用方回退冻结值，不抛错。
+# 函数用途: 从会话线程读取模型引用与智能程度，拿不到就返回空。
+def _thread_model_refs(agent: object, payload: dict[str, object]) -> tuple[str, str]:
+    thread_id = str(payload.get("thread_id") or "").strip()
+    store = getattr(agent, "conversation_store", None)
+    if not thread_id or store is None:
+        return "", ""
+    try:
+        thread = store.threads.load(thread_id)
+    except Exception:
+        return "", ""
+    return (
+        str(getattr(thread, "model_profile_id", "") or ""),
+        str(getattr(thread, "reasoning_effort", "") or ""),
+    )
+
+
+# LLM: 只取模型名称与档案编号，绝不读地址、密钥或请求头；default 表示继承会话默认，
+#   名称解析失败（档案删除/目录损坏）显示"未知"。shared: 前缀走共享目录。
+# 函数用途: 把模型编号换算成"名称（编号）"展示文本。
+def _model_label(agent: object, profile_id: str) -> str:
+    profile_id = str(profile_id or "").strip()
+    if not profile_id or profile_id == "default":
+        return "继承会话默认"
+    name = _resolve_model_name(agent, profile_id)
+    return f"{name}（{profile_id}）" if name else "未知"
+
+
+# LLM: 只读模型目录与共享目录的公开字段，任何失败返回空串（展示"未知"）；不缓存、不发请求。
+# 函数用途: 按档案编号解析模型显示名称；查不到或目录不可读时返回空。
+def _resolve_model_name(agent: object, profile_id: str) -> str:
+    try:
+        from ...settings.model_profiles import model_profiles_path, read_model_profiles
+        from ...settings.shared_model_catalog import public_shared_profiles, shared_profile_key
+
+        if shared_profile_key(profile_id):
+            for row in public_shared_profiles(agent.home_paths):
+                if row.get("id") == profile_id:
+                    return str(row.get("model_name") or "")
+            return ""
+        data = read_model_profiles(model_profiles_path(agent.home_paths))
+        row = data["profiles"].get(profile_id)
+        return str(row.get("model_name") or "") if isinstance(row, dict) else ""
+    except Exception:
+        return ""
+
+
+# LLM: 档位规范化复用同一入口；空串/非法值按"默认"展示（线程未设置，运行时回落全局默认）。
+# 函数用途: 把档位值换算成展示文本。
+def _effort_label(effort: str) -> str:
+    from ...backends.reasoning_control import normalize_reasoning_level
+
+    level = normalize_reasoning_level(effort)
+    return level if level else "默认"
 
 
 __all__ = ["node_from_kernel_run"]

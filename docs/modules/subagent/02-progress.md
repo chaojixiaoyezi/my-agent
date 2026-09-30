@@ -6,6 +6,8 @@
 写入失败与 `subagent_run_saved` 一致（吞异常只记 warning），二次接替被预检拒绝时不产生新事件。结构见
 [04-structure](04-structure.md#接替关系的唯一落账入口2026-09-28)，测试见[测试记录](../../../TESTS.md)。
 
+2026-09-30（分支 `worker/ds2-capability-guide`）：list_agents 与代理树节点新增 `model`、`reasoning_effort` 两个只读字段，展示子代理实际使用的模型与智能程度。权威来源是已物化的子代理线程（`ConversationThread.model_profile_id` / `reasoning_effort`），线程未物化/读取失败时回退 kernel 快照里创建时冻结的任务属性（`host_model_profile.v1` / `host_reasoning_effort.v1`）。模型显示为“名称（编号）”，default 显示“继承会话默认”，档案删除或读取失败显示“未知”；档位未设置显示“默认”；输出绝不含密钥、地址或请求头。对应实现：`subagents/kernel.py`（SubagentKernelRun 冻结值回退源）、`agent_core/agent_tree/node_rendering.py`（投影与名称解析）、`agent_core/agent_tree/model_view.py`（白名单）。测试见 TESTS 顶部本节。
+
 2026-09-29（分支 `claude/75-scheduler-waiting-deadlock`）：`runner_completion_wake.has_persisted_subagent_parent` 改为公开函数（原私有名
 `_has_persisted_subagent_parent`，行为不变），供 `conversation/task_follow_up` 判定“直属会话的子代理才会给会话发完成唤醒”时复用同一判据。
 

@@ -75,6 +75,13 @@ event 把进展、阻塞和结束通知直接父级；模型不能循环调用 `
 最近失败时间与 `ongoing`，用来分清“被授权门反复拦下”和“还在慢慢想”；它从 owner 权威事件流现算，
 不是第二份状态，也不是等待或重试信号。
 
+每个子代理节点还会带 `model` 与 `reasoning_effort` 两个只读字段，展示这个子代理实际使用的模型与智能程度：
+模型显示为“名称（档案编号）”（如 `deepseek-v4.1-flash（536c11f9）`），`default` 显示“继承会话默认”，
+档案被删除或目录不可读时显示“未知”；智能程度显示档位（low/medium/high/max/auto/off），未设置显示“默认”。
+权威来源是已物化的子代理线程（`ConversationThread.model_profile_id` / `reasoning_effort`），线程未物化或
+读取失败时回退创建时冻结的任务属性（`host_model_profile.v1` / `host_reasoning_effort.v1`）；只显示名称与编号，
+绝不带地址、密钥或请求头，任何读取失败都不让 list_agents 失败。
+
 子代理状态、进度、channel 状态和内部 refs 以这个内部 projection 为运维状态面。普通文件工具和
 shell 不应该读取或遍历 `work/agents/<run_id>/canonical_state.json`、`final_report.md`、
 `summary.md`、`checkpoint.json`、`memory_archive/` 等内部文件；这些文件是审计/恢复资料，不是父代理的正常汇总入口。
