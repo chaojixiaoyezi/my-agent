@@ -604,7 +604,7 @@
 渠道、是否当前会话和可用发送类型，不含正文；别的 owner 的会话不列出也不计数。细节见
 [SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md) 实现落点一节。
 
-**已知缺陷：同一对会话只能送达一条消息**（2026-09-29 复审发现，待修，排在 step16h；会话互通禁令维持到修好、部署、验收通过）：
+**已修：同一对会话只能送达一条消息**（2026-09-29 复审发现；修复在分支 `claude/75-session-message-dedupe`，待 ae 复审；会话互通禁令维持到修好、部署、验收通过）：
 - **原因**：`send_session_message` 的去重键是 `session_message:{发送方}->{目标}`，只区分会话对；`append_once` 对同一个键的处理是同文返回旧记录、异文抛 DataCorruptionError。
 - **后果**：
   - 第二条不同内容报结果未知，发送方这一轮收口；
@@ -614,13 +614,22 @@
   - 键写进唤醒 metadata，已消费判据按这个键查回执，不再从会话对拼；
   - 工具返回回执的真实状态。
 - **门禁**：`test_repeated_messages_between_the_same_pair_are_all_delivered` 先按 strict xfail 标出，修好后转正。
+- **落地**：
+  - 键由 `session_messaging.session_message_dedupe_key(发送方, 目标, 这次发送的身份)` 唯一生成：模型工具用执行器注入的
+    `__operation_id`（同一次调用重试不变），TUI `/tell` 每次命令新生成；执行器没注入 `__operation_id` 时不入队，不退回旧键；
+  - 唤醒 metadata 的 `message_dedupe_key`（常量 `SESSION_MESSAGE_KEY_FIELD`）记这条消息的键，唤醒的 `dedupe_key` 也用它，
+    同一次调用重试不多发唤醒；已消费判据只按这个键查回执，唤醒里没有键就照常开回合；
+  - 工具结果的 `status` 取回执真实状态；门禁那一窗已转正。
 
 **待定：目标回合在消费前被停止，会话消息怎样重新投递**（2026-09-29，真实链路复现；由 dsh-75 在去重改造里一并定，禁令期间不影响生产）：
 - **现象**：B 忙时收到消息，消息在安全点注入；带着它的那次模型调用返回前 B 被 `/stop`。
   - 回执此时是 `submitted`：模型还没对这次调用作出返回。调用失败后，回执先退回 `reserved`；
   - 前台收尾 `terminalize_gateway_request_file` 的 `reject_pending(reject_reserved=True)` 再把它改成 `rejected`。
   - 插话（Gateway 输入回执）被拒后，对账会把它重新排成普通请求；会话消息没有这一步。
-- **当前 main**：消息唤醒回合从后台上下文把这条消息当本回合输入交给 B，所以没有丢，但回执停在 `rejected`、与实际不符。
+- **当前 main（2026-09-29 75 实测更正）**：回执永久停在 `rejected`，之后没有任何回合认领它；模型还看得到这条消息，只是因为
+  被停回合在安全点注入、已写进会话历史的那段输入没有助手回复，成了下一回合请求里"未答复的尾巴"（唤醒回合本回合的输入只有
+  "Wake reason: session_message"，并没有认领这条消息）。这靠历史形状碰巧可见：历史被 Compact 或截断、或中间先跑了别的回合，
+  它就不再是本回合输入，模型也不知道这是一条待处理的新消息。门禁按"最后一条助手回复之后的非助手消息"取 notes，所以通过。
 - **取消线（`my-agent/self-dev-3-cancel-final`，现由 `claude/75-cancel-line-finish` 收尾）的两处问题**：
   - 已消费判据把 `rejected`（以及可逆的 `submitted`）算成已消费，于是跳过这条唤醒，B 空闲时消息送不到；
   - 跳过时只把认领记成 cancelled，没有结案唤醒，每轮 tick 都会再认领一次。

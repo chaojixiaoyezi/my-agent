@@ -138,6 +138,21 @@ def test_tell_success_queues_and_wakes() -> None:
     assert agent.conversation_store.wakes.signals[0]["reason"] == "session_message"
 
 
+def test_tell_each_message_gets_its_own_key_carried_by_the_wake() -> None:
+    """两次 /tell 同一目标、同样内容也是两条消息：键各不相同；唤醒 metadata 与去重键都带上这条消息的键。"""
+    from agent_py_agent.agent.conversation.session_messaging import SESSION_MESSAGE_KEY_FIELD
+
+    agent = _agent({"thread-b": _FakeThread("thread-b")})
+    ctx = _Ctx(agent)
+    _run("/tell thread-b 你好", ctx)
+    _run("/tell thread-b 你好", ctx)
+    keys = [key for _request, key in agent.conversation_store.guidance.calls]
+    assert len(set(keys)) == 2 and all(key.startswith("session_message:thread-a->thread-b:") for key in keys)
+    signals = agent.conversation_store.wakes.signals
+    assert [signal["metadata"][SESSION_MESSAGE_KEY_FIELD] for signal in signals] == keys
+    assert [signal["dedupe_key"] for signal in signals] == keys
+
+
 def test_tell_im_target_rejected() -> None:
     agent = _agent({"thread-im": _FakeThread("thread-im", channel="feishu")})
     ctx = _Ctx(agent)

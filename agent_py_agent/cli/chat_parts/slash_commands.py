@@ -377,6 +377,15 @@ def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str)
 
     if pair_limit_reached(store, ctx.conversation_id, target_thread_id, limit):
         return f"这一对会话每小时的消息条数已达上限（{limit}）；消息没有投递。（SESSION_TASK_RATE_LIMIT）"
+    from uuid import uuid4
+
+    from ...agent.conversation.session_messaging import (
+        SESSION_MESSAGE_KEY_FIELD,
+        session_message_dedupe_key,
+    )
+
+    # 每次 /tell 都是一条新消息：幂等键按单条消息区分（这次调用自己生成身份），不按会话对复用。
+    message_key = session_message_dedupe_key(ctx.conversation_id, target_thread_id, uuid4().hex)
     try:
         entry = store.guidance.append_once(
             {
@@ -388,7 +397,7 @@ def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str)
                 "delivery": "next_turn",
                 "metadata": {"origin_kind": "session_message", "origin_thread_id": ctx.conversation_id},
             },
-            dedupe_key=f"session_message:{ctx.conversation_id}->{target_thread_id}",
+            dedupe_key=message_key,
         )
         wake_id = ""
         if str(getattr(thread, "status", "") or "active").strip() == "active":
@@ -400,7 +409,9 @@ def _tell_message(ctx: SlashCommandContext, target_thread_id: str, message: str)
                         "urgency": "normal",
                         "reason": "session_message",
                         "summary": "收到来自另一个会话的消息",
-                        "metadata": {"origin_kind": "session_message", "origin_thread_id": ctx.conversation_id},
+                        "dedupe_key": message_key,
+                        "metadata": {"origin_kind": "session_message", "origin_thread_id": ctx.conversation_id,
+                                     SESSION_MESSAGE_KEY_FIELD: message_key},
                     }
                 )
                 wake_id = str(getattr(signal, "wake_signal_id", "") or "")

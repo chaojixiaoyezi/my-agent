@@ -497,9 +497,6 @@ def test_message_wakes_an_idle_session(tmp_path, monkeypatch) -> None:
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "消息唤醒没有结案"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="新缺陷：send_session_message 的去重键只按会话对区分，同一对会话第二条不同内容的消息报结果未知、"
-                          "与第一条相同的第三条被当成重试返回旧记录，都送不到（去重键按单条消息区分后转正）")
 def test_repeated_messages_between_the_same_pair_are_all_delivered(tmp_path, monkeypatch) -> None:
     """同一对会话连发三条（第二条内容不同、第三条与第一条相同）：每条独立入队、各有回执，工具返回真实状态、各自送达，
     发送方这一轮不触发结果未知收口。"""

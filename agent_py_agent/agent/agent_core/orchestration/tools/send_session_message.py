@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING
 from ....conversation.session_messaging import (
     SESSION_IDENTITY_UNAVAILABLE,
     SESSION_KIND_MESSAGE,
+    SESSION_MESSAGE_KEY_FIELD,
     SESSION_MESSAGE_ORIGIN_KIND,
     SESSION_NO_CURRENT_THREAD,
     SESSION_TASK_RATE_LIMIT,
     SessionMessagingRequest,
     decide_session_messaging,
+    session_message_dedupe_key,
 )
 from ....runtime_errors import runtime_error_report
 from ....tooling.models import (
@@ -26,6 +28,7 @@ from ....tooling.models import (
     IdempotencyPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
+    ToolInputPolicy,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -38,12 +41,14 @@ if TYPE_CHECKING:
 _TOOL_NAME = "send_session_message"
 
 
-# LLM: 只承载两个模型参数；发送方与来源信息是宿主内部字段，不进模型输入面。
-# 类用途: 保存一次会话间发消息的目标会话与正文。
+# LLM: 两个模型参数 + 宿主注入的本次调用 operation_id（send_id，按单条消息区分幂等键）；发送方与来源信息是宿主内部字段，
+#   不进模型输入面。
+# 类用途: 保存一次会话间发消息的目标会话、正文与这次发送的结构化身份。
 @dataclass(frozen=True)
 class _SendInput:
     target_thread_id: str
     message: str
+    send_id: str
 
 
 # LLM: 这是会话间消息的唯一模型入口；不要在这里加轮询、推进、验收或子代理语义。
@@ -61,6 +66,8 @@ class SendSessionMessageTool(BaseTool):
         ),
         mutates_workspace=False,
         promotes_task=False,
+        # 本次调用的 operation_id 由执行器注入，用来按单条消息区分幂等键；同一次调用重试时它不变。
+        input_policy=ToolInputPolicy(internal_parameters=("__operation_id",)),
     )
 
     # LLM: model_spec 是实例属性，保持与现有工具注册器一致的装配方式。
@@ -163,7 +170,15 @@ def _send_input(params: dict[str, object]) -> _SendInput | ToolHandlerOutcome:
             error_code="TOOL_PARAMETER_REQUIRED",
             effect_outcome="not_started",
         )
-    return _SendInput(target_thread_id=target, message=message)
+    send_id = str(params.get("__operation_id") or "").strip()
+    if not send_id:
+        # 执行器按 input_policy 注入；缺了是宿主装配缺陷，不退回按会话对的旧键（那会把不同消息当成重试）。
+        return _error(
+            "缺少本次调用的操作身份（宿主没有注入 __operation_id）；消息没有投递。",
+            error_code="TOOL_EXECUTION_FAILED",
+            effect_outcome="not_started",
+        )
+    return _SendInput(target_thread_id=target, message=message, send_id=send_id)
 
 
 # LLM: 发送方身份只从 agent.home_paths 的结构化 owner 三元组和当前会话 thread_id 取；
@@ -236,8 +251,9 @@ def _thread_channel(thread: object) -> str:
     return ""
 
 
-# LLM: 写入用 append_once 带稳定 dedupe_key，保证重试返回同一条；来源类型与发送方 thread 落 metadata，
-#   便于注入时渲染成"来自会话 X 的消息"而不是用户原话。目标空闲时补一次 wake，不改其它队列语义。
+# LLM: 写入用 append_once，幂等键按单条消息区分（session_message_dedupe_key：会话对 + 本次调用的 operation_id），
+#   同一次调用重试返回同一条，不同的发送各自入队；来源类型与发送方 thread 落 metadata，注入时渲染成"来自会话 X 的消息"
+#   而不是用户原话。返回的 status 取回执真实状态。目标空闲时补一次唤醒，唤醒 metadata 带上这条消息的键。
 # 函数用途: 耐久保存一条会话消息，并在目标空闲时唤醒它。
 def _queue_and_wake(
     agent: object,
@@ -247,7 +263,7 @@ def _queue_and_wake(
     target_thread: object,
 ) -> ToolHandlerOutcome:
     store = agent.conversation_store
-    dedupe_key = f"session_message:{sender_thread_id}->{parsed.target_thread_id}"
+    dedupe_key = session_message_dedupe_key(sender_thread_id, parsed.target_thread_id, parsed.send_id)
     metadata = {
         "origin_kind": SESSION_MESSAGE_ORIGIN_KIND,
         "origin_thread_id": sender_thread_id,
@@ -265,7 +281,8 @@ def _queue_and_wake(
             },
             dedupe_key=dedupe_key,
         )
-        wake_id = _maybe_wake(store, target_thread, sender_thread_id)
+        receipt = store.guidance.receipt(dedupe_key)
+        wake_id = _maybe_wake(store, target_thread, sender_thread_id, dedupe_key)
     except Exception as exc:  # noqa: BLE001 - 统一转成结构化失败
         return _error(
             "写入目标会话消息箱失败；消息没有投递。",
@@ -282,7 +299,8 @@ def _queue_and_wake(
         "message_id": entry.guidance_id,
         "target_thread_id": parsed.target_thread_id,
         "delivery": "queued",
-        "status": "pending",
+        # 回执的真实状态：同一次调用重试时可能已是 reserved/consumed 等，不写死 pending。
+        "status": str(getattr(receipt, "status", "") or "unknown"),
         "wake_signal_id": wake_id,
         "delivery_timing": "next_turn_boundary_or_wake",
         "message": (
@@ -302,9 +320,11 @@ def _record_pair(store: object, sender_thread_id: str, target_thread_id: str) ->
 
 
 # LLM: 目标空闲才唤醒；status 不是 active 时不叫醒，避免给不会再消费的目标制造假 pending。
+#   metadata[SESSION_MESSAGE_KEY_FIELD] 记这次唤醒投递的是哪条消息，领取后的"已消费"判据按它查回执；
+#   唤醒的 dedupe_key 也用这条消息的键，同一次调用重试不会多出第二条唤醒。
 #   返回 wake_signal_id 供回执展示，不承诺目标已消费。
 # 函数用途: 目标会话仍活跃时发起一次来源明确的唤醒。
-def _maybe_wake(store: object, target_thread: object, sender_thread_id: str) -> str:
+def _maybe_wake(store: object, target_thread: object, sender_thread_id: str, message_key: str) -> str:
     status = str(getattr(target_thread, "status", "") or "active").strip()
     if status != "active":
         return ""
@@ -317,7 +337,10 @@ def _maybe_wake(store: object, target_thread: object, sender_thread_id: str) -> 
             "urgency": "normal",
             "reason": "session_message",
             "summary": "收到来自另一个会话的消息",
-            "metadata": {"origin_kind": "session_message", "origin_thread_id": sender_thread_id},
+            # 同一条消息只发一条唤醒：同一次调用重试时按消息键去重，返回原唤醒。
+            "dedupe_key": message_key,
+            "metadata": {"origin_kind": "session_message", "origin_thread_id": sender_thread_id,
+                         SESSION_MESSAGE_KEY_FIELD: message_key},
         }
     )
     return str(getattr(signal, "wake_signal_id", "") or "")

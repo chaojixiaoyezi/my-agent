@@ -4423,7 +4423,8 @@ _SESSION_MESSAGE_CONSUMED_STATUSES = frozenset({"consumed"})
 
 # LLM: 会话消息唤醒的内容可能**已经被目标自己的前台回合消费掉了**（目标当时正忙，消息在安全点注入并确认）。
 #   这时再为这条唤醒开一轮，只会跑出一次没有新输入的空回合（观察项②）。
-#   判据只用**真实存在的结构化事实**：这条唤醒投递的消息回执是否为 consumed（模型已对带着它的调用作出返回）。
+#   判据只用**真实存在的结构化事实**：唤醒 metadata 里那条消息的键（SESSION_MESSAGE_KEY_FIELD）对应的回执是否为 consumed
+#   （模型已对带着它的调用作出返回）；没有这个键就无法确认，照常开回合。
 #   回执状态全集见 store_guidance_records.py：pending / reserved / submitted / consumed / rejected，其余都不算已消费：
 #   - reserved、submitted 可逆：调用失败会退回 reserved，release_reserved 会把提交前死掉的预留写回 pending；
 #   - rejected 不等于送达：B 忙时消息已注入、在途调用未返回就被 /stop，终结时 reject_reserved 把它改成 rejected，
@@ -4435,15 +4436,14 @@ _SESSION_MESSAGE_CONSUMED_STATUSES = frozenset({"consumed"})
 def _session_message_consumed_admission(signal: WakeSignal, *, guidance_store: object = None) -> str:
     if str(signal.reason or "").strip().lower() != SESSION_MESSAGE_WAKE_REASON:
         return ""
+    from .session_messaging import SESSION_MESSAGE_KEY_FIELD
+
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-    sender_thread_id = str(metadata.get("origin_thread_id") or "").strip()
-    target_thread_id = str(signal.thread_id or "").strip()
-    if not (sender_thread_id and target_thread_id):
-        return ""
+    # 这次唤醒投递的是哪条消息，由发送方写进唤醒 metadata；没有这个键就无法确认，照常开回合，不按会话对拼旧键。
+    dedupe_key = str(metadata.get(SESSION_MESSAGE_KEY_FIELD) or "").strip()
     guidance = guidance_store
-    if guidance is None:
+    if not dedupe_key or guidance is None:
         return ""
-    dedupe_key = f"session_message:{sender_thread_id}->{target_thread_id}"
     try:
         receipt = guidance.receipt(dedupe_key)
     except Exception:  # noqa: BLE001 - 读不到回执不当作"已消费"

@@ -35,6 +35,22 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 会话消息去重键按单条消息区分（2026-09-29，分支 `claude/75-session-message-dedupe`，接在取消线 `4d3558fa4` 之后）
+
+- **修的缺陷**：去重键原来只按会话对区分（`session_message:{发送方}->{目标}`），同一对会话第二条不同内容报结果未知，
+  与第一条同文的第三条被当成重试返回旧记录、状态写死 pending，都送不到。
+- **做法**：键由 `session_message_dedupe_key(发送方, 目标, 这次发送的身份)` 唯一生成——模型工具用执行器注入的 `__operation_id`，
+  TUI `/tell` 每次命令新生成；唤醒 metadata 的 `message_dedupe_key` 带上这个键，唤醒 `dedupe_key` 也用它；
+  "已消费"判据只按唤醒里的键查回执；工具结果 `status` 取回执真实状态。
+- **测试**：
+  - `test_send_session_message_tool.py` 新增：两次调用各自一个键、同一次调用重试用回同一个键、唤醒带键且按键去重；
+    结果 `status` 为回执真实状态（pending/consumed/rejected 三例）；没有 `__operation_id` 时不入队也不唤醒；
+  - `test_tell_command.py` 新增：两次 `/tell` 同样内容也是两个键，唤醒 metadata 与去重键带上各自的键；
+  - `test_session_message_consumed_admission.py`：信号按新键带 `message_dedupe_key`；唤醒里没有键时不判定、也不按会话对拼旧键去查；
+  - 真实链路 `test_repeated_messages_between_the_same_pair_are_all_delivered` 转正（原 strict xfail）。
+- **变异**（按 rc==1 且有 FAILED 判定，5 个全部被抓住）：键退回会话对、唤醒不带键、状态写死 pending、唤醒不按键去重、
+  判据按会话对拼键。脚本 `sm3/mutate_dd.py`（scratchpad）。
+
 ## 会话 capability 默认值只留一个来源、构造时兜住坏配置（2026-09-29，分支 `claude/75-cancel-line-finish`，接在取消与消息唤醒提交之后；接手 my-agent-3）
 
 原分支压成的第二个提交。

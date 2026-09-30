@@ -226,8 +226,9 @@
     - 2026-09-29 起有“同一对会话连发三条”一窗：第二条内容不同，第三条与第一条相同。
       - 断言：三条都独立入队、各有回执；工具返回真实状态；每条都送到；发送方不触发结果未知收口。
       - 现状（缺陷）：`send_session_message` 的去重键只按会话对区分（`session_message:{发送方}->{目标}`），`append_once` 同键同文返回旧记录、同键异文报错。所以第二条报结果未知，第三条返回第一条的旧 id、写死 `status: pending`，都送不到。
-      - 修法方向：去重键按单条消息区分（同一次工具调用重试仍去重），键写进唤醒 metadata，已消费判据按它查回执。
-      - 修好前按 strict xfail 标出。
+      - 已修（分支 `claude/75-session-message-dedupe`）：键 = 会话对 + 这次发送的身份（`session_message_dedupe_key`；模型工具用
+        `__operation_id`，同一次调用重试不变；`/tell` 每次新生成），唤醒 metadata 的 `message_dedupe_key` 带上它，已消费判据按它查回执，
+        工具返回回执真实状态；这一窗已转正。
     - 细节见 TESTS.md。
 
 ## 交付切片

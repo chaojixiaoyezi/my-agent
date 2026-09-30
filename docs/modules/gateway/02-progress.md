@@ -625,3 +625,7 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
   供应瞬时、配置暂缺、环境级故障与额度用完都不记，不因此退休；重试节奏交给车道暂停。普通程序错误 3 次退休不变。只改记账条件，
   不动持久账 schema。
 - 测试与变异见 TESTS.md 同名节。
+
+会话消息去重键按单条消息区分（分支 `claude/75-session-message-dedupe`）：键 = 会话对 + 这次发送的身份（模型工具的 `__operation_id`、
+`/tell` 每次新生成），唤醒 metadata 的 `message_dedupe_key` 带上它，"已消费"判据按它查回执；同一对会话连发多条各自入队、各自送达，
+工具结果返回回执真实状态。

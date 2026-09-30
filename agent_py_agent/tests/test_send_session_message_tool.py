@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from agent_py_agent.agent.agent_core.orchestration.tools.send_session_message im
 )
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation.session_messaging import (
+    SESSION_MESSAGE_KEY_FIELD,
     SESSION_TARGET_OUT_OF_SCOPE,
     SESSION_TASK_RATE_LIMIT,
 )
@@ -39,8 +41,9 @@ class _FakeThreads:
 
 
 class _FakeGuidance:
-    def __init__(self) -> None:
+    def __init__(self, status: str = "pending") -> None:
         self.calls: list[tuple[dict, str]] = []
+        self.status = status
 
     def append_once(self, request: dict, *, dedupe_key: str):
         self.calls.append((request, dedupe_key))
@@ -49,6 +52,10 @@ class _FakeGuidance:
             guidance_id = "guidance-fixed"
 
         return _Entry()
+
+    # 函数用途: 按键返回一份回执，状态由测试指定（真实状态要原样回到工具结果里）。
+    def receipt(self, dedupe_key: str):
+        return SimpleNamespace(dedupe_key=dedupe_key, status=self.status)
 
 
 class _FakeWakes:
@@ -88,8 +95,12 @@ class _FakeAgent:
         )()
 
 
+_OPERATIONS = itertools.count(1)
+
+
+# 函数用途: 造一次工具调用的参数；执行器会注入本次调用的 operation_id，每次调用各不相同。
 def _params(**overrides):
-    base = {"target_thread_id": "thread-b", "message": "你好"}
+    base = {"target_thread_id": "thread-b", "message": "你好", "__operation_id": f"op-{next(_OPERATIONS)}"}
     base.update(overrides)
     return base
 
@@ -221,3 +232,34 @@ def test_unreadable_config_file_falls_back_to_default_pair_limit(tmp_path, conte
     blocked = SendSessionMessageTool(agent).execute(_params(message="第二条"))
     assert blocked.error_code == SESSION_TASK_RATE_LIMIT
     assert json.loads(blocked.output)["details"]["limit"] == 60
+
+
+def test_each_call_gets_its_own_key_and_a_retry_reuses_it() -> None:
+    """键按单条消息区分：两次调用（哪怕同样内容）各自一个键；同一次调用重试（operation_id 不变）用回同一个键。"""
+    store = _FakeStore({"thread-b": _FakeThread("thread-b")})
+    agent = _FakeAgent(store)
+    first = _params()
+    SendSessionMessageTool(agent).execute(first)
+    SendSessionMessageTool(agent).execute(_params())
+    SendSessionMessageTool(agent).execute(dict(first))
+    keys = [key for _request, key in store.guidance.calls]
+    assert keys[0] == f"session_message:thread-a->thread-b:{first['__operation_id']}"
+    assert keys[0] != keys[1] and keys[2] == keys[0]
+    assert [signal["metadata"][SESSION_MESSAGE_KEY_FIELD] for signal in store.wakes.signals] == keys
+    assert [signal["dedupe_key"] for signal in store.wakes.signals] == keys, "同一条消息只发一条唤醒"
+
+
+@pytest.mark.parametrize("status", ["pending", "consumed", "rejected"])
+def test_result_reports_the_real_receipt_status(status) -> None:
+    store = _FakeStore({"thread-b": _FakeThread("thread-b")})
+    store.guidance.status = status
+    payload = json.loads(SendSessionMessageTool(_FakeAgent(store)).execute(_params()).output)
+    assert payload["status"] == status
+
+
+def test_missing_operation_id_does_not_queue() -> None:
+    """执行器没注入 operation_id 是宿主装配缺陷：不入队、不退回按会话对的旧键。"""
+    store = _FakeStore({"thread-b": _FakeThread("thread-b")})
+    outcome = SendSessionMessageTool(_FakeAgent(store)).execute(_params(__operation_id=""))
+    assert (outcome.ok, outcome.effect_outcome) == (False, "not_started")
+    assert store.guidance.calls == [] and store.wakes.signals == []

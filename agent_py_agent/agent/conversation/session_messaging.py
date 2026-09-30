@@ -43,9 +43,23 @@ SESSION_MESSAGE_ORIGIN_KIND = "session_message"
 SESSION_MESSAGE_ORIGIN_THREAD_KEY = "origin_thread_id"
 # 宿主事件标记：渲染会话消息时写在最前面，明确它不是用户原话。
 SESSION_MESSAGE_HOST_EVENT_MARKER = "[SESSION_MESSAGE_HOST_EVENT]"
+# 唤醒信封 metadata 里记"这次唤醒投递的是哪条消息"的字段：值是那条消息的 guidance 幂等键，
+#   领取后的"已消费"判据按它查回执，不再按会话对拼键。
+SESSION_MESSAGE_KEY_FIELD = "message_dedupe_key"
 
 # owner_kind 结构化取值；main 是管理员（含 IM 绑定管理员私聊），user/group 是普通用户。
 OWNER_KIND_MAIN = "main"
+
+
+# LLM: 每条消息一个幂等键：发送方、目标之外再带上这次发送自己的结构化身份（模型工具用本次调用的 operation_id，
+#   /tell 每次调用新生成）。同一次工具调用重试 operation_id 不变 → 同一个键 → append_once 返回原消息；
+#   不同的发送各自入队、各有回执。send_id 为空是调用方缺陷，抛 ValueError，不退回按会话对的旧键。
+# 函数用途: 生成一条会话消息在 guidance 队列里的幂等键。
+def session_message_dedupe_key(sender_thread_id: str, target_thread_id: str, send_id: str) -> str:
+    identity = str(send_id or "").strip()
+    if not identity:
+        raise ValueError("session message send_id is required")
+    return f"session_message:{sender_thread_id}->{target_thread_id}:{identity}"
 
 
 # LLM: 冻结值对象；两个开关与目标归属都由调用方从结构化配置/存储读出后传入，本对象不做 IO。
@@ -179,6 +193,8 @@ def session_task_tool_visible(home_paths: object, config: object) -> bool:
 
 
 __all__ = [
+    "SESSION_MESSAGE_KEY_FIELD",
+    "session_message_dedupe_key",
     "OWNER_KIND_MAIN",
     "SESSION_KINDS",
     "SESSION_KIND_MESSAGE",

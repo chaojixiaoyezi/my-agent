@@ -24,10 +24,12 @@ from agent_py_agent.agent.conversation.models import (
     WakeSignal,
 )
 from agent_py_agent.agent.conversation.runtime import _session_message_consumed_admission
+from agent_py_agent.agent.conversation.session_messaging import SESSION_MESSAGE_KEY_FIELD
 
 _SENDER = "thread-sender"
 _TARGET = "thread-target"
-_KEY = f"session_message:{_SENDER}->{_TARGET}"
+# 按单条消息区分的键：会话对 + 这次发送的身份（模型工具用 operation_id）。
+_KEY = f"session_message:{_SENDER}->{_TARGET}:op-1"
 
 
 # 函数用途: 造一个只实现 receipt() 的 guidance 替身，按 dedupe_key 返回给定状态。
@@ -43,20 +45,23 @@ class _Guidance:
         return SimpleNamespace(status=self.status)
 
 
-def _signal() -> WakeSignal:
+def _signal(key: str = _KEY) -> WakeSignal:
+    metadata = {"origin_kind": SESSION_MESSAGE_WAKE_REASON, "origin_thread_id": _SENDER}
+    if key:
+        metadata[SESSION_MESSAGE_KEY_FIELD] = key
     return WakeSignal(
         wake_signal_id="wake-msg",
         thread_id=_TARGET,
         reason=SESSION_MESSAGE_WAKE_REASON,
         root_task_id="",
-        metadata={"origin_kind": SESSION_MESSAGE_WAKE_REASON, "origin_thread_id": _SENDER},
+        metadata=metadata,
     )
 
 
 def test_consumed_status_skips_the_turn() -> None:
     guidance = _Guidance("consumed")
     assert _session_message_consumed_admission(_signal(), guidance_store=guidance) == SESSION_MESSAGE_CONSUMED_ADMISSION
-    assert guidance.seen_keys == [_KEY], "判据应当按会话对键查回执"
+    assert guidance.seen_keys == [_KEY], "判据应当按唤醒 metadata 里那条消息的键查回执"
 
 
 @pytest.mark.parametrize("status", ["submitted", "rejected"])
@@ -126,3 +131,10 @@ def test_only_a_consumed_source_is_retired(admission, retire) -> None:
     assert run_claimed(dependencies, kwargs) is None
     assert [(row["status"], row["runtime_facts"]["admission"]) for row in finished] == [("cancelled", admission)]
     assert retired == ([kwargs] if retire else [])
+
+
+def test_wake_without_a_message_key_is_not_judged() -> None:
+    """唤醒 metadata 里没有消息键就无法确认是哪条消息：照常开回合，也不按会话对拼旧键去查。"""
+    guidance = _Guidance("consumed")
+    assert _session_message_consumed_admission(_signal(key=""), guidance_store=guidance) == ""
+    assert guidance.seen_keys == []
