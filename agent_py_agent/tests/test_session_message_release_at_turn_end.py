@@ -51,6 +51,29 @@ def _end_turn(store: ConversationStore, turn_id: str) -> dict:
     return store.guidance.recovery.reject_pending(turn_id, reject_reserved=True)
 
 
+# 函数用途: 写一条派活正文回执：metadata 带它所属的任务号（认领时按它核对归属）。
+def _append_task_body(store: ConversationStore, key: str, task_id: str):
+    return store.guidance.append_once(
+        {"target_type": "thread", "target_id": _TARGET, "message": f"任务正文 {key}", "sender": _SENDER,
+         "priority": "normal", "delivery": "next_turn",
+         "metadata": {"origin_kind": SESSION_TASK_ORIGIN_KIND, "origin_thread_id": _SENDER, "session_task_id": task_id}},
+        dedupe_key=key,
+    )
+
+
+# 函数用途: 以某个回合、某个归属任务号认领派活正文（前台回合没有归属任务号）。
+def _claim_body(store: ConversationStore, key: str, turn_id: str, owner: str) -> bool:
+    receipt = store.guidance.receipt(key)
+    return store.guidance.claim_for_turn(
+        receipt.entry, expected_turn_id=turn_id, attempt_id=f"attempt-{turn_id}", owning_task_id=owner,
+    )
+
+
+# 函数用途: 模拟后台片异常结束的收尾：非取消时允许派活正文退回（只给同一回合号的重跑），取消时不退。
+def _end_background_turn(store: ConversationStore, turn_id: str, *, cancelled: bool = False) -> dict:
+    return store.guidance.recovery.reject_pending(turn_id, reject_reserved=True, release_task_body=not cancelled)
+
+
 # 函数用途: 某一回合在精确回合索引里有没有登记这条回执（回合收尾按它找本回合的消息）。
 def _turn_index(store: ConversationStore, turn_id: str, key: str):
     return store.storage.guidance_turn_index_path(turn_id, key)
@@ -123,13 +146,17 @@ def test_release_stops_at_the_limit_with_a_structured_code(tmp_path, same_turn) 
     assert not _claim(store, "msg-1", "turn-after"), "转 rejected 后不再有回合能认领"
 
 
-@pytest.mark.parametrize(("raised", "settles"), [
-    (RuntimeError("模型调用失败"), True),
-    (BackgroundCompactSliceYield("Compact 公平让出"), False),
-], ids=["failed", "compact-yield"])
-def test_background_slice_settles_its_turn_input_only_on_abnormal_end(tmp_path, monkeypatch, raised, settles) -> None:
-    """后台片异常结束时按这一片的精确回合号（消息唤醒取 wake_signal_id）走同一条收尾；Compact 公平让出是同一回合
-    换片续跑，预留已退回 pending 等续跑认领，这时收尾会把派活正文和插话误判为 rejected。走真实链路的后台调度器。"""
+@pytest.mark.parametrize(("raised", "cancelled", "expected"), [
+    (RuntimeError("模型调用失败"), False, {"reject_reserved": True, "release_task_body": True}),
+    (InterruptedError("任务已取消"), True, {"reject_reserved": True, "release_task_body": False}),
+    (BackgroundCompactSliceYield("Compact 公平让出"), False, None),
+], ids=["failed", "task-cancelled", "compact-yield"])
+def test_background_slice_settles_its_turn_input_only_on_abnormal_end(
+    tmp_path, monkeypatch, raised, cancelled, expected,
+) -> None:
+    """后台片异常结束时按这一片的精确回合号（消息唤醒取 wake_signal_id）走同一条收尾；任务已取消（结构化任务状态）时
+    不退回派活正文。Compact 公平让出是同一回合换片续跑，预留已退回 pending 等续跑认领，这时收尾会把派活正文和插话
+    误判为 rejected。走真实链路的后台调度器。"""
     from agent_py_agent.tests import test_session_task_real_chain as rc
 
     chain = rc._real_chain(tmp_path, monkeypatch)
@@ -147,9 +174,55 @@ def test_background_slice_settles_its_turn_input_only_on_abnormal_end(tmp_path, 
 
     monkeypatch.setattr(GuidanceRecovery, "reject_pending", spy)
     monkeypatch.setattr(runtime_module, "_invoke_background_main_agent", invoke)
+    monkeypatch.setattr(runtime_module, "_session_task_turn_was_cancelled", lambda *_args: cancelled)
     try:
         chain.scheduler.tick(now=time.time())
     except RuntimeError:
         pass
     calls = [call for call in settled if call[0] == wake.wake_signal_id]
-    assert calls == ([(wake.wake_signal_id, {"reject_reserved": True})] if settles else [])
+    assert calls == ([(wake.wake_signal_id, expected)] if expected else [])
+
+
+def test_task_body_goes_back_only_to_its_own_task_turn_after_a_failed_background_slice(tmp_path) -> None:
+    """派活片非取消的失败：正文退回 pending、按次计数，但不授权跨回合——前台回合、别的任务回合、归属任务号对不上的
+    认领都拿不到；只有同一个任务号的重跑能认领，重跑再失败时收尾还能按回合索引找到它（读回执时投影修复补回）。"""
+    store = ConversationStore(tmp_path / "conv")
+    _append_task_body(store, "body-1", "task-1")
+    assert _claim_body(store, "body-1", "task-1", "task-1")
+    assert _end_background_turn(store, "task-1")["released"] == 1
+    receipt = store.guidance.receipt("body-1")
+    assert (receipt.status, receipt.migration["release_count"]) == ("pending", 1)
+    assert "released_turn_ids" not in receipt.migration, "派活正文的退回不能授权跨回合认领"
+    assert store.guidance.available_for_turn(receipt.entry, expected_turn_id="turn-foreground") is False
+    assert not _claim_body(store, "body-1", "turn-foreground", ""), "前台回合认领到了退回的派活正文"
+    assert not _claim_body(store, "body-1", "task-2", "task-2"), "别的任务回合认领到了退回的派活正文"
+    assert not _claim_body(store, "body-1", "task-1", "task-2"), "归属任务号对不上也认领到了"
+    assert _claim_body(store, "body-1", "task-1", "task-1"), "同一任务号的重跑应当能认领"
+    assert _turn_index(store, "task-1", "body-1").exists()
+
+
+def test_cancelled_task_body_is_not_released(tmp_path) -> None:
+    """任务已取消：派活正文照旧 rejected，不退回（退回会让之后的回合认领到已取消任务的正文）。"""
+    store = ConversationStore(tmp_path / "conv")
+    _append_task_body(store, "body-1", "task-1")
+    assert _claim_body(store, "body-1", "task-1", "task-1")
+    _end_background_turn(store, "task-1", cancelled=True)
+    receipt = store.guidance.receipt("body-1")
+    assert receipt.status == "rejected" and "release_count" not in receipt.migration
+
+
+def test_task_body_release_stops_at_the_limit_with_a_structured_code(tmp_path) -> None:
+    """同一派活片反复失败：退回次数沿用 release_count 上限，满上限后再失败转 rejected 并记结构化原因码。"""
+    store = ConversationStore(tmp_path / "conv")
+    _append_task_body(store, "body-1", "task-1")
+    for index in range(1, SESSION_MESSAGE_RELEASE_LIMIT + 1):
+        assert _claim_body(store, "body-1", "task-1", "task-1"), f"第 {index} 次重跑应当能认领"
+        _end_background_turn(store, "task-1")
+        released = store.guidance.receipt("body-1")
+        assert (released.status, released.migration["release_count"]) == ("pending", index)
+    assert _claim_body(store, "body-1", "task-1", "task-1")
+    _end_background_turn(store, "task-1")
+    receipt = store.guidance.receipt("body-1")
+    assert receipt.status == "rejected"
+    assert receipt.migration["rejection_code"] == SESSION_MESSAGE_RELEASE_LIMIT_REACHED
+    assert not _claim_body(store, "body-1", "task-1", "task-1"), "转 rejected 后不再能认领"

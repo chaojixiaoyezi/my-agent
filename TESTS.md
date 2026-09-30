@@ -83,6 +83,22 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 派活正文在后台片非取消的失败后退回给同一任务号的重跑（2026-09-29，分支 `claude/75-session-message-dedupe`，接在还原提交之后）
+
+- **修的问题**：B 的派活回合认领正文后，带着正文的模型调用失败（不是取消）。123f6f3b4 的后台收尾把派活正文按方案 A 转 rejected，
+  重跑的派活回合拿不到正文（修复前是卡在 reserved，同样拿不到）；重跑只能从被停回合留在历史尾巴里的输入碰巧看到任务。
+- **规则**（3a 裁定）：后台收尾按结构化任务状态传 `release_task_body`：任务没取消 → 派活正文退回 pending、按 `release_count` 计次、
+  不记 `released_turn_ids`，只有同一个回合号（`session_task_id`）的重跑能认领；任务已取消 → 照旧 rejected。前台终态不变。
+- **`test_session_task_real_chain.py`**：假线路新增 `RC-GOAL-FAILONCE`（带着正文的第一次调用断线，重跑正常完成）。
+  - `test_task_turn_that_fails_before_finishing_gets_its_body_back_on_the_rerun`：重跑回合完成、任务 done、正文回执最终 `consumed`；
+    在 123f6f3b4 上失败（正文 rejected）。
+  - 取消用例（`test_cancel_stops_the_bound_task_turn_during_a_model_call` 两窗）加断言：正文回执以 rejected 或 consumed 结束，不回到 pending。
+- **`test_session_message_release_at_turn_end.py`**：派活正文退回后前台回合、别的任务回合、归属任务号对不上的认领都拿不到，
+  `available_for_turn` 对前台回合为 False，只有同一任务号的重跑能认领；任务已取消不退回；同一任务反复失败满上限转 rejected 带码；
+  后台收尾探针加「任务已取消」一例（`release_task_body=False`），失败一例带 `release_task_body=True`。
+- **变异**（9 个，按 rc==1 且有 FAILED 判定，全部被抓住）：派活正文授权跨回合、取消也退、去掉归属任务号核对、派活正文不退、
+  参数没传到收尾、去掉后台收尾、改回按回合去重、让出也收尾、上限差一。脚本 `sm3/mutate_tb.py`（scratchpad）。
+
 ## 后台片没有正常结束时收尾本片认领的补充消息，释放按次计数（2026-09-29，分支 `claude/75-session-message-dedupe`，接在方案 A 之后）
 
 - **修的问题**（ae 复审方案 A 时复现）：C 空闲，A 给 C 发消息；C 的消息唤醒回合认领了它（reserved，绑定到唤醒回合号

@@ -41,6 +41,7 @@ from agent_py_agent.agent.conversation.control_commands import (
 from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_MESSAGE_RELEASE_LIMIT,
     SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
+    SESSION_TASK_ORIGIN_KIND,
 )
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.core import SimpleAgent
@@ -236,11 +237,13 @@ class ScriptedWire:
     def _resets_own_note(self, turn: _Turn) -> bool:
         if "RC-NOTE-FAILALWAYS" in turn.own_text:
             return True
+        return "RC-NOTE-FAILONCE" in turn.own_text and self._first_reset()
+
+    # 函数用途: 断一次的注入共用一个开关：第一次调用返回 True 并关上，之后都返回 False。
+    def _first_reset(self) -> bool:
         with self._lock:
-            if "RC-NOTE-FAILONCE" not in turn.own_text or self._reset_once:
-                return False
-            self._reset_once = True
-            return True
+            first, self._reset_once = not self._reset_once, True
+            return first
 
     # 函数用途: 测试者输入的前台回合：派活、发普通消息、取消、在忙时挂起（含"带着消息的调用挂起等停止"）。
     def _user_turn(self, turn: _Turn) -> tuple[str, str | None, tuple[str, dict] | None]:
@@ -310,6 +313,11 @@ class ScriptedWire:
             self.hold("task", honor_stop=False)
             return "task-hold-released", _HELD_FINAL, None
         if marker.startswith("RC-GOAL-DONE"):
+            return "task-done", "RC-TASK-DONE 任务完成。", None
+        if marker.startswith("RC-GOAL-FAILONCE"):
+            # 带着正文的第一次调用断线（非取消的失败），重跑时正常完成。
+            if self._first_reset():
+                raise ConnectionResetError("RC 假线路：带着派活正文的模型调用连接被对端重置")
             return "task-done", "RC-TASK-DONE 任务完成。", None
         return "task-unknown", "RC-TASK-UNKNOWN", None
 
@@ -718,6 +726,9 @@ def test_cancel_stops_the_bound_task_turn_during_a_model_call(tmp_path, monkeypa
     assert delivered == [], "目标回合被取消后仍交付了放行后的答复"
     assert final.status == "cancelled" and not final.summary, final
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后目标的唤醒没有结案"
+    # 取消的派活正文不退回 pending：退回会让之后的回合认领到已取消任务的正文。
+    body = _task_body_receipt(chain, "B", final.task_id)
+    assert getattr(body, "status", None) in {"rejected", "consumed"}, f"取消后派活正文回执应已结束，实际 {getattr(body, 'status', None)}"
 
 
 def test_cancel_discards_the_reply_when_the_backend_ignores_the_stop(tmp_path, monkeypatch) -> None:
@@ -755,6 +766,40 @@ def test_cancel_discards_the_reply_when_the_stop_flag_is_lost(tmp_path, monkeypa
     assert delivered == [], "停止旗丢失时，放行后返回的答复仍被交付了（交付前的持久检查没有生效）"
     assert final.status == "cancelled" and not final.summary, final
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "取消后唤醒没有结案"
+
+
+def test_task_turn_that_fails_before_finishing_gets_its_body_back_on_the_rerun(tmp_path, monkeypatch) -> None:
+    """B 的派活回合认领正文后，带着正文的模型调用断线（不是取消）。正文退回 pending，但只许同一个任务号的重跑认领：
+    重跑回合拿到正文、任务完成、正文回执 consumed。没有这条收尾时正文卡在 reserved（123f6f3b4 之后是 rejected），
+    重跑回合看不到任务内容。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-FAILONCE 整理三条要点。")
+    task = chain.task("RC-GOAL-FAILONCE")
+    now = time.time()
+    with pytest.raises(Exception):  # noqa: B017,PT011 - 断线原样从后台片抛出，这里只要这一拍失败
+        chain.scheduler.tick(now=now)
+    _require([call["kind"] for call in chain.wire.calls_for_task(task.task_id)] == ["connection-reset"],
+             f"前提不成立：派活回合带着正文的调用应当断线一次，实际 {[call['kind'] for call in chain.wire.calls]}")
+
+    # 失败的唤醒按调度器的重试间隔（30 秒）再领取；时钟往后推过这个间隔。
+    chain.scheduler.tick(now=now + 31)
+
+    kinds = [call["kind"] for call in chain.wire.calls_for_task(task.task_id)]
+    assert kinds == ["connection-reset", "task-done"], f"重跑的派活回合没有拿到正文：{kinds}"
+    final = chain.agent.conversation_store.session_tasks.load(task.task_id)
+    assert final.status == "done", final
+    body = _task_body_receipt(chain, "B", task.task_id)
+    assert getattr(body, "status", None) == "consumed", f"正文回执最终应是 consumed，实际 {getattr(body, 'status', None)}"
+
+
+# 函数用途: 按任务号找到派活正文在目标会话里的回执（正文条目 metadata 带 session_task_id）；找不到返回 None。
+def _task_body_receipt(chain: RealChain, label: str, task_id: str):
+    guidance = chain.agent.conversation_store.guidance
+    for entry in guidance.recent("thread", chain.threads[label], limit=200, include_delivered=True):
+        metadata = entry.metadata or {}
+        if metadata.get("origin_kind") == SESSION_TASK_ORIGIN_KIND and metadata.get("session_task_id") == task_id:
+            return guidance.receipt(str(metadata.get("dedupe_key") or ""))
+    return None
 
 
 # 函数用途: 取消场景的共用流程：A 派活给 B，B 的派活回合挂在模型调用里时 A 取消，放行后等后台排空、唤醒结案；

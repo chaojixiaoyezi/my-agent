@@ -928,10 +928,17 @@ class BackgroundMainAgentRuntime:
 
 # LLM: 后台片没有正常结束（模型调用失败、被取消或中断）时，对这一片的精确回合号走与前台终态（request_execution.
 #   _settle_pending_gateway_guidance）同一条收尾 reject_pending(turn_id, reject_reserved=True)：会话消息释放回 pending
-#   （方案 A，按次计数，满上限转 rejected），插话和派活正文 rejected，已提交/已消费不动。否则唤醒回合认领的消息永远卡在
+#   （方案 A，按次计数，满上限转 rejected），插话 rejected，已提交/已消费不动。派活正文看结构化任务状态：任务已取消
+#   （_session_task_turn_was_cancelled，与交付前取消判定同源）照旧 rejected；否则退回 pending，只让同一任务号的重跑认领
+#   （release_task_body）。否则唤醒回合认领的消息永远卡在
 #   reserved：重跑回合看不到它，前台回合也认领不了。Compact 公平让出不走这里（调用方先放行）：那是同一回合换片续跑，
 #   预留已由 compact 续跑退回 pending 等续跑认领。只收自带精确回合号的片（定时 run、派活、会话消息唤醒），与 _run_params
 #   注入时用的回合号同源；task_id 兜底的回合号不收。此时本片已结束、仍持有执行租约，同一回合不会有并发尝试。
+#   只在 _invoke_background_main_agent 抛异常时收尾，前提是认领只发生在紧接着那次模型调用的请求组装里
+#   （inject_pending_turn_input）：认领和调用之间的退出都会抛异常（调用失败、发送前放弃、中断）；模型返回之后才抛的错
+#   （交付前取消判定、run_once 之后的二次检查）发生时，带着它的调用已返回确认，回执是 consumed，无需收尾。以后若在认领和
+#   调用之间加了不抛异常的退出路径，要同步在那里收尾。不在正常结束时收尾：派活回合会跨好几片共用同一个回合号（例如等子代理
+#   完成），正常结束一片就收尾会把发给这个进行中任务的插话提前拒掉。
 #   收尾失败只吞掉，不能盖住原异常；回执留在原状态。副作用：写补充消息回执、删回合索引。
 # 函数用途: 后台片异常结束时，把它认领了但没消费的补充消息按统一规则收尾（会话消息退回给下一回合或重跑回合）。
 def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundRunRequest) -> None:
@@ -940,7 +947,9 @@ def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundR
     if not turn_id or store is None:
         return
     try:
-        store.guidance.recovery.reject_pending(turn_id, reject_reserved=True)
+        store.guidance.recovery.reject_pending(
+            turn_id, reject_reserved=True, release_task_body=not _session_task_turn_was_cancelled(agent, request),
+        )
     except Exception:  # noqa: BLE001 - 与前台收尾同口径：收尾失败不阻断原异常上抛
         pass
 

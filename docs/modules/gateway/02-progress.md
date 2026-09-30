@@ -638,3 +638,6 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 回合号的片，模型调用失败、取消或中断时对本片回合号 `reject_pending(reject_reserved=True)`，Compact 公平让出除外；此前消息唤醒
 回合认领后失败，消息卡在 reserved。释放改为按次计数（回执 `migration.release_count`），同一条唤醒重跑（同一回合号）反复失败也会
 到上限。（更正：123f6f3b4 另写的「同一回合重新认领时补回回合索引」不需要，读回执时的投影修复会补回，下一提交已还原。）
+
+派活正文在后台片非取消的失败后退回：后台收尾按结构化任务状态传 `release_task_body`，任务没取消时派活正文退回 pending、
+按同一个 `release_count` 计次，不授权跨回合，只有同一 `session_task_id` 的重跑能认领；任务已取消照旧 rejected，前台终态不变。
