@@ -8657,6 +8657,77 @@ def test_failed_policy_run_records_backoff_and_retires_after_three(tmp_path) -> 
     assert retired.policy_id not in {p.policy_id for p in store.progress.due(now=60.0)}
 
 
+# LLM: 测试替身，只在 generate 抛出给定的 typed 供应异常；不联网、不读配置。
+# 类用途: 让一轮真实后台回合以指定的环境级故障失败，检查策略失败账的口径。
+class _ProviderFaultBackend:
+    name = "provider-fault"
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def probe_tool_capability(self):
+        return _native_probe(self)
+
+    def generate(self, prompt: str, on_chunk=None, **kwargs) -> ModelResponse:
+        raise self.error
+
+
+def _environment_faults_for_policy_ledger():
+    from agent_py_agent.agent.backends.errors import (
+        ProviderConnectionError,
+        ProviderQuotaExhaustedError,
+        ProviderRequestRejectedError,
+    )
+
+    return [
+        ProviderRequestRejectedError("HTTP 401", status_code=401),
+        ProviderRequestRejectedError("HTTP 407", status_code=407),
+        ProviderConnectionError("DNS 解析失败"),
+        ProviderQuotaExhaustedError("HTTP 429: weekly quota", details={"status_code": 429}),
+    ]
+
+
+@pytest.mark.parametrize("error", _environment_faults_for_policy_ledger(), ids=["401", "407", "connection", "quota"])
+def test_environment_fault_policy_runs_never_count_toward_retirement(tmp_path, error) -> None:
+    """环境级故障与额度用完不是这条策略自己的问题：连续失败 3 次也不记失败账、不退休，修好密钥或额度重置后策略还在；
+    重试节奏交给 Gateway 车道暂停。普通程序错误 3 次退休不变，见上一条测试。"""
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundMainAgentRuntime,
+        BackgroundMainAgentScheduler,
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", enable_tools=False, my_agent_home=str(tmp_path / "home")),
+        tmp_path,
+    )
+    agent.backend = _ProviderFaultBackend(error)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "canonical_user_id": "user-1", "channel": "internal",
+        "channel_conversation_id": "thread-env-fault-policy", "channel_user_id": "user-1", "now": 10.0,
+    })
+    task_root = tmp_path / "home" / "tasks" / "task-env-fault-policy"
+    (task_root / "output").mkdir(parents=True)
+    (task_root / "work").mkdir()
+    store.tasks.bind({
+        "thread_id": thread.thread_id, "task_id": "task-env-fault-policy", "goal": "环境故障不记失败账",
+        "status": "active", "task_path": str(task_root),
+    })
+    policy = store.progress.create({
+        "thread_id": thread.thread_id, "task_id": "task-env-fault-policy", "interval_seconds": 30,
+        "route_channel": "internal", "route_target": thread.thread_id, "now": 20.0,
+    })
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    for tick in (30.0, 40.0, 50.0):
+        with pytest.raises(type(error)):
+            scheduler._run_due_policy(policy, now=tick)
+        after = store.progress.load(policy.policy_id)
+        assert after is not None and after.enabled is True
+        assert "failure_count" not in after.metadata and "retired_at" not in after.metadata
+    assert policy.policy_id in {p.policy_id for p in store.progress.due(now=60.0)}
+
+
 def test_successful_policy_run_resets_failure_accounting(tmp_path) -> None:
     """问题6成功半边:policy run 成功 → failure_count 清零，终态任务立即退休策略。
 

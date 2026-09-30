@@ -9,6 +9,7 @@ import pytest
 
 from agent_py_agent.agent.backends.errors import (
     ModelNotConfiguredError,
+    ProviderConnectionError,
     ProviderQuotaExhaustedError,
     ProviderRequestRejectedError,
     ProviderTransientError,
@@ -244,7 +245,11 @@ def test_claim_execution_order_identity_and_clock_sources(monkeypatch, result):
     (ProviderUsageLimitError("limit"), "failed", False),
     (ModelNotConfiguredError(), "failed", False),
     (ModelProfileError("profile"), "failed", False),
-    (ProviderQuotaExhaustedError("quota"), "failed", True),
+    # 环境级故障与额度用完不记策略失败账（3a 2026-09-29 裁定）；请求本身的问题照样记。
+    (ProviderQuotaExhaustedError("quota"), "failed", False),
+    (ProviderRequestRejectedError("HTTP 401", status_code=401), "failed", False),
+    (ProviderConnectionError("dns"), "failed", False),
+    (ProviderRequestRejectedError("HTTP 400", status_code=400), "failed", True),
     (ProviderRequestRejectedError("rejected"), "failed", True),
 ])
 def test_claim_exit_partition_keeps_original_error_and_cleanup_order(monkeypatch, error, status, policy):

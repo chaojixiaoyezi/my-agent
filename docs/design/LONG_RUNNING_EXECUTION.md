@@ -171,6 +171,8 @@ native 信封落盘，恢复只读取已有取消账、attempt 和文件事实�
 状态读取和 worker 更新共用短锁，配置读取在锁外；不暂停 Goal、不改慢流时限、不强杀模型。
 真实 TUI 补测发现 Goal 的旧错误分支会先把目标标成 blocked、消费原唤醒，导致配好模型也无法接回。
 现让同一 typed 本地配置异常只释放调度 claim、保留 active Goal 和原 wake，不累计周期策略的失败退休次数。
+环境级故障（`is_provider_environment_fault`）与额度用完同样不累计周期策略的失败退休次数（`background_claim._counts_as_policy_failure`）：
+修好密钥或额度重置后策略还在，重试节奏交给车道暂停；普通执行错误仍连续 3 次退休。
 已有 blocked/paused 目标不会批量激活，须用户显式恢复；其它执行错误和额度限制继续沿原状态处理。
 真正 HTTP 拒绝不等于本地缺配置，不能用这个检查推断远端账号可用或伪装为已经通过真实模型验收。
 

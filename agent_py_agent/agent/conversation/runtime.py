@@ -4493,7 +4493,8 @@ class _BackgroundSchedulerExecutionMixin:
             )
         return report
 
-    # LLM: 只按 wake 的 policy_id 更新原 Store；供应/配置错误由调用方排除，不改变退避和退休记账顺序。
+    # LLM: 只按 wake 的 policy_id 更新原 Store；供应瞬时、配置暂缺、环境级故障与额度用完由调用方排除
+    #   （background_claim._counts_as_policy_failure），不改变退避和退休记账顺序。
     # 函数用途: 失败回合后保存次数和下次到期时间，连续三次停用策略；记账异常只记录警告。
     def _record_policy_failure(self, kwargs: dict) -> None:
         """失败续跑记账:policy 退避 + 连续失败退休。

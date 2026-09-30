@@ -145,6 +145,10 @@
 - **额度用完并入车道暂停**（3a 裁定后的补充提交）：`test_quota_exhausted_pauses_lane_like_environment_fault`——共享判定仍不含额度；
   额度用完进入暂停，30 秒、59.9 秒后不放行，到探测时刻放行一次、暂停记录保留，探测再失败 120 秒，换模型（指纹变化）立即放行；
   日志 error_type 为 `ProviderQuotaExhaustedError`、状态码为空。
+- **策略失败账不记环境级故障**（补充二）：`test_background_main_agent_runtime.py::test_environment_fault_policy_runs_never_count_toward_retirement`
+  （401/407/连接失败/额度用完各一例）经真实后台回合连续失败 3 次，策略仍 enabled、没有 failure_count 与 retired_at、仍在 due 里；改前 4 例全部失败
+  （第一次就记 failure_count=1），草稿探针另证改前连续 3 次 401 即退休。`test_background_claim_execution.py` 的错误分流表：额度、401、连接失败不记账，
+  400 与不带状态码的请求被拒照样记；普通程序错误 3 次退休仍由 `test_failed_policy_run_records_backoff_and_retires_after_three` 钉住。
 - **变异**（草稿副本上逐个精确替换、按字节恢复，跑上面两个文件与 `test_wake_poison.py`）：19 个全部被杀，基线与恢复后通过。
   覆盖：环境级故障退回 30 秒冷却、模型指纹比较恒为相等、探测不翻倍、缺模型先归环境暂停、不封顶、到点不放行、不记基线、
   Gateway 规划不传指纹、指纹不含选择版本、指纹不含档案内容、指纹经会写库的入口读取、毒丸不引用共享判定、状态码漏 402、

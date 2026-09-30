@@ -134,8 +134,8 @@ class BackgroundLaneRetry:
 
 # LLM: 调用方持锁；只按异常类型和结构化状态码分类，顺序见 BackgroundLaneRetry.failed。额度用完（3a 2026-09-29 裁定）在这里
 #   显式并入环境暂停：重试同一额度不会恢复，换模型或额度重置后由指纹或探测放行；is_provider_environment_fault 本身不含额度
-#   （毒丸也用它，额度在毒丸那边按瞬时类不计数）。只有紧接在上一轮环境暂停之后才翻倍（探测失败），否则从 60 秒起；
-#   不读异常正文。
+#   （毒丸也用它，额度在毒丸那边按瞬时类不计数）。持久策略失败账排除同一组（background_claim._counts_as_policy_failure）。
+#   只有紧接在上一轮环境暂停之后才翻倍（探测失败），否则从 60 秒起；不读异常正文。
 # 函数用途: 根据上一条记录和本次异常算出这条车道新的失败记录。
 def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -> _LaneFailure:
     now = time.monotonic()
