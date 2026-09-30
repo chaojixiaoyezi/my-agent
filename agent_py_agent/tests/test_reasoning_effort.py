@@ -235,6 +235,29 @@ def test_effort_command_sets_views_and_resets_with_real_model_effect(tmp_path):
     assert "fake-key" not in json.dumps([view.message, low.message, reset.message], ensure_ascii=False)
 
 
+def _responses_effort_run(root, levels):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(root / "home"), prompt_files=[],
+                                    gateway_per_user_owner_scoping=False), root / "ws")
+    profile_id = str(uuid4())
+    profile = {"model_backend": "openai_responses", "model_name": "gpt-test", "api_base": "https://responses.example.invalid/v1",
+               "api_key": "fake-key", "model_context_window_tokens": 128000, "reasoning_control": "effort"}
+    if levels:
+        profile["reasoning_levels"] = list(levels)
+    assert execute_model_profile_operation(agent, "add", {"profile_id": profile_id, "profile": profile})["ok"]
+    execute_model_profile_operation(agent, "set_default", {"profile_id": profile_id})
+    paths = gateway_paths(agent)
+    return lambda text: execute_gateway_conversation_control(agent, paths, _command(text), _scope()).message
+
+
+def test_effort_command_receipt_follows_responses_levels(tmp_path):
+    # /effort 回执与 Responses 发送同一换算：未声明档位时 off 不发、max 发 high；声明了 max 才说“发送 max”。
+    undeclared = _responses_effort_run(tmp_path / "undeclared", ())
+    assert "没有声明可关闭思考的档位" in undeclared("/effort off")
+    assert "实际发送 high" in undeclared("/effort max")
+    declared = _responses_effort_run(tmp_path / "declared", ("low", "medium", "high", "xhigh", "max"))
+    assert "（发送 max）" in declared("/effort max")
+
+
 def test_profile_reasoning_control_is_validated_persisted_and_resolved(tmp_path):
     host = Host(tmp_path)
     key, result = add(host, reasoning_control="budget")

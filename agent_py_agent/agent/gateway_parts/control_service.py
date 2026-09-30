@@ -1187,14 +1187,11 @@ def _execute_effort_control(
         return ConversationControlResult("effort", False, "当前会话的智能程度设置暂时不可用，请稍后重试。")
 
 
-# LLM: 只由线程档位、全局默认与当前会话模型的控制方式生成文案；模型暂不可解析时仍显示档位并说明原因。
+# LLM: 只由线程档位、全局默认与当前会话模型的运行配置生成文案（describe_config_reasoning_effect 与发送同一换算）；
+#   模型暂不可解析时仍显示档位并说明原因。
 # 函数用途: 渲染 /effort 的中文回执。
 def _render_effort(owner_agent: object, thread: object, command: ConversationControlCommand) -> str:
-    from ..backends.reasoning_control import (
-        LEVEL_LABELS,
-        describe_reasoning_effect,
-        resolved_reasoning_control,
-    )
+    from ..backends.reasoning_control import LEVEL_LABELS, describe_config_reasoning_effect
     from ..settings.reasoning_effort import THREAD_FIELD, configured_reasoning_level
     from ..settings.thread_model_selection import thread_model_config
 
@@ -1208,8 +1205,7 @@ def _render_effort(owner_agent: object, thread: object, command: ConversationCon
     except Exception:  # noqa: BLE001 - 模型尚未配置时仍要能查看和设置档位。
         lines.append("当前会话还没有可用的模型；设置会保存，选择模型后生效。")
         return "\n".join(lines)
-    control = resolved_reasoning_control(config.model_reasoning_control, config.api_base, config.model_backend)
-    lines.append(f"当前模型 {config.model_name}：{describe_reasoning_effect(level, control)}")
+    lines.append(f"当前模型 {config.model_name}：{describe_config_reasoning_effect(level, config)}")
     return "\n".join(lines)
 
 

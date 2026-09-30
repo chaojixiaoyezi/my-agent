@@ -101,17 +101,47 @@ def responses_reasoning_field(control: str, level: str, levels: tuple[str, ...] 
     return {"reasoning": {"effort": choice}} if choice else {}
 
 
-# LLM: 给 /effort 回执与状态展示用的人读说明；只由结构化的档位与控制方式生成。
+# LLM: 给 /effort 回执与状态展示用的人读说明；只由结构化的档位、控制方式、协议与模型声明的服务商档位生成。
+#   Responses 协议必须与发送走同一个换算（responses_reasoning_field）：没声明 none/minimal 时 off 实际不发字段，
+#   没声明更高档位时 max 实际发 high——回执要如实说出来（2026-09-30 真实核对：ChatGPT 订阅目录没有任何模型声明
+#   none/minimal，旧档案没有 reasoning_levels 时 max 发的是 high）。
 # 函数用途: 描述某档位在某模型上会怎样生效。
-def describe_reasoning_effect(level: str, control: str) -> str:
+def describe_reasoning_effect(level: str, control: str, *, protocol: str = "", levels: tuple[str, ...] | list[str] = ()) -> str:
     level = normalize_reasoning_level(level) or "auto"
     if level == "auto":
         return "不额外发送推理参数，由服务商按默认方式思考。"
     if control == "none":
         return "当前模型不支持调节智能程度（没有已确认可用的参数），本设置暂不改变请求；换到支持的模型后生效。"
+    if protocol == "responses":
+        return _describe_responses_effect(level, control, levels)
     if level == "off":
         return "请求时关闭思考。"
     return f"{CONTROL_LABELS[control]}：{LEVEL_LABELS[level]}。"
+
+
+# LLM: 只读 responses_reasoning_field 的换算结果，不另写档位对应规则；实际发送的服务商档位与用户档位不同时写明。
+# 函数用途: 说明 Responses 模型上某个档位实际发出的 reasoning.effort，或为什么不发。
+def _describe_responses_effect(level: str, control: str, levels: tuple[str, ...] | list[str]) -> str:
+    field = responses_reasoning_field(control, level, levels, disabled=level == "off")
+    sent = field.get("reasoning", {}).get("effort", "") if field else ""
+    if not sent and level == "off":
+        return "这个模型没有声明可关闭思考的档位（none / minimal），本设置不改变请求，由服务商按默认方式思考。"
+    if not sent:
+        return f"这个模型声明的服务商档位里没有对应「{LEVEL_LABELS[level]}」的取值，本设置不改变请求。"
+    if level == "off" or sent == level:
+        return f"{CONTROL_LABELS[control]}：{LEVEL_LABELS[level]}（发送 {sent}）。"
+    return f"{CONTROL_LABELS[control]}：{LEVEL_LABELS[level]}；这个模型没有声明更高的服务商档位，实际发送 {sent}。"
+
+
+# LLM: 回执入口的配置版：控制方式、协议与服务商档位都从同一份运行配置解析（与后端工厂同源），调用方不要自己拼。
+# 函数用途: 按一份模型运行配置说明某档位会怎样生效，供 /effort 回执和参数中心共用。
+def describe_config_reasoning_effect(level: str, config: object) -> str:
+    backend = str(getattr(config, "model_backend", "") or "")
+    control = resolved_reasoning_control(getattr(config, "model_reasoning_control", "auto"),
+                                         getattr(config, "api_base", ""), backend)
+    protocol = _PROTOCOLS.get(backend.strip().lower(), "")
+    levels = tuple(getattr(config, "model_reasoning_levels", ()) or ())
+    return describe_reasoning_effect(level, control, protocol=protocol, levels=levels)
 
 
 __all__ = [
@@ -119,6 +149,7 @@ __all__ = [
     "LEVEL_LABELS",
     "REASONING_CONTROLS",
     "REASONING_LEVELS",
+    "describe_config_reasoning_effect",
     "describe_reasoning_effect",
     "normalize_reasoning_control",
     "normalize_reasoning_level",

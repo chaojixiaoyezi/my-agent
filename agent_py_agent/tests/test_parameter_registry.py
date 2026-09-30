@@ -108,6 +108,12 @@ def test_reasoning_effort_applied_value_says_whether_the_model_supports_it():
     deepseek = SimpleNamespace(**{**_OPENCODE, "api_base": "https://api.deepseek.com/v1"}, model_reasoning_effort="max")
     assert applied_value("model_reasoning_effort", deepseek)[0] == "按推理强度档位发送：最高。"
     assert "不额外发送" in applied_value("model_reasoning_effort", SimpleNamespace(model_reasoning_effort="auto"))[0]
+    # Responses 协议与发送同一换算：ChatGPT 订阅旧档案没有声明档位时，最高档实际发 high，关闭思考不发字段。
+    chatgpt = {"model_backend": "openai_responses", "api_base": "https://chatgpt.com/backend-api/codex", "model_reasoning_control": "auto"}
+    assert "实际发送 high" in applied_value("model_reasoning_effort", SimpleNamespace(**chatgpt, model_reasoning_effort="max"))[0]
+    assert "不改变请求" in applied_value("model_reasoning_effort", SimpleNamespace(**chatgpt, model_reasoning_effort="off"))[0]
+    declared = SimpleNamespace(**chatgpt, model_reasoning_effort="max", model_reasoning_levels=["low", "high", "max"])
+    assert applied_value("model_reasoning_effort", declared)[0].endswith("（发送 max）。")
 
 
 def test_applied_value_with_uses_the_new_value_without_touching_the_config():

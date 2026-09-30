@@ -7,6 +7,8 @@ import pytest
 from agent_py_agent.agent.backends import BackendOptions, get_backend
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.reasoning_control import (
+    REASONING_LEVELS,
+    describe_config_reasoning_effect,
     resolved_reasoning_control,
     responses_reasoning_field,
 )
@@ -107,3 +109,34 @@ def test_re_adding_an_existing_model_only_refreshes_its_declared_levels(tmp_path
     row = next(row for row in again["profiles"] if row["id"] == key)
     assert row["reasoning_levels"] == list(LUNA) and row["model_context_window_tokens"] == 272000
     assert len([row for row in again["profiles"] if row.get("model_name") == "gpt-6-luna"]) == 1
+
+
+def _chatgpt(levels=()):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(model_backend="openai_responses", api_base="https://chatgpt.com/backend-api/codex",
+                           model_reasoning_control="auto", model_reasoning_levels=list(levels))
+
+
+def test_receipt_tells_the_truth_about_off_and_max_on_chatgpt():
+    # 2026-09-30 真实核对：订阅目录没有任何模型声明 none/minimal，旧档案没有 reasoning_levels 时 max 实际发 high。
+    assert "不改变请求" in describe_config_reasoning_effect("off", _chatgpt())
+    assert "不改变请求" in describe_config_reasoning_effect("off", _chatgpt(LUNA))
+    assert "实际发送 high" in describe_config_reasoning_effect("max", _chatgpt())
+    assert describe_config_reasoning_effect("max", _chatgpt(LUNA)).endswith("（发送 max）。")
+    assert "关闭思考（发送 none）" in describe_config_reasoning_effect("off", _chatgpt(WITH_NONE))
+    assert "没有对应「低」" in describe_config_reasoning_effect("low", _chatgpt(("xhigh", "max")))
+
+
+@pytest.mark.parametrize("levels", [(), LUNA, WITH_NONE, ("low", "medium", "high", "xhigh"), ("xhigh", "max")])
+def test_receipt_names_the_effort_actually_sent(levels):
+    # 回执与发送必须同一换算：回执里写出的服务商档位就是请求体里的 reasoning.effort，不发字段时回执说“不改变请求”。
+    for level in REASONING_LEVELS:
+        if level == "auto":
+            continue
+        text = describe_config_reasoning_effect(level, _chatgpt(levels))
+        sent = responses_reasoning_field("effort", level, levels, disabled=level == "off").get("reasoning", {}).get("effort", "")
+        if sent:
+            assert f"发送 {sent}" in text and "不改变请求" not in text
+        else:
+            assert "不改变请求" in text and "发送" not in text.replace("不额外发送", "")

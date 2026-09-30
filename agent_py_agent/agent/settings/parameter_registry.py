@@ -207,17 +207,15 @@ def search_parameters(query: str, *, limit: int = 20) -> list[ParameterSpec]:
     return found[:limit] if limit else found
 
 
-# LLM: 与 /effort 回执同一组合：控制方式只由 backends.reasoning_control.resolved_reasoning_control 按
-#   model_reasoning_control、api_base、model_backend 决定，说明只由 describe_reasoning_effect 生成，这里不另写支持判断；
-#   档位取配置里的全局默认（会话里用 /effort 单独设过的以会话为准，这里不读线程）。只读。
+# LLM: 与 /effort 回执同一入口 backends.reasoning_control.describe_config_reasoning_effect（控制方式、协议与服务商档位
+#   都从这份配置解析，与发送同一换算），这里不另写支持判断；档位取配置里的全局默认（会话里用 /effort 单独设过的
+#   以会话为准，这里不读线程）。只读。
 # 函数用途: 说明全局推理强度档位在这个模型上实际会怎样发送，例如当前模型不支持调节时本设置不改变请求。
 def _reasoning_effect(config: object) -> str:
-    from ..backends.reasoning_control import describe_reasoning_effect, resolved_reasoning_control
+    from ..backends.reasoning_control import describe_config_reasoning_effect
     from .reasoning_effort import configured_reasoning_level
 
-    control = resolved_reasoning_control(getattr(config, "model_reasoning_control", "auto"),
-                                         getattr(config, "api_base", ""), getattr(config, "model_backend", ""))
-    return describe_reasoning_effect(configured_reasoning_level(config), control)
+    return describe_config_reasoning_effect(configured_reasoning_level(config), config)
 
 
 # 运行时按规则派生的参数：登记“由配置算出实际使用值”的唯一函数与一句中文规则；公式不在这里另写。

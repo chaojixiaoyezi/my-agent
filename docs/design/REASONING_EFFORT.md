@@ -50,6 +50,10 @@
 ## 5. 用户入口
 
 - `/effort`：显示本会话档位（及来源：本会话设置 / 全局默认），以及在当前会话模型上的实际效果。
+- 回执与发送同一换算（2026-09-30 起，`reasoning_control.describe_config_reasoning_effect`，`/effort` 与参数中心共用）：
+  Responses 模型上，没有声明 none / minimal 时 `/effort off` 实际不发字段，回执写“本设置不改变请求”；没有声明更高档位时
+  `/effort max` 实际发 high，回执写“实际发送 high”；声明了就写“发送 max”。此前回执一律写“请求时关闭思考”“最高”，
+  与 ChatGPT 订阅的实际请求不符（订阅目录没有任何模型声明 none / minimal，旧档案没有 reasoning_levels）。
 - `/effort auto|off|low|medium|high|max`：设置本会话档位；`/effort default` 清除；`/effort help` 显示用法。回执总是说明当前模型会怎样生效，模型不支持时明确说“本设置暂不改变请求”。
 - `/effort probe`：在后台检测当前模型是否真的支持按档位调节；`/effort revert <编号>` 撤销检测写入的档案修改（见第 8 节）。
 - `/model` 编辑模型：新增“思考控制”单选（自动 / 按档位 / 按预算 / 不支持），存为档案字段 `reasoning_control`（只有显式声明且不是 auto 才写键，旧档案逐字节不变）；`manage_models` 工具同一字段。

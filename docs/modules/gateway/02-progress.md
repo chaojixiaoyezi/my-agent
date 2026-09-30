@@ -718,3 +718,11 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **改动**：`context_pressure._stable_context_surface_fingerprint` 的连接部分改由 `_tokenizer_connection_identity` 给出（模型档案、地址、
   鉴权方式），不再用进程加盐的 `connection_revision`；密钥与请求头不进指纹。
 - **测试**：`test_runtime_context_pressure.py` 新增重启存活、分词身份两个用例，原“换密钥回到原始估算”断言改为继续校准。
+
+## /effort 回执与 Responses 实际发送同一换算（2026-09-30，分支 `claude/38-effort-receipt`，基于 main `bf4f740c3`）
+
+- **起因**：智能程度真实审计里，ChatGPT 订阅模型 `/effort off` 实际不发字段（目录没有任何模型声明 none / minimal），回执却写“请求时关闭思考”；
+  旧档案没有 `reasoning_levels` 时 `/effort max` 实际发 high，回执写“最高”。
+- **改动**：`control_service._render_effort` 与参数中心 `_reasoning_effect` 都改用 `reasoning_control.describe_config_reasoning_effect`，
+  Responses 协议下回执由 `responses_reasoning_field` 的换算结果生成。
+- 测试与变异见 TESTS.md 同名节。

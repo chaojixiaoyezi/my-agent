@@ -1706,7 +1706,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   完整恢复点、owner-local 旧聊天检索投影，以及 CLI/IM 共用 typed slash/task command；
   `/context` 只读自动压缩同一估算，`/compact` 复用同一 run lane/checkpoint/CAS；`/effort` 与 `/verbose` 共用
   `control_service._settings_thread` 取或建会话线程，档位写 thread 的 `reasoning_effort`（`default` 清除），回执按当前会话
-  模型的结构化 `reasoning_control` 说明实际效果（不支持时如实说明不改变请求，见 docs/design/REASONING_EFFORT.md）；检测相关
+  模型的运行配置说明实际效果（`reasoning_control.describe_config_reasoning_effect`，与发送同一换算：不支持、Responses 未声明
+  none/minimal 的 off 都如实说明不改变请求，max 实际发 high 时写明，见 docs/design/REASONING_EFFORT.md）；检测相关
   （set 时的自动检测、`/effort probe`、`/effort revert <编号>`）全交给 `settings/reasoning_probe.effort_probe_lines`，先执行再渲染，
   检测在后台线程跑，控制命令不等网络；
   `/verbose off|on|full` 的持久状态仍在唯一 thread schema 中，不从自然语言推断 owner 或 compact 成败。

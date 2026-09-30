@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## /effort 回执与 Responses 实际发送同一换算（2026-09-30，分支 `claude/38-effort-receipt`，基于 main `bf4f740c3`）
+
+- `test_responses_reasoning.py`：
+  - `test_receipt_tells_the_truth_about_off_and_max_on_chatgpt`：ChatGPT 订阅地址、没有声明档位时 off 回执“不改变请求”、max 回执“实际发送 high”；
+    声明 luna 档位后 max 回执“发送 max”；声明了 none 时 off 回执“关闭思考（发送 none）”；声明里没有对应档位时回执“不改变请求”。
+  - `test_receipt_names_the_effort_actually_sent`：五组声明 × 全部档位，回执里写出的服务商档位就是 `responses_reasoning_field` 发出的值，
+    不发字段时回执说“不改变请求”。
+- `test_reasoning_effort.py::test_effort_command_receipt_follows_responses_levels`：真实 `/effort` 控制命令，未声明与声明两种档案。
+- `test_parameter_registry.py`：参数中心的“实际效果”与回执同一入口，补 ChatGPT 未声明/声明两种情况。
+- **变异**（`mutate_receipt.py`，精确替换、按字节恢复）：7 个全部被杀（回执不看协议、丢声明档位、实际档位不同也说一致、off 说成关闭、
+  `/effort` 与参数中心各自退回只看控制方式、协议名取错）。
+
 ## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
 
 - `test_runtime_context_pressure.py`：
