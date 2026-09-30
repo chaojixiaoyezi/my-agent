@@ -61,13 +61,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["instructions"] = "\n\n".join(item["content"] for item in payload["input"] if item.get("role") == "system")
             payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
         validate_responses_input(payload["input"])
-        from .provider_headers import current_provider_session
-
-        session = current_provider_session()
-        if session:
-            # 参考官方 Codex：同一会话的请求带上稳定缓存键，让服务商把同一会话路由到同一份提示缓存；
-            # 只在绑定宿主会话时写入，绝不生成随机键，避免破坏缓存命中。
-            payload["prompt_cache_key"] = session
+        payload.update(_session_cache_key())
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
         if self.stream_enabled:
             payload["stream"] = True
@@ -79,3 +73,13 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         else:
             obj = self.request_json("/responses", payload, headers)
         return ModelResponse(backend=self.name, **response_fields(obj, self.model_name))
+
+
+# LLM: 参考官方 Codex：同一会话的请求带稳定缓存键（宿主绑定的 owner+thread 摘要，不含凭据），让服务商把同一会话
+#   路由到同一份提示缓存；只在绑定宿主会话时写入，绝不生成随机键。改动须同步 test_responses_cache_key。
+# 函数用途: 返回要并进 Responses 请求体的缓存键字段；没有绑定会话时返回空字典。
+def _session_cache_key() -> dict:
+    from .provider_headers import current_provider_session
+
+    session = current_provider_session()
+    return {"prompt_cache_key": session} if session else {}
