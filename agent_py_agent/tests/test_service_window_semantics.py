@@ -163,7 +163,7 @@ def test_explicit_done_is_accepted_after_service_window_elapsed():
     assert task.failure_type == ""
 
 
-def test_create_tool_passes_service_window_into_created_run(monkeypatch):
+def test_create_tool_passes_service_window_into_created_run(monkeypatch, tmp_path):
     # 工具层端到端:create_subagents 声明的窗口经 create_policy 落进 create_run 的
     # attributes(mock manager 捕获真实调用参数,验证声明→任务落盘链)。
     from pathlib import Path
@@ -171,6 +171,9 @@ def test_create_tool_passes_service_window_into_created_run(monkeypatch):
 
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
+    # 建子代理会按 agent.home_paths.owner_home_dir 写任务进度；MagicMock 当路径用时是相对路径
+    # "MagicMock/..."，不切目录就会写进仓库根目录（导出目录里没有 .gitignore，架构守卫会报 MagicMock 产物）。
+    monkeypatch.chdir(tmp_path)
     mock_agent = MagicMock()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
