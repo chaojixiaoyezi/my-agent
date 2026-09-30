@@ -4,7 +4,9 @@
 #   09-30 实测：普通 SSE 长输出在服务端中途卡住、约 60 秒后被关（gpt-6-luna 4/4），同一请求走 WebSocket 2/2 完整。
 #   超时语义与 SSE 相同：首个事件单独预算，之后按 request.timeout 滚动空闲；/stop 立即关连接并抛 InterruptedError；
 #   握手失败沿 HTTP 同一分类（_runtime_http_error / _runtime_network_error）并按同一有限次数重试；回复完成前断开抛可恢复的
-#   ProviderTransientError，交给上层模型重试。实验发送许可不支持（拒绝发送）。改动须同步 test_responses_websocket。
+#   ProviderTransientError（文本带阶段、连接后秒数和关闭码，供排查），交给上层模型重试。实验发送许可不支持（拒绝发送）。
+#   与官方 Codex 一致不主动发心跳 ping，只自动回应服务端 ping（09-30 审计：49 次里 2 次在 23–24 秒中途断开，紧跟客户端
+#   第 20 秒的 ping）。改动须同步 test_responses_websocket。
 # 模块用途: 让 ChatGPT 订阅模型的长回复（含 Compact 摘要）不再中途断线。
 from __future__ import annotations
 
@@ -98,7 +100,8 @@ def _open_connection(request: GatewayRequest):
 
 
 # LLM: 代理沿环境变量（与 urllib 相同的 HTTPS_PROXY 等），不绕开本机代理；连接超时用 connect_timeout；
-#   ping 保活由库处理，服务端 ping 自动回 pong。认证头来自同一个 GatewayRequest，本函数不读凭据。
+#   不开客户端 ping（ping_interval=None，与官方 Codex 相同），服务端 ping 仍由库自动回 pong；死连接靠 _events 的
+#   首包/空闲超时收口。认证头来自同一个 GatewayRequest，本函数不读凭据。
 # 函数用途: 按请求信封打开一条 WebSocket 连接。
 def _connect(request: GatewayRequest):
     from websockets.sync.client import connect
@@ -109,17 +112,19 @@ def _connect(request: GatewayRequest):
                       _DEFAULT_USER_AGENT)
     return connect(websocket_url(request.url), additional_headers=headers, user_agent_header=user_agent,
                    open_timeout=max(1.0, float(request.connect_timeout or 10.0)), max_size=_MAX_MESSAGE_BYTES,
-                   ping_interval=20, ping_timeout=60, close_timeout=5)
+                   ping_interval=None, ping_timeout=None, close_timeout=5)
 
 
 # LLM: 首条事件用首包预算，之后每条有效消息把期限滚动到 request.timeout；每秒醒一次检查停止。
-#   回复完成前连接断开：用户停止→InterruptedError；否则可恢复的 ProviderTransientError（不当成完整回复）。
+#   回复完成前连接断开：用户停止→InterruptedError；否则可恢复的 ProviderTransientError（不当成完整回复），
+#   文本附当前阶段（first_event/stream_idle）、连接后秒数和关闭帧信息，只作诊断，不参与任何判定。
 #   终态事件（completed/incomplete/failed/error）产出后即结束，只读结构化 type 字段判断。
 # 函数用途: 逐条读取服务端事件，处理空闲超时、用户停止和中途断开。
 def _events(connection, request: GatewayRequest) -> Iterator[str]:
     from websockets.exceptions import ConnectionClosed
 
-    deadline, stage = time.monotonic() + _stream_first_event_timeout(request), "first_event"
+    started = time.monotonic()
+    deadline, stage = started + _stream_first_event_timeout(request), "first_event"
     while True:
         try:
             message = connection.recv(timeout=max(0.01, min(_STOP_CHECK_SECONDS, deadline - time.monotonic())))
@@ -131,7 +136,8 @@ def _events(connection, request: GatewayRequest) -> Iterator[str]:
         except ConnectionClosed as exc:
             _raise_if_stopped(exc)
             raise ProviderTransientError(
-                f"网络请求失败: 模型接口 WebSocket 在回复完成前断开（{request.url}）。本次请求可由重试/恢复/接管继续处理；"
+                f"网络请求失败: 模型接口 WebSocket 在回复完成前断开（{request.url}；阶段 {stage}，连接后 "
+                f"{time.monotonic() - started:.1f} 秒，{_close_detail(exc)}）。本次请求可由重试/恢复/接管继续处理；"
                 f"底层错误: {type(exc).__name__}") from exc
         _raise_if_stopped()
         text = message if isinstance(message, str) else bytes(message).decode("utf-8", "replace")
@@ -139,6 +145,17 @@ def _events(connection, request: GatewayRequest) -> Iterator[str]:
         if _event_type(text) in _TERMINAL_EVENT_TYPES:
             return
         deadline, stage = time.monotonic() + max(1.0, float(request.timeout or 0)), "stream_idle"
+
+
+# LLM: 只取 websockets 关闭异常上的结构化关闭帧（先看服务端 rcvd，再看本端 sent）；原因文本截到 120 字。
+#   没有关闭帧（例如 TCP 直接断开）写“无关闭帧”。只拼诊断文字，不参与重试或状态判定。
+# 函数用途: 把连接关闭信息整理成一句话，方便排查是谁、以什么码关的连接。
+def _close_detail(exc: BaseException) -> str:
+    for side, frame in (("服务端", getattr(exc, "rcvd", None)), ("本端", getattr(exc, "sent", None))):
+        if frame is not None:
+            reason = str(getattr(frame, "reason", "") or "")[:120]
+            return f"{side}关闭码 {int(getattr(frame, 'code', 0) or 0)}" + (f"，原因 {reason}" if reason else "")
+    return "无关闭帧"
 
 
 # LLM: 只读事件的 type 字段；坏 JSON 返回空串（照常交给 collect_response，由它报无效 JSON）。

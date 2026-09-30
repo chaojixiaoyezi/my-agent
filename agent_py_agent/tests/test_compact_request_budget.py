@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.backends.errors import ProviderContextWindowError
+from agent_py_agent.agent.backends.errors import (
+    ProviderContextWindowError,
+    ProviderQuotaExhaustedError,
+    ProviderRequestRejectedError,
+    ProviderTransientError,
+)
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 from agent_py_agent.agent.conversation import compact_request_budget as budget_module
@@ -506,3 +511,74 @@ def test_tool_call_fallback_does_not_hide_a_source_that_changed_during_segments(
     with pytest.raises(ConversationCompactError) as error:
         budget_module.generate_bounded_compact_response(_request("来源会变"))
     assert error.value.code == "COMPACT_SOURCE_CHANGED"
+
+
+_RETRY_WAIT = "agent_py_agent.agent.agent_core.provider_transient_auto_resume.wait_interruptibly"
+
+
+def test_transient_disconnect_resends_the_same_summary_request_after_backoff(monkeypatch):
+    request = _request("短历史")
+    calls, waits = [], []
+
+    def generate(candidate):
+        calls.append(candidate)
+        if len(calls) == 1:
+            raise ProviderTransientError("模型接口 WebSocket 在回复完成前断开")
+        return ModelResponse(text="摘要", backend="fake")
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    monkeypatch.setattr(_RETRY_WAIT, waits.append)
+    response = budget_module.generate_bounded_compact_response(request)
+    assert response.text == "摘要"
+    # 原样重发同一个请求，不改成分段、不缩预算。
+    assert len(calls) == 2 and calls[0] == calls[1] and calls[0].messages == request.messages
+    assert len(waits) == 1 and waits[0] > 0
+
+
+def test_transient_disconnect_in_one_segment_resends_only_that_segment(monkeypatch):
+    request = _request("中间也必须保留🪴\n" * 3000)
+    prompts, waits = [], []
+
+    def generate(candidate):
+        prompts.append(candidate.prompt)
+        if len(prompts) == 2:
+            raise ProviderTransientError("断开")
+        return ModelResponse(text="保留先前事实与本段的新事实", backend="fake")
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    monkeypatch.setattr(_RETRY_WAIT, waits.append)
+    budget_module.generate_bounded_compact_response(request)
+    assert prompts[1] == prompts[2] and len(waits) == 1
+    covered = [segment_part(prompt)[3] for index, prompt in enumerate(prompts) if index != 1]
+    assert "".join(covered) == json.dumps(request.messages, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("error", [ProviderQuotaExhaustedError("额度已用完"), ProviderRequestRejectedError("请求被拒绝")])
+def test_quota_and_rejection_are_not_resent(monkeypatch, error):
+    calls, waits = [], []
+
+    def generate(candidate):
+        calls.append(candidate)
+        raise error
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    monkeypatch.setattr(_RETRY_WAIT, waits.append)
+    with pytest.raises(type(error)):
+        budget_module.generate_bounded_compact_response(_request("短历史"))
+    assert len(calls) == 1 and waits == []
+
+
+def test_retries_stop_at_the_configured_budget(monkeypatch):
+    calls, waits = [], []
+
+    def generate(candidate):
+        calls.append(candidate)
+        raise ProviderTransientError("一直断开")
+
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
+    monkeypatch.setattr(_RETRY_WAIT, waits.append)
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.provider_transient_auto_resume.provider_transient_retry_delays",
+                        lambda policy=None: (1.0, 2.0))
+    with pytest.raises(ProviderTransientError, match="一直断开"):
+        budget_module.generate_bounded_compact_response(_request("短历史"))
+    assert len(calls) == 3 and len(waits) == 2

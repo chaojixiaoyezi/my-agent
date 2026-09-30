@@ -5,6 +5,7 @@ import json
 import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus
+from websockets.frames import Close
 from websockets.http11 import Response
 
 from agent_py_agent.agent.backends import get_backend
@@ -97,14 +98,31 @@ def test_headers_keep_auth_add_beta_and_drop_http_only_fields(monkeypatch):
     assert headers["OpenAI-Beta"] == ws.BETA_HEADER_VALUE
     assert not {"Content-Type", "Accept"} & set(headers)
     assert captured["user_agent_header"].startswith("my-agent/")
+    # 与官方 Codex 一致不主动发心跳 ping（服务端 ping 仍由库自动回应）。
+    assert captured["ping_interval"] is None and captured["ping_timeout"] is None
 
 
 def test_disconnect_before_completion_is_a_recoverable_error(monkeypatch):
     connection = FakeConnection([completed_events()[2], ConnectionClosedError(None, None)])
     monkeypatch.setattr(ws, "_connect", lambda req: connection)
-    with pytest.raises(ProviderTransientError, match="回复完成前断开"):
+    with pytest.raises(ProviderTransientError, match="回复完成前断开") as caught:
         collect_response(ws.iter_responses_websocket(request()), None, None)
     assert connection.closed
+    assert "阶段 stream_idle" in str(caught.value) and "无关闭帧" in str(caught.value)
+
+
+def test_disconnect_diagnostics_name_the_closing_side_code_and_stage(monkeypatch):
+    server_close = ConnectionClosedError(Close(1011, "keepalive ping timeout"), None)
+    monkeypatch.setattr(ws, "_connect", lambda req: FakeConnection([server_close]))
+    with pytest.raises(ProviderTransientError) as caught:
+        list(ws.iter_responses_websocket(request()))
+    text = str(caught.value)
+    assert "阶段 first_event" in text and "服务端关闭码 1011" in text and "原因 keepalive ping timeout" in text
+    local_close = ConnectionClosedError(None, Close(1001, ""))
+    monkeypatch.setattr(ws, "_connect", lambda req: FakeConnection([completed_events()[0], local_close]))
+    with pytest.raises(ProviderTransientError) as caught:
+        list(ws.iter_responses_websocket(request()))
+    assert "阶段 stream_idle" in str(caught.value) and "本端关闭码 1001）" in str(caught.value)  # 原因为空时不写“原因”
 
 
 def test_silence_times_out_with_the_same_stages_as_sse(monkeypatch):

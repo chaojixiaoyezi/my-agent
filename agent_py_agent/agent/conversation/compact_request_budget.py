@@ -1,5 +1,6 @@
 # LLM: 摘要请求复用原缓存前缀和工具目录，但显式 none 禁止选择工具；本模块不执行工具或拥有 checkpoint 状态。
 # 分段沿原有界纠正和机械摘录，非分段仍保持原严格/普通截断规则；诊断只投影响应形状，不成为新的状态事实源。
+# 每次摘要请求遇到结构化瞬时错误（断流、限流、过载、首包/空闲超时）按主回合同一退避配置原地重发，见 _generate_auxiliary_with_retry。
 # 模块用途: 在当前窗口内发送只读摘要，超量时顺序分段保留完整源历史；失败日志不泄露原文或增加恢复请求。
 
 from __future__ import annotations
@@ -156,7 +157,18 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
 # LLM: 只在完整来源已容纳时物化原运输列表；请求失败退出本帧后释放临时数组，外层仍持可重放来源。
 # 函数用途: 保持AuxiliaryModelCallRequest及供应商接口不接磁盘视图，普通列表请求原对象直传。
 def _generate_materialized_response(request, source):
-    return generate_auxiliary_model_response(request if source is None else replace(request, messages=list(source)))
+    return _generate_auxiliary_with_retry(request if source is None else replace(request, messages=list(source)))
+
+
+# LLM: 与主回合模型采样同一退避口径（provider_transient_auto_resume，间隔读运行护栏配置
+#   provider_transient_auto_resume_delays_seconds）：只重发结构化瞬时错误；用户中断立即上抛，窗口错误、额度、认证、
+#   请求拒绝照旧直接上抛（窗口错误仍由调用方减半分段处理）。每次尝试各自进辅助调用账本。摘要请求不向界面流式输出，
+#   重发不会重复显示内容。09-30：订阅 WebSocket 偶发中途断开，一段摘要断一次不应让整次压缩失败。
+# 函数用途: 发一次摘要辅助请求，遇到可恢复的网络故障时按配置间隔自动重发。
+def _generate_auxiliary_with_retry(request: AuxiliaryModelCallRequest) -> object:
+    from ..agent_core.provider_transient_auto_resume import run_with_provider_transient_auto_resume
+
+    return run_with_provider_transient_auto_resume(lambda: generate_auxiliary_model_response(request))
 
 
 # LLM: Count the same complete surface sent by AuxiliaryModelCallRequest, including schemas and
@@ -280,7 +292,7 @@ def _summarize_segment(
             raise ConversationCompactError("分段摘要请求超出当前预算，保留原始来源", code="COMPACT_SEGMENT_REQUEST_TOO_LARGE")
         raise_if_compact_interrupted(interrupt_check)
         try:
-            response = generate_auxiliary_model_response(candidate)
+            response = _generate_auxiliary_with_retry(candidate)
         except ProviderContextWindowError:
             # 同一源片段按更小窗口重试，不跳过字节；小到无法容纳固定前缀时明确失败。
             budget = max(1, min(budget - 1, _request_tokens(candidate) // 2))

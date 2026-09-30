@@ -20,6 +20,18 @@
 - **变异**（`mutate_receipt.py`，精确替换、按字节恢复）：7 个全部被杀（回执不看协议、丢声明档位、实际档位不同也说一致、off 说成关闭、
   `/effort` 与参数中心各自退回只看控制方式、协议名取错）。
 
+## WebSocket 断开加固与 Compact 摘要瞬时错误重发（2026-09-30，分支 `claude/3a-ws-robustness`，基于 `bf4f740c3`）
+
+- `test_responses_websocket.py`：连接参数断言不主动发 ping（`ping_interval`/`ping_timeout` 为 None）；中途断开的错误文本带阶段和
+  “无关闭帧”；新增 `test_disconnect_diagnostics_name_the_closing_side_code_and_stage`（服务端关闭码 1011 带原因、首事件阶段；本端 1001
+  无原因、空闲阶段）。
+- `test_compact_request_budget.py` 新增四项：整段摘要断开一次后按退避原样重发同一请求（不改分段、不缩预算）；分段路径只重发出错的
+  那一段，拼回完整来源；额度用完、请求被拒绝不重发、不等待；一直断开时按配置次数（改成两档）停止并抛出原错误。
+- 回归：73 个 `test_*compact*.py` 加 `test_provider_transient_auto_resume.py`、`test_gateway_request_runtime_errors.py`、
+  `test_tool_model_generation.py`、`test_wake_poison.py`、`test_tool_loop_model_turn.py`、`test_gateway_helpers.py` 等共 1558 passed（127.7 秒）。
+- 变异（精确替换、按字节恢复）7/7 被杀：恢复客户端 ping、不看服务端关闭帧、断开文本丢阶段、整段摘要不重试、分段摘要不重试、
+  什么错都重试、关闭原因不写。
+
 ## TUI 上下文数字忽高忽低：持久校准指纹跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`）
 
 - `test_runtime_context_pressure.py`：

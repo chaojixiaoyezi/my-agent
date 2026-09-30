@@ -14,6 +14,18 @@
   - MiniMax `M3` 声明 `reasoning_control: budget`（只开 / 关）；
   - opencode `deepseek-v4-flash`、MiniMax `M2.7` 保持不声明（none）。
 
+## WebSocket 断开加固：不再主动发心跳、断开带诊断，Compact 摘要遇瞬时错误原地重发（2026-09-30，已实现，待上线）
+
+- **来源**：38 的智能程度审计里，订阅 WebSocket 49 次请求有 2 次在第 23–24 秒"回复完成前断开"（握手已成功），都紧跟客户端
+  第 20 秒的心跳 ping；错误里没有关闭码，也分不清断在哪个阶段。另查到 Compact 摘要走辅助调用，没有任何瞬时错误重试。
+- **做法**：① 仿照官方 Codex 不主动发 ping（服务端 ping 照常自动回应），死连接靠首事件/空闲超时收口；② 断开错误文本附阶段、
+  连接后秒数、关闭方与关闭码/原因；③ Compact 摘要（整段、分段、看图）请求复用主回合同一退避器原地重发瞬时错误，分段只重发出错的
+  那一段。没有新增配置，退避间隔沿用 `provider_transient_auto_resume_delays_seconds`。
+- **验证**：`test_responses_websocket.py`、`test_compact_request_budget.py` 新增用例；73 个 Compact 相关文件及错误/重试相关测试
+  1558 项通过；7 个变异全部被抓住。详见 [订阅接口改走 WebSocket](docs/design/MODEL_OAUTH.md) 与
+  [摘要请求的瞬时错误重发](docs/design/CONVERSATION_CONTEXT_DESIGN.md#摘要请求的瞬时错误重发2026-09-30)。
+- **待观察**：去掉客户端 ping 后的断开率要靠上线后的真实请求统计确认；如果仍有断开，下一步参考 Codex 的会话级回退（重试用完后本会话改走 HTTP）。
+
 ## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
 
 - **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的

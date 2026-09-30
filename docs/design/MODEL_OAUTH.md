@@ -73,6 +73,11 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
   `OpenAI-Beta: responses_websockets=2026-02-06`，发 `{"type": "response.create", …}`，逐条产出与 SSE 相同的事件文本交原
   `collect_response`；超时（首事件/滚动空闲）、/stop、握手失败的错误分类与重试、观察事件口径都与 SSE 相同，回复完成前断开抛可恢复错误。
   只有登录模式 `chatgpt` 的 Responses 走它（`OAuthResponsesBackend.request_stream_iter`），其它服务商与登录模式仍走 SSE。不固定模型、不换模型。
+- **心跳与断开诊断（09-30 加固）**：审计 49 次 WebSocket 请求有 2 次在第 23–24 秒中途断开（握手 101 之后），都紧跟客户端第 20 秒的
+  心跳 ping；官方 Codex 不主动发 ping，只回应服务端 ping。现在同样关闭客户端 ping（`ping_interval=None`，服务端 ping 仍由库自动回 pong），
+  死连接由首事件/滚动空闲超时收口。断开错误文本附阶段（first_event / stream_idle）、连接后秒数和关闭帧（服务端或本端关闭码与原因，
+  无关闭帧时写明），只作排查，不参与判定。中途断开照旧是可恢复错误：主回合由模型回合级退避重试；Compact 摘要请求也按同一退避配置
+  原地重发（见[对话上下文 · 摘要请求的瞬时错误重发](CONVERSATION_CONTEXT_DESIGN.md#摘要请求的瞬时错误重发2026-09-30)）。
 - **依赖**：直接使用 `websockets`（BSD-3-Clause）。它原已随 `lark-oapi`（飞书长连接）安装，现在 pyproject 显式声明。
   收益是与服务商推荐的传输一致、长回复不断线；替代方案（标准库自写 RFC 6455 客户端）要自己处理握手、掩码、分片、ping 和代理 CONNECT，
   代码量与风险更大，不采用。
