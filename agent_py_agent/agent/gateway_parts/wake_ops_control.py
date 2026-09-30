@@ -1,7 +1,7 @@
 # LLM: /wakes 只在已认证 scope 解析出的本机管理员 owner 上执行，不开放给模型。列表与预览只读；只有 replay confirm 才写：
 #   经 store.wakes.attempts.replay 在结案锁里按原 ID 和冻结内容写回 pending、结案记录移入 replayed 留档、尝试账清零。
-#   能否重放的来源状态只读 attempts.replay_source（已归档、读不出、不存在各有码），领域终态判定 _wake_domain_terminal
-#   是本地版本：毒丸第 3 步 C4 落地 conversation/wake_domain_closeout.wake_domain_terminal 后改成导入它、删掉这里的版本。
+#   能否重放的来源状态只读 attempts.replay_source（已归档、读不出、不存在各有码）；领域终态只用毒丸第 3 步 C4 的
+#   conversation/wake_domain_closeout.wake_domain_status / wake_domain_terminal（唯一判定，读账异常照常上抛），这里只把裸状态拼成提示。
 #   成功重放打一行 [background-wake-poison] wake_replayed 事件（只有结构化字段）。错误码都登记在 ERROR_CONTRACTS。
 #   原因码是开放集合：已知码与已知前缀带中文短说明，认不出的只显示原码，不因不在表里拒绝。
 #   改动须同步 test_wake_ops_control.py 与 CLI_REFERENCE.md 的 /wakes 说明。
@@ -14,8 +14,7 @@ from functools import partial
 from typing import Any
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
-from ..conversation.models import SESSION_MESSAGE_WAKE_REASON, SESSION_TASK_WAKE_REASON, WakeSignal
-from ..conversation.session_tasks import SESSION_TASK_TERMINAL_STATUSES
+from ..conversation.models import SESSION_TASK_WAKE_REASON, WakeSignal
 from ..conversation.store_wake_attempts import (
     WAKE_REPLAY_ARCHIVED,
     WAKE_REPLAY_DOMAIN_TERMINAL,
@@ -23,6 +22,7 @@ from ..conversation.store_wake_attempts import (
     WAKE_REPLAY_PENDING_CONFLICT,
     WAKE_REPLAY_SOURCE_UNREADABLE,
 )
+from ..conversation.wake_domain_closeout import wake_domain_status, wake_domain_terminal
 from ..conversation.wake_poison import (
     WAKE_REASON_ATTEMPT_ABANDONED,
     WAKE_REASON_CHANNEL_UNAVAILABLE,
@@ -36,10 +36,6 @@ from ..user_space.approval_mode import is_permission_admin
 _KIND = "wakes"
 _QUARANTINED_LIST_LIMIT = 30
 _ADMIN_ONLY = "WAKE_OPS_ADMIN_ONLY"
-# 会话消息回执里算「已结束」的状态（回执状态全集：pending/reserved/submitted/consumed/rejected，见 store_guidance_records）。
-_MESSAGE_RECEIPT_TERMINAL = frozenset({"consumed", "rejected"})
-# 会话消息唤醒 metadata 里这条消息的去重键；没带键的旧唤醒查不到回执，按「领域未结束」处理（重放后由消费判定自己收口）。
-_MESSAGE_KEY_FIELD = "message_dedupe_key"
 _REASON_TEXT = {
     WAKE_REASON_RUN_NO_REPORT: "执行结束但没有报告",
     WAKE_REASON_DELIVERY_NOT_COMMITTED: "回复没能交付",
@@ -82,7 +78,7 @@ def execute_wake_ops_control(owner_agent: object, command: ConversationControlCo
 # 函数用途: 把一条已核实可重放的结案唤醒放回待处理队列，并打运维事件（写唤醒队列、留档与尝试账）。
 def _replay(store: object, signal: WakeSignal, record: dict[str, Any]) -> ConversationControlResult:
     result = store.wakes.attempts.replay(
-        signal.wake_signal_id, now=time.time(), domain_terminal=partial(_wake_domain_terminal, store),
+        signal.wake_signal_id, now=time.time(), domain_terminal=partial(wake_domain_terminal, store),
     )
     if not result.ok:
         return _refusal(result.error_code, signal.wake_signal_id, store, result.signal or signal)
@@ -100,36 +96,24 @@ def _replay(store: object, signal: WakeSignal, record: dict[str, Any]) -> Conver
 def _replay_blocker(store: object, signal: WakeSignal) -> str:
     if store.wakes.pending_one(signal.wake_signal_id) is not None:
         return WAKE_REPLAY_PENDING_CONFLICT
-    return WAKE_REPLAY_DOMAIN_TERMINAL if _wake_domain_terminal(store, signal) else ""
+    return WAKE_REPLAY_DOMAIN_TERMINAL if wake_domain_terminal(store, signal) else ""
 
 
-# LLM: 本地版本，毒丸第 3 步 C4 落地后改为导入 wake_domain_closeout.wake_domain_terminal。判定只读结构化字段：
-#   会话任务唤醒看 metadata.session_task_id 对应任务是否已在 SESSION_TASK_TERMINAL_STATUSES；会话消息唤醒看 metadata 里
-#   这条消息的回执是否 consumed/rejected；其它 reason 不做领域检查。
-# 函数用途: 判断一条已结案唤醒对应的事是否已经结束（结束了就不该重放，应重新派活）。
-def _wake_domain_terminal(store: object, signal: WakeSignal) -> bool:
-    return bool(_domain_status(store, signal))
-
-
-# LLM: 返回已结束时的领域状态文字（例如「会话任务已是 failed」），未结束或不适用返回空串；读取异常照常上抛，由控制入口兜底。
-# 函数用途: 读出一条唤醒对应的会话任务或会话消息的结束状态，供判定和提示共用。
-def _domain_status(store: object, signal: WakeSignal) -> str:
-    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-    if signal.reason == SESSION_TASK_WAKE_REASON:
-        task_id = str(metadata.get("session_task_id") or "").strip()
-        status = str(getattr(store.session_tasks.load(task_id), "status", "") or "") if task_id else ""
-        return f"会话任务已是 {status}" if status in SESSION_TASK_TERMINAL_STATUSES else ""
-    if signal.reason == SESSION_MESSAGE_WAKE_REASON:
-        key = str(metadata.get(_MESSAGE_KEY_FIELD) or "").strip()
-        status = str(getattr(store.guidance.receipt(key), "status", "") or "") if key else ""
-        return f"会话消息回执已是 {status}" if status in _MESSAGE_RECEIPT_TERMINAL else ""
-    return ""
+# LLM: 状态只取 wake_domain_status 的裸状态（任务 done/failed/cancelled、回执 consumed/rejected，未结束为空串），这里只负责
+#   拼成给管理员看的文字；reason 与 C4 一样按 strip().lower() 比较。读取异常照常上抛，由控制入口兜底。
+# 函数用途: 把一条唤醒对应的会话任务或会话消息的结束状态写成提示文字，未结束返回空串。
+def _domain_text(store: object, signal: WakeSignal) -> str:
+    status = wake_domain_status(store, signal)
+    if not status:
+        return ""
+    noun = "会话任务" if str(signal.reason or "").strip().lower() == SESSION_TASK_WAKE_REASON else "会话消息回执"
+    return f"{noun}已是 {status}"
 
 
 # LLM: 模板按码取，认不出的码给通用句并带原码；领域终态时重读一次领域状态写进提示。只读，不改文件。
 # 函数用途: 把一个重放拒绝码转成给管理员看的结果，领域终态时带上具体状态。
 def _refusal(code: str, wake_signal_id: str, store: object, signal: WakeSignal | None) -> ConversationControlResult:
-    domain = _domain_status(store, signal) if code == WAKE_REPLAY_DOMAIN_TERMINAL and signal is not None else ""
+    domain = _domain_text(store, signal) if code == WAKE_REPLAY_DOMAIN_TERMINAL and signal is not None else ""
     text = _REFUSALS.get(code, "唤醒 {id} 暂时不能重放（{code}），没有做任何改动。")
     return ConversationControlResult(_KIND, False, text.format(id=wake_signal_id, domain=domain, code=code), error_code=code)
 

@@ -5,7 +5,9 @@
 #   每条顶层记录在它自己的结案锁（wake_quarantine_path）里移动，与 WakeAttemptStore.quarantine/replay 串行。
 #   归档只换物理位置、不改发布语义：archive/<id>.json 仍是发布层的只读安装位置（store_wake_publication._installed_signal），
 #   同键再发布返回原结案信号；重放对已归档的记录拒绝（WAKE_REPLAY_ARCHIVED）。改动时联测 test_wake_quarantine_archive.py。
-# 模块用途: 在 6 小时一次的账本整理里，把超过 14 天的唤醒结案记录和留档移进归档目录，列表和计数只看近期的，运维清理只管归档目录。
+#   运维不能单独删 archive/<id>.json：同键回执还在时，再发布和查回执会抛 DataCorruptionError；要删必须连同 wake_queue/dedupe
+#   里同键的回执一起删（见 docs/design/WAKE_POISON_PILL.md 第 8 节）。
+# 模块用途: 在 6 小时一次的账本整理里，把超过 14 天的唤醒结案记录和留档移进归档目录，列表和计数只看近期的；清理归档须连同去重回执一起删。
 from __future__ import annotations
 
 import math

@@ -522,6 +522,25 @@ class TestQuarantineUnreadableAndCorrupt:
         assert (replay.ok, replay.error_code) == (False, WAKE_REPLAY_SOURCE_UNREADABLE)
         assert record.read_text(encoding="utf-8") == "{not json"
 
+    @pytest.mark.parametrize("damage", ["bad_envelope", "id_mismatch"])
+    def test_a_record_that_does_not_restore_to_the_same_wake_is_refused_on_replay(self, tmp_path, damage):
+        # 结案记录读得出，但还原不成信封，或还原出的是别的 ID：重放和预览都拒绝，不抛异常、不改文件（be 第 4 步建议 1）。
+        store = _store(tmp_path)
+        signal = _raise(store)
+        store.wakes.attempts.quarantine(signal.wake_signal_id, _poison(store, signal).decision, now=200.0)
+        record = store.storage.wake_quarantine_path(signal.wake_signal_id)
+        payload = json.loads(record.read_text(encoding="utf-8"))
+        if damage == "bad_envelope":
+            payload["created_at"] = "not-a-number"
+        else:
+            payload["wake_signal_id"] = "wake-someone-else"
+        record.write_text(json.dumps(payload), encoding="utf-8")
+        before = record.read_bytes()
+        assert store.wakes.attempts.replay_source(signal.wake_signal_id) == (WAKE_REPLAY_SOURCE_UNREADABLE, {})
+        replay = store.wakes.attempts.replay(signal.wake_signal_id, now=300.0)
+        assert (replay.ok, replay.error_code) == (False, WAKE_REPLAY_SOURCE_UNREADABLE)
+        assert record.read_bytes() == before and store.wakes.pending(limit=0) == []
+
     def test_a_corrupt_ledger_is_preserved_next_to_the_record_not_reset(self, tmp_path):
         store = _store(tmp_path)
         signal = _raise(store)

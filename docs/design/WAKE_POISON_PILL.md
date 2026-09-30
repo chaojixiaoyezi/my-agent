@@ -240,7 +240,10 @@ pending 和 handled 两种状态。所以尝试账不能写进信封。
   重放对已归档的记录拒绝（`WAKE_REPLAY_ARCHIVED`）。「14 天后同键可以重新发布」没有采用：那要连去重回执和观察配对一起动，
   还会让 `thread-goal:<goal_id>` 这类复用键自己复活，和上面「只能人工重放」冲突；要放开需另立设计项。
 - 列表和计数不含已归档的。会话删除一并清理 `archive/` 顶层带 thread_id 的记录；`archive/ledger/`、`archive/unreadable/`
-  与原来的 `ledger/`、`unreadable/` 一样无法归属会话，由运维清理。
+  与原来的 `ledger/`、`unreadable/` 一样无法归属会话，也没有保留上限，由运维清理。
+- **运维删除归档记录的正确做法**：不能单独删 `archive/<id>.json`。它是发布层的只读安装位置，单删之后只要 `wake_queue/dedupe`
+  里同键的回执还在，同键再发布和查回执（`raise_signal`、`delivery_receipt`）都会抛 `DataCorruptionError("published wake signal is missing")`。
+  要清掉一条，必须和它同键的 `wake_queue/dedupe` 回执一起删；两者都删掉之后，同键再发布才会生成新一代信号。
 
 ## 9. 和现有兜底的关系
 

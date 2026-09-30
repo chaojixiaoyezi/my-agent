@@ -215,7 +215,7 @@
 
 ## 唤醒认领的毒丸处理（2026-09-28，分支 `claude/75-wake-poison-design`，基于 `f7a4cc909`，方案已审，分步实现中）
 
-- **第 3 步 C1 已落地（2026-09-29，分支 `claude/38-wake-poison-c1`，基于 9b 的 C5 `cb08b80dc`）**：纯函数与存储层补充，不接线。接线层（75 的 C2–C4）依赖的接口：`WakeAttemptFacts`/`verdict_for_attempt(facts)`、`ledger_corrupt_decision()`、`attempts.has_ledger/preflight/mark_stopping/discard`、`quarantine` 返回 `WakeQuarantineResult(settled, source_unreadable, ledger_preserved_at)`、`replay` 对读不出来源返回 WAKE_REPLAY_SOURCE_UNREADABLE。C6（停机标记）待 C3 的在途登记接口。留档目录 quarantine/unreadable、quarantine/ledger 不随线程删除（无法归属线程），由运维清理。
+- **第 3 步 C1 已落地（2026-09-29，分支 `claude/38-wake-poison-c1`，基于 9b 的 C5 `cb08b80dc`）**：纯函数与存储层补充，不接线。接线层（75 的 C2–C4）依赖的接口：`WakeAttemptFacts`/`verdict_for_attempt(facts)`、`ledger_corrupt_decision()`、`attempts.has_ledger/preflight/mark_stopping/discard`、`quarantine` 返回 `WakeQuarantineResult(settled, source_unreadable, ledger_preserved_at)`、`replay` 对读不出来源返回 WAKE_REPLAY_SOURCE_UNREADABLE。C6（停机标记）待 C3 的在途登记接口。留档目录 quarantine/unreadable、quarantine/ledger 不随线程删除（无法归属线程），满 14 天归档后由运维清理 archive/（清理规则见 WAKE_POISON_PILL.md 第 8 节：归档记录须连同同键去重回执一起删）；archive/unreadable、archive/ledger 没有保留上限（待定）。
 - **第 3 步 C2/C3 已落地（2026-09-29，分支 `claude/75-wake-poison-wiring`，进 step16m）**：C2 给 `run_claimed` 加领取观察者；C3 新模块
   `wake_attempt_tracking.py` 在唤醒车道批次消费处记账、结案，跳过阶段与就绪扫描读持久退避（细节见 WAKE_POISON_PILL 第 10 节第 3 点）。
   - 在途记录持久化回合号（`WakeAttemptStart.turn_id` 写进 `in_flight`，`InflightWakeAttempt.turn_id`）：3a 裁定进程中途被杀时

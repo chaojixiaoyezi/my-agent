@@ -361,8 +361,9 @@ class WakeAttemptStore:
 
 
 # LLM: 纯读、不取锁；来源状态的唯一判定，WakeAttemptStore.replay（在锁内）与 /wakes replay 预览共用：已移进归档的返回
-#   WAKE_REPLAY_ARCHIVED；信封当初读不出（留在 unreadable/）或结案记录本身读不出返回 WAKE_REPLAY_SOURCE_UNREADABLE；
-#   都没有返回 WAKE_REPLAY_NOT_FOUND；读得出返回空码和记录字典。
+#   WAKE_REPLAY_ARCHIVED；信封当初读不出（留在 unreadable/）、结案记录本身读不出、记录还原不成信封或信封 ID 与请求的
+#   ID 不一致，都返回 WAKE_REPLAY_SOURCE_UNREADABLE（不在坏内容上继续，也不抛异常）；都没有返回 WAKE_REPLAY_NOT_FOUND；
+#   读得出返回空码和记录字典。
 # 函数用途: 读出一条已结案唤醒的结案记录，读不到时说明原因。
 def wake_replay_source(storage: ConversationStorage, wake_signal_id: str) -> tuple[str, dict[str, Any]]:
     source = storage.wake_quarantine_path(wake_signal_id)
@@ -371,7 +372,21 @@ def wake_replay_source(storage: ConversationStorage, wake_signal_id: str) -> tup
     payload, error = read_json_object_report(source, context="conversation.wake_replay.read")
     if error is not None or _source_unreadable(storage, wake_signal_id, source):
         return WAKE_REPLAY_SOURCE_UNREADABLE, {}
-    return ("", payload) if payload else (WAKE_REPLAY_NOT_FOUND, {})
+    if not payload:
+        return WAKE_REPLAY_NOT_FOUND, {}
+    return ("", payload) if _restorable_signal(payload, wake_signal_id) else (WAKE_REPLAY_SOURCE_UNREADABLE, {})
+
+
+# LLM: 与 WakeAttemptStore.replay 同一还原方式（去掉 quarantine 事实、status 改回 pending、handled_at 清零）；WakeSignal.from_dict
+#   抛 ValueError/TypeError 或还原出的 wake_signal_id 与请求的不同都算坏记录。只读，不改文件。
+# 函数用途: 判断一条结案记录能否还原成要重放的那条唤醒。
+def _restorable_signal(payload: dict[str, Any], wake_signal_id: str) -> bool:
+    restored = {key: value for key, value in payload.items() if key != "quarantine"}
+    try:
+        signal = WakeSignal.from_dict({**restored, "status": "pending", "handled_at": 0.0})
+    except (ValueError, TypeError):
+        return False
+    return signal.wake_signal_id == wake_signal_id
 
 
 # LLM: 只数文件、不读内容：顶层结案记录加读不出的信封留档，不含已归档与重放留档。

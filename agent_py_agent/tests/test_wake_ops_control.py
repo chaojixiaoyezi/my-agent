@@ -210,6 +210,21 @@ def test_domain_terminal_session_task_and_message_are_refused(tmp_path, monkeypa
     assert _run(agent, f"/wakes replay {keyless.wake_signal_id} confirm").ok is True
 
 
+def test_preview_of_a_domain_terminal_wake_is_refused_without_changes(tmp_path, monkeypatch):
+    # 只读预览（不带 confirm）同样先核对领域终态：事已结束就直接拒绝，不给出"确认请输入"的提示，也不改任何文件。
+    agent, store, thread_id = _agent(tmp_path)
+    consumed = _quarantined(store, thread_id, wake={"reason": "session_message", "metadata": {"message_dedupe_key": "msg-1"}})
+    monkeypatch.setattr(store.guidance, "receipt", lambda key: SimpleNamespace(status="consumed") if key == "msg-1" else None)
+    record = store.storage.wake_quarantine_path(consumed.wake_signal_id)
+    before = record.read_bytes()
+
+    preview = _run(agent, f"/wakes replay {consumed.wake_signal_id}")
+
+    assert (preview.ok, preview.error_code) == (False, WAKE_REPLAY_DOMAIN_TERMINAL)
+    assert "会话消息回执已是 consumed" in preview.message and "confirm" not in preview.message
+    assert record.read_bytes() == before and store.wakes.pending(limit=0) == []
+
+
 def test_status_and_gateway_status_show_the_quarantined_count(tmp_path):
     agent, store, thread_id = _agent(tmp_path)
     _quarantined(store, thread_id)
