@@ -14,6 +14,7 @@ import time
 
 import pytest
 
+from agent_py_agent.agent.backends.errors import ProviderConnectionError, ProviderTransientError
 from agent_py_agent.agent.conversation import runtime as runtime_module
 from agent_py_agent.agent.conversation.background_execution import BackgroundCompactSliceYield
 from agent_py_agent.agent.conversation.session_messaging import (
@@ -46,9 +47,14 @@ def _claim(store: ConversationStore, key: str, turn_id: str) -> bool:
     return store.guidance.claim_for_turn(receipt.entry, expected_turn_id=turn_id, attempt_id=f"attempt-{turn_id}")
 
 
-# 函数用途: 模拟回合没消费就结束：Gateway 收尾对这一回合 reject_pending(reject_reserved=True)。
-def _end_turn(store: ConversationStore, turn_id: str) -> dict:
-    return store.guidance.recovery.reject_pending(turn_id, reject_reserved=True)
+# 会让回合崩溃的失败（唤醒毒丸计数的程序错误）：只有这类失败计入释放上限。
+_CRASH = RuntimeError("回合崩溃")
+
+
+# 函数用途: 模拟回合没消费就结束：Gateway 收尾对这一回合 reject_pending(reject_reserved=True)；failure 是回合抛出的异常，
+#   默认是计次的程序错误。
+def _end_turn(store: ConversationStore, turn_id: str, *, failure: BaseException | None = _CRASH) -> dict:
+    return store.guidance.recovery.reject_pending(turn_id, reject_reserved=True, failure=failure)
 
 
 # 函数用途: 写一条派活正文回执：metadata 带它所属的任务号（认领时按它核对归属）。
@@ -69,9 +75,11 @@ def _claim_body(store: ConversationStore, key: str, turn_id: str, owner: str) ->
     )
 
 
-# 函数用途: 模拟后台片异常结束的收尾：非取消时允许派活正文退回（只给同一回合号的重跑），取消时不退。
+# 函数用途: 模拟后台片异常结束的收尾：非取消时允许派活正文退回（只给同一回合号的重跑），取消时不退；默认是计次的程序错误。
 def _end_background_turn(store: ConversationStore, turn_id: str, *, cancelled: bool = False) -> dict:
-    return store.guidance.recovery.reject_pending(turn_id, reject_reserved=True, release_task_body=not cancelled)
+    return store.guidance.recovery.reject_pending(
+        turn_id, reject_reserved=True, release_task_body=not cancelled, failure=_CRASH,
+    )
 
 
 # 函数用途: 某一回合在精确回合索引里有没有登记这条回执（回合收尾按它找本回合的消息）。
@@ -186,7 +194,8 @@ def test_background_slice_settles_its_turn_input_only_on_abnormal_end(
     except RuntimeError:
         pass
     calls = [call for call in settled if call[0] == wake.wake_signal_id]
-    assert calls == ([(wake.wake_signal_id, expected)] if expected else [])
+    # 收尾把这一片抛出的异常原样交给 reject_pending，由它按唤醒毒丸的分类决定计不计次。
+    assert calls == ([(wake.wake_signal_id, {**expected, "failure": raised})] if expected else [])
 
 
 def test_task_body_goes_back_only_to_its_own_task_turn_after_a_failed_background_slice(tmp_path) -> None:
@@ -232,3 +241,40 @@ def test_task_body_release_stops_at_the_limit_with_a_structured_code(tmp_path) -
     assert receipt.status == "rejected"
     assert receipt.migration["rejection_code"] == SESSION_MESSAGE_RELEASE_LIMIT_REACHED
     assert not _claim_body(store, "body-1", "task-1", "task-1"), "转 rejected 后不再能认领"
+
+
+@pytest.mark.parametrize("failure", [
+    None, TimeoutError("超时"), InterruptedError("用户 /stop 或取消"), ProviderTransientError("429 或连接断开"),
+    ProviderConnectionError("代理配置错误"),
+], ids=["no-exception", "timeout", "stop-or-cancel", "provider-transient", "provider-environment"])
+def test_failures_the_poison_does_not_count_never_drop_the_message(tmp_path, failure) -> None:
+    """释放照常，但只有唤醒毒丸会计数的失败才计次（两层同一个判据 verdict_for_error）：超时、429、连接、环境故障、
+    用户 /stop 与取消、没有异常，连续多少次都只释放、不计次、不转 rejected；之后一次会计数的失败也只计第 1 次。"""
+    store = ConversationStore(tmp_path / "conv")
+    _append(store, "msg-1")
+    for index in range(1, SESSION_MESSAGE_RELEASE_LIMIT + 3):
+        assert _claim(store, "msg-1", f"turn-{index}"), f"第 {index} 回合应当能认领"
+        _end_turn(store, f"turn-{index}", failure=failure)
+        receipt = store.guidance.receipt("msg-1")
+        assert receipt.status == "pending" and "release_count" not in receipt.migration
+    assert _claim(store, "msg-1", "turn-crash")
+    _end_turn(store, "turn-crash")
+    assert store.guidance.receipt("msg-1").migration["release_count"] == 1
+
+
+def test_only_counted_failures_reach_the_limit_even_when_interleaved(tmp_path) -> None:
+    """计次的失败与不计次的结束交替出现：计满上限后，不计次的结束照样只释放；再来一次计次的失败才转 rejected。"""
+    store = ConversationStore(tmp_path / "conv")
+    _append(store, "msg-1")
+    turns = iter(range(1, 100))
+    for _index in range(SESSION_MESSAGE_RELEASE_LIMIT):
+        for failure in (_CRASH, TimeoutError("超时")):
+            turn = f"turn-{next(turns)}"
+            assert _claim(store, "msg-1", turn)
+            _end_turn(store, turn, failure=failure)
+    receipt = store.guidance.receipt("msg-1")
+    assert (receipt.status, receipt.migration["release_count"]) == ("pending", SESSION_MESSAGE_RELEASE_LIMIT)
+    turn = f"turn-{next(turns)}"
+    assert _claim(store, "msg-1", turn)
+    _end_turn(store, turn)
+    assert store.guidance.receipt("msg-1").migration.get("rejection_code") == SESSION_MESSAGE_RELEASE_LIMIT_REACHED

@@ -2208,6 +2208,9 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 判据所需的 guidance store 由 `_background_claim_dependencies` 直接传 `scheduler.store.guidance`（不用 `getattr` 兜底，
 替身缺属性由测试夹具补）：早先实现用 `pending_one.__self__` 反查，拿到的是 WakeStore，没有 `.agent`，判据因此从未生效。
 
+补充消息的回合收尾：前台 `request_execution._handle_gateway_request` 在 finally 里调 `_settle_pending_gateway_guidance(agent, request_id, failure)`，
+后台片异常结束时 `runtime._settle_unconsumed_background_turn_input(agent, request, failure)`；两处都把回合抛出的异常交给
+`reject_pending(failure=...)`，会话消息与派活正文这次释放计不计次只按唤醒毒丸的 `verdict_for_error` 判（只计会让回合崩溃的失败）。
 开跑前还有一道：`_execute_wake_signal` 解析交付路线之前调 `_retire_cancelled_task_wake`，只对派活唤醒按信封自带的
 `session_task_id` 直接 `session_tasks.load` 读会话任务是否已 `cancelled`（不按绑定反查：排队中取消的任务还没绑定回合），
 命中就释放定时租约、结案唤醒，不开模型回合（重试等待中或排队中被取消的任务都不再开跑一片）。

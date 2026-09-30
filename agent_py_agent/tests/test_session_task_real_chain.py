@@ -144,6 +144,7 @@ class ScriptedWire:
         self.ignored_stops: list[str] = []
         self._per_turn: dict[str, int] = {}
         self._reset_once = False
+        self._timeouts = 0
 
     # 函数用途: 替换 backends.http.post_json；探测请求照实回答，其余交给脚本并记账。
     def __call__(self, request) -> dict:
@@ -171,8 +172,8 @@ class ScriptedWire:
             raise InterruptedError(f"RC 假线路：同一回合模型调用超过 {_SPIN_GUARD_CALLS} 次，判定为空转")
         try:
             kind, text, call = self._script(turn)
-        except ConnectionResetError:
-            entry["kind"] = "connection-reset"
+        except (ConnectionResetError, TimeoutError, RuntimeError) as exc:
+            entry["kind"] = {ConnectionResetError: "connection-reset", TimeoutError: "timeout"}.get(type(exc), "program-error")
             raise
         entry["kind"] = kind
         return self._reply(payload, text, call)
@@ -233,7 +234,19 @@ class ScriptedWire:
             return self._user_turn(turn)
         if self._resets_own_note(turn):
             raise ConnectionResetError("RC 假线路：带着这条消息的模型调用连接被对端重置")
+        if "RC-NOTE-BUGALWAYS" in turn.own_text:
+            raise RuntimeError("RC 假线路：带着这条消息的回合每次都遇到程序错误")
+        if "RC-NOTE-TIMEOUTSEVEN" in turn.own_text and self._next_timeout(7):
+            raise TimeoutError("RC 假线路：带着这条消息的模型调用超时")
         return ("wake-saw-note" if "RC-NOTE-" in turn.turn_text else "other"), "RC-ACK 收到。", None
+
+    # 函数用途: 前 limit 次调用返回 True（这次超时），之后返回 False（恢复）。
+    def _next_timeout(self, limit: int) -> bool:
+        with self._lock:
+            if self._timeouts >= limit:
+                return False
+            self._timeouts += 1
+            return True
 
     # 函数用途: 失败注入：消息作为本回合自己的输入送来时断线——RC-NOTE-FAILONCE 只断第一次，RC-NOTE-FAILALWAYS 每次都断。
     def _resets_own_note(self, turn: _Turn) -> bool:
@@ -279,6 +292,9 @@ class ScriptedWire:
             return "user-busy-final", "RC-BUSY-DONE 忙完了。", None
         if verb == "RC-LIST-THEN":
             return self._list_then_send(words[0], turn)
+        if verb == "RC-BUGNOTE" and "RC-NOTE-" in turn.own_text:
+            # 前台回合带着认领到的会话消息时遇到程序错误：这一回合没消费就结束，且是会计次的失败。
+            raise RuntimeError("RC 假线路：前台回合带着这条消息时遇到程序错误")
         return "user-other", "RC-ACK 好的。", None
 
     # 函数用途: 先列本 owner 的会话，再只凭清单挑目标（非当前、最近活动、允许该类型），派活或发消息。
@@ -362,6 +378,27 @@ class RealChain:
             status = "failed"
             raise
         finally:
+            terminalize_gateway_request_file(
+                self.paths, path, self.paths.done if status == "done" else self.paths.failed, request_id,
+                conversation_store=self.agent.conversation_store,
+                terminal_response={"id": request_id, "status": status, "ok": status == "done"},
+            )
+
+    # 函数用途: 同 ask，但经真实 worker 的请求入口 request_execution._handle_gateway_request 执行（租约、chunk 写入、回合抛错时
+    #   按失败落响应并在收尾时把异常交给补充消息收尾），返回它落下的响应字典；ask 直接调 _run_gateway_ask，碰不到这一层。
+    def ask_via_worker(self, label: str, prompt: str) -> dict:
+        request_id = f"rc-{label.lower()}-{next(self.asks)}"
+        request = {"id": request_id, "kind": "ask", "prompt": prompt, "status": "processing", "turn_phase": "open",
+                   "execution_attempt_id": f"rc-attempt-{request_id}", "conversation": self._conversation(label)}
+        path = self.paths.processing / f"{request_id}.json"
+        path.write_text(json.dumps(request), encoding="utf-8")
+        response: dict = {}
+        try:
+            with register_interruptible(conversation_request_interrupt_name(request_id)):
+                response = request_execution._handle_gateway_request(self.agent, path)
+            return response
+        finally:
+            status = "done" if response.get("ok") else "failed"
             terminalize_gateway_request_file(
                 self.paths, path, self.paths.done if status == "done" else self.paths.failed, request_id,
                 conversation_store=self.agent.conversation_store,
@@ -662,6 +699,7 @@ def test_busy_target_stopped_before_consuming_the_message_still_gets_it(tmp_path
     assert own, "消息只出现在被停回合的历史尾巴里，没有被之后的回合作为自己的输入正式认领"
     final = _message_receipt(chain, "B", str(sent.get("message_id") or ""))
     assert getattr(final, "status", None) == "consumed", f"回执最终应是 consumed，实际 {getattr(final, 'status', None)}"
+    assert "release_count" not in final.migration, "用户 /stop 不是会让回合崩溃的失败，这次释放不能计次"
     assert not _pending_wakes(chain, "B"), f"B 的消息唤醒没有结案：{_pending_wakes(chain, 'B')}"
 
 
@@ -727,20 +765,20 @@ def test_message_wake_that_fails_after_claiming_still_delivers_the_message(tmp_p
 
 
 def test_message_wake_failing_every_time_rejects_the_message_after_the_release_limit(tmp_path, monkeypatch) -> None:
-    """同一条唤醒每次认领消息后都失败：重跑用的是同一个回合号，释放按次计数；释放满上限后再失败，回执转 rejected
-    并带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，下一拍领取后准入判来源已处理完、唤醒结案，不再开模型回合。"""
+    """同一条唤醒每次认领消息后都遇到程序错误（唤醒毒丸计数的那类失败）：重跑用的是同一个回合号，释放按次计数；计满上限后
+    再失败，回执转 rejected 并带 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，下一拍领取后准入判来源已处理完、唤醒结案，不再开模型回合。"""
     chain = _real_chain(tmp_path, monkeypatch)
-    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-FAILALWAYS 你好 C。")
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-BUGALWAYS 你好 C。")
     sent = chain.tool_outputs("send_session_message")[-1]
     _require(sent.get("ok") is True, f"消息没有发出：{sent}")
     now = time.time()
     statuses = []
     for attempt in range(SESSION_MESSAGE_RELEASE_LIMIT + 1):
-        with pytest.raises(Exception):  # noqa: B017,PT011 - 每一拍都应当是带着消息的调用断线
+        with pytest.raises(RuntimeError):
             chain.scheduler.tick(now=now + 31 * attempt)
         statuses.append(getattr(_message_receipt(chain, "C", str(sent.get("message_id") or "")), "status", None))
-    resets = [call["kind"] for call in chain.wire.calls if call["kind"] == "connection-reset"]
-    _require(len(resets) == SESSION_MESSAGE_RELEASE_LIMIT + 1, f"前提不成立：每一拍都应当断线一次，实际 {len(resets)} 次")
+    bugs = [call["kind"] for call in chain.wire.calls if call["kind"] == "program-error"]
+    _require(len(bugs) == SESSION_MESSAGE_RELEASE_LIMIT + 1, f"前提不成立：每一拍都应当遇到一次程序错误，实际 {len(bugs)} 次")
 
     assert statuses == ["pending"] * SESSION_MESSAGE_RELEASE_LIMIT + ["rejected"], f"逐次失败后的回执状态：{statuses}"
     final = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
@@ -748,6 +786,50 @@ def test_message_wake_failing_every_time_rejects_the_message_after_the_release_l
     before = len(chain.wire.calls)
     chain.scheduler.tick(now=now + 31 * (SESSION_MESSAGE_RELEASE_LIMIT + 1))
     assert chain.wire.calls[before:] == [], "消息已达释放上限，唤醒仍开了模型回合"
+    assert not _pending_wakes(chain, "C"), f"C 的消息唤醒没有结案：{_pending_wakes(chain, 'C')}"
+
+
+def test_foreground_turn_crashing_with_the_message_counts_one_release(tmp_path, monkeypatch) -> None:
+    """前台终态与后台收尾用同一判据：C 的前台回合认领这条消息后遇到程序错误，回执释放并计 1 次；之后的唤醒回合照样送到。
+    走真实 worker 的请求入口（_handle_gateway_request），回合抛出的异常经它的收尾交给 reject_pending。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-FGBUG 你好 C。")
+    sent = chain.tool_outputs("send_session_message")[-1]
+    _require(sent.get("ok") is True, f"消息没有发出：{sent}")
+    response = chain.ask_via_worker("C", "RC-BUGNOTE 看看。")
+    _require(response.get("ok") is False, f"前提不成立：C 的前台请求应当按失败结束：{response.get('status')}")
+    _require([call for call in chain.wire.calls if call["kind"] == "program-error"], "前提不成立：C 的前台回合没有带着消息遇到程序错误")
+    receipt = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+    assert (receipt.status, receipt.migration.get("release_count")) == ("pending", 1), (
+        f"前台回合崩溃后应释放并计 1 次：{receipt.status} / {receipt.migration.get('release_count')}")
+
+    chain.drain()
+
+    final = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+    assert getattr(final, "status", None) == "consumed", f"回执最终应是 consumed，实际 {getattr(final, 'status', None)}"
+
+
+def test_message_wake_timing_out_repeatedly_is_never_dropped(tmp_path, monkeypatch) -> None:
+    """带着消息的调用连续超时 7 次（超过上限 5）：超时是唤醒毒丸不计数的瞬时失败，回执层同一判据只释放、不计次，回执一直
+    pending；第 8 次恢复后消息作为唤醒回合自己的输入送到，回执 consumed，唤醒结案（瞬时和环境故障不丢消息）。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-TIMEOUTSEVEN 你好 C。")
+    sent = chain.tool_outputs("send_session_message")[-1]
+    _require(sent.get("ok") is True, f"消息没有发出：{sent}")
+    now = time.time()
+    for attempt in range(7):
+        with pytest.raises(TimeoutError):
+            chain.scheduler.tick(now=now + 31 * attempt)
+        receipt = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+        assert (receipt.status, receipt.migration.get("release_count")) == ("pending", None), f"第 {attempt + 1} 次超时后：{receipt.status}"
+    before = len(chain.wire.calls)
+
+    chain.scheduler.tick(now=now + 31 * 7)
+
+    own = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-TIMEOUTSEVEN" in call["own_notes"]]
+    assert own, "超时恢复后，消息没有作为唤醒回合自己的输入送到"
+    final = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
+    assert getattr(final, "status", None) == "consumed", f"回执最终应是 consumed，实际 {getattr(final, 'status', None)}"
     assert not _pending_wakes(chain, "C"), f"C 的消息唤醒没有结案：{_pending_wakes(chain, 'C')}"
 
 

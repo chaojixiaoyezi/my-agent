@@ -1185,12 +1185,14 @@ def _handle_gateway_request(
     )
 
     execution_started_mono = time.monotonic()
+    failure: Exception | None = None
     try:
         _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
         _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
         from .request_errors import gateway_provider_error_projection
 
+        failure = exc
         error_code = response.get("error_code") or str(
             getattr(exc, "error_code", "") or type(exc).__name__.upper()
         )
@@ -1209,7 +1211,7 @@ def _handle_gateway_request(
         chunk_writer.close()
         # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
         # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
-        _settle_pending_gateway_guidance(agent, context["request_id"])
+        _settle_pending_gateway_guidance(agent, context["request_id"], failure)
         _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
         stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
     _project_observed_gateway_run_facts(response, chunk_writer)
@@ -1222,14 +1224,15 @@ def _handle_gateway_request(
 
 # LLM: 插话持久操作经 guidance 领域组件； 回合结束时未消费的 steer/guidance 必须收口（reject），否则残留消息占住
 # conversation lane，同一 thread 的后续请求永久排队（#7 真机实证：进行中提交的消息
-# 在回合结束后挂 processing）。收口失败留给 recovery 兜底，静默不反噬执行路径。
+# 在回合结束后挂 processing）。收口失败留给 recovery 兜底，静默不反噬执行路径。failure 是回合抛出的异常（正常结束为 None），
+# 只决定会话消息这次释放计不计次（与后台片收尾同一判据，见 store_guidance_recovery.failure_counts_toward_release_limit）。
 # 函数用途: 在回合终态落账前拒绝该回合仍挂起的补充消息。
-def _settle_pending_gateway_guidance(agent: SimpleAgent, request_id: str) -> None:
+def _settle_pending_gateway_guidance(agent: SimpleAgent, request_id: str, failure: Exception | None = None) -> None:
     store = getattr(agent, "conversation_store", None)
     if store is None or not str(request_id or "").strip():
         return
     try:
-        store.guidance.recovery.reject_pending(request_id, reject_reserved=True)
+        store.guidance.recovery.reject_pending(request_id, reject_reserved=True, failure=failure)
     except Exception:  # noqa: BLE001 收口失败不阻断回合收尾，recovery 会再次处理
         pass
 

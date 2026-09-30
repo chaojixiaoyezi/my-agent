@@ -813,11 +813,11 @@ def test_non_rich_writer_never_emits_thinking_delta(tmp_path) -> None:
 def test_gateway_round_end_settles_pending_guidance(tmp_path, monkeypatch) -> None:
     from agent_py_agent.agent.gateway_parts import request_execution
 
-    settled: list[tuple[str, bool]] = []
+    settled: list[tuple[str, bool, object]] = []
 
     class FakeGuidanceRecovery:
-        def reject_pending(self, turn_id, *, reject_reserved=False):
-            settled.append((turn_id, reject_reserved))
+        def reject_pending(self, turn_id, *, reject_reserved=False, failure=None):
+            settled.append((turn_id, reject_reserved, failure))
             return {"rejected": 0}
 
     agent = SimpleNamespace(
@@ -827,10 +827,14 @@ def test_gateway_round_end_settles_pending_guidance(tmp_path, monkeypatch) -> No
     )
 
     request_execution._settle_pending_gateway_guidance(agent, "req-1")
-    assert settled == [("req-1", True)]
+    assert settled == [("req-1", True, None)]
+    # 回合抛出的异常原样交给收尾，由它按唤醒毒丸的分类决定这次释放计不计次。
+    crash = RuntimeError("回合崩溃")
+    request_execution._settle_pending_gateway_guidance(agent, "req-2", crash)
+    assert settled[-1] == ("req-2", True, crash)
 
     request_execution._settle_pending_gateway_guidance(agent, "")
-    assert len(settled) == 1
+    assert len(settled) == 2
 
 
 def test_gateway_session_approval_cache_survives_request_writer_turns(

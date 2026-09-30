@@ -647,3 +647,6 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 没有正文的空派活回合、向目标会话交付答复。
 派活正文只许它自己的派活回合认领（R-b）：目标正忙时前台回合不再在安全点领走派活正文，任务留在队列，前台结束后由派活唤醒开
 派活回合、收口并回报发送方；派活回报（带 `SESSION_TASK_STATUS_FIELD`）不受影响。
+
+释放只计会让回合崩溃的失败（3a 裁定 (a)）：`reject_pending(failure=...)` 按唤醒毒丸的 `verdict_for_error` 判定，超时、429、连接、
+环境故障、/stop 与取消只释放不计次；前台 `_handle_gateway_request` 的收尾与后台片收尾都把回合抛出的异常交进来。

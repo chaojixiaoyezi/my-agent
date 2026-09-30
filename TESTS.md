@@ -25,6 +25,23 @@
   发出的 assistant 都带正文或工具调用，只剩有正文的那条且保留思考，历史对象不变。四例在 `4c0edd913` 的原实现上全部失败，
   修复后该文件 37 passed（Linux 容器，Mac 测试 venv 当时不可用）。
 
+## 会话消息与派活正文的释放只计会让回合崩溃的失败（2026-09-29，3a 裁定 (a)，接在 step16l 的 M2 注释提交之后）
+
+- **规则**：回执照常释放，`release_count` 只在唤醒毒丸会计数的失败时加一（`failure_counts_toward_release_limit` 复用
+  `verdict_for_error`）；超时、429、连接、环境故障、/stop 与取消、没有异常都不计次，计满后只有计次的失败才转 rejected。
+- **`test_session_message_release_at_turn_end.py`**：收尾辅助函数默认传程序错误（计次）；新增不计次的五种结束（无异常、超时、
+  中断、`ProviderTransientError`、`ProviderConnectionError`）连续 7 次仍 pending、不写次数，之后一次程序错误只计第 1 次；计次与
+  不计次交替时，计满后超时照样只释放，下一次程序错误才转 rejected 带码；后台收尾把这一片的异常原样交给 `reject_pending`。
+- **`test_session_task_real_chain.py`**：假线路新增 `RC-NOTE-BUGALWAYS`（程序错误）、`RC-NOTE-TIMEOUTSEVEN`（前 7 次超时）、
+  前台动词 `RC-BUGNOTE`；夹具加 `ask_via_worker`（经真实 worker 入口 `_handle_gateway_request`，ask 碰不到这一层）。
+  - 「每次都失败」一窗改用程序错误，第 6 次 rejected 带码；
+  - 新窗：连续超时 7 次回执一直 pending、不计次，第 8 次恢复后送到并 consumed；
+  - 新窗：前台回合带着消息遇到程序错误，释放并计 1 次，之后唤醒回合送到；
+  - 忙碌目标被 /stop 的那一窗补断言：这次释放不计次。
+- **`test_gateway_verbose_progress.py`**：`_settle_pending_gateway_guidance` 的假 `reject_pending` 接收 `failure`，断言回合异常原样传入。
+- **变异**（`sm3/mutate_cnt.py`，7 个，全部被抓住）：瞬时也计次、/stop 也计次、判据不走 verdict_for_error、计满后不计次的结束也拒、
+  前台收尾不传异常、后台收尾不传异常、从不计次。
+
 ## compileall 自检不再给产品目录写 __pycache__（2026-09-29，分支 `claude/9a-magicmock-guard`）
 
 - **定位**：

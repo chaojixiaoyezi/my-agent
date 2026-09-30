@@ -901,8 +901,8 @@ class BackgroundMainAgentRuntime:
             )
         except BackgroundCompactSliceYield:
             raise
-        except Exception:
-            _settle_unconsumed_background_turn_input(self.agent, request)
+        except Exception as exc:
+            _settle_unconsumed_background_turn_input(self.agent, request, exc)
             raise
         # LLM: 取消可能在本片进入模型调用之后才到；调用返回时这一片的答复**不得交付**，任务也不许按
         #   "正常完成"收口。这里是**纵深防线**，不是常规停法：常规停法有两道，都在它之前——
@@ -941,9 +941,11 @@ class BackgroundMainAgentRuntime:
 #   （交付前取消判定、run_once 之后的二次检查）发生时，带着它的调用已返回确认，回执是 consumed，无需收尾。以后若在认领和
 #   调用之间加了不抛异常的退出路径，要同步在那里收尾。不在正常结束时收尾：派活回合会跨好几片共用同一个回合号（例如等子代理
 #   完成），正常结束一片就收尾会把发给这个进行中任务的插话提前拒掉。
+#   failure 是这一片抛出的异常，只决定这次释放计不计次（与前台终态同一判据 failure_counts_toward_release_limit：
+#   只有会让回合崩溃的失败计次，超时、连接、环境故障、中断不计次）。
 #   收尾失败只吞掉，不能盖住原异常；回执留在原状态。副作用：写补充消息回执、删回合索引。
 # 函数用途: 后台片异常结束时，把它认领了但没消费的补充消息按统一规则收尾（会话消息退回给下一回合或重跑回合）。
-def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundRunRequest) -> None:
+def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundRunRequest, failure: Exception) -> None:
     turn_id = _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
     store = getattr(agent, "conversation_store", None)
     if not turn_id or store is None:
@@ -951,6 +953,7 @@ def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundR
     try:
         store.guidance.recovery.reject_pending(
             turn_id, reject_reserved=True, release_task_body=not _session_task_turn_was_cancelled(agent, request),
+            failure=failure,
         )
     except Exception:  # noqa: BLE001 - 与前台收尾同口径：收尾失败不阻断原异常上抛
         pass

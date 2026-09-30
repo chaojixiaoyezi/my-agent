@@ -6,7 +6,7 @@ import hashlib
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from .store_guidance_records import (
 )
 from .store_guidance_submission import GuidanceSubmissions
 from .store_io import unlink_quietly
+from .wake_poison import WAKE_VERDICT_FAILURE, verdict_for_error
 
 
 # LLM: 只改绑已确认失效且尚未提交模型的消息；修改须核对回执指纹、索引修复和跨尝试隔离。
@@ -171,6 +172,8 @@ class GuidanceRecovery:
 
     # LLM: GuidanceRecovery：终态与运行循环共用回合锁；先修已提交批次，只结算该回合索引，联测取消与确认竞争。
     #   release_task_body 只由后台片异常结束且任务没被取消时传 True（派活正文退回给同一任务号的重跑），前台终态保持默认。
+    #   failure 是这一回合没正常结束的那个异常（前台终态与后台收尾都传；没有异常传 None）：只用来决定这次释放计不计次
+    #   （failure_counts_toward_release_limit），不改变释放与否。
     # 函数用途: 回合结束时原子拒绝尚未消费的补充消息，并返回本回合状态计数。
     def reject_pending(
         self,
@@ -178,6 +181,7 @@ class GuidanceRecovery:
         *,
         reject_reserved: bool = False,
         release_task_body: bool = False,
+        failure: BaseException | None = None,
     ) -> dict[str, int]:
         turn_id = str(expected_turn_id or "").strip()
         if not turn_id:
@@ -193,8 +197,7 @@ class GuidanceRecovery:
         with self.ledger.turn_guard(turn_id):
             return self._reject_pending_locked(
                 turn_id,
-                reject_reserved=reject_reserved,
-                release_task_body=release_task_body,
+                TurnEndSettlement(reject_reserved, release_task_body, failure_counts_toward_release_limit(failure)),
             )
 
     # LLM: GuidanceRecovery：调用方已证明尝试死亡；提交结果未知始终保留，只有尚未越过模型提交边界的预留可释放。
@@ -362,13 +365,7 @@ class GuidanceRecovery:
 
     # LLM: GuidanceRecovery：调用方持回合锁；先修提交再修确认，内部无幂等消息按送达投影退休，保持原提交顺序。
     # 函数用途: 在已持有回合锁时逐条结算当前回合索引。
-    def _reject_pending_locked(
-        self,
-        turn_id: str,
-        *,
-        reject_reserved: bool = False,
-        release_task_body: bool = False,
-    ) -> dict[str, int]:
+    def _reject_pending_locked(self, turn_id: str, settlement: TurnEndSettlement) -> dict[str, int]:
         summary = {
             "rejected": 0,
             "released": 0,
@@ -394,9 +391,7 @@ class GuidanceRecovery:
                 summary["errors"] += 1
                 continue
             try:
-                outcome = self._settle_turn_receipt(
-                    dedupe_key, turn_id, reject_reserved=reject_reserved, release_task_body=release_task_body,
-                )
+                outcome = self._settle_turn_receipt(dedupe_key, turn_id, settlement)
             except Exception:
                 outcome = "errors"
             if outcome == "released":
@@ -432,7 +427,7 @@ class GuidanceRecovery:
     #   已提交/已消费原样计数。返回用于汇总计数的结果名："released" 表示已退回 pending（调用方删本回合索引，再认领时补回），
     #   "errors" 表示回执缺失或绑定对不上。副作用：写回执。
     # 函数用途: 回合收尾时结算本回合索引里的一条补充消息回执。
-    def _settle_turn_receipt(self, dedupe_key: str, turn_id: str, *, reject_reserved: bool, release_task_body: bool) -> str:
+    def _settle_turn_receipt(self, dedupe_key: str, turn_id: str, settlement: TurnEndSettlement) -> str:
         receipt_path = self.storage.guidance_dedupe_path(dedupe_key)
         with locked_file_transition(receipt_path.with_name(f".{receipt_path.name}.transition")):
             receipt = self.ledger.read_receipt(receipt_path)
@@ -441,9 +436,9 @@ class GuidanceRecovery:
                 return "errors"
             # Gateway terminalization holds its outer exact-turn lock. A reserved row is
             # then proven not to have an atomic submission batch and is safe to settle.
-            if not (receipt.status == "pending" or (reject_reserved and receipt.status == "reserved")):
+            if not (receipt.status == "pending" or (settlement.reject_reserved and receipt.status == "reserved")):
                 return receipt.status
-            settled = settle_unconsumed_receipt(receipt, turn_id, now=time.time(), release_task_body=release_task_body)
+            settled = settle_unconsumed_receipt(receipt, turn_id, settlement, now=time.time())
             write_json_file_atomic(receipt_path, settled.to_dict())
         return "released" if settled.status == "pending" else settled.status
 
@@ -508,33 +503,38 @@ class GuidanceRecovery:
 #   （Gateway 输入对账会把被拒插话重新排成请求）；会话消息改为释放回 pending，在回执自己的 migration.released_turn_ids 记下
 #   这一回合，下一回合按跨回合例外正式认领（认领时改绑到那一回合）——否则回执永久 rejected，内容只靠被停回合留在历史里的
 #   那段输入碰巧可见（2026-09-29 真实链路实测）。释放按次计数（migration.release_count），不按回合去重：同一条唤醒重跑
-#   用同一个回合号，按回合去重时它反复失败永远到不了上限。已释放 SESSION_MESSAGE_RELEASE_LIMIT 次后再收尾转 rejected，
-#   migration.rejection_code 记 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，防止一条会让回合崩溃的消息无限循环。
+#   用同一个回合号，按回合去重时它反复失败永远到不了上限。只有会让回合崩溃的失败才计次（settlement.count_release，
+#   判据见 failure_counts_toward_release_limit）：计次的失败在已计满 SESSION_MESSAGE_RELEASE_LIMIT 次后再发生时转 rejected，
+#   migration.rejection_code 记 SESSION_MESSAGE_RELEASE_LIMIT_REACHED，防止一条会让回合崩溃的消息无限循环；不计次的结束
+#   （超时、429、连接、环境故障、/stop、取消、正常结束）只释放，不计次也不会被拒，瞬时和环境故障不丢消息。
 #   已提交（submitted）的回执调用方不会传进来：提交结果未知，释放会重复消费。派活正文默认不释放：任务被取消后释放会让
 #   前台回合认领到已取消任务的正文；只有后台派活片非取消的失败（调用方按结构化任务状态判定后传 release_task_body）才退回
 #   pending，且不记 released_turn_ids、不授权跨回合，只有同一回合号（即同一 session_task_id）的重跑能认领，次数与上限同上。
 #   只改回执级字段，entry.metadata 不动（参与正文指纹）。纯函数，不写盘。
 # 函数用途: 决定一条没被消费的回执在回合结束时是释放（退回 pending），还是转 rejected。
 def settle_unconsumed_receipt(
-    receipt: GuidanceOnceReceipt, turn_id: str, *, now: float, release_task_body: bool = False,
+    receipt: GuidanceOnceReceipt, turn_id: str, settlement: TurnEndSettlement, *, now: float,
 ) -> GuidanceOnceReceipt:
     metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
     origin_kind = str(metadata.get("origin_kind") or "").strip()
     if origin_kind == SESSION_MESSAGE_ORIGIN_KIND:
-        return _release_or_reject(receipt, now=now, authorized_turn_id=turn_id)
-    if origin_kind == SESSION_TASK_ORIGIN_KIND and release_task_body:
-        return _release_or_reject(receipt, now=now, authorized_turn_id="")
+        return _release_or_reject(receipt, settlement, now=now, authorized_turn_id=turn_id)
+    if origin_kind == SESSION_TASK_ORIGIN_KIND and settlement.release_task_body:
+        return _release_or_reject(receipt, settlement, now=now, authorized_turn_id="")
     return replace(receipt, status="rejected", submission_id="", updated_at=now)
 
 
-# LLM: settle_unconsumed_receipt 的释放分支：按 migration.release_count 计次，满 SESSION_MESSAGE_RELEASE_LIMIT 转 rejected 带码；
-#   authorized_turn_id 非空时把它记进 released_turn_ids，授权别的回合跨回合认领（会话消息），为空时不授权（派活正文）。纯函数。
-# 函数用途: 把一条没消费的回执退回 pending 并计一次释放，次数用满时改为 rejected。
-def _release_or_reject(receipt: GuidanceOnceReceipt, *, now: float, authorized_turn_id: str) -> GuidanceOnceReceipt:
+# LLM: settle_unconsumed_receipt 的释放分支：只有 settlement.count_release 时才计次（migration.release_count 加一），计次的失败在
+#   已计满 SESSION_MESSAGE_RELEASE_LIMIT 次后再发生时转 rejected 带码；不计次时只释放、不改次数、也不会被拒。authorized_turn_id
+#   非空时把它记进 released_turn_ids，授权别的回合跨回合认领（会话消息），为空时不授权（派活正文）。纯函数。
+# 函数用途: 把一条没消费的回执退回 pending（该计次时计一次），计次的失败次数用满时改为 rejected。
+def _release_or_reject(
+    receipt: GuidanceOnceReceipt, settlement: TurnEndSettlement, *, now: float, authorized_turn_id: str,
+) -> GuidanceOnceReceipt:
     migration = dict(receipt.migration)
     release_count = migration.get("release_count")
     release_count = release_count if type(release_count) is int and release_count > 0 else 0
-    if release_count >= SESSION_MESSAGE_RELEASE_LIMIT:
+    if settlement.count_release and release_count >= SESSION_MESSAGE_RELEASE_LIMIT:
         migration["rejection_code"] = SESSION_MESSAGE_RELEASE_LIMIT_REACHED
         return replace(receipt, status="rejected", submission_id="", updated_at=now, migration=migration)
     if authorized_turn_id:
@@ -542,6 +542,25 @@ def _release_or_reject(receipt: GuidanceOnceReceipt, *, now: float, authorized_t
         if authorized_turn_id not in released:
             released.append(authorized_turn_id)
         migration["released_turn_ids"] = released
-    migration["release_count"] = release_count + 1
+    if settlement.count_release:
+        migration["release_count"] = release_count + 1
     return replace(receipt, status="pending", attempt_id="", submission_id="", submitted_at=0.0,
                    updated_at=now, migration=migration)
+
+
+# LLM: 回合结束时收尾一条回执要用的三个结构化开关：reject_reserved（持回合锁的终态可以收已预留的回执）、release_task_body
+#   （后台片非取消的失败时派活正文退回给同一任务号）、count_release（这次没消费就结束计不计入释放上限）。只由 reject_pending 构造。
+# 类用途: 一次回合收尾对补充消息回执的处理方式。
+@dataclass(frozen=True)
+class TurnEndSettlement:
+    reject_reserved: bool = False
+    release_task_body: bool = False
+    count_release: bool = False
+
+
+# LLM: 回合没消费就结束时这次释放计不计次，唯一判据是唤醒毒丸的错误分类 wake_poison.verdict_for_error（两层同一个权威，
+#   3a 2026-09-29 裁定）：只有毒丸会计数的失败（程序错误、未分类异常等会让回合崩溃的）计次；瞬时（超时、429、连接）、环境级
+#   （401/402/403/404/407、配置、额度用完）、用户 /stop 与取消（中断类）不计次；没有异常（正常结束、宿主收尾、恢复）也不计次。
+# 函数用途: 判断一次回合失败是否计入会话消息与派活正文的释放上限。
+def failure_counts_toward_release_limit(failure: BaseException | None) -> bool:
+    return failure is not None and verdict_for_error(failure).kind == WAKE_VERDICT_FAILURE
