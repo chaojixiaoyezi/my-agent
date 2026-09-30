@@ -219,8 +219,10 @@ class ConversationStorage:
     def wake_quarantine_ledger_path(self, wake_signal_id: str) -> Path:
         return self.wake_quarantine_ledger_dir / f"{validate_opaque_id(wake_signal_id, kind='wake_signal_id')}.json"
 
-    # LLM: 归档后的结案记录位置；发布层不再把它当作安装位置（同键可以重新发布出新一代），重放遇到它拒绝
-    #   （WAKE_REPLAY_ARCHIVED）。坏账留档与读不出的信封在 archive 下的 ledger/、unreadable/ 子目录里，与原位置同名。
+    # LLM: 归档后的结案记录位置；归档只换物理位置、不改发布语义：发布层把它当作 pending/handled/quarantine 之后的第四个
+    #   只读安装位置（store_wake_publication._installed_signal），同键再发布返回原结案信号（failed_permanently），不会发布出
+    #   新一代。重放遇到它拒绝（WAKE_REPLAY_ARCHIVED）。坏账留档与读不出的信封在 archive 下的 ledger/、unreadable/ 子目录里，
+    #   与原位置同名。
     # 函数用途: 定位一条已归档的结案记录文件。
     def wake_quarantine_archive_path(self, wake_signal_id: str) -> Path:
         return self.wake_quarantine_archive_dir / f"{validate_opaque_id(wake_signal_id, kind='wake_signal_id')}.json"
