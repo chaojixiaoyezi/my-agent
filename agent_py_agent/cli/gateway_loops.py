@@ -1352,7 +1352,7 @@ class _GatewayOwnerMaintenanceController:
         )
 
     # LLM: 每拍先跑基础 owner，再按分页游标跑一页 scoped owner，只做到期维护、不构造 owner agent；
-    #   摘要里 failed 是旧口径，refused / isolated 按 OwnerMaintenanceResult.apply_outcome 区分，只打印、不落盘。
+    #   摘要 failed 只算整次被拒与执行期动作失败，refused / isolated 按 OwnerMaintenanceResult.apply_outcome 区分，只打印、不落盘。
     # 函数用途: 跑一拍 owner 维护并打印一行 [gateway-owner-maintenance] 摘要。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
         current = float(now if now is not None else time.time())
@@ -1385,9 +1385,10 @@ class _GatewayOwnerMaintenanceController:
         summary = {
             "scanned": page.scanned,
             "ran": sum(report.ran for report in reports),
-            # failed 保持旧口径（旧 status 有错误就算）；refused 是整次被拒，isolated 是执行了、但有路径级错误被隔离。
+            # failed 只算整次被拒（策略级错误，retention 自己的 _POLICY_LEVEL_ERROR_CODES 判定）和执行期动作失败；
+            #   「执行了、只有路径级隔离错误」不算 failed，只进 isolated。持久化的 status 不受影响（摘要只打印、不落盘）。
             "failed": sum(
-                report.status in {"partial_failure", "policy_unavailable"}
+                report.apply_outcome == "refused" or report.failed_action_count > 0
                 for report in reports
             ),
             "refused": sum(report.apply_outcome == "refused" for report in reports),

@@ -58,9 +58,12 @@
     `last_applied_at` 保留上一轮的值。
   - 新增 `test_legal_hold_outcome_is_explicit`：法律保留时 `apply_outcome=legal_hold`，不删任何东西。
   - 原有两例补了新字段断言：成功时为 applied/0；策略坏时为 refused/0/0，且 `to_dict` 带 `apply_outcome`、审计隔离计数为 0。
-- `test_gateway_owner_maintenance.py`：原摘要断言补上 `refused=0`、`isolated=0`。新增一例：一个 owner 策略坏、一个 owner 有坏任务状态，
-  摘要为 `failed=2`（旧口径）、`refused=1`、`isolated=1`，打印的那行与返回值一致。
-- **变异**（草稿副本上精确替换、按字节恢复）：11 个全部被杀，基线与恢复后通过。覆盖：
+- `test_gateway_owner_maintenance.py`：
+  - 原摘要断言补上 `refused=0`、`isolated=0`；
+  - 一个 owner 策略坏、一个 owner 有坏任务状态：`failed=1`（只算被拒）、`refused=1`、`isolated=1`，打印的那行与返回值一致；
+  - 只有隔离错误：`failed=0`、`isolated=1`，持久化 status 仍是 `policy_unavailable`、`apply_outcome=applied`；
+  - 执行期动作失败（缓存目录只读，root 下跳过）：`failed=1`、`failed_action_count=1`。
+- **变异**（草稿副本上精确替换、按字节恢复）：第一个提交 11 个、补充提交（failed 口径）4 个，全部被杀，基线与恢复后通过。覆盖：
   - 执行结果按有无错误推导；
   - 整份拒绝时也带隔离错误；
   - 被拒时 `last_applied_at` 也前进；
@@ -71,7 +74,8 @@
   - 合并回执丢掉隔离错误；
   - 旧 status 口径被偷改；
   - `to_dict` 不输出新键；
-  - 法律保留算成被拒。
+  - 法律保留算成被拒；
+  - failed 退回旧口径、failed 漏算执行期失败、failed 漏算被拒、结果里 `failed_action_count` 恒为 0。
 - **回归**：引用保留、维护、Gateway 循环和审计日志的 49 个测试文件，加 9 个全仓守卫，共 989 过。
 
 ## compileall 自检不再给产品目录写 __pycache__（2026-09-29，分支 `claude/9a-magicmock-guard`）

@@ -29,8 +29,10 @@
 - `last_applied_at`：最近一次 `applied` 的时刻，旧文件缺这个键时按 0。
 
 同一轮的审计事件 `owner_retention_applied` 带 `isolated_error_count` 与 `isolated_error_codes`（按码计数）。
-Gateway 维护摘要 `[gateway-owner-maintenance]` 的 `failed` 保持旧口径，另加 `refused`（整次被拒）与 `isolated`
-（执行了、但有被隔离的错误）两个计数。
+Gateway 维护摘要 `[gateway-owner-maintenance]` 只打印、不落盘。其中：
+- `failed` 只算整次被拒（`apply_outcome=refused`，即 retention 用 `_POLICY_LEVEL_ERROR_CODES` 判定的整份拒绝）与执行期动作失败
+  （`failed_action_count>0`）；「执行了、只有路径级隔离错误」不算 failed（3a 补充裁定）；
+- 另有 `refused`（整次被拒）与 `isolated`（执行了、有被隔离的错误）两个计数。
 
 `SchedulerService.claim_wake`核对wake与canonical run身份，在原repository领取后准确回读pending，再调用`_prepare_task_link`：原TaskStore任务锁内只为首次新运行建立链接，已有链接只读复核。合法冻结只保留原claim用于原回复交付；无冻结的active任务才标记running并交后台模型，无冻结终态按唯一既有映射结算。无法确认pending时释放claim并保留待处理；准入结算只有原CAS实际成功才返回stale，claim已被接手时返回busy，不能确认掉新持有者的wake。TaskStore仍唯一保存pins/选包marker，不新增调度专用任务账或Skill豁免。
 

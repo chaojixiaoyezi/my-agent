@@ -22,9 +22,10 @@ from .home_retention import OwnerRetentionPlan, apply_owner_retention
 _DEFAULT_INTERVAL_SECONDS = 86_400
 
 
-# LLM: status 保持旧口径；apply_outcome（applied / refused / legal_hold）与 isolated_error_count 供 Gateway 摘要区分
-#   「整次被拒」和「执行了、隔离了 N 条」。没跑（not_due）时两个新字段为空值，to_dict 也不输出它们。
-# 类用途: 一次维护调用的结果：跑没跑、旧状态、执行结果与被隔离的错误条数。
+# LLM: status 保持旧口径；apply_outcome（applied / refused / legal_hold）、isolated_error_count 与 failed_action_count
+#   供 Gateway 摘要区分「整次被拒」「执行期动作失败」和「执行了、只是隔离了 N 条」。没跑（not_due）时新字段为空值，
+#   to_dict 也不输出它们。
+# 类用途: 一次维护调用的结果：跑没跑、旧状态、执行结果、被隔离的错误条数与执行期失败的动作数。
 @dataclass(frozen=True)
 class OwnerMaintenanceResult:
     ran: bool
@@ -32,6 +33,7 @@ class OwnerMaintenanceResult:
     retention: OwnerRetentionPlan | None = None
     apply_outcome: str = ""
     isolated_error_count: int = 0
+    failed_action_count: int = 0
 
     # LLM: 旧键原样输出；新键只在真正跑过时附加，not_due 的输出与旧版逐字相同。
     # 函数用途: 转成可打印或测试比对的字典。
@@ -40,6 +42,7 @@ class OwnerMaintenanceResult:
         if self.apply_outcome:
             payload["apply_outcome"] = self.apply_outcome
             payload["isolated_error_count"] = self.isolated_error_count
+            payload["failed_action_count"] = self.failed_action_count
         if self.retention is not None:
             payload["retention"] = self.retention.to_dict()
         return payload
@@ -97,6 +100,10 @@ def run_owner_retention_if_due(
         compacted, compact_failed = _compact_global_indexes(home, now=current)
         status = _maintenance_status(retention)
         outcome = _apply_outcome(retention)
+        failed_actions = sum(
+            action.status in {"failed", "collision", "state_changed"}
+            for action in retention.actions
+        )
         previous = read_json_object_report(
             state_path,
             context="owner_maintenance.state",
@@ -111,10 +118,7 @@ def run_owner_retention_if_due(
             ),
             "status": status,
             "action_count": len(retention.actions),
-            "failed_action_count": sum(
-                action.status in {"failed", "collision", "state_changed"}
-                for action in retention.actions
-            ),
+            "failed_action_count": failed_actions,
             "load_errors": list(retention.load_errors),
             "legal_hold": retention.legal_hold,
             "text_vector_cache_reclaimed": dropped_cache_keys,
@@ -133,6 +137,7 @@ def run_owner_retention_if_due(
         write_json_file_atomic_unlocked(state_path, payload)
         return OwnerMaintenanceResult(
             True, status, retention, apply_outcome=outcome, isolated_error_count=len(retention.isolated_errors),
+            failed_action_count=failed_actions,
         )
 
 
@@ -204,7 +209,8 @@ def _maintenance_status(retention: OwnerRetentionPlan) -> str:
 
 
 # LLM: 只看 report.applied 与 legal_hold，不看错误列表：有路径级错误但执行了其余动作仍是 applied；
-#   策略级错误（策略无效/读不了、候选账本读不了）整份拒绝才是 refused。
+#   refused 与 retention.apply() 的整份拒绝是同一个判定（_has_policy_level_error，即 _POLICY_LEVEL_ERROR_CODES：
+#   策略无效/读不了、候选账本读不了），这里不另造错误码集合。
 # 函数用途: 给出本轮保留到底执行了没有：applied / refused / legal_hold。
 def _apply_outcome(retention: OwnerRetentionPlan) -> str:
     if retention.legal_hold:

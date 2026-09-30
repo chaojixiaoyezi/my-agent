@@ -225,7 +225,8 @@
     `isolated_error_count` 和 `last_applied_at`；
   - `MemoryRetentionReport` 新增 `isolated_errors`，由 `apply()` 随可执行计划带进执行器；
   - 审计事件 `owner_retention_applied` 新增 `isolated_error_count` 与 `isolated_error_codes`（按码计数，不含路径）；
-  - Gateway 摘要 `[gateway-owner-maintenance]` 的 `failed` 保持旧口径，另加 `refused` 与 `isolated`。
+  - Gateway 摘要 `[gateway-owner-maintenance]` 的 `failed` 改为只算整次被拒与执行期动作失败，另加 `refused` 与 `isolated`
+    （摘要只打印、不落盘；持久化的 `status` 不变）。
   - 仍待定：`partial_failure` 实际到不了（失败动作同时会记一条错误）；/status、TUI 展示维护状况。
 - 同一个坏任务 `state.json` 会被 completed_task 与 tool_output 两个扫描器各报一次 `TASK_STATE_INVALID`，所以错误条数不等于被隔离的
   子树数（生产 local/main 的 355 条同样如此）；按 (错误码, 路径) 去重待定。
@@ -240,7 +241,8 @@
   - tmp 直接删除 3581（约 77 MB）；
   - subagent_scratch 进回收站 8090（约 73 MB）；
   - tool_output 进回收站 25，另有 46 条执行时目标已不在（missing）。
-- 355 条 `TASK_STATE_INVALID` 的子树被隔离、没有动，要不要修复或迁移待定。
+- 355 条 `TASK_STATE_INVALID` 的子树被隔离、没有动。9a 诊断（`~/.my-agent/decision-evidence/task-state-invalid-20260929/`）：
+  它们是 05-31 到 06-05 的旧格式 `state.json`（有运行身份与预留字段，没有 status 键），不会再增长，数据保留原样；要不要迁移待定。
 - `maintenance.json` 仍记 `policy_unavailable`，这正是上面「已知残留」第一条的实例（修复后看 `apply_outcome=applied` 与
   `isolated_error_count`）。
 - 另一个 owner（`86462b8c9517`）执行 146 个动作。

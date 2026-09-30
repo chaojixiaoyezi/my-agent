@@ -507,7 +507,8 @@
   - 磁盘压力触发维护。
 - 已知残留：
   - 已修（step16l）：只要有路径级错误，维护状态就记 `policy_unavailable`、把「其实执行了」掩盖掉。现新增 `apply_outcome` /
-    `isolated_error_count` / `last_applied_at`，审计事件加隔离计数，Gateway 摘要加 `refused` / `isolated`；旧字段含义不变。
+    `isolated_error_count` / `last_applied_at`，审计事件加隔离计数；Gateway 摘要 `failed` 只算整次被拒与执行期失败，另加
+    `refused` / `isolated`（摘要只打印）；持久化旧字段含义不变。
     /status、TUI 展示维护状况待定。
   - 待定：同一个坏任务状态被两个扫描器各报一次，错误条数不等于子树数；
   - 待定：不活跃 owner 不会自愈迁移，因为 v1→v2 策略迁移只挂在 Curator 上。`93b8c3ffffb8` 已按裁定一次性迁移，

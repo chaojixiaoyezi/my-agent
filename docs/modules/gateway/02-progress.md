@@ -667,7 +667,8 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
     - `last_applied_at`（最近一次 `applied`，被拒时沿用上次，旧文件按 0）。
     - `status` / `last_success_at` 不变。
   - `OwnerMaintenanceResult` 新增 `apply_outcome` / `isolated_error_count`，`not_due` 时 `to_dict` 与旧版逐字相同。
-  - Gateway 摘要 `failed` 保持旧口径，另加 `refused` 与 `isolated`。
+  - Gateway 摘要：`failed` 改为只算整次被拒与执行期动作失败，「执行了、只有隔离错误」不算（3a 据 9a 对 355 条的诊断补充裁定；
+    摘要只打印、没有持久化读取方）；另加 `refused` 与 `isolated`。`OwnerMaintenanceResult` 同步带出 `failed_action_count`。
 - **不改**：/status、TUI 不读维护状态，展示维护状况属于新功能，记台账待定。
 - **计数口径**：`isolated_error_count` 是错误条数。同一个坏 `state.json` 会被 completed_task 与 tool_output 两个扫描器各报一次
   （既有行为），所以不等于子树数；按 (错误码, 路径) 去重待定。
