@@ -59,6 +59,8 @@ def test_failure_message_names_the_test_the_place_and_the_fix(tmp_path):
     assert "tests/test_x.py::test_y" in created and str(tmp_path / MAGICMOCK_DIR_NAME) in created
     assert "monkeypatch.chdir(tmp_path)" in created and "已删除" in created
     assert "不删除" in kept
+    # 防线分不出是哪个进程写的，两种文字都要提示并行分片的可能和单独重跑。
+    assert all("并行分片" in text and "单独重跑" in text for text in (created, kept))
 
 
 def test_tracked_report_rewrite_changes_the_fingerprint(tmp_path):
@@ -76,3 +78,4 @@ def test_repo_root_matches_the_code_size_script_root():
     assert (Path(REPO_ROOT) / "scripts" / "check_code_size.py").is_file()
     message = tracked_report_failure_message("tests/test_x.py::test_y", REPO_ROOT)
     assert "--report" in message and "tests/test_x.py::test_y" in message
+    assert "并行分片" in message and "单独重跑" in message
