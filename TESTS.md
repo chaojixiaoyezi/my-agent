@@ -82,6 +82,24 @@
   - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：通过
   - `git diff --check`：通过
 
+## 能力包 G03／G05 真实模型补测、G07 一次选择开启臂与子代理选模权限（2026-09-30，分支 `claude/ae-capability-real-model`，仅文档）
+
+- **被测**：G03／G05／G07 为 `bf4f740c3`（step16s）；子代理选模权限为 `10041de02`（step16t）。都用 git archive 导出，装专用 `--without-pip` venv。
+- **环境**：
+  - 隔离 home，私有 Gateway 8441／8442／8443，真实 TUI 跑在 tmux 里，全部 `env -i` 启动，假 HOME 跑完为空。
+  - 模型为官方 MiniMax（`d9607663…`）。目录副本只留这一个服务商，600，用完删除。
+  - `max_tool_rounds: 60`。
+- **方法**：测试者只发自然需求。故障只用三种：一次性受控暂停点、改 owner 工具索引权限、SIGKILL 测试 Gateway 或其子代理 runner 的 PID。判定只看结构化事实：工具回执错误码、`tool_operations`／attempt、安装表／activation、pin、canonical、wake、线程 `model_profile_id`／`reasoning_effort`、模型调用数。不读会话正文。模型没走到的分支记为未命中，不用脚本代替。
+- **结果**：
+  - G05：五项中四项通过，审批期撤销只命中 get 分支；工具操作 UNKNOWN 通过，跨回合 Goal 恢复未命中。
+  - G03：四条路径的拒绝或主分支都命中；BLOCKED 接替经故障路线通过，拒绝后的接替出口未命中。
+  - G07 一次选择开启臂：通过（选中 A、B，C 未入选）。
+  - 选模权限：四步通过，按模型名点名未命中。
+  - 详表见[验收记录](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#真实模型补测-g03-g05-g07-与子代理选模权限2026-09-30)。
+- **缺陷候选（只报告）**：Goal 续跑空转；`resolve_capability_requests` 的确定拒绝被记成 `TOOL_OPERATION_OUTCOME_UNKNOWN`；没有会话任务的请求，TaskRun 永不关闭（两个版本都复现）。另有一条观察：被 SIGKILL 子代理的 unknown attempt，`/recover` 里查不到。
+- **证据**：`~/.my-agent/decision-evidence/capability-real-bf4f/`（仓库外），含脚本、hook 事件、facts、故障日志、`host-defect-candidates.json`。
+- **本轮验证**：只改 Markdown，跑了 doc sync、`git diff --check` 等静态门，没有跑 pytest。
+
 ## 智能程度逐模型真实审计（2026-09-30，38）
 
 - **方法**：隔离 home、生产目录副本（只留待测服务商，600，refresh_token 清空）；产品 `selected_model_config` + `get_backend` +

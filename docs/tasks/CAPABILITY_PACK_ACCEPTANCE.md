@@ -140,11 +140,11 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 | --- | --- | --- |
 | G01 | 生产规模的当前能力包长任务，特别是默认 262144 自然 Compact | C22 使用 65536，仅为受控机制证据；最终 27 次 generation=0。历史生产大窗口提交缺当前源码／pins／资源执行关联，不能替代当前能力包验收；约 128K 及以上的规模口径见下文。[C24](#c24固定9f88的131072自然长任务两代压缩2026-09-28) 在固定 9f88、131072 窗口的自然长任务里两代自动提交（88347→39157、89492→46017，均 `tool_context_overflow`），约 128K 的自动压缩机制已有当前版本证据；默认 262144 与压缩后原资源链仍未覆盖 |
 | G02 | 第四代提交后再 get／执行原资源 | C22 第二代后已真实 get、复制和执行原程序；第四代后只有最终答复。历史多代提交也没有后继原资源链。“必须第四代后执行”不是原 Goal 的独立次数门槛，保留未覆盖而不加任务凑数；65536 不补算生产规模。C24 两代后各有工具调用，但选择空选、全程 0 次包 get，压缩后原资源链在 131072 仍未覆盖 |
-| G03 | ONE_SHOT／历史不完整、BLOCKED 接替、后台续接后的前台新请求 | C23 只证明正常三子完成、一次原派工、两次后台续接及父级保存；原父自动选择为空。既有组件和正常路径不替代实际拒绝／接替分支，全文消费和资料准确性失败保持。四条宿主分支已用脚本模型在真实 Gateway／TUI 端到端验证（[见下文](#g03后台子代理四条特殊路径的脚本模型端到端2026-09-28)），真实模型仍未覆盖 |
+| G03 | ONE_SHOT／历史不完整、BLOCKED 接替、后台续接后的前台新请求 | C23 只证明正常三子完成、一次原派工、两次后台续接及父级保存；原父自动选择为空。既有组件和正常路径不替代实际拒绝／接替分支，全文消费和资料准确性失败保持。四条宿主分支已用脚本模型在真实 Gateway／TUI 端到端验证（[见下文](#g03后台子代理四条特殊路径的脚本模型端到端2026-09-28)）。**2026-09-30 真实模型补测**（`bf4f740c3`）：ONE_SHOT 拒绝、历史不完整拒绝、BLOCKED 后接替（故障路线）、前台新请求均通过；BLOCKED 自然路线命中但父级自己接手，拒绝后接替出口未命中，见[真实模型补测](#真实模型补测-g03-g05-g07-与子代理选模权限2026-09-30) |
 | G04 | Goal 暂停、回合中断、明确资源停止三类独立控制 | **已由 [R10 独立实测](#r10三类控制独立原生实测2026-09-28)闭合，三项分别通过**。已有 /stop 组合状态和 REOPEN03 同代续读仍只是旧证据，不替代这三次实测。[深度切片](#r10深度切片2026-09-28)补测了长前台工具执行中途的 `/interrupt` 和 `/goal resume` 对照，均通过 |
-| G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过。五项已有[脚本模型端到端机制证据](#g05脚本模型端到端机制验证2026-09-28)，跨回合 Goal 恢复和工具操作 UNKNOWN 也已[补测](#g05补测跨回合-goal-恢复与工具操作-unknown2026-09-28)，真实模型仍未覆盖 |
+| G05 | 审批期撤销／迟到批准、在途读取切代、UNKNOWN 查原操作且零重放、非空设置不兼容、内容 SHA 变化后的旧任务续读 | 串行生命周期 unknown=0；F02 是同字节 activation 换代；F01 恢复后 get=0，仅旧 source_ref 物化拒绝命中。组件与这些局部分项不能拼为 R11/R12/R14 完整交错通过。五项已有[脚本模型端到端机制证据](#g05脚本模型端到端机制验证2026-09-28)，跨回合 Goal 恢复和工具操作 UNKNOWN 也已[补测](#g05补测跨回合-goal-恢复与工具操作-unknown2026-09-28)。**2026-09-30 真实模型补测**（`bf4f740c3`）：五项里四项通过，审批期撤销只命中 get 分支（source_ref 物化未命中）；工具操作 UNKNOWN 通过，跨回合 Goal 恢复未命中，见[真实模型补测](#真实模型补测-g03-g05-g07-与子代理选模权限2026-09-30) |
 | G06 | 不同 owner 的包、设置、task 和偏好隔离 | 同 owner 多 TUI 与显式子授权有真实证据。**2026-09-28 补跨 owner 原生验收**（`9f88e4905`，隔离 home、私有 8436、local/main 与 local/user 两个 owner）：包、设置、task、偏好四项均取得原生结构化证据，未发现隔离缺陷，见[R16 跨 owner 隔离原生验收](#r16-跨-owner-隔离原生验收2026-09-28)；按包选择偏好与 global_index 可读性已由同日补测覆盖，均通过（见[补测](#r16-补测按包选择偏好与-global_index-可读性2026-09-28)） |
-| G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证。**2026-09-28 补原生对照**（`9f88e4905`，隔离 home、私有 8440，A01 每种配置一次）：旧 v3 随包 Skill 三组都能列出和读取；三组都没有无关包调用；宿主都未做一次选择，模型都自选 A；开关关闭只去掉推荐段，已装包仍在静态索引里可见，见[G07 Skill 共存与成本对照原生验收](#g07-skill-共存与成本对照原生验收2026-09-28)；一次选择开启臂仍未覆盖 |
+| G07 | 当前版本旧 v3 随包全局 Skill 共存，以及开关关闭／单包／多包同输入成本对照 | 普通 builtin Skill、ZERO01 空表核心任务和既有回归各证明有限事实；目录规模夹具不等于完整模型性能。YAML/dataclass 的推荐默认开启、一次选择默认关闭，私有开启臂不是默认自动采用保证。**2026-09-28 补原生对照**（`9f88e4905`，隔离 home、私有 8440，A01 每种配置一次）：旧 v3 随包 Skill 三组都能列出和读取；三组都没有无关包调用；宿主都未做一次选择，模型都自选 A；开关关闭只去掉推荐段，已装包仍在静态索引里可见，见[G07 Skill 共存与成本对照原生验收](#g07-skill-共存与成本对照原生验收2026-09-28)。**2026-09-30 补一次选择开启臂**（`bf4f740c3`，A01 一次）：宿主选中 A、B（均在可接受集合），C 未入选、未调用，辅助选择 1 次，见[真实模型补测](#真实模型补测-g03-g05-g07-与子代理选模权限2026-09-30) |
 
 ### R16 跨 owner 隔离原生验收（2026-09-28）
 
@@ -342,6 +342,101 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 - 本节证据：`~/.my-agent/decision-evidence/g05-followup-9f88/`（仓库外），汇总 `summary.json`（SHA256 `918a6b9f…e128`），另含脚本模型日志（含两次尝试）、hook 事件、各步快照、Goal 与任务记录、最终 runtime.db 副本和清理记录。本节只补文档，没有改产品代码、测试、配置或文件树。
 
 建议下一步：G05 的五项机制和两项补测都已有脚本模型证据，真实模型覆盖仍然开放。主代理对同一失败调用的重复是否加上限，由产品线决定后另开一片。
+
+## 真实模型补测 G03 G05 G07 与子代理选模权限（2026-09-30）
+
+结论：G03、G05 的宿主分支首次在真实模型下验收，G07 一次选择开启臂也补上了，另按 3a 追加验了子代理选模权限。分项结果如下：
+- 真实模型自然走到的分支都按结构化事实判定通过。
+- 模型没有自然走到的分支记为**未命中**，不改判，也不用脚本代替。
+- 发现 3 个宿主缺陷候选和 1 条观察，已交 3a 决定谁修，本文不改产品代码。
+
+### 环境
+- **被测代码**：G03／G05／G07 为 `bf4f740c3`（生产 step16s，git archive tar SHA256 `424f6687…`）；子代理选模权限为 `10041de02`（step16t，tar SHA256 `09b32a6a…`）。两套导出各装专用 `--without-pip` venv，依赖目录用 ci-venv-312。
+- **隔离**：
+  - 每套一个全新隔离 home，Gateway 分别用私有 127.0.0.1:8441（G03／G05）、8442（G07）、8443（选模）。
+  - TUI 在 tmux 里像用户一样输入；Gateway 和 TUI 都用 `env -i` 启动，假 HOME 跑完为空，代理保留，`NO_PROXY=127.0.0.1`。
+  - 没有碰生产 8420 和生产运行时。
+- **模型**：官方 MiniMax（服务商 `d9607663…`，M2.7；选模场景另用 M3）。
+  - 模型目录只复制进隔离 home，只留这一个服务商，决策模型关闭，权限 600，不打印；用完随测试根一起删除。
+  - 隔离配置设 `max_tool_rounds: 60`，防止真实模型循环。
+- **故障注入**：只用测试进程内的一次性受控暂停点（`sitecustomize`，只观察，不改结果）、改 owner 工具索引的文件权限、对本测试 Gateway 或其子代理 runner 的 PID 发 SIGKILL。每次都写入 `fault-log.txt`。
+- **判据**：只看结构化事实，不读会话正文。事实来源包括：
+  - 工具索引与 `tool_completed` 事件的错误码、failure_stage、handler_executed；
+  - `tool_operations` 与 `agent_attempts` 的状态、代次；
+  - 安装表与 activation；task 的 `skill_snapshot_refs` 和 `host_capability_selection.v1`；
+  - 子代理 canonical 状态与 `superseded_by`／`takeover_by`；wake 记录与 runner_result；
+  - 线程的 `model_profile_id`／`reasoning_effort`；请求记录里的模型调用数。
+
+### G05 结果（`bf4f740c3`）
+
+| 情况 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| 审批期撤销＋迟到批准 | get 分支通过；source_ref 物化分支未命中 | get re-s1-a 成功，pin 为 `79814234…`。等待审批期间 TUI2 停用 re-s1-a（rev 4）。批准后：get re-s1-b 成功；get re-s1-a `tools/check.txt` 得到 `SKILL_SNAPSHOT_UNAVAILABLE`。模型没有尝试 `write_file(source_ref)`，目标文件不存在。共 5 次模型调用 |
+| 在途读取切代 | 通过 | 暂停点停在读取 `CAPABILITY.md` 的前后检查之间。TUI2 停用再启用（activation `6e5b4fb5…` → `d3b23f84…`，rev 5）。两次 get 都是 `SKILL_SNAPSHOT_UNAVAILABLE`，没有写 pin。新任务的 get 成功，pin 为 `d3b23f84…` |
+| UNKNOWN 查原操作且零重放（管理操作） | 通过（不涉及模型） | 暂停点在启用已提交（rev 2 active）、handler 尚未返回时，此时操作行为 EXECUTING，随后 SIGKILL Gateway。TUI 提示“未能确认”并给出 `/plugins status <操作号>`，重启后两次查询都答“未能确认”。操作表只有 1 行，代次 1，状态 EXECUTING；attempt 为 unknown；`change_activation` 只进入 1 次。之后再执行 enable，直接成功，没有进入 handler，revision 不变 |
+| 非空设置不兼容 | 通过 | update 到 0.2.0：`settings_reason=incompatible`、`settings_restored=False`；enable 以 `invalid_settings`／`not_committed` 失败。用旧设置 configure 得到 `invalid_settings_source`，用 `{"tone":3}` configure 成功，enable 成功（rev 8，`411763d8…`）。新任务 get 后 pin 为 `411763d8…` |
+| 内容 SHA 变化后旧任务续读 | 通过 | 旧任务 pin 为 `fa38a670…`（包 SHA `6987674c…`）。审批期间 TUI2 停用→更新到 0.2.0→启用（`ede0aa29…`，包 SHA `325d029b…`）。旧任务第二次 get 得到 `SKILL_SNAPSHOT_UNAVAILABLE`，pin 仍是旧代。新任务 pin 为 `ede0aa29…` |
+| 补测：跨回合 Goal 恢复 | 未命中 | 模型 get re-g-a（pin `0703a663…`）后调用了 `create_goal` 和 list_files，但没有调用 `update_goal` 标记等待。测试者 `/goal pause`，把包更新到 0.2.0（`c5a012c7…`），再 `/goal resume`；续跑没有任何工具调用，也没再读包。同时发现缺陷候选 D1 |
+| 补测：模型工具操作 UNKNOWN | 通过 | 模型自己先 get、search、get `tools/template.txt`，再执行 `write_file(out/handover.txt, source_ref)`。暂停点在 handler 已返回、文件已写出之后，随后 SIGKILL Gateway；文件 SHA 与包资源一致。重启后，新消息得到 `RUN_RECOVERY_REQUIRED`，模型调用 0 次；`/recover` 列出这次 write_file“执行中断，结果未回传”。核对字节后选 `/recover recorded`，下一条消息用了 6 次模型调用，只有 skill_search，没有重写。write handler 全程只进入 1 次，文件 mtime 不变；原操作行为 UNKNOWN、代次 1；attempt 从 unknown 变为 recovered |
+
+### G03 结果（`bf4f740c3`，同一个 TUI 线程顺序执行）
+
+| 情况 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| ONE_SHOT 拒绝 | 通过 | 自然需求是“派子代理统计，回来后用同一任务描述再派一次复核”。唤醒片里同参数的 create 得到 `TOOL_ONE_SHOT_ALREADY_EXECUTED`（runtime_gate，handler 未执行）。模型随后按回执带 `replacement_for_run_ids` 另派（goal、role 的哈希与第一次相同），回执为 `recorded`／`superseded`；来源保持 DONE，`superseded_by` 指向接替者 |
+| BLOCKED 后接替（自然路线） | BLOCKED 命中；派子代理接替未命中 | 子代理读 `/etc/hosts` 得到 `PATH_OWNER_SCOPE_BLOCKED`，随后提 capability_request，canonical 为 BLOCKED。父级 resolve 失败（见 D2）后，自己用 run_command 接手，没有派子代理接替 |
+| BLOCKED 后接替（故障路线） | 通过 | 子代理 `write_file(ws/notes/child-note.txt)` 的 handler 返回后停在暂停点，测试者只 SIGKILL 这个子代理的 runner 进程（父进程是测试 Gateway）。随后 attempt 变为 unknown（`executor_process_died`），runner_result 为 BLOCKED／blocked，wake metadata 为 BLOCKED。父级按自然需求带 `replacement_for_run_ids` 另派；来源 canonical 变为 TAKEN_OVER，`takeover_by` 指向接替者，接替者 DONE。另见观察 O1 |
+| 历史不完整 | 拒绝通过；拒绝后的接替出口未命中 | 子代理先由暂停点 h1 按住，测试者把 owner 工具索引改为只写（0200，共 26.09 秒）再放行。唤醒片的普通 create 得到 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`（runtime_gate，handler 未执行），权限随即恢复并确认可读。模型没有用 `replacement_for_run_ids` 另派，而是自己写了结果文件；TaskRun done |
+| 后台续接后的前台新请求 | 通过 | 新的前台请求 done，2 次模型调用，list_agents 成功，没有被此前回合拦住。它的 TaskRun 一直没有关闭，见 D3 |
+
+### G07 一次选择开启臂（`bf4f740c3`）
+- **配置**：开关文件放在 `<owner home>/config/capability_config.yaml`（推荐开、一次选择开），启动前用产品的 `make_agent` 核对确实加载。
+- **包与输入**：用 TUI 的 `/plugins install|enable` 装入冻结的 A 0.3.0、B 0.1.4、C 0.1.0；design-lite 包本机没有，这次没装（偏差）。A01 原提示只发一次。
+- **结果**：通过。
+  - task 带 `host_capability_selection.v1`：outcome=selected，selected_count=2，warning `CAPABILITY_SELECTION_ENTRY_PARTIAL`。
+  - pin 住 A 与 B，都在可接受集合 {A, B} 内；C 没有入选，也没有被调用。
+  - 模型只调用了 A（get 7 次、search 1 次）；输入文件未改。
+- **成本**：请求 done，281 秒，主调用 14 次加辅助选择调用 1 次（输入 720、输出 250 token），决策调用 0。
+
+### 子代理选模权限（`10041de02`，按 3a 追加）
+- **做法**：R16 双 owner 做法，local/main 管理员加普通用户 local/user/ms-user，共用一个测试 Gateway。
+  - 管理员目录有 M2.7 和 M3。
+  - 普通用户目录只有 M3，由测试者放入，并换了新的服务商和档案 ID（`d7516658…`），代表“用户自己添加的模型”；没有走菜单录入密钥（偏差）。
+
+| 步骤 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| 1 管理员共享 M2.7 | 通过 | 自然需求下，模型调用 `manage_models set_shared`；`shared-model-profiles.json` 只含 `shared:d9607663…` 引用，不含密钥 |
+| 2 普通用户点名共享模型 | 通过 | 模型先 list，再用 `model: "shared:d9607663…"` 派工，得到 `TOOL_INVALID_ARGUMENTS`，没有创建子代理。回执文案出自 `model_profiles.py` 的“普通用户派子代理只能指定自己添加的模型；想用管理员开放的模型，请省略 model（子代理继承当前会话的模型）”。模型随即省略 model 重派成功，子代理线程为 `d7516658…`、auto |
+| 2b 按模型名点名 | 未命中 | 自然需求让模型直接写 `MiniMax-M2.7`，模型没有调用工具，1 次调用后直接作答 |
+| 3 普通用户用自己的模型并设 effort low | 通过 | 模型先传 `model: "default"` 被拒（参数错误），随后用 `model: d7516658…`、`effort: low` 成功。子代理线程 `model_profile_id=d7516658…`、`reasoning_effort=low`，实际调用 MiniMax-M3，DONE |
+| 4 管理员用自己目录里的模型 | 通过 | `model: 7ec7c1a7…`（M3）成功，子代理线程 `model_profile_id=7ec7c1a7…`，实际调用 MiniMax-M3，DONE |
+
+### 宿主缺陷候选与观察（只报告，不修）
+- **D1 活动 Goal 续跑空转**：没有工具调用时，每 4–5 秒续跑一片。从 Goal 开始到第二次 `/goal pause`，`agent_run.started` 共 23 次，tokens_used 340838，token_budget 为空。`ensure_goal_progress_continuation` 没有进展判据。3a 已派修。
+- **D2 确定的拒绝被记成结果未知**：`resolve_capability_requests(decision=grant)` 遇到 write_roots 全部越界时（resolved 0，rejected `['/etc/hosts']`），返回 ok=False 但不带错误码。宿主于是把它记成 `TOOL_OPERATION_OUTCOME_UNKNOWN`（effect_reconciliation、manual_review），操作行停在 UNKNOWN，settled_at 为 0。操作号 `tool_operation:39a147a6…`。
+- **D3 没建会话任务的请求，TaskRun 永不关闭**：请求记录里没有 `conversation_runtime`、也没有会话 task 文件时，请求 done，但 TaskRun 一直停在 created。两个版本都复现：
+  - `bf4f740c3`：只调了 list_agents 的前台请求；
+  - `10041de02`：管理员共享请求，以及普通用户一次不调工具的请求。
+- **O1 子代理未知 attempt 用户无从处理**：被 SIGKILL 的子代理：
+  - failure_type 为 `runner_error`，不是 `executor_effects_unknown`；
+  - 其 write_file 操作停在 EXECUTING，agent_run 停在 unknown，按静止规则所在 TaskRun 一直不关闭；
+  - 而该线程的 `/recover` 显示“没有等待核对的执行”。
+
+### 测试者偏差（如实记录）
+- 早期查看 TUI 画面时范围过宽，看到过模型回复文字；之后只看审批和状态行。判定从未使用画面内容。
+- 有一次用 `grep -l` 找 `replacement_records`，命中了一个会话消息文件；抽取脚本只打印了这个键的正则匹配（输出为空），没有显示正文。之后回执只从 runs 下的 tool_outputs 读取。
+- `drv stop` 原本会保存最终画面，已在任何证据落盘前去掉，证据里没有画面文件。
+
+### 证据与收尾
+- **证据**：`~/.my-agent/decision-evidence/capability-real-bf4f/`（仓库外），不含模型目录和会话正文。
+  - `g03-g05/`：脚本、暂停点 hook 及其事件、各步 facts、故障日志、`inject-hi.json`。
+  - `g07-select/`、`model-select-10041/`：各自的脚本与 facts。
+  - 汇总：`host-defect-candidates.json`、`artifacts/goal-continuation-spin.json`。
+- **收尾**：
+  - 只停了自己记录的 PID，TUI 都用 `/exit`，Gateway 用 `gateway stop`；8441、8442、8443 无监听，没有进程引用测试根。
+  - 假 HOME 为空；三个测试根（连同目录副本）已删除。
+
+建议下一步：先修 D2、D3（都有结构化复现和明确入口），D1 按 3a 已派的方案修。修好后复跑 G03-D 和 G05 Goal 场景，即可复核 D1、D3。仍未命中的是：模型自发的 source_ref 物化、Goal 标记等待后恢复、拒绝后派子代理接替、按模型名点名共享模型。它们依赖模型选择，可以在后续真实任务里顺带观察，不必为此专门重跑。
 
 ## C25空选后能力包对主线程的可见性只读核对与脚本复现（2026-09-28）
 
