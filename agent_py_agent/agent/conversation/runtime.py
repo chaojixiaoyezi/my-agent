@@ -3949,7 +3949,7 @@ def _retire_cancelled_task_wake(
     task_id = _session_task_run_id(_background_run_request_for_wake(scheduler, signal, reason, now))
     try:
         task = scheduler.store.session_tasks.load(task_id)
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError):
         return False
     if str(getattr(task, "status", "") or "") != SESSION_TASK_CANCELLED:
         return False

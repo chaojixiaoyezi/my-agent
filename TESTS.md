@@ -136,6 +136,15 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## R-a/R-b 复审跟进（2026-09-30，分支 `claude/ae-task-wake-fixes`，接在 R-b 之后，75 复审意见）
+
+- **`_retire_cancelled_task_wake` 的 except 去掉 `AttributeError`**：`read_json_file_report` 把根节点不是对象的记录当读取错误返回，
+  `SessionTaskStore.load` 随即抛 `ValueError`，`from_dict` 只会拿到字典；`AttributeError` 只可能来自替身缺 `session_tasks`，
+  属于在产品代码里给替身兜底，去掉后替身缺属性应当在夹具里补。
+- **`test_session_task_claim_binding.py`**：新增 `test_legacy_task_body_without_task_id_keeps_the_old_behavior`：正文写入时没记
+  `session_task_id` 的旧数据不算派活正文，没有归属任务号的回合照样能认领（75 的变异"没有任务号的旧正文也当成派活正文"原来存活，
+  现在被这一项抓住）。
+
 ## 派活正文只许它自己的派活回合认领（2026-09-29，分支 `claude/ae-task-wake-fixes`，接在 R-a 之后，R-b）
 
 - **修的问题**（step16k 上同样复现）：`claim_for_turn`/`available_for_turn` 只在 `owning_task_id` 非空时核对正文归属。目标正忙时，

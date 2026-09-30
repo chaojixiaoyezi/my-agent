@@ -167,3 +167,26 @@ def test_task_report_is_still_claimable_without_a_task(tmp_path) -> None:
     assert inject_pending_guidance(agent, params) is True
 
     assert store.guidance.receipt(f"session_task_result:{task.task_id}:done").status == "reserved"
+
+
+def test_legacy_task_body_without_task_id_keeps_the_old_behavior(tmp_path) -> None:
+    """旧数据：正文写入时没记 session_task_id（归属无从核对），不算派活正文，保持原行为——没有归属任务号的回合照样能认领。"""
+    agent, store, task, params = _setup(tmp_path, task_turn=False)
+    store.guidance.mark_status(_BODY_KEY, "rejected")
+    legacy_key = f"body:session_task:{_SENDER}->{_TARGET}:旧正文"
+    store.guidance.append_once(
+        {
+            "target_type": "thread",
+            "target_id": _TARGET,
+            "message": "旧版本写入的派活正文",
+            "sender": _SENDER,
+            "priority": "normal",
+            "delivery": "next_turn",
+            "metadata": {"origin_kind": SESSION_TASK_ORIGIN_KIND, "origin_thread_id": _SENDER},
+        },
+        dedupe_key=legacy_key,
+    )
+
+    assert inject_pending_guidance(agent, params) is True
+
+    assert store.guidance.receipt(legacy_key).status == "reserved"
