@@ -22,6 +22,16 @@
 四份索引的键定义只有一处权威：`home_indexes.INDEX_KEY_FIELDS_BY_FILE`，写入侧与压缩侧都从它派生。
 手动 `home-index-rebuild --apply` 仍是权威修复工具，不变。
 
+**维护状态只加键、不改旧键含义**（2026-09-29，step16l）：`O/data/maintenance.json` 的 `status` / `last_success_at` 仍是旧汇总口径
+（有任何错误就 `policy_unavailable`）。「到底执行了没有」看三个新键：
+- `apply_outcome`：`applied` / `refused` / `legal_hold`，只由 `report.applied` 与 `legal_hold` 推出，不看错误列表；
+- `isolated_error_count`：`MemoryRetentionReport.isolated_errors` 的条数，是 apply 隔离掉的扫描期路径级错误，按错误条数计，不按子树计；
+- `last_applied_at`：最近一次 `applied` 的时刻，旧文件缺这个键时按 0。
+
+同一轮的审计事件 `owner_retention_applied` 带 `isolated_error_count` 与 `isolated_error_codes`（按码计数）。
+Gateway 维护摘要 `[gateway-owner-maintenance]` 的 `failed` 保持旧口径，另加 `refused`（整次被拒）与 `isolated`
+（执行了、但有被隔离的错误）两个计数。
+
 `SchedulerService.claim_wake`核对wake与canonical run身份，在原repository领取后准确回读pending，再调用`_prepare_task_link`：原TaskStore任务锁内只为首次新运行建立链接，已有链接只读复核。合法冻结只保留原claim用于原回复交付；无冻结的active任务才标记running并交后台模型，无冻结终态按唯一既有映射结算。无法确认pending时释放claim并保留待处理；准入结算只有原CAS实际成功才返回stale，claim已被接手时返回busy，不能确认掉新持有者的wake。TaskStore仍唯一保存pins/选包marker，不新增调度专用任务账或Skill豁免。
 
 `goal_control_service._create_goal`复用`capability.package_selection_scope.new_task_capability_selection`为真正新建任务提供可选typed pending；原Goal存储、任务bind和wake顺序保持，入口选择在后续真实主业务请求前发生。

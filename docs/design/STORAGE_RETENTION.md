@@ -218,9 +218,17 @@
 
 **已知残留（2026-09-29 核对时发现，待定，不改代码）**：
 
-- `owner_maintenance._maintenance_status` 只要 `load_errors` 非空就记 `policy_unavailable`，哪怕路径级错误已被隔离、其余动作都执行了；
-  `last_success_at` 也因此不前进。状态名会让人误以为整次被拒（生产 local/main 带 355 条 `TASK_STATE_INVALID` 时就是这样）。
-  `partial_failure` 实际到不了：失败动作同时会记一条错误。
+- （**已修，step16l，分支 `claude/9b-maintenance-apply-outcome`**）`owner_maintenance._maintenance_status` 只要 `load_errors` 非空就记
+  `policy_unavailable`，哪怕路径级错误已被隔离、其余动作都执行了，`last_success_at` 也因此不前进。修法按持久化字段只加不改：
+  - `status` 与 `last_success_at` 含义不变；
+  - `maintenance.json` 新增 `apply_outcome`（`applied` / `refused` / `legal_hold`，只看 `report.applied` 与 `legal_hold`）、
+    `isolated_error_count` 和 `last_applied_at`；
+  - `MemoryRetentionReport` 新增 `isolated_errors`，由 `apply()` 随可执行计划带进执行器；
+  - 审计事件 `owner_retention_applied` 新增 `isolated_error_count` 与 `isolated_error_codes`（按码计数，不含路径）；
+  - Gateway 摘要 `[gateway-owner-maintenance]` 的 `failed` 保持旧口径，另加 `refused` 与 `isolated`。
+  - 仍待定：`partial_failure` 实际到不了（失败动作同时会记一条错误）；/status、TUI 展示维护状况。
+- 同一个坏任务 `state.json` 会被 completed_task 与 tool_output 两个扫描器各报一次 `TASK_STATE_INVALID`，所以错误条数不等于被隔离的
+  子树数（生产 local/main 的 355 条同样如此）；按 (错误码, 路径) 去重待定。
 - `retention_scan._tool_output_actions` 的「函数用途」注释写「含旧 tasks 与新版 runs 两个根」，实际只扫 `O/tasks`；
   `_recovery_roots` 的注释写「两个规范根」，实际返回三个。
 - `AuditLogQuery.cleanup_old_entries` 先读、写临时文件再替换，全程不持追加锁（`io.jsonl.append_line_locked` 用的锁），
@@ -233,10 +241,16 @@
   - subagent_scratch 进回收站 8090（约 73 MB）；
   - tool_output 进回收站 25，另有 46 条执行时目标已不在（missing）。
 - 355 条 `TASK_STATE_INVALID` 的子树被隔离、没有动，要不要修复或迁移待定。
-- `maintenance.json` 仍记 `policy_unavailable`，这正是上面「已知残留」第一条的实例。
+- `maintenance.json` 仍记 `policy_unavailable`，这正是上面「已知残留」第一条的实例（修复后看 `apply_outcome=applied` 与
+  `isolated_error_count`）。
 - 另一个 owner（`86462b8c9517`）执行 146 个动作。
-- 两个 owner（`93b8c3ffffb8`、`ebd40e6fc3ec`）的保留策略本身无效（`POLICY_INVALID`），每天整次拒绝执行，需要有人看它们的
-  `retention.json`（待定）。
+- 两个 owner（`93b8c3ffffb8`、`ebd40e6fc3ec`）的保留策略本身无效（`POLICY_INVALID`），每天整次拒绝执行。09-29 只读诊断：
+  - 两份都是产品 05-31 种子写出的 `retention.v1`，不是手写；
+  - 08-05 起卡在 v2 版本门；
+  - v1→v2 迁移只挂在 Curator 执行前与手动 `memory migrate --apply` 上，两个 owner 长期不活跃、Curator 从没到期，所以一直没升级。
+  - 处理（3a 裁定）：`93b8c3ffffb8`（local/users，测试名）已于 09-29 22:01 用产品 `_migrate_retention_policy` 只迁移这一个文件，
+    原 v1 备份在 `first-maintenance/v1-policy-migration/`；`ebd40e6fc3ec`（feishu/users，像真实用户）不动，交用户决定。
+  - 待定：不活跃 owner 不会自愈迁移，因为迁移只挂在 Curator 上。
 
 ## 9. 旧版任务状态文件：355 棵 `TASK_STATE_INVALID`（2026-09-29 只读诊断，待定、未落地）
 

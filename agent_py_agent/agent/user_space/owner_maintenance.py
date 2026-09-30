@@ -1,3 +1,8 @@
+# LLM: owner 维护的唯一入口与状态文件 O/data/maintenance.json（schema owner-maintenance.v1，只加键、不改旧键含义）。
+#   status/last_success_at 是旧汇总口径（有任何错误就 policy_unavailable）；「到底执行了没有」看 apply_outcome，
+#   被隔离的路径级错误看 isolated_error_count，最近一次真正执行看 last_applied_at。改动联测 test_owner_maintenance
+#   与 test_gateway_owner_maintenance。
+# 模块用途: 按 owner 到期跑保留、向量缓存回收与 global_index 压缩，并把结构化结果写进维护状态文件。
 from __future__ import annotations
 
 import time
@@ -17,14 +22,24 @@ from .home_retention import OwnerRetentionPlan, apply_owner_retention
 _DEFAULT_INTERVAL_SECONDS = 86_400
 
 
+# LLM: status 保持旧口径；apply_outcome（applied / refused / legal_hold）与 isolated_error_count 供 Gateway 摘要区分
+#   「整次被拒」和「执行了、隔离了 N 条」。没跑（not_due）时两个新字段为空值，to_dict 也不输出它们。
+# 类用途: 一次维护调用的结果：跑没跑、旧状态、执行结果与被隔离的错误条数。
 @dataclass(frozen=True)
 class OwnerMaintenanceResult:
     ran: bool
     status: str
     retention: OwnerRetentionPlan | None = None
+    apply_outcome: str = ""
+    isolated_error_count: int = 0
 
+    # LLM: 旧键原样输出；新键只在真正跑过时附加，not_due 的输出与旧版逐字相同。
+    # 函数用途: 转成可打印或测试比对的字典。
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"ran": self.ran, "status": self.status}
+        if self.apply_outcome:
+            payload["apply_outcome"] = self.apply_outcome
+            payload["isolated_error_count"] = self.isolated_error_count
         if self.retention is not None:
             payload["retention"] = self.retention.to_dict()
         return payload
@@ -54,6 +69,9 @@ def owner_maintenance_due(
     return last_attempt <= 0 or current - last_attempt >= interval
 
 
+# LLM: 维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
+#   status 与 last_success_at 含义不变。写 maintenance.json 与审计属于副作用，都在 locked_json_path 内完成。
+# 函数用途: owner 到期时跑一轮维护并写结构化状态；没到期直接返回 not_due。
 def run_owner_retention_if_due(
     home: MyAgentHomePaths,
     *,
@@ -78,6 +96,7 @@ def run_owner_retention_if_due(
         # 单份失败不中断维护；成功与"试了但失败"分开汇总进维护状态，便于观察是否真的压过。
         compacted, compact_failed = _compact_global_indexes(home, now=current)
         status = _maintenance_status(retention)
+        outcome = _apply_outcome(retention)
         previous = read_json_object_report(
             state_path,
             context="owner_maintenance.state",
@@ -104,9 +123,17 @@ def run_owner_retention_if_due(
             "indexes_compacted": compacted,
             # "试了但失败"（io_error / identity_changed）单列，免得跟"没到期"混成一片。
             "indexes_compact_failed": compact_failed,
+            # status 有路径级错误就记 policy_unavailable，会把"其实执行了"掩盖掉；这三个键说清执行事实。
+            "apply_outcome": outcome,
+            "isolated_error_count": len(retention.isolated_errors),
+            "last_applied_at": (
+                current if outcome == "applied" else _timestamp(previous.get("last_applied_at"))
+            ),
         }
         write_json_file_atomic_unlocked(state_path, payload)
-        return OwnerMaintenanceResult(True, status, retention)
+        return OwnerMaintenanceResult(
+            True, status, retention, apply_outcome=outcome, isolated_error_count=len(retention.isolated_errors),
+        )
 
 
 # LLM: 回收只读 active 记忆算出保留集合，不加载嵌入模型、不联网；失败只记 0，绝不影响保留策略结果。
@@ -163,6 +190,9 @@ _COMPACT_NOT_ATTEMPTED_REASONS = frozenset(
 )
 
 
+# LLM: 旧汇总口径，含义保持不变（持久化字段只加不改）：只要有任何错误（含已被隔离的路径级错误）就是 policy_unavailable。
+#   判断是否真的执行过用 _apply_outcome，不要改这里。
+# 函数用途: 给出维护状态文件里的旧 status 值。
 def _maintenance_status(retention: OwnerRetentionPlan) -> str:
     if retention.legal_hold:
         return "legal_hold"
@@ -171,6 +201,15 @@ def _maintenance_status(retention: OwnerRetentionPlan) -> str:
     if any(action.status in {"failed", "collision"} for action in retention.actions):
         return "partial_failure"
     return "success"
+
+
+# LLM: 只看 report.applied 与 legal_hold，不看错误列表：有路径级错误但执行了其余动作仍是 applied；
+#   策略级错误（策略无效/读不了、候选账本读不了）整份拒绝才是 refused。
+# 函数用途: 给出本轮保留到底执行了没有：applied / refused / legal_hold。
+def _apply_outcome(retention: OwnerRetentionPlan) -> str:
+    if retention.legal_hold:
+        return "legal_hold"
+    return "applied" if retention.applied else "refused"
 
 
 def _maintenance_state_path(owner_home: Path) -> Path:

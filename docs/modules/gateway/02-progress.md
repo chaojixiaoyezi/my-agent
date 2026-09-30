@@ -650,3 +650,27 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 
 释放只计会让回合崩溃的失败（3a 裁定 (a)）：`reject_pending(failure=...)` 按唤醒毒丸的 `verdict_for_error` 判定，超时、429、连接、
 环境故障、/stop 与取消只释放不计次；前台 `_handle_gateway_request` 的收尾与后台片收尾都把回合抛出的异常交进来。
+
+## 维护状态说清「执行了没有」：只加字段、不改旧口径（2026-09-29，分支 `claude/9b-maintenance-apply-outcome`，基于 step16l `5ec2db2e0`）
+
+- **起因**：step16i 首跑积压时，local/main 其实执行了 11742 个动作、失败 0。但 `maintenance.json` 记的是 `policy_unavailable`、
+  `last_success_at` 为空，Gateway 摘要也把它算成 `failed`；同一轮的审计事件却写 `ok=true`、`errors=[]`。
+  - 前两者的原因：R4 之后路径级错误只隔离重叠动作，而 `_maintenance_status` 只要有错误就记 `policy_unavailable`。
+  - 审计的原因：它在 `execute_retention_plan` 里只看到隔离后剩下的可执行部分。
+- **修法**（3a 裁定，持久化字段只加不改）：
+  - `MemoryRetentionReport.isolated_errors`（末尾、带默认值）：`apply()` 用 `replace(_without_errored_subtrees(plan), isolated_errors=plan.errors)`
+    把扫描期路径级错误随可执行计划带进执行器，合并回执时原样带出；整份拒绝、法律保留时为空。
+  - 审计事件 `owner_retention_applied` 新增 `isolated_error_count` 与 `isolated_error_codes`（按码计数，不含路径）。
+  - `maintenance.json` 新增：
+    - `apply_outcome`（`applied` / `refused` / `legal_hold`，由 `_apply_outcome` 只看 `report.applied` 与 `legal_hold` 推出）；
+    - `isolated_error_count`；
+    - `last_applied_at`（最近一次 `applied`，被拒时沿用上次，旧文件按 0）。
+    - `status` / `last_success_at` 不变。
+  - `OwnerMaintenanceResult` 新增 `apply_outcome` / `isolated_error_count`，`not_due` 时 `to_dict` 与旧版逐字相同。
+  - Gateway 摘要 `failed` 保持旧口径，另加 `refused` 与 `isolated`。
+- **不改**：/status、TUI 不读维护状态，展示维护状况属于新功能，记台账待定。
+- **计数口径**：`isolated_error_count` 是错误条数。同一个坏 `state.json` 会被 completed_task 与 tool_output 两个扫描器各报一次
+  （既有行为），所以不等于子树数；按 (错误码, 路径) 去重待定。
+- **同轮处理的两个 v1 策略 owner**（3a 裁定）：`93b8c3ffffb8`（local/users，测试名）用产品 `_migrate_retention_policy` 一次性迁移，
+  原文件备份进证据目录；`ebd40e6fc3ec`（feishu/users，像真实用户）不动、交用户决定，状态修复上线后它每天会记为 `refused`。
+- 测试与变异见 TESTS.md 同名节。

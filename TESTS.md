@@ -45,6 +45,35 @@
 - **变异**（`sm3/mutate_cnt.py`，7 个，全部被抓住）：瞬时也计次、/stop 也计次、判据不走 verdict_for_error、计满后不计次的结束也拒、
   前台收尾不传异常、后台收尾不传异常、从不计次。
 
+## 维护状态说清「执行了没有」（2026-09-29，分支 `claude/9b-maintenance-apply-outcome`，基于 step16l `5ec2db2e0`）
+
+- `test_owner_maintenance.py`：
+  - 新增 `test_applied_run_with_isolated_errors_is_not_masked`：一个坏任务 `state.json` 加一个过期缓存。
+    - 旧 `status` 仍是 `policy_unavailable`、`last_success_at` 为 0；
+    - 新字段 `apply_outcome=applied`、`isolated_error_count=2`（同一坏状态被两个扫描器各报一次）、`last_applied_at` 为本轮时刻；
+    - 过期缓存照常删除；
+    - 审计事件 `ok=true`、`errors=[]`，同时 `isolated_error_count=2`、按码计数 `{TASK_STATE_INVALID: 2}`；
+    - 回执的 `isolated_errors` 进 `to_dict`。
+  - 新增 `test_last_applied_at_survives_a_refused_run`：先执行一轮，再把策略弄坏；被拒那轮 `apply_outcome=refused`，
+    `last_applied_at` 保留上一轮的值。
+  - 新增 `test_legal_hold_outcome_is_explicit`：法律保留时 `apply_outcome=legal_hold`，不删任何东西。
+  - 原有两例补了新字段断言：成功时为 applied/0；策略坏时为 refused/0/0，且 `to_dict` 带 `apply_outcome`、审计隔离计数为 0。
+- `test_gateway_owner_maintenance.py`：原摘要断言补上 `refused=0`、`isolated=0`。新增一例：一个 owner 策略坏、一个 owner 有坏任务状态，
+  摘要为 `failed=2`（旧口径）、`refused=1`、`isolated=1`，打印的那行与返回值一致。
+- **变异**（草稿副本上精确替换、按字节恢复）：11 个全部被杀，基线与恢复后通过。覆盖：
+  - 执行结果按有无错误推导；
+  - 整份拒绝时也带隔离错误；
+  - 被拒时 `last_applied_at` 也前进；
+  - 摘要把被拒算进隔离；
+  - 审计漏记隔离条数；
+  - 审计按码计数为空；
+  - 可执行计划不带隔离错误；
+  - 合并回执丢掉隔离错误；
+  - 旧 status 口径被偷改；
+  - `to_dict` 不输出新键；
+  - 法律保留算成被拒。
+- **回归**：引用保留、维护、Gateway 循环和审计日志的 49 个测试文件，加 9 个全仓守卫，共 989 过。
+
 ## compileall 自检不再给产品目录写 __pycache__（2026-09-29，分支 `claude/9a-magicmock-guard`）
 
 - **定位**：

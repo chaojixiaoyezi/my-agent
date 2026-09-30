@@ -73,6 +73,14 @@
 **注意：`index_all` 的孤儿回收不会清掉它们。** 回收只作用于 `memory_text_vectors.json`，
 而 v1 遗留项在 `memory_vectors.json` 里；两个文件互不相干。
 
+## 保留回执与隔离错误
+
+`memory_store/retention_models.MemoryRetentionReport` 的 `errors` 仍是执行期错误加扫描期错误（旧语义）。
+末尾新增的 `isolated_errors` 只在 `MemoryRetentionService.apply()` 真正执行的分支里有值，是被隔离保护的扫描期路径级错误；
+整份拒绝、法律保留、只规划时为空。`apply()` 用 `replace(_without_errored_subtrees(plan), isolated_errors=plan.errors)` 把它随可执行计划
+带进 `retention_apply.execute_retention_plan`，审计事件 `owner_retention_applied` 据此写 `isolated_error_count` 和 `isolated_error_codes`
+（按码计数，不含路径）。owner 维护怎么用它，见 [gateway 结构](../gateway/04-structure.md) 开头「维护状态只加键」一段。
+
 ## 会话删除收集的唤醒文件
 
 `memory_store/retention_scan._conversation_related_paths` 收集一个会话的唤醒相关文件时扫描 `wake_queue/` 下的

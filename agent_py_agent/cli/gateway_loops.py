@@ -1351,6 +1351,9 @@ class _GatewayOwnerMaintenanceController:
             _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
         )
 
+    # LLM: 每拍先跑基础 owner，再按分页游标跑一页 scoped owner，只做到期维护、不构造 owner agent；
+    #   摘要里 failed 是旧口径，refused / isolated 按 OwnerMaintenanceResult.apply_outcome 区分，只打印、不落盘。
+    # 函数用途: 跑一拍 owner 维护并打印一行 [gateway-owner-maintenance] 摘要。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
         current = float(now if now is not None else time.time())
         reports = [run_owner_retention_if_due(self._base_home, now=current)]
@@ -1382,8 +1385,14 @@ class _GatewayOwnerMaintenanceController:
         summary = {
             "scanned": page.scanned,
             "ran": sum(report.ran for report in reports),
+            # failed 保持旧口径（旧 status 有错误就算）；refused 是整次被拒，isolated 是执行了、但有路径级错误被隔离。
             "failed": sum(
                 report.status in {"partial_failure", "policy_unavailable"}
+                for report in reports
+            ),
+            "refused": sum(report.apply_outcome == "refused" for report in reports),
+            "isolated": sum(
+                report.apply_outcome == "applied" and report.isolated_error_count > 0
                 for report in reports
             ),
         }

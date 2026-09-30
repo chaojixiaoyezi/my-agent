@@ -155,7 +155,9 @@ class MemoryRetentionAction:
         return payload
 
 
-# LLM: Report 同时表达 dry-run、apply、legal hold 和错误；applied 不能等同于 ok。
+# LLM: Report 同时表达 dry-run、apply、legal hold 和错误；applied 不能等同于 ok。isolated_errors 只在 apply 真正执行的
+#   分支有值：扫描期的路径级错误，与之重叠的子树被隔离保护、其余动作照常执行；它们同时也在 errors 里（旧语义不变）。
+#   整份拒绝、法律保留、只规划时为空。新增字段放在末尾并带默认值，旧的构造与读取方不受影响。
 # 类用途: 返回一轮 retention 规划或执行的完整无正文结果。
 @dataclass(frozen=True)
 class MemoryRetentionReport:
@@ -165,6 +167,7 @@ class MemoryRetentionReport:
     legal_hold: bool = False
     policy_fingerprint: str = ""
     schema_version: str = RETENTION_PLAN_SCHEMA_VERSION
+    isolated_errors: tuple[MemoryRetentionError, ...] = field(default_factory=tuple)
 
     # LLM: 任一策略/状态/动作错误都使报告不成功；legal hold 是安全停止而非错误。
     # 函数用途: 告诉 CLI 是否可把本轮视为完整成功。
@@ -190,6 +193,7 @@ class MemoryRetentionReport:
             "actions": [action.to_dict() for action in self.actions],
             "errors": [error.to_dict() for error in self.errors],
             "load_errors": [error.to_dict() for error in self.errors],
+            "isolated_errors": [error.to_dict() for error in self.isolated_errors],
         }
 
 

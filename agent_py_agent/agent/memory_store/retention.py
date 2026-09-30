@@ -5,6 +5,7 @@ from __future__ import annotations
 # LLM: 所有 plan/apply 调用必须进入 MemoryRetentionService；旧 home-retention 只能作为同服务 CLI alias。
 # 模块用途: 组合 typed policy 扫描、锁内重规划、执行重验证，以及正式长期记忆硬删除。
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath, PureWindowsPath
 
@@ -62,6 +63,7 @@ class MemoryRetentionService:
     # LLM: apply 在 owner retention 锁内重新 plan。policy 级损坏仍整份拒绝（读不懂策略就不能动任何数据）；
     #   但单棵任务的 state 损坏只保护那一棵，不连累其他类别——否则生产上会被少数坏目录永久卡住（2026-09-28
     #   dev 裁定 R4）。隔离依据是错误路径与动作路径的前缀重叠，绝不按类别名或目录名放宽。
+    #   返回的 errors 仍是执行期错误加扫描期错误（旧语义）；isolated_errors 单列被隔离的扫描期错误，整份拒绝时为空。
     # 函数用途: 应用当前时刻重新验证出的 retention 计划，坏的那一棵单独保护。
     def apply(self, *, now: datetime | None = None) -> MemoryRetentionReport:
         current = _normalize_now(now)
@@ -78,7 +80,8 @@ class MemoryRetentionService:
                 )
                 record_retention_report(home=self.home, report=stopped, now=current)
                 return stopped
-            executable = _without_errored_subtrees(plan)
+            # 扫描期的路径级错误随可执行计划带进执行器，审计与回执都能看见"执行了、但隔离了 N 条"。
+            executable = replace(_without_errored_subtrees(plan), isolated_errors=plan.errors)
             applied = execute_retention_plan(
                 home=self.home,
                 candidates=self.candidates,
@@ -94,6 +97,7 @@ class MemoryRetentionService:
                     errors=(*applied.errors, *plan.errors),
                     legal_hold=applied.legal_hold,
                     policy_fingerprint=applied.policy_fingerprint,
+                    isolated_errors=applied.isolated_errors,
                 )
             return applied
 

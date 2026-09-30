@@ -27,6 +27,7 @@ from .retention_scan import file_fingerprint, paths_fingerprint, tree_fingerprin
 
 
 # LLM: candidate actions 必须一次批量删除，否则首条写入会让同一计划其余 ledger fingerprint 失效。
+#   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
 # 函数用途: 执行一份已验证计划，并返回每条动作状态及结构化错误。
 def execute_retention_plan(
     *,
@@ -85,6 +86,7 @@ def execute_retention_plan(
         actions=tuple(results),
         errors=tuple(errors),
         policy_fingerprint=plan.policy_fingerprint,
+        isolated_errors=plan.isolated_errors,
     )
     _append_retention_audit(home, report=report, now=now)
     return report
@@ -433,7 +435,8 @@ def _write_tombstone(
     )
 
 
-# LLM: 审计只写动作元数据和错误码，不复制候选、对话、工具输出或长期记忆正文。
+# LLM: 审计只写动作元数据和错误码，不复制候选、对话、工具输出或长期记忆正文。被隔离的路径级错误只记条数与按码计数
+#   （isolated_error_count / isolated_error_codes，新增键，旧读取方忽略即可），不重复写路径。
 # 函数用途: 通过现有 owner audit ledger 记录一轮 retention 结果。
 def _append_retention_audit(
     home: object,
@@ -452,10 +455,22 @@ def _append_retention_audit(
             "legal_hold": report.legal_hold,
             "errors": [error.to_dict() for error in report.errors],
             "actions": [action.to_dict() for action in report.actions],
+            # 执行了、但有路径级错误被隔离时，审计不能看起来"全干净"：记条数与按码计数，不记路径。
+            "isolated_error_count": len(report.isolated_errors),
+            "isolated_error_codes": _error_code_counts(report.isolated_errors),
             "updated_at": now.isoformat(),
         },
         sort_keys=True,
     )
+
+
+# LLM: 只数结构化 error_code，不读 message 或路径；键按字母序，便于审计比对。
+# 函数用途: 把一组保留错误按错误码计数。
+def _error_code_counts(errors: tuple[MemoryRetentionError, ...]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for error in errors:
+        counts[error.error_code] = counts.get(error.error_code, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 # LLM: 时间解析只用于 apply cutoff 重验证，不从 reason 或状态文案提取时间。
