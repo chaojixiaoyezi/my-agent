@@ -25,6 +25,19 @@
   发出的 assistant 都带正文或工具调用，只剩有正文的那条且保留思考，历史对象不变。四例在 `4c0edd913` 的原实现上全部失败，
   修复后该文件 37 passed（Linux 容器，Mac 测试 venv 当时不可用）。
 
+## compileall 自检不再给产品目录写 __pycache__（2026-09-29，分支 `claude/9a-magicmock-guard`）
+
+- **定位**：
+  - 用 scratchpad 探针插件串行跑了 90 个会起子进程的测试文件，再加上架构守卫文件。每条测试前后看产品目录的哨兵
+    `__pycache__`，新出现就记下这条测试，再清掉。
+  - 结果只命中一条：`test_architecture_guardrails.py::test_compileall_succeeds`，一次写出 97 个 `__pycache__` 目录。
+  - `compileall` 是显式编译，不理会 `PYTHONDONTWRITEBYTECODE`。父进程设了这个变量时，子进程都会继承，没有任何子进程测试写字节码。
+    所以不需要在 conftest 或子进程辅助函数里再传环境变量。
+- **改法**：这条测试用 `monkeypatch` 把 `sys.pycache_prefix` 指到 `tmp_path`，`compileall` 的字节码写到临时目录，语法检查本身不变。
+- **验证**：
+  - 跑完产品目录下没有 `__pycache__`，临时目录里有 2772 个 `.pyc`；
+  - 临时放一个语法错误文件，这条测试照样失败。
+
 ## 尺寸脚本自检不再改写被跟踪的 CODE_SIZE_REPORT.md（2026-09-29，分支 `claude/9a-magicmock-guard`）
 
 - **起因**：`test_code_size_script.py::test_check_code_size_warn_generates_report` 在仓库根跑 `scripts/check_code_size.py`，

@@ -348,11 +348,15 @@ def _forbidden_marker_hits(relative_path: str, markers: list[str]) -> list[str]:
     return [f"{relative_path}: {marker}" for marker in markers if marker in text]
 
 
-def test_compileall_succeeds() -> None:
+def test_compileall_succeeds(tmp_path, monkeypatch) -> None:
     """All Python source must compile without syntax errors."""
 
     import compileall
+    import sys
 
+    # compileall 是显式编译，不理会 PYTHONDONTWRITEBYTECODE，会给每个产品目录写 __pycache__（全量一次 97 个目录）；
+    # 用 sys.pycache_prefix 把字节码改写到临时目录，语法检查本身不变。
+    monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "pycache"))
     result = compileall.compile_dir(
         str(REPO_ROOT / "agent_py_agent"),
         quiet=2,
