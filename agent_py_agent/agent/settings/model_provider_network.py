@@ -105,6 +105,7 @@ def _probe(agent: object, data: dict, profile_id: str) -> dict:
 
 
 # LLM: 身份来自已认证 owner，共享 probe 只读取已发布的完整快照，纳入相同秘密脱敏；不落盘临时连接数据。
+#   discover 可带未保存的 connection（新增模型先拉列表再保存），该连接同样纳入报错脱敏。
 # 函数用途: 在不持有配置文件锁的情况下进行一次用户明确要求的目录/连接测试。
 def execute_provider_network(agent: object, data: dict, operation: str, payload: dict) -> dict:
     identity = str(payload.get("session_id") or payload.get("conversation_id") or "model-menu")
@@ -116,6 +117,13 @@ def execute_provider_network(agent: object, data: dict, operation: str, payload:
         with provider_runtime_scope(agent, SimpleNamespace(thread_id="model-menu:" + identity)):
             if operation == "probe":
                 return _probe(agent, data, str(payload.get("profile_id") or ""))
+            if payload.get("connection") is not None and not payload.get("provider_id"):
+                from .model_connections import connection_provider
+
+                # 未保存的连接只在内存里参与本次目录读取和报错脱敏，不写入配置。
+                provider = connection_provider(payload["connection"])
+                data = {**data, "providers": {**data["providers"], "unsaved-connection": provider}}
+                return _discover(provider)
             provider = data["providers"].get(str(payload.get("provider_id") or ""))
             if not provider or not provider["enabled"]:
                 raise ModelProfileError("请先保存并启用服务商。")

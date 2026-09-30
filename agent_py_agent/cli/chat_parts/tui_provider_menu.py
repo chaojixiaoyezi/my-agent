@@ -1,8 +1,11 @@
-# LLM: Provider 表单仅调用认证配置 API；密码不进历史，网络测试必须通过独立明确按钮。
-# 模块用途: 提供服务商编辑、多模型管理、目录发现和短连接测试，复用当前 TUI 浮层。
+# LLM: Provider 表单仅调用认证配置 API；密码不进历史，网络测试必须通过独立明确按钮。连接和登录账号在同一个列表里管理；
+#   表单只放常用字段，其余进「高级」（控件一次建好，两处共享同一份值，保存时整组提交）。
+#   改动须同步 test_tui_manage_models、test_decision_model_profiles、test_model_usage_tags 等表单回归。
+# 模块用途: /model →「管理已有模型」（改连接、账号、编辑/删除模型、从连接再添加模型）和「连接测试」。
 from __future__ import annotations
 
 import json
+from collections import Counter
 from uuid import uuid4
 
 from prompt_toolkit.filters import to_filter
@@ -28,59 +31,53 @@ async def _choose(app, title: str, rows: list[tuple]):
     return await _dialog(app, title, choices, (("进入", lambda: choices.current_value), ("返回", None)), focus=choices)
 
 
-# LLM: 内置预设只提供公开端点和本产品 UA，不伪造客户端认证或复制截图会话号。
-# 函数用途: 新建时可使用 OpenCode Go 的官方接入地址，密钥仍由用户填写。
-async def _provider_preset(app) -> dict | None:
-    preset = await _choose(app, "新增服务商 · 选择模板", [("custom", "自定义服务商"), ("go", "OpenCode Go")])
-    if preset is None:
-        return None
-    return {"id": "opencode-go", "display_name": "OpenCode Go", "api_base": "https://opencode.ai/zen/go/v1",
-            "session_header": "x-opencode-session"} if preset == "go" else {}
-
-
 # LLM: 服务商用途完整读写，不能在编辑时丢 decision；空秘密保留，清除须明确，保存不发模型请求。
-# 函数用途: 编辑服务商及聊天/嵌入/决策用途，长表单可滚动；关闭时清除内存密码。
-async def _edit_provider(app, agent, session: str, existing: dict | None = None) -> str:
-    preset = existing if existing is not None else await _provider_preset(app)
-    if preset is None:
-        return ""
-    identity = _field(preset.get("id", ""))
-    if existing:
-        identity.buffer.read_only = to_filter(True)
-    name, address = _field(preset.get("display_name", "")), _field(preset.get("api_base", ""))
-    secret, session_header = _field(secret=True), _field(preset.get("session_header", ""))
+#   编号只读显示；会话头、自定义请求头、清空选项和用途在「高级」里。
+# 函数用途: 修改一个已有连接的名称、地址、密钥、请求头和用途；关闭时清除内存里的密码和请求头。
+async def _edit_provider(app, agent, session: str, existing: dict) -> str:
+    identity = _field(existing["id"])
+    identity.buffer.read_only = to_filter(True)
+    name, address = _field(existing.get("display_name", "")), _field(existing.get("api_base", ""))
+    secret, session_header = _field(secret=True), _field(existing.get("session_header", ""))
     headers = TextArea(text="", height=3, multiline=True)
-    enabled = Checkbox("启用服务商", checked=preset.get("enabled", True))
-    agentic = Checkbox("Agentic（对话/工具）", checked="agentic" in preset.get("capabilities", ["agentic"]))
-    embedding = Checkbox("Embedding（目录配置；不用于聊天）", checked="embedding" in preset.get("capabilities", []))
-    decision = Checkbox("Decision（决策建议；不用于聊天）", checked="decision" in preset.get("capabilities", []))
+    enabled = Checkbox("启用这个连接", checked=existing.get("enabled", True))
+    capabilities = existing.get("capabilities", ["agentic"])
+    agentic = Checkbox("Agentic（对话/工具）", checked="agentic" in capabilities)
+    embedding = Checkbox("Embedding（目录配置；不用于聊天）", checked="embedding" in capabilities)
+    decision = Checkbox("Decision（决策建议；不用于聊天）", checked="decision" in capabilities)
     clear_key, clear_headers = Checkbox("清空已保存密钥"), Checkbox("清空已保存自定义头")
     notice = Label("")
-    form = HSplit([Label("Provider ID（保存后不变）"), identity, Label("展示名"), name, Label("Base URL"), address,
-        Label("API Key（留空保留；不会进入聊天记录）"), secret, enabled, agentic, embedding, decision,
-        Label("稳定会话头名称（可空；值由 my-agent 生成）"), session_header,
-        Label("自定义请求头 JSON（留空保留）"), headers, clear_key, clear_headers,
-        Label("Tab 切换 · 长表单自动滚动 · Esc 不保存退出"), notice])
+    form = HSplit([Label("连接编号（不可改）"), identity, Label("名称"), name, Label("接口地址"), address,
+                   Label("密钥（留空保留原密钥；不会进入聊天记录）"), secret, enabled, notice,
+                   Label("Tab 切换 · 请求头、会话头和用途在「高级」· Esc 不保存退出")])
+    advanced = HSplit([Label("会话头名称（可空；值由 my-agent 按会话生成）"), session_header,
+                       Label(f"自定义请求头 JSON（留空保留；已保存：{', '.join(existing.get('header_names', [])) or '无'}）"), headers,
+                       clear_key, clear_headers, Label("用途"), agentic, embedding, decision])
     try:
-        while await _dialog(app, "编辑服务商" if existing else "新增服务商", ScrollablePane(form, max_available_height=22),
-                           (("保存", True), ("退出", None)), focus=name if existing else identity):
+        while True:
+            action = await _dialog(app, "修改连接", form, (("保存", True), ("高级", "advanced"), ("退出", None)), focus=name)
+            if action is None:
+                return ""
+            if action == "advanced":
+                await _dialog(app, "修改连接 · 高级", ScrollablePane(advanced, max_available_height=20), (("完成", True),),
+                              focus=session_header)
+                continue
             try:
                 parsed = json.loads(headers.text) if headers.text.strip() else None
             except ValueError:
-                notice.text = "自定义请求头不是有效 JSON 对象。"
+                notice.text = "「高级」里的自定义请求头不是有效 JSON 对象。"
                 continue
             result = await _request(app, agent, session, "save_provider", {"provider_id": identity.text,
-                "editing": existing is not None, "clear_key": clear_key.checked, "clear_headers": clear_headers.checked,
+                "editing": True, "clear_key": clear_key.checked, "clear_headers": clear_headers.checked,
                 "provider": {"display_name": name.text, "api_base": address.text, "api_key": secret.text,
                     "enabled": enabled.checked, "capabilities": [v for v, c in (("agentic", agentic), ("embedding", embedding), ("decision", decision)) if c.checked],
                     "custom_headers": parsed, "session_header": session_header.text}})
             if result.get("ok"):
-                return "服务商已保存；可以为它新增多个模型。未发模型请求。"
+                return "连接已保存；未发模型请求。"
             notice.text = str(result.get("message") or "保存未确认，请刷新列表。")
     finally:
         secret.text = ""
         headers.text = ""
-    return ""
 
 
 # 思考控制方式的表单选项；取值与 backends/reasoning_control.REASONING_CONTROLS 一致，文案只供人读。
@@ -96,73 +93,82 @@ _STRUCTURED_OUTPUT_CHOICES = [
     ("native", "原生严格方式（OpenAI 兼容发 json_schema；Anthropic 兼容用强制工具信封）"),
     ("json_object", "JSON 对象（只适用于 OpenAI 兼容接口；schema 写进提示，结果由程序校验）"),
 ]
+_GENERATION_BACKENDS = [("openai_compatible", "OpenAI 风格（Chat Completions）"),
+                        ("anthropic_compatible", "Anthropic 风格（Messages）"),
+                        ("openai_responses", "OpenAI Responses（响应 / 工具流）")]
+
+
+# LLM: 生成模型的「高级」字段一次建好；表单与高级页共享同一组控件，保存时整组提交，不因没打开高级而丢原值。
+#   用途标签、输入模态、思考控制、结构化输出的语义见 _edit_model 注释；决策模型不建这些控件。
+# 类用途: 持有一个生成模型编辑表单的高级字段，并把它们整理成 save_model 的字段。
+class _GenerationFields:
+    def __init__(self, data: dict, backend: str):
+        self.backend = RadioList(_GENERATION_BACKENDS, default=backend, select_on_focus=True)
+        self.temperature, self.top_p = _field(data.get("temperature", "")), _field(data.get("top_p", ""))
+        self.queue = _field(data.get("model_queue_wait_seconds", ""))
+        self.usage = _field(", ".join(data.get("usage_tags", ())))
+        self.modalities = _field(", ".join(data.get("input_modalities", ())))
+        self.reasoning = RadioList(_REASONING_CONTROL_CHOICES, default=data.get("reasoning_control", "auto"), select_on_focus=True)
+        self.structured = RadioList(_STRUCTURED_OUTPUT_CHOICES, default=data.get("structured_output", "auto"), select_on_focus=True)
+        self.capability = RadioList([("agentic", "Agentic 对话/工具"), ("embedding", "Embedding 目录配置")],
+                                    default=data.get("capability", "agentic"), select_on_focus=True)
+        self.body = HSplit([Label("接口类型（一般不用改）"), self.backend, Label("用途"), self.capability,
+            Label("温度 0–2（留空沿用部署值；按供应商要求填写）"), self.temperature,
+            Label("top_p 0–1（留空沿用部署/供应商；Flash 思考下限 0.95）"), self.top_p,
+            Label("额外排队预算秒数（0–86400，留空继承；慢模型可增大）"), self.queue,
+            Label("用途标签（可选，逗号分隔的小写英文标识，如 long_document, low_cost；只供决策模型比较候选时参考）"), self.usage,
+            Label("输入模态（可选，如 text, image；留空=未知，含图历史压缩时用结构化探针判断能否随图摘要）"), self.modalities,
+            Label("思考控制（决定 /effort 智能程度怎样发送；不确定就选自动）"), self.reasoning,
+            Label("结构化输出（记忆整理等后台调用的输出格式；不确定就选自动）"), self.structured])
+
+    # 函数用途: 把高级字段整理成 save_model 的 profile 字段（取值合法性由服务端校验）。
+    def values(self) -> dict:
+        return {"model_backend": self.backend.current_value, "capability": self.capability.current_value,
+                "temperature": self.temperature.text, "top_p": self.top_p.text, "model_queue_wait_seconds": self.queue.text,
+                "usage_tags": self.usage.text, "input_modalities": self.modalities.text,
+                "reasoning_control": self.reasoning.current_value, "structured_output": self.structured.current_value}
+
 
 # LLM: 编辑保留原用途/协议；decision 不发送生成采样字段和用途标签，保存无网络，同步用途表单回归。
 #   用途标签按原值预填，编辑其它字段时不会丢失；标签只作决策模型的参考材料，不影响路由。
 #   输入模态同样预填、逗号分隔；它是压缩策略"能否随图摘要"的声明事实，留空表示未知（由探针判断），不是能力证明。
 #   思考控制方式按原值预选（缺省 auto），只决定 /effort 与子代理 effort 的档位怎样发送，取值见 reasoning_control。
 #   结构化输出方式同样按原值预选，只决定记忆整理等后台结构化调用的输出格式，取值见 structured_output_mode。
-# 函数用途: 新增或编辑生成/决策模型；认证在 provider 管理，原 UUID 不变，决策设置另行绑定。
+#   原记录已有接口类型就不再先弹接口选择（接口在「高级」里改）；没有时先选接口。
+# 函数用途: 新增或编辑生成/决策模型；认证在账号管理，原 UUID 不变，决策设置另行绑定。
 async def _edit_model(app, agent, session: str, provider_id: str, row: dict | None = None) -> str:
-    backend = await _choose_interface(app, default=(row or {}).get("model_backend"), allow_auth=False, allow_decision=True)
+    data = row or {}
+    backend = data.get("model_backend") or await _choose_interface(app, allow_decision=True)
     if backend is None:
         return ""
-    data = row or {}
+    is_decision = backend == "typesafe_decision"
     name = _field(data.get("model_name", ""))
     window = _field(data.get("model_context_window_tokens") or 128000)
-    temperature = _field(data.get("temperature", ""))
-    top_p = _field(data.get("top_p", ""))
-    queue = _field(data.get("model_queue_wait_seconds", ""))
-    usage = _field(", ".join(data.get("usage_tags", ())))
-    modalities = _field(", ".join(data.get("input_modalities", ())))
-    reasoning = RadioList(_REASONING_CONTROL_CHOICES, default=data.get("reasoning_control", "auto"), select_on_focus=True)
-    structured = RadioList(_STRUCTURED_OUTPUT_CHOICES, default=data.get("structured_output", "auto"), select_on_focus=True)
     enabled = Checkbox("启用模型", checked=data.get("enabled", True))
-    is_decision = backend == "typesafe_decision"
-    capability = RadioList([("decision", "Decision 决策建议")] if is_decision else
-                          [("agentic", "Agentic 对话/工具"), ("embedding", "Embedding 目录配置")],
-                          default="decision" if is_decision else data.get("capability", "agentic"), select_on_focus=True)
+    extra = None if is_decision else _GenerationFields(data, backend)
     notice = Label("")
-    body = HSplit([Label("模型名称（区分大小写）"), name, Label("总上下文 tokens（按供应商说明填写）"), window,
-                   *([Label("决策等待时间与接入点分别设置；保存不启用，也不发请求。")] if is_decision else [
-                   Label("温度 0–2（留空沿用部署值；按供应商要求填写）"), temperature,
-                   Label("top_p 0–1（留空沿用部署/供应商；Flash 思考下限 0.95）"), top_p,
-                   Label("额外排队预算秒数（0–86400，留空继承；慢模型可增大）"), queue,
-                   Label("用途标签（可选，逗号分隔的小写英文标识，如 long_document, low_cost；只供决策模型比较候选时参考）"), usage,
-                   Label("输入模态（可选，如 text, image；留空=未知，含图历史压缩时用结构化探针判断能否随图摘要）"), modalities,
-                   Label("思考控制（决定 /effort 智能程度怎样发送；不确定就选自动）"), reasoning,
-                   Label("结构化输出（记忆整理等后台调用的输出格式；不确定就选自动）"), structured]),
-                   enabled, capability, notice, Label("Tab 切换 · Esc 不保存返回")])
+    body = HSplit([Label("模型名称（区分大小写）"), name, Label("总上下文 tokens（按供应商说明填写）"), window, enabled, notice,
+                   Label("决策等待时间与接入点在「选择模型 → 决策模型」里设置；保存不启用，也不发请求。" if is_decision
+                         else "温度、思考控制等在「高级」· Tab 切换 · Esc 不保存返回")])
     identity = data.get("id") or str(uuid4())
-    while await _dialog(app, "编辑模型" if data.get("id") else "新增模型", body,
-                       (("保存", True), ("返回", None)), focus=name):
+    title = "编辑模型" if data.get("id") else "新增模型"
+    actions = (("保存", True), ("返回", None)) if is_decision else (("保存", True), ("高级", "advanced"), ("返回", None))
+    while True:
+        action = await _dialog(app, title, body, actions, focus=name)
+        if action is None:
+            return ""
+        if action == "advanced":
+            await _dialog(app, title + " · 高级", ScrollablePane(extra.body, max_available_height=20), (("完成", True),),
+                          focus=extra.backend)
+            continue
+        profile = {"provider_id": provider_id, "model_backend": backend, "model_name": name.text,
+                   "model_context_window_tokens": window.text, "enabled": enabled.checked,
+                   **({"capability": "decision"} if extra is None else extra.values())}
         result = await _request(app, agent, session, "save_model", {"profile_id": identity, "editing": bool(data.get("id")),
-            "profile": {"provider_id": provider_id, "model_backend": backend, "model_name": name.text,
-                        "model_context_window_tokens": window.text,
-                        **({} if is_decision else {"temperature": temperature.text, "top_p": top_p.text,
-                                                 "model_queue_wait_seconds": queue.text, "usage_tags": usage.text,
-                                                 "input_modalities": modalities.text,
-                                                 "reasoning_control": reasoning.current_value,
-                                                 "structured_output": structured.current_value}),
-                        "enabled": enabled.checked, "capability": capability.current_value}})
+                                                                  "profile": profile})
         if result.get("ok"):
             return "决策模型已保存；尚未启用或测试。" if is_decision else "模型已保存；选择后将在后续工作片生效。"
         notice.text = str(result.get("message") or "保存未确认。")
-    return ""
-
-
-# LLM: 目录发现明确发一次 GET，选中目录条目不自动启用；容量缺失必须让用户填写。
-# 函数用途: 获取模型名称列表并打开所选模型的配置表单。
-async def _discover_models(app, agent, session: str, provider: str) -> str:
-    result = await _request(app, agent, session, "discover", {"provider_id": provider})
-    if not result.get("ok"):
-        return str(result.get("message") or "目录读取失败。")
-    rows = result["models"]
-    name = await _choose(app, "发现模型 · 选择后确认接口及容量", [(row["model_name"], row["model_name"]) for row in rows])
-    if name is None:
-        return ""
-    row = next(row for row in rows if row["model_name"] == name)
-    return await _edit_model(app, agent, session, provider, row)
 
 
 # LLM: 删除须二次明确确认，宿主拒绝删除仍有引用的服务商和当前模型；取消无任何副作用。
@@ -176,48 +182,95 @@ async def _delete(app, agent, session: str, operation: str, key: str) -> str:
     return "配置已删除。" if result.get("ok") else str(result.get("message") or "未确认删除。")
 
 
-# LLM: 所有菜单动作先刷新同 owner 配置，外部修改/删除后不得操作另一项；配置和测试入口分离。
-# 函数用途: 管理一个服务商下的多个模型、编辑服务商或发现目录。
-async def manage_providers(app, agent, session: str, *, create=False) -> str:
-    if create:
-        return await _edit_provider(app, agent, session)
+# LLM: 行文字只给人看，编号是操作对象；登录账号显示登录状态，API 连接显示地址。
+# 函数用途: 生成「管理已有模型」列表里一行连接/账号的文字，如「DeepSeek · https://… · 2 个模型」。
+def _provider_label(row: dict, counts: Counter) -> str:
+    state = ("已登录" if row.get("signed_in") else "未登录") if row.get("auth_mode") in {"chatgpt", "oauth_device"} else row["api_base"]
+    return f"{row['display_name']} · {state} · {counts.get(row['id'], 0)} 个模型{'' if row['enabled'] else ' · 已停用'}"
+
+
+# LLM: 所有动作先刷新同 owner 配置，外部修改/删除后不得操作另一项；登录账号交给 tui_model_auth.manage_account。
+# 函数用途: 「管理已有模型」入口：选一个连接或账号，再选要做的事。
+async def manage_models(app, agent, session: str) -> str:
     result = await _request(app, agent, session, "list")
     if not result.get("ok"):
-        return str(result.get("message") or "无法读取服务商。")
+        return str(result.get("message") or "无法读取模型配置。")
     providers = result.get("providers", [])
-    provider = await _choose(app, "服务商列表", [(row["id"], f"{row['display_name']} · {row['id']} · {'启用' if row['enabled'] else '停用'}") for row in providers])
+    # 管理员列表里自己共享出去的模型还会以 shared: 别名再出现一次，管理和计数只算自己的原记录。
+    counts = Counter(row.get("provider_id") for row in result["profiles"] if not row.get("shared"))
+    provider = await _choose(app, "管理已有模型 · 选择连接或账号", [(row["id"], _provider_label(row, counts)) for row in providers])
     if provider is None:
         return ""
-    action = await _choose(app, "服务商管理", [("edit", "编辑服务商 / 密钥 / 请求头"), ("add", "新增模型"),
-        ("models", "编辑或删除已有模型"), ("discover", "获取远端模型列表"), ("delete", "删除服务商")])
-    if action == "edit":
-        return await _edit_provider(app, agent, session, next(row for row in providers if row["id"] == provider))
-    if action == "add":
-        return await _edit_model(app, agent, session, provider)
-    if action == "discover":
-        return await _discover_models(app, agent, session, provider)
-    if action == "delete":
-        return await _delete(app, agent, session, "delete_provider", provider)
+    row = next(row for row in providers if row["id"] == provider)
+    if row.get("auth_mode") in {"chatgpt", "oauth_device"}:
+        from .tui_model_auth import manage_account
+
+        return await manage_account(app, agent, session, row)
+    action = await _choose(app, f"连接操作 · {row['display_name']}", [
+        ("models", "编辑或删除这个连接下的模型"), ("add", "从这个连接再添加模型（拉列表勾选）"),
+        ("edit", "修改地址 / 密钥 / 请求头"), ("delete", "删除这个连接（需先删掉其下模型）")])
     if action == "models":
-        models = [row for row in result["profiles"] if row.get("provider_id") == provider]
-        key = await _choose(app, "模型列表", [(row["id"], row["model_name"]) for row in models])
-        if key:
-            operation = await _choose(app, "模型管理", [("edit", "编辑模型（名称 / 接口 / 上下文）"), ("delete", "删除模型")])
-            if operation == "edit":
-                return await _edit_model(app, agent, session, provider, next(row for row in models if row["id"] == key))
-            if operation == "delete":
-                return await _delete(app, agent, session, "delete_model", key)
-    return ""
+        return await manage_provider_models(app, agent, session, provider)
+    if action == "add":
+        return await _add_from_provider(app, agent, session, row)
+    if action == "edit":
+        return await _edit_provider(app, agent, session, row)
+    return await _delete(app, agent, session, "delete_provider", provider) if action == "delete" else ""
+
+
+# LLM: 列表重新读取，只列属于这个服务商的自己的原记录（不含 shared: 别名，别名不能编辑）；编辑与删除都走原保存入口，编号不变。
+# 函数用途: 选一个模型，再编辑或删除它。
+async def manage_provider_models(app, agent, session: str, provider: str) -> str:
+    result = await _request(app, agent, session, "list")
+    models = [row for row in result.get("profiles", []) if row.get("provider_id") == provider and not row.get("shared")]
+    key = await _choose(app, "模型列表", [(row["id"], f"{row['model_name']} · {row['model_backend']}"
+                                              f"{'' if row.get('enabled', True) else ' · 已停用'}") for row in models])
+    if not key:
+        return ""
+    operation = await _choose(app, "模型管理", [("edit", "编辑模型（名称 / 上下文 / 高级参数）"), ("delete", "删除模型")])
+    if operation == "edit":
+        return await _edit_model(app, agent, session, provider, next(row for row in models if row["id"] == key))
+    return await _delete(app, agent, session, "delete_model", key) if operation == "delete" else ""
+
+
+# LLM: 目录读取明确发一次 GET；接口类型由用户选（默认取这个连接下已有模型的接口），不按地址猜；读不到列表时退回单个模型表单。
+# 函数用途: 从一个已保存的连接拉模型列表，勾选后一次添加。
+async def _add_from_provider(app, agent, session: str, row: dict) -> str:
+    from .tui_subscription_models import added_text, choose_models, with_ids
+
+    listing = await _request(app, agent, session, "list")
+    known = [item["model_backend"] for item in listing.get("profiles", [])
+             if item.get("provider_id") == row["id"] and not item.get("shared")]
+    backend = await _choose_interface(app, default=known[0] if known else None, allow_decision=True)
+    if backend is None:
+        return ""
+    catalog = await _request(app, agent, session, "discover", {"provider_id": row["id"]})
+    if not catalog.get("ok") or not catalog.get("models"):
+        return await _edit_model(app, agent, session, row["id"], {"model_backend": backend})
+    picked = await choose_models(app, catalog["models"], "选择要添加的模型（可多选）")
+    if not picked:
+        return ""
+    result = await _request(app, agent, session, "add_models", {"provider_id": row["id"], "model_backend": backend,
+                                                              "models": with_ids(picked)})
+    return added_text(result, picked)
 
 
 # LLM: 测试明确说明有模型请求；成功不自动切模型，不把 basic probe 当任务验收，结果只在浮层展示。
-# 函数用途: 为选定模型发送短问候，让用户看到实际返回和耗时。
+#   决策模型转交决策菜单的限时测试（同一个 decision_probe 入口），不走普通问候。
+# 函数用途: 为选定模型发送短问候（或限时决策测试），让用户看到实际返回和耗时。
 async def test_connection(app, agent, session: str) -> str:
     result = await _request(app, agent, session, "list")
-    rows = [row for row in result.get("profiles", []) if row.get("available")]
-    key = await _choose(app, "连接测试 · 选择模型", [(row["id"], f"{row['model_name']} · {row['model_backend']}") for row in rows])
+    # 「默认」行没有可测的已保存连接（部署配置不走这里；管理员初始模型另有 shared: 行），不列。
+    rows = [row for row in result.get("profiles", []) if row["id"] != "default"
+            and (row.get("available") or "decision" in row.get("available_for", []))]
+    key = await _choose(app, "连接测试 · 选择模型", [(row["id"], f"{row['model_name']} · "
+                                                     f"{'决策' if row.get('capability') == 'decision' else row['model_backend']}") for row in rows])
     if key is None:
         return ""
+    if next(row for row in rows if row["id"] == key).get("capability") == "decision":
+        from .tui_decision_menu import probe_selected
+
+        return await probe_selected(app, agent, session, key)
     if not await _dialog(app, "连接测试", Label("将发送一条短问候，会产生少量模型用量。\n不做任务、不派子代理、不执行工具、不切换当前模型。"),
                          (("开始测试", True), ("返回", None))):
         return ""

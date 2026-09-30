@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+/model 五项菜单与其他用户的初始模型（分支 `claude/3a-chatgpt-browser-login`，2026-09-30）：`/client/models` 不改路由，新操作
+`add_models` / `set_initial` 与带 `connection` 的 `discover` 都经 `execute_model_profile_operation`。`model_profile_service.render_model_choices`
+的「默认」行按 `default_source=admin_initial` 标「管理员指定的初始模型」，空列表提示改指「默认模型与共享」。
+设计见 `docs/design/TUI_MODEL_PROFILES.md`「菜单结构」与 `docs/design/SHARED_MODEL_CATALOG.md`「其他用户的初始模型」。
+
 唤醒毒丸第 3 步 C6（step16m，3a）：后台 supervisor 停机时先给本进程在途的唤醒尝试打停机标记
 （`wake_attempt_tracking.mark_inflight_attempts_stopping`，写失败逐条吞掉），再关执行池；死进程那一片认领过的补充消息按尝试账里
 持久化的回合号退回（`wake_domain_closeout.settle_abandoned_turn`）；结案顺序改为写记录 → 删 pending → 移坏账 → 删尝试账。

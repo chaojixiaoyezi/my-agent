@@ -1,5 +1,6 @@
-# LLM: 共享目录只存显式发布引用及随机代次；来源目录先于发布目录加原锁，凭据始终只在管理员私有文件。
-# 模块用途: 管理共享模型的发布和撤销版本，支持旧建议复核，不复制密钥或自动开放已有配置。
+# LLM: 共享目录只存显式发布引用、可选的「其他用户初始模型」及随机代次；来源目录先于发布目录加原锁，凭据始终只在管理员私有文件。
+#   初始模型必须是已发布的共享引用，撤销该共享时同次清除；改动须同步 test_shared_initial_model。
+# 模块用途: 管理共享模型的发布和撤销版本，以及管理员给其他用户指定的初始模型，不复制密钥或自动开放已有配置。
 
 from __future__ import annotations
 
@@ -57,6 +58,9 @@ def _read_catalog(home: object) -> dict:
         keys = {shared_profile_key(value) for value in data["profiles"]}
         if "" in keys:
             raise ValueError("id")
+        initial = data.get("initial_profile")
+        if initial is not None and (not shared_profile_key(initial) or initial not in data["profiles"]):
+            raise ValueError("initial")
         return data
     except (KeyError, TypeError, ValueError) as exc:
         raise ModelProfileError("共享模型目录损坏，未覆盖已有配置。") from exc
@@ -100,6 +104,10 @@ def _shared_source(home: object, profile_id: str) -> tuple[dict, dict]:
 # 函数用途: 原子保存共享引用并轮换发布版本，复用原文件不保存凭据。
 def _save_catalog(home: object, catalog: dict) -> None:
     saved = {"schema": _SCHEMA, "profiles": catalog["profiles"], "catalog_generation": uuid4().hex}
+    if catalog.get("initial_profile") in catalog["profiles"]:
+        saved["initial_profile"] = catalog["initial_profile"]
+    else:
+        catalog.pop("initial_profile", None)
     write_json_file_atomic_unlocked(shared_catalog_path(home), saved)
     catalog.update(saved)
 
@@ -154,4 +162,34 @@ def set_shared_profile(agent: object, profile_id: object, enabled: object) -> No
         keys = {shared_profile_key(value) for value in catalog["profiles"]}
         keys.add(key) if enabled else keys.discard(key)
         catalog["profiles"] = ["shared:" + value for value in sorted(keys)]
+        _save_catalog(agent.home_paths, catalog)
+
+
+# LLM: 只读；目录不存在视为未设置，目录损坏抛 ModelProfileError（不能当作未设置而悄悄换成部署模型）。
+# 函数用途: 返回管理员给其他用户指定的初始模型引用（shared:<id>），没有设置返回空串。
+def initial_profile_key(home: object) -> str:
+    return str(_read_catalog(home).get("initial_profile") or "")
+
+
+# LLM: 只有管理员可设；只接受管理员自己的 API Key 模型（OAuth 账号不能给别人用），设置时同次发布共享；空值清除。
+#   原来源→发布锁顺序与 set_shared_profile 一致，每次保存都换代，旧建议失效。
+# 函数用途: 设置或清除「其他用户的初始模型」；会写共享目录，可能同时把该模型开放共享。
+def set_initial_profile(agent: object, profile_id: object) -> None:
+    if not is_permission_admin(agent.home_paths):
+        raise ModelProfileError("只有管理员可以指定其他用户的初始模型。")
+    path = shared_catalog_path(agent.home_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if profile_id in (None, ""):
+        with locked_json_path(path):
+            catalog = _read_catalog(agent.home_paths)
+            catalog.pop("initial_profile", None)
+            _save_catalog(agent.home_paths, catalog)
+        return
+    set_shared_profile(agent, profile_id, True)
+    key = "shared:" + str(UUID(str(profile_id)))
+    with locked_json_path(path):
+        catalog = _read_catalog(agent.home_paths)
+        if key not in catalog["profiles"]:
+            raise ModelProfileError("这个模型刚被撤销共享，初始模型未设置，请重新选择。")
+        catalog["initial_profile"] = key
         _save_catalog(agent.home_paths, catalog)

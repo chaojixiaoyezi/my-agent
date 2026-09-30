@@ -33,8 +33,10 @@ from .model_provider_schema import (
     validate_provider_id,
 )
 from .shared_model_catalog import (
+    initial_profile_key,
     public_shared_profiles,
     resolve_shared_model,
+    set_initial_profile,
     set_shared_profile,
     shared_profile_key,
 )
@@ -260,7 +262,8 @@ def _with_point_diagnostics(agent: object, result: dict) -> dict:
     return {**result, "point_diagnostics": decision_point_diagnostics(POINTS, modes, reach), "diagnostics_window_hours": 24}
 
 
-# LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用。
+# LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用，
+#   set_initial 只改共享目录里的「其他用户初始模型」；add_models 按连接一次加多个模型（见 model_connections）。
 # 函数用途: 管理模型与决策设置；决策操作不初始化生成选择，网络只在显式认证/目录/连接测试时发生，回执不含令牌。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
     decision_operations = {"decision_read": "read", "decision_patch": "patch", "decision_reset": "reset"}
@@ -295,6 +298,9 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     if operation == "set_shared":
         set_shared_profile(agent, payload.get("profile_id"), payload.get("enabled"))
         operation = "list"
+    if operation == "set_initial":
+        set_initial_profile(agent, payload.get("profile_id"))
+        operation = "list"
     if operation == "list":
         return _model_selection_projection(agent, read_model_profiles(path), thread_id)
     if operation in {"auth_start", "auth_poll", "auth_status", "auth_parameters", "auth_cancel", "auth_logout",
@@ -310,6 +316,7 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
 
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
+    added = None
     with locked_json_path(path):
         data = read_model_profiles(path)
         selected = str(payload.get("profile_id") or "")
@@ -317,9 +324,10 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
             resolve_shared_model(agent.home_paths, selected)
             data["selected"] = selected
         else:
-            mutate_profiles(data, "select" if operation == "set_default" else operation, payload)
+            added = mutate_profiles(data, "select" if operation == "set_default" else operation, payload)
         _save_profiles(path, data)
-    return _model_selection_projection(agent, data, thread_id)
+    result = _model_selection_projection(agent, data, thread_id)
+    return {**result, "added_models": added} if operation == "add_models" else result
 
 
 # LLM: 列表只含私有及管理员显式发布的公开字段；共享不是复制 secrets，默认变化不能投射成旧会话切换。
@@ -330,14 +338,19 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str) -> di
     result = public_model_profiles(data, agent.config)
     try:
         shared = public_shared_profiles(agent.home_paths)
+        initial = initial_profile_key(agent.home_paths)
     except (ModelProfileError, OSError):
-        shared = []
+        shared, initial = [], ""
         result["warning"] = "共享模型目录暂不可用；仍可选择自己的私有模型或显式部署配置。"
     result["can_share"] = is_permission_admin(agent.home_paths)
+    result["initial_profile"] = initial
     if result["can_share"]:
         shared_keys = {shared_profile_key(row["id"]) for row in shared}
         for row in result["profiles"]:
             row["shared_enabled"] = row["id"] in shared_keys
+            row["initial_for_others"] = "shared:" + row["id"] == initial
+    elif initial:
+        _use_initial_default(result, shared, initial)
     result["profiles"].extend(shared)
     result.update(default_selected=data["selected"], selection_scope="thread" if thread_id else "owner_default",
                   thread_id=thread_id)
@@ -348,13 +361,27 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str) -> di
     result["selection_available"] = any(row["id"] == result["selected"] and row.get("available", True)
                                         for row in result["profiles"])
     if not result["selection_available"]:
-        result["warning"] = ("尚未配置模型，请先通过 /model 新增并选择模型。"
-                             if result["selected"] == "default"
+        result["warning"] = ("管理员指定的初始模型暂不可用，请在 /model 另选模型；系统没有自动切换到其他模型。"
+                             if result["selected"] == "default" and initial and not result["can_share"]
+                             else "尚未配置模型，请先通过 /model 新增并选择模型。" if result["selected"] == "default"
                              else "本会话选定模型已不可用，请重新选择；系统没有自动切换到其他模型。")
     return result
 
 
+# LLM: 只给普通用户：default 行换成管理员初始模型的公开字段（default_source=admin_initial），可用性沿共享行；
+#   原模型已删除（共享行不再展示）时显示为不可用，与运行时明确报错一致。部署默认行此时不再展示给普通用户。
+# 函数用途: 让普通用户在 /model 和 IM 的模型列表里看到"默认"实际会用哪个模型。
+def _use_initial_default(result: dict, shared: list[dict], initial: str) -> None:
+    row = next((row for row in shared if row["id"] == initial), None)
+    default = {key: value for key, value in (row or {}).items() if key != "shared"} or {
+        "model_name": "管理员指定的初始模型（原配置已删除）", "model_backend": "", "model_context_window_tokens": 0,
+        "available": False, "available_for": []}
+    default.update(id="default", default_source="admin_initial", api_base="（管理员指定的初始模型）")
+    result["profiles"] = [default, *(row for row in result["profiles"] if row["id"] != "default")]
+
+
 # LLM: provider/model/secret/protocol 仍按原引用整组冻结；可选宿主捕获仅复制本次已读公开选择与决策设置，不另读目录。
+#   捕获记录的是选择引用本身（default 仍记 default）；普通用户的 default 在管理员指定初始模型时解析为该共享引用。
 # 函数用途: 新工作片解析选定模型并复用其开关事实；禁用、删除或撤销共享均明确报错，不偷偷换模型。
 def selected_model_config(agent: object, *, profile_id: str | None = None):
     data = read_model_profiles(model_profiles_path(agent.home_paths))
@@ -363,7 +390,9 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
     if captured is not None and not captured:
         captured.append(SelectedModelRead(selected, deepcopy(data["decision_settings"])))
     if selected == "default":
-        return agent.config
+        selected = _default_for_owner(agent)
+        if selected == "default":
+            return agent.config
     row = _resolved_profile(agent, data, selected)
     # 模型档案的窗口必填，写进 model_context_window_tokens 即显式容量；档案带温度就发送，没带沿用部署的 temperature（空 = 不发）。
     config = replace(agent.config, **row, api_key_env="")
@@ -374,6 +403,17 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
         "source": "owner_model_profile", "priority": 90, "profile_id": selected,
     } for key in fields}}
     return config
+
+
+# LLM: 管理员（local/main）的 default 始终是部署配置；普通用户在管理员指定初始模型时得到该共享引用。
+#   撤销共享会同次清除初始模型（回到部署配置）；原模型被删时由共享解析明确报错。共享目录损坏同样报错，不猜。只读。
+# 函数用途: 返回某个用户的"默认模型"实际对应的引用：管理员初始模型，或 default（部署配置）。
+def _default_for_owner(agent: object) -> str:
+    from ..user_space.approval_mode import is_permission_admin
+
+    if is_permission_admin(agent.home_paths):
+        return "default"
+    return initial_profile_key(agent.home_paths) or "default"
 
 
 # LLM: 解析本 owner 或已授权共享的指定用途；OAuth 引用路径由可信 home 生成，不接受客户端指定。

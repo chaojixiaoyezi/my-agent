@@ -115,7 +115,6 @@ async def _manage_scope(app, agent, session: str, scope: str) -> None:
             return
         rows = [(field, _field_label(view, field)) for field in _GENERAL if field in _fields(view)]
         rows.extend([("points", "逐接入点设置（模式 / 模型 / 时间 / 减量）"), ("reset", "逐字段恢复继承"),
-                     ("providers", "管理服务商 / 决策模型"), ("provider_add", "新增服务商 / 决策模型"),
                      ("probe", "主动测试决策连接（会产生少量用量）")])
         notice = message + ("\n后台记忆整理及后台期限只在用户长期设置生效，请返回上一层修改。" if scope == "thread" else "")
         action = await _choose(app, "决策设置 · " + ("用户长期" if scope == "owner" else "本会话"), rows, notice=notice)
@@ -124,7 +123,8 @@ async def _manage_scope(app, agent, session: str, scope: str) -> None:
         message = await _scope_action(app, agent, session, view, action) or message
 
 
-# LLM: 只分发已登记动作；providers 复用原用途表单，probe 有独立按钮；不能顺带启用或修改聊天选择。
+# LLM: 只分发已登记动作；probe 有独立按钮；不能顺带启用或修改聊天选择。新增/管理决策模型在 /model 顶层的
+#   「新增模型」「管理已有模型」，这里不再重复入口。
 # 函数用途: 执行一个决策设置动作并把确认结果交回重读菜单。
 async def _scope_action(app, agent, session: str, view: dict, action: str) -> str:
     if action in _GENERAL:
@@ -137,10 +137,6 @@ async def _scope_action(app, agent, session: str, view: dict, action: str) -> st
             return "本范围没有字段覆盖，已全部继承上层配置。"
         field = await _choose(app, "恢复继承 · 选择一个覆盖字段", [(field, _reset_label(view, field)) for field in fields])
         return await _save(app, agent, session, view, field, reset=True) if field else ""
-    if action in {"providers", "provider_add"}:
-        from .tui_provider_menu import manage_providers
-
-        return await manage_providers(app, agent, session, create=action == "provider_add")
     if action == "probe":
         return await _probe(app, agent, session)
     return ""
@@ -280,8 +276,8 @@ async def _save(app, agent, session: str, view: dict, field: str, *, value=None,
     return "已恢复继承，以下为重新读取的生效值。" if reset else "已保存，以下为重新读取的生效值。"
 
 
-# LLM: 测试必须由明确按钮触发，秒数只作用本次 probe；返回不含价格，输出 token 展示位置留白。
-# 函数用途: 为已保存决策模型发一次限时原生测试，结果只在浮层显示，不启用设置或切换模型。
+# LLM: 只负责选模型；真正的测试在 probe_selected（/model「连接测试」选中决策模型时也直接调用它）。
+# 函数用途: 在决策设置里选一个已保存的决策模型并测试。
 async def _probe(app, agent, session: str) -> str:
     choices = await _profile_choices(app, agent, session, "")
     if choices is None:
@@ -290,6 +286,12 @@ async def _probe(app, agent, session: str) -> str:
                              (("选择模型", lambda: choices.current_value), ("返回", None)), focus=choices)
     if not selected:
         return "未选择决策模型，未发送请求。"
+    return await probe_selected(app, agent, session, selected)
+
+
+# LLM: 测试必须由明确按钮触发，秒数只作用本次 probe；返回不含价格，输出 token 展示位置留白。
+# 函数用途: 为已选的决策模型发一次限时原生测试，结果只在浮层显示，不启用设置或切换模型。
+async def probe_selected(app, agent, session: str, selected: str) -> str:
     seconds = TextArea(text="4.0", height=1, multiline=False)
     notice = Label("只有点击开始测试才发送一次决策请求，会产生少量用量；不启用设置、不切聊天模型。")
     while True:

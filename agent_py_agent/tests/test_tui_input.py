@@ -46,7 +46,7 @@ def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monk
     monkeypatch.setattr(tui_input, "_path_candidates", scan)
     completer = TuiInputCompleter(tmp_path)
     candidates = list(completer.get_completions(Document("/plug"), CompleteEvent()))
-    assert {item.text for item in candidates} == {"/plugins", "/plugins@"}
+    assert {item.text for item in candidates} == {"/plugins ", "/plugins@"}
     assert all(item.enter_action == "apply" for item in candidates)
     namespace = next(item for item in candidates if item.text == "/plugins@")
     assert namespace.append_space is False
@@ -434,7 +434,7 @@ def test_input_completer_uses_structured_commands_and_one_level_paths(tmp_path) 
     completer = TuiInputCompleter(tmp_path)
 
     command = list(completer.get_completions(Document("/st"), None))
-    assert [item.text for item in command] == ["/status", "/stop"]
+    assert [item.text for item in command] == ["/status ", "/stop "]
     assert [item.display_text for item in command] == ["/status", "/stop"]
     paths = list(completer.get_completions(Document("@d"), None))
     assert [item.text for item in paths] == ["@docs/", "@draft.md"]
@@ -461,6 +461,43 @@ def test_input_completer_blank_or_completed_token_never_scans_paths(tmp_path, mo
         return [item async for item in completer.get_completions_async(document, event)]
 
     assert asyncio.run(collect()) == []
+
+
+# 09-30 用户反馈：/model 没打完时下拉里高亮着候选，打完就没了。完整命令的候选文本自带结尾空格，
+# prompt_toolkit 不再把它当作"接受后文本不变"的唯一候选丢掉；Tab 接受后仍是 "/model "。
+@pytest.mark.parametrize("typed", ["/mo", "/model"])
+def test_fully_typed_command_keeps_its_completion_highlighted(tmp_path, typed) -> None:
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
+    from agent_py_agent.tests.test_tui_decision_menu import wait_app
+    from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
+
+    def shown(buffer):
+        return [item.display_text for item in getattr(buffer.complete_state, "completions", ())]
+
+    async def scenario():
+        params = _app_params(tmp_path, TuiRuntime("complete-highlight"))
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+            app = make_tui_app(params)
+            runner = asyncio.create_task(app.run_async())
+            try:
+                await wait_app(app, lambda: app.is_running and app.render_counter > 0, "TUI 起跑并画出首帧")
+                buffer = app.current_buffer
+                pipe.send_text(typed)
+                await wait_app(app, lambda: buffer.text == typed and shown(buffer) == ["/model"], "下拉里高亮 /model")
+                menu = TuiCompletionMenuControl(buffer).create_content(80, 6)
+                assert menu.get_line(0)[0][0] == "class:tui-completion-selected"
+                pipe.send_bytes(b"\t")
+                await wait_app(app, lambda: buffer.text == "/model " and not shown(buffer), "Tab 接受后是 /model 加一个空格")
+                assert params.jobs.empty()
+            finally:
+                app.exit()
+                await runner
+
+    asyncio.run(scenario())
 
 
 def test_input_completer_respects_cursor_and_keeps_explicit_empty_path_query(tmp_path) -> None:

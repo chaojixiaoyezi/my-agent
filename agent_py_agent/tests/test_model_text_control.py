@@ -50,7 +50,7 @@ def test_im_user_without_models_gets_guidance_instead_of_unsupported(tmp_path, m
     base.config.model_backend = ""  # 部署配置没有模型，与真实飞书用户同样处境
     result = _run(base, "/model")
     assert result.ok is True and result.kind == "model"
-    assert "还没有可选模型" in result.message and "管理员共享模型" in result.message
+    assert "还没有可选模型" in result.message and "默认模型与共享" in result.message
     assert "/model" in gateway_client_error_message("MODEL_NOT_CONFIGURED")
 
 

@@ -161,7 +161,8 @@ async def running(tmp_path, gateway):
 
 async def open_scope(ui, *, thread=False):
     await press(ui, "/model\r")
-    await press(ui, b"\x1b[B" * 8 + b"\r")
+    await press(ui, b"\x1b[B\r")  # 顶层第 2 项「选择模型」
+    await press(ui, b"\x1b[B\r")  # 二级第 2 项「决策模型」
     assert "决策模型 · 设置范围" in visible(ui.app)
     await press(ui, (b"\x1b[B" if thread else b"") + b"\r")
 
@@ -180,12 +181,12 @@ def point_index(gateway, point, *, thread=False):
 
 # LLM: 行序与 _manage_scope 一致：先是当前作用域可写的通用字段（按 _GENERAL 顺序），再是固定的动作行；不写死下标，
 #   新增通用字段时测试不必逐个改位置。
-# 函数用途: 算出决策设置范围菜单里某个通用字段或动作行（points/reset/providers/provider_add/probe）的位置。
+# 函数用途: 算出决策设置范围菜单里某个通用字段或动作行（points/reset/probe）的位置。
 def scope_index(gateway, action, *, thread=False):
     view = (settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
             if thread else settings(gateway.host, "read", {}))
     rows = [field for field in _GENERAL if field in _fields(view)]
-    return [*rows, "points", "reset", "providers", "provider_add", "probe"].index(action)
+    return [*rows, "points", "reset", "probe"].index(action)
 
 
 
@@ -289,9 +290,6 @@ def test_pipe_owner_fields_model_mode_seconds_reset_and_provider_reuse(tmp_path)
             await choose(ui, scope_index(gateway, "reset"))  # reset 列表
             await choose(ui, 0)  # enabled
             assert "enabled" not in settings(gateway.host, "read", {})["overrides"]["owner"]
-            await choose(ui, scope_index(gateway, "providers"))  # 原服务商管理入口
-            assert "服务商列表" in visible(ui.app)
-            await press(ui, b"\x1b")
             assert ui.runtime.store.snapshot().selected_model_name == "ordinary-main"
             assert ui.params.jobs.empty() and not ui.params.stop_event.is_set()
             assert not any(operation in {"probe", "decision_probe", "select", "set_default"} for operation, _ in gateway.calls)

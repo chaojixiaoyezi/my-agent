@@ -2029,6 +2029,9 @@ blocked，由 Gateway 停止该 request，避免重复副作用。
 
 `model_profile_service.handle_client_models` 为 `/client/models` 提供 owner 认证后的 list/add/select。
 密钥不进入 ask/control/notice 队列；私有配置文件和运行快照分别由 settings/model_profiles 与 model_scope 负责。
+这里不设操作白名单，operation 原样交给 `execute_model_profile_operation`（09-30 新增的 `add_models`、带 `connection` 的 `discover`、
+`set_initial` 都由它分派，未知操作在 settings 层拒绝）。聊天 `/model` 渲染「默认」行时按结构化 `default_source` 区分部署默认与
+管理员指定的初始模型，空列表提示指向 TUI 的「默认模型与共享」。
 
 ## 会话模型选择版本（P5-D Stage A）
 

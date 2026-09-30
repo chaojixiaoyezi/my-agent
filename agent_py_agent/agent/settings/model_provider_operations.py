@@ -88,8 +88,9 @@ def _add_flat(data: dict, payload: dict) -> None:
 
 
 # LLM: operation 是结构化管理命令，所有校验在唯一文件锁内完成；未知动作不写盘。
+#   add_models 返回实际新增的模型名（已存在的同连接同名模型被跳过），其余动作返回 None。
 # 函数用途: 修改当前用户的模型配置内存快照，由调用方一次落盘。
-def mutate_profiles(data: dict, operation: str, payload: dict) -> None:
+def mutate_profiles(data: dict, operation: str, payload: dict) -> list[str] | None:
     if operation == "add":
         _add_flat(data, payload)
         return
@@ -108,6 +109,10 @@ def mutate_profiles(data: dict, operation: str, payload: dict) -> None:
     if operation in {"delete_provider", "delete_model"}:
         _delete(data, operation, payload)
         return
+    if operation == "add_models":
+        from .model_connections import add_connection_models
+
+        return add_connection_models(data, payload)
     if operation == "select":
         _select(data, payload)
         return

@@ -37,7 +37,11 @@ def slow_model_requests(monkeypatch, delay):
 
 @pytest.mark.parametrize("delay", [0.0, 0.5], ids=["fast", "slow_io"])
 def test_tui_menu_add_select_cancel_and_secret_history(tmp_path, monkeypatch, delay):
+    from agent_py_agent.agent.settings import model_provider_network as network
+
     slow_model_requests(monkeypatch, delay)
+    # 目录接口只给模型名、不给上下文：勾选框会多出一栏统一上下文，填 96000。
+    monkeypatch.setattr(network, "get_json", lambda request: {"data": [{"id": "MiniMax-M2.7"}]})
 
     async def scenario():
         runtime = TuiRuntime("models")
@@ -58,23 +62,30 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path, monkeypatch, de
                     await wait_dialog_ready(app, "模型配置 /model", "/model 打开模型菜单")
                     assert app._my_agent_model_menu_active
                     assert len(app._my_agent_model_float_container.floats) == 1
-                    pipe.send_bytes(b"\x1b[B\r")  # 新增
-                    await wait_dialog_ready(app, "新增模型 · 选择接口", "进入选择接口")
+                    pipe.send_bytes(b"\r")  # 顶层第 1 项「新增模型」
+                    await wait_dialog_ready(app, "新增模型 · 选择类型", "进入选择类型")
                     pipe.send_bytes(b"\x1b[B\r")  # Anthropic
-                    await wait_dialog_ready(app, "新增模型 · 填写配置", "进入填写配置")
-                    pipe.send_text("MiniMax-M2.7\thttps://example.test/anthropic\tonly-private-secret\t")
-                    await wait_app(app, lambda: "only-private-secret" in visible(app), "三项配置都已填入")
-                    pipe.send_bytes(b"\x01\x0b")
-                    pipe.send_text("96000\t\r")  # 保存
-                    # 保存在线程里确认成功后才回到主菜单并显示结果，所以看到“保存成功”时配置必须已经落盘。
-                    await wait_dialog_ready(app, "保存成功。", "保存后回到模型菜单")
+                    await wait_dialog_ready(app, "新增模型 · 填写连接", "进入填写连接")
+                    pipe.send_text("https://example.test/anthropic\tonly-private-secret")
+                    await wait_app(app, lambda: "only-private-secret" in visible(app), "地址和密钥都已填入")
+                    pipe.send_text("\t\r")  # Tab 到「拉取模型列表」
+                    await wait_dialog_ready(app, "选择要添加的模型（可多选）", "拉到列表后出现勾选框")
+                    pipe.send_bytes(b" ")
+                    await asyncio.sleep(0.05)
+                    pipe.send_bytes(b"\t\x01\x0b")  # 到统一上下文栏并清空
+                    pipe.send_text("96000\t\r")  # 「添加」
+                    # 保存在线程里确认成功后才回到主菜单并显示结果，所以看到结果时配置必须已经落盘。
+                    await wait_dialog_ready(app, "已添加 1 个模型：MiniMax-M2.7", "保存后回到模型菜单")
                     data = read_model_profiles(model_profiles_path(host.home_paths))
                     assert len(data["profiles"]) == 1
                     row = next(iter(data["profiles"].values()))
                     assert data["providers"][row["provider_id"]]["api_key"] == "only-private-secret"
                     assert row["model_context_window_tokens"] == 96000
+                    assert row["model_backend"] == "anthropic_compatible"
                     assert runtime.store.snapshot().selected_model_name == "deployment-model"
-                    pipe.send_bytes(b"\r")  # 选择已有模型
+                    pipe.send_bytes(b"\x1b[B\r")  # 顶层第 2 项「选择模型」
+                    await wait_dialog_ready(app, "对话模型（本会话", "打开选择模型二级菜单")
+                    pipe.send_bytes(b"\r")  # 对话模型
                     await wait_dialog_ready(app, "当前会话模型 · 不影响其他 TUI / IM 会话", "打开当前会话模型列表")
                     pipe.send_bytes(b"\x1b[B\r")
                     await wait_dialog_ready(app, "本会话已选择 MiniMax-M2.7", "选择后回到模型菜单")
@@ -146,8 +157,8 @@ def test_revoked_selection_does_not_keep_misleading_deployment_banner():
     assert "撤销" in runtime.notice()
 
 
-def test_auth_action_refreshes_revoked_current_model(monkeypatch):
-    from agent_py_agent.cli.chat_parts import tui_model_auth, tui_model_menu
+def test_manage_action_refreshes_revoked_current_model(monkeypatch):
+    from agent_py_agent.cli.chat_parts import tui_model_menu, tui_provider_menu
 
     calls = []
 
@@ -159,11 +170,11 @@ def test_auth_action_refreshes_revoked_current_model(monkeypatch):
         calls.append((operation, session))
         return {"ok": True, "selected": "oauth", "selection_available": False, "warning": "账号已退出"}
 
-    monkeypatch.setattr(tui_model_auth, "manage_auth", manage)
+    monkeypatch.setattr(tui_provider_menu, "manage_models", manage)
     monkeypatch.setattr(tui_model_menu, "_request", request)
     runtime = TuiRuntime("logout-selection")
     runtime.publish_model_selection("signed-in-model")
-    result = asyncio.run(tui_model_menu._run_model_action(None, None, "logout-selection", runtime, "auth"))
+    result = asyncio.run(tui_model_menu._run_model_action(None, None, "logout-selection", runtime, "manage"))
     assert result == "已退出登录"
     assert calls == [("logout", "logout-selection"), ("list", "logout-selection")]
     assert "不可用" in runtime.store.snapshot().selected_model_name

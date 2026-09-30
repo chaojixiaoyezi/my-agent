@@ -253,14 +253,15 @@ class TuiInputCompleter(Completer):
                 spec = directory[name]
                 if not name.startswith(slash_prefix):
                     continue
+                # 完整命令名把空格直接放进候选文本：prompt_toolkit 会丢掉"唯一且接受后文本不变"的候选，
+                # 若只靠 append_space，命令打全（如 /model）时高亮菜单就消失了。接受后的结果与原来相同。
                 yield TuiCompletion(
-                    "/" + name,
+                    "/" + name + (" " if name == spec.name else ""),
                     start_position=-len(before),
                     display="/" + name,
                     display_meta=spec.summary,
                     kind="command",
                     enter_action="submit" if spec.submit_on_enter and name == spec.name else "apply",
-                    append_space=name == spec.name,
                 )
             return
         query = _path_query(before)

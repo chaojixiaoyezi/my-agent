@@ -1,4 +1,4 @@
-"""订阅账号模型勾选：只列未添加的、勾几个加几个、以后再说不写入、目录读取失败给出可重试提示。"""
+"""订阅账号模型勾选：只列未添加的、勾几个经 add_models 一次加几个、以后再说不写入、目录读取失败给出可重试提示。"""
 import asyncio
 
 from prompt_toolkit.application import create_app_session
@@ -21,6 +21,8 @@ CATALOG = [
 def fake_gateway(monkeypatch, calls, *, catalog_ok=True):
     async def request(app, agent, session, operation, payload):
         calls.append((operation, dict(payload)))
+        if operation == "add_models":
+            return {"ok": True, "added_models": [row["model_name"] for row in payload["models"]]}
         if not catalog_ok:
             return {"ok": False, "message": "订阅接口暂时不可用。"}
         return {"ok": True, "models": [dict(row) for row in CATALOG]}
@@ -63,7 +65,7 @@ def run_picker(tmp_path, keys):
 
 
 def saved_names(calls):
-    return [payload["profile"]["model_name"] for operation, payload in calls if operation == "save_model"]
+    return [row["model_name"] for operation, payload in calls if operation == "add_models" for row in payload["models"]]
 
 
 def test_checked_models_are_added_with_catalog_defaults_and_existing_ones_are_not_offered(tmp_path, monkeypatch):
@@ -71,10 +73,13 @@ def test_checked_models_are_added_with_catalog_defaults_and_existing_ones_are_no
     fake_gateway(monkeypatch, calls)
     result = run_picker(tmp_path, [b" ", b"\x1b[B", b"\x1b[B", b" ", b"\t", b"\r"])
     assert saved_names(calls) == ["gpt-b", "gpt-c"]
-    profile = next(payload for operation, payload in calls if operation == "save_model")["profile"]
-    assert profile == {"provider_id": "account", "model_name": "gpt-b", "model_backend": "openai_responses",
-                       "model_context_window_tokens": 272000, "capability": "agentic", "enabled": True}
-    assert "已添加 2 个模型：GPT-B、GPT-C" in result and "选择已有模型" in result
+    batch = [payload for operation, payload in calls if operation == "add_models"]
+    assert len(batch) == 1  # 一次请求整批保存
+    assert batch[0]["provider_id"] == "account" and batch[0]["model_backend"] == "openai_responses"
+    assert [(row["model_name"], row["model_context_window_tokens"]) for row in batch[0]["models"]] == [
+        ("gpt-b", 272000), ("gpt-c", 128000)]
+    assert len({row["profile_id"] for row in batch[0]["models"]}) == 2
+    assert "已添加 2 个模型：GPT-B、GPT-C" in result and "对话模型" in result
 
 
 def test_later_adds_nothing(tmp_path, monkeypatch):
@@ -88,5 +93,5 @@ def test_catalog_failure_gives_a_retry_hint_without_a_dialog(tmp_path, monkeypat
     calls = []
     fake_gateway(monkeypatch, calls, catalog_ok=False)
     result = run_picker(tmp_path, [])
-    assert "订阅接口暂时不可用" in result and "选择模型" in result
+    assert "订阅接口暂时不可用" in result and "管理已有模型" in result
     assert [operation for operation, _ in calls] == ["discover"]

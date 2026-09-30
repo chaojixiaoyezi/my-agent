@@ -1,5 +1,6 @@
 # LLM: 登录是现有 TUI 的私密模态表单，不进入聊天/文件历史；只显示设备码或浏览器提示，令牌始终留在 Gateway owner 配置。
-#   ChatGPT 订阅默认走 tui_browser_login 的浏览器登录，环境不适合或端口被占时退回设备码。
+#   ChatGPT 订阅默认走 tui_browser_login 的浏览器登录，环境不适合或端口被占时退回设备码。新增账号入口在「新增模型 →
+#   登录账号」（add_account），已有账号在「管理已有模型」里（manage_account）。
 # 模块用途: 在 /model 完成订阅登录、通用设备码参数设置、取消和退出，等待时不阻塞界面。
 from __future__ import annotations
 
@@ -22,33 +23,38 @@ async def _choose(app, title: str, values: list[tuple[str, str]]):
     return await _dialog(app, title, choices, (("进入", lambda: choices.current_value), ("返回", None)), focus=choices)
 
 
-# LLM: 认证参数为显式用户配置；ChatGPT 端点固定，通用模式只支持服务商公开的 RFC 8628 接口。
-#   返回 (服务商编号, 登录类型)，取消或保存失败返回两个空串；登录类型决定走浏览器还是设备码。
-# 函数用途: 创建一个未登录的服务商，不预填模型型号或容量，不调用模型。
+# LLM: 认证参数为显式用户配置；ChatGPT 端点、展示名固定，不再让用户填编号或地址；通用模式只支持服务商公开的
+#   RFC 8628 接口。服务商编号自动生成 login-<8位>。返回 (服务商编号, 登录类型)，取消或保存失败返回两个空串。
+# 函数用途: 创建一个未登录的账号服务商，不预填模型型号或容量，不调用模型。
 async def _new_provider(app, agent, session: str) -> tuple[str, str]:
     mode = await _choose(app, "登录类型", [("chatgpt", "ChatGPT 订阅登录（Plus / Pro 等账号）"),
         ("oauth_device", "通用 OAuth 2.0（设备码授权，填写服务商参数）")])
     if not mode:
         return "", ""
-    key = TextArea(height=1, multiline=False, text="login-" + uuid4().hex[:8])
-    name = TextArea(height=1, multiline=False, text="ChatGPT 订阅" if mode == "chatgpt" else "")
-    base = TextArea(height=1, multiline=False, text=CHATGPT_BASE if mode == "chatgpt" else "", read_only=mode == "chatgpt")
-    form = HSplit([Label("Provider ID（本人目录内唯一）"), key, Label("展示名"), name,
-                   Label("模型 API 基础地址（ChatGPT 使用固定订阅接口）"), base])
-    if not await _dialog(app, "认证服务商 · 基本信息", form, (("下一步", True), ("取消", None)), focus=key):
+    provider = ({"display_name": "ChatGPT 订阅", "api_base": CHATGPT_BASE, "api_key": "", "auth": {"mode": "chatgpt"}}
+                if mode == "chatgpt" else await _generic_provider(app))
+    if not provider:
         return "", ""
-    config = {"mode": mode}
-    if mode == "oauth_device":
-        config = await _generic_parameters(app, base.text)
-        if not config:
-            return "", ""
-        config.pop("clear_client_secret", None)
-    result = await _request(app, agent, session, "save_provider", {"provider_id": key.text, "provider": {
-        "display_name": name.text, "api_base": base.text, "api_key": "", "auth": config}})
+    key = "login-" + uuid4().hex[:8]
+    result = await _request(app, agent, session, "save_provider", {"provider_id": key, "provider": provider})
     if not result.get("ok"):
         await _dialog(app, "未保存", Label(str(result.get("message") or "无法保存认证配置。")), (("返回", None),))
         return "", ""
-    return key.text, mode
+    return key, mode
+
+
+# LLM: 只收集展示名、模型 API 地址与设备码参数；Client Secret 由 _generic_parameters 掩码处理，不回显。
+# 函数用途: 通用 OAuth 账号的基本信息与授权参数表单，取消返回 None。
+async def _generic_provider(app) -> dict | None:
+    name, base = TextArea(height=1, multiline=False), TextArea(height=1, multiline=False)
+    form = HSplit([Label("展示名"), name, Label("模型 API 基础地址"), base])
+    if not await _dialog(app, "通用 OAuth · 基本信息", form, (("下一步", True), ("取消", None)), focus=name):
+        return None
+    config = await _generic_parameters(app, base.text)
+    if not config:
+        return None
+    config.pop("clear_client_secret", None)
+    return {"display_name": name.text, "api_base": base.text, "api_key": "", "auth": config}
 
 
 # LLM: 仅回显无秘密配置；Client Secret 掩码且留空保留，显式勾选才清除，不进入本机历史。
@@ -152,43 +158,50 @@ async def _device_login(app, agent, session: str, provider_id: str) -> LoginOutc
         await _request_data(agent, session, "auth_cancel", attempt)
         code.text = ""
     if final and final.get("ok") and final.get("status") == "connected":
-        return LoginOutcome("登录成功。请添加该账号可用的模型、接口和上下文容量，再选择使用；尚未发送模型请求。", connected=True)
+        return LoginOutcome("登录成功。在 /model →「管理已有模型」→ 这个账号 →「添加此账号的模型」里添加可用的模型，"
+                            "再到「选择模型」里选用；尚未发送模型请求。", connected=True)
     return LoginOutcome(str((final or {}).get("message") or "已取消本次登录；此前有效登录未被清除。"))
 
 
-# LLM: 账号目录与已有 provider 同源；重新登录和退出须显式动作，不以菜单关闭触发 logout。
-# 函数用途: 管理当前用户的登录账号，并复用已有模型编辑器。
-async def manage_auth(app, agent, session: str, *, create: bool = False) -> str:
-    from .tui_provider_menu import _edit_model
+# LLM: 新账号先保存未登录的服务商再发起登录；ChatGPT 登录成功后直接弹出勾选框（见 _sign_in）。
+# 函数用途: 「新增模型 → 登录账号」：选登录类型、登录，然后勾选这个账号能用的模型。
+async def add_account(app, agent, session: str) -> str:
+    provider, mode = await _new_provider(app, agent, session)
+    return await _sign_in(app, agent, session, (provider, mode)) if provider else ""
 
-    result = await _request(app, agent, session, "list")
-    if not result.get("ok"):
-        return str(result.get("message") or "无法读取登录配置。")
-    rows = [row for row in result.get("providers", []) if row.get("auth_mode") in {"chatgpt", "oauth_device"}]
-    provider = "new" if create else await _choose(app, "登录认证（本人账号）", [("new", "新增登录服务商"), *[
-        (row["id"], f"{row['display_name']} · {'已登录' if row['signed_in'] else '未登录'}") for row in rows]])
-    if not provider:
-        return ""
-    if provider == "new":
-        provider, mode = await _new_provider(app, agent, session)
-        return await _sign_in(app, agent, session, (provider, mode)) if provider else ""
-    row = next(row for row in rows if row["id"] == provider)
-    chatgpt = row["auth_mode"] == "chatgpt"
-    choices = [("login", "登录 / 重新登录"), ("model", "选择模型（勾选这个账号能用的模型）" if chatgpt else "添加此账号的模型")]
+
+# LLM: row 来自同一次 list 投影的公开服务商行；重新登录、退出和删除都须显式动作，不以菜单关闭触发 logout。
+#   模型的编辑/删除复用 tui_provider_menu 的同一入口；删除账号前须先删掉其下模型（服务端强制）。
+# 函数用途: 「管理已有模型」里选中一个登录账号后的操作：登录、添加模型、编辑或删除模型、改参数、退出、删除账号。
+async def manage_account(app, agent, session: str, row: dict) -> str:
+    from .tui_provider_menu import _delete, _edit_model, manage_provider_models
+
+    provider, chatgpt = row["id"], row["auth_mode"] == "chatgpt"
+    choices = [("login", "登录 / 重新登录"), ("model", "添加模型（勾选这个账号能用的模型）" if chatgpt else "添加此账号的模型"),
+               ("models", "编辑或删除这个账号下的模型")]
     if row["auth_mode"] == "oauth_device":
         choices.append(("edit", "编辑认证参数（变化后需重新登录）"))
-    choices.append(("logout", "退出登录（后续请求停止使用此凭据）"))
-    action = await _choose(app, "账号操作", choices)
+    choices += [("logout", "退出登录（后续请求停止使用此凭据）"), ("delete", "删除这个账号（需先删掉其下模型）")]
+    action = await _choose(app, f"账号操作 · {row['display_name']}", choices)
     if action == "login":
         return await _sign_in(app, agent, session, (provider, row["auth_mode"]))
-    if action == "model" and chatgpt:
-        return await pick_subscription_models(app, agent, session, provider)
     if action == "model":
-        return await _edit_model(app, agent, session, provider, None)
+        return await (pick_subscription_models(app, agent, session, provider) if chatgpt
+                      else _edit_model(app, agent, session, provider, None))
+    if action == "models":
+        return await manage_provider_models(app, agent, session, provider)
     if action == "edit":
         return await _edit_parameters(app, agent, session, row)
-    if action == "logout" and await _dialog(app, "确认退出登录", Label("将删除本用户保存的访问/刷新令牌。\n不会退出其他应用或其他用户；已经发出的请求无法撤回。"),
-                                              (("退出账号", True), ("取消", None))):
-        result = await _request(app, agent, session, "auth_logout", {"provider_id": provider})
-        return "已退出登录；再次使用需重新授权。" if result.get("ok") else str(result.get("message") or "退出未确认。")
-    return ""
+    if action == "delete":
+        return await _delete(app, agent, session, "delete_provider", provider)
+    return await _logout(app, agent, session, provider) if action == "logout" else ""
+
+
+# LLM: 退出只删除本用户保存的令牌，需二次确认；取消无副作用。
+# 函数用途: 确认后退出一个账号的登录。
+async def _logout(app, agent, session: str, provider: str) -> str:
+    if not await _dialog(app, "确认退出登录", Label("将删除本用户保存的访问/刷新令牌。\n不会退出其他应用或其他用户；已经发出的请求无法撤回。"),
+                         (("退出账号", True), ("取消", None))):
+        return ""
+    result = await _request(app, agent, session, "auth_logout", {"provider_id": provider})
+    return "已退出登录；再次使用需重新授权。" if result.get("ok") else str(result.get("message") or "退出未确认。")

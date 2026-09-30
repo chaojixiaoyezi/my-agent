@@ -206,14 +206,15 @@ agent_py_agent/
 |   |   |-- tui_media_clipboard.py      # 显式截图剪贴板读取及临时文件清理
 |   |   |-- tui_media.py                # 文件拖入/附件命令与草稿引用
 |   |   |-- tui_decision_menu.py        # 原模型菜单的决策范围、模式、秒数、恢复继承和显式原生连接测试
-|   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
-|   |   |-- tui_model_auth.py           # 私密设备码登录、通用参数编辑、取消及退出账号
+|   |   |-- tui_model_menu.py           # /model 顶层五项（新增/选择/管理/连接测试/默认与共享）与弹窗、焦点守卫
+|   |   |-- tui_model_add.py            # 「新增模型」五类：填连接→拉列表→勾选一次保存，拉不到可手动填，OpenCode 模板与高级请求头
+|   |   |-- tui_model_auth.py           # 新增登录账号、已有账号的登录/添加模型/退出/删除，设备码与通用参数
 |   |   |-- tui_browser_login.py        # ChatGPT 订阅浏览器登录：本机临时回调、自动打开浏览器、登录完自动回到 TUI
-|   |   |-- tui_subscription_models.py  # 订阅账号模型勾选：读账号可用模型目录，勾选（可多选）后一次添加
+|   |   |-- tui_subscription_models.py  # 模型勾选框（可多选）：订阅账号与新连接共用，经 add_models 一次保存
 |   |   |-- tui_model_metrics.py        # Context 下方模型轮、工具数、最近缓存、会话累计与输出速度的一行统计
-|   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销，普通用户只选已开放模型
+|   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销、指定其他用户的初始模型
 |   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认
-|   |   |-- tui_provider_menu.py        # 服务商、多模型编辑、启停、目录发现和明确短连接测试
+|   |   |-- tui_provider_menu.py        # 「管理已有模型」（改连接、编辑/删除模型、从连接再勾选添加）与连接测试
 |   |   |-- tui_media.py                # 文件拖入/附件命令与草稿引用
 |   |   |-- tui_media_clipboard.py      # 显式截图剪贴板读取及临时文件清理
 |   |   |-- tui_input_delivery.py       # 活动回合输入的持久 outbox、同 ID 对账与排队接管
@@ -627,10 +628,11 @@ agent_py_agent/
 |   |   |-- reasoning_effort.py         # 会话/子代理智能程度档位：线程现读、全局默认、/effort 写入、子代理继承与请求选项
 |   |   |-- reasoning_probe.py          # 智能程度自动检测：/effort 自动与手动检测、后台 9 次短请求、按档案记录、确认支持后经参数中心写档案
 |   |   |-- reasoning_probe_judge.py    # 智能程度检测的判定规则（纯函数）：只读 usage 的 token 字段，按 09-26 实测标定
-|   |   |-- shared_model_catalog.py     # 管理员显式共享引用目录，不复制私有连接凭证
+|   |   |-- shared_model_catalog.py     # 管理员显式共享引用目录与其他用户初始模型，不复制私有连接凭证
 |   |   |-- model_provider_schema.py    # provider/model v2 校验、v1 显式迁移与单份连接快照解析
 |   |   |-- model_provider_operations.py # 锁内服务商/模型管理，密钥保留与显式清除
-|   |   |-- model_provider_network.py   # 用户主动目录 GET/短问候，不执行工具或创建任务
+|   |   |-- model_provider_network.py   # 用户主动目录 GET/短问候（可带未保存连接），不执行工具或创建任务
+|   |   |-- model_connections.py        # 按连接一次加多个模型（add_models）：连接去重、重复跳过、整批落盘
 |   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |   |-- cancellation.py             # UI、Gateway 和工具共用的唯一进程内取消令牌与上下文绑定
@@ -1626,7 +1628,8 @@ docs/
 - `cli/chat_parts/tui_browser_login.py`：ChatGPT 订阅的浏览器登录（授权码 + PKCE），登录期间在本机回环端口临时收回调；说明见 `docs/design/MODEL_OAUTH.md`。
 - `agent/settings/thread_model_selection.py`：按 canonical thread 固定模型，同 owner 多 TUI 不串配置，默认值只初始化新会话。
 - `agent/settings/shared_model_catalog.py` 与 `cli/chat_parts/tui_shared_model_menu.py`：管理员逐模型发布共享引用；秘密留在原 provider 文件，撤销后明确提示而非换模型。
-- `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，保存/返回与模型执行分离。
+- `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，顶层五项；保存/返回与模型执行分离。
+- `cli/chat_parts/tui_model_add.py` 与 `agent/settings/model_connections.py`：「新增模型」填连接→拉列表→勾选，`add_models` 一次保存并按连接去重；说明见 `docs/design/TUI_MODEL_PROFILES.md`。
 - `cli/chat_parts/tui_provider_menu.py`：同一个 provider 管理多个模型；敏感字段仅表单暂存，短测试明确提示消耗。
 - `agent/settings/model_provider_*.py`：v2 存储 schema/锁内修改/用户主动网络操作，配置只在 owner 私有文件存在一份。
 - `agent/backends/provider_headers.py`、`responses.py`、`responses_wire.py`：统一身份与三种协议；不复制其他产品认证身份。

@@ -268,8 +268,10 @@ def test_tui_form_prefills_and_saves_reasoning_control(monkeypatch):
         return "anthropic_compatible"
 
     async def dialog(*args, **kwargs):
-        assert radios[0].current_value == "budget"
-        radios[0].current_value = "none"
+        # 按选项值找「思考控制」单选框：表单里还有接口类型、用途等单选框，不依赖创建顺序。
+        reasoning = next(widget for widget in radios if any(value == "budget" for value, _label in widget.values))
+        assert reasoning.current_value == "budget"
+        reasoning.current_value = "none"
         return True
 
     async def request(*args):

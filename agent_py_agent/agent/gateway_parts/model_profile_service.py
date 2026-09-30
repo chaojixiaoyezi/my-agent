@@ -128,6 +128,7 @@ def _choice_by_reference(listing: dict, reference: str) -> dict | None:
 
 
 # LLM: 只渲染公开字段（模型名、服务商名、上下文窗口、共享/默认标记），不渲染接口地址或密钥状态以外的内容。
+#   默认行按结构化字段 default_source 标注：部署默认，或管理员指定的初始模型（普通用户）。
 # 函数用途: 把模型列表整理成聊天文字：当前会话模型、新会话默认、编号列表和用法。
 def render_model_choices(listing: dict) -> str:
     rows = _selectable_choices(listing)
@@ -138,12 +139,13 @@ def render_model_choices(listing: dict) -> str:
         f"新会话默认：{names.get(listing.get('default_selected', 'default')) or '未设置'}",
     ]
     if not rows:
-        lines.append("还没有可选模型。请让管理员在终端 TUI 的 /model 里用“管理员共享模型”开放一个模型，再发送 /model 查看。")
+        lines.append("还没有可选模型。请让管理员在终端 TUI 的 /model →「默认模型与共享」里开放一个模型或指定初始模型，再发送 /model 查看。")
     else:
         lines.append("可选模型：")
         for index, row in enumerate(rows, start=1):
             mark = "● " if row.get("id") == current else ""
-            label = "（部署默认）" if row.get("id") == "default" else ("（管理员共享）" if row.get("shared") else "")
+            label = (("（管理员指定的初始模型）" if row.get("default_source") == "admin_initial" else "（部署默认）")
+                     if row.get("id") == "default" else ("（管理员共享）" if row.get("shared") else ""))
             provider_name = str(row.get("provider_name") or "")
             provider = f" · {provider_name}" if provider_name and provider_name != row.get("model_name") else ""
             lines.append(f"{index}. {mark}{row.get('model_name')}{provider} · {row.get('model_context_window_tokens', '?')} tokens{label}")
