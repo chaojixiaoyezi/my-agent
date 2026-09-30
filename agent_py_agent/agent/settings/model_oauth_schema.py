@@ -1,5 +1,6 @@
 # LLM: OAuth 参数与令牌只存 owner 私有 provider；公开投影只含授权类型与状态，不能把令牌放进模型快照。
-# 模块用途: 校验设备码授权参数、限定凭据投递端点，并生成不含秘密的运行引用。
+#   浏览器登录的回调地址只认本机回环上登记过的端口，PKCE 校验码只进私有 pending，改动须同步 test_model_oauth。
+# 模块用途: 校验设备码与浏览器登录参数、限定凭据投递端点，并生成不含秘密的运行引用。
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +11,20 @@ from urllib.parse import urlsplit
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
 CHATGPT_CLIENT = "app_EMoamEEZ73f0CkXaXp7hrann"
 CHATGPT_ISSUER = "https://auth.openai.com"
+# 官方授权服务器只接受这两个本机回调端口（与官方命令行登录登记的回调地址一致），换端口会被拒绝。
+CHATGPT_CALLBACK_PORTS = (1455, 1457)
+CHATGPT_BROWSER_SCOPE = "openid profile email offline_access"
+_BASE64URL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
+
+# LLM: 回调地址逐字比对登记值，不接受其它主机、端口、路径或查询；客户端只能从这两个值里选。
+# 函数用途: 校验浏览器登录的本机回调地址，给 Gateway 开始登录和读取已保存的等待状态共用。
+def chatgpt_callback_uri(value: object) -> str:
+    from .model_provider_schema import ModelProfileError
+
+    if value not in {f"http://127.0.0.1:{port}/auth/callback" for port in CHATGPT_CALLBACK_PORTS}:
+        raise ModelProfileError("浏览器登录的本机回调地址无效。")
+    return str(value)
 
 
 # LLM: 认证端点必须 TLS 或显式本机回环；禁止 URL 中内嵌秘密、查询和片段，重定向由传输层拒绝。
@@ -86,24 +101,61 @@ def stored_oauth(value: object, api_base: str) -> dict:
             raise ModelProfileError("保存的登录有效期无效。")
         result[field] = number
     if "pending" in value:
-        pending = value["pending"]
-        if not isinstance(pending, dict) or not isinstance(pending.get("id"), str) or not pending["id"]:
-            raise ModelProfileError("保存的登录请求无效，请重新发起登录。")
-        kept = {"id": pending["id"]}
-        if "device_code" in pending:
-            for field in ("device_code", "user_code"):
-                text = pending.get(field)
-                if not isinstance(text, str) or not text or len(text) > 8192 or any(ord(c) < 32 for c in text):
-                    raise ModelProfileError("保存的登录请求无效，请重新发起登录。")
-                kept[field] = text
-            kept["verification_uri"] = verification_url(pending.get("verification_uri"))
-            for field in ("expires_at", "interval", "next_poll_at"):
-                number = pending.get(field, 0)
-                if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or number < 0:
-                    raise ModelProfileError("保存的登录等待参数无效，请重新发起登录。")
-                kept[field] = number
-        result["pending"] = kept
+        result["pending"] = _stored_pending(value["pending"])
     return result
+
+
+# LLM: 每个服务商只有一个等待中的登录；按 flow 字段分派浏览器或设备码两种形状，只保留各自白名单字段。
+# 函数用途: 校验已保存的登录等待状态，损坏时要求重新发起登录。
+def _stored_pending(pending: object) -> dict:
+    from .model_provider_schema import ModelProfileError
+
+    if not isinstance(pending, dict) or not isinstance(pending.get("id"), str) or not pending["id"]:
+        raise ModelProfileError("保存的登录请求无效，请重新发起登录。")
+    kept = {"id": pending["id"]}
+    if pending.get("flow") == "browser":
+        kept.update(_browser_pending(pending))
+    elif "device_code" in pending:
+        kept.update(_device_pending(pending))
+    return kept
+
+
+# LLM: 设备码与验证码是短期秘密，只校验形状不回显；确认页地址按 verification_url 规则校验。
+# 函数用途: 校验设备码登录等待状态里的设备码、验证码、确认页和轮询时间。
+def _device_pending(pending: dict) -> dict:
+    from .model_provider_schema import ModelProfileError
+
+    kept = {}
+    for field in ("device_code", "user_code"):
+        text = pending.get(field)
+        if not isinstance(text, str) or not text or len(text) > 8192 or any(ord(c) < 32 for c in text):
+            raise ModelProfileError("保存的登录请求无效，请重新发起登录。")
+        kept[field] = text
+    kept["verification_uri"] = verification_url(pending.get("verification_uri"))
+    for field in ("expires_at", "interval", "next_poll_at"):
+        number = pending.get(field, 0)
+        if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or number < 0:
+            raise ModelProfileError("保存的登录等待参数无效，请重新发起登录。")
+        kept[field] = number
+    return kept
+
+
+# LLM: state 与 PKCE 校验码必须是随机生成的 base64url 串（43–128 字符）；损坏记录失败关闭，要求重新登录。
+# 函数用途: 校验浏览器登录等待状态里的 state、校验码、回调地址和期限，只保留这几个字段。
+def _browser_pending(pending: dict) -> dict:
+    from .model_provider_schema import ModelProfileError
+
+    kept = {"flow": "browser", "redirect_uri": chatgpt_callback_uri(pending.get("redirect_uri"))}
+    for field in ("state", "code_verifier"):
+        text = pending.get(field)
+        if not isinstance(text, str) or not 43 <= len(text) <= 128 or not set(text) <= _BASE64URL:
+            raise ModelProfileError("保存的浏览器登录请求无效，请重新发起登录。")
+        kept[field] = text
+    expires_at = pending.get("expires_at", 0)
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or not math.isfinite(expires_at) or expires_at < 0:
+        raise ModelProfileError("保存的浏览器登录期限无效，请重新发起登录。")
+    kept["expires_at"] = expires_at
+    return kept
 
 
 # LLM: 绑定指纹覆盖端点、client 和 scope；编辑后旧工作片不得将原令牌发送到新端点。

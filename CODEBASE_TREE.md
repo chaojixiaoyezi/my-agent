@@ -208,6 +208,7 @@ agent_py_agent/
 |   |   |-- tui_decision_menu.py        # 原模型菜单的决策范围、模式、秒数、恢复继承和显式原生连接测试
 |   |   |-- tui_model_menu.py           # /model 新增/选择/退出浮层，私密密钥与显式上下文窗口
 |   |   |-- tui_model_auth.py           # 私密设备码登录、通用参数编辑、取消及退出账号
+|   |   |-- tui_browser_login.py        # ChatGPT 订阅浏览器登录：本机临时回调、自动打开浏览器、登录完自动回到 TUI
 |   |   |-- tui_model_metrics.py        # Context 下方模型轮、工具数、最近缓存、会话累计与输出速度的一行统计
 |   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销，普通用户只选已开放模型
 |   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认
@@ -1621,6 +1622,7 @@ docs/
 - `agent/settings/model_profiles.py` 与 `model_scope.py`：用户模型存储和运行快照；敏感配置位于宿主 config/model-profiles，非业务目录。
 - `agent/settings/model_oauth.py`、`model_oauth_schema.py`、`model_oauth_wire.py`：账号登录的状态、校验与协议；说明见 `docs/design/MODEL_OAUTH.md`。
 - `agent/backends/oauth.py`、`oauth_transport.py` 和 `cli/chat_parts/tui_model_auth.py`：认证与原模型后端的适配及私密登录交互。
+- `cli/chat_parts/tui_browser_login.py`：ChatGPT 订阅的浏览器登录（授权码 + PKCE），登录期间在本机回环端口临时收回调；说明见 `docs/design/MODEL_OAUTH.md`。
 - `agent/settings/thread_model_selection.py`：按 canonical thread 固定模型，同 owner 多 TUI 不串配置，默认值只初始化新会话。
 - `agent/settings/shared_model_catalog.py` 与 `cli/chat_parts/tui_shared_model_menu.py`：管理员逐模型发布共享引用；秘密留在原 provider 文件，撤销后明确提示而非换模型。
 - `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，保存/返回与模型执行分离。

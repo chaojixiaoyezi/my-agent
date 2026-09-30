@@ -168,7 +168,7 @@ class GatewayChatClientAgent:
     # LLM: 模型表单以独立payload映射走authenticated owner接口；身份字段由宿主覆盖，不进入ask/history或自动重发密钥。
     # 函数用途: 管理当前用户模型；显式决策测试沿用户秒数加运输余量，既有短测/目录/认证上限保持，回执须脱敏。
     def request_models(self, *, session_id: str, operation: str, payload: dict[str, object] | None = None) -> dict:
-        timeout = 180.0 if operation == "probe" else 45.0 if operation in {"auth_start", "auth_poll"} else 30.0 if operation == "discover" else 10.0
+        timeout = 180.0 if operation == "probe" else 45.0 if operation in {"auth_start", "auth_poll", "auth_browser_complete"} else 30.0 if operation == "discover" else 10.0
         if operation == "decision_probe":
             from ..agent.settings.decision_settings_schema import positive_seconds
 

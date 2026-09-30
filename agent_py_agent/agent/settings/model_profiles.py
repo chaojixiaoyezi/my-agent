@@ -297,7 +297,8 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
         operation = "list"
     if operation == "list":
         return _model_selection_projection(agent, read_model_profiles(path), thread_id)
-    if operation in {"auth_start", "auth_poll", "auth_status", "auth_parameters", "auth_cancel", "auth_logout"}:
+    if operation in {"auth_start", "auth_poll", "auth_status", "auth_parameters", "auth_cancel", "auth_logout",
+                     "auth_browser_start", "auth_browser_complete"}:
         from .model_oauth import execute_oauth
 
         return execute_oauth(agent, operation, payload)

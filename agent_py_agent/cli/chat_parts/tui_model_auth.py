@@ -1,4 +1,5 @@
-# LLM: 登录是现有 TUI 的私密模态表单，不进入聊天/文件历史；仅显示设备码，令牌始终留在 Gateway owner 配置。
+# LLM: 登录是现有 TUI 的私密模态表单，不进入聊天/文件历史；只显示设备码或浏览器提示，令牌始终留在 Gateway owner 配置。
+#   ChatGPT 订阅默认走 tui_browser_login 的浏览器登录，环境不适合或端口被占时退回设备码。
 # 模块用途: 在 /model 完成订阅登录、通用设备码参数设置、取消和退出，等待时不阻塞界面。
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from prompt_toolkit.layout import HSplit
 from prompt_toolkit.widgets import Checkbox, Label, RadioList, TextArea
 
 from ...agent.settings.model_oauth_schema import CHATGPT_BASE, oauth_config
+from .tui_browser_login import USE_DEVICE_CODE, browser_login, browser_login_available, open_browser
 from .tui_model_menu import _dialog, _request, _request_data
 
 
@@ -20,31 +22,32 @@ async def _choose(app, title: str, values: list[tuple[str, str]]):
 
 
 # LLM: 认证参数为显式用户配置；ChatGPT 端点固定，通用模式只支持服务商公开的 RFC 8628 接口。
+#   返回 (服务商编号, 登录类型)，取消或保存失败返回两个空串；登录类型决定走浏览器还是设备码。
 # 函数用途: 创建一个未登录的服务商，不预填模型型号或容量，不调用模型。
-async def _new_provider(app, agent, session: str) -> str:
+async def _new_provider(app, agent, session: str) -> tuple[str, str]:
     mode = await _choose(app, "登录类型", [("chatgpt", "ChatGPT 订阅登录（Plus / Pro 等账号）"),
         ("oauth_device", "通用 OAuth 2.0（设备码授权，填写服务商参数）")])
     if not mode:
-        return ""
+        return "", ""
     key = TextArea(height=1, multiline=False, text="login-" + uuid4().hex[:8])
     name = TextArea(height=1, multiline=False, text="ChatGPT 订阅" if mode == "chatgpt" else "")
     base = TextArea(height=1, multiline=False, text=CHATGPT_BASE if mode == "chatgpt" else "", read_only=mode == "chatgpt")
     form = HSplit([Label("Provider ID（本人目录内唯一）"), key, Label("展示名"), name,
                    Label("模型 API 基础地址（ChatGPT 使用固定订阅接口）"), base])
     if not await _dialog(app, "认证服务商 · 基本信息", form, (("下一步", True), ("取消", None)), focus=key):
-        return ""
+        return "", ""
     config = {"mode": mode}
     if mode == "oauth_device":
         config = await _generic_parameters(app, base.text)
         if not config:
-            return ""
+            return "", ""
         config.pop("clear_client_secret", None)
     result = await _request(app, agent, session, "save_provider", {"provider_id": key.text, "provider": {
         "display_name": name.text, "api_base": base.text, "api_key": "", "auth": config}})
     if not result.get("ok"):
         await _dialog(app, "未保存", Label(str(result.get("message") or "无法保存认证配置。")), (("返回", None),))
-        return ""
-    return key.text
+        return "", ""
+    return key.text, mode
 
 
 # LLM: 仅回显无秘密配置；Client Secret 掩码且留空保留，显式勾选才清除，不进入本机历史。
@@ -83,14 +86,27 @@ async def _edit_parameters(app, agent, session: str, provider: dict) -> str:
     return "参数已保存；认证参数变化后需重新登录，未自动切换模型。" if result.get("ok") else str(result.get("message") or "未保存。")
 
 
+# LLM: target 是 (服务商编号, 登录类型)。ChatGPT 订阅先走浏览器登录（不需复制），环境不适合、端口被占或用户选择时
+#   再走设备码；通用 OAuth 只走设备码。
+# 函数用途: 按登录类型选择浏览器或设备码方式发起登录，返回给用户看的结果文字。
+async def _sign_in(app, agent, session: str, target: tuple[str, str]) -> str:
+    provider_id, mode = target
+    if mode == "chatgpt" and browser_login_available():
+        outcome = await browser_login(app, agent, session, provider_id)
+        if outcome != USE_DEVICE_CODE:
+            return outcome
+    return await _login(app, agent, session, provider_id)
+
+
 # LLM: 只在此模态页存续期间轮询，使用上游 interval；取消后 CAS 撤销，迟到响应不能恢复登录。
-# 函数用途: 展示网页登录地址和验证码，自动等待结果，Esc 退出不会停止代理任务。
+# 函数用途: 设备码登录：自动打开确认页并显示验证码，自动等待结果，Esc 退出不会停止代理任务。
 async def _login(app, agent, session: str, provider_id: str) -> str:
     result = await _request(app, agent, session, "auth_start", {"provider_id": provider_id})
     if not result.get("ok"):
         return str(result.get("message") or "发起登录失败。")
     completion = asyncio.get_running_loop().create_future()
-    label = Label("等待网页确认…")
+    opened = browser_login_available() and await asyncio.to_thread(open_browser, result["verification_uri"])
+    label = Label("已在浏览器打开确认页，请输入下面的验证码并确认…" if opened else "等待网页确认…")
     code = TextArea(text=f"{result['verification_uri']}\n\n验证码：{result['user_code']}", read_only=True, height=4, width=72)
     attempt = {"provider_id": provider_id, "attempt_id": result["attempt_id"]}
 
@@ -144,8 +160,8 @@ async def manage_auth(app, agent, session: str, *, create: bool = False) -> str:
     if not provider:
         return ""
     if provider == "new":
-        provider = await _new_provider(app, agent, session)
-        return await _login(app, agent, session, provider) if provider else ""
+        provider, mode = await _new_provider(app, agent, session)
+        return await _sign_in(app, agent, session, (provider, mode)) if provider else ""
     row = next(row for row in rows if row["id"] == provider)
     choices = [("login", "登录 / 重新登录"), ("model", "添加此账号的模型")]
     if row["auth_mode"] == "oauth_device":
@@ -153,7 +169,7 @@ async def manage_auth(app, agent, session: str, *, create: bool = False) -> str:
     choices.append(("logout", "退出登录（后续请求停止使用此凭据）"))
     action = await _choose(app, "账号操作", choices)
     if action == "login":
-        return await _login(app, agent, session, provider)
+        return await _sign_in(app, agent, session, (provider, row["auth_mode"]))
     if action == "model":
         return await _edit_model(app, agent, session, provider,
             {"model_backend": "openai_responses"} if row["auth_mode"] == "chatgpt" else None)

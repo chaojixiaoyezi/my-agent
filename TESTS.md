@@ -8170,9 +8170,13 @@ Audit/摄取不列入本轮新增验收；共享模块既有回归按改动影�
 - 客户端计时：`test_gateway_client.py`、`test_gateway_admission_wait.py`、`test_tui_worker_paths.py`，
   覆盖时钟前跳/回拨、失联超时和活动租约续期。真实 TUI 可隔离替换客户端模块时钟注入跳变，
   不修改系统时钟、不影响 Gateway/模型计时；单独记录注入已发生、真实终态及任务产物，不能把替身当真实模型。
-- 账号认证：`test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`，
+- 账号认证：`test_model_oauth.py`、`test_model_oauth_browser.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、
+  `test_tui_browser_login.py`，
   联合模型配置/共享目录/会话选择/原后端测试。覆盖跨 owner、冻结引用、刷新轮换、取消和退出竞态、
   私密参数保留/清除、重定向拒绝及协议复用。真实 TUI 的设备码确认另验；替身不作为实际账号权益证明。
+  浏览器登录另测：state 与请求编号不符拒绝且不打断真实登录、超时清等待状态、兑换期间取消或退出不能复活、
+  只认登记的本机回调地址与 ChatGPT 服务商、PKCE 挑战值与兑换表单、本机回调只收本次登录且不打印授权码、端口回退、
+  SSH/无图形界面不自动开浏览器、TUI 全流程自动完成/Esc 取消/端口被占退回验证码。15 个变异全部被杀（脚本在 3a scratchpad）。
 - 用量增量：`test_model_call_ledger.py`、`test_tui_model_metrics.py`、`test_reproject_model_usage.py`，
   成功/异常/取消共用结算；累计容器重建换代，来源切换不重复算，旧账与缺报不得估算重写。
   真 TUI 中断后追加、Goal 后台交接、子代理及 Compact 必须按 provider 分项对账。

@@ -2,14 +2,23 @@
 # 模块用途: 管理登录和令牌刷新，并让旧模型建议识别凭据变化，不创建第二份认证状态或后台线程。
 from __future__ import annotations
 
+import hmac
 import time
 from pathlib import Path
 from uuid import uuid4
 
 from ..common.json_io import locked_json_path
-from .model_oauth_schema import has_credential, oauth_binding, stored_oauth
-from .model_oauth_wire import poll_device, refresh_tokens, start_device
+from .model_oauth_schema import chatgpt_callback_uri, has_credential, oauth_binding, stored_oauth
+from .model_oauth_wire import (
+    browser_authorize,
+    exchange_browser_code,
+    poll_device,
+    refresh_tokens,
+    start_device,
+)
 from .model_provider_schema import ModelProfileError, validate_provider_id
+
+BROWSER_OPERATIONS = frozenset({"auth_browser_start", "auth_browser_complete"})
 
 
 # LLM: 延迟导入避免 schema/profiles 循环；锁与原子写仍使用配置模块原实现。
@@ -61,6 +70,8 @@ def execute_oauth(agent: object, operation: str, payload: dict) -> dict:
 
     path = model_profiles_path(agent.home_paths)
     provider_id = validate_provider_id(payload.get("provider_id"))
+    if operation in BROWSER_OPERATIONS:
+        return _browser_login(path, provider_id, operation, payload)
     with locked_json_path(path):
         data, row = _provider(path, provider_id)
         auth = row["auth"]
@@ -115,6 +126,50 @@ def execute_oauth(agent: object, operation: str, payload: dict) -> dict:
     pending["interval"] += 5 if status == "slow_down" else 0
     pending["next_poll_at"] = time.time() + pending["interval"]
     return _commit(path, provider_id, binding, attempt, {"pending": pending})
+
+
+# LLM: 浏览器登录与设备码共用唯一 pending 槽位和 _commit 的 CAS：开始只写本次 PKCE 等待状态（不联网），完成时锁内核对
+#   请求编号、期限与 state，锁外兑换一次授权码，再按配置绑定和请求编号提交；state 不符不清等待状态，伪造回调不能打断真实登录。
+#   只支持已启用的 ChatGPT 订阅服务商；通用 OAuth 仍走设备码。改动须同步 test_model_oauth 的浏览器登录用例。
+# 函数用途: 处理 TUI 发起的 ChatGPT 浏览器登录的开始与完成两步；会写 owner 私有模型目录，完成时向授权服务器换一次令牌。
+def _browser_login(path: Path, provider_id: str, operation: str, payload: dict) -> dict:
+    from .model_profiles import _save_profiles
+
+    with locked_json_path(path):
+        data, row = _provider(path, provider_id)
+        auth, binding = row["auth"], oauth_binding(row)
+        if not row["enabled"] or auth["mode"] != "chatgpt":
+            raise ModelProfileError("浏览器登录只支持已启用的 ChatGPT 订阅服务商。")
+        if operation == "auth_browser_start":
+            url, pending = browser_authorize(auth, chatgpt_callback_uri(payload.get("redirect_uri")))
+            auth["pending"] = {"id": uuid4().hex, **pending}
+            _save_profiles(path, data)
+            return {**_projection(auth), "authorize_url": url, "state": pending["state"]}
+        pending = dict(auth.get("pending", {}))
+        problem = _browser_callback_problem(pending, payload)
+        if problem == "expired":
+            auth.pop("pending", None)
+            _save_profiles(path, data)
+            raise ModelProfileError("浏览器登录已超时，请重新登录。")
+        if problem:
+            raise ModelProfileError(problem)
+    fields = exchange_browser_code(auth, pending, str(payload["code"]))
+    return _commit(path, provider_id, binding, pending["id"], {**fields, "generation": uuid4().hex, "pending": None})
+
+
+# LLM: 只比结构化字段：请求编号、期限、state（常量时间比较）和授权码形状；不解析网页或错误文字。
+# 函数用途: 判断浏览器带回的登录结果能否兑换；可以兑换返回空串，超时返回 "expired"，其它返回给用户看的原因。
+def _browser_callback_problem(pending: dict, payload: dict) -> str:
+    if pending.get("flow") != "browser" or not pending.get("id") or payload.get("attempt_id") != pending["id"]:
+        return "浏览器登录请求不存在或已取消，请重新登录。"
+    if time.time() >= pending["expires_at"]:
+        return "expired"
+    if not hmac.compare_digest(str(payload.get("state") or ""), pending["state"]):
+        return "登录回调与本次登录不匹配，已拒绝。"
+    code = payload.get("code")
+    if not isinstance(code, str) or not code or len(code) > 8192 or any(ord(c) < 33 for c in code):
+        return "登录回调缺少有效的授权码，请重新登录。"
+    return ""
 
 
 # LLM: auth_ref 保持原登录会话语义；刷新沿 _save_profiles 原事务轮换目录代次，使旧 pending 失效但不伪造换账号。

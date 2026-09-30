@@ -208,6 +208,7 @@ def test_auth_escape_cancels_login_without_interrupting_agent(tmp_path, monkeypa
 
     monkeypatch.setattr(tui_model_auth, "_request", request)
     monkeypatch.setattr(tui_model_auth, "_request_data", data)
+    monkeypatch.setattr(tui_model_auth, "open_browser", lambda url: False)
 
     async def scenario():
         runtime = TuiRuntime("auth-cancel")

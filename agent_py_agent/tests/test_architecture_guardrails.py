@@ -59,6 +59,11 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
         "Web dashboard HTTP handler logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."
     ),
+    "agent_py_agent/cli/chat_parts/tui_browser_login.py:log_message": (
+        "Loopback login-callback HTTP handler logging override accepts formatter arguments; "
+        "silenced because the request line carries the one-time authorization code, "
+        "not a product service parameter entry point (same as http_service/feishu)."
+    ),
     "scripts/watch_harness/multi_source_simulator.py:log_message": (
         "Watch-harness HTTP simulator logging override accepts formatter arguments; "
         "not a product service parameter entry point (same as http_service/feishu)."

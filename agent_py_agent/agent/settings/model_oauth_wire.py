@@ -1,18 +1,23 @@
-# LLM: 设备码/换令牌只发显式 OAuth 请求；拒绝 HTTP 重定向，不记录原响应或秘密，所有返回值仅供私有存储。
-# 模块用途: 实现 ChatGPT 与 RFC 8628 设备码授权的有界网络交互，调用方负责 owner、取消和原子保存。
+# LLM: 设备码/浏览器登录/换令牌只发显式 OAuth 请求；拒绝 HTTP 重定向，不记录原响应或秘密，所有返回值仅供私有存储。
+# 模块用途: 实现 ChatGPT 设备码与浏览器（PKCE）登录、RFC 8628 设备码授权的有界网络交互，调用方负责 owner、取消和原子保存。
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
+import secrets
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, build_opener
 
 from ..backends.oauth_transport import NoAuthRedirect
-from .model_oauth_schema import CHATGPT_ISSUER, auth_url, verification_url
+from .model_oauth_schema import CHATGPT_BROWSER_SCOPE, CHATGPT_ISSUER, auth_url, verification_url
 from .model_provider_schema import ModelProfileError
+
+# 浏览器登录的等待期限：超过就要求重新点登录，不让一次授权无限期有效。
+BROWSER_LOGIN_SECONDS = 600
 
 
 # LLM: 不沿异常链公开请求体；大小、耗时均有界，只有状态码和协议错误代号参与决策。
@@ -136,8 +141,48 @@ def poll_device(auth: dict, pending: dict) -> tuple[str, dict]:
             "redirect_uri": CHATGPT_ISSUER + "/deviceauth/callback"})
         if status != 200:
             raise ModelProfileError(f"授权码兑换失败（HTTP {status}），请重新登录。")
-    fresh = {key: value for key, value in auth.items() if key not in {"access_token", "refresh_token", "account_id", "expires_at"}}
-    return "connected", token_fields(obj, fresh)
+    return "connected", token_fields(obj, _without_credentials(auth))
+
+
+# LLM: 新登录不能继承旧账号的令牌或账号编号，否则 token_fields 会把不同账号误判成同一个。
+# 函数用途: 去掉已保存的凭据字段，只留认证参数，供新登录兑换令牌时使用。
+def _without_credentials(auth: dict) -> dict:
+    return {key: value for key, value in auth.items() if key not in {"access_token", "refresh_token", "account_id", "expires_at"}}
+
+
+# LLM: 与官方命令行登录同一套授权码 + PKCE(S256) 流程；校验码只返回给调用方写进私有 pending，授权地址只含挑战值与 state，
+#   不带官方命令行的来源标识；不联网、不打开浏览器。
+# 函数用途: 生成一次浏览器登录要打开的官方授权页地址，以及要私下保存的等待状态。
+def browser_authorize(auth: dict, redirect_uri: str) -> tuple[str, dict]:
+    verifier = _base64url(secrets.token_bytes(64))
+    state = _base64url(secrets.token_bytes(32))
+    query = urlencode({
+        "response_type": "code", "client_id": auth["client_id"], "redirect_uri": redirect_uri,
+        "scope": CHATGPT_BROWSER_SCOPE, "code_challenge": _base64url(hashlib.sha256(verifier.encode()).digest()),
+        "code_challenge_method": "S256", "state": state,
+        "id_token_add_organizations": "true", "codex_cli_simplified_flow": "true",
+    })
+    pending = {"flow": "browser", "state": state, "code_verifier": verifier, "redirect_uri": redirect_uri,
+               "expires_at": time.time() + BROWSER_LOGIN_SECONDS}
+    return CHATGPT_ISSUER + "/oauth/authorize?" + query, pending
+
+
+# LLM: 授权码只兑换一次、失败不重试（超时时授权码可能已被消费）；成功与设备码共用 token_fields，不保存 ID token。
+# 函数用途: 用浏览器带回的授权码和本次 PKCE 校验码换取令牌；会向授权服务器发一次请求。
+def exchange_browser_code(auth: dict, pending: dict, code: str) -> dict:
+    status, obj = oauth_post(auth["token_url"], {
+        "grant_type": "authorization_code", "code": code, "redirect_uri": pending["redirect_uri"],
+        "client_id": auth["client_id"], "code_verifier": pending["code_verifier"],
+    })
+    if status != 200:
+        raise ModelProfileError(f"授权码兑换失败（HTTP {status}），请重新登录。")
+    return token_fields(obj, _without_credentials(auth))
+
+
+# LLM: 只做编码，不含随机或秘密判断；state、校验码与挑战值共用，改动会让授权服务器校验挑战失败。
+# 函数用途: 按 RFC 7636 生成不带填充的 base64url 串。
+def _base64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 # LLM: 刷新只由实际请求触发，失败不回退 API Key、不换模型，也不把 token 放到异常正文。
