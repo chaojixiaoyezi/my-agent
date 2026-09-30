@@ -83,6 +83,19 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 排队中取消的派活任务不再开空回合（2026-09-29，分支 `claude/ae-task-wake-fixes`，基于 step16l `5ec2db2e0`，R-a）
+
+- **修的问题**（取消线带进来的既有缺口，step16l 之前的 step16k 同样复现）：M2 的开跑前判定沿用 `_session_task_turn_was_cancelled`，
+  它按"任务绑在这一片的回合号上"反查。派出后目标还没开跑就取消时，正文已撤回、任务从未绑定回合，判据对不上；派活唤醒照样
+  开一个没有正文的空派活回合，把答复交付到目标会话。任务被别的回合认领过（例如忙碌目标的前台回合）再取消，也是同样结果。
+- **修法**：`_retire_cancelled_task_wake` 按唤醒信封自带的 `session_task_id` 直接 `session_tasks.load` 读任务状态，`cancelled`
+  就释放定时租约、`mark_handled`、返回 terminal。只对派活唤醒查的范围不变。
+- **`test_session_task_real_chain.py`**：新窗 `test_task_cancelled_while_queued_does_not_open_an_empty_task_turn`：派出后不开跑就取消
+  （前提用 `_require` 核对：取消前任务没有绑定回合、取消工具回报正文已从队列撤回），排空后这个任务 0 次模型调用、B 的派活
+  唤醒结案、B 的会话里没有派活回合的答复；修复前失败（多出一个空派活回合）。
+- **变异**：改回按绑定反查、状态比较改成 `done`、命中后不结案唤醒，都被这一窗抓住（数字见提交说明）。
+- **已知窄窗口**（记在台账）：开跑前判定放行之后、第一次认领正文之前到的取消，仍会跑成空回合并交付答复；探针见提交说明。
+
 ## 已取消派活任务的唤醒在开跑前结案（2026-09-29，分支 `claude/75-session-message-dedupe`，接在 M1 之后，ae 复审 M2）
 
 - **修的问题**（取消线带进来的既有缺口）：已取消判定原来只在跑完一片之后生效——派活片在重试等待中被取消，下一拍照样开跑，

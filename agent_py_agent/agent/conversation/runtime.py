@@ -100,6 +100,7 @@ from .models import (
     new_id,
 )
 from .run_claim import claim_heartbeat_interval_seconds
+from .session_tasks import SESSION_TASK_CANCELLED
 from .store import ConversationStore
 
 # 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略（阈值只在 store_progress 定义一次）。
@@ -3925,12 +3926,14 @@ def _execute_wake_signal(
     return _WakeExecution(report)
 
 
-# LLM: 已取消的派活任务，它的唤醒在重试等待中不能再开跑：真实模型下已取消任务的工具调用会做完（有副作用），答复才在交付前
-#   被丢掉（ae 复审 388194636 的 M2）。在解析交付路线、领取后台租约之前，用与交付前取消判定同一个判据
-#   （_session_task_turn_was_cancelled，读持久的任务状态）先查一次；命中就释放定时租约、把唤醒标记已处理。只对派活唤醒查，
-#   前提（3a 认可）：定时 run 和会话消息唤醒跑的是自己的回合（回合号是 scheduler_run_id / wake_signal_id），即使这一片曾经认领过
-#   某条派活正文、任务因此绑到了它的回合号，这一片也不是那条任务的派活回合，不能因为那条任务被取消就不开跑；它们照旧由交付前
-#   判定兜底。另外这个判据扫全部会话任务，限定范围也免得每条唤醒多一次全量扫描。读不到账时判据返回 False，照常执行。
+# LLM: 已取消的派活任务，它的唤醒不能再开跑：重试等待中被取消的，真实模型下工具调用会做完（有副作用），答复才在交付前被丢掉
+#   （ae 复审 388194636 的 M2）；排队中就被取消的（正文已撤回、从未绑定回合），开跑只会得到一个没有正文的空派活回合，答复还会
+#   交付到目标会话（ae 复审 M2 的 R-a）。在解析交付路线、领取后台租约之前，按唤醒信封自带的 session_task_id
+#   （_session_task_run_id，与 _run_params 注入正文时的回合号同源）直接读这条任务的持久状态，cancelled 就释放定时租约、把唤醒
+#   标记已处理。按任务号读、不按绑定反查（_session_task_turn_was_cancelled 要求任务绑在这一片的回合号上）：任务可能还没绑定
+#   回合，也可能被别的回合认领过；按号精确读一次，也不用扫全部会话任务。只对派活唤醒查，前提（3a 认可）：定时 run 和会话消息
+#   唤醒跑的是自己的回合（回合号是 scheduler_run_id / wake_signal_id），即使这一片曾经认领过某条派活正文，这一片也不是那条任务的
+#   派活回合，不能因为那条任务被取消就不开跑；它们照旧由交付前判定兜底。任务不存在或记录读不出时照常执行，由交付前判定兜底。
 #   副作用：释放定时租约、写唤醒 handled 回执。
 # 函数用途: 派活任务已取消时，在开跑之前把它的唤醒结案。
 def _retire_cancelled_task_wake(
@@ -3939,9 +3942,12 @@ def _retire_cancelled_task_wake(
     reason = str(signal.reason or "").strip()
     if reason.lower() != SESSION_TASK_WAKE_REASON:
         return False
-    if not _session_task_turn_was_cancelled(
-        scheduler.runtime.agent, _background_run_request_for_wake(scheduler, signal, reason, now),
-    ):
+    task_id = _session_task_run_id(_background_run_request_for_wake(scheduler, signal, reason, now))
+    try:
+        task = scheduler.store.session_tasks.load(task_id)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    if str(getattr(task, "status", "") or "") != SESSION_TASK_CANCELLED:
         return False
     if claim is not None:
         scheduler.scheduler_service.release(claim, now=now)

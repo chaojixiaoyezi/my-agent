@@ -824,6 +824,26 @@ def test_cancelled_task_wake_does_not_run_while_waiting_to_retry(tmp_path, monke
     assert not _pending_wakes(chain, "B"), f"取消后 B 的派活唤醒没有结案：{_pending_wakes(chain, 'B')}"
 
 
+def test_task_cancelled_while_queued_does_not_open_an_empty_task_turn(tmp_path, monkeypatch) -> None:
+    """派出后目标还没开跑（任务没有绑定回合）就取消：正文从队列撤回；派活唤醒在开跑之前按任务号读到 cancelled 就结案，
+    不开一个没有正文的空派活回合，也不向目标会话交付答复（ae 复审 M2 的 R-a：原判据按绑定反查，未绑定的任务对不上）。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-DONE 整理三条要点。")
+    task = chain.task("RC-GOAL-DONE")
+    _require(chain.agent.conversation_store.session_tasks.load(task.task_id).conversation_request_id == "",
+             "前提不成立：取消前任务不应已绑定回合")
+    chain.ask("A", f"RC-CANCEL {task.task_id}")
+    cancels = [row for row in chain.tool_outputs("cancel_session_task") if row.get("task_id") == task.task_id]
+    _require(bool(cancels) and cancels[-1].get("withdrawn_from_queue") is True, f"前提不成立：正文应已从队列撤回：{cancels}")
+
+    chain.drain()
+
+    assert chain.wire.calls_for_task(task.task_id) == [], (
+        f"排队中取消的任务仍开了派活回合：{[call['kind'] for call in chain.wire.calls_for_task(task.task_id)]}")
+    assert not _pending_wakes(chain, "B"), f"取消后 B 的派活唤醒没有结案：{_pending_wakes(chain, 'B')}"
+    assert [text for text in chain.assistant_texts("B") if "RC-TASK" in text] == [], "目标会话收到了空派活回合的答复"
+
+
 # 函数用途: A 派活给 B（RC-GOAL-FAILONCE），B 的派活片带着正文断线一次、正文退回 pending；随后 A 取消任务。返回任务和时钟基准。
 def _fail_once_then_cancel(chain: RealChain) -> tuple[object, float]:
     chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-FAILONCE 整理三条要点。")
