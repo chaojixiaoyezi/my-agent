@@ -45,7 +45,7 @@
   - 恢复顺序：压缩上限上线 → 手动压缩 4 个线程 → 错开唤醒、逐个恢复。
   - 要不要换模型、升级套餐，由用户决定。
 
-## 压缩触发线的绝对上限 `memory_compact_auto_trigger_max_tokens`（2026-09-29，分支 `claude/be-compact-trigger-cap`，基于 `89af6b07a`，本地验证通过，待 38 复审）
+## 压缩触发线的绝对上限 `memory_compact_auto_trigger_max_tokens`（2026-09-29，分支 `claude/be-compact-trigger-cap`，基于 `89af6b07a`，38 已复审，已拣进 step16k `7f4ccf09a`；跟进在分支 `claude/be-compact-cap-followup`）
 
 - **来源**：
   - 03:44 起生产 4 个 my-agent 撞 deepseek-v4.1-flash 的 429。38 查清压缩本身正常，问题在阈值。
@@ -55,15 +55,19 @@
 - **做法（38 的方案 A）**：
   - 新配置 `memory_compact_auto_trigger_max_tokens`，0（默认）表示不封顶，现有行为不变。
   - 大于 0 时，`runtime_compact_policy` 把触发线取成 min(窗口 × 百分比, 上限)，近期尾部与 recovery 都从封顶后的触发线推出。
+  - 上限严格小于窗口 × 百分比才算封顶（`trigger_capped`）。正好相等时触发线与不封顶一样，finalization 仍按百分比判定，`/context` 也不写封顶（38 复审的 should-fix）。
   - 前台请求前预检、工具循环、活动回合、会话压缩和后台定时回合都读这一处。
   - finalization 的旧归档周期原来只按百分比判断（钳在 50–100），现在经 `trigger_tokens` 拿到同一条线，只在封顶时传；不封顶时原样。
   - `/context` 封顶时写“N tokens 触发（绝对上限封顶，比 90% 更早）”，免得出现“90%（30 万）”这种自相矛盾的显示。
   - 前端配置目录：生成器新增按键名的 `rangeMap`，这个键的范围是 0–10,000,000。按名字猜会给 0–200,000，填不进 25 万。
 - **取舍**：
-  - 封顶后 recovery = min(窗口 × 60%, 上限 − 近期尾部)。1M 窗口、上限 30 万时是 28 万，只比触发线低 2 万。
-  - 这不会导致每涨 2 万 token 就重压：压缩后的实际大小由摘要加近期尾部决定，尾部 ≤ 2 万、最多 4 轮（`compact_partitions` 按 `recent_tail_tokens` 截）。recovery 只是候选“可直接提交”的判定线。
-  - 没有加进 user_config 的自助修改白名单（`TUNABLE_KEYS`）。
-- **未做**：生产值由 3a 部署后在配置里定（38 建议 25–30 万），这次不改生产配置。
+  - 封顶后 recovery 按触发线 × recovery% ÷ 触发% 等比推导，保持“恢复目标与触发线之比”不变（38 复审的 should-fix）。
+    1M 窗口、上限 30 万、60%/90% 时是 20 万；仍不超过“触发线 − 近期尾部”。整数先乘后除，浮点比值在部分组合下会少 1。
+    不封顶时仍是原公式 min(窗口 × recovery%, 触发线 − 近期尾部)，数值不变。
+  - recovery 只是候选“可直接提交”的判定线；压缩后的实际大小由摘要加近期尾部决定，尾部 ≤ 2 万、最多 4 轮（`compact_partitions` 按 `recent_tail_tokens` 截）。
+  - 已加进 user_config 的自助修改白名单（`TUNABLE_KEYS`），飞书、TUI 里经 user_config 也能改。只拒非整数和负数，接受的值原样生效；
+    回执与两个百分比项一样写“保存后需要重启 Gateway 才生效”。
+- **生产值**：3a 定 300,000，部署前写进 desktop.yaml；代码提交不改生产配置。
 
 ## 普通消息迟到送达：信封带提交时间与提升年龄门（2026-09-29，分支 `claude/38-stale-delivery-docs`，基于 `89af6b07a`，**待定**，只记方案不实现）
 

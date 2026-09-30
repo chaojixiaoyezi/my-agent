@@ -127,7 +127,7 @@ Curator 决策输入（`memory_store/decision_curator.py`）的候选释义只�
 
 ## 自动压缩触发线的绝对上限
 
-触发线只在 `agent_core/runtime/context_compactor.runtime_compact_policy` 算一次：窗口 × `memory_compact_auto_trigger_percent`，`memory_compact_auto_trigger_max_tokens` 大于 0 时再与它取小（`compact_trigger_max_tokens` 规范化，非法与负数按 0）。`RuntimeCompactPolicy.trigger_max_tokens` 记规范化后的上限，`trigger_capped` 表示触发线正好等于上限。近期尾部与 recovery 目标都从封顶后的触发线推出。模型请求前预检、工具循环中途与即时压缩、活动回合压缩、会话压缩都直接用 `trigger_tokens`；finalization 的旧归档周期经 `MemoryCompactAutoCycleOptions.trigger_tokens` → `MemoryCompactSuggestOptions.trigger_tokens` 拿到同一条线（只在 `trigger_capped` 时传，否则为 0、按百分比判断）。
+触发线只在 `agent_core/runtime/context_compactor.runtime_compact_policy` 算一次：窗口 × `memory_compact_auto_trigger_percent`，`memory_compact_auto_trigger_max_tokens` 大于 0 时再与它取小（`compact_trigger_max_tokens` 规范化，非法与负数按 0）。`RuntimeCompactPolicy.trigger_max_tokens` 记规范化后的上限，`trigger_capped` 表示上限严格小于窗口 × 百分比、触发线被它压低（正好相等时不算封顶，一切按百分比口径）。近期尾部从封顶后的触发线推出；recovery 目标封顶时按触发线 × recovery% ÷ 触发% 等比推导（整数先乘后除，仍不超过“触发线 − 近期尾部”），不封顶时仍是窗口 × recovery% 与“触发线 − 近期尾部”取小。模型请求前预检、工具循环中途与即时压缩、活动回合压缩、会话压缩都直接用 `trigger_tokens`；finalization 的旧归档周期经 `MemoryCompactAutoCycleOptions.trigger_tokens` → `MemoryCompactSuggestOptions.trigger_tokens` 拿到同一条线（只在 `trigger_capped` 时传，否则为 0、按百分比判断）。
 
 ## 子代理任务工作区的路径与物化边界
 

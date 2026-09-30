@@ -73,6 +73,19 @@ def _positive_int(value: object) -> tuple[bool, str, object]:
     return True, "", number
 
 
+# LLM: 与配置解析（_memory_coercion 的 int 字段，下限 0、无上限）和运行时 compact_trigger_max_tokens 同一口径：
+#   接受的值必须原样生效，所以只拒非整数和负数，不另设上限；0 表示不封顶。
+# 函数用途: 校验一次自助修改提交的非负整数（比如压缩触发线的绝对 token 上限）。
+def _non_negative_int(value: object) -> tuple[bool, str, object]:
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return False, "必须是 0 或正整数（0 表示不封顶）", 0
+    if number < 0:
+        return False, "必须是 0 或正整数（0 表示不封顶）", 0
+    return True, "", number
+
+
 def _non_empty_text(value: object) -> tuple[bool, str, object]:
     text = str(value or "").strip()
     if not text:
@@ -93,6 +106,12 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
         key="memory_compact_recovery_target_percent",
         describe="compact 之后的健康目标百分比（25~80，默认 60）",
         validate=_percent_within(COMPACT_RECOVERY_PERCENT_RANGE),
+        effect=EFFECT_GATEWAY_RESTART,
+    ),
+    "memory_compact_auto_trigger_max_tokens": TunableSpec(
+        key="memory_compact_auto_trigger_max_tokens",
+        describe="自动 compact 触发线的绝对 token 上限（0 表示不封顶，默认 0；大于 0 时触发线取「窗口 × 百分比」和它的较小值）",
+        validate=_non_negative_int,
         effect=EFFECT_GATEWAY_RESTART,
     ),
     "tool_read_max_chars": TunableSpec(

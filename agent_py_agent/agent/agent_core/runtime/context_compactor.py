@@ -37,19 +37,21 @@ class RuntimeCompactPolicy:
     # memory_compact_auto_trigger_max_tokens 规范化后的绝对上限；0 表示不封顶。trigger_tokens 已按它取小。
     trigger_max_tokens: int = 0
 
-    # LLM: 只由结构化字段推出：上限开启且触发线正好等于上限（窗口 × 百分比不低于上限）。finalization 的百分比判定与
-    #   /context 展示据此改用 token 触发线；不开上限时恒为 False，原有行为不变。
+    # LLM: 只由结构化字段推出：上限严格小于「窗口 × 百分比」才算封顶；上限正好等于它时触发线与不封顶相同，
+    #   finalization 仍按百分比判定。finalization 的 token 触发线、/context 展示和 recovery 的等比推导都据此切换；
+    #   不开上限时恒为 False，原有行为不变。与 runtime_compact_policy 共用 _trigger_is_capped。
     # 函数用途: 判断这次的触发线是不是被绝对上限压下来的。
     @property
     def trigger_capped(self) -> bool:
-        return 0 < self.trigger_max_tokens == self.trigger_tokens
+        return _trigger_is_capped(self.context_window_tokens, self.trigger_percent, self.trigger_max_tokens)
 
 
 # LLM: Resolve every durable compact limit from the model/config snapshot once per invocation.
 # Transcript authority may permit a canonical Compact even when save=False only suppresses the
 # legacy memory/final-response write path; auxiliary no-save calls still remain non-persistent.
 # 触发线 = 窗口 × 百分比；memory_compact_auto_trigger_max_tokens 大于 0 时再与它取小（1M 窗口的长期后台线程靠它把压缩提前），
-# 近期尾部与 recovery 目标都从封顶后的触发线推出。所有自动压缩入口只读这里，不要在调用方另算一条触发线。
+# 近期尾部与 recovery 目标都从封顶后的触发线推出：封顶时 recovery 按触发线 × recovery% ÷ 触发% 等比推导（_capped_recovery_target_tokens），
+# 不封顶时仍是 compact_recovery_target_tokens 的原公式。所有自动压缩入口只读这里，不要在调用方另算一条触发线。
 # 函数用途: 为主代理或子代理生成同一口径的压缩策略；会话权威回合即使由别处负责保存回复，也能提交真实压缩。
 def runtime_compact_policy(
     agent: object,
@@ -71,17 +73,16 @@ def runtime_compact_policy(
             int(trigger_tokens * (DEFAULT_COMPACT_RECENT_TAIL_PERCENT / 100.0)),
         ),
     )
+    if _trigger_is_capped(window, percent, trigger_max_tokens):
+        recovery_target_tokens = _capped_recovery_target_tokens(trigger_tokens, percent, recovery_percent, recent_tail_tokens)
+    else:
+        recovery_target_tokens = compact_recovery_target_tokens(window, trigger_tokens, recent_tail_tokens, recovery_percent)
     return RuntimeCompactPolicy(
         context_window_tokens=window,
         trigger_percent=percent,
         trigger_tokens=trigger_tokens,
         recovery_target_percent=recovery_percent,
-        recovery_target_tokens=compact_recovery_target_tokens(
-            window,
-            trigger_tokens,
-            recent_tail_tokens,
-            recovery_percent,
-        ),
+        recovery_target_tokens=recovery_target_tokens,
         allow_persistent_apply=(
             bool(save) or conversation_transcript_is_authoritative(task_attributes)
         ),
@@ -100,6 +101,24 @@ def _capped_trigger_tokens(window: int, percent: int, trigger_max_tokens: int) -
     if trigger_max_tokens > 0 and trigger_tokens > 0:
         return min(trigger_tokens, trigger_max_tokens)
     return trigger_tokens
+
+
+# LLM: 上限大于 0 且严格小于「窗口 × 百分比」才算封顶；上限等于或高于它时触发线与不封顶相同，各处按原百分比口径处理。
+#   窗口未知（窗口 × 百分比为 0）时恒为 False。RuntimeCompactPolicy.trigger_capped 与 runtime_compact_policy 共用这一处。
+# 函数用途: 判断绝对上限是否真的把触发线压低了。
+def _trigger_is_capped(window: int, percent: int, trigger_max_tokens: int) -> bool:
+    return 0 < trigger_max_tokens < compact_trigger_tokens(window, percent)
+
+
+# LLM: 封顶时 recovery 的百分比部分按封顶后的触发线等比推导：触发线 × recovery% ÷ 触发%（上限 30 万、60%、90% 时是 20 万），
+#   保持「恢复目标与触发线之比 = recovery% ÷ 触发%」；再与 compact_recovery_target_tokens 同口径，不超过「触发线 − 近期尾部」。
+#   两个百分比都先经各自的规范化函数；先乘后整除，全程整数：浮点比值在部分百分比组合下会少 1（上限 10 万、80%、41% 应是 51,250）。
+#   不封顶时不调用，原公式（窗口 × recovery%）不变。
+# 函数用途: 算封顶触发线下压缩后的优选健康目标。
+def _capped_recovery_target_tokens(trigger_tokens: int, percent: int, recovery_percent: int, recent_tail_tokens: int) -> int:
+    proportional = int(trigger_tokens) * compact_recovery_target_percent(recovery_percent) // compact_trigger_percent(percent)
+    tail_ceiling = int(trigger_tokens) - max(1, int(recent_tail_tokens or 0))
+    return max(1, min(proportional, tail_ceiling))
 
 
 # LLM: 与配置解析（_memory_coercion 的 int 字段，下限 0、无上限）同一口径：非整数、布尔、负数都按 0（不封顶）；

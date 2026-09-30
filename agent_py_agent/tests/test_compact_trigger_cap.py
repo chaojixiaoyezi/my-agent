@@ -5,11 +5,14 @@
 
 钉住：
 1. 上限为 0（默认）或非法值时，策略与之前完全一样；
-2. 上限低于“窗口 × 百分比”时触发线 = 上限，近期尾部与 recovery 都从封顶后的触发线推出（recovery ≤ 触发线）；
+2. 上限严格低于“窗口 × 百分比”时触发线 = 上限，近期尾部与 recovery 都从封顶后的触发线推出：recovery 按
+   触发线 × recovery% ÷ 触发% 等比推导（30 万时是 20 万），且不超过“触发线 − 近期尾部”；上限正好等于“窗口 × 百分比”
+   时不算封顶，一切按原百分比口径；
 3. 配置解析：合法值原样生效，负数、非整数回到 0 并告警；
 4. 模型请求前预检在上限处触发（前台同一入口），后台定时回合的预检也在上限处先压缩；
 5. finalization 自动压缩周期：封顶时按 token 触发线判断，不封顶时仍按百分比（原行为）；
-6. /context 在封顶时说清楚是绝对上限。
+6. /context 在封顶时说清楚是绝对上限；
+7. 这个键在自助修改白名单里：接受的值原样生效，回执与百分比项同样写“重启 Gateway 才生效”。
 """
 from __future__ import annotations
 
@@ -45,6 +48,7 @@ from agent_py_agent.agent.memory_archive.compact_suggest import (
 )
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings.memory import normalize_memory_settings
+from agent_py_agent.agent.settings.user_config_capability import TUNABLE_KEYS, set_tunable_value
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 from agent_py_agent.tests.memory_compact_support import write_compact_fixture
 from agent_py_agent.tests.test_background_compact_recovery import _background
@@ -88,22 +92,39 @@ def test_zero_or_invalid_cap_keeps_the_policy_unchanged():
         0, 0, 0, 0, 0, 300_000, 250_000]
 
 
-@pytest.mark.parametrize(("cap", "tail", "recovery"), [(300_000, 20_000, 280_000), (100_000, 10_000, 90_000)])
-def test_cap_below_the_percent_trigger_caps_trigger_tail_and_recovery(cap, tail, recovery):
-    policy = runtime_compact_policy(_agent(cap))
+# 每组是 (上限, 触发百分比, 恢复百分比, 近期尾部, 恢复目标)。
+@pytest.mark.parametrize("case", [
+    (300_000, 90, 60, 20_000, 200_000),
+    (100_000, 90, 60, 10_000, 66_666),
+    (300_000, 80, 50, 20_000, 187_500),
+    # 浮点比值（41 ÷ 80）会算成 51,249；整数先乘后除才是 51,250。
+    (100_000, 80, 41, 10_000, 51_250),
+    # 等比结果（48 万）超过“触发线 − 近期尾部”时取后者。
+    (300_000, 50, 80, 20_000, 280_000),
+])
+def test_cap_below_the_percent_trigger_caps_trigger_tail_and_recovery(case):
+    cap, percent, recovery_percent, tail, recovery = case
+    policy = runtime_compact_policy(_agent(cap, percent=percent, recovery=recovery_percent))
 
     assert policy.trigger_tokens == cap and policy.trigger_capped is True
-    assert policy.trigger_percent == 90, "百分比仍是配置值，只是触发线被上限压下来"
+    assert policy.trigger_percent == percent, "百分比仍是配置值，只是触发线被上限压下来"
     assert policy.recent_tail_tokens == tail
-    assert policy.recovery_target_tokens == recovery == compact_recovery_target_tokens(WINDOW, cap, tail, 60)
-    assert policy.recovery_target_tokens <= policy.trigger_tokens, "recovery 必须跟随封顶后的触发线"
+    assert policy.recovery_target_tokens == recovery
+    assert policy.recovery_target_tokens <= policy.trigger_tokens - tail, "recovery 必须跟随封顶后的触发线"
 
 
-def test_cap_above_the_percent_trigger_changes_nothing():
-    policy = runtime_compact_policy(_agent(950_000))
+def test_uncapped_recovery_keeps_the_window_formula():
+    for cap in (0, 900_000, 950_000):
+        policy = runtime_compact_policy(_agent(cap))
+        assert policy.recovery_target_tokens == compact_recovery_target_tokens(WINDOW, 900_000, 20_000, 60) == 600_000
+
+
+@pytest.mark.parametrize("cap", [950_000, 900_000])
+def test_cap_at_or_above_the_percent_trigger_changes_nothing(cap):
+    policy = runtime_compact_policy(_agent(cap))
 
     assert _limits(policy) == (WINDOW, 90, 900_000, 600_000, 20_000)
-    assert policy.trigger_capped is False and policy.trigger_max_tokens == 950_000
+    assert policy.trigger_capped is False and policy.trigger_max_tokens == cap
 
 
 def test_config_parsing_accepts_positive_values_and_falls_back_to_zero():
@@ -235,7 +256,7 @@ def _cycle_options(tmp_path, monkeypatch, cap):
     return options
 
 
-@pytest.mark.parametrize(("cap", "expected"), [(0, 0), (950_000, 0), (300_000, 300_000)])
+@pytest.mark.parametrize(("cap", "expected"), [(0, 0), (950_000, 0), (900_000, 0), (300_000, 300_000)])
 def test_finalization_cycle_receives_the_token_trigger_only_when_capped(tmp_path, monkeypatch, cap, expected):
     options = _cycle_options(tmp_path, monkeypatch, cap)
 
@@ -256,7 +277,9 @@ def test_context_view_says_the_trigger_is_capped():
     assert "自动 compact：开启，90% （300,000 tokens）触发；" in plain
 
 
-@pytest.mark.parametrize(("cap", "trigger", "capped"), [(0, 900_000, False), (300_000, 300_000, True)])
+@pytest.mark.parametrize(("cap", "trigger", "capped"), [
+    (0, 900_000, False), (900_000, 900_000, False), (300_000, 300_000, True),
+])
 def test_context_inspection_reports_the_capped_trigger(tmp_path, cap, trigger, capped):
     agent = SimpleAgent(AgentConfig(
         model_backend="echo", my_agent_home=str(tmp_path / "home"), model_context_window_tokens=WINDOW,
@@ -266,3 +289,27 @@ def test_context_inspection_reports_the_capped_trigger(tmp_path, cap, trigger, c
     usage = inspect_conversation_context(agent, agent.conversation_store, None, current_prompt="看一下上下文")
 
     assert (usage.trigger_tokens, usage.trigger_capped) == (trigger, capped)
+
+
+def test_self_service_cap_is_accepted_exactly_when_it_takes_effect():
+    """自助修改接受的上限必须原样生效：与配置解析、运行时规范化三处一致；0 表示不封顶。"""
+    spec = TUNABLE_KEYS["memory_compact_auto_trigger_max_tokens"]
+    for value in (-5, -1, 0, 1, 250_000, 300_000, 10_000_000, 50_000_000):
+        accepted = spec.validate(str(value))[0]
+        parsed = normalize_memory_settings({"memory_compact_auto_trigger_max_tokens": value})[0]
+        assert accepted == (compact_trigger_max_tokens(value) == value) == (
+            parsed.memory_compact_auto_trigger_max_tokens == value), value
+    for raw in ("abc", "1.5", ""):
+        assert spec.validate(raw)[0] is False, raw
+
+
+def test_self_service_cap_receipt_says_restart_like_the_percent(tmp_path):
+    user = tmp_path / "desktop.yaml"
+    user.write_text("my_agent_home: /tmp/home\n", encoding="utf-8")
+
+    cap = set_tunable_value("memory_compact_auto_trigger_max_tokens", "300000", user_path=user)
+    percent = set_tunable_value("memory_compact_auto_trigger_percent", "80", user_path=user)
+
+    assert cap["ok"] is True and cap["saved"] == "300000" and cap["written_value_matches"] is True
+    assert cap["effect_text"] == percent["effect_text"] and "重启 Gateway 才生效" in cap["effect_text"]
+    assert set_tunable_value("memory_compact_auto_trigger_max_tokens", "-1", user_path=user)["ok"] is False

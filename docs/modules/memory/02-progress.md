@@ -287,3 +287,5 @@ error_self` 的提前返回只是快速路径，语义上不改变结果（错�
 也不会剔除任何动作）。
 
 2026-09-29 自动压缩触发线的绝对上限（分支 `claude/be-compact-trigger-cap`，基于 `89af6b07a`，38 调查的方案 A）：新增 `memory_compact_auto_trigger_max_tokens`（0 = 不封顶，默认 0）。`agent_core/runtime/context_compactor.runtime_compact_policy` 在它大于 0 时把触发线取成 min(窗口 × 百分比, 上限)，近期尾部与 recovery 从封顶后的触发线推出；前台、后台、finalization 与会话压缩都读这一处。finalization 的旧归档周期原来只按百分比判断（`memory_archive/compact_suggest` 的百分比钳在 50–100，表达不了 1M 窗口下的 30 万），现在 `MemoryCompactAutoCycleOptions` / `MemoryCompactSuggestOptions` 多一个 `trigger_tokens`，只在触发线被封顶时由 finalization 传入，不封顶时仍按百分比，原行为不变。`/context` 在封顶时写明“N tokens 触发（绝对上限封顶）”。
+
+2026-09-29 压缩触发线上限的跟进（分支 `claude/be-compact-cap-followup`，38 复审两条 should-fix 加自助修改）：`trigger_capped` 改成上限严格小于窗口 × 百分比才算，正好相等时 finalization 与 `/context` 按原百分比口径；封顶时 recovery 按触发线 × recovery% ÷ 触发% 等比推导（上限 30 万时 20 万，整数先乘后除），不封顶时原公式不变；`memory_compact_auto_trigger_max_tokens` 加进 `settings/user_config_capability.TUNABLE_KEYS`，只拒非整数和负数，生效时机与两个百分比项相同（重启 Gateway 后生效）。
