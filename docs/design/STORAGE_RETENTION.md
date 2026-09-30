@@ -237,3 +237,52 @@
 - 另一个 owner（`86462b8c9517`）执行 146 个动作。
 - 两个 owner（`93b8c3ffffb8`、`ebd40e6fc3ec`）的保留策略本身无效（`POLICY_INVALID`），每天整次拒绝执行，需要有人看它们的
   `retention.json`（待定）。
+
+## 9. 旧版任务状态文件：355 棵 `TASK_STATE_INVALID`（2026-09-29 只读诊断，待定、未落地）
+
+诊断只读结构化事实：
+- state.json 的键集合；
+- timeline 的 `event`、`task_id`、`ts`、`status` 四个键；
+- runtime.db 的 task_id；
+- global_index 的 `task_id`、`status`。
+
+没有读 `task.yaml` 和任何正文字段。证据在 `~/.my-agent/decision-evidence/task-state-invalid-20260929/`，有 `diagnosis.md`、`facts.json`、`tsi_facts.py` 三个文件。
+
+**事实**：
+
+- 来源：上一节首跑积压里，local/main 的 `O/data/maintenance.json` 中 `load_errors` 共 355 条。
+  - 错误码全是 `MEMORY_RETENTION_TASK_STATE_INVALID`，message 都是 `structured retention state is invalid`。
+  - 路径没有重复。
+- 位置：全在旧版 `O/tasks/<日期>/<任务>/work/state.json`，都在规范深度上。
+  - 目录日期 05-31～06-06。state.json 的修改时间是 05-31 08:19～06-05 21:46（PDT）。
+  - 共 352 个不同的 task_id：有一个 task_id 出现在 3 个目录里，另一个出现在 2 个目录里。
+  - 355 棵合计约 17.6 MB。
+- 不满足的不变式：`retention_scan._task_actions` 要求 `task_id` 和 `status` 都非空。这 355 个文件都能解析，都有 `task_id`，但全部没有 `status` 键。
+- 键集合：当时的 `work/state.json` 是「运行身份 + 预留」记录，不是状态机。分四组：
+  - 257 个：`owner_home`、`owner_id`、`request_id`、`reserved`、`run_id`、`source`、`task_id`、`task_name`、`updated_at`、`version`；
+  - 67 个：在上一组基础上多 `prompt_fingerprint`、`task_title`；
+  - 28 个：有 `prompt_fingerprint`、`task_title`，但没有 `reserved`；
+  - 3 个：在第二组基础上多 `child_run_ids`。
+
+  `version` 都是 1，和现行写入方同号，所以靠版本号区分不了新旧。`updated_at` 有 352 个是 ISO 字符串、3 个是浮点，而现行合同是浮点秒。
+- 不会再增长：现行 `run_workspace._task_state_payload` 建文件时就写 `status: "RUNNING"`。这批文件的修改时间都停在 06-05。
+- 没有权威终态：
+  - runtime.db 的 `tasks`、`task_runs` 表里，352 个 task_id 一个都没有；
+  - 任务自己的 `timeline.jsonl`：351 棵没有本任务的 `task_workspace_synced` 状态事件，只有 `run_workspace_saved` 身份事件；另外 4 棵有状态事件，最后状态是 DONE×3、BLOCKED×1；
+  - `global_index/active_tasks.jsonl` 是投影，只能作旁证：几乎全是 ACTIVE。
+
+**裁定**（2026-09-29，3a 同意 9a 的诊断建议）：
+
+- 数据保留原样。
+  - retention 本来就把状态未知的任务整棵保护起来；路径级错误只剔除和它重叠的动作，所以这 355 棵不会被移动。
+  - 代价是每次维护都会带上这 355 条错误。维护状态因此被记成 `policy_unavailable`，这是第 8 节「已知残留」第一条，由 9b 单独修，和这批数据无关。
+- 不自动迁移，原因有三：
+  - 状态不隐式兼容：缺 status 不能自动当成任何协议状态，更不能当成终态；
+  - global_index（投影）和 timeline 都不是任务状态的权威位置，不拿来推终态；
+  - 编出来的终态会让 `completed_task_days` 把整棵连同交付物移入回收站，等于未经确认就处理了用户数据。
+- 不在 retention 里为这批目录开特例，不按目录日期、文件名或键集合放行，那样就成了专项合同。
+  - 可选的通用改进：把 `TASK_STATE_INVALID` 里「缺 status」这一类拆成单独的码，方便分诊；保护语义不变。
+- 要清理，只能做一次性的显式迁移，由用户拍板，目前未排期。做法：
+  - 管理员命令先 plan，只列出清单；再 apply，apply 时复核文件指纹没有变化；
+  - 每棵写一条结构化迁移记录：原路径、task_id、原键集合、迁移原因码、迁移时间、处理结果。处理结果比如标成 `ABANDONED`，或直接移入回收站并写 tombstone；
+  - 迁移完成后，才按正常的保留窗口处理。

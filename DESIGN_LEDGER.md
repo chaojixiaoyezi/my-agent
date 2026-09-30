@@ -27,6 +27,24 @@
   Anthropic 协议的只有思考的 assistant：MiniMax-M2.7/M3 实测接受，保持回放。整类问题的出口修整与校验见上一条「出站协议合同」。
 - **未改**：压缩触发线上限被模型重置的事实保留（配置改动账本 `settings-changes.jsonl` 有记录），是否恢复由用户决定。
 
+## 旧版任务状态文件：355 棵 `TASK_STATE_INVALID` 保留原样（2026-09-29，分支 `claude/9a-legacy-task-state-ledger`，基于 step16l `5ec2db2e0`，只读诊断，待定、未落地）
+
+- **来源**：local/main 的生产首跑积压（09-29 21:39:50）隔离了 355 棵子树，错误码全是 `MEMORY_RETENTION_TASK_STATE_INVALID`。
+  - 它们是旧版 `O/tasks/<日期>/<任务>/work/state.json`（文件修改时间 05-31～06-05），文件能解析、有 `task_id`，但全部没有 `status`。
+  - 原因是那时这个文件只记「运行身份 + 预留」，键集合分四组：257、67、28、3 个。
+  - 现行写入方建文件时就写 status，这批不会再增长。
+- **为什么没有终态**：
+  - runtime.db 里没有这些 task_id；
+  - 任务自己的 timeline 里，351 棵没有任何状态事件；
+  - global_index 是投影，不能当权威。
+- **裁定**（3a，09-29）：
+  - 数据保留原样。retention 本来就整棵保护状态未知的任务，不会误删。
+  - 不自动迁移。状态不隐式兼容，也不拿投影或 timeline 去推终态。
+  - 不在 retention 里为这批目录开特例，不按目录日期、文件名或键集合放行。
+  - 要清理，只能做一次性显式迁移：用管理员命令先 plan 再 apply，每棵写一条结构化迁移记录。做不做由用户拍板。
+- **相关**：维护状态把路径级错误记成 `policy_unavailable` 的问题 9b 在修，和这批数据无关。
+- 详见 [STORAGE_RETENTION.md 第 9 节](docs/design/STORAGE_RETENTION.md)；证据在 `~/.my-agent/decision-evidence/task-state-invalid-20260929/`。
+
 ## 插件子进程测试会往源码树写 __pycache__（2026-09-29，分支 `claude/9a-magicmock-guard`，待定）
 
 - **来源**：约 85 条插件测试（插件调用、停用、启用、发布、卸载、沙箱、MCP 传输、任意语言插件等）会起真实的插件宿主或插件环境准备子进程。
@@ -494,7 +512,7 @@
 - 生产首跑积压（09-29 21:39:50）：
   - local/main `applied=true`，11742 个动作全部执行、失败 0，与 plan 逐类对上：tmp 删 3581、subagent_scratch 进回收站 8090、tool_output 71
     （其中 46 条执行时已不在）；
-  - 355 棵 `TASK_STATE_INVALID` 子树被隔离未动（待定）；
+  - 355 棵 `TASK_STATE_INVALID` 子树被隔离未动（待定；诊断和裁定见本台账「旧版任务状态文件：355 棵 `TASK_STATE_INVALID` 保留原样」一节）；
   - 两个 owner 的 `retention.json` 无效，每天整次拒绝执行（待定）。
 - 逐条出处见 STORAGE_RETENTION 第 8 节。
 
