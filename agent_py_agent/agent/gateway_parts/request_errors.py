@@ -48,7 +48,8 @@ class SystemCommandRoutingError(RuntimeError):
 # 文案要点明这一点并给出可行动的出路；已知图片在 auto/archived_refs 下会走归档引用，不再报这个码。
 # COMPACT_VISION_SUMMARY_FAILED 同样先于前缀匹配：随图摘要本次失败，同代次下一次压缩自动改走归档引用，文案说明不必换模型。
 # ACTIVE_TURN_OUTCOME_UNCERTAIN 与 RUN_RECOVERY_REQUIRED 都是执行结果未确认的人工恢复点：文案只指向 /recover，重试不会自行解除。
-# 函数用途: 区分尚未配置、压缩、截断、持久化与请求拒绝，不把未知 400 归咎密钥或建议不安全重放。
+# PROVIDER_REQUEST_SHAPE_INVALID 是出站协议合同在发送前查出的结构违规，请求没有发出；文案不说"服务拒绝"，只请用户反馈诊断。
+# 函数用途: 区分尚未配置、压缩、截断、持久化、请求拒绝与发送前结构检查失败，不把未知 400 归咎密钥或建议不安全重放。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
     if code == "COMPACT_REQUEST_NON_TEXT":
@@ -81,6 +82,10 @@ def gateway_client_error_message(error_code: object) -> str:
         "MODEL_RESPONSE_CONTENT_FILTERED": "模型服务过滤了本次响应，本轮已停止；已有工具操作和历史保留。",
         "PROVIDER_REQUEST_REJECTED": (
             "模型服务拒绝了本次请求，本轮已停止。具体原因请查看请求诊断；此前已执行的工作不会因此撤销。"
+        ),
+        "PROVIDER_REQUEST_SHAPE_INVALID": (
+            "发送前检查发现本次请求的消息结构不合规，请求没有发出，本轮已停止；此前已执行的工作不会因此撤销。"
+            "这是请求组装的问题，请把运行诊断反馈给开发者。"
         ),
         "PROVIDER_CONFIGURATION_INVALID": (
             "模型服务配置不可用。请检查接口地址、模型名称和密钥是否属于同一服务后重试。"

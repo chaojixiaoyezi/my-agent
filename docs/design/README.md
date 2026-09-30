@@ -47,6 +47,7 @@
 | [P2_SCALE_MAINLINE.md](P2_SCALE_MAINLINE.md) | P2 规模主链 | 部分可用 | PG/Redis/OTel/migration、正式 scale 入口与诚实缺口 |
 | [P2_SCALE_ROLLOUT_DR_OWNER_STORE.md](P2_SCALE_ROLLOUT_DR_OWNER_STORE.md) | P2 灰度/灾备/Owner 存储 | 进行中 | release channel、S3 owner 事实源、灾备清单与运行中的 24 小时 proof |
 | [WAKE_POISON_PILL.md](WAKE_POISON_PILL.md) | 唤醒认领的毒丸处理 | 方案已审，分步实现中 | 同因连续失败的持久计数、瞬时排除、`failed_permanently` 结案、运维事件、人工重放，以及与回合内兜底的分层 |
+| [PROVIDER_WIRE_CONTRACT.md](PROVIDER_WIRE_CONTRACT.md) | 出站协议合同 | 已实现 | 三个后端出口修整坏历史（空块、结果紧跟调用、孤儿结果）并按协议校验，违规本地报错不发送；MiniMax 实测校准 |
 | [SESSION_MESSAGING.md](SESSION_MESSAGING.md) | 会话间消息与派活（第一期仅管理员） | 设计中，待 dev 审 | 复用 GuidanceStore/WakeStore/TurnTrigger，仅 task 新增 SessionTaskStore；权限矩阵、防循环、落点与测试计划 |
 
 ## 后续待拆模块

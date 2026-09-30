@@ -56,6 +56,22 @@ class ProviderRequestRejectedError(ProviderConfigurationError):
         self.details = details
 
 
+# LLM: 出口合同（backends.wire_contract）在发送前发现请求形状违反协议规则时抛出，请求没有发出、没有 HTTP 状态码。作为
+#   ProviderRequestRejectedError 子类沿用"确定性拒绝、不盲重试、不当环境故障"的全部处理，只用错误码区分本地发现。
+#   details 只含 protocol/rule/index 三个结构化字段，不含消息正文。
+# 类用途: 让"发送前就查出消息结构不合规"成为可识别的本地错误，而不是打到服务端再换回一个 400。
+class ProviderRequestShapeInvalidError(ProviderRequestRejectedError):
+    error_code = "PROVIDER_REQUEST_SHAPE_INVALID"
+
+    # LLM: 文案只供展示，分类与诊断读 error_code 和 details。
+    # 函数用途: 记录违规的协议、规则名和消息位置。
+    def __init__(self, *, protocol: str, rule: str, index: int) -> None:
+        super().__init__(
+            f"请求发出前的协议检查未通过：{protocol} 第 {index} 项违反 {rule}，请求没有发出。",
+            details={"protocol": protocol, "rule": rule, "index": index},
+        )
+
+
 # LLM: 只接受异常上的真实整数 HTTP 属性，不解析正文、details 或布尔值；供诊断和分类共同使用。
 # 函数用途: 返回可安全显示的 HTTP 状态码，缺失或非法时明确返回 None。
 def provider_error_http_status(exc: BaseException) -> int | None:
@@ -216,6 +232,13 @@ def provider_recoverable_report(exc: BaseException, *, timeout_seconds: object =
 def provider_configuration_report(exc: BaseException) -> str:
     if isinstance(exc, ModelNotConfiguredError):
         return f"[model_not_configured]\n{exc}"
+    if isinstance(exc, ProviderRequestShapeInvalidError):
+        return (
+            "[provider_request_shape_invalid]\n"
+            "发送前的协议检查发现本次请求的消息结构不合规，请求没有发出，本轮已停止；此前已执行的工作不会因此撤销。\n"
+            f"error={exc}\n"
+            "这是请求组装的缺陷，请把运行诊断反馈给开发者，不要直接重做整个任务。"
+        )
     if isinstance(exc, ProviderRequestRejectedError):
         return (
             "[provider_request_rejected]\n"

@@ -233,9 +233,11 @@ class AnthropicCompatibleBackend(HttpBackend):
         return {}
 
     # LLM: 普通发送、短JSON和只读投影共用组包；媒体按同预算有界读盘及核对哈希，不执行传输或修改canonical引用。
+    #   历史先经 wire_contract.repair_native_messages 修整副本，最终消息由 validate_anthropic_messages 复核，不合规在本地抛错不发送。
     # 函数用途: 按原缓存、采样和工具合同构造内容，在此将已验证媒体引用展开为临时字节。
     def _request_payload(self, request: _AnthropicGenerateRequest) -> dict[str, Any]:
         from ..conversation.input_media import project_input_media
+        from .wire_contract import repair_native_messages, validate_anthropic_messages
 
         payload: dict[str, Any] = {
             "model": self.model_name,
@@ -262,7 +264,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         selected_tools = tools_for_choice(request.tools, request.tool_choice)
         payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
             prompt=cache_projection.prompt,
-            messages=project_input_media(request.messages, self.input_media_max_bytes),
+            messages=project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes),
             tools=selected_tools,
             cache_enabled=self.prompt_cache_enabled,
             stable_user_prefix=cache_projection.stable_user_prefix,
@@ -272,6 +274,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         from ..conversation.input_media import provider_media_messages
 
         payload["messages"] = provider_media_messages(payload["messages"])
+        validate_anthropic_messages(payload["messages"])
         if selected_tools:
             from .tool_protocol_adapter import anthropic_tool_choice
 

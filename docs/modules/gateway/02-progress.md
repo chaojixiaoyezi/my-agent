@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+出站协议合同的错误文案（分支 `claude/3a-wire-contract`，2026-09-30）：
+- `request_errors.gateway_client_error_message` 新增 `PROVIDER_REQUEST_SHAPE_INVALID`：后端出口在发送前查出消息结构违规，
+  请求没有发出、本轮停止，文案请用户反馈运行诊断。错误本身与规则见 `docs/design/PROVIDER_WIRE_CONTRACT.md`。
+
 维护回收的错误码与缓存不可读时的行为（分支 `my-agent/self-dev-2-vcache`，2026-09-29）：
 - **第五轮补充（2026-09-29）**：回收的错误码此前抓不到最可能出的错——缓存文件读不出内容时
   `_load` 静默返回空、`retain_matching` 把异常吞进 `last_write_error`，维护状态里的错误字段仍是空串

@@ -1,5 +1,18 @@
 # 设计台账
 
+## 出站协议合同：坏历史不再让请求永远 400（2026-09-30，分支 `claude/3a-wire-contract`，已实现）
+
+- **问题**：历史会原样带进之后每次请求，一条服务端不接受的消息就让线程所有请求永远 400（09-30 热修只堵了 Chat 的一种形状）。
+- **做法**：新增 `backends/wire_contract.py`，三个后端组包入口（发送与只读预览同一路径）先修整规范原生历史的副本——空白正文块、
+  无文字无签名的思考块、删空的消息不发；工具结果移到紧跟调用的 user 消息开头，缺的补结构化"结果未知"回执，孤儿与重复结果删除——
+  再按协议校验最终请求体，违规抛 `PROVIDER_REQUEST_SHAPE_INVALID`（请求拒绝子类，已登记错误合同）且不发送。
+  Responses 另去掉助手轮末尾没有后继的 reasoning 项。只读结构化字段，不按正文分类，不按模型名或地址猜供应商。
+- **取舍**：只有思考的 assistant 仍按协议区分——Chat、Responses 不发，Messages 照原设计回放（MiniMax 实测接受，省去续跑重做推理）。
+  连续同 role 消息不合并、无签名思考不删、后台车道冷却不改（反复失败由毒丸 step16m 收口），理由与边界见
+  [docs/design/PROVIDER_WIRE_CONTRACT.md](docs/design/PROVIDER_WIRE_CONTRACT.md)。
+- **证据**：MiniMax-M2.7/M3 官网实测，孤儿结果两者都 400、调用与结果之间夹 user 消息 M3 400；产品组包对 6 段坏历史生成的
+  24 个请求，修整前 5 个 400，修整后全部 200（`~/.my-agent/decision-evidence/wire-contract-2026-09-30/`）。
+
 ## 一条空 assistant 让线程所有请求 400：Chat Completions 回放不再发出无正文无工具调用的消息（2026-09-30，热修，生产事故记录）
 
 - **事实**：09-30 00:49 my-agent-4 用配置工具去掉了压缩触发线上限并重启 Gateway；重启后第一个后台回合（`gateway_restart_completed`
@@ -11,7 +24,7 @@
   这个形状不符合 Chat Completions 规范，DeepSeek 官网实拒。改为仅思考轮只留在原生历史、不进 Chat Completions 请求，
   续跑时模型重新思考，由既有两次空正文预算兜底；Messages 协议不变。原用例的对应断言随之改为新合同。
 - **防再犯**：同类「一条坏历史让请求永远被拒」的重试循环，由毒丸第 3 步接线（同因 5 次结案）兜底，在 step16m；
-  另记待定：Anthropic 协议的只有思考的 assistant 是否同样会被上游拒绝，未复现、未改。
+  Anthropic 协议的只有思考的 assistant：MiniMax-M2.7/M3 实测接受，保持回放。整类问题的出口修整与校验见上一条「出站协议合同」。
 - **未改**：压缩触发线上限被模型重置的事实保留（配置改动账本 `settings-changes.jsonl` 有记录），是否恢复由用户决定。
 
 ## 模型每周额度用完：判定、用量与后台轮询成本（2026-09-29，生产事故记录；前三项在做，后两项未落地）

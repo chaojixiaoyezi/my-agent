@@ -21,6 +21,7 @@
 |-- agent_py_agent/agent/capability/package_selection_authority.py # 原只读准入与精确执行权复核
 |-- agent_py_agent/agent/capability/package_selection_context.py # 已读入口的总预算和准确续页
 |-- agent_py_agent/agent/capability/package_selection_runtime.py # 首个主业务请求前的一次领取和装配
+|-- agent_py_agent/tests/test_wire_contract.py # 出站协议合同：逐形状修整与校验、三个出口集成、修整被改坏时本地拦截、随机历史性质测试
 |-- agent_py_agent/tests/test_capability_selection_state.py # 原TaskLink严格标记、损坏隔离和CAS
 |-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
 |-- agent_py_agent/tests/test_capability_config_missing_defaults.py # 缺配置文件给默认实例且不缓存、坏文件仍 None、决策默认值读 capability 文件
@@ -99,6 +100,7 @@
     |-- PARAMETER_CENTER.md             # 参数中心：一个参数一个权威定义、安全等级、my-agent 自助修改与回滚、分阶段迁移
     |-- STORAGE_RETENTION.md            # 产品持久数据盘点：写入点、实测大小、现有保留机制与缺口、通用保留方向（未落地）
     |-- WAKE_POISON_PILL.md             # 唤醒毒丸处理：同因连续失败持久计数、瞬时排除、结案与人工重放（方案已审，分步实现中）
+    |-- PROVIDER_WIRE_CONTRACT.md       # 出站协议合同：三个后端出口修整坏历史并按协议校验，MiniMax 实测校准与已知边界
     |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
     |-- REASONING_EFFORT.md             # 智能程度：各服务商实测、档位与控制方式、会话/子代理档位来源、/effort 与边界
     |-- HOST_NOTICES.md                 # 宿主提示：现有通道查证、线程待送达字段、提交即已读、飞书/TUI/历史显示与边界
@@ -747,6 +749,7 @@ agent_py_agent/
 |       |-- request_content.py         # 原始内容的文字计量适用性，未知模态保留原请求
 |       |-- vision_capability.py       # 视觉能力事实：8×8 纯色图结构化探针、进程级缓存（端点+模型+api_base，同键单飞）
 |       |-- anthropic.py               # Messages 请求对象、缓存布局、思考及工具结果转换
+|       |-- wire_contract.py           # 出站协议合同：三个后端出口先修整历史副本（空块、结果紧跟调用、孤儿结果），再按协议校验，不合规本地报错不发送
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
@@ -1614,6 +1617,7 @@ docs/
 - `agent/backends/base.py`、`http.py`、`openai_chat.py`、`anthropic.py`、`factory.py`：公共合同、网络传输、协议适配和构造分工；包级公开导入指向唯一实现，内部调用方不依赖旧文件转发。
 - `agent/backends/request_scope.py`：同 Gateway 前台端点占用和请求局部预算；外部程序及代理别名不作推断。
 - `agent/backends/cache_diagnostics.py`：真实 HTTP 请求的无正文摘要，不修改模型请求或记忆。
+- `agent/backends/wire_contract.py`：出站协议合同的唯一位置。Chat、Messages、Responses 三个组包入口先用 `repair_native_messages` 修整规范原生历史的副本，再用 `validate_*` 按协议复核最终请求体，违规抛 `PROVIDER_REQUEST_SHAPE_INVALID`（`ProviderRequestRejectedError` 子类）且不发送。设计见 `docs/design/PROVIDER_WIRE_CONTRACT.md`，测试 `test_wire_contract.py`。
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/conversation/task_follow_up.py`：会话任务后续工作事实的唯一判定（活跃 Goal、guidance、子代理、已终态未交回的子代理完成、唤醒、后台命令、进度策略），读失败按项目报告、按记录归属限定；`agent/scheduler/active_run_closeout.py`（`close_active_run` 收口一轮没做完的定时执行、`settle_stale_waiting` 解开存量 waiting）据此决定等待还是结算成受阻。测试 `test_scheduler_waiting_deadlock.py`。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。

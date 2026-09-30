@@ -1561,6 +1561,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="模型供应商明确拒绝了请求；按结构化错误修正请求或切换后端，不要原样重放。",
     ),
+    "PROVIDER_REQUEST_SHAPE_INVALID": ErrorContract(
+        code="PROVIDER_REQUEST_SHAPE_INVALID",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="发送前的协议检查发现请求消息结构不合规，请求没有发出；这是请求组装缺陷，按 details 的协议和规则名上报，不要原样重放。",
+    ),
     "PROVIDER_RESPONSE_TOO_LARGE": ErrorContract(
         code="PROVIDER_RESPONSE_TOO_LARGE",
         category="resource",

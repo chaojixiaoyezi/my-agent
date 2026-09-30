@@ -231,7 +231,8 @@ def _tool_result_block(result: ToolResult) -> dict[str, Any]:
 
 # tool_use 缺配对结果时补的合成占位（参照标杆 长期助手 _strip_orphaned_tool_blocks /
 # 通道运行时 transform-messages：宁可补合成结果也别删 assistant 文本）。
-_ORPHAN_TOOL_RESULT_STUB = (
+# 出口合同 wire_contract 修整相邻配对时复用同一占位，两处不能各写一份。
+ORPHAN_TOOL_RESULT_STUB = (
     '[{"status":"result_unavailable","effect_outcome":"unknown",'
     '"message":"该调用没有已记录的结果，不能据此认定成功、失败或未执行；重试有副作用的操作前先核实实际状态。"}]'
 )
@@ -342,7 +343,7 @@ def _append_stub_for_orphan_tool_use(
                 {
                     "type": "tool_result",
                     "tool_use_id": call_id,
-                    "content": _ORPHAN_TOOL_RESULT_STUB,
+                    "content": ORPHAN_TOOL_RESULT_STUB,
                     "is_error": True,
                 }
                 for call_id in missing
@@ -362,5 +363,6 @@ __all__ = [
     "AnthropicMessageAdapter",
     "HistoryItem",
     "MessageAdapter",
+    "ORPHAN_TOOL_RESULT_STUB",
     "strip_orphaned_tool_blocks",
 ]

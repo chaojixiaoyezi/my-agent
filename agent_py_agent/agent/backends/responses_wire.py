@@ -24,6 +24,7 @@ def reasoning_item(value: object) -> dict:
 
 
 # LLM: 工具结果依据 tool_use_id 匹配，助手工具依据 canonical IR；任何自然语言都不能生成 function_call。
+#   reasoning 项必须紧跟它产出的消息或函数调用，所以助手轮末尾没有后继的 reasoning 项不发送（只影响本次请求）。
 # 函数用途: 转换 Responses items，图片在发送边界编码，未支持的视频显式拒绝而不静默丢失。
 def message_items(message: dict, model: str) -> list[dict]:
     role, content = message.get("role"), message.get("content")
@@ -55,6 +56,8 @@ def message_items(message: dict, model: str) -> list[dict]:
         if role == "user" and kind == "tool_result":
             result.append({"type": "function_call_output", "call_id": block["tool_use_id"],
                            "output": str(block.get("content") or "")})
+    while role == "assistant" and result and result[-1].get("type") == "reasoning":
+        result.pop()
     return result
 
 

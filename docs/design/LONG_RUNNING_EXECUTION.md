@@ -111,7 +111,9 @@ Gateway 重启不恢复旧 PTY；显式后台命令仍使用其独立的持久�
 - 普通最终回复与实际工具轮沿原保存入口，避免双写；已有历史不倒推补写。
 - 协议边界（2026-09-30 生产修正）：Chat Completions 规范要求 assistant 带正文或 `tool_calls`，DeepSeek 官网对只带
   `reasoning_content` 的 assistant 直接 400，且这条历史会让之后每次请求都被拒。所以仅思考轮只保留在原生历史里，
-  不进 Chat Completions 请求；续跑时模型会重新思考，由上面的两次预算兜底。Messages 协议仍照原样回放 typed 思考。
+  不进 Chat Completions 请求；续跑时模型会重新思考，由上面的两次预算兜底。Responses 的仅推理密文轮同理不发（reasoning 项
+  必须紧跟它产出的项）。Messages 协议仍照原样回放 typed 思考（MiniMax-M2.7/M3 实测接受）。三种协议共用的出口修整与校验见
+  [PROVIDER_WIRE_CONTRACT.md](PROVIDER_WIRE_CONTRACT.md)。
 
 该修复不保证模型单次输出不重复，也不改变采样、服务缓存、权限或长流等待期限。
 定向验证覆盖流式/非流式、连续仅思考、下一工具轮、真实出站字段、签名、用量和未执行工具过滤；

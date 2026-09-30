@@ -8,6 +8,7 @@ from .http import bounded_output_tokens
 from .openai_chat import OpenAICompatibleBackend
 from .responses_wire import collect_response, input_items, response_fields
 from .tool_protocol_adapter import tools_for_choice
+from .wire_contract import repair_native_messages, validate_responses_input
 
 
 # LLM: 继承公开生成签名以保持 Compact/原生调用方一致，仅覆盖协议组装和解析。
@@ -25,11 +26,13 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         return "".join(endpoint_parts(self.api_base, "/responses"))
 
     # LLM: Responses 只发送显式采样；订阅登录固定使用流式、不发 max_output_tokens，system 移到 instructions。
+    #   历史先经 wire_contract.repair_native_messages 修整副本，最终 input 由 validate_responses_input 复核，不合规在本地抛错不发送。
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
+        messages = project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes)
         payload = {"model": self.model_name, "store": False, "include": ["reasoning.encrypted_content"],
                    "max_output_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens),
-                   "input": input_items(request.prompt, project_input_media(request.messages, self.input_media_max_bytes), request.system_instruction, self.model_name)}
+                   "input": input_items(request.prompt, messages, request.system_instruction, self.model_name)}
         if self.temperature_explicit:
             payload["temperature"] = self.temperature
         if self.top_p is not None:
@@ -52,6 +55,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload.pop("max_output_tokens", None)
             payload["instructions"] = "\n\n".join(item["content"] for item in payload["input"] if item.get("role") == "system")
             payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
+        validate_responses_input(payload["input"])
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
         if self.stream_enabled:
             payload["stream"] = True

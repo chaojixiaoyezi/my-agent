@@ -197,6 +197,7 @@ class OpenAICompatibleBackend(HttpBackend):
         return deepcopy(payload)
 
     # LLM: 发送和预览共用唯一组包；媒体按预算读文件并校验hash后编码，不修改canonical历史或推断模态容量。
+    #   历史先经 wire_contract.repair_native_messages 修整副本，转换后由 validate_chat_messages 复核，不合规在本地抛错不发送。
     # 函数用途: 构造Chat历史、工具和输出格式，保留原思考语义；媒体输入包含有界文件读取。
     def _request_payload(self, request: _OpenAIGenerateRequest) -> dict[str, Any]:
         from .sampling import chat_sampling_fields
@@ -215,10 +216,11 @@ class OpenAICompatibleBackend(HttpBackend):
             if self.reasoning_control in {"effort", "budget"}:
                 payload["thinking"] = {"type": "disabled"}
         from ..conversation.input_media import project_input_media
+        from .wire_contract import repair_native_messages, validate_chat_messages
 
         if request.messages is not None:
             payload["messages"] = _openai_messages_from_native(
-                project_input_media(request.messages, self.input_media_max_bytes),
+                project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes),
                 initial_user_prompt=request.prompt,
                 system_instruction=request.system_instruction,
             )
@@ -228,6 +230,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 initial_user_prompt=request.prompt,
                 system_instruction=request.system_instruction,
             )
+        validate_chat_messages(payload["messages"])
         tools = tools_for_choice(request.tools, request.tool_choice)
         if tools:
             from .tool_protocol_adapter import openai_tool_choice
