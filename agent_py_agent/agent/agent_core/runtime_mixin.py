@@ -547,7 +547,13 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
 # conversation task. The durable link—not a turn-local flag or model prose—authorizes
 # closeout, while RuntimeDB proves the exact agent tree terminal. This function runs on
 # root and child terminal edges so either side of their race can complete the same CAS.
-# 函数用途: 在任一代理执行收口后核对持久会话任务状态，并幂等关闭整棵任务执行总账。
+# A TaskRun whose task id has no link file at all (Gateway requests that never promoted a
+# conversation task: plain answers, read-only tools) is governed only by its own agent tree,
+# so the same tree-terminal CAS closes it (operator agent-runtime, reason no_conversation_task).
+# Only a real absence counts: missing store, empty task id, an unreadable link (DataCorruptionError)
+# or a non-terminal link keep it open. Unknown attempts still block via the repository's tree rule
+# (killed children stay open — separate O1 item). A later create_attempt reopens a closed TaskRun.
+# 函数用途: 在任一代理执行收口后核对持久会话任务状态，并幂等关闭整棵任务执行总账；没有会话任务的请求在代理树结束后同样关闭。
 def _settle_terminal_conversation_task_run(agent: object, params: object) -> None:
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
     store = getattr(agent, "conversation_store", None)
@@ -566,19 +572,37 @@ def _settle_terminal_conversation_task_run(agent: object, params: object) -> Non
         if task_run is None:
             return
         canonical_task_id = str(task_run["task_id"] or "").strip()
-        link = store.tasks.load(canonical_task_id)
-        link_status = str(getattr(link, "status", "") or "").strip().lower()
-        if link is None or not conversation_task_link_is_terminal(link_status):
+        if not canonical_task_id:
             return
+        closeout = _task_run_closeout_reason(store.tasks.load(canonical_task_id))
+        if closeout is None:
+            return
+        operator, reason = closeout
         repo.settle_task_run_if_agent_tree_terminal(
             task_run_id=task_run_id,
             task_id=canonical_task_id,
-            operator="conversation-runtime",
-            reason=f"conversation_task_{link_status}",
+            operator=operator,
+            reason=reason,
         )
     except Exception:  # noqa: BLE001 审计投影失败不反噬已完成的用户任务
         return
 
+
+# LLM: Pure decision for _settle_terminal_conversation_task_run. `link` is the result of
+# ConversationStore.tasks.load: None means the link file is truly absent (D3: the request never
+# promoted a conversation task, so its own agent tree governs closeout); a loaded link must be
+# terminal per conversation_task_link_is_terminal. Returns (operator, reason) for the tree CAS or
+# None to keep the TaskRun open. Callers must never pass None for an unreadable link — load raises
+# DataCorruptionError there and the caller's except keeps the TaskRun open.
+# 函数用途: 根据会话任务关联文件决定能否关闭任务执行总账，并给出关闭人和原因；返回 None 表示继续保持打开。
+def _task_run_closeout_reason(link: object) -> tuple[str, str] | None:
+    if link is None:
+        # 没有会话任务关联文件：这条执行总账只归本次请求的代理树管，树结束即可关（D3）。
+        return "agent-runtime", "no_conversation_task"
+    link_status = str(getattr(link, "status", "") or "").strip().lower()
+    if not conversation_task_link_is_terminal(link_status):
+        return None
+    return "conversation-runtime", f"conversation_task_{link_status}"
 
 def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseException) -> None:
     """异常路径收口：InterruptedError → 'cancelled'，其余 → 'failed'。"""

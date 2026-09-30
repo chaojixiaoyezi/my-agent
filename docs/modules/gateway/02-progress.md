@@ -742,3 +742,10 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **改动**：`compact_message_source.summary_source_message` + `CompactMessageSource.projected`；`compact_request_budget._summarize_segments`
   两种来源工厂都经这一投影。整请求原协议发送路径不变。
 - 测试与变异见 TESTS.md 同名节。
+
+## 没有会话任务的请求，代理树结束后 TaskRun 也关闭（2026-09-30，分支 `claude/38-taskrun-close-without-conversation-runtime`，基于 main `a8c71f0e0`）
+
+- **起因**：ae 真实模型验收 D3，从未升格成会话任务的请求 done 后 TaskRun 永远 created。
+- **改动**：`runtime_mixin._settle_terminal_conversation_task_run` 在关联文件确实不存在时，也走同一个树终态 CAS 关闭
+  （`reason=no_conversation_task`）；读坏、无存储、空身份、未终态关联保持开放；unknown attempt 仍挡住关闭。
+- 测试与变异见 TESTS.md 同名节。

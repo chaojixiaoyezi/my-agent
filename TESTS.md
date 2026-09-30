@@ -36,6 +36,19 @@
   - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
   - 未跑 `check_code_size.py`（纯文档任务，任务明确可不跑）
 
+## 没有会话任务的请求，代理树结束后 TaskRun 也关闭（2026-09-30，分支 `claude/38-taskrun-close-without-conversation-runtime`，基于 main `a8c71f0e0`）
+
+- `test_task_run_close_without_conversation_task.py`（新，真实 RuntimeRepository 与 ConversationStore）：
+  - 关联文件不存在、主 run 正常收口 → TaskRun `done` 且 closed，`task_run.closed` 事件 `operator=agent-runtime`、`reason=no_conversation_task`
+    （改前 created、closed_at=0）；
+  - 子代理仍在运行时不关，最后一个子代理收口边关闭；
+  - 子代理 attempt 为 unknown 时仍不关（O1 边界不放宽）；
+  - 关联文件读坏、没有会话存储都不关，文件确实不存在后照常关闭；
+  - 任务身份为空不当成“没有关联”；
+  - 关闭后同一 run 再挂 attempt → TaskRun 重开。
+- 原有 `test_run_audit_terminal.py`、`test_task_run_settle_quiescent_children.py` 不改、全部通过。
+- **变异**（`mutate_taskrun.py`）：5 个全部被杀：没有关联仍直接返回、读坏关联当成没有关联、空任务身份当成没有关联、事件原因写错、非终态关联也关闭。
+
 ## 分段摘要来源不收 Responses 思考密文（2026-09-30，分支 `claude/38-compact-segment-strip-ciphertext`，基于 step16t `10041de02`）
 
 - `test_compact_message_source.py` 新增：

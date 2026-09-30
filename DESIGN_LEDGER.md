@@ -25,6 +25,24 @@
 - **依据**：agent_py_agent/agent/agent_core/agent_tree/node_rendering.py（list_agents 节点投影）、docs/modules/subagent/ORCHESTRATION_TOOL_REFERENCE.md（节点字段说明）、docs/design/REASONING_EFFORT.md 第 2 节「2026-09-30 复测」表与第 5 节、agent_py_agent/agent/backends/reasoning_control.py（describe_config_reasoning_effect 回执）。
 - **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
 
+## 没有会话任务的请求，代理树结束后 TaskRun 也关闭（2026-09-30，分支 `claude/38-taskrun-close-without-conversation-runtime`，基于 main `a8c71f0e0`，已实现，待集成）
+
+- **现象**（ae 真实模型验收 D3，bf4f740c3 与 10041de02 各复现）：请求 record 没有 `conversation_runtime`、`conversations/tasks/<请求>.json`
+  不存在（只调 list_agents、管理员 `manage_models set_shared`、不调工具），请求 done、主 agent_run done，TaskRun 却永远
+  `created`、`closed_at=0`。证据 `capability-real-bf4f/host-defect-candidates.json`。
+- **原因**：TaskRun 的唯一收口边 `runtime_mixin._settle_terminal_conversation_task_run` 要求会话任务关联已终态，`tasks.load`
+  返回空时直接返回；发现层重放同样只认终态关联。从未升格成会话任务的请求没有关联，于是没有任何路径关闭它的 TaskRun。
+- **修法**（权威写入点不变，仍是 `settle_task_run_if_agent_tree_terminal` 的树终态 CAS）：同一个收口边里，关联文件确实不存在时
+  改由代理树决定，`operator=agent-runtime`、`reason=no_conversation_task`。只认真正的“不存在”：关联读坏、没有会话存储、任务身份为空、
+  关联未终态都保持开放。之后若同一 run 再挂 attempt，`task_run.reopened` 照常重开。
+- **不放宽**：unknown attempt 仍不算静止（树判定没改）。被 SIGKILL 的子代理 O1（写操作停在 EXECUTING、agent_run=unknown、TaskRun 不关、
+  /recover 看不到待核对项）是另一个问题，待定。
+- **待定**：进程在主 run 收口与 TaskRun 关闭之间崩溃的窗口，发现层 `_reconcile_terminal_conversation_task_runs` 不补——它按文件内容
+  收集关联状态，读坏的文件会被跳过，分不出“没有关联”和“关联读坏”，不能据此关闭。
+- **改动范围**：只改 `agent_core/runtime_mixin.py` 一个函数；没动 `conversation/runtime.py`（Codex 重构区）与
+  `orchestration/tools/capability.py`（ae 修 D2）。
+- **验证**：`test_task_run_close_without_conversation_task.py` 6 项；5 个变异全部被杀。见 TESTS.md 同名节。
+
 ## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`，已实现，待集成）
 
 - **来源**：能力包验收 G03 发现接替已结束子代理时，追加式事件日志里只有普通保存（`subagent_run_saved`）或状态记录，没有专门的“接替”条目；接替事实只在权威 takeover_records 与 TAKEOVER.md 里。要求只读审计投影，不建第二份状态。

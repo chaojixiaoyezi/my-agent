@@ -863,6 +863,11 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 - root、child 的普通与异常收口边都调用同一幂等 CAS，因此“link 先终态”和“最后一个 child 后终态”两种顺序
   都能闭环。`owner_wake_discovery` 在 Gateway 启动/周期发现时只扫描仍开放 TaskRun，并以唯一、无冲突的
   canonical link 状态重放该 CAS；缺失、活跃、未知或互相冲突的 link 状态一律保持开放。
+- 没有会话任务的请求（2026-09-30，D3）：TaskRun 的任务身份在会话存储里确实没有关联文件（`tasks.load` 返回空；
+  只调只读工具或不调工具、从未升格成会话任务的 Gateway 请求）时，这条总账只归本次代理树管，收口边用同一个树终态 CAS 关闭，
+  事件 `operator=agent-runtime`、`reason=no_conversation_task`。关联读坏（DataCorruptionError）、没有会话存储、任务身份为空、
+  关联未终态都保持开放；unknown attempt 仍挡住关闭。进程在主 run 收口与关闭之间崩溃的窗口，发现层目前不补（它看不出“没有关联”
+  与“关联读坏”），记待定。
 - TaskRun 的最终 status 来自唯一 root AgentRun；一次成功关闭只追加一条 `task_run.closed` 事件，payload 带
   `quiescent_agent_run_count` / `quiescent_agent_run_ids` 说明哪些子 run 是靠静止而不是终态被算作结束的；静止子 run 之后
   `create_attempt` 仍经 `task_run.reopened` 重开。该投影不修改
