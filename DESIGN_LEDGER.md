@@ -27,6 +27,27 @@
   Anthropic 协议的只有思考的 assistant：MiniMax-M2.7/M3 实测接受，保持回放。整类问题的出口修整与校验见上一条「出站协议合同」。
 - **未改**：压缩触发线上限被模型重置的事实保留（配置改动账本 `settings-changes.jsonl` 有记录），是否恢复由用户决定。
 
+## 插件子进程测试会往源码树写 __pycache__（2026-09-29，分支 `claude/9a-magicmock-guard`，待定）
+
+- **来源**：约 85 条插件测试（插件调用、停用、启用、发布、卸载、沙箱、MCP 传输、任意语言插件等）会起真实的插件宿主或插件环境准备子进程。
+  子进程从源码树导入 `plugin_entry`、`plugin_installation` 等产品模块，每条测试写出 8 到 18 个 `__pycache__`。
+  这些子进程由产品代码起，环境由产品的安全清理构造：
+  - `tooling/mcp_client.build_safe_env` 只放行 PATH/HOME 等白名单和 `XDG_*`；
+  - `plugin_environment_process.preparation_environment` 有意剥掉全部 `PYTHON*`/`PIP_`/`LD_*` 前缀，防止注入。
+  所以父进程的 `PYTHONDONTWRITEBYTECODE` 传不进去，conftest 或测试辅助函数也改不到。
+  - 定位方法：scratchpad 探针插件串行跑，每条测试前后看产品目录的哨兵 `__pycache__`。
+  - 同一轮定位还找出 `test_compileall_succeeds` 一次写 97 个目录，已在同分支 `e833b7148` 修掉。
+- **影响**：git 检出里被 `.gitignore` 挡住，看不见也不会提交。只有导出目录（没有 `.git`）里，
+  如果运行产物检查 `test_runtime_artifacts_are_not_present_in_tracked_files` 排在这些插件测试之后，才会被 `__pycache__` 绊倒。
+- **可选方案 A（未采用）**：`build_safe_env` 白名单加 `PYTHONDONTWRITEBYTECODE`，`preparation_environment` 对这个精确名字豁免剥离。
+  这个变量不是机密，也注入不了代码；父进程没设就不传，生产行为不变。
+  不采用的理由：为测试卫生去改两处安全清理，收益只是导出目录里的测试顺序问题，不值得。
+- **已知负载偶发**：12 片全量并发下出现过 3 条时序断言失败，单独连跑都能通过；step16k 的两次全量里没出现过：
+  - `test_tools/test_shell_background.py` 的两条后台立即成功/失败用例（断言 `'started' == 'exited'`）；
+  - `test_plugin_invocation.py::test_duplicate_and_disable_during_approval_cannot_execute_old_or_new_activation`。
+  以后在全量里单独出现这 3 条，先单跑确认，不当作回归。
+- **状态**：待定，不改产品；导出目录流水线如果要彻底干净，可以把运行产物检查排在最前，或者跑前清掉 `__pycache__`。
+
 ## 模型每周额度用完：判定、用量与后台轮询成本（2026-09-29，生产事故记录；前三项在做，后两项未落地）
 
 - **事实**：
