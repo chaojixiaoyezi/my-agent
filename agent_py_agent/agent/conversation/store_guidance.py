@@ -15,7 +15,11 @@ from ..gateway_parts.io import (
 from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .models import GuidanceEntry, MessageLogEntry, normalize_guidance_target_type
-from .session_messaging import SESSION_MESSAGE_ORIGIN_KIND, SESSION_TASK_ORIGIN_KIND
+from .session_messaging import (
+    SESSION_MESSAGE_ORIGIN_KIND,
+    SESSION_TASK_ORIGIN_KIND,
+    SESSION_TASK_STATUS_FIELD,
+)
 from .store_guidance_acknowledgements import GuidanceAcknowledgements
 from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
@@ -76,6 +80,19 @@ def _body_belongs_to_task(metadata: dict[str, Any], owning_task_id: str) -> bool
         # 正文写入时没记任务编号（旧数据/普通消息）：保持原行为，不新增拒绝。
         return True
     return task_id == owning_task_id
+
+
+# LLM: 派活正文 = origin_kind 为 session_task、带 session_task_id、不带 SESSION_TASK_STATUS_FIELD 的投递（带这个键的是派活回报）。
+#   正文只许它自己的派活回合认领：claim_for_turn/available_for_turn 在 owning_task_id 为空（前台、会话消息唤醒、定时回合）时据此拒绝。
+#   否则忙碌目标的前台回合会在安全点领走正文，任务绑到前台请求上：前台回合不按派活收口，任务一直 accepted、发送方收不到回报，
+#   派活唤醒还会再开一个空派活回合（ae 复审 M2 的 R-b，step16k 上复现）。没有 session_task_id 的旧正文保持原行为。只读结构化字段。
+# 函数用途: 判断一条投递是不是某条派活任务的正文（而不是派活回报或别的消息）。
+def _is_task_body(metadata: dict[str, Any]) -> bool:
+    if str(metadata.get("origin_kind") or "").strip() != SESSION_TASK_ORIGIN_KIND:
+        return False
+    if not str(metadata.get("session_task_id") or "").strip():
+        return False
+    return not str(metadata.get(SESSION_TASK_STATUS_FIELD) or "").strip()
 
 
 # LLM: 提供插话入队、认领和读取；修改须核对 Gateway、主子运行循环与精确回合隔离测试。
@@ -205,6 +222,8 @@ class GuidanceStore:
             return updated
 
     # LLM: GuidanceStore：安全点仅为精确尝试预留 pending；跨回合例外必须由持久释放记录授权，联测主子邮箱隔离。
+    #   派活正文只许它自己的派活回合认领（owning_task_id 必须等于正文的任务号，空的也不行，见 _is_task_body）；
+    #   判据与 available_for_turn 完全一致。
     # 函数用途: 在模型安全点为当前执行尝试首次预留补充消息，其他尝试不能重复注入。
     def claim_for_turn(
         self,
@@ -240,6 +259,9 @@ class GuidanceStore:
             # 同一个编号。两者不一致时这一轮不许认领：否则先到的回合会把别人（往往是更早那条）的
             # 正文抢走做完，就是真实链路上"B 做掉了更早的 B1"的成因。
             if owning_task_id and not _body_belongs_to_task(receipt_metadata, owning_task_id):
+                return False
+            # 没有归属任务号的回合（前台、会话消息唤醒、定时）认领不到派活正文：正文只给它自己的派活回合。
+            if not owning_task_id and _is_task_body(receipt_metadata):
                 return False
             normalized_attempt_id = str(attempt_id or "").strip()
             if not normalized_attempt_id:
@@ -295,6 +317,8 @@ class GuidanceStore:
             return False
         # 与 claim_for_turn 完全同一条归属判据：不属于本回合的投递既不能认领，也不算待处理输入。
         if owning_task_id and not _body_belongs_to_task(receipt_metadata, owning_task_id):
+            return False
+        if not owning_task_id and _is_task_body(receipt_metadata):
             return False
         return receipt.status == "pending"
 

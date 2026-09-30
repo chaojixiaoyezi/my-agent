@@ -83,6 +83,23 @@
   （证据 `~/.my-agent/releases/claude-tools/vector-cache-root-guard/container-run.txt`）；负向验证：让缓存构造把读错误抛出，
   四个变体全部变红。
 
+## 派活正文只许它自己的派活回合认领（2026-09-29，分支 `claude/ae-task-wake-fixes`，接在 R-a 之后，R-b）
+
+- **修的问题**（step16k 上同样复现）：`claim_for_turn`/`available_for_turn` 只在 `owning_task_id` 非空时核对正文归属。目标正忙时，
+  前台回合在安全点把派活正文当本回合输入领走，任务绑到前台请求上：前台回合不按派活收口，任务一直 accepted、发送方收不到回报；
+  派活唤醒随后还会再开一个没有正文的空派活回合，把答复交付到目标会话。
+- **修法**：派活正文（`origin_kind=session_task`、带 `session_task_id`、不带 `SESSION_TASK_STATUS_FIELD`）只许 `owning_task_id` 等于
+  它任务号的回合认领，空的也不行，认领与待处理检查两处同一判据。回报带 `SESSION_TASK_STATUS_FIELD`（新常量，回报写入改用它），不受影响。
+- **`test_session_task_real_chain.py`**：新窗 `test_busy_target_runs_a_dispatched_task_in_its_own_task_turn`：B 前台挂着时 A 派活，
+  放行后前台回合经过安全点（前提用 `_require` 核对最后一次是 `user-busy-final`），断言前台各次调用的本回合输入都没有任务目标、
+  前台只有一次最终调用（不空转）、任务没有绑到前台请求；排空后派活回合正常完成一次（`task-done`）、任务 done、A 收到 done 回报、
+  B 的派活唤醒结案。R-a 之上、没有这个修复时失败（正文被注入了前台回合）。
+- **`test_session_task_claim_binding.py`**：原来 3 个单测用普通回合 `req-target-1` 认领正文，写的正是这个缺口，改成派活回合身份
+  （回合号 = 任务号，`task_attributes` 带同一个任务号）；新增两项：没有归属任务号的回合认领不到正文（正文仍 pending、任务不绑定），
+  派活回报照样能被这样的回合认领。
+- **变异**（5 个，全部被抓住）：去掉认领侧判定、去掉待处理检查侧判定（只有"前台只有一次最终调用"这条抓得到）、回报也当正文、
+  永不当正文、判定取反（挡派活回合），数字见提交说明。
+
 ## 排队中取消的派活任务不再开空回合（2026-09-29，分支 `claude/ae-task-wake-fixes`，基于 step16l `5ec2db2e0`，R-a）
 
 - **修的问题**（取消线带进来的既有缺口，step16l 之前的 step16k 同样复现）：M2 的开跑前判定沿用 `_session_task_turn_was_cancelled`，

@@ -645,3 +645,5 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 已取消派活任务的唤醒在开跑前结案（`_retire_cancelled_task_wake`），重试等待中被取消的任务不再重跑一片。
 开跑前判定按唤醒自带的 `session_task_id` 直接读任务状态（R-a）：排队中就取消、从未绑定回合的任务也在开跑前结案，不再开一个
 没有正文的空派活回合、向目标会话交付答复。
+派活正文只许它自己的派活回合认领（R-b）：目标正忙时前台回合不再在安全点领走派活正文，任务留在队列，前台结束后由派活唤醒开
+派活回合、收口并回报发送方；派活回报（带 `SESSION_TASK_STATUS_FIELD`）不受影响。

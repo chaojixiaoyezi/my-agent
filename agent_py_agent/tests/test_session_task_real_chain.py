@@ -42,6 +42,7 @@ from agent_py_agent.agent.conversation.session_messaging import (
     SESSION_MESSAGE_RELEASE_LIMIT,
     SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
     SESSION_TASK_ORIGIN_KIND,
+    SESSION_TASK_STATUS_FIELD,
 )
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.core import SimpleAgent
@@ -664,6 +665,39 @@ def test_busy_target_stopped_before_consuming_the_message_still_gets_it(tmp_path
     assert not _pending_wakes(chain, "B"), f"B 的消息唤醒没有结案：{_pending_wakes(chain, 'B')}"
 
 
+def test_busy_target_runs_a_dispatched_task_in_its_own_task_turn(tmp_path, monkeypatch) -> None:
+    """B 正在执行前台请求时收到派活：前台回合经过安全点也不把正文当本回合输入（派活正文只许它自己的派活回合认领），
+    任务不绑到前台请求上；前台结束后派活唤醒开出派活回合、完成任务，并给 A 回报 done（ae 复审 M2 的 R-b：原来前台回合
+    领走正文，任务一直 accepted、A 收不到回报，派活唤醒还会再开一个没有正文的空回合）。"""
+    chain = _real_chain(tmp_path, monkeypatch)
+    results: list[object] = []
+    busy = threading.Thread(target=lambda: results.append(chain.ask("B", "RC-BUSY 先看看工作目录。")), daemon=True)
+    busy.start()
+    _require(chain.wire.wait_holding("busy"), "B 的前台回合没有进入模型调用")
+    chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-DONE 整理三条要点。")
+    task = chain.task("RC-GOAL-DONE")
+    chain.wire.release("busy")
+    busy.join(_JOIN_SECONDS)
+    _require(results and not busy.is_alive(), "B 的前台请求没有正常结束")
+    foreground = [call for call in chain.wire.calls if str(call.get("kind") or "").startswith("user-busy")]
+    _require(bool(foreground) and foreground[-1]["kind"] == "user-busy-final",
+             f"前提不成立：B 的前台回合放行后应当再调一次模型（经过安全点）：{[call['kind'] for call in foreground]}")
+
+    assert all("RC-GOAL-DONE" not in call["own_goals"] for call in foreground), "派活正文被注入了 B 的前台回合"
+    # 认领与"有没有待处理输入"必须是同一条判据：只挡认领、不挡待处理检查时，前台回合会反复作废答复重来（空转）。
+    assert [call["kind"] for call in foreground].count("user-busy-final") == 1, (
+        f"B 的前台回合反复重来：{[call['kind'] for call in foreground]}")
+    assert chain.agent.conversation_store.session_tasks.load(task.task_id).conversation_request_id == "", "任务被绑到了前台请求上"
+
+    chain.drain()
+
+    kinds = [call["kind"] for call in chain.wire.calls_for_task(task.task_id)]
+    assert kinds == ["task-done"], f"前台结束后派活回合应当正常完成一次，实际 {kinds}"
+    assert chain.agent.conversation_store.session_tasks.load(task.task_id).status == "done"
+    assert _task_report_statuses(chain, "A", task.task_id) == ["done"], "A 没有收到这条任务的 done 回报"
+    assert not _pending_wakes(chain, "B"), f"B 的派活唤醒没有结案：{_pending_wakes(chain, 'B')}"
+
+
 def test_message_wake_that_fails_after_claiming_still_delivers_the_message(tmp_path, monkeypatch) -> None:
     """C 空闲时收到消息；C 的消息唤醒回合认领了它（reserved，绑定到唤醒回合），带着它的模型调用断线失败。
 
@@ -857,6 +891,13 @@ def _fail_once_then_cancel(chain: RealChain) -> tuple[object, float]:
     chain.ask("A", f"RC-CANCEL {task.task_id}")
     _require(chain.agent.conversation_store.session_tasks.load(task.task_id).status == "cancelled", "任务没有转 cancelled")
     return task, now
+
+
+# 函数用途: 某个会话里关于这条任务的派活回报的状态列表（按回报 metadata 的任务状态键，含已送达的），用来断言发送方收到了回报。
+def _task_report_statuses(chain: RealChain, label: str, task_id: str) -> list[str]:
+    entries = chain.agent.conversation_store.guidance.recent("thread", chain.threads[label], limit=200, include_delivered=True)
+    return [str(entry.metadata.get(SESSION_TASK_STATUS_FIELD) or "") for entry in entries
+            if (entry.metadata or {}).get("session_task_id") == task_id and (entry.metadata or {}).get(SESSION_TASK_STATUS_FIELD)]
 
 
 # 函数用途: 按任务号找到派活正文在目标会话里的回执（正文条目 metadata 带 session_task_id）；找不到返回 None。

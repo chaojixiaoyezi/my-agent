@@ -34,6 +34,9 @@ SESSION_TASK_NOT_FOUND = "SESSION_TASK_NOT_FOUND"
 
 # guidance metadata 里区分 task 正文的来源标记（与 session_message 并列）。
 SESSION_TASK_ORIGIN_KIND = "session_task"
+# 派活回报（宿主写给发送方的任务结果）在 guidance metadata 里带的任务状态键；派活正文没有这个键。
+#   认领判定据此区分正文（只许它自己的派活回合认领）和回报（发送方哪一回合都能认领）。
+SESSION_TASK_STATUS_FIELD = "session_task_status"
 
 # 第一期允许的接收方渠道白名单：只允许本地渠道（TUI/CLI/本机）。这是**白名单**而非黑名单：
 # 任何不在名单里的渠道（包括以后新增的 IM 渠道）一律拒绝，fail closed，避免封闭枚举漏项。
