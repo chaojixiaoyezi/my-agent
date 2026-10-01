@@ -18,6 +18,7 @@ from ..conversation.auxiliary_model_call import (
     generate_auxiliary_model_response,
 )
 from ..memory_archive import estimate_tokens
+from .package_selection_failure import log_selection_failure, selection_failure_facts
 from .package_snapshot import CapabilityPackageSnapshot
 from .task_references import normalize_skill_reference
 
@@ -57,6 +58,7 @@ class PackageSelectionMaterial:
 
 
 # LLM: selected 仅代表模型返回合法候选，绝不代表授权/读取/入模；warning 不含正文，用量次数来自原辅助调用账。
+#   failure 只在辅助调用抛异常时非空，是无正文的结构化原因，只供回执落盘，不进模型上下文。
 # 类用途: 返回选择、明确空选或可选阶段失败，供宿主继续原主任务。
 @dataclass(frozen=True)
 class PackageSelectionResult:
@@ -66,6 +68,13 @@ class PackageSelectionResult:
     warning_codes: tuple[str, ...] = ()
     call_id: str = ""
     provider_http_attempt_count: int | None = None
+    failure: tuple[tuple[str, object], ...] = ()
+
+    # LLM: 只在辅助调用抛异常时非空，内容来自 package_selection_failure.selection_failure_facts（无正文）。
+    # 函数用途: 以字典副本给出选择失败的结构化原因，供回执落盘。
+    @property
+    def failure_facts(self) -> dict[str, object]:
+        return dict(self.failure)
 
     # LLM: 原 ref 映射保持不变，后续读取方还须核 owner/scope、activation、hash 和取消。
     # 函数用途: 取得模型选中的准确包引用，返回副本避免修改冻结结果。
@@ -120,8 +129,10 @@ def build_package_selection_material(
 # 函数用途: 生成一份可比较的候选输入及预算观察。
 def _material(query: str, cards: tuple[dict, ...], references: _FrozenReferences, total: int) -> PackageSelectionMaterial:
     ids = [dict(row)["stable_id"] for row in references]
+    # 只用各家严格 JSON Schema 模式都接受的关键字（OpenAI 严格模式不支持 uniqueItems）；不重复、不越界由
+    # _selected_references 在本地严格核对，所以不靠 schema 关键字保证。
     schema = {"type": "object", "properties": {"selected_ids": {
-        "type": "array", "items": {"type": "string", "enum": ids}, "uniqueItems": True, "maxItems": len(ids),
+        "type": "array", "items": {"type": "string", "enum": ids},
     }}, "required": ["selected_ids"], "additionalProperties": False}
     prompt = _INSTRUCTION + json.dumps({"task": query, "candidates": cards}, ensure_ascii=False, sort_keys=True)
     schema_json = json.dumps(schema, ensure_ascii=False, sort_keys=True)
@@ -142,6 +153,8 @@ def _failed_material(code: str, total: int) -> PackageSelectionMaterial:
 
 
 # LLM: 调用者已完成原任务 claim；本函数只分派一次原 structured 辅助调用，后端内部重试照旧，取消不能降级继续。
+#   辅助调用抛异常时记 CAPABILITY_SELECTION_MODEL_FAILED，并把异常的结构化原因（类型、错误码、HTTP 状态、服务商
+#   code/type/param，无正文）放进结果的 failure 并记宿主日志，供回执落盘排查。
 # 函数用途: 用准备时 agent.backend 选候选，返回原引用或无正文错误；不执行读取、工具、晋升或主历史写入。
 def select_capability_packages(
     agent: object, material: PackageSelectionMaterial, *, request_id: str = "", run_id: str = "",
@@ -154,6 +167,7 @@ def select_capability_packages(
     response = None
     error_code = ""
     selected: _FrozenReferences = ()
+    failure: dict[str, object] = {}
     try:
         response = generate_auxiliary_model_response(AuxiliaryModelCallRequest(
             agent, material.prompt, response_schema=material.response_schema, request_id=request_id,
@@ -163,13 +177,15 @@ def select_capability_packages(
         selected, error_code = _selected_references(material, response)
     except (InterruptedError, CancelledError, ToolCancelled):
         raise
-    except Exception:
+    except Exception as exc:
         error_code = "CAPABILITY_SELECTION_MODEL_FAILED"
+        failure = selection_failure_facts(exc)
+        log_selection_failure(failure, request_id=request_id, run_id=run_id)
     observation = observations[-1] if observations else AuxiliaryModelCallObservation("", None)
     warnings = _usage_warnings(material, response, observation)
     return PackageSelectionResult(
         "failed" if error_code else "selected" if selected else "empty", selected, error_code, warnings,
-        observation.call_id, observation.provider_http_attempt_count,
+        observation.call_id, observation.provider_http_attempt_count, tuple(failure.items()),
     )
 
 

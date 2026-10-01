@@ -190,6 +190,8 @@ None不序列化键，旧记录及关闭路径字节保持。仅原新建任务�
 claimed绑定实际请求/run/attempt与候选指纹；旧缺键、claimed、finished、损坏标记均不得重新领取，损坏只警告不阻普通业务。
 模型身份使用准备时实际后端公开生成字段的`model_binding_digest`，不把可能已被菜单改动的thread profile冒充当前后端。
 摘要不含密钥，不作为模型采用权限或凭据版本；实际调用仍看原辅助模型账。finished只保存结果数量、摘要与warning，准确refs仍归原pins。
+outcome=failed 且是辅助调用抛异常时，标记另带 `failure`：只含异常类型、宿主错误码、HTTP 状态和服务商错误的 code/type/param 这些短标记，不含异常正文或服务商说明；其它结果不写这个键，旧记录字节不变。它只供排查，不进模型上下文（模型只看到原 warning 码）。
+选择用的 response schema 只用各家严格 JSON Schema 模式都接受的关键字（数组只写 items/enum，不写 uniqueItems、maxItems），不重复、不越界由本地严格解析保证；2026-10-01 真实 gpt-6-luna 实测带 uniqueItems/maxItems 时订阅接口以 invalid_json_schema（param text.format.schema）拒绝。
 停止或换attempt后的迟到结果不得pin/注入。bind、状态更新和原pin必须保留该字段，不把整块marker放进模型可写attrs。
 不新建表/文件/采用账；原pins仍是唯一版本权威。旧程序回写丢键后，再升级按缺键跳过，不补填或重复选择。
 配置开启且有授权候选时可沿原晋升创建任务，这有持久写入成本，即使最后空选也不撤掉原任务。

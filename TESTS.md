@@ -37,6 +37,29 @@
   1762 passed、1 skipped、4 xfailed；Ruff、doc sync、strict code-size（与 `0ca852195` 比新增 finding 0）、`git diff --check`、
   clean-package 全部通过。本轮只加测试和文档，没有改产品代码。
 
+## 一次能力包选择：严格 schema 关键字与失败原因落回执（2026-10-01，分支 `claude/ae-selection-failure-cause`，基于 main `0ca852195`）
+
+- **合同测试**：
+  - `test_package_selection_failure.py`：
+    - `selection_failure_facts` 只取短标记，丢弃正文、自由文本和越界状态码；
+    - 选择 schema 不含 uniqueItems/maxItems，本地仍拒绝重复和未知 id；
+    - 订阅模式 Responses 假事件流的出站请求体（strict json_schema）与 `response.failed` 失败事件；
+    - `failure` 只允许出现在 failed 结果、为空时不序列化、往返一致；
+    - 宿主日志带原因、不带正文。
+  - `test_capability_package_selection_runtime.py::test_model_failure_cause_is_persisted_in_receipt_but_not_given_to_the_model`。
+- **变异**：12 个全部被抓住，包括：
+  - schema 加回 uniqueItems；
+  - 不捕获原因、结果丢弃 failure、不记日志；
+  - 短标记接受空格、状态码不限范围、不拆服务商嵌套错误；
+  - 空 failure 也序列化、非 failed 结果允许 failure、未知键放行、状态码类型放宽；
+  - runtime 不传 failure。
+- **真实模型**（隔离 home、私有 8441、`env -i`、目录副本 600，用完删除）：
+  - gpt-6-luna 修复后 selected；
+  - gpt-6-luna 修复前复现 `invalid_json_schema`／`text.format.schema`；
+  - MiniMax-M2.7 修复后 selected。
+  - 证据在 `~/.my-agent/decision-evidence/d5-selection-schema/`。
+- **本轮门禁**：相关测试加仓库级扫描守卫（含 `test_packaging.py`）、`check_import_boundaries`、Ruff、doc sync、strict code-size、`git diff --check`、clean-package。
+
 ## Gateway 前台新消息清零 Goal 空片计数（D4）与 O2 裁定（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`）
 
 - **新增** `test_gateway_goal_fuse_reset.py`（真实 echo Gateway：`submit_gateway_ask` + `_process_gateway_requests`；真实后台调度器

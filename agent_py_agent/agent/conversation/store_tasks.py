@@ -635,15 +635,16 @@ class TaskStore:
         )
 
     # LLM: 只有完整expected_claim和当前执行权均相符才结束；refs仅形成结果摘要，原pins仍是版本权威。
-    # 函数用途: 保存selected/empty/failed一次终态；迟到、已结束或损坏marker均不改盘，不pin或注入正文。
+    # 函数用途: 保存selected/empty/failed一次终态（失败时连同无正文的failure原因）；迟到、已结束或损坏marker均不改盘，不pin或注入正文。
     def finish_capability_selection(
         self, *, task_id: str, thread_id: str, expected_claim: TaskCapabilitySelection,
-        outcome: str, selected_refs=(), warning_codes=(),
+        outcome: str, selected_refs=(), warning_codes=(), failure=None,
         execution_is_current: Callable[[ThreadTaskLink, TaskCapabilitySelection], bool],
     ) -> TaskCapabilitySelection | None:
         if not isinstance(expected_claim, TaskCapabilitySelection) or expected_claim.status != "claimed":
             raise ValueError("CAPABILITY_SELECTION_CLAIM_REQUIRED")
-        finished = expected_claim.finished(outcome=outcome, selected_refs=selected_refs, warning_codes=warning_codes)
+        finished = expected_claim.finished(outcome=outcome, selected_refs=selected_refs, warning_codes=warning_codes,
+                                           failure=failure)
         return _transition_capability_selection(
             self, task_id=task_id, thread_id=thread_id, expected=expected_claim, updated=finished,
             authority_claim=expected_claim, execution_is_current=execution_is_current,

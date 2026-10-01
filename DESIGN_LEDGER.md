@@ -20,6 +20,25 @@
     要不要按服务商实际能力上调窗口（会推迟压缩、单次请求更贵）交用户决定；在那之前保持现状，宁可早压缩。
 - **验证**：见 TESTS.md 同名节。
 
+## 一次能力包选择在 gpt-6-luna 上失败：严格 schema 关键字 + 失败原因可诊断（2026-10-01，分支 `claude/ae-selection-failure-cause`，基于 main `0ca852195`，已实现，待集成）
+
+- **来源**：能力包验收 D5。链式 G01 重跑时，宿主一次选择在 gpt-6-luna 上 `outcome=failed`（`CAPABILITY_SELECTION_MODEL_FAILED`、`CAPABILITY_SELECTION_USAGE_NOT_REPORTED`）。`select_capability_packages` 用宽泛的 `except Exception` 吞掉了异常，没有日志，也没有结构化原因，从现有事实里查不出根因。
+- **根因（真实 luna 实测）**：选择用的 response schema 在数组上写了 `uniqueItems` 和 `maxItems`。Responses 订阅接口按严格模式校验 `text.format` 的 json_schema，用失败事件拒绝：`invalid_json_schema`，param `text.format.schema`，type `invalid_request_error`。
+  - 同一份代码只把这两个关键字加回去，就复现失败，诊断字段正好记下上述原因；去掉后 luna 和 MiniMax 都正常选中。
+  - 订阅模式下 `instructions` 为空串并不影响：修复后的同一调用成功了。所以不改 instructions，也不改 Responses 后端。
+- **做法**：
+  - schema 只用严格模式都接受的关键字（数组只写 items/enum）；不重复、不越界继续由 `_selected_references` 在本地严格判定。
+  - 新增 `capability/package_selection_failure.py`：辅助调用抛异常时，从异常的结构化属性取出类型名、宿主错误码、HTTP 状态和服务商错误的 code/type/param。都是短标记，不合格的值丢弃，不读正文。
+  - 结果写进 `host_capability_selection.v1` 的新字段 `failure`：只在 failed 时允许，构造时校验键和值，为空时不序列化，旧记录字节不变。同时记一行宿主日志；不进模型上下文。
+  - 没有新增错误码，沿用登记表里的 `CAPABILITY_SELECTION_MODEL_FAILED` 和 provider 原有码。
+- **依赖说明**：流式失败事件里的服务商 code/param 来自 3a 的 Responses 失败事件分类（`claude/3a-responses-failed`，46a9eac86）。它合入前，这类失败只记得到 `error_type`；HTTP 4xx 拒绝不依赖它。
+- **边界**：旧版程序读到带 `failure` 的失败记录时，会把整个标记当损坏处理，按既有规则只警告、保留原值、不阻断任务。成功和空选的记录不受影响。
+- **验证**：
+  - 新增 `test_package_selection_failure.py` 共 12 项：原因提取不含正文、自由文本与越界值丢弃、schema 只用严格关键字、本地仍拒绝重复和未知 id、订阅 Responses 假传输的请求体与失败事件、回执校验与往返。
+  - `test_capability_package_selection_runtime.py` 新增一项：provider 400 的原因写进回执，但不进模型上下文。
+  - 12 个变异全部被抓住。
+  - 真实运行：luna 修复后 selected；luna 修复前复现 invalid_json_schema；MiniMax 修复后 selected。证据在 `~/.my-agent/decision-evidence/d5-selection-schema/`（仓库外）。
+
 ## 能力包 G01 生产规模真实运行后的两条待定（2026-10-01，3a 裁定；第二条已核实送达）
 
 - **G01 压缩后原资源链仍未覆盖**：ae 在 step16v 上用 gpt-6-luna 跑了一次生产规模长任务（36 份输入、约 58 万字），产物全对、

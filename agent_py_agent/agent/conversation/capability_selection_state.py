@@ -16,9 +16,11 @@ SELECTION_RESULT_MAX_BYTES = 1024 * 1024
 _CLAIM_FIELDS = ("claim_id", "request_id", "run_id", "attempt_id", "candidate_digest", "model_binding_digest")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _WARNING_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,79}\Z")
+_FAILURE_TOKEN = re.compile(r"[A-Za-z0-9_.:\-\[\]]{1,80}\Z")
 
 
 # LLM: 字段均来自宿主或已验结果；model_binding_digest只观察准备时实际模型配置，不能把可变profile菜单当实际身份。
+#   failure 只在 outcome=failed 时可非空，存辅助调用失败的结构化原因（见 package_selection_failure），不含正文。
 # selected_count/digest 只作选择回执，不能替代授权、pin 或入口提交事实。
 # 类用途: 表达 pending→claimed→finished 单向状态；构造即验证，不接受大小写别名或未知状态。
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class TaskCapabilitySelection:
     selected_count: int = 0
     selection_digest: str = ""
     warning_codes: tuple[str, ...] = ()
+    failure: dict = field(default_factory=dict)
 
     # LLM: 校验只接收严格 typed 字段，警告数量和标签长度有界；标记中不存正文或第二份 refs。
     # 函数用途: 拒绝半写状态、损坏身份与不一致的结果，使合法值可以安全进行完整 CAS 比较。
@@ -52,6 +55,9 @@ class TaskCapabilitySelection:
                 _require_identity(value)
         warnings = _warning_codes(self.warning_codes)
         object.__setattr__(self, "warning_codes", warnings)
+        object.__setattr__(self, "failure", _failure_facts(self.failure))
+        if self.failure and self.outcome != "failed":
+            raise ValueError(CAPABILITY_SELECTION_INVALID)
         if type(self.selected_count) is not int or self.selected_count < 0:
             raise ValueError(CAPABILITY_SELECTION_INVALID)
         if self.status != "finished":
@@ -73,10 +79,14 @@ class TaskCapabilitySelection:
     def pending(cls) -> TaskCapabilitySelection:
         return cls(status="pending")
 
-    # LLM: 序列化只包含固定 schema 和 bounded 标量；调用方必须经 TaskLink.to_dict 写入原任务键。
+    # LLM: 序列化只包含固定 schema 和 bounded 标量；调用方必须经 TaskLink.to_dict 写入原任务键。failure 为空时不写这个键，
+    #   成功/空选/旧版记录的字节形状保持不变（旧版本读取方遇到未知键会把整个标记当损坏）。
     # 函数用途: 返回独立 JSON 值，不能通过修改返回容器影响本标记。
     def to_dict(self) -> dict[str, object]:
-        return {"schema": self.schema, **asdict(self), "warning_codes": list(self.warning_codes)}
+        row = {"schema": self.schema, **asdict(self), "warning_codes": list(self.warning_codes)}
+        if not self.failure:
+            row.pop("failure")
+        return row
 
     # LLM: 只解析当前 schema 的精确字段；未知键/状态是损坏，不能隐式迁移成可重试 pending。
     # 函数用途: 从磁盘 JSON 恢复已验证状态，损坏隔离由外层 decode 负责。
@@ -90,14 +100,14 @@ class TaskCapabilitySelection:
 
     # LLM: 完整 claimed 身份保留，引用只用来计算结果摘要；总字节超限明确失败，不按数量或领域截断。
     # 函数用途: 把一次已领取的选择转成结果值，零 I/O，仍须 TaskStore 的执行权及同 claim CAS 才能保存。
-    def finished(self, *, outcome: str, selected_refs=(), warning_codes=()) -> TaskCapabilitySelection:
+    def finished(self, *, outcome: str, selected_refs=(), warning_codes=(), failure=None) -> TaskCapabilitySelection:
         if self.status != "claimed":
             raise ValueError(CAPABILITY_SELECTION_INVALID)
         count, digest = _selection_summary(selected_refs)
         if outcome == "failed":
             digest = ""
         return replace(self, status="finished", outcome=outcome, selected_count=count,
-                       selection_digest=digest, warning_codes=warning_codes)
+                       selection_digest=digest, warning_codes=warning_codes, failure=dict(failure or {}))
 
 
 # LLM: 此载体只保留同一个 JSON 键的原坏值，repr 不得泄露内容；没有 pending 权限、无第二份存储或自动修复。
@@ -144,6 +154,23 @@ def _warning_codes(value: object) -> tuple[str, ...]:
     if len(set(value)) != len(value):
         raise ValueError(CAPABILITY_SELECTION_INVALID)
     return tuple(value)
+
+
+# LLM: 键只能是 package_selection_failure.FAILURE_FACT_KEYS；字符串值是 ≤80 的短标记，http_status 是 100–599 的整数。
+#   不满足就整体拒绝（构造即校验），绝不把异常正文写进回执。
+# 函数用途: 校验并复制选择失败的结构化原因。
+def _failure_facts(value: object) -> dict:
+    from ..capability.package_selection_failure import FAILURE_FACT_KEYS
+
+    if not isinstance(value, dict) or set(value) - set(FAILURE_FACT_KEYS):
+        raise ValueError(CAPABILITY_SELECTION_INVALID)
+    for key, item in value.items():
+        if key == "http_status":
+            if type(item) is not int or not 100 <= item <= 599:
+                raise ValueError(CAPABILITY_SELECTION_INVALID)
+        elif not isinstance(item, str) or not _FAILURE_TOKEN.fullmatch(item):
+            raise ValueError(CAPABILITY_SELECTION_INVALID)
+    return dict(value)
 
 
 # LLM: 复用原 canonical 包引用校验；本函数不查安装、不授予权限、不写 pins。只按总序列化字节防止失控输入，数量开放。

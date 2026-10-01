@@ -90,7 +90,7 @@ def _prepare_pending_selection(agent, params, scope, link) -> None:
 
 
 # LLM: 入口通过原 policy 和 shared reader；finished 是选择回执而不是采用/质量保证。CAS 成功后才写 RuntimeFacts，后续正常 capture 含同一正文。
-# 函数用途: 在同一活动回合内完成入口读取与一次性收口，把必要告警和已读资料交给主模型。
+# 函数用途: 在同一活动回合内完成入口读取与一次性收口，把必要告警和已读资料交给主模型；失败原因只写回执，不给模型。
 def _commit_selection(agent, params, scope, authority, claim, result, window: int) -> None:
     warnings = list(result.warning_codes)
     context = None
@@ -110,7 +110,7 @@ def _commit_selection(agent, params, scope, authority, claim, result, window: in
     finished = agent.conversation_store.tasks.finish_capability_selection(
         task_id=authority.task_id, thread_id=authority.thread_id, expected_claim=claim,
         outcome=result.outcome, selected_refs=result.selected_refs, warning_codes=tuple(dict.fromkeys(warnings)),
-        execution_is_current=authority.is_current,
+        failure=result.failure_facts, execution_is_current=authority.is_current,
     )
     if finished is None:
         return

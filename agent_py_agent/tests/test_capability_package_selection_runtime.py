@@ -676,3 +676,23 @@ def test_optional_selection_failure_or_empty_still_reaches_original_primary_requ
     assert "my_agent_structured_output" not in payload and "# story-a" not in payload
     assert not fixture.reads and not _task(fixture).skill_snapshot_refs and not _facts(fixture)
     assert _task(fixture).capability_selection.outcome == ("empty" if outcome == "empty" else "failed")
+
+
+def test_model_failure_cause_is_persisted_in_receipt_but_not_given_to_the_model(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError
+
+    fixture = _runtime(tmp_path, monkeypatch)
+    fixture.agent.backend.failure = ProviderRequestRejectedError(
+        "HTTP 400: secret-provider-message", status_code=400,
+        details={"status_code": 400, "provider_error": {"error": {
+            "code": "invalid_json_schema", "param": "text.format.schema", "message": "secret-provider-message"}}})
+    prepare_capability_package_selection(fixture.agent, fixture.params)
+    selection = _task(fixture).capability_selection
+    assert selection.outcome == "failed"
+    assert selection.failure == {"error_type": "ProviderRequestRejectedError", "error_code": "PROVIDER_REQUEST_REJECTED",
+                                 "http_status": 400, "provider_error_code": "invalid_json_schema",
+                                 "provider_error_param": "text.format.schema"}
+    serialized = json.dumps(_task(fixture).to_dict(), ensure_ascii=False) + str(fixture.params.tool_ir_history)
+    assert "secret-provider-message" not in serialized
+    model_facts = str(_facts(fixture, "capability_package_selection_warning"))
+    assert "CAPABILITY_SELECTION_MODEL_FAILED" in model_facts and "invalid_json_schema" not in model_facts

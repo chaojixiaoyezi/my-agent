@@ -17,6 +17,7 @@
 |-- agent_py_agent/agent/capability/package_resources.py # 原写文件工具的私有资源引用解析
 |-- agent_py_agent/agent/capability/package_read.py # 原工具与宿主共用的准确正文分页和任务pin
 |-- agent_py_agent/agent/capability/package_selection.py # 有界包名卡及一次结构化选择
+|-- agent_py_agent/agent/capability/package_selection_failure.py # 选择失败的无正文结构化原因（回执 failure 与宿主日志）
 |-- agent_py_agent/agent/capability/package_selection_scope.py # 新主任务的元数据资格与pending初始化
 |-- agent_py_agent/agent/capability/package_selection_authority.py # 原只读准入与精确执行权复核
 |-- agent_py_agent/agent/capability/package_selection_context.py # 已读入口的总预算和准确续页
@@ -29,6 +30,7 @@
 |-- agent_py_agent/tests/test_capability_config_single_default_source.py # 各调用点缺文件/坏文件都取 dataclass 默认、文件值生效
 |-- agent_py_agent/tests/test_session_task_real_chain.py # 会话互通真实链路门禁：真实 Gateway ask + 后台调度器 + 只替换供应商传输；含 list_owner_sessions 列会话后按清单派活/发消息
 |-- agent_py_agent/tests/test_capability_package_selection.py # 结构化选择、原调用账与响应隔离
+|-- agent_py_agent/tests/test_package_selection_failure.py # 选择失败原因落回执且不含正文、选择 schema 只用严格模式关键字
 |-- agent_py_agent/tests/test_capability_package_read.py # 原页回执保持及读取和pin取消边界
 |-- agent_py_agent/tests/test_capability_selection_authority.py # 原执行权和只读准入组合验证
 |-- agent_py_agent/tests/test_capability_package_entry_context.py # 多入口总预算、分页和失败隔离
@@ -712,6 +714,7 @@ agent_py_agent/
 |   |-- capability/                    # 单一 SkillsService、逐轮 snapshot、能力路由与 capability tools
 |   |   |-- package_read.py            # 原工具与宿主共用正文分页、页验收和任务pin
 |   |   |-- package_selection.py       # 有界元数据与原后端的一次结构化选择
+|   |   |-- package_selection_failure.py # 选择辅助调用失败时的结构化原因，不含正文
 |   |   |-- package_selection_scope.py # 新主任务选择资格和typed pending初值
 |   |   |-- package_selection_authority.py # 原策略门和精确执行轮复查
 |   |   |-- package_selection_context.py # 入口总预算、来源与续页装配
