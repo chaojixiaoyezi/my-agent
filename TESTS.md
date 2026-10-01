@@ -26,6 +26,9 @@
 - **对应问题**：G01 真机里前台以 `USER_REPLY_UNAVAILABLE` 失败后，父级后台续跑收尾，当时没记录这条后台回复是否送到用户。
 - **真实链路复现**（仓库外证据 `~/.my-agent/decision-evidence/bg-reply-after-fg-failure-20261001/`）：step16w 运行时、隔离网关、脚本化假模型；
   前台只有思考后失败，子代理结束后父级后台片的回复以 `root_subagents_terminal` 落到 canonical 记录、出现在 TUI 后台消息页，运行中的 TUI 也显示了。
+- **真实模型复核**（MiniMax-M2.7，step16w，隔离环境；证据 `.../bg-reply-after-fg-failure-20261001/real-model-minimax/`）：模型派出子代理后前台约
+  12 秒 done、子代理仍在跑；子代理完成后父级后台回复以 `root_subagents_terminal` 落 canonical、TUI 后台消息页 1 条 `assistant_response`。
+  前台失败形状真实模型没走到（由假模型复现与本测试覆盖）；第一次措辞模型没调工具，记为未命中。
 - **新增** `test_background_reply_after_foreground_failure.py`：真实 echo Gateway 提交请求、后端只回思考 → 请求 `USER_REPLY_UNAVAILABLE` 且没有
   前台助手 final；随后登记 active 任务关联与 DONE 子代理、发出结束 wake，真实后台调度器（`agent.delivery_service`）在合批窗口后收尾：
   投递原因 `root_subagents_terminal`，canonical final 带投递原因，`read_background_response_page` 返回这条 `assistant_response`，wake 不再待处理。

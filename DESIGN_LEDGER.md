@@ -39,6 +39,10 @@
   - 飞书等外发通道走同一条路线解析，外发义务由 `background_owner_delivery_committed` 把关（未送达不确认、冻结重投）；这次没有在真实飞书上复现。
   - 不需要另加“完成通知”。`test_background_reply_after_foreground_failure.py` 钉住这条链（真实 echo Gateway、真实工具循环、真实后台调度器与
     `agent.delivery_service`），变异 5/5。证据：`~/.my-agent/decision-evidence/bg-reply-after-fg-failure-20261001/`（仓库外）。
+  - 真实模型复核（MiniMax-M2.7，step16w 运行时，隔离环境，用户要求尽量用真实模型）：自然需求下模型派出子代理后前台约 12 秒以 done 结束、
+    子代理仍在跑；子代理写完 3 个文件后父级后台片收尾，投递 `root_subagents_terminal`、本地通道 `not_applicable`、落 canonical，线程多一条
+    带投递原因的助手 final，TUI 后台消息页返回 1 条 `assistant_response`。前台“失败”形状这次真实模型没走到，由假模型复现与上面的测试覆盖；
+    第一次措辞（“派出去后直接告诉我已经派了”）模型没调任何工具，记为模型未命中。证据在同目录 `real-model-minimax/`。
 
 ## Gateway 前台新消息清零 Goal 空片计数（D4）与“熔断后又起一片”裁定（O2）（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`，D4 已实现，step16w 已上线并经真实模型复核）
 
