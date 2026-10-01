@@ -421,6 +421,30 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
   - failure_type 为 `runner_error`，不是 `executor_effects_unknown`；
   - 其 write_file 操作停在 EXECUTING，agent_run 停在 unknown，按静止规则所在 TaskRun 一直不关闭；
   - 而该线程的 `/recover` 显示“没有等待核对的执行”。
+  - **已修并复测（2026-10-01，step16v `b7058e33a`）**：见下方“O1 修复后的真实模型复测”。
+
+### O1 修复后的真实模型复测（2026-10-01，step16v `b7058e33a`，已上线运行时只读使用）
+
+- **环境**：隔离 home，网关 127.0.0.1:8457（8441 被另一个验收 harness 占用，未触碰），模型 MiniMax-M2.7（MiniMax 官方，过滤后的
+  目录副本权限 600，用后已删除），生产 8420 未触碰。杀点同 G03：子代理 `write_file` 的 handler 返回后、结果落账前暂停，
+  测试者只 SIGKILL 这个子代理的 runner（父进程核对为测试网关）。判定只用结构化事实。
+
+| 检查 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| `/recover` 列出被杀子代理 | 通过 | 场景 A、B、C、E 的回执列出子代理编号、角色 worker、接替情况和 `write_file｜执行中断，结果未回传` |
+| `/recover recorded` 恢复子代理 | 通过 | A、B、C：attempt unknown→recovered，agent_run unknown→created；`attempt_recovered` 事件 operator `conversation-control:/recover`、effect_disposition recorded、recovery_target `child_agent_run`，带 thread_id 与 task_run_id |
+| TaskRun 关闭 | 通过 | A、B、C：`task_run.closed`，operator conversation-runtime，reason conversation_task_completed；C 里另派的子代理 done，与恢复后的来源一起满足树规则 |
+| 处置后再查 | 通过 | A 处置后再输 `/recover`：“当前会话没有等待核对的执行，无需恢复” |
+| 两条同时待核对 | 通过 | D、E 两条：查看列出两条；`/recover recorded` 被拒（“同时有 2 个子代理待核对…”），`attempt_recovered` 计数 3→3，attempt 状态不变 |
+| 已被接替的来源收成 cancelled | 未覆盖 | 4 次唤醒里模型都没有在 `create_subagents` 里传 `replacement_for_run_ids`：A、B 父级读了已写好的文件就收尾；C、D 另派了新子代理但没声明接替，D 的需求里明确要求“标明接替的是哪一个”。来源 canonical 保持 BLOCKED、没有 takeover_by，所以 `/recover` 如实显示“没有被接替”。工具 schema 仍提供该参数，这一分支目前只有合同单测覆盖 |
+
+- **观察（不是宿主缺陷）**：同类自然需求，在 `bf4f740c3` 的 G03 里模型带了 `replacement_for_run_ids`，这次 4 次都没带。
+  被杀子代理的 runner_result 是 BLOCKED、blocked_reason 为空，没有给父级结构化的接替提示；要不要在唤醒回执里给出结构化接替建议，
+  留给 3a 判断。
+- **写操作行**仍停在 EXECUTING，与主链 `/recover` 口径一致，处置只记在恢复事件上。
+- **证据**：`~/.my-agent/decision-evidence/o1-real-step16v-20261001/`（仓库外）：`SUMMARY.json`、各步 facts、`/recover` 回执的
+  固定前缀行、hook 事件、脚本和 `sha256sums.txt`；不含模型目录和会话正文。
+- **收尾**：只停了自己记录的 PID，TUI 用 `/exit`，8457 无监听；隔离根连同目录副本已删除。
 
 ### 测试者偏差（如实记录）
 - 早期查看 TUI 画面时范围过宽，看到过模型回复文字；之后只看审批和状态行。判定从未使用画面内容。
