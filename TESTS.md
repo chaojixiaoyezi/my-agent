@@ -10,6 +10,13 @@
   - SSE 后端遇到 `server_error` 抛 `ProviderTransientError`。
 - **红绿与变异**：改前已知错误码一律是同一个 `ProviderResponseError`；9 个变异全部被抓住（退回一律报失败、去掉上下文超限／额度／
   限流／临时故障任一分支、response.failed 读错位置、不限长、忽略 error 事件顶层字段、认不出的码丢掉错误码）。
+- **真实模型核对**（gpt-6-luna，ChatGPT 订阅 WebSocket，隔离 MY_AGENT_HOME，目录副本只含 luna、refresh_token 清空、600，跑完整根删除；
+  被测 `46a9eac86`）：
+  - 短请求正常完成（输入 12 token），修复不影响正常回复；
+  - 故意用不存在的模型名：服务商回 `error` 事件，错误对象只有 `type=invalid_request_error`（没有 code），宿主分到 `MODEL_RESPONSE_FAILED`，
+    回执带出 `invalid_request_error`，诊断里保留服务商消息（94 字）；修复前只会说“返回失败事件”；
+  - 约 55.9 万 token 的超长输入被服务商正常接受（input_tokens 559021），档案窗口 272000 偏保守，没能触发真实的上下文超限，
+    “上下文超限→压缩恢复”这一支只有假连接测试覆盖。
 
 ## Gateway 前台新消息清零 Goal 空片计数（D4）与 O2 裁定（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`）
 
