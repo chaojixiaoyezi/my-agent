@@ -81,3 +81,33 @@ def test_sse_backend_raises_transient_for_server_errors(monkeypatch):
     monkeypatch.setattr(backend, "request_stream_iter", stream)
     with pytest.raises(ProviderTransientError):
         backend.generate("你好")
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        # 结构化码优先：限流消息里提到 token limit 或额度词，也按限流处理
+        (failed("rate_limit_exceeded", "You hit the token limit for this minute."), ProviderUsageLimitError),
+        (failed("rate_limit_exceeded", "not insufficient_quota, just slow down"), ProviderUsageLimitError),
+        # 没有可识别的码时，才用与 HTTP 同一组全文判定兜底
+        ({"type": "error", "error": {"type": "invalid_request_error",
+                                     "message": "This model's maximum context length is 272000 tokens."}},
+         ProviderContextWindowError),
+        (failed("Context_Length_Exceeded"), ProviderContextWindowError),
+        (failed("Rate_Limit_Exceeded"), ProviderUsageLimitError),  # 码不分大小写
+        # 额度码优先：消息里提到 token limit 也按额度用完，不当成上下文超限
+        (failed("insufficient_quota", "monthly token limit reached"), ProviderQuotaExhaustedError),
+        # 错误写成字符串：error 事件并上顶层 code
+        ({"type": "error", "code": "server_error", "error": "upstream exploded"}, ProviderTransientError),
+    ],
+)
+def test_structured_codes_win_over_message_text(event, expected):
+    assert type(failed_event_error(event)) is expected
+
+
+def test_string_errors_keep_the_reason_and_unknown_codes_are_not_retried():
+    error = failed_event_error({"type": "response.failed", "response": {"status": "failed", "error": "upstream exploded"}})
+    assert type(error) is ProviderResponseError and error.error_code == FAILED_EVENT_ERROR_CODE
+    assert error.details["provider_error"] == {"message": "upstream exploded"}
+    contract = error_contract(FAILED_EVENT_ERROR_CODE)
+    assert contract.retryable is False  # 与运行时一致：认不出的码不自动重试

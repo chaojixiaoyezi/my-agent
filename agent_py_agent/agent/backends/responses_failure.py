@@ -17,12 +17,14 @@ from .errors import (
     ProviderUsageLimitError,
 )
 from .gateway_helpers import (
+    _HARD_QUOTA_ERROR_CODES,
     _provider_error_indicates_context_window,
     _provider_error_indicates_quota_exhausted,
 )
 
 FAILED_EVENT_ERROR_CODE = "MODEL_RESPONSE_FAILED"
-# 已知的限流与服务端临时错误码（OpenAI/ChatGPT Responses 公开写法）；不在表里的码照样保留原文，只是不自动重试。
+# 已知的限流与服务端临时错误码（OpenAI/ChatGPT Responses 公开写法）；结构化码优先于消息全文判定，
+# 不在表里的码照样保留原文，只是不自动重试。上下文超限码（context_length_exceeded）由全文判定直接识别。
 _RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "rate_limit_error", "too_many_requests"})
 _TRANSIENT_CODES = frozenset({
     "server_error", "internal_error", "internal_server_error", "server_is_overloaded", "overloaded",
@@ -33,23 +35,25 @@ _KEPT_FIELDS = {"code": 64, "type": 64, "param": 128, "message": 500}
 
 
 # LLM: response.failed 的错误在 response.error；error 事件的错误在 error 对象或顶层 code/message/param（顶层 type 恒为 "error"，
-#   不当作错误码）。字段只留白名单并限长，缺失时返回空字典。纯函数。
+#   不当作错误码）。错误写成字符串时当作 message 保留（error 事件再并上顶层 code/param）。字段只留白名单并限长，缺失时返回空字典。纯函数。
 # 函数用途: 从失败事件里取出服务商给的错误对象。
 def failed_event_provider_error(event: dict) -> dict[str, str]:
+    top = {key: event.get(key) for key in ("code", "message", "param")}
     if event.get("type") == "response.failed":
         response = event.get("response") if isinstance(event.get("response"), dict) else {}
-        raw = response.get("error")
-    elif isinstance(event.get("error"), dict):
-        raw = event["error"]
+        raw, top = response.get("error"), {}
     else:
-        raw = {key: event.get(key) for key in ("code", "message", "param")}
+        raw = event.get("error") or top
+    if isinstance(raw, str):
+        raw = {**top, "message": raw}
     if not isinstance(raw, dict):
         return {}
     return {key: str(raw[key])[:limit] for key, limit in _KEPT_FIELDS.items() if raw.get(key) not in (None, "")}
 
 
-# LLM: 先判上下文超限与硬额度（与 HTTP 同一判定函数），再按错误码判限流和临时错误，其余保留原码；返回异常而不抛出，
-#   由调用方 raise。用户可见文字只带错误码，服务商原始消息只进 details 供诊断。
+# LLM: 结构化错误码优先（_error_for_code），认不出码时才用与 HTTP 同一组全文判定兜底上下文超限与硬额度，其余保留原码；
+#   这样“限流消息里提到 token limit”不会被当成上下文超限。返回异常而不抛出，由调用方 raise。用户可见文字只带错误码，
+#   服务商原始消息只进 details 供诊断。
 # 函数用途: 把一个 error / response.failed 事件换成对应的结构化供应商异常。
 def failed_event_error(event: dict) -> Exception:
     provider_error = failed_event_provider_error(event)
@@ -57,15 +61,26 @@ def failed_event_error(event: dict) -> Exception:
     detail = json.dumps(provider_error, ensure_ascii=False, sort_keys=True)
     message = f"Responses 服务返回失败事件（错误码 {code}）。" if code else "Responses 服务返回失败事件（服务商没有给出错误码）。"
     details = {"event_type": str(event.get("type") or ""), "provider_error": provider_error}
+    by_code = _error_for_code(code, message, details)
+    if by_code is not None:
+        return by_code
     if provider_error and _provider_error_indicates_context_window(detail):
         return ProviderContextWindowError(message, details=details)
     if provider_error and _provider_error_indicates_quota_exhausted(detail):
+        return ProviderQuotaExhaustedError(message, details=details)
+    return ProviderResponseError(message, error_code=FAILED_EVENT_ERROR_CODE, details=details)
+
+
+# LLM: 只按已知的结构化错误码（已小写）选恢复路线；认不出返回 None，交调用方做全文兜底。纯函数。
+# 函数用途: 已知错误码直接对应额度用完、限流或临时故障（上下文超限码由全文判定识别）。
+def _error_for_code(code: str, message: str, details: dict) -> Exception | None:
+    if code in _HARD_QUOTA_ERROR_CODES:
         return ProviderQuotaExhaustedError(message, details=details)
     if code in _RATE_LIMIT_CODES:
         return ProviderUsageLimitError(message)
     if code in _TRANSIENT_CODES:
         return ProviderTransientError(message)
-    return ProviderResponseError(message, error_code=FAILED_EVENT_ERROR_CODE, details=details)
+    return None
 
 
 __all__ = ["FAILED_EVENT_ERROR_CODE", "failed_event_error", "failed_event_provider_error"]

@@ -3021,9 +3021,9 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
     "MODEL_RESPONSE_FAILED": ErrorContract(
         code="MODEL_RESPONSE_FAILED",
         category="model",
-        retryable=True,
-        recommended_action=RecoveryAction.RETRY.value,
-        recovery_hint="服务商在 Responses 流里明确返回了失败事件，错误码不属于上下文超限、额度、限流或临时故障；可重试一次，持续出现请看运行诊断里的服务商错误码（provider_error.code）。",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="服务商在 Responses 流里明确返回了失败事件，错误码不属于上下文超限、额度、限流或临时故障；宿主不自动重试，请按运行诊断里的服务商错误码（provider_error.code／type）修正请求或换模型。",
     ),
     # —— 产物 ——
     "ARTIFACT_TOO_LARGE": ErrorContract(
