@@ -491,6 +491,7 @@ agent_py_agent/
 |   |   |-- message_selection.py        # 固定EOF两遍来源校验与逐行范围/覆盖筛选，无第二消息存储
 |   |   |-- message_replay.py           # 固定原文件身份及行地址/hash的只读消息重放，切片不驻留正文
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
+|   |   |-- task_run_closeout.py        # TaskRun 收口唯一判定：根已终态＋会话任务关联终态或确实不存在＋整棵树终态/静止
 |   |   |-- capability_selection_state.py # 原任务内的一次选包标记校验，不另建账
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
@@ -1394,6 +1395,7 @@ docs/
 - `agent_py_agent/agent/runtime_db/host_command_execution.py`：只领取原 pending，强制原操作 Store，终态沿原运行收口；查询不初始化数据库，UNKNOWN 不重跑。
 - `agent_py_agent/agent/runtime_db/host_command_approval.py`：只在原执行区间等待精确批准，回到原 ToolExecutor 重新核验；拒绝、取消或无消费者都不启动 handler。
 - `docs/design/HOST_COMMAND_EXECUTION.md`：显式宿主请求的登记、终态只读重放、UNKNOWN 和现有执行器接线边界。
+- `agent_py_agent/agent/conversation/task_run_closeout.py`：TaskRun 收口的唯一判定（D3 规则）。执行收口边经 `runtime_mixin` 委托调用，网关 `/recover` 子代理分支直接调用；只经 `settle_task_run_if_agent_tree_terminal` 写，缺存储、空身份、关联读坏或未终态都保持打开。
 - `agent_py_agent/agent/conversation/task_resources.py`：主链身份适配与整任务固定清单；热请求带正式绑定，无热请求才读取唯一主链，组合原子树后锁外清理，不重新选择资源。
 - `agent_py_agent/agent/subagents/cancellation.py`：原创建事务内选择后代、关闭原权限并冻结资源；模型和用户控制共用，业务终态与资源退出分别保留。
 - `agent_py_agent/agent/subagents/cancellation_hosts.py`：精确 attempt 中断及冻结宿主身份的只读观察；PID/launch 不构成整棵进程树的取消许可。

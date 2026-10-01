@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import conversation_transcript_is_authoritative
-from ..conversation.task_state import conversation_task_link_is_terminal
+from ..conversation.task_run_closeout import settle_terminal_task_run
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
@@ -543,73 +543,19 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
     _settle_terminal_conversation_task_run(agent, params)
 
 
-# LLM: A TaskRun spans every foreground/background slice and descendant of one
-# conversation task. The durable link—not a turn-local flag or model prose—authorizes
-# closeout, while RuntimeDB proves the exact agent tree terminal. This function runs on
-# root and child terminal edges so either side of their race can complete the same CAS.
-# A TaskRun whose task id has no link file at all (Gateway requests that never promoted a
-# conversation task: plain answers, read-only tools) is governed only by its own agent tree,
-# so the same tree-terminal CAS closes it (operator agent-runtime, reason no_conversation_task).
-# Only a real absence counts: missing store, empty task id, an unreadable link (DataCorruptionError)
-# or a non-terminal link keep it open. Unknown attempts still block via the repository's tree rule
-# (killed children stay open — separate O1 item). A later create_attempt reopens a closed TaskRun.
+# LLM: A TaskRun spans every foreground/background slice and descendant of one conversation task. This runs on root and
+# child terminal edges so either side of their race can complete the same CAS. The decision itself (root terminal, link
+# terminal or truly absent, tree terminal/quiescent) lives in conversation/task_run_closeout.settle_terminal_task_run, which
+# the gateway /recover child branch also calls (gateway_parts may not import agent_core); keep both callers on that function.
 # 函数用途: 在任一代理执行收口后核对持久会话任务状态，并幂等关闭整棵任务执行总账；没有会话任务的请求在代理树结束后同样关闭。
 def _settle_terminal_conversation_task_run(agent: object, params: object) -> None:
-    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
-    store = getattr(agent, "conversation_store", None)
-    if repo is None or store is None:
-        return
-    run_id = str(getattr(params, "run_id", "") or "").strip()
-    task_id = str(getattr(params, "task_id", "") or "").strip()
-    try:
-        row = repo.agent_run_for_run_id(run_id) if run_id else None
-        if row is None and task_id:
-            row = repo.main_agent_run_for_task(task_id)
-        if row is None or str(row["status"] or "") not in AGENT_RUN_TERMINAL_STATUSES:
-            return
-        task_run_id = str(row["task_run_id"] or "").strip()
-        task_run = repo.get_task_run(task_run_id)
-        if task_run is None:
-            return
-        canonical_task_id = str(task_run["task_id"] or "").strip()
-        if not canonical_task_id:
-            return
-        closeout = _task_run_closeout_reason(store.tasks.load(canonical_task_id))
-        if closeout is None:
-            return
-        operator, reason = closeout
-        repo.settle_task_run_if_agent_tree_terminal(
-            task_run_id=task_run_id,
-            task_id=canonical_task_id,
-            operator=operator,
-            reason=reason,
-        )
-    except Exception:  # noqa: BLE001 审计投影失败不反噬已完成的用户任务
-        return
+    settle_terminal_task_run(
+        getattr(getattr(agent, "subagents", None), "runtime_db", None),
+        getattr(agent, "conversation_store", None),
+        run_id=str(getattr(params, "run_id", "") or ""),
+        task_id=str(getattr(params, "task_id", "") or ""),
+    )
 
-
-# LLM: Pure decision for _settle_terminal_conversation_task_run. `link` is the result of
-# ConversationStore.tasks.load: None means the link file is truly absent (D3: the request never
-# promoted a conversation task, so its own agent tree governs closeout); a loaded link must be
-# terminal per conversation_task_link_is_terminal. Returns (operator, reason) for the tree CAS or
-# None to keep the TaskRun open. Callers must never pass None for an unreadable link — load raises
-# DataCorruptionError there and the caller's except keeps the TaskRun open.
-# 函数用途: 根据会话任务关联文件决定能否关闭任务执行总账，并给出关闭人和原因；返回 None 表示继续保持打开。
-def _task_run_closeout_reason(link: object) -> tuple[str, str] | None:
-    if link is None:
-        # 没有会话任务关联文件：这条执行总账只归本次请求的代理树管，树结束即可关（D3）。
-        return "agent-runtime", "no_conversation_task"
-    link_status = str(getattr(link, "status", "") or "").strip().lower()
-    if not conversation_task_link_is_terminal(link_status):
-        return None
-    return "conversation-runtime", f"conversation_task_{link_status}"
-
-# LLM: 给不经过代理执行收口边的显式入口（如 /recover 处置子代理之后）复用同一条 TaskRun 收口：按 task_id 找根主代理，
-#   其余判定（根已终态、会话任务关联终态或确实不存在、整棵树终态或静止）与 _settle_terminal_conversation_task_run 完全相同，
-#   条件不满足时什么也不写。调用方见 gateway_parts/turn_recovery_control.py；改口径同步 test_turn_recovery_child_unknown.py。
-# 函数用途: 按任务身份尝试关闭任务执行总账；有写入时产生 task_run.closed 事件。
-def settle_terminal_task_run_for_task(agent: object, task_id: str) -> None:
-    _settle_terminal_conversation_task_run(agent, SimpleNamespace(run_id="", task_id=str(task_id or "")))
 
 def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseException) -> None:
     """异常路径收口：InterruptedError → 'cancelled'，其余 → 'failed'。"""

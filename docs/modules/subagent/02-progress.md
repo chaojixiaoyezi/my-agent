@@ -293,3 +293,10 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 - **起因**：G03 验收第二条观察，BLOCKED 后被接替的子代理 runtime.db agent_run 永远停在 created。
 - **改动**：新增 `runtime_db/run_takeover.py`，`services/base.record_takeover` 接替落账后调用；只改运行账，不动 `takeover/record.py`。
 - 测试与变异见 TESTS.md 同名节。
+
+## 子代理管理器回答“是否已被接替”（2026-09-30，分支 `claude/38-recover-child-import-boundary`，基于 step16v `d9abcb5ec`）
+
+- **起因**：O1 的 `/recover` 子代理分支需要知道被中断的子代理有没有被接替，但网关按分层边界不能导入 `subagents`。
+- **改动**：`SubAgentManager.taken_over_successor(run_id)` 一行委托到模块级 `_taken_over_successor`：只认 status=TAKEN_OVER 且
+  `task_replacement_successor` 判为 taken_over；记录缺失或读坏返回 None，只记 superseded_by 的不算接管。只读，不改记录。
+- 测试与变异见 TESTS.md“/recover 子代理分支的分层边界修正”节。

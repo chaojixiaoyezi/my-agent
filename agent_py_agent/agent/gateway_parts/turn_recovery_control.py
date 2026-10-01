@@ -6,16 +6,19 @@
 #      之后子代理记录显示已被接替（TAKEN_OVER）才用 settle_taken_over_run 收成 cancelled，再按任务尝试 TaskRun 收口。
 #   不改会话历史、不重放旧操作、不按提示词或最近任务猜目标、不做任何自动处置。改动时同步 test_turn_recovery_control.py
 #   与 test_turn_recovery_child_unknown.py。
+#   分层边界（scripts/check_import_boundaries.py）不允许本层导入 agent_core 与 subagents：接替判定只经
+#   owner_agent.subagents.taken_over_successor，TaskRun 收口调用会话层 conversation/task_run_closeout.settle_terminal_task_run
+#   （与执行收口边同一个函数）。
 # 模块用途: 实现会话控制 /recover，查看阻塞本会话的未知执行轮（含本会话子代理留下的），并在用户显式确认处置后解除阻塞。
 from __future__ import annotations
 
 import time
 
-from ..agent_core.runtime_mixin import settle_terminal_task_run_for_task
 from ..conversation.control_commands import (
     ConversationControlCommand,
     ConversationControlResult,
 )
+from ..conversation.task_run_closeout import settle_terminal_task_run
 from ..runtime_db.child_recovery import (
     ChildRecoveryTarget,
     recover_child_attempt_unknown,
@@ -23,11 +26,6 @@ from ..runtime_db.child_recovery import (
 )
 from ..runtime_db.operations import ATTEMPT_EFFECT_DISPOSITIONS, ATTEMPT_STATUS_UNKNOWN
 from ..runtime_db.run_takeover import settle_taken_over_run_best_effort
-from ..subagents.models import (
-    TAKEOVER_DISPOSITION_TAKEN_OVER,
-    TaskStatus,
-    task_replacement_successor,
-)
 
 _OPERATOR = "conversation-control:/recover"
 _NO_BLOCK = "当前会话没有等待核对的执行，无需恢复。"
@@ -126,9 +124,9 @@ def _execute_child_recovery(
     return _recover_single_child(owner_agent, repo, children[0], command.value)
 
 
-# LLM: 顺序固定：先 CAS 恢复（事务内复核线程范围），成功后才读子代理记录决定是否做接替收口，最后按任务尝试 TaskRun 收口。
-#   接替收口与 TaskRun 收口都是尽力而为，失败不影响已落账的恢复。副作用：写 attempt_recovered，可能写 agent_run.completed
-#   与 task_run.closed。
+# LLM: 顺序固定：先 CAS 恢复（事务内复核线程范围），成功后才经 owner_agent.subagents.taken_over_successor 决定是否做接替收口，
+#   最后用会话层 settle_terminal_task_run 按任务尝试 TaskRun 收口（按根主代理判定）。接替收口与 TaskRun 收口都是尽力而为，
+#   失败不影响已落账的恢复。副作用：写 attempt_recovered，可能写 agent_run.completed 与 task_run.closed。
 # 函数用途: 恢复唯一一条子代理未知执行轮，并把已被接替的来源和整棵任务执行总账顺带收口。
 def _recover_single_child(
     owner_agent: object,
@@ -139,11 +137,11 @@ def _recover_single_child(
     result = recover_child_attempt_unknown(repo, target, disposition, _OPERATOR)
     if not result.get("recovered"):
         return _refused(result)
-    successor = _taken_over_successor(_load_subagent(owner_agent, target.run_id))
+    successor = owner_agent.subagents.taken_over_successor(target.run_id) or ""
     settled: dict[str, object] = {}
     if successor:
         settled = settle_taken_over_run_best_effort(repo, target.run_id, takeover_by=successor)
-    settle_terminal_task_run_for_task(owner_agent, target.task_id)
+    settle_terminal_task_run(repo, getattr(owner_agent, "conversation_store", None), task_id=target.task_id)
     lines = [f"已按「{_DISPOSITION_LABELS.get(disposition, disposition)}」解除子代理 {target.run_id} 的阻塞。"]
     if successor:
         tail = "，运行记录已收口为取消。" if settled.get("settled") else "。"
@@ -164,29 +162,6 @@ def _refused(result: dict[str, object]) -> ConversationControlResult:
         "没有恢复：" + _REFUSAL_LABELS.get(reason, f"{reason or '未知原因'}，请查看运行诊断。"),
         error_code="RUN_RECOVERY_REJECTED",
     )
-
-
-# LLM: 子代理记录是“是否已被接替”的唯一来源（status 与 takeover_by）；记录缺失或读坏返回 None，调用方按“接替情况未知”处理，
-#   不能据此猜测接替关系。只读，不改记录。
-# 函数用途: 读取某个子代理的持久记录；读不到时返回 None。
-def _load_subagent(owner_agent: object, run_id: str) -> object | None:
-    load = getattr(getattr(owner_agent, "subagents", None), "load", None)
-    if not callable(load) or not run_id:
-        return None
-    try:
-        return load(run_id)
-    except Exception:  # noqa: BLE001 记录缺失或读坏只影响接替展示与收口，恢复本身以运行库为准
-        return None
-
-
-# LLM: 只有 status=TAKEN_OVER 且 takeover_by 有值才算“已被接替”（与 services/base.record_takeover 的收口条件同口径）；
-#   已关闭来源只记 superseded_by 的情况不在这里收口。纯函数。
-# 函数用途: 返回接替这个子代理的 run_id；没有被接替或记录读不到时返回空串。
-def _taken_over_successor(task: object | None) -> str:
-    if task is None or str(getattr(task, "status", "") or "").upper() != TaskStatus.TAKEN_OVER.value:
-        return ""
-    successor, disposition = task_replacement_successor(task)
-    return successor if disposition == TAKEOVER_DISPOSITION_TAKEN_OVER else ""
 
 
 # LLM: 只渲染结构化字段（工具名、状态、开始时间），不读工具参数或结果正文，避免把命令原文和路径投到 IM。
@@ -228,15 +203,15 @@ def _render_ambiguous(children: list[ChildRecoveryTarget]) -> str:
     return "\n".join(lines)
 
 
-# LLM: 每个子代理一行身份加接替情况，下面缩进列未确认操作；只读运行库与子代理记录。
+# LLM: 每个子代理一行身份加接替情况，下面缩进列未确认操作；只读运行库与子代理记录（经 owner_agent.subagents）。
+#   taken_over_successor 返回 None 表示记录读不到，空串表示没被接替。
 # 函数用途: 生成单个子代理在查看结果里的几行说明。
 def _child_lines(owner_agent: object, repo: object, target: ChildRecoveryTarget) -> list[str]:
-    task = _load_subagent(owner_agent, target.run_id)
-    successor = _taken_over_successor(task)
+    successor = owner_agent.subagents.taken_over_successor(target.run_id)
     if successor:
         takeover = f"已由 {successor} 接替"
     else:
-        takeover = "接替情况未知（子代理记录读不到）" if task is None else "没有被接替"
+        takeover = "接替情况未知（子代理记录读不到）" if successor is None else "没有被接替"
     lines = [f"- 子代理 {target.run_id}（{target.role or '未知角色'}）｜{takeover}"]
     operations = repo.unsettled_attempt_operations(target.attempt_id)
     lines.extend("  " + _operation_line(item) for item in operations)

@@ -17,7 +17,15 @@ from .manager_work_orders import (
     validate_work_order,
     write_takeover_file,
 )
-from .models import SubAgentCard, SubAgentTask, TakeoverRecord, WorkOrderValidation
+from .models import (
+    TAKEOVER_DISPOSITION_TAKEN_OVER,
+    SubAgentCard,
+    SubAgentTask,
+    TakeoverRecord,
+    TaskStatus,
+    WorkOrderValidation,
+    task_replacement_successor,
+)
 from .patch.patch_service import SubAgentPatchService
 from .services.actions import SubAgentActionService
 from .services.base import CreateRunParams, PreparedSubagentRun, SubAgentBaseService
@@ -217,6 +225,12 @@ class SubAgentManager(SubagentKernelMixin):
     def load(self, run_id: str) -> SubAgentTask:
         return self.persistence.load(run_id)
 
+    # LLM: 只读子代理记录回答“这个 run 是否已被接替、被谁接替”，口径与 services/base.record_takeover 的运行账收口条件相同；
+    #   网关 /recover 按分层边界不能导入 subagents，只能经 owner_agent.subagents 调用本方法。实现见模块级 _taken_over_successor。
+    # 函数用途: 返回接替这个子代理的 run_id；没被接替返回空串，记录读不到返回 None。
+    def taken_over_successor(self, run_id: str) -> str | None:
+        return _taken_over_successor(self, run_id)
+
     def list_runs(self) -> list[SubAgentTask]:
         return self.persistence.list_runs()
 
@@ -311,6 +325,21 @@ class SubAgentManager(SubagentKernelMixin):
 
     def _new_id(self, prefix: str) -> str:
         return _new_id(prefix)
+
+
+# LLM: 只有 status=TAKEN_OVER 且 task_replacement_successor 判为 taken_over 才算“已被接替”（已关闭来源只记 superseded_by 的不算）；
+#   记录缺失、编号不合法或读坏时返回 None，调用方据此显示“接替情况未知”并跳过接替收口，不能猜测接替关系。只读。
+#   改口径同步 test_turn_recovery_child_unknown.py。
+# 函数用途: 读取子代理记录并给出接替者 run_id；SubAgentManager.taken_over_successor 的实现。
+def _taken_over_successor(manager: SubAgentManager, run_id: str) -> str | None:
+    try:
+        task = manager.load(str(run_id or ""))
+    except Exception:  # noqa: BLE001 记录缺失或读坏只影响接替展示与收口，调用方按“接替情况未知”处理
+        return None
+    if str(getattr(task, "status", "") or "").upper() != TaskStatus.TAKEN_OVER.value:
+        return ""
+    successor, disposition = task_replacement_successor(task)
+    return successor if disposition == TAKEOVER_DISPOSITION_TAKEN_OVER else ""
 
 
 def _init_params_from_kwargs(values: dict[str, object]) -> SubAgentManagerInitParams:

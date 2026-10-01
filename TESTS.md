@@ -11,6 +11,26 @@
   设置与恢复默认的回执不带这行。
 - **变异**：6 个全部被抓住（单独 /effort 也进出站箱、分派不打开菜单、菜单选中不提交、查看回执不带提示、所有回执都带提示、Esc 也提交）。
 
+## /recover 子代理分支的分层边界修正（2026-09-30，分支 `claude/38-recover-child-import-boundary`，基于 step16v `d9abcb5ec`）
+
+- **起因**：step16v 的 Linux 车道里 `test_packaging.py::test_current_production_import_boundaries_have_no_unapproved_findings` 失败，
+  `scripts/check_import_boundaries.py` 报 `gateway_parts/turn_recovery_control.py` 两处 `LAYER_BOUNDARY_FORBIDDEN`
+  （导入 `agent_core.runtime_mixin` 与 `subagents.models`）。首版门禁的仓库级守卫没有包含 `test_packaging.py`，现已补上。
+- **改动后**：`check_import_boundaries.py` 0 条。TaskRun 收口判定移到 `conversation/task_run_closeout.py`，接替判定经
+  `SubAgentManager.taken_over_successor`。`test_turn_recovery_child_unknown.py` 共 13 个：
+  - 夹具的假 manager 只替换存储，接替判定调用真实 `_taken_over_successor`；
+  - 新增“只记 superseded_by 的来源不算接管”；
+  - 新增“执行收口边、/recover 与会话层是同一个收口函数，真实 `SubAgentManager` 上有 `taken_over_successor`，网关文件没有边界
+    finding”，防止假对象掩盖缺失的方法。
+  - D3 的 `test_task_run_close_without_conversation_task.py` 原样通过（经 `runtime_mixin` 委托走到会话层）。
+- **变异**：O1 18 个全部被抓住（原 16 个按新位置改锚点，新增“已取代也算接管”“记录读不到当成没被接替”）；D3 的 5 个变异
+  改到 `conversation/task_run_closeout.py` 后同样 5/5。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 203 个加仓库级扫描守卫（含 `test_packaging.py`）：
+  4295 passed、2 skipped、5 xfailed；Ruff、doc sync、strict code-size（与 `d9abcb5ec` 比新增 finding 0）、`git diff --check`、
+  clean-package 全部通过。
+- **环境注意**：`test_subagent_debug_trace.py::test_subagent_debug_trace_level_five_writes_detail_refs` 在很长的 `--basetemp`
+  路径下必失败（基线 `d9abcb5ec` 同样复现，与本改动无关），用短路径（如 `/private/tmp/claude-501/p`）在基线和本分支都通过。
+
 ## 测试互相污染修复：唤醒车道测试泄漏假供应商线路（2026-09-30，3a）
 
 - **现象**：`test_wake_attempt_wiring.py` 与 `test_capability_package_recommendations.py` 同进程先后运行时，后者 4 个非流式用例拿到

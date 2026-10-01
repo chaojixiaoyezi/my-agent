@@ -6,7 +6,9 @@
 1. /recover 查看会列出本线程未关 TaskRun 里被中断的子代理、接替情况和未确认操作，且只读；
 2. 主链不阻塞且恰好一条时，显式处置走同一个 unknown→recovered CAS；已被接替的来源收成 cancelled，TaskRun 随后关闭；
 3. 主链阻塞时仍只处理主链；多于一条子代理时拒绝并列清单、不写库；
-4. 范围只到本线程、未关 TaskRun、非根代理；写事务内复核目标，状态变了就拒绝；没有任何自动处置。
+4. 范围只到本线程、未关 TaskRun、非根代理；写事务内复核目标，状态变了就拒绝；没有任何自动处置；
+5. 网关不越层导入：接替判定经 SubAgentManager.taken_over_successor（真实类上必须存在），TaskRun 收口与执行收口边共用
+   会话层 conversation/task_run_closeout.settle_terminal_task_run。
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ from agent_py_agent.agent.runtime_db.child_recovery import (
     unknown_child_attempts_for_thread,
 )
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.subagents.manager import SubAgentManager, _taken_over_successor
 from agent_py_agent.agent.subagents.model_task import SubAgentTask
 
 THREAD = "thread-o1"
@@ -46,7 +49,10 @@ def world(tmp_path):
             raise FileNotFoundError(run_id)
         return records[run_id]
 
-    owner = SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo, load=load), conversation_store=store)
+    # 假的 manager 只替换存储，接替判定仍调用真实实现（真实类上的方法见最后一条用例）。
+    subagents = SimpleNamespace(runtime_db=repo, load=load)
+    subagents.taken_over_successor = lambda run_id: _taken_over_successor(subagents, run_id)
+    owner = SimpleNamespace(subagents=subagents, conversation_store=store)
     main = _tree_root(repo, "run-main", "gwreq-o1", THREAD)
     thread = SimpleNamespace(thread_id=THREAD, workspace_task_id=main["task_id"])
     return SimpleNamespace(repo=repo, owner=owner, main=main, thread=thread, records=records)
@@ -178,6 +184,17 @@ def test_only_a_taken_over_status_counts_as_takeover(world):
     assert _statuses(world, child) == ("created", "recovered")
 
 
+def test_superseded_source_is_not_treated_as_taken_over(world):
+    child = _killed_child(world, "subagent-src", taken_over_by="subagent-repl")
+    record = world.records["subagent-src"]
+    record.takeover_by, record.superseded_by = "", "subagent-repl"  # 只记 superseded_by：不是“已被接管”
+    _finish_main(world)
+
+    assert "没有被接替" in _recover(world, "/recover").message
+    assert _recover(world, "/recover recorded").ok is True
+    assert _statuses(world, child) == ("created", "recovered")
+
+
 def test_root_block_keeps_priority_and_children_wait_their_turn(world):
     child = _killed_child(world, "subagent-src", taken_over_by="subagent-repl")
     with world.repo.transaction() as conn:
@@ -258,3 +275,17 @@ def test_gateway_dispatch_reaches_the_child_branch(world, tmp_path, monkeypatch)
 
     assert result.ok is True and "解除子代理 subagent-src 的阻塞" in result.message
     assert _statuses(world, child) == ("cancelled", "recovered") and _task_run_closed(world)
+
+
+def test_gateway_reaches_lower_layers_only_through_allowed_paths():
+    from agent_py_agent.agent.agent_core import runtime_mixin
+    from agent_py_agent.agent.conversation import task_run_closeout
+    from agent_py_agent.agent.gateway_parts import turn_recovery_control
+    from scripts.check_import_boundaries import check_import_boundaries
+
+    # TaskRun 收口只有一份实现：执行收口边与 /recover 子代理分支调用同一个会话层函数。
+    assert runtime_mixin.settle_terminal_task_run is task_run_closeout.settle_terminal_task_run
+    assert turn_recovery_control.settle_terminal_task_run is task_run_closeout.settle_terminal_task_run
+    assert callable(SubAgentManager.taken_over_successor)
+    findings = [item for item in check_import_boundaries() if item.source.endswith("turn_recovery_control.py")]
+    assert findings == []

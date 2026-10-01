@@ -761,5 +761,13 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 
 - **起因**：ae 真实模型验收 O1，被 SIGKILL 的子代理留下 unknown 执行轮，TaskRun 不关，`/recover` 只看根主代理，用户没有入口。
 - **改动**：新增 `runtime_db/child_recovery.py`；`/recover` 主链不阻塞时列出本线程子代理，恰好一条才处置，之后做接替收口与
-  TaskRun 收口（`runtime_mixin.settle_terminal_task_run_for_task`）。主链行为不变，没有自动处置；目标参数待定。
+  TaskRun 收口（会话层 `conversation/task_run_closeout.settle_terminal_task_run`）。主链行为不变，没有自动处置；目标参数待定。
+- 测试与变异见 TESTS.md 同名节。
+
+## /recover 子代理分支的分层边界修正（2026-09-30，分支 `claude/38-recover-child-import-boundary`，基于 step16v `d9abcb5ec`）
+
+- **起因**：首版 `turn_recovery_control.py` 导入 `agent_core.runtime_mixin` 与 `subagents.models`，`check_import_boundaries.py` 报两处
+  `LAYER_BOUNDARY_FORBIDDEN`，step16v 没有上线。
+- **改动**：TaskRun 收口判定移到 `conversation/task_run_closeout.settle_terminal_task_run`（`runtime_mixin` 只委托，网关直接调用）；
+  接替判定改为 `SubAgentManager.taken_over_successor`，网关经 `owner_agent.subagents` 调用。边界规则没改，行为不变。
 - 测试与变异见 TESTS.md 同名节。

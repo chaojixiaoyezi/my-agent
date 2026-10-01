@@ -26,8 +26,8 @@
     `thread_id`、`task_run_id`。
   - `/recover`（`gateway_parts/turn_recovery_control.py`）：主链阻塞时行为不变，查看时多一句“另有 N 个子代理待核对”；主链不阻塞时
     列出子代理编号、角色、接替情况和未确认操作；恰好一条时才处置，多条拒绝并列清单（沿用 `RUN_RECOVERY_REJECTED`，不新增错误码）。
-  - 子代理恢复后：子代理记录 `status=TAKEN_OVER` 且有 `takeover_by` 时，用现有 `settle_taken_over_run` 收成 cancelled；再经
-    `runtime_mixin.settle_terminal_task_run_for_task` 按任务走 D3 同一条 TaskRun 收口。没被接替的子代理留在 created（执行轮
+  - 子代理恢复后：经 `SubAgentManager.taken_over_successor` 判定子代理记录 `status=TAKEN_OVER` 且有 `takeover_by` 时，用现有
+    `settle_taken_over_run` 收成 cancelled；再用会话层 `conversation/task_run_closeout.settle_terminal_task_run`按任务走 D3 同一条 TaskRun 收口。没被接替的子代理留在 created（执行轮
     recovered），是否续跑由主代理决定；续跑时 `create_attempt` 会重新打开 TaskRun。
   - TUI 把 `/recover` 原文转给 Gateway，飞书走同一服务，两边入口一致；命令目录文案不再承诺“接着原任务继续”。
 - **守住的边界**：只有用户显式输入处置才写库；不加任何自动处置或过期规则；静止规则与 TaskRun 树规则不变；范围只到本线程未关
@@ -38,7 +38,16 @@
     有了它才能逐条处理多条子代理（例如整棵树一起被杀），也能消掉上面的换目标窗口。
   - 不挂会话线程的历史 unknown：09-30 生产库副本里根代理 32 条、子代理 2 条（最新 09-23），任何会话里的 `/recover` 都够不着，
     需要 owner 级查看与处置入口；另立一项，不和 O1 混做。
-- **验证**：见 TESTS.md 同名节。
+- **分层边界修正**（2026-09-30，分支 `claude/38-recover-child-import-boundary`，基于 step16v `d9abcb5ec`）：首版网关直接导入
+  `agent_core.runtime_mixin` 与 `subagents.models`，违反 `scripts/check_import_boundaries.py` 对 gateway_parts 的规则，step16v 因此
+  没有上线。现在：
+  - TaskRun 收口的判定（D3 规则）整体移到会话层 `conversation/task_run_closeout.py` 的 `settle_terminal_task_run`；
+    `runtime_mixin._settle_terminal_conversation_task_run` 只做委托，网关直接调用会话层，两处共用一份实现。没有改成 agent 方法，
+    因为 `SimpleAgentRuntimeMixin` 再加方法会进入 code-size 的 mixin high-risk 区。
+  - 接替判定经网关已持有的 `owner_agent.subagents` 调用 `SubAgentManager.taken_over_successor`（实现在
+    `subagents/manager._taken_over_successor`，记录读不到返回 None，只记 superseded_by 的不算接管）。
+  - 边界规则和白名单都没改；`check_import_boundaries.py` 0 条。
+- **验证**：见 TESTS.md 同名节与“/recover 子代理分支的分层边界修正”节。
 
 ## 能力申请裁决的确定拒绝不再记成“结果未知”（2026-09-30，分支 `claude/ae-resolve-refusal-code`，基于 main `a8c71f0e0`，已实现，待集成）
 
@@ -70,7 +79,8 @@
 - **现象**（ae 真实模型验收 D3，bf4f740c3 与 10041de02 各复现）：请求 record 没有 `conversation_runtime`、`conversations/tasks/<请求>.json`
   不存在（只调 list_agents、管理员 `manage_models set_shared`、不调工具），请求 done、主 agent_run done，TaskRun 却永远
   `created`、`closed_at=0`。证据 `capability-real-bf4f/host-defect-candidates.json`。
-- **原因**：TaskRun 的唯一收口边 `runtime_mixin._settle_terminal_conversation_task_run` 要求会话任务关联已终态，`tasks.load`
+- **原因**：TaskRun 的唯一收口边 `runtime_mixin._settle_terminal_conversation_task_run`（判定已于 O1 分层边界修正时移到
+  `conversation/task_run_closeout.py`）要求会话任务关联已终态，`tasks.load`
   返回空时直接返回；发现层重放同样只认终态关联。从未升格成会话任务的请求没有关联，于是没有任何路径关闭它的 TaskRun。
 - **修法**（权威写入点不变，仍是 `settle_task_run_if_agent_tree_terminal` 的树终态 CAS）：同一个收口边里，关联文件确实不存在时
   改由代理树决定，`operator=agent-runtime`、`reason=no_conversation_task`。只认真正的“不存在”：关联读坏、没有会话存储、任务身份为空、
