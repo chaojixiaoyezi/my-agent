@@ -17,7 +17,7 @@
   `scripts/check_import_boundaries.py` 报 `gateway_parts/turn_recovery_control.py` 两处 `LAYER_BOUNDARY_FORBIDDEN`
   （导入 `agent_core.runtime_mixin` 与 `subagents.models`）。首版门禁的仓库级守卫没有包含 `test_packaging.py`，现已补上。
 - **改动后**：`check_import_boundaries.py` 0 条。TaskRun 收口判定移到 `conversation/task_run_closeout.py`，接替判定经
-  `SubAgentManager.taken_over_successor`。`test_turn_recovery_child_unknown.py` 共 13 个：
+  `SubAgentManager.taken_over_successor`。`test_turn_recovery_child_unknown.py` 共 12 个：
   - 夹具的假 manager 只替换存储，接替判定调用真实 `_taken_over_successor`；
   - 新增“只记 superseded_by 的来源不算接管”；
   - 新增“执行收口边、/recover 与会话层是同一个收口函数，真实 `SubAgentManager` 上有 `taken_over_successor`，网关文件没有边界
