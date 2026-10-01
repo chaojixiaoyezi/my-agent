@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`）
+
+- **新增** `test_tui_effort_menu.py`：
+  - 菜单每一行都是合法的 `/effort` 命令（查看→view，各档位与 default→set，probe→probe），档位与 `REASONING_LEVELS` 同源；
+  - 单独 `/effort` 不进控制出站箱（留给本地菜单），`/effort low`、`/effort status`、`/effort default` 照旧进出站箱；
+  - 真实 prompt_toolkit 管道按键：输入 `/effort` 回车出现菜单且尚未发命令，下移三次回车后出站箱收到 `/effort low`，菜单关闭、
+    占用标志释放；再次打开后 Esc 不发命令。
+- **改动** `test_reasoning_effort.py::test_effort_command_sets_views_and_resets_with_real_model_effect`：查看回执以可选档位提示结尾，
+  设置与恢复默认的回执不带这行。
+- **变异**：6 个全部被抓住（单独 /effort 也进出站箱、分派不打开菜单、菜单选中不提交、查看回执不带提示、所有回执都带提示、Esc 也提交）。
+
 ## 测试互相污染修复：唤醒车道测试泄漏假供应商线路（2026-09-30，3a）
 
 - **现象**：`test_wake_attempt_wiring.py` 与 `test_capability_package_recommendations.py` 同进程先后运行时，后者 4 个非流式用例拿到

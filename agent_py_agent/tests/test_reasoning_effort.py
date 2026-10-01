@@ -228,6 +228,10 @@ def test_effort_command_sets_views_and_resets_with_real_model_effect(tmp_path):
     helped = run("/effort help")
 
     assert view.ok and "自动（服务商默认）（全局默认）" in view.message and "不额外发送推理参数" in view.message
+    # 查看回执末尾告诉用户能选哪些档位、怎么改（IM 没有选择菜单）；设置回执不重复这行。
+    assert view.message.endswith("可选档位：auto 自动（服务商默认）、off 关闭思考、low 低、medium 中、high 高、max 最高。"
+                                 "发送 /effort 加档位只改本会话；/effort default 回到全局默认。")
+    assert "可选档位" not in low.message and "可选档位" not in reset.message
     assert low.ok and "低（本会话设置）" in low.message
     assert "deepseek-v4-flash" in low.message and "按推理强度档位发送：低" in low.message
     assert reset.ok and "（全局默认）" in reset.message

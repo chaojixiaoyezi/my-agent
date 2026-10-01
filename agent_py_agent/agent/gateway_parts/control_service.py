@@ -1165,13 +1165,14 @@ def _stop_targeted_manual_compact(
 # LLM: 智能程度是会话线程设置（reasoning_effort），命令文本不进入模型轮；set 只写本线程字段，default 清除回落全局默认。
 #   检测相关（set 时的自动检测、probe、revert）全交给 settings/reasoning_probe.effort_probe_lines，先执行再渲染，
 #   回执里的“当前模型效果”因此反映撤销之后的状态。检测在后台跑，这里不等网络。回执按当前会话模型的结构化控制方式
-#   说明实际效果，模型不支持时如实说明不改变请求，绝不假装已生效。
+#   说明实际效果，模型不支持时如实说明不改变请求，绝不假装已生效。查看时末尾附“可选档位和怎么改”（IM 没有选择菜单）。
 # 函数用途: 查看或设置本会话的智能程度、检测或撤销检测写入，并说明在当前模型上怎样生效。
 def _execute_effort_control(
     base_agent: object,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
+    from ..backends.reasoning_control import describe_level_choices
     from ..settings.reasoning_effort import set_thread_reasoning_level
     from ..settings.reasoning_probe import effort_probe_lines
 
@@ -1182,7 +1183,8 @@ def _execute_effort_control(
             level = "" if command.value == "default" else command.value
             thread = set_thread_reasoning_level(owner_agent.conversation_store, thread.thread_id, level)
         extra = effort_probe_lines(owner_agent, thread.thread_id, command)
-        return ConversationControlResult("effort", True, "\n".join([_render_effort(owner_agent, thread, command), *extra]))
+        hint = [describe_level_choices()] if command.operation == "view" else []
+        return ConversationControlResult("effort", True, "\n".join([_render_effort(owner_agent, thread, command), *extra, *hint]))
     except Exception:
         return ConversationControlResult("effort", False, "当前会话的智能程度设置暂时不可用，请稍后重试。")
 

@@ -1,5 +1,20 @@
 # 设计台账
 
+## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`，已实现，待上线）
+
+- **现象**（用户反馈“effort 只能最高，想按自己想法换档好像不行”）：生产控制账里用户 6 次 `/effort` 全是查看，从没设成过别的档位。
+  原因有三：全局默认 `model_reasoning_effort` 在 09-27 按用户要求设成了 max，所以每个会话都显示“最高（全局默认）”；TUI 里从补全
+  选中 `/effort` 回车会立刻提交（`submit_on_enter`），没机会输入档位；查看回执也不说能选哪些档位、怎么改。
+- **做法**：
+  - TUI：单独 `/effort` 在 Gateway 模式打开本地档位菜单（新文件 `cli/chat_parts/tui_effort_menu.py`，与 `/model`、`/permissions`
+    同一套弹窗和互斥标志）。菜单行是查看、auto/off/low/medium/high/max、default、probe，值就是 `/effort` 参数；选中后经既有控制
+    出站箱发 `/effort <值>`，Esc 不发任何命令。带参数的文字形式（含 `/effort status`）照旧直接发给 Gateway。本地模式照旧提示改用 Gateway。
+  - Gateway（TUI 与飞书同一服务）：`/effort` 查看回执末尾多一行“可选档位……发送 /effort 加档位只改本会话；/effort default 回到全局默认”，
+    由 `reasoning_control.describe_level_choices` 按档位表生成；设置、检测、撤销回执不加。
+- **守住的边界**：不改 `/effort` 语法（`conversation/control_commands.py` 属 Codex 重构区，未动）、不改档位换算与发送；菜单不读
+  当前档位（TUI 拿不到结构化值，也不解析回执文字），所以默认停在“查看”一行；不改全局默认（那是用户自己的设置，`/settings` 可改）。
+- **验证**：见 TESTS.md 同名节。
+
 ## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`，第一步已实现，待集成）
 
 - **现象**（ae 真实模型验收 O1）：子代理 runner 在写操作 handler 返回后被 SIGKILL，attempt 与 agent_run 停在 unknown，write_file 停在

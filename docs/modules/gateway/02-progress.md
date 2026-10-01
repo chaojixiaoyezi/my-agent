@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+`/effort` 查看回执列出可选档位（分支 `claude/3a-effort-picker`，2026-09-30）：`control_service._execute_effort_control` 在查看
+（operation=view）时于回执末尾追加 `reasoning_control.describe_level_choices()` 一行（可选档位与“/effort 加档位只改本会话、
+/effort default 回到全局默认”），设置/检测/撤销回执不变。TUI 单独 `/effort` 改由本地档位菜单（`cli/chat_parts/tui_effort_menu.py`）
+选好后发 `/effort <值>`，Gateway 收到的仍是同一控制命令。设计见 `docs/design/REASONING_EFFORT.md` 第 5 节。
+
 /model 五项菜单与其他用户的初始模型（分支 `claude/3a-chatgpt-browser-login`，2026-09-30）：`/client/models` 不改路由，新操作
 `add_models` / `set_initial` 与带 `connection` 的 `discover` 都经 `execute_model_profile_operation`。`model_profile_service.render_model_choices`
 的「默认」行按 `default_source=admin_initial` 标「管理员指定的初始模型」，空列表提示改指「默认模型与共享」。

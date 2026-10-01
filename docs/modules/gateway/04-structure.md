@@ -1,5 +1,8 @@
 # Gateway Structure
 
+`control_service._execute_effort_control` 只在查看 `/effort` 时附加 `backends/reasoning_control.describe_level_choices()` 生成的
+可选档位行（只由档位表生成，不判断模型能力）；TUI 的档位菜单在客户端（`cli/chat_parts/tui_effort_menu.py`），不新增 Gateway 路由。
+
 `user_space/owner_maintenance.run_owner_retention_if_due` 是 owner 维护的唯一入口（默认 24 小时一次，已在 `locked_json_path` 内执行）：
 它先跑 retention 计划，再调 `_reclaim_text_vector_cache_orphans` 回收 `memory_text_vectors.json` 里不属于任何 active 记忆的键。
 **路径取自 canonical 的 `home.owner_memory_long_term_jsonl`**（此前手拼 `memory/memory.jsonl`，在生产布局下不存在）。

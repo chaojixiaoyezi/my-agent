@@ -209,6 +209,7 @@ agent_py_agent/
 |   |   |-- tui_media_clipboard.py      # 显式截图剪贴板读取及临时文件清理
 |   |   |-- tui_media.py                # 文件拖入/附件命令与草稿引用
 |   |   |-- tui_decision_menu.py        # 原模型菜单的决策范围、模式、秒数、恢复继承和显式原生连接测试
+|   |   |-- tui_effort_menu.py          # 单独 /effort 的档位菜单：选中后以 /effort <值> 走控制出站箱
 |   |   |-- tui_model_menu.py           # /model 顶层五项（新增/选择/管理/连接测试/默认与共享）与弹窗、焦点守卫
 |   |   |-- tui_model_add.py            # 「新增模型」五类：填连接→拉列表→勾选一次保存，拉不到可手动填，OpenCode 模板与高级请求头
 |   |   |-- tui_model_auth.py           # 新增登录账号、已有账号的登录/添加模型/退出/删除，设备码与通用参数
@@ -1643,6 +1644,7 @@ docs/
 - `cli/chat_parts/tui_browser_login.py`：ChatGPT 订阅的浏览器登录（授权码 + PKCE），登录期间在本机回环端口临时收回调；说明见 `docs/design/MODEL_OAUTH.md`。
 - `agent/settings/thread_model_selection.py`：按 canonical thread 固定模型，同 owner 多 TUI 不串配置，默认值只初始化新会话。
 - `agent/settings/shared_model_catalog.py` 与 `cli/chat_parts/tui_shared_model_menu.py`：管理员逐模型发布共享引用；秘密留在原 provider 文件，撤销后明确提示而非换模型。
+- `cli/chat_parts/tui_effort_menu.py`：TUI 单独 `/effort` 的档位菜单；只产出 `/effort <值>`，发送仍走控制出站箱。
 - `cli/chat_parts/tui_model_menu.py`：真实 TUI 模型菜单，顶层五项；保存/返回与模型执行分离。
 - `cli/chat_parts/tui_model_add.py` 与 `agent/settings/model_connections.py`：「新增模型」填连接→拉列表→勾选，`add_models` 一次保存并按连接去重；说明见 `docs/design/TUI_MODEL_PROFILES.md`。
 - `cli/chat_parts/tui_provider_menu.py`：同一个 provider 管理多个模型；敏感字段仅表单暂存，短测试明确提示消耗。

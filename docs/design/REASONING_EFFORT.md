@@ -76,7 +76,11 @@ v4.1-flash 的关闭思考现在都生效。结论不变的：opencode v4-flash 
 
 ## 5. 用户入口
 
-- `/effort`：显示本会话档位（及来源：本会话设置 / 全局默认），以及在当前会话模型上的实际效果。
+- `/effort`：显示本会话档位（及来源：本会话设置 / 全局默认），以及在当前会话模型上的实际效果；末尾一行列出可选档位和怎么改
+  （2026-09-30 起，`reasoning_control.describe_level_choices`，IM 没有菜单靠它知道能怎么改）。
+- TUI 里单独 `/effort`（2026-09-30 起）：打开本地档位菜单 `cli/chat_parts/tui_effort_menu.py`，上下键选查看 / auto / off / low /
+  medium / high / max / default / probe，回车后以 `/effort <值>` 经控制出站箱发给 Gateway，Esc 不发；带参数的文字形式照旧直接发送。
+  起因：用户只看到“最高（全局默认）”，从补全选中 `/effort` 回车会立刻提交，没机会输入档位。
 - 回执与发送同一换算（2026-09-30 起，`reasoning_control.describe_config_reasoning_effect`，`/effort` 与参数中心共用）：
   Responses 模型上，没有声明 none / minimal 时 `/effort off` 实际不发字段，回执写“本设置不改变请求”；没有声明更高档位时
   `/effort max` 实际发 high，回执写“实际发送 high”；声明了就写“发送 max”。此前回执一律写“请求时关闭思考”“最高”，

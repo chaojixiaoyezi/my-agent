@@ -133,6 +133,14 @@ def _describe_responses_effect(level: str, control: str, levels: tuple[str, ...]
     return f"{CONTROL_LABELS[control]}：{LEVEL_LABELS[level]}；这个模型没有声明更高的服务商档位，实际发送 {sent}。"
 
 
+# LLM: 只由 REASONING_LEVELS 与 LEVEL_LABELS 生成，档位增减时自动同步；不涉及任何模型能力判断（能否生效由效果行说明）。
+#   /effort 查看回执（IM 没有选择菜单，靠它知道能怎么改）使用；改文案同步 test_reasoning_effort.py。
+# 函数用途: 生成“可选档位和怎么改”的一行提示。
+def describe_level_choices() -> str:
+    choices = "、".join(f"{level} {LEVEL_LABELS[level]}" for level in REASONING_LEVELS)
+    return f"可选档位：{choices}。发送 /effort 加档位只改本会话；/effort default 回到全局默认。"
+
+
 # LLM: 回执入口的配置版：控制方式、协议与服务商档位都从同一份运行配置解析（与后端工厂同源），调用方不要自己拼。
 # 函数用途: 按一份模型运行配置说明某档位会怎样生效，供 /effort 回执和参数中心共用。
 def describe_config_reasoning_effect(level: str, config: object) -> str:
@@ -150,6 +158,7 @@ __all__ = [
     "REASONING_CONTROLS",
     "REASONING_LEVELS",
     "describe_config_reasoning_effect",
+    "describe_level_choices",
     "describe_reasoning_effect",
     "normalize_reasoning_control",
     "normalize_reasoning_level",

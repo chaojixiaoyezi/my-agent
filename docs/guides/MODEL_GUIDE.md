@@ -75,9 +75,9 @@ ChatGPT 订阅不需要填接口地址和模型编号：
 
 ### 常用命令
 
-- `/effort`：查看当前档位和它在当前模型上会怎么生效。
+- `/effort`：在 TUI 里会弹出档位菜单，上下键选好回车就设上（Esc 取消，什么都不改）；在飞书等聊天里会显示当前档位、在当前模型上怎么生效，最后一行列出能选哪些档位。
 - `/effort low`（或 off / medium / high / max）：设置当前会话档位。
-- `/effort default`：清除设置，回到全局默认（默认 auto）。
+- `/effort default`：清除设置，回到全局默认（仓库默认 auto；全局默认可以用 `/settings` 改 `model_reasoning_effort`）。
 - `/effort probe`：让软件后台实测当前模型支不支持调节，可能要几分钟，完成后 `/effort` 查看结论。
 - `/effort revert <编号>`：撤销一次自动检测写入的修改。
 

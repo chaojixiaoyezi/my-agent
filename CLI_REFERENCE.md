@@ -85,7 +85,7 @@ python -m agent_py_agent --help
 | `/deny` | 仅 IM 私聊：拒绝本会话当前唯一等待确认的工具操作，不需要密码。 | 同上；终端里请直接在审批面板中选择。 |
 | `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
 | `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
-| `/effort [auto\|off\|low\|medium\|high\|max\|default]` | 查看或设置本会话的智能程度（推理强度）。回执说明在当前模型上的实际效果：按档位发送、按思考预算发送，或“不支持调节、本设置暂不改变请求”；`default` 清除本会话设置、回到全局默认 `model_reasoning_effort`。子代理可在 `create_subagents` 用 `effort` 单独指定，省略则继承当前档位。当前模型未声明思考控制方式且解析为不支持时，设成 auto 以外的档位会在后台自动检测一次（开关 `reasoning_control_auto_probe`），`/effort` 查看进度与结论。 | 写当前 thread 的 `reasoning_effort`；自动检测时后台发 9 次短请求。仅 Gateway 模式。 |
+| `/effort [auto\|off\|low\|medium\|high\|max\|default]` | 查看或设置本会话的智能程度（推理强度）。TUI 里单独输入 `/effort` 会打开档位菜单（上下键选、回车设置、Esc 不改）；查看回执末尾列出可选档位。回执说明在当前模型上的实际效果：按档位发送、按思考预算发送，或“不支持调节、本设置暂不改变请求”；`default` 清除本会话设置、回到全局默认 `model_reasoning_effort`。子代理可在 `create_subagents` 用 `effort` 单独指定，省略则继承当前档位。当前模型未声明思考控制方式且解析为不支持时，设成 auto 以外的档位会在后台自动检测一次（开关 `reasoning_control_auto_probe`），`/effort` 查看进度与结论。 | 写当前 thread 的 `reasoning_effort`；自动检测时后台发 9 次短请求。仅 Gateway 模式。 |
 | `/effort probe` | 在后台检测当前模型是否真的支持按档位调节智能程度（同一道短题按低 / 最高 / 不带参数各发 3 次，比较用量里的 token），确认支持就把模型档案的思考控制改为按档位发送。结论会在同一会话下一条回复顶部提示一次（`/effort` 看过就不再提示）。 | 后台发 9 次短请求；可能写本人模型档案或（仅管理员、部署默认模型）全局配置，并记账。仅 Gateway 模式。 |
 | `/effort revert <编号>` | 撤销一次由检测写入的模型档案修改（编号至少 6 位，见检测结果里的提示）。 | 写本人模型档案与档案账本。仅 Gateway 模式。 |
 | `/audit [时长] <任务>` | 以结构化保证档启动一个新任务。 | `/audit` 前缀不进入模型，只有任务正文进入正常 turn。 |

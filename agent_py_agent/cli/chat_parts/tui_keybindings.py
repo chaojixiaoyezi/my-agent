@@ -520,7 +520,8 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     _restore_stash_after_submit(params)
 
 
-# LLM: 模型/权限表单和普通 slash 都经既有控制入口；只在对应命令被消费后返回，不把普通正文当控制。
+# LLM: 模型/权限/智能程度表单和普通 slash 都经既有控制入口；只在对应命令被消费后返回，不把普通正文当控制。
+#   单独 /effort 只在 Gateway 模式打开档位菜单（本地模式照旧由 _tui_handle_command 提示改用 Gateway）。
 # 函数用途: 分派本地表单与同步命令，并统一处理命令后的退出或草稿恢复。
 def _dispatch_tui_slash_input(event, params: TuiCreateKeybindingsParams, text: str) -> bool:
     if text == "/permissions" or text.startswith("/permissions "):
@@ -534,6 +535,11 @@ def _dispatch_tui_slash_input(event, params: TuiCreateKeybindingsParams, text: s
         event.app.create_background_task(run_model_menu(
             event.app, params.agent, str(params.current_session_id or "default"), _required_tui_runtime(params),
         ))
+        return True
+    if text == "/effort" and bool(getattr(params, "use_gateway", False)):
+        from .tui_effort_menu import open_effort_menu
+
+        open_effort_menu(event, lambda command: _tui_submit_control_operation(params, command))
         return True
     if _tui_handle_command(params=_handle_command_params(params, text)):
         if params.stop_event.is_set():
