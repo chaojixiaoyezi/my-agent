@@ -642,6 +642,7 @@ D1／G05 Goal 续跑熔断的过程：
 - **原因无从诊断**：`capability/package_selection.py` 的 `select_capability_packages` 用一个宽泛的 `except Exception` 吞掉辅助调用的异常，只记一个通用码，不写日志，也不留结构化原因。
 - **对照**：同一个开关在 MiniMax-M2.7 上（9-30 的 G07）选中了 A、B。
 - **影响**：这次主回合不受影响，模型自己 search／get 到了包。
+- **已修并上线复核（2026-10-01）**：根因是选择 schema 的 `uniqueItems`／`maxItems` 被订阅 Responses 严格模式以 `invalid_json_schema` 拒绝。修复（`1d3a57deb`，另有集成调整）随 step16x `d519a8472` 上线。在隔离环境里用同一版本代码、gpt-6-luna、打开一次选择发一次自然需求：`host_capability_selection.v1` 为 `outcome=selected`（`selected_count=1`，没有 warning），成功记录不含 `failure` 键；辅助调用正常完成（输入 285／输出 21 token）。证据在 `~/.my-agent/decision-evidence/d5-selection-schema/step16x-check/`（仓库外）。
 
 ### 证据
 - `~/.my-agent/decision-evidence/g01-luna/`（仓库外）：
