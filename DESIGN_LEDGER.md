@@ -20,17 +20,25 @@
     要不要按服务商实际能力上调窗口（会推迟压缩、单次请求更贵）交用户决定；在那之前保持现状，宁可早压缩。
 - **验证**：见 TESTS.md 同名节。
 
-## 能力包 G01 生产规模真实运行后的两条待定（2026-10-01，3a 裁定）
+## 能力包 G01 生产规模真实运行后的两条待定（2026-10-01，3a 裁定；第二条已核实送达）
 
 - **G01 压缩后原资源链仍未覆盖**：ae 在 step16v 上用 gpt-6-luna 跑了一次生产规模长任务（36 份输入、约 58 万字），产物全对、
   止损线一条没碰，但模型自然地把工作分给 6 个子代理，主线程上下文峰值约 135.6K，低于触发线 244800，全程没有压缩。按规矩记“未命中”，
   不为凑压缩改写需求诱导模型不派子代理。是否再跑一次“每一步依赖上一步”的串行长任务（预计 1–2 小时、几千万 token），超出这次批准的
   一次运行，交用户决定。
-- **前台回复不可用、任务在后台做完**：前台请求在 +451 秒以 `USER_REPLY_UNAVAILABLE` 结束（模型在 2 个子代理仍在跑时连续给出空正文，
-  宿主按有界重试后如实失败，这是既有合同），之后父级后台续跑写完 report.md，TaskRun 在约 +975 秒关闭为 done。后台续跑片的答复按
-  wake 带的通道信息应会投递给用户，但这次没有记录投递事实。下一次真实长任务要同时记 `channel_delivery` 事实，再决定要不要在
-  “前台失败、后台完成”时补一条结构化的完成通知；在那之前不改代码。证据见 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md`
-  “step16v 复核三项与 G01 生产规模真实运行（2026-10-01）”。
+- **前台回复不可用、任务在后台做完（2026-10-01 已核实：送达，不改代码）**：前台请求在 +451 秒以 `USER_REPLY_UNAVAILABLE` 结束
+  （模型在 2 个子代理仍在跑时连续给出空正文，宿主按有界重试后如实失败，这是既有合同），之后父级后台续跑写完 report.md，TaskRun 在约
+  +975 秒关闭为 done。真机当时没记投递事实；用真实网关循环加脚本化假模型在 step16w 运行时上复现同一形状（前台只有思考、两次补问后
+  `USER_REPLY_UNAVAILABLE`，子代理随后结束），结论是已送达：
+  - 后台路线按线程自己的通道绑定解析（`background_routing.resolve_background_route`），与前台请求成败无关；TUI 线程走 `chat` 这个本地
+    transcript 通道。
+  - 末个子代理结束的 wake 经 5 秒成功完成合批后由父级后台片收尾，投递判定 `root_subagents_terminal`；回复落到 canonical 会话记录
+    （助手 final 带 `background_delivery_reason`），本地通道投递状态为 `not_applicable`（不欠外发）。
+  - TUI 轮询的后台消息页（`read_background_response_page`，Gateway 后台通知接口读的就是它）返回这条 `assistant_response`；复现里正在运行的
+    TUI 也显示了这条回复。
+  - 飞书等外发通道走同一条路线解析，外发义务由 `background_owner_delivery_committed` 把关（未送达不确认、冻结重投）；这次没有在真实飞书上复现。
+  - 不需要另加“完成通知”。`test_background_reply_after_foreground_failure.py` 钉住这条链（真实 echo Gateway、真实工具循环、真实后台调度器与
+    `agent.delivery_service`），变异 5/5。证据：`~/.my-agent/decision-evidence/bg-reply-after-fg-failure-20261001/`（仓库外）。
 
 ## Gateway 前台新消息清零 Goal 空片计数（D4）与“熔断后又起一片”裁定（O2）（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`，D4 已实现，step16w 已上线并经真实模型复核）
 

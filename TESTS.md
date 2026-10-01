@@ -21,6 +21,19 @@
   - 约 55.9 万 token 的超长输入被服务商正常接受（input_tokens 559021），档案窗口 272000 偏保守，没能触发真实的上下文超限，
     “上下文超限→压缩恢复”这一支只有假连接测试覆盖。
 
+## 前台诚实失败后，后台收尾回复仍送达 TUI（2026-10-01，分支 `claude/38-bg-reply-delivery`，基于 main `0ca852195`）
+
+- **对应问题**：G01 真机里前台以 `USER_REPLY_UNAVAILABLE` 失败后，父级后台续跑收尾，当时没记录这条后台回复是否送到用户。
+- **真实链路复现**（仓库外证据 `~/.my-agent/decision-evidence/bg-reply-after-fg-failure-20261001/`）：step16w 运行时、隔离网关、脚本化假模型；
+  前台只有思考后失败，子代理结束后父级后台片的回复以 `root_subagents_terminal` 落到 canonical 记录、出现在 TUI 后台消息页，运行中的 TUI 也显示了。
+- **新增** `test_background_reply_after_foreground_failure.py`：真实 echo Gateway 提交请求、后端只回思考 → 请求 `USER_REPLY_UNAVAILABLE` 且没有
+  前台助手 final；随后登记 active 任务关联与 DONE 子代理、发出结束 wake，真实后台调度器（`agent.delivery_service`）在合批窗口后收尾：
+  投递原因 `root_subagents_terminal`，canonical final 带投递原因，`read_background_response_page` 返回这条 `assistant_response`，wake 不再待处理。
+- **变异**：5 个全部被抓住（末个子代理结束也不交付、后台页只收前台回复、收尾后 completed 即抑制、本地路线不落 canonical、回复不带投递原因）。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 51 个加仓库级扫描守卫（含 `test_packaging.py`）：
+  1762 passed、1 skipped、4 xfailed；Ruff、doc sync、strict code-size（与 `0ca852195` 比新增 finding 0）、`git diff --check`、
+  clean-package 全部通过。本轮只加测试和文档，没有改产品代码。
+
 ## Gateway 前台新消息清零 Goal 空片计数（D4）与 O2 裁定（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`）
 
 - **新增** `test_gateway_goal_fuse_reset.py`（真实 echo Gateway：`submit_gateway_ask` + `_process_gateway_requests`；真实后台调度器
