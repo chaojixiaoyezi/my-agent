@@ -43,6 +43,10 @@
     有了它才能逐条处理多条子代理（例如整棵树一起被杀），也能消掉上面的换目标窗口。
   - 不挂会话线程的历史 unknown：09-30 生产库副本里根代理 32 条、子代理 2 条（最新 09-23），任何会话里的 `/recover` 都够不着，
     需要 owner 级查看与处置入口；另立一项，不和 O1 混做。
+  - 结构化接替提示（10-01 真实复测后 3a 裁定先观察）：被 SIGKILL 的子代理只回 BLOCKED，`blocked_reason` 是子代理自己写的字段，
+    被杀时为空；宿主侧的事实是执行轮 unknown（executor_process_died）。复测 4 次模型都没在 `create_subagents` 里声明
+    `replacement_for_run_ids`，“已被接替的来源收成 cancelled”只有合同单测覆盖。是否在唤醒回执里给父级结构化的接替建议是新设计项；
+    先在以后的真实任务里观察模型是否自然声明接替，不为测试改提示。
 - **分层边界修正**（2026-09-30，分支 `claude/38-recover-child-import-boundary`，基于 step16v `d9abcb5ec`）：首版网关直接导入
   `agent_core.runtime_mixin` 与 `subagents.models`，违反 `scripts/check_import_boundaries.py` 对 gateway_parts 的规则，step16v 因此
   没有上线。现在：
