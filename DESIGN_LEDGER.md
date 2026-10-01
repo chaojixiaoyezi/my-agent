@@ -12,9 +12,7 @@
   “前台失败、后台完成”时补一条结构化的完成通知；在那之前不改代码。证据见 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md`
   “step16v 复核三项与 G01 生产规模真实运行（2026-10-01）”。
 
-## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`，已实现，step16v 已上线）
-
-## Gateway 前台新消息清零 Goal 空片计数（D4）与“熔断后又起一片”裁定（O2）（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`，D4 已实现，待集成）
+## Gateway 前台新消息清零 Goal 空片计数（D4）与“熔断后又起一片”裁定（O2）（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`，D4 已实现，step16w 已上线并经真实模型复核）
 
 - **D4 现象**（ae 复测 G05）：TUI/飞书经 Gateway 发来的新消息（`gwreq-1790863471`）之后 `idle_slices` 仍是 3；设计是新用户消息清零计数。
 - **D4 原因**：`reset_goal_progress_fuse` 只接在 `conversation/runtime.ChannelMessageRuntime.receive` 与 `agent_core/cli_run_conversation`
@@ -35,9 +33,14 @@
 - **观察口径**：判断“暂停之后是否还有片”请用 fuse 记账或 runtime_events/attempt 的真实时间，不要用 Goal `updated_at`。是否给熔断记录另存
   真实记账时刻，留待以后有需要再定，本次不改。
 - **证据**：`~/.my-agent/decision-evidence/o2-goal-fuse-timestamp-20261001/`（仓库外：hook 计时事件、假模型日志、脚本、README）。
+- **上线与复核**：step16w（main `8d6a5401b`，10-01 08:08 上线）。ae 用 MiniMax-M2.7 在隔离环境复核通过：计数为 1 时发消息清零、之后仍要连续
+  3 个空片才暂停；暂停后发消息只清计数、保留暂停和原因码；`/goal resume` 后恢复。证据 `~/.my-agent/decision-evidence/d4-step16w/`。
+- **待定（O4，3a 裁定先不改）**：用户消息要等正在跑的那一片结束才处理；如果那一片正好是第三个空片，熔断先暂停，消息之后只清零计数，
+  用户还要再 `/goal resume`。这与“只有恢复动作清除暂停”的设计一致，用户也会在回复里收到熔断提示，不算正确性缺陷。若要改成
+  “消息排队期间不记第三个空片”，需要会话层在熔断记账前查网关队列里本线程是否有排队的用户消息，属于新设计，先记在这里。
 - **验证**：见 TESTS.md 同名节。
 
-## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`，已实现，待上线）
+## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`，已实现，step16v 已上线）
 
 - **现象**（用户反馈“effort 只能最高，想按自己想法换档好像不行”）：生产控制账里用户 6 次 `/effort` 全是查看，从没设成过别的档位。
   原因有三：全局默认 `model_reasoning_effort` 在 09-27 按用户要求设成了 max，所以每个会话都显示“最高（全局默认）”；TUI 里从补全
