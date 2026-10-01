@@ -14,6 +14,31 @@
 
 ## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`，已实现，step16v 已上线）
 
+## Gateway 前台新消息清零 Goal 空片计数（D4）与“熔断后又起一片”裁定（O2）（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`，D4 已实现，待集成）
+
+- **D4 现象**（ae 复测 G05）：TUI/飞书经 Gateway 发来的新消息（`gwreq-1790863471`）之后 `idle_slices` 仍是 3；设计是新用户消息清零计数。
+- **D4 原因**：`reset_goal_progress_fuse` 只接在 `conversation/runtime.ChannelMessageRuntime.receive` 与 `agent_core/cli_run_conversation`
+  （非续跑消息）两个入口；Gateway 前台 `gateway_parts/request_execution._execute_gateway_conversation_turn` 用
+  `append_gateway_conversation_message(role="user")` 写入用户消息后没有重置。
+- **D4 做法**：同一函数里用户消息写入成功后调用 `reset_goal_progress_fuse(store, thread_id)`（默认 `clear_reason=False`），与另两个入口同口径：
+  只清计数，熔断暂停的 Goal 保留暂停与原因码，恢复仍走 `/goal resume`；写入失败时不清。没有新配置项（纯缺陷修复，沿用既有语义）。
+- **D4 边界**：Goal 自动续跑片是后台 wake（`background_goal.continue_goal_after_report` → `goal_runtime.raise_goal_continuation_wake` →
+  后台调度器 `run_once`），不经过 Gateway 前台回合，所以不会被这次重置清零；Gateway 前台请求的生产者只有 TUI/IM/HTTP 用户提交
+  （含用户输入的系统任务命令）与 scale 转发，没有后台自造的前台请求。合同测试同时钉住两个方向。
+- **O2 现象**（同一 G05）：熔断在 +32.9 s 暂停 Goal 后 0.1 s，同一 main run 又起了一片（`attempt-1790862721-b5a7ea38`，+33.0–37.7 s，0 工具），
+  找不到对应的新 wake，之后再无新片。
+- **O2 裁定：不是宿主竞态，不改代码。** 用真实 Gateway 循环加脚本化假模型三轮复现（即时、贴近真实时长、再加前台收尾占住会话 3 秒），
+  都是 3 个空片、第 3 片报告记账时熔断、之后没有任何新片或新 wake。关键事实：熔断把 Goal `updated_at` 记成调度 tick 开始时传入的 `now`
+  （`record_goal_continuation_fuse` 的 `request.now`），而这一刻早于本片模型运行；复现里暂停后的 `updated_at` 正好等于第 3 片的 tick 开始，
+  比第 3 片 attempt 早 0.05 s，熔断真正记账在 5 秒之后。ae 看到的“暂停后又起一片”就是触发熔断的第 3 片本身：ae 的后台 attempt 共 3 个
+  （+20、+27、+33），对应 3 个计数 wake，暂停后没有新片。前台占住会话时后台多次进入同一 wake 批次都被推迟，不计数也不运行。
+- **观察口径**：判断“暂停之后是否还有片”请用 fuse 记账或 runtime_events/attempt 的真实时间，不要用 Goal `updated_at`。是否给熔断记录另存
+  真实记账时刻，留待以后有需要再定，本次不改。
+- **证据**：`~/.my-agent/decision-evidence/o2-goal-fuse-timestamp-20261001/`（仓库外：hook 计时事件、假模型日志、脚本、README）。
+- **验证**：见 TESTS.md 同名节。
+
+## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`，已实现，待上线）
+
 - **现象**（用户反馈“effort 只能最高，想按自己想法换档好像不行”）：生产控制账里用户 6 次 `/effort` 全是查看，从没设成过别的档位。
   原因有三：全局默认 `model_reasoning_effort` 在 09-27 按用户要求设成了 max，所以每个会话都显示“最高（全局默认）”；TUI 里从补全
   选中 `/effort` 回车会立刻提交（`submit_on_enter`），没机会输入档位；查看回执也不说能选哪些档位、怎么改。

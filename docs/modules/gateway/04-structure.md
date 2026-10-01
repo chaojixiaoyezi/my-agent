@@ -273,7 +273,8 @@ direct/plain/TUI 由 `conversation/local_run_control.py` 接收同一 core 回�
 锁维护 exact attempt，迟到取消不覆盖活动目标的新执行。`request_errors.py` 将绑定冲突独立报告，
 不把完好的会话历史误报为无法读取。前后台共享 canonical task/history，不新增恢复会话。
 `conversation/goal_progress_fuse.py` 按工具调用、Goal revision/status 与任务状态快照判断空片；计数保存在 Goal metadata，达到配置上限后复用 `paused` 状态并落 `GOAL_CONTINUATION_NO_PROGRESS`。
-`gateway_parts/goal_control_service._resume_goal` 显式恢复时清计数、原因和旧 host notice，再经 `goal_runtime.py` 发布 wake；用户新消息只重置计数，不隐式恢复目标。
+`gateway_parts/goal_control_service._resume_goal` 显式恢复时清计数、原因和旧 host notice，再经 `goal_runtime.py` 发布 wake；用户新消息只重置计数，不隐式恢复目标；Gateway 前台在 `request_execution._execute_gateway_conversation_turn` 写入用户消息成功后
+调用 `reset_goal_progress_fuse`（默认保留暂停原因，写入失败不清），Goal 自动续跑片走后台 wake，不经过这里。
 后台输入使用原 task 邮箱及持久消息回执；`control_service.py` 核对同会话执行 claim，
 TUI 的背景 task ID 仅作 expected-target 提示。`runtime_db/repository.py` 在新 attempt 成功取得执行权后
 同事务重开旧 TaskRun 并追加事件，不把历史关闭状态当作当前状态，也不绕过原执行锁。

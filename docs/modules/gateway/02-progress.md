@@ -771,3 +771,10 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **改动**：TaskRun 收口判定移到 `conversation/task_run_closeout.settle_terminal_task_run`（`runtime_mixin` 只委托，网关直接调用）；
   接替判定改为 `SubAgentManager.taken_over_successor`，网关经 `owner_agent.subagents` 调用。边界规则没改，行为不变。
 - 测试与变异见 TESTS.md 同名节。
+
+## Gateway 前台新消息清零 Goal 空片计数（D4）与 O2 裁定（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`）
+
+- **起因**：ae 复测 G05，Gateway 来的新消息之后 `idle_slices` 仍是 3；另有“熔断暂停后 0.1 s 又起一片”的观察 O2。
+- **改动**：`request_execution._execute_gateway_conversation_turn` 用户消息写入成功后调用 `reset_goal_progress_fuse`。
+- **O2**：不是竞态，是熔断用调度 tick 的 `now` 记 `updated_at`，那一片其实就是触发熔断的第 3 片；不改代码，见设计台账同名节。
+- 测试与变异见 TESTS.md 同名节。

@@ -68,6 +68,10 @@ workspace 是控制输入的一部分，必须纳入持久回执的版本化摘�
 - `goal_continuation_idle_limit` 默认 3；连续达到上限后在 Goal 原子记录中将状态设为既有 `paused`，记录
   `reason_code=GOAL_CONTINUATION_NO_PROGRESS` 并结算目标时钟。0 表示不限；任一工具调用或 Goal/任务状态变化清空连续计数。
 - 用户新消息重置计数但不恢复暂停目标；显式 `/goal resume` 恢复原 Goal/task、清除熔断原因与待送达熔断提示，并从 0 开始计数。
+  重置入口共三处，口径相同（只清计数、保留暂停原因）：`ChannelMessageRuntime.receive`、CLI 的非续跑用户消息、Gateway 前台
+  `request_execution._execute_gateway_conversation_turn` 写入用户消息成功之后（2026-10-01 D4 补齐）。自动续跑片走后台 wake，不经过这三处。
+- 熔断记账用调度 tick 开始时传入的 `now`，所以暂停后 Goal 的 `updated_at` 等于触发熔断那一片的 tick 开始，早于这一片的模型运行；
+  判断暂停之后是否还有片要看 fuse 记账或 attempt/runtime_events 的真实时间（2026-10-01 O2 裁定）。
 - 暂停提示复用线程的 host notice 队列，不建立第二种通知/状态机；由现有 TUI 与 IM 最终消息出口展示，因提示在熔断后排队，用户会在下一条适用回复中看到。
 - 验证覆盖：原始红测证明没有保护时目标仍为 active；续跑集成测试验证第 3 个空片暂停与 0 不限；独立合同测试验证工具/结构化进展重置、用户消息重置、恢复后第一片计数为 1、原因清除及通知去重。
   真实 MiniMax 模型和实际 TUI/IM 收件观察仍未验证。

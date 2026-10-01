@@ -40,6 +40,7 @@ from ..conversation.authority import (
 from ..conversation.compact_carry import compact_overflow_carry
 from ..conversation.compact_progress import COMPACT_TRIGGER_PREFLIGHT
 from ..conversation.control_commands import conversation_task_attributes
+from ..conversation.goal_progress_fuse import reset_goal_progress_fuse
 from ..conversation.host_notices import HostNotice, host_notices_from, pending_host_notices
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..tooling.operation_verification import public_operation_verification
@@ -382,6 +383,8 @@ def _configure_gateway_main_activity(context: request_context.GatewayAskRunConte
 # LLM: 仅在车道内运行；observer只沿内部调用传入，恢复上下文须回到最终持久化；公共命令判据先于用户历史和模型。
 #   模型回合正常返回后先做决策实验收尾（补写实际工具用量、apply 授权内晋升检查），再持久化答复；收尾不改变结果。
 #   用户消息落账后先发布待送达的宿主提示，同一批提示在持久化答复时按编号取走。
+#   用户消息落账成功后清零持续目标的空片计数（与 ChannelMessageRuntime.receive、CLI 入口同口径：保留熔断暂停原因）；
+#   Goal 自动续跑片走后台 wake，不经过这里，所以不会被这次重置清零。改动同步 test_gateway_goal_fuse_reset.py。
 # 函数用途: 配置流和审批并执行会话；明确系统命令及历史写入失败均阻止模型副作用。
 def _execute_gateway_conversation_turn(
     context: request_context.GatewayAskRunContext,
@@ -408,6 +411,7 @@ def _execute_gateway_conversation_turn(
         content=prompt,
     ):
         raise ConversationPersistenceError("当前消息无法可靠写入会话记录，请稍后重试")
+    reset_goal_progress_fuse(getattr(context.agent, "conversation_store", None), conversation.thread_id)
     notices = _publish_gateway_host_notices(context, conversation)
     result, conversation = _run_gateway_turn_with_conversation_compact(
         context,

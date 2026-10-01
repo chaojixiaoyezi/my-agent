@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## Gateway 前台新消息清零 Goal 空片计数（D4）与 O2 裁定（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`）
+
+- **新增** `test_gateway_goal_fuse_reset.py`（真实 echo Gateway：`submit_gateway_ask` + `_process_gateway_requests`；真实后台调度器
+  `BackgroundMainAgentScheduler.tick`；同一个 Agent 与 ConversationStore，没有替身对象）：
+  - 后台 2 个空片后，Gateway 前台用户消息把计数清零、Goal 仍 active；之后后台仍要连续 3 个空片才熔断，且这 3 片没有一片经过
+    `_execute_gateway_conversation_turn`；
+  - 熔断暂停的 Goal 收到 Gateway 消息：计数清零，状态仍 paused，原因码保留；
+  - 用户消息写入失败（请求失败）时计数不变。
+- **红绿**：改前前两条失败（计数停在 2 和 3）。
+- **变异**：5 个全部被抓住（去掉重置、写入前就重置、清掉暂停原因、空线程、后台续跑片也重置；最后一个确认失败在“仍要 3 片才熔断”的断言上）。
+- **O2**：真实 Gateway 循环加脚本化假模型三轮复现，见设计台账同名节；证据在仓库外 `~/.my-agent/decision-evidence/o2-goal-fuse-timestamp-20261001/`。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 73 个加仓库级扫描守卫（含 `test_packaging.py`，
+  短 basetemp）：2088 passed、1 skipped；Ruff、doc sync、strict code-size（与 `b7058e33a` 比新增 finding 0）、`git diff --check`、
+  clean-package 全部通过。
+
 ## TUI 单独 /effort 打开档位菜单，查看回执列出可选档位（2026-09-30，分支 `claude/3a-effort-picker`，基于 step16v `d9abcb5ec`）
 
 - **新增** `test_tui_effort_menu.py`：

@@ -1,0 +1,126 @@
+"""Gateway 前台新消息重置 Goal 空片计数（2026-10-01，ae 复测 D4）。
+
+真机：TUI/飞书经 Gateway 发来的新消息（gwreq-1790863471）之后 idle_slices 仍是 3；设计是新用户消息清零计数。
+reset_goal_progress_fuse 只接在 ChannelMessageRuntime.receive 和 CLI 入口，Gateway 前台
+（request_execution._execute_gateway_conversation_turn）写入用户消息后没有重置。钉住两个方向（真实 echo Gateway + 真实后台调度器）：
+1. Gateway 前台用户消息写入成功后清零计数；熔断暂停的 Goal 只清计数、保留暂停原因（与另两个入口同口径）；写入失败不清；
+2. Goal 自动续跑片走后台 wake，不经过这条前台路径：清零之后仍要连续 3 个空片才熔断。
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from agent_py_agent.agent.conversation import (
+    BackgroundMainAgentRuntime,
+    BackgroundMainAgentScheduler,
+    FakeDeliveryService,
+)
+from agent_py_agent.agent.conversation.goal_progress_fuse import (
+    FUSE_METADATA_KEY,
+    NO_PROGRESS_REASON_CODE,
+)
+from agent_py_agent.agent.conversation.goal_runtime import raise_goal_continuation_wake
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import (
+    GatewayAskParams,
+    _process_gateway_requests,
+    gateway_paths,
+    request_execution,
+    request_history,
+    submit_gateway_ask,
+)
+from agent_py_agent.agent.settings.config import AgentConfig
+
+_SESSION = "goal-fuse-session"
+
+
+@pytest.fixture
+def world(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
+                                    gateway_per_user_owner_scoping=False), tmp_path / "ws")
+    paths = gateway_paths(agent)
+    for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+    store = agent.conversation_store
+    _ask(agent, paths, "开个头")
+    thread_id = store.threads.resolve(channel="chat", channel_conversation_id=_SESSION,
+                                      channel_user_id="local-agent").thread_id
+    goal = store.goals.create({"thread_id": thread_id, "objective": "持续推进同一件事"})
+    store.tasks.bind({"thread_id": thread_id, "task_id": goal.task_id, "goal": goal.objective, "status": "active"})
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    world = type("World", (), {})()
+    world.agent, world.paths, world.store, world.thread_id, world.goal, world.scheduler = (
+        agent, paths, store, thread_id, goal, scheduler)
+    return world
+
+
+def _ask(agent, paths, prompt: str) -> dict:
+    _request_id, _request_path, response_path = submit_gateway_ask(
+        paths, params=GatewayAskParams(prompt=prompt, save=False, chat_session_id=_SESSION, agent=agent))
+    _process_gateway_requests(agent, paths)
+    return json.loads(response_path.read_text(encoding="utf-8"))
+
+
+def _fuse(world) -> tuple[str, int, str]:
+    goal = world.store.goals.load(world.thread_id, goal_id=world.goal.goal_id)
+    state = goal.metadata.get(FUSE_METADATA_KEY) or {}
+    return goal.status, int(state.get("idle_slices", 0) or 0), str(state.get("reason_code") or "")
+
+
+def _background_slice(world, now: float) -> None:
+    batch = world.scheduler.tick(now=now)
+    assert len(batch) == 1 and batch[0].tool_call_count == 0
+
+
+def test_gateway_user_message_resets_idle_count_but_background_slices_still_trip(world, monkeypatch):
+    raise_goal_continuation_wake(world.store, world.goal, now=100.0)
+    _background_slice(world, 101.0)
+    _background_slice(world, 102.0)
+    assert _fuse(world) == ("active", 2, "")
+
+    response = _ask(world.agent, world.paths, "我补充一句新的要求")
+
+    # 改前：Gateway 前台新消息之后仍是 ("active", 2, "")。
+    assert response["ok"] is True
+    assert _fuse(world) == ("active", 0, "")
+    foreground_turns = []
+    original = request_execution._execute_gateway_conversation_turn
+    monkeypatch.setattr(request_execution, "_execute_gateway_conversation_turn",
+                        lambda *args, **kwargs: foreground_turns.append(1) or original(*args, **kwargs))
+    _background_slice(world, 103.0)
+    _background_slice(world, 104.0)
+    assert _fuse(world) == ("active", 2, "")
+    _background_slice(world, 105.0)
+    assert _fuse(world) == ("paused", 3, NO_PROGRESS_REASON_CODE)
+    # 续跑片全程走后台 wake，没有一片经过 Gateway 前台回合，所以不会被前台的重置清零。
+    assert foreground_turns == []
+    assert world.store.wakes.pending() == []
+
+
+def test_gateway_message_after_fuse_pause_clears_count_and_keeps_the_pause_reason(world):
+    for index in range(3):
+        world.store.goals.record_continuation_fuse({
+            "thread_id": world.thread_id, "goal_id": world.goal.goal_id, "task_id": world.goal.task_id,
+            "wake_signal_id": f"idle-{index}", "progressed": False, "idle_limit": 3,
+        })
+    assert _fuse(world) == ("paused", 3, NO_PROGRESS_REASON_CODE)
+
+    assert _ask(world.agent, world.paths, "看看现在进展如何")["ok"] is True
+
+    # 与 ChannelMessageRuntime.receive / CLI 同口径：只清计数，暂停与原因留给 /goal resume 处理。
+    assert _fuse(world) == ("paused", 0, NO_PROGRESS_REASON_CODE)
+
+
+def test_unpersisted_gateway_message_does_not_reset_the_count(world, monkeypatch):
+    raise_goal_continuation_wake(world.store, world.goal, now=100.0)
+    _background_slice(world, 101.0)
+    _background_slice(world, 102.0)
+    monkeypatch.setattr(request_history, "append_gateway_conversation_message", lambda *args, **kwargs: False)
+
+    response = _ask(world.agent, world.paths, "这条写不进会话")
+
+    assert response["ok"] is False
+    assert _fuse(world) == ("active", 2, "")
