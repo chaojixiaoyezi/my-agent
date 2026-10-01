@@ -7,6 +7,7 @@ import json
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from .errors import ProviderResponseError
 from .response_completion import incomplete_response_fields, without_tool_blocks
+from .responses_failure import failed_event_error
 
 
 # LLM: 仅白名单 reasoning item 可跨轮回放，不保存服务端 response id 或开启远端会话存储。
@@ -90,6 +91,7 @@ def _notify(callback, value: str) -> None:
 
 
 # LLM: response.completed/incomplete 是终态事实；EOF 与 failed 不冒充完整回复，工具参数只从最终 output 取。
+#   error / response.failed 交给 responses_failure.failed_event_error 按服务商错误码分类（上下文超限走压缩恢复等），不再一律报失败。
 #   终态 output 为空时改用流里逐条的 response.output_item.done（同一组完整条目）：ChatGPT 订阅接口终态不回带 output
 #   （09-30 实测：函数调用只在 output_item.done 里，completed.output 为 []），不按服务商地址分支。终态有 output 仍以它为准。
 # 函数用途: 消费 typed SSE，实时显示正文及 reasoning summary，保留最终用量。
@@ -106,7 +108,7 @@ def collect_response(lines, on_chunk, on_thinking) -> dict:
             raise ProviderResponseError("Responses 流包含无效 JSON。") from exc
         kind = event.get("type")
         if kind in {"error", "response.failed"}:
-            raise ProviderResponseError("Responses 服务返回失败事件。")
+            raise failed_event_error(event)
         if kind in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
             delta = str(event.get("delta") or "")
             thinking.append(delta)

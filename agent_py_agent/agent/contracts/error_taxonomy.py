@@ -3018,6 +3018,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="模型接口返回了无法解码或非 JSON 的响应体（常为网关/代理临时返回错误页或坏字节）；可重试，持续出现则换后端或检查 api_base/代理。",
     ),
+    "MODEL_RESPONSE_FAILED": ErrorContract(
+        code="MODEL_RESPONSE_FAILED",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="服务商在 Responses 流里明确返回了失败事件，错误码不属于上下文超限、额度、限流或临时故障；可重试一次，持续出现请看运行诊断里的服务商错误码（provider_error.code）。",
+    ),
     # —— 产物 ——
     "ARTIFACT_TOO_LARGE": ErrorContract(
         code="ARTIFACT_TOO_LARGE",

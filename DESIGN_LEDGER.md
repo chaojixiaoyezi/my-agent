@@ -1,5 +1,20 @@
 # 设计台账
 
+## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
+
+- **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`
+  结束，错误码只是异常类名 `PROVIDERRESPONSEERROR`；当时估算上下文 235358／272000（触发线 244800）。宿主把服务商给的错误对象整个
+  丢掉：诊断查不到原因，上下文超限走不到既有的压缩恢复，限流／临时故障也走不到各自的重试路线。
+- **做法**：新文件 `backends/responses_failure.py`。`responses_wire.collect_response`（SSE 与 WebSocket 共用）遇到 `error`／`response.failed`
+  时取服务商错误对象（`response.error`，或 error 事件的 `error`／顶层 code、message、param；只留白名单字段并限长），与 HTTP 同一组判定：
+  上下文超限 → `ProviderContextWindowError`（主循环 `context_pressure_response` 压缩后重试）；硬额度 → `ProviderQuotaExhaustedError`；
+  限流码 → `ProviderUsageLimitError`；服务端繁忙／内部错误 → `ProviderTransientError`；其余 → `ProviderResponseError`（新登记错误码
+  `MODEL_RESPONSE_FAILED`），服务商错误码与消息留在 details 供诊断。
+- **守住的边界**：只看结构化错误对象，不按模型名或地址分支；已知错误码表只是优化，认不出的码保留原文、不会因此被丢弃；用户可见文字
+  只带错误码，服务商原始消息只进诊断；重试、压缩策略本身不改。
+- **待定**：触发这次修复的那一单，真实原因已无法追溯（当时没有记录）；上线后若再出现，看诊断里的 `provider_error.code`。
+- **验证**：见 TESTS.md 同名节。
+
 ## 能力包 G01 生产规模真实运行后的两条待定（2026-10-01，3a 裁定）
 
 - **G01 压缩后原资源链仍未覆盖**：ae 在 step16v 上用 gpt-6-luna 跑了一次生产规模长任务（36 份输入、约 58 万字），产物全对、

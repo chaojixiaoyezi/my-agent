@@ -80,6 +80,11 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
   死连接由首事件/滚动空闲超时收口。断开错误文本附阶段（first_event / stream_idle）、连接后秒数和关闭帧（服务端或本端关闭码与原因，
   无关闭帧时写明），只作排查，不参与判定。中途断开照旧是可恢复错误：主回合由模型回合级退避重试；Compact 摘要请求也按同一退避配置
   原地重发（见[对话上下文 · 摘要请求的瞬时错误重发](CONVERSATION_CONTEXT_DESIGN.md#摘要请求的瞬时错误重发2026-09-30)）。
+- **失败事件按错误码分类（10-01）**：SSE 与 WebSocket 共用的 `collect_response` 遇到 `error`／`response.failed` 时，交
+  `backends/responses_failure.failed_event_error` 读服务商错误对象（`response.error`，或 error 事件的 error／顶层 code、message、
+  param，限长），与 HTTP 同一组判定：上下文超限 → `ProviderContextWindowError`（主循环压缩后重试），硬额度 → 额度用完，限流 →
+  限流，服务端繁忙／内部错误 → 临时故障，其余 → `MODEL_RESPONSE_FAILED` 并在诊断 details 里保留服务商错误码与消息。此前一律报
+  “返回失败事件”，原因整个丢掉，上下文超限也走不到压缩恢复。
 - **依赖**：直接使用 `websockets`（BSD-3-Clause）。它原已随 `lark-oapi`（飞书长连接）安装，现在 pyproject 显式声明。
   收益是与服务商推荐的传输一致、长回复不断线；替代方案（标准库自写 RFC 6455 客户端）要自己处理握手、掩码、分片、ping 和代理 CONNECT，
   代码量与风险更大，不采用。

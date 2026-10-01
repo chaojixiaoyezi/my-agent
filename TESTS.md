@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`）
+
+- **新增** `test_responses_failure.py`（9 项）：
+  - 已知错误码各走既有路线：`context_length_exceeded`（response.failed 与 error 事件两种写法）→ 上下文超限；`insufficient_quota`、
+    `usage_limit_reached` → 额度用完；`rate_limit_exceeded` → 限流；`server_error` → 临时故障；
+  - 认不出或没给错误码时保留原因：`MODEL_RESPONSE_FAILED`，details 留服务商 code／param，消息限 500 字，错误码已登记；
+  - WebSocket 假连接下 `context_length_exceeded` 抛 `ProviderContextWindowError`，主循环判定 `is_context_window_error` 为真，连接已关；
+  - SSE 后端遇到 `server_error` 抛 `ProviderTransientError`。
+- **红绿与变异**：改前已知错误码一律是同一个 `ProviderResponseError`；9 个变异全部被抓住（退回一律报失败、去掉上下文超限／额度／
+  限流／临时故障任一分支、response.failed 读错位置、不限长、忽略 error 事件顶层字段、认不出的码丢掉错误码）。
+
 ## Gateway 前台新消息清零 Goal 空片计数（D4）与 O2 裁定（2026-10-01，分支 `claude/38-goal-fuse-gateway-reset`，基于 main `b7058e33a`）
 
 - **新增** `test_gateway_goal_fuse_reset.py`（真实 echo Gateway：`submit_gateway_ask` + `_process_gateway_requests`；真实后台调度器
