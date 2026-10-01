@@ -141,14 +141,30 @@ def test_subscription_responses_selection_sends_strict_compatible_schema_and_par
 
 
 def test_subscription_responses_failed_event_is_recorded_as_structured_failure():
+    # 与 backends/responses_failure 合并后：server_error 归为临时故障，类型名照样落回执，正文不进回执
     backend, _sent = _subscription_backend((
         {"type": "response.created", "response": {"status": "in_progress"}},
         {"type": "response.failed", "response": {"status": "failed", "error": {"code": "server_error", "message": _SECRET}}},
     ))
     result = select_capability_packages(_agent(backend), _material())
     assert result.outcome == "failed" and result.error_code == "CAPABILITY_SELECTION_MODEL_FAILED"
-    assert result.failure_facts["error_type"] == "ProviderResponseError"
+    assert result.failure_facts["error_type"] == "ProviderTransientError"
     assert "secret" not in json.dumps(result.failure_facts)
+
+
+def test_strict_schema_rejection_keeps_provider_code_and_param():
+    # D5 真实失败的形状：Responses 失败事件 invalid_json_schema（param text.format.schema）；服务商码与参数一并落回执
+    backend, _sent = _subscription_backend((
+        {"type": "response.created", "response": {"status": "in_progress"}},
+        {"type": "response.failed", "response": {"status": "failed", "error": {
+            "code": "invalid_json_schema", "type": "invalid_request_error", "param": "text.format.schema", "message": _SECRET}}},
+    ))
+    result = select_capability_packages(_agent(backend), _material())
+    assert result.outcome == "failed"
+    facts = result.failure_facts
+    assert facts["error_type"] == "ProviderResponseError" and facts["error_code"] == "MODEL_RESPONSE_FAILED"
+    assert facts["provider_error_code"] == "invalid_json_schema" and facts["provider_error_param"] == "text.format.schema"
+    assert facts["provider_error_type"] == "invalid_request_error" and "secret" not in json.dumps(facts)
 
 
 def test_failure_is_persisted_only_for_failed_outcome_and_round_trips():

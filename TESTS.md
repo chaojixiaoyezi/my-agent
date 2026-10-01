@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
+
+- `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，
+  预期 `server_error` 失败事件落成 `ProviderResponseError`；合入 `backends/responses_failure` 后它归为临时故障，预期改为 `ProviderTransientError`。
+- 新增 `test_strict_schema_rejection_keeps_provider_code_and_param`：D5 真实失败的形状（`invalid_json_schema`、`text.format.schema`）经两项修复
+  合并后，回执里 `error_code=MODEL_RESPONSE_FAILED` 且服务商 code／type／param 都在，正文不进回执。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`）
 
 - **新增** `test_responses_failure.py`（17 项）：
