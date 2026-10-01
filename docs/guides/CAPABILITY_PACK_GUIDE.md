@@ -51,6 +51,19 @@
 
 小例子：默认设置下，你派一个新任务「按报告流程写一份周报」，my-agent 会看到相关的报告能力包摘要；如果包里方法合适，它会读入口和需要的模板照着做。关闭一次选择开关不影响这个流程。
 
+### 装好后怎么读包里的资源
+
+my-agent 通过 `skill_search` 这个检索工具读能力包，实际链路是：**读入口文档 → 在包里找模板/脚本 → 把脚本复制到工作区 → 运行**。分步说明：
+
+1. **找包**：`skill_search(action=search, query=...)` 按任务需求检索；结果里每个包带 `package_id`，后面几步都要用它。任务推荐里出现的包摘要同样可以用。
+2. **读入口文档**：`skill_search(action=get, package_id=<包ID>)` 读取包的入口文档（如 `CAPABILITY.md`），先看整套方法怎么用。注意：能力包不能用 `skill_id` 读，必须用 `package_id`。
+3. **在包里找资源**：`skill_search(action=search, package_id=<包ID>, query=...)` 检索包内的模板/脚本；结果里的 `next_read` 可以原样作为下一步的参数。
+4. **读具体资源**：`skill_search(action=get, package_id=<包ID>, resource_path=<包内相对路径>)`。包内资源**不是工作区文件**，不能用 `read_file`/`find_files` 去猜安装位置，必须用 `package_id + resource_path` 读。
+5. **把脚本放进工作区**：需要运行时，把返回的完整 `source_ref` 原样传给 `write_file(source_ref=...)`，写到工作区里自己选的目标路径。不要手抄或改写脚本内容；这一步只是复制，不会执行资源。
+6. **运行**：脚本只是文本资料，执行仍走你平时允许的命令工具，且只在你授权的范围内运行。
+
+小例子：my-agent 找到「会议纪要整理」包 `meeting-notes-qa-pack` 后，先 `get` 读入口文档，再 `get` 拿 `scripts/summarize.py`，用 `write_file(source_ref=...)` 把脚本原样复制到工作区，然后 `run_command` 运行它核对纪要。
+
 ### 新任务才会用到新版本
 
 - 一个任务**开始后**用到的包版本会被固定住：包停用、卸载或换了新版，正在进行/已开始的任务仍然用当初固定的版本，不会中途换包，也不会悄悄改用新版。
@@ -69,6 +82,27 @@
 - 子代理沿授权读取的版本与主任务固定的是同一个版本，孙代理只继承父级的授权，不会自己扩大。
 
 小例子：你让主代理"用报告包做一份周报，分一部分给子代理整理数据"，主代理派子代理时在 `allowed_skills` 里填 `capability:report-workbench-a`，子代理才能读报告包里的模板和脚本。
+
+### 子代理没拿到授权时先申请，不要直接读包
+
+没有包授权的子代理直接调 `skill_search` 读这个包会失败，错误码固定为 `SKILL_SNAPSHOT_UNAVAILABLE`（当前轮快照里没有这个包，读不到正文），恢复建议就是去申请能力。正确做法是走"能力申请 → 父级裁决"两步：
+
+1. 子代理调 `capability_request` 提交申请，`requested_skills` 里填 `capability:<包ID>`（例如 `capability:report-workbench-a`）。注意：裸包名、包内资源路径都不能代替这个引用，必须写 `capability:` 前缀的包稳定 ID。
+2. 父级用 `resolve_capability_requests` 裁决：`decision=grant` 批准，或 `decision=deny` 拒绝；两种都会带着结果唤醒子代理继续跑。批准后，子代理从下一个工作片开始带新权限，重新读包即可。
+
+小例子：子代理整理数据时发现报告包不可用（`skill_search` 返回 `SKILL_SNAPSHOT_UNAVAILABLE`），于是调 `capability_request` 申请 `requested_skills=["capability:report-workbench-a"]`；主代理用 `resolve_capability_requests` 批准后，子代理续跑并成功读到包里的模板。
+
+### 申请被拒会带确定错误码，不会记成"结果未知"
+
+父级批准（grant）时会对申请做安全检查，越界或超范围的申请会**确定拒绝**，回执带错误码，不会再被记成"结果未知"：
+
+- 申请的写目录（`write_roots`）全部落在任务工作区或主代理工作区之外（例如 `/etc/hosts`）→ `PATH_OUTSIDE_WORKSPACE`，未授权。
+- 申请的工具、MCP 或 Skill 超出直属父级当前可用范围 → `MISSING_CAPABILITY`，未授权。
+- 裁决过程中出现异常 → `TOOL_ERROR`。
+
+被拒绝后子代理会收到明确的拒绝结果（含原因），按现有权限调整方案或交付能完成的部分即可，不需要继续空等授权。
+
+小例子：子代理申请把结果写到 `/etc/hosts`，父级 grant 时回执直接是 `PATH_OUTSIDE_WORKSPACE` 拒绝；子代理看到原因后改写到自己的任务工作区，不再空等。
 
 ## 五、自己做一个能力包
 
@@ -112,4 +146,6 @@ python3 scripts/build_capability_package.py \
 - **为什么旧任务还用旧版本？** 任务开始后版本被固定，换代/停用不影响已开始的任务；新任务才用新版本。
 - **为什么 my-agent 说这个包不可用？** 包被停用、卸载或版本被换后，旧任务里的引用会标记为不可用，不会偷偷换成别的包。
 - **IM 里能不能管能力包？** 目前不行——`/plugins` 只在 TUI 里可用，IM 暂不支持，请在 TUI 里操作。
-- **界面和我看到的不一样？** 以实际界面为准；这份说明按 2026-09-30 的 `/plugins` 动作编写。
+- **子代理说 skill_search 报 SKILL_SNAPSHOT_UNAVAILABLE？** 说明它没拿到这个包的授权：要么父级派工时的 `allowed_skills` 没传 `capability:<包ID>`，要么它申请后还没被批准。让父级在派工参数里授权，或让子代理走 `capability_request` 申请、父级 `resolve_capability_requests` 批准后再读。
+- **父级拒绝能力申请会怎样？** 确定拒绝并带错误码：写目录越界是 `PATH_OUTSIDE_WORKSPACE`，工具/Skill 超出父级是 `MISSING_CAPABILITY`，裁决异常是 `TOOL_ERROR`；不会记成"结果未知"。子代理按拒绝原因调整方案即可。
+- **界面和我看到的不一样？** 以实际界面为准；这份说明按 2026-10-01 的 `/plugins` 动作和真实运行观察编写。
