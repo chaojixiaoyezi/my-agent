@@ -164,13 +164,17 @@ def _failure_facts(value: object) -> dict:
 
     if not isinstance(value, dict) or set(value) - set(FAILURE_FACT_KEYS):
         raise ValueError(CAPABILITY_SELECTION_INVALID)
-    for key, item in value.items():
-        if key == "http_status":
-            if type(item) is not int or not 100 <= item <= 599:
-                raise ValueError(CAPABILITY_SELECTION_INVALID)
-        elif not isinstance(item, str) or not _FAILURE_TOKEN.fullmatch(item):
-            raise ValueError(CAPABILITY_SELECTION_INVALID)
+    if not all(_failure_fact_valid(key, item) for key, item in value.items()):
+        raise ValueError(CAPABILITY_SELECTION_INVALID)
     return dict(value)
+
+
+# LLM: _failure_facts 的单字段判定：http_status 必须是 100–599 的整数，其余值必须是 _FAILURE_TOKEN 短标记；纯函数，不抛异常。
+# 函数用途: 判断一个选择失败原因字段的值是否合格。
+def _failure_fact_valid(key: str, item: object) -> bool:
+    if key == "http_status":
+        return type(item) is int and 100 <= item <= 599
+    return isinstance(item, str) and bool(_FAILURE_TOKEN.fullmatch(item))
 
 
 # LLM: 复用原 canonical 包引用校验；本函数不查安装、不授予权限、不写 pins。只按总序列化字节防止失控输入，数量开放。
