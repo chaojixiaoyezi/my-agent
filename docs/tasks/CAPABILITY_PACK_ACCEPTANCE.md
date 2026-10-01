@@ -578,6 +578,69 @@ D1／G05 Goal 续跑熔断的过程：
   - 换一个不适合分摊的长任务形态再跑一次，例如每一步都依赖上一步结果的串行任务。
   - 不建议为了凑压缩去改写需求，诱导模型不派子代理。
 
+## G01／G02 链式长任务真实重跑（gpt-6-luna，2026-10-01）
+
+结论：
+- **G01、G02 仍未命中。** 任务按设计做成了串行依赖，模型也没有派子代理，但它写了一个脚本，用 run_command 批量处理整条链。40 份原文从没读进模型上下文，上下文峰值约 75K，离触发线 244800 很远，全程没有压缩。
+- 产物全部正确，包资源链（读取、物化、执行）正常。
+- 发现缺陷候选 D5：宿主一次选择在 luna 上失败，而且失败原因没有记下来。已交 3a。
+- 没有改产品代码，也没有为了凑压缩改写需求。
+
+### 环境
+- **被测代码**：`0ca852195`。它在 `agent_py_agent/`、`scripts/` 下的代码与生产 step16w `8d6a5401b` 完全一致（git diff 为空），git archive tar SHA256 `23c4510b…`。
+- **隔离**：专用 venv、隔离 home、私有 127.0.0.1:8441（开跑前确认空闲），`env -i` 启动；跑完假 HOME 为空，测试根已删除，没有碰生产 8420。
+- **模型**：gpt-6-luna（档案 `057b8e64…`，服务商 `login-b86e5880`，openai_responses，窗口 272000，触发线 244800，即 ≥262144 生产规模）。
+  - 目录副本只留这一个档案，清空 refresh_token，权限 600，用完删除；开跑时 access_token 剩约 217 小时。
+- **配置**：一次选择开关打开，`max_tool_rounds: 400`，不用 Goal，审批模式 auto。
+- **判据**：只看结构化事实，包括：
+  - 压缩检查点与线程的 `compact_generation`、请求流里的 `context_usage`／`model_metrics`；
+  - 工具索引与事件（skill_search 的 get／source_ref、run_command）、物化文件 SHA；
+  - 任务 pin 与 `host_capability_selection.v1`、TaskRun、model_usage。
+  - 不读会话正文。
+
+### 任务设计（让任务本身不好拆，而不是在需求里诱导）
+- **测试包**：`meeting-records` 0.2.0（链式版），用产品自带的构建脚本打包，经 TUI 安装启用。
+  - 每份原始记录有「修订版 A」「修订版 B」两个版本，负责人、截止日和结论都不同。
+  - 第 N 份采用哪一版、第 N 份的校验码，都由包内 `tools/check.py` 根据第 N−1 份的校验码算出（第一份为 START），盐值只在脚本里。所以必须按顺序一份份来，拆给并行的子代理没有帮助。
+- **输入**：40 份确定性合成记录，共 1216484 字，每版约 1.5 万字。标准答案由测试者沿链用包内同一套函数算出，放在被测工作区之外。
+- **需求**：只发一次，原文是「请把工作区 inputs 目录下的 40 份原始会议记录，按我们装的会议记录整理规范逐份整理成标准记录，放到 records 目录里；全部做完后用规范自带的检查工具把整批核对一遍，再写一份总报告 report.md。」
+  - 需求里没有提子代理或主线程；之后没有插话。
+  - 止损线：累计输入 4000 万 token、4 小时、连续 10 片没有新工具进展。
+
+### 结果
+
+| 项 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| G01 生产规模自然压缩，及压缩后原资源链 | 未命中 | 没有任何压缩检查点，所有线程都没有 `compact_generation`。上下文估算峰值 75153，触发线 244800 |
+| G02 第四代之后 | 未命中 | 没有任何压缩代次 |
+| 为什么没涨到压缩线 | — | 模型用 apply_patch 写了 `ws/process_records.py`，再通过 run_command（共 9 次，其中 4 次提到 check.py）批量处理整条链，过程中调用物化出来的 check.py。read_file 只读了它自己的脚本和 report.md，40 份原文没有进入模型上下文。全程只有主线程，没有子代理 |
+| 包资源链（没有压缩参与） | 已发生 | skill_search 依次 get 入口文档、search、get `templates/record.md`、get `tools/check.py`；`write_file(source_ref)` 物化出 `ws/check.py`，SHA 与包资源一致；任务 pin 是 `meeting-records` `30d185d6e6c7` |
+| 产物（测试者用包自带的 `check.py verify` 加标准答案只读核对） | 全部正确 | 40／40 份：整条链 OK，采用版本对，负责人和截止日全对，校验码与标准答案一致；0 份混用另一版，0 份照抄陷阱；report.md 已写 |
+| 回合 | 正常完成 | 请求 `gwreq-1790870093-67e130de…` done，`turn_end_reason=completed`，19 个工具轮，318 秒；TaskRun done |
+| 用量 | — | 主调用 20 次，accounted 输入 1026914 token（其中缓存 336896），输出 5517 token；止损线一条都没触发 |
+
+### 缺陷候选 D5（已交 3a，不改判本节）
+- **现象**：宿主一次选择在 gpt-6-luna 上失败。
+  - 任务的 `host_capability_selection.v1` 是 `outcome=failed`、`selected_count=0`，warning_codes 为 `CAPABILITY_SELECTION_USAGE_NOT_REPORTED`、`CAPABILITY_SELECTION_MODEL_FAILED`。
+  - model_usage 里的 auxiliary 记录：1 次尝试，状态 failed，0 token。
+- **原因无从诊断**：`capability/package_selection.py` 的 `select_capability_packages` 用一个宽泛的 `except Exception` 吞掉辅助调用的异常，只记一个通用码，不写日志，也不留结构化原因。
+- **对照**：同一个开关在 MiniMax-M2.7 上（9-30 的 G07）选中了 A、B。
+- **影响**：这次主回合不受影响，模型自己 search／get 到了包。
+
+### 证据
+- `~/.my-agent/decision-evidence/g01-luna/`（仓库外）：
+  - 准备材料在 `prep2/`：链式测试包、生成器、核对脚本、stage、watcher；
+  - 本次运行在 `run-chain-step16w/`：`artifacts/g02-summary.json`、30 秒一行的观察日志、`verify-outputs.json`、`stage-report.json`、`prompt.txt`。
+- 不含模型目录、会话正文和产物正文，已扫过，没有密钥或令牌样式的字符串。
+
+建议下一步：
+- G01／G02 的「压缩后原资源链」两次真实运行都没走到。
+  - 第一次，模型把工作分给了子代理；
+  - 第二次，即使任务是串行依赖，模型也选择写脚本批处理，不把原文读进上下文。
+  - 这说明真实模型面对这类批量任务，会自然避开上下文膨胀。该缺口建议按「取决于模型做法、未命中」记账，由 3a／用户决定是否接受。
+  - 若一定要覆盖，只能换成脚本无法代劳的任务，例如每份都要模型自己理解和改写的长文。这已超出本次批准的范围。
+- D5 建议先补可诊断性：失败时把异常类型或结构化原因记进选择回执或日志，再判断是否和 Responses 后端有关。
+
 ## C25空选后能力包对主线程的可见性只读核对与脚本复现（2026-09-28）
 
 针对 [C24](#c24固定9f88的131072自然长任务两代压缩2026-09-28) 的观察①：包选择结果为空之后，已安装并启用的能力包对主线程是否仍可发现、可读取。方法是固定 `9f88e4905` 源码的只读核对、一份本地合同测试和一次 8435 脚本模型端到端；没有产品、测试或配置改动。`origin/main` `60f6f485a` 对 `skill_search_tool.py`、`skill_snapshot.py`、`package_provider.py` 的差异只是读取失败回执带结构化内部原因（`e4a3dba08`），不改下述路径。
