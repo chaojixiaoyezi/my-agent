@@ -241,8 +241,6 @@
   集成分支其它提交引入的新增；按规则 9 拆平——`_run_agent` 尾部收尾段抽成模块级函数 `_finalize_background_execution`
   （参数命名避开 `request` 名单的 params +1 规则），行为逐行不变，拆后 size_diff 新增告警 0。
 
-## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察 → 已实施）
-
 ## P17 合入后的 code-size 拆平（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`，已实现，待集成）
 
 - **起因**：集成分支合入 P17 后，相对已上线 step16y 多出 3 条 high-risk（UserConfigTool 类行数接近软上限、
@@ -280,7 +278,7 @@
   - 依此做 C16 判定：没有包满足"最后 3 次重跑业务全部通过"，不装生产。
   - 详见 [CAPABILITY_PACK_ACCEPTANCE.md](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md) 的 C13 第二部分和 C16 两节。
 
-## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察，待 3a/用户定）
+## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察 → 已实施）
 
 - **现象**（假飞书 + 真网关 + 真模型，`6b2f56dc7`）：
   - 用户在飞书设了一个"等我发笔记"的持续目标。前台确认之后，3 个续跑片每片都给出一句很短的"在等你"，每句都按后台送达规则主动推给了用户（`reason=thread_goal_continue delivery=sent`），10 秒内连收 3 条。
@@ -584,7 +582,7 @@
 - **验证边界**：声明解析、单组和多组冲突、无冲突、provider 投影、真实 write_file schema、handler 未执行及模型可见结果已有仓库测试和变异覆盖。本分支按任务约束没有启动 Gateway 或运行真实模型，改善真实模型恢复行为仍待后续复测。
 - **验证**：见 TESTS.md 同名节。
 
-## C10：IM 的 /plugins 入口（2026-10-01，sol，已实现，本地定向与变异已验，待集成）
+## C10：IM 的 /plugins 入口（2026-10-01，sol，已实现，已集成 step16z `f93968a95`）
 
 - **解决问题**：插件和能力包装卸只有 TUI 入口，IM 用户无法直接查看或管理。
 - **做法**：会话层只识别公共插件命名空间并保留原文；`/ask`、`/control` 进入原持久控制回执，
@@ -593,9 +591,11 @@
   `local/main` 身份判断管理员（含已绑定管理员的私聊），正文中的角色、owner 自述无效。拒绝保留结构化及可见错误码。
 - **确认**：含可执行文件或外部解释器的包沿原启用预览与 `--confirm <确认码>`，未确认前不启动；
   普通危险工具审批仍受原工具策略约束，本轮不另造 IM 确认通道。IM 纯文本不实现 TUI 本地面板动作。
+- **回执口径**（3a 集成时核定，2026-10-02）：IM 回执是公共持久控制回执，只与 TUI 共用 `ok/message/request_id/error_code`；
+  TUI 目录回执里的细分 `reason`（如 invalid_plugin_id、unclosed_quote）不进 IM 回执，机器判断只看 `error_code`。
+  关闭按用户分 owner（`gateway_per_user_owner_scoping: false`）时，所有 IM 请求本来就在本机 local/main 上运行，
+  按同一规则算管理员，与 `/settings` 一致。旧的 `/ask`、`/control` 短路用例已按此更新（`7e0fbcec1`、`b6f25978c`）。
 - **状态**：本地开发验证见 TESTS；未启动或部署 Gateway，真实飞书/QQ 收发尚未验证。
-
-## 能力包版本字段抄错不再报"快照失效"，改为可修参数（H1）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `34e4d874e`，已实现，待集成）
 
 ## 能力包版本字段抄错不再报"快照失效"，改为可修参数（H1，同分支含 H3、H4）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `626b8576c`（初版在 `34e4d874e`），已实现，待集成）
 
