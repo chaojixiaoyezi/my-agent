@@ -126,6 +126,61 @@ def test_internal_lists_code_constants_through_the_real_dispatch(monkeypatch, us
     assert "TOOL_PREVIEW_MAX_LINE_COUNT" in found.message and "只读" in found.message
 
 
+# P18 验收后续（2026-10-02）：capability 文件里的覆盖要算进 show 的“用户配置里”，
+# runtime_guard 的 show 说法与 set 被拒一致，回执“原来/现在是 默认值”不再多一个空格。
+def _agent_with_capability(tmp_path, cap_content: str | None):
+    path = tmp_path / "desktop.yaml"
+    path.write_text('agent_name: "myagent"\n', encoding="utf-8")
+    cap_path = tmp_path / "config" / "capability_config.yaml"
+    if cap_content is not None:
+        cap_path.parent.mkdir(parents=True)
+        cap_path.write_text(cap_content, encoding="utf-8")
+    return SimpleNamespace(root=str(tmp_path), config=SimpleNamespace(config_path=str(path)),
+                           capability_config_path=str(cap_path))
+
+
+def test_show_counts_capability_file_as_user_override(monkeypatch, tmp_path):
+    """capability 键改过之后，show 的“用户配置里”要算上 capability 文件里的覆盖（P18 观察项）。"""
+    monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
+    agent = _agent_with_capability(tmp_path, "capability_candidate_limit: 7\n")
+    shown = module.execute_settings_control(agent, _settings("/settings show capability_candidate_limit"), None)
+    assert shown.ok, shown.message
+    assert "当前运行值：7" in shown.message
+    assert "用户配置里：7" in shown.message
+    assert "未覆盖" not in shown.message
+
+
+def test_show_runtime_guard_wording_matches_the_set_refusal(monkeypatch, tmp_path):
+    """runtime_guard 没有用户覆盖层：show 的说法与 set 被拒时一致（P18 观察项）。"""
+    monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
+    agent = SimpleNamespace(root=str(tmp_path),
+                            config=SimpleNamespace(config_path=str(tmp_path / "desktop.yaml")))
+    shown = module.execute_settings_control(agent, _settings("/settings show repeat_fail_threshold"), None)
+    assert shown.ok, shown.message
+    assert "不能在这里修改：属于 runtime_guard 配置" in shown.message
+    assert "只能查看和搜索" in shown.message
+    assert "宿主入口或配置文件里改" not in shown.message
+    refused = module.execute_settings_control(agent, _settings("/settings set repeat_fail_threshold 5"), None)
+    assert refused.ok is False and "只能查看和搜索" in refused.message
+
+
+def test_set_and_revert_receipts_have_no_double_space_before_default(monkeypatch, tmp_path):
+    """回执“原来 是默认值”“现在是 默认值”中间多了一个空格（P18 观察项），已修。"""
+    monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
+    path = tmp_path / "desktop.yaml"
+    path.write_text('agent_name: "myagent"\n', encoding="utf-8")
+    agent = SimpleNamespace(root=str(tmp_path),
+                            config=SimpleNamespace(config_path=str(path), request_timeout=240))
+    changed = module.execute_settings_control(agent, _settings("/settings set dynamic_timeout_min 40"), None)
+    assert changed.ok and "（原来是默认值）" in changed.message, changed.message
+    assert "原来 是默认值" not in changed.message
+    history = module.execute_settings_control(agent, _settings("/settings history dynamic_timeout_min"), None)
+    change_id = history.message.splitlines()[1].split()[1]
+    reverted = module.execute_settings_control(agent, _settings(f"/settings revert {change_id}"), None)
+    assert reverted.ok and "现在是默认值" in reverted.message, reverted.message
+    assert "现在是 默认值" not in reverted.message
+
+
 def test_show_reports_the_applied_output_cap_for_the_default_model(monkeypatch, user_config):
     monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
     agent = SimpleNamespace(config=SimpleNamespace(

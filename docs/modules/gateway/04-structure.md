@@ -1,5 +1,15 @@
 # Gateway Structure
 
+## 设置服务 P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，待集成）
+
+- `gateway_parts/settings_control_service`：`show` 的 capability 来源键覆盖判断扩展到来运行时 capability 文件
+  （`_override_text`）；runtime_guard 键“能否修改”文案与 `parameter_changes._writable_spec` 拒绝文案一致；
+  set/revert 回执默认值文案无多余空格。`_internal` 接住 `capability_path` 关键字参数（P18 失败项已修）。
+- `capability/runtime_config_reload`：`default_capability_config_path` 只返回 `<root>/config/capability_config.yaml`
+  （唯一用户位置）；新增 `bundled_capability_config_path`（随包默认，只读）与 `resolve_capability_config_path`
+  （用户位置优先、缺失回落随包默认）。`parameter_changes` 对解析成随包默认的 capability_path 拒绝写入
+  （`CAPABILITY_IS_PACKAGED`），新建目录 0700。`parameter_metadata` 的读取方统计排除定义/规范化/登记类文件。
+
 ## 设置服务与嵌入档案（P13，2026-10-02，ds1，待集成）
 
 - `gateway_parts/settings_control_service`：`/settings show embedding_model_profile` 经 `embedding_profile_description`

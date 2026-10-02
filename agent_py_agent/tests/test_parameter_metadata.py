@@ -83,6 +83,19 @@ def test_every_listed_key_has_a_reader():
                             if spec.source == "agent" and key not in LOADER_METADATA_KEYS}
 
 
+def test_readers_exclude_definition_normalization_registration_files():
+    """P8 验收后修订（2026-10-02）：定义/规范化/登记类文件不再当读取方——
+    memory_compact_auto_trigger_percent 的真实消费方是 context_compactor（不是 user_config_capability）。"""
+    registry = parameter_registry()
+    assert registry["memory_compact_auto_trigger_percent"].reader == "agent/agent_core/runtime/context_compactor"
+    assert registry["memory_compact_recovery_target_percent"].reader == "agent/agent_core/runtime/context_compactor"
+    assert registry["memory_compact_auto_trigger_max_tokens"].reader == "agent/agent_core/runtime/context_compactor"
+    assert registry["memory_curator_interval_seconds"].reader == "agent/memory_store/curator_models"
+    assert registry["memory_resume_auto_context_mode"].reader == "agent/memory_archive/resume_context"
+    assert registry["log_level"].reader == "agent/settings/services/runtime_config_env"
+    assert registry["api_base"].reader == "agent/settings/model_profiles"
+
+
 def test_owner_module_is_top_level_without_slash():
     """归属模块是顶层模块名（不含路径分隔符），读取方是相对文件路径。"""
     for key, spec in parameter_registry().items():

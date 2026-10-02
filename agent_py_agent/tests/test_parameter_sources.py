@@ -118,14 +118,16 @@ def test_extra_sources_default_to_boundary_except_the_explicit_free_list():
     reg = parameter_registry()
     for key in ("capability_grant_max_skills", "capability_grant_expires_after_task",
                 "decision_subagent_model_mode", "session_messaging_user_enabled",
-                "session_task_max_chain_depth", "subagent_failure_auto_split_enabled"):
+                "session_task_max_chain_depth", "subagent_failure_auto_split_enabled",
+                # C16：开不开由用户决定，模型不能改（P8/P17 验收后续，2026-10-02）。
+                "enable_capability_package_selection"):
         assert reg[key].safety == SAFETY_BOUNDARY and not reg[key].writable, key
     for key in ("repeat_fail_threshold", "hard_failure_halt_enabled", "unknown_command_allowlist",
                 "background_max_tool_rounds", "main_agent_auto_resume_attempt_limit"):
         assert not reg[key].writable, key
     for key in ("capability_candidate_limit", "subagent_heartbeat_timeout",
                 "subagent_no_progress_attempt_limit", "decision_agent_timeout_max_seconds",
-                "session_pair_hourly_limit", "enable_capability_package_selection"):
+                "session_pair_hourly_limit"):
         assert reg[key].writable, key
 
 
@@ -267,3 +269,101 @@ def test_tool_view_marks_readonly_sources(tmp_path, monkeypatch):
         assert view["parameter"]["source_readonly"] == "随包默认、不可覆盖（该配置运行时没有用户覆盖层）"
         assert view["fact"]["source"] == "packaged_default"
         assert view["parameter"]["writable"] is False
+
+
+# ---- P8/P17 验收后续（2026-10-02）：capability 唯一位置 ----
+
+def test_default_capability_config_path_is_the_single_user_location(tmp_path):
+    """default_capability_config_path 只返回 <root>/config/capability_config.yaml；
+    旧候选 <root>/agent_py_agent/config/capability_config.yaml 不再参与，即使那里有文件也不改变结果。"""
+    from agent_py_agent.agent.capability.runtime_config_reload import default_capability_config_path
+
+    root = tmp_path / "owner-home"
+    legacy = root / "agent_py_agent" / "config" / "capability_config.yaml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("capability_candidate_limit: 9\n", encoding="utf-8")
+    assert default_capability_config_path(root) == root / "config" / "capability_config.yaml"
+
+
+def test_resolve_capability_config_path_prefers_user_then_bundled(tmp_path):
+    """resolve 的语义：用户位置存在用用户位置，否则回落随包默认（只读来源）。"""
+    from agent_py_agent.agent.capability.runtime_config_reload import (
+        bundled_capability_config_path,
+        resolve_capability_config_path,
+    )
+
+    user = tmp_path / "config" / "capability_config.yaml"
+    assert resolve_capability_config_path(user) == bundled_capability_config_path()
+    user.parent.mkdir(parents=True)
+    user.write_text("capability_candidate_limit: 9\n", encoding="utf-8")
+    assert resolve_capability_config_path(user) == user
+    assert resolve_capability_config_path(root=tmp_path) == user
+
+
+def test_legacy_location_non_bundled_file_triggers_a_warning(tmp_path):
+    """旧候选位置（<root>/agent_py_agent/config/...）存在非随包默认文件时给结构化告警，不静默合并；
+    那里就是随包默认本身时（开发模式 root 是仓库目录）不告警。"""
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    from agent_py_agent.agent.capability.runtime_config_reload import (
+        bundled_capability_config_path,
+        capability_config_for_agent,
+    )
+
+    root = tmp_path / "owner-home"
+    legacy = root / "agent_py_agent" / "config" / "capability_config.yaml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("capability_candidate_limit: 9\n", encoding="utf-8")
+    config = capability_config_for_agent(SimpleNamespace(root=root))
+    assert isinstance(config, CapabilityConfig)
+    assert any("旧位置" in warning and "已不再读取" in warning for warning in config.config_warnings)
+
+    # 旧位置就是随包默认：复制随包文件过去，不该告警（开发模式 root=仓库目录是常态）。
+    bundled = bundled_capability_config_path()
+    clean_root = tmp_path / "repo-root"
+    same = clean_root / "agent_py_agent" / "config" / "capability_config.yaml"
+    same.parent.mkdir(parents=True)
+    same.write_bytes(bundled.read_bytes())
+    assert capability_config_for_agent(SimpleNamespace(root=clean_root)) == CapabilityConfig()
+
+
+def test_capability_write_refuses_the_bundled_default_file(tmp_path):
+    """随包默认文件只读、永不被写：capability_path 解析成随包默认时拒绝（CAPABILITY_IS_PACKAGED），文件不动。"""
+    from agent_py_agent.agent.capability.runtime_config_reload import bundled_capability_config_path
+
+    path = _user(tmp_path)
+    bundled = bundled_capability_config_path()
+    before = bundled.read_bytes()
+    report = changes.set_parameter("capability_candidate_limit", "8", paths=_paths(path, bundled), origin=_ORIGIN)
+    assert (report["ok"], report["code"]) == (False, "CAPABILITY_IS_PACKAGED")
+    assert "随包默认" in report["error"] and "只读" in report["error"]
+    assert bundled.read_bytes() == before
+
+
+def test_capability_write_creates_dir_with_0700_and_file_0600(tmp_path):
+    """参数中心新建 capability 目录用 0700、文件用 0600（与主配置写回保留权限同一安全口径）。"""
+    import os
+    import stat
+
+    path = _user(tmp_path)
+    root = tmp_path / "owner-home"
+    cap_path = root / "config" / "capability_config.yaml"
+    report = changes.set_parameter("capability_candidate_limit", "8", paths=_paths(path, cap_path), origin=_ORIGIN)
+    assert report["ok"]
+    assert stat.S_IMODE(cap_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(cap_path.stat().st_mode) == 0o600
+    assert os.access(cap_path.parent, os.W_OK)
+
+
+def test_enable_capability_package_selection_user_can_write_but_model_cannot(tmp_path):
+    """C16：开不开由用户决定——用户在 /settings 作用域可写该键，模型（无作用域）一律按边界拒绝。"""
+    path = _user(tmp_path)
+    root, cap_path = _capability_file(tmp_path)
+    with changes.user_settings_write_scope():
+        report = changes.set_parameter(
+            "enable_capability_package_selection", "true", paths=_paths(path, cap_path), origin=_ORIGIN)
+    assert report["ok"] and report["saved"] == "true"
+    assert load_capability_config(cap_path).enable_capability_package_selection is True
+    denied = changes.set_parameter(
+        "enable_capability_package_selection", "false", paths=_paths(path, cap_path), origin=_ORIGIN)
+    assert (denied["ok"], denied["code"]) == (False, "PARAMETER_BOUNDARY")
+    assert "模型不能改" in denied["error"]

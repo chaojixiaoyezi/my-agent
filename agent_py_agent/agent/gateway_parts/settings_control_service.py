@@ -368,9 +368,8 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
         raise SettingsControlError(f"没有名为 {argument} 的参数；可以发 /settings search <关键词> 找一找。")
     path = _user_path(config)
     stored = load_simple_yaml(path) if path.is_file() else {}
-    override = _value(spec, stored[spec.key]) if spec.key in stored else "未覆盖（用默认值）"
-    writable = (f"可以修改，{effect_text(spec.effect)}" if spec.writable
-                else f"不能在这里修改：{BOUNDARY_KEYS.get(spec.key, _BOUNDARY_TEXT)}")
+    override = _override_text(spec, stored, capability_path)
+    writable = _writable_text(spec)
     if spec.key in USER_SETTINGS_BOUNDARY_KEYS:
         writable = f"安全边界，仅用户经 /settings 修改，模型不能改；{effect_text(spec.effect)}"
     applied = applied_value(spec.key, config)
@@ -393,6 +392,35 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
         *applied_line,
         f"能否修改：{writable}",
     ])
+
+
+# LLM: 与 set/reset/revert 被拒时同一句说法（_writable_spec 的 PARAMETER_SOURCE_READ_ONLY），
+#   P18 验收发现 show 原来 fallback 到“只能由用户在宿主入口或配置文件里改”，
+#   但 runtime_guard 没有用户覆盖层，两个说法对不上，这里统一。
+# 函数用途: 生成 show 里“能否修改”一行的文字。
+def _writable_text(spec: ParameterSpec) -> str:
+    if spec.writable:
+        return f"可以修改，{effect_text(spec.effect)}"
+    if spec.source == SOURCE_RUNTIME_GUARD:
+        return ("不能在这里修改：属于 runtime_guard 配置，运行时只读随包文件、没有用户覆盖层，"
+                "改了也不会生效；只能查看和搜索。")
+    if spec.key in USER_SETTINGS_BOUNDARY_KEYS:
+        return f"安全边界，仅用户经 /settings 修改，模型不能改；{effect_text(spec.effect)}"
+    return f"不能在这里修改：{BOUNDARY_KEYS.get(spec.key, _BOUNDARY_TEXT)}"
+
+
+# LLM: 用户配置里的覆盖照旧；capability 来源的键还要算 capability 文件（运行时实际读取的那份）里的覆盖——
+#   P18 验收发现 set capability 键后 show 一边说“当前运行值 7”一边说“未覆盖（用默认值）”，
+#   后半句没算 capability 文件。capability_path 为 None（调用方没给运行时路径）时不猜文件位置，按未覆盖。
+# 函数用途: 生成 show 里“用户配置里”一行的文字（含 capability 文件覆盖）。
+def _override_text(spec: ParameterSpec, stored: dict, capability_path: Path | None) -> str:
+    if spec.key in stored:
+        return _value(spec, stored[spec.key])
+    if spec.source == SOURCE_CAPABILITY and capability_path is not None and Path(capability_path).is_file():
+        capability_values = load_simple_yaml(Path(capability_path))
+        if spec.key in capability_values:
+            return _value(spec, capability_values[spec.key])
+    return "未覆盖（用默认值）"
 
 
 # LLM: 元数据是自动推导的展示事实；没有值就不出现对应行，避免空字段噪音。
@@ -423,7 +451,8 @@ def _set(config: object, argument: str, *, capability_path: Path | None = None) 
     paths = WritePaths(user_path=_user_path(config), capability_path=capability_path)
     report = _checked(set_parameter(key, value, paths=paths, origin=_ORIGIN))
     previous = report.get("previous")
-    return (f"已把 {key} 改为 {report['saved']}（原来 {previous if previous is not None else '是默认值'}），"
+    before = f"原来 {previous}" if previous is not None else "原来是默认值"
+    return (f"已把 {key} 改为 {report['saved']}（{before}），"
             f"记录编号 {str(report['change_id'])[:8]}。{report['effect_text']}{_applied_text(report, config)}")
 
 
@@ -460,8 +489,8 @@ def _history(config: object, argument: str, *, capability_path: Path | None = No
 def _revert(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     paths = WritePaths(user_path=_user_path(config), capability_path=capability_path)
     report = _checked(revert_change(argument, paths=paths, origin=_ORIGIN))
-    now = report.get("saved") if report.get("saved") is not None else "默认值"
-    return (f"已回滚记录 {argument}：{report['key']} 现在是 {now}，新记录编号 {str(report['change_id'])[:8]}。"
+    now = f"现在是 {report['saved']}" if report.get("saved") is not None else "现在是默认值"
+    return (f"已回滚记录 {argument}：{report['key']} {now}，新记录编号 {str(report['change_id'])[:8]}。"
             f"{report['effect_text']}{_applied_text(report, config)}")
 
 

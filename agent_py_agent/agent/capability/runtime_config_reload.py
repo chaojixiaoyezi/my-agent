@@ -12,16 +12,33 @@ from .config import CapabilityConfig, load_capability_config
 from .runtime_config_models import CapabilityConfigReloadResult, CapabilityConfigSnapshot
 
 
+# LLM: capability 配置文件只有两个角色：随包默认（打包进发布物，只读）与用户位置
+#   （<owner home>/config/capability_config.yaml，参数中心写入与展示的唯一目标）。
+#   P18 验收发现旧实现把 <root>/agent_py_agent/config/capability_config.yaml 也当候选，
+#   开发模式下 root 是仓库目录时它就是随包默认文件，参数中心可能写进随包默认；
+#   生产 owner home 下参数中心又新建在旧第一候选，和文档 <owner home>/config/ 不一致，
+#   且有人在 <owner home>/config/ 下放文件会被旧候选静默盖住。因此去掉候选逻辑。
+# 函数用途: 返回唯一的用户 capability 配置位置（<root>/config/capability_config.yaml）。
 def default_capability_config_path(root: str | Path) -> Path:
-    base = Path(root)
-    candidates = [
-        base / "agent_py_agent" / "config" / "capability_config.yaml",
-        base / "config" / "capability_config.yaml",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
+    return Path(root) / "config" / "capability_config.yaml"
+
+
+# 函数用途: 返回随包默认 capability 配置文件（agent_py_agent/config/capability_config.yaml），只读永不被写。
+def bundled_capability_config_path() -> Path:
+    return Path(__file__).resolve().parent.parent.parent / "config" / "capability_config.yaml"
+
+
+# LLM: 运行时“实际读哪一份”的统一答案：用户位置存在就用用户位置（写进去重启就能读到），
+#   否则回落随包默认（只读、永不被写）。展示层 running_value 与运行时入口共用，
+#   保证“默认值、运行值、写入目标”三者语义一致。
+# 函数用途: 解析运行时实际读取的 capability 配置路径（用户位置优先，缺失时随包默认）。
+def resolve_capability_config_path(user_path: Path | None = None, *, root: str | Path | None = None) -> Path:
+    user = Path(user_path) if user_path is not None else (
+        default_capability_config_path(root) if root is not None else None)
+    if user is not None and user.exists():
+        return user
+    bundled = bundled_capability_config_path()
+    return bundled if bundled.exists() else (user if user is not None else bundled)
 
 
 # LLM: 参数中心写入口与展示层要写/读的就是这份文件：agent 上有 capability_config_path 用它的，否则按
@@ -39,8 +56,12 @@ def capability_config_path_for(agent: object) -> Path:
 #   _capability_config_runtime_snapshot，否则按 capability_config_path/默认路径加载并把
 #   快照缓存回 agent（副作用）。缓存里不是 CapabilityConfig 的对象一律不认，
 #   改走文件加载，防止非配置对象的属性被当成开关（2026-09-27 能力包合入时发现）。
-#   文件不存在是常态（生产 Gateway 的 owner home 下通常没有这份配置）：返回 CapabilityConfig() 默认实例且不缓存，
-#   之后建好文件时下一次调用就能读到；只有读取失败或格式错误才返回 None，限流类调用方仍要自己落到默认值。
+#   用户位置不存在是常态（生产 Gateway 的 owner home 下通常没有这份配置）：回落读随包默认
+#   （只读、不缓存），值与 dataclass 默认一致；这样“建好用户文件后下一次调用就能读到”，
+#   不必重启，也保证展示层 running_value 与运行时看到同一组默认值。
+#   只有读取失败或格式错误才返回 None，限流类调用方仍要自己落到默认值。
+#   旧候选位置（<root>/agent_py_agent/config/capability_config.yaml）不再当用户配置读：
+#   那里存在非随包默认文件时给结构化告警（配置告警里能看到），不静默合并。
 #   新增运行时读 capability 配置的地方应一律走这里，不要从 agent.config 或 capability_router.config 上找。
 # 函数用途: 运行时想读 capability_config.yaml 里的开关时，从 agent 拿配置对象；没有配置文件时给默认值。
 def capability_config_for_agent(agent: object):
@@ -49,21 +70,55 @@ def capability_config_for_agent(agent: object):
     # 只认真正的 CapabilityConfig：替身对象上自动生成的属性不是配置，不能让它的“真值”打开能力开关。
     if isinstance(config, CapabilityConfig):
         return config
-    path = Path(
+    root = getattr(agent, "root", None)
+    user_path = Path(
         str(getattr(agent, "capability_config_path", "") or "")
-        or default_capability_config_path(getattr(agent, "root", "."))
+        or default_capability_config_path(root or ".")
     )
+    if user_path.exists():
+        try:
+            snapshot = load_capability_config_snapshot(user_path)
+        except (OSError, TypeError, ValueError):
+            return None
+        _attach_legacy_location_warning(snapshot.config, root)
+        try:
+            agent._capability_config_runtime_snapshot = snapshot
+        except AttributeError:
+            pass
+        return snapshot.config
+    # 用户位置缺失：读随包默认（只读、不缓存），之后建好用户文件时下一次调用就能读到。
     try:
-        snapshot = load_capability_config_snapshot(path)
-    except FileNotFoundError:
-        return CapabilityConfig()
+        loaded = load_capability_config(bundled_capability_config_path())
     except (OSError, TypeError, ValueError):
+        return CapabilityConfig()
+    _attach_legacy_location_warning(loaded, root)
+    return loaded
+
+
+# LLM: 旧候选 <root>/agent_py_agent/config/capability_config.yaml 只在“不是随包默认文件”时告警：
+#   开发模式下 root 是仓库目录，那里就是随包默认本身（路径或内容相同都算），属正常只读来源，不能误报。
+# 函数用途: 旧候选位置存在非随包默认文件时给出结构化告警文字，否则返回 None。
+def _legacy_location_warning(root: object) -> str | None:
+    if root is None:
+        return None
+    legacy = Path(root) / "agent_py_agent" / "config" / "capability_config.yaml"
+    bundled = bundled_capability_config_path()
+    if not legacy.exists() or legacy.resolve() == bundled.resolve():
         return None
     try:
-        agent._capability_config_runtime_snapshot = snapshot
-    except AttributeError:
+        if legacy.read_bytes() == bundled.read_bytes():
+            return None
+    except OSError:
         pass
-    return snapshot.config
+    return (f"旧位置 {legacy} 有一份 capability 配置文件（不是随包默认），已不再读取；"
+            f"用户 capability 配置统一放在 {Path(root) / 'config' / 'capability_config.yaml'}。")
+
+
+# 函数用途: 把旧位置告警挂到加载出的 CapabilityConfig.config_warnings（配置告警展示能看到）。
+def _attach_legacy_location_warning(config: CapabilityConfig, root: object) -> None:
+    warning = _legacy_location_warning(root)
+    if warning and warning not in (config.config_warnings or []):
+        config.config_warnings = [*config.config_warnings, warning]
 
 
 def capability_config_version(config_path: str | Path) -> str:

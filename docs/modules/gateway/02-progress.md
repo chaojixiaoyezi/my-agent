@@ -1,5 +1,15 @@
 # Gateway 维护状态
 
+## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，待集成）
+
+- `settings_control_service` 的 `/settings show` 修复三处：
+  - capability 来源键的“用户配置里”计入 capability 文件（运行时路径）里的覆盖（`_override_text`）；
+  - runtime_guard 来源键“能否修改”一行与 set 被拒同说法（“属于 runtime_guard 配置，运行时只读随包文件、
+    没有用户覆盖层，改了也不会生效；只能查看和搜索。”）；
+  - set/revert 回执“原来是默认值/现在是默认值”去掉多余空格。
+- capability 配置文件唯一位置（`capability/runtime_config_reload`）：用户位置 `<owner home>/config/capability_config.yaml`，
+  随包默认只读；旧候选非随包默认文件挂结构化告警。
+
 ## P13：/settings 展示嵌入档案（2026-10-02，ds1，本地已实现，待集成）
 
 - `settings_control_service` 新增 `embedding_model_profile` 的 show 支持：展示档案编号、模型名或失效原因，不含连接凭据；

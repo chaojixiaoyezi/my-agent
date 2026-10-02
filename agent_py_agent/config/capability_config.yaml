@@ -4,12 +4,15 @@
 # - 普通用户不需要配置每个子代理能用什么工具；默认由系统和 LLM 根据任务判断。
 # - 本文件的键和值与 CapabilityConfig 默认值逐项一致（测试锁定）；新增能力开关必须同时写进本文件和 CapabilityConfig。
 # 实际生效位置：
-# - Gateway 和本地会话读取 agent 根目录下的配置：先找 agent_py_agent/config/capability_config.yaml，
-#   再找 config/capability_config.yaml。agent 根目录是显式工作区（workspace_root 或 --workspace）；
-#   没有指定时就是所配 owner 的 home，例如 local/main 为
+# - 用户 capability 配置只有一个位置：<agent 根目录>/config/capability_config.yaml。agent 根目录是
+#   显式工作区（workspace_root 或 --workspace）；没有指定时就是所配 owner 的 home，例如 local/main 为
 #   <MY_AGENT_HOME>/owners/local/main/config/capability_config.yaml。
+# - 本文件（随包默认）只读、永不被写：用户位置不存在时按本文件的值运行；参数中心 /settings 写入
+#   永远落在用户位置（不存在时新建，权限 0600/目录 0700），不会写进随包默认。
 # - Gateway 读到的这一份被它服务的所有 owner 共用；找不到文件时按 CapabilityConfig 默认值运行，也就是本模板的值。
 # - 要改能力配置：把本文件复制到上述位置再改。进程内会缓存已加载的配置，改完重启 Gateway 最稳妥。
+# - 旧位置 <agent 根目录>/agent_py_agent/config/capability_config.yaml 不再当用户配置读取；
+#   那里存在非随包默认文件时会在配置告警里提示，不会静默合并。
 # - daemon、gateway scenario 和 subagents 系列 CLI 子命令默认直接读本随包文件，可用 --capability-config 指定别的文件。
 
 # 是否按当前任务展示相关能力包摘要，独立于能力申请和可选决策模型开关。

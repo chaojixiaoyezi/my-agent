@@ -128,7 +128,6 @@ def classify_safety(key: str, value_type: str = "") -> str:
 # 常量用途: capability_config.yaml 里可以由模型/聊天修改的键与理由（每个键必须有一句人话理由）。
 _EXTRA_FREE_KEYS: dict[str, str] = {
     "enable_capability_package_recommendations": "只控制展示相关能力包摘要，不授予能力、不执行资源",
-    "enable_capability_package_selection": "只读已授权包摘要做选择，不执行包内脚本、不扩大工具权限",
     "capability_package_selection_max_input_tokens": "选包请求的输入预算上限（0 不设独立配额），纯数量",
     "capability_candidate_limit": "推荐/选包共用的候选数上限，纯数量",
     "capability_bundle_max_tokens": "装配入口的 token 预算（0 仍受模型窗口限制），纯数量",
@@ -289,8 +288,9 @@ def running_value(spec: ParameterSpec, config: object | None = None, *, capabili
         return getattr(config, spec.key, spec.default) if config is not None else spec.default
     if spec.source == SOURCE_CAPABILITY:
         from ..capability.config import load_capability_config
+        from ..capability.runtime_config_reload import resolve_capability_config_path
 
-        path = capability_path or _packaged_extra_config_path(SOURCE_CAPABILITY)
+        path = resolve_capability_config_path(capability_path)
         try:
             return getattr(load_capability_config(path), spec.key)
         except (OSError, ValueError):

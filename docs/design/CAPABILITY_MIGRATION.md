@@ -204,7 +204,11 @@ enable_capability_package_recommendations: true
 enable_capability_package_selection: true
 ```
 
-文件以 Agent 的 `capability_config_path` 为准：在构造 root 下先找 `agent_py_agent/config/capability_config.yaml`，其次找 `config/capability_config.yaml`。普通 CLI 未指定工作区时，root 默认是解析后的 owner home；显式宿主工作区可能改变位置，不能盲改另一份同名文件。这是宿主能力配置，不是包的私有 settings；当前 `config-set` 和 `/plugins configure` 不提供这两个宿主开关的修改入口。
+文件以 Agent 的 `capability_config_path` 为准：用户 capability 配置只有一个位置 `<root>/config/capability_config.yaml`
+（2026-10-02 P8/P17 验收后续修订，旧的 `<root>/agent_py_agent/config/` 候选不再当用户配置读，那里存在非随包默认
+文件时会给结构化告警）。普通 CLI 未指定工作区时，root 默认是解析后的 owner home；显式宿主工作区可能改变位置，
+不能盲改另一份同名文件。随包默认 `agent_py_agent/config/capability_config.yaml` 只读、永不被写。这是宿主能力配置，
+不是包的私有 settings；当前 `config-set` 和 `/plugins configure` 不提供这两个宿主开关的修改入口。
 
 已运行 Agent 优先使用缓存配置，普通推荐/选包请求不保证每轮重读 YAML。独立 CLI 可在保存后新建 Agent；常驻 Gateway 则由其负责人停稳现有任务后重启**原同一个 Gateway**，再核对加载值。单独新开 TUI 客户端不保证重建 Gateway 内的 owner Agent；dispatch/watch 的独立刷新点也不能作为普通对话热加载的保证。这里重建是为应用宿主开关，包本身的 install/enable/update 不因此增加重启要求。
 

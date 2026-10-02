@@ -41,6 +41,34 @@
   - runtime_guard 键的 `show` 写"只能由用户在宿主入口或配置文件里改"，但这个来源没有用户覆盖层，和 set 被拒时的说法不一致。
   - 回执文案"原来 是默认值""现在是 默认值"中间多了一个空格。
 
+### 2026-10-02 P8/P17 验收后续（P18 缺陷修复，ds2，分支 `worker/ds2-p17-p8-followups`，基于 `a3a4eb28a`，已实现，待集成）
+
+上节观察项与失败项的处理结论（“一个概念一个权威位置”）：
+
+- **capability 配置文件唯一位置**：定唯一用户位置 `<owner home>/config/capability_config.yaml`
+  （即 `default_capability_config_path(root)` 的唯一返回值，不再有两个候选）。运行时读取
+  （`capability_config_for_agent`）用户位置存在就读用户位置，否则回落**随包默认**
+  （`bundled_capability_config_path()`，只读、不缓存，建好用户文件后下一次调用就能读到）；
+  参数中心写入永远落在用户位置；展示层 `running_value` 与运行时同一解析（`resolve_capability_config_path`）。
+  旧候选 `<root>/agent_py_agent/config/capability_config.yaml` 不再当用户配置读：存在且内容不是随包默认时
+  挂结构化告警（`CapabilityConfig.config_warnings`，/settings 配置告警可见），不静默合并；
+  内容等于随包默认（开发模式 root=仓库目录）不告警。随包默认文件只读、永不被写（写入口对解析成随包默认的
+  capability_path 拒绝，错误码 `CAPABILITY_IS_PACKAGED`）。
+- **读取方统计规则**：P8 读取方/归属模块排除定义/规范化/登记类文件（`_memory_coercion`、`services/_normalize`、
+  `user_config_capability`、`model_provider_schema`，加已有排除的 config.py/parameter_registry/parameter_metadata），
+  重新按“引用最多”选真实消费方；`log_level` 经 `apply_log_level` 应用、无直接引用，补显式映射到
+  `runtime_config_env`。抽查结果：`memory_compact_auto_trigger_percent` →
+  `agent/agent_core/runtime/context_compactor`，`memory_curator_interval_seconds` →
+  `agent/memory_store/curator_models`，`api_base` → `agent/settings/model_profiles` 等。
+- **enable_capability_package_selection**：从 free 名单改为边界项（`BOUNDARY_KEYS` + `USER_SETTINGS_BOUNDARY_KEYS`，
+  照 P12 `memory_curator_model_profile`）：用户经 /settings 可改，模型 user_config 不能改（C16）。
+- **/settings show**：capability 来源键的“用户配置里”计入 capability 文件覆盖；runtime_guard 键的说法与
+  set 被拒一致（“属于 runtime_guard 配置，运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索。”）；
+  回执“原来是默认值/现在是默认值”不再多空格。
+- **参数中心新建目录 0700**（文件已是 0600）。
+- **P18 失败项（/settings internal TypeError）** 已在分支上修好（`_internal` 接住 `capability_path`），
+  并补了经调度入口的用例（test_settings_chat_control::test_internal_lists_code_constants_through_the_real_dispatch）。
+
 ## 2026-10-01 模块级数值常数只读目录与守卫（P10，分支 `worker/ds1-constants-catalog`，已实现，待集成）
 
 - **设计定案（常数不迁入登记表）**：常数留在读取它的地方（那里是唯一权威，符合“一个概念一个权威位置”；不搬进中央常数模块，

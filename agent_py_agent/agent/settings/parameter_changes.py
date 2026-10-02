@@ -136,7 +136,15 @@ def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
         if path is None:
             raise ParameterChangeError("USER_CONFIG_MISSING",
                                        "当前进程没有 capability 配置的运行时路径，不能安全写入。")
-        return Path(path).expanduser()
+        target = Path(path).expanduser()
+        from ..capability.runtime_config_reload import bundled_capability_config_path
+
+        # 随包默认文件只读、永不被写（P18 验收：开发模式下 root 是仓库目录时旧第一候选就是随包默认）。
+        if target.resolve() == bundled_capability_config_path().resolve():
+            raise ParameterChangeError(
+                "CAPABILITY_IS_PACKAGED",
+                "capability 随包默认文件只读，不能写入；用户配置请放在 <owner home>/config/capability_config.yaml。")
+        return target
     raise ParameterChangeError(
         "PARAMETER_SOURCE_READ_ONLY",
         f"'{spec.source}' 配置运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索，不能修改。")
@@ -303,7 +311,7 @@ def set_parameter(key: object, value: object, *, paths: WritePaths, origin: Chan
 #   调用方只在确认不存在时才调用。之后的写回由 config_io 保留这个权限。
 # 函数用途: 以仅本人可读写的权限新建一份只含说明行的配置文件。副作用：新建文件。
 def _create_config_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write("# 由参数中心创建（只含被改的键，其余按随包默认）\n")
@@ -313,7 +321,7 @@ def _create_config_file(path: Path) -> None:
 #   之后 append_jsonl_capped 的原子重写会保留这个权限（json_io._keep_target_mode）。已存在时不改。
 # 函数用途: 确保账本文件存在且新建时只有本人可读写。副作用：可能新建空文件。
 def _ensure_private_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     except FileExistsError:

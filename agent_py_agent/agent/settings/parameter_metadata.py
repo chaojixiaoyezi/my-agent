@@ -24,8 +24,19 @@ _PACKAGE = Path(__file__).resolve().parents[2]
 _DEFINITION = _PACKAGE / "agent" / "settings" / "config.py"
 # 与 test_config_field_readers 同一套“字段名怎么出现在产品代码里”的正则：属性访问或字符串键。
 _REFERENCE = re.compile(r"\.([A-Za-z_]\w*)|[\"']([A-Za-z_]\w*)[\"']")
+# 定义/规范化/登记类文件（P8 验收后修订，2026-10-02）：这些文件只是声明、校验或登记字段，
+#   不是真正消费方——P18 验收发现约 50 个键的“读取方”落在 _memory_coercion、_normalize、
+#   user_config_capability、model_provider_schema 上（如 memory_compact_auto_trigger_percent 显示
+#   user_config_capability，实际是 context_compactor）。排除后读取方才是实际消费方。
+_DEFINITION_EXCLUDED = frozenset({
+    _PACKAGE / "agent" / "settings" / "_memory_coercion.py",
+    _PACKAGE / "agent" / "settings" / "services" / "_normalize.py",
+    _PACKAGE / "agent" / "settings" / "user_config_capability.py",
+    _PACKAGE / "agent" / "settings" / "model_provider_schema.py",
+})
 # 推导模块自身和登记表会以字符串引用所有字段名，扫描时必须排除，否则每个字段都“被 settings 读取”。
-_SELF_EXCLUDED = {_DEFINITION, Path(__file__).resolve(), _PACKAGE / "agent" / "settings" / "parameter_registry.py"}
+_SELF_EXCLUDED = {_DEFINITION, Path(__file__).resolve(),
+                  _PACKAGE / "agent" / "settings" / "parameter_registry.py"} | _DEFINITION_EXCLUDED
 
 # 单位推导：键名结尾的后缀 → 中文单位；没有匹配的键留空（表示没有单位或不适用）。
 _UNIT_SUFFIXES = (
@@ -166,6 +177,9 @@ def field_readers() -> dict[str, tuple[str, str]]:
     mapped = {field: ("settings", "agent/settings/decision_settings_defaults")
               for _path, (domain, field) in decision_config_fields().items()
               if domain in {"agent", "memory"}}
+    # log_level 经 apply_log_level 应用（定义在 config.py，已排除），调用点在 runtime_config_env/
+    # runtime_config_task，没有直接的属性访问或字符串键引用，补显式映射指向真实消费方。
+    mapped["log_level"] = ("settings", "agent/settings/services/runtime_config_env")
     picked = {item.name: _reader_for(item.name, counts, mapped) for item in fields(AgentConfig)}
     return {name: reader for name, reader in picked.items() if reader is not None}
 

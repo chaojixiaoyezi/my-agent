@@ -14,6 +14,37 @@
   - 恢复成改前状态；
   - 效果未知时仍记 runner_error。
 
+## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，基于 `a3a4eb28a`，已实现，待集成）
+
+- **capability 配置文件唯一位置**（最重要）：`default_capability_config_path` 原来有两个候选
+  （`<root>/agent_py_agent/config/` 与 `<root>/config/`，哪个存在用哪个），P18 验收发现参数中心在 owner
+  原本没有文件时新建在第一个候选、开发模式下第一候选就是随包默认文件（可能被写坏）、有人在 `<root>/config/`
+  下放文件会被静默盖住。现定**唯一用户位置 `<owner home>/config/capability_config.yaml`**：
+  - `default_capability_config_path(root)` 只返回该位置；运行时读取（`capability_config_for_agent`）用户位置
+    存在就读它，否则回落**随包默认**（`bundled_capability_config_path()`，只读、不缓存——建好用户文件后
+    下一次调用就能读到）；展示层 `running_value` 与运行时同一解析（`resolve_capability_config_path`）。
+  - 参数中心写入永远落在用户位置；capability_path 解析成随包默认时写入口拒绝（新错误码 `CAPABILITY_IS_PACKAGED`）。
+  - 旧候选 `<root>/agent_py_agent/config/capability_config.yaml` 不再当用户配置读：存在且内容不是随包默认
+    时给结构化告警（挂在 `CapabilityConfig.config_warnings`，/settings 配置告警里能看到），不静默合并；
+    内容等于随包默认（开发模式 root=仓库目录）不告警。
+- **enable_capability_package_selection free → 边界项**（C16：开不开由用户决定）：从 `_EXTRA_FREE_KEYS`
+  移除，加入 `BOUNDARY_KEYS` 与 `USER_SETTINGS_BOUNDARY_KEYS`（照 P12 `memory_curator_model_profile`）——
+  用户经 /settings 在 `user_settings_write_scope` 内可改，模型 user_config set 一律按边界拒绝。
+- **P8 读取方/归属模块统计排除定义/规范化/登记类文件**：`_memory_coercion`、`services/_normalize`、
+  `user_config_capability`、`model_provider_schema` 不再当读取方（P18 发现约 50 个键的读取方落在这类文件上，
+  例 `memory_compact_auto_trigger_percent` 显示 user_config_capability、实际是 context_compactor）。
+  排除后该键读取方为 `agent/agent_core/runtime/context_compactor`；`log_level` 经 `apply_log_level` 应用
+  （定义文件已排除、无直接引用），补显式映射到真实消费方 `runtime_config_env`。其余键按引用最多重选。
+- **/settings show 展示修复**：capability 来源键的“用户配置里”算上 capability 文件里的覆盖（`_override_text`）；
+  runtime_guard 来源键“能否修改”一行与 set 被拒同说法（“属于 runtime_guard 配置，运行时只读随包文件、
+  没有用户覆盖层，改了也不会生效；只能查看和搜索。”）；回执“原来 是默认值/现在是 默认值”去掉多余空格。
+- **参数中心新建目录 0700**（新建文件已是 0600）：`_create_config_file` 与 `_ensure_private_file` 的
+  `mkdir` 加 `mode=0o700`，已存在目录不改变权限。
+- **测试**：每条修复都有用例，经 `execute_settings_control`/`run_settings_control` 真实调度；7 个变异全部抓住
+  （唯一位置、旧位置告警、边界项、show 覆盖、runtime_guard 说法、0700、读取方排除）。
+- **验证**：相关测试全过（test_parameter_sources 22、test_settings_chat_control 34、test_parameter_metadata、
+  capability 相关 323、前端/会话工具 49 等）；门禁与 size_diff 见 TESTS.md P18 后续节。
+
 ## P10 常数整改第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，基于 `d55cb266c`，已实现，待集成）
 
 - **背景**：P10 白名单按模块分批清理，本批是最后一批——白名单主组 groups[0] 剩余全部 41 个常数

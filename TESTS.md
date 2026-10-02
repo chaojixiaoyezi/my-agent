@@ -24,6 +24,47 @@
   改前是 `runner_error`。
 - **变异**（2 个，抓到 2 个）：恢复成改前状态（枚举里去掉这一项、恢复字符串）；效果未知时仍记 runner_error。
 
+## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，基于 `a3a4eb28a`）
+
+- **capability 唯一位置**（`test_parameter_sources.py` 新增 6 项）：
+  - `test_default_capability_config_path_is_the_single_user_location`：default 只返回 `<root>/config/capability_config.yaml`，
+    旧候选有文件也不改变结果。
+  - `test_resolve_capability_config_path_prefers_user_then_bundled`：用户位置存在用用户位置，缺失回落随包默认。
+  - `test_legacy_location_non_bundled_file_triggers_a_warning`：旧候选存在非随包默认文件时挂结构化告警；
+    内容等于随包默认不告警。
+  - `test_capability_write_refuses_the_bundled_default_file`：capability_path 解析成随包默认时拒绝
+    （`CAPABILITY_IS_PACKAGED`），随包文件不动。
+  - `test_capability_write_creates_dir_with_0700_and_file_0600`：新建目录 0700、文件 0600。
+  - `test_enable_capability_package_selection_user_can_write_but_model_cannot`：用户经 `user_settings_write_scope`
+    可改该键，模型（无作用域）按 `PARAMETER_BOUNDARY` 拒绝。
+- **/settings show 与回执**（`test_settings_chat_control.py` 新增 3 项，全部经 `execute_settings_control`
+  真实调度）：
+  - `test_show_counts_capability_file_as_user_override`：capability 键改过之后“用户配置里”显示覆盖值。
+  - `test_show_runtime_guard_wording_matches_the_set_refusal`：runtime_guard show 与 set 被拒同说法。
+  - `test_set_and_revert_receipts_have_no_double_space_before_default`：回执“原来是默认值/现在是默认值”无多余空格。
+- **读取方统计**（`test_parameter_metadata.py` 新增 1 项）：`test_readers_exclude_definition_normalization_registration_files`
+  钉住 context_compactor / curator_models / resume_context / runtime_config_env / model_profiles 等真实消费方。
+- **变异验证（7 个全部抓住）**：唯一位置恢复两候选、旧位置不告警、USER_SETTINGS_BOUNDARY_KEYS 删该键、
+  show 不算 capability 覆盖、runtime_guard 说法回退、mkdir 不带 0700、读取方不排除 user_config_capability，
+  各自对应测试变红；恢复后全绿。
+- **验证命令**：
+  ```
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_parameter_sources.py \
+    agent_py_agent/tests/test_settings_chat_control.py agent_py_agent/tests/test_parameter_metadata.py \
+    agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_capability_config_missing_defaults.py \
+    agent_py_agent/tests/test_capability_runtime_config.py agent_py_agent/tests/test_capability_config_class.py \
+    agent_py_agent/tests/test_capability_config_single_default_source.py \
+    agent_py_agent/tests/test_capability_package_selection_runtime.py \
+    agent_py_agent/tests/test_capability_package_recommendations.py agent_py_agent/tests/test_subagent_package_entries.py \
+    agent_py_agent/tests/test_settings_config_warnings_display.py agent_py_agent/tests/test_value_display_parity.py \
+    agent_py_agent/tests/test_config_warning_no_credential_echo.py agent_py_agent/tests/test_structured_masking.py \
+    agent_py_agent/tests/test_parameter_registry.py -q --tb=short -p no:cacheprovider \
+    --basetemp=/private/tmp/claude-501/m-ds2
+  ```
+  结果：相关测试全部 passed（合计 22+34+10+323+49 等）；guards9 全量、import 边界、ruff、doc-sync、
+  code-size、diff-check、clean-package、size_diff 新增 0 见门禁小节（以本批收尾实际输出为准）。
+
 ## 决策模型中文质量基准与每个点位的阈值（J12）（2026-10-02，分支 `claude/be-jev-quality-bench`，基于 `8ec88808d`）
 
 - **新增 `test_decision_quality_bench.py`（13 项，不发网络请求）**：
