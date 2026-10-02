@@ -728,7 +728,8 @@ def _command_text(command: ConversationControlCommand) -> str:
             return "/wakes"
         return f"/wakes replay {command.value}{' confirm' if command.operation == 'apply' else ''}".rstrip()
     if command.kind == "model":
-        prefix = "/model default" if command.operation == "set_default" else "/model"
+        # vector 必须原样带上子命令，否则 Gateway 会把 /model <编号> 当成选对话模型。
+        prefix = {"set_default": "/model default", "vector": "/model vector"}.get(command.operation, "/model")
         return f"{prefix} {command.value}".rstrip()
     if command.kind == "skills":
         # value 是解析器规范化后的完整参数，Gateway 端按同一解析器重新解析。

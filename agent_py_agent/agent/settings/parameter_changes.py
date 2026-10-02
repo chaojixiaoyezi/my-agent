@@ -50,6 +50,8 @@ _USER_SETTINGS_WRITE: ContextVar[bool] = ContextVar("user_settings_write", defau
 
 
 # LLM: 只能由 Gateway 已认证管理员控制入口进入；授权随调用退出还原，不接收客户端字段，不把 origin.actor 当授权。
+#   唯一例外（用户 10-02 拍板）：settings.embedding_selection 在结构化规则全部满足后进入——本机管理员、目标是本人目录里的
+#   嵌入档案、端点主机与默认对话模型相同——只写 embedding_model_profile 与 memory_semantic_recall 两项，不扩到别的边界键。
 # 函数用途: 给用户 /settings 一个短暂的边界写作用域，模型工具与回滚默认仍拒绝。
 @contextmanager
 def user_settings_write_scope():

@@ -8,6 +8,12 @@ import json
 from types import SimpleNamespace
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
+from ..settings.embedding_selection import (
+    EMBEDDING_OPERATIONS,
+    apply_embedding_choice,
+    embedding_choices,
+    execute_embedding_operation,
+)
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import _scope_request_payload, resolve_gateway_scope_owner
@@ -37,9 +43,10 @@ def handle_client_models(handler, server) -> None:
         user_id, channel = _request_channel(handler)
         scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
         config_host, thread = _scoped_model_host(server.agent, scope)
-        result = execute_model_profile_operation(
-            config_host, str(body.get("operation") or ""), body, thread_id=thread.thread_id,
-        )
+        operation = str(body.get("operation") or "")
+        # 向量模型是全局设置（不属于会话），管理员判定在 embedding_selection 里按已认证 owner 做。
+        result = (execute_embedding_operation(config_host, operation, body) if operation in EMBEDDING_OPERATIONS
+                  else execute_model_profile_operation(config_host, operation, body, thread_id=thread.thread_id))
     except json.JSONDecodeError:
         handler._send_json(400, {"ok": False, "message": "模型配置请求格式错误。"})
         return
@@ -76,6 +83,8 @@ def _scoped_model_host(base_agent, scope) -> tuple[SimpleNamespace, object]:
 def execute_model_text_control(base_agent, command: ConversationControlCommand, scope) -> ConversationControlResult:
     try:
         host, thread = _scoped_model_host(base_agent, scope)
+        if command.operation == "vector":
+            return _vector_text_control(host, command.value)
         listing = execute_model_profile_operation(host, "list", {}, thread_id=thread.thread_id)
         if command.operation == "view":
             return ConversationControlResult("model", True, render_model_choices(listing) + _admin_hint(base_agent, listing, scope))
@@ -98,6 +107,41 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
         "model", True,
         f"本会话已选择 {row['model_name']}，上下文 {row.get('model_context_window_tokens', '?')} tokens，下一条消息生效。",
     )
+
+
+# LLM: 向量模型（语义记忆）是全局设置：谁都能查看，改只给本机管理员（判定在 settings.embedding_selection）；编号按本人可用的
+#   嵌入档案列表从 1 起，也接受精确档案编号；off/关闭 表示关闭语义记忆。回执带“保存后重启 Gateway 生效”的说明。有写文件副作用。
+# 函数用途: 执行 /model vector [编号|off]，返回中文回执。
+def _vector_text_control(host, value: str) -> ConversationControlResult:
+    listing = embedding_choices(host)
+    target = str(value or "").strip()
+    if not target:
+        return ConversationControlResult("model", True, render_vector_choices(listing))
+    if target.lower() in {"off", "关闭"}:
+        result = apply_embedding_choice(host, "", actor="chat")
+    else:
+        rows = listing["choices"]
+        row = rows[int(target) - 1] if target.isdigit() and 1 <= int(target) <= len(rows) else next(
+            (item for item in rows if item["id"] == target), None)
+        if row is None:
+            return ConversationControlResult("model", False, f"没有编号为 {target} 的向量模型。\n" + render_vector_choices(listing))
+        result = apply_embedding_choice(host, row["id"], actor="chat")
+    return ConversationControlResult("model", bool(result.get("ok")), str(result.get("message") or ""))
+
+
+# LLM: 只渲染模型名、服务商名和稳定档案编号，不渲染接口地址或密钥；列表序号与 /model vector <编号> 共用。
+#   操作提示按结构化字段 can_change 给：非管理员只告诉他只能查看（向量模型是全局设置，他自己加嵌入模型也用不上）。
+# 函数用途: 把向量模型的可选项和当前状态排成聊天文字。
+def render_vector_choices(listing: dict) -> str:
+    lines = ["向量模型（语义记忆用，不聊天；全局设置，只有管理员能改）", str(listing.get("message") or "")]
+    for index, row in enumerate(listing.get("choices", []), 1):
+        lines.append(f"{index}. {row['model_name']}（{row.get('provider_name') or '未命名服务商'}，编号 {row['id']}）")
+    if not listing.get("can_change"):
+        return "\n".join([*lines, "你不是本机管理员，只能查看；要改请让管理员操作。"])
+    if not listing.get("choices"):
+        lines.append("还没有嵌入模型：先在 TUI 的 /model → 新增模型 里添加，用途选 embedding（例如 MiniMax embo-01）。")
+    lines.append("用法：/model vector <编号> 选用并打开语义记忆；/model vector off 关闭。保存后重启 Gateway 生效。")
+    return "\n".join(lines)
 
 
 # LLM: 只在没有可选模型时追加；判据复用 request_worker.admin_binding_hint_for_request（IM 私聊、开关、密码已设、未绑定）。

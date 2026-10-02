@@ -2217,6 +2217,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "（仍有持久工作的 Audit 来源保持 PENDING，重启后照常接续）。"
         ),
     ),
+    "EMBEDDING_HOST_DIFFERS": ErrorContract(
+        code="EMBEDDING_HOST_DIFFERS",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint=(
+            "这个向量模型和当前默认对话模型不是同一服务商主机，设置它等于把记忆发给另一家服务商，所以没有修改。"
+            "请用户自己在 /model → 选择模型 → 向量模型 里选；不要换参数重试，也不要改走别的入口绕过。"
+        ),
+    ),
     "UNSUPPORTED_OPERATION": ErrorContract(
         code="UNSUPPORTED_OPERATION",
         category="tool",

@@ -246,18 +246,44 @@ async def _run_model_action(app, agent, session_id: str, runtime, action: str) -
     return "未知模型菜单操作，配置未修改。"
 
 
-# LLM: 对话模型只改本会话选择（select）；决策模型进入独立的决策设置，不切换对话模型。
-# 函数用途: 「选择模型」二级菜单：对话模型 / 决策模型。
+# LLM: 对话模型只改本会话选择（select）；决策模型进入独立的决策设置，不切换对话模型；向量模型是全局的语义记忆设置。
+# 函数用途: 「选择模型」二级菜单：对话模型 / 决策模型 / 向量模型。
 async def _select_menu(app, agent, session_id: str, runtime) -> str:
     kind = await _choose_action(app, "选择模型", [("chat", "对话模型（本会话；不影响其他 TUI / IM 会话）"),
-                                                ("decision", "决策模型（开关与绑定；只给建议，不切换对话模型）")])
+                                                ("decision", "决策模型（开关与绑定；只给建议，不切换对话模型）"),
+                                                ("vector", "向量模型（语义记忆用，不聊天；全局设置，管理员）")])
     if kind == "chat":
         return await _select_model(app, agent, session_id, runtime)
     if kind == "decision":
         from .tui_decision_menu import manage_decision_settings
 
         return await manage_decision_settings(app, agent, session_id)
+    if kind == "vector":
+        return await _vector_menu(app, agent, session_id)
     return ""
+
+
+# LLM: 权限、可选项和写入都由服务端 settings.embedding_selection 裁决（Gateway 或本地同一入口），菜单只展示和传结构化选项；
+#   “关闭”的选项值是空串，与“返回”（None）区分。保存后要重启 Gateway 才生效，回执原样显示服务端说明。
+# 函数用途: 「选择模型 → 向量模型」：列出本人可用的嵌入档案和“关闭”，选中后保存并显示生效说明。
+async def _vector_menu(app, agent, session_id: str) -> str:
+    listing = await _request(app, agent, session_id, "embedding_list")
+    if listing.get("ok") is not True:
+        return str(listing.get("message") or "读取向量模型失败，配置未修改。")
+    status = str(listing.get("message") or "")
+    if not listing.get("can_change"):
+        return "向量模型是全局设置（所有用户共用），只有管理员（本机主账号）能改。" + status
+    rows = [(row["id"], f"{row['model_name']}（{row.get('provider_name') or '未命名服务商'}）") for row in listing["choices"]]
+    rows.append(("", "关闭（只按关键词召回）"))
+    hint = "" if listing["choices"] else "\n还没有嵌入模型：先到「新增模型」添加，用途选 embedding（例如 MiniMax embo-01）。"
+    choices = RadioList(rows, select_on_focus=True)
+    choice = await _dialog(app, "向量模型（语义记忆用，不聊天）", HSplit([Label(status + hint), choices]),
+                           (("保存", lambda: choices.current_value), ("返回", None)), focus=choices)
+    if choice is None:
+        return ""
+    operation, payload = ("embedding_select", {"profile_id": choice}) if choice else ("embedding_off", {})
+    result = await _request(app, agent, session_id, operation, payload)
+    return str(result.get("message") or ("已保存。" if result.get("ok") else "没有保存。"))
 
 
 # LLM: 共享与初始模型的权限以 Gateway 回执为准（只有管理员能改），菜单不做授权判断。

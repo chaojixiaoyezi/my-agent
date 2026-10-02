@@ -68,11 +68,15 @@ def default_model_profile_id(agent: object) -> str:
 
 
 # LLM: 本地 TUI 复用 chat/local-agent 的正式通道身份；必须有真实 store，不能退回 owner 全局选择。
+#   向量模型三个操作（embedding_list/select/off）是全局设置，不属于会话，交给 settings.embedding_selection，与 Gateway 同一入口。
 # 函数用途: 用本地 session_id 进入与 Gateway 相同的会话模型管理逻辑。
 def execute_local_model_operation(agent: object, session_id: str, operation: str, payload: dict) -> dict:
     from ..conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
+    from .embedding_selection import EMBEDDING_OPERATIONS, execute_embedding_operation
     from .model_profiles import execute_model_profile_operation
 
+    if operation in EMBEDDING_OPERATIONS:
+        return execute_embedding_operation(agent, operation, payload)
     store = getattr(agent, "conversation_store", None)
     if store is None or not str(session_id).strip():
         raise ModelProfileError("模型选择需要可用的本地会话存储与会话编号。")

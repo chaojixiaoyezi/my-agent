@@ -1,6 +1,8 @@
 # LLM: manage_models 工具——让主会话代理代替用户直接管理 owner 模型目录（等价于 TUI /model）：列出、快捷新增、
 #   保存/编辑服务商与模型、切换当前会话或新会话默认模型、删除、连通性探针与服务商模型发现。唯一写入口仍是
 #   settings.model_profiles.execute_model_profile_operation（文件锁内原子落盘）；本工具只做参数整理、身份裁决与回执整形。
+#   例外：set_embedding/disable_embedding（语义记忆的向量模型，全局配置）走 settings.embedding_selection，裁决规则（本机管理员、
+#   本人目录嵌入档案、与默认对话模型同主机）都在那里，本工具只映射回执。
 #   契约：回执永不包含 api_key（只透传投影里的 has_key）；错误文案不回显参数值；delete_provider 声明为 dangerous
 #   （密钥不可恢复）走统一审批门；子代理运行内不可用；select 只作用于当前 conversation_thread_id，没有会话时要求改用
 #   set_default。改动时同步 tests/test_model_profile_tool.py、docs/design/TUI_MODEL_PROFILES.md 与 prompts/default.md。
@@ -17,6 +19,7 @@ from ..backends.reasoning_control import REASONING_CONTROLS
 from ..backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ..conversation.authority import current_conversation_task_attributes
 from ..runtime_context import current_subagent_run_id
+from ..settings.embedding_selection import model_disable_embedding, model_set_embedding
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
 from ..settings.model_provider_schema import BACKENDS, CAPABILITIES
 from ..tooling.models import (
@@ -37,8 +40,12 @@ if TYPE_CHECKING:
 TOOL_NAME = "manage_models"
 _ACTIONS = (
     "list", "add", "add_models", "save_provider", "save_model", "select", "set_default",
-    "delete_model", "delete_provider", "probe", "discover", "set_shared", "set_initial",
+    "delete_model", "delete_provider", "probe", "discover", "set_shared", "set_initial", "set_embedding", "disable_embedding",
 )
+# 向量模型（语义记忆）两个动作：全局设置，裁决与写入都在 settings.embedding_selection（用户 10-02 拍板的结构化规则）。
+_EMBEDDING_ACTIONS = frozenset({"set_embedding", "disable_embedding"})
+# 写之前就拒绝的两种结果 → 工具控制码；其余失败（参数中心写入出错）按执行失败、副作用未知交给对账。
+_EMBEDDING_REFUSALS = {"PARAMETER_BOUNDARY": "TOOL_PERMISSION_DENIED", "EMBEDDING_HOST_DIFFERS": "EMBEDDING_HOST_DIFFERS"}
 _PROFILE_ID_ACTIONS = {"select", "set_default", "delete_model", "probe"}
 _PROVIDER_ID_ACTIONS = {"save_provider", "delete_provider"}
 _DESCRIPTION = (
@@ -46,7 +53,9 @@ _DESCRIPTION = (
     "save_provider/save_model 保存或编辑、select 切换当前会话模型、set_default 设置新会话默认模型、"
     "delete_model/delete_provider 删除、probe 连通性测试、discover 读取服务商模型列表（可带未保存的 connection 先看有哪些模型）、"
     "add_models 按一个连接或已有服务商一次加多个模型、set_shared 把自己的模型开放给其他用户、set_initial 指定其他用户的初始模型"
-    "（后两项只有管理员能用，由宿主校验）。"
+    "（后两项只有管理员能用，由宿主校验）、set_embedding 选向量模型并打开语义记忆、disable_embedding 关闭语义记忆"
+    "（向量模型是全局设置，只有本机管理员能用；目标必须是自己目录里用途为 embedding 的模型，且与当前默认对话模型是同一服务商主机，"
+    "主机不同会返回 needs_user_choice，这时请用户自己在 /model → 选择模型 → 向量模型 里选；保存后重启 Gateway 生效）。"
     "用户说“帮我加/换/改/删模型或服务商”“默认模型改成 X”“测一下这个模型能不能用”时直接调用，不要让用户自己去 /model 填表。"
     "密钥只作为参数传一次；回执和你的回复都不得复述密钥。delete_provider 会经统一危险动作审批门。"
 )
@@ -56,6 +65,7 @@ _USE_CASES = (
     "用户要求本会话换成某个已保存模型 → 先 list 取精确 id，再 action=select",
     "用户要求以后新会话默认用某模型 → action=set_default",
     "用户怀疑模型配置不可用 → action=probe 用真实请求验证，不凭列表状态下结论",
+    "用户要开语义记忆/向量记忆 → list 找用途为 embedding 的模型（没有就先 add 一个，例如 MiniMax embo-01），再 set_embedding",
 )
 _AVOID_WHEN = (
     "用 write/edit/shell 直接改 config/model-profiles 目录 → 必须改用 manage_models",
@@ -63,7 +73,7 @@ _AVOID_WHEN = (
     "子代理任务里 → 本工具不可用，模型目录只由主会话代理管理",
 )
 _KEYWORDS = ("加模型", "新增模型", "换模型", "切换模型", "默认模型", "删除模型", "服务商", "api key", "密钥", "/model", "上下文窗口",
-             "共享模型", "初始模型")
+             "共享模型", "初始模型", "语义记忆", "向量模型", "embedding")
 _EXAMPLES = (
     '{"tool":"manage_models","action":"list"}',
     '{"tool":"manage_models","action":"add","profile":{"model_name":"MiniMax-M2.7","model_backend":"anthropic_compatible",'
@@ -75,11 +85,12 @@ _EXAMPLES = (
     '"api_base":"https://api.example.com/v1","api_key":"<用户给的密钥>"},'
     '"models":[{"model_name":"model-a","model_context_window_tokens":128000}]}',
     '{"tool":"manage_models","action":"set_initial","profile_id":"<list 返回的 id>"}',
+    '{"tool":"manage_models","action":"set_embedding","profile_id":"<list 返回的 embedding 用途模型 id>"}',
 )
 _PARAMETERS = {
     "action": "必填。" + "/".join(_ACTIONS) + "。",
     "profile_id": (
-        "select/set_default/delete_model/probe 必填，save_model 编辑已有模型时必填；只能用 list 返回的精确 id，"
+        "select/set_default/delete_model/probe/set_embedding 必填，save_model 编辑已有模型时必填；只能用 list 返回的精确 id，"
         "select/set_default 还可用 default 表示显式部署配置。add/save_model 新建时省略，由系统生成。"
     ),
     "provider_id": "save_provider/delete_provider/discover 必填，save_model 新建时必填；1 至 96 个字母、数字、点、横线或下划线。",
@@ -268,12 +279,15 @@ class ManageModelsTool(BaseTool):
         return ToolAvailability.ready()
 
     # LLM: 副作用：add/save_*/set_default/delete_* 写 owner 的 model-profiles 文件；select 写当前会话线程记录；
-    #   probe/discover 向服务商发一次网络请求。ModelProfileError 都在落盘前抛出，标记 not_started；其余异常保留未知副作用。
+    #   probe/discover 向服务商发一次网络请求；set_embedding/disable_embedding 写管理员用户配置与修改账本（全局，重启生效）。
+    #   ModelProfileError 都在落盘前抛出，标记 not_started；其余异常保留未知副作用。
     # 函数用途: 校验参数、解析当前会话、调用唯一的模型配置服务，并返回不含密钥的回执。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _parse_request(params)
         if isinstance(request, ToolHandlerOutcome):
             return request
+        if request.action in _EMBEDDING_ACTIONS:
+            return _embedding_outcome(self.agent, request)
         thread_id = _current_thread_id(self.agent)
         if request.action == "select" and not thread_id:
             return _err(
@@ -304,6 +318,10 @@ def _parse_request(params: dict[str, object]) -> _ModelToolRequest | ToolHandler
     editing = params.get("editing") is True
     if action == "list":
         return _ModelToolRequest(action, "list")
+    if action in _EMBEDDING_ACTIONS:
+        if action == "set_embedding" and not profile_id:
+            return _missing(action, "profile_id")
+        return _ModelToolRequest(action, action, {"profile_id": profile_id} if profile_id else {})
     if action in _PROFILE_ID_ACTIONS:
         if not profile_id:
             return _missing(action, "profile_id")
@@ -353,6 +371,30 @@ def _catalog_request(action: str, params: dict[str, object], *, profile_id: str,
         source["model_backend"] = params.get("model_backend")
     items = [{**item, "profile_id": str(uuid4())} for item in models if isinstance(item, dict)]
     return _ModelToolRequest(action, "add_models", {**source, "models": items})
+
+
+# LLM: 向量模型两个动作的回执：成功照实带上“重启 Gateway 后生效”；边界拒绝（非管理员、共享或不在本人目录的档案）按
+#   TOOL_PERMISSION_DENIED（与 user_config 同口径）；主机不同返回 EMBEDDING_HOST_DIFFERS 和 needs_user_choice。这两种在写之前
+#   就停下，标 not_started；参数中心写入失败按 TOOL_EXECUTION_FAILED、原码留在 reported_error_code，副作用未知（可能已写一步），
+#   交给对账。不回显密钥或接口地址。
+# 函数用途: 执行 set_embedding/disable_embedding 并整理成工具回执。
+def _embedding_outcome(agent: object, request: _ModelToolRequest) -> ToolHandlerOutcome:
+    try:
+        result = (model_set_embedding(agent, request.payload["profile_id"]) if request.action == "set_embedding"
+                  else model_disable_embedding(agent))
+    except ModelProfileError as exc:
+        code = "TOOL_PERMISSION_DENIED" if exc.reason == "profile_not_found" else "MODEL_PROFILE_INVALID"
+        return _err(str(exc), code, effect_outcome="not_started")
+    body = json.dumps({"action": request.action, **result}, ensure_ascii=False)
+    if result.get("ok"):
+        return ToolHandlerOutcome(TOOL_NAME, True, body)
+    reported = str(result.get("error_code") or "")
+    refusal = _EMBEDDING_REFUSALS.get(reported)
+    if refusal:
+        return ToolHandlerOutcome(TOOL_NAME, False, body, error_code=refusal, effect_outcome="not_started",
+                                  failure_stage="validation")
+    return ToolHandlerOutcome(TOOL_NAME, False, body, error_code="TOOL_EXECUTION_FAILED",
+                              reported_error_code=reported or "TOOL_EXECUTION_FAILED")
 
 
 def _missing(action: str, name: str) -> ToolHandlerOutcome:

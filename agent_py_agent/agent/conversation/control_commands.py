@@ -400,7 +400,8 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
     return ConversationControlCommand("goal", value=value, operation="create")
 
 
-_MODEL_USAGE = "用法：/model 查看可选模型；/model <编号> 选为本会话模型；/model default <编号> 设为新会话默认。"
+_MODEL_USAGE = ("用法：/model 查看可选模型；/model <编号> 选为本会话模型；/model default <编号> 设为新会话默认；"
+                "/model vector 查看向量模型（语义记忆），/model vector <编号> 选用，/model vector off 关闭（管理员）。")
 _EFFORT_USAGE = (f"用法：/effort [{'|'.join(REASONING_LEVELS)}|default]；/effort probe 检测当前模型是否支持调节；"
                  "/effort revert <编号> 撤销检测写入的档案修改。")
 _EFFORT_WORDS = frozenset((*REASONING_LEVELS, "default", "help", "probe"))
@@ -422,13 +423,19 @@ def _effort_command(trailing: object) -> ConversationControlCommand:
                                       valid=not value or value in _EFFORT_WORDS, usage=_EFFORT_USAGE)
 
 
-# LLM: 文字形式只做查看、会话选择和默认值三件事，目标是列表编号或精确配置编号；新增/密钥永远不走聊天。
-# 函数用途: 把 `/model`、`/model <编号>`、`/model default <编号>` 解析成结构化模型控制。
+# LLM: 文字形式只做查看、会话选择、默认值和向量模型（vector：查看、按编号选用、off 关闭）几件事，目标是列表编号或精确配置编号；
+#   新增/密钥永远不走聊天。vector 的权限（只给管理员）由执行端 settings.embedding_selection 裁决，这里只解析结构。
+# 函数用途: 把 `/model`、`/model <编号>`、`/model default <编号>`、`/model vector [编号|off]` 解析成结构化模型控制。
 def _model_command(trailing: object) -> ConversationControlCommand:
     value = str(trailing or "").strip()
     if not value:
         return ConversationControlCommand("model", operation="view", usage=_MODEL_USAGE)
     head, _, rest = value.partition(" ")
+    if head.lower() == "vector":
+        target = rest.strip()
+        return ConversationControlCommand(
+            "model", value=target, operation="vector", valid=len(target.split()) <= 1, usage=_MODEL_USAGE,
+        )
     if head.lower() == "default":
         target = rest.strip()
         return ConversationControlCommand(
