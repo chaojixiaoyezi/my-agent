@@ -160,6 +160,14 @@
   - 第 2 次开关生效，唤醒里带了完整提示。父级没有声明接替（**接替声明未命中，0/1**），而是按提示里的“接手前先核对”去读
     子代理报告和 `ws/notes/child-note.txt`。文件在被杀前已经写好，所以它更新进度后结束，没有另派。
   - 这个杀点（写完之后、结果落账之前）本身不需要接替。要验证“声明接替”这条路，需要换一个工作没做完的杀点，那是另一个场景。
+  - 第 3 次（3a 指定的新场景，宿主侧故障注入，只发一次）：h1 杀点，在子代理执行器登记之前就 SIGKILL，开关生效。
+    - 宿主把子代理收成 FAILED（executor_process_died，没有未确认效果），唤醒里带提示。
+    - 父级唤醒片在 `create_subagents` 里声明了 `replacement_for_run_ids=[被杀子代理]`，**接替声明命中（1/1）**。合计 u2 0/1、h1 1/1。
+  - 同一次运行把 O1 一起核对了（ae 不用另测），用产品 `SubAgentManager` 只读核对：
+    - 来源 TAKEN_OVER，`takeover_by` 是新子代理，`taken_over_successor` 一致；
+    - 新子代理 DONE，TaskRun 在它完成后关闭（done）。
+    - “来源运行账收成 cancelled”这一支不适用：h1 杀在任何工具之前，来源接替前已是 FAILED，运行账已经是终态 failed，
+      `settle_taken_over_run` 按设计不改已终态的运行。这一支只对执行轮未终态的 BLOCKED 来源生效，真实运行仍只有合同单测覆盖。
 - **顺带发现（2026-10-02 已修，见上方“执行器退出且效果未知时保留宿主给的失败类型”）**：`recover_exited_runner` 传的 `failure_type=executor_effects_unknown` 不在 `FailureType` 枚举里，被
   `runner_result_state._apply_unstructured_failure` 改成了 `runner_error`，所以唤醒里的 failure_type 不能区分“未知效果”。接替提示里
   `uncertain_effects` 已带这个事实，所以不影响 C4。
