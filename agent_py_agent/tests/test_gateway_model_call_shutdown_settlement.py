@@ -396,3 +396,152 @@ def test_runtime_error_report_names_host_stopping_with_structured_codes():
         assert (report["error_code"], report["reason_code"]) == ("MODEL_CALL_ADMISSION_CLOSED", MODEL_CALL_INTERRUPTED_ERROR_CODE)
     unrelated = RuntimeError("model call admission closed: MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN")
     assert runtime_error_report(unrelated)["category"] == "programmer_bug", "只认结构化异常，不从消息文本反推"
+
+
+def test_audit_source_rejected_at_admission_keeps_the_reason_and_is_not_redispatched(tmp_path, monkeypatch):
+    """sol2 复审 38d7c8615 的必须修（2026-10-02）：Audit 来源子代理还有工作时，结果归并把 FAILED/model_call_admission_closed
+    改成 PENDING 并清空失败类型，session 收尾随即 auto_start_orphan_run → auto_start_tasks 续派，绕过“停机后不自动重跑”，
+    停机原因也丢了。走真实分类、结果归并、session 收尾续派和自动派发入口，只截获最终启动副作用：关门后不再请求启动新 attempt，
+    run 保持 PENDING（重启后照常接续）并留着结构化停机原因。"""
+    from agent_py_agent.agent.agent_core.orchestration.background import (
+        dispatch as background_dispatch,
+    )
+    from agent_py_agent.agent.agent_core.runner.worker import _continue_pending_run_after_session
+    from agent_py_agent.agent.agent_core.subagent.params import SubagentRunFailureParams
+    from agent_py_agent.agent.agent_core.subagent_mixin import _handle_subagent_run_failure
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.tests.test_dispatch_liveness_and_revive import (
+        _agent,
+        _audit_source_binding_attributes,
+        _make_child,
+        _session,
+    )
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    session = {**_session(age_seconds=120.0), "attempt_id": "attempt-live-1"}
+    task = _make_child(manager, status="RUNNING", session=session,
+                       attributes=_audit_source_binding_attributes(audit_id="audit-1"))
+    agent, snapshots, started = _agent(tmp_path, manager), [], []
+    agent._write_subagent_recovery_snapshot = lambda params: snapshots.append(params)
+    agent.dispatch_subagents = lambda *_args, **_kwargs: None  # 让真实 auto_start_tasks 走得到启动边界
+    monkeypatch.setattr(background_dispatch, "_start_background_dispatch",
+                        lambda _agent, run_ids, **_kwargs: started.append(list(run_ids)) or {"status": "started", "run_ids": run_ids})
+
+    _handle_subagent_run_failure(agent, SubagentRunFailureParams(
+        task.id, "attempt-live-1", _admission_error(), SimpleNamespace(goal="整理来源"), "prompt"))
+    loaded = manager.load(task.id)
+    assert (loaded.status, loaded.failure_type) == ("PENDING", "model_call_admission_closed"), "来源仍有工作：保持可接续，原因不丢"
+    _continue_pending_run_after_session(agent, task.id, attempt_id="attempt-live-1")
+
+    assert started == [], "关门后不再请求启动新 attempt"
+    assert manager.load(task.id).status == "PENDING"
+
+
+def test_auto_start_entry_refuses_new_runners_once_admission_closes(tmp_path, monkeypatch):
+    """自动派发公共入口 auto_start_tasks：关门前照常启动；关门后返回 blocked/host_shutdown（带结构化码），不请求启动、不改 run。"""
+    from agent_py_agent.agent.agent_core.orchestration.background import (
+        dispatch as background_dispatch,
+    )
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.tests.test_dispatch_liveness_and_revive import _agent, _make_child
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    task = _make_child(manager, status="PENDING")
+    agent, started = _agent(tmp_path, manager), []
+    agent.dispatch_subagents = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(background_dispatch, "_start_background_dispatch",
+                        lambda _agent, run_ids, **_kwargs: started.append(list(run_ids)) or {"status": "started", "run_ids": run_ids})
+
+    assert background_dispatch.auto_start_tasks(agent, [manager.load(task.id)], {})["status"] == "started"
+    settle_open_model_calls_for_shutdown()
+    refused = background_dispatch.auto_start_tasks(agent, [manager.load(task.id)], {})
+
+    assert started == [[task.id]], "只有关门前那一次请求了启动"
+    assert (refused["status"], refused["reason"], refused["run_ids"], refused["skipped_run_ids"]) == (
+        "blocked", "host_shutdown", [], [task.id])
+    assert (refused["error_code"], refused["reason_code"]) == ("MODEL_CALL_ADMISSION_CLOSED", MODEL_CALL_INTERRUPTED_ERROR_CODE)
+    assert manager.load(task.id).status == "PENDING"
+
+
+@pytest.mark.parametrize(("failure_type", "kept"), [
+    ("model_call_admission_closed", "model_call_admission_closed"),
+    ("runner_error", ""),
+])
+def test_source_merge_keeps_only_the_shutdown_reason_when_it_turns_pending(tmp_path, failure_type, kept):
+    """结果归并规则：来源仍有工作时改回 PENDING 以便接续；停机准入拒绝的原因留着，其它失败类型照旧清空。"""
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.agent.subagents.runner_result_state import _apply_status_fields
+    from agent_py_agent.tests.test_dispatch_liveness_and_revive import (
+        _audit_source_binding_attributes,
+        _make_child,
+    )
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    task = _make_child(manager, status="RUNNING", attributes=_audit_source_binding_attributes(audit_id="audit-1"))
+    _apply_status_fields(task, {"status": "FAILED", "verification_status": "UNVERIFIED", "failure_type": failure_type},
+                         SimpleNamespace(failure_type=""))
+
+    assert (task.status, task.failure_type) == ("PENDING", kept)
+
+
+def test_admission_error_lookup_follows_explicit_causes_only():
+    """sol2 建议：原因链边界钉成长期用例——无匹配的环能终止、很深的显式原因链也能找到、只有 __context__ 的不算停机。"""
+    error = _admission_error()
+    first, second = RuntimeError("a"), RuntimeError("b")
+    first.__cause__, second.__cause__ = second, first
+    assert ledger_module.find_model_call_admission_error(first) is None
+
+    deep = error
+    for _ in range(10_000):
+        wrapper = RuntimeError("wrapped")
+        wrapper.__cause__ = deep
+        deep = wrapper
+    assert ledger_module.find_model_call_admission_error(deep) is error
+
+    implicit = RuntimeError("raised while handling")
+    implicit.__context__ = error
+    assert ledger_module.find_model_call_admission_error(implicit) is None
+
+
+
+@pytest.mark.parametrize("closed", [False, True], ids=["admission-open", "admission-closed"])
+def test_child_closeout_keeps_the_waiting_parent_pending_after_admission_closes(tmp_path, monkeypatch, closed):
+    """75 复审 38d7c8615（2026-10-02）：嵌套子代理收尾时 _resume_direct_parent_after_session 先删父级的等待标记，再在停机进程里
+    启动父级——父级第一次调用被拒成 FAILED/model_call_admission_closed、尝试次数 +1，还逐层往上传；进程直接退出反而保留
+    PENDING + 等待标记，重启后等待调和照常续上。走真实等待调和、孤儿续派和自动派发入口，只截获最终启动副作用：
+    准入开着时照常释放并启动（对照）；关门后不释放标记、不请求启动，父级保持 PENDING + 等待标记。"""
+    from agent_py_agent.agent.agent_core.orchestration.background import (
+        dispatch as background_dispatch,
+    )
+    from agent_py_agent.agent.agent_core.runner.worker import _resume_direct_parent_after_session
+    from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
+        mark_parent_waiting_for_direct_children,
+        parent_wait_blocks_dispatch,
+    )
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.tests.test_dispatch_liveness_and_revive import _agent
+
+    manager = SubAgentManager(tmp_path / "subagents")
+    parent = manager.create_run(goal="父", thought="t", plan=["p"], role="coordinator")
+    parent.status = "PENDING"
+    manager.save(parent)
+    child = manager.create_run(goal="子", thought="t", plan=["p"], role="worker")
+    child.parent_id, child.root_id, child.depth, child.status = parent.id, parent.id, 1, "RUNNING"
+    manager.save(child)
+    manager.add_child(parent.id, child.id)
+    mark_parent_waiting_for_direct_children(manager, parent.id, [child.id])
+    child = manager.load(child.id)
+    child.status, child.failure_type = "FAILED", "model_call_admission_closed"
+    manager.save(child)
+    agent, started = _agent(tmp_path, manager), []
+    agent.dispatch_subagents = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(background_dispatch, "_start_background_dispatch",
+                        lambda _agent, run_ids, **_kwargs: started.append(list(run_ids)) or {"status": "started", "run_ids": run_ids})
+    if closed:
+        settle_open_model_calls_for_shutdown()
+
+    _resume_direct_parent_after_session(agent, child.id)
+
+    loaded = manager.load(parent.id)
+    assert started == ([] if closed else [[parent.id]])
+    assert loaded.status == "PENDING" and parent_wait_blocks_dispatch(loaded) is closed, "关门后等待标记必须还在"

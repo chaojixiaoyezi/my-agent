@@ -174,6 +174,16 @@ class TestError:
         assert verdict_for_error(admission) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:MODEL_CALL_ADMISSION_CLOSED")
         assert verdict_for_error(wrapped) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:host_stopping:RuntimeError")
 
+    def test_shutdown_neutrals_between_real_failures_still_reach_quarantine(self):
+        """sol2 建议：停机拒绝不计数，但也不清零已有的真实失败；五次同因失败中间穿插停机，仍按原阈值隔离。"""
+        admission = ModelCallAdmissionClosedError(
+            ModelCallAdmissionClosure("HostShutdownInterrupted", "MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN"))
+        neutral, failure = verdict_for_error(admission), _failure("error:SKILL_TASK_BINDING_INVALID")
+        assert neutral.kind == WAKE_VERDICT_NEUTRAL
+        state = _feed([failure, neutral, failure, neutral, failure, neutral, failure, neutral, failure])
+        assert (state.same_cause_count, state.total_count) == (5, 5)
+        assert quarantine_decision(state) is not None
+
     def test_base_exceptions_are_not_counted(self):
         assert verdict_for_error(KeyboardInterrupt()) == WakeAttemptVerdict(
             WAKE_VERDICT_NEUTRAL, "error:base_exception:KeyboardInterrupt")

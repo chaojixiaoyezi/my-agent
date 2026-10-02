@@ -43,12 +43,16 @@ class _ProcessStartupFailureRequest:
 
 
 # LLM: expected_attempt_ids 只接受宿主关键字，不能从模型 request_params 读取；进程启动在 creation 锁外。
+#   宿主停机已关闭本进程模型调用准入时（J17 栅栏，见 _host_shutdown_refusal）一律不启动：session 收尾续派、孤儿复活、
+#   卡住扫描、控制入口和建子代理的自动启动都经这里，run 保持原状态，重启后由新进程照常续派。
 # 函数用途: 自动启动可执行孩子，并沿用控制入口已经预留的准确执行轮。
 def auto_start_tasks(
     agent, tasks: list, request_params: dict[str, object], *,
     expected_attempt_ids: dict[str, str] | None = None,
 ) -> dict[str, object]:
     skipped_run_ids = [_safe_task_id(task) for task in tasks if _safe_task_id(task)]
+    if (refusal := _host_shutdown_refusal(skipped_run_ids)) is not None:
+        return refusal
     dispatchable = dispatchable_tasks(tasks)
     if _bool_param(request_params.get("defer_start"), default=False):
         run_ids = [_safe_task_id(task) for task in dispatchable if _safe_task_id(task)]
@@ -93,6 +97,29 @@ def auto_start_tasks(
         return result
     except Exception as exc:
         return {"status": "failed", "run_ids": run_ids, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# LLM: 只读本进程模型调用准入的关门事实（contracts.model_call_ledger.model_call_admission_closure），不读文本、不改 run 状态。
+#   关门后新启动的 runner 第一次模型调用就会被拒，只会白占尝试次数；Audit 来源被结果归并改回 PENDING 后，session 收尾续派
+#   也会从这里绕过“停机后不自动重跑”（sol2 复审 38d7c8615 的必须修）。返回 blocked/host_shutdown 并带结构化码。
+# 函数用途: 宿主停机后拒绝自动启动子代理，返回拒绝回执；没停机返回 None。
+def _host_shutdown_refusal(skipped_run_ids: list[str]) -> dict[str, object] | None:
+    from ....contracts.model_call_ledger import (
+        MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
+        model_call_admission_closure,
+    )
+
+    closure = model_call_admission_closure()
+    if closure is None:
+        return None
+    return {
+        "status": "blocked",
+        "run_ids": [],
+        "skipped_run_ids": skipped_run_ids,
+        "reason": "host_shutdown",
+        "error_code": MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
+        "reason_code": closure.error_code,
+    }
 
 
 # LLM: 先在原创建锁固定 pending 和 launch，再释放锁启动线程/进程；任一接纳错误都不能交给执行器。

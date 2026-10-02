@@ -191,6 +191,14 @@ def reconcile_parent_wait_for_child(
     return _reconcile_parent_wait(manager, parent_id)
 
 
+# LLM: 只读本进程模型调用准入的关门事实，不读文本、不改状态。
+# 函数用途: 判断宿主是否已进入停机结清、不再接新的模型调用。
+def _host_stopping() -> bool:
+    from ..contracts.model_call_ledger import model_call_admission_closure
+
+    return model_call_admission_closure() is not None
+
+
 # LLM: 等待账不可读时返回 unavailable 和错误类型，不把未知伪装为 checked=0 的健康快照。
 # 函数用途: 补偿父子唤醒事件，并向监督层明确报告本次是否真的完成扫描。
 def reconcile_all_parent_waits(manager: Any) -> dict[str, object]:
@@ -265,6 +273,9 @@ def direct_children_context_payload(manager: Any, parent_run_id: str) -> dict[st
 
 # LLM: Reconciliation clears the marker only when the parent is eligible for
 # one event-driven slice; its next slice re-marks any children still active.
+#   宿主停机已关闭本进程模型调用准入（contracts.model_call_ledger.model_call_admission_closure）时，要续跑的父级既不释放
+#   等待标记也不续跑（reason=host_shutdown）：本进程里启动的父级第一次调用就会被拒、白占尝试次数，还会逐层往上传；
+#   保留 PENDING + 等待标记，重启后的等待调和照常续上。父级已结束时照旧释放。改动同步 test_gateway_model_call_shutdown_settlement。
 # 函数用途: 核对一个父级的精确等待记录并在需要反应时释放它。
 def _reconcile_parent_wait(
     manager: Any,
@@ -321,6 +332,8 @@ def _reconcile_parent_wait(
         if completed
         else "siblings_still_active"
     )
+    if should_resume and not parent_terminal and _host_stopping():
+        should_resume, reason = False, "host_shutdown"
     if should_resume or parent_terminal:
         released = False
 

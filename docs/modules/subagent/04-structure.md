@@ -167,7 +167,10 @@ worker/run_id/准确 attempt，读取 canonical 后复用原 auto-start，不再
 - 宿主停机关闭模型调用准入后（J17 停机准入栅栏），子代理回合的新模型调用被拒，`subagent_mixin._subagent_run_failure_type`
   最先认它（`contracts/model_call_ledger.find_model_call_admission_error`，含显式原因链），失败类型记 `MODEL_CALL_ADMISSION_CLOSED`
   （值 `model_call_admission_closed`，2026-10-02 登记），结果与恢复快照的 error_code 都写它；不在可自动重跑族，界面标签“宿主停机中断”。
-  重启后是否续派由父级按完成唤醒里的失败类型决定。
+  重启后不会自动重跑，父级按 recovery_decision 用同一 run 续派。例外：仍有持久工作的 Audit 来源，结果归并保持 PENDING 并留着
+  这个原因，重启后照常接续。宿主停机后两条自动入口都不再续派：`auto_start_tasks` 返回 `blocked/host_shutdown`，
+  `direct_parent_lifecycle._reconcile_parent_wait` 不释放父级等待标记（reason=host_shutdown），都只读
+  `contracts/model_call_ledger.model_call_admission_closure()`。
 - `runner_completion_payload.py` 是完成内容的只读投影，根父通知、直属父等待和递归父级快照共用；`runner_completion_wake.py` 只拥有原状态更新、投递、去重和错误记录，不再导出完成内容构造函数。
 - 完成通知向 `store.wakes.append_observation` 显式传 `retain_handled=True`，由 `conversation/store_wake_publication.py` 在原锁内冻结完整负载、补齐配对并裁决旧消费事实；前置查询不承担去重权威。原 WAL 重试通路不增加新服务，通用 Goal 保持 handled 后新代。
 - `runner_result_admission.py` 显式接收原 `RuntimeRepository | None` 与 canonical task，在结果落盘前裁决 exact run／attempt 的接管、废弃、换代及终态冲突；拒绝诊断写同一运行账，不接收完整 manager，原结果服务不再保留旧私有准入函数。

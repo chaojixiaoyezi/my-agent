@@ -193,11 +193,12 @@ def _apply_status_fields(task, status_context, parsed) -> None:
         _resolve_stale_capability_requests(task)
         return
     if _source_worker_still_has_work(task):
-        # LLM: 持久来源账本只决定“还要不要续派”，不是质量验收。
+        # LLM: 持久来源账本只决定“还要不要续派”，不是质量验收。宿主停机准入拒绝（model_call_admission_closed）不是来源工作结束：
+        #   保持 PENDING 以便重启后接续，但留着这个结构化停机原因，不清空；停机进程里不续派由自动派发入口按准入关门事实把住。
         # 函数用途: 来源窗口仍开放时保持同一 run 可续派，不被单轮自然回复提前关闭。
         task.status = TaskStatus.PENDING.value
         task.verification_status = VerificationStatus.UNVERIFIED.value
-        task.failure_type = ""
+        task.failure_type = failure_type if failure_type == FailureType.MODEL_CALL_ADMISSION_CLOSED.value else ""
         task.blockers = []
         task.ended_at = 0.0
         return

@@ -70,6 +70,19 @@
   doc_sync PASS；code-size strict blocked=False（hard=0，报告已 checkout 还原）；size_diff 新增 0；`git diff --check` OK；
   clean_package OK；常数目录 818 项 `--check` 一致。
 
+## 停机后不再从两条自动入口续派子代理（sol2/75 复审 38d7c8615，2026-10-02，分支 `claude/38-audit-redispatch`，基于 `c6f28b150`）
+
+- `test_gateway_model_call_shutdown_settlement.py` 新增 5 项，都只截获最终启动副作用 `_start_background_dispatch`：
+  - **sol2 那条**：真实分类、结果归并、session 收尾续派、自动派发入口。Audit 来源保持 PENDING，并留着 `model_call_admission_closed`；关门后没有请求启动。
+  - **75 那条**：真实 `_resume_direct_parent_after_session`，参数化成两种：
+    - 准入开着：照常释放并启动父级，作为对照；
+    - 关门后：不释放等待标记、不请求启动，父级保持 PENDING + 等待标记。
+  - **自动派发入口**：关门前照常启动；关门后返回 `blocked/host_shutdown`，带结构化码，run 不变。
+  - **结果归并规则**：只保留停机原因，`runner_error` 照旧清空。
+  - **原因链边界**：无匹配的环能终止、1 万层深链能找到、只有 `__context__` 的不算。
+- `test_wake_poison.py` 新增 1 项：五次同因真实失败中间穿插停机不计数，仍按原阈值隔离。
+- 变异 9 个，全部被预期用例抓住：入口不看关门、入口恒为未关门、归并清空停机原因、归并留下任何失败类型、原因链也沿 `__context__`、原因链没有环防护（按超时算）、毒丸清零已有失败、等待调和不看停机、停机判断恒为假。
+
 ## 停机准入拒绝的调用方收尾（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `00bcf7d45`）
 
 - `test_gateway_decision_shutdown_cancel.py` 新增 1 项，参数化成 3 种情形。走真实本地 HTTP 决策链，在“已登记 ActiveDecision、还没进模型账本”这一刻执行收尾步骤：

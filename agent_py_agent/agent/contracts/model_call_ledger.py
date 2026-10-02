@@ -977,12 +977,19 @@ def _register_ledger_admission(ledger: ModelCallLedger) -> None:
         registry.ledgers.add(ledger)
 
 
+# LLM: 只读本进程准入表的关门原因（停机结清之后才有，进程内不重开），不改任何状态。账本登记新调用时用它拒绝；
+#   “停机后不再发起新工作”的调用方（例如自动派发入口 background.dispatch.auto_start_tasks）也读这一个结构化事实，不另设标记。
+# 函数用途: 返回本进程模型调用准入的关门原因；还没关门返回 None。
+def model_call_admission_closure() -> ModelCallAdmissionClosure | None:
+    registry = _ADMISSION_REGISTRY
+    with registry.lock:
+        return registry.closure
+
+
 # LLM: 只在 ModelCallLedger.started 持账本锁时调用（锁序固定为账本锁→准入表锁，关门方从不在持准入表锁时拿账本锁）。
 # 函数用途: 准入已关闭就抛 ModelCallAdmissionClosedError，让这次新调用不被登记、不发请求。
 def _require_call_admission() -> None:
-    registry = _ADMISSION_REGISTRY
-    with registry.lock:
-        closure = registry.closure
+    closure = model_call_admission_closure()
     if closure is not None:
         raise ModelCallAdmissionClosedError(closure)
 
@@ -1153,5 +1160,6 @@ __all__ = [
     "ModelCallTimeoutParams",
     "close_model_call_admission",
     "find_model_call_admission_error",
+    "model_call_admission_closure",
     "summarize_model_call_records",
 ]

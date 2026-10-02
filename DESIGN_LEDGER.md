@@ -73,6 +73,31 @@
   - **S2 tests 目录按相对包根判断**：`_production_source_files` 原按绝对路径 `path.parts` 排除 `tests`，仓库检出在名叫 tests 的上级目录下会把
     全部文件排除、扫描结果变空；改为看相对包目录（`agent`/`cli`）的路径段。
 
+## 停机后不再从两条自动入口续派子代理：Audit 来源归并续派、嵌套子代理收尾唤醒父级（sol2/75 复审 38d7c8615 的必须修，2026-10-02，分支 `claude/38-audit-redispatch`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
+
+- **问题**：
+  - **sol2**：Audit 来源仍有工作时，结果归并把 `FAILED/model_call_admission_closed` 改成 PENDING。随后 session 收尾的 `_continue_pending_run_after_session → auto_start_orphan_run → auto_start_tasks` 在停机进程里续派，绕过了“停机后不自动重跑”。新 attempt 第一次调用又被拒，尝试次数 +1。
+  - **75**：嵌套子代理收尾时，`_resume_direct_parent_after_session → _reconcile_parent_wait` 先删父级的等待标记，再经同一入口在停机进程里启动父级。父级被拒成 FAILED、尝试次数 +1，还逐层往上传。
+    - 进程直接退出时，父级反而保留 PENDING + 等待标记，重启后等待调和照常续上。也就是说，关了栅栏反倒多丢了一层自动续跑。
+- **做法**：统一按“本进程准入已关”这个结构化事实拦截。新增只读查询 `contracts/model_call_ledger.model_call_admission_closure()`，账本拒绝新调用读的也是这一个事实。
+  - **自动派发公共入口** `orchestration/background/dispatch.auto_start_tasks`：最先判断，在任何 `reserve_runner_start`/后台启动之前返回 `blocked/host_shutdown`，不改 run。
+    - 回执带 `error_code=MODEL_CALL_ADMISSION_CLOSED`、`reason_code`= 关门原因。
+    - 经过这里的有：session 收尾续派、孤儿复活、卡住扫描、控制入口、建子代理时的自动启动。
+  - **等待调和** `subagents/direct_parent_lifecycle._reconcile_parent_wait`：在释放标记之前判断。要续跑的父级不释放等待标记、不续跑（reason=host_shutdown），保持 PENDING + 等待标记，重启后等待调和照常续上；父级已结束时照旧释放。会话收尾、控制入口、定期监督都经过这里。
+  - **结果归并**：来源仍有工作时照旧改回 PENDING，不改成不可恢复的 FAILED，重启后照常接续；但保留 `model_call_admission_closed` 这个停机原因，其它失败类型照旧清空。
+  - **恢复提示**：错误码表、运行错误报告、失败类型注释三处统一成实际行为：
+    - 普通子代理 run 重启后不会自动重跑，父级按 recovery_decision（状态机给 REPAIR）用同一 run 续派；
+    - Audit 来源例外：保持 PENDING，重启后接续；
+    - 被拒的用户回合不会续跑，需要用户重新发送。
+- **不变**：local/main 子进程派工的语义不动；没有停机时，各入口行为不变。
+- **边界**：
+  - 关门前已启动的后台派发线程，在批次内部逐个启动候选（`runner_batches.collect_runner_candidates`）时不经过 `auto_start_tasks`。这些 runner 第一次调用会被拒，记成 `model_call_admission_closed`。
+  - 发送层硬门、普通 run 重启后自动续跑，仍是待办。
+- **sol2 建议修**：以下两组都已钉成用例：
+  - 原因链边界：无匹配的环能终止、1 万层深链能找到、只有 `__context__` 的不算；
+  - 唤醒毒丸：中间穿插停机，不清零已有的真实失败。
+- **验证**：见 TESTS.md 同名节。
+
 ## 停机准入拒绝的调用方收尾：决策、子代理、运行错误报告、唤醒毒丸按“宿主停机”处理（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `claude/3a-step16z` `00bcf7d45`，已实现，待集成）
 
 - **问题**：sol2 复审 J17 栅栏（`bc639caa7`）后确认：没有锁倒置，窗口确实拦住了。但三个调用方不认识新的准入拒绝 `ModelCallAdmissionClosedError`，把正常停机说成了别的错误。
