@@ -162,30 +162,37 @@ def ranges() -> dict[str, str]:
 def field_readers() -> dict[str, tuple[str, str]]:
     counts: dict[str, dict[str, int]] = {}
     for path in _PACKAGE.rglob("*.py"):
-        resolved = path.resolve()
-        if "tests" in path.relative_to(_PACKAGE).parts or resolved in _SELF_EXCLUDED:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        relative = path.relative_to(_PACKAGE).with_suffix("")
-        for attribute, key in _REFERENCE.findall(text):
-            name = attribute or key
-            counts.setdefault(name, {}).setdefault(str(relative), 0)
-            counts[name][str(relative)] += 1
+        _count_references(path, counts)
     mapped = {field: ("settings", "agent/settings/decision_settings_defaults")
               for _path, (domain, field) in decision_config_fields().items()
               if domain in {"agent", "memory"}}
-    result: dict[str, tuple[str, str]] = {}
-    for item in fields(AgentConfig):
-        per_module = counts.get(item.name)
-        if per_module:
-            reader = max(per_module, key=per_module.get)
-            result[item.name] = (_owner_module(reader), reader)
-        elif item.name in mapped:
-            result[item.name] = mapped[item.name]
-    return result
+    picked = {item.name: _reader_for(item.name, counts, mapped) for item in fields(AgentConfig)}
+    return {name: reader for name, reader in picked.items() if reader is not None}
+
+
+# LLM: 跳过测试目录与自身/定义文件；读不出的文件忽略（只影响展示，不影响任何判定）。副作用：只往 counts 累加引用次数。
+# 函数用途: 统计一个源码文件里每个属性名/字符串键被引用的次数。
+def _count_references(path: Path, counts: dict[str, dict[str, int]]) -> None:
+    if "tests" in path.relative_to(_PACKAGE).parts or path.resolve() in _SELF_EXCLUDED:
+        return
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return
+    relative = str(path.relative_to(_PACKAGE).with_suffix(""))
+    for attribute, key in _REFERENCE.findall(text):
+        per_module = counts.setdefault(attribute or key, {})
+        per_module[relative] = per_module.get(relative, 0) + 1
+
+
+# LLM: 引用最多的文件为读取方；没有直接引用的决策字段用 decision_config_fields 映射补；都没有返回 None。只读。
+# 函数用途: 为一个配置字段选出主要读取方与归属模块。
+def _reader_for(name: str, counts: dict[str, dict[str, int]], mapped: dict[str, tuple[str, str]]) -> tuple[str, str] | None:
+    per_module = counts.get(name)
+    if per_module:
+        reader = max(per_module, key=per_module.get)
+        return _owner_module(reader), reader
+    return mapped.get(name)
 
 
 # LLM: agent 包内文件多，归属模块细分到 agent/ 的第二段（conversation、agent_core、settings…），

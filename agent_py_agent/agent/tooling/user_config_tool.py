@@ -439,6 +439,12 @@ def _with_applied_effect(report: dict[str, object], config: object) -> dict[str,
             "applied_basis": "按新值与当前会话模型计算；什么时候开始生效见 effect_text"}
 
 
+# LLM: 元数据（单位/范围/归属模块/读取方）只在有值时给模型看，避免空字段噪音；字段来自 parameter_metadata 自动推导。只读。
+# 函数用途: 取出一条参数登记里非空的四项元数据。
+def _spec_metadata(spec: object) -> dict[str, object]:
+    return {field: value for field in ("unit", "range", "owner_module", "reader") if (value := getattr(spec, field, ""))}
+
+
 # LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。common 标出参数中心的常用层级（COMMON_KEYS），
 #   只用于推荐，不影响能否修改。登记了派生规则的参数另给 applied_value/applied_rule
 #   （按传入 config 即本片会话模型计算，等于后端实际发送值的同一公式）。只读。
@@ -453,12 +459,7 @@ def _spec_view(spec: object, config: object, *, brief: bool = False) -> dict[str
         "description": description[:160] + ("…" if brief and len(description) > 160 else "") if brief else description,
     }
     if not brief:
-        view.update({"safety": spec.safety, "effect_when": spec.effect})
-        # 元数据（单位/范围/归属模块/读取方）只在有值时给模型看，避免空字段噪音。
-        for field in ("unit", "range", "owner_module", "reader"):
-            value = getattr(spec, field, "")
-            if value:
-                view[field] = value
+        view.update({"safety": spec.safety, "effect_when": spec.effect, **_spec_metadata(spec)})
     applied = applied_value(spec.key, config)
     if applied is not None:
         view["applied_value"], view["applied_rule"] = applied

@@ -26,16 +26,22 @@ def tool_model_spec_to_input_schema(spec: ToolModelSpec) -> dict[str, Any]:
     return schema
 
 
-# LLM: 递归遍历是为了支持嵌套对象声明；仅移除当前宿主拥有的互斥扩展，其它 x-* annotation 保持原行为。
-# 函数用途: 从 provider 副本递归删除运行时专用的互斥参数组声明。
+# LLM: 用显式栈遍历整棵 schema 以支持嵌套对象声明；仅移除当前宿主拥有的互斥扩展，其它 x-* annotation 保持原行为。
+#   只改 provider 副本（调用方已深拷贝），canonical schema 与其 hash 不受影响。
+# 函数用途: 从 provider 副本中删除所有层级的运行时专用互斥参数组声明。
 def _strip_host_schema_extensions(value: Any) -> None:
+    pending = [value]
+    while pending:
+        pending.extend(_stripped_schema_children(pending.pop()))
+
+
+# LLM: 单层处理：字典先删宿主扩展键再返回子值，列表返回元素，其它返回空；供 _strip_host_schema_extensions 逐层展开。
+# 函数用途: 删掉一个 schema 节点上的宿主扩展，并返回它的下一层子节点。
+def _stripped_schema_children(value: Any) -> list[Any]:
     if isinstance(value, dict):
         value.pop(EXCLUSIVE_ARGUMENT_GROUPS_KEY, None)
-        for child in value.values():
-            _strip_host_schema_extensions(child)
-    elif isinstance(value, list):
-        for child in value:
-            _strip_host_schema_extensions(child)
+        return list(value.values())
+    return list(value) if isinstance(value, list) else []
 
 
 def tool_model_spec_to_anthropic_tool(spec: ToolModelSpec) -> dict[str, Any]:
