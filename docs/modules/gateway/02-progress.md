@@ -830,3 +830,11 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 也没有可控根任务时调用 `_stop_session_leftovers`。它只收本会话精确 thread_id 的登记记录，保护仍 active 的任务和执行状态里仍在跑的
 任务，按每条记录的 (thread, root_task, run) 走 `freeze_process_stop`，锁外按进程组回收，回执列出 pid 与 task/run；读不出就报未确认、
 不停。没有运行中回合时的 `/interrupt` 两个入口都不碰资源。合同测试 `test_gateway_stop_session_leftovers.py`。
+
+## 发现层补关"根本没有会话任务"的执行总账（C12c，2026-10-01，分支 `claude/38-c12c-discovery-no-link`，基于 main `34e4d874e`）
+
+D3 让运行时收口边在关联文件确实不存在时按代理树关 TaskRun，但发现层的崩溃重放只认可读的终态关联。所以收口边前崩溃、又没有请求恢复
+重跑的执行（例如 CLI 一次性 run）会永远留着开放的总账，step16v 之前的同形历史行也一样（生产试算 338 条）。现在
+`owner_wake_discovery._task_run_reconcile_reason` 补上同一规则：规范目录列全、任何目录里都没有 `<task_id>.json`（读坏的文件算"有"）、
+根主执行轮已终态，才以 `no_conversation_task` 走树终态 CAS。Gateway 前台请求的崩溃由重启时的请求恢复重跑补上（实测），不靠这条。
+合同测试 `test_owner_wake_discovery_task_run_no_link.py`。

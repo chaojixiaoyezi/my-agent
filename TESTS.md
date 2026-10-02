@@ -508,6 +508,23 @@ $PY scripts/check_clean_package.py .
   （此前只有假连接测试）；超限后的压缩恢复本身这次没有走。
 - 结论：上限在 900018（含）到 922000（不含）之间，建议窗口 900000。证据：`~/.my-agent/decision-evidence/c6-luna-window/`（仓库外）。
 
+## C12c：发现层补关"根本没有会话任务"的执行总账（2026-10-01，分支 `claude/38-c12c-discovery-no-link`，基于 main `34e4d874e`）
+
+- **真实链路复现**（隔离 home，私有端口 8475/8476，脚本化假模型；测试侧钩子停在 TaskRun 收口边入口后 SIGKILL；证据
+  `~/.my-agent/decision-evidence/c12-observations-20261001/c12c/`）：
+  - Gateway 前台请求崩溃后，重启时请求恢复重跑一遍，新执行轮自己把 TaskRun 关了（`agent-runtime`／`no_conversation_task`）。
+  - CLI 一次性 run 崩溃后 TaskRun 一直 `created`：base 网关 200 秒加一次显式发现扫描都不关；本分支网关启动后第一轮就关
+    （`wake-discovery-task-run-reconcile`／`no_conversation_task`）。
+- **生产影响试算**（只读，runtime.db 拷到 scratch 上试跑）：会补关 338 条历史总账，55 条树未结束的不动，见台账同名节。
+- **新增** `test_owner_wake_discovery_task_run_no_link.py`（6 项，真实 RuntimeRepository 与关联目录）：
+  - 没有关联、树已终态的总账被发现扫描关掉，原因 `no_conversation_task`，第二遍幂等；
+  - owner 根本没有会话存储同样按不存在处理；
+  - 关联文件读坏、关联仍 active、根执行轮还在跑、关联目录列不全，都保持打开。
+  - base 代码上跑同一文件：两项"不存在"用例失败，四项保持打开用例通过（行为不变）。
+- **变异**：5 个全部被抓住（去掉不存在分支、读坏文件当不存在、列目录失败当空、没有会话存储当列不全、补关原因写错）。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 14 个加仓库级扫描守卫（含 `test_packaging.py`）：496 passed；
+  Ruff、doc sync、strict code-size（与 `34e4d874e` 比新增 finding 0；`size_diff.sh` 对线上清单新增 0）、`git diff --check`、clean-package 全部通过。
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，

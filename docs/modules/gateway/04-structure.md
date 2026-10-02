@@ -2308,3 +2308,11 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 内存里的 `_wake_retry_after` 照旧只管本进程的 30 秒重试间隔，两者取较晚的一个。观察、策略车道不经过这里。
 领域收尾（C4）在 `wake_domain_closeout.py`：`quarantine_wake` 结案成功后调 `close_out_quarantined_wake`，停滞提醒调 `notify_stalled_wake`；
 `BackgroundClaimDependencies.close_out_source` 由 runtime 绑定 `close_out_abandoned_source`，在 `retire_source` 之前执行。
+
+## 发现层的执行总账重放：两条规则同运行时收口边（2026-10-01，C12c）
+
+`owner_wake_discovery.unfinished_task_ids` 扫完会话任务关联后调 `_reconcile_terminal_conversation_task_runs(repo, link_statuses, links_root)`，
+每条开放 TaskRun 由 `_task_run_reconcile_reason` 决定原因：唯一可读的终态关联 → `conversation_task_<状态>`；没读出状态时，
+`_conversation_task_link_dirs` 列全规范目录（根不存在算空、列目录出错返回 None 不补关）、任何目录都没有 `<task_id>.json`
+（读坏的文件算"有"）、根主执行轮已终态 → `no_conversation_task`。两条都只经仓库的 `settle_task_run_if_agent_tree_terminal`
+写（operator `wake-discovery-task-run-reconcile`），与 `conversation/task_run_closeout.settle_terminal_task_run` 的运行时收口边同口径。

@@ -906,6 +906,7 @@ agent_py_agent/
 |   |-- test_compact_capacity_facts.py # 候选过大失败带出最小候选/上限/摘要占比/保留条数/候选数，白名单与TUI失败行
 |   |-- test_compact_capacity_host_chain.py # 真实恢复宿主两入口：固定开销经只计量入口只在失败时量一次，保留IR按实际发送材料
 |   |-- test_task_run_settle_quiescent_children.py # TaskRun 收口：静止但未终态的子 run（attempt 终态且无锁）不再拦住父 TaskRun，closed 带证据、reopened 可逆、发现扫描能关存量
+|   |-- test_owner_wake_discovery_task_run_no_link.py # 发现层补关没有会话任务的 TaskRun（C12c）：关联文件确实不存在才按代理树关，读坏/active/根在跑/目录列不全都不关
 |   |-- _postgres_test_schema.py       # 测试专用：每个 pytest 进程一个 PostgreSQL schema（URL options 设 search_path），并行分片不互删表
 |   |-- test_compact_calibrated_candidate_gate.py # 候选接受门按预检校准口径：纯函数、宿主冻结、两条门、触发来源、两回合假LLM复现
 |   |-- test_compact_trigger_cap.py # 触发线绝对上限：0/非法不变、封顶后触发线/尾部/recovery、配置解析、请求前预检、后台定时回合先压缩、finalization token 触发线、/context 说明
@@ -1849,6 +1850,7 @@ docs/
 - `agent_py_agent/tests/test_background_child_control_tools.py`：锁后台子代理整合档与 goal 子代理两档在策略收紧前包含 `DIRECT_CHILD_CONTROL_TOOLS` 全部工具（原顺序不变、末尾补缺），owner/task/显式配置收紧只做减法，真实后台运行参数与注册表快照里生命周期唤醒片能用 `list_agents`。
 - `agent_py_agent/tests/test_compact_capacity_host_chain.py`：走真实 `PreparedCompactRecovery` 两个入口（三宿主 transcript、联合来源、活动回合），只替身摘要与末端 HTTP；锁固定开销经宿主只计量入口只在失败时量一次、测不出缺失，保留 IR 按候选实际发送材料计，以及与候选替换规则的等价。
 - `agent_py_agent/tests/test_task_run_settle_quiescent_children.py`：`settle_task_run_if_agent_tree_terminal` 的树判定回归：根终态 + BLOCKED 子 run 能关 TaskRun 并在 `task_run.closed` 留静止子 run 证据；子 run 再起 attempt 经 `task_run.reopened` 重开；attempt 在跑/仍持锁/根未终态/无 attempt 都保持开放；发现扫描能关掉存量；pending 激活的 started 事件按各自列写。
+- `agent_py_agent/tests/test_owner_wake_discovery_task_run_no_link.py`：发现层 TaskRun 重放的"没有会话任务"分支（C12c）：只有规范关联目录列全、任何目录都没有 `<task_id>.json`、根执行轮已终态时才按 `no_conversation_task` 走树终态 CAS。
 - `agent_py_agent/tests/test_compact_calibrated_candidate_gate.py`：候选接受门与预检同一校准口径的回归：纯校准函数与预检逐项相等、宿主边界按 fingerprint/代次冻结观测、transcript 与活动回合两条门在估算偏高 43% 时接受候选且恰好等于上限仍拒绝、进度事件的结构化触发来源，以及隔离 home 两回合假 LLM 复现（接受后下一次真实预检与接受基准一致、失败路径线程快照不被原始值误导、无观测行为不变）。
 - `agent_py_agent/tests/test_compact_output_reserve.py`：真实冻结请求与本地输出预留门组合，当前要求和工具schema保留，过界零业务发送/覆盖提交，Responses普通及OAuth未知上限分开验证。
 - `agent_py_agent/tests/test_session_task_real_chain.py`：会话互通的真实链路门禁，每次交付先用它把关。前台走真实 Gateway ask，后台走 Gateway 同款调度器，唤醒、认领、run_claimed、回合装配都是真实的，只替换供应商传输；覆盖派活与消息唤醒的正向对照、list_owner_sessions 列会话后按清单派活或发消息（不含别的 owner、不含正文）、取消的四个窗口（调用中打断两窗、后端不响应停止、停止旗丢失）、同一对会话连发三条（按单条消息去重）、空转回归与兜底、默认链深 4，已知未修项用 strict xfail（只接受 AssertionError，链路断掉抛 RealChainBroken）。

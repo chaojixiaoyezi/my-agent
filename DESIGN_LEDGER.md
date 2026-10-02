@@ -318,6 +318,20 @@
   - **问题**：子代理的 `capability_request` 在写申请账之前，会因参数不全（`TOOL_PARAMETER_REQUIRED`）、root 不可申请（`TOOL_NOT_ALLOWED`）等被拒。这些拒绝没有声明 `effect_outcome`，又不在执行前确定失败白名单里，操作账因此落成 `UNKNOWN`（`TOOL_OPERATION_OUTCOME_UNKNOWN`，reconcile）。这和 D2 是同一类问题。
   - **做法**：唯一的失败出口 `_capability_error` 固定声明 `effect_outcome=not_started`，操作账改落 failed。
 
+## C12c：发现层补关"根本没有会话任务"的执行总账（D3 崩溃窗口）（2026-10-01，分支 `claude/38-c12c-discovery-no-link`，基于 main `34e4d874e`，已实现，待集成）
+
+- **来源**：D3 修复的待定项。主执行轮已在运行库收口、TaskRun 收口边还没跑时进程崩溃，发现层的崩溃重放（`owner_wake_discovery._reconcile_terminal_conversation_task_runs`）只认可读的终态关联，分不出"没有关联"和"关联读坏"，没人补关。
+- **真实链路复现**（隔离 home，测试侧暂停钩子停在 `task_run_closeout.settle_terminal_task_run` 入口、再 SIGKILL；base = step16x 代码）：
+  - Gateway 前台请求：崩溃后请求停在 processing；网关重启时请求恢复把它重跑一遍（多一次模型调用，attempt 第 2 代），新执行轮的收口边按 `no_conversation_task` 关掉了 TaskRun。所以这条路自己会补上，不留永久泄漏。
+  - CLI 一次性 `run`（没有请求恢复）：崩溃后 TaskRun 永远 `created`。base 网关跑 200 秒加一次显式发现扫描都不关；换成本分支的网关，启动后第一轮发现就关掉（operator `wake-discovery-task-run-reconcile`，reason `no_conversation_task`）。
+- **做法**：发现层重放补上与运行时收口边同一条规则：
+  - 关联文件确实不存在，就交给代理树决定。
+  - "确实不存在"用文件系统事实判断，并且在 CAS 前一刻现查：规范目录 `*/conversations/tasks` 下有任何 `<task_id>.json`，不管读不读得出来，都保持打开；目录列不全也保持打开。
+  - 还要求根主执行轮已终态才去试 CAS；整棵树是否终态或静止，仍由 `settle_task_run_if_agent_tree_terminal` 判断，unknown 不算静止。
+- **生产影响**（只读试算，把各 owner 的 runtime.db 拷到 scratch 上试跑同一个 CAS）：上线后第一轮发现会一次性补关 338 条历史总账，全部是建成超过一天的，绝大多数是 step16v 之前 D3 留下的。分布：local/main 327 条，飞书用户 6 条，测试 owner 5 条。另有 55 条树未结束（含 unknown）继续保持打开，不受影响。读开放 TaskRun 的只有发现层和 /recover 子代理分支，后者要求 unknown 执行轮，这类行本来就不会被关。
+- **边界**：发现层只认默认布局下的会话存储。配置了 `conversation_workspace` 指向别处的部署，关联文件不在扫描范围内，会被当成不存在；生产配置里没有这一项。若误关一条，之后的新执行会照常 `task_run.reopened`，可以恢复。
+- **验证**：见 TESTS.md 同名节。证据（仓库外）：`~/.my-agent/decision-evidence/c12-observations-20261001/c12c/`。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`
@@ -512,6 +526,7 @@
   /recover 看不到待核对项）是另一个问题；第一步已单独处理，见上方“/recover 能看到并处置本会话子代理留下的未知执行轮”。
 - **待定**：进程在主 run 收口与 TaskRun 关闭之间崩溃的窗口，发现层 `_reconcile_terminal_conversation_task_runs` 不补——它按文件内容
   收集关联状态，读坏的文件会被跳过，分不出“没有关联”和“关联读坏”，不能据此关闭。
+  （2026-10-01 C12c 已实施：发现层按关联文件是否存在区分两者，见上方 C12c 条目。）
 - **改动范围**：只改 `agent_core/runtime_mixin.py` 一个函数；没动 `conversation/runtime.py`（Codex 重构区）与
   `orchestration/tools/capability.py`（ae 修 D2）。
 - **验证**：`test_task_run_close_without_conversation_task.py` 6 项；5 个变异全部被杀。见 TESTS.md 同名节。

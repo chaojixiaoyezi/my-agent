@@ -998,7 +998,7 @@ def unfinished_task_ids(
                 links_by_task[task_id] = path
     repo = _runtime_repo_for_owner(owner_home)
     if repo is not None:
-        _reconcile_terminal_conversation_task_runs(repo, link_statuses)
+        _reconcile_terminal_conversation_task_runs(repo, link_statuses, links_root)
     if not active_ids:
         return []
     # 新记录在 runs，存量在 tasks；仅扫描标准宿主 state 叶子，不从业务文件名推断活跃运行。
@@ -1029,35 +1029,75 @@ def unfinished_task_ids(
     )
 
 
-# LLM: Discovery replays the same TaskRun closeout CAS after process crashes. It may
-# trust only one unambiguous canonical link status per task and a fully terminal RuntimeDB
-# tree; active, conflicting, unreadable, or unknown link states remain open.
-# 函数用途: 网关启动或周期发现时补齐“会话链接已结束、代理树也已结束但执行总账未关”的崩溃窗口。
+# LLM: Discovery replays the same TaskRun closeout CAS after process crashes, with the same two rules as the runtime edge
+#   (conversation/task_run_closeout): one unambiguous terminal link status, or — C12c, 2026-10-01 — a link file that truly
+#   does not exist (the request never promoted a conversation task, so its own agent tree governs; reason
+#   no_conversation_task). "Truly absent" is a filesystem fact checked right before the CAS: any `<task_id>.json` under the
+#   canonical `*/conversations/tasks` dirs, readable or not, keeps the TaskRun open, and so does an incomplete directory
+#   scan. The absent branch also requires the root main run to be terminal before trying the CAS. Active, conflicting,
+#   unreadable or unknown link states, and unknown/active trees, stay open. Side effect: may write task_run.closed.
+#   Change together with test_task_run_close_without_conversation_task.py and test_owner_wake_discovery_task_run_no_link.py.
+# 函数用途: 网关启动或周期发现时补齐“会话链接已结束（或根本没有会话任务）、代理树也已结束，但执行总账未关”的崩溃窗口。
 def _reconcile_terminal_conversation_task_runs(
     repo: RuntimeRepository,
     link_statuses: dict[str, set[str]],
+    links_root: Path,
 ) -> None:
     try:
         open_runs = repo.open_task_runs()
     except Exception:  # noqa: BLE001 恢复投影失败不能阻断 owner 发现
         return
+    link_dirs = _conversation_task_link_dirs(links_root)
     for task_run in open_runs:
         task_id = str(task_run["task_id"] or "").strip()
-        statuses = link_statuses.get(task_id, set())
-        if len(statuses) != 1:
+        try:
+            reason = _task_run_reconcile_reason(repo, task_id, link_statuses.get(task_id, set()), link_dirs)
+        except Exception:  # noqa: BLE001 单条坏账不影响其它 owner 任务发现
             continue
-        link_status = next(iter(statuses))
-        if not conversation_task_link_is_terminal(link_status):
+        if not reason:
             continue
         try:
             repo.settle_task_run_if_agent_tree_terminal(
                 task_run_id=str(task_run["task_run_id"] or ""),
                 task_id=task_id,
                 operator="wake-discovery-task-run-reconcile",
-                reason=f"conversation_task_{link_status}",
+                reason=reason,
             )
         except Exception:  # noqa: BLE001 单条坏账不影响其它 owner 任务发现
             continue
+
+
+# LLM: 会话任务关联的规范位置是 `<owner>/workspace/runtime/workspaces/<工作区>/conversations/tasks/<task_id>.json`
+#   （store_layout.task_path）。根目录不存在说明这个 owner 从没建过会话存储，返回空元组（所有 TaskRun 都没有关联）；
+#   列目录出错返回 None，调用方就不按"没有关联"补关任何一条。只做目录元数据读取。
+# 函数用途: 列出本 owner 全部会话任务关联目录；列不全时明确返回 None。
+def _conversation_task_link_dirs(links_root: Path) -> tuple[Path, ...] | None:
+    if not links_root.is_dir():
+        return ()
+    try:
+        return tuple(links_root.glob("*/conversations/tasks"))
+    except OSError:
+        return None
+
+
+# LLM: 返回补关原因，空串表示保持打开。唯一可读的终态关联 → conversation_task_<状态>；没有读出状态时，只有
+#   link_dirs 列全、任何目录里都没有这个任务的关联文件（读坏的文件也算"有"）、且根主代理执行轮已终态，才返回
+#   no_conversation_task——树里其余执行是否终态/静止仍由仓库的树终态 CAS 判。只读：stat 与一次运行库查询。
+# 函数用途: 决定一条未关的执行总账能不能由发现层补关，以及用什么原因。
+def _task_run_reconcile_reason(
+    repo: RuntimeRepository, task_id: str, statuses: set[str], link_dirs: tuple[Path, ...] | None,
+) -> str:
+    if len(statuses) == 1:
+        status = next(iter(statuses))
+        return f"conversation_task_{status}" if conversation_task_link_is_terminal(status) else ""
+    if statuses or not task_id or link_dirs is None:
+        return ""
+    if any((folder / f"{task_id}.json").exists() for folder in link_dirs):
+        return ""
+    root = _main_run_row_for_task(repo, task_id)
+    if root is None or str(root["status"] or "") not in AGENT_RUN_TERMINAL_STATUSES:
+        return ""
+    return "no_conversation_task"
 
 
 def _filter_by_runtime_authority(
