@@ -560,7 +560,7 @@ J10 状态：改后未复核的写入触发已实施（2026-10-01），`worker/s
 
 ### P5-C 动作候选 `action_candidate`
 
-当前状态：已接入（随分支 `claude/decision-action-candidate` 合入，基于 main `6a50d84aa`），默认关闭。新鲜度只问插件线的 `plugin_observation.observation_is_current`；离线合同 82 项、19 种变异全杀。2026-09-25 在隔离 owner 上用 browser-lite 完成 off/observe/apply/过期四档真实验收，见[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md#15-动作候选-action_candidate-的-browser-lite-真实验收2026-09-25)。前置结构见[插件观察候选结构](PLUGIN_OBSERVATION_CANDIDATES.md)。
+当前状态：已接入（随分支 `claude/decision-action-candidate` 合入，基于 main `6a50d84aa`），默认关闭。新鲜度只问插件线的 `plugin_observation.observation_is_current`；离线合同 82 项、19 种变异全杀。2026-09-25 在隔离 owner 上用 browser-lite 完成 off/observe/apply/过期四档真实验收，见[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md#15-动作候选-action_candidate-的-browser-lite-真实验收2026-09-25)。前置结构见[插件观察候选结构](PLUGIN_OBSERVATION_CANDIDATES.md)。J16（2026-10-02）已记录 Computer Use 接入设计，但固定上游缺结构化窗口/截图/坐标合同，且按窗 OCR 非只读；产品实现阻塞，未新增观察来源，image-text 无动作工具故不接。真实桌面/模型未验证，见该设计第 7 节。
 
 要解决的问题：插件的只读观察工具（如 browser-lite `read`）一次返回多个可操作对象时，主模型可能先去操作不相关的那个。此点在观察结果归档之后，可选地请 Jev 从宿主铸造的候选里挑一个"下一步最值得先核对的"，宿主把它渲染成一句可忽略的提示。它不执行动作，也不生成参数、选择器或坐标。
 

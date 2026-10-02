@@ -40,6 +40,17 @@
   - ruff、import 边界、doc_sync、`diff --check`、`size_diff` 新增 0、clean_package。
 - **变异**：6 个全部抓住。包括不管替换与否都附、从不附、每替换一处附一次、本机通道也脱敏、投递服务退回旧投影、请求历史退回旧投影。
 
+## J16：固定上游观察合同核对（2026-10-02，sol，设计阶段阻塞）
+
+- 范围：`worker/sol-j16-observation`，基于 `b35796a60`；只改设计/状态文档，不改产品与测试。
+- 用指定 CI Python 的标准库读取 PyPI `computer-control-mcp/0.3.13/json` 与固定 wheel，计算 SHA-256 后用 zipfile/ast 查看公开函数；
+  wheel 摘要 `fdbd14c00e0bd6bbbe3b0d08080773c2f4baede5317871607f35a2925e454513` 相符，命令退出 0。
+  没有安装、导入或执行 GUI 包。看到 OCR tuple 文本、窗口列表无稳定 ID、坐标变换不导出及按窗采样切焦点，详见观察设计第 7 节。
+- 未执行假 MCP 功能测试或四项变异，未运行真实桌面/MCP/模型；不能把源码读取或依赖元数据查询算红灯、功能通过或端到端验证。
+- 文档门禁：`PYTHONDONTWRITEBYTECODE=1 ~/.my-agent/releases/claude-tools/ci-venv-312/bin/python scripts/check_doc_sync.py` 返回 `DOC_SYNC_PASS`；
+  `git diff --check` 退出 0；`PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 退出 0，新增告警 0、消失告警 0。
+  未改产品，因此未跑相关 pytest、guards9、Ruff、strict-size、import-boundaries 或 clean-package；不宣称产品门禁全部通过。
+
 ## 去抖：唤醒发现事实缓存用例显式推进策略文件 mtime（2026-10-02，3a）
 
 - **现象**：Linux 车道（`25882221f`）第 10 片 `test_scheduler_scan_costs.py::test_fact_cache_respects_policy_due_deadline` 第 949 行 `[] == ['u1']`；Mac 连跑通过。

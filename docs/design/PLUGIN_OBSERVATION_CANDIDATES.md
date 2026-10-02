@@ -180,3 +180,65 @@
 5. **browser-lite 的 key**：用插件内序号加代次。CSS 选择器不稳定，也会诱使模型或宿主把它当选择器用。
 
 另加两条边界（已并入 2.3/2.4）：发送前新鲜度按 `tool_operations` 调用序判定；同一 run/task 的后台续跑 attempt 共享观察。
+
+## 7. J16：Computer Use / OCR 接入设计与上游合同阻塞（2026-10-02）
+
+**状态：设计已记录，产品实现阻塞。** 本节不表示 Computer Use 已产出观察，也不替代第 6 节的 browser-lite 实施记录。
+工作分支 `worker/sol-j16-observation`，基于 `claude/3a-step16z` 的 `b35796a60`。只允许改适配层与宿主校验，
+且适配层只组合上游公开 MCP 工具；在此边界内，固定 `computer-control-mcp==0.3.13` 尚不能提供安全接入所需事实。
+
+### 7.1 固定上游的实际输出，不把前置假设当事实
+
+来源：[PyPI 固定版本元数据](https://pypi.org/pypi/computer-control-mcp/0.3.13/json)、该版本 wheel 的
+`computer_control_mcp/core.py`；读取并核对 wheel SHA-256
+`fdbd14c00e0bd6bbbe3b0d08080773c2f4baede5317871607f35a2925e454513`，未安装、导入或执行 GUI 包。
+
+- `take_screenshot_with_ocr` 成功时返回 `',\n'.join(str(item) ...)`，每项是外框、文字、置信度的 Python tuple 文本；
+  空结果是 `No text found`，异常是含 traceback 的文字。公开结果没有结构化成功码、截图 ID/时刻、窗口 ID、坐标原点或缩放信息。
+- `list_windows` 返回标题、left/top/width/height 和 active/visible/minimized/maximized 标志；没有稳定窗口句柄、进程身份或窗口重建代次。
+  标题和外框相同的两个窗口、同位置同标题的新窗口不能据此区分；不能把标题/矩形哈希伪装成稳定身份。
+- 全屏截图内部用 `mss.monitors[0]`（全部显示器的组合区域）；OCR 返回图像坐标，没有导出该区域的原点。
+  按窗 OCR 会截图裁剪区域并允许缩放，结果也没有导出窗口偏移/变换。不能把这些坐标直接当全局点击坐标。
+- 按窗截图/OCR 会调用 `window.activate()`，再尝试恢复先前窗口；`save_to_downloads` 还可能写用户目录。
+  不能把这两个原工具整体降为 `read_only` 来满足 observation 声明。
+
+缺依赖不是本片停止原因：假 MCP 足以测试适配代码；真正缺的是生产公开接口的结构化合同。
+不读取 `upstream.gw`、不调用 `_mss_screenshot`/`engine` 等内部实现，不解析错误文案判断成功，不新造桌面执行器绕过这条边界。
+
+### 7.2 合同补齐后采用的观察与动作设计（尚未实现）
+
+1. **只读采样接口**须保证不切焦点、不激活/恢复窗口、不保存用户文件；一次结果同时返回结构化成功状态、
+   稳定窗口身份（含实例代次）、截图 ID/采样时刻/内容摘要、屏幕坐标系、原点、缩放和可见区域，以及有限 OCR 区域或窗口元素。
+   单纯图片没有可定位元素时不凭空造候选；OCR 区域的 role 为固定 `ocr_text`，不根据 label 猜成按钮或输入框。
+2. **静态声明**仍只有一个权威：插件沿 manifest v5；宿主内建 Computer Use 在原受控 MCP profile 固定同形的
+   observation/observation_ref 声明，不让握手自报降 effect。只读采样配 `target_kind=window`，最多 64 项；动作只来自该 profile 已声明工具。
+   适配后的结构统一交给 `plugin_observation` 校验、铸 ID、写原归档和原 `tool_completed` 事件；不建第二观察账本。
+3. **目标与代次**：target.ref 绑定稳定窗口实例，generation 绑定该实例、截图 ID/时刻、像素摘要和坐标变换。
+   新采样替换该目标的旧观察；执行前还须由适配器从公开只读接口复核窗口身份、可见状态和图像/变换没有变化。
+   换窗、窗口重建、移动/缩放或截图换代均拒绝旧候选，不能只检查“编号还存在”。
+4. **候选**保留 key/role/截断 label/允许动作；label 去控制字符并截到 120 字，只作 external_data。
+   普通 OCR 区域只提供可定位的点击动作；输入动作仅给上游明确声明可编辑且可定位的元素，不能从文字猜测。
+   坐标几何需作为同一观察的宿主私有结构扩展校验（有限数、正面积、边界、坐标系与变换一致），并留在原归档/事件中，
+   不把坐标藏进 key 或自由文本供后续解释，也不把未经校验的 OCR 外框当点击点。
+5. **点击/输入**的模型 schema 只收 `candidate_id`（observation_ref.param）及显式输入文字/替换选项，不暴露 x/y 或选择器。
+   宿主沿当前 run/task、固定连接代次、当前观察和候选 actions 复核，从已校验几何解析唯一点击点，随原可信 `_meta` 交适配器。
+   适配器最后复核窗口/代次后才组合公开点击与既有文本输入。过期/未知返回原 OBSERVATION_STALE/OBSERVATION_CANDIDATE_UNKNOWN，
+   `not_started` 且不发点击/输入。输入文字仅来自经原审批绑定的显式参数，绝不复制 label。
+6. **开关与权限**不新增：`computer_use_enabled`、管理员和 Full Access 仍决定是否装配；危险动作仍走原审批。
+   `action_candidate` 默认 off；observe 只请求记账，apply 只给候选 ID 的软提示。Jev 与主模型都不能生成候选动作的坐标。
+
+### 7.3 image-text 的裁决：本片不声明 observation
+
+`plugins/image-text/src/image_text/declaration.json` 只有只读 `read`；`ocr.py` 返回图片内文字外框和置信度，没有动作工具，
+也没有桌面窗口身份。图片像素不能等同于当前屏幕坐标。仅为 Jev 造一组“可操作候选”没有可用动作，
+还违反 manifest v5 的 observation/observation_ref 双向配对合同。因此 image-text 保持原 OCR 数据工具，不改声明、不造候选 ID。
+
+### 7.4 恢复实施的前置条件及验收顺序
+
+由集成者先确定并提供满足 7.2 第 1 项的公开结构化观察接口与版本，或明确另行授权更改“仅组合上游公开 MCP 工具”的适配边界。
+本片没有改上游包、增加私有 API 旁路或声明假接口已接通。
+
+接口补齐后：先写真实缺行为红灯，再接宿主校验与原归档，使用假 MCP/假截图完成合规与不合规、少于两个候选零决策请求、
+换代/换窗零动作、candidate_id 解析坐标及 label 注入不进入参数的测试；至少杀死四个变异：跳过几何校验、跳过代次校验、
+忽略窗口身份、从 label 生成动作参数。再跑相关测试、guards9 与指定门禁。
+这些功能测试和变异本轮**未执行**；真实桌面、真实 MCP 执行、真实 Jev 采用均**未验证**，由 3a 另行安排。
