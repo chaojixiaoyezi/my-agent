@@ -16,6 +16,7 @@
 - 原样 LICENSE/NOTICE、PROVENANCE/UPSTREAM、characters NUL 保持；自检与样例仅在仓库测试。
 - 本机聚焦 29 passed、1 failed、1 skipped，守卫 166 passed；宿主启用和 report 沙箱限制按原失败/跳过保留。
 - 原宿主测试的嵌套 JSON 子串断言改为分层解码和布尔/门计数断言，修改后完整宿主链仍待 3a 沙箱外复验。
+- 2026-10-02 补跨语言样例 2 passed、2 failed，Node/Go 均在启用确认处失败；按 3a 范围只做定向与 guards9，不再跑全仓。
 - 未验证：真实 TUI 安装/本人确认/调用、真实模型自然调用；不登记完整 C14 或 M-B2 已完成。
 - 下一步由 3a 外部复验后集成，ae 可并行只读审许可与包装边界。详细门禁见 [TESTS](../TESTS.md)。
 

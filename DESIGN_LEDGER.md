@@ -295,8 +295,9 @@
   本机聚焦 29 passed、1 failed、1 skipped，守卫 166 passed；失败在解释器确认启用处，沙箱跳过发生在 Node 启动前。
   3a 沙箱外对修改前候选报告 30 passed、1 failed、0 skipped，固定提交完整复验仍由 3a 执行，不能改记本机全绿。
 - 真实 TUI/模型未验证；Node 打开后复核不等同 Python SDK 的逐段目录描述符竞态防护。
-  本轮严格静态门禁及含 NUL 的源树 clean-package 通过；追加全仓收到 SIGTERM 未完成，
-  首失败诊断确认基线旧测试导入已删除的 TokenBudgetResult。未改无关模块，不宣称全仓通过。
+  严格静态门禁及含 NUL 的源树 clean-package 通过；2026-10-02 补跨语言样例为 2 passed、2 failed，均在宿主启用确认处失败。
+  3a 明确后续只跑定向文件与 guards9，不再执行全仓或无文件列表的-x；此前全仓由 3a 主动结束，
+  历史日志保留但不作为 M-B1 当前验收门，不修改无关旧接口失败。
   完整证据见 [TESTS](TESTS.md)，能力边界见 [迁移设计](docs/design/CAPABILITY_UPSTREAM_MIGRATION.md)与 [README](plugins/shuohao-novel-gates/README.md)。
 
 ## C14 第一批 M-A1 + M-A2：drama-media-shell（2026-10-01，分支 `worker/sol56-c14-ma12`，本地已实现，待 ae 审查/集成）

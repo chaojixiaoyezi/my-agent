@@ -440,6 +440,10 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 
 ## C14 M-B1 五阶段只读 Node 门插件（2026-10-01，`worker/sol2-c14-mb1`，本地候选、待外部复验）
 
+收尾补充（2026-10-02）：3a 已明确本任务只跑直接相关测试文件与 guards9，**不再执行全仓或未列文件的 pytest/-x**。
+产品与测试代码保持 `8e07a17b9` 不变；本次补跑跨语言样例文件，其余未变输入的有效结果复用。
+此前全仓 exit 143 的归因现按 3a 说明更正为“集成者主动结束”，不再记为未知环境故障，也不作为 M-B1 当前验收门。
+
 - 来源：固定 B `7ebef4f2f53159ee1eaaec2793271a114a8be8cc`，不联网拉取、不修改上游；许可和逐文件摘要见插件 PROVENANCE/UPSTREAM。
 - 做法：五工具同进程调用导出函数，逐次读取上下文，分镜不进入日志分支；上游六份 selftest 只在仓库测试。
 - 本轮处理 3a 评审：完整宿主测试不再搜索转义文本里的 `"passed":true`，改为
@@ -458,6 +462,11 @@ export PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1
 "$PY" -m pytest agent_py_agent/tests/test_shuohao_novel_gates.py \
   -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 \
   --junitxml=tmp/mb1-resume-focused.xml
+mkdir -p tmp/mb1-go-cache
+GOCACHE=$PWD/tmp/mb1-go-cache GOPROXY=off GOTOOLCHAIN=local GOSUMDB=off \
+  "$PY" -m pytest agent_py_agent/tests/test_plugin_any_language_samples.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 \
+  --junitxml=tmp/mb1-samples-focused.xml
 "$PY" -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) \
   -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 \
   --junitxml=tmp/mb1-resume-guards.xml
@@ -468,14 +477,6 @@ export PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 "$PY" scripts/check_clean_package.py .
-
-# 候选含原样上游代码，生产/测试代码新增累计 12,778 行，按 AGENTS.md 追加全仓。
-"$PY" -m pytest -q --tb=short -p no:cacheprovider \
-  --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/mb1-resume-full.xml \
-  > tmp/mb1-resume-full.log 2>&1
-# 上一命令未完成后，仅用于定位首失败；不是全仓通过证据。
-"$PY" -m pytest -x -q --tb=short -p no:cacheprovider \
-  --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/mb1-full-first-failure.xml
 ```
 
 本轮实际结果（从 JUnit 逐项读取，不把外层诊断脚本退出 0 当 pytest 通过）：
@@ -483,6 +484,9 @@ git diff --check
   尚未执行修改后的五工具断言。当前执行环境此前已实测拒绝 `/bin/ps`，宿主出生身份无法取得；保留原失败。
 - report 沙箱：明确 `sandbox_apply: Operation not permitted`、exit 71，零操作 probe 都未启动 Node，故记跳过；
   **本机 report 沙箱子进程未验证**，不推断子进程允许或禁止。
+- 跨语言样例文件：**2 passed、2 failed、0 errors/skipped**，pytest exit 1；Python 参考与 Node 移植的读取向量检查通过。
+  hello-node / hello-go 都在 `_install_and_confirm` 的启用确认处失败；Go 已实际编译完成，不能据此声称宿主调用通过。
+  保留两条原宿主失败，不改断言或增加 skip，由 3a 沙箱外复核；构建缓存只在本工作树 tmp，禁止依赖联网下载。
 - guards9.txt 实际十个文件（含 packaging）：**166 passed、0 failed/errors/skipped**。
 - import boundaries：**0 条**；Ruff：`All checks passed!`；doc sync：`DOC_SYNC_PASS`。
 - strict code-size：exit 0、`blocked=False`，`strict_scope_total=2239 hard=0 high-risk=1531 soft=708 test_advisory=1244`；
@@ -491,12 +495,13 @@ git diff --check
   工作区与暂存字节相同，SHA-256 为 `146cef28dbbe21a2f800de61ca10052cf3d13f79375aaae57c25ce398e15b864`，
   `git check-attr text` 为 `unset`（`-text` 生效），未修改清洁检查规则或忽略源文件来放行。
 - 中断恢复时读回聚焦/守卫 JUnit；对应非文档输入均早于测试启动且无未暂存代码改动，复用有效结果，未为恢复重跑相同测试。
-- **追加全仓未通过/未完成**：命令收到 SIGTERM、exit **143**，日志停在约 71%，已有失败标记，
-  未生成最终 `mb1-resume-full.xml`。终止原因未确认，不归因为沙箱或插件；不从进度符号统计通过数。
-- 首失败诊断 `-x`：exit **1**，JUnit 为 672 tests、1 failure、0 errors、2 skipped；
-  首失败 `test_archive_tokens.py::TestTokenBudgetResult::test_token_budget_result_fields` 仍导入已不存在的 `TokenBudgetResult`。
-  此测试与 `memory_archive/tokens.py` 已按字节核对与基线 `f15b0a19f` 相同，M-B1 未改它们；
-  没有删除/跳过断言或恢复旧接口来改绿。其余全仓失败的原因未复核，交集成者另行处理，不能称全仓通过。
+
+此前误扩范围的执行记录仅保留为历史，不再列作本任务门槛，也不继续复跑：
+- 全仓命令收到 SIGTERM、exit **143**，日志停在约 71%，未生成最终 JUnit；3a 已说明由其主动结束。
+  原始 `tmp/mb1-resume-full.log` 保留，不将中断或进度符号记成通过。
+- 已执行的无文件列表 `-x` 诊断 exit **1**，JUnit 为 672 tests、1 failure、0 errors、2 skipped；
+  首失败是 `test_archive_tokens.py` 导入已不存在的 `TokenBudgetResult`，测试/生产模块均与基线字节相同，M-B1 未改。
+  原 `tmp/mb1-full-first-failure.xml` 保留；此失败不归入插件新缺陷，不修改无关模块，其他全仓失败未复核。
 
 外部结果单独记账：3a 在沙箱外复制修改前候选报告 **30 passed、1 failed、0 skipped**，
 原环境受限的宿主启用/report 沙箱分支在那里执行通过；唯一真实失败是上述 JSON 子串断言。
@@ -504,7 +509,7 @@ git diff --check
 真实 TUI 安装、本人确认和调用、一次真实模型自然调用**未验证**，由 3a/ae 集成后按迁移设计 §3 执行。
 线上 CI 未作为本轮验收来源；未 push、部署或操作 Gateway，不覆盖 J6 或其它分支的历史测试数字。
 建议下一步：3a 在沙箱外重跑交付提交的完整插件测试，ae 可并行只读核许可/包装边界；
-全仓首失败交对应模块实施者核对，原中断日志保留，修复/复核前不以本候选宣称全仓验收完成。
+本机插件宿主失败与 report 沙箱跳过分别补外部证据；全仓历史记录不替代定向验收，也不要求本线恢复全量。
 
 ## C14 第一批 M-A1 + M-A2：drama-media-shell（2026-10-01，分支 `worker/sol56-c14-ma12`，基于 `f15b0a19f`）
 

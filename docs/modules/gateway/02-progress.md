@@ -41,6 +41,8 @@ C14 M-B1（2026-10-01，sol2，本地候选）：新增 `plugins/shuohao-novel-g
 复用原安装/本人解释器确认/Registry/HostCommand/ToolExecutor/MCP 链，不改 Gateway 或新增授权通道。
 只从本次 `_meta` 读取上下文，门计算不写工作区；原样上游自检和来源摘要有仓库证据。
 宿主启用失败与嵌套 Seatbelt 跳过保留，固定提交待 3a 沙箱外复验；真实 TUI/模型未验证，详见 TESTS 的 M-B1 节。
+收尾补充（2026-10-02）：跨语言样例 2 passed、2 failed，Node/Go 均停在宿主启用确认处；
+按 3a 明确范围只做定向文件与 guards9，不再跑全仓或无文件列表的-x，保持原安全校验与失败断言。
 
 `/settings show` 显示参数元数据（参数中心 P8，分支 `worker/ds2-registry-metadata`，2026-10-01）：`settings_control_service._show`
 对有值的参数补四行“单位／范围／归属模块／读取方”（`_metadata_line`，没推导出就不出现），来源是 `settings/parameter_metadata.py`

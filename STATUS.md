@@ -9,8 +9,9 @@ C14 M-B1（2026-10-01，sol2，`worker/sol2-c14-mb1`，本地候选、待外部�
 本机聚焦 29 passed、1 failed、1 skipped，守卫 166 passed；宿主失败发生在解释器确认启用，report 沙箱因 Seatbelt 拒绝未启动。
 嵌套 JSON 子串断言已按结构解码，固定提交由 3a 沙箱外重跑；真实 TUI/模型调用未验证，不能宣称完整 M-B1 已验收。
 没有 Gateway 操作或新配置，不覆盖其它分支历史数字；证据和下一步见 TESTS、迁移设计与插件 README。
-严格静态门禁与含 NUL 源树 clean-package 通过；追加全仓未通过，SIGTERM 终止原因未确认，
-首失败为与基线相同的 archive_tokens 旧接口导入。无关失败未改，详细范围与原始证据见 TESTS。
+收尾补充（2026-10-02）：跨语言样例文件 2 passed、2 failed，Node/Go 均停在宿主启用确认处；Go 编译已执行。
+严格静态门禁与含 NUL 源树 clean-package 通过；按 3a 明确范围只做定向文件与 guards9，不再跑全仓或无文件列表的-x。
+此前全仓由 3a 主动结束，保留原日志但不列作 M-B1 当前验收门；无关旧接口失败未改，详情见 TESTS。
 
 C14 第一批 M-A1 + M-A2（2026-10-01，`worker/sol56-c14-ma12`，本地已实现、待审查集成）：新增标准库 Python 插件
 `drama-media-shell`，包含四个离线提示词检查器和 fixture-only 的 prepare/confirm/run/status/audit/collect 作业流程。

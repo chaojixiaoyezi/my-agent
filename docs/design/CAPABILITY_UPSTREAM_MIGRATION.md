@@ -55,8 +55,9 @@ M-B1 实施记录（2026-10-01，`worker/sol2-c14-mb1`）：
 - 本机聚焦为 29 passed、1 failed、1 skipped：宿主在确认启用处失败，report 因 Seatbelt 拒绝未启动。
   3a 对修改前候选沙箱外复核报告为 30 passed、1 failed、0 skipped，后者是嵌套 JSON 子串断言问题；
   本轮已改为分层 json.loads 和布尔/门计数断言，固定提交的完整宿主结果仍待 3a 复验。
-- 严格静态门禁及含 NUL 源树 clean-package 已通过；追加全仓未通过/未完成，
-  首失败是与基线相同的 archive_tokens 旧接口导入，其他失败未复核；不以局部结果宣称全仓或 §3 验收完成。
+- 严格静态门禁及含 NUL 源树 clean-package 已通过；2026-10-02 补跨语言样例为 2 passed、2 failed，
+  Node/Go 均在宿主启用确认处失败，保留原断言由 3a 外部复核。按 3a 明确范围仅定向文件与 guards9，
+  不再执行全仓或无文件列表的-x；此前由 3a 主动结束的全仓记录保留，不列作本线当前验收门。
 - 真实 TUI 安装/确认/调用与一次真实模型自然调用由 3a/ae 在集成后验收；不能用组件结果关闭 §3。
   用法与权限局限见 [插件 README](../../plugins/shuohao-novel-gates/README.md)，命令与门禁见 [TESTS](../../TESTS.md)。
 
