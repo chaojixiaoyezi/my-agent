@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 802,
+  "count": 803,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2082,6 +2082,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "决策触达计数保留 7 天（秒）：过期清理。"
+    },
+    {
+      "name": "SELECTION_STRUCTURE_THREADS_COUNT",
+      "file": "agent_py_agent/agent/conversation/decision_selection_cadence.py",
+      "value": 500,
+      "unit": "个",
+      "category": "其它",
+      "description": "指纹文件最多保留的会话数：超过时淘汰最久没更新的，文件大小有界。"
     },
     {
       "name": "DISPLAY_PAGE_CHARS",

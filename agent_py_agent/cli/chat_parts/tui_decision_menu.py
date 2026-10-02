@@ -28,10 +28,13 @@ _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout
             "observe_nonblocking_enabled": "观察不挡回复（observe 点位改在后台问决策模型）"}
 _POINT_FIELDS = {"mode": "模式", "profile_id": "决策模型", "timeout_seconds": "单次上限（秒）",
                  "context_policy": "上下文减量策略", "optional_categories": "可选工具类别",
-                 "candidate_profile_ids": "子代理执行模型候选"}
+                 "candidate_profile_ids": "子代理执行模型候选", "cadence": "询问节奏"}
 # 模式仍只有 off/observe/apply 三个存储值；界面按"开/关 + 观察模式"呈现（关=off，开+观察=observe，开+不观察=apply）
 _MODES = {"off": "关", "observe": "开 · 观察模式", "apply": "开 · 正式使用"}
 _CONTEXT_POLICIES = {"metadata": "仅精简名卡与推荐", "progressive": "名卡与可选工具渐进披露"}
+_CADENCES = {"every_turn": "每轮都问", "structure_change": "只在结构变化时问（新会话、压缩后、模型目录或当前模型变化）"}
+# 用单选编辑的点位枚举字段：后缀 → 存储值到界面文字。
+_ENUM_LABELS = {".context_policy": _CONTEXT_POLICIES, ".cadence": _CADENCES}
 
 
 # LLM: 来源是原 settings 的结构化字段，中文仅用于显示，不根据展示文本生成修改或权限。
@@ -61,10 +64,11 @@ def _field_label(view: dict, field: str) -> str:
     name = _GENERAL[field] if len(parts) == 1 else f"{_POINTS[parts[1]]} · {_POINT_FIELDS[parts[2]]}"
     value = _value(view, field)
     shown = ("开启" if value else "关闭") if field in BOOLEAN_FIELDS else _MODES.get(value, value) if field.endswith(".mode") else value or "未绑定"
+    enum_labels = next((labels for suffix, labels in _ENUM_LABELS.items() if field.endswith(suffix)), None)
     if field.endswith((".optional_categories", ".candidate_profile_ids")):
         shown = json.dumps(value, ensure_ascii=False)
-    elif field.endswith(".context_policy"):
-        shown = _CONTEXT_POLICIES[value]
+    elif enum_labels is not None:
+        shown = enum_labels[value]
     return f"{name}：{shown}（{_source(view['sources'][field])}）"
 
 
@@ -207,12 +211,12 @@ def _field_text_value(field: str, text: str):
     return _seconds(text)
 
 
-# LLM: 开关与上下文策略用单选，其余（秒数、JSON 数组）用单行文本；取值仍由 _field_text_value 与设置服务校验。
+# LLM: 开关、上下文策略与选模型询问节奏用单选，其余（秒数、JSON 数组）用单行文本；取值仍由 _field_text_value 与设置服务校验。
 # 函数用途: 为非模式、非模型编号的字段生成编辑控件。
 def _plain_control(field: str, value):
-    if field in BOOLEAN_FIELDS or field.endswith(".context_policy"):
-        rows = ([(False, "关闭"), (True, "开启")] if field in BOOLEAN_FIELDS else
-                list(_CONTEXT_POLICIES.items()))
+    enum_labels = next((labels for suffix, labels in _ENUM_LABELS.items() if field.endswith(suffix)), None)
+    if field in BOOLEAN_FIELDS or enum_labels is not None:
+        rows = [(False, "关闭"), (True, "开启")] if field in BOOLEAN_FIELDS else list(enum_labels.items())
         return RadioList(rows, default=value, select_on_focus=True)
     return TextArea(text=json.dumps(value, ensure_ascii=False) if isinstance(value, list) else str(value), height=1, multiline=False)
 
@@ -247,6 +251,8 @@ async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
                    "候选请填原模型目录 ID 的 JSON 字符串数组；[] 表示全部当前授权生成模型。" if field.endswith(".candidate_profile_ids") else
                    "类别请填 JSON 字符串数组，如 [\"plugins\", \"自定义类别\"]；[] 不额外收起。" if field.endswith(".optional_categories") else
                    "减量可改变缓存前缀/schema；原搜索和权限不变，仅在开启并采用建议时生效。" if field.endswith(".context_policy") else
+                   "只在结构变化时问：新会话、本会话压缩之后、模型目录或当前模型变化才调用决策模型，其余轮次沿用上次判断。"
+                   if field.endswith(".cadence") else
                    "空格或回车勾选；关=不调用，开+观察=只记录建议，开+不勾观察=正式使用（采用前仍会复核）。Tab 到保存。"
                    if field.endswith(".mode") else
                    "恢复继承会删除本范围覆盖；清空模型只表示不绑定。")

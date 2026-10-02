@@ -205,6 +205,24 @@
 - **真实模型复核**：照原场景用 MiniMax-M2.7 跑了一次，再加一条新的自然需求，模型两次都没有尝试绕路（未命中原触发）。
   同一个真实隔离 home 上的宿主侧复核确认：本分支读不到旧包，base 代码原样读出。详见 TESTS.md。
 
+## 选模型只在结构变化时问（J4）（2026-10-01，分支 `claude/be-jev-selection-cadence`，基于 `claude/be-jev-keepalive-z` `24f1bd287`，已实现，待集成）
+
+- **做法**：
+  - 选模型点加专属字段 `points.model_selection.cadence`（every_turn / structure_change），配置 `decision_model_selection_cadence` 默认 every_turn（关）。
+  - owner 与会话两层覆盖都能改：TUI 决策菜单有“询问节奏”单选，IM 经 my-agent 的 `user_config decision_patch`。
+  - 结构 = 压缩代数 + 候选目录版本 + 当前冻结的模型档案；新会话没有指纹也算变化。
+  - 结构没变就不提交、不调用，请求标记 `skipped / structure_unchanged`，到达诊断同名原因。
+  - 只在成功拿到回答时记指纹，observe 转后台的在完成回调里记。指纹存 owner 决策数据目录的 `model_selection_structure.json`，最多 500 个会话。
+- **为什么不用 `catalog_generation`**：目录文件每次保存（包括改决策设置）都会换新值，拿它判“目录变化”会把每次调设置都当成变化。候选摘要只在候选模型变化时才变。
+- **当前模型也算结构**：用户在会话里手动换了模型，下一轮应该重新给建议。
+- **真实验收**：
+  - 环境：隔离 home、真实 Gateway + TUI、MiniMax 主模型 + Jev，打开观察不挡回复。
+  - 同一会话 3 条只问 1 次；`/model` 换 M3 后重问；新会话第一条问、第二条跳过。
+  - Jev 共 3 次调用，与预计一致。
+  - 证据：`~/.my-agent/decision-evidence/j4-selection-cadence/`。
+- **打开与关闭（生产由集成方做）**：owner 级 `decision_patch`，`{"changes":{"points.model_selection.cadence":"structure_change"}}`；关闭改回 `every_turn`。
+- **验证**：见 TESTS.md 同名节。
+
 ## Jev 决策调用复用长连接（J1，B 第 1 步）与后台等待 5→15 秒净效果（J2）（2026-10-01，分支 `claude/be-jev-keepalive-z`，基于 `claude/3a-step16z` `efaedfab2`，已实现，待集成）
 
 - **先确认空闲上限**（经本机代理实测，探针只发轻量 GET）：

@@ -47,6 +47,7 @@
 
 结论：按现状"每条都问"不划算；精简材料后可以保留，但等待时间应与 Jev 实际延迟匹配（见第 2 节，my-agent 现在能自调），
 提问频率是否改为"只在结构性变化时问"（新会话、压缩之后、模型目录变化）需要用户拍板，本批不改。
+（2026-10-01 已按用户确认实现为可选节奏，见下面“询问节奏”，仓库默认仍每轮都问。）
 
 已做的精简（只删材料，不改"采用前必须复核"：apply 指令、候选冻结、首请求容量/工具/版本核对全部不变）：
 - 摘要只带语义部分（去掉原文锚点段），最多 `decision_model_selection_summary_max_chars`（默认 1500）字符；
@@ -55,6 +56,18 @@
 - 候选公共声明（`capacity_status`、`tool_support`）只在 `state.candidate_facts` 写一次。
 
 效果（14 个候选、3000 字语义摘要 + 6000 字锚点段的合成输入，按真实编码与 `estimate_tokens` 估算）：约 7.5k → 2.7k token/次，减少约 63%。
+
+### 询问节奏（J4，2026-10-01）
+
+- **开关**：选模型点的专属字段 `points.model_selection.cadence`，配置默认 `decision_model_selection_cadence: every_turn`（每轮都问，与以前一样）；
+  `structure_change` 时只在结构变化才问。owner 与会话两层都能覆盖：TUI 决策菜单“逐接入点设置 · 询问节奏”，或让 my-agent 用 `user_config` 的 `decision_patch`。
+- **结构**：会话的压缩代数 + 候选目录版本（公开候选摘要的哈希）+ 本请求冻结的当前模型档案。会话从没成功问过（新会话）也算变化。
+- **判定**：结构与上次成功询问相同就不提交、不调用决策模型，请求标记记 `skipped / structure_unchanged`，到达诊断记同名原因（菜单与 `audit_records` 显示大白话）。
+  只在成功拿到回答时记指纹（observe 转后台的在后台完成时记），失败、超时下一轮照常再问。
+- **存放**：owner 决策数据目录下的 `model_selection_structure.json`（与结果日志同目录），按会话最多 500 条，坏文件按“没问过”处理。
+  `every_turn` 时不读不写这个文件。
+- **真实验收**（隔离 home、真实 Gateway + TUI + Jev，打开观察不挡回复）：同一会话 3 条消息只问 1 次；`/model` 换成 M3 后再问；
+  新会话第一条问、第二条跳过；Jev 共 3 次调用，请求标记与到达计数（called 3、structure_unchanged 3）一致。
 
 ## 4. TUI 统计行：决策段分开标注数据来源（2026-09-28 修订）
 

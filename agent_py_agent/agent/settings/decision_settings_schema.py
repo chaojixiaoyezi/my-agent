@@ -28,6 +28,9 @@ _POINT_EXTRA_SCHEMAS = {"subagent_model": {
 }, "skill_tool": {
     "context_policy": {"type": "string", "enum": ["metadata", "progressive"]},
     "optional_categories": {"type": "array", "items": {"type": "string", "minLength": 1}},
+}, "model_selection": {
+    # 询问节奏：every_turn 每轮都问（默认）；structure_change 只在新会话、压缩之后、模型目录或当前模型变化时问。
+    "cadence": {"type": "string", "enum": ["every_turn", "structure_change"]},
 }}
 
 
@@ -151,6 +154,10 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
     if field == "context_policy":
         if type(value) is not str or value not in decision_field_schema(path)["enum"]:
             raise ModelProfileError("上下文策略只能是 metadata 或 progressive。")
+        return value
+    if field == "cadence":
+        if type(value) is not str or value not in decision_field_schema(path)["enum"]:
+            raise ModelProfileError("选模型询问节奏只能是 every_turn（每轮都问）或 structure_change（只在结构变化时问）。")
         return value
     if type(value) is not str or value not in {"off", "observe", "apply"}:
         raise ModelProfileError("决策模式只能是 off、observe 或 apply。")

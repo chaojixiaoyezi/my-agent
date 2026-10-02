@@ -542,6 +542,7 @@ agent_py_agent/
 |   |   |-- auxiliary_model_call.py   # 会话辅助模型调用的统一账、退避、并发闸；独立压缩用量持久结算
 |   |   |-- decision_service.py       # 可选决策阶段预算、设置/身份复核和建议返回，不执行业务动作
 |   |   |-- decision_policy.py        # 有界连接/点位冷却与同进程设置取消通知，不拥有 worker 或持久状态
+|   |   |-- decision_selection_cadence.py # 选模型询问节奏：structure_change 时按（压缩代数, 候选目录版本, 当前模型）指纹只在结构变化时问，成功后记指纹
 |   |   |-- decision_outcome_log.py   # 决策结果日志：每次 decide 的点位/状态/原因/耗时与供应商实际版本（无正文），有界落 owner data/decision，审计按点位汇总并按版本计次
 |   |   |-- decision_observe_nonblocking.py # observe 不挡主链路的唯一后台执行器：单 worker、有界排队、捕获身份执行、写结果行与独立用量范围
 |   |   |-- decision_point_limits.py  # 决策点数量界限（焦点/候选/网页/待办/提案/记忆的上下限）：点位判定与诊断大白话共用的唯一定义
@@ -839,6 +840,7 @@ agent_py_agent/
 |   |-- test_decision_observe_nonblocking.py # observe 转后台：主链路先返回、apply 仍同步、有界队列、停止/撤销/停机、独立用量、选模型补记
 |   |-- test_decision_audit_controls.py # 管理员控制存取/失败关闭/只许管理员写、审计工具范围与时间窗、观察白名单与跨用户许可
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
+|   |-- test_decision_selection_cadence.py # 选模型询问节奏：字段与默认关、结构没变跳过、换模型/目录变化/新会话重问、失败不记指纹、会话层覆盖、文件有界
 |   |-- test_decision_outcome_log.py    # 决策结果日志：只记结构化字段、有界、按窗口汇总，decide 的成功/超时/点位冷却落日志，审计按点位报告，成功行记请求名与实际版本
 |   |-- test_decision_transport_timing.py # 假代理/假 TLS/假服务端逐段注入延迟：分段计时与超时阶段落结果日志、估算输入入 model_usage、零重试不补发
 |   |-- test_keepalive_transport.py     # 决策长连接复用：一条隧道/一次握手、复用记 0 毫秒建连、错误与中止不归还、过期与对端关闭丢弃、开关

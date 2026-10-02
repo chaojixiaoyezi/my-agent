@@ -21,6 +21,14 @@ from .conversation.decision_reach_counts import (
     note_decision_reach,
     stage_miss_reason,
 )
+from .conversation.decision_selection_cadence import (
+    SELECTION_CADENCE_STRUCTURE_CHANGE,
+    STRUCTURE_UNCHANGED,
+    SelectionStructureMemo,
+    selection_cadence_from_read,
+    selection_structure,
+    selection_structure_unchanged,
+)
 from .gateway_parts.request_binding import (
     MODEL_OBSERVATION_KEY,
     GatewayActiveTurnTransition,
@@ -312,14 +320,19 @@ class GatewayModelObservation:
             return {"status": "skipped", "reason": "no_candidates"}
         state, questions, revision = counted_material(
             agent, "model_selection", lambda: _material(self.context, thread, self.captured, candidates))
+        skipped, memo = _cadence_gate(self, thread, revision)
+        if skipped is not None:
+            return skipped
         if mode == "apply":
             questions["model"]["instructions"] = _APPLY_INSTRUCTIONS
         self._submit(agent)
         note_decision_reach(agent, "model_selection", CALLED)
+        callback = partial(self._complete_deferred, {**facts, "candidates_revision": revision}, candidates)
         outcome = decision_service.decide(agent, self.params, stage, point="model_selection", state=state,
                                          questions=questions, candidates_revision=revision, caller_deadline=stage.deadline,
-                                         on_background_result=partial(self._complete_deferred,
-                                                                      {**facts, "candidates_revision": revision}, candidates))
+                                         on_background_result=memo.wrap(callback) if memo is not None else callback)
+        if memo is not None:
+            memo.record_if_success(outcome)
         result = _observation_result(outcome, candidates)
         choice = result.get("choice")
         if outcome.may_apply and choice in generations and choice != self.captured.profile_id:
@@ -361,3 +374,20 @@ class GatewayModelObservation:
             FinalizationService(self.context.agent).settle_model_usage(self.params)
         except Exception:
             logging.getLogger(__name__).error("模型观察用量收口失败，保留原请求错误", exc_info=False)
+
+
+# LLM: 询问节奏只读设置分层（配置默认 → owner → 本会话）；every_turn（默认）直接放行且不读写指纹文件。
+#   structure_change 时结构与上次成功询问相同就记到达原因 structure_unchanged 并返回跳过结果（不提交、不发请求）；
+#   否则返回问成功后记指纹的 memo。指纹 = 压缩代数 + 候选目录版本 + 本请求冻结的当前模型。
+# 函数用途: 按选模型询问节奏决定这一轮问不问，返回（跳过结果或 None, 记指纹的 memo 或 None）。
+def _cadence_gate(observation: GatewayModelObservation, thread: object, revision: str
+                  ) -> tuple[dict | None, SelectionStructureMemo | None]:
+    agent = observation.context.agent
+    cadence = selection_cadence_from_read(agent.config, observation.captured.decision_settings, thread)
+    if cadence != SELECTION_CADENCE_STRUCTURE_CHANGE:
+        return None, None
+    structure = selection_structure(thread, revision, observation.captured.profile_id)
+    if selection_structure_unchanged(agent.home_paths, thread.thread_id, structure):
+        note_decision_reach(agent, "model_selection", STRUCTURE_UNCHANGED)
+        return {"status": "skipped", "reason": STRUCTURE_UNCHANGED, "candidates_revision": revision}, None
+    return None, SelectionStructureMemo(agent.home_paths, thread.thread_id, structure)

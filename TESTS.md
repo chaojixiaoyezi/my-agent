@@ -239,6 +239,23 @@
   含 `test_packaging.py`）：3367 passed、11 skipped、3 xfailed；Ruff、doc sync、strict code-size（`size_diff.sh` 对线上清单新增 0）、
   `git diff --check`、clean-package 全部通过。
 
+## 选模型只在结构变化时问（J4）（2026-10-01，分支 `claude/be-jev-selection-cadence`，基于 `24f1bd287`）
+
+- **新增 `test_decision_selection_cadence.py`**（7 项）：
+  - 字段登记与校验只收两个值，配置和随包 YAML 默认 every_turn，YAML 写错值拒绝加载。
+  - 结构没变时跳过：请求标记 `skipped/structure_unchanged`，不调用决策后端，到达原因计 1。
+  - 经正式会话模型选择入口换模型后重问；候选目录多一个模型后重问。
+  - 询问失败不记指纹，下一轮照常问。
+  - every_turn 每轮都问，且不建指纹文件。
+  - 会话层覆盖优先于 owner 层。
+  - 指纹随压缩代数、候选版本、当前模型变化；文件按 500 会话有界，坏文件按没问过处理。
+  - 用例经真实 Gateway 请求链与本地假决策后端。同一会话连跑多条请求时，每条之后按产品入口 `claims.finish` 释放车道认领，否则下一条会一直等。
+- **`test_tui_decision_menu.py`** 新增 1 项：询问节奏在 owner 与会话两层都可编辑，标签是中文，编辑控件是两项单选。
+- **前端目录与常数目录**：重新生成（272 项 / 802 项，各多一个新键或新常数）。
+- **变异**：7 个全部抓住：不看节奏一律检查、失败也记指纹、指纹不含当前模型、只看有没有记录、不做上限淘汰、忽略会话层覆盖、跳过时不记到达原因。
+- **真实验收**：见台账同名节，证据 `~/.my-agent/decision-evidence/j4-selection-cadence/`。
+- **门禁**：见交付记录。
+
 ## Jev 决策调用复用长连接（J1）与后台等待 5→15 秒净效果（J2）（2026-10-01，分支 `claude/be-jev-keepalive-z`，基于 `claude/3a-step16z` `efaedfab2`）
 
 - **新增 `test_keepalive_transport.py`**（9 项；假 CONNECT 代理 + 假 TLS + HTTP/1.1 保活假服务端，不访问真实服务）：

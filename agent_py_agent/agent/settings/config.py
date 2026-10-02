@@ -288,6 +288,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     decision_background_timeout_seconds: float = 4.0
     decision_profile_id: str = ""
     decision_model_selection_mode: str = "off"
+    # 选模型询问节奏（默认每轮都问）：structure_change 时只在新会话、压缩之后、模型目录或当前模型变化时问决策模型。
+    decision_model_selection_cadence: str = "every_turn"
     # 选模型决策请求里对话摘要（只带语义部分，不带原文锚点段）与当前消息的字符上限；0 表示不截断，截断时如实标注
     # 规划/交付质量/动作候选三个决策点位发给决策模型的当前请求字数预算：更长时取首尾节选并标注；0 表示不截取
     decision_request_max_chars: int = 2000

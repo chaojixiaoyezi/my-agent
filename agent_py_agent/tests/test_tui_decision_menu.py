@@ -23,9 +23,11 @@ from agent_py_agent.cli.chat_parts.tui_decision_menu import (
     _GENERAL,
     _POINTS,
     _diagnosis,
+    _field_label,
     _field_text_value,
     _fields,
     _mode_control,
+    _plain_control,
     _seconds,
 )
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
@@ -370,6 +372,18 @@ def test_pipe_probe_requires_explicit_start_and_hides_price_output_and_secret(tm
 def test_seconds_reject_nonpositive_or_nonfinite(text):
     with pytest.raises(ValueError):
         _seconds(text)
+
+
+def test_selection_cadence_is_offered_in_both_scopes_as_a_two_choice_radio(tmp_path):
+    gateway = Gateway(tmp_path)
+    field = "points.model_selection.cadence"
+    owner = settings(gateway.host, "read", {})
+    thread = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
+    assert field in _fields(owner) and field in _fields(thread)
+    assert "每轮都问" in _field_label(owner, field)
+    control = _plain_control(field, "every_turn")
+    assert [value for value, _label in control.values] == ["every_turn", "structure_change"]
+    assert control.current_value == "every_turn"
 
 
 def test_scope_fields_are_finite_and_thread_has_no_unused_curator_controls(tmp_path):
