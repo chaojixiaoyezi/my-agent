@@ -56,6 +56,8 @@ OWNER_STATE_ITEMS = (
     "workspace/runtime/services/gateway/gateway_state.json", "memory/curator/state.json",
     "memory/curator/transactions/t-1.json", "memory_archive/runtime_facts/r-1/task.json", "cache/retention/scan.json",
     "trash/item-1/meta.json", "skills/my-skill/SKILL.md", ".agents/skills/home-skill/SKILL.md",
+    "data/scheduler/jobs.json", "data/decision/d.jsonl", "data/skill_proposals/p.json", "data/local_store/local.db",
+    "agents/subagent-1/report.json", "agents/subagent_dispatch_log.jsonl",
 )
 # 仍属于模型的位置（3a 口径）：交付区 artifacts/、workspace/ 其余、tmp/、记忆正文、用户在家目录根的文件。
 OWNER_MODEL_ITEMS = ("artifacts/report.md", "workspace/notes.md", "tmp/scratch.txt", "memory.md", "memory/daily/2026-10-02.md",
@@ -404,7 +406,7 @@ def test_shell_lists_host_files_per_mode(tmp_path):
     state = (*_STATE_FILES, *(f"{name}.lock" for name in _STATE_FILES),
              "runtime.db", "runtime.db-wal", "runtime.db-shm", "runtime.db-journal",
              "capability_requests", "temporary_grants", "compact", "logs", "audit", "workspace/runtime", "memory/curator",
-             "memory_archive", "cache", "trash", "skills", ".agents/skills")
+             "memory_archive", "cache", "trash", "skills", ".agents/skills", "data", "agents")
 
     scoped = set(host_readonly_paths_for(str(main), ""))
     assert scoped == {main / "config", *(main / name for name in state)}
@@ -650,7 +652,7 @@ def test_every_host_state_item_is_read_only_for_commands(tmp_path, relative):
 
 
 def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeypatch):
-    """B 类：runs/、agents/、data/、tasks/ 留在 tool_runtime_ledger，只在隔离模式挂、可被本任务工作目录穿透；A 类不再重复列。"""
+    """B 类：只剩 runs/、tasks/ 留在 tool_runtime_ledger（data/、agents/ 二审后归 A），只在隔离模式挂、可被本任务工作目录穿透。"""
     from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
         _attach_owner_control_write_guards,
     )
@@ -665,7 +667,7 @@ def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeyp
     agent = SimpleNamespace(home_paths=SimpleNamespace(**{key: main / value for key, value in names.items()}))
     scoped: dict[str, object] = {"effective_owner_scope_root": str(main)}
     _attach_owner_control_write_guards(scoped, agent)
-    assert scoped["forbidden_write_roots"] == [str(main / name) for name in ("runs", "agents", "data", "tasks")]
+    assert scoped["forbidden_write_roots"] == [str(main / name) for name in ("runs", "tasks")]
     full: dict[str, object] = {}
     _attach_owner_control_write_guards(full, agent)
     assert "forbidden_write_roots" not in full, "B 类只在隔离模式挂"

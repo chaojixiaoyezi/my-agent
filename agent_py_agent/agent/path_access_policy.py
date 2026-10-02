@@ -64,8 +64,10 @@ HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
 # H3 宿主运行状态（3a 2026-10-02 扩项，A 类“绝对只读”的唯一声明）：owner home 里只由宿主写的权威账本、控制面和派生数据，模型的
 #   文件工具与命令在任何模式下都只能读、不能写（按路径拒写，不管存不存在；不可被任何允许根穿透）。来源：9b 的家目录盘点
 #   （~/.my-agent/decision-evidence/owner-home-host-files-inventory-a9c2b691f/）与原 tool_runtime_ledger 控制面清单中的绝对项
-#   （已从那里删掉，每条路径只在一处）。可被本任务工作目录穿透的任务树根（runs/、agents/、data/、tasks/）不在这里，见
-#   agent_core.tool_runtime_ledger._attach_owner_control_write_guards（B 类）。宿主自己的写入（记忆工具、Curator、策略服务、
+#   （已从那里删掉，每条路径只在一处）。可被本任务工作目录穿透的任务树根（runs/、tasks/）不在这里，见
+#   agent_core.tool_runtime_ledger._attach_owner_control_write_guards（B 类）。owner 根的 data/（调度、决策、上下文、skill 提案与
+#   学习、产物备份、会话与本地库等）和 agents/（旧子代理运行状态与派工报告；现在子代理工作区在 <任务根>/work/agents/ 下）都是
+#   宿主状态，不是任务树，归 A 类（9b 二审，3a 定）。注意：能力包核验记录在 <任务根>/data/，不是 owner 根的 data/。宿主自己的写入（记忆工具、Curator、策略服务、
 #   runtime 仓库）在宿主进程里，不经过模型工具，不受影响。
 #   - 文件：权限、配额、保留、记忆、skill、工具策略，审计流水，记忆操作流水与候选；每个文件旁的 .lock 一并保护（抢锁会卡住宿主写入）。
 #   - 目录：能力申请、临时授权、Compact、日志、审计、会话与事件库（workspace/runtime）、Curator 事务、记忆归档、缓存、回收站、
@@ -78,6 +80,7 @@ HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
 )
 HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
     ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
+    ("data",), ("agents",),
     ("memory", "curator"), ("memory_archive",), ("cache",), ("trash",), ("skills",), (".agents", "skills"),
 )
 HOST_STATE_OWNER_SQLITE: tuple[str, ...] = ("runtime.db",)
