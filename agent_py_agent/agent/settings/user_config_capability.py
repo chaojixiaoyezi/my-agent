@@ -162,11 +162,16 @@ BOUNDARY_KEYS: dict[str, str] = {
     "shell_sandbox_hide_user_home": "决定 Shell 沙箱能否读用户家目录，属于安全边界",
     "api_key": "供应商凭据，不能由模型改写",
     "api_key_env": "供应商凭据来源，不能由模型改写",
+    "memory_curator_model_profile": "决定把记忆内容发给哪个服务商；仅用户经 /settings 修改，模型不能改",
     "my_agent_home": "宿主数据根，属于宿主控制面",
     "my_agent_owner_provider": "owner 身份解析，属于宿主控制面",
     "my_agent_owner_kind": "owner 身份解析，属于宿主控制面",
     "my_agent_owner_id": "owner 身份解析，属于宿主控制面",
 }
+
+# LLM: 边界项仍对模型不可写；只有已认证管理员 /settings 的短生命周期授权能写这些项，不以 actor 标签授权。
+# 常量用途: 列出用户设置命令可以修改、模型工具始终不能修改的边界参数。
+USER_SETTINGS_BOUNDARY_KEYS = frozenset({"memory_curator_model_profile"})
 
 # 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据。
 # 常见缩写与组合（DB_PASS、MYSQL_PWD、SSH_PRIVATE_KEY、AWS_SECRET_ACCESS_KEY、BASIC_AUTH）同样按完整末尾片段认；

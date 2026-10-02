@@ -168,7 +168,7 @@ def default_label(row: dict) -> str:
     return "（管理员指定的初始模型）" if row.get("default_source") == "admin_initial" else "（部署默认）"
 
 
-# LLM: 显式 ID 是唯一选项身份；成功后发布公开模型显示事件，不能热改共享 Agent 的 config/backend。
+# LLM: 显式 ID 是唯一选项身份并向用户展示以便填写后台引用；成功仅发布显示事件，不能热改共享 Agent。
 # 函数用途: 分别选择当前会话模型或未来新会话默认值；修改默认值不会替换其他已打开会话。
 async def _select_model(app, agent, session_id: str, runtime, *, operation: str = "select") -> str:
     result = await _request(app, agent, session_id, "list")
@@ -181,7 +181,7 @@ async def _select_model(app, agent, session_id: str, runtime, *, operation: str 
     choices = RadioList([(row["id"], f"{'● ' if row['id'] == current else ''}{row['model_name']}"
                          f" · {row['model_backend']} · {row['model_context_window_tokens']} tokens"
                          f"{default_label(row) if row['id'] == 'default' else ' · ' + row['api_base']}"
-                         f"{'（管理员共享）' if row.get('shared') else ''}") for row in rows],
+                         f"{'（管理员共享）' if row.get('shared') else ''} · 档案编号：{row['id']}") for row in rows],
                         default=current, select_on_focus=True)
     title = "新会话默认模型 · 不修改已打开会话" if setting_default else "当前会话模型 · 不影响其他 TUI / IM 会话"
     selected = await _dialog(app, title, choices,

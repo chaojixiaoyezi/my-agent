@@ -229,6 +229,71 @@
 - 未验证：`test_backend_config_catalog.py`/`test_frontend_settings_labels.py`（前端目录守卫，P17 未动 frontend/、只加行尾注释不改键，理论不受影响，
   未单独跑）；真实 Gateway 进程里的 `/settings` 交互（测试走控制服务单测，未启动 Gateway）。
 
+## P12：Curator 固定模型档案（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，未集成/部署）
+
+- 来源：3a 的 P12 合同；新增 `test_curator_model_profile.py`，使用临时 owner 目录、假凭据和模型响应，不读生产正文或调用真实服务。
+- 做法：复用原档案整组解析、后端工厂和 Curator 失败运行账；新键空值沿 owner 选择，失效不回退；仅管理员用户 `/settings` 的可信调用作用域可写，模型 set/reset/revert 仍拒绝。
+- 覆盖：固定档案自己的凭据/端点/请求头/采样/排队、非流式；空值沿用；不存在/default/无 agentic/模型停用/服务商停用/服务商用途不符/缺凭据/坏目录；旧键只告警；保存与运行型号分开显示；稳定编号在 IM 文本、TUI 选择及管理列表显示。
+- 红绿：首轮新测试在目标行为断言处失败（不是导入或环境错误）；实现后下列定向回归 **235 passed**。
+
+以下命令均在工作树根，Python 固定为发布工具环境；`-o addopts=''` 只取消仓库额外静默输出，保留明确统计，不改变断言或选测范围：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_curator_model_profile.py \
+  agent_py_agent/tests/test_model_unconfigured.py \
+  agent_py_agent/tests/test_curator_model_not_configured.py \
+  agent_py_agent/tests/test_curator_failure_attribution.py \
+  agent_py_agent/tests/test_curator_input_budget.py \
+  agent_py_agent/tests/test_settings_chat_control.py \
+  agent_py_agent/tests/test_model_profiles.py \
+  agent_py_agent/tests/test_model_provider_management.py \
+  agent_py_agent/tests/test_decision_model_profiles.py \
+  agent_py_agent/tests/test_model_text_control.py \
+  agent_py_agent/tests/test_tui_model_menu.py \
+  agent_py_agent/tests/test_tui_manage_models.py \
+  agent_py_agent/tests/test_parameter_changes.py \
+  agent_py_agent/tests/test_memory_config.py \
+  agent_py_agent/tests/test_config_defaults_parity.py \
+  agent_py_agent/tests/test_backend_config_catalog.py \
+  agent_py_agent/tests/test_frontend_settings_labels.py \
+  agent_py_agent/tests/test_user_config_capability.py \
+  agent_py_agent/tests/test_user_config_owner_scope.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol -o addopts=''
+```
+
+- 架构守卫：`guards9.txt` 的完整清单（含 `test_packaging.py`），**167 passed**：
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_architecture_guardrails.py \
+  agent_py_agent/tests/test_config_field_readers.py \
+  agent_py_agent/tests/test_constant_names_unique.py \
+  agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+  agent_py_agent/tests/test_parameter_registry.py \
+  agent_py_agent/tests/test_recovery_actions.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+  agent_py_agent/tests/test_subagent_config_inheritance.py \
+  agent_py_agent/tests/test_packaging.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol -o addopts=''
+```
+
+- 三个独立变异逐项施加/验证/撤回，不叠加，不放宽断言：
+  1. 忽略固定引用，直接采用聊天配置：固定连接断言失败，**1 failed**（chat-test 不等于 curator-test）。
+  2. 关闭模型及服务商 agentic 用途检查：两个用途拒绝断言失败，**2 failed**。
+  3. 用户授权 ContextVar 默认改为 True：模型写入边界断言失败，**1 failed**。
+  原四个关键文件 SHA256 逐字节恢复一致；随后 Curator 档案/未配置/失败归因、设置、参数修改及前端目录七文件恢复回归 **99 passed**。
+- 静态门禁：`$PY scripts/check_import_boundaries.py` → **0 条**；`$PY -m ruff check agent_py_agent scripts` → **通过**；
+  `$PY scripts/check_doc_sync.py` → **DOC_SYNC_PASS**；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
+  → **hard=0、blocked=False**；`git diff --check` → **通过**；`$PY scripts/check_clean_package.py .` → **未发现发布阻塞项**。
+  初检曾因缺少 Gateway 模块同步、两个新增文件尚未纳入索引而失败，补齐后原门禁复跑通过；没有削弱检查。
+  code-size 的报告已恢复，不提交；baseline 未扩大，现有基线风险不写成全仓零风险。
+- 前端目录由 `node frontend/scripts/sync-backend-config.mjs` 正式生成，新增键为 high 风险、旧键消失，已由定向守卫核对。
+- 验证边界：运行的是产品组件入口与渠道共用渲染，不是实际 Gateway、终端或 IM 客户端；真实模型连通、提炼质量和重启生效 **未验证**。
+  生产 deepseek-v4-flash 绑定及真实验收由 3a 部署后进行；没有改生产配置、启停 Gateway、安装依赖或运行 my-agent。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `02568822d`）
 
 - **P15**：`test_structured_masking.py` 新增 2 例：

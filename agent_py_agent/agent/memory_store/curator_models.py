@@ -51,13 +51,12 @@ CURATOR_BATCH_MESSAGE_LIMIT = 80
 CURATOR_MAX_RETRIES = 1
 
 
-# LLM: 这是 Curator 唯一有效配置快照；provider/model 切换不得改变输出 Schema。
+# LLM: 这是 Curator 唯一有效配置快照；模型档案编号参与修订，不保留单独覆盖协议或型号的拼接旁路。
 # 类用途: 从 AgentConfig 提取后台策展开关、批量、超时和晋升策略。
 @dataclass(frozen=True)
 class MemoryCuratorConfig:
     enabled: bool = True
-    provider: str = "auto"
-    model: str = ""
+    model_profile: str = ""
     interval_seconds: int = 10_800
     turn_threshold: int = 10
     batch_message_limit: int = CURATOR_BATCH_MESSAGE_LIMIT
@@ -67,14 +66,13 @@ class MemoryCuratorConfig:
     daily_finalize_hour: int = 23
     auto_promotion_policy: str = "conservative_v1"
 
-    # LLM: 配置只从已经 normalize 的 AgentConfig 读取，不再解析配置文件或自然语言。
+    # LLM: 固定引用只从已 normalize 的 AgentConfig 读取编号，不从型号猜档案，不另解析配置文件或自然语言。
     # 函数用途: 构造一次运行不可变配置。
     @classmethod
     def from_agent_config(cls, config: object) -> MemoryCuratorConfig:
         return cls(
             enabled=bool(getattr(config, "memory_curator_enabled", True)),
-            provider=str(getattr(config, "memory_curator_provider", "auto") or "auto").strip(),
-            model=str(getattr(config, "memory_curator_model", "") or "").strip(),
+            model_profile=str(getattr(config, "memory_curator_model_profile", "") or "").strip(),
             interval_seconds=int(getattr(config, "memory_curator_interval_seconds", 10_800)),
             turn_threshold=int(getattr(config, "memory_curator_turn_threshold", 10)),
             max_input_chars=int(getattr(config, "memory_curator_max_input_chars", 40_000)),

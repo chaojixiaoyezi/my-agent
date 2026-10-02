@@ -134,6 +134,20 @@
 - **验证**：相关 153 passed（含新 `test_parameter_sources.py` 10 项）、guards9 167 passed、import boundaries 0、ruff/doc-sync/code-size
   strict/diff-check/clean-package 全过；3 个变异被杀红并还原。详见 TESTS.md。
 
+## P12：记忆整理引用固定模型档案（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，待集成/部署）
+
+- 解决问题：聊天模型套餐或连接失败时，后台记忆整理也跟着失效；只覆盖协议/型号、却借用聊天凭据的旧组合容易配错。
+- 新键 `memory_curator_model_profile` 默认空，沿用 owner 当前选中模型；非空只引用原模型目录，完整采用该档案的服务商凭据、端点、协议与选项。
+  原 `memory_curator_provider`、`memory_curator_model` 删除，不留别名或自动转值，残留按原未知配置键规则告警。
+- 引用必须存在、启用并有 agentic 用途；失效不回退，复用 `ModelNotConfiguredError` / `UnconfiguredBackend`，
+  原运行账 `failure_diagnostic` 补 `profile_id`、`profile_reason`，仍是 `CURATOR_MODEL_NOT_CONFIGURED` 和一小时退避，run v2 键集不变。
+- 新键是流量去向边界，登记表对模型始终不可写。仅可信管理员用户 `/settings` 控制调用内开启短生命周期授权，
+  set/reset/revert 复用同一校验与账本，不按 actor 标签授权，退出即清理；其余边界项不放行。
+- TUI/IM 共用 `/settings show` 回执，显示运行编号、型号及待重启的保存编号/型号；`/model` 文本和 TUI 模型列表展示稳定档案编号。
+- 本地定向 235 passed、架构守卫 167 passed；三个独立变异均被断言拦截，逐字节恢复后 99 passed，命令见 TESTS。
+- 边界：连接在 owner 实例装配时冻结，配置变更需重启；自动总结 Skill 继续共用原 Curator 后端。私有编号仅在本人目录解析，
+  跨 owner 使用须有原共享授权，不能读取管理员私有凭据作为回退。本线不改生产，不启动 Gateway；3a 部署后再绑定实际 deepseek-v4-flash 档案并验收。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已实现，待集成）
 
 - **P15 脱敏补两种写法**（唯一实现 `user_config_capability.masked_structure`/`mask_value`，未另写一份）：

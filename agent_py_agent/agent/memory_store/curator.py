@@ -1022,9 +1022,9 @@ def _corrupt_run_id(quarantine: dict[str, object]) -> str:
     return "memory-curator-corrupt-" + digest[:16]
 
 
-# LLM: Failure audit preserves the acquired lease and recovery provenance; the exception message is
-# persisted only after the shared log redaction and a hard 200-char cut, never prompt/response bodies.
-# 包装异常的根因(_cause_facts)和解析失败的响应形状(CuratorResponseParseError.response_facts)只并入
+# LLM: 失败账保留已领取租约与恢复来源；异常消息经统一脱敏及 200 字符截断后才能持久化，
+# 不能保存请求或响应正文，也不能因为诊断改变原失败码、游标与退避规则。
+# 缺配置异常仅补档案编号和原因；包装异常根因与解析失败响应形状只并入
 # 无正文标量;键集同步 docs/modules/memory/04-structure.md 与 test_curator_failure_attribution.py。
 # 函数用途: 构造失败 run audit 的诊断字典(类名、HTTP 状态码、脱敏截断后的异常正文、根因、响应形状)。
 def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
@@ -1037,6 +1037,8 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     解析失败另记响应字符数、是否截断、结束原因和输出 token。
     """
     diagnostic: dict[str, object] = {"error_type": type(exc).__name__}
+    if isinstance(exc, ModelNotConfiguredError) and exc.profile_reason:
+        diagnostic.update(profile_id=exc.profile_id, profile_reason=exc.profile_reason)
     for attr in ("http_status", "status_code"):
         value = getattr(exc, attr, None)
         try:

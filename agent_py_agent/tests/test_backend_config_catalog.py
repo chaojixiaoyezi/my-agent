@@ -83,3 +83,10 @@ def test_catalog_restart_required_matches_backend_effect():
         "后端所有参数 effect=EFFECT_GATEWAY_RESTART（配置修改都要重启 Gateway 才生效），"
         "目录里每一项都应标记 restartRequired=true"
     )
+
+
+def test_curator_profile_is_a_high_risk_reference_without_legacy_keys():
+    fields = {item["key"]: item for item in _catalog_fields()}
+    reference = fields["memory_curator_model_profile"]
+    assert reference["riskLevel"] == "high" and "仅用户" in reference["riskWarning"]
+    assert not {"memory_curator_provider", "memory_curator_model"} & fields.keys()

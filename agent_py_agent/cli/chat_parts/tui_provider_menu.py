@@ -250,13 +250,13 @@ async def manage_models(app, agent, session: str) -> str:
     return await _delete(app, agent, session, "delete_provider", provider) if action == "delete" else ""
 
 
-# LLM: 列表重新读取，只列属于这个服务商的自己的原记录（不含 shared: 别名，别名不能编辑）；编辑与删除都走原保存入口，编号不变。
+# LLM: 列表只列属于此服务商的原记录（不含共享别名）；展示稳定编号以便固定引用，编辑删除仍走原保存入口。
 # 函数用途: 选一个模型，再编辑或删除它。
 async def manage_provider_models(app, agent, session: str, provider: str) -> str:
     result = await _request(app, agent, session, "list")
     models = [row for row in result.get("profiles", []) if row.get("provider_id") == provider and not row.get("shared")]
     key = await _choose(app, "模型列表", [(row["id"], f"{row['model_name']} · {row['model_backend']}"
-                                              f"{'' if row.get('enabled', True) else ' · 已停用'}") for row in models])
+                                              f"{'' if row.get('enabled', True) else ' · 已停用'} · 档案编号：{row['id']}") for row in models])
     if not key:
         return ""
     operation = await _choose(app, "模型管理", [("edit", "编辑模型（名称 / 上下文 / 高级参数）"), ("delete", "删除模型")])

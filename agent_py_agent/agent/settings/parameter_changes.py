@@ -2,13 +2,15 @@
 #   以及白名单里的模型档案字段（PROFILE_FIELDS，经 model_profiles 唯一的锁内保存入口，记在该用户档案旁的 .changes.jsonl，
 #   与配置账本同一格式、同一脱敏与回滚规则）。配置写入按登记表类型渲染值（布尔、数字不加引号），写后用正式 load_config
 #   回读核对，不一致就恢复原文件并报错；每次写入追加一条
-#   账本（用户配置旁的 settings-changes.jsonl，保留最近 500 条）。凭据类只记脱敏值、不可回滚；边界项、列表/映射类型、
-#   随包默认 YAML 一律拒绝。副作用：改写用户配置与账本。改动须同步 test_parameter_changes.py、tooling/user_config_tool.py、
+#   账本（用户配置旁的 settings-changes.jsonl，保留最近 500 条）。模型始终不能写边界；仅已认证用户 /settings 可在限定作用域
+#   修改 USER_SETTINGS_BOUNDARY_KEYS，set/reset/revert 共用校验。列表/映射与随包默认 YAML 拒绝。副作用：改写用户配置与账本。
 #   gateway_parts/settings_control_service.py、user_config_capability.set_tunable_value 与 settings/reasoning_probe.py。
 # 模块用途: 让用户与 my-agent 修改参数、恢复默认、查看修改记录并按编号回滚。
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +29,7 @@ from .parameter_registry import (
 from .user_config_capability import (
     BOUNDARY_KEYS,
     TUNABLE_KEYS,
+    USER_SETTINGS_BOUNDARY_KEYS,
     effect_text,
     mask_value,
     packaged_config_path,
@@ -40,6 +43,18 @@ _FALSE_WORDS = frozenset({"false", "0", "no", "off", "关", "关闭", "否"})
 _BOUNDARY_REASON = "属于安全边界（凭据、权限、身份、路径、外部地址、会运行代码的服务或插件等），不能由模型或聊天命令修改"
 # 可经参数中心修改并记账的模型档案字段（其余字段只能在 /model 里编辑）；取值由档案 schema（validate_model）校验。
 PROFILE_FIELDS = frozenset({"reasoning_control"})
+_USER_SETTINGS_WRITE: ContextVar[bool] = ContextVar("user_settings_write", default=False)
+
+
+# LLM: 只能由 Gateway 已认证管理员控制入口进入；授权随调用退出还原，不接收客户端字段，不把 origin.actor 当授权。
+# 函数用途: 给用户 /settings 一个短暂的边界写作用域，模型工具与回滚默认仍拒绝。
+@contextmanager
+def user_settings_write_scope():
+    token = _USER_SETTINGS_WRITE.set(True)
+    try:
+        yield
+    finally:
+        _USER_SETTINGS_WRITE.reset(token)
 
 
 # LLM: 谁发起、为什么；actor 用固定短标签（model / chat / cli / test），reason 只给人看、截断后记账，不参与任何判断。
@@ -124,7 +139,8 @@ def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
         f"'{spec.source}' 配置运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索，不能修改。")
 
 
-# LLM: 先查登记表，再查边界：BOUNDARY_KEYS 给出原因原样回显；其余边界项给统一原因。
+# LLM: 先查登记表，再查边界：BOUNDARY_KEYS 给出原因原样回显；其余边界项给统一原因。只有可信用户命令作用域且在
+#   用户白名单（USER_SETTINGS_BOUNDARY_KEYS）里的边界项可由用户写；模型的 set/reset/revert 一律按边界拒绝。
 #   运行时没有覆盖层的来源（runtime_guard）先于安全边界拒绝，原因要结构化（PARAMETER_SOURCE_READ_ONLY）。
 # 函数用途: 取出一个可写参数的登记信息，不可写时拒绝。
 def _writable_spec(key: str) -> ParameterSpec:
@@ -135,7 +151,8 @@ def _writable_spec(key: str) -> ParameterSpec:
         raise ParameterChangeError(
             "PARAMETER_SOURCE_READ_ONLY",
             f"'{spec.key}' 属于 {spec.source} 配置：运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索。")
-    if not spec.writable:
+    user_allowed = _USER_SETTINGS_WRITE.get() and spec.key in USER_SETTINGS_BOUNDARY_KEYS
+    if not spec.writable and not user_allowed:
         reason = BOUNDARY_KEYS.get(spec.key, _BOUNDARY_REASON)
         raise ParameterChangeError("PARAMETER_BOUNDARY", f"'{spec.key}' 属于安全边界，不能由模型自行修改：{reason}")
     return spec

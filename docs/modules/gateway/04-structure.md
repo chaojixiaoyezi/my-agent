@@ -1,5 +1,15 @@
 # Gateway Structure
 
+## Curator 档案控制 P12（2026-10-01，本地待集成）
+
+- `settings_control_service.execute_settings_control` 从可信 scope 解析完整管理员 home；只有原身份校验通过，才进入
+  `parameter_changes.user_settings_write_scope` 执行同步设置命令。作用域不读取 actor/client 标志，退出即清理，不授予其它边界项。
+- `run_settings_control` 在新键的 show 分支调用 `_curator_profile_text`，展示仍走 `settings/curator_profile` 唯一连接解析，
+  只给编号、型号和结构化失效原因，不显示连接秘密，不探针；可信 home 缺失时明确未验证，不按客户端路径找目录。
+- 运行值来自启动 `AgentConfig`，保存值来自原用户配置；修改未重启时两者分别显示，保存成功不承诺运行后端热切换。
+- `model_profile_service.render_model_choices`、`tui_model_menu` 与 `tui_provider_menu` 展示原 catalog 的稳定 id，
+  私有/共享权限和会话选择编号合同不变；跨 owner 引用仍由原共享目录解析器授权。
+
 ## 决策实验晋升提示 J6（2026-10-01，本地待集成）
 
 - `request_experiment_promotion.py`：原请求回执仍是唯一幂等权威，新增 promotion_id 和冻结的 evaluation.rule；只返回本次新写入的回执。

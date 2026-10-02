@@ -21,10 +21,14 @@ _USAGE_TAG = re.compile(r"[a-z][a-z0-9_]{0,39}")
 _MAX_USAGE_TAGS = 16
 
 
-# LLM: 此类错误必须仅使用固定脱敏文案；HTTP/TUI 可直接公开。
+# LLM: 此类错误仅使用固定脱敏文案；reason 是解析器提供的结构化原因，不从文案反推，不包含凭据。
 # 类用途: 表示用户可以在模型表单中修正的配置错误。
 class ModelProfileError(ValueError):
-    pass
+    # LLM: 默认原因用于旧校验分支；用途、停用与缺凭据在唯一连接解析点给出明确原因，调用方不能解析中文。
+    # 函数用途: 同时携带可展示说明和机器可读的档案不可用原因。
+    def __init__(self, message: str, *, reason: str = "catalog_invalid") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 # LLM: 持久代次由原保存事务生成 UUID4，不接受秘密摘要或任意展示文本；缺失只在显式旧版迁移中表示未知。
@@ -385,7 +389,7 @@ def migrate_v4(data: dict) -> dict:
     return {**data, "schema": SCHEMA, "catalog_generation": None}
 
 
-# LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；OAuth 只返回绑定引用。
+# LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；失效原因结构化，OAuth 只返回绑定引用。
 #   声明了 input_modalities 时以 model_input_modalities 进入 AgentConfig（压缩策略消费）；思考控制方式总以
 #   model_reasoning_control 进入、结构化输出方式总以 model_structured_output 进入（未声明均为 auto）；用途标签仍不进运行时。
 # 函数用途: 获得指定用途的连接字段，默认只供聊天生成；决策消费者须显式请求 decision，不发网络请求。
@@ -395,9 +399,13 @@ def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True,
     model = data["profiles"][profile_id]
     provider = data["providers"][model["provider_id"]]
     if capability not in CAPABILITIES or model["capability"] != capability or capability not in provider["capabilities"]:
-        raise ModelProfileError("模型及服务商用途与本次请求不一致。")
-    if require_enabled and (not model["enabled"] or not provider["enabled"] or not has_credential(provider)):
-        raise ModelProfileError("这个模型或服务商未启用、缺少密钥或尚未登录。")
+        raise ModelProfileError("模型及服务商用途与本次请求不一致。", reason="capability_mismatch")
+    if require_enabled and not model["enabled"]:
+        raise ModelProfileError("这个模型未启用。", reason="profile_disabled")
+    if require_enabled and not provider["enabled"]:
+        raise ModelProfileError("这个服务商未启用。", reason="provider_disabled")
+    if require_enabled and not has_credential(provider):
+        raise ModelProfileError("这个服务商缺少密钥或尚未登录。", reason="credential_missing")
     result = {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model},
             "api_base": provider["api_base"], "api_key": provider["api_key"],
             "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"],

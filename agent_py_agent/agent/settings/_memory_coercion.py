@@ -1,6 +1,6 @@
 """Coercion helpers for memory-related config fields."""
 
-# LLM: Every Memory config field must normalize through this typed table; provider choices include the same Responses adapter as main. Invalid values warn and use one declared default.
+# LLM: 所有记忆字段共用此类型表；模型引用只保留编号，存在、启用与用途由原模型目录解析器校验，不拼接聊天连接。
 # 模块用途: 校验 Memory/Curator 配置类型、枚举与范围，并生成不含秘密的结构化警告。
 
 from __future__ import annotations
@@ -69,12 +69,7 @@ _FIELDS = (
     _FieldSpec("memory_compact_auto_trigger_max_tokens", "int", 0, None),
     _FieldSpec("memory_compact_recovery_target_percent", "compact_recovery_percent"),
     _FieldSpec("memory_curator_enabled", "bool"),
-    _FieldSpec(
-        "memory_curator_provider",
-        "choice",
-        choices={"auto", "echo", "openai_compatible", "anthropic_compatible", "openai_responses"},
-    ),
-    _FieldSpec("memory_curator_model", "string", max_chars=200),
+    _FieldSpec("memory_curator_model_profile", "string", max_chars=100),
     _FieldSpec("memory_curator_interval_seconds", "int", 60, 604_800),
     _FieldSpec("memory_curator_turn_threshold", "int", 1, 1_000),
     _FieldSpec("memory_curator_max_input_chars", "int", 2_000, 500_000),

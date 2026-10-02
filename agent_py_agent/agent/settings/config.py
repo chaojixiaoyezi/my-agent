@@ -263,7 +263,7 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: AgentConfig 拥有通用决策和实验能力默认；实验开关不授予额外请求许可，能力点归 CapabilityConfig，Memory 四点对齐 MemorySettings。
+# LLM: 通用决策默认与 MemorySettings 对齐；Curator 档案只存引用，不拼接聊天连接，不接受模型修改，实验开关也不授予请求许可。
 # 类用途: 汇总模型和运行配置；决策默认关闭，有限正时间只为后续请求提供默认，不管理阶段时钟。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
@@ -341,8 +341,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_recovery_target_percent: int = 60
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
-    memory_curator_provider: str = "auto"
-    memory_curator_model: str = ""
+    memory_curator_model_profile: str = ""
     memory_curator_interval_seconds: int = 10_800
     memory_curator_turn_threshold: int = 10
     memory_curator_max_input_chars: int = 40_000

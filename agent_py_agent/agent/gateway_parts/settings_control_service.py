@@ -1,6 +1,7 @@
 # LLM: 聊天 `/settings` 的执行与中文回执，TUI 与飞书等 IM 共用（都经 Gateway 控制通道）。只有管理员可用：按控制范围解析出的
 #   本机 local/main（已绑定管理员身份的 IM 私聊也解析到这里），因为全局参数对整个 Gateway 生效且含本机路径。读写统一走参数中心
 #   （parameter_registry / parameter_changes），actor 记为 chat；回执经 mask_value 脱敏。普通异常不承诺“没有改动”。
+#   用户专属边界写作用域只在完整管理员身份校验后开启，模型工具不能借 actor 或回滚绕过。
 #   改动须同步 control_commands._settings_command、command_catalog 的 settings 条目、TUI control_runtime 的文本还原与本地拒绝，
 #   以及 test_settings_chat_control.py。不带参数只列参数中心的常用层级（COMMON_KEYS），/settings all 才列全部。
 # 模块用途: 让管理员在 TUI 和 IM 里查看常用或全部参数，查找、查看、修改、恢复默认、查看记录并回滚参数。
@@ -9,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
 from ..settings.config_io import load_simple_yaml
@@ -21,6 +23,7 @@ from ..settings.parameter_changes import (
     reset_parameter,
     revert_change,
     set_parameter,
+    user_settings_write_scope,
 )
 from ..settings.parameter_registry import (
     SOURCE_CAPABILITY,
@@ -35,6 +38,7 @@ from ..settings.parameter_registry import (
 )
 from ..settings.user_config_capability import (
     BOUNDARY_KEYS,
+    USER_SETTINGS_BOUNDARY_KEYS,
     effect_text,
     mask_value,
     user_config_path,
@@ -60,13 +64,14 @@ class SettingsControlError(Exception):
     pass
 
 
-# LLM: Gateway 控制分派入口；非管理员一律拒绝（不暴露任何参数），可预期失败给原因，其它异常只说没能完整确认。有写文件副作用。
+# LLM: 非管理员一律拒绝；用户边界授权只包住同步控制调用，退出清理，不交给模型或后台工作。有写文件副作用。
 # 函数用途: 执行一条已解析的 /settings 控制并返回中文回执。
 def execute_settings_control(base_agent: object, command: ConversationControlCommand, scope: object) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(_KIND, False, command.usage)
     try:
-        if not _is_admin(_scoped_home(base_agent, scope)):
+        home = _scoped_home(base_agent, scope)
+        if not _is_admin(home):
             return ConversationControlResult(_KIND, False, _NOT_ADMIN)
         from ..capability.runtime_config_reload import (
             capability_config_for_agent,
@@ -76,9 +81,10 @@ def execute_settings_control(base_agent: object, command: ConversationControlCom
         # capability 告警要从统一入口取：AgentConfig 上没有 capability_config，旧写法永远拿不到。
         # 展示与写入用的 capability 文件路径也按运行时同一逻辑解析（agent.capability_config_path 或 root 默认），
         # 不拿 agent_config 用户文件同目录猜——两者目录不同（2026-10-01 评审抓出）。
-        text = run_settings_control(getattr(base_agent, "config", None), command,
-                                    capability_config=capability_config_for_agent(base_agent),
-                                    capability_path=capability_config_path_for(base_agent))
+        with user_settings_write_scope():
+            text = run_settings_control(getattr(base_agent, "config", None), command,
+                                        capability_config=capability_config_for_agent(base_agent),
+                                        capability_path=capability_config_path_for(base_agent), home_paths=home)
     except SettingsControlError as exc:
         return ConversationControlResult(_KIND, False, str(exc))
     except Exception:  # noqa: BLE001 - 控制回执不能带堆栈或本机路径之外的内部细节。
@@ -104,19 +110,41 @@ def _is_admin(home: object) -> bool:
 # LLM: 按解析器给出的 operation 分派；config 是 Gateway 启动时加载的配置（当前运行值与用户配置路径的来源）。
 #   capability_config 由调用方经统一入口取得，只交给要显示配置告警的总览与全部视图；不传时这两处只显示主配置告警。
 #   capability_path 是运行时实际读取的 capability 文件路径，展示与写入口都要用（否则显示的运行值/写入目标对不上）。
+#   home_paths 仅用于固定档案展示，身份授权仍在 execute_settings_control，不由字段或文案决定。
 # 函数用途: 对管理员执行 /settings 的一个子命令，返回中文回执。
 def run_settings_control(config: object, command: ConversationControlCommand, *,
-                         capability_config: object = None, capability_path: Path | None = None) -> str:
+                         capability_config: object = None, capability_path: Path | None = None,
+                         home_paths: object = None) -> str:
     if command.operation == "help":
         return command.usage
     handler = _HANDLERS.get(command.operation)
     if handler is None:
         raise SettingsControlError(command.usage)
     _operation, _, argument = command.value.partition(" ")
+    if command.operation == "show" and argument.strip() == "memory_curator_model_profile":
+        return _show(config, argument.strip()) + _curator_profile_text(config, home_paths)
     if command.operation in _WARNING_VIEWS:
         return handler(config, argument.strip(), capability_config=capability_config,
                        capability_path=capability_path)
     return handler(config, argument.strip(), capability_path=capability_path)
+
+
+# LLM: 展示复用同一连接解析规则，只返回编号、型号和原因；区分启动值与已保存值，不把保存当成热生效。
+# 函数用途: 在设置详情末尾补上运行档案与待重启档案的模型名，TUI 与 IM 共用。
+def _curator_profile_text(config: object, home_paths: object) -> str:
+    from ..settings.curator_profile import curator_profile_description
+
+    if home_paths is None:
+        return "\n档案模型名：未验证（缺少可信用户目录）。"
+    host = SimpleNamespace(config=config, home_paths=home_paths)
+    key = "memory_curator_model_profile"
+    running = str(getattr(config, key, "") or "")
+    stored = _stored(config).get(key, "") or ""
+    saved = "" if stored == [] else str(stored).strip()
+    lines = ["当前运行档案：" + curator_profile_description(host, running)]
+    if running != saved:
+        lines.append("保存的档案（重启后生效）：" + curator_profile_description(host, saved))
+    return "\n" + "\n".join(lines)
 
 
 def _user_path(config: object):
@@ -303,7 +331,7 @@ def _internal(_config: object, argument: str) -> str:
 
 
 # LLM: config 是 Gateway 启动配置，所以登记了派生规则的参数（如 max_tokens、推理强度）按默认模型算实际效果，并注明
-#   /model 切换过的会话可能不同；派生公式只在参数中心 applied_value 背后的原权威位置。只读。
+#   /model 切换过的会话可能不同；用户专属边界项只展示用户命令可改，不改变登记表的模型权限。只读。
 # 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、实际效果（有派生规则时）、用户配置里的值与能否修改。
 def _show(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     spec = parameter_registry().get(argument)
@@ -314,6 +342,8 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
     override = _value(spec, stored[spec.key]) if spec.key in stored else "未覆盖（用默认值）"
     writable = (f"可以修改，{effect_text(spec.effect)}" if spec.writable
                 else f"不能在这里修改：{BOUNDARY_KEYS.get(spec.key, _BOUNDARY_TEXT)}")
+    if spec.key in USER_SETTINGS_BOUNDARY_KEYS:
+        writable = f"安全边界，仅用户经 /settings 修改，模型不能改；{effect_text(spec.effect)}"
     applied = applied_value(spec.key, config)
     applied_line = ([f"实际效果：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
                     if applied is not None else [])

@@ -2,7 +2,8 @@
 #   说明只取随包 agent_config.yaml：该键正上方的连续注释优先，没有再取该键的行尾注释（与加载器同一引号规则），不在代码里再写一份；
 #   说明为空的字段只允许留在 test_parameter_registry 的基线名单里。安全等级按显式名单与键名记号结构化判定（指向类记号只对
 #   非数字参数生效，凭据按键名最后的完整片段认、与回显脱敏同一条规则），
-#   user_config_capability.TUNABLE_KEYS 可显式放行（如飞书凭据），BOUNDARY_KEYS 永远拒绝。分类只用于展示，未知前缀归“其它”，
+#   TUNABLE_KEYS 可显式放行（如飞书凭据），BOUNDARY_KEYS 对模型永远拒绝；用户专属 /settings 授权不改变此表的 writable。
+#   分类只用于展示，未知前缀归“其它”，
 #   不参与任何放行判断。只读，不写文件、不调模型。改动须同步 parameter_changes.py、tooling/user_config_tool.py、
 #   gateway_parts/settings_control_service.py 与 test_parameter_registry.py。运行时还会按规则派生的参数（配置值不等于
 #   实际使用值，如 max_tokens 按窗口夹取、推理强度在不支持的模型上不发送）在 _APPLIED_RULES 登记派生函数，公式本身仍只在原权威位置；

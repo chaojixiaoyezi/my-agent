@@ -23,10 +23,12 @@ class ProviderConfigurationError(RuntimeError):
 class ModelNotConfiguredError(ProviderConfigurationError):
     error_code = "MODEL_NOT_CONFIGURED"
 
-    # LLM: 文案不包含私有配置或占位模型名；CLI、Gateway 和后台消费者使用同一异常身份。
+    # LLM: CLI、Gateway 和后台共用同一异常身份；可选档案诊断只含编号与结构化原因，不带端点、密钥或输入正文。
     # 函数用途: 给未配置模型的调用返回明确、可操作的错误。
-    def __init__(self) -> None:
+    def __init__(self, *, profile_id: str = "", profile_reason: str = "") -> None:
         super().__init__("尚未配置模型，请先通过 /model 新增并选择模型；系统不会自动使用其它模型。")
+        self.profile_id = profile_id
+        self.profile_reason = profile_reason
 
 
 # LLM: ProviderConnectionError 只承载尚未证明可瞬时恢复的 DNS/地址/代理配置失败；typed ECONNREFUSED 已在 transport 边界归 ProviderTransientError。

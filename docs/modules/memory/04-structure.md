@@ -1,5 +1,24 @@
 # Memory Structure
 
+## Curator 固定模型档案（P12，2026-10-01）
+
+`AgentConfig` / `MemorySettings` / `_memory_coercion` 只保留 `memory_curator_model_profile`，默认空。
+`MemoryCuratorConfig.model_profile` 是不可变引用，参与 `revision()`；原单独覆盖 provider/model 的字段和配置键已删除，旧 YAML 残留仅告警。
+
+- `settings/curator_profile.curator_model_config` 复用 `selected_model_config`：空值取 owner 选择，非空精确引用本人或已授权共享档案；不按型号匹配，不读当前线程选择。
+  原 `resolved_model` 是用途、启用、凭据和连接字段的唯一权威，必须同时具备 agentic；显式 `default` 不是固定档案。
+- `core._build_memory_curator_backend` 仅装配：整个配置交原 `get_backend`，只改 `stream_enabled=False`，不拼接聊天端点或凭据。
+  引用失败转 `UnconfiguredBackend(ModelNotConfiguredError(...))`，生成不发网络，不创建第二 Agent；前台仍能进入设置修正。
+- `ModelProfileError.reason` 由原解析器赋值。缺配置异常只传 `profile_id` / `profile_reason`，Curator 失败码仍为 `CURATOR_MODEL_NOT_CONFIGURED`，
+  `curator_failure_retry_seconds` 的一小时退避不变，失败不推进游标。
+- 诊断写进**原 run 账**的 `failure_diagnostic` warning JSON（仍不超过 300 字符），新增编号/原因，不改变 run v2 dataclass 键集；
+  连接秘密、端点、请求或响应正文不入账，CLI 结果不伪造提炼成功。
+- 新键在参数中心是 boundary / `writable=False`；只有 `execute_settings_control` 的完整管理员身份校验通过后，
+  在 `user_settings_write_scope` 内允许用户 set/reset/revert。作用域退出还原，模型工具默认拒绝，actor 仅记账不是权限。
+  TUI/IM 使用同一详情回执，运行引用与保存引用分开解析型号，保存不等于热生效。
+- 后端在 owner 实例装配时冻结；主配置变更仍需重启 Gateway。自动总结 Skill 继续复用原 Curator 后端，因而也采用此固定档案。
+  私有引用只在本人目录有效，跨 owner 须已有共享授权；目录损坏或授权撤销均不读其它私有模型做回退。
+
 ## 缓存不可读时的行为（构造宽松、写入严格，2026-09-29）
 
 `TextVectorCache` 对"缓存文件读不了"（权限/EIO/EMFILE，不是"文件不存在"）分两种态度：

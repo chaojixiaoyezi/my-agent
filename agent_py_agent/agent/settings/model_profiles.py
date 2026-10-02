@@ -416,13 +416,13 @@ def _default_for_owner(agent: object) -> str:
     return initial_profile_key(agent.home_paths) or "default"
 
 
-# LLM: 解析本 owner 或已授权共享的指定用途；OAuth 引用路径由可信 home 生成，不接受客户端指定。
+# LLM: 解析本 owner 或已授权共享的指定用途；不存在给出结构化原因，OAuth 路径由可信 home 生成，不接受客户端指定。
 # 函数用途: 将模型编号解析成连接字段，默认只供生成消费者；决策用途必须显式传入。
 def _resolved_profile(agent: object, data: dict, selected: str, *, capability: str = "agentic") -> dict:
     if shared_profile_key(selected):
         return resolve_shared_model(agent.home_paths, selected, capability=capability)
     if selected not in data["profiles"]:
-        raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。")
+        raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。", reason="profile_not_found")
     row = resolved_model(data, selected, capability=capability)
     if row.get("model_auth_ref"):
         row["model_auth_ref"]["path"] = str(model_profiles_path(agent.home_paths))

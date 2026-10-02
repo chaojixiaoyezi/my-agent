@@ -10,7 +10,7 @@ from typing import Any
 
 
 # LLM: Curator 标签、关系与召回前/后各自默认关闭；点位的期限与模型引用只在决策设置覆盖层按点位设置，默认继承通用策略，
-#   不改变记忆证据规则。
+#   不改变记忆证据规则；固定提炼模型只存档案编号，服务商连接仍由原模型目录解析。
 # 类用途: 保存校验后真正供 Memory 运行时使用的全部配置。
 @dataclass(frozen=True)
 class MemorySettings:
@@ -28,8 +28,7 @@ class MemorySettings:
     memory_compact_auto_trigger_max_tokens: int = 300_000
     memory_compact_recovery_target_percent: int = 60
     memory_curator_enabled: bool = True
-    memory_curator_provider: str = "auto"
-    memory_curator_model: str = ""
+    memory_curator_model_profile: str = ""
     memory_curator_interval_seconds: int = 10_800
     memory_curator_turn_threshold: int = 10
     memory_curator_max_input_chars: int = 40_000

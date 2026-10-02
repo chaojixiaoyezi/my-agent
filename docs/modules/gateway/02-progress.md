@@ -9,6 +9,13 @@ Gateway 控制通道，与 user_config action=search 的 constants 结果同数�
 （目录与源码一致且**不比较行号**——目录唯一失效时机是常数增删、改名、改值、改说明或改单位/类别；待整改白名单只短不长、协议类排除；
 只在常数上方插空行的行号漂移用例 `--check` 必须仍通过）。`control_commands._settings_command` 新增 internal 子命令（词法同 search）。
 
+## P12：Curator 档案设置与编号展示（2026-10-01，sol，本地已实现，待集成/部署）
+
+- `/settings show memory_curator_model_profile` 在原参数详情后补运行编号/型号；有未生效修改时另列保存编号/型号，TUI 与 IM 共用回执。
+- `execute_settings_control` 只在原完整管理员身份校验后开启用户专属边界写作用域，退出还原；模型 set/reset/revert、伪造 actor 和普通 owner 仍拒绝。
+- `/model` 的 IM 文本列表以及 TUI 选择/服务商管理列表展示稳定档案编号，区别于临时选择序号，不新增协议或路由。
+- 定向与守卫结果见 TESTS；真实 Gateway、终端和 IM 客户端显示未验证，由 3a 集成部署后复核，不把组件渲染当收信验收。
+
 `/settings show` 显示参数元数据（参数中心 P8，分支 `worker/ds2-registry-metadata`，2026-10-01）：`settings_control_service._show`
 对有值的参数补四行“单位／范围／归属模块／读取方”（`_metadata_line`，没推导出就不出现），来源是 `settings/parameter_metadata.py`
 的自动推导：单位按键名后缀（_seconds/_ms/_chars/_bytes/_tokens/_percent 等，推不出留空）、范围取自现有规范化/校验规格

@@ -117,10 +117,10 @@ memory_top_k: 5
 
 # 是否启用后台 Memory Curator（统一每日经历提炼服务）：关闭时保留现有游标和候选，不调用辅助模型。
 memory_curator_enabled: true
-# 后台策展使用的服务商：auto 表示继承主后端；指定 provider 时由统一后端工厂创建，不改变输出 Schema。
-memory_curator_provider: "auto"
-# 后台策展使用的模型：留空继承主模型；填写时只影响后台提炼模型，不改变主会话模型。
-memory_curator_model: ""
+# 后台记忆整理固定使用的模型档案编号（在 /model 列表查看）；留空沿用 owner 当前选中的模型。
+# 指定时使用该档案自己的服务商凭据和端点，必须存在、启用且支持 agentic；失效明确失败，不回退到聊天模型。
+# 这决定记忆内容发送给哪个服务商，属于安全边界：仅用户经 /settings 修改，模型不能改；重启 Gateway 后生效。
+memory_curator_model_profile: ""
 # 后台记忆整理隔多久自动触发一次（秒）。
 # 想让记忆更及时沉淀就调小，想减少后台模型调用、省资源就调大；需要注意的是，光到时间还不够，期间必须有过新对话才会真的触发。
 memory_curator_interval_seconds: 10800

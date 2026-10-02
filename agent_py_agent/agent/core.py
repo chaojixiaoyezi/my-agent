@@ -186,41 +186,25 @@ def _export_model_endpoint_env(config) -> None:
         os.environ.setdefault("AGENT_MODEL_NAME", model_name)
 
 
-# LLM: Curator provider/model selection reuses the canonical backend factory and config credentials;
-# it must not create a second agent loop or tool registry.
+# LLM: 档案与整组连接只由原设置解析器给出，再走唯一后端工厂；失效保留诊断的未配置后端，不回退或创建第二 Agent。
 # 函数用途: 为无工具后台策展构造独立非流式模型适配器，并返回解析后的 provider/model 标识。
 def _build_memory_curator_backend(
     agent: object,
     config: AgentConfig,
     curator_config: MemoryCuratorConfig,
 ) -> tuple[object, str, str]:
-    profile_config = _curator_profile_config(agent, config)
-    provider = (
-        str(profile_config.model_backend)
-        if curator_config.provider in {"", "auto"}
-        else curator_config.provider
-    )
-    model = curator_config.model or str(profile_config.model_name)
-    scoped_config = replace(
-        profile_config,
-        model_backend=provider,
-        model_name=model,
-        stream_enabled=False,
-    )
-    return get_backend(provider, scoped_config), provider, model
-
-
-# LLM: 策展读取 owner 显式选择；失效引用不能回退到启动模型，更不能请求另一个服务商。
-# 函数用途: 解析记忆策展使用的模型；配置损坏时保留未配置状态与诊断，让前台仍可进入设置修正。
-def _curator_profile_config(agent: object, config: AgentConfig) -> AgentConfig:
-    from .settings.model_profiles import ModelProfileError, selected_model_config
+    from .backends.base import UnconfiguredBackend
+    from .backends.errors import ModelNotConfiguredError
+    from .settings.curator_profile import curator_model_config
 
     try:
-        resolved = selected_model_config(agent)
-    except (ModelProfileError, OSError):
-        logging.getLogger(__name__).warning("记忆策展选定模型配置不可用，未自动切换模型。")
-        return replace(config, model_backend="", model_name="", api_base="", api_key="")
-    return resolved
+        profile_config = curator_model_config(agent, curator_config.model_profile)
+    except ModelNotConfiguredError as exc:
+        logging.getLogger(__name__).warning("记忆策展档案不可用，原因=%s，未自动切换模型。", exc.profile_reason)
+        return UnconfiguredBackend(exc), "", ""
+    scoped_config = replace(profile_config, stream_enabled=False)
+    provider, model = str(scoped_config.model_backend), str(scoped_config.model_name)
+    return get_backend(provider, scoped_config), provider, model
 
 
 # LLM: The composition root is the only adapter allowed to join Memory Store with the existing

@@ -85,15 +85,17 @@ def test_background_readiness_matches_backend_factory(backend, model, url):
 
 
 def test_curator_invalid_selection_does_not_fall_back_to_deployment(monkeypatch):
-    from agent_py_agent.agent.core import _curator_profile_config
-    from agent_py_agent.agent.settings import model_profiles
+    from agent_py_agent.agent.core import _build_memory_curator_backend
+    from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig
+    from agent_py_agent.agent.settings import curator_profile, model_profiles
 
     def invalid_selection(agent):
         raise model_profiles.ModelProfileError("选定模型不存在")
 
-    monkeypatch.setattr(model_profiles, "selected_model_config", invalid_selection)
+    monkeypatch.setattr(curator_profile, "selected_model_config", invalid_selection)
     deployment = AgentConfig(model_backend="openai_compatible", model_name="different-model",
                              api_base="https://example.test/v1", api_key="test-secret")
-    config = _curator_profile_config(SimpleNamespace(), deployment)
-    assert (config.model_backend, config.model_name, config.api_base, config.api_key) == ("", "", "", "")
-    assert get_backend(config.model_backend, config).name == "unconfigured"
+    backend, provider, model = _build_memory_curator_backend(SimpleNamespace(), deployment, MemoryCuratorConfig())
+    assert (backend.name, provider, model) == ("unconfigured", "", "")
+    with pytest.raises(ModelNotConfiguredError):
+        backend.generate("synthetic input")

@@ -127,7 +127,7 @@ def _choice_by_reference(listing: dict, reference: str) -> dict | None:
     return next((row for row in rows if row.get("id") == text), None)
 
 
-# LLM: 只渲染公开字段（模型名、服务商名、上下文窗口、共享/默认标记），不渲染接口地址或密钥状态以外的内容。
+# LLM: 只渲染公开字段与稳定档案编号，方便填写固定引用；不渲染接口地址或密钥，列表序号仍仅供会话选择。
 #   默认行按结构化字段 default_source 标注：部署默认，或管理员指定的初始模型（普通用户）。
 # 函数用途: 把模型列表整理成聊天文字：当前会话模型、新会话默认、编号列表和用法。
 def render_model_choices(listing: dict) -> str:
@@ -148,7 +148,8 @@ def render_model_choices(listing: dict) -> str:
                      if row.get("id") == "default" else ("（管理员共享）" if row.get("shared") else ""))
             provider_name = str(row.get("provider_name") or "")
             provider = f" · {provider_name}" if provider_name and provider_name != row.get("model_name") else ""
-            lines.append(f"{index}. {mark}{row.get('model_name')}{provider} · {row.get('model_context_window_tokens', '?')} tokens{label}")
+            lines.append(f"{index}. {mark}{row.get('model_name')}{provider} · {row.get('model_context_window_tokens', '?')} tokens{label}"
+                         f" · 档案编号：{row.get('id')}")
         lines.append("用法：/model <编号> 选为本会话模型；/model default <编号> 设为新会话默认。")
     # 未选模型时投影给的是 TUI 菜单用语（“新增并选择”），聊天里改由上面的“未选择”和用法引导，不重复显示。
     if listing.get("warning") and not (current == "default" and not listing.get("selection_available")):

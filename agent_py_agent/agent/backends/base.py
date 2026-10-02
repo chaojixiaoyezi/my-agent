@@ -203,10 +203,15 @@ class BaseBackend:
 class UnconfiguredBackend(BaseBackend):
     name = "unconfigured"
 
+    # LLM: 仅持有宿主在装配时确认的缺配置异常，保留固定引用诊断；不会消费输入或另建请求路径。
+    # 函数用途: 为无模型状态保存统一错误，未传入时维持首次安装行为。
+    def __init__(self, error: ModelNotConfiguredError | None = None) -> None:
+        self.error = error if error is not None else ModelNotConfiguredError()
+
     # LLM: 工具能力预检与实际生成共用相同缺配置错误，不能误报成模型不支持工具。
     # 函数用途: 尚无模型时拒绝能力探针，不发网络请求。
     def probe_tool_capability(self) -> ProviderToolCapability:
-        raise ModelNotConfiguredError()
+        raise self.error
 
     # LLM: 参数逐项遵守 BaseBackend.generate；缺配置时不消费输入、不调用模型，修改公共签名须同步此处。
     # 函数用途: 明确提醒先选择模型，普通聊天和后台生成都不能偷偷回退。
@@ -221,7 +226,7 @@ class UnconfiguredBackend(BaseBackend):
         on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
         request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
-        raise ModelNotConfiguredError()
+        raise self.error
 
 
 # LLM: 此本地测试实现不代表真实模型或工具验收；工厂只有显式 echo 配置才能选用。

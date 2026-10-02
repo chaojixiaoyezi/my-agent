@@ -58,6 +58,25 @@
   （用 `_descriptions_from_lines` 逐条替换）；2026-10-01 删除 log_analysis 来源后由生成器重新生成目录（270→250 项），
   `--check` 通过；`test_backend_config_catalog.py`/`test_frontend_settings_labels.py` 已跑通。
 
+## 2026-10-01 Curator 固定档案引用（P12，本地已实现，待集成/部署）
+
+- `memory_curator_model_profile`：字符串档案编号，默认空；空值沿用 owner 当前选中模型，不改成当前线程聊天模型。
+  非空复用 `/model` 唯一解析器，要求模型与服务商存在、启用且支持 agentic，使用该连接自己的凭据、端点、协议、请求头及模型选项。
+  `default` 是部署配置而非已保存档案，不能当固定编号；失效明确报缺配置，不会静默换模型。
+- 安全等级是 boundary，登记表 `writable=False`：模型 `user_config` 的 set/reset/revert 都拒绝。
+  仅已认证管理员的用户 `/settings` 调用内允许修改此键，授权不是 `actor=chat` 标签，退出清理；其余边界仍拒绝。
+  配置依旧重启 Gateway 后生效，记在原参数修改账本，没有第二套配置或确认账。
+- 用户操作：先在 `/model` 列表取得**档案编号**（不是临时列表序号），再发
+  `/settings set memory_curator_model_profile <档案编号>`；查看用 `/settings show memory_curator_model_profile`，
+  回到沿用用 `/settings reset memory_curator_model_profile`。TUI 与 IM 的详情都能看到运行编号/型号，未重启时另列保存编号/型号。
+- 失败诊断仍放原 Curator run v2 的 `failure_diagnostic` warning JSON：`profile_id` 与 `profile_reason`，不含连接秘密或记忆正文。
+  原因包括 `profile_not_found`、`capability_mismatch`、`profile_disabled`、`provider_disabled`、`credential_missing`、
+  `catalog_invalid`、`catalog_unreadable`；不从说明文字判定。失败码仍为 `CURATOR_MODEL_NOT_CONFIGURED`，一小时退避不变。
+- `memory_curator_provider`、`memory_curator_model` 已删除：不保留别名，不自动转换，旧配置仅按未知键告警。
+  下文 P3 等旧推进记录保留原时点，不代表两键仍可用。
+- 多 owner 时私有编号只在对应 owner 目录有效；需要全局共享连接时须采用已授权的 `shared:<编号>`，仍由原共享解析器核权。
+  生产指向 deepseek-v4-flash 的实际编号由 3a 部署后设置，本线未读/改生产档案或配置。
+
 ## 2026-10-01 参数登记表元数据（P8，分支 `worker/ds2-registry-metadata`，已实现，待集成）
 
 - 设计目标 1 落地：登记表每条参数补「单位、范围、归属模块、读取方」四项元数据，全部由 `agent/settings/parameter_metadata.py` 自动推导、

@@ -283,7 +283,12 @@ function requiresUnlock(key, category) {
   return false;
 }
 
+// LLM: 风险按结构化键名与类别声明，不从中文说明判断；记忆档案改变内容发送目的地，需与后端边界登记同样标为高风险。
+// 函数用途: 给用户配置目录标注敏感字段风险，不授予模型修改权限。
 function riskForField(key, category, type) {
+  if (key === "memory_curator_model_profile") {
+    return { level: "high", warning: "决定把记忆内容发给哪个服务商；仅用户经 /settings 修改，模型不能改。" };
+  }
   if (type === "secret") return { level: "high", warning: "密钥或凭证字段，保存前确认不要写入真实公开仓库。" };
   if (key === "api_base" || key === "workspace_root" || key === "extensions_dir") {
     return { level: "high", warning: "会改变运行边界或加载来源，建议只在明确知道影响时修改。" };
