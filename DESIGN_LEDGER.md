@@ -88,7 +88,7 @@
     要不要按服务商实际能力上调窗口（会推迟压缩、单次请求更贵）交用户决定；在那之前保持现状，宁可早压缩。
 - **验证**：见 TESTS.md 同名节。
 
-## 一次能力包选择在 gpt-6-luna 上失败：严格 schema 关键字 + 失败原因可诊断（2026-10-01，分支 `claude/ae-selection-failure-cause`，基于 main `0ca852195`，已实现，待集成）
+## 一次能力包选择在 gpt-6-luna 上失败：严格 schema 关键字 + 失败原因可诊断（2026-10-01，分支 `claude/ae-selection-failure-cause`，基于 main `0ca852195`，已实现，step16x 已上线并经真实 gpt-6-luna 复核）
 
 - **来源**：能力包验收 D5。链式 G01 重跑时，宿主一次选择在 gpt-6-luna 上 `outcome=failed`（`CAPABILITY_SELECTION_MODEL_FAILED`、`CAPABILITY_SELECTION_USAGE_NOT_REPORTED`）。`select_capability_packages` 用宽泛的 `except Exception` 吞掉了异常，没有日志，也没有结构化原因，从现有事实里查不出根因。
 - **根因（真实 luna 实测）**：选择用的 response schema 在数组上写了 `uniqueItems` 和 `maxItems`。Responses 订阅接口按严格模式校验 `text.format` 的 json_schema，用失败事件拒绝：`invalid_json_schema`，param `text.format.schema`，type `invalid_request_error`。
@@ -107,12 +107,13 @@
   - 12 个变异全部被抓住。
   - 真实运行：luna 修复后 selected；luna 修复前复现 invalid_json_schema；MiniMax 修复后 selected。证据在 `~/.my-agent/decision-evidence/d5-selection-schema/`（仓库外）。
 
-## 能力包 G01 生产规模真实运行后的两条待定（2026-10-01，3a 裁定；第二条已核实送达）
+## 能力包 G01 生产规模真实运行与串行重跑（2026-10-01，3a 裁定；两条均已出结论）
 
 - **G01 压缩后原资源链仍未覆盖**：ae 在 step16v 上用 gpt-6-luna 跑了一次生产规模长任务（36 份输入、约 58 万字），产物全对、
   止损线一条没碰，但模型自然地把工作分给 6 个子代理，主线程上下文峰值约 135.6K，低于触发线 244800，全程没有压缩。按规矩记“未命中”，
-  不为凑压缩改写需求诱导模型不派子代理。是否再跑一次“每一步依赖上一步”的串行长任务（预计 1–2 小时、几千万 token），超出这次批准的
-  一次运行，交用户决定。
+  不为凑压缩改写需求诱导模型不派子代理。随后用“每一步依赖上一步”的串行长任务（40 份链式记录、约 121 万字）再跑一次 gpt-6-luna：
+  模型没派子代理，而是写脚本批量处理整条链，原文没进上下文（峰值约 75K），40/40 正确，仍然没有压缩。两次真实运行模型都自然避开
+  上下文膨胀，G01/G02 按“取决于模型做法、未命中”记账（提交 `57cdeef19`／`106fc3b5d`），见[链式重跑](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#g01g02-链式长任务真实重跑gpt-6-luna2026-10-01)。
 - **前台回复不可用、任务在后台做完（2026-10-01 已核实：送达，不改代码）**：前台请求在 +451 秒以 `USER_REPLY_UNAVAILABLE` 结束
   （模型在 2 个子代理仍在跑时连续给出空正文，宿主按有界重试后如实失败，这是既有合同），之后父级后台续跑写完 report.md，TaskRun 在约
   +975 秒关闭为 done。真机当时没记投递事实；用真实网关循环加脚本化假模型在 step16w 运行时上复现同一形状（前台只有思考、两次补问后
@@ -179,7 +180,7 @@
   应允许直接选当前模型声明的服务商档位（例如 `/effort xhigh`），但 `/effort` 的参数白名单在 `conversation/control_commands.py`
   （Codex 重构区），等重构告一段落再做；菜单届时按模型声明多列几行。
 
-## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`，第一步已实现，待集成）
+## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`，第一步已实现，已合入 main `3fdaa3130`）
 
 - **现象**（ae 真实模型验收 O1）：子代理 runner 在写操作 handler 返回后被 SIGKILL，attempt 与 agent_run 停在 unknown，write_file 停在
   EXECUTING；父级用替补接替（来源 TAKEN_OVER），主代理 done。TaskRun 因 unknown 子代理按树规则一直不关，而 `/recover` 只看
@@ -217,7 +218,7 @@
   - 边界规则和白名单都没改；`check_import_boundaries.py` 0 条。
 - **验证**：见 TESTS.md 同名节与“/recover 子代理分支的分层边界修正”节。
 
-## 能力申请裁决的确定拒绝不再记成“结果未知”（2026-09-30，分支 `claude/ae-resolve-refusal-code`，基于 main `a8c71f0e0`，已实现，待集成）
+## 能力申请裁决的确定拒绝不再记成“结果未知”（2026-09-30，分支 `claude/ae-resolve-refusal-code`，基于 main `a8c71f0e0`，已实现，已合入 main `7430a0000` 并经真实模型复核）
 
 - **来源**：能力包真实模型验收 G03 缺陷 D2。父级 `resolve_capability_requests(decision=grant)` 遇到 write_roots 全部越界（`/etc/hosts`），回执 `ok=false` 但不带错误码。
 - **原因**：`tool_operation_coordinator._operation_status_for_result` 的判定是：handler 已执行过的失败，只有显式声明 `effect_outcome=failed/not_started`，或错误码在执行前确定失败白名单里，才落 FAILED；其余一律 UNKNOWN。这个回执两样都没有，于是被包成 `TOOL_OPERATION_OUTCOME_UNKNOWN`／manual_review，操作行停在 UNKNOWN。
@@ -261,20 +262,20 @@
   `orchestration/tools/capability.py`（ae 修 D2）。
 - **验证**：`test_task_run_close_without_conversation_task.py` 6 项；5 个变异全部被杀。见 TESTS.md 同名节。
 
-## 能力包使用说明实操核对：补入口文档必须列入 files（2026-09-30，分支 `worker/ds1-guide-qa`，已修正，待集成）
+## 能力包使用说明实操核对：补入口文档必须列入 files（2026-09-30，分支 `worker/ds1-guide-qa`，已修正，已合入 main `199c1933e`）
 
 - **做法**：按 `docs/guides/CAPABILITY_PACK_GUIDE.md` 第五节在临时目录实操构建一个小能力包（CAPABILITY.md + 模板 + 示例脚本 + 声明 JSON），用说明书命令 `scripts/build_capability_package.py` 构建成功，并用 `inspect_plugin_package`/`read_plugin_member` 进程内读回核对成员、摘要与声明一致。
 - **发现**：说明书字段表没说入口文档必须同时列入 `files`；实测 `capability.entry_document` 不在 `files` 时构建失败（错误为笼统的"插件包描述无效"）。已在说明书补注意说明。`settings_schema` 写 `{}` 实测可行。
 - **状态**：仅改说明书与测试记录，未改产品代码；未安装、未运行 `/plugins`、未启动 Gateway。
 
-## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`，已实现，待集成）
+## 子代理接替写专门审计事件 subagent_takeover_recorded（2026-09-30，分支 `worker/ds1-takeover-event`，已实现，已合入 main `6da387942`）
 
 - **来源**：能力包验收 G03 发现接替已结束子代理时，追加式事件日志里只有普通保存（`subagent_run_saved`）或状态记录，没有专门的“接替”条目；接替事实只在权威 takeover_records 与 TAKEOVER.md 里。要求只读审计投影，不建第二份状态。
 - **做法**：在接替落账唯一入口 `services/takeover/record.py::record_takeover_edge` 落盘核对通过、TAKEOVER.md 写完后，追加一条 `subagent_takeover_recorded` 事件（复用 `manager.log_local_record`，与 `subagent_run_saved` 同一写入通道）。payload 带 `source_run_id`（来源）、`successor_run_id`（接替者）、`disposition`（superseded 或 taken_over）、`record_id`、`created_at`。
 - **边界**：它是审计投影，权威仍是 takeover_records / superseded_by / takeover_by；不改任何状态语义；事件写入失败与同通道其它事件一致（内部吞异常只记 warning），不影响落账主链；二次接替同一来源被预检拒绝时不产生新事件（不会走到落账入口）。
 - **验证**：`test_subagent_done_supersede.py` 新增三用例（DONE→superseded、BLOCKED→taken_over 各一条事件且字段正确；二次接替被拒不新增事件）；连同 orchestration、local_store 相关共 63 passed。
 
-## 被接替的子代理在运行账里补终态（2026-09-30，分支 `claude/38-agent-run-closeout-status`，基于 main `10041de02`，已实现，待集成）
+## 被接替的子代理在运行账里补终态（2026-09-30，分支 `claude/38-agent-run-closeout-status`，基于 main `10041de02`，已实现，已合入 main `fffafb47a`）
 
 - **现象**（G03 验收第二条观察）：子代理被宿主收口成 BLOCKED 后又被 `replacement_for_run_ids` 接替，canonical 转 TAKEN_OVER，
   但 runtime.db 的 agent_run 永远停在 created（attempt 已 done）。证据批次 `bg-subagent-paths-9f88` 的 runtime.db 副本：13 个 agent_run

@@ -1,6 +1,6 @@
 # 后续开发与验证
 
-当前能力包收口：固定 27 次执行及独立审阅已结束，业务 16/27、原资源执行 12/18；原失败和模型恢复限制保持。十二步骤与七组完整缺项已对照核定，不能简化为只待四项或 Linux；C22 受控机制、历史大窗口提交与当前能力包生产规模分别记账。Mac 两版记录及 wheel 摘要已核；Linux 两版未部署，容器源码测试不代替 wheel 发布，Goal active。建议下一步由 Claude 集成缺项文档并按既有安排跟进 Linux；只读可并行，本轮不新开真实模型或 owner 用例。见[唯一 TODO](tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)与[完整缺项](tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。
+当前能力包收口：Mac 生产已上线 step16v／16w／16x，验收中发现的宿主缺陷（D1—D5、O1）均已修复上线并经真实模型复核，前台失败后台完成已核实送达。固定 27 次执行：业务 16/27、原资源执行 12/18；G01／G02 用 gpt-6-luna 生产规模与串行长任务各跑一次均未命中自然压缩。七组缺项：G04、G06 已闭合，G07 基本覆盖，G03、G05 部分覆盖，G01、G02 未覆盖；Linux 真机仍因测试机下线未部署，容器源码测试不代替 wheel 发布，Goal active。建议下一步由 Claude 集成缺项文档并按既有安排跟进 Linux；只读可并行，本轮不新开真实模型或 owner 用例。见[唯一 TODO](tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)与[完整缺项](tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。
 
 固定 `8ef68c5fd` 的 C22 已关闭受控 65536 配置下连续两代及第二代后原资源执行缺口：同请求实际四代自动提交，A/B 原脚本经 source_ref 同字节复制、真实执行，输入与版本保持。业务交接存在确定错误，默认窗口自然长任务未覆盖，最终仍 0/27；Goal 工具已核为 active。详见[本轮范围](tasks/CAPABILITY_PACK_ACCEPTANCE.md#c22固定校准后的连续压缩与原资源执行2026-09-28)。
 
