@@ -104,7 +104,7 @@ def _scoped_home(base_agent: object, scope: object) -> object:
 
 
 # LLM: 必须是已解析的完整身份（provider/kind/id 都是非空字符串）且为本机 local/main；规则统一在
-#   owner_access.is_complete_local_admin_owner，记忆向量重建等管理入口共用，不在这里另写一份。
+#   owner_access.is_complete_local_admin_owner，记忆向量重建、/recover owner 等管理入口共用，不在这里另写一份。
 # 函数用途: 判断当前发起者是否是管理员。
 def _is_admin(home: object) -> bool:
     return is_complete_local_admin_owner(home)

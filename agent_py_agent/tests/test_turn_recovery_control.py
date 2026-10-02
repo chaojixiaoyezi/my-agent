@@ -95,6 +95,21 @@ def test_recover_parses_view_apply_and_rejects_free_text():
     assert rejected.kind == "recover" and rejected.valid is False
     assert "recorded|confirmed_noop|abandoned" in rejected.usage
 
+    targeted = parse_conversation_control("/recover recorded subagent-1790930000-deadbeef")
+    assert targeted.valid is True and targeted.operation == "apply"
+    assert targeted.value == "recorded"
+    assert getattr(targeted, "target_id", "") == "subagent-1790930000-deadbeef"
+    assert parse_conversation_control("/recover recorded ../other").valid is False
+
+    owner_view = parse_conversation_control("/recover owner")
+    assert owner_view.valid is True and owner_view.operation == "owner_view"
+    owner_preview = parse_conversation_control("/recover owner abandoned")
+    assert owner_preview.valid is True and owner_preview.operation == "owner_preview"
+    owner_apply = parse_conversation_control("/recover owner abandoned --confirm 0123456789ab")
+    assert owner_apply.valid is True and owner_apply.operation == "owner_apply"
+    assert getattr(owner_apply, "confirmation_code", "") == "0123456789ab"
+    assert parse_conversation_control("/recover owner abandoned --confirm not-hex").valid is False
+
 
 def test_view_lists_unsettled_operations_without_changing_state(tmp_path):
     repo, rec, owner, thread, _executing = _unknown_turn(tmp_path)
@@ -182,6 +197,18 @@ def test_tui_serializes_recover_and_local_mode_requires_gateway():
     assert control_runtime._command_text(parse_conversation_control("/recover")) == "/recover"
     applied = parse_conversation_control("/recover abandoned")
     assert control_runtime._command_text(applied) == "/recover abandoned"
+    targeted = parse_conversation_control("/recover recorded subagent-1790930000-deadbeef")
+    assert control_runtime._command_text(targeted) == "/recover recorded subagent-1790930000-deadbeef"
+    owner_preview = parse_conversation_control("/recover owner confirmed_noop")
+    assert control_runtime._command_text(owner_preview) == "/recover owner confirmed_noop"
+    owner_apply = parse_conversation_control("/recover owner confirmed_noop --confirm 0123456789ab")
+    assert control_runtime._command_text(owner_apply) == "/recover owner confirmed_noop --confirm 0123456789ab"
+    restored = control_runtime._gateway_control_result_from_body(
+        "recover",
+        {"kind": "recover", "ok": True, "message": "ok",
+         "details": {"scope": "owner", "target_count": 2, "success_count": 2}},
+    )
+    assert restored.details == {"scope": "owner", "target_count": 2, "success_count": 2}
     execution = control_runtime.ChatControlExecution(
         agent=SimpleNamespace(config=SimpleNamespace()),
         use_gateway=False,

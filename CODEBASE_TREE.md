@@ -442,7 +442,8 @@ agent_py_agent/
 |   |   |-- operation_resources.py      # 同次只读核对原操作、holder/代数/epoch 与已领取资源锁
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   |-- run_takeover.py             # 被接替（TAKEN_OVER）的子代理运行收口为 cancelled：只在执行轮已静止时，CAS 核对 attempt 状态
-|   |   |-- child_recovery.py           # /recover 子代理分支：按线程列出未关 TaskRun 里 unknown 子代理执行轮；事务内复核后显式恢复
+|   |   |-- child_recovery.py           # /recover 线程分支：列出 unknown 子代理；带编号时事务内复核根/子目标范围后恢复
+|   |   |-- owner_recovery.py           # /recover owner：空 thread 历史 unknown 只读投影、集合确认码、批量共享 CAS 与幂等回执
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- plugin_command_service.py  # TUI HTTP 与 IM 会话共用插件服务、可信 owner 目录和管理员授权
@@ -1089,8 +1090,9 @@ agent_py_agent/
 |   |-- test_tui_paste.py               # 大小 paste 的折叠/展开和占位符安全回归
 |   |-- test_tui_preflight.py           # Gateway readiness 瞬态成功、typed 失败与 worker 只启动一次回归
 |   |-- test_tui_upgrade_follow.py      # TUI 随 Gateway 升级原地切换：目标判定、空闲事实、UI 线程两段式、交接载荷、终端兜底
-|   |-- test_turn_recovery_control.py   # /recover 解析、只读查看、显式恢复后可再挂载、拒绝情形、Gateway 分派与 TUI 序列化
-|   |-- test_turn_recovery_child_unknown.py # /recover 子代理分支：只读列出、恰好一条才处置、接替收口、TaskRun 关闭、范围与事务复核
+|   |-- test_turn_recovery_control.py   # /recover 普通/编号/owner 语法、恢复后可再挂载、Gateway 分派与 TUI 原文序列化
+|   |-- test_turn_recovery_child_unknown.py # /recover 子代理分支：只读列出、按编号逐条处置、接替收口、TaskRun 关闭、范围与事务复核
+|   |-- test_owner_unknown_recovery.py  # /recover owner：临时库只读投影、管理员边界、集合确认、共享 CAS、事件与重复确认幂等
 |   |-- test_end_task_control.py      # /endtask 解析、只读列表与预览、确认结束后同一定时任务恢复派发、拒绝不改状态、Gateway 分派与 TUI 序列化
 |   |-- test_wake_ops_control.py      # /wakes 解析、仅管理员、列表与预览只读、确认重放与事件、各类拒绝不改文件、状态计数、Gateway 分派与 TUI 序列化
 |   |-- test_wake_quarantine_archive.py # 唤醒结案留档 14 天归档：判断时间、坏账随记录、max(mtime,ctime)、发布语义不变、重放拒绝、会话删除清单
@@ -1736,8 +1738,9 @@ docs/
 - `agent/gateway_parts/model_profile_service.py`：authenticated owner 的模型菜单接口，不经聊天队列或模型。
 - `cli/gateway_host_guard.py`：Gateway 服务进程启动时写入托管进程号，工具子进程继承；stop/restart/start --force 据此拒绝停掉托管自己的 Gateway。
 - `agent/gateway_parts/restart_service.py`：Gateway 安全重启的唯一状态源；工具、`/restart` 只写请求，排空与换进程由服务循环经 `cli/gateway_restart_handover.py` 执行。
-- `agent/gateway_parts/turn_recovery_control.py`：`/recover` 先看当前 thread 工作任务的根主代理执行轮，主链不阻塞时再看本线程子代理（恰好一条才处置）；查看只读，处置经同一个 unknown→recovered CAS，不重放旧操作。
-- `agent_py_agent/agent/runtime_db/child_recovery.py`：`/recover` 子代理分支的运行库入口。只读投影按 `tasks.thread_id` 找未关 TaskRun 里 unknown 的非根代理；写入口在同一事务复核范围后复用主链恢复 CAS，事件带恢复目标。
+- `agent/gateway_parts/turn_recovery_control.py`：`/recover` 不带编号时保持主链优先、唯一子代理才处置；带编号时直达同事务范围复核；`/recover owner` 仅可信 local/main 管理员查看、预览并确认空 thread 历史 unknown。所有写入复用同一个 unknown→recovered CAS，不重放旧操作。
+- `agent_py_agent/agent/runtime_db/child_recovery.py`：`/recover` 线程运行库入口。只读投影按 `tasks.thread_id` 找未关 TaskRun 里 unknown 的非根代理；带编号写入口在 `BEGIN IMMEDIATE` 内复核 opaque 编号仍属该 thread/open TaskRun/current unknown，再复用主链恢复 CAS，给出不存在、越界、已变化原因。
+- `agent_py_agent/agent/runtime_db/owner_recovery.py`：`/recover owner` 运行库入口。只读投影限定 owner、空 thread 和 current unknown，不读任务/会话正文；确认码绑定完整编号与 attempt 集合，锁内复核后逐条复用共享 CAS，并以批次事件提供幂等统计回执。
 - `agent/gateway_parts/end_task_control.py`：`/endtask` 只处理“定时执行 waiting、会话任务 active、执行树没有未结束 attempt”的任务；列表与预览只读，确认后经 `tasks.update_status(cancelled, expected_status=active)` 与 `reconcile_waiting_run` 收口，仅管理员可用。
 - `agent/gateway_parts/wake_ops_control.py`：`/wakes` 列出已结案的后台唤醒，`/wakes replay <ID>` 预览、带 confirm 经 `store.wakes.attempts.replay` 重放；来源、pending 冲突与领域终态核对不过就拒绝且不改文件，仅管理员可用。测试 `test_wake_ops_control.py`。
 - `agent/gateway_parts/admin_control_service.py`：`/admin`、`/approve`、`/deny` 的唯一执行入口；只信任认证 scope 与结构化私聊类型，批准只写原 permission bridge 的精确决定文件。

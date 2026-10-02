@@ -40,8 +40,8 @@ def is_local_admin_owner(home_paths: object) -> bool:
 
 
 # LLM: 管理动作的统一授权：provider/kind/id 都必须是已解析的非空字符串，且是本机 local/main。is_local_admin_owner 允许
-#   空值（只适合目录墙裁决），管理入口不能因缺字段被当成管理员。/settings、插件管理（IM）、user_config 工具的本机配置动作
-#   与记忆向量重建共用这一条；只读身份字段。
+#   空值（只适合目录墙裁决），管理入口不能因缺字段被当成管理员。/settings、插件管理（IM）、user_config 工具的本机配置动作、
+#   记忆向量重建与 /recover owner（owner 历史未知执行轮）共用这一条；只读身份字段。
 # 函数用途: 判断当前 owner 是否是身份完整的本机管理员，供管理命令授权。
 def is_complete_local_admin_owner(home_paths: object) -> bool:
     identity = [getattr(home_paths, field, None) for field in ("owner_provider", "owner_kind", "owner_id")]

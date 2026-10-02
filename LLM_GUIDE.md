@@ -5,6 +5,13 @@ Anthropic 预算边界（2026-10-02，sol2，本地已实施、待集成）：�
 无上限说明只写条件，不把省略字段当作服务商已关闭思考。十一文件 494 项与三项变异有组件证据，详见 TESTS；
 真实供应商、实际 TUI/IM、生产 Gateway 未验证。下一步 3a 审阅合入并核真实请求，不由本线部署或改生产配置。
 
+C8/C9（2026-10-02，sol56，本地已实现、待集成/真实入口核对）：`/recover <处置> <编号>` 只认 opaque ID，
+写入口必须在同一事务复核 thread、未关 TaskRun 和 current unknown；不带编号的唯一目标旧行为保持。
+`/recover owner` 只给完整可信 local/main 管理员，空 thread 历史 unknown 的查看/预览不读正文，确认码绑定完整
+`(target_id, attempt_id)` 集合；集合变化零写入，同码重送只读批次回执。共享 unknown→recovered CAS、静止规则和
+TaskRun 树不变。临时库三文件 25 项与五个变异已有组件证据；真实 Gateway/TUI/飞书和生产历史处置未验证，
+集成后先用隔离 owner 复核查看→预览→集合变化拒绝→确认→重复确认，不要直接拿生产 unknown 做首验。
+
 C7（2026-10-02，sol，已上线 step17a，main de222698b，2026-10-02）：用户智能程度固定八档，唯一换算表在 backends/reasoning_control；
 菜单/命令/schema 不再另写档位白名单，发送和回执共用声明筛选。线程/child 保留用户值，投影与发送按候选模型降档。
 不要为 Responses 借用 Chat 容量投影或按型号猜支持。三个变异有组件证据，旧 Gateway 控制失败保持在 TESTS；

@@ -225,6 +225,23 @@
 - **验证**：先红后绿、工厂边界 1024/2047/2048/2049、真实组包/投影的流式和非流式替身、控制服务与参数中心回执、正常大上限及三个独立变异；结果和门禁见 TESTS.md。没有新配置，未做真实供应商验收或 Gateway 操作；早期夹具遗漏的假地址外部传输尝试保留在 TESTS.md。
 - 详细合同见 [智能程度第 10 节](docs/design/REASONING_EFFORT.md#10-anthropic-小输出上限的预算边界2026-10-02)。真实供应商及实际 TUI/IM 客户端未验证，由 3a 集成后复核。
 
+## C8/C9：/recover 按编号处置与管理员 owner 历史恢复入口（2026-10-02，分支 `worker/sol56-c8c9-recover`，基于 `claude/3a-step16z` `b35796a60`，已实现，待集成）
+
+- **C8 指定编号**：`/recover <处置> <编号>` 的编号只接受 `common/opaque_id.py` 规则；写入口在同一个 `BEGIN IMMEDIATE`
+  事务里重新定位编号并复核 thread、未关闭 TaskRun、current attempt 仍为 unknown，再复用主链唯一 unknown→recovered CAS。
+  不存在、越界、已非 unknown 分别返回 `target_not_found`、`target_out_of_scope`、`target_not_unknown`，统一沿
+  `RUN_RECOVERY_REJECTED`。不带编号时旧行为不变：唯一一条才处置，多条只列清单。
+- **C9 owner 历史入口**：仅完整可信的本机 `local/main` 管理员可用 `/recover owner`。只读投影仅取本 owner、
+  `tasks.thread_id=''`、current attempt=unknown 的根/子代理编号、角色、开始时间和未确认操作数，不读 title、goal 或会话正文；
+  历史 TaskRun 已关闭也不替代 current attempt 的 unknown 权威事实。
+- **预览与确认**：`/recover owner <处置>` 生成绑定 owner、处置和完整 `(编号, attempt_id)` 目标集合的 12 位确认码；
+  `/recover owner <处置> --confirm <确认码>` 在同一写事务里重读集合，集合变化即 `target_set_changed`、不写库。
+  每条仍走共享 CAS，事件带 `recovery_target`、`recovery_source=owner_history`、owner 和确认码；批次事件保存目标/成功/跳过及原因码，
+  相同确认重送只读原批次回执，不重复恢复或追加事件。
+- **入口与边界**：TUI 仍只把命令原文交给 Gateway，飞书经同一个 `control_service` 分派；正文自述、actor 或 metadata 不授权。
+  只有显式处置写库，不新增自动处置、过期规则、静止规则或 TaskRun 树规则，也不跨 owner。
+- **验证状态**：临时 runtime.db 的三份聚焦测试 25 项通过；五个关键变异均被捕获并还原。真实运行中 Gateway、TUI 和飞书未在本分支启动或验证，待集成后复核。
+
 ## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
 
 - **问题**：插件包放在当前 owner 范围外时，允许的根目录只拼在给模型看的异常文字里；用户在 TUI 和 IM 看到的仍是通用的“插件、来源文件或配置无效，或读取未获授权。”。
@@ -1500,7 +1517,7 @@
   服务商声明继续开放，用户界面按本次明确合同显示八档，不动态透传未知原始值。组件验收记录日期 2026-10-02，
   尚未集成/部署，真实核对留给 3a。详见 [智能程度](docs/design/REASONING_EFFORT.md) 第 9 节和 TESTS。
 
-## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`，第一步已实现，已合入 main `3fdaa3130`）
+## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30 第一阶段已合入；2026-10-02 C8/C9 已实施，待集成）
 
 - **现象**（ae 真实模型验收 O1）：子代理 runner 在写操作 handler 返回后被 SIGKILL，attempt 与 agent_run 停在 unknown，write_file 停在
   EXECUTING；父级用替补接替（来源 TAKEN_OVER），主代理 done。TaskRun 因 unknown 子代理按树规则一直不关，而 `/recover` 只看
@@ -1517,12 +1534,13 @@
   - TUI 把 `/recover` 原文转给 Gateway，飞书走同一服务，两边入口一致；命令目录文案不再承诺“接着原任务继续”。
 - **守住的边界**：只有用户显式输入处置才写库；不加任何自动处置或过期规则；静止规则与 TaskRun 树规则不变；范围只到本线程未关
   TaskRun，不跨线程，不按正文或最近任务猜目标；工具操作行照旧停在 EXECUTING，处置只记在恢复事件上（与主链 `/recover` 一致）。
-- **已知限制**：“恰好一条”规则留有很小的换目标窗口（查看后那条被别处处理掉、又冒出新的一条）。三种处置行为相同，差别只在审计标签。
-- **待定**：
-  - 第二步：`/recover <处置> <编号>` 目标参数，需要改 `conversation/control_commands.py`（Codex 重构区），等重构告一段落再做。
-    有了它才能逐条处理多条子代理（例如整棵树一起被杀），也能消掉上面的换目标窗口。
-  - 不挂会话线程的历史 unknown：09-30 生产库副本里根代理 32 条、子代理 2 条（最新 09-23），任何会话里的 `/recover` 都够不着，
-    需要 owner 级查看与处置入口；另立一项，不和 O1 混做。
+- **C8 已实施（2026-10-02）**：`conversation/control_commands.py` 已支持 `/recover <处置> <编号>`；多条子代理可按查看清单逐条处置。
+  写入口不使用查看快照选目标，而是在同一写事务里按编号复核 thread、未关闭 TaskRun 和 current unknown，因此消除了“唯一一条”换目标窗口；
+  不带编号的“恰好一条”兼容行为不变。
+- **C9 已实施（2026-10-02）**：新增仅完整可信 `local/main` 管理员可用的 `/recover owner` 查看、预览、确认入口，覆盖本 owner
+  不挂任何会话线程的历史 unknown 根代理和子代理。确认码绑定本次完整目标集合，集合改变即失效；批量处置复用同一个
+  unknown→recovered CAS，并给出目标/成功/跳过和原因码的结构化回执。09-30 生产库副本里的历史数量只是需求来源，
+  本轮测试绝未读取或修改真实运行库。
   - 结构化接替提示（2026-10-02 已实施，开关默认关，见上方 C4 条目；原记录如下）（10-01 真实复测后 3a 裁定先观察）：被 SIGKILL 的子代理只回 BLOCKED，`blocked_reason` 是子代理自己写的字段，
     被杀时为空；宿主侧的事实是执行轮 unknown（executor_process_died）。复测 4 次模型都没在 `create_subagents` 里声明
     `replacement_for_run_ids`，“已被接替的来源收成 cancelled”只有合同单测覆盖。是否在唤醒回执里给父级结构化的接替建议是新设计项；

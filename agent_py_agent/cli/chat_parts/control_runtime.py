@@ -239,9 +239,9 @@ def request_gateway_control_status(
     )
 
 
-# LLM: Control HTTP responses preserve operation identity, delivery state, and error_code
-# separately from localized prose; callers must never infer interruption or retry safety from text.
-# 函数用途: 把控制 HTTP 字典恢复成含结构化错误码的共享 ConversationControlResult。
+# LLM: Control HTTP responses preserve operation identity, delivery state, error_code, and typed details
+# separately from localized prose; callers must never infer interruption, retry safety, or recovery counts from text.
+# 函数用途: 把控制 HTTP 字典恢复成含结构化错误码和详情的共享 ConversationControlResult。
 def _gateway_control_result_from_body(
     fallback_kind: str,
     body: dict[str, object],
@@ -272,6 +272,7 @@ def _gateway_control_result_from_body(
         operation_id=str(body.get("operation_id") or ""),
         control_state=control_state,
         error_code=error_code,
+        details=dict(body["details"]) if isinstance(body.get("details"), dict) else None,
     )
 
 
@@ -621,7 +622,18 @@ def _cleanup_local_resources(request_id: str, resources: object | None) -> None:
     ).start()
 
 
-# LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 原样带结构化处置值，/model 保留 default 前缀，
+# LLM: /recover 的 owner 确认码和普通编号必须从结构化字段逐字还原，不能依赖展示文案或丢掉作用域。
+# 函数用途: 将结构化恢复命令还原成 Gateway 共用的 /recover 原文。
+def _recover_command_text(command: ConversationControlCommand) -> str:
+    if command.operation == "owner_view":
+        return "/recover owner"
+    if command.operation in {"owner_preview", "owner_apply"}:
+        confirmation = f" --confirm {command.confirmation_code}" if command.confirmation_code else ""
+        return f"/recover owner {command.value}{confirmation}".rstrip()
+    return f"/recover {command.value} {command.target_id}".rstrip()
+
+
+# LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 委托专用还原器保留作用域，/model 保留 default 前缀，
 #   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
 # 函数用途: 将界面的结构化控制还原为服务端共用的命令协议，不发送给模型。
 def _command_text(command: ConversationControlCommand) -> str:
@@ -668,7 +680,7 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "verbose":
         return f"/verbose {command.value}".rstrip()
     if command.kind == "recover":
-        return f"/recover {command.value}".rstrip()
+        return _recover_command_text(command)
     if command.kind == "endtask":
         # value 是任务 ID，apply 表示带 confirm；Gateway 端按同一解析器重新解析。
         return f"/endtask {command.value}{' confirm' if command.operation == 'apply' else ''}".rstrip()

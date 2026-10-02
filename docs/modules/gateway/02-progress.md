@@ -35,6 +35,15 @@
 - 真实控制服务 chat/feishu 路由与所选模型后端、参数中心隔离组件有断言；十一文件 494 项与三个变异结果见 TESTS。
   实际终端、IM 收信及生产 Gateway 未验证，仍由 3a 集成后复核。
 
+## C8/C9：/recover 编号与 owner 历史恢复（2026-10-02，sol56，本地已实现，待集成/真实入口核对）
+
+- `/recover <处置> <编号>` 已接入共用 Gateway 控制服务：编号按 opaque ID 校验，写事务内复核 thread、未关 TaskRun、
+  current unknown；不带编号的旧主链优先/唯一子代理行为保持。
+- `/recover owner` 只信任与 `/settings` 共用的完整 local/main 管理员裁决；查看和预览只读本 owner 的空 thread 历史 unknown，
+  确认码绑定完整目标集合，变化拒绝且零写入，重复确认只读原批次回执。
+- TUI 仍发送原命令，飞书走同一 `control_service`。临时库聚焦测试与变异有本地证据；没有启动 Gateway 或验证真实渠道，
+  也没有读取、预览或处置生产运行库，后续按 ROADMAP 在隔离 owner 验收。
+
 ## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，已上线 step17a，main de222698b，2026-10-02）
 
 - `settings_control_service` 的 `/settings show` 修复三处：

@@ -143,11 +143,15 @@ COMMAND_CATALOG = (
     CommandSpec(
         "recover",
         "/recover",
-        "查看结果未确认、正在阻塞本会话的操作（含本会话子代理留下的）",
+        "查看并处置本会话或管理员 owner 历史中结果未确认的执行轮",
         help_variants=(
             ("/recover recorded", "已核实操作生效并记下，解除阻塞"),
             ("/recover confirmed_noop", "已核实操作没有生效，解除阻塞"),
             ("/recover abandoned", "不再核对、接受未知后果，解除阻塞"),
+            ("/recover <处置> <编号>", "多条待核对时按查看清单中的编号逐条处置"),
+            ("/recover owner", "仅管理员：查看不挂会话线程的 owner 历史未知执行轮"),
+            ("/recover owner <处置>", "仅管理员：预览 owner 历史批量处置并生成确认码"),
+            ("/recover owner <处置> --confirm <确认码>", "仅管理员：确认目标集合未变后批量处置"),
         ),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",

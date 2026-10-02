@@ -258,6 +258,33 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
 - **未验证**：真实供应商接受与思考效果、实际 TUI/IM、生产 Gateway、发布部署及全仓 pytest；本轮没有新配置或生产操作。
 - **第二提交**：本树未找到 `g3-effort-probe-metering.body.md`，未猜探测计量/自动检测成本上界规格，也未实现这两项。
 
+## C8/C9：/recover 按编号处置与管理员 owner 历史恢复（2026-10-02，sol56，分支 `worker/sol56-c8c9-recover`）
+
+- **测试库边界**：全部新用例使用 pytest `tmp_path` 创建独立 `RuntimeRepository`；没有读取或修改真实 runtime.db、会话正文或记忆正文。
+- **C8**（`test_turn_recovery_control.py`、`test_turn_recovery_child_unknown.py`）：
+  - 解析与 TUI 原文还原覆盖 `/recover <处置> <编号>`，非法 opaque ID 被入口拒绝；
+  - 多条 unknown 子代理仍可不带编号查看且不写，带编号后逐条处置；
+  - 编号不存在、current attempt 已非 unknown、跨线程或 TaskRun 已关分别由结构化原因拒绝；
+  - 不带编号的唯一一条、主链优先、接替收口与 TaskRun 树旧规则继续回归。
+- **C9**（新增 `test_owner_unknown_recovery.py`）：
+  - 查看只列本 owner 的空 thread/current unknown 根代理和子代理；不读/不显示 goal，历史 TaskRun 已关闭也不隐藏 unknown；
+  - 非管理员和缺任一可信身份字段都返回 `admin_required`，正文、actor 或 metadata 没有授权入口；
+  - 预览后新增目标使旧确认码返回 `target_set_changed` 且零写入；
+  - 确认后根/子两条都走共享 CAS，`attempt_recovered` 事件含 `recovery_target`、`recovery_source=owner_history`、owner 与确认码；
+  - 相同确认经飞书共用 Gateway 分派重送时返回 `idempotent=true`，不增加恢复事件或批次事件。
+- **聚焦命令（变异全部还原后的当前源码）**：
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 ~/.my-agent/releases/claude-tools/ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_turn_recovery_control.py agent_py_agent/tests/test_turn_recovery_child_unknown.py agent_py_agent/tests/test_owner_unknown_recovery.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol56`
+  → **25 passed**。
+- **变异 5/5 被捕获**：反转 C8 未关 TaskRun 判定；反转 C8 current unknown 判定；移除完整管理员身份闸；确认摘要不绑定目标集合；跳过既有批次幂等查询。
+  每项均先看到对应聚焦用例失败，再逐项恢复源码；恢复后按上面三文件命令复跑 25 passed。
+- **最终门禁（当前工作树）**：`test_settings_chat_control.py` 34 项通过；`guards9.txt` 的 10 份测试文件（含 `test_packaging.py`）退出码 0；
+  `check_import_boundaries.py` 为 `findings=0`；Ruff 为 `All checks passed!`；`check_doc_sync.py` 为 `DOC_SYNC_PASS`；
+  strict code-size 为 `hard=0`、`blocked=False`；`git diff --check` 无输出；`check_clean_package.py .` 无发布阻塞项；
+  `size_diff.sh` 为“新增告警: 0 / 消失告警: 0”。生成的 `CODE_SIZE_REPORT.md` 已还原，未纳入改动。
+- **独立审查状态**：只读审查子代理未取得补丁 artifact 后改用消息正文重派，但模型接口在 TLS 握手阶段超时，未产生代码审查结论；
+  按集成者规则没有重试或把超时冒充审查通过。
+- **未验证**：按任务约束未启动 Gateway，未在真实 TUI 或飞书账号操作，也未对生产历史 unknown 做预览/处置；这些入口只登记组件与共用服务链证据，真实渠道待集成后复核。
+
 ## 去抖：唤醒发现事实缓存用例显式推进策略文件 mtime（2026-10-02，3a）
 
 - **现象**：Linux 车道（`25882221f`）第 10 片 `test_scheduler_scan_costs.py::test_fact_cache_respects_policy_due_deadline` 第 949 行 `[] == ['u1']`；Mac 连跑通过。

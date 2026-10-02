@@ -212,20 +212,48 @@ def test_root_block_keeps_priority_and_children_wait_their_turn(world):
     assert "子代理 subagent-src" in _recover(world, "/recover").message
 
 
-def test_two_children_are_listed_but_apply_is_refused_without_writing(world):
+def test_two_children_are_listed_and_targeted_one_by_one(world):
     first = _killed_child(world, "subagent-a")
     second = _killed_child(world, "subagent-b")
     _finish_main(world)
 
     view = _recover(world, "/recover")
     assert "subagent-a" in view.message and "subagent-b" in view.message
-    assert "暂不支持指定目标" in view.message and "/recover recorded" not in view.message
+    assert "/recover recorded <编号>" in view.message
     refused = _recover(world, "/recover recorded")
 
     assert refused.ok is False and refused.error_code == "RUN_RECOVERY_REJECTED"
     assert "子代理 subagent-a（worker）" in refused.message and "子代理 subagent-b（worker）" in refused.message
     assert _statuses(world, first) == ("unknown", "unknown") and _statuses(world, second) == ("unknown", "unknown")
     assert _events(world, "attempt_recovered") == []
+
+    recovered_first = _recover(world, "/recover recorded subagent-a")
+    assert recovered_first.ok is True and "subagent-a" in recovered_first.message
+    assert _statuses(world, first) == ("created", "recovered")
+    assert _statuses(world, second) == ("unknown", "unknown")
+    recovered_second = _recover(world, "/recover confirmed_noop subagent-b")
+    assert recovered_second.ok is True and "subagent-b" in recovered_second.message
+    assert _statuses(world, second) == ("created", "recovered")
+
+
+def test_targeted_recovery_rejects_missing_not_unknown_and_out_of_scope(world):
+    child = _killed_child(world, "subagent-current")
+    _tree_root(world.repo, "run-other", "gwreq-other", "thread-other")
+    other = _killed_child(world, "subagent-other", parent="run-other")
+    _finish_main(world)
+
+    missing = _recover(world, "/recover recorded subagent-missing")
+    assert missing.ok is False and missing.error_code == "RUN_RECOVERY_REJECTED"
+    assert getattr(missing, "details", {}).get("reason") == "target_not_found"
+    out_of_scope = _recover(world, "/recover recorded subagent-other")
+    assert out_of_scope.ok is False and getattr(out_of_scope, "details", {}).get("reason") == "target_out_of_scope"
+    assert _statuses(world, child) == ("unknown", "unknown")
+    assert _statuses(world, other) == ("unknown", "unknown")
+
+    assert world.repo.recover_attempt_unknown(child["attempt_id"], operator="elsewhere")["recovered"] is True
+    changed = _recover(world, "/recover recorded subagent-current")
+    assert changed.ok is False and getattr(changed, "details", {}).get("reason") == "target_not_unknown"
+    assert len(_events(world, "attempt_recovered")) == 1
 
 
 def test_projection_is_limited_to_this_thread_open_task_runs_and_non_root_runs(world):

@@ -11,11 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.opaque_id import is_opaque_id
 from .operations import ATTEMPT_EFFECT_DISPOSITIONS, ATTEMPT_STATUS_UNKNOWN
 from .repository import _recover_unknown_attempt_conn
 
 # 事件里标明这次恢复的目标是子代理（结构化来源，不从正文推断）。
 CHILD_RECOVERY_TARGET = "child_agent_run"
+ROOT_RECOVERY_TARGET = "root_agent_run"
 
 # 线程范围的唯一口径：读投影和写事务复核共用同一段条件，避免两边漂移。
 _THREAD_CHILD_UNKNOWN_SCOPE = (
@@ -39,6 +41,25 @@ class ChildRecoveryTarget:
     task_run_id: str
     task_id: str
     thread_id: str
+
+
+# LLM: 按编号写入口把解析后的线程、编号、处置和审计人冻结在一个值对象里，避免函数参数扩张和调用时错位。
+# 类用途: 描述一次用户明确指定编号的线程恢复请求。
+@dataclass(frozen=True)
+class ThreadRecoveryRequest:
+    thread_id: str
+    target_id: str
+    disposition: str
+    operator: str
+
+
+# LLM: 编号恢复必须让仓储、现有写事务和不可变请求同行，避免拆散后误在事务外重查；仅供本模块内部传递。
+# 类用途: 打包一条线程恢复写操作所需的事务上下文。
+@dataclass(frozen=True)
+class _ThreadRecoveryWrite:
+    repository: Any
+    conn: Any
+    request: ThreadRecoveryRequest
 
 
 # LLM: 空线程身份直接返回空列表（证明不了归属，不能退回全库扫描）；结果按 agent_run 创建时间排序，展示顺序稳定。
@@ -66,6 +87,65 @@ def unknown_child_attempts_for_thread(repository: Any, thread_id: str) -> list[C
         )
         for row in rows
     ]
+
+
+# LLM: 带编号的写入口必须在同一个 BEGIN IMMEDIATE 事务里定位编号并复核 thread/open TaskRun/current unknown；
+#   三类失败分别返回 target_not_found、target_out_of_scope、target_not_unknown，不能退回“恰好一条”或按正文猜目标。
+#   成功仍调用主链唯一 _recover_unknown_attempt_conn，并在事件里保留目标类型、线程和 TaskRun。
+# 函数用途: 按查看结果里的 opaque 编号恢复本线程一条根或子代理未知执行轮。
+def recover_thread_attempt_unknown(repository: Any, request: ThreadRecoveryRequest) -> dict[str, Any]:
+    if request.disposition not in ATTEMPT_EFFECT_DISPOSITIONS:
+        return {"recovered": False, "reason": "invalid_effect_disposition"}
+    if not is_opaque_id(request.target_id, kind="run_id"):
+        return {"recovered": False, "reason": "target_not_found"}
+    with repository.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = _target_rows(conn, request.target_id)
+        if not rows:
+            return {"recovered": False, "reason": "target_not_found"}
+        scoped = [row for row in rows if str(row["thread_id"] or "") == request.thread_id
+                  and float(row["closed_at"] or 0) == 0]
+        if not scoped:
+            return {"recovered": False, "reason": "target_out_of_scope"}
+        row = scoped[0]
+        if str(row["attempt_status"] or "") != ATTEMPT_STATUS_UNKNOWN:
+            return {"recovered": False, "reason": "target_not_unknown"}
+        return _recover_target_row(_ThreadRecoveryWrite(repository, conn, request), row)
+
+
+# LLM: 编号只匹配规范 run_id；极旧空 run_id 记录才允许用 agent_run_id 回退。查询不按角色或正文筛选。
+# 函数用途: 在写事务内读取一个编号对应的当前执行轮和范围事实。
+def _target_rows(conn: Any, target_id: str) -> list[Any]:
+    return conn.execute(
+        "SELECT ar.agent_run_id, ar.run_id, ar.role, ar.parent_agent_run_id, ar.current_attempt_id, "
+        "aa.status AS attempt_status, tr.task_run_id, tr.task_id, tr.closed_at, t.thread_id "
+        "FROM agent_runs ar JOIN agent_attempts aa ON aa.attempt_id=ar.current_attempt_id "
+        "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id "
+        "WHERE ar.run_id=? OR (ar.run_id='' AND ar.agent_run_id=?) ORDER BY ar.created_at",
+        (target_id, target_id),
+    ).fetchall()
+
+
+# LLM: 调用共享 CAS 后补回调用方收口所需的结构化目标字段；这些字段都来自同一事务查询，不读子代理正文。
+# 函数用途: 对已复核的目标行执行共享恢复 CAS，并返回目标身份。
+def _recover_target_row(write: _ThreadRecoveryWrite, row: Any) -> dict[str, Any]:
+    request = write.request
+    recovery_target = CHILD_RECOVERY_TARGET if str(row["parent_agent_run_id"] or "") else ROOT_RECOVERY_TARGET
+    result = _recover_unknown_attempt_conn(
+        write.repository, write.conn, attempt_id=str(row["current_attempt_id"] or ""), operator=request.operator,
+        effect_disposition=request.disposition, reason="用户在会话中用 /recover 编号显式确认处置",
+        event_facts={"recovery_target": recovery_target, "thread_id": request.thread_id,
+                     "task_run_id": str(row["task_run_id"] or "")},
+    )
+    if result.get("recovered"):
+        result.update(
+            target_id=request.target_id, recovery_target=recovery_target,
+            agent_run_id=str(row["agent_run_id"] or ""), run_id=str(row["run_id"] or ""),
+            role=str(row["role"] or ""),
+            attempt_id=str(row["current_attempt_id"] or ""), task_run_id=str(row["task_run_id"] or ""),
+            task_id=str(row["task_id"] or ""), thread_id=request.thread_id,
+        )
+    return result
 
 
 # LLM: 写事务内先按同一范围条件复核（线程、TaskRun 未关、非根、当前执行轮仍 unknown），不满足返回 target_changed，
@@ -104,7 +184,10 @@ def recover_child_attempt_unknown(
 
 __all__ = [
     "CHILD_RECOVERY_TARGET",
+    "ROOT_RECOVERY_TARGET",
     "ChildRecoveryTarget",
+    "ThreadRecoveryRequest",
     "recover_child_attempt_unknown",
+    "recover_thread_attempt_unknown",
     "unknown_child_attempts_for_thread",
 ]

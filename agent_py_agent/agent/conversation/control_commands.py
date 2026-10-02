@@ -19,6 +19,7 @@ from ..command_catalog import (
     system_slash_command_name,
     unavailable_command_message,
 )
+from ..common.opaque_id import is_opaque_id
 from ..plugin_commands import plugin_namespace
 from ..runtime_db.operations import ATTEMPT_EFFECT_DISPOSITIONS
 from .authority import (
@@ -72,6 +73,9 @@ _EXPERIMENT_USAGE = ("用法：/experiment observe|apply skill_tool 时长 HTTP�
                      "输入上界是经验值，不是供应商保证。")
 
 
+# LLM: 控制命令只承载入口已解析的结构化参数；recover 的 target_id 和 confirmation_code 不从正文或回执反推，
+#   并保持末尾默认字段，避免破坏既有位置构造。
+# 类用途: 表示一条已识别的即时会话控制命令及其安全解析结果。
 @dataclass(frozen=True)
 class ConversationControlCommand:
     kind: ControlKind
@@ -81,6 +85,8 @@ class ConversationControlCommand:
     duration_seconds: int | None = None
     valid: bool = True
     usage: str = ""
+    target_id: str = ""
+    confirmation_code: str = ""
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,7 @@ class ConversationControlResult:
     operation_id: str = ""
     control_state: str = ""
     error_code: str = ""
+    details: dict[str, object] | None = None
 
     # LLM: HTTP/IM boundaries receive a plain typed projection, never a dataclass repr.
     # 函数用途：把控制结果转换成可以安全跨进程传输的普通字典。
@@ -166,6 +173,8 @@ class ConversationControlResult:
             payload["control_state"] = self.control_state
         if self.error_code:
             payload["error_code"] = self.error_code
+        if self.details is not None:
+            payload["details"] = dict(self.details)
         if self.status is not None:
             task_status = asdict(self.status)
             task_status["task"] = redact_host_absolute_paths(str(task_status.get("task") or ""))
@@ -590,16 +599,52 @@ def _wakes_command(trailing: object) -> ConversationControlCommand:
     )
 
 
-# LLM: 处置值只认 runtime_db 的结构化取值表，不接受同义词或正文；无参数只读查看，带参数才会改运行库。
-# 函数用途: 把 `/recover` 解析为查看，或把 `/recover <处置>` 解析为显式恢复请求。
+# 确认码固定 12 位十六进制字符，与宿主其它结构化预览确认保持一致。
+_RECOVER_CONFIRM_CODE = re.compile(r"^[0-9a-f]{12}$")
+_RECOVER_USAGE = (
+    "用法：/recover 查看；/recover <处置> [编号]；/recover owner；"
+    "/recover owner <处置> [--confirm <确认码>]。处置为 "
+    + "|".join(ATTEMPT_EFFECT_DISPOSITIONS)
+    + "。"
+)
+
+
+# LLM: 处置、目标编号和 owner 确认码都在入口做拒绝式结构化解析；编号只走 opaque ID 校验，不能从正文猜目标。
+#   owner 处置先产生绑定当前目标集合的预览码，只有显式 --confirm 才进入写入口。
+# 函数用途: 解析本会话按编号恢复和管理员 owner 级历史恢复命令。
 def _recover_command(trailing: object) -> ConversationControlCommand:
-    value = str(trailing or "").strip().lower()
+    parts = str(trailing or "").split()
+    if not parts:
+        return ConversationControlCommand("recover", operation="view", usage=_RECOVER_USAGE)
+    if parts[0].lower() == "owner":
+        return _owner_recover_command(parts[1:])
+    disposition = parts[0].lower()
+    target_id = parts[1] if len(parts) == 2 else ""
+    valid_target = not target_id or is_opaque_id(target_id, kind="run_id")
     return ConversationControlCommand(
         "recover",
-        value=value,
-        operation="apply" if value else "view",
-        valid=not value or value in ATTEMPT_EFFECT_DISPOSITIONS,
-        usage="用法：/recover 查看未确认的操作；核对后用 /recover " + "|".join(ATTEMPT_EFFECT_DISPOSITIONS) + " 解除阻塞。",
+        value=disposition,
+        operation="apply",
+        valid=len(parts) <= 2 and disposition in ATTEMPT_EFFECT_DISPOSITIONS and valid_target,
+        usage=_RECOVER_USAGE,
+        target_id=target_id,
+    )
+
+
+# LLM: owner 语法固定为查看、预览、确认三态；确认码只接受宿主生成的 12 位十六进制摘要，不接受位置变体或自由文字。
+# 函数用途: 解析 `/recover owner` 的只读查看、处置预览和带确认码执行形式。
+def _owner_recover_command(parts: list[str]) -> ConversationControlCommand:
+    if not parts:
+        return ConversationControlCommand("recover", operation="owner_view", usage=_RECOVER_USAGE)
+    disposition = parts[0].lower()
+    confirmation = parts[2].lower() if len(parts) == 3 and parts[1].lower() == "--confirm" else ""
+    operation = "owner_apply" if confirmation else "owner_preview"
+    valid = disposition in ATTEMPT_EFFECT_DISPOSITIONS and (
+        len(parts) == 1 or (len(parts) == 3 and bool(_RECOVER_CONFIRM_CODE.fullmatch(confirmation)))
+    )
+    return ConversationControlCommand(
+        "recover", value=disposition, operation=operation, valid=valid,
+        usage=_RECOVER_USAGE, confirmation_code=confirmation,
     )
 
 
