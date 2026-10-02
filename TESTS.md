@@ -251,6 +251,12 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - 变异 7/7 全部被抓住（`cpv2-mut/mutations_b3h2.json`）：
     - 只认列出的分隔符、词字符只认 ASCII、点也算分隔、去掉 `..`；
     - 段名收 `;`、任意字符算分隔、不做 URL 解码。
+- **车道修正**（step17g 候选 Linux 车道发现，只改用例）：
+  - 现象：车道容器把证据目录挂在 `/out`，`../out/d.json` 的首段 `/out` 在容器里真实存在，于是被整条置空。产品行为符合设计（只丢定位、不泄露），问题在用例依赖了宿主根目录下有哪些目录。
+  - 改法：三个脱敏单测改用夹具 `fixed_root_dirs`，只替换脱敏模块自己引用的 `os`，根目录判定固定为 Users、home、root、tmp、var、private、..，泄露写法的根段取 `/Users`。`..` 保留，是因为 `/..` 在任何 POSIX 系统上都存在，`../../Users` 这类写法正是靠它命中。普通写法另加 `../repo/a.py`。
+  - 核对：
+    - 在车道镜像里挂 `/out` 单跑这个文件：修前 1 failed（与车道一致），修后 48 passed；
+    - 故意把 out 加进固定组，`../out/d.json` 就失败，证明夹具在起作用。
 - **相关回归**：50 个文件，第二个提交后 898 passed，10 skipped（第一个提交时 890 passed）。包括：
   - pack 系列、verification 声明、attempt_sandbox；
   - 43 个扫描守卫；

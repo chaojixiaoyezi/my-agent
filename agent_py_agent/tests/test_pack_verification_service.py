@@ -467,6 +467,30 @@ def test_location_host_paths_are_redacted_before_reaching_the_model(tmp_path, mo
         assert str(env.workspace) not in text and str(Path.home()) not in text and "pack-verifier-" not in text
 
 
+# 根目录判定固定成这一组名字，不看本机根目录下真有哪些目录：Linux 车道容器把证据目录挂在 /out、仓库挂在 /repo，
+# Mac 上没有这些目录，依赖宿主文件系统的用例两边结果不一样（../out/d.json 在车道里会被整条置空）。
+# 泄露写法的根段从这组里取，普通写法的首段都不在这组里。“..”在任何 POSIX 根目录下都存在（/.. 就是 /），照实保留。
+_FIXED_ROOT_NAMES = frozenset({"Users", "home", "root", "tmp", "var", "private", ".."})
+_HOST_ROOT = "/Users"
+_HOST_SEGMENT = "Users"
+
+
+# LLM: 只换脱敏模块自己引用的 os（模块级代理，带 sep 和 path.isdir），不动全局 os.path；单段根路径按固定名字判，其余不应出现。
+# 函数用途: 让脱敏用例的“根目录下是否真实存在”判定与宿主文件系统无关。
+@pytest.fixture
+def fixed_root_dirs(monkeypatch):
+    import os
+
+    from agent_py_agent.agent.capability import pack_verifier_redaction as redaction
+
+    def isdir(path: str) -> bool:
+        assert path.startswith(os.sep) and path.count(os.sep) == 1, path
+        return path[1:] in _FIXED_ROOT_NAMES
+
+    monkeypatch.setattr(redaction, "os", types.SimpleNamespace(sep=os.sep, path=types.SimpleNamespace(isdir=isdir)))
+
+
+@pytest.mark.usefixtures("fixed_root_dirs")
 def test_redact_location_keeps_json_pointers_and_redacts_host_paths():
     from agent_py_agent.agent.capability.pack_verifier_redaction import redact_location
 
@@ -476,14 +500,10 @@ def test_redact_location_keeps_json_pointers_and_redacts_host_paths():
     assert redact_location("SH01.start_state", replacements) == "SH01.start_state"
     assert redact_location("~/x", replacements) == "<redacted>"
     assert redact_location("C:\\Users\\x", replacements) == "<redacted>"
-    assert redact_location(f"in {Path.home()}/a", replacements) == "<redacted>"
+    assert redact_location(f"in {_HOST_ROOT}/me/a", replacements) == "<redacted>"
 
 
-# 本机根目录下真实存在的首段（macOS 是 /Users，Linux 车道是 /home 或 /root），9b 的 /Users 写法按本机换算
-_HOST_ROOT = "/" + Path.home().resolve().parts[1]
-_HOST_SEGMENT = _HOST_ROOT.lstrip("/")
-
-
+@pytest.mark.usefixtures("fixed_root_dirs")
 @pytest.mark.parametrize("location", [
     f"file://{_HOST_ROOT}/me/ws/out/d.json",
     f"../../../..{_HOST_ROOT}/me/ws/out/d.json",
@@ -504,10 +524,12 @@ def test_redact_location_catches_9b_leak_variants(location):
     assert redact_location(location, []) == "<redacted>"
 
 
+@pytest.mark.usefixtures("fixed_root_dirs")
 @pytest.mark.parametrize("location", [
     "out/tmp/x.json", "src/lib/a.py", "data/var/b.json", "docs/Users/x.md", "/shots/0/title",
     "./out/d.json", "./tmp/x.json", "out/d.json:12:3", "SH01.start_state",
     "https://example.com/a/b", "../out/d.json", "out/a%20b.json", "交付/tmp/x.json", "my-dir/tmp/x.json",
+    "../repo/a.py",
 ])
 def test_redact_location_keeps_ordinary_locations(location):
     from agent_py_agent.agent.capability.pack_verifier_redaction import redact_location
