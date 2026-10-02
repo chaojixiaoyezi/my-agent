@@ -21,10 +21,16 @@ class PluginContentActivation:
     installation_revision: int
     settings_revision: int
     phase: str = "active"
+    # 能力包 v2：声明了检查程序的包在启用时由管理员确认，这里存确认内容的完整摘要；为空表示没有执行同意，
+    #   序列化时省略，旧记录与旧代次逐字节不变（见 capability_verifier_consent）。
+    verifier_consent_sha256: str = ""
 
-    # LLM: 版本与摘要必须完整；同一安装/操作的代次不随撤销变化，读取方仍须检查唯一安装表。
-    # 函数用途: 拒绝畸形操作身份、内容身份和状态。
+    # LLM: 版本与摘要必须完整；同一安装/操作的代次不随撤销变化，读取方仍须检查唯一安装表。同意摘要为空或 64 位十六进制。
+    # 函数用途: 拒绝畸形操作身份、内容身份、状态和同意摘要。
     def __post_init__(self) -> None:
+        if not isinstance(self.verifier_consent_sha256, str) or (
+                self.verifier_consent_sha256 and not re.fullmatch(r"[0-9a-f]{64}", self.verifier_consent_sha256)):
+            raise ValueError("内容激活的执行同意摘要无效")
         if (not isinstance(self.operation_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", self.operation_id)
                 or not isinstance(self.plugin_id, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]{0,63}", self.plugin_id)
                 or not isinstance(self.package_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.package_sha256)
@@ -45,17 +51,21 @@ class PluginContentActivation:
     def content_sha256(self) -> str:
         return _digest(self.to_payload())
 
-    # LLM: 使用显式新协议识别内容变体，原进程激活的无版本 payload 不改写。
+    # LLM: 使用显式新协议识别内容变体，原进程激活的无版本 payload 不改写；没有执行同意时不输出该键，代次不变。
     # 函数用途: 生成不含个人地址与运行资源的持久记录。
     def to_payload(self) -> dict:
-        return {"schema_version": CONTENT_ACTIVATION_SCHEMA, **asdict(self)}
+        payload = {"schema_version": CONTENT_ACTIVATION_SCHEMA, **asdict(self)}
+        if not self.verifier_consent_sha256:
+            payload.pop("verifier_consent_sha256")
+        return payload
 
-    # LLM: 严格版本与字段，不允许旧进程字段或未来属性被丢弃后当作当前状态。
+    # LLM: 严格版本与字段，不允许旧进程字段或未来属性被丢弃后当作当前状态；只有同意摘要这一个键可以缺省。
     # 函数用途: 从原安装表恢复无进程内容激活。
     @classmethod
     def from_payload(cls, value: object) -> PluginContentActivation:
+        required = {"schema_version", *(field.name for field in fields(cls))} - {"verifier_consent_sha256"}
         if (not isinstance(value, dict) or value.get("schema_version") != CONTENT_ACTIVATION_SCHEMA
-                or set(value) != {"schema_version", *(field.name for field in fields(cls))}):
+                or not required <= set(value) or not set(value) <= required | {"verifier_consent_sha256"}):
             raise ValueError("内容激活字段无效")
         return cls(**{key: item for key, item in value.items() if key != "schema_version"})
 

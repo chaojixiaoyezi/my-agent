@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from .capability_verifier_consent import CONSENT_KIND, verifier_confirmation_message
 from .command_catalog import COMMAND_INDEX
 from .common.cancellation import CancellationToken
 from .path_access_policy import PathAccessPolicy
@@ -475,8 +476,11 @@ _PLUGIN_BUSINESS_REPLY_MESSAGES = {
 def _reason_message(details: dict) -> str:
     reason = details.get("reason")
     if reason == "confirmation_required" and isinstance(details.get("confirmation"), dict):
-        # 非 Python 插件启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明
-        return confirmation_message(details["confirmation"])
+        # 启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明；能力包检查程序按结构化 kind 分开展示
+        confirmation = details["confirmation"]
+        if confirmation.get("kind") == CONSENT_KIND:
+            return verifier_confirmation_message(confirmation)
+        return confirmation_message(confirmation)
     if reason == "source_unauthorized":
         # 来源在当前 owner 范围外：按信封里的 allowed_root/source_base 告诉用户包该放哪里，不读输出文本
         return source_unauthorized_message(details)

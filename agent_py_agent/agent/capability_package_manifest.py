@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
+
+from .capability_verification_manifest import VerificationDeclaration, validate_verification_members
 
 CAPABILITY_PACKAGE_SCHEMA = "plugin_package.v7"
 # 能力包清单最多收录的文件数；超出即判定清单过大（接近常见文件描述符上限 4096）。
@@ -43,12 +45,14 @@ class CapabilityFile:
 
 
 # LLM: 描述与关键词仅供模型软选择，不能用于权限或状态判断；入口文档必须属于同一包的已声明资源。
+#   verification 是能力包 v2 的可选核验声明（交付物、检查程序、输入策略）；为 None 时序列化与旧包逐字节一致。
 # 类用途: 保存一个能力包对外公开的少量元数据。
 @dataclass(frozen=True)
 class CapabilityDeclaration:
     description: str
     keywords: tuple[str, ...]
     entry_document: str
+    verification: VerificationDeclaration | None = None
 
     # LLM: 元数据有界，正文与包内方法不能塞进公开摘要；集合冻结供逐轮快照使用。
     # 函数用途: 拒绝空描述、不合法关键词及不安全的文档地址。
@@ -61,24 +65,33 @@ class CapabilityDeclaration:
         for word in self.keywords:
             _metadata_text(word, 128)
         validate_capability_path(self.entry_document)
+        if self.verification is not None and not isinstance(self.verification, VerificationDeclaration):
+            raise ValueError("能力核验声明无效")
 
-    # LLM: 序列化只包含公开内容声明，不混入用户、激活或本地资源地址。
+    # LLM: 序列化只包含公开内容声明，不混入用户、激活或本地资源地址；没有核验声明时不输出该键，旧包字节不变。
     # 函数用途: 生成固定字段的能力元数据。
     def to_payload(self) -> dict:
-        return {**asdict(self), "keywords": list(self.keywords)}
+        payload = {"description": self.description, "keywords": list(self.keywords), "entry_document": self.entry_document}
+        if self.verification is not None:
+            payload["verification"] = self.verification.to_payload()
+        return payload
 
     # LLM: 缺字段或未知键直接拒绝，不能把未来协议静默当作当前协议读取。
     # 函数用途: 从静态描述恢复能力声明。
     @classmethod
     def from_payload(cls, value: object) -> CapabilityDeclaration:
-        if (not isinstance(value, dict) or set(value) != {"description", "keywords", "entry_document"}
+        base = {"description", "keywords", "entry_document"}
+        if (not isinstance(value, dict) or not base <= set(value) or not set(value) <= base | {"verification"}
                 or not isinstance(value["keywords"], list)):
             raise ValueError("能力声明字段无效")
-        return cls(value["description"], tuple(value["keywords"]), value["entry_document"])
+        verification = (VerificationDeclaration.from_payload(value["verification"])
+                        if "verification" in value else None)
+        return cls(value["description"], tuple(value["keywords"]), value["entry_document"], verification)
 
 
 # LLM: 列表只定义包内资源，SKILL.md 同样是私有文件；去重与 ZIP 使用同一 NFC/大小写折叠口径。
-# 函数用途: 验证非空文件集合、数量预算及入口文档归属。
+#   有核验声明时，检查程序引用的成员也必须是这里声明过的文件。
+# 函数用途: 验证非空文件集合、数量预算、入口文档归属及检查程序成员归属。
 def validate_capability_files(capability: CapabilityDeclaration, files: tuple[CapabilityFile, ...]) -> None:
     if (not isinstance(capability, CapabilityDeclaration) or not isinstance(files, tuple)
             or not 1 <= len(files) <= MAX_CAPABILITY_FILES
@@ -87,6 +100,8 @@ def validate_capability_files(capability: CapabilityDeclaration, files: tuple[Ca
     keys = {unicodedata.normalize("NFC", item.path.casefold()) for item in files}
     if len(keys) != len(files) or capability.entry_document not in {item.path for item in files}:
         raise ValueError("能力资源重名或入口文档缺失")
+    if capability.verification is not None:
+        validate_verification_members(capability.verification, {item.path for item in files})
 
 
 # LLM: 展示文字有界且不允许控制字符，不依据文字内容做路由或授权。

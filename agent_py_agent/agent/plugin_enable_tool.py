@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 
+from .capability_verifier_consent import (
+    verifier_confirmation_code,
+    verifier_confirmation_details,
+    verifier_consent_sha256,
+)
 from .plugin_activation import PLUGIN_ENABLE_TOOL, PluginActivationRequest
 from .plugin_activation_record import PluginActivation, plugin_catalog_digest
 from .plugin_content_activation import PluginContentActivation
@@ -48,6 +53,7 @@ class PluginEnableTool(BaseTool):
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
         self.process_sandbox = process_sandbox
+        self._verifier_consent = ""
         pending = (installation is not None and installation.activation is None
                    and not installation.manifest.is_content_only)
         self.runtime, self.runtime_error = _runtime_facts(installation) if pending else (None, "")
@@ -81,13 +87,13 @@ class PluginEnableTool(BaseTool):
         if self.runtime is not None:
             confirmation = self._confirmation()
             if params.get("confirm") != confirmation["confirm_code"]:
-                # 非 Python 插件启用前的确认预览：结构化 state 供回执层识别，专用错误码不是参数错误
-                return ToolHandlerOutcome(
-                    PLUGIN_ENABLE_TOOL, False, "启用前需要你确认这个插件会运行的程序。",
-                    error_code="PLUGIN_CONFIRMATION_REQUIRED", effect_outcome="not_started",
-                    result_envelope={PLUGIN_ENABLE_TOOL: {"reason": "confirmation_required",
-                                                          "state": "confirmation_required",
-                                                          "commit_state": "not_committed", "confirmation": confirmation}})
+                return _confirmation_required(confirmation)
+        if self._needs_verifier_consent():
+            # 能力包 v2：声明了检查程序的内容包，启用即同意宿主自动运行这些包内程序，必须先给管理员看并凭确认码继续
+            details = verifier_confirmation_details(self.installation.manifest, self.installation.package_sha256)
+            if params.get("confirm") != verifier_confirmation_code(details):
+                return _confirmation_required({**details, "confirm_code": verifier_confirmation_code(details)})
+            self._verifier_consent = verifier_consent_sha256(details)
         try:
             result = self._enable()
         except PluginInstallationError as exc:
@@ -152,7 +158,8 @@ class PluginEnableTool(BaseTool):
             raise PluginInstallationError("activation_unsettled", "原内容激活尚未释放。")
         operation_id = self.binding.request.operation_id
         active = PluginContentActivation(operation_id, entry.manifest.plugin_id, entry.package_sha256,
-                                         entry.revision, entry.settings_revision)
+                                         entry.revision, entry.settings_revision,
+                                         verifier_consent_sha256=self._verifier_consent)
         published = store.change_activation(PluginActivationRequest(operation_id, entry.revision, active))
         return {"plugin_id": entry.manifest.plugin_id, "enabled": True, "activation_id": active.activation_id,
                 "revision": published.installation.revision, "outcome": published.outcome,
@@ -164,6 +171,15 @@ class PluginEnableTool(BaseTool):
         package = inspect_plugin_package(PluginInstallStore(self.owner).package_bytes(self.installation))
         details = confirmation_details(self.installation.manifest, package.sha256, self.runtime, inspect_plugin_files(package))
         return {**details, "confirm_code": confirmation_code(details)}
+
+    # LLM: 只对尚未激活、声明了检查程序的纯内容包要求执行同意；已激活版本走原“保持不变”分支，不重复询问。
+    # 函数用途: 判断这次启用是否需要检查程序的执行确认。
+    def _needs_verifier_consent(self) -> bool:
+        entry = self.installation
+        capability = getattr(entry.manifest, "capability", None) if entry is not None else None
+        verification = getattr(capability, "verification", None)
+        return (entry is not None and entry.activation is None and entry.manifest.is_content_only
+                and verification is not None and verification.runs_package_code)
 
     # LLM: 回执只包含稳定原因和提交分类，不回显设置、安装日志、候选路径或底层错误正文。
     # 函数用途: 让原请求状态查询保留启用失败与未知的区别。
@@ -182,3 +198,13 @@ def _runtime_facts(installation) -> tuple[PluginRuntimeFacts | None, str]:
         return resolve_plugin_runtime(installation.manifest), ""
     except PluginRuntimeError as exc:
         return None, exc.reason
+
+
+# LLM: 启用前确认预览：结构化 state 供回执层识别，专用错误码不是参数错误；v6 程序确认与能力包检查程序确认共用。
+# 函数用途: 生成“需要先确认”的启用回执，不提交任何激活。
+def _confirmation_required(confirmation: dict) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        PLUGIN_ENABLE_TOOL, False, "启用前需要你确认这个插件会运行的程序。",
+        error_code="PLUGIN_CONFIRMATION_REQUIRED", effect_outcome="not_started",
+        result_envelope={PLUGIN_ENABLE_TOOL: {"reason": "confirmation_required", "state": "confirmation_required",
+                                              "commit_state": "not_committed", "confirmation": confirmation}})

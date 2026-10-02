@@ -12,6 +12,22 @@
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
 
+## 能力包 v2 块 1：verification 声明与启用前执行确认（2026-10-02，分支 `claude/ae-capability-packs-v2`，基于 `81221a667`）
+
+- **新增** `agent_py_agent/tests/test_capability_verification_declaration.py`（20 项），覆盖：
+  - 声明往返；
+  - 旧能力声明逐字节不变；
+  - 13 种非法形状拒绝；
+  - 未知 runtime、format、input_policy 按开放世界接受；
+  - 检查程序成员必须是包内声明文件；
+  - 确认内容与确认码；
+  - 包摘要、超时等任一变化让同意失效；
+  - 无同意的内容激活 payload 与代次不变；
+  - 声明了检查程序的包先返回确认回执、凭码启用并写入同意摘要；
+  - 没声明的包启用不变。
+- **相关回归**：`test_capability_*.py`、`test_plugin_any_language.py`、`test_plugin_management.py`、`test_plugin_catalog_digest_stability.py`、`test_constants_catalog.py`、`test_plugin_package.py` 共 1161 项全部通过（`run_files312.sh`，basetemp pae）。
+- **常数目录**已用 `scripts/build_constants_catalog.py` 重新生成。
+
 ## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）
 
 - `test_owner_wake_discovery_task_run_no_link.py` 新增 7 项：
