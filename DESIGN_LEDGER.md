@@ -1,5 +1,20 @@
 # 设计台账
 
+## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0 的流程、模板和检查器（be，2026-10-02，分支 `claude/be-capability-packs-content`，基于 `claude/3a-step17e` `1175278cc`，已实现，待 ae 审）
+
+- **依据**：冻结重跑逐条归因（`capability-packs-v2-design/attribution.md`）里 K 类 7 次、P 类 2 次，按 ae 的设计（[CAPABILITY_PACKS_V2](docs/design/CAPABILITY_PACKS_V2.md) 第 2 节）补包内容。只改 `examples/capability-packages/` 下两个包，不改宿主。
+- **A 包 0.5.0**：
+  - 新检查：error 有 `placeholder_text`、`embedded_quote_not_verbatim`（另有 `embedded_quote_not_in_line`）、`adaptation_original_not_in_source`；warning 有 `prop_states_missing`、`prop_origin_unstated`、`named_character_offscreen`、`shot_too_short`（`--min-shot-seconds`，默认 2 秒）。
+  - 新可选字段：改编条目 `{text, original_quote}`、台词 `embedded_quotes`、道具 `origin`；资料仍是 `drama_text_delivery.v3`。
+  - 模板的自由文字改成 `<…>` 提示，照抄不填会被 `placeholder_text` 抓到。
+- **B 包 0.3.0**：
+  - 新检查：error 有 `missing_table`、`missing_foreign_key`（键不在时；键在但值不对仍是原错误码）、`unknown_reference_mention`（参考 ID 写法从本项目 references 表推出前缀，不写死格式）、`baseline_beat_changed`、`baseline_relation_changed`、`baseline_schema_or_duration_changed`、`handoff_claim_without_change`；warning 有 `beat_character_missing`（动作节拍可选 `character_ids`）、`shot_character_reference_missing`（项目有人物参考计划时才查）。
+  - **约定变化**：0.2.0 的“基线差异只提醒”改为四类改动（节拍增删或台词、对应关系、schema、时长）没在交接里列出就是 error；“列出”看交接地址，文件按 `files[].sha256` 对应改前改后的项目。其余差异仍只提醒。
+  - 交接模板的改动条目写成“基线值 → 新值：为什么改”，整段照抄 `<…>` 提示报 `placeholder_text`。
+- **宿主核验输出**（按 ae 定的 `pack_verifier_result.v1`）：两包都加 `--host-json`，`valid` 等于 errors 为空，条目只有 code/location，metrics 只留数字且不超过 16 个键，写出即退 0；读不了交付物记 `target_unreadable`。B 在宿主模式下没有 `--input-file` 时，交接文件按摘要对应宿主交来的项目和基线，对不上的只提醒、不读，结论不依赖它们。不加参数时两包原报告和退出码都不变。
+- **还没做**：`declaration.json` 的 `verification` 块等 ae 的 `inputs` 协议提交 SHA 后再写（A：`--source` 用 task_input、required；B：`--handoff` 用 turn_output、`--baseline-project` 用 task_input、都非 required）。
+- **验证**：见 TESTS.md 同名节。
+
 ## 工具瘦身第一阶段：工具自己声明“默认收起” + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `claude/3a-step17e` `60f909b12`（原基于 `c6f28b150`），已实现，待集成；开关默认关，真实验收后由 3a 在生产打开）
 
 - **问题**：生产前台回合每轮把全部基础工具的原生 Schema 发给模型。实际发出的工具是 `model_visible_specs` 那一份（类别收起已生效，web 类的 watch_stream/web_fetch/web_search 本来就不发）；其中约 40 个工具占首轮约 3.65 万 token 的八成。一批又大又少用的工具每轮都在交钱。

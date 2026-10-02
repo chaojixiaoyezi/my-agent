@@ -226,6 +226,14 @@ def test_unlisted_baseline_change_is_an_error(tmp_path, make, expected):
     assert report["checks"]["baseline"] == "failed" and report["checks"]["project"] == "passed"
 
 
+def test_reordering_a_shots_references_is_not_a_relation_change(tmp_path):
+    project = _project()
+    shot = _row(project, "shots", "SH02")
+    shot["reference_ids"] = list(reversed(shot["reference_ids"]))
+    report = _run(tmp_path, {"p.json": project, "b.json": _project()}, *BASELINE)
+    assert report["structure_valid"], report["errors"]
+
+
 def test_episode_target_change_is_a_duration_change(tmp_path):
     project = _project()
     _row(project, "episodes", "EP01")["target_seconds"] = 61

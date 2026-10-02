@@ -120,12 +120,13 @@ def test_declared_embedded_quote_that_is_verbatim_passes(tmp_path):
     assert report["structure_valid"], report["errors"]
 
 
-@pytest.mark.parametrize("text,quote,source_id,code", [
+@pytest.mark.parametrize("case", [
     ("谁把被雨淋坏的旧书落在门口了？", "被雨淋坏的旧书", "P01", "embedded_quote_not_verbatim"),
     ("谁把书落在门口了？", "被雨淋湿的旧书", "P01", "embedded_quote_not_in_line"),
     ("谁把被雨淋湿的旧书落在门口了？", "被雨淋湿的旧书", "P02", "quote_source_not_in_shot"),
 ])
-def test_embedded_quote_must_be_in_the_line_and_verbatim_in_the_cited_passage(tmp_path, text, quote, source_id, code):
+def test_embedded_quote_must_be_in_the_line_and_verbatim_in_the_cited_passage(tmp_path, case):
+    text, quote, source_id, code = case
     delivery = _delivery()
     line = _shot(delivery, "SH01")["lines"][0]
     line["text"] = text
