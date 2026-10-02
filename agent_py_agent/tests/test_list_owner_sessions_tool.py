@@ -96,7 +96,7 @@ class TestVisibility:
 
 def _real_agent(tmp_path, capability_yaml=None, **owner):
     if capability_yaml is not None:
-        path = tmp_path / "agent_py_agent" / "config" / "capability_config.yaml"
+        path = tmp_path / "config" / "capability_config.yaml"  # 用户 capability 配置的唯一位置：<agent 根>/config/（P18 后续）
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(capability_yaml, encoding="utf-8")
     config = AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), enable_plugins=False, **owner)
