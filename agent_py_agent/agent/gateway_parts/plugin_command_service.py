@@ -18,7 +18,7 @@ from ..plugin_command_service import (
 from ..plugin_management import PluginManagement, plugin_management_context
 from ..user_space.owner_access import is_complete_local_admin_owner
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
-from .control_service import resolve_gateway_scope_owner
+from .control_service import resolve_gateway_scope_owner, resolve_loaded_gateway_scope_agent
 from .owner_conversation_store import owner_conversation_store
 
 
@@ -115,6 +115,8 @@ def _management(handler, server, body: dict) -> PluginManagement:
 
 # LLM: TUI 的 HTTP 角色或 IM 的已解析完整 owner 是唯一授权源；正文不能选择管理员，冷读取不构造 Agent。
 #   IM 路径的管理员判定用 owner_access.is_complete_local_admin_owner(home)，与 /settings 同一条规则、同一种 home。
+#   /plugins list 的 MCP 段只借用已经加载的 owner 实例（resolve_loaded_gateway_scope_agent 的被动查找），冷 owner 保持冷、
+#   段里如实写“未加载”。
 # 函数用途: 为两个入口组装同一 PluginManagement，显式工作目录仍经原 Gateway 路径权限门。
 def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManagement:
     from .workspace_scope import gateway_request_workspace_scope
@@ -128,6 +130,8 @@ def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManage
         owner, home, base.config, store.threads, actor_id=scope.user_id, channel=scope.channel,
         conversation_id=scope.conversation_id, is_admin=is_admin,
     )
+    loaded = resolve_loaded_gateway_scope_agent(base, scope)
+    context = replace(context, live_registry=getattr(loaded, "tools", None))
     if scope.workspace is not None:
         narrow_host = SimpleNamespace(
             config=SimpleNamespace(my_agent_owner_provider=owner.identity.provider),

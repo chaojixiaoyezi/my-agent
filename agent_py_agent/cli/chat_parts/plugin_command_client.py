@@ -122,7 +122,9 @@ class PluginCommandClient:
             actor_id="local-agent", channel="chat", conversation_id=conversation_id,
             is_admin=is_local_admin_owner(self.agent.home_paths),
         )
-        return PluginManagement(replace(context, workspace=self.agent.effective_workspace_root))
+        # direct 模式就是本进程的完整代理：/plugins list 的 MCP 段直接读它的注册表
+        return PluginManagement(replace(context, workspace=self.agent.effective_workspace_root,
+                                        live_registry=getattr(self.agent, "tools", None)))
 
     # LLM: 仅显式 Tab/命令调用此入口；乱序旧响应不覆盖新快照，无轮询或自动重试。
     # 函数用途: 从宿主更新一次用于帮助与补全的目录。

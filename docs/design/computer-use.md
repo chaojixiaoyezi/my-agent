@@ -37,6 +37,11 @@
   暂不调区域摘要容差（`DIGEST_*` 常数）；片 F 真实验收再跑三次，若仍有 ≥ 0.4 的轮次，再议把输入框光标所在格排除或放宽容差。
 - 自动执行碰到适配器复核拒绝（`OBSERVATION_STALE`，含光标误判）时只记账不重试：光标误判率直接决定自动点击的“白跑”比例，真实验收要把这个比例记进证据。
 
+**片 F 真实验收（2026-10-02，Linux 车道容器，M3 + 真 Jev）**：四档各一次 prompt 全部跑通（第二轮），M3 15 次调用、Jev 6 次，复核拒绝 0 次（输入框没被聚焦，光标误判没出现）；
+auto 档宿主以 actor=decision 自动点击、审批与两本账都带 decision_ref。发现一条待定：模型按提示重新观察后，Jev 对新观察又选同一按钮，宿主按观察编号幂等再点一次，
+等于重复提交；方向见 J16 设计稿第 7 节，等 ae 定。另外 `observe_window` 的 `window` 参数只接受上一次观察的别名或留空，第一轮 prompt 写了窗口标题，模型把标题传进去
+连续 not_found，这是 prompt 写法问题，两轮证据都在 `~/.my-agent/decision-evidence/j16-slice-f-<sha>/`。`/plugins list` 末尾现在有 MCP 服务段（运行/发布状态与工具数）。
+
 **片 E 实施（2026-10-02，macOS）**：
 - 后端按平台选：`tooling/computer_use_backends.select_backend()`，darwin → `computer_use_macos.MacBackend`，其余 → `X11Backend`；
   `computer_use_server._screen_observer()` 只调它。OCR 两个后端共用 `tooling/screen_ocr.RapidOcrReader`。

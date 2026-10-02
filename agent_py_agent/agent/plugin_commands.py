@@ -164,6 +164,42 @@ def render_plugin_help(namespace: PluginNamespace, actions: tuple[CommandActionS
 # LLM: 仅从包的公开动作和设置 schema 生成展示文本；示例不是授权、参数值或模型指令，不能写回安装状态。
 #   普通中文示例只取非 display 动作（按结构化 kind 判断）；只有展示动作时改为说明面板只能用命令打开。
 # 函数用途: 给插件详情和成功启用回执生成同一张简短使用卡，不读取私有设置或启动插件。
+# LLM: /plugins list 的 MCP 段：只投影 tooling.mcp_registration.mcp_server_facts 的结构化事实（服务名、是否运行、发布状态
+#   published/rejected/unavailable、工具数、原因码与提醒），不含命令、环境或路径；publication 为 None 的客户端（插件客户端，
+#   或尚未走完发布链）不列，插件已在上面的列表里。registry 为 None 表示当前 owner 的实例没有加载，如实写明。
+# 函数用途: 把 MCP 服务的运行与发布事实渲染成 /plugins list 末尾的一段文字（TUI 与 IM 同一份）。
+def render_mcp_server_section(registry: object | None) -> str:
+    if registry is None:
+        return "MCP 服务：当前实例未加载，没有运行事实。"
+    from .tooling.mcp_registration import mcp_server_facts
+
+    rows = [fact for fact in mcp_server_facts(registry) if isinstance(fact.get("publication"), dict)]
+    if not rows:
+        return "MCP 服务：没有配置。"
+    lines = [f"MCP 服务（{len(rows)} 个）："]
+    for fact in rows:
+        publication = fact["publication"]
+        running = "运行中" if fact.get("running") else "未运行"
+        lines.append(f"{fact.get('server', '')}  {running}  {_publication_text(publication)}")
+    return "\n".join(lines)
+
+
+# 函数用途: 一条发布状态的中文投影：已发布 N 个工具 / 被拒绝（码：tool=… code=…）/ 不可用（码）/ 其它状态原样。
+def _publication_text(publication: dict) -> str:
+    status = str(publication.get("status") or "")
+    code = str(publication.get("code") or "")
+    if status == "published":
+        notices = publication.get("notices") or []
+        suffix = f"，提醒 {len(notices)} 条" if notices else ""
+        return f"已发布 {int(publication.get('tool_count') or 0)} 个工具{suffix}"
+    if status == "rejected":
+        reasons = [f"tool={r.get('tool', '')} code={r.get('code', '')}" for r in publication.get("reasons") or [] if isinstance(r, dict)]
+        return f"被拒绝（{code}" + ("：" + "；".join(reasons) if reasons else "") + "）"
+    if status == "unavailable":
+        return f"不可用（{code}）" if code else "不可用"
+    return status or "状态未知"
+
+
 def render_plugin_use_card(plugin: PluginCommandSpec, settings_schema: dict) -> str:
     namespace = f"/plugins@{plugin.plugin_id}"
     actions = tuple(action for action in plugin.actions if action.available)

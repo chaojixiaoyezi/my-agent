@@ -922,12 +922,16 @@
 - **不受影响**：TUI、CLI 等本机私有通道仍原样保留完整路径，也不附说明。
 - **验证**：见 TESTS.md 同名节。
 
-## J16：屏幕识别——结构化观察 + 动作候选（2026-10-02，已确认设计；片 A/B/C 已集成 step17g，片 D/E 已集成 step17h，片 G 已实施待复审）
+## J16：屏幕识别——结构化观察 + 动作候选（2026-10-02，已确认设计；片 A/B/C 已集成 step17g，片 D/E/G 已集成 step17h，片 F 已实施待复审）
 
 - **来由**：用户第 13 条要做、要“功能做全”，先像观察模式那样只给建议、不自动点；并把原来“只组合上游公开 MCP 工具”的边界放宽为“别等上游”。3a 审定的设计见 [J16_SCREEN_OBSERVATION](docs/design/J16_SCREEN_OBSERVATION.md)（分支 `claude/ae-j16-screen-observation`，ae 起草）。
 - **设计要点**：
   - **新工具**：在自家 Computer Use 适配器里新增 `observe_window`（read_only，审批策略 always），直接用操作系统和库的公开接口（X11/EWMH、Quartz、ScreenCaptureKit、mss、RapidOCR），给出稳定窗口身份、代次、坐标原点和缩放、遮挡、成功状态。还有 `click_candidate`；`type_into_candidate` 随片 G 注册。
   - **三件套共用**：插件线观察三件套抽成 `ObservationBinding`，插件和 MCP 共用，几何是通用扩展，只进归档。
+  - **片 F 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-f`，基于 `claude/3a-step17h` afb15947b）**：真实验收在 Linux 车道容器里用 M3 + 生产同一个 Jev 端点跑了
+    四档各一次 prompt（第二轮全部跑通，auto 档宿主以 actor=decision 自动点击、两本账带 decision_ref；第一轮 prompt 写了窗口标题导致 observe_window not_found，两轮都留证据）；
+    `/plugins list` 末尾加 MCP 服务段（运行/发布状态、工具数、拒绝原因码），TUI 直连读本进程注册表、Gateway/IM 只借已加载的 owner 实例。**待定**：重新观察后 Jev 再选同一按钮、
+    宿主按观察编号幂等又点一次（重复提交），方向见设计稿第 7 节，等 ae 定。
   - **片 D 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` 72ddc2b5c，ae 定规则）**：决策材料多一项归一化粗位置
     （有 region 和 frame 才有，先夹后舍入）；能力开关 `action_candidate_auto_execute_enabled`（默认关，管理员边界）打开且建议已采用时，宿主按结构化条件
     （本机管理员主代理、所选候选恰有一个只凭候选编号的动作、同一观察没被碰过）计划一次 `actor=decision` 的宿主调用，走模型调用同一条执行/审批/记录链；

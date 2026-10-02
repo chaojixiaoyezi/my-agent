@@ -1103,6 +1103,25 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   `git diff --check` 退出 0；`PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 退出 0，新增告警 0、消失告警 0。
   未改产品，因此未跑相关 pytest、guards9、Ruff、strict-size、import-boundaries 或 clean-package；不宣称产品门禁全部通过。
 
+## J16 片 F：真实模型验收（M3 + 真 Jev，Linux 车道容器）+ `/plugins list` 的 MCP 服务段（2026-10-02，ef，分支 `claude/ef-j16-slice-f`，基于 `claude/3a-step17h` afb15947b）
+
+- **真实验收怎么跑**：只在桌面层镜像 `my-agent-linux-test:py312-desktop` 里跑，容器联网只走本机代理 host.docker.internal:7890（专用脚本 `real_lane.sh`，不改 `xvfb_lane.sh`）。
+  Mac 上 `extract_catalog.py` 只读生产模型目录抽出 MiniMax 官网 M3 与 Jev（provider-25b77836，jev-1.13.0）两家写成 0600 子集；容器内 `driver.py` 起 Xvfb + openbox + Tk 测试窗口，
+  建隔离 home（local/main、access_mode=full-access、computer_use 两开关、max_tool_rounds=12、stream/自学习/策展关），每档新 SimpleAgent + 新线程 + 新 Tk 窗口，
+  决策设置 patch（enabled、profile_id=Jev、points.action_candidate.mode、timeout 8 s/stage 20 s），能力开关文件在建实例前写（capability_config_for_agent 会缓存快照）；
+  审批由测试方接收器替用户批准并逐条记 tool_name/binding.actor；只读采集 model_usage、决策账行、runtime_events tool_completed、工具调用参数、Tk 点击数、回复前 600 字。
+  预算：Jev 预计 6 次、超 18 次停；单档 M3 超 30 次停。`cleanup.sh` 按密钥值扫证据（0 命中）后删目录子集。脚本在证据目录 harness/。
+- **第二轮结果（prompt 不提窗口标题）**：四档全部跑通，M3 15 次 / 约 42 万输入 token，Jev 6 次（1.2–1.6 s）；off 模型自己 observe→click_candidate→observe、Tk 1 次；
+  observe Jev 2 次只记账、模型自己点；apply Jev 2 次给提示、模型点中 Submit；auto 宿主以 actor=decision 自动点击 2 次（两次观察各一次），审批 binding 带 actor=decision 与
+  decision_ref，runtime_events 与决策账补充行都 ok/confirmed，Tk 2 次——这就是“重新观察后再次自动点击”的待定问题（设计稿第 7 节）。复核拒绝 0 次。
+- **第一轮结果（prompt 写了“标题为 J16 Smoke 的窗口”）**：模型把标题当 `window` 参数传，observe_window 连续 OBSERVATION_WINDOW_NOT_FOUND；off/observe 改用上游 OCR+click_screen，
+  没点中 Submit；apply 第 4 次留空成功后 Jev 选中、模型点中；auto 因 harness 顺序问题没跑。M3 26 次 / 约 77 万输入，Jev 2 次。保留在证据 `run1/`，不挑成功。
+- **`/plugins list` MCP 段**：`test_plugin_list_mcp_section.py`（8 项）：三种发布状态与提醒计数的文字投影、publication 为 None 的插件客户端不列、没有实例/没有服务两句话、
+  管理服务 list 末尾追加、TUI 直连把本进程注册表交给管理服务、Gateway 冷 owner 不初始化（`_owner_pool` 被断言替身守着）且段里写“未加载”、已加载 owner 经 `peek` 借注册表、
+  上下文默认无注册表。相关 14 个插件/网关测试文件 + guards9 共 438 passed。
+- **门禁**：ruff 0；常数目录 --check 0（864）；import boundaries 0；strict code-size hard=0；size_diff 新增 0；doc_sync PASS；diff --check 0；node --check 0；clean_package。
+- **未做**：待定问题的修法等 ae 裁定后另开；macOS 真机只读核对由 3a 安排。
+
 ## J16 片 D：决策点粗位置 + 自动执行能力开关 + 假 Jev 四档（2026-10-02，ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` 72ddc2b5c）
 
 - **范围**：`tool_context/decision_action_execute.py`（规划、记账、粗位置）、`decision_action_candidate.py`（材料 position、采用后规划、提示变体）、

@@ -19,6 +19,7 @@ from .plugin_commands import (
     parse_plugin_command,
     plugin_command_response,
     plugin_namespace,
+    render_mcp_server_section,
     render_plugin_use_card,
 )
 from .plugin_configure_tool import PLUGIN_CONFIGURE_TOOL, PluginConfigureTool
@@ -78,6 +79,9 @@ class PluginManagementContext:
     approval_mode: str = "ask"
     # 配置 plugin_process_sandbox：插件进程是否套平台沙箱（启用验收与显式调用都按它启动）
     process_sandbox: bool = False
+    # 当前 owner 已加载实例的工具注册表（只读，给 /plugins list 的 MCP 段投影运行与发布事实）；冷入口/未加载为 None，
+    # 绝不为了这一段去初始化实例。
+    live_registry: object | None = None
 
 
 # LLM: 冷入口与完整代理共用 owner 权限和审批配置；管理/业务分别受工具禁用约束，查询仍绑定原身份。
@@ -184,9 +188,11 @@ class PluginManagement:
             return execute_plugin_command(catalog, text, revision=revision)
         if parsed.action.name == "list":
             entries = [item for item in catalog.plugins if not values.get("enabled") or item.enabled]
-            return self._reply({"ok": True, "message": "\n".join(
+            plugins_text = "\n".join(
                 f"{item.plugin_id} {item.package_version}（{'启用' if item.enabled else '停用'}）  {item.summary}"
-                for item in entries) or "当前没有符合条件的已安装插件。"})
+                for item in entries) or "当前没有符合条件的已安装插件。"
+            # MCP 服务段（J16 片 F）：TUI 直连与 Gateway/IM 都经这里，事实只来自已加载实例的注册表
+            return self._reply({"ok": True, "message": plugins_text + "\n\n" + render_mcp_server_section(self.context.live_registry)})
         if parsed.action.name == "info":
             plugin = next((item for item in catalog.plugins if item.plugin_id == values["plugin"]), None)
             entry = next((item for item in entries if item.manifest.plugin_id == values["plugin"]), None)

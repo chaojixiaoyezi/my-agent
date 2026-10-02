@@ -6,6 +6,8 @@
   后者要求身份完整且是本机 local/main；`cli/memory_admin_commands._vectors_rebuild_payload` 用的是同一个函数。
 - 收拢（2026-10-02）：`gateway_parts/plugin_command_service._scope_management`（IM 插件管理）与
   `tooling/user_config_tool._is_main_owner`（本机配置动作）也改为调用它，不再各写一份。
+- `_scope_management` 另把 `resolve_loaded_gateway_scope_agent` 找到的已加载 owner 实例的工具注册表交给
+  `PluginManagementContext.live_registry`（J16 片 F，2026-10-02）：只给 `/plugins list` 的 MCP 段投影运行与发布事实，被动查找，冷 owner 为 None。
 
 ## Anthropic 预算回执的同源裁决（2026-10-02，本地待集成）
 

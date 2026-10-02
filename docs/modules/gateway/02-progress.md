@@ -1,5 +1,14 @@
 # Gateway 维护状态
 
+## /plugins list 末尾加 MCP 服务段（J16 片 F，2026-10-02，ef，分支 `claude/ef-j16-slice-f`，基于 `claude/3a-step17h` `afb15947b`，待集成）
+
+- `plugin_command_service._scope_management` 组装管理服务时多做一步：`resolve_loaded_gateway_scope_agent` 被动查找已加载的 owner 实例，
+  把它的工具注册表放进 `PluginManagementContext.live_registry`；冷 owner 保持冷（不初始化、不记活跃），字段为 None。
+- `/plugins list` 的回执末尾由 `plugin_commands.render_mcp_server_section` 追加一段：每个 MCP 服务的运行状态与发布状态
+  （`tooling/mcp_registration.mcp_server_facts`：已发布 N 个工具 / 被拒绝（码：tool/code）/ 不可用（码）），publication 为 None 的插件客户端不列；
+  实例未加载时写“当前实例未加载，没有运行事实”。TUI 直连入口（`cli/chat_parts/plugin_command_client._direct_manager`）交本进程注册表，IM 与 TUI 经 Gateway 走同一段。
+- 测试见 TESTS.md“J16 片 F”。
+
 ## 能力包宿主核验结论随回合结束发宿主提示（2026-10-02，ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`，待集成）
 
 - 回合正常返回后，`request_pack_verification_notice.queue_pack_verification_notice` 用 `AgentRunResult.pack_verifications`（核验账本的结构化事实）写一条宿主提示：`source=pack_verification`，`code=summary`。

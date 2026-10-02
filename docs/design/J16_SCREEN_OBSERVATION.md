@@ -246,7 +246,11 @@
   宿主调用的记录以 `[host-action-record round=R index=K actor=decision]` / `[host-action-output-record …]` 块进 tool_context（text 下同链展示；native 下它不是 IR 承载条目，
   经 runtime.guidance 转发，不伪造 assistant tool_use，也不进原生 IR 配对）。
 - **一次只做一次**：复核拒绝（stale / not_found）、执行失败、用户拒绝、取消都只记账，不重试、不改选候选；同一观察第二次进决策点会被幂等事实挡下（`already_acted`）。
-- **没做**：真实模型验收（M3 + 真 Jev，片 F）；`observe_window` 之外的来源（插件/MCP）只要声明了 `observation_ref` 且只需候选编号，规则一样适用，但没有真实验收。
+- **真实验收（片 F，2026-10-02，Linux 车道容器，M3 + 真 Jev）**：四档各一次 prompt 都跑通，auto 档宿主以 actor=decision 自动点击、两本账都带 decision_ref；
+  结果与一条待定问题见第 8 节第 5 条。`observe_window` 之外的来源（插件/MCP）只要声明了 `observation_ref` 且只需候选编号，规则一样适用，但没有真实验收。
+- **待定（片 F 真实验收发现）**：模型按提示“再操作请先重新观察”重新观察后，新观察是新的 observation_id，Jev 又选中同一个按钮（材料里没有“本 run 已做过什么”），
+  宿主按幂等规则（按观察编号）又点了一次，等于重复提交。候选方向：同一 run 内同一目标（target_ref_hash）只自动执行一次；或把本 run 已执行的动作事实
+  放进 Jev 材料让它能答 not_needed。等 ae 定，片 D 规则暂不改。
 
 ## 8. 开关、测试与验收
 
@@ -290,6 +294,15 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 5. **真实模型验收**（Linux 车道容器，主模型 MiniMax M3，Jev 真实）：
    - 四档各发一次 prompt；
    - 记录 Jev 用量、选中候选、提示和执行是否发生、复核拒绝次数、M3 是否采纳。
+   - **片 F 结果（2026-10-02，ef；证据 `~/.my-agent/decision-evidence/j16-slice-f-<sha>/`）**：容器内 Xvfb + openbox + Tk 测试窗口，隔离 home（local/main、
+     Full Access、`computer_use_*` 两开关、`max_tool_rounds=12`），模型目录只抽 MiniMax 官网 M3 与生产同一个 Jev 端点（jev-1.13.0），审批由测试方接收器替用户批准并逐条记
+     `binding.actor`。第二轮（prompt“请先用 observe_window 看一下当前最前面的窗口，再点击里面的 Submit 按钮…”）：off → M3 4 次调用、Jev 0，模型 observe→click_candidate→
+     再 observe，Tk 收到 1 次点击；observe → M3 4、Jev 2（1.24 s / 1.22 s，只记账），模型自己点，Tk 1；apply → M3 4、Jev 2（1.55 s / 1.22 s，提示），模型点了 Submit 候选，Tk 1；
+     auto → M3 3、Jev 2（1.32 s / 1.27 s），宿主以 actor=decision 自动点击两次（两次观察各一次，审批 binding 带 actor=decision/decision_ref，runtime_events 与决策账补充行
+     都 ok/confirmed），Tk 2 次——见上面“待定”。复核拒绝（stale）0 次。总用量：M3 15 次 / 约 42 万输入 token；Jev 6 次 = 预计 6 次。
+     第一轮（prompt 写了“标题为 J16 Smoke 的窗口”，证据 `run1/`）：模型把标题当 `window` 参数传，而该参数只接受上一次观察的别名或留空，于是 observe_window 连续
+     `OBSERVATION_WINDOW_NOT_FOUND`；off / observe 两档模型改用上游 OCR + click_screen（没点中 Submit），apply 档第 4 次留空成功后 Jev 选中、模型点中；auto 档因 harness
+     在建实例后才写能力开关（快照已缓存）没跑。第一轮 M3 26 次 / 约 77 万输入，Jev 2 次。两轮都保留，不挑成功。
 6. **macOS 后端和片 G**：假 Quartz、假 ScreenCaptureKit、假 AX 单测；真机只读核对另行安排。片 E 已按此实施（`test_computer_use_macos.py`、`test_screen_capture_guard.py`），片 G 同（`test_screen_ui_candidates.py`、`test_computer_use_macos_ax.py`，假 AX 在 `tests/_fake_macos_ax.py`）。
    - **V-H 真机核对清单**（J16 各片合完后由 3a 一次性向用户申请，会弹“屏幕录制”与“辅助功能”两个授权）：真实窗口的列窗、遮挡与 Retina 缩放；ScreenCaptureKit 主路径与 mss 回退；AX 窗口匹配、真实应用与网页的树深和节点数（据此调上限）；`AXValueCreate((0, n))` 全选与读回、`AXUIElementSetMessagingTimeout` 设在系统级元素上；中文输入法开着时，`type_desktop_text` 用的“键码 0 + Unicode 字符串”事件会不会被输入法截走当成拼音；AZERTY 等非 QWERTY 布局下，现有 `type_text` 的清空（`pyautogui.hotkey("command","a")` 按美式键位发 a）会不会变成 ⌘Q。
 
@@ -306,7 +319,7 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 | C | 车道镜像加 Xvfb、openbox、Tk 测试窗口；集成测试；变异（已实施：`test_computer_use_xvfb_cases.py` 覆盖关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计 0.15–0.20；派生镜像 Dockerfile.desktop + xvfb_lane.sh 待 3a 落位；Debian 包清单与 pymonctl 要 xrandr 的硬性要求见 computer-use.md 当前边界） | 4–5 h |
 | D | `action_candidate` 接粗位置；自动执行路径和能力开关；假 Jev 四档（已实施：第 7 节“片 D 实施定稿”；真实模型验收留给片 F） | 5–6 h |
 | E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测（已实施 2026-10-02，75；ae 两轮复审通过，已集成 step17h） | 4–5 h |
-| F | 真实验收（M3 + Jev，Linux 车道）+ 文档、台账、TESTS | 3–4 h |
+| F | 真实验收（M3 + Jev，Linux 车道）+ 文档、台账、TESTS（已实施：第 8 节第 5 条；另加 `/plugins list` 末尾的 MCP 服务段，TUI 与 IM 同一段） | 3–4 h |
 | G | macOS AX 候选 + `type_into_candidate` 注册；Linux AT-SPI 可选评估和安装说明；合并去重（已实施 2026-10-02，75，分支 `claude/75-j16-slice-g`，待 ae 复审） | 5–7 h |
 
 合计约 30–39 h。每片单独提交、单独评审（ae 审设计）。第 9 节等第 14 条交付后再排。
