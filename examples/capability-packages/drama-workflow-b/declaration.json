@@ -13,7 +13,72 @@
       "连续性",
       "制作报告"
     ],
-    "entry_document": "CAPABILITY.md"
+    "entry_document": "CAPABILITY.md",
+    "verification": {
+      "deliverables": [
+        {
+          "id": "project",
+          "path_patterns": [
+            "**/*.json"
+          ],
+          "required": true,
+          "field_match": {
+            "format": "json",
+            "field": "schema",
+            "equals": [
+              "drama_workflow_project.v1"
+            ]
+          }
+        }
+      ],
+      "verifiers": [
+        {
+          "id": "check-project",
+          "member": "scripts/check_continuity.py",
+          "runtime": "python",
+          "applies_to": "project",
+          "args": [
+            "--project",
+            "{target}",
+            "--host-json"
+          ],
+          "timeout_seconds": 20,
+          "inputs": [
+            {
+              "flag": "--handoff",
+              "source": "turn_output",
+              "path_patterns": [
+                "**/*.json"
+              ],
+              "required": false,
+              "field_match": {
+                "format": "json",
+                "field": "schema",
+                "equals": [
+                  "drama_workflow_handoff.v2"
+                ]
+              }
+            },
+            {
+              "flag": "--baseline-project",
+              "source": "task_input",
+              "path_patterns": [
+                "**/*.json"
+              ],
+              "required": false,
+              "field_match": {
+                "format": "json",
+                "field": "schema",
+                "equals": [
+                  "drama_workflow_project.v1"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "input_policy": "preserve_originals"
+    }
   },
   "files": [
     {

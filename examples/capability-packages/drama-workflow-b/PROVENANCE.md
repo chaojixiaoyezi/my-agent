@@ -78,6 +78,8 @@
 
 另加：交接文字整段照抄模板 `<…>` 提示报 `placeholder_text`；`--host-json` 输出宿主核验用的 `pack_verifier_result.v1`，宿主模式下交接文件按摘要对应宿主交来的项目和基线，不需要 `--input-file`。
 
+**核验声明**：`declaration.json` 的 `capability.verification` 声明交付物（`schema` 为 `drama_workflow_project.v1`）和检查程序（`--project {target} --host-json`，`--handoff` 取本回合写出的交接、`--baseline-project` 取任务开始时已有的项目，都非必需）。宿主开启包检查、管理员确认启用后，由宿主用钉住的原件在沙箱里跑，结论以宿主为准。
+
 **和 0.2.0 的差别**：0.2.0 的基线差异全是 warning；0.3.0 起上表四类未列出的改动是 error，其余差异仍是 warning。
 
 **仍不判断的事**：改动是不是用户要求的、改得合不合理、交接说明文字是否真实、媒体是否完成。根据这些失败改动之后，原冻结用例再跑一次只能算“已见回归”，不是新的保留集。

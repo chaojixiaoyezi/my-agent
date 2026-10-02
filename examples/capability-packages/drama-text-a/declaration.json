@@ -12,7 +12,57 @@
       "分镜",
       "文本依据"
     ],
-    "entry_document": "CAPABILITY.md"
+    "entry_document": "CAPABILITY.md",
+    "verification": {
+      "deliverables": [
+        {
+          "id": "delivery",
+          "path_patterns": [
+            "**/*.json"
+          ],
+          "required": true,
+          "field_match": {
+            "format": "json",
+            "field": "schema",
+            "equals": [
+              "drama_text_delivery.v3"
+            ]
+          }
+        }
+      ],
+      "verifiers": [
+        {
+          "id": "check-delivery",
+          "member": "scripts/check_delivery.py",
+          "runtime": "python",
+          "applies_to": "delivery",
+          "args": [
+            "--delivery",
+            "{target}",
+            "--host-json"
+          ],
+          "timeout_seconds": 20,
+          "inputs": [
+            {
+              "flag": "--source",
+              "source": "task_input",
+              "path_patterns": [
+                "**/*.json"
+              ],
+              "required": true,
+              "field_match": {
+                "format": "json",
+                "field": "schema",
+                "equals": [
+                  "drama_text_source.v1"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "input_policy": "preserve_originals"
+    }
   },
   "files": [
     {

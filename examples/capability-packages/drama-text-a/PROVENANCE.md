@@ -131,6 +131,8 @@
 | `named_character_offscreen`：起止状态或动作点名的人物被列为画外 | warning | A10-t6、A08-t4、A10-t4 |
 | `shot_too_short`：单镜秒数低于下限（默认 2 秒，`--min-shot-seconds` 可改） | warning | A08-t5 |
 
+**核验声明**：`declaration.json` 的 `capability.verification` 声明交付物（`schema` 为 `drama_text_delivery.v3`）和检查程序（`--delivery {target} --host-json`，`--source` 取任务开始时已有的原文）。宿主开启包检查、管理员确认启用后，由宿主用钉住的原件在沙箱里跑，结论以宿主为准。
+
 **和上游的差异**：仍然只认作者写成结构化字段的内容。内嵌引文只查 `embedded_quotes` 里声明的片段，不扫描台词里的引号；道具和人物只按字面名字匹配；`origin` 只看写没写。
 
 **不覆盖的范围**：把原文已有的事实说成改编、改了结局或因果、上下镜语义矛盾、动作能不能在给定秒数内完成——这些仍要靠方法和独立阅读。根据这些失败改动之后，原冻结用例再跑一次只能算“已见回归”，不是新的保留集。

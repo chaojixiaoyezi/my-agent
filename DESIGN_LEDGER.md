@@ -1,6 +1,6 @@
 # 设计台账
 
-## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0 的流程、模板和检查器（be，2026-10-02，分支 `claude/be-capability-packs-content`，基于 `claude/3a-step17e` `1175278cc`，已实现，待 ae 审）
+## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0 的流程、模板、检查器和核验声明（be，2026-10-02，分支 `claude/be-capability-packs-content-b2`，基于 ae 块 2 `ce2b833a7`，已实现，待 ae 审）
 
 - **依据**：冻结重跑逐条归因（`capability-packs-v2-design/attribution.md`）里 K 类 7 次、P 类 2 次，按 ae 的设计（[CAPABILITY_PACKS_V2](docs/design/CAPABILITY_PACKS_V2.md) 第 2 节）补包内容。只改 `examples/capability-packages/` 下两个包，不改宿主。
 - **A 包 0.5.0**：
@@ -12,7 +12,11 @@
   - **约定变化**：0.2.0 的“基线差异只提醒”改为四类改动（节拍增删或台词、对应关系、schema、时长）没在交接里列出就是 error；“列出”看交接地址，文件按 `files[].sha256` 对应改前改后的项目。其余差异仍只提醒。
   - 交接模板的改动条目写成“基线值 → 新值：为什么改”，整段照抄 `<…>` 提示报 `placeholder_text`。
 - **宿主核验输出**（按 ae 定的 `pack_verifier_result.v1`）：两包都加 `--host-json`，`valid` 等于 errors 为空，条目只有 code/location，metrics 只留数字且不超过 16 个键，写出即退 0；读不了交付物记 `target_unreadable`。B 在宿主模式下没有 `--input-file` 时，交接文件按摘要对应宿主交来的项目和基线，对不上的只提醒、不读，结论不依赖它们。不加参数时两包原报告和退出码都不变。
-- **还没做**：`declaration.json` 的 `verification` 块等 ae 的 `inputs` 协议提交 SHA 后再写（A：`--source` 用 task_input、required；B：`--handoff` 用 turn_output、`--baseline-project` 用 task_input、都非 required）。
+- **核验声明**（`capability.verification`，按 ae 块 2 的 `inputs` 协议，经真实校验器检查）：
+  - A：交付物 `delivery`（`**/*.json`、顶层 `schema` 等于 `drama_text_delivery.v3`，必需）；检查程序 `scripts/check_delivery.py`，参数 `--delivery {target} --host-json`，超时 20 秒；`--source` 取任务开始时已有、`schema` 为 `drama_text_source.v1` 的文件，必需。
+  - B：交付物 `project`（`schema` 为 `drama_workflow_project.v1`，必需）；检查程序 `scripts/check_continuity.py`，参数 `--project {target} --host-json`；`--handoff` 取本回合写出的 `drama_workflow_handoff.v2`，`--baseline-project` 取任务开始时已有的项目，都非必需。交接不声明成必需交付物：新建项目的任务没有交接（ae 同意）。
+  - 两包 `input_policy` 都是 `preserve_originals`（另存新文件，不就地改输入）。
+  - 启用时要管理员确认（`kind=capability_verifiers`），确认说明列出这些输入。
 - **验证**：见 TESTS.md 同名节。
 
 ## 工具瘦身第一阶段：工具自己声明“默认收起” + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `claude/3a-step17e` `60f909b12`（原基于 `c6f28b150`），已实现，待集成；开关默认关，真实验收后由 3a 在生产打开）

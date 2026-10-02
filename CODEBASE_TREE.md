@@ -49,6 +49,7 @@
 |-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py # B包0.2.0基线逐ID对比、交接覆盖与虚假新增/省略、检查器身份
+|-- agent_py_agent/tests/test_capability_package_verification_blocks.py # A/B 两包 verification 块经真实构建器往返、启用确认列出输入、按声明参数驱动检查器
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_v03.py # B包0.3.0新增检查（缺表/外键、编造参考ID、节拍角色、出镜参考、未列出基线改动、虚假改动声明）与--host-json按摘要对应交接
 |-- agent_py_agent/tests/test_subagent_package_entries.py # 子代理同代包入口的首请求、显式选模、权限和恢复组合
 |-- agent_py_agent/tests/test_file_syntax_diagnostics.py # 有界语法观察、反馈与诊断异常隔离
