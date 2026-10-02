@@ -493,6 +493,9 @@ _HOST_SEGMENT = _HOST_ROOT.lstrip("/")
     f"/{_HOST_ROOT}/me/x",
     "%7E%2F.ssh",
     f"{_HOST_ROOT};3",
+    f"a&{_HOST_ROOT}/me/x",
+    f"#{_HOST_ROOT}/me/x",
+    f"${{HOME}}{_HOST_ROOT}/me/x",
     f"{_HOST_ROOT}/0",  # JSON Pointer 首段恰好是本机根目录名：只丢定位、不泄露
 ])
 def test_redact_location_catches_9b_leak_variants(location):
@@ -504,6 +507,7 @@ def test_redact_location_catches_9b_leak_variants(location):
 @pytest.mark.parametrize("location", [
     "out/tmp/x.json", "src/lib/a.py", "data/var/b.json", "docs/Users/x.md", "/shots/0/title",
     "./out/d.json", "./tmp/x.json", "out/d.json:12:3", "SH01.start_state",
+    "https://example.com/a/b", "../out/d.json", "out/a%20b.json", "交付/tmp/x.json", "my-dir/tmp/x.json",
 ])
 def test_redact_location_keeps_ordinary_locations(location):
     from agent_py_agent.agent.capability.pack_verifier_redaction import redact_location

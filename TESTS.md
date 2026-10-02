@@ -242,7 +242,16 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - `test_redact_location_keeps_ordinary_locations` 共 9 种相对写法，原样保留：3a 列的 8 种，加上 `./tmp/x.json`（单个点不算分隔符）；
   - 根段按本机取 `Path.home()` 的第一段：macOS 是 `/Users`，Linux 车道是 `/home` 或 `/root`。Linux 上 `/Users` 不存在，本来就不是宿主路径。
 - **变异 7/7 全部被抓住**（`cpv2-mut/mutations_b3h.json`）：去掉 `;@`、去掉 `..`、去掉 `/`、`..` 改成单个点、段名收 `;`、任意字符都算分隔符、不做 URL 解码。
-- **相关回归**：50 个文件，890 passed，10 skipped。包括：
+- **9b 复核建议，已采纳**（第二个提交，基于同一底座）：
+  - 分隔符改成反向写法：前一个字符不是词字符、点或连字符就算分隔。词字符按 Unicode 判断，中文目录名不会被误伤；
+  - 用例新增 3 种置空写法：`a&`、`#`、`${HOME}` 后紧跟宿主路径；新增 5 种保留写法：`https://example.com/a/b`、`../out/d.json`、`out/a%20b.json`、`交付/tmp/x.json`、`my-dir/tmp/x.json`；
+  - 用 9b 的独立对抗样例（41 种泄露、14 种普通定位，`decision-evidence/review-capability-v2-b3h-5d48cbd2e/adversarial.py`）复跑新模块：
+    - 只剩 5 种没置空，都属于故意编码：两次 %-编码、`%00`、`~user/`、反斜杠写法、`vscode://`。设计稿已写明不在防护范围；
+    - 普通定位零误伤。
+  - 变异 7/7 全部被抓住（`cpv2-mut/mutations_b3h2.json`）：
+    - 只认列出的分隔符、词字符只认 ASCII、点也算分隔、去掉 `..`；
+    - 段名收 `;`、任意字符算分隔、不做 URL 解码。
+- **相关回归**：50 个文件，第二个提交后 898 passed，10 skipped（第一个提交时 890 passed）。包括：
   - pack 系列、verification 声明、attempt_sandbox；
   - 43 个扫描守卫；
   - test_packaging、test_constants_catalog。

@@ -79,7 +79,8 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
     - 目标和输入换成工作区相对路径，工作区根前缀去掉；
     - 本次临时目录换成 `<verifier>`，宿主解释器换成 `<python>`；
     - 换完仍含宿主路径的整条置成 `<redacted>`。是否“仍含宿主路径”只看结构化事实：片段以 `~/`、盘符开头，或者是 `/<段>` 且这一段在本机根目录下真实存在。JSON Pointer（如 `/shots/0`）的首段在本机不存在，不会被误伤。
-    - 9b 复核加固：片段前可以紧跟 `..`、`/`、`;`、`@`（`file:///Users/…`、`../../../../Users/…`、`a;/Users/…`、`at@/Users/…` 都算），判断前先做一次 URL 解码（`%2FUsers%2F…` 也算）。`out/tmp/x.json`、`docs/Users/x.md`、`./out/d.json`、`out/d.json:12:3` 这类相对写法原样保留。
+    - 9b 复核加固：片段前只要不是词字符、点或连字符就算分隔（`file:///Users/…`、`a;/Users/…`、`at@/Users/…`、`a&/Users/…`、`#/Users/…` 都算；词字符按 Unicode，`交付/tmp/x.json` 这类中文目录名不误伤），另认 `..`（`../../../../Users/…`），判断前先做一次 URL 解码（`%2FUsers%2F…` 也算）。`out/tmp/x.json`、`docs/Users/x.md`、`./out/d.json`、`out/d.json:12:3`、`https://example.com/a/b` 这类写法原样保留。
+    - 防护范围：防的是 `sys.argv`、`__file__`、异常信息这类无意带出的宿主路径。故意编码（两次 %-编码如 `%252FUsers`、插 `%00`、base64、`~user/`、反斜杠写法、`vscode://file/Users` 这类）不在范围内：检查程序存心外传，换什么编码都挡不住，真正的信任边界是“能力包由管理员审过才装”。
     - 代价：JSON Pointer 的首段恰好是本机根目录名（`/home`、`/Users`、`/tmp`）时，整条置成 `<redacted>`，只丢定位、不泄露。
   - `valid` 必须等于“errors 为空”。自相矛盾、格式不对都记 `verifier_output_invalid`。
   - 退出码不参与判定，只用来识别超时。检查器写出 v1 就退 0；目标坏了给 `valid=false` 加错误码，崩溃没写出 v1 时宿主记 `verifier_output_invalid`。
