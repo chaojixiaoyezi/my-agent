@@ -206,8 +206,7 @@ class AttemptExecutionSandbox:
             if cached is not None:
                 self._ready = cached
             else:
-                report = _network_checked(self.probe(), self._platform, self.spec)
-                self._ready = self._cache_readiness(key, report)
+                self._ready = self._cache_readiness(key, _network_checked(self.probe(), self._platform, self.spec))
         if not self._ready.ready:
             raise SandboxUnavailableError(
                 f"SANDBOX_UNAVAILABLE: {self._ready.code}: {self._ready.detail}"
@@ -271,8 +270,7 @@ class AttemptExecutionSandbox:
             protected_write_paths=self.spec.protected_write_paths,
             implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
             full_access=self.spec.full_access,
-        ), *_private_read_rules(self.spec), *_hidden_path_rules(self.spec.hidden_paths),
-            *_network_rules(self.spec.network_access)])
+        ), *_spec_rules(self.spec)])
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
     # LLM: 同步批处理无 stdin 注入协议，必须返回 EOF；不改变 build_argv、显式 PTY 通道和超时回收契约。
@@ -473,6 +471,12 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
     if completed is None or completed.returncode != 0:
         return SandboxReadiness(False, "SANDBOX_NETWORK_ISOLATION_UNAVAILABLE", "本机沙箱无法切断网络")
     return SandboxReadiness(True, "SANDBOX_READY", "沙箱可用且能切断网络")
+
+
+# LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、隐藏路径、断网；断网必须最后（Seatbelt 后写覆盖先写）。
+# 函数用途: 汇总按 spec 生成的 macOS 附加规则。
+def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
+    return [*_private_read_rules(spec), *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access)]
 
 
 # LLM: 断网只看结构化 network_access；规则放在整份配置最后（Seatbelt 后写覆盖先写），full_access 也同样生效。
