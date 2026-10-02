@@ -71,11 +71,21 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - 不起进程的拒绝：同意缺失、运行方式不支持、平台沙箱不可用、能沙箱但不能断网；
   - 交付物不存在、检查程序未声明。
 - **声明用例**同步改为 `inputs`（`test_capability_verification_declaration.py` 29 项）：多了 8 种非法形状（参数名不带横线、required 非布尔、越界路径、未知键、参数名重复、与 args 字面量重名、超过 4 条、旧 `baseline` 键），未知来源名按开放世界接受，输入的 required 变了同意失效，确认说明列出输入参数和来源。
-- **macOS**（ci-venv-312，Seatbelt）：块 2 最初 15 项加 `test_attempt_sandbox.py`、`test_sandbox.py`、`test_plugin_sandbox.py`，共 75 passed / 9 skipped（Linux 专用）。
-- **Linux 车道**（Docker 镜像 `my-agent-linux-test:py312`，`--network none`，bwrap 0.12.0，同 4 个文件；脚本 scratchpad `lane-b2/run_lane_b2.sh`）：
-  - 不加 `NET_ADMIN`：67 passed / 17 skipped，其中 9 项真实沙箱用例因断网探测不通过而按设计跳过；
-  - 加 `--cap-add NET_ADMIN`：76 passed / 8 skipped（macOS 专用），断网和只读都真跑通过。
+- **macOS**（ci-venv-312，Seatbelt）：`test_pack_verifier_runner.py`、`test_attempt_sandbox.py`、`test_sandbox.py`、`test_plugin_sandbox.py` 共 79 passed / 9 skipped（Linux 专用）。
+- **Linux 车道**（Docker 镜像 `my-agent-linux-test:py312`，`--network none`，bwrap 0.12.0，上述 4 个文件加声明用例；脚本 scratchpad `lane-b2/run_lane_b2.sh`）：
+  - 不加 `NET_ADMIN`：99 passed / 18 skipped，其中 10 项真实沙箱用例因断网探测不通过而按设计跳过；
+  - 加 `--cap-add NET_ADMIN`：109 passed / 8 skipped（7 项 macOS 专用、1 项本机没有 node），断网和只读都真跑通过。
   - 车道全量要覆盖这些用例，需要在容器参数里加 `--cap-add NET_ADMIN`。
+- **相关回归**：`test_capability_*.py`、`test_plugin_*.py`、沙箱三件、常数目录、guards9 与 `test_packaging.py`，共 94 个文件 1932 passed / 9 skipped。
+  - 回归查出块 2 自己的一处问题：超时退出码常数原名不带单位后缀，常数目录守卫不放行。它是协议常数，改名为 `_SANDBOX_TIMEOUT_EXIT_CODE` 后不进目录。
+- **门禁**逐项 rc=0：import boundaries、ruff、doc_sync、常数目录 `--check`、前端目录 `--check`、strict code-size、`git diff --check`、clean_package。
+  - code-size 按确切基线 `2e5a36af0` 比对告警身份：新增 0、消失 0。
+  - 首轮多出 4 条（沙箱类超 250 行、`require_ready` 嵌套、两个函数参数多），已通过把断网探测挪成模块函数、拆分运行器、测试辅助函数改用 `**options` 消掉。
+- **变异 23/23 全部被抓住**（`cpv2-mut/mutations_b2.json`）：
+  - 用工作区副本、跳过同意、放开运行方式、联网、去掉 macOS 断网规则、工作区可写；
+  - 不查 schema、去掉超时分支、去掉显式就绪检查、跳过断网探测、摘要不设上限、条目缺 code 也放行；
+  - 不传输入、原样传调用方参数、去掉必需输入闸、不查 valid 一致性、同意不含输入、不查参数名重复、不限输入条数、接受旧 baseline 键、非普通文件算找到、不查 required 类型、把来源名封闭成两种。
+  - 首轮“跳过断网探测”漏网：用例把整个探测函数替换掉了。改成只替换底层 `subprocess.run`、让真实探测逻辑参与后抓住。
 
 ## 能力包 v2 块 1：verification 声明与启用前执行确认（2026-10-02，分支 `claude/ae-capability-packs-v2`，基于 `81221a667`）
 
