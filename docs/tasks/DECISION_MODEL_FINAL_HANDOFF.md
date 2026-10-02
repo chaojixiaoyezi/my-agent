@@ -136,7 +136,7 @@ python3 scripts/check_clean_package.py .
 
 - 插件线：
   - 动作候选已接入并真实验收。插件线后续：browser-lite 的相对路径按宿主 `workspace_root` 解析，`file://` 与本机 http 被宿主 URL 参数门先拦，工具描述与宿主门需要对齐（已记入观察候选设计第 6 节）；
-  - 停止时未结束模型调用的结构化"被中断/未结算"结清已落地（`db4d46398`）；runner worker 账本的同类结清由主线跟进。
+  - 停止时未结束模型调用的结构化"被中断/未结算"结清已落地（`db4d46398`）；runner worker 账本的同类结清由主线跟进（2026-10-02 J17 已做，进程内 runner worker 与 owner 池 agent 一并结清）。
 - 主线：Memory v2 迁移把新 owner 的模板标题生成待审候选（主线已记待办）；模型经后台进程起的 http.server 监听所有网卡，Gateway 停止后仍在运行（已登记台账，待主线评估）。
 
 ## 剩余风险
@@ -150,7 +150,7 @@ python3 scripts/check_clean_package.py .
   S1 草稿适用场景标签改为"适用场景"；S2 草稿含查询串 URL 时按 `privacy_url` 结构化原因跳过并记 skipped 审计，不外发；
   S2 冷却持久化到 `owner_skill_proposals_dir/.cooldown.json`（有界、过期即清、可删文件回退）。详见 DESIGN_LEDGER。
 - 决策实验自动晋升后，TUI 没有主动提示。
-- Gateway 停止时，runner worker 账本里的在途调用还没有同类结清（主线跟进）。
+- Gateway 停止时，runner worker 账本里的在途调用还没有同类结清（主线跟进）。2026-10-02 J17 已做：进程内 runner worker 与 owner 池 agent 一并结清；local/main 子进程 runner 各自收口。
 - 动作候选只用 browser-lite 一个插件、一张简单测试页验证过；OCR/computer_use 还没有声明观察候选。工具描述让模型以为能用 `file://`，真实样本里两次被宿主拦下、页面没打开。
 
 ## 后续建议

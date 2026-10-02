@@ -60,6 +60,10 @@ def build_owner_scoped_agent(
         channel_runtime_health_provider=channel_runtime_health_provider,
     )
     _maybe_seed_feishu_call_name(base_config, owner, agent)  # 飞书首聊自动称呼,best-effort 永不抛
+    from .agent_core.model.call_runtime import track_shutdown_ledger
+
+    # J17：作用域 agent 和网关同进程，停机时它的在途模型调用会被切断，登记后由网关停机结清一并记账（弱引用，逐出回收后自动消失）。
+    track_shutdown_ledger(agent)
     return agent
 
 

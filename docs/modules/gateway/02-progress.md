@@ -352,7 +352,7 @@ Gateway 安全重启第一期（主线，2026-09-26，用户批准“代理要�
 
 无进程身份的悬挂运行轮改为可见并可显式结清（主线，2026-09-24 晚，用户决定第 5 项自愈）：Gateway 启动的 `_recover_gateway_stale_attempts` 在原进程死亡证明之外，另经 `RuntimeRepository.unidentified_stale_attempts()` 列出 metadata 里没有 `runner_pid` 的 current attempt（旧版本写入、永远无法证实死活），写进 `state.json`/`gateway_run_started` 的 `unidentified_stale_attempts` 计数与 `gateway_stale_attempts_reconciled` 事件的 `unidentified` 列表；不自动判死（同一 owner 库可能被别的运行版本写入，原 RUN-01 合同保持）。结清走显式命令 `my-agent runtime-stale-attempts --settle [--older-than-days N]`，经 `settle_unidentified_attempts` 的 current_attempt CAS 记为 unknown 并在 metadata 记 `recovery_reason=no_runner_identity`。测试 `test_runtime_db_recover_stale.py`、`test_startup_commands.py`。
 
-Gateway 停止时结清在途模型调用（主线，2026-09-24，用户决定第 4 项，已合入）：`_cmd_gateway_run_cleanup` 收完三条循环后调用 `agent_core/model/call_runtime.settle_open_model_calls_for_shutdown()`，把进程 agent 账本里仍是 started/first_token 的调用一次性记为 failed，错误码 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`、类型 `HostShutdownInterrupted`，用量继续按缺报处理（不补零）；有在途调用才写事件 `gateway_model_calls_interrupted`（call/request/run 身份、后端、模型、账本用途桶、是否见首 token、耗时、估算输入、HTTP 尝试数、是否探针、原因码，不含正文），收尾事件与控制台行新增 `interrupted_model_calls` 条数。账本模块出错只记 `gateway_model_call_settlement_failed{error_type}`，不中断收尾。边界：只覆盖 Gateway 进程 agent 自己的账本；子代理 runner worker 的账本在其自身生命周期内结算，非正常退出（kill -9、断电）留给启动对账切片。测试 `test_gateway_model_call_shutdown_settlement.py`。
+Gateway 停止时结清在途模型调用（主线，2026-09-24，用户决定第 4 项，已合入）：`_cmd_gateway_run_cleanup` 收完三条循环后调用 `agent_core/model/call_runtime.settle_open_model_calls_for_shutdown()`，把进程 agent 账本里仍是 started/first_token 的调用一次性记为 failed，错误码 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`、类型 `HostShutdownInterrupted`，用量继续按缺报处理（不补零）；有在途调用才写事件 `gateway_model_calls_interrupted`（call/request/run 身份、后端、模型、账本用途桶、是否见首 token、耗时、估算输入、HTTP 尝试数、是否探针、原因码，不含正文），收尾事件与控制台行新增 `interrupted_model_calls` 条数。账本模块出错只记 `gateway_model_call_settlement_failed{error_type}`，不中断收尾。边界：只覆盖 Gateway 进程 agent 自己的账本（2026-10-02 J17 起，同进程登记过的 runner worker 与 owner 池 agent 账本一并结清）；子代理 runner worker 的账本在其自身生命周期内结算，非正常退出（kill -9、断电）留给启动对账切片。测试 `test_gateway_model_call_shutdown_settlement.py`。
 
 线程中断标志不再随 ident 复用串到新线程（已合入 main `761ef2ab2`，双机已部署 `runtime-step11b-240d0f70`）：`concurrency/interrupt.py` 的中断标志改为记住立旗时的线程对象（弱引用）。线程已退出或 ident 换了主人即视为过期并清除；给已退出线程立旗直接落空，关闭竞态里晚到的立旗不再残留。此前长期运行的 Gateway 里，新线程可能复用带脏标志的 ident，被静默、随机地取消。公共接口不变。
 
@@ -919,3 +919,8 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - 文件工具经 `PathAccessPolicy.check` 最先拒绝（`PATH_HOST_MANAGED_STORE_BLOCKED`），遍历类工具不交出其中条目；
 - shell 沙箱把它们藏起来（Linux 用只读空 tmpfs、macOS 用 Seatbelt 末尾拒读写）。
 用户工作区里同名目录和自己的 zip 不受影响。合同测试 `test_host_managed_store_access.py`。
+
+## Gateway 停机一并结清进程内 runner worker 与 owner 池 agent 的在途模型调用（J17，2026-10-02，分支 `claude/38-j17-stop-settles-runner-calls`，基于 step16z `51e52f04a`）
+
+- **起因**：停机结清只结网关 agent 自己的账本；非 local/main owner 的进程内 runner worker 和 owner 池作用域 agent 各有账本，停机后在途调用一直是 started。
+- **改动**：`call_runtime.track_shutdown_ledger` 弱引用登记（runner worker 构建、owner 池建 agent 两处），停机结清一并处理；事件与原因码不变。设计见台账 J17 节，测试与变异见 TESTS.md 同名节。

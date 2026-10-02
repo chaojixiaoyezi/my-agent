@@ -4,8 +4,12 @@
 # 模块用途: 验证 Gateway 停止时仍在途的模型调用会被记成"被停机中断、未结算"，并写出结构化停机事件（用户决定第 4 项）。
 from __future__ import annotations
 
+import gc
 import threading
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core.model import call_runtime
 from agent_py_agent.agent.agent_core.model.call_runtime import (
@@ -24,6 +28,13 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
 )
 from agent_py_agent.agent.conversation import decision_policy
 from agent_py_agent.cli import gateway_process
+
+
+# 函数用途: 停机结清的登记表是进程级的；每个用例换一份同类型的新表，别的测试留下的 worker 账本不会混进来（类型沿用产品的，弱引用语义仍受测）。
+@pytest.fixture(autouse=True)
+def _isolated_shutdown_ledgers(monkeypatch):
+    monkeypatch.setattr(call_runtime, "_SHUTDOWN_LEDGERS", type(call_runtime._SHUTDOWN_LEDGERS)())
+
 
 _PROJECTION_FIELDS = {
     "call_id", "request_id", "run_id", "backend", "model", "purpose", "first_token_seen", "elapsed_seconds",
@@ -137,3 +148,68 @@ def test_gateway_cleanup_survives_a_failing_settlement(monkeypatch):
     failed = [payload for name, payload in events if name == "gateway_model_call_settlement_failed"]
     assert failed == [{"error_type": "RuntimeError"}], "只记异常类型，不记异常正文"
     assert [name for name, _payload in events][-1] == "gateway_run_cleanup"
+
+
+# 函数用途: 进程内 runner worker 的最小启动参数（只用来走一遍 _attach_worker_runtime）。
+def _worker_params():
+    from agent_py_agent.agent.agent_core.runner.worker import RunSubagentWorkerParams
+
+    return RunSubagentWorkerParams(config=None, root=Path("."), run_id="subagent-1", instruction="", dry_run=False,
+                                   max_cards=0, probe=False, retry_reason="")
+
+
+def test_runner_worker_and_owner_agent_ledgers_are_settled_with_the_gateway(monkeypatch):
+    """J17（2026-10-02）：非 local/main owner 走进程内线程派工，每个 runner worker 和 owner 池里的作用域 agent 各有一本账，
+    和网关同进程，停机会切断它们的在途调用。改前停机只结清网关 agent 自己的账本，这些调用永远停在 started。"""
+    from agent_py_agent.agent import core, owner_scoped_pool
+    from agent_py_agent.agent.agent_core.runner.worker import _attach_worker_runtime
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    gateway = SimpleNamespace()
+    _start(model_call_ledger(gateway), "gateway-call", request_id="gwreq-1")
+    worker = SimpleNamespace()
+    _start(model_call_ledger(worker), "worker-call", run_id="subagent-1")
+    _attach_worker_runtime(worker, _worker_params())
+    monkeypatch.setattr(core, "SimpleAgent",
+                        lambda config, root, **_kwargs: SimpleNamespace(config=config, _model_call_ledger=ModelCallLedger()))
+    owner = SimpleNamespace(provider="local", owner_kind="user", owner_id="u-1")
+    scoped = owner_scoped_pool.build_owner_scoped_agent(AgentConfig(), Path("."), owner, None)
+    _start(scoped._model_call_ledger, "owner-call", request_id="gwreq-2")
+
+    facts = settle_open_model_calls_for_shutdown(gateway)
+
+    assert sorted(fact["call_id"] for fact in facts) == ["gateway-call", "owner-call", "worker-call"]
+    assert {fact["error_code"] for fact in facts} == {MODEL_CALL_INTERRUPTED_ERROR_CODE}
+    assert model_call_ledger(worker).records()[0].status == "failed"
+    assert settle_open_model_calls_for_shutdown(gateway) == (), "同一本账只结一次"
+
+
+def test_tracked_ledgers_are_weak_and_vanish_with_their_agent():
+    from agent_py_agent.agent.agent_core.runner.worker import _attach_worker_runtime
+
+    worker = SimpleNamespace()
+    _start(model_call_ledger(worker), "gone-call", run_id="subagent-2")
+    _attach_worker_runtime(worker, _worker_params())
+    del worker
+    gc.collect()
+    gateway = SimpleNamespace()
+
+    assert settle_open_model_calls_for_shutdown(gateway) == () and not hasattr(gateway, "_model_call_ledger")
+
+
+def test_gateway_cleanup_reports_runner_worker_calls_in_the_same_event(monkeypatch):
+    from agent_py_agent.agent.agent_core.runner.worker import _attach_worker_runtime
+
+    agent = SimpleNamespace()
+    _start(model_call_ledger(agent), "curator", run_id="memory-curator-run-1", auxiliary=True)
+    worker = SimpleNamespace()
+    _start(model_call_ledger(worker), "worker-call", run_id="subagent-3")
+    _attach_worker_runtime(worker, _worker_params())
+    request, events = _cleanup_request(monkeypatch, [], agent)
+
+    report = gateway_process._cmd_gateway_run_cleanup(request)
+
+    assert report["interrupted_model_calls"] == 2
+    calls = events[0][1]["calls"]
+    assert sorted((call["call_id"], call["run_id"]) for call in calls) == [
+        ("curator", "memory-curator-run-1"), ("worker-call", "subagent-3")]

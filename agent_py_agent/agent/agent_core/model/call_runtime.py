@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
+import weakref
 from typing import Any
 
 from ...contracts.model_call_ledger import (
@@ -46,6 +47,10 @@ from .usage import (
 # 模块用途: 连接实际调用与账本、超时及统计，让生成和决策响应共用用量读取并保留缺报事实。
 
 _LEDGER_CREATION_LOCK = threading.Lock()
+# 同进程里随 Gateway 停机一并结清的其它 agent 账本（J17：进程内 runner worker、owner 池里各 owner 的 agent）。
+# 只存弱引用：agent 被回收后自动消失；只供停机结清查找，不是账本副本，也不参与正常记账。
+_SHUTDOWN_LEDGERS: weakref.WeakSet[ModelCallLedger] = weakref.WeakSet()
+_SHUTDOWN_LEDGERS_LOCK = threading.Lock()
 # LLM: 停机中断的唯一结构化原因码/类型；消费端按 error_code 识别"未结算"，不解析文案。
 MODEL_CALL_INTERRUPTED_ERROR_CODE = "MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN"
 MODEL_CALL_INTERRUPTED_ERROR_TYPE = "HostShutdownInterrupted"
@@ -307,18 +312,42 @@ def model_call_ledger(agent: object) -> ModelCallLedger:
         return ledger
 
 
-# LLM: 只读取 agent 上已存在的账本，停机时不新建账本；每条未结清调用按同一原因码记 failed，用量仍按缺报处理（不补零）。
-#   返回的投影只含结构化身份与时长字段，不含提示词、响应正文或密钥；写事件由调用方（Gateway 收尾）负责。
-# 函数用途: Gateway 停机排空后，把仍在途的模型调用统一记成"被停机中断、未结算"，并给出可写进停机事件的事实列表。
-def settle_open_model_calls_for_shutdown(agent: object) -> tuple[dict[str, object], ...]:
+# LLM: J17 登记入口：只登记 agent 上已存在的 ModelCallLedger（不新建账本），弱引用、可重复调用；调用方是进程内 runner worker 的
+#   构建（runner/worker._attach_worker_runtime）和 owner 池建作用域 agent（owner_scoped_pool.build_owner_scoped_agent）。
+#   改动同步 test_gateway_model_call_shutdown_settlement.py。
+# 函数用途: 把这个 agent 的模型调用账本登记为“随 Gateway 停机一并结清”。
+def track_shutdown_ledger(agent: object) -> None:
     ledger = getattr(agent, "_model_call_ledger", None)
     if not isinstance(ledger, ModelCallLedger):
-        return ()
-    interrupted = ledger.fail_open_calls(
-        error_type=MODEL_CALL_INTERRUPTED_ERROR_TYPE,
-        error_code=MODEL_CALL_INTERRUPTED_ERROR_CODE,
-    )
+        return
+    with _SHUTDOWN_LEDGERS_LOCK:
+        _SHUTDOWN_LEDGERS.add(ledger)
+
+
+# LLM: 只读取 agent 上已存在的账本，停机时不新建账本；同进程里登记过的其它账本（track_shutdown_ledger）一并结清，同一账本只结一次。
+#   每条未结清调用按同一原因码记 failed，用量仍按缺报处理（不补零）。返回的投影只含结构化身份与时长字段，不含提示词、
+#   响应正文或密钥；写事件由调用方（Gateway 收尾）负责。local/main 的子进程 runner 不在本进程，各自收口。
+# 函数用途: Gateway 停机排空后，把本进程仍在途的模型调用统一记成"被停机中断、未结算"，并给出可写进停机事件的事实列表。
+def settle_open_model_calls_for_shutdown(agent: object) -> tuple[dict[str, object], ...]:
+    interrupted = [
+        record
+        for ledger in _shutdown_ledgers(agent)
+        for record in ledger.fail_open_calls(
+            error_type=MODEL_CALL_INTERRUPTED_ERROR_TYPE,
+            error_code=MODEL_CALL_INTERRUPTED_ERROR_CODE,
+        )
+    ]
     return tuple(_interrupted_call_projection(record) for record in interrupted)
+
+
+# LLM: 主 agent 的账本在前，再接登记表快照；同一本账出现两次也无妨：fail_open_calls 只结仍在途的调用，第二次什么都不返回。
+#   不新建账本。
+# 函数用途: 列出这次停机要结清的全部账本。
+def _shutdown_ledgers(agent: object) -> list[ModelCallLedger]:
+    own = getattr(agent, "_model_call_ledger", None)
+    with _SHUTDOWN_LEDGERS_LOCK:
+        tracked = list(_SHUTDOWN_LEDGERS)
+    return ([own] if isinstance(own, ModelCallLedger) else []) + tracked
 
 
 # LLM: 投影字段固定：调用/请求/run 身份、后端与模型名、账本用途桶、是否已见首 token、耗时、估算输入、HTTP 尝试数、

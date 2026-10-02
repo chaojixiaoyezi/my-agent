@@ -9,6 +9,16 @@
 - **做法**：断言改成 `len(server.requests) <= 1`（守的是“不重试”）；正常路径下服务端挂起收到 1 次，重试会变 2 次仍被抓到。
   延迟插件下与正常运行都通过。
 
+## J17：Gateway 停机一并结清进程内 runner worker 与 owner 池 agent 的在途模型调用（2026-10-02，分支 `claude/38-j17-stop-settles-runner-calls`，基于 `claude/3a-step16z` `51e52f04a`）
+
+- **新增**（`test_gateway_model_call_shutdown_settlement.py`，3 项；原 5 项不变）：
+  - 网关 agent、经 `_attach_worker_runtime` 的 runner worker、经 `build_owner_scoped_agent` 的作用域 agent 各有一条在途调用，
+    停机结清三条都记 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`；再结一次没有第二份事实；
+  - 登记是弱引用：worker 被回收后不再出现，空网关 agent 不新建账本；
+  - Gateway 收尾端到端：worker 的在途调用和网关自己的进同一条 `gateway_model_calls_interrupted` 事件，按 run_id 区分。
+- **登记表隔离**：用例前换一份同类型的新表（类型取产品的），别的测试留下的 worker 账本不会混进来，弱引用语义仍受测。
+- **变异**（5 个，抓到 5 个）：登记不落表；worker 不登记；owner 池不登记；结清不看登记表；登记表改成强引用集合。
+
 ## 集成修正：插件目录 schema v4 的测试与文档同步（2026-10-02，3a）
 
 - C14 后续（`2ff572e5f`）把 `plugin_command_catalog` 升到 v4（管理动作加 `unavailable_reason`）。读取端只认当前版本，

@@ -1,5 +1,24 @@
 # 设计台账
 
+## J17：Gateway 停机时一并结清进程内 runner worker 与 owner 池 agent 的在途模型调用（2026-10-02，分支 `claude/38-j17-stop-settles-runner-calls`，基于 `claude/3a-step16z` `51e52f04a`，已实现，待集成）
+
+- **缺口**：停机结清（`call_runtime.settle_open_model_calls_for_shutdown`）原来只结网关 agent 自己的账本。
+  - 非 local/main 的 owner（飞书、local/user）走进程内线程派工，每个 runner worker 都新建一个 SimpleAgent，各有一本账；
+  - owner 池里各 owner 的作用域 agent 也各有一本账；
+  - 这些 agent 和网关同进程，停机会切断它们的在途调用，但账上永远停在 started，没有“被停机中断”的记录。
+- **做法**（3a 同意：一个机制一起结清）：
+  - `call_runtime` 新增进程内弱引用登记表与 `track_shutdown_ledger(agent)`。只登记 agent 上已存在的账本，不新建；agent 被回收后自动消失。
+  - 两个登记点：
+    - 每个建好的 runner worker（`runner/worker._attach_worker_runtime`，含按有效配置重建的那个）；
+    - owner 池建的作用域 agent（`owner_scoped_pool.build_owner_scoped_agent`）。
+  - `settle_open_model_calls_for_shutdown` 先结网关 agent 的账，再结登记表里的账。同一本账出现两次也无妨：`fail_open_calls` 只结仍在途的调用。
+  - 原因码、用量按缺报、事件 `gateway_model_calls_interrupted` 都不变，只是多了这些调用；靠 run_id、request_id 区分来源。
+- **范围**：
+  - 覆盖本进程的账本：网关 agent、进程内 runner worker、owner 池作用域 agent；
+  - local/main 的子进程 runner 带 `start_new_session`，网关停了它还在，在自己的生命周期里收口，不在这次范围。
+  - kill -9、断电这类非正常退出，仍靠启动对账。
+- **验证**：`test_gateway_model_call_shutdown_settlement.py` 加 3 项（原 5 项不变）；5 个变异全部被抓住。见 TESTS.md 同名节。
+
 ## 执行器退出且效果未知时保留宿主给的失败类型（2026-10-02，分支 `claude/38-executor-failure-type`，基于 `claude/3a-step16z` `00ec92b77`，已实现，待集成）
 
 - **来源**：C4 真实核对的顺带发现。`executor_recovery.recover_exited_runner` 在“执行器已退出、有工具效果未确认”时给
@@ -2856,7 +2875,7 @@ Compact补充片已获协作方归属确认，本地537项及独立审阅通过�
   - **关闭取消**：`decision_policy.cancel_active_decisions_for_shutdown()` 复用设置撤销那张进程内在途索引。等待中的调用立即回原方案（`stale/host_shutdown`），不冒充用户停止、不进冷却，调用账记 `DECISION_CANCELLED`；关闭后不再登记新决策。Gateway 收尾在置位停止事件后调用它，出错只记异常类型。
   - **并发组合**：后台 `curator` 慢响应不拖住前台 `skill_tool`；线程变更只撤销前台，owner 级改 `curator` 只提前撤销后台。
   - **两处已知取舍**（不改，登记在此）：采用前复核按整份策略版本判断，所以 owner 级任何设置改动会让同 owner 其他点的在途建议返回后作废为 `policy_changed`；冷却原先按连接共享，2026-09-26 已改为超时只冷却本点位（`point_backoff`），只有连接错误才冷却整条连接（见本台账 Jev 条目）。两者都只会少一条建议，不会采用过期建议或卡住。
-  - 停止时仍未结束的模型调用已由主线 owner 结清为结构化"被中断"（`db4d46398`，已部署）：排空窗口之后，Gateway 进程账本里的在途调用记为 failed / `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，用量保持未报告、不补零；runner worker 的账本另行跟进。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
+  - 停止时仍未结束的模型调用已由主线 owner 结清为结构化"被中断"（`db4d46398`，已部署）：排空窗口之后，Gateway 进程账本里的在途调用记为 failed / `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，用量保持未报告、不补零；runner worker 的账本另行跟进（2026-10-02 J17 已做：进程内 runner worker 与 owner 池 agent 一并结清，见台账 J17 节）。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
 - **决策实验自动晋升后没有主动提示**（2026-09-25，F1 正向晋升真实样本发现；已实施（2026-10-01），本地待集成）：新 `applied` 回执冻结唯一 `promotion_id` 与规则摘要，沿原宿主提示通道在 TUI 当轮灰行及同会话飞书最终回复前提示点位、off→apply、样本数/门槛及真实 `/model` 恢复继承路径。原请求回执阻止重放，`notice_id` 复用唯一编号，消费后重启不补投；不解析自然语言。隔离测试及变异已验证，真实客户端收信未验证，见顶部 J6 与 TESTS 同名节。
 - **自学习的 lesson 来源在当前产品里是死路**（2026-09-25，真实验收发现；已由 `record_lesson` 修复并做端到端真实验收，已合入 main `52e0190e1`）：
   - 子代理提示要求"像普通协作者一样回复、不输出状态 JSON"，`output.json` 由宿主生成，没有结构化通道填 `lessons`。所以真实子代理即使在回复里写了经验，也不会产生 `subagent_lesson` 候选，S1 提案与 S2 排序都无法触发。
@@ -3634,7 +3653,7 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
 
 - 已实现、待真实停机复验：Gateway 停止排空窗口后，仍在途的模型调用由唯一账本批量记为 failed/`MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`
   （用量按缺报，不补零），并写 `gateway_model_calls_interrupted` 结构化事件；只覆盖 Gateway 进程 agent 自己的账本，
-  子代理 runner worker 各自持有的账本尚未纳入。下一片是启动时对遗留 `running` attempt 的结构化对账（非正常退出的补救路径），
+  子代理 runner worker 各自持有的账本尚未纳入（2026-10-02 J17 已纳入进程内 runner worker 与 owner 池 agent，见台账 J17 节）。下一片是启动时对遗留 `running` attempt 的结构化对账（非正常退出的补救路径），
   与本项一起构成"停机结清 + 启动对账"两段自愈，见 [Gateway 结构](docs/modules/gateway/04-structure.md)。
 
 - 已决定并实现（2026-09-24 晚，用户第 5 项"小问题 my-agent 自己搞定"）：无进程身份的悬挂运行轮**不自动判死**——同一 owner 权威库会被多个运行版本写入，"没有身份"不是死亡证明；产品改为在 Gateway 启动时把它们列进状态与事件，并提供显式结构化命令 `runtime-stale-attempts --settle` 按阈值结清为 unknown（记结清来源）。自愈的边界是"看得见 + 一条命令"，不是猜。启动对账仍只对能证实进程死亡的行自动生效。

@@ -489,7 +489,8 @@ def _join_gateway_loops(request: GatewayRunCleanupRequest) -> list[str]:
 
 # LLM: 排空窗口之后才结清：这时仍在途的模型调用会随进程退出被切断，由唯一账本按同一原因码记 failed（用量按缺报），
 #   有在途调用才写结构化事件 gateway_model_calls_interrupted（只含身份/用途/时长字段，不含正文）；账本模块出错只记
-#   异常类型事件 gateway_model_call_settlement_failed，不能中断收尾。只覆盖 Gateway 进程 agent 自己的账本。
+#   异常类型事件 gateway_model_call_settlement_failed，不能中断收尾。覆盖本进程的账本：Gateway agent 自己的，加上登记过的
+#   进程内 runner worker 与 owner 池作用域 agent 的（J17，call_runtime.track_shutdown_ledger）；local/main 子进程 runner 各自收口。
 # 函数用途: Gateway 停止时给还没结清的前台/后台模型调用留下"被中断、未结算"的事实，返回条数。
 def _settle_interrupted_model_calls(request: GatewayRunCleanupRequest, *, drain_complete: bool) -> int:
     agent = request.context.agent
