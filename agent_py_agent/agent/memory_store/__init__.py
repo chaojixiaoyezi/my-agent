@@ -21,9 +21,12 @@ from .migration import (
 )
 from .recall import (
     MemoryRecallScope,
+    formal_recall_suppressed,
     hot_memory_records,
+    is_isolated_recall_context,
     long_term_record_matches_scope,
     routed_lesson_records,
+    runtime_long_term_scope,
 )
 from .retention import (
     RETENTION_SCHEMA_VERSION,
@@ -49,7 +52,10 @@ __all__ = [
     "RETENTION_SCHEMA_VERSION",
     "append_daily_memory_event",
     "daily_memory_path",
+    "formal_recall_suppressed",
     "hot_memory_records",
+    "is_isolated_recall_context",
     "long_term_record_matches_scope",
     "routed_lesson_records",
+    "runtime_long_term_scope",
 ]

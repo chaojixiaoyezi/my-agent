@@ -50,6 +50,7 @@ from .backends import get_backend
 from .capability import CapabilityRouter, from_tool_model_spec
 from .capability.channel_message_tool import SendMessageTool
 from .capability.config import CapabilityConfig
+from .capability.memory_search_tool import MemorySearchTool
 from .capability.memory_tool import RememberTool
 from .capability.model_profile_tool import ManageModelsTool
 from .capability.persona_repository import PersonaRepository
@@ -1098,6 +1099,10 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(SendMessageTool(agent))
     # 长期记忆写入:记"需要时才想起"的具体事实/事件到 owner memory(对标 长期助手 memory_tool)。
     agent.tools.register(RememberTool(agent))
+    # 长期记忆只读检索:自动召回漏掉时主模型自己按当前 owner 与范围查一次(P5-A 缺口 2);
+    # 开关 enable_memory_search_tool 默认关,关着不注册,工具目录里不出现。
+    if agent.config.enable_memory_search_tool:
+        agent.tools.register(MemorySearchTool(agent))
     # 人格文件写入:用户表达长期人设/画像/称呼/工作约定时,直接落 SOUL/USER/AGENTS.md(每轮注入,
     # 真正塑造每次交互)。区别于 remember——人设走这个,不进 memory(否则模型惯性把称呼/偏好塞进记忆)。
     agent.tools.register(UpdatePersonaTool(agent))

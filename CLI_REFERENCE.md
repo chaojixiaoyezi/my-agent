@@ -384,6 +384,13 @@ my-agent remember "项目 moneywise 使用 Python 3.14" --kind project
 | `content` | 必填，要长期保存的具体事实、事件或项目知识。 |
 | `--kind <kind>` | 正式知识类型：`fact`=事实（默认）、`event`=事件、`project`=项目知识；用户画像或偏好走 `update_persona`，lesson 走统一 Candidate/Promotion 链。 |
 
+代理侧对应两个模型工具：
+- `remember`：写入或列出正式长期记忆。
+- `memory_search`：只读检索，默认关闭，开关 `enable_memory_search_tool`，只能由你经 `/settings` 或配置文件打开，重启 Gateway 生效。
+  - 打开后，自动召回漏掉某个事实时，主会话代理可以按你本人和本轮适用范围查一次。
+  - 返回条目编号、类型、更新时间和前 300 字摘录，并写明这次走的是语义还是关键词检索。
+  - 它不写、不删、不改记忆，结果不进自动召回；子代理回合和记忆总闸关闭时不可用。
+
 ## `memory`
 
 ```powershell

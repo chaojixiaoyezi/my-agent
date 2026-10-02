@@ -59,6 +59,58 @@ def long_term_record_matches_scope(record: MemoryRecord, scope: MemoryRecallScop
     return scope.allows(attributes.get("scope_type"), attributes.get("scope_key"))
 
 
+# 这两类回合不读正式长期记忆：子代理 task_local 回合与宿主 control_plane 控制回合（与自动召回原规则相同）。
+FORMAL_RECALL_ISOLATED_CONTEXTS = frozenset({"task_local", "control_plane"})
+
+
+# LLM: 只看结构化 context_scope；自动召回（loop_support）与只读检索工具共用这一判定，改这里两边一起变。
+# 函数用途: 判断本轮上下文是不是不读正式长期记忆的隔离回合（子代理 task_local 或 control_plane）。
+def is_isolated_recall_context(context_scope: object) -> bool:
+    return str(context_scope or "").strip().lower() in FORMAL_RECALL_ISOLATED_CONTEXTS
+
+
+# LLM: 抑制条件只来自结构化 context_scope 与 owner 记忆总闸 owner_policy.memory_enabled，不解析自然语言；
+#   自动召回与 memory_search 工具共用，保证“自动召回不读的回合，模型也查不到”。
+# 函数用途: 判断本轮是否必须跳过正式长期记忆读取（隔离回合或 owner 关闭了记忆）。
+def formal_recall_suppressed(context_scope: object, owner_policy: object | None) -> bool:
+    if is_isolated_recall_context(context_scope):
+        return True
+    return owner_policy is not None and not bool(getattr(owner_policy, "memory_enabled", True))
+
+
+# LLM: 与自动召回同一范围规则：task_id/task_attributes 推出的精确范围，再加记忆库里实际存在的 project 范围
+#   （普通对话也能召回用户要求记住的项目知识；有 task 时 task 的 project 并存）。只扫 long_term 的结构化
+#   attributes.scope_type/scope_key。读记录失败时保持原范围，与原 loop_support 内联实现一致。
+# 函数用途: 计算本轮长期事实的召回范围，供自动召回与只读检索工具共用。
+def runtime_long_term_scope(
+    memory: object,
+    *,
+    task_id: str = "",
+    task_attributes: Mapping[str, object] | None = None,
+) -> MemoryRecallScope:
+    scope = MemoryRecallScope.from_runtime(task_id=task_id, task_attributes=task_attributes)
+    try:
+        project_pairs = _existing_project_pairs(memory)
+    except Exception:
+        return scope
+    if not project_pairs:
+        return scope
+    return MemoryRecallScope(tuple(dict.fromkeys([*scope.keys, *project_pairs])))
+
+
+# LLM: 只读 active 记录的结构化 scope 字段；不看正文。异常由调用方按“保持原范围”处理。
+# 函数用途: 列出记忆库里实际出现过的 project 范围键。
+def _existing_project_pairs(memory: object) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for record in memory.all():
+        attrs = record.attributes if isinstance(record.attributes, dict) else {}
+        scope_type = str(attrs.get("scope_type") or "").strip().lower()
+        scope_key = str(attrs.get("scope_key") or "").strip()
+        if scope_type == "project" and scope_key:
+            pairs.append(("project", scope_key))
+    return pairs
+
+
 # LLM: Routing 的文件读取票据只决定“哪些 lesson 被读过”；正文仍只从 LessonRepository 的正式文件恢复。
 # 函数用途: 将本轮已成功路由读取且 scope 匹配的 lesson 转成 Prompt MemoryRecord。
 def routed_lesson_records(

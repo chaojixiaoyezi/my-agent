@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 808,
+  "count": 811,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1050,6 +1050,30 @@
       "unit": "字符",
       "category": "其它",
       "description": "经验条目在提案摘录里的最大字符数。"
+    },
+    {
+      "name": "MEMORY_SEARCH_DEFAULT_COUNT",
+      "file": "agent_py_agent/agent/capability/memory_search_tool.py",
+      "value": 5,
+      "unit": "个",
+      "category": "其它",
+      "description": "不传 limit 时返回几条。"
+    },
+    {
+      "name": "MEMORY_SEARCH_EXCERPT_CHARS",
+      "file": "agent_py_agent/agent/capability/memory_search_tool.py",
+      "value": 300,
+      "unit": "字符",
+      "category": "其它",
+      "description": "每条正文摘录最多多少字；超出标 excerpt_truncated。"
+    },
+    {
+      "name": "MEMORY_SEARCH_MAX_COUNT",
+      "file": "agent_py_agent/agent/capability/memory_search_tool.py",
+      "value": 10,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "一次最多返回几条（schema 上限与执行时截断共用）。"
     },
     {
       "name": "_DEFAULT_TTL_SECONDS",

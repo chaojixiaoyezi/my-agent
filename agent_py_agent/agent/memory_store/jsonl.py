@@ -591,7 +591,7 @@ class _JsonlMemorySearchMixin:
         top_k: int,
         predicate: Callable[[MemoryRecord], bool],
     ) -> list[MemoryRecord]:
-        return self._search_scoped(query, top_k, predicate, record_access=True)
+        return self._search_scoped(query, top_k, predicate, record_access=True)[0]
 
     # LLM: 候选检索复用正式 allowlist 与混合排序，但候选尚未注入上下文，不能写访问信号。
     # 函数用途: 为可选的补充召回寻找候选；只有最终采用的记录可交给 confirm_scoped_access。
@@ -601,6 +601,18 @@ class _JsonlMemorySearchMixin:
         top_k: int,
         predicate: Callable[[MemoryRecord], bool],
     ) -> list[MemoryRecord]:
+        return self._search_scoped(query, top_k, predicate, record_access=False)[0]
+
+    # LLM: 与 search_scoped_candidates 同一检索（同 allowlist、同排序、不写访问信号），另返回本次检索的结构化事实：
+    #   mode（semantic/keyword/none）、fallback_reason、scoped_entries 与存储层 semantic_recall 状态。只读工具据此
+    #   如实告诉模型这次走的是语义还是关键词；不得用它改变自动召回或访问信号。
+    # 函数用途: 给只读记忆检索工具返回候选记录和“这次怎么检索的”事实，不登记访问。
+    def search_scoped_candidates_report(
+        self,
+        query: str,
+        top_k: int,
+        predicate: Callable[[MemoryRecord], bool],
+    ) -> tuple[list[MemoryRecord], dict[str, object]]:
         return self._search_scoped(query, top_k, predicate, record_access=False)
 
     # LLM: 访问确认重读正式源并核对原 scope、ID、版本及正文；撤销或替换的候选不得留下 touch。
@@ -625,8 +637,9 @@ class _JsonlMemorySearchMixin:
             self._note_access(active.entry_id)
         return confirmed
 
-    # LLM: 正式与候选检索只能在访问确认时分叉；索引、scope 与排序必须完全相同。
-    # 函数用途: 执行原 scoped 检索；正式召回记录访问，候选检索只返回记录。
+    # LLM: 正式与候选检索只能在访问确认时分叉；索引、scope 与排序必须完全相同。检索事实（第二个返回值）只是观察，
+    #   取自 HybridRetriever 的 last_retrieval_mode/last_fallback_reason，不参与排序。
+    # 函数用途: 执行原 scoped 检索；正式召回记录访问，候选检索只返回记录；同时返回本次检索方式。
     def _search_scoped(
         self,
         query: str,
@@ -634,10 +647,11 @@ class _JsonlMemorySearchMixin:
         predicate: Callable[[MemoryRecord], bool],
         *,
         record_access: bool,
-    ) -> list[MemoryRecord]:
+    ) -> tuple[list[MemoryRecord], dict[str, object]]:
         if top_k <= 0:
-            return []
+            return [], self._scoped_retrieval_facts(None, 0)
         active = [record for record in self.all() if predicate(record)]
+        retriever = None
         candidate_limit = max(top_k * 4, top_k + 8)
         # 混合检索:BM25 词面 + 向量语义 RRF 融合(治"换词就召不回"),替代原纯子串+自管 RRF;
         # embedder 缺失或端点抖动时自动降级纯 BM25(仍强于纯子串)。active JSONL 已建 allowlist,
@@ -670,7 +684,18 @@ class _JsonlMemorySearchMixin:
         if record_access:
             for record in selected:
                 self._note_access(record.entry_id)
-        return selected
+        return selected, self._scoped_retrieval_facts(retriever, len(active))
+
+    # LLM: 只读投影：没有检索器（top_k<=0 或范围内没有条目）时 mode=none；semantic_recall 是存储层状态副本，
+    #   含档案不可用等原因码，不含正文和凭据。
+    # 函数用途: 把一次 scoped 检索的方式、降级原因和范围条目数整理成结构化事实。
+    def _scoped_retrieval_facts(self, retriever: object | None, scoped_entries: int) -> dict[str, object]:
+        return {
+            "mode": str(getattr(retriever, "last_retrieval_mode", "none") or "none"),
+            "fallback_reason": str(getattr(retriever, "last_fallback_reason", "") or ""),
+            "scoped_entries": scoped_entries,
+            "semantic_recall": dict(self._semantic_status),
+        }
 
     # LLM: 检索侧缓存只是派生索引，读取失败必须静默退化为"没有缓存"（现嵌），结果不变。
     #   竞态（取缓存之后事实才被删/被替换）统一在回写点用 active 身份复核收口，

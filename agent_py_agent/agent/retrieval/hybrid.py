@@ -27,11 +27,19 @@ class HybridRetriever:
       重合本身就是相关信号)。None/0 表示不过滤。
     """
 
+    # LLM: 一个实例只服务一次检索；last_* 字段是本轮观察事实（现嵌向量、检索方式、降级原因），下一次 rank 覆盖。
+    # 函数用途: 绑定可选嵌入端并清空本轮观察字段。
     def __init__(self, embedder: EmbeddingProvider | None = None) -> None:
         self._embedder = embedder
         # 本轮真正现嵌得到的文档向量（id → vector），供调用方回写缓存；未嵌时为空。
         self.last_fresh_doc_vectors: dict[str, list[float]] = {}
+        # 本轮实际走的检索方式（semantic=词面+向量融合，keyword=只有词面，none=没有文档未检索）与降级原因，
+        # 只是观察事实：调用方据此如实告诉模型这次走的是哪条路，不参与排序。
+        self.last_retrieval_mode = "none"
+        self.last_fallback_reason = ""
 
+    # LLM: 排序结果与降级规则不变；只额外记下 last_retrieval_mode/last_fallback_reason，供记忆检索报告如实回给模型。
+    # 函数用途: 按词面（和可选向量）给文档排序，嵌入不可用时退回纯词面。
     def rank(
         self,
         query: str,
@@ -41,6 +49,7 @@ class HybridRetriever:
         vector_min_score: float = 0.0,
         cached_vectors: dict[str, list[float]] | None = None,
     ) -> list[tuple[str, float]]:
+        self.last_retrieval_mode, self.last_fallback_reason = "none", ""
         if not docs:
             return []
         ids = [d[0] for d in docs]
@@ -53,8 +62,11 @@ class HybridRetriever:
         )
         if vec_order is None:
             # 无 embedder 或端点失败 → 纯 BM25(给个递减分,保持可比)
+            self.last_retrieval_mode = "keyword"
+            self.last_fallback_reason = "embedder_unavailable" if self._embedder is None else "embedding_failed"
             return [(id, 1.0 / (i + 1)) for i, id in enumerate(bm25_order)][:top_k]
 
+        self.last_retrieval_mode = "semantic"
         fused = reciprocal_rank_fusion([bm25_order, vec_order])
         return fused[:top_k]
 

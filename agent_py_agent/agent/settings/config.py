@@ -398,6 +398,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     self_learning_timeout_seconds: int = 180
     # 主会话代理可用 manage_models 工具直接增删改切 owner 模型目录；关闭后只能用 TUI /model 手动配置。
     enable_model_profile_tool: bool = True
+    # 主模型可用 memory_search 只读检索本人正式长期记忆（自动召回漏掉时自查）；默认关，关着不注册该工具。
+    enable_memory_search_tool: bool = False
     # 本机管理员主代理可用 restart_gateway 工具安排 Gateway 安全重启（先排空再换进程）；关闭后不注册该工具。
     enable_gateway_restart_tool: bool = True
     # TUI 发现 Gateway 换了安装（runtime_prefix 不同）且自身空闲时在同一终端原地换成同版客户端（同会话、不退出全屏）；关闭后只在 footer 提示。

@@ -1,5 +1,22 @@
 # Memory Structure
 
+## 主模型只读检索工具 `memory_search`（J9，2026-10-02，分支 `claude/ae-j9-memory-tool`，默认关，待集成）
+
+- `capability/memory_search_tool.MemorySearchTool`：
+  - 开关 `enable_memory_search_tool` 开着时才由 `core._register_orchestration_tools` 注册，效果声明 `read_only`。
+  - schema 只收 `query`/`limit`/`kind`，`additionalProperties=false`。
+  - 返回有界摘录，以及 `retrieval` 结构化事实。
+- `memory_store/jsonl.JsonlMemory.search_scoped_candidates_report`：
+  - 与 `search_scoped_candidates` 同一检索、不写访问信号，另返回（记录，检索事实）。
+  - 检索事实有 `mode`（semantic/keyword/none）、`fallback_reason`、`scoped_entries`、`semantic_recall`。
+  - `_search_scoped` 改为返回二元组，两个原入口取第一项，结果与副作用不变。
+- `retrieval/hybrid.HybridRetriever`：每次 `rank` 记下 `last_retrieval_mode` 与 `last_fallback_reason`（`embedder_unavailable`/`embedding_failed`），只是观察，不参与排序。
+- `memory_store/recall`：
+  - 新增 `runtime_long_term_scope`（task 范围加记忆库里实际存在的 project 范围）。
+  - 新增 `formal_recall_suppressed`/`is_isolated_recall_context`（`task_local`/`control_plane` 或记忆总闸关）。
+  - 这几条从 `agent_core/runtime/loop_support` 原样抽出，自动召回与工具共用，保证“自动召回不读的回合模型也查不到、范围一致”。
+- 不改嵌入客户端构建和向量文件格式。设计见 [决策模型接入设计](../../design/DECISION_MODEL_INTEGRATION.md) “P5-A 缺口 2”节。
+
 ## 嵌入档案与向量身份（P13+P14，2026-10-02，ds1，待集成）
 
 - `settings/embedding_profile.embedding_model_config`：按档案编号解析嵌入连接（capability="embedding"），空值返回 None；

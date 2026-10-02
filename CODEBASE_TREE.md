@@ -749,6 +749,7 @@ agent_py_agent/
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
 |   |   |-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
+|   |   |-- memory_search_tool.py      # memory_search：主模型只读检索本人正式长期记忆（默认关），与自动召回同范围、不写访问信号
 |   |   |-- session_search_tool.py     # session_search：本地历史检索/翻看/浏览，外加按 message_id 读原文与当前会话检索
 |   |   `-- session_history_read.py    # session_search 的会话原文读取：按消息编号分段读回、当前会话按页浏览，只读 canonical 消息文件
 |   |-- prompting_parts/               # prompt 构造
@@ -1449,6 +1450,8 @@ docs/
 - `agent_py_agent/tests/test_subagent_lesson_ledger.py`：record_lesson 链路的离线合同（只用假件）：身份与 Schema、字段/条数/字节上限、幂等、坏账本与符号链接、读回复核、合并进 output.json、`subagent_lesson` 候选与 S1 提案（含重放不重复）、候选失败不阻断交付、暴露面与 runner 提示。
 - `agent_py_agent/tests/test_skill_proposals.py`：自学习 S1 的默认关闭、幂等、忽略非法来源、Curator 迁移不碰提案目录、确认拒绝矩阵、安装/回执失败回滚、快照可见性、runner 结果隔离与真实 CLI 入口往返验证。
 - `agent_py_agent/agent/capability/decision_skill_proposal_review.py`：自学习 S2 的唯一审核顺序点 `skill_proposal_review`（owner_background，默认 off）；只读 `SkillProposalService.list`，外发别名、来源计数与经 `external_data/default` 投影的草稿摘要，采用前重读待确认提案核对版本与草稿 hash，只重排 CLI 展示并附宿主标签；关闭、observe 或任何失败都返回 None 保持原输出，取消上抛。
+- `agent_py_agent/agent/capability/memory_search_tool.py`：`memory_search` 工具（J9，开关 `enable_memory_search_tool` 默认关）；主模型只读检索本人正式长期记忆，范围与自动召回共用 `memory_store/recall.runtime_long_term_scope`，只调 `JsonlMemory.search_scoped_candidates_report`（不写访问信号），返回有界摘录与检索方式（semantic/keyword）；自动召回被抑制的回合不可用。
+- `agent_py_agent/tests/test_memory_search_tool.py`：J9 守卫——开关关不注册、写参数执行前被拒、跨 owner 与跨范围查不到、条数与摘录上限、语义/关键词降级事实、不写访问信号、抑制回合不可用、模型不能自己打开开关。
 - `agent_py_agent/agent/capability/model_profile_tool.py`：`manage_models` 工具；把 TUI /model 的 list/add/save_provider/save_model/select/set_default/delete_model/delete_provider/probe/discover 暴露给主会话代理，唯一写入口仍是 `execute_model_profile_operation`；delete_provider 为 dangerous，子代理不可用，`select` 只读结构化 `conversation_thread_id`，回执只含 `has_key`，开关 `enable_model_profile_tool`。
 - `agent_py_agent/tests/test_decision_skill_proposal_review.py`、`test_decision_skill_proposal_review_integration.py`：前者只替换决策服务边界，覆盖资格、隐私、逐题校验、并发变化与取消；后者经真实 CLI、设置、模型目录、决策服务与调用账，只替换 HTTP 发送，覆盖输出逐字节不变、observe 记账、错误/冷却/超时、中断、30 条窗口门、默认值与 TUI 菜单。
 - `agent_py_agent/agent/agent_core/tool_loop/segment_planning.py`：只接canonical调用、有效批上限、Compact及并发描述查询；审批、线程和provider顺序记账仍归原执行轮。

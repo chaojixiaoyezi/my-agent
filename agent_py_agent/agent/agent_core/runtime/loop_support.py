@@ -28,9 +28,12 @@ from ...memory_routing import (
 )
 from ...memory_store import (
     MemoryRecallScope,
+    formal_recall_suppressed,
     hot_memory_records,
+    is_isolated_recall_context,
     long_term_record_matches_scope,
     routed_lesson_records,
+    runtime_long_term_scope,
 )
 from ...path_access_policy import effective_owner_scope_root
 from ...runtime_context import current_subagent_run_id
@@ -273,40 +276,22 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         agent,
         request,
     )
-    task_local = _is_task_local_context(request.context_scope)
-    owner_policy = getattr(agent, "owner_policy", None)
-    recall_suppressed = task_local or (
-        owner_policy is not None and not bool(getattr(owner_policy, "memory_enabled", True))
-    )
+    task_local = is_isolated_recall_context(request.context_scope)
+    recall_suppressed = formal_recall_suppressed(request.context_scope, getattr(agent, "owner_policy", None))
     memory_top_k = max(1, int(agent.config.memory_top_k or 1))
     routed_context = _routed_memory_context_for_request(
         agent, request, skip_formal_recall=recall_suppressed,
     )
-    recall_scope = MemoryRecallScope.from_runtime(
-        task_id=request.task_id,
-        task_attributes=request.task_attributes,
-    )
     # 真机缺口(2026-08-06):普通对话(无 task)的召回只含 global/personal,project 记忆(如
-    # 用户喂入的小说知识库,scope=project:novel:xxx)不被召回 → 问小说"信息不足"。这里把
-    # 记忆库中实际存在的 project scope 追加进召回范围(用户明确要求记住的项目知识可召回),
-    # 有 task 时仍按 task 精确。纯结构化:只扫描 long_term 的 attributes.scope_type/key。
-    # gateway 的 request_id 会被当 task_id,故不能以 task_id 判"普通对话"。启用召回时追加
-    # 实际存在的 project scope(用户明确要求记住的项目知识可召回),与 task 的 project:task 并存。
-    if not recall_suppressed:
-        try:
-            project_pairs: list[tuple[str, str]] = []
-            for record in agent.memory.all():
-                attrs = record.attributes if isinstance(record.attributes, dict) else {}
-                st = str(attrs.get("scope_type") or "").strip().lower()
-                sk = str(attrs.get("scope_key") or "").strip()
-                if st == "project" and sk:
-                    project_pairs.append(("project", sk))
-            if project_pairs:
-                recall_scope = MemoryRecallScope(
-                    tuple(dict.fromkeys([*recall_scope.keys, *project_pairs]))
-                )
-        except Exception:
-            pass
+    # 用户喂入的小说知识库,scope=project:novel:xxx)不被召回 → 问小说"信息不足"。启用召回时
+    # 把记忆库中实际存在的 project scope 追加进召回范围,与 task 的 project:task 并存。
+    # gateway 的 request_id 会被当 task_id,故不能以 task_id 判"普通对话"。范围规则与只读检索
+    # 工具 memory_search 共用 memory_store.recall.runtime_long_term_scope。
+    recall_scope = (
+        MemoryRecallScope.from_runtime(task_id=request.task_id, task_attributes=request.task_attributes)
+        if recall_suppressed
+        else runtime_long_term_scope(agent.memory, task_id=request.task_id, task_attributes=request.task_attributes)
+    )
 
     long_term_memories = (
         []
@@ -951,10 +936,6 @@ def _queue_audit_source_provision_reply(
     )
 
 
-
-
-def _is_task_local_context(value: object) -> bool:
-    return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
 def _loop_attempt_id(agent, params: object) -> str:

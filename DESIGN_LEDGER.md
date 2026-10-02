@@ -42,6 +42,20 @@
   - 没有 owner 根时（不是按用户隔离的部署），说明改为提示放到当前会话工作区或显式授权的目录。说明不回显用户给的越权路径。
 - **验证**：见 TESTS.md 同名节。
 
+## J9：主模型的只读长期记忆检索工具 `memory_search`（P5-A 缺口 2）（2026-10-02，分支 `claude/ae-j9-memory-tool`，基于 `claude/3a-step16z` `25882221f`，已实现，待集成）
+
+- **缺口**：自动召回漏掉的事实，主模型自己查不到（`remember list` 整表列出、不过滤不截断；`session_search` 查的是会话历史）。
+- **做法**：新增只读工具 `memory_search`，参数为 `query`、`limit`（1–10，默认 5）、可选 `kind`，返回条目编号、类型、范围、更新时间和前 300 字摘录。
+  - 只调记忆模块的检索接口（新增 `search_scoped_candidates_report`，与自动召回同一混合检索）。
+  - 检索结果里带结构化事实 `retrieval.mode`（`semantic`/`keyword`/`none`）和降级原因。
+- **边界**：
+  - 只读：schema 不收其它字段，写参数在执行前就被拒；不写访问信号，结果不进自动召回。
+  - 范围：只查当前 owner；scope 与自动召回共用 `runtime_long_term_scope`。
+  - 不可用：自动召回被抑制的回合（子代理 task_local、control_plane、记忆总闸关）不可用。
+- **开关**：`enable_memory_search_tool`，默认关，属于安全边界。模型不能自己打开，用户可经 `/settings` 或配置文件打开。
+- **开销**：语义开着时，每次多 1 次查询嵌入，加上范围内未缓存条目的正文嵌入；没有模型调用。
+- 设计见[决策模型接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)“P5-A 缺口 2”节，验证见 TESTS.md 同名节。
+
 ## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `claude/3a-step16z` `58c674d46`，已实现，待集成）
 
 - **问题**：
@@ -3061,12 +3075,12 @@ Compact补充片已获协作方归属确认，本地537项及独立审阅通过�
 - **TUI 决策菜单的接入点清单改为取 schema 登记**（2026-09-25，已实施：分支 `claude/decision-tui-points`，已合入 main `171caa21c`）：菜单原先自带一份接入点清单，漏了 `pre_recall`，界面无法设召回前补充查询，且已有该点覆盖时"恢复继承"列表会抛 KeyError。现在清单直接取 `decision_settings_schema.POINTS`（唯一权威），本地只保留中文显示名，缺显示名时显示原键。今后新增接入点只需在 schema 登记，菜单自动出现；各分支若新增接入点，只需补显示名。
 - **交付复核焦点 `delivery_quality`（第 15 项 P5-C 质量提示首片）**（2026-09-24，已实施：本地分支 `claude/decision-delivery-quality`，已合入 main，P1-P5 goal 已随 `313f5dd23` 关闭）：`run_command` 刚产生新验证事件、本轮同 run/task 有 2—12 个验证焦点（每个 project/kind/scope 只留最新一条）且至少一个 failed 或其后有修改时，可选地请 Jev 选一个交付前最值得先复核的焦点，宿主只把该焦点的编号/kind/scope/status/其后修改渲染成一句追加提示（≤512 字符），text/native 共用。外发材料只有脱敏当前请求和焦点别名事实，不含路径、命令或输出；默认 off，observe 只记账不追加，任何非成功、选中本次事件或来源/配置变化都保留原展示；ToolResult、归档、验证账、Goal、Todo 与收口不变，取消照常上抛。接线沿外部材料首片：`_record_tool_call` 的原展示接缝改为 `_optional_result_hints` 依次调用两个按工具名互斥的点。未做真实 Jev/TUI 验收。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-质量提示首片交付复核焦点-delivery_quality)。
 - **自学习 S1：子代理 lesson 生成待用户确认的 Skill 提案**（2026-09-24，已合入 main `e9ead5ae3`；2026-09-25 随 `record_lesson` 做了端到端真实验收；2026-09-26 起自学习开启时新提案改为以 `confirmed_by=auto` 自动确认，见顶部“自学习 S3”条目，下文“只能由用户确认”描述的是当时语义）：`enable_self_learning`（默认 false，YAML、AgentConfig 与布尔规范化同步）开启时，组合根给子代理 manager 接上 `capability/skill_proposals.py`；runner 结果记录 lesson Candidate 之后，只把 `subagent_lesson`、同时带 task/run 来源、状态有效且未脱敏的候选按固定模板（不调模型）渲染成提案，O_EXCL 幂等写入 owner 路径解析器登记的 `<owner_home>/data/skill_proposals/<proposal_id>.json`（`proposal_id` 为 sha256(candidate_id + content_hash) 前 24 位；目标 `lesson-<正文 hash 前 12 位>`、`before=absent`；提案写明来源任务/运行、触发原因、拟保存内容和适用场景），生成失败只写工作日志、不影响结果交付。正式 Skill 只能由用户 `my-agent skills proposals confirm <id> --expected-revision N` 写入：owner 锁内复核版本与待确认状态、草稿 hash、来源 Candidate（存在、未脱敏、hash 未变、未被拒绝/替代/过期/阻塞）、目标不存在，再在临时目录经 `parse_skill_file(require_frontmatter=True)`、`scan_skill(source="agent_generated")` 与 `install_decision`（不 force，caution/dangerous 均拒）后 `os.replace` 到 `<owner_home>/skills/<name>/` 并标 committed（revision+1）；任何失败不写目标、提案保持待确认并返回结构化错误码，写回执失败会删掉刚装的目标。目录刻意不叫 `learning_drafts`：Curator 每次持 lease 前的 Memory 迁移会递归迁走并删除该名字的目录。没有任何模型可调用的确认工具；开关只控制自动生成，已有提案仍可在 CLI 查看/确认/拒绝。S2（Jev 对待确认提案的审核排序）见本台账顶部“自学习 S2”条目；两者的端到端真实验收见 `record_lesson` 条目。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)自学习段与 [TESTS](TESTS.md)。
-- **召回前补充查询与关系提示的真实收益，以及随之发现的四个缺口**（2026-09-25，真实验收已完成：main `ab23a2666` 在测试机隔离目录，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#14-p5-a-召回前补充查询语义召回下的真实收益2026-09-25main-ab23a2666)；缺口 1—3 仍只记录方向，缺口 4 已于 2026-09-28 实施）：
+- **召回前补充查询与关系提示的真实收益，以及随之发现的四个缺口**（2026-09-25，真实验收已完成：main `ab23a2666` 在测试机隔离目录，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md#14-p5-a-召回前补充查询语义召回下的真实收益2026-09-25main-ab23a2666)；缺口 3 仍只记录方向，缺口 1、2、4 已实施，见各项）：
   - P5-A：在语义召回下，3 条已知漏召回样本中 2 条稳定补回（4/4 次），答复从"查不到"变成准确事实。
   - P5-B：关系提示让真实 M2.7 提取把"换车"稳定归为 `long_term_fact replace` 并指向原条目（off 两次都是 `user_profile`）；其余两类无稳定差异。
   - 两点都默认关闭。发现的缺口如下：
     1. **补充片段选择缺客观材料**：第 3 条样本 Jev 两批都选了主题已被基线覆盖的片段。方向：宿主把"各片段能否新增记录"作为结构化事实交给 Jev，或在有空槽时按阈值确定性补位。先评估额外嵌入开销和弱相关事实混入的风险。**已实施前一种（可选，默认关）**（2026-10-02，J8，分支 `claude/be-jev-snippet-facts`）：`points.pre_recall.fragment_material=with_new_facts`，见本台账顶部同名条目。
-    2. **主模型没有长期事实检索工具**：工具面只有 `remember`、`session_search`、`search_text` 等，正式召回漏掉的事实对主模型不可达，off 轮它自查也查不到。是否补一个只读、按 owner/scope 约束的检索工具需要单独设计，与自动召回的权威边界一并考虑。
+    2. **主模型没有长期事实检索工具**：工具面只有 `remember`、`session_search`、`search_text` 等，正式召回漏掉的事实对主模型不可达，off 轮它自查也查不到。是否补一个只读、按 owner/scope 约束的检索工具需要单独设计，与自动召回的权威边界一并考虑。**已实施（可选，默认关）**（2026-10-02，J9，分支 `claude/ae-j9-memory-tool`）：只读工具 `memory_search`，开关 `enable_memory_search_tool`，见本台账顶部同名条目。
     3. **语义检索每次对全部事实重新嵌入**：`_search_scoped` 对 active 列表整体调嵌入端，补充查询使嵌入量翻倍。事实多时需要按正文哈希缓存向量；缓存只能是派生索引，正文仍以 JSONL 为准。
     4. **关系对按顺序截取前 32 对**：`decision_curator_relation` 取消息×正式条目笛卡尔积的前 32 对，不按相关度，后面的消息比不到。**已实施**（2026-09-28，分支 `my-agent/self-dev-4`，基于 `54880f8e9`）：改用标准库 BM25 词面相似度给每对打分，按分数从高到低取前 32 对，同分保持原枚举顺序；不引入嵌入调用、不增加网络请求和费用。覆盖范围仍如实声明为"仅展示的对"，并在 `state.coverage` 里新增 `total_pair_count`（全批笛卡尔积对数）、`selection`（挑选规则标识）与 `selection_limit`（上限），下游可据此看出未比过全部。缺口 3（语义检索重复嵌入）仍待办，挑选只用词面、不新增嵌入。
   - 同一实验还发现一个与决策无关的 Memory 问题：新 owner 首次整理时，v2 迁移把 memory.md/HOT 模板的标题行生成两条 `migrated_legacy` 待审候选。已告知主线 owner，归 Memory 模块处理。

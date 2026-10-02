@@ -468,6 +468,46 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 自学习点的前置合同见[只读审计](../tasks/DECISION_MODEL_SELF_LEARNING_AUDIT.md)。S1 提案/确认链已合入 main（`e9ead5ae3`）：`enable_self_learning` 默认关闭；开启后 runner 结果先记录 lesson Candidate，再由 `capability/skill_proposals.py` 为 `subagent_lesson`、带精确 task/run 来源的候选按固定模板生成提案，O_EXCL 幂等写入 `<owner_home>/data/skill_proposals/`（不用会被 Curator 迁移清理的 `learning_drafts`），生成失败只记工作日志。只有用户 `my-agent skills proposals confirm <id> --expected-revision N` 能在 owner 锁内复核版本、草稿 hash、来源 Candidate（未脱敏、hash 未变、状态有效）与目标不存在，并通过 `parse_skill_file(require_frontmatter=True)`、`scan_skill(agent_generated)` 与不 force 的 `install_decision` 后，把 Skill 原子装到 `<owner_home>/skills/lesson-*`；失败不写目标、提案保持待确认。2026-09-26 起按用户决定（自学习不逐条审批），自学习开启时新提案立即以 `confirmed_by=auto` 走同一确认链，主代理任务另有自动总结 Skill（S3，见[自动总结 Skill 设计](SKILL_AUTO_SUMMARY.md)）；上面的“只有用户能确认”描述的是 S1 当时语义。S2 已合入 main（`1132fd9d0`，见下文“P5-C 自学习 S2”），现在只对遗留的待确认提案生效：独立决策点定名 `skill_proposal_review`（审计里暂称 `self_learning`，改名以表明它只管待确认提案的审核顺序），默认关闭，Jev 只能给已存在的待确认提案排审核先后，不能生成正文、确认、拒绝或写 Skill。
 如果用户显式要求一次 Jev 分析而服务不可用，应明确报告该分析未完成；不能拿普通模型结果冒充 Jev。
 
+### P5-A 缺口 2：主模型的只读长期记忆检索工具 `memory_search`（2026-10-02，J9，默认关）
+
+- **缺口**：自动召回漏掉的事实，主模型自己查不到。它的工具面只有 `remember`（list 会整表列出、不过滤也不截断）、`session_search`（查会话历史索引）和 `search_text`（查文件）。
+- **开关**：主配置 `enable_memory_search_tool`，默认 `false`。
+  - 开着才注册工具，关着工具目录里根本不出现。
+  - 它决定模型多一个读本人长期记忆的工具，所以按安全边界处理：模型不能经 `user_config` 自己打开；用户可经 `/settings`（TUI 和 IM 同一入口）或配置文件打开，Gateway 重启后生效。
+- **工具与参数**：`memory_search`。
+  - `query`：必填，检索文本。
+  - `limit`：1–10，默认 5。
+  - `kind`：可选，按正式条目的 kind 精确过滤（常见 fact/event/project）。不在常见值里也不拒绝，只是查不到。
+  - schema 不允许其它字段（`additionalProperties=false`）。工具运行时在执行前校验，`action`、`content`、`entry_id` 这类写参数一律报 `TOOL_INVALID_ARGUMENTS`，处理函数不会执行。
+- **返回**：
+  - `entries`：每条给 `entry_id`、`version`、`kind`、`scope`、`subject_key`、`updated_at`（UTC ISO），正文摘录 `excerpt`（前 300 字），以及 `content_chars` 和 `excerpt_truncated`。
+  - `retrieval`：这次检索的结构化事实。
+    - `mode`：`semantic`（词面加向量融合）、`keyword`（只有词面）、`none`（范围内没有条目，没检索）。
+    - `fallback_reason`：没走语义时写原因，`embedder_unavailable` 是没有嵌入端，`embedding_failed` 是这次嵌入失败。
+    - `semantic_recall`：存储层的语义召回状态（含档案不可用之类的原因码）。
+    - `scoped_entries`：范围内的正式条目数。
+  - `authority=clue_only` 加一句说明。
+- **权威边界**：
+  - 只读：只调记忆模块的检索接口，不写、不删、不改正式条目，不建候选，不晋升。运行时效果声明为 `read_only`。
+  - 只是线索：结果不进自动召回。不改本轮或下轮注入的记忆，也不进 `memory_refs`/`recalled_refs`。
+  - 不写访问信号：用的是候选检索，不登记 touch，所以模型自查不会让条目在留存冷热判断里“变热”。
+  - 要改记忆仍用 `remember`：先 list 拿版本，再 replace 或 remove。
+- **范围**：
+  - owner：只查当前 agent 自己的记忆（每个 owner 一份 JSONL，在各自 owner home 里），没有 owner 参数，跨 owner 查不到。
+  - scope：与自动召回同一规则，即 `task_id`/`task_attributes` 推出的范围，加上记忆库里实际存在的 project 范围。两处共用 `memory_store/recall.py` 的 `runtime_long_term_scope`（从 `loop_support` 原样抽出，行为不变）。
+  - 抑制：自动召回被抑制的回合，工具报不可用，判定同用 `formal_recall_suppressed`。这类回合包括 `task_local`/`control_plane` 上下文，以及 owner 记忆总闸关闭。
+  - 子代理：不进任何角色模板，也不进后台续跑默认目录。父代理即使经 `allowed_tools` 显式下发，子代理回合是 `task_local`，按上一条也不可用。这与“子代理回合不读正式长期记忆”的现有规则一致。
+- **开销**：每次调用恰好一次检索，与自动召回同一混合检索（BM25 加可选语义）。
+  - 语义开着时的额外嵌入：1 次查询嵌入，加范围内正文哈希缓存未命中条目的正文嵌入（一批）。
+  - 新嵌出的向量照常写进派生缓存 `memory_text_vectors.json`，这和自动召回一样，不是正式记忆。
+  - 没有模型调用，没有其它网络请求。
+  - P14 的向量库身份校验只作用于 `memory_vectors.json` 那条路径。本工具和自动召回走的是按嵌入指纹分键的正文哈希缓存，嵌入身份变了只会缓存不中、重新嵌入。
+- **记忆模块改动**：
+  - `HybridRetriever` 记下本次 `last_retrieval_mode`/`last_fallback_reason`。
+  - `JsonlMemory.search_scoped_candidates_report` 返回（记录，检索事实）。
+  - 原 `search_scoped`/`search_scoped_candidates` 的结果和副作用不变。不碰嵌入客户端的构建和向量文件格式。
+- **验证**：见 TESTS.md 同名节。
+
 ### P5-B 第一片：提取前的来源—正式条目关系建议
 
 当前状态：第一片已本地实现并通过离线合同与原 Curator 组合验证，未部署；本片不等同于完整的候选分类或语义合并功能。
