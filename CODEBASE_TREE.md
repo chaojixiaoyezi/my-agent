@@ -1131,7 +1131,7 @@ agent_py_agent/
 scripts/
 |-- build_constants_catalog.py              # 模块级数值常数只读目录生成器（ast 静态扫描，不 import 产品代码；--check 校验）
 |-- build_plugin_api.py                # 固定共用源码原字节投影，标准构建零运行依赖 SDK wheel
-|-- build_plugin_package.py            # 构建自有插件并沿原包/依赖校验生成安装 ZIP
+|-- build_plugin_package.py            # 构建自有 Python 插件；wheel 与外层 ZIP 都固定归档元数据并经原包/依赖校验
 |-- build_plugin_files_package.py      # 构建非 Python（任意语言）插件的 v6 安装包：生成摘要、固定时间戳、宿主读包器复核
 |-- plugin_build.py                    # 开发构建后端调用、wheel 元数据读取与独占产物写入
 |-- bench/                             # GW-03/慢模型配对基准：锁内解析成本、owner 事实缓存各路径（配对交替，比值只在组内）
@@ -1213,6 +1213,29 @@ plugins/
 |       |-- declarations.py            # 读取同源声明并验证平面参数和设置
 |       |-- commands.py                # 业务错误、按平台定位系统程序、组装 argv/stdin 命令并以超时运行
 |       `-- opening.py                 # open 的授权、no-follow 普通文件校验与可执行/脚本类扩展名拒绝清单
+|-- drama-media-shell/                 # A/drama-skills 离线媒体外壳：四个提示词检查器 + fixture-only 生产作业
+|   |-- README.md                      # 十个工具、夹具边界、作业流程、构建与测试说明
+|   |-- pyproject.toml                 # 插件发行身份、精确 SDK 0.2.0 依赖及许可/来源资源打包
+|   `-- src/drama_media_shell/
+|       |-- declaration.json           # 10 个工具的名称、说明、effect 与 inputSchema 唯一声明
+|       |-- __init__.py                # 独立插件包入口
+|       |-- __main__.py                # python -m drama_media_shell 启动 stdio 服务
+|       |-- server.py                  # MCP 握手、逐次读写上下文恢复、固定工具分派与结构化错误
+|       |-- declarations.py            # 读取同源声明并验证工具参数
+|       |-- errors.py                  # 稳定错误码与中文安全消息
+|       |-- workspace_io.py            # SDK 读取上下文 + no-follow 有界 JSON/JSONL 读取
+|       |-- image_prompt_check.py      # 图片提示词资产、引用、字段及负面词检查
+|       |-- container_check.py         # 视频容器与镜头所有权、时长和覆盖核对
+|       |-- motion_timing_check.py     # 运动窗口、镜头时长及所有权核对
+|       |-- music_spec_check.py        # 音乐提示词字段与负面词检查
+|       |-- job_contract.py            # 作业清单规范化、输入摘要与固定指纹
+|       |-- production_state.py        # prepare/confirm/status 的确认消费状态机
+|       |-- production.py              # fixture-only run/collect 与供应商拒绝边界
+|       |-- production_audit.py        # 当前指纹运行证据和工作区输出摘要审计
+|       |-- fixture_adapter.py         # 内置离线夹具字节；明确不是真实媒体生成
+|       |-- private_store.py           # 只在绝对插件私有数据目录保存作业 JSON
+|       |-- LICENSE.drama-skills       # 上游 MIT 原文与版权行
+|       `-- PROVENANCE.md              # 固定提交、逐文件 sha256、改动和排除项
 |-- genui-lite/                        # 自有数据展示插件：JSON 渲染为表格/文字条形图，可导出独立 HTML，随包带 Skill
 |   |-- README.md                      # 构建、两个动作用法、数据格式与中文示例
 |   |-- pyproject.toml                 # 插件发行身份、精确 SDK 依赖，package-data 打入声明与 SKILL.md
@@ -1435,6 +1458,9 @@ docs/
 - `plugins/design-lite/`：首个带随包 Skill（包描述 v3）的自有插件，生成与修改 HTML 设计文件都走写入上下文；`agent_py_agent/tests/test_design_lite_package.py` 为其实际包、Skill 打包与 MCP 进程组件验收。
 - `plugins/browser-lite/`：首个驱动外部进程的自有插件，浏览器不随包分发，专属 profile 在插件数据目录，地址经读取上下文与 allowed_hosts 双重裁决；`agent_py_agent/tests/test_browser_lite_package.py` 为其实际包、帧编解码与真实浏览器组件验收；`agent_py_agent/tests/test_browser_lite_launcher.py` 用假 /proc 进程表覆盖关闭时等本 profile 子进程、超时只对同进程组的精确匹配 SIGKILL。
 - `plugins/savepoint-lite/`：首个写工作区的自有插件，快照只存宿主插件数据目录，恢复走写入上下文；`agent_py_agent/tests/test_savepoint_lite_package.py` 为其实际包与 MCP 进程组件验收。
+- `plugins/drama-media-shell/`：固定 A/drama-skills 上游的四个只读检查器和 fixture-only 生产作业外壳；工作区只走 SDK 0.2.0
+  逐次上下文，作业账只进插件私有数据目录，不包含付费适配器、Remotion 或限用途样例；
+  `agent_py_agent/tests/test_drama_media_shell_package.py` 覆盖实际包、上游 selftest 合同与 MCP 进程组件，不替代真实 TUI/模型验收。
 - `plugins/harness-console/`：首个界面型插件（宿主只读 API 样本），网页与桌面窗口共用一个只绑回环的服务，宿主令牌只留在插件服务端；`agent_py_agent/tests/test_harness_console_package.py` 为其实际包、假宿主 API 与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/hello-node/`、`plugins/hello-go/` 与 `scripts/build_plugin_files_package.py`：任意语言插件（包描述 v6）的两种启动机制样例及打包脚本；`plugins/sdk/conformance/workspace_read_check.json` 是非 Python 插件移植读取检查时必须跑通的一致性用例，`agent_py_agent/tests/test_plugin_any_language_samples.py` 为其组件验收。

@@ -402,6 +402,32 @@ git diff --check
 建议下一步：3a 在沙箱外重跑交付提交的完整插件测试，ae 可并行只读核许可/包装边界；
 全仓首失败交对应模块实施者核对，原中断日志保留，修复/复核前不以本候选宣称全仓验收完成。
 
+## C14 第一批 M-A1 + M-A2：drama-media-shell（2026-10-01，分支 `worker/sol56-c14-ma12`，基于 `f15b0a19f`）
+
+- 新增 `agent_py_agent/tests/test_drama_media_shell_package.py`，使用仓库标准构建器构建实际插件包并启动独立 MCP 进程，覆盖：
+  - 包描述和 `tools/list` 的 10 个工具名称、说明及 schema 完全同源；许可/PROVENANCE 随 wheel 分发，包中没有
+    `provider_adapters.py`、Remotion 或限用途小说样例；相同输入连续构建字节一致；
+  - 上游图片/音乐 selftest 的最小通过与失败合同，以及 container/motion 结构和时序错误；
+  - 读上下文越界/符号链接拒绝，写上下文缺失关闭，参数里的伪上下文不能代替 `_meta`；
+  - prepare→confirm→fixture run→status→audit→collect 全流程、确认一次消费、输入变化后重确认、真实供应商结构化拒绝；
+    输出和回执明确“夹具，不是真实生成”，作业只存插件私有数据目录。
+- 红绿记录：初始插件骨架运行聚焦用例为 **1 passed, 4 failed**；完成 MCP/业务后为 5 passed，再逐步加入上游 selftest、
+  符号链接和输入变化合同。重复构建测试跨过 ZIP 的 DOS 两秒粒度后抓到外层 ZIP 时间戳漂移，修复标准构建器固定成员元数据。
+- 当前聚焦命令：
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_drama_media_shell_package.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol56`
+  → **9 passed**。
+- 静态结构自检：插件功能代码 AST 检查结果为函数参数 >4 **0 项**、嵌套 >2 **0 项**、双层中文注释缺失 **0 项**；
+  `py_compile` 与 `ruff check plugins/drama-media-shell agent_py_agent/tests/test_drama_media_shell_package.py` 均通过。
+- 收尾门禁：`guards9.txt` 所列 10 个测试文件（含 `test_packaging.py`）退出 0；`check_import_boundaries.py` 为
+  `findings=0`；`ruff check agent_py_agent scripts` 为 `All checks passed!`；`check_doc_sync.py` 为 `DOC_SYNC_PASS`；
+  strict code-size 为 `hard=0`、`blocked=False`（报告已还原）；暂存区及工作区 `git diff --check` 通过；
+  `check_clean_package.py .` 为 `OK`。
+- 共用构建器回归：9 个不依赖浏览器/桌面进程的 Python 插件包测试文件整组退出 0。额外跑全 14 个调用该构建器的
+  包测试文件时有 14 项失败，观察点分别是 `BROWSER_DISCONNECTED`、端口/窗口进程未关闭、插件启用
+  `outcome_unknown`，以及 `ps` 明确报 `PermissionError: Operation not permitted`；该额外整组不记为通过，也没有证据把这些失败归因于
+  ZIP 元数据改动。
+- 未验证：真实 TUI 安装/启用/调用和真实模型自然调用；本轮按分工不启动 Gateway，留给 3a/ae 集成后验收。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `02568822d`）
 
 - **P15**：`test_structured_masking.py` 新增 2 例：

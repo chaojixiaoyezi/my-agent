@@ -196,6 +196,24 @@
   首失败诊断确认基线旧测试导入已删除的 TokenBudgetResult。未改无关模块，不宣称全仓通过。
   完整证据见 [TESTS](TESTS.md)，能力边界见 [迁移设计](docs/design/CAPABILITY_UPSTREAM_MIGRATION.md)与 [README](plugins/shuohao-novel-gates/README.md)。
 
+## C14 第一批 M-A1 + M-A2：drama-media-shell（2026-10-01，分支 `worker/sol56-c14-ma12`，本地已实现，待 ae 审查/集成）
+
+- **范围**：按固定上游 `zenstory-ai/drama-skills@0e8929881bb59248618c4f402707c64723adc017` 迁移四个纯离线提示词检查器，
+  并把 `production_tool.py` 的 prepare/confirm/run/status/audit/collect 作业合同收进同一 Python 插件；运行依赖只有精确
+  `my-agent-plugin-api==0.2.0`，业务代码只用标准库。
+- **付费边界**：包内只有 `fixture_adapter.py`，没有 `provider_adapters.py`、任意供应商网络调用或任意适配器/子进程入口；
+  `production_run` 只接受内置 fixture，回执和输出都标“夹具，不是真实生成”，真实供应商请求返回结构化
+  `PROVIDER_NOT_CONFIGURED`。工具说明统一写明“夹具产物不算生成成功”。
+- **权限与状态**：工作区读取/写入权限只从每次 MCP 调用 `_meta` 恢复；写入执行 SDK 0.2.0 的
+  `check → anchor → no-follow 原子写`。作业元数据只进绝对 `MY_AGENT_PLUGIN_DATA_DIR`，不回退 cwd、用户目录或安装目录，
+  不创建宿主任务账。
+- **许可与来源**：随包保留 A 的 MIT 原文和 `Copyright (c) 2026 drama-skills contributors`；`PROVENANCE.md`
+  记录固定提交、每个迁移来源的路径/sha256 和改造说明。明确排除 Remotion、限用途小说及派生样例和付费适配器。
+- **打包修复**：`build_plugin_package.py` 的外层 ZIP 成员改为固定时间戳、权限与压缩方式；此前 wheel 可复现而外层包仍带
+  构建时钟，本插件的重复构建测试实际跨过 DOS 两秒粒度后抓到该问题。
+- **验证边界**：实际包、`tools/list` 同源性、重复构建字节、上游 selftest 合同、读写上下文、符号链接拒绝、fixture 状态机
+  和 MCP 进程组件已由仓库测试覆盖；真实 TUI 安装/调用与真实模型自然调用按分工留给 3a/ae 集成后验收，不把组件测试外推。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已实现，待集成）
 
 - **P15 脱敏补两种写法**（唯一实现 `user_config_capability.masked_structure`/`mask_value`，未另写一份）：

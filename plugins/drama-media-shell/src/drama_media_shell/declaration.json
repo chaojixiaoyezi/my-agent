@@ -1,0 +1,140 @@
+{
+  "plugin_id": "drama-media-shell",
+  "summary": "离线检查短剧媒体提示词并运行夹具生产外壳；夹具产物不算生成成功",
+  "entry_module": "drama_media_shell",
+  "default_action": "status",
+  "actions": [
+    {
+      "name": "image-check",
+      "summary": "检查图像提示词规范",
+      "arguments": [{"name": "path", "summary": "图像提示词 JSONL 路径", "options": ["--path"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true}],
+      "kind": "tool", "target": "image_prompt_check", "available": true
+    },
+    {
+      "name": "container-check",
+      "summary": "核对视频交付容器与镜头集合",
+      "arguments": [
+        {"name": "containers_path", "summary": "容器 JSONL 路径", "options": ["--containers-path"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true},
+        {"name": "shots_path", "summary": "镜头 JSONL 路径", "options": ["--shots-path"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true}
+      ],
+      "kind": "tool", "target": "container_check", "available": true
+    },
+    {
+      "name": "motion-timing-check",
+      "summary": "核对显式运动时序",
+      "arguments": [
+        {"name": "motion_specs_path", "summary": "运动规范 JSONL 路径", "options": ["--motion-specs-path"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true},
+        {"name": "shots_path", "summary": "镜头 JSONL 路径", "options": ["--shots-path"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true}
+      ],
+      "kind": "tool", "target": "motion_timing_check", "available": true
+    },
+    {
+      "name": "music-check",
+      "summary": "检查音乐提示词规范",
+      "arguments": [{"name": "path", "summary": "音乐规范 JSONL 路径", "options": ["--path"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true}],
+      "kind": "tool", "target": "music_spec_check", "available": true
+    },
+    {
+      "name": "prepare",
+      "summary": "准备夹具生产作业",
+      "arguments": [{"name": "job_path", "summary": "作业 JSON 路径", "options": ["--job-path"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": true}],
+      "kind": "tool", "target": "production_prepare", "available": true
+    },
+    {
+      "name": "confirm",
+      "summary": "确认夹具生产作业",
+      "arguments": [
+        {"name": "job_id", "summary": "作业编号", "options": ["--job-id"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": false},
+        {"name": "confirmation", "summary": "prepare 返回的精确确认文本", "options": ["--confirmation"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": false}
+      ],
+      "kind": "tool", "target": "production_confirm", "available": true
+    },
+    {
+      "name": "run",
+      "summary": "运行离线夹具作业",
+      "arguments": [{"name": "job_id", "summary": "作业编号", "options": ["--job-id"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": false}],
+      "kind": "tool", "target": "production_run", "available": true
+    },
+    {
+      "name": "status",
+      "summary": "查看夹具作业状态",
+      "arguments": [{"name": "job_id", "summary": "作业编号", "options": ["--job-id"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": false}],
+      "kind": "tool", "target": "production_status", "available": true
+    },
+    {
+      "name": "audit",
+      "summary": "审计夹具作业记录",
+      "arguments": [],
+      "kind": "tool", "target": "production_audit", "available": true
+    },
+    {
+      "name": "collect",
+      "summary": "从私有夹具缓存重新收集产物",
+      "arguments": [{"name": "job_id", "summary": "作业编号", "options": ["--job-id"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": false}],
+      "kind": "tool", "target": "production_collect", "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "image_prompt_check",
+      "description": "只读检查图像提示词 JSONL 的引用、结构与供应商中立性；不生成媒体。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "工作区内的图像提示词 JSONL 路径"}}, "required": ["path"], "additionalProperties": false}
+    },
+    {
+      "name": "container_check",
+      "description": "只读核对交付容器与镜头集合、成员顺序和时长；不生成媒体。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {"containers_path": {"type": "string", "minLength": 1, "maxLength": 4096}, "shots_path": {"type": "string", "minLength": 1, "maxLength": 4096}}, "required": ["containers_path", "shots_path"], "additionalProperties": false}
+    },
+    {
+      "name": "motion_timing_check",
+      "description": "只读核对显式运动分段与已接受镜头时长；不生成媒体。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {"motion_specs_path": {"type": "string", "minLength": 1, "maxLength": 4096}, "shots_path": {"type": "string", "minLength": 1, "maxLength": 4096}}, "required": ["motion_specs_path", "shots_path"], "additionalProperties": false}
+    },
+    {
+      "name": "music_spec_check",
+      "description": "只读检查时间线级音乐规范的引用、结构与供应商中立性；不生成媒体。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "工作区内的音乐规范 JSONL 路径"}}, "required": ["path"], "additionalProperties": false}
+    },
+    {
+      "name": "production_prepare",
+      "description": "读取并冻结离线夹具作业，返回精确确认文本；夹具产物不算生成成功。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {"job_path": {"type": "string", "minLength": 1, "maxLength": 4096}}, "required": ["job_path"], "additionalProperties": false}
+    },
+    {
+      "name": "production_confirm",
+      "description": "确认 prepare 返回的精确离线夹具作业；夹具产物不算生成成功。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 80}, "confirmation": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["job_id", "confirmation"], "additionalProperties": false}
+    },
+    {
+      "name": "production_run",
+      "description": "只运行包内离线 fixture_adapter 并写入夹具产物；夹具产物不算生成成功。",
+      "requested_effect": "mutating",
+      "input_schema": {"type": "object", "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 80}}, "required": ["job_id"], "additionalProperties": false}
+    },
+    {
+      "name": "production_status",
+      "description": "读取插件私有目录中的离线夹具作业状态；夹具产物不算生成成功。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 80}}, "required": ["job_id"], "additionalProperties": false}
+    },
+    {
+      "name": "production_audit",
+      "description": "审计插件私有目录中的夹具作业与产物声明，不评价媒体质量；夹具产物不算生成成功。",
+      "requested_effect": "read_only",
+      "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}
+    },
+    {
+      "name": "production_collect",
+      "description": "从插件私有夹具缓存重新收集已运行作业的产物；夹具产物不算生成成功。",
+      "requested_effect": "mutating",
+      "input_schema": {"type": "object", "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 80}}, "required": ["job_id"], "additionalProperties": false}
+    }
+  ],
+  "settings_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}
+}

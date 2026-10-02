@@ -12,6 +12,11 @@ C14 M-B1（2026-10-01，sol2，`worker/sol2-c14-mb1`，本地候选、待外部�
 严格静态门禁与含 NUL 源树 clean-package 通过；追加全仓未通过，SIGTERM 终止原因未确认，
 首失败为与基线相同的 archive_tokens 旧接口导入。无关失败未改，详细范围与原始证据见 TESTS。
 
+C14 第一批 M-A1 + M-A2（2026-10-01，`worker/sol56-c14-ma12`，本地已实现、待审查集成）：新增标准库 Python 插件
+`drama-media-shell`，包含四个离线提示词检查器和 fixture-only 的 prepare/confirm/run/status/audit/collect 作业流程。
+读写走 SDK 0.2.0 逐次上下文，作业账只在插件私有目录；包内没有付费供应商代码、Remotion 或限用途小说样例。
+聚焦实际包/MCP 测试 9 项通过；未启动 Gateway，真实 TUI 安装/调用和真实模型自然调用未验证。下一步由 ae 审查、3a 合入后原生验收。
+
 C10（2026-10-01，sol，源码已支持、待集成）：IM `/plugins` 与 `/plugins@<插件ID>` 走 TUI 同一
 插件服务，管理权限、纯文本错误码、原非 Python 启用预览和持久控制重放已在本地开发用例验证。
 定向 155 项、架构守卫 166 项通过，三个变异均被拦截；真实飞书/QQ 收发与正式部署未验证。
