@@ -154,8 +154,8 @@ def _read_result(observation):
 def _observation():
     return {"schema": OBSERVATION_SCHEMA, "target": {"ref": "win:boot:1", "generation": "boot-1-3"},
             "frame": {"space": "screen_points", "origin": [0, 0], "size": [800, 600], "scale": [1, 1]},
-            "candidates": [{"key": "t1", "role": "ocr_text", "label": "提交", "actions": ["click"], "region": [10, 20, 60, 18]},
-                           {"key": "t2", "role": "ocr_text", "label": "取消", "actions": ["click"], "region": [90, 20, 60, 18]}]}
+            "candidates": [{"key": "ocr:1", "role": "ocr_text", "label": "提交", "actions": ["click"], "region": [10, 20, 60, 18]},
+                           {"key": "ocr:2", "role": "ocr_text", "label": "取消", "actions": ["click"], "region": [90, 20, 60, 18]}]}
 
 
 # 函数用途: 经发布链拿到带绑定的代理（transport 不给就用替身）。
@@ -208,7 +208,7 @@ def test_each_connection_gets_its_own_activation_id_even_with_equal_or_empty_bir
     fresh = json.loads(_recorded(repo, second).output)["structuredContent"][OBSERVATION_KEY]["candidates"]
     client.result = {"content": "{}", "structuredContent": {"clicked": True}, "isError": False}
     outcome = second.tools["mcp__srv__click"].execute({"candidate_id": fresh[0]["candidate_id"], "__run_scope": RUN_SCOPE})
-    assert outcome.ok and client.sent[-1]["meta"][OBSERVATION_META_EXTENSION]["key"] == "t1", "新代次的观察照常可用"
+    assert outcome.ok and client.sent[-1]["meta"][OBSERVATION_META_EXTENSION]["key"] == "ocr:1", "新代次的观察照常可用"
 
 
 def test_action_tool_rechecks_candidate_before_sending_and_lifts_provider_rejection():
@@ -223,7 +223,7 @@ def test_action_tool_rechecks_candidate_before_sending_and_lifts_provider_reject
     client.result = {"content": "{}", "structuredContent": {"clicked": True}, "isError": False}
     ok = click.execute({"candidate_id": candidates[1]["candidate_id"], "__run_scope": RUN_SCOPE})
     assert ok.ok and client.sent[-1]["meta"][OBSERVATION_META_EXTENSION] == {
-        "version": "1", "observation_id": repo.events[-1]["payload"]["observation"]["observation_id"], "key": "t2",
+        "version": "1", "observation_id": repo.events[-1]["payload"]["observation"]["observation_id"], "key": "ocr:2",
         "target": {"ref": "win:boot:1", "generation": "boot-1-3"}}
     client.result = {"content": "{}", "structuredContent": {"my_agent_observation_error": {"code": "stale"}}, "isError": True}
     lifted = click.execute({"candidate_id": candidates[1]["candidate_id"], "__run_scope": RUN_SCOPE})

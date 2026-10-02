@@ -29,6 +29,7 @@ from agent_py_agent.agent.tooling.screen_observation import (
     TextRegion,
 )
 from agent_py_agent.agent.tooling.screen_observation_store import WindowInstanceRegistry
+from agent_py_agent.tests._fake_macos_ax import FakeAx
 from agent_py_agent.tests.test_screen_observation_core import _context, _meta
 
 FORM, PANEL, BACKDROP, MENUBAR = 101, 102, 103, 104
@@ -209,19 +210,14 @@ def _ocr(buffer):
     return [TextRegion("提交", tuple(round(value * scale) for value in PATCH))]
 
 
-# 函数用途: 假 AXIsProcessTrusted：给异常类就抛（模拟绑定导入失败），否则返回是否已授权。
-def _accessibility(state):
-    if isinstance(state, type) and issubclass(state, BaseException):
-        raise state("ApplicationServices")
-    return state
-
-
-# 函数用途: 组装一套假框架的后端与观察核心；返回 (observer, quartz, kit, grabs, clicks)。
+# 函数用途: 组装一套假框架的后端与观察核心；trusted 是辅助功能授权，给 ImportError 表示 ApplicationServices 绑定导入失败。
+#   返回 (observer, quartz, kit, grabs, clicks)；假 AX 里这个应用没有窗口，控件树读不到（只出 OCR 候选）。
 def _setup(*, kit="default", version=(15, 1), trusted=True):
     quartz, grabs, clicks = _Quartz(), [], []
     kit = _Kit() if kit == "default" else kit
-    backend = MacBackend(MacFrameworks(quartz, kit, lambda: _Grabber(grabs), lambda x, y: clicks.append((x, y)), version,
-                                       lambda: _accessibility(trusted)))
+    ax = None if trusted is ImportError else FakeAx(trusted=trusted)
+    backend = MacBackend(MacFrameworks(quartz, kit, lambda: _Grabber(grabs), lambda x, y: clicks.append((x, y)), version, ax,
+                                       lambda text: clicks.append(("type", text))))
     backend._ocr = SimpleNamespace(read=_ocr)
     observer = ScreenObserver(backend, registry=WindowInstanceRegistry(boot="mac0"), clock=lambda: 1790000000.5)
     return observer, quartz, kit, grabs, clicks
@@ -245,7 +241,7 @@ def test_listing_is_bottom_to_top_with_identity_layer_and_visibility_facts():
     quartz.windows.append(_row(202, (10, 10, 80, 80), onscreen=False, name="最小化"))
     quartz.windows.append(_row(203, (5000, 5000, 80, 80), name="不在任何显示器上"))
     quartz.windows.append(_row(204, (-1800, 100, 400, 300), pid=777, name="副屏"))
-    windows = MacBackend(MacFrameworks(quartz, _Kit(), lambda: None, lambda x, y: None, (15, 1), lambda: True)).list_windows()
+    windows = MacBackend(MacFrameworks(quartz, _Kit(), lambda: None, lambda x, y: None, (15, 1), FakeAx(), lambda text: None)).list_windows()
     assert [w.native_id for w in windows] == [(204, 777), (203, 500), (202, 500), (BACKDROP, 500), (FORM, 500), (MENUBAR, 500), (201, 500)], "前→后翻成底→顶"
     facts = {w.native_id[0]: (w.normal, w.viewable, w.geometry.scale, w.geometry.origin) for w in windows}
     assert facts[MENUBAR][0] is False and facts[FORM][0] is True, "layer==0 才算普通窗口"

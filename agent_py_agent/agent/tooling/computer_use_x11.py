@@ -3,7 +3,9 @@
 #   不激活、不移动鼠标（click 除外）。所有桌面库都在用到时才 import：没有 DISPLAY 的进程也能构造后端，错误在调用时变成
 #   ObservationError。打开 X 连接、截屏、点击这三个真碰桌面的库只经 load_real_x11_libraries() 一个入口拿（与 macOS 后端同一套），
 #   测试侧守卫在会话级把它换成直接失败（Linux 车道容器里不换），pyautogui 在 Mac 上也能点，不能靠每个测试自觉替换模块。
-#   X11 注入点击不需要额外授权，ensure_click_permitted 什么都不做。坐标：X11 全局坐标就是像素，缩放固定 1；几何取客户区（translate_coords 到根窗口），遮挡矩形加 _NET_FRAME_EXTENTS 边框。
+#   X11 注入点击不需要额外授权，ensure_click_permitted 什么都不做。
+#   控件候选（片 G）：Linux AT-SPI 只做评估、不进默认依赖，X11 后端不给控件候选（ui_candidates_supported=False，ui_scan 返回空、
+#   不带原因，免得在 Linux 上制造噪音），适配器也就不注册 type_into_candidate。坐标：X11 全局坐标就是像素，缩放固定 1；几何取客户区（translate_coords 到根窗口），遮挡矩形加 _NET_FRAME_EXTENTS 边框。
 #   截图是 mss 按区域截屏：压在上面的窗口也会被拍进去，所以如实报 capture="screen_region"（片 E 起由后端报，核心不再写死）。
 #   OCR 用与 macOS 后端共用的 screen_ocr.RapidOcrReader。
 #   不调上游 computer_control_mcp 的内部对象。真实验证只在 Linux 车道容器（Xvfb + openbox）做，Mac 上只用假后端。
@@ -19,6 +21,7 @@ from .screen_observation import SCREEN_REGION_CAPTURE, ScreenCapture, TextRegion
 from .screen_observation_store import WindowGeometry
 from .screen_ocr import RapidOcrReader
 from .screen_region_digest import PixelBuffer
+from .screen_ui_candidates import UiScan
 
 # _NET_WM_DESKTOP 里"所有桌面"的 EWMH 协议约定值（协议常数，不进常数目录）
 _ALL_DESKTOPS_PROTOCOL_VALUE = 0xFFFFFFFF
@@ -45,6 +48,8 @@ def load_real_x11_libraries() -> X11Libraries:
 #   不缓存窗口状态（复核要新鲜事实）。
 # 类用途: 观察核心的 X11 后端。
 class X11Backend:
+    ui_candidates_supported = False
+
     def __init__(self, display: Any | None = None, libraries: X11Libraries | None = None) -> None:
         self._display = display
         self._libraries = libraries
@@ -87,6 +92,10 @@ class X11Backend:
     # 函数用途: 在全局像素坐标点一下（复核通过后立刻调用，中间不做别的 I/O）。
     def click(self, x: int, y: int) -> None:
         self._libs().click(int(x), int(y))
+
+    # 函数用途: 控件树：X11 后端不读（AT-SPI 只评估），返回空、不带原因。
+    def ui_scan(self, info: WindowInfo) -> UiScan:
+        return UiScan()
 
     # 函数用途: 点击前的权限确认：X11 注入点击不需要额外授权，什么都不做（与 macOS 后端同一个鸭子接口）。
     def ensure_click_permitted(self) -> None:

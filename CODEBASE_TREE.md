@@ -716,14 +716,16 @@ agent_py_agent/
 |   |   |-- process_output_capture.py   # stdout/stderr 有界保留与持续排空，公开截断和完整性
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
 |   |   |-- computer_use_server.py    # 用公开 MCP 接口组合上游桌面工具、滚轮及文本输入；底层 Server 单一运行路径，按环境标记装观察接管层
-|   |   |-- computer_use_observation_tools.py # J16 屏幕观察两个工具的接入胶水：tools/list 声明、底层 tools/call 接管、_meta 读取与 isError+structuredContent 编码
+|   |   |-- computer_use_observation_tools.py # J16 屏幕观察工具的接入胶水：tools/list 声明（type_into 按后端能力注册）、底层 tools/call 接管、_meta 读取与 isError+structuredContent 编码
 |   |   |-- computer_use_x11.py       # Linux X11 真后端：叠放列窗、上层矩形（含 override-redirect 与边框）、mss 区域截屏（screen_region）、点击；真实库只经 load_real_x11_libraries
-|   |   |-- computer_use_macos.py     # macOS 真后端（片 E）：Quartz 列窗与遮挡、权限预检、ScreenCaptureKit 单窗口截图与 mss 回退（带原因）、辅助功能预检与点击
+|   |   |-- computer_use_macos.py     # macOS 真后端（片 E）：Quartz 列窗与遮挡、权限预检、ScreenCaptureKit 单窗口截图与 mss 回退（带原因）、辅助功能预检与点击；片 G 的控件、全选、输入、删除键入口
+|   |   |-- computer_use_macos_ax.py  # macOS 无障碍读取（片 G）：只查不弹窗的授权、AX 窗口匹配、广度优先限深限量读树、密码框不读值、AX 全选
 |   |   |-- computer_use_backends.py  # 屏幕观察后端唯一选择入口：darwin → MacBackend，其余 → X11Backend
 |   |   |-- screen_ocr.py             # 两个桌面后端共用的 RapidOCR 识别器（文字区域 → TextRegion）
-|   |   |-- screen_observation.py     # 屏幕观察核心（来源无关）：选窗、采样、候选、快照、动作前五项复核、复核通过立刻点击
-|   |   |-- screen_observation_store.py # 窗口实例登记（boot + 实例号）与每窗最近 4 代快照环（只存几何、可见事实、候选 region/grid）
+|   |   |-- screen_observation.py     # 屏幕观察核心（来源无关）：选窗、采样、候选合并、快照、动作前复核、点击与输入（片 G）
+|   |   |-- screen_observation_store.py # 窗口实例登记（boot + 实例号）与每窗最近 4 代快照环（只存几何、可见事实、候选 region/grid 或控件结构化事实）
 |   |   |-- screen_region_digest.py   # 候选区域像素摘要口径：灰度 → 16×8 面积平均 → 16 级量化 → sha；容差判定
+|   |   |-- screen_ui_candidates.py   # 候选来源无关部分（片 G）：动作名、label 清洗、控件 + OCR 合并去重与动作判定
 |   |   |-- computer_text_input.py    # 按平台提交可靠文本，校验 Unicode 并保留后置验证边界
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
 |   |   |-- runtime_contracts.py      # 唯一 canonical ToolCall/ToolResult、ToolChoice、协议与 operation 合同
@@ -1036,6 +1038,9 @@ agent_py_agent/
 |   |-- test_computer_use_xvfb_lane.py   # J16 车道 Xvfb 冒烟（默认跳过）：真适配器观察 → 点击 → 再观察、移动后过期、开关关着只有上游工具
 |   |-- test_computer_use_xvfb_cases.py  # J16 片 C 车道集成（默认跳过）：关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计
 |   |-- test_computer_use_macos.py # J16 片 E：假 Quartz/ScreenCaptureKit/mss 上的列窗、可见、遮挡、多显示器缩放、回退原因、权限与晚到回调
+|   |-- test_computer_use_macos_ax.py # J16 片 G：假 AX 上的授权、窗口匹配、限深限量读树、密码框不读值、端到端输入与控件变化 stale
+|   |-- test_screen_ui_candidates.py # J16 片 G 核心：合并去重与动作判定、控件结构化复核、type_into 顺序、文字边界与取消时点
+|   |-- _fake_macos_ax.py         # 测试共用的假 ApplicationServices：记录读写，绝不弹授权框、不执行 AX 动作
 |   |-- test_screen_capture_guard.py # 真实屏幕防线自检：macOS / X11 真实库入口一调就失败且吞不掉（绊线兜底）；递归扫描“开观察 + 拉子进程”的文件必须带车道标记
 |   |-- _screen_capture_guard.py # 测试侧真实屏幕防线：RealScreenAccessForbidden 与车道标记扫描规则
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归

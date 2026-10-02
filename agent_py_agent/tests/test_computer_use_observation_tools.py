@@ -3,6 +3,7 @@ X11 后端在假 Xlib 上的事实提取。"""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import sys
 from types import SimpleNamespace
@@ -23,10 +24,15 @@ from agent_py_agent.agent.tooling.computer_use_profile import (
 )
 from agent_py_agent.agent.tooling.mcp_client import MCPServerConfig, MCPToolInfo
 from agent_py_agent.agent.tooling.mcp_declarations import resolve_server_declarations
-from agent_py_agent.agent.tooling.screen_observation import ObservationError
+from agent_py_agent.agent.tooling.screen_observation import (
+    TYPE_INTO_TEXT_MAX_CHARS,
+    ObservationError,
+)
 
 OBSERVE_SCHEMA = {"type": "object", "properties": {"window": {"type": "string"}}}
 CLICK_SCHEMA = {"type": "object", "properties": {"candidate_id": {"type": "string"}}}
+TYPE_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}, "candidate_id": {"type": "string"},
+                                                "clear_existing": {"type": "boolean"}}, "required": ["text"]}
 
 
 def _profile(enabled=True, observation=True, admin=True, access="full-access"):
@@ -35,18 +41,23 @@ def _profile(enabled=True, observation=True, admin=True, access="full-access"):
     return with_computer_use_observation(servers, enabled=observation)
 
 
-def test_switch_adds_the_two_declarations_and_the_env_flag_only_inside_the_owner_scope():
+def test_switch_adds_the_observation_declarations_and_the_env_flag_only_inside_the_owner_scope():
     profile = _profile()[COMPUTER_USE_MCP_SERVER_NAME]
     assert profile["env"][OBSERVATION_ENV_FLAG] == "1" and profile["env"]["DISPLAY"] == ":99"
     assert profile["tool_effects"]["observe_window"] == "read_only" and profile["tool_effects"]["click_candidate"] == "dangerous"
+    assert profile["tool_effects"]["type_into_candidate"] == "dangerous"
     assert profile["tool_effects"]["list_windows"] == "read_only", "原有 16 项声明保持"
     assert profile["tool_approvals"] == {"observe_window": "always"}
     config = MCPServerConfig.from_mapping(COMPUTER_USE_MCP_SERVER_NAME, profile)
     assert config.tool_observations == {"observe_window": PluginToolObservation("window", 64),
-                                        "click_candidate": PluginToolObservationRef("window", "candidate_id")}
+                                        "click_candidate": PluginToolObservationRef("window", "candidate_id"),
+                                        "type_into_candidate": PluginToolObservationRef("window", "candidate_id")}
     resolved = resolve_server_declarations(config, [MCPToolInfo("observe_window", "o", OBSERVE_SCHEMA), MCPToolInfo("click_candidate", "c", CLICK_SCHEMA),
-                                                     MCPToolInfo("list_windows", "l", {})])
+                                                     MCPToolInfo("type_into_candidate", "t", TYPE_SCHEMA), MCPToolInfo("list_windows", "l", {})])
     assert resolved.tools["observe_window"].approval == "always" and resolved.notices == ()
+    linux = resolve_server_declarations(config, [MCPToolInfo("observe_window", "o", OBSERVE_SCHEMA), MCPToolInfo("click_candidate", "c", CLICK_SCHEMA)])
+    assert "type_into_candidate" not in linux.tools and linux.notices == ({"tool": "type_into_candidate", "code": "declared_tool_not_discovered"},), \
+        "后端不给控件候选时适配器不注册它：只记 notice，不拒整个服务"
     off = _profile(observation=False)[COMPUTER_USE_MCP_SERVER_NAME]
     assert OBSERVATION_ENV_FLAG not in off["env"] and "observe_window" not in off["tool_effects"] and off["tool_approvals"] == {}
     for scope in ({"admin": False}, {"access": "restricted"}, {"enabled": False}):
@@ -57,6 +68,8 @@ def test_switch_adds_the_two_declarations_and_the_env_flag_only_inside_the_owner
 
 # 类用途: 假观察核心：记录调用，按预设返回或抛结构化错误。
 class _Observer:
+    supports_ui_candidates = False
+
     def __init__(self):
         self.calls, self.error = [], None
         self.result = {"window": "win:b:1", "generation": "b-1-1", "candidate_count": 1,
@@ -77,6 +90,12 @@ class _Observer:
             raise self.error
         return {"clicked": {"key": meta["key"]}, "point": [1, 2]}
 
+    def type_into_candidate(self, meta, text, clear_existing=False, *, cancelled=None):
+        self.calls.append(("type", meta, text, clear_existing))
+        if self.error:
+            raise self.error
+        return {"typed": {"key": meta["key"]}, "characters": len(text), "clear_existing": clear_existing, "application_verified": False}
+
 
 def test_call_observation_tool_keeps_the_payload_out_of_the_body_and_encodes_failures():
     observer = _Observer()
@@ -85,10 +104,10 @@ def test_call_observation_tool_keeps_the_payload_out_of_the_body_and_encodes_fai
     assert observer.calls == [("observe", None)]
     body, structured, is_error = glue.call_observation_tool(observer, "observe_window", {"window": 5}, None)
     assert is_error and body["code"] == "OBSERVATION_INVALID_ARGUMENTS" and structured == {"my_agent_observation_error": {"code": "invalid_arguments"}}
-    meta = {"version": "1", "key": "t1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}
+    meta = {"version": "1", "key": "ocr:1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}
     context = glue.CallContext(meta=meta)
     body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "cand-0123456789abcdef"}, context)
-    assert not is_error and body == structured == {"clicked": {"key": "t1"}, "point": [1, 2]}
+    assert not is_error and body == structured == {"clicked": {"key": "ocr:1"}, "point": [1, 2]}
     assert glue.call_observation_tool(observer, "click_candidate", {}, context)[2] is True, "缺 candidate_id 不执行"
     observer.error = ObservationError("stale", "候选区域的像素已变")
     body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, context)
@@ -130,13 +149,13 @@ def test_lowlevel_handler_intercepts_only_observation_tools_and_reads_host_meta(
     glue.install_observation_handler(low, observer)
     handler = low.request_handlers[types.CallToolRequest]
     assert handler is not delegate
-    meta = SimpleNamespace(model_extra={OBSERVATION_META_EXTENSION: {"version": "1", "key": "t1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}})
+    meta = SimpleNamespace(model_extra={OBSERVATION_META_EXTENSION: {"version": "1", "key": "ocr:1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}})
     plain = SimpleNamespace(params=SimpleNamespace(name="list_windows", arguments={}, meta=None))
     assert asyncio.run(handler(plain)) == "delegated" and delegated == ["list_windows"], "其它工具原样交给 FastMCP"
     clicked = asyncio.run(handler(SimpleNamespace(params=SimpleNamespace(name="click_candidate", arguments={"candidate_id": "cand-x"}, meta=meta))))
-    assert clicked.root.isError is False and clicked.root.structuredContent == {"clicked": {"key": "t1"}, "point": [1, 2]}
-    assert json.loads(clicked.root.content[0].text) == {"clicked": {"key": "t1"}, "point": [1, 2]}
-    assert observer.calls[-1] == ("click", {"version": "1", "key": "t1", "target": {"ref": "win:b:1", "generation": "b-1-1"}})
+    assert clicked.root.isError is False and clicked.root.structuredContent == {"clicked": {"key": "ocr:1"}, "point": [1, 2]}
+    assert json.loads(clicked.root.content[0].text) == {"clicked": {"key": "ocr:1"}, "point": [1, 2]}
+    assert observer.calls[-1] == ("click", {"version": "1", "key": "ocr:1", "target": {"ref": "win:b:1", "generation": "b-1-1"}})
     observed = asyncio.run(handler(SimpleNamespace(params=SimpleNamespace(name="observe_window", arguments=None, meta=None))))
     assert observed.root.isError is False and "my_agent_observation" in observed.root.structuredContent
     assert "my_agent_observation" not in json.loads(observed.root.content[0].text), "观察载荷只进 structuredContent"
@@ -192,15 +211,18 @@ class _FastMCP:
         self.added.append((fn, name, description))
 
 
-@pytest.mark.parametrize("flag,expect_tools", [({}, 1), ({OBSERVATION_ENV_FLAG: "0"}, 1), ({OBSERVATION_ENV_FLAG: "1"}, 3)])
-def test_build_adapter_server_registers_observation_tools_only_when_the_flag_is_on(monkeypatch, flag, expect_tools):
+@pytest.mark.parametrize("flag,typing,expect_tools", [({}, True, 1), ({OBSERVATION_ENV_FLAG: "0"}, True, 1), ({OBSERVATION_ENV_FLAG: "1"}, False, 3),
+                                                     ({OBSERVATION_ENV_FLAG: "1"}, True, 4)])
+def test_build_adapter_server_registers_observation_tools_only_when_the_flag_is_on(monkeypatch, flag, typing, expect_tools):
     types = _fake_types()
     monkeypatch.setitem(sys.modules, "mcp", SimpleNamespace(types=types))
     monkeypatch.setitem(sys.modules, "mcp.types", types)
     monkeypatch.setitem(sys.modules, "mcp.server", SimpleNamespace())
     monkeypatch.setitem(sys.modules, "mcp.server.lowlevel", SimpleNamespace(Server=_LowServer))
     fastmcp, factory_calls = _FastMCP(), []
-    low = glue.build_adapter_server(fastmcp, flag, lambda: factory_calls.append(1) or _Observer())
+    observer = _Observer()
+    observer.supports_ui_candidates = typing
+    low = glue.build_adapter_server(fastmcp, flag, lambda: factory_calls.append(1) or observer)
     assert low.name == fastmcp.name and low.bound["list_tools"] == fastmcp.list_tools and low.bound["call_tool"] == fastmcp.call_tool
     listed = asyncio.run(low.bound["list_tools"]())
     assert len(listed) == expect_tools and [t["name"] for t in listed][:1] == ["list_windows"]
@@ -208,18 +230,43 @@ def test_build_adapter_server_registers_observation_tools_only_when_the_flag_is_
     if expect_tools == 1:
         assert handler == ("delegate", fastmcp.call_tool) and fastmcp.added == [] and factory_calls == [], "关时目录与处理器都不变，不碰 X11"
     else:
-        assert [name for _, name, _ in fastmcp.added] == ["observe_window", "click_candidate"] and factory_calls == [1]
+        expected = ["observe_window", "click_candidate"] + (["type_into_candidate"] if typing else [])
+        assert [name for _, name, _ in fastmcp.added] == expected and factory_calls == [1], "type_into 按后端声明的能力注册"
         assert callable(handler) and not isinstance(handler, tuple), "开时接管层已装上"
 
 
 def test_declaration_functions_only_describe_and_register_the_tools():
     registered = []
-    glue.register_observation_tools(SimpleNamespace(add_tool=lambda fn, name, description: registered.append((fn, name, description))))
-    assert [(name, fn.__name__) for fn, name, _ in registered] == [("observe_window", "observe_window"), ("click_candidate", "click_candidate")]
+    glue.register_observation_tools(SimpleNamespace(add_tool=lambda fn, name, description: registered.append((fn, name, description))), with_typing=True)
+    assert [(name, fn.__name__) for fn, name, _ in registered] == [("observe_window", "observe_window"), ("click_candidate", "click_candidate"),
+                                                                   ("type_into_candidate", "type_into_candidate")]
     assert all("candidate" in description for _, _, description in registered)
+    assert str(TYPE_INTO_TEXT_MAX_CHARS) in registered[2][2], "说明里的字数上限和核心常数一致"
     for fn, _, _ in registered:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(TypeError if fn.__name__ == "type_into_candidate" else RuntimeError):
             fn()
+    params = inspect.signature(glue.type_into_candidate).parameters
+    assert params["text"].default is inspect.Parameter.empty and params["candidate_id"].default == "", \
+        "text 必填、候选参数可选：按片 D 的规则（必填项 ⊆ {候选参数}）它不会被自动执行"
+    without = []
+    glue.register_observation_tools(SimpleNamespace(add_tool=lambda fn, name, description: without.append(name)), with_typing=False)
+    assert without == ["observe_window", "click_candidate"]
+
+
+def test_type_into_branch_validates_the_candidate_id_and_passes_text_and_clicked_facts_through():
+    observer = _Observer()
+    meta = {"version": "1", "key": "ax:1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}
+    context = glue.CallContext(meta=meta)
+    body, structured, is_error = glue.call_observation_tool(observer, "type_into_candidate", {"candidate_id": "cand-x", "text": "你好", "clear_existing": True}, context)
+    assert not is_error and structured["typed"] == {"key": "ax:1"} and observer.calls[-1] == ("type", meta, "你好", True)
+    assert glue.call_observation_tool(observer, "type_into_candidate", {"text": "x"}, context)[1] == {"my_agent_observation_error": {"code": "invalid_arguments"}}
+    observer.error = ObservationError("focus_not_acquired", "已点击、未输入", clicked=True)
+    body, structured, is_error = glue.call_observation_tool(observer, "type_into_candidate", {"candidate_id": "cand-x", "text": "x"}, context)
+    assert (is_error, body["code"]) == (True, "OBSERVATION_FOCUS_NOT_ACQUIRED")
+    assert structured == {"my_agent_observation_error": {"code": "focus_not_acquired", "clicked": True}}, "点击之后的失败如实带 clicked"
+    observer.error = ObservationError("stale", "控件已变")
+    assert glue.call_observation_tool(observer, "type_into_candidate", {"candidate_id": "cand-x", "text": "x"}, context)[1] == \
+        {"my_agent_observation_error": {"code": "stale"}}, "点击之前的失败不带 clicked"
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +451,7 @@ def test_cancelled_click_queued_behind_a_cancelled_slow_observation_never_clicks
 
     handler = glue.observation_call_handler(delegate, observer)
     observe = SimpleNamespace(params=SimpleNamespace(name="observe_window", arguments={}, meta=None))
-    click_meta = SimpleNamespace(model_extra={OBSERVATION_META_EXTENSION: {"version": "1", "key": "t1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}})
+    click_meta = SimpleNamespace(model_extra={OBSERVATION_META_EXTENSION: {"version": "1", "key": "ocr:1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}})
     click = SimpleNamespace(params=SimpleNamespace(name="click_candidate", arguments={"candidate_id": "cand-x"}, meta=click_meta))
 
     async def scenario():

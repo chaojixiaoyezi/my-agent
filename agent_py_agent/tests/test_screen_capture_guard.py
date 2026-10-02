@@ -1,7 +1,7 @@
 """真实屏幕防线自检（J16 片 E，ae 设计评审定的两层）。
 
 1. 本进程：conftest 已在会话级把两个桌面后端唯一的真实库加载入口换成直接失败（X11 的在 Linux 车道容器里不换）。不注入假库时，
-   列窗口、上层矩形、截图、点击、点击权限确认都当场失败；失败是 BaseException，观察核心截图外层的 except Exception 吞不掉，
+   列窗口、上层矩形、截图、点击、点击权限确认，以及片 G 的读控件树、复核控件、查焦点、全选、输入、删除键都当场失败；失败是 BaseException，观察核心截图外层的 except Exception 吞不掉，
    不会变成 capture_failed。真实库的模块名先换成一碰就炸的绊线：防线哪天退化了，这里也只会碰到绊线，不会真的点到屏幕。
 2. 子进程：tests/ 下（含子目录、辅助模块）同时“打开屏幕观察”和“拉起 MCP 子进程”的文件必须带 Linux 车道跳过标记；
    样例文本覆盖违规与不违规。样例用防线模块里的常量拼出来，本文件源码里不出现标记字面量，免得扫描到自己。
@@ -59,7 +59,14 @@ def tripwires(monkeypatch):
     lambda: MacBackend().capture(_INFO),
     lambda: MacBackend().click(1, 2),
     lambda: MacBackend().ensure_click_permitted(),
-], ids=["list_windows", "above_rects", "capture", "click", "ensure_click_permitted"])
+    lambda: MacBackend().ui_scan(_INFO),
+    lambda: MacBackend().ui_facts(object()),
+    lambda: MacBackend().ui_focused(object()),
+    lambda: MacBackend().ui_select_all(object()),
+    lambda: MacBackend().type_text("x"),
+    lambda: MacBackend().press_delete(),
+], ids=["list_windows", "above_rects", "capture", "click", "ensure_click_permitted", "ui_scan", "ui_facts", "ui_focused",
+        "ui_select_all", "type_text", "press_delete"])
 def test_real_macos_frameworks_are_never_loaded_under_pytest(call, tripwires):
     with pytest.raises(RealScreenAccessForbidden):
         call()

@@ -1,6 +1,6 @@
 # LLM: 适配器进程内的窗口实例登记与快照环（J16 片 B 复核的"当时"一侧）。boot 每个进程随机，窗口原生 ID（XID / 窗口号）在上次列表里
 #   不存在、这次出现就算新实例（ID 复用也算新）；每个实例只留最近 SNAPSHOT_RETAIN_COUNT 代快照，只存几何、可见事实和逐候选的
-#   {region, grid}，不存整幅图；跟踪窗口数超过 TRACKED_WINDOWS_MAX_COUNT 按最近采样淘汰，列表里消失的窗口连快照一起删。
+#   {region, grid}（OCR 候选）或 {region, 控件结构化事实, 后端句柄}（无障碍候选，片 G），不存整幅图，也不存任何控件的值；跟踪窗口数超过 TRACKED_WINDOWS_MAX_COUNT 按最近采样淘汰，列表里消失的窗口连快照一起删。
 #   这里不做任何 X11 / 系统调用，也不判定过期：找快照只按 (ref, generation) 精确命中，是否仍有效由 screen_observation 逐项复核。
 # 模块用途: 记住"上次观察时窗口长什么样"，供动作前复核对照；纯内存、无副作用，可用假数据单测。
 from __future__ import annotations
@@ -30,12 +30,31 @@ class WindowGeometry:
         return {"origin": list(self.origin), "size": list(self.size), "scale": list(self.scale)}
 
 
-# 类用途: 一个候选在快照里的事实：提供方 key、截图像素外框、量化灰度格（screen_region_digest.region_grid）。
+# LLM: 无障碍控件（片 G）复核用的结构化事实，ae 定：role、enabled、原始外框（全局点，未裁剪）、label 来源（AXTitle /
+#   AXDescription / AXPlaceholderValue）的 sha、值是否可写；selection_settable 只给 clear_existing 判能不能全选。绝不含控件的值本身
+#   （AXValue 的内容不存、不算哈希）；动作前整份相等才算没变，任一项不同 → stale。
+# 类用途: 一个无障碍控件在采样时的结构化事实。
+@dataclass(frozen=True)
+class UiFacts:
+    role: str
+    enabled: bool
+    frame: tuple[int, int, int, int]
+    label_sha: str
+    value_settable: bool
+    selection_settable: bool = False
+
+
+# LLM: OCR 候选带 grid（像素摘要复核）；无障碍候选 grid 为 None，改带 facts 与 native（后端句柄，只在适配器进程内存里，不进任何载荷）。
+#   actions 是观察时给出的动作工具名，动作前核对候选是否真有这个动作。
+# 类用途: 一个候选在快照里的事实：提供方 key、截图像素外框、量化灰度格或控件事实。
 @dataclass(frozen=True)
 class CandidateSnapshot:
     key: str
     region: tuple[int, int, int, int]
-    grid: bytes
+    grid: bytes | None = None
+    actions: tuple[str, ...] = ()
+    native: object = None
+    facts: UiFacts | None = None
 
 
 # LLM: generation 形如 <boot>-<instance>-<seq>，ref 形如 win:<boot>:<instance>；native_id 只在适配器内部用来重新找到窗口，
@@ -125,5 +144,5 @@ class SnapshotStore:
 
 __all__ = [
     "BOOT_TOKEN_BYTES", "SNAPSHOT_RETAIN_COUNT", "TRACKED_WINDOWS_MAX_COUNT", "CandidateSnapshot", "SnapshotStore",
-    "WindowGeometry", "WindowInstanceRegistry", "WindowSnapshot",
+    "UiFacts", "WindowGeometry", "WindowInstanceRegistry", "WindowSnapshot",
 ]

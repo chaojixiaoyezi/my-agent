@@ -3,7 +3,9 @@
 #   工具在底层 Server 的 tools/call 处理器里接管：按名字拦截、读 _meta 里宿主附的观察上下文、自己编码结果；其它工具原样交给
 #   FastMCP。FastMCP 侧只用这两个函数的签名和说明生成 tools/list 的 schema，函数体不会被执行（执行到就是接管层没装，抛错让它显形）。
 #   只在 OBSERVATION_ENV_FLAG 为 "1" 时注册与接管；mcp 包只在编码/安装时惰性 import，纯逻辑可用假 types 单测。
-# 模块用途: 让 observe_window / click_candidate 用插件线同一份观察合同说话，又不碰 FastMCP 的私有实现。
+#   片 G：type_into_candidate 只在后端声明能给控件候选（observer.supports_ui_candidates，结构化能力，不按平台名）时注册；text 必填，
+#   按片 D 的自动执行规则（schema 必填项 ⊆ {候选参数}）它在结构上就不会被自动执行。点击之后的失败在错误对象里带 clicked=true。
+# 模块用途: 让 observe_window / click_candidate / type_into_candidate 用插件线同一份观察合同说话，又不碰 FastMCP 的私有实现。
 # 注意：本模块故意不用 `from __future__ import annotations`——固定的 MCP 1.13 在 add_tool 时对每个参数注解做 issubclass
 # 检查，字符串注解会直接 TypeError；所以两个声明函数的注解必须是真实类型对象。可选参数写成 `str = ""`（不写 Optional）：
 # FastMCP 会把 Optional 生成 anyOf[string, null]，过不了宿主"候选参数必须是可选的 string"这条声明规则。
@@ -18,7 +20,7 @@ from ..plugin_observation import OBSERVATION_ERROR_KEY, OBSERVATION_META_EXTENSI
 from .computer_use_profile import OBSERVATION_ENV_FLAG
 from .screen_observation import ObservationError
 
-OBSERVATION_TOOL_NAMES = ("observe_window", "click_candidate")
+OBSERVATION_TOOL_NAMES = ("observe_window", "click_candidate", "type_into_candidate")
 
 
 # LLM: 一次调用的宿主侧事实：_meta 里的观察上下文与"宿主已取消"的判定；cancelled 由接管层按协程取消设置，观察核心在拿到锁后、
@@ -50,10 +52,22 @@ def click_candidate(candidate_id: str = "") -> dict[str, object]:
     raise RuntimeError("click_candidate 必须由适配器的观察接管层执行")
 
 
-# 函数用途: 把两个工具的声明注册进 FastMCP（只为 tools/list）。
-def register_observation_tools(server: Any) -> None:
+# 函数用途: type_into_candidate 的模型可见声明（text 必填，候选参数可选）。
+def type_into_candidate(text: str, candidate_id: str = "", clear_existing: bool = False) -> dict[str, object]:
+    """往上一次 observe_window 给出的可编辑控件（actions 里有 type_into_candidate 的候选）里输入 text：先点一下让它拿到焦点，
+    确认有焦点才输入；clear_existing=true 先全选原有内容再替换（text 为空就是清空）。text 最多 500 个字符，不能有换行、Tab 等
+    控制字符（多行文字暂不支持，需要回车请另行按键）。点之前按当时快照复核控件（还在、角色、可用、外框、名称、可编辑），变了就
+    不点并返回 stale；点了但控件没拿到焦点返回 focus_not_acquired（已点击、未输入）。返回值只证明提交了输入，不读回内容，结果要靠
+    下一次 observe_window 确认。"""
+    raise RuntimeError("type_into_candidate 必须由适配器的观察接管层执行")
+
+
+# 函数用途: 把观察工具的声明注册进 FastMCP（只为 tools/list）；with_typing 为真（后端能给控件候选）才注册 type_into_candidate。
+def register_observation_tools(server: Any, *, with_typing: bool) -> None:
     server.add_tool(observe_window, name="observe_window", description=(observe_window.__doc__ or "").strip())
     server.add_tool(click_candidate, name="click_candidate", description=(click_candidate.__doc__ or "").strip())
+    if with_typing:
+        server.add_tool(type_into_candidate, name="type_into_candidate", description=(type_into_candidate.__doc__ or "").strip())
 
 
 # LLM: 返回 (正文, structuredContent, isError)。观察载荷只进 structuredContent、正文不重复（和 browser-lite 一致）；失败正文带
@@ -64,14 +78,15 @@ def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any]
     try:
         if context.cancelled():
             raise ObservationError("cancelled", "宿主已取消，未执行")
-        body, structured = _observe(observer, arguments) if name == "observe_window" else _click(observer, arguments, context)
+        body, structured = _BRANCHES[name](observer, arguments, context)
     except ObservationError as exc:
-        return {"code": "OBSERVATION_" + exc.code.upper(), "message": str(exc)}, {OBSERVATION_ERROR_KEY: {"code": exc.code}}, True
+        error = {"code": exc.code, **({"clicked": True} if exc.clicked else {})}
+        return {"code": "OBSERVATION_" + exc.code.upper(), "message": str(exc)}, {OBSERVATION_ERROR_KEY: error}, True
     return body, structured, False
 
 
 # 函数用途: observe_window 分支：window 只接受字符串别名；正文不重复观察载荷。
-def _observe(observer: Any, arguments: Mapping[str, Any]) -> tuple[dict, dict]:
+def _observe(observer: Any, arguments: Mapping[str, Any], context: CallContext) -> tuple[dict, dict]:
     window = arguments.get("window")
     if window is not None and not isinstance(window, str):
         raise ObservationError("invalid_arguments", "window 必须是字符串")
@@ -86,6 +101,22 @@ def _click(observer: Any, arguments: Mapping[str, Any], context: CallContext) ->
         raise ObservationError("invalid_arguments", "candidate_id 必须是非空字符串")
     result = observer.click_candidate(context.meta, cancelled=context.cancelled)
     return result, result
+
+
+# 函数用途: type_into_candidate 分支：candidate_id 必须是非空字符串；text / clear_existing 的边界由观察核心在任何副作用之前校验。
+def _type_into(observer: Any, arguments: Mapping[str, Any], context: CallContext) -> tuple[dict, dict]:
+    candidate_id = arguments.get("candidate_id")
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise ObservationError("invalid_arguments", "candidate_id 必须是非空字符串")
+    result = observer.type_into_candidate(context.meta, arguments.get("text"), arguments.get("clear_existing", False),
+                                          cancelled=context.cancelled)
+    return result, result
+
+
+# 工具名 → 处理分支（键与 OBSERVATION_TOOL_NAMES 一致）
+_BRANCHES: dict[str, Callable[[Any, Mapping[str, Any], CallContext], tuple[dict, dict]]] = {
+    "observe_window": _observe, "click_candidate": _click, "type_into_candidate": _type_into,
+}
 
 
 # 函数用途: 把三元组编码成底层 Server 的 ServerResult(CallToolResult)。
@@ -137,7 +168,7 @@ def install_observation_handler(low_server: Any, observer: Any) -> None:
 
 
 # LLM: 适配器进程的唯一装配入口（stdio 收发留在 computer_use_server.serve）：底层 Server 的 list_tools / call_tool 直接绑 FastMCP
-#   的公开协程；只有环境标记为 "1" 时才注册两个观察工具并装接管层、才调用 observer_factory（它会碰 X11）。标记关着时 tools/list
+#   的公开协程；只有环境标记为 "1" 时才调用 observer_factory（构造不碰屏幕）、按它声明的能力注册观察工具并装接管层。标记关着时 tools/list
 #   与只有上游工具时逐字节一致，tools/call 处理器就是原 delegate——"关时工具目录不变"靠这里保证。
 # 函数用途: 按环境标记装配底层 Server。
 def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_factory: Callable[[], Any]) -> Any:
@@ -147,13 +178,14 @@ def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_fact
     low.list_tools()(fastmcp.list_tools)
     low.call_tool(validate_input=False)(fastmcp.call_tool)
     if observation_tools_enabled(environ):
-        register_observation_tools(fastmcp)
-        install_observation_handler(low, observer_factory())
+        observer = observer_factory()
+        register_observation_tools(fastmcp, with_typing=observer.supports_ui_candidates)
+        install_observation_handler(low, observer)
     return low
 
 
 __all__ = [
     "OBSERVATION_TOOL_NAMES", "CallContext", "build_adapter_server", "call_observation_tool", "click_candidate", "encode_call_result",
     "install_observation_handler",
-    "observation_call_handler", "observation_tools_enabled", "observe_window", "register_observation_tools",
+    "observation_call_handler", "observation_tools_enabled", "observe_window", "register_observation_tools", "type_into_candidate",
 ]

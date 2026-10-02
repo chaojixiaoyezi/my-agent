@@ -36,6 +36,7 @@ from agent_py_agent.agent.tooling.screen_region_digest import (
     grid_unchanged,
     region_grid,
 )
+from agent_py_agent.agent.tooling.screen_ui_candidates import UiScan
 
 GEOMETRY = WindowGeometry(origin=(100, 50), size=(320, 200), scale=(1, 1))
 
@@ -53,8 +54,10 @@ SUBMIT, CANCEL = (20, 30, 60, 18), (120, 30, 60, 18)
 DEFAULT_PATCHES = {SUBMIT: (30, 30, 30), CANCEL: (30, 30, 30)}
 
 
-# 类用途: 假桌面后端：可变的窗口列表、每窗截图、上层矩形、OCR 结果与点击记录。
+# 类用途: 假桌面后端：可变的窗口列表、每窗截图、上层矩形、OCR 结果与点击记录；默认不给控件候选（片 G 的用例另配控件树）。
 class _Backend:
+    ui_candidates_supported = False
+
     def __init__(self):
         self.windows = [WindowInfo(native_id=0x1a, title="表单\x07 窗口", geometry=GEOMETRY, viewable=True, hidden=False, desktop=0, current_desktop=0)]
         self.buffers = {0x1a: _buffer(patches=DEFAULT_PATCHES)}
@@ -64,6 +67,7 @@ class _Backend:
         self.fail_capture = self.fail_ocr = False
         self.capture_kind, self.fallback_reason, self.capture_error = SCREEN_REGION_CAPTURE, None, None
         self.click_permission_error, self.list_calls = None, 0
+        self.ui = UiScan()
 
     def list_windows(self):
         self.list_calls += 1
@@ -78,6 +82,9 @@ class _Backend:
         if self.capture_error is not None:
             raise self.capture_error
         return ScreenCapture(self.buffers[info.native_id], self.capture_kind, self.fallback_reason)
+
+    def ui_scan(self, info):
+        return self.ui
 
     def ocr(self, buffer):
         if self.fail_ocr:
@@ -175,10 +182,10 @@ def test_observe_builds_a_payload_the_host_accepts_and_records_a_snapshot():
     assert result["title"] == "表单 窗口" and result["frame"]["occluded"] is False and result["frame"]["captured_at"] == 1790000000.5
     payload = result["my_agent_observation"]
     assert payload["target"] == {"ref": "win:b00t:1", "generation": "b00t-1-1"}
-    assert [c["key"] for c in payload["candidates"]] == ["t1", "t2"] and payload["candidates"][0]["region"] == [20, 30, 60, 18]
+    assert [c["key"] for c in payload["candidates"]] == ["ocr:1", "ocr:2"] and payload["candidates"][0]["region"] == [20, 30, 60, 18]
     record = parse_observation(json.loads(json.dumps(payload)), _context())
     assert record.candidates[0].region == (20, 30, 60, 18) and record.frame["space"] == "screen_points"
-    assert observer.store.find("win:b00t:1", "b00t-1-1").candidates["t2"].region == CANCEL
+    assert observer.store.find("win:b00t:1", "b00t-1-1").candidates["ocr:2"].region == CANCEL
     second = observer.observe("win:b00t:1")
     assert second["generation"] == "b00t-1-2", "同一窗口每次采样代次递增"
     assert click_point(GEOMETRY, SUBMIT) == (150, 89)
@@ -191,7 +198,8 @@ def test_observe_reports_structured_failures_and_never_invents_candidates():
     assert plain["candidate_count"] == 0 and "my_agent_observation" not in plain, "没有候选就不造候选"
     backend.ocr_rows = [TextRegion("\x01\x02", SUBMIT), TextRegion("x" * 200, (-5, -5, 10, 10)), TextRegion("零面积", (10, 10, 0, 5)), TextRegion("越界", (300, 190, 40, 40))]
     payload = observer.observe()["my_agent_observation"]
-    assert [(c["key"], len(c["label"]), c["region"]) for c in payload["candidates"]] == [("t2", 120, [0, 0, 5, 5]), ("t4", 2, [300, 190, 20, 10])]
+    assert [(c["key"], len(c["label"]), c["region"]) for c in payload["candidates"]] == [("ocr:1", 120, [0, 0, 5, 5]), ("ocr:2", 2, [300, 190, 20, 10])], \
+        "key 按留下的 OCR 区域连续编号，带来源前缀"
     with pytest.raises(ObservationError) as unknown:
         observer.observe("win:b00t:9")
     assert unknown.value.code == "window_not_found"
@@ -260,7 +268,7 @@ def test_non_integer_scale_still_lets_the_host_accept_a_candidate_touching_the_e
     assert all(abs(scale - 124 / 71) < 1e-12 for scale in frame["scale"])
     record = parse_observation(json.loads(json.dumps(result["my_agent_observation"])), _context())
     assert [list(item.region) for item in record.candidates] == [[94, 112, 30, 12]], "宿主照常接受贴边候选，不整份拒绝"
-    assert observer.click_candidate(_meta(result))["clicked"]["key"] == "t1", "复核时同一张图算出同一个 scale"
+    assert observer.click_candidate(_meta(result))["clicked"]["key"] == "ocr:1", "复核时同一张图算出同一个 scale"
 
 
 def test_click_asks_the_backend_for_click_permission_before_rechecking():
@@ -273,7 +281,7 @@ def test_click_asks_the_backend_for_click_permission_before_rechecking():
     assert denied.value.code == "accessibility_not_permitted"
     assert backend.list_calls == 0 and backend.clicks == [], "复核之前就拒绝：不重新列窗口、不点击"
     backend.click_permission_error = None
-    assert observer.click_candidate(meta)["clicked"]["key"] == "t1" and backend.list_calls == 1
+    assert observer.click_candidate(meta)["clicked"]["key"] == "ocr:1" and backend.list_calls == 1
 
 
 def test_recheck_is_stale_when_the_capture_scale_changes_even_if_pixels_look_alike():
@@ -321,7 +329,7 @@ def test_click_requires_the_snapshot_and_key_and_passes_when_nothing_changed():
         observer.click_candidate({**meta, "target": {"ref": "win:b00t:1", "generation": "b00t-1-9"}})
     assert missing.value.code == "not_found"
     with pytest.raises(ObservationError) as no_key:
-        observer.click_candidate({**meta, "key": "t9"})
+        observer.click_candidate({**meta, "key": "ocr:9"})
     assert no_key.value.code == "not_found"
     with pytest.raises(ObservationError) as other_boot:
         observer.click_candidate({**meta, "target": {"ref": "win:other:1", "generation": "other-1-1"}})
@@ -336,7 +344,7 @@ def test_click_requires_the_snapshot_and_key_and_passes_when_nothing_changed():
     assert backend.clicks == [], "上下文形状不对一律不点"
     observer.observe()  # 更新的观察不影响同一代、核对全过的候选
     clicked = observer.click_candidate(meta)
-    assert clicked == {"clicked": {"window": "win:b00t:1", "generation": "b00t-1-1", "key": "t1"}, "point": [150, 89]}
+    assert clicked == {"clicked": {"window": "win:b00t:1", "generation": "b00t-1-1", "key": "ocr:1"}, "point": [150, 89]}
     assert backend.clicks == [(150, 89)]
 
 
@@ -386,11 +394,11 @@ def test_a_lookalike_window_cannot_stand_in_for_the_vanished_target():
 
 def test_pixel_changes_outside_the_candidate_region_do_not_invalidate_it():
     backend, observer = _observer()
-    meta = _meta(observer.observe())  # 候选 t1 = Submit
+    meta = _meta(observer.observe())  # 候选 ocr:1 = Submit
     changed = dict(DEFAULT_PATCHES)
     changed[(20, 120, 200, 30)] = (0, 0, 0)  # 状态行那块变了（在候选外框之外）
     backend.buffers[0x1a] = _buffer(patches=changed)
-    assert observer.click_candidate(meta)["clicked"]["key"] == "t1" and backend.clicks == [(150, 89)], "只比候选区域，不比整窗"
+    assert observer.click_candidate(meta)["clicked"]["key"] == "ocr:1" and backend.clicks == [(150, 89)], "只比候选区域，不比整窗"
 
 
 def test_click_checks_host_cancellation_after_recheck_and_before_clicking():
@@ -408,4 +416,4 @@ def test_click_checks_host_cancellation_after_recheck_and_before_clicking():
         observer.click_candidate(meta, cancelled=lambda: flag["cancelled"])
     assert info.value.code == "cancelled" and backend.clicks == [], "复核完、点之前再看一眼取消，已取消就不点"
     backend.capture = original_capture
-    assert observer.click_candidate(meta, cancelled=lambda: False)["clicked"]["key"] == "t1" and backend.clicks == [(150, 89)]
+    assert observer.click_candidate(meta, cancelled=lambda: False)["clicked"]["key"] == "ocr:1" and backend.clicks == [(150, 89)]

@@ -51,6 +51,18 @@
 - 测试全程不碰真实屏幕：假 Quartz / 假 ScreenCaptureKit 单测，conftest 会话级防线让 macOS 与 X11 两个真实库入口一被调用就失败
   （X11 的只在 Linux 车道容器里放行）；真机只读核对另行安排。
 
+**片 G 实施（2026-10-02，macOS 无障碍候选 + 输入）**：
+- `observe_window` 在 macOS 上除了 OCR 文字，还读窗口的无障碍（AX）控件树，给出按钮、输入框这类控件候选：role 是系统角色
+  （如 `AXButton`、`AXTextField`），key 是 `ax:<n>`；OCR 文字落在控件里就并进控件，剩下的是 `ocr:<n>`。读 AX 需要
+  “系统设置 → 隐私与安全性 → 辅助功能”授权；没授权、读不到或读到上限时观察照常成功，只是结果顶层带 `ui_tree{status, reason}`。
+- 新工具 `type_into_candidate(text, candidate_id, clear_existing)`（`dangerous`）：只接受观察时带输入动作的控件（可编辑、不是密码框）。
+  先点一下让控件拿到焦点，确认有焦点才输入；`clear_existing=true` 用 AX 全选原有内容再由键盘输入替换（text 为空就是清空）。
+  文字最多 500 字，不能有换行、Tab 等控制字符。点击之后才失败时，错误里带 `clicked: true`（已点击、未输入）。
+- 只在后端能给控件候选时注册（macOS 有，Linux X11 没有）；`text` 必填，所以不会被决策点的自动执行选中，自动执行仍只点击。
+- 控件的值（`AXValue`）不进结果、快照、日志，密码框连读都不读；输入后也不读回核对，内容是否真的进去要靠下一次观察。
+- 动作前复核：控件候选不比像素（输入框光标会闪），改比角色、可用、外框、名称、可编辑这些结构化事实，变了就 `stale`、不点。
+  细节、上限常数与已知限制见设计稿第 6 节“片 G 实施定稿”。
+
 ## 解决问题
 
 my-agent 需要操作终端之外的系统界面：查看窗口、读取屏幕文字、点击、键入、按键和等待状态变化。但鼠标、
@@ -147,6 +159,17 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
 - 纯 OCR 对空白控件和窗口定位仍可能失败；本次空白输入框曾被错点成标签，加占位文字的夹具才完成定位。
   输入修复不等于解决视觉理解、任意控件定位或全部应用兼容性。
 - 浏览器内页面优先现有 Browser 工具。Computer Use 只处理浏览器能力覆盖不到的系统 UI、原生应用和桌面。
+- 现有 `type_text` 的 `clear_existing` 用 `pyautogui.hotkey("command","a")` 全选，pyautogui 按美式（ANSI）键位发 `a`。
+  疑似风险（未核实）：在 AZERTY 等布局上，这个物理键位打出来是 Q，等于按了 ⌘Q，会把目标应用退出。复现思路：
+  macOS 切到法语 AZERTY 布局，打开一个可以随便关的文本编辑窗口，让 `type_text(text="x", clear_existing=true)` 作用在它上面，
+  看窗口是全选后被替换还是整个应用退出。已列入 V-H 核对清单并另立后续项；片 G 的 `type_into_candidate` 不走这条，改用 AX 全选。
+- 片 G 的输入用“键码 0 + Unicode 字符串”的 Quartz 键盘事件；中文输入法开着时会不会被输入法截走当成拼音，没有在真机上测过（V-H 核对）。
+- 多行文字填不了：`type_into_candidate` 拒绝换行与 Tab（单行框里换行等于提交，Tab 会挪走焦点）；以后要提交另加结构化参数。
+- **Linux AT-SPI（只评估，不进默认依赖）**：Linux 上要拿到“这是输入框、可编辑”这类事实，需要 AT-SPI。它依赖系统包
+  （Debian/Ubuntu：`python3-gi gir1.2-atspi-2.0 at-spi2-core`；RPM 系：`python3-gobject at-spi2-core`）、会话 D-Bus，
+  以及开启了无障碍支持的应用（GTK/Qt；车道里的 Tk 测试窗口不暴露 AT-SPI）。这些都不是 pip 依赖，装起来和桌面环境强相关，
+  所以本期不接：X11 后端不读控件树、不注册 `type_into_candidate`，Linux 只有 OCR 候选与点击。以后要接，按后端声明能力
+  （`ui_candidates_supported`）的同一条路径加一个 AT-SPI 读取实现即可，适配器和核心不用改。
 - Linux 头less 验收需要 Xvfb 之外再运行窗口管理器；没有窗口管理器时窗口枚举、激活和按窗口 OCR 不能作为
   可用证据。RPM 系测试环境还需 `xorg-x11-server-Xvfb`、`xterm`、`xorg-x11-xauth`、
   `xorg-x11-server-utils`、`openbox` 和 `python3-tkinter`。

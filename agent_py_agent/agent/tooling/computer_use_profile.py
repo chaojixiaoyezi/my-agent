@@ -39,11 +39,13 @@ _COMPUTER_USE_TOOL_DECLARATIONS: dict[str, dict[str, Any]] = {
 
 
 # J16 屏幕观察工具的声明（和插件 manifest v5 同形，宿主写死、不接受适配器自报）：读屏涉及隐私，observe_window 只读但审批 always；
-# click_candidate 只接受候选 ID，dangerous。只在 computer_use_observation_enabled 为 true 时并入 Computer Use 服务声明。
+# click_candidate / type_into_candidate（片 G）只接受候选 ID，dangerous。只在 computer_use_observation_enabled 为 true 时并入 Computer Use
+# 服务声明。type_into_candidate 只有后端能给控件候选时适配器才注册（如 Linux X11 不注册）：声明了但没发现的工具按片 A 的规则只记 notice。
 _COMPUTER_USE_OBSERVATION_DECLARATIONS: dict[str, dict[str, Any]] = {
     "observe_window": {"effect": "read_only", "approval": "always",
                        "observation": {"target_kind": "window", "max_candidates": 64}},
     "click_candidate": {"effect": "dangerous", "observation_ref": {"target_kind": "window", "param": "candidate_id"}},
+    "type_into_candidate": {"effect": "dangerous", "observation_ref": {"target_kind": "window", "param": "candidate_id"}},
 }
 
 

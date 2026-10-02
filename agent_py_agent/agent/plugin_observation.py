@@ -212,9 +212,15 @@ def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+# LLM: 宿主对候选 key / role 的唯一形状规则；提供方（如屏幕观察核心）先用它过滤自己的候选，免得一个怪 role 让整份观察被拒。
+# 函数用途: 一段文字能不能当候选的 key / role（短标识，不含空白）。
+def observation_token_ok(value: object) -> bool:
+    return isinstance(value, str) and _TOKEN.fullmatch(value) is not None
+
+
 # 函数用途: 校验一段短标识（key / role）。
 def _token(value: object, code: str) -> str:
-    if not isinstance(value, str) or not _TOKEN.fullmatch(value):
+    if not observation_token_ok(value):
         raise ObservationRejected(code)
     return value
 
@@ -466,5 +472,5 @@ __all__ = [
     "ObservationCandidate", "ObservationDeclarationError", "ObservationHostContext", "ObservationRecord", "ObservationRejected",
     "PluginToolObservation", "PluginToolObservationRef", "current_observation", "observation_action_payload_from_envelope",
     "observation_actions", "observation_event_payload_from_envelope", "observation_is_current", "observation_meta",
-    "parse_observation", "resolve_action_candidate", "validate_observation_declaration",
+    "observation_token_ok", "parse_observation", "resolve_action_candidate", "validate_observation_declaration",
 ]

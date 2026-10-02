@@ -3,23 +3,27 @@
 #   可见、未最小化、同桌面 → 原点与尺寸相等 → 点击点不被遮挡（动作时重新查叠放）→ 重新截图的 scale 相等 → 候选区域摘要在容差内，
 #   任一项不过 → stale，零副作用；
 #   复核通过后立刻点击，中间不做任何别的 I/O；复核之前先问后端能不能真的点（ensure_click_permitted，macOS 是辅助功能权限）。
+#   片 G：候选 = 后端给的无障碍控件 + OCR 文字区域，合并去重在 screen_ui_candidates；控件候选不比像素摘要，改比结构化事实
+#   （role、enabled、外框、label 来源 sha、值是否可写）；type_into_candidate 只接受观察时带输入动作的控件：校验文字 → 权限 → 复核 →
+#   点击 → 等焦点 →（全选）→ 输入，焦点确认后、真正打字（或删除）前各看一次取消；点击之后的失败在错误里带 clicked=true（已点击、未输入）。
+#   控件的值（AXValue）不进快照、结果、日志，也不读回核对。
 #   后端是鸭子类型（X11 / macOS 真后端 / 单测假后端），本模块不 import 任何桌面库。
 #   截图由后端给 ScreenCapture（像素、采样方式、回退原因）；frame.scale 取截图自己的像素/点比（不取显示器的），复核时 scale 变了也判 stale；
 #   非整数比时 scale 往上调到"点数 × scale ≥ 像素数"，宿主按 size × scale 校验贴边候选才不会误拒。
 #   错误码集合开放（宿主只提升 stale / not_found，其它原样透传）：window_not_found | not_viewable | capture_failed | ocr_failed | occluded |
-#   not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted | accessibility_not_permitted；
+#   not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted | accessibility_not_permitted |
+#   focus_not_acquired | clear_unsupported | clear_failed | type_failed；
 #   后端主动抛的 ObservationError 原样透传。
 # 模块用途: "看一眼窗口、给出可点的候选、点之前再确认一遍没变"的全部判断逻辑，可在没有桌面的机器上用假后端完整测试。
 from __future__ import annotations
 
 import math
 import time
+import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from ..plugin_observation import (
-    MAX_CANDIDATE_COUNT,
-    MAX_LABEL_CHARS,
     OBSERVATION_META_VERSION,
     OBSERVATION_SCHEMA,
 )
@@ -31,23 +35,40 @@ from .screen_observation_store import (
     WindowSnapshot,
 )
 from .screen_region_digest import PixelBuffer, grid_unchanged, region_grid
+from .screen_ui_candidates import (
+    CLICK_ACTION,
+    OCR_ROLE,
+    TYPE_ACTION,
+    MergedCandidate,
+    UiScan,
+    merge_candidates,
+    sanitize_label,
+)
 
-# 观察载荷里的固定取值：坐标空间、目标类型、候选角色、候选动作工具名
+# 观察载荷里的固定取值：坐标空间、目标类型
 OBSERVATION_SPACE = "screen_points"
 WINDOW_TARGET_KIND = "window"
-OCR_ROLE = "ocr_text"
-CLICK_ACTION = "click_candidate"
+# type_into_candidate 一次最多输入的字符数（超了整次拒绝、不截断：截一半输进去的是错误内容）
+TYPE_INTO_TEXT_MAX_CHARS = 500
+# 点击后最多等多久让控件拿到焦点（拿不到就 focus_not_acquired，不输入）
+TYPE_INTO_FOCUS_WAIT_SECONDS = 0.5
+# 等焦点时的轮询间隔
+TYPE_INTO_FOCUS_POLL_SECONDS = 0.05
+# 读控件树出了后端没归类的异常时，ui_tree.reason 用的原因码
+UI_SCAN_FAILED_REASON = "ui_scan_failed"
 # 截图采样方式（frame.capture）：单窗口内容（被压住的部分也拍得到）/ 按屏幕区域截屏（压在上面的窗口也会被拍进去）
 WINDOW_IMAGE_CAPTURE = "window_image"
 SCREEN_REGION_CAPTURE = "screen_region"
 
 
 # LLM: code 是稳定机器码，进 structuredContent.my_agent_observation_error.code；message 是中文说明，不含路径、标题正文或坐标。
+#   clicked=True 表示失败发生在已经点击之后（type_into 拿不到焦点、全选失败、点完被取消）：如实报"已点击、未输入"。
 # 类用途: 观察或复核失败的结构化错误。
 class ObservationError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, clicked: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        self.clicked = clicked
 
 
 # LLM: 由后端按叠放次序（底→顶）给出；native_id 只在适配器内部使用；normal 表示普通应用窗口（非 dock/桌面/工具条）。
@@ -112,14 +133,9 @@ def window_rect(geometry: WindowGeometry) -> tuple[int, int, int, int]:
     return (geometry.origin[0], geometry.origin[1], geometry.size[0], geometry.size[1])
 
 
-# 函数用途: 标签只作外部数据：空白类控制字符当空格、其它控制字符去掉、折叠空白、截到 MAX_LABEL_CHARS；空串表示丢弃。
-def sanitize_label(text: object) -> str:
-    kept = "".join(" " if ch in "\t\n\r\x0b\x0c" else ch for ch in str(text or "") if ch in "\t\n\r\x0b\x0c" or (ord(ch) >= 32 and ord(ch) != 127))
-    return " ".join(kept.split())[:MAX_LABEL_CHARS]
-
-
-# LLM: 五步链都在这一个类里，后端只提供事实；observe 与 click_candidate 都有副作用（写快照 / 点击），recheck 本身只读。
-# 类用途: 观察一个窗口并给出候选；动作前复核后点击。
+# LLM: 五步链都在这一个类里，后端只提供事实；observe、click_candidate、type_into_candidate 都有副作用（写快照 / 点击 / 键盘输入），
+#   recheck 本身只读。
+# 类用途: 观察一个窗口并给出候选；动作前复核后点击或输入。
 class ScreenObserver:
     def __init__(self, backend: object, *, registry: WindowInstanceRegistry | None = None,
                  store: SnapshotStore | None = None, clock: Callable[[], float] = time.time) -> None:
@@ -128,8 +144,15 @@ class ScreenObserver:
         self.store = store or SnapshotStore()
         self.clock = clock
 
+    # LLM: 后端声明的结构化能力（能不能给出无障碍控件候选）；适配器按它决定注不注册 type_into_candidate，不按平台名判断。
+    # 函数用途: 这个观察核心的后端能不能给出可输入的控件候选。
+    @property
+    def supports_ui_candidates(self) -> bool:
+        return bool(self.backend.ui_candidates_supported)
+
     # LLM: 不切焦点、不激活、不动鼠标；window 为空取最前的普通可见窗口，给了只接受本进程发过的 win:<boot>:<n> 别名。
-    #   没有候选时结果里不带 my_agent_observation（不凭空造候选），但快照照样记。
+    #   候选 = 控件树（后端 ui_scan，读不全或读不到只降级、不失败，结果顶层带 ui_tree{status, reason}）+ OCR，合并去重见
+    #   screen_ui_candidates。没有候选时结果里不带 my_agent_observation（不凭空造候选），但快照照样记。
     # 函数用途: 采样一个窗口并返回给模型的结果（含观察载荷）。
     def observe(self, window: str | None = None) -> dict[str, object]:
         windows = self._refresh_listing()
@@ -141,18 +164,23 @@ class ScreenObserver:
         if any(rect_contains(other, rect) for other in above):
             raise ObservationError("occluded", "窗口被上层窗口完全盖住")
         capture, geometry = self._capture(target)
-        candidates = self._candidates(capture.buffer)
+        scan = self._ui_scan(target)
+        bounds = (capture.buffer.width, capture.buffer.height)
+        candidates = merge_candidates(scan.elements, self._ocr_rows(capture.buffer), geometry, bounds)
         ref = self.registry.ref_for(target.native_id)
         snapshot = WindowSnapshot(
             ref=ref, generation=self.store.next_generation(ref), native_id=target.native_id, captured_at=float(self.clock()),
             geometry=geometry, desktop=target.desktop, occluded=any(rects_intersect(other, rect) for other in above),
-            candidates={item.key: item for item in (CandidateSnapshot(key, region, region_grid(capture.buffer, region))
-                                                     for key, _label, region in candidates)},
+            candidates={item.key: _candidate_snapshot(item, capture.buffer) for item in candidates},
         )
         self.store.record(snapshot)
-        return self._result(snapshot, target, candidates, capture)
+        result = self._result(snapshot, target, candidates, capture)
+        if scan.status:
+            result["ui_tree"] = {"status": scan.status, **({"reason": scan.reason} if scan.reason else {})}
+        return result
 
-    # LLM: 只读复核：按 _meta 找快照与候选（not_found），再重新采样逐项核对（任一项不符 → stale）；不点击。
+    # LLM: 只读复核：按 _meta 找快照与候选（not_found），再重新采样逐项核对（任一项不符 → stale）；不点击。最后一项按候选来源分：
+    #   OCR 候选比区域像素摘要；控件候选不比像素（输入框里光标会闪），改比后端重新读的结构化事实（控件没了也是 stale）。
     # 函数用途: 判定一个候选此刻是否仍可点，返回快照、候选与全局点击点。
     def recheck(self, meta: object) -> tuple[WindowSnapshot, CandidateSnapshot, tuple[int, int]]:
         ref, generation, key = _meta_fields(meta)
@@ -174,7 +202,10 @@ class ScreenObserver:
         capture, geometry = self._capture(info)
         if geometry.scale != snapshot.geometry.scale:
             raise ObservationError("stale", "截图缩放已变（换了采样方式或显示器），区域摘要不可比")
-        if not grid_unchanged(candidate.grid, region_grid(capture.buffer, candidate.region)):
+        if candidate.facts is not None:
+            if self.backend.ui_facts(candidate.native) != candidate.facts:
+                raise ObservationError("stale", "控件已变（不在了，或角色、可用、外框、名称、可编辑有变化）")
+        elif not grid_unchanged(candidate.grid, region_grid(capture.buffer, candidate.region)):
             raise ObservationError("stale", "候选区域的像素已变")
         return snapshot, candidate, point
 
@@ -189,6 +220,31 @@ class ScreenObserver:
             raise ObservationError("cancelled", "宿主已取消，未点击")
         self.backend.click(point[0], point[1])
         return {"clicked": {"window": snapshot.ref, "generation": snapshot.generation, "key": candidate.key}, "point": list(point)}
+
+    # LLM: 顺序是合同：校验文字（零副作用）→ 点击权限 → 两层复核 → 候选真有输入动作、要清空时能全选 → 看取消 → 点击（让控件拿焦点）→
+    #   等焦点（拿不到 → focus_not_acquired，已点击、未输入）→ [清空：看取消 → AX 全选，失败 → clear_failed] → 看取消 → 打字（text 为空
+    #   时按删除键清掉选区）。点击之后的失败都带 clicked=true。不读回控件的值核对（防密码泄露），结果 application_verified=False，
+    #   内容是否真的进去要靠下一次 observe。
+    # 函数用途: 往宿主复核过的可编辑控件里输入一段显式文字，可选先清空原有内容。
+    def type_into_candidate(self, meta: object, text: object, clear_existing: object = False, *,
+                            cancelled: Callable[[], bool] | None = None) -> dict[str, object]:
+        check_typed_text(text, clear_existing)
+        self.backend.ensure_click_permitted()
+        snapshot, candidate, point = self.recheck(meta)
+        _require_typing_target(candidate, bool(clear_existing))
+        stop = cancelled or _never_cancelled
+        _raise_if_cancelled(stop, clicked=False)
+        self.backend.click(point[0], point[1])
+        if not self._wait_for_focus(candidate.native):
+            raise ObservationError("focus_not_acquired", "已点击、未输入：控件没有拿到焦点", clicked=True)
+        if clear_existing:
+            _raise_if_cancelled(stop, clicked=True)
+            if not self.backend.ui_select_all(candidate.native):
+                raise ObservationError("clear_failed", "已点击、未输入：没能选中原有内容", clicked=True)
+        _raise_if_cancelled(stop, clicked=True)
+        _type_or_delete(self.backend, str(text))
+        return {"typed": {"window": snapshot.ref, "generation": snapshot.generation, "key": candidate.key},
+                "characters": len(str(text)), "clear_existing": bool(clear_existing), "application_verified": False}
 
     # 函数用途: 拉一次窗口列表并同步实例登记与快照环（消失的窗口一起忘掉）。
     def _refresh_listing(self) -> list[WindowInfo]:
@@ -221,27 +277,42 @@ class ScreenObserver:
             raise ObservationError("capture_failed", "截图结果形状不对")
         return capture, captured_geometry(target.geometry, capture.buffer)
 
-    # 函数用途: OCR 文字区域 → (key, label, region) 列表：去空标签、裁到截图范围、去零面积，最多 MAX_CANDIDATE_COUNT 个。
-    def _candidates(self, buffer: PixelBuffer) -> list[tuple[str, str, tuple[int, int, int, int]]]:
+    # LLM: 控件树读不到只降级不失败：后端主动给的 UiScan 原样用；后端抛了任何异常（BaseException 的测试防线除外）或形状不对，
+    #   都当作一个控件都没有，ui_tree 记 unavailable + UI_SCAN_FAILED_REASON。
+    # 函数用途: 读目标窗口的无障碍控件。
+    def _ui_scan(self, target: WindowInfo) -> UiScan:
+        try:
+            scan = self.backend.ui_scan(target)
+        except Exception:  # noqa: BLE001 控件树只是候选来源之一，读不到不能让整次观察失败
+            scan = None
+        return scan if isinstance(scan, UiScan) else UiScan(status="unavailable", reason=UI_SCAN_FAILED_REASON)
+
+    # 函数用途: OCR 文字区域 → (label, region) 列表：去空标签、裁到截图范围、去零面积（数量上限在合并后统一截）。
+    def _ocr_rows(self, buffer: PixelBuffer) -> list[tuple[str, tuple[int, int, int, int]]]:
         try:
             regions = list(self.backend.ocr(buffer))
         except Exception as exc:  # noqa: BLE001 同上，OCR 库异常只能变成结构化失败
             raise ObservationError("ocr_failed", f"OCR 失败：{type(exc).__name__}") from exc
-        rows = []
-        for index, item in enumerate(regions, 1):
-            label, region = sanitize_label(item.text), _clip_region(item.region, buffer)
-            if label and region is not None:
-                rows.append((f"t{index}", label, region))
-        return rows[:MAX_CANDIDATE_COUNT]
+        rows = [(sanitize_label(item.text), _clip_region(item.region, buffer)) for item in regions]
+        return [(label, region) for label, region in rows if label and region is not None]
+
+    # 函数用途: 点击后在 TYPE_INTO_FOCUS_WAIT_SECONDS 内轮询控件是否拿到焦点。
+    def _wait_for_focus(self, native: object) -> bool:
+        deadline = time.monotonic() + TYPE_INTO_FOCUS_WAIT_SECONDS
+        while not self.backend.ui_focused(native):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(TYPE_INTO_FOCUS_POLL_SECONDS)
+        return True
 
     # LLM: capture_fallback 放结果顶层（和 window、generation 并列）：宿主的 frame 只认固定键，多一个键整份拒绝。
     # 函数用途: 组装给模型的结果与 plugin_observation.v1 载荷（含 frame 与候选 region）。
-    def _result(self, snapshot: WindowSnapshot, target: WindowInfo, candidates: Iterable[tuple[str, str, tuple[int, int, int, int]]],
+    def _result(self, snapshot: WindowSnapshot, target: WindowInfo, candidates: Iterable[MergedCandidate],
                 capture: ScreenCapture) -> dict[str, object]:
         frame = {"space": OBSERVATION_SPACE, **snapshot.geometry.frame_fields(), "captured_at": snapshot.captured_at,
                  "capture": capture.kind, "occluded": snapshot.occluded}
-        rows = [{"key": key, "role": OCR_ROLE, "label": label, "actions": [CLICK_ACTION], "region": list(region)}
-                for key, label, region in candidates]
+        rows = [{"key": item.key, "role": item.role, "label": item.label, "actions": list(item.actions), "region": list(item.region)}
+                for item in candidates]
         result: dict[str, object] = {"window": snapshot.ref, "generation": snapshot.generation, "title": sanitize_label(target.title),
                                      "frame": frame, "candidate_count": len(rows)}
         if capture.fallback_reason:
@@ -275,6 +346,57 @@ def covering_scale(pixels: int, points: int) -> float:
     return scale
 
 
+# LLM: 输入文字的边界（ae 定稿）：字符串、≤ TYPE_INTO_TEXT_MAX_CHARS（超了拒绝、不截断）、不含控制字符（Cc，含换行和 Tab：单行框里
+#   换行等于提交，Tab 会挪走焦点）和孤立代理码点（Cs）；空文字只在 clear_existing=true（清空）时允许。全部在任何副作用之前判。
+# 函数用途: 校验 type_into_candidate 的 text 与 clear_existing，不合规就 invalid_arguments。
+def check_typed_text(text: object, clear_existing: object) -> None:
+    if not isinstance(text, str) or not isinstance(clear_existing, bool):
+        raise ObservationError("invalid_arguments", "text 必须是字符串，clear_existing 必须是布尔值")
+    if len(text) > TYPE_INTO_TEXT_MAX_CHARS:
+        raise ObservationError("invalid_arguments", f"文字超过 {TYPE_INTO_TEXT_MAX_CHARS} 个字符，未输入（不截断）")
+    if not text and not clear_existing:
+        raise ObservationError("invalid_arguments", "没有要输入的文字")
+    if any(unicodedata.category(ch) in ("Cc", "Cs") for ch in text):
+        raise ObservationError("invalid_arguments", "文字里有控制字符（含换行、Tab）或无效字符，未输入")
+
+
+# 函数用途: 候选必须是观察时带输入动作的控件；要清空时控件得能全选（不能就 clear_unsupported），都在点击之前判。
+def _require_typing_target(candidate: CandidateSnapshot, clear_existing: bool) -> None:
+    if TYPE_ACTION not in candidate.actions or candidate.facts is None:
+        raise ObservationError("invalid_arguments", "这个候选不能输入文字")
+    if clear_existing and not candidate.facts.selection_settable:
+        raise ObservationError("clear_unsupported", "这个控件不支持全选，无法清空原有内容；未点击")
+
+
+# 函数用途: 打字（text 为空时按删除键清掉已全选的内容）；后端异常变成 type_failed（已点击，可能只输入了一部分）。
+def _type_or_delete(backend: object, text: str) -> None:
+    try:
+        if text:
+            backend.type_text(text)
+        else:
+            backend.press_delete()
+    except Exception as exc:  # noqa: BLE001 键盘库的任何异常都只能变成结构化失败
+        raise ObservationError("type_failed", f"已点击，输入中途失败，可能只输入了一部分：{type(exc).__name__}", clicked=True) from exc
+
+
+# 函数用途: 宿主已取消就停下；clicked 说明停下时是否已经点过。
+def _raise_if_cancelled(cancelled: Callable[[], bool], *, clicked: bool) -> None:
+    if cancelled():
+        raise ObservationError("cancelled", "宿主已取消，已点击、未输入" if clicked else "宿主已取消，未点击", clicked=clicked)
+
+
+# 函数用途: 没有宿主取消判定时的默认值。
+def _never_cancelled() -> bool:
+    return False
+
+
+# 函数用途: 合并后的候选 → 快照项：OCR 候选记像素摘要；控件候选记结构化事实与后端句柄（不记像素、不记值）。
+def _candidate_snapshot(item: MergedCandidate, buffer: PixelBuffer) -> CandidateSnapshot:
+    if item.element is None:
+        return CandidateSnapshot(item.key, item.region, region_grid(buffer, item.region), item.actions)
+    return CandidateSnapshot(item.key, item.region, None, item.actions, item.element.native, item.element.facts)
+
+
 # 函数用途: 校验宿主附的 _meta 观察上下文形状，返回 (ref, generation, key)。
 def _meta_fields(meta: object) -> tuple[str, str, str]:
     if not isinstance(meta, dict):
@@ -298,7 +420,8 @@ def _clip_region(region: object, buffer: PixelBuffer) -> tuple[int, int, int, in
 
 
 __all__ = [
-    "CLICK_ACTION", "OBSERVATION_SPACE", "OCR_ROLE", "SCREEN_REGION_CAPTURE", "WINDOW_IMAGE_CAPTURE", "WINDOW_TARGET_KIND",
-    "ObservationError", "ScreenCapture", "ScreenObserver", "TextRegion", "WindowInfo", "captured_geometry", "click_point", "covering_scale",
+    "CLICK_ACTION", "OBSERVATION_SPACE", "OCR_ROLE", "SCREEN_REGION_CAPTURE", "TYPE_ACTION", "TYPE_INTO_FOCUS_POLL_SECONDS",
+    "TYPE_INTO_FOCUS_WAIT_SECONDS", "TYPE_INTO_TEXT_MAX_CHARS", "UI_SCAN_FAILED_REASON", "WINDOW_IMAGE_CAPTURE", "WINDOW_TARGET_KIND",
+    "ObservationError", "ScreenCapture", "ScreenObserver", "TextRegion", "WindowInfo", "captured_geometry", "check_typed_text", "click_point", "covering_scale",
     "point_in_rect", "rect_contains", "rects_intersect", "sanitize_label", "window_rect",
 ]

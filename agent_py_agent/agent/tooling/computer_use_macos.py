@@ -13,6 +13,9 @@
 #   - 点击权限：pyautogui 用 CGEventPost 发事件，宿主没有辅助功能权限时系统会悄悄丢掉、不报错。核心在复核之前调
 #     ensure_click_permitted()，这里用 AXIsProcessTrusted()（只查不弹窗，绝不调带提示选项的 AXIsProcessTrustedWithOptions）问一次，
 #     没权限 / 绑定导入失败 → accessibility_not_permitted（无法确认就不点）。
+#   - 控件候选（片 G）：ui_scan / ui_facts / ui_focused / ui_select_all 交给 computer_use_macos_ax（只读遍历，唯一的写是全选）；
+#     输入走既有的 computer_text_input.type_desktop_text（Quartz Unicode 键盘事件，不碰剪贴板），清空后 text 为空时按删除键
+#     （kVK_Delete，物理键码与键盘布局无关）。ui_candidates_supported=True 是给适配器的结构化能力声明。
 #   - 真实框架只经 load_real_macos_frameworks() 这一个入口拿；构造时注入假框架就不碰它。测试侧守卫在会话级把它换成直接失败。
 #   改动同步 test_computer_use_macos 与设计稿 J16 第 3.2 节 macOS 口径。
 # 模块用途: 把 macOS 桌面变成观察核心能理解的几个事实，自己不做任何判定；单测全用假 Quartz / 假 ScreenCaptureKit。
@@ -25,6 +28,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .computer_text_input import type_desktop_text
+from .computer_use_macos_ax import element_facts, element_focused, scan_window, select_all
 from .screen_observation import (
     SCREEN_REGION_CAPTURE,
     WINDOW_IMAGE_CAPTURE,
@@ -33,18 +38,22 @@ from .screen_observation import (
     TextRegion,
     WindowInfo,
 )
-from .screen_observation_store import WindowGeometry
+from .screen_observation_store import UiFacts, WindowGeometry
 from .screen_ocr import RapidOcrReader
 from .screen_region_digest import PixelBuffer
+from .screen_ui_candidates import UiScan
 
 # ScreenCaptureKit 每个异步回调（查可分享内容、单窗口截图）最多等多久，超时退回区域截图
 MACOS_SCREENCAPTURE_CALLBACK_TIMEOUT_SECONDS = 5.0
 # 有单窗口截图接口（SCScreenshotManager）的最低 macOS 主版本号（系统版本事实，低于它报 screencapturekit_too_old）
 SCREENSHOT_MANAGER_MIN_MACOS_MAJOR_VERSION = 14
+# macOS 删除键（kVK_Delete）的虚拟键码：物理键位，与键盘布局无关（系统协议值）
+MACOS_DELETE_KEY_CODE_PROTOCOL_VALUE = 51
 
 
 # LLM: 测试注入假框架时整份替换；quartz / screencapturekit 是模块对象（常量和函数都从它上面取，不写死数值），grabber 返回 mss
-#   的截屏上下文，click 在全局点点击；screencapturekit 为 None 表示导入失败；accessibility_trusted 只查辅助功能权限、不弹窗。
+#   的截屏上下文，click 在全局点点击；screencapturekit / ax（ApplicationServices）为 None 表示导入失败；type_text 往当前焦点控件
+#   输入一段文字（不清空、不碰剪贴板）。
 # 类用途: macOS 后端用到的全部系统框架与系统版本。
 @dataclass(frozen=True)
 class MacFrameworks:
@@ -53,27 +62,36 @@ class MacFrameworks:
     grabber: Callable[[], Any]
     click: Callable[[int, int], None]
     macos_version: tuple[int, ...]
-    accessibility_trusted: Callable[[], bool]
+    ax: Any | None
+    type_text: Callable[[str], None]
 
 
-# LLM: 唯一拿真实系统框架的入口（会 import pyobjc 的 Quartz / ScreenCaptureKit；mss、pyautogui、ApplicationServices 用到时才 import）。
-#   Quartz 导入失败抛 ImportError，由后端变成结构化失败；ScreenCaptureKit 导入失败记 None，截图时退回区域截图并给原因。
+# LLM: 唯一拿真实系统框架的入口（会 import pyobjc 的 Quartz / ScreenCaptureKit / ApplicationServices；mss、pyautogui 用到时才 import）。
+#   Quartz 导入失败抛 ImportError，由后端变成结构化失败；ScreenCaptureKit 导入失败记 None，截图时退回区域截图并给原因；
+#   ApplicationServices 导入失败记 None，控件树读不到（只出 OCR 候选），点击按没有辅助功能权限处理。
 #   测试侧守卫在会话级把这个函数换成直接失败，测试永远碰不到真实屏幕。
 # 函数用途: 加载真实的 macOS 框架。
 def load_real_macos_frameworks() -> MacFrameworks:
     quartz = importlib.import_module("Quartz")
-    try:
-        screencapturekit = importlib.import_module("ScreenCaptureKit")
-    except ImportError:
-        screencapturekit = None
+    screencapturekit, ax = _optional_module("ScreenCaptureKit"), _optional_module("ApplicationServices")
     return MacFrameworks(quartz, screencapturekit, lambda: importlib.import_module("mss").mss(),
-                         lambda x, y: importlib.import_module("pyautogui").click(x, y), _macos_version(),
-                         lambda: bool(importlib.import_module("ApplicationServices").AXIsProcessTrusted()))
+                         lambda x, y: importlib.import_module("pyautogui").click(x, y), _macos_version(), ax,
+                         lambda text: type_desktop_text(text, False))
+
+
+# 函数用途: 导入一个可选的系统框架绑定，导入失败返回 None。
+def _optional_module(name: str) -> Any | None:
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
 
 
 # LLM: 每个方法都重新读系统事实，不缓存窗口状态（复核要新鲜事实）；frameworks 为 None 时第一次用才加载真实框架。
 # 类用途: 观察核心的 macOS 后端。
 class MacBackend:
+    ui_candidates_supported = True
+
     def __init__(self, frameworks: MacFrameworks | None = None) -> None:
         self._frameworks = frameworks
         self._ocr = RapidOcrReader()
@@ -121,14 +139,40 @@ class MacBackend:
     #   免得系统丢掉点击、工具却报已点击，给自动执行留下假的成功事实。
     # 函数用途: 点击前确认宿主有辅助功能权限，没有就报 accessibility_not_permitted。
     def ensure_click_permitted(self) -> None:
-        accessibility_trusted = self._fw().accessibility_trusted
-        try:
-            trusted = accessibility_trusted()
-        except ImportError:
-            trusted = False
-        if not trusted:
+        ax = self._fw().ax
+        if ax is None or not ax.AXIsProcessTrusted():
             raise ObservationError("accessibility_not_permitted",
                                    "没有辅助功能权限（或无法确认）：系统会悄悄丢掉点击，请在系统设置的隐私与安全性里允许辅助功能")
+
+    # 函数用途: 读目标窗口的无障碍控件（读不到只降级，见 computer_use_macos_ax.scan_window）。
+    def ui_scan(self, info: WindowInfo) -> UiScan:
+        return scan_window(self._fw().ax, info)
+
+    # 函数用途: 复核用：重新读一个控件的结构化事实；控件已失效返回 None。
+    def ui_facts(self, native: object) -> UiFacts | None:
+        return element_facts(self._fw().ax, native)
+
+    # 函数用途: 控件现在有没有焦点。
+    def ui_focused(self, native: object) -> bool:
+        return element_focused(self._fw().ax, native)
+
+    # 函数用途: 在已拿到焦点的输入框里全选原有内容（AX 设选区并读回核对）。
+    def ui_select_all(self, native: object) -> bool:
+        ax = self._fw().ax
+        return ax is not None and select_all(ax, native)
+
+    # 函数用途: 往当前焦点控件输入文字（Quartz Unicode 键盘事件）。
+    def type_text(self, text: str) -> None:
+        self._fw().type_text(text)
+
+    # 函数用途: 按一下删除键（清空时 text 为空，用它删掉已全选的内容）。
+    def press_delete(self) -> None:
+        quartz = self._fw().quartz
+        for down in (True, False):
+            event = quartz.CGEventCreateKeyboardEvent(None, MACOS_DELETE_KEY_CODE_PROTOCOL_VALUE, down)
+            if event is None:
+                raise RuntimeError("系统未能创建键盘事件")
+            quartz.CGEventPost(quartz.kCGHIDEventTap, event)
 
     # 函数用途: 取框架：注入的假框架直接用，否则第一次用时加载真实框架（缺 pyobjc 变成结构化失败）。
     def _fw(self) -> MacFrameworks:

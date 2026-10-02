@@ -46,7 +46,7 @@
 | --- | --- | --- | --- | --- |
 | `observe_window` | 片 B（已实施） | `read_only`，审批策略 `always` | `observation{target_kind: "window", max_candidates: 64}` | 只读采样一个窗口：不切焦点、不激活、不移鼠标、不写文件 |
 | `click_candidate` | 片 B（已实施） | `dangerous` | `observation_ref{target_kind: "window", param: "candidate_id"}` | 点击候选的中心点 |
-| `type_into_candidate` | **片 G** | `dangerous` | `observation_ref{target_kind: "window", param: "candidate_id"}` | 先点可编辑控件让它拿到焦点，再输入显式文字（`text`、`clear_existing`） |
+| `type_into_candidate` | **片 G**（已实施，只在后端能给控件候选时注册） | `dangerous` | `observation_ref{target_kind: "window", param: "candidate_id"}` | 先点可编辑控件让它拿到焦点，再输入显式文字（`text`、`clear_existing`） |
 
 - **读屏审批**：读屏涉及隐私，`observe_window` 用现有的 `ApprovalPolicy(mode="always")`，每次都审批。审批面板是现有的“允许一次 / 本会话允许同一操作 / 拒绝”。effect 如实记 `read_only`，观察合同不用放宽。用户已被告知“每个会话第一次读屏会问你”。
 - **何时注册输入工具**：OCR 区域没有“可编辑”这个事实，`type_into_candidate` 在片 G 之前不进工具目录（75 在做工具瘦身，不加用不上的工具）。片 G 有了无障碍树里的可编辑控件，它才和片 G 一起注册。
@@ -84,9 +84,11 @@
   - macOS：用 `CGWindowListCopyWindowInfo` 列窗口，用 ScreenCaptureKit 的单窗口截图（macOS 14 以上的公开接口）；拿不到时退回 `mss` 区域截图，同样算遮挡。主路径不用已废弃的 `CGWindowListCreateImage`（回退用的 mss 内部用它，见 3.2 第 5 条已知限制）。片 E 实施细节见 3.2 第 5 条。
 - **候选**：
   - 片 B 起：RapidOCR 公开调用 `RapidOCR()(image)` 的文字区域。`role` 固定为 `ocr_text`，`actions` 只有 `click_candidate`；label 去控制字符，截到 120 字，只作外部数据（external_data）。
-  - 片 G 起：无障碍树里的控件（见第 6 节），role 取自系统的结构化角色，可编辑控件才有 `type_into_candidate`。
-- **失败**：MCP `isError` 加 `structuredContent.my_agent_observation_error{code}`，code 取 `window_not_found | not_viewable | capture_failed | ocr_failed | occluded | cancelled | screen_recording_not_permitted | accessibility_not_permitted`（片 C：宿主已取消；片 E：macOS 没有屏幕录制权限、点击前没有辅助功能权限）等。码集合是开放的：宿主只把 `stale` / `not_found` 提升为宿主错误码，其它码原样透传，新增码不用改宿主。没有候选时不凭空造候选。
+  - 片 G 起：无障碍树里的控件（见第 6 节），role 取自系统的结构化角色，可编辑控件才有 `type_into_candidate`。控件和 OCR 合并去重后，
+    key 带来源前缀 `ax:<n>` / `ocr:<n>`（片 B 的 `t<n>` 改成 `ocr:<n>`，按留下的 OCR 区域连续编号），先控件后 OCR，合计不超过 64。
+- **失败**：MCP `isError` 加 `structuredContent.my_agent_observation_error{code}`，code 取 `window_not_found | not_viewable | capture_failed | ocr_failed | occluded | cancelled | screen_recording_not_permitted | accessibility_not_permitted | focus_not_acquired | clear_unsupported | clear_failed | type_failed`（片 C：宿主已取消；片 E：macOS 没有屏幕录制权限、点击前没有辅助功能权限；片 G：输入相关，见第 6 节）等。点击之后才发生的失败（输入时拿不到焦点、全选失败、点完被取消、打字中途失败）在错误对象里另带 `clicked: true`，如实说明“已点击、未输入”。码集合是开放的：宿主只把 `stale` / `not_found` 提升为宿主错误码，其它码原样透传，新增码不用改宿主。没有候选时不凭空造候选。
 - **采样方式回退**：主路径拿不到、退回别的采样方式时，结果顶层（与 `window`、`generation` 并列）带 `capture_fallback{reason}`；不进 `frame`（宿主的 frame 只认固定键，多一个键整份拒绝），也不进观察载荷。
+- **控件树不完整**（片 G）：读到上限被截断，或一个控件都读不到（没授权、绑定缺失、窗口对不上、超时、出错），结果顶层带 `ui_tree{status, reason}`（status 取 `truncated` / `unavailable`，reason 是开放的短原因码），只在不完整时出现，放法同 `capture_fallback`；读不到时 OCR 候选照出，观察不失败。
 
 ### 3.2 动作前两层复核
 
@@ -186,6 +188,17 @@
   - 评估结论和安装方式写进 Computer Use 文档；能 import 时才启用，否则只用 OCR。
 - **候选合并**：同一窗口的 OCR 区域和无障碍控件按外框重叠去重，无障碍控件优先（它有结构化角色和可编辑标记）。key 带来源前缀（`ax:`、`ocr:`）。
 - **`type_into_candidate`**：随片 G 注册，只接受 actions 里有它的候选，也就是可编辑控件。
+- **片 G 实施定稿（2026-10-02，ae 定、75 实施，分支 `claude/75-j16-slice-g`，基于 `claude/3a-step17h` `afb15947b`）**：
+  - 分层：合并去重、动作判定、复核、输入顺序都在核心（`screen_ui_candidates.py` + `screen_observation.py`）；后端只给事实，鸭子接口新增 `ui_candidates_supported`（结构化能力）、`ui_scan`、`ui_facts`、`ui_focused`、`ui_select_all`、`type_text`、`press_delete`。macOS 的 AX 读取在 `computer_use_macos_ax.py`；X11 不读控件树（`ui_candidates_supported=False`，`ui_scan` 返回空、不带原因）。
+  - 读取：先 `AXIsProcessTrusted()`（只查不弹窗）；AX 窗口按 `AXPosition`+`AXSize` 与 CG 外框比，多个再比标题，0 个或多个都不猜（`window_unmatched`）；不用私有的 `_AXUIElementGetWindow`。广度优先，深度 16、节点 600、总预算 2 秒、单条消息超时 0.5 秒（`AXUIElementSetMessagingTimeout`，系统级元素上设置只影响本进程），都是模块常数，V-H 之后按实测调；碰到上限停下、已读的照用。外框和可见范围（窗口 ∩ 各级祖先外框）不相交的子树整棵跳过、不读子节点；没有外框的容器沿用上级范围。只读属性和动作名，不调任何 `AXPerformAction`。
+  - 候选判定（不写死角色表）：可点 = `AXEnabled` 且（有 `AXPress` 动作或可编辑）；可编辑 = `AXValue` 可写且是文字；可输入 = 可编辑且不是密码框。role 取 `AXRole`，不合宿主短标识规则的控件丢掉（它的 OCR 文字照常单列）。
+  - 去重与 label：OCR 区域面积至少 50%（`UI_DEDUPE_OCR_INSIDE_MIN_PERCENT`，按 OCR 面积、不用 IoU）落在控件里就算同一个，归给面积最小（最里层）的控件；像素区域完全相同的两个控件留后读到的（更深的）。label 依次取 `AXTitle` / `AXDescription` / `AXPlaceholderValue`，都没有就用被吸收的 OCR 文字，再没有就用 role。
+  - 值的隐私：密码框（subrole `AXSecureTextField`）一律不读 `AXValue`、不给 `type_into_candidate`（工具参数会原样进归档，密码会明文落盘）；其它控件的 `AXValue` 只判“是不是文字”，读完即丢，不存、不记日志、不算哈希、不进结果；输入后不读回核对，结果 `application_verified=False`。
+  - 复核：OCR 候选照旧比区域像素摘要；控件候选（包括吸收了 OCR 文字的）不比像素——输入框里光标会闪，片 C 多轮车道统计 20 次循环误判 3–8 次（0.15–0.40）——改比结构化事实 `UiFacts`：role、enabled、原始外框、label 来源（三项）的 sha、值是否可写（另记选区是否可写，供清空判断），整份相等才算没变；控件没了也是 `stale`。
+  - 输入顺序：校验文字（≤500 字 `TYPE_INTO_TEXT_MAX_CHARS`，超了拒绝、不截断；拒绝 Unicode 类别 Cc（含 `\n`、`\t`）与孤立代理码点；空文字只在 `clear_existing=true` 时允许；都在任何副作用之前）→ 点击权限 → 两层复核 → 候选真有输入动作（否则 `invalid_arguments`）、要清空时选区可写（否则 `clear_unsupported`）→ 看取消 → 点击 → 在 0.5 秒内等 `AXFocused`（拿不到 → `focus_not_acquired`）→ 清空时：看取消 → AX 把 `AXSelectedTextRange` 设成 `(0, 字符数)` 并读回核对（失败 → `clear_failed`）→ 看取消 → 用既有 `computer_text_input.type_desktop_text`（Quartz Unicode 键盘事件，不碰剪贴板）打字，替换选区；text 为空时按删除键（`kVK_Delete`，物理键码与布局无关）。打字中途出错 → `type_failed`。
+  - 注册：适配器按 `observer.supports_ui_candidates`（后端声明的结构化能力）决定是否注册 `type_into_candidate`，不按平台名；profile 照样声明，没被发现时按片 A 的规则只记 notice。`text` 在 schema 里必填，所以按片 D 的自动执行规则（必填项 ⊆ {候选参数}）它在结构上就不会被自动执行。
+  - Linux AT-SPI：只评估、写安装说明（见 computer-use.md），不进默认依赖，没有代码路径。
+  - 已知限制：多行文字填不了（拒绝换行，以后要提交另加结构化参数）；`AXValueCreate` 传 `(0, n)` 元组、`AXUIElementSetMessagingTimeout` 设在系统级元素上，这两处 pyobjc 的实际行为没在真机上跑过（V-H 核对）；同一应用里外框和标题都相同的两个窗口读不到控件；网页内容的树可能超过深度或节点上限（只截断不失败）。
 
 ## 7. 自动执行（功能做全，默认关）
 
@@ -277,7 +290,8 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 5. **真实模型验收**（Linux 车道容器，主模型 MiniMax M3，Jev 真实）：
    - 四档各发一次 prompt；
    - 记录 Jev 用量、选中候选、提示和执行是否发生、复核拒绝次数、M3 是否采纳。
-6. **macOS 后端和片 G**：假 Quartz、假 ScreenCaptureKit、假 AX 单测；真机只读核对另行安排。片 E 已按此实施（`test_computer_use_macos.py`、`test_screen_capture_guard.py`）。
+6. **macOS 后端和片 G**：假 Quartz、假 ScreenCaptureKit、假 AX 单测；真机只读核对另行安排。片 E 已按此实施（`test_computer_use_macos.py`、`test_screen_capture_guard.py`），片 G 同（`test_screen_ui_candidates.py`、`test_computer_use_macos_ax.py`，假 AX 在 `tests/_fake_macos_ax.py`）。
+   - **V-H 真机核对清单**（J16 各片合完后由 3a 一次性向用户申请，会弹“屏幕录制”与“辅助功能”两个授权）：真实窗口的列窗、遮挡与 Retina 缩放；ScreenCaptureKit 主路径与 mss 回退；AX 窗口匹配、真实应用与网页的树深和节点数（据此调上限）；`AXValueCreate((0, n))` 全选与读回、`AXUIElementSetMessagingTimeout` 设在系统级元素上；中文输入法开着时，`type_desktop_text` 用的“键码 0 + Unicode 字符串”事件会不会被输入法截走当成拼音；AZERTY 等非 QWERTY 布局下，现有 `type_text` 的清空（`pyautogui.hotkey("command","a")` 按美式键位发 a）会不会变成 ⌘Q。
 
 ## 9. 给能看图的主模型附截图（第二期）
 
@@ -293,6 +307,6 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 | D | `action_candidate` 接粗位置；自动执行路径和能力开关；假 Jev 四档（已实施：第 7 节“片 D 实施定稿”；真实模型验收留给片 F） | 5–6 h |
 | E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测（已实施 2026-10-02，75；ae 两轮复审通过，已集成 step17h） | 4–5 h |
 | F | 真实验收（M3 + Jev，Linux 车道）+ 文档、台账、TESTS | 3–4 h |
-| G | macOS AX 候选 + `type_into_candidate` 注册；Linux AT-SPI 可选评估和安装说明；合并去重 | 5–7 h |
+| G | macOS AX 候选 + `type_into_candidate` 注册；Linux AT-SPI 可选评估和安装说明；合并去重（已实施 2026-10-02，75，分支 `claude/75-j16-slice-g`，待 ae 复审） | 5–7 h |
 
 合计约 30–39 h。每片单独提交、单独评审（ae 审设计）。第 9 节等第 14 条交付后再排。
