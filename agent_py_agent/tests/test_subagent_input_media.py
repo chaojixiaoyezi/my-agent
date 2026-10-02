@@ -69,6 +69,7 @@ def test_manifest_lists_media_refs_without_paths():
     ref = {"path": "/owner/media/input/x", "sha256": "a" * 64, "media_type": "image/png", "size_bytes": 5, "name": "c.png"}
     text = input_media_manifest_text([ref, {"bad": True}])
     assert text.startswith("[INPUT_MEDIA_MANIFEST]")
+    assert "不需要工具读取或解码" in text.splitlines()[1], "首行软提示：附件已直接给模型"
     payload = json.loads(text.splitlines()[-1])
     assert payload == {"schema_version": "input-media-manifest.v1",
                        "media": [{"media_ref": "a" * 64, "name": "c.png", "media_type": "image/png", "size_bytes": 5}]}
