@@ -479,6 +479,38 @@ def test_redact_location_keeps_json_pointers_and_redacts_host_paths():
     assert redact_location(f"in {Path.home()}/a", replacements) == "<redacted>"
 
 
+# 本机根目录下真实存在的首段（macOS 是 /Users，Linux 车道是 /home 或 /root），9b 的 /Users 写法按本机换算
+_HOST_ROOT = "/" + Path.home().resolve().parts[1]
+_HOST_SEGMENT = _HOST_ROOT.lstrip("/")
+
+
+@pytest.mark.parametrize("location", [
+    f"file://{_HOST_ROOT}/me/ws/out/d.json",
+    f"../../../..{_HOST_ROOT}/me/ws/out/d.json",
+    f"a;{_HOST_ROOT}/me/x",
+    f"at@{_HOST_ROOT}/me/x",
+    f"%2F{_HOST_SEGMENT}%2Fme%2Fx",
+    f"/{_HOST_ROOT}/me/x",
+    "%7E%2F.ssh",
+    f"{_HOST_ROOT};3",
+    f"{_HOST_ROOT}/0",  # JSON Pointer 首段恰好是本机根目录名：只丢定位、不泄露
+])
+def test_redact_location_catches_9b_leak_variants(location):
+    from agent_py_agent.agent.capability.pack_verifier_redaction import redact_location
+
+    assert redact_location(location, []) == "<redacted>"
+
+
+@pytest.mark.parametrize("location", [
+    "out/tmp/x.json", "src/lib/a.py", "data/var/b.json", "docs/Users/x.md", "/shots/0/title",
+    "./out/d.json", "./tmp/x.json", "out/d.json:12:3", "SH01.start_state",
+])
+def test_redact_location_keeps_ordinary_locations(location):
+    from agent_py_agent.agent.capability.pack_verifier_redaction import redact_location
+
+    assert redact_location(location, []) == location
+
+
 def test_truncated_baseline_only_reworks_files_proven_written_this_run(env, fake_runner, monkeypatch):
     from agent_py_agent.agent.capability import pack_verification_matching as matching
 

@@ -212,6 +212,7 @@
   - 结果、返工次数都记在每 run 一本的核验账本，Compact 和重启后不重置；
   - 回合结束发宿主提示（`source=pack_verification`），并写 `channel_delivery.pack_verifications`；
   - 开关 `capability_pack_host_verification_enabled` 默认 false，是管理员边界项。细节见设计文档 3.1 节。
+    生产打开这个开关之前必须满足 9b 复审定的两个前提：（a）be 的 H3 已合入，核验账本所在的 `<任务根>/data/pack_verification` 在受保护写路径里；（b）块 4 有回归用例证明主代理和子代理、Shell 和文件工具都写不进 `<任务根>/data/pack_verification`。
 - **声明协议调整（块 2 内，ae 定，3a 已审同意：旧 baseline 键直接删、不做兼容；必需输入找不到就不跑、不返工）**：检查程序的 `baseline` 换成 `inputs` 列表（最多 4 条，每条 `{flag, source, path_patterns, field_match?, required}`）。起因是 be 对齐包内容时发现，A 的检查器要另一种 schema 的原文，B 要本回合写出的交接文件，只有一个同交付物基线不够用。来源 `task_input`/`turn_output` 是开放字符串，恰好匹配一个才算找到；必需的找不到就不跑（`verifier_input_unresolved`），非必需的找不到就不传。`valid` 必须等于“errors 为空”，退出码不参与判定。
 - **块 1 已实现**：
   - v7 可选块 `capability.verification`（交付物按路径模式加可选结构化字段识别，格式、运行方式、输入策略都是开放字符串）；

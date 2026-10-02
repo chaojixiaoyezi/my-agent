@@ -3,7 +3,9 @@
 #   返工提示、账本和 channel_delivery）。做法：按已知宿主路径做替换（目标和输入换成工作区相对路径，工作区根前缀去掉，
 #   本次临时目录换成 <verifier>，宿主解释器换成 <python>），长的先换；换完仍含宿主路径的整条置成 <redacted>。
 #   “仍含宿主路径”只看结构化事实：以 ~/、盘符或 /<段> 开头的片段，且 /<段> 在本机根目录下真实存在（JSON Pointer 如 /shots/0
-#   的首段在本机不存在，不误伤）。只改 location，不改 code、计数和状态。改动同步 test_pack_verifier_runner.py。
+#   的首段在本机不存在，不误伤）。9b 复核补的变形：片段前可以紧跟 ..、/、;、@（file:///Users、../../Users、a;/Users），
+#   判断前先做一次 URL 解码（%2FUsers%2F）。代价：JSON Pointer 首段恰好是本机根目录名（/home、/Users、/tmp）时整条置成
+#   <redacted>，只丢定位、不泄露。只改 location，不改 code、计数和状态。改动同步 test_pack_verification_service.py。
 # 模块用途: 不让检查程序借 location 把宿主路径带进模型可见的回执和提示。
 
 from __future__ import annotations
@@ -13,10 +15,11 @@ import re
 import sys
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import unquote
 
 REDACTED_LOCATION = "<redacted>"
-# location 里可能的宿主路径片段：前面是开头或分隔符，后面是 ~/、盘符或 /<首段>。
-_HOST_PATH_TOKEN = re.compile(r"(?:^|[\s\"'=:(\[,|<>])(~[/\\]|[A-Za-z]:[\\/]|/([^/\s\"'|<>()\[\],]+))")
+# location 里可能的宿主路径片段：前面是开头、分隔符（含 ;、@）、.. 或 /，后面是 ~/、盘符或 /<首段>。
+_HOST_PATH_TOKEN = re.compile(r"(?:^|[\s\"'=:(\[,|<>;@]|\.\.|/)(~[/\\]|[A-Za-z]:[\\/]|/([^/\s\"'|<>()\[\],;]+))")
 
 
 # LLM: 只在有错误样例时才计算替换表；target / inputs 的相对形式沿用运行器入账口径（工作区外的只留文件名）。
@@ -68,9 +71,10 @@ def _relative(path: Path, root: Path) -> str:
         return path.name
 
 
+# LLM: 先 URL 解码一次再判断（%2FUsers%2F 这类写法）；只用于判断，返回给模型的仍是替换后的原文或 <redacted>。
 # 函数用途: 判断文字里是否仍含宿主路径片段（~/、盘符，或首段在本机根目录下真实存在的 /<段>）。
 def _contains_host_path(text: str) -> bool:
-    for match in _HOST_PATH_TOKEN.finditer(text):
+    for match in _HOST_PATH_TOKEN.finditer(unquote(text)):
         if match.group(2) is None or os.path.isdir(os.sep + match.group(2)):
             return True
     return False

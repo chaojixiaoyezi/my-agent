@@ -231,6 +231,27 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
 - 测试夹具抽成普通函数 `build_env` / `install_fake_runner`，块 4 的测试文件复用。
 - 变异：在原 25 个基础上新增 8 个（R1–R8：不脱敏、不判宿主路径、误伤 JSON Pointer、临时目录不替换、不区分不确定、忽略写入证据、不记快照截断、开关关着仍读账本）；B8、B9 的定位文本随代码更新。
 
+### 块 3 的 9b 复核加固（2026-10-02，分支 `claude/ae-capability-packs-v2-b3h`，基于 `claude/3a-step17g` `43f29df6a`）
+
+- **起因**：9b 复核 `92a90fa9b` 时，用探针找到几种绕过残留路径判定的写法：`file:///Users/…`、`../../../../Users/…`、紧跟在 `;` 或 `@` 后面的 `/Users/…`、`%2FUsers%2F…`。证据在 `~/.my-agent/decision-evidence/review-capability-v2-b3-92a90fa9b/`。
+- **改法**（`capability/pack_verifier_redaction.py`）：
+  - 分隔符补上 `..`、`/`、`;`、`@`，段名里不收 `;`；
+  - 判断前先做一次 URL 解码，只用来判断，返回的仍是原文或 `<redacted>`。
+- **用例**（`test_pack_verification_service.py`）：
+  - `test_redact_location_catches_9b_leak_variants` 共 9 种写法，都置成 `<redacted>`：9b 的几类、`//<根段>/…`、`%7E%2F`、`<根段>;3`，以及首段恰好是本机根目录名的 JSON Pointer；
+  - `test_redact_location_keeps_ordinary_locations` 共 9 种相对写法，原样保留：3a 列的 8 种，加上 `./tmp/x.json`（单个点不算分隔符）；
+  - 根段按本机取 `Path.home()` 的第一段：macOS 是 `/Users`，Linux 车道是 `/home` 或 `/root`。Linux 上 `/Users` 不存在，本来就不是宿主路径。
+- **变异 7/7 全部被抓住**（`cpv2-mut/mutations_b3h.json`）：去掉 `;@`、去掉 `..`、去掉 `/`、`..` 改成单个点、段名收 `;`、任意字符都算分隔符、不做 URL 解码。
+- **相关回归**：50 个文件，890 passed，10 skipped。包括：
+  - pack 系列、verification 声明、attempt_sandbox；
+  - 43 个扫描守卫；
+  - test_packaging、test_constants_catalog。
+- **门禁**逐项 rc=0（基线 `43f29df6a`）：
+  - import boundaries、ruff（首轮报 import 顺序，已修）；
+  - `doc_sync --base 43f29df6a`、常数目录 `--check`（861 项）、前端配置目录 `--check`；
+  - strict code-size：按确切基线比告警身份，新增 0、消失 0；
+  - `git diff --check 43f29df6a..HEAD`、clean_package。
+
 ## 能力包 v2 块 2：宿主在沙箱里跑钉住的原版检查程序（2026-10-02，分支 `claude/ae-capability-packs-v2-b2`，基于 `claude/3a-step17e` `2e5a36af0`）
 
 - **新增** `agent_py_agent/tests/test_pack_verifier_runner.py`（19 项）：

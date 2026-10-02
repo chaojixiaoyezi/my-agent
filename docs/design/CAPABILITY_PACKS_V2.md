@@ -79,6 +79,8 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
     - 目标和输入换成工作区相对路径，工作区根前缀去掉；
     - 本次临时目录换成 `<verifier>`，宿主解释器换成 `<python>`；
     - 换完仍含宿主路径的整条置成 `<redacted>`。是否“仍含宿主路径”只看结构化事实：片段以 `~/`、盘符开头，或者是 `/<段>` 且这一段在本机根目录下真实存在。JSON Pointer（如 `/shots/0`）的首段在本机不存在，不会被误伤。
+    - 9b 复核加固：片段前可以紧跟 `..`、`/`、`;`、`@`（`file:///Users/…`、`../../../../Users/…`、`a;/Users/…`、`at@/Users/…` 都算），判断前先做一次 URL 解码（`%2FUsers%2F…` 也算）。`out/tmp/x.json`、`docs/Users/x.md`、`./out/d.json`、`out/d.json:12:3` 这类相对写法原样保留。
+    - 代价：JSON Pointer 的首段恰好是本机根目录名（`/home`、`/Users`、`/tmp`）时，整条置成 `<redacted>`，只丢定位、不泄露。
   - `valid` 必须等于“errors 为空”。自相矛盾、格式不对都记 `verifier_output_invalid`。
   - 退出码不参与判定，只用来识别超时。检查器写出 v1 就退 0；目标坏了给 `valid=false` 加错误码，崩溃没写出 v1 时宿主记 `verifier_output_invalid`。
   - 运行形态：宿主只把这一个成员拷进临时目录、改名后用 `python -I -S` 跑。检查器必须是单文件、只用标准库，不 import 包里其它文件，也不读包里的模板或资源。
