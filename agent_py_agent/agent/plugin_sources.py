@@ -11,22 +11,22 @@ from .path_access_policy import PathAccessPolicy
 
 # LLM: 来源读取失败的结构化原因：not_found / unauthorized / symlink，base 是本次解析相对路径用的工作区根（会话工作区，
 #   不是客户端 shell 的当前目录）。仍是 ValueError 子类，旧的宽泛捕获照常生效；管理工具按 reason 给用户区分"不存在"与"没权限"。
-#   allowed_root 只在越权时给出，且只取路径策略冻结的当前 owner 根（PathAccessPolicy.owner_scope_root），不含其它 owner 或宿主路径。
 # 类用途: 让安装/更新回执能说清楚来源到底是找不到、越权还是链接，而不是一句泛化文案。
 class PluginSourceError(ValueError):
-    # 函数用途: 保存原因码、用户输入的来源、解析基准和（越权时）当前 owner 允许放包的根，不放包正文。
-    def __init__(self, reason: str, message: str, *, source: str, base: Path, allowed_root: Path | None = None) -> None:
+    # 函数用途: 保存原因码、用户输入的来源和解析基准，不放包正文。
+    def __init__(self, reason: str, message: str, *, source: str, base: Path) -> None:
         super().__init__(message)
-        self.reason, self.source, self.base, self.allowed_root = reason, source, base, allowed_root
+        self.reason, self.source, self.base = reason, source, base
 
 
-# LLM: 安装与更新工具共用的结构化回执：reason=source_<原因>、source_base（解析基准）；越权且有 owner 根时多给 allowed_root。
+# LLM: 安装与更新工具共用的结构化回执：reason=source_<原因>、source_base（解析基准）；越权且路径策略冻结了当前 owner 根时
+#   多给 allowed_root（只取 PathAccessPolicy.owner_scope_root，不含其它 owner 或宿主路径）。
 #   展示层（plugin_management._reply）只读这些字段生成用户说明，不解析异常文本。
 # 函数用途: 把来源读取失败转成回执信封里的结构化字段。
-def plugin_source_error_envelope(exc: PluginSourceError) -> dict[str, str]:
+def plugin_source_error_envelope(exc: PluginSourceError, policy: PathAccessPolicy) -> dict[str, str]:
     envelope = {"reason": f"source_{exc.reason}", "source_base": str(exc.base)}
-    if exc.allowed_root is not None:
-        envelope["allowed_root"] = str(exc.allowed_root)
+    if exc.reason == "unauthorized" and policy.owner_scope_root is not None:
+        envelope["allowed_root"] = str(policy.owner_scope_root)
     return envelope
 
 
@@ -58,10 +58,8 @@ def read_plugin_source(source: str, workspace: Path, policy: PathAccessPolicy, *
         ) from exc
     if not policy.check(path).allowed:
         # 越权时给出当前 owner 允许放包的根目录：只用路径策略冻结的结构化根，不泄露其它 owner 或宿主私有路径。
-        root = Path(policy.owner_scope_root) if policy.owner_scope_root is not None else None
-        details = {"allowed_root": str(root or ""), "source_base": str(workspace)}
-        raise PluginSourceError("unauthorized", source_unauthorized_message(details), source=source, base=workspace,
-                                allowed_root=root)
+        details = {"allowed_root": str(policy.owner_scope_root or ""), "source_base": str(workspace)}
+        raise PluginSourceError("unauthorized", source_unauthorized_message(details), source=source, base=workspace)
     content = read_bytes_beneath(Path(path.anchor), path.parts[1:], max_bytes=max_bytes, require_dir_fd=True)
     if content is None:
         raise PluginSourceError("not_found", f"插件来源不存在：{source}。", source=source, base=workspace)

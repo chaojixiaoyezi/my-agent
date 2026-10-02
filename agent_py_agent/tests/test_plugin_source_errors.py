@@ -64,14 +64,15 @@ def test_unauthorized_source_carries_only_the_current_owner_root_as_a_structured
     scoped = PathAccessPolicy.from_values(mode="normal", owner_scope_root=str(tmp_path / "owner-a"))
     with pytest.raises(PluginSourceError) as denied:
         read_plugin_source(str(other / "pkg.zip"), workspace, scoped, max_bytes=1 << 20)
-    assert denied.value.allowed_root == scoped.owner_scope_root
-    assert plugin_source_error_envelope(denied.value) == {
+    assert plugin_source_error_envelope(denied.value, scoped) == {
         "reason": "source_unauthorized", "source_base": str(workspace), "allowed_root": str(scoped.owner_scope_root)}
     assert str(other) not in str(denied.value), "不回显越权路径，也不提别的 owner"
-    assert str(denied.value) == source_unauthorized_message(plugin_source_error_envelope(denied.value)), "模型与用户看到同一句"
+    assert str(denied.value) == source_unauthorized_message(plugin_source_error_envelope(denied.value, scoped)), "模型与用户看到同一句"
     with pytest.raises(PluginSourceError) as missing:
         read_plugin_source("nope.zip", workspace, scoped, max_bytes=1 << 20)
-    assert missing.value.allowed_root is None and "allowed_root" not in plugin_source_error_envelope(missing.value)
+    assert "allowed_root" not in plugin_source_error_envelope(missing.value, scoped), "只有越权才给允许的根"
+    full = PathAccessPolicy.from_values(mode="full")
+    assert "allowed_root" not in plugin_source_error_envelope(denied.value, full), "没有 owner 根时不编造"
 
 
 def test_unauthorized_message_without_an_owner_root_points_at_the_session_workspace():

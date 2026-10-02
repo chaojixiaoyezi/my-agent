@@ -431,16 +431,9 @@ class PluginManagement:
             payload["details"] = envelope
         state = payload.get("state", "")
         result = {"kind": "plugin_command", "request_id": request_id, **payload}
-        details = payload.get("details", {})
-        if details.get("reason") == "confirmation_required" and isinstance(details.get("confirmation"), dict):
-            # 非 Python 插件启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明
-            result["message"] = confirmation_message(details["confirmation"])
-        elif details.get("reason") == "source_unauthorized":
-            # 来源在当前 owner 范围外：按信封里的 allowed_root/source_base 告诉用户包该放哪里，不读输出文本
-            result["message"] = source_unauthorized_message(details)
-        elif runtime_reason_message(details.get("reason")):
-            # 平台不符、解释器缺失或被替换：按结构化原因码给出具体说明与下一步
-            result["message"] = runtime_reason_message(details.get("reason"))
+        special = _reason_message(payload.get("details", {}))
+        if special:
+            result["message"] = special
         result.setdefault("message", _outcome_message(payload, state, _reply_message(payload, state, business)))
         self._attach_catalog(result, payload)
         if request_id:
@@ -475,6 +468,20 @@ _PLUGIN_BUSINESS_REPLY_MESSAGES = {
     "succeeded": "插件调用已完成。", "failed": "插件调用失败，请核对原结果。",
     "approval_required": "插件调用需要审批，尚未执行。", "outcome_unknown": "插件调用结果尚未确认，请查询原请求。",
 }
+
+
+# LLM: 只按回执结构化 reason 选专用说明，不读输出文本；没有专用说明时返回空串，交 _reply 用状态默认说明。
+# 函数用途: 给确认预览、来源越权、运行环境问题三类原因选具体说明。
+def _reason_message(details: dict) -> str:
+    reason = details.get("reason")
+    if reason == "confirmation_required" and isinstance(details.get("confirmation"), dict):
+        # 非 Python 插件启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明
+        return confirmation_message(details["confirmation"])
+    if reason == "source_unauthorized":
+        # 来源在当前 owner 范围外：按信封里的 allowed_root/source_base 告诉用户包该放哪里，不读输出文本
+        return source_unauthorized_message(details)
+    # 平台不符、解释器缺失或被替换：按结构化原因码给出具体说明与下一步（没有对应说明时为空串）
+    return runtime_reason_message(reason) or ""
 
 
 # LLM: 只读回执里的结构化状态与收尾字段选说明，不解析正文；业务调用的输出只经可读化投影后附在说明后面。

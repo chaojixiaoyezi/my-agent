@@ -57,7 +57,7 @@ class PluginInstallTool(BaseTool):
             # 来源问题按结构化原因分开告知：不存在（含解析基准）、越权、链接；不把三者混成一句。
             return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS",
                                       effect_outcome="not_started",
-                                      result_envelope={PLUGIN_INSTALL_TOOL: plugin_source_error_envelope(exc)})
+                                      result_envelope={PLUGIN_INSTALL_TOOL: plugin_source_error_envelope(exc, self.policy)})
         except PluginPackageError as exc:
             return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, f"插件包格式无效：{exc}", error_code="TOOL_INVALID_ARGUMENTS",
                                       effect_outcome="not_started",
