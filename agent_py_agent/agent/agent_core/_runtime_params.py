@@ -131,6 +131,9 @@ class ToolLoopExecuteParams:
     # Progressive disclosure: an explicit tool_search selection makes these
     # already-authorized deferred tools visible to the next model call only.
     loaded_tool_names: set[str] = field(default_factory=set)
+    # action_candidate 自动执行计划（tool_context/decision_action_execute.HostAction）：决策点在记录观察调用时追加，
+    # tool_loop/round_execution 在同一条记录之后取走并执行；只在本轮内存里，不持久化、不进 compact。
+    host_actions: list = field(default_factory=list)
     # 会话运行时 turn snapshot: volatile wall-clock fields must not rewrite the
     # first provider message on every tool round and invalidate prompt caching.
     workspace_context_snapshot: str = ""

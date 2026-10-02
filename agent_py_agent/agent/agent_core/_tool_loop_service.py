@@ -2396,10 +2396,13 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     update_runtime_fact_progress_if_enabled(agent, record.params, tool_round=record.tool_rounds)
     result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
     result_rendered += _optional_result_hints(agent, record, archive_record) + schema_hint
+    # 决策发起的宿主调用换 [host-action-record] 标签并标 actor：text 下同链展示；native 下它不是 IR 承载条目，
+    # 会按 runtime.guidance 转发到模型，不伪造 assistant tool_use。
+    tag, suffix = ("tool", "") if record.actor == "model" else ("host-action", f" actor={record.actor}")
     record.params.tool_context.append(
-        f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
+        f"[{tag}-record round={record.tool_rounds} index={record.idx}{suffix}]\n"
         f"{render_tool_payload_for_live_prompt(record.model_payload)}\n"
-        f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
+        f"[{tag}-output-record round={record.tool_rounds} index={record.idx}{suffix}]\n"
         f"{result_rendered}"
     )
     # 灰度双轨：native 下同时把这次「调用+结果」记进结构化 IR 历史（与上面的文本
@@ -2445,14 +2448,15 @@ def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[s
 
 
 # LLM: Native history must carry the reducer output, never the raw executor projection; otherwise
-# large-output refs bypass the canonical read_artifact recovery contract.
+# large-output refs bypass the canonical read_artifact recovery contract. 只有模型发起（actor=model）的调用才有
+# 配对的 assistant tool_use，决策发起的宿主调用不进 IR 配对（它经 tool_context 的 [host-action-record] 块转发）。
 # 函数用途: 把工具调用与有界、可恢复的结果正文追加到原生模型历史。
 def _record_tool_call_ir_if_native(
     record: ToolCallRecordParams,
     result_rendered: str,
 ) -> None:
     """Append the exact canonical pair with the shared bounded model projection."""
-    if not native_tool_use_active(record.params):
+    if record.actor != "model" or not native_tool_use_active(record.params):
         return
     record_tool_call_ir(
         record.params,

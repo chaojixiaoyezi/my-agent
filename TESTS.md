@@ -1074,6 +1074,30 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   `git diff --check` 退出 0；`PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 退出 0，新增告警 0、消失告警 0。
   未改产品，因此未跑相关 pytest、guards9、Ruff、strict-size、import-boundaries 或 clean-package；不宣称产品门禁全部通过。
 
+## J16 片 D：决策点粗位置 + 自动执行能力开关 + 假 Jev 四档（2026-10-02，ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` 72ddc2b5c）
+
+- **范围**：`tool_context/decision_action_execute.py`（规划、记账、粗位置）、`decision_action_candidate.py`（材料 position、采用后规划、提示变体）、
+  `tool_loop/round_execution.py`（`ToolCallRecordParams`/`ToolRoundExecutionRequest` 的 `actor`/`decision_ref`、审批 binding 带 actor、`_run_host_actions`/
+  `_execute_host_action`）、`_tool_loop_service._record_tool_call`（宿主记录 `[host-action-record]` 标签、不进原生 IR）、`tool_call_archive_record`（`actor`/`decision_ref`
+  典型字段 + 信封白名单 `observation_action`）、`tool_runtime_ledger`（事件载荷 `actor`/`decision_ref`/`observation_action`）、`plugin_observation.observation_actions`、
+  `ObservationBinding` 发送后记 `observation_action`、`PluginProxyTool.observation_binding` 公开属性（构造时设）、能力开关三处 + `USER_SETTINGS_BOUNDARY_KEYS`。
+- **测试**：`test_decision_action_execute.py`（46 项）：粗位置 10 组（中心、夹上/下界、四舍五入、缺 frame/region/scale、零缩放、坏形状）与材料里只有带 region 的候选有
+  `position`、不外发绝对坐标；假 Jev 四档（off 零请求、observe 请求无提示、apply 提示不执行、apply+开关 执行一次 click 且参数只有候选编号）；两本账（归档/事件/决策账）
+  都带 `actor=decision` 与同一个 `decision_ref`，事件带 `observation_action`；native 下宿主记录不进 IR、text/native 都只有一条 `[host-action-record]`；同一观察第二轮不再执行
+  （`already_acted`）、模型已动作不执行、别的 task 的动作不算；只会输入的候选不执行（`no_auto_action`）；两个可执行动作 `ambiguous_action`；动作工具是普通处理器 / 只有观察
+  声明 / 参数名不同都不执行；快照 owner_type=user、飞书 owner、缺 owner_id、空身份都 `owner_scope`；替身配置的真值不算开；开关在 capability 配置且是管理员边界；
+  ask 审批 binding 带 `actor=decision`/`decision_ref`、说明带前缀，拒绝只记一次（`APPROVAL_REJECTED`，`handler_executed=false`）且不再询问；模型自己的审批不带 actor；
+  复核拒绝只记一次、失败的发送也算碰过、再来一轮不重试不换候选；中断后不执行只记 `interrupted`；`actor=decision` 的请求不取计划（防递归）；事实投影拒绝不全形状、
+  只保留宿主字段；`observation_actions` 跳过别的 run 与坏载荷。`test_plugin_proxy_observation.py` 加一条：发送过（成功 / 提供方拒绝）都记 `observation_action`，
+  未发送（未知候选）与没填候选编号不记。`test_decision_action_candidate.install` 的假阶段多带 `operation_id`。
+- **假 Jev 四档结果**（`MY_AGENT_J16D_REPORT=1` 跑 `test_four_modes_only_apply_with_the_switch_executes` 打印）：off → 0 次请求、0 提示、0 执行；observe → 1 次请求、
+  0 提示、0 执行；apply → 1 次请求、1 条提示、0 执行；apply+开关 → 1 次请求、1 条“宿主将自动执行”提示、执行 1 次 `click(candidate_id=c1)`、1 条宿主记录、
+  决策账 1 行 `auto_execution:executed`。
+- **变异**：见 `~/.my-agent/decision-evidence/j16-slice-d-<sha>/mutations_j16d.json`（脚本 `run_mutations_j16d.py` 在会话 scratchpad）；清单见设计稿 8.4。
+- **门禁**：ruff；常数目录重生成（862）+ `--check`；import boundaries 0；node `sync-backend-config.mjs` 重生成 + `--check`；doc_sync；strict code-size；size_diff 新增 0；
+  diff --check；clean_package。
+- **未做**：真实模型验收（M3 + 真 Jev）留片 F；`/plugins` 的 MCP 段也在片 F。
+
 ## J16 片 C：Linux 车道 Xvfb 集成（关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计）（2026-10-02，ef，分支 `claude/ef-j16-slice-c`，叠在片 B 8371ca334 上）
 
 - **范围**：`test_computer_use_xvfb_cases.py`（复用片 B 车道夹具，设计稿 8.3 的三条 + 光标统计）；Tk 测试窗口加输入框（闪动光标）与 relabel / reopen 命令；

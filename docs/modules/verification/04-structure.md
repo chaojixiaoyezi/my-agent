@@ -149,6 +149,9 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    重建“本调用为何被允许”，不能反向批准另一调用。
    插件观察候选 `observation`（`plugin_observation.parse_observation` 夹界后的完整记录，含插件 key、目标引用与代次）与整份拒绝码
    `observation_rejected` 也经此白名单进入归档，是候选内容的唯一权威；模型可见投影由插件代理另行改写，事件流只带查找投影。
+   动作工具按候选发送后的 `observation_action{observation_id, candidate_id, tool}`（`ObservationBinding` 写）同样经白名单进归档，
+   并随 `tool_completed` 事件落库，是 J16 自动执行幂等与“模型已动作”判定的唯一事实。归档另带典型字段 `actor`（`model` / `decision`）
+   与 `decision_ref`：谁发起了这次调用是宿主结构化事实，决策发起的调用不进原生 IR 配对，工具账与决策账靠 `decision_ref` 互查。
    `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影、附件引用和有界
    `evidence_refs`，以及
    `tool_search` 的已加载工具名列表。参数审计只接受 `input_sources`、`input_coercions` 和不可逆

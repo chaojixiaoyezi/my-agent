@@ -107,6 +107,26 @@ def test_action_with_a_current_candidate_sends_the_plugin_key_and_generation_in_
         "target": {"ref": "tab-1", "generation": "3"}}
 
 
+def test_sent_actions_record_the_observation_action_fact_whatever_the_outcome():
+    repo = _Repo()
+    client = _Client(_read_result(_observation()), repo)
+    candidates = _recorded(repo, client)
+    observation_id = repo.events[-1]["payload"]["observation"]["observation_id"]
+    fact = {"observation_id": observation_id, "candidate_id": candidates[0]["candidate_id"], "tool": plugin_tool_name("sample-peek", "click")}
+    client.result = {"content": "{}", "structuredContent": {"clicked": "button"}, "isError": False}
+    ok = _proxy(client, "click").execute({"candidate_id": candidates[0]["candidate_id"], "__run_scope": RUN_SCOPE})
+    assert ok.ok and ok.result_envelope == {"observation_action": fact}
+    client.result = {"content": "{}", "structuredContent": {"my_agent_observation_error": {"code": "stale"}}, "isError": True}
+    rejected = _proxy(client, "click").execute({"candidate_id": candidates[0]["candidate_id"], "__run_scope": RUN_SCOPE})
+    assert not rejected.ok and rejected.reported_error_code == OBSERVATION_STALE
+    assert rejected.result_envelope == {"observation_action": fact, "observation_rejected": OBSERVATION_STALE}, "发送过就算碰过，提供方拒绝也记"
+    before = len(client.sent)
+    unknown = _proxy(client, "click").execute({"candidate_id": "cand-0123456789abcdef", "__run_scope": RUN_SCOPE})
+    assert "observation_action" not in unknown.result_envelope and len(client.sent) == before, "没发送就不算碰过"
+    plain = _proxy(client, "click").execute({"selector": "#go", "__run_scope": RUN_SCOPE})
+    assert "observation_action" not in plain.result_envelope, "没填候选编号的动作不记观察事实"
+
+
 def test_action_with_unknown_or_stale_candidate_is_rejected_before_sending():
     repo = _Repo()
     client = _Client(_read_result(_observation()), repo)

@@ -137,7 +137,7 @@ def install(monkeypatch, **fake):
     def begin(_agent, run_params, **kwargs):
         assert kwargs["operation_id"].startswith(module._POINT + ":")
         return SimpleNamespace(error_code=fake.get("stage_error", ""), deadline=time.monotonic() + 5,
-                               run_id=fake.get("stage_run_id", run_params.run_id),
+                               run_id=fake.get("stage_run_id", run_params.run_id), operation_id=kwargs["operation_id"],
                                enabled_points=() if mode == "off" else (module._POINT,))
 
     def decide(_agent, run_params, stage, **kwargs):

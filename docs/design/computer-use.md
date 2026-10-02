@@ -28,6 +28,14 @@
 - 片 C：观察处理器把采样 + OCR 放到工作线程并加锁，宿主 `/stop` 的取消通知能被底层 Server 处理：宿主马上拿到 `CANCELLED`（车道用例 0.16 s），被丢弃的 OCR 在线程里跑完，取消后的下一次观察要排在它之后；不被堵的是取消通知和其他工具。已取消的调用拿到锁后不碰观察核心，点击在复核完、真正点之前再看一次取消标记，不会多点一下。
   Linux 车道的桌面层镜像定义 `Dockerfile.desktop` 与运行脚本 `xvfb_lane.sh` 在证据目录 harness/（正式位置由 3a 定），只在显式指定时构建；
   集成用例 `test_computer_use_xvfb_lane.py` / `test_computer_use_xvfb_cases.py` 只在 `MY_AGENT_XVFB_LANE=1` 时跑。闪动光标误判率 0.15–0.20（20 次循环），只记录不调容差。
+- 片 D：`action_candidate` 决策材料带几何派生的归一化粗位置；能力开关 `action_candidate_auto_execute_enabled`（默认关，管理员边界）打开且决策模式为 apply 时，
+  宿主可按 Jev 的选择以 `actor=decision` 自动调用一次只凭候选编号的动作（这里就是 `click_candidate`），走和模型调用完全一样的审批、两层复核、归档；
+  `type_into_candidate` 这类要文字的动作永远不自动执行。规则与账目见设计稿第 7 节“片 D 实施定稿”。
+
+**待观察项（片 D 记，片 F 真实验收时复核）**：
+- 闪动光标误判过期：片 C 三次 20 轮“观察 → 点击”分别 3 / 20、4 / 20、8 / 20（0.15 / 0.20 / 0.40），方差不小，正式桌面层镜像那次最高。按 ae 定的只记录，
+  暂不调区域摘要容差（`DIGEST_*` 常数）；片 F 真实验收再跑三次，若仍有 ≥ 0.4 的轮次，再议把输入框光标所在格排除或放宽容差。
+- 自动执行碰到适配器复核拒绝（`OBSERVATION_STALE`，含光标误判）时只记账不重试：光标误判率直接决定自动点击的“白跑”比例，真实验收要把这个比例记进证据。
 
 **片 E 实施（2026-10-02，macOS）**：
 - 后端按平台选：`tooling/computer_use_backends.select_backend()`，darwin → `computer_use_macos.MacBackend`，其余 → `X11Backend`；

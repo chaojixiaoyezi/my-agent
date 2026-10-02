@@ -17,7 +17,10 @@ from ..conversation.authority import (
 )
 from ..local_storage import RuntimeGateLedgerRecord
 from ..path_access_policy import effective_owner_scope_root, inheritable_declared_work_roots
-from ..plugin_observation import observation_event_payload_from_envelope
+from ..plugin_observation import (
+    observation_action_payload_from_envelope,
+    observation_event_payload_from_envelope,
+)
 from ..tooling.runtime_contracts import tool_arguments_hash
 from .run_task_workspace_writer import current_run_tool_output_archive_root
 from .runtime_write_guards import attach_running_install_guard
@@ -38,8 +41,9 @@ def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]
     _append_runtime_event(agent, archive_record)
 
 
-# LLM: 载荷只取 archive 记录里的宿主 typed 字段（工具、ok、错误码、失败阶段、handler 是否执行、状态），
-#   不放参数值与输出正文；父级工具失败摘要与插件观察新鲜度都只读这条事件流。写入尽力而为，失败不打断工具循环。
+# LLM: 载荷只取 archive 记录里的宿主 typed 字段（工具、ok、错误码、失败阶段、handler 是否执行、状态、发起者 actor 与
+#   decision_ref），不放参数值与输出正文；父级工具失败摘要、插件观察新鲜度与自动执行幂等（observation_action）都只读这条
+#   事件流。写入尽力而为，失败不打断工具循环。
 # 函数用途: 把一次工具调用完成写进 owner 权威 runtime_events，供审计、重建和父级状态面读取。
 def _append_runtime_event(agent: object, archive_record: dict[str, object]) -> None:
     """把「工具调用完成」追进权威 runtime_events（A.3/A.8 追到 attempt）。
@@ -71,11 +75,19 @@ def _append_runtime_event(agent: object, archive_record: dict[str, object]) -> N
         "handler_executed": archive_record.get("handler_executed") is True,
         "status": _completion_status(archive_record, runtime_gate),
         "idempotency_key": _text(archive_record.get("idempotency_key")),
+        # 没记发起者的旧归档都是模型发起的（宿主自动执行之前不存在别的发起者）
+        "actor": _text(archive_record.get("actor")) or "model",
+        "decision_ref": _text(archive_record.get("decision_ref")),
     }
+    envelope = _dict_value(archive_record.get("tool_result_envelope"))
+    # 动作工具按候选发送过的事实随同一事件落库：自动执行的幂等与“模型已动作”判定只读它
+    action = observation_action_payload_from_envelope(envelope.get("observation_action"),
+                                                      task_id=_text(archive_record.get("task_id")))
+    if action is not None:
+        payload["observation_action"] = action
     # 插件观察候选的查找投影随同一事件落库：新鲜度按事件 seq 判定，归档信封仍是候选内容的唯一权威
     observation = observation_event_payload_from_envelope(
-        _dict_value(archive_record.get("tool_result_envelope")).get("observation"),
-        task_id=_text(archive_record.get("task_id")), operation_id=operation_id,
+        envelope.get("observation"), task_id=_text(archive_record.get("task_id")), operation_id=operation_id,
     )
     if observation is not None:
         payload["observation"] = observation

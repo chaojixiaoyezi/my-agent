@@ -1,5 +1,13 @@
 # Verification：开发推进
 
+## 2026-10-02 J16 片 D：归档与工具账记发起者（ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` `72ddc2b5c`，待集成）
+
+- `tool_call_archive_record` 的归档多两个典型字段：`actor`（`model` 或 `decision`，取自 `ToolCallRecordParams.actor`，默认 `model`）与 `decision_ref`
+  （决策发起的宿主调用才有）；信封白名单收 `observation_action`（动作工具按候选发送后的观察/候选/工具名事实）。
+- `tool_runtime_ledger` 的 `tool_completed` 事件载荷同样带 `actor`、`decision_ref`，动作调用另带 `observation_action`（含 task_id）；没记发起者的旧归档按
+  `model` 处理。J16 自动执行的幂等判定只读这条事件流，不读正文。
+- 被动验证账和 `verification_state` 不变。规则见 [J16 设计稿第 7 节](../../design/J16_SCREEN_OBSERVATION.md)，测试见 TESTS.md“J16 片 D”。
+
 ## 2026-10-02 能力包宿主核验接进工具执行缝隙（ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`，待集成）
 
 - `tool_call_runtime.execute_traced_tool_call` 新增两处调用，都在开关 `capability_pack_host_verification_enabled`（默认 false）打开、本任务钉住了声明检查程序的能力包时才生效：

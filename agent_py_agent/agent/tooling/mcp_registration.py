@@ -139,8 +139,14 @@ class MCPProxyTool(BaseTool):
         self.model_spec = model_spec
         self.runtime_policy = runtime_policy
         self.transport = transport
-        # 观察绑定由注册层在发布前按逐工具声明设置一次；None 表示普通 MCP 工具，执行链完全不变
-        self.observation_binding: ObservationBinding | None = None
+        # 观察绑定：插件子类按安装描述在构造时算出；普通 MCP 工具由注册层在发布前按逐工具声明设置一次；None 表示执行链完全不变
+        self.observation_binding: ObservationBinding | None = self._initial_observation_binding()
+
+    # LLM: 构造钩子：普通 MCP 代理的声明来自注册层的逐工具表（_declared_proxy 发布前赋值），构造时没有来源，返回 None；
+    #   插件代理重写它按 manifest 构造。决策点的自动执行规划只读公开属性 observation_binding，两种代理同一属性。
+    # 函数用途: 构造时的初始观察绑定。
+    def _initial_observation_binding(self) -> ObservationBinding | None:
+        return None
 
     # LLM: 只读原连接，不自动重启或跟随新的 current；目录可见不代替真正发送前的激活和任务权限检查。
     # 函数用途: 隐藏已断开的原代理，防止新连接让旧工具声明重新可用。

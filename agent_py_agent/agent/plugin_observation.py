@@ -335,10 +335,10 @@ def _canonical_candidate(row: object, context: ObservationHostContext, frame: di
     return canonical
 
 
-# LLM: 只读 runtime_events：先按既有 run_id 找权威 AgentRun，再取该 agent_run 全部 tool_completed 事件（跨 attempt 共享），
-#   只保留 ok 且带 observation 的事件；任何库错误按"没有观察"处理，不抛给调用方。
-# 函数用途: 列出一个 run 里按发生顺序排列的观察事件载荷。
-def _observation_events(repo: object, *, run_id: str, task_id: str) -> list[dict[str, Any]]:
+# LLM: 只读 runtime_events：先按既有 run_id 找权威 AgentRun，再取该 agent_run 全部 tool_completed 事件载荷（跨 attempt 共享，
+#   按事件序）；任何库错误按"没有事件"处理，不抛给调用方。观察与动作事实的读取都从这里取载荷。
+# 函数用途: 列出一个 run 里按发生顺序排列的工具完成事件载荷。
+def _completed_payloads(repo: object, run_id: str) -> list[dict[str, Any]]:
     if repo is None or not run_id:
         return []
     try:
@@ -348,15 +348,35 @@ def _observation_events(repo: object, *, run_id: str, task_id: str) -> list[dict
         events = repo.events_for_agent_run(str(agent_run["agent_run_id"]), event_type="tool_completed")
     except (sqlite3.Error, OSError, AttributeError, KeyError, TypeError):
         return []
+    return [event["payload"] for event in events if isinstance(event, dict) and isinstance(event.get("payload"), dict)]
+
+
+# LLM: 只保留 ok 且带 observation 的事件，按 task 过滤（task_id 空表示不过滤）。
+# 函数用途: 列出一个 run 里按发生顺序排列的观察事件载荷。
+def _observation_events(repo: object, *, run_id: str, task_id: str) -> list[dict[str, Any]]:
     rows = []
-    for event in events:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        observation = payload.get("observation") if isinstance(payload, dict) else None
+    for payload in _completed_payloads(repo, run_id):
+        observation = payload.get("observation")
         if not isinstance(observation, dict) or payload.get("ok") is not True:
             continue
         if task_id and str(observation.get("task_id") or "") != task_id:
             continue
         rows.append(observation)
+    return rows
+
+
+# LLM: 动作事实不看 ok：只要动作工具按候选真的发送过（复核通过），不论提供方成功、失败或按代次拒绝，都算碰过这个观察；
+#   宿主自动执行与模型自己的动作共用这条事实。按 task 过滤（task_id 空表示不过滤）。
+# 函数用途: 列出一个 run 里按发生顺序排列的动作事实（observation_id / candidate_id / tool / actor）。
+def observation_actions(repo: object, *, run_id: str, task_id: str) -> list[dict[str, Any]]:
+    rows = []
+    for payload in _completed_payloads(repo, run_id):
+        action = payload.get("observation_action")
+        if not isinstance(action, dict):
+            continue
+        if task_id and str(action.get("task_id") or "") != task_id:
+            continue
+        rows.append({**action, "actor": str(payload.get("actor") or "model")})
     return rows
 
 
@@ -409,6 +429,18 @@ def observation_meta(observation: Mapping[str, Any], candidate: Mapping[str, Any
             "target": {"ref": observation.get("target_ref"), "generation": observation.get("generation")}}
 
 
+# LLM: 只读归档信封里 ObservationBinding 写过的 observation_action（observation_id / candidate_id / tool 都是字符串），
+#   形状不对返回 None；供 tool_completed 事件写载荷时复用同一投影，任务编号由调用方按归档给。
+# 函数用途: 从归档 tool_result_envelope.observation_action 还原事件载荷投影。
+def observation_action_payload_from_envelope(value: object, *, task_id: str) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    fields = {key: value.get(key) for key in ("observation_id", "candidate_id", "tool")}
+    if any(not isinstance(item, str) or not item for item in fields.values()):
+        return None
+    return {**fields, "task_id": task_id}
+
+
 # LLM: 只读归档信封里宿主写过的 observation，形状不对返回 None；供 tool_completed 事件写载荷时复用同一投影。
 # 函数用途: 从归档 tool_result_envelope.observation 还原事件载荷投影。
 def observation_event_payload_from_envelope(envelope: object, *, task_id: str, operation_id: str) -> dict[str, Any] | None:
@@ -432,7 +464,7 @@ __all__ = [
     "MAX_ACTION_COUNT", "MAX_CANDIDATE_COUNT", "MAX_LABEL_CHARS", "OBSERVATION_CANDIDATE_UNKNOWN", "OBSERVATION_ERROR_KEY",
     "OBSERVATION_KEY", "OBSERVATION_META_EXTENSION", "OBSERVATION_META_VERSION", "OBSERVATION_SCHEMA", "OBSERVATION_STALE",
     "ObservationCandidate", "ObservationDeclarationError", "ObservationHostContext", "ObservationRecord", "ObservationRejected",
-    "PluginToolObservation", "PluginToolObservationRef", "current_observation", "observation_event_payload_from_envelope",
-    "observation_is_current", "observation_meta", "parse_observation", "resolve_action_candidate",
-    "validate_observation_declaration",
+    "PluginToolObservation", "PluginToolObservationRef", "current_observation", "observation_action_payload_from_envelope",
+    "observation_actions", "observation_event_payload_from_envelope", "observation_is_current", "observation_meta",
+    "parse_observation", "resolve_action_candidate", "validate_observation_declaration",
 ]

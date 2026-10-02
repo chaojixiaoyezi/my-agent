@@ -213,6 +213,9 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     output_record["operation_id"] = record.call.operation_id
     output_record["idempotency_key"] = record.call.idempotency_key
     output_record["execution_states"] = list(record.execution_states)
+    # 发起者是宿主结构化事实（model / decision），决策发起的调用另带决策结果编号；工具账与决策账靠它互查
+    output_record["actor"] = str(record.actor or "model")
+    output_record["decision_ref"] = str(record.decision_ref or "")
     _attach_run_scope(output_record, agent, record)
     _attach_gate_and_refs(output_record, record.result)
     _attach_model_summary(output_record, record.result)
@@ -656,6 +659,8 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         # 插件观察候选：plugin_observation.parse_observation 已按形状与数量夹过界，归档是它的唯一权威位置
         "observation",
         "observation_rejected",
+        # 动作工具按候选发送后的事实（观察/候选编号、工具名）：自动执行幂等与“模型已动作”判定只读它
+        "observation_action",
         # 能力包宿主核验的有界摘要：pack_verification_service 已按条数和码数夹过界，恢复/续跑重渲染回执时要读它
         "pack_verification",
     )

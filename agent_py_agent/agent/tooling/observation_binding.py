@@ -1,5 +1,5 @@
-# LLM: 观察三件套的唯一来源无关实现：动作工具发送前按候选 ID 复核并回填 _meta、观察工具成功结果铸 ID 并改写模型投影、提供方按
-#   代次拒绝时提升成宿主错误码。PluginProxyTool（声明来自 manifest，activation 来自插件激活）与 MCPProxyTool（声明来自
+# LLM: 观察三件套的唯一来源无关实现：动作工具发送前按候选 ID 复核并回填 _meta、发送后在信封记 observation_action 事实（不论结果，
+#   自动执行幂等靠它）、观察工具成功结果铸 ID 并改写模型投影、提供方按代次拒绝时提升成宿主错误码。PluginProxyTool（声明来自 manifest，activation 来自插件激活）与 MCPProxyTool（声明来自
 #   mcp_servers 逐工具表，activation 来自本次固定连接代次）共用；binding 为 None 的代理行为不变。身份只取宿主参数
 #   （__run_scope / __operation_id）与绑定时的结构化事实，不取提供方自报。改动须同步 plugin_runtime、mcp_registration 与
 #   test_plugin_proxy_observation / test_mcp_observation_binding。
@@ -55,8 +55,9 @@ class ObservationBinding:
         if (self.observation is None) == (self.observation_ref is None):
             raise ValueError("观察绑定必须恰好声明观察或观察引用之一")
 
-    # LLM: 动作工具填了候选 ID 先复核新鲜度再发送（不通过记 not_started、不发送）；观察工具成功后校验并铸 ID；提供方按代次拒绝时
-    #   提升为结构化码。send 是代理自己的发送主体，这里不缓存任何逐次状态到实例上。
+    # LLM: 动作工具填了候选 ID 先复核新鲜度再发送（不通过记 not_started、不发送）；发送过就在信封记 observation_action（成功、失败、
+    #   被提供方拒绝都记，表示这个观察已被动作碰过）；观察工具成功后校验并铸 ID；提供方按代次拒绝时提升为结构化码。
+    #   send 是代理自己的发送主体，这里不缓存任何逐次状态到实例上。
     # 函数用途: 带观察合同地执行一次调用。
     def execute(self, params: dict[str, Any], context: ToolInvocationContext | None, send: ObservationSend) -> ToolHandlerOutcome:
         extra_meta = None
@@ -68,9 +69,21 @@ class ObservationBinding:
         outcome = send(params, context, extra_meta)
         if self.observation is not None and outcome.ok:
             outcome = self.attach(outcome, params, context)
-        if extra_meta is not None and not outcome.ok:
-            outcome = self.lift_error(outcome)
+        if extra_meta is not None:
+            outcome = self._with_action_fact(outcome, params, extra_meta)
+            if not outcome.ok:
+                outcome = self.lift_error(outcome)
         return outcome
+
+    # LLM: 事实只取宿主复核过的 _meta 里的观察编号与模型填的候选编号（已过复核），工具名是本绑定的注册名；写进 result_envelope，
+    #   由归档与 tool_completed 事件沿同一投影落库。不改输出正文。
+    # 函数用途: 给发送过的动作调用记下“碰过哪个观察的哪个候选”。
+    def _with_action_fact(self, outcome: ToolHandlerOutcome, params: dict[str, Any], extra_meta: dict[str, object]) -> ToolHandlerOutcome:
+        meta = extra_meta.get(OBSERVATION_META_EXTENSION)
+        observation_id = str(meta.get("observation_id") or "") if isinstance(meta, dict) else ""
+        fact = {"observation_id": observation_id, "candidate_id": str(params.get(self.observation_ref.param) or "").strip(),
+                "tool": self.tool_name}
+        return replace(outcome, result_envelope={**outcome.result_envelope, "observation_action": fact})
 
     # LLM: 只在模型填了 observation_ref.param 时复核：候选按当前 run/task 的权威事件流解析，过期/未知抛 ObservationRejected；
     #   候选所属观察的 activation_id 必须等于本绑定的（提供方换代——插件重新激活或 MCP 子进程重启——后旧观察一律 stale，

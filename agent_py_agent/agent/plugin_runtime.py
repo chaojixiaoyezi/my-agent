@@ -85,15 +85,16 @@ class PluginProxyTool(MCPProxyTool):
                 error_code="TOOL_UNAVAILABLE", reported_error_code="PLUGIN_ACTIVATION_UNAVAILABLE",
                 effect_outcome="not_started",
             )
-        binding = self._observation_binding()
-        if binding is None:
+        if self.observation_binding is None:
             return self._execute_with_meta(params, context, None)
-        return binding.execute(params, context, self._execute_with_meta)
+        return self.observation_binding.execute(params, context, self._execute_with_meta)
 
-    # LLM: 身份全部取宿主：provider_id 是 plugin:<id>，activation 来自固定 client 的激活代次，复核库是 client.runtime_repo（owner
-    #   权威库）；actions 映射只含本包同 target_kind 的 observation_ref 工具。没有观察声明（含测试夹具的普通客户端）返回 None。
-    # 函数用途: 按已安装描述与固定激活构造本工具的观察绑定。
-    def _observation_binding(self) -> ObservationBinding | None:
+    # LLM: MCPProxyTool 的构造钩子：公开属性 observation_binding 在构造时按安装描述设好（与普通 MCP 代理同名同义，决策点的自动执行
+    #   规划只读这个属性）。身份全部取宿主：provider_id 是 plugin:<id>，activation 来自固定 client 的激活代次，复核库是
+    #   client.runtime_repo（owner 权威库）；actions 映射只含本包同 target_kind 的 observation_ref 工具。没有观察声明（含测试夹具的
+    #   普通客户端）返回 None。client 的安装描述与激活代次在构造时已固定，不在执行时重算。
+    # 函数用途: 按已安装描述与固定激活构造本工具的观察绑定（只在构造时调用一次）。
+    def _initial_observation_binding(self) -> ObservationBinding | None:
         declared = self._declared_tool()
         if declared is None or (declared.observation is None and declared.observation_ref is None):
             return None

@@ -484,6 +484,14 @@
       "description": "决策点提示文字的最大字符数，控制上下文占用。"
     },
     {
+      "name": "_DIGEST_PREFIX_CHARS",
+      "file": "agent_py_agent/agent/agent_core/tool_context/decision_action_execute.py",
+      "value": 16,
+      "unit": "字符",
+      "category": "其它",
+      "description": "decision_ref 里取响应输入摘要的前缀长度，够区分同一操作下的不同响应"
+    },
+    {
       "name": "_MAX_HINT_CHARS",
       "file": "agent_py_agent/agent/agent_core/tool_context/decision_delivery_quality.py",
       "value": 512,

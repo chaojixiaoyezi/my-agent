@@ -103,6 +103,15 @@ subagent_input_media_enabled: false
 # - false: 推荐默认值；宿主执行包里的代码属于安全边界，先由用户显式开启（启用包时仍要单独确认检查程序）。
 # 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后重启 Gateway 生效。
 capability_pack_host_verification_enabled: false
+
+# 屏幕/页面观察的自动执行（J16 第 7 节）：action_candidate 决策点（决策设置里模式为 apply）采用 Jev 的选择后，宿主要不要替主模型
+# 自动执行一次动作。
+# - true: 所选候选恰有一个只凭候选编号就能调用的动作工具（如 click_candidate）时，宿主以 actor=decision 调用它，走和模型调用
+#   完全一样的审批、复核、归档；需要文字的动作（输入）永远不自动执行；两个及以上可选动作不执行；同一观察只执行一次，模型已经
+#   动作过的观察不执行；复核拒绝、失败、用户拒绝都不重试、不改选候选。只对本机管理员主代理生效。
+# - false: 推荐默认值；只给提示，不替用户点任何东西。
+# 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后下一次读取生效。
+action_candidate_auto_execute_enabled: false
 # 决策能力点默认关闭；observe 也会发请求并产生用量；模式不授予执行权限。
 decision_subagent_model_mode: off
 # 子代理执行模型候选的原模型目录 ID；[] 使用全部当前授权的 agentic 模型。可按用户长期或会话设置覆盖，不按名称猜服务商。

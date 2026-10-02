@@ -67,6 +67,8 @@ class CapabilityConfig:
     subagent_input_media_enabled: bool = False
     # 能力包宿主核验：宿主自动运行钉住包里声明的原版检查程序；执行包内代码属于安全边界，默认关闭。
     capability_pack_host_verification_enabled: bool = False
+    # action_candidate 决策点采用建议后，宿主自动执行一次只凭候选编号的动作（如 click_candidate）；会替用户点击，默认关闭。
+    action_candidate_auto_execute_enabled: bool = False
     # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。
     # 默认关闭——拆分会创建新任务并改变原任务状态，需用户显式开启。
     subagent_failure_auto_split_enabled: bool = False

@@ -1,8 +1,10 @@
 # LLM: 只读当前插件观察调用原归档信封里宿主铸造的 observation；新鲜度唯一权威是插件线的 plugin_observation（按
-#   runtime_events 的 tool_completed 序），本模块不扫归档自判；形状规则也只认 plugin_observation / plugin_manifest 一处。可选决策只能选一个已有候选，不执行工具、不生成参数/选择器/坐标，
+#   runtime_events 的 tool_completed 序），本模块不扫归档自判；形状规则也只认 plugin_observation / plugin_manifest 一处。可选决策只能选一个已有候选，不生成参数/选择器/坐标，
 #   不改 ToolResult、归档、审批或观察记录。插件 key、目标引用、代次与动作工具名只进本地版本摘要，不发送给决策模型；
-#   label 属外部数据，整体按 external_data 投影后才可外发。改动须同步 test_decision_action_candidate.py。
-# 模块用途: 插件只读观察工具返回宿主校验过的候选后，可选地提示主模型下一步先核对哪个候选；关闭、失败或无法安全投影时保留原展示。
+#   label 属外部数据，整体按 external_data 投影后才可外发。几何扩展只派生归一化粗位置（decision_action_execute.coarse_position），
+#   不发绝对坐标。建议采用后是否计划一次宿主自动执行由 decision_action_execute.plan_auto_execution 按能力开关与结构化条件决定，
+#   本模块只把计划写进 params.host_actions，不执行工具。改动须同步 test_decision_action_candidate.py 与 test_decision_action_execute.py。
+# 模块用途: 插件只读观察工具返回宿主校验过的候选后，可选地提示主模型下一步先核对哪个候选（开关打开时再计划宿主自动点击）；关闭、失败或无法安全投影时保留原展示。
 from __future__ import annotations
 
 import hashlib
@@ -47,6 +49,7 @@ from ...settings.decision_settings_schema import POINT_RUNTIME_SCOPES
 from ...settings.defaults import decision_request_max_chars
 from ...tooling.output_projection import project_tool_output_body
 from ...tooling.runtime_contracts import ToolCall, ToolResult
+from .decision_action_execute import AutoExecutionSelection, coarse_position, plan_auto_execution
 
 # URL 查询串拒绝沿用外部材料首片的同一策略，不在本点另立第二份规则。
 from .external_material_order import _URL_WITH_QUERY
@@ -86,8 +89,9 @@ def action_candidate_hint(agent: object, record: object, archive_record: dict) -
 
 
 # LLM: 资格与材料都只读结构化事实；每次到达都在 decision_reach_counts 记一次结果（没调用的原因码，或真正调用前记 CALLED）。
-#   采用前在配置复核之后再比对原来源/参数版本、观察新鲜度与同一绝对期限，任一变化都不采用。
-# 函数用途: 完成一次“资格→阶段→材料→决策→复核→渲染”，调用方负责取消绑定和普通故障回退。
+#   采用前在配置复核之后再比对原来源/参数版本、观察新鲜度与同一绝对期限，任一变化都不采用。采用后才问自动执行规划：
+#   计划成功时提示改成“宿主将自动执行”，执行与否以随后 actor=decision 的宿主记录为准。
+# 函数用途: 完成一次“资格→阶段→材料→决策→复核→渲染→（可选）自动执行规划”，调用方负责取消绑定和普通故障回退。
 def _advise(agent: object, record: object, archive: dict) -> str:
     reason = _miss_reason(agent, record, archive)
     stage = None if reason else begin_decision_stage(agent, record.params, operation_id=_operation_id(record))
@@ -114,7 +118,8 @@ def _advise(agent: object, record: object, archive: dict) -> str:
     if outcome.response.binding.candidates_revision != revision:
         record_decision_dropped(agent, stage, outcome, DROP_SOURCES_CHANGED)
         return ""
-    hint = _render_hint(_selected_candidate(outcome.response, observation), _available_tools(params))
+    candidate = _selected_candidate(outcome.response, observation)
+    hint = _render_hint(candidate, _available_tools(params))
     if not hint:
         return ""
     if not decision_outcome_is_current(agent, params, stage, outcome):
@@ -127,7 +132,8 @@ def _advise(agent: object, record: object, archive: dict) -> str:
     if time.monotonic() >= min(stage.deadline, outcome.deadline):
         record_decision_dropped(agent, stage, outcome, DROP_ADOPTION_DEADLINE)
         return ""
-    return hint
+    action = plan_auto_execution(agent, record, AutoExecutionSelection(_POINT, stage, outcome, observation, candidate))
+    return hint if action is None else _auto_hint(candidate, action.call.tool_name)
 
 
 # LLM: 触发只看结构化事实：当前调用与归档配对、主代理、无收口标记、观察形状合规且候选数不少于 decision_point_limits 的下限、观察仍为当前、
@@ -184,7 +190,7 @@ def _run_state_miss_reason(agent: object, params: object) -> str:
 
 
 # LLM: 形状按设计稿第 6 节的归档字段逐项校验（schema 版本、宿主铸的观察/候选编号、manifest 规则的目标类型、本地目标事实与 1—64 个候选）；
-# 任一缺项或候选编号重复就整份放弃，不部分采纳、不补默认值。
+# 任一缺项或候选编号重复就整份放弃，不部分采纳、不补默认值。可选几何 frame 原样复制（只用来算粗位置，不校验，算不出就没有位置）。
 # 函数用途: 校验并复制当前归档里的观察记录，供资格判断、材料与渲染共用。
 def _observation(archive: dict) -> dict:
     value = archive["tool_result_envelope"]["observation"]
@@ -198,12 +204,14 @@ def _observation(archive: dict) -> dict:
     rows = [_candidate(item) for item in candidates]
     if len({row["candidate_id"] for row in rows}) != len(rows):
         raise DecisionInputError("同一观察内候选编号重复。")
+    frame = value.get("frame")
     return {"observation_id": value["observation_id"], "target_kind": value["target_kind"],
-            **{key: value[key] for key in _LOCAL_KEYS}, "candidates": rows}
+            **{key: value[key] for key in _LOCAL_KEYS}, "candidates": rows,
+            **({"frame": frame} if type(frame) is dict else {})}
 
 
 # LLM: 候选须有宿主铸的 candidate_id、宿主 key/role 规则的 role、≤120 字 label、非空插件 key 与 1—8 个动作工具名（宿主注册名）；
-# key 只进本地版本摘要，动作名只用于核对本轮可用性。
+# key 只进本地版本摘要，动作名只用于核对本轮可用性与自动执行规划；可选 region（4 元列表）原样复制，只用来算粗位置。
 # 函数用途: 校验并复制一条候选。
 def _candidate(value: object) -> dict:
     actions = value.get("actions") if type(value) is dict else None
@@ -215,8 +223,10 @@ def _candidate(value: object) -> dict:
             or type(actions) is not list or not 0 < len(actions) <= MAX_ACTION_COUNT
             or any(type(name) is not str or not name for name in actions)):
         raise DecisionInputError("观察候选缺少宿主结构化事实。")
+    region = value.get("region")
     return {"candidate_id": value["candidate_id"], "key": value["key"], "role": value["role"],
-            "label": value["label"], "actions": list(actions)}
+            "label": value["label"], "actions": list(actions),
+            **({"region": list(region)} if isinstance(region, (list, tuple)) and len(region) == 4 else {})}
 
 
 # LLM: 新鲜度只问插件线的唯一权威 plugin_observation.observation_is_current（owner 权威库 agent.subagents.runtime_db，
@@ -254,12 +264,14 @@ def _has_request(params: object) -> bool:
     return type(value) is str and bool(value)
 
 
-# LLM: 外发只有脱敏当前请求、目标类型和候选别名/role/label（label 在同一个 external_data 块里）；候选编号、插件 key、
-#   目标引用、代次与动作名只进本地版本摘要。题目唯一，候选之外只有保留原结果的非选择项。
+# LLM: 外发只有脱敏当前请求、目标类型和候选别名/role/label/粗位置（label 在同一个 external_data 块里；粗位置是宿主按几何扩展
+#   派生的 0–1 归一值，有 region 和 frame 才有，不发绝对坐标）；候选编号、插件 key、目标引用、代次与动作名只进本地版本摘要。
+#   题目唯一，候选之外只有保留原结果的非选择项。
 #   当前请求可能是首尾节选，current_request_completeness 如实标注并进入版本摘要。
 # 函数用途: 冻结一次操作建议材料和单选题，并给等待后的来源复核生成版本值。
 def _material(record: object, archive: dict, observation: dict, limit: int) -> tuple[dict, dict, str]:
-    rows = [{"candidate": f"c{order}", "role": candidate["role"], "label": candidate["label"]}
+    rows = [{"candidate": f"c{order}", "role": candidate["role"], "label": candidate["label"],
+             **_position_item(observation.get("frame"), candidate.get("region"))}
             for order, candidate in enumerate(observation["candidates"], 1)]
     request, completeness = _request_excerpt(record.params, limit)
     state = {"current_request": _safe_external({"current_request": request}),
@@ -303,6 +315,12 @@ def _selected_candidate(response: object, observation: dict) -> dict | None:
     return {f"c{order}": candidate for order, candidate in enumerate(observation["candidates"], 1)}.get(answer.value)
 
 
+# 函数用途: 候选有归一化粗位置时给材料行加 position 项，没有就什么都不加。
+def _position_item(frame: object, region: object) -> dict[str, dict[str, float]]:
+    position = coarse_position(frame, region)
+    return {"position": position} if position is not None else {}
+
+
 # LLM: 提示只渲染宿主铸的 candidate_id 与短标识 role，不复制 label 或模型文案；所选候选没有本轮可用的动作工具时不追加。
 # 函数用途: 为当前工具回执生成一段可忽略的操作建议，超过展示预算则完全不追加。
 def _render_hint(candidate: dict | None, available: frozenset[str]) -> str:
@@ -310,6 +328,15 @@ def _render_hint(candidate: dict | None, available: frozenset[str]) -> str:
         return ""
     hint = (f"{_HINT_TAG}\n可选操作建议：下一步可先核对候选 {candidate['candidate_id']}（{candidate['role']}）；"
             "是否操作、如何操作仍由你按原工具与审批决定。")
+    return hint if len(hint) <= _MAX_HINT_CHARS else ""
+
+
+# LLM: 自动执行已计划时的提示：写明宿主将以 actor=decision 调用哪个工具，但执行与否、结果如何只以随后的 [host-action-record]
+#   记录为准（没有那条记录就是没执行），不在这里预报成功。
+# 函数用途: 渲染“宿主将自动执行”的提示，超过展示预算则完全不追加。
+def _auto_hint(candidate: dict, tool_name: str) -> str:
+    hint = (f"{_HINT_TAG}\n宿主将按建议以 actor=decision 自动执行候选 {candidate['candidate_id']}（{candidate['role']}）："
+            f"{tool_name}；是否执行、结果如何以随后的 [host-action-record] 记录为准，没有该记录即未执行。")
     return hint if len(hint) <= _MAX_HINT_CHARS else ""
 
 

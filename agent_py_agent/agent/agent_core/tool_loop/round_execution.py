@@ -25,6 +25,7 @@ from ...contracts.model_call_ledger import (
 from ...contracts.required_actions import required_action_assessment_failed
 from ...contracts.tool_approval import (
     ToolApprovalDecision,
+    ToolApprovalRequest,
     build_tool_approval_request,
     operation_grant_key,
 )
@@ -47,6 +48,7 @@ from ..tool_context.call_reducer import (
     AssistantToolRoundContextRequest,
     render_assistant_tool_round_context,
 )
+from ..tool_context.decision_action_execute import HostAction, record_auto_execution
 from .segment_planning import (
     parallel_segment_end,
     parse_optional_batch_limit,
@@ -95,6 +97,10 @@ class ToolCallRecordParams:
     result: ToolResult
     execution_states: tuple[str, ...] = ()
     model_call: ToolCall | None = None
+    # 谁发起了这次调用："model"（模型 tool_use）或 "decision"（action_candidate 自动执行）。决策发起的记录带 decision_ref，
+    # 归档/工具账照记，但不进原生 IR 配对（没有对应的 assistant tool_use），在模型上下文里以 [host-action-record] 块出现。
+    actor: str = "model"
+    decision_ref: str = ""
 
     @property
     def payload(self) -> dict[str, object]:
@@ -141,6 +147,10 @@ class ToolRoundExecutionRequest:
     execute_one: Callable[[ToolCallExecuteParams], ToolExecution]
     record_one: Callable[[ToolCallRecordParams], None]
     current_prompt: str = ""
+    # 本请求下执行的调用由谁发起（见 ToolCallRecordParams.actor）；宿主自动执行用 replace 派生一份 actor=decision 的请求，
+    # 审批 binding/说明与记录都从这里读，不另开参数。
+    actor: str = "model"
+    decision_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -498,6 +508,7 @@ def _resolve_tool_approval(
         description=_approval_description(request, idx, execution.call),
         grant_key=_owner_grant_key(request, execution.call),
     )
+    approval_request = _with_request_actor(approval_request, request)
     prior_rejection = _matching_runtime_rejection(request.params, approval_request.binding)
     if prior_rejection is not None:
         prior_decision = str(prior_rejection.get("decision") or "denied")
@@ -897,11 +908,62 @@ def _record_execution(
             result,
             execution.states,
             model_call=_model_visible_call(request, idx, call),
+            actor=request.actor,
+            decision_ref=request.decision_ref,
         )
     )
+    _run_host_actions(request, idx)
     # 会话运行时 式循环中，写任何文件（包括历史 output.json）都只是工具结果；
     # 不能跳过下一次模型采样或由宿主据产物内容强制收口。
     return False, _runtime_transition_after_tool(result)
+
+
+# LLM: 只在模型发起的记录之后取走决策点刚计划的宿主动作（params.host_actions，决策点在 record_one 里追加）；actor=decision 的
+#   请求不再取（防递归）。每条动作执行一次、不重试、不改选候选；列表取空为止。
+# 函数用途: 把 action_candidate 自动执行计划逐条交给宿主动作执行。
+def _run_host_actions(request: ToolRoundExecutionRequest, idx: int) -> None:
+    actions = getattr(request.params, "host_actions", None)
+    if request.actor != "model" or not isinstance(actions, list):
+        return
+    while actions:
+        action = actions.pop(0)
+        if isinstance(action, HostAction):
+            _execute_host_action(request, idx, action)
+
+
+# LLM: 宿主动作走模型调用同一条链：同一 execute_one（ActionPolicy、绑定新鲜度、适配器复核）、同一审批（binding 带 actor=decision
+#   与 decision_ref，用户拒绝只记录不重试）、同一 _record_execution（归档/工具账 actor=decision）；索引取 len(calls)+观察调用
+#   索引，不与本轮模型调用撞号。执行前已中断/取消就不执行，只记决策账 interrupted；执行后把结果写进决策账补充行。
+# 函数用途: 执行并记录一条 action_candidate 自动执行计划。
+def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: HostAction) -> None:
+    if _round_cancelled(request):
+        record_auto_execution(request.agent, action, None)
+        return
+    host_request = replace(request, actor=action.actor, decision_ref=action.decision_ref)
+    host_idx = len(request.calls) + idx
+    call = action.call
+    started_at = time.monotonic()
+    _emit_tool_progress(ToolProgressEvent(host_request, host_idx, call, "started", "开始"))
+    execution = host_request.execute_one(
+        ToolCallExecuteParams(host_request.params, host_request.tool_rounds, host_idx, call)
+    )
+    execution = _resolve_tool_approval(host_request, host_idx, call, execution)
+    _record_execution(host_request, host_idx, started_at, execution)
+    record_auto_execution(request.agent, action, execution.result)
+
+
+# LLM: 模型发起的审批请求原样不动；决策发起的在 binding 里加 actor/decision_ref（结构化，消费方据此展示“决策自动执行”），
+#   说明前加固定标记。permission_id 已按 call 身份铸好，不因附加键改变；批准记录沿 binding 带上这两个键，审批门只比对
+#   tool/run/operation/idempotency/args_hash，不受影响。
+# 函数用途: 给宿主自动执行的审批请求标上发起者。
+def _with_request_actor(approval_request: ToolApprovalRequest, request: ToolRoundExecutionRequest) -> ToolApprovalRequest:
+    if request.actor == "model":
+        return approval_request
+    return replace(
+        approval_request,
+        binding={**approval_request.binding, "actor": request.actor, "decision_ref": request.decision_ref},
+        description=f"[决策自动执行 actor={request.actor}] {approval_request.description}",
+    )
 
 
 def _remember_runtime_transition(

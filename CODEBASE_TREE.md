@@ -362,7 +362,8 @@ agent_py_agent/
 |   |   |-- tool_loop/deferred_schema_reload.py # 收起工具被盲调且参数校验失败时，下一次请求带上它的完整定义（默认收起开关打开时）
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |   |-- decision_delivery_quality.py # 新验证或成功写入后多个 stale 焦点的可选提示，共用逐记录一次，只追加宿主事实
-|   |   |   |-- decision_action_candidate.py # 插件观察归档后的可选动作候选提示，只选宿主铸的候选、不执行动作
+|   |   |   |-- decision_action_candidate.py # 插件观察归档后的可选动作候选提示，只选宿主铸的候选；材料带几何派生的粗位置，采用后可计划宿主自动执行
+|   |   |   |-- decision_action_execute.py # action_candidate 自动执行规划与记账：能力开关、属主、唯一可执行动作、幂等事实，计划进 params.host_actions
 |   |   |   `-- external_material_order.py # 原已归档页的可选阅读顺序提示，保留正式结果与 refs
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
 |   |   |   |-- decision_subagent.py # 原批次创建前模型建议，锁外请求、锁内复核，不另建任务账
@@ -924,6 +925,7 @@ agent_py_agent/
 |   |-- test_plugin_catalog_digest_stability.py # 激活目录摘要跨声明版本稳定：可选字段为空不改变旧安装的 catalog_sha256
 |   |-- test_background_listen_scope.py        # 后台服务默认只监听回环：授权键、approved_owner 面板与 owner 授权存储、host 按 socket 表回收越界服务
 |   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
+|   |-- test_decision_action_execute.py # J16 片 D：粗位置、假 Jev 四档、自动执行各生效条件、两本账 actor/decision_ref、审批/失败/中断只记不重试
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
 |   |-- test_decision_capability_provider_grouping.py # 能力推荐按结构化provider_id按插件出题、选中展开与整体延迟
 |   |-- test_jev_candidate_projection.py # 发给 Jev 的能力候选白名单投影、按转义字节截断与计数、53 题最坏情况落进经验上界
@@ -1950,8 +1952,10 @@ docs/
 - `agent_py_agent/tests/test_decision_external_material_order.py`、`test_external_material_order_integration.py`：安全输入、失效、取消、原页面归档链和设置消费的离线证据。
 - `agent_py_agent/agent/agent_core/tool_context/decision_delivery_quality.py`：新验证或成功写入让已有焦点 stale 后，可选追加复核提示；写入只选多个 stale，两种触发共用本轮逐记录一次；外发不含路径/命令/输出，不改结果、归档、验证账或收口。
 - `agent_py_agent/tests/test_decision_delivery_quality.py`、`test_decision_delivery_quality_integration.py`、`test_decision_delivery_stale.py`：资格、隐私、非选择、来源复核、取消、写后触发及去重，以及原验证账到 text/native 展示与假 Jev worker 的离线证据，不代表真实模型采用。
-- `agent_py_agent/agent/agent_core/tool_context/decision_action_candidate.py`：插件只读观察工具的归档带宿主铸造的观察候选时，可选请决策模型选一个下一步先核对的候选并追加软提示；新鲜度只问插件线的 `plugin_observation` 权威，不执行动作、不生成参数。
+- `agent_py_agent/agent/agent_core/tool_context/decision_action_candidate.py`：插件只读观察工具的归档带宿主铸造的观察候选时，可选请决策模型选一个下一步先核对的候选并追加软提示；新鲜度只问插件线的 `plugin_observation` 权威，不生成参数；材料里带几何派生的归一化粗位置；建议采用后交 `decision_action_execute` 决定要不要计划一次宿主自动执行，本模块不执行工具。
+- `agent_py_agent/agent/agent_core/tool_context/decision_action_execute.py`：J16 第 7 节的自动执行规划与记账：能力开关 `action_candidate_auto_execute_enabled`、本机管理员主代理、所选候选恰有一个只凭候选编号的动作、同一观察没被碰过（runtime_events 的 `observation_action`）时把 `actor=decision` 的宿主 ToolCall 计划进 `params.host_actions`；执行由 `tool_loop/round_execution` 走模型调用同一条链；决策账补充行与工具账共用 `decision_ref`。
 - `agent_py_agent/tests/test_decision_action_candidate.py`：资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段提示和设置入口；两项集成用例经真实写入口 `persist_tool_runtime_ledger`（无 `runtime_gate` 的归档）接插件线真实新鲜度权威。
+- `agent_py_agent/tests/test_decision_action_execute.py`：片 D 的假 Jev 四档、粗位置、自动执行各生效条件、两本账 `actor`/`decision_ref`、审批/失败/中断只记不重试、不进原生 IR；归档与权威事件走真实写入口。
 - `agent_py_agent/agent/capability/decision_candidates.py`、`decision_recommendation.py`：原授权能力候选与单工作片推荐消费者；一次调用、旧建议复核、按需展示，原Registry/Skill快照及搜索执行仍唯一。
 - `docs/tasks/DECISION_MODEL_P2_SUBAGENT_HANDOFF.md`：子代理选择生产接线、联合验证和完整窗口待验边界。
 - `docs/tasks/DECISION_MODEL_P3_RECALL_HANDOFF.md`：记忆排序、来源撤销、原本轮复用及本地验证交接。

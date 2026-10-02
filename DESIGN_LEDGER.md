@@ -922,12 +922,17 @@
 - **不受影响**：TUI、CLI 等本机私有通道仍原样保留完整路径，也不附说明。
 - **验证**：见 TESTS.md 同名节。
 
-## J16：屏幕识别——结构化观察 + 动作候选（2026-10-02，已确认设计；片 A 已集成，片 B 复审通过待集成，片 C 已实施待复审，片 E 已实施待复审）
+## J16：屏幕识别——结构化观察 + 动作候选（2026-10-02，已确认设计；片 A/B/C 已集成 step17g，片 D/E 已集成 step17h，片 G 由 75 做）
 
 - **来由**：用户第 13 条要做、要“功能做全”，先像观察模式那样只给建议、不自动点；并把原来“只组合上游公开 MCP 工具”的边界放宽为“别等上游”。3a 审定的设计见 [J16_SCREEN_OBSERVATION](docs/design/J16_SCREEN_OBSERVATION.md)（分支 `claude/ae-j16-screen-observation`，ae 起草）。
 - **设计要点**：
   - **新工具**：在自家 Computer Use 适配器里新增 `observe_window`（read_only，审批策略 always），直接用操作系统和库的公开接口（X11/EWMH、Quartz、ScreenCaptureKit、mss、RapidOCR），给出稳定窗口身份、代次、坐标原点和缩放、遮挡、成功状态。还有 `click_candidate`；`type_into_candidate` 随片 G 注册。
   - **三件套共用**：插件线观察三件套抽成 `ObservationBinding`，插件和 MCP 共用，几何是通用扩展，只进归档。
+  - **片 D 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` 72ddc2b5c，ae 定规则）**：决策材料多一项归一化粗位置
+    （有 region 和 frame 才有，先夹后舍入）；能力开关 `action_candidate_auto_execute_enabled`（默认关，管理员边界）打开且建议已采用时，宿主按结构化条件
+    （本机管理员主代理、所选候选恰有一个只凭候选编号的动作、同一观察没被碰过）计划一次 `actor=decision` 的宿主调用，走模型调用同一条执行/审批/记录链；
+    归档、`tool_completed` 事件与决策账补充行都带 `actor` 与 `decision_ref`，动作调用的 `observation_action` 事实是幂等依据；失败/拒绝/取消只记账不重试不改选；
+    宿主记录不进原生 IR 配对，以 `[host-action-record]` 块进模型上下文。细节见设计稿第 7 节“片 D 实施定稿”。
   - **片 C 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-c`，叠在片 B 上）**：车道 Xvfb 集成用例（关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计 0.15–0.20 只记录不调）；观察处理器放工作线程加锁，宿主马上拿到 CANCELLED、后续观察排在被丢弃的 OCR 之后，不被堵的是事件循环；已取消的调用拿到锁不执行、点击前再查一次取消标记；派生镜像定义与运行脚本待 3a 落位；变异 12/12。
   - **片 B 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-b`，基于 `claude/3a-step17f` f6b63ab35，ae 定复核细节）**：主配置 `computer_use_observation_enabled`（默认关，管理员边界）；Linux X11 后端 + `observe_window`（read_only、always）/ `click_candidate`（dangerous）；适配器层五项复核按代次找快照不要求最新、通过后立刻点击；快照每窗 4 代、区域摘要 16×8/16 级/≤4 格、遮挡按叠放+override-redirect+边框；适配器改成底层 Server 单一运行路径以满足 isError+structuredContent 合同。细节见设计稿 3.2 节第 4 条。
   - **片 E 已实施（2026-10-02，75，分支 `claude/75-j16-slice-e`，基于 `claude/3a-step17g` `c22e58290`，ae 定设计）**：macOS 后端 `computer_use_macos.MacBackend`（Quartz 列窗、`OnScreenAboveWindow` 取遮挡、ScreenCaptureKit 单窗口截图，拿不到退回 mss 区域截图并带 `capture_fallback{reason}`；窗口不在可分享内容里、用户拒绝授权都不回退）；后端选择 `computer_use_backends.select_backend()`；OCR 共用 `screen_ocr.RapidOcrReader`。核心改两处：所有后端的截图统一返回 `ScreenCapture(buffer, kind, fallback_reason)`（X11 改报 `screen_region`，删掉写死的 `CAPTURE_KIND`），`frame.scale` 取截图自己的像素/点比、复核时 scale 变了判 `stale`；后端主动抛的结构化码原样透传，新增 `screen_recording_not_permitted`（码集合开放，宿主只提升 stale / not_found）。测试防线放测试侧：conftest 会话级把真实框架入口换成直接失败，扫描守卫要求“开观察 + 拉子进程”的测试带车道标记。ae 复审 4 条应修已改：X11 的真实桌面库也只经 `load_real_x11_libraries()` 一个入口、测试里同样拦住（车道容器放行）；扫描守卫递归扫 tests/ 下所有 `.py`；非整数比时 scale 往上挪到“点数 × scale ≥ 像素数”，贴边候选不再被宿主整份拒绝；点击前（复核之前）先查辅助功能权限，没有就 `accessibility_not_permitted`，不给自动执行留假的成功事实。细节见设计稿 3.2 第 5 条。

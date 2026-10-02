@@ -162,7 +162,8 @@
 - **发给 Jev**：
   - 本轮请求的有界摘要；
   - 候选别名 `c1…cN`、role、截断后的 label、actions；
-  - 加一项通用粗位置：外框中心按窗口尺寸归一到 0–1，保留一位小数，取自几何扩展。
+  - 加一项通用粗位置：外框中心按窗口尺寸归一到 0–1，保留一位小数，取自几何扩展。（片 D 已实施：候选有 `region` 且观察有合法
+    `frame.size`/`frame.scale` 时材料行多一项 `position{x, y}`，先夹到 [0, 1] 再保留一位小数；算不出就没有这一项，不补默认值。）
   - 不发绝对坐标、窗口号、标题或路径。
 - **Jev 只做选择题**：选一个别名，或 `not_needed / no_match / abstain / need_data`。不生成文字、坐标或参数。“点哪”由 Jev 选，“输入什么”只由主模型填。
 - **各模式**：
@@ -205,6 +206,34 @@
   - 主模型同一轮已经对这个观察发了动作：以主模型为准；
   - 子代理回合：首期不开放。
 
+**片 D 实施定稿（2026-10-02，ef，ae 定规则）**：
+
+- **开关**：`capability_config.yaml` 的 `action_candidate_auto_execute_enabled`（dataclass `CapabilityConfig` 同名字段，默认 false；在
+  `USER_SETTINGS_BOUNDARY_KEYS` 里，模型不可写，管理员 `/settings` 可翻；参数中心 source=capability、writable=false）。运行时经
+  `capability_config_for_agent` 读，只认 `True`；替身对象上的“真值”不是配置。
+- **规划点**：`tool_context/decision_action_execute.plan_auto_execution`，在 `action_candidate` 的建议**采用之后**（来源复核、新鲜度与期限都过了）才问：
+  1. 开关关 → 什么都不做、不记账；
+  2. 属主：本轮工具快照 `owner_type == main_agent` **且** home 身份是字段齐全的本机 local/main（`is_complete_local_admin_owner`），否则记 `owner_scope`；
+  3. 可自动执行的动作 = 所选候选 `actions` 里、本轮快照有、处理器公开属性 `observation_binding` 带 `observation_ref`、且 schema `required ⊆ {observation_ref.param}`
+     的工具。恰好一个才执行；0 个记 `no_auto_action`（要文字的输入动作永远不自动执行），≥2 个记 `ambiguous_action`，不按工具名排优先级；
+  4. 幂等：读 owner 权威库 runtime_events 里当前 run/task 的 `observation_action` 事实（动作工具按候选发送过就有，不论成功、失败或被提供方拒绝；
+     宿主执行与模型自己的动作共用这条事实），同一观察已被碰过记 `already_acted`。
+  通过后把一次宿主 `ToolCall` 计划进 `params.host_actions`：`call_id = host-action-<observation_id>`、`operation_id = action_candidate:auto:<observation_id>`
+  （幂等键由它派生）、参数只有 `{observation_ref.param: candidate_id}`，run/turn/attempt/协议沿原观察调用。
+- **执行点**：`tool_loop/round_execution._run_host_actions` 在观察调用记录完（`record_one`）之后立刻取走计划，`_execute_host_action` 走模型调用同一条链：同一
+  `execute_one`（ActionPolicy、绑定新鲜度复核、适配器五项复核）、同一 `_resolve_tool_approval`（审批 binding 多 `actor=decision` 与 `decision_ref`，说明前缀
+  `[决策自动执行 actor=decision]`；用户拒绝只记录不重试）、同一 `_record_execution`。索引取 `len(本轮模型调用) + 观察调用索引`，不与模型调用撞号。执行前已
+  中断/取消就不执行，决策账记 `interrupted`。`actor=decision` 的请求不再取计划（防递归）。
+- **两本账**：归档多 `actor`（`model` / `decision`）与 `decision_ref`（`<决策阶段操作编号>#<响应输入摘要前 16 位>`）；`tool_completed` 事件载荷同样带
+  `actor`、`decision_ref`，动作调用另带 `observation_action{observation_id, candidate_id, tool, task_id}`；决策账追加 `record_kind=auto_execution` 补充行
+  （`result_category = auto_execution:executed | auto_execution:skipped:<原因码>`，`auto_execution{operation_id, tool, ok, error_code, reported_error_code,
+  effect_outcome, handler_executed, status}` 或 `{reason}`），与工具账共用 `decision_ref`。
+- **模型看到什么**：观察记录后的提示改成“宿主将按建议以 actor=decision 自动执行候选 X：工具；是否执行、结果如何以随后的 `[host-action-record]` 记录为准，没有该记录即未执行”；
+  宿主调用的记录以 `[host-action-record round=R index=K actor=decision]` / `[host-action-output-record …]` 块进 tool_context（text 下同链展示；native 下它不是 IR 承载条目，
+  经 runtime.guidance 转发，不伪造 assistant tool_use，也不进原生 IR 配对）。
+- **一次只做一次**：复核拒绝（stale / not_found）、执行失败、用户拒绝、取消都只记账，不重试、不改选候选；同一观察第二次进决策点会被幂等事实挡下（`already_acted`）。
+- **没做**：真实模型验收（M3 + 真 Jev，片 F）；`observe_window` 之外的来源（插件/MCP）只要声明了 `observation_ref` 且只需候选编号，规则一样适用，但没有真实验收。
+
 ## 8. 开关、测试与验收
 
 **开关**（新增的都默认关）：
@@ -226,10 +255,11 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
    - `_meta` 不可伪造；label 注入不进参数；
    - 自动执行的各项生效条件；
    - **属主范围**：非 local/main 的 owner（local/user、飞书用户）工具目录里没有这些工具，按名字直接调也被拒。
-2. **假模型 + 假 Jev**：
+2. **假模型 + 假 Jev**（片 D 已实施：`test_decision_action_execute.py`）：
    - off、observe、apply、apply+自动执行四档；
    - 候选少于 2 个时零决策请求；
-   - 自动执行幂等；主模型已动作时宿主不执行。
+   - 自动执行幂等；主模型已动作时宿主不执行；
+   - 两个可执行动作不执行；ask 审批带 actor=decision、拒绝只记一次；中断不执行；动作工具没有只凭候选编号的绑定不执行；两本账都带 actor 与决策结果编号。
 3. **Xvfb 集成**（真适配器、真 python-xlib/mss/RapidOCR、真点击）：
    - 观察 → 点击 → 再观察，确认状态行变了；
    - 移动窗口、关掉再开、改内容后，动作得到 `OBSERVATION_STALE`，测试窗口没收到点击；（片 B/C 已验证）
@@ -240,7 +270,9 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
    - 忽略窗口实例；
    - 只比整窗不比区域；
    - 开关关闭时仍自动执行；
-   - 自动执行了输入。
+   - 自动执行了输入；
+   - （片 D 追加）actor 没记成 decision；中断后仍执行；拒绝后改选另一个候选；两个可执行动作挑第一个；不查幂等；不查属主；粗位置不夹不舍入；
+     绑定发送后不记动作事实；两本账缺 actor/decision_ref/observation_action；宿主记录进原生 IR；审批请求不带 actor。
 5. **真实模型验收**（Linux 车道容器，主模型 MiniMax M3，Jev 真实）：
    - 四档各发一次 prompt；
    - 记录 Jev 用量、选中候选、提示和执行是否发生、复核拒绝次数、M3 是否采纳。
@@ -257,8 +289,8 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 | A | 观察三件套抽成通用的 `ObservationBinding`；几何扩展校验；核实并补齐 MCP 工具的审批策略声明；插件回归不变 | 3–4 h |
 | B | Linux X11 后端 + `observe_window`、`click_candidate` + 适配器复核 + profile 声明 + `computer_use_observation_enabled` + 属主范围用例 | 6–8 h |
 | C | 车道镜像加 Xvfb、openbox、Tk 测试窗口；集成测试；变异（已实施：`test_computer_use_xvfb_cases.py` 覆盖关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计 0.15–0.20；派生镜像 Dockerfile.desktop + xvfb_lane.sh 待 3a 落位；Debian 包清单与 pymonctl 要 xrandr 的硬性要求见 computer-use.md 当前边界） | 4–5 h |
-| D | `action_candidate` 接粗位置；自动执行路径和能力开关；假 Jev 四档 | 5–6 h |
-| E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测（已实施 2026-10-02，75，分支 `claude/75-j16-slice-e`；ae 复审 4 条应修已改，待复核） | 4–5 h |
+| D | `action_candidate` 接粗位置；自动执行路径和能力开关；假 Jev 四档（已实施：第 7 节“片 D 实施定稿”；真实模型验收留给片 F） | 5–6 h |
+| E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测（已实施 2026-10-02，75；ae 两轮复审通过，已集成 step17h） | 4–5 h |
 | F | 真实验收（M3 + Jev，Linux 车道）+ 文档、台账、TESTS | 3–4 h |
 | G | macOS AX 候选 + `type_into_candidate` 注册；Linux AT-SPI 可选评估和安装说明；合并去重 | 5–7 h |
 
