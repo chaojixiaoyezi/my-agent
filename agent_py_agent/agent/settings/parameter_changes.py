@@ -16,7 +16,15 @@ from uuid import uuid4
 
 from ..common.json_io import append_jsonl_capped, locked_json_path, read_jsonl_objects_report
 from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
-from .parameter_registry import ParameterSpec, applied_value_with, parameter_registry
+from .parameter_registry import (
+    SOURCE_AGENT,
+    SOURCE_CAPABILITY,
+    SOURCE_LOG_ANALYSIS,
+    SOURCE_RUNTIME_GUARD,
+    ParameterSpec,
+    applied_value_with,
+    parameter_registry,
+)
 from .user_config_capability import (
     BOUNDARY_KEYS,
     TUNABLE_KEYS,
@@ -88,6 +96,21 @@ def _target(user_path: Path | None) -> Path:
     return path
 
 
+# LLM: P17 起另三份配置也经参数中心写入：目标文件放在用户配置（agent_config）同目录，文件名按来源，
+#   例如 capability_config.yaml；用户没建这份文件就拒绝写（与 agent 一致，不自动创建，避免写出运行时读不到的散文件）。
+# 函数用途: 按参数来源给出实际写入目标（主配置就是用户配置文件，其余为同目录的 <source>_config.yaml）。
+def _write_target(spec: ParameterSpec, user_path: Path | None) -> Path:
+    path = _target(user_path)
+    if spec.source == SOURCE_AGENT:
+        return path
+    target = path.with_name(f"{spec.source}_config.yaml")
+    if not target.is_file():
+        raise ParameterChangeError(
+            "USER_CONFIG_MISSING",
+            f"{spec.source} 配置的用户文件不存在：{target}；请先从随包 {spec.source}_config.yaml 复制一份到同目录再改。")
+    return target
+
+
 # LLM: 先查登记表，再查边界：BOUNDARY_KEYS 给出原因原样回显；其余边界项给统一原因。
 # 函数用途: 取出一个可写参数的登记信息，不可写时拒绝。
 def _writable_spec(key: str) -> ParameterSpec:
@@ -137,9 +160,24 @@ def _render_number(spec: ParameterSpec, text: str) -> tuple[object, str]:
     return number, str(number)
 
 
-# LLM: 用正式 load_config 读出进程重启后会拿到的值；这是“改了是否真的生效”的唯一判据。
-# 函数用途: 读取用户配置经完整加载后的某个参数值。
+# LLM: 用正式加载器读出进程重启后会拿到的值；这是“改了是否真的生效”的唯一判据。主配置用 load_config，
+#   capability 用 load_capability_config，runtime_guard 用 runtime_guard_policy（values 字典），
+#   log_analysis 没有产品加载器，用与写同一套的 load_simple_yaml 读回（config_io 是它唯一的正式读取器）。
+# 函数用途: 读取用户配置经完整加载后的某个参数值（按来源选加载器）。
 def _effective(path: Path, key: str) -> object:
+    source = getattr(parameter_registry().get(key), "source", SOURCE_AGENT)
+    if source == SOURCE_CAPABILITY:
+        from ..capability.config import load_capability_config
+
+        return getattr(load_capability_config(path), key)
+    if source == SOURCE_RUNTIME_GUARD:
+        from .runtime_guard_config import runtime_guard_policy
+
+        return runtime_guard_policy(path=path).values.get(key)
+    if source == SOURCE_LOG_ANALYSIS:
+        from .config_io import load_simple_yaml
+
+        return load_simple_yaml(path).get(key)
     from .config import load_config
 
     return getattr(load_config(path), key)
@@ -204,7 +242,7 @@ def _failure(error: ParameterChangeError) -> dict[str, object]:
 def set_parameter(key: object, value: object, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
     try:
         spec = _writable_spec(str(key or ""))
-        path = _target(user_path)
+        path = _write_target(spec, user_path)
         expected, rendered = _render(spec, value)
         original = path.read_text(encoding="utf-8")
         previous, _line = set_simple_yaml_raw(path, spec.key, rendered)
@@ -225,7 +263,7 @@ def set_parameter(key: object, value: object, *, user_path: Path | None, origin:
 def reset_parameter(key: object, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
     try:
         spec = _writable_spec(str(key or ""))
-        path = _target(user_path)
+        path = _write_target(spec, user_path)
         previous = unset_simple_yaml_value(path, spec.key)
         if previous is None:
             raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有用户覆盖，已经是默认值。")
@@ -280,6 +318,7 @@ def revert_change(change_id: str, *, user_path: Path | None, origin: ChangeOrigi
         path = _target(user_path)
         entry = _find_change(parameter_history(user_path=path, limit=0), change_id)
         spec = _writable_spec(str(entry.get("key") or ""))
+        path = _write_target(spec, user_path)
         if entry.get("masked"):
             raise ParameterChangeError("CHANGE_MASKED", f"'{spec.key}' 是凭据类参数，记录里只有脱敏值，不能回滚；请重新设置。")
         target = entry.get("previous")

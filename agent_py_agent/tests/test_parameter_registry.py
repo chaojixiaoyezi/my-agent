@@ -137,12 +137,51 @@ def test_applied_value_uses_the_single_output_cap_formula():
 
 def test_registry_covers_every_config_field_with_yaml_descriptions():
     registry = parameter_registry()
-    assert set(registry) == {item.name for item in fields(AgentConfig)}
+    # P17：登记表覆盖四份配置；主配置部分仍必须与 AgentConfig 字段一一对应（capability 31 / runtime_guard 22 /
+    # log_analysis 20 由各自来源测试锁定），防止登记表悄悄丢字段。
+    assert {key for key, spec in registry.items() if spec.source == "agent"} == {item.name for item in fields(AgentConfig)}
     assert "64K" in registry["max_tokens"].description
     assert registry["max_tokens"].value_type == "int" and registry["enable_self_learning"].value_type == "bool"
     fuse = registry["goal_continuation_idle_limit"]
     assert fuse.default == 3 and fuse.value_type == "int" and fuse.writable
     assert "0 = 不限" in fuse.description
+
+
+def test_extra_sources_are_registered_with_yaml_descriptions():
+    """P17：capability（dataclass 默认值）、runtime_guard、log_analysis 三份配置全部进登记表并带说明。"""
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
+    registry = parameter_registry()
+    capability_keys = {item.name for item in fields(CapabilityConfig)} - {"config_warnings"}
+    assert {key for key, spec in registry.items() if spec.source == "capability"} == capability_keys
+    assert {key for key, spec in registry.items() if spec.source == "runtime_guard"} == {
+        "repeat_fail_threshold", "readonly_no_progress_threshold", "repeated_success_hint_threshold",
+        "terminal_block_enabled", "repeated_failure_halt_threshold", "hard_failure_halt_enabled",
+        "hard_failure_halt_threshold", "tool_rate_window_seconds", "tool_rate_max_calls",
+        "tool_circuit_failure_threshold", "tool_circuit_backoff_seconds", "tool_rate_max_records",
+        "unknown_command_allowlist", "unknown_command_window_seconds", "unknown_command_max_calls",
+        "background_max_tool_rounds", "background_max_tool_calls_per_round",
+        "provider_transient_auto_resume_delays_seconds", "provider_supply_backoff_base_seconds",
+        "provider_supply_backoff_max_seconds", "provider_transient_redispatch_limit",
+        "main_agent_auto_resume_attempt_limit",
+    }
+    assert {key for key, spec in registry.items() if spec.source == "log_analysis"} == {
+        "enabled", "capability_level", "config_version", "data_dir", "worker_enabled",
+        "security_prompt_enabled", "auto_dispatch_enabled", "ml_enabled", "cluster_enabled",
+        "response_execution_enabled", "response_mode", "local_store_backend", "query_default_limit",
+        "query_max_limit", "source_retention_days", "payload_preview_max_chars",
+        "max_parallel_analyst_agents", "dispatch_budget_per_hour", "case_merge_window_minutes",
+        "detector_window_minutes",
+    }
+    # 默认值/类型与 dataclass 或 YAML 一致；说明全部非空（新键不允许进空说明基线）。
+    assert registry["capability_candidate_limit"].default == CapabilityConfig().capability_candidate_limit == 5
+    assert registry["capability_candidate_limit"].value_type == "int"
+    assert registry["decision_subagent_model_candidate_profile_ids"].value_type == "list"
+    assert registry["repeat_fail_threshold"].default == 10 and registry["repeat_fail_threshold"].value_type == "int"
+    assert registry["tool_circuit_backoff_seconds"].default == [1, 2, 4, 8, 16, 30]
+    assert registry["response_mode"].default == "recommend" and registry["response_mode"].value_type == "str"
+    assert registry["enabled"].default is False and registry["enabled"].value_type == "bool"
+    assert all(spec.description for key, spec in registry.items() if spec.source != "agent")
 
 
 @pytest.mark.parametrize("key", [

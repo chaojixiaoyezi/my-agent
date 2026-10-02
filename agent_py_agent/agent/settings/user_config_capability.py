@@ -409,12 +409,23 @@ def mask_value(key: str, value: object) -> str:
 # LLM: 生效值＝用户配置文件里的值优先；没写才回落到随包默认 YAML。报告必须同时给出两者与来源，
 #   否则模型会把随包默认当成"用户配置"（真机：模型去读安装目录里的 agent_config.yaml 当答案）。
 #   能不能改只由参数中心登记表的 writable 回答；这里不再给旧白名单的 tunable 字段（09-27 模型见 writable=true、
-#   tunable=false 两个口径，误以为 max_tokens 改不了）。
+#   tunable=false 两个口径，误以为 max_tokens 改不了）。P17 起按登记表的 source 选文件：主配置用传入的
+#   user_path/default_path，capability/runtime_guard/log_analysis 用同目录的 <source>_config.yaml。
 # 函数用途: 读取某个键的用户值与随包默认值，并给出当前生效值与来源。
 def read_config_fact(
     key: str, *, user_path: Path | None, default_path: Path
 ) -> dict[str, object]:
     name = str(key or "").strip()
+    source = "agent"
+    from .parameter_registry import parameter_registry
+
+    spec = parameter_registry().get(name)
+    if spec is not None and getattr(spec, "source", "agent") != "agent":
+        source = spec.source
+        base = Path(default_path).parent
+        default_path = base / f"{source}_config.yaml"
+        if user_path is not None:
+            user_path = Path(user_path).with_name(f"{source}_config.yaml")
     user_values = load_simple_yaml(user_path) if user_path is not None and user_path.exists() else {}
     default_values = load_simple_yaml(default_path) if default_path.exists() else {}
     user_value = user_values.get(name)

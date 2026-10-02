@@ -17,6 +17,15 @@ Gateway 控制通道，与 user_config action=search 的 constants 结果同数�
 `decision_config_fields()` 映射补，读取方为 decision_settings_defaults）。user_config 的 view/search 同口径只在有值时带这四个字段。
 回归见 `test_parameter_metadata.py`。
 
+登记表增加来源维度（参数中心 P17，分支 `worker/ds2-registry-sources`，2026-10-01）：`parameter_registry.ParameterSpec` 加 `source` 字段，
+四来源 `agent`（agent_config.yaml，224 键）/`capability`（capability_config.yaml，31 键）/`runtime_guard`（runtime_guard_config.yaml，22 键）/
+`log_analysis`（log_analysis_config.yaml，20 键），合计 297 键；说明、类型、默认值从各随包 YAML 与 dataclass 取，规则与主配置一致。
+写入口 `parameter_changes._write_target` 按来源把写入重定向到用户配置同目录 `<source>_config.yaml`，`_effective` 按来源选正式加载器
+（capability→`load_capability_config`、runtime_guard→`runtime_guard_policy`、log_analysis→`load_simple_yaml`）回读校验，写后回读不一致恢复原文件并记 settings-changes 账本。
+安全等级默认按边界（授权、权限、路径、执行权威链一律模型不可改），capability 的 17 个能力数值上限键为显式 free 名单（`_EXTRA_FREE_KEYS`，逐键带理由），
+runtime_guard/log_analysis 全部边界。`settings_control_service._show` 对每条参数加“来源：<source>_config.yaml”行，`_search/_all/_common_line` 运行值改走
+`running_value`（非 agent 键从随包文件实时读）。回归见 `test_parameter_sources.py`（10 项：四来源 search/view、真实文件写链、回读失败恢复、边界拒绝）。
+
 J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，本地待集成）：
 - 原请求晋升回执追加唯一 `promotion_id` 与冻结规则；只返回新写入的 applied 回执，旧回执消费后重启不补投。
 - 新 `request_experiment_notice.py` 只读结构化回执生成点位、前后模式、样本/门槛与真实恢复继承路径，排进原宿主提示队列。

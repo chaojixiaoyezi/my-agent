@@ -71,6 +71,38 @@
   parameter_metadata / constant_names_unique / value_display_parity）→ **185 passed**
   guards9 架构守卫（含 test_packaging）→ **166 passed**
 
+## 参数中心 P17：三份配置纳入登记表与写入口（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `f15b0a19f`）
+
+- 新增 `agent_py_agent/tests/test_parameter_sources.py`（10 项）：
+  - `test_search_covers_four_sources` / `test_view_shows_source_and_running_value`：search/view 四来源全覆盖，view 带 source 与 running_value；
+  - `test_running_value_reads_packaged_yaml`：非 agent 键运行值从随包文件实时读（capability_skill_max_context_tokens、tool_circuit_failure_threshold、
+    query_max_limit 各取到真实默认值）；
+  - `test_extra_sources_default_to_boundary`：新来源默认安全等级边界，仅 17 个 free 键例外；
+  - `test_extra_free_keys_have_reasons`：free 名单每键理由非空、数量与登记表一致；
+  - `test_capability_write_reset_and_revert_chain`：capability 键真实文件写→正式加载器回读→reset→revert 全链路，账本与文件内容核对；
+  - `test_effective_dispatches_the_loader_per_source`：_effective 按来源选 capability/runtime_guard/log_analysis 各自加载器；
+  - `test_write_target_missing_file_raises_missing`：目标 `<source>_config.yaml` 不存在时拒绝（USER_CONFIG_MISSING），不建文件；
+  - `test_write_reload_mismatch_restores_original`：写后回读不一致恢复原文件并记 PARAMETER_NOT_EFFECTIVE；
+  - `test_boundary_keys_are_rejected_without_touching_files`：runtime_guard/log_analysis 边界键 set 拒绝且文件不动；
+  - `test_user_config_tool_set_history_revert_and_deny`：user_config 工具链路 set→history→revert→边界 deny。
+- 修改：`test_parameter_registry.py`（`test_registry_covers_every_config_field` 按 source==agent 过滤，新增
+  `test_extra_sources_are_registered_with_yaml_descriptions` 锁定三份新来源键集合/默认值/类型/说明非空）、
+  `test_parameter_metadata.py`（`test_every_listed_key_has_a_reader` 限定 spec.source==agent，派生规则只覆盖主配置）。
+- 变异验证 3 个（临时改实现→守卫测试变红→还原，备份在 /private/tmp/claude-501/）：
+  - `_safety_for` 改用 `classify_safety` → `test_extra_sources_default_to_boundary` 红；
+  - `_EXTRA_FREE_KEYS` 删 `capability_candidate_limit` → 同上红；
+  - `_effective` capability 分支改用 `load_config` → `test_capability_write_reset_and_revert_chain` 红。
+- 命令与结果（`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，basetemp=/private/tmp/claude-501/m-ds2）：
+  - 相关八文件 `test_parameter_registry test_parameter_changes test_parameter_metadata test_parameter_sources test_settings_chat_control
+    test_config_defaults_parity test_value_display_parity test_config_field_readers` → **153 passed**；
+  - guards9 全量（10 文件，含 test_packaging）→ **167 passed**；
+  - `scripts/check_import_boundaries.py` → **0 条**；`ruff check agent_py_agent scripts` → **All checks passed**；
+  - `scripts/check_doc_sync.py` → **DOC_SYNC_PASS**；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
+    → **hard=0, blocked=False**（跑完 `git checkout -- CODE_SIZE_REPORT.md` 还原，未提交）；`git diff --check` → 通过；
+    `scripts/check_clean_package.py .` → **OK: 未发现发布阻塞项**。
+- 未验证：`test_backend_config_catalog.py`/`test_frontend_settings_labels.py`（前端目录守卫，P17 未动 frontend/、只加行尾注释不改键，理论不受影响，
+  未单独跑）；真实 Gateway 进程里的 `/settings` 交互（测试走控制服务单测，未启动 Gateway）。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `02568822d`）
 
 - **P15**：`test_structured_masking.py` 新增 2 例：

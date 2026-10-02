@@ -37,6 +37,19 @@
 - **验证**：新增守卫 9 项 + 相关既有测试 185 项通过；3 个变异（协议排除清空、单位推导恒空、说明提取恒空）全部被抓住；
   详情见 TESTS.md 同名节。
 
+## 参数中心 P17：capability/runtime_guard/log_analysis 三份配置纳入登记表与写入口（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已实现，待集成）
+
+- **来源维度**：`ParameterSpec` 加 `source`（agent/capability/runtime_guard/log_analysis），登记表从 224 键扩到 297 键
+  （capability 31、runtime_guard 22、log_analysis 20）；说明/类型/默认值从各随包 YAML 与 dataclass 取，规则与主配置一致。
+- **统一入口**：/settings 与 user_config 的 search/view/history/revert 四来源全覆盖；写入口仍是 `parameter_changes` 唯一一套——
+  `_write_target` 按来源重定向到用户配置同目录 `<source>_config.yaml`，`_effective` 按来源选正式加载器（capability→`load_capability_config`、
+  runtime_guard→`runtime_guard_policy`、log_analysis→`load_simple_yaml`）回读校验，写后回读不一致恢复原文件并记 settings-changes 账本。
+- **安全等级**：默认按边界（授权/权限/路径/执行权威链/运行时门/审批/白名单/执行开关/audit 模型不可改），capability 的 17 个能力数值上限键
+  为显式 free 名单（`_EXTRA_FREE_KEYS` 逐键带理由），runtime_guard/log_analysis 全部边界。
+- **展示**：`/settings show` 加「来源：<source>_config.yaml」行；非 agent 键运行值走 `running_value`（从随包文件实时读）。
+- **验证**：相关 153 passed（含新 `test_parameter_sources.py` 10 项）、guards9 167 passed、import boundaries 0、ruff/doc-sync/code-size
+  strict/diff-check/clean-package 全过；3 个变异被杀红并还原。详见 TESTS.md。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已实现，待集成）
 
 - **P15 脱敏补两种写法**（唯一实现 `user_config_capability.masked_structure`/`mask_value`，未另写一份）：

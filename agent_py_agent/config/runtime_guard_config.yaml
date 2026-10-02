@@ -28,7 +28,7 @@
 # 这个门默认只拦“本次重复工具调用”，不会杀掉整个任务。
 # 填 0 表示不限制、不拦截；系统只在 50、100 次给软提示，提醒模型尽快收束或换路。
 repeat_fail_threshold: 10
-readonly_no_progress_threshold: 3
+readonly_no_progress_threshold: 3  # 只读 gate：同一 run 内连续多少次无进展后给出返工提示，0 关闭
 
 # 成功调用重复观察（与上面的只读 gate、安全分类分别独立）：
 # 在同一代理最近 256 条工具记录内，按“run_id + 工具 + 完整参数哈希 + 原文结果哈希”计数。
@@ -55,8 +55,8 @@ terminal_block_enabled: false
 # 子代理按阻塞收口并把原因码、工具、错误码、次数和参数名通知直属父代理。同一次调用同时满足授权阶段收口时
 # 按授权阶段收口。中间有别的调用或任一成功即重新计数。设为 0 时也关闭这项收口。
 repeated_failure_halt_threshold: 15
-hard_failure_halt_enabled: false
-hard_failure_halt_threshold: 15
+hard_failure_halt_enabled: false  # 是否开启同类失败硬收口（默认关闭，开启后达到阈值才按未完成收口等人工介入）
+hard_failure_halt_threshold: 15  # 开启硬收口后，同类失败达到该次数即按未完成收口；0 关闭
 
 ###############################################################################
 # 工具工程限流与熔断
@@ -77,10 +77,10 @@ hard_failure_halt_threshold: 15
 # tool_rate_max_records:
 #   每个运行边界最多保留多少条限流记录，防止账本无限增长。
 tool_rate_window_seconds: 60
-tool_rate_max_calls: 60
-tool_circuit_failure_threshold: 3
-tool_circuit_backoff_seconds: [1, 2, 4, 8, 16, 30]
-tool_rate_max_records: 256
+tool_rate_max_calls: 60  # 窗口内同 tool+args 最多调用次数，0 表示不限频率
+tool_circuit_failure_threshold: 3  # 连续多少次 retryable 失败后打开熔断，0 表示不启用
+tool_circuit_backoff_seconds: [1, 2, 4, 8, 16, 30]  # 熔断打开后的退避等待秒数列表
+tool_rate_max_records: 256  # 每个运行边界最多保留多少条限流记录，防止账本无限增长
 
 ###############################################################################
 # unknown 命令：白名单 + 按代理滚动额度
@@ -102,8 +102,8 @@ tool_rate_max_records: 256
 #
 # 普通用户零负担：不配任何东西也自动生效（默认 200 次/600 秒）。
 unknown_command_allowlist: []
-unknown_command_window_seconds: 600
-unknown_command_max_calls: 200
+unknown_command_window_seconds: 600  # 白名单外 unknown 命令滚动额度的时间窗口秒数，0 表示关闭这道门
+unknown_command_max_calls: 200  # 窗口内 unknown 命令最多调用次数，0 表示关闭这道门
 
 ###############################################################################
 # 单代理工具预算
@@ -141,7 +141,7 @@ unknown_command_max_calls: 200
 #   + 额度，不会因为前台已用的轮数一开始就触顶。写 0 表示回落 agent_config.yaml 的 max_tool_rounds：它是正数 M 时
 #   新增额度就是 M（片上限 = 携带条数 + M，同样是“基线 + 携带条数”）；它也是 0（不限制）或留空（5000）时不设片上限，照全局口径。
 background_max_tool_rounds: 5000
-background_max_tool_calls_per_round: 4
+background_max_tool_calls_per_round: 4  # 每个后台执行批次最多多少个工具调用
 
 ###############################################################################
 # 模型网关临时错误自动续跑
@@ -163,7 +163,7 @@ provider_transient_auto_resume_delays_seconds: [10, 25, 45, 100, 180]
 #   在退避期间不被标记消费，供应恢复后自动续跑，不需要人肉重启。
 #   默认 30 / 900：30s→60s→120s→240s→480s→900s→900s…
 provider_supply_backoff_base_seconds: 30
-provider_supply_backoff_max_seconds: 900
+provider_supply_backoff_max_seconds: 900  # 供应故障长退避的封顶秒数
 
 # provider_transient_redispatch_limit:
 #   子代理 runner 因【临时供应错】(failure_type=transient_error/provider_timeout，

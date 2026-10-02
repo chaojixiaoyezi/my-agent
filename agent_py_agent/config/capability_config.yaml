@@ -89,15 +89,15 @@ decision_subagent_model_candidate_profile_ids: []
 decision_skill_tool_context_policy: progressive
 # 可额外收起的工具类别是开放字符串列表；[] 不额外收起。不会修改原 tool_catalog_deferred_categories。
 decision_skill_tool_optional_categories: ["plugins"]
-decision_skill_tool_mode: off
+decision_skill_tool_mode: off  # 技能/工具上下文决策点模式（off/observe/apply）；默认关闭，observe 也会发请求并产生用量
 
 # my-agent 自己调决策等待时间的上下限（秒，整数）。
 # - 只约束 my-agent 通过 user_config 的 decision_patch 调整各 timeout_seconds 字段（通用前台/阶段/后台与各接入点）；
 #   用户在 /model 决策设置菜单里修改不受此限。
 # - 越界时工具直接拒绝并返回允许范围，不会自动夹到边界。
 # - 0: 该侧不限制（统一约定）。
-decision_agent_timeout_min_seconds: 1
-decision_agent_timeout_max_seconds: 30
+decision_agent_timeout_min_seconds: 1  # my-agent 自调决策等待时间下限（秒）；0 表示该侧不限制
+decision_agent_timeout_max_seconds: 30  # my-agent 自调决策等待时间上限（秒）；0 表示该侧不限制
 
 # 会话间消息与派活（第一期只开给管理员）。
 # - 判定只读结构化 owner_kind 与下面这些开关，不解析任何文本。

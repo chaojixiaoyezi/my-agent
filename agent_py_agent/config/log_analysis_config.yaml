@@ -4,19 +4,19 @@
 
 # 是否启用日志分析模块；默认关闭，不影响普通 my-agent run/chat/status。
 enabled: false
-capability_level: L0
-config_version: 1
+capability_level: L0  # 能力等级标记（当前占位，默认 L0）
+config_version: 1  # 配置版本号
 
 # 运行态数据目录。相对路径以 agent_py_agent/ 为根。
 data_dir: data/log_analysis
 
 # 高影响开关默认全部关闭。
 worker_enabled: false
-security_prompt_enabled: false
-auto_dispatch_enabled: false
-ml_enabled: false
-cluster_enabled: false
-response_execution_enabled: false
+security_prompt_enabled: false  # 是否启用安全提示生成（默认关闭）
+auto_dispatch_enabled: false  # 是否自动派发分析任务（默认关闭）
+ml_enabled: false  # 是否启用机器学习分析（默认关闭）
+cluster_enabled: false  # 是否启用聚类分析（默认关闭）
+response_execution_enabled: false  # 是否允许分析结果直接执行响应（默认关闭）
 
 # response_mode:
 # - recommend: 只给建议
@@ -29,16 +29,16 @@ local_store_backend: jsonl
 
 # 查询输出保护。
 query_default_limit: 100
-query_max_limit: 1000
+query_max_limit: 1000  # 单次查询返回的最大条数上限
 
 # 数据和 payload 控制。
 source_retention_days: 30
-payload_preview_max_chars: 2048
+payload_preview_max_chars: 2048  # 负载预览的最大字符数
 
 # 0 表示关闭自动 analyst 派遣预算，不是“不限制”。
 max_parallel_analyst_agents: 0
-dispatch_budget_per_hour: 0
+dispatch_budget_per_hour: 0  # 每小时自动派发分析师的预算；0 关闭预算（不是“不限制”）
 
 # 窗口配置。
 case_merge_window_minutes: 60
-detector_window_minutes: 15
+detector_window_minutes: 15  # 检测器滑动窗口分钟数

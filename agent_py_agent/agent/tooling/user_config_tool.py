@@ -18,7 +18,12 @@ from ..settings.parameter_changes import (
     revert_change,
     set_parameter,
 )
-from ..settings.parameter_registry import applied_value, parameter_registry, search_parameters
+from ..settings.parameter_registry import (
+    applied_value,
+    parameter_registry,
+    running_value,
+    search_parameters,
+)
 from ..settings.user_config_capability import (
     capability_summary,
     mask_value,
@@ -464,8 +469,8 @@ def _spec_view(spec: object, config: object, *, brief: bool = False) -> dict[str
     description = str(spec.description)
     view = {
         "key": spec.key, "category": spec.category, "writable": spec.writable, "common": spec.common,
-        "value_type": spec.value_type,
-        "running_value": mask_value(spec.key, getattr(config, spec.key, "")) if config is not None else "",
+        "value_type": spec.value_type, "source": spec.source,
+        "running_value": mask_value(spec.key, running_value(spec, config)) if config is not None else "",
         "default": mask_value(spec.key, spec.default),
         "description": description[:160] + ("…" if brief and len(description) > 160 else "") if brief else description,
     }

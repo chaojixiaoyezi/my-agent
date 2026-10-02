@@ -26,6 +26,7 @@ from ..settings.parameter_registry import (
     common_parameters,
     listed_parameters,
     parameter_registry,
+    running_value,
     search_parameters,
 )
 from ..settings.user_config_capability import (
@@ -154,7 +155,7 @@ def _brief(description: str) -> str:
 #   值都经 mask_value 脱敏。只读。
 # 函数用途: 把一个常用参数排成一行中文。
 def _common_line(spec: ParameterSpec, config: object, stored: dict) -> str:
-    running = getattr(config, spec.key, spec.default)
+    running = running_value(spec, config)
     marks = ""
     if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(spec.default):
         marks += f"（改过，默认 {_value(spec, spec.default)}）"
@@ -241,7 +242,7 @@ def _category_lines(registry: dict[str, ParameterSpec], config: object, changed:
 # 函数用途: 把一个参数排成全部视图里的一行：当前运行值，改过标［改过］，不能在这里改标［安全边界］。
 def _all_line(spec: ParameterSpec, config: object, changed: set[str]) -> str:
     marks = ("［改过］" if spec.key in changed else "") + ("" if spec.writable else "［安全边界］")
-    return f"- {spec.key} = {_value(spec, getattr(config, spec.key, spec.default))}{marks}"
+    return f"- {spec.key} = {_value(spec, running_value(spec, config))}{marks}"
 
 
 # 函数用途: /settings search <关键词> —— 按参数名与中文说明找参数。
@@ -253,7 +254,7 @@ def _search(config: object, argument: str) -> str:
     for spec in found:
         flag = "可改" if spec.writable else "安全边界"
         summary = spec.description[:60] + ("…" if len(spec.description) > 60 else "")
-        lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, getattr(config, spec.key, spec.default))}：{summary or '（没有说明）'}")
+        lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, running_value(spec, config))}：{summary or '（没有说明）'}")
     return "\n".join(lines)
 
 
@@ -295,14 +296,15 @@ def _show(config: object, argument: str) -> str:
     applied = applied_value(spec.key, config)
     applied_line = ([f"实际效果：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
                     if applied is not None else [])
-    # 元数据行只在有值时显示：单位、范围、归属模块、主要读取方。
-    metadata_lines = [line for field, label in (("unit", "单位"), ("range", "范围"),
-                                                ("owner_module", "归属模块"), ("reader", "读取方"))
-                      if (line := _metadata_line(spec, field, label))]
+    # 元数据行只在有值时显示：来源文件（非主配置）、单位、范围、归属模块、主要读取方。
+    metadata_lines = ([f"来源：{spec.source}_config.yaml"] if spec.source != "agent" else [])
+    metadata_lines += [line for field, label in (("unit", "单位"), ("range", "范围"),
+                                                 ("owner_module", "归属模块"), ("reader", "读取方"))
+                       if (line := _metadata_line(spec, field, label))]
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
         f"说明：{spec.description or '（没有说明）'}",
-        f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, getattr(config, spec.key, spec.default))}；"
+        f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, running_value(spec, config))}；"
         f"用户配置里：{override}",
         *metadata_lines,
         *applied_line,

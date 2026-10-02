@@ -22,6 +22,26 @@
   文件按名字定位（`settings/constants_catalog.locate_line`/`entry_with_line`），定位不到就只显示文件。
 - **后续按模块分批整改**（改名、合并、补单位与说明）时以目录为准，每批完成后重新生成目录并删掉对应的白名单条目。
 
+## 2026-10-01 登记表增加来源维度：四份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
+
+- **来源维度**：`ParameterSpec` 增加 `source` 字段，四来源 `agent`（agent_config.yaml，224 键）/`capability`（capability_config.yaml，31 键）/
+  `runtime_guard`（runtime_guard_config.yaml，22 键）/`log_analysis`（log_analysis_config.yaml，20 键），合计 297 键；说明、类型、默认值
+  从各随包 YAML 与 dataclass 取，规则与主配置一致（说明取 YAML 注释、无注释用键名兜底并计数）。
+- **统一入口**：`/settings` 与 user_config 的 search/view/history/revert 四来源全覆盖；`_show` 加「来源：<source>_config.yaml」行，
+  运行值改走 `running_value`（非 agent 键从随包文件实时读）；写入口仍只有 `parameter_changes` 一套——`_write_target` 按来源把写入
+  重定向到用户配置同目录 `<source>_config.yaml`，`_effective` 按来源选正式加载器回读（capability→`load_capability_config`、
+  runtime_guard→`runtime_guard_policy`、log_analysis→`load_simple_yaml`），写后回读不一致恢复原文件并记 settings-changes 账本，
+  不另写一套写入。
+- **安全等级**：默认按边界（授权、权限、路径、执行权威链、运行时门、审批、白名单、执行开关、audit 一律模型不可改，用户经宿主入口改）；
+  capability 的 17 个能力数值上限键为显式 free 名单（`_EXTRA_FREE_KEYS`，逐键带理由：模型/tool 上下文窗口、skill 检索上限、
+  subagent 数量上限等纯数值容量类，不含任何授权语义）；runtime_guard/log_analysis 全部边界。
+- **守卫**：`test_parameter_sources.py` 10 项（四来源 search/view、running_value 真实读文件、新来源默认边界+free 名单、free 理由必填、
+  capability 写/reset/revert 真实文件链、_effective 按来源分派加载器、目标文件不存在拒绝、回读不一致恢复、三来源边界拒绝文件不动、
+  user_config 工具 set/history/revert/deny 链路）；变异验证 3 个（_safety_for 改回 classify_safety、删 free 键、_effective 改用 load_config）均被杀红。
+- **前端**：未动 frontend/；`test_backend_config_catalog.py`/`test_frontend_settings_labels.py` 用 `_descriptions_from_lines` 读三份 YAML
+  顶层键，P17 只加行尾说明注释不改键，两个守卫不受影响（未单独跑，见 TESTS.md）。
+- **运行值口径**：非 agent 键当前运行值从随包文件读（用户未复制 `<source>_config.yaml` 到用户配置目录前，写入口会拒绝并提示先复制）。
+
 ## 2026-10-01 参数登记表元数据（P8，分支 `worker/ds2-registry-metadata`，已实现，待集成）
 
 - 设计目标 1 落地：登记表每条参数补「单位、范围、归属模块、读取方」四项元数据，全部由 `agent/settings/parameter_metadata.py` 自动推导、

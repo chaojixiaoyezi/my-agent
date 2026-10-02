@@ -627,8 +627,10 @@ agent_py_agent/
 |   |   |-- user_config_capability.py  # 用户配置路径（当前加载的配置文件）、显式白名单校验、边界名单与生效时机说明
 |   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机
 |   |   |-- constants_catalog.py      # 代码常数目录的运行时只读入口（/settings internal 与 user_config search 共用），只读随包 JSON
+
+|   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机、来源文件（agent/capability/runtime_guard/log_analysis）
 |   |   |-- parameter_metadata.py    # 参数登记表元数据自动推导（单位/范围/归属模块/读取方），只读纯函数
-|   |   |-- parameter_changes.py      # 参数中心唯一写入口：按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
+|   |   |-- parameter_changes.py      # 参数中心唯一写入口：按来源写对应文件、按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
 |   |   |-- decision_probe.py           # 显式原生连接测试，共用后端/worker/账本，不改开关或聊天选择
 |   |   |-- decision_settings.py        # 原 owner/thread 决策覆盖共用读取、字段修改、恢复继承与双版本 CAS
@@ -792,6 +794,7 @@ agent_py_agent/
 |   |-- test_structured_masking.py     # 字典/列表参数结构脱敏：请求头与环境变量只留键名，任意开关后的“名字: 值/名字=值”只留名字，凭据开关、连接串与网址密码遮值，各回显与记账出口无明文
 |   |-- test_value_display_parity.py   # 回显值文字一致：8 种值（False/0/True/None/空串/空列表/空映射/凭据）在 user_config 查看/搜索/改参回执、/settings show、config get 下显示相同，聊天空值显示“（空）”，走不到的格子核对原因
 |   |-- test_parameter_changes.py      # 参数中心写入：按类型写入并真正生效、拒绝不改文件、回读不一致回滚、记录与回滚链、user_config 工具
+|   |-- test_parameter_sources.py      # 参数中心来源维度 P17：四来源 search/view、运行值真实读文件、新来源默认边界+free 名单、capability 真实文件写链、回读失败恢复、边界拒绝、user_config 工具链路
 |   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、常用/全部两种视图、完整修改与回滚流程
 |   |-- test_plugins_chat_control.py   # IM 插件公共解析、共享服务、权限错误码、启用确认和持久控制重放
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置
