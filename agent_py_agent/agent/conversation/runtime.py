@@ -647,7 +647,7 @@ class _BackgroundSlicePlan:
     local_transcript_only: bool = False
 
 
-# LLM: 空片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（工具调用数、
+# LLM: 空转片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（工具调用数、
 #   物化进展数、wake 时的 Goal/任务快照比较），不另写一套判据。缺基线按有进展处理，不误伤旧 wake。
 # 函数用途: 判断这一片 thread_goal_continue 是否无进展，供交付决策决定是否只做本地转录。
 def _background_goal_idle_slice(
@@ -670,6 +670,30 @@ def _background_goal_idle_slice(
     )
     task_status = _background_task_link_status(agent, request, store=store)
     return not slice_has_progress(signal, report, goal, task_status)
+
+
+# LLM: 空转片的交付改写只发生在“外部投递义务 + 无进展”同时成立时：正文仍落权威会话转录
+#   （TUI/历史可见），但不主动推给外部通道；纯本地/TUI 线程本来只进转录，保持原行为。
+#   返回值 (deliver, delivery_reason, local_transcript_only) 与 run_once 原内联判定完全一致。
+# 函数用途: 计算一片 thread_goal_continue 的最终交付参数，让 run_once 只做一行委托。
+def _background_goal_delivery_mode(
+    goal: object,
+    request: BackgroundRunRequest,
+    execution_result: object,
+    *,
+    agent: object,
+    store: ConversationStore,
+    deliver: bool,
+    delivery_reason: str,
+    route_ownership: str,
+) -> tuple[bool, str, bool]:
+    idle_slice = _background_goal_idle_slice(
+        goal, request, execution_result, agent=agent, store=store
+    )
+    local_transcript_only = bool(idle_slice and route_ownership == ROUTE_EXTERNAL)
+    if local_transcript_only and deliver:
+        return False, "thread_goal_idle", True
+    return deliver, delivery_reason, local_transcript_only
 
 
 # LLM: 交付收口只有一条路径：能自己外发的走 message-tool 直投镜像，其余交给独立交付入口完成
@@ -818,19 +842,11 @@ class BackgroundMainAgentRuntime:
             resolved_route_supports_proactive=route_supports_proactive,
             resolved_route_supports_transcript=route_supports_transcript,
         )
-        idle_slice = _background_goal_idle_slice(
-            goal_context.goal,
-            request,
-            execution_result,
-            agent=self.agent,
-            store=self.store,
+        deliver, delivery_reason, local_transcript_only = _background_goal_delivery_mode(
+            goal_context.goal, request, execution_result, agent=self.agent,
+            store=self.store, deliver=deliver, delivery_reason=delivery_reason,
+            route_ownership=route_ownership,
         )
-        if idle_slice and deliver and route_ownership == ROUTE_EXTERNAL:
-            # 空转片（无工具调用、无 Goal/任务结构化变化）不主动推给外部通道；
-            # 正文仍落权威会话转录，TUI/历史可见。只在有外部投递义务的路线生效，
-            # 纯本地/TUI 线程保持原行为（本来就只会进转录）。
-            deliver = False
-            delivery_reason = "thread_goal_idle"
         return _complete_background_slice(
             self,
             _BackgroundSlicePlan(
@@ -855,7 +871,7 @@ class BackgroundMainAgentRuntime:
                 ),
                 runtime_status=execution_result.runtime_status,
                 runtime_reason=execution_result.runtime_reason,
-                local_transcript_only=bool(idle_slice and route_ownership == ROUTE_EXTERNAL),
+                local_transcript_only=local_transcript_only,
             ),
         )
 

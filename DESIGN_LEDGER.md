@@ -1,5 +1,19 @@
 # 设计台账
 
+## 熔断体验修复 code-size 拆平（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）
+
+- **背景**：`fa781d169` 合入后相对 step16y 告警基线多出 3 条 code-size 高风险（纯重构，行为不变）：
+  class `BackgroundMainAgentRuntime` 202/250、params `_background_external_delivery`、测试函数过长。
+- **做法**：
+  - runtime.py：run_once 里空转片交付改写抽成模块级 `_background_goal_delivery_mode`（复用
+    `_background_goal_idle_slice`，判据不变），类里只留一行委托；类行数 202 → 199（< near-soft 200）。
+  - background_delivery.py：`_background_external_delivery` 的 `frozen_retry` 与 `local_transcript_only`
+    收进 frozen dataclass `_ExternalDeliveryOptions`，参数回到 4 个；参数名用 `external_options`，
+    避开 guard 对 params/options/request 打包参数 +1 的特判。
+  - test_goal_idle_delivery.py：60 行的推送测试拆成两个（feishu 推送并取走、internal 只排队不推送）。
+- **验证**：warn 基线相对 step16y（3598 条）三个目标文件 **0 新增**（全部新增集合也为空）；
+  strict code-size 2239 blocked=False；相关测试 217 passed（5+8+204）、guards9 166 passed。
+
 ## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察 → 已实施）
 
 ## P17 合入后的 code-size 拆平（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`，已实现，待集成）

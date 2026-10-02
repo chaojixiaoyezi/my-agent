@@ -193,7 +193,7 @@ def test_tui_thread_without_external_channel_keeps_original_behavior(tmp_path) -
     assert updated is not None and updated.status == "paused"
 
 
-def test_push_notice_queues_without_external_channel_but_pushes_and_takes_with_feishu(tmp_path) -> None:
+def test_push_notice_pushes_once_and_takes_with_feishu(tmp_path) -> None:
     from agent_py_agent.agent.conversation.background_routing import BackgroundRouteDependencies
 
     agent, store, runtime, scheduler, thread, goal = _goal_env(tmp_path, channel="feishu")
@@ -221,7 +221,11 @@ def test_push_notice_queues_without_external_channel_but_pushes_and_takes_with_f
     assert "自动续跑已暂停" in runtime.channels.adapter("feishu").sent_messages[0].content
     assert store.threads.load(thread.thread_id).pending_host_notices == ()
 
-    # 纯 TUI 线程（internal binding）只排队不推送。
+
+def test_push_notice_queues_without_external_channel(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.background_routing import BackgroundRouteDependencies
+
+    # 纯 TUI 线程（internal binding）只排队不推送，提示留给下一次前台回复带出。
     agent2 = SimpleAgent(AgentConfig(memory_path="memory.jsonl"), tmp_path / "tui")
     store2 = agent2.conversation_store
     thread2 = store2.threads.get_or_create(
@@ -247,6 +251,11 @@ def test_push_notice_queues_without_external_channel_but_pushes_and_takes_with_f
         }
     )
     assert tripped2 and paused2 is not None
+    route_deps = BackgroundRouteDependencies(
+        load_thread=lambda tid: store2.threads.load(tid),
+        owner_paths=lambda: (),
+        owner_identity=lambda: ("", ""),
+    )
     channels2 = FakeDeliveryService()
     assert push_goal_no_progress_notice(
         store2, paused2, channels=channels2, route_deps=route_deps

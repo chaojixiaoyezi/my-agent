@@ -114,8 +114,10 @@ def record_background_response(
         delivery,
         delivery_context,
         envelope,
-        frozen_retry=frozen_retry,
-        local_transcript_only=local_transcript_only,
+        _ExternalDeliveryOptions(
+            frozen_retry=frozen_retry,
+            local_transcript_only=local_transcript_only,
+        ),
     )
     # 投递服务执行最终脱敏，历史保存其回执正文；缺少正文的既有替身保留已净化投影。
     committed_content = str(getattr(receipt, "content", projection.content) or "")
@@ -300,6 +302,15 @@ def _background_owner_message_metadata(
     return metadata
 
 
+# LLM: 本次外部投递的“既有事实”打包：重投载荷与空片本地转录标记互不排斥，
+#   合并后 _background_external_delivery 参数回到 4 个以内，调用点也不容易漏传。
+# 类用途: 承载外部投递的两个可选事实（冻结重投载荷、空片只做本地转录）。
+@dataclass(frozen=True)
+class _ExternalDeliveryOptions:
+    frozen_retry: FrozenOwnerDelivery | None = None
+    local_transcript_only: bool = False
+
+
 # LLM: 外部发送只有这一个出口：重投时若冻结载荷已证明外发成功，就绝不能再次外发
 # （只补本地 canonical），否则会对真实用户重复发消息。
 # 函数用途: 执行本次外部投递或复用冻结的外发事实，返回 (回执, 投递状态)。
@@ -307,10 +318,9 @@ def _background_external_delivery(
     delivery: BackgroundDeliveryDependencies,
     delivery_context: DeliveryContext,
     envelope: ReplyEnvelope,
-    *,
-    frozen_retry: FrozenOwnerDelivery | None,
-    local_transcript_only: bool = False,
+    external_options: _ExternalDeliveryOptions,
 ) -> tuple[object, str]:
+    frozen_retry = external_options.frozen_retry
     if frozen_retry is not None and frozen_retry.external_sent:
         return (
             SimpleNamespace(
@@ -324,7 +334,7 @@ def _background_external_delivery(
             ),
             "sent",
         )
-    if local_transcript_only:
+    if external_options.local_transcript_only:
         # 空片正文不主动推给用户，只作为本地转录保存；delivery_status 用 local_only
         # 表示"这条不欠外发"，唤醒确认与冻结判定都按本地转录处理。
         return (

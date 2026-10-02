@@ -65,6 +65,12 @@
     测试 1/2 红（feishu 收到 4/5 条，`assert 4 == 1`、`assert 5 == 2`）；②推送后不 `take_host_notices` →
     测试 1/2/4 红（`pending_host_notices` 非空）；③`supports_proactive` 恒 False（禁主动推送）→ 测试 1/2/4 红
     （feishu 收不到提示）。3 个变异全部被抓住（MUT1/2/3_EXIT=1），已还原。
+  - **code-size 拆平（2026-10-01，ds1，纯重构行为不变）**：相对 step16y 基线多出的 3 条 high-risk 全部消除——
+    runtime 类抽 `_background_goal_delivery_mode` 模块级函数（类 202→199）、`_background_external_delivery`
+    参数收进 `_ExternalDeliveryOptions`（4 个）、60 行推送测试拆成两个。
+    命令：`PYTHONPATH=$PWD $PY scripts/check_code_size.py --mode warn --write-baseline /private/tmp/claude-501/m-ds1-after3.json --report /private/tmp/claude-501/m-ds1-after3.md`
+    → 三个目标文件相对 step16y（3598 条）**0 新增**；strict 2239 blocked=False；
+    相关测试 217 passed（5+8+204）、guards9 166 passed。
 - **测试者偏差（如实记录）**：
   - **经过**：第一次绑定时脚本漏了 `/admin ` 前缀，假用户实际只发出了密码本身。产品把它当普通私聊消息：未绑定的 feishu/user owner 没有模型，请求以 `MODEL_NOT_CONFIGURED` 结束，没有调用模型；这条消息像普通消息一样落了 9 个隔离文件。
   - **处置**：用的是一次性假密码，测试根已整体删除，修正脚本后重发。
