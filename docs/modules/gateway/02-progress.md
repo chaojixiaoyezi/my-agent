@@ -6,6 +6,12 @@
 - `process_host_id` 在进程内缓存；macOS 用 libc gethostuuid 取硬件 UUID，取不到才退回主机名。
 - 设计、跨进程表现和一次性过渡见设计台账同名节，测试见 TESTS.md 同名节。
 
+## 插件管理的管理员判定改用统一函数（2026-10-02，分支 `claude/38-admin-fold`，基于 `claude/3a-step16z` `6980e5f41`，待集成）
+
+- `plugin_command_service._scope_management` 的 IM 管理员判定改为 `owner_access.is_complete_local_admin_owner(home)`，与 /settings 同一条规则、同一种 home；
+  user_config 工具的本机配置动作同样改用它。
+- 唯一行为差别是纯空白身份字段，原来插件会认作管理员，现在不认（/settings 一直不认）。详见设计台账同名节。
+
 ## C5 剩余竞态：熔断判定与用户回合登记同闸（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待集成）
 
 - “在场”查询和熔断落账之间原来没有互斥。现在 `run_claim.user_input_turn_gate` 持车道闸，读在场和落账一次做完。

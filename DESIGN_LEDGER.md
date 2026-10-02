@@ -32,6 +32,19 @@
 - **已知边界**：“登记要过车道闸”只影响互斥时序、不改可观察状态，黑盒测试无法区分（实测删掉 `gate.lock` 后本文件仍全绿）；
   这条留给 C5 自己的确定性交错用例守。登记键的“线程为空返回空串”分支当前无用例覆盖。详见 TESTS.md。
 
+## 管理员判定收拢：插件管理与 user_config 工具改用统一函数（2026-10-02，分支 `claude/38-admin-fold`，基于 `claude/3a-step16z` `6980e5f41`，已实现，待集成）
+
+- **背景**：P14 新增了 `owner_access.is_complete_local_admin_owner`（三项身份都是非空字符串，且是本机 local/main），/settings 的 `_is_admin` 和记忆向量重建已经改用它。
+  另外两处仍是内联写法：插件管理（IM 路径，`plugin_command_service._scope_management`）和 user_config 工具的本机配置动作（`user_config_tool._is_main_owner`）。
+- **做法**：两处都改为调用 `is_complete_local_admin_owner`，规则本身一字不改。
+  - 插件管理传入和 /settings 同一种 home（`home_paths_with_owner(base, resolve_owner_home(...))`）；
+  - user_config 传入 agent 的 `home_paths`，缺上下文时得到 None，判为非管理员（和原来一样）。
+- **行为对照**：
+  - 对系统自己构造的身份（`OwnerIdentity.local_main`、经 `safe_path_segment` 的 provider_user/group、命令流校验过的非空字段），结果和改前完全相同。
+  - 唯一的差别在纯空白身份字段。插件管理原来按真值判断完整性，`"  "` 算有值，`is_local_admin_owner` 又会去掉空白后当成本机，
+    结果 provider 为纯空白、kind 为 main 的身份会被认作管理员；/settings 一直不认。收拢后两边都不认，方向是变严格。
+  - user_config 原本就去空白，没有变化。
+
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，已实现，待集成）
 
 - **来源**：sol2 只读审查第 1 条。“用户回合在场”的查询只短暂持有登记表锁，之后的 `record_continuation_fuse` 落账不受保护。

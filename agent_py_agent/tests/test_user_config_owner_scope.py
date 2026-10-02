@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_context import (
@@ -13,7 +15,7 @@ from agent_py_agent.agent.runtime_context import (
 )
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.settings.model_profiles import model_profiles_path
-from agent_py_agent.agent.tooling.user_config_tool import UserConfigTool
+from agent_py_agent.agent.tooling.user_config_tool import UserConfigTool, _is_main_owner
 from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 from agent_py_agent.tests.test_decision_settings import host_at
 
@@ -82,6 +84,26 @@ def test_missing_owner_identity_cannot_gain_legacy_config_actions():
     assert "view" not in tool.model_spec.input_schema["properties"]["action"]["enum"]
     result = tool.execute({"action": "view"})
     assert not result.ok and result.error_code == "TOOL_PERMISSION_DENIED"
+
+
+@pytest.mark.parametrize(("identity", "expected"), [
+    (("local", "main", "main"), True),
+    (("", "", "main"), False),  # 目录墙裁决里空值算本机；管理动作要完整身份
+    (("  ", "main", "main"), False),
+    (("feishu", "user", "ou-alice"), False),
+])
+def test_legacy_config_gate_follows_the_shared_settings_rule(identity, expected):
+    from agent_py_agent.agent.gateway_parts.settings_control_service import _is_admin
+
+    home = SimpleNamespace(owner_provider=identity[0], owner_kind=identity[1], owner_id=identity[2])
+    agent = SimpleNamespace(home_paths=home)
+    tool = UserConfigTool(agent)
+    assert _is_main_owner(agent) is expected
+    assert _is_admin(home) is expected  # 与 /settings 对同一份身份的裁决一致
+    assert ("view" in tool.model_spec.input_schema["properties"]["action"]["enum"]) is expected
+    if not expected:
+        result = tool.execute({"action": "view"})
+        assert not result.ok and result.error_code == "TOOL_PERMISSION_DENIED"
 
 
 def test_user_legacy_action_rejected_by_canonical_model_schema(tmp_path, monkeypatch):

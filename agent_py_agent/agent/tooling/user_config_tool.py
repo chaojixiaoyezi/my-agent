@@ -32,7 +32,7 @@ from ..settings.user_config_capability import (
     read_config_fact,
     user_config_path,
 )
-from ..user_space.owner_access import is_local_admin_owner
+from ..user_space.owner_access import is_complete_local_admin_owner
 from .models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -56,15 +56,11 @@ def _decision_change_properties() -> dict:
     return {path: decision_field_schema(path) for path in decision_field_scopes()}
 
 
-# LLM: 身份只来自 Agent 的已解析 home；缺失上下文绝不能因空 provider/kind 被当作本机管理员。
+# LLM: 身份只来自 Agent 的已解析 home；缺失上下文绝不能因空 provider/kind 被当作本机管理员。规则统一在
+#   owner_access.is_complete_local_admin_owner（与 /settings、插件管理、记忆向量重建同一条），这里不另写一份。
 # 函数用途: 决定 legacy view/set 是否能展示和执行，普通 user 始终只能操作自己的决策设置。
 def _is_main_owner(agent: object | None) -> bool:
-    home_paths = getattr(agent, "home_paths", None)
-    # 原 owner 判据兼容空 provider/kind；工具提权入口必须额外要求已解析的完整身份。
-    return (home_paths is not None
-            and all(type(getattr(home_paths, field, None)) is str and getattr(home_paths, field).strip()
-                    for field in ("owner_provider", "owner_kind", "owner_id"))
-            and is_local_admin_owner(home_paths))
+    return is_complete_local_admin_owner(getattr(agent, "home_paths", None))
 
 
 # LLM: 普通 owner 的模型 schema 只保留决策字段，action 必填；运行时仍须二次拒绝 legacy，不能只依赖展示。

@@ -4,6 +4,8 @@
 
 - `gateway_parts/settings_control_service._is_admin` → `user_space/owner_access.is_complete_local_admin_owner`。
   后者要求身份完整且是本机 local/main；`cli/memory_admin_commands._vectors_rebuild_payload` 用的是同一个函数。
+- 收拢（2026-10-02）：`gateway_parts/plugin_command_service._scope_management`（IM 插件管理）与
+  `tooling/user_config_tool._is_main_owner`（本机配置动作）也改为调用它，不再各写一份。
 
 ## 设置服务 P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，待集成）
 

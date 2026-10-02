@@ -107,6 +107,25 @@ def test_bound_admin_private_chat_uses_settings_owner_rule(host, monkeypatch):
     assert seen == [True]
 
 
+@pytest.mark.parametrize(("owner", "expected"), [
+    (OwnerIdentity("local", "main", "main"), True),
+    (OwnerIdentity("feishu", "user", "ou-alice"), False),
+    # 纯空白 provider：/settings 一直不认；原来插件这里按真值判断，再经 is_local_admin_owner 去空白后会被当成本机管理员。
+    (OwnerIdentity("  ", "main", "main"), False),
+])
+def test_im_plugin_admin_follows_the_shared_settings_rule(host, owner, expected):
+    from agent_py_agent.agent.gateway_parts.settings_control_service import _is_admin
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    management = module._scope_management(host, replace(_scope(), resolved_owner=owner))
+    home = home_paths_with_owner(host.home_paths, resolve_owner_home(host.home_paths.root, owner))
+    assert management.context.is_admin is expected
+    assert _is_admin(home) is expected  # 与 /settings 对同一个 owner 的裁决一致
+
+
 def test_confirmation_preview_and_confirm_are_not_rewritten(host, monkeypatch):
     _command("/plugins enable demo")
     preview = "将启动外部程序，请先核对。\n确认启用：/plugins enable demo --confirm abc123"

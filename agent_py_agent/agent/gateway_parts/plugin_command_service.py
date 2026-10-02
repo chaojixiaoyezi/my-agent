@@ -16,7 +16,7 @@ from ..plugin_command_service import (
     plugin_command_unknown,
 )
 from ..plugin_management import PluginManagement, plugin_management_context
-from ..user_space.owner_access import is_local_admin_owner
+from ..user_space.owner_access import is_complete_local_admin_owner
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import resolve_gateway_scope_owner
 from .owner_conversation_store import owner_conversation_store
@@ -114,6 +114,7 @@ def _management(handler, server, body: dict) -> PluginManagement:
 
 
 # LLM: TUI 的 HTTP 角色或 IM 的已解析完整 owner 是唯一授权源；正文不能选择管理员，冷读取不构造 Agent。
+#   IM 路径的管理员判定用 owner_access.is_complete_local_admin_owner(home)，与 /settings 同一条规则、同一种 home。
 # 函数用途: 为两个入口组装同一 PluginManagement，显式工作目录仍经原 Gateway 路径权限门。
 def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManagement:
     from .workspace_scope import gateway_request_workspace_scope
@@ -121,8 +122,7 @@ def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManage
     owner = resolve_owner_home(base.home_paths.root, resolve_gateway_scope_owner(base, scope))
     home = home_paths_with_owner(base.home_paths, owner)
     if is_admin is None:
-        identity = owner.identity
-        is_admin = bool(identity.provider and identity.owner_kind and identity.owner_id) and is_local_admin_owner(home)
+        is_admin = is_complete_local_admin_owner(home)
     store = owner_conversation_store(base, home, initialize=False)
     context = plugin_management_context(
         owner, home, base.config, store.threads, actor_id=scope.user_id, channel=scope.channel,

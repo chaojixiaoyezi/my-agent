@@ -33,6 +33,16 @@
   这条由 C5 自己的确定性交错用例（`test_goal_fuse_user_turn_first.py` 的两项 + `test_gateway_goal_fuse_reset.py`）守着。
   同理，登记键“线程为空时返回空串”这一分支当前无用例覆盖。
 
+## 管理员判定收拢的入口用例（2026-10-02，分支 `claude/38-admin-fold`，基于 `claude/3a-step16z` `6980e5f41`）
+
+- `test_plugins_chat_control.py::test_im_plugin_admin_follows_the_shared_settings_rule`（3 组）：local/main 是管理员；飞书用户不是；纯空白 provider 不是。
+  每组都断言与 /settings `_is_admin` 对同一 owner 的裁决一致。
+- `test_user_config_owner_scope.py::test_legacy_config_gate_follows_the_shared_settings_rule`（4 组）：
+  - local/main 能看本机配置；
+  - 以下三组都被拒，模型 schema 里没有 view，执行时返回 TOOL_PERMISSION_DENIED：空 provider/kind、纯空白 provider、飞书用户。
+  - 每组都断言与 /settings 一致。
+- 变异 5 个，全部被拦住：插件退回旧的真值判断、插件不要求完整身份、user_config 不要求完整身份、共享判定不去空白、插件恒为非管理员。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：
