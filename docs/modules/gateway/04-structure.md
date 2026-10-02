@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## 管理员判定统一入口（P14 第 6 条，2026-10-02，待集成）
+
+- `gateway_parts/settings_control_service._is_admin` → `user_space/owner_access.is_complete_local_admin_owner`。
+  后者要求身份完整且是本机 local/main；`cli/memory_admin_commands._vectors_rebuild_payload` 用的是同一个函数。
+
 ## 设置服务 P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，待集成）
 
 - `gateway_parts/settings_control_service`：`show` 的 capability 来源键覆盖判断扩展到来运行时 capability 文件

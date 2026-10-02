@@ -533,7 +533,14 @@
       旧键只告警、不留别名、生产未设无需迁移）。该键是边界项，模型不能改；`/settings show` 展示编号/模型名/失效原因。
       向量库旁写 `memory_vectors.json.meta.json`（档案编号/服务商/模型名/维度/写入时间），读取时身份不一致或无元数据就把
       已有向量视为不存在、语义召回退回关键词并给原因码，不静默混用向量空间；管理员经 `memory vectors status` 预览、
-      `memory vectors rebuild --confirmed` 显式确认后清库重嵌（TUI 与 IM 通用）。详见本文件 §6 与 TESTS.md。
+      `memory vectors rebuild --confirmed` 显式确认后清库重嵌。详见本文件 §6 与 TESTS.md。
+    - P14 必须修（2026-10-02，分支 `claude/38-p14-embedding-fixes`，待集成）取代上面的旁路 meta：
+      - 身份改为档案编号 + 线路协议 + 端点摘要 + 模型名，从实际客户端取；
+      - 身份、实际维度和向量放进同一个快照文件，在正式跨进程锁里读写；
+      - 重建全有或全无；
+      - 重建入口只有 CLI `my-agent memory vectors rebuild --confirmed`，且只认身份完整的本机 local/main（TUI 与 IM 没有这个入口）。
+
+      详见 DESIGN_LEDGER 顶部同名节。
 
 - **减量第一批（2026-09-27，分支 `claude/38-delete-dead-config`，已合入 main `8f73a512c`，双机 step13s）**：按分类结论逐项复核后删除 43 个没有产品读取方的配置项
   （只在 `settings/config.py`、随包 YAML、归一化表或字段规格表里出现，或只被孤儿模块/测试/离线验收入口读取）。同批处理：

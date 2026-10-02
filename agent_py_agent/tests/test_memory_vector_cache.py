@@ -217,9 +217,9 @@ def test_cache_lives_in_its_own_file_and_never_rewrites_plaintext_store(tmp_path
     assert after == before
     # 缓存文件里不含任何明文字段（只存键与向量）。
     assert "支付系统迁移" not in (tmp_path / TEXT_CACHE_FILE).read_text(encoding="utf-8")
-    # 缓存键不进权威向量库的键空间。
+    # 缓存键不进权威向量库的键空间（P14 起条目在快照的 items 里）。
     if after:
-        assert not [k for k in json.loads(after) if k.startswith("textcache")]
+        assert not [k for k in json.loads(after)["items"] if k.startswith("textcache")]
 
 
 def test_cache_key_binds_fingerprint_and_hides_plaintext(tmp_path) -> None:
@@ -533,14 +533,14 @@ def test_p6_search_only_instance_never_rewrites_plaintext_store(tmp_path) -> Non
     writer.remove(victim.entry_id)
     vectors = tmp_path / VECTOR_FILE
     if vectors.exists():
-        assert victim.entry_id not in json.loads(vectors.read_text(encoding="utf-8"))
+        assert victim.entry_id not in json.loads(vectors.read_text(encoding="utf-8"))["items"]
 
     writer.add("user", "客户预算大约五十万元")  # reader 下次检索要现嵌这条 → 触发缓存回写
     reader.search_scoped("团建", top_k=3, predicate=_all)
 
     # 修复点：只做检索的实例只写自己的缓存文件，绝不整文件回写权威向量库。
     if vectors.exists():
-        data = json.loads(vectors.read_text(encoding="utf-8"))
+        data = json.loads(vectors.read_text(encoding="utf-8"))["items"]
         assert not (victim.entry_id in data and data[victim.entry_id].get("text") == victim.content)
         assert victim.content not in vectors.read_text(encoding="utf-8")
 

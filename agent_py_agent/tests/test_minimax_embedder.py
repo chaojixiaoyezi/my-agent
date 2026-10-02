@@ -152,8 +152,8 @@ def test_minimax_multi_text_keeps_order_and_count(monkeypatch) -> None:
 
     def fake_urlopen(req, timeout=None):
         captured["texts"] = json.loads(req.data.decode("utf-8"))["texts"]
-        # 按请求顺序返回各自向量(N 进 N 出,逐条对齐)
-        return _FakeResp({"vectors": [[1.0, 0.0], [0.0, 2.0], [0.0, 0.0, 0.0]], "base_resp": {"status_code": 0}})
+        # 按请求顺序返回各自向量(N 进 N 出,逐条对齐);同一批维度必须一致(P14 第 5 条),第三条用同维零向量
+        return _FakeResp({"vectors": [[1.0, 0.0], [0.0, 2.0], [0.0, 0.0]], "base_resp": {"status_code": 0}})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     out = MiniMaxEmbedder(api_base="https://x/v1", model="embo-01").embed(["a", "b", "c"])

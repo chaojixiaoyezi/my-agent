@@ -13,6 +13,25 @@
 - 同一起始游标连续 3 次确定性失败（提交被拒或输出解析失败）即熔断：state 记 `CURATOR_REPLAY_BREAKER_OPEN`，退避一小时，与发现层同源；运行账保留真实失败码。
 - 待定：同消息同主题不同内容会被合并（“花生/芒果”例子），两种做法与代价见 DESIGN_LEDGER 同名条目，交用户定。
 
+## P14 必须修：向量空间身份、同代快照、重建如实计数、实际维度、管理员入口（2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`，已实现，待集成）
+
+- 来源：sol 只读审查 P14 的 6 个必须修问题，外加“建议修”里的原因码登记、重建文案、状态未知不报 0、回归测试。
+- 身份改从实际发请求的嵌入客户端算：档案编号 + 线路协议 + 端点摘要（去掉账号口令后取 sha256）+ 模型名，和建客户端共用一次档案解析。
+  同一档案换端点或换协议就是另一个空间；密钥、请求头、端点明文都不进快照。
+- 接线：`core._memory_semantic_channel` 在身份建不起来时关掉语义通道，诊断记 `MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE`。
+  从此不会出现“有客户端、身份为 None”而跳过检查的情况。
+- 向量库改成单文件快照 `my-agent.memory-vectors.v2`，内含身份、实际维度、代次、写入时间和全部条目。
+  - 写入：在 `locked_json_path` 里先重读、再裁决、最后整份原子替换。
+  - 读取：按文件指纹发现换代就重载；检索在同一份快照上再裁决一次身份和维度。
+  - 原来单独写的 `memory_vectors.json.meta.json` 不再读也不再写。
+- 重建全有或全无：逐条嵌入，首个失败即停。
+  - 失败：返回 `ok=False` + `VECTOR_REBUILD_INCOMPLETE`，附 attempted/embedded/failed/failed_stage/failure，旧库不动。
+  - 全部成功才调 `replace_all` 整体替换。
+- 维度以实际向量为准：同一批向量必须等长；和快照维度不同时，读写都明确报 `VECTOR_DIMENSION_MISMATCH`。
+- `my-agent memory vectors rebuild --confirmed` 先过统一管理员判定 `owner_access.is_complete_local_admin_owner`（与 /settings 同一条）。被拒时不调嵌入、不碰向量文件。
+- 状态预览：没有嵌入客户端时也独立读文件，报能确认的数量；读不了报 None，不用 0 冒充。
+- 详见 DESIGN_LEDGER 与 TESTS.md 同名节。
+
 ## 补充查询片段材料：先预检每个片段能新增的事实（J8，2026-10-02，分支 `claude/be-jev-snippet-facts`，已实现，待集成）
 
 - 新增 `points.pre_recall.fragment_material`，配置 `memory_decision_pre_recall_fragment_material` 默认 `query_text`，与原做法逐字节相同。
@@ -24,7 +43,7 @@
 - 真实 Jev 对照：候选检索写死成模拟语义召回的结果，因为嵌入模型不在授权名单。被覆盖的片段不再给选，没有可补时不调 Jev；选择准确率的提升没有被证明，语义召回下的端到端效果未验证。
 - 详见 [召回前审计](../../tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md) 与 TESTS.md 同名节。
 
-## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，本地已实现，待集成）
+## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，本地已实现，待集成；P14 的旁路 meta 方案已被上节取代）
 
 - P13：`embedding_model_profile` 取代 `embedding_model/embedding_api_base/embedding_api_key/embedding_api_key_env` 四个平铺键
   （旧键仅告警，不留别名）。`core._embedding_client` 按档案的服务商凭据与端点构建，空档案 = 不建客户端、只走关键词；

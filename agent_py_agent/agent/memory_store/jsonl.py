@@ -184,8 +184,9 @@ class _JsonlMemoryIdentityMixin:
 
         path: JSONL 文件路径。
         local_store: 可选 LocalStore，用于索引和搜索；为空时仍可正常写 JSONL。
-        vector_identity: 可选嵌入身份（档案编号/服务商/模型名/维度）；P14 用它校验向量库元数据，
-            不一致或缺失时语义召回退回关键词，不静默混用。None 保持旧行为。
+        vector_identity: 可选向量空间身份（档案编号/线路协议/端点摘要/模型名，见 embedding_identity）；
+            P14 用它裁决向量库快照，不一致、缺失或维度不符时语义召回退回关键词，不静默混用。
+            None 是不管理身份的通用模式，只给测试和通用组件用；生产接线身份建不起来会直接关掉语义通道。
 
         副作用说明:
         会创建 path 的父目录；不会创建 LocalStore，也不会调用模型。"""
@@ -521,25 +522,29 @@ class _JsonlMemoryMutationMixin:
 # 类用途: 提供关键词/语义融合与 scope 内确定性召回。
 class _JsonlMemorySearchMixin:
     # LLM: 每个向量命中必须按 active entry ID 和正文逐字复核，旧向量不能复活历史内容；
-    #   身份不一致或没有元数据时，把已有向量当作不存在（退回关键词），不静默混用两个向量空间。
+    #   身份不一致、没有身份、维度不符或库读不了时，把已有向量当作不存在（退回关键词），不静默混用两个向量空间。
+    #   前置 identity_status 只为省一次付费嵌入；真正的裁决在 search 里对同一份快照再做一次（P14 第 3 条）。
+    #   检索成功会清掉 identity/search 两类旧错误（别的进程重建后本进程自动恢复）。
     # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果，失败保留可观察降级状态。
     def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
+        from ..retrieval.vector_store import VectorIdentityError
+
         try:
             store = self._vector_store()
             if store is None:
                 return []
-            from ..retrieval.vector_store import VectorIdentityError
-
             ok, reason = store.identity_status()
             if not ok:
-                self._record_semantic_health("identity", VectorIdentityError(reason))
-                return []
-            query_vec = self._embedder.embed([query])[0]
-            hits = store.search(query_vec, top_k=top_k)
-            self._record_semantic_health("search")
+                raise VectorIdentityError(reason)
+            hits = store.search(self._embedder.embed([query])[0], top_k=top_k)
+        except VectorIdentityError as exc:
+            self._record_semantic_health("identity", exc)
+            return []
         except Exception as exc:
             self._record_semantic_health("search", exc)
             return []
+        self._record_semantic_health("identity")
+        self._record_semantic_health("search")
         active = {record.entry_id: record for record in self.all()}
         records: list[MemoryRecord] = []
         for hit in hits:
@@ -1013,18 +1018,20 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
         """本地 per-owner 向量库(memory_vectors.json,在 owner home 内)。无 embedder 返回 None。
 
         只用本地文件,绝不碰共享向量库(零外部依赖、按 owner 天然隔离)。懒建缓存。
-        P14: 带上当前嵌入身份，向量库据此写/校验旁边元数据，身份不一致时视为不存在。
+        P14: 带上当前空间身份，向量库按同一份快照里的身份与实际维度裁决读写，不一致时视为不存在。
         """
         if self._embedder is None:
             return None
         if self._vector_store_cache is None:
             from ..retrieval.vector_store import VectorStore
 
-            self._vector_store_cache = VectorStore(
-                self.path.parent / "memory_vectors.json",
-                identity=self._vector_identity,
-            )
+            self._vector_store_cache = VectorStore(self._vector_store_path(), identity=self._vector_identity)
         return self._vector_store_cache
+
+    # LLM: 向量库固定在正式记忆 JSONL 同目录的 memory_vectors.json；状态预览和语义通道必须指向同一文件。
+    # 函数用途: 返回当前 owner 向量库快照文件路径。
+    def _vector_store_path(self) -> Path:
+        return self.path.parent / "memory_vectors.json"
 
     # LLM: 正文哈希缓存独立成文件（memory_text_vectors.json），检索路径永不重写含明文向量库；
     #   无 embedder 时必须完全关闭。它只是派生数据，丢了按"没有缓存"重算。
@@ -1047,8 +1054,8 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
             store = self._vector_store()
             if store is None:
                 return
-            # 写侧身份裁决统一交给 VectorStore._ensure_identity_writable：meta 缺失且库空=首次写入（落 meta），
-            # meta 缺失且库里有向量或身份不一致=拒绝混写，异常在下方记录降级。
+            # 写侧裁决统一交给 VectorStore.upsert（锁内重读最新快照）：空库由当前身份接管；有向量却没身份、身份不一致、
+            # 维度不符或库读不了都拒绝混写，VectorIdentityError 在下方按 reason 记录降级。
             vector = self._embedder.embed([record.content])[0]
             store.upsert(_record_vec_id(record), vector, text=record.content, metadata=_record_payload(record))
             self._record_semantic_health("index")
@@ -1065,44 +1072,6 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
             store.remove(entry_id)
         except Exception:
             pass
-
-    # LLM: 预览只读投影，不触发嵌入或清库；重建前先看数量与身份，避免管理员盲操作。
-    # 函数用途: 返回向量库现状：条目数、元数据、身份原因码与可重建的 active 记忆数。
-    def vector_index_status(self) -> dict[str, object]:
-        store = self._vector_store()
-        if store is None:
-            return {
-                "ok": False, "reason": "no_embedder", "vector_count": 0,
-                "meta": None, "active_count": 0,
-            }
-        ok, reason = store.identity_status()
-        return {
-            "ok": ok,
-            "reason": reason,
-            "vector_count": len(store),
-            "meta": store.meta(),
-            "active_count": len(list(self.all())),
-        }
-
-    # LLM: 重建是管理员显式动作：先清空旧库并按当前身份落新元数据，再全量重嵌 active 记忆；
-    #   它不修改 memory.jsonl 权威事实，只重建可推导的向量投影。失败保留结构化 reason。
-    # 函数用途: 清空并全量重嵌当前 owner 的记忆向量，返回重建数量与状态。
-    def rebuild_vectors(self) -> dict[str, object]:
-        try:
-            store = self._vector_store()
-            if store is None:
-                return {"ok": False, "reason": "no_embedder", "rebuilt": 0, "vector_count": 0}
-            store.reset()
-            count = 0
-            for record in self.all():
-                self._index_vector(record)
-                count += 1
-            self._record_semantic_health("index")
-            self._record_semantic_health("identity")
-            return {"ok": True, "rebuilt": count, "vector_count": len(store)}
-        except Exception as exc:
-            self._record_semantic_health("rebuild", exc)
-            return {"ok": False, "reason": type(exc).__name__, "rebuilt": 0, "vector_count": 0}
 
     # LLM: 全量建索引只读 active authority，不修改 memory.jsonl 或生成第二份长期事实。
     # 函数用途: 从正式长期记忆重建 LocalStore/FTS 索引。
@@ -1219,12 +1188,74 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
         return records
 
 
+# LLM: 向量投影的管理动作（状态预览、全量重建）与日常召回分开：只读写可重建的 memory_vectors.json，不碰 memory.jsonl
+#   权威；依赖 Recall mixin 的 _vector_store/_vector_store_path/_record_semantic_health。改动同步 cli/memory_admin_commands、
+#   test_vector_identity 与 test_vector_snapshot_consistency。
+# 类用途: 给管理员入口提供向量库状态预览和全有或全无的重建。
+class _JsonlMemoryVectorAdminMixin:
+    # LLM: 预览只读投影，不触发嵌入或清库；重建前先看数量与身份，避免管理员盲操作。没有嵌入客户端时也独立读文件
+    #   给出能确认的数量：文件不存在是 0，读不了是 None（未知），不用 0 冒充；active 数始终来自正式 JSONL。
+    # 函数用途: 返回向量库现状：条目数、快照头、身份原因码与可重建的 active 记忆数。
+    def vector_index_status(self) -> dict[str, object]:
+        from ..retrieval.vector_store import VectorStore
+
+        active_count = len(list(self.all()))
+        store = self._vector_store()
+        if store is None:
+            summary = VectorStore(self._vector_store_path()).summary()
+            return {"ok": False, "reason": "no_embedder", "active_count": active_count, **summary}
+        ok, reason = store.identity_status()
+        return {"ok": ok, "reason": reason, "active_count": active_count, **store.summary()}
+
+    # LLM: 重建是管理员显式动作，全有或全无（P14 第 4 条）：逐条嵌入全部 active 记忆、在内存里拼出完整新快照，
+    #   任一条失败立即停（后面的不再发请求，省 token），返回 ok=False + VECTOR_REBUILD_INCOMPLETE 和准确计数，旧库原样保留；
+    #   全部成功才经 VectorStore.replace_all 一次原子替换。不修改 memory.jsonl 权威事实；失败原因只记类型名或原因码。
+    # 函数用途: 全量重嵌当前 owner 的记忆向量，返回尝试数、成功数、失败数、写入数与结构化原因。
+    def rebuild_vectors(self) -> dict[str, object]:
+        from ..retrieval.vector_store import VectorStoreError
+
+        store = self._vector_store()
+        if store is None:
+            return {"ok": False, "reason": "no_embedder", "attempted": 0, "embedded": 0, "failed": 0,
+                    "rebuilt": 0, "vector_count": None}
+        records = list(self.all())
+        rows, failure = self._embed_rebuild_rows(records)
+        # failed 只数嵌入失败的记录（首个失败即停，所以是 0 或 1）；写盘失败看 failed_stage=write。
+        failed = 0 if failure is None else 1
+        counts = {"active_count": len(records), "attempted": len(rows) + failed, "embedded": len(rows), "failed": failed}
+        if failure is None:
+            try:
+                store.replace_all(rows)
+            except Exception as exc:
+                failure = ("write", getattr(exc, "reason", None) or type(exc).__name__)
+        if failure is not None:
+            self._record_semantic_health("rebuild", VectorStoreError("VECTOR_REBUILD_INCOMPLETE"))
+            return {"ok": False, "reason": "VECTOR_REBUILD_INCOMPLETE", "failed_stage": failure[0], "failure": failure[1],
+                    "rebuilt": 0, **counts, "vector_count": store.summary()["vector_count"]}
+        for operation in ("rebuild", "index", "identity"):
+            self._record_semantic_health(operation)
+        return {"ok": True, "reason": "", "rebuilt": len(rows), **counts, "vector_count": store.summary()["vector_count"]}
+
+    # LLM: 重建的嵌入阶段：一次只嵌一条，便于准确计数；首个失败即停并返回 ("embed", 原因码或异常类型名)，不吞成功。
+    # 函数用途: 为全部 active 记忆生成重建行，返回 (已成功的行, 失败信息或 None)。
+    def _embed_rebuild_rows(self, records: list[MemoryRecord]) -> tuple[list[tuple], tuple[str, str] | None]:
+        rows: list[tuple] = []
+        for record in records:
+            try:
+                vector = self._embedder.embed([record.content])[0]
+            except Exception as exc:
+                return rows, ("embed", getattr(exc, "reason", None) or type(exc).__name__)
+            rows.append((_record_vec_id(record), vector, record.content, _record_payload(record)))
+        return rows, None
+
+
 # LLM: One public repository composes the mutation authority and recall projection without duplicate storage paths.
 # 类用途: 作为 owner 唯一正式长期记忆仓库，对外保持既有 JsonlMemory 接口。
 class JsonlMemory(
     _JsonlMemoryIdentityMixin,
     _JsonlMemoryMutationMixin,
     _JsonlMemoryRecallMixin,
+    _JsonlMemoryVectorAdminMixin,
 ):
     pass
 

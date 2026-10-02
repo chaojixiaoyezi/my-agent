@@ -27,6 +27,52 @@
 - **开关**：recall 点位仍默认关闭，生产是否打开由集成方定。
 - **验证**：见 TESTS.md 同名节。
 
+## P14 必须修：向量空间身份、同代快照、重建如实计数、实际维度、管理员入口（2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`，已实现，待集成）
+
+- **来源**：sol 只读审查 P14（`918285cc1`）的 6 个必须修，外加 4 条建议修。生产还没开嵌入，这批要在任何人打开嵌入之前合入。
+- **决策 1：空间身份 = 档案编号 + 线路协议 + 端点摘要 + 模型名，从实际发请求的客户端对象取**（第 1、2 条）。
+  - 不加目录里的 provider_id：解析结果里没有它。嵌入请求只由协议、端点、模型和密钥决定；换服务商基本都会换端点，
+    端点和模型都相同就是同一个空间。
+  - 端点摘要：scheme 和主机转小写、去掉末尾斜杠，路径和查询原样保留；先剥掉 userinfo 再取 sha256。
+    换账号或换密钥不算换空间，不会触发无谓的重建，凭据派生值也不进快照。
+  - 协议取客户端类上显式声明的 `protocol`，不用类名，改类名不会让所有向量库失配；没声明协议的新客户端拿不到身份，语义通道直接关闭。
+  - 档案编号保留在身份里，换档案就要求重建（保守做法）。
+- **决策 2：身份建不起来就关闭语义通道**（第 2 条）。
+  - `core._memory_semantic_channel` 返回 (None, None)，并记 `MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE`。
+  - `VectorStore(identity=None)` 保留为不管理身份的通用模式，只给测试和通用检索用。
+  - 这种模式的写入会把快照身份置空，因为它没法为新向量担保；之后带身份的读者会得到 `VECTOR_META_MISSING`。
+- **决策 3：单文件快照 + 正式跨进程锁**（第 3 条）。格式 `my-agent.memory-vectors.v2`，字段：schema_version、identity、dim、generation、written_at、items。
+  - 写：在 `locked_json_path` 里重读最新快照，裁决身份和维度，再整份原子替换。
+    `remove` 不做身份裁决，保留原身份，保证硬删除的隐私清理不会被失配挡住。
+  - 读：每次比对 (inode, size, mtime_ns) 指纹，变了就重载；指纹和内容用同一个文件句柄读取。
+    `search` 在同一份快照上再裁决一次；前置的 `identity_status` 只是为了省一次付费嵌入。
+  - 空库可以被任何身份接管。
+  - 文件读不了时：带身份就报 `VECTOR_STORE_UNREADABLE` 并拒绝增量写，等管理员重建；不带身份沿用旧行为，当成空库。
+  - 旧格式（整份 id→条目）按“没有身份”读入。P14 第一版的旁路 `memory_vectors.json.meta.json` 不读、不写、不迁移；
+    生产没开过嵌入，开发机上如果有可以手动删。
+- **决策 4：重建全有或全无，首个失败即停**（第 4 条）。
+  - 逐条嵌入，方便准确计数。一条失败后整次重建注定作废，再继续只会白花请求（端点宕机时每条还要等 30 秒超时），所以直接停。
+  - 返回 attempted、embedded、failed（嵌入失败条数，0 或 1）、failed_stage（embed 或 write）、failure（原因码或异常类型名）、
+    rebuilt（实际写入数）和 vector_count；失败时旧库不动。
+  - 代价：如果某条记忆单独嵌不出来（例如超长），重建会一直失败，管理员需要按 failure 先处理那条记忆。
+- **决策 5：维度只认实际向量**（第 5 条）。
+  - 客户端的 `dim` 只是声明值，不进身份。
+  - 同一批写入必须等长；库非空时必须等于快照维度；query 维度不同就报 `VECTOR_DIMENSION_MISMATCH`。
+  - 请求里不发 dimensions 参数，因为不是所有兼容端点都支持。
+- **决策 6：管理员判定只有一份**（第 6 条）。
+  - 新增 `owner_access.is_complete_local_admin_owner`；/settings 的 `_is_admin` 改为调用它。
+  - `memory vectors rebuild` 的预览和执行都先过这个判定；被拒时在任何嵌入或读写向量库之前返回 `MEMORY_VECTORS_ADMIN_ONLY`。
+  - `memory vectors status` 是只读预览，本轮不加门（3a 只点名了 rebuild）。插件管理和 user_config 工具里还有两处同规则的内联写法，可以后续收拢。
+- **建议修**：
+  - 7 个原因码登记进 error_taxonomy。
+  - YAML 里的重建提示改成 CLI 用法 `my-agent memory vectors rebuild --confirmed`；聊天命令族里没有这个入口。
+  - 没有嵌入客户端时，状态预览报真实数量，读不了报 None。
+- **结构**：管理动作挪到 `_JsonlMemoryVectorAdminMixin`，召回 mixin 不再变大。对精确底版做告警身份比对：新增 0。
+- **未做 / 未验证**：
+  - 没调真实嵌入，只用了测试替身和伪端点。
+  - TUI 和 IM 里没有 vectors 管理入口（本来就只有 CLI）。
+  - 没测真实的多个网关进程同时写同一 owner 的向量库，用“子进程持锁”用例代替。
+
 ## J17：Gateway 停机时一并结清进程内 runner worker 与 owner 池 agent 的在途模型调用（2026-10-02，分支 `claude/38-j17-stop-settles-runner-calls`，基于 `claude/3a-step16z` `51e52f04a`，已实现，待集成）
 
 - **缺口**：停机结清（`call_runtime.settle_open_model_calls_for_shutdown`）原来只结网关 agent 自己的账本。
@@ -442,7 +488,7 @@
   ruff/doc_sync/code-size strict/diff --check/clean_package 全过；`size_diff.sh` 新增告警 1（`test_gateway_conversation_control.py`
   的测试函数 soft 告警，该文件本轮未改、由集成分支 7e0fbcec1 引入，非本批所致）/消失 3。
 
-## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，基于 `ed64438fc`，已实现，待集成）
+## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，基于 `ed64438fc`，已实现，待集成；P14 的旁路 meta 方案已被顶部“P14 必须修”取代）
 
 - **背景**：嵌入连接此前是 4 个平铺键（embedding_model/api_base/api_key/api_key_env），`/model` 目录已有 embedding 能力档案却无运行时消费者；
   `memory_vectors.json` 不记录生成它的模型，同维度换模型会静默混用两个向量空间。

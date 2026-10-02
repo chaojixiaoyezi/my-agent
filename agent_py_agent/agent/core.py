@@ -239,13 +239,7 @@ def _wire_memory_authorities(
         quota_enforcer=agent.owner_quota,
     )
     semantic_status: dict[str, str] = {}
-    embedder = _build_memory_embedder(agent, diagnostics=semantic_status)
-    vector_identity: dict[str, object] | None = None
-    if embedder is not None:
-        from .settings.embedding_profile import embedding_identity
-
-        profile_id = str(getattr(config, "embedding_model_profile", "") or "").strip()
-        vector_identity = embedding_identity(agent, profile_id, int(getattr(embedder, "dim", 0) or 0))
+    embedder, vector_identity = _memory_semantic_channel(agent, semantic_status)
     agent.memory = JsonlMemory(
         paths["memory_path"],
         local_store=agent.local_store,
@@ -734,6 +728,26 @@ def _build_memory_embedder(agent: object, *, diagnostics: dict[str, str] | None 
     status.clear()
     status.update(state="configured")
     return embedder
+
+
+# LLM: 生产语义通道 = 客户端 + 由同一客户端算出的空间身份，二者同生同灭（P14 第 2 条）：身份建不起来就关掉通道、
+#   诊断记 MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE，绝不把"有客户端、身份为 None"交给 JsonlMemory（None 是给测试和
+#   通用组件的不管理模式）。只建对象、不发网络请求。改这里要同步 test_vector_identity 的接线用例。
+# 函数用途: 为记忆语义召回建好嵌入客户端和向量库身份；任一缺失都返回 (None, None) 并写降级诊断。
+def _memory_semantic_channel(agent: object, status: dict[str, str]) -> tuple[object | None, dict[str, str] | None]:
+    embedder = _build_memory_embedder(agent, diagnostics=status)
+    if embedder is None:
+        return None, None
+    from .settings.embedding_profile import embedding_identity
+
+    profile_id = str(getattr(getattr(agent, "config", None), "embedding_model_profile", "") or "")
+    identity = embedding_identity(profile_id, embedder)
+    if identity is None:
+        status.clear()
+        status.update(state="degraded", error_code="MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE")
+        logging.getLogger(__name__).warning("语义记忆无法确定嵌入身份；当前使用关键词召回")
+        return None, None
+    return embedder, identity
 
 
 # LLM: 工具语义检索只守自己的开关 tool_vector_search_enabled，模型与凭据来自 embedding_model_profile 档案（与记忆共用）；

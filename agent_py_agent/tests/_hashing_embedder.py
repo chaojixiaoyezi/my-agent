@@ -34,9 +34,13 @@ def _features(text: str) -> list[str]:
 
 
 # LLM: 实现 retrieval.embedding.EmbeddingProvider 协议（dim + embed），只在测试里当确定性替身，产品代码不引用。
+#   另带 protocol/model/api_base 三个身份字段，让 core 的生产接线能为它算出向量空间身份（embedding_identity）。
 # 类用途: 把文字特征哈希成定长向量并 L2 归一的本地 embedder，零依赖、不发网络请求、结果可复现。
 class LocalHashingEmbedder:
     """确定性本地 embedder(默认/兜底/测试):特征哈希 → 定长向量,L2 归一。零依赖、可复现。"""
+
+    # 线路协议名，只为让替身也有完整的向量空间身份；没有真实网络协议。
+    protocol = "local_hashing"
 
     def __init__(self, dim: int = DEFAULT_EMBED_DIM) -> None:
         self._dim = max(8, int(dim))
@@ -44,6 +48,18 @@ class LocalHashingEmbedder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    # LLM: 模型名带维度：不同维度的特征哈希是不同的向量空间，身份和正文哈希缓存指纹都要能区分。
+    # 函数用途: 返回替身的模型名。
+    @property
+    def model(self) -> str:
+        return f"local-hashing-{self._dim}"
+
+    # LLM: 替身没有网络端点，固定一个本地伪地址，只为让身份字段完整；不会被请求。
+    # 函数用途: 返回替身的伪端点地址。
+    @property
+    def api_base(self) -> str:
+        return "local://hashing"
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._embed_one(t) for t in texts]

@@ -44,6 +44,27 @@
   - ruff、import 边界、doc_sync、`diff --check`、`size_diff` 新增 0、clean_package、常数目录重生成。
 - **变异**：12 个全部抓住。包括主题比对回到原样、范围比对回到原样、提交前不剔除、剔除吞掉所有 ValueError、合并抛普通 ValueError、模型警告不截短、永不熔断、网络类失败也计入、熔断码不拉长退避、不比游标、state 记真实失败码、熔断不看前几条状态。
 
+## P14 必须修的回归用例（2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`）
+
+- `test_vector_identity.py`（重写，19 项）：
+  - 第 1 条：身份跟着端点和协议走，不含凭据和端点明文。
+  - 第 2 条：接线只解析一次档案；身份缺失时关通道、不落向量。
+  - 读写身份裁决；旧格式文件和不管理身份的写入都算没有身份；删除不受失配阻挡。
+  - 状态预览：读不了的数量报 None。
+  - 第 6 条：CLI rebuild 对非管理员、身份不完整各 2 项（预览和执行），断言不调嵌入、向量文件字节和 mtime 不变。
+- `test_vector_snapshot_consistency.py`（新增，11 项）：
+  - 第 3 条：旧读者换代后重载；旧写者在锁内重读后被拒；确定性交错（A 落盘中，B 等锁）；子进程持锁时写入要等待。
+  - 第 4 条：重建嵌入失败（首条、末条）时计数如实、旧库字节不变；写盘失败；失败后再成功会清掉错误。
+  - 第 5 条：伪端点返回 2 维、客户端声明 256 维；端点换维度后读写都明确失配；一批里混长度被拒。
+- 既有用例调整：
+  - `test_semantic_recall_integration.py` 两处补 `embedding_model_profile`，因为身份需要档案编号。
+  - `test_minimax_embedder.py` 伪响应的第三条向量改成同维。
+  - `test_memory_vector_cache.py` 三处改为读快照的 `items`，原断言在新格式下会空过。
+- 变异 15 个，全部被目标用例拦住：身份不含端点、身份缺失仍保留客户端、读不重载、增量写不取锁、锁内不重读、
+  重建吞掉逐条失败、库内批次混维度、写入不比快照维度、端点批次混维度、入口不判管理员、判定不要求完整身份、
+  读不了报 0、检索不在同一快照裁决、写盘失败当成功、检索不比 query 维度。
+- 只用测试替身 `tests/_hashing_embedder.py`（新增 protocol/model/api_base 身份字段）和伪端点，不调真实嵌入。
+
 ## 去抖：探测超时用例的“不重试”断言改成最多 1 次（2026-10-02，3a）
 
 - **现象**：Linux 12 片车道（`92842d69b`）第 5 片 `test_decision_model_operations.py::test_native_probe_timeout_is_bounded_and_does_not_retry`

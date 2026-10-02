@@ -1,7 +1,10 @@
 # LLM: 嵌入服务只按 /model 档案引用解析连接，空值 = 不建客户端、只走关键词；档案失效明确失败，不回退到聊天模型。
 #   服务商凭据与端点全部来自档案，_embedding_client 不再读任何 embedding_* 平铺键。机器判断只读结构化 reason。
-# 模块用途: 解析嵌入服务的固定模型档案，并给设置页提供不含秘密的编号、型号与失效原因。
+# 模块用途: 解析嵌入服务的固定模型档案，给设置页提供不含秘密的编号、型号与失效原因，并由嵌入客户端算向量库空间身份。
 from __future__ import annotations
+
+import hashlib
+from urllib.parse import urlsplit, urlunsplit
 
 from ..backends.errors import ModelNotConfiguredError
 from .model_profiles import selected_model_config
@@ -38,24 +41,36 @@ def embedding_profile_description(agent: object, profile_id: str) -> str:
     return f"{label}；模型：{config.model_name or '未配置'}"
 
 
-# LLM: 向量库身份 = 档案编号 + 服务商 + 模型名 + 维度，缺任一关键字段都不构成可用身份；供 P14 写元数据与一致性校验。
-# 函数用途: 由档案解析结果生成向量库元数据身份，profile_id 为空时返回 None（不写元数据、不启用语义身份）。
-def embedding_identity(agent: object, profile_id: str, dim: int) -> dict[str, object] | None:
+# LLM: 向量空间身份只从"真正要发请求的那个客户端对象"取：档案编号 + 线路协议 + 端点摘要 + 模型名，与建客户端
+#   共用同一次档案解析，不再二次读目录（P14 第 1/2 条）。端点只留去掉账号口令后的摘要，密钥和请求头永不进身份。
+#   维度不在这里，由 VectorStore 按实际向量长度确定（第 5 条）。任一字段缺失返回 None：生产调用方必须关闭语义通道并
+#   给出结构化诊断，不能把 None 当成旧兼容放行。改字段要同步 VectorStore 的身份比对与 test_vector_identity。
+# 函数用途: 由嵌入客户端生成向量库的空间身份；缺字段返回 None。
+def embedding_identity(profile_id: str, embedder: object) -> dict[str, str] | None:
     profile_id = str(profile_id or "").strip()
-    if not profile_id or not dim:
-        return None
-    try:
-        config = embedding_model_config(agent, profile_id)
-    except ModelNotConfiguredError:
-        return None
-    if config is None:
+    protocol = str(getattr(embedder, "protocol", "") or "").strip()
+    model_name = str(getattr(embedder, "model", "") or "").strip()
+    endpoint_digest = _endpoint_digest(str(getattr(embedder, "api_base", "") or ""))
+    if not (profile_id and protocol and model_name and endpoint_digest):
         return None
     return {
         "profile_id": profile_id,
-        "provider": str(getattr(config, "model_backend", "") or ""),
-        "model_name": str(getattr(config, "model_name", "") or ""),
-        "dim": int(dim),
+        "protocol": protocol,
+        "endpoint_digest": endpoint_digest,
+        "model_name": model_name,
     }
+
+
+# LLM: 只规范大小写不敏感的部分（scheme、主机）和末尾斜杠，路径与查询原样参与；先剥掉 userinfo（账号口令）再摘要，
+#   所以换主机、端口、路径就换空间，换账号不换。没有 scheme 或主机返回空串，调用方据此判身份不可用。
+# 函数用途: 把端点地址规范化后取 sha256 十六进制摘要，作为不含凭据的连接身份。
+def _endpoint_digest(api_base: str) -> str:
+    parts = urlsplit(api_base.strip())
+    host = parts.netloc.rpartition("@")[2].lower()
+    if not (parts.scheme and host):
+        return ""
+    normalized = urlunsplit((parts.scheme.lower(), host, parts.path.rstrip("/"), parts.query, ""))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 __all__ = [

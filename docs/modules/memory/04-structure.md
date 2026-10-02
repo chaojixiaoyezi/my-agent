@@ -3,14 +3,22 @@
 ## 嵌入档案与向量身份（P13+P14，2026-10-02，ds1，待集成）
 
 - `settings/embedding_profile.embedding_model_config`：按档案编号解析嵌入连接（capability="embedding"），空值返回 None；
-  失效抛 `ModelNotConfiguredError(profile_id, profile_reason)`；`embedding_identity` 生成向量库元数据身份。
+  失效抛 `ModelNotConfiguredError(profile_id, profile_reason)`。
+- `settings/embedding_profile.embedding_identity(profile_id, embedder)`（P14 修正）：从客户端对象取 `protocol`、`model`、`api_base`，
+  生成 {档案编号, 线路协议, 端点摘要, 模型名}；缺任一字段返回 None。维度不在身份里。
+- `retrieval/embedding`：`OpenAICompatibleEmbedder.protocol="openai_compatible_embeddings"`、`MiniMaxEmbedder.protocol="minimax_native_embeddings"`；
+  `_parse_vectors` 要求同一批向量等长且非空。客户端的 `dim` 只是声明的默认值，不进身份。
 - `core._embedding_client(agent)`：唯一嵌入客户端入口，服务商凭据与端点全部来自档案；`_build_memory_embedder` / `_build_tool_embedder`
-  只守各自开关，失败降级 None 并给结构化状态。
-- `retrieval/vector_store.VectorStore`：`identity` 参数控制 `memory_vectors.json.meta.json` 的写读；
-  `identity_status()` 判定一致性，`reset()` 供重建清库并落新身份。
-- `memory_store/jsonl.JsonlMemory`：`vector_identity` 传入身份；`vector_index_status()` 预览、`rebuild_vectors()` 全量重嵌；
-  语义召回读侧身份不一致退回关键词。
-- `cli/memory_admin_commands`：`memory vectors status / rebuild --confirmed` 管理入口（先预览再确认）。
+  只守各自开关，失败降级 None 并给结构化状态。`_memory_semantic_channel` 把客户端和身份一起交给 JsonlMemory；身份缺失就两者都不给。
+- `retrieval/vector_store.VectorStore`：单文件快照 `my-agent.memory-vectors.v2`（identity/dim/generation/written_at/items）。
+  - 写入（`upsert_many`/`replace_all`/`remove`）都在 `common/json_io.locked_json_path` 里完成。
+  - 读取先 `_refresh` 比文件指纹；`search` 在同一份快照上裁决身份与 query 维度，失配抛 `VectorIdentityError(reason)`。
+  - `summary()` 给条目数（读不了为 None）和快照头；`identity=None` 是不管理身份的通用模式。
+- `memory_store/jsonl.JsonlMemory`：`vector_identity` 传入身份；语义召回读侧失配退回关键词，并记 identity/search 健康错误。
+  管理动作单独放在 `_JsonlMemoryVectorAdminMixin`：`vector_index_status()` 预览；`rebuild_vectors()` 全有或全无地重嵌，
+  嵌入阶段在 `_embed_rebuild_rows`。
+- `cli/memory_admin_commands`：`memory vectors status / rebuild --confirmed` 管理入口。rebuild 先经 `owner_access.is_complete_local_admin_owner`，
+  再预览，最后显式确认执行。
 
 ## 常数整改第三批（P10，2026-10-02，分支 `worker/ds2-p10-batch3`）
 

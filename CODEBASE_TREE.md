@@ -808,6 +808,8 @@ agent_py_agent/
 |   |-- test_merged_config_knobs.py    # 参数减量第 2 批：11 组合并后的单一旋钮语义（空/0/数字）、旧键只告警不转值、随包 YAML 与默认值一致
 |   |-- test_param_reduction_e_group.py # 参数减量第 3 批 E 组：14 个内部参数降为常量（值不变）、旧键只告警、注册表用常量、模型可见提示不再指向已删的键
 |   |-- test_embedding_service.py      # 嵌入服务合并：记忆与工具共用 embedding_*（模型/端点/key 链同一条），两个开关各管各的，旧 tool_/memory_embedding_* 只告警不转值，登记表归“模型请求”
+|   |-- test_vector_identity.py        # P14 向量空间身份：端点/协议决定空间、凭据不进身份、接线一次解析且身份缺失关通道、读写裁决、重建入口只认本机管理员（拒绝时不嵌入不改文件）
+|   |-- test_vector_snapshot_consistency.py # P14 单文件快照：换代重载、锁内重读、交错与跨进程锁、重建全有或全无且计数如实、维度以实际向量为准
 |   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
 |   |-- test_constant_names_unique.py  # 同一数值常数名只在一个模块定义；确属不同含义的列白名单写原因，过期条目也失败
 |   |-- test_ci_workflow_paths.py      # CI 工作流里点名的测试文件必须存在，删除或改名测试时同批改工作流

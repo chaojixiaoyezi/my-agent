@@ -16,6 +16,7 @@ from ..agent.memory_api import (
     MemoryMigrationService,
     MemoryRetentionService,
 )
+from ..agent.user_space.owner_access import is_complete_local_admin_owner
 from .common import make_agent
 from .memory_commands.memory_doctor_cmd import (
     _build_archive_doctor,
@@ -368,9 +369,20 @@ def _vectors_status_payload(agent: Any, args: Any) -> dict[str, object]:
     }
 
 
-# LLM: rebuild 必须先预览；未 --confirmed 只回预览并提示，不执行清库重嵌。
-# 函数用途: 构造记忆向量库重建报告（预览或执行）。
+# LLM: rebuild 先过统一管理员判定（与 /settings 同一条：完整可信身份 + 本机 local/main），不是管理员时预览和执行
+#   都拒绝，且在任何嵌入、读写向量库之前返回 MEMORY_VECTORS_ADMIN_ONLY。之后必须先预览；未 --confirmed 只回预览，
+#   不执行重嵌。执行结果如实回传重建计数与失败阶段，ok 只取重建结果。
+# 函数用途: 构造记忆向量库重建报告（拒绝、预览或执行）。
 def _vectors_rebuild_payload(agent: Any, args: Any) -> dict[str, object]:
+    if not is_complete_local_admin_owner(agent.home_paths):
+        return {
+            "ok": False,
+            "command": "memory vectors rebuild",
+            "owner_id": str(getattr(agent.home_paths, "owner_id", "") or "local/main"),
+            "executed": False,
+            "error_code": "MEMORY_VECTORS_ADMIN_ONLY",
+            "message": "只有本机管理员（local/main，身份完整）能重建记忆向量库。",
+        }
     preview = agent.memory.vector_index_status()
     if not bool(getattr(args, "confirmed", False)):
         return {
@@ -387,14 +399,13 @@ def _vectors_rebuild_payload(agent: Any, args: Any) -> dict[str, object]:
             "message": "未确认：已预览将重建的 active 记忆数；确认执行请加 --confirmed。",
         }
     result = agent.memory.rebuild_vectors()
+    fields = ("rebuilt", "attempted", "embedded", "failed", "failed_stage", "failure", "vector_count", "reason")
     return {
         "ok": bool(result.get("ok")),
         "command": "memory vectors rebuild",
         "owner_id": str(getattr(agent.home_paths, "owner_id", "") or "local/main"),
         "executed": True,
-        "rebuilt": result.get("rebuilt", 0),
-        "vector_count": result.get("vector_count", 0),
-        "reason": result.get("reason", ""),
+        **{key: result[key] for key in fields if key in result},
     }
 
 

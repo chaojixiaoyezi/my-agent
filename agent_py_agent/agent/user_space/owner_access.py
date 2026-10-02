@@ -39,6 +39,14 @@ def is_local_admin_owner(home_paths: object) -> bool:
     return provider in {"", "local"} and owner_kind in {"", "main"}
 
 
+# LLM: 管理动作的统一授权：provider/kind/id 都必须是已解析的非空字符串，且是本机 local/main。is_local_admin_owner 允许
+#   空值（只适合目录墙裁决），管理入口不能因缺字段被当成管理员。/settings 与记忆向量重建共用这一条；只读身份字段。
+# 函数用途: 判断当前 owner 是否是身份完整的本机管理员，供管理命令授权。
+def is_complete_local_admin_owner(home_paths: object) -> bool:
+    identity = [getattr(home_paths, field, None) for field in ("owner_provider", "owner_kind", "owner_id")]
+    return all(type(item) is str and item.strip() for item in identity) and is_local_admin_owner(home_paths)
+
+
 # LLM: owner 隔离 Shell 要拒读的宿主根只按结构化身份、全局配置和平台事实裁决，不看命令或自然语言。my-agent 根总是给出
 #   （沙箱只在 owner 隔离时用它，Full Access 不生效）；开关 shell_sandbox_hide_user_home 打开、owner 不是本机管理员、且平台
 #   沙箱本身不隐藏宿主路径（macOS；Linux bwrap 已不挂载家目录）时，再加用户家目录。配置来自全局配置，owner 无法自行覆盖。

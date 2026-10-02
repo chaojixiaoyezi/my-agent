@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+## /settings 管理员判定改用统一函数（P14 第 6 条，2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`，待集成）
+
+- `settings_control_service._is_admin` 改为调用 `user_space/owner_access.is_complete_local_admin_owner`，规则不变：
+  provider/kind/id 都是非空字符串，且是本机 local/main。
+- 记忆向量重建入口 `my-agent memory vectors rebuild --confirmed` 共用这一条，不再各写一份。插件管理和 user_config 工具里还有两处同规则的内联写法，本轮没动。
+
 ## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，待集成）
 
 - `settings_control_service` 的 `/settings show` 修复三处：

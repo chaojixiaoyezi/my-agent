@@ -93,6 +93,9 @@ def _one_vector(v: object) -> list[float]:
         raise EmbeddingError(f"embedding 响应含非数值向量:{type(exc).__name__}") from exc
 
 
+# LLM: 维度以端点实际返回为准（P14 第 5 条）：同一批向量必须等长且非空，否则整批作废抛 EmbeddingError，
+#   不让一批里混进两种长度；跨批次、跨写入的维度一致性由 VectorStore 按快照维度裁决。
+# 函数用途: 把端点返回的向量数组解析并 L2 归一，数量、形状或维度不符都抛 EmbeddingError 供调用方降级。
 def _parse_vectors(raw: object, expected: int) -> list[list[float]]:
     """把端点返回的向量数组解析+L2归一;数量/形状不符一律抛 EmbeddingError(供降级),不让坏响应裸崩。
 
@@ -102,7 +105,11 @@ def _parse_vectors(raw: object, expected: int) -> list[list[float]]:
     if not isinstance(raw, list) or len(raw) != expected:
         got = len(raw) if isinstance(raw, list) else type(raw).__name__
         raise EmbeddingError(f"embedding 响应向量数不符:期望 {expected} 得 {got}")
-    return [_one_vector(v) for v in raw]
+    vectors = [_one_vector(v) for v in raw]
+    lengths = {len(v) for v in vectors}
+    if 0 in lengths or len(lengths) > 1:
+        raise EmbeddingError(f"embedding 响应向量维度为空或不一致:{sorted(lengths)}")
+    return vectors
 
 
 class OpenAICompatibleEmbedder:
@@ -110,7 +117,11 @@ class OpenAICompatibleEmbedder:
 
     POST {api_base}/embeddings {model, input:[...]} → {data:[{embedding:[...]}]}。
     **零外部库**:用 stdlib ``urllib`` 自建客户端。失败抛 ``EmbeddingError``,调用方降级 BM25。
+    ``dim`` 只是声明的默认值,请求里不带维度约束;向量库按实际返回的向量长度定维度,不信这个值。
     """
+
+    # 线路协议名，参与向量库空间身份（embedding_identity）；改名会让已有向量库进入身份失配、需管理员重建。
+    protocol = "openai_compatible_embeddings"
 
     def __init__(self, *, api_base: str, model: str, api_key: str = "", dim: int = DEFAULT_EMBED_DIM) -> None:
         self._api_base = api_base.rstrip("/")
@@ -162,6 +173,9 @@ class MiniMaxEmbedder:
     ``type`` 固定 ``"db"``(存储语义);查询侧 MiniMax 推荐 ``"query"``,留作后续按 kind 细分的优化。
     embo-01 维度 1536。真机已验:Bearer key 直连、无需 GroupId(国际站比国内站简单)。
     """
+
+    # 线路协议名，参与向量库空间身份（embedding_identity）；与 OpenAI 兼容协议区分，同名模型换协议即另一空间。
+    protocol = "minimax_native_embeddings"
 
     def __init__(self, *, api_base: str, model: str = "embo-01", api_key: str = "", dim: int = 1536) -> None:
         self._api_base = api_base.rstrip("/")

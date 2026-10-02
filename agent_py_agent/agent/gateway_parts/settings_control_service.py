@@ -44,7 +44,7 @@ from ..settings.user_config_capability import (
     mask_value,
     user_config_path,
 )
-from ..user_space.owner_access import is_local_admin_owner
+from ..user_space.owner_access import is_complete_local_admin_owner
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import resolve_gateway_scope_owner
 
@@ -103,11 +103,11 @@ def _scoped_home(base_agent: object, scope: object) -> object:
     return home_paths_with_owner(base_home, resolve_owner_home(base_home.root, owner))
 
 
-# LLM: 必须是已解析的完整身份（provider/kind/id 都是非空字符串）且为本机 local/main；缺字段不能因空值被当成管理员。
+# LLM: 必须是已解析的完整身份（provider/kind/id 都是非空字符串）且为本机 local/main；规则统一在
+#   owner_access.is_complete_local_admin_owner，记忆向量重建等管理入口共用，不在这里另写一份。
 # 函数用途: 判断当前发起者是否是管理员。
 def _is_admin(home: object) -> bool:
-    identity = [getattr(home, field, None) for field in ("owner_provider", "owner_kind", "owner_id")]
-    return all(type(item) is str and item.strip() for item in identity) and is_local_admin_owner(home)
+    return is_complete_local_admin_owner(home)
 
 
 # LLM: /settings 一次执行用到的外部事实，都由调用方经统一入口取得：capability_config 只交给要显示配置告警的总览与
