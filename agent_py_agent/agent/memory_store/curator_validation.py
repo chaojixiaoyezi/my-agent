@@ -18,6 +18,7 @@ from .candidate_models import (
 )
 from .curator_inputs import CuratorAuditInput, CuratorInputBatch, CuratorMessageInput
 from .curator_models import CURATOR_MODEL_ORIGINS, CuratorExtraction
+from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
 
 
@@ -348,8 +349,12 @@ def _canonical_artifact_refs(
 
 
 # LLM: Provider observation_id is advisory only; the host hashes canonical evidence plus typed
-# subject/scope/action so paraphrased replay cannot fabricate another independent occurrence.
-# 函数用途: 生成一次 Curator Candidate 观察的稳定宿主身份。
+#   subject/scope/action and the normalized content hash (memory_content_hash, the same normalization
+#   stable_candidate_id uses). 用户 2026-10-02 拍板第 6 条：同一来源、同一主题、内容不同的是不同观察，各存一条
+#   （“我对花生过敏，也对芒果过敏”不再塌成一条）；规范化后内容相同的才是同一观察、照旧合并。
+#   代价：同一条未声明已处理的消息被安全重放时，模型换了说法会多出一条候选（候选编号本来就含内容，
+#   所以不会把出现次数虚增到原候选上）。改动须同步 test_curator_observation_identity.py。
+# 函数用途: 生成一次 Curator Candidate 观察的稳定宿主身份（来源 + 类型化主题 + 规范化内容指纹）。
 def _canonical_observation_id(
     observation: object,
     *,
@@ -367,6 +372,7 @@ def _canonical_observation_id(
     material = {
         "candidate_type": str(observation.candidate_type or "").strip().lower(),
         "subject_key": str(observation.subject_key or "").strip().lower(),
+        "content_hash": memory_content_hash(observation.content),
         "scope": {**scope.to_dict(), "scope_key": canonical_key},
         "proposed_action": str(observation.proposed_action or "").strip().lower(),
         "target_entry_id": str(observation.target_entry_id or "").strip(),

@@ -661,6 +661,7 @@ retention 扫描根与深度不再写死在本模块：`retention_scan._recovery
 ## Curator 提交前的身份冲突剔除与重放熔断（2026-10-02）
 
 - `candidates.merge_candidate_observations` 是候选账本唯一合并入口，保持严格：同一观察身份对应不同类型化主题时，抛 `CandidateIdentityConflictError`（ValueError 子类）。
+- Curator 观察身份（`curator_validation._canonical_observation_id`）= 来源（消息/工具/产物/任务/运行）+ 类型化主题 + 规范化内容指纹（`operations.memory_content_hash`，与 `stable_candidate_id` 同一正文规范化）。同主题不同内容是不同观察；规范化后内容相同才是同一观察（2026-10-02 用户拍板第 6 条）。
 - `_same_candidate_identity` 与身份计算同口径：主题键按 `fold_key` 比较，范围按 `scope_contract.canonical_scope_key` 规范键比较。
 - `candidates.split_identity_conflicts` 是纯函数，用同一个合并函数逐条预演，只剔除身份冲突的那几条。`curator.MemoryCuratorService._without_identity_conflicts` 在生成运行记录前调用它，并记警告。
 - 重放熔断的判断是纯函数 `curator_models.curator_replay_breaker_tripped`，读取最近运行记录用 `curator_run_log.CuratorRunLog.recent_finished`，退避由 `curator_failure_retry_seconds` 给出（熔断码 3600 秒）。

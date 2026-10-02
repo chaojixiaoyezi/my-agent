@@ -113,18 +113,73 @@ def _output(message, candidates: list[dict], extra: dict | None = None) -> dict:
 
 
 def test_case_variant_subjects_in_one_batch_merge_instead_of_failing_the_batch(tmp_path):
+    # 主题键只差大小写、内容规范化后相同（只多了空白）：同一观察，合并且整批不失败。
     store, thread, message = _conversation(tmp_path)
     backend = _Backend(_output(message, [
         _candidate(message.message_id, "用户对花生过敏。", "health.allergy"),
-        _candidate(message.message_id, "用户对花生过敏（重述）。", "Health.Allergy"),
+        _candidate(message.message_id, "  用户对花生过敏。 ", "Health.Allergy"),
     ]))
     service = _service(tmp_path, backend, store)
     result = service.run(reason="admin")
     assert (result.status, result.failure_code, result.processed_messages) == ("succeeded", "", 1)
     assert service.state_store.load().per_thread_cursors == {thread.thread_id: message.message_id}
-    assert len(service.candidate_service.list()) == 1, "同一条消息、同一主题（忽略大小写）按同一观察合并"
+    [candidate] = service.candidate_service.list()
+    assert candidate.occurrence_count == 1, "同一条消息、同一主题（忽略大小写）、同一内容按同一观察合并"
     [record] = service.run_log.list()
     assert not any(item.startswith("curator_candidate_identity_conflict_dropped") for item in record.warnings)
+
+
+# 用户 2026-10-02 拍板第 6 条：同一条消息里同一主题、内容不同的是两件事，各存一条（J13 的花生/芒果）。
+def test_same_message_same_subject_different_content_are_stored_separately(tmp_path):
+    store, thread, message = _conversation(tmp_path)
+    backend = _Backend(_output(message, [
+        _candidate(message.message_id, "用户对花生过敏。", "health.allergy"),
+        _candidate(message.message_id, "用户对芒果过敏。", "health.allergy"),
+    ]))
+    service = _service(tmp_path, backend, store)
+    result = service.run(reason="admin")
+    assert (result.status, result.failure_code, result.processed_messages) == ("succeeded", "", 1)
+    candidates = service.candidate_service.list()
+    assert {item.content for item in candidates} == {"用户对花生过敏。", "用户对芒果过敏。"}
+    assert all(item.subject_key == "health.allergy" and item.occurrence_count == 1 for item in candidates)
+    assert len({key for item in candidates for key in item.observation_keys}) == 2, "两条观察身份不同"
+
+
+def test_exact_duplicate_content_in_one_batch_is_still_one_observation(tmp_path):
+    store, _thread, message = _conversation(tmp_path)
+    allergy = _candidate(message.message_id, "用户对花生过敏。", "health.allergy")
+    service = _service(tmp_path, _Backend(_output(message, [allergy, dict(allergy)])), store)
+    assert service.run(reason="admin").status == "succeeded"
+    [candidate] = service.candidate_service.list()
+    assert candidate.occurrence_count == 1 and len(candidate.observation_keys) == 1
+
+
+def test_replaying_an_unclaimed_message_with_the_same_content_does_not_duplicate(tmp_path):
+    # 第一批没声明处理这条消息（游标不动），候选已提交；下一批原样重放：同一观察，不新增、不虚增出现次数。
+    store, thread, message = _conversation(tmp_path)
+    peanut = _candidate(message.message_id, "用户对花生过敏。", "health.allergy")
+    mango = _candidate(message.message_id, "用户对芒果过敏。", "health.allergy")
+    backend = _Backend(_output(message, [peanut, mango], {"processed": False}), _output(message, [peanut, mango]))
+    service = _service(tmp_path, backend, store)
+    assert service.run(reason="admin").processed_messages == 0
+    assert service.run(reason="admin").processed_messages == 1
+    assert service.state_store.load().per_thread_cursors == {thread.thread_id: message.message_id}
+    candidates = service.candidate_service.list()
+    assert len(candidates) == 2 and all(item.occurrence_count == 1 for item in candidates)
+
+
+def test_paraphrase_of_the_same_subject_in_one_batch_is_a_separate_candidate(tmp_path):
+    # 已知代价（用户拍板按内容区分）：同一来源同一主题换了说法，宿主不按文案猜是不是一回事，各存一条；
+    # 两条各自 occurrence_count=1，不会虚增同一条候选的出现次数。
+    store, _thread, message = _conversation(tmp_path)
+    backend = _Backend(_output(message, [
+        _candidate(message.message_id, "用户对花生过敏。", "health.allergy"),
+        _candidate(message.message_id, "用户对花生过敏（重述）。", "health.allergy"),
+    ]))
+    service = _service(tmp_path, backend, store)
+    assert service.run(reason="admin").status == "succeeded"
+    candidates = service.candidate_service.list()
+    assert len(candidates) == 2 and all(item.occurrence_count == 1 for item in candidates)
 
 
 def test_a_candidate_conflicting_with_the_ledger_is_dropped_and_the_batch_still_commits(tmp_path):
