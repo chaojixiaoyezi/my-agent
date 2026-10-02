@@ -85,6 +85,9 @@ class AttemptSandboxSpec:
     # H2：对模型命令完全隐藏的宿主托管存储目录（插件安装库、包库），任何模式都生效（含 full_access）：Linux 盖一层只读空
     # tmpfs，macOS 在规则最后拒读写。只由模型 shell 的 _sandbox_exec 填写；插件进程沙箱不填，插件仍能读自己的环境目录。
     hidden_paths: tuple[Path, ...] = ()
+    # H3：按正则拒写的宿主托管位置（path_access_policy.host_readonly_patterns：所有任务的核验记录），只有 macOS Seatbelt 能表达；
+    # Linux bwrap 只能挂已存在的路径，忽略这一项（只保护 protected_write_paths 里的本任务记录，已知边界）。
+    protected_write_patterns: tuple[str, ...] = ()
 
 
 class AttemptExecutionSandbox:
@@ -477,8 +480,15 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
 #   断网必须最后（Seatbelt 后写覆盖先写）。上级目录规则只拒写，不影响前面的读规则。
 # 函数用途: 汇总按 spec 生成的 macOS 附加规则。
 def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
-    return [*_private_read_rules(spec), *_ancestor_write_denies(spec), *_hidden_path_rules(spec.hidden_paths),
-            *_network_rules(spec.network_access)]
+    return [*_private_read_rules(spec), *_ancestor_write_denies(spec), *_pattern_write_denies(spec.protected_write_patterns),
+            *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access)]
+
+
+# LLM: 正则拒写（H3）：模式是 POSIX ERE，按 JSON 字符串写进规则（本机实测 SBPL 的 regex 认普通字符串）。只拒写，排在写根放行
+#   之后才能盖过它（Seatbelt 后写覆盖先写）；不影响读规则。没有模式时返回空列表，现有配置逐字节不变。
+# 函数用途: 把按正则声明的只读位置转成 Seatbelt 写拒绝。
+def _pattern_write_denies(patterns: tuple[str, ...]) -> list[str]:
+    return [f"(deny file-write* (regex {json.dumps(pattern)}))" for pattern in dict.fromkeys(patterns)]
 
 
 # LLM: 沙箱通用规则（H3 探针发现，2026-10-02）：Seatbelt 的 subpath/literal 拒绝只认当前路径，命令先把上级目录改名

@@ -36,7 +36,12 @@ from .runtime_boundary import (
 )
 from .workspace_read_scope import build_workspace_read_context
 from .workspace_write_scope import build_workspace_write_context
-from .write_boundary import RUNTIME_INSTALL_ROOTS_KEY, WRITE_TOOL_NAMES, validate_write_boundary
+from .write_boundary import (
+    RUNTIME_INSTALL_ROOTS_KEY,
+    WRITE_TOOL_NAMES,
+    validate_write_boundary,
+    write_boundary_error_code,
+)
 
 # 异常信息最多回 500 字符：超长截断，防堆栈撑爆反馈。
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
@@ -114,7 +119,7 @@ def _write_boundary_denied(
     )
     if not boundary_error:
         return None
-    return ToolHandlerOutcome(request.tool_name, False, boundary_error, error_code="WRITE_FORBIDDEN")
+    return ToolHandlerOutcome(request.tool_name, False, boundary_error, error_code=write_boundary_error_code(boundary_error))
 
 
 # LLM: Exact read scope is enforced before any filesystem handler runs.  The
@@ -220,8 +225,8 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
 # 函数用途: 冻结本次调用的执行权、取消和插件读取/写入上下文，不修改共享 handler。
 def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationContext:
     policy = PathAccessPolicy.from_values(mode=request.path_access_mode, dangerous_roots=request.path_dangerous_roots,
-                                         owner_scope_root=request.owner_scope_root).with_data_root(
-        data_root_from_boundary(request.write_boundary))
+                                         owner_scope_root=request.owner_scope_root,
+                                         agent_home_root=data_root_from_boundary(request.write_boundary))
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
         execution_authority_check=request.execution_authority_check,
@@ -301,7 +306,8 @@ def _request_local_tool_for_invocation(
         mode=request.path_access_mode,
         dangerous_roots=request.path_dangerous_roots,
         owner_scope_root=effective_owner_scope,
-    ).with_data_root(getattr(configured_policy, "agent_home_root", None))
+        agent_home_root=getattr(configured_policy, "agent_home_root", None),
+    )
     if hasattr(scoped, "path_access_policy"):
         scoped.path_access_policy = dynamic_policy
     if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):

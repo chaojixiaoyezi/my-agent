@@ -190,7 +190,8 @@ class FileSystemTool(BaseTool):
             mode=access.path_access_mode,
             dangerous_roots=access.path_dangerous_roots,
             owner_scope_root=access.owner_scope_root,
-        ).with_data_root(agent_home_root_for_owner(access.owner_scope_root or access.protected_persona_root))
+            agent_home_root=agent_home_root_for_owner(access.owner_scope_root or access.protected_persona_root),
+        )
         self.protected_persona_root = (
             Path(access.protected_persona_root).expanduser().resolve(strict=False)
             if str(access.protected_persona_root or "").strip()

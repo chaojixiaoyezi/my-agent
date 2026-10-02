@@ -8,7 +8,7 @@ manage_models 的检查）；3a 定为硬门（2026-10-02），随后扩成“�
   owner 级正式 skill 等），规范任务根的 data/pack_verification（ae 能力包核验记录）→ PATH_HOST_STATE_WRITE_BLOCKED，读照常；
 - B 类（runs/、agents/、data/、tasks/）仍是 tool_runtime_ledger 的 forbidden_write_roots：只在隔离模式生效，可被本任务工作目录穿透；
 - 宿主凭据：管理员密码、模型目录、共享模型档案、数据根 config/ 里的 YAML 配置及备份、数据根里 owner home 之外的 secrets
-  目录 → 文件工具读写都拒 PATH_HOST_CREDENTIAL_BLOCKED；命令只拒写不拒读（my-agent CLI 要读，已知边界）。
+  目录 → 文件工具读写都拒 PATH_HOST_CREDENTIAL_BLOCKED；命令只拒写不拒读（读取不在 H3 范围，已知边界）。
 - 命令沙箱：这些路径并进只读覆盖（Full Access 也生效）；Seatbelt 给每个受保护路径的上级目录加写拒绝，堵住“先改名上级目录
   再写”的绕过（探针证据 ~/.my-agent/decision-evidence/host-config-guard-design/）。
 
@@ -56,7 +56,8 @@ OWNER_STATE_ITEMS = (
     "workspace/runtime/services/gateway/gateway_state.json", "memory/curator/state.json",
     "memory/curator/transactions/t-1.json", "memory_archive/runtime_facts/r-1/task.json", "cache/retention/scan.json",
     "trash/item-1/meta.json", "skills/my-skill/SKILL.md", ".agents/skills/home-skill/SKILL.md",
-    "data/scheduler/jobs.json", "data/decision/d.jsonl", "data/skill_proposals/p.json", "data/local_store/local.db",
+    "data/scheduler/store.json", "data/decision/outcomes.jsonl", "data/context/calibration.json",
+    "data/skill_proposals/p-1.json", "data/skill_learning/l-1.json", "data/artifact_backups/b-1/report.md",
     "agents/subagent-1/report.json", "agents/subagent_dispatch_log.jsonl",
 )
 # 仍属于模型的位置（3a 口径）：交付区 artifacts/、workspace/ 其余、tmp/、记忆正文、用户在家目录根的文件。
@@ -406,7 +407,8 @@ def test_shell_lists_host_files_per_mode(tmp_path):
     state = (*_STATE_FILES, *(f"{name}.lock" for name in _STATE_FILES),
              "runtime.db", "runtime.db-wal", "runtime.db-shm", "runtime.db-journal",
              "capability_requests", "temporary_grants", "compact", "logs", "audit", "workspace/runtime", "memory/curator",
-             "memory_archive", "cache", "trash", "skills", ".agents/skills", "data", "agents")
+             "memory_archive", "cache", "trash", "skills", ".agents/skills", "data/scheduler", "data/decision", "data/context",
+             "data/skill_proposals", "data/skill_learning", "data/artifact_backups", "agents")
 
     scoped = set(host_readonly_paths_for(str(main), ""))
     assert scoped == {main / "config", *(main / name for name in state)}
@@ -504,7 +506,7 @@ def test_real_full_access_shell_cannot_write_host_files(tmp_path):
         assert not run(f"printf x > {home['bare'] / 'runtime.db-shm'}").ok and not (home["bare"] / "runtime.db-shm").exists()
         assert not run(f"mkdir {home['bare'] / 'config'}").ok and not (home["bare"] / "config").exists()
     assert {path: path.read_bytes() for path in before} == before
-    # 命令只拒写不拒读（my-agent CLI 要读配置，已知边界）；普通写照常。
+    # 命令只拒写不拒读（读取不在 H3 范围，已知边界）；普通写照常。
     assert run(f"cat {config / 'desktop.yaml'}").ok
     assert run(f"printf ok > {home['ws'] / 'new.txt'}").ok and run(f"printf ok > {task / 'work' / 'x.md'}", task / "work").ok
 
@@ -652,7 +654,8 @@ def test_every_host_state_item_is_read_only_for_commands(tmp_path, relative):
 
 
 def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeypatch):
-    """B 类：只剩 runs/、tasks/ 留在 tool_runtime_ledger（data/、agents/ 二审后归 A），只在隔离模式挂、可被本任务工作目录穿透。"""
+    """B 类：runs/、data/、tasks/ 留在 tool_runtime_ledger（agents/ 与 data/ 下 6 个宿主状态子目录二审后归 A），只在隔离模式挂、
+    可被本任务工作目录穿透。"""
     from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
         _attach_owner_control_write_guards,
     )
@@ -667,7 +670,10 @@ def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeyp
     agent = SimpleNamespace(home_paths=SimpleNamespace(**{key: main / value for key, value in names.items()}))
     scoped: dict[str, object] = {"effective_owner_scope_root": str(main)}
     _attach_owner_control_write_guards(scoped, agent)
-    assert scoped["forbidden_write_roots"] == [str(main / name) for name in ("runs", "tasks")]
+    assert scoped["forbidden_write_roots"] == [str(main / name) for name in ("runs", "data", "tasks")]
+    policy = _admin_policy(home, monkeypatch)
+    assert policy.check_write(main / "data" / "loose.txt").allowed, "data/ 本身不是 A 类（3a 最终裁定）"
+    assert policy.check_write(main / "data" / "scheduler" / "store.json").code == STATE_CODE
     full: dict[str, object] = {}
     _attach_owner_control_write_guards(full, agent)
     assert "forbidden_write_roots" not in full, "B 类只在隔离模式挂"
@@ -787,7 +793,9 @@ def test_receipt_says_whether_task_records_were_protected(tmp_path, monkeypatch)
 def test_configured_home_wins_over_a_different_env_home(tmp_path, monkeypatch):
     """配置写了 my_agent_home、环境变量 MY_AGENT_HOME 指向别处时，宿主文件判定跟宿主解析出的数据根走（原来只看环境变量，
     9b 用真实 SimpleAgent 在 Full Access 下写进了 permissions.json、tool_policy.json、runtime.db 旁的文件和 config/）。"""
-    from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        write_boundary_with_runtime_ledger,
+    )
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.tooling.registry_invoke import (
@@ -823,3 +831,290 @@ def test_configured_home_wins_over_a_different_env_home(tmp_path, monkeypatch):
     scoped = _request_local_tool_for_invocation(write, request=request, workspace_roots=[owner])
     assert scoped.path_access_policy.agent_home_root == configured, "每次调用换的策略也沿用宿主数据根"
     assert scoped.path_access_policy.check_write(owner / "permissions.json").code == STATE_CODE
+
+
+# ---------------------------------------------------------------- 真实链路
+
+
+# 类用途: 假模型：第一轮发出给定的工具调用，第二轮收尾；记下第二轮收到的请求内容，用来核对模型看到的拒绝码。
+class _ToolCallsBackend:
+    name = "fake_h3"
+
+    def __init__(self, blocks: list[dict]) -> None:
+        self.blocks, self.calls, self.seen = blocks, 0, ""
+
+    # 函数用途: 声明支持原生工具调用。
+    def probe_tool_capability(self):
+        from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+
+        return ProviderToolCapability(provider=self.name, endpoint="local://fake", model="", stream=False,
+                                      native_supported=True, evidence="test_fake_native")
+
+    # 函数用途: 第一轮返回工具调用，之后返回收尾文字并记下请求。
+    def generate(self, prompt, on_chunk=None, **kwargs):
+        from agent_py_agent.agent.backends import ModelResponse
+
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(text="", backend=self.name, tool_use_blocks=self.blocks)
+        self.seen = repr(prompt) + repr(kwargs)
+        return ModelResponse(text="done", backend=self.name)
+
+
+# 函数用途: 按生产方式造一个本机管理员 Full Access 的 SimpleAgent（审批模式经宿主操作设成 full-access），工作目录在家目录外。
+def _full_access_agent(home: Path, project: Path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+
+    config = AgentConfig(enable_tools=True, max_tool_rounds=3, my_agent_home=str(home))
+    project.mkdir(parents=True, exist_ok=True)
+    execute_approval_mode_operation(SimpleAgent(config, root=project).home_paths, "set", "full-access")
+    return SimpleAgent(config, root=project)
+
+
+# 函数用途: 读出隔离 home 里工具结果索引的结构化行（call_id、ok、error_code）。
+def _tool_rows(home: Path) -> dict[str, tuple[bool, str]]:
+    import json
+
+    rows = [json.loads(line) for index in home.rglob("blobs/tool_outputs/index.jsonl")
+            for line in index.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return {str(row.get("call_id")): (bool(row.get("ok")), str(row.get("error_code") or "")) for row in rows}
+
+
+def test_real_chain_full_access_write_reports_the_specific_host_code(tmp_path, monkeypatch):
+    """真实链路（SimpleAgent + 假模型，审批模式 full-access，配置的 home ≠ 环境变量的 home）：模型用 write_file 写 A 类和宿主配置
+    被拒，工具结果和模型下一轮看到的都是具体码 PATH_HOST_*，不是通用的 WRITE_FORBIDDEN（9b 二审建议）；字节不变；
+    模型自己的文件照常写。"""
+    home = (tmp_path / "configured-home").resolve()
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "env-home"))
+    agent = _full_access_agent(home, tmp_path / "proj")
+    owner = Path(agent.home_paths.owner_home_dir).resolve()
+    assert owner.is_relative_to(home)
+    state, config = _put(owner / "permissions.json", "HOST"), _put(owner / "config" / "capability_config.yaml", "HOST")
+    # 项目和家目录之外也能写，证明这一轮确实是 Full Access（审批模式按回合换算，构造时的工具还带 owner 墙）。
+    own, elsewhere = tmp_path / "proj" / "notes.md", tmp_path / "elsewhere" / "x.md"
+    blocks = [{"id": f"call_w{index}", "name": "write_file", "input": {"path": str(path), "content": "x"}}
+              for index, path in enumerate((state, config, own, elsewhere))]
+    agent.backend = _ToolCallsBackend(blocks)
+
+    agent.run("h3", save=False, allowed_tools=["write_file"])
+
+    rows = _tool_rows(home)
+    assert [rows[f"call_w{index}"] for index in range(4)] == [(False, STATE_CODE), (False, CONFIG_CODE), (True, ""), (True, "")]
+    assert STATE_CODE in agent.backend.seen and CONFIG_CODE in agent.backend.seen, "模型下一轮看到的是具体码"
+    assert (state.read_text(encoding="utf-8"), config.read_text(encoding="utf-8")) == ("HOST", "HOST")
+    assert own.read_text(encoding="utf-8") == elsewhere.read_text(encoding="utf-8") == "x"
+
+
+def test_host_write_denials_are_terminal_failures_not_unknown():
+    """文件工具在写之前按路径拒写宿主文件，零副作用：结果归 FAILED（模型可换路子），不能归 UNKNOWN 触发“结果未知”停机。"""
+    from agent_py_agent.agent.local_storage import TOOL_OPERATION_FAILED
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import _operation_status_for_result
+
+    for code in (CONFIG_CODE, STATE_CODE):
+        outcome = ToolHandlerOutcome("write_file", False, "blocked", error_code=code, handler_executed=True)
+        assert _operation_status_for_result(outcome) == TOOL_OPERATION_FAILED, code
+
+
+def test_write_boundary_reports_the_specific_host_code(tmp_path, monkeypatch):
+    """写边界拒在宿主托管文件上时原码上报（PATH_HOST_*），其余拒绝仍是 WRITE_FORBIDDEN；两个调用方都只读结构化 code。"""
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        RegistryToolInvokeRequest,
+        _write_boundary_denied,
+    )
+    from agent_py_agent.agent.tooling.write_boundary import (
+        validate_write_boundary,
+        write_boundary_error_code,
+    )
+
+    home = _home(tmp_path)
+    main = home["main"]
+    boundary = {"canonical_owner_home_root": str(main), "allowed_write_roots": [str(main)],
+                "forbidden_write_roots": [str(main / "runs")]}
+    cases = {main / "permissions.json": STATE_CODE, main / "config" / "x.yaml": CONFIG_CODE,
+             home["config"] / "desktop.yaml": CREDENTIAL_CODE, main / "data" / "plugins" / "p" / "x.py": "PATH_HOST_MANAGED_STORE_BLOCKED",
+             main / "runs" / "2026-10-02" / "k9" / "x.md": "WRITE_FORBIDDEN"}
+    for target, code in cases.items():
+        error = validate_write_boundary("write_file", {"path": str(target)}, workspace_root=main, path_access_mode="full",
+                                        write_boundary=boundary)
+        assert (error.startswith("写入被阻止"), write_boundary_error_code(error)) == (True, code), target
+        request = RegistryToolInvokeRequest(tool_name="write_file", arguments={}, tools={}, workspace_root=main,
+                                            workspace_roots=[main], allowed_tools=None, write_boundary=boundary,
+                                            path_access_mode="full")
+        assert _write_boundary_denied(request, {"path": str(target)}, (main,)).error_code == code
+    assert write_boundary_error_code("写入被阻止: 旧调用方自己拼的") == "WRITE_FORBIDDEN"
+
+
+def test_task_record_patterns_cover_every_task_root_layout(tmp_path):
+    """一条正则盖住 owner home 下全部规范任务根的核验记录（runs/<日期>/<键>、tasks/<日期>/<名>、audits/<编号>），别的位置不误伤；
+    owner home 路径里的正则元字符按字面匹配。owner 集合与 host_readonly_paths 相同。"""
+    import re
+
+    from agent_py_agent.agent.path_access_policy import host_readonly_patterns
+
+    home = _home(tmp_path)
+    root, main = home["root"], home["main"]
+    assert len(host_readonly_patterns(root)) == 3, "Full Access：全部已有 owner"
+    (pattern,) = host_readonly_patterns(root, main)
+    hit = ("runs/2026-10-02/k2/data/pack_verification", "runs/2026-10-02/k2/data/pack_verification/r.jsonl",
+           "tasks/2026-09-01/old/data/pack_verification/x.json", "audits/a-1/data/pack_verification")
+    miss = ("runs/2026-10-02/k2/data/other.json", "runs/2026-10-02/data/pack_verification",
+            "runs/2026-10-02/k2/work/data/pack_verification", "runs/2026-10-02/k2/data/pack_verification2",
+            "audits/a-1/b/data/pack_verification")
+    assert all(re.search(pattern, str(main / rel)) for rel in hit)
+    assert not any(re.search(pattern, str(main / rel)) for rel in miss)
+    assert not re.search(pattern, str(home["feishu"] / hit[0])), "隔离：只本 owner"
+
+    odd = (tmp_path / "my.agent+(x)").resolve()
+    (odd_main := odd / "owners" / "local" / "main").mkdir(parents=True)
+    (odd_pattern,) = host_readonly_patterns(odd, odd_main)
+    assert re.search(odd_pattern, str(odd_main / hit[0]))
+    assert not re.search(odd_pattern, str(tmp_path / "myXagent+(x)" / "owners" / "local" / "main" / hit[0]))
+
+
+def test_seatbelt_pattern_denies_come_after_the_write_root_allow(tmp_path):
+    """Seatbelt 后写覆盖先写：正则拒写必须排在写根放行之后；没有正则时配置不变。"""
+    from dataclasses import replace
+
+    home = _home(tmp_path)
+    pattern = "^/x/(runs/[^/]+/[^/]+)/(data/pack_verification)(/|$)"
+    scoped = replace(_spec(home), full_access=False, extra_write_roots=(home["main"],), implicit_attempt_write_roots=False)
+    profile = AttemptExecutionSandbox(replace(scoped, protected_write_patterns=(pattern,)))._macos_argv(["true"])[2]
+    assert profile.index("(allow file-write*") < profile.index(f"(deny file-write* (regex {_quoted_regex(pattern)}))")
+    assert "(regex" not in AttemptExecutionSandbox(scoped)._macos_argv(["true"])[2]
+
+
+# 函数用途: 按规则里的写法（JSON 字符串）引用一个正则。
+def _quoted_regex(pattern: str) -> str:
+    import json
+
+    return json.dumps(pattern)
+
+
+@pytest.mark.skipif(not IS_MACOS, reason="正则规则只有 macOS Seatbelt 能表达；Linux 只保护本任务（registry 按 task_root 给，已知边界）")
+def test_real_seatbelt_protects_every_task_record_without_task_params(tmp_path):
+    """不带本任务的 task_root 参数时，Full Access 与隔离的命令照样改不了别的任务的核验记录，也建不出新的（含大小写变体）；
+    任务目录里其它位置照常可写。"""
+    if not _sandbox_ready():
+        pytest.skip("平台沙箱不可用")
+    home = _home(tmp_path)
+    main = home["main"]
+    other = main / "runs" / "2026-10-02" / "k2" / "data" / "pack_verification" / "r.jsonl"
+    before = other.read_bytes()
+    for scoped, extra in ((False, {}), (True, {"__sandbox_write_roots": [str(main)]})):
+        shell = _shell(home, scoped=scoped)
+
+        def run(command: str, shell=shell, extra=extra):
+            return shell.execute({"command": command, "working_dir": str(main), **extra})
+
+        assert not run(f"printf x >> {other}").ok, scoped
+        assert not run(f"mv {other.parent} {other.parent}.moved").ok, scoped
+        for fresh in ("runs/2026-10-03/k9/data/pack_verification", "tasks/2026-10-03/t9/DATA/Pack_Verification",
+                      "audits/a-9/data/pack_verification"):
+            assert not run(f"mkdir -p {main / fresh}").ok and not (main / fresh).exists(), (scoped, fresh)
+        assert run(f"printf ok > {main / 'runs' / '2026-10-02' / 'k2' / 'data' / 'notes.json'}").ok, scoped
+    assert other.read_bytes() == before
+
+
+def test_sandboxed_commands_carry_the_host_state_read_only_marker(monkeypatch):
+    """沙箱里的命令带“宿主状态只读”标记；不进沙箱的宿主命令不带，继承来的同名变量也去掉（标记只由宿主设）。"""
+    from agent_py_agent.agent.path_access_policy import HOST_STATE_READ_ONLY_ENV
+    from agent_py_agent.agent.tooling.shell import _subprocess_text_env
+
+    monkeypatch.setenv(HOST_STATE_READ_ONLY_ENV, "1")
+    assert HOST_STATE_READ_ONLY_ENV not in _subprocess_text_env()
+    monkeypatch.delenv(HOST_STATE_READ_ONLY_ENV)
+    assert _subprocess_text_env(sandboxed=True)[HOST_STATE_READ_ONLY_ENV] == "1"
+    assert _subprocess_text_env("/x/owner", sandboxed=True)[HOST_STATE_READ_ONLY_ENV] == "1"
+
+
+def test_cli_guard_only_rewrites_permission_failures_inside_the_sandbox(tmp_path, monkeypatch, capsys):
+    """CLI 守卫只看宿主标记和结构化错误码（errno、sqlite 错误码），不看报错文字；沙箱外或非权限类错误原样抛出。"""
+    import errno
+    import sqlite3
+
+    from agent_py_agent.agent.path_access_policy import HOST_STATE_READ_ONLY_ENV
+    from agent_py_agent.cli.host_state_guard import (
+        CLI_HOST_STATE_READ_ONLY,
+        host_state_read_only_guard,
+    )
+
+    cant_open = None
+    try:
+        sqlite3.connect(tmp_path / "missing" / "local.db")
+    except sqlite3.OperationalError as exc:
+        cant_open = exc
+    denied = PermissionError(errno.EPERM, "denied", str(tmp_path / "home" / "config"))
+    missing = FileNotFoundError(errno.ENOENT, "missing", "x")
+
+    def guarded(exc: BaseException):
+        with host_state_read_only_guard():
+            raise exc
+
+    with pytest.raises(PermissionError):
+        guarded(denied)
+    monkeypatch.setenv(HOST_STATE_READ_ONLY_ENV, "1")
+    for failure in (denied, *((cant_open,) if hasattr(cant_open, "sqlite_errorcode") else ())):
+        with pytest.raises(SystemExit) as stopped:
+            guarded(failure)
+        assert stopped.value.code == 1
+        assert f"error_code={CLI_HOST_STATE_READ_ONLY}" in capsys.readouterr().err
+    with pytest.raises(FileNotFoundError):
+        guarded(missing)
+    with pytest.raises(ValueError):
+        guarded(ValueError("x"))
+
+
+# 函数用途: 收集 owner home 里全部 A 类宿主状态（文件和目录里的文件）的字节，用来核对命令没改它们。
+def _host_state_bytes(root: Path, owner: Path) -> dict[Path, bytes]:
+    from agent_py_agent.agent.path_access_policy import host_readonly_paths
+
+    found: dict[Path, bytes] = {}
+    for path in host_readonly_paths(root, owner):
+        files = [path] if path.is_file() else sorted(item for item in path.rglob("*") if item.is_file())
+        found.update({item: item.read_bytes() for item in files})
+    return found
+
+
+@needs_sandbox
+@pytest.mark.parametrize("scoped", [False, True], ids=["full-access", "isolated"])
+def test_real_sandbox_cli_cannot_start_and_says_so(tmp_path, monkeypatch, scoped):
+    """锁住现状（3a 最终裁定）：模型在命令里跑 my-agent CLI 会失败——每条命令都要构造完整 SimpleAgent，启动时要写 workspace/runtime
+    下的本地库，而宿主状态在沙箱里只读（隔离 owner 原来就这样）。失败给结构化码 CLI_HOST_STATE_READ_ONLY，A 类字节不变。
+    只读子命令走只读启动是台账里的待做项。"""
+    import agent_py_agent
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
+    from agent_py_agent.cli.host_state_guard import CLI_HOST_STATE_READ_ONLY
+
+    if not _sandbox_ready():
+        pytest.skip("平台沙箱不可用")
+    root = (tmp_path / "home").resolve()
+    monkeypatch.setenv("MY_AGENT_HOME", str(root))
+    project = tmp_path / "proj"
+    project.mkdir()
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(root)), root=project)
+    main = Path(agent.home_paths.owner_home_dir).resolve()
+    before = _host_state_bytes(root, main)
+    assert any("local_store" in str(path) for path in before), "宿主已建好本地库"
+    config = _put(tmp_path / "cli.yaml", f'my_agent_home: "{root}"\n')
+    options = (ShellToolOptions(owner_scope_root=str(main), host_private_roots=(str(root),)) if scoped
+               else ShellToolOptions(protected_persona_root=str(main)))
+    shell = ShellTool(main, options=options)
+    work = main if scoped else project
+    extra = {"__sandbox_write_roots": [str(main)]} if scoped else {}
+    # 钉住本检出的源码：venv 的可编辑安装可能指向别的检出。
+    python = f"PYTHONPATH={Path(agent_py_agent.__file__).resolve().parents[1]} {sys.executable}"
+    probe = shell.execute({"command": f"{python} -c 'import agent_py_agent'", "working_dir": str(work), **extra})
+    if not probe.ok:
+        pytest.skip("沙箱视图里看不到本仓库源码（Linux 隔离视图只挂授权根）")
+
+    outcome = shell.execute({"command": f"{python} -m agent_py_agent --config {config} status",
+                             "working_dir": str(work), "timeout": 120, **extra})
+
+    assert not outcome.ok
+    assert f"error_code={CLI_HOST_STATE_READ_ONLY}" in outcome.output, outcome.output[-2000:]
+    assert _host_state_bytes(root, main) == before

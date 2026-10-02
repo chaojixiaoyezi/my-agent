@@ -162,13 +162,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from ..agent.extensions import load_extension_registry
     from ..agent.settings import load_config
+    from .host_state_guard import host_state_read_only_guard
 
-    bootstrap = argparse.ArgumentParser(add_help=False)
-    bootstrap.add_argument("--config", default=str(default_config_path()))
-    bootstrap_args, _ = bootstrap.parse_known_args(effective_argv)
-    config = load_config(bootstrap_args.config)
-    extension_registry = load_extension_registry(config.extension_plugins)
-    parser = build_parser(extension_registry)
-    args = parser.parse_args(effective_argv)
-    args.app_scrollback = not bool(getattr(args, "plain", False))
-    return args.func(args)
+    # H3：在模型命令的沙箱里宿主状态只读，CLI 起不来时给结构化错误码（只看宿主设的标记和错误码，见 host_state_guard）。
+    with host_state_read_only_guard():
+        bootstrap = argparse.ArgumentParser(add_help=False)
+        bootstrap.add_argument("--config", default=str(default_config_path()))
+        bootstrap_args, _ = bootstrap.parse_known_args(effective_argv)
+        config = load_config(bootstrap_args.config)
+        extension_registry = load_extension_registry(config.extension_plugins)
+        parser = build_parser(extension_registry)
+        args = parser.parse_args(effective_argv)
+        args.app_scrollback = not bool(getattr(args, "plain", False))
+        return args.func(args)

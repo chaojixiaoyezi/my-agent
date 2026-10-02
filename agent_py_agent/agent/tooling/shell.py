@@ -335,7 +335,8 @@ def _working_dir_from_params(
             decision = PathAccessPolicy.from_values(
                 mode=path_access_policy.mode,
                 dangerous_roots=path_access_policy.dangerous_roots,
-            ).with_data_root(path_access_policy.agent_home_root).check(target)
+                agent_home_root=path_access_policy.agent_home_root,
+            ).check(target)
         roots = workspace_roots or [workspace_root]
         if not decision.allowed or not _path_inside_any_root(target, roots):
             return ToolHandlerOutcome(
@@ -437,10 +438,19 @@ def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, obje
 # 沙箱内 /tmp。npm 是已验证会忽略 XDG 并写 ``$HOME/.npm`` 的标准工具例外，因此只覆盖其官方
 # cache 变量；未知工具仍使用开放世界的 TMPDIR/XDG 路径。凭据擦洗仍先执行，不能因此恢复 secret。
 # hidden_roots 是沙箱拒读的宿主根：宿主 HOME 落在其中时改指到 owner home（见 _redirected_home）。
+# sandboxed=True（只给真的进了 attempt 沙箱的命令：前台、后台、PTY）时设 H3 的“宿主状态只读”标记，否则去掉继承来的同名变量。
 # 函数用途: 构造 shell 子进程环境，并把普通缓存及 npm 缓存安全地放进任务持久临时区。
-def _subprocess_text_env(owner_home: object = None, *, hidden_roots: tuple[str, ...] = ()) -> dict[str, str]:
+def _subprocess_text_env(
+    owner_home: object = None, *, hidden_roots: tuple[str, ...] = (), sandboxed: bool = False,
+) -> dict[str, str]:
+    from ..path_access_policy import HOST_STATE_READ_ONLY_ENV
+
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # H3：沙箱里宿主状态只读，告诉命令里的 my-agent CLI（cli/host_state_guard）；只有宿主能设，不进沙箱的命令不带它。
+    env.pop(HOST_STATE_READ_ONLY_ENV, None)
+    if sandboxed:
+        env[HOST_STATE_READ_ONLY_ENV] = "1"
     _apply_owner_scoped_pip_env(env, owner_home)
     # 选项1-C 凭据擦洗:owner-scoped(降权,per-user 不可信命令)+ bwrap 放行外网 → 剥掉自管凭据
     # (MINIMAX_API_KEY / 飞书 app_secret 等),防 `curl 带 $KEY` 外泄(真机实锤 env 泄漏)。
@@ -708,6 +718,7 @@ def _sandbox_exec(
             Path(str(root)).expanduser().resolve(strict=False) for root in private_roots if str(root or "").strip()
         ) if owner_text else (),
         hidden_paths=_host_managed_hidden_paths(owner_text, persona_text),
+        protected_write_patterns=host_readonly_patterns_for(owner_text, persona_text),
     )
     sandbox = AttemptExecutionSandbox(spec)
     # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，
@@ -734,8 +745,9 @@ def _host_managed_hidden_paths(owner_text: str, persona_text: str) -> tuple[Path
 # LLM: H3：宿主托管文件对模型命令只读（唯一声明 path_access_policy 的 HOST_CONFIG_* / HOST_STATE_*，列法见 host_readonly_paths）。
 #   owner 隔离时只盖本 owner 的（数据根的配置在 owner 墙外，Linux 不挂载、macOS 写入本来就只落写根）；Full Access 盖数据根的
 #   配置和全部 owner 的。本任务的核验记录不在这里：registry_invoke 按写边界的 task_root 放进 __sandbox_protected_write_paths
-#   （3a 定：不从工作目录或写根反推）。数据根只从规范 owner home 反推，推不出时不加覆盖（与 H2 同口径）。只拒写不拒读：
-#   my-agent CLI 要读配置。只读元数据。
+#   （3a 定：不从工作目录或写根反推）。数据根只从规范 owner home 反推，推不出时不加覆盖（与 H2 同口径）。只拒写不拒读
+#   （读取不在 H3 范围）。注意：my-agent CLI 每条命令都要构造完整 SimpleAgent、启动时写 workspace/runtime 下的本地库，所以在
+#   模型命令里跑会失败（隔离 owner 原来就这样），模型应改用内置工具（3a 最终裁定，台账有后续项）。只读元数据。
 # 函数用途: 计算本次模型命令要设成只读的 owner 级宿主托管路径。
 def host_readonly_paths_for(owner_text: str, persona_text: str) -> tuple[Path, ...]:
     from ..path_access_policy import agent_home_root_for_owner, host_readonly_paths
@@ -746,6 +758,20 @@ def host_readonly_paths_for(owner_text: str, persona_text: str) -> tuple[Path, .
         return ()
     owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
     return host_readonly_paths(agent_home, owner)
+
+
+# LLM: H3：同一组 owner 的全部任务核验记录按正则只读（path_access_policy.host_readonly_patterns；只有 macOS 生效）。本任务的记录
+#   另由 registry 按 task_root 精确给出（两个平台都生效）。数据根推不出时不加。只做路径运算。
+# 函数用途: 计算本次模型命令要按正则设成只读的任务核验记录位置。
+def host_readonly_patterns_for(owner_text: str, persona_text: str) -> tuple[str, ...]:
+    from ..path_access_policy import agent_home_root_for_owner, host_readonly_patterns
+
+    anchor = owner_text or persona_text
+    agent_home = agent_home_root_for_owner(anchor) if anchor else None
+    if agent_home is None:
+        return ()
+    owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
+    return host_readonly_patterns(agent_home, owner)
 
 
 # LLM: 显式后台命令使用前台相同的已校验沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。
@@ -963,7 +989,8 @@ class ShellTool(BaseTool):
             mode=options.path_access_mode,
             dangerous_roots=options.path_dangerous_roots,
             owner_scope_root=options.owner_scope_root,
-        ).with_data_root(agent_home_root_for_owner(options.owner_scope_root or options.protected_persona_root))
+            agent_home_root=agent_home_root_for_owner(options.owner_scope_root or options.protected_persona_root),
+        )
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.protected_persona_root = str(options.protected_persona_root or "")
         self.host_private_roots = tuple(str(root) for root in options.host_private_roots if str(root or "").strip())
@@ -1251,7 +1278,8 @@ class ShellTool(BaseTool):
             log_path.touch(exist_ok=False)
             request = BackgroundLaunchRequest(
                 argv=argv, command=command, cwd=target, log_path=log_path,
-                env=_subprocess_text_env(self.path_access_policy.owner_scope_root, hidden_roots=self.host_private_roots),
+                env=_subprocess_text_env(self.path_access_policy.owner_scope_root, hidden_roots=self.host_private_roots,
+                                         sandboxed=True),
                 max_log_bytes=_MAX_BG_LOG_BYTES,
                 store_root=process_session_store_root(self.workspace_root, access_scope.owner_home),
                 access_scope=access_scope, execution_scope=execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home),
@@ -2068,7 +2096,7 @@ def _run_attempt_sandboxed_shell_command(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots),
+            env=_subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True),
             start_new_session=True,
         )
     except OSError as exc:

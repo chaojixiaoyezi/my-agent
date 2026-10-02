@@ -57,7 +57,7 @@
   - 确定性失败（坏 JSON）的补跑警告不带 `:transient`，不降阈值；账里看不到成功（太早）按 2 处理。
 - **验证**：见 TESTS.md 同名节。
 
-## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `claude/3a-step17f` `a9c2b691f`，已实现，待集成）
+## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，二审必须改已修完，待 9b 复核）
 
 - **起因**：
   - 管理员的文件工具和命令能直接写 `~/.my-agent/config/`，绕过参数中心的 `BOUNDARY_KEYS`、修改账本和 `manage_models` 的 M1 检查。
@@ -65,14 +65,15 @@
 - **做法**：唯一声明在 `path_access_policy`（路径片段，插件 SDK 照样只依赖标准库）。
   - 保护范围分三类：
     - 宿主配置：数据根 `config/`、`system/config/`，各 owner 的 `config/`；
-    - 宿主运行状态（9b 盘点、3a 定口径）：各 owner 的策略文件及 `.lock`、审计流水、`runtime.db` 及伴随文件、`workspace/runtime/`、`audit/`、Curator 事务、记忆流水与候选、记忆归档、缓存、回收站、owner 级正式 skill 等，按路径拒写，不管存不存在；
+    - 宿主运行状态（9b 盘点、3a 定口径）：各 owner 的策略文件及 `.lock`、审计流水、`runtime.db` 及伴随文件、`workspace/runtime/`、`audit/`、Curator 事务、记忆流水与候选、记忆归档、缓存、回收站、owner 级正式 skill、`agents/`、`data/` 下 6 个宿主状态子目录（调度、决策、上下文校准、skill 提案与学习、产物备份）等，按路径拒写，不管存不存在；
     - 规范任务根的 `data/pack_verification/`。
   - **A/B 两类，每条路径只在一处**（3a 定）：
     - 上面这些是 A 类，绝对只读，唯一声明在 `path_access_policy`。原 `tool_runtime_ledger` 控制面清单里的绝对项已搬过来、从那里删掉。
-    - B 类留在 ledger：`runs/`、`agents/`、`data/`、`tasks/`，只在隔离模式挂，可被本任务工作目录穿透。
+    - B 类留在 ledger：`runs/`、`data/`、`tasks/`，只在隔离模式挂，可被本任务工作目录穿透（二审：`agents/` 和 `data/` 下 6 个宿主状态子目录归 A 类，`data/` 本身留 B 类）。
     - 不保护：`artifacts/`、`workspace/` 其余、`tmp/`、记忆正文。
-  - 文件工具、写边界、插件写入上下文都走 `check_write`。拒写码是 `PATH_HOST_CONFIG_WRITE_BLOCKED` 和 `PATH_HOST_STATE_WRITE_BLOCKED`，提示指向 `user_config` / `manage_models`。
-  - 宿主凭据（管理员密码、模型目录、共享模型档案、数据根 `config/` 里的 YAML 配置及备份、owner home 之外的 `secrets` 目录）对文件工具读写都拒，码是 `PATH_HOST_CREDENTIAL_BLOCKED`。命令只拒写不拒读，因为 my-agent CLI 要读。
+  - 文件工具、写边界、插件写入上下文都走 `check_write`。拒写码是 `PATH_HOST_CONFIG_WRITE_BLOCKED` 和 `PATH_HOST_STATE_WRITE_BLOCKED`，提示指向 `user_config` / `manage_models`。写边界把这些具体码原样传给动作策略和 registry，真实链路里模型看到的是具体码，不是通用的 `WRITE_FORBIDDEN`。
+  - 宿主凭据（管理员密码、模型目录、共享模型档案、数据根 `config/` 里的 YAML 配置及备份、owner home 之外的 `secrets` 目录）对文件工具读写都拒，码是 `PATH_HOST_CREDENTIAL_BLOCKED`。命令只拒写不拒读（读取不在本项范围）。
+  - 数据根只有一个权威来源：`PathAccessPolicy.from_values(agent_home_root=...)` 由宿主解析出的数据根结构化传入，Full Access 下不再读进程环境变量（二审必须改 1）。
   - 命令类工具在 `_sandbox_exec` 里加只读覆盖，任何模式都生效，Full Access 也是。
   - 宿主路径判定一律大小写无关：macOS 上 `CONFIG/Desktop.YAML` 就是 `config/desktop.yaml`。H2 插件库原来也有这个口子，一并修好。
 - **沙箱通用规则**：
@@ -83,11 +84,15 @@
 - **补洞（ae 块 4 发现，2026-10-02）**：
   - 问题：Full Access 下命令在任务树外跑、写根又不含本任务时，本任务的核验记录没进只读覆盖。
   - 修法：`registry_invoke` 改从写边界的结构化 `task_root` 推出本任务的宿主托管位置，交给命令沙箱，不再依赖工作目录在哪。
+  - 二审建议：macOS 再加一条 Seatbelt 正则，盖住 owner 下全部任务的 `data/pack_verification/`（别的任务的、还没建的都算）；Linux 只保护本任务。
+- **模型在命令里跑 my-agent CLI 会失败**（二审实测，3a 最终裁定这次不修 CLI）：CLI 每条命令都要构造完整的 SimpleAgent，启动时要写 `workspace/runtime` 下的本地库，沙箱里写不了。Full Access 下 `status` 等只读命令从 rc=0 变成 rc=1；隔离 owner 原来就这样。请模型改用内置工具。起不来时 CLI 输出结构化错误 `CLI_HOST_STATE_READ_ONLY`：沙箱给命令设 `MY_AGENT_HOST_STATE_READ_ONLY=1`，CLI 只看这个标记和异常的 errno / sqlite 错误码，不解析报错文字。
+- **后续项**：
+  - 只读子命令走只读启动：本地库用 `mode=ro` 打开，或推迟到真要写时再建，让 `status`、`memory-list` 这类命令在沙箱里能跑（**待做**，3a 2026-10-02 定）。
 - **已知边界**：
   - Windows 上命令不进沙箱；
   - 命令能读凭据；
   - Linux 上还不存在的路径挡不住（休眠 owner 的 `config/`，宿主没开库时的 SQLite 伴随文件）；
-  - 命令只保护本任务的核验记录；
+  - Linux 上命令只保护本任务的核验记录；macOS 上别的任务的记录伪造不了，但命令能把它所在的 `data/` 或日期目录整个改名挪走；
   - 沙箱外早已存在的硬链接；
   - 插件沙箱关闭时的插件进程；
   - 用户配置放在数据根以外时不受保护。

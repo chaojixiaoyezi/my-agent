@@ -14,7 +14,7 @@ prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件�
 from pathlib import Path
 from typing import Any
 
-from ..path_access_policy import PathAccessPolicy, data_root_from_boundary
+from ..path_access_policy import HOST_FILE_DENIAL_CODES, PathAccessPolicy, data_root_from_boundary
 
 # LLM: Every file-mutation capability snapshot and write-scope consumer must
 # reuse this canonical order/set; duplicating partial lists previously hid
@@ -39,6 +39,26 @@ _WRITE_SCOPE_BOUNDARY_KEYS = frozenset(
         "task_dir",
     }
 )
+
+
+# LLM: 写边界的拒绝结果：仍是给模型看的消息字符串（原调用方按 str 用、按空串判放行不变），另带结构化拒绝码 code。路径门拒在
+#   宿主托管文件上时是原码（path_access_policy.HOST_FILE_DENIAL_CODES），其余拒绝是 WRITE_FORBIDDEN。调用方只读 code，
+#   不从消息文字反推（registry_invoke._write_boundary_denied、action_policy._task_boundary_decision）。
+# 类用途: 写边界拒绝消息，附带要上报的错误码。
+class WriteBoundaryDenial(str):
+    code: str
+
+    # 函数用途: 用消息和结构化码构造拒绝结果。
+    def __new__(cls, message: str, code: str = "WRITE_FORBIDDEN") -> WriteBoundaryDenial:
+        denial = super().__new__(cls, message)
+        denial.code = code
+        return denial
+
+
+# LLM: 只读结构化 code；不是 WriteBoundaryDenial（旧调用方自己拼的字符串）时按 WRITE_FORBIDDEN。
+# 函数用途: 取写边界拒绝结果要上报的错误码。
+def write_boundary_error_code(error: str) -> str:
+    return getattr(error, "code", "") or "WRITE_FORBIDDEN"
 
 
 def _path_text(raw_path: object, *, label: str = "path") -> str:
@@ -89,7 +109,8 @@ def validate_write_boundary(
     path_policy = PathAccessPolicy.from_values(
         mode=path_access_mode,
         dangerous_roots=path_dangerous_roots,
-    ).with_data_root(data_root_from_boundary(write_boundary))
+        agent_home_root=data_root_from_boundary(write_boundary),
+    )
     allowed_roots = _boundary_paths(write_boundary.get("allowed_write_roots"), workspace_root, roots)
     for raw_path in raw_paths:
         try:
@@ -98,7 +119,8 @@ def validate_write_boundary(
             return f"写入被阻止: {exc}"
         access_decision = path_policy.check_write(target)
         if not access_decision.allowed:
-            return f"写入被阻止: {access_decision.message}"
+            code = access_decision.code if access_decision.code in HOST_FILE_DENIAL_CODES else "WRITE_FORBIDDEN"
+            return WriteBoundaryDenial(f"写入被阻止: {access_decision.message}", code)
         install_error = _runtime_install_error(target, write_boundary, workspace_root)
         if install_error:
             return install_error

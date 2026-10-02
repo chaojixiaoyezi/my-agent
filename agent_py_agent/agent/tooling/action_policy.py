@@ -41,7 +41,7 @@ from .registry_rate_limit_policy import tool_rate_limit_policy
 from .runtime_boundary import exact_read_boundary_error
 from .runtime_contracts import ToolCall
 from .workspace_scopes import authoritative_workspace_scopes
-from .write_boundary import validate_write_boundary
+from .write_boundary import validate_write_boundary, write_boundary_error_code
 
 ActionStatus = Literal["allow", "ask", "deny"]
 _EFFECT_RANK = {"read_only": 0, "mutating": 1, "dangerous": 2}
@@ -411,7 +411,7 @@ def _task_boundary_decision(
     )
     if write_error:
         return _deny(
-            "WRITE_FORBIDDEN",
+            write_boundary_error_code(write_error),
             effect=effect,
             evidence={"boundary_error": write_error},
         )

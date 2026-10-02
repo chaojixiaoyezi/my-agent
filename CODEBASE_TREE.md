@@ -214,6 +214,7 @@ agent_py_agent/
 |   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
 |   |-- skill_proposal_commands.py      # `skills proposals list/show/confirm/reject`：子代理经验提案的用户入口；也挂 learned 子树
 |   |-- skill_learning_commands.py      # `skills learned list/show/revert/remove`：自动总结 Skill 的查看、回滚与删除
+|   |-- host_state_guard.py             # H3：模型命令沙箱里宿主状态只读、CLI 起不来时输出结构化错误码 CLI_HOST_STATE_READ_ONLY
 |   |-- chat_parts/                     # TUI、gateway client、stream/render worker
 |   |   |-- chat_prompt_queue.py        # 可按 request identity 原子回取且保持 FIFO/task_done 账的聊天任务队列
 |   |   |-- tui_agent_navigation.py     # TUI 精确子代理选择栈、详情游标与父子视图切换状态
@@ -1545,6 +1546,7 @@ docs/
 - `agent_py_agent/agent/gateway_parts/loop_health.py`：Gateway 派发线程健康的唯一事实源（进程内、不做 IO）——起止、每次 tick 起止与派发数、从 tick 逃逸的异常、循环错误打印本身失败的次数；`dispatcher_alive` 由登记/退出记录加线程仍在 `threading.enumerate()` 判定。心跳与 `/status` 只扁平并入 `snapshot()`，不另算存活。
 - `agent_py_agent/cli/gateway_loop_backoff.py`：`LoopErrorBackoff`，派发循环与后台主循环共用的"连续出错退避 + 打印限流"小工具：只算节奏不记账不打印，成功一次清零；防止 tick 持续出错时每 0.2 秒一条错误日志把刚腾出的磁盘再写满。
 - `agent_py_agent/tests/test_host_files_access.py`：H3 合同：宿主托管文件（`path_access_policy` 的 `HOST_CONFIG_*`、`HOST_STATE_*`、`HOST_CREDENTIAL_*`）对模型的文件工具与 Shell 只读（凭据对文件工具连读也拒），9b 盘点的每一项都有文件工具和真实沙箱用例；B 类任务树根留在 `tool_runtime_ledger`；宿主记忆工具照常写。
+- `agent_py_agent/cli/host_state_guard.py`：H3：模型在命令沙箱里跑 my-agent CLI 起不来时（每条命令都要构造完整 SimpleAgent、写本地库，而宿主状态只读），只按宿主设的 `MY_AGENT_HOST_STATE_READ_ONLY` 标记和异常的 errno / sqlite 错误码把它换成一行 `error_code=CLI_HOST_STATE_READ_ONLY`；沙箱外行为不变。
 - `agent_py_agent/tests/test_host_managed_store_access.py`：H2 合同：宿主托管存储（`path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS`）对模型的文件工具与 shell 不开放，用户工作区同名目录与 zip 不受影响；含 macOS/Linux 真实沙箱用例。
 - `agent_py_agent/agent/gateway_parts/background_resource_report.py`：`gateway stop`、本地 `/stop` 与 Gateway 会话级 `/stop`（C12a：无运行中回合时冻结本会话遗留进程，回执渲染 `background_resource_lines` 也在这里）共用的受管后台进程事实投影与停止入口；只读登记表（根地址与写入端同用 `process_session_store_root(workspace, owner_home)`），投影不含命令正文/cwd/输出路径，按精确执行身份冻结停止意图、等真实终态后如实报告是否停止。`session_background_processes` 只按精确 `thread_id` 筛本会话资源，不做 owner 全量。
 - `agent_py_agent/tests/test_gateway_stop_background_resources.py`：gateway stop 侧合同（只列运行中、跨 task/run 不误停、空身份被拒、未终态如实报未停、按进程组回收孙进程）。

@@ -21,8 +21,8 @@ def build_workspace_read_context(
     roots = (cwd,) if exact is None else _intersect_roots((cwd,), exact)
     return WorkspaceReadContext(
         cwd, roots, path_policy, _intersect_roots(roots, granted_external_roots),
-        PathAccessPolicy.from_values(mode=path_policy.mode, dangerous_roots=path_policy.dangerous_roots).with_data_root(
-            path_policy.agent_home_root),
+        PathAccessPolicy.from_values(mode=path_policy.mode, dangerous_roots=path_policy.dangerous_roots,
+                                     agent_home_root=path_policy.agent_home_root),
     )
 
 

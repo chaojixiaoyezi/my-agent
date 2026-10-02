@@ -110,11 +110,13 @@ def test_host_home_exemption_is_frozen_before_plugin_environment_changes(tmp_pat
     assert restored.path_policy.agent_home_root == home.resolve()
 
 
-def test_owner_layout_and_unscoped_external_policy_keep_distinct_data_roots(tmp_path, monkeypatch):
+def test_owner_layout_and_unscoped_external_policy_share_the_host_data_root(tmp_path, monkeypatch):
+    # H3 二审必须改 1：数据根只有一个权威来源。墙外复核策略沿用 owner 策略的宿主数据根，不再退回环境变量；载荷往返也不重读环境。
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "environment-home"))
     owner = tmp_path / "configured-home/owners/local/main"
     context = read_context(tmp_path / "work", owner=str(owner), grants=(tmp_path / "work",))
-    assert context.path_policy.agent_home_root != context.external_policy.agent_home_root
+    configured = (tmp_path / "configured-home").resolve()
+    assert context.path_policy.agent_home_root == context.external_policy.agent_home_root == configured
     assert WorkspaceReadContext.from_payload(context.to_payload()) == context
 
 

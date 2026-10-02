@@ -908,6 +908,9 @@ _PRE_HANDLER_DETERMINISTIC_CODES = frozenset(
         "WRITE_FORBIDDEN",
         "PERSONA_WRITE_REQUIRES_TOOL",
         "OWNER_QUOTA_UNAVAILABLE",
+        # H3：文件工具在写之前按路径拒写宿主配置/运行状态（WriteScopeError.access_code），零副作用。
+        "PATH_HOST_CONFIG_WRITE_BLOCKED",
+        "PATH_HOST_STATE_WRITE_BLOCKED",
     }
 )
 

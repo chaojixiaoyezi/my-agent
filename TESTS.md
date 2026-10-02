@@ -95,9 +95,9 @@
   - A 类逐项（9b 盘点 + 3a 口径，36 个路径逐个写死）：
     - 策略：每项 `check_write` 都拒 `PATH_HOST_STATE_WRITE_BLOCKED`，读照常；Full Access 和隔离 owner（声明自家根为写根）下 `write_file` 都被拒，文件一个字节不变。
     - 真实沙箱：同样两种模式下，追加、删除、改名三条命令都失败，内容不变。
-    - 路径包括：6 个策略文件、审计流水、记忆流水与候选、它们旁边的 `.lock`；`runtime.db` 及三个伴随文件；能力申请、临时授权、Compact、日志、审计、`workspace/runtime` 里的会话与 Gateway 服务状态、Curator 状态与事务、记忆归档、缓存、回收站、`skills/` 和家目录根 `.agents/skills/` 里的 `SKILL.md`。
+    - 路径包括：6 个策略文件、审计流水、记忆流水与候选、它们旁边的 `.lock`；`runtime.db` 及三个伴随文件；能力申请、临时授权、Compact、日志、审计、`workspace/runtime` 里的会话与 Gateway 服务状态、Curator 状态与事务、记忆归档、缓存、回收站、`skills/` 和家目录根 `.agents/skills/` 里的 `SKILL.md`；二审加上 `data/` 下 6 个宿主状态子目录（调度、决策、上下文校准、skill 提案、skill 学习、产物备份）和 `agents/` 里的文件。
   - 仍属于模型的位置照常可写：`artifacts/`、`workspace/` 其余、`tmp/`、`memory.md`、`memory/daily`、家目录根文件，以及前缀相近的 `memory/curatorX`、`skills2`。
-  - B 类：`_attach_owner_control_write_guards` 只挂 `runs/`、`agents/`、`data/`、`tasks/`，只在隔离模式挂，A 类不再重复；旧任务的 `work/` 穿透 `tasks/` 可写，别的任务仍拒。
+  - B 类：`_attach_owner_control_write_guards` 只挂 `runs/`、`data/`、`tasks/`，只在隔离模式挂，A 类不再重复；`data/` 本身不是 A 类（`data/loose.txt` 路径策略放行），里面的 `data/scheduler/` 是；旧任务的 `work/` 穿透 `tasks/` 可写，别的任务仍拒。
   - 宿主记忆工具：真实 `SimpleAgent` 的 `remember` 照常写 `memory/candidates.jsonl`；模型 `write_file` 写同一文件被拒，内容没被改。
   - 路径策略（full 和 normal 各一遍）：
     - 宿主配置：数据根 `config/`（含目录本身、还不存在的文件）、`system/config/`、本机主用户、飞书用户、还没有 `config/` 的用户，写入都拒 `PATH_HOST_CONFIG_WRITE_BLOCKED`，提示含 `user_config` 与 `manage_models`，读照常；工作区里同名的 `config/`、前缀相同的目录照常可写。
@@ -111,7 +111,7 @@
   - 隔离 owner 把自家根声明成工作根时，`write_file` 写自家配置、`runtime.db` 被拒，别处照常。
   - 写边界 `validate_write_boundary`、插件写入上下文（含序列化往返）、插件读取上下文的裁决与上面一致。
   - 命令：
-    - 按模式列出的只读覆盖（隔离只列自家，Full Access 列数据根和全部 owner，子代理工作目录也认出任务根）；非规范布局不加。
+    - 按模式列出的只读覆盖（隔离只列自家，Full Access 列数据根和全部 owner）；任务核验记录不在这里，只按写边界的 `task_root` 给；非规范布局不加。
     - Seatbelt 规则顺序：还不存在的受保护路径也有拒写；上级目录写拒绝覆盖到数据根、owner home 等各层，排在隐藏路径之前；断网仍在最后。
   - 真实沙箱（macOS sandbox-exec；Linux bwrap）：
     - Full Access：写修改账本、写 `runtime.db-wal`、写本任务 `originals.json`、删 `runtime.db` 都失败；“改名 owner home → 写配置 → 改回”失败且目录原样；macOS 上新建 `runtime.db-shm`、给还没有配置目录的用户建 `config/` 也失败；`cat desktop.yaml` 能读（已知边界）；普通写照常。
@@ -127,6 +127,7 @@
 - **改了期望的旧用例**（行为变化，不是放宽）：
   - `test_runtime_gate_ledger.py::test_workspace_only_owner_control_metadata_stays_read_only`：权限文件改由路径策略拒写（`PATH_HOST_STATE_WRITE_BLOCKED`），不再出现在 ledger 的 `forbidden_write_roots` 里；写边界照样拒。
   - `test_shell_sandbox_boundary_facts.py` 两项：写根是 owner 的 `workspace/` 时，里面的 `workspace/runtime` 是宿主托管文件，边界事实把它列进 `read_only`。
+  - `test_workspace_read_context.py` 一项（二审必须改 1）：原名 `..._keep_distinct_data_roots`，断言墙外复核策略的数据根跟环境变量走、和 owner 策略不同，这正是“两个数据根”的问题；改名 `..._share_the_host_data_root`，断言两者都是配置的 home（环境变量指向别处），载荷往返照样相等。
 - **全量 12 分片（Mac）**：上面 3 项按新行为改期望后，其余全过。
 - **Docker Linux 车道**（`666880839`，带 NET_ADMIN）：
   - 全量结果：12/12 rc=0，26641 passed / 0 failed / 103 skipped / 32 xfailed / 5 xpassed。证据在 `~/.my-agent/releases/claude-tools/linux-lane-666880839/`。

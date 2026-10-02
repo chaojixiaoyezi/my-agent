@@ -524,8 +524,8 @@ def _attach_owner_task_write_scope(
 
 
 # LLM: B 类（H3 后的口径，3a 2026-10-02 定）：这里只放 owner 隔离时默认禁写、但可被更具体的本任务工作目录穿透的任务树根
-#   （runs/、tasks/；逐个核实过里面是规范任务根 runs/<日期>/<键>、旧版 tasks/<日期>/<名>）。owner 根的 data/、agents/ 是宿主状态，
-#   9b 二审后搬到 A 类。它们走写范围的 forbidden_write_roots，按“命中的最具体条目生效”裁决，文件工具与进程沙箱
+#   （runs/、tasks/：规范任务根 runs/<日期>/<键>、旧版 tasks/<日期>/<名>；以及 owner 根的 data/，其中 6 个宿主状态子目录另归 A 类）。
+#   agents/ 是宿主状态，9b 二审后搬到 A 类。它们走写范围的 forbidden_write_roots，按“命中的最具体条目生效”裁决，文件工具与进程沙箱
 #   共用这一个字段。权限/配额/策略文件、审计流水、runtime.db、Compact、日志等“绝对只读”的宿主文件是 A 类，唯一声明在
 #   path_access_policy（HOST_STATE_* / HOST_CONFIG_*），任何模式都生效、不可穿透，这里不再重复列。改动同步 test_host_files_access.py。
 # 函数用途: 隔离 owner 的任务树根默认禁写（本任务工作目录照常可写），防止模型改别的任务或宿主任务账。
@@ -540,6 +540,7 @@ def _attach_owner_control_write_guards(
     protected: list[str] = []
     for name in (
         "owner_runs_dir",
+        "owner_data_dir",
         "owner_tasks_dir",
     ):
         path = _resolved_path(getattr(home, name, None))

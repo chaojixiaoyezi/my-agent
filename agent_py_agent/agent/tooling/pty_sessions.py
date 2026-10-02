@@ -261,7 +261,8 @@ class PtySessionRegistry:
                 stderr=slave_fd,
                 start_new_session=True,
                 close_fds=True,
-                env=_subprocess_text_env(owner_home, hidden_roots=tuple(str(root) for root in sandbox.private_roots)),
+                env=_subprocess_text_env(owner_home, hidden_roots=tuple(str(root) for root in sandbox.private_roots),
+                                         sandboxed=True),
             )
         except Exception:
             os.close(master_fd)

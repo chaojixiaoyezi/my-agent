@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 PATH_ACCESS_MODE_NORMAL = "normal"
@@ -65,10 +65,11 @@ HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
 #   文件工具与命令在任何模式下都只能读、不能写（按路径拒写，不管存不存在；不可被任何允许根穿透）。来源：9b 的家目录盘点
 #   （~/.my-agent/decision-evidence/owner-home-host-files-inventory-a9c2b691f/）与原 tool_runtime_ledger 控制面清单中的绝对项
 #   （已从那里删掉，每条路径只在一处）。可被本任务工作目录穿透的任务树根（runs/、tasks/）不在这里，见
-#   agent_core.tool_runtime_ledger._attach_owner_control_write_guards（B 类）。owner 根的 data/（调度、决策、上下文、skill 提案与
-#   学习、产物备份、会话与本地库等）和 agents/（旧子代理运行状态与派工报告；现在子代理工作区在 <任务根>/work/agents/ 下）都是
-#   宿主状态，不是任务树，归 A 类（9b 二审，3a 定）。注意：能力包核验记录在 <任务根>/data/，不是 owner 根的 data/。宿主自己的写入（记忆工具、Curator、策略服务、
-#   runtime 仓库）在宿主进程里，不经过模型工具，不受影响。
+#   agent_core.tool_runtime_ledger._attach_owner_control_write_guards（B 类）。owner 根的 data/ 本身留在 B 类，其中 6 个宿主
+#   状态子目录（调度 scheduler、决策 decision、上下文校准 context、skill 提案 skill_proposals 与学习 skill_learning、产物备份
+#   artifact_backups）归 A 类；data/plugins 是 H2 宿主托管存储（9b 二审，3a 最终裁定）。agents/（旧子代理运行状态与派工报告；
+#   现在子代理工作区在 <任务根>/work/agents/ 下）不是任务树，归 A 类。注意：能力包核验记录在 <任务根>/data/，不是 owner 根的
+#   data/。宿主自己的写入（记忆工具、Curator、策略服务、runtime 仓库）在宿主进程里，不经过模型工具，不受影响。
 #   - 文件：权限、配额、保留、记忆、skill、工具策略，审计流水，记忆操作流水与候选；每个文件旁的 .lock 一并保护（抢锁会卡住宿主写入）。
 #   - 目录：能力申请、临时授权、Compact、日志、审计、会话与事件库（workspace/runtime）、Curator 事务、记忆归档、缓存、回收站、
 #     owner 级正式 skill（skills/ 与家目录根的 .agents/skills/；项目工作区里的 skills 不在 owner home 下，不受影响）。
@@ -80,12 +81,25 @@ HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
 )
 HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
     ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
-    ("data",), ("agents",),
+    ("data", "scheduler"), ("data", "decision"), ("data", "context"), ("data", "skill_proposals"), ("data", "skill_learning"),
+    ("data", "artifact_backups"), ("agents",),
     ("memory", "curator"), ("memory_archive",), ("cache",), ("trash",), ("skills",), (".agents", "skills"),
 )
 HOST_STATE_OWNER_SQLITE: tuple[str, ...] = ("runtime.db",)
 SQLITE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
 HOST_STATE_LOCK_SUFFIX = ".lock"
+# H2/H3 宿主托管文件的拒绝码：写边界（tooling/write_boundary）拒在这些码上时原码上报给模型，不再换成通用 WRITE_FORBIDDEN
+#   （9b 二审建议，3a 定），模型能按码看到该改用哪个宿主工具（错误合同里的 recovery_hint）。
+# 常量用途: 列出要原码透传的宿主托管文件拒绝码。
+HOST_FILE_DENIAL_CODES: frozenset[str] = frozenset({
+    "PATH_HOST_MANAGED_STORE_BLOCKED", "PATH_HOST_CONFIG_WRITE_BLOCKED", "PATH_HOST_STATE_WRITE_BLOCKED",
+    "PATH_HOST_CREDENTIAL_BLOCKED",
+})
+# H3：宿主给沙箱里跑的模型命令设的环境标记，值 "1" 表示这个进程在宿主命令沙箱里、宿主状态只读（任何模式）。只由
+#   tooling/shell._subprocess_text_env 设（不进沙箱的宿主命令会去掉它）；my-agent CLI 按它把启动时的权限类失败换成结构化错误码
+#   （cli/host_state_guard）。
+# 常量用途: 命令沙箱里“宿主状态只读”的环境变量名。
+HOST_STATE_READ_ONLY_ENV = "MY_AGENT_HOST_STATE_READ_ONLY"
 
 # H3 任务内的宿主托管位置（ae 能力包块 4）：相对规范任务根的路径片段，模型工具只读。规范任务根与
 #   conversation.workspace_paths.canonical_task_root 一致：owner home 下 runs/<日期>/<键>、tasks/<日期>/<名>、audits/<编号>
@@ -93,8 +107,10 @@ HOST_STATE_LOCK_SUFFIX = ".lock"
 # 常量用途: 列出规范任务根的布局与任务里对模型工具只读的宿主托管位置。
 TASK_ROOT_LAYOUT: tuple[tuple[str, int], ...] = (("runs", 2), ("tasks", 2), ("audits", 1))
 HOST_STATE_TASK_PARTS: tuple[tuple[str, ...], ...] = (("data", "pack_verification"),)
+# 常量用途: POSIX ERE 的元字符，路径拼进正则前逐个转义（host_readonly_patterns）。
+_ERE_SPECIAL = frozenset(".^$*+?()[]{}|\\")
 
-# H3 凭据（3a 定）：宿主配置里存放密钥的位置，文件工具连读也拒；命令只拒写不拒读（my-agent CLI 要读它们，已知边界）。相对数据根。
+# H3 凭据（3a 定）：宿主配置里存放密钥的位置，文件工具连读也拒；命令只拒写不拒读（读取不在 H3 范围，命令能读到凭据是已知边界）。相对数据根。
 #   用户配置的文件名由部署决定（Gateway --config），所以按“数据根 config/ 下名字里有 yaml/yml 段的文件”认，备份
 #   desktop.yaml.bak-* 一并算上；数据根里 owner home 之外任何一层叫 secrets 的目录也按密钥目录处理。
 # 常量用途: 列出对模型文件工具不可读的宿主凭据位置。
@@ -163,6 +179,10 @@ class PathAccessPolicy:
         )
 
     # LLM: 当前用户 home 过滤与数据根豁免必须由宿主计算一次；直接恢复协议字段不得再次应用此环境归一化。
+    #   数据根的唯一权威是宿主启动时解析出的结果（home_paths：配置 my_agent_home 优先，其次环境变量），由构造处经
+    #   agent_home_root 结构化传入（宿主 owner home 或写边界 canonical_owner_home_root 反推）；传了就不读进程环境变量。
+    #   只有没有任何宿主事实时才按 owner 墙反推、再退回 MY_AGENT_HOME。两者不一致时（配置写了固定 home）若只看环境变量，
+    #   H2/H3 的宿主文件判定会落到另一个目录上（9b 二审实测 Full Access 写进了 permissions.json 等）。
     # 函数用途: 规范化模式和危险根，并固定 owner 及数据根事实。
     @classmethod
     def from_values(
@@ -171,6 +191,7 @@ class PathAccessPolicy:
         mode: object = DEFAULT_PATH_ACCESS_MODE,
         dangerous_roots: Iterable[object] | None = None,
         owner_scope_root: object = None,
+        agent_home_root: object = None,
     ) -> PathAccessPolicy:
         normalized_mode = normalize_path_access_mode(mode)
         roots = tuple(_normalized_root(item) for item in (dangerous_roots or DEFAULT_DANGEROUS_PATH_ROOTS))
@@ -184,17 +205,10 @@ class PathAccessPolicy:
         else:
             roots = tuple(root for root in roots if root is not None)
         roots = tuple(dict.fromkeys(roots))
-        return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope,
-                   agent_home_root=_home_root_from_owner_scope(scope) if scope else _my_agent_home_root())
-
-    # LLM: 数据根的唯一权威是宿主启动时解析出的结果（home_paths：配置 my_agent_home 优先，其次环境变量）。from_values 在没有
-#   owner 墙时只能退回环境变量 MY_AGENT_HOME，两者不一致时（配置写了固定 home）H2/H3 的宿主文件判定会落到另一个目录上
-#   （9b 二审实测 Full Access 写进了 permissions.json 等）。所以拿得到宿主 owner home 或写边界 canonical_owner_home_root 的
-#   构造点都要调它。root 为空时原样返回（没有宿主事实时才退回环境变量）。
-    # 函数用途: 返回把数据根换成宿主解析结果的同一策略。
-    def with_data_root(self, root: object) -> PathAccessPolicy:
-        resolved = _normalized_root(root) if root else None
-        return self if resolved is None else replace(self, agent_home_root=resolved)
+        data_root = _normalized_root(agent_home_root) if agent_home_root else None
+        if data_root is None:
+            data_root = _home_root_from_owner_scope(scope) if scope else _my_agent_home_root()
+        return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope, agent_home_root=data_root)
 
     # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；模式放行后再拒宿主凭据
     #   （PATH_HOST_CREDENTIAL_BLOCKED，H3），所以原有拒绝码不变。只读构造时冻结的根，不受另一个会话或子进程环境影响。
@@ -337,7 +351,7 @@ class PathAccessPolicy:
         if not any(_is_relative_to(resolved, root) for root in granted_external_roots):
             return decision
         policy = external_policy or PathAccessPolicy.from_values(
-            mode=self.mode, dangerous_roots=self.dangerous_roots).with_data_root(self.agent_home_root)
+            mode=self.mode, dangerous_roots=self.dangerous_roots, agent_home_root=self.agent_home_root)
         return policy.check(resolved)
 
     def _owner_scope_decision(self, resolved: Path, home_root: Path) -> PathAccessDecision:
@@ -583,6 +597,24 @@ def task_host_state_paths(task_root: Path) -> tuple[Path, ...]:
     return tuple(task_root.joinpath(*parts) for parts in HOST_STATE_TASK_PARTS)
 
 
+# LLM: 同一份任务布局（TASK_ROOT_LAYOUT × HOST_STATE_TASK_PARTS）的正则投影，给 macOS Seatbelt 用一条规则盖住 owner home 下
+#   全部规范任务根里的宿主托管位置：别的任务的、还没建出来的都算，不逐个列路径（9b 二审建议，3a 定）。owner 集合与
+#   host_readonly_paths 相同（隔离只本 owner，Full Access 全部已有 owner）。POSIX ERE，owner home 先解析符号链接再按字面转义；
+#   Seatbelt 在不区分大小写的卷上按不区分大小写匹配（本机实测 RUNS/、DATA/、Pack_Verification 变体都拦住）。Linux bwrap 只能
+#   挂已存在的路径，不用它：Linux 只保护本任务（registry 按 task_root 给的路径），已知边界。改布局时同步 test_host_files_access.py。
+# 函数用途: 生成匹配 owner home 下所有任务核验记录路径的正则（每个 owner 一条）。
+def host_readonly_patterns(agent_home_root: Path, owner_home: Path | None = None) -> tuple[str, ...]:
+    homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
+    roots = "|".join(_ere_literal(name) + "/[^/]+" * depth for name, depth in TASK_ROOT_LAYOUT)
+    parts = "|".join("/".join(_ere_literal(part) for part in item) for item in HOST_STATE_TASK_PARTS)
+    return tuple(f"^{_ere_literal(str(home.resolve(strict=False)))}/({roots})/({parts})(/|$)" for home in homes)
+
+
+# 函数用途: 把一段文字转成 POSIX ERE 里的字面匹配（给正则元字符加反斜杠）。
+def _ere_literal(text: str) -> str:
+    return "".join("\\" + char if char in _ERE_SPECIAL else char for char in text)
+
+
 # LLM: 写门的拒绝结果只在这里拼：配置优先于运行状态，再看硬链接（按它连到的那个文件归类）。提示文字给模型下一步该用的入口。
 # 函数用途: 目标是宿主托管文件时返回拒写结果，否则 None。
 def _host_write_block(resolved: Path, agent_home_root: Path) -> PathAccessDecision | None:
@@ -786,12 +818,14 @@ __all__ = [
     "HOST_CONFIG_OWNER_PARTS",
     "HOST_CONFIG_YAML_SEGMENTS",
     "HOST_CREDENTIAL_HOME_PARTS",
+    "HOST_FILE_DENIAL_CODES",
     "HOST_MANAGED_OWNER_STORE_PARTS",
     "HOST_SECRET_DIR_NAME",
     "HOST_STATE_LOCK_SUFFIX",
     "HOST_STATE_OWNER_DIRS",
     "HOST_STATE_OWNER_FILES",
     "HOST_STATE_OWNER_SQLITE",
+    "HOST_STATE_READ_ONLY_ENV",
     "HOST_STATE_TASK_PARTS",
     "PATH_ACCESS_MODE_FULL",
     "PATH_ACCESS_MODE_NORMAL",
@@ -810,6 +844,7 @@ __all__ = [
     "host_config_root_for_path",
     "host_credential_for_path",
     "host_readonly_paths",
+    "host_readonly_patterns",
     "host_state_for_path",
     "host_managed_store_dirs",
     "host_managed_store_for_path",

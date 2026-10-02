@@ -50,7 +50,8 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
         mode=facts.path_access_mode,
         dangerous_roots=facts.path_dangerous_roots,
         owner_scope_root=facts.owner_scope_root,
-    ).with_data_root(facts.data_root)
+        agent_home_root=facts.data_root,
+    )
     findings: list[GateFinding] = []
     _collect_path_findings(data, roots, path_policy, findings)
     _collect_url_findings(
@@ -141,7 +142,8 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
             workspace_policy = PathAccessPolicy.from_values(
                 mode=request.path_policy.mode,
                 dangerous_roots=request.path_policy.dangerous_roots,
-            ).with_data_root(request.path_policy.agent_home_root)
+                agent_home_root=request.path_policy.agent_home_root,
+            )
             decision = workspace_policy.check(resolved)
         if not decision.allowed:
             return GateFinding(decision.code or "PATH_ACCESS_DENIED", evidence={
