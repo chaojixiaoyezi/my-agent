@@ -86,7 +86,8 @@ def test_payload_fields_per_protocol_and_budget_clamp():
     assert reasoning_payload_fields("effort", "max", "anthropic", limits) == {"output_config": {"effort": "max"}}
     assert reasoning_payload_fields("budget", "low", "anthropic", limits) == {"thinking": {"type": "enabled", "budget_tokens": 2048}}
     assert reasoning_payload_fields("budget", "max", "anthropic", limits)["thinking"]["budget_tokens"] == 15290
-    assert reasoning_payload_fields("budget", "high", "anthropic", ReasoningPayloadLimits(1500))["thinking"]["budget_tokens"] == 1024
+    # 输出上限不足以容纳最小预算及正文预留时，不能把空区间强行抬成 1024。
+    assert reasoning_payload_fields("budget", "high", "anthropic", ReasoningPayloadLimits(1500)) == {}
     assert reasoning_payload_fields("budget", "medium", "openai", limits) == {"thinking": {"type": "enabled"}}
     assert reasoning_payload_fields("none", "high", "openai", limits) == {}
     assert "不支持调节" in describe_reasoning_effect("high", "none")
@@ -357,13 +358,13 @@ def test_extended_effort_wire_uses_protocol_and_declared_levels(monkeypatch, pro
 
 
 @pytest.mark.parametrize("case", [("xhigh", 65536, 24576), ("ultra", 65536, 64512),
-                                  ("xhigh", 16314, 15290), ("ultra", 1500, 1024)])
+                                  ("xhigh", 16314, 15290), ("ultra", 1500, None)])
 @pytest.mark.parametrize("levels", [(), ("high", "xhigh", "max", "ultra")])
 def test_extended_budget_values_and_existing_clamp(case, levels):
     level, cap, expected = case
     context = ReasoningPayloadLimits(cap, levels)
-    assert reasoning_payload_fields("budget", level, "anthropic", context) == {
-        "thinking": {"type": "enabled", "budget_tokens": expected}}
+    expected_fields = {} if expected is None else {"thinking": {"type": "enabled", "budget_tokens": expected}}
+    assert reasoning_payload_fields("budget", level, "anthropic", context) == expected_fields
     assert reasoning_payload_fields("budget", level, "openai", context) == {"thinking": {"type": "enabled"}}
     assert reasoning_payload_fields("none", level, "anthropic", context) == {}
 

@@ -7,6 +7,13 @@
 - 收拢（2026-10-02）：`gateway_parts/plugin_command_service._scope_management`（IM 插件管理）与
   `tooling/user_config_tool._is_main_owner`（本机配置动作）也改为调用它，不再各写一份。
 
+## Anthropic 预算回执的同源裁决（2026-10-02，本地待集成）
+
+- `backends/reasoning_control._anthropic_budget_decision` 只读用户档位预算与输出上限，给冻结的预算或 `reasoning_budget_interval_empty`；出站与回执共用，不创建状态/配置/通知链。
+- 具体请求使用实际 max_tokens，空区间省略 thinking；`describe_config_reasoning_effect` 读取 `settings.defaults.effective_max_output_tokens`，与工厂构造的常规 cap 相同，不误用配置原始值。
+- `control_service` 与参数中心仍消费原效果函数；短 JSON/强制工具等请求局部覆盖不由常规回执代替，关闭优先级不变。
+- 新测试经真实工厂、builder、所选模型和原控制服务；只有传输用替身，真实 TUI/IM 与供应商未验证。完整合同见智能程度设计第 10 节。
+
 ## 设置服务 P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，已上线 step17a，main de222698b，2026-10-02）
 
 - `gateway_parts/settings_control_service`：`show` 的 capability 来源键覆盖判断扩展到来运行时 capability 文件

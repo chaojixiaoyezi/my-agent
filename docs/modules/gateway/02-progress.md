@@ -28,6 +28,13 @@
   provider/kind/id 都是非空字符串，且是本机 local/main。
 - 记忆向量重建入口 `my-agent memory vectors rebuild --confirmed` 共用这一条，不再各写一份。插件管理和 user_config 工具里还有两处同规则的内联写法，本轮没动。
 
+## Anthropic 预算空区间回执（2026-10-02，sol2，本地已实施，待集成）
+
+- 解决小输出 cap 下回执仍声称发送非法预算的缺口；`/effort` 与参数中心继续共用 `describe_config_reasoning_effect`，不增加路由。
+- 上限与工厂同源，预算/原因与后端裁决同源；空区间说明未发送 thinking，不承诺服务商已关闭思考，不抬高 cap。
+- 真实控制服务 chat/feishu 路由与所选模型后端、参数中心隔离组件有断言；十一文件 494 项与三个变异结果见 TESTS。
+  实际终端、IM 收信及生产 Gateway 未验证，仍由 3a 集成后复核。
+
 ## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，已上线 step17a，main de222698b，2026-10-02）
 
 - `settings_control_service` 的 `/settings show` 修复三处：

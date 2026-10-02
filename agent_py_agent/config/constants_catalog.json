@@ -873,7 +873,7 @@
       "value": 1024,
       "unit": "tokens",
       "category": "上限预算",
-      "description": "思考预算按档位取值，最终再夹到 [1024, max_tokens-1024]；Anthropic 协议要求预算小于 max_tokens。"
+      "description": "思考预算按档位取值，最终夹到 [1024, max_tokens-1024]；空区间不发送，不能以抬高下界伪装成合法夹紧。"
     },
     {
       "name": "_MAX_MESSAGE_BYTES",

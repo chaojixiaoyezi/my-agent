@@ -1,5 +1,11 @@
 # 当前状态
 
+Anthropic 小输出上限预算（2026-10-02，sol2，`worker/sol2-anthropic-budget`，基于 `b35796a60`，本地已实施、待集成）：
+空区间省略 thinking，回执从同一结构化裁决说明 `reasoning_budget_interval_empty`，不增大输出 cap。
+工厂派生四个边界、非流/流式出站与投影、chat/feishu 控制服务及参数中心、正常大上限十一文件 494 项通过；
+三个独立变异拦截后恢复同一产品 SHA256，门禁结果见 TESTS。真实供应商和实际客户端/生产 Gateway 未验证，未部署。
+可选第二提交的简报本树未找到，探测计量与自动检测成本上界未做，等 3a 补规格，不影响主修复交接。
+
 C7（2026-10-02，sol，`worker/sol-effort-levels`，已上线 step17a，main de222698b，2026-10-02）：/effort 可选八档，Responses 依声明选择 xhigh/ultra，
 Chat/Messages 沿原 high/max，budget 保留原夹紧，回执说出实际值。组件与三个变异有证据，扩展回归旧失败保留 TESTS。
 真实模型及实际 TUI/IM 未验证；本线没有部署、改生产配置或启停 Gateway，下一步由 3a 集成后核对新档。

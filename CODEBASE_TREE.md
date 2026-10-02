@@ -818,6 +818,7 @@ agent_py_agent/
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
+|   |-- test_anthropic_reasoning_budget.py # 空预算区间：工厂边界、非流/流式出站与完整投影、控制服务及参数中心回执同源、正常大上限、HTTP 默认禁外发
 |   |-- test_reasoning_probe.py         # 智能程度检测：回放标定与阈值、自动触发条件、出站字段、写档案与撤销、管理员门槛、记录失效、凭据不外泄
 |   |-- test_host_notices.py            # 宿主提示：存取与清洗、模型看不到、Gateway 发布与提交即已读、失败保留、飞书正文前、TUI 灰行、历史回放、检测结论
 |   |-- test_steer_delivery_recovery.py # TUI 插话：失败调用按编号退回并重提交、超时与瞬断重试只见一次、隔离 Gateway 端到端、定时任务目标终态后排到下一轮
@@ -1768,6 +1769,7 @@ docs/
 - `agent/conversation/process_events.py`：原进程记录到原 wake 队列的耐久终态通知；不新增任务状态机。
 - `agent/conversation/task_follow_up.py`：会话任务后续工作事实的唯一判定（活跃 Goal、guidance、子代理、已终态未交回的子代理完成、唤醒、后台命令、进度策略），读失败按项目报告、按记录归属限定；`agent/scheduler/active_run_closeout.py`（`close_active_run` 收口一轮没做完的定时执行、`settle_stale_waiting` 解开存量 waiting）据此决定等待还是结算成受阻。测试 `test_scheduler_waiting_deadlock.py`。
 - `agent/backends/sampling.py`：YAML/profile/backend 共用 top_p 数值校验；已知 Flash 方言默认与任意端点显式覆盖分开。
+- `agent/backends/reasoning_control.py::_anthropic_budget_decision`：本次上限下的合法预算或空区间原因，出站和回执共用，不抬高上限；`describe_config_reasoning_effect` 用工厂同源的常规输出 cap，具体请求仍使用请求局部 cap。测试 `test_anthropic_reasoning_budget.py`，合同见智能程度设计第 10 节。
 - `agent/backends/reasoning_control.py` 与 `agent/settings/reasoning_effort.py`：智能程度的换算与解析。档位是会话线程属性（`/effort`、子代理 `effort`、全局 `model_reasoning_effort`），模型档案 `reasoning_control` 决定怎样发送；真实请求与两处自动选模投影共用 `request_reasoning_options`。设计见 `docs/design/REASONING_EFFORT.md`，测试 `test_reasoning_effort.py`。`agent/settings/reasoning_probe.py` 与 `reasoning_probe_judge.py`：宿主侧检测当前模型是否真的支持按档位调节（后台 9 次短请求，只比较 usage 的 token），确认支持后经参数中心写 `reasoning_control: effort`；设计见同文第 8 节，测试 `test_reasoning_probe.py`。`agent/conversation/host_notices.py`：宿主提示的唯一存取点（线程 `pending_host_notices`），Gateway 前台回复提交时取走并随最终回复显示；设计见 `docs/design/HOST_NOTICES.md`，测试 `test_host_notices.py`。
 - `agent/backends/structured_output_mode.py`：结构化输出方式的换算。模型档案 `structured_output`（auto/native/json_object）经 `model_structured_output` 进入后端，`openai_chat.generate_structured` 按它发 `json_schema` 或 JSON 对象模式（schema 写进提示）；记忆整理和自动总结 Skill 都走这里。测试 `test_structured_output_mode.py`。
 - `agent_py_agent/tests/test_gateway_main_activity.py`：前后台数值/阶段共享、任务晋升、跨会话拒绝、迟到关闭和显示故障验证。

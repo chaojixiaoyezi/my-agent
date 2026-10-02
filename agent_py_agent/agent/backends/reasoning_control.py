@@ -5,7 +5,8 @@
 #   强制工具选择时原关闭思考优先。Responses 协议写 reasoning.effort，档位按模型档案的 reasoning_levels
 #   （服务商目录声明的可用档位）对应；未声明时只发通用的 low/medium/high。Chat/Messages 沿原通用四档，
 #   两个新档映射为 high/max；有声明时过滤，不发声明之外的值。档位、中文名和三种换算只定义在一张表里。
-#   改动须同步 test_reasoning_effort*.py、test_responses_reasoning.py、gateway_model_adoption 与子代理首轮选模投影。
+#   Anthropic 预算值与未发送原因共用结构化裁决；空区间不发 thinking，不能抬高输出上限或冒称思考已关闭。
+#   改动须同步 test_anthropic_reasoning_budget.py、test_reasoning_effort*.py、test_responses_reasoning.py 与选模投影。
 # 模块用途: 定义智能程度档位、解析模型的思考控制方式，并把档位换算成各协议的请求字段。
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ REASONING_LEVELS = tuple(_REASONING_LEVEL_RULES)
 REASONING_CONTROLS = ("auto", "effort", "budget", "none")
 LEVEL_LABELS = {level: rule.label for level, rule in _REASONING_LEVEL_RULES.items()}
 CONTROL_LABELS = {"effort": "按推理强度档位发送", "budget": "按思考预算发送（部分服务商只按开/关生效）", "none": "不支持调节"}
-# 思考预算按档位取值，最终再夹到 [1024, max_tokens-1024]；Anthropic 协议要求预算小于 max_tokens。
+# 思考预算按档位取值，最终夹到 [1024, max_tokens-1024]；空区间不发送，不能以抬高下界伪装成合法夹紧。
 _MIN_BUDGET_TOKENS = 1024
 # 已知供应商的默认控制方式（只是优化，profile 可显式覆盖）：DeepSeek 官方 OpenAI 兼容接口的
 # reasoning_effort 与 thinking 开关实测生效；其 Anthropic 兼容接口只有思考开关生效；ChatGPT 订阅的 Responses
@@ -60,6 +61,25 @@ _EFFORT_GENERIC_LEVELS = ("low", "medium", "high", "max")
 class ReasoningPayloadLimits:
     max_tokens: int
     levels: tuple[str, ...] = ()
+
+
+# LLM: 只保存本次上限下的预算或未发送原因；出站与回执消费同一裁决，不持有配置、不发请求、不写状态。
+# 类用途: 区分合法预算与空预算区间，防止回执和出站各算一次而发生偏差。
+@dataclass(frozen=True)
+class _AnthropicBudgetDecision:
+    budget_tokens: int
+    reason_code: str = ""
+
+
+# LLM: 调用方已确认 level 有预算；max_tokens 是本次载荷或工厂派生的常规请求上限。至少保留最小预算及等量正文空间，
+#   不能修改输出上限；reasoning_payload_fields 和预算回执必须共用此无副作用裁决，联测边界与正常大上限。
+# 函数用途: 算出可以发送的思考预算，区间为空时返回明确原因而不是强行抬到最小值。
+def _anthropic_budget_decision(level: str, max_tokens: int) -> _AnthropicBudgetDecision:
+    ceiling = int(max_tokens) - _MIN_BUDGET_TOKENS
+    if ceiling < _MIN_BUDGET_TOKENS:
+        return _AnthropicBudgetDecision(0, "reasoning_budget_interval_empty")
+    budget = max(_MIN_BUDGET_TOKENS, min(_REASONING_LEVEL_RULES[level].budget, ceiling))
+    return _AnthropicBudgetDecision(budget)
 
 
 # LLM: 大小写与首尾空白不敏感；不认识的值返回空串，由调用方决定回退默认或报错，绝不猜。
@@ -115,7 +135,8 @@ def _provider_effort(level: str, protocol: str, levels: tuple[str, ...] | list[s
 
 
 # LLM: 只用于 Chat/Messages；effort 从唯一表按协议降档后与模型声明取交集，找不到就不发；budget 不发档位字符串，
-#   只按表中预算及本次 max_tokens 沿原规则夹紧。关闭思考仍由外层原优先级处理，联合两协议组包及投影测试。
+#   Anthropic 读取与回执同源的预算裁决，空区间不发 thinking；其余预算协议仍只发开关。关闭思考由外层优先处理，
+#   不静默抬高输出上限，联合 test_anthropic_reasoning_budget 与两协议组包、投影回归。
 # 函数用途: 将用户档位和当前载荷限制换成实际供应商字段，不请求网络、不修改后端配置。
 def reasoning_payload_fields(control: str, level: str, protocol: str, limits: ReasoningPayloadLimits) -> dict[str, object]:
     rule = _REASONING_LEVEL_RULES.get(level)
@@ -128,8 +149,10 @@ def reasoning_payload_fields(control: str, level: str, protocol: str, limits: Re
         return {"reasoning_effort": sent} if protocol == "openai" else {"output_config": {"effort": sent}}
     if protocol != "anthropic":
         return {"thinking": {"type": "enabled"}}
-    ceiling = max(_MIN_BUDGET_TOKENS, int(limits.max_tokens) - _MIN_BUDGET_TOKENS)
-    return {"thinking": {"type": "enabled", "budget_tokens": max(_MIN_BUDGET_TOKENS, min(rule.budget, ceiling))}}
+    decision = _anthropic_budget_decision(level, limits.max_tokens)
+    if decision.reason_code:
+        return {}
+    return {"thinking": {"type": "enabled", "budget_tokens": decision.budget_tokens}}
 
 
 # LLM: 只用于 Responses 协议：control 必须是 effort；levels 是模型档案声明的服务商档位（可空）。disabled=True 表示本次
@@ -177,14 +200,21 @@ def _describe_effort_effect(level: str, protocol: str, levels: tuple[str, ...] |
     return f"{prefix}；按当前协议与模型声明降档，实际发送 {sent}。"
 
 
-# LLM: budget 不发送 effort 字符串；回执说明原始预算与原夹紧规则，不把展示时上限当作每次请求的最终上限。
-# 函数用途: 告诉用户预算模式真正发什么，避免把 xhigh/ultra 当成服务商档位字符串。
-def _describe_budget_effect(level: str, protocol: str) -> str:
-    prefix = f"{CONTROL_LABELS['budget']}：{LEVEL_LABELS[level]}；发送 thinking.enabled"
+# LLM: budget 不发送 effort 字符串；有上限时只渲染出站同源裁决，未发送原因不可由文案或模型正文反推。
+#   无上限的纯档位说明只能写条件规则，不能声称已发；配置回执上限与工厂同源，不证明强制工具请求或供应商接受。
+# 函数用途: 按结构化预算事实说明实际字段或未发送原因，没有请求上限时只解释规则。
+def _describe_budget_effect(level: str, protocol: str, max_tokens: int | None = None) -> str:
+    prefix = f"{CONTROL_LABELS['budget']}：{LEVEL_LABELS[level]}"
     if protocol != "anthropic":
-        return f"{prefix}，不发送档位字符串或预算数值。"
-    budget = "与 max 相同的可用预算上限" if level in {"max", "ultra"} else str(_REASONING_LEVEL_RULES[level].budget)
-    return f"{prefix}，预算为 {budget}，最终沿原规则按本次输出上限夹紧，不发送档位字符串。"
+        return f"{prefix}；发送 thinking.enabled，不发送档位字符串或预算数值。"
+    if max_tokens is None:
+        return f"{prefix}；预算沿本次输出上限夹紧，预算区间为空时不发送 thinking，不发送档位字符串。"
+    decision = _anthropic_budget_decision(level, max_tokens)
+    if decision.reason_code:
+        return (f"{prefix}；未发送 thinking（未发送原因：{decision.reason_code}）：常规请求输出上限 max_tokens={max_tokens}"
+                f" 无法同时容纳最小思考预算 {_MIN_BUDGET_TOKENS} 和正文预留 {_MIN_BUDGET_TOKENS}；不改变输出上限。")
+    return (f"{prefix}；发送 thinking.enabled，budget_tokens={decision.budget_tokens}"
+            f"（常规请求输出上限 max_tokens={max_tokens}），不发送档位字符串。")
 
 
 # LLM: 只读 responses_reasoning_field 的换算结果，不另写档位对应规则；实际发送的服务商档位与用户档位不同时写明。
@@ -209,14 +239,20 @@ def describe_level_choices() -> str:
     return f"可选档位：{choices}。发送 /effort 加档位只改本会话；/effort default 回到全局默认。"
 
 
-# LLM: 回执入口的配置版：控制方式、协议与服务商档位都从同一份运行配置解析（与后端工厂同源），调用方不要自己拼。
-# 函数用途: 按一份模型运行配置说明某档位会怎样生效，供 /effort 回执和参数中心共用。
+# LLM: 控制方式、协议、声明与常规输出上限均由同一运行配置解析；预算上限读 effective_max_output_tokens，与工厂同源，
+#   不把配置原始 max_tokens 当出站值。auto/off/none 保持原优先级；联测真实控制服务与参数中心，纯读取、不发请求。
+# 函数用途: 按模型配置说明发送字段或未发送原因，供 /effort 回执和参数中心共用。
 def describe_config_reasoning_effect(level: str, config: object) -> str:
+    from ..settings.defaults import effective_max_output_tokens
+
+    level = normalize_reasoning_level(level) or "auto"
     backend = str(getattr(config, "model_backend", "") or "")
     control = resolved_reasoning_control(getattr(config, "model_reasoning_control", "auto"),
                                          getattr(config, "api_base", ""), backend)
     protocol = _PROTOCOLS.get(backend.strip().lower(), "")
     levels = tuple(getattr(config, "model_reasoning_levels", ()) or ())
+    if control == "budget" and protocol == "anthropic" and level not in {"auto", "off"}:
+        return _describe_budget_effect(level, protocol, effective_max_output_tokens(config))
     return describe_reasoning_effect(level, control, protocol=protocol, levels=levels)
 
 

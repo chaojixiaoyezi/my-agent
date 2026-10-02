@@ -4,6 +4,8 @@
 
 C7 八档扩展已在 `worker/sol-effort-levels` 本地实施，尚未集成/部署（验收记录日期 2026-10-02）；真实模型由 3a 集成后核对，不能沿用上述旧版真实结果证明新档已生效。新增合同见第 9 节。
 
+2026-10-02 小输出上限预算修复已在 `worker/sol2-anthropic-budget` 本地实施，基于集成线 `b35796a60`，待集成/真实入口核对。它修复的是 C7 之前已有的空预算区间，不新增档位、开关或协议字段，合同见第 10 节。
+
 ## 1. 背景
 
 用户要求：能设置模型的智能程度，包括给子代理单独设置，并实测。
@@ -56,7 +58,7 @@ v4.1-flash 的关闭思考现在都生效。结论不变的：opencode v4-flash 
 - **档位**（用户层）：`auto`（不发任何参数，服务商默认）、`off`（关闭思考）、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`。
 - **控制方式**（模型层，`reasoning_control`）：
   - `effort`：OpenAI 兼容接口写 `reasoning_effort: <档位>`，Anthropic 兼容接口写 `output_config.effort`；`off` 写 `thinking: disabled`。
-  - `budget`：Anthropic 兼容接口写 `thinking: {type: enabled, budget_tokens: N}`。N 取值：low 2048、medium 6144、high 12288、xhigh 24576、max/ultra 为原可用上限，再沿原规则夹紧。OpenAI 兼容接口只写 `thinking: enabled`。`off` 写 `thinking: disabled`。
+  - `budget`：Anthropic 兼容接口仅在合法区间非空时写 `thinking: {type: enabled, budget_tokens: N}`。N 取值：low 2048、medium 6144、high 12288、xhigh 24576、max/ultra 为原可用上限，夹到 `[1024, max_tokens-1024]`；空区间不发 thinking，回执说明结构化未发送原因（第 10 节）。OpenAI 兼容接口仍只写 `thinking: enabled`。`off` 写 `thinking: disabled`。
   - `none`：不发任何字段。回执如实说明“不支持调节”。
   - `auto`（默认）：只对实测确认的供应商给默认值——`api.deepseek.com` 的 OpenAI 兼容接口取 `effort`，Anthropic 兼容接口取 `budget`，`chatgpt.com` 的 Responses 接口（ChatGPT 订阅）取 `effort`；其余一律 `none`。这张表只是优化，可在 `/model` 编辑里显式声明覆盖（例如把 MiniMax M3 声明为 `budget`）。
   - **Responses 协议（09-30 接入）**：`effort` 写 `reasoning: {effort: <服务商档位>}`。服务商档位按模型档案的 `reasoning_levels`（服务商声明的可用档位，
@@ -199,14 +201,39 @@ my-agent 为了确认 opencode.ai 是否支持 `reasoning_effort`，先后 3 次
 - 有声明时只取候选与声明的第一个交集，交集为空不发 effort 字段；不按型号、展示文案、模型回复猜能力。
 - 无声明时保留原协议通用范围：Responses 为 low/medium/high（新档回落 high），Chat/Messages 为 low/medium/high/max。
   新用户档位不能因此原样发到不支持的新接口；Chat/Messages 的 xhigh/ultra 仍落到原已能发送的 high/max。
-- Anthropic 预算仍为 `max(1024, min(原始预算, max(1024, max_tokens - 1024)))`，其中 max_tokens 是本次载荷沿原规则计算的输出上限。
+- Anthropic 的原始预算表不变；2026-10-02 第 10 节修复了继承的空区间缺陷：先检查 `max_tokens-1024 >= 1024`，成立才取
+  `max(1024, min(原始预算, max_tokens-1024))`，否则不发 thinking。max_tokens 仍是本次载荷沿原规则计算的上限，不为预算抬高。
   OpenAI budget 仍只有 thinking.enabled；预算与 none 控制不发送服务商档位字符串。
 - auto 不加字段，off/强制工具选择优先，DeepSeek 缺 reasoning_content 的原关闭逻辑保持。
 - 菜单、TUI/IM 共用命令、配置枚举与派工顶层/逐项 schema 都沿唯一档位定义；线程和 child 属性保存用户档位，不能在继承时提前降档。
   真实发送、Gateway 自动采用和 child 首轮候选投影按候选后端自身声明换算，不能沿用父模型的实际发出值。
 - `/effort` 和 user_config 的“实际效果”与发送使用同一个候选筛选，降档写“实际发送 high/max”等；无对应值写“不改变请求”。
-  budget 回执说明开关、原始预算和夹紧规则，不把展示时的预算假装成每个请求已发出的最终数值。配置 set 的重启语义不变。
+  budget 配置回执按工厂同源的常规输出上限说明预算数值或未发送原因；没有上限的纯档位说明只写条件规则，不能冒充每个请求已发出的最终数值。配置 set 的重启语义不变。
 - Responses 仍无自动采用所需的完整容量投影，保留原 `provider_request_surface_unknown`；本项只扩档位，不冒用 Chat 投影扩大选模范围。
 
 组件覆盖包括声明/无声明/无交集、三种控制方式、出站字段与回执、八档菜单、配置保存、两处选模投影与首业务请求。
 三个独立变异各自被拦且逐字节还原，扩展回归中的既有失败保留在 TESTS。真实模型及实际 TUI/IM 客户端未验证，由 3a 集成后核对；本线不触碰生产配置或启停 Gateway。
+
+## 10. Anthropic 小输出上限的预算边界（2026-10-02）
+
+**解决问题**：工厂按窗口统一派生输出上限，窗口 4096 可得到 max_tokens=1024。旧实现把预算上界强行抬到 1024，
+发出与输出上限相等的预算；max_tokens=2047 时也不满足正文至少预留 1024 的合同。该缺陷早于 C7 八档扩展。
+
+唯一裁决是 `backends/reasoning_control._anthropic_budget_decision`，只读档位预算和本次输出上限，返回冻结的
+`budget_tokens/reason_code`，不写配置、不发请求。`reasoning_payload_fields` 与预算回执共用该裁决：
+
+| 本次 max_tokens | thinking 出站字段 | 宿主未发送原因 |
+|---|---|---|
+| 1024、2047 | 完全省略 | `reasoning_budget_interval_empty` |
+| 2048 | enabled，budget_tokens=1024 | 无 |
+| 2049 | enabled，budget_tokens=1025 | 无 |
+
+- 判断整个区间是否为空，不针对窗口、型号或某个档位加专项分支；正常大上限与原始预算表不变。
+- 不抬高 max_tokens，不发送 reason_code；省略 thinking 是没有额外设置，不保证服务商默认已关闭思考。
+- `/effort` 与参数中心共用 `describe_config_reasoning_effect`，常规输出上限来自工厂同源的 `effective_max_output_tokens`，
+  不使用配置里未经窗口夹取的原始 max_tokens。无上限的 `describe_reasoning_effect` 只解释条件规则。
+- 具体请求仍按本次上限裁决；短 JSON、强制工具与其它请求局部覆盖不能用常规回执代替。off/强制关闭优先级与其它协议不变。
+- `test_anthropic_reasoning_budget.py` 经真实工厂与后端 builder 截获非流/流式替身出站，核对完整投影；
+  真实控制服务的 chat/feishu 路由和参数中心用隔离 home 测回执。所有实际 HTTP 入口默认拒绝，夹具遗漏会本地失败。
+- 三项变异分别破坏空区间判据、2048 包含边界和回执上限来源，均被拦截并恢复；命令与结果见 TESTS.md 顶部。
+  这些是组件证据，真实供应商、实际 TUI/IM 客户端及生产 Gateway 未验证，未部署。

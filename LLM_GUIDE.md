@@ -1,5 +1,10 @@
 # LLM_GUIDE
 
+Anthropic 预算边界（2026-10-02，sol2，本地已实施、待集成）：空区间 `[1024, max_tokens-1024]` 不发 thinking，
+出站与回执共用 reasoning_control 的冻结预算/原因裁决，不抬高 cap。配置回执用工厂同源的常规输出上限，
+无上限说明只写条件，不把省略字段当作服务商已关闭思考。十一文件 494 项与三项变异有组件证据，详见 TESTS；
+真实供应商、实际 TUI/IM、生产 Gateway 未验证。下一步 3a 审阅合入并核真实请求，不由本线部署或改生产配置。
+
 C7（2026-10-02，sol，已上线 step17a，main de222698b，2026-10-02）：用户智能程度固定八档，唯一换算表在 backends/reasoning_control；
 菜单/命令/schema 不再另写档位白名单，发送和回执共用声明筛选。线程/child 保留用户值，投影与发送按候选模型降档。
 不要为 Responses 借用 Chat 容量投影或按型号猜支持。三个变异有组件证据，旧 Gateway 控制失败保持在 TESTS；

@@ -155,6 +155,64 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   - 结果：7 个达标，external_material_order 22/36 未达标（原因见 DESIGN_LEDGER 同名条目）。
   - 证据：`~/.my-agent/decision-evidence/j12-quality-bench/*8points*`。
 
+## Anthropic 小输出上限空预算区间（2026-10-02，sol2，`worker/sol2-anthropic-budget`，基于 `b35796a60`）
+
+- **解决问题**：原预算夹紧强行抬高上界，小窗口发出等于 max_tokens 的预算；修复不抬高输出上限，空区间省略 thinking。
+- **实现**：出站与回执共用冻结的 `_AnthropicBudgetDecision`，空区间原因码 `reasoning_budget_interval_empty`；原因只进宿主回执，不进供应商载荷。
+- **新增 `test_anthropic_reasoning_budget.py`**：工厂由窗口派生 1024/2047/2048/2049 的输出上限；六预算档、合法包含边界、完整投影与非流/流式替身出站一致；正常大上限不变；effort/none/强制关闭优先级不变。
+  chat/feishu 共用真实控制服务、所选档案后端和参数中心回执，均为隔离组件，不是实际终端/IM 收信验收。实际 HTTP 入口默认拒绝。
+- **先红后绿**：仅补合同测试、未修产品时两文件 `59 failed, 97 passed`；旧 max_tokens=1500 用例保留并收紧为空字段断言。
+  增加流式覆盖后两文件恢复 `160 passed`；最终扩展十一文件 `494 passed in 38.32s`。集合有重叠，不累加成绩。
+- **夹具修正如实保留**：首修复回归 `8 failed, 148 passed`，新增控制夹具默认流式未被 JSON fake 截获，进入外部传输后 SSL EOF；
+  这是夹具遗漏，不能当预算失败或供应商验收。随后显式截获真实流式公共传输入口并禁外部 HTTP，当前回归全通过。
+
+复现与回归（工作树根目录，指定解释器，无缓存、不跑全仓）：
+
+```sh
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_anthropic_reasoning_budget.py agent_py_agent/tests/test_reasoning_effort.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 -o addopts=''
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_anthropic_reasoning_budget.py agent_py_agent/tests/test_reasoning_effort.py agent_py_agent/tests/test_reasoning_probe.py agent_py_agent/tests/test_responses_reasoning.py agent_py_agent/tests/test_tui_effort_menu.py agent_py_agent/tests/test_subagent_first_request_selection.py agent_py_agent/tests/test_gateway_model_adoption.py agent_py_agent/tests/test_provider_sampling.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_parameter_metadata.py agent_py_agent/tests/test_backend_config_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 -o addopts=''
+```
+
+三个独立变异，每次只改一处，恢复后核对产品 SHA256：
+
+| 变异 | 定向断言 | 真实结果 |
+|---|---|---|
+| M1：空区间判断从 ceiling<1024 改成 ceiling<0 | 工厂边界＋流式边界 | 14 failed，14 passed，49 deselected |
+| M2：判断改成 ceiling<=1024，错拒 2048 | 同上 | 7 failed，21 passed，49 deselected |
+| M3：回执使用未经窗口夹取的 config.max_tokens | 配置回执＋控制服务＋参数中心 | 36 failed，41 deselected |
+
+M1/M2 使用新文件 `-k 'test_factory_budget_boundaries_keep_wire_and_projection_exact or test_stream_budget_wire_matches_the_same_boundary_projection'`；
+M3 使用同文件 `-k 'test_config_budget_receipt_uses_the_same_derived_output_cap or test_tui_im_control_receipts_and_real_selected_backend_agree or test_parameter_receipt_uses_selected_model_budget_facts'`，其余 pytest 参数同上。
+M1 初次的流夹具 KeyError 不计作变异命中，修正截获位置后才记录表中有效成绩。
+恢复后 `reasoning_control.py` SHA256：`b989c84149e6b7204d65f8b38100fe0b281a38f2f13b70b1ae1242afbb0c5e8f`；最终扩展回归通过。
+
+- **收尾门禁**：guards9 全部十文件（含 packaging）`169 passed in 30.14s`；新增测试导入格式整理并同步常数目录后，预算两文件＋常数目录守卫 `171 passed in 8.16s`。
+  import boundaries `findings=0`，Ruff、doc-sync、`git diff --check`、clean-package 通过。
+  strict code-size：`strict_scope_total=2235 hard=0 high-risk=1527 soft=708 test_advisory=1241 blocked=False`；生成的 CODE_SIZE_REPORT.md 已还原，不提交。
+  尺寸身份差分在最后格式与目录同步后复核：`新增告警: 0`、`消失告警: 0`；没有新增完整告警身份。
+- **门禁过程中修正**：常数说明改动导致目录一致性首轮 `1 failed, 10 passed`，重新生成目录只改 `_MIN_BUDGET_TOKENS` 的说明，808 项数量与数值不变；
+  新测试导入排序报 Ruff I001，整理后通过。clean-package 最初拒绝尚未纳入 git 的新测试，明确加入暂存区后通过，未放宽检查。
+
+门禁复现（同一根目录、同一 PY；pytest 与 code-size 串行）：
+
+```sh
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_anthropic_reasoning_budget.py agent_py_agent/tests/test_reasoning_effort.py agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 -o addopts=''
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 -o addopts=''
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/build_constants_catalog.py --check
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_import_boundaries.py
+PYTHONDONTWRITEBYTECODE=1 "$PY" -m ruff check agent_py_agent scripts
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_doc_sync.py
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
+git diff --check
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
+```
+
+- **未验证**：真实供应商接受与思考效果、实际 TUI/IM、生产 Gateway、发布部署及全仓 pytest；本轮没有新配置或生产操作。
+- **第二提交**：本树未找到 `g3-effort-probe-metering.body.md`，未猜探测计量/自动检测成本上界规格，也未实现这两项。
+
 ## 去抖：唤醒发现事实缓存用例显式推进策略文件 mtime（2026-10-02，3a）
 
 - **现象**：Linux 车道（`25882221f`）第 10 片 `test_scheduler_scan_costs.py::test_fact_cache_respects_policy_due_deadline` 第 949 行 `[] == ['u1']`；Mac 连跑通过。
