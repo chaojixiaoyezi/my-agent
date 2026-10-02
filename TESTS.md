@@ -1,5 +1,10 @@
 # 测试与发布验收
 
+## 压缩触发绝对上限默认改为 300000（2026-10-01，分支 `claude/3a-cap-default`）
+
+- `test_compact_trigger_cap.py`：默认值 300000、显式 0 不封顶、乱填/负数/布尔/缺失回到 300000（配置解析与运行时一致）；`test_runtime_context_pressure.py` 的窗口准入用例显式写 0，只测按窗口算的输入上限。
+- 压缩相关 79 个测试文件（名称含 compact/context_pressure/context_window/runtime_compact/calibration）加默认值一致性与目录守卫：修改后 1066 通过、3 失败，均为按旧默认写的断言和目录说明，修正后全部通过；共享默认值，推送前以 12 片 Linux 车道为全量。
+
 ## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`）
 
 - 新用例 `test_settings_chat_control.py::test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works`：列表、搜索、`/settings all` 都不出现 `model_auth_ref`，`/settings show` 仍可查看且提示不能在这里修改；原加载器元数据用例的计数同步扣除隐藏集合。

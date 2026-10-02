@@ -395,6 +395,8 @@ def test_configured_250k_and_1m_windows_admit_only_fitting_requests(monkeypatch)
             config=AgentConfig(
                 auto_save_memory=True, model_context_window_tokens=window,
                 memory_compact_auto_trigger_percent=90,
+                # 本用例只测按窗口算的请求输入上限；显式不封顶，避免默认 30 万触发线先介入。
+                memory_compact_auto_trigger_max_tokens=0,
             ),
             backend=backend,
         )

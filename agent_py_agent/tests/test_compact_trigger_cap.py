@@ -26,6 +26,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
     preflight_context_pressure_response,
 )
 from agent_py_agent.agent.agent_core.runtime.context_compactor import (
+    DEFAULT_COMPACT_TRIGGER_MAX_TOKENS,
     compact_recovery_target_tokens,
     compact_trigger_max_tokens,
     runtime_compact_policy,
@@ -78,18 +79,21 @@ def _limits(policy):
             policy.recovery_target_tokens, policy.recent_tail_tokens)
 
 
-def test_zero_or_invalid_cap_keeps_the_policy_unchanged():
-    baseline = runtime_compact_policy(SimpleNamespace(
+def test_explicit_zero_keeps_the_policy_uncapped_and_invalid_falls_back_to_default_cap():
+    uncapped = runtime_compact_policy(_agent(0))
+    assert _limits(uncapped) == (WINDOW, 90, 900_000, 600_000, 20_000) and uncapped.trigger_capped is False
+    default_capped = runtime_compact_policy(_agent(DEFAULT_COMPACT_TRIGGER_MAX_TOKENS))
+    missing = runtime_compact_policy(SimpleNamespace(
         config=SimpleNamespace(memory_compact_auto_trigger_percent=90, memory_compact_recovery_target_percent=60),
         backend=SimpleNamespace(context_window_tokens=WINDOW),
     ))
-    assert _limits(baseline) == (WINDOW, 90, 900_000, 600_000, 20_000)
-    for cap in (0, None, "abc", -5, True, "", 2.5e-1):
+    assert _limits(missing) == _limits(default_capped) and missing.trigger_capped is True
+    for cap in (None, "abc", -5, True, ""):
         policy = runtime_compact_policy(_agent(cap))
-        assert _limits(policy) == _limits(baseline), cap
-        assert policy.trigger_capped is False
+        assert _limits(policy) == _limits(default_capped), cap
+        assert policy.trigger_capped is True
     assert [compact_trigger_max_tokens(value) for value in (0, None, "abc", -5, True, "300000", 250_000)] == [
-        0, 0, 0, 0, 0, 300_000, 250_000]
+        0, 300_000, 300_000, 300_000, 300_000, 300_000, 250_000]
 
 
 # 每组是 (上限, 触发百分比, 恢复百分比, 近期尾部, 恢复目标)。
@@ -127,16 +131,21 @@ def test_cap_at_or_above_the_percent_trigger_changes_nothing(cap):
     assert policy.trigger_capped is False and policy.trigger_max_tokens == cap
 
 
-def test_config_parsing_accepts_positive_values_and_falls_back_to_zero():
-    assert AgentConfig().memory_compact_auto_trigger_max_tokens == 0
+def test_config_parsing_accepts_explicit_values_and_falls_back_to_safe_default():
+    # 默认 300000（10-01 起）：生产曾被模型 reset 回旧默认 0，大窗口模型拖到约 90% 才压缩；显式 0 仍表示不封顶。
+    assert AgentConfig().memory_compact_auto_trigger_max_tokens == DEFAULT_COMPACT_TRIGGER_MAX_TOKENS == 300_000
     settings, warnings = normalize_memory_settings({})
-    assert settings.memory_compact_auto_trigger_max_tokens == 0 and warnings == []
-    settings, warnings = normalize_memory_settings({"memory_compact_auto_trigger_max_tokens": "300000"})
     assert settings.memory_compact_auto_trigger_max_tokens == 300_000 and warnings == []
+    settings, warnings = normalize_memory_settings({"memory_compact_auto_trigger_max_tokens": "250000"})
+    assert settings.memory_compact_auto_trigger_max_tokens == 250_000 and warnings == []
+    settings, warnings = normalize_memory_settings({"memory_compact_auto_trigger_max_tokens": 0})
+    assert settings.memory_compact_auto_trigger_max_tokens == 0 and warnings == []
     for raw in ("abc", -1, True):
         settings, warnings = normalize_memory_settings({"memory_compact_auto_trigger_max_tokens": raw})
-        assert settings.memory_compact_auto_trigger_max_tokens == 0, raw
+        assert settings.memory_compact_auto_trigger_max_tokens == 300_000, raw
         assert [item.field_name for item in warnings] == ["memory_compact_auto_trigger_max_tokens"], raw
+        assert compact_trigger_max_tokens(raw) == 300_000, raw
+    assert compact_trigger_max_tokens(None) == 300_000 and compact_trigger_max_tokens(0) == 0
 
 
 @pytest.mark.parametrize("cap", [0, 300_000])

@@ -25,7 +25,7 @@ class MemorySettings:
     memory_rule_auto_read_limit: int = 3
     memory_resume_auto_context_mode: str = "off"
     memory_compact_auto_trigger_percent: int = 90
-    memory_compact_auto_trigger_max_tokens: int = 0
+    memory_compact_auto_trigger_max_tokens: int = 300_000
     memory_compact_recovery_target_percent: int = 60
     memory_curator_enabled: bool = True
     memory_curator_provider: str = "auto"

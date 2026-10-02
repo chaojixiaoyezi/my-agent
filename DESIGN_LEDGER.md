@@ -1,5 +1,12 @@
 # 设计台账
 
+## 压缩触发绝对上限默认改为 300000（2026-10-01，分支 `claude/3a-cap-default`，已实现，待集成）
+
+- **事故**：生产 `memory_compact_auto_trigger_max_tokens` 09-29 设为 300000 后，09-30 07:49Z 被一个 my-agent 会话经 user_config `reset`（账本 actor=model）退回当时的默认 0，即不封顶；之后 1M 窗口的 deepseek-v4-flash 会话要到约 90 万才压缩，10-01 把 gpt-6-luna 档案窗口改为实测的 900000 后也一样（约 81 万）。这正是 09-29「1M 窗口、90% 触发」429 的形状。ae 在 C1 准备时只读发现，集成者核实后已经正式写回 300000（变更号 77e58ca0038e，重启 Gateway 生效）。
+- **根修**：默认值改为 300000（AgentConfig、MemorySettings、随包 YAML 与运行时 `DEFAULT_COMPACT_TRIGGER_MAX_TOKENS` 一致），`reset` 回到安全值；显式 0 仍表示不封顶；乱填、负数、布尔与缺失都回到 300000（配置解析与运行时同一口径，原来回到 0）。
+- **影响面**：窗口 ≤333K 的模型按 90% 先触发，不受影响；只有 1M 级窗口会在 30 万处压缩。参数仍是 free（模型可改），改为 0 会在账本留下记录。
+- **验证**：见 TESTS.md 同名节；属于共享默认值，推送前跑 12 片全量车道。
+
 ## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`，已实现，待集成）
 
 - **决定（集成者，三线收尾 goal P11）**：不再按“约 100 项”的数量目标减量。219 个随包键里 218 个在 `/settings` 列表与搜索出现；
@@ -655,7 +662,7 @@
   - `memory_compact_auto_trigger_percent` 钳在 50–100，1M 窗口下最低只到 50 万。
   - 证据：`~/.my-agent/decision-evidence/compact-429-20260929/`。
 - **做法（38 的方案 A）**：
-  - 新配置 `memory_compact_auto_trigger_max_tokens`，0（默认）表示不封顶，现有行为不变。
+  - 新配置 `memory_compact_auto_trigger_max_tokens`，0（默认）表示不封顶，现有行为不变。（2026-10-01 起默认改为 300000，见顶部同名条目。）
   - 大于 0 时，`runtime_compact_policy` 把触发线取成 min(窗口 × 百分比, 上限)，近期尾部与 recovery 都从封顶后的触发线推出。
   - 上限严格小于窗口 × 百分比才算封顶（`trigger_capped`）。正好相等时触发线与不封顶一样，finalization 仍按百分比判定，`/context` 也不写封顶（38 复审的 should-fix）。
   - 前台请求前预检、工具循环、活动回合、会话压缩和后台定时回合都读这一处。

@@ -14,6 +14,8 @@ from ..model.context_window import resolve_model_context_window_tokens
 # agents. The configured percentage has one authoritative location.
 # 模块用途: 统一计算模型窗口、精确触发点、近期尾部预算和连续失败冷却参数。
 DEFAULT_COMPACT_TRIGGER_PERCENT = 90
+# 触发线绝对上限的默认值：与 AgentConfig/MemorySettings/随包 YAML 的默认一致；0 只在显式配置时表示不封顶。
+DEFAULT_COMPACT_TRIGGER_MAX_TOKENS = 300_000
 DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT = 60
 DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS = 4
 DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP = 20_000
@@ -121,17 +123,18 @@ def _capped_recovery_target_tokens(trigger_tokens: int, percent: int, recovery_p
     return max(1, min(proportional, tail_ceiling))
 
 
-# LLM: 与配置解析（_memory_coercion 的 int 字段，下限 0、无上限）同一口径：非整数、布尔、负数都按 0（不封顶）；
-#   runtime_compact_policy 只在结果大于 0 时对触发线取小，所以前台、后台和 finalization 自动压缩共用这一处。
-# 函数用途: 规范化自动压缩触发线的绝对 token 上限；0 表示不封顶。
+# LLM: 与配置解析（_memory_coercion 的 int 字段，下限 0、无上限，非法回默认）同一口径：非整数、布尔、负数、缺失都回到
+#   DEFAULT_COMPACT_TRIGGER_MAX_TOKENS；只有显式 0 表示不封顶。runtime_compact_policy 只在结果大于 0 时对触发线取小，
+#   所以前台、后台和 finalization 自动压缩共用这一处。改默认值须同步 AgentConfig、MemorySettings、随包 YAML。
+# 函数用途: 规范化自动压缩触发线的绝对 token 上限；0 表示不封顶，填错时回到安全默认值。
 def compact_trigger_max_tokens(value: object) -> int:
     if isinstance(value, bool):
-        return 0
+        return DEFAULT_COMPACT_TRIGGER_MAX_TOKENS
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        return 0
-    return max(0, parsed)
+        return DEFAULT_COMPACT_TRIGGER_MAX_TOKENS
+    return parsed if parsed >= 0 else DEFAULT_COMPACT_TRIGGER_MAX_TOKENS
 
 
 def compact_trigger_percent(value: object) -> int:
