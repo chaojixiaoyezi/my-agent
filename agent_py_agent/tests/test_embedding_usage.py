@@ -21,9 +21,21 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.retrieval.embedding import EmbeddingError, MiniMaxEmbedder, OpenAICompatibleEmbedder
-from agent_py_agent.agent.retrieval.embedding_usage import EMBEDDING_USAGE, counted_as, embedding_purpose
-from agent_py_agent.tests.test_embedding_selection import _add, _member, host  # noqa: F401  （复用 fixture）
+from agent_py_agent.agent.retrieval.embedding import (
+    EmbeddingError,
+    MiniMaxEmbedder,
+    OpenAICompatibleEmbedder,
+)
+from agent_py_agent.agent.retrieval.embedding_usage import (
+    EMBEDDING_USAGE,
+    counted_as,
+    embedding_purpose,
+)
+from agent_py_agent.tests.test_embedding_selection import (  # noqa: F401  （复用 fixture）
+    _add,
+    _member,
+    host,
+)
 
 MARKER = "正文标记-绝不能出现在回执里-7f3a"
 
@@ -199,10 +211,13 @@ def test_tool_semantic_search_counts_as_tool_retrieval(stub):
 
 
 # 函数用途: 先在本进程里产生一些用量（含带标记的正文），再按 IM 文字和 TUI 发给 Gateway 的文字各执行一次 /model vector。
-def _vector_views(host, monkeypatch, stub):
+def _vector_views(admin_or_member, monkeypatch, stub):
+    host = admin_or_member
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
     from agent_py_agent.agent.gateway_parts import model_profile_service
-    from agent_py_agent.agent.gateway_parts.control_service import execute_gateway_conversation_control
+    from agent_py_agent.agent.gateway_parts.control_service import (
+        execute_gateway_conversation_control,
+    )
     from agent_py_agent.cli.chat_parts.control_runtime import _command_text
 
     with embedding_purpose("memory_write"):
@@ -219,7 +234,7 @@ def _vector_views(host, monkeypatch, stub):
     return [execute_gateway_conversation_control(host, None, command, None) for command in (im_command, tui_command)]
 
 
-def test_admin_vector_view_shows_usage_numbers_without_any_text(host, monkeypatch, stub):
+def test_admin_vector_view_shows_usage_numbers_without_any_text(host, monkeypatch, stub):  # noqa: F811  （host 是复用的 fixture）
     _add(host)
     views = _vector_views(host, monkeypatch, stub)
 
@@ -233,7 +248,7 @@ def test_admin_vector_view_shows_usage_numbers_without_any_text(host, monkeypatc
     assert MARKER not in message and "嵌入·其他" not in message
 
 
-def test_member_vector_view_does_not_show_process_wide_usage(host, monkeypatch, stub):
+def test_member_vector_view_does_not_show_process_wide_usage(host, monkeypatch, stub):  # noqa: F811  （host 是复用的 fixture）
     _add(_member(host))
     views = _vector_views(host, monkeypatch, stub)
 

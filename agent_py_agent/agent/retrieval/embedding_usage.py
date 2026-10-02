@@ -43,16 +43,13 @@ class EmbeddingUsage:
     # 函数用途: 记一次嵌入请求的结果。
     def record_embedding(self, purpose: str, texts: int, *, ok: bool, tokens: int | None) -> None:
         key = purpose if purpose in self._embedding else "other"
+        delta = {"requests": 1, "texts": max(0, int(texts)), "failures": 0 if ok else 1,
+                 "tokens": tokens if ok and tokens is not None else 0,
+                 "tokens_unreported_requests": 1 if ok and tokens is None else 0}
         with self._lock:
             row = self._embedding[key]
-            row["requests"] += 1
-            row["texts"] += max(0, int(texts))
-            if not ok:
-                row["failures"] += 1
-            elif tokens is None:
-                row["tokens_unreported_requests"] += 1
-            else:
-                row["tokens"] += tokens
+            for name, value in delta.items():
+                row[name] += value
 
     # LLM: mode 只收 RETRIEVAL_MODES 里的值，其它按 none 记；fallback_reason 是结构化原因码，原样保存最近一次。
     # 函数用途: 记一次记忆检索走的方式。
