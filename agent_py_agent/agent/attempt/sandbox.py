@@ -27,6 +27,7 @@ import platform
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ from ..tooling.sandbox import (
     SandboxSpec,
     SandboxUnavailable,
     build_bwrap_argv,
+    find_bwrap,
     probe_sandbox,
 )
 
@@ -61,6 +63,7 @@ class AttemptSandboxSpec:
     staging_root: Path       # 发布源 staging 区（H 节），可写
     shared_workspace: Path   # 共享 workspace：只读或不可见（E.4/E.5）
     owner_home: Path         # owner home 底图（只读；persona 文件强制只读）
+    # 网络开关是两个平台共用的通用选项：False 时 Linux bwrap 用 --unshare-net，macOS Seatbelt 在规则最后加 (deny network*)。
     network_access: bool = True
     bwrap_path: str | None = None
     macos_sandbox_exec: str | None = None
@@ -198,17 +201,40 @@ class AttemptExecutionSandbox:
         以异常拒绝执行实现）。探测结果按平台二进制缓存，避免高频 spawn 重复
         试跑；缓存只存 ready 事实（含失败），spec 路径不影响结论。"""
         if self._ready is None:
-            key = (self._platform, self.spec.bwrap_path, self.spec.macos_sandbox_exec)
+            key = (self._platform, self.spec.bwrap_path, self.spec.macos_sandbox_exec, self.spec.network_access)
             cached = self._cached_readiness(key)
             if cached is not None:
                 self._ready = cached
             else:
-                self._ready = self._cache_readiness(key, self.probe())
+                report = self.probe()
+                if report.ready and not self.spec.network_access:
+                    report = self._probe_network_isolation()
+                self._ready = self._cache_readiness(key, report)
         if not self._ready.ready:
             raise SandboxUnavailableError(
                 f"SANDBOX_UNAVAILABLE: {self._ready.code}: {self._ready.detail}"
             )
         return self._ready
+
+    # LLM: 要求断网时，平台沙箱本身可用还不够，必须真能隔离网络：Linux 实跑一次 bwrap --unshare-net（容器里缺 NET_ADMIN
+    #   时回环配置会失败），macOS 实跑一次带 (deny network*) 的 Seatbelt。失败按沙箱不可用 fail-closed，
+    #   不能让命令以“bwrap 启动失败”的形态跑完再被误判成程序自己的输出。结果随 readiness 缓存。
+    # 函数用途: 探测本机能否在沙箱里切断网络。
+    def _probe_network_isolation(self) -> SandboxReadiness:
+        command = [sys.executable, "-I", "-S", "-c", "pass"]
+        if self._platform == "Linux":
+            binary = self.spec.bwrap_path or find_bwrap()
+            argv = [str(binary), "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--", *command]
+        else:
+            binary = self.spec.macos_sandbox_exec or shutil.which("sandbox-exec")
+            argv = [str(binary), "-p", "(version 1)\n(allow default)\n(deny network*)", "--", *command]
+        try:
+            completed = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError):
+            completed = None
+        if completed is None or completed.returncode != 0:
+            return SandboxReadiness(False, "SANDBOX_NETWORK_ISOLATION_UNAVAILABLE", "本机沙箱无法切断网络")
+        return SandboxReadiness(True, "SANDBOX_READY", "沙箱可用且能切断网络")
 
     # ---------------------------------------------------------------- 执行
     def build_argv(self, command_argv: list[str]) -> list[str]:
@@ -267,7 +293,8 @@ class AttemptExecutionSandbox:
             protected_write_paths=self.spec.protected_write_paths,
             implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
             full_access=self.spec.full_access,
-        ), *_private_read_rules(self.spec), *_hidden_path_rules(self.spec.hidden_paths)])
+        ), *_private_read_rules(self.spec), *_hidden_path_rules(self.spec.hidden_paths),
+            *_network_rules(self.spec.network_access)])
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
     # LLM: 同步批处理无 stdin 注入协议，必须返回 EOF；不改变 build_argv、显式 PTY 通道和超时回收契约。
@@ -446,6 +473,13 @@ def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[st
                 f"(deny file-write* (literal {json.dumps(str(candidate.resolve()))}))"
             )
     return denies
+
+
+# LLM: 断网只看结构化 network_access；规则放在整份配置最后（Seatbelt 后写覆盖先写），full_access 也同样生效。
+#   默认 True 时不加任何规则，现有调用方的配置逐字节不变。改动同步 test_attempt_sandbox.py。
+# 函数用途: 按网络开关生成 macOS 的断网规则。
+def _network_rules(network_access: bool) -> list[str]:
+    return [] if network_access else ["(deny network*)"]
 
 
 # LLM: Seatbelt needs explicit deny rules for host control metadata because broader owner-home

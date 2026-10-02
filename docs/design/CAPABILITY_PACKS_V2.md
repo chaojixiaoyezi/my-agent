@@ -59,7 +59,12 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 只跑声明过、启用时确认过、按 sha 钉住的原件；
   - 断网；目标只读；只写临时目录；
   - 没有沙箱就不跑，记 `sandbox_unavailable`。
-- **沙箱只有一个入口**：复用 `AttemptExecutionSandbox`，不新写 sandbox-exec 配置。它还不支持断网的话，就在同一个 `AttemptSandboxSpec` 上加通用的断网选项，Linux 和 macOS 都要有测试（Linux 在车道跑，macOS 写单测）。
+- **沙箱只有一个入口**：复用 `AttemptExecutionSandbox`，不新写 sandbox-exec 配置。断网用同一个 `AttemptSandboxSpec.network_access`：
+  - Linux 原本就有 `--unshare-net`；macOS 这次补上，配置最后加 `(deny network*)`，默认 True 时现有配置逐字节不变；
+  - `network_access=False` 时，就绪检查会实际试一次断网，失败记 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`，按沙箱不可用不跑；
+  - 实测：Docker 容器里以 root 跑 bwrap、没有 `NET_ADMIN` 时，回环配置失败（`loopback: Failed RTM_NEWADDR`），这时宿主拒绝运行；车道加上 `--cap-add NET_ADMIN` 后能真实断网；
+  - 宿主触发检查程序前先显式调用 `require_ready()`，不就绪时一个进程都不起。
+  - 检查程序只由宿主触发，模型只看到结论摘要。插件管理工具对模型不可见，模型拿不到确认码。
 - **成员原件**：从已安装的包 blob 按 sha256 读出成员字节（`read_capability_member` 一类入口，核对激活代次），放进宿主临时目录，用宿主自己的 Python（`-I -S`）运行。工作区里的副本一律不用。
 - **输出合同**：stdout 是一个 JSON 对象，`schema=pack_verifier_result.v1`，内容 `{valid, errors[{code, location}], warnings[{code, location}], metrics}`。宿主只读 `valid`、code 和计数，不解释 message；格式不对记 `verifier_output_invalid`。
 - **什么时候跑**（不新增工具）：
@@ -111,7 +116,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 | 块 | 内容 | 状态 |
 | --- | --- | --- |
 | 1 | `verification` 声明与安装校验；启用前执行确认；同意摘要写入内容激活 | 已实现（`test_capability_verification_declaration.py`） |
-| 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项） | 待做 |
+| 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测） | 已实现（`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
 | 3 | 写完就查、收尾检查、返工、`HostNotice` 和 `channel_delivery` 事实、开关 | 待做 |
 | 4 | 输入基线、原件副本、收尾比对、返工 | 待做 |
 | 5 | 交付存在和返工 | 待做 |

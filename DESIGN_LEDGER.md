@@ -48,6 +48,7 @@
   - **输入保护**：首读记基线、存不超过 1 MB 的原件副本，原件被就地改就返工 1 次；
   - **交付存在**：缺失或打不开返工 2 次。
   - 开关 `capability_pack_host_verification_enabled` 仓库默认 false。
+- **块 2 已实现**：`capability/pack_verifier_runner.py`。它只从安装 blob 取钉住的原件，在 `AttemptExecutionSandbox` 里跑（断网、整根只读、只写临时目录），只认 `pack_verifier_result.v1`。`AttemptSandboxSpec.network_access=False` 在 macOS 补了 `(deny network*)`，就绪检查会实际试一次断网，失败就不跑。macOS 和 Linux 车道都实测过，车道要加 `NET_ADMIN` 才能真跑断网用例。
 - **块 1 已实现**：
   - v7 可选块 `capability.verification`（交付物按路径模式加可选结构化字段识别，格式、运行方式、输入策略都是开放字符串）；
   - 声明了检查程序的包启用前要确认码，同意摘要写进内容激活，为空时旧记录与代次逐字节不变。

@@ -61,6 +61,18 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
+## 能力包 v2 块 2：宿主在沙箱里跑钉住的原版检查程序（2026-10-02，分支 `claude/ae-capability-packs-v2`）
+
+- **新增** `agent_py_agent/tests/test_pack_verifier_runner.py`（15 项）：
+  - macOS 配置只在要求断网时加 `(deny network*)`；
+  - 真实沙箱下：通过、失败（按 code 计数和有界摘要）、输出格式不对、超时、本机端口连不上（断网）、交付物所在目录不能写、基线按声明参数名传入、工作区里篡改的副本不影响结果、事实可序列化；
+  - 不起进程的拒绝：同意缺失、运行方式不支持、平台沙箱不可用、能沙箱但不能断网；
+  - 交付物不存在、检查程序未声明。
+- **macOS**（ci-venv-312，Seatbelt）：上述文件 15 项加 `test_attempt_sandbox.py`、`test_sandbox.py`、`test_plugin_sandbox.py`，共 75 passed / 9 skipped（Linux 专用）。
+- **Linux 车道**（Docker 镜像 `my-agent-linux-test:py312`，`--network none`，bwrap 0.12.0，同 4 个文件；脚本 scratchpad `lane-b2/run_lane_b2.sh`）：
+  - 不加 `NET_ADMIN`：67 passed / 17 skipped，其中 9 项真实沙箱用例因断网探测不通过而按设计跳过；
+  - 加 `--cap-add NET_ADMIN`：76 passed / 8 skipped（macOS 专用），断网和只读都真跑通过。
+  - 车道全量要覆盖这些用例，需要在容器参数里加 `--cap-add NET_ADMIN`。
 
 ## 能力包 v2 块 1：verification 声明与启用前执行确认（2026-10-02，分支 `claude/ae-capability-packs-v2`，基于 `81221a667`）
 

@@ -11,6 +11,7 @@
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
 |-- agent_py_agent/agent/capability_verification_manifest.py # 能力包 v2 可选核验声明：交付物识别、钉住的检查程序、输入策略
 |-- agent_py_agent/agent/capability_verifier_consent.py # 检查程序启用前确认、确认码与写入内容激活的同意摘要
+|-- agent_py_agent/agent/capability/pack_verifier_runner.py # 宿主在唯一沙箱入口里跑钉住的包内检查程序（断网、整根只读），返回结构化检查事实
 |-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
 |-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
 |-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数
