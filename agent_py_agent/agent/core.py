@@ -305,6 +305,7 @@ def _query_curator_tool_references(
 
 
 # LLM: Formal Memory, Candidate and Persona authorities are constructed once from canonical owner paths before prompts/tools.
+#   同一时刻记下默认对话模型主机快照（agent.embedding_chat_host_snapshot，只读目录），供 my-agent 自配向量模型比对。
 # 函数用途: 为 composition root 接通 LocalStore 派生索引、唯一候选账本、长期记忆和 Persona 仓库。
 def _wire_memory_authorities(
     agent: object,
@@ -323,6 +324,10 @@ def _wire_memory_authorities(
     )
     semantic_status: dict[str, str] = {}
     embedder, vector_identity = _memory_semantic_channel(agent, semantic_status)
+    from .settings.embedding_selection import remember_startup_chat_host
+
+    # 和嵌入客户端同一时刻记下默认对话模型主机；my-agent 自配向量模型只比对这份启动快照（be 复审 S1）。
+    remember_startup_chat_host(agent)
     agent.memory = JsonlMemory(
         paths["memory_path"],
         local_store=agent.local_store,

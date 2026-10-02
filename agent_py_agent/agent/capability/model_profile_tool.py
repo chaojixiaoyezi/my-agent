@@ -20,11 +20,17 @@ from ..backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ..conversation.authority import current_conversation_task_attributes
 from ..runtime_context import current_subagent_run_id
 from ..settings.embedding_selection import (
+    EMBEDDING_HOST_CHANGE_REASON,
+    catalog_write_check,
     model_disable_embedding,
     model_set_embedding,
     semantic_memory_view,
 )
-from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
+from ..settings.model_profiles import (
+    ModelProfileError,
+    execute_model_profile_operation,
+    model_profile_write_check,
+)
 from ..settings.model_provider_schema import BACKENDS, CAPABILITIES
 from ..tooling.models import (
     BaseTool,
@@ -60,7 +66,8 @@ _DESCRIPTION = (
     "（后两项只有管理员能用，由宿主校验）、set_embedding 选向量模型并打开语义记忆、disable_embedding 关闭语义记忆"
     "（用户要求开/关语义记忆时直接调用，用户的要求就是授权，不要再请用户确认或让用户自己去 /model；list 回执的 semantic_memory "
     "给出当前状态和可选的 embedding 模型 id。管理员身份、本人目录与服务商主机由宿主核对，只有回执 needs_user_choice 时才请用户"
-    "自己在 /model → 选择模型 → 向量模型 里选；保存后重启 Gateway 生效）。"
+    "自己在 /model → 选择模型 → 向量模型 里选；保存后重启 Gateway 生效。会把当前向量模型挪到别的服务商主机的修改——改它的服务商地址、"
+    "把它挪到别的服务商、删掉它——也回 needs_user_choice，请用户自己在 /model 里改）。"
     "用户说“帮我加/换/改/删模型或服务商”“默认模型改成 X”“测一下这个模型能不能用”时直接调用，不要让用户自己去 /model 填表。"
     "密钥只作为参数传一次；回执和你的回复都不得复述密钥。delete_provider 会经统一危险动作审批门。"
 )
@@ -287,7 +294,9 @@ class ManageModelsTool(BaseTool):
 
     # LLM: 副作用：add/save_*/set_default/delete_* 写 owner 的 model-profiles 文件；select 写当前会话线程记录；
     #   probe/discover 向服务商发一次网络请求；set_embedding/disable_embedding 写管理员用户配置与修改账本（全局，重启生效）。
-    #   ModelProfileError 都在落盘前抛出，标记 not_started；其余异常保留未知副作用。
+    #   目录写入都在 model_profile_write_check(catalog_write_check(agent)) 里做：会改变当前向量模型端点主机的写入在落盘前被拒
+    #   （be 复审 M1），回 needs_user_choice / EMBEDDING_HOST_DIFFERS。ModelProfileError 都在落盘前抛出，标记 not_started；
+    #   其余异常保留未知副作用。
     # 函数用途: 校验参数、解析当前会话、调用唯一的模型配置服务，并返回不含密钥的回执。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _parse_request(params)
@@ -303,10 +312,13 @@ class ManageModelsTool(BaseTool):
                 effect_outcome="not_started",
             )
         try:
-            result = execute_model_profile_operation(
-                self.agent, request.operation, request.payload, thread_id=thread_id,
-            )
+            with model_profile_write_check(catalog_write_check(self.agent)):
+                result = execute_model_profile_operation(
+                    self.agent, request.operation, request.payload, thread_id=thread_id,
+                )
         except ModelProfileError as exc:
+            if exc.reason == EMBEDDING_HOST_CHANGE_REASON:
+                return _embedding_host_change_outcome(request, str(exc))
             return _err(str(exc), "MODEL_PROFILE_INVALID", effect_outcome="not_started")
         except (OSError, ValueError) as exc:
             # 不回显异常正文：底层错误可能带上请求地址或配置片段。
@@ -404,6 +416,16 @@ def _embedding_outcome(agent: object, request: _ModelToolRequest) -> ToolHandler
                                   failure_stage="validation")
     return ToolHandlerOutcome(TOOL_NAME, False, body, error_code="TOOL_EXECUTION_FAILED",
                               reported_error_code=reported or "TOOL_EXECUTION_FAILED")
+
+
+# LLM: 目录写入会动到当前向量模型端点主机时（catalog_write_check 拒绝）的回执：和 set_embedding 主机不同同口径——
+#   needs_user_choice + EMBEDDING_HOST_DIFFERS，目录没有落盘（not_started）。
+# 函数用途: 告诉模型这次修改没做，请用户自己在 /model 里改。
+def _embedding_host_change_outcome(request: _ModelToolRequest, message: str) -> ToolHandlerOutcome:
+    body = {"action": request.action, "ok": False, "status": "needs_user_choice", "error_code": "EMBEDDING_HOST_DIFFERS",
+            "message": message}
+    return ToolHandlerOutcome(TOOL_NAME, False, json.dumps(body, ensure_ascii=False), error_code="EMBEDDING_HOST_DIFFERS",
+                              effect_outcome="not_started", failure_stage="validation")
 
 
 # LLM: list 回执的语义记忆视图（只给本机管理员）；视图读不出来时省略，不影响模型列表本身。只读。

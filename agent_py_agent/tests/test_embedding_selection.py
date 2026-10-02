@@ -24,9 +24,11 @@ from agent_py_agent.agent.conversation.control_commands import parse_conversatio
 from agent_py_agent.agent.gateway_parts import http_handlers, model_profile_service
 from agent_py_agent.agent.settings import embedding_selection
 from agent_py_agent.agent.settings.config import load_config
+from agent_py_agent.agent.settings.embedding_profile import embedding_model_config
 from agent_py_agent.agent.settings.model_profiles import (
     execute_model_profile_operation,
     model_profiles_path,
+    read_model_profiles,
 )
 from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
 from agent_py_agent.agent.settings.parameter_changes import parameter_history
@@ -35,6 +37,7 @@ from agent_py_agent.cli.chat_parts import tui_model_menu
 from agent_py_agent.cli.chat_parts.control_runtime import _command_text
 
 CHAT_BASE = "https://api.minimax.test/anthropic"
+OTHER = "https://other-provider.example.test/v1"
 SECRET = "fake-embedding-credential-5678"
 
 
@@ -47,7 +50,9 @@ def host(tmp_path, monkeypatch):
     path.write_text('agent_name: "embedding-selection-test"\n', encoding="utf-8")
     config = load_config(path)
     config.api_base = CHAT_BASE  # 管理员的默认对话模型就是部署配置
-    return SimpleNamespace(home_paths=home, config=config)
+    host = SimpleNamespace(home_paths=home, config=config)
+    embedding_selection.remember_startup_chat_host(host)  # 组合根启动时记下的默认对话模型主机
+    return host
 
 
 def _add(host, api_base="https://api.minimax.test/v1", capability="embedding"):
@@ -123,11 +128,29 @@ def test_endpoint_host_drops_credentials_and_rejects_unparsable():
         assert embedding_selection._endpoint_host(value) == ""
 
 
-def test_selected_chat_profile_is_the_comparison_host(host):
+def test_selected_chat_profile_is_the_comparison_host_after_restart(host):
     chat_id = _add(host, "https://api.openai.test/v1", capability="agentic")
     execute_model_profile_operation(host, "set_default", {"profile_id": chat_id})
+    embedding_selection.remember_startup_chat_host(host)  # 重启：组合根按新的默认对话模型重新记快照
     assert embedding_selection.model_set_embedding(host, _add(host))["error_code"] == "EMBEDDING_HOST_DIFFERS"
     assert embedding_selection.model_set_embedding(host, _add(host, "https://api.openai.test/embed"))["ok"]
+
+
+def test_switching_the_default_in_the_same_run_cannot_unlock_another_host(host):
+    """be 复审 S1：先 set_default 换成另一家，再 set_embedding 另一家，再换回来——同一次运行里第二步就被拦。"""
+    chat_other = _add(host, OTHER, capability="agentic")
+    embed_other = _add(host, OTHER)
+    tool = ManageModelsTool(host)
+    assert _run(tool, action="set_default", profile_id=chat_other)[0].ok
+    outcome, body = _run(tool, action="set_embedding", profile_id=embed_other)
+    assert outcome.error_code == "EMBEDDING_HOST_DIFFERS" and body["status"] == "needs_user_choice"
+    assert _run(tool, action="set_default", profile_id="default")[0].ok
+    assert _saved(host)[:2] == ("", False) and _ledger(host) == []
+
+
+def test_missing_startup_snapshot_asks_the_user(host):
+    del host.embedding_chat_host_snapshot
+    assert embedding_selection.model_set_embedding(host, _add(host))["status"] == "needs_user_choice"
 
 
 def test_unresolvable_default_chat_model_asks_the_user_instead_of_writing(host):
@@ -137,6 +160,7 @@ def test_unresolvable_default_chat_model_asks_the_user_instead_of_writing(host):
     data = json.loads(path.read_text(encoding="utf-8"))
     data["profiles"][chat_id]["enabled"] = False
     path.write_text(json.dumps(data), encoding="utf-8")
+    embedding_selection.remember_startup_chat_host(host)  # 启动时默认对话模型就解析不出来
     original = _file(host)
     result = embedding_selection.model_set_embedding(host, _add(host))
     assert result["status"] == "needs_user_choice" and _file(host) == original
@@ -354,3 +378,80 @@ def test_im_vector_member_is_refused(host, monkeypatch):
     assert not result.ok and "管理员" in result.message and _ledger(host) == []
     view = _im(host, monkeypatch, "/model vector")
     assert view.ok and "只能查看" in view.message and "用法" not in view.message
+
+
+def _provider_of(host, profile_id):
+    return read_model_profiles(model_profiles_path(host.home_paths))["profiles"][profile_id]["provider_id"]
+
+
+def _embedding_api_base(host, profile_id):
+    return read_model_profiles(model_profiles_path(host.home_paths))["providers"][_provider_of(host, profile_id)]["api_base"]
+
+
+def _refused(outcome, body):
+    return (outcome.ok, outcome.error_code, outcome.effect_outcome, body["status"]) == (
+        False, "EMBEDDING_HOST_DIFFERS", "not_started", "needs_user_choice")
+
+
+def test_model_cannot_move_the_embedding_provider_to_another_host(host):
+    """be 复审 M1 探针：同主机设好后，save_provider(editing) 把服务商地址改到另一家——不写，回 needs_user_choice。"""
+    profile_id = _add(host)
+    tool = ManageModelsTool(host)
+    assert _run(tool, action="set_embedding", profile_id=profile_id)[0].ok
+    before = _embedding_api_base(host, profile_id)
+    outcome, body = _run(tool, action="save_provider", provider_id=_provider_of(host, profile_id), editing=True,
+                         provider={"api_base": OTHER})
+    assert _refused(outcome, body) and _embedding_api_base(host, profile_id) == before
+    assert embedding_model_config(host, profile_id).api_base == before, "重启后嵌入请求仍去原主机"
+
+
+def test_model_cannot_move_the_embedding_profile_to_another_provider(host):
+    profile_id = _add(host)
+    other_provider = _provider_of(host, _add(host, OTHER))
+    tool = ManageModelsTool(host)
+    assert _run(tool, action="set_embedding", profile_id=profile_id)[0].ok
+    outcome, body = _run(tool, action="save_model", profile_id=profile_id, provider_id=other_provider, editing=True,
+                         profile={"model_name": "embo-01", "model_backend": "openai_compatible",
+                                  "model_context_window_tokens": 4096, "capability": "embedding"})
+    assert _refused(outcome, body) and _provider_of(host, profile_id) != other_provider
+
+
+def test_model_cannot_delete_or_recreate_the_embedding_profile_elsewhere(host):
+    profile_id = _add(host)
+    tool = ManageModelsTool(host)
+    assert _run(tool, action="set_embedding", profile_id=profile_id)[0].ok
+    assert _refused(*_run(tool, action="delete_model", profile_id=profile_id))
+    execute_model_profile_operation(host, "delete_model", {"profile_id": profile_id})  # 管理员在菜单里亲手删
+    outcome, body = _run(tool, action="add", profile_id=profile_id, profile={
+        "model_name": "embo-01", "model_backend": "openai_compatible", "api_base": OTHER, "api_key": SECRET,
+        "model_context_window_tokens": 4096, "capability": "embedding"})
+    assert _refused(outcome, body) and profile_id not in read_model_profiles(model_profiles_path(host.home_paths))["profiles"]
+
+
+def test_running_value_is_protected_even_before_it_is_saved(host):
+    profile_id = _add(host)
+    host.config.embedding_model_profile = profile_id  # 进程里在用，用户配置里已清空（等重启生效）
+    outcome, body = _run(ManageModelsTool(host), action="save_provider", provider_id=_provider_of(host, profile_id),
+                         editing=True, provider={"api_base": OTHER})
+    assert _refused(outcome, body)
+
+
+def test_changes_that_keep_the_embedding_host_still_go_through(host):
+    profile_id = _add(host)
+    tool = ManageModelsTool(host)
+    assert _run(tool, action="set_embedding", profile_id=profile_id)[0].ok
+    assert _run(tool, action="save_provider", provider_id=_provider_of(host, profile_id), editing=True,
+                provider={"display_name": "MiniMax 向量"})[0].ok
+    assert _run(tool, action="add", profile={"model_name": "chat-y", "model_backend": "openai_compatible",
+                                             "api_base": OTHER, "api_key": SECRET,
+                                             "model_context_window_tokens": 4096})[0].ok
+
+
+def test_human_menu_edits_are_not_checked(host):
+    profile_id = _add(host)
+    embedding_selection.model_set_embedding(host, profile_id)
+    provider_id = _provider_of(host, profile_id)
+    current = read_model_profiles(model_profiles_path(host.home_paths))["providers"][provider_id]
+    execute_model_profile_operation(host, "save_provider", {"provider_id": provider_id, "editing": True,
+                                                             "provider": {**current, "api_base": OTHER}})
+    assert _embedding_api_base(host, profile_id) == OTHER, "TUI 里管理员亲手改是人的动作，不拦"

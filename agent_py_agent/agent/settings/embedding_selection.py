@@ -9,6 +9,8 @@
 # 模块用途: 列出可选的向量模型，在管理员菜单（TUI/IM）与 my-agent 自配两条入口里写入或关闭语义记忆。
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import partial
 from urllib.parse import urlsplit
 
 from ..user_space.owner_access import is_complete_local_admin_owner
@@ -29,6 +31,10 @@ EMBEDDING_OPERATIONS = frozenset({"embedding_list", "embedding_select", "embeddi
 _PROFILE_KEY, _RECALL_KEY = "embedding_model_profile", "memory_semantic_recall"
 _DEFAULT_PORTS = {"https": 443, "http": 80}
 _ADMIN_ONLY = "向量模型是全局设置（所有用户共用），只有管理员（本机主账号）能改。"
+# 模型改目录会动到当前向量模型主机时的拒绝原因码（ModelProfileError.reason），manage_models 据此回 needs_user_choice。
+EMBEDDING_HOST_CHANGE_REASON = "embedding_host_change"
+_HOST_CHANGE_MESSAGE = ("这次修改会把语义记忆正在用（或已保存、等重启生效）的向量模型换到另一个服务商主机，等于把记忆发给另一家；"
+                        "没有修改。请用户自己在 /model 里处理（管理员在菜单里亲手改不受这个限制）。")
 
 
 # LLM: TUI 菜单的分派：list 只读；select/off 走管理员写入。未知操作抛 ModelProfileError（菜单按可预期错误显示）。
@@ -117,13 +123,14 @@ def _write_steps(steps: tuple, paths: WritePaths, origin: ChangeOrigin) -> tuple
 
 # LLM: 模型自配的结构化裁决（用户 10-02 拍板）：只给本机管理员；只认本人目录里的嵌入档案；端点主机与默认对话模型一致才写，
 #   不一致返回 needs_user_choice、不写文件。主机按 scheme+host+port 比较（去掉账号口令、默认端口补齐），不看路径。
-#   默认对话模型本身解析不出来（档案停用、被删等）时主机记为未知，同样请用户自己选，不当成目标档案的错误。
+#   “默认对话模型”只认组合根启动时记下的快照（remember_startup_chat_host，be 复审 S1）：同一次运行里先改默认、再设向量会被拦；
+#   没有快照或当时解析不出来（档案停用、被删等）时主机记为未知，同样请用户自己选，不当成目标档案的错误。
 # 函数用途: manage_models 设置向量模型：同主机直接设，主机不同请用户在 /model 里自己选，其余拒绝。
 def model_set_embedding(host: object, profile_id: str) -> dict:
     if not is_complete_local_admin_owner(host.home_paths):
         return _boundary(_ADMIN_ONLY + "my-agent 只能替本机管理员设置。")
     target = _own_embedding_profile(host, profile_id)
-    chat_host = _default_chat_host(host)
+    chat_host = str(getattr(host, "embedding_chat_host_snapshot", "") or "")
     if not target["host"] or target["host"] != chat_host:
         return {"ok": False, "status": "needs_user_choice", "error_code": "EMBEDDING_HOST_DIFFERS",
                 "message": (f"这个向量模型的服务商主机（{target['host'] or '未知'}）和当前默认对话模型（{chat_host or '未知'}）"
@@ -149,6 +156,40 @@ def _own_embedding_profile(host: object, profile_id: str) -> dict:
     config = selected_model_config(host, profile_id=profile_id, capability="embedding")
     return {"model_name": str(getattr(config, "model_name", "") or ""),
             "host": _endpoint_host(str(getattr(config, "api_base", "") or ""))}
+
+
+# LLM: 组合根（core._wire_memory_authorities）建 agent 时调用一次，和嵌入客户端同一时刻定下：记下当时本 owner 默认对话模型的
+#   端点主机，写在 agent.embedding_chat_host_snapshot 上，model_set_embedding 只比对它。读不出来记空串（之后设向量一律请用户
+#   自己选）。只读目录，不发请求；进程内不再刷新，重启才更新。
+# 函数用途: 记下启动时默认对话模型的端点主机，供 my-agent 自配向量模型时比对。
+def remember_startup_chat_host(agent: object) -> None:
+    try:
+        chat_host = _default_chat_host(agent)
+    except (OSError, ValueError):
+        chat_host = ""
+    agent.embedding_chat_host_snapshot = chat_host
+
+
+# LLM: manage_models 写模型目录时的写前检查（be 复审 M1，3a 定做法 a）：当前向量档案——用户配置里的保存值和进程里的运行值都算——
+#   写前、写后解析出的端点主机只要不一样（被删、挪到别的服务商、服务商地址改了、或从无到有），就抛
+#   ModelProfileError(reason=EMBEDDING_HOST_CHANGE_REASON)，目录不落盘；工具映射成 needs_user_choice。只读用户配置。
+# 函数用途: 生成“不许模型把向量模型悄悄换到别的服务商主机”的目录写前检查，交给 model_profiles.model_profile_write_check。
+def catalog_write_check(host: object) -> Callable[[dict, dict], None]:
+    ids = (_saved_values(host.config)["profile_id"], _running_values(host.config)["profile_id"])
+    return partial(_check_embedding_hosts, frozenset(value for value in ids if value))
+
+
+# 函数用途: 比较写前写后受保护档案的端点主机，有任何一个变了就拒绝。
+def _check_embedding_hosts(protected: frozenset, before: dict, after: dict) -> None:
+    if any(_catalog_host(before, profile_id) != _catalog_host(after, profile_id) for profile_id in protected):
+        raise ModelProfileError(_HOST_CHANGE_MESSAGE, reason=EMBEDDING_HOST_CHANGE_REASON)
+
+
+# 函数用途: 按目录快照算一个本人档案的端点主机（档案或服务商不在就是空串）；不解析共享引用。
+def _catalog_host(data: dict, profile_id: str) -> str:
+    model = data.get("profiles", {}).get(profile_id)
+    provider = data.get("providers", {}).get(model.get("provider_id")) if isinstance(model, dict) else None
+    return _endpoint_host(str(provider.get("api_base") or "")) if isinstance(provider, dict) else ""
 
 
 # 函数用途: 取本 owner 默认对话模型（新会话默认）的端点主机；解析不出返回空串。只读目录。
@@ -202,5 +243,6 @@ def _boundary(message: str) -> dict:
     return {"ok": False, "error_code": "PARAMETER_BOUNDARY", "message": message}
 
 
-__all__ = ["EMBEDDING_OPERATIONS", "apply_embedding_choice", "embedding_choices", "execute_embedding_operation",
-           "model_disable_embedding", "model_set_embedding", "semantic_memory_view"]
+__all__ = ["EMBEDDING_HOST_CHANGE_REASON", "EMBEDDING_OPERATIONS", "apply_embedding_choice", "catalog_write_check",
+           "embedding_choices", "execute_embedding_operation", "model_disable_embedding", "model_set_embedding",
+           "remember_startup_chat_host", "semantic_memory_view"]

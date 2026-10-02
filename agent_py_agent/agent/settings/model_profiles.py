@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -51,6 +52,20 @@ class SelectedModelRead:
 
 
 _SELECTED_MODEL_READ: ContextVar[list[SelectedModelRead] | None] = ContextVar("selected_model_read", default=None)
+# 写前检查：execute_model_profile_operation 在目录锁内、落盘前调用 check(写前快照, 写后快照)，抛错就不落盘。
+_WRITE_CHECK: ContextVar[Callable[[dict, dict], None] | None] = ContextVar("model_profile_write_check", default=None)
+
+
+# LLM: 目前只有 manage_models 进这个作用域（检查来自 settings.embedding_selection.catalog_write_check，be 复审 M1）；
+#   TUI/IM 的人工管理不进，行为不变。检查在同一把目录锁里跑，没有“查完再写”的竞态；作用域随 with 退出还原。
+# 函数用途: 让这个作用域里的模型目录写入在落盘前先过一遍 check，不通过（抛 ModelProfileError）就不写。
+@contextmanager
+def model_profile_write_check(check: Callable[[dict, dict], None]):
+    token = _WRITE_CHECK.set(check)
+    try:
+        yield
+    finally:
+        _WRITE_CHECK.reset(token)
 
 
 # LLM: 仅原 selected_model_config 的首次读取填充当前作用域；不改变解析顺序、网络或文件读写，嵌套退出还原。
@@ -327,12 +342,16 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     added = None
     with locked_json_path(path):
         data = read_model_profiles(path)
+        check = _WRITE_CHECK.get()
+        before = deepcopy(data) if check is not None else None
         selected = str(payload.get("profile_id") or "")
         if operation == "set_default" and shared_profile_key(selected):
             resolve_shared_model(agent.home_paths, selected)
             data["selected"] = selected
         else:
             added = mutate_profiles(data, "select" if operation == "set_default" else operation, payload)
+        if check is not None:
+            check(before, data)
         _save_profiles(path, data)
     result = _model_selection_projection(agent, data, thread_id)
     return {**result, "added_models": added} if operation == "add_models" else result
