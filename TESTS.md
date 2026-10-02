@@ -14,7 +14,7 @@
 
 ## 能力包 v2 块 1：verification 声明与启用前执行确认（2026-10-02，分支 `claude/ae-capability-packs-v2`，基于 `81221a667`）
 
-- **新增** `agent_py_agent/tests/test_capability_verification_declaration.py`（20 项），覆盖：
+- **新增** `agent_py_agent/tests/test_capability_verification_declaration.py`（22 项），覆盖：
   - 声明往返；
   - 旧能力声明逐字节不变；
   - 13 种非法形状拒绝；
@@ -27,6 +27,7 @@
   - 没声明的包启用不变。
 - **相关回归**：`test_capability_*.py`、`test_plugin_any_language.py`、`test_plugin_management.py`、`test_plugin_catalog_digest_stability.py`、`test_constants_catalog.py`、`test_plugin_package.py` 共 1161 项全部通过（`run_files312.sh`，basetemp pae）。
 - **常数目录**已用 `scripts/build_constants_catalog.py` 重新生成。
+- **变异 12/12 全部被抓住**：总是输出 verification、能力声明接受未知键、去掉参数模板校验、不核成员归属、启用跳过确认、不记同意、同意不含包摘要、激活总输出同意键、去掉超时上限、放行 .. 路径、同意不含超时、把 runtime 封闭成只认 python。首轮 M2 漏网，补了“能力声明拒绝未知键”用例后抓住。脚本在 scratchpad `cpv2-mut/run_mut.sh`，每个变异后 git checkout 还原，结束确认工作区干净。
 
 ## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）
 
