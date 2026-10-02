@@ -191,7 +191,14 @@ def test_explicit_allowed_tools_catalog_has_no_declared_index(tmp_path):
     assert agent.tools.search_deferred_specs("user_config", allowed_tools=["user_config", "tool_search"]) == []
 
 
-def _blind_call(agent, tool="manage_models", *, ok=False, stage="validation", loaded=None, error_code=""):
+# 函数用途: 造一条工具归档记录（只含兜底会读的结构化字段）。
+def _failed_record(tool="manage_models", stage="validation", error_code="", ok=False):
+    return {"tool": tool, "ok": ok, "error_code": error_code,
+            "tool_execution": {"failure_stage": stage, "handler_executed": False}}
+
+
+# 函数用途: 用真实注册表和本快照跑一次盲调兜底，返回（提示, 下一次请求的临时可见名单）。
+def _blind_call(agent, record=None, loaded=()):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core.tool_loop.deferred_schema_reload import (
@@ -199,10 +206,8 @@ def _blind_call(agent, tool="manage_models", *, ok=False, stage="validation", lo
     )
 
     params = SimpleNamespace(tool_runtime_snapshot=agent.tools.runtime_snapshot(), allowed_tools=None,
-                             loaded_tool_names=set(loaded or ()))
-    record = {"tool": tool, "ok": ok, "error_code": error_code,
-              "tool_execution": {"failure_stage": stage, "handler_executed": False}}
-    return reload_schema_after_blind_call(agent, params, record), params.loaded_tool_names
+                             loaded_tool_names=set(loaded))
+    return reload_schema_after_blind_call(agent, params, record or _failed_record()), params.loaded_tool_names
 
 
 def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp_path):
@@ -213,7 +218,7 @@ def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp
     assert "manage_models" in _visible(agent, loaded_tool_names=loaded)
 
 
-@pytest.mark.parametrize(("deferral", "tool", "ok", "stage"), [
+@pytest.mark.parametrize("case", [
     (False, "manage_models", False, "validation"),
     (False, "web_fetch", False, "validation"),
     (True, "manage_models", True, "validation"),
@@ -222,9 +227,10 @@ def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp
     (True, "read_file", False, "validation"),
     (True, "no_such_tool", False, "validation"),
 ])
-def test_blind_call_reload_only_for_declared_deferral_validation_failures(tmp_path, deferral, tool, ok, stage):
+def test_blind_call_reload_only_for_declared_deferral_validation_failures(tmp_path, case):
+    deferral, tool, ok, stage = case
     agent = _agent(tmp_path, tool_default_deferral_enabled=deferral)
-    assert _blind_call(agent, tool, ok=ok, stage=stage) == ("", set())
+    assert _blind_call(agent, _failed_record(tool, stage, ok=ok)) == ("", set())
 
 
 def test_blind_call_already_loaded_is_left_alone(tmp_path):
@@ -240,6 +246,6 @@ def test_blind_call_already_loaded_is_left_alone(tmp_path):
 ])
 def test_handler_side_argument_errors_also_reload_the_schema(tmp_path, stage, error_code, reloads):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
-    hint, loaded = _blind_call(agent, "update_persona", stage=stage, error_code=error_code)
+    hint, loaded = _blind_call(agent, _failed_record("update_persona", stage, error_code))
     assert (loaded == {"update_persona"}) is reloads
     assert bool(hint) is reloads
