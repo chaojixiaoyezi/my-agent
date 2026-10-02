@@ -46,6 +46,8 @@ def _source(value: str) -> str:
     if value.startswith("inherit:"):
         _, field, source = value.split(":", 2)
         return f"继承{_GENERAL.get(field, field)} · {_source(source)}"
+    if value.startswith("point_default:"):
+        return f"本点位默认（不低于 {value.split(':', 1)[1]} 秒）"
     return "能力默认配置" if value.startswith("capability_config.") else "记忆默认配置" if value.startswith("memory_config.") else "应用默认配置"
 
 

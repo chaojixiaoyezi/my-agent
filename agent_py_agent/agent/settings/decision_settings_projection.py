@@ -2,7 +2,11 @@
 # 模块用途: 提供设置完整投影与宿主已有读取的零 I/O 开关检查，不返回凭据或拥有运行中时钟。
 from __future__ import annotations
 
-from .decision_settings_defaults import decision_config_fields, decision_defaults
+from .decision_settings_defaults import (
+    POINT_TIMEOUT_FLOOR_SECONDS,
+    decision_config_fields,
+    decision_defaults,
+)
 from .decision_settings_schema import (
     POINT_RUNTIME_SCOPES,
     decision_field_scopes,
@@ -62,6 +66,20 @@ def _profile_status(context: object, data: dict, profile_id: str) -> dict:
     return {"configured": True, "reason": "configured", "network": "unchecked"}
 
 
+# LLM: 原地补齐点位缺的单次期限与模型引用（会改 values/origins）。覆盖层已有的点位值一律不动；单次期限缺省时，
+#   有登记下限（POINT_TIMEOUT_FLOOR_SECONDS）且下限大于通用期限就取下限、来源记 point_default:<秒>，
+#   其余按原作用层继承通用值、来源记 inherit:<通用字段>:<原来源>。改动须同步 test_decision_settings.py 与 TUI _source。
+# 函数用途: 给每个点位补上没被覆盖的期限和模型；选模型等点位先套仓库默认的单次期限下限，再继承通用值。
+def _fill_point_fields(values: dict, origins: dict, point: str, time_key: str) -> None:
+    prefix, floor = f"points.{point}.", POINT_TIMEOUT_FLOOR_SECONDS.get(point)
+    if prefix + "timeout_seconds" not in values and floor is not None and floor > values[time_key]:
+        values[prefix + "timeout_seconds"], origins[prefix + "timeout_seconds"] = floor, f"point_default:{floor:g}"
+    for field, fallback in (("timeout_seconds", time_key), ("profile_id", "profile_id")):
+        if prefix + field not in values:
+            values[prefix + field] = values[fallback]
+            origins[prefix + field] = f"inherit:{fallback}:{origins[fallback]}"
+
+
 # LLM: 缺点值按原作用层继承；实验授权只读当前 thread 的完整信封，绝不拼接 owner/thread 或从开关推导许可。
 #   静态等待上限与 decision_service._point_deadline 同口径：前台点位取点位预算与 stage_timeout_seconds 的较小值；
 #   普通后台点位只看自己的 timeout_seconds（缺省继承 background_timeout_seconds），不再受阶段预算封顶；
@@ -88,10 +106,7 @@ def decision_settings_projection(context: object, data: dict, thread: object = N
         prefix = f"points.{point}."
         time_key = "background_timeout_seconds" if runtime_scope == "owner_background" else "timeout_seconds"
         budget_key = prefix + "timeout_seconds" if runtime_scope == "owner_background" else "stage_timeout_seconds"
-        for field, fallback in (("timeout_seconds", time_key), ("profile_id", "profile_id")):
-            if prefix + field not in values:
-                values[prefix + field] = values[fallback]
-                origins[prefix + field] = f"inherit:{fallback}:{origins[fallback]}"
+        _fill_point_fields(values, origins, point, time_key)
         sources.update({prefix + field: origins[prefix + field] for field in decision_point_fields(point)})
         seconds = values[prefix + "timeout_seconds"]
         mode = _effective_point_mode(values, point)

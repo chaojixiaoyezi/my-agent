@@ -112,7 +112,7 @@ def test_stage_budget_and_single_call_deadline_do_not_restart(prepared, monkeypa
     now = [100.0]
     monkeypatch.setattr(service, "time", SimpleNamespace(monotonic=lambda: now[0]))
     stage = service.begin_decision_stage(host, params, operation_id="batch")
-    assert stage.deadline == 104
+    assert stage.deadline == 105
     patch(host, {"stage_timeout_seconds": 50, "points.recall.timeout_seconds": 10})
     captured = []
     def call(*args, **kwargs):
@@ -122,9 +122,9 @@ def test_stage_budget_and_single_call_deadline_do_not_restart(prepared, monkeypa
     now[0] = 103
     assert decide(host, params, stage, caller_deadline=103.5).status == "success"
     assert captured == [103.5]
-    now[0] = 104
+    now[0] = 105
     assert decide(host, params, stage).status == "deadline" and len(captured) == 1
-    assert stage.deadline == 104
+    assert stage.deadline == 105
 
 
 def test_stage_start_precedes_settings_read_and_corruption_keeps_baseline(prepared, monkeypatch):
@@ -137,7 +137,7 @@ def test_stage_start_precedes_settings_read_and_corruption_keeps_baseline(prepar
         return original(*args, **kwargs)
     monkeypatch.setattr(service, "execute_decision_settings_operation", delayed)
     stage = service.begin_decision_stage(host, params, operation_id="batch")
-    assert stage.started_at == 100 and stage.deadline == 104
+    assert stage.started_at == 100 and stage.deadline == 105
     assert decide(host, params, stage).status == "deadline"
     path = model_profiles_path(host.home_paths)
     path.write_text("broken json")

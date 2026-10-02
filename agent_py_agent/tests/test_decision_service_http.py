@@ -69,7 +69,9 @@ def configured(tmp_path, server, *, mode="apply", timeout=1.0):
     host = host_at(tmp_path)
     thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
     key, _ = add_decision(host, api_base=server.url)
+    # 借 subagent_model 测通用期限：选模型点位有 5 秒仓库默认下限，所以把同一期限显式覆盖到点位上。
     patch(host, {"enabled": True, "profile_id": key, "timeout_seconds": timeout,
+                 "points.subagent_model.timeout_seconds": timeout,
                  "points.subagent_model.mode": mode}, thread_id=thread.thread_id)
     params = SimpleNamespace(request_id="req-decision", run_id="run-decision", task_id="task-decision",
         task_attributes={"conversation_thread_id": thread.thread_id}, live_archive_state={})

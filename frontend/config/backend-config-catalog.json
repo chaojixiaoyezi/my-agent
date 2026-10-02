@@ -1632,10 +1632,10 @@
           {
             "key": "decision_stage_timeout_seconds",
             "label": "decision_stage_timeout_seconds（decision stage timeout seconds）",
-            "description": "同一阶段累计等待；必须为有限正秒数",
+            "description": "同一阶段累计等待（前台点位实际等待取点位期限与它的较小值，选模型两点默认 5 秒）；必须为有限正秒数",
             "type": "number",
-            "defaultValue": 4,
-            "currentValue": 4,
+            "defaultValue": 5,
+            "currentValue": 5,
             "category": "basic",
             "categoryLabel": "基础信息",
             "advanced": true,

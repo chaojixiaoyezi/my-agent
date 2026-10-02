@@ -284,7 +284,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 决策调用复用长连接（仓库默认关，Mac 线上验收后由集成方打开）：打开后同一进程里的决策请求复用已建好的 HTTPS 连接，
     # 省掉每次约 0.9 秒的代理隧道与 TLS 握手；关着就每次新建连接，与改动前逐字节相同。不改请求内容、重试或期限。
     decision_connection_reuse_enabled: bool = False
-    decision_stage_timeout_seconds: float = 4.0
+    # 同一前台阶段累计等待：2026-10-02 由 4 提到 5 秒，与选模型点位默认 5 秒一致（前台点位实际等待取点位期限与它的较小值）。
+    decision_stage_timeout_seconds: float = 5.0
     decision_background_timeout_seconds: float = 4.0
     decision_profile_id: str = ""
     decision_model_selection_mode: str = "off"

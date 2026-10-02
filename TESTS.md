@@ -8,6 +8,23 @@
 - **既有设计用例**：`test_gateway_model_adoption.py::test_actual_gateway_adopts_only_after_full_payload_and_persists_intent` 跑完整个业务请求后，仍断言状态是 `send_intent_uncertain`，“故意不结清”这一点由它锁定，本次不改。
 - **门禁与变异**：见交付记录。
 
+## 选模型两个点位的仓库默认期限定为 5 秒（2026-10-02，分支 `claude/be-selection-timeout-default`，基于 `a44f2ad62`）
+
+- **新增 `test_selection_points_default_to_at_least_five_seconds_and_overrides_still_win`**（`test_decision_settings.py`）：
+  - 常数 5 秒、登记表只含两个选模型点位；dataclass 与随包 YAML 的阶段默认都是 5。
+  - 默认投影：两个点位 5 秒、来源 `point_default:5`；`planning` 仍继承通用 3 秒；TUI 来源文案。
+  - owner 对点位覆盖 3 秒时用 3 秒；通用期限调到 8 秒（阶段 9 秒）时点位跟着是 8 秒；本会话覆盖 2 秒时用 2 秒。
+- **改写的旧用例**：
+  - 阶段默认断言 4→5；`stage.deadline` 104→105，阶段到期的时刻跟着改到 105。
+  - 借 `subagent_model` 测通用期限的辅助函数（`test_decision_service_http.configured`、`test_decision_observe_nonblocking.nonblocking`）
+    把同一期限显式覆盖到点位上，测的仍是通用期限的语义。
+- **变异 10/10 杀死**：不套下限、已覆盖也套下限、下限直接替换不取较大值、dataclass 阶段默认退回 4、YAML 阶段默认退回 4、
+  登记表漏 `subagent_model`、登记表误加 `planning`、下限写成 4 秒、TUI 不认来源、来源记成继承。
+- **门禁**：
+  - `test_decision_*.py`、`test_gateway_model_observation.py`、`test_tui_decision_menu.py`、常数/前端目录、默认值一致性、
+    `test_user_config_decision_patch.py`、`test_gateway_decision_shutdown_cancel.py` 加 10 个守卫：1773 passed。
+  - ruff、import 边界、doc_sync、`diff --check`、`size_diff`、clean_package、前端目录 `--check`。
+
 ## 工具操作持有者同主机判定改用 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`）
 
 - `test_tool_operation_host_identity.py`（新增，3 项）：

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 812,
+  "count": 813,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4370,6 +4370,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。"
+    },
+    {
+      "name": "SELECTION_POINT_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/settings/decision_settings_defaults.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "按通用 3 秒会超时、保留原模型。"
     },
     {
       "name": "DEFAULT_DECISION_REQUEST_MAX_CHARS",

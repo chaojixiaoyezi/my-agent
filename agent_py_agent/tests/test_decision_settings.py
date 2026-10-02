@@ -55,7 +55,7 @@ def test_defaults_no_model_no_agent_no_credentials_and_no_owner_file(tmp_path):
     assert result["ok"] and result["revision"] == {"owner": 0, "thread": 0}
     assert result["effective"]["enabled"] is False
     assert result["effective"]["timeout_seconds"] == 3
-    assert result["effective"]["stage_timeout_seconds"] == 4
+    assert result["effective"]["stage_timeout_seconds"] == 5
     assert result["effective"]["points"]["curator"]["timeout_seconds"] == 4
     assert all(point["mode"] == "off" for point in result["effective"]["points"].values())
     assert not model_profiles_path(host.home_paths).exists()
@@ -64,18 +64,19 @@ def test_defaults_no_model_no_agent_no_credentials_and_no_owner_file(tmp_path):
 
 def test_owner_partial_patch_reset_and_stage_upper_bound(tmp_path):
     host = host_at(tmp_path)
-    result = patch(host, {"timeout_seconds": 5, "enabled": True, "points.recall.mode": "observe"})
-    assert result["effective"]["points"]["recall"]["max_request_seconds"] == 4
+    # 阶段默认 5 秒（2026-10-02 由 4 提到 5），单次期限设得更长时由阶段封顶。
+    result = patch(host, {"timeout_seconds": 6, "enabled": True, "points.recall.mode": "observe"})
+    assert result["effective"]["points"]["recall"]["max_request_seconds"] == 5
     assert result["effective"]["points"]["recall"]["limiting_field"] == "stage_timeout_seconds"
     result = patch(host, {"enabled": False})
     assert result["effective"]["points"]["recall"]["mode"] == "observe"
     assert result["effective"]["points"]["recall"]["effective_mode"] == "off"
     result = patch(host, {"enabled": True, "points.recall.timeout_seconds": 1})
     result = execute(host, "reset", {"fields": ["points.recall.timeout_seconds"], "expected_revision": result["revision"]})
-    assert result["effective"]["points"]["recall"]["timeout_seconds"] == 5
+    assert result["effective"]["points"]["recall"]["timeout_seconds"] == 6
     assert result["sources"]["points.recall.timeout_seconds"] == "inherit:timeout_seconds:owner"
     assert result["effective_from"] == "next_request" and result["stage_budget_policy"] == "preserve_started_stage"
-    assert result["overrides"]["owner"] == {"enabled": True, "timeout_seconds": 5, "points.recall.mode": "observe"}
+    assert result["overrides"]["owner"] == {"enabled": True, "timeout_seconds": 6, "points.recall.mode": "observe"}
     assert result["before"]["overrides"]["owner"]["points.recall.timeout_seconds"] == 1
 
 
@@ -369,9 +370,11 @@ def test_defaults_follow_original_config_domains_and_fractional_yaml(tmp_path):
     result = execute(host, "read", {})
     assert result["effective"]["points"]["recall"]["mode"] == "observe"
     assert result["effective"]["points"]["pre_recall"]["mode"] == "apply"
-    # 点位期限与模型引用不再有配置字段：没有覆盖时继承通用值，来源写明继承。
-    assert result["effective"]["points"]["subagent_model"]["timeout_seconds"] == 2.5
-    assert result["sources"]["points.subagent_model.timeout_seconds"].startswith("inherit:timeout_seconds:")
+    # 点位期限与模型引用不再有配置字段：没有覆盖时继承通用值，来源写明继承；选模型两点另有 5 秒下限。
+    assert result["effective"]["points"]["recall"]["timeout_seconds"] == 2.5
+    assert result["sources"]["points.recall.timeout_seconds"].startswith("inherit:timeout_seconds:")
+    assert result["effective"]["points"]["subagent_model"]["timeout_seconds"] == 5.0
+    assert result["sources"]["points.subagent_model.timeout_seconds"] == "point_default:5"
     assert result["sources"]["points.subagent_model.mode"] == "capability_config.decision_subagent_model_mode"
     path = tmp_path / "agent.yaml"
     path.write_text("decision_timeout_seconds: 0.75\nmemory_decision_recall_timeout_seconds: 0.5\n"
@@ -412,10 +415,43 @@ def test_foreground_default_is_three_seconds_and_a_user_point_override_is_kept(t
     assert AgentConfig().decision_timeout_seconds == 3.0
     assert load_config(packaged_config_path()).decision_timeout_seconds == 3.0
     host = host_at(tmp_path)
+    # 2026-10-02（已定做法 10）：选模型点位不覆盖时默认不低于 5 秒，阶段默认 5 秒，所以实际也能等满 5 秒。
     point = execute(host, "read", {})["effective"]["points"]["model_selection"]
-    assert (point["timeout_seconds"], point["max_request_seconds"]) == (3.0, 3.0)
+    assert (point["timeout_seconds"], point["max_request_seconds"]) == (5.0, 5.0)
     assert point["limiting_field"] == "points.model_selection.timeout_seconds"
     # 用户给选模型单独设的 5 秒（生产现值）是覆盖层的值，改默认不影响它；其它前台点位跟着新默认走。
     view = patch(host, {"points.model_selection.timeout_seconds": 5.0, "stage_timeout_seconds": 5.0})
     assert view["effective"]["points"]["model_selection"]["max_request_seconds"] == 5.0
     assert view["effective"]["points"]["planning"]["max_request_seconds"] == 3.0
+
+
+def test_selection_points_default_to_at_least_five_seconds_and_overrides_still_win(tmp_path):
+    from agent_py_agent.agent.settings.decision_settings_defaults import (
+        POINT_TIMEOUT_FLOOR_SECONDS,
+        SELECTION_POINT_TIMEOUT_SECONDS,
+    )
+    from agent_py_agent.agent.settings.user_config_capability import packaged_config_path
+    from agent_py_agent.cli.chat_parts.tui_decision_menu import _source
+
+    assert SELECTION_POINT_TIMEOUT_SECONDS == 5.0 and set(POINT_TIMEOUT_FLOOR_SECONDS) == {"model_selection", "subagent_model"}
+    assert AgentConfig().decision_stage_timeout_seconds == load_config(packaged_config_path()).decision_stage_timeout_seconds == 5.0
+    host = host_at(tmp_path)
+    view = execute(host, "read", {})
+    for name in ("model_selection", "subagent_model"):
+        point = view["effective"]["points"][name]
+        assert (point["timeout_seconds"], point["max_request_seconds"]) == (5.0, 5.0), name
+        assert view["sources"][f"points.{name}.timeout_seconds"] == "point_default:5"
+    assert view["effective"]["points"]["planning"]["timeout_seconds"] == 3.0, "其它前台点位仍继承通用 3 秒"
+    assert view["sources"]["points.planning.timeout_seconds"].startswith("inherit:timeout_seconds:")
+    assert _source("point_default:5") == "本点位默认（不低于 5 秒）"
+
+    overridden = patch(host, {"points.model_selection.timeout_seconds": 3.0})
+    assert overridden["effective"]["points"]["model_selection"]["timeout_seconds"] == 3.0, "点位覆盖优先，可以低于下限"
+    assert overridden["sources"]["points.model_selection.timeout_seconds"] == "owner"
+    raised = patch(host, {"timeout_seconds": 8.0, "stage_timeout_seconds": 9.0})
+    assert raised["effective"]["points"]["subagent_model"]["timeout_seconds"] == 8.0, "通用期限更长时跟着通用走"
+    assert raised["sources"]["points.subagent_model.timeout_seconds"].startswith("inherit:timeout_seconds:")
+    store = host.conversation_store
+    thread = store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
+    session = patch(host, {"points.subagent_model.timeout_seconds": 2.0}, thread_id=thread.thread_id, scope="thread")
+    assert session["effective"]["points"]["subagent_model"]["timeout_seconds"] == 2.0, "本会话覆盖同样优先"

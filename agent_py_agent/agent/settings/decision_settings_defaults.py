@@ -15,6 +15,13 @@ from .decision_settings_schema import (
 # 点位的单次期限与模型引用只在用户长期设置/会话临时设置里按点位覆盖（TUI 决策菜单“逐接入点设置”、user_config 的
 # decision_patch），配置文件里不再各设一份：默认一律继承通用 timeout/background_timeout 与 profile_id（2026-09-27 参数减量）。
 _OVERRIDE_ONLY_POINT_FIELDS = frozenset({"timeout_seconds", "profile_id"})
+# 选模型两个点位的仓库默认单次期限下限（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）：冷连接下 Jev 实测约 3.2 秒，
+# 按通用 3 秒会超时、保留原模型。
+SELECTION_POINT_TIMEOUT_SECONDS = 5.0
+# 点位单次期限的仓库默认下限：点位没有覆盖时取 max(通用期限, 下限)，通用期限调高时跟着变长；
+# 用户长期/本会话对点位的覆盖照旧优先，想低于下限就单独覆盖这个点位。
+POINT_TIMEOUT_FLOOR_SECONDS = {"model_selection": SELECTION_POINT_TIMEOUT_SECONDS,
+                               "subagent_model": SELECTION_POINT_TIMEOUT_SECONDS}
 
 
 # LLM: 注册表只确定字段归属；能力点不能混入 AgentConfig，召回前/后及整理/关系点沿原记忆配置，各自独立开关。

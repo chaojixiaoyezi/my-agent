@@ -1047,7 +1047,7 @@ decision_observe_sampling_enabled: false
 # 默认关：决策的行为与时序不变，只是结果日志每行多一个附加字段 blocking。
 decision_observe_nonblocking_enabled: false
 decision_timeout_seconds: 3.0  # 前台单次等待；必须为有限正秒数
-decision_stage_timeout_seconds: 4.0  # 同一阶段累计等待；必须为有限正秒数
+decision_stage_timeout_seconds: 5.0  # 同一阶段累计等待（前台点位实际等待取点位期限与它的较小值，选模型两点默认 5 秒）；必须为有限正秒数
 decision_background_timeout_seconds: 4.0  # 后台单次等待；必须为有限正秒数
 # 决策调用复用长连接：打开后同一进程里的决策请求复用已经建好的 HTTPS 连接，省掉每次约 0.9 秒的代理隧道与 TLS 握手
 # （2026-10-01 实测：复用后单次快约 1 秒）。空闲超过 60 秒的连接不再复用；复用连接上发送失败照常算一次失败，不会自动重发。

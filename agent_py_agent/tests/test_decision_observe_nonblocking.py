@@ -65,8 +65,10 @@ def nonblocking(tmp_path, server, mode="observe", changes=None):  # noqa: F811
     host, params, thread, stage = configured(tmp_path, server, mode=mode)
     host.home_paths.owner_decision_outcomes_jsonl = tmp_path / "decision" / "outcomes.jsonl"
     host.home_paths.owner_decision_reach_counts_json = tmp_path / "decision" / "reach_counts.json"
-    patch(host, {"observe_nonblocking_enabled": True, "timeout_seconds": 2.0, "background_timeout_seconds": 2.0,
-                 **(changes or {})}, thread_id=thread.thread_id)
+    merged = {"observe_nonblocking_enabled": True, "timeout_seconds": 2.0, "background_timeout_seconds": 2.0, **(changes or {})}
+    # 选模型点位有 5 秒仓库默认下限；这里测的是通用期限，所以点位期限跟着通用期限显式覆盖。
+    merged.setdefault("points.subagent_model.timeout_seconds", merged["timeout_seconds"])
+    patch(host, merged, thread_id=thread.thread_id)
     return host, params, thread, stage
 
 
