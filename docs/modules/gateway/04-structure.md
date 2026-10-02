@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## 决策实验晋升提示 J6（2026-10-01，本地待集成）
+
+- `request_experiment_promotion.py`：原请求回执仍是唯一幂等权威，新增 promotion_id 和冻结的 evaluation.rule；只返回本次新写入的回执。
+- `request_experiment_notice.py`：只读回执生成中文宿主提示，notice_id 复用 promotion_id，排入授权所绑定会话的原 pending_host_notices。
+- `request_experiment_records.finish_decision_experiment_turn`：新 applied 回执才产生返回提示；旧回执、skipped、uncertain、无晋升均为空。
+- `request_execution._publish_gateway_host_notices`：开轮读取原队列，收尾只发布传入的新提示；两批合并后由 request_history 原提交按编号消费。
+- 原 `host_notice` 流 → TUI 灰行/历史恢复；原 final metadata/channel_delivery → IM 原最终回复/DeliveryService，模型输入不含提示。
+- 原请求回执和线程队列非跨文件事务，不补投旧回执；IM 重试保持原 final/sent 幂等身份，不新增通知账。
+
 `control_service._execute_effort_control` 只在查看 `/effort` 时附加 `backends/reasoning_control.describe_level_choices()` 生成的
 可选档位行（只由档位表生成，不判断模型能力）；TUI 的档位菜单在客户端（`cli/chat_parts/tui_effort_menu.py`），不新增 Gateway 路由。
 

@@ -3,7 +3,8 @@
 #   样本在决策调用后写一次（record_id=原调用编号去重）；实际用量只在回合正常收尾时按结构化工具账补写，停止/关闭的回合不补写。
 #   证据链只沿 experiment_grant.previous_request_id 回读原请求记录，条目身份由评估器按 owner/thread 逐条核对。
 #   普通请求（无实验条目、无 apply 授权）在任何入口都零 I/O、不写任何键。调用方：request_execution、request_binding、晋升模块。
-# 模块用途: 把只观察实验的对照记录、回合结束的实际工具用量和跨请求证据读取接到原请求记录上。
+#   收尾只把新写入的 applied 回执交原提示队列并返回给当轮；已有回执不补投，联测 test_decision_experiment_notice。
+# 模块用途: 在原请求里保存实验证据并收尾，把授权内新晋升及时接到同会话原宿主提示链。
 from __future__ import annotations
 
 import logging
@@ -12,6 +13,7 @@ import re
 from ..common.cancellation import ToolCancelled
 from ..conversation.decision_experiment_evaluation import evaluate_skill_tool_samples
 from ..conversation.decision_policy import decision_owner_ref
+from ..conversation.host_notices import HostNotice
 from ..turn_end import result_turn_end_reason
 from .io import read_json_file_report, update_json_file_atomic
 from .paths import gateway_paths_from_root
@@ -142,25 +144,27 @@ def _apply_granted(request: dict) -> bool:
     return isinstance(grant, dict) and grant.get("status") == "granted" and "apply" in (grant.get("operations") or ())
 
 
-# LLM: 回合已正常返回后调用；先补写实际用量，再在 apply 授权内尝试晋升。停止/关闭（转换锁抛中断）只跳过，
-#   不把可选实验收尾变成另一种请求结果；其它异常只记日志。普通请求直接返回，零 I/O。
-# 函数用途: 在 Gateway 回合结束时补写实验记录的实际用量，并触发授权内的自动晋升检查。
-def finish_decision_experiment_turn(context: object, result: object) -> None:
+# LLM: 回合正常返回后先补实际用量，再尝试授权内晋升；只把新写入的 applied 回执排入原宿主提示队列并返回当轮发布。
+#   原请求已有任何 promotion 即不再生成，消费后重启也不会补投。停止/关闭或异常不改变业务结果；普通请求零 I/O。
+# 函数用途: 在收尾时记录实验结果，让本轮发生的自动设置变化及时随本轮回复告知用户。
+def finish_decision_experiment_turn(context: object, result: object) -> tuple[HostNotice, ...]:
     request = context.request
     pending, apply = _has_pending(request), _apply_granted(request)
     if not pending and not apply:
-        return
+        return ()
     try:
         if pending:
             _complete_records(context, realized_tool_usage(result))
         if apply:
+            from .request_experiment_notice import queue_promotion_notice
             from .request_experiment_promotion import promote_skill_tool_if_ready
 
-            promote_skill_tool_if_ready(context)
+            return queue_promotion_notice(context, promote_skill_tool_if_ready(context))
     except (InterruptedError, ToolCancelled):
         _LOGGER.info("决策实验收尾时本回合已停止或关闭；不补写实际用量、不晋升设置。")
     except Exception:  # noqa: BLE001 实验收尾失败不能改变已完成的业务回合
         _LOGGER.warning("决策实验收尾未完成；本轮业务结果不受影响。")
+    return ()
 
 
 # LLM: 在转换锁内把本代次待补写条目标为 completed 并写入同一份实际用量；已完成或其它代次条目不动。

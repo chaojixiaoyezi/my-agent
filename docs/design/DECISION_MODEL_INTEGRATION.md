@@ -557,6 +557,12 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 - **F1a 只读评估**：`conversation/decision_experiment_evaluation.py` 只读这些条目并逐条核对 owner/thread。样本=最近 8 条已完成条目；可比较=结算 charged、实际用量已知、候选已投影且召回可算。短名单召回=实际工具中在短名单的比例，分母只含本次快照内的工具（短名单或延迟名单中的），快照外工具不计；名单截断而无法归类、或没有可归类工具时召回未知（样本不可比较，但不阻断）。规则四条同时成立才提出 `points.skill_tool.mode off→apply`：可比较样本≥3、窗口内每个样本 charged、每个可比较样本召回=1.0、每个可比较样本延迟数>0；否则 `keep_observing` 与原因码。常量属于已审计规则，不设配置项。跨请求证据只沿授权回执 v2 的 `previous_request_id`（授权时被替换信封的来源请求）回读原请求记录，至多 16 条，每条须是本会话 granted 回执，编号按文件名规则校验。`user_config decision_read` 在会话已有授权信封时附只读 `experiment_evaluation`（插在信封之后），模型可见；没有信封时输出逐字节不变。
 - **F1b 授权内自动晋升**：`/experiment apply skill_tool …` 与 observe 同一语法，信封 operations 为 `["observe","apply"]`（仍是 v2；旧版程序无法读取含 apply 的信封，撤销与 reset 都不删除信封）。实验调用本身仍只观察；apply 只授权宿主在回合收尾时晋升：锁外只读评估，锁内复读设置，核对授权仍是本请求那份、身份一致、active、含 apply、未到期、设置 revision 与授权时一致、能力仍开、点有效模式仍为 off，再经原设置服务 `patch`（thread 范围、`expected_revision` 取锁内读数，完整 CAS）写 apply。冲突或任何用户后改（线程/用户层修改、默认配置改变有效模式、撤销、到期、被新授权替换）都跳过、绝不覆盖。
 - **回执权威选请求记录**：`experiment_records.promotion` 与触发它的证据同处一份原请求记录；授权信封是纯授权、会被下一次授权整份替换，把回执写进它还会改变信封 schema 与发送门的读取者。晋升先写 `promoting` 再改设置，已有任何回执即不再尝试（内存快判加锁内复核，重放与重启幂等）；崩溃遗留的 `promoting` 表示结果不确定，不重试、不反向恢复。回执含状态/原因码、目标字段、证据摘要（记录编号与计数）以及前后值（线程覆盖是否存在及值、有效模式、两层 revision）。到期或撤销不回滚已晋升设置，需要恢复继承时对 `points.skill_tool.mode` 执行 reset。
+- **J6 晋升提示（已实施（2026-10-01），本地待集成）**：回执 v1 追加唯一 `promotion_id`（每授权最多一次晋升）与冻结的 `evaluation.rule`。
+  只把本次真正持久化的 `applied` 回执生成提示，说明点位、前后有效模式、样本数/门槛和恢复继承路径；不读取当前规则或自然语言。
+  复用原 `pending_host_notices → host_notice → canonical final/channel_delivery → IM DeliveryService`，收尾提示在当轮追加发布并合入原最终提交。
+  原请求已有回执便不再返回新回执，notice_id 复用 promotion_id；消费后重启不补投，IM 沿原 final/sent 去重，不加通知账或发送线程。
+  恢复继承走 `/model → 选择模型 → 决策模型 → 本会话临时设置 → 逐字段恢复继承 → points.skill_tool.mode`，也可请助手经原设置服务 reset。
+  沿原“提交即已读”；回执与线程队列非跨文件事务，极端中断或排队失败可能漏提示，不扫旧回执补发。隔离链路/变异见 TESTS，真实两端收信未验证。
 - **不变的边界**：Jev 回答只经宿主投影成候选名单，不能直接改变评估或触发晋升；模型没有授权或晋升工具路径（`user_config` 仍只有读取/撤销实验授权）。节省只按延迟数计，工具 schema 字节随协议序列化而变，不作为结构化事实记录。
 
 ### 决策开关、超时自调、统一审计与管理员管控（2026-09-25，本地实施待合入；已合入 main `2093631e5`）

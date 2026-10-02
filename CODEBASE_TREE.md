@@ -453,6 +453,7 @@ agent_py_agent/
 |   |   |-- request_experiment_records.py # 实验对照记录写入请求记录、回合收尾补写实际工具用量、授权指针证据链与只读评估
 |   |   |-- request_audit_records.py   # 审计只读：窗口内请求记录的决策观察与请求结果（owner_id 优先、会话归属兜底），白名单、有界、不写文件
 |   |   |-- request_experiment_promotion.py # /experiment apply 授权内：证据满足规则时经原设置 CAS 晋升 skill_tool 并写回执
+|   |   |-- request_experiment_notice.py # 新晋升回执生成中文宿主提示，复用原队列、当轮流与 IM final，旧回执不补投
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
 |   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
 |   |   |-- stream_writer.py            # 请求级文本缓冲、typed 流事件和显示投影的有序出口
@@ -935,6 +936,7 @@ agent_py_agent/
 |   |-- test_decision_experiment_records.py # E2 对照记录：结算等于原账、基线/候选、写入边界、回合收尾实际用量
 |   |-- test_decision_experiment_evaluation.py # F1a 规则矩阵、外来记录忽略、授权指针证据链与 decision_read 只读暴露
 |   |-- test_decision_experiment_promotion.py # F1b apply 授权内 CAS 晋升、回执幂等、用户后改/撤销/到期跳过
+|   |-- test_decision_experiment_notice.py # J6：晋升回执到当轮 TUI、同会话 IM final、消费后重启去重及无晋升不提示
 |   |-- test_decision_experiment_gateway_turn.py # 真实 Gateway 回合：本地 HTTP 实验、真实工具账实际用量与链上晋升
 |   |-- test_model_call_input_budget.py # 原账带标签上界预留、单次发送许可、拒绝/绕过结算与代次/LRU 隔离
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
@@ -1765,6 +1767,7 @@ docs/
 - `agent_py_agent/tests/test_decision_experiment_authorization.py`、`test_model_call_input_budget.py`、`test_decision_experiment_send_gate.py`、`test_decision_experiment_command.py`：许可/预算/发送门/授权入口的合同与本地 HTTP 组合回归，统计 TCP accept，不调用真实供应商。
 - `agent_py_agent/agent/capability/decision_experiment_sample.py`、`agent_py_agent/agent/gateway_parts/request_experiment_records.py`：E2 对照记录（身份、配置版本、基线/候选名单、原账结算视图）只写 Gateway 请求记录的 `experiment_records`；回合正常收尾按结构化工具账补写实际用量，停止/关闭不补写，普通请求零 I/O。
 - `agent_py_agent/agent/conversation/decision_experiment_evaluation.py`、`agent_py_agent/agent/gateway_parts/request_experiment_promotion.py`：F1 只读证据评估（≥3 可比较、全部 charged、召回 1.0、有节省）与 `/experiment apply` 授权内经原设置 CAS 的一次性晋升；回执在请求记录 `experiment_records.promotion`，用户后改优先。
+- `agent_py_agent/agent/gateway_parts/request_experiment_notice.py`：只把新 applied 回执变成原 host_notice，点位/模式/样本/门槛取回执冻结值，稳定 notice_id 沿原请求去重；当轮 TUI 与同会话 IM final 共用原提示链，历史回执不补投。
 - `agent_py_agent/tests/test_decision_experiment_records.py`、`test_decision_experiment_evaluation.py`、`test_decision_experiment_promotion.py`、`test_decision_experiment_gateway_turn.py`：E2/F1 合同、写入器、规则矩阵、证据链、CAS 晋升与真实 Gateway 回合组合回归，不调用真实供应商。
 - `agent_py_agent/tests/test_user_config_owner_scope.py`：普通 user 主回合 read/patch 的可信线程及 CAS 预览、跨 owner/子代理拒绝和 main_agent 原能力回归。
 - `agent_py_agent/tests/test_gateway_model_adoption.py`：Gateway 到原生成投影、最终发送和线程 CAS 的本地 HTTP 替身矩阵，不当作供应商真实验收。

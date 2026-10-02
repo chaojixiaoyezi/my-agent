@@ -4,7 +4,8 @@
 #   points.skill_tool.mode=apply（thread 范围）。任何冲突或用户后改都跳过、绝不覆盖；到期或撤销不回滚已晋升设置，reset 恢复继承。
 #   回执权威是本请求记录的 experiment_records.promotion：先写 promoting 再改设置，已有任何回执即不再尝试（重放幂等），
 #   崩溃遗留的 promoting 保持原样表示结果不确定，绝不自动重试或反向恢复。
-# 模块用途: 在用户显式 apply 授权内，把满足证据规则的 skill_tool 建议一次性写成本会话设置并留下结构化回执。
+#   回执冻结 promotion_id（每授权最多一份）和证据规则，只返回本次真正写入的回执；改动联测晋升与提示用例。
+# 模块用途: 在用户显式 apply 授权内一次性改本会话设置，留下能解释变化、阻止重复提示的结构化回执。
 from __future__ import annotations
 
 import time
@@ -24,15 +25,17 @@ from .request_experiment_records import (
 _PROMOTION_SCHEMA = "gateway_decision_experiment_promotion.v1"
 
 
-# LLM: 回执只含授权编号、目标字段、状态/原因码、证据摘要（记录编号与计数）和前后值/版本，不含正文、凭据或模型回答。
-# 函数用途: 生成一份晋升回执。
+# LLM: 回执冻结授权派生的唯一 promotion_id、目标字段、证据计数/规则和前后值；新增字段沿 v1 追加，不补写旧回执。
+# 函数用途: 留下能独立解释这次晋升的结构化事实，避免重启后按当前设置重新猜文案。
 def _receipt(grant: dict, evaluation: dict, outcome: tuple[str, str], values: dict | None = None) -> dict:
     status, reason = outcome
     return {"schema": _PROMOTION_SCHEMA, "status": status, "reason": reason, "authorization_id": grant["authorization_id"],
+            "promotion_id": grant["authorization_id"],
             "point": SKILL_TOOL_PROPOSAL["point"], "field": SKILL_TOOL_PROPOSAL["field"],
             "scope": SKILL_TOOL_PROPOSAL["scope"], "to": SKILL_TOOL_PROPOSAL["to"],
             "evaluation": {"status": evaluation["status"], "reasons": list(evaluation["reasons"]),
                            "sample_count": evaluation["sample_count"], "comparable_count": evaluation["comparable_count"],
+                           "rule": dict(evaluation["rule"]),
                            "record_ids": [sample["record_id"] for sample in evaluation["samples"]]},
             "before": (values or {}).get("before"), "after": (values or {}).get("after")}
 
@@ -113,8 +116,8 @@ def _apply(context: object, view: dict, grant: dict, evaluation: dict) -> dict:
                                                          "after": _field_value(result)})
 
 
-# LLM: 调用方持有转换锁。规则不通过或前提不符只写 skipped；通过时先写 promoting（已有回执即放弃），再 CAS 改设置，最后收尾回执。
-# 函数用途: 在一次回合收尾中至多执行一次自动晋升，并返回最终回执（未执行时为 None）。
+# LLM: 调用方持有转换锁。先写 promoting 再 CAS 改设置，最后收尾；只返回本次真正写入的回执供提示，旧回执重放返回 None。
+# 函数用途: 在一次回合收尾中至多晋升一次，让原请求回执同时守住设置与提示的幂等性。
 def _promote_once(context: object, grant: dict, evaluation: dict) -> dict | None:
     if evaluation["status"] != "proposal":
         receipt = _receipt(grant, evaluation, ("skipped", "evaluation_keep_observing"))
@@ -127,8 +130,7 @@ def _promote_once(context: object, grant: dict, evaluation: dict) -> dict | None
     if not _write_receipt(context, _receipt(grant, evaluation, ("promoting", "")), create=True):
         return None
     receipt = _apply(context, view, grant, evaluation)
-    _write_receipt(context, receipt, create=False)
-    return receipt
+    return receipt if _write_receipt(context, receipt, create=False) else None
 
 
 # LLM: 只在本请求 apply 授权回执存在时由回合收尾调用；已有晋升回执直接返回（零写入）。证据评估在锁外只读完成，

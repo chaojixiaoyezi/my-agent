@@ -5,6 +5,7 @@
 # 延迟transcript Compact沿同次恢复准备提交；原CAS后的上下文必须回传至下一溢出或最终持久化。
 # typed overflow携带原生IR与精确插话ID，下一轮重建权限/前缀，不能用归档preview替代原完整工具回执。
 # 决策实验对照记录由能力观察出口拆出写入请求记录；回合正常收尾后才补写实际工具用量并在 apply 授权内检查晋升。
+# 新晋升提示并入当轮原 host_notice 流和 final；开轮旧提示不重发，联测 test_decision_experiment_notice 与 test_host_notices。
 # 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
 from __future__ import annotations
 
@@ -382,7 +383,7 @@ def _configure_gateway_main_activity(context: request_context.GatewayAskRunConte
 
 # LLM: 仅在车道内运行；observer只沿内部调用传入，恢复上下文须回到最终持久化；公共命令判据先于用户历史和模型。
 #   模型回合正常返回后先做决策实验收尾（补写实际工具用量、apply 授权内晋升检查），再持久化答复；收尾不改变结果。
-#   用户消息落账后先发布待送达的宿主提示，同一批提示在持久化答复时按编号取走。
+#   开轮先发布待送达提示；收尾新晋升提示沿同一出口追加并并入当轮提交，不重发开轮提示，不捎带其它后台新提示。
 #   用户消息落账成功后清零持续目标的空片计数（与 ChannelMessageRuntime.receive、CLI 入口同口径：保留熔断暂停原因）；
 #   Goal 自动续跑片走后台 wake，不经过这里，所以不会被这次重置清零。改动同步 test_gateway_goal_fuse_reset.py。
 # 函数用途: 配置流和审批并执行会话；明确系统命令及历史写入失败均阻止模型副作用。
@@ -420,19 +421,21 @@ def _execute_gateway_conversation_turn(
         observer=observer,
     )
     # 实验收尾只在回合正常返回后执行；普通请求零 I/O，停止/失败不补写，任何异常都不改变本轮结果。
-    request_experiment_records.finish_decision_experiment_turn(context, result)
+    promoted = request_experiment_records.finish_decision_experiment_turn(context, result)
+    notices += _publish_gateway_host_notices(context, conversation, notices=promoted)
     return request_history.persist_gateway_assistant_result(context, conversation, result, host_notices=notices)
 
 
-# LLM: 只发布本会话此刻待送达的宿主提示，不取走：真正取走在最终回复提交时按这批编号进行（提交即已读），回合失败就留给下一轮；
-#   没有事件流的 writer 只返回提示、不发布。读不到提示时返回空，不影响回合。副作用：追加 chunk 流事件。
-# 函数用途: 在用户消息落账后、模型执行前把待送达的宿主提示发到前台流，返回这批提示。
+# LLM: 开轮读取原队列，收尾只发布传入的新提示；不取走，最终回复提交才按编号消费，失败留下一轮。没有流也返回同批提示。
+# 函数用途: 让开轮提示与收尾设置变化共用同一个前台流出口和最终交付批次。
 def _publish_gateway_host_notices(
     context: request_context.GatewayAskRunContext,
     conversation: request_context.GatewayConversationContext,
+    *, notices: tuple[HostNotice, ...] | None = None,
 ) -> tuple[HostNotice, ...]:
-    store = getattr(context.agent, "conversation_store", None)
-    notices = pending_host_notices(store, conversation.thread_id) if store is not None and conversation.thread_id else ()
+    if notices is None:
+        store = getattr(context.agent, "conversation_store", None)
+        notices = pending_host_notices(store, conversation.thread_id) if store is not None and conversation.thread_id else ()
     if notices and isinstance(context.on_chunk, BufferedChunkStreamWriter):
         write_host_notice_events(context.on_chunk, notices)
     return notices

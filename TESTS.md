@@ -121,6 +121,60 @@
 - **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 50 个加仓库级扫描守卫（含 `test_packaging.py`）：1253 passed；
   Ruff、doc sync、strict code-size（与 `34e4d874e` 比新增 finding 0）、`git diff --check`、clean-package 全部通过。
 
+## J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，本地待集成）
+
+- **来源与做法**：DESIGN_LEDGER 原“决策实验自动晋升后没有主动提示”。新 `applied` 回执冻结 `promotion_id` 和 `evaluation.rule`，
+  经 Goal 熔断共用的宿主提示队列、当轮流、canonical final 与原 IM DeliveryService 送达，不读自然语言、不新开通知通道。
+- **新增** `test_decision_experiment_notice.py`（8 项，参数化计入）：
+  - 回执冻结唯一标识和证据规则；晋升发生在收尾，TUI 当轮仍显示一条灰色系统提示，既有 Goal 提示不丢；
+  - 事件重放与历史恢复只显示一次，canonical metadata 保留，提示不进模型正文/provider history；
+  - 真实 Gateway 执行入口和设置 CAS 产生的 final，经公开结果、原 poll client/worker、DeliveryService 到隔离飞书适配器发送动作，
+    核对正文同一提示、同一 conversation/reply_to 和稳定 final 幂等键；重建回复 worker 不重发；
+  - 重复收尾、消费后重建 ConversationStore 与执行代次不补投；observe、样本不足、普通请求和 uncertain 写入均无晋升提示。
+- **红绿**：新测试改产品前实际 4 failed/4 passed；补链路后修正测试夹具的 `ou_` 目标、Store 根属性与出站 metadata 断言，
+  保留完整行为断言。三项变异撤回后的相邻回归 **111 passed、0 failed、0 skipped**；指定架构守卫 **166 passed、0 failed、0 skipped**。
+  收尾整理导入和文档后，同一命令合并这两组再次执行：**277 passed、0 failed、0 errors、0 skipped**，含新增 J6 的 8 项。
+- **三项独立变异**（逐个改、逐个测试、逐个撤回，均以行为断言失败而非导入错误被抓到）：
+  1. 删除收尾新提示的当轮发布/合入：TUI 测试只收到原 Goal 提示，失败；
+  2. IM `_reply_text_with_host_notices` 只返回原正文：IM 发送正文缺少整条提示，失败；
+  3. 晋升模块对已存在回执返回旧回执：消费后重建 Store 再收尾重新排队，重启去重测试失败。
+- **证据**：当前工作树 `tmp/j6-focused.xml`、`tmp/j6-guards.xml` 和 `tmp/j6-mutant-{current-turn,im-text,replay}.xml`；JUnit 由工具解析核对计数。
+  最终组合证据 `tmp/j6-final.xml`；合并执行上述聚焦文件与 `guards9.txt` 全部文件，pytest 参数相同。临时测试输出不提交，不以历史其它分片结果替代本轮验证。
+
+复现（工作树根、指定 Python；同目录串行执行，不并行 pytest/code-size）：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+export PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1
+$PY -m pytest agent_py_agent/tests/test_decision_experiment_notice.py \
+  agent_py_agent/tests/test_decision_experiment_promotion.py \
+  agent_py_agent/tests/test_decision_experiment_records.py \
+  agent_py_agent/tests/test_decision_experiment_gateway_turn.py \
+  agent_py_agent/tests/test_host_notices.py \
+  agent_py_agent/tests/test_gateway_goal_fuse_reset.py \
+  agent_py_agent/tests/test_adapter_manager.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/j6-focused.xml
+$PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/j6-guards.xml
+$PY scripts/check_import_boundaries.py
+$PY -m ruff check agent_py_agent scripts
+$PY scripts/check_doc_sync.py
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+$PY scripts/check_clean_package.py .
+```
+
+- **守卫范围**：`guards9.txt` 的 architecture_guardrails、config_field_readers、constant_names_unique、main_agent_has_no_case_runtime、
+  parameter_registry、recovery_actions、recovery_code_policy、skill_snapshot_error_codes、subagent_config_inheritance、packaging 十个测试文件。
+- **静态/打包门禁**：`check_import_boundaries.py` **findings=0**；Ruff、doc sync、strict code-size（hard=0、blocked=False）、
+  `git diff --check`、clean-package 全部通过。生成的 CODE_SIZE_REPORT.md 已还原，不改/不提交基线与报告。
+  Ruff 首次拦到新测试导入排序，已修正；clean-package 首次拦到两个新文件未登记，正常 `git add` 后复验通过，没有删/忽略检查项。
+  线上 CI 未作为本轮验收来源。
+- **未验证与取舍**：没有启动/停止 Gateway、没有运行 my-agent 命令、没有改真实设置/会话，也没有真实飞书 API 或真实终端验收。
+  模型和供应商传输是隔离替身，不能外推为真实用户已收信。沿原“提交即已读”，原请求回执与线程队列不是跨文件事务，
+  写回执后、排队前的极端中断/排队失败可能少提示；不扫旧回执补投。建议 3a 固定集成版后按原授权用例复核两端收信与重启无重复。
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，

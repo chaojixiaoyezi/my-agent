@@ -8,6 +8,13 @@
 `decision_config_fields()` 映射补，读取方为 decision_settings_defaults）。user_config 的 view/search 同口径只在有值时带这四个字段。
 回归见 `test_parameter_metadata.py`。
 
+J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，本地待集成）：
+- 原请求晋升回执追加唯一 `promotion_id` 与冻结规则；只返回新写入的 applied 回执，旧回执消费后重启不补投。
+- 新 `request_experiment_notice.py` 只读结构化回执生成点位、前后模式、样本/门槛与真实恢复继承路径，排进原宿主提示队列。
+- `finish_decision_experiment_turn` 返回本轮新提示；执行编排沿原发布 helper 追加并合入同批 final，保留开轮已发布提示且不捎带其它后台新提示。
+- IM 仍走原 watcher/DeliveryService，无新线程、通道或通知账；沿原“提交即已读”与原队列失败口径。
+- 111 项聚焦、166 项守卫与三项变异有本地证据；真实终端/飞书收信未验证，详细命令和风险见 TESTS 的 J6 节。
+
 `/effort` 查看回执列出可选档位（分支 `claude/3a-effort-picker`，2026-09-30）：`control_service._execute_effort_control` 在查看
 （operation=view）时于回执末尾追加 `reasoning_control.describe_level_choices()` 一行（可选档位与“/effort 加档位只改本会话、
 /effort default 回到全局默认”），设置/检测/撤销回执不变。TUI 单独 `/effort` 改由本地档位菜单（`cli/chat_parts/tui_effort_menu.py`）

@@ -725,3 +725,7 @@ def example(...):
 
 <!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
 新增 TUI 图片/视频输入沿 owner 私有内容引用、Gateway ask 和原生消息传递；官网 M3 已识别图片与视频并在重连后继续读取。官网 M2.7 已完成 100 独立身份/50 执行槽真模型验收，替代前轮假模型的验收结论。默认环境仍未切换，见 [媒体合同](docs/design/TUI_INPUT_MEDIA.md) 与 TESTS。
+
+决策实验晋升提示 J6（2026-10-01，本地待集成）：只从新写入的 applied 回执生成提示，沿原 host_notice 队列、当轮流、canonical final
+和 IM DeliveryService 送达，不开第二条通道；原 promotion 是唯一幂等账。回执冻结规则与 promotion_id，设置撤销走 /model 本会话逐字段恢复继承。
+隔离链路、TUI renderer 与三项变异有证据，真实终端/飞书收信未验证；改动时联测晋升、host_notices 与 adapter_manager，见 TESTS 的 J6 节。

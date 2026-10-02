@@ -129,6 +129,19 @@
   - 先 `/interrupt` 再马上 `/stop` 时，TaskRun 不在 `/stop` 当下关，而是约 2 分钟后由发现层按 `conversation_task_interrupted` 关（实测）。不算泄漏，不改。
 - **验证**：见 TESTS.md 同名节。证据（仓库外）：`~/.my-agent/decision-evidence/c12-observations-20261001/`。
 
+## J6 决策实验自动晋升提示（已实施（2026-10-01），分支 `worker/sol2-promotion-notice`，本地待集成）
+
+- **解决问题**：授权内 off→apply 改了本会话决策设置，但用户在 TUI 和飞书都看不到提示。
+- **实现**：回执 `gateway_decision_experiment_promotion.v1` 追加 `promotion_id`（授权编号派生，每授权最多一份）和冻结的 `evaluation.rule`。
+  只把本次真正持久化的 `applied` 回执变成中文提示，说明点位、前后有效模式、样本数/门槛和恢复继承入口；不读模型正文。
+- **唯一送达链**：复用 Goal 熔断的 `pending_host_notices → host_notice → canonical final/channel_delivery → 原 IM DeliveryService`。
+  晋升发生在收尾，新提示在当轮追加发布并合入原最终提交批次；不重发开轮提示，不新增发送线程、通知账或配置。
+- **去重**：`notice_id=promotion_id`；原请求已有任何晋升回执便不再返回新回执，消费后重建 Store/执行代次不补投；IM 沿原 final/sent 回执去重。
+- **撤销**：`/model → 选择模型 → 决策模型 → 本会话临时设置 → 逐字段恢复继承 → points.skill_tool.mode`；也可让助手经原设置服务恢复本会话继承。
+  `/experiment` 的授权撤销不是设置回滚，不编造 `/experiment revoke` 命令。
+- **验证边界**：111 项聚焦回归、166 项架构守卫与 3 项变异已有本地证据，详见 TESTS 同名节。真实终端及真实飞书收信未验证，待集成后复核。
+  沿原“提交即已读”口径；回执写盘与线程提示队列非跨文件事务，极端中断/排队失败可能漏提示，不扫旧回执补发。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`
@@ -1964,7 +1977,7 @@ Compact补充片已获协作方归属确认，本地537项及独立审阅通过�
   - **并发组合**：后台 `curator` 慢响应不拖住前台 `skill_tool`；线程变更只撤销前台，owner 级改 `curator` 只提前撤销后台。
   - **两处已知取舍**（不改，登记在此）：采用前复核按整份策略版本判断，所以 owner 级任何设置改动会让同 owner 其他点的在途建议返回后作废为 `policy_changed`；冷却原先按连接共享，2026-09-26 已改为超时只冷却本点位（`point_backoff`），只有连接错误才冷却整条连接（见本台账 Jev 条目）。两者都只会少一条建议，不会采用过期建议或卡住。
   - 停止时仍未结束的模型调用已由主线 owner 结清为结构化"被中断"（`db4d46398`，已部署）：排空窗口之后，Gateway 进程账本里的在途调用记为 failed / `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，用量保持未报告、不补零；runner worker 的账本另行跟进。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
-- **决策实验自动晋升后没有主动提示**（2026-09-25，F1 正向晋升真实样本发现；未实施）：授权内晋升把线程的 `points.skill_tool.mode` 由 off 改为 apply，但 TUI 当轮没有任何提示，用户只能在决策设置里看到线程覆盖。方向：晋升回执已是结构化的 `gateway_decision_experiment_promotion.v1`（带前后版本），由 Gateway 终态响应带出、TUI 按结构化字段展示一行提示，不从文字判断。
+- **决策实验自动晋升后没有主动提示**（2026-09-25，F1 正向晋升真实样本发现；已实施（2026-10-01），本地待集成）：新 `applied` 回执冻结唯一 `promotion_id` 与规则摘要，沿原宿主提示通道在 TUI 当轮灰行及同会话飞书最终回复前提示点位、off→apply、样本数/门槛及真实 `/model` 恢复继承路径。原请求回执阻止重放，`notice_id` 复用唯一编号，消费后重启不补投；不解析自然语言。隔离测试及变异已验证，真实客户端收信未验证，见顶部 J6 与 TESTS 同名节。
 - **自学习的 lesson 来源在当前产品里是死路**（2026-09-25，真实验收发现；已由 `record_lesson` 修复并做端到端真实验收，已合入 main `52e0190e1`）：
   - 子代理提示要求"像普通协作者一样回复、不输出状态 JSON"，`output.json` 由宿主生成，没有结构化通道填 `lessons`。所以真实子代理即使在回复里写了经验，也不会产生 `subagent_lesson` 候选，S1 提案与 S2 排序都无法触发。
   - 宿主不能从自然语言回复抽取经验。修复为仿照 `record_finding` 的独立结构化工具 `record_lesson`，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节。
