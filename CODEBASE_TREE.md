@@ -12,6 +12,7 @@
 |-- agent_py_agent/agent/capability_verification_manifest.py # 能力包 v2 可选核验声明：交付物识别、钉住的检查程序、输入策略
 |-- agent_py_agent/agent/capability_verifier_consent.py # 检查程序启用前确认、确认码与写入内容激活的同意摘要
 |-- agent_py_agent/agent/capability/pack_verifier_runner.py # 宿主在唯一沙箱入口里跑钉住的包内检查程序（断网、整根只读），返回结构化检查事实
+|-- agent_py_agent/agent/capability/pack_verifier_redaction.py # 检查程序 location 转给模型前脱敏宿主路径（目标/输入换相对路径，临时目录、解释器换占位）
 |-- agent_py_agent/agent/capability/pack_verification_service.py # 宿主核验主流程：记基线、写完就查、收尾再查、输入解析、返工 1 次
 |-- agent_py_agent/agent/capability/pack_verification_hooks.py # 宿主核验接进工具执行缝隙和收尾通道的钩子（不新增模型工具）
 |-- agent_py_agent/agent/capability/pack_verification_scope.py # 宿主核验生效范围：开关、owner、钉住的带检查程序的包、基线模式

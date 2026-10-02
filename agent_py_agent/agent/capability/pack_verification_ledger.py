@@ -61,6 +61,12 @@ class PackVerificationLedger:
     def rework_count(self) -> int:
         return sum(1 for row in self.records() if row.get("kind") == "rework")
 
+    # LLM: written 记录是写工具回执里本回合写出的工作区相对路径（9b 复审应修 2：基线截断时，只有它能证明不在基线里的文件是本回合写的）。
+    # 函数用途: 返回本 run 写工具写出过的工作区相对路径集合。
+    def written_paths(self) -> frozenset[str]:
+        return frozenset(path for row in self.records() if row.get("kind") == "written"
+                         for path in row.get("paths") or [] if isinstance(path, str))
+
     # LLM: key 由包摘要、检查程序、目标与各输入的路径和摘要组成；同样的内容只跑一次，收尾时直接复用写后结果。
     # 函数用途: 按复用键找本 run 最近一次的检查结果事实。
     def cached_fact(self, key: str) -> dict | None:

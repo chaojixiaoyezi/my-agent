@@ -216,6 +216,21 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - 收尾、事实与接线：返工上限失效、不复用结果、收尾查没改过的文件、返工不先记账、事实不按最后一次收尾、提示漏掉“没正常收尾”、空摘要也挂上、空段也渲染、归档丢摘要、开关默认开、开关不是边界项、收尾没接、pin 摘要不核、删掉的旧地址算写出、账本可被别人读、写后钩子没接、返工提示不带位置。
   - 写变异清单时发现，原有用例都直接调钩子，抓不住“钩子没接上”这类问题；所以先补了执行缝隙的接线用例，再跑变异。
 
+### 块 3 的 9b 复审修正（2026-10-02，同一分支）
+
+- **必须修 F4：location 漏宿主路径**，已修：新增 `capability/pack_verifier_redaction.py`，运行器出结果后统一脱敏。
+  - 用例 `test_location_host_paths_are_redacted_before_reaching_the_model` 是 9b 探针改的，跑真实沙箱。检查程序故意写入 `sys.argv[1]`、`__file__`、`sys.executable`、家目录路径和一个 JSON Pointer。
+  - 结果依次是 `out/d.json`、`<verifier>/verifier.py`、`<python>`、`<redacted>`，JSON Pointer 原样保留。
+  - 写工具回执、返工提示、账本里都不再出现工作区绝对路径、家目录和临时目录。
+  - `test_redact_location_keeps_json_pointers_and_redacts_host_paths` 另外覆盖 `~/`、盘符和 JSON Pointer。
+- **应修 2，已修**：
+  - 基线截断时，不在基线里、又没有写工具回执的文件只记 `uncertain_targets`，不返工；写工具回执证明本回合写过的照常返工（`test_truncated_baseline_only_reworks_files_proven_written_this_run`）。
+  - 当前快照截断记 `current_truncated`（`test_current_scan_truncation_is_recorded`）。
+- **建议，已做**：开关关着时最终结果阶段不读账本（`test_final_facts_skip_the_ledger_when_switch_is_off`）。
+- **应修 1（账本防伪造）**：放到块 4，靠 be 的 H3 把 `data/pack_verification/` 设成对模型只读；主代理、子代理 × Shell、文件工具的回归用例随块 4 补。
+- 测试夹具抽成普通函数 `build_env` / `install_fake_runner`，块 4 的测试文件复用。
+- 变异：在原 25 个基础上新增 8 个（R1–R8：不脱敏、不判宿主路径、误伤 JSON Pointer、临时目录不替换、不区分不确定、忽略写入证据、不记快照截断、开关关着仍读账本）；B8、B9 的定位文本随代码更新。
+
 ## 能力包 v2 块 2：宿主在沙箱里跑钉住的原版检查程序（2026-10-02，分支 `claude/ae-capability-packs-v2-b2`，基于 `claude/3a-step17e` `2e5a36af0`）
 
 - **新增** `agent_py_agent/tests/test_pack_verifier_runner.py`（19 项）：

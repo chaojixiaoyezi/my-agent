@@ -31,6 +31,7 @@ from ..plugin_install_store import PluginInstallStore
 from ..plugin_installation import PluginInstallationError
 from ..plugin_manifest import PluginPackageError
 from ..plugin_package import inspect_plugin_package, read_plugin_member
+from .pack_verifier_redaction import redact_error_samples
 
 PACK_VERIFIER_RESULT_SCHEMA = "pack_verifier_result.v1"
 SUPPORTED_VERIFIER_RUNTIMES = frozenset({"python"})
@@ -149,7 +150,10 @@ def run_pack_verifier(request: PackVerifierRequest) -> PackVerificationResult:
     except (PluginInstallationError, PluginPackageError, ValueError):
         return PackVerificationResult(**base, status="error", reason_code="verifier_member_mismatch")
     base.update(member_sha256=hashlib.sha256(member_bytes).hexdigest(), target_sha256=_file_sha256(request.target))
-    return _run_result(_sandboxed_run(request, verifier, member_bytes), verifier, base)
+    outcome = _sandboxed_run(request, verifier, member_bytes)
+    result = _run_result(outcome, verifier, base)
+    # location 是检查程序写的任意文字，转给模型前把宿主路径脱敏（9b 复审 F4）
+    return redact_error_samples(result, request, outcome[2]) if outcome is not None else result
 
 
 # LLM: 只有已激活的内容代次、且同意摘要覆盖当前声明，才允许宿主运行包内代码；运行方式不认识的不跑（开放世界：不拒绝安装）。
@@ -172,10 +176,10 @@ def _pinned_member(request: PackVerifierRequest, verifier: VerifierDeclaration) 
 
 
 # LLM: 临时目录在宿主自己的临时区，结束即删；沙箱整根只读、只写临时目录、断网；超时按 TERM→KILL 回收。
-#   沙箱不可用（含不能断网）时返回 None，一个进程都不起。
-# 函数用途: 把原件写进临时目录，在沙箱里运行，返回进程结果和耗时。
+#   沙箱不可用（含不能断网）时返回 None，一个进程都不起。临时目录路径也一并返回，供 location 脱敏把它换成 <verifier>。
+# 函数用途: 把原件写进临时目录，在沙箱里运行，返回进程结果、耗时和本次临时目录。
 def _sandboxed_run(request: PackVerifierRequest, verifier: VerifierDeclaration,
-                   member_bytes: bytes) -> tuple[subprocess.CompletedProcess, float] | None:
+                   member_bytes: bytes) -> tuple[subprocess.CompletedProcess, float, str] | None:
     temp = Path(tempfile.mkdtemp(prefix="pack-verifier-"))
     try:
         script = temp / "verifier.py"
@@ -189,18 +193,18 @@ def _sandboxed_run(request: PackVerifierRequest, verifier: VerifierDeclaration,
             completed = sandbox.run(_argv(script, verifier, request), timeout=float(verifier.timeout_seconds))
         except SandboxUnavailableError:
             return None
-        return completed, time.monotonic() - started
+        return completed, time.monotonic() - started, str(temp)
     finally:
         shutil.rmtree(temp, ignore_errors=True)
 
 
 # LLM: 退出码只用来识别超时（沙箱回收约定的退出码且耗时到了声明超时），其余一律按 stdout 合同判定。
 # 函数用途: 把沙箱运行结果转成结构化检查结果。
-def _run_result(outcome: tuple[subprocess.CompletedProcess, float] | None, verifier: VerifierDeclaration,
+def _run_result(outcome: tuple[subprocess.CompletedProcess, float, str] | None, verifier: VerifierDeclaration,
                 base: dict) -> PackVerificationResult:
     if outcome is None:
         return PackVerificationResult(**base, status="not_run", reason_code="sandbox_unavailable")
-    completed, elapsed = outcome
+    completed, elapsed, _ = outcome
     base.update(returncode=completed.returncode, duration_ms=int(elapsed * 1000))
     if completed.returncode == _SANDBOX_TIMEOUT_EXIT_CODE and elapsed >= verifier.timeout_seconds:
         return PackVerificationResult(**base, status="error", reason_code="verifier_timeout")

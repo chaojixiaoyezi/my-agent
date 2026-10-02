@@ -74,7 +74,11 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 - **成员原件**：从已安装的包 blob 按 sha256 读出成员字节（`read_capability_member` 一类入口，核对激活代次），放进宿主临时目录，用宿主自己的 Python（`-I -S`）运行。工作区里的副本一律不用。
 - **输出合同**：stdout 是一个 JSON 对象（不超过 1 MB，日志写 stderr），`schema=pack_verifier_result.v1`，内容 `{valid, errors[{code, location}], warnings[{code, location}], metrics}`。
   - 宿主只读 `valid`、code 和计数，不解释 message，也不读 `metrics`。code 是非空字符串，不超过 128 字符；不同 code 最多 64 个，超出的计入 `_other`。
-  - 为了让返工提示能定位，宿主保留前 10 条错误的 code 和 `location`（去掉控制字符、截到 128 字符），原样转给模型，自己不解释。
+  - 为了让返工提示能定位，宿主保留前 10 条错误的 code 和 `location`（去掉控制字符、截到 128 字符），转给模型，自己不解释。
+  - `location` 是检查程序写的任意文字，转给模型前宿主先脱敏宿主路径（9b 复审 F4，`capability/pack_verifier_redaction.py`）：
+    - 目标和输入换成工作区相对路径，工作区根前缀去掉；
+    - 本次临时目录换成 `<verifier>`，宿主解释器换成 `<python>`；
+    - 换完仍含宿主路径的整条置成 `<redacted>`。是否“仍含宿主路径”只看结构化事实：片段以 `~/`、盘符开头，或者是 `/<段>` 且这一段在本机根目录下真实存在。JSON Pointer（如 `/shots/0`）的首段在本机不存在，不会被误伤。
   - `valid` 必须等于“errors 为空”。自相矛盾、格式不对都记 `verifier_output_invalid`。
   - 退出码不参与判定，只用来识别超时。检查器写出 v1 就退 0；目标坏了给 `valid=false` 加错误码，崩溃没写出 v1 时宿主记 `verifier_output_invalid`。
   - 运行形态：宿主只把这一个成员拷进临时目录、改名后用 `python -I -S` 跑。检查器必须是单文件、只用标准库，不 import 包里其它文件，也不读包里的模板或资源。
@@ -102,6 +106,10 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 - **基线**：本 run 第一次改工作区的工具执行前（写工具，或运行策略声明了 `mutates_workspace`，比如 shell），按全部已启用、声明了核验的包的路径模式扫一次工作区。
   - 用全部已启用的包而不只是已钉住的包，是因为包可能在回合中途才被钉住。
   - 扫描不跟随符号链接，最多走访 2 万个条目、记 512 个文件，单文件 16 MB 以内才算摘要；超限记 `truncated`。
+  - 基线截断时（9b 复审应修 2），不在基线里的文件可能是漏扫的老文件：
+    - 只有写工具回执证明本回合写过它（账本里的 `written` 记录）才算本回合改的；
+    - 其余算“不确定”，收尾照样检查、入账（`uncertain_targets`），但它的失败不触发返工。
+  - 收尾时的当前快照截断也记进 closeout 记录和最终事实（`current_truncated`）。
 - **关联输入怎么找**：
   - `task_input`：基线里有、现在内容没变的文件；
   - `turn_output`：本回合新建或内容变了的文件；
@@ -124,6 +132,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 记录分四种：baseline、result、closeout、rework。
   - 返工次数和结果复用都只读这本账，Compact 续跑、进程重启后不会重置。
   - `runtime_events` 记 `pack_verification_completed`，只是可观测投影，不做决定。
+  - 开关关着时，最终结果阶段直接返回、不去读账本，每轮收尾零 I/O。
 - **对外**：
   - `AgentRunResult.pack_verifications`（`pack_verifications.v1`）→ `channel_delivery.pack_verifications`，不进公开投影白名单；
   - 回合正常返回后，Gateway 用这些事实写一条 `HostNotice`（`source=pack_verification`，`code=summary`），排入原提示队列，和当轮其它提示一起发布。

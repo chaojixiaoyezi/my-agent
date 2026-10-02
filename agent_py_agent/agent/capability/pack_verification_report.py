@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from .pack_verification_ledger import PackVerificationLedger, ledger_for_run
+from .pack_verification_scope import host_verification_enabled
 
 PACK_VERIFICATIONS_SCHEMA = "pack_verifications.v1"
 NOTICE_SOURCE = "pack_verification"
@@ -37,6 +38,8 @@ def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | Non
     baseline = next((row for row in records if row.get("kind") == "baseline"), {})
     return {"schema": PACK_VERIFICATIONS_SCHEMA, "closeout_checked": bool(closeouts),
             "closeout_truncated": bool(closeouts and closeouts[-1].get("truncated")),
+            "current_truncated": bool(closeouts and closeouts[-1].get("current_truncated")),
+            "uncertain_targets": list(closeouts[-1].get("uncertain_targets") or []) if closeouts else [],
             "baseline_truncated": bool((baseline.get("scan") or {}).get("truncated")),
             "rework_count": sum(1 for row in records if row.get("kind") == "rework"),
             "results": list(latest.values())[:MAX_RUN_FACT_RESULTS_COUNT]}
@@ -47,6 +50,9 @@ def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | Non
 def run_pack_verification_facts(agent: object, context: object) -> dict | None:
     from ..agent_core.run_task_workspace_writer import current_run_task_workspace_root
 
+    # 开关关着就不去开账本（9b 建议）：未开启时每轮收尾零 I/O
+    if not host_verification_enabled(agent):
+        return None
     ledger = ledger_for_run(current_run_task_workspace_root(agent, context), str(getattr(context, "run_id", "") or ""))
     return pack_verification_facts(ledger)
 

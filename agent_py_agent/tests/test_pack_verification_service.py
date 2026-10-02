@@ -94,9 +94,11 @@ def _install(tmp_path, checker=REAL_CHECKER):
     return owner, ref
 
 
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    owner, ref = _install(tmp_path)
+# LLM: 块 3 起的流程用例共用的环境：真实安装并同意的包、任务根、工作区、钉住引用、开关打开的替身 Agent；installed 可以换成
+#   用别的检查程序安装的 (owner, ref)。只改 monkeypatch 能撤销的模块属性，不碰真实 owner home。
+# 函数用途: 搭一套宿主核验的测试环境（普通函数，供各测试文件的夹具调用）。
+def build_env(tmp_path, monkeypatch, installed=None):
+    owner, ref = installed or _install(tmp_path)
     workspace, task_root = tmp_path / "ws", tmp_path / "task"
     workspace.mkdir()
     pins = [ref]
@@ -117,7 +119,13 @@ def env(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def fake_runner(monkeypatch):
+def env(tmp_path, monkeypatch):
+    return build_env(tmp_path, monkeypatch)
+
+
+# LLM: 交付物里 bad=true 就报一条带位置的 placeholder_text；返回记录下来的请求列表，供断言调用次数和输入。
+# 函数用途: 把运行器换成不起进程的确定性替身（普通函数，供各测试文件的夹具调用）。
+def install_fake_runner(monkeypatch):
     calls = []
 
     def run(request):
@@ -132,6 +140,11 @@ def fake_runner(monkeypatch):
             error_samples=({"code": "placeholder_text", "location": "SH01.start_state"},) if bad else ())
     monkeypatch.setattr(pack_verification_service, "run_pack_verifier", run)
     return calls
+
+
+@pytest.fixture
+def fake_runner(monkeypatch):
+    return install_fake_runner(monkeypatch)
 
 
 def _write(path: Path, payload) -> Path:
@@ -419,3 +432,87 @@ def test_tool_execution_seam_calls_both_hooks(monkeypatch, tmp_path):
         tool_call_runtime.ToolCallRuntimeRequest(agent=agent, request=request, call=call))
     assert order == [("baseline", "write_file"), ("handler", "write_file"), ("post", "raw")]
     assert execution.result == "attached"
+
+
+# 9b 复审 F4 的探针改成的用例：检查程序把宿主路径写进 location，宿主转给模型前必须脱敏。
+LEAKY_CHECKER = (
+    "import json, os, sys\n"
+    "home = os.path.expanduser('~')\n"
+    "print(json.dumps({'schema': 'pack_verifier_result.v1', 'valid': False, 'warnings': [],\n"
+    "                  'errors': [{'code': 'argv_target', 'location': sys.argv[1]},\n"
+    "                             {'code': 'own_file', 'location': __file__},\n"
+    "                             {'code': 'interpreter', 'location': sys.executable},\n"
+    "                             {'code': 'home', 'location': 'see ' + home + '/notes'},\n"
+    "                             {'code': 'pointer', 'location': '/shots/0/start_state'}]}))\n")
+
+
+def test_location_host_paths_are_redacted_before_reaching_the_model(tmp_path, monkeypatch):
+    try:
+        AttemptExecutionSandbox(AttemptSandboxSpec(tmp_path, tmp_path, tmp_path, tmp_path, network_access=False)).require_ready()
+    except SandboxUnavailableError:
+        pytest.skip("本机平台沙箱不可用")
+    owner, ref = _install(tmp_path, checker=LEAKY_CHECKER)
+    env = build_env(tmp_path, monkeypatch, installed=(owner, ref))
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+    target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1"})
+    attached = attach_post_write_verification(env.agent, env.params, _tool_result(target))
+    [summary] = attached.metadata["handler_details"]["pack_verification"]
+    rework = closeout_rework_block(env.agent, env.params)
+    ledger_text = env.ledger.path.read_text()
+    last_result = [row for row in map(json.loads, ledger_text.splitlines()) if row["kind"] == "result"][-1]
+    samples = {item["code"]: item["location"] for item in last_result["fact"]["error_samples"]}
+    assert samples == {"argv_target": "out/d.json", "own_file": "<verifier>/verifier.py", "interpreter": "<python>",
+                       "home": "<redacted>", "pointer": "/shots/0/start_state"}, samples
+    for text in (json.dumps(summary, ensure_ascii=False), rework, ledger_text):
+        assert str(env.workspace) not in text and str(Path.home()) not in text and "pack-verifier-" not in text
+
+
+def test_redact_location_keeps_json_pointers_and_redacts_host_paths():
+    from agent_py_agent.agent.capability.pack_verifier_redaction import redact_location
+
+    replacements = [("/w/ws/out/d.json", "out/d.json"), ("/w/ws/", "")]
+    assert redact_location("/w/ws/out/d.json:3", replacements) == "out/d.json:3"
+    assert redact_location("/references/0/id", replacements) == "/references/0/id"
+    assert redact_location("SH01.start_state", replacements) == "SH01.start_state"
+    assert redact_location("~/x", replacements) == "<redacted>"
+    assert redact_location("C:\\Users\\x", replacements) == "<redacted>"
+    assert redact_location(f"in {Path.home()}/a", replacements) == "<redacted>"
+
+
+def test_truncated_baseline_only_reworks_files_proven_written_this_run(env, fake_runner, monkeypatch):
+    from agent_py_agent.agent.capability import pack_verification_matching as matching
+
+    for index in range(3):
+        _write(env.workspace / f"in/{index}.json", {"schema": "other"})
+    old = _write(env.workspace / "out/old.json", {"schema": "delivery.v1", "bad": True})
+    monkeypatch.setattr(matching, "MAX_SCAN_MATCHED_FILES_COUNT", 2)
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+    monkeypatch.setattr(matching, "MAX_SCAN_MATCHED_FILES_COUNT", 512)
+    assert "out/old.json" not in env.ledger.baseline()["scan"]["files"] and env.ledger.baseline()["scan"]["truncated"]
+    assert closeout_rework_block(env.agent, env.params) == "", "漏扫的老文件只记事实，不返工"
+    facts = run_pack_verification_facts(env.agent, env.params)
+    assert facts["uncertain_targets"] == ["out/old.json"] and [item["target"] for item in facts["results"]] == ["out/old.json"]
+    new = _write(env.workspace / "out/new.json", {"schema": "delivery.v1", "bad": True})
+    attach_post_write_verification(env.agent, env.params, _tool_result(new))
+    assert "out/new.json" in closeout_rework_block(env.agent, env.params), "有写工具回执证明的新文件照常返工"
+    assert old.exists()
+
+
+def test_current_scan_truncation_is_recorded(env, fake_runner, monkeypatch):
+    from agent_py_agent.agent.capability import pack_verification_matching as matching
+
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+    for index in range(3):
+        _write(env.workspace / f"out/{index}.json", {"schema": "delivery.v1"})
+    monkeypatch.setattr(matching, "MAX_SCAN_MATCHED_FILES_COUNT", 2)
+    closeout_rework_block(env.agent, env.params)
+    assert run_pack_verification_facts(env.agent, env.params)["current_truncated"] is True
+
+
+def test_final_facts_skip_the_ledger_when_switch_is_off(env, fake_runner, monkeypatch):
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+    attach_post_write_verification(env.agent, env.params, _tool_result(_write(env.workspace / "out/d.json", {"schema": "delivery.v1"})))
+    assert run_pack_verification_facts(env.agent, env.params) is not None
+    env.agent._capability_config_runtime_snapshot.config = CapabilityConfig()
+    monkeypatch.setattr(PackVerificationLedger, "records", lambda self: pytest.fail("开关关着不该读账本"))
+    assert run_pack_verification_facts(env.agent, env.params) is None

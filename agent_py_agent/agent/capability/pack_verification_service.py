@@ -63,6 +63,7 @@ class _RunScope:
     baseline: WorkspaceScan | None
     run_ids: tuple[str, str]
     runtime_db: object = None
+    written: frozenset[str] = frozenset()
 
     # 函数用途: 按钉住包声明的全部模式扫一次当前工作区。
     @cached_property
@@ -96,25 +97,35 @@ def verify_written_files(agent: object, params: object, paths: list[Path]) -> li
     scope = _run_scope(agent, params)
     if scope is None:
         return []
+    written = [relpath for relpath in (workspace_relpath(path, scope.root) for path in paths) if relpath is not None]
+    if written:
+        # 写工具回执是“本回合写过它”的结构化证据；基线截断时靠它区分新写的文件和漏扫的老文件
+        scope.ledger.append({"kind": "written", "paths": written})
     checked = [item for path in paths[:MAX_POST_WRITE_TARGETS_COUNT] for item in _verify_target(scope, path, TRIGGER_POST_WRITE)]
     return [result.summary() for _, result in checked]
 
 
 # LLM: 目标 = 本回合新建或内容变了的、符合钉住包交付物声明的文件（按基线比对，shell 写的也算）；没有基线说明本回合没改过工作区。
-#   有 failed 结果且本 run 返工次数没到上限时，先把返工记进账本再返回提示；记不进账本就不返工（避免无界循环）。
+#   基线截断时，不在基线里、又没有写工具回执证明本回合写过的文件只算“不确定”：照样检查、入账，但它的失败不触发返工（9b 应修 2）。
+#   当前快照也截断时记 current_truncated。有 failed 结果且本 run 返工次数没到上限时，先把返工记进账本再返回提示；
+#   记不进账本就不返工（避免无界循环）。
 # 函数用途: 收尾时核验本回合改过的全部交付物，必要时返回一次返工提示。
 def pack_verification_closeout_block(agent: object, params: object) -> str:
     scope = _run_scope(agent, params)
     if scope is None or scope.baseline is None:
         return ""
-    targets = [scope.root / relpath for relpath in _changed_paths(scope) if _applicable(scope, scope.root / relpath)]
+    uncertain = set(_uncertain_paths(scope))
+    targets = [scope.root / relpath for relpath in sorted({*_changed_paths(scope), *uncertain})
+               if _applicable(scope, scope.root / relpath)]
     checked = [item for path in targets[:MAX_CLOSEOUT_TARGETS_COUNT] for item in _verify_target(scope, path, TRIGGER_CLOSEOUT)]
     scope.ledger.append({"kind": "closeout", "keys": [key for key, _ in checked],
-                         "target_count": len(targets), "truncated": len(targets) > MAX_CLOSEOUT_TARGETS_COUNT})
-    failed = [result for _, result in checked if result.status == "failed"]
+                         "target_count": len(targets), "truncated": len(targets) > MAX_CLOSEOUT_TARGETS_COUNT,
+                         "uncertain_targets": sorted(rel for rel in uncertain if scope.root / rel in targets),
+                         "current_truncated": scope.current.truncated})
+    failed = [result for _, result in checked if result.status == "failed" and result.target not in uncertain]
     if not failed or scope.ledger.rework_count() >= MAX_PACK_VERIFICATION_REWORK_COUNT:
         return ""
-    if not scope.ledger.append({"kind": "rework", "keys": [key for key, result in checked if result.status == "failed"]}):
+    if not scope.ledger.append({"kind": "rework", "keys": [key for key, result in checked if result in failed]}):
         return ""
     return _rework_text(failed)
 
@@ -134,7 +145,7 @@ def _run_scope(agent: object, params: object) -> _RunScope | None:
     return _RunScope(owner, _workspace_root(agent, params), ledger, packages,
                      WorkspaceScan.from_payload(baseline.get("scan")) if baseline else None,
                      (str(getattr(params, "run_id", "") or ""), str(getattr(params, "attempt_id", "") or "")),
-                     getattr(getattr(agent, "subagents", None), "runtime_db", None))
+                     getattr(getattr(agent, "subagents", None), "runtime_db", None), ledger.written_paths())
 
 
 # 函数用途: 对一个目标文件跑全部适用的检查程序，返回 (复用键, 结果) 列表。
@@ -198,11 +209,24 @@ def _candidates(scope: _RunScope, source: str) -> list[str]:
     return []
 
 
-# 函数用途: 列出本回合新建或内容变了的文件（与基线比；太大没算摘要的不算）。
+# LLM: 和基线比内容变了的文件；不在基线里的文件，只有基线没截断、或写工具回执证明本回合写过它时才算（太大没算摘要的不算）。
+# 函数用途: 列出确定是本回合新建或内容变了的文件。
 def _changed_paths(scope: _RunScope) -> list[str]:
-    baseline = scope.baseline.files if scope.baseline is not None else {}
+    baseline = scope.baseline
+    known = baseline.files if baseline is not None else {}
+    truncated = baseline is not None and baseline.truncated
     return sorted(relpath for relpath, state in scope.current.files.items()
-                  if state.sha256 and baseline.get(relpath) != state)
+                  if state.sha256 and known.get(relpath) != state
+                  and (relpath in known or not truncated or relpath in scope.written))
+
+
+# 函数用途: 基线截断时，列出不在基线里、也没有写工具回执证明的文件（可能是漏扫的老文件）。
+def _uncertain_paths(scope: _RunScope) -> list[str]:
+    baseline = scope.baseline
+    if baseline is None or not baseline.truncated:
+        return []
+    return sorted(relpath for relpath, state in scope.current.files.items()
+                  if state.sha256 and relpath not in baseline.files and relpath not in scope.written)
 
 
 # 函数用途: 由包摘要、检查程序、目标和各输入的路径与摘要生成复用键。
