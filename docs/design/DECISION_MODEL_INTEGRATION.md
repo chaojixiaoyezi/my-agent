@@ -250,7 +250,8 @@ agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 
 - **阶段**（`backends/transport_timing.py`，封闭集合）：`connect`（直连含 DNS；走代理时是连到代理）→ `proxy_connect`（CONNECT 隧道，只在 HTTPS 走代理时有）
   → `tls_handshake`（只在 HTTPS 时有）→ `request_send`（请求写完）→ `first_byte`（读到状态行）→ `body_read`（非流式正文读完）。
 - **开关**：只有观察者显式 `provider_attempt_observer(transport_timing=True)` 才计时，目前只有决策 worker 开启。
-  计时只包裹标准库连接已有的步骤，先原样执行再推进阶段；发送字节、`max_retries=0`、发送许可、绝对期限都不变，也不复用连接。
+  计时只包裹标准库连接已有的步骤，先原样执行再推进阶段；发送字节、`max_retries=0`、发送许可、绝对期限都不变。
+  连接复用（下一段）时同一连接会经历多次尝试：每次都从原方法重新包裹，复用的那次把建连、隧道、TLS 记 0 毫秒并标 `connection_reused`。
   没开启的调用事件与原先完全相同。
 - **进账**：每个阶段结束发一次 `status=progress` 事件，账本只替换该尝试的 `transport`（当前阶段 + 已完成阶段毫秒），
   不改尝试状态、活动时间和事件列表。超时写 `timeout_transport_phase`，即超时那一刻最后一次尝试所处的阶段。
@@ -264,6 +265,20 @@ agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 
 - **估算入账**：超时或失败、且已发起过 HTTP 尝试的调用，把发送前的本地估算输入记进
   `usage_breakdown.estimated.unfinished_input_tokens/unfinished_call_count`（所有用途分区都有），随 model_usage 快照增量落盘，
   与 `provider` 桶分开。没发出尝试的调用（准入忙、许可拒绝、配置错误）不计。TUI 统计行口径不变。
+
+连接复用（2026-10-01，B 第 1 步，J1）：决策调用复用已建好的 HTTPS 长连接，省掉每次约 0.9–1.1 秒的代理隧道与 TLS 握手。
+- **开关**：主配置 `decision_connection_reuse_enabled`，默认开；关掉就回到每次新建连接（`Connection: close`），与改动前逐字节相同。
+  决策服务按开关给 Jev 后端传进程级连接池 `DECISION_CONNECTION_POOL`；显式探测（测试连接）不传，测的是完整链路。
+- **实现**（`backends/keepalive_transport.py`）：只有带连接池的严格请求（零重试、禁止重定向、有绝对期限，信封校验强制）才走保活打开；
+  代理解析、双超时连接类、中断守卫、发送许可、绝对期限都沿原路径；非 2xx 抛 HTTPError；复用连接上发送失败照常算一次失败，
+  不换新连接重发（避免同一请求被供应商收两次）。连接只在正文完整读完、响应关闭、服务端没要求关闭、守卫没中止过时才放回池；
+  代理带凭据或明文经代理时不复用，走原 urllib 路径。
+- **空闲上限**：经本机代理实测，代理链（FlClash 或其上游节点）在空闲约 103–131 秒时直接断开隧道（没有 TLS 关闭通知，
+  Google、cloudflare.com、Jev 都一样；DeepSeek 60 秒、MiniMax 120 秒由服务端正常关闭），Jev 空闲 120 秒内复用成功、240 秒失败。
+  所以空闲超过 60 秒的连接不再复用；取出前还用零超时 select 检查对端是否已关。每组（协议, 主机, 端口, 代理）最多留 4 条空闲连接。
+- **计时**：复用那次把建连、隧道、TLS 记 0 毫秒并在快照里标 `connection_reused`；同一连接的每次尝试都从原方法重新包裹计时。
+- **A/B（同一时段交替 80 次真实调用，0 失败）**：P50 1390→395 毫秒，P90 1998→1513 毫秒，复用的 33 次建连+TLS 为 0。
+  超过 3 秒的调用 1/40→0/40，超过 2 秒的 4/40→0/40。
 
 故障矩阵（2026-09-24，`test_decision_fault_matrix.py` 经真实传输栈钉住，冷却期内不发起新尝试）：
 

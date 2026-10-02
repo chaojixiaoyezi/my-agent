@@ -36,6 +36,7 @@ from .gateway_request_limits import (
     stdlib_response_socket,
     validate_request_limits,
 )
+from .keepalive_transport import keepalive_target, pooled_urlopen, release_pooled_response
 from .provider_send_gate import provider_send_attempt
 from .transport_timing import (
     PROGRESS_STATUS,
@@ -142,6 +143,9 @@ class GatewayRequest:
     max_response_bytes: int | None = None
     # 实验发送许可：存在时每次物理发送前由 _gateway_request_attempt 硬门复核；None 保持原请求合同与字节。
     send_permit: Any | None = field(default=None, repr=False, compare=False)
+    # 长连接池（keepalive_transport.KeepAlivePool）：存在时复用已建好的连接，只允许零重试、禁止重定向、有绝对期限的严格请求；
+    # None 保持原 urllib 路径（每次新建连接、Connection: close），字节与行为不变。
+    connection_pool: Any | None = field(default=None, repr=False, compare=False)
 
     # LLM: 新限制在信封创建时校验，不修改共享 backend 或普通请求默认值；校验失败不产生网络副作用。
     # 许可请求另须零重试、禁止重定向且有绝对期限，由同一校验入口拒绝。
@@ -502,12 +506,15 @@ class _GatewayResponseGuard:
         self.response = response
         self._lock = threading.Lock()
         self._closed = False
+        self.aborted = False
 
     # LLM: 当前响应的关闭只走这个串行 guard；socket 获取与严格读取共用唯一 helper，不关闭其它请求资源。
+    #   aborted 记下“被中断/到期/读失败中止过”，长连接收尾据此拒绝把这条连接放回池。
     # 函数用途: 先 shutdown 唤醒阻塞读取，再幂等关闭响应并忽略清理噪声。
     def abort(self) -> None:
         """Cancel a blocked read and close exactly once without surfacing cleanup noise."""
         with self._lock:
+            self.aborted = True
             if self._closed:
                 return
             transport = stdlib_response_socket(self.response)
@@ -534,6 +541,8 @@ class _GatewayResponseGuard:
                 raise
 
 
+# LLM: 收尾先关响应，再按守卫是否中止过决定长连接去留（只有带租约的保活响应才有动作，普通响应原样）。
+# 函数用途: 独占一次 provider 响应的生命周期，结束时关闭它并归还或关闭可能借来的长连接。
 @contextmanager
 def _gateway_response_scope(response: Any):
     """Own one provider response without invoking urllib's racy context exit."""
@@ -541,7 +550,10 @@ def _gateway_response_scope(response: Any):
     try:
         yield response, guard
     finally:
-        guard.close()
+        try:
+            guard.close()
+        finally:
+            release_pooled_response(response, aborted=guard.aborted)
 
 
 # LLM: JSON open/正文共用既有 watchdog，取消只作用精确 guard；不等待清理线程，不宣称可以中止 DNS 或任意解析代码。
@@ -759,6 +771,8 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
 
     connect_timeout = _bounded_connect_timeout(request)
     read_timeout = _request_initial_read_timeout(request)
+    # 带连接池且能安全复用的目标改走保活打开；不能复用（代理带凭据、明文经代理）时仍走原 urllib 路径。
+    target = keepalive_target(request.connection_pool, req.full_url)
     open_guard = _GatewayOpenGuard()
     transport_options = _SplitTimeoutOptions(connect_timeout, read_timeout, open_guard, request.deadline,
                                              getattr(req, _ATTEMPT_TIMING_ATTR, None))
@@ -778,7 +792,8 @@ def _gateway_urlopen(req: urllib.request.Request, request: GatewayRequest):
             if _provider_is_interrupted():
                 raise InterruptedError("模型接口请求已被用户停止")
             try:
-                response = opener.open(req, timeout=read_timeout)
+                response = (pooled_urlopen(target, req, transport_options) if target is not None
+                            else opener.open(req, timeout=read_timeout))
             except urllib.error.HTTPError as exc:
                 response = exc
                 raise

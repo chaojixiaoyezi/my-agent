@@ -108,7 +108,7 @@ def _patch_decide(monkeypatch, agent, settings, row):
     monkeypatch.setattr(svc, "_stale", lambda *a, **k: "")
     monkeypatch.setattr(svc, "connection_revision", lambda config: "conn")
     monkeypatch.setattr(svc, "cooldown_state", lambda key, revision, *, retry=False: (False, 0.0))
-    monkeypatch.setattr(svc, "decision_backend_from_profile", lambda config: SimpleNamespace(model_name="m"))
+    monkeypatch.setattr(svc, "decision_backend_from_profile", lambda config, **_: SimpleNamespace(model_name="m"))
     monkeypatch.setattr(dmc, "invoke_decision_model_call",
                         lambda agent_arg, params_arg, request, backend, **kwargs: _stub_response(request, backend))
 

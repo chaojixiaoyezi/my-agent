@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 800,
+  "count": 802,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -850,6 +850,22 @@
       "unit": "",
       "category": "重试",
       "description": "探针只缓存成功证据；短暂失败允许之后重试，但单次探测有界。"
+    },
+    {
+      "name": "KEEPALIVE_IDLE_PER_ROUTE_COUNT",
+      "file": "agent_py_agent/agent/backends/keepalive_transport.py",
+      "value": 4,
+      "unit": "个",
+      "category": "其它",
+      "description": "每组（协议, 主机, 端口, 代理）最多留几条空闲连接：前台点位、后台单 worker 与多个用户偶尔并发，4 条够用且有界。"
+    },
+    {
+      "name": "KEEPALIVE_MAX_IDLE_SECONDS",
+      "file": "agent_py_agent/agent/backends/keepalive_transport.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "空闲长连接最长保留秒数：取最早断开（103 秒）以下留 40 秒余量；安全兜底，不进配置。"
     },
     {
       "name": "_MIN_BUDGET_TOKENS",

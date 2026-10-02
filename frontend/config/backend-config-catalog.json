@@ -4,7 +4,7 @@
     {
       "id": "agent_config",
       "path": "agent_py_agent/config/agent_config.yaml",
-      "fieldCount": 218
+      "fieldCount": 219
     },
     {
       "id": "capability_config",
@@ -1702,6 +1702,23 @@
             "max": 3600
           },
           {
+            "key": "decision_connection_reuse_enabled",
+            "label": "decision_connection_reuse_enabled（decision connection reuse enabled）",
+            "description": "决策调用复用长连接：开着时同一进程里的决策请求复用已经建好的 HTTPS 连接，省掉每次约 0.9 秒的代理隧道与 TLS 握手 （2026-10-01 实测：复用后单次快约 1 秒）。空闲超过 60 秒的连接不再复用；复用连接上发送失败照常算一次失败，不会自动重发。 关掉就回到每次新建连接的老做法。不改请求内容、重试次数或等待期限。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 206
+          },
+          {
             "key": "decision_skip_records_enabled",
             "label": "decision_skip_records_enabled（decision skip records enabled）",
             "description": "决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数），一个开关同时管两样，关闭后两样都不记。 跳过行：已到触发点、该点也已开启，却被条件挡下时，在决策结果日志记一条 skipped（原因码 privacy_url：要外发的材料含带查询串的 URL），日志有界（最近 1000 条）。 到达计数：每个点位每次检查的结果（真正调用了，或没调用的原因，如“这一步不是运行测试的命令”），只在进程内累加，每个用户最多每分钟合并写一次盘、保留 7 天。 audit_records 和 TUI 决策菜单据此用大白话说明“最近为什么没触发”，不会把 0 次误判为没接线。默认开着就好。",
@@ -1716,7 +1733,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 206
+            "order": 207
           },
           {
             "key": "decision_profile_id",
@@ -1733,7 +1750,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 207
+            "order": 208
           },
           {
             "key": "decision_model_selection_mode",
@@ -1750,7 +1767,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 208
+            "order": 209
           },
           {
             "key": "decision_request_max_chars",
@@ -1767,7 +1784,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 209,
+            "order": 210,
             "min": 0,
             "max": 2000000
           },
@@ -1786,7 +1803,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 210
+            "order": 211
           },
           {
             "key": "decision_planning_mode",
@@ -1803,7 +1820,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 211
+            "order": 212
           },
           {
             "key": "decision_delivery_quality_mode",
@@ -1820,7 +1837,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 212
+            "order": 213
           },
           {
             "key": "decision_action_candidate_mode",
@@ -1837,7 +1854,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 213
+            "order": 214
           },
           {
             "key": "decision_skill_proposal_review_mode",
@@ -1854,7 +1871,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 214
+            "order": 215
           }
         ]
       },
@@ -2960,7 +2977,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 215
+            "order": 216
           },
           {
             "key": "memory_decision_recall_mode",
@@ -2977,7 +2994,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 216
+            "order": 217
           },
           {
             "key": "memory_decision_curator_mode",
@@ -2994,7 +3011,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 217
+            "order": 218
           },
           {
             "key": "memory_decision_curator_relation_mode",
@@ -3011,7 +3028,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 218
+            "order": 219
           }
         ]
       },

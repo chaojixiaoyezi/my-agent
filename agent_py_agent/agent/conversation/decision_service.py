@@ -380,7 +380,7 @@ def _decide_outcome(agent: object, params: object, call: _DecideCall) -> Decisio
         binding = DecisionBinding(point, stage.owner_ref, stage.operation_id, revision, call.candidates_revision,
             stage.thread_id, stage.run_id, stage.task_id, call.source_refs)
         request = DecisionRequest(binding, call.state, call.questions)
-        backend = decision_backend_from_profile(config)
+        backend = decision_backend_from_profile(config, connection_pool=_decision_connection_pool(agent))
         active = ActiveDecision(stage.owner_ref, stage.thread_id, point, InterruptHandle(), agent, settings,
                                 nonblocking=nonblocking)
         token = uuid.uuid4().hex
@@ -583,6 +583,16 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
         return DecisionOutcome(mode, "error", reason="admission_busy")
     except Exception as exc:
         return _failure_outcome(request, exc, active, mode=mode, key=key)
+
+
+# LLM: 开关只读宿主配置 decision_connection_reuse_enabled（缺配置的宿主替身按 dataclass 默认开）；关闭时每次调用新建连接，
+#   与改动前逐字节相同。池是进程级共享的 DECISION_CONNECTION_POOL，连接身份不含凭据。
+# 函数用途: 按配置决定决策调用是否复用长连接，返回要用的连接池或 None。
+def _decision_connection_pool(agent: object):
+    from ..backends.keepalive_transport import DECISION_CONNECTION_POOL
+
+    enabled = getattr(getattr(agent, "config", None), "decision_connection_reuse_enabled", True)
+    return DECISION_CONNECTION_POOL if enabled is True else None
 
 
 # LLM: 登记被拒只有两种固定原因：宿主已开始关闭（建议失效，不算错误）或在途索引已满（可选增强忙）；都不联网、不进冷却。

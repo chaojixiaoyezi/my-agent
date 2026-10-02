@@ -762,7 +762,8 @@ agent_py_agent/
 |       |-- request_scope.py           # 前台模型端点占用与后台单次预算；不保存正文和持久状态
 |       |-- gateway_request_limits.py  # 原 HTTP 请求的绝对期限、有限读取与严格 JSON 校验；许可请求须零重试/禁重定向/有期限
 |       |-- provider_send_gate.py      # 传输层发送许可接口：最终请求事实与 ProviderSendRefused，不读设置或账本
-|       |-- transport_timing.py        # HTTP 尝试分段计时（建连/代理隧道/TLS/发送/首字节/读正文），观察者显式开启才计，只量不改发送
+|       |-- transport_timing.py        # HTTP 尝试分段计时（建连/代理隧道/TLS/发送/首字节/读正文），观察者显式开启才计，只量不改发送；复用连接记跳过建连
+|       |-- keepalive_transport.py     # 严格请求（决策调用）的长连接池与保活打开：与 urllib 同口径的代理/超时/守卫，只有干净读完才归还
 |       |-- bounded_call.py            # 从 Curator 迁出的唯一有界调用，保留未退出 worker/清理资源
 |       |-- decision_protocol.py       # 决策输入快照、宿主来源/版本绑定及逐题响应，不拥有业务执行权
 |       |-- typesafe_decision.py       # Jev 原生 decide 适配（无网络 prepare + 必须持许可的 send），不接聊天生成接口
@@ -839,6 +840,7 @@ agent_py_agent/
 |   |-- test_decision_fault_matrix.py   # 决策故障矩阵：断网/DNS/TLS/额度/计费/5xx/慢响应的冷却与恢复、同 owner 多会话并发
 |   |-- test_decision_outcome_log.py    # 决策结果日志：只记结构化字段、有界、按窗口汇总，decide 的成功/超时/点位冷却落日志，审计按点位报告，成功行记请求名与实际版本
 |   |-- test_decision_transport_timing.py # 假代理/假 TLS/假服务端逐段注入延迟：分段计时与超时阶段落结果日志、估算输入入 model_usage、零重试不补发
+|   |-- test_keepalive_transport.py     # 决策长连接复用：一条隧道/一次握手、复用记 0 毫秒建连、错误与中止不归还、过期与对端关闭丢弃、开关
 |   |-- test_decision_stats_display.py  # 决策统计口径：TUI 已报/估算（未完成）/缺报分开、未发出单列，结果日志与审计把没发出去的失败单列
 |   |-- test_decision_reach_counts.py   # 到达计数：进程内累加、节流合并不覆盖、7 天修剪、开关与写失败、阶段原因与大白话；导出各点位测试共用的 reach_counter
 |   |-- test_capability_presentation_observation.py # 能力推荐观测进 Gateway 请求记录：一回合一条、采用/保留原因、失败码、写入上限与失败语义
@@ -1560,6 +1562,7 @@ docs/
 - `agent_py_agent/agent/backends/typesafe_decision.py`：独立 decide 操作，复用原连接选项、请求头、HTTP 与错误协议；实验另拆无网络 `prepare` 与必须携带发送许可的 `send`，普通请求字节不变；不实现 generate。
 - `agent_py_agent/agent/backends/typesafe_decision_wire.py`：TypeSafe 问题和答案解析，单题错误与顶层协议损坏分开，完整用量交给原账本。
 - `agent_py_agent/agent/backends/gateway_request_limits.py`：原 HTTP 传输的有限读取、剩余期限和严格 JSON 原语，不另建执行器。
+- `agent_py_agent/agent/backends/keepalive_transport.py`：严格请求的长连接复用。只有 `GatewayRequest.connection_pool` 非空（目前只有决策调用，配置 `decision_connection_reuse_enabled`）才走；打开语义与 urllib `do_open` 对齐，非 2xx 抛 HTTPError，不重试；连接只在正文读完、未中止时由响应作用域归还。
 - `agent_py_agent/agent/backends/transport_timing.py`：一次 HTTP 尝试的阶段计时器与连接包裹；只有 `provider_attempt_observer(transport_timing=True)` 才创建，阶段集合封闭，进度事件由账本只替换计时字段；决策调用据此把链路分段耗时写进结果日志。
 - `agent_py_agent/agent/backends/bounded_call.py`：Curator 与后续决策共用的有界 callable；及时放弃等待与真实资源退出分别记录。
 - `docs/design/PLUGIN_LIFECYCLE.md`：可选 Python 插件的核心边界、命令目录、隔离依赖、版本绑定和卡死卸载；提案与现有实现明确区分。

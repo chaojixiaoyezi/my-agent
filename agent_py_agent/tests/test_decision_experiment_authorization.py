@@ -72,7 +72,7 @@ def _stage(running):
 def test_default_off_skips_preparation_ledger_and_experiment_writes(running, monkeypatch):
     host, thread, params = running
     original = host.conversation_store.threads.storage.thread_path(thread.thread_id).read_bytes()
-    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda *_: pytest.fail("off 不能准备后端"))
+    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda *_, **__: pytest.fail("off 不能准备后端"))
     stage = _stage(running)
     assert stage.error_code == "experiment_disabled" and not stage.enabled_points
     outcome = decision_service.decide(host, params, stage, point="planning", state=object(), questions=object(), candidates_revision="v1")
@@ -122,7 +122,7 @@ def test_host_grant_is_single_thread_authority_and_ordinary_mode_point_never_sen
     assert model_profiles_path(host.home_paths).read_bytes() == owner_bytes
     assert execute(host, "read", {})["experiment_authorization"] is None
     assert not host._model_call_ledger.records()
-    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda *_: pytest.fail("普通模式未关不能构造后端"))
+    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda *_, **__: pytest.fail("普通模式未关不能构造后端"))
     stage = _stage(running)
     # 准入通过，但 planning 普通模式为 observe：实验与普通建议互斥，不发布可准备点。
     assert stage.error_code == "" and stage.enabled_points == ()

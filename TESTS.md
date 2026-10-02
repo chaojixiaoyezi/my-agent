@@ -172,6 +172,33 @@
   含 `test_packaging.py`）：3367 passed、11 skipped、3 xfailed；Ruff、doc sync、strict code-size（`size_diff.sh` 对线上清单新增 0）、
   `git diff --check`、clean-package 全部通过。
 
+## Jev 决策调用复用长连接（J1）与后台等待 5→15 秒净效果（J2）（2026-10-01，分支 `claude/be-jev-keepalive-z`，基于 `claude/3a-step16z` `efaedfab2`）
+
+- **新增 `test_keepalive_transport.py`**（9 项；假 CONNECT 代理 + 假 TLS + HTTP/1.1 保活假服务端，不访问真实服务）：
+  - 带池连发 3 次只建 1 条隧道、1 次握手、1 条 TCP；复用两次的计时建连/隧道/TLS 为 0、标 `connection_reused`。
+  - 不带池时每次新建连接，请求头 `Connection: close`。
+  - 503 与读正文到期中止的连接不放回池。
+  - 回环直连也能复用。
+  - 池：空闲超时、对端已关的连接丢弃，每组上限淘汰最旧的，`close_all` 清空。
+  - 带池的请求必须零重试、禁止重定向、有绝对期限。
+  - 代理带凭据、明文经代理不复用。
+  - 开关：dataclass 与随包 YAML 默认开，关掉时决策服务不传池。
+  - Jev 后端经池发两次决策只用一条连接。
+- **改动的既有测试**：
+  - `test_decision_transport_timing.py` 的 link 夹具同时替换长连接的 TLS 上下文，收尾清空决策连接池。决策调用默认复用连接，新建连接不再走 urllib 的 `https_open`。
+  - 4 个测试文件里替换 `decision_backend_from_profile` 的替身改成接受关键字参数，因为工厂多了 `connection_pool`。
+  - 前端目录用 `node frontend/scripts/sync-backend-config.mjs` 重新生成：271 项，只多新键。
+  - 常数目录用 `scripts/build_constants_catalog.py` 重新生成：801 项，多出两个带单位后缀和中文说明的新常数（`KEEPALIVE_MAX_IDLE_SECONDS`、`KEEPALIVE_IDLE_PER_ROUTE_COUNT`）。
+- **变异**：7 个全部抓住：中止过的连接也放回池、请求头保持 close、空闲超时不丢弃、复用时不记跳过建连、开关关闭也传池、非 2xx 不抛错、不检查对端是否已关。
+- **真实测量**：只发轻量 GET 或合成决策请求，不含任何用户数据；Jev provider 只复制 typesafe 一个，0600，用完删除。
+  - 空闲上限探针结果见台账同名节。
+  - J1 A/B 80 次 + J2 30 次，Jev 实际 110 次调用，与预计一致。
+  - 证据：`~/.my-agent/decision-evidence/j1-j2-keepalive/`。
+- **全量**：6 片本地全量。除下面两类外全部通过：
+  - `test_archive_tokens`（5 个）、`test_cli_update`（1 个，导出副本不是 git 检出）、`test_gateway_conversation_control` 插件命令（16 个），基线 step16z 导出上同样失败，与本改动无关；
+  - `test_constants_catalog` 的 2 个失败是本改动的新常数没进目录，已重新生成，现已通过。
+- **门禁**：见交付记录。
+
 ## P17 合入后的 code-size 拆平，行为不变（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`）
 
 - 拆掉 P17 新增的 3 条 high-risk 告警（只重构，不改行为、错误码、回执字段）：

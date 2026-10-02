@@ -99,7 +99,7 @@ class DecisionBackend:
 
 def install_backend(monkeypatch, fixture, *, action=None, choice=None):
     backend = DecisionBackend(choice or fixture.candidate, action)
-    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda _config: backend)
+    monkeypatch.setattr(decision_service, "decision_backend_from_profile", lambda _config, **_: backend)
     return backend
 
 

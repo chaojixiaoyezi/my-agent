@@ -281,6 +281,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 也不累计 decision_reach_counts 的到达/未触发原因计数。
     decision_skip_records_enabled: bool = True
     decision_timeout_seconds: float = 3.0
+    # 决策调用复用长连接（默认开）：同一进程里的决策请求复用已建好的 HTTPS 连接，省掉每次约 0.9 秒的代理隧道与 TLS 握手；
+    # 关闭后每次新建连接，与改动前逐字节相同。不改请求内容、重试或期限。
+    decision_connection_reuse_enabled: bool = True
     decision_stage_timeout_seconds: float = 4.0
     decision_background_timeout_seconds: float = 4.0
     decision_profile_id: str = ""

@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core.model.call_runtime import model_call_summary
-from agent_py_agent.agent.backends import gateway_helpers
+from agent_py_agent.agent.backends import gateway_helpers, keepalive_transport
 from agent_py_agent.agent.backends.gateway_helpers import (
     GatewayRequest,
     post_json,
@@ -161,7 +161,8 @@ def _fresh_cooldowns():
         decision_policy._FAILURES.clear()
 
 
-# LLM: 测试夹具：HTTPS 请求经本机假代理和假 TLS 到达假服务端；只改本测试进程的代理环境与 https_open，结束全部回收。
+# LLM: 测试夹具：HTTPS 请求经本机假代理和假 TLS 到达假服务端；只改本测试进程的代理环境、https_open 与长连接的 TLS 上下文
+#   （决策调用默认复用长连接，新建连接走 keepalive_transport），结束时清空决策连接池并全部回收。
 # 函数用途: 提供可按阶段注入延迟的完整链路。
 @pytest.fixture
 def link(monkeypatch):
@@ -187,9 +188,11 @@ def link(monkeypatch):
                                transport_options=handler.transport_options)
 
     monkeypatch.setattr(gateway_helpers._SplitTimeoutHTTPSHandler, "https_open", https_open)
+    monkeypatch.setattr(keepalive_transport, "_tls_context", lambda: context)
     try:
         yield state
     finally:
+        keepalive_transport.DECISION_CONNECTION_POOL.close_all()
         state.release.set()
         for server in (target, proxy):
             server.shutdown()

@@ -47,14 +47,16 @@ class TypesafeDecisionBackend:
     name = "typesafe_decision"
 
     # LLM: 自定义头复制并校验，引用原连接配置不建凭据存储；此类不会替代普通生成后端。
+    #   connection_pool 非空时每次发送复用其中的长连接（见 keepalive_transport），None 时每次新建连接（原行为）。
     # 函数用途: 冻结已经过 owner 用途验证的连接参数，不测试模型或启用接入点。
-    def __init__(self, options: BackendOptions) -> None:
+    def __init__(self, options: BackendOptions, *, connection_pool: object | None = None) -> None:
         self.api_base, self._path = endpoint_parts(options.api_base, "/v1/systemone")
         self._api_key = options.api_key
         self.model_name = options.model_name
         self.context_window_tokens = options.context_window_tokens
         self._custom_headers = validate_headers(options.custom_headers)
         self._session_header = validate_session_header(options.session_header)
+        self._connection_pool = connection_pool
 
     # LLM: deadline 为宿主准备前建立的绝对 monotonic 期限，不得在重试/解码时重置；迟到响应没有采用权。
     # 函数用途: 校验题目后发一次无重试、无重定向的请求，返回逐题结果；超时和取消交给可选调用边界分类。
@@ -92,7 +94,7 @@ class TypesafeDecisionBackend:
         raw = post_json(GatewayRequest(api_base=self.api_base, api_key=self._api_key, path=self._path,
             payload=prepared.payload, headers=headers, timeout=remaining, connect_timeout=remaining,
             allow_redirects=False, deadline=prepared.deadline, max_retries=0, max_response_bytes=MAX_DECISION_RESPONSE_BYTES,
-            send_permit=permit))
+            send_permit=permit, connection_pool=self._connection_pool))
         remaining_deadline_seconds(prepared.deadline)
         result = parse_typesafe_response(prepared.request, self.model_name, raw)
         remaining_deadline_seconds(prepared.deadline)
@@ -100,8 +102,10 @@ class TypesafeDecisionBackend:
 
 
 # LLM: 接入服务和显式探测共用同一配置映射；profile必须已由原owner目录解析，不在此验证权限或读取配置。
+#   connection_pool 由决策服务按配置开关给出；显式探测不传（每次新建连接，测到的是完整链路）。
 # 函数用途: 从已授权的原决策配置创建无网络后端，避免连接头和窗口字段在两个入口分叉。
-def decision_backend_from_profile(config: dict) -> TypesafeDecisionBackend:
+def decision_backend_from_profile(config: dict, *, connection_pool: object | None = None) -> TypesafeDecisionBackend:
     return TypesafeDecisionBackend(BackendOptions(api_base=config["api_base"], api_key=config["api_key"],
         model_name=config["model_name"], context_window_tokens=config["model_context_window_tokens"],
-        custom_headers=config["model_custom_headers"], session_header=config["model_session_header"]))
+        custom_headers=config["model_custom_headers"], session_header=config["model_session_header"]),
+        connection_pool=connection_pool)
