@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 814,
+  "count": 816,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -850,6 +850,14 @@
       "unit": "个",
       "category": "重试",
       "description": "探针只缓存成功证据；短暂失败允许之后重试，但单次探测有界。"
+    },
+    {
+      "name": "_UNACCOUNTED_PROBE_ATTEMPT_COUNT",
+      "file": "agent_py_agent/agent/backends/http.py",
+      "value": 0,
+      "unit": "个",
+      "category": "重试",
+      "description": "不写日志避免高频噪声；计数只反映次数，不含任何探测细节。宿主绑定 scope 的探测不计入。"
     },
     {
       "name": "KEEPALIVE_IDLE_PER_ROUTE_COUNT",

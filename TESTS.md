@@ -109,6 +109,32 @@
 - 已知环境限制：`test_gateway_conversation_control.py` 3 个 PTY + `sandbox-exec` 子进程用例（`/goal` 资源控制）在沙箱内被宿主拦（returncode 71），与本次改动无关，3a 在沙箱外复核。
 - 沙箱限制：不启动 Gateway/真实供应商请求、不跑全仓 pytest；压缩触发的真实探测记账由 3a 集成后核对。
 
+### C7 三件小加固 M1 修正（2026-10-02，be 审查必须修，追加提交 `32f965f5c` 之上）
+
+be 审查发现：写端“只在真有探测用量时才写探测桶”原用字典真假判断，生产上从不生效——线上实时快照
+（`_ModelCallAggregate.to_summary()`）四个桶固定都在，无探测时 probe 桶是全 0 骨架字典判断为“真”，首行就写；
+先前累计求和也得到骨架字典，第二行起照写。改为结构化计数判断 `_purpose_bucket_has_usage(row)`（加法字段任一 > 0）。
+
+- **新增 3 用例**（`test_store_usage_open_world.py`）：
+  - `test_write_with_real_ledger_shape_omits_probe_key`：真实账本形状（`_ModelCallAggregate.to_summary()` +
+    生产组装根 schema，只有 main 调用）写一行 → 没有 probe 键，全 0 骨架字典不算“有”；
+  - `test_write_two_rows_without_probe_usage_omits_probe_key_in_both`：同范围两行都没有探测 → 两行都没有 probe 键
+    （第二行先前累计求和骨架同样不算“有”）；
+  - `test_write_probe_appears_after_usage_and_deltas_sum_to_cumulative`：先无后有再续写 → 出现探测那行才落键，
+    增量（1/12、1/8）加起来等于累计（2/20）。
+- **变异 1 个**（`python3 tmp/run-mutations-m1.py`）：probe 判断改回字典真假，被 (a)(b) 两个用例拦下且逐字节恢复；
+  上一轮 4 个变异（`run-mutations-hardening.py`，写端无条件写匹配串随新代码更新）仍全部被拦且逐字节恢复，共 5 个。
+- **常数目录**：`_UNACCOUNTED_PROBE_ATTEMPTS` → `_UNACCOUNTED_PROBE_ATTEMPT_COUNT`（`_COUNT` 单位后缀，unit=“个”，
+  上方已有中文说明）；`scripts/build_constants_catalog.py` 重新生成 816 项，`--check` 一致；
+  `test_constants_catalog.py`、`test_constant_names_unique.py` 全过。
+- **测试结果**：`test_store_usage_open_world.py` 8 个全过；探测计量 + reasoning_probe + 两个常数守卫 54 个全过；
+  store/compact 回归（compact_media_policy/vision、model_selection_isolation、gateway_model_observation、
+  runtime_module_boundaries、gateway_conversation_compact）203 个全过；guards9 170 全过；
+  全部门禁通过（import 0、ruff、doc_sync、code-size strict blocked=False、diff check、clean-package）；
+  size_diff 新增告警 0。
+- **上线说明（回滚兼容）**：没用过探测的线程回滚到 17a 照常能读；用过探测的线程 17a `summary()` 严格读法仍会报错
+  （生产链路没有调用方），属预期，不改旧读法。
+
 ## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `ee3bd09f7`）
 
 - **新增用例** `test_decision_audit_controls.py::test_adoption_statuses_carry_a_fixed_note_that_they_are_not_settled`：

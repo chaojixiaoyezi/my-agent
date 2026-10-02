@@ -19,6 +19,23 @@ _PURPOSE_SCHEMA = "model_call_purpose_breakdown.v1"
 # LLM: 用途桶必须与 model_call_ledger._PURPOSE_BUCKETS 保持同一集合；探测调用独立成桶，持久账校验按同一集合放行。
 _PURPOSES = ("main", "auxiliary", "decision", "probe:tool_capability")
 
+# LLM: 与 _model_usage_snapshot_delta 共用的可加数字段名单；写端判断用途桶“有没有用量”也只读这些字段，
+#   未来加新加法字段时这里与增量函数同步补，判断自动覆盖。
+_ADDITIVE_USAGE_FIELDS = (
+    "logical_model_turn_count",
+    "physical_model_attempt_count",
+    "model_retry_count",
+    "provider_http_attempt_count",
+    "provider_http_retry_count",
+    "accounted_input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cached_input_tokens",
+    "cache_creation_input_tokens",
+    "provider_usage_call_count",
+    "estimated_usage_call_count",
+)
+
 
 # LLM: 模型计费事件与 preflight 显示分别保存，各自有唯一口径；共享 store 原子写入，不新增旁路文件。
 # 类用途: 保存模型调用的消耗账及最近上下文显示，后者不能作为费用或任务完成证据。
@@ -315,24 +332,10 @@ def _model_usage_snapshot_delta(
     include_purposes: bool = True,
 ) -> dict[str, Any]:
     prior = _sum_model_call_summaries(prior_summaries, include_purposes=include_purposes)
-    additive_fields = (
-        "logical_model_turn_count",
-        "physical_model_attempt_count",
-        "model_retry_count",
-        "provider_http_attempt_count",
-        "provider_http_retry_count",
-        "accounted_input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "cached_input_tokens",
-        "cache_creation_input_tokens",
-        "provider_usage_call_count",
-        "estimated_usage_call_count",
-    )
     delta: dict[str, Any] = {"schema": "model_call_summary.v1"}
     if snapshot.get("usage_scope_id"):
         delta["usage_scope_id"] = snapshot["usage_scope_id"]
-    for key in additive_fields:
+    for key in _ADDITIVE_USAGE_FIELDS:
         delta[key] = _monotonic_usage_delta(snapshot.get(key), prior.get(key), key)
     delta["status_counts"] = _usage_mapping_delta(
         snapshot.get("status_counts"),
@@ -350,22 +353,8 @@ def _model_usage_snapshot_delta(
         - prior_models
     )
     snapshot_usage = snapshot.get("usage_breakdown")
-    snapshot_usage = snapshot_usage if isinstance(snapshot_usage, dict) else {}
     prior_usage = prior.get("usage_breakdown")
-    prior_usage = prior_usage if isinstance(prior_usage, dict) else {}
-    delta["usage_breakdown"] = {
-        "schema": "model_usage_breakdown.v1",
-        "provider": _usage_mapping_delta(
-            snapshot_usage.get("provider"),
-            prior_usage.get("provider"),
-            "usage_breakdown.provider",
-        ),
-        "estimated": _usage_mapping_delta(
-            snapshot_usage.get("estimated"),
-            prior_usage.get("estimated"),
-            "usage_breakdown.estimated",
-        ),
-    }
+    delta["usage_breakdown"] = _usage_breakdown_delta(snapshot_usage, prior_usage)
     if include_purposes:
         current_rows, prior_rows = _purpose_rows(snapshot), _purpose_rows(prior)
         if current_rows or prior_rows:
@@ -373,7 +362,27 @@ def _model_usage_snapshot_delta(
     return delta
 
 
-# LLM: 用途增量只落有事实的桶；探测桶只在真有探测用量时写（本快照或同范围先前行任一有值），
+# LLM: 与根加法字段同一增量口径，usage_breakdown 分 provider/estimated 两个映射做非负差值；schema 标签不参与。
+# 函数用途: 组装快照相对先行的用量分区增量，供快照增量根引用。
+def _usage_breakdown_delta(snapshot_usage: object, prior_usage: object) -> dict[str, Any]:
+    current = snapshot_usage if isinstance(snapshot_usage, dict) else {}
+    prior = prior_usage if isinstance(prior_usage, dict) else {}
+    return {
+        "schema": "model_usage_breakdown.v1",
+        "provider": _usage_mapping_delta(
+            current.get("provider"),
+            prior.get("provider"),
+            "usage_breakdown.provider",
+        ),
+        "estimated": _usage_mapping_delta(
+            current.get("estimated"),
+            prior.get("estimated"),
+            "usage_breakdown.estimated",
+        ),
+    }
+
+
+# LLM: 用途增量只落有事实的桶；探测桶只在真有探测用量时写（本快照或同范围先前行任一有结构化计数），
 #   不给每行都写空桶；老三个桶照写，多数线程的行与上一版逐字节一致。
 # 函数用途: 按需组装快照相对先行的用途增量结构（probe 空桶省略，其余照写）。
 def _purpose_breakdown_delta(
@@ -384,12 +393,46 @@ def _purpose_breakdown_delta(
     for purpose in _PURPOSES:
         current_row = current_rows.get(purpose, {})
         prior_row = prior_rows.get(purpose, {})
-        if purpose == "probe:tool_capability" and not current_row and not prior_row:
+        if (
+            purpose == "probe:tool_capability"
+            and not _purpose_bucket_has_usage(current_row)
+            and not _purpose_bucket_has_usage(prior_row)
+        ):
             continue
         purpose_breakdown[purpose] = _model_usage_snapshot_delta(
             current_row, [prior_row], include_purposes=False
         )
     return purpose_breakdown
+
+
+# LLM: 用途桶是否“真有用量”只按结构化加法字段判断：调用/尝试/token 计数任一大于 0 才算有；
+#   全 0 骨架（真实账本 to_summary 的桶、空桶求和得到的骨架）不算有，避免给每行写空探测桶。
+#   判断只读数值字段，不看字典真假、不看文字；当前快照与先前累计共用，未来加法字段进 _ADDITIVE_USAGE_FIELDS 自动覆盖。
+# 函数用途: 判断一个用途桶里有没有结构化用量，供写端决定是否落键。
+def _purpose_bucket_has_usage(row: dict[str, Any]) -> bool:
+    if any(_usage_int(row.get(key)) > 0 for key in _ADDITIVE_USAGE_FIELDS):
+        return True
+    status_counts = row.get("status_counts")
+    if isinstance(status_counts, dict) and any(
+        _usage_int(value) > 0 for value in status_counts.values()
+    ):
+        return True
+    usage = row.get("usage_breakdown")
+    if isinstance(usage, dict) and _purpose_usage_partition_has_value(usage):
+        return True
+    return False
+
+
+# LLM: 分区映射（provider/estimated）里任何数字大于 0 都算该桶有用量；schema 字符串按非数值忽略。
+# 函数用途: 只检查用量分区数值，配合 _purpose_bucket_has_usage 控制嵌套深度。
+def _purpose_usage_partition_has_value(usage: dict[str, Any]) -> bool:
+    for partition in ("provider", "estimated"):
+        part = usage.get(partition)
+        if isinstance(part, dict) and any(
+            _usage_int(value) > 0 for value in part.values()
+        ):
+            return True
+    return False
 
 
 # LLM: 持久行已经是增量，不能当作新累计；用途复用同一求和且不递归嵌套，不改变旧字段含义。

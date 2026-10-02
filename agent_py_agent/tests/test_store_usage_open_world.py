@@ -181,3 +181,114 @@ def test_strict_purpose_rules_still_fail_closed():
     unknown_bad = _calls_with_purposes({"future:archival": "bad"})
     with pytest.raises(DataCorruptionError, match="purpose bucket is invalid"):
         _purpose_rows(unknown_bad)
+
+
+# LLM: 生产快照的用途桶来自 model_call_ledger._ModelCallAggregate.to_summary()，四个桶固定都在；
+#   没有探测时 probe 桶是全 0 骨架字典（非空），按字典真假判断会误写空键，所以用例用真实账本形状锁定。
+# 函数用途: 回归锁 M1：真实账本形状（只有 main 调用）写一行时不得出现 probe 键。
+def test_write_with_real_ledger_shape_omits_probe_key(tmp_path):
+    from agent_py_agent.agent.contracts.model_call_ledger import (
+        ModelCallRecord,
+        _ModelCallAggregate,
+    )
+
+    aggregate = _ModelCallAggregate()
+    aggregate.observe_new(ModelCallRecord(
+        call_id="call-main-1",
+        backend="test-backend",
+        model="test-model",
+        input_tokens=10,
+        request_id="req",
+        run_id="run",
+        status="finished",
+        output_tokens=2,
+        provider_usage_reported=True,
+    ))
+    # 生产组装与 call_runtime.model_call_summary 一致：根带 schema，用途桶来自真实账本 to_summary()
+    calls = {"schema": "model_call_summary.v1", **aggregate.to_summary()}
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "write-real-ledger"})
+    event = store.model_usage.append_snapshot_once({
+        "thread_id": thread.thread_id,
+        "request_id": "req",
+        "run_id": "run",
+        "source": "test",
+        "model_calls": calls,
+    })
+    purposes = event.model_calls["purpose_breakdown"]
+    assert "probe:tool_capability" not in purposes, "真实账本形状（probe 桶全 0 骨架）不许写空 probe 键"
+    assert {"main", "auxiliary", "decision"} <= set(purposes), "老三个桶照写"
+
+
+# LLM: 同一范围第二行起，先前累计由 _sum_model_call_summaries 求和；无探测时求和没有 probe 键，
+#   但上一版"字典真假"判断在第二行会因 prior 求和骨架而误写，本用例锁两行都不写。
+# 函数用途: 回归锁 M1 场景 (b)：同范围两行都没有探测时，两行都不许出现 probe 键。
+def test_write_two_rows_without_probe_usage_omits_probe_key_in_both(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "write-two-no-probe"})
+    scope = {
+        "thread_id": thread.thread_id,
+        "request_id": "req",
+        "run_id": "run",
+        "source": "test",
+    }
+    first_calls = _calls_with_purposes({
+        "main": _bucket(logical=1, physical=1, input=10, output=2),
+        "auxiliary": _bucket(),
+        "decision": _bucket(),
+    })
+    first = store.model_usage.append_snapshot_once({**scope, "model_calls": first_calls})
+    second_calls = _calls_with_purposes({
+        "main": _bucket(logical=2, physical=2, input=15, output=3),
+        "auxiliary": _bucket(),
+        "decision": _bucket(),
+    })
+    second = store.model_usage.append_snapshot_once({**scope, "model_calls": second_calls})
+    for event in (first, second):
+        purposes = event.model_calls["purpose_breakdown"]
+        assert "probe:tool_capability" not in purposes, "两行都没有探测时第二行也不许写空 probe 键"
+
+
+# LLM: 探测从无到有再到继续累计：probe 键只在出现用量那行才落，续写行按增量减 prior，
+#   各行增量求和应等于最后快照的累计值；判断"有没有"只看结构化计数，不因 prior 有骨架就倒退。
+# 函数用途: 回归锁 M1 场景 (c)：先无后有再续写，probe 键出现时机与增量累计都对。
+def test_write_probe_appears_after_usage_and_deltas_sum_to_cumulative(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "write-probe-later"})
+    scope = {
+        "thread_id": thread.thread_id,
+        "request_id": "req",
+        "run_id": "run",
+        "source": "test",
+    }
+    no_probe = _calls_with_purposes({
+        "main": _bucket(logical=1, physical=1, input=10, output=2),
+        "auxiliary": _bucket(),
+        "decision": _bucket(),
+    })
+    first = store.model_usage.append_snapshot_once({**scope, "model_calls": no_probe})
+    assert "probe:tool_capability" not in first.model_calls["purpose_breakdown"]
+    with_probe = _calls_with_purposes({
+        "main": _bucket(logical=2, physical=2, input=15, output=3),
+        "auxiliary": _bucket(),
+        "decision": _bucket(),
+        "probe:tool_capability": _bucket(logical=1, physical=1, output=12),
+    })
+    second = store.model_usage.append_snapshot_once({**scope, "model_calls": with_probe})
+    second_probe = second.model_calls["purpose_breakdown"]["probe:tool_capability"]
+    assert second_probe["physical_model_attempt_count"] == 1
+    assert second_probe["output_tokens"] == 12
+    with_more_probe = _calls_with_purposes({
+        "main": _bucket(logical=3, physical=3, input=20, output=4),
+        "auxiliary": _bucket(),
+        "decision": _bucket(),
+        "probe:tool_capability": _bucket(logical=2, physical=2, output=20),
+    })
+    third = store.model_usage.append_snapshot_once({**scope, "model_calls": with_more_probe})
+    third_probe = third.model_calls["purpose_breakdown"]["probe:tool_capability"]
+    assert third_probe["physical_model_attempt_count"] == 1, "第三行增量 = 2 - 1"
+    assert third_probe["output_tokens"] == 8, "第三行增量 = 20 - 12"
+    total = _sum_purpose_breakdowns([second.model_calls, third.model_calls])
+    probe_total = total["probe:tool_capability"]
+    assert probe_total["physical_model_attempt_count"] == 2, "各行增量加起来等于累计"
+    assert probe_total["output_tokens"] == 20

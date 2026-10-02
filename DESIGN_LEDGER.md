@@ -116,6 +116,16 @@
 - **验证**：4 组用例全过（`test_store_usage_open_world.py` 新增 6 个、`test_probe_tool_capability_metering.py` 新增 3 个、
   `test_reasoning_probe.py` 新增 1 个）；4 个变异（读端恢复封闭集合、写端恢复无条件写、压缩移除绑定、回执恢复常量）全部被拦且逐字节恢复；
   相关回归 86 + 149 + 54、guards9 170 全过；size_diff 新增 0。详见 TESTS.md 顶部同名节。
+- **M1 修正（2026-10-02，be 审查必须修，追加提交）**：写端“只在真有探测用量时才写探测桶”原用字典真假判断
+  （`if not current_row and not prior_row`），生产上从不生效——线上实时快照来自账本 `_ModelCallAggregate.to_summary()`，
+  四个桶固定都在，无探测时 probe 桶是全 0 骨架字典（含 backends、accounted_input_tokens 等字段）判断为“真”，首行就写空桶；
+  先前累计由 `_sum_model_call_summaries` 求和也得到骨架字典，同样为“真”，同范围第二行起照写。改为结构化计数判断：
+  新增 `_purpose_bucket_has_usage(row)`，桶里调用/尝试/token 等加法字段（`_ADDITIVE_USAGE_FIELDS`，与
+  `_model_usage_snapshot_delta` 共用同一名单）任一大于 0 才算有，当前快照与先前累计共用；判断只读数值字段，
+  不看字典真假、不看文字。读取端开放世界与三条严格规则不变。配套：`http.py` 未绑定探测计数器改名
+  `_UNACCOUNTED_PROBE_ATTEMPT_COUNT`（带 `_COUNT` 单位后缀）并重新生成常数目录（816 项，--check 一致）。
+- **上线说明（回滚兼容）**：修好后，没用过探测的线程写出的行不再含 `probe:tool_capability` 键，回滚到 17a 照常能读；
+  用过探测的线程行里带探测桶，17a 的 `summary()` 严格读法仍会报错（生产链路没有调用方）。
 
 ## 选模型两个点位的仓库默认期限定为 5 秒（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）（2026-10-02，分支 `claude/be-selection-timeout-default`，基于 `claude/3a-step16z` `a44f2ad62`，已实现，待集成）
 

@@ -21,28 +21,28 @@ _PROBE_MAX_ATTEMPT_COUNT = 3
 
 # LLM: 进程内计数器：记录“没有绑定记账范围”的工具能力探测尝试，只提供只读诊断入口，
 #   不写日志避免高频噪声；计数只反映次数，不含任何探测细节。宿主绑定 scope 的探测不计入。
-_UNACCOUNTED_PROBE_ATTEMPTS = 0
+_UNACCOUNTED_PROBE_ATTEMPT_COUNT = 0
 _UNACCOUNTED_PROBE_LOCK = threading.Lock()
 
 
 # 函数用途: 记录一次未绑定记账范围的工具能力探测尝试。
 def _count_unaccounted_probe_attempt() -> None:
-    global _UNACCOUNTED_PROBE_ATTEMPTS
+    global _UNACCOUNTED_PROBE_ATTEMPT_COUNT
     with _UNACCOUNTED_PROBE_LOCK:
-        _UNACCOUNTED_PROBE_ATTEMPTS += 1
+        _UNACCOUNTED_PROBE_ATTEMPT_COUNT += 1
 
 
 # 函数用途: 返回进程内未绑定记账范围的工具能力探测尝试次数（诊断用，只读）。
 def unaccounted_probe_attempt_count() -> int:
     with _UNACCOUNTED_PROBE_LOCK:
-        return _UNACCOUNTED_PROBE_ATTEMPTS
+        return _UNACCOUNTED_PROBE_ATTEMPT_COUNT
 
 
 # 函数用途: 清零未绑定探测计数；只供测试和显式管理入口使用。
 def reset_unaccounted_probe_attempt_count() -> None:
-    global _UNACCOUNTED_PROBE_ATTEMPTS
+    global _UNACCOUNTED_PROBE_ATTEMPT_COUNT
     with _UNACCOUNTED_PROBE_LOCK:
-        _UNACCOUNTED_PROBE_ATTEMPTS = 0
+        _UNACCOUNTED_PROBE_ATTEMPT_COUNT = 0
 
 
 # LLM: HTTP 协议共同使用此请求级限额；不能热改实例配置，需同步 Chat/Messages/Responses 的摘要调用测试。
