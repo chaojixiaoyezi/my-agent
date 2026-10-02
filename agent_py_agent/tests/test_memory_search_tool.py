@@ -127,6 +127,9 @@ def test_limit_and_excerpt_are_bounded(tmp_path):
     assert len(_call(agent, {"query": "部署清单停机", "limit": MEMORY_SEARCH_MAX_COUNT})["entries"]) == MEMORY_SEARCH_MAX_COUNT
     too_many = execute_registry_test_call(agent.tools, "memory_search", {"query": "部署", "limit": MEMORY_SEARCH_MAX_COUNT + 1})
     assert too_many.ok is False and too_many.error_code == "TOOL_INVALID_ARGUMENTS"
+    # 处理函数自身也收口：绕过 schema 直接调用时条数仍不超过上限。
+    direct = json.loads(MemorySearchTool(agent).execute({"query": "部署清单停机", "limit": 50}).output)
+    assert len(direct["entries"]) == MEMORY_SEARCH_MAX_COUNT
     long_entry = next(entry for entry in _call(agent, {"query": "部署清单长说明停机步骤", "limit": 10})["entries"]
                       if entry["entry_id"] == long_id)
     assert len(long_entry["excerpt"]) == MEMORY_SEARCH_EXCERPT_CHARS

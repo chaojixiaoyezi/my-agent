@@ -649,7 +649,7 @@ class _JsonlMemorySearchMixin:
         record_access: bool,
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         if top_k <= 0:
-            return [], self._scoped_retrieval_facts(None, 0)
+            return [], _scoped_retrieval_facts(None, 0, self._semantic_status)
         active = [record for record in self.all() if predicate(record)]
         retriever = None
         candidate_limit = max(top_k * 4, top_k + 8)
@@ -684,18 +684,7 @@ class _JsonlMemorySearchMixin:
         if record_access:
             for record in selected:
                 self._note_access(record.entry_id)
-        return selected, self._scoped_retrieval_facts(retriever, len(active))
-
-    # LLM: 只读投影：没有检索器（top_k<=0 或范围内没有条目）时 mode=none；semantic_recall 是存储层状态副本，
-    #   含档案不可用等原因码，不含正文和凭据。
-    # 函数用途: 把一次 scoped 检索的方式、降级原因和范围条目数整理成结构化事实。
-    def _scoped_retrieval_facts(self, retriever: object | None, scoped_entries: int) -> dict[str, object]:
-        return {
-            "mode": str(getattr(retriever, "last_retrieval_mode", "none") or "none"),
-            "fallback_reason": str(getattr(retriever, "last_fallback_reason", "") or ""),
-            "scoped_entries": scoped_entries,
-            "semantic_recall": dict(self._semantic_status),
-        }
+        return selected, _scoped_retrieval_facts(retriever, len(active), self._semantic_status)
 
     # LLM: 检索侧缓存只是派生索引，读取失败必须静默退化为"没有缓存"（现嵌），结果不变。
     #   竞态（取缓存之后事实才被删/被替换）统一在回写点用 active 身份复核收口，
@@ -1016,6 +1005,20 @@ class _JsonlMemoryLifecycleMixin:
             "semantic_index": "configured" if self._embedder is not None else "unconfigured",
             "semantic_recall": dict(self._semantic_status),
         }
+
+
+# LLM: 只读投影：没有检索器（top_k<=0 或范围内没有条目）时 mode=none；semantic_recall 是存储层状态副本，
+#   含档案不可用等原因码，不含正文和凭据。放在模块级是为了不撑大检索 mixin。
+# 函数用途: 把一次 scoped 检索的方式、降级原因和范围条目数整理成结构化事实。
+def _scoped_retrieval_facts(
+    retriever: object | None, scoped_entries: int, semantic_status: dict[str, str]
+) -> dict[str, object]:
+    return {
+        "mode": str(getattr(retriever, "last_retrieval_mode", "none") or "none"),
+        "fallback_reason": str(getattr(retriever, "last_fallback_reason", "") or ""),
+        "scoped_entries": scoped_entries,
+        "semantic_recall": dict(semantic_status),
+    }
 
 
 # LLM: This mixin owns reads and rebuildable search projections; it never becomes the formal memory authority.
