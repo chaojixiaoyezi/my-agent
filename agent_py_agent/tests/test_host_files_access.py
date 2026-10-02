@@ -800,6 +800,7 @@ def test_configured_home_wins_over_a_different_env_home(tmp_path, monkeypatch):
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.tooling.registry_invoke import (
         RegistryToolInvokeRequest,
+        _invocation_context,
         _request_local_tool_for_invocation,
     )
     from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
@@ -831,6 +832,16 @@ def test_configured_home_wins_over_a_different_env_home(tmp_path, monkeypatch):
     scoped = _request_local_tool_for_invocation(write, request=request, workspace_roots=[owner])
     assert scoped.path_access_policy.agent_home_root == configured, "每次调用换的策略也沿用宿主数据根"
     assert scoped.path_access_policy.check_write(owner / "permissions.json").code == STATE_CODE
+    # 数据根只有一个来源：构造出的每个工具策略都是宿主数据根（包括眼下不靠它判的 Shell），插件读写上下文也跟写边界走。
+    roots = {name: tool.path_access_policy.agent_home_root for name, tool in agent.tools.tools.items()
+             if getattr(tool, "path_access_policy", None) is not None}
+    assert {"write_file", "run_command"} <= set(roots) and set(roots.values()) == {configured}, roots
+    from dataclasses import replace
+
+    # 快照只原样透传给插件，这里只看路径上下文。
+    context = _invocation_context(replace(request, runtime_snapshot=SimpleNamespace()))
+    assert context.workspace_write_context.check(owner / "permissions.json").code == STATE_CODE
+    assert context.workspace_read_context.external_policy.agent_home_root == configured
 
 
 # ---------------------------------------------------------------- 真实链路
@@ -945,6 +956,10 @@ def test_write_boundary_reports_the_specific_host_code(tmp_path, monkeypatch):
                                             path_access_mode="full")
         assert _write_boundary_denied(request, {"path": str(target)}, (main,)).error_code == code
     assert write_boundary_error_code("写入被阻止: 旧调用方自己拼的") == "WRITE_FORBIDDEN"
+    # 只透传宿主托管文件的码：路径策略按别的码拒（normal 模式的危险目录）时仍是 WRITE_FORBIDDEN。
+    dangerous = validate_write_boundary("write_file", {"path": "/etc/my-agent-h3-probe.txt"}, workspace_root=main,
+                                        path_access_mode="normal", write_boundary=boundary)
+    assert dangerous.startswith("写入被阻止") and write_boundary_error_code(dangerous) == "WRITE_FORBIDDEN"
 
 
 def test_task_record_patterns_cover_every_task_root_layout(tmp_path):
@@ -966,6 +981,7 @@ def test_task_record_patterns_cover_every_task_root_layout(tmp_path):
     assert all(re.search(pattern, str(main / rel)) for rel in hit)
     assert not any(re.search(pattern, str(main / rel)) for rel in miss)
     assert not re.search(pattern, str(home["feishu"] / hit[0])), "隔离：只本 owner"
+    assert not re.search(pattern, str(tmp_path / "mirror") + str(main / hit[0])), "从路径开头匹配：别处的同名拷贝不误伤"
 
     odd = (tmp_path / "my.agent+(x)").resolve()
     (odd_main := odd / "owners" / "local" / "main").mkdir(parents=True)
