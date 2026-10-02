@@ -31,15 +31,12 @@ const choiceMap = {
   model_backend: ["echo", "openai_compatible", "anthropic_compatible"],
   memory_rule_routing_mode: ["off", "soft", "strict"],
   memory_resume_auto_context_mode: ["off", "trigger", "always"],
-  scheduler_mode: ["auto", "manual", "off"],
   runner_concurrency: ["auto"],
   runner_start_rate: ["auto"],
   runner_timeout_seconds: ["off", "auto"],
-  runner_failure_policy: ["auto", "off", "none", "disabled"],
   daemon_max_runners: ["auto"],
   daemon_reviewer: ["parent-daemon"],
   log_level: ["debug", "info", "warning", "error", "critical"],
-  subagent_workflow_mode: ["auto", "manual", "off"],
   tool_catalog_mode: ["compact", "full", "retrieval_only", "off"],
   response_mode: ["recommend", "dry_run", "execute"],
   local_store_backend: ["jsonl", "sqlite", "duckdb", "parquet"],
@@ -58,39 +55,32 @@ const unitMap = {
   request_timeout: "秒",
   tool_http_timeout: "秒",
   tool_shell_timeout: "秒",
-  tool_agent_budget_window_seconds: "秒",
-  tool_artifact_read_budget_window_seconds: "秒",
-  gateway_heartbeat_interval: "秒",
   gateway_stale_seconds: "秒",
   gateway_stop_timeout: "秒",
   gateway_request_timeout: "秒",
   gateway_processing_timeout_seconds: "秒",
-  lease_heartbeat_interval_seconds: "秒",
   lease_stale_without_heartbeat_seconds: "秒",
   subagent_run_timeout: "秒",
   subagent_heartbeat_timeout: "秒",
-  subagent_due_check_interval: "秒",
   dynamic_timeout_min: "秒",
   dynamic_timeout_max: "秒",
-  dynamic_timeout_safety_margin: "倍",
-  memory_hook_retention_days: "天",
   cli_audit_cleanup_days: "天",
 };
 
-// LLM: 键的描述取上一个键之后、本键之前的注释（最多最后 8 行，空行不打断）。唯一例外是文件头：第一个键出现前遇到空行，
-//   就丢弃已累积的注释——以空行结束的首段注释说明整份文件，不属于任何键。后端 parameter_registry._descriptions_from_lines
-//   遇空行即清空注释块，对第一个键得到同样结果；改归属规则要两边一起核对，并逐字段比对重新生成的目录。
+// LLM: 键的描述取该键正上方连续 `#` 注释（与后端 parameter_registry._descriptions_from_lines 同一规则：空行或任何
+//   非注释行都会中断注释块，注释块只归紧挨着的下一个键；第一个键前以空行结尾的文件头注释不属于任何键，被丢弃）。
+//   没有上方注释时取该行行尾注释（引号里的 # 不算，见 trailingComment），与后端 yaml_trailing_comment 同一规则。
+//   后端是权威（改归属规则要两边一起核对，并逐字段比对重新生成的目录）；同名键只保留第一次出现。
 // 函数用途: 按项目的极简 YAML 子集读出每个键的值和上方的中文注释，供生成设置页目录。
 function parseSimpleYaml(text) {
   const entries = [];
   const lines = text.split(/\r?\n/);
   let comments = [];
-  let seenKey = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const trimmed = line.trim();
     if (!trimmed) {
-      if (!seenKey) comments = [];
+      comments = [];
       continue;
     }
     if (trimmed.startsWith("#")) {
@@ -119,9 +109,10 @@ function parseSimpleYaml(text) {
     } else {
       value = parseScalar(raw);
     }
-    entries.push({ key, value, comments: comments.slice(-8) });
+    const above = comments.join(" ");
+    const fallback = trailingComment(line);
+    entries.push({ key, value, comments: above ? comments : (fallback ? [fallback] : []) });
     comments = [];
-    seenKey = true;
   }
   return entries;
 }
@@ -157,6 +148,23 @@ function stripInlineComment(raw) {
     }
   }
   return raw;
+}
+
+// LLM: 与后端 config_io.yaml_trailing_comment 同一规则：取引号外的第一个 `#`（前面有空白）之后的文本，作为该行说明；
+//   没有行尾注释返回空串。只读，不参与值解析（值解析用 stripInlineComment 去掉同一段）。
+// 函数用途: 取一行 YAML 的行尾注释文字，供键上方没有注释块时兜底使用。
+function trailingComment(line) {
+  let quote = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if ((char === '"' || char === "'") && line[index - 1] !== "\\") {
+      quote = quote === char ? "" : quote || char;
+    }
+    if (char === "#" && !quote && /\s/.test(line[index - 1] || "")) {
+      return line.slice(index + 1).trim();
+    }
+  }
+  return "";
 }
 
 function inferCategory(sourceId, key) {
@@ -265,8 +273,12 @@ function isAdvanced(key, category) {
   );
 }
 
+// LLM: 后端 parameter_registry 对每个参数统一声明 effect=EFFECT_GATEWAY_RESTART（TUNABLE_KEYS 里的可调参数同样如此，
+//   user_config_capability.py 里没有 next_session 的键），配置修改一律要重启 Gateway 才生效，不存在“按名字免重启”的键；
+//   因此这里不再按键名猜，所有项都标记需要重启。若后端未来引入 next_session 的键，再按后端 effect 事实补充。
+// 函数用途: 返回该配置项修改后是否需要重启 Gateway 才生效（当前后端语义：全部需要）。
 function restartRequired(key) {
-  return key.includes("workspace") || key.includes("root") || key.includes("backend") || key === "gateway_port" || key === "extensions_dir";
+  return true;
 }
 
 function requiresUnlock(key, category) {

@@ -342,11 +342,10 @@ pending 插话重放已按原 mailbox 锁内最新状态和准确 DB 预留收�
 - **前端 JSON 与 store 残留已删后端键的旧字段（等能跑 tsc 时再清）**：`frontend/config/frontend-runtime-config.json` 与
   `frontend/src/stores/settingsStore.ts` 里仍有参数减量删掉的后端键对应的默认值（设置页表单项已清）。本机没有
   `frontend/node_modules`，删字段后查不出引用断裂，所以现在不删；`runtimeConfig.ts` 的类型由 JSON 推导，清 JSON 时自动跟上。
-- **前端目录生成器的注释归属与后端统一（未排期，低优先级）**：
-  - 现状：第一个键之后，`frontend/scripts/sync-backend-config.mjs` 会跨空行累积注释，最多取最后 8 行；后端 `parameter_registry._descriptions_from_lines` 遇到空行就清空注释块。两边对被空行隔开的注释块归属不同。
-  - 目标：以后端规则为准统一前端生成器。改之前要逐键核对重新生成的描述，被空行隔开的说明要并回紧挨键的注释块，否则描述会变空。
-  - 文件头已在 `8ae89a226` 按同一规则处理。
-  - 用户主要用 TUI，TUI 读的是后端，所以优先级低。
+- ~~前端目录生成器的注释归属与后端统一（未排期，低优先级）~~：**已完成（2026-10-01，分支 `worker/ds1-config-catalog`）**。生成器
+  `frontend/scripts/sync-backend-config.mjs` 的注释归属按后端 `parameter_registry._descriptions_from_lines` 规则统一（空行/任何非注释行
+  中断注释块、无上方注释取行尾注释，不再跨空行累积、不再截断到 8 行），删掉已删键映射，`restartRequired` 与后端 effect 语义一致（全部需要重启）；
+  目录重新生成 270 项，并新增不依赖 node 的 pytest 守卫 `agent_py_agent/tests/test_backend_config_catalog.py`（键集合、说明、restart 三项）。
 
 发布资料清理已落地，含文档断链与旧状态说明整理；不宣称以上运行时问题已修复，当前证据边界见 [STATUS](../STATUS.md)。
 

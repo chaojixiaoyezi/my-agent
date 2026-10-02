@@ -13,6 +13,21 @@
   - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：通过
   - `git diff --check`：通过；`$PY scripts/check_clean_package.py .`：通过
 
+## 前端参数目录生成器修正、重新生成与守卫（2026-10-01，分支 `worker/ds1-config-catalog`，基于 main `34e4d874e`）
+
+- 生成器修正后重新生成：`/opt/homebrew/bin/node frontend/scripts/sync-backend-config.mjs` → **270 fields**；`--check` → **in sync**。
+- 与后端逐键比对：目录 270 项 description 与 `parameter_registry._descriptions_from_lines` **0 差异**；`restartRequired` 全 true（后端
+  所有参数 effect=EFFECT_GATEWAY_RESTART）。
+- 新增守卫 `agent_py_agent/tests/test_backend_config_catalog.py`（3 项，不依赖 node）：
+  - `test_catalog_covers_exactly_the_packaged_yaml_keys`：各随包 YAML 键集合 == 目录键集合（分别比），失败列差异；
+  - `test_catalog_descriptions_match_backend_comment_rule`：后端有说明的键，目录 description 必须与后端一致；
+  - `test_catalog_restart_required_matches_backend_effect`：全部 restartRequired=true。
+  - 命令与结果：
+    `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_backend_config_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **3 passed**
+- guards9 全套（10 文件）→ **182 passed**；`check_import_boundaries.py` → 0 条；`ruff check agent_py_agent scripts` → All checks passed；
+  `check_doc_sync.py` → DOC_SYNC_PASS；`check_code_size.py --mode strict` → blocked=False（strict_scope_total=2241，CODE_SIZE_REPORT.md 已还原）；
+  `git diff --check` 干净；`check_clean_package.py .` 通过。
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，

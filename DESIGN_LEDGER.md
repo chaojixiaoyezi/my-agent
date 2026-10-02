@@ -6,6 +6,25 @@
 - **P3**：基线 `parameter_description_baseline.json` 第二组 8 个保留 advanced 键补中文说明（写进 agent_config.yaml 各键正上方注释：dynamic_timeout_min、home_lesson_stale_caveat_days、local_store_fts_enabled、memory_curator_daily_finalize_hour、memory_curator_model、memory_curator_provider、memory_hot_min_occurrences、memory_lesson_min_occurrences）；后台 Memory Curator 整段挂在 `memory_curator_enabled` 上的注释块拆开归到各自键，删掉已删除键（batch_message_limit、max_retries）的说明。基线只剩 5 个加载器元数据键，`test_parameter_registry.py` 通过。
 - **验证**：`test_parameter_registry.py` + `test_config_defaults_parity.py` + `test_config_validation.py` + `test_merged_config_knobs.py` 共 134 passed；架构守卫 guards9 与静态 gate 全过（详见 TESTS.md）。
 
+## 前端参数目录生成器修正、重新生成与守卫（2026-10-01，分支 `worker/ds1-config-catalog`，基于 main `34e4d874e`，已实现，待集成）
+
+- **现象**：`frontend/config/backend-config-catalog.json` 过期：缺 `goal_continuation_idle_limit`、`model_reasoning_levels`；
+  `5c224e6df` 手插一项后头部 fieldCount 写 216 实际 217、后续 order 未顺移，`node frontend/scripts/sync-backend-config.mjs --check` 必然失败。
+- **做法（P6，生成器以后端为准，不改后端）**：
+  - 注释归属对齐 `parameter_registry._descriptions_from_lines`：空行或任何非注释行都中断注释块（原实现只在首键前清空、且最多取最后 8 行注释）；
+    无上方注释时取行尾注释，对齐 `config_io.yaml_trailing_comment` 的引号规则。逐键比对后 27 处说明差异清零。
+  - 删除已删键的映射条目：实测 13 个不在三个随包 YAML 键集合里（choiceMap 5：scheduler_mode、runner_failure_policy、daemon_max_runners、
+    daemon_reviewer、subagent_workflow_mode；unitMap 8：tool_agent_budget_window_seconds、tool_artifact_read_budget_window_seconds、
+    gateway_heartbeat_interval、gateway_stale_seconds、lease_heartbeat_interval_seconds、subagent_due_check_interval、
+    dynamic_timeout_safety_margin、memory_hook_retention_days）。
+  - `restartRequired` 不再按键名猜：后端每个参数 `effect=EFFECT_GATEWAY_RESTART`（`user_config_capability.py` 的 TUNABLE_KEYS 也没有
+    next_session 的键），配置修改一律要重启 Gateway 才生效，因此全部标记为需要重启（true）。
+- **P1 重新生成**：270 项（agent_config 219、capability_config 31、log_analysis_config 20），`--check` 通过；目录 270 项 description 与
+  后端 `_descriptions_from_lines` 逐键比对 0 差异。
+- **P2 守卫**：新增 `agent_py_agent/tests/test_backend_config_catalog.py`（3 项，不依赖 node）：各随包 YAML 键集合 == 目录键集合（分别比，
+  失败列差异）、目录 description 与后端一致、`restartRequired` 全 true；YAML 注释或键变化后目录未重新生成时会立刻失败。
+- **验证**：见 TESTS.md 同名节。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`

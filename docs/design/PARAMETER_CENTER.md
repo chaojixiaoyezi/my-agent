@@ -7,6 +7,16 @@
 - `goal_continuation_idle_limit`：连续多少个持续目标自动续跑片没有工具调用或 Goal/任务结构化状态变化时自动暂停；默认 3，设为 0 表示不限。
   定义在 `AgentConfig`，随包 `agent_config.yaml` 的中文说明由参数登记表自动读取；按普通非安全整数参数登记，可从参数中心查看/修改，沿配置默认的 Gateway 重启生效语义。
 
+## 2026-10-01 前端参数目录重新生成与守卫
+
+- `frontend/config/backend-config-catalog.json` 按当前随包 YAML 重新生成为 **270 项**（agent_config 219、capability_config 31、
+  log_analysis_config 20），`node frontend/scripts/sync-backend-config.mjs --check` 通过。
+- 生成器 `frontend/scripts/sync-backend-config.mjs` 的注释归属规则与后端 `parameter_registry._descriptions_from_lines` 统一：
+  空行或任何非注释行中断注释块（不再跨空行累积、不再截断到 8 行），无上方注释时取行尾注释（对齐 `config_io.yaml_trailing_comment`）；
+  删掉 13 个已不在随包 YAML 里的映射条目；`restartRequired` 与后端 effect 语义一致（每个参数修改都要重启 Gateway 才生效），不再按键名猜。
+- 新增 pytest 守卫 `agent_py_agent/tests/test_backend_config_catalog.py`（不依赖 node）：随包 YAML 键集合必须等于目录键集合（各文件分别比，
+  失败列出差异），目录说明与后端逐键一致，`restartRequired` 全 true；同事改动 YAML 注释或键后目录未重新生成时会立刻失败。
+
 ## 1. 来源
 
 2026-09-27 用户提出两件事：
