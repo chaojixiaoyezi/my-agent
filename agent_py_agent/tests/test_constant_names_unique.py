@@ -28,7 +28,7 @@ _ALLOWED = {
     "MAX_OWNERS_COUNT": "管理员控制工具与审计记录工具各自一次列出的用户数上限",
     "POLL_SECONDS": "Gateway 重启等待、TUI 插件面板、升级跟随三种不同的轮询节奏",
     "PREVIEW_CHARS": "会话搜索结果预览与本地存储正文预览，用途不同",
-    "PROBE_MAX_ATTEMPTS": "模型 HTTP 连接探测与看图能力探测各自的重试次数",
+    "PROBE_MAX_ATTEMPT_COUNT": "模型 HTTP 连接探测与看图能力探测各自的重试次数",
     "SALT_BYTES": "会话锁与管理员密码是两套独立的散列存储，参数随散列落盘；要统一须整体换成共用散列函数",
     "REQUEST_TIMEOUT_SECONDS": "飞书应用注册的 HTTP 请求超时与推理探测的单次请求等待上限，两处含义不同",
     "SCHEMA_VERSION": "各持久格式自己的版本号，互不相关",

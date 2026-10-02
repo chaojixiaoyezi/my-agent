@@ -12,7 +12,8 @@ from .common.strict_json import load_strict_json
 from .plugin_installation import PluginInstallation, PluginInstallationError
 
 INSTALLATION_SCHEMA = "plugin_installations.v3"
-INSTALLATION_STATE_LIMIT = 16 * 1024 * 1024
+# 插件安装状态文件上限 16 MiB：防损坏/恶意状态文件撑爆内存。
+INSTALLATION_STATE_LIMIT_BYTES = 16 * 1024 * 1024
 _V1 = "plugin_installations.v1"
 _V2 = "plugin_installations.v2"
 
@@ -120,6 +121,6 @@ def encode_installation_state(entries: tuple[PluginInstallation, ...], owner, mi
         "schema_version": INSTALLATION_SCHEMA, "owner": asdict(owner),
         "installations": [entry.to_payload() for entry in entries], "migration": migration,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
-    if len(text.encode("utf-8")) > INSTALLATION_STATE_LIMIT:
+    if len(text.encode("utf-8")) > INSTALLATION_STATE_LIMIT_BYTES:
         raise PluginInstallationError("state_limit", "安装表超过存储预算。")
     return text

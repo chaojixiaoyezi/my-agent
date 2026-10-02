@@ -20,6 +20,17 @@
   - 对照样本开预检后两次都不调 Jev。其余样本两种材料下选择相同。
   - 证据：`~/.my-agent/decision-evidence/j8-fragment-material/`。
 
+## P10 常数整改第九批（最后一批）：白名单 groups[0] 清空（2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，基于 `d55cb266c`）
+
+- **范围**：白名单 groups[0] 剩余全部 41 个（backends 约 26、settings 约 10、agent 根/零散几个；`_PROBE_MAX_ATTEMPTS` 在 http.py 与 vision_capability.py 两处定义）。数值一律不变、不碰其它模块。
+- **做法**：
+  - 改名 19 个唯一名（含 `_PROBE_MAX_ATTEMPTS` 两处定义同步）：数量上限补 `_COUNT` 17 个（`_MAX_RETAINED_CALLS→_MAX_RETAINED_CALL_COUNT`、`_PROBE_MAX_ATTEMPTS→_PROBE_MAX_ATTEMPT_COUNT`、`MAX_TEXT_CALLS→MAX_TEXT_CALL_COUNT`、`MAX_DELIVERY_ATTEMPTS→MAX_DELIVERY_ATTEMPT_COUNT`、`PROBE_ROUNDS→PROBE_ROUND_COUNT` 等），字符补 `_CHARS` 1 个（`_MAX_ERROR_TEXT→_MAX_ERROR_TEXT_CHARS`）、字节补 `_BYTES` 1 个（`INSTALLATION_STATE_LIMIT→INSTALLATION_STATE_LIMIT_BYTES`）；全仓词边界改引用（23 文件 65 处），重 grep 旧名 0 残留；新名撞名预检 19 个全仓 0 命中；
+  - 补上方中文说明 34 处（脚本 tmp/add-batch9-comments.py，与生成器同判定；含 vision_capability.py 的 `_PROBE_MAX_ATTEMPT_COUNT` 手动补紧邻说明）；
+  - 无物理单位 5 个（`MAX_DECISION_JSON_DEPTH`/`_STRICT_JSON_MAX_DEPTH` 深度、`_JEV_BOUND_TOKENS_PER_QUESTION` 换算率、`MODEL_OUTPUT_WINDOW_DIVISOR` 除数、`_MIN_RATIO` 比率）只补说明、挪入白名单无单位组；
+  - `test_constant_names_unique._ALLOWED` 键 `PROBE_MAX_ATTEMPTS→PROBE_MAX_ATTEMPT_COUNT`（两处仍同名）。
+- **白名单/目录**：主组 **41→0 清空**、无单位组 39→44；目录重建 804 项 `--check` 一致；守卫 13 passed。
+- **验证**：改名/说明直接相关 22 个测试文件（bounded_call/cache_diagnostics/decision_protocol/gateway_helpers/incremental_text_parser/parameter_changes/reasoning_probe/typesafe_decision/task_progress/runtime_db_delivery/runtime_error_reports/gateway_strict_request/model_usage_tags/plugin_install_store 等）**全过（累计 492）**；guards9 全量 **168 passed**；import boundaries **0 条**；ruff **All checks passed**；doc-sync **PASS**；code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；clean-package **OK**；`size_diff.sh` **新增告警 0 / 消失 3**。
+
 ## P10 常数整改第八批：capability 目录 49 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，基于 `f0bb62254`）
 
 - **范围**：`agent_py_agent/agent/capability/` 目录（16 个文件）内 49 条待整改常数，不碰其它目录。

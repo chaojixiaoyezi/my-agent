@@ -26,7 +26,8 @@ _RESULT_FIELDS = ("result", "outcome", "conclusion", "decision", "summary")
 _EXPLICIT_OVERWRITE_KEYS = ("correction", "overwrite", "replace")
 _DISPLAY_PLAN_KEY = "display_plan"
 _DISPLAY_PLAN_UPDATE_KEY = "_display_plan_update"
-_DISPLAY_PLAN_MAX_ITEMS = 128
+# 展示计划最多 128 项：控制回执体积，防计划清单膨胀。
+_DISPLAY_PLAN_MAX_ITEM_COUNT = 128
 
 
 @dataclass(frozen=True)
@@ -362,7 +363,7 @@ def with_task_progress_display_plan(
             for item in values
             if str(item or "").strip()
         ]
-    )[:_DISPLAY_PLAN_MAX_ITEMS]
+    )[:_DISPLAY_PLAN_MAX_ITEM_COUNT]
     return {
         **dict(update),
         _DISPLAY_PLAN_UPDATE_KEY: {
@@ -416,7 +417,7 @@ def _normalize_display_plan(value: object) -> dict[str, Any]:
             for item in values
             if str(item or "").strip()
         ]
-    )[:_DISPLAY_PLAN_MAX_ITEMS]
+    )[:_DISPLAY_PLAN_MAX_ITEM_COUNT]
     try:
         revision = max(1, int(value.get("revision") or 1))
     except (TypeError, ValueError):
@@ -450,7 +451,7 @@ def _merge_display_plan(
         }
     merged_ids = dedupe_strings(
         [*current["item_ids"], *update["item_ids"]]
-    )[:_DISPLAY_PLAN_MAX_ITEMS]
+    )[:_DISPLAY_PLAN_MAX_ITEM_COUNT]
     return {
         "generation_id": current["generation_id"],
         "revision": current["revision"] + (merged_ids != current["item_ids"]),

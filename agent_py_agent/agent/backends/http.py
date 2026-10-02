@@ -17,7 +17,7 @@ from .model_metadata import ProviderMetadataOptions, discover_provider_model_met
 from .provider_headers import endpoint_parts, request_headers
 
 # 探针只缓存成功证据；短暂失败允许之后重试，但单次探测有界。
-_PROBE_MAX_ATTEMPTS = 3
+_PROBE_MAX_ATTEMPT_COUNT = 3
 
 
 # LLM: HTTP 协议共同使用此请求级限额；不能热改实例配置，需同步 Chat/Messages/Responses 的摘要调用测试。
@@ -123,7 +123,7 @@ class HttpBackend(BaseBackend):
                 "api_key 为空：无法执行工具能力探针（检查 AGENT_API_KEY 环境变量或配置）"
             )
         evidence = ""
-        for _attempt in range(1, _PROBE_MAX_ATTEMPTS + 1):
+        for _attempt in range(1, _PROBE_MAX_ATTEMPT_COUNT + 1):
             nonce = secrets.token_hex(8)
             probe_tool = {
                 "name": "my_agent_capability_probe",

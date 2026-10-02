@@ -10,6 +10,7 @@ from .common.value_parsing import dedupe_strings
 from .runtime_errors import DataCorruptionError, runtime_error_report
 
 _PATH_RE = re.compile(r"(~?/[^ \t\r\n，。；;：:、)）\]】\"'<>`]+)")
+# 唤醒事实最多来自 12 个文件：限制后台唤醒读取范围，防扫描爆炸。
 _MAX_FACT_FILES = 12
 
 

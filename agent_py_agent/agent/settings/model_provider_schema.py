@@ -18,7 +18,8 @@ BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses", "ty
 CAPABILITIES = {"agentic", "embedding", "decision"}
 # 用途标签是开放的小写标识符（不是封闭枚举）；数量与长度只防止滥填撑大决策材料。
 _USAGE_TAG = re.compile(r"[a-z][a-z0-9_]{0,39}")
-_MAX_USAGE_TAGS = 16
+# 模型用途标签最多 16 个：防滥填撑大决策材料。
+_MAX_USAGE_TAG_COUNT = 16
 
 
 # LLM: 此类错误仅使用固定脱敏文案；reason 是解析器提供的结构化原因，不从文案反推，不包含凭据。
@@ -256,15 +257,17 @@ def validate_usage_tags(value: object) -> list[str]:
     else:
         raise ModelProfileError("用途标签请填写逗号分隔的小写英文标识，例如 long_document, low_cost。")
     tags = sorted(set(items))
-    if len(tags) > _MAX_USAGE_TAGS or any(not _USAGE_TAG.fullmatch(tag) for tag in tags):
-        raise ModelProfileError(f"用途标签最多 {_MAX_USAGE_TAGS} 个，每个以小写英文字母开头，只含小写字母、数字或下划线，长度不超过 40。")
+    if len(tags) > _MAX_USAGE_TAG_COUNT or any(not _USAGE_TAG.fullmatch(tag) for tag in tags):
+        raise ModelProfileError(f"用途标签最多 {_MAX_USAGE_TAG_COUNT} 个，每个以小写英文字母开头，只含小写字母、数字或下划线，长度不超过 40。")
     return tags
 
 
 # 输入模态是开放的小写标识符列表（text/image/video 是压缩策略认识的值，其它照存不判定）；缺省表示未知。
 _INPUT_MODALITY = re.compile(r"[a-z][a-z0-9_]{0,39}")
-_MAX_INPUT_MODALITIES = 8
-_MAX_REASONING_LEVELS = 12
+# 模型输入模态最多 8 种：防滥填撑大决策材料。
+_MAX_INPUT_MODALITY_COUNT = 8
+# 模型推理档位最多 12 档：防滥填无效档位。
+_MAX_REASONING_LEVEL_COUNT = 12
 
 
 # LLM: 只在填写时返回字段，缺省不写键（未知，由结构化视觉探针判定）；决策模型不接受，与采样字段和用途标签同一口径。
@@ -290,8 +293,8 @@ def validate_input_modalities(value: object) -> list[str]:
     else:
         raise ModelProfileError("输入模态请填写逗号分隔的小写英文标识，例如 text, image。")
     modalities = sorted(set(items))
-    if len(modalities) > _MAX_INPUT_MODALITIES or any(not _INPUT_MODALITY.fullmatch(item) for item in modalities):
-        raise ModelProfileError(f"输入模态最多 {_MAX_INPUT_MODALITIES} 个，每个以小写英文字母开头，只含小写字母、数字或下划线，长度不超过 40。")
+    if len(modalities) > _MAX_INPUT_MODALITY_COUNT or any(not _INPUT_MODALITY.fullmatch(item) for item in modalities):
+        raise ModelProfileError(f"输入模态最多 {_MAX_INPUT_MODALITY_COUNT} 个，每个以小写英文字母开头，只含小写字母、数字或下划线，长度不超过 40。")
     return modalities
 
 
@@ -309,8 +312,8 @@ def validate_reasoning_levels(value: object) -> list[str]:
     else:
         raise ModelProfileError("思考档位请填写逗号分隔的小写英文标识，例如 low, medium, high。")
     levels = list(dict.fromkeys(items))
-    if len(levels) > _MAX_REASONING_LEVELS or any(not _INPUT_MODALITY.fullmatch(item) for item in levels):
-        raise ModelProfileError(f"思考档位最多 {_MAX_REASONING_LEVELS} 个，每个以小写英文字母开头，只含小写字母、数字或下划线。")
+    if len(levels) > _MAX_REASONING_LEVEL_COUNT or any(not _INPUT_MODALITY.fullmatch(item) for item in levels):
+        raise ModelProfileError(f"思考档位最多 {_MAX_REASONING_LEVEL_COUNT} 个，每个以小写英文字母开头，只含小写字母、数字或下划线。")
     return levels
 
 

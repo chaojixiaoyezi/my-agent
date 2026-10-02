@@ -29,7 +29,7 @@ from ..common.id_generator import new_id
 from .operations import (
     INBOX_PROCESSED,
     INBOX_RECEIVED,
-    MAX_DELIVERY_ATTEMPTS,
+    MAX_DELIVERY_ATTEMPT_COUNT,
     OUTBOX_ACKED,
     OUTBOX_DEAD_LETTER,
     OUTBOX_FAILED,
@@ -177,7 +177,7 @@ class RuntimeDeliveryMixin:
                 # 重复 settle（ACK 重放/竞争 worker）→ 幂等，不改写既有终态。
                 return self.outbox_entry(outbox_id)
             final_status = status
-            if status == OUTBOX_FAILED and int(row["attempts"]) >= MAX_DELIVERY_ATTEMPTS:
+            if status == OUTBOX_FAILED and int(row["attempts"]) >= MAX_DELIVERY_ATTEMPT_COUNT:
                 final_status = OUTBOX_DEAD_LETTER
             evidence = dict(provider_evidence or {})
             existing = conn.execute(

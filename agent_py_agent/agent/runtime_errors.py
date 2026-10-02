@@ -21,7 +21,8 @@ from .backends.errors import (
 )
 from .runtime_db.operations import RuntimeExecutionBusyError
 
-_MAX_ERROR_TEXT = 300
+# 错误文本最多回 300 字符：超长截断，防错误信息撑爆回执。
+_MAX_ERROR_TEXT_CHARS = 300
 # 结构化错误码的唯一形状：大写字母开头，只含大写字母、数字和下划线。
 STRUCTURED_ERROR_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]+")
 
@@ -248,7 +249,7 @@ def environment_cause_fields(exc: BaseException) -> dict[str, str]:
     return {"cause_type": cause.__class__.__name__, "cause_category": _builtin_category(cause)}
 
 
-def compact_error_message(exc: BaseException, *, max_chars: int = _MAX_ERROR_TEXT) -> str:
+def compact_error_message(exc: BaseException, *, max_chars: int = _MAX_ERROR_TEXT_CHARS) -> str:
     text = str(exc or "").strip() or exc.__class__.__name__
     if len(text) <= max_chars:
         return text

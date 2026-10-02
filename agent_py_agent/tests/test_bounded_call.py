@@ -204,7 +204,7 @@ def test_cleanup_keeps_reservation_after_worker_exits_and_cancel_is_deduplicated
 
 
 def test_process_capacity_reserves_one_ordinary_call(releases, monkeypatch):
-    monkeypatch.setattr(bounded, "_MAX_RETAINED_CALLS", 3)
+    monkeypatch.setattr(bounded, "_MAX_RETAINED_CALL_COUNT", 3)
     release = threading.Event()
     releases.append(release)
     for key in ("optional-1", "optional-2"):

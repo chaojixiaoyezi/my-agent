@@ -26,7 +26,7 @@ from .plugin_installation import (
     admit_installation,
 )
 from .plugin_installation_state import (
-    INSTALLATION_STATE_LIMIT,
+    INSTALLATION_STATE_LIMIT_BYTES,
     PluginInstallationState,
     decode_installation_state,
     encode_installation_state,
@@ -68,7 +68,7 @@ class PluginInstallStore:
     def _read_state(self) -> PluginInstallationState:
         try:
             content = read_bytes_beneath(
-                self._anchor, (*self._parts, "installations.json"), max_bytes=INSTALLATION_STATE_LIMIT
+                self._anchor, (*self._parts, "installations.json"), max_bytes=INSTALLATION_STATE_LIMIT_BYTES
             )
             return decode_installation_state(content, self._owner)
         except PluginInstallationError:

@@ -16,6 +16,7 @@ from .errors import ProviderResponseError, ProviderTimeoutError
 if TYPE_CHECKING:
     from .gateway_helpers import GatewayRequest
 
+# 严格 JSON 校验嵌套最多 64 层：防畸形深嵌套请求拖垮解析，无物理单位。
 _STRICT_JSON_MAX_DEPTH = 64
 
 

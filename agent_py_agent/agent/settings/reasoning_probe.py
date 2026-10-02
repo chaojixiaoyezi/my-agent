@@ -1,5 +1,5 @@
 # LLM: 智能程度自动检测的唯一入口（宿主侧）。用已保存的凭据和正式 HTTP 后端，对当前会话模型按 low / max / 不带字段
-#   各发 PROBE_ROUNDS 次同一道短题，只把 usage 的 token 字段交给 reasoning_probe_judge 判定；凭据只在后端内部使用，
+#   各发 PROBE_ROUND_COUNT 次同一道短题，只把 usage 的 token 字段交给 reasoning_probe_judge 判定；凭据只在后端内部使用，
 #   不进入模型上下文、工具参数、检测记录或回执，回复正文直接丢弃。检测在后台线程运行（控制命令必须很快返回），结果按用户、
 #   按模型档案记在模型档案旁的 .reasoning-probes.json（模型指纹变了即失效）。确认支持时经参数中心写 reasoning_control: effort：
 #   私有档案写本人档案（set_profile_field，可 /effort revert 撤销）；部署默认模型只在管理员触发时写全局配置
@@ -41,7 +41,7 @@ from .parameter_changes import (
 from .reasoning_probe_judge import (
     MEASURE_REASONING,
     PROBE_LEVELS,
-    PROBE_ROUNDS,
+    PROBE_ROUND_COUNT,
     VERDICT_INCONCLUSIVE,
     VERDICT_SUPPORTED,
     ProbeSample,
@@ -59,11 +59,12 @@ PROBE_PROMPT = "请计算：1 到 2000 中，既是 3 的倍数、各位数字�
 _RECORDS_SCHEMA = "reasoning_probe_records.v1"
 # 单次请求的等待上限（max 档可能想很久）；running 记录超过这个时长仍未结束视为已中断（例如 Gateway 重启）。
 _REQUEST_TIMEOUT_SECONDS = 180
+# 推理探测 running 记录 3600 秒未结束视为已中断：防 Gateway 重启后陈旧记录卡死。
 _STALE_RUNNING_SECONDS = 3600
 _ACTOR = "reasoning_probe"
 # 检测结论作为宿主提示的来源名：同一会话只留最新一条，/effort 看过就清掉。
 _NOTICE_SOURCE = "reasoning_probe"
-_TOTAL_REQUESTS = PROBE_ROUNDS * len(PROBE_LEVELS)
+_TOTAL_REQUESTS = PROBE_ROUND_COUNT * len(PROBE_LEVELS)
 # 进程内登记：正在跑的检测（防同一档案重复检测）与各检测的开始时间。
 _RUNNING: set[str] = set()
 _RUNNING_LOCK = threading.Lock()
@@ -217,7 +218,7 @@ def _start(agent: object, target: ProbeTarget, trigger: str) -> str:
     clear_host_notices(getattr(agent, "conversation_store", None), target.thread_id, _NOTICE_SOURCE)  # 旧结论已作废
     _spawn(lambda: _run(job))
     head = "当前模型还没检测过是否支持调节智能程度，已" if trigger == "auto" else "已"
-    return (f"{head}在后台开始检测：同一道短题按“低”“最高”和不带参数各发 {PROBE_ROUNDS} 次，共 {_TOTAL_REQUESTS} 次请求，"
+    return (f"{head}在后台开始检测：同一道短题按“低”“最高”和不带参数各发 {PROBE_ROUND_COUNT} 次，共 {_TOTAL_REQUESTS} 次请求，"
             "约需 1～5 分钟，会额外消耗少量 token；完成后发 /effort 查看结果。")
 
 
@@ -298,7 +299,7 @@ def _verdict_fields(verdict: ProbeVerdict) -> dict:
 def _collect_samples(job: _ProbeJob) -> list[ProbeSample]:
     config = replace(job.target.config, model_reasoning_control="effort", request_timeout=_REQUEST_TIMEOUT_SECONDS)
     backend = get_backend(config.model_backend, config)
-    plan = [level for _round in range(PROBE_ROUNDS) for level in PROBE_LEVELS]
+    plan = [level for _round in range(PROBE_ROUND_COUNT) for level in PROBE_LEVELS]
     samples: list[ProbeSample] = []
     with provider_runtime_scope(job.agent, SimpleNamespace(thread_id="reasoning-probe:" + job.target.profile_id)):
         for level in plan:

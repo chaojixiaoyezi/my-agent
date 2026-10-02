@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 
-_MESSAGE_HASH_LIMIT = 512
+# 缓存诊断一次最多散列 512 条消息：控制诊断扫描规模，防止超大缓存拖垮查询。
+_MESSAGE_HASH_LIMIT_COUNT = 512
 
 
 # LLM: JSON 序列化顺序与出站数据一致，不能排序掩盖真正的顺序变化；摘要不用于权限或控制。
@@ -25,8 +26,8 @@ def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
     options = {key: value for key, value in payload.items() if key not in {"model", "messages", "input", "system", "instructions", "tools", "stream"}}
     return {"schema": "request_surface.v1", "endpoint": _digest(endpoint), "model": _digest(payload.get("model")),
             "system": _digest(system), "tools": _digest(payload.get("tools", [])), "options": _digest(options),
-            "messages": [_digest(row) for row in rows[:_MESSAGE_HASH_LIMIT]], "message_count": len(rows),
-            "partial": len(rows) > _MESSAGE_HASH_LIMIT}
+            "messages": [_digest(row) for row in rows[:_MESSAGE_HASH_LIMIT_COUNT]], "message_count": len(rows),
+            "partial": len(rows) > _MESSAGE_HASH_LIMIT_COUNT}
 
 
 # LLM: 变化是客户端可证实事实，不是缓存失效的因果证明；首次调用和裁剪窗口外不伪造比较基线。
@@ -63,7 +64,7 @@ def public_cache_diagnostic(value: object) -> dict[str, object]:
     return {
         "baseline_available": value["baseline_available"],
         "changes": [item for item in changes if isinstance(item, str) and item in allowed][:8] if isinstance(changes, list) else [],
-        "shared_message_prefix": min(_MESSAGE_HASH_LIMIT, max(0, count)) if type(count) is int else 0,
+        "shared_message_prefix": min(_MESSAGE_HASH_LIMIT_COUNT, max(0, count)) if type(count) is int else 0,
         "partial": value.get("partial") is True,
         "server_cache_state": "unknown",
     }

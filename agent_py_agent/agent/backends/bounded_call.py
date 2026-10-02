@@ -21,7 +21,7 @@ from ..concurrency.interrupt import (
 _Result = TypeVar("_Result")
 _CALL_LOCK = threading.Lock()
 # 这是残留资源保护上限，不是业务并发配置；不能由单次调用放大，optional 必须为基础调用保留一席。
-_MAX_RETAINED_CALLS = 32
+_MAX_RETAINED_CALL_COUNT = 32
 _CALLS: dict[Hashable, _Call] = {}
 
 
@@ -121,7 +121,7 @@ def _claim_call(key: Hashable, handle: InterruptHandle, optional: bool) -> _Call
         _reap_calls_locked()
         if key in _CALLS:
             raise BoundedCallBusyError("resource_busy")
-        if len(_CALLS) >= _MAX_RETAINED_CALLS - int(optional):
+        if len(_CALLS) >= _MAX_RETAINED_CALL_COUNT - int(optional):
             raise BoundedCallBusyError("capacity_exhausted")
         handle.claim()
         call = _Call(f"bounded-call:{uuid.uuid4().hex}", handle)

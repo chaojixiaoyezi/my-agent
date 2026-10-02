@@ -16,7 +16,8 @@ ANY_PLATFORM = "any"
 FILES_DIRECTORY = "files"
 # 与包读取器默认成员上限（128，含 plugin.json）一致，避免描述合法而读包必然超限
 MAX_PLUGIN_FILES = 127
-MAX_ENTRY_ARGS = 16
+# 插件入口参数最多 16 个：防畸形 argv 撑爆启动参数。
+MAX_ENTRY_ARG_COUNT = 16
 _SEGMENT = r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,63}"
 _FILE_PATH = re.compile(rf"(?:{_SEGMENT}/){{0,7}}{_SEGMENT}\Z")
 _INTERPRETER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
@@ -61,7 +62,7 @@ class PluginEntry:
             raise ValueError("插件入口类型无效")
         if not isinstance(self.command, str) or not _FILE_PATH.fullmatch(self.command):
             raise ValueError("插件入口文件路径无效")
-        if (not isinstance(self.args, tuple) or len(self.args) > MAX_ENTRY_ARGS
+        if (not isinstance(self.args, tuple) or len(self.args) > MAX_ENTRY_ARG_COUNT
                 or any(not isinstance(item, str) or not 0 < len(item) <= 512
                        or any(ord(char) < 32 or ord(char) == 127 for char in item) for item in self.args)):
             raise ValueError("插件入口参数无效")

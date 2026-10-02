@@ -13,7 +13,9 @@ from .stream_parsers import (
     openai_stream_events,
 )
 
+# 工具输入进度每 1 秒刷一次：控制推送频率，防刷屏。
 _TOOL_INPUT_PROGRESS_FLUSH_SECONDS = 1.0
+# 工具输入进度累计 8192 字符刷一次：平衡进度推送频率与开销。
 _TOOL_INPUT_PROGRESS_FLUSH_CHARS = 8_192
 
 

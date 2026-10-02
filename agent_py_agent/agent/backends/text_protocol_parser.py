@@ -30,10 +30,13 @@ _TEXT_CLOSE = "[/TOOL_CALL]"
 
 # J-6 常量：文本协议防护上限。未闭合 open 数 > 1 的整轮拒绝规则与流式
 # MalformedToolProtocolStreamAbort 对齐（边界层与裁决层同一条红线）。
-MAX_UNCLOSED_OPEN_MARKERS = 1  # 未闭合 open 数 > 1 → 整轮拒绝（好块也不执行）
+MAX_UNCLOSED_OPEN_MARKER_COUNT = 1  # 未闭合 open 数 > 1 → 整轮拒绝（好块也不执行）
+# 文本协议单个未闭合块最多 40000 字符：finalize 级防护，防超长块撑爆。
 MAX_BLOCK_CHARS = 40_000  # 单个未闭合块体长度上限（finalize 级，仅未闭合块）
+# 文本协议整个响应最多 200000 字符：超限整轮拒绝，防响应洪泛。
 MAX_RESPONSE_CHARS = 200_000  # 整个响应文本上限（terminal，整轮拒绝）
-MAX_TEXT_CALLS = 64  # 好块数量上限（G5：超限 → 整轮拒绝，不执行任何块）
+# 文本协议一轮最多 64 个好块：超限整轮拒绝，防工具调用洪泛。
+MAX_TEXT_CALL_COUNT = 64  # 好块数量上限（G5：超限 → 整轮拒绝，不执行任何块）
 
 
 @dataclass(frozen=True)
@@ -258,8 +261,8 @@ __all__ = [
     "IncrementalTextToolParser",
     "MAX_BLOCK_CHARS",
     "MAX_RESPONSE_CHARS",
-    "MAX_TEXT_CALLS",
-    "MAX_UNCLOSED_OPEN_MARKERS",
+    "MAX_TEXT_CALL_COUNT",
+    "MAX_UNCLOSED_OPEN_MARKER_COUNT",
     "ScannedTextBlock",
     "TextBlockScan",
     "scan_text_blocks",

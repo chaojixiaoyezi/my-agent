@@ -15,7 +15,7 @@ UI 转发与流式中止使用，不参与执行决策）。
 - 流式 UI 转发：只转发第一个工具块 open 之前的 prose，尾部不完整 marker
   前缀 hold-back（等后续 chunk 确认，保证可见文本与切分无关，J-4）；
 - 流式中止：未闭合 open 数 > MAX_UNCLOSED_TOOL_START_MARKERS（与裁决层
-  MAX_UNCLOSED_OPEN_MARKERS 同一条红线）→ MalformedToolProtocolStreamAbort；
+  MAX_UNCLOSED_OPEN_MARKER_COUNT 同一条红线）→ MalformedToolProtocolStreamAbort；
   长写块体超限 → LongToolContentStreamAbort。执行权裁决在裁决层（G5：
   任何协议错误 → 整轮零执行），filter 永不执行、永不误放行。
 """
@@ -193,7 +193,7 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
     - 嵌套：某个 line-start open 未闭合且其后仍有 line-start open（块序
       混乱，协议损坏，裁决层同样整轮拒）。
     - 未闭合 line-start open 数 > MAX_UNCLOSED_TOOL_START_MARKERS（与裁决层
-      MAX_UNCLOSED_OPEN_MARKERS 同一条红线；line-start 子集 ≤ plain 全量，
+      MAX_UNCLOSED_OPEN_MARKER_COUNT 同一条红线；line-start 子集 ≤ plain 全量，
       「流式 abort ⟹ 裁决整轮拒」恒成立）。
 
     尾部不完整 marker 前缀（chunk 切在 marker 中间）→ 先等后续 chunk 确认，

@@ -764,20 +764,20 @@
       "description": "FICLONE ioctl（Linux reflink）：_IOW(0x94, 9, int)；文件克隆的系统调用号，平台协议值（无物理单位）。"
     },
     {
-      "name": "_MAX_RETAINED_CALLS",
+      "name": "_MAX_RETAINED_CALL_COUNT",
       "file": "agent_py_agent/agent/backends/bounded_call.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "这是残留资源保护上限，不是业务并发配置；不能由单次调用放大，optional 必须为基础调用保留一席。"
     },
     {
-      "name": "_MESSAGE_HASH_LIMIT",
+      "name": "_MESSAGE_HASH_LIMIT_COUNT",
       "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
       "value": 512,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "缓存诊断一次最多散列 512 条消息：控制诊断扫描规模，防止超大缓存拖垮查询。"
     },
     {
       "name": "MAX_DECISION_INPUT_BYTES",
@@ -785,7 +785,7 @@
       "value": 262144,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "决策请求输入上限 256 KiB：防超大请求体撑爆内存。"
     },
     {
       "name": "MAX_DECISION_JSON_DEPTH",
@@ -793,15 +793,15 @@
       "value": 16,
       "unit": "",
       "category": "上限预算",
-      "description": ""
+      "description": "决策请求 JSON 嵌套最多 16 层：防超深结构把解析撑爆，无物理单位。"
     },
     {
-      "name": "MAX_DECISION_JSON_NODES",
+      "name": "MAX_DECISION_JSON_NODE_COUNT",
       "file": "agent_py_agent/agent/backends/decision_protocol.py",
       "value": 16384,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "决策请求 JSON 最多 16384 个节点：防超深超宽结构把解析撑爆。"
     },
     {
       "name": "MAX_DECISION_RESPONSE_BYTES",
@@ -809,7 +809,7 @@
       "value": 1048576,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "决策响应上限 1 MiB：防超大响应撑爆解析。"
     },
     {
       "name": "_LONG_QUOTA_WINDOW_SECONDS",
@@ -825,13 +825,13 @@
       "value": 30.0,
       "unit": "秒",
       "category": "重试",
-      "description": ""
+      "description": "重试等待上限 30 秒：服务商 Retry-After 超此值按 30 秒封顶，防无限等待。"
     },
     {
-      "name": "_UNLABELED_REJECTION_ATTEMPTS",
+      "name": "_UNLABELED_REJECTION_ATTEMPT_COUNT",
       "file": "agent_py_agent/agent/backends/gateway_helpers.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "重试",
       "description": "不改变其它 400 的\"不重试\"语义，不重试未知错误，也不掩盖 typed 错误。"
     },
@@ -841,13 +841,13 @@
       "value": 64,
       "unit": "",
       "category": "上限预算",
-      "description": ""
+      "description": "严格 JSON 校验嵌套最多 64 层：防畸形深嵌套请求拖垮解析，无物理单位。"
     },
     {
-      "name": "_PROBE_MAX_ATTEMPTS",
+      "name": "_PROBE_MAX_ATTEMPT_COUNT",
       "file": "agent_py_agent/agent/backends/http.py",
       "value": 3,
-      "unit": "",
+      "unit": "个",
       "category": "重试",
       "description": "探针只缓存成功证据；短暂失败允许之后重试，但单次探测有界。"
     },
@@ -897,7 +897,7 @@
       "value": 40000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "文本协议单个未闭合块最多 40000 字符：finalize 级防护，防超长块撑爆。"
     },
     {
       "name": "MAX_RESPONSE_CHARS",
@@ -905,21 +905,21 @@
       "value": 200000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "文本协议整个响应最多 200000 字符：超限整轮拒绝，防响应洪泛。"
     },
     {
-      "name": "MAX_TEXT_CALLS",
+      "name": "MAX_TEXT_CALL_COUNT",
       "file": "agent_py_agent/agent/backends/text_protocol_parser.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "文本协议一轮最多 64 个好块：超限整轮拒绝，防工具调用洪泛。"
     },
     {
-      "name": "MAX_UNCLOSED_OPEN_MARKERS",
+      "name": "MAX_UNCLOSED_OPEN_MARKER_COUNT",
       "file": "agent_py_agent/agent/backends/text_protocol_parser.py",
       "value": 1,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "MalformedToolProtocolStreamAbort 对齐（边界层与裁决层同一条红线）。"
     },
@@ -929,7 +929,7 @@
       "value": 64000,
       "unit": "tokens",
       "category": "其它",
-      "description": ""
+      "description": "Jev 请求上下文预算 64000 tokens：整请求窗口上限，超限拒绝而不外推。"
     },
     {
       "name": "JEV_STATE_QUESTION_TOKENS",
@@ -937,7 +937,7 @@
       "value": 32000,
       "unit": "tokens",
       "category": "其它",
-      "description": ""
+      "description": "Jev 状态+问题预算 32000 tokens：按状态与问题规模计费标定的上限。"
     },
     {
       "name": "_JEV_BOUND_BYTES_PER_TOKEN",
@@ -945,7 +945,7 @@
       "value": 2,
       "unit": "tokens",
       "category": "其它",
-      "description": ""
+      "description": "Jev 计费换算：每 token 折 2 字节：来自 4 次真实请求标定（约 2.3 倍余量）。"
     },
     {
       "name": "_JEV_BOUND_FIXED_TOKENS",
@@ -953,15 +953,15 @@
       "value": 1024,
       "unit": "tokens",
       "category": "其它",
-      "description": ""
+      "description": "Jev 请求固定开销 1024 tokens：计费公式 C=ceil(B/2)+256Q+1024 的固定项。"
     },
     {
-      "name": "_JEV_BOUND_MAX_QUESTIONS",
+      "name": "_JEV_BOUND_MAX_QUESTION_COUNT",
       "file": "agent_py_agent/agent/backends/typesafe_decision_wire.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "Jev 请求问题数上限 64：防问题清单膨胀超出计费标定范围。"
     },
     {
       "name": "_JEV_BOUND_MAX_STATE_BYTES",
@@ -969,7 +969,7 @@
       "value": 4096,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "Jev 状态正文上限 4096 字节：防超大状态撑爆请求。"
     },
     {
       "name": "_JEV_BOUND_MAX_TOKENS",
@@ -977,7 +977,7 @@
       "value": 57600,
       "unit": "tokens",
       "category": "上限预算",
-      "description": ""
+      "description": "Jev 请求 token 上限 57600（0.9×64k 窗口）：留出余量防超窗。"
     },
     {
       "name": "_JEV_BOUND_TOKENS_PER_QUESTION",
@@ -985,7 +985,7 @@
       "value": 256,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "Jev 计费换算：每题折 256 tokens：来自真实请求标定，无物理单位。"
     },
     {
       "name": "_TOOL_INPUT_PROGRESS_FLUSH_CHARS",
@@ -993,7 +993,7 @@
       "value": 8192,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "工具输入进度累计 8192 字符刷一次：平衡进度推送频率与开销。"
     },
     {
       "name": "_TOOL_INPUT_PROGRESS_FLUSH_SECONDS",
@@ -1001,15 +1001,15 @@
       "value": 1.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "工具输入进度每 1 秒刷一次：控制推送频率，防刷屏。"
     },
     {
-      "name": "_PROBE_MAX_ATTEMPTS",
+      "name": "_PROBE_MAX_ATTEMPT_COUNT",
       "file": "agent_py_agent/agent/backends/vision_capability.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "重试",
-      "description": ""
+      "description": "看图探测最多试 2 次：一次失败可能是偶发，再多会拖慢探测；证据以成功回包为准。"
     },
     {
       "name": "_MAX_ATTACHMENT_COUNT",
@@ -3908,12 +3908,12 @@
       "description": "面板渲染超时秒数；超时按失败处理并回退，防止插件卡死主界面。"
     },
     {
-      "name": "MAX_ENTRY_ARGS",
+      "name": "MAX_ENTRY_ARG_COUNT",
       "file": "agent_py_agent/agent/plugin_entry.py",
       "value": 16,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "插件入口参数最多 16 个：防畸形 argv 撑爆启动参数。"
     },
     {
       "name": "MAX_PLUGIN_FILES",
@@ -3956,12 +3956,12 @@
       "description": "宿主 API 标题的最大字符数；超长截断，保持面板标题一行显示。"
     },
     {
-      "name": "INSTALLATION_STATE_LIMIT",
+      "name": "INSTALLATION_STATE_LIMIT_BYTES",
       "file": "agent_py_agent/agent/plugin_installation_state.py",
       "value": 16777216,
-      "unit": "",
+      "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "插件安装状态文件上限 16 MiB：防损坏/恶意状态文件撑爆内存。"
     },
     {
       "name": "MAX_OBSERVATION_CANDIDATE_COUNT",
@@ -4057,7 +4057,7 @@
       "value": 12,
       "unit": "个文件",
       "category": "上限预算",
-      "description": ""
+      "description": "唤醒事实最多来自 12 个文件：限制后台唤醒读取范围，防扫描爆炸。"
     },
     {
       "name": "DEFAULT_LEASE_SECONDS",
@@ -4076,20 +4076,20 @@
       "description": ": 宽限期默认 2×lease（find_orphaned_attempts grace_seconds 缺省值）。"
     },
     {
-      "name": "MAX_DELIVERY_ATTEMPTS",
+      "name": "MAX_DELIVERY_ATTEMPT_COUNT",
       "file": "agent_py_agent/agent/runtime_db/operations.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "重试",
       "description": ": K.6：投递重试上限，超限进 dead-letter（完整证据保留，可人工重放）。"
     },
     {
-      "name": "_MAX_ERROR_TEXT",
+      "name": "_MAX_ERROR_TEXT_CHARS",
       "file": "agent_py_agent/agent/runtime_errors.py",
       "value": 300,
-      "unit": "",
+      "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "错误文本最多回 300 字符：超长截断，防错误信息撑爆回执。"
     },
     {
       "name": "_FOLLOW_UP_UNREADABLE_DEADLINE_FACTOR",
@@ -4348,36 +4348,36 @@
       "description": "浏览器登录的等待期限：超过就要求重新点登录，不让一次授权无限期有效。"
     },
     {
-      "name": "_MAX_INPUT_MODALITIES",
+      "name": "_MAX_INPUT_MODALITY_COUNT",
       "file": "agent_py_agent/agent/settings/model_provider_schema.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "模型输入模态最多 8 种：防滥填撑大决策材料。"
     },
     {
-      "name": "_MAX_REASONING_LEVELS",
+      "name": "_MAX_REASONING_LEVEL_COUNT",
       "file": "agent_py_agent/agent/settings/model_provider_schema.py",
       "value": 12,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "模型推理档位最多 12 档：防滥填无效档位。"
     },
     {
-      "name": "_MAX_USAGE_TAGS",
+      "name": "_MAX_USAGE_TAG_COUNT",
       "file": "agent_py_agent/agent/settings/model_provider_schema.py",
       "value": 16,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "模型用途标签最多 16 个：防滥填撑大决策材料。"
     },
     {
-      "name": "_MAX_LEDGER_RECORDS",
+      "name": "_MAX_LEDGER_RECORD_COUNT",
       "file": "agent_py_agent/agent/settings/parameter_changes.py",
       "value": 500,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "设置修改台账最多保留 500 条：超限轮转，防 JSONL 无限增长。"
     },
     {
       "name": "_MAX_TEXT_CHARS",
@@ -4385,7 +4385,7 @@
       "value": 500,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "设置修改台账单条文本最多 500 字符：防超长记录撑爆台账。"
     },
     {
       "name": "_REQUEST_TIMEOUT_SECONDS",
@@ -4401,15 +4401,15 @@
       "value": 3600,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "推理探测 running 记录 3600 秒未结束视为已中断：防 Gateway 重启后陈旧记录卡死。"
     },
     {
-      "name": "PROBE_ROUNDS",
+      "name": "PROBE_ROUND_COUNT",
       "file": "agent_py_agent/agent/settings/reasoning_probe_judge.py",
       "value": 3,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "推理探测每组档位发 3 次：按轮交替发送，减少时段漂移影响。"
     },
     {
       "name": "_MIN_GAP_TOKENS",
@@ -4417,7 +4417,7 @@
       "value": 200,
       "unit": "tokens",
       "category": "其它",
-      "description": ""
+      "description": "推理探测判支持至少多 200 token：与 1.5 倍中位数共同防止噪声误判。"
     },
     {
       "name": "_MIN_RATIO",
@@ -4612,20 +4612,20 @@
       "description": "连续失败段里最多列出的不同工具名/参数名。"
     },
     {
-      "name": "_DISPLAY_PLAN_MAX_ITEMS",
+      "name": "_DISPLAY_PLAN_MAX_ITEM_COUNT",
       "file": "agent_py_agent/agent/task_progress.py",
       "value": 128,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "展示计划最多 128 项：控制回执体积，防计划清单膨胀。"
     },
     {
-      "name": "_OPEN_ID_LIMIT",
+      "name": "_OPEN_ID_LIMIT_COUNT",
       "file": "agent_py_agent/agent/task_progress_guidance.py",
       "value": 24,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": "模块用途: 统一生成 Todo 收尾软提醒，避免工具回执和后台续轮各写一套不同规则。"
+      "description": "Todo 收尾软提醒最多列 24 个 open id：防清单过长刷屏，超出的只给计数。"
     },
     {
       "name": "_FALLBACK_SCAN_MAX_FILES",

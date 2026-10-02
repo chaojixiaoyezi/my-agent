@@ -7,9 +7,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from statistics import median
 
-# 三组请求的档位；空串表示不带任何推理字段（服务商默认）。每组发 PROBE_ROUNDS 次，按轮交替发送，减少时段漂移的影响。
+# 三组请求的档位；空串表示不带任何推理字段（服务商默认）。每组发 PROBE_ROUND_COUNT 次，按轮交替发送，减少时段漂移的影响。
 PROBE_LEVELS = ("low", "max", "")
-PROBE_ROUNDS = 3
+# 推理探测每组档位发 3 次：按轮交替发送，减少时段漂移影响。
+PROBE_ROUND_COUNT = 3
 VERDICT_SUPPORTED = "supported"
 VERDICT_UNSUPPORTED = "unsupported"
 VERDICT_INCONCLUSIVE = "inconclusive"
@@ -18,6 +19,7 @@ MEASURE_OUTPUT = "output_tokens"
 # “支持”必须同时满足：max 组中位数至少是 low 组的 1.5 倍、至少多 200 个 token，并且两组完全不重叠
 # （max 组最少的一次也比 low 组最多的一次多）。同分布下三对三完全不重叠的概率只有 1/20，噪声很难凑出“支持”。
 _MIN_RATIO = 1.5
+# 推理探测判支持至少多 200 token：与 1.5 倍中位数共同防止噪声误判。
 _MIN_GAP_TOKENS = 200
 # 服务商认为请求参数不合法时的状态码；带字段的两组全被这样拒绝、不带字段的一组全部成功，才算“拒绝了这个字段”。
 _REJECT_STATUS = frozenset({400, 422})
@@ -86,7 +88,7 @@ def judge_reasoning_samples(samples: list[ProbeSample]) -> ProbeVerdict:
     if _field_rejected(groups):
         return ProbeVerdict(VERDICT_UNSUPPORTED, "field_rejected")
     measure, counts = _measured_counts(groups)
-    if any(len(values) < PROBE_ROUNDS for values in counts.values()):
+    if any(len(values) < PROBE_ROUND_COUNT for values in counts.values()):
         return ProbeVerdict(VERDICT_INCONCLUSIVE, "incomplete" if any(not sample.ok for sample in samples) else "no_usage")
     low, high, default = (int(median(counts[level])) for level in PROBE_LEVELS)
     medians = {"measure": measure, "low_median": low, "max_median": high, "default_median": default}
@@ -121,7 +123,7 @@ __all__ = [
     "MEASURE_OUTPUT",
     "MEASURE_REASONING",
     "PROBE_LEVELS",
-    "PROBE_ROUNDS",
+    "PROBE_ROUND_COUNT",
     "VERDICT_INCONCLUSIVE",
     "VERDICT_SUPPORTED",
     "VERDICT_UNSUPPORTED",

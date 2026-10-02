@@ -25,8 +25,8 @@ from agent_py_agent.agent.agent_core.tool_stream import (
 from agent_py_agent.agent.backends.text_protocol_parser import (
     MAX_BLOCK_CHARS,
     MAX_RESPONSE_CHARS,
-    MAX_TEXT_CALLS,
-    MAX_UNCLOSED_OPEN_MARKERS,
+    MAX_TEXT_CALL_COUNT,
+    MAX_UNCLOSED_OPEN_MARKER_COUNT,
     scan_text_blocks,
 )
 from agent_py_agent.agent.backends.tool_protocol_adapter import (

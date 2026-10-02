@@ -37,7 +37,9 @@ from .user_config_capability import (
 )
 
 LEDGER_NAME = "settings-changes.jsonl"
-_MAX_LEDGER_RECORDS = 500
+# 设置修改台账最多保留 500 条：超限轮转，防 JSONL 无限增长。
+_MAX_LEDGER_RECORD_COUNT = 500
+# 设置修改台账单条文本最多 500 字符：防超长记录撑爆台账。
 _MAX_TEXT_CHARS = 500
 _TRUE_WORDS = frozenset({"true", "1", "yes", "on", "开", "开启", "是"})
 _FALSE_WORDS = frozenset({"false", "0", "no", "off", "关", "关闭", "否"})
@@ -249,7 +251,7 @@ def _append_record(ledger: Path, key: str, row: _ChangeRow, masked: bool) -> dic
     }
     entry.update({name: item for name, item in (("target", row.target), ("reverts", row.reverts)) if item})
     _ensure_private_file(ledger)
-    append_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORDS)
+    append_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORD_COUNT)
     return entry
 
 

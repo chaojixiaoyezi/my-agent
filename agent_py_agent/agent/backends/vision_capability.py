@@ -30,7 +30,8 @@ VISION_UNAVAILABLE = "unavailable"
 # 探针用的四种纯色；模型必须用结构化工具参数回答其中一个，文字回答不算。
 _PROBE_COLORS = {"red": (255, 0, 0), "green": (0, 160, 0), "blue": (0, 0, 255), "yellow": (255, 220, 0)}
 _PROBE_TOOL_NAME = "my_agent_vision_probe"
-_PROBE_MAX_ATTEMPTS = 2
+# 看图探测最多试 2 次：一次失败可能是偶发，再多会拖慢探测；证据以成功回包为准。
+_PROBE_MAX_ATTEMPT_COUNT = 2
 _PROBE_TOOL = {
     "name": _PROBE_TOOL_NAME,
     "description": "Internal vision capability probe with no host-side effect. Report the dominant color of the attached image.",
@@ -130,7 +131,7 @@ def probe_vision_capability(backend: object) -> VisionCapability:
     if not bool(getattr(tool_probe(), "native_supported", False)):
         return VisionCapability(VISION_UNAVAILABLE, "probe_unavailable", "native_tools_unsupported")
     evidence = "probe_no_attempt"
-    for attempt in range(1, _PROBE_MAX_ATTEMPTS + 1):
+    for attempt in range(1, _PROBE_MAX_ATTEMPT_COUNT + 1):
         color = secrets.choice(sorted(_PROBE_COLORS))
         image = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                              "data": base64.b64encode(probe_png_bytes(color)).decode("ascii")}}

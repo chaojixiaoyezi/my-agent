@@ -7,10 +7,14 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 
+# 决策请求输入上限 256 KiB：防超大请求体撑爆内存。
 MAX_DECISION_INPUT_BYTES = 262_144
+# 决策响应上限 1 MiB：防超大响应撑爆解析。
 MAX_DECISION_RESPONSE_BYTES = 1_048_576
+# 决策请求 JSON 嵌套最多 16 层：防超深结构把解析撑爆，无物理单位。
 MAX_DECISION_JSON_DEPTH = 16
-MAX_DECISION_JSON_NODES = 16_384
+# 决策请求 JSON 最多 16384 个节点：防超深超宽结构把解析撑爆。
+MAX_DECISION_JSON_NODE_COUNT = 16_384
 
 
 # LLM: 决策输入窗口判断需要与后端发送前同一套 token 估算口径；估算实现留在 memory_archive.tokens
@@ -87,10 +91,10 @@ def decision_json(value: object, *, limit: int = MAX_DECISION_INPUT_BYTES) -> by
     while pending:
         item, depth = pending.pop()
         nodes += 1
-        if depth > MAX_DECISION_JSON_DEPTH or nodes > MAX_DECISION_JSON_NODES:
+        if depth > MAX_DECISION_JSON_DEPTH or nodes > MAX_DECISION_JSON_NODE_COUNT:
             raise DecisionInputError("决策材料层数或条目过多。")
         if type(item) in (dict, list):
-            if len(item) + len(pending) + nodes > MAX_DECISION_JSON_NODES:
+            if len(item) + len(pending) + nodes > MAX_DECISION_JSON_NODE_COUNT:
                 raise DecisionInputError("决策材料条目过多。")
             members, key_characters = _json_members(item)
             characters += key_characters

@@ -47,6 +47,7 @@ from .transport_timing import (
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 409, 425, 429, 502, 503, 504, 529})
 _RETRYABLE_HTTP_DELAYS_SECONDS = (2.0, 5.0, 15.0)
+# 重试等待上限 30 秒：服务商 Retry-After 超此值按 30 秒封顶，防无限等待。
 _MAX_RETRY_AFTER_SECONDS = 30.0
 _NETWORK_IO_ERRORS = (
     urllib.error.URLError,
@@ -209,7 +210,7 @@ def _emit_provider_attempt(event: dict[str, object], timing: AttemptTiming | Non
 # 父代理整轮卡住。这里只对这一种客观形状做**有界**重试：最多一次，且必须同时满足
 # ①HTTP 400 ②body 里没有 message/type/code 三个定位字段 ③没有任何工具已在本轮执行。
 # 不改变其它 400 的"不重试"语义，不重试未知错误，也不掩盖 typed 错误。
-_UNLABELED_REJECTION_ATTEMPTS = 2
+_UNLABELED_REJECTION_ATTEMPT_COUNT = 2
 
 
 # 函数用途: 判断一次 400 是否属于"供应商没给任何定位信息的瞬时拒绝"。
@@ -234,13 +235,13 @@ def _is_unlabeled_provider_rejection(exc: urllib.error.HTTPError) -> bool:
 # 函数用途: 对"无定位信息的 400"做一次有界重试，其它异常原样抛出。
 def _retry_unlabeled_rejection(operation):
     last: urllib.error.HTTPError | None = None
-    for attempt in range(_UNLABELED_REJECTION_ATTEMPTS):
+    for attempt in range(_UNLABELED_REJECTION_ATTEMPT_COUNT):
         try:
             return operation()
         except urllib.error.HTTPError as exc:
             _dump_provider_rejection(exc)
             last = exc
-            if not _is_unlabeled_provider_rejection(exc) or attempt + 1 >= _UNLABELED_REJECTION_ATTEMPTS:
+            if not _is_unlabeled_provider_rejection(exc) or attempt + 1 >= _UNLABELED_REJECTION_ATTEMPT_COUNT:
                 raise _runtime_http_error(exc) from exc
     raise _runtime_http_error(last) from last  # pragma: no cover - 循环内必已 raise
 

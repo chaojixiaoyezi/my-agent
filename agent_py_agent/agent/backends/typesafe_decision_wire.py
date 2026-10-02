@@ -18,17 +18,25 @@ from .decision_protocol import (
 from .errors import ProviderResponseError
 from .gateway_helpers import gateway_request_body
 
+# Jev 请求上下文预算 64000 tokens：整请求窗口上限，超限拒绝而不外推。
 JEV_REQUEST_CONTEXT_TOKENS = 64_000
+# Jev 状态+问题预算 32000 tokens：按状态与问题规模计费标定的上限。
 JEV_STATE_QUESTION_TOKENS = 32_000
 # jev_wire_bytes.v1 是版本化的代码方法，不是用户配置：C = ceil(B/2) + 256*Q + 1024。
 # 标定依据：4 次真实 64,921–65,063 字节、27 题请求计费 17,352–17,383 输入（C≈40.5k，约 2.3 倍余量）；
 # 官方示例 173 字节、1 题计费 296（C=1367）。只在标定范围内使用，超出即拒绝而不外推。
 JEV_EMPIRICAL_BOUND_METHOD = "jev_wire_bytes.v1"
+# Jev 计费换算：每 token 折 2 字节：来自 4 次真实请求标定（约 2.3 倍余量）。
 _JEV_BOUND_BYTES_PER_TOKEN = 2
+# Jev 计费换算：每题折 256 tokens：来自真实请求标定，无物理单位。
 _JEV_BOUND_TOKENS_PER_QUESTION = 256
+# Jev 请求固定开销 1024 tokens：计费公式 C=ceil(B/2)+256Q+1024 的固定项。
 _JEV_BOUND_FIXED_TOKENS = 1024
-_JEV_BOUND_MAX_QUESTIONS = 64
+# Jev 请求问题数上限 64：防问题清单膨胀超出计费标定范围。
+_JEV_BOUND_MAX_QUESTION_COUNT = 64
+# Jev 状态正文上限 4096 字节：防超大状态撑爆请求。
 _JEV_BOUND_MAX_STATE_BYTES = 4096
+# Jev 请求 token 上限 57600（0.9×64k 窗口）：留出余量防超窗。
 _JEV_BOUND_MAX_TOKENS = 57_600  # 0.9 × 64k 整请求窗口
 _JEV_BOUND_POINTS = frozenset({"skill_tool", "curator"})
 
@@ -43,7 +51,7 @@ def jev_empirical_input_bound(body: bytes, payload: dict, *, point: str) -> Inpu
     state_bytes = len(gateway_request_body(payload.get("state")))
     tokens = (-(-len(body) // _JEV_BOUND_BYTES_PER_TOKEN) + _JEV_BOUND_TOKENS_PER_QUESTION * len(questions)
               + _JEV_BOUND_FIXED_TOKENS)
-    if (type(point) is not str or point not in _JEV_BOUND_POINTS or len(questions) > _JEV_BOUND_MAX_QUESTIONS
+    if (type(point) is not str or point not in _JEV_BOUND_POINTS or len(questions) > _JEV_BOUND_MAX_QUESTION_COUNT
             or state_bytes > _JEV_BOUND_MAX_STATE_BYTES or tokens > _JEV_BOUND_MAX_TOKENS):
         raise ModelCallBudgetError("input_bound_out_of_calibration")
     return InputTokenBound(tokens=tokens, kind="empirical", method=JEV_EMPIRICAL_BOUND_METHOD, body_bytes=len(body),

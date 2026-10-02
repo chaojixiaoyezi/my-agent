@@ -13,7 +13,8 @@ from typing import Any
 # must never recover ids from titles, goals, final text, or artifact names.
 # 模块用途: 统一生成 Todo 收尾软提醒，避免工具回执和后台续轮各写一套不同规则。
 
-_OPEN_ID_LIMIT = 24
+# Todo 收尾软提醒最多列 24 个 open id：防清单过长刷屏，超出的只给计数。
+_OPEN_ID_LIMIT_COUNT = 24
 
 
 # LLM: This switch controls extra model-context guidance only. It must not alter
@@ -51,9 +52,9 @@ def task_progress_closeout_contract(open_item_ids: object) -> dict[str, Any]:
         "schema_version": "task-progress-closeout-guidance.v1",
         "severity": "soft",
         "blocking": False,
-        "open_item_ids": exact_ids[:_OPEN_ID_LIMIT],
+        "open_item_ids": exact_ids[:_OPEN_ID_LIMIT_COUNT],
         "open_count": len(exact_ids),
-        "ids_truncated": len(exact_ids) > _OPEN_ID_LIMIT,
+        "ids_truncated": len(exact_ids) > _OPEN_ID_LIMIT_COUNT,
         "before_final": {
             "tool": "task_progress",
             "action": "update",

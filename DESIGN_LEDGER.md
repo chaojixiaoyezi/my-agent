@@ -1,5 +1,25 @@
 # 设计台账
 
+## P10 常数整改第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，基于 `d55cb266c`，已实现，待集成）
+
+- **背景**：P10 白名单按模块分批清理，本批是最后一批——白名单主组 groups[0] 剩余全部 41 个常数
+  （`agent/backends/` 约 26 个、`agent/settings/` 约 10 个、agent 根/零散几个；`_PROBE_MAX_ATTEMPTS`
+  在 http.py 与 vision_capability.py 两处定义），目标 **41→0 清空主组**。
+- **做法**：
+  - 按生成器后缀表改名 19 个唯一名：数量上限补 `_COUNT` 17 个（`_MAX_RETAINED_CALLS→…_COUNT`、
+    `_PROBE_MAX_ATTEMPTS→_PROBE_MAX_ATTEMPT_COUNT` 两处定义同步、`MAX_TEXT_CALLS→MAX_TEXT_CALL_COUNT`、
+    `MAX_DELIVERY_ATTEMPTS→MAX_DELIVERY_ATTEMPT_COUNT`、`PROBE_ROUNDS→PROBE_ROUND_COUNT` 等）、
+    字符补 `_CHARS` 1 个（`_MAX_ERROR_TEXT→_MAX_ERROR_TEXT_CHARS`）、字节补 `_BYTES` 1 个
+    （`INSTALLATION_STATE_LIMIT→INSTALLATION_STATE_LIMIT_BYTES`）；全仓词边界改引用 23 文件 65 处，重 grep 旧名 0 残留；
+  - 补上方中文说明 34 处（含 vision_capability.py 的 `_PROBE_MAX_ATTEMPT_COUNT` 补紧邻说明）；
+  - 无物理单位 5 个（深度 `MAX_DECISION_JSON_DEPTH`/`_STRICT_JSON_MAX_DEPTH`、换算率 `_JEV_BOUND_TOKENS_PER_QUESTION`、
+    除数 `MODEL_OUTPUT_WINDOW_DIVISOR`、比率 `_MIN_RATIO`）只补说明、挪入白名单无单位组；
+  - `test_constant_names_unique._ALLOWED` 键 `PROBE_MAX_ATTEMPTS→PROBE_MAX_ATTEMPT_COUNT`。
+  - 数值一律不变、不碰其它模块。
+- **白名单/目录**：主组 41→0 清空、无单位组 39→44；目录重建 804 项 `--check` 一致。
+- **验证**：守卫 13 passed；相关 22 个测试文件全过（累计 492）；guards9 168 passed；import 0 条、ruff 过、
+  doc-sync PASS、code-size strict hard=0、diff-check 过、clean-package OK、size_diff 新增 0。详见 TESTS.md 第九批节。
+
 ## 补充查询片段材料：先预检每个片段能新增的事实（J8，P5-A 缺口 1）（2026-10-02，分支 `claude/be-jev-snippet-facts`，基于 `claude/3a-step16z` `918285cc1`，已实现，待集成）
 
 - **问题**：09-25 语义召回实验里，K3a 两批都选了主题已被原召回覆盖的片段，补不出东西。原因是 Jev 只看得到基线摘要和片段文字，不知道哪个片段真能补出新事实。

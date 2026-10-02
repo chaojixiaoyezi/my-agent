@@ -139,7 +139,7 @@ OUTBOX_FAILED = "FAILED"
 OUTBOX_DEAD_LETTER = "DEAD_LETTER"
 
 #: K.6：投递重试上限，超限进 dead-letter（完整证据保留，可人工重放）。
-MAX_DELIVERY_ATTEMPTS = 8
+MAX_DELIVERY_ATTEMPT_COUNT = 8
 
 # inbox 状态（K.4）：重复投递由 effect_key UNIQUE 去重，只处理一次。
 INBOX_RECEIVED = "RECEIVED"

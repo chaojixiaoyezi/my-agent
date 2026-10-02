@@ -91,6 +91,15 @@
   `_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER` 倍数、`_WAKE_FACT_DEPTH_LIMIT` 深度、`_CHARS_PER_TOKEN_WINDOW` 换算率）只补说明
   挪入无单位组。数值一律不变；目录重建 800 项 `--check` 一致；白名单 320→225＋无单位组 28→32（只减不增；
   `_MAX_RECORDS` 恢复是回滚 sync 脚本误删，非新增）。
+- **P10 第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，已实现，待集成）**：白名单主组 **41→0 清空**——
+  整改 `agent_py_agent/agent/backends/`（26 个）、`agent/settings/`（约 10 个）及 agent 根/零散几个（`_PROBE_MAX_ATTEMPTS`
+  在 http.py 与 vision_capability.py 两处定义）共 41 个待整改常数：按后缀表改名 19 个唯一名（数量上限补 `_COUNT` 17 个，
+  如 `_PROBE_MAX_ATTEMPTS→_PROBE_MAX_ATTEMPT_COUNT`、`MAX_TEXT_CALLS→MAX_TEXT_CALL_COUNT`、`MAX_DELIVERY_ATTEMPTS→
+  MAX_DELIVERY_ATTEMPT_COUNT`、`PROBE_ROUNDS→PROBE_ROUND_COUNT`，字符补 `_CHARS` 1 个 `_MAX_ERROR_TEXT→…_CHARS`、字节补
+  `_BYTES` 1 个 `INSTALLATION_STATE_LIMIT→…_BYTES`，全仓 23 文件 65 处重 grep 0 残留）；已有单位后缀 17 个只补中文说明；
+  无物理单位 5 个（`MAX_DECISION_JSON_DEPTH`/`_STRICT_JSON_MAX_DEPTH` 深度、`_JEV_BOUND_TOKENS_PER_QUESTION` 换算率、
+  `MODEL_OUTPUT_WINDOW_DIVISOR` 除数、`_MIN_RATIO` 比率）只补说明挪入无单位组。数值一律不变；
+  目录重建 804 项 `--check` 一致；白名单 41→0＋无单位组 39→44（只减不增）。
 - **P10 第八批（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，已实现，待集成）**：整改 `agent_py_agent/agent/capability/`
   目录（16 个文件）范围内 **49 个**待整改常数：已有单位后缀 28 个只补中文说明（`_CHARS/_SECONDS/_BYTES/_PERCENT/_TOKENS/_REQUESTS` 等，
   含 `_APPROX_BYTES_PER_TOKEN`）；按后缀表改名 20 个（`_MAX_ATTACHMENTS→_MAX_ATTACHMENT_COUNT`、
