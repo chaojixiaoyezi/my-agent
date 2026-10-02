@@ -1,4 +1,8 @@
-"""P12：固定档案不拼接聊天凭据，失效不回退，只有管理员用户命令能改引用。"""
+"""P12：固定档案不拼接聊天凭据，只有管理员用户命令能改引用。
+
+2026-10-02（3a 定）：指定档案在本 owner 解析不到时改用本 owner 默认模型并留结构化原因
+curator_profile_unavailable_fallback；默认模型也不可用时才是带指定档案编号和原因的类型化失败。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -100,25 +104,39 @@ def test_empty_reference_follows_the_owner_selection(host, monkeypatch):
     assert model == "owner-selected" and seen[0].api_key == "fake-curator-credential"
 
 
-@pytest.mark.parametrize("case,reason", [
+_UNUSABLE_CASES = [
     ("missing", "profile_not_found"), ("default", "profile_not_found"),
     ("capability", "capability_mismatch"), ("disabled", "profile_disabled"),
     ("provider_disabled", "provider_disabled"), ("provider_capability", "capability_mismatch"),
-    ("credential", "credential_missing"), ("catalog", "catalog_invalid"),
-])
-def test_unusable_reference_is_a_typed_failure_with_id_and_never_falls_back(host, tmp_path, case, reason):
-    profile_id, _ = _add(host, capability="embedding" if case == "capability" else "agentic",
-                         enabled=case != "disabled")
+    ("credential", "credential_missing"),
+]
+
+
+@pytest.mark.parametrize("case,reason", _UNUSABLE_CASES)
+def test_unusable_reference_falls_back_to_the_owner_default_with_a_reason(host, case, reason):
+    owner_default, _ = _add(host, model_name="owner-default", api_base="https://owner.example.test/v1")
+    execute_model_profile_operation(host, "set_default", {"profile_id": owner_default})
+    reference = _unusable_reference(host, case)
+    seen = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(core, "get_backend", lambda provider, config: seen.append(config) or SimpleNamespace(name=provider))
+        _, provider, model = core._build_memory_curator_backend(host, host.config, _bind(host, reference))
+        routing = core._curator_model_router(host, host.config, _bind(host, reference))(())
+    assert (provider, model) == ("openai_compatible", "owner-default")
+    assert seen[0].api_base == "https://owner.example.test/v1" and seen[0].stream_enabled is False
+    assert routing.default.model == "owner-default"
+    assert routing.warnings == (f"curator_profile_unavailable_fallback:{reason}",)
+
+
+@pytest.mark.parametrize("case,reason", [*_UNUSABLE_CASES, ("catalog", "catalog_invalid")])
+def test_unusable_reference_and_owner_default_is_a_typed_failure_with_id(host, tmp_path, case, reason):
+    owner_default, _ = _add(host, model_name="owner-default", api_base="https://owner.example.test/v1")
+    execute_model_profile_operation(host, "set_default", {"profile_id": owner_default})
     path = model_profiles_path(host.home_paths)
     data = json.loads(path.read_text(encoding="utf-8"))
-    provider = data["providers"][data["profiles"][profile_id]["provider_id"]]
-    if case in {"provider_disabled", "provider_capability", "credential"}:
-        provider.update(enabled=case != "provider_disabled", capabilities=["embedding"] if case == "provider_capability" else ["agentic"],
-                        api_key="" if case == "credential" else provider["api_key"])
-        path.write_text(json.dumps(data), encoding="utf-8")
-    if case == "catalog":
-        path.write_text("broken", encoding="utf-8")
-    reference = str(uuid4()) if case == "missing" else "default" if case == "default" else profile_id
+    data["profiles"][owner_default]["enabled"] = False  # 本 owner 默认模型也不可用
+    path.write_text(json.dumps(data), encoding="utf-8")
+    reference = _unusable_reference(host, case)
     config = _bind(host, reference)
     backend, _, _ = core._build_memory_curator_backend(host, host.config, config)
     assert backend.name == "unconfigured"
@@ -137,6 +155,22 @@ def test_unusable_reference_is_a_typed_failure_with_id_and_never_falls_back(host
     diagnostic = json.loads(warning.split("=", 1)[1])
     assert diagnostic["profile_id"] == reference and diagnostic["profile_reason"] == reason
     assert "fake-curator" not in json.dumps(diagnostic) and not service.state_store.load().per_thread_cursors
+
+
+# 函数用途: 按用例造一个在本 owner 解析不到的整理档案引用（另起一个服务商，改坏它不会连带 owner 默认模型）。
+def _unusable_reference(host, case):
+    profile_id, _ = _add(host, capability="embedding" if case == "capability" else "agentic",
+                         enabled=case != "disabled", api_base="https://fixed.example.test/v1")
+    path = model_profiles_path(host.home_paths)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    provider = data["providers"][data["profiles"][profile_id]["provider_id"]]
+    if case in {"provider_disabled", "provider_capability", "credential"}:
+        provider.update(enabled=case != "provider_disabled", capabilities=["embedding"] if case == "provider_capability" else ["agentic"],
+                        api_key="" if case == "credential" else provider["api_key"])
+        path.write_text(json.dumps(data), encoding="utf-8")
+    if case == "catalog":
+        path.write_text("broken", encoding="utf-8")
+    return str(uuid4()) if case == "missing" else "default" if case == "default" else profile_id
 
 
 def test_old_keys_warn_without_alias_or_conversion(host):
@@ -187,7 +221,8 @@ def test_settings_show_reports_id_and_model_for_running_and_saved_references(hos
     assert "running-curator" in result.message and "saved-curator" in result.message and "仅用户" in result.message
     _bind(host, "missing-id")
     result = _command(host, monkeypatch, f"/settings show {KEY}")
-    assert result.ok and "profile_not_found" in result.message and "未回退" in result.message
+    assert result.ok and "profile_not_found" in result.message
+    assert "改用本用户默认模型：deployment-test" in result.message
 
 
 def test_model_text_and_tui_lists_display_the_stable_profile_id(host, monkeypatch):

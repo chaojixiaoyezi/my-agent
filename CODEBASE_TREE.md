@@ -423,6 +423,7 @@ agent_py_agent/
 |   |   |-- decision_curator.py       # 可选用户后台分类/优先级标注，失败保留原批次且不拥有记忆写权限
 |   |   |-- decision_curator_relation.py # 同阶段的完整来源—正式条目关系建议，精确版本复查且不直接合并或晋升
 |   |   |-- curator_commit.py         # Daily/Candidate/state/run audit 整批提交与崩溃恢复
+|   |   |-- curator_routing.py        # 按会话主代理模型分组：挑本次处理的那组、审计事件只跟默认组、按组投影熔断游标、汇总多组结果
 |   |   |-- curator_*.py              # Curator 输入、Schema、正式记忆快照、状态与运行审计辅助模块
 |   |   |-- daily.py                  # v2 DailyMemoryEvent 稳定序列、幂等合并与按天账本
 |   |   |-- jsonl.py                  # 正式 long_term 稳定 ID CRUD/batch、冲突、hard delete 与召回
@@ -642,7 +643,7 @@ agent_py_agent/
 |   |   |-- parameter_metadata.py    # 参数登记表元数据自动推导（单位/范围/归属模块/读取方），只读纯函数
 |   |   |-- parameter_changes.py      # 参数中心唯一写入口：按来源写对应文件、按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
-|   |   |-- curator_profile.py          # 固定 Curator 档案整组解析，失效诊断与设置型号展示，不建第二模型目录
+|   |   |-- curator_profile.py          # 固定 Curator 档案整组解析（本 owner 解析不到时改用其默认模型并留原因）；留空时只读解析各会话的主代理模型（不可用带原因退回默认），失效诊断与设置型号展示
 |   |   |-- embedding_profile.py        # 嵌入档案引用解析（capability=embedding）、失效诊断、向量库身份（P13/P14）
 |   |   |-- decision_probe.py           # 显式原生连接测试，共用后端/worker/账本，不改开关或聊天选择
 |   |   |-- decision_settings.py        # 原 owner/thread 决策覆盖共用读取、字段修改、恢复继承与双版本 CAS
@@ -1134,6 +1135,7 @@ agent_py_agent/
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
+|   |-- test_curator_thread_model_routing.py # 记忆整理按会话主代理模型分组：各调各的、失败不重复落账、坏 JSON 用默认补跑、按组熔断、路由只读
 |   |-- test_curator_input_budget.py   # Curator 输入预算缩批：按最终提示实测长度截尾、尾部重放不丢、标注前缩批、预算失败不复用旧尝试形状
 |   |-- test_curator_model_not_configured.py # 没配模型的 owner：永久配置错误不原地重试、独立失败码、发现层与 Curator 同源一小时退避
 |   |-- test_curator_model_profile.py   # 固定连接/空值沿用/失效原因/旧键告警，用户专属写边界与 TUI/IM 档案编号展示
@@ -1590,6 +1592,7 @@ docs/
 - `agent_py_agent/agent/settings/decision_settings.py`：原设置界面和工具共用服务；原 owner 模型目录及线程字段保存覆盖，锁序 owner→thread，版本冲突拒绝覆写。
 - `agent_py_agent/agent/conversation/decision_service.py`、`decision_policy.py`、`decision_model_call.py`：分别负责建议策略、连接隔离和实际模型调用；复用原存储/准入/取消/账本，不建立第二份任务权威。
 - `agent_py_agent/agent/conversation/decision_observe_nonblocking.py`：observe 不挡主链路（开关 `observe_nonblocking_enabled`）的唯一后台执行器，只执行决策服务交来的已登记调用，负责结果行、独立用量结算与完成回调，不另建决策状态。
+- `agent_py_agent/agent/memory_store/curator_routing.py`：记忆整理按“消息来源会话的主代理模型”分组的纯函数。批内第一条消息所在的组先跑，工具审计事件只跟 owner 默认模型那组；熔断历史只看同一模型、且投影到本组会话的游标；一次触发里多组结果汇总。路由表由组合根 `core._curator_model_router` 经 `settings/curator_profile.curator_thread_profiles` 只读解析后注入。
 - `agent_py_agent/agent/memory_store/decision_curator.py`：原用户后台批次的临时分类/优先级建议；关闭不准备，失败保留完整输入，原提取/提交仍唯一。
 - `agent_py_agent/agent/memory_store/decision_curator_relation.py`：完整来源和正式 long-term 版本的可选关系注释；复用同一阶段、原仓库和账本，没有直接合并/晋升权限。消息×正式条目对数超过上限时按标准库 BM25 词面相似度挑前 32 对（同分保持原枚举顺序、无嵌入调用），并在 `state.coverage` 声明总对数、展示对数与挑选规则。
 - `agent_py_agent/tests/test_decision_curator_relation.py`：验证关系输入完整性、失效、原模型账本、作用域和 Curator 提取提交，fake 模型不代表真实语义质量。

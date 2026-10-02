@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -50,12 +50,21 @@ from .curator_models import (
     CURATOR_REPLAY_BREAKER_OPEN,
     CURATOR_REPLAY_DETERMINISTIC_CODES,
     CuratorExtraction,
+    CuratorModelRouting,
     CuratorRunResult,
     MemoryCuratorConfig,
     MemoryCuratorState,
     curator_failure_retry_seconds,
     curator_replay_breaker_tripped,
     validate_curator_state,
+)
+from .curator_routing import (
+    CURATOR_DEFAULT_FALLBACK_CODES,
+    CURATOR_MODEL_GROUP_MAX_COUNT,
+    combined_run_result,
+    group_breaker_history,
+    group_cursor_view,
+    route_batch,
 )
 from .curator_run_log import (
     RUN_WARNING_MAX_CHARS,
@@ -125,6 +134,9 @@ class MemoryCuratorDependencies:
     # 升级自愈:每次持 lease 执行前自动应用 Memory v2 迁移(幂等),失败不阻断提炼。
     migration_service: object | None = None
     annotate_batch: Callable[[CuratorInputBatch, str, float], tuple[CuratorInputBatch, tuple[str, ...]]] | None = None
+    # 记忆整理按会话的主代理模型走：组合根在“没指定整理档案”时注入，传入本批会话编号，返回各会话该用哪组模型；
+    # 为 None（指定了档案、旧调用方、测试替身）时全批用 backend，与改动前一致。
+    model_router: Callable[[tuple[str, ...]], CuratorModelRouting] | None = None
 
 
 # LLM: Run context binds one acquired lease to its pre-run cursor snapshot; helpers cannot use a
@@ -139,6 +151,9 @@ class _RunContext:
     expires_at: str
     state_before: MemoryCuratorState
     recovery: dict[str, object]
+    # 本次运行实际用的那组模型（provider/model/backend/会话/是否带审计/剩余组数/补跑失败码），由 _execute 填写，
+    # 成功与失败记账都从这里取；没有路由时为空，记账回到服务实例的 provider/model。
+    route: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: 触发/调度/失败结果与执行链分离:Lifecycle 只做持久化触发、lease 获取与结果构造,
@@ -194,43 +209,6 @@ class _CuratorLifecycleMixin:
                 return self._result(status="succeeded", reason="promote_backlog")
         return self._result(status="not_due", reason="interval")
 
-    # LLM: Recovery runs before lease acquisition; an unexpired prior lease remains busy, while
-    # an expired partial transaction is rolled back before any new input is processed.
-    # 函数用途: 显式或自动执行一次 Curator 并返回无正文运行摘要。
-    def run(
-        self,
-        *,
-        reason: str,
-        force: bool = False,
-        now: datetime | None = None,
-    ) -> CuratorRunResult:
-        if not self.config.enabled and not force:
-            return self._result(status="disabled", reason=reason)
-        try:
-            self.committer.recover_incomplete(now=now)
-        except CuratorStateCorruptError as exc:
-            # 崩溃恢复阶段也读 state: 损坏同样隔离留证, 不进无落账的 unleased 路径。
-            return self._corrupt_failure(reason, exc)
-        except Exception as exc:
-            return self._unleased_failure(reason, _failure_code(exc))
-        try:
-            acquired = self.state_store.acquire(
-                reason=reason,
-                config_revision=self.config.revision(),
-                lease_seconds=_lease_seconds(self.config),
-                now=now,
-            )
-        except CuratorStateCorruptError as exc:
-            # 损坏 state 拒绝接管: 不 acquire、不消费、不自动重跑, 隔离留证转人工。
-            return self._corrupt_failure(reason, exc)
-        if acquired is None:
-            return self._result(status="busy", reason=reason)
-        context = _run_context(reason, *acquired)
-        try:
-            return self._execute(context)
-        except Exception as exc:
-            return self._commit_failure(context, exc)
-
     # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries
     # without deleting the reason or skipping input. 退避时长与 owner_wake_discovery 共用
     # curator_failure_retry_seconds：普通失败沿维护周期（30–300 秒），CURATOR_MODEL_NOT_CONFIGURED 等一小时，
@@ -263,19 +241,22 @@ class _CuratorLifecycleMixin:
         failure_code = _failure_code(exc)
         finished_at = utc_now_iso()
         state_code, breaker_warnings = _replay_breaker(self.run_log, context, failure_code)
+        provider = str(context.route.get("provider", self.provider_name))
+        model = str(context.route.get("model", self.model_name))
         try:
             self.run_log.append(
                 _failed_run_record(
                     context,
-                    provider=self.provider_name,
-                    model=self.model_name,
+                    provider=provider,
+                    model=model,
                     finished_at=finished_at,
                     failure_code=failure_code,
                     failure_diagnostic=_failure_diagnostic(exc),
                     # 缩批/重试的形状来自本线程最后一次 extract_with_retries;失败时它是唯一能
                     # 说明"空批失败还是大批量超时"的证据,所以必须在失败审计里落盘。
-                    attempt_warnings=(*breaker_warnings,
-                                      *_attempt_shape_warnings(last_model_attempts())[: RUN_WARNINGS_MAX_COUNT - 2]),
+                    # 路由警告（默认模型来源、档案退回原因）也进失败记录，总数给失败诊断留一个位置。
+                    attempt_warnings=(*breaker_warnings, *context.route.get("warnings", ()), *context.route.get("failure_warnings", ()),
+                                      *_attempt_shape_warnings(last_model_attempts()))[: RUN_WARNINGS_MAX_COUNT - 1],
                 )
             )
         except Exception:
@@ -295,8 +276,8 @@ class _CuratorLifecycleMixin:
             run_id=context.run_id,
             status="failed",
             reason=context.reason,
-            provider=self.provider_name,
-            model=self.model_name,
+            provider=provider,
+            model=model,
             failure_code=failure_code,
         )
 
@@ -457,6 +438,8 @@ class _CuratorExecutionMixin:
             return self._commit_batch(
                 context, batch, None, extra_warnings=migration_warnings
             )
+        # 按会话的主代理模型挑出这一次处理的那组会话；没有路由时全批照旧。
+        batch = _apply_route(context, batch, self.dependencies.model_router)
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)
         migration_warnings = (*migration_warnings, *fit_warnings)
@@ -464,20 +447,12 @@ class _CuratorExecutionMixin:
         if annotate is not None:
             batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, self.config))
             migration_warnings = (*migration_warnings, *decision_warnings)
-        # 提取可能因超时按比例缩批重试,返回的 batch 才是本次真正喂给模型的输入快照:
-        # 证据验证、processed 前缀和游标推进都必须按同一快照计算,否则等待重放时引用不上。
-        # 会话头绑定必须包住整次提取:要求会话头的服务商在发请求前就会拒绝无会话请求,而后台线程
-        # 没有前台的 ContextVar;bounded_call 的 copy_context 会把这里的值带进供应商调用线程。
-        with provider_session_scope((self.owner_id,), context.run_id):
-            attempt = extract_with_retries(self.backend, self.config, batch)
+        attempt, validated = self._extract_for_route(context, batch)
         if attempt.shrink_attempts:
             migration_warnings = (
                 *migration_warnings,
                 f"memory_curator_input_shrunk:{attempt.shrink_attempts}",
             )
-        validated = validate_extraction(
-            attempt.extraction, attempt.batch, owner_id=self.owner_id
-        )
         return self._commit_batch(
             context, attempt.batch, validated, extra_warnings=migration_warnings
         )
@@ -556,8 +531,8 @@ class _CuratorExecutionMixin:
         run_record = _successful_run_record(
             context,
             prepared,
-            provider=self.provider_name,
-            model=self.model_name,
+            provider=str(context.route.get("provider", self.provider_name)),
+            model=str(context.route.get("model", self.model_name)),
             finished_at=finished_at,
         )
         state_commit = _success_commit(
@@ -623,8 +598,8 @@ class _CuratorExecutionMixin:
             run_id=context.run_id,
             status="succeeded",
             reason=context.reason,
-            provider=self.provider_name,
-            model=self.model_name,
+            provider=str(context.route.get("provider", self.provider_name)),
+            model=str(context.route.get("model", self.model_name)),
             processed_messages=prepared.cursor.processed_messages,
             processed_audit_events=prepared.cursor.processed_audit_events,
             daily_events=len(committed.daily_events),
@@ -671,10 +646,101 @@ class _CuratorExecutionMixin:
         return promoted, tuple(dict.fromkeys(warnings))
 
 
+# LLM: 一次触发的运行编排与按组取模型：run 按会话主代理模型分组依次跑完整运行（_run_once 负责恢复、租约和失败记账），
+#   _extract_for_route 用本组模型提取并在确定性失败时用 owner 默认模型补跑一次。只经 _execute/_commit_failure 等原链
+#   读写账本，不直接碰 Daily/Candidate；改动同步 test_curator_thread_model_routing.py 与 test_memory_curator_v2.py。
+# 类用途: 提供 Curator 一次触发的分组运行和按组选模型的提取。
+class _CuratorRunMixin:
+    # LLM: 按会话主代理模型分组时，一次触发依次处理各组：每组是一次完整运行（租约、提取、一次事务提交），
+    #   成功且还有组没处理才接着跑下一组，最多 CURATOR_MODEL_GROUP_MAX_COUNT 组；任何一组没成功就停在那组，
+    #   已提交的组不会重复落账，那组游标不动、按原规则安全重放。没有路由时只跑一次，与改动前一致。
+    # 函数用途: 显式或自动执行 Curator（可能连续处理几组会话）并返回汇总后的无正文运行摘要。
+    def run(
+        self,
+        *,
+        reason: str,
+        force: bool = False,
+        now: datetime | None = None,
+    ) -> CuratorRunResult:
+        results: list[CuratorRunResult] = []
+        remaining = 1
+        while remaining and len(results) < CURATOR_MODEL_GROUP_MAX_COUNT:
+            result, remaining = self._run_once(reason=reason, force=force, now=now)
+            results.append(result)
+            if result.status != "succeeded":
+                break
+        return combined_run_result(results)
+
+    # LLM: Recovery runs before lease acquisition; an unexpired prior lease remains busy, while
+    # an expired partial transaction is rolled back before any new input is processed.
+    #   返回（结果, 本批还剩几组没处理）；剩余组数只在成功时有意义，由 _execute 写在 context.route。
+    # 函数用途: 显式或自动执行一次 Curator 运行并返回无正文运行摘要。
+    def _run_once(
+        self,
+        *,
+        reason: str,
+        force: bool = False,
+        now: datetime | None = None,
+    ) -> tuple[CuratorRunResult, int]:
+        if not self.config.enabled and not force:
+            return self._result(status="disabled", reason=reason), 0
+        try:
+            self.committer.recover_incomplete(now=now)
+        except CuratorStateCorruptError as exc:
+            # 崩溃恢复阶段也读 state: 损坏同样隔离留证, 不进无落账的 unleased 路径。
+            return self._corrupt_failure(reason, exc), 0
+        except Exception as exc:
+            return self._unleased_failure(reason, _failure_code(exc)), 0
+        try:
+            acquired = self.state_store.acquire(
+                reason=reason,
+                config_revision=self.config.revision(),
+                lease_seconds=_lease_seconds(self.config),
+                now=now,
+            )
+        except CuratorStateCorruptError as exc:
+            # 损坏 state 拒绝接管: 不 acquire、不消费、不自动重跑, 隔离留证转人工。
+            return self._corrupt_failure(reason, exc), 0
+        if acquired is None:
+            return self._result(status="busy", reason=reason), 0
+        context = _run_context(reason, *acquired)
+        try:
+            return self._execute(context), int(context.route.get("remaining", 0) or 0)
+        except Exception as exc:
+            return self._commit_failure(context, exc), 0
+
+    # LLM: 用本组模型提取并校验；会话自己的模型在提取/校验阶段确定性失败（CURATOR_DEFAULT_FALLBACK_CODES）且不是默认组时，
+    #   本次运行内用 owner 默认模型补跑一次：此时还没写任何东西，幂等不受影响；成功后运行记录写实际用的默认模型并加
+    #   curator_thread_model_failed:<码>，补跑也失败就按这次运行记一次失败（熔断按运行计，不按尝试计）。每组每次最多补跑一次。
+    # 函数用途: 执行一次有界的模型提取与证据校验，必要时用默认模型补跑。
+    def _extract_for_route(self, context: _RunContext, batch: CuratorInputBatch):
+        route = context.route
+        try:
+            return self._extract_with(route.get("backend", self.backend), context, batch)
+        except Exception as exc:
+            code = _failure_code(exc)
+            default = route.get("default")
+            if default is None or route.get("is_default", True) or code not in CURATOR_DEFAULT_FALLBACK_CODES:
+                raise
+            route["failure_warnings"] = (f"curator_thread_model_failed:{code}",)
+        result = self._extract_with(default.backend, context, batch)
+        route.update(provider=default.provider, model=default.model,
+                     fallback_warnings=(f"curator_thread_model_failed:{code}",))
+        return result
+
+    # LLM: 提取可能因超时按比例缩批重试，返回的 batch 才是真正喂给模型的输入快照：证据验证、processed 前缀和游标推进
+    #   都必须按同一快照计算。会话头绑定必须包住整次提取（后台线程没有前台 ContextVar，bounded_call 会复制这里的值）。
+    # 函数用途: 用指定后端提取一次并按同一输入快照校验。
+    def _extract_with(self, backend: object, context: _RunContext, batch: CuratorInputBatch):
+        with provider_session_scope((self.owner_id,), context.run_id):
+            attempt = extract_with_retries(backend, self.config, batch)
+        return attempt, validate_extraction(attempt.extraction, attempt.batch, owner_id=self.owner_id)
+
+
 # LLM: This is the only background Memory extraction service used by Gateway maintenance, CLI,
 # compact, task completion, and lifecycle signals.
 # 类用途: 执行一个 owner 的增量 Daily/Candidate 策展闭环。
-class MemoryCuratorService(_CuratorExecutionMixin, _CuratorLifecycleMixin):
+class MemoryCuratorService(_CuratorRunMixin, _CuratorExecutionMixin, _CuratorLifecycleMixin):
     # LLM: Construction wires existing canonical services and creates only a transaction
     # coordinator; it starts no thread, daemon, or second scheduler.
     # 函数用途: 初始化唯一 Curator 服务及其可恢复提交器。
@@ -924,6 +990,27 @@ def _without_identity_conflicts(candidate_service: CandidateService, prepared: _
     return replace(prepared, candidates=kept, warnings=warnings)
 
 
+# LLM: 组合根注入的路由器只读解析各会话的主代理模型（ConversationThread.model_profile_id），这里只按结果切子批，
+#   并把本组的后端、provider/model、会话、是否带审计、剩余组数和兜底警告记进 context.route，供提取、记账和熔断使用。
+#   路由器为 None（指定了整理档案、旧调用方）时原样返回，全批用服务实例的 backend，与改动前一致。
+# 函数用途: 按会话模型给这一次运行挑出那组会话，返回只含这组的输入。
+def _apply_route(
+    context: _RunContext,
+    batch: CuratorInputBatch,
+    router: Callable[[tuple[str, ...]], CuratorModelRouting] | None,
+) -> CuratorInputBatch:
+    if router is None:
+        return batch
+    routing = router(tuple(dict.fromkeys(item.thread_id for item in batch.messages)))
+    routed = route_batch(batch, routing)
+    context.route.update(
+        backend=routed.route.backend, provider=routed.route.provider, model=routed.route.model,
+        default=routing.default, is_default=routed.include_audit, threads=routed.thread_ids,
+        include_audit=routed.include_audit, remaining=routed.remaining_groups, warnings=routed.warnings,
+    )
+    return routed.batch
+
+
 # LLM: 只读最近的运行账；本次是确定性失败（提交被拒/输出解析失败），且之前紧挨着的几次都在同一起始游标上
 #   确定性失败时，state 改记 CURATOR_REPLAY_BREAKER_OPEN（退避一小时，发现层同源），运行账保留真实失败码并加
 #   curator_replay_breaker_open:<真实失败码> 警告，打日志告警。读运行账出错时不熔断，按原失败码处理。
@@ -931,12 +1018,20 @@ def _without_identity_conflicts(candidate_service: CandidateService, prepared: _
 def _replay_breaker(run_log: CuratorRunLog, context: _RunContext, failure_code: str) -> tuple[str, tuple[str, ...]]:
     if failure_code not in CURATOR_REPLAY_DETERMINISTIC_CODES:
         return failure_code, ()
+    route = context.route
+    grouped = "threads" in route
     try:
-        previous = run_log.recent_finished(CURATOR_REPLAY_BREAKER_FAILURE_COUNT - 1)
+        # 按会话模型分组时多读几条再筛本组历史：别的组夹在中间的运行不打断本组的确定性失败计数。
+        count = (CURATOR_REPLAY_BREAKER_FAILURE_COUNT - 1) * (CURATOR_MODEL_GROUP_MAX_COUNT if grouped else 1)
+        previous = run_log.recent_finished(count)
     except Exception:
         return failure_code, ()
     cursor = _cursor_payload(context.state_before.per_thread_cursors, context.state_before.last_processed_audit_event_id)
-    if not curator_replay_breaker_tripped(failure_code, cursor, previous):
+    view = None
+    if grouped:
+        view = group_cursor_view(tuple(route["threads"]), bool(route.get("include_audit")))
+        previous = group_breaker_history(previous, (str(route.get("provider", "")), str(route.get("model", ""))), view)
+    if not curator_replay_breaker_tripped(failure_code, cursor, previous, view):
         return failure_code, ()
     _LOGGER.warning("memory curator replay breaker open: the same input failed %d times in a row (%s)",
                     CURATOR_REPLAY_BREAKER_FAILURE_COUNT, failure_code)
@@ -978,7 +1073,9 @@ def _prepare_outputs(
     candidates = tuple(
         _fill_candidate_promotion_authority(item) for item in extraction.candidates
     )
-    return _PreparedOutputs(daily, candidates, cursor, model_warnings)
+    # 按会话模型分组时的宿主警告（档案退回、会话退回默认的原因计数、补跑原因）放在最前，保证进运行记录、不被模型警告挤掉。
+    host_warnings = (*context.route.get("warnings", ()), *context.route.get("fallback_warnings", ()))
+    return _PreparedOutputs(daily, candidates, cursor, (*host_warnings, *model_warnings)[:RUN_WARNINGS_MAX_COUNT])
 
 
 # LLM: Host authority comes from the shared typed candidate policy. This adapter only fills the

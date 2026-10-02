@@ -177,6 +177,28 @@ schema 不看开关 → 1；不重验上限/附件根 → 1；不查重复引用
 - 没做：真实 Gateway/TUI/IM 的 `/attach` → 派工全链（主会话带图走 J11 已验路径，本次从 task_attributes 起）；视频附件；
   被归档/压缩掉的历史附件引用；孙代理真实派工（组件链已验）。
 
+## 记忆整理跟着消息来源会话的主代理模型走（2026-10-02，分支 `claude/be-curator-thread-model`，基于 `5a56714dc`）
+
+**新增 `test_curator_thread_model_routing.py`（15 项）**：服务层用真实 ConversationStore、候选库、state、运行账，后端是按提示里消息编号回显的脚本化后端。
+- 两个会话两个模型：两次调用各用各的模型、只看到自己会话的消息，两个会话游标都推进，两条运行记录分别写 model-a、model-d，退回默认的会话带 `curator_thread_model_fallback:<原因>:<条数>`。
+- 后一组失败：前一组已提交、汇总计数含它；失败组游标不动；修好后重跑，前一组不再调用、不重复落账。
+- 会话模型坏 JSON：自己的模型只试一次，默认模型补跑成功；运行记录写 model-d，并带 `curator_thread_model_failed:CURATOR_SCHEMA_INVALID`。
+- 会话模型网络类失败（CURATOR_MODEL_FAILED）：不补跑，也不接着跑别的组。
+- 按组熔断：会话 A 自己的模型和默认补跑都失败，B 每轮先成功；第 3 次 A 失败时仍熔断（state 记 `CURATOR_REPLAY_BREAKER_OPEN`）。
+- 纯函数：审计事件只跟默认组、剩余组数（含只剩审计的默认组）、退回原因计数；本组熔断历史不含别的模型的失败、不含没动本组游标的成功；多组结果汇总。
+- 组合根路由器（真实模型目录 + 真实会话存储）：没选 → 默认（不写会话）；选了可用 → 用它；选了已删档案 → 退回默认带 `profile_not_found`；指定了整理档案 → 不路由。
+- 普通用户在自己的目录里解析：默认 = 管理员指定的初始模型；选了管理员共享的模型能用；选了管理员没共享的 → 退回默认带原因。
+- 没有自己档案的普通用户（model-less）：记忆整理的默认模型和 `selected_model_config`（主代理同一条解析）一致——部署配置有模型时用它并记 `curator_default_model_source:deployment_default`，管理员指定初始模型后跟着换成它并记 `admin_initial`；部署配置也没模型时主代理和记忆整理都是未配置，运行失败 `CURATOR_MODEL_NOT_CONFIGURED`，失败记录带 `deployment_default`，游标不动。
+- 全局指定的档案只在管理员目录里：管理员不路由；普通用户改用自己的默认模型、不按会话分组，路由表带 `curator_profile_unavailable_fallback:profile_not_found`，这条警告进运行记录并排最前（只有审计事件的运行也带）。
+
+**改 `test_curator_model_profile.py`**：原“指定档案失效不回退”拆成两条，7 种失效（编号不存在、写 default、用途不符、停用、服务商停用、服务商用途不符、缺凭据）→ 改用 owner 默认模型、建的是默认模型的后端、路由表带 `curator_profile_unavailable_fallback:<原因>`；owner 默认也停用时（再加目录损坏），仍是带指定档案编号和原因的类型化失败。`/settings show` 写“改用本用户默认模型：<型号>”。
+
+**变异 13 个、拦下 12 个**：挑最后一条消息的组、审计跟任何组走、剩余组数恒为 0、不补跑、任何失败码都补跑、补跑成功仍记会话模型、熔断不按组筛、本组历史留下别的模型的失败、宿主警告不进运行记录、解析时给会话写默认、不可用档案不记原因、指定档案时仍路由。
+- 存活 1 个是等价变异：去掉“这组没成功就停”的 `break`。单次运行失败时本来就返回“剩余 0 组”，循环自己会停，这个 break 只是第二道保险。
+
+**回归**：所有用到 Curator 服务、整理档案设置、组合根建 Curator 的测试文件，以及经真实 agent 跑整理、唤醒发现的测试文件全部通过（见门禁）。
+
+**真实核对**：隔离 home、官方 MiniMax（owner 默认）与官方 DeepSeek（会话 A），一次触发两次运行全部成功（见 DESIGN_LEDGER 同名节）。
 
 ## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`）
 

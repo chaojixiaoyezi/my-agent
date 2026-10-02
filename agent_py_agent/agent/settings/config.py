@@ -352,6 +352,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_recovery_target_percent: int = 60
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
+    # 留空时按消息来源会话的主代理模型整理（2026-10-02 用户拍板），会话没选或不可用时用 owner 默认；填编号则固定用它，
+    # 某个 owner 解析不到这个编号时该 owner 改用自己的默认模型（curator_profile_unavailable_fallback）。
     memory_curator_model_profile: str = ""
     memory_curator_interval_seconds: int = 10_800
     memory_curator_turn_threshold: int = 10

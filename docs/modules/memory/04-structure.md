@@ -658,6 +658,13 @@ retention 的恢复材料扫描同样按这两个规范根进行（`retention_sc
 
 retention 扫描根与深度不再写死在本模块：`retention_scan._recovery_roots` 从 `conversation.workspace_paths` 推导规范根（`validated_durable_work_path` 列出全部持久工作根，`canonical_task_root(owner_home, path)` 判断"给定路径是不是规范任务根"），`O/runs/<date>/<key>`、旧 `O/tasks/<date>/<key>`（深度 2）与 `O/audits/<audit_id>`（深度 1）各按自己的深度校验，深一层或浅一层都不算任务根；三处 `rglob`（`_iter_task_states`、`_tool_output_actions`、`_subagent_scratch_actions`）都先过这个判断，`tool_output` 仍只扫旧 `O/tasks`，`audit` 类别（`O/audit/*.jsonl`）一律跳过。`retention.apply` 的整份拒绝维持原样（`plan.errors` 或 `legal_hold` 非空即 `applied=False`、零动作），单棵子树错误只隔离那一棵：`_without_errored_subtrees` 先算出错误路径自身的键集合（逐条解析后取并集）和"错误 + 全部祖先"集合，再对每个动作做两次 O(深度) 查表，判据是单向的"错误是动作的祖先"或"动作是错误的祖先"——两边都取祖先集合求交会命中公共祖先、把兄弟目录误判成同一棵树。
 
+## Curator 按会话主代理模型分组（2026-10-02）
+
+- 路由由组合根注入：`core._curator_model_router` 在没指定整理档案、或指定档案在本 owner 解析不到时生成（后者只有一个组：owner 默认模型 + 整批警告 `curator_profile_unavailable_fallback:<原因>`，由 `settings/curator_profile.curator_model_config_with_fallback` 解析）；没指定时用 `settings/curator_profile.curator_thread_profiles` 只读解析各会话的 `model_profile_id`，建好各组后端，组成 `curator_models.CuratorModelRouting`。
+- `curator_routing.route_batch` 挑本次处理的那组（批内第一条消息所在的组），切出只含这组会话的子批；工具审计事件只跟默认组。
+- `_CuratorRunMixin.run` 依次调用 `_run_once`（每组一次完整运行），没成功就停；`_extract_for_route` 在会话模型确定性失败时用默认模型补跑一次。路由警告在 `_prepare_outputs` 里排到运行记录警告最前，失败记录也带（`_commit_failure`）。整批路由警告由 `core._curator_route_warnings` 生成：指定档案退回原因、owner 默认模型来源（`settings/curator_profile.curator_default_model_source`）。
+- `_replay_breaker` 在分组时用 `group_breaker_history` + `group_cursor_view` 只看本组历史，熔断码与退避仍写 owner 级 state。
+
 ## Curator 提交前的身份冲突剔除与重放熔断（2026-10-02）
 
 - `candidates.merge_candidate_observations` 是候选账本唯一合并入口，保持严格：同一观察身份对应不同类型化主题时，抛 `CandidateIdentityConflictError`（ValueError 子类）。

@@ -129,6 +129,38 @@
   证据 `~/.my-agent/decision-evidence/subagent-media-8378ff9a9/`。
 - **3a 集成补**：ef 的 M3 真实核对里，子代理先说“没有解码附件的工具”才去看图。清单在标记行后加一句软提示“这些附件已作为本轮消息里的图片/视频直接给你，可以直接看，不需要工具读取或解码。”（只是提示，不参与任何判断）。
 
+## 记忆整理跟着消息来源会话的主代理模型走（用户拍板第 2 条细化，2026-10-02，分支 `claude/be-curator-thread-model`，基于 `claude/3a-step16z` `5a56714dc`，已实现，待集成）
+
+- **用户原话**：“那不能按主代理的走吗？我可能开 5-10 个 tui，普通用户就 1 个飞书或者别的 IM。”
+- **之前**：`memory_curator_model_profile` 留空时，整批都用 owner 当前选中的模型，后端在建 agent 时一次性建好。
+- **现在**（留空时；指定了档案仍固定用它，和以前一样）：
+  - 模型身份只读结构化事实：组合根经 `settings/curator_profile.curator_thread_profiles` 直接 `threads.load` 读 `ConversationThread.model_profile_id`，不走会写默认值的 `thread_model_profile_id`。
+  - 会话没选过模型 → owner 默认；选的档案解析失败（`ModelProfileError.reason`，如 `profile_not_found`）、目录读不了（`catalog_unreadable`）、连接字段缺（`model_configuration_missing`，如订阅登出）、后端建不出来（`backend_unavailable`）→ 退回 owner 默认，原因按条数记进运行记录 `curator_thread_model_fallback:<原因>:<条数>`。
+  - 一批里按生效档案分组，每组是一次完整运行（租约、提取、校验、一次事务提交都沿原合同），一次触发依次跑完（最多 `CURATOR_MODEL_GROUP_MAX_COUNT`=8 组）。
+    - 组的顺序：批内第一条消息（按会话最近更新时间从早到晚收集）所在的组先跑。
+    - 游标只推进本组会话；工具审计事件只跟 owner 默认那组走（审计游标是全局连续前缀，拆开就推不动）。默认组没有消息但有审计事件时，最后单独跑一次。
+    - 某组没成功就停在那组：已提交的组不会重复落账，失败组游标不动、按原规则安全重放。
+  - 会话自己的模型在提取或校验阶段确定性失败（`CURATOR_SCHEMA_INVALID`，比如不擅长严格 JSON）时，本次运行用 owner 默认模型补跑一次（3a 建议）。
+    - 这时还没写任何东西，幂等不受影响；成功就照常提交，运行记录写实际用的默认模型，并加 `curator_thread_model_failed:<码>`。
+    - 补跑也失败就只记这一次运行失败：熔断按运行计，不按尝试计。
+    - 网络、额度、超时、提交失败都不补跑。每组每次最多补跑一次。
+  - 熔断仍是 owner 级（退避和熔断码与以前相同），但“同一输入”的判断改成按组：只看同一模型的历史运行、游标投影到本组会话（默认组再加审计游标）；没推进本组游标的成功不打断计数。所以别的组夹在中间成功，也不会让一直失败的组无限重放。
+  - 运行记录与返回结果的 provider/model 写本组实际用的模型；多组时返回汇总结果（计数相加，状态取最后一组），加 `curator_model_groups:<组数>`。
+- **每个 owner 在自己的目录里解析**（3a 要求，step17c 背景：step17b 时全局指定的档案只在 local/main 的目录里，别的 owner 解析成 `profile_not_found`，整理一直不跑，日志 257 条）：
+  - 会话模型和 owner 默认模型都用该 owner 的 agent（`agent.home_paths`）经 `selected_model_config` 解析，管理员共享给它的（`shared:<编号>`）和管理员指定的初始模型都算；解析不到按上面的结构化原因退回。
+  - owner 默认模型和主代理走同一条解析（`model_profiles._default_for_owner`）：自己选过就用自己的；没选过的普通用户在管理员指定了初始模型时用它，否则用部署配置。用到 owner 默认时运行记录（成功和失败都）写 `curator_default_model_source:admin_initial|deployment_default`（自己选过的不记）。
+  - 没有自己档案的 owner（model-less）：生产里飞书用户 `ou_16d7…` 和测试 owner `tui-matrix/p1-r141-local-compact` 就是。核对（10-02，只看结构化字段）：管理员没设初始模型（`shared-model-profiles.json` 的 `initial_profile` 为空）、部署配置没有模型；这个飞书用户 6 次主代理运行（09-25）全部失败，从来没聊通过。所以它们的记忆整理和主代理一样解析不到模型，失败是 `CURATOR_MODEL_NOT_CONFIGURED`，现在失败记录会写 `curator_default_model_source:deployment_default`，不会越过主代理去找别的模型。要让它们能用：管理员在 /model 里指定“其他用户的初始模型”，或共享一个模型让用户自己选。
+- **全局指定了档案、但某个 owner 解析不到时**（3a 定，2026-10-02）：
+  - 这个 owner 改用自己的默认模型（`settings/curator_profile.curator_model_config_with_fallback`），每次运行的运行记录排最前写 `curator_profile_unavailable_fallback:<原因>`；建实例时只记一条 info 日志，不再刷 warning。
+  - 指定档案只对能解析到它的 owner 生效；能解析到的 owner 和以前完全一样（不路由、建实例时建一次后端）。解析不到的 owner 每次运行重新解析一次，档案后来能用了就自动用它。
+  - 退回时不按会话分组，整批用该 owner 默认模型；owner 默认模型也不可用时，仍是带指定档案编号和原因的类型化失败（`CURATOR_MODEL_NOT_CONFIGURED`，按原规则退避一小时）。
+  - `/settings show memory_curator_model_profile` 写“本用户不可用：<原因>（改用本用户默认模型：<型号>）”。这改了 P12 原来“指定档案失效不回退”的约定。
+- **有意不做**：按组隔离失败（一组坏了别的组照跑）需要按组记失败与退避，熔断也要按组持久化，工作量约翻倍，记成后续可选项。现在一个模型持续失败时，熔断前后都会挡住所有组，和改动前（一个模型、全体受阻）相同。
+- **已知局限**：前台忙闲判断（`foreground_model_active`）仍按服务启动时建的默认后端判断，没有按每组的后端判断。
+- **真实核对**（隔离 home、官方 MiniMax M2.7 设为 owner 默认、官方 DeepSeek flash 给会话 A，档案副本 0600 用完删）：一次触发分两次运行、2 次真实调用约 18.7 秒；DeepSeek 处理会话 A、MiniMax 处理会话 B，各 1 条候选，两个会话游标都推进。证据 `~/.my-agent/decision-evidence/j13-curator-retest/thread-model-routing-20261002/`。
+- **文档**：`agent_config.yaml` 与 `AgentConfig` 里这个键的注释（留空的含义、指定档案解析不到时的退回都变了）、MODEL_GUIDE 常见疑问、CODEBASE_TREE。
+- **验证**：见 TESTS.md 同名节。
+
 ## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
 
 - **问题**：step17c 冒烟基本链路（`decision-evidence/step17c-shutdown-rehearsal-38d7c8615/`）里，父代理被子代理完成唤醒的那一轮，

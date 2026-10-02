@@ -187,25 +187,107 @@ def _export_model_endpoint_env(config) -> None:
         os.environ.setdefault("AGENT_MODEL_NAME", model_name)
 
 
-# LLM: 档案与整组连接只由原设置解析器给出，再走唯一后端工厂；失效保留诊断的未配置后端，不回退或创建第二 Agent。
+# LLM: 档案与整组连接只由原设置解析器给出（按该 owner 自己的模型目录，含管理员共享），再走唯一后端工厂，不创建第二 Agent。
+#   指定档案在本 owner 解析不到时（2026-10-02 3a 定：指定档案只对能解析到它的 owner 生效）改用本 owner 默认模型，
+#   只在建实例时记一条 info 日志；运行记录里的 curator_profile_unavailable_fallback:<原因> 由路由器每次运行写。
+#   默认模型也不可用时保留指定档案自己的诊断，返回未配置后端（运行失败为 CURATOR_MODEL_NOT_CONFIGURED，按原规则退避）。
 # 函数用途: 为无工具后台策展构造独立非流式模型适配器，并返回解析后的 provider/model 标识。
 def _build_memory_curator_backend(
     agent: object,
     config: AgentConfig,
     curator_config: MemoryCuratorConfig,
 ) -> tuple[object, str, str]:
+    backend, provider, model, fallback = _curator_backend(agent, curator_config.model_profile)
+    if fallback:
+        logging.getLogger(__name__).info("记忆整理指定档案在本用户不可用，原因=%s，改用本用户默认模型。", fallback)
+    return backend, provider, model
+
+
+# LLM: 不写日志里的退回事实（路由器每次运行都会调它）；返回（后端, provider, model, 退回原因）。
+# 函数用途: 按指定档案（不可用时本 owner 默认模型）建一个无工具非流式后端；都不可用时返回未配置后端。
+def _curator_backend(agent: object, profile_id: str) -> tuple[object, str, str, str]:
     from .backends.base import UnconfiguredBackend
+    from .backends.errors import ModelNotConfiguredError
+    from .settings.curator_profile import curator_model_config_with_fallback
+
+    try:
+        profile_config, fallback = curator_model_config_with_fallback(agent, profile_id)
+    except ModelNotConfiguredError as exc:
+        logging.getLogger(__name__).warning("记忆策展模型不可用，原因=%s，本次不整理。", exc.profile_reason)
+        return UnconfiguredBackend(exc), "", "", ""
+    scoped_config = replace(profile_config, stream_enabled=False)
+    provider, model = str(scoped_config.model_backend), str(scoped_config.model_name)
+    return get_backend(provider, scoped_config), provider, model, fallback
+
+
+# LLM: 记忆整理留空档案时（2026-10-02 用户拍板）按消息来源会话的主代理模型走：每次运行由 Curator 传入本批会话编号，
+#   这里用 settings.curator_profile.curator_thread_profiles 只读解析（不写会话），默认组每次现建（owner 换了默认模型也能跟上），
+#   其余档案各建一个无工具非流式后端。建某个后端失败时，那批会话退回默认组并记 backend_unavailable，不让整次运行失败。
+#   指定了 memory_curator_model_profile 且本 owner 解析得到时返回 None，Curator 全批用固定档案，与改动前一致；解析不到时
+#   返回只有一个组的路由器：每次运行重新解析（档案又能用了就用它），仍不可用就用本 owner 默认模型并带整批警告
+#   curator_profile_unavailable_fallback:<原因>，不按会话分组。用到 owner 默认模型时再记 curator_default_model_source:<来源>。
+# 函数用途: 为后台记忆整理构造“会话 → 模型”的路由器，或在固定档案可用时返回 None。
+def _curator_model_router(agent: object, config: AgentConfig, curator_config: MemoryCuratorConfig):
+    from .memory_store.curator_models import CuratorModelRoute, CuratorModelRouting
+    from .settings.curator_profile import curator_thread_profiles
+
+    fixed = curator_config.model_profile
+    if fixed and _fixed_curator_profile_usable(agent, fixed):
+        return None
+
+    def route(thread_ids: tuple[str, ...]) -> CuratorModelRouting:
+        backend, provider, model, fallback = _curator_backend(agent, fixed)
+        warnings = _curator_route_warnings(agent, fixed, fallback)
+        if fixed:
+            return CuratorModelRouting(CuratorModelRoute(fixed, backend, provider, model, is_default=True), warnings=warnings)
+        plan = curator_thread_profiles(agent, thread_ids)
+        default = CuratorModelRoute(plan.default_profile_id, backend, provider, model, is_default=True)
+        routes = {key: _curator_profile_route(key, value) for key, value in plan.configs.items()}
+        broken = {key for key, value in routes.items() if value is None}
+        groups = {thread: key for thread, key in plan.thread_profiles.items() if key not in broken}
+        reasons = {**plan.fallback_reasons,
+                   **{thread: "backend_unavailable" for thread, key in plan.thread_profiles.items() if key in broken}}
+        return CuratorModelRouting(default, {key: value for key, value in routes.items() if value is not None},
+                                   groups, reasons, warnings)
+
+    return route
+
+
+# LLM: 只在用到 owner 默认模型时记来源（留空、或指定档案退回）；指定档案能用时什么都不记。都是结构化短词，
+#   成功和失败的运行记录都会带上（model-less owner 失败时能看出是“部署默认没配模型”，不是档案问题）。
+# 函数用途: 生成整批共用的路由警告：指定档案退回的原因、owner 默认模型的来源。
+def _curator_route_warnings(agent: object, fixed: str, fallback: str) -> tuple[str, ...]:
+    from .settings.curator_profile import curator_default_model_source
+
+    warnings = [f"curator_profile_unavailable_fallback:{fallback}"] if fallback else []
+    source = curator_default_model_source(agent) if fallback or not fixed else ""
+    if source:
+        warnings.append(f"curator_default_model_source:{source}")
+    return tuple(warnings)
+
+
+# 函数用途: 判断指定的整理档案在本 owner 的目录（含管理员共享）里能不能解析到；只读，不建后端。
+def _fixed_curator_profile_usable(agent: object, profile_id: str) -> bool:
     from .backends.errors import ModelNotConfiguredError
     from .settings.curator_profile import curator_model_config
 
     try:
-        profile_config = curator_model_config(agent, curator_config.model_profile)
-    except ModelNotConfiguredError as exc:
-        logging.getLogger(__name__).warning("记忆策展档案不可用，原因=%s，未自动切换模型。", exc.profile_reason)
-        return UnconfiguredBackend(exc), "", ""
-    scoped_config = replace(profile_config, stream_enabled=False)
-    provider, model = str(scoped_config.model_backend), str(scoped_config.model_name)
-    return get_backend(provider, scoped_config), provider, model
+        curator_model_config(agent, profile_id)
+    except ModelNotConfiguredError:
+        return False
+    return True
+
+
+# 函数用途: 用一个会话档案的完整配置建无工具非流式后端；建不出来返回 None（调用方退回默认组）。
+def _curator_profile_route(profile_id: str, profile_config: object):
+    from .memory_store.curator_models import CuratorModelRoute
+
+    scoped = replace(profile_config, stream_enabled=False)
+    try:
+        backend = get_backend(str(scoped.model_backend), scoped)
+    except Exception:  # noqa: BLE001 - 后端构造失败只让这批会话退回默认模型，不中断整理。
+        return None
+    return CuratorModelRoute(profile_id, backend, str(scoped.model_backend), str(scoped.model_name))
 
 
 # LLM: The composition root is the only adapter allowed to join Memory Store with the existing
@@ -301,6 +383,7 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
         config=curator_config,
         dependencies=MemoryCuratorDependencies(
             backend=backend,
+            model_router=_curator_model_router(agent, config, curator_config),
             conversation_store=agent.conversation_store,
             annotate_batch=lambda batch, run_id, deadline: annotate_curator_batch(
                 agent, batch, run_id, max_input_chars=curator_config.max_input_chars, caller_deadline=deadline,

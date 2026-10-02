@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 828,
+  "count": 829,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3754,6 +3754,14 @@
       "unit": "秒",
       "category": "重试",
       "description": "熔断后的退避秒数：同一批最多每小时重放一次；输入变了或成功后自动恢复原节奏。"
+    },
+    {
+      "name": "CURATOR_MODEL_GROUP_MAX_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_routing.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "没处理到的组照常留到下一次触发。"
     },
     {
       "name": "RUN_WARNINGS_MAX_COUNT",

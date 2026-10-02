@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -125,13 +126,48 @@ def curator_failure_retry_seconds(failure_code: str, base_seconds: int) -> int:
 
 # LLM: 纯函数；previous 是本次之前最近的已结束运行记录（新到旧）。本次失败码是确定性失败，且之前紧挨着的
 #   CURATOR_REPLAY_BREAKER_FAILURE_COUNT-1 条全是同一起始游标上的确定性失败时返回 True。中间夹一次成功或游标变了就不算。
+#   project 给出时（按会话模型分组整理），游标先投影到本组的会话再比较；调用方负责把 previous 先筛成同一组模型的记录。
 # 函数用途: 判断这一次失败是否让同一批输入的重放达到熔断上限。
-def curator_replay_breaker_tripped(failure_code: str, cursor_before: dict, previous: list) -> bool:
+def curator_replay_breaker_tripped(failure_code: str, cursor_before: dict, previous: list,
+                                   project: Callable[[dict], object] | None = None) -> bool:
     needed = CURATOR_REPLAY_BREAKER_FAILURE_COUNT - 1
     window = previous[:needed]
+    view = project or (lambda value: value)
     return (failure_code in CURATOR_REPLAY_DETERMINISTIC_CODES and len(window) == needed
             and all(row.status == "failed" and row.failure_code in CURATOR_REPLAY_DETERMINISTIC_CODES
-                    and row.cursor_before == cursor_before for row in window))
+                    and view(row.cursor_before) == view(cursor_before) for row in window))
+
+
+# LLM: 记忆整理按“消息来源会话的主代理模型”分组时的一组模型：backend 由组合根建好注入，本模块不 import settings/backends。
+#   group_key 是生效的模型档案编号（同编号即同组）；is_default 表示这是 owner 默认模型那组（工具审计事件只跟这组走，
+#   确定性失败的补跑也用这组）。provider/model 写进运行记录，按组熔断时用它筛同组的历史运行。
+# 类用途: 描述一次整理可用的一组模型。
+@dataclass(frozen=True)
+class CuratorModelRoute:
+    group_key: str
+    backend: object
+    provider: str
+    model: str
+    is_default: bool = False
+
+
+# LLM: 组合根按会话的结构化模型选择（ConversationThread.model_profile_id）只读解析后交给 Curator；
+#   thread_groups 把会话映射到组，fallback_reasons 记录哪些会话退回了默认模型以及结构化原因（未选模型、档案不可用等）。
+#   不在列表里的会话按默认组处理。warnings 是整批共用的宿主警告（如指定整理档案在本 owner 解析不到、改用默认模型时的
+#   curator_profile_unavailable_fallback:<原因>），每次运行都写进运行记录。
+# 类用途: 一次整理批次里各会话该用哪组模型的路由表。
+@dataclass(frozen=True)
+class CuratorModelRouting:
+    default: CuratorModelRoute
+    routes: dict[str, CuratorModelRoute] = field(default_factory=dict)
+    thread_groups: dict[str, str] = field(default_factory=dict)
+    fallback_reasons: dict[str, str] = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
+
+    # LLM: 只读；会话没有路由或路由指向不存在的组时回到默认组，不猜。
+    # 函数用途: 取出某个会话要用的那组模型。
+    def route_for(self, thread_id: str) -> CuratorModelRoute:
+        return self.routes.get(self.thread_groups.get(thread_id, ""), self.default)
 
 
 # LLM: state 是每 owner 唯一游标和 lease 权威；不能在 Gateway 内存另存一份成功游标。
