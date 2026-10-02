@@ -1,5 +1,19 @@
 # 设计台账
 
+## 执行器退出且效果未知时保留宿主给的失败类型（2026-10-02，分支 `claude/38-executor-failure-type`，基于 `claude/3a-step16z` `00ec92b77`，已实现，待集成）
+
+- **来源**：C4 真实核对的顺带发现。`executor_recovery.recover_exited_runner` 在“执行器已退出、有工具效果未确认”时给
+  `failure_type=executor_effects_unknown`，但这个值不在 `FailureType` 枚举里。`runner_result_state._apply_unstructured_failure` 只认枚举里的
+  类型，于是把它改写成通用 `runner_error`。
+  - 父级唤醒里分不出“效果未知、要先核对”；
+  - `runner_error` 还属于可自动重跑族，和“已停止自动重跑，等待核对”的本意相反。
+    重跑实际被 attempt 的 UNKNOWN 封存挡住，所以以前没有出事。
+- **做法**：在 `FailureType` 里正式登记 `EXECUTOR_EFFECTS_UNKNOWN`（不放进可自动重跑族），`recover_exited_runner` 改用枚举值。
+  宿主显式给的类型从此原样保留到任务和父级唤醒。
+- **验证**：`test_executor_exit_recovery.py` 加 1 项；变异 2 个，都被抓住：
+  - 恢复成改前状态；
+  - 效果未知时仍记 runner_error。
+
 ## P10 常数整改第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，基于 `d55cb266c`，已实现，待集成）
 
 - **背景**：P10 白名单按模块分批清理，本批是最后一批——白名单主组 groups[0] 剩余全部 41 个常数
@@ -146,7 +160,7 @@
   - 第 2 次开关生效，唤醒里带了完整提示。父级没有声明接替（**接替声明未命中，0/1**），而是按提示里的“接手前先核对”去读
     子代理报告和 `ws/notes/child-note.txt`。文件在被杀前已经写好，所以它更新进度后结束，没有另派。
   - 这个杀点（写完之后、结果落账之前）本身不需要接替。要验证“声明接替”这条路，需要换一个工作没做完的杀点，那是另一个场景。
-- **顺带发现（未改）**：`recover_exited_runner` 传的 `failure_type=executor_effects_unknown` 不在 `FailureType` 枚举里，被
+- **顺带发现（2026-10-02 已修，见上方“执行器退出且效果未知时保留宿主给的失败类型”）**：`recover_exited_runner` 传的 `failure_type=executor_effects_unknown` 不在 `FailureType` 枚举里，被
   `runner_result_state._apply_unstructured_failure` 改成了 `runner_error`，所以唤醒里的 failure_type 不能区分“未知效果”。接替提示里
   `uncertain_effects` 已带这个事实，所以不影响 C4。
 - **验证**：`test_subagent_takeover_hint.py` 8 项；13 个变异全部被抓住。见 TESTS.md 同名节。

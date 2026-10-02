@@ -227,6 +227,8 @@ worker/run_id/准确 attempt，读取 canonical 后复用原 auto-start，不再
   `record_takeover_hint` 写入或清除 `attributes.takeover_hint`；`runner_completion_payload` 只在 BLOCKED/FAILED 时带出，
   `runner_completion_wake._summary` 加一句说明，生命周期唤醒事件、活动回合、后台完成清单和递归父级快照经
   `completion_takeover_hint_facts` 投影。开关由 `capability_auto_sweep._reclaim_dead_running_runs` 读取。
+  失败类型只用 `FailureType` 枚举值：效果未知是 `EXECUTOR_EFFECTS_UNKNOWN`（2026-10-02 登记，不在可自动重跑族），没有结果是
+  `RUNNER_ERROR`；不在枚举里的值会被 `runner_result_state._apply_unstructured_failure` 改写成通用 `runner_error`。
 - `runtime_db/repository.py::pending_events_page` 按未消费事实分页轮转；游标与消费回执分开，
   原事件不删除，处理失败可在下一圈重试，旧记录不受最近 50/100 条窗口限制。
 - 定向回归：`test_executor_exit_recovery.py`、`test_closeout_recovery_paging.py`；真实 TUI 验收另记，

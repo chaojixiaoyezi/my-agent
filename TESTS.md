@@ -8,6 +8,13 @@
 - 沙箱外复核：`test_shuohao_novel_gates.py` 的宿主安装确认用例在沙箱外通过（ds1 沙箱里 MCP 启动被拒属环境限制）。
 - 发布提示：已开着的旧版 TUI 连上新网关后，插件目录会因版本不符被拒，重启 TUI 后恢复。
 
+## 执行器退出且效果未知时保留宿主给的失败类型（2026-10-02，分支 `claude/38-executor-failure-type`，基于 `claude/3a-step16z` `00ec92b77`）
+
+- **新增用例**：`test_executor_exit_recovery.py::test_unknown_effects_keep_the_host_failure_type_for_the_parent`。
+  执行器已退出、有 EXECUTING 工具时，任务的 `failure_type` 和父级唤醒 metadata 里的 `failure_type` 都是 `executor_effects_unknown`，
+  改前是 `runner_error`。
+- **变异**（2 个，抓到 2 个）：恢复成改前状态（枚举里去掉这一项、恢复字符串）；效果未知时仍记 runner_error。
+
 ## 决策模型中文质量基准与每个点位的阈值（J12）（2026-10-02，分支 `claude/be-jev-quality-bench`，基于 `8ec88808d`）
 
 - **新增 `test_decision_quality_bench.py`（13 项，不发网络请求）**：

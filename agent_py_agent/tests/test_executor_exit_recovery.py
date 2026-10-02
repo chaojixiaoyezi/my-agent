@@ -91,6 +91,24 @@ def test_unknown_tools_remain_blocked_not_replayed_and_notify_parent(tmp_path):
         assert conn.execute("SELECT status FROM tool_operations WHERE operation_id='effect'").fetchone()[0] == "EXECUTING"
 
 
+def test_unknown_effects_keep_the_host_failure_type_for_the_parent(tmp_path):
+    """宿主显式给的 executor_effects_unknown 必须原样留在任务与父级唤醒里（2026-10-02 C4 真实核对发现）。
+    改前它不在 FailureType 枚举里，被结果状态改写成可自动重跑族里的通用 runner_error，父级分不出“效果未知、要先核对”。"""
+    manager, task, attempt, run = _running(tmp_path)
+    with attempt_executor(manager.runtime_db, task.id, attempt), manager.runtime_db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, attempt_generation, "
+            "tool_operation_generation, operation_type, status, handler_started_at, created_at, updated_at) "
+            "VALUES('effect',?,?,1,1,'write_file','EXECUTING',1,1,1)", (run, attempt),
+        )
+
+    recover_exited_runner(manager, manager.load(task.id))
+
+    assert manager.load(task.id).failure_type == "executor_effects_unknown"
+    [(_path, wake)] = _wakes_for_attempt(tmp_path, task.id, attempt)
+    assert wake["metadata"]["failure_type"] == "executor_effects_unknown"
+
+
 def test_live_host_without_executor_identity_is_not_guessed_dead(tmp_path):
     manager, task, attempt, run = _running(tmp_path)
     with manager.runtime_db.transaction() as conn:

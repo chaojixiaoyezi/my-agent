@@ -79,6 +79,9 @@ class FailureType(str, Enum):
     CHANNEL = "channel"
     CHANNEL_BROKEN = "channel_broken"
     CHANNEL_ERROR = "channel_error"
+    # 宿主证实执行器已退出、且有工具效果未确认（attempt 已封存为 UNKNOWN）：只能等显式核对，不属于可自动重跑的失败。
+    # 由 services/executor_recovery.recover_exited_runner 显式给出；不在枚举里时会被结果状态改写成通用 runner_error。
+    EXECUTOR_EFFECTS_UNKNOWN = "executor_effects_unknown"
     # The runner made durable progress but explicitly reports that its declared
     # deliverables are not finished yet.  This is a continuation state, not an
     # external blocker and not permission to create a replacement run.

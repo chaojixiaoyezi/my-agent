@@ -322,3 +322,9 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 - **改动**：开关 `subagent_takeover_hint_enabled`（默认关）打开时，执行器退出收口附 `takeover_hint`（哪个 run、退出原因码、是否有未确认效果、
   怎么用 `replacement_for_run_ids` 声明接替），经完成合同交给所有父级消费方；只是提示，不派工、不改状态。
 - **真实模型**：MiniMax-M2.7 一次有效运行，接替声明未命中，模型按提示先核对、发现文件已写好后结束。见设计台账 C4 节，测试与变异见 TESTS.md 同名节。
+
+## 执行器退出且效果未知时保留宿主给的失败类型（2026-10-02，分支 `claude/38-executor-failure-type`，基于 step16z `00ec92b77`）
+
+- **起因**：C4 真实核对发现，`recover_exited_runner` 给的 `executor_effects_unknown` 不在 `FailureType` 枚举里，被结果状态改写成
+  可自动重跑族里的通用 `runner_error`，父级唤醒分不出“效果未知、要先核对”。
+- **改动**：枚举正式登记 `EXECUTOR_EFFECTS_UNKNOWN`（不进可自动重跑族），`recover_exited_runner` 改用枚举值。测试与变异见 TESTS.md 同名节。

@@ -8,6 +8,7 @@ from typing import Any
 from ...contracts.subagent_completion import subagent_takeover_hint
 from ...runtime_db.executor_liveness import exited_attempt_facts, mark_exited_attempt_unknown
 from ..manager_runner_result_payload import RecordRunnerResultParams
+from ..models import FailureType
 from .runtime_closeout import pending_closeout
 
 # 子代理 attributes 里保存“执行器退出后的接替提示”的键；只属于最近一次写回的结果。
@@ -17,6 +18,7 @@ TAKEOVER_HINT_ATTR = "takeover_hint"
 # LLM: 调用方已核对父会话允许管理此 child；只消费 exact attempt 退出事实，不能凭缺 session、无输出或时长触发。
 #   takeover_hint 由调用方按 capability 开关 subagent_takeover_hint_enabled 传入（缺省关）：开着时随这一份结果附结构化接替提示
 #   （哪个 run、退出原因码、怎么用 replacement_for_run_ids 声明接替），只是提示，不派工、不改状态。改动同步 test_subagent_takeover_hint.py。
+#   失败类型只用 FailureType 枚举值（EXECUTOR_EFFECTS_UNKNOWN / RUNNER_ERROR）：不在枚举里的值会被结果状态改写成通用 runner_error。
 # 函数用途: 为没有结论的已退出工作片补写结构化失败；有未知工具时显示阻塞并保留安全封存。
 def recover_exited_runner(manager: Any, task: Any, *, takeover_hint: bool = False) -> dict[str, Any] | None:
     if str(task.status) != "RUNNING" or pending_closeout(task) is not None:
@@ -33,7 +35,8 @@ def recover_exited_runner(manager: Any, task: Any, *, takeover_hint: bool = Fals
             run_id=task.id, attempt_id=attempt_id, dry_run=False, ok=False,
             status="BLOCKED" if uncertain else "FAILED",
             turn_end_reason="blocked" if uncertain else "error",
-            failure_type="executor_effects_unknown" if uncertain else "runner_error",
+            failure_type=(FailureType.EXECUTOR_EFFECTS_UNKNOWN.value if uncertain
+                          else FailureType.RUNNER_ERROR.value),
             message=("执行器已退出，部分工具是否生效尚未确认；已停止自动重跑，等待核对。"
                      if uncertain else "执行器已退出但没有返回结果；本次执行失败，未作业务完成判定。"),
             takeover_hint=(subagent_takeover_hint(str(task.id), str(facts["reason"]), bool(uncertain))
