@@ -105,6 +105,34 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
 - 变异 20 个全部抓住（m01–m20）：主机规则关掉、端口丢失、菜单管理员检查关掉、本人目录守卫关掉、关闭/选中顺序对调、默认对话模型解析异常不再兜住、工具拒绝码映射关掉、IM `off` 词、TUI 重建丢 vector、本地分派关掉、列表不按 embedding 过滤、私有写抄回旧权限、目录不收紧、复用不比文本、复用不比身份、list 不附视图、视图给普通 owner、提示不看状态、逐项写入遇到失败不停。尺寸门收口（复用查找挪到模块级、写入循环拆函数）后重跑了受影响的 m03/m05/m06/m15 并加 m20，全部抓住。
 - 真实核对两次（MiniMax M2.7 + embo-01，隔离 home、8441，各只发一次“帮我开语义记忆”）：第 1 次未通过（只 list）；修契约后第 2 次通过（list → set_embedding → restart_gateway，重启后 `/model vector` 显示运行中已开，新组合根真实召回为 semantic 且只嵌查询）。详情与证据路径见 DESIGN_LEDGER 同名条目。
 
+## E2 真实核对：隔离模式的普通飞书用户自己加模型、切换、确认（2026-10-02，ef，分支 `claude/ef-im-user-models`，基于 `claude/3a-step17e` `91677bfa4`，无代码改动）
+
+**环境**（证据 `~/.my-agent/decision-evidence/im-user-models-91677bfa4/`，含 harness）：`env -i` 隔离 `MY_AGENT_HOME`，私有 venv 指向本 worktree；
+真实 Gateway（127.0.0.1:8477）+ 真实飞书 adapter（webhook，回调 8478）+ 假飞书 Open API（127.0.0.1:8479，`hookpy/sitecustomize.py` 只改
+API 根）；飞书凭据明显是假的；会话锁关；决策模型关；工具开。管理员 local/main 的目录副本只有 MiniMax 官网 M2.7（0600），并用产品操作
+`set_initial` 把 M2.7 设为“其他用户的初始模型”（同时共享），普通用户因此有模型可聊。两个从未绑定管理员的普通飞书用户 u1/u2
+（隔离 owner `owners/providers/feishu/users/<open_id>`）。u1 要加的模型是官方 DeepSeek（OpenAI 兼容）`deepseek-v4-flash`，密钥只在
+`secret/` 文件里出现一次，由假飞书 `send-file` 发送，事件日志只记 `<secret>`；用完整个 home/secret 删除，证据扫密钥前缀 0 命中。
+每一步只发一次 prompt。
+
+**步骤与结构化事实（u1，同一会话 `thread-195df934a`）**：
+1. 加模型（一句话给地址、模型名、窗口、密钥）：请求 done/ok，52 秒，4 次工具调用——`manage_models list` ok；`add` 两次
+   `MODEL_PROFILE_INVALID`（参数填错，模型按回执自纠；回执未外置、账里只有结构化码）；第三次 `add` ok。本轮模型 MiniMax-M2.7
+   （初始共享模型；用量账 main 5 次、探测 1 次）。回复给出新档案编号 `5f071966-…`，不含密钥。
+   u1 自己的目录文件出现在 `owners/providers/feishu/users/ou_e2_user_one/config/model-profiles/<digest>.json`（0600，目录 0700）：
+   档案 `5f071966` deepseek-v4-flash / openai_compatible / 窗口 1000000，服务商 `provider-5f071966` has_key=true；目录 `selected`
+   仍是 `default`（新会话默认不变）。
+2. 切换（“本会话切到 deepseek-v4-flash 这个模型。”）：done/ok，16 秒，`manage_models select` ok；会话线程 `model_profile_id`
+   由空变成 `5f071966-…`；本轮仍由 M2.7 执行（切换发生在本轮内）。
+3. 确认（“请只回答一句话：你现在这个会话用的是哪个模型？”）：done/ok，5 秒；用量账 main 模型 `deepseek-v4-flash`（2 次）、
+   探测 1 次也是 deepseek-v4-flash；回复“本会话当前选中的模型是 deepseek-v4-flash（编号 5f071966-…）”。
+4. 其他 owner 看不到：u2（另一个普通用户，产品 `list`）只有 `default`（M2.7）与 `shared:d9607663`，没有目录文件；管理员 local/main
+   的 `list` 只有自己的 M2.7 与共享项；两者都看不到 `5f071966`，共享目录 `public_shared` 也只有 M2.7。
+
+**观察**：第一步模型两次 `add` 参数错误后自纠成功——产品只给结构化码和错误文案，没有人工干预；`/status` 已带 E1 的 `usage_accounting` 段（都为 0）。
+**没做**：真实飞书（用的是假 Open API）、长连接模式、`/model` 斜杠命令路径（用的是自然语句经 `manage_models`）、删除/共享等其它动作、
+普通用户的记忆整理（K2 另线）。
+
 ## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）
 
 - `test_owner_wake_discovery_task_run_no_link.py` 新增 7 项：
