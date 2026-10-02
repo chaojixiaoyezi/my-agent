@@ -251,24 +251,7 @@ class PathAccessPolicy:
         # 必须先于 full 判定，避免 path_access_mode=full 变成跨租户/跨宿主读权。
         home_root = self.agent_home_root
         if self.owner_scope_root is not None:
-            # WorkspaceOnly 的唯一硬边界就是 owner home。用户自己的文件（包含项目自用
-            # .env/认证配置）不再被第二层文件名 denylist 误伤；凭据仍不会被日志主动输出，
-            # 也不能借此跨到其他 owner 或宿主目录。
-            if _is_relative_to(resolved, self.owner_scope_root):
-                return PathAccessDecision(True)
-            if home_root is not None and _is_relative_to(resolved, home_root):
-                decision = self._owner_scope_decision(resolved, home_root)
-                if not decision.allowed:
-                    return decision
-                if _is_credential_filename(resolved.name):
-                    return _credential_file_decision(resolved)
-                return decision
-            return PathAccessDecision(
-                False,
-                "PATH_OWNER_SCOPE_BLOCKED",
-                f"当前用户只能访问自己的数据目录和 shared 公共能力区: target={resolved}",
-                str(self.owner_scope_root),
-            )
+            return self._owner_wall_decision(resolved, home_root)
         if self.mode == PATH_ACCESS_MODE_FULL:
             return PathAccessDecision(True)
         # 无 owner wall 的 legacy normal 模式仍保护常见凭据文件；显式 Full Access 与
@@ -290,6 +273,28 @@ class PathAccessPolicy:
                     str(root),
                 )
         return PathAccessDecision(True)
+
+    # LLM: owner 墙分支从 _mode_decision 拆出（只为降低嵌套，判定与顺序不变）：自己 home 放行；数据根里按 _owner_scope_decision
+    #   分 shared/控制面/别人的家，放行后再拒凭据文件名；数据根以外一律 PATH_OWNER_SCOPE_BLOCKED。
+    # 函数用途: 隔离 owner 的路径裁决。
+    def _owner_wall_decision(self, resolved: Path, home_root: Path | None) -> PathAccessDecision:
+        assert self.owner_scope_root is not None
+        # WorkspaceOnly 的唯一硬边界就是 owner home。用户自己的文件（包含项目自用
+        # .env/认证配置）不再被第二层文件名 denylist 误伤；凭据仍不会被日志主动输出，
+        # 也不能借此跨到其他 owner 或宿主目录。
+        if _is_relative_to(resolved, self.owner_scope_root):
+            return PathAccessDecision(True)
+        if home_root is None or not _is_relative_to(resolved, home_root):
+            return PathAccessDecision(
+                False,
+                "PATH_OWNER_SCOPE_BLOCKED",
+                f"当前用户只能访问自己的数据目录和 shared 公共能力区: target={resolved}",
+                str(self.owner_scope_root),
+            )
+        decision = self._owner_scope_decision(resolved, home_root)
+        if decision.allowed and _is_credential_filename(resolved.name):
+            return _credential_file_decision(resolved)
+        return decision
 
     # LLM: H2（2026-10-01）：宿主托管存储的唯一声明是本模块的 HOST_MANAGED_OWNER_STORE_PARTS；这里只用构造时冻结的
     #   agent_home_root 做路径运算（不读文件、不读环境），数据根未知时返回 None。check 与目录遍历类工具（list/find）共用它。
