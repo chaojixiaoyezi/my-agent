@@ -2,6 +2,45 @@
 
 状态：阶段 0 已实现（分支 `claude/param-center-phase0`，2026-09-27）；阶段 1、2、2b 已完成，阶段 3 部分完成（A/B/D/E/C 组已合入 main，剩余少量内部键分派中），按下文顺序推进。
 
+## 2026-10-02 /settings 真实验收（P18，ae，被测 `aea277a92`，权限修复在 `b3195b809` 复测）
+
+结论：七项里五项通过，一项失败，一项真实模型未命中。验收期间发现的写回权限问题已由 3a 修复（`b3195b809`），复测通过。
+
+- **环境**：
+  - 隔离 home；Gateway 在 127.0.0.1:8455；TUI 走 Gateway。
+  - 假飞书：真适配器 webhook 回调 8465，假 Open API 8466，两个假用户。一个用 `/admin <密码>` 绑定为管理员，另一个从未绑定。
+  - 模型 MiniMax-M2.7，目录副本只含这一家，权限 600，用完即删。
+  - 证据在 `~/.my-agent/decision-evidence/p18-settings-acceptance-aea277a92/`（仓库外），包含：
+    - TUI 回执；
+    - 假飞书回执（只存这次隔离测试里宿主的控制回执）；
+    - 修改账本、文件权限、工具索引、控制操作记录、harness；
+    - `retest-b3195b809/`。
+
+| 项 | 终态 | 事实 |
+| --- | --- | --- |
+| 1. 总览与 show（P8 元数据） | 通过 | TUI 和飞书都列出常用 21 项，共 271 项。`show memory_compact_auto_trigger_percent` 显示单位 %、范围 50-100、归属模块、读取方；没有单位或范围的键不显示这两行，两端一致 |
+| 2. 普通键修改与回滚 | 通过 | TUI 和飞书分别做了一轮 `set tool_list_max_entries` → `history` → `revert`。账本先记 set（actor=chat），回滚另记一条 revert，`reverts` 指向原记录；配置里这一行写入后又删掉 |
+| 3. capability 来源的键（P17） | 通过 | `set capability_candidate_limit 7` 写进 Gateway agent 实际读取的那份文件，`capability_config_for_agent` 读回 7；revert 后只剩文件头注释 |
+| 4. runtime_guard 来源的键 | 通过 | `set repeat_fail_threshold 5` 被拒："属于 runtime_guard 配置……只能查看和搜索"。没有新建文件，账本没有新记录 |
+| 5. 飞书非管理员 | 通过 | 未绑定的用户发 `/settings` 和 `/settings show` 都收到"只有管理员能查看和修改全局参数" |
+| 6. `/settings internal <常数名>` | **失败** | TUI 和飞书查 `TOOL_PREVIEW_MAX_LINE_COUNT`、`BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS`，都只回"参数暂时读不到……"，`b3195b809` 上仍是如此。见下方缺陷 1 |
+| 7. 模型经 user_config 改边界键 | 未命中 | 需求只发一次，请模型把 `memory_curator_model_profile` 改成某个档案。模型只调了 `user_config view`，看到"安全边界，模型不能改"后没有去 set，宿主的拒绝路径没被走到。账本和配置都没变。拒绝路径现有自动化覆盖见 `test_parameter_sources.py` 的 user_config deny 链 |
+
+- **缺陷 1（失败项，未修，交 3a）**：
+  - `run_settings_control` 调各子命令时一律带 `capability_path=` 关键字参数（P17 加的），P10 的 `_internal(_config, argument)` 不接收它，于是抛 `TypeError`，被统一兜底成"参数暂时读不到……"。
+  - 现有测试没有经 `run_settings_control` 跑过 internal。
+  - 修法：给 `_internal` 加 `**_` 或 `capability_path=None`，补一条经调度入口的用例。
+- **缺陷 2（已修）**：参数写回后，配置文件和账本的权限从 600 变成 644。
+  - 根因：`config_io._write_config_lines` 用跟随 umask 的临时文件替换原文件。生产 desktop.yaml 也已被放宽。
+  - 3a 已在生产 chmod，并在 `b3195b809` 修复（写回保留原权限、新建文件 0600、临时文件用 mkstemp）。
+  - 复测：set、revert 之后 gateway.yaml 和账本保持 600，新建的 capability 文件是 600。新建的目录仍是 755（文件本身 600），记为小事。
+- **观察（未修，交 3a 定）**：
+  - P8 的"读取方/归属模块"取"引用最多的文件"。约 50 个键因此落在设置定义或规范化文件上（`_normalize`、`_memory_coercion`、`user_config_capability`、`model_provider_schema` 等），不是实际消费方。例如 `memory_compact_auto_trigger_percent` 显示读取方 user_config_capability，实际是 `context_compactor`。建议把这些定义文件也排除在外。
+  - capability 文件位置：owner 原本没有 capability 文件时，参数中心新建在 `<owner home>/agent_py_agent/config/capability_config.yaml`。这是 `default_capability_config_path` 的第一候选，写入和运行时一致，但和本节上方 P17 描述的 `<owner home>/config/capability_config.yaml` 不同。之后如果有人在 `<owner home>/config/` 下放一份，会被这份静默盖住。
+  - capability 键改过之后，`show` 一边写"当前运行值：7"，一边写"用户配置里：未覆盖（用默认值）"，后半句没算 capability 文件里的覆盖。
+  - runtime_guard 键的 `show` 写"只能由用户在宿主入口或配置文件里改"，但这个来源没有用户覆盖层，和 set 被拒时的说法不一致。
+  - 回执文案"原来 是默认值""现在是 默认值"中间多了一个空格。
+
 ## 2026-10-01 模块级数值常数只读目录与守卫（P10，分支 `worker/ds1-constants-catalog`，已实现，待集成）
 
 - **设计定案（常数不迁入登记表）**：常数留在读取它的地方（那里是唯一权威，符合“一个概念一个权威位置”；不搬进中央常数模块，
