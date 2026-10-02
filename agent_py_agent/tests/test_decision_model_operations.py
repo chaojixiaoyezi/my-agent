@@ -85,7 +85,9 @@ def test_native_probe_timeout_is_bounded_and_does_not_retry(tmp_path, server, mo
     assert time.monotonic() - started < 2.0
     assert not result["ok"] and result["error_type"]
     assert host._model_call_ledger.records()[0].status == "timed_out"
-    assert len(server.requests) == 1 and result["usage"]["input_tokens"] is None
+    # 期限覆盖整个调用：负载重时（12 片并行车道）建连或发送就可能用完 0.08 秒，请求根本到不了服务端，记 0 次。
+    # 这里要守的是“不重试”，所以最多 1 次；正常路径下服务端挂起收到 1 次，一旦重试就是 2 次，仍会被抓到。
+    assert len(server.requests) <= 1 and result["usage"]["input_tokens"] is None
     server.release.set()
 
 

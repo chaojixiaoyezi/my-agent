@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## 去抖：探测超时用例的“不重试”断言改成最多 1 次（2026-10-02，3a）
+
+- **现象**：Linux 12 片车道（`92842d69b`）第 5 片 `test_decision_model_operations.py::test_native_probe_timeout_is_bounded_and_does_not_retry`
+  在第 88 行报 `assert (0 == 1)`：服务端一次请求都没收到。Mac 上单跑和 12 路并发 36 次都过。
+- **复现**：用一个只在复现时加载的 pytest 插件让 `socket.create_connection` 先慢 0.15 秒，同一断言稳定失败——0.08 秒期限覆盖整个调用，
+  负载重时建连就用完期限，请求到不了服务端。产品行为正确：有上限、账本记 timed_out、没有重试。
+- **做法**：断言改成 `len(server.requests) <= 1`（守的是“不重试”）；正常路径下服务端挂起收到 1 次，重试会变 2 次仍被抓到。
+  延迟插件下与正常运行都通过。
+
 ## 集成修正：插件目录 schema v4 的测试与文档同步（2026-10-02，3a）
 
 - C14 后续（`2ff572e5f`）把 `plugin_command_catalog` 升到 v4（管理动作加 `unavailable_reason`）。读取端只认当前版本，
