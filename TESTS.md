@@ -263,6 +263,23 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   1. 去掉 M1 守卫（非选择也登记） → `test_result_category_records_host_drops_with_the_existing_reason_code`、`test_not_needed_with_expired_adoption_deadline_records_no_dropped_row` 红；
   2. S1 改回空格连接（`" ".join`） → `test_result_category_separates_selection_non_selection_and_unrecorded` 红（多题非选择键变成 `non_selection:not_needed no_match`）。
 
+## 决策账结果类别：be 复审小补（2026-10-02，分支 `worker/ds1-decision-outcome-category-fix3`，基于集成分支 `b8e99aaa8`）
+
+- **新用例**（`test_decision_outcome_log.py`）：`test_result_category_records_host_drops_with_the_existing_reason_code` 补一条——所有题都带 error_code 的响应
+  （`may_apply`、有响应，类别是 `no_selection_recorded`“没有可判定结果”）+ 宿主丢弃 `sources_changed` → 结果日志里没有 dropped 行。
+  守卫是 `!= "selected"`，`no_selection_recorded` 和 `non_selection` 一样不放行（M1 的延伸；be 曾做过“守卫只挡 non_selection 前缀”的存活变异）。
+  `_bound_outcome` 辅助函数加 `errors` 参数支持构造全错响应。
+- **文档改准**：DESIGN_LEDGER 码表 `adoption_deadline` 从“全部消费点 + 复核门”改成具体点位（planning、decision_subagent、action_candidate、delivery_quality、
+  external_material_order、skill_proposal_review、recall、pre_recall、decision_recommendation + 复核门 `_adoption_reason`；curator、curator_relation 只用 `sources_changed`，
+  按 `grep DROP_` 各消费点实际使用核对）；DECISION_AUDIT 的“10 个消费者点位登记 4 个丢弃原因码”改成“前 3 个（`review_failed` 只在复核门自身异常时用，消费者点位不直接登记）”；
+  “按点位看 dropped 不大于选中”改成“正常情况下不大于”，并写明两种例外（主行与补充行写入时刻不同、时间窗边界可能只截到一行；主行写盘失败而补充行写入成功）。
+- **验证命令与结果**（Python：`~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，工作目录根，`--basetemp=/private/tmp/claude-501/m-ds1-fix3`）：
+  - `test_decision_outcome_log.py`、`test_decision_external_material_order.py`、`test_decision_audit_controls.py`、`test_decision_transport_timing.py` → **135 passed**；
+  - guards9 → **170 passed**；ruff All checks passed；`check_doc_sync` DOC_SYNC_PASS；`git diff --check` 干净；`check_clean_package` OK；`size_diff.sh` 新增告警 0（消失 4）。
+- **变异验证 1 个，被新用例拦下并还原（先备份再拷回，sha256 与备份一致）**：
+  守卫改成只挡 `non_selection:` 前缀（`no_selection_recorded` 放行） → `test_result_category_records_host_drops_with_the_existing_reason_code` 红（多出一行 dropped），
+  即 be 报告的“变异存活”现在被钉住。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：

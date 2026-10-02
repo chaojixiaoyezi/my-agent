@@ -96,7 +96,7 @@ def test_result_category_separates_selection_non_selection_and_unrecorded():
 
 
 # 函数用途: 造一个带真实信封绑定的 apply 结果替身（丢弃补充行要从绑定里取点位）。
-def _bound_outcome(*, point="delivery_quality", value="candidate_1", may_apply=True):
+def _bound_outcome(*, point="delivery_quality", value="candidate_1", may_apply=True, errors=()):
     from agent_py_agent.agent.backends.decision_protocol import (
         DecisionAnswer,
         DecisionBinding,
@@ -106,7 +106,8 @@ def _bound_outcome(*, point="delivery_quality", value="candidate_1", may_apply=T
     binding = DecisionBinding(point=point, owner_ref="owner-1", operation_id="op-1", policy_revision="policy-1",
                               candidates_revision="rev-1")
     response = DecisionResponse(binding=binding, input_digest="d", requested_model="jev-latest", model="jev-1.13.0",
-                                answers=(DecisionAnswer(question_id="q0", kind="choice", value=value),), _usage_json=b"{}")
+                                answers=(DecisionAnswer(question_id="q0", kind="choice", value=value,
+                                                        error_code=errors[0] if errors else ""),), _usage_json=b"{}")
     return SimpleNamespace(mode="apply", status="success", reason="", may_apply=may_apply, response=response)
 
 
@@ -144,6 +145,10 @@ def test_result_category_records_host_drops_with_the_existing_reason_code(tmp_pa
     assert len(rows()) == 1
     record_decision_dropped(agent, _stage(), _bound_outcome(value="candidate_9"), "adoption_deadline")
     assert len(rows()) == 2 and rows()[-1]["result_category"] == "dropped:adoption_deadline"
+    # 所有题都带 error_code：类别是 no_selection_recorded（没有可判定结果），即使宿主想丢弃也不登记 dropped——
+    # 守卫是 != "selected"，"没有可判定结果"和"非选择"一样都不放行（M1 的延伸，be 变异曾让这条存活）。
+    record_decision_dropped(agent, _stage(), _bound_outcome(value="", errors=("bad_answer",)), "sources_changed")
+    assert len(rows()) == 2
     # 写盘失败只记日志：调用返回 None、不抛异常，主链路结果不变。
     def broken(*_args, **_kwargs):
         raise OSError("disk full")

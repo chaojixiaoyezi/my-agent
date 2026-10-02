@@ -273,8 +273,8 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
 - 强制接入点是共用复核门 `decision_service.decision_outcome_is_current`（薄门 + `_adoption_review`），返回第一个不通过原因码：
   新增码 `adoption_deadline` / `review_failed`，或 `_stale` 给出的既有码（`identity_changed`/`disabled`/`policy_changed`，实验路径另有 `experiment_*`/`connection_changed`；
   `settings_changed` 是 model_selection 的选择原因、`host_shutdown` 是关闭取消路径的码，均不来自 `_stale`）。
-  另外 10 个消费者点位的既有丢弃出口按变化性质登记本批新增的 4 个丢弃原因码 `sources_changed` / `runtime_changed` / `adoption_deadline` / `review_failed`
-  （模块级常量，与复核门共用；完整码表见 DESIGN_LEDGER）。
+  另外 10 个消费者点位的既有丢弃出口按变化性质登记本批新增码里的前 3 个 `sources_changed` / `runtime_changed` / `adoption_deadline`
+  （`review_failed` 只在复核门自身异常时用，消费者点位不直接登记；模块级常量与复核门共用，完整码表见 DESIGN_LEDGER）。
 - **与发送路径“保留候选”的边界**：`agent/backends/gateway_model_adoption` 的 `candidate_validation_unavailable`、`first_request_not_selected`、
   `candidate_rejected_before_provider`、`request_facts_unknown`、`model_catalog_changed`、`request_capacity_*`、`history_modality_or_projection_unknown`
   是“候选被保留/没提交给模型”，不是“模型给了建议又被宿主丢掉”，这次不并入 `dropped:`，两套码语义不同，展示时也不互相翻译。
@@ -285,7 +285,8 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
 - TUI 决策菜单“逐接入点设置”行尾追加“；最近结果：<大白话>（N次）”，取次数最多的一项；旧 Gateway 没有这块数据时不显示这一段。
 - 汇总 `decision_outcome_summary` 新增 `result_categories`；丢弃补充行不算一次独立调用，不进 `points`/`not_sent`，只进类别统计与 `recent`。
   **注意**：同一次调用会在类别统计里记两行（主行 `selected` + 补充行 `dropped:<码>`），所以“选中了某个候选 N 次”里包含后来被丢弃的；
-  被丢弃是“选中”的子集（M1 修好后成立），按点位看 `dropped` 的次数不会大于对应“选中”的次数。
+  被丢弃是“选中”的子集（M1 修好后成立），正常情况下按点位看 `dropped` 的次数不会大于对应“选中”的次数；
+  个别超出只可能出现在两种例外里：主行与补充行写入时刻不同，统计窗口边界上可能只截到其中一行；或主行写盘失败而补充行写入成功。
 
 ### 主题 `requests`：请求成败（2026-09-26，用户要求“这种东西以后 my-agent 能帮我解决”）
 

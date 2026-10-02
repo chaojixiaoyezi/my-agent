@@ -222,7 +222,7 @@
   | --- | --- | --- |
   | `sources_changed` | 采用前复核发现候选来源/材料/上下文版本变化 | planning、decision_subagent、action_candidate、delivery_quality、external_material_order、skill_proposal_review、curator、curator_relation、recall、pre_recall、decision_recommendation |
   | `runtime_changed` | 采用前复核发现运行环境变化（工具集/后端/策略/主模型身份/任务属性） | decision_recommendation、recall、pre_recall |
-  | `adoption_deadline` | 采用期限已过 | 全部消费点 + 复核门 `_adoption_reason` |
+  | `adoption_deadline` | 采用期限已过 | planning、decision_subagent、action_candidate、delivery_quality、external_material_order、skill_proposal_review、recall、pre_recall、decision_recommendation + 复核门 `_adoption_reason`（curator、curator_relation 不用此码，只用 `sources_changed`） |
   | `review_failed` | 采用前复核自身抛异常（兜底） | 复核门 `decision_outcome_is_current` |
   | `identity_changed`（宿主既有码，`_stale` 也在用） | 身份不再匹配 | 复核门 `_adoption_reason` |
 - **汇总与展示**：`decision_outcome_summary` 加 `result_categories`（缺字段旧行归 `unrecorded`，按次数降序再按名排序）；丢弃补充行不进 `points`/`not_sent`（不是一次独立调用），
