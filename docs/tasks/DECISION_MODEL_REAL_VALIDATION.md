@@ -1003,3 +1003,14 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
   - 调用 3 次，输出约 3.1 万 token，都与预计一致。
 - **结论**：官方 DeepSeek 下“不是严格 JSON”同样未复现，输出上限维持不变。事实一致的对话输出量约为输入的三分之一，上一版合成数据输出偏大，正是事实互相矛盾所致。
 - **证据**：`~/.my-agent/decision-evidence/j13-curator-retest/deepseek-official/`。
+
+## J12 续：决策质量基准补齐其余 8 个点位（2026-10-02，分支 `claude/be-bench-more-points`，基于 `b35796a60`）
+
+- **做法**：同 J12，`env -i` 隔离、只用 Jev 连接文件（0600，用完删）。8 个点位共 60 个中文用例，各跑 2 遍。
+- **调用**：120 次，与预计一致，0 失败，`jev-1.13.0`，中位 1.2—1.9 秒，最长 3.4 秒。
+- **结果**：
+  - planning、model_selection、action_candidate、skill_tool 满分。action_candidate 含一个标签里藏注入指令的样本，两遍都没被带偏。
+  - skill_proposal_review 22/24，subagent_model 18/20，delivery_quality 16/20，均达标。
+  - external_material_order 22/36，**未达标**：无关页答 not_needed/no_match 而不是 later，与 recall 改措辞前同一问题。
+- **结论**：12 个点位都有了中文基准成绩，11 个达标。external_material_order 的修正方向已登记台账。所有点位默认值不变。
+- **证据**：`~/.my-agent/decision-evidence/j12-quality-bench/*8points*`。

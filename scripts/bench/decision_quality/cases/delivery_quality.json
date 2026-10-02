@@ -1,0 +1,299 @@
+{
+  "schema": "decision_quality_cases.v1",
+  "point": "delivery_quality",
+  "note": "交付复核焦点：从本轮已有验证焦点里选一个交付前最该先复核的。验证之后同项目又改过文件（edited_after）或验证失败的焦点期望被选中；全部通过且之后没改动时期望 not_needed/no_match。期望按“项目根|kind|scope”写。",
+  "shared": {},
+  "cases": [
+    {
+      "id": "dq-01-edited-after-test",
+      "prompt": "改完登录逻辑就交付。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        },
+        {
+          "edit": "/repo/web"
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "lint",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/web|test|full"
+      ]
+    },
+    {
+      "id": "dq-02-failed-test",
+      "prompt": "修好了就交付。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "failed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "lint",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/web|test|full"
+      ]
+    },
+    {
+      "id": "dq-03-all-green",
+      "prompt": "所有检查都通过了，准备交付。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "lint",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "not_needed",
+        "no_match"
+      ]
+    },
+    {
+      "id": "dq-04-other-project-edited",
+      "prompt": "两个项目都改了，交付前确认一下。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/api",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        },
+        {
+          "edit": "/repo/api"
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "lint",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/api|test|full"
+      ]
+    },
+    {
+      "id": "dq-05-full-failed",
+      "prompt": "单元测试过了，可以交付了吧？",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "unit",
+            "status": "passed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "failed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "lint",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/web|test|full"
+      ]
+    },
+    {
+      "id": "dq-06-build-failed",
+      "prompt": "接口改好了，交付吧。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/api",
+            "kind": "build",
+            "scope": "full",
+            "status": "failed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/api",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/api",
+            "kind": "lint",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/api|build|full"
+      ]
+    },
+    {
+      "id": "dq-07-unit-after-edit",
+      "prompt": "改完又跑了单元测试，准备交付。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        },
+        {
+          "edit": "/repo/web"
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "unit",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/web|test|full"
+      ]
+    },
+    {
+      "id": "dq-08-lint-failed-edited",
+      "prompt": "跑一下检查就交付。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "lint",
+            "scope": "full",
+            "status": "failed"
+          }
+        },
+        {
+          "edit": "/repo/web"
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/web|lint|full"
+      ]
+    },
+    {
+      "id": "dq-09-both-green",
+      "prompt": "只改了 web 项目的样式，两个项目的测试都过了。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/api",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "not_needed",
+        "no_match"
+      ]
+    },
+    {
+      "id": "dq-10-api-failed-edited",
+      "prompt": "修完 api 的问题顺手跑了 web 的测试，交付。",
+      "steps": [
+        {
+          "verify": {
+            "root": "/repo/api",
+            "kind": "test",
+            "scope": "full",
+            "status": "failed"
+          }
+        },
+        {
+          "edit": "/repo/api"
+        },
+        {
+          "verify": {
+            "root": "/repo/web",
+            "kind": "test",
+            "scope": "full",
+            "status": "passed"
+          }
+        }
+      ],
+      "expected": [
+        "/repo/api|test|full"
+      ]
+    }
+  ]
+}

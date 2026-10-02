@@ -1,0 +1,149 @@
+{
+  "schema": "decision_quality_cases.v1",
+  "point": "model_selection",
+  "note": "选模型（apply 题面）：当前模型 MiniMax-M2.7（约 20 万窗口）。超长文档任务期望换到带“长文档”标签、百万窗口的候选；明确要便宜快速的批量任务期望低成本候选；普通对话期望保留（或换低成本也算对）。看图候选在没有图片时不应被选。",
+  "shared": {
+    "current": {
+      "profile_id": "cur",
+      "model_name": "MiniMax-M2.7",
+      "model_backend": "anthropic",
+      "context_window_tokens": 204800
+    },
+    "candidates": {
+      "cur": {
+        "model_name": "MiniMax-M2.7",
+        "model_backend": "anthropic",
+        "declared_context_window_tokens": 204800,
+        "input_modalities": [
+          "text"
+        ],
+        "usage_tags": [
+          "通用"
+        ]
+      },
+      "long": {
+        "model_name": "gpt-6-luna",
+        "model_backend": "openai_responses",
+        "declared_context_window_tokens": 1000000,
+        "input_modalities": [
+          "text"
+        ],
+        "usage_tags": [
+          "长文档",
+          "推理"
+        ]
+      },
+      "cheap": {
+        "model_name": "deepseek-v4-flash",
+        "model_backend": "openai_compatible",
+        "declared_context_window_tokens": 128000,
+        "input_modalities": [
+          "text"
+        ],
+        "usage_tags": [
+          "低成本",
+          "快速"
+        ]
+      },
+      "vision": {
+        "model_name": "vision-pro",
+        "model_backend": "openai_compatible",
+        "declared_context_window_tokens": 128000,
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "usage_tags": [
+          "看图"
+        ]
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "ms-01-chat",
+      "prompt": "今天心情不错，随便聊两句吧。",
+      "expected": [
+        "retain_original",
+        "not_needed",
+        "cheap",
+        "cur"
+      ]
+    },
+    {
+      "id": "ms-02-tender",
+      "prompt": "这是一份大约 60 万字的招标文件全文，请完整通读后列出所有付款条款和违约责任。",
+      "expected": [
+        "long"
+      ]
+    },
+    {
+      "id": "ms-03-translate",
+      "prompt": "帮我把这句话翻译成英文：明天下午三点开会。",
+      "expected": [
+        "retain_original",
+        "not_needed",
+        "cheap",
+        "cur"
+      ]
+    },
+    {
+      "id": "ms-04-books",
+      "prompt": "把这三本书（合计约 120 万字）的全文放在一起做对比分析，找出人物关系的变化。",
+      "expected": [
+        "long"
+      ]
+    },
+    {
+      "id": "ms-05-date",
+      "prompt": "今天是几号？",
+      "expected": [
+        "retain_original",
+        "not_needed",
+        "cheap",
+        "cur"
+      ]
+    },
+    {
+      "id": "ms-06-code",
+      "prompt": "写一个 Python 函数，判断一个字符串是不是回文。",
+      "expected": [
+        "retain_original",
+        "not_needed",
+        "cheap",
+        "cur"
+      ]
+    },
+    {
+      "id": "ms-07-minutes",
+      "prompt": "这是我们公司过去五年全部的会议纪要（总计约 80 万字），帮我按年份总结主要决策。",
+      "expected": [
+        "long"
+      ]
+    },
+    {
+      "id": "ms-08-bulk",
+      "prompt": "我需要批量做一万条短评论的情感分类，每条只有一句话，要求尽量便宜、速度快。",
+      "expected": [
+        "cheap"
+      ]
+    },
+    {
+      "id": "ms-09-novel",
+      "prompt": "随便推荐一本适合周末看的小说。",
+      "expected": [
+        "retain_original",
+        "not_needed",
+        "cheap",
+        "cur"
+      ]
+    },
+    {
+      "id": "ms-10-spec",
+      "prompt": "下面是一份 900 页的技术规范全文（约 70 万字），请找出所有关于加密算法的要求。",
+      "expected": [
+        "long"
+      ]
+    }
+  ]
+}

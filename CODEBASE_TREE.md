@@ -1156,7 +1156,7 @@ scripts/
 |-- bench/                             # GW-03/慢模型配对基准：锁内解析成本、owner 事实缓存各路径（配对交替，比值只在组内）；决策模型中文质量基准
 |   |-- decision_quality_bench.py      # 决策质量基准运行器：离线核对、真实打分、阈值比对、登记成绩、“点位默认打开”前提检查
 |   |-- decision_quality_adapters.py   # 点位适配：中文用例 → 各点位真实材料构造代码 → 请求材料与每题可接受答案
-|   `-- decision_quality/              # thresholds.json（12 点位阈值）、results.json（登记成绩）、cases/<点位>.json、README
+|   `-- decision_quality/              # thresholds.json（12 点位阈值）、results.json（登记成绩）、cases/<点位>.json（12 点位都有用例）、README
 |-- live_lab/                          # 真实链路 harness；真实 preflight、main-artifact、tool-recovery
 |-- tui_ansi_snapshot.py               # pyte 开发工具：从 raw ANSI/offset 账还原文本、样式、光标和标题快照
 |-- tui_reference_fixture_server.py    # loopback 确定性 Anthropic 服务：驱动 TUI Markdown/思考/权限/错误黑盒场景

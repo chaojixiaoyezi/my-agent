@@ -14,13 +14,14 @@ scripts/bench/
 `-- decision_quality/
     |-- thresholds.json            # 全部 12 个点位的阈值（跑之前定，不按结果回调）
     |-- results.json               # 各点位最近一次登记的成绩（汇总数字、模型名、用例与材料摘要、时间）
-    `-- cases/<点位>.json          # 中文用例；现有 pre_recall、recall、curator、curator_relation
+    `-- cases/<点位>.json          # 中文用例；12 个点位都有
 ```
 
 ## 用例怎么变成请求
 
 - 用例只写结构化输入，例如问题、事实、消息、正式条目，以及每题可接受的答案。
 - 适配层把输入交给该点位**真实的材料构造代码**（各模块的 `_material` 一类函数；pre_recall 截获补充查询入口里拼出的材料），所以发出去的请求和产品逐字节同形。
+- 例外：subagent_model 的 `_candidate_request_limits` 会加载真实模型后端，适配层用 mock 换成用例给的窗口与输出上限（同字段），其余照常。model_selection 按 apply 模式换上采用时的题面。
 - 构造代码一改，材料摘要就变，旧成绩随之失效，必须重跑。
 - 不建 Agent，不读写 owner 目录。离线核对完全不发请求。
 

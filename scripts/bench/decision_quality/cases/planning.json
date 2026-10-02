@@ -1,0 +1,218 @@
+{
+  "schema": "decision_quality_cases.v1",
+  "point": "planning",
+  "note": "规划：现有待办里先做哪一项。每个用例的当前请求都点明了先后依赖或紧急程度，期望选那一项（写待办编号 t1..tN）。",
+  "shared": {},
+  "cases": [
+    {
+      "id": "pl-01-requirements",
+      "prompt": "先把需求确认清楚再写代码，别返工。",
+      "todos": [
+        [
+          "实现登录接口",
+          "pending"
+        ],
+        [
+          "和产品确认登录需求细节",
+          "pending"
+        ],
+        [
+          "写登录接口的单元测试",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    },
+    {
+      "id": "pl-02-outage",
+      "prompt": "线上支付挂了，用户付不了款，赶紧处理！",
+      "todos": [
+        [
+          "优化首页加载速度",
+          "pending"
+        ],
+        [
+          "排查线上支付失败",
+          "pending"
+        ],
+        [
+          "整理上周的会议纪要",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    },
+    {
+      "id": "pl-03-tests-before-deploy",
+      "prompt": "部署前得先过测试。",
+      "todos": [
+        [
+          "部署到生产环境",
+          "pending"
+        ],
+        [
+          "跑完整测试套件",
+          "pending"
+        ],
+        [
+          "写发布说明",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    },
+    {
+      "id": "pl-04-backup",
+      "prompt": "数据库迁移前一定要先备份。",
+      "todos": [
+        [
+          "执行数据库迁移脚本",
+          "pending"
+        ],
+        [
+          "备份生产数据库",
+          "pending"
+        ],
+        [
+          "通知运营迁移窗口",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    },
+    {
+      "id": "pl-05-demo",
+      "prompt": "明天上午要给老板演示，先保证演示能跑起来。",
+      "todos": [
+        [
+          "重构日志模块",
+          "pending"
+        ],
+        [
+          "准备演示环境并完整走一遍演示流程",
+          "pending"
+        ],
+        [
+          "升级依赖版本",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    },
+    {
+      "id": "pl-06-excel",
+      "prompt": "客户投诉导出的 Excel 乱码，今天之内必须修好。",
+      "todos": [
+        [
+          "修复 Excel 导出乱码",
+          "pending"
+        ],
+        [
+          "给导出功能补单元测试",
+          "pending"
+        ],
+        [
+          "优化导出速度",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t1"
+      ]
+    },
+    {
+      "id": "pl-07-security",
+      "prompt": "别的先放一放，安全漏洞优先。",
+      "todos": [
+        [
+          "升级有安全漏洞的依赖",
+          "pending"
+        ],
+        [
+          "美化设置页面",
+          "pending"
+        ],
+        [
+          "补充 README",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t1"
+      ]
+    },
+    {
+      "id": "pl-08-interface-first",
+      "prompt": "接口还没定义好，前后端都没法开工。",
+      "todos": [
+        [
+          "前端实现订单列表页",
+          "pending"
+        ],
+        [
+          "定义订单列表接口的字段和格式",
+          "pending"
+        ],
+        [
+          "后端实现订单列表接口",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    },
+    {
+      "id": "pl-09-ci",
+      "prompt": "持续集成没配好之前每次提交都没人检查，先把这个补上。",
+      "todos": [
+        [
+          "搭建项目脚手架",
+          "done"
+        ],
+        [
+          "配置持续集成流水线",
+          "pending"
+        ],
+        [
+          "编写第一个功能模块",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    },
+    {
+      "id": "pl-10-reproduce",
+      "prompt": "这个偶发崩溃到现在还没人能稳定复现，没复现就别急着改代码。",
+      "todos": [
+        [
+          "修改崩溃相关的代码",
+          "pending"
+        ],
+        [
+          "写一个能稳定复现崩溃的脚本",
+          "pending"
+        ],
+        [
+          "发布修复版本",
+          "pending"
+        ]
+      ],
+      "expected": [
+        "t2"
+      ]
+    }
+  ]
+}

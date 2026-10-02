@@ -1,5 +1,22 @@
 {
   "points": {
+    "action_candidate": {
+      "accuracy": 1.0,
+      "call_failures": 0,
+      "calls": 20,
+      "cases_digest": "7a769b1f2a88a8d40995f08fecf4cc0994590b02cb3943432e0ea057ffbf747e",
+      "elapsed_ms_max": 2899,
+      "elapsed_ms_median": 1868.5,
+      "material_digest": "e40afcd4ba39f7bca13064ea32932156a69c13f3338bf0ab18c658265e1d11a8",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 20,
+      "recorded_at": "2026-10-02T04:10:42-0700",
+      "reps": 2,
+      "scored_questions": 20
+    },
     "curator": {
       "accuracy": 1.0,
       "call_failures": 0,
@@ -34,6 +51,74 @@
       "reps": 2,
       "scored_questions": 32
     },
+    "delivery_quality": {
+      "accuracy": 0.8,
+      "call_failures": 0,
+      "calls": 20,
+      "cases_digest": "b10b36c891d49fd8c0819a3de95b5172bf38e133d1ff96233abe122587ae3e67",
+      "elapsed_ms_max": 2318,
+      "elapsed_ms_median": 1419.0,
+      "material_digest": "97334a66fbbd2049b0b8bdd660ec2d44938f1f618e4ba85ffe8d03b270387c37",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 16,
+      "recorded_at": "2026-10-02T04:10:05-0700",
+      "reps": 2,
+      "scored_questions": 20
+    },
+    "external_material_order": {
+      "accuracy": 0.6111,
+      "call_failures": 0,
+      "calls": 12,
+      "cases_digest": "2f83982ad9ad581e852bd379ed8120b3574da3fb66f0df775be81490b1fbe777",
+      "elapsed_ms_max": 2177,
+      "elapsed_ms_median": 1406.5,
+      "material_digest": "74a15c3bcac7b7b42b7d8c7f63a123aba0289dc35fa89bacb3c5d31206019261",
+      "met": false,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 22,
+      "recorded_at": "2026-10-02T04:08:52-0700",
+      "reps": 2,
+      "scored_questions": 36
+    },
+    "model_selection": {
+      "accuracy": 1.0,
+      "call_failures": 0,
+      "calls": 20,
+      "cases_digest": "d51d9f9619cc6fe3a97e11ee48121b80b53126d93d7ae7917f698dfad63f46e3",
+      "elapsed_ms_max": 2981,
+      "elapsed_ms_median": 1417.0,
+      "material_digest": "dd896ac3b90e61bd7f4bd8fc96e1154f1931757dd786324ebb9922ad5229b2c8",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 20,
+      "recorded_at": "2026-10-02T04:09:23-0700",
+      "reps": 2,
+      "scored_questions": 20
+    },
+    "planning": {
+      "accuracy": 1.0,
+      "call_failures": 0,
+      "calls": 20,
+      "cases_digest": "06285864229ccb4294a7f439e40e9acf54f060d85b977f5118266f2348eafac4",
+      "elapsed_ms_max": 2078,
+      "elapsed_ms_median": 1244.5,
+      "material_digest": "70412619fbb0ff8b3c5c0e3c2843c8d9ddf29c457a75196b21f497fe35e1c305",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 20,
+      "recorded_at": "2026-10-02T04:08:34-0700",
+      "reps": 2,
+      "scored_questions": 20
+    },
     "pre_recall": {
       "accuracy": 0.875,
       "call_failures": 0,
@@ -67,6 +152,57 @@
       "recorded_at": "2026-10-02T03:09:35-0700",
       "reps": 2,
       "scored_questions": 30
+    },
+    "skill_proposal_review": {
+      "accuracy": 0.9167,
+      "call_failures": 0,
+      "calls": 8,
+      "cases_digest": "51874fcc2aaf37a39ec0218d7f93c65799d90679a7f4e15f1c8947be13202280",
+      "elapsed_ms_max": 1843,
+      "elapsed_ms_median": 1404.5,
+      "material_digest": "d0ca703e311a06051370ba54e96480e7615e0b4db316114ecbffa2783393d46a",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 22,
+      "recorded_at": "2026-10-02T04:09:35-0700",
+      "reps": 2,
+      "scored_questions": 24
+    },
+    "skill_tool": {
+      "accuracy": 1.0,
+      "call_failures": 0,
+      "calls": 10,
+      "cases_digest": "0a2f47e369c3174f41624feaa1e6dff959917fc88f88c9bd3685233a251141cd",
+      "elapsed_ms_max": 3406,
+      "elapsed_ms_median": 1927.0,
+      "material_digest": "5cb64bc1eba6d4a9334c627ef5d2980c738bdb59eafe86d57b0c0afff2aaa604",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 60,
+      "recorded_at": "2026-10-02T04:11:02-0700",
+      "reps": 2,
+      "scored_questions": 60
+    },
+    "subagent_model": {
+      "accuracy": 0.9,
+      "call_failures": 0,
+      "calls": 10,
+      "cases_digest": "097bc86b1afc8ea0e0334f6ca2fb762700b127f4bae99e8d9ec43f141e4b09c0",
+      "elapsed_ms_max": 3321,
+      "elapsed_ms_median": 1751.0,
+      "material_digest": "987656b8a72965dc4f171c89937c0702ed481aa5f9f6f6c9446d2526dc886b90",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 18,
+      "recorded_at": "2026-10-02T04:11:20-0700",
+      "reps": 2,
+      "scored_questions": 20
     }
   },
   "schema": "decision_quality_results.v1"

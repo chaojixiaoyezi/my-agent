@@ -1,0 +1,148 @@
+{
+  "schema": "decision_quality_cases.v1",
+  "point": "subagent_model",
+  "note": "子代理选模：每批两个子任务，各一题。需要通读几十万字材料的子任务期望换到百万窗口的 luna；明确要便宜的批量子任务期望 flash；琐碎小任务期望保留原模型（或换 flash/m27 也算对）。期望按子任务序号写。",
+  "shared": {
+    "candidates": {
+      "m27": {
+        "source_model_generation": 1,
+        "revision": "r1",
+        "model_name": "MiniMax-M2.7",
+        "model_backend": "anthropic",
+        "context_window_tokens": 204800,
+        "capability": "agentic",
+        "provider_tool_support": "unknown_until_original_runner_probe",
+        "input_modalities": [
+          "text"
+        ],
+        "usage_tags": [
+          "通用"
+        ]
+      },
+      "luna": {
+        "source_model_generation": 1,
+        "revision": "r2",
+        "model_name": "gpt-6-luna",
+        "model_backend": "openai_responses",
+        "context_window_tokens": 1000000,
+        "capability": "agentic",
+        "provider_tool_support": "unknown_until_original_runner_probe",
+        "input_modalities": [
+          "text"
+        ],
+        "usage_tags": [
+          "长文档",
+          "推理"
+        ]
+      },
+      "flash": {
+        "source_model_generation": 1,
+        "revision": "r3",
+        "model_name": "deepseek-v4-flash",
+        "model_backend": "openai_compatible",
+        "context_window_tokens": 128000,
+        "capability": "agentic",
+        "provider_tool_support": "unknown_until_original_runner_probe",
+        "input_modalities": [
+          "text"
+        ],
+        "usage_tags": [
+          "低成本",
+          "快速"
+        ]
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "sm-01",
+      "children": [
+        "把这 50 个文件名改成统一的小写格式",
+        "通读这份约 60 万字的历史合同档案，汇总所有违约条款"
+      ],
+      "expected": {
+        "0": [
+          "retain_original",
+          "not_needed",
+          "flash",
+          "m27"
+        ],
+        "1": [
+          "luna"
+        ]
+      }
+    },
+    {
+      "id": "sm-02",
+      "children": [
+        "给这个函数补一行注释",
+        "对比三个开源项目合计约 100 万字的设计文档，写一份差异报告"
+      ],
+      "expected": {
+        "0": [
+          "retain_original",
+          "not_needed",
+          "flash",
+          "m27"
+        ],
+        "1": [
+          "luna"
+        ]
+      }
+    },
+    {
+      "id": "sm-03",
+      "children": [
+        "批量给一万条用户短评打情感标签，要求尽量便宜、速度快",
+        "检查这段 20 行的代码有没有语法错误"
+      ],
+      "expected": {
+        "0": [
+          "flash"
+        ],
+        "1": [
+          "retain_original",
+          "not_needed",
+          "flash",
+          "m27"
+        ]
+      }
+    },
+    {
+      "id": "sm-04",
+      "children": [
+        "读完这本约 80 万字的小说，整理人物关系图谱",
+        "把会议时间改成下午三点"
+      ],
+      "expected": {
+        "0": [
+          "luna"
+        ],
+        "1": [
+          "retain_original",
+          "not_needed",
+          "flash",
+          "m27"
+        ]
+      }
+    },
+    {
+      "id": "sm-05",
+      "children": [
+        "总结过去五年全部工单记录（约 70 万字）里的高频问题",
+        "统计这周一共提交了几次代码"
+      ],
+      "expected": {
+        "0": [
+          "luna"
+        ],
+        "1": [
+          "retain_original",
+          "not_needed",
+          "flash",
+          "m27"
+        ]
+      }
+    }
+  ]
+}

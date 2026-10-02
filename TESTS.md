@@ -101,6 +101,17 @@
   `git diff --check` 退出 0；`PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 退出 0，新增告警 0、消失告警 0。
   未改产品，因此未跑相关 pytest、guards9、Ruff、strict-size、import-boundaries 或 clean-package；不宣称产品门禁全部通过。
 
+## 决策质量基准补齐全部 12 个点位（J12 续）（2026-10-02，分支 `claude/be-bench-more-points`，基于 `b35796a60`）
+
+- **改动**：`decision_quality_adapters.py` 新增 8 个点位的适配函数，`decision_quality/cases/` 新增 8 个用例文件，`results.json` 登记新成绩。
+- **离线**：
+  - `test_decision_quality_bench.py` 21 项通过：每个点位都能离线生成协议合法的材料，期望都在候选里，用例编号唯一，默认打开前提检查不变。
+  - 10 个守卫加本文件 190 passed；ruff 通过。
+- **真实运行**：
+  - 环境：`env -i` 隔离，只用 Jev 连接文件（0600，用完删）。8 个点位 60 个用例各 2 遍，Jev 120 次，0 失败。
+  - 结果：7 个达标，external_material_order 22/36 未达标（原因见 DESIGN_LEDGER 同名条目）。
+  - 证据：`~/.my-agent/decision-evidence/j12-quality-bench/*8points*`。
+
 ## 去抖：唤醒发现事实缓存用例显式推进策略文件 mtime（2026-10-02，3a）
 
 - **现象**：Linux 车道（`25882221f`）第 10 片 `test_scheduler_scan_costs.py::test_fact_cache_respects_policy_due_deadline` 第 949 行 `[] == ['u1']`；Mac 连跑通过。

@@ -105,6 +105,25 @@
 - [设计及源代码证据](docs/design/PLUGIN_OBSERVATION_CANDIDATES.md#7-j16computer-use--ocr-接入设计与上游合同阻塞2026-10-02)已写明所需合同、宿主校验、动作解析与 image-text 无动作工具故不接。
 - 未实施产品代码；假 MCP 功能测试、四变异及真实桌面/模型均未验证。先由 3a 补齐公开接口或明确调整适配边界，再续做。
 
+## 决策质量基准补齐全部 12 个点位（J12 续）（2026-10-02，分支 `claude/be-bench-more-points`，基于 `claude/3a-step16z` `b35796a60`，已实现，待集成）
+
+- **做了什么**：
+  - 给其余 8 个点位补了适配函数和中文用例：planning、external_material_order、model_selection、skill_proposal_review、delivery_quality、action_candidate、skill_tool、subagent_model，共 60 个用例。
+  - 都走各点位真实的材料构造代码。subagent_model 会加载真实后端的那一步用 mock 换成用例数据；model_selection 按 apply 模式换上采用时的题面。
+- **首轮成绩**：Jev 120 次调用，0 失败；结果已登记进 `results.json`。
+  - 7 个达标：planning、model_selection、action_candidate、skill_tool 满分；skill_proposal_review 0.92；subagent_model 0.9 与 delivery_quality 0.8 都刚好压线。
+  - **external_material_order 0.61 未达标。**
+  - 证据：`~/.my-agent/decision-evidence/j12-quality-bench/*8points*`。
+- **external_material_order 的原因与方向（未实施）**：
+  - 原因与 recall 改措辞前完全相同：无关页答 `not_needed`/`no_match`，而不是 `later`；按现有规则任一非排序回答就整次放弃，所以这些调用在 apply 下都不会给出阅读顺序提示。
+  - 方向：照 J12b 改逐页题的候选说明（写明“这一页”的含义、无关页选 later），不做隐式别名；改完重跑本基准。
+- **压线点位的错题**：
+  - delivery_quality：全部通过且无改动时，Jev 选了最新焦点而不是 not_needed。题面没写“都没问题时选 not_needed”，这条期望偏严；跑后不改期望。
+  - subagent_model：“补一行注释”答 need_data，效果同保留原模型。
+  - skill_proposal_review：“密钥泄露立刻轮换”给了 normal。
+- **点位默认值一律不变**（全部 off）。哪个点位改成默认打开，由集成方按成绩、阈值和真实收益决定；`test_decision_quality_bench.py` 仍强制“默认打开必须有当前有效且达标的成绩”。
+- **验证**：见 TESTS.md 同名节。
+
 ## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，已实现，待集成）
 
 - **问题**：插件包放在当前 owner 范围外时，允许的根目录只拼在给模型看的异常文字里；用户在 TUI 和 IM 看到的仍是通用的“插件、来源文件或配置无效，或读取未获授权。”。

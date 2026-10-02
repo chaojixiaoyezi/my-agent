@@ -1,0 +1,139 @@
+{
+  "schema": "decision_quality_cases.v1",
+  "point": "skill_proposal_review",
+  "note": "Skill 提案审核顺序：每条提案一题。内容相同的提案期望 possible_duplicate；防止数据丢失或密钥泄露的经验期望 review_first（有时 normal 也算对）；琐碎小技巧期望 review_later（normal 也算对）。期望按提案序号写。",
+  "shared": {},
+  "cases": [
+    {
+      "id": "sr-01-backup",
+      "proposals": [
+        [
+          "db-backup-before-migration",
+          "部署前先备份生产数据库，迁移失败时才能回滚。",
+          "做数据库迁移"
+        ],
+        [
+          "backup-db-first",
+          "迁移数据库之前务必先备份，否则出了问题回不去。",
+          "数据库迁移前"
+        ],
+        [
+          "ls-alias",
+          "在终端里用 ll 代替 ls -l 更省事。",
+          "日常终端操作"
+        ]
+      ],
+      "expected": {
+        "1": [
+          "possible_duplicate",
+          "review_first"
+        ],
+        "2": [
+          "possible_duplicate"
+        ],
+        "3": [
+          "review_later",
+          "normal"
+        ]
+      }
+    },
+    {
+      "id": "sr-02-secrets",
+      "proposals": [
+        [
+          "no-secret-in-log",
+          "日志里不要打印完整的 API Key，最多打印是否读取到和长度。",
+          "写调试日志"
+        ],
+        [
+          "emoji-commit",
+          "提交信息前面加一个表情符号会更好看。",
+          "写提交信息"
+        ],
+        [
+          "rotate-leaked-key",
+          "密钥一旦泄露到仓库里，必须立刻作废并轮换，只删提交是不够的。",
+          "发现密钥泄露"
+        ]
+      ],
+      "expected": {
+        "1": [
+          "review_first",
+          "normal"
+        ],
+        "2": [
+          "review_later",
+          "normal"
+        ],
+        "3": [
+          "review_first"
+        ]
+      }
+    },
+    {
+      "id": "sr-03-tests",
+      "proposals": [
+        [
+          "run-tests-before-push",
+          "推送前先在本地跑一遍相关测试，别把挂掉的提交推上去。",
+          "推送代码前"
+        ],
+        [
+          "test-before-push",
+          "push 之前本地先跑测试，避免 CI 变红。",
+          "准备推送"
+        ],
+        [
+          "pytest-before-push",
+          "每次推送前先跑 pytest，CI 才不会挂。",
+          "推送前"
+        ]
+      ],
+      "expected": {
+        "1": [
+          "possible_duplicate"
+        ],
+        "2": [
+          "possible_duplicate"
+        ],
+        "3": [
+          "possible_duplicate"
+        ]
+      }
+    },
+    {
+      "id": "sr-04-mixed",
+      "proposals": [
+        [
+          "check-disk-before-bulk-tests",
+          "跑大批量测试前先看磁盘剩余空间，上次临时目录把磁盘写满了，服务全挂。",
+          "大批量测试"
+        ],
+        [
+          "dark-theme",
+          "编辑器用深色主题，看久了眼睛不累。",
+          "写代码"
+        ],
+        [
+          "proxy-env-for-scripts",
+          "调用外网的脚本要带上代理环境变量，不然请求会失败。",
+          "调用外部接口"
+        ]
+      ],
+      "expected": {
+        "1": [
+          "review_first",
+          "normal"
+        ],
+        "2": [
+          "review_later",
+          "normal"
+        ],
+        "3": [
+          "normal",
+          "review_first"
+        ]
+      }
+    }
+  ]
+}

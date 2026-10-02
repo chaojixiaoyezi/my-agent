@@ -1,0 +1,323 @@
+{
+  "schema": "decision_quality_cases.v1",
+  "point": "skill_tool",
+  "note": "能力推荐：每个插件（按 provider 合并）和每个 Skill 各一题，相关的期望 include，无关的期望 not_needed。注意本点位的 no_match 表示“整批不匹配、保持原展示”，会让整次推荐作废，所以无关项只认 not_needed。期望按候选名写（插件写 provider_id，Skill 写名字）。",
+  "shared": {},
+  "cases": [
+    {
+      "id": "st-01-pdf",
+      "prompt": "帮我把这份 PDF 合同里的付款条款摘出来。",
+      "tools": [
+        [
+          "browser_lite_read_page",
+          "读取当前网页的正文与可点击元素",
+          "browser-lite"
+        ],
+        [
+          "browser_lite_click",
+          "点击网页上的一个元素",
+          "browser-lite"
+        ],
+        [
+          "pdf_reader_extract",
+          "从 PDF 文件中提取正文和表格",
+          "pdf-reader"
+        ],
+        [
+          "weather_forecast",
+          "查询指定城市未来几天的天气预报",
+          "weather"
+        ],
+        [
+          "calendar_add_event",
+          "在用户日历里新建一个日程",
+          "calendar"
+        ]
+      ],
+      "skills": [
+        [
+          "git-rollback",
+          "把 Git 仓库安全地回退到之前的提交",
+          "需要撤销或回退已经做出的代码提交时"
+        ],
+        [
+          "weekly-report",
+          "按固定格式整理一周的工作内容写成周报",
+          "需要写周报或工作总结时"
+        ]
+      ],
+      "expected": {
+        "browser-lite": [
+          "not_needed"
+        ],
+        "pdf-reader": [
+          "include"
+        ],
+        "weather": [
+          "not_needed"
+        ],
+        "calendar": [
+          "not_needed"
+        ],
+        "git-rollback": [
+          "not_needed"
+        ],
+        "weekly-report": [
+          "not_needed"
+        ]
+      }
+    },
+    {
+      "id": "st-02-weather",
+      "prompt": "明天北京下雨吗？要不要带伞？",
+      "tools": [
+        [
+          "browser_lite_read_page",
+          "读取当前网页的正文与可点击元素",
+          "browser-lite"
+        ],
+        [
+          "browser_lite_click",
+          "点击网页上的一个元素",
+          "browser-lite"
+        ],
+        [
+          "pdf_reader_extract",
+          "从 PDF 文件中提取正文和表格",
+          "pdf-reader"
+        ],
+        [
+          "weather_forecast",
+          "查询指定城市未来几天的天气预报",
+          "weather"
+        ],
+        [
+          "calendar_add_event",
+          "在用户日历里新建一个日程",
+          "calendar"
+        ]
+      ],
+      "skills": [
+        [
+          "git-rollback",
+          "把 Git 仓库安全地回退到之前的提交",
+          "需要撤销或回退已经做出的代码提交时"
+        ],
+        [
+          "weekly-report",
+          "按固定格式整理一周的工作内容写成周报",
+          "需要写周报或工作总结时"
+        ]
+      ],
+      "expected": {
+        "browser-lite": [
+          "not_needed"
+        ],
+        "pdf-reader": [
+          "not_needed"
+        ],
+        "weather": [
+          "include"
+        ],
+        "calendar": [
+          "not_needed"
+        ],
+        "git-rollback": [
+          "not_needed"
+        ],
+        "weekly-report": [
+          "not_needed"
+        ]
+      }
+    },
+    {
+      "id": "st-03-web-and-calendar",
+      "prompt": "打开这个商品网页看看价格，再帮我把下周三下午的会议记进日历。",
+      "tools": [
+        [
+          "browser_lite_read_page",
+          "读取当前网页的正文与可点击元素",
+          "browser-lite"
+        ],
+        [
+          "browser_lite_click",
+          "点击网页上的一个元素",
+          "browser-lite"
+        ],
+        [
+          "pdf_reader_extract",
+          "从 PDF 文件中提取正文和表格",
+          "pdf-reader"
+        ],
+        [
+          "weather_forecast",
+          "查询指定城市未来几天的天气预报",
+          "weather"
+        ],
+        [
+          "calendar_add_event",
+          "在用户日历里新建一个日程",
+          "calendar"
+        ]
+      ],
+      "skills": [
+        [
+          "git-rollback",
+          "把 Git 仓库安全地回退到之前的提交",
+          "需要撤销或回退已经做出的代码提交时"
+        ],
+        [
+          "weekly-report",
+          "按固定格式整理一周的工作内容写成周报",
+          "需要写周报或工作总结时"
+        ]
+      ],
+      "expected": {
+        "browser-lite": [
+          "include"
+        ],
+        "pdf-reader": [
+          "not_needed"
+        ],
+        "weather": [
+          "not_needed"
+        ],
+        "calendar": [
+          "include"
+        ],
+        "git-rollback": [
+          "not_needed"
+        ],
+        "weekly-report": [
+          "not_needed"
+        ]
+      }
+    },
+    {
+      "id": "st-04-rollback",
+      "prompt": "刚才那个提交有问题，帮我把仓库回退到上一个版本。",
+      "tools": [
+        [
+          "browser_lite_read_page",
+          "读取当前网页的正文与可点击元素",
+          "browser-lite"
+        ],
+        [
+          "browser_lite_click",
+          "点击网页上的一个元素",
+          "browser-lite"
+        ],
+        [
+          "pdf_reader_extract",
+          "从 PDF 文件中提取正文和表格",
+          "pdf-reader"
+        ],
+        [
+          "weather_forecast",
+          "查询指定城市未来几天的天气预报",
+          "weather"
+        ],
+        [
+          "calendar_add_event",
+          "在用户日历里新建一个日程",
+          "calendar"
+        ]
+      ],
+      "skills": [
+        [
+          "git-rollback",
+          "把 Git 仓库安全地回退到之前的提交",
+          "需要撤销或回退已经做出的代码提交时"
+        ],
+        [
+          "weekly-report",
+          "按固定格式整理一周的工作内容写成周报",
+          "需要写周报或工作总结时"
+        ]
+      ],
+      "expected": {
+        "browser-lite": [
+          "not_needed"
+        ],
+        "pdf-reader": [
+          "not_needed"
+        ],
+        "weather": [
+          "not_needed"
+        ],
+        "calendar": [
+          "not_needed"
+        ],
+        "git-rollback": [
+          "include"
+        ],
+        "weekly-report": [
+          "not_needed"
+        ]
+      }
+    },
+    {
+      "id": "st-05-report",
+      "prompt": "根据这周做的事情帮我写一份周报。",
+      "tools": [
+        [
+          "browser_lite_read_page",
+          "读取当前网页的正文与可点击元素",
+          "browser-lite"
+        ],
+        [
+          "browser_lite_click",
+          "点击网页上的一个元素",
+          "browser-lite"
+        ],
+        [
+          "pdf_reader_extract",
+          "从 PDF 文件中提取正文和表格",
+          "pdf-reader"
+        ],
+        [
+          "weather_forecast",
+          "查询指定城市未来几天的天气预报",
+          "weather"
+        ],
+        [
+          "calendar_add_event",
+          "在用户日历里新建一个日程",
+          "calendar"
+        ]
+      ],
+      "skills": [
+        [
+          "git-rollback",
+          "把 Git 仓库安全地回退到之前的提交",
+          "需要撤销或回退已经做出的代码提交时"
+        ],
+        [
+          "weekly-report",
+          "按固定格式整理一周的工作内容写成周报",
+          "需要写周报或工作总结时"
+        ]
+      ],
+      "expected": {
+        "browser-lite": [
+          "not_needed"
+        ],
+        "pdf-reader": [
+          "not_needed"
+        ],
+        "weather": [
+          "not_needed"
+        ],
+        "calendar": [
+          "not_needed"
+        ],
+        "git-rollback": [
+          "not_needed"
+        ],
+        "weekly-report": [
+          "include"
+        ]
+      }
+    }
+  ]
+}

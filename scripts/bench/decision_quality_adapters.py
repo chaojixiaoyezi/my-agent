@@ -133,5 +133,183 @@ def _formal(entry_id: str, text: str):
                                     authority_version=1, content_chars=len(text))
 
 
+# LLM: 直接调用规划点的 _material；待办按用例顺序编号 t1..tN，期望写待办编号（或非选择键），这里换算成 todo_<序号>。
+#   已完成/跳过的待办由产品自己剔除，题号只覆盖仍开着的项。
+# 函数用途: 生成规划（planning）一条用例的真实请求材料与期望答案。
+def planning(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent.agent_core import decision_planning
+
+    items = [{"id": f"t{index}", "title": title, "status": status}
+             for index, (title, status) in enumerate(case["todos"], start=1)]
+    payload = {"run_id": "bench", "items": items,
+               "display_plan": {"generation_id": "bench-plan", "revision": 1, "item_ids": [item["id"] for item in items]}}
+    agent = SimpleNamespace(_current_user_prompt=case["prompt"], config=None)
+    state, questions, _revision = decision_planning._material(agent, payload)
+    index = {row["id"]: row["candidate"] for row in state["todos"]}
+    return state, questions, {"priority": {index.get(value, value) for value in case["expected"]}}
+
+
+# LLM: 直接调用外部材料阅读顺序点的 _material；页按用例顺序成为 page_<序号>，内容哈希由正文算出，不含 URL。
+# 函数用途: 生成外部材料阅读顺序（external_material_order）一条用例的真实请求材料与期望答案。
+def external_material_order(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent.agent_core.tool_context import external_material_order as module
+
+    pages = [{"title": title, "preview": preview, "artifact_ref": f"artifact://bench/{case['id']}/{index}",
+              "content_hash": hashlib.sha256(f"{title}\n{preview}".encode()).hexdigest()}
+             for index, (title, preview) in enumerate(case["pages"], start=1)]
+    record = SimpleNamespace(params=SimpleNamespace(user_prompt=case["prompt"]),
+                             result=SimpleNamespace(metadata={"handler_details": {"pages": pages}}))
+    state, questions, _revision = module._material(record, {"output_hash": "0" * 64, "scoped_call_id": "bench"})
+    return state, questions, {f"page_{number}": set(values) for number, values in case["expected"].items()}
+
+
+# LLM: 调用选模型点的真实模态过滤与 _material，再按 apply 模式换上 _APPLY_INSTRUCTIONS（正式采用时的题面）；
+#   候选目录、当前模型都来自用例共享表，不读模型目录、不探针。期望写候选编号或保留类非选择键。
+# 函数用途: 生成选模型（model_selection）一条用例的真实请求材料与期望答案。
+def model_selection(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent import gateway_model_observation as module
+
+    current = shared["current"]
+    config = SimpleNamespace(model_name=current["model_name"], model_backend=current["model_backend"],
+                             model_context_window_tokens=current["context_window_tokens"])
+    context = SimpleNamespace(agent=SimpleNamespace(config=config), request={"prompt": case["prompt"]})
+    thread = SimpleNamespace(summary=case.get("summary", ""), model_profile_id="", model_selection_revision=0)
+    captured = SimpleNamespace(profile_id=current["profile_id"])
+    candidates = {key: dict(row) for key, row in shared["candidates"].items()}
+    candidates, _generations, hint, retained = module._filter_by_modality(context, candidates, {})
+    if retained is not None:
+        raise ValueError(f"{case['id']}: 模态过滤后没有可选候选")
+    state, questions, _revision = module._material(context, thread, captured, (candidates, hint))
+    questions["model"]["instructions"] = module._APPLY_INSTRUCTIONS
+    return state, questions, {"model": set(case["expected"])}
+
+
+# LLM: 用产品 render_lesson_draft 在内存里生成合法草稿（hash 与渲染一致），组装待确认的 SkillProposal 后调用 _facts/_material；
+#   不写提案文件、不读 owner 目录。提案按用例顺序成为 proposal_<序号>，期望按序号写。
+# 函数用途: 生成 Skill 提案审核顺序（skill_proposal_review）一条用例的真实请求材料与期望答案。
+def skill_proposal_review(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent.capability import decision_skill_proposal_review as module
+    from agent_py_agent.agent.capability.skill_proposals import (
+        PROPOSAL_PENDING,
+        SkillProposal,
+        SkillProposalSource,
+        SkillProposalTarget,
+        render_lesson_draft,
+    )
+
+    pending = []
+    for index, (skill_name, lesson, scenario) in enumerate(case["proposals"], start=1):
+        candidate = SimpleNamespace(content=lesson, scope={"applies_when": scenario}, candidate_id=f"candidate-{index}",
+                                    source_task_ids=(f"task-{index}",), source_run_ids=(f"run-{index}",))
+        draft = render_lesson_draft(candidate, skill_name)
+        pending.append(SkillProposal(f"proposal-{index}", 1, PROPOSAL_PENDING,
+                                     SkillProposalSource(f"candidate-{index}", draft.sha256, (f"task-{index}",), (f"run-{index}",)),
+                                     SkillProposalTarget(skill_name), draft,
+                                     f"2026-10-0{index}T00:00:00+00:00", f"2026-10-0{index}T00:00:00+00:00"))
+    pending = tuple(pending)
+    state, questions, _revision = module._material(pending, module._facts(pending))
+    return state, questions, {f"proposal_{number}": set(values) for number, values in case["expected"].items()}
+
+
+# LLM: 按用例步骤造本轮工具归档：verify 步是 run_command 的验证事件，edit 步是写入工具留下的 stale 状态；最后一步是当前回执。
+#   调用交付复核点的 _review_focuses/_material；期望按“项目根|kind|scope”写，这里按产品焦点顺序换算成 focus_<序号>。
+# 函数用途: 生成交付复核焦点（delivery_quality）一条用例的真实请求材料与期望答案。
+def delivery_quality(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent.agent_core.tool_context import decision_delivery_quality as module
+
+    archive_rows = [_delivery_archive_row(index, step) for index, step in enumerate(case["steps"], start=1)]
+    call = SimpleNamespace(run_id="run-1", tool_name="run_command", to_dict=lambda: {"tool_name": "run_command"})
+    params = SimpleNamespace(archive_tool_calls=archive_rows, task_id="task-1", user_prompt=case["prompt"])
+    record = SimpleNamespace(call=call, params=params)
+    focuses = module._review_focuses(record, archive_rows[-1])
+    state, questions, _revision = module._material(record, archive_rows[-1], 2000)
+    keys = {f"{focus['root']}|{focus['kind']}|{focus['scope']}": f"focus_{order}" for order, focus in enumerate(focuses, 1)}
+    return state, questions, {"review_focus": {keys.get(value, value) for value in case["expected"]}}
+
+
+# 函数用途: 把一个用例步骤变成与产品归档同形的一条记录（验证事件或文件修改后的 stale 状态）。
+def _delivery_archive_row(index: int, step: dict) -> dict:
+    if "edit" in step:
+        envelope = {"verification_state": [{"status": "stale", "root": step["edit"]}]}
+        tool = "edit_file"
+    else:
+        verify = step["verify"]
+        evidence = {"id": index, "kind": verify["kind"], "scope": verify["scope"], "status": verify["status"],
+                    "root": verify["root"], "canonical_command": verify.get("command", "pytest -q"),
+                    "created_at": f"2026-10-02T00:00:{index:02d}+00:00", "exit_code": 0 if verify["status"] == "passed" else 1}
+        envelope = {"verification_evidence": evidence, "process": {"status": "exited", "return_code": evidence["exit_code"]}}
+        tool = "run_command"
+    return {"tool": tool, "id": f"call-{index}", "run_id": "run-1", "task_id": "task-1",
+            "scoped_call_id": f"run-1:call-{index}", "output_hash": "a" * 64, "tool_result_envelope": envelope}
+
+
+# LLM: 按产品观察记录形状造一条插件 read 观察（宿主铸的观察/候选编号、本地目标事实），再调用 _observation/_material；
+#   候选按用例顺序成为 c<序号>，期望按序号写（或非选择键）。动作名只需非空，本函数不核对可用性。
+# 函数用途: 生成动作候选（action_candidate）一条用例的真实请求材料与期望答案。
+def action_candidate(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent.agent_core.tool_context import decision_action_candidate as module
+
+    candidates = [{"candidate_id": f"cand-{index:016x}", "key": f"key-{index}", "role": role, "label": label,
+                   "actions": ["plugin__browser_lite_bench__click"]}
+                  for index, (role, label) in enumerate(case["candidates"], start=1)]
+    observation = {"schema": module.OBSERVATION_SCHEMA, "observation_id": "obs-" + "a" * 24, "plugin_id": "browser-lite",
+                   "activation_id": "activation-bench", "tool": "plugin__browser_lite_bench__read",
+                   "target_kind": case.get("target_kind", "page"), "target_ref": "tab-bench", "target_ref_hash": "target-bench",
+                   "generation": "gen-1", "content_hash": "c" * 24, "candidates": candidates}
+    archive = {"tool_result_envelope": {"observation": observation}, "scoped_call_id": "run-1:call-1", "output_hash": "a" * 64}
+    record = SimpleNamespace(params=SimpleNamespace(user_prompt=case["prompt"]))
+    state, questions, _revision = module._material(record, archive, module._observation(archive), 2000)
+    return state, questions, {"next_candidate": {f"c{value}" if str(value).isdigit() else value for value in case["expected"]}}
+
+
+# LLM: 用轻量对象造工具快照（插件类工具带 provider_id）、Skill 列表与参数，调用能力推荐点的真实 _material；
+#   候选按产品分组顺序成为 candidate_<序号>，期望按候选名（插件写 provider_id、Skill 写名字）写，这里换算成题号。
+# 函数用途: 生成能力推荐（skill_tool）一条用例的真实请求材料与期望答案。
+def skill_tool(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent.capability import decision_recommendation as module
+
+    runtimes = []
+    for name, description, provider in case["tools"]:
+        spec = SimpleNamespace(name=name, description=description, category="plugins", schema_hash=f"schema-{name}",
+                               hints=SimpleNamespace(provider_id=provider))
+        runtimes.append(SimpleNamespace(model_spec=spec, exposure=SimpleNamespace(model_visible=True)))
+    entries = [SimpleNamespace(stable_id=f"skill:{name}", name=name, description=description, when_to_use=when,
+                               content_sha256=f"sha-{name}", tools_required=())
+               for name, description, when in case.get("skills", [])]
+    skills = SimpleNamespace(enabled_entries=lambda: list(entries), packages=[], fingerprint="skills-bench")
+    snapshot = SimpleNamespace(runtimes=runtimes, snapshot_hash="snapshot-bench")
+    params = SimpleNamespace(user_prompt=case["prompt"], allowed_tools=None, context_scope="default", task_attributes={})
+    agent = SimpleNamespace(backend=_MAIN_BACKEND, config=_MAIN_CONFIG)
+    policy = {"context_policy": "progressive", "optional_categories": ["plugins"]}
+    state, questions, _revision = module._material(agent, params, snapshot, skills, policy, bool(entries))
+    index = {question["instructions"]["candidate"]["name"]: key for key, question in questions.items()}
+    return state, questions, {index[name]: set(values) for name, values in case["expected"].items()}
+
+
+# LLM: 子代理选模的真实 _questions/_frozen_material；会加载真实后端的 _candidate_request_limits 用 mock 换成用例给的窗口与
+#   输出上限（同字段），候选目录来自用例共享表。孩子按用例顺序成为题号 "0","1"...，期望按序号写候选编号或保留类非选择键。
+# 函数用途: 生成子代理选模（subagent_model）一条用例的真实请求材料与期望答案。
+def subagent_model(case: dict, shared: dict) -> tuple[dict, dict, dict]:
+    from agent_py_agent.agent.agent_core.orchestration import decision_subagent as module
+
+    candidates = {key: dict(row) for key, row in shared["candidates"].items()}
+    limits = {key: {"runtime_config_revision": f"rev-{key}", "model_name": row["model_name"], "model_backend": row["model_backend"],
+                    "context_window_tokens": row["context_window_tokens"], "output_cap_tokens": None,
+                    "output_cap_status": "unknown", "output_cap_reason": "not_proven_by_original_provider_contract",
+                    "provider_tool_support": "unknown_until_original_runner_probe"} for key, row in candidates.items()}
+    eligible = {str(index): module.SubagentModelInput(raw={}, prepared=SimpleNamespace(goal=goal),
+                                                      canonical=SimpleNamespace(id=f"child-{index}", goal=goal))
+                for index, goal in enumerate(case["children"])}
+    agent = SimpleNamespace(_current_run_params=None)
+    stage = SimpleNamespace(deadline=time.monotonic() + 60)
+    with mock.patch.object(module, "_candidate_request_limits", mock.Mock(return_value=limits)):
+        questions, snapshots = module._questions(agent, eligible, candidates, stage)
+    _revision, state = module._frozen_material(candidates, snapshots, questions)
+    return state, questions, {key: set(values) for key, values in case["expected"].items()}
+
+
 # 已有用例的点位 → 适配函数；没登记的点位没有基准，不能默认打开（见 decision_quality_bench.gate_failures）。
-ADAPTERS = {"pre_recall": pre_recall, "recall": recall, "curator": curator, "curator_relation": curator_relation}
+ADAPTERS = {"pre_recall": pre_recall, "recall": recall, "curator": curator, "curator_relation": curator_relation,
+            "planning": planning, "external_material_order": external_material_order, "model_selection": model_selection,
+            "skill_proposal_review": skill_proposal_review, "delivery_quality": delivery_quality,
+            "action_candidate": action_candidate, "skill_tool": skill_tool, "subagent_model": subagent_model}
