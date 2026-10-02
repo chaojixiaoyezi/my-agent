@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+## C5 剩余竞态：熔断判定与用户回合登记同闸（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待集成）
+
+- “在场”查询和熔断落账之间原来没有互斥。现在 `run_claim.user_input_turn_gate` 持车道闸，读在场和落账一次做完。
+- 网关前台用户回合的登记也要过这把闸：要么在判定之前登记（空片不计入），要么等落账做完再登记（D4 只清计数）。
+- 设计与锁顺序见设计台账同名节，测试与变异见 TESTS.md 同名节。
+
 ## /settings 管理员判定改用统一函数（P14 第 6 条，2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`，待集成）
 
 - `settings_control_service._is_admin` 改为调用 `user_space/owner_access.is_complete_local_admin_owner`，规则不变：

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,8 @@ _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 
 
 # LLM: 仅注入 Goal/任务/时钟领域及若干精确能力；回调在原分支内查询，不预取子树或注册表。
-#   user_turn_on_lane 按 thread_id 只读车道登记（run_claim.user_input_turn_on_lane），缺省 None 表示不判断（与改前相同）。
+#   user_turn_gate 按 thread_id 持有车道闸并给出“用户回合在场”（run_claim.user_input_turn_gate），熔断判定与落账都在闸内；
+#   缺省 None 表示不判断（与 C5 之前相同）。
 # 类用途: 列明目标续跑需要的依赖，不缓存目标状态、不创建第二份账本或后台工作。
 @dataclass(frozen=True)
 class GoalContinuationDependencies:
@@ -34,7 +36,7 @@ class GoalContinuationDependencies:
     task_registry: Callable[[], object | None]
     goal_continuation_idle_limit: int = 3
     queue_no_progress_notice: Callable[[object], object] | None = None
-    user_turn_on_lane: Callable[[str], bool] | None = None
+    user_turn_gate: Callable[[str], AbstractContextManager[bool]] | None = None
 
 
 # LLM: 只更新 wake 精确匹配的 active Goal；原事务内先结算时钟、再 CAS 停目标、改任务并登记注册表。
@@ -150,26 +152,28 @@ def _active_goal_for_signal(dependencies: GoalContinuationDependencies, signal: 
 #   不再续跑；目标已不存在也返回 None。不读正文。
 #   C5/O4 用户消息先处理：空片结束时本会话车道上有携带用户消息的回合（排队或执行中），这一片不计入、不记账，计数保持原值，
 #   续跑链照常接下一片；清零仍由用户消息写入会话后的 D4 重置完成（写不进去就不清）。有进展的片照常记账清零。
-#   改动同步 test_goal_fuse_user_turn_first.py。
+#   判定时点（sol2 竞态）：读“在场”和落账在同一次车道闸内完成，用户回合登记要等闸，不能插在两者之间；落账之后才登记的
+#   用户回合不补救已发生的暂停（D4 只清计数），也不靠用户消息自动恢复。宿主提示在闸外发。改动同步 test_goal_fuse_user_turn_first.py。
 # 函数用途: 记下本片有没有进展，决定是否还能继续自动续跑。
 def _record_continuation_slice(
     dependencies: GoalContinuationDependencies, signal: WakeSignal, report: BackgroundMainAgentReport, facts: _GoalSlice,
 ) -> object | None:
     progressed = slice_has_progress(signal, report, facts.goal, facts.task_status)
-    user_turn_on_lane = dependencies.user_turn_on_lane
-    if not progressed and user_turn_on_lane is not None and user_turn_on_lane(facts.goal.thread_id):
-        return facts.goal
-    goal, tripped = dependencies.goals.record_continuation_fuse(
-        {
-            "thread_id": facts.goal.thread_id,
-            "goal_id": facts.goal.goal_id,
-            "task_id": facts.goal.task_id,
-            "wake_signal_id": signal.wake_signal_id,
-            "progressed": progressed,
-            "idle_limit": dependencies.goal_continuation_idle_limit,
-            "now": facts.now,
-        }
-    )
+    gate = dependencies.user_turn_gate
+    with gate(facts.goal.thread_id) if gate is not None else nullcontext(False) as user_turn_present:
+        if not progressed and user_turn_present:
+            return facts.goal
+        goal, tripped = dependencies.goals.record_continuation_fuse(
+            {
+                "thread_id": facts.goal.thread_id,
+                "goal_id": facts.goal.goal_id,
+                "task_id": facts.goal.task_id,
+                "wake_signal_id": signal.wake_signal_id,
+                "progressed": progressed,
+                "idle_limit": dependencies.goal_continuation_idle_limit,
+                "now": facts.now,
+            }
+        )
     if goal is None or not tripped:
         return goal
     notify = dependencies.queue_no_progress_notice

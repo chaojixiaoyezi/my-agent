@@ -1,6 +1,7 @@
 # LLM: Share one durable claim lane; host-bound foreground recovery must retain exact task affinity.
 # 租约操作统一访问 store.claims；线程存在性、心跳和最终释放仍使用同一原文件及调用顺序。
-# 模块用途: 前后台共用执行权、心跳与释放流程，不新增队列或模型重试；另在进程内登记“用户回合在场”，供 Goal 熔断记账读取。
+# 模块用途: 前后台共用执行权、心跳与释放流程，不新增队列或模型重试；另在进程内登记“用户回合在场”，并给每条车道一把闸，
+#   让 Goal 熔断的“判定 + 落账”与用户回合登记互斥。
 """One durable execution lane shared by foreground and background turns."""
 
 from __future__ import annotations
@@ -8,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -20,6 +22,21 @@ _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
 # 不是执行权、不落盘；进程退出即消失，重启后排队的请求重新等车道时再登记。
 _USER_INPUT_TURNS: dict[str, int] = {}
 _USER_INPUT_TURNS_LOCK = threading.Lock()
+
+
+# LLM: threading.Lock 不能被弱引用，包一层才能放进弱值字典；有线程在闸内或在等闸时持有强引用，互斥不会因回收而失效。
+# 类用途: 一条车道的“用户回合登记 / 熔断判定落账”闸。
+class _LaneGate:
+    __slots__ = ("lock", "__weakref__")
+
+    # LLM: 只建锁，不登记；登记进闸表由 _lane_gate 在登记表锁内完成。
+    # 函数用途: 建一把新的车道闸。
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+
+
+# 车道闸表（键同 _USER_INPUT_TURNS）：没人持有或等待时自动回收，表只随活跃车道数增长，不随见过的会话数无界增长。
+_USER_INPUT_LANE_GATES: weakref.WeakValueDictionary[str, _LaneGate] = weakref.WeakValueDictionary()
 
 
 # LLM: Callers publish any recoverable task binding before acquiring; this flag carries no authority.
@@ -152,7 +169,7 @@ def conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]
 
 
 # LLM: 只读进程内登记，不读写租约文件；键与登记时同一个租约文件路径，所以只认同一 owner 存储里的同一会话。
-#   后台 Goal 熔断记账用它判断“空片结束时本会话是否有用户消息在排队或执行”（C5/O4：用户消息先处理）。
+#   只是一次性快照：要依据它落账（Goal 熔断）必须用 user_input_turn_gate，否则查完到落账之间仍可能有用户回合登记进来。
 # 函数用途: 回答这个会话的执行车道上此刻有没有携带用户消息的回合（排队中或执行中）。
 def user_input_turn_on_lane(store: object, thread_id: str) -> bool:
     key = _user_input_lane_key(store, thread_id)
@@ -160,16 +177,57 @@ def user_input_turn_on_lane(store: object, thread_id: str) -> bool:
         return bool(key) and key in _USER_INPUT_TURNS
 
 
+# LLM: C5 判定时点：后台 Goal 熔断在这把车道闸里读“用户回合在场”并完成落账，用户回合登记（+1）也要过同一把闸，
+#   所以登记要么在判定之前（这一空片不计入），要么在落账之后（暂停已先发生，之后按 D4 只清计数、不自动恢复）。
+#   锁顺序：车道闸 → GoalStore 迁移锁/文件锁；持闸期间不得等执行租约、不得回调登记，撤销不经过闸。
+#   算不出键时不持任何锁、按“不在场”给出。只读登记，不写盘。改动同步 test_goal_fuse_user_turn_first.py。
+# 函数用途: 持有本会话车道闸并给出“此刻有没有用户回合在场”，供熔断判定与落账在闸内一次做完。
+@contextmanager
+def user_input_turn_gate(store: object, thread_id: str) -> Iterator[bool]:
+    key = _user_input_lane_key(store, thread_id)
+    if not key:
+        yield False
+        return
+    gate = _lane_gate(key)
+    with gate.lock:
+        with _USER_INPUT_TURNS_LOCK:
+            present = key in _USER_INPUT_TURNS
+        yield present
+
+
 # LLM: 登记与撤销成对出现在同一个 with 里，异常、中断、取消都会撤销；不携带用户消息或算不出键时什么都不做。
+#   登记经车道闸（与熔断判定落账互斥），撤销不经闸：用户回合离开车道后再记的空片照常计数。
 # 函数用途: 在携带用户消息的回合排队和执行期间登记“用户回合在场”，退出车道时撤销。
 @contextmanager
 def _user_input_turn_registered(request: ConversationRunLaneRequest) -> Iterator[None]:
     key = _user_input_lane_key(request.store, request.thread_id) if request.carries_user_input else ""
-    _adjust_user_input_turns(key, 1)
+    _register_user_input_turn(key)
     try:
         yield
     finally:
         _adjust_user_input_turns(key, -1)
+
+
+# LLM: 登记必须在车道闸内：熔断正在判定或落账时等它做完再登记，不能插进“查不在场”和“落账暂停”之间。
+#   只持闸做一次计数，不在闸内等执行租约。空键不登记。
+# 函数用途: 经车道闸登记一个在场的用户回合。
+def _register_user_input_turn(key: str) -> None:
+    if not key:
+        return
+    gate = _lane_gate(key)
+    with gate.lock:
+        _adjust_user_input_turns(key, 1)
+
+
+# LLM: 取闸与建闸在登记表锁内完成，同一车道并发取到的是同一把闸；调用方持有返回值期间它不会被回收。
+# 函数用途: 取得（必要时新建）某条车道的闸。
+def _lane_gate(key: str) -> _LaneGate:
+    with _USER_INPUT_TURNS_LOCK:
+        gate = _USER_INPUT_LANE_GATES.get(key)
+        if gate is None:
+            gate = _LaneGate()
+            _USER_INPUT_LANE_GATES[key] = gate
+        return gate
 
 
 # LLM: 键取本会话执行租约文件路径（store.claims.storage.background_claim_path），与租约同一份 owner 存储；
@@ -245,5 +303,6 @@ __all__ = [
     "claim_heartbeat_interval_seconds",
     "conversation_run_lane",
     "detached_task_claim_scope_id",
+    "user_input_turn_gate",
     "user_input_turn_on_lane",
 ]

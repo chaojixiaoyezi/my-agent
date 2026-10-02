@@ -6,6 +6,8 @@ reset_goal_progress_fuse 只接在 ChannelMessageRuntime.receive 和 CLI 入口�
 1. Gateway 前台用户消息写入成功后清零计数；熔断暂停的 Goal 只清计数、保留暂停原因（与另两个入口同口径）；写入失败不清；
 2. Goal 自动续跑片走后台 wake，不经过这条前台路径：清零之后仍要连续 3 个空片才熔断。
 3. C5/O4（2026-10-02）：第 3 个空片还在跑时用户发来消息，用户消息先处理——这一片不计入，消息写入后清零，目标不暂停。
+4. sol2 竞态（2026-10-02）：用户消息在第 3 片判定“不在场”之后、暂停落盘之前到达，用户回合登记要等落账做完；
+   暂停先落账，消息写入后按 D4 只清计数、保留暂停，不靠用户消息自动恢复。
 """
 from __future__ import annotations
 
@@ -183,3 +185,53 @@ def test_user_message_queued_during_the_third_idle_slice_is_handled_first(world,
     assert _fuse(world) == ("active", 2, "")
     _background_slice(world, 106.0)
     assert _fuse(world) == ("paused", 3, NO_PROGRESS_REASON_CODE)
+
+
+def test_user_message_arriving_during_the_fuse_commit_waits_for_the_decision(world, monkeypatch):
+    from agent_py_agent.agent.conversation import run_claim
+    from agent_py_agent.agent.conversation.run_claim import user_input_turn_on_lane
+
+    raise_goal_continuation_wake(world.store, world.goal, now=100.0)
+    _background_slice(world, 101.0)
+    _background_slice(world, 102.0)
+    attempted, slice_accounted, worker, seen_during_commit = threading.Event(), threading.Event(), [], []
+    original_register = run_claim._register_user_input_turn
+    original_commit = world.store.goals.record_continuation_fuse
+    original_append = request_history.append_gateway_conversation_message
+
+    def register(key: str) -> None:
+        attempted.set()
+        original_register(key)
+
+    def append_after_accounting(*args, **kwargs):
+        # 用户回合一旦拿到车道就停在写入会话之前，直到第 3 片记完账（sol2 复现里的屏障）。
+        slice_accounted.wait(10)
+        return original_append(*args, **kwargs)
+
+    def commit_with_user_arriving(request: dict):
+        if not worker:
+            # 屏障：第 3 片已判定“不在场”、还没落账时，用户消息进网关并走到登记。
+            submit_gateway_ask(world.paths, params=GatewayAskParams(
+                prompt="我补充一句：先别停", save=False, chat_session_id=_SESSION, agent=world.agent))
+            worker.append(threading.Thread(target=_process_gateway_requests, args=(world.agent, world.paths),
+                                           daemon=True))
+            worker[0].start()
+            assert attempted.wait(10)
+            time.sleep(0.2)
+            seen_during_commit.append(user_input_turn_on_lane(world.store, world.thread_id))
+        return original_commit(request)
+
+    monkeypatch.setattr(run_claim, "_register_user_input_turn", register)
+    monkeypatch.setattr(request_history, "append_gateway_conversation_message", append_after_accounting)
+    monkeypatch.setattr(world.store.goals, "record_continuation_fuse", commit_with_user_arriving)
+    _background_slice(world, 103.0)
+
+    # 改前这里是 [True]：用户回合在“查不在场”和“落账暂停”之间已经登记在场，暂停仍抢先落账。
+    assert seen_during_commit == [False]
+    assert _fuse(world) == ("paused", 3, NO_PROGRESS_REASON_CODE)
+    slice_accounted.set()
+    worker[0].join(10)
+    assert not worker[0].is_alive()
+    # 判定时点之后到达的消息：D4 只清计数、保留暂停与原因，不自动恢复。
+    assert _fuse(world) == ("paused", 0, NO_PROGRESS_REASON_CODE)
+    assert not user_input_turn_on_lane(world.store, world.thread_id)

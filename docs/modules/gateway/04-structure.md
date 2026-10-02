@@ -386,7 +386,7 @@ direct/plain/TUI 由 `conversation/local_run_control.py` 接收同一 core 回�
 `conversation/goal_progress_fuse.py` 按工具调用、Goal revision/status 与任务状态快照判断空片；计数保存在 Goal metadata，达到配置上限后复用 `paused` 状态并落 `GOAL_CONTINUATION_NO_PROGRESS`。
 `gateway_parts/goal_control_service._resume_goal` 显式恢复时清计数、原因和旧 host notice，再经 `goal_runtime.py` 发布 wake；用户新消息只重置计数，不隐式恢复目标；Gateway 前台在 `request_execution._execute_gateway_conversation_turn` 写入用户消息成功后
 调用 `reset_goal_progress_fuse`（默认保留暂停原因，写入失败不清），Goal 自动续跑片走后台 wake，不经过这里。
-网关前台车道带 `carries_user_input`，排队和执行期间在 `conversation/run_claim` 登记“用户回合在场”；`background_goal` 记账时遇到用户回合在场的空片不计入（C5/O4 用户消息先处理）。
+网关前台车道带 `carries_user_input`，排队和执行期间在 `conversation/run_claim` 登记“用户回合在场”；`background_goal` 记账时遇到用户回合在场的空片不计入（C5/O4 用户消息先处理）。读“在场”和落账都在 `run_claim.user_input_turn_gate` 持有的车道闸里完成，登记（+1）也要过同一把闸，锁顺序是车道闸 → GoalStore 锁（C5 剩余竞态）。
 后台输入使用原 task 邮箱及持久消息回执；`control_service.py` 核对同会话执行 claim，
 TUI 的背景 task ID 仅作 expected-target 提示。`runtime_db/repository.py` 在新 attempt 成功取得执行权后
 同事务重开旧 TaskRun 并追加事件，不把历史关闭状态当作当前状态，也不绕过原执行锁。
