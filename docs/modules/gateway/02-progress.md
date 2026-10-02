@@ -1026,6 +1026,7 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 
 - **起因**：停机结清只在账本里把在途模型调用记成 failed；物理响应稍后照常回到工具循环，响应里的工具调用（例如写文件）照常执行。
 - **改动**：工具轮每个未启动调用前的顺序屏障先读 `model_call_admission_closure()`；关门后当前及后续调用不启动，记 `HOST_SHUTDOWN_TOOL_NOT_STARTED`（cancelled、未执行），关门原因码与账本同源；之后下一次模型调用照旧被准入拒绝，回合按宿主停机收尾。
+  - 9b 复核小意见（随 I4 分支交）：审批前先读准入，关门了不再询问；档案和索引共用 `tooling.runtime_facts.project_host_shutdown_facts`（单行、不超过 128 字）。
   - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
 
 ## 被宿主停机打断的回合重启后统一自动续跑（I4，第 8 条②，2026-10-02，分支 `claude/38-resume-rule`，基于 step17f `f6b63ab35`）

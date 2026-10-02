@@ -4,6 +4,8 @@
 关门后当前及后续调用一律不启动，记成 HOST_SHUTDOWN_TOOL_NOT_STARTED（cancelled、未执行、无副作用），关门原因码与模型调用
 账本把在途调用结清成 failed 时用的是同一份；轮中途关门只拦还没启动的；停机优先于普通取消。真实工具循环里，调用在途时
 停机结清、响应稍后带着写文件调用回来：文件不落盘，账本保持 failed，下一次模型调用被准入拒绝、请求不发出。
+审批路径在发审批请求前和批准之后各读一次准入：关门了就不再询问、不执行；关门原因落工具档案和耐久索引时两侧共用
+一个清洗函数（tooling.runtime_facts.project_host_shutdown_facts，单行、不超过 128 字）。
 """
 from __future__ import annotations
 
@@ -155,7 +157,62 @@ def test_approval_granted_after_closure_does_not_execute(segment):
     assert started == ([False] if segment == "serial" else [False, False])
     assert [_shape(record) for record in records] == [("HOST_SHUTDOWN_TOOL_NOT_STARTED", "cancelled", False, "not_started")] * 2
     assert params.runtime_approved_actions == [], "没执行就不记批准绑定"
-    assert approver.requests == (1 if segment == "serial" else 2)
+    assert approver.requests == 1, "第一张审批卡批准时已关门；并行段补审批的第二条发请求前就读到关门，不再询问"
+
+
+class _CountingApprover:
+    """只记被问了几次，一律批准。"""
+
+    def __init__(self):
+        self.requests = 0
+
+    def request_permission(self, payload, *, cancellation_token=None):
+        self.requests += 1
+        return {"permission_id": payload["permission_id"], "decision": "approved"}
+
+
+@pytest.mark.parametrize("segment", ["serial", "parallel"])
+def test_no_approval_is_requested_once_admission_is_closed(segment):
+    """屏障放行之后、发审批请求之前宿主关门：不再询问，直接配停机结果（9b 复核）。"""
+    approver = _CountingApprover()
+    params = SimpleNamespace(tool_context=[], effective_on_chunk=approver, request_id="approval-closed",
+                             cancellation_token=CancellationToken(), runtime_approved_actions=[])
+    calls = [{"tool": "run_command", "command": "printf a"}, {"tool": "run_command", "command": "printf b"}]
+    if segment == "parallel":
+        params.tool_runtime_snapshot = _parallel_reader_snapshot()
+        calls = [{"tool": "read_probe", "slot": 0}, {"tool": "read_probe", "slot": 1}]
+
+    def execute_one(request):
+        close_model_call_admission(_CLOSURE)
+        return _approval_pending(request)
+
+    records, _ = _run_round(calls, execute_one=execute_one, params=params)
+
+    assert approver.requests == 0, "关门后不再弹审批卡"
+    assert [_shape(record) for record in records] == [("HOST_SHUTDOWN_TOOL_NOT_STARTED", "cancelled", False, "not_started")] * 2
+    assert [record.result.metadata["host_shutdown"] for record in records] == [_SHUTDOWN_FACTS] * 2
+    assert params.runtime_approved_actions == []
+
+
+def test_approval_path_shutdown_result_keeps_the_cancel_hint():
+    """审批路径配的停机结果与顺序屏障同口径：本轮也已取消时给取消那句提示，并记 round_cancelled。"""
+    approver = _CountingApprover()
+    token = CancellationToken()
+    params = SimpleNamespace(tool_context=[], effective_on_chunk=approver, request_id="approval-cancelled",
+                             cancellation_token=token, runtime_approved_actions=[])
+
+    def execute_one(request):
+        token.cancel()
+        close_model_call_admission(_CLOSURE)
+        return _approval_pending(request)
+
+    records, _ = _run_round([{"tool": "run_command", "command": "printf a"}], execute_one=execute_one, params=params)
+
+    assert approver.requests == 0
+    result = records[0].result
+    assert result.error_code == "HOST_SHUTDOWN_TOOL_NOT_STARTED"
+    assert json.loads(result.output)["hint"] == "停止派发新动作，保存已有进展后收尾。"
+    assert result.metadata["host_shutdown"] == {**_SHUTDOWN_FACTS, "round_cancelled": True}
 
 
 def test_persisted_execution_facts_keep_only_whitelisted_shutdown_fields():
@@ -168,6 +225,26 @@ def test_persisted_execution_facts_keep_only_whitelisted_shutdown_fields():
     assert _compact_tool_execution(raw)["host_shutdown"] == expected
     assert _safe_tool_execution(raw)["host_shutdown"] == expected
     assert "host_shutdown" not in _safe_tool_execution({**raw, "host_shutdown": {"private": "x", "round_cancelled": True}})
+
+
+@pytest.mark.parametrize("raw_value, kept", [
+    ("A" * 200, "A" * 128),
+    ("第一行\n第二行", None),
+    ("原因\u2028第二行", None),
+    (42, None),
+    ("  HostShutdownInterrupted  ", "HostShutdownInterrupted"),
+], ids=["truncated_to_128", "multiline", "unicode_line_separator", "not_a_string", "stripped"])
+def test_archive_and_index_share_one_shutdown_sanitizer(raw_value, kept):
+    """档案侧和索引侧共用一个清洗函数：单行、不超过 128 字；round_cancelled 只认布尔 True（9b 复核）。"""
+    from agent_py_agent.agent.agent_core import tool_call_archive_record as archive
+    from agent_py_agent.agent.memory_archive import tool_output_externalizer as index
+
+    assert archive.project_host_shutdown_facts is index.project_host_shutdown_facts
+    raw = {"handler_executed": False, "duration_ms": 0, "failure_stage": "runtime_gate",
+           "host_shutdown": {**_SHUTDOWN_FACTS, "error_type": raw_value, "round_cancelled": "yes"}}
+    expected = {key: value for key, value in {**_SHUTDOWN_FACTS, "error_type": kept}.items() if value is not None}
+    assert archive._compact_tool_execution(raw)["host_shutdown"] == expected
+    assert index._safe_tool_execution(raw)["host_shutdown"] == expected
 
 
 class _LateResponseBackend:

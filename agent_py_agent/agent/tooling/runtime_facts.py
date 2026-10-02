@@ -1,5 +1,6 @@
 # LLM: 只投影canonical handler_details中的核验、进程及沙箱边界事实，不解析工具正文或改变执行结果；调用方须继续统一脱敏。
 # 模块用途: 为当前回复、耐久索引和恢复提供同一执行事实投影；区分命令退出、资源清理与业务完成，不依赖 Agent。
+#   宿主停机没启动的调用带的关门原因也在这里清洗（project_host_shutdown_facts），档案和索引两侧共用。
 from __future__ import annotations
 
 import json
@@ -19,6 +20,10 @@ _TERMINATION_FIELDS = {
 _SANDBOX_ROOT_LIMIT_COUNT = 16
 # 沙箱事实里每条允许目录路径最多展示多少字符（更长的整条跳过，原账不变）。
 _SANDBOX_ROOT_MAX_CHARS = 1024
+# 宿主停机没启动的调用落盘的关门原因字段（白名单）。
+_HOST_SHUTDOWN_TEXT_KEYS = ("reason_code", "error_type", "admission_error_code")
+# 关门原因每个字段最多保留多少字（超出截断；真实原因码远短于此）。
+_HOST_SHUTDOWN_TEXT_MAX_CHARS = 128
 
 
 # LLM: 保留已有verification块的字节顺序（键排序输出，新增的 verification_evidence_chain 只在 && 串联通过时出现，
@@ -146,3 +151,28 @@ def project_process_runtime_facts(source: object) -> dict[str, object]:
     if receipt:
         facts["termination"] = receipt
     return facts
+
+
+# LLM: 宿主停机没启动的调用（round_execution._host_shutdown_result 写的 metadata.host_shutdown）进档案和耐久索引的唯一清洗口：
+#   只收白名单字段里单行、不超过 128 字的文本（超出截断，非字符串和多行丢掉）；round_cancelled 只认布尔 True，且要有原因字段才留。
+#   档案侧 tool_call_archive_record 与索引侧 tool_output_externalizer 都调它，两侧落盘字段因此逐字相同；改规则时联测
+#   test_late_response_tool_fence.py。
+# 函数用途: 清洗关门原因，让工具档案、耐久索引能和模型调用账本逐字段对账，又不让任意字段借此进入恢复上下文。
+def project_host_shutdown_facts(source: object) -> dict[str, object]:
+    if not isinstance(source, Mapping):
+        return {}
+    facts: dict[str, object] = {}
+    for key in _HOST_SHUTDOWN_TEXT_KEYS:
+        if text := _single_line_text(source.get(key)):
+            facts[key] = text[:_HOST_SHUTDOWN_TEXT_MAX_CHARS]
+    if facts and source.get("round_cancelled") is True:
+        facts["round_cancelled"] = True
+    return facts
+
+
+# LLM: project_host_shutdown_facts 的单行判定：只收 str，按 str.splitlines 判跨行（\u2028、\x85 等 Unicode 换行也算），
+#   不 str() 任意对象（repr 可能带运行时私有状态）；截断长度由调用方决定。
+# 函数用途: 取一段去掉首尾空白后的单行文本；不是字符串、为空或跨行（含 Unicode 换行符）都返回空串。
+def _single_line_text(value: object) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    return text if len(text.splitlines()) == 1 else ""

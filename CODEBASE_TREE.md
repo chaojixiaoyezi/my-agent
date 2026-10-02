@@ -710,7 +710,7 @@ agent_py_agent/
 |   |   |-- computer_text_input.py    # 按平台提交可靠文本，校验 Unicode 并保留后置验证边界
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
 |   |   |-- runtime_contracts.py      # 唯一 canonical ToolCall/ToolResult、ToolChoice、协议与 operation 合同
-|   |   |-- runtime_facts.py          # 工具回复、归档索引及恢复共用的有界执行事实，不依赖 Agent
+|   |   |-- runtime_facts.py          # 工具回复、归档索引及恢复共用的有界执行事实（含停机关门原因的唯一清洗口），不依赖 Agent
 |   |   |-- tool_search_state.py      # 主/子/Gateway 共用的纯工具发现归档投影，不导入执行循环
 |   |   |-- input_schema.py           # 唯一 input_schema 规范化、强类型纠正和完整执行前校验
 |   |   |-- action_policy.py          # 副作用前唯一 allow/ask/deny 聚合决策
@@ -901,7 +901,7 @@ agent_py_agent/
 |   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、超时只冷却本点而连接故障冷却全部、关闭一起取消
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
-|   |-- test_late_response_tool_fence.py # 停机关门后迟到的模型响应里的工具不启动，记 HOST_SHUTDOWN_TOOL_NOT_STARTED，原因码与账本同源（I3）
+|   |-- test_late_response_tool_fence.py # 停机关门后迟到的模型响应里的工具不启动，记 HOST_SHUTDOWN_TOOL_NOT_STARTED，原因码与账本同源；关门后不再弹审批卡，档案/索引共用清洗（I3）
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
 |   |-- test_gateway_host_identity.py # 主机名变化后 SIGTERM 仍能停网关：信号用启动身份、host_id 进程内缓存、macOS 硬件 UUID、跨进程核验表现
 |   |-- test_tool_operation_host_identity.py # 工具操作持有者同主机判定用 process_host_id：主机名变化后本机死进程可接管、老主机名记录等租约到期
@@ -1988,7 +1988,7 @@ docs/
 - `agent_py_agent/tests/test_compact_checkpoint_stream.py`：对照原检查点读取峰值并验证坏orphan、重复ID、Unicode/末行、晚追加、改写和异常关闭。
 
 - `agent_py_agent/tests/test_native_history_projection_memory.py`：单次隔离复制与完整Compact投影内存对照、不同调用及匿名重复输出隔离、原生往返与孤儿修补保真。
-- `agent/tooling/runtime_facts.py`：只读canonical执行事实，保留未知与独立清理确认；不复制PID、诊断正文或授予执行权。
+- `agent/tooling/runtime_facts.py`：只读canonical执行事实，保留未知与独立清理确认；不复制PID、诊断正文或授予执行权。宿主停机未启动调用的关门原因（`project_host_shutdown_facts`）也只在这里清洗，档案和索引两侧共用。
 - `agent/conversation/input_media.py`：入站媒体唯一文件/ref 合同；`cli/chat_parts/tui_media.py`、`tui_media_clipboard.py` 只处理输入动作。
 - `docs/design/TUI_INPUT_MEDIA.md`：新媒体能力、迁移、平台和供应商边界。
 - `agent_py_agent/tests/test_input_media.py`：字节、归属、历史恢复和媒体预算合同测试。

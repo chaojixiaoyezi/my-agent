@@ -23,7 +23,7 @@ from ..tooling.executor import ToolOutputProjection
 from ..tooling.models import ToolHandlerOutcome, output_policy_for_outcome
 from ..tooling.output_projection import project_tool_output_body
 from ..tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResultRef
-from ..tooling.runtime_facts import project_process_runtime_facts
+from ..tooling.runtime_facts import project_host_shutdown_facts, project_process_runtime_facts
 from .run_task_workspace_writer import (
     current_run_task_workspace_root,
     current_run_tool_output_archive_root,
@@ -542,7 +542,8 @@ def _error_facts_from_result(result: object) -> dict[str, object]:
 
 
 # LLM: archive 的执行层级只能投影 typed result，不能从 output_preview 或错误文案反推。宿主停机没启动的调用
-#   （round_execution._host_shutdown_result）把 metadata.host_shutdown 的白名单字段一并落盘，事后能和模型调用账本逐字段对账。
+#   （round_execution._host_shutdown_result）把 metadata.host_shutdown 经 project_host_shutdown_facts 清洗后一并落盘，
+#   事后能和模型调用账本逐字段对账；索引侧用同一个清洗函数。
 # 函数用途: 让成功、门前拒绝和 handler 后失败都能按同一字段快速定位。
 def _tool_execution_facts_from_result(result: object) -> dict[str, object]:
     facts: dict[str, object] = {
@@ -551,26 +552,11 @@ def _tool_execution_facts_from_result(result: object) -> dict[str, object]:
     }
     _copy_text_fact(facts, "failure_stage", getattr(result, "failure_stage", ""))
     metadata = getattr(result, "metadata", None)
-    shutdown = _host_shutdown_facts(metadata.get("host_shutdown") if isinstance(metadata, dict) else None)
+    shutdown = project_host_shutdown_facts(metadata.get("host_shutdown") if isinstance(metadata, dict) else None)
     if shutdown:
         facts["host_shutdown"] = shutdown
     return facts
 
-
-# 停机未启动调用落盘的关门原因字段（白名单）；round_cancelled 只认布尔 True。
-_HOST_SHUTDOWN_FACT_KEYS = ("reason_code", "error_type", "admission_error_code")
-
-
-# LLM: 只拷白名单里的非空字符串和 round_cancelled=True，不接受别的形状；读写两侧共用，保证落盘与精简后的字段一致。
-# 函数用途: 从结果元数据或已落盘的执行事实里取出宿主停机的关门原因。
-def _host_shutdown_facts(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        return {}
-    facts: dict[str, object] = {key: value[key] for key in _HOST_SHUTDOWN_FACT_KEYS
-                                if isinstance(value.get(key), str) and value[key]}
-    if facts and value.get("round_cancelled") is True:
-        facts["round_cancelled"] = True
-    return facts
 
 
 # LLM: archive 顶层的操作事实来自 typed result/envelope；不得从 output 正文解析状态。
@@ -749,7 +735,7 @@ def _compact_tool_execution(value: object) -> dict[str, object]:
         "duration_ms": max(0, _int_value(value.get("duration_ms"))),
     }
     _copy_text_fact(compact, "failure_stage", value.get("failure_stage"))
-    shutdown = _host_shutdown_facts(value.get("host_shutdown"))
+    shutdown = project_host_shutdown_facts(value.get("host_shutdown"))
     if shutdown:
         compact["host_shutdown"] = shutdown
     return compact

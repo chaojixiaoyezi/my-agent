@@ -58,7 +58,7 @@
 - **代价与未做**：Jev 每个 Skill 只看到约 30 + 24 个汉字的说明，选得准不准要看真实样本。criteria 每题约 938 字节（53 题约 2.5 万上界 token）仍逐题重复；改成共享说明或换 UTF-8 编码（要重新标定 v2）留作后续选项，本轮不做。
 - **验证**：见 TESTS.md 同名节。
 
-## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 `claude/3a-step17e` `4dd56f627`（原基于 `e75cf6061`），已实现，待集成）
+## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 `claude/3a-step17e` `4dd56f627`（原基于 `e75cf6061`），已集成 step17f；9b 复核小意见随 I4 分支交）
 
 - **问题**：J17 栅栏关门时（`close_model_call_admission`），只在账本里把在途模型调用记成 failed（原因码 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`）。
   - 物理 HTTP 调用还在跑，响应稍后照常回来；`_finish_model_generation` 不看账本终态（迟到的成功也不会重开终态），响应原样交回工具循环。
@@ -76,6 +76,12 @@
   - 落盘对账：工具账（任务工作区 `tool_outputs/index.jsonl` 的 `tool_execution`，以及续跑用的精简执行事实）按同一白名单带上 `host_shutdown`（reason_code / error_type / admission_error_code，round_cancelled 只认 True），事后能和模型调用账本逐字段对上。
   - 停机和取消同时命中：错误码仍是 `HOST_SHUTDOWN_TOOL_NOT_STARTED`，给模型的提示改用取消那句（“停止派发新动作，保存已有进展后收尾”），并记 `round_cancelled=true`。用户 /stop 后 24 小时内续跑时，历史里的提示不能引导模型重做用户喊停的动作。
   - 文案：`restart_gateway` 注释按 9b 的措辞写清两段排空（先等在跑的回合，最多 turn_wait 秒，没跑完的停在下一个副作用工具前、由新进程续跑；再等执行中的副作用工具，最多 drain_timeout 秒，超时取消这次重启、不强杀），`gateway_restart_drain_timeout_seconds` 上方原来那句“超过就先强制收尾”改对。
+- **9b 复核小意见**（3a 让随 I4 分支 `claude/38-resume-rule` 一起交）：
+  - 审批路径发请求之前也读一次准入（`_closed_admission_execution`，批准之后那次复读保留）。已关门就直接配停机结果、不再询问，停机后 TUI/IM 不会再多弹一张没用的审批卡。
+    - 并行段补审批时，第一张卡批准时已关门，第二条不再发请求。
+  - 档案侧（`tool_call_archive_record`）和索引侧（`tool_output_externalizer`）两份白名单合成一个清洗函数 `tooling.runtime_facts.project_host_shutdown_facts`，以“单行、不超过 128 字”为准：
+    - 非字符串、跨行（含 Unicode 换行符）的丢掉，超长的截断；
+    - round_cancelled 只认布尔 True。
 
 ## 记忆正文的其它文件也按私有原子写（S2，75，2026-10-02，分支 `claude/75-memory-private-writes`，基于 `claude/3a-step17e` `4dd56f627`，已实现，待集成）
 

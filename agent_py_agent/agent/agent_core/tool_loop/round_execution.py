@@ -473,7 +473,8 @@ def _owner_grant_key(request: ToolRoundExecutionRequest, call: ToolCall) -> str:
 
 
 # LLM: 审批 consumer 是 effective_on_chunk 上的宿主能力；无 consumer/unavailable 保留旧 approval_required 终态，绝不擅自批准。
-#   批准之后、重新执行之前读一次本进程准入：等审批期间宿主已停机关门的，不执行、不记批准绑定，配停机结果（I3 复审必须修）。
+#   本进程准入读两次（_closed_admission_execution）：发审批请求前已关门的不再询问，免得停机后在 TUI/IM 多弹一张没用的审批卡
+#   （9b 复核）；批准之后、重新执行之前再读一次，等审批期间关门的不执行、不记批准绑定（I3 复审必须修）。两处都配停机结果。
 # 函数用途: 等待一条审批决定，并在批准时用原 call identity 重新执行同一工具调用。
 def _resolve_tool_approval(
     request: ToolRoundExecutionRequest,
@@ -483,6 +484,8 @@ def _resolve_tool_approval(
 ) -> ToolExecution:
     if execution.decision.status != "ask":
         return execution
+    if (closed := _closed_admission_execution(request, original_call)) is not None:
+        return closed  # 发审批请求前宿主已停机关门：不再询问
     on_chunk = getattr(request.params, "effective_on_chunk", None)
     consumer = getattr(on_chunk, "request_permission", None)
     if not callable(consumer):
@@ -522,10 +525,8 @@ def _resolve_tool_approval(
     if decision.permission_id != approval_request.permission_id:
         return execution
     if decision.approved:
-        closure = model_call_admission_closure()
-        if closure is not None:  # 等审批期间宿主停机关门：批准了也不再执行
-            result = _host_shutdown_result(original_call, closure=closure, cancelled=_round_cancelled(request))
-            return _synthetic_execution(original_call, result, "HOST_SHUTDOWN_TOOL_NOT_STARTED")
+        if (closed := _closed_admission_execution(request, original_call)) is not None:
+            return closed  # 等审批期间宿主停机关门：批准了也不再执行
         approved_actions = getattr(request.params, "runtime_approved_actions", None)
         if not isinstance(approved_actions, list):
             return execution
@@ -1032,6 +1033,17 @@ def _host_shutdown_result(call: ToolCall, *, closure: ModelCallAdmissionClosure,
         failure_stage="runtime_gate",
         facts=ToolFailureFacts(status="cancelled", metadata={"host_shutdown": shutdown}),
     )
+
+
+# LLM: 审批路径读本进程准入的唯一入口（_resolve_tool_approval 在发审批请求前、批准之后各调一次）；没关门返回 None，
+#   关门就给原 call 配 HOST_SHUTDOWN_TOOL_NOT_STARTED 的合成执行，本轮已取消时带取消提示，和顺序屏障同口径。
+# 函数用途: 宿主已停机关门时，给等审批的调用一条“未执行、无副作用”的停机结果，调用方据此不再询问或不再执行。
+def _closed_admission_execution(request: ToolRoundExecutionRequest, call: ToolCall) -> ToolExecution | None:
+    closure = model_call_admission_closure()
+    if closure is None:
+        return None
+    result = _host_shutdown_result(call, closure=closure, cancelled=_round_cancelled(request))
+    return _synthetic_execution(call, result, "HOST_SHUTDOWN_TOOL_NOT_STARTED")
 
 
 # LLM: 单回合聚合预算。

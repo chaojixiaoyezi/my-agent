@@ -5364,6 +5364,14 @@
       "description": "异常信息最多回 500 字符：超长截断，防堆栈撑爆反馈。"
     },
     {
+      "name": "_HOST_SHUTDOWN_TEXT_MAX_CHARS",
+      "file": "agent_py_agent/agent/tooling/runtime_facts.py",
+      "value": 128,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "关门原因每个字段最多保留多少字（超出截断；真实原因码远短于此）。"
+    },
+    {
       "name": "_SANDBOX_ROOT_LIMIT_COUNT",
       "file": "agent_py_agent/agent/tooling/runtime_facts.py",
       "value": 16,
