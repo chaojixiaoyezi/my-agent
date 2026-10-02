@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 871,
+  "count": 874,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5594,6 +5594,22 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "type_into_candidate 一次最多输入的字符数（超了整次拒绝、不截断：截一半输进去的是错误内容）"
+    },
+    {
+      "name": "WINDOW_LIST_MAX_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_observation.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "window_not_found / window_ambiguous 结果里可见窗口清单的最多条数，超出截断并标 truncated"
+    },
+    {
+      "name": "WINDOW_TITLE_MAX_CHARS",
+      "file": "agent_py_agent/agent/tooling/screen_observation.py",
+      "value": 64,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "给模型展示的窗口标题长度上限：清单、observe 结果和按标题选窗口比的都是这同一个展示形态（sanitize_label 后截到这么长）"
     },
     {
       "name": "BOOT_TOKEN_BYTES",

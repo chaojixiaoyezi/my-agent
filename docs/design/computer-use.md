@@ -41,6 +41,8 @@
 auto 档宿主以 actor=decision 自动点击、审批与两本账都带 decision_ref。发现一条待定：模型按提示重新观察后，Jev 对新观察又选同一按钮，宿主按观察编号幂等再点一次，
 等于重复提交；方向见 J16 设计稿第 7 节，等 ae 定。另外 `observe_window` 的 `window` 参数只接受上一次观察的别名或留空，第一轮 prompt 写了窗口标题，模型把标题传进去
 连续 not_found，这是 prompt 写法问题，两轮证据都在 `~/.my-agent/decision-evidence/j16-slice-f-<sha>/`。`/plugins list` 末尾现在有 MCP 服务段（运行/发布状态与工具数）。
+按 3a/ae 的要求，`window` 参数现在也接受与展示标题完全相同的唯一匹配（多个同名报 `window_ambiguous`，绝不模糊），`window_not_found` / `window_ambiguous` 都带可见窗口清单
+`windows: [{alias, title}]`（最多 16 条，标题清洗并截到 64 字）；规则见 J16 设计稿第 3 节。
 
 **片 E 实施（2026-10-02，macOS）**：
 - 后端按平台选：`tooling/computer_use_backends.select_backend()`，darwin → `computer_use_macos.MacBackend`，其余 → `X11Backend`；

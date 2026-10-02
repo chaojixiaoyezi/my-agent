@@ -40,8 +40,10 @@ def observation_tools_enabled(environ: Mapping[str, str]) -> bool:
 # LLM: 只提供 tools/list 的签名与说明；真正执行在 observation_call_handler。
 # 函数用途: observe_window 的模型可见声明。
 def observe_window(window: str = "") -> dict[str, object]:
-    """只读采样一个窗口：不切焦点、不激活、不动鼠标。window 可填上一次观察返回的窗口别名（win:…），不填取当前最前的普通窗口。
-    结果里的 my_agent_observation 候选只能通过 click_candidate 的 candidate_id 使用；没有候选时不会凭空造候选。"""
+    """只读采样一个窗口：不切焦点、不激活、不动鼠标。window 可填：留空（当前最前面的普通窗口）、上一次观察返回的别名 win:…、
+    或与窗口标题完全相同的文字（只认唯一匹配；多个同名窗口会报 window_ambiguous 并列出别名；真实标题以 win: 开头的窗口请用别名）。
+    找不到时结果里带当前可见窗口清单 windows（别名 + 标题）。结果里的 my_agent_observation 候选只能通过 click_candidate 的 candidate_id 使用；
+    没有候选时不会凭空造候选。"""
     raise RuntimeError("observe_window 必须由适配器的观察接管层执行")
 
 
@@ -71,7 +73,8 @@ def register_observation_tools(server: Any, *, with_typing: bool) -> None:
 
 
 # LLM: 返回 (正文, structuredContent, isError)。观察载荷只进 structuredContent、正文不重复（和 browser-lite 一致）；失败正文带
-#   OBSERVATION_<CODE> 与中文说明，structuredContent 带 {my_agent_observation_error: {code}}，宿主据此提升 stale / not_found。
+#   OBSERVATION_<CODE> 与中文说明，structuredContent 带 {my_agent_observation_error: {code, ...details}}（window_not_found /
+#   window_ambiguous 的 details 是可见窗口清单 windows 与 truncated），宿主据此提升 stale / not_found，其它码原样给模型。
 # 函数用途: 执行一个观察工具调用并给出可编码的三元组；context 为 None 表示没有宿主上下文（也不会被取消）。
 def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any], context: CallContext | None) -> tuple[dict, dict | None, bool]:
     context = context or CallContext()
@@ -80,12 +83,13 @@ def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any]
             raise ObservationError("cancelled", "宿主已取消，未执行")
         body, structured = _BRANCHES[name](observer, arguments, context)
     except ObservationError as exc:
-        error = {"code": exc.code, **({"clicked": True} if exc.clicked else {})}
-        return {"code": "OBSERVATION_" + exc.code.upper(), "message": str(exc)}, {OBSERVATION_ERROR_KEY: error}, True
+        error = {"code": exc.code, **({"clicked": True} if exc.clicked else {}),
+                 **{key: value for key, value in exc.details.items() if key not in {"code", "clicked"}}}
+        return {"code": "OBSERVATION_" + exc.code.upper(), "message": str(exc), **{k: v for k, v in error.items() if k != "code"}}, {OBSERVATION_ERROR_KEY: error}, True
     return body, structured, False
 
 
-# 函数用途: observe_window 分支：window 只接受字符串别名；正文不重复观察载荷。
+# 函数用途: observe_window 分支：window 是字符串（空 / win: 别名 / 展示标题，解析在 ScreenObserver._target）；正文不重复观察载荷。
 def _observe(observer: Any, arguments: Mapping[str, Any], context: CallContext) -> tuple[dict, dict]:
     window = arguments.get("window")
     if window is not None and not isinstance(window, str):

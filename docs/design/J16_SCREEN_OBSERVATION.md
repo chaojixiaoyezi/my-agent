@@ -52,6 +52,11 @@
 - **何时注册输入工具**：OCR 区域没有“可编辑”这个事实，`type_into_candidate` 在片 G 之前不进工具目录（75 在做工具瘦身，不加用不上的工具）。片 G 有了无障碍树里的可编辑控件，它才和片 G 一起注册。
 - **声明来源**：观察声明由宿主在 `computer_use_profile.py` 里写死，和插件 manifest v5 同形；不接受握手自报，不能自己降 effect。
 - **参数**：动作工具的模型可见参数只有 `candidate_id`、`text`、`clear_existing`，不暴露 x/y、选择器或窗口号。文字只来自主模型显式填的、经过审批绑定的参数，绝不从 label 复制。
+- **`observe_window` 的 `window` 参数（片 F，ae 定规则，真实验收发现模型会直接传标题）**：解析顺序固定——留空 → 叠放最顶的普通可见窗口；以 `win:` 开头 → 只认本进程发过的
+  别名（不看可见性，之后由 not_viewable 说明）；其它字符串 → 和可见普通窗口的**展示标题**完全相等（`window_title` = `sanitize_label` 后截到 64 字，就是清单和 observe 结果里给模型看的那个
+  字符串），恰好一个才用：0 个 `window_not_found`，2 个以上 `window_ambiguous`（只带命中的那几个）。不 strip、不忽略大小写、不做子串/模糊，不可见的同名窗口不参与；
+  真实标题以 `win:` 开头的窗口不能按标题选，请用别名。`window_not_found` / `window_ambiguous` 的 `my_agent_observation_error` 里带 `windows: [{alias, title}]`（可见普通窗口，顶在前，
+  最多 16 条，超出 `truncated: true`）。已知限制：清单会把当前可见窗口的标题给模型看——上游 Computer Use 的 `list_windows` 本来就返回标题，不是新增的暴露面。
 
 ### 3.1 `observe_window`
 
@@ -303,6 +308,8 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
      第一轮（prompt 写了“标题为 J16 Smoke 的窗口”，证据 `run1/`）：模型把标题当 `window` 参数传，而该参数只接受上一次观察的别名或留空，于是 observe_window 连续
      `OBSERVATION_WINDOW_NOT_FOUND`；off / observe 两档模型改用上游 OCR + click_screen（没点中 Submit），apply 档第 4 次留空成功后 Jev 选中、模型点中；auto 档因 harness
      在建实例后才写能力开关（快照已缓存）没跑。第一轮 M3 26 次 / 约 77 万输入，Jev 2 次。两轮都保留，不挑成功。
+     按标题选窗口实施后的补跑（证据 `run3/`，同一句提到标题的 prompt，只跑 apply）：`observe_window(window="J16 Smoke")` 第一次就命中，失败码序列为空；Jev 2 次选中，
+     模型点中 Submit 并按别名再观察确认；M3 4 次 / 约 11 万输入，耗时 14.3 s。
 6. **macOS 后端和片 G**：假 Quartz、假 ScreenCaptureKit、假 AX 单测；真机只读核对另行安排。片 E 已按此实施（`test_computer_use_macos.py`、`test_screen_capture_guard.py`），片 G 同（`test_screen_ui_candidates.py`、`test_computer_use_macos_ax.py`，假 AX 在 `tests/_fake_macos_ax.py`）。
    - **V-H 真机核对清单**（J16 各片合完后由 3a 一次性向用户申请，会弹“屏幕录制”与“辅助功能”两个授权）：真实窗口的列窗、遮挡与 Retina 缩放；ScreenCaptureKit 主路径与 mss 回退；AX 窗口匹配、真实应用与网页的树深和节点数（据此调上限）；`AXValueCreate((0, n))` 全选与读回、`AXUIElementSetMessagingTimeout` 设在系统级元素上；中文输入法开着时，`type_desktop_text` 用的“键码 0 + Unicode 字符串”事件会不会被输入法截走当成拼音；AZERTY 等非 QWERTY 布局下，现有 `type_text` 的清空（`pyautogui.hotkey("command","a")` 按美式键位发 a）会不会变成 ⌘Q。
 

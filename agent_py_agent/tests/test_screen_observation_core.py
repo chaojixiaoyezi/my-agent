@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -417,3 +418,82 @@ def test_click_checks_host_cancellation_after_recheck_and_before_clicking():
     assert info.value.code == "cancelled" and backend.clicks == [], "复核完、点之前再看一眼取消，已取消就不点"
     backend.capture = original_capture
     assert observer.click_candidate(meta, cancelled=lambda: False)["clicked"]["key"] == "ocr:1" and backend.clicks == [(150, 89)]
+
+
+# ---------------------------------------------------------------------------
+# 片 F：window 参数三种解析（空 / win: 别名 / 展示标题精确唯一匹配）与 not_found / ambiguous 的可见窗口清单（ae 定规则）
+# ---------------------------------------------------------------------------
+
+def _window(native_id, title, *, hidden=False, normal=True):
+    return WindowInfo(native_id=native_id, title=title, geometry=GEOMETRY, viewable=True, hidden=hidden, desktop=0, current_desktop=0, normal=normal)
+
+
+def _not_found(observer, window):
+    with pytest.raises(ObservationError) as caught:
+        observer.observe(window)
+    return caught.value
+
+
+def test_window_is_selected_by_its_displayed_title_exactly():
+    backend, observer = _observer()
+    backend.windows.append(_window(0x2b, "Form Window"))
+    backend.buffers[0x2b] = _buffer()
+    assert observer.observe("表单 窗口")["window"] == "win:b00t:1", "比的是展示形态（控制字符已清掉）"
+    assert observer.observe("Form Window")["window"] == "win:b00t:2"
+    for wrong in ("表单\x07 窗口", "表单", "form window", "FORM WINDOW", " Form Window", "Form Window ", "Form"):
+        assert _not_found(observer, wrong).code == "window_not_found", wrong
+    assert observer.observe()["title"] == "Form Window", "observe 结果里的标题就是匹配键"
+
+
+def test_same_displayed_title_is_ambiguous_and_lists_both_aliases():
+    backend, observer = _observer()
+    backend.windows = [_window(0x1a, "A" * 70), _window(0x2b, "A" * 64 + "zzz")]
+    backend.buffers[0x2b] = _buffer()
+    assert observer.observe()["title"] == "A" * 64, "展示标题截到 64 字"
+    error = _not_found(observer, "A" * 64)
+    assert error.code == "window_ambiguous"
+    assert error.details == {"windows": [{"alias": "win:b00t:2", "title": "A" * 64}, {"alias": "win:b00t:1", "title": "A" * 64}], "truncated": False}
+    assert observer.observe("win:b00t:1")["window"] == "win:b00t:1", "多个同名时改用别名就行"
+    assert _not_found(observer, "A" * 70).code == "window_not_found", "原始长标题不是匹配键"
+
+
+def test_invisible_same_title_windows_never_match_and_are_not_listed():
+    backend, observer = _observer()
+    backend.windows = [_window(0x2b, "表单 窗口", hidden=True), backend.windows[0], replace(_window(0x3c, "表单 窗口"), desktop=1)]
+    backend.buffers.update({0x2b: _buffer(), 0x3c: _buffer()})
+    assert observer.observe("表单 窗口")["window"] == "win:b00t:2", "只有可见的那一个参与匹配，所以不算 ambiguous"
+    backend.windows[1] = _window(0x1a, "表单\x07 窗口", hidden=True)
+    error = _not_found(observer, "表单 窗口")
+    assert error.code == "window_not_found" and error.details == {"windows": [], "truncated": False}
+    assert _not_found(observer, None).code == "window_not_found" and _not_found(observer, "").details["windows"] == []
+    assert _not_found(observer, "win:b00t:2").code == "not_viewable", "别名照样找得到窗口，只是不可见"
+
+
+def test_alias_lookup_ignores_visibility_and_reports_not_viewable():
+    backend, observer = _observer()
+    backend.replace_window(hidden=True)
+    with pytest.raises(ObservationError) as hidden:
+        observer.observe("win:b00t:1")
+    assert hidden.value.code == "not_viewable", "别名找得到窗口，只是现在不可见"
+
+
+def test_not_found_listing_is_top_first_sanitized_and_capped():
+    backend, observer = _observer()
+    backend.windows = [_window(0x100 + index, f"窗\x07{index}\t末") for index in range(18)]
+    backend.windows.append(_window(0x999, "dock", normal=False))
+    error = _not_found(observer, "没有的标题")
+    rows = error.details["windows"]
+    assert error.code == "window_not_found" and error.details["truncated"] is True and len(rows) == 16
+    assert rows[0] == {"alias": "win:b00t:18", "title": "窗17 末"} and rows[-1] == {"alias": "win:b00t:3", "title": "窗2 末"}, "顶在前、清洗过、dock 不列"
+    assert all(row["alias"] == observer.registry.ref_for(backend.windows[int(row['alias'].rsplit(':', 1)[1]) - 1].native_id) for row in rows)
+    backend.buffers[0x111] = _buffer()
+    assert observer.observe(rows[0]["title"])["window"] == "win:b00t:18", "清单里的标题原样抄回来就能选中"
+
+
+def test_titles_starting_with_the_alias_prefix_are_alias_only():
+    backend, observer = _observer()
+    backend.windows.append(_window(0x2b, "win:real"))
+    backend.buffers[0x2b] = _buffer()
+    error = _not_found(observer, "win:real")
+    assert error.code == "window_not_found" and [row["title"] for row in error.details["windows"]] == ["win:real", "表单 窗口"]
+    assert observer.observe("win:b00t:2")["title"] == "win:real"

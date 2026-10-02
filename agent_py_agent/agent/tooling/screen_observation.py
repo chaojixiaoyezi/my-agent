@@ -10,17 +10,17 @@
 #   后端是鸭子类型（X11 / macOS 真后端 / 单测假后端），本模块不 import 任何桌面库。
 #   截图由后端给 ScreenCapture（像素、采样方式、回退原因）；frame.scale 取截图自己的像素/点比（不取显示器的），复核时 scale 变了也判 stale；
 #   非整数比时 scale 往上调到"点数 × scale ≥ 像素数"，宿主按 size × scale 校验贴边候选才不会误拒。
-#   错误码集合开放（宿主只提升 stale / not_found，其它原样透传）：window_not_found | not_viewable | capture_failed | ocr_failed | occluded |
-#   not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted | accessibility_not_permitted |
-#   focus_not_acquired | clear_unsupported | clear_failed | type_failed；
-#   后端主动抛的 ObservationError 原样透传。
+#   错误码集合开放（宿主只提升 stale / not_found，其它原样透传）：window_not_found | window_ambiguous | not_viewable | capture_failed |
+#   ocr_failed | occluded | not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted |
+#   accessibility_not_permitted | focus_not_acquired | clear_unsupported | clear_failed | type_failed；后端主动抛的 ObservationError 原样透传。
+#   window 参数三种解析（空 / win: 别名 / 展示标题精确唯一匹配）与 not_found/ambiguous 携带的可见窗口清单见 _target（片 F，ae 定规则）。
 # 模块用途: "看一眼窗口、给出可点的候选、点之前再确认一遍没变"的全部判断逻辑，可在没有桌面的机器上用假后端完整测试。
 from __future__ import annotations
 
 import math
 import time
 import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
 from ..plugin_observation import (
@@ -59,16 +59,25 @@ UI_SCAN_FAILED_REASON = "ui_scan_failed"
 # 截图采样方式（frame.capture）：单窗口内容（被压住的部分也拍得到）/ 按屏幕区域截屏（压在上面的窗口也会被拍进去）
 WINDOW_IMAGE_CAPTURE = "window_image"
 SCREEN_REGION_CAPTURE = "screen_region"
+# 给模型展示的窗口标题长度上限：清单、observe 结果和按标题选窗口比的都是这同一个展示形态（sanitize_label 后截到这么长）
+WINDOW_TITLE_MAX_CHARS = 64
+# window_not_found / window_ambiguous 结果里可见窗口清单的最多条数，超出截断并标 truncated
+WINDOW_LIST_MAX_COUNT = 16
+# window 参数以它开头就只按别名解析，真实标题以它开头的窗口不能按标题选
+WINDOW_ALIAS_PREFIX = "win:"
 
 
 # LLM: code 是稳定机器码，进 structuredContent.my_agent_observation_error.code；message 是中文说明，不含路径、标题正文或坐标。
 #   clicked=True 表示失败发生在已经点击之后（type_into 拿不到焦点、全选失败、点完被取消）：如实报"已点击、未输入"。
+#   details 是随错误一起进 my_agent_observation_error 的结构化补充（目前只有 window_not_found / window_ambiguous 的 windows 清单与
+#   truncated），键不能和 code / clicked 撞。
 # 类用途: 观察或复核失败的结构化错误。
 class ObservationError(Exception):
-    def __init__(self, code: str, message: str, *, clicked: bool = False) -> None:
+    def __init__(self, code: str, message: str, details: Mapping[str, object] | None = None, *, clicked: bool = False) -> None:
         super().__init__(message)
         self.code = code
         self.clicked = clicked
+        self.details = dict(details or {})
 
 
 # LLM: 由后端按叠放次序（底→顶）给出；native_id 只在适配器内部使用；normal 表示普通应用窗口（非 dock/桌面/工具条）。
@@ -131,6 +140,13 @@ def click_point(geometry: WindowGeometry, region: tuple[int, int, int, int]) -> 
 # 函数用途: 窗口几何对应的全局点矩形。
 def window_rect(geometry: WindowGeometry) -> tuple[int, int, int, int]:
     return (geometry.origin[0], geometry.origin[1], geometry.size[0], geometry.size[1])
+
+
+# LLM: 窗口标题给模型看的唯一形态：同 sanitize_label 的清洗，再截到 WINDOW_TITLE_MAX_CHARS；按标题选窗口比的就是它（所见即可填），
+#   不比原始标题。
+# 函数用途: 把原始窗口标题变成展示/匹配用的字符串。
+def window_title(text: object) -> str:
+    return sanitize_label(text)[:WINDOW_TITLE_MAX_CHARS]
 
 
 # LLM: 五步链都在这一个类里，后端只提供事实；observe、click_candidate、type_into_candidate 都有副作用（写快照 / 点击 / 键盘输入），
@@ -251,16 +267,31 @@ class ScreenObserver:
         self.store.forget(self.registry.observe_listing(item.native_id for item in windows))
         return windows
 
-    # 函数用途: 选目标窗口：给了别名按别名找，否则取叠放最顶的普通可见窗口。
+    # LLM: window 的解析顺序固定（ae 定）：空 → 叠放最顶的普通可见窗口；以 win: 开头 → 只认本进程发过的别名（不看可见性，之后由
+    #   not_viewable 说明）；其它字符串 → 和可见普通窗口的展示标题（window_title）完全相等，恰好一个才用：0 个 window_not_found，
+    #   2 个以上 window_ambiguous（只带命中的那几个）。不 strip、不忽略大小写、不做子串/模糊，不可见的同名窗口不参与。
+    #   not_found / ambiguous 都带可见窗口清单（别名 + 展示标题，顶在前，最多 WINDOW_LIST_MAX_COUNT 条）。
+    # 函数用途: 选目标窗口：空取最前、别名按别名、别的字符串按展示标题唯一匹配；找不到或多个都带清单报错。
     def _target(self, windows: list[WindowInfo], window: str | None) -> WindowInfo:
-        if window:
+        visible = [item for item in reversed(windows) if item.normal and item.visible_now()]
+        if not window:
+            matches = visible[:1]
+        elif str(window).startswith(WINDOW_ALIAS_PREFIX):
             native_id = self.registry.native_for(str(window))
-            target = next((item for item in windows if native_id is not None and item.native_id == native_id), None)
+            matches = [item for item in windows if native_id is not None and item.native_id == native_id][:1]
         else:
-            target = next((item for item in reversed(windows) if item.normal and item.visible_now()), None)
-        if target is None:
-            raise ObservationError("window_not_found", "没有这个窗口" if window else "当前没有可见的普通窗口")
-        return target
+            matches = [item for item in visible if window_title(item.title) == str(window)]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ObservationError("window_ambiguous", "多个可见窗口的标题相同，请改用别名", self._window_listing(matches))
+        raise ObservationError("window_not_found", "没有这个窗口" if window else "当前没有可见的普通窗口", self._window_listing(visible))
+
+    # LLM: 清单只含别名与展示标题（标题是外部数据，已清洗截短），顶在前；上游 list_windows 本来就给标题，不是新增暴露面。
+    # 函数用途: 把一组窗口投影成错误里的 windows 清单（最多 WINDOW_LIST_MAX_COUNT 条，超出标 truncated）。
+    def _window_listing(self, items: list[WindowInfo]) -> dict[str, object]:
+        rows = [{"alias": self.registry.ref_for(item.native_id), "title": window_title(item.title)} for item in items[:WINDOW_LIST_MAX_COUNT]]
+        return {"windows": rows, "truncated": len(items) > WINDOW_LIST_MAX_COUNT}
 
     # LLM: 后端主动抛的 ObservationError（如 screen_recording_not_permitted）原样透传，其它异常一律变成 capture_failed。
     #   返回的几何是“列表里的原点、尺寸 + 截图自己的像素/点比”：scale 是这张截图的事实，不是显示器的。
@@ -312,7 +343,7 @@ class ScreenObserver:
                  "capture": capture.kind, "occluded": snapshot.occluded}
         rows = [{"key": item.key, "role": item.role, "label": item.label, "actions": list(item.actions), "region": list(item.region)}
                 for item in candidates]
-        result: dict[str, object] = {"window": snapshot.ref, "generation": snapshot.generation, "title": sanitize_label(target.title),
+        result: dict[str, object] = {"window": snapshot.ref, "generation": snapshot.generation, "title": window_title(target.title),
                                      "frame": frame, "candidate_count": len(rows)}
         if capture.fallback_reason:
             result["capture_fallback"] = {"reason": capture.fallback_reason}

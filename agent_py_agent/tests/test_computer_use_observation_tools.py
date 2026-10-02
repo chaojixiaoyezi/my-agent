@@ -485,3 +485,18 @@ def test_cancellation_during_recheck_reaches_the_real_observer_through_the_glue(
     body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "cand-x"}, context)
     assert (is_error, structured, body["code"]) == (True, {"my_agent_observation_error": {"code": "cancelled"}}, "OBSERVATION_CANCELLED")
     assert backend.clicks == [], "复核期间被取消，真正点击前拦住"
+
+
+def test_window_errors_carry_the_structured_window_listing():
+    observer = _Observer()
+    listing = {"windows": [{"alias": "win:b:1", "title": "表单 窗口"}, {"alias": "win:b:2", "title": "Form"}], "truncated": False}
+    observer.error = ObservationError("window_ambiguous", "多个", listing)
+    body, structured, is_error = glue.call_observation_tool(observer, "observe_window", {"window": "表单 窗口"}, None)
+    assert is_error and structured == {"my_agent_observation_error": {"code": "window_ambiguous", **listing}}
+    assert body["code"] == "OBSERVATION_WINDOW_AMBIGUOUS" and body["windows"] == listing["windows"] and body["truncated"] is False
+    observer.error = ObservationError("window_not_found", "没有", {"code": "spoof", "windows": [], "truncated": True})
+    structured = glue.call_observation_tool(observer, "observe_window", {"window": "x"}, None)[1]
+    assert structured["my_agent_observation_error"] == {"code": "window_not_found", "windows": [], "truncated": True}, "details 不能覆盖 code"
+    observer.error = ObservationError("stale", "候选区域的像素已变")
+    assert glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, None)[1] == {"my_agent_observation_error": {"code": "stale"}}
+    assert "完全相同的文字" in glue.observe_window.__doc__ and "win:" in glue.observe_window.__doc__
