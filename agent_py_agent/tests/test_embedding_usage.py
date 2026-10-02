@@ -211,8 +211,7 @@ def test_tool_semantic_search_counts_as_tool_retrieval(stub):
 
 
 # 函数用途: 先在本进程里产生一些用量（含带标记的正文），再按 IM 文字和 TUI 发给 Gateway 的文字各执行一次 /model vector。
-def _vector_views(admin_or_member, monkeypatch, stub):
-    host = admin_or_member
+def _vector_views(owner_host, monkeypatch, stub):
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
     from agent_py_agent.agent.gateway_parts import model_profile_service
     from agent_py_agent.agent.gateway_parts.control_service import (
@@ -227,11 +226,11 @@ def _vector_views(admin_or_member, monkeypatch, stub):
         MiniMaxEmbedder(api_base=stub).embed([f"查一下 {MARKER}"])
     EMBEDDING_USAGE.record_retrieval("semantic", "")
     monkeypatch.setattr(model_profile_service, "_scoped_model_host",
-                        lambda _agent, _scope: (host, SimpleNamespace(thread_id="t1")))
+                        lambda _agent, _scope: (owner_host, SimpleNamespace(thread_id="t1")))
     im_command = parse_conversation_control("/model vector", reject_unknown_slash=True)
     tui_text = _command_text(parse_conversation_control("/model vector", reject_unknown_slash=True))
     tui_command = parse_conversation_control(tui_text, reject_unknown_slash=True)
-    return [execute_gateway_conversation_control(host, None, command, None) for command in (im_command, tui_command)]
+    return [execute_gateway_conversation_control(owner_host, None, command, None) for command in (im_command, tui_command)]
 
 
 def test_admin_vector_view_shows_usage_numbers_without_any_text(host, monkeypatch, stub):  # noqa: F811  （host 是复用的 fixture）
