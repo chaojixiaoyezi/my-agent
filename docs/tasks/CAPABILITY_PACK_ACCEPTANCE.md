@@ -292,6 +292,8 @@ G04 的三类控制各做了一次独立的真实原生 TUI 实测，分别判�
 | D2：越界 grant 落 failed（`PATH_OUTSIDE_WORKSPACE`） | 未命中（两次自然尝试：子代理直接 run_command 读成功、没提能力申请；改为写 `/etc/myagent-check/` 后 shell 申请被宿主记为 GAP 而非 OPEN，没走到越界拒绝分支） | test_resolve_capability_requests_tool.py::test_grant_rejects_out_of_workspace_roots_structurally ＋ test_out_of_bounds_grant_settles_operation_failed_not_unknown | 合同层＋原执行器与操作账：越界 write_roots 拒绝（`PATH_OUTSIDE_WORKSPACE`、effect_outcome=failed、请求保持 OPEN、不落 grant）；经 LocalStore 操作账落 failed 而非 UNKNOWN／manual_review（即 `7430a0000` 的 D2 回归）。没证明：真实模型自然触发越界 grant |
 | 子代理选模：按模型名点名共享模型 | 未命中：自然需求让模型直接写 `MiniMax-M2.7`，模型没有调用工具、1 次调用后直接作答 | test_shared_model_catalog.py::test_shared_selection_defaults_child_and_private_isolation | 合同层：普通用户按模型名点名共享模型被拒（“尚未新增”）、`shared:` 引用被拒（提示“省略 model”）、管理员按名可用、撤销共享后明确报错。没证明：真实模型自发按模型名点名（模型选择行为，未命中） |
 
+**2026-10-01 C3 补测更新**：上表的 G03 拒绝后接替出口、G05 审批期撤销后的 source_ref 物化、跨回合 Goal 恢复三行，已用新的自然需求加宿主侧注入在真实模型下命中，宿主行为正确（另发现 H2、H3），见 [C3 节](#c3-未命中分支用新的自然需求加宿主侧注入重测2026-10-01)。O1 等 C4 上线后再测。
+
 完全没有自动化覆盖的分支：无。上表每个宿主机制分支都有合同层或脚本模型覆盖；真实模型未命中的是模型自发选择行为（自发带 `replacement_for_run_ids`、自发 source_ref 物化、自发标记 Goal 等待、自发按名点名、父级自己接手），这类选择不属于 pytest 可稳定覆盖的范围。剩余风险是这些路径的真实模型端到端行为未经实测，建议在后续真实任务里顺带观察（与 09-30 的收尾建议一致），需要补专门测试时再单独立项。
 
 ## G03后台子代理四条特殊路径的脚本模型端到端（2026-09-28）
@@ -701,6 +703,62 @@ D1／G05 Goal 续跑熔断的过程：
   - `tool-calls.json`，只含工具的结构化字段；
   - `c1-watch.jsonl`、`stage-report.json`、`prompt.txt`；
   - 复现脚本。
+
+## C3 未命中分支用新的自然需求加宿主侧注入重测（2026-10-01）
+
+结论：G03 的拒绝后接替出口、G05 的撤销后 source_ref 物化、跨回合 Goal 恢复，这三个分支这次都命中，宿主行为正确。另发现两个宿主缺陷候选（H2、H3），已交 3a。
+O1（被接替来源收成 cancelled）按约定等 C4 上线后再测。
+
+### 环境
+- **被测代码**：`39059a2be`，即 main `34e4d874e` 加 H1 修复。
+- **隔离**：
+  - 隔离 home，私有 127.0.0.1:8442，`env -i` 启动，代理保留；
+  - `max_tool_rounds: 60`；没有碰生产 8420。
+- **模型**：官方 MiniMax-M2.7（服务商 `d9607663…`）。目录副本只留这一个服务商，权限 600，用完随测试根删除。
+- **需求与注入**：
+  - 每个需求只发一次，都是新的自然需求；
+  - 故障只用三种：测试进程内的一次性暂停点、改 owner 工具索引的文件权限、用户命令（`/plugins`、`/goal pause|resume`、Esc）。
+  - 每次操作都记在 `fault-log.txt`。
+- **判据**：只看结构化事实，不读会话正文。用到的有：
+  - 工具索引的工具名、参数键、错误码和 `tool_execution`；
+  - `runtime_events` 的 `tool_completed`；
+  - 子代理 canonical 状态的 `superseded_by`；
+  - Goal 记录、安装表，以及产物的 sha256。
+
+### 结果
+
+| 分支 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| 历史不完整拒绝后的接替出口 | **命中，通过** | **需求**：派子代理统计 `ws/release`，回来后再派第二个子代理写 `count.txt`，写文件必须交给子代理。<br>**注入**：h1 暂停住第一个子代理，owner 工具索引改成 0200，放行，持续 63 秒后恢复。<br>**拒绝**：唤醒片里的 create 得到 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`（runtime_gate，handler 未执行）。<br>**接替**：模型随即在 item 上带 `replacement_for_run_ids=[第一个子代理]` 另派，成功；第二个子代理写出 `count.txt`。第一个子代理 canonical 为 DONE，`superseded_by` 指向接替者 |
+| 审批期撤销后的 source_ref 物化 | **命中，宿主拒绝正确** | **需求**：先在 c3-check 包里找到巡检清单资源，再查看管理控制设置，最后把清单原样写到 `out/c3-check.txt`。<br>**撤销**：模型先 get 到 `tools/check.txt`，此时已拿到 source_ref；在 `admin_controls` 等待审批时，测试者停用 c3-check（rev 4）。<br>**拒绝**：批准后 `write_file(source_ref)` 得到 `TOOL_UNAVAILABLE`（文件来源不可用，`effect_outcome=not_started`），没有写出任何内容。<br>**之后**：模型用 content 写出了同样的字节（sha 与包资源 `232d6642…` 相同），见观察 |
+| 跨回合 Goal 恢复 | **命中，宿主拒绝正确；另见 H2、H3** | **需求**：把按 c3-release 包做两步发布检查设成目标。<br>**打断**：模型 get 入口、create_goal、做完第一步；读 `steps/step2.md` 时被 g1 暂停住。用户 `/goal pause` 后按 Esc，本轮请求 `INTERRUPTED`，那次读取 `CANCELLED`、没有 pin。<br>**换代**：把包更新到 0.2.0（rev 6）后 `/goal resume`。续跑仍在同一个 task 里：get `steps/step2.md` 得到 `SKILL_SNAPSHOT_UNAVAILABLE`，旧 pin 投影成不可用，没有静默读到新一代 |
+
+### 宿主缺陷候选（已交 3a）
+- **H2：shell 能直接读 owner 插件库，绕过撤销和换代。**
+  - Goal 续跑被拒后，模型用 `run_command` 执行 `unzip -p data/plugins/packages/<0.1.0 包摘要>.zip steps/step2.md`，读出旧包；
+  - 然后按 v1 格式写出结论，把 Goal 标为 complete。
+  - 原因：Gateway 请求的工作区根就是 owner home。生产 gateway 也是 `--workspace-root <owner home>`，所以生产里同样能读到。
+- **H3：主任务的快照失效提示叫模型去找父代理。**
+  - 主任务拿到 `SKILL_SNAPSHOT_UNAVAILABLE` 时，恢复提示是“由父代理按当前快照重新授权”；
+  - 主线程没有父代理，模型照着去调 `resolve_capability_requests`，得到 `TOOL_INVALID_ARGUMENTS`。
+  - 这和 H1 属于同一类问题：回执误导，而且模型没法照着回执自己纠正。
+
+### 观察与测试者偏差
+- **source_ref 被拒后模型手抄原内容。** 撤销能挡住宿主物化，挡不住模型上下文里已有的内容。这是模型行为，不算宿主缺陷。
+- **测试者偏差：前台请求被注入波及。** 注入开始时前台轮还没收尾，前台请求以 `failed`／`PERMISSIONERROR` 结束，TaskRun 仍正常 done。
+  - 这个失败是测试者造成的，不改判上面的结论；
+  - 只说明一点：owner 工具索引读不到时，前台请求会直接以异常类名失败。
+
+### 证据
+`~/.my-agent/decision-evidence/c3-unhit-branches-39059/`（仓库外）：
+- 工具结构化行 `tool-calls.jsonl`；
+- 子代理、Goal、安装表；
+- 产物 sha；
+- 钩子事件、`fault-log.txt`、`facts-*.json`；
+- 各需求原文；
+- 完整 harness。
+
+已扫过，不含密钥。现场已收：TUI、Gateway、tmux 都已关闭，按 cwd 查没有遗留进程，根目录和目录副本都已删除。
 
 ## C25空选后能力包对主线程的可见性只读核对与脚本复现（2026-09-28）
 
