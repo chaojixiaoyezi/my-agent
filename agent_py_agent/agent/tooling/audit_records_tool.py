@@ -237,8 +237,7 @@ class AuditRecordsTool(BaseTool):
             "用户问决策花了多少 token、哪些会话调用最多",
             "排查决策设置是否生效（总开关、各点模式、等待时间）",
             "用户说在飞书/IM/TUI 发消息报错或没回复：topic=requests 查错误码与处理建议（别的用户的请求要 scope=all_owners）",
-        ), avoid_when=("需要修改设置时（用 user_config）",),
-            default_deferred=True, deferred_summary="查自己的运行记录：决策模型调用与失败、token 用量、请求报错原因"),
+        ), avoid_when=("需要修改设置时（用 user_config）",)),
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),

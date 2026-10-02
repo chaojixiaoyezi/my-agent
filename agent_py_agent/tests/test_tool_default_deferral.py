@@ -18,8 +18,9 @@ from agent_py_agent.agent.tooling.models import TOOL_DISCOVERY_ENTRY_NAMES, Tool
 from agent_py_agent.agent.tooling.registry import _declared_deferred_names
 
 # 第一阶段按近 30 天生产调用频率和风险定的名单；新增声明时同步这里和 DESIGN_LEDGER 的理由。
+# audit_records 不收起：IM 用户自查“发消息报错/没回复”靠它，真实验收里收起后模型没去搜索（I6），改前对照直接调用成功。
 DECLARED = {
-    "admin_controls", "audit_records", "gateway_status", "manage_models", "restart_gateway",
+    "admin_controls", "gateway_status", "manage_models", "restart_gateway",
     "schedule", "update_persona", "user_config", "watch_stream",
 }
 
@@ -82,7 +83,6 @@ def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
     ("看一下这个直播流", "watch_stream"),
     ("帮我换个模型", "manage_models"),
     ("改一下配置项", "user_config"),
-    ("查审计记录", "audit_records"),
     ("明天早上提醒我", "schedule"),
     ("重启网关", "restart_gateway"),
     ("gateway 状态", "gateway_status"),
@@ -191,7 +191,7 @@ def test_explicit_allowed_tools_catalog_has_no_declared_index(tmp_path):
     assert agent.tools.search_deferred_specs("user_config", allowed_tools=["user_config", "tool_search"]) == []
 
 
-def _blind_call(agent, tool="audit_records", *, ok=False, stage="validation", loaded=None, error_code=""):
+def _blind_call(agent, tool="manage_models", *, ok=False, stage="validation", loaded=None, error_code=""):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core.tool_loop.deferred_schema_reload import (
@@ -208,16 +208,17 @@ def _blind_call(agent, tool="audit_records", *, ok=False, stage="validation", lo
 def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     hint, loaded = _blind_call(agent)
-    assert loaded == {"audit_records"}
-    assert hint.startswith("\n[tool-schema-loaded] audit_records ")
-    assert "audit_records" in _visible(agent, loaded_tool_names=loaded)
+    assert loaded == {"manage_models"}
+    assert hint.startswith("\n[tool-schema-loaded] manage_models ")
+    assert "manage_models" in _visible(agent, loaded_tool_names=loaded)
 
 
 @pytest.mark.parametrize(("deferral", "tool", "ok", "stage"), [
-    (False, "audit_records", False, "validation"),
+    (False, "manage_models", False, "validation"),
     (False, "web_fetch", False, "validation"),
-    (True, "audit_records", True, "validation"),
-    (True, "audit_records", False, "execution"),
+    (True, "manage_models", True, "validation"),
+    (True, "manage_models", False, "execution"),
+    (True, "audit_records", False, "validation"),
     (True, "read_file", False, "validation"),
     (True, "no_such_tool", False, "validation"),
 ])
@@ -228,7 +229,7 @@ def test_blind_call_reload_only_for_declared_deferral_validation_failures(tmp_pa
 
 def test_blind_call_already_loaded_is_left_alone(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
-    assert _blind_call(agent, loaded={"audit_records"}) == ("", {"audit_records"})
+    assert _blind_call(agent, loaded={"manage_models"}) == ("", {"manage_models"})
 
 
 @pytest.mark.parametrize(("stage", "error_code", "reloads"), [
