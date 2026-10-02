@@ -206,11 +206,11 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
 - **Linux 车道**（`lane-b3/run_lane_b3.sh`，同一镜像，块 3 两个文件加 runner 和 attempt_sandbox）：
   - 不加 `NET_ADMIN`：64 passed / 18 skipped，真实沙箱用例按设计跳过；
   - 加 `--cap-add NET_ADMIN`：75 passed / 7 skipped（都是 macOS 专用），块 3 真实沙箱用例在 bwrap 下通过。
-- **相关回归**：252 个文件（capability、plugin、pack、工具循环、收尾、Gateway、归档、运行时事实、设置与参数、常数、沙箱、guards9、test_packaging），4789 passed / 12 skipped / 4 xfailed。
-- **门禁**逐项 rc=0：import boundaries、ruff、`doc_sync --base ce2b833a7`、常数目录 `--check`（846 项）、前端配置目录 `--check`（254 项）、strict code-size、`git diff --check ce2b833a7..HEAD`、clean_package。
-  - code-size 按确切基线 `ce2b833a7` 比告警身份：新增 0、消失 0。首轮多出 1 条（写后钩子参数），改成从结果取工具名后消掉。
+- **相关回归**（变基到 `f6b63ab35` 后重跑）：263 个文件（capability、plugin、pack、MCP、观察、工具循环、收尾、Gateway、归档、运行时事实、设置与参数、常数、沙箱、guards9、test_packaging），5057 passed / 12 skipped / 4 xfailed。变基前在原基线 `ce2b833a7`、`60e100dcb` 上也各跑过一次，都没有失败。
+- **门禁**逐项 rc=0（`f6b63ab35` 上）：import boundaries、ruff、`doc_sync --base f6b63ab35`、常数目录 `--check`（849 项）、前端配置目录 `--check`（255 项）、strict code-size、`git diff --check f6b63ab35..HEAD`、clean_package。
+  - code-size 按确切基线 `f6b63ab35` 比告警身份：新增 0、消失 0。首轮（基线 `ce2b833a7`）多出 1 条（写后钩子参数），改成从结果取工具名后消掉。
   - doc_sync 一开始只和 HEAD 比，漏了 gateway、verification 两个模块文档；改成和基线比之后发现并补上。块 2 按它的基线重查过，原本就通过。
-- **变异 25/25 全部被抓住**（`cpv2-mut/mutations_b3.json`），分三组：
+- **变异 25/25 全部被抓住**（`cpv2-mut/mutations_b3.json`，变基后在 `f6b63ab35` 上重跑仍是 25/25），分三组：
   - 记基线：每次都记基线、任何工具都算改工作区、忽略运行策略、基线钩子没接；
   - 认文件与输入：不做字段匹配、被改过的输入算原件、目标不排除、多个匹配也交；
   - 收尾、事实与接线：返工上限失效、不复用结果、收尾查没改过的文件、返工不先记账、事实不按最后一次收尾、提示漏掉“没正常收尾”、空摘要也挂上、空段也渲染、归档丢摘要、开关默认开、开关不是边界项、收尾没接、pin 摘要不核、删掉的旧地址算写出、账本可被别人读、写后钩子没接、返工提示不带位置。
