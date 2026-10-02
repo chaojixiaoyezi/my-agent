@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 837,
+  "count": 847,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5028,6 +5028,14 @@
       "description": "逐键输入间隔 50ms：防止输入过快被目标程序丢键。"
     },
     {
+      "name": "_ALL_DESKTOPS_VALUE",
+      "file": "agent_py_agent/agent/tooling/computer_use_x11.py",
+      "value": 4294967295,
+      "unit": "",
+      "category": "其它",
+      "description": "_NET_WM_DESKTOP 里\"所有桌面\"的约定值"
+    },
+    {
       "name": "MAX_INLINE_WRITE_CONTENT_CHARS",
       "file": "agent_py_agent/agent/tooling/content_transport_policy.py",
       "value": 12000,
@@ -5394,6 +5402,78 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "沙箱事实里每条允许目录路径最多展示多少字符（更长的整条跳过，原账不变）。"
+    },
+    {
+      "name": "BOOT_TOKEN_BYTES",
+      "file": "agent_py_agent/agent/tooling/screen_observation_store.py",
+      "value": 8,
+      "unit": "字节",
+      "category": "其它",
+      "description": "适配器启动时生成的 boot 随机串字节数（十六进制后 16 位）"
+    },
+    {
+      "name": "SNAPSHOT_RETAIN_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_observation_store.py",
+      "value": 4,
+      "unit": "个",
+      "category": "其它",
+      "description": "每个窗口实例保留的最近快照代数：宿主只放行最新观察，多留几代是为了并发的几个 run 都还能找到自己那一代"
+    },
+    {
+      "name": "TRACKED_WINDOWS_MAX_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_observation_store.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同时跟踪的窗口实例上限，超过按最近一次采样淘汰"
+    },
+    {
+      "name": "DIGEST_CHANGED_CELLS_MAX_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_region_digest.py",
+      "value": 4,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "变了的格子超过多少个才算区域变了（128 格的约 3%，留给光标闪烁与抗锯齿）"
+    },
+    {
+      "name": "DIGEST_CHANGED_LEVEL_MIN_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_region_digest.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "一格要相差多少级才算\"变了\""
+    },
+    {
+      "name": "DIGEST_GRID_COLUMNS_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_region_digest.py",
+      "value": 16,
+      "unit": "个",
+      "category": "其它",
+      "description": "摘要格子的列数（面积平均缩放后的格子网格宽）"
+    },
+    {
+      "name": "DIGEST_GRID_ROWS_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_region_digest.py",
+      "value": 8,
+      "unit": "个",
+      "category": "其它",
+      "description": "摘要格子的行数（格子网格高）"
+    },
+    {
+      "name": "DIGEST_HEX_CHARS",
+      "file": "agent_py_agent/agent/tooling/screen_region_digest.py",
+      "value": 16,
+      "unit": "字符",
+      "category": "其它",
+      "description": "摘要十六进制取前多少位"
+    },
+    {
+      "name": "DIGEST_LEVELS_COUNT",
+      "file": "agent_py_agent/agent/tooling/screen_region_digest.py",
+      "value": 16,
+      "unit": "个",
+      "category": "其它",
+      "description": "每格灰度量化的级数（256 级灰度 → 16 级）"
     },
     {
       "name": "_CLEANUP_WARNING_PID_LIMIT_COUNT",

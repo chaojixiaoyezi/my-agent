@@ -185,7 +185,7 @@ def test_extra_sources_are_registered_with_yaml_descriptions():
 @pytest.mark.parametrize("key", [
     *sorted(BOUNDARY_KEYS), "api_base", "model_backend", "system_prompt", "prompt_files",
     "audit_enabled", "enable_tools", "enable_gateway_restart_tool", "additional_write_roots", "mcp_servers",
-    "execution_mode", "computer_use_enabled", "config_sources",
+    "execution_mode", "computer_use_enabled", "computer_use_observation_enabled", "config_sources",
     "self_dev_worktree", "protect_running_runtime",
 ])
 def test_security_relevant_keys_are_never_model_writable(key):

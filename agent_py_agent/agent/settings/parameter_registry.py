@@ -54,7 +54,8 @@ _TARGET_TOKENS = frozenset({
 # 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、写入保护、特权动作频率、审计记录保留期
 # （cli_audit_cleanup_days 缩短会提前删掉审计证据）或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
 _BOUNDARY_NAMES = frozenset({
-    "api_base", "api_key", "model_backend", "computer_use_enabled", "execution_mode", "user_id", "system_prompt",
+    "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
+    "user_id", "system_prompt",
     "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "gateway_restart_cooldown_seconds",
     "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",

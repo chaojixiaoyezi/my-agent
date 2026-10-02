@@ -254,6 +254,9 @@ class _ToolConfigFields:
     # Computer Use 复用 computer-control-mcp，不在本项目实现鼠标/键盘/OCR。只有 local/main
     # 管理员同时显式 full-access 时才注入；普通 owner 和 WorkspaceOnly 一律不可见。
     computer_use_enabled: bool = False
+    # J16 屏幕观察：在 Computer Use 适配器里再注册 observe_window / click_candidate（只读采样 + 候选点击，审批策略
+    # always / dangerous）。默认关：工具目录不变；开了也仍受 computer_use_enabled、local/main 与 Full Access 三重约束。
+    computer_use_observation_enabled: bool = False
 
 
 # LLM: 运行预算类字段的默认值组；默认值须与随包 YAML 一致，改动同步规范化与参数登记表。

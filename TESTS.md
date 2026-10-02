@@ -956,6 +956,49 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   `git diff --check` 退出 0；`PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 退出 0，新增告警 0、消失告警 0。
   未改产品，因此未跑相关 pytest、guards9、Ruff、strict-size、import-boundaries 或 clean-package；不宣称产品门禁全部通过。
 
+## J16 片 B：Linux X11 屏幕观察 + 适配器两层复核 + `computer_use_observation_enabled`（2026-10-02，ef，分支 `claude/ef-j16-slice-b`，基于 `claude/3a-step17f` f6b63ab35）
+
+- **范围**：主配置开关 `computer_use_observation_enabled`（默认关，管理员边界；YAML 注释、dataclass、规范化、参数中心、前端目录）；`computer_use_profile.with_computer_use_observation`
+  并入 `observe_window`（read_only、always、observation window/64）与 `click_candidate`（dangerous、observation_ref candidate_id）两行声明和环境标记；
+  观察核心 `screen_observation.py` / 快照 `screen_observation_store.py` / 摘要 `screen_region_digest.py` / X11 后端 `computer_use_x11.py` /
+  接入胶水 `computer_use_observation_tools.py`；适配器 `computer_use_server.py` 改成底层 Server 单一运行路径。`type_into_candidate` 留片 G。
+- **适配器层五项复核 ↔ 用例对照（ae 要求的审表；全在 `test_screen_observation_core.py`，假后端，点击次数必须为 0）**：
+
+| 复核项 | 不通过的用例 | 通过/放行的用例 |
+| --- | --- | --- |
+| 按 `_meta` 代次找快照、key 在那一代 | `test_click_requires_the_snapshot_and_key_and_passes_when_nothing_changed`（别的代次 / 别的 key / 别的 boot → `not_found`）；`test_window_that_vanished_and_came_back_with_the_same_xid_is_a_new_instance`（环被忘 → `not_found`） | 同一用例：有更新的观察也不影响同一代核对全过的候选 |
+| 1 boot/instance 相同 | `..._is_stale_with_zero_side_effects[window-gone]`；`test_a_lookalike_window_cannot_stand_in_for_the_vanished_target`（几何像素一样的孪生窗口也不能顶替） | `test_observe_builds_a_payload_the_host_accepts_and_records_a_snapshot` |
+| 2 可见、未最小化、同桌面 | `[hidden]`、`[unmapped]`、`[desktop]` | 同上 |
+| 3 原点/尺寸/缩放完全相等 | `[moved]`、`[resized]` | 同上 |
+| 4 点击点不被遮挡（动作时重查叠放） | `[occluded-point]` | `test_observe_reports_structured_failures_and_never_invents_candidates`（部分遮挡只记 `frame.occluded`） |
+| 5 候选区域摘要在容差内 | `[pixels]`；`test_region_grid_is_deterministic_and_tolerates_a_caret_but_not_content_changes`（文字没了 → 变；亮光标整列动 → 变，ae 记下的已知风险） | 同一用例：淡光标在容差内 |
+
+- **其它单测**：实例登记（XID 消失再出现算新实例）、快照环 4 代 / 64 窗淘汰 / forget；观察载荷用宿主 `parse_observation` 原样校验通过；
+  无候选不造候选、标签去控制字符截 120、region 裁剪与零面积丢弃、`window_not_found` / `occluded` / `not_viewable` / `capture_failed` / `ocr_failed`；
+  不填别名取最顶的普通可见窗口（dock、别的桌面不算）。`test_computer_use_observation_tools.py`：开关并入声明与环境标记、三种属主范围不成立时目录不变、
+  按名字直接调不在快照里的工具被拒（`TOOL_NOT_IN_RUNTIME_SNAPSHOT`）；调用三元组（载荷只进 structuredContent、失败带结构化码）；底层处理器只拦截两个观察工具并读 `_meta`
+  （假 `mcp.types`）；声明函数只描述不执行；X11 后端在假 Xlib 上的叠放顺序、状态、标题解码、上层矩形（override-redirect、`_NET_FRAME_EXTENTS`）、mss/OCR/点击的公开调用。
+- **Linux 车道 Xvfb 冒烟（真适配器子进程、真 X11、真 RapidOCR、真 pyautogui，`test_computer_use_xvfb_lane.py`，容器内 `MY_AGENT_XVFB_LANE=1`）**：
+  `2 passed in 10.03s`。观察 → 点击 Submit → 再观察状态行变成 "status submitted"；移动窗口后点旧候选 → `OBSERVATION_STALE`、`not_started`、Tk 没收到点击；
+  未知别名 → `my_agent_observation_error.code=window_not_found`；上游 `get_screen_size` 经委托照常可用。证据与两份派生镜像 Dockerfile：
+  `~/.my-agent/decision-evidence/j16-slice-b-xvfb-f6b63ab35/`。排查记下三件事：车道镜像要加 `x11-xserver-utils`（上游依赖 pymonctl 导入时没 xrandr 就 `sys.exit(1)`）；
+  固定 MCP 1.13 的 `add_tool` 对注解做 `issubclass`，胶水模块不能用字符串注解；FastMCP 把 `Optional[str]` 生成 anyOf，过不了宿主声明规则，可选参数写 `str = ""`。
+- **结果**：核心 + 接入两文件 `24 passed, 2 skipped`（跳过的是车道用例）；`test_computer_use_profile` / `test_config_normalize` / `test_parameter_registry` / `test_computer_text_input` 照常；
+  ruff 通过；`check_import_boundaries` 0；常数目录重生成（844 项）后 `--check` 通过；`node sync-backend-config --check` 通过；strict code-size hard=0；size_diff 新增 0。
+- **变异 10/10 抓到**：不按代次找快照（拿最新一代）、忽略窗口实例（补孪生窗口用例后抓到）、不查可见性、不比几何、不查点击点遮挡、不比区域像素、
+  摘要容差放宽到整格、先点击后复核（10 红）、开关关着仍并入声明、接管层不拦截观察工具。脚本 `run_mutations_j16b.py` 在会话 scratchpad。
+- **未做**：真实模型验收（片 F）；`/plugins` 的 MCP 段（片 F）；带闪动光标输入框的误判统计（片 C）；macOS 后端（片 E）。
+
+复现（工作树根目录）：
+
+```sh
+bash ~/.my-agent/releases/claude-tools/3a-scripts/run_files312.sh $PWD pef \
+  agent_py_agent/tests/test_screen_observation_core.py agent_py_agent/tests/test_computer_use_observation_tools.py \
+  agent_py_agent/tests/test_computer_use_profile.py agent_py_agent/tests/test_config_normalize.py agent_py_agent/tests/test_parameter_registry.py
+# 车道容器里（派生镜像见证据目录 harness/）：
+MY_AGENT_XVFB_LANE=1 python -m pytest agent_py_agent/tests/test_computer_use_xvfb_lane.py -q -o addopts= -p no:cacheprovider
+```
+
 ## J16 片 A：观察三件套共用 + MCP 逐工具声明表 + 几何扩展（2026-10-02，ef，分支 `claude/ef-j16-slice-a`，基于 `claude/3a-step17e` 0dab27111）
 
 - **范围**：`tooling/observation_binding.py`（三件套搬出 PluginProxyTool，MCPProxyTool 共用）、`tooling/mcp_declarations.py`（`tool_approvals` / `tool_observations` 解析与按发现工具核对、发布结果事实）、`plugin_observation.py`（声明类型搬入、`provider_id`、`frame` / `region` 几何校验）、`computer_use_profile.py` 声明表；无新配置项。

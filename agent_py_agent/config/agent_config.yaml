@@ -1043,6 +1043,13 @@ mcp_servers: {}
 # - 截图/OCR 和所有输入动作按 dangerous 审批；窗口枚举/屏幕尺寸/等待只读，移动鼠标/激活窗口按 mutating。
 # - Linux 复用 Gateway 当前 DISPLAY/WAYLAND/XAUTHORITY 会话；没有可用桌面会明确表现为工具不可用。
 computer_use_enabled: false
+# J16 屏幕观察（片 B 起）：在同一个 Computer Use 适配器里再注册两个工具——observe_window（只读采样一个窗口：不切焦点、
+# 不激活、不动鼠标，给出稳定窗口身份、截图代次、几何和 OCR 文字候选，审批策略 always，每次都问本人）和 click_candidate
+# （按候选点一下，dangerous；点之前适配器按当时快照逐项复核：实例、可见、几何、遮挡、区域像素，任一项变了就不点）。
+# - 默认 false：工具目录不变，适配器不装载 X11/OCR 观察后端。
+# - 开了也必须同时满足 computer_use_enabled、结构化 local/main 与 Full Access；普通 owner 看不到、按名字调也会被拒。
+# - 片 B 只有 Linux X11 后端（需要 DISPLAY 与窗口管理器）；macOS 后端在片 E。
+computer_use_observation_enabled: false
 
 
 # Chat 界面交互历史带多少轮；模型使用的同会话历史预算见下面 conversation_history_*。

@@ -8,12 +8,23 @@
 不修改上游、不绕公开 MCP 组合边界。现有 computer_use 开关、effect 与执行行为保持；OCR 观察候选尚未接通。
 `image-text` 没有动作工具，保持原图片 OCR 数据工具。新增链路的假 MCP 功能/变异、真实桌面及真实模型均未验证。
 
-**2026-10-02 更新**：用户放宽边界为“别等上游”。新设计 [J16_SCREEN_OBSERVATION](J16_SCREEN_OBSERVATION.md) 已由 3a 确认、尚未实施：
+**2026-10-02 更新**：用户放宽边界为“别等上游”。新设计 [J16_SCREEN_OBSERVATION](J16_SCREEN_OBSERVATION.md) 已由 3a 确认：
 - 在本适配器里新增 `observe_window`、`click_candidate`，以及随片 G 注册的 `type_into_candidate`；
 - 只用操作系统和库的公开接口，不新增依赖；
 - 可用条件和本节的 Computer Use 完全相同（结构化 local/main + Full Access + `computer_use_enabled`），另加新开关 `computer_use_observation_enabled`。
 
 上游原有工具保持不变。
+
+**片 B 实施（2026-10-02，Linux X11）**：
+- 主配置 `computer_use_observation_enabled`（默认 false，管理员边界）为 true 且 Computer Use 已装配时，`computer_use_profile.with_computer_use_observation`
+  给该服务加环境标记 `MY_AGENT_COMPUTER_USE_OBSERVATION=1`，并并入两行声明：`observe_window`（`read_only`，审批 `always`，
+  `observation{window, 64}`）与 `click_candidate`（`dangerous`，`observation_ref{window, candidate_id}`）。开关关着目录字节不变；开关不能绕过属主范围。
+- 适配器 `computer_use_server.py` 改成单一运行路径：底层 `mcp.server.lowlevel.Server` 收发 stdio，`tools/list` 与普通 `tools/call`
+  绑 FastMCP 的公开协程；只有观察两个工具由 `computer_use_observation_tools` 的接管层处理（读 `_meta` 的宿主观察上下文、自己编码
+  `isError` + `structuredContent`），因为固定的 MCP 1.13 不能把 `CallToolResult` 原样返回。不碰 FastMCP 私有属性。
+- 观察核心 `screen_observation.py`（来源无关）+ `screen_observation_store.py`（实例登记、每窗 4 代快照）+ `screen_region_digest.py`
+  （区域像素摘要）+ `computer_use_x11.py`（python-xlib / mss / RapidOCR / pyautogui 的公开接口）。动作前五项复核与已知限制见设计稿 3.2 节。
+- macOS 后端（Quartz + ScreenCaptureKit）在片 E；`type_into_candidate` 随片 G。
 
 ## 解决问题
 
@@ -56,12 +67,13 @@ computer_use_enabled
              |
              v
 computer_use_profile.py
+  (+ with_computer_use_observation：computer_use_observation_enabled 时并入观察声明与环境标记)
              |
              v
 existing MCP stdio client -> ToolRegistry -> Tool Gateway
              |
              v
-computer_use_server.py (组合上游工具、滚轮和文本输入)
+computer_use_server.py (底层 Server 单一运行路径：上游工具、滚轮、文本输入交 FastMCP；观察两个工具走接管层)
              |
              v
 computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
@@ -91,6 +103,8 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
 | `get_screen_size`、`list_windows`、`wait_milliseconds` | `read_only` | 只读显示事实或计时 |
 | `move_mouse`、`activate_window`、`scroll_screen` | `mutating` | 改变指针、焦点或当前可见区域，但不直接输入内容 |
 | 截图、OCR、点击、键入、按键、拖拽、mouse/key down/up | `dangerous` | 读取敏感屏幕或产生真实外部界面副作用 |
+| `observe_window`（片 B，开关开时） | `read_only`，审批 `always` | 只读采样不改桌面，但读屏涉及隐私，每次都问本人 |
+| `click_candidate`（片 B，开关开时） | `dangerous` | 真实点击；点前按当时快照五项复核，变了就不点 |
 
 所有工具继续生成 `mcp__computer_use__*` typed 调用，并进入现有 operation、审批绑定、取消和工具输出归档。
 上游返回的自然语言成功/失败文本只按 `external_data` 给模型参考，不能反向成为宿主完成或授权事实；真实测试
@@ -111,6 +125,9 @@ computer-control-mcp (PyAutoGUI / RapidOCR / ONNX)
 - Linux 头less 验收需要 Xvfb 之外再运行窗口管理器；没有窗口管理器时窗口枚举、激活和按窗口 OCR 不能作为
   可用证据。RPM 系测试环境还需 `xorg-x11-server-Xvfb`、`xterm`、`xorg-x11-xauth`、
   `xorg-x11-server-utils`、`openbox` 和 `python3-tkinter`。
+- Debian 系（Docker 车道镜像）对应 `xvfb openbox python3-tk x11-utils x11-xserver-utils xterm xauth fonts-dejavu-core libgl1 libglib2.0-0`。
+  其中 `x11-xserver-utils`（xrandr / xset）是硬性要求：上游依赖链里的 pymonctl 在导入时检查 xrandr，缺了直接 `sys.exit(1)`，
+  适配器连启动都到不了，宿主只看到 `MCP_CONNECTION_CLOSED`（J16 片 B 的 Xvfb 冒烟排查记录）。
 
 ## 工具披露对照
 

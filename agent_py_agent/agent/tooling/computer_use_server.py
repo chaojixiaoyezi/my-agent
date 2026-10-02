@@ -3,17 +3,27 @@
 # ruff: noqa: UP045
 
 # LLM: 通过 FastMCP 公开接口复用上游函数，截图/OCR/窗口/鼠标继续由上游实现；仅替换文本输入
-# 并补滚轮。不能修改 SDK 私有工具表、保留两条 type_text 路径或启动第二个服务。
+# 并补滚轮。不能修改 SDK 私有工具表、保留两条 type_text 路径或启动第二个服务。单一运行路径：底层 Server 收发 stdio，
+# tools/list 与普通 tools/call 都交给 FastMCP；屏幕观察两个工具（J16 片 B，只在宿主写了环境标记时注册）由
+# computer_use_observation_tools 的接管层处理，不碰 FastMCP 私有属性。
 # 模块用途: 组合开源桌面工具与可靠文本输入，复用原工具名、权限和 stdio 连接。
 
 import asyncio
+import os
 from typing import Optional
 
 import pyautogui
 from computer_control_mcp import core as upstream
 from mcp.server.fastmcp import FastMCP
+from mcp.server.lowlevel import Server
+from mcp.server.stdio import stdio_server
 
 from .computer_text_input import type_desktop_text
+from .computer_use_observation_tools import (
+    install_observation_handler,
+    observation_tools_enabled,
+    register_observation_tools,
+)
 
 mcp = FastMCP("my-agent Computer Use")
 
@@ -53,7 +63,24 @@ def scroll_screen(
     }
 
 
+# LLM: 底层 Server 的 list_tools / call_tool 直接绑 FastMCP 的公开协程（参数校验仍由 FastMCP 做）；观察开关开着时才注册观察工具
+#   并把接管层装到 tools/call 处理器上。不另起第二个服务。
+# 函数用途: 适配器进程的唯一启动入口：注册上游工具，按环境标记装观察层，跑 stdio。
+async def serve() -> None:
+    await register_upstream_tools()
+    low = Server(mcp.name)
+    low.list_tools()(mcp.list_tools)
+    low.call_tool(validate_input=False)(mcp.call_tool)
+    if observation_tools_enabled(os.environ):
+        from .computer_use_x11 import X11Backend
+        from .screen_observation import ScreenObserver
+
+        register_observation_tools(mcp)
+        install_observation_handler(low, ScreenObserver(X11Backend()))
+    async with stdio_server() as (read_stream, write_stream):
+        await low.run(read_stream, write_stream, low.create_initialization_options())
+
+
 if __name__ == "__main__":
-    asyncio.run(register_upstream_tools())
     pyautogui.FAILSAFE = True
-    mcp.run()
+    asyncio.run(serve())

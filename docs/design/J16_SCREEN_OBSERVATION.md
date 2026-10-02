@@ -44,8 +44,8 @@
 
 | 工具 | 注册时机 | effect / 审批 | 观察声明 | 作用 |
 | --- | --- | --- | --- | --- |
-| `observe_window` | 片 B | `read_only`，审批策略 `always` | `observation{target_kind: "window", max_candidates: 64}` | 只读采样一个窗口：不切焦点、不激活、不移鼠标、不写文件 |
-| `click_candidate` | 片 B | `dangerous` | `observation_ref{target_kind: "window", param: "candidate_id"}` | 点击候选的中心点 |
+| `observe_window` | 片 B（已实施） | `read_only`，审批策略 `always` | `observation{target_kind: "window", max_candidates: 64}` | 只读采样一个窗口：不切焦点、不激活、不移鼠标、不写文件 |
+| `click_candidate` | 片 B（已实施） | `dangerous` | `observation_ref{target_kind: "window", param: "candidate_id"}` | 点击候选的中心点 |
 | `type_into_candidate` | **片 G** | `dangerous` | `observation_ref{target_kind: "window", param: "candidate_id"}` | 先点可编辑控件让它拿到焦点，再输入显式文字（`text`、`clear_existing`） |
 
 - **读屏审批**：读屏涉及隐私，`observe_window` 用现有的 `ApprovalPolicy(mode="always")`，每次都审批。审批面板是现有的“允许一次 / 本会话允许同一操作 / 拒绝”。effect 如实记 `read_only`，观察合同不用放宽。用户已被告知“每个会话第一次读屏会问你”。
@@ -106,7 +106,15 @@
 3. **复核通过才动手**：
    - 外框中心 → 全局点 → `pyautogui.click(x, y)`；
    - 输入时再调现有的 `type_desktop_text`。
+   - 复核和点击之间一定有一小段时间差，绕不开：复核通过后立刻点击，中间不做任何别的 I/O。
    - 返回值只证明“提交了”，结果要靠下一次 `observe_window` 确认。
+4. **片 B 实施定稿（2026-10-02，ae 定、ef 实施）**：
+   - 适配器层不要求“最新一代”：按 `_meta` 的代次在环里找快照，找不到或 `key` 不在那一代 → `not_found`；找到后按上面第 2 层的顺序逐项核对，任一项不过 → `stale`。宿主层已经只放行最新观察，适配器再加“必须最新”会误伤并发的几个 run，而像素、几何、遮挡复核已经保证安全。
+   - 快照：`screen_observation_store.SnapshotStore`，每个窗口实例最近 4 代（`SNAPSHOT_RETAIN_COUNT`），最多跟踪 64 个窗口（`TRACKED_WINDOWS_MAX_COUNT`，按最近采样淘汰）；只存几何、可见事实和逐候选的 `{region, grid}`，不存整幅图。`boot` 用 `token_hex(8)`；窗口原生 ID 在上一次列表里不存在、这次出现就算新实例（ID 复用也算新），消失的窗口连快照一起忘。
+   - 区域摘要（`screen_region_digest`）：灰度 → 按面积平均缩成 16×8 格 → 量化 16 级；sha 相等走快路径，否则“量化级相差 ≥2 的格子不超过 4 个”算没变。数字都是带单位后缀的模块常数，不做配置项。亮光标缩成格子后整列都会动，可能超过 4 格（已知风险）：片 C 的 Xvfb 集成加带闪动光标的输入框统计误判次数，现在不调容差。
+   - 遮挡：X11 用 `_NET_CLIENT_LIST_STACKING`（底→顶）里排在目标之后且可见的窗口，加根窗口下可见的 override-redirect 子窗口（菜单、tooltip），矩形带 `_NET_FRAME_EXTENTS` 边框；`frame.occluded` = 任一上层矩形与窗口相交，整个被盖住 → 错误码 `occluded`；点击点在动作时重新查叠放。跨桌面、未映射、`_NET_WM_STATE_HIDDEN` 一律 `not_viewable`。macOS 同口径留片 E。
+   - 已知限制：半透明窗口也算遮挡；异形窗口按外框算；两次采样之间 XID 先消失又复用的情况靠几何和像素复核兜底。
+   - 适配器接入：固定的 MCP SDK 1.13 里 FastMCP 和底层 Server 都不能把 `CallToolResult` 原样返回，而观察合同要求失败结果是 `isError` + `structuredContent.my_agent_observation_error`，所以适配器改成单一运行路径——底层 `Server` 收发 stdio，`tools/list` 与普通 `tools/call` 交给 FastMCP 的公开协程，只有 `observe_window` / `click_candidate` 由 `computer_use_observation_tools` 的接管层按名字处理（读 `_meta` 里的观察上下文、自己编码结果）；不碰 FastMCP 私有属性。两个工具只在宿主写了 `MY_AGENT_COMPUTER_USE_OBSERVATION=1`（主配置 `computer_use_observation_enabled` 为 true 且 Computer Use 已装配）时注册。
 
 ## 4. 宿主侧：观察三件套抽成通用的
 
@@ -233,7 +241,7 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 | --- | --- | --- |
 | A | 观察三件套抽成通用的 `ObservationBinding`；几何扩展校验；核实并补齐 MCP 工具的审批策略声明；插件回归不变 | 3–4 h |
 | B | Linux X11 后端 + `observe_window`、`click_candidate` + 适配器复核 + profile 声明 + `computer_use_observation_enabled` + 属主范围用例 | 6–8 h |
-| C | 车道镜像加 Xvfb、openbox、Tk 测试窗口；集成测试；变异 | 4–5 h |
+| C | 车道镜像加 Xvfb、openbox、Tk 测试窗口；集成测试；变异（片 B 已有一版派生镜像与冒烟用例 `test_computer_use_xvfb_lane.py`：Debian 包清单与 pymonctl 要 xrandr 的硬性要求见 computer-use.md 当前边界） | 4–5 h |
 | D | `action_candidate` 接粗位置；自动执行路径和能力开关；假 Jev 四档 | 5–6 h |
 | E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测 | 4–5 h |
 | F | 真实验收（M3 + Jev，Linux 车道）+ 文档、台账、TESTS | 3–4 h |

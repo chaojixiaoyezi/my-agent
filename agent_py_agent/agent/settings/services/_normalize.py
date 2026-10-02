@@ -441,6 +441,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
             "tool_default_deferral_enabled",
             "tool_vector_search_enabled",
             "computer_use_enabled",
+            "computer_use_observation_enabled",
         ),
     )
 

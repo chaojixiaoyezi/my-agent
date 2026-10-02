@@ -134,7 +134,7 @@ from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
 from .tooling.admin_controls_tool import AdminControlsTool
 from .tooling.audit_records_tool import AuditRecordsTool
-from .tooling.computer_use_profile import computer_use_mcp_servers
+from .tooling.computer_use_profile import computer_use_mcp_servers, with_computer_use_observation
 from .tooling.gateway_restart_tool import RestartGatewayTool
 from .tooling.gateway_status import GatewayStatusTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
@@ -984,11 +984,14 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
     effective_path_access_mode = (
         "full" if access_mode == "full-access" and not owner_scope_root else config.path_access_mode
     )
-    mcp_servers = computer_use_mcp_servers(
-        getattr(config, "mcp_servers", {}),
-        enabled=bool(getattr(config, "computer_use_enabled", False)),
-        is_local_admin=is_local_admin_owner(agent.home_paths),
-        access_mode=access_mode,
+    mcp_servers = with_computer_use_observation(
+        computer_use_mcp_servers(
+            getattr(config, "mcp_servers", {}),
+            enabled=bool(getattr(config, "computer_use_enabled", False)),
+            is_local_admin=is_local_admin_owner(agent.home_paths),
+            access_mode=access_mode,
+        ),
+        enabled=bool(getattr(config, "computer_use_observation_enabled", False)),
     )
     source_resolver = None
     source_ref_schema = None

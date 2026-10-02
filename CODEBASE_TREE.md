@@ -706,7 +706,12 @@ agent_py_agent/
 |   |   |-- plugin_registration.py    # 新运行中同步原插件连接，各权限视图分别投影已验工具
 |   |   |-- process_output_capture.py   # stdout/stderr 有界保留与持续排空，公开截断和完整性
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
-|   |   |-- computer_use_server.py    # 用公开 MCP 接口组合上游桌面工具、滚轮及文本输入
+|   |   |-- computer_use_server.py    # 用公开 MCP 接口组合上游桌面工具、滚轮及文本输入；底层 Server 单一运行路径，按环境标记装观察接管层
+|   |   |-- computer_use_observation_tools.py # J16 屏幕观察两个工具的接入胶水：tools/list 声明、底层 tools/call 接管、_meta 读取与 isError+structuredContent 编码
+|   |   |-- computer_use_x11.py       # Linux X11 真后端：叠放列窗、上层矩形（含 override-redirect 与边框）、mss 截图、RapidOCR 区域、点击
+|   |   |-- screen_observation.py     # 屏幕观察核心（来源无关）：选窗、采样、候选、快照、动作前五项复核、复核通过立刻点击
+|   |   |-- screen_observation_store.py # 窗口实例登记（boot + 实例号）与每窗最近 4 代快照环（只存几何、可见事实、候选 region/grid）
+|   |   |-- screen_region_digest.py   # 候选区域像素摘要口径：灰度 → 16×8 面积平均 → 16 级量化 → sha；容差判定
 |   |   |-- computer_text_input.py    # 按平台提交可靠文本，校验 Unicode 并保留后置验证边界
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
 |   |   |-- runtime_contracts.py      # 唯一 canonical ToolCall/ToolResult、ToolChoice、协议与 operation 合同
@@ -1013,6 +1018,8 @@ agent_py_agent/
 |   |-- test_runner_stop_relay.py       # 独立 Python 宿主心跳转交精确取消、共享隔离及旧配置投影
 |   |-- test_runtime_module_boundaries.py # 公共后端合同和纯策略不加载执行器/HTTP 的导入边界回归
 |   |-- test_computer_text_input.py     # 文本事件 UTF-16、显式替换与不支持字符零副作用回归
+|   |-- test_screen_observation_core.py # J16 片 B 核心：实例登记与快照环、摘要口径与容差、观察载荷过宿主校验、五项复核放行与各项 stale
+|   |-- test_computer_use_observation_tools.py # J16 片 B 接入：开关并入声明与环境标记、属主范围、工具调用三元组、底层处理器（假 mcp.types）、X11 后端假 Xlib
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
 |   |-- test_subagent_takeover_hint.py   # 执行器退出后给父级的结构化接替提示：合同形状、开关开关两种回执、各消费方投影、只属一份结果（C4）
 |   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入

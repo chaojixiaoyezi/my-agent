@@ -13,6 +13,8 @@ from typing import Any
 
 COMPUTER_USE_MCP_SERVER_NAME = "computer_use"
 COMPUTER_USE_PACKAGE = "computer-control-mcp==0.3.13"
+# 适配器子进程里打开屏幕观察工具的环境标记：宿主只在主配置开关为 true 时写入，适配器只认 "1"
+OBSERVATION_ENV_FLAG = "MY_AGENT_COMPUTER_USE_OBSERVATION"
 
 _GUI_SESSION_ENV_KEYS = (
     "DISPLAY",
@@ -33,6 +35,15 @@ _COMPUTER_USE_TOOL_DECLARATIONS: dict[str, dict[str, Any]] = {
     "move_mouse": {"effect": "mutating"},
     "activate_window": {"effect": "mutating"},
     "scroll_screen": {"effect": "mutating"},
+}
+
+
+# J16 屏幕观察工具的声明（和插件 manifest v5 同形，宿主写死、不接受适配器自报）：读屏涉及隐私，observe_window 只读但审批 always；
+# click_candidate 只接受候选 ID，dangerous。只在 computer_use_observation_enabled 为 true 时并入 Computer Use 服务声明。
+_COMPUTER_USE_OBSERVATION_DECLARATIONS: dict[str, dict[str, Any]] = {
+    "observe_window": {"effect": "read_only", "approval": "always",
+                       "observation": {"target_kind": "window", "max_candidates": 64}},
+    "click_candidate": {"effect": "dangerous", "observation_ref": {"target_kind": "window", "param": "candidate_id"}},
 }
 
 
@@ -98,8 +109,27 @@ def computer_use_mcp_servers(
     return servers
 
 
+# LLM: 复制写：只有 Computer Use 服务已装配（即总开关、local/main、Full Access 都成立）且 enabled 为 true 时才给该服务加
+#   观察环境标记并并入两个工具的声明；否则原样返回，目录字节不变。不新建第二个服务，也不绕过属主范围。
+# 函数用途: 按主配置 computer_use_observation_enabled 决定是否在 Computer Use 适配器里打开屏幕观察工具。
+def with_computer_use_observation(servers: Mapping[str, Any], *, enabled: bool) -> dict[str, Any]:
+    result = dict(servers)
+    profile = result.get(COMPUTER_USE_MCP_SERVER_NAME)
+    if not enabled or not isinstance(profile, dict):
+        return result
+    declarations = _declaration_maps(_COMPUTER_USE_OBSERVATION_DECLARATIONS)
+    result[COMPUTER_USE_MCP_SERVER_NAME] = {
+        **profile,
+        "env": {**dict(profile.get("env") or {}), OBSERVATION_ENV_FLAG: "1"},
+        **{key: {**dict(profile.get(key) or {}), **value} for key, value in declarations.items()},
+    }
+    return result
+
+
 __all__ = [
     "COMPUTER_USE_MCP_SERVER_NAME",
     "COMPUTER_USE_PACKAGE",
+    "OBSERVATION_ENV_FLAG",
     "computer_use_mcp_servers",
+    "with_computer_use_observation",
 ]
