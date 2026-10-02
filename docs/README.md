@@ -4,7 +4,7 @@
 
 ## 入口
 
-- [guides/MODEL_GUIDE.md](guides/MODEL_GUIDE.md)：给用户的《模型管理使用说明》，覆盖新增、切换、默认、`/effort`、删除、共享、派子代理选模与对话式管理。
+- [guides/MODEL_GUIDE.md](guides/MODEL_GUIDE.md)：给用户的《模型管理使用说明》，覆盖新增、切换、默认、`/effort`、删除、共享、派子代理选模、语义记忆的向量模型与对话式管理。
 - [guides/CAPABILITY_PACK_GUIDE.md](guides/CAPABILITY_PACK_GUIDE.md)：给用户的《能力包使用说明》，覆盖装/启用/停用/更新/回退/卸载、发现与使用、版本固定、派子代理授权、自制包与安全边界。
 - [modules/README.md](modules/README.md)：按功能模块组织的“四件套”规范和模块索引。
 - [design/README.md](design/README.md)：较长的模块设计文档索引，承接 `DESIGN_LEDGER.md` 里的长篇设计细节。

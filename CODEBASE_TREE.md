@@ -26,6 +26,8 @@
 |-- agent_py_agent/agent/capability/package_selection_runtime.py # 首个主业务请求前的一次领取和装配
 |-- agent_py_agent/tests/test_wire_contract.py # 出站协议合同：逐形状修整与校验、三个出口集成、修整被改坏时本地拦截、随机历史性质测试
 |-- agent_py_agent/tests/test_responses_cache_key.py # Responses 请求体会话级缓存键：绑定会话带 prompt_cache_key、未绑定不带、同线程稳定、跨线程不同、不含凭据
+|-- agent_py_agent/tests/test_embedding_selection.py # 向量模型选择：同主机直设、异主机不写、共享/普通 owner 拒绝、关闭还原、TUI/IM/Gateway 入口与工具回执
+|-- agent_py_agent/tests/test_semantic_memory_storage.py # 向量文件 600/目录 700（替换后仍是）、第一次召回复用 memory_vectors.json 不重嵌
 |-- agent_py_agent/tests/test_capability_selection_state.py # 原TaskLink严格标记、损坏隔离和CAS
 |-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
 |-- agent_py_agent/tests/test_capability_config_missing_defaults.py # 缺配置文件给默认实例且不缓存、坏文件仍 None、决策默认值读 capability 文件
@@ -645,6 +647,7 @@ agent_py_agent/
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
 |   |   |-- curator_profile.py          # 固定 Curator 档案整组解析（本 owner 解析不到时改用其默认模型并留原因）；留空时只读解析各会话的主代理模型（不可用带原因退回默认），失效诊断与设置型号展示
 |   |   |-- embedding_profile.py        # 嵌入档案引用解析（capability=embedding）、失效诊断、向量库身份（P13/P14）
+|   |   |-- embedding_selection.py      # 语义记忆“向量模型”唯一选择入口：TUI/IM 管理员菜单与 manage_models 自配（同主机直设、异主机请用户选）
 |   |   |-- decision_probe.py           # 显式原生连接测试，共用后端/worker/账本，不改开关或聊天选择
 |   |   |-- decision_settings.py        # 原 owner/thread 决策覆盖共用读取、字段修改、恢复继承与双版本 CAS
 |   |   |-- decision_settings_schema.py # 决策字段/范围校验及旧会话覆盖迁移，不持有默认值
@@ -1471,7 +1474,8 @@ docs/
 - `agent_py_agent/agent/capability/decision_skill_proposal_review.py`：自学习 S2 的唯一审核顺序点 `skill_proposal_review`（owner_background，默认 off）；只读 `SkillProposalService.list`，外发别名、来源计数与经 `external_data/default` 投影的草稿摘要，采用前重读待确认提案核对版本与草稿 hash，只重排 CLI 展示并附宿主标签；关闭、observe 或任何失败都返回 None 保持原输出，取消上抛。
 - `agent_py_agent/agent/capability/memory_search_tool.py`：`memory_search` 工具（J9，开关 `enable_memory_search_tool` 默认关）；主模型只读检索本人正式长期记忆，范围与自动召回共用 `memory_store/recall.runtime_long_term_scope`，只调 `JsonlMemory.search_scoped_candidates_report`（不写访问信号），返回有界摘录与检索方式（semantic/keyword）；自动召回被抑制的回合不可用。
 - `agent_py_agent/tests/test_memory_search_tool.py`：J9 守卫——开关关不注册、写参数执行前被拒、跨 owner 与跨范围查不到、条数与摘录上限、语义/关键词降级事实、不写访问信号、抑制回合不可用、模型不能自己打开开关。
-- `agent_py_agent/agent/capability/model_profile_tool.py`：`manage_models` 工具；把 TUI /model 的 list/add/save_provider/save_model/select/set_default/delete_model/delete_provider/probe/discover 暴露给主会话代理，唯一写入口仍是 `execute_model_profile_operation`；delete_provider 为 dangerous，子代理不可用，`select` 只读结构化 `conversation_thread_id`，回执只含 `has_key`，开关 `enable_model_profile_tool`。
+- `agent_py_agent/agent/settings/embedding_selection.py`：语义记忆“向量模型”唯一选择入口（用户 10-02 拍板）；`embedding_model_profile`/`memory_semantic_recall` 是全局配置，只给本机管理员；经 `user_settings_write_scope` 调参数中心写两项并记账，重启 Gateway 生效；manage_models 自配只在本人目录嵌入档案且与默认对话模型同端点主机时直写，主机不同回 `needs_user_choice`。
+- `agent_py_agent/agent/capability/model_profile_tool.py`：`manage_models` 工具；把 TUI /model 的 list/add/save_provider/save_model/select/set_default/delete_model/delete_provider/probe/discover（以及向量模型 set_embedding/disable_embedding）暴露给主会话代理，唯一写入口仍是 `execute_model_profile_operation`；delete_provider 为 dangerous，子代理不可用，`select` 只读结构化 `conversation_thread_id`，回执只含 `has_key`，开关 `enable_model_profile_tool`。
 - `agent_py_agent/tests/test_decision_skill_proposal_review.py`、`test_decision_skill_proposal_review_integration.py`：前者只替换决策服务边界，覆盖资格、隐私、逐题校验、并发变化与取消；后者经真实 CLI、设置、模型目录、决策服务与调用账，只替换 HTTP 发送，覆盖输出逐字节不变、observe 记账、错误/冷却/超时、中断、30 条窗口门、默认值与 TUI 菜单。
 - `agent_py_agent/agent/agent_core/tool_loop/segment_planning.py`：只接canonical调用、有效批上限、Compact及并发描述查询；审批、线程和provider顺序记账仍归原执行轮。
 - `agent_py_agent/agent/subagents/services/run_authority.py`：子代理创建时 runtime.db 权威运行链（Task/TaskRun/AgentRun/pending Attempt/Delegation）的唯一写入点与链身份回存；有 home 上下文时 fail-closed，由 `SubAgentBaseService.create_run` 调用。

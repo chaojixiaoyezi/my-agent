@@ -51,7 +51,7 @@
 | 顶层 | 下一层 | 说明 |
 | --- | --- | --- |
 | 新增模型 | 五类：OpenAI Chat、Anthropic、OpenAI Responses、登录账号、Jev 决策 | 见下 |
-| 选择模型 | 对话模型（本会话）/ 决策模型（开关与绑定） | 决策模型进原决策设置，不切换对话模型 |
+| 选择模型 | 对话模型（本会话）/ 决策模型（开关与绑定）/ 向量模型（语义记忆，全局，管理员） | 决策模型进原决策设置，不切换对话模型；向量模型见下方“向量模型（语义记忆）” |
 | 管理已有模型 | 选一个连接或登录账号 → 编辑/删除其下模型、从这个连接再勾选添加、改地址/密钥/请求头、删除；账号另有登录/退出 | 连接和账号在同一个列表 |
 | 连接测试 | 选模型 | 对话模型发短问候；决策模型转限时决策测试 |
 | 默认模型与共享 | 我的新会话默认、共享给其他用户（管理员）、其他用户的初始模型（管理员） | 初始模型见 [共享模型目录](SHARED_MODEL_CATALOG.md) |
@@ -97,6 +97,26 @@
   以 `MODEL_PROBE_FAILED`/`MODEL_DISCOVER_FAILED` 返回，不冒充配置错误。
 - 开关：主配置 `enable_model_profile_tool`（默认开启）；关闭后不注册该工具，仍可用 `/model` 手动维护。
   回归：`test_model_profile_tool.py`。
+
+## 向量模型（语义记忆，2026-10-02，已实现，待集成）
+
+- 唯一入口 `agent/settings/embedding_selection.py`。`embedding_model_profile` 与 `memory_semantic_recall` 是全局配置（owner 作用域
+  agent 只换 owner 三字段、其余原样继承 Gateway 配置），所以只有身份完整的本机管理员（local/main）能改，普通 owner 一律
+  `PARAMETER_BOUNDARY`、不写文件。
+- 入口：TUI「选择模型 → 向量模型」（本人目录里用途为 embedding 的档案 + 「关闭」，本地与 Gateway 同走 `embedding_list/select/off`）；
+  IM `/model vector`、`/model vector <编号|档案编号>`、`/model vector off|关闭`（TUI 键入同一命令时原样保留 vector 子命令）。
+- 写入：参数中心 `set_parameter`，包在 `user_settings_write_scope` 里（与管理员 `/settings` 同一边界授权，只写这两项），每项记一笔账。
+  选中先写档案再开召回；关闭先关召回再清档案（显式写 `""`/`false`），任一步失败都停在不外发记忆的一侧。保存后重启 Gateway 才生效
+  （嵌入客户端在组合根构建），列表同时给出保存值、运行值和 `restart_pending`。`tool_vector_search_enabled` 不跟着变。
+- my-agent 自配（`manage_models` 的 `set_embedding` / `disable_embedding`，用户 10-02 拍板）：本机管理员 + 目标在本人目录里（共享引用、
+  外部编号按 `TOOL_PERMISSION_DENIED`）+ 嵌入用途可用 + 端点主机（scheme+主机+端口，去掉账号口令、补齐默认端口）与默认对话模型相同
+  → 直接写；主机不同或默认对话模型解析不出 → 不写，回 `needs_user_choice` / `EMBEDDING_HOST_DIFFERS`（恢复动作 request_user_input），
+  请用户在菜单里自己选。参数中心写入失败按 `TOOL_EXECUTION_FAILED`、原码进 `reported_error_code`，副作用未知交给对账。
+- `list` 回执附带 `semantic_memory`（只给本机管理员，`embedding_selection.semantic_memory_view`）：运行值、保存值、`restart_pending`、
+  可选嵌入档案（编号+模型名）和按这些事实选出的下一步提示。工具说明写明“用户要求开/关语义记忆就是授权，直接调用”，只有回执
+  `needs_user_choice` 才请用户去菜单。由来：真实核对第 1 次（f95a38b40，变基后 214465417）模型只 list 不设，加视图后第 2 次（8eb9f8771，变基后 5236901ea）一次设好。
+- 后续项：普通用户各自开语义记忆（需要 owner 级配置与各自的嵌入档案），见 DESIGN_LEDGER 同名条目。
+- 回归：`test_embedding_selection.py`、`test_embedding_model_profile.py`、`test_semantic_memory_storage.py`。
 
 ## 子代理单独指定模型
 

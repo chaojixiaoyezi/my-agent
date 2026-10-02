@@ -62,6 +62,23 @@
   - TUI 随后换了一条命令成功；IM 没有再原样重试 Shell，收尾答复；沙箱本身没有放宽。
   - 另一次"统计 .md"的 TUI 任务里模型用了专用文件工具 `find_files`，不走 Shell，本条功能不触发（发现，不重发）。
 
+## 语义记忆整包 S1–S5（用户 10-02 拍板，2026-10-02，分支 `claude/38-semantic-memory`，基于 `3c7565bf2`）
+
+- 新增 `test_embedding_selection.py`（20 个测试函数，参数化展开 33 例）：
+  - 同主机直设，关闭还原（读回配置与账本顺序：选中先档案后召回、关闭先召回后档案，actor=model）；
+  - 主机规则：路径不同、显式默认端口和大小写算同主机；端口、scheme、子域、另一家算不同主机且不写文件；去掉账号口令、解析不出返回空；
+  - 默认对话模型是已选档案时按它比较；默认对话模型停用（解析不出）→ needs_user_choice、不写；
+  - 真实共享出去的嵌入档案（`shared:` 引用）、不在本人目录的编号、非 embedding 用途 → 拒绝且不写；普通 owner 在三个入口都 `PARAMETER_BOUNDARY`；
+  - 第二步写入失败时停在召回关的一侧；列表只含本人 embedding 档案、显示等待重启；
+  - manage_models：动作枚举、回执映射（EMBEDDING_HOST_DIFFERS / TOOL_PERMISSION_DENIED / TOOL_INVALID_ARGUMENTS，not_started；部分写入为 TOOL_EXECUTION_FAILED + reported_error_code、副作用未知）、`list` 的 `semantic_memory` 视图只给管理员；
+  - TUI：「选择模型」有第三项；向量菜单保存所选、选「关闭」走 off、「返回」不写；非管理员只提示；本地入口没有会话存储也能到同一入口；Gateway `/client/models` 分派到同一入口；
+  - IM：`/model vector [编号|off]` 解析与 TUI 键入重建；查看、按编号选用、off 关闭、无效编号；普通 owner 拒绝且只给“只能查看”。
+- 新增 `test_semantic_memory_storage.py`（S3）：umask 0 下写出即 600/700；把文件放宽到 644、目录 755 后再写一次仍收紧（钉住“替换后”）；第一次召回只嵌查询；换身份全部重嵌；文本对不上的那条单独重嵌。
+- `test_embedding_model_profile.py` 新增 2 例（S4）：语义设置对 owner 作用域 agent 是全局的；普通 owner 解析不到管理员档案时只走关键词、只读自己的目录、不建嵌入客户端。
+- 同步：`test_memory_vector_cache.py` 故障注入按私有写的临时文件名（前导点）匹配；`test_vector_snapshot_consistency.py` 改打补丁到新的私有写函数名。
+- 变异 19 个全部抓住（m01–m19）：主机规则关掉、端口丢失、菜单管理员检查关掉、本人目录守卫关掉、关闭/选中顺序对调、默认对话模型解析异常不再兜住、工具拒绝码映射关掉、IM `off` 词、TUI 重建丢 vector、本地分派关掉、列表不按 embedding 过滤、私有写抄回旧权限、目录不收紧、复用不比文本、复用不比身份、list 不附视图、视图给普通 owner、提示不看状态。
+- 真实核对两次（MiniMax M2.7 + embo-01，隔离 home、8441，各只发一次“帮我开语义记忆”）：第 1 次未通过（只 list）；修契约后第 2 次通过（list → set_embedding → restart_gateway，重启后 `/model vector` 显示运行中已开，新组合根真实召回为 semantic 且只嵌查询）。详情与证据路径见 DESIGN_LEDGER 同名条目。
+
 ## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）
 
 - `test_owner_wake_discovery_task_run_no_link.py` 新增 7 项：

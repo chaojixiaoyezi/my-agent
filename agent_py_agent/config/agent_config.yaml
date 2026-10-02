@@ -158,6 +158,8 @@ auto_save_memory: true
 # 记忆语义召回（检索拓宽 #1，默认 false=现状纯关键词）：开后记忆召回在关键词外加一路语义向量召回、
 # RRF 融合，治"换词就召不回"。向量只存各 owner 自己 home 本地文件（零依赖、不碰共享向量库、按用户隔离）。
 # 需配嵌入服务 embedding_model_profile（见“嵌入服务”一节，与工具语义检索共用）；没配自动只走关键词，不崩不退化。
+# 全局设置（所有用户共用），常用入口：/model → 选择模型 → 向量模型（IM：/model vector），选中会同时打开本项、关闭会同时清空档案；
+# 重启 Gateway 后生效。向量文件 memory_vectors.json / memory_text_vectors.json 在各 owner 的 memory/long_term 下，权限 600、目录 700。
 memory_semantic_recall: false
 
 # Memory 新架构安全配置（第一版骨架）：
@@ -800,7 +802,9 @@ model_structured_output: auto
 
 # /model 里 embedding 用途的模型档案编号（在 /model 列表查看）。留空就是不用语义检索：记忆和工具都只按关键词找，
 # 不发任何嵌入请求。指定时必须存在、启用且支持 embedding；档案失效明确失败、不回退到聊天模型，语义通道退回关键词。
-# 档案决定把记忆内容发给哪个服务商，属于安全边界：仅用户经 /settings 修改，模型不能改；重启 Gateway 后生效。
+# 档案决定把记忆内容发给哪个服务商，属于安全边界：只有本机管理员能改，入口是 /model → 选择模型 → 向量模型（IM：/model vector）
+# 或 /settings；my-agent 只能在“档案在管理员自己目录里、与默认对话模型同一服务商主机”时代为设置（用户 10-02 拍板），主机不同
+# 会请用户自己在 /model 里选。全局设置，所有用户共用；重启 Gateway 后生效。
 # 换成另一个档案后，已存下的记忆向量不会自动重算，语义召回会退回关键词；由本机管理员在终端运行 my-agent memory vectors rebuild --confirmed 重新嵌入。
 embedding_model_profile: ""
 
@@ -996,6 +1000,7 @@ tool_catalog_include_examples: false
 
 # 是否启用真实语义工具检索。向量来自“嵌入服务”一节的 embedding_model_profile 档案（与记忆语义召回共用）；没配档案时
 # 语义通道明确标为 unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。
+# 在 /model 里选了向量模型后，工具检索也会用它发嵌入请求；选向量模型的入口不会改本开关。
 tool_vector_search_enabled: true
 
 # MCP 客户端（短板6）：连接外部 MCP server（Model Context Protocol，JSON-RPC over stdio），

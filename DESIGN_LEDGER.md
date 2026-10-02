@@ -42,6 +42,40 @@
 - **下一步怎么走**：主代理直接告诉用户需要什么访问权限（用户可经 `/permissions` 等宿主入口决定）；子代理用已有的 `capability_request` 申请；或把范围缩到允许目录。安全边界不变。
 - **验证**：见 TESTS.md 同名节。真实 MiniMax-M2.7 验收（TUI 本机管理员 + 假飞书私聊普通用户经真实 Gateway，证据 `~/.my-agent/decision-evidence/sandbox-boundary-facts-bbd6bef1e/`）：两边越界的 `du` 都在沙箱里非零退出，模型看到的工具结果带着边界事实；TUI 随后换了一条命令成功，IM 没有再原样重试 Shell 而是收尾答复。另记一条发现："统计 .md 文件"这类需求模型优先用专用文件工具（由文件工具自己的 owner 墙管），不走 Shell，本条功能不触发。
 
+## 语义记忆整包：/model 向量模型入口、my-agent 同主机自配、向量文件私有写、第一次召回不重嵌（S1–S5，用户 10-02 拍板，2026-10-02，分支 `claude/38-semantic-memory`，基于 `claude/3a-step17d` `3c7565bf2`，已实现，待集成）
+
+- **背景**：用户拍板生产要开语义召回（MiniMax embo-01；真正打开是 S6，由 3a 发版时做）。原来只有管理员在 `/settings` 里填档案编号，模型改不了；向量文件按 644 写；第一次召回会把已存的记忆全部重嵌一遍。
+- **查清的事实（S4）**：`embedding_model_profile` 和 `memory_semantic_recall` 是**全局配置**。owner 池建作用域 agent 时只换 owner 三字段（`owner_scoped_pool._config_with_owner`），其余原样继承 Gateway 配置。
+  - 全局档案编号指向管理员目录里的档案，普通 owner 的目录里没有它 → 语义通道关闭、只走关键词，诊断 `MEMORY_EMBEDDING_PROFILE_UNAVAILABLE` / `profile_not_found`；
+  - 全程只读普通 owner 自己的目录、不建嵌入客户端，绝不会拿管理员的密钥去嵌普通用户的记忆（已钉用例）。
+- **入口（S1）**：唯一入口 `settings/embedding_selection.py`。
+  - TUI：`/model` →「选择模型」→「向量模型」（本人目录里用途为 embedding 的档案 +「关闭」），本地与 Gateway 同走 `embedding_list/select/off`；
+  - IM：`/model vector` 查看、`/model vector <编号|档案编号>` 选用、`/model vector off|关闭` 关闭；TUI 键入同一命令时原样保留 vector 子命令；
+  - 写入走参数中心 `set_parameter`，包在 `user_settings_write_scope` 里（与管理员 `/settings` 同一边界授权，只写这两项），每项各记一笔账；
+  - 选中先写档案再开召回；关闭先关召回再清档案（显式写 `""`/`false`），任一步失败都停在“不会把记忆发出去”的一侧；
+  - 保存后重启 Gateway 才生效（嵌入客户端在组合根构建），菜单、回执和列表都写明，列表同时给出保存值、运行值和 `restart_pending`；
+  - 只给身份完整的本机管理员（local/main），普通 owner 一律 `PARAMETER_BOUNDARY`、不写文件；`tool_vector_search_enabled` 不跟着变；仓库默认不变（召回关、档案空）。
+- **my-agent 自配规则（S2，用户 10-02 拍板，3a 同意最小做法）**：`manage_models` 加 `set_embedding` / `disable_embedding`。
+  - 只给本机管理员；目标必须是**本人目录里**用途为 embedding 的档案（`shared:` 引用、不在本人目录的编号按 `TOOL_PERMISSION_DENIED`）；
+  - 端点主机（scheme + 主机 + 端口，去掉账号口令、补齐默认端口，不看路径）与本 owner 默认对话模型相同 → 直接写；
+  - 主机不同，或默认对话模型本身解析不出来 → 不写，回 `needs_user_choice` + `EMBEDDING_HOST_DIFFERS`（新登记，恢复动作 request_user_input），请用户自己在 `/model` →「选择模型」→「向量模型」里选；
+  - 其余情况照旧 `PARAMETER_BOUNDARY`；参数中心写入失败按 `TOOL_EXECUTION_FAILED`、原码进 `reported_error_code`，副作用未知交给对账；
+  - `BOUNDARY_KEYS` 里 `embedding_model_profile` 的说明和 `user_settings_write_scope` 的注释同步写明这条唯一例外；
+  - `list` 回执附带 `semantic_memory` 视图（只给本机管理员）：运行值、保存值、是否等待重启、可选嵌入档案和下一步提示；工具说明写明“用户要求开/关语义记忆就是授权，直接调用”。由来见下方真实核对。
+- **向量文件（S3）**：
+  - 记忆本体、`memory_vectors.json`、`memory_text_vectors.json` 都按私有原子写：临时文件一建出来就是 0600，替换时不抄回旧文件的 0644；`long_term` 目录收紧到 0700（尽力而为）；
+  - 第一次召回先复用 `memory_vectors.json` 里**身份一致、文本完全一致**的向量（写入与重建都按 `index_text` 存同一段文本），剩下的才查正文哈希缓存，再不行才嵌。
+- **真实核对**（隔离 home、127.0.0.1:8441、env -i 假 HOME；模型目录副本只含 MiniMax 官网服务商并选 M2.7，经产品“新增模型”入口加 embo-01，0600，用完连同 home 删除；决策模型关、审批 auto；每次只发一次“帮我开语义记忆”）：
+  - 提交号说明：核对时分支基于 `e7e6c4563`，之后变基到集成头 `3c7565bf2`（只多两个无关测试文件的末尾空行修正），代码不变；`f95a38b40` → `214465417`，`8eb9f8771` → `5236901ea`。
+  - 第 1 次（`f95a38b40`）**未通过**：模型调 `list` 后直接回答，没调 `set_embedding`，配置没变（58,938 tokens）。契约缺口：`list` 看不到语义记忆现状和下一步，说明里“请用户去 /model 选”太显眼。修法即上面的 `semantic_memory` 视图与说明（`8eb9f8771`，变基后 `5236901ea`）。
+  - 第 2 次（`8eb9f8771`）**通过**：模型 `list` → `set_embedding`（embo-01，ok）→ 自己调 `restart_gateway` 安排了安全重启（120,244 tokens）。配置读回：档案 = embo-01、召回开、`tool_vector_search_enabled` 未动；账本 2 笔 actor=model。重启后 TUI `/model vector` 显示“当前运行：档案…，语义记忆开”；新组合根探针真实调用 embo-01：写 1 条嵌 1 次，第一次召回检索方式 semantic、只嵌查询 1 条，`memory.jsonl` / `memory_vectors.json` 0600、目录 0700。
+  - 证据：`~/.my-agent/decision-evidence/semantic-memory-20261002/`（run1、run2 各有 SUMMARY.md 和结构化 JSON，不含正文和密钥）。
+- **观察（不在本分支改）**：`enable_gateway_restart_tool` 的配置注释写“其它模式按危险动作审批”，实际 auto 模式下非 always 的危险动作不逐次询问（`action_policy._approval_decision`），第 2 次核对里重启没弹确认。注释要不要改，留给 3a 定。
+- **后续项（未做）**：
+  - 普通用户各自开语义记忆：要有 owner 级配置、各自的嵌入档案和费用归属；现在普通用户只按关键词召回。
+  - `tool_vector_search_enabled` 默认开：选了向量模型后工具检索也会用同一档案发嵌入请求。要不要和语义记忆一起管，待定。
+- **验证**：见 TESTS.md 同名节。
+
 ## 记忆整理：同一条消息里同主题、不同内容各存一条（用户拍板第 6 条，2026-10-02，分支 `claude/be-curator-content-identity`，基于 `claude/3a-step16z` `5e972003e`，已实现，待集成）
 
 - **问题**（J13 复测登记，见下方 J13 条目里的“待定”）：用户说“我对花生过敏，也对芒果过敏。”，模型给出两条候选，主题键都是 `health.allergy`。宿主的观察身份不含内容，两条算出同一个观察键；芒果那条在候选库合并时按观察键找到花生那条，被当成同一次观察的改写并进去，候选库只剩“花生”。
