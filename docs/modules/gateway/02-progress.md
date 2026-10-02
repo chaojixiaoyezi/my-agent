@@ -1017,3 +1017,7 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 ## /status 的子代理异常按界面标签细分（2026-10-02，分支 `claude/9b-shutdown-label`）
 
 - `control_service._subagent_status` 返回 `_SubagentStatusCounts`（前四项位置不变，多 `other_labels`），异常一类按 `agent_activity.subagent_display_label` 细分；`ConversationTaskStatus.subagent_other_labels` 让 IM 与 TUI 的 `/status` 显示“异常 3：宿主停机中断 2，失败 1”，没有异常时原文不变。
+
+## schedule 工具声明默认收起（工具瘦身 T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `c6f28b150`）
+
+- `scheduler/tool.py` 的 `schedule` 在 ToolModelHints 里声明 `default_deferred` 和用途句“创建、查看、暂停或删除定时任务与提醒”。开关 `tool_default_deferral_enabled` 打开时前台回合不再每轮发它的 Schema，目录索引列出它，模型说“提醒我…”时 tool_search 一步加载。工具行为不变。设计见台账同名节，测试见 TESTS.md 同名节。

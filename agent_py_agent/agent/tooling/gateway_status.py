@@ -77,6 +77,8 @@ class GatewayStatusTool(BaseTool):
                 '{"tool":"gateway_status"}',
                 '{"tool":"gateway_status","include_log_diagnostics":false}',
             ),
+            default_deferred=True,
+            deferred_summary="查看 Gateway 运行状态、监听端口、当前模型和配置来源（不要用 ps/ss 猜）",
         ),
     )
     runtime_policy = ToolRuntimePolicy(

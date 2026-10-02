@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -126,10 +127,10 @@ def _remember_scope_schema() -> dict[str, object]:
 
 
 # LLM: Batch items use the same domain fields as a single mutation and cannot nest batch/list
-# control operations.
+# control operations. 批量项的 scope 与顶层同结构同义，只留“同顶层 scope。”，不在每轮请求里重复整段范围说明。
 # 函数用途: 构造 remember batch 单项 Schema。
 def _remember_operation_schema(scope_schema: dict[str, object]) -> dict[str, object]:
-    properties = _remember_business_fields(scope_schema)
+    properties = _remember_business_fields(_remember_batch_scope_schema(scope_schema))
     properties["action"] = {
         "type": "string",
         "enum": ["add", "replace", "remove"],
@@ -140,6 +141,17 @@ def _remember_operation_schema(scope_schema: dict[str, object]) -> dict[str, obj
         "required": ["action", "origin"],
         "additionalProperties": False,
     }
+
+
+# LLM: 只改说明文字：字段、类型、枚举、必填与 additionalProperties 原样复制，顶层 scope 的权威说明不动。
+# 函数用途: 生成批量项用的 scope Schema 副本，去掉与顶层重复的说明文字。
+def _remember_batch_scope_schema(scope_schema: dict[str, object]) -> dict[str, object]:
+    batch = deepcopy(scope_schema)
+    for shape in (batch.get("properties") or {}).values():
+        if isinstance(shape, dict):
+            shape.pop("description", None)
+    batch["description"] = "同顶层 scope。"
+    return batch
 
 
 # LLM: Field construction is shared by top-level and batch schemas, preventing drift in origin,

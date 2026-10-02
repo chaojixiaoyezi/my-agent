@@ -82,7 +82,8 @@ class AdminControlsTool(BaseTool):
             "管理员要求关闭或开启某个用户的 Jev 决策模型",
             "管理员要求关闭或开启某个用户的审计工具",
             "管理员明确允许或收回 my-agent 跨用户审计",
-        ), avoid_when=("普通用户问自己的设置时（用 user_config 或 audit_records）",)),
+        ), avoid_when=("普通用户问自己的设置时（用 user_config 或 audit_records）",),
+            default_deferred=True, deferred_summary="管理员专用：开关各用户的决策模型、审计权限和跨用户审计"),
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", (("list", "read_only"),)),)),

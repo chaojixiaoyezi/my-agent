@@ -171,6 +171,8 @@ def build_update_persona_model_spec() -> ToolModelSpec:
             avoid_when=_PERSONA_AVOID_WHEN,
             keywords=_PERSONA_KEYWORDS,
             examples=_PERSONA_EXAMPLES,
+            default_deferred=True,
+            deferred_summary="改写每轮都生效的长期设定：用户称呼/画像/偏好、工作约定、你的性格语气",
         ),
     )
 

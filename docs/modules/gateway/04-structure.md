@@ -2437,3 +2437,7 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 
 - `_SubagentStatusCounts(total, running, done, other, other_labels)`：前四项与旧四元组同位同义（`_control_record_is_executing` 按下标读），`other_labels` 是异常子代理按界面标签的计数，按数量降序。
 - 标签只经 `conversation.agent_activity.subagent_display_label` 取得（转调 `runner_display_projection`），网关层不直接导入 subagents（import 边界）。渲染在 `conversation/control_commands._subagent_label_breakdown`，TUI 走 Gateway 时由 `control_runtime._label_counts` 有界解析。
+
+## 工具默认收起声明（2026-10-02）
+
+- 持久提醒工具 `schedule`（`agent/scheduler/tool.py`）带 `default_deferred=True` 与 `deferred_summary`；是否真的收起由 ToolRegistry 按 `tool_default_deferral_enabled` 统一决定（`tooling/registry._declared_deferred_names`），调度器本身不感知。

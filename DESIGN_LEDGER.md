@@ -1,5 +1,18 @@
 # 设计台账
 
+## 工具瘦身第一阶段：工具自己声明“默认收起” + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `claude/3a-step17e` `60f909b12`（原基于 `c6f28b150`），已实现，待集成；开关默认关，真实验收后由 3a 在生产打开）
+
+- **问题**：生产前台回合每轮把全部基础工具的原生 Schema 发给模型。实际发出的工具是 `model_visible_specs` 那一份（类别收起已生效，web 类的 watch_stream/web_fetch/web_search 本来就不发）；其中约 40 个工具占首轮约 3.65 万 token 的八成。一批又大又少用的工具每轮都在交钱。
+- **做法**（不改名、不合并、不改任何工具行为）：
+  - `ToolModelHints` 加两个软字段：`default_deferred`（工具自己声明默认收起）和 `deferred_summary`（收起后目录里的一句用途，声明收起时必填）。它们不进 snapshot_hash、tool_manifest 或授权。
+  - 新开关 `tool_default_deferral_enabled`（`agent_config.yaml` + `AgentConfig`，默认 false）。打开后，ToolRegistry 把声明收起的工具并进“结构性收起”，与 `tool_catalog_deferred_categories`、决策点展示投影 `presentation_deferred_names` 取并集：可见 Schema、收起搜索范围、目录三处共用 `_extra_deferred_names`。
+  - 保护：显式 `allowed_tools` 的回合不收起（与类别收起同口径）；本快照里 tool_search 不可用、模型不可见或被类别收起时不收起（宁可多发也不能藏到找不回）；发现入口 tool_search/list_tools/skill_search 永不收起。
+  - 模型要知道它们存在：目录末尾的折叠提示里，声明收起的工具单列成“默认收起的工具：名字：一句用途”的索引，不受决策点短名单裁剪；用途句也并进关键词检索和语义检索文档（只对有用途句的工具，其他工具检索文本逐字不变）。开关关闭时提示词逐字不变。
+  - 与能力精选（skill_tool 决策点）的合并：决策点默认候选只有 plugins 类和 Skill，和本批内置工具不重叠；并集不会打架。若管理员把某个声明收起工具的类别加进 optional_categories 且决策选中它，本轮它仍收起、需要一次 tool_search（已知取舍）。
+- **收起名单**（按生产 local/main 近 30 天工具调用账，1205 个 run，只读工具名字段；括号里是调用次数/涉及 run 数和估算 token）：user_config（47/10，约 3.8k）、manage_models（65/2，约 1.9k）、audit_records（24/4，约 1.1k）、update_persona（16/9，约 0.85k）、schedule（80/3，约 0.73k）、admin_controls（0，约 0.46k）、restart_gateway（1/1，约 0.29k）、gateway_status（32/7，约 0.28k）、watch_stream（1/1，本来按 web 类别收起，声明后不再依赖类别配置，并在索引里露出用途）。常用的读写文件、命令、派子代理（create_subagents 218/43）、进度（task_progress 854/204）、记忆（remember）、目标不收起。
+- **精简说明**（只删逐字重复，字段、类型、枚举、必填不变）：create_subagents 的 items[] 字段与顶层同义的改写成“同顶层 X。”（goal/description/role 本项专属说明，以及 covers 与第 14 条的 input_media_refs 完整说明保留，原文比引用还短的也保留；input_media_refs 只在 subagent_input_media_enabled 打开时出现，关闭时说明里没有它）；remember 批量项的 scope 改成“同顶层 scope。”；user_config 的各接入点 `points.*.profile_id` 改成“同 profile_id”，并删掉工具说明里与参数说明逐字重复的 reason/fields/probe 子句；task_progress 的 items 删掉与工具说明重复的返工句。
+- **F1（第 9 条）上界**：skill_tool 候选是 52 个 Skill（内置 27 + owner 25）+ 1 个插件组 = 53 题；内置工具不在候选里，所以本阶段瘦身不改变 Jev 请求。按 `jev_wire_bytes.v1`（C = ceil(B/2) + 256Q + 1024，上限 57,600）和标定数据（27 题约 65KB，每题约 2.4KB）估算：53 题约 7.8 万 token，仍超上限；按现有每题体积最多约 38 题，或每题文字压到约 1.6KB（约减三分之一）才进标定范围。要回到范围内需缩小参与实验的候选或精简 Skill 说明，属新设计项，交 3a/用户定。
+
 ## 宿主死在“已预留、未激活”窗口里的子代理，重启后永久卡住（根修，I5 前提探针发现，2026-10-02，分支 `claude/9b-runner-admission`，基于 `claude/3a-step17e` `20125c9d2`，已实现，待集成）
 
 - **现象**（9b 探针，证据 `~/.my-agent/decision-evidence/i5-restart-pickup-probe-20261002/`）：派工已经预留执行轮、写下后台启动记录，进程在派工线程收尾前就没了（kill -9、停机时正落在这个窗口；进程内线程没有 pid，或 local/main 派工子进程的 pid 已死），启动记录冻在 launching/running。重启后：

@@ -987,6 +987,14 @@ tool_catalog_categories: []
 # 设为 [] 即恢复全部工具直出。
 tool_catalog_deferred_categories: ["collaboration", "web", "vision", "meta", "mcp"]
 
+# 按工具声明默认收起：有些工具又大又少用（如改配置、换模型、查审计、定时任务、Gateway 管理），它们在自己的规格里
+# 声明了“默认收起”和一句用途。打开后，前台回合不再每轮把这些工具的完整说明发给模型，只在工具目录末尾留
+# “名字：一句用途”的索引；模型用到时先用 tool_search 搜索，一步加载后即可调用。权限和可调用范围不变。
+# - 省下的是每轮请求的 token；用到这些工具的那一轮会多一次 tool_search。
+# - 显式 allowed_tools 的后台/子代理回合本来就全量直出，不受影响；tool_search 本身不可用时自动不收起。
+# 默认 false（不收起，行为和以前完全一样）；修改后重启 Gateway 生效。
+tool_default_deferral_enabled: false
+
 # 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 list_tools/tool_search 读取。
 tool_catalog_include_examples: false
 

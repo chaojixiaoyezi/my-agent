@@ -109,6 +109,9 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 '{"tool":"schedule","action":"list"}',
                 '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
             ),
+            # 又大又少用：开关 tool_default_deferral_enabled 打开时前台回合不发 Schema，目录索引留下面这句用途，用到时 tool_search 加载。
+            default_deferred=True,
+            deferred_summary="创建、查看、暂停或删除定时任务与提醒（稍后、每天、每周、cron）",
         ),
     )
 

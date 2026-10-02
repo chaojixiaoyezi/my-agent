@@ -903,6 +903,9 @@ agent_py_agent/
 |   |-- test_decision_capability_http.py # 能力消费者经本地原生HTTP的成功/期限/在途设置变化
 |   |-- test_decision_skill_projection.py # Skill名卡动态投影、原搜索可达及None旧字节等价
 |   |-- test_tool_presentation_projection.py # 工具schema收起、原搜索恢复及真实插件撤销
+|   |-- test_tool_default_deferral.py # 工具自己声明的默认收起：开关、索引、搜索找回、保护条件与决策投影并集
+|   |-- test_tool_default_deferral_chain.py # 默认收起的真实链路：tool_search 后下一次请求带上并执行（本机与飞书 owner）
+|   |-- test_tool_description_trim.py # 工具说明只删重复：create_subagents/remember/user_config 结构不变
 |   |-- test_tool_request_projection.py # 完整冻结请求与实际原生出站等价、未知输入及无副作用
 |   |-- test_gateway_capability_compact.py # 同片能力展示沿 Gateway/子代理 Compact 和续跑保留
 |   |-- test_subagent_capability_compact.py # child 同轮展示沿真实 Compact 重试保留、失效清除与新轮重置

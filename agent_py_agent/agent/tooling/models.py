@@ -66,6 +66,10 @@ class TrustedParameterBinding:
         object.__setattr__(self, "authority", authority)
 
 
+# LLM: 只影响目录展示与检索，不参与权限、snapshot_hash 或 tool_manifest（那里逐字段列出，不含新增的收起字段）。
+#   default_deferred 是工具自己声明的“默认收起”：开关 tool_default_deferral_enabled 打开时由 ToolRegistry 并入结构性收起，
+#   deferred_summary 是收起后留在目录索引里的一句用途，声明收起时必填。改字段要同步 registry 的收起计算与 test_tool_default_deferral。
+# 类用途: 给每个工具附带目录分类、检索关键词、用法提示，以及“默认收起时目录里显示哪一句用途”。
 @dataclass(frozen=True)
 class ToolModelHints:
     """Soft catalog and retrieval hints; never an authorization input."""
@@ -77,6 +81,18 @@ class ToolModelHints:
     examples: tuple[str, ...] = ()
     # 结构化归属：插件代理工具为 "plugin:<插件ID>"，其余为空；供能力推荐按插件分组，不是授权依据
     provider_id: str = ""
+    default_deferred: bool = False
+    deferred_summary: str = ""
+
+    # LLM: 声明默认收起却没有用途句时拒绝构造，避免模型在目录里只看到一个名字、不知道何时该加载；只做本对象校验，无副作用。
+    # 函数用途: 规范用途句的首尾空白，并检查“默认收起”声明是否带了用途句。
+    def __post_init__(self) -> None:
+        summary = str(self.deferred_summary or "").strip()
+        if type(self.default_deferred) is not bool:
+            raise ValueError("tool hint default_deferred must be a bool")
+        if self.default_deferred and not summary:
+            raise ValueError("default_deferred tool hint requires deferred_summary")
+        object.__setattr__(self, "deferred_summary", summary)
 
 
 @dataclass(frozen=True)
@@ -1524,27 +1540,33 @@ def _append_unique_reasons(target: list[str], reasons: list[str]) -> None:
     del target[4:]
 
 
+# LLM: 默认收起工具在目录索引里只露出 deferred_summary，模型会照着它搜，所以它并进用途场景一起计分；没有用途句的工具
+#   检索文本逐字不变。只读，不改排序规则；改字段要同步 test_tool_default_deferral 的检索用例。
+# 函数用途: 把一个工具可被关键词检索命中的各段文字整理成小写文本。
 def _keyword_haystacks(spec: ToolModelSpec) -> dict[str, str]:
+    use_cases = (*spec.use_cases, spec.hints.deferred_summary) if spec.hints.deferred_summary else spec.use_cases
     return {
         "name": spec.name.lower(),
         "description": spec.description.lower(),
         "category": spec.category.lower(),
         "keywords": " ".join(spec.keywords).lower(),
-        "use_cases": " ".join(spec.use_cases).lower(),
+        "use_cases": " ".join(use_cases).lower(),
     }
 
 
+# LLM: 语义检索文档只在工具声明了收起用途句时多一行 summary，其它工具的文档逐字不变，向量缓存不会因此整体失效。只读。
+# 函数用途: 把一个工具的名字、说明、用途和关键词拼成语义检索要嵌入的文档。
 def _tool_semantic_document(spec: ToolModelSpec) -> str:
-    return "\n".join(
-        (
-            f"name: {spec.name}",
-            f"category: {spec.category}",
-            f"description: {spec.description}",
-            "use cases: " + " | ".join(spec.use_cases),
-            "avoid when: " + " | ".join(spec.avoid_when),
-            "keywords: " + " | ".join(spec.keywords),
-        )
+    lines = (
+        f"name: {spec.name}",
+        f"category: {spec.category}",
+        f"description: {spec.description}",
+        "use cases: " + " | ".join(spec.use_cases),
+        "avoid when: " + " | ".join(spec.avoid_when),
+        "keywords: " + " | ".join(spec.keywords),
     )
+    summary = spec.hints.deferred_summary
+    return "\n".join((*lines, f"summary: {summary}") if summary else lines)
 
 
 def _semantic_tool_hits(

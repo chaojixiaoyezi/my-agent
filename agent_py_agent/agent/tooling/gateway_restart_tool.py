@@ -68,6 +68,8 @@ class RestartGatewayTool(BaseTool):
             ),
             keywords=("restart gateway", "gateway restart", "重启 gateway", "重启网关", "安全重启"),
             examples=('{"tool":"restart_gateway","reason":"用户要求重启以加载新的通道配置"}',),
+            default_deferred=True,
+            deferred_summary="安排 Gateway 安全重启（不要用 shell 重启或 kill 进程）",
         ),
     )
     runtime_policy = ToolRuntimePolicy(

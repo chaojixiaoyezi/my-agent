@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## 工具瘦身第一阶段：默认收起 + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `60f909b12`）
+
+- `test_tool_default_deferral.py`（24 项）：开关默认关且提示词与可见工具逐字不变；打开后 9 个声明工具离开原生 Schema、目录给出“名字：用途”索引且不重复进名字串；名单钉死、用途句不超过 60 字；tool_search 一步加载并在下一次调用可见；9 条自然说法（如“看一下这个直播流”“帮我换个模型”“改一下配置项”“查审计记录”）都能搜到对应工具；显式 allowed_tools 全量可见且目录无索引；tool_search 不可用/不可见/被类别收起时不收起；发现入口即使声明也不收起；与决策点投影取并集且短名单不裁索引；只有声明收起的工具时名字串不留空冒号；语义文档只对有用途句的工具变化；YAML 字符串开关归一化；hint 声明收起必须带用途句。
+- `test_tool_default_deferral_chain.py`（3 项，真实链路 + 脚本化供应商）：本机管理员和飞书普通用户两种 owner 走真实 Gateway 前台 ask：首个请求不带 schedule、带 tool_search；tool_search 之后那次请求带上 schedule 并真正执行（`handler_executed=true`）；开关关闭时首个请求照旧直接带 schedule。
+- `test_tool_description_trim.py`（4 项）：create_subagents 的 items[] 只把长重复说明换成“同顶层 X。”且结构与顶层逐项相同、covers 和 input_media_refs 保留完整说明，子代理带图开关关闭时说明里不出现 input_media_refs；remember 批量 scope 结构与顶层一致、说明不重复；user_config 各接入点 profile_id 指回共享字段。
+- 变异 29 个全部被抓住（收起判定的 allowed/可用/可见/类别/发现入口五个条件、并集、索引追加与短名单、名字串去重、空冒号、开关接线三处、hint 校验两处、检索文本两处、搜索范围、目录配置，以及精简的 7 处）。
+- 门禁：相关测试 162 个文件（含 guards9 与 test_packaging）全过；ruff、import boundaries 0、doc sync、code-size 告警身份与基线比对新增 0、`git diff --check`、常数目录 `--check`、前端参数目录 `--check`（新增 1 个字段，其余只是序号顺延）。
+- 真实模型验收与首轮 token 对比：待补（MiniMax M2.7，隔离 home、私有端口；TUI 与飞书 IM 请求路径）。
+
 ## 已预留未启动的子代理：停机不启动、重启照样拉起（I5 + 冻住启动记录的根修，2026-10-02，分支 `claude/9b-runner-admission`，基于 `20125c9d2`）
 
 - 新增 `test_subagent_reserved_start_restart_pickup.py`（真实 SubAgentManager，受管 = 带 owner runtime.db、文件 = 显式无库；只截获最终的 dispatch_subagents，在截获处按 worker 的顺序激活）：
@@ -12,7 +21,7 @@
 - 变异 11/11 被杀（草稿副本上逐个精确替换、按字节恢复）：过期记录仍被复用、过期记录不收掉、受管也按文件撤销、复用算成复活、合并丢掉复用计数、检查点不在公共入口、关门时写 FAILED、候选不用权威判定、过期判定不看死 pid、重启后父级不释放、预览也被拦。
 - 探针证据：`~/.my-agent/decision-evidence/i5-restart-pickup-probe-20261002/`。
 
-## 子代理被宿主停机打断时界面显示“宿主停机中断”（2026-10-02，分支 `claude/9b-shutdown-label`，基于 `2e5a36af0`）
+## 子代理被宿主停机打断时界面显示“宿主停机中断”（2026-10-02，分支 `claude/9b-shutdown-label`，基于 `60f909b12`）
 
 - 新增 `test_tui_shutdown_failure_label.py`（14 项，真实 SubAgentManager、Gateway 名册行、TUI runtime/导航/渲染）：
   - 权威：两种停机失败类型都是"宿主停机中断"；额度不足是"额度不足"；其它失败的专属标签为空、整体标签仍是"失败"；RUNNING 为空。

@@ -64,9 +64,15 @@ def _hints(
     )
 
 
-# LLM: 嵌套参数保留本项 goal/职责说明；role 引用同工具顶层索引，不重复整份角色目录。字段和验证规则不变；
-#   input_media 为真时顶层与 items[] 各多一个 input_media_refs（说明与形状同源），为假时与原 schema 逐字节一致。
-# 函数用途: 为 create_subagents 的每个 items[] 字段补齐必要说明，批量项也能选择相同工具、模型和角色。
+# covers 绑定 Todo 的 exact id 主要在每个 item 里填（2d3bfa5cb 委派进度对齐）；input_media_refs 也是按 item 交给各自子代理的
+#   媒体（第 14 条）。这两个字段 item 级保留顶层完整说明。
+_ITEM_FIELDS_KEEPING_FULL_TEXT = frozenset({"covers", "input_media_refs"})
+
+
+# LLM: 嵌套参数保留本项专属说明（goal/description/role，见 _CREATE_ITEM_PARAMETER_DETAILS）以及 covers、input_media_refs 的完整
+#   说明；其余字段与顶层同名同义，只写“同顶层 X。”指回顶层完整说明，不在每轮请求里重复同一段文字。字段、类型、枚举和验证规则不变；
+#   input_media 为真时顶层与 items[] 各多一个 input_media_refs（说明与形状同源），为假时不出现这个字段。
+# 函数用途: 为 create_subagents 的每个 items[] 字段补齐说明，批量项也能选择相同工具、模型和角色。
 def _create_subagents_input_schema(*, input_media: bool = False) -> dict[str, object]:
     parameters = {**_CREATE_PARAMETERS, **(_CREATE_INPUT_MEDIA_PARAMETERS if input_media else {})}
     details = _with_role_template_index(
@@ -82,16 +88,23 @@ def _create_subagents_input_schema(*, input_media: bool = False) -> dict[str, ob
     items_shape = properties.get("items") if isinstance(properties, dict) else None
     item_shape = items_shape.get("items") if isinstance(items_shape, dict) else None
     item_properties = item_shape.get("properties") if isinstance(item_shape, dict) else None
-    descriptions = {
-        **parameters,
-        **details,
-        **_CREATE_ITEM_PARAMETER_DETAILS,
-    }
     if isinstance(item_properties, dict):
+        descriptions = {**parameters, **details}
         for name, shape in item_properties.items():
-            if isinstance(shape, dict) and name in descriptions:
-                shape["description"] = descriptions[name]
+            if isinstance(shape, dict):
+                shape["description"] = _item_field_description(name, descriptions)
     return schema
+
+
+# LLM: 只决定 items[] 字段的说明文字，不改字段集合；descriptions 是顶层同一份说明（details 覆盖 parameters）。
+#   顶层原文比“同顶层 X。”还短时直接用原文，引用只用来省掉长说明的重复。
+# 函数用途: 给一个 items[] 字段选说明：本项专属说明、保留的完整顶层说明，或“同顶层 X。”。
+def _item_field_description(name: str, descriptions: dict[str, str]) -> str:
+    if name in _CREATE_ITEM_PARAMETER_DETAILS:
+        return _CREATE_ITEM_PARAMETER_DETAILS[name]
+    full = descriptions[name]
+    reference = f"同顶层 {name}。"
+    return full if name in _ITEM_FIELDS_KEEPING_FULL_TEXT or len(full) <= len(reference) else reference
 
 
 # LLM: 工具级说明保留并发/分工语义，参数级说明负责 covers/output_files 细节；不宣称 owner 内业务目录互相隔离。
@@ -161,7 +174,7 @@ def build_task_progress_model_spec() -> ToolModelSpec:
         },
     }
     details = {
-        "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。若已关闭项需要返工，对同一 id 传 status=in_progress 和 correction=true 明确重开；不能拿另一个 pending id 代替。",
+        "items": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。返工规则见工具说明。",
         "coverage": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。它只是模型维护的软计划，不是系统完成判定。",
     }
     return ToolModelSpec(

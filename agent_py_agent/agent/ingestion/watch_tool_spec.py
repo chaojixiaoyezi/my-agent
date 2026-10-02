@@ -717,6 +717,8 @@ def _watch_stream_model_spec(
             ),
             keywords=("数据流", "盯守", "监控", "游标", "增量", "高吞吐", "stream", "watch", "pull", "候选", "初筛", "背压", "判据", "spec", "日志", "大文件", "tail", "定时查", "轮询", "poll", "快照"),
             examples=tuple(_surface_examples(surface, _watch_stream_examples())),
+            default_deferred=True,
+            deferred_summary="持续盯守数据流：直播/HTTP 游标流、持续增长的日志、定时轮询接口",
         ),
     )
 

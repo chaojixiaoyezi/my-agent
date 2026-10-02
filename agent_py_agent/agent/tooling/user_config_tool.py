@@ -49,11 +49,16 @@ from .models import (
 
 
 # LLM: schema 字段来自同一决策登记表，不通过任意属性路径扩大可修改范围；运行时仍由服务严格校验。
+#   各接入点的 points.<点>.profile_id 与 changes.profile_id 同义，只写“同 profile_id”指回去，不重复同一句说明；类型不变。
 # 函数用途: 构造模型可见的字段 patch 描述，使用数值秒数和明确布尔开关。
 def _decision_change_properties() -> dict:
     from ..settings.decision_settings_schema import decision_field_schema, decision_field_scopes
 
-    return {path: decision_field_schema(path) for path in decision_field_scopes()}
+    properties = {path: decision_field_schema(path) for path in decision_field_scopes()}
+    for path, shape in properties.items():
+        if path.startswith("points.") and path.endswith(".profile_id") and "description" in shape:
+            shape["description"] = "同 profile_id，只作用于本接入点。"
+    return properties
 
 
 # LLM: 身份只来自 Agent 的已解析 home；缺失上下文绝不能因空 provider/kind 被当作本机管理员。规则统一在
@@ -75,8 +80,7 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
         description=("读取或修改当前用户自己的决策设置。先 decision_read 获取 owner/thread revision，"
                      "再用 decision_patch 或 decision_reset 修改并读回生效值；scope=thread 只用于当前可信会话。"
                      "decision_patch 只填 scope、expected_revision、changes，decision_reset 只填 scope、expected_revision、fields，"
-                     "两者可带可选 reason 说明修改原因（只记录与展示，截断 200 字）；"
-                     "其余多带的字段会被拒绝并在回执 unknown_fields 里列出。"
+                     "另可带 reason（见参数说明），多带的字段会被拒绝并在回执 unknown_fields 里列出。"
                      "等待时间只能在 decision_read 返回的 agent_timeout_bounds 范围内调整，越界会被拒绝。"
                      "decision_models 只读脱敏目录；decision_probe 仅在用户明确要求测试连接时使用，会联网并产生用量。"
                      "decision_experiment_revoke 只能撤销当前会话已有授权，不能建立授权。"
@@ -86,7 +90,8 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
             "用户要求开启、关闭或调整自己的决策模型等待时间与接入点",
             "用户要求查看自己的决策模型设置、已保存模型或撤销当前实验授权",
             "用户明确要求测试已保存决策模型连接",
-        ), avoid_when=("需要本机全局配置、凭据或其他用户设置时",)),
+        ), avoid_when=("需要本机全局配置、凭据或其他用户设置时",),
+            default_deferred=True, deferred_summary="查看或修改自己的决策模型设置"),
     )
 
 
@@ -203,14 +208,14 @@ class UserConfigTool(BaseTool):
             "修改在重启 Gateway 后生效（当前进程不会热加载）。安全边界（凭据、权限、身份、路径、外部地址、会运行代码的设置）永远不可写。"
             "decision_read/decision_patch/decision_reset 读取、字段修改或恢复决策设置继承；"
             "decision_patch 只填 scope/expected_revision/changes，decision_reset 只填 scope/expected_revision/fields，"
-            "两者可带可选 reason 说明修改原因（只记录与展示，截断 200 字）；多带的字段会被拒并在回执 unknown_fields 列出；"
+            "另可带 reason（见参数说明），多带的字段会被拒并在回执 unknown_fields 列出；"
             "decision_experiment_revoke 可用当前授权编号撤销本会话实验；本工具不能建立实验授权，能力开关不代表用户授权。"
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
             "时间使用有限正秒数，且须在 decision_read 返回的 agent_timeout_bounds 范围内（越界拒绝、不自动夹取）；"
-            "reset 的 fields 删除覆盖。总开关关闭保留各点模式，observe 也会产生用量；"
+            "总开关关闭保留各点模式，observe 也会产生用量；"
             "保存不联网，时间只用于后续请求且不重置正在进行的阶段预算。"
             "decision_models 只读当前用户已保存或获共享授权的脱敏 Decision 目录，可用返回的编号绑定配置。"
-            "decision_probe 仅在用户要求测试连接时使用，必须显式传 profile_id 和有限正 timeout_seconds；"
+            "decision_probe 仅在用户要求测试连接时使用；"
             "它会联网并产生用量，不能在读取目录或保存配置后自动测试，也不能据测试通过声称判断质量可靠。"
         ),
         input_schema={
@@ -252,6 +257,8 @@ class UserConfigTool(BaseTool):
                 "用户要求选择已保存的决策配置，或明确要求测试其连接",
             ),
             avoid_when=("需要改权限模式、危险路径或凭据时",),
+            default_deferred=True,
+            deferred_summary="查看或修改配置参数（参数中心，等同 /settings；含决策模型设置）",
         ),
     )
     # LLM: view/目录只读，set 改配置，显式 probe 会联网并记用量；保持原 mutating 中央门、串行策略和操作审计。

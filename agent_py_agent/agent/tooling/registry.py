@@ -14,7 +14,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -79,6 +79,8 @@ class CatalogRenderConfig:
     # 渐进式披露:这些 category 的工具不进初始模型 schema，只在目录末尾留折叠清单。
     # 模型通过 tool_search 加载命中工具；list_tools 仍可查看完整注册表。默认空=全量直出。
     deferred_categories: list[str] = field(default_factory=list)
+    # 本轮由工具自己声明默认收起的名字（只在 tool_default_deferral_enabled 打开时非空）；目录给它们列“名字：一句用途”的索引。
+    declared_deferred_names: frozenset[str] = frozenset()
 
 
 # LLM: ToolRegistry 单一装配配置；审批、来源合同和语法反馈开关由 core 绑定，不从模型参数推导；联测 owner/worker 和文件反馈。
@@ -118,6 +120,8 @@ class ToolRegistryParams:
     catalog_categories: list[str] | None = None
     catalog_deferred_categories: list[str] | None = None
     catalog_include_examples: bool = False
+    # 工具自己声明 default_deferred 的“默认收起”是否生效（配置 tool_default_deferral_enabled，默认关）；只改展示，不改授权。
+    catalog_default_deferral_enabled: bool = False
     catalog_entry_max_chars: int = 700
     # 参数减量第 3 批：目录分页/截断提示固定开启，原配置项 tool_catalog_show_truncated_notice 已删除。
     catalog_show_truncated_notice: bool = True
@@ -425,6 +429,7 @@ class ToolRegistry:
             item.strip() for item in params.catalog_deferred_categories or [] if item.strip()
         ]
         self.catalog_include_examples = params.catalog_include_examples
+        self.catalog_default_deferral_enabled = params.catalog_default_deferral_enabled is True
         self.catalog_entry_max_chars = max(0, params.catalog_entry_max_chars)
         self.catalog_show_truncated_notice = params.catalog_show_truncated_notice
         self.tool_detail_max_chars = max(0, params.tool_detail_max_chars)
@@ -455,7 +460,6 @@ class ToolRegistry:
     # 函数用途: 给一个工作片生成独立权限视图，避免切 Full Access 热改同用户其他正在执行的会话。
     def with_access_policy(self, *, access_mode: str, path_access_mode: str, owner_scope_root: str):
         from copy import copy
-        from dataclasses import replace
 
         params = replace(self._construction_params, access_mode=access_mode,
                          path_access_mode=path_access_mode, owner_scope_root=owner_scope_root)
@@ -597,7 +601,7 @@ class ToolRegistry:
         if allowed_tools is not None or (snapshot.allowed_tools is not None and
                 (snapshot.presentation_deferred_names is not None or snapshot.presentation_shortlist_names is not None)):
             return specs
-        extra_deferred = _presentation_deferred_names(snapshot, self.catalog_deferred_categories, allowed_tools=allowed_tools)
+        extra_deferred, _declared = _extra_deferred_names(self, snapshot, allowed_tools)
         if not self.catalog_deferred_categories and not extra_deferred:
             return specs
         deferred = set(self.catalog_deferred_categories)
@@ -623,7 +627,7 @@ class ToolRegistry:
             runtime_snapshot=snapshot,
         )
         deferred = set(self.catalog_deferred_categories)
-        extra_deferred = _presentation_deferred_names(snapshot, self.catalog_deferred_categories, allowed_tools=allowed_tools)
+        extra_deferred, _declared = _extra_deferred_names(self, snapshot, allowed_tools)
         searchable = [spec for spec in specs if spec.category in deferred or spec.name in extra_deferred]
         if not searchable:
             return []
@@ -647,12 +651,13 @@ class ToolRegistry:
             runtime_snapshot=snapshot,
         )
         presentation = allowed_tools is None and snapshot.allowed_tools is None
+        extra_deferred, declared = _extra_deferred_names(self, snapshot, allowed_tools)
         return _render_registry_catalog_section(
             specs,
-            self._catalog_render_config(),
+            replace(self._catalog_render_config(), declared_deferred_names=declared),
             write_inline_max_chars=self._write_inline_max_chars(),
             tool_protocol=tool_protocol,
-            presentation_deferred_names=_presentation_deferred_names(snapshot, self.catalog_deferred_categories, allowed_tools=allowed_tools),
+            presentation_deferred_names=extra_deferred,
             presentation_shortlist_names=snapshot.presentation_shortlist_names if presentation else None,
         )
 
@@ -918,6 +923,35 @@ def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categor
     return names
 
 
+# LLM: 工具自己声明的默认收起（ToolModelHints.default_deferred）只在开关打开、本轮没有显式 allowed_tools、且原 tool_search
+#   在本快照里可用、模型可见、没被类别收起时生效，否则返回空集——宁可多展示，也不能把工具藏到找不回来。发现入口永不收起。
+#   只读快照，不改注册表、授权或 snapshot_hash；改判定要同步 test_tool_default_deferral。
+# 函数用途: 算出本轮因工具声明而默认收起的工具名，供可见 Schema、收起搜索范围和目录索引共用。
+def _declared_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
+                             enabled: bool, allowed_tools: list[str] | None = None) -> frozenset[str]:
+    if not enabled or allowed_tools is not None:
+        return frozenset()
+    search = snapshot.runtime("tool_search")
+    if (search is None or not search.availability.available or not search.exposure.model_visible
+            or search.model_spec.category in deferred_categories):
+        return frozenset()
+    return frozenset(
+        runtime.model_spec.name for runtime in snapshot.runtimes
+        if runtime.model_spec.hints.default_deferred and runtime.model_spec.name not in TOOL_DISCOVERY_ENTRY_NAMES
+    )
+
+
+# LLM: 决策点展示投影（presentation_deferred_names）与工具声明的默认收起取并集，二者都只减可见 Schema；被收起的工具仍在同一
+#   原快照里，由 tool_search 一步找回。第二个返回值是其中属于工具声明的部分，目录据此给出“名字 + 一句用途”的索引。只读。
+# 函数用途: 返回本轮在类别收起之外还要额外收起的工具名，以及其中由工具声明收起的那部分。
+def _extra_deferred_names(registry: Any, snapshot: ToolRuntimeSnapshot,
+                          allowed_tools: list[str] | None) -> tuple[frozenset[str], frozenset[str]]:
+    categories = registry.catalog_deferred_categories
+    declared = _declared_deferred_names(snapshot, categories, enabled=registry.catalog_default_deferral_enabled,
+                                        allowed_tools=allowed_tools)
+    return _presentation_deferred_names(snapshot, categories, allowed_tools=allowed_tools) | declared, declared
+
+
 # LLM: 默认投影为None时保持原目录字节；额外折叠与短名单仅影响提示，不改变传入的完整授权specs。
 # 函数用途: 组合原工具协议、传输说明和本工作片的折叠发现提示。
 def _render_registry_catalog_section(
@@ -942,7 +976,8 @@ def _render_registry_catalog_section(
             "- 当前直接工具的名称、说明和参数 Schema 已通过原生工具通道提供；"
             "以该结构化 Schema 为准，不在提示词中重复展开。",
         ]
-        deferred_notice = _render_deferred_notice(deferred, presentation_shortlist_names=presentation_shortlist_names)
+        deferred_notice = _render_deferred_notice(deferred, presentation_shortlist_names=presentation_shortlist_names,
+                                                  declared_names=render_config.declared_deferred_names)
         if deferred_notice:
             entries.append(deferred_notice)
     else:
@@ -1109,7 +1144,8 @@ def render_catalog_entries(specs: list[ToolModelSpec], config: CatalogRenderConf
         notice = _catalog_page_notice(config, total=len(primary), returned=len(page))
         if notice:
             entries.append(notice)
-    deferred_notice = _render_deferred_notice(deferred, presentation_shortlist_names=presentation_shortlist_names)
+    deferred_notice = _render_deferred_notice(deferred, presentation_shortlist_names=presentation_shortlist_names,
+                                              declared_names=config.declared_deferred_names)
     if deferred_notice:
         entries.append(deferred_notice)
     return entries
@@ -1134,26 +1170,41 @@ def _split_deferred_specs(
 
 
 # LLM: 短名单只缩名字，完整数目和原tool_search/list_tools入口保留；省略名称不能成为权限或loaded事实。
+#   declared_names（工具自己声明的默认收起）不进名字串，改在末尾按“名字：用途”列索引，且不受短名单裁剪；为空时逐字保留原输出。
 # 函数用途: 显示有界的本轮折叠名称提示，默认None逐字保留原完整折叠清单；被折叠的插件按插件 ID 与简介列出（仅展示）。
-def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlist_names: frozenset[str] | None = None) -> str:
+def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlist_names: frozenset[str] | None = None,
+                            declared_names: frozenset[str] = frozenset()) -> str:
     """折叠清单:只列被 defer 工具的名字，按 会话运行时 方式用 tool_search 再加载。"""
     if not specs:
         return ""
-    shown = [spec.name for spec in specs if presentation_shortlist_names is None or spec.name in presentation_shortlist_names]
+    shown = [spec.name for spec in specs if spec.name not in declared_names
+             and (presentation_shortlist_names is None or spec.name in presentation_shortlist_names)]
     names = ", ".join(sorted(shown))
+    index = _declared_deferred_index(specs, declared_names)
     notice = (
         f"- ⊞ 另有 {len(specs)} 个工具已注册但未直接展开；需要时先用 tool_search 搜索并加载，"
         "也可用 list_tools 查看完整清单"
     )
     if presentation_shortlist_names is None:
-        return notice + f"：{names}"
+        return notice + (f"：{names}" if shown or not index else "。") + index
     notice += f"。本轮提示 {len(shown)} 个：{names}" if shown else "。本轮未列短名单，仍可按能力搜索。"
     # 被折叠的插件按插件列出（数量受已启用插件数约束），否则模型不知道用户点名的插件其实已安装
     plugins = sorted({spec.description.split("的 ", 1)[0] for spec in specs
                       if spec.category == "plugins" and spec.name not in shown and spec.description.startswith("插件 ")})
     if plugins:
         notice += "\n  已启用但本轮未展开的插件（可用 tool_search 按插件 ID 加载）：" + "；".join(plugins)
-    return notice
+    return notice + index
+
+
+# LLM: 只列折叠清单里由工具声明收起的那些；用途句取工具自己的 deferred_summary，不读模型或用户文本，不授予任何权限。
+# 函数用途: 生成“默认收起的工具：名字：一句用途”索引，让模型知道这些工具存在、需要时用 tool_search 一步加载。
+def _declared_deferred_index(specs: list[ToolModelSpec], declared_names: frozenset[str]) -> str:
+    rows = sorted((spec.name, spec.hints.deferred_summary) for spec in specs if spec.name in declared_names)
+    if not rows:
+        return ""
+    return "\n  默认收起的工具（需要时用 tool_search 按名字或用途搜索，加载后即可调用）：" + "".join(
+        f"\n  - {name}：{summary}" for name, summary in rows
+    )
 
 
 def _filter_catalog_specs(specs: list[ToolModelSpec], categories: list[str]) -> list[ToolModelSpec]:

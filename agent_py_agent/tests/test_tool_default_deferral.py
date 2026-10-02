@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+"""按工具声明的默认收起（tool_default_deferral_enabled）合同单测。
+
+又大又少用的工具在自己的 ToolModelHints 里声明 default_deferred + deferred_summary。开关打开时，前台回合不再发它们的
+原生 Schema，目录末尾留“名字：一句用途”的索引，tool_search 一步找回；开关关闭时提示词与可见工具逐字不变。
+显式 allowed_tools 的回合、tool_search 不可用的快照不收起；决策点的展示投影与它取并集。
+"""
+
+import json
+from dataclasses import replace
+
+import pytest
+
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.tooling.models import TOOL_DISCOVERY_ENTRY_NAMES, ToolModelHints
+from agent_py_agent.agent.tooling.registry import _declared_deferred_names
+
+# 第一阶段按近 30 天生产调用频率和风险定的名单；新增声明时同步这里和 DESIGN_LEDGER 的理由。
+DECLARED = {
+    "admin_controls", "audit_records", "gateway_status", "manage_models", "restart_gateway",
+    "schedule", "update_persona", "user_config", "watch_stream",
+}
+
+
+def _agent(tmp_path, **overrides) -> SimpleAgent:
+    cfg = AgentConfig(enable_tools=True, enable_subagents=True, memory_path=str(tmp_path / "m.jsonl"), **overrides)
+    return SimpleAgent(cfg, str(tmp_path))
+
+
+def _visible(agent, **kwargs) -> set[str]:
+    return {spec.name for spec in agent.tools.model_visible_specs(**kwargs)}
+
+
+def test_switch_defaults_off_and_keeps_surface_and_catalog_unchanged(tmp_path):
+    assert AgentConfig().tool_default_deferral_enabled is False
+    plain = _agent(tmp_path / "plain")
+    off = _agent(tmp_path / "off", tool_default_deferral_enabled=False)
+    assert _visible(off) == _visible(plain)
+    assert DECLARED - {"watch_stream"} <= _visible(off), "开关关闭时这些工具照旧直出（watch_stream 本来就按 web 类别收起）"
+    section = off.tools.render_catalog_section()
+    assert section == plain.tools.render_catalog_section()
+    assert "默认收起的工具" not in section
+
+
+def test_declared_tools_leave_the_native_surface_and_get_a_compact_index(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    visible = _visible(agent)
+    assert visible.isdisjoint(DECLARED)
+    assert TOOL_DISCOVERY_ENTRY_NAMES & set(agent.tools.tools) <= visible
+    assert {"read_file", "write_file", "run_command", "create_subagents", "remember", "create_goal"} <= visible
+    section = agent.tools.render_catalog_section()
+    index = section.split("默认收起的工具", 1)[1]
+    for name in sorted(DECLARED):
+        summary = agent.tools.tools[name].model_spec.hints.deferred_summary
+        assert f"\n  - {name}：{summary}" in index
+    names_line = section.split("默认收起的工具", 1)[0].rsplit("⊞", 1)[1]
+    assert "user_config" not in names_line, "声明收起的工具只在索引里出现一次，不重复进名字串"
+
+
+def test_declared_set_is_pinned_and_every_summary_is_short(tmp_path):
+    agent = _agent(tmp_path)
+    declared = {name for name, tool in agent.tools.tools.items() if tool.model_spec.hints.default_deferred}
+    assert declared == DECLARED
+    assert not declared & TOOL_DISCOVERY_ENTRY_NAMES
+    for name in declared:
+        assert 0 < len(agent.tools.tools[name].model_spec.hints.deferred_summary) <= 60, name
+
+
+def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    result = agent.tools.tools["tool_search"].execute({"query": "manage_models", "limit": 3})
+    loaded = result.result_envelope["tool_search"]["loaded_tool_names"]
+    assert loaded[0] == "manage_models"
+    payload = json.loads(result.output)
+    assert payload["tools"][0]["input_schema"]["properties"], "搜索结果带完整参数 Schema"
+    assert "manage_models" in _visible(agent, loaded_tool_names=set(loaded))
+
+
+@pytest.mark.parametrize(("query", "tool"), [
+    ("看一下这个直播流", "watch_stream"),
+    ("帮我换个模型", "manage_models"),
+    ("改一下配置项", "user_config"),
+    ("查审计记录", "audit_records"),
+    ("明天早上提醒我", "schedule"),
+    ("重启网关", "restart_gateway"),
+    ("gateway 状态", "gateway_status"),
+    ("以后叫我小王", "update_persona"),
+    ("关闭某个用户的决策模型", "admin_controls"),
+])
+def test_natural_requests_find_each_declared_tool(tmp_path, query, tool):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    hits = [spec.name for spec in agent.tools.search_deferred_specs(query, limit=5)]
+    assert tool in hits
+
+
+def test_explicit_allowed_tools_stay_fully_visible(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    assert _visible(agent, allowed_tools=["user_config", "read_file"]) == {"user_config", "read_file"}
+
+
+def test_declared_deferral_needs_an_available_visible_tool_search(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    snapshot = agent.tools.runtime_snapshot()
+    assert _declared_deferred_names(snapshot, [], enabled=True) == frozenset(DECLARED & snapshot.available_tool_names)
+    assert _declared_deferred_names(snapshot, [], enabled=False) == frozenset()
+    assert _declared_deferred_names(snapshot, ["system"], enabled=True) == frozenset(), "tool_search 被类别收起时不再额外收起"
+    runtimes = tuple(runtime for runtime in snapshot.runtimes if runtime.model_spec.name != "tool_search")
+    without_search = replace(snapshot, runtimes=runtimes, snapshot_hash="",
+                             available_tool_names=frozenset(runtime.model_spec.name for runtime in runtimes))
+    assert _declared_deferred_names(without_search, [], enabled=True) == frozenset()
+
+
+def test_decision_projection_and_declared_deferral_merge(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    base = agent.tools.runtime_snapshot()
+    projected = replace(base, presentation_deferred_names=frozenset({"session_search"}),
+                        presentation_shortlist_names=frozenset({"read_file"}))
+    visible = _visible(agent, runtime_snapshot=projected)
+    assert "session_search" not in visible and visible.isdisjoint(DECLARED)
+    searchable = {spec.name for spec in agent.tools.search_deferred_specs("session_search", runtime_snapshot=projected)}
+    assert "session_search" in searchable
+    section = agent.tools.render_catalog_section(runtime_snapshot=projected)
+    assert "本轮未列短名单" in section or "本轮提示" in section
+    assert "\n  - user_config：" in section, "短名单不裁剪声明收起的索引"
+
+
+def test_hint_requires_a_summary_when_declared():
+    with pytest.raises(ValueError):
+        ToolModelHints(default_deferred=True)
+    with pytest.raises(ValueError):
+        ToolModelHints(default_deferred="yes", deferred_summary="x")
+    assert ToolModelHints(default_deferred=True, deferred_summary="  查东西  ").deferred_summary == "查东西"
+    assert ToolModelHints().deferred_summary == ""
+
+
+def test_discovery_entry_stays_direct_even_if_it_declares_deferral(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    search_tool = agent.tools.tools["tool_search"]
+    spec = search_tool.model_spec
+    search_tool.model_spec = replace(spec, hints=replace(spec.hints, default_deferred=True, deferred_summary="搜索工具"))
+    assert "tool_search" in _visible(agent)
+    assert "tool_search" not in _declared_deferred_names(agent.tools.runtime_snapshot(), [], enabled=True)
+
+
+def test_index_without_other_folded_names_has_no_dangling_name_list(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True, tool_catalog_deferred_categories=[])
+    section = agent.tools.render_catalog_section()
+    assert "也可用 list_tools 查看完整清单。\n  默认收起的工具" in section
+    assert "完整清单：" not in section
+
+
+def test_semantic_document_only_grows_for_tools_with_a_summary(tmp_path):
+    from agent_py_agent.agent.tooling.models import _tool_semantic_document
+
+    agent = _agent(tmp_path)
+    assert "summary:" not in _tool_semantic_document(agent.tools.tools["read_file"].model_spec)
+    schedule = agent.tools.tools["schedule"].model_spec
+    assert _tool_semantic_document(schedule).endswith("summary: " + schedule.hints.deferred_summary)
+
+
+def test_switch_is_normalized_from_yaml_strings():
+    from agent_py_agent.agent.settings.config import normalize_agent_config
+
+    normalized, warnings = normalize_agent_config({"tool_default_deferral_enabled": "false"})
+    assert normalized["tool_default_deferral_enabled"] is False
+    normalized, _ = normalize_agent_config({"tool_default_deferral_enabled": "true"})
+    assert normalized["tool_default_deferral_enabled"] is True
+
+
+@pytest.mark.parametrize("broken", ["unavailable", "hidden"])
+def test_declared_deferral_backs_off_when_tool_search_is_unusable(tmp_path, broken):
+    from agent_py_agent.agent.tooling.models import ToolAvailability, ToolExposure
+
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    snapshot = agent.tools.runtime_snapshot()
+    damaged = {
+        "unavailable": {"availability": ToolAvailability(False, "TOOL_UNAVAILABLE", "test")},
+        "hidden": {"exposure": ToolExposure(model_visible=False)},
+    }[broken]
+    runtimes = tuple(replace(runtime, **damaged) if runtime.model_spec.name == "tool_search" else runtime
+                     for runtime in snapshot.runtimes)
+    assert _declared_deferred_names(replace(snapshot, runtimes=runtimes, snapshot_hash=""), [], enabled=True) == frozenset()
+
+
+def test_explicit_allowed_tools_catalog_has_no_declared_index(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    section = agent.tools.render_catalog_section(allowed_tools=["user_config", "read_file", "tool_search"])
+    assert "默认收起的工具" not in section
+    assert agent.tools.search_deferred_specs("user_config", allowed_tools=["user_config", "tool_search"]) == []
