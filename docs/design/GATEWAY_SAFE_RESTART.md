@@ -191,7 +191,7 @@
   恢复后给记录了会话存储根的发起方写 `gateway_restart_completed` 持久唤醒（“重启已完成、不要再次重启或验证”）。
   设计里“给每个续跑回合注入已重启事实”简化为只通知发起方：其它续跑回合不需要知道重启；发起方自己的回合在历史里已有 `restart_gateway`
   回执，回执写明完成后不要再次调用。
-- 入口：`restart_gateway` 工具（main_agent 专用，effect=dangerous，完全访问模式直接执行，其它模式走危险动作审批）与 `/restart`
+- 入口：`restart_gateway` 工具（main_agent 专用，effect=dangerous；默认确认（ask）模式走危险动作审批，自主工作（auto）与完全访问不弹确认，以 `action_policy._approval_decision` 为准；2026-10-02 按代码行为更正）与 `/restart`
   控制命令（local/main owner 专用，含之后绑定为管理员的 IM 身份）。托管自停闸的拒绝文案改为指向这两个入口。
 - `/status`：HTTP `/status` 投影 `restart_drain`（阶段、请求编号、在飞回合数、执行中工具数）。
 - 已知边界：只读工具（含被判为只读的命令，例如 `sleep 20 && echo`）不经过关口也不计数，第二段不等它们；换进程时它们被切断，

@@ -1,7 +1,8 @@
 # LLM: 只注册给本机管理员主代理（owner_type=main_agent）且 enable_gateway_restart_tool 开启；子代理运行里不可用。
 # 工具只写一份重启请求就返回，真正的排空与换进程由 Gateway 服务主循环执行（gateway_parts/restart_service）。
 # 发起方身份只取结构化事实：owner 三元组、会话 thread_id、会话存储根；不接受模型传入的进程号或路径。
-# effect=dangerous：完全放行模式直接执行，其它审批模式走统一危险动作审批。改动须同步 test_gateway_restart_tool.py。
+# effect=dangerous：默认确认（ask）模式走统一危险动作审批；自主工作（auto）与完全放行（full access）不弹确认（以
+#   tooling.action_policy._approval_decision 为准）。安排后由 restart_service 先排空再换进程。改动须同步 test_gateway_restart_tool.py。
 # 模块用途: 让管理员的 my-agent 在排查中发现需要重启时，自己安排一次不会切断回合的 Gateway 安全重启。
 from __future__ import annotations
 

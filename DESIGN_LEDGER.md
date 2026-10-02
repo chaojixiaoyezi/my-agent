@@ -161,7 +161,7 @@
   - 第 2 次（`8eb9f8771`）**通过**：模型 `list` → `set_embedding`（embo-01，ok）→ 自己调 `restart_gateway` 安排了安全重启（120,244 tokens）。配置读回：档案 = embo-01、召回开、`tool_vector_search_enabled` 未动；账本 2 笔 actor=model。重启后 TUI `/model vector` 显示“当前运行：档案…，语义记忆开”；新组合根探针真实调用 embo-01：写 1 条嵌 1 次，第一次召回检索方式 semantic、只嵌查询 1 条，`memory.jsonl` / `memory_vectors.json` 0600、目录 0700。
   - 证据：`~/.my-agent/decision-evidence/semantic-memory-20261002/`（run1、run2 各有 SUMMARY.md 和结构化 JSON，不含正文和密钥）。
 - **S6 注意（3a 发版时做）**：goal 第 5 条要求生产里工具语义检索保持关。仓库默认 `tool_vector_search_enabled: true`，以前只是因为档案为空才没生效；生产 desktop.yaml 没有覆盖这个键（只用 grep -c 核对）。所以开生产语义记忆时要先 `/settings set tool_vector_search_enabled false`（参数中心可写，重启生效），再选向量模型，两项共用一次重启。本分支不动这个开关。
-- **观察（不在本分支改）**：`enable_gateway_restart_tool` 的配置注释写“其它模式按危险动作审批”，实际 auto 模式下非 always 的危险动作不逐次询问（`action_policy._approval_decision`），第 2 次核对里重启没弹确认。注释要不要改，留给 3a 定。
+- **观察（已处理）**：`enable_gateway_restart_tool` 的配置注释原写“其它模式按危险动作审批”，实际 auto 模式下非 always 的危险动作不逐次询问（`action_policy._approval_decision`），第 2 次核对里重启没弹确认。3a 定：以代码行为为准改注释（ask 弹确认，auto/完全放行不弹，安全重启先等空闲），在 I3 分支 `claude/38-late-tool-fence` 里改了配置注释、工具模块头和 GATEWAY_SAFE_RESTART.md。生产 S6 由 3a 自己控制重启。
 - **后续项（未做）**：
   - 普通用户各自开语义记忆：要有 owner 级配置、各自的嵌入档案和费用归属；现在普通用户只按关键词召回。
   - `tool_vector_search_enabled` 默认开：选了向量模型后工具检索也会用同一档案发嵌入请求。要不要和语义记忆一起管，待定。
