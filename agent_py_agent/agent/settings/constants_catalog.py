@@ -37,18 +37,32 @@ def search_constants(query: str, *, limit: int = 10) -> list[dict]:
     entries = load_catalog()
     if not needle:
         return entries[:limit] if limit else entries
-    by_name: list[dict] = []
-    by_other: list[dict] = []
-    for entry in entries:
-        name = str(entry.get("name") or "").lower()
-        if needle in name:
-            by_name.append(entry)
-        elif needle in str(entry.get("description") or "").lower() or needle in str(entry.get("file") or "").lower():
-            by_other.append(entry)
+    ranked = [(entry, _match_kind(entry, needle)) for entry in entries]
+    by_name = [entry for entry, kind in ranked if kind == "name"]
+    by_other = [entry for entry, kind in ranked if kind == "other"]
     by_name.sort(key=lambda entry: (str(entry.get("name")) != needle,
                                     not str(entry.get("name")).startswith(needle), len(str(entry.get("name")))))
     found = by_name + sorted(by_other, key=lambda entry: (entry.get("file"), entry.get("name")))
     return found[:limit] if limit else found
+
+
+# LLM: 名字命中优先于说明/文件命中；都不命中返回空串。不区分大小写，needle 已是小写。纯函数。
+# 函数用途: 判断一条常数条目是名字命中、说明或文件命中，还是不相关。
+def _match_kind(entry: dict, needle: str) -> str:
+    if needle in str(entry.get("name") or "").lower():
+        return "name"
+    other = f'{entry.get("description") or ""} {entry.get("file") or ""}'.lower()
+    return "other" if needle in other else ""
+
+
+# LLM: 只认模块级单目标赋值（NAME = …）和带值的注解赋值（NAME: T = …）；其它语句返回 None。纯函数。
+# 函数用途: 取出一条模块级语句赋值的名字与右值，供常数定位/收集共用同一判定。
+def _assigned_name(node: ast.stmt) -> tuple[str, ast.expr] | None:
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        return node.targets[0].id, node.value
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+        return node.target.id, node.value
+    return None
 
 
 # LLM: 只读打开目录里记录的那一个源码文件，用 ast 找模块级 name 的赋值行；目录里的 file 是仓库相对
@@ -64,15 +78,7 @@ def locate_line(file_rel: str, name: str) -> int | None:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return None
-    for node in tree.body:
-        target = None
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            target = node.targets[0].id
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
-            target = node.target.id
-        if target == name:
-            return node.lineno
-    return None
+    return next((node.lineno for node in tree.body if (_assigned_name(node) or ("", None))[0] == name), None)
 
 
 # LLM: 查看入口显示“文件:行”用：只读定位该条目的行号并附到副本；定位不到就只带文件不带行号。

@@ -145,6 +145,22 @@ def _description(lines: list[str], lineno: int) -> str:
     return ""
 
 
+# LLM: 只认模块级单目标赋值（NAME = …）和带值的注解赋值（NAME: T = …）；其它语句返回 None。纯函数。
+# 函数用途: 取出一条模块级语句赋值的名字与右值，供常数定位/收集共用同一判定。
+def _assigned_name(node: ast.stmt) -> tuple[str, ast.expr] | None:
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        return node.targets[0].id, node.value
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+        return node.target.id, node.value
+    return None
+
+
+# LLM: 目录只收全大写、非协议类、右值可静态求出数值的模块级常数；与 _module_entries 同一判定。纯函数。
+# 函数用途: 判断一个模块级赋值是否属于常数目录收录范围。
+def _is_catalog_constant(target: str, value: ast.expr) -> bool:
+    return bool(_NAME.match(target)) and not _is_protocol_constant(target) and _is_numeric(value)
+
+
 # LLM: 收集一个源码文件里所有合格的模块级数值常数（全大写、非协议类、数字字面量或简单算术），
 #   每个条目带名字、相对路径、计算值、单位、类别、上方中文说明。不存行号：目录唯一失效时机是常数
 #   增删、改名、改值、改说明或改单位/类别，源码里插入空行/换行这类行号漂移不应当让目录过期（行号由
@@ -163,14 +179,10 @@ def _module_entries(root: Path, path: Path) -> list[dict]:
     relative = str(path.relative_to(root).as_posix())
     entries: list[dict] = []
     for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            target, value = node.targets[0].id, node.value
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
-            target, value = node.target.id, node.value
-        else:
+        assigned = _assigned_name(node)
+        if assigned is None or not _is_catalog_constant(*assigned):
             continue
-        if not _NAME.match(target) or _is_protocol_constant(target) or not _is_numeric(value):
-            continue
+        target, value = assigned
         entries.append({
             "name": target,
             "file": relative,
