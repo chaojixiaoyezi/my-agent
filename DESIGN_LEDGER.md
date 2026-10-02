@@ -1,5 +1,14 @@
 # 设计台账
 
+## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`，已实现，待集成）
+
+- **决定（集成者，三线收尾 goal P11）**：不再按“约 100 项”的数量目标减量。219 个随包键里 218 个在 `/settings` 列表与搜索出现；
+  `model_auth_ref`（/model 登录生成的 OAuth 运行引用，注释写“请勿手填”）归入新集合 `MANAGED_ELSEWHERE_KEYS`：只从列表与搜索隐藏，
+  字段、登记与边界等级不变，`/settings show model_auth_ref` 仍能查看。
+- **其余候选保留**：分类时的保留理由（急停开关、安装扫描上限、租约时长）仍成立，生产未覆盖；理由与复核清单见
+  [参数中心](docs/design/PARAMETER_CENTER.md) 的“减量收口”一条。
+- **验证**：见 TESTS.md 同名节。
+
 ## 参数中心 P7 全量默认值一致性测试与 P3 补齐 8 个保留键说明（2026-10-01，分支 `worker/ds2-param-parity`，已实现，待集成）
 
 - **P7**：新增 `agent_py_agent/tests/test_config_defaults_parity.py`——用正式加载器 `load_config` 读随包 agent_config.yaml，对 `AgentConfig` 全部字段逐个断言加载值等于 dataclass 默认值（219 个 YAML 键当前全部一致，值级白名单为空）。5 个加载器运行时元数据键（config_layers/config_path/config_sources/config_warnings/memory_config_warnings）跳过值比较但断言仍存在；值级白名单结构保留且要求“放进去的键必须仍不一致”，防止白名单烂掉。api_key 由 `api_key_env` 环境变量注入，测试先清 `AGENT_API_KEY` 再加载，避免本机环境污染。实现了 PARAMETER_CENTER.md 目标第 2 条“随包 YAML、AgentConfig 默认值和文档一致，由测试核对”的全量落点。

@@ -222,6 +222,12 @@
     （测试机 298 项是当年整份复制随包 YAML）。下一步先把测试机配置收成“只写与默认不同的项”，再对 386 个配置项逐项分类：
     删除（无用）、合并（总一起调）、降级（只对程序内部有意义，改回代码常数并移出配置）、常用（`/settings` 默认只列二三十个）、
     高级（可搜索但不刷屏）。目标约 100 项；每批不改任何生效值。
+  - **减量收口（2026-10-01，三线收尾 goal P11，集成者裁定）**：“约 100 项”的目标更正为实际下限。随包 YAML 现有 219 个键，
+    `/settings` 列表与搜索显示 218 个（`model_auth_ref` 由 /model 登录写入、请勿手填，归入 `MANAGED_ELSEWHERE_KEYS` 只隐藏不删，
+    `/settings show` 仍可查看）。复核余下候选（`orphan_supervision_interval_seconds`、`owner_maintenance_scan_interval_seconds`、
+    `skill_guard_max_files/_size_kb`、`lease_stale_without_heartbeat_seconds` 等）：分类时都有明确保留理由（出事时置 0 的急停开关、
+    外部 skill 安装扫描上限、租约时长），生产配置也没有覆盖它们，降级为常数只会拿走排障手段；常用层 21 个、其余可搜索不刷屏，
+    用户日常不受参数数量打扰。之后不再按数量目标减量，只在“没有读取方”（`test_config_field_readers.py` 守卫）或“同一概念多个旋钮”时删并。
   - **参数减量第 2 批：11 组重复参数合并（2026-09-27，集成者派活，分支 `claude/9a-merge-config`）**：同一个概念只留一个旋钮。
     被吸收的键从 AgentConfig、随包 YAML、规范化、说明基线与测试里删除，不留别名、不自动转值；写在用户配置里只告警
     “unknown config key”并忽略。默认行为全部保持；只有显式写过被吸收键、或写了原来不生效的值的配置会变（见各条）。

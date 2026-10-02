@@ -1,5 +1,10 @@
 # 测试与发布验收
 
+## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`）
+
+- 新用例 `test_settings_chat_control.py::test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works`：列表、搜索、`/settings all` 都不出现 `model_auth_ref`，`/settings show` 仍可查看且提示不能在这里修改；原加载器元数据用例的计数同步扣除隐藏集合。
+- 验证：`test_settings_chat_control.py`、`test_parameter_registry.py`、`test_user_config_capability.py` 124 passed。
+
 ## 参数中心 P7 / P3（2026-10-01，分支 `worker/ds2-param-parity`，已实现）
 
 - **P7 全量默认值一致性**：新增 `test_config_defaults_parity.py` 2 项——随包 agent_config.yaml 用正式 `load_config` 加载后，`AgentConfig` 全部字段（224 个，其中 219 个 YAML 键）逐个断言等于 dataclass 默认值；5 个运行时元数据键跳过值比较但断言仍存在；值级白名单为空并校验结构不烂。

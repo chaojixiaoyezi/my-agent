@@ -176,13 +176,18 @@ def parameter_registry() -> dict[str, ParameterSpec]:
 # 加载器写进 AgentConfig 的元数据（配置文件路径、来源、分层、告警），不是用户参数：/settings 的列表与计数、参数搜索都不列出。
 # 只是不显示——字段本身不删，登记表里仍保留（/settings show 仍能查看，仍是安全边界）。
 LOADER_METADATA_KEYS = frozenset({"config_path", "config_sources", "config_layers", "config_warnings", "memory_config_warnings"})
+# 由别的正式入口写入、用户不该手填的配置值（如 /model 登录生成的 OAuth 运行引用）：列表与搜索不列，避免诱导手改；
+# 字段与登记照旧，/settings show 仍能查看，安全等级不变。参数减量收口（2026-10-01）时定。
+MANAGED_ELSEWHERE_KEYS = frozenset({"model_auth_ref"})
 
 
 # LLM: 列表视图（/settings 默认与全部视图的总数、分类清单，user_config 的可改数量，参数搜索）统一用这份：
-#   去掉 LOADER_METADATA_KEYS，其余与登记表同序同值。单个参数的查看、修改仍走 parameter_registry。只读。
-# 函数用途: 返回会在 /settings 列表和搜索里出现的参数（不含加载器元数据）。
+#   去掉 LOADER_METADATA_KEYS 与 MANAGED_ELSEWHERE_KEYS，其余与登记表同序同值。单个参数的查看、修改仍走
+#   parameter_registry。只读。改动隐藏集合时同步 test_settings_chat_control 的列表/搜索/show 断言。
+# 函数用途: 返回会在 /settings 列表和搜索里出现的参数（不含加载器元数据和由其它入口管理的值）。
 def listed_parameters() -> dict[str, ParameterSpec]:
-    return {key: spec for key, spec in parameter_registry().items() if key not in LOADER_METADATA_KEYS}
+    hidden = LOADER_METADATA_KEYS | MANAGED_ELSEWHERE_KEYS
+    return {key: spec for key, spec in parameter_registry().items() if key not in hidden}
 
 
 # LLM: 按 COMMON_KEYS 的顺序返回常用参数的登记信息；名单里不存在的键直接跳过（守卫测试会先失败），不猜替代项。只读。

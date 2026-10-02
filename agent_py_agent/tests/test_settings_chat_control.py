@@ -20,6 +20,7 @@ from agent_py_agent.agent.settings.config import load_config
 from agent_py_agent.agent.settings.parameter_registry import (
     COMMON_KEYS,
     LOADER_METADATA_KEYS,
+    MANAGED_ELSEWHERE_KEYS,
     listed_parameters,
     parameter_registry,
     search_parameters,
@@ -206,7 +207,7 @@ def test_loader_metadata_is_hidden_from_lists_and_search_but_show_still_works(mo
 
     registry = parameter_registry()
     assert set(registry) >= LOADER_METADATA_KEYS and not LOADER_METADATA_KEYS & set(listed_parameters())
-    assert len(listed_parameters()) == len(registry) - len(LOADER_METADATA_KEYS)
+    assert len(listed_parameters()) == len(registry) - len(LOADER_METADATA_KEYS) - len(MANAGED_ELSEWHERE_KEYS)
     summary = capability_summary()
     assert summary["writable_count"] + summary["boundary_count"] == len(listed_parameters())
     assert not LOADER_METADATA_KEYS & {spec.key for spec in search_parameters("config", limit=0)}
@@ -216,3 +217,15 @@ def test_loader_metadata_is_hidden_from_lists_and_search_but_show_still_works(mo
     assert not any(f"- {key}［" in found for key in LOADER_METADATA_KEYS)
     detail = _run(monkeypatch, user_config, "/settings show config_warnings")
     assert detail.ok and detail.message.startswith("config_warnings（") and "不能在这里修改" in detail.message
+
+
+def test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works(monkeypatch, user_config):
+    """/model 登录生成的 OAuth 运行引用由模型菜单写入、请勿手填：列表和搜索不出现，show 仍能查看且仍是边界。"""
+    registry = parameter_registry()
+    assert MANAGED_ELSEWHERE_KEYS == {"model_auth_ref"} and MANAGED_ELSEWHERE_KEYS <= set(registry)
+    assert not MANAGED_ELSEWHERE_KEYS & set(listed_parameters())
+    assert not MANAGED_ELSEWHERE_KEYS & {spec.key for spec in search_parameters("model", limit=0)}
+    lines = _run(monkeypatch, user_config, "/settings all").message.splitlines()
+    assert not [line for line in lines if line.startswith("- model_auth_ref = ")]
+    detail = _run(monkeypatch, user_config, "/settings show model_auth_ref")
+    assert detail.ok and detail.message.startswith("model_auth_ref（") and "不能在这里修改" in detail.message
