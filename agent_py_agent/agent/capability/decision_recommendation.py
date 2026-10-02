@@ -1,3 +1,6 @@
+# LLM: 可选推荐和已采用展示的携带都只投影原快照；纯值不持有handler，权限/搜索/加载仍归原合同，失效保留基础输入。
+# 宿主授权的只观察实验与普通 observe/apply 互斥（仅普通模式 off 时运行），结果只写 finding 与不采用的 observation。
+# 模块用途: 在原模型循环前请求或复用本片短名单；复用不再次联网，不从历史或结果序列化恢复选择。
 from __future__ import annotations
 
 import time

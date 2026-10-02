@@ -158,10 +158,44 @@ def test_summary_counts_result_categories_and_marks_old_rows_unrecorded(tmp_path
     assert summary["result_categories"] == [
         {"category": "dropped:policy_changed", "calls": 2}, {"category": "non_selection:not_needed", "calls": 1},
         {"category": "selected", "calls": 1}, {"category": "unrecorded", "calls": 1}]
+    # 逐点位类别计数（含 dropped 补充行）：recall 两条、curator 一条、planning 旧记录归 unrecorded、
+    # delivery_quality 的 dropped 补充行单独计在其点位下。
+    assert summary["result_categories_by_point"] == {
+        "recall": {"selected": 1, "non_selection:not_needed": 1},
+        "curator": {"dropped:policy_changed": 1},
+        "planning": {"unrecorded": 1},
+        "delivery_quality": {"dropped:policy_changed": 1}}
     assert [row["result_category"] for row in summary["recent"]] == [
         "selected", "non_selection:not_needed", "dropped:policy_changed", None, "dropped:policy_changed"]
     # 丢弃补充行不是一次独立调用：进类别统计与最近行，但不进按状态的调用统计。
     assert summary["points"] == {"recall": {"success": 2}, "curator": {"success": 1}, "planning": {"success": 1}}
+
+
+def test_summary_categories_by_point_cover_full_window_beyond_recent_rows(tmp_path):
+    path = tmp_path / "outcomes.jsonl"
+    now = time.time()
+    rows = [
+        # 低频点位的结果在 1 小时前：24 小时窗口内、但在最近 20 行之外。
+        {"point": "external_material_order", "status": "success", "result_category": "selected", "created_at": now - 3600},
+        {"point": "external_material_order", "status": "success", "result_category": "dropped:sources_changed",
+         "record_kind": "dropped", "created_at": now - 3600},
+    ]
+    # 最近 20 行全是另一个点位，把 recent 窗口占满。
+    rows += [{"point": "delivery_quality", "status": "success", "result_category": "selected",
+              "created_at": now - index} for index in range(20)]
+    path.write_text("".join(json.dumps({"schema": SCHEMA, **row}) + "\n" for row in rows), encoding="utf-8")
+
+    summary = decision_outcome_summary(SimpleNamespace(owner_decision_outcomes_jsonl=path), since=now - 86400)
+
+    # 逐点位类别唯一来源按时间窗口全部行（含 dropped 补充行）计算，不受最近行数限制。
+    assert summary["result_categories_by_point"]["external_material_order"] == {
+        "selected": 1, "dropped:sources_changed": 1}
+    assert summary["result_categories_by_point"]["delivery_quality"] == {"selected": 20}
+    # recent 只保留最近 20 行：低频点位不在里面，但类别统计仍在。
+    assert [row["point"] for row in summary["recent"]] == ["delivery_quality"] * 20
+    # 窗口更窄时（60 秒内）低频点位的结果被排除，类别统计随之消失。
+    narrow = decision_outcome_summary(SimpleNamespace(owner_decision_outcomes_jsonl=path), since=now - 60)
+    assert narrow["result_categories_by_point"].get("external_material_order") is None
 
 
 def test_adoption_review_records_drop_with_reason_code(tmp_path, monkeypatch):

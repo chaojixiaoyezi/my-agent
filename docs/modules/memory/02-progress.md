@@ -11,6 +11,8 @@
 - 决策结果日志新增结构化 `result_category`（`selected` / `non_selection:<取值>` / `dropped:<原因码>` / `no_selection_recorded`）。
 - 四个记忆点位的采纳前复核出口在丢掉一条已拿到的建议时调 `record_decision_dropped` 登记原因码：期限 `adoption_deadline`、
   运行时身份变化 `runtime_changed`、来源或正式条目变化 `sources_changed`。行为不变（仍保留原材料/原顺序），只多一行补充记录。
+- 返工（2026-10-02）：`decision_recall._pre_recall_stale` 的两处复核都比对主模型身份（`_model_identity` 与材料里的 `primary_model`）；
+  第二次复核因此比原口径多一条主模型检查，是有意收紧——采用前换过主模型就不按旧模型建议注入。`_StaleStage` 挪到全部 import 之后。
 - 详见 DESIGN_LEDGER 同名条目与[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近是选中非选择还是被丢弃2026-10-02分支-workerds1-decision-outcome-category)。
 
 ## 召回后排序逐条题的候选措辞修正（J12b，2026-10-02，分支 `claude/be-recall-criteria`，已上线 step17a，main de222698b，2026-10-02）

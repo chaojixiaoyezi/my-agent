@@ -40,6 +40,12 @@ from .orchestration.dispatch_progress_seed import _known_child_run_ids
 from .runtime.task_identity import progress_ledger_id
 
 _POINT = "planning"
+_NON_SELECTIONS = {
+    "not_needed": "无需额外优先级建议，继续原计划",
+    "no_match": "现有候选均不适合优先推荐",
+    "abstain": "无法可靠选择",
+    "need_data": "缺少判断材料，由主代理按原工具补读，不向用户逐次询问",
+}
 
 
 # LLM: 已拿到的建议被宿主丢弃时记一笔结构化原因码，然后按调用方语义返回空结果。
@@ -48,12 +54,6 @@ _POINT = "planning"
 def _drop(agent: object, stage: object, outcome: object, reason: str) -> None:
     record_decision_dropped(agent, stage, outcome, reason)
     return None
-_NON_SELECTIONS = {
-    "not_needed": "无需额外优先级建议，继续原计划",
-    "no_match": "现有候选均不适合优先推荐",
-    "abstain": "无法可靠选择",
-    "need_data": "缺少判断材料，由主代理按原工具补读，不向用户逐次询问",
-}
 
 
 # LLM: Read-only enhancement after the original task_progress read/reconciliation.

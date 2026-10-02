@@ -72,13 +72,16 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
             if not outcome.may_apply or outcome.response is None:
                 return ""
             deadline = min(stage.deadline, outcome.deadline)
-            if stale := _material_stale(agent, record, archive_record, (params, outcome, revision, context_revision, deadline, None)):
+            if stale := _material_stale(agent, record, archive_record, (params, outcome, revision, context_revision, deadline)):
                 return drop_and_return(agent, (stage, outcome), stale, "")
             order = _reading_order(outcome.response, questions)
             if not (hint := _render_hint(order)):
                 return ""
             _check_interrupted()
-            if stale := _material_stale(agent, record, archive_record, (params, outcome, revision, context_revision, deadline, stage)):
+            if not decision_outcome_is_current(agent, params, stage, outcome):
+                # 强制门不通过时它自己已登记一行 dropped（带真实原因码），这里直接放弃，不再重复登记。
+                return ""
+            if stale := _material_stale(agent, record, archive_record, (params, outcome, revision, context_revision, deadline)):
                 return drop_and_return(agent, (stage, outcome), stale, "")
             return hint
     except (InterruptedError, ToolCancelled):
@@ -90,23 +93,17 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
 
 
 # LLM: 两段出口共用同一套复核：到期算 adoption_deadline，候选 revision/宿主来源/上下文 revision 任一变化算 sources_changed；
-#   第二段在渲染后还要过一次唯一强制门（decision_outcome_is_current），所以由 ctx 里的 gate 决定是否调用。
-#   判定顺序与原先两个 if 逐字对应，不新增语义；ctx 是 (params, outcome, revision, context_revision, deadline, stage) 六元组。
+#   唯一强制门（decision_outcome_is_current）由调用方直接调用：门不通过时门自己已登记一行 dropped（真实原因码），
+#   调用方直接返回空串，本函数不再返回门的原因码，避免同一条建议被登记两行。判定顺序与原先两个 if 逐字对应，
+#   不新增语义；ctx 是 (params, outcome, revision, context_revision, deadline) 五元组。
 # 函数用途: 复核外部材料阅读顺序建议是否仍成立，返回原因码（空串表示可采用）。
 def _material_stale(agent, record, archive_record, ctx) -> str:
-    params, outcome, revision, context_revision, deadline, stage = ctx
-    if stage is None:
-        # 渲染前那一段：期限先判，再比来源；此时还没有强制门可过。
-        if time.monotonic() >= deadline:
-            return DROP_ADOPTION_DEADLINE
-    elif not decision_outcome_is_current(agent, params, stage, outcome):
-        return DROP_SOURCES_CHANGED
+    params, outcome, revision, context_revision, deadline = ctx
+    if time.monotonic() >= deadline:
+        return DROP_ADOPTION_DEADLINE
     if (outcome.response.binding.candidates_revision != revision or _miss_reason(record, archive_record)
             or _context_revision(params) != context_revision or _material(record, archive_record)[2] != revision):
         return DROP_SOURCES_CHANGED
-    if stage is not None and time.monotonic() >= deadline:
-        # 渲染后那一段：期限压在最后判，保证先过强制门（与原先两个 if 的次序逐字一致）。
-        return DROP_ADOPTION_DEADLINE
     return ""
 
 

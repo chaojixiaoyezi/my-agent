@@ -300,6 +300,41 @@ def test_audit_and_menu_read_explain_why_points_did_not_trigger(tmp_path, monkey
     assert read["diagnostics_window_hours"] == 24
     assert read["point_diagnostics"]["delivery_quality"]["not_called"] == quality["not_called"]
 
+
+def test_low_frequency_point_categories_visible_in_audit_and_menu_same_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(reach_counts, "_PENDING", {})
+    monkeypatch.setattr(reach_counts, "_LAST_FLUSH", {})
+    alice = _agent(tmp_path, monkeypatch, ALICE_OWNER)
+    from agent_py_agent.agent.conversation.decision_outcome_log import append_decision_outcome
+    now = time.time()
+
+    def outcome_row(point, category, created_at, kind=""):
+        return {"schema": "decision_outcome.v1", "created_at": created_at, "point": point,
+                "scope": "thread", "mode": "apply", "status": "success", "reason": "",
+                "result_category": category, "elapsed_ms": 1, "thread_id": "thread-1",
+                "run_id": "run-1", "task_id": "task-1", "experiment": False, "blocking": True,
+                **({"record_kind": kind} if kind else {})}
+
+    # 低频点位的结果在 1 小时前：24 小时窗口内、但在最近 20 行之外。
+    append_decision_outcome(alice, outcome_row("external_material_order", "selected", now - 3600))
+    append_decision_outcome(alice, outcome_row("external_material_order", "dropped:sources_changed", now - 3600, kind="dropped"))
+    # 最近 20 行是另一个点位，把 recent 窗口占满。
+    for index in range(20):
+        append_decision_outcome(alice, outcome_row("delivery_quality", "selected", now - index))
+
+    outcome, report = _call(alice, "audit_records", {"topic": "decision"})
+    assert outcome.ok, outcome.output
+    [owner] = report["owners"]
+    audit_categories = owner["point_diagnostics"]["external_material_order"]["result_categories"]
+    assert {item["category"]: item["calls"] for item in audit_categories} == {
+        "selected": 1, "dropped:sources_changed": 1}
+    assert all(item["label"] for item in audit_categories)
+
+    # TUI 决策菜单与审计从同一处取逐点位类别（按 24 小时窗口全部行），低频点位两边都看得到且一致。
+    read = execute_local_model_operation(alice, "local-session", "decision_read", {"decision": {"scope": "owner"}})
+    assert read["point_diagnostics"]["external_material_order"]["result_categories"] == audit_categories
+
+
 def test_all_owners_scope_needs_admin_and_explicit_cross_owner_permission(tmp_path, monkeypatch):
     alice = _agent(tmp_path, monkeypatch, ALICE_OWNER)
     main = _agent(tmp_path, monkeypatch)

@@ -27,6 +27,8 @@
   - 运行时身份/后端变更 → `DROP_RUNTIME_CHANGED`（`runtime_changed`）；
   - 候选/材料/正式条目版本变化 → `DROP_SOURCES_CHANGED`（`sources_changed`）。
 - 登记只写观察记录，不改召回顺序、不重放、不推进游标；写失败只记日志。结果日志因此能分辨“Jev 选了但被宿主丢掉”。
+- 返工（2026-10-02）：`decision_recall._pre_recall_stale` 的两处复核都比对主模型身份，第二次复核比原口径更严（有意收紧）；
+  两次复核的结构化上下文统一收进 `_StaleStage`（在全部 import 之后定义）。
 - 详见[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近是选中非选择还是被丢弃2026-10-02分支-workerds1-decision-outcome-category)。
 
 ## 嵌入档案与向量身份（P13+P14，2026-10-02，ds1，待集成）

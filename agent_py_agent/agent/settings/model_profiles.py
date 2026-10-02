@@ -247,6 +247,8 @@ def public_model_profiles(data: dict, config: object) -> dict:
 # LLM: 只给经本入口的 decision_read（本地与 Gateway TUI 的决策菜单）附加近 24 小时的点位诊断；模型侧（含飞书等 IM 对话）
 #   看 audit_records topic=decision 的同一份 point_diagnostics。begin_decision_stage 与 user_config 的设置读取不走这里，
 #   决策热路径不多读文件。诊断只读 decision_reach_counts 与决策结果日志的同窗口行，读不到 effective 视图时原样返回。
+#   结果类别计数取 decision_outcome_summary 的 result_categories_by_point（按 24 小时窗口全部行逐点归，含 dropped 补充行），
+#   与审计诊断共用同一来源，不再由本文件按 recent 行自归。
 # 函数用途: 在决策设置读取结果上附加每个点位“最近检查几次、调用几次、为什么没触发、结果是什么类别”。
 def _with_point_diagnostics(agent: object, result: dict) -> dict:
     if not isinstance(result, dict) or not isinstance(result.get("effective"), dict):
@@ -262,29 +264,10 @@ def _with_point_diagnostics(agent: object, result: dict) -> dict:
     home_paths = getattr(agent, "home_paths", None)
     reach = decision_reach_summary(home_paths, since=since)
     outcomes = decision_outcome_summary(home_paths, since=since, thread_ids=None)
-    categories = _category_calls_by_point(outcomes.get("recent") or [])
+    categories = outcomes.get("result_categories_by_point") or {}
     modes = {point: row.get("effective_mode") for point, row in (result["effective"].get("points") or {}).items()}
     return {**result, "point_diagnostics": decision_point_diagnostics(POINTS, modes, reach, categories),
             "diagnostics_window_hours": 24}
-
-
-# LLM: 结果日志汇总的 result_categories 是全点位合计，逐点分不出来，所以这里用汇总的最近几行（带 point 与 result_category）
-#   自己按点位归计数；行数少、每个点位各算一份，够菜单展示。缺 result_category 的旧行在展示时由翻译函数显示为“未记录”。
-# 函数用途: 把结果日志最近几行按点位归成 {点位: {结果类别: 次数}}；没有可用行时返回空表（展示层照旧不显示这一段）。
-def _category_calls_by_point(recent: list) -> dict[str, dict[str, int]]:
-    counts: dict[str, dict[str, int]] = {}
-    for row in recent:
-        if not isinstance(row, dict):
-            continue
-        point = str(row.get("point") or "")
-        if not point:
-            continue
-        value = row.get("result_category")
-        # 旧记录没有这个字段（或值不是字符串）时用空串占位，交给共用的 result_category_label 显示“未记录”。
-        category = value if isinstance(value, str) and value else ""
-        point_counts = counts.setdefault(point, {})
-        point_counts[category] = point_counts.get(category, 0) + 1
-    return counts
 
 
 # LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用，

@@ -184,6 +184,34 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   5. 去掉 `record_decision_dropped` 的 `may_apply` 前置 → `test_result_category_records_host_drops_with_the_existing_reason_code` 红（多出一行）。
 - **未做/未验证**：这批测试只在 Mac 隔离 venv 跑；没在真实 home/Gateway 上做端到端复测（沙箱不允许起 Gateway），真实链路由 3a 在沙箱外复核。
 
+## 决策账结果类别：3a 审查返工（2026-10-02，同分支，追加提交）
+
+- **问题与改法**（3 必须 + 4 建议）：
+  1. 丢弃重复登记：`external_material_order` 唯一强制门改由调用方直接调 `decision_outcome_is_current`，不通过就 `return ""`（门自己已登记 dropped 行），
+     `_material_stale` 只管来源与期限（ctx 五元组），同一条建议只记一行 dropped；
+  2. `decision_recommendation.py` 文件头三行模块注释按 `78fc5c209` 原样恢复；
+  3. 逐点位结果类别唯一来源：`decision_outcome_summary` 新增 `result_categories_by_point`（时间窗口全部行、含 dropped 补充行），
+     TUI（`model_profiles._with_point_diagnostics`）与审计（`audit_records._decision_owner_report`）都从这一处取并传给 `decision_point_diagnostics` 第 4 参；
+     删掉 `_category_calls_by_point`、`_label_recent_categories`；
+  4. `decision_recall._StaleStage` 挪到全部 import 之后；`_pre_recall_stale` 注释写实（两处复核都比对主模型，第二次比原口径更严是有意的）；
+  5. `decision_planning._drop` 挪到 `_NON_SELECTIONS` 常量之后，前后各两空行；
+  6. `decision_outcome_log` 第 198 行第二个 `# LLM:` 改为 `#   ` 续行。
+- **新增/改写用例**（`agent_py_agent/tests/`）：
+  - `test_decision_external_material_order.py::test_gate_failure_records_exactly_one_dropped_row`：门不通过时结果日志恰好一行 dropped，原因码就是门给的码；
+  - `test_decision_outcome_log.py::test_summary_categories_by_point_cover_full_window_beyond_recent_rows`：低频点位早于最近 20 行但在 24 小时窗口内，
+    `result_categories_by_point` 仍能看到；窄窗口排除；`test_summary_counts_result_categories_and_marks_old_rows_unrecorded` 补 `result_categories_by_point` 断言；
+  - `test_decision_audit_controls.py::test_low_frequency_point_categories_visible_in_audit_and_menu_same_window`：审计与 TUI 决策菜单在同一窗口看到同一份逐点位类别。
+- **验证命令与结果**（Python：`~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，工作目录根，`--basetemp=/private/tmp/claude-501/m-ds1-r2`）：
+  - 22 个相关测试文件（decision_outcome_log、decision_reach_counts、tui_decision_menu、decision_audit_controls、delivery_quality、delivery_quality_integration、
+    delivery_stale、action_candidate、external_material_order、recall、pre_recall、planning、curator、curator_relation、skill_proposal_review、model_profiles、
+    model_operations、tui_model_menu、audit_requests_topic、decision_service、decision_subagent、skill_proposal_review_integration）→ 890 passed；
+  - guards9 → 169 passed；`check_import_boundaries` findings=0；ruff All checks passed；`check_doc_sync` DOC_SYNC_PASS；
+    `check_code_size --mode strict` hard=0 blocked=False（跑后还原 CODE_SIZE_REPORT.md）；`git diff --check` 干净；`check_clean_package` OK；
+    `size_diff.sh` 新增告警 0（消失 1）。
+- **变异验证 2 个，全部被拦下并还原（先备份再拷回）**：
+  1. 门不通过时调用方又 `drop_and_return` 登记一行（去掉“不重复登记”） → `test_gate_failure_records_exactly_one_dropped_row` 红（`assert 2 == 1`）；
+  2. 审计调 `decision_point_diagnostics` 不传类别 → `test_low_frequency_point_categories_visible_in_audit_and_menu_same_window` 红（审计侧 `result_categories` 为空 `{}`）。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：

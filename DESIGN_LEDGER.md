@@ -200,6 +200,18 @@
 - **与 `_record_retained` 的边界**：`gateway_model_adoption` 的 `candidate_validation_unavailable`、`first_request_not_selected`、`candidate_rejected_before_provider` 等
   属于“候选保留/未提交给模型”，不是“建议被丢”，这次不动、也不并进 `dropped:`；两者语义不同，文档在 `DECISION_AUDIT_AND_ADMIN_CONTROLS.md` 里写明。
 - **验证**：见 TESTS.md 同名节；变异验证 5 个（全部被现有测试拦下并还原）。
+- **返工（2026-10-02，3a 审查后追加提交）**：
+  - 丢弃记录去重：`external_material_order` 的唯一强制门改由调用方直接调 `decision_outcome_is_current`，不通过就 `return ""`
+    （门自己已按真实原因码登记一行 dropped），`_material_stale` 只复核来源与期限，不再返回门的原因码 → 同一条建议只记一行。
+  - 逐点位结果类别收成一个权威位置：`decision_outcome_summary` 新增 `result_categories_by_point`（按时间窗口全部行、含 dropped 补充行，
+    逐点归 `{类别: 次数}`），TUI 决策菜单（`model_profiles._with_point_diagnostics`）与审计（`audit_records._decision_owner_report`）都从这一处取
+    再传给 `decision_point_diagnostics` 第 4 参；低频点位在窗口内有结果就显示，不再受最近 20 行限制。删掉 `_category_calls_by_point` 与
+    `_label_recent_categories`（recent 行已带 label，是重复逻辑）。
+  - 恢复 `decision_recommendation` 文件头三行模块注释（重建时丢失，按 `78fc5c209` 原样恢复）。
+  - 代码风格：`decision_recall._StaleStage` 挪到全部 import 之后；`_pre_recall_stale` 注释写实（两处复核都比对主模型，第二次比原口径更严是有意的）；
+    `decision_planning._drop` 挪到常量之后；`decision_outcome_log` 的 `# LLM:` 续行改 `#   `。
+  - 补测试：强制门不通过时日志恰好一行 dropped（原因码是门给的码）；低频点位早于最近 20 行但在 24 小时窗口内，TUI 与审计诊断都能看到且一致。
+  - 变异验证 2 个（本轮）：去掉“不重复登记”、审计诊断不传类别，均被新测试拦下并还原。
 
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
 

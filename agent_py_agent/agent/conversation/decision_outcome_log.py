@@ -195,7 +195,7 @@ def material_or_skip(agent: object, stage: object, point: str, build: Callable[[
 
 # LLM: 只读；按时间窗口汇总每个接入点各状态的次数，并给出最近几行（无正文，建了调用记录的行附链路计时）。坏行只计数，不中断审计。
 #   请求根本没发出去的失败类结果（见 _unsent_code）不进 points，单列在 not_sent[点位][原因码]，不计入 Jev 的超时率和失败率；
-# LLM: 只改汇总口径，不改日志行本身。丢弃补充行（record_kind=dropped）进类别统计与 recent，
+#   只改汇总口径，不改日志行本身。丢弃补充行（record_kind=dropped）进类别统计与 recent，
 #   但不进按状态的调用统计——它不是一次独立调用，否则会把“丢了一次”错算成“多调了一次”。
 #   thread_ids 给出时只统计这些会话的行（调用方按可信范围解析，如 current_thread）；后台点位没有会话编号，随之排除。
 #   None 表示 owner 全部（含后台点位）。model_versions 按（请求名, 实际版本）计次，只数带 model_version 的行（旧行没有）。
@@ -205,7 +205,7 @@ def decision_outcome_summary(home_paths: object, *, since: float,
     path = getattr(home_paths, "owner_decision_outcomes_jsonl", None)
     if not path:
         return {"available": False, "points": {}, "not_sent": {}, "model_versions": [], "recent": [],
-                "result_categories": [], "unreadable_rows": 0}
+                "result_categories": [], "result_categories_by_point": {}, "unreadable_rows": 0}
     report = read_jsonl_objects_report(Path(path), context="decision_outcome_log.read")
     rows = [row for row in report.records if row.get("schema") == SCHEMA and _created_at(row) >= since
             and (thread_ids is None or str(row.get("thread_id") or "") in thread_ids)]
@@ -220,7 +220,8 @@ def decision_outcome_summary(home_paths: object, *, since: float,
         counts[key] = counts.get(key, 0) + 1
     recent = [_recent_row(row) for row in rows[-_RECENT_ROWS_COUNT:]]
     return {"available": True, "points": points, "not_sent": unsent, "model_versions": _model_versions(rows),
-            "result_categories": _result_categories(rows), "recent": recent,
+            "result_categories": _result_categories(rows),
+            "result_categories_by_point": _result_categories_by_point(rows), "recent": recent,
             "unreadable_rows": len(report.load_errors)}
 
 
@@ -235,6 +236,23 @@ def _result_categories(rows: list[dict[str, object]]) -> list[dict[str, object]]
         counts[key] = counts.get(key, 0) + 1
     ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     return [{"category": category, "calls": calls} for category, calls in ordered]
+
+
+# LLM: 只读 result_category 结构化字符串；按时间窗口全部行（含 dropped 补充行）逐点位归次数，
+#   是 TUI 决策菜单与审计诊断共用的唯一来源：低频点位在窗口内有结果就显示，不再受最近行数限制。
+#   旧记录缺字段归 RESULT_UNRECORDED（展示为未记录）；缺 point 的行不进表。
+# 函数用途: 统计时间窗内各点位的结果类别次数 {点位: {类别: 次数}}。
+def _result_categories_by_point(rows: list[dict[str, object]]) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        point = str(row.get("point") or "")
+        if not point:
+            continue
+        category = row.get("result_category")
+        key = category if isinstance(category, str) and category else RESULT_UNRECORDED
+        point_counts = counts.setdefault(point, {})
+        point_counts[key] = point_counts.get(key, 0) + 1
+    return counts
 
 
 # LLM: 只读行里的 requested_model / model_version 两个字符串字段；缺失或不是字符串的行不计（旧行、失败行）。

@@ -10,16 +10,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NamedTuple
 
-
-# LLM: 召回复核的只读上下文会随判断阶段变化（早段有来源列、晚段有主模型），用具名元组区分两段，
-#   避免函数签名为了塞参数越界，也让每个判定字段在函数体里可读。
-# 类用途: 重排建议采用前的两段只读复核输入。
-class _StaleStage(NamedTuple):
-    run_request: object
-    stage: object
-    outcome: object
-    payload: tuple
-
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
@@ -42,6 +32,17 @@ from ..conversation.decision_service import (
     decision_outcome_is_current,
 )
 from ..settings.defaults import context_window_or_default
+
+
+# LLM: 召回复核的只读上下文会随判断阶段变化（早段有来源列、晚段有主模型），用具名元组区分两段，
+#   避免函数签名为了塞参数越界，也让每个判定字段在函数体里可读。
+# 类用途: 重排建议采用前的两段只读复核输入。
+class _StaleStage(NamedTuple):
+    run_request: object
+    stage: object
+    outcome: object
+    payload: tuple
+
 
 # 逐条记忆题的候选说明（J12b，2026-10-02）：旧措辞里 not_needed 写“不需要额外重排”，决策模型把它读成“这条记忆用不上”，
 # 对无关记忆答 not_needed/no_match，任何非排序回答都让整批保持原顺序，重排永远不生效（基准 recall 12/30）。
@@ -194,7 +195,8 @@ def _pre_recall_material(agent, ctx) -> tuple:
 
 
 # LLM: 与被替换掉的三段 if 一一对应：先看基线记录视图是否与冻结视图一致（来源变化），
-#   再看主模型身份（运行时变化），最后看期限；都通过返回空串。首段不检查主模型（原口径没有这一条）。
+#   再看主模型身份（运行时变化），最后看期限；都通过返回空串。本函数的两处调用都会比对主模型身份：
+#   第二次复核因此比原口径多一条主模型检查，是有意收紧——采用前换过主模型就不按旧模型建议注入。
 #   ctx 是 (最新记录, 冻结的记录视图, 决策材料 state) 三元组，收成一个参数。
 # 函数用途: 复核补充召回建议在采用前是否仍然成立，返回被丢弃的原因码（空串表示仍可采用）。
 def _pre_recall_stale(agent, stage, outcome, ctx) -> str:

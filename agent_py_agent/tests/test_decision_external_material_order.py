@@ -371,3 +371,23 @@ def test_page_floor_and_its_label_share_one_limit(prepared, monkeypatch):
     monkeypatch.setattr(limits, "MATERIAL_PAGES_MIN_COUNT", 4)
     assert module.external_material_order_hint(host, record, archive) == "" and not calls
     assert reasons() == ({"single_page": 1}, 0) and "不到 4 个" in miss_reason_label("single_page")
+
+
+def test_gate_failure_records_exactly_one_dropped_row(prepared, monkeypatch):
+    host, record, archive = prepared
+    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=host.root / "outcomes.jsonl")
+    install(monkeypatch, choices=("later", "first", "first"))
+    from agent_py_agent.agent.conversation.decision_outcome_log import record_decision_dropped
+
+    def gate(agent, _unused, stage, outcome):
+        # 模拟真实强制门：不通过时门自己按真实原因码追加一行 dropped，调用方不应再登记。
+        record_decision_dropped(agent, stage, outcome, "policy_changed")
+        return False
+
+    monkeypatch.setattr(module, "decision_outcome_is_current", gate)
+    assert module.external_material_order_hint(host, record, archive) == ""
+    rows = [json.loads(line) for line in (host.root / "outcomes.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["record_kind"], row["result_category"]) == ("dropped", "dropped:policy_changed")
+    assert row["point"] == module._POINT
