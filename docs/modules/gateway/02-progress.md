@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+## GET /status 新增 usage_accounting 段：用量账两项进程内诊断计数（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`，待集成）
+
+- `http_handlers.handle_status` 响应多一段 `usage_accounting`：`unaccounted_probe_attempt_count`（没绑记账范围的工具能力探测次数，
+  来自 `backends/http.py`）和 `unknown_purpose_keys`（持久用量账里读到的未知用途键 `{keys, overflow_count}`，来自 `conversation/store_usage.py`）。
+- 和 `loop_health` 一样直接读进程内存、不经磁盘；只读、不清零、不写盘。不进按 owner 范围的 `audit_records`，理由见设计台账同名节。
+
 ## 主机名变化后 SIGTERM 仍能停网关（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，待集成）
 
 - 信号处理函数改用启动时记下的本代身份，和主循环比对同一份。

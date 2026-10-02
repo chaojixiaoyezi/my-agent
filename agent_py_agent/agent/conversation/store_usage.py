@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,52 @@ _ADDITIVE_USAGE_FIELDS = (
     "provider_usage_call_count",
     "estimated_usage_call_count",
 )
+
+# LLM: 读取端放行未知用途键的进程内诊断计数：按键名计次，只给 GET /status 的 usage_accounting 段投影
+#   （gateway_parts/http_handlers._usage_accounting_diagnostics）。不写日志、不改求和结果、不报错，开放世界读法照旧。
+#   计的是“读到的行次”：同一持久行每被求和一次就 +1，用来发现有没有拼错的键、是什么键，不是行数。
+#   不同键名最多单独记 _UNKNOWN_PURPOSE_KEY_MAX_COUNT 个，超出只进 overflow_count，坏文件也撑不爆内存。
+# 不同的未知用途键最多单独计 16 个：拼错的键通常只有一两个，再多就是坏数据，只记总数不记键名。
+_UNKNOWN_PURPOSE_KEY_MAX_COUNT = 16
+_UNKNOWN_PURPOSE_KEYS_LOCK = threading.Lock()
+_UNKNOWN_PURPOSE_KEYS: dict[str, Any] = {"keys": {}, "overflow_count": 0}
+
+
+# LLM: 只在锁内改计数；已记过的键继续累加，新键超过上限只进 overflow_count。调用方传全部用途键，已知桶在这里过滤。
+# 函数用途: 把一批用途键里不认识的记进诊断计数（已知四桶不计）。
+def _count_unknown_purpose_keys(purposes: Iterable[str]) -> None:
+    unknown = [purpose for purpose in purposes if purpose not in _PURPOSES]
+    if not unknown:
+        return
+    with _UNKNOWN_PURPOSE_KEYS_LOCK:
+        keys = _UNKNOWN_PURPOSE_KEYS["keys"]
+        for purpose in unknown:
+            _UNKNOWN_PURPOSE_KEYS["overflow_count"] += int(not _bump_bounded_count(keys, purpose))
+
+
+# LLM: 调用方持锁；只有“新键且已记满上限”才拒记，已有键不受上限影响。
+# 函数用途: 给一个键 +1；键是新的且已记满上限就不记，返回 False。
+def _bump_bounded_count(counts: dict[str, int], key: str) -> bool:
+    if key not in counts and len(counts) >= _UNKNOWN_PURPOSE_KEY_MAX_COUNT:
+        return False
+    counts[key] = counts.get(key, 0) + 1
+    return True
+
+
+# LLM: 只读快照（复制），键按名字排序，可直接 JSON 化；改字段名须同步 http_handlers 的投影与 test_store_usage_open_world。
+# 函数用途: 返回当前进程读到的未知用途键及次数（诊断用，只读）。
+def unknown_purpose_key_counts() -> dict[str, Any]:
+    with _UNKNOWN_PURPOSE_KEYS_LOCK:
+        keys = _UNKNOWN_PURPOSE_KEYS["keys"]
+        return {"keys": dict(sorted(keys.items())), "overflow_count": int(_UNKNOWN_PURPOSE_KEYS["overflow_count"])}
+
+
+# LLM: 生产路径不调用；测试夹具用它隔离进程级计数。
+# 函数用途: 清零未知用途键计数；只供测试和显式管理入口使用。
+def reset_unknown_purpose_key_counts() -> None:
+    with _UNKNOWN_PURPOSE_KEYS_LOCK:
+        _UNKNOWN_PURPOSE_KEYS["keys"].clear()
+        _UNKNOWN_PURPOSE_KEYS["overflow_count"] = 0
 
 
 # LLM: 模型计费事件与 preflight 显示分别保存，各自有唯一口径；共享 store 原子写入，不新增旁路文件。
@@ -482,11 +529,13 @@ def _purpose_rows(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 # LLM: 各桶互斥但复用根摘要加法；按“已知桶 + 出现过的桶”求和并保留，不能倒推旧调用用途。
-# 函数用途: 合并已声明用途的增量，未知用途键一并求和并保留，供计费和回放。
+#   出现过的未知键同时记进程内诊断计数（unknown_purpose_key_counts），只计不拦，拼错的键靠 /status 发现。
+# 函数用途: 合并已声明用途的增量，未知用途键一并求和并保留（并记诊断计数），供计费和回放。
 def _sum_purpose_breakdowns(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     rows = [_purpose_rows(summary) for summary in summaries]
     if not any(rows):
         return {}
+    _count_unknown_purpose_keys(purpose for row in rows for purpose in row)
     purposes = [*_PURPOSES, *sorted({purpose for row in rows for purpose in row} - set(_PURPOSES))]
     return {"schema": _PURPOSE_SCHEMA, **{
         purpose: _sum_model_call_summaries([row.get(purpose, {}) for row in rows], include_purposes=False)

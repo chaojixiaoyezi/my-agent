@@ -1,5 +1,28 @@
 # 设计台账
 
+## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
+
+- **来源**：3a 派活。ds2 两轮加固（C7 计量修正、三件小加固、M1 修正）be 审过之后剩下四处可选尾巴，都不需要用户拍板。
+- **① 未知用途键留结构化计数（`conversation/store_usage.py`）**：开放世界读法照旧——“值是对象”的未知用途键放行并当新桶求和，不改回报错。
+  `_sum_purpose_breakdowns` 读到不在 `_PURPOSES` 里的键时记进程内诊断计数 `unknown_purpose_key_counts()`：按键名计次
+  （拼成 `probe:tool_capabilty` 这类一眼能看出来），不同键名最多单独记 `_UNKNOWN_PURPOSE_KEY_MAX_COUNT`（16）个，超出只进
+  `overflow_count`，坏文件撑不爆内存。计的是“读到的行次”（同一持久行每被求和一次 +1），用来发现有没有、是什么键，不是行数。
+  不写日志、不影响求和结果、不持久化。
+- **② 没绑记账范围的探测次数挂到 GET /status（`gateway_parts/http_handlers.py`）**：`unaccounted_probe_attempt_count()` 原来只有测试读。
+  现在 `/status` 响应多一段 `usage_accounting`：`unaccounted_probe_attempt_count` 与 `unknown_purpose_keys`（`{keys, overflow_count}`）。
+  **挂 /status 不挂审计的理由**：两项都是 Gateway 进程内存里的进程级计数，和 `loop_health` 同一种事实、同一个出口（直接读内存、不经磁盘）；
+  `audit_records` 是按 owner 范围读持久记录（设置、用量账、请求记录）的工具，进程级计数跨 owner，放进 owner 审计会把别的用户的探测次数
+  泄露给当前用户，也没有持久来源可读。线上 `curl /status` 看 `usage_accounting.unaccounted_probe_attempt_count` 非零就说明有探测没进
+  用量账，`unknown_purpose_keys.keys` 非空就说明用量账里有不认识的用途键。只读、不清零、不写盘；两项的定义仍在各自模块，/status 只投影。
+- **③ 补真实账本形状两行用例**：`_ModelCallAggregate.to_summary()` 同范围连写两行、都没探测用量 → 两行都没有 `probe:tool_capability` 键，
+  第二行是增量。原来靠“一行真实形状”和“两行假形状”两个用例拼起来覆盖，现在一个用例锁住组合。产品代码不变。
+- **④ 取证脚本去写死行号（`agent_py_agent/scripts/b_acceptance/timeout_budget_evidence.py`）**：`is_probe_production_sites` 原写死
+  `llm_activation_readiness.py:178`，探测计量上线后 `backends/http.py` 也有埋点，原行号也已漂到 186。改为按源码结构化事实扫描：
+  ast 找 `agent_py_agent/agent`、`agent_py_agent/cli`（不含 tests）里 `is_probe=True` 关键字实参，输出“相对路径:行号”；
+  `is_probe=params.is_probe` 这类转发不算埋点。同一字典里 `timeout_stage_production_values` 仍写死 `["provider_wall"]`，不在本轮范围，原样保留。
+- **边界**：没有新配置、没有新文件、不改读写合同；两个计数都是进程内、重启清零、不持久化；常数目录已重新生成（817 项）。
+- **验证**：见 TESTS.md 同名节。
+
 ## 停机准入拒绝的调用方收尾：决策、子代理、运行错误报告、唤醒毒丸按“宿主停机”处理（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `claude/3a-step16z` `00bcf7d45`，已实现，待集成）
 
 - **问题**：sol2 复审 J17 栅栏（`bc639caa7`）后确认：没有锁倒置，窗口确实拦住了。但三个调用方不认识新的准入拒绝 `ModelCallAdmissionClosedError`，把正常停机说成了别的错误。

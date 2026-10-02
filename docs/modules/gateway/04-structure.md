@@ -422,6 +422,8 @@ TUI 的背景 task ID 仅作 expected-target 提示。`runtime_db/repository.py`
 `status_rendering.render_gateway_status` 另在 state.json 的 `unidentified_stale_attempts` 大于 0 时输出
 `gateway unidentified_stale_attempts=N`（`_append_unidentified_stale_attempts`），只投影 Gateway 启动写下的计数，
 不查 runtime.db、不结清；CLI `my-agent status` 的 Gateway 段与 `--json` 载荷同源同规则。
+GET `/status`（`http_handlers.handle_status`）除 `loop_health` 快照外另带 `usage_accounting` 段：`unaccounted_probe_attempt_count`
+（`backends/http.py`）与 `unknown_purpose_keys`（`conversation/store_usage.py`），都是进程内只读计数，直接读内存，不进 owner 审计。
 
 ## 2026-09-14 R291 收口待重试事实必须进入硬事实发现层（否则恢复链跑不到）
 

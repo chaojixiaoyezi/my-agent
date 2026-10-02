@@ -12,12 +12,23 @@ import json
 import pytest
 
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation import store_usage as store_usage_module
 from agent_py_agent.agent.conversation.store_usage import (
     _PURPOSE_SCHEMA,
     _purpose_rows,
     _sum_purpose_breakdowns,
+    reset_unknown_purpose_key_counts,
+    unknown_purpose_key_counts,
 )
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+
+# 函数用途: 每个用例前后清零进程级未知用途键计数；本文件多个用例都会读到未知键，不能互相串账。
+@pytest.fixture(autouse=True)
+def _reset_unknown_purpose_keys():
+    reset_unknown_purpose_key_counts()
+    yield
+    reset_unknown_purpose_key_counts()
 
 
 # 函数用途: 生成一个用途桶的最小累计形状（数字字段按需给，缺省为 0）。
@@ -292,3 +303,91 @@ def test_write_probe_appears_after_usage_and_deltas_sum_to_cumulative(tmp_path):
     probe_total = total["probe:tool_capability"]
     assert probe_total["physical_model_attempt_count"] == 2, "各行增量加起来等于累计"
     assert probe_total["output_tokens"] == 20
+
+
+# LLM: 读取端开放世界放行未知键的同时记进程内诊断计数：走 ConversationStore.summary() 的真实读路径，
+#   拼错的键名和读到的行次能从 unknown_purpose_key_counts() 看到；已知四桶不计；求和结果与读法不变。
+# 函数用途: 拼错的 probe 键经 store.summary() 读到后进诊断计数，已知键不计，读法照旧当新桶求和。
+def test_unknown_purpose_keys_are_counted_through_store_summary(tmp_path):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "unknown-key-count"})
+    row = _calls_with_purposes({
+        "main": _bucket(output=2),
+        "probe:tool_capabilty": _bucket(output=7),  # 故意拼错的键
+    })
+    store.model_usage.append_once({
+        "event_id": "usage-unknown-key-1",
+        "thread_id": thread.thread_id,
+        "request_id": "req",
+        "run_id": "run",
+        "source": "test",
+        "model_calls": row,
+    })
+    assert unknown_purpose_key_counts() == {"keys": {}, "overflow_count": 0}, "写入不求和用途桶，不计"
+    summary = store.model_usage.summary(thread.thread_id)
+    assert summary["purpose_breakdown"]["probe:tool_capabilty"]["output_tokens"] == 7, "读法不变：照样当新桶求和"
+    assert summary["purpose_breakdown"]["main"]["output_tokens"] == 2
+    assert unknown_purpose_key_counts() == {"keys": {"probe:tool_capabilty": 1}, "overflow_count": 0}
+    store.model_usage.summary(thread.thread_id)
+    assert unknown_purpose_key_counts()["keys"] == {"probe:tool_capabilty": 2}, "按读到的行次计，再读一次再 +1"
+
+
+# LLM: 上限只约束“不同键名”的个数：记满后新键只进 overflow_count，已记过的键照常累加；上限是模块常数，测试缩小它。
+# 函数用途: 不同未知键超过上限时只计总数不记键名，已记过的键不受上限影响。
+def test_unknown_purpose_key_counts_are_bounded(monkeypatch):
+    monkeypatch.setattr(store_usage_module, "_UNKNOWN_PURPOSE_KEY_MAX_COUNT", 2)
+    rows = [
+        _calls_with_purposes({"main": _bucket(output=1), f"future:{index}": _bucket(output=1)})
+        for index in range(3)
+    ]
+    _sum_purpose_breakdowns(rows)
+    assert unknown_purpose_key_counts() == {"keys": {"future:0": 1, "future:1": 1}, "overflow_count": 1}
+    _sum_purpose_breakdowns([rows[0], rows[2]])
+    assert unknown_purpose_key_counts() == {"keys": {"future:0": 2, "future:1": 1}, "overflow_count": 2}
+
+
+# LLM: 真实账本形状 + 同范围两行：第一行 current 的 probe 桶是全 0 骨架，第二行 prior 由 _sum_purpose_breakdowns 求和
+#   得到骨架；两处都只能按结构化计数判“没有”，任一处退回字典真假都会写出空 probe 键。
+#   原来靠“一行真实形状”和“两行假形状”两个用例拼起来覆盖，这里一个用例锁住组合。
+# 函数用途: 回归锁 M1 场景 (d)：真实账本形状同范围连写两行、都没有探测时，两行都没有 probe 键，第二行是增量。
+def test_write_two_real_ledger_rows_without_probe_usage_omits_probe_key_in_both(tmp_path):
+    from agent_py_agent.agent.contracts.model_call_ledger import (
+        ModelCallRecord,
+        _ModelCallAggregate,
+    )
+
+    aggregate = _ModelCallAggregate()
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "write-two-real-ledger"})
+    scope = {
+        "thread_id": thread.thread_id,
+        "request_id": "req",
+        "run_id": "run",
+        "source": "test",
+    }
+    events = []
+    for index in (1, 2):
+        aggregate.observe_new(ModelCallRecord(
+            call_id=f"call-main-{index}",
+            backend="test-backend",
+            model="test-model",
+            input_tokens=10 * index,
+            request_id="req",
+            run_id="run",
+            status="finished",
+            output_tokens=2 * index,
+            provider_usage_reported=True,
+        ))
+        # 生产组装与 call_runtime.model_call_summary 一致：根带 schema，用途桶来自真实账本 to_summary()
+        calls = {"schema": "model_call_summary.v1", **aggregate.to_summary()}
+        events.append(store.model_usage.append_snapshot_once({**scope, "model_calls": calls}))
+    for event in events:
+        purposes = event.model_calls["purpose_breakdown"]
+        assert "probe:tool_capability" not in purposes, "真实账本形状两行都没有探测时，两行都不许写空 probe 键"
+        assert {"main", "auxiliary", "decision"} <= set(purposes), "老三个桶照写"
+    second_main = events[1].model_calls["purpose_breakdown"]["main"]
+    assert second_main["physical_model_attempt_count"] == 1, "第二行是相对第一行的增量：2 - 1"
+    assert second_main["output_tokens"] == 4, "第二行增量 = 6 - 2"
+    total = store.model_usage.summary(thread.thread_id)["purpose_breakdown"]
+    assert total["main"]["output_tokens"] == 6 and "probe:tool_capability" in total, "读回求和仍给出已知四桶"
+    assert unknown_purpose_key_counts() == {"keys": {}, "overflow_count": 0}, "已知桶不进未知键计数"

@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -245,3 +247,43 @@ def test_unaccounted_probe_attempt_is_counted(monkeypatch):
     select_tool_protocol(agent, run_id="run-1", request_id="req-1")
     assert unaccounted_probe_attempt_count() == 0, "绑定记账 scope 的探测不计入未绑定计数"
     assert len(agent._model_call_ledger.records()) == 1
+
+
+# LLM: 两项进程内计数的线上出口是 GET /status 的 usage_accounting 段（http_handlers._usage_accounting_diagnostics）；
+#   这里走真实 handle_status（假 handler 只收 JSON），计数来自真实的无 scope 探测与真实的开放世界读法，不直接塞数。
+# 函数用途: /status 能看到没绑记账范围的探测次数和用量账里读到的未知用途键。
+def test_status_endpoint_projects_usage_accounting_counters(monkeypatch, tmp_path):
+    from agent_py_agent.agent.conversation.store_usage import (
+        _PURPOSE_SCHEMA,
+        _sum_purpose_breakdowns,
+        reset_unknown_purpose_key_counts,
+    )
+    from agent_py_agent.agent.gateway_parts.http_handlers import handle_status
+    from agent_py_agent.tests.test_gateway_admission_wait import _paths
+
+    reset_unaccounted_probe_attempt_count()
+    reset_unknown_purpose_key_counts()
+    try:
+        wire = _ProbeWire()
+        backend2 = get_backend("openai_compatible", _backend_config())
+        monkeypatch.setattr(backend2, "request_json", wire.request_json)
+        assert backend2.probe_tool_capability().native_supported is True  # 无 scope 直调：真实探测、不记账
+        _sum_purpose_breakdowns([{"purpose_breakdown": {"schema": _PURPOSE_SCHEMA, "probe:tool_capabilty": {}}}])
+        paths = _paths(tmp_path)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.state.write_text(
+            json.dumps({"status": "running", "pid": os.getpid(), "started_at": time.time()}), encoding="utf-8"
+        )
+        sent: list[tuple[int, dict]] = []
+        handle_status(
+            SimpleNamespace(_send_json=lambda status, body: sent.append((status, body))),
+            SimpleNamespace(paths=paths),
+        )
+        assert sent[0][0] == 200 and sent[0][1]["status"] == "running"
+        assert sent[0][1]["usage_accounting"] == {
+            "unaccounted_probe_attempt_count": 1,
+            "unknown_purpose_keys": {"keys": {"probe:tool_capabilty": 1}, "overflow_count": 0},
+        }
+    finally:
+        reset_unaccounted_probe_attempt_count()
+        reset_unknown_purpose_key_counts()

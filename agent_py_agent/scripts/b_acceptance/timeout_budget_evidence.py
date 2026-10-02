@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import socket
 import sys
@@ -277,6 +278,39 @@ def _scenario_stream_idle() -> dict[str, object]:
 
 # ---------------------------------------------------------------- 场景 3: ledger 形态
 
+# LLM: 只认关键字实参 `is_probe=True` 的字面量；`is_probe=params.is_probe` 这类转发不是埋点。
+# 函数用途: 判断一个 ast 节点是不是把 is_probe=True 传进去的关键字实参。
+def _is_probe_true_keyword(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.keyword)
+        and node.arg == "is_probe"
+        and isinstance(node.value, ast.Constant)
+        and node.value.value is True
+    )
+
+
+# LLM: 生产代码口径与 test_constant_names_unique 一致：agent_py_agent/agent 与 agent_py_agent/cli，不含 tests。
+# 函数用途: 列出要扫描的生产 .py 文件（排序稳定）。
+def _production_source_files() -> list[Path]:
+    files: list[Path] = []
+    for package in ("agent", "cli"):
+        root = PKG_ROOT / "agent_py_agent" / package
+        files.extend(path for path in root.rglob("*.py") if "tests" not in path.parts)
+    return sorted(files)
+
+
+# LLM: 取证的“探针埋点在哪”按源码结构化事实扫描，不写死文件名或行号（探测计量上线后旧的单一埋点说法已失效，
+#   行号也会随源码漂移）。返回 "相对 agent_py_agent 的路径:行号"，顺序按文件名、行号稳定。
+# 函数用途: 列出当前源码里所有把 is_probe=True 传给模型调用账本的生产调用点。
+def is_probe_production_sites() -> list[str]:
+    sites: list[str] = []
+    for path in _production_source_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(PKG_ROOT / "agent_py_agent").as_posix()
+        sites.extend(f"{rel}:{node.lineno}" for node in ast.walk(tree) if _is_probe_true_keyword(node))
+    return sites
+
+
 def _scenario_ledger_evidence() -> dict[str, object]:
     # 生产路径: idle 掐断抛 ProviderTimeoutError -> except ProviderTimeoutError
     # (tool_model_generation.py:139) -> _record_provider_timeout -> record_model_call_timeout
@@ -319,7 +353,7 @@ def _scenario_ledger_evidence() -> dict[str, object]:
         "timeout_params_fields": list(ModelCallTimeoutParams.__dataclass_fields__.keys()),
         "has_elapsed_or_first_token_field": False,
         "timeout_stage_production_values": ["provider_wall"],  # 全库唯一生产取值
-        "is_probe_production_sites": ["llm_activation_readiness.py:178"],  # 探针路径唯一埋点
+        "is_probe_production_sites": is_probe_production_sites(),  # 按源码扫描，不写死行号
     }
 
 

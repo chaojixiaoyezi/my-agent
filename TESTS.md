@@ -1,5 +1,40 @@
 # 测试与发布验收
 
+## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`）
+
+**来源**：3a 派活；ds2 两轮加固 be 审过之后剩下的四处可选尾巴。设计与“挂 /status 不挂审计”的理由见 DESIGN_LEDGER 同名节。
+
+**新增用例（5 项）**：
+- `test_store_usage_open_world.py` 新增 3 项，文件加 autouse 夹具每例前后清零进程级未知键计数：
+  - `test_unknown_purpose_keys_are_counted_through_store_summary`：拼错的 `probe:tool_capabilty` 经 `ConversationStore.summary()`
+    读到后 `unknown_purpose_key_counts()` 记 1 次，再读一次记 2 次；写入不计；求和结果与读法不变（仍当新桶求和）；
+  - `test_unknown_purpose_key_counts_are_bounded`：上限缩到 2，三个不同未知键 → 记两个键 + `overflow_count` 1；已记过的键继续累加；
+  - `test_write_two_real_ledger_rows_without_probe_usage_omits_probe_key_in_both`：真实账本形状（`_ModelCallAggregate.to_summary()` +
+    生产根 schema）同范围连写两行、都没探测 → 两行都没 probe 键、老三桶照写，第二行是增量（物理尝试 1、输出 4），读回求和 6。
+- `test_probe_tool_capability_metering.py` 新增 1 项 `test_status_endpoint_projects_usage_accounting_counters`：真实无 scope 探测一次 +
+  真实开放世界读一次拼错键，再走真实 `handle_status`（假 handler 只收 JSON）→
+  `usage_accounting == {"unaccounted_probe_attempt_count": 1, "unknown_purpose_keys": {"keys": {"probe:tool_capabilty": 1}, "overflow_count": 0}}`。
+- `test_timeout_budget_locked.py` 新增 1 项 `test_is_probe_production_sites_come_from_source_scan`：扫描结果的文件集合恰为
+  `agent/backends/http.py` 与 `agent/contracts/llm_activation_readiness.py`，每条行号指向的源码行含 `is_probe=True`，
+  ledger 场景的 `is_probe_production_sites` 来自同一扫描（不再写死）。新增埋点时要同步改这个文件集合。
+
+**变异（5 个，每项至少 1 个，全部被拦且 sha256 逐字节恢复；脚本在 Claude 会话 scratchpad `run_mutations.py`）**：
+- ① 去掉 `_sum_purpose_breakdowns` 里的 `_count_unknown_purpose_keys` 调用 → 3 failed（两个计数用例 + /status 投影用例）；
+- ① 上限判断 `>=` 放宽成 `>` → 1 failed（有界用例）；
+- ② 去掉 `handle_status` 里 `response["usage_accounting"] = ...` → 1 failed（/status 投影用例）；
+- ③ `_purpose_breakdown_delta` 的 prior 侧退回字典真假（`not prior_row`）→ 2 failed（新真实形状两行用例 + 原假形状两行用例）；
+- ④ 扫描改认 `is_probe=False` → 1 failed（源码扫描用例）。
+
+**门禁结果（本地，线上 CI 未作为验收来源）**：
+- focused：`test_store_usage_open_world.py`、`test_probe_tool_capability_metering.py`、`test_timeout_budget_locked.py`、
+  `test_gateway_dispatcher_resilience.py`、`test_constants_catalog.py`、`test_constant_names_unique.py` 共 59 passed, 1 xpassed（既有）；
+- guards9（`3a-scripts/guards9.txt` 10 文件）170 passed；`check_import_boundaries.py` findings=0；
+- `ruff check agent_py_agent scripts` All checks passed；`check_doc_sync.py` DOC_SYNC_PASS；
+- `check_code_size.py --mode strict` blocked=False（hard=0，报告已 `git checkout` 还原）；`size_diff.sh` 新增告警 0；
+- `git diff --check` OK；`check_clean_package.py .` OK；常数目录重新生成 817 项，`--check` 一致。
+- 环境：`claude-tools/ci-venv-312`，basetemp `/private/tmp/claude-501/pef*`；不启动 Gateway、不碰 8420、不读产品会话正文。
+  真实 Gateway 的 `curl /status` 看 `usage_accounting` 段由 3a 集成部署后核对。
+
 ## 停机准入拒绝的调用方收尾（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `00bcf7d45`）
 
 - `test_gateway_decision_shutdown_cancel.py` 新增 1 项，参数化成 3 种情形。走真实本地 HTTP 决策链，在“已登记 ActiveDecision、还没进模型账本”这一刻执行收尾步骤：

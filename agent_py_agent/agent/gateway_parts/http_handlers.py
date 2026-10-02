@@ -23,6 +23,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
+from ..backends.http import unaccounted_probe_attempt_count
 from ..conversation.agent_activity import (
     ConversationAgentActivity,
     conversation_agent_activity,
@@ -47,6 +48,7 @@ from ..conversation.control_commands import (
     parse_conversation_task_command,
 )
 from ..conversation.message_stream import NoticeDisplayCapabilities, read_background_response_page
+from ..conversation.store_usage import unknown_purpose_key_counts
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .channel_health import adapter_process_facts
 from .client_service import execute_gateway_client_memory, read_gateway_client_history
@@ -148,6 +150,17 @@ def _can_read_control_operation(handler, receipt) -> bool:
     )
 
 
+# LLM: 用量账的两项进程内诊断计数只在 Gateway 进程内存里，所以和 loop_health 一样挂 GET /status，不进按 owner 范围的
+#   audit_records：两项都是进程级、跨 owner 的计数，放进 owner 审计会把别的用户的探测次数泄露给当前用户。
+#   只读、不清零、不写盘；计数定义在 backends/http.py 与 conversation/store_usage.py，这里只投影，字段名与那两处的测试同步。
+# 函数用途: 组装 /status 的 usage_accounting 段：没绑记账范围的探测次数、持久用量账里读到的未知用途键。
+def _usage_accounting_diagnostics() -> dict[str, Any]:
+    return {
+        "unaccounted_probe_attempt_count": unaccounted_probe_attempt_count(),
+        "unknown_purpose_keys": unknown_purpose_key_counts(),
+    }
+
+
 def handle_status(handler, server) -> None:
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
@@ -163,6 +176,8 @@ def handle_status(handler, server) -> None:
     }
     # 派发线程存活与最近一次 tick 直接读进程内账本（不经磁盘）：有 pending 却没人派发时一眼能看出派发已死或卡住。
     response.update(loop_health.snapshot())
+    # 用量账两项进程内诊断计数同样直接读内存：没绑记账范围的探测次数、用量账里读到的未知用途键。
+    response["usage_accounting"] = _usage_accounting_diagnostics()
     # 适配器是否真活着按 adapter.pid 的进程存活判定，状态文件只作补充；事实读取失败不影响 /status 本身。
     try:
         response.update(adapter_process_facts(server.paths))

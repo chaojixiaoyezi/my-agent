@@ -19,6 +19,7 @@ B 阶段修恢复/证据字段时, 本文件 6/7 将按预期变红 -> 正是「
 """
 
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -427,6 +428,30 @@ def test_json_roundtrip_of_locked_evidence(tmp_path: Path) -> None:
         / "scripts" / "b_acceptance" / "timeout_budget_evidence.py"
     )
     assert script.exists()
+
+
+# LLM: 取证脚本的“探针埋点在哪”改为按源码扫描 is_probe=True 关键字实参，不写死行号。本用例锁住扫描口径与接线：
+#   现有两处生产埋点（backends/http.py 工具能力探测、contracts/llm_activation_readiness.py 激活探针）都在，
+#   每条行号指向的源码行确实含 is_probe=True，且 ledger 场景的字段来自同一扫描。新增埋点时同步改这里的文件集合。
+# 函数用途: 取证脚本的 is_probe 埋点清单来自源码扫描，覆盖当前两处生产埋点且行号真实。
+def test_is_probe_production_sites_come_from_source_scan() -> None:
+    import importlib.util
+
+    package_root = Path(__file__).resolve().parents[1]
+    script = package_root / "scripts" / "b_acceptance" / "timeout_budget_evidence.py"
+    spec = importlib.util.spec_from_file_location("timeout_budget_evidence_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    sites = module.is_probe_production_sites()
+    files = sorted({site.rsplit(":", 1)[0] for site in sites})
+    assert files == ["agent/backends/http.py", "agent/contracts/llm_activation_readiness.py"]
+    for site in sites:
+        rel, line = site.rsplit(":", 1)
+        source_line = (package_root / rel).read_text(encoding="utf-8").splitlines()[int(line) - 1]
+        assert "is_probe=True" in source_line, site
+    assert module._scenario_ledger_evidence()["is_probe_production_sites"] == sites
 
 
 # ---------------------------------------------------------------- 门槛2 终审边界②(seq1622-2): ledger 写入层 stage 封闭

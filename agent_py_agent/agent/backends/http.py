@@ -19,7 +19,8 @@ from .provider_headers import current_probe_accounting, endpoint_parts, request_
 # 探针只缓存成功证据；短暂失败允许之后重试，但单次探测有界。
 _PROBE_MAX_ATTEMPT_COUNT = 3
 
-# LLM: 进程内计数器：记录“没有绑定记账范围”的工具能力探测尝试，只提供只读诊断入口，
+# LLM: 进程内计数器：记录“没有绑定记账范围”的工具能力探测尝试，只读出口经 GET /status 的 usage_accounting 段
+#   投影（gateway_parts/http_handlers._usage_accounting_diagnostics），线上非零就说明有探测没进用量账。
 #   不写日志避免高频噪声；计数只反映次数，不含任何探测细节。宿主绑定 scope 的探测不计入。
 _UNACCOUNTED_PROBE_ATTEMPT_COUNT = 0
 _UNACCOUNTED_PROBE_LOCK = threading.Lock()
@@ -32,7 +33,8 @@ def _count_unaccounted_probe_attempt() -> None:
         _UNACCOUNTED_PROBE_ATTEMPT_COUNT += 1
 
 
-# 函数用途: 返回进程内未绑定记账范围的工具能力探测尝试次数（诊断用，只读）。
+# LLM: 只读；改名或改语义须同步 http_handlers 的 /status 投影与 test_probe_tool_capability_metering。
+# 函数用途: 返回进程内未绑定记账范围的工具能力探测尝试次数（诊断用，只读，/status 可见）。
 def unaccounted_probe_attempt_count() -> int:
     with _UNACCOUNTED_PROBE_LOCK:
         return _UNACCOUNTED_PROBE_ATTEMPT_COUNT
