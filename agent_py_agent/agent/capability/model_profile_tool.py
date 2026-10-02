@@ -19,7 +19,11 @@ from ..backends.reasoning_control import REASONING_CONTROLS
 from ..backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ..conversation.authority import current_conversation_task_attributes
 from ..runtime_context import current_subagent_run_id
-from ..settings.embedding_selection import model_disable_embedding, model_set_embedding
+from ..settings.embedding_selection import (
+    model_disable_embedding,
+    model_set_embedding,
+    semantic_memory_view,
+)
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
 from ..settings.model_provider_schema import BACKENDS, CAPABILITIES
 from ..tooling.models import (
@@ -54,8 +58,9 @@ _DESCRIPTION = (
     "delete_model/delete_provider 删除、probe 连通性测试、discover 读取服务商模型列表（可带未保存的 connection 先看有哪些模型）、"
     "add_models 按一个连接或已有服务商一次加多个模型、set_shared 把自己的模型开放给其他用户、set_initial 指定其他用户的初始模型"
     "（后两项只有管理员能用，由宿主校验）、set_embedding 选向量模型并打开语义记忆、disable_embedding 关闭语义记忆"
-    "（向量模型是全局设置，只有本机管理员能用；目标必须是自己目录里用途为 embedding 的模型，且与当前默认对话模型是同一服务商主机，"
-    "主机不同会返回 needs_user_choice，这时请用户自己在 /model → 选择模型 → 向量模型 里选；保存后重启 Gateway 生效）。"
+    "（用户要求开/关语义记忆时直接调用，用户的要求就是授权，不要再请用户确认或让用户自己去 /model；list 回执的 semantic_memory "
+    "给出当前状态和可选的 embedding 模型 id。管理员身份、本人目录与服务商主机由宿主核对，只有回执 needs_user_choice 时才请用户"
+    "自己在 /model → 选择模型 → 向量模型 里选；保存后重启 Gateway 生效）。"
     "用户说“帮我加/换/改/删模型或服务商”“默认模型改成 X”“测一下这个模型能不能用”时直接调用，不要让用户自己去 /model 填表。"
     "密钥只作为参数传一次；回执和你的回复都不得复述密钥。delete_provider 会经统一危险动作审批门。"
 )
@@ -65,7 +70,7 @@ _USE_CASES = (
     "用户要求本会话换成某个已保存模型 → 先 list 取精确 id，再 action=select",
     "用户要求以后新会话默认用某模型 → action=set_default",
     "用户怀疑模型配置不可用 → action=probe 用真实请求验证，不凭列表状态下结论",
-    "用户要开语义记忆/向量记忆 → list 找用途为 embedding 的模型（没有就先 add 一个，例如 MiniMax embo-01），再 set_embedding",
+    "用户要开语义记忆/向量记忆 → list，取 semantic_memory.choices 里的 id 直接 set_embedding（没有可选项就先 add 一个 embedding 模型）",
 )
 _AVOID_WHEN = (
     "用 write/edit/shell 直接改 config/model-profiles 目录 → 必须改用 manage_models",
@@ -304,6 +309,8 @@ class ManageModelsTool(BaseTool):
         except (OSError, ValueError) as exc:
             # 不回显异常正文：底层错误可能带上请求地址或配置片段。
             return _err(f"模型配置读写失败: {type(exc).__name__}", "TOOL_EXECUTION_FAILED")
+        if request.action == "list":
+            result = {**result, **_semantic_memory_block(self.agent)}
         return _outcome(request, result)
 
 
@@ -395,6 +402,16 @@ def _embedding_outcome(agent: object, request: _ModelToolRequest) -> ToolHandler
                                   failure_stage="validation")
     return ToolHandlerOutcome(TOOL_NAME, False, body, error_code="TOOL_EXECUTION_FAILED",
                               reported_error_code=reported or "TOOL_EXECUTION_FAILED")
+
+
+# LLM: list 回执的语义记忆视图（只给本机管理员）；视图读不出来时省略，不影响模型列表本身。只读。
+# 函数用途: 取 list 要附带的 semantic_memory 字段，没有时返回空字典。
+def _semantic_memory_block(agent: object) -> dict:
+    try:
+        view = semantic_memory_view(agent)
+    except (ModelProfileError, OSError, ValueError):
+        return {}
+    return {"semantic_memory": view} if view is not None else {}
 
 
 def _missing(action: str, name: str) -> ToolHandlerOutcome:

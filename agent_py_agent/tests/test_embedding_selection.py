@@ -224,6 +224,19 @@ def test_manage_models_actions_map_outcomes(host):
     assert error_contract("EMBEDDING_HOST_DIFFERS").recommended_action == RecoveryAction.REQUEST_USER_INPUT.value
 
 
+def test_manage_models_list_shows_semantic_memory_state_and_next_step_to_admins_only(host):
+    profile_id = _add(host)
+    _, body = _run(ManageModelsTool(host), action="list")
+    view = body["semantic_memory"]
+    assert view["choices"] == [{"id": profile_id, "model_name": "embo-01"}] and view["restart_pending"] is False
+    assert view["running"] == {"profile_id": "", "semantic_recall": False} and "set_embedding" in view["hint"]
+    embedding_selection.model_set_embedding(host, profile_id)
+    _, body = _run(ManageModelsTool(host), action="list")
+    assert body["semantic_memory"]["restart_pending"] is True and "disable_embedding" in body["semantic_memory"]["hint"]
+    _, body = _run(ManageModelsTool(_member(host)), action="list")
+    assert "semantic_memory" not in body
+
+
 def test_manage_models_partial_write_keeps_unknown_effect(host, monkeypatch):
     monkeypatch.setattr(embedding_selection, "apply_embedding_choice", lambda *_a, **_k: {
         "ok": False, "error_code": "PARAMETER_NOT_EFFECTIVE", "change_ids": ["c1"], "message": "第二步没有生效"})

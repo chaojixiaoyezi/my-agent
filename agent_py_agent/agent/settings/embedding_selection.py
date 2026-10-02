@@ -55,6 +55,31 @@ def embedding_choices(host: object) -> dict:
             "can_change": is_complete_local_admin_owner(host.home_paths), "message": _status_text(saved, running)}
 
 
+# LLM: 给 manage_models list 附带的语义记忆视图（只给本机管理员；普通 owner 改不了全局设置，返回 None 不引导）：运行值、保存值、
+#   是否等待重启、可选嵌入档案（编号+模型名），以及按这些结构化事实选出的下一步提示。提示只是给模型的软引导，裁决仍在
+#   model_set_embedding。只读，不发请求，不含接口地址和密钥。
+# 函数用途: 让模型在列出模型时就看到语义记忆现在开没开、能选哪个、下一步调什么。
+def semantic_memory_view(host: object) -> dict | None:
+    listing = embedding_choices(host)
+    if not listing["can_change"]:
+        return None
+    choices = [{"id": row["id"], "model_name": row["model_name"]} for row in listing["choices"]]
+    return {"running": listing["running"], "saved": listing["saved"], "restart_pending": listing["restart_pending"],
+            "choices": choices, "hint": _view_hint(listing["saved"], choices)}
+
+
+# 函数用途: 按保存值和可选项给出下一步：已开 → 怎么关；有可选项 → 直接 set_embedding；没有 → 先加一个嵌入模型。
+def _view_hint(saved: dict, choices: list[dict]) -> str:
+    if saved["semantic_recall"] and saved["profile_id"]:
+        return "语义记忆已开（重启 Gateway 后以保存值为准）；用户要关闭时直接 action=disable_embedding。"
+    if not choices:
+        return ("还没有用途为 embedding 的模型：先用 add 或 save_model 加一个（capability=embedding，例如 MiniMax embo-01），"
+                "再 set_embedding。")
+    return ("用户要开语义记忆时直接 action=set_embedding，profile_id 取 choices 里的 id：用户的要求就是授权，不用再请用户确认，"
+            "也不要让用户自己去 /model 选。管理员与服务商主机由宿主核对，只有回执是 needs_user_choice 时，才请用户在 "
+            "/model → 选择模型 → 向量模型 里自己选。保存后重启 Gateway 生效。")
+
+
 # LLM: 管理员入口（TUI 菜单、IM /model vector）与模型自配共用的写入：选中 → 先写档案再开召回；关闭 → 先关召回再清档案，
 #   任一步失败都停在“不会把记忆发出去”的一侧。非管理员直接拒绝，不写任何文件。有写文件副作用（用户配置 + 修改账本）。
 # 函数用途: 把向量模型设成某个档案（并打开语义记忆），或关闭语义记忆（profile_id 为空）。
@@ -168,4 +193,4 @@ def _boundary(message: str) -> dict:
 
 
 __all__ = ["EMBEDDING_OPERATIONS", "apply_embedding_choice", "embedding_choices", "execute_embedding_operation",
-           "model_disable_embedding", "model_set_embedding"]
+           "model_disable_embedding", "model_set_embedding", "semantic_memory_view"]
