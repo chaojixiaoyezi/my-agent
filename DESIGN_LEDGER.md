@@ -1,5 +1,34 @@
 # 设计台账
 
+## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已实现，待集成）
+
+- **起因**：I4 之后，被停机打断的回合重启后都会自动续跑，但启动续跑一直没有次数上限。本身会把进程弄崩的回合，每次重启都会再续一次，形成崩溃循环。3a 定：加上限。
+- **规则**：
+  - 同一个 Gateway 用户回合，因“非计划重启”自动续跑最多 `MAX_UNPLANNED_RESUME_COUNT` = 3 次。这是 `gateway_parts/recovery.py` 里的常数，注释写了理由。
+  - 用完后再被打断就不再续跑：请求收成 failed，错误码 `TURN_RESUME_LIMIT_EXCEEDED`（已登记，恢复动作 request_user_input）。
+  - TUI 和 IM 都显示同一句：“这一轮被打断太多次，已停止自动续跑；发‘继续’可以接着做。”文案在 `conversation/turn_resume_notice.py`。
+  - 用户发“继续”是新请求，没有续跑标记，从 0 算，不受这个上限影响。
+- **什么算“非计划重启”**：启动恢复、且不是安全重启接班，和续跑原因 `gateway_restart` 是同一个判断。进程崩溃、被杀、直接 stop 再 start 都算。
+  - **安全重启接班不计（我定，3a 可改）**，理由三条：
+    - 旧进程是排空后确认退出的，不是崩溃；
+    - `restart_gateway` 另有冷却和防循环；
+    - 本模块原有约定是“部署多次也不能把健康的长任务停掉”。
+    - 要把安全重启也算进去，只改 `_counts_as_unplanned_resume` 一行。
+  - 服务内租约过期（`processing_lease_expired`）不计：它有自己的卡死预算（`processing_failure_count` 加 `gateway_request_max_attempts`）。
+  - 这两种都不会把已用掉的次数清零。
+- **计数放哪**：请求记录现有的 `active_turn_recovery` 标记里新增 `unplanned_resume_count`，不新建账本。
+  - recovery 每次重排时在旧标记上累加；认领时整条记录原样保留，所以能跨重启累计。
+  - 旧标记没有这个字段，按 0 算。
+  - 坏值（非整数、布尔、负数）按数据损坏 fail-closed：请求留在 processing，恢复报告带出诊断，不当 0 把次数重置。
+- **怎么收口**：和卡死超时共用同一条带 CAS 的终态提交（新拆出的 `_commit_stale_processing_failure`）。
+  - 先按原执行编号、租约代次、心跳等核对，再归档：释放会话车道、收口插话，然后写 response、history 和流终态事件 `request_aborted`。
+  - 失败结果的 `user_error` 和 `error` 都是那句提示：TUI 显示 `user_error`；IM 公开结果显示 `user_error`，管理员拿完整结果时 IM 显示 `error`。三处一致。
+  - 续跑次数和上限放在结构化字段 `unplanned_resume_count` / `max_unplanned_resume_count`，供诊断读取。
+- **已知边界 / 后续项**（I4 留下的，这次没动）：
+  - 仍没有“打断太久就不续”的时间上限；
+  - 停机那一刻仍不会立刻提示“将会续跑”。
+- **验证**：见 TESTS.md 同名节。
+
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，待 be 审）
 
 - **生产事实**（3a，step17f 上线后 local/main 的 curator/runs）：13:58 qwen3.8-flash 那组用 MiniMax-M2.7 补跑成功，带 `curator_thread_model_failed:CURATOR_MODEL_FAILED:transient`，修复生效；13:59 这个会话来了新消息，又先试 qwen3.8-flash，失败。按原规则还要再失败一次才换默认模型。
@@ -22,7 +51,7 @@
 - 实现：`memory_store/curator_routing.py`（常数与纯函数 `transient_fallback_code`）、`memory_store/curator.py`（`_CuratorRunMixin._transient_fallback`）。测试见 TESTS 同名条目。
 - **后续（已做，75）**：默认补跑推进过本组游标后，下一批只给会话模型 1 次机会，见本台账“记忆整理补跑后续”条目。
 
-## 被宿主停机打断的回合重启后统一自动续跑，TUI 和 IM 都看得到（I4，第 8 条②，用户选 B，2026-10-02，分支 `claude/38-resume-rule`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，待集成）
+## 被宿主停机打断的回合重启后统一自动续跑，TUI 和 IM 都看得到（I4，第 8 条②，用户选 B，2026-10-02，分支 `claude/38-resume-rule`，基于 `claude/3a-step17f` `f6b63ab35`，已集成 step17g）
 
 - **现状（查清）**：Gateway 停机时，在跑的用户回合有两种结局，全看时间先后，不是策略：
   - 被拒（A）：收尾关闭模型调用准入后，回合的下一次模型调用被拒（`MODEL_CALL_ADMISSION_CLOSED`）。请求写成 failed，重启后不续跑，用户只看到一句泛泛的“模型本轮响应未完成”。
@@ -48,7 +77,7 @@
   - `MODEL_CALL_ADMISSION_CLOSED` 的恢复提示和 `runtime_errors` 的 host_stopping 说明，改成“Gateway 前台用户回合重启后自动续跑；子代理 run 不自动重跑”。
 - **不做**（goal 第 8 条）：发送层硬门；子代理停机中断后自动续跑不占次数（子代理照旧由父级按 recovery_decision 续派）。
 - **已知边界 / 后续项**：
-  - 启动续跑没有次数上限（B 原本就是这样）。如果某个回合本身会把进程弄崩，每次重启都会再续一次，要不要加续跑次数上限，待定。
+  - 启动续跑没有次数上限（B 原本就是这样）。如果某个回合本身会把进程弄崩，每次重启都会再续一次。3a 10-02 定做，已在 `claude/38-resume-limit` 实现：非计划重启最多续 3 次，见“同一回合因非计划重启最多自动续跑 3 次”那节。
   - 没有“打断太久就不续”的时间上限：停机一天后再启动，那一轮照样续跑。
   - 停机那一刻 TUI/IM 不会立刻提示“将会续跑”：TUI 看到的是 Gateway 断开 / 正在安全重启，提示在续跑开始（TUI）和续跑完成（IM）时出现。
 - **验证**：见 TESTS.md 同名节。

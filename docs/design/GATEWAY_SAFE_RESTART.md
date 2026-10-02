@@ -233,3 +233,9 @@
   （重排、续跑边界、死进程车道立即接管、同一主 run 开新 attempt）。停机前用户已发停止的照常按取消收尾。
 - IM：续跑回合的最终结果在 `channel_delivery.host_notices` 最前面补一条“已自动续跑”提示，适配器渲染在回复正文前；
   文案与 TUI 续跑边界共用 `conversation/turn_resume_notice.py`。设计取舍见 DESIGN_LEDGER 同名条目。
+
+## 续跑次数上限（2026-10-02，分支 `claude/38-resume-limit`）
+
+- 同一个用户回合因非计划重启（崩溃、被杀、直接 stop 再 start）自动续跑最多 3 次，用完再被打断就收成 failed（`TURN_RESUME_LIMIT_EXCEEDED`）。
+  - TUI 和 IM 都提示“这一轮被打断太多次，已停止自动续跑；发‘继续’可以接着做”。
+- 安全重启接班不计入，也不清零：旧进程排空后确认退出，不是崩溃；重启工具另有冷却和防循环。取舍见 DESIGN_LEDGER 同名节。

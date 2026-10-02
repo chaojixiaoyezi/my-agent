@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## 同一回合因非计划重启最多自动续跑 3 次（I4 续，2026-10-02，分支 `claude/38-resume-limit`，基于 `72ddc2b5c`）
+
+- 新增 `test_turn_resume_limit.py`（9 例）：
+  - 连续 3 次非计划重启都续跑，计数 1→2→3 经真实认领（`claim_request`）跨重启累计；第 4 次被打断收成 failed（`TURN_RESUME_LIMIT_EXCEEDED`），次数和上限进结构化字段，终态和 response 都写了；
+  - 安全重启接班和服务内租约过期既不计数也不清零：计数已满时它们照常续跑，之后来一次非计划重启就停；
+  - 提示：TUI（`_gateway_outcome` 显示 user_error）、IM 公开结果、管理员完整结果都是同一句，流里有 `request_aborted` 终态事件；
+  - 错误码已登记，恢复动作 request_user_input；
+  - 坏计数（字符串、负数、布尔、小数）fail-closed：不重排、不收口，留在 processing，恢复报告带 DataCorruptionError；
+  - 真实链路（真实 SimpleAgent 加 Gateway 入口，只替换供应商传输）：同一回合连续 4 代都在主调用途中被停机结清，下一次模型调用被拒。前 3 次重启续跑，第 4 次停止续跑并给出提示；随后同一会话发“继续”（新请求）照常跑完，没有续跑提示。
+- 改了的旧用例（按新规则），都在 `test_local_store_gateway_recovery.py`：
+  - `test_repeated_gateway_restart_is_not_a_processing_failure`：连续重启从 4 次改为上限 3 次，并断言计数 1→3；它要证明的“重启不算卡死次数”不变；
+  - `test_gateway_startup_requeued_request_does_not_block_fresh_pending`：续跑标记多一个 `unplanned_resume_count: 1`。
+- 变异 12 个全部抓住：
+  - 计数规则：l01 从不计数；l02 安全重启也计；l03 上限差一（`>` 代替 `>=`）；l04 计数不跨重启累计；l05 每次重排都计；l11 没有标记按已满算；
+  - 收口和提示：l06 不写 user_error；l07 error 不是提示原句；l08 错误码写错；l10 上限失败不走终态提交；l12 恢复动作写错；
+  - 坏数据：l09 坏计数当 0。
+- 真进程验证（隔离 home、私有端口、假模型、env -i）：回合在跑时 kill -9 Gateway 再起接班进程，连续 4 次。
+  - 前 3 次续跑，计数 1→2→3；第 4 次启动恢复直接收成 failed（`TURN_RESUME_LIMIT_EXCEEDED`），/result 和 TUI 面板都是提示原句；
+  - 同一 TUI 发“继续”，新请求 0.22 秒跑完。
+  - 证据 `~/.my-agent/decision-evidence/resume-limit-20261002/real-kill9/`。
+
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`）
 
 - **`test_curator_thread_model_routing.py` 新增 2 项**（共 23 项）：

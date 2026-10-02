@@ -606,7 +606,7 @@ agent_py_agent/
 |   |   |-- history_seed.py             # 会话种子只读来源：冻结行加原单行投影，只在 native/text 准备边界解析
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
 |   |   |-- host_notices.py             # 宿主提示：线程待送达提示的存取（同来源替换、按编号取走、按来源清除）与 IM 正文前渲染
-|   |   |-- turn_resume_notice.py       # 被打断回合“已自动续跑”提示的共用文案表（按恢复标记 cause 选，TUI 续跑边界与 IM 回复前共用）
+|   |   |-- turn_resume_notice.py       # 被打断回合“已自动续跑”和“打断太多次、已停止自动续跑”提示的共用文案表（TUI 与 IM 共用）
 |   |   |-- input_media.py              # owner 内容寻址原件、验证、发送编码和媒体预算
 |   |   |-- history_order.py            # 按源记录恢复跨工作片顺序并去重插话显示副本
 |   |   |-- input_media.py              # owner 内容寻址原件、验证、发送编码和媒体预算
@@ -1149,6 +1149,7 @@ agent_py_agent/
 |   |-- test_restart_gate.py            # 工具关口：关闭时停在领取前、重开放行、中断按未启动收口、执行中计数与等待
 |   |-- test_gateway_safe_restart.py    # 安全重启：合并/冷却/防循环、两段排空与超时取消、标记、续跑优先、接班与 /restart
 |   |-- test_shutdown_turn_resume.py    # 停机准入拒绝的回合留给重启续跑（I4）：不写终态、用户停止优先、TUI/IM 同一句提示、真实链路续跑完成
+|   |-- test_turn_resume_limit.py       # 非计划重启续跑最多 3 次：计数跨重启累计、安全重启/租约过期不计、用完收成 failed 并提示、真实链路“继续”是新回合
 |   |-- test_gateway_restart_tool.py    # restart_gateway：只在 Gateway 内、立即返回、冷却拒绝、只注册给管理员主代理
 |   |-- test_audit_requests_topic.py    # 审计 requests 主题：owner_id/会话归属、去重、时间窗、不含正文、跨用户两道门、管理员身份事实
 |   |-- test_model_text_control.py      # 聊天 /model：解析、无模型引导、选择共享模型不泄密钥、按 owner 隔离、TUI 菜单保留

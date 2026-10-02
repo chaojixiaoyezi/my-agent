@@ -1041,3 +1041,12 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **起因**：同样是停机打断，被准入拒绝的回合写成 failed、不续跑，随进程消失的回合却会续跑；IM 也看不到续跑提示。
 - **改动**：`request_execution._host_shutdown_resume_marker` 认出宿主停机准入拒绝时，响应带 `restart_resume` 标记，不写终态、不收口插话、不记审计；`request_worker._finish_claimed_gateway_request` 见到标记就把请求留在 processing，交给重启恢复。用户停止优先。续跑回合的最终结果给 IM 补宿主提示，文案与 TUI 共用 `conversation/turn_resume_notice.py`。
   - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## 同一回合因非计划重启最多自动续跑 3 次（I4 续，2026-10-02，分支 `claude/38-resume-limit`，基于 step17g `72ddc2b5c`）
+
+- **起因**：启动续跑没有次数上限，本身会把进程弄崩的回合会无限续跑（崩溃循环）。
+- **改动**：
+  - `recovery._settle_stale_processing` 统一过期请求的三选一：卡死超时、续跑上限、重排。
+  - 非计划重启的续跑次数记在 `active_turn_recovery.unplanned_resume_count`。满 `MAX_UNPLANNED_RESUME_COUNT`（3）后再被打断，按 `TURN_RESUME_LIMIT_EXCEEDED` 收成 failed，和卡死超时共用 `_commit_stale_processing_failure`。
+  - 安全重启接班、服务内租约过期不计。
+  - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
