@@ -7,6 +7,22 @@
 - **影响面**：窗口 ≤333K 的模型按 90% 先触发，不受影响；只有 1M 级窗口会在 30 万处压缩。参数仍是 free（模型可改），改为 0 会在账本留下记录。
 - **验证**：见 TESTS.md 同名节；属于共享默认值，推送前跑 12 片全量车道。
 
+## decision_patch / decision_reset 接受可选 reason（2026-10-01，分支 `worker/ds1-decision-reason`，基于 `claude/3a-step16y` 的 `e08507ea4`，已实现，待集成）
+
+- **触发条件已核实（3a 10-01 真实探测）**：隔离环境用真实 deepseek-v4-flash 做 4 条“改决策设置”自然语言请求，decision_patch 首次调用
+  3 次里错 2 次，都是多带 `reason` 被拒（TOOL_INVALID_ARGUMENTS，unknown_fields=reason），第二次才改对；gpt-6-luna 3 次全对；
+  9-28 生产那 3 次错误也全是多带 `reason`（DESIGN_LEDGER 原 1118–1125 行附近，见下方 2026-09-28 条目）。
+- **落地**：decision_patch / decision_reset 的允许字段加可选 `reason`（字符串，截断 200 字，超长回执与账本标明 reason_truncated）；
+  reason 只记录与展示（写进模型档案旁的修改账本 `profile_ledger_path`，/settings history 一类入口可显示），不参与任何机器判断，
+  不改 overrides/revision、不影响结果。
+- **工具面**：user_config 工具说明（普通视图与 decision-only 视图）与 schema 的 reason 描述同步改写；其余多带字段仍整笔拒绝并在
+  unknown_fields 列出，不替模型删字段。
+- **按动作拆分 schema 不做**：会改模型可见的工具面，部分 provider 对 oneOf 支持不稳，且接受 reason 后模型不再需要删字段重试。
+- **测试**：`test_decision_settings_reason.py` 5 项（patch/reset 带 reason 成功并记录、超长截断并标记、多余字段仍拒、相同 changes 不同
+  reason 结果一致）；`test_user_config_decision_patch.py` 同步更新（_PATCH_FIELDS 含 reason、fake model 第一次带 reason 直接成功）。
+  3 个变异实测被抓住（去掉 reason 允许 / 不写账本 / 不标截断）。
+- **验证**：相关 decision 测试 123 passed（详见 TESTS.md）。
+
 ## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`，已实现，待集成）
 
 - **决定（集成者，三线收尾 goal P11）**：不再按“约 100 项”的数量目标减量。219 个随包键里 218 个在 `/settings` 列表与搜索出现；
@@ -1195,8 +1211,13 @@
   - 工具回执与 `handler_details` 写明 `unknown_fields`、`allowed_fields`；工具说明写清 patch/reset 各接受哪些字段。
 - **已确认**：生产那三次都多带了 `reason`（来源：调用方记录，三次同因）。三次的顶层键都是 action、changes、expected_revision、reason、scope。
   这来自 my-agent-1 作为调用方的调用记录，不是读工具账得到的：audit 只记工具名和状态，不记参数。本修复对任何多带字段都给出同样的结构化回执。
+- **已落地（2026-10-01，分支 `worker/ds1-decision-reason`）**：decision_patch / decision_reset 正式接受可选 `reason`（字符串，截断 200 字，
+  回执与账本记录标明截断）。触发条件已核实：隔离环境用真实 deepseek-v4-flash 做 4 条自然语言请求，decision_patch 首次调用 3 次里错 2 次，
+  都是多带 `reason` 被拒（unknown_fields=reason），第二次才改对；gpt-6-luna 3 次全对；9-28 生产那 3 次错误也全是多带 `reason`。
+  reason 只记录与展示（模型档案旁的修改账本，/settings history 一类入口可显示），不参与任何机器判断。**按动作拆分 schema 不做**：
+  会改模型可见的工具面，部分 provider 对 oneOf 的支持不稳定，当前风险大于收益，且接受 reason 后模型不再需要删字段重试。
 - **候选（未排期，集成者 2026-09-28 定本轮不做）**：按动作拆分 `user_config` 的 schema，或给决策动作单开一个工具。
-  - 不做的原因：会改模型可见的工具面，部分 provider 对 `oneOf` 的支持也不稳定，当前风险大于收益。
+  - 不做的原因：会改模型可见的工具面，部分 provider 对 `oneOf` 的支持也不稳定，当前风险大于收益（reason 已改为正式接受，见上条）。
   - 触发条件：回执指名之后，模型仍经常在第一次调用就传错字段时再评估。判断依据须是结构化事实（例如工具结果
     `handler_details.decision_request_fields`），统计 `decision_patch` 首次调用因 `unknown_fields` 被拒的比例，不按对话文本判断。
     audit 目前只记工具名和状态、不记参数，真要统计时先确认有可用的结构化记录。

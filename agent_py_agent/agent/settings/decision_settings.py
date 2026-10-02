@@ -24,6 +24,7 @@ from .thread_model_selection import _require_owner
 
 # LLM: 入口上下文必须来自原认证 owner；restore 只提供同事务 set/unset，不接受路径、owner 或 store。
 #   多出的顶层字段一律拒绝（不静默丢弃），异常 DecisionSettingsUnknownFields 带未知字段与本操作接受的字段，供调用方指给模型。
+#   patch/reset 接受可选的 reason（仅记录与展示，不参与任何机器判断），其余动作仍不接受。
 # 函数用途: 在进行任何文件访问前检查可信 owner 上下文和明确请求结构。
 def _validate_request(context: object, operation: str, payload: dict, thread_id: str) -> str:
     home = context.home_paths
@@ -33,9 +34,9 @@ def _validate_request(context: object, operation: str, payload: dict, thread_id:
         raise ModelProfileError("决策设置操作无效。")
     allowed = {"scope"} if operation == "read" else {"scope", "expected_revision"}
     if operation == "patch":
-        allowed.add("changes")
+        allowed.update(("changes", "reason"))
     elif operation == "reset":
-        allowed.add("fields")
+        allowed.update(("fields", "reason"))
     elif operation == "restore":
         allowed.update(("set", "unset"))
     elif operation == "experiment_revoke":
@@ -192,6 +193,16 @@ def execute_decision_settings_operation(context: object, operation: str, payload
         from .decision_experiment import revoke_original_experiment_budget
 
         revoke_original_experiment_budget(context, result["experiment_authorization"])
+    if operation in {"patch", "reset"}:
+        # reason 只记录与展示（截断 200 字），不参与任何机器判断；写进与模型档案同一目录的修改账本，
+        # /settings history 一类的入口可显示；超长时回执标明，让调用方知道原因被截断。
+        from .parameter_changes import record_decision_change
+
+        reason = str(payload.get("reason") or "").strip()
+        fields = sorted(payload.get("changes", payload.get("fields", []))) if operation == "patch" else sorted(payload.get("fields") or [])
+        record_decision_change(context.home_paths, operation=operation, fields=fields, reason=reason)
+        result["recorded_reason"] = reason[:200]
+        result["reason_truncated"] = len(reason) > 200
     if operation != "read":
         try:
             from ..conversation.decision_policy import notify_decision_settings_changed

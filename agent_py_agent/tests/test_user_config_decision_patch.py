@@ -25,7 +25,7 @@ from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_ca
 from agent_py_agent.tests.test_agent.backends import _TestNativeBackend
 from agent_py_agent.tests.test_decision_settings import host_at
 
-_PATCH_FIELDS = ["changes", "expected_revision", "scope"]
+_PATCH_FIELDS = ["changes", "expected_revision", "reason", "scope"]
 
 
 # 函数用途: 经真实工具执行器（schema 校验、授权门、handler）调一次 user_config，返回工具结果。
@@ -51,8 +51,8 @@ def test_a_valid_patch_through_the_real_tool_entry_persists_and_bumps_the_revisi
 
 
 @pytest.mark.parametrize("extra", [
-    {"reason": "用户要求把后台等待调到 15 秒"}, {"fields": ["timeout_seconds"]}, {"timeout_seconds": 15},
-    {"profile_id": "some-profile"},
+    {"fields": ["timeout_seconds"]}, {"timeout_seconds": 15},
+    {"profile_id": "some-profile"}, {"authorization_id": "auth-1"},
 ])
 def test_foreign_fields_are_still_rejected_and_named(tmp_path, extra):
     host = host_at(tmp_path)
@@ -77,7 +77,7 @@ def test_reset_names_the_field_it_does_not_take(tmp_path):
                                            "fields": ["timeout_seconds"], "changes": {"timeout_seconds": 3}})
     payload = json.loads(result.output)
     assert not result.ok and payload["unknown_fields"] == ["changes"]
-    assert payload["allowed_fields"] == ["expected_revision", "fields", "scope"]
+    assert payload["allowed_fields"] == ["expected_revision", "fields", "reason", "scope"]
 
 
 def test_the_settings_service_itself_stays_strict(tmp_path):
@@ -153,6 +153,12 @@ def test_fake_model_adjusts_the_background_wait_from_a_natural_request(tmp_path)
     agent.backend = backend
     revision, _before = _read(agent)
     agent.run("把后台决策等待时间调到 15 秒。", save=False, allowed_tools=["user_config"])
-    assert backend.patch_results and backend.patch_results[0]["unknown_fields"] == ["reason"]
+    # reason 已被正式接受：第一次带 reason 的 patch 直接成功，不再被拒
+    assert backend.patch_results and "unknown_fields" not in backend.patch_results[0]
+    from agent_py_agent.agent.settings.parameter_changes import profile_change_history
+
+    records = profile_change_history(agent.home_paths)
+    assert records and records[0]["key"] == "decision_settings" and records[0]["action"] == "decision_patch"
+    assert records[0]["reason"] == "用户要求把后台等待调到 15 秒"
     after, seconds = _read(agent)
     assert seconds == 15 and after == {"owner": revision["owner"] + 1, "thread": revision["thread"]}

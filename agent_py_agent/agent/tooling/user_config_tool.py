@@ -73,7 +73,8 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
         description=("读取或修改当前用户自己的决策设置。先 decision_read 获取 owner/thread revision，"
                      "再用 decision_patch 或 decision_reset 修改并读回生效值；scope=thread 只用于当前可信会话。"
                      "decision_patch 只填 scope、expected_revision、changes，decision_reset 只填 scope、expected_revision、fields，"
-                     "多带的字段会被拒绝并在回执 unknown_fields 里列出。"
+                     "两者可带可选 reason 说明修改原因（只记录与展示，截断 200 字）；"
+                     "其余多带的字段会被拒绝并在回执 unknown_fields 里列出。"
                      "等待时间只能在 decision_read 返回的 agent_timeout_bounds 范围内调整，越界会被拒绝。"
                      "decision_models 只读脱敏目录；decision_probe 仅在用户明确要求测试连接时使用，会联网并产生用量。"
                      "decision_experiment_revoke 只能撤销当前会话已有授权，不能建立授权。"
@@ -199,7 +200,8 @@ class UserConfigTool(BaseTool):
             "action=reset 删除覆盖恢复默认；action=history 查看修改记录；action=revert 按记录编号（change_id）回滚。"
             "修改在重启 Gateway 后生效（当前进程不会热加载）。安全边界（凭据、权限、身份、路径、外部地址、会运行代码的设置）永远不可写。"
             "decision_read/decision_patch/decision_reset 读取、字段修改或恢复决策设置继承；"
-            "decision_patch 只填 scope/expected_revision/changes，decision_reset 只填 scope/expected_revision/fields，多带的字段会被拒并在回执 unknown_fields 列出；"
+            "decision_patch 只填 scope/expected_revision/changes，decision_reset 只填 scope/expected_revision/fields，"
+            "两者可带可选 reason 说明修改原因（只记录与展示，截断 200 字）；多带的字段会被拒并在回执 unknown_fields 列出；"
             "decision_experiment_revoke 可用当前授权编号撤销本会话实验；本工具不能建立实验授权，能力开关不代表用户授权。"
             "先读 revision 再作为 expected_revision 提交。scope=owner 为长期设置，thread 仅当前可信会话；"
             "时间使用有限正秒数，且须在 decision_read 返回的 agent_timeout_bounds 范围内（越界拒绝、不自动夹取）；"
@@ -227,7 +229,7 @@ class UserConfigTool(BaseTool):
                 },
                 "query": {"type": "string", "description": "action=search 的关键词，匹配参数名与中文说明。"},
                 "change_id": {"type": "string", "description": "action=revert 要回滚的修改记录编号（history 返回的 id，至少 6 位）。"},
-                "reason": {"type": "string", "description": "set/reset/revert 可选：这次修改的原因，记入修改记录；decision_* 动作不接受。"},
+                "reason": {"type": "string", "description": "set/reset/revert 可选：这次修改的原因，记入修改记录；decision_patch/decision_reset 也可带，记入决策设置修改记录并展示（截断 200 字）。"},
                 "scope": {"type": "string", "enum": ["owner", "thread"], "description": "决策设置范围，默认 owner；thread 只指当前可信运行会话。"},
                 "expected_revision": {"type": "object", "properties": {"owner": {"type": "integer", "minimum": 0}, "thread": {"type": "integer", "minimum": 0}}, "required": ["owner", "thread"], "additionalProperties": False},
                 "changes": {"type": "object", "properties": _decision_change_properties(), "additionalProperties": False, "minProperties": 1},

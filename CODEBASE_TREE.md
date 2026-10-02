@@ -814,6 +814,7 @@ agent_py_agent/
 |   |-- test_user_config_decision_operations.py # 主代理读取已保存决策目录及显式测试，拒绝伪造身份
 |   |-- test_user_config_decision_patch.py # decision_patch 经真实执行器落盘、多带字段仍拒并写明 unknown_fields、假模型自然语言调等待时间
 |   |-- test_decision_settings.py       # 决策覆盖继承、双版本 CAS、权限隔离及原配置迁移
+|   |-- test_decision_settings_reason.py # decision_patch/reset 接受可选 reason：记录与展示、200 字截断、多余字段仍拒、机器逻辑不受影响
 |   |-- test_decision_settings_notifications.py # 设置逆序通知、覆盖恢复继承及精准取消
 |   |-- test_decision_service.py        # 决策阶段预算、冷却、设置复核、关闭与旧请求隔离
 |   |-- test_decision_background_deadline.py # 后台点位各自完整计时、前台保留阶段上限、调用方期限取更小（假时钟）

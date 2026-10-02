@@ -318,6 +318,23 @@ def profile_ledger_path(home_paths: object) -> Path:
     return model_profiles_path(home_paths).with_suffix(".changes.jsonl")
 
 
+# LLM: 决策设置（模型档案同目录）的修改也进同一份档案账本，供 /settings history 一类的入口展示；reason 只记录与展示，
+#   不参与任何机器判断；超长在 _append_record 截断到 200 字。key 固定为 decision_settings，action 区分 patch/reset。
+# 函数用途: 追加一条决策设置修改记录并返回它。副作用：追加档案账本。
+def record_decision_change(home_paths: object, *, operation: str, fields: list[str], reason: str) -> dict[str, object]:
+    return _append_record(
+        profile_ledger_path(home_paths),
+        "decision_settings",
+        _ChangeRow(
+            f"decision_{operation}",
+            None,
+            ",".join(fields) or "(no fields)",
+            ChangeOrigin("model", str(reason or "")),
+        ),
+        False,
+    )
+
+
 # LLM: 坏行由 read_jsonl_objects_report 跳过；按时间倒序。只读。
 # 函数用途: 读取当前用户的模型档案字段修改记录（最新在前）。
 def profile_change_history(home_paths: object) -> list[dict[str, object]]:
@@ -403,6 +420,7 @@ __all__ = [
     "parameter_history",
     "profile_change_history",
     "profile_ledger_path",
+    "record_decision_change",
     "reset_parameter",
     "revert_change",
     "revert_profile_change",

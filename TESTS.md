@@ -5,6 +5,19 @@
 - `test_compact_trigger_cap.py`：默认值 300000、显式 0 不封顶、乱填/负数/布尔/缺失回到 300000（配置解析与运行时一致）；`test_runtime_context_pressure.py` 的窗口准入用例显式写 0，只测按窗口算的输入上限。
 - 压缩相关 79 个测试文件（名称含 compact/context_pressure/context_window/runtime_compact/calibration）加默认值一致性与目录守卫：修改后 1066 通过、3 失败，均为按旧默认写的断言和目录说明，修正后全部通过；共享默认值，推送前以 12 片 Linux 车道为全量。
 
+## decision_patch / decision_reset 接受可选 reason（2026-10-01，分支 `worker/ds1-decision-reason`，基于 `e08507ea4`）
+
+- 新增 `agent_py_agent/tests/test_decision_settings_reason.py`（5 项）：
+  - patch / reset 带 reason 成功，reason 进模型档案旁的修改账本（key=decision_settings，action=decision_patch/reset）；
+  - 超长 reason 截断到 200 字，回执 reason_truncated=True 且 recorded_reason 为截断后值；
+  - 其它多余字段（fields/timeout_seconds/profile_id/authorization_id）仍整笔拒绝并列出 unknown_fields；
+  - 相同 changes 带不同 reason，overrides/revision 完全一致（机器逻辑不受 reason 影响）。
+- `test_user_config_decision_patch.py` 更新：_PATCH_FIELDS 含 reason；多余字段参数化去掉 reason（现已接受）；fake model
+  “把后台等待调到 15 秒”第一次带 reason 直接成功并写账本（原来断言第一次被拒、删 reason 重试）。
+- 变异验证（临时改实现→测试失败→还原）：去掉 reason 允许（5 用例失败）、不写账本（4 用例失败）、不标截断（KeyError），3 个变异全部被抓住。
+- 命令与结果：
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_decision_settings_reason.py agent_py_agent/tests/test_user_config_decision_patch.py agent_py_agent/tests/test_decision_settings.py agent_py_agent/tests/test_decision_settings_notifications.py agent_py_agent/tests/test_decision_settings_scope.py agent_py_agent/tests/test_user_config_decision_operations.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **123 passed**
+
 ## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`）
 
 - 新用例 `test_settings_chat_control.py::test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works`：列表、搜索、`/settings all` 都不出现 `model_auth_ref`，`/settings show` 仍可查看且提示不能在这里修改；原加载器元数据用例的计数同步扣除隐藏集合。
