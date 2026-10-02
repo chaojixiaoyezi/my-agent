@@ -1005,3 +1005,11 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - `owner_wake_discovery._filter_by_runtime_authority` 在 24 小时续接窗口内跳过这类 cancelled 执行，不投影、不诊断、不驱动；窗口截止时刻进发现缓存期限。过期照原规则收口，原因 `user_interrupt_expired`。
   - `/stop` 语义不变：窗口内走正常任务停止并回收资源，过期后走 C12a 遗留资源回收。
   - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## Gateway 收尾给本进程在跑的子代理执行器打停机记号（step17c 预演观察 1，2026-10-02，分支 `claude/38-shutdown-label-v2`，基于 `5a56714dc`）
+
+- **起因**：自然停机时网关进程里的子代理随进程消失，重启后被收尾成 `runner_error`，看不出原因是停机。
+- **改动**：
+  - Gateway 关门结清后，给本进程在跑的执行器在各自 attempt 上打 `executor.host_shutdown` 记号，个数写进收尾载荷 `host_shutdown_executors`；
+  - 重启收尾看到记号，记 `host_shutdown_interrupted`（不自动重跑），有未确认工具效果时仍先核对。
+  - 设计见台账同名节，测试与变异见 TESTS.md 同名节。

@@ -46,6 +46,28 @@
 - **影响**：被中断任务在窗口内保持 active、TaskRun 保持打开，期间不会被自动续跑（运行库权威终态照旧排除驱动）。窗口内用户发的下一条消息，无论内容，都接着原任务目录，与原先"中断后马上发消息"的行为一致。
 - **验证**：见 TESTS.md 同名节。真实 MiniMax 链路未跑（组件 + 真实 Gateway ask 加脚本化假模型已覆盖），可在集成验收时补一轮。
 
+## 自然停机带走的子代理重启后按“宿主停机中断”收尾（step17c 停机预演观察 1，2026-10-02，分支 `claude/38-shutdown-label-v2`，基于 `claude/3a-step16z` `5a56714dc`，已实现，待集成）
+
+- **问题**（ae 观察 1）：自然停机时，网关进程里的子代理是守护线程，随进程消失，碰不到关门后的拒绝。重启后宿主把它收尾成 `runner_error`（“执行器已退出但没有返回结果”），用户看不出原因是停机。
+- **为什么不用网关停机事件判定**：3a 举的例子是 `gateway_model_calls_interrupted` 事件和账上的中断码，但都不好用。
+  - 账本在内存里，重启就没了。
+  - 停机事件写在 Gateway 主 agent 的本地库里，而 local/user 这类 owner 的子代理由各自 owner 的 agent 做重启收尾，读不到那份库。
+  - 按“调用编号 = attempt 编号”去匹配，依赖的是一个约定。
+  - 子代理停机时可能正在跑工具而不是在等模型，这时根本没有在途调用可匹配。
+- **做法**：结构化事实写在这个 run 自己的 attempt 上。
+  - Gateway 收尾在关门结清之后调用 `runtime_db/executor_liveness.mark_in_process_executors_host_shutdown()`：给本进程仍在执行区间里的每个子代理执行器，在它自己的 attempt 元数据上按 token CAS 写 `executor.host_shutdown`（pid + 时间）。
+    - 不改 status，不判死。线程如果还来得及自己收尾，就照常写退出和结果。
+    - 子进程 runner 不在本进程的执行区间表里，不受影响。kill -9 这类非正常退出走不到这里，不会有记号。
+    - 打上记号的个数写进收尾载荷 `host_shutdown_executors`。出错只记 `gateway_executor_shutdown_mark_failed{error_type}`，不中断收尾。
+  - 重启收尾：`exited_attempt_facts` 带出 `host_shutdown`，`recover_exited_runner` 按优先级选失败类型：
+    1. 有未确认的工具效果：仍然是 `executor_effects_unknown`，先核对；
+    2. 有停机记号：新失败类型 `host_shutdown_interrupted`，界面显示“宿主停机中断”；
+    3. 其它：照旧 `runner_error`。
+  - `host_shutdown_interrupted` 登记了错误码 `HOST_SHUTDOWN_INTERRUPTED`（不可重试），不进自动重跑名单。
+    - 重启后不自动重跑，父级按 recovery_decision 用同一 run 续派，不改“不自动重跑”的取舍。
+    - Audit 来源例外：和 `model_call_admission_closed` 同属 `HOST_SHUTDOWN_FAILURE_TYPES`，结果归并改回 PENDING 时保留原因，重启后接续。
+- **验证**：见 TESTS.md 同名节。
+
 ## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
 
 - **问题**：step17c 冒烟基本链路（`decision-evidence/step17c-shutdown-rehearsal-38d7c8615/`）里，父代理被子代理完成唤醒的那一轮，

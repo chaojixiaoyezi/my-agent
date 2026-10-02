@@ -557,7 +557,8 @@ def _flush_decision_reach_counts(request: GatewayRunCleanupRequest) -> None:
 
 
 # LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策（并最多等 2 秒让 observe 后台执行器落账），再停 HTTP 与
-#   收三条循环，排空窗口后关闭模型调用准入并把仍在途的模型调用记成被停机中断（只记结构化事实，不猜用量），再把决策点到达计数的尾巴落盘，
+#   收三条循环，排空窗口后关闭模型调用准入并把仍在途的模型调用记成被停机中断（只记结构化事实，不猜用量），给本进程仍在跑的
+#   子代理执行器打停机记号，再把决策点到达计数的尾巴落盘，
 #   最后清 pid/停止请求并写心跳与收尾事件；
 #   决策取消、账本结清或计数落盘出错只记异常类型事件，不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py、
 #   test_gateway_model_call_shutdown_settlement.py 与 Gateway 停止相关回归。
@@ -571,6 +572,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
     alive_threads = _join_gateway_loops(request)
     drain_complete = not alive_threads
     interrupted_model_calls = _settle_interrupted_model_calls(request, drain_complete=drain_complete)
+    host_shutdown_executors = _mark_host_shutdown_executors(request)
     surviving_background_sessions = _record_surviving_background_sessions(request)
     _flush_decision_reach_counts(request)
     paths = request.context.paths
@@ -597,6 +599,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         "drain_complete": drain_complete,
         "alive_threads": alive_threads,
         "interrupted_model_calls": interrupted_model_calls,
+        "host_shutdown_executors": host_shutdown_executors,
         "surviving_background_sessions": surviving_background_sessions,
         "updated_at": time.time(),
     }
@@ -613,6 +616,21 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         flush=True,
     )
     return cleanup_payload
+
+
+# LLM: 关门结清之后调用：给本进程仍在执行区间里的子代理执行器，在各自 attempt 上记“被宿主停机中断”
+#   （runtime_db.executor_liveness.mark_in_process_executors_host_shutdown）。进程退出把它们带走时，重启收尾按
+#   host_shutdown_interrupted 收口，不再笼统记成 runner_error。出错只记异常类型事件 gateway_executor_shutdown_mark_failed，
+#   不能中断收尾。改事件名或字段同步 test_gateway_model_call_shutdown_settlement.py。
+# 函数用途: Gateway 停止时给本进程在跑的子代理执行器打上停机记号，返回打上的个数（写各自运行库）。
+def _mark_host_shutdown_executors(request: GatewayRunCleanupRequest) -> int:
+    try:
+        from ..agent.runtime_db.executor_liveness import mark_in_process_executors_host_shutdown
+
+        return mark_in_process_executors_host_shutdown()
+    except Exception as exc:  # noqa: BLE001 - 停止收尾不能因停机记号出错而中断
+        log_gateway_event(request.context.agent, "gateway_executor_shutdown_mark_failed", {"error_type": type(exc).__name__})
+        return 0
 
 
 # LLM: 停机时受管后台进程按设计继续存活；这里只在排空后列一次仍未终态的会话并写事件 gateway_background_sessions_surviving

@@ -63,6 +63,20 @@
   - 其中"续接判断恒不成立"和"Gateway 不记"由真实链路那一项单独就能杀掉。
 - 原有 `test_r103_ledger_selfheal.py` 不变、照常通过（没有用户中断事件时自愈行为不变）。
 
+## 自然停机带走的子代理重启后按“宿主停机中断”收尾（step17c 预演观察 1，2026-10-02，分支 `claude/38-shutdown-label-v2`，基于 `5a56714dc`）
+
+- `test_executor_exit_recovery.py` 新增 2 项：
+  - 执行器停在本进程里，把它的执行器身份改成一个已死的进程，用来模拟“停机后进程退出、重启收尾”。参数化成三种：
+    - 有停机记号：`host_shutdown_interrupted`，FAILED，不自动重跑，标签“宿主停机中断”；
+    - 没有记号：`runner_error`；
+    - 有记号且有未确认工具：`executor_effects_unknown`。
+    - 父级唤醒里都是同一个失败类型。打了记号、执行器还活着时不判死。
+  - 停机记号按 token CAS：记录换成别的执行器后不写。
+- `test_gateway_model_call_shutdown_settlement.py` 新增 2 项，原有 1 项加了一组参数：
+  - 收尾时先关门结清、再打记号、最后写心跳，个数写进载荷；
+  - 打记号出错时只记异常类型，收尾照常；
+  - 结果归并规则加一组：`host_shutdown_interrupted` 也被保留。
+
 ## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`）
 
 **来源**：3a 派活；ds2 两轮加固 be 审过之后剩下的四处可选尾巴。设计与“挂 /status 不挂审计”的理由见 DESIGN_LEDGER 同名节。

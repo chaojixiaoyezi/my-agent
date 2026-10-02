@@ -11,6 +11,8 @@ _DETAIL_BY_FAILURE = {
     FailureType.PROVIDER_QUOTA_EXHAUSTED.value: "额度不足",
     # 宿主停机关门后新模型调用被拒（J17 停机准入栅栏）：说清是停机打断，不笼统显示“失败”。
     FailureType.MODEL_CALL_ADMISSION_CLOSED.value: "宿主停机中断",
+    # 执行器随网关停机退出、重启收尾按停机记号记的（自然停机），和被准入拒绝的同一个标签。
+    FailureType.HOST_SHUTDOWN_INTERRUPTED.value: "宿主停机中断",
     FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value: "结果格式异常",
 }
 

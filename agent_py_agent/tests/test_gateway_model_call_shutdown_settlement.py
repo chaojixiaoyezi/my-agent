@@ -465,6 +465,7 @@ def test_auto_start_entry_refuses_new_runners_once_admission_closes(tmp_path, mo
 
 @pytest.mark.parametrize(("failure_type", "kept"), [
     ("model_call_admission_closed", "model_call_admission_closed"),
+    ("host_shutdown_interrupted", "host_shutdown_interrupted"),
     ("runner_error", ""),
 ])
 def test_source_merge_keeps_only_the_shutdown_reason_when_it_turns_pending(tmp_path, failure_type, kept):
@@ -545,3 +546,36 @@ def test_child_closeout_keeps_the_waiting_parent_pending_after_admission_closes(
     loaded = manager.load(parent.id)
     assert started == ([] if closed else [[parent.id]])
     assert loaded.status == "PENDING" and parent_wait_blocks_dispatch(loaded) is closed, "关门后等待标记必须还在"
+
+
+def test_gateway_cleanup_marks_in_process_executors_after_settlement(monkeypatch):
+    """自然停机（step17c 预演观察 1）：关门结清之后给本进程在跑的子代理执行器打停机记号，个数写进收尾载荷。"""
+    from agent_py_agent.agent.runtime_db import executor_liveness
+
+    order = []
+    original = call_runtime.settle_open_model_calls_for_shutdown
+    monkeypatch.setattr(call_runtime, "settle_open_model_calls_for_shutdown", lambda: order.append("settle") or original())
+    monkeypatch.setattr(executor_liveness, "mark_in_process_executors_host_shutdown", lambda: order.append("mark") or 2)
+    request, events = _cleanup_request(monkeypatch, order, SimpleNamespace())
+
+    report = gateway_process._cmd_gateway_run_cleanup(request)
+
+    assert order.index("settle") < order.index("mark") < order.index("heartbeat"), "先关门结清，再打记号，最后写心跳"
+    assert report["host_shutdown_executors"] == 2 and events[-1][1]["host_shutdown_executors"] == 2
+
+
+def test_gateway_cleanup_survives_a_failing_executor_mark(monkeypatch):
+    from agent_py_agent.agent.runtime_db import executor_liveness
+
+    def broken():
+        raise RuntimeError("secret detail that must not be logged")
+
+    order = []
+    monkeypatch.setattr(executor_liveness, "mark_in_process_executors_host_shutdown", broken)
+    request, events = _cleanup_request(monkeypatch, order, SimpleNamespace())
+    report = gateway_process._cmd_gateway_run_cleanup(request)
+
+    assert report["host_shutdown_executors"] == 0 and "heartbeat" in order
+    failed = [payload for name, payload in events if name == "gateway_executor_shutdown_mark_failed"]
+    assert failed == [{"error_type": "RuntimeError"}], "只记异常类型，不记异常正文"
+

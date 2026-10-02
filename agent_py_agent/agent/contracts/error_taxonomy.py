@@ -2206,6 +2206,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "（仍有持久工作的 Audit 来源保持 PENDING，重启后照常接续）；被拒的用户回合不会续跑，需要用户重新发送。"
         ),
     ),
+    "HOST_SHUTDOWN_INTERRUPTED": ErrorContract(
+        code="HOST_SHUTDOWN_INTERRUPTED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "宿主（Gateway）停机时这个子代理的执行器还在运行，随进程退出、没有返回结果；不是任务失败也不是代码错误，"
+            "重启后不会自动重跑：父级按 recovery_decision 用同一 run 续派，不要把它当成已完成"
+            "（仍有持久工作的 Audit 来源保持 PENDING，重启后照常接续）。"
+        ),
+    ),
     "UNSUPPORTED_OPERATION": ErrorContract(
         code="UNSUPPORTED_OPERATION",
         category="tool",

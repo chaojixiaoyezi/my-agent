@@ -96,6 +96,10 @@ class FailureType(str, Enum):
     MODEL_ERROR = "model_error"
     NO_PROGRESS_FUSE = "no_progress_fuse"
     PERMISSION_BLOCKED = "permission_blocked"
+    # 宿主（Gateway）优雅停机时这个 run 的执行器还在本进程里跑，随进程退出、没有返回结果；重启收尾凭执行器上的停机记号认出它。
+    # 和 MODEL_CALL_ADMISSION_CLOSED 一样不进自动重跑名单，重启后也不会自动重跑，父级按 recovery_decision 用同一 run 续派；
+    # 仍有持久工作的 Audit 来源例外（见 HOST_SHUTDOWN_FAILURE_TYPES）。
+    HOST_SHUTDOWN_INTERRUPTED = "host_shutdown_interrupted"
     # Account/plan quota cannot be repaired by replaying the same provider
     # request.  Keep it distinct from transient overload so durable workers
     # stop consuming tokens until an operator explicitly restores supply.
@@ -133,6 +137,12 @@ RETRYABLE_RUNNER_FAILURE_TYPES = frozenset({
     # Backward compatibility for persisted BLOCKED results written before
     # incomplete work became a PENDING continuation state.
     FailureType.INCOMPLETE_DELIVERABLES.value,
+})
+# 宿主停机造成的失败类型：被准入拒绝的 run 和随进程退出的执行器。仍有持久工作的 Audit 来源被结果归并改回 PENDING 时
+# 留着这个原因不清空（runner_result_state._apply_status_fields），界面都显示“宿主停机中断”。
+HOST_SHUTDOWN_FAILURE_TYPES = frozenset({
+    FailureType.MODEL_CALL_ADMISSION_CLOSED.value,
+    FailureType.HOST_SHUTDOWN_INTERRUPTED.value,
 })
 PROVIDER_SUPPLY_FAILURE_TYPES = frozenset({
     FailureType.TRANSIENT_ERROR.value,
