@@ -51,6 +51,25 @@
   - 真实链路那一项单独就能杀掉其中 4 个：增量不看次数、求和漏掉次数、账本不计模型次数、摘要不导出模型次数。
 - `test_model_call_ledger.py` 的 3 个整份摘要比对补上两个按名次数键（合同变化，值等于各用例的真实调用数）。
 
+**追加提交（timeout_stage 扫描 + be 复审 S1/S2）**：
+- `test_timeout_budget_locked.py` 新增 2 项（脚本加载抽成 `_load_evidence_script` 共用）：
+  - `test_timeout_stage_production_values_come_from_source_scan`：值集合恰为 `sorted(TIMEOUT_STAGES)`（五个登记阶段都有生产来源）；
+    `agent/backends/errors.py`（legacy 默认 provider_wall）与 `agent/backends/gateway_request_limits.py`（wall_clock）在列；
+    `agent/contracts/model_call_ledger.py`（集合定义）与 `agent/agent_core/runner/activity_diagnostics.py`（同名概念）不在列；
+    每条行号指向的源码行含该字面量；ledger 场景的 values/sites 两字段来自同一扫描。当前扫出 14 处。
+  - `test_production_source_scan_ignores_ancestor_directory_named_tests`（S2）：临时仓库放在名叫 `tests` 的上级目录下，包内再放
+    `agent/tests/t.py`；扫描得 `agent/x.py`、`cli/y.py`，`is_probe_production_sites` 同样只报这两处。
+- `test_store_usage_open_world.py` 新增 1 项 `test_unknown_purpose_key_names_are_sanitized_and_truncated`（S1）：带空白、标记、控制符、
+  非 ASCII 且超长的未知键，求和仍按原键；计数里的键名长 64、只含 `[0-9A-Za-z:_.-]`，前缀 `probe:tool_capability__b___x`。
+- 变异（5 个，全部拦住、sha256 逐字节恢复）：
+  - 扫描去掉“stage 关键字实参”这一类产生位置 → provider_declared 失去来源，值集合用例失败；
+  - 扫描把任何位置的字面量都算来源 → 集合定义被算成来源，负向锁失败；
+  - S1 去掉截断 → 键名长 128，失败；S1 去掉脱敏 → 空格原样进计数，失败；
+  - S2 退回按绝对路径 parts 排除 → 上级目录叫 tests 时扫描为空，失败。
+- 门禁（最终树）：focused 6 文件 62 passed, 1 xpassed（既有）；guards9 170 passed；import_boundaries findings=0；ruff All checks passed；
+  doc_sync PASS；code-size strict blocked=False（hard=0，报告已 checkout 还原）；size_diff 新增 0；`git diff --check` OK；
+  clean_package OK；常数目录 818 项 `--check` 一致。
+
 ## 停机准入拒绝的调用方收尾（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `00bcf7d45`）
 
 - `test_gateway_decision_shutdown_cancel.py` 新增 1 项，参数化成 3 种情形。走真实本地 HTTP 决策链，在“已登记 ActiveDecision、还没进模型账本”这一刻执行收尾步骤：

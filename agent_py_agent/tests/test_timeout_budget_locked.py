@@ -53,6 +53,7 @@ from agent_py_agent.agent.agent_core.tool_model_generation import (
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 from agent_py_agent.agent.backends.gateway_helpers import GatewayRequest, post_stream_iter
 from agent_py_agent.agent.contracts.model_call_ledger import (
+    TIMEOUT_STAGES,
     ModelCallLedger,
     ModelCallStartedParams,
     ModelCallTimeoutParams,
@@ -430,19 +431,34 @@ def test_json_roundtrip_of_locked_evidence(tmp_path: Path) -> None:
     assert script.exists()
 
 
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+# 函数用途: 按文件路径加载取证脚本（脚本目录不是包），供源码扫描用例直接调它的函数。
+def _load_evidence_script():
+    import importlib.util
+
+    script = _PACKAGE_ROOT / "scripts" / "b_acceptance" / "timeout_budget_evidence.py"
+    spec = importlib.util.spec_from_file_location("timeout_budget_evidence_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# 函数用途: 读出 "相对路径:行号[:值]" 指向的那一行源码。
+def _source_line(site: str) -> str:
+    rel, line = site.split(":")[:2]
+    return (_PACKAGE_ROOT / rel).read_text(encoding="utf-8").splitlines()[int(line) - 1]
+
+
 # LLM: 取证脚本的“探针埋点在哪”改为按源码扫描 is_probe=True 关键字实参，不写死行号。本用例锁住扫描口径与接线：
 #   现有两处生产埋点（backends/http.py 工具能力探测、contracts/llm_activation_readiness.py 激活探针）都在，
 #   每条行号指向的源码行确实含 is_probe=True，且 ledger 场景的字段来自同一扫描。新增埋点时同步改这里的文件集合。
 # 函数用途: 取证脚本的 is_probe 埋点清单来自源码扫描，覆盖当前两处生产埋点且行号真实。
 def test_is_probe_production_sites_come_from_source_scan() -> None:
-    import importlib.util
-
-    package_root = Path(__file__).resolve().parents[1]
-    script = package_root / "scripts" / "b_acceptance" / "timeout_budget_evidence.py"
-    spec = importlib.util.spec_from_file_location("timeout_budget_evidence_under_test", script)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = _load_evidence_script()
+    package_root = _PACKAGE_ROOT
 
     sites = module.is_probe_production_sites()
     files = sorted({site.rsplit(":", 1)[0] for site in sites})
@@ -452,6 +468,45 @@ def test_is_probe_production_sites_come_from_source_scan() -> None:
         source_line = (package_root / rel).read_text(encoding="utf-8").splitlines()[int(line) - 1]
         assert "is_probe=True" in source_line, site
     assert module._scenario_ledger_evidence()["is_probe_production_sites"] == sites
+
+
+# LLM: 取证脚本的 timeout_stage 生产取值也按源码扫描（四种结构位置：stage/timeout_stage 关键字实参、同名参数默认值、
+#   赋给同名变量、同名字典键的值），不再写死 ["provider_wall"]。锁住：五个登记阶段都有生产来源；每条行号指向的源码行
+#   含该字面量；阶段集合定义（model_call_ledger）、纯比较和别的概念的同名字面量（runner 活动 phase 的 "stream_idle"）
+#   不算来源；ledger 场景的两个字段来自同一扫描。新增阶段或改产生位置时同步改这里。
+# 函数用途: 取证脚本的超时阶段生产取值来自源码扫描，覆盖全部登记阶段，且不把集合定义、比较和同名概念算成来源。
+def test_timeout_stage_production_values_come_from_source_scan() -> None:
+    module = _load_evidence_script()
+
+    sites = module.timeout_stage_production_sites()
+    values = module.timeout_stage_production_values()
+    assert values == sorted(TIMEOUT_STAGES), "每个登记阶段都要有真实生产来源"
+    files = {site.split(":")[0] for site in sites}
+    assert "agent/backends/errors.py" in files, "ProviderTimeoutError 的 legacy 默认值 provider_wall"
+    assert "agent/backends/gateway_request_limits.py" in files, "总期限耗尽的 wall_clock"
+    assert "agent/contracts/model_call_ledger.py" not in files, "TIMEOUT_STAGES 集合定义不是生产来源"
+    assert "agent/agent_core/runner/activity_diagnostics.py" not in files, "runner 活动 phase 的 stream_idle 是别的概念"
+    for site in sites:
+        value = site.rsplit(":", 1)[1]
+        assert f'"{value}"' in _source_line(site), site
+    evidence = module._scenario_ledger_evidence()
+    assert evidence["timeout_stage_production_values"] == values
+    assert evidence["timeout_stage_production_sites"] == sites
+
+
+# LLM: be 复审 S2：排除 tests 只能看相对包目录的路径段。仓库检出在名叫 tests 的上级目录下时，原来按绝对路径 parts 判断会把
+#   全部文件排除、扫描结果变空。用临时仓库复现：上级目录叫 tests，包内再放一个真正的 tests 子目录。
+# 函数用途: 上级目录叫 tests 不影响扫描，包内 tests 子目录仍被排除。
+def test_production_source_scan_ignores_ancestor_directory_named_tests(tmp_path: Path) -> None:
+    module = _load_evidence_script()
+    repo = tmp_path / "tests" / "repo"
+    for rel in ("agent_py_agent/agent/x.py", "agent_py_agent/agent/tests/t.py", "agent_py_agent/cli/y.py"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("probe = dict(is_probe=True)\n", encoding="utf-8")
+    module.PKG_ROOT = repo
+    files = [path.relative_to(repo / "agent_py_agent").as_posix() for path in module._production_source_files()]
+    assert files == ["agent/x.py", "cli/y.py"], "上级目录叫 tests 不排除，包内 tests 子目录才排除"
+    assert module.is_probe_production_sites() == ["agent/x.py:1", "cli/y.py:1"]
 
 
 # ---------------------------------------------------------------- 门槛2 终审边界②(seq1622-2): ledger 写入层 stage 封闭

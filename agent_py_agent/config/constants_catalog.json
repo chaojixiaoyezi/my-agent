@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 817,
+  "count": 818,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2386,6 +2386,14 @@
       "unit": "个",
       "category": "其它",
       "description": "退休策略不再参与 due 扫描，原失败事实仍保留在 metadata，供应冷却另由进程内组件管理。"
+    },
+    {
+      "name": "_UNKNOWN_PURPOSE_KEY_MAX_CHARS",
+      "file": "agent_py_agent/agent/conversation/store_usage.py",
+      "value": 64,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "未知键名进计数（进而进 /status）前先截断：坏文件里的超长键名不能原样展示，64 个字符足够认出拼错的键。"
     },
     {
       "name": "_UNKNOWN_PURPOSE_KEY_MAX_COUNT",

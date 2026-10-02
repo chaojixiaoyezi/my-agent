@@ -58,8 +58,20 @@
   `llm_activation_readiness.py:178`，探测计量上线后 `backends/http.py` 也有埋点，原行号也已漂到 186。改为按源码结构化事实扫描：
   ast 找 `agent_py_agent/agent`、`agent_py_agent/cli`（不含 tests）里 `is_probe=True` 关键字实参，输出“相对路径:行号”；
   `is_probe=params.is_probe` 这类转发不算埋点。同一字典里 `timeout_stage_production_values` 仍写死 `["provider_wall"]`，不在本轮范围，原样保留。
-- **边界**：没有新配置、没有新文件、不改读写合同；两个计数都是进程内、重启清零、不持久化；常数目录已重新生成（817 项）。
+- **边界**：没有新配置、没有新文件、不改读写合同；两个计数都是进程内、重启清零、不持久化；常数目录已重新生成。
 - **验证**：见 TESTS.md 同名节。
+- **追加提交（2026-10-02，3a 指派 + be 复审两条建议修）**：
+  - **timeout_stage 也改结构化扫描**：同一取证字典里 `timeout_stage_production_values` 原写死 `["provider_wall"]`（A 阶段“全库唯一生产取值”，
+    门槛 2 之后早已不止）。现在 `timeout_stage_production_sites()` 按源码扫描四种“产生阶段值”的结构位置——`stage`/`timeout_stage`
+    关键字实参、同名参数默认值（`ProviderTimeoutError.__init__` 的 legacy `provider_wall`）、赋给同名变量（含元组赋值按位置对齐）、
+    同名字典键的值（恢复状态载荷）——只认 `TIMEOUT_STAGES`（账本层单一事实源）里的字面量，输出“相对路径:行号:值”；值集合由它推出。
+    纯比较（`exc.stage in {...}`）、集合定义本身和别的概念的同名字面量（runner 活动 phase 的 `stream_idle`）都不算来源。
+    当前扫出 14 处、5 个值，正好覆盖全部登记阶段；取证要看的是反向——每个登记阶段有没有真实生产来源。
+  - **S1 未知键名脱敏截断**：未知用途键名进诊断计数前只保留 ASCII 字母、数字和 `:_-.`，其它字符替换成 `_`，再截到
+    `_UNKNOWN_PURPOSE_KEY_MAX_CHARS`（64）；坏文件里的超长或怪字符键名不会原样出现在 /status。读取端求和仍用原键，脱敏只在诊断层；
+    不同原键脱敏后可能撞名，计数合并，诊断可接受。
+  - **S2 tests 目录按相对包根判断**：`_production_source_files` 原按绝对路径 `path.parts` 排除 `tests`，仓库检出在名叫 tests 的上级目录下会把
+    全部文件排除、扫描结果变空；改为看相对包目录（`agent`/`cli`）的路径段。
 
 ## 停机准入拒绝的调用方收尾：决策、子代理、运行错误报告、唤醒毒丸按“宿主停机”处理（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `claude/3a-step16z` `00bcf7d45`，已实现，待集成）
 

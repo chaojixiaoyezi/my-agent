@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -391,3 +392,27 @@ def test_write_two_real_ledger_rows_without_probe_usage_omits_probe_key_in_both(
     total = store.model_usage.summary(thread.thread_id)["purpose_breakdown"]
     assert total["main"]["output_tokens"] == 6 and "probe:tool_capability" in total, "读回求和仍给出已知四桶"
     assert unknown_purpose_key_counts() == {"keys": {}, "overflow_count": 0}, "已知桶不进未知键计数"
+
+
+# LLM: 坏文件里的超长或怪字符键名不能原样进 /status（be 复审 S1）：进计数前替换掉非 [0-9A-Za-z:_.-] 的字符并截到 64 个；
+#   读取端求和仍用原键，脱敏只在诊断计数这一层。
+# 函数用途: 带空白、控制符、标记和超长的未知键，计数里只剩安全字符且不超过 64 个字符，求和结果仍按原键。
+def test_unknown_purpose_key_names_are_sanitized_and_truncated(tmp_path):
+    raw_key = "probe:tool capability\n<b>\x00中" + "x" * 100
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "unknown-key-sanitize"})
+    store.model_usage.append_once({
+        "event_id": "usage-unknown-key-raw-1",
+        "thread_id": thread.thread_id,
+        "request_id": "req",
+        "run_id": "run",
+        "source": "test",
+        "model_calls": _calls_with_purposes({"main": _bucket(output=1), raw_key: _bucket(output=3)}),
+    })
+    summary = store.model_usage.summary(thread.thread_id)
+    assert summary["purpose_breakdown"][raw_key]["output_tokens"] == 3, "求和仍按原键，脱敏只在诊断计数"
+    counts = unknown_purpose_key_counts()
+    assert list(counts["keys"].values()) == [1] and counts["overflow_count"] == 0
+    (shown,) = counts["keys"]
+    assert len(shown) == 64 and re.fullmatch(r"[0-9A-Za-z:_.\-]+", shown), shown
+    assert shown.startswith("probe:tool_capability__b___x"), "空白、标记、控制符、非 ASCII 各换成一个 _"

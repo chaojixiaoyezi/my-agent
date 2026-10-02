@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import replace
@@ -45,14 +46,26 @@ _IDENTITY_FIELDS = (("backends", "backend_attempt_counts"), ("models", "model_at
 #   不同键名最多单独记 _UNKNOWN_PURPOSE_KEY_MAX_COUNT 个，超出只进 overflow_count，坏文件也撑不爆内存。
 # 不同的未知用途键最多单独计 16 个：拼错的键通常只有一两个，再多就是坏数据，只记总数不记键名。
 _UNKNOWN_PURPOSE_KEY_MAX_COUNT = 16
+# 未知键名进计数（进而进 /status）前先截断：坏文件里的超长键名不能原样展示，64 个字符足够认出拼错的键。
+_UNKNOWN_PURPOSE_KEY_MAX_CHARS = 64
+# 键名只保留 ASCII 字母、数字和 :_-.，其它字符（空白、控制符、标记）一律替换成 _，/status 里不会出现怪字符。
+_UNSAFE_PURPOSE_KEY_CHARS = re.compile(r"[^0-9A-Za-z:_.\-]")
 _UNKNOWN_PURPOSE_KEYS_LOCK = threading.Lock()
 _UNKNOWN_PURPOSE_KEYS: dict[str, Any] = {"keys": {}, "overflow_count": 0}
 
 
-# LLM: 只在锁内改计数；已记过的键继续累加，新键超过上限只进 overflow_count。调用方传全部用途键，已知桶在这里过滤。
-# 函数用途: 把一批用途键里不认识的记进诊断计数（已知四桶不计）。
+# LLM: 只影响诊断计数里的键名，读取端求和仍用原键。先替换不安全字符再截断，所以结果只含安全字符且不超过上限；
+#   不同原键脱敏后可能撞成同一个名字，计数合并，这是诊断可接受的损失。
+# 函数用途: 把未知用途键名变成能安全展示的形式（只留字母数字和 :_-.，最长 64 个字符）。
+def _display_purpose_key(purpose: object) -> str:
+    return _UNSAFE_PURPOSE_KEY_CHARS.sub("_", str(purpose))[:_UNKNOWN_PURPOSE_KEY_MAX_CHARS]
+
+
+# LLM: 只在锁内改计数；已记过的键继续累加，新键超过上限只进 overflow_count。调用方传全部用途键，已知桶在这里过滤，
+#   未知键按脱敏后的名字计。
+# 函数用途: 把一批用途键里不认识的记进诊断计数（已知四桶不计，键名先脱敏截断）。
 def _count_unknown_purpose_keys(purposes: Iterable[str]) -> None:
-    unknown = [purpose for purpose in purposes if purpose not in _PURPOSES]
+    unknown = [_display_purpose_key(purpose) for purpose in purposes if purpose not in _PURPOSES]
     if not unknown:
         return
     with _UNKNOWN_PURPOSE_KEYS_LOCK:

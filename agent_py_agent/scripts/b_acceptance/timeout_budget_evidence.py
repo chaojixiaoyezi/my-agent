@@ -69,6 +69,7 @@ from agent_py_agent.agent.backends.gateway_helpers import (  # noqa: E402
     post_stream_iter,
 )
 from agent_py_agent.agent.contracts.model_call_ledger import (  # noqa: E402
+    TIMEOUT_STAGES,
     ModelCallLedger,
     ModelCallStartedParams,
     ModelCallTimeoutParams,
@@ -289,13 +290,14 @@ def _is_probe_true_keyword(node: ast.AST) -> bool:
     )
 
 
-# LLM: 生产代码口径与 test_constant_names_unique 一致：agent_py_agent/agent 与 agent_py_agent/cli，不含 tests。
+# LLM: 生产代码口径与 test_constant_names_unique 一致：agent_py_agent/agent 与 agent_py_agent/cli，不含其下的 tests 目录。
+#   “tests”只看相对包目录的路径段：仓库检出在名叫 tests 的上级目录下时不能把所有文件都排除掉（be 复审 S2）。
 # 函数用途: 列出要扫描的生产 .py 文件（排序稳定）。
 def _production_source_files() -> list[Path]:
     files: list[Path] = []
     for package in ("agent", "cli"):
         root = PKG_ROOT / "agent_py_agent" / package
-        files.extend(path for path in root.rglob("*.py") if "tests" not in path.parts)
+        files.extend(path for path in root.rglob("*.py") if "tests" not in path.relative_to(root).parts)
     return sorted(files)
 
 
@@ -309,6 +311,90 @@ def is_probe_production_sites() -> list[str]:
         rel = path.relative_to(PKG_ROOT / "agent_py_agent").as_posix()
         sites.extend(f"{rel}:{node.lineno}" for node in ast.walk(tree) if _is_probe_true_keyword(node))
     return sites
+
+
+# 会成为超时阶段值的参数名 / 变量名 / 字典键名：异常构造用 stage，账本参数与持久载荷用 timeout_stage。
+_STAGE_PARAMETER_NAMES = frozenset({"stage", "timeout_stage"})
+
+
+# LLM: 只认 TIMEOUT_STAGES（账本层单一事实源）里的字符串字面量；表达式里其它字符串（如 getattr 的属性名）不算。
+# 函数用途: 列出一个表达式里出现的合法超时阶段字面量（行号 + 值）。
+def _stage_literals(expression: ast.AST) -> list[tuple[int, str]]:
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(expression)
+        if isinstance(node, ast.Constant) and node.value in TIMEOUT_STAGES
+    ]
+
+
+# LLM: 参数默认值按 ast 规则对齐：defaults 对应最后 N 个位置参数，kw_defaults 与 kwonlyargs 等长（None 表示没有默认值）。
+# 函数用途: 取出函数签名里 stage/timeout_stage 参数的默认值表达式（ProviderTimeoutError 的 legacy provider_wall 就在这里）。
+def _stage_parameter_defaults(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
+    args = function.args
+    positional = zip(reversed(args.args), reversed(args.defaults))
+    keyword_only = zip(args.kwonlyargs, args.kw_defaults)
+    return [
+        default for arg, default in [*positional, *keyword_only]
+        if default is not None and arg.arg in _STAGE_PARAMETER_NAMES
+    ]
+
+
+# LLM: 元组赋值按位置对齐（`deadline, stage = ..., "first_event"` 只取 stage 那一位）；其它目标形状不算。
+# 函数用途: 赋值目标里有 stage/timeout_stage 时，取出赋给它的那部分表达式。
+def _assigned_stage_parts(target: ast.AST, value: ast.AST | None) -> list[ast.AST]:
+    if value is None:
+        return []
+    if isinstance(target, ast.Name):
+        return [value] if target.id in _STAGE_PARAMETER_NAMES else []
+    if isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple) and len(target.elts) == len(value.elts):
+        return [
+            part for name, part in zip(target.elts, value.elts)
+            if isinstance(name, ast.Name) and name.id in _STAGE_PARAMETER_NAMES
+        ]
+    return []
+
+
+# LLM: 四种“产生阶段值”的结构位置：stage/timeout_stage 关键字实参、同名参数默认值、赋给同名变量、同名字典键的值。
+#   纯比较（exc.stage in {...}）、集合定义（TIMEOUT_STAGES）和别的概念同名字面量（runner 活动 phase 的 "stream_idle"）都不算。
+# 函数用途: 从一个 ast 节点取出“会成为 timeout_stage 的值”的表达式；不是产生位置就返回空。
+def _stage_value_expressions(node: ast.AST) -> list[ast.AST]:
+    if isinstance(node, ast.keyword):
+        return [node.value] if node.arg in _STAGE_PARAMETER_NAMES else []
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return _stage_parameter_defaults(node)
+    if isinstance(node, ast.Assign):
+        return [part for target in node.targets for part in _assigned_stage_parts(target, node.value)]
+    if isinstance(node, ast.AnnAssign):
+        return _assigned_stage_parts(node.target, node.value)
+    if isinstance(node, ast.Dict):
+        return [
+            value for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant) and key.value in _STAGE_PARAMETER_NAMES
+        ]
+    return []
+
+
+# 函数用途: 扫一个生产源码文件，返回 "相对路径:行号:阶段值"，按行号排序。
+def _stage_sites_in_file(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    rel = path.relative_to(PKG_ROOT / "agent_py_agent").as_posix()
+    sites: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        for expression in _stage_value_expressions(node):
+            sites.extend(_stage_literals(expression))
+    return [f"{rel}:{line}:{value}" for line, value in sorted(set(sites))]
+
+
+# LLM: 与 is_probe_production_sites 同一口径扫源码，不写死值或行号；值只可能是 TIMEOUT_STAGES 的成员，
+#   所以“产生的值都已登记”由构造保证，取证要看的是反向：每个登记阶段有没有真实生产来源。
+# 函数用途: 列出当前源码里所有会产生 timeout_stage 值的生产位置（相对路径:行号:值）。
+def timeout_stage_production_sites() -> list[str]:
+    return [site for path in _production_source_files() for site in _stage_sites_in_file(path)]
+
+
+# 函数用途: 生产代码实际会产生的超时阶段值集合（排序去重），由 timeout_stage_production_sites 推出。
+def timeout_stage_production_values() -> list[str]:
+    return sorted({site.rsplit(":", 1)[1] for site in timeout_stage_production_sites()})
 
 
 def _scenario_ledger_evidence() -> dict[str, object]:
@@ -352,7 +438,8 @@ def _scenario_ledger_evidence() -> dict[str, object]:
         "failed_branch_timeout_stage": failed_record["timeout_stage"],
         "timeout_params_fields": list(ModelCallTimeoutParams.__dataclass_fields__.keys()),
         "has_elapsed_or_first_token_field": False,
-        "timeout_stage_production_values": ["provider_wall"],  # 全库唯一生产取值
+        "timeout_stage_production_values": timeout_stage_production_values(),  # 按源码扫描，不写死
+        "timeout_stage_production_sites": timeout_stage_production_sites(),
         "is_probe_production_sites": is_probe_production_sites(),  # 按源码扫描，不写死行号
     }
 
