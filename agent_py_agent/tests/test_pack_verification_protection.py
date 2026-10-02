@@ -109,7 +109,8 @@ def _shell_forgeries(pack: Path) -> list[str]:
 
 
 # LLM: 真实 run_command。where = (工作目录, 写根)；isolated=False 是本机管理员 Full Access（人格根 = 本机主用户），
-#   True 是隔离 owner。
+#   True 是隔离 owner。Full Access 的沙箱参数按生产路径由 registry 投影：写边界带宿主写入的结构化 task_root
+#   （H3 定：本任务的核验记录只从它推，不再从工作目录或写根猜），子代理的 task_root 也是共享的规范任务根。
 # 函数用途: 以给定工作目录和写根跑一条命令。
 def _run(env, command: str, where: tuple[Path, list[Path]], isolated: bool):
     cwd, roots = where
@@ -118,9 +119,27 @@ def _run(env, command: str, where: tuple[Path, list[Path]], isolated: bool):
     options = (ShellToolOptions(owner_scope_root=str(env.owner_home), host_private_roots=(str(env.data_root),)) if isolated
                else ShellToolOptions(protected_persona_root=str(env.owner_home)))
     params = {"command": command, "working_dir": str(cwd)}
-    if isolated or roots:
+    if isolated:
         params["__sandbox_write_roots"] = [str(root) for root in roots]
+    else:
+        params.update(_projected_sandbox_params(env, cwd, roots))
     return ShellTool(env.owner_home, options=options).execute(params)
+
+
+# LLM: 和生产一样经 registry_invoke._tool_params_with_runtime_boundary 组沙箱参数，只取 __sandbox_ 开头的键并进命令参数。
+# 函数用途: 按写边界 {task_root, allowed_write_roots} 生成 Full Access 命令的沙箱参数。
+def _projected_sandbox_params(env, cwd: Path, roots: list[Path]) -> dict:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        AuthorizedToolDispatchRequest,
+        _tool_params_with_runtime_boundary,
+    )
+
+    boundary = {"task_root": str(env.task_root), "allowed_write_roots": [str(root) for root in roots]}
+    projected = _tool_params_with_runtime_boundary(AuthorizedToolDispatchRequest(
+        tool_name="run_command", tool=SimpleNamespace(), tool_params={}, workspace_root=cwd, write_boundary=boundary))
+    return {key: value for key, value in projected.items() if key.startswith("__sandbox_")}
 
 
 # LLM: 主代理在本任务 work/ 里；主代理在用户项目目录、写根带本任务 work/ 和 output/（tool_runtime_ledger 给主链任务注入的形状；
@@ -159,18 +178,18 @@ def test_real_shell_cannot_forge_the_ledger(tmp_path, monkeypatch, actor, isolat
     assert restored.ok, "自己的工作目录照常可写"
 
 
-# H3 的命令沙箱只按“本次命令的工作目录和写根”找当前任务根；两者都在任务树外时，这个任务的账本目录不在只读覆盖里。
-# 主链任务没有既有写根时，tool_runtime_ledger 会注入本任务 work/、output/ 作写根（上面 main-with-task-write-roots 的形状），
-# 子代理的写根带自己的任务目录，这两种形状都挡住了；但这不是结构保证（调用方预先给了别的写根就不注入）。
-# 这里钉住结构上的缺口，已报 be/3a；修好后这条会 XPASS，届时去掉标记。
+# 曾经的结构缺口（ae 报、be 修，3a 定为必须修）：命令的工作目录和写根都在任务树外时，旧版 H3 找不到当前任务根。
+# 现在本任务的核验记录只从写边界里的结构化 task_root 推出，和工作目录、写根无关。
 @needs_sandbox
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="H3 命令沙箱缺少本 run 任务根这个结构化锚点（已报 be/3a）")
 def test_full_access_shell_outside_the_task_tree_cannot_forge_the_ledger(tmp_path, monkeypatch):
-    """主代理 Full Access、工作目录在任务树外（用户项目目录）、没有任务写根时，账本目录也要只读。"""
+    """主代理 Full Access、工作目录和写根都在任务树外（用户项目目录），账本目录也要只读。"""
     if not _sandbox_ready():
         pytest.skip("平台沙箱不可用")
     env, files = _recorded(tmp_path, monkeypatch)
+    where = (env.workspace, [env.workspace])
     for command in _shell_forgeries(env.pack):
-        outcome = _run(env, command, (env.workspace, []), False)
+        outcome = _run(env, command, where, False)
         assert not outcome.ok, (command, outcome.output)
-    assert _snapshot(env.pack) == files
+    assert _snapshot(env.pack) == files and not Path(str(env.pack) + ".moved").exists()
+    assert _run(env, f"cat {shlex.quote(str(env.pack / 'originals.json'))}", where, False).ok, "读照常"
+    assert _run(env, f"printf ok > {shlex.quote(str(env.workspace / 'restored.txt'))}", where, False).ok, "项目目录照常可写"
