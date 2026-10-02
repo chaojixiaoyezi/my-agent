@@ -106,7 +106,8 @@ def transient_fallback_warning(code: str) -> str:
 
 # LLM: previous 新到旧且只含本组相关行，其中第一条成功就是最近一次推进本组游标的运行。它带“连不上让给默认”的警告码
 #   （按 transient_fallback_warning 全文比对，不解析别的文字）时，阈值降到 CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT；
-#   否则（会话模型自己成功推进、确定性失败的补跑、账里看不到成功）用 CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT。不加新状态。
+#   否则（会话模型自己成功推进、确定性失败的补跑、账里看不到成功、运行记录警告条数被截断而找不到补跑码）都用
+#   CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT，方向保守（最多多失败一次）。不加新状态。
 # 函数用途: 算这组这一次要在同一输入上连续连不上几次，才改用默认模型。
 def _transient_fallback_threshold(previous: list) -> int:
     advanced = next((row for row in previous if row.status == "succeeded"), None)
