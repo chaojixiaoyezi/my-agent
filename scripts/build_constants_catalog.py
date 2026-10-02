@@ -146,8 +146,9 @@ def _description(lines: list[str], lineno: int) -> str:
 
 
 # LLM: 收集一个源码文件里所有合格的模块级数值常数（全大写、非协议类、数字字面量或简单算术），
-#   每个条目带名字、相对路径、行号、计算值、单位、类别、上方中文说明。行号来自 ast（1 起），
-#   注释行取同一份源文件的行数组。单个文件读不出来或语法错误时跳过，不影响其它文件。
+#   每个条目带名字、相对路径、计算值、单位、类别、上方中文说明。不存行号：目录唯一失效时机是常数
+#   增删、改名、改值、改说明或改单位/类别，源码里插入空行/换行这类行号漂移不应当让目录过期（行号由
+#   查看入口在运行时按名字定位）。注释行取同一份源文件的行数组。单个文件读不出来或语法错误时跳过。
 # 函数用途: 把一个 .py 文件变成常数目录条目列表。
 def _module_entries(root: Path, path: Path) -> list[dict]:
     try:
@@ -173,7 +174,6 @@ def _module_entries(root: Path, path: Path) -> list[dict]:
         entries.append({
             "name": target,
             "file": relative,
-            "line": node.lineno,
             "value": _eval_numeric(value),
             "unit": unit_for_name(target),
             "category": category_for_name(target),
@@ -182,8 +182,8 @@ def _module_entries(root: Path, path: Path) -> list[dict]:
     return entries
 
 
-# LLM: 全量扫描产品代码（agent 与 cli），按文件路径+行号排序输出稳定列表；不 import 任何产品模块。
-#   每次调用都是全新扫描，不缓存，保证 --check 与写文件用同一份结果。
+# LLM: 全量扫描产品代码（agent 与 cli），按文件路径+名字排序输出稳定列表；不 import 任何产品模块。
+#   每次调用都是全新扫描，不缓存，保证 --check 与写文件用同一份结果。不用行号排序：行号不属于目录内容。
 # 函数用途: 生成完整的常数目录条目列表。
 def build_catalog(root: Path | None = None) -> list[dict]:
     base = Path(root) if root is not None else _ROOT
@@ -191,7 +191,7 @@ def build_catalog(root: Path | None = None) -> list[dict]:
     for package in _SCANNED:
         for path in sorted((base / "agent_py_agent" / package).rglob("*.py")):
             entries.extend(_module_entries(base, path))
-    entries.sort(key=lambda entry: (entry["file"], entry["line"]))
+    entries.sort(key=lambda entry: (entry["file"], entry["name"]))
     return entries
 
 

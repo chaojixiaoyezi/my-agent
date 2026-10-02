@@ -259,21 +259,24 @@ def _search(config: object, argument: str) -> str:
 
 # LLM: 代码常数目录是只读投影（权威位置是读取常数的那行源码），这里只按名字/说明/文件查找并展示
 #   文件:行、值、单位、类别与中文说明，绝不提供修改。与 user_config search 的常数结果同一数据源
-#   （settings/constants_catalog.search_constants）。只读，不需要 config。
+#   （settings/constants_catalog.search_constants）。行号在运行时按名字只读定位（entry_with_line），
+#   定位不到就只显示文件。只读，不需要 config。
 # 函数用途: /settings internal <关键词> —— 查代码里的模块级数值常数（只读，改动需改代码）。
 def _internal(_config: object, argument: str) -> str:
-    from ..settings.constants_catalog import search_constants
+    from ..settings.constants_catalog import entry_with_line, search_constants
 
     found = search_constants(argument, limit=10)
     if not found:
         return f"没有找到和“{argument}”相关的代码常数；可以试试 /settings search <关键词> 找用户可调参数。"
     lines = [f"和“{argument}”相关的代码常数（最多 10 个，只读，改动需改代码）："]
     for entry in found:
-        unit = f"（{entry['unit']}）" if entry.get("unit") else ""
-        summary = str(entry.get("description") or "").strip()
+        view = entry_with_line(entry)
+        unit = f"（{view.get('unit')}）" if view.get("unit") else ""
+        summary = str(view.get("description") or "").strip()
         summary = (summary[:60] + "…" if len(summary) > 60 else summary) or "（没有中文说明）"
-        lines.append(f"- {entry['file']}:{entry['line']} {entry['name']} = {entry.get('value')}{unit}"
-                     f"［{entry.get('category', '其它')}］：{summary}")
+        location = f"{view['file']}:{view['line']}" if view.get("line") else str(view.get("file"))
+        lines.append(f"- {location} {view.get('name')} = {view.get('value')}{unit}"
+                     f"［{view.get('category', '其它')}］：{summary}")
     return "\n".join(lines)
 
 

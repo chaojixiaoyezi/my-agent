@@ -130,3 +130,48 @@ def test_runtime_catalog_search_finds_by_name_file_and_description():
     assert search_constants(first["file"].split("/")[-1], limit=50)
     if first.get("description"):
         assert search_constants(first["description"][:4], limit=50)
+
+
+def test_runtime_locate_line_finds_definition_only_in_that_file():
+    from agent_py_agent.agent.settings.constants_catalog import (
+        entry_with_line,
+        load_catalog,
+        locate_line,
+    )
+
+    first = load_catalog()[0]
+    line = locate_line(first["file"], first["name"])
+    assert isinstance(line, int) and line > 0, "目录里存在的常数应在它的源码文件里定位到行号"
+    view = entry_with_line(first)
+    assert view["line"] == line
+    assert locate_line(first["file"], "NO_SUCH_CONSTANT_XYZ") is None
+    assert locate_line("agent_py_agent/agent/not_a_real_file.py", "MAX_BYTES") is None
+    assert locate_line("not_under_package.py", "MAX_BYTES") is None
+
+
+def test_line_shift_does_not_invalidate_catalog(tmp_path):
+    package = tmp_path / "agent_py_agent" / "agent"
+    package.mkdir(parents=True)
+    source = package / "sample.py"
+    source.write_text(
+        "# 上方中文说明：请求超时\n"
+        "_TIMEOUT_SECONDS = 15\n"
+        "MAX_BYTES = 8 * 1024 * 1024\n",
+        encoding="utf-8",
+    )
+    catalog = tmp_path / "constants_catalog.json"
+    entries = build_catalog(tmp_path)
+    catalog.write_text(json.dumps({"schema_version": 1, "count": len(entries), "constants": entries},
+                                  ensure_ascii=False), encoding="utf-8")
+    assert check_catalog(tmp_path, catalog) == []
+    # 在常数上方插入空行：行号变了、常数本身没变，--check 必须仍然通过（目录不存行号）。
+    source.write_text(
+        "# 上方中文说明：请求超时\n"
+        "\n"
+        "\n"
+        "_TIMEOUT_SECONDS = 15\n"
+        "\n"
+        "MAX_BYTES = 8 * 1024 * 1024\n",
+        encoding="utf-8",
+    )
+    assert check_catalog(tmp_path, catalog) == []

@@ -415,16 +415,16 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
         config = getattr(agent, "config", None)
         found = search_parameters(str(params.get("query") or key), limit=20)
         report = {"ok": True, "parameters": [_spec_view(spec, config, brief=True) for spec in found]}
-        from ..settings.constants_catalog import search_constants
+        from ..settings.constants_catalog import entry_with_line, search_constants
 
-        constants = search_constants(str(params.get("query") or key), limit=10)
+        constants = [entry_with_line(entry) for entry in search_constants(str(params.get("query") or key), limit=10)]
         if constants:
-            report["constants"] = [{"name": entry["name"], "file": entry["file"], "line": entry["line"],
+            report["constants"] = [{"name": entry["name"], "file": entry["file"], "line": entry.get("line"),
                                     "value": entry.get("value"), "unit": entry.get("unit", ""),
                                     "category": entry.get("category", "其它"),
                                     "description": str(entry.get("description") or "")[:160]}
                                    for entry in constants]
-            report["constants_note"] = "以下为代码里的常数（模块级数值），只读，改动需改代码（按文件:行修改源码）；不是用户配置。"
+            report["constants_note"] = "以下为代码里的常数（模块级数值），只读，改动需改代码（按文件:行修改源码，行号为运行时定位，定位不到只有文件）；不是用户配置。"
         return report
     if action == "history":
         changes = parameter_history(user_path=user_path, key=key, limit=20)
