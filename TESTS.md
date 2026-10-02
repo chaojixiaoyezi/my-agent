@@ -95,9 +95,9 @@
   - A 类逐项（9b 盘点 + 3a 口径，36 个路径逐个写死）：
     - 策略：每项 `check_write` 都拒 `PATH_HOST_STATE_WRITE_BLOCKED`，读照常；Full Access 和隔离 owner（声明自家根为写根）下 `write_file` 都被拒，文件一个字节不变。
     - 真实沙箱：同样两种模式下，追加、删除、改名三条命令都失败，内容不变。
-    - 路径包括：6 个策略文件、审计流水、记忆流水与候选、它们旁边的 `.lock`；`runtime.db` 及三个伴随文件；能力申请、临时授权、Compact、日志、审计、`workspace/runtime` 里的会话与 Gateway 服务状态、Curator 状态与事务、记忆归档、缓存、回收站、`skills/` 和家目录根 `.agents/skills/` 里的 `SKILL.md`；二审加上 `data/` 下 6 个宿主状态子目录（调度、决策、上下文校准、skill 提案、skill 学习、产物备份）和 `agents/` 里的文件。
+    - 路径包括：6 个策略文件、审计流水、记忆流水与候选、它们旁边的 `.lock`；`runtime.db` 及三个伴随文件；能力申请、临时授权、Compact、日志、审计、`workspace/runtime` 里的会话与 Gateway 服务状态、Curator 状态与事务、记忆归档、缓存、回收站、`skills/` 和家目录根 `.agents/skills/` 里的 `SKILL.md`；二审加上 `data/` 下的已知宿主状态（调度、决策、上下文校准、skill 提案、skill 学习、产物备份、核验证据库及 `-wal`、维护标记）、一个“以后才会有”的 `data/some-future-store/`，以及 `agents/` 里的文件。
   - 仍属于模型的位置照常可写：`artifacts/`、`workspace/` 其余、`tmp/`、`memory.md`、`memory/daily`、家目录根文件，以及前缀相近的 `memory/curatorX`、`skills2`。
-  - B 类：`_attach_owner_control_write_guards` 只挂 `runs/`、`data/`、`tasks/`，只在隔离模式挂，A 类不再重复；`data/` 本身不是 A 类（`data/loose.txt` 路径策略放行），里面的 `data/scheduler/` 是；旧任务的 `work/` 穿透 `tasks/` 可写，别的任务仍拒。
+  - B 类：`_attach_owner_control_write_guards` 只挂 `runs/`、`tasks/`，只在隔离模式挂，A 类不再重复；旧任务的 `work/` 穿透 `tasks/` 可写，别的任务仍拒。
   - 宿主记忆工具：真实 `SimpleAgent` 的 `remember` 照常写 `memory/candidates.jsonl`；模型 `write_file` 写同一文件被拒，内容没被改。
   - 路径策略（full 和 normal 各一遍）：
     - 宿主配置：数据根 `config/`（含目录本身、还不存在的文件）、`system/config/`、本机主用户、飞书用户、还没有 `config/` 的用户，写入都拒 `PATH_HOST_CONFIG_WRITE_BLOCKED`，提示含 `user_config` 与 `manage_models`，读照常；工作区里同名的 `config/`、前缀相同的目录照常可写。
@@ -131,7 +131,7 @@
   - 只读 CLI（必须改 2，锁住现状）：`test_real_sandbox_cli_cannot_start_and_says_so`（Full Access、隔离各一遍）：宿主先用真实 SimpleAgent 建好家目录和本地库，沙箱里跑 `my-agent status` 失败，输出 `error_code=CLI_HOST_STATE_READ_ONLY`，A 类全部字节不变。用例显式钉住本检出的源码（venv 的可编辑安装可能指向别的检出）。Linux 隔离视图看不到仓库源码时跳过这一遍。
     - `test_cli_guard_only_rewrites_permission_failures_inside_the_sandbox`：只有宿主标记加权限类 errno 或 sqlite CANTOPEN 才改写；没有标记、`ENOENT`、普通异常都原样抛出。
     - `test_sandboxed_commands_carry_the_host_state_read_only_marker`：沙箱命令带标记，不进沙箱的命令去掉继承来的同名变量。
-  - data/ 拆开（必须改 3）：A 类逐项加 `data/` 下 6 个宿主状态子目录和 `agents/` 里的文件（文件工具和真实命令各一遍）；B 类用例断言 `runs/`、`data/`、`tasks/`，`data/loose.txt` 路径策略放行。
+  - data/（必须改 3，3a 随后改裁为整体归 A）：A 类逐项加 `data/` 下已知宿主状态和 `agents/` 里的文件（文件工具和真实命令各一遍）；`test_any_new_subdir_under_owner_data_is_read_only_but_host_writes_go_on`（Full Access、隔离各一遍）：`data/` 下新建原本没有的子目录和 `data/loose.txt`，文件工具拒 `PATH_HOST_STATE_WRITE_BLOCKED`，真实 Shell `mkdir -p … && printf …` 失败、目录建不出来，家目录别处照常可写；宿主 `run_owner_retention_if_due` 照常写 `data/maintenance.json`。B 类用例断言只剩 `runs/`、`tasks/`。
   - 全部任务的核验记录（建议 1）：
     - `test_task_record_patterns_cover_every_task_root_layout`：三种任务根布局命中，深度不对、`work/` 下、名字相近、别的 owner、别处的同名拷贝都不命中；owner home 路径里的正则元字符按字面匹配。
     - `test_seatbelt_pattern_denies_come_after_the_write_root_allow`：正则拒写排在写根放行之后；没有正则时配置里没有 `regex`。

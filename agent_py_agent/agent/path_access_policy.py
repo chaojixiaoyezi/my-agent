@@ -65,11 +65,12 @@ HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
 #   文件工具与命令在任何模式下都只能读、不能写（按路径拒写，不管存不存在；不可被任何允许根穿透）。来源：9b 的家目录盘点
 #   （~/.my-agent/decision-evidence/owner-home-host-files-inventory-a9c2b691f/）与原 tool_runtime_ledger 控制面清单中的绝对项
 #   （已从那里删掉，每条路径只在一处）。可被本任务工作目录穿透的任务树根（runs/、tasks/）不在这里，见
-#   agent_core.tool_runtime_ledger._attach_owner_control_write_guards（B 类）。owner 根的 data/ 本身留在 B 类，其中 6 个宿主
-#   状态子目录（调度 scheduler、决策 decision、上下文校准 context、skill 提案 skill_proposals 与学习 skill_learning、产物备份
-#   artifact_backups）归 A 类；data/plugins 是 H2 宿主托管存储（9b 二审，3a 最终裁定）。agents/（旧子代理运行状态与派工报告；
-#   现在子代理工作区在 <任务根>/work/agents/ 下）不是任务树，归 A 类。注意：能力包核验记录在 <任务根>/data/，不是 owner 根的
-#   data/。宿主自己的写入（记忆工具、Curator、策略服务、runtime 仓库）在宿主进程里，不经过模型工具，不受影响。
+#   agent_core.tool_runtime_ledger._attach_owner_control_write_guards（B 类）。owner 根的 data/ 整个归 A 类（3a 2026-10-02 定）：
+#   那里全是宿主状态（调度、决策、上下文校准、skill 提案与学习、产物备份、核验证据库、维护标记，data/plugins 另是 H2 宿主托管
+#   存储），宿主以后还会往里加新东西；逐个列子目录是封闭清单，新目录默认没保护，违反“开放世界不靠写死清单”。模型确实该写的
+#   路径只能作为显式例外列出（写明原因和用例），目前没有。agents/（旧子代理运行状态与派工报告；现在子代理工作区在
+#   <任务根>/work/agents/ 下）不是任务树，归 A 类。注意：能力包核验记录在 <任务根>/data/，不是 owner 根的 data/。宿主自己的写入
+#   （记忆工具、Curator、策略服务、维护、runtime 仓库）在宿主进程里，不经过模型工具，不受影响。
 #   - 文件：权限、配额、保留、记忆、skill、工具策略，审计流水，记忆操作流水与候选；每个文件旁的 .lock 一并保护（抢锁会卡住宿主写入）。
 #   - 目录：能力申请、临时授权、Compact、日志、审计、会话与事件库（workspace/runtime）、Curator 事务、记忆归档、缓存、回收站、
 #     owner 级正式 skill（skills/ 与家目录根的 .agents/skills/；项目工作区里的 skills 不在 owner home 下，不受影响）。
@@ -81,8 +82,7 @@ HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
 )
 HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
     ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
-    ("data", "scheduler"), ("data", "decision"), ("data", "context"), ("data", "skill_proposals"), ("data", "skill_learning"),
-    ("data", "artifact_backups"), ("agents",),
+    ("data",), ("agents",),
     ("memory", "curator"), ("memory_archive",), ("cache",), ("trash",), ("skills",), (".agents", "skills"),
 )
 HOST_STATE_OWNER_SQLITE: tuple[str, ...] = ("runtime.db",)

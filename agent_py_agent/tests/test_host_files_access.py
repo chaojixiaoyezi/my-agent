@@ -58,6 +58,8 @@ OWNER_STATE_ITEMS = (
     "trash/item-1/meta.json", "skills/my-skill/SKILL.md", ".agents/skills/home-skill/SKILL.md",
     "data/scheduler/store.json", "data/decision/outcomes.jsonl", "data/context/calibration.json",
     "data/skill_proposals/p-1.json", "data/skill_learning/l-1.json", "data/artifact_backups/b-1/report.md",
+    "data/verification/evidence.sqlite3", "data/verification/evidence.sqlite3-wal", "data/maintenance.json",
+    "data/some-future-store/state.json",
     "agents/subagent-1/report.json", "agents/subagent_dispatch_log.jsonl",
 )
 # 仍属于模型的位置（3a 口径）：交付区 artifacts/、workspace/ 其余、tmp/、记忆正文、用户在家目录根的文件。
@@ -407,8 +409,7 @@ def test_shell_lists_host_files_per_mode(tmp_path):
     state = (*_STATE_FILES, *(f"{name}.lock" for name in _STATE_FILES),
              "runtime.db", "runtime.db-wal", "runtime.db-shm", "runtime.db-journal",
              "capability_requests", "temporary_grants", "compact", "logs", "audit", "workspace/runtime", "memory/curator",
-             "memory_archive", "cache", "trash", "skills", ".agents/skills", "data/scheduler", "data/decision", "data/context",
-             "data/skill_proposals", "data/skill_learning", "data/artifact_backups", "agents")
+             "memory_archive", "cache", "trash", "skills", ".agents/skills", "data", "agents")
 
     scoped = set(host_readonly_paths_for(str(main), ""))
     assert scoped == {main / "config", *(main / name for name in state)}
@@ -654,8 +655,7 @@ def test_every_host_state_item_is_read_only_for_commands(tmp_path, relative):
 
 
 def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeypatch):
-    """B 类：runs/、data/、tasks/ 留在 tool_runtime_ledger（agents/ 与 data/ 下 6 个宿主状态子目录二审后归 A），只在隔离模式挂、
-    可被本任务工作目录穿透。"""
+    """B 类：只剩 runs/、tasks/ 留在 tool_runtime_ledger（data/、agents/ 整体归 A，3a 定），只在隔离模式挂、可被本任务工作目录穿透。"""
     from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
         _attach_owner_control_write_guards,
     )
@@ -670,10 +670,7 @@ def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeyp
     agent = SimpleNamespace(home_paths=SimpleNamespace(**{key: main / value for key, value in names.items()}))
     scoped: dict[str, object] = {"effective_owner_scope_root": str(main)}
     _attach_owner_control_write_guards(scoped, agent)
-    assert scoped["forbidden_write_roots"] == [str(main / name) for name in ("runs", "data", "tasks")]
-    policy = _admin_policy(home, monkeypatch)
-    assert policy.check_write(main / "data" / "loose.txt").allowed, "data/ 本身不是 A 类（3a 最终裁定）"
-    assert policy.check_write(main / "data" / "scheduler" / "store.json").code == STATE_CODE
+    assert scoped["forbidden_write_roots"] == [str(main / name) for name in ("runs", "tasks")]
     full: dict[str, object] = {}
     _attach_owner_control_write_guards(full, agent)
     assert "forbidden_write_roots" not in full, "B 类只在隔离模式挂"
@@ -685,6 +682,39 @@ def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeyp
     blocked = validate_write_boundary("write_file", {"path": str(main / "tasks" / "2026-09-01" / "other" / "x.md")},
                                       workspace_root=main, write_boundary=boundary)
     assert allowed == "" and "forbidden_write_roots" in blocked, "本任务工作目录穿透，别的任务仍禁写"
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["full-access", "isolated"])
+def test_any_new_subdir_under_owner_data_is_read_only_but_host_writes_go_on(tmp_path, monkeypatch, scoped):
+    """owner 根的 data/ 整体归 A 类（3a 定：开放世界不靠写死清单，宿主以后加的新目录默认就受保护）：模型在 data/ 下新建一个原本
+    没有的子目录，文件工具和真实 Shell 都写不进、目录也建不出来；宿主自己的维护流程照常写 data/maintenance.json。"""
+    import shlex
+
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    root = (tmp_path / "home").resolve()
+    monkeypatch.setenv("MY_AGENT_HOME", str(root))
+    home = ensure_my_agent_home(root)
+    main = Path(home.owner_home_dir).resolve()
+    data = Path(home.owner_data_dir).resolve()
+    assert data == main / "data" and data.is_dir()
+    fresh = data / "brand-new-store" / "state.json"
+    tools = _registry(main, owner_scope=main, roots=[main]) if scoped else _registry(main / "ws")
+    for target in (fresh, data / "loose.txt"):
+        outcome = tools["write_file"].execute({"path": str(target), "content": "x"})
+        assert (outcome.ok, outcome.error_code) == (False, STATE_CODE), (target, outcome.output)
+    if _sandbox_ready():
+        shell = _shell({"main": main, "root": root}, scoped=scoped)
+        extra = {"__sandbox_write_roots": [str(main)]} if scoped else {}
+        command = f"mkdir -p {shlex.quote(str(fresh.parent))} && printf x > {shlex.quote(str(fresh))}"
+        assert not shell.execute({"command": command, "working_dir": str(main), **extra}).ok
+        assert shell.execute({"command": f"printf ok > {shlex.quote(str(main / 'notes.txt'))}", "working_dir": str(main),
+                              **extra}).ok, "家目录里别处照常可写"
+    assert not fresh.parent.exists() and not (data / "loose.txt").exists()
+
+    assert run_owner_retention_if_due(home, now=200_000).ran is True
+    assert (data / "maintenance.json").is_file(), "宿主在自己的进程里写，不经过模型工具"
 
 
 def test_host_memory_tool_still_writes_its_own_files(tmp_path, monkeypatch):

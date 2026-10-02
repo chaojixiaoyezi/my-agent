@@ -18,7 +18,7 @@
 | 类别 | 声明 | 位置 | 文件工具 | 命令（Shell） | 拒写码 |
 | --- | --- | --- | --- | --- | --- |
 | 宿主配置 | `HOST_CONFIG_HOME_PARTS`、`HOST_CONFIG_OWNER_PARTS` | 数据根 `config/`、`system/config/`；每个 owner home 的 `config/` | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_CONFIG_WRITE_BLOCKED` |
-| 宿主运行状态 | `HOST_STATE_OWNER_FILES`（连 `.lock`）、`HOST_STATE_OWNER_DIRS`、`HOST_STATE_OWNER_SQLITE`（连 `SQLITE_SIDECAR_SUFFIXES`） | owner home 里，按路径拒写、不管存不存在。文件：`permissions.json`、`quota.json`、`retention.json`、`memory_policy.json`、`skill_policy.json`、`tool_policy.json`、`audit_log.jsonl`、`memory/ops.jsonl`、`memory/candidates.jsonl`，每个旁边的 `.lock`；`runtime.db` 和 `-wal`/`-shm`/`-journal`。目录：`capability_requests/`、`temporary_grants/`、`compact/`、`logs/`、`audit/`、`workspace/runtime/`、`memory/curator/`、`memory_archive/`、`cache/`、`trash/`、`skills/`、家目录根的 `.agents/skills/`、`agents/`，以及 `data/` 下的 `scheduler/`、`decision/`、`context/`、`skill_proposals/`、`skill_learning/`、`artifact_backups/` | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_STATE_WRITE_BLOCKED` |
+| 宿主运行状态 | `HOST_STATE_OWNER_FILES`（连 `.lock`）、`HOST_STATE_OWNER_DIRS`、`HOST_STATE_OWNER_SQLITE`（连 `SQLITE_SIDECAR_SUFFIXES`） | owner home 里，按路径拒写、不管存不存在。文件：`permissions.json`、`quota.json`、`retention.json`、`memory_policy.json`、`skill_policy.json`、`tool_policy.json`、`audit_log.jsonl`、`memory/ops.jsonl`、`memory/candidates.jsonl`，每个旁边的 `.lock`；`runtime.db` 和 `-wal`/`-shm`/`-journal`。目录：`capability_requests/`、`temporary_grants/`、`compact/`、`logs/`、`audit/`、`workspace/runtime/`、`memory/curator/`、`memory_archive/`、`cache/`、`trash/`、`skills/`、家目录根的 `.agents/skills/`、`agents/`、owner 根的整个 `data/`（新子目录默认也在内） | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_STATE_WRITE_BLOCKED` |
 | 任务核验记录 | `TASK_ROOT_LAYOUT` + `HOST_STATE_TASK_PARTS` | 规范任务根（owner home 下 `runs/<日期>/<键>`、`tasks/<日期>/<名>`、`audits/<编号>`）的 `data/pack_verification/` | 拒写，读照常 | 本任务（写边界里的结构化 `task_root`）两个平台都保护；macOS 另用一条 Seatbelt 正则盖住 owner 下全部任务的，Linux 只保护本任务（已知边界） | `PATH_HOST_STATE_WRITE_BLOCKED` |
 | 宿主凭据 | `HOST_CREDENTIAL_HOME_PARTS`、`HOST_CONFIG_YAML_SEGMENTS`、`HOST_SECRET_DIR_NAME` | 数据根 `config/` 下的 `admin-password.json`、`shared-model-profiles.json`、`model-profiles/`、名字里有 yaml/yml 段的文件（用户配置及 `desktop.yaml.bak-*` 等备份）；数据根里 owner home 之外任何一层叫 `secrets` 的目录 | 读写都拒 | 拒写，**读照常**（已知边界） | `PATH_HOST_CREDENTIAL_BLOCKED` |
 
@@ -34,11 +34,15 @@
   - 文件工具、写边界、插件上下文、Shell 只读覆盖、上级目录改名规则都按它判。
   - 原 `tool_runtime_ledger._attach_owner_control_write_guards` 清单里的绝对项已搬到这里，从那里删掉：权限、配额、保留、记忆、skill、工具策略文件，审计流水，能力申请，临时授权，Compact，日志。
 - **B 类：owner 写范围里默认禁写、可被本任务工作目录穿透的根**。
-  - 范围：`runs/`、`data/`、`tasks/`（二审逐个核实：`runs/`、`tasks/` 里只有规范任务根）。
+  - 范围：只剩 `runs/`、`tasks/`（二审逐个核实：里面只有规范任务根）。
   - 留在 `_attach_owner_control_write_guards`，走写范围的 `forbidden_write_roots`，按“命中的最具体条目生效”裁决，只在隔离模式挂。
   - 举例：本任务的 `work/` 是更具体的允许根，照常可写；别的任务仍禁写。
   - `tasks/`（9b 第 3 项）放 B 类：旧版任务工作区 `tasks/<日期>/<名>` 恢复时，模型要在它的 `work/` 里写。
-  - `data/` 本身留在 B 类（3a 最终裁定），其中 6 个宿主状态子目录归 A 类：调度 `scheduler/`、决策 `decision/`、上下文校准 `context/`、skill 提案 `skill_proposals/` 与学习 `skill_learning/`、产物备份 `artifact_backups/`。`data/plugins` 是 H2 宿主托管存储，整体隐藏。
+  - owner 根的 `data/` **整个归 A 类**（3a 2026-10-02 定）：
+    - 那里全是宿主状态：调度、决策、上下文校准、skill 提案与学习、产物备份、核验证据库 `verification/evidence.sqlite3`（连伴随文件）、维护标记 `maintenance.json`；`data/plugins` 另是 H2 宿主托管存储，整体隐藏。
+    - 宿主以后还会往里加新东西。逐个列子目录是封闭清单，新目录默认没保护，违反“开放世界不靠写死清单”的铁律；整体归 A 才是默认安全。
+    - 模型确实该写的 `data/` 路径只能作为显式例外列出，写明原因和用例。按 9b 的盘点目前一个都没有。
+    - 中间一版曾把 `data/` 留在 B 类、只把 6 个子目录列进 A 类，已按这条裁定改回整体。
   - `agents/` 二审后搬到 A 类：里面是旧子代理运行状态和派工报告，不是任务树（现在子代理工作区在 `<任务根>/work/agents/` 下）。
   - 不要混淆：能力包核验记录在 `<任务根>/data/pack_verification/`，是任务根里的 `data/`，不是 owner 根的 `data/`。
 - **不保护（3a 口径）**，这些属于模型：
@@ -171,7 +175,7 @@
 | --- | --- | --- |
 | 必须改 1：数据根 | 路径策略和宿主用同一个解析结果 | `from_values(agent_home_root=...)` 结构化传入，构造处见 2.1 节；用例：配置的 home ≠ 环境变量的 home，Full Access 下 `write_file` 写 A 类被拒（单元和真实链路各一条） |
 | 必须改 2：只读 CLI | 这次不修 CLI，写清现状并用例锁住 | 第 3 节第 8 条；真实沙箱用例（Full Access、隔离各一遍）锁住“失败、给结构化码、A 类字节不变”；顺手项结构化错误码已做；只读启动记台账待做 |
-| 必须改 3：data/ 拆开 | 6 个宿主状态子目录进 A 类，`data/` 本身留 B 类 | 1.1 节；每项都有文件工具和真实命令用例 |
+| 必须改 3：data/ | 先裁“6 个子目录进 A、`data/` 留 B”，随后改为 owner 根的 `data/` 整体归 A（开放世界，不靠清单），B 类只剩 `runs/`、`tasks/` | 1.1 节；已知子目录逐项用例；`data/` 下新建一个原本没有的子目录，两种模式下文件工具和 Shell 都写不进，宿主维护照常写 `data/maintenance.json` |
 | 必须改 4：task_root 锚点 | 只用写边界的 `task_root`，不从工作目录反推 | 2.2 节 |
 | 建议 1：全部任务的核验记录 | macOS 一条 Seatbelt 正则；Linux 只保护本任务，记已知边界 | 2.2 节、第 3 节第 4 条 |
 | 建议 2：拒绝码透传 | 写边界把具体码传出去 | 2.1 节；真实链路用例 |
