@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from ..agent_core.runtime.turn_trigger import TURN_TRIGGER_LIFECYCLE_WAKE, TurnTrigger
 
 # 唤醒信封顶层与 metadata 里进入宿主事件的字段；原始结果 JSON、去重键等宿主内部字段不在名单里。
+# takeover_hint 是执行器退出后的结构化接替提示（C4，开关 subagent_takeover_hint_enabled 开时宿主才写入）。
 _SIGNAL_FIELDS = ("wake_signal_id", "source_agent_id", "parent_agent_id", "root_task_id")
 _CHILD_FIELDS = (
     "status",
@@ -21,6 +22,7 @@ _CHILD_FIELDS = (
     "declared_output_refs",
     "artifact_refs",
     "tool_failure_halt",
+    "takeover_hint",
     "service_window_incomplete",
     "service_window_remaining_seconds",
 )

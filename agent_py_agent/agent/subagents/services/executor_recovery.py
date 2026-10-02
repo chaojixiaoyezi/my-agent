@@ -5,14 +5,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...contracts.subagent_completion import subagent_takeover_hint
 from ...runtime_db.executor_liveness import exited_attempt_facts, mark_exited_attempt_unknown
 from ..manager_runner_result_payload import RecordRunnerResultParams
 from .runtime_closeout import pending_closeout
 
+# 子代理 attributes 里保存“执行器退出后的接替提示”的键；只属于最近一次写回的结果。
+TAKEOVER_HINT_ATTR = "takeover_hint"
+
 
 # LLM: 调用方已核对父会话允许管理此 child；只消费 exact attempt 退出事实，不能凭缺 session、无输出或时长触发。
+#   takeover_hint 由调用方按 capability 开关 subagent_takeover_hint_enabled 传入（缺省关）：开着时随这一份结果附结构化接替提示
+#   （哪个 run、退出原因码、怎么用 replacement_for_run_ids 声明接替），只是提示，不派工、不改状态。改动同步 test_subagent_takeover_hint.py。
 # 函数用途: 为没有结论的已退出工作片补写结构化失败；有未知工具时显示阻塞并保留安全封存。
-def recover_exited_runner(manager: Any, task: Any) -> dict[str, Any] | None:
+def recover_exited_runner(manager: Any, task: Any, *, takeover_hint: bool = False) -> dict[str, Any] | None:
     if str(task.status) != "RUNNING" or pending_closeout(task) is not None:
         return None
     attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "")
@@ -30,8 +36,23 @@ def recover_exited_runner(manager: Any, task: Any) -> dict[str, Any] | None:
             failure_type="executor_effects_unknown" if uncertain else "runner_error",
             message=("执行器已退出，部分工具是否生效尚未确认；已停止自动重跑，等待核对。"
                      if uncertain else "执行器已退出但没有返回结果；本次执行失败，未作业务完成判定。"),
+            takeover_hint=(subagent_takeover_hint(str(task.id), str(facts["reason"]), bool(uncertain))
+                           if takeover_hint else None),
         )
     )
     if result.status not in {"FAILED", "BLOCKED"}:
         return None
     return {**facts, "recovery_action": "executor_exit_projected", "status": result.status}
+
+
+# LLM: 写回结果时调用：这一份结果带接替提示就写入，不带就移除旧提示，所以完成信封不会带出上一份结果的提示。
+#   只改内存里的 task.attributes，由结果服务随同一次保存落盘；没有提示时只动已有的 attributes 字典
+#   （与 record_tool_failure_ledger 无事可做时不碰 attributes 同口径），真实 SubAgentTask 总有这个字典。
+# 函数用途: 按本次结果设置或清除子代理的接替提示。
+def record_takeover_hint(task: Any, hint: dict[str, object] | None) -> None:
+    if hint:
+        task.attributes[TAKEOVER_HINT_ATTR] = dict(hint)
+        return
+    attrs = getattr(task, "attributes", None)
+    if isinstance(attrs, dict):
+        attrs.pop(TAKEOVER_HINT_ATTR, None)

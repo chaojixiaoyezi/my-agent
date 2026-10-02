@@ -1,7 +1,7 @@
 """Versioned contracts and neutral projections for child completion envelopes."""
 
-# LLM: 中性完成合同连接子代理发布方和前后台消费者；窗口字段与授权阶段连续失败收口事实只复制宿主事件的冻结事实，
-# 不重新计时或改变终态。字段变更须同步活动回合、后台预算投影、递归父级快照与交接回归。
+# LLM: 中性完成合同连接子代理发布方和前后台消费者；窗口字段、授权阶段连续失败收口事实与执行器退出后的接替提示只复制
+# 宿主事件的冻结事实，不重新计时或改变终态。字段变更须同步活动回合、后台预算投影、递归父级快照与交接回归。
 # 模块用途: 统一子代理交接协议和可见事实，避免各条消费链丢字段或反向依赖子代理实现。
 
 SUBAGENT_COMPLETION_SCHEMA_VERSION = "subagent-completion.v1"
@@ -19,6 +19,11 @@ _TOOL_FAILURE_HALT_LIST_FIELDS = ("tools", "argument_names")
 _TOOL_FAILURE_HALT_TEXT_LIMIT_CHARS = 120
 # 工具失败停机详情里最多列出的清单条目数；防止失败原因列表无限增长。
 _TOOL_FAILURE_HALT_LIST_COUNT = 8
+# 执行器已退出（宿主证实）、这一轮没有业务结果时，随完成信封交给直属父级的结构化接替提示版本（C4，开关默认关）。
+SUBAGENT_TAKEOVER_HINT_SCHEMA_VERSION = "subagent-takeover-hint.v1"
+# 接替提示指向的派工工具与参数名：只描述既有 create_subagents 合同，不新增入口。
+_TAKEOVER_HINT_TOOL = "create_subagents"
+_TAKEOVER_HINT_FIELD = "replacement_for_run_ids"
 
 
 # LLM: Parent-facing completion context must be derived only from typed observation fields and
@@ -78,7 +83,7 @@ def subagent_completion_context_from_observations(
     }, tuple(issues)
 
 
-# LLM: 状态、归属、未满声明窗口和授权阶段收口事实均来自宿主事件；正文不参与裁决，私有 runner JSON 不外露。
+# LLM: 状态、归属、未满声明窗口、授权阶段收口事实和执行器退出后的接替提示均来自宿主事件；正文不参与裁决，私有 runner JSON 不外露。
 # 函数用途: 校验直属孩子身份后提取完成消息、冻结窗口与收口事实，不从摘要推断是否完成。
 def _subagent_completion_item(
     event: object,
@@ -130,6 +135,7 @@ def _subagent_completion_item(
         "observed_at": observed_at,
         **completion_service_window_facts(metadata),
         **completion_tool_failure_halt_facts(metadata),
+        **completion_takeover_hint_facts(metadata),
     }
     if metadata.get("completion_message_truncated") is True:
         item["completion_message_truncated"] = True
@@ -173,6 +179,35 @@ def completion_tool_failure_halt_facts(value: object) -> dict[str, object]:
     for key in _TOOL_FAILURE_HALT_LIST_FIELDS:
         projected[key] = _bounded_names(halt.get(key))
     return {"tool_failure_halt": projected}
+
+
+# LLM: 只在宿主证实执行器已退出、这一轮没有业务结果时由宿主调用（subagents/services/executor_recovery，开关
+#   subagent_takeover_hint_enabled）；纯计算。提示只说明既有出口：在 create_subagents 里用 replacement_for_run_ids 声明接替哪个 run，
+#   不授予权限、不触发派工，是否接替仍由父级模型决定。reason 是 runtime_db.executor_liveness 的退出原因码。
+# 函数用途: 生成“哪个子代理、为什么、怎么声明接替”的结构化接替提示。
+def subagent_takeover_hint(run_id: str, exit_reason: str, uncertain_effects: bool) -> dict[str, object]:
+    selected = str(run_id or "").strip()
+    return {
+        "schema_version": SUBAGENT_TAKEOVER_HINT_SCHEMA_VERSION,
+        "run_id": selected,
+        "reason": str(exit_reason or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT_CHARS],
+        "uncertain_effects": bool(uncertain_effects),
+        "declare_with": {"tool": _TAKEOVER_HINT_TOOL, _TAKEOVER_HINT_FIELD: [selected]},
+    }
+
+
+# LLM: 前台活动回合、后台完成清单、生命周期唤醒和递归父级快照共用这一份投影；只接受当前版本、非空 run_id 与原因码，
+#   按 subagent_takeover_hint 的固定形状重建，不复制其它键。宿主状态仍是完成权威，本字段不改终态、不触发派工。
+# 函数用途: 从完成信封里取出执行器退出后的接替提示，缺失或损坏时返回空。
+def completion_takeover_hint_facts(value: object) -> dict[str, object]:
+    hint = value.get("takeover_hint") if isinstance(value, dict) else None
+    if not isinstance(hint, dict) or hint.get("schema_version") != SUBAGENT_TAKEOVER_HINT_SCHEMA_VERSION:
+        return {}
+    run_id = str(hint.get("run_id") or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT_CHARS]
+    reason = str(hint.get("reason") or "").strip()
+    if not run_id or not reason:
+        return {}
+    return {"takeover_hint": subagent_takeover_hint(run_id, reason, hint.get("uncertain_effects") is True)}
 
 
 # LLM: 名称列表只保留去重后的短字符串，最多八个；非列表输入视为空，不从字符串里切分。
@@ -220,8 +255,11 @@ __all__ = [
     "CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION",
     "DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT",
     "SUBAGENT_COMPLETION_SCHEMA_VERSION",
+    "SUBAGENT_TAKEOVER_HINT_SCHEMA_VERSION",
     "TOOL_FAILURE_HALT_SCHEMA_VERSION",
     "completion_service_window_facts",
+    "completion_takeover_hint_facts",
     "completion_tool_failure_halt_facts",
     "subagent_completion_context_from_observations",
+    "subagent_takeover_hint",
 ]

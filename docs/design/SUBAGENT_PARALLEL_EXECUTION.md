@@ -135,6 +135,13 @@ Audit 来源岗位的专门 metadata 与内部 wake 留在原位，不借这次�
 | `subagent_tool_wait_notice_seconds` | `900` | 工具长等待；有精确审批记录时标记等待审批 |
 
 三个时间项的 `0` 表示关闭该阶段提醒，不是执行超时。供应商安排的退避时间不算静默。
+
+执行器退出后的接替提示（C4，2026-10-02）另有开关 `subagent_takeover_hint_enabled`，默认 `false`：
+- 打开后，宿主证实子代理执行器已退出、这一轮没有结果时（`executor_recovery.recover_exited_runner`），给直属父级的完成通知里
+  附 `takeover_hint`：哪个 run、退出原因码、是否有未确认的工具效果，以及“在 `create_subagents` 里用 `replacement_for_run_ids`
+  声明接替”的结构化写法。
+- 提示只是提示，不派工、不改状态；是否接替仍由父级决定。合同在 `contracts/subagent_completion.py`
+  （`subagent_takeover_hint`、`completion_takeover_hint_facts`），唤醒事件、活动回合、后台完成清单和递归父级快照共用同一投影。
 实际 provider 超时、显式任务预算和用户停止仍按原协议处理，提醒不覆写这些边界。
 
 诊断保存在 canonical run 的 `attributes.runtime_activity_diagnostic`，schema 为

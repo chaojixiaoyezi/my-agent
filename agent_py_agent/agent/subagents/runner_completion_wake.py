@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from ..conversation.store_wakes import WakeStore
     from .models import SubAgentTask
 
+from ..contracts.subagent_completion import completion_takeover_hint_facts
 from ..runtime_errors import runtime_error_report
 from .capability_scope import request_scope_snapshot
 from .models import (
@@ -282,8 +283,8 @@ def _raise_internal_audit_source_wake(
 
 
 # LLM: 摘要只由宿主结构化字段拼出；连续失败收口事实（授权阶段或同调用同失败）来自本 attempt 账本并只在 BLOCKED 时附带，
-#   完整字段仍在 metadata.tool_failure_halt，摘要文字不是状态来源。
-# 函数用途: 生成交给父代理的一句话终态说明，被授权门反复拦下时点明原因码、工具和参数名。
+#   完整字段仍在 metadata.tool_failure_halt，摘要文字不是状态来源。执行器退出后的接替提示（开关开时才有）见 _takeover_hint_summary。
+# 函数用途: 生成交给父代理的一句话终态说明，被授权门反复拦下时点明原因码、工具和参数名，执行器退出时附接替提示。
 def _summary(task: Any, result: Any, status: str) -> str:
     name = str(getattr(task, "agent_name", "") or getattr(task, "role", "") or "子代理")
     run_id = str(getattr(task, "id", "") or getattr(result, "run_id", "") or "")
@@ -294,6 +295,7 @@ def _summary(task: Any, result: Any, status: str) -> str:
     )
     base = f"{name} {run_id} 本轮已结束：status={status}, reason={reason}。请父代理查看结果。"
     base += _tool_failure_halt_summary(task, status)
+    base += _takeover_hint_summary(task, status)
     remaining = _service_window_remaining(task)
     if remaining <= 0:
         return base
@@ -320,6 +322,22 @@ def _tool_failure_halt_summary(task: Any, status: str) -> str:
         f"结构化事实：{halt.get('reason_code')}——工具 {tools} {what} {halt.get('consecutive_failures')} 次"
         f"得到错误码 {halt.get('error_code')}（参数名：{names}），子代理已停止重试，等待父代理调整输入或改派。"
     )
+
+
+# LLM: 只读完成合同投影过的接替提示，且只在 BLOCKED/FAILED 时附带；完整字段仍在 metadata.takeover_hint，摘要文字不是状态来源。
+#   开关关闭时 attributes 里没有提示，这里返回空串，摘要与改前一字不差。
+# 函数用途: 把执行器退出后的接替提示写成父代理能直接读懂的一句话（哪个 run、原因码、怎么声明接替）。
+def _takeover_hint_summary(task: Any, status: str) -> str:
+    if str(status or "").strip().upper() not in {TaskStatus.BLOCKED.value, TaskStatus.FAILED.value}:
+        return ""
+    hint = completion_takeover_hint_facts(getattr(task, "attributes", {}) or {}).get("takeover_hint")
+    if not hint:
+        return ""
+    text = (
+        f"结构化事实：执行器已退出（{hint['reason']}），这一轮没有结果；如需另派子代理接手，在 create_subagents 里声明 "
+        f"replacement_for_run_ids=[\"{hint['run_id']}\"]，宿主会把原 run 记为已接替。"
+    )
+    return text + ("部分工具是否生效尚未确认，接手前先核对。" if hint["uncertain_effects"] else "")
 
 
 # LLM: Completion metadata combines host-owned lifecycle facts, the exact originating

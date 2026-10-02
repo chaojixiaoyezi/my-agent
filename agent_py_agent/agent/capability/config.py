@@ -61,6 +61,8 @@ class CapabilityConfig:
     subagent_first_token_notice_seconds: int = 600
     subagent_stream_idle_notice_seconds: int = 180
     subagent_tool_wait_notice_seconds: int = 900
+    # 执行器已退出（宿主证实）时给直属父级附结构化接替提示；会改变父级模型看到的内容，默认关闭。
+    subagent_takeover_hint_enabled: bool = False
     # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。
     # 默认关闭——拆分会创建新任务并改变原任务状态，需用户显式开启。
     subagent_failure_auto_split_enabled: bool = False

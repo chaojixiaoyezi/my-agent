@@ -222,6 +222,11 @@ worker/run_id/准确 attempt，读取 canonical 后复用原 auto-start，不再
   不以 Gateway PID 或旧心跳代替真实执行器。退出事实不产生模型调用。
 - `services/executor_recovery.py` 复用正式 runner_result/WAL/父级通知；没有结论的退出显示失败，
   存在未决工具则保留 UNKNOWN 与执行锁，显示阻塞，不能凭全部工具成功反推整个任务成功。
+  C4（2026-10-02）：capability 开关 `subagent_takeover_hint_enabled`（默认关）打开时，`recover_exited_runner` 经
+  `RecordRunnerResultParams.takeover_hint` 附结构化接替提示（`contracts/subagent_completion.subagent_takeover_hint`），结果服务用
+  `record_takeover_hint` 写入或清除 `attributes.takeover_hint`；`runner_completion_payload` 只在 BLOCKED/FAILED 时带出，
+  `runner_completion_wake._summary` 加一句说明，生命周期唤醒事件、活动回合、后台完成清单和递归父级快照经
+  `completion_takeover_hint_facts` 投影。开关由 `capability_auto_sweep._reclaim_dead_running_runs` 读取。
 - `runtime_db/repository.py::pending_events_page` 按未消费事实分页轮转；游标与消费回执分开，
   原事件不删除，处理失败可在下一圈重试，旧记录不受最近 50/100 条窗口限制。
 - 定向回归：`test_executor_exit_recovery.py`、`test_closeout_recovery_paging.py`；真实 TUI 验收另记，

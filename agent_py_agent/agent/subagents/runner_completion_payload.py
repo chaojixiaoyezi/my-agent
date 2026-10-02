@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..contracts.subagent_completion import SUBAGENT_COMPLETION_SCHEMA_VERSION
+from ..contracts.subagent_completion import (
+    SUBAGENT_COMPLETION_SCHEMA_VERSION,
+    completion_takeover_hint_facts,
+)
 from ..memory_archive.tokens import estimate_tokens
 from ..model_visible_refs import current_model_ref, current_model_ref_list
 from .context_bundle_contracts import declared_output_refs
@@ -58,7 +61,18 @@ def completion_handoff_payload(
         payload["completion_message_original_tokens"] = completion_tokens
     if halt := _blocked_tool_failure_halt(task, selected_result):
         payload["tool_failure_halt"] = halt
+    payload.update(_exit_takeover_hint(task, selected_result))
     return payload
+
+
+# LLM: 接替提示由执行器退出收口写进 attributes（executor_recovery.record_takeover_hint），只随 BLOCKED/FAILED 结果交出；
+#   之后的受控取消等其它状态的通知不带旧提示。投影走完成合同 completion_takeover_hint_facts，不复制其它键。
+# 函数用途: 子代理执行器已退出、宿主附了接替提示时，把它放进给直属父级的完成信封。
+def _exit_takeover_hint(task: Any, result: Any) -> dict[str, object]:
+    status = str(getattr(result, "status", "") or getattr(task, "status", "") or "").strip().upper()
+    if status not in {TaskStatus.BLOCKED.value, TaskStatus.FAILED.value}:
+        return {}
+    return completion_takeover_hint_facts(getattr(task, "attributes", {}) or {})
 
 
 # LLM: 收口事实只读本 attempt 写入账本的结构化 halt，且仅在结果状态为 BLOCKED 时附带；

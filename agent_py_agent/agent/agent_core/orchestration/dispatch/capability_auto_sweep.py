@@ -437,6 +437,15 @@ def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
         }
 
 
+# LLM: C4 接替提示开关只读唯一 capability 快照（capability_config_for_agent，缺省值与 YAML 同为关）；读不到配置按关闭处理。
+#   改动同步 test_subagent_takeover_hint.py。
+# 函数用途: 判断执行器退出收口时要不要给直属父级附结构化接替提示。
+def _takeover_hint_enabled(agent: Any) -> bool:
+    from ....capability.runtime_config_reload import capability_config_for_agent
+
+    return bool(getattr(capability_config_for_agent(agent), "subagent_takeover_hint_enabled", False))
+
+
 # LLM: 宿主已死的 RUNNING 回收(重启/SIGKILL 韧性的最后一环):RUNNING 但 runner 会话
 #   心跳过期【且】会话宿主 pid 已死 → runner 线程必已消亡,abandon 当前 attempt 并
 #   requeue PENDING(同一轮 supervision 的复活扫描随即拉起续跑)。判据全结构化且双重
@@ -458,6 +467,7 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     # timeouts apiece before the process was finally killed.
     stalled_host_cleanup = _terminate_fully_stalled_source_hosts(fully_stalled_host_pids)
     decisions = conversation_lifecycle_decisions(agent, tasks)
+    takeover_hint = _takeover_hint_enabled(agent)
     for task in tasks:
         decision = decisions.get(str(getattr(task, "id", "") or ""))
         try:
@@ -466,7 +476,7 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
 
             supervised = structured_audit_supervised_worker_attributes(getattr(task, "attributes", {}))
             if not supervised and _reclaim_decision_allows(decision, supervised):
-                exited = recover_exited_runner(manager, task)
+                exited = recover_exited_runner(manager, task, takeover_hint=takeover_hint)
                 if exited is not None:
                     reclaimed.append(exited)
                     continue

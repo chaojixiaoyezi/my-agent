@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...contracts.subagent_completion import completion_tool_failure_halt_facts
+from ...contracts.subagent_completion import (
+    completion_takeover_hint_facts,
+    completion_tool_failure_halt_facts,
+)
 from ...model_visible_refs import current_model_ref, current_model_text
 from ...subagents import SubAgentExecutionContext
 
@@ -89,7 +92,7 @@ def _direct_children_prompt_payload(value: object) -> dict[str, object]:
 
 
 # LLM: One direct-child row keeps only bounded status/refs, the contract-projected
-# tool_failure_halt, and at most three structured capability requests; raw responses remain behind refs.
+# tool_failure_halt and takeover_hint, and at most three structured capability requests; raw responses remain behind refs.
 # 函数用途: 将一个直属孩子裁成父级 prompt 可安全读取的小对象，被授权门反复拦下而停止时带上收口事实。
 def _direct_child_prompt_row(item: dict[str, object]) -> dict[str, object]:
     row = _dict_prompt_subset(
@@ -113,6 +116,7 @@ def _direct_child_prompt_row(item: dict[str, object]) -> dict[str, object]:
     )
     # 授权阶段同码连续失败收口事实沿完成合同的同一投影交给递归父级，不另拼字段。
     row.update(completion_tool_failure_halt_facts(item))
+    row.update(completion_takeover_hint_facts(item))
     requests = item.get("open_capability_requests")
     if isinstance(requests, list | tuple):
         row["open_capability_requests"] = [

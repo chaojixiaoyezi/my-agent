@@ -99,6 +99,38 @@
   4. **C 无物理单位 1 个**：`_MAX_SCAN_DEPTH`（扫描深度）只补说明、挪入白名单无单位组。
 - **白名单/目录**：主组 164→115（删 49 个）、无单位组 36→37（+1）；目录重建 **803 项** `--check` 一致。数值一律不变。
 
+## C4：执行器退出后父级唤醒回执里的结构化接替提示（2026-10-02，分支 `claude/38-c4-takeover-hint`，基于 `claude/3a-step16z` `e0a6d53af`，已实现，开关默认关）
+
+- **来源**：O1 待定项“结构化接替提示”。被 SIGKILL 的子代理只以 BLOCKED 通知父级，`blocked_reason` 是子代理自己写的，被杀时为空；
+  宿主侧的事实是执行器退出（`executor_process_died`）。O1 复测 4 次，模型都没有在 `create_subagents` 里声明 `replacement_for_run_ids`。
+- **做法**（通用合同层，不针对任何具体任务）：
+  - 合同 `contracts/subagent_completion.py`：
+    - `subagent_takeover_hint(run_id, exit_reason, uncertain_effects)` 生成固定形状：版本、run_id、退出原因码、是否有未确认效果，
+      以及 `declare_with={tool: create_subagents, replacement_for_run_ids: [run_id]}`；
+    - `completion_takeover_hint_facts` 校验版本、非空字段，并按固定形状重建，不复制其它键。
+  - 宿主写入：只在 `executor_recovery.recover_exited_runner`（宿主证实执行器已退出、这一轮没有结果）且开关打开时，随这一份结果附提示；
+    结果服务每次写回都“有就写、没有就清”（`record_takeover_hint`），所以提示只属于那一份结果。
+  - 交出：完成信封 `completion_handoff_payload` 只在 BLOCKED/FAILED 时带出，受控取消等其它通知不带旧提示。
+  - 消费方共用同一合同投影（合同要求字段变更同步所有消费方）：
+    - 生命周期唤醒事件（父级模型看到的回执，`lifecycle_wake_event._CHILD_FIELDS`）；
+    - 观察摘要的一句话（哪个 run、原因码、怎么声明接替；有未确认效果时加“接手前先核对”）；
+    - 前台活动回合事件、后台完成清单、递归父级的直属孩子快照。
+  - 开关 `subagent_takeover_hint_enabled`（`capability_config.yaml` 与 `CapabilityConfig`，默认 false）：
+    - 由执行器退出回收扫描（`capability_auto_sweep._reclaim_dead_running_runs`）经唯一 capability 快照读取；
+    - 关闭时唤醒回执与改前一字不差；
+    - 前端参数目录已重新生成。
+- **真实模型核对**（MiniMax-M2.7，隔离 home，场景与 O1 场景 A 相同、提示原文相同，证据
+  `~/.my-agent/decision-evidence/c4-takeover-hint-20261002/`）：
+  - 第 1 次是测试侧失误：开关文件放错了目录，网关代理根是 owner home，所以实际按关闭运行，当作基线记录。
+    结果是父级另派了新子代理，但没有声明接替；原子代理一直 BLOCKED，运行账 unknown。
+  - 第 2 次开关生效，唤醒里带了完整提示。父级没有声明接替（**接替声明未命中，0/1**），而是按提示里的“接手前先核对”去读
+    子代理报告和 `ws/notes/child-note.txt`。文件在被杀前已经写好，所以它更新进度后结束，没有另派。
+  - 这个杀点（写完之后、结果落账之前）本身不需要接替。要验证“声明接替”这条路，需要换一个工作没做完的杀点，那是另一个场景。
+- **顺带发现（未改）**：`recover_exited_runner` 传的 `failure_type=executor_effects_unknown` 不在 `FailureType` 枚举里，被
+  `runner_result_state._apply_unstructured_failure` 改成了 `runner_error`，所以唤醒里的 failure_type 不能区分“未知效果”。接替提示里
+  `uncertain_effects` 已带这个事实，所以不影响 C4。
+- **验证**：`test_subagent_takeover_hint.py` 8 项；13 个变异全部被抓住。见 TESTS.md 同名节。
+
 ## /settings internal 与 P17 统一调度的接缝（2026-10-02，3a，step16z，已修）
 
 - P18 真实验收发现 `/settings internal` 在 TUI 和飞书都被兜底成“参数暂时读不到”：P17 给所有子命令统一传 `capability_path`，
@@ -1032,7 +1064,7 @@
     有了它才能逐条处理多条子代理（例如整棵树一起被杀），也能消掉上面的换目标窗口。
   - 不挂会话线程的历史 unknown：09-30 生产库副本里根代理 32 条、子代理 2 条（最新 09-23），任何会话里的 `/recover` 都够不着，
     需要 owner 级查看与处置入口；另立一项，不和 O1 混做。
-  - 结构化接替提示（10-01 真实复测后 3a 裁定先观察）：被 SIGKILL 的子代理只回 BLOCKED，`blocked_reason` 是子代理自己写的字段，
+  - 结构化接替提示（2026-10-02 已实施，开关默认关，见上方 C4 条目；原记录如下）（10-01 真实复测后 3a 裁定先观察）：被 SIGKILL 的子代理只回 BLOCKED，`blocked_reason` 是子代理自己写的字段，
     被杀时为空；宿主侧的事实是执行轮 unknown（executor_process_died）。复测 4 次模型都没在 `create_subagents` 里声明
     `replacement_for_run_ids`，“已被接替的来源收成 cancelled”只有合同单测覆盖。是否在唤醒回执里给父级结构化的接替建议是新设计项；
     先在以后的真实任务里观察模型是否自然声明接替，不为测试改提示。

@@ -46,6 +46,8 @@ class RecordRunnerResultParams:
     tool_failures: list[dict[str, str]] | None = None
     # 本 attempt 因授权阶段同码连续失败收口时的结构化事实(原因码/工具/错误码/次数/参数名);None=未收口。
     tool_failure_halt: dict[str, object] | None = None
+    # 执行器已退出（宿主证实、没有业务结果）时宿主附给直属父级的接替提示；None=不是这种收口或开关关闭。只属于这一份结果。
+    takeover_hint: dict[str, object] | None = None
     structured_repair_attempted: bool = False
     structured_repair_ok: bool = False
     structured_repair_error: str = ""

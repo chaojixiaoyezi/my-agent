@@ -39,6 +39,7 @@ from ..runner_rendering import render_runner_result_markdown
 from ..runner_result_admission import reject_stale_runner_result
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
+from .executor_recovery import record_takeover_hint
 from .runner_result_commit import commit_runner_result
 from .runtime_closeout import deliver_parent_wake
 
@@ -266,6 +267,8 @@ class SubAgentRunnerResultService:
         # 后续 build/persist 链路会随任务一起落盘。None(超时/异常)不覆盖旧账本。
         # 授权阶段连续失败收口事实随同一账本写入,父级完成信封只从这里读取。
         record_tool_failure_ledger(task, params.tool_failures, now, params.tool_failure_halt)
+        # 执行器退出收口附的接替提示只属于这一份结果；没带就清掉旧提示。
+        record_takeover_hint(task, params.takeover_hint)
         extracted = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
         output_payload, build_ctx = self._runner_result_build_context(
             _RunnerResultBuildParams(params, extracted, now),

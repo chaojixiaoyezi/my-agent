@@ -7,6 +7,7 @@ from typing import Any
 
 from ...contracts.subagent_completion import (
     completion_service_window_facts,
+    completion_takeover_hint_facts,
     completion_tool_failure_halt_facts,
 )
 from ...conversation.active_turn_input import append_active_turn_user_input, packet_from_guidance
@@ -919,7 +920,8 @@ def _render_task_events(events: list[WakeSignal]) -> str:
     )
 
 
-# LLM: 安全点确认事件前保留交接、诊断、宿主冻结窗口事实及授权阶段连续失败收口事实；不能只交付状态就确认已读。
+# LLM: 安全点确认事件前保留交接、诊断、宿主冻结窗口事实、授权阶段连续失败收口事实及执行器退出后的接替提示；
+#   不能只交付状态就确认已读。
 # 函数用途: 生成活动回合可见事件，窗口提示与收口事实都不改写生命周期或触发额外模型轮。
 def _task_event_payload(event: WakeSignal) -> dict[str, object]:
     metadata = event.metadata if isinstance(event.metadata, dict) else {}
@@ -934,6 +936,8 @@ def _task_event_payload(event: WakeSignal) -> dict[str, object]:
         **completion_service_window_facts(metadata),
         # 授权阶段同码连续失败收口的结构化事实（原因码/工具/错误码/次数/参数名），经合同投影裁剪。
         **completion_tool_failure_halt_facts(metadata),
+        # 执行器已退出后的结构化接替提示（哪个 run、原因码、怎么声明 replacement_for_run_ids），开关关闭时没有。
+        **completion_takeover_hint_facts(metadata),
         **{key: metadata[key] for key in (
             "completion_message", "final_report_ref", "declared_output_refs", "artifact_refs",
             "turn_end_reason", "failure_type", "activity_diagnostic",

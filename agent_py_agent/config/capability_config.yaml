@@ -80,6 +80,11 @@ subagent_first_token_notice_seconds: 600
 subagent_stream_idle_notice_seconds: 180
 # 工具长时间未返回时的提醒秒数；可能仍在编译或等待审批，不判失败；0 关闭。
 subagent_tool_wait_notice_seconds: 900
+
+# 子代理执行器已退出（宿主证实、这一轮没有结果）时，是否在给直属父级的完成通知里附结构化接替提示（哪个 run、退出原因、怎么用 replacement_for_run_ids 声明接替）。
+# - true: 父级模型在唤醒回执里看到这条提示；只是提示，不自动派工或接管，是否接替仍由父级决定。
+# - false: 推荐默认值；会改变父级模型看到的内容，先由用户显式开启。
+subagent_takeover_hint_enabled: false
 # 决策能力点默认关闭；observe 也会发请求并产生用量；模式不授予执行权限。
 decision_subagent_model_mode: off
 # 子代理执行模型候选的原模型目录 ID；[] 使用全部当前授权的 agentic 模型。可按用户长期或会话设置覆盖，不按名称猜服务商。

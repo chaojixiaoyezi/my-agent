@@ -309,3 +309,10 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 - **改动**：`SubAgentManager.taken_over_successor(run_id)` 一行委托到模块级 `_taken_over_successor`：只认 status=TAKEN_OVER 且
   `task_replacement_successor` 判为 taken_over；记录缺失或读坏返回 None，只记 superseded_by 的不算接管。只读，不改记录。
 - 测试与变异见 TESTS.md“/recover 子代理分支的分层边界修正”节。
+
+## 执行器退出后父级唤醒回执里的结构化接替提示（C4，2026-10-02，分支 `claude/38-c4-takeover-hint`，基于 step16z `e0a6d53af`）
+
+- **起因**：O1 复测，被 SIGKILL 的子代理只以 BLOCKED 通知父级，父级 4 次唤醒都没有声明 `replacement_for_run_ids`。
+- **改动**：开关 `subagent_takeover_hint_enabled`（默认关）打开时，执行器退出收口附 `takeover_hint`（哪个 run、退出原因码、是否有未确认效果、
+  怎么用 `replacement_for_run_ids` 声明接替），经完成合同交给所有父级消费方；只是提示，不派工、不改状态。
+- **真实模型**：MiniMax-M2.7 一次有效运行，接替声明未命中，模型按提示先核对、发现文件已写好后结束。见设计台账 C4 节，测试与变异见 TESTS.md 同名节。

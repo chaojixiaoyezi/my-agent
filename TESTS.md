@@ -69,6 +69,21 @@
     `check_doc_sync.py`：**PASS**；`check_code_size.py --mode strict`：hard=0 blocked=False（报告已还原）；
     `git diff --check` 通过；`check_clean_package.py .`：**OK**；`size_diff.sh $PWD`：**新增告警 0**。
 
+## C4：执行器退出后父级唤醒回执里的结构化接替提示（2026-10-02，分支 `claude/38-c4-takeover-hint`，基于 `claude/3a-step16z` `e0a6d53af`）
+
+- **新增** `test_subagent_takeover_hint.py`（8 项），用真实 `SubAgentManager`、owner runtime.db 和会话库，执行器为已退出的进程：
+  - 合同形状：只按固定形状重建，版本不对、run_id 或原因码为空时不投影，多余键丢弃；
+  - 开关打开：唤醒 metadata、生命周期唤醒事件、观察摘要都带同一份提示（`replacement_for_run_ids=[被杀 run]`）；
+    有未确认工具效果时仍 BLOCKED，提示带 `uncertain_effects=true`，摘要加“接手前先核对”；
+  - 开关关闭（缺省）：唤醒 metadata、事件、摘要与改前一样，attributes 里也没有提示；
+  - 提示只属于那一份结果：受控取消等其它状态的信封不带；下一份结果不带提示就清掉旧提示；
+  - 前台活动回合、后台完成清单、递归父级快照三处消费方投影同一份提示；
+  - 执行器退出回收扫描从 capability 快照读开关，开、关两种情况都端到端走真实收口。
+- **变异**（13 个，抓到 13 个）：宿主不附提示；结果服务不写提示；信封不看状态；唤醒事件不投影；摘要不加句子；去掉“接手前先核对”；
+  扫描不看开关；合同照抄原字典；活动回合、递归父级、后台清单任一不投影；没有提示时不清旧提示；开关缺省改成开。
+- **真实模型**：MiniMax-M2.7 隔离环境两次运行（第 1 次开关放错目录未生效，当作基线；第 2 次生效，接替声明未命中，模型先核对后结束）。
+  证据 `~/.my-agent/decision-evidence/c4-takeover-hint-20261002/`。
+
 ## 集成修正：/settings internal 接住统一调度传的 capability_path（2026-10-02，3a，step16z）
 
 - **起因**：ae 的 P18 真实验收（TUI 与假飞书）里 `/settings internal <常数名>` 只回“参数暂时读不到”。P17 让 `run_settings_control`
