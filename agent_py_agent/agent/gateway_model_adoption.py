@@ -12,12 +12,12 @@ from dataclasses import dataclass, field, replace
 from .agent_core.tool_request_capture import capture_tool_loop_request
 from .agent_core.tool_request_projection import (
     ToolLoopRequestInput,
+    candidate_input_modality_decision,
     project_tool_loop_request,
     text_request_capacity_known,
 )
 from .backends.base import ProviderRequestOptions
 from .backends.bounded_call import call_with_deadline
-from .backends.request_content import text_content_supported
 from .backends.request_scope import foreground_model_scope, provider_request_budget
 from .common.cancellation import ToolCancelled
 from .concurrency.interrupt import is_interrupted
@@ -49,7 +49,8 @@ def freeze_selection_candidates(agent: object, candidates: dict, deadline: float
         generations[profile_id] = generation
         rows[profile_id] = {**candidates[profile_id], "model_name": config.model_name,
                            "model_backend": config.model_backend,
-                           "declared_context_window_tokens": config.model_context_window_tokens}
+                           "declared_context_window_tokens": config.model_context_window_tokens,
+                           "input_modalities": list(config.model_input_modalities)}
     return rows, generations
 
 
@@ -160,8 +161,10 @@ class GatewayModelAdoption:
             if dependencies is None:
                 raise ValueError("model_dependencies_unknown")
             prepared = capture_tool_loop_request(agent, params, self.prompt_input)
-            if not text_request_capacity_known(prepared, allow_reasoning=False):
-                raise ValueError("history_modality_unknown")
+            modality = candidate_input_modality_decision(prepared, config.model_input_modalities)
+            if modality.status != "applicable":
+                _record_retained(self, modality.reason_code, modality.as_dict())
+                return params, prompt
             frozen_params = replace(params, tool_ir_history=deepcopy(params.tool_ir_history),
                                     provider_history_messages=deepcopy(params.provider_history_messages),
                                     tool_context=deepcopy(params.tool_context), live_archive_state=deepcopy(params.live_archive_state))
@@ -180,7 +183,7 @@ class GatewayModelAdoption:
         except Exception:
             self.stack.close()
             self.candidate = None
-            self._record_retained("candidate_validation_unavailable")
+            _record_retained(self, "candidate_validation_unavailable")
             return params, prompt
 
     # LLM: provider 探针沿原 bounded budget；原 stage 身份冻结于车道，不改绑当前主 run；仅返回材料，无权采用或迟到提交。
@@ -197,11 +200,15 @@ class GatewayModelAdoption:
             candidate_params = replace(params, tool_protocol_snapshot=protocol)
             candidate_input = replace(prepared, tool_protocol_snapshot=protocol,
                                       system_instruction=provider_system_instruction(agent.backend))
-            if not text_request_capacity_known(candidate_input, allow_reasoning=False):
-                raise ValueError("history_modality_unknown")
             projected = project_tool_loop_request(candidate_input)
-            if projected.status != "ready" or any(not text_content_supported(row.get("content"), allow_reasoning=False) for row in projected.messages or ()):
+            if projected.status != "ready":
                 raise ValueError("history_modality_or_projection_unknown")
+            projected_modality = candidate_input_modality_decision(
+                replace(candidate_input, tool_ir_history=(), provider_history_messages=tuple(projected.messages or ())),
+                dependencies.config.model_input_modalities,
+            )
+            if projected_modality.status != "applicable":
+                raise ValueError(projected_modality.reason_code)
             # 原始非空工具面即使被 choice.none 隐藏，也决定真实发送包装是否关闭 thinking。
             payload = _payload(agent.backend, projected.provider_prompt, _PayloadSurface(
                 list(candidate_input.native_tools) or None, projected.tool_choice, projected.messages,
@@ -209,7 +216,8 @@ class GatewayModelAdoption:
             validation = _capacity(dependencies.config, payload)
             if preflight_context_pressure_response(ModelGenerateParams(agent, candidate_params, projected.prompt, params.tool_rounds)):
                 raise ValueError("original_context_preflight_rejected")
-            return candidate_params, payload, {**validation, "provider_tool_support": protocol.capability.evidence}
+            return candidate_params, payload, {**validation, "provider_tool_support": protocol.capability.evidence,
+                                                "input_modality": projected_modality.as_dict()}
 
     # LLM: 只在精确候选首次发送前核对真实最终载荷；提交以后不得把 HTTP 错误当成局部拒绝，也不重新检查后续工具轮模型。
     # 函数用途: 最后复核候选并原子提交模型与发送意图，失败通知 caller 沿原模型一次执行。
@@ -218,7 +226,7 @@ class GatewayModelAdoption:
             return
         if not self.considered:
             self.considered = True
-            self._record_retained("first_request_not_selected")
+            _record_retained(self, "first_request_not_selected")
         if self.candidate is None:
             return
         try:
@@ -231,13 +239,13 @@ class GatewayModelAdoption:
             _capacity(self.candidate.config, payload)
             if not decision_service.decision_outcome_is_current(state.agent, self.observation.params, self.stage, self.outcome):
                 raise ValueError("decision_changed")
-            if not self._commit(state):
+            if not _commit_selection(self, state):
                 raise ValueError("selection_changed")
         except (InterruptedError, ToolCancelled):
             raise
         except Exception as exc:
             if self.submitted or self.commit_uncertain:
-                self._record_commit_failure()
+                _record_commit_failure(self)
                 raise
             raise ModelRequestSelectionRejected("gateway_candidate_rejected_before_provider") from exc
         # 原线程 CAS 已确定采用，之后回执故障不能跨模型重发。
@@ -250,102 +258,6 @@ class GatewayModelAdoption:
         except Exception:
             logging.getLogger(__name__).warning("模型采用回执未保存，原线程发送意图仍有效", exc_info=False)
 
-    # LLM: model catalog→active-turn T→thread 原锁序，无网络；原目录/设置/Compact/显式选择版本须同时有效。
-    # 函数用途: 在唯一线程存储保存一次自动选择及不确定发送意图，保持最近显式事件版本。
-    def _commit(self, state: object) -> bool:
-        from .settings.model_profiles import model_profile_generation_guard
-
-        context = self.observation.context
-        with model_profile_generation_guard(state.agent, self.generation, blocking=False) as current:
-            if not current:
-                return False
-            transition = GatewayActiveTurnTransition(context.request_path, context.request_id, context.request["execution_attempt_id"])
-            transition("submit", lambda: self._commit_active_turn(state))
-        return self.submitted
-
-    # LLM: 在 T 内重读原队列，不凭进程中旧 runtime_authority 或临时 marker 采用；claim 读取不创建或续租。
-    # 函数用途: 确认准确请求仍拥有原身份和车道，再进入线程 CAS。
-    def _commit_active_turn(self, state: object) -> None:
-        from .gateway_parts.io import read_json_file
-        from .gateway_parts.request_binding import MODEL_OBSERVATION_KEY
-
-        context = self.observation.context
-        current = read_json_file(context.request_path)
-        authority = gateway_runtime_authority(current, context.request_id)
-        marker = current.get(MODEL_OBSERVATION_KEY, {})
-        if (not authority or any(authority.get(key) != getattr(state.params, key, None) for key in ("run_id", "task_id", "attempt_id"))
-                or marker.get("operation_id") != self.stage.operation_id or marker.get("status") != "observed"
-                or marker.get("claim_id") != self.observation.claim["claim_id"]):
-            return
-        claim = state.agent.conversation_store.claims.load(self.thread.thread_id)
-        if (claim.get("claim_id") != self.observation.claim["claim_id"] or claim.get("status") != "running"
-                or claim.get("expires_at", 0) <= time.time()):
-            return
-        threads = state.agent.conversation_store.threads
-        self.commit_uncertain = True
-        try:
-            saved = threads.update_atomic(self.thread.thread_id, lambda latest: self._adopt(latest, state))
-        except BaseException:
-            self._resolve_write_failure(state)
-            raise
-        self.submitted = self._owns_intent(saved, state.call_id)
-        self.commit_uncertain = False
-
-    # LLM: 对更新异常不能猜原子 replace 是否发生；只有原选择版本不变且无本次意图才证明未提交，读不回保留 UNKNOWN。
-    # 函数用途: 区分可安全回退的磁盘失败与已经提交或结果不确定的失败，不发送候选或重复原模型。
-    def _resolve_write_failure(self, state: object) -> None:
-        try:
-            saved = state.agent.conversation_store.threads.require(self.thread.thread_id)
-        except Exception:
-            return
-        self.submitted = self._owns_intent(saved, state.call_id)
-        unchanged = (saved.model_profile_id, saved.model_selection_revision) == (self.thread.model_profile_id, self.thread.model_selection_revision)
-        self.commit_uncertain = self.submitted or not unchanged
-
-    # LLM: 读回只承认本请求/操作/物理调用的原线程发送意图，显示投影或相同模型编号不证明提交。
-    # 函数用途: 核对原 thread CAS 返回或故障读回是否确认此次采用。
-    def _owns_intent(self, thread: object, call_id: str) -> bool:
-        record = thread.metadata.get(MODEL_ADOPTION_KEY, {})
-        return (record.get("schema") == MODEL_ADOPTION_KEY and record.get("operation_id") == self.stage.operation_id
-                and record.get("request_id") == self.observation.context.request_id and record.get("provider_call_id") == call_id
-                and record.get("status") == "send_intent_uncertain" and thread.model_profile_id == self.generation.profile_id)
-
-    # LLM: updater 只能修改本线程选择和一条有界元数据；每次覆盖旧请求记录，发送意图不推断 HTTP 收到，也不授予重新选择资格。
-    # 函数用途: 比较 source/revision 与真实运行绑定，提交采用时保持历史、权限和其它元数据。
-    def _adopt(self, latest: object, state: object):
-        from .settings.decision_settings_projection import decision_settings_projection
-        from .settings.model_profiles import model_profiles_path, read_model_profiles
-        from .settings.shared_model_catalog import shared_profile_key
-        from .user_space.approval_mode import permission_config
-
-        agent, context = state.agent, self.observation.context
-        if is_interrupted() or bool(getattr(getattr(state.params, "cancellation_token", None), "cancelled", False)):
-            raise InterruptedError("当前模型请求已停止。")
-        authority = gateway_runtime_authority(context.request, context.request_id)
-        if (not authority or any(authority.get(key) != getattr(state.params, key, None) for key in ("run_id", "task_id", "attempt_id"))
-                or time.monotonic() >= self.outcome.deadline
-                or (latest.model_profile_id, latest.model_selection_revision, latest.compact_generation) !=
-                   (self.thread.model_profile_id, self.thread.model_selection_revision, self.thread.compact_generation)):
-            return latest
-        settings = decision_settings_projection(agent, read_model_profiles(model_profiles_path(agent.home_paths)), latest)
-        point = settings["effective"]["points"]["model_selection"]
-        if (point["effective_mode"] != "apply" or decision_service._policy_revision(settings) != self.outcome.response.binding.policy_revision
-                or shared_profile_key(point["profile_id"]) and not self.generation.shared_generation):
-            return latest
-        config = selected_model_config(agent, profile_id=self.generation.profile_id)
-        if permission_config(config, agent.home_paths) != self.candidate.config:
-            return latest
-        record = {"schema": MODEL_ADOPTION_KEY, "request_id": context.request_id, "operation_id": self.stage.operation_id,
-                  "execution_attempt_id": context.request["execution_attempt_id"], "run_id": state.params.run_id,
-                  "attempt_id": state.params.attempt_id, "profile_id": self.generation.profile_id,
-                  "source_selection_revision": latest.model_selection_revision,
-                  "model_generation": self.generation.to_dict(), "status": "send_intent_uncertain",
-                  "provider_call_id": state.call_id, "validation": self.validation}
-        return replace(latest, model_profile_id=self.generation.profile_id,
-                       model_selection_revision=latest.model_selection_revision + 1, model_selection_source="automatic",
-                       provider_context_observation={}, model_context_usage={},
-                       metadata={**latest.metadata, MODEL_ADOPTION_KEY: record})
-
     # LLM: 仅已准备但尚未提交的本请求可回退；退出候选绑定发生在原 caller，随后 typed 拒绝不再触发第二次选择。
     # 函数用途: 在发送前明确拒绝后恢复原模型及参数，保留原账本中的零 HTTP 尝试。
     def reject(self, agent: object, params: object) -> None:
@@ -353,29 +265,136 @@ class GatewayModelAdoption:
             raise RuntimeError("不能回退已提交或其它请求的模型。")
         self.stack.close()
         self.candidate = None
-        self._record_retained("candidate_rejected_before_provider")
+        _record_retained(self, "candidate_rejected_before_provider")
 
-    # LLM: 原线程写入已发生或无法证伪时，原请求只展示确认程度；此回执失败不能再转成未提交或允许第二次选择。
-    # 函数用途: 为失败收口保留采用不确定性，不谎称已有 HTTP 或原模型可以安全重发。
-    def _record_commit_failure(self) -> None:
-        try:
-            self.observation.writer.record_adoption({
-                "status": "send_intent_uncertain" if self.submitted else "commit_unknown",
-                "adopted": True if self.submitted else None,
-                "reason": "thread_commit_confirmed_io_error" if self.submitted else "thread_commit_unconfirmed",
-            })
-        except (InterruptedError, ToolCancelled):
-            raise
-        except Exception:
-            logging.getLogger(__name__).warning("模型选择提交结果未知，禁止跨模型重发", exc_info=False)
 
-    # LLM: 失败注释仅是原请求投影，不更改线程选择或重置 once marker；持久失败不影响原请求。
-    # 函数用途: 保存安全保留原因，不输出原 prompt、凭据或供应商异常正文。
-    def _record_retained(self, reason: str) -> None:
-        try:
-            self.observation.writer.record_adoption({"status": "retained", "reason": reason, "adopted": False,
-                                                     "adoption_eligibility": "retained"})
-        except (InterruptedError, ToolCancelled):
-            raise
-        except Exception:
-            logging.getLogger(__name__).warning("模型保留回执未保存，继续原请求", exc_info=False)
+# LLM: model catalog→active-turn T→thread 原锁序保持在单一函数；目录、设置、Compact 与显式选择版本仍须同时有效。
+# 函数用途: 在唯一线程存储保存一次自动选择及不确定发送意图，保持最近显式事件版本。
+def _commit_selection(adoption: GatewayModelAdoption, state: object) -> bool:
+    from .settings.model_profiles import model_profile_generation_guard
+
+    context = adoption.observation.context
+    with model_profile_generation_guard(state.agent, adoption.generation, blocking=False) as current:
+        if not current:
+            return False
+        transition = GatewayActiveTurnTransition(context.request_path, context.request_id, context.request["execution_attempt_id"])
+        transition("submit", lambda: _commit_active_turn(adoption, state))
+    return adoption.submitted
+
+
+# LLM: 在 T 内重读原队列，不凭进程中旧 runtime_authority 或临时 marker 采用；claim 读取不创建或续租。
+# 函数用途: 确认准确请求仍拥有原身份和车道，再进入线程 CAS。
+def _commit_active_turn(adoption: GatewayModelAdoption, state: object) -> None:
+    from .gateway_parts.io import read_json_file
+    from .gateway_parts.request_binding import MODEL_OBSERVATION_KEY
+
+    context = adoption.observation.context
+    current = read_json_file(context.request_path)
+    authority = gateway_runtime_authority(current, context.request_id)
+    marker = current.get(MODEL_OBSERVATION_KEY, {})
+    if (not authority or any(authority.get(key) != getattr(state.params, key, None) for key in ("run_id", "task_id", "attempt_id"))
+            or marker.get("operation_id") != adoption.stage.operation_id or marker.get("status") != "observed"
+            or marker.get("claim_id") != adoption.observation.claim["claim_id"]):
+        return
+    claim = state.agent.conversation_store.claims.load(adoption.thread.thread_id)
+    if (claim.get("claim_id") != adoption.observation.claim["claim_id"] or claim.get("status") != "running"
+            or claim.get("expires_at", 0) <= time.time()):
+        return
+    threads = state.agent.conversation_store.threads
+    adoption.commit_uncertain = True
+    try:
+        saved = threads.update_atomic(adoption.thread.thread_id, lambda latest: _adopt_selection(adoption, latest, state))
+    except BaseException:
+        _resolve_write_failure(adoption, state)
+        raise
+    adoption.submitted = _owns_intent(adoption, saved, state.call_id)
+    adoption.commit_uncertain = False
+
+
+# LLM: 对更新异常不能猜原子 replace 是否发生；只有原选择版本不变且无本次意图才证明未提交，读不回保留 UNKNOWN。
+# 函数用途: 区分可安全回退的磁盘失败与已经提交或结果不确定的失败，不发送候选或重复原模型。
+def _resolve_write_failure(adoption: GatewayModelAdoption, state: object) -> None:
+    try:
+        saved = state.agent.conversation_store.threads.require(adoption.thread.thread_id)
+    except Exception:
+        return
+    adoption.submitted = _owns_intent(adoption, saved, state.call_id)
+    unchanged = ((saved.model_profile_id, saved.model_selection_revision) ==
+                 (adoption.thread.model_profile_id, adoption.thread.model_selection_revision))
+    adoption.commit_uncertain = adoption.submitted or not unchanged
+
+
+# LLM: 读回只承认本请求/操作/物理调用的原线程发送意图，显示投影或相同模型编号不证明提交。
+# 函数用途: 核对原 thread CAS 返回或故障读回是否确认此次采用。
+def _owns_intent(adoption: GatewayModelAdoption, thread: object, call_id: str) -> bool:
+    record = thread.metadata.get(MODEL_ADOPTION_KEY, {})
+    return (record.get("schema") == MODEL_ADOPTION_KEY and record.get("operation_id") == adoption.stage.operation_id
+            and record.get("request_id") == adoption.observation.context.request_id and record.get("provider_call_id") == call_id
+            and record.get("status") == "send_intent_uncertain" and thread.model_profile_id == adoption.generation.profile_id)
+
+
+# LLM: updater 只能修改本线程选择和一条有界元数据；每次覆盖旧请求记录，发送意图不推断 HTTP 收到，也不授予重新选择资格。
+# 函数用途: 比较 source/revision 与真实运行绑定，提交采用时保持历史、权限和其它元数据。
+def _adopt_selection(adoption: GatewayModelAdoption, latest: object, state: object):
+    from .settings.decision_settings_projection import decision_settings_projection
+    from .settings.model_profiles import model_profiles_path, read_model_profiles
+    from .settings.shared_model_catalog import shared_profile_key
+    from .user_space.approval_mode import permission_config
+
+    agent, context = state.agent, adoption.observation.context
+    if is_interrupted() or bool(getattr(getattr(state.params, "cancellation_token", None), "cancelled", False)):
+        raise InterruptedError("当前模型请求已停止。")
+    authority = gateway_runtime_authority(context.request, context.request_id)
+    if (not authority or any(authority.get(key) != getattr(state.params, key, None) for key in ("run_id", "task_id", "attempt_id"))
+            or time.monotonic() >= adoption.outcome.deadline
+            or (latest.model_profile_id, latest.model_selection_revision, latest.compact_generation) !=
+               (adoption.thread.model_profile_id, adoption.thread.model_selection_revision, adoption.thread.compact_generation)):
+        return latest
+    settings = decision_settings_projection(agent, read_model_profiles(model_profiles_path(agent.home_paths)), latest)
+    point = settings["effective"]["points"]["model_selection"]
+    if (point["effective_mode"] != "apply" or decision_service._policy_revision(settings) != adoption.outcome.response.binding.policy_revision
+            or shared_profile_key(point["profile_id"]) and not adoption.generation.shared_generation):
+        return latest
+    config = selected_model_config(agent, profile_id=adoption.generation.profile_id)
+    if permission_config(config, agent.home_paths) != adoption.candidate.config:
+        return latest
+    record = {"schema": MODEL_ADOPTION_KEY, "request_id": context.request_id, "operation_id": adoption.stage.operation_id,
+              "execution_attempt_id": context.request["execution_attempt_id"], "run_id": state.params.run_id,
+              "attempt_id": state.params.attempt_id, "profile_id": adoption.generation.profile_id,
+              "source_selection_revision": latest.model_selection_revision,
+              "model_generation": adoption.generation.to_dict(), "status": "send_intent_uncertain",
+              "provider_call_id": state.call_id, "validation": adoption.validation}
+    return replace(latest, model_profile_id=adoption.generation.profile_id,
+                   model_selection_revision=latest.model_selection_revision + 1, model_selection_source="automatic",
+                   provider_context_observation={}, model_context_usage={},
+                   metadata={**latest.metadata, MODEL_ADOPTION_KEY: record})
+
+
+# LLM: 原线程写入已发生或无法证伪时，原请求只展示确认程度；回执失败不能再转成未提交或允许第二次选择。
+# 函数用途: 为失败收口保留采用不确定性，不谎称已有 HTTP 或原模型可以安全重发。
+def _record_commit_failure(adoption: GatewayModelAdoption) -> None:
+    try:
+        adoption.observation.writer.record_adoption({
+            "status": "send_intent_uncertain" if adoption.submitted else "commit_unknown",
+            "adopted": True if adoption.submitted else None,
+            "reason": "thread_commit_confirmed_io_error" if adoption.submitted else "thread_commit_unconfirmed",
+        })
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception:
+        logging.getLogger(__name__).warning("模型选择提交结果未知，禁止跨模型重发", exc_info=False)
+
+
+# LLM: 失败注释仅是原请求投影，不更改线程选择或重置 once marker；持久失败不影响原请求。
+# 函数用途: 保存安全保留原因，不输出原 prompt、凭据或供应商异常正文。
+def _record_retained(adoption: GatewayModelAdoption, reason: str, input_modality: dict | None = None) -> None:
+    try:
+        result = {"status": "retained", "reason": reason, "adopted": False,
+                  "adoption_eligibility": "retained"}
+        if input_modality:
+            result["input_modality"] = deepcopy(input_modality)
+        adoption.observation.writer.record_adoption(result)
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception:
+        logging.getLogger(__name__).warning("模型保留回执未保存，继续原请求", exc_info=False)

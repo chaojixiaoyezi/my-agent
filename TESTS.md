@@ -364,6 +364,26 @@ bash "$HOME/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh" "$PWD"
 本轮无插件宿主/嵌套 Seatbelt 失败或跳过，不把其他轮的环境限制混入 J10 数字。HTTP 仅是隔离测试夹具，非生产渠道验收。
 3a 只读审阅并集成后，由 be 复测真实写后提示、单 stale 零调用、observe 不追加与自然收口不变；不从组件绿灯推断模型采用或交付质量。
 
+## J11 按结构化输入模态选模型（2026-10-02，分支 `worker/sol56-j11-modality`，基于 `7e0fbcec1`）
+
+- **红灯**：先新增共享模态、child 首轮和 Gateway 真实组包用例；首次聚焦运行出现 4 个预期失败，分别证明：
+  带图且候选声明 image 时 child/Gateway 尚未采用、child 未声明能力仍只记旧 unknown、Gateway 全无兼容候选仍调用 Decision。
+- **实现覆盖**：有图/视频与纯文本；候选显式声明、未声明、声明缺模态；全候选不满足时保留原模型并给
+  `no_candidate_supports_input_modalities`；历史没有模态事实时保持 `history_modality_unknown`。Gateway 与 child 共用
+  `candidate_input_modality_decision` / `filter_model_candidates_by_input_modality`，只读结构化媒体和档案声明。
+- **聚焦回归**（统一 `PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`，`--basetemp=/private/tmp/claude-501/m-sol56`）：
+  - `pytest test_request_content_capacity.py test_gateway_model_adoption.py test_gateway_model_observation.py test_subagent_first_request_selection.py test_decision_subagent.py -q --tb=short -p no:cacheprovider` → **205 passed**。
+  - `pytest test_gateway_conversation_control.py -k test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop -q --tb=short -p no:cacheprovider` → **18 passed**（仅验证为清除新增尺寸告警所做的等价测试夹具拆分）。
+- **变异 3/3**：临时杀死共享“支持”分支，image/video 两例红；绕过 child 模态拒绝，未声明候选例红；绕过 Gateway
+  空兼容集合保留，原模型/提示例红。每次恢复后比对源码，最终等价拆分后再次跑上述 205 项全绿。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0`、`消失告警: 8`。
+- **收尾门禁**：guards9 的 10 个文件 **168 passed**；`check_import_boundaries.py` → **0 条**；Ruff →
+  **All checks passed**；`check_doc_sync.py` → **DOC_SYNC_PASS**；strict code-size →
+  `strict_scope_total=2236 hard=0 high-risk=1528 soft=708 test_advisory=1241 blocked=False`，随后已还原
+  `CODE_SIZE_REPORT.md`；`git diff --check` 通过；`check_clean_package.py .` → **OK**。
+- **未验证**：没有启动 Gateway、没有真实 TUI/IM、没有调用 Decision 或收费生成模型；因此不把本地 fake/组件证据写成真实带图自动换模可用。
+
 ## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
 
 - **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数

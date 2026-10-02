@@ -65,6 +65,48 @@ class ToolLoopRequestProjection:
     tool_choice: ToolChoice | None = None
 
 
+# LLM: 结论只来自冻结历史与档案声明；unknown 和未声明不能冒充支持，详情只含模态名和固定原因码。
+# 类用途: 表示一个模型候选对本次结构化输入模态是否适用，供主会话和子代理共用。
+@dataclass(frozen=True)
+class InputModalityDecision:
+    status: Literal["applicable", "inapplicable", "unknown"]
+    reason_code: str
+    required_modalities: tuple[str, ...] = ()
+    declared_modalities: tuple[str, ...] = ()
+    missing_modalities: tuple[str, ...] = ()
+
+    # LLM: 持久化提示不得包含媒体路径、正文或模型配置，只展开固定的小型事实集合。
+    # 函数用途: 生成可写入建议回执的结构化模态判定。
+    def as_dict(self) -> dict:
+        return {
+            "status": self.status, "reason_code": self.reason_code,
+            "required_modalities": list(self.required_modalities),
+            "declared_modalities": list(self.declared_modalities),
+            "missing_modalities": list(self.missing_modalities),
+        }
+
+
+# LLM: 过滤结果保留逐候选不适用原因；没有适用候选只是一条保留提示，绝不授权宿主另挑模型。
+# 类用途: 返回一次候选模态过滤的白名单和结构化说明。
+@dataclass(frozen=True)
+class InputModalityFilter:
+    status: Literal["ready", "unknown"]
+    reason_code: str
+    required_modalities: tuple[str, ...] = ()
+    applicable_profile_ids: tuple[str, ...] = ()
+    inapplicable: dict[str, dict] = field(default_factory=dict)
+
+    # LLM: 对外只暴露候选编号、固定原因码和模态集合，不复制请求或目录记录。
+    # 函数用途: 生成 Decision 材料或保留回执使用的候选过滤提示。
+    def as_dict(self) -> dict:
+        return {
+            "status": self.status, "reason_code": self.reason_code,
+            "required_modalities": list(self.required_modalities),
+            "applicable_profile_ids": list(self.applicable_profile_ids),
+            "inapplicable": deepcopy(self.inapplicable),
+        }
+
+
 # LLM: 参数来自原 ToolLoopExecuteParams；额外三项必须由宿主准备，不能在这里读取 Goal、运行账或执行事实。
 #   回合触发类型原样交给 PromptBuilder，只决定当前回合以用户任务还是宿主事件开头。
 # 函数用途: 统一真实轮次和准备前投影使用的 PromptBuilder 输入，保留原系统、动态段、名卡及上下文作用域。
@@ -148,10 +190,116 @@ def _missing_request_fields(prepared: ToolLoopRequestInput) -> tuple[str, ...]:
 
 
 __all__ = [
-    "ToolLoopRequestInput", "ToolLoopRequestProjection",
+    "InputModalityDecision", "InputModalityFilter", "ToolLoopRequestInput", "ToolLoopRequestProjection",
+    "candidate_input_modality_decision", "filter_model_candidates_by_input_modality",
     "project_tool_loop_request", "tool_loop_prompt_request", "text_request_capacity_known",
     "compact_request_source_supported",
 ]
+
+
+# LLM: 纯文字仍兼容未声明档案；只有结构化 image/video 才要求显式声明，缺历史事实保持原 unknown 语义。
+# 函数用途: 用同一规则判断一个候选是否能接收冻结请求，不读取正文、文件、模型名或 MIME 猜测。
+def candidate_input_modality_decision(prepared: object, declared_modalities: object) -> InputModalityDecision:
+    required = _request_input_modalities(prepared)
+    declared = tuple(dict.fromkeys(value for value in declared_modalities or ()
+                                   if isinstance(value, str) and value in {"text", "image", "video"}))
+    if required is None:
+        return InputModalityDecision("unknown", "history_modality_unknown", declared_modalities=declared)
+    missing = tuple(value for value in required if value not in declared)
+    if not missing:
+        return InputModalityDecision("applicable", "input_modalities_supported", required, declared)
+    reason = "candidate_input_modalities_undeclared" if not declared else "candidate_input_modalities_missing"
+    return InputModalityDecision("inapplicable", reason, required, declared, missing)
+
+
+# LLM: 候选过滤只做白名单，不在多个适用模型间排序；全不满足时固定提示保留原模型，禁止静默换到任意项。
+# 函数用途: 对一批候选复用单候选判定并返回可选编号及逐项不适用原因。
+def filter_model_candidates_by_input_modality(prepared: object, candidate_modalities: dict) -> InputModalityFilter:
+    applicable, rejected, required = [], {}, ()
+    for profile_id, declared in candidate_modalities.items():
+        decision = candidate_input_modality_decision(prepared, declared)
+        if decision.status == "unknown":
+            return InputModalityFilter("unknown", decision.reason_code)
+        required = decision.required_modalities
+        if decision.status == "applicable":
+            applicable.append(profile_id)
+        else:
+            rejected[profile_id] = decision.as_dict()
+    reason = "no_candidate_supports_input_modalities" if required and not applicable else "input_modalities_filtered"
+    return InputModalityFilter("ready", reason, required, tuple(applicable), rejected)
+
+
+# LLM: None 历史与显式空历史语义不同；两份结构化历史都必须可分类，未知块或跨模型推理信封使整体 unknown。
+# 函数用途: 从冻结 provider/IR 历史汇总实际需要的 image/video 集合。
+def _request_input_modalities(prepared: object) -> tuple[str, ...] | None:
+    provider = getattr(prepared, "provider_history_messages", None)
+    native = getattr(prepared, "tool_ir_history", None)
+    if provider is None or native is None:
+        return None
+    provider_modalities = _provider_input_modalities(provider)
+    native_modalities = _native_input_modalities(native)
+    if provider_modalities is None or native_modalities is None:
+        return None
+    return tuple(sorted(set(provider_modalities) | set(native_modalities)))
+
+
+# LLM: provider 历史沿 request_content 的 canonical 判定；只收顶层 user local_file 媒体，assistant/嵌套/未知块不外推。
+# 函数用途: 分类 provider 消息中的结构化媒体模态，无法完整分类时返回 None。
+def _provider_input_modalities(messages: object) -> tuple[str, ...] | None:
+    from ..backends.request_content import classify_nontext_content, is_local_media_block
+
+    classes = classify_nontext_content(messages, allow_reasoning=False)
+    if not isinstance(messages, (list, tuple)) or classes.unknown:
+        return None
+    blocks = (block for row in messages if row.get("role") == "user" and isinstance(row.get("content"), (list, tuple))
+              for block in row["content"] if is_local_media_block(block))
+    return tuple(sorted({str(block["type"]) for block in blocks}))
+
+
+# LLM: IR 只承认仓库已有 typed 容器；未知对象、坏媒体引用和跨模型推理都保持 unknown，不经 adapter 丢弃。
+# 函数用途: 分类 canonical IR 中的媒体模态。
+def _native_input_modalities(items: object) -> tuple[str, ...] | None:
+    if not isinstance(items, (list, tuple)):
+        return None
+    result = []
+    for item in items:
+        modalities = _ir_item_input_modalities(item)
+        if modalities is None:
+            return None
+        result.extend(modalities)
+    return tuple(sorted(set(result)))
+
+
+# LLM: UserTurn 媒体是唯一新增模态事实；其余 IR 类型沿原跨模型文字可移植规则，不能把 assistant 媒体当用户输入能力。
+# 函数用途: 分类一个 IR 项，返回需要的媒体模态或 unknown。
+def _ir_item_input_modalities(item: object) -> tuple[str, ...] | None:
+    from ..backends.request_content import text_content_supported
+    from ..backends.tool_ir import (
+        AssistantTurn,
+        CompactionSummary,
+        RuntimeFactsTurn,
+        ToolResult,
+        UserTurn,
+    )
+
+    if isinstance(item, UserTurn):
+        values = tuple(_media_ref_input_modality(ref) for ref in item.media)
+        return None if any(value is None for value in values) else tuple(sorted(set(values)))
+    if isinstance(item, AssistantTurn):
+        return () if text_content_supported(item.content_blocks, allow_reasoning=False) else None
+    if isinstance(item, (list, tuple)):
+        return () if all(isinstance(result, ToolResult) for result in item) else None
+    return () if isinstance(item, (CompactionSummary, RuntimeFactsTurn, ToolResult)) else None
+
+
+# LLM: 已验证附件引用必须同时有内容哈希和明确 image/video MIME 前缀；路径和文件名不参与机器判断。
+# 函数用途: 从一条 canonical input_media 引用取得模态，格式不完整时返回 None。
+def _media_ref_input_modality(ref: object) -> str | None:
+    if not isinstance(ref, dict) or not isinstance(ref.get("sha256"), str):
+        return None
+    media_type = ref.get("media_type")
+    kind = media_type.split("/", 1)[0] if isinstance(media_type, str) else ""
+    return kind if kind in {"image", "video"} else None
 
 
 # LLM: 适配前检查原IR/历史，未知媒体不假报已量；同模型保留文字推理，跨模型须allow_reasoning=False，不阻止普通生成。

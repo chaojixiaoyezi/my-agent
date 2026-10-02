@@ -8,7 +8,9 @@ from agent_py_agent.agent.agent_core import _tool_loop_service
 from agent_py_agent.agent.agent_core.runtime import loop_support
 from agent_py_agent.agent.agent_core.tool_request_projection import (
     ToolLoopRequestInput,
+    candidate_input_modality_decision,
     compact_request_source_supported,
+    filter_model_candidates_by_input_modality,
     text_request_capacity_known,
 )
 from agent_py_agent.agent.backends.request_content import (
@@ -80,6 +82,35 @@ def test_media_or_unknown_content_is_not_text_capacity_proof(location):
     assert not text_messages_supported([{"role": "user", "content": [{"type": "tool_result", "content": [media]}]}])
 
 
+@pytest.mark.parametrize("kind,declared", [("image", ["text", "image"]), ("video", ["video"])])
+def test_structured_media_requires_and_accepts_matching_declared_modality(kind, declared):
+    ref = {"sha256": "a" * 64, "media_type": f"{kind}/test"}
+    prepared = ToolLoopRequestInput(tool_ir_history=(UserTurn("检查附件", media=(ref,)),),
+                                    provider_history_messages=())
+    decision = candidate_input_modality_decision(prepared, declared)
+    assert decision.status == "applicable"
+    assert decision.required_modalities == (kind,)
+
+
+def test_pure_text_needs_no_modality_declaration_but_missing_history_stays_unknown():
+    text = ToolLoopRequestInput(tool_ir_history=(UserTurn("纯文字"),), provider_history_messages=())
+    assert candidate_input_modality_decision(text, []).status == "applicable"
+    unknown = candidate_input_modality_decision(ToolLoopRequestInput(), ["image", "video"])
+    assert unknown.status == "unknown" and unknown.reason_code == "history_modality_unknown"
+
+
+def test_all_candidates_without_required_modality_returns_structured_retain_hint():
+    ref = {"sha256": "b" * 64, "media_type": "video/mp4"}
+    prepared = ToolLoopRequestInput(tool_ir_history=(UserTurn("检查视频", media=(ref,)),),
+                                    provider_history_messages=())
+    result = filter_model_candidates_by_input_modality(prepared, {"plain": [], "image-only": ["image"]})
+    assert result.applicable_profile_ids == ()
+    assert result.reason_code == "no_candidate_supports_input_modalities"
+    assert {row["reason_code"] for row in result.inapplicable.values()} == {
+        "candidate_input_modalities_undeclared", "candidate_input_modalities_missing",
+    }
+
+
 @pytest.mark.parametrize("force", [False, True])
 def test_native_compact_unknown_media_preserves_ir_before_summary_or_estimation(force):
     params = _params()
@@ -91,8 +122,9 @@ def test_native_compact_unknown_media_preserves_ir_before_summary_or_estimation(
     assert plan is None and params.tool_ir_history == before
 
 
-def test_child_media_keeps_inherited_model_without_extra_candidate_probe(tmp_path, monkeypatch):
-    agent, task, _ = _automatic_child(tmp_path)
+def _child_with_image(tmp_path, monkeypatch, *, input_modalities):
+    values = {"input_modalities": input_modalities} if input_modalities is not None else None
+    agent, task, key = _automatic_child(tmp_path, profile_values=values)
     source = tmp_path / "tiny.png"
     source.write_bytes(bytes.fromhex("89504e470d0a1a0a"))
     ref = import_input_media(source, input_media_root(agent))
@@ -106,14 +138,36 @@ def test_child_media_keeps_inherited_model_without_extra_candidate_probe(tmp_pat
         return params
 
     monkeypatch.setattr(loop_support, "_tool_loop_execute_params", with_media)
-    calls, _ = _install_automatic_provider(
-        monkeypatch, agent, task, material,
-        before_candidate_probe=lambda: pytest.fail("媒体未知时不应探测候选模型"),
-    )
+    calls, probes = _install_automatic_provider(monkeypatch, agent, task, material)
     result = agent.run_subagent(task.id, dry_run=False, probe=False)
+    return agent, task, key, calls, probes, result
+
+
+def test_child_image_adopts_candidate_that_declares_image(tmp_path, monkeypatch):
+    agent, task, key, calls, probes, result = _child_with_image(
+        tmp_path, monkeypatch, input_modalities=["image", "text"],
+    )
+    assert result.ok and len(calls) == 2
+    assert {wire["model"] for wire, _ in calls} == {"MiniMax-M3"}
+    assert {wire["model"] for wire in probes} == {"inherited", "MiniMax-M3"}
+    thread = agent.conversation_store.threads.require(task.agent_thread_id)
+    assert thread.model_profile_id == key
+    assert thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["status"] == "adopted"
+
+
+def test_child_image_rejects_candidate_without_modality_declaration(tmp_path, monkeypatch):
+    agent, task, _, calls, probes, result = _child_with_image(
+        tmp_path, monkeypatch, input_modalities=None,
+    )
     assert result.ok and len(calls) == 2
     assert {wire["model"] for wire, _ in calls} == {"inherited"}
+    assert {wire["model"] for wire in probes} == {"inherited"}
     thread = agent.conversation_store.threads.require(task.agent_thread_id)
+    advice = thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]
     assert thread.model_profile_id == "default"
-    assert thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["status"] == "retained"
-    assert thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["reason"] == "history_modality_unknown"
+    assert advice["status"] == "retained"
+    assert advice["reason"] == "candidate_input_modalities_undeclared"
+    assert advice["input_modality"] == {
+        "status": "inapplicable", "reason_code": "candidate_input_modalities_undeclared",
+        "required_modalities": ["image"], "declared_modalities": [], "missing_modalities": ["image"],
+    }

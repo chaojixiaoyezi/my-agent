@@ -243,7 +243,8 @@ def test_real_child_first_request_capture_matches_actual_provider_payload(tmp_pa
 
 # LLM: 候选目录、设置、父子 thread 与首轮资格走原存储；只假造服务商返回，不伪造 RUNNING/attempt/空历史或直接改有效 profile。
 # 函数用途: 构造宿主已经保存语义建议的真实 child，供自动验证/采用和失败矩阵使用。
-def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax-M3", window=1_000_000, persist_child=True, timeout_seconds=10, output_limit=4096, endpoint=""):
+def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax-M3", window=1_000_000,
+                     persist_child=True, timeout_seconds=10, output_limit=4096, profile_values=None):
     from agent_py_agent.agent.conversation.decision_policy import decision_owner_ref
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -257,8 +258,12 @@ def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax
         api_key="fake-key", stream_enabled=False, enable_tools=True, enable_subagents=True, max_subagents=10, max_tool_rounds=3,
         max_tokens=output_limit, model_context_window_tokens=200_000,
     ), tmp_path)
-    endpoint = endpoint or ("https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1")
-    key, _ = add(agent, model_backend=backend, model_name=model, api_base=endpoint, model_context_window_tokens=window)
+    profile_values = dict(profile_values or {})
+    endpoint = profile_values.pop("api_base", "") or (
+        "https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1"
+    )
+    key, _ = add(agent, model_backend=backend, model_name=model, api_base=endpoint,
+                 model_context_window_tokens=window, **profile_values)
     jev, _ = decision(agent)
     source = agent.conversation_store.threads.get_or_create({"canonical_user_id": agent.home_paths.owner_id,
                                                             "owner_id": agent.home_paths.owner_id})
@@ -398,7 +403,8 @@ def test_automatic_adoption_keeps_the_child_reasoning_level_on_the_adopted_model
     from agent_py_agent.agent.settings.reasoning_effort import set_thread_reasoning_level
 
     agent, task, key = _automatic_child(tmp_path, backend="openai_compatible", model="deepseek-v4-flash",
-                                        window=1_000_000, output_limit=65_536, endpoint="https://api.deepseek.com")
+                                        window=1_000_000, output_limit=65_536,
+                                        profile_values={"api_base": "https://api.deepseek.com"})
     set_thread_reasoning_level(agent.conversation_store, task.agent_thread_id, level)
     material = tmp_path / "material.txt"
     material.write_text("材料内容用于验证真实工具读取。", encoding="utf-8")
@@ -671,7 +677,8 @@ def test_create_jev_advice_automatically_reaches_first_business_model(tmp_path, 
 
     model = "MiniMax-M3" if effort_mode == "default" else "deepseek-v4-flash"
     options = {} if effort_mode == "default" else {
-        "backend": "openai_compatible", "model": model, "endpoint": "https://api.deepseek.com",
+        "backend": "openai_compatible", "model": model,
+        "profile_values": {"api_base": "https://api.deepseek.com"},
     }
     agent, source, key = _automatic_child(tmp_path, persist_child=False, **options)
     request = {"goal": "读取材料给出结论", "allowed_tools": ["read_file"]}

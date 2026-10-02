@@ -36,6 +36,7 @@ class SubagentFirstRequestPreparation:
     request_input: ToolLoopRequestInput | None = field(default=None, repr=False)
     prompt_request: object | None = field(default=None, repr=False)
     selection_reason: str = "request_validation_unavailable"
+    selection_details: dict = field(default_factory=dict)
     selection_checked: bool = False
     submitted: bool = False
     has_model_advice: bool = True
@@ -231,11 +232,14 @@ def mark_subagent_business_request_submitted(agent: object, params: object, *, p
                 }
             if current_advice is not None and current_advice.get("status") == "pending":
                 preparation = first_request_preparation(agent, params)
-                metadata[SUBAGENT_MODEL_ADVICE_KEY] = {
+                retained = {
                     **current_advice, "status": "retained",
                     "reason": (preparation.selection_reason if preparation is not None else
                                "request_validation_unavailable" if current_marker is not None else "first_request_unproven"),
                 }
+                if preparation is not None and preparation.selection_details:
+                    retained["input_modality"] = deepcopy(preparation.selection_details)
+                metadata[SUBAGENT_MODEL_ADVICE_KEY] = retained
             return replace(latest, metadata=metadata) if metadata != latest.metadata else latest
 
         store.threads.update_atomic(thread_id, update)
@@ -294,6 +298,7 @@ def select_first_request_model(agent: object, params: object, prompt: str) -> tu
         raise
     except _CandidateUnavailable as exc:
         preparation.selection_reason = exc.reason
+        preparation.selection_details = exc.details
         return params, prompt
     except ToolProtocolSelectionError:
         preparation.selection_reason = "provider_tool_support_unknown"
@@ -333,14 +338,52 @@ class _CandidateRequest:
     deadline: float
 
 
+# LLM: 候选依赖和绝对期限必须成对传入同一个有界探针，收成值对象避免继续扩张首请求验证函数参数。
+# 类用途: 保存一次候选探针的运行边界，不承担采用或持久化。
+@dataclass(frozen=True)
+class _CandidateProbe:
+    dependencies: object = field(repr=False)
+    params: object = field(repr=False)
+    deadline: float
+
+
+# LLM: 完整投影只在候选依赖作用域内使用；载体不落盘，也不把协议或模态判定当成采用授权。
+# 类用途: 把候选 payload 构造所需的同源对象交给容量检查，避免长返回元组。
+@dataclass(frozen=True)
+class _CandidateProjection:
+    params: object = field(repr=False)
+    request_input: ToolLoopRequestInput = field(repr=False)
+    projected: object = field(repr=False)
+    tools: object = field(repr=False)
+    protocol: object = field(repr=False)
+    modality: object = field(repr=False)
+
+
 # LLM: 仅传递宿主客观验证原因，不承载原响应/连接/授权；外层将其落为 retained，不能从异常正文决定权限。
 # 类用途: 区分完整输入未知与容量超限，让保留结果可以核对。
 class _CandidateUnavailable(ValueError):
     # LLM: 原因必须由本模块固定调用点给出，不保存 provider 原文。
     # 函数用途: 保存不包含秘密的客观缺口代码。
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, details: dict | None = None):
         self.reason = reason
+        self.details = deepcopy(details or {})
         super().__init__(reason)
+
+
+# LLM: 建议只接受同代目录记录；缺失或变化都要先写固定保留原因，不能进入候选依赖或探针。
+# 函数用途: 从待采用建议恢复并复核候选模型代次。
+def _candidate_generation(agent: object, preparation: SubagentFirstRequestPreparation, advice: dict) -> object | None:
+    from ...settings.model_profiles import model_profile_generation
+    from ...settings.model_provider_schema import ModelProfileGeneration
+
+    if advice.get("source_model_generation") is None:
+        preparation.selection_reason = "model_catalog_generation_unknown"
+        return None
+    generation = ModelProfileGeneration.from_dict(advice["source_model_generation"])
+    if generation.profile_id != advice.get("profile_id") or model_profile_generation(agent, generation.profile_id) != generation:
+        preparation.selection_reason = "model_catalog_changed"
+        return None
+    return generation
 
 
 # LLM: 验证顺序固定为版本→原配置→原依赖→候选真实探针→同源 payload；没有版本/完整窗口/出站上限则自动保留，不使用父快照。
@@ -350,8 +393,7 @@ def _prepare_candidate(agent: object, params: object, preparation: SubagentFirst
 
     from ...backends.bounded_call import call_with_deadline
     from ...settings.decision_settings import execute_decision_settings_operation
-    from ...settings.model_profiles import model_profile_generation, selected_model_config
-    from ...settings.model_provider_schema import ModelProfileGeneration
+    from ...settings.model_profiles import selected_model_config
     from ...settings.model_scope import prepare_model_dependencies
     from ...settings.services.runtime_config_task import project_task_runtime_config_overlay
     from ..orchestration.decision_subagent import SubagentModelInput, _child_fingerprint
@@ -365,12 +407,8 @@ def _prepare_candidate(agent: object, params: object, preparation: SubagentFirst
             or thread.model_selection_source != "inherited" or thread.model_selection_last_explicit_revision):
         preparation.selection_reason = "first_request_unproven"
         return None
-    if advice.get("source_model_generation") is None:
-        preparation.selection_reason = "model_catalog_generation_unknown"
-        return None
-    generation = ModelProfileGeneration.from_dict(advice["source_model_generation"])
-    if generation.profile_id != advice.get("profile_id") or model_profile_generation(agent, generation.profile_id) != generation:
-        preparation.selection_reason = "model_catalog_changed"
+    generation = _candidate_generation(agent, preparation, advice)
+    if generation is None:
         return None
     settings = execute_decision_settings_operation(agent, "read", {}, thread_id=advice["source_thread_id"], blocking=False)
     if not _advice_settings_current(agent, thread, advice, settings):
@@ -386,8 +424,9 @@ def _prepare_candidate(agent: object, params: object, preparation: SubagentFirst
     with manager.creation_guard():
         _require_current_attempt(manager, params, preparation.run_id)
     # 原有界 worker 只处理纯依赖和原探针，返回后仍在宿主执行 CAS；超时 worker 不能晚提交。
+    probe = _CandidateProbe(dependencies, params, deadline)
     candidate_params, request_input, validation = call_with_deadline(
-        lambda: _candidate_request_input(agent, params, preparation, dependencies, deadline),
+        lambda: _candidate_request_input(agent, preparation, probe),
         deadline=deadline, resource_key=("subagent_model_probe", advice["source_owner_ref"], generation.profile_id,
                                          generation.catalog_generation, generation.shared_generation), optional=True,
     )
@@ -395,53 +434,73 @@ def _prepare_candidate(agent: object, params: object, preparation: SubagentFirst
                              dependencies, candidate_params, request_input, validation, deadline)
 
 
-# LLM: 同一child冻结输入先核对跨模型内容可移植性，未知媒体/签名不探测或采用；probe有界，payload共用实际builder。
-# 函数用途: 在候选依赖中核对 native 工具支持及输入加真实输出上限，返回后续工具轮将直接使用的完整参数。
-def _candidate_request_input(agent: object, params: object, preparation: SubagentFirstRequestPreparation,
-                             dependencies: object, deadline: float) -> tuple[object, ToolLoopRequestInput, dict]:
-    import time
-
-    from ...backends.base import ProviderRequestOptions
-    from ...backends.request_content import text_messages_supported
-    from ...backends.request_scope import provider_request_budget
-    from ...memory_archive import estimate_tokens
+# LLM: 同一 child 冻结输入先核对跨模型内容可移植性；原 builder、协议和模态判定必须在候选依赖作用域内同源准备。
+# 函数用途: 构造候选完整请求投影并保留模态回执，未知媒体、签名或请求面直接拒绝。
+def _candidate_projection(agent: object, preparation: SubagentFirstRequestPreparation,
+                          probe: _CandidateProbe) -> _CandidateProjection:
     from ...model_guidance import provider_system_instruction
-    from ...settings.model_scope import model_dependencies_scope
-    from ...settings.reasoning_effort import request_reasoning_options
-    from ..model.context_pressure import preflight_context_pressure_response
     from ..native_tool_protocol import (
         model_turn_tool_choice,
         resolve_native_tools,
         select_tool_protocol,
     )
-    from ..tool_model_generation import ModelGenerateParams
-    from ..tool_request_projection import project_tool_loop_request, text_request_capacity_known
+    from ..tool_request_projection import (
+        candidate_input_modality_decision,
+        project_tool_loop_request,
+    )
 
-    if not text_request_capacity_known(preparation.request_input, allow_reasoning=False):
-        raise _CandidateUnavailable("history_modality_unknown")
-    with model_dependencies_scope(agent, dependencies), provider_request_budget(deadline - time.monotonic()):
-        protocol = select_tool_protocol(agent, run_id=params.run_id)
-        candidate_params = replace(params, tool_protocol_snapshot=protocol)
-        prompt_input = agent.prompts.prepare_render_input(preparation.prompt_request)
-        tools = resolve_native_tools(agent, candidate_params)
-        request_input = replace(preparation.request_input, prompt_input=prompt_input,
-                                tool_protocol_snapshot=protocol, native_tools=tuple(tools or ()),
-                                tool_choice=model_turn_tool_choice(candidate_params, tools),
-                                system_instruction=provider_system_instruction(agent.backend))
-        projected = project_tool_loop_request(request_input)
-        projector = getattr(agent.backend, "project_generate_payload", None)
-        if projected.status != "ready" or not callable(projector):
-            raise _CandidateUnavailable("provider_request_surface_unknown")
-        if not text_messages_supported(projected.messages or (), allow_reasoning=False):
-            raise _CandidateUnavailable("history_modality_unknown")
+    dependencies, params = probe.dependencies, probe.params
+    modality = candidate_input_modality_decision(
+        preparation.request_input, dependencies.config.model_input_modalities,
+    )
+    if modality.status != "applicable":
+        raise _CandidateUnavailable(modality.reason_code, modality.as_dict())
+    protocol = select_tool_protocol(agent, run_id=params.run_id)
+    candidate_params = replace(params, tool_protocol_snapshot=protocol)
+    prompt_input = agent.prompts.prepare_render_input(preparation.prompt_request)
+    tools = resolve_native_tools(agent, candidate_params)
+    request_input = replace(preparation.request_input, prompt_input=prompt_input,
+                            tool_protocol_snapshot=protocol, native_tools=tuple(tools or ()),
+                            tool_choice=model_turn_tool_choice(candidate_params, tools),
+                            system_instruction=provider_system_instruction(agent.backend))
+    projected = project_tool_loop_request(request_input)
+    if projected.status != "ready" or not callable(getattr(agent.backend, "project_generate_payload", None)):
+        raise _CandidateUnavailable("provider_request_surface_unknown")
+    projected_modality = candidate_input_modality_decision(
+        replace(request_input, tool_ir_history=(), provider_history_messages=tuple(projected.messages or ())),
+        dependencies.config.model_input_modalities,
+    )
+    if projected_modality.status != "applicable":
+        raise _CandidateUnavailable(projected_modality.reason_code, projected_modality.as_dict())
+    return _CandidateProjection(candidate_params, request_input, projected, tools, protocol, projected_modality)
+
+
+# LLM: 候选探针有界，payload 共用实际 builder；容量与原 Compact 预检仍消费同一完整投影，不另算媒体字节。
+# 函数用途: 在候选依赖中核对 native 工具支持及输入加真实输出上限，返回后续工具轮直接使用的完整参数。
+def _candidate_request_input(agent: object, preparation: SubagentFirstRequestPreparation,
+                             probe: _CandidateProbe) -> tuple[object, ToolLoopRequestInput, dict]:
+    import time
+
+    from ...backends.base import ProviderRequestOptions
+    from ...backends.request_scope import provider_request_budget
+    from ...memory_archive import estimate_tokens
+    from ...settings.model_scope import model_dependencies_scope
+    from ...settings.reasoning_effort import request_reasoning_options
+    from ..model.context_pressure import preflight_context_pressure_response
+    from ..tool_model_generation import ModelGenerateParams
+
+    dependencies, params = probe.dependencies, probe.params
+    with model_dependencies_scope(agent, dependencies), provider_request_budget(probe.deadline - time.monotonic()):
+        candidate = _candidate_projection(agent, preparation, probe)
         # 和真实生成包装一样，原工具参数决定 choice/thinking，智能程度与真实发送同一函数计算；
         # 筛选后空 schema 不代表原参数缺失。
-        forced = tools is not None and projected.tool_choice.mode != "auto"
-        thinking_disabled, effort = request_reasoning_options(agent, candidate_params, agent.backend, forced=forced)
-        payload = projector(projected.provider_prompt, tools=tools,
-                            tool_choice=projected.tool_choice if tools is not None else None,
-                            messages=projected.messages, request_options=ProviderRequestOptions(
-                                system_instruction=projected.system_instruction,
+        forced = candidate.tools is not None and candidate.projected.tool_choice.mode != "auto"
+        thinking_disabled, effort = request_reasoning_options(agent, candidate.params, agent.backend, forced=forced)
+        payload = agent.backend.project_generate_payload(
+            candidate.projected.provider_prompt, tools=candidate.tools,
+            tool_choice=candidate.projected.tool_choice if candidate.tools is not None else None,
+            messages=candidate.projected.messages, request_options=ProviderRequestOptions(
+                                system_instruction=candidate.projected.system_instruction,
                                 thinking_disabled=thinking_disabled, reasoning_effort=effort,
                             ))
         config = dependencies.config
@@ -454,11 +513,13 @@ def _candidate_request_input(agent: object, params: object, preparation: Subagen
             raise _CandidateUnavailable("request_capacity_unknown")
         if estimated + cap >= window:
             raise _CandidateUnavailable("request_capacity_exceeded")
-        if preflight_context_pressure_response(ModelGenerateParams(agent, candidate_params, projected.prompt, params.tool_rounds)):
+        if preflight_context_pressure_response(ModelGenerateParams(agent, candidate.params, candidate.projected.prompt,
+                                                                   params.tool_rounds)):
             raise _CandidateUnavailable("original_context_preflight_rejected")
-        return candidate_params, request_input, {
+        return candidate.params, candidate.request_input, {
             "input_tokens_estimate": estimated, "output_cap_tokens": cap, "context_window_tokens": window,
-            "provider_tool_support": protocol.capability.evidence,
+            "provider_tool_support": candidate.protocol.capability.evidence,
+            "input_modality": candidate.modality.as_dict(),
         }
 
 

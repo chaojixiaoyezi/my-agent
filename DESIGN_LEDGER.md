@@ -371,6 +371,25 @@
 - **本地证据**：四文件定向 208 项通过；三个独立变异分别产生 1/4/1 个预期失败，原字节恢复后 208 项再通过。
   真实 Jev/模型采用与交付质量未验证，由 be 在 3a 集成后复测；命令及门禁结果见 [TESTS](TESTS.md)。
 
+## J11 按结构化输入模态选模型（2026-10-02，sol56，分支 `worker/sol56-j11-modality`，本地已实现、待集成）
+
+- **事实来源**：主会话只读 Gateway 已校验的 `request.input_media`；真实请求捕获后只读 canonical
+  `UserTurn.media` 和 provider 顶层 user `local_file` image/video 块。模型能力只读档案
+  `input_modalities`。不读取普通正文，不按文件名、扩展名、模型名或模型自述猜模态。
+- **共享判定**：`tool_request_projection.py` 新增候选适用性和候选集过滤值对象/纯函数。纯文本兼容未声明档案；
+  image/video 必须显式声明，未声明与声明缺失分别返回 `candidate_input_modalities_undeclared` /
+  `candidate_input_modalities_missing`；冻结历史缺失、未知内容块或不可迁移 reasoning 保持
+  `history_modality_unknown`。
+- **两条采用链**：Gateway 在向 Decision 暴露候选前过滤，并在完整候选投影中复核；子代理首轮在原目录代次、设置、
+  task/权限/attempt 和 child thread CAS 之外复用同一判定。所有候选都不满足时保留原模型，记录
+  `no_candidate_supports_input_modalities` 与逐候选结构化原因，不调用 Decision 或候选探针。
+- **事务边界**：没有新增授权、第二份选模状态或媒体正文落盘；媒体支持不放宽跨模型 reasoning 限制，附件字节数不充当
+  视觉 token/窗口证明。显式选中的不兼容模型仍由真实服务拒绝。
+- **验证**：TDD 先得到 4 个预期行为失败；最终五个直接相关测试文件 205 项通过，尺寸拆分涉及的插件控制测试 18 项通过；
+  三个变异分别杀死共享支持、child 拒绝和 Gateway 全不满足保留分支，测试均变红后恢复；`size_diff.sh` 新增告警 0、消失 8。
+  guards9 168 项、导入边界 0、Ruff、文档同步、strict code-size、diff 与 clean package 全部通过，完整命令见 TESTS。
+  真实 Gateway/TUI/收费模型和真实带图自动换模未验证。
+
 ## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已实现，待集成）
 
 - **背景**：P10 定案“常数留在读取点、目录只是投影”后，待整改白名单按模块分批清理。本批接第一批之后，

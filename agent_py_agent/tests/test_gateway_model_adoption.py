@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import pytest
 
 from agent_py_agent.agent import gateway_model_adoption as model_adoption
 from agent_py_agent.agent.agent_core.model.call_runtime import model_call_summary
 from agent_py_agent.agent.backends import gateway_helpers, http
+from agent_py_agent.agent.conversation.input_media import import_input_media, input_media_root
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.request_binding import MODEL_OBSERVATION_KEY
 from agent_py_agent.agent.model_request_selection import _HOST
@@ -24,22 +25,50 @@ from agent_py_agent.tests.test_gateway_model_observation import (
 from agent_py_agent.tests.test_model_profiles import add
 
 
-# LLM: 设置/线程选择/请求准备均使用原服务；仅测试部署控制上下文和工具轮上限，未伪造资格或 run 身份。
-# 函数用途: 准备 250K 原模型与 1M 候选，并为发送前故障矩阵提供同一个真实入口。
-def actual_request(tmp_path, *, mode="apply", tools=False, window=1_000_000, original_window=250_000, candidate_backend="anthropic_compatible"):
-    fixture = prepared(tmp_path, mode=mode)
-    fixture.agent.config.enable_tools = tools
+# LLM: 测试配置只是夹具输入，收成值对象避免每增加一个候选声明就扩张公共测试入口参数。
+# 类用途: 保存 Gateway 自动采用夹具的模型与工具配置。
+@dataclass(frozen=True)
+class _ActualRequestOptions:
+    tools: bool = False
+    window: int = 1_000_000
+    original_window: int = 250_000
+    candidate_backend: str = "anthropic_compatible"
+
+
+# LLM: 原线程选择和设置仍走正式服务；本函数只把同一组测试选项应用到已创建的观察夹具。
+# 函数用途: 为普通与多模态用例共用 Gateway 自动采用夹具的后半段配置。
+def _configure_actual_request(fixture, options: _ActualRequestOptions):
+    fixture.agent.config.enable_tools = options.tools
     fixture.agent.config.stream_enabled = False
     fixture.agent.config.max_tool_rounds = 3
     fixture.agent.config.max_tokens = 4096
-    original, _ = add(fixture.agent, model_name="original-model", model_context_window_tokens=original_window)
+    original, _ = add(fixture.agent, model_name="original-model",
+                      model_context_window_tokens=options.original_window)
     model_profiles.execute_model_profile_operation(fixture.agent, "select", {"profile_id": original}, thread_id=fixture.thread_id)
     fixture.original = original
-    if window != 1_000_000 or candidate_backend != "anthropic_compatible":
-        fixture.candidate, _ = add(fixture.agent, model_name="candidate-large", model_context_window_tokens=window,
-                                   model_backend=candidate_backend)
+    if options.window != 1_000_000 or options.candidate_backend != "anthropic_compatible":
+        fixture.candidate, _ = add(fixture.agent, model_name="candidate-large",
+                                   model_context_window_tokens=options.window,
+                                   model_backend=options.candidate_backend)
     patch(fixture.agent, {"timeout_seconds": 30, "stage_timeout_seconds": 30})
     return fixture
+
+
+# LLM: 设置/线程选择/请求准备均使用原服务；仅测试部署控制上下文和工具轮上限，未伪造资格或 run 身份。
+# 函数用途: 准备 250K 原模型与 1M 候选，并为发送前故障矩阵提供同一个真实入口。
+def actual_request(tmp_path, *, mode="apply", tools=False, window=1_000_000, original_window=250_000,
+                   candidate_backend="anthropic_compatible"):
+    return _configure_actual_request(prepared(tmp_path, mode=mode), _ActualRequestOptions(
+        tools, window, original_window, candidate_backend,
+    ))
+
+
+# LLM: 多模态用例只改变候选档案声明，其余线程、设置、容量和发送入口与普通夹具逐项相同。
+# 函数用途: 准备带 input_modalities 声明的真实 Gateway 自动采用夹具。
+def _multimodal_actual_request(tmp_path, input_modalities):
+    return _configure_actual_request(
+        prepared(tmp_path, mode="apply", candidate_input_modalities=input_modalities), _ActualRequestOptions(),
+    )
 
 
 # LLM: 原 adapters/probe/post_json 调用形状保持；只替换网络端，业务 payload 必须在原投影与最终门之间完全相同。
@@ -85,6 +114,14 @@ def fake_http(monkeypatch, fixture, *, before_probe=None, on_business=None, use_
     return business, probes
 
 
+def attach_image(fixture, tmp_path):
+    source = tmp_path / "gateway-image.png"
+    source.write_bytes(bytes.fromhex("89504e470d0a1a0a"))
+    ref = import_input_media(source, input_media_root(fixture.agent))
+    fixture.context.request["input_media"] = [ref]
+    fixture.context.request_path.write_text(json.dumps(fixture.context.request), encoding="utf-8")
+
+
 @pytest.mark.parametrize("tools", [False, True])
 def test_actual_gateway_adopts_only_after_full_payload_and_persists_intent(tmp_path, monkeypatch, tools):
     fixture = actual_request(tmp_path, tools=tools)
@@ -128,6 +165,38 @@ def test_gateway_adoption_preserves_extended_level_and_actual_effort(tmp_path, m
     wire, thread = business[0]
     assert wire["model"] == "candidate-large" and wire["reasoning_effort"] == sent
     assert thread.model_profile_id == fixture.candidate and thread.reasoning_effort == level
+
+
+def test_gateway_image_only_offers_and_adopts_declared_image_candidate(tmp_path, monkeypatch):
+    fixture = _multimodal_actual_request(tmp_path, ["image", "text"])
+    attach_image(fixture, tmp_path)
+    decision = install_backend(monkeypatch, fixture)
+    business, _ = fake_http(monkeypatch, fixture)
+    result = request_execution._run_gateway_ask(fixture.context)
+    assert result.response == "资料整理完成。"
+    assert len(decision.calls) == 1
+    assert [row[0]["model"] for row in business] == ["candidate-large"]
+    criteria = decision.calls[0][0].payload("jev-test")["questions"]["model"]["criteria"]
+    assert fixture.candidate in criteria
+    assert criteria[fixture.candidate]["input_modalities"] == ["image", "text"]
+    assert fixture.original not in criteria
+
+
+def test_gateway_image_with_no_compatible_candidate_keeps_original_with_hint(tmp_path, monkeypatch):
+    fixture = _multimodal_actual_request(tmp_path, ["text"])
+    attach_image(fixture, tmp_path)
+    decision = install_backend(monkeypatch, fixture)
+    business, probes = fake_http(monkeypatch, fixture)
+    result = request_execution._run_gateway_ask(fixture.context)
+    assert result.response == "资料整理完成。"
+    assert decision.calls == [] and probes == []
+    assert [row[0]["model"] for row in business] == ["original-model"]
+    marker = fixture.context.request[MODEL_OBSERVATION_KEY]
+    assert marker["status"] == "retained"
+    assert marker["reason"] == "no_candidate_supports_input_modalities"
+    assert marker["input_modality_filter"]["required_modalities"] == ["image"]
+    assert marker["input_modality_filter"]["applicable_profile_ids"] == []
+    assert marker["input_modality_filter"]["inapplicable"][fixture.candidate]["reason_code"] == "candidate_input_modalities_missing"
 
 
 @pytest.mark.parametrize("original_window,window", [(250_000, 1_000_000), (1_000_000, 250_000)])

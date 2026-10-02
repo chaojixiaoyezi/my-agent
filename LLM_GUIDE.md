@@ -10,6 +10,12 @@ J10（2026-10-02，sol2，本地实现、待集成）：`delivery_quality` 沿�
 去重不是工具幂等或完成状态，不持久化；observe 不追加、子代理及已收口不触发、来源/设置/期限变化丢弃。
 定向 208、guards9 168 项与三项变异有离线证据，真实 Jev/采用由 be 集成后复测，不增加完成门或强制续跑，详见 TESTS。
 
+J11（2026-10-02，sol56，本地实现、待集成/真实验收）：主会话与子代理首轮选模共用结构化输入模态判定。
+只认 Gateway `input_media`、冻结 canonical media 块与档案 `input_modalities`；不读普通正文、不从文件名或模型名猜能力。
+image/video 候选须显式声明支持；全无兼容候选保留原模型并记结构化提示；纯文本兼容旧档案，未知历史仍为
+`history_modality_unknown`。本地聚焦 205+18 项、三个变异、guards9 168 项和全部静态门禁已验，size_diff 新增 0；命令见 TESTS。
+真实 Gateway/TUI/Decision/收费模型及真实带图自动换模未验证，后续由 3a 集成后按主会话与 child 各复核一例。
+
 P12（2026-10-01，sol，本地实现、待集成/部署）：Curator 的固定引用只走原模型目录解析与后端工厂，默认空值仍沿 owner 选择。
 `memory_curator_model_profile` 是安全边界，模型 set/reset/revert 不可改；只在可信管理员用户 `/settings` 的同步作用域允许此键，
 actor 标签不是授权。失效保留原未配置失败码、退避及运行账诊断，不回退聊天凭据；旧两覆盖键不保留兼容转换。

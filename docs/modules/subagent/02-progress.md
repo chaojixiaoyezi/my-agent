@@ -1,5 +1,11 @@
 # 子代理维护状态
 
+2026-10-02（J11，分支 `worker/sol56-j11-modality`，本地已实现、待集成）：子代理首轮自动选模现在从冻结的
+`ToolLoopRequestInput` 读取 canonical `UserTurn.media` / provider `local_file` 媒体块，并与模型档案
+`input_modalities` 共用 Gateway 同一判定函数。image/video 只允许显式声明支持的候选；未声明、缺失模态和全无兼容候选都有
+固定结构化原因，全无兼容项时保留继承模型。纯文本继续兼容旧档案；历史、未知块或跨模型 reasoning 无可靠模态事实时仍为
+`history_modality_unknown`，不从任务正文、模型名、文件名或模型自述猜能力。仓库 fake/组件链与三个变异已验；真实带图 child 未验证。
+
 2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。subagents 目录 10 个文件的常数补齐上方中文说明，缺单位的按生成器后缀表改名（如 `PARENT_CHAIN_LIMIT`→`PARENT_CHAIN_COUNT`、`MAX_LESSONS_PER_RUN`→`MAX_LESSONS_PER_RUN_COUNT`），数值一律不变；待整改白名单 685→600，目录重建后 --check 一致。
 
 ## C7：子代理八档与首轮投影（2026-10-02，sol，本地已实施，待集成）
@@ -104,7 +110,7 @@ child overflow完整恢复已本地接入：原来源延迟至真实请求render
 隔离 Gateway TUI 又完成六轮普通中文派工，10 个 child 均 DONE：三候选自然建议官方 MiniMax-M3 与
 仅限 OpenCode DeepSeek 候选时的合法建议，各被宿主自动采用并完成实际工具后续轮；Jev 超时/冷却时
 自动保留官方 M2.7。两条异模成功只是各自条件的小样本，DeepSeek 不代表三候选默认偏好。
-P2-B 已于 2026-09-25 复核勾选：窗口/Compact/故障组合已由第 12、13 项验收；模态按保守规则，子任务带图片等非文本内容时不换模型（`history_modality_unknown`，媒体集成 `319004926` 带真实 child 路径反例测试）。仍未做：按 `input_modalities` 换到能看图的候选。以下为当时记录：
+P2-B 已于 2026-09-25 复核勾选：窗口/Compact/故障组合已由第 12、13 项验收。当时媒体一律保留原模型；2026-10-02 的 J11 已在本地补齐按结构化附件事实和 `input_modalities` 过滤、采用或结构化保留。真实带图 child 自动换模仍未验证。以下为当时记录：
 其中一次 `selection_changed` 的精确提交分支没有当时观测，不能补推原因；提交阶段现已按失败点记录结构化原因码
 （目录/父线程锁占用、目录代次或设置变化、task/权限变化、期限、child 线程冲突，本地分支 `claude/decision-child-commit-reasons`，待审），
 同类情况再现即可直接归因。详见

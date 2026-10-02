@@ -58,10 +58,13 @@ def _optional_admission(monkeypatch):
 
 # LLM: 原 SimpleAgent、owner 目录、线程和队列事务均真实；模型仅用 echo 与 fake Decision，不加载私有配置或网络。
 # 函数用途: 创建隔离 Gateway 请求并通过原设置服务开关观察，供身份/排队/账本验收。
-def prepared(tmp_path, *, mode="observe"):
+def prepared(tmp_path, *, mode="observe", candidate_input_modalities=None):
     agent, paths = _make_agent(tmp_path)
     agent.config.enable_tools = False
-    candidate, _ = add(agent, model_name="candidate-large", model_context_window_tokens=1_000_000)
+    candidate_values = ({"input_modalities": candidate_input_modalities}
+                        if candidate_input_modalities is not None else {})
+    candidate, _ = add(agent, model_name="candidate-large", model_context_window_tokens=1_000_000,
+                       **candidate_values)
     profile, _ = decision(agent)
     patch(agent, {"enabled": mode != "disabled", "profile_id": profile,
                   "points.model_selection.mode": "observe" if mode == "disabled" else mode})

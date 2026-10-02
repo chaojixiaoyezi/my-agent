@@ -61,7 +61,9 @@
 - `input_modalities` 校验为任意小写标识符列表（开放世界），解析器只处理认识的值，不认识的保留并忽略；决策线的用途标签平行字段按同一规则。
 - 计量缺口：三处门放开后，preflight、`_automatic_noop`、候选接受数仍按"媒体引用字节不算视觉 token"估算，会低估并依赖供应商窗口错误那条恢复路径兜底；片 B 把同一个 `input_media_token_reserve` 加进这几处估算。
 - 新近可达路径：会话没有已完成历史、只有本轮带图时，恢复宿主走 `_compact_active_source`（来源只有工具记录与 IR，UserTurn 的图原样留在候选里，不需要 A 投影）；片 A 后续补一例"新会话首条带图、工具循环越过压缩点"的回归。
-- `_prepare_native_compact_plan`、模型切换判定（`gateway_model_adoption`/`subagent.model_selection` 里的 `text_request_capacity_known`）保持严格语义不变：它们回答的是"能否换给另一个模型"，要等 `input_modalities` 落地后由决策线处理。
+- `_prepare_native_compact_plan` 继续保持 Compact 自身的严格媒体策略；2026-10-02 J11 已把模型切换判定改为共享的结构化模态规则：
+  `gateway_model_adoption` 与 `subagent.model_selection` 都从冻结 canonical media/input_media 和档案 `input_modalities`
+  判断候选是否可用，未知历史仍保留原模型。该规则不替代 Compact 的视觉摘要探针，也不把附件字节数当容量证明。
 
 ## 配置与错误码
 

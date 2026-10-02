@@ -49,7 +49,8 @@ _USAGE_TAGS_NOTE = "部分候选带用户填写的用途标签 usage_tags，可�
 _APPLY_INSTRUCTIONS = (
     "根据当前任务对已授权目录提出一项模型建议。宿主会在完整首请求准备后独立核对容量、工具和版本，"
     "只有客观验证通过才自动采用，未通过就保持原模型；因此请按任务的语义需要挑选最合适的候选，"
-    "不必因为容量或工具尚未验证而回避更合适的候选。候选的模型名和声明窗口同样只是声明，不是能力证明。"
+    "不必因为容量或工具尚未验证而回避更合适的候选。input_modalities 是按结构化附件事实预先过滤的显式能力声明；"
+    "候选的模型名和声明窗口只是声明，不是能力证明。"
     + _USAGE_TAGS_NOTE + "当前模型同样合适时选 retain_original，资料不足选 need_data。"
 )
 
@@ -59,7 +60,7 @@ _CANDIDATE_FACTS = {"capacity_status": "unknown_until_full_request_projection", 
 
 
 # LLM: 只引用原目录的当前可访问生成模型，字段白名单不含端点、凭据或价格；不探针、不迁移、不保存选择。
-#   用户填写了用途标签才带上 usage_tags，作为语义参考；它和窗口一样只是声明，不是能力或容量证明。
+#   用户填写了用途标签才带上 usage_tags，作为语义参考；input_modalities 是宿主按附件事实使用的能力声明。
 #   容量与工具支持"尚未核对"对所有候选相同，统一放在 state.candidate_facts，不逐个候选重复。
 # 函数用途: 准备本次观察的公开模型候选，窗口是配置声明，不代表完整输入能容纳。
 def _candidates(agent: object, deadline: float) -> dict:
@@ -73,9 +74,26 @@ def _candidates(agent: object, deadline: float) -> dict:
         result[row["id"]] = {
             "model_name": row["model_name"], "model_backend": row["model_backend"],
             "declared_context_window_tokens": row["model_context_window_tokens"],
+            "input_modalities": list(row.get("input_modalities") or ()),
             **({"usage_tags": list(row["usage_tags"])} if row.get("usage_tags") else {}),
         }
     return result
+
+
+# LLM: Gateway 当前附件来自入口已校验的 input_media；缺字段等于本轮无附件，坏结构保持 unknown，旧历史仍在采用时复核。
+# 函数用途: 用共享判定过滤当前请求明确不支持 image/video 的候选，不读取 prompt 或附件文件。
+def _request_modality_filter(context: object, candidates: dict) -> object:
+    from .agent_core.tool_request_projection import (
+        ToolLoopRequestInput,
+        filter_model_candidates_by_input_modality,
+    )
+    from .backends.tool_ir import UserTurn
+
+    media = context.request.get("input_media", ())
+    refs = () if media is None else tuple(media) if isinstance(media, (list, tuple)) else (media,)
+    prepared = ToolLoopRequestInput(tool_ir_history=(UserTurn("", media=refs),), provider_history_messages=())
+    declared = {profile_id: row.get("input_modalities") or () for profile_id, row in candidates.items()}
+    return filter_model_candidates_by_input_modality(prepared, declared)
 
 
 # LLM: 只截头部、不改写；截断与否写进 input_completeness，不能把截断后的材料冒充完整输入。limit<=0 表示不截断。
@@ -117,18 +135,24 @@ def _observation_input(context: object, thread: object, captured: SelectedModelR
     }
     questions = {"model": {"type": "choice", "instructions": (
         "根据当前任务对已授权目录提出一项模型建议。本次只观察，宿主保持原模型。"
-        "候选只含配置声明，不能把模型名或窗口当成能力、完整容量或授权证明；资料不足可选择 need_data。"
+        "input_modalities 已按本轮结构化附件过滤；不能把模型名或窗口当成能力、完整容量或授权证明；"
+        "资料不足可选择 need_data。"
         + _USAGE_TAGS_NOTE
     ), "criteria": {**candidates, **_RETAIN_CHOICES}}}
     return state, questions
 
 
-# LLM: 材料只由 _observation_input 与候选摘要组成；候选超出协议上限时 decision_json 抛 DecisionInputError，
+# LLM: 材料只由 _observation_input、候选摘要和无正文的模态过滤提示组成；超限时 decision_json 抛 DecisionInputError，
 #   由调用方的 counted_material 记 bad_material 后原样上抛，走原普通失败回退。
 # 函数用途: 生成一次观察的 state、题目与候选版本值。
-def _material(context: object, thread: object, captured: SelectedModelRead, candidates: dict) -> tuple[dict, dict, str]:
+def _material(context: object, thread: object, captured: SelectedModelRead, selection: tuple[dict, dict]) -> tuple[dict, dict, str]:
+    candidates, modality_filter = selection
     state, questions = _observation_input(context, thread, captured, candidates)
-    return state, questions, hashlib.sha256(decision_json(candidates)).hexdigest()
+    state["input_modality_filter"] = modality_filter
+    state["input_completeness"]["multimodal_inputs"] = "structured_current_input_only"
+    decision_json({"state": state, "questions": questions})
+    revision = hashlib.sha256(decision_json({"candidates": candidates, "input_modality_filter": modality_filter})).hexdigest()
+    return state, questions, revision
 
 
 # LLM: 只接收原 service 已验回执的单题结构，错误不会改称无需选择；输出不是后续自动采用凭据。
@@ -299,7 +323,7 @@ class GatewayModelObservation:
     #   observe 转后台（observe_nonblocking_enabled）时 decide 当场返回 deferred，标记先记 deferred；后台完成后由
     #   _complete_deferred 把建议编号补记进同一标记（facts 与候选随回调带过去，不重读材料）。
     #   apply 的问题说明告诉决策模型容量与工具由宿主核对、应按语义挑最合适候选，并同样解释用途标签；采用仍走原验证门。
-    #   到达结果计入 decision_reach_counts：阶段原因、no_candidates、材料不合格（bad_material）、提交时轮次已关（turn_closed），
+    #   到达结果计入 decision_reach_counts：阶段原因、no_candidates、模态无适用候选、材料不合格和 turn_closed，
     #   真正调用前记 called；预留标记失败（同一请求重复）不在这里，不算到达。
     # 函数用途: 建立一次原阶段并准备只读候选，超时或无候选时保留原模型。
     def _decide(self, thread: object, op: str, mode: str, facts: dict) -> dict:
@@ -318,8 +342,19 @@ class GatewayModelObservation:
         if not candidates:
             note_decision_reach(agent, "model_selection", "no_candidates")
             return {"status": "skipped", "reason": "no_candidates"}
+        modality_filter = _request_modality_filter(self.context, candidates)
+        modality_hint = modality_filter.as_dict()
+        if modality_filter.status == "unknown" or not modality_filter.applicable_profile_ids:
+            reason = modality_filter.reason_code
+            note_decision_reach(agent, "model_selection", reason)
+            return {"status": "retained", "reason": reason, "adopted": False,
+                    "input_modality_filter": modality_hint}
+        allowed = set(modality_filter.applicable_profile_ids)
+        candidates = {profile_id: row for profile_id, row in candidates.items() if profile_id in allowed}
+        generations = {profile_id: row for profile_id, row in generations.items() if profile_id in allowed}
         state, questions, revision = counted_material(
-            agent, "model_selection", lambda: _material(self.context, thread, self.captured, candidates))
+            agent, "model_selection", lambda: _material(self.context, thread, self.captured,
+                                                         (candidates, modality_hint)))
         skipped, memo = _cadence_gate(self, thread, revision)
         if skipped is not None:
             return skipped
@@ -339,7 +374,7 @@ class GatewayModelObservation:
             from .gateway_model_adoption import GatewayModelAdoption
 
             self.adoption = GatewayModelAdoption(self, thread, stage, outcome, generations[choice])
-        return {**result, "candidates_revision": revision}
+        return {**result, "candidates_revision": revision, "input_modality_filter": modality_hint}
 
     # LLM: 只在 observe 转后台后由决策执行器的 worker 线程调用：按与同步路径相同的 _observation_result 生成编号与状态，
     #   经 complete_deferred 补记进原请求；回合已结束（active-turn 事务拒绝）就放弃回写，结果仍在决策结果日志里。
