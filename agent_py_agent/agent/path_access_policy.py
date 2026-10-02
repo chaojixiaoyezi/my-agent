@@ -56,10 +56,25 @@ HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (("data", "plugins
 #   模型的文件工具和命令直接写这些目录会绕过边界键、修改账本、撤销和模型目录检查（be 复审语义记忆时发现）。读取照常，只拒写。
 #   数据根下 config/（用户配置及备份、模型目录、共享模型档案、修改账本、管理员密码）与 system/config/；每个 owner home 的 config/
 #   （capability_config.yaml）。必须与 home_layout 的 config_dir、system_config_dir 及 runtime_config_reload.default_capability_config_path
-#   一致（test_host_config_access 有守卫用例）。本模块被原样打进插件 SDK，所以写成路径片段。
+#   一致（test_host_files_access 有守卫用例）。本模块被原样打进插件 SDK，所以写成路径片段。
 # 常量用途: 列出对模型工具只读的宿主配置目录（分别相对数据根、相对 owner home）。
 HOST_CONFIG_HOME_PARTS: tuple[tuple[str, ...], ...] = (("config",), ("system", "config"))
 HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
+
+# H3 宿主运行状态（3a 2026-10-02 扩项）：owner home 里只由宿主写的权威账本，模型工具与命令只读、按路径拒写（不管存不存在）。
+#   runtime.db 是每个 owner 的权威执行账（runtime_db.schema.RUNTIME_DB_FILENAME，9b 发现隔离 Shell 能写它）；SQLite 库连
+#   -wal/-shm/-journal 伴随文件一起保护，改 -wal 一样能改到账。HOST_STATE_OWNER_PARTS 收其它宿主权威文件或目录（9b 盘点）。
+# 常量用途: 列出 owner home 里对模型工具只读的宿主运行状态文件。
+HOST_STATE_OWNER_PARTS: tuple[tuple[str, ...], ...] = ()
+HOST_STATE_OWNER_SQLITE: tuple[str, ...] = ("runtime.db",)
+SQLITE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
+
+# H3 任务内的宿主托管位置（ae 能力包块 4）：相对规范任务根的路径片段，模型工具只读。规范任务根与
+#   conversation.workspace_paths.canonical_task_root 一致：owner home 下 runs/<日期>/<键>、tasks/<日期>/<名>、audits/<编号>
+#   （守卫用例在 test_host_files_access）。data/pack_verification 是能力包核验的原件清单与核验账本。
+# 常量用途: 列出规范任务根的布局与任务里对模型工具只读的宿主托管位置。
+TASK_ROOT_LAYOUT: tuple[tuple[str, int], ...] = (("runs", 2), ("tasks", 2), ("audits", 1))
+HOST_STATE_TASK_PARTS: tuple[tuple[str, ...], ...] = (("data", "pack_verification"),)
 
 # H3 凭据（3a 定）：宿主配置里存放密钥的位置，文件工具连读也拒；命令只拒写不拒读（my-agent CLI 要读它们，已知边界）。相对数据根。
 #   用户配置的文件名由部署决定（Gateway --config），所以按“数据根 config/ 下名字里有 yaml/yml 段的文件”认，备份
@@ -156,7 +171,7 @@ class PathAccessPolicy:
 
     # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；模式放行后再拒宿主凭据
     #   （PATH_HOST_CREDENTIAL_BLOCKED，H3），所以原有拒绝码不变。只读构造时冻结的根，不受另一个会话或子进程环境影响。
-    #   这是读写共用的裁决；写还要再过 check_write / host_config_write_decision。
+    #   这是读写共用的裁决；写还要再过 check_write / host_write_decision。
     # 函数用途: 解析目标并判断是否位于当前 owner 或管理员允许访问的路径范围，不读取内容。
     def check(self, path: str | Path) -> PathAccessDecision:
         try:
@@ -177,37 +192,27 @@ class PathAccessPolicy:
             return decision
         return self._host_credential_decision(resolved)
 
-    # LLM: H3 写门：先走 check（读写共用的全部拒绝），再拒宿主配置目录。核心写边界（tooling/write_boundary）与插件写入上下文
-    #   （workspace_write_context）都调它，两边裁决保持一致；文件工具的 resolve_write_path 因要先过墙外授权根，单独调
-    #   host_config_write_decision。
+    # LLM: H3 写门：先走 check（读写共用的全部拒绝），再拒宿主配置与宿主运行状态。核心写边界（tooling/write_boundary）与插件
+    #   写入上下文（workspace_write_context）都调它，两边裁决保持一致；文件工具的 resolve_write_path 因要先过墙外授权根，单独调
+    #   host_write_decision。
     # 函数用途: 判断模型工具能否写这个路径。
     def check_write(self, path: str | Path) -> PathAccessDecision:
         decision = self.check(path)
         if not decision.allowed:
             return decision
-        return self.host_config_write_decision(path)
+        return self.host_write_decision(path)
 
-    # LLM: H3：只判宿主配置（声明见 HOST_CONFIG_HOME_PARTS / HOST_CONFIG_OWNER_PARTS），按解析后的真实路径、大小写无关地比较；
-    #   目标与配置目录里某个文件是同一个硬链接时同样拒绝。不读文件内容，硬链接比对只读目录元数据。数据根未知时放行。
-    # 函数用途: 目标落在宿主配置目录里时返回 PATH_HOST_CONFIG_WRITE_BLOCKED，提示改用 user_config / manage_models。
-    def host_config_write_decision(self, path: str | Path) -> PathAccessDecision:
+    # LLM: H3：只判宿主托管文件（配置：HOST_CONFIG_*；运行状态：HOST_STATE_*），按解析后的真实路径、大小写无关地比较，目标不存在
+    #   也判；与宿主配置或 owner 运行状态文件是同一个硬链接时同样拒绝。不读文件内容，硬链接比对只读元数据。数据根未知时放行。
+    # 函数用途: 目标是宿主配置时返回 PATH_HOST_CONFIG_WRITE_BLOCKED，是宿主运行状态时返回 PATH_HOST_STATE_WRITE_BLOCKED。
+    def host_write_decision(self, path: str | Path) -> PathAccessDecision:
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
         if self.agent_home_root is None:
             return PathAccessDecision(True)
-        root = host_config_root_for_path(resolved, self.agent_home_root) or _hardlinked_host_config(
-            resolved, self.agent_home_root)
-        if root is None:
-            return PathAccessDecision(True)
-        return PathAccessDecision(
-            False,
-            "PATH_HOST_CONFIG_WRITE_BLOCKED",
-            "宿主配置目录不对模型工具开放写入：改设置请用 user_config（参数中心，带边界检查、修改记录和撤销），"
-            f"改模型和服务商请用 manage_models；读取不受影响: target={resolved}",
-            str(root),
-        )
+        return _host_write_block(resolved, self.agent_home_root) or PathAccessDecision(True)
 
     # LLM: H3 凭据只在模式已放行之后才拒（owner 墙、危险根等原拒绝码优先）；判定见 host_credential_for_path，只做路径运算。
     # 函数用途: 目标是宿主凭据时返回 PATH_HOST_CREDENTIAL_BLOCKED，提示改用脱敏的 user_config / manage_models。
@@ -491,37 +496,94 @@ def host_credential_for_path(path: Path, agent_home_root: Path) -> Path | None:
     return None
 
 
-# LLM: H3：给命令沙箱列只读覆盖。owner_home 给出时只列这个 owner 的 config/（数据根的本来就在 owner 墙外）；为空时列数据根的
-#   config/、system/config/ 和全部已存在 owner home 的 config/。不按存在过滤：macOS 对还不存在的目录也能拒写，Linux 由挂载层
-#   只挂已存在的。只读目录元数据。
-# 函数用途: 列出要对模型命令设成只读的宿主配置目录。
-def host_config_dirs(agent_home_root: Path, owner_home: Path | None = None) -> tuple[Path, ...]:
-    if owner_home is not None:
-        return tuple(owner_home.joinpath(*parts) for parts in HOST_CONFIG_OWNER_PARTS)
-    homes = _existing_owner_homes(agent_home_root)
-    return (*(agent_home_root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS),
-            *(home.joinpath(*parts) for home in homes for parts in HOST_CONFIG_OWNER_PARTS))
+# LLM: H3 运行状态只做路径运算：owner home 里声明的宿主权威文件（含 SQLite 伴随文件，不管存不存在），或规范任务根里声明的
+#   宿主托管位置（HOST_STATE_TASK_PARTS）时返回命中的那一层，否则 None。
+# 函数用途: 判断一个已解析路径是否是宿主运行状态。
+def host_state_for_path(path: Path, agent_home_root: Path) -> Path | None:
+    home = owner_home_containing(path, agent_home_root)
+    if home is None:
+        return None
+    found = _declared_root_containing(path, home, _owner_state_parts())
+    if found is not None:
+        return found
+    task = task_root_containing(path, home)
+    return None if task is None else _declared_root_containing(path, task, HOST_STATE_TASK_PARTS)
+
+
+# LLM: 与 conversation.workspace_paths.canonical_task_root 同一布局（TASK_ROOT_LAYOUT），只做路径运算、大小写无关；
+#   路径就是任务根本身或更深时返回任务根，否则 None。
+# 函数用途: 从规范布局找出路径所在的任务根。
+def task_root_containing(path: Path, owner_home: Path) -> Path | None:
+    parts = _relative_folded(path, owner_home)
+    for name, depth in TASK_ROOT_LAYOUT:
+        if parts and parts[0] == name and len(parts) > depth:
+            return _prefix_of(path, parts, depth + 1)
+    return None
+
+
+# LLM: H3：给命令沙箱列只读覆盖。owner_home 给出时只列这个 owner 的 config/ 和运行状态文件（数据根的配置本来就在 owner 墙外）；
+#   为空时列数据根的 config/、system/config/ 和全部已存在 owner home 的。anchors（本次命令的工作目录与写根）所在任务根里的
+#   宿主托管位置也列上（别的任务不枚举）。不按存在过滤：macOS 对还不存在的路径也能拒写，Linux 由挂载层只挂已存在的。
+# 函数用途: 列出要对模型命令设成只读的宿主托管路径。
+def host_readonly_paths(agent_home_root: Path, owner_home: Path | None = None,
+                        anchors: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+    homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
+    home_parts = () if owner_home is not None else HOST_CONFIG_HOME_PARTS
+    paths = [*(agent_home_root.joinpath(*parts) for parts in home_parts),
+             *(home.joinpath(*parts) for home in homes for parts in (*HOST_CONFIG_OWNER_PARTS, *_owner_state_parts()))]
+    for anchor in anchors:
+        home = owner_home_containing(anchor, agent_home_root)
+        task = task_root_containing(anchor, home) if home is not None else None
+        paths.extend(task.joinpath(*parts) for parts in HOST_STATE_TASK_PARTS if task is not None)
+    return tuple(dict.fromkeys(paths))
+
+
+# LLM: 写门的拒绝结果只在这里拼：配置优先于运行状态，再看硬链接（按它连到的那个文件归类）。提示文字给模型下一步该用的入口。
+# 函数用途: 目标是宿主托管文件时返回拒写结果，否则 None。
+def _host_write_block(resolved: Path, agent_home_root: Path) -> PathAccessDecision | None:
+    linked = _hardlinked_host_file(resolved, agent_home_root)
+    target = linked or resolved
+    config = host_config_root_for_path(target, agent_home_root)
+    if config is not None:
+        return PathAccessDecision(
+            False, "PATH_HOST_CONFIG_WRITE_BLOCKED",
+            "宿主配置目录不对模型工具开放写入：改设置请用 user_config（参数中心，带边界检查、修改记录和撤销），"
+            f"改模型和服务商请用 manage_models；读取不受影响: target={resolved}", str(config))
+    state = host_state_for_path(target, agent_home_root)
+    if state is not None:
+        return PathAccessDecision(
+            False, "PATH_HOST_STATE_WRITE_BLOCKED",
+            "宿主运行状态（runtime.db 等权威账本、能力包核验记录）只由宿主写，模型工具不能改；任务、运行和核验状态请经对应的宿主工具"
+            f"改变，读取不受影响: target={resolved}", str(state))
+    return None
+
+
+# 函数用途: owner home 里运行状态的全部路径片段（声明的文件或目录，加每个 SQLite 库及其伴随文件）。
+def _owner_state_parts() -> tuple[tuple[str, ...], ...]:
+    sqlite = tuple((name + suffix,) for name in HOST_STATE_OWNER_SQLITE for suffix in ("", *SQLITE_SIDECAR_SUFFIXES))
+    return (*HOST_STATE_OWNER_PARTS, *sqlite)
 
 
 # LLM: H3 硬链接加固：文件工具自己建不了硬链接，但会顺着已有的硬链接写进去。只在目标是有多个链接的普通文件时才逐个比对
-#   宿主配置目录里的文件（st_dev + st_ino），平时不扫描；只读元数据，列目录出错按没命中处理。
-# 函数用途: 目标和某个宿主配置文件是同一个文件时返回那个配置目录，否则 None。
-def _hardlinked_host_config(path: Path, agent_home_root: Path) -> Path | None:
+#   宿主配置目录里的文件和各 owner 的运行状态文件（st_dev + st_ino），平时不扫描；任务里的托管位置不枚举。只读元数据，
+#   列目录出错按没命中处理。
+# 函数用途: 目标和某个宿主托管文件是同一个文件时返回那个文件，否则 None。
+def _hardlinked_host_file(path: Path, agent_home_root: Path) -> Path | None:
     try:
         info = path.stat()
     except OSError:
         return None
     if info.st_nlink < 2 or not stat.S_ISREG(info.st_mode):
         return None
-    for root in host_config_dirs(agent_home_root):
-        if any(_same_file(info, item) for item in _files_under(root)):
-            return root
-    return None
+    candidates = (item for root in host_readonly_paths(agent_home_root) for item in _files_at(root))
+    return next((item for item in candidates if item != path and _same_file(info, item)), None)
 
 
-# 函数用途: 列出目录下全部文件（含子目录）；目录不存在或读取出错时返回空元组。
-def _files_under(root: Path) -> tuple[Path, ...]:
+# 函数用途: 列出一个路径本身（是文件时）或它下面的全部文件；不存在或读取出错时返回空元组。
+def _files_at(root: Path) -> tuple[Path, ...]:
     try:
+        if root.is_file():
+            return (root,)
         return tuple(item for item in root.rglob("*") if item.is_file())
     except OSError:
         return ()
@@ -672,6 +734,9 @@ __all__ = [
     "HOST_CREDENTIAL_HOME_PARTS",
     "HOST_MANAGED_OWNER_STORE_PARTS",
     "HOST_SECRET_DIR_NAME",
+    "HOST_STATE_OWNER_PARTS",
+    "HOST_STATE_OWNER_SQLITE",
+    "HOST_STATE_TASK_PARTS",
     "PATH_ACCESS_MODE_FULL",
     "PATH_ACCESS_MODE_NORMAL",
     "PATH_SCOPE_FULL",
@@ -680,16 +745,20 @@ __all__ = [
     "UNINHERITABLE_ROOT_DIRS",
     "PathAccessDecision",
     "PathAccessPolicy",
+    "SQLITE_SIDECAR_SUFFIXES",
+    "TASK_ROOT_LAYOUT",
     "agent_home_root_for_owner",
     "effective_owner_scope_root",
     "granted_external_work_roots",
-    "host_config_dirs",
     "host_config_root_for_path",
     "host_credential_for_path",
+    "host_readonly_paths",
+    "host_state_for_path",
     "host_managed_store_dirs",
     "host_managed_store_for_path",
     "inheritable_declared_work_roots",
     "normalize_path_access_mode",
     "owner_home_containing",
     "path_scope_regime",
+    "task_root_containing",
 ]

@@ -107,9 +107,10 @@ _READ_FILE_EXAMPLES = [
 ]
 
 
-# LLM: 写工具把它统一转成 WRITE_FORBIDDEN；只有 access_code 非空（目前仅 H3 宿主配置拒写 PATH_HOST_CONFIG_WRITE_BLOCKED）时改报
-#   这个码，让模型和宿主都能按结构化码区分。access_code 只由 resolve_write_path 从 PathAccessDecision.code 写入。
-# 类用途: 表示写目标不在本次结构化写入范围内，或落在宿主配置目录里。
+# LLM: 写工具把它统一转成 WRITE_FORBIDDEN；只有 access_code 非空（目前仅 H3 宿主托管文件拒写：PATH_HOST_CONFIG_WRITE_BLOCKED、
+#   PATH_HOST_STATE_WRITE_BLOCKED）时改报这个码，让模型和宿主都能按结构化码区分。access_code 只由 resolve_write_path 从
+#   PathAccessDecision.code 写入。
+# 类用途: 表示写目标不在本次结构化写入范围内，或是宿主托管文件。
 class WriteScopeError(ValueError):
     """A mutating file target is outside this invocation's structured write roots."""
 
@@ -267,9 +268,9 @@ class FileSystemTool(BaseTool):
 
     # LLM: owner-scoped 的写操作只能落在当前结构化 workspace_roots；registry 会把
     #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。
-    #   H3：任何模式下宿主配置目录都拒写（PATH_HOST_CONFIG_WRITE_BLOCKED 随 WriteScopeError.access_code 上报），在墙外授权
-    #   复核之后、工作区范围之前判定，所以 Full Access 管理员与声明了自家根的隔离 owner 同样被拒。
-    # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd，也防止直接改宿主配置。
+    #   H3：任何模式下宿主托管文件（配置、运行状态）都拒写（拒写码随 WriteScopeError.access_code 上报），在墙外授权复核之后、
+    #   工作区范围之前判定，所以 Full Access 管理员与声明了自家根的隔离 owner 同样被拒。
+    # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd，也防止直接改宿主配置和宿主账本。
     def resolve_write_path(self, raw_path: str | Path) -> Path:
         """解析写路径，并在多用户模式下强制命中本轮已授权工作区。"""
         try:
@@ -285,9 +286,9 @@ class FileSystemTool(BaseTool):
             raise WriteScopeError(
                 f"{exc} 可用的写入位置: {'、'.join(str(p) for p in allowed) or '（无）'}"
             ) from exc
-        config_decision = self.path_access_policy.host_config_write_decision(candidate)
-        if not config_decision.allowed:
-            raise WriteScopeError(config_decision.message, config_decision.code)
+        host_decision = self.path_access_policy.host_write_decision(candidate)
+        if not host_decision.allowed:
+            raise WriteScopeError(host_decision.message, host_decision.code)
         if self.path_access_policy.owner_scope_root is None:
             return candidate
         if any(_path_is_under(candidate, root) for root in self.workspace_roots):

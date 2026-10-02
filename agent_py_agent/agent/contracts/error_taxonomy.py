@@ -169,7 +169,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recovery_hint="目标在宿主托管存储（插件安装库、包库）里，模型工具不能直接读写；能力包内容只经宿主的能力工具读取，"
         "停用或换代后的旧内容不能再用。",
     ),
-    # H3：宿主配置只读、凭据不可读（path_access_policy 的 HOST_CONFIG_* / HOST_CREDENTIAL_* 声明）。
+    # H3：宿主配置与宿主运行状态只读、凭据不可读（path_access_policy 的 HOST_CONFIG_* / HOST_STATE_* / HOST_CREDENTIAL_* 声明）。
     "PATH_HOST_CONFIG_WRITE_BLOCKED": ErrorContract(
         code="PATH_HOST_CONFIG_WRITE_BLOCKED",
         category="permission",
@@ -177,6 +177,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="宿主配置目录对模型工具只读：改设置用 user_config（参数中心，带边界检查、修改记录和撤销），"
         "改模型和服务商用 manage_models；不要换别的工具或命令去写这些文件。",
+    ),
+    "PATH_HOST_STATE_WRITE_BLOCKED": ErrorContract(
+        code="PATH_HOST_STATE_WRITE_BLOCKED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标是宿主运行状态（runtime.db 等权威账本、能力包核验记录），只由宿主写；任务、运行和核验状态请经对应的"
+        "宿主工具改变，不要换别的工具或命令去写。",
     ),
     "PATH_HOST_CREDENTIAL_BLOCKED": ErrorContract(
         code="PATH_HOST_CREDENTIAL_BLOCKED",

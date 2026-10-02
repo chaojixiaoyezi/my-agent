@@ -89,6 +89,30 @@
 - **变异**：8 个全部抓到（新阈值改 2、从不降阈值、取最早而不是最近一次推进、任何补跑警告都算、不看状态取第一条、窗口仍按 2 取、警告码去掉 `:transient`、写记录不用共用的警告码函数）。
 - **门禁**：相关测试 74 个文件（所有涉及 curator 的测试、常数目录、全仓扫描守卫与 test_packaging）1412 项全过；严格门禁见交付消息。
 
+## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`）
+
+- **新增 `test_host_files_access.py`**（22 项，真实沙箱用例按平台跳过，macOS 本机、Linux 在 Docker 车道跑）：
+  - 路径策略（full 和 normal 各一遍）：
+    - 宿主配置：数据根 `config/`（含目录本身、还不存在的文件）、`system/config/`、本机主用户、飞书用户、还没有 `config/` 的用户，写入都拒 `PATH_HOST_CONFIG_WRITE_BLOCKED`，提示含 `user_config` 与 `manage_models`，读照常；工作区里同名的 `config/`、前缀相同的目录照常可写。
+    - 宿主运行状态：`runtime.db` 及三个伴随文件（不存在的也拒）、别的 owner 的库、`runs`/`tasks`/`audits` 三种任务根的 `data/pack_verification/`，写拒 `PATH_HOST_STATE_WRITE_BLOCKED`，读照常；任务里别的数据、`runtime.db.bak`、不在规范任务根下的同名目录照常可写。
+    - 宿主凭据：管理员密码、共享模型档案、模型目录（目录和里面的文件）、`desktop.yaml` 及两种备份、数据根里的 `secrets` 目录，读写都拒 `PATH_HOST_CREDENTIAL_BLOCKED`；修改账本、失败节流文件、`config/tests/` 下的 yaml、owner 配置、用户工作区里的 `secrets/` 和同名 `desktop.yaml` 照常可读。
+  - 大小写变体（`CONFIG/Desktop.YAML`、大写数据根、`Owners/Local/Main/Config`、`Runtime.DB-WAL`、`RUNS/.../Data/Pack_Verification`）都被拦。H2 的 `Data/Plugins` 也被拦。macOS 上核对确实是同一个文件。
+  - 软链接指进配置、硬链接连到配置文件或 `runtime.db` 都拒；有多个链接的普通文件照常可写。
+  - 隔离 owner：读自家配置照常，写自家配置、`runtime.db-journal`、本任务核验记录被拒；数据根配置仍是 `PATH_OWNER_SCOPE_BLOCKED`，别人的配置仍是 `PATH_CROSS_OWNER_BLOCKED`。
+  - 守卫：声明片段和 `home_paths` 的 `config_dir`/`system_config_dir`、`default_capability_config_path`、`runtime_db_path`、`model_profiles_path`、`shared_catalog_path`、`admin_password_path`、`canonical_task_root` 一致；`ensure_owner_home` 建出 `config/`。
+  - 文件工具（Full Access 注册表）：`write_file`、`edit_file`、`apply_patch` 的增、改、删，以及移动的源和目标，对配置、`runtime.db`、`runtime.db-shm`（不存在）、`runtime.db-wal`、核验记录都按各自的码被拒，文件一个字节不变、不新建；读配置和核验记录照常，读凭据被拒且输出不带内容；`search_text` 在整个数据根里搜不出凭据文件，能搜到修改账本。
+  - 隔离 owner 把自家根声明成工作根时，`write_file` 写自家配置、`runtime.db` 被拒，别处照常。
+  - 写边界 `validate_write_boundary`、插件写入上下文（含序列化往返）、插件读取上下文的裁决与上面一致。
+  - 命令：
+    - 按模式列出的只读覆盖（隔离只列自家，Full Access 列数据根和全部 owner，子代理工作目录也认出任务根）；非规范布局不加。
+    - Seatbelt 规则顺序：还不存在的受保护路径也有拒写；上级目录写拒绝覆盖到数据根、owner home 等各层，排在隐藏路径之前；断网仍在最后。
+  - 真实沙箱（macOS sandbox-exec；Linux bwrap）：
+    - Full Access：写修改账本、写 `runtime.db-wal`、写本任务 `originals.json`、删 `runtime.db` 都失败；“改名 owner home → 写配置 → 改回”失败且目录原样；macOS 上新建 `runtime.db-shm`、给还没有配置目录的用户建 `config/` 也失败；`cat desktop.yaml` 能读（已知边界）；普通写照常。
+    - 隔离 owner 把自家根声明为写根：写自家配置、`runtime.db` 失败，别处照常。
+    - 断网 + 只读覆盖 + 上级目录拒写同时生效：写配置失败；改名数据根再写失败且目录原样；普通写成功；连本机监听端口失败。
+    - 只有人格文件受保护时，改名人格根再改 `SOUL.md` 也失败。
+  - 隔离 Shell 失败时的边界事实：声明自家根为写根时，`read_only` 列出自家 `config/`、`runtime.db` 等；不列别人的；写根只是工作区时与原来完全一样。
+
 ## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`）
 
 - **`test_curator_thread_model_routing.py` 新增 6 项**（共 21 项）：

@@ -57,17 +57,34 @@
   - 确定性失败（坏 JSON）的补跑警告不带 `:transient`，不降阈值；账里看不到成功（太早）按 2 处理。
 - **验证**：见 TESTS.md 同名节。
 
-## 宿主配置目录对模型工具只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `4dd56f627`，设计待 3a 确认）
+## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `claude/3a-step17f` `a9c2b691f`，已实现，待集成）
 
-- **起因**：管理员的文件工具和命令能直接写 `~/.my-agent/config/`，绕过参数中心的 `BOUNDARY_KEYS`、修改账本和 `manage_models` 的 M1 检查。
-- **做法**：
-  - 数据根的 `config/`、`system/config/` 和每个 owner home 的 `config/`，统一声明在 `path_access_policy`；
-  - 文件工具在唯一写门 `resolve_write_path` 上拦，错误码 `PATH_HOST_CONFIG_WRITE_BLOCKED`，提示指向 `user_config`、`manage_models`；
-  - 命令类工具在 `_sandbox_exec` 里加只读覆盖（Full Access 档也生效）；
-  - 读取不拦。
-- **探针发现**：macOS 上命令可以先把上级目录改名，再写原本只读的目录。人格目录现有的只读覆盖也有这个口子。做法是在所有上级目录上加 literal 写拒绝，作为沙箱通用规则。
-- **已知边界**：Windows 命令不进沙箱；Linux 上还没建 `config/` 的休眠 owner；沙箱外早已存在的硬链接；插件沙箱关闭时的插件进程。
-- 详细设计见 [HOST_CONFIG_WRITE_GUARD](docs/design/HOST_CONFIG_WRITE_GUARD.md)。
+- **起因**：
+  - 管理员的文件工具和命令能直接写 `~/.my-agent/config/`，绕过参数中心的 `BOUNDARY_KEYS`、修改账本和 `manage_models` 的 M1 检查。
+  - 3a 扩项后并进两件：9b 发现的“隔离 Shell 能写自家 `runtime.db`”，以及 ae 能力包块 4 的核验记录。
+- **做法**：唯一声明在 `path_access_policy`（路径片段，插件 SDK 照样只依赖标准库）。
+  - 保护范围分三类：
+    - 宿主配置：数据根 `config/`、`system/config/`，各 owner 的 `config/`；
+    - 宿主运行状态：各 owner 根的 `runtime.db` 和 `-wal`/`-shm`/`-journal`，按路径拒写，不管存不存在；
+    - 规范任务根的 `data/pack_verification/`。
+  - 文件工具、写边界、插件写入上下文都走 `check_write`。拒写码是 `PATH_HOST_CONFIG_WRITE_BLOCKED` 和 `PATH_HOST_STATE_WRITE_BLOCKED`，提示指向 `user_config` / `manage_models`。
+  - 宿主凭据（管理员密码、模型目录、共享模型档案、数据根 `config/` 里的 YAML 配置及备份、owner home 之外的 `secrets` 目录）对文件工具读写都拒，码是 `PATH_HOST_CREDENTIAL_BLOCKED`。命令只拒写不拒读，因为 my-agent CLI 要读。
+  - 命令类工具在 `_sandbox_exec` 里加只读覆盖，任何模式都生效，Full Access 也是。
+  - 宿主路径判定一律大小写无关：macOS 上 `CONFIG/Desktop.YAML` 就是 `config/desktop.yaml`。H2 插件库原来也有这个口子，一并修好。
+- **沙箱通用规则**：
+  - 探针发现：macOS 上命令可以先把上级目录改名，再写原本只读的路径。人格文件、H2 隐藏路径、`runtime.db` 的覆盖都有这个口子。
+  - 修法：给所有受保护路径的上级目录加 literal 写拒绝，排在隐藏路径之前、断网之前。
+  - 还不存在的受保护路径在 macOS 上也写拒绝规则。
+- **顺带**：`restart_gateway` 任何审批模式都要确认（3a 定）。
+- **已知边界**：
+  - Windows 上命令不进沙箱；
+  - 命令能读凭据；
+  - Linux 上还不存在的路径挡不住（休眠 owner 的 `config/`，宿主没开库时的 SQLite 伴随文件）；
+  - 命令只保护本任务的核验记录；
+  - 沙箱外早已存在的硬链接；
+  - 插件沙箱关闭时的插件进程；
+  - 用户配置放在数据根以外时不受保护。
+- 详细设计见 [HOST_CONFIG_WRITE_GUARD](docs/design/HOST_CONFIG_WRITE_GUARD.md)；测试见 TESTS 同名条目。
 
 ## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，待集成）
 
@@ -3867,7 +3884,6 @@ A 样包独立修订为0.1.1，补齐镜头时长及原始输入字节摘要要�
 Compact补充片已获协作方归属确认，本地537项及独立审阅通过：原缓存前缀及工具schema保留，摘要请求沿既有ToolChoice.none禁止工具，
 失败记录仅用结构化响应形状和原因，不写正文或参数；候选6实际同会话再次Compact已生成自然摘要，旧REOPEN02机械回退原因保持未知。
 通用文件格式检查若后续做，只考虑复用原解析器的可选warning；当前未实施，不增加某个索引文件的专项合同。
-
 
 决策分支已在本地吸收 main `66a598cf3`，尚未合入 main，也未部署：
 - Compact 工具来源统一为 v3 checkpoint 加 run/attempt/turn/call 四元身份，主线三元 `tooling/call_ref.py` 已删除。

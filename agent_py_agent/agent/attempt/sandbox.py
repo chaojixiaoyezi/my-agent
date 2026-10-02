@@ -485,7 +485,7 @@ def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
 #   （mv ~/.my-agent ~/.my-agent2）、写完再改回，只读覆盖、人格文件、隐藏路径就全部落空。所以给每个受保护路径的全部上级目录
 #   （直到 /）各加一条 literal 写拒绝：只拦改名、删除、chmod、touch 上级目录本身，上级目录里的普通读写照常（本机实测
 #   mkdir -p、git、cp、tar 均正常）。只拒写，所以排在私有读规则之后、隐藏路径之前都不改变读裁决。Linux 只读挂载跟着
-#   目录项走，不需要这条。改动须同步 test_host_config_access.py 的真实 sandbox-exec 用例。
+#   目录项走，不需要这条。改动须同步 test_host_files_access.py 的真实 sandbox-exec 用例。
 # 函数用途: 生成受保护路径（只读覆盖、隐藏路径、人格根）所有上级目录的写拒绝；没有受保护路径时返回空列表。
 def _ancestor_write_denies(spec: AttemptSandboxSpec) -> list[str]:
     protected = [*spec.protected_write_paths, *spec.hidden_paths]
