@@ -20,6 +20,16 @@
 
 `gateway_parts/request_context.py::DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`（原 DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS，子代理完成回执最多展示条数）与 `owner_wake_discovery.py` 的常数改名/补中文说明；数值不变，目录投影随源码一致。
 
+## 五阶段只读插件 C14 M-B1（2026-10-01，本地候选）
+
+- `plugins/shuohao-novel-gates/declaration.json` 是五工具和动作的唯一声明；`src/server.js` 只提供 MCP stdio 与读取扩展 v1。
+- `src/workspace_read.js` 移植原 Node 路径裁决；`workspace_files.js` 对业务文件逐份裁决、no-follow 打开并复核。
+- `src/gates.js` / `cast.js` 调固定原样 ESM 导出函数，分镜不进入 logGates，不提供写工具/付费服务。
+- 安装、本人确认、启用和模型工具调用继续走宿主原安装表与 Registry；插件不能凭声明扩大权限。
+- `test_shuohao_novel_gates.py` 保留完整宿主调用测试，分层解析 output 信封/内层 JSON，环境失败不旁路；
+  `fixtures/shuohao_skills/` 仅供自检和沙箱 report 子进程验证，不进生产插件 ZIP。
+- 本片未修改 Gateway 生产模块；真实 TUI/模型调用和固定提交沙箱外宿主复验由集成者负责。
+
 ## 决策实验晋升提示 J6（2026-10-01，本地待集成）
 
 - `request_experiment_promotion.py`：原请求回执仍是唯一幂等权威，新增 promotion_id 和冻结的 evaluation.rule；只返回本次新写入的回执。

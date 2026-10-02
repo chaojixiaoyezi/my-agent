@@ -26,6 +26,11 @@ Gateway 控制通道，与 user_config action=search 的 constants 结果同数�
 - `/model` 的 IM 文本列表以及 TUI 选择/服务商管理列表展示稳定档案编号，区别于临时选择序号，不新增协议或路由。
 - 定向与守卫结果见 TESTS；真实 Gateway、终端和 IM 客户端显示未验证，由 3a 集成部署后复核，不把组件渲染当收信验收。
 
+C14 M-B1（2026-10-01，sol2，本地候选）：新增 `plugins/shuohao-novel-gates/` 五阶段只读工具，
+复用原安装/本人解释器确认/Registry/HostCommand/ToolExecutor/MCP 链，不改 Gateway 或新增授权通道。
+只从本次 `_meta` 读取上下文，门计算不写工作区；原样上游自检和来源摘要有仓库证据。
+宿主启用失败与嵌套 Seatbelt 跳过保留，固定提交待 3a 沙箱外复验；真实 TUI/模型未验证，详见 TESTS 的 M-B1 节。
+
 `/settings show` 显示参数元数据（参数中心 P8，分支 `worker/ds2-registry-metadata`，2026-10-01）：`settings_control_service._show`
 对有值的参数补四行“单位／范围／归属模块／读取方”（`_metadata_line`，没推导出就不出现），来源是 `settings/parameter_metadata.py`
 的自动推导：单位按键名后缀（_seconds/_ms/_chars/_bytes/_tokens/_percent 等，推不出留空）、范围取自现有规范化/校验规格

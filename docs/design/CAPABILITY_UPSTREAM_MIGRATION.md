@@ -1,6 +1,7 @@
 # 上游未迁内容：许可核对与迁移清单（C14）
 
-状态：许可已核对、清单已定（2026-10-01，ae），**尚未实施**。实现派给 my-agent 会话，ae 负责审查。来源分母与样包已覆盖的部分见
+状态：许可已核对、清单已定（2026-10-01，ae）；M-B1 与仓库自检（M-B3）已有本地候选（sol2），
+**待 ae 审查、3a 沙箱外复验及集成，完整验收未完成**。M-B2 与 A 各批次仍未实施。来源分母与样包已覆盖的部分见
 [来源清单](CAPABILITY_SOURCE_COVERAGE.md)；本文只回答“剩下没迁的，哪些能迁、迁成什么、哪些不迁、为什么”。
 
 用户已定的做法（10-01 做法 8）：
@@ -40,9 +41,24 @@
 
 | 编号 | 内容 | 迁成什么 | 说明 |
 | --- | --- | --- | --- |
-| M-B1 | 五个 CLI 的只读子命令：`validate`、`checkup`（含门报告）、`stats`，以及 characters 的 `validate <cast> <book>` | 一个插件 `shuohao-novel-gates`，每个阶段一个只读工具（例如 `outline_check`、`art_check`、`script_check`、`storyboard_check`、`cast_check`） | 第一批。工具声明 `requested_effect: read_only`。读工作区文件一律按宿主下发的读取上下文核对，直接复用 `plugins/hello-node/src/workspace_read.js` 的 Node 移植，并跑通原有 74+20 条一致性用例。返回门编号、通过/失败、计数等结构化结果 |
+| M-B1 | 五个 CLI 的只读子命令：`validate`、`checkup`（含门报告）、`stats`，以及 characters 的 `validate <cast> <book>` | 插件 `shuohao-novel-gates`，五只读工具 `outline_check`、`art_check`、`script_check`、`storyboard_check`、`cast_check` | 2026-10-01 本地候选已实现，待审/外部复验/集成。`read_only`、74+20 向量与结构化门回执有本地测试；完整宿主/TUI/模型验收未完成，详见下方实施记录 |
 | M-B2 | 会写文件的子命令：`chunk`、`seed`、`render`、`assemble --out`、`export`、`merge --apply`，以及 `scripts/report.mjs` | 同一个插件里的写工具 | 第二批，**前置条件**：非 Python 插件目前没有写入上下文的跨语言一致性用例（见[任意语言插件](PLUGIN_ANY_LANGUAGE.md)）。先把 `workspace_write` 检查移植到 Node，并补一致性用例；做不到就只把结果放在工具回执里返回，由模型用 `write_file` 落盘，不给插件另开写路径 |
-| M-B3 | 五个 `selftest.mjs`、`scripts/report-selftest.mjs` | 不进插件包；放进仓库测试 | 按 `test_plugin_any_language_samples.py` 的做法，本机有 node 时跑上游自检，没有就跳过 |
+| M-B3 | 五个 `selftest.mjs`、`scripts/report-selftest.mjs` | 不进插件包；放进仓库测试 | 随 M-B1 本地候选接入，六份原样自检已在真实 Node 执行；没有 node 时跳过 |
+
+M-B1 实施记录（2026-10-01，`worker/sol2-c14-mb1`）：
+- 同进程调用固定上游导出函数，不解析 CLI 文案。outline/art/script 只提供 validate/checkup；
+  storyboard 另有 stats（读取已有门日志，不是镜头数量）；characters 仅 validate 且 book 必填。
+- 所有主/参考/原文/日志/卡片由宿主逐次 `_meta` 上下文裁决，不扫描私有卡库。
+  缺依赖门 `status=skipped`、`passed=null`，不计通过数；顶层 passed 不代表 complete。
+- 不进入 storyboard main/logGates，等价于 --no-log；CLI 对照显式传 --no-log。
+  原样 NUL 与许可来源清单保持；自检/样例/report 不进生产 ZIP。
+- 本机聚焦为 29 passed、1 failed、1 skipped：宿主在确认启用处失败，report 因 Seatbelt 拒绝未启动。
+  3a 对修改前候选沙箱外复核报告为 30 passed、1 failed、0 skipped，后者是嵌套 JSON 子串断言问题；
+  本轮已改为分层 json.loads 和布尔/门计数断言，固定提交的完整宿主结果仍待 3a 复验。
+- 严格静态门禁及含 NUL 源树 clean-package 已通过；追加全仓未通过/未完成，
+  首失败是与基线相同的 archive_tokens 旧接口导入，其他失败未复核；不以局部结果宣称全仓或 §3 验收完成。
+- 真实 TUI 安装/确认/调用与一次真实模型自然调用由 3a/ae 在集成后验收；不能用组件结果关闭 §3。
+  用法与权限局限见 [插件 README](../../plugins/shuohao-novel-gates/README.md)，命令与门禁见 [TESTS](../../TESTS.md)。
 
 要守住的边界：
 - **门报告的副作用**：storyboard 的 `validate`/`checkup` 默认会在当前目录追加 `.gates.jsonl`。插件调用时必须带 `--no-log`；如果要留门日志，写到插件私有数据目录，不能写进用户工作区。

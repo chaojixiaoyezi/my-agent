@@ -1,0 +1,674 @@
+{
+  "plugin_id": "shuohao-novel-gates",
+  "version": "0.1.0",
+  "summary": "上游 shuohao-skills 五阶段只读结构校验与质量门；不写工作区、不出图",
+  "entry": {
+    "kind": "interpreter",
+    "interpreter": "node",
+    "command": "src/server.js",
+    "args": []
+  },
+  "files": [
+    {
+      "path": "declaration.json",
+      "executable": false
+    },
+    {
+      "path": "LICENSE",
+      "executable": false
+    },
+    {
+      "path": "NOTICE",
+      "executable": false
+    },
+    {
+      "path": "PROVENANCE.md",
+      "executable": false
+    },
+    {
+      "path": "UPSTREAM.json",
+      "executable": false
+    },
+    {
+      "path": "src/arguments.js",
+      "executable": false
+    },
+    {
+      "path": "src/cast.js",
+      "executable": false
+    },
+    {
+      "path": "src/errors.js",
+      "executable": false
+    },
+    {
+      "path": "src/gates.js",
+      "executable": false
+    },
+    {
+      "path": "src/server.js",
+      "executable": false
+    },
+    {
+      "path": "src/workspace_files.js",
+      "executable": false
+    },
+    {
+      "path": "src/workspace_read.js",
+      "executable": false
+    },
+    {
+      "path": "upstream/skills/novel-art/scripts/novel-art.mjs",
+      "executable": false
+    },
+    {
+      "path": "upstream/skills/novel-characters/scripts/novel-characters.mjs",
+      "executable": false
+    },
+    {
+      "path": "upstream/skills/novel-outline/scripts/novel-outline.mjs",
+      "executable": false
+    },
+    {
+      "path": "upstream/skills/novel-script/scripts/novel-script.mjs",
+      "executable": false
+    },
+    {
+      "path": "upstream/skills/novel-storyboard/scripts/novel-storyboard.mjs",
+      "executable": false
+    }
+  ],
+  "platforms": [
+    "any"
+  ],
+  "default_action": "outline_check",
+  "actions": [
+    {
+      "name": "outline_check",
+      "summary": "按宿主逐次权限只读检查改编大纲，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "文件路径，相对宿主当前工作区或绝对路径",
+          "options": [],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "operation",
+          "summary": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志",
+          "options": [
+            "--operation"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [
+            "validate",
+            "checkup"
+          ],
+          "path": false
+        },
+        {
+          "name": "stage",
+          "summary": "validate 的结构完整度，默认 full",
+          "options": [
+            "--stage"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [
+            "skeleton",
+            "beats",
+            "full"
+          ],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "outline_check",
+      "available": true
+    },
+    {
+      "name": "art_check",
+      "summary": "按宿主逐次权限只读检查美术资产，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "文件路径，相对宿主当前工作区或绝对路径",
+          "options": [],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "operation",
+          "summary": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志",
+          "options": [
+            "--operation"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [
+            "validate",
+            "checkup"
+          ],
+          "path": false
+        },
+        {
+          "name": "cast",
+          "summary": "cast 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--cast"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        }
+      ],
+      "kind": "tool",
+      "target": "art_check",
+      "available": true
+    },
+    {
+      "name": "script_check",
+      "summary": "按宿主逐次权限只读检查剧本，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "文件路径，相对宿主当前工作区或绝对路径",
+          "options": [],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "operation",
+          "summary": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志",
+          "options": [
+            "--operation"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [
+            "validate",
+            "checkup"
+          ],
+          "path": false
+        },
+        {
+          "name": "outline",
+          "summary": "outline 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--outline"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "art",
+          "summary": "art 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--art"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "cast",
+          "summary": "cast 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--cast"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        }
+      ],
+      "kind": "tool",
+      "target": "script_check",
+      "available": true
+    },
+    {
+      "name": "storyboard_check",
+      "summary": "按宿主逐次权限只读检查分镜，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。 validate/checkup 必须给 script，不写门日志；stats 仅统计已有日志。",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "文件路径，相对宿主当前工作区或绝对路径",
+          "options": [],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "operation",
+          "summary": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志",
+          "options": [
+            "--operation"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [
+            "validate",
+            "checkup",
+            "stats"
+          ],
+          "path": false
+        },
+        {
+          "name": "script",
+          "summary": "script 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--script"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "outline",
+          "summary": "outline 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--outline"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "cast",
+          "summary": "cast 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--cast"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "art",
+          "summary": "art 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--art"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "shots",
+          "summary": "可选镜头配方卡片路径列表；不带时 shot-recipe 标跳过，不扫描目录",
+          "options": [
+            "--shots"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": true,
+          "default": null,
+          "choices": [],
+          "path": true
+        }
+      ],
+      "kind": "tool",
+      "target": "storyboard_check",
+      "available": true
+    },
+    {
+      "name": "cast_check",
+      "summary": "按宿主逐次权限只读检查角色逐字引文，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "arguments": [
+        {
+          "name": "path",
+          "summary": "文件路径，相对宿主当前工作区或绝对路径",
+          "options": [],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "operation",
+          "summary": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志",
+          "options": [
+            "--operation"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [
+            "validate"
+          ],
+          "path": false
+        },
+        {
+          "name": "book",
+          "summary": "book 参考文件，逐份按本次宿主读取上下文裁决",
+          "options": [
+            "--book"
+          ],
+          "value_type": "string",
+          "required": true,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": true
+        },
+        {
+          "name": "lang",
+          "summary": "覆盖角色文档的 lang",
+          "options": [
+            "--lang"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        },
+        {
+          "name": "style",
+          "summary": "覆盖角色文档的 style",
+          "options": [
+            "--style"
+          ],
+          "value_type": "string",
+          "required": false,
+          "multiple": false,
+          "default": null,
+          "choices": [],
+          "path": false
+        }
+      ],
+      "kind": "tool",
+      "target": "cast_check",
+      "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "outline_check",
+      "description": "按宿主逐次权限只读检查改编大纲，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "文件路径，相对宿主当前工作区或绝对路径"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "checkup"
+            ],
+            "description": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "skeleton",
+              "beats",
+              "full"
+            ],
+            "description": "validate 的结构完整度，默认 full"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "art_check",
+      "description": "按宿主逐次权限只读检查美术资产，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "文件路径，相对宿主当前工作区或绝对路径"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "checkup"
+            ],
+            "description": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志"
+          },
+          "cast": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "cast 参考文件，逐份按本次宿主读取上下文裁决"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "script_check",
+      "description": "按宿主逐次权限只读检查剧本，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "文件路径，相对宿主当前工作区或绝对路径"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "checkup"
+            ],
+            "description": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志"
+          },
+          "outline": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "outline 参考文件，逐份按本次宿主读取上下文裁决"
+          },
+          "art": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "art 参考文件，逐份按本次宿主读取上下文裁决"
+          },
+          "cast": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "cast 参考文件，逐份按本次宿主读取上下文裁决"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "storyboard_check",
+      "description": "按宿主逐次权限只读检查分镜，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。 validate/checkup 必须给 script，不写门日志；stats 仅统计已有日志。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "文件路径，相对宿主当前工作区或绝对路径"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "checkup",
+              "stats"
+            ],
+            "description": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志"
+          },
+          "script": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "script 参考文件，逐份按本次宿主读取上下文裁决"
+          },
+          "outline": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "outline 参考文件，逐份按本次宿主读取上下文裁决"
+          },
+          "cast": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "cast 参考文件，逐份按本次宿主读取上下文裁决"
+          },
+          "art": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "art 参考文件，逐份按本次宿主读取上下文裁决"
+          },
+          "shots": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "文件路径，相对宿主当前工作区或绝对路径"
+            },
+            "description": "可选镜头配方卡片路径列表；不带时 shot-recipe 标跳过，不扫描目录"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "cast_check",
+      "description": "按宿主逐次权限只读检查角色逐字引文，返回结构问题与门编号/判定/计数；缺参考资料的门标跳过，不算通过。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "文件路径，相对宿主当前工作区或绝对路径"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "validate"
+            ],
+            "description": "只读操作；默认 checkup，角色仅 validate；分镜 stats 读取 path 指定的已有门日志"
+          },
+          "book": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "book 参考文件，逐份按本次宿主读取上下文裁决"
+          },
+          "lang": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "覆盖角色文档的 lang"
+          },
+          "style": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "覆盖角色文档的 style"
+          }
+        },
+        "required": [
+          "path",
+          "book"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

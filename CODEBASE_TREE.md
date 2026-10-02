@@ -1017,6 +1017,8 @@ agent_py_agent/
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查；v5 观察声明往返与非法声明
 |   |-- test_plugin_any_language.py    # v6 非 Python 插件：包描述、可复现打包、确认回执、解包准备、解释器固定与真实 MCP 启停
 |   |-- test_plugin_any_language_samples.py # 跨语言读取检查一致性用例（Python 参考 + Node 移植）与 hello-node/hello-go 宿主链路
+|   |-- test_shuohao_novel_gates.py     # C14 M-B1：五阶段真实 Node MCP、74+20 读取向量、原样许可/NUL、自检、无写入与宿主链（环境失败保留）
+|   |-- fixtures/shuohao_skills/        # 固定上游 B 的五阶段自检/样例、三张镜头卡与 report 测试闭包；不进插件 ZIP
 |   |-- test_plugin_sandbox.py         # 插件进程沙箱：开关默认值、bwrap 整根只读布局、包装与 TMPDIR、不可用拒绝、真实平台写边界
 |   |-- plugin_wheel_fixtures.py       # 合成标准 wheel 与导入陷阱，仅用于开发组件检查
 |   |-- test_plugin_wheels.py          # 固定依赖、extras、平台、摘要与归档预算检查
@@ -1142,6 +1144,23 @@ scripts/
 plugins/
 |-- sdk/pyproject.toml                  # 独立 SDK 的唯一发行版本及标准构建声明
 |-- sdk/conformance/workspace_read_check.json # 工作区读取检查的跨语言一致性用例（期望值由宿主参考实现裁决）
+|-- shuohao-novel-gates/                # C14 M-B1：v6 Node 五阶段只读结构校验与质量门；待外部复验/集成
+|   |-- README.md                      # 构建、本人确认、五工具用法、回执与未验证边界
+|   |-- declaration.json               # 安装清单、动作与五工具 schema 的同源声明
+|   |-- LICENSE                        # 上游 Apache-2.0 原文
+|   |-- NOTICE                         # 上游版权通知原文，旧样例路径不改
+|   |-- PROVENANCE.md                   # 固定来源、逐文件摘要、未暴露写入口与排除项
+|   |-- UPSTREAM.json                  # 上游路径、本仓库目标、SHA-256 与改动的机器清单
+|   |-- conformance.js                 # 仓库内读取向量验证，不进插件 ZIP
+|   |-- src/
+|   |   |-- server.js                  # 串行 MCP stdio 入口，只协商读取上下文 v1
+|   |   |-- arguments.js               # 同源 schema 参数检查，拒绝未知字段和写操作
+|   |   |-- errors.js                  # 稳定公开错误码，不回显输入、私有路径或栈
+|   |   |-- workspace_read.js          # hello-node 读取权限移植，算法保持
+|   |   |-- workspace_files.js         # 普通文件完整 UTF-8 读取、no-follow 与 dev/ino 复核
+|   |   |-- cast.js                    # 补齐角色 CLI 顶层与原文逐字核对
+|   |   `-- gates.js                   # 同进程调用导出函数；门/跳过计数与已有日志统计，不写门日志
+|   `-- upstream/skills/               # 五份固定原样 ESM CLI，characters 的 NUL 按字节保留
 |-- activity-line/                     # 自有纯展示插件：面板显示运行状态、活动与耗时，无工具、无依赖
 |   |-- README.md                      # 构建与面板用法
 |   |-- pyproject.toml                 # 插件发行身份，无运行依赖
@@ -1419,6 +1438,7 @@ docs/
 - `plugins/harness-console/`：首个界面型插件（宿主只读 API 样本），网页与桌面窗口共用一个只绑回环的服务，宿主令牌只留在插件服务端；`agent_py_agent/tests/test_harness_console_package.py` 为其实际包、假宿主 API 与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/hello-node/`、`plugins/hello-go/` 与 `scripts/build_plugin_files_package.py`：任意语言插件（包描述 v6）的两种启动机制样例及打包脚本；`plugins/sdk/conformance/workspace_read_check.json` 是非 Python 插件移植读取检查时必须跑通的一致性用例，`agent_py_agent/tests/test_plugin_any_language_samples.py` 为其组件验收。
+- `plugins/shuohao-novel-gates/`：固定 B 的五阶段只读门插件，安装/调用仍沿既有宿主链；同源声明、来源清单和字节保留由 `agent_py_agent/tests/test_shuohao_novel_gates.py` 核对。`agent_py_agent/tests/fixtures/shuohao_skills/` 只用于原样上游自检，不随插件 ZIP 分发；本机环境失败与真实入口未验证边界见 TESTS。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。

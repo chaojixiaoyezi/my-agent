@@ -5,6 +5,13 @@ P12（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，待集
 新键仅管理员用户 `/settings` 可写，TUI/IM 共用编号与型号展示。定向 235、守卫 167 项通过，三个变异拦截后恢复回归 99 项通过。
 真实模型、Gateway 重启及实际 TUI/IM 未验证。下一步由 3a 集成部署后绑定实际 deepseek-v4-flash 档案，详见 TESTS。
 
+C14 M-B1（2026-10-01，sol2，`worker/sol2-c14-mb1`，本地候选、待外部复验/集成）：五阶段只读 Node 插件已实现，
+本机聚焦 29 passed、1 failed、1 skipped，守卫 166 passed；宿主失败发生在解释器确认启用，report 沙箱因 Seatbelt 拒绝未启动。
+嵌套 JSON 子串断言已按结构解码，固定提交由 3a 沙箱外重跑；真实 TUI/模型调用未验证，不能宣称完整 M-B1 已验收。
+没有 Gateway 操作或新配置，不覆盖其它分支历史数字；证据和下一步见 TESTS、迁移设计与插件 README。
+严格静态门禁与含 NUL 源树 clean-package 通过；追加全仓未通过，SIGTERM 终止原因未确认，
+首失败为与基线相同的 archive_tokens 旧接口导入。无关失败未改，详细范围与原始证据见 TESTS。
+
 C10（2026-10-01，sol，源码已支持、待集成）：IM `/plugins` 与 `/plugins@<插件ID>` 走 TUI 同一
 插件服务，管理权限、纯文本错误码、原非 Python 启用预览和持久控制重放已在本地开发用例验证。
 定向 155 项、架构守卫 166 项通过，三个变异均被拦截；真实飞书/QQ 收发与正式部署未验证。

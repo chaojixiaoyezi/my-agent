@@ -334,6 +334,74 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - 验证边界：运行的是产品组件入口与渠道共用渲染，不是实际 Gateway、终端或 IM 客户端；真实模型连通、提炼质量和重启生效 **未验证**。
   生产 deepseek-v4-flash 绑定及真实验收由 3a 部署后进行；没有改生产配置、启停 Gateway、安装依赖或运行 my-agent。
 
+## C14 M-B1 五阶段只读 Node 门插件（2026-10-01，`worker/sol2-c14-mb1`，本地候选、待外部复验）
+
+- 来源：固定 B `7ebef4f2f53159ee1eaaec2793271a114a8be8cc`，不联网拉取、不修改上游；许可和逐文件摘要见插件 PROVENANCE/UPSTREAM。
+- 做法：五工具同进程调用导出函数，逐次读取上下文，分镜不进入日志分支；上游六份 selftest 只在仓库测试。
+- 本轮处理 3a 评审：完整宿主测试不再搜索转义文本里的 `"passed":true`，改为
+  `value = json.loads(json.loads(result["output"])["result"])` 后断言 `value["passed"] is True`，
+  并钉住阶段/操作、门总数与失败数、问题列表、跳过/完整口径、操作账输出与公开输出相同。
+  未删除/skip/xfail 宿主失败；未关闭出生身份校验或平台沙箱。
+- 31 项涵盖：可复现 ZIP、同源 tools/list、74 有效+20 畸形读取向量、五阶段真实 Node MCP 与 CLI 对照、
+  无工作区改写/门日志、越界主文件/链接/参考、凭据文件/伪上下文/写参数拒绝、缺依赖跳过、日志统计、
+  六份原样上游自检、原文引文与逐张镜头卡；另保留真实宿主安装确认/注册调用与 report 平台沙箱子进程测试。
+
+所有命令从本工作树根目录串行执行，Python 导入点已确认在本工作树：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+export PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1
+"$PY" -m pytest agent_py_agent/tests/test_shuohao_novel_gates.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 \
+  --junitxml=tmp/mb1-resume-focused.xml
+"$PY" -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 \
+  --junitxml=tmp/mb1-resume-guards.xml
+"$PY" scripts/check_import_boundaries.py
+"$PY" -m ruff check agent_py_agent scripts
+"$PY" scripts/check_doc_sync.py
+"$PY" scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+"$PY" scripts/check_clean_package.py .
+
+# 候选含原样上游代码，生产/测试代码新增累计 12,778 行，按 AGENTS.md 追加全仓。
+"$PY" -m pytest -q --tb=short -p no:cacheprovider \
+  --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/mb1-resume-full.xml \
+  > tmp/mb1-resume-full.log 2>&1
+# 上一命令未完成后，仅用于定位首失败；不是全仓通过证据。
+"$PY" -m pytest -x -q --tb=short -p no:cacheprovider \
+  --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/mb1-full-first-failure.xml
+```
+
+本轮实际结果（从 JUnit 逐项读取，不把外层诊断脚本退出 0 当 pytest 通过）：
+- 聚焦：**29 passed、1 failed、1 skipped、0 errors**，pytest exit 1。失败在 `_install_and_confirm` 的启用确认处，
+  尚未执行修改后的五工具断言。当前执行环境此前已实测拒绝 `/bin/ps`，宿主出生身份无法取得；保留原失败。
+- report 沙箱：明确 `sandbox_apply: Operation not permitted`、exit 71，零操作 probe 都未启动 Node，故记跳过；
+  **本机 report 沙箱子进程未验证**，不推断子进程允许或禁止。
+- guards9.txt 实际十个文件（含 packaging）：**166 passed、0 failed/errors/skipped**。
+- import boundaries：**0 条**；Ruff：`All checks passed!`；doc sync：`DOC_SYNC_PASS`。
+- strict code-size：exit 0、`blocked=False`，`strict_scope_total=2239 hard=0 high-risk=1531 soft=708 test_advisory=1244`；
+  `CODE_SIZE_REPORT.md` 已按原要求还原，baseline 未改。diff（工作区及暂存）通过。
+- 源树 clean-package：**`OK: . 未发现发布阻塞项`**；characters 文件含 **1 个真实 NUL**，
+  工作区与暂存字节相同，SHA-256 为 `146cef28dbbe21a2f800de61ca10052cf3d13f79375aaae57c25ce398e15b864`，
+  `git check-attr text` 为 `unset`（`-text` 生效），未修改清洁检查规则或忽略源文件来放行。
+- 中断恢复时读回聚焦/守卫 JUnit；对应非文档输入均早于测试启动且无未暂存代码改动，复用有效结果，未为恢复重跑相同测试。
+- **追加全仓未通过/未完成**：命令收到 SIGTERM、exit **143**，日志停在约 71%，已有失败标记，
+  未生成最终 `mb1-resume-full.xml`。终止原因未确认，不归因为沙箱或插件；不从进度符号统计通过数。
+- 首失败诊断 `-x`：exit **1**，JUnit 为 672 tests、1 failure、0 errors、2 skipped；
+  首失败 `test_archive_tokens.py::TestTokenBudgetResult::test_token_budget_result_fields` 仍导入已不存在的 `TokenBudgetResult`。
+  此测试与 `memory_archive/tokens.py` 已按字节核对与基线 `f15b0a19f` 相同，M-B1 未改它们；
+  没有删除/跳过断言或恢复旧接口来改绿。其余全仓失败的原因未复核，交集成者另行处理，不能称全仓通过。
+
+外部结果单独记账：3a 在沙箱外复制修改前候选报告 **30 passed、1 failed、0 skipped**，
+原环境受限的宿主启用/report 沙箱分支在那里执行通过；唯一真实失败是上述 JSON 子串断言。
+这不是本机结果，也不证明本轮修改后的固定提交已经全绿；3a 将对交付提交完整重跑。
+真实 TUI 安装、本人确认和调用、一次真实模型自然调用**未验证**，由 3a/ae 集成后按迁移设计 §3 执行。
+线上 CI 未作为本轮验收来源；未 push、部署或操作 Gateway，不覆盖 J6 或其它分支的历史测试数字。
+建议下一步：3a 在沙箱外重跑交付提交的完整插件测试，ae 可并行只读核许可/包装边界；
+全仓首失败交对应模块实施者核对，原中断日志保留，修复/复核前不以本候选宣称全仓验收完成。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `02568822d`）
 
 - **P15**：`test_structured_masking.py` 新增 2 例：

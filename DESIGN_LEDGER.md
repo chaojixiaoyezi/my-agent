@@ -179,6 +179,23 @@
 - 边界：连接在 owner 实例装配时冻结，配置变更需重启；自动总结 Skill 继续共用原 Curator 后端。私有编号仅在本人目录解析，
   跨 owner 使用须有原共享授权，不能读取管理员私有凭据作为回退。本线不改生产，不启动 Gateway；3a 部署后再绑定实际 deepseek-v4-flash 档案并验收。
 
+## C14 M-B1：五阶段只读 Node 门插件（2026-10-01，`worker/sol2-c14-mb1`，本地候选已实现、待外部复验/审查/集成）
+
+- 解决问题：上游 B 的离线 CLI 尚不能经宿主逐次权限作为工具使用，分镜默认门日志还会写工作区。
+- `shuohao-novel-gates` 为 v6 Node 18+ 插件，五工具声明 read_only；复用 hello-node 的读取上下文移植，
+  主文件、参考、原文、日志和每张卡片逐份裁决，不另建授权账。直接调用上游导出函数，不解析自然语言。
+- validate/checkup 保留真实阶段差异，独立 stats 只在分镜读取已有 JSONL 日志；角色仅 validate 且 book 必填。
+  同进程计算不进入 CLI main/logGates，分镜等价于 --no-log；缺依赖门 skipped/passed=null，不算通过。
+- 原 LICENSE、NOTICE、固定来源与逐文件摘要随包，characters 原样 NUL 配 -text；不迁付费路线、install.sh、作者图片。
+  六份自检、样例与 report 只在测试闭包，M-B2 写工具未实施。
+- 宿主测试原嵌套 JSON 子串断言改为分层 json.loads，钉住 passed is True、阶段/操作、门计数和持久输出一致。
+  本机聚焦 29 passed、1 failed、1 skipped，守卫 166 passed；失败在解释器确认启用处，沙箱跳过发生在 Node 启动前。
+  3a 沙箱外对修改前候选报告 30 passed、1 failed、0 skipped，固定提交完整复验仍由 3a 执行，不能改记本机全绿。
+- 真实 TUI/模型未验证；Node 打开后复核不等同 Python SDK 的逐段目录描述符竞态防护。
+  本轮严格静态门禁及含 NUL 的源树 clean-package 通过；追加全仓收到 SIGTERM 未完成，
+  首失败诊断确认基线旧测试导入已删除的 TokenBudgetResult。未改无关模块，不宣称全仓通过。
+  完整证据见 [TESTS](TESTS.md)，能力边界见 [迁移设计](docs/design/CAPABILITY_UPSTREAM_MIGRATION.md)与 [README](plugins/shuohao-novel-gates/README.md)。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已实现，待集成）
 
 - **P15 脱敏补两种写法**（唯一实现 `user_config_capability.masked_structure`/`mask_value`，未另写一份）：
@@ -194,7 +211,7 @@
 - **文档**：PARAMETER_CENTER.md 脱敏节 209-210 漏网写法改为已补；第 2 节目标第 5 条补记落地。
 - **验证**：脱敏/改名相关测试 204 passed（详见 TESTS.md）。
 
-## 上游未迁内容：许可核对与迁移清单（C14）（2026-10-01，分支 `claude/ae-c14-migration-list`，清单已定，未实施）
+## 上游未迁内容：许可核对与迁移清单（C14）（2026-10-01，分支 `claude/ae-c14-migration-list`，清单已定；M-B1 本地候选见顶部）
 
 - **结论**：
   - A（MIT）、B（Apache-2.0 + NOTICE）的代码可以迁，随迁移文件保留许可原文和来源说明；
