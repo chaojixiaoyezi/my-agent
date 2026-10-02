@@ -10,7 +10,6 @@ therefore fails closed.
 
 import json
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -497,8 +496,20 @@ def _release_local_tool_operation_reconciliation(
         return released
 
 
+# LLM: 同主机判定只认 daemon_metadata.process_host_id（进程内缓存的稳定主机身份），不读主机名：macOS 换网络后主机名会变，
+#   拿主机名比会把本机持有者当成别的主机。持有者写入和三处比较（本文件两处、managed_operation_store 一处）用同一个值。
+#   上一版写的是主机名，与它不相等，按“另一主机”处理，只等租约到期，不会被误接管。懒导入避免 local_storage 与 gateway_parts 循环。
+# 函数用途: 返回本机在工具操作持有者记录里使用的主机身份。
+def tool_operation_host_id() -> str:
+    from ..gateway_parts.daemon_metadata import process_host_id
+
+    return process_host_id()
+
+
+# LLM: holder_id 只要求唯一，里面的主机段同样用 tool_operation_host_id，不再嵌主机名；host 字段供同主机判定。
+# 函数用途: 为本进程生成一个工具操作持有者身份（主机、PID、进程启动标记与随机后缀）。
 def new_tool_operation_holder() -> ToolOperationHolder:
-    host = socket.gethostname()
+    host = tool_operation_host_id()
     pid = os.getpid()
     start_token = _process_start_token()
     return ToolOperationHolder(
@@ -749,10 +760,13 @@ def _claim_mismatch_reason(
     )
 
 
+# LLM: 租约过期即不活；持有者主机为空或不是本机（tool_operation_host_id）时无法核验 PID，到期前一律当活着；
+#   本机才看 PID 与启动标记。老记录的主机名与本机身份不等，所以只能等租约到期。
+# 函数用途: 判断一条工具操作的持有者是否仍可能在执行，决定能否接管。
 def _operation_holder_is_live(record: ToolOperationRecord, now: float) -> bool:
     if record.lease_expires_at <= now:
         return False
-    if not record.holder_host or record.holder_host != socket.gethostname():
+    if not record.holder_host or record.holder_host != tool_operation_host_id():
         return True
     if record.holder_pid <= 0:
         return False
@@ -783,7 +797,7 @@ def _reconciliation_marker_is_live(marker: dict[str, Any], now: float) -> bool:
     if not isinstance(holder, dict):
         return False
     host = str(holder.get("host") or "")
-    if not host or host != socket.gethostname():
+    if not host or host != tool_operation_host_id():
         return True
     pid = int(holder.get("pid") or 0)
     if pid <= 0 or not _pid_exists(pid):

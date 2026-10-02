@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import sqlite3
 import stat
 import time
@@ -55,6 +54,7 @@ from ..local_storage.tool_operations import (
     ToolOperationRecord,
     ToolOperationReopenRequest,
     ToolOperationStateError,
+    tool_operation_host_id,
 )
 from .operations import (
     OP_CANCELLED,
@@ -1359,6 +1359,7 @@ def _holder_pid_alive(holder: dict[str, Any]) -> bool:
 
 # LLM: Reconciliation claims use the same host process evidence and a hard lease. A dead local
 # holder may be replaced before expiry; cross-host ambiguity remains live until the lease expires.
+#   同主机按 tool_operation_host_id 判定（与持有者写入同一个值），老记录的主机名与它不等，按另一主机等租约到期。
 # 函数用途: 判断 runtime.db 中的未知操作核对租约是否仍有效。
 def _managed_reconciliation_claim_is_live(
     marker: dict[str, Any],
@@ -1370,7 +1371,7 @@ def _managed_reconciliation_claim_is_live(
     if not isinstance(holder, dict):
         return False
     host = str(holder.get("host") or "")
-    if host and host != socket.gethostname():
+    if host and host != tool_operation_host_id():
         return True
     return _holder_pid_alive(holder)
 

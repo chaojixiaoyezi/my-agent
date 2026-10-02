@@ -1,5 +1,25 @@
 # 设计台账
 
+## 工具操作持有者的同主机判定统一到 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`，已实现，待集成）
+
+- **背景**：网关 host_id 修复后，`tool_operations` 和 `managed_operation_store` 里还有三处直接拿 `socket.gethostname()` 判同主机：
+  - 工具操作租约 `_operation_holder_is_live`；
+  - 本地核对标记 `_reconciliation_marker_is_live`；
+  - runtime.db 核对标记 `_managed_reconciliation_claim_is_live`。
+  持有者的 host 也写的是主机名。macOS 换网络后主机名会变，本机持有者被当成另一台主机，进程死了也要等租约到期才能接管。
+- **做法**：
+  - 新增 `tool_operations.tool_operation_host_id()`，返回 `daemon_metadata.process_host_id()`（进程内缓存的稳定主机身份）。
+    懒导入，避免 local_storage 和 gateway_parts 循环导入。
+  - `new_tool_operation_holder` 的 host 和 holder_id 里的主机段改用它；三处比较也改为和它比。
+  - 空 host 的原有语义不变：工具操作两处当作另一主机，runtime.db 那处走 PID 核验。
+- **holder_host 格式变化与过渡**：
+  - 新记录写的是 32 位主机身份摘要，不再是主机名。
+  - 升级前写下的主机名记录和本机身份不相等，一律按“另一主机”处理：租约到期前当作还活着，到期后才可接管。
+    也就是老记录只是等一次 TTL，不会被误接管。
+  - 新旧版本同时在跑（部署切换）时，双方都把对方的记录当成另一主机，同样只等 TTL。
+  - 诊断里看到的 holder_host 从主机名变成摘要，可读性下降，换来主机名变化后判断不出错。
+- **没动的**：`curator_state` 里记的 `host` 和 `runtime_db/repository` 的 instance_id 只做展示，不参与同主机判定，仍用主机名。
+
 ## 主机名变化后 SIGTERM 仍能停网关：主机身份进程内缓存 + macOS 硬件 UUID（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，已实现，待集成）
 
 - **现场**（3a，step17a 切换）：macOS 没有 /etc/machine-id，`process_host_id` 退回 `socket.gethostname()`；换网络后主机名变成 anonymous。

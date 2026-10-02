@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## 工具操作持有者同主机判定改用 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`）
+
+- `test_tool_operation_host_identity.py`（新增，3 项）：
+  - 新持有者记的是主机身份、不含主机名；
+  - 主机名中途变化后，本机已死的持有者在三处判定里都是“不活”，可以立刻接管；
+  - 上一版的主机名记录在三处判定里，租约内都是“活着”，到期后才“不活”。
+- `test_tool_operation_idempotency.py` 的“本机已死持有者”用例改用 `tool_operation_host_id()` 造同主机持有者，原来用的是主机名。
+- 变异 4 个，全部被拦住：持有者仍记主机名、工具操作租约仍按主机名比、本地核对标记仍按主机名比、runtime.db 核对标记仍按主机名比。
+
 ## 主机名变化后 SIGTERM 仍能停网关（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`）
 
 - `test_gateway_host_identity.py`（新增，7 项）：

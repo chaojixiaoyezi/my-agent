@@ -1879,6 +1879,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/daemon_metadata.py`：统一提供 process-domain（machine-id / macOS 硬件 UUID / 主机名 + PID namespace）、
   PID 和 start_time 身份。后台会话 claim 与 gateway PID record 共用，不复制一套存活判定。`process_host_id` 一个进程只算一次
   （`_cached_process_host_id`），macOS 硬件 UUID 走 libc `gethostuuid`（`_macos_platform_uuid`），不起子进程。
+  工具操作持有者的同主机判定（`local_storage/tool_operations.tool_operation_host_id`，`runtime_db/managed_operation_store` 共用）也用它。
 - `cli/gateway_process.py` 的信号处理：`_install_gateway_signal_handlers(paths, process_identity)` 把启动身份交给
   `_record_gateway_signal_stop_request`，与 `_run_gateway_service_loop` 比对的是同一份身份。
 

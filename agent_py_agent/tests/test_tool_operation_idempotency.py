@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import socket
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -18,6 +17,7 @@ from agent_py_agent.agent.local_storage import (
     ToolOperationOwnershipError,
     new_tool_operation_holder,
 )
+from agent_py_agent.agent.local_storage.tool_operations import tool_operation_host_id
 from agent_py_agent.agent.tooling.models import (
     BaseTool,
     ToolFailureStage,
@@ -362,7 +362,7 @@ def test_dead_holder_becomes_unknown_and_is_not_reexecuted(tmp_path):
             idempotency_namespace="counting_write",
             holder=ToolOperationHolder(
                 holder_id="dead-holder",
-                host=socket.gethostname(),
+                host=tool_operation_host_id(),  # 本机（与持有者写入同一个主机身份）、进程已死
                 pid=999_999_999,
                 process_start_token="not-running",
             ),

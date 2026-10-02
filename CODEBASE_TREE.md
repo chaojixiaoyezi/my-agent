@@ -880,6 +880,7 @@ agent_py_agent/
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
 |   |-- test_gateway_host_identity.py # 主机名变化后 SIGTERM 仍能停网关：信号用启动身份、host_id 进程内缓存、macOS 硬件 UUID、跨进程核验表现
+|   |-- test_tool_operation_host_identity.py # 工具操作持有者同主机判定用 process_host_id：主机名变化后本机死进程可接管、老主机名记录等租约到期
 |   |-- test_plugin_catalog_digest_stability.py # 激活目录摘要跨声明版本稳定：可选字段为空不改变旧安装的 catalog_sha256
 |   |-- test_background_listen_scope.py        # 后台服务默认只监听回环：授权键、approved_owner 面板与 owner 授权存储、host 按 socket 表回收越界服务
 |   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
