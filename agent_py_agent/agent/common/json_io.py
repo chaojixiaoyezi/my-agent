@@ -283,6 +283,35 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
         _unlink_tmp_file(tmp)
 
 
+# LLM: 记忆本体、归档、向量库、正文缓存这类带记忆原文或可反推内容的文件专用：临时文件一出生就是 0600
+#   （os.open 带 0o600，再显式 chmod，不受 umask 影响），替换后的目标自然是 0600；已有 644 的文件下次写入即被收紧。
+#   父目录按 0700 新建并收紧（只动直接父目录；收紧失败不挡写入，文件本身仍是 0600）。调用方须已持有 locked_json_path。
+#   改动同步 test_memory_file_permissions。
+# 函数用途: 以“仅本人可读写”的权限原子替换一个文本文件（写文件、可能 chmod 父目录）。
+def write_private_text_file_atomic_unlocked(path: Path, content: str) -> None:
+    _ensure_private_dir(path.parent)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.chmod(tmp, 0o600)
+            handle.write(content)
+        _replace_with_retry(tmp, path, keep_mode=False)
+    finally:
+        _unlink_tmp_file(tmp)
+
+
+# LLM: 新建按 0700；已存在且宽于 0700 时收紧。属主不是本进程等原因 chmod 失败只放弃收紧，不让写入失败。
+# 函数用途: 确保私有文件所在目录存在且只有本人可进入（可能新建目录或 chmod）。
+def _ensure_private_dir(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        if stat.S_IMODE(directory.stat().st_mode) != 0o700:
+            os.chmod(directory, 0o700)
+    except OSError:
+        return
+
+
 def _path_lock(path: Path) -> _PathLock:
     key = str(path.resolve())
     with _JSON_FILE_LOCKS_GUARD:
@@ -352,9 +381,11 @@ def _flock_unlock(handle) -> None:
 
 # LLM: 所有原子写（JSON、JSONL 账本、文本）都经这里替换；替换前先让临时文件带上目标原来的权限位，
 #   否则 600 的配置/账本每写一次就按 umask 变成 644（2026-10-02 ae 在 P18 发现生产 desktop.yaml 被放宽）。
-# 函数用途: 带重试地把临时文件原子替换到目标位置，并保留目标原有权限。副作用：替换目标文件。
-def _replace_with_retry(tmp: Path, path: Path) -> None:
-    _keep_target_mode(tmp, path)
+#   keep_mode=False 只给私有写（write_private_text_file_atomic_unlocked）：临时文件已是 0600，不能抄回旧的 0644。
+# 函数用途: 带重试地把临时文件原子替换到目标位置，默认保留目标原有权限。副作用：替换目标文件。
+def _replace_with_retry(tmp: Path, path: Path, *, keep_mode: bool = True) -> None:
+    if keep_mode:
+        _keep_target_mode(tmp, path)
     last_error: OSError | None = None
     for attempt in range(8):
         try:

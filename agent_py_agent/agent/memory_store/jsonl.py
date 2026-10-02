@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from ..common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
-    write_text_file_atomic_unlocked,
+    write_private_text_file_atomic_unlocked,
 )
 from ..common.text_norm import fold_key, nfc
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
@@ -194,7 +194,7 @@ class _JsonlMemoryIdentityMixin:
         self.local_store = local_store
         self.ops_path = Path(ops_path) if ops_path is not None else None
         self.candidate_service = candidate_service
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
         self._semantic_status = dict(semantic_status or {"state": "configured" if embedder is not None else "disabled"})
         self._semantic_errors: dict[str, str] = {}
@@ -401,7 +401,7 @@ class _JsonlMemoryMutationMixin:
                 self._pending_access.clear()
                 _check_memory_quota(admission, self, persisted, next_text)
                 self._redact_local_tool_ledgers(removed_contents)
-                write_text_file_atomic_unlocked(self.path, next_text)
+                write_private_text_file_atomic_unlocked(self.path, next_text)
         if removed_content_hashes and self.candidate_service is not None:
             self.candidate_service.redact_content(
                 content_hashes=removed_content_hashes,
@@ -508,7 +508,7 @@ class _JsonlMemoryMutationMixin:
                     for record in [*retained, *tombstones]
                 )
                 _check_memory_quota(admission, self, tombstones, next_text)
-                write_text_file_atomic_unlocked(self.path, next_text)
+                write_private_text_file_atomic_unlocked(self.path, next_text)
         append_memory_purge_event(
             self.ops_path,
             entry_ids=set(expected),
@@ -885,7 +885,7 @@ class _JsonlMemoryLifecycleMixin:
                 for record in [*current_events, *_touch_events(pending)]
             )
             self._pending_access.clear()
-            write_text_file_atomic_unlocked(self.path, next_text)
+            write_private_text_file_atomic_unlocked(self.path, next_text)
         return len(pending)
 
     # LLM: 总量闸只淘汰"非用户明确要求"的冷条目;user_explicit 永不因用量淘汰(用户显式记忆
@@ -930,7 +930,7 @@ class _JsonlMemoryLifecycleMixin:
             )
             if archive_path.exists():
                 archived_text = archive_path.read_text(encoding="utf-8") + archived_text
-            write_text_file_atomic_unlocked(archive_path, archived_text)
+            write_private_text_file_atomic_unlocked(archive_path, archived_text)
         self.apply_batch(
             [
                 {

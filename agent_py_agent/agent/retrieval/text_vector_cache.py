@@ -37,7 +37,6 @@ import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
-from uuid import uuid4
 
 
 @runtime_checkable
@@ -258,23 +257,17 @@ def _content_hash_of(key: str) -> str:
     return digest if sep else key
 
 
+# LLM: 正文哈希能反推记忆是否存在、向量可近似还原语义，按记忆本体同一规则落盘：替换前临时文件就是 0600、目录 0700
+#   （json_io.write_private_text_file_atomic_unlocked）。调用方负责持锁；失败返回 False，由调用方记 last_write_error。
+# 函数用途: 不加锁地原子写出整份正文哈希缓存，成功返回 True。
 def _write_atomic_unlocked(path: Path, payload: dict[str, list[float]]) -> bool:
-    """不加锁的原子写：唯一 tmp 名 + rename（调用方负责持锁）。成功返回 True。"""
-    tmp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+    from ..common.json_io import write_private_text_file_atomic_unlocked
+
     try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(path)
+        write_private_text_file_atomic_unlocked(path, json.dumps(payload, ensure_ascii=False))
         return True
     except OSError:
-        _discard_tmp(tmp)
         return False
-
-
-def _discard_tmp(tmp: Path) -> None:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
 
 
 # LLM: 指纹只取实现类/端点/模型三者哈希前 16 位，既不落端点明文，也能让换模型/换端点自然失效。

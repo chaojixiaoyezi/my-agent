@@ -23,7 +23,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_py_agent.agent.common.json_io import locked_json_path, write_text_file_atomic_unlocked
+from agent_py_agent.agent.common.json_io import (
+    locked_json_path,
+    write_private_text_file_atomic_unlocked,
+)
 from agent_py_agent.agent.retrieval.embedding import cosine
 
 # 快照文件 schema 版本；不是这个版本的 JSON 对象按 P14 之前的旧格式（整份就是 id→条目、没有身份）读入。
@@ -220,7 +223,7 @@ class VectorStore:
             "generation": uuid.uuid4().hex,
             "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        write_text_file_atomic_unlocked(self._path, json.dumps({**header, "items": items}, ensure_ascii=False))
+        write_private_text_file_atomic_unlocked(self._path, json.dumps({**header, "items": items}, ensure_ascii=False))
         self._header, self._items, self._readable = header, items, True
         self._stamp = _file_stamp(self._path.stat())
 

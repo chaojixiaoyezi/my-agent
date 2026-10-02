@@ -93,7 +93,7 @@ def test_rebuild_waits_for_inflight_write_and_lands_last(tmp_path, monkeypatch) 
     writer_a.upsert("a-1", _unit(64, 0), text="甲")
     rebuilder_b = VectorStore(path, identity=_ID_128)
     paused, release = threading.Event(), threading.Event()
-    real_write = vector_store.write_text_file_atomic_unlocked
+    real_write = vector_store.write_private_text_file_atomic_unlocked
 
     def gated_write(target: Path, content: str) -> None:
         if threading.current_thread().name == "writer-a":
@@ -101,7 +101,7 @@ def test_rebuild_waits_for_inflight_write_and_lands_last(tmp_path, monkeypatch) 
             assert release.wait(10)
         real_write(target, content)
 
-    monkeypatch.setattr(vector_store, "write_text_file_atomic_unlocked", gated_write)
+    monkeypatch.setattr(vector_store, "write_private_text_file_atomic_unlocked", gated_write)
     thread_a = threading.Thread(target=writer_a.upsert, args=("a-2", _unit(64, 1)), name="writer-a")
     thread_a.start()
     assert paused.wait(10)
@@ -191,7 +191,7 @@ def test_rebuild_write_failure_keeps_old_store(tmp_path, monkeypatch) -> None:
     def broken_write(target: Path, content: str) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(vector_store, "write_text_file_atomic_unlocked", broken_write)
+    monkeypatch.setattr(vector_store, "write_private_text_file_atomic_unlocked", broken_write)
     result = mem.rebuild_vectors()
     assert result["ok"] is False and result["failed_stage"] == "write" and result["failure"] == "OSError"
     assert result["embedded"] == 2 and result["failed"] == 0 and result["rebuilt"] == 0 and result["vector_count"] == 2
