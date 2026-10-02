@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 PATH_ACCESS_MODE_NORMAL = "normal"
@@ -184,6 +184,15 @@ class PathAccessPolicy:
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope,
                    agent_home_root=_home_root_from_owner_scope(scope) if scope else _my_agent_home_root())
 
+    # LLM: 数据根的唯一权威是宿主启动时解析出的结果（home_paths：配置 my_agent_home 优先，其次环境变量）。from_values 在没有
+#   owner 墙时只能退回环境变量 MY_AGENT_HOME，两者不一致时（配置写了固定 home）H2/H3 的宿主文件判定会落到另一个目录上
+#   （9b 二审实测 Full Access 写进了 permissions.json 等）。所以拿得到宿主 owner home 或写边界 canonical_owner_home_root 的
+#   构造点都要调它。root 为空时原样返回（没有宿主事实时才退回环境变量）。
+    # 函数用途: 返回把数据根换成宿主解析结果的同一策略。
+    def with_data_root(self, root: object) -> PathAccessPolicy:
+        resolved = _normalized_root(root) if root else None
+        return self if resolved is None else replace(self, agent_home_root=resolved)
+
     # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；模式放行后再拒宿主凭据
     #   （PATH_HOST_CREDENTIAL_BLOCKED，H3），所以原有拒绝码不变。只读构造时冻结的根，不受另一个会话或子进程环境影响。
     #   这是读写共用的裁决；写还要再过 check_write / host_write_decision。
@@ -324,7 +333,8 @@ class PathAccessPolicy:
             return decision
         if not any(_is_relative_to(resolved, root) for root in granted_external_roots):
             return decision
-        policy = external_policy or PathAccessPolicy.from_values(mode=self.mode, dangerous_roots=self.dangerous_roots)
+        policy = external_policy or PathAccessPolicy.from_values(
+            mode=self.mode, dangerous_roots=self.dangerous_roots).with_data_root(self.agent_home_root)
         return policy.check(resolved)
 
     def _owner_scope_decision(self, resolved: Path, home_root: Path) -> PathAccessDecision:
@@ -461,6 +471,14 @@ def agent_home_root_for_owner(owner_home: object) -> Path | None:
         if candidate.name == "owners":
             return candidate.parent
     return None
+
+
+# LLM: 写边界里宿主写的 canonical_owner_home_root（tool_runtime_ledger._attach_canonical_owner_home_root，来自 home_paths）是本次
+#   调用的数据根来源；没有或推不出时返回 None，调用方不改策略的数据根。只做路径运算。
+# 函数用途: 从写边界取宿主解析出的数据根。
+def data_root_from_boundary(boundary: object) -> Path | None:
+    owner_home = boundary.get("canonical_owner_home_root") if isinstance(boundary, dict) else None
+    return agent_home_root_for_owner(owner_home) if owner_home else None
 
 
 # LLM: 与 user_space.owner_resolver._owner_home_dir 互为逆运算（owners/local/main 或 owners/providers/<p>/<users|groups>/<id>），
@@ -783,6 +801,7 @@ __all__ = [
     "SQLITE_SIDECAR_SUFFIXES",
     "TASK_ROOT_LAYOUT",
     "agent_home_root_for_owner",
+    "data_root_from_boundary",
     "effective_owner_scope_root",
     "granted_external_work_roots",
     "host_config_root_for_path",

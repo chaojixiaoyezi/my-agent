@@ -30,6 +30,8 @@ class PathUrlCommandFacts:
     local_file_url_fields: Iterable[str] = ()
     allow_shell_operators: bool = False
     allowed_commands: Iterable[str] = ()
+    # 宿主解析出的数据根（写边界 canonical_owner_home_root 推出）；空时策略退回环境变量（H3 二审）。
+    data_root: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,7 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
         mode=facts.path_access_mode,
         dangerous_roots=facts.path_dangerous_roots,
         owner_scope_root=facts.owner_scope_root,
-    )
+    ).with_data_root(facts.data_root)
     findings: list[GateFinding] = []
     _collect_path_findings(data, roots, path_policy, findings)
     _collect_url_findings(
@@ -139,7 +141,7 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
             workspace_policy = PathAccessPolicy.from_values(
                 mode=request.path_policy.mode,
                 dangerous_roots=request.path_policy.dangerous_roots,
-            )
+            ).with_data_root(request.path_policy.agent_home_root)
             decision = workspace_policy.check(resolved)
         if not decision.allowed:
             return GateFinding(decision.code or "PATH_ACCESS_DENIED", evidence={

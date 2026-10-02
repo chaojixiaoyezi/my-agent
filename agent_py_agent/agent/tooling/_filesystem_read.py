@@ -15,6 +15,7 @@ from ..path_access_policy import (
     PATH_SCOPE_OWNER_WALL,
     PathAccessDecision,
     PathAccessPolicy,
+    agent_home_root_for_owner,
 )
 from ..path_recovery_hints import suggest_workspace_typo_target
 from ..user_space.owner_quota import (
@@ -184,11 +185,12 @@ class FileSystemTool(BaseTool):
         # 人类: 这是 owner 墙的逃生口白名单，只能由 registry 逐次调用组装，不要从模型参数或
         #   workspace_roots 反推。
         self.granted_external_roots: tuple[Path, ...] = ()
+        # 数据根取宿主解析出的 owner home（H3 二审：不能只看环境变量 MY_AGENT_HOME）。
         self.path_access_policy = PathAccessPolicy.from_values(
             mode=access.path_access_mode,
             dangerous_roots=access.path_dangerous_roots,
             owner_scope_root=access.owner_scope_root,
-        )
+        ).with_data_root(agent_home_root_for_owner(access.owner_scope_root or access.protected_persona_root))
         self.protected_persona_root = (
             Path(access.protected_persona_root).expanduser().resolve(strict=False)
             if str(access.protected_persona_root or "").strip()

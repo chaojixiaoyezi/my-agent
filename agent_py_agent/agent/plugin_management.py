@@ -12,7 +12,7 @@ from pathlib import Path
 from .capability_verifier_consent import CONSENT_KIND, verifier_confirmation_message
 from .command_catalog import COMMAND_INDEX
 from .common.cancellation import CancellationToken
-from .path_access_policy import PathAccessPolicy
+from .path_access_policy import PathAccessPolicy, agent_home_root_for_owner
 from .plugin_cleanup import consume_plugin_cleanup
 from .plugin_command_service import execute_plugin_command, read_plugin_catalog
 from .plugin_commands import (
@@ -107,7 +107,7 @@ def plugin_management_context(
     path_policy = PathAccessPolicy.from_values(
         mode="full" if access == "full-access" and not scope else effective.path_access_mode,
         dangerous_roots=effective.path_dangerous_roots, owner_scope_root=scope,
-    )
+    ).with_data_root(agent_home_root_for_owner(getattr(home, "owner_home_dir", None)))
     thread, error = threads.resolve_report(channel=channel, channel_conversation_id=conversation_id,
                                            channel_user_id=actor_id)
     if error:

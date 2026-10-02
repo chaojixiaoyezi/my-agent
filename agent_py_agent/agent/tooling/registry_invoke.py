@@ -14,7 +14,11 @@ from typing import Any
 
 from ..common.cancellation import ToolCancelled, bind_cancellation_token
 from ..concurrency.interrupt import register_interrupt_callback
-from ..path_access_policy import PathAccessPolicy, granted_external_work_roots
+from ..path_access_policy import (
+    PathAccessPolicy,
+    data_root_from_boundary,
+    granted_external_work_roots,
+)
 from .controlled_exec import ControlledExecToolRequest, execute_controlled_exec_tool
 from .models import (
     BaseTool,
@@ -216,7 +220,8 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
 # 函数用途: 冻结本次调用的执行权、取消和插件读取/写入上下文，不修改共享 handler。
 def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationContext:
     policy = PathAccessPolicy.from_values(mode=request.path_access_mode, dangerous_roots=request.path_dangerous_roots,
-                                         owner_scope_root=request.owner_scope_root)
+                                         owner_scope_root=request.owner_scope_root).with_data_root(
+        data_root_from_boundary(request.write_boundary))
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
         execution_authority_check=request.execution_authority_check,
@@ -291,11 +296,12 @@ def _request_local_tool_for_invocation(
     effective_owner_scope = request.owner_scope_root or getattr(
         configured_policy, "owner_scope_root", ""
     )
+    # 数据根沿用工具注册时按宿主 owner home 定好的那个（H3 二审：不能退回环境变量）。
     dynamic_policy = PathAccessPolicy.from_values(
         mode=request.path_access_mode,
         dangerous_roots=request.path_dangerous_roots,
         owner_scope_root=effective_owner_scope,
-    )
+    ).with_data_root(getattr(configured_policy, "agent_home_root", None))
     if hasattr(scoped, "path_access_policy"):
         scoped.path_access_policy = dynamic_policy
     if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):

@@ -28,6 +28,7 @@ from ..contracts.gates.tool_rate_limit import (
     ToolRateLimitFacts,
     evaluate_tool_rate_limit_gate,
 )
+from ..path_access_policy import data_root_from_boundary
 from ..settings.runtime_guard_config import runtime_guard_bool, runtime_guard_int
 from .input_schema import normalize_tool_input, validate_tool_input
 from .models import (
@@ -367,6 +368,7 @@ def _path_url_command_decision(
             local_file_url_fields=runtime.runtime_policy.input_policy.local_file_url_parameters,
             allow_shell_operators=_shell_operators_allowed(boundary),
             allowed_commands=_controlled_exec_allowed_commands(boundary),
+            data_root=str(data_root_from_boundary(boundary) or ""),
         )
     )
     if decision.allowed:

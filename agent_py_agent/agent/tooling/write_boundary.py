@@ -14,7 +14,7 @@ prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件�
 from pathlib import Path
 from typing import Any
 
-from ..path_access_policy import PathAccessPolicy
+from ..path_access_policy import PathAccessPolicy, data_root_from_boundary
 
 # LLM: Every file-mutation capability snapshot and write-scope consumer must
 # reuse this canonical order/set; duplicating partial lists previously hid
@@ -85,10 +85,11 @@ def validate_write_boundary(
         return ""
 
     roots = _normalized_workspace_roots(workspace_root, workspace_roots)
+    # 数据根取写边界里宿主解析出的 owner home（H3 二审：与文件工具同一来源，不能只看环境变量）。
     path_policy = PathAccessPolicy.from_values(
         mode=path_access_mode,
         dangerous_roots=path_dangerous_roots,
-    )
+    ).with_data_root(data_root_from_boundary(write_boundary))
     allowed_roots = _boundary_paths(write_boundary.get("allowed_write_roots"), workspace_root, roots)
     for raw_path in raw_paths:
         try:

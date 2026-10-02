@@ -37,7 +37,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
     analyze_command,
     evaluate_command_policy,
 )
-from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+from agent_py_agent.agent.path_access_policy import PathAccessPolicy, agent_home_root_for_owner
 
 from ..attempt.sandbox import sandbox_hides_host_paths
 from ..common.cancellation import (
@@ -335,7 +335,7 @@ def _working_dir_from_params(
             decision = PathAccessPolicy.from_values(
                 mode=path_access_policy.mode,
                 dangerous_roots=path_access_policy.dangerous_roots,
-            ).check(target)
+            ).with_data_root(path_access_policy.agent_home_root).check(target)
         roots = workspace_roots or [workspace_root]
         if not decision.allowed or not _path_inside_any_root(target, roots):
             return ToolHandlerOutcome(
@@ -958,11 +958,12 @@ class ShellTool(BaseTool):
         #   WorkspaceOnly 语义。
         # 人类: 用户显式 --workspace 声明到 owner home 之外的目录时，命令才能在那里执行。
         self.granted_external_roots: tuple[Path, ...] = ()
+        # 数据根取宿主解析出的 owner home（H3 二审：不能只看环境变量 MY_AGENT_HOME）。
         self.path_access_policy = PathAccessPolicy.from_values(
             mode=options.path_access_mode,
             dangerous_roots=options.path_dangerous_roots,
             owner_scope_root=options.owner_scope_root,
-        )
+        ).with_data_root(agent_home_root_for_owner(options.owner_scope_root or options.protected_persona_root))
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.protected_persona_root = str(options.protected_persona_root or "")
         self.host_private_roots = tuple(str(root) for root in options.host_private_roots if str(root or "").strip())

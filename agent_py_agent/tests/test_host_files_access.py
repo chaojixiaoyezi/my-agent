@@ -777,3 +777,47 @@ def test_receipt_says_whether_task_records_were_protected(tmp_path, monkeypatch)
         assert outcome.result_envelope["sandbox"]["task_records"] == state
     plain = shell.execute({"command": "true", "working_dir": str(project)})
     assert "task_records" not in plain.result_envelope["sandbox"], "没经 registry 时不加这一项，旧回执不变"
+
+
+# ---------------------------------------------------------------- 数据根只有一个权威来源（9b 二审，3a 必须改第 1 条）
+
+
+def test_configured_home_wins_over_a_different_env_home(tmp_path, monkeypatch):
+    """配置写了 my_agent_home、环境变量 MY_AGENT_HOME 指向别处时，宿主文件判定跟宿主解析出的数据根走（原来只看环境变量，
+    9b 用真实 SimpleAgent 在 Full Access 下写进了 permissions.json、tool_policy.json、runtime.db 旁的文件和 config/）。"""
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        RegistryToolInvokeRequest,
+        _request_local_tool_for_invocation,
+    )
+    from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
+    from agent_py_agent.tests.test_runtime_gate_ledger import _loop_params
+
+    configured, decoy = (tmp_path / "configured-home").resolve(), tmp_path / "env-home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(decoy))
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(configured), path_access_mode="full",
+                                    access_mode="full-access"), tmp_path / "work")
+    assert agent.tools.tools["write_file"].path_access_policy.owner_scope_root is None, "本机管理员 Full Access，没有 owner 墙"
+    owner = Path(agent.home_paths.owner_home_dir)
+    assert owner.is_relative_to(configured)
+    targets = (owner / "permissions.json", owner / "tool_policy.json", owner / "runtime.db-wal", configured / "config" / "x.txt")
+    blocked = {CONFIG_CODE, STATE_CODE}
+
+    write = agent.tools.tools["write_file"]
+    for target in targets:
+        outcome = write.execute({"path": str(target), "content": "x"})
+        assert (outcome.ok, outcome.error_code in blocked) == (False, True), (target, outcome.output)
+        assert not target.exists() or target.read_text(encoding="utf-8") != "x"
+    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(write_boundary={}))
+    for target in targets:
+        error = validate_write_boundary("write_file", {"path": str(target)}, workspace_root=owner, path_access_mode="full",
+                                        write_boundary=boundary)
+        assert error.startswith("写入被阻止"), target
+    request = RegistryToolInvokeRequest(tool_name="write_file", arguments={}, tools={}, workspace_root=owner,
+                                        workspace_roots=[owner], allowed_tools=None, write_boundary=boundary,
+                                        path_access_mode="full")
+    scoped = _request_local_tool_for_invocation(write, request=request, workspace_roots=[owner])
+    assert scoped.path_access_policy.agent_home_root == configured, "每次调用换的策略也沿用宿主数据根"
+    assert scoped.path_access_policy.check_write(owner / "permissions.json").code == STATE_CODE
