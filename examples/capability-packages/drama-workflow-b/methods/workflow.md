@@ -74,6 +74,7 @@ CLI 报告升级为 `drama_workflow_check.v2`：`checks.project` 与 `checks.han
   - “列出”指交接里有一条地址（`source`、`target` 或 `refs`）点到这处改动，文件按 `files[].sha256` 对应到改前或改后的项目。换说话人、节拍类型、对象删除等仍只是提醒。
 - **交接只列真实改动**：对象映射两端在已读文件里、值完全相同，报 `handoff_claim_without_change` 错误；声称新增却原样已有、声称省略却原样还在，仍报原来的错误。
 - **交接模板**：`templates/handoff.json` 里 `<…>` 是填写提示；改动写成“基线值 → 新值：为什么改”。整段照抄提示报 `placeholder_text` 错误。
+- **交接摘要过期**：带基线时交接 `files` 里没有一条摘要等于本次项目的实际字节，报 `handoff_target_not_matched` 提醒：项目改完后要重算交接里的摘要，否则交接里的地址都对不上，所有改动都会算“没列出”。
 - **宿主模式**：宿主开启包检查时，用 `--host-json` 跑本检查器，交接文件按摘要对应宿主交来的项目和基线；对不上的文件报 `handoff_file_not_available` 提醒，不读、不影响结论。
 
 ## 和改动前的项目对比（0.2.0）

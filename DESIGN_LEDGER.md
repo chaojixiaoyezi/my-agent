@@ -17,6 +17,8 @@
   - B：交付物 `project`（`schema` 为 `drama_workflow_project.v1`，必需）；检查程序 `scripts/check_continuity.py`，参数 `--project {target} --host-json`；`--handoff` 取本回合写出的 `drama_workflow_handoff.v2`，`--baseline-project` 取任务开始时已有的项目，都非必需。交接不声明成必需交付物：新建项目的任务没有交接（ae 同意）。
   - 两包 `input_policy` 都是 `preserve_originals`（另存新文件，不就地改输入）。
   - 启用时要管理员确认（`kind=capability_verifiers`），确认说明列出这些输入。
+- **宿主模式不能崩**（ae 审阅的必须修）：模糊测试发现 4 处遇到列表或对象就 TypeError（A `prop_mention_warnings`；B `shot_reference_warnings`、`stage_addresses`、`beat_warnings`，后两处是旧函数）。崩溃时宿主只能记 `verifier_output_invalid`，整次结论丢失。修法是这几处只收字符串、坏形状跳过（结构错误另由原检查报出），不在入口套全局 try（那会把检查器自己的 bug 算成交付物错误，逼模型返工）。
+- **交接摘要过期**（ae 的建议，采纳）：带基线时交接 files 里没有一条摘要等于本次项目实际字节，B 报 `handoff_target_not_matched` 提醒，告诉模型是交接摘要过期，而不是让它只看到一串 `baseline_*_changed` 去猜。
 - **验证**：见 TESTS.md 同名节。
 
 ## 工具瘦身第一阶段：工具自己声明“默认收起” + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `claude/3a-step17e` `60f909b12`（原基于 `c6f28b150`），已实现，待集成；开关默认关，真实验收后由 3a 在生产打开）

@@ -267,6 +267,20 @@ def test_handoff_address_elsewhere_does_not_list_the_change(tmp_path):
     assert [item["location"] for item in report["errors"]] == ["shots:SH02"]
 
 
+def test_stale_handoff_digest_gets_its_own_warning(tmp_path):
+    after = _seconds_changed()
+    mappings = [{"stage_id": "ST1", "source": {"file_id": "F1", "pointer": f"/shots/{position}/seconds"},
+                 "target": {"file_id": "F2", "pointer": f"/shots/{position}/seconds"}, "reason": "20 → 新秒数：用户要求"}
+                for position in (0, 1)]
+    handoff = _handoff(tmp_path, _project(), after, object_mappings=mappings)
+    fresh = _run(tmp_path, {"h.json": handoff}, *BASELINE, "--handoff", "h.json", "--host-json")
+    assert fresh["valid"] and {"code": "handoff_target_not_matched", "location": "files"} not in fresh["warnings"]
+    _row(after, "shots", "SH03")["reference_ids"].reverse()  # 交接写完后项目又改了一下，F2 摘要过期
+    stale = _run(tmp_path, {"p.json": after, "h.json": handoff}, *BASELINE, "--handoff", "h.json", "--host-json")
+    assert {"code": "handoff_target_not_matched", "location": "files"} in stale["warnings"]
+    assert {item["code"] for item in stale["errors"]} == {"baseline_schema_or_duration_changed"}
+
+
 # ---- handoff_claim_without_change（B08-t4：声称补填了其实原件本来就有）----
 
 def test_mapping_between_identical_objects_is_a_false_change_claim(tmp_path):

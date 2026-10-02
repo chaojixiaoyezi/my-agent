@@ -247,11 +247,12 @@ def action_beat_characters(beat: dict, beat_id: str, scene_characters: set[str],
 
 
 # LLM: 镜头的出镜角色 = 它引用的节拍里的说话人和动作角色。项目里有人物参考时，出镜角色在本镜 reference_ids 里没有一条
-#   kind=character 的参考就提醒；项目完全没有人物参考计划时不提醒（不要求虚构参考）。只比 ID。
+#   kind=character 的参考就提醒；项目完全没有人物参考计划时不提醒（不要求虚构参考）。只比 ID；subject_id 不是字符串的
+#   参考不参与（形状错误另由 check_project 报 error），提醒本身不能崩溃。
 # 函数用途: 提醒出镜人物缺本镜人物参考。
 def shot_reference_warnings(catalog: dict, beat_catalog: dict, warnings: list[dict]) -> None:
-    subjects = {identifier: row.get("subject_id") for identifier, row in catalog["references"].items()
-                if row.get("kind") == "character"}
+    subjects = {identifier: row["subject_id"] for identifier, row in catalog["references"].items()
+                if row.get("kind") == "character" and isinstance(row.get("subject_id"), str)}
     if not subjects:
         return
     for identifier, shot in catalog["shots"].items():
@@ -729,7 +730,9 @@ def beat_warnings(before: object, after: object) -> list[dict]:
         if beat.get("kind") == "dialogue" and isinstance(beat.get("text"), str):
             lines.setdefault((scene_id, beat["text"]), set()).add(str(beat.get("character_id")))
     for key, (_, beat) in sorted(new_beats.items()):
-        speakers = lines.get((key[0], beat.get("text"))) if beat.get("kind") == "dialogue" else None
+        # 台词不是字符串（坏形状，项目检查另报）时不比对，避免拿对象当字典键崩溃。
+        text = beat.get("text") if isinstance(beat.get("text"), str) else None
+        speakers = lines.get((key[0], text)) if beat.get("kind") == "dialogue" and text is not None else None
         if key not in flagged and speakers and str(beat.get("character_id")) not in speakers:
             warnings.append({"code": "dialogue_speaker_changed", "path": ".".join(key),
                              "baseline_character_ids": sorted(speakers), "character_id": beat.get("character_id")})
@@ -757,7 +760,8 @@ def address_covers(addresses: set[tuple[str, str]], file_id: str, pointer: str) 
                for owner, declared in addresses)
 
 
-# LLM: 交接行的全部结构化地址都参与覆盖判断；只读已校验通过的行，不解析 reason 等说明文字。stage_id 为 None 时收集全部阶段。
+# LLM: 交接行的全部结构化地址都参与覆盖判断；不解析 reason 等说明文字。stage_id 为 None 时收集全部阶段（handoff_listing
+#   会传入未经校验的交接，所以 file_id、pointer 都要是字符串才收，坏形状跳过，不能崩溃）。
 # 函数用途: 收集某个阶段（或全部阶段）交接行里声明过的 (文件, 地址)。
 def stage_addresses(rows: dict, stage_id: str | None) -> set[tuple[str, str]]:
     addresses = set()
@@ -767,8 +771,9 @@ def stage_addresses(rows: dict, stage_id: str | None) -> set[tuple[str, str]]:
                 continue
             references = row.get("refs") if section == "unresolved_differences" else [row.get("source"), row.get("target")]
             for reference in references if isinstance(references, list) else []:
-                if isinstance(reference, dict) and isinstance(reference.get("pointer"), str):
-                    addresses.add((reference.get("file_id"), reference["pointer"]))
+                if (isinstance(reference, dict) and isinstance(reference.get("file_id"), str)
+                        and isinstance(reference.get("pointer"), str)):
+                    addresses.add((reference["file_id"], reference["pointer"]))
     return addresses
 
 
@@ -980,6 +985,7 @@ def evaluate_inputs(project_path: Path, handoff_path: Path | None, binding_value
             known = known_documents(project_sha256, project, baseline_input) if host_mode and not binding_values else None
             handoff_check = check_handoff(handoff, bindings, snapshots, known)
             handoff_check["errors"].extend(reference_mentions(handoff, project_objects(project)["references"]))
+            handoff_check.setdefault("warnings", []).extend(handoff_target_warning(handoff, project_sha256, baseline_input))
         except InputProblem as exc:
             handoff_check = {"errors": [{"code": "invalid_input", "cause": exc.code, "path": "--handoff"}]}
         handoff_status = "failed" if handoff_check["errors"] else "passed"
@@ -995,6 +1001,18 @@ def evaluate_inputs(project_path: Path, handoff_path: Path | None, binding_value
                      "errors": errors, "warnings": warnings,
                      "metrics": {**project_check.get("metrics", {}), "project_sha256": project_sha256},
                      "handoff_metrics": handoff_check.get("metrics", {}), "baseline_metrics": baseline_check.get("metrics", {})}
+
+
+# LLM: 带基线时，交接 files 里没有一条摘要等于本次项目实际字节（交接写早了、项目后来又改过），交接里的地址就对不上改后的项目，
+#   所有基线改动都会算“没列出”；单独报 handoff_target_not_matched 提醒，让模型知道该重算摘要，而不是去猜哪处改动没写。只比摘要。
+# 函数用途: 交接没对上本次项目时给出提醒。
+def handoff_target_warning(handoff: object, project_sha256: str | None, baseline: dict) -> list[dict]:
+    files = handoff.get("files") if isinstance(handoff, dict) else None
+    if baseline["status"] != "read" or project_sha256 is None or not isinstance(files, list):
+        return []
+    if any(isinstance(row, dict) and row.get("sha256") == project_sha256 for row in files):
+        return []
+    return [{"code": "handoff_target_not_matched", "path": "files"}]
 
 
 # LLM: 宿主模式下交接能对上的只有宿主交来的项目（target）和基线；按各自实际字节的 sha256 建索引，交接 files 的摘要等于它才算同一文件。

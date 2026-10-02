@@ -535,14 +535,15 @@ def shot_prop_states(row: dict, identifier: str, context: dict, errors: list[dic
 
 
 # LLM: 已登记道具的名字（≥2 字）按字面出现在本镜 action 里，而本镜 prop_states 的 start/end 都没写这个道具时提醒；
-#   只比字面，不推断道具是否真在画面里，也不要求没出现在动作里的道具写状态。
+#   只比字面，不推断道具是否真在画面里，也不要求没出现在动作里的道具写状态。坏形状的 prop_id（列表、对象）只当没写，
+#   不能让提醒本身崩溃（宿主模式崩溃会丢掉整次检查结论；形状错误另由 moment_prop_states 报 error）。
 # 函数用途: 提醒作者给动作里用到的已登记道具写状态。
 def prop_mention_warnings(props: dict, shots: dict, warnings: list[dict]) -> None:
     for identifier, row in shots.items():
         action = row.get("action") if isinstance(row.get("action"), str) else ""
         states = row.get("prop_states") if isinstance(row.get("prop_states"), dict) else {}
         entries = [entry for moment in ("start", "end") if isinstance(states.get(moment), list) for entry in states[moment]]
-        declared = {entry.get("prop_id") for entry in entries if isinstance(entry, dict)}
+        declared = {entry["prop_id"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("prop_id"), str)}
         for prop_id, prop in props.items():
             name = prop.get("name").strip() if isinstance(prop.get("name"), str) else ""
             if len(name) >= 2 and name in action and prop_id not in declared:
