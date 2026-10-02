@@ -40,8 +40,10 @@ from ..tooling.models import (
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
-_MAX_ATTACHMENTS = 10
-_MAX_EVIDENCE_REFS = 64
+# 发送消息最多允许携带的附件个数，防止单次消息体过大。
+_MAX_ATTACHMENT_COUNT = 10
+# 单条消息最多携带的证据引用条数，控制工具结果篇幅。
+_MAX_EVIDENCE_REF_COUNT = 64
 
 
 # LLM: send_message 是通道无关的模型入口，目标固定为当前 owner；不要新增 feishu_send 等重叠工具。
@@ -61,13 +63,13 @@ def build_send_message_model_spec() -> ToolModelSpec:
                 "attachments": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "maxItems": _MAX_ATTACHMENTS,
+                    "maxItems": _MAX_ATTACHMENT_COUNT,
                     "description": "Recent Artifact Refs 中 path 组成的数组。",
                 },
                 "evidence_refs": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "maxItems": _MAX_EVIDENCE_REFS,
+                    "maxItems": _MAX_EVIDENCE_REF_COUNT,
                     "description": "正文实际依据的结构化证据引用；不从正文猜测。",
                 },
             },
@@ -304,8 +306,8 @@ def _attachment_refs(value: object) -> list[str] | ToolHandlerOutcome:
     if len(refs) != len(value):
         return _error("attachments 每一项都必须是非空字符串", "TOOL_INVALID_ARGUMENTS")
     refs = list(dict.fromkeys(refs))
-    if len(refs) > _MAX_ATTACHMENTS:
-        return _error(f"一次最多发送 {_MAX_ATTACHMENTS} 个附件", "TOOL_INVALID_ARGUMENTS")
+    if len(refs) > _MAX_ATTACHMENT_COUNT:
+        return _error(f"一次最多发送 {_MAX_ATTACHMENT_COUNT} 个附件", "TOOL_INVALID_ARGUMENTS")
     return refs
 
 
@@ -385,9 +387,9 @@ def _evidence_refs(value: object) -> list[str] | ToolHandlerOutcome:
             "TOOL_INVALID_ARGUMENTS",
         )
     refs = _string_refs(value)
-    if len(refs) > _MAX_EVIDENCE_REFS:
+    if len(refs) > _MAX_EVIDENCE_REF_COUNT:
         return _error(
-            f"一次最多携带 {_MAX_EVIDENCE_REFS} 个 evidence_refs",
+            f"一次最多携带 {_MAX_EVIDENCE_REF_COUNT} 个 evidence_refs",
             "TOOL_INVALID_ARGUMENTS",
         )
     return refs

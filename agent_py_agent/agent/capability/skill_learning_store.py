@@ -29,11 +29,14 @@ REQUEST_SCHEMA_VERSION = "my-agent.skill-learning-request.v1"
 REGISTRY_SCHEMA_VERSION = "my-agent.skill-learning-registry.v1"
 EVENT_SCHEMA_VERSION = "my-agent.skill-learning-event.v1"
 LEARNED_DIR_NAME = "learned"
+# 学习请求队列最大积压条数。
 MAX_PENDING_REQUESTS = 20
-MAX_REQUEST_ATTEMPTS = 2
+# 单条学习请求最多重试次数。
+MAX_REQUEST_ATTEMPT_COUNT = 2
 MAX_KEPT_VERSIONS = 5
 MAX_LEDGER_EVENTS = 2000
-MAX_SOURCE_RUNS = 10
+# 同一来源运行最多保留条数。
+MAX_SOURCE_RUN_COUNT = 10
 
 # 结构化事件与结果码：账本、CLI 和测试只按这些值判断，reason 只给人看。
 EVENT_PUBLISHED = "published"
@@ -380,8 +383,8 @@ __all__ = [
     "EVENT_SKIPPED",
     "EVENT_UPDATED",
     "LEARNED_DIR_NAME",
-    "MAX_REQUEST_ATTEMPTS",
-    "MAX_SOURCE_RUNS",
+    "MAX_REQUEST_ATTEMPT_COUNT",
+    "MAX_SOURCE_RUN_COUNT",
     "REQUEST_SCHEMA_VERSION",
     "LearnedSkill",
     "SkillLearningEvent",

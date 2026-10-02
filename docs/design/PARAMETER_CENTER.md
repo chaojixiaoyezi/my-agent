@@ -91,6 +91,15 @@
   `_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER` 倍数、`_WAKE_FACT_DEPTH_LIMIT` 深度、`_CHARS_PER_TOKEN_WINDOW` 换算率）只补说明
   挪入无单位组。数值一律不变；目录重建 800 项 `--check` 一致；白名单 320→225＋无单位组 28→32（只减不增；
   `_MAX_RECORDS` 恢复是回滚 sync 脚本误删，非新增）。
+- **P10 第八批（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，已实现，待集成）**：整改 `agent_py_agent/agent/capability/`
+  目录（16 个文件）范围内 **49 个**待整改常数：已有单位后缀 28 个只补中文说明（`_CHARS/_SECONDS/_BYTES/_PERCENT/_TOKENS/_REQUESTS` 等，
+  含 `_APPROX_BYTES_PER_TOKEN`）；按后缀表改名 20 个（`_MAX_ATTACHMENTS→_MAX_ATTACHMENT_COUNT`、
+  `_MAX_EVIDENCE_REFS→_MAX_EVIDENCE_REF_COUNT`、`_BASELINE_NAME_LIMIT→_BASELINE_NAME_LIMIT_CHARS`、
+  `_DEFAULT_SKILL_METADATA_CHAR_BUDGET→_DEFAULT_SKILL_METADATA_MAX_CHARS`、`_DEFAULT_BROWSE_LIMIT→_DEFAULT_BROWSE_COUNT`、
+  `TRACE_LIMIT→TRACE_COUNT`、`MAX_REQUEST_ATTEMPTS→MAX_REQUEST_ATTEMPT_COUNT`、`MAX_SOURCE_RUNS→MAX_SOURCE_RUN_COUNT`、
+  `_MAX_SKILLS_PER_ROOT→_MAX_SKILLS_PER_ROOT_COUNT` 等；词边界替换按文件限定，避开 audit_records_tool/tui_subscription_models
+  同名异义元组解包常数）；无物理单位 1 个（`_MAX_SCAN_DEPTH` 深度）只补说明挪入无单位组。数值一律不变；
+  目录重建 803 项 `--check` 一致；白名单 164→115＋无单位组 36→37（只减不增）。
 - **P10 第七批（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，已实现，待集成）**：整改 `agent_py_agent/agent/agent_core/`
   目录（34 个文件）范围内 **64 条**（61 个唯一名字）待整改常数：按后缀表改名 40 个（`_LIMIT`→`_COUNT` 如
   `PENDING_TURN_INPUT_INVALIDATION_LIMIT→…_COUNT`、`_ISSUE_LIMIT→_ISSUE_COUNT`、`DEFAULT_HARD_FAILURE_HALT_THRESHOLD→…_THRESHOLD_COUNT`，

@@ -22,9 +22,13 @@ from .skill_snapshot import (
 )
 from .skills import SkillCard, parse_skill_file
 
+# 扫描技能目录的最大深度，防止递归过深。
 _MAX_SCAN_DEPTH = 6
-_MAX_SKILLS_PER_ROOT = 2000
+# 每个根目录下最多收录的技能个数。
+_MAX_SKILLS_PER_ROOT_COUNT = 2000
+# 技能名最大字符数。
 _NAME_MAX_CHARS = 128
+# 技能描述最大字符数。
 _DESCRIPTION_MAX_CHARS = 1024
 
 
@@ -164,9 +168,9 @@ def _discover_root(root: SkillRoot) -> tuple[list[SkillManifestItem], list[Skill
     resolved_root = root.path.resolve(strict=False)
     files = [path for path in sorted(root.path.rglob("SKILL.md")) if _visible_skill_path(root.path, path)]
     errors: list[SkillLoadError] = []
-    if len(files) > _MAX_SKILLS_PER_ROOT:
-        errors.append(_error(root, root.path, "SKILL_ROOT_LIMIT", f"skill count exceeds {_MAX_SKILLS_PER_ROOT}"))
-        files = files[:_MAX_SKILLS_PER_ROOT]
+    if len(files) > _MAX_SKILLS_PER_ROOT_COUNT:
+        errors.append(_error(root, root.path, "SKILL_ROOT_LIMIT", f"skill count exceeds {_MAX_SKILLS_PER_ROOT_COUNT}"))
+        files = files[:_MAX_SKILLS_PER_ROOT_COUNT]
     items: list[SkillManifestItem] = []
     for path in files:
         item, error = _manifest_item(root, resolved_root, path)

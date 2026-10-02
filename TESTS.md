@@ -20,6 +20,26 @@
   - 对照样本开预检后两次都不调 Jev。其余样本两种材料下选择相同。
   - 证据：`~/.my-agent/decision-evidence/j8-fragment-material/`。
 
+## P10 常数整改第八批：capability 目录 49 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，基于 `f0bb62254`）
+
+- **范围**：`agent_py_agent/agent/capability/` 目录（16 个文件）内 49 条待整改常数，不碰其它目录。
+- **做法**：A 补上方中文说明 28 个（已有 `_CHARS/_SECONDS/_BYTES/_PERCENT/_TOKENS/_REQUESTS` 等单位后缀，只缺说明，含
+  `_APPROX_BYTES_PER_TOKEN`）；B 按生成器后缀表改名 20 个（`_MAX_ATTACHMENTS→_MAX_ATTACHMENT_COUNT`、
+  `_MAX_EVIDENCE_REFS→_MAX_EVIDENCE_REF_COUNT`、`_BASELINE_NAME_LIMIT→_BASELINE_NAME_LIMIT_CHARS`、
+  `_DEFAULT_SKILL_METADATA_CHAR_BUDGET→_DEFAULT_SKILL_METADATA_MAX_CHARS`、`_DEFAULT_BROWSE_LIMIT→_DEFAULT_BROWSE_COUNT`、
+  `TRACE_LIMIT→TRACE_COUNT`、`MAX_REQUEST_ATTEMPTS→MAX_REQUEST_ATTEMPT_COUNT`、`MAX_SOURCE_RUNS→MAX_SOURCE_RUN_COUNT`、
+  `_MAX_SKILLS_PER_ROOT→_MAX_SKILLS_PER_ROOT_COUNT` 等），全仓引用（含 import、`__all__`、模块注释）词边界一起改；
+  词边界替换按文件限定，避开 `agent/tooling/audit_records_tool.py` 与 `cli/chat_parts/tui_subscription_models.py`
+  里同名但不同义的元组解包常数（`_MAX_LIMIT`/`_MAX_WINDOW`，非本批、不在目录/白名单）；C 无物理单位 1 个
+  （`_MAX_SCAN_DEPTH` 深度）只补说明、挪入白名单无单位组。数值一律不变。
+- **白名单/目录**：主组 164→115（删 49 个）、无单位组 36→37（+1）；目录重建 **803 项** `--check` 一致。
+- **验证命令**（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - 目录守卫 `test_constants_catalog.py` + `test_constant_names_unique.py`：**13 passed**；
+  - 引用改名的 17 个测试文件（skill_learning/persona/session_search/session_history/channel_message/decision 等）：**全过**；
+  - guards9 全部：**全过**；`check_import_boundaries.py`：**0 条**；`ruff check agent_py_agent scripts`：**All checks passed**；
+    `check_doc_sync.py`：**PASS**；`check_code_size.py --mode strict`：hard=0 blocked=False（报告已还原）；
+    `git diff --check` 通过；`check_clean_package.py .`：**OK**；`size_diff.sh $PWD`：**新增告警 0**。
+
 ## 集成修正：/settings internal 接住统一调度传的 capability_path（2026-10-02，3a，step16z）
 
 - **起因**：ae 的 P18 真实验收（TUI 与假飞书）里 `/settings internal <常数名>` 只回“参数暂时读不到”。P17 让 `run_settings_control`

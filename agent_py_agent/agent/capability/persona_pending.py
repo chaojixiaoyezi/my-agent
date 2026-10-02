@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _DIR_NAME = "pending_persona"
+# 待确认画像变更的默认存活秒数，超时后丢弃。
 _DEFAULT_TTL_SECONDS = 24 * 3600
 # token 由 uuid4().hex 生成;取用时严格校验(卡片 value.token 属外部输入,防路径穿越)。
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")

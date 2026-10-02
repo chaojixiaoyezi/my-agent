@@ -31,7 +31,9 @@ _TARGET_ATTR = {
     "user": "owner_user_md",
     "agents": "owner_agents_md",
 }
+# 人设文件最大字节数，防止损坏文件拖垮加载。
 _MAX_PERSONA_FILE_BYTES = 2 * 1024 * 1024
+# 人设提示词默认最大字符数，超长截断。
 _DEFAULT_PROMPT_MAX_CHARS = 20_000
 _LEGACY_TEMPLATE_PLACEHOLDER_VALUES = {
     "(简短结论 / 详细解释 / 带步骤)",

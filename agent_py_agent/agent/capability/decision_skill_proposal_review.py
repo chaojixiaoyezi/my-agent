@@ -40,6 +40,7 @@ from .skill_proposals import PROPOSAL_PENDING, SkillProposal, render_skill_markd
 from .skill_snapshot import skill_content_sha256
 
 _POINT = "skill_proposal_review"
+# 经验条目在提案摘录里的最大字符数。
 _LESSON_EXCERPT_CHARS = 240
 # 与 skill_proposals._BODY_TEMPLATE 的经验段标题一致；模板变动由 test_lesson_excerpt_matches_s1_template 拦住。
 _LESSON_START = "\n## 经验\n\n"

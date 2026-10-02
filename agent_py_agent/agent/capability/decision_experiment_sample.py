@@ -13,9 +13,9 @@ from ..runtime_context import current_subagent_attempt_id
 from ..settings.decision_experiment_schema import experiment_task_id
 
 # 基线名称只供核对，截到 64 个（与能力观测同一口径）；完整集合另以数量与摘要表达。
-_BASELINE_NAME_LIMIT = 64
+_BASELINE_NAME_LIMIT_CHARS = 64
 # 候选短名单/延迟名单要逐个判断实际调用的工具是否被保留，需尽量完整；256 覆盖常见工具规模，超出时显式标记截断。
-_CANDIDATE_NAME_LIMIT = 256
+_CANDIDATE_NAME_LIMIT_CHARS = 256
 _SETTLEMENT_FIELDS = ("outcome", "status", "reserved_http_requests", "max_http_requests", "charged_input_tokens",
                       "provider_input_tokens", "estimated_input_tokens", "input_bound_tokens", "max_input_tokens",
                       "unknown_usage_calls", "input_bound_kind", "input_bound_ratio", "input_bound_warning")
@@ -39,7 +39,7 @@ def _digest(names: list[str]) -> str:
 def _baseline(agent, params, snapshot) -> dict:
     visible = agent.tools.model_visible_specs(runtime_snapshot=snapshot, allowed_tools=params.allowed_tools)
     names = sorted({spec.name for spec in visible})
-    listed, truncated = _names(names, _BASELINE_NAME_LIMIT)
+    listed, truncated = _names(names, _BASELINE_NAME_LIMIT_CHARS)
     return {"variant": "point_off", "presented_count": len(names), "presented_digest": _digest(names),
             "presented_names": listed, "names_truncated": truncated}
 
@@ -50,8 +50,8 @@ def _candidate(projected, reason: str) -> dict:
     if projected is None:
         return {"status": "retained" if reason.startswith("retained:") else "unavailable", "reason": reason}
     tools = projected.tool_snapshot
-    shortlist, shortlist_cut = _names(tools.presentation_shortlist_names, _CANDIDATE_NAME_LIMIT)
-    deferred, deferred_cut = _names(tools.presentation_deferred_names, _CANDIDATE_NAME_LIMIT)
+    shortlist, shortlist_cut = _names(tools.presentation_shortlist_names, _CANDIDATE_NAME_LIMIT_CHARS)
+    deferred, deferred_cut = _names(tools.presentation_deferred_names, _CANDIDATE_NAME_LIMIT_CHARS)
     return {"status": "projected", "reason": "", "tool_projection": tools.presentation_shortlist_names is not None,
             "shortlist_count": len(tools.presentation_shortlist_names or ()), "shortlist_names": shortlist,
             "deferred_count": len(tools.presentation_deferred_names or ()), "deferred_names": deferred,

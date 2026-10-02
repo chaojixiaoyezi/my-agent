@@ -13,9 +13,13 @@ from ..conversation.channels import project_user_reply
 from ..conversation.display_checkpoint import is_display_checkpoint
 from ..conversation.models import MessageLogEntry, is_audit_background_transcript_entry
 
+# 读取历史消息时默认返回的字符数。
 READ_DEFAULT_CHARS = 6_000
+# 读取历史消息的最小字符数，避免一次返回过少。
 READ_MIN_CHARS = 200
+# 读取历史消息的最大字符数，防止一次拉爆上下文。
 READ_MAX_CHARS = 20_000
+# 浏览历史时单条记录的预览字符数。
 _BROWSE_PREVIEW_CHARS = 160
 
 

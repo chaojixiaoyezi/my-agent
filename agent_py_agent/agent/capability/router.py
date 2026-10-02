@@ -60,9 +60,13 @@ _PLAYWRIGHT_KEYWORDS = [
     "导航",
 ]
 
+# 技能元数据最多占用上下文窗口的比例（%），防止技能说明挤占对话。
 _SKILL_METADATA_CONTEXT_WINDOW_PERCENT = 2
-_DEFAULT_SKILL_METADATA_CHAR_BUDGET = 8_000
+# 技能元数据默认字符预算，控制每轮注入的技能说明总量。
+_DEFAULT_SKILL_METADATA_MAX_CHARS = 8_000
+# 单条技能描述的最大字符数，超长截断。
 _MAX_SKILL_DESCRIPTION_CHARS = 1_024
+# 每 token 的近似字节数，用于估算上下文占用。
 _APPROX_BYTES_PER_TOKEN = 4
 _SKILL_SOURCE_RANK = {"builtin": 0, "shared": 1, "workspace": 2, "owner": 3}
 
@@ -559,7 +563,7 @@ def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataB
             max(1, window * _SKILL_METADATA_CONTEXT_WINDOW_PERCENT // 100),
             True,
         )
-    return _SkillMetadataBudget(_DEFAULT_SKILL_METADATA_CHAR_BUDGET, False)
+    return _SkillMetadataBudget(_DEFAULT_SKILL_METADATA_MAX_CHARS, False)
 
 
 # LLM: 包卡仅展示公开 package_id，私有成员路径不参与统一名卡格式。

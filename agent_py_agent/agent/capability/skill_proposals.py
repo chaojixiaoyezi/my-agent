@@ -65,7 +65,9 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _LOCK_NAME = ".proposals"
 _STAGING_PREFIX = ".staging-"
 _DESCRIPTION_PREFIX = "子代理经验："
+# 提案描述摘录字符数。
 _DESCRIPTION_EXCERPT_CHARS = 160
+# 适用场景摘录字符数。
 _SCENARIO_EXCERPT_CHARS = 240
 _BODY_TEMPLATE = """# 子代理经验 {skill_name}
 

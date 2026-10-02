@@ -48,15 +48,24 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
     from ..local_storage import LocalSearchResult, LocalStore
 
+# 检索结果摘要的最大字符数。
 _SNIPPET_CHARS = 240
+# 检索结果预览的最大字符数。
 _PREVIEW_CHARS = 160
-_DEFAULT_DISCOVER_LIMIT = 5
-_DEFAULT_BROWSE_LIMIT = 10
-_DEFAULT_WINDOW = 5
-_MAX_LIMIT = 20
-_MAX_WINDOW = 20
+# 发现模式下默认返回的条数。
+_DEFAULT_DISCOVER_COUNT = 5
+# 浏览模式下默认返回的条数。
+_DEFAULT_BROWSE_COUNT = 10
+# 锚点两侧默认各取几条上下文。
+_DEFAULT_WINDOW_COUNT = 5
+# 检索或浏览一次最多返回的条数上限。
+_MAX_LIMIT_COUNT = 20
+# 锚点窗口条数上限。
+_MAX_WINDOW_COUNT = 20
+# 翻页浏览单页内容的最大字符数。
 _SCROLL_CONTENT_CHARS = 2_000
-_THREAD_BROWSE_DEFAULT = 20
+# 浏览当前会话历史时默认取多少条。
+_THREAD_BROWSE_DEFAULT_COUNT = 20
 _HISTORICAL_TASK_REF_STATUSES = frozenset({"done", "failed", "interrupted"})
 _SESSION_SEARCH_USE_CASES = (
     "用户问之前怎么解决或上次聊到哪时先检索历史",
@@ -102,8 +111,8 @@ def build_session_search_model_spec() -> ToolModelSpec:
             "properties": {
                 "query": {"type": "string", "description": "全文检索词；留空则浏览最近记录。"},
                 "around_id": {"type": "string", "description": "记录 ID；以它为锚返回前后窗口，优先于 query。"},
-                "window": {"type": "integer", "minimum": 1, "maximum": _MAX_WINDOW, "description": "锚点两侧各取几条，默认 5。"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT, "description": "检索或浏览返回条数。"},
+                "window": {"type": "integer", "minimum": 1, "maximum": _MAX_WINDOW_COUNT, "description": "锚点两侧各取几条，默认 5。"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT_COUNT, "description": "检索或浏览返回条数。"},
                 "source_type": {"type": "string", "description": "限定来源类型，如 memory。"},
                 "message_id": {"type": "string", "description": "会话消息编号（压缩摘要或检索结果里给出）；读取这条消息原文，优先于其它形态。"},
                 "thread_id": {"type": "string", "description": "配合 message_id 读取本人其它会话的消息，取自检索结果 scope；不传则读当前会话。"},
@@ -161,20 +170,20 @@ def _dispatch(agent: object, store: LocalStore | None, params: dict[str, object]
         return read_conversation_message(agent, message_id, params)
     around_id = _clean_str(params.get("around_id"))
     query = _clean_str(params.get("query"))
-    limit_default = _DEFAULT_DISCOVER_LIMIT if query else _DEFAULT_BROWSE_LIMIT
+    limit_default = _DEFAULT_DISCOVER_COUNT if query else _DEFAULT_BROWSE_COUNT
     if params.get("current_thread") is True and not around_id:
         if not query:
-            return browse_current_thread(agent, params, _safe_int(params.get("limit"), _THREAD_BROWSE_DEFAULT, _MAX_LIMIT))
-        search = ThreadSearch("", source_type or "conversation_message", _safe_int(params.get("limit"), limit_default, _MAX_LIMIT))
+            return browse_current_thread(agent, params, _safe_int(params.get("limit"), _THREAD_BROWSE_DEFAULT_COUNT, _MAX_LIMIT_COUNT))
+        search = ThreadSearch("", source_type or "conversation_message", _safe_int(params.get("limit"), limit_default, _MAX_LIMIT_COUNT))
         return _discover_thread(agent, _required_store(store), query, search)
     store = _required_store(store)
     # scroll 优先:显式锚点压过 query(模型明确要翻看某条的上下文)。
     if around_id:
-        window = _safe_int(params.get("window"), _DEFAULT_WINDOW, _MAX_WINDOW)
+        window = _safe_int(params.get("window"), _DEFAULT_WINDOW_COUNT, _MAX_WINDOW_COUNT)
         return _scroll(store, around_id, window, source_type)
     if query:
-        return _discover(store, query, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT), source_type)
-    return _browse(store, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT), source_type)
+        return _discover(store, query, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT_COUNT), source_type)
+    return _browse(store, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT_COUNT), source_type)
 
 
 # LLM: 只有检索/翻看/浏览需要派生索引；读原文（message_id、current_thread 浏览）不经过这里。
@@ -215,7 +224,7 @@ def _error(message: str, hint: str, code: str) -> ToolHandlerOutcome:
 # cannot be hidden by several prose rows. Stable partitioning keeps FTS order inside each group.
 # 函数用途: discovery 形态检索历史，并让可续作的精确任务引用优先出现。
 def _discover(store: LocalStore, query: str, limit: int, source_type: str | None) -> dict[str, Any]:
-    fetch_limit = _MAX_LIMIT if source_type in {None, "gateway_request"} else limit
+    fetch_limit = _MAX_LIMIT_COUNT if source_type in {None, "gateway_request"} else limit
     hits = store.search(query, limit=fetch_limit, source_type=source_type)
     shaped = [_shape_hit(hit, snippet_for=query) for hit in hits]
     results = _prioritize_historical_task_refs(shaped)[:limit]

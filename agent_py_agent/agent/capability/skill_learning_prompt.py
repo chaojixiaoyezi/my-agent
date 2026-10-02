@@ -17,13 +17,21 @@ DECISIONS = (DECISION_CREATE, DECISION_UPDATE, DECISION_SKIP)
 CODE_OUTPUT_INVALID = "SKILL_LEARNING_OUTPUT_INVALID"
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]")
 TAG_RE = re.compile(r"[a-z0-9-]{1,32}")
+# 提案描述字段的最大字符数。
 DESCRIPTION_MAX_CHARS = 200
+# 适用时机字段的最大字符数。
 WHEN_TO_USE_MAX_CHARS = 300
+# 理由字段的最大字符数。
 REASON_MAX_CHARS = 200
+# 提案正文最小字符数，过短视为无效总结。
 BODY_MIN_CHARS = 80
+# 提案正文最大字符数，防止超长总结。
 BODY_MAX_CHARS = 12000
-TAGS_MAX = 6
-EXISTING_SKILLS_LIMIT = 200
+# 提案标签最多个数。
+TAGS_MAX_COUNT = 6
+# 已有技能清单最多列出条数。
+EXISTING_SKILLS_COUNT = 200
+# 已有技能描述截取字符数。
 EXISTING_DESCRIPTION_CHARS = 160
 _FIELDS = ("schema_version", "decision", "reason", "update_target", "name", "description",
            "when_to_use", "tags", "body")
@@ -84,7 +92,7 @@ def skill_learning_prompt(material: SkillLearningMaterial) -> str:
     payload = {
         "task": {key: request.get(key) for key in (
             "user_prompt", "final_response", "tool_rounds", "tool_calls_total", "tool_trace")},
-        "existing_skills": list(material.existing_skills[:EXISTING_SKILLS_LIMIT]),
+        "existing_skills": list(material.existing_skills[:EXISTING_SKILLS_COUNT]),
         "updatable_skills": list(material.updatable_skills),
     }
     return _PROMPT.replace("{payload}", json.dumps(payload, ensure_ascii=False, indent=1))
@@ -140,12 +148,12 @@ def _single_line(value: object, limit: int, field: str, *, required: bool) -> st
     return text
 
 
-# LLM: 标签只允许小写字母数字连字符，最多 TAGS_MAX 个，去重保序；任何不合规标签都拒绝整个输出。
+# LLM: 标签只允许小写字母数字连字符，最多 TAGS_MAX_COUNT 个，去重保序；任何不合规标签都拒绝整个输出。
 # 函数用途: 校验并规范标签列表。
 def _tags(value: object) -> tuple[str, ...]:
     _require(isinstance(value, list) and all(isinstance(item, str) for item in value), "tags")
     tags = tuple(dict.fromkeys(item.strip().lower() for item in value if item.strip()))
-    _require(len(tags) <= TAGS_MAX and all(TAG_RE.fullmatch(item) for item in tags), "tags")
+    _require(len(tags) <= TAGS_MAX_COUNT and all(TAG_RE.fullmatch(item) for item in tags), "tags")
     return tags
 
 
@@ -212,7 +220,7 @@ __all__ = [
     "DECISION_SKIP",
     "DECISION_UPDATE",
     "EXISTING_DESCRIPTION_CHARS",
-    "EXISTING_SKILLS_LIMIT",
+    "EXISTING_SKILLS_COUNT",
     "OUTPUT_SCHEMA_VERSION",
     "SkillLearningDecision",
     "SkillLearningMaterial",

@@ -21,7 +21,7 @@ from .skill_learning_store import (
     EVENT_REVERTED,
     EVENT_SKIPPED,
     EVENT_UPDATED,
-    MAX_SOURCE_RUNS,
+    MAX_SOURCE_RUN_COUNT,
     LearnedSkill,
     SkillLearningEvent,
     SkillLearningRegistry,
@@ -281,12 +281,12 @@ def _require_guard_allowed(scan: SkillScanResult) -> None:
         })
 
 
-# LLM: 来源 run 只保留最近 MAX_SOURCE_RUNS 个，保持首次出现顺序。
+# LLM: 来源 run 只保留最近 MAX_SOURCE_RUN_COUNT 个，保持首次出现顺序。
 # 函数用途: 把本次请求的 run_id 追加到来源列表。
 def _runs(existing: tuple[str, ...], request: dict[str, object]) -> tuple[str, ...]:
     run_id = str(request.get("run_id") or "")
     runs = existing if not run_id or run_id in existing else (*existing, run_id)
-    return tuple(runs[-MAX_SOURCE_RUNS:])
+    return tuple(runs[-MAX_SOURCE_RUN_COUNT:])
 
 
 # LLM: 事件只带结构化字段与有界 reason；reason 来自模型，只供人看。

@@ -21,6 +21,26 @@
 - **打开与关闭**：仓库默认 `query_text`；生产不打开（3a 10-02）。要试用时 owner 级 `decision_patch`：`{"changes":{"points.pre_recall.fragment_material":"with_new_facts"}}`。
 - **验证**：见 TESTS.md 同名节。
 
+## P10 常数整改第八批：capability 目录 49 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，基于 `f0bb62254`，已实现，待集成）
+
+- **背景**：P10 白名单按模块分批清理。本批接第七批之后，范围是 `agent_py_agent/agent/capability/` 目录（16 个文件）
+  的 49 条待整改常数，不碰其它目录（其它会话并行处理各自的批）。
+- **做法**：
+  1. **A 补说明 28 个**：已有 `_CHARS/_SECONDS/_BYTES/_PERCENT/_TOKENS/_REQUESTS` 等单位后缀、缺上方中文说明的，
+     在定义上方补一句人话（含 `_APPROX_BYTES_PER_TOKEN` 每 token 字节估算）。
+  2. **B 改名 20 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名——数量类复数→单数+`_COUNT`
+     （`_MAX_ATTACHMENTS→_MAX_ATTACHMENT_COUNT`、`_MAX_EVIDENCE_REFS→_MAX_EVIDENCE_REF_COUNT`、
+     `MAX_REQUEST_ATTEMPTS→MAX_REQUEST_ATTEMPT_COUNT`、`MAX_SOURCE_RUNS→MAX_SOURCE_RUN_COUNT`、
+     `_MAX_SKILLS_PER_ROOT→_MAX_SKILLS_PER_ROOT_COUNT`、`TRACE_LIMIT→TRACE_COUNT` 等），
+     字符类 `_BASELINE_NAME_LIMIT→_BASELINE_NAME_LIMIT_CHARS`、`_CANDIDATE_NAME_LIMIT→_CANDIDATE_NAME_LIMIT_CHARS`，
+     `_DEFAULT_SKILL_METADATA_CHAR_BUDGET→_DEFAULT_SKILL_METADATA_MAX_CHARS`（预算语义保留，后缀归 `_CHARS`）。
+     全仓引用（含 import、`__all__`、模块注释）词边界一起改，旧名在 capability 范围零残留。
+  3. **同名异义处理**：`_MAX_LIMIT`/`_MAX_WINDOW` 在 `agent/tooling/audit_records_tool.py` 与
+     `cli/chat_parts/tui_subscription_models.py` 还有同名但不同义的元组解包常数（不在目录、不在白名单、
+     守卫按单赋值扫描不覆盖）。词边界替换按文件限定跳过这两个文件，避免第七批误伤 audit_records_tool 的重演。
+  4. **C 无物理单位 1 个**：`_MAX_SCAN_DEPTH`（扫描深度）只补说明、挪入白名单无单位组。
+- **白名单/目录**：主组 164→115（删 49 个）、无单位组 36→37（+1）；目录重建 **803 项** `--check` 一致。数值一律不变。
+
 ## /settings internal 与 P17 统一调度的接缝（2026-10-02，3a，step16z，已修）
 
 - P18 真实验收发现 `/settings internal` 在 TUI 和飞书都被兜底成“参数暂时读不到”：P17 给所有子命令统一传 `capability_path`，

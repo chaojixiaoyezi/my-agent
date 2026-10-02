@@ -398,8 +398,10 @@ def _parse_rollback_version(
 # Stale buckets are swept at most once per window so the soft guard cannot leak owner identities.
 # 函数用途: 按当前用户独立计算 30 秒内最多 3 次 USER 画像更新，用户之间绝不互相占额度。
 _persona_update_lock = threading.Lock()
+# USER 画像更新限流的统计窗口秒数，窗口内最多写 3 次。
 _PERSONA_UPDATE_WINDOW_SECONDS = 30.0
-_PERSONA_UPDATE_MAX_WRITES = 3
+# 单个窗口内允许的画像写入次数上限，防止高频覆盖。
+_PERSONA_UPDATE_MAX_WRITE_COUNT = 3
 _persona_update_timestamps: dict[str, list[float]] = {}
 _persona_update_last_cleanup = 0.0
 
@@ -427,7 +429,7 @@ def _persona_update_rate_limited(repository: PersonaRepository) -> bool:
             for item in timestamps
             if now - item < _PERSONA_UPDATE_WINDOW_SECONDS
         ]
-        if len(timestamps) >= _PERSONA_UPDATE_MAX_WRITES:
+        if len(timestamps) >= _PERSONA_UPDATE_MAX_WRITE_COUNT:
             return True
         timestamps.append(now)
         return False

@@ -11,10 +11,14 @@ import json
 from ..common.log_redaction import redact_sensitive_text, redact_sensitive_value
 from .skill_learning_store import REQUEST_SCHEMA_VERSION, request_key, utc_now
 
+# 学习请求里用户输入/回复的截断字符数。
 TEXT_LIMIT_CHARS = 3000
-TRACE_LIMIT = 80
+# 工具轨迹最多记录条数。
+TRACE_COUNT = 80
+# 单条轨迹参数的最大字符数。
 TRACE_ARGS_CHARS = 300
-USED_SKILLS_LIMIT = 10
+# 本轮实际用到的技能 id 最多记录条数。
+USED_SKILLS_COUNT = 10
 _SKILL_TOOL = "skill_search"
 _EXCLUDED_SOURCES = frozenset({"background_main_agent"})
 
@@ -55,7 +59,7 @@ def build_learning_request(ctx: object, min_tool_rounds: int) -> dict[str, objec
         "user_prompt": bounded_text(getattr(ctx, "user_prompt", ""), TEXT_LIMIT_CHARS),
         "final_response": bounded_text(getattr(getattr(ctx, "final_response", None), "text", ""), TEXT_LIMIT_CHARS),
         "tool_calls_total": len(records),
-        "tool_trace": [_trace_entry(item) for item in records[:TRACE_LIMIT]],
+        "tool_trace": [_trace_entry(item) for item in records[:TRACE_COUNT]],
         "used_skill_ids": used_skill_ids(records),
     }
 
@@ -91,7 +95,7 @@ def used_skill_ids(records: list[dict[str, object]]) -> list[str]:
         skill_id = _read_skill_id(record)
         if skill_id and skill_id not in found:
             found.append(skill_id)
-    return found[:USED_SKILLS_LIMIT]
+    return found[:USED_SKILLS_COUNT]
 
 
 # LLM: 只认 tool=skill_search、ok=True、action=get 的原始参数；其它记录返回空串。

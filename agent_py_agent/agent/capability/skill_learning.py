@@ -1,7 +1,7 @@
 # LLM: 自学习 S3（自动总结 Skill）的服务入口，只在 enable_self_learning 开启时由组合根装配到 agent.skill_learning。
 #   收口侧 enqueue_from_finalize 只写一条有界请求；Gateway 后台记忆整理车道调用 run_pending：非阻塞运行锁、
 #   前台同端点模型在忙就顺延、每日上限、无工具结构化调用（复用记忆整理的 backend 与 call_backend_with_timeout）、
-#   严格解析、自动闸门发布、账本、删请求。模型失败最多重试 MAX_REQUEST_ATTEMPTS 次；输出不合规和闸门拒绝不重试。
+#   严格解析、自动闸门发布、账本、删请求。模型失败最多重试 MAX_REQUEST_ATTEMPT_COUNT 次；输出不合规和闸门拒绝不重试。
 #   不给模型注册任何工具。同步检查 core.py 装配、_finalization_service.py、cli/gateway_loops.py 与 test_skill_learning*.py。
 # 模块用途: 把主代理完成的复杂任务在后台总结成 owner 的自学 Skill，全程不需要用户确认、全程留账。
 from __future__ import annotations
@@ -31,7 +31,7 @@ from .skill_learning_store import (
     EVENT_FAILED,
     EVENT_REJECTED,
     EVENT_SKIPPED,
-    MAX_REQUEST_ATTEMPTS,
+    MAX_REQUEST_ATTEMPT_COUNT,
     SkillLearningEvent,
     SkillLearningRegistry,
     SkillLearningStore,
@@ -46,7 +46,8 @@ STATUS_DAILY_LIMIT = "daily_limit"
 STATUS_RETRY = "retry"
 CODE_MODEL_TIMEOUT = "SKILL_LEARNING_MODEL_TIMEOUT"
 CODE_MODEL_FAILED = "SKILL_LEARNING_MODEL_FAILED"
-UPDATABLE_LIMIT = 3
+# 单轮最多更新几条已登记的自主学习 Skill。
+UPDATABLE_COUNT = 3
 
 
 # LLM: 数值来自 AgentConfig 的 self_learning_* 字段（已规范化）；0 的上限表示不限。
@@ -196,7 +197,7 @@ class SkillLearningService:
     def _retry_or_drop(self, path: Path, request: dict[str, object], exc: Exception) -> SkillLearningRunResult:
         code = CODE_MODEL_TIMEOUT if isinstance(exc, TimeoutError) else CODE_MODEL_FAILED
         attempts = int(request.get("attempts") or 0) + 1
-        if attempts < MAX_REQUEST_ATTEMPTS:
+        if attempts < MAX_REQUEST_ATTEMPT_COUNT:
             self.store.rewrite_request(path, {**request, "attempts": attempts})
             return SkillLearningRunResult(STATUS_RETRY, code, request_key=str(request.get("request_key") or ""))
         failed = replace(_request_event(EVENT_FAILED, code, request), reason=type(exc).__name__)
@@ -223,7 +224,7 @@ def _snapshot_entries(provider: Callable[[], object]) -> tuple[object, ...]:
 
 
 # LLM: existing 是全部来源的名字索引（描述截断）；updatable 只收本轮 skill_search get 读过、登记在册、
-#   快照条目确实指向 learned/<name>/SKILL.md 且磁盘 hash 等于登记值的自学 Skill，最多 UPDATABLE_LIMIT 个。
+#   快照条目确实指向 learned/<name>/SKILL.md 且磁盘 hash 等于登记值的自学 Skill，最多 UPDATABLE_COUNT 个。
 #   读取登记表；登记表损坏时抛 SkillLearningStoreError，由 run_pending 记 failed 且保留请求。
 # 函数用途: 组装一次总结调用的材料。
 def _material(store: SkillLearningStore, request: dict[str, object], entries: tuple[object, ...]) -> SkillLearningMaterial:
@@ -238,7 +239,7 @@ def _material(store: SkillLearningStore, request: dict[str, object], entries: tu
     )
     used = {str(item) for item in (request.get("used_skill_ids") or [])}
     candidates = (_updatable(store, registry, entry) for entry in entries if getattr(entry, "stable_id", "") in used)
-    updatable = tuple(item for item in candidates if item is not None)[:UPDATABLE_LIMIT]
+    updatable = tuple(item for item in candidates if item is not None)[:UPDATABLE_COUNT]
     taken = frozenset(item["name"] for item in existing if item["name"])
     return SkillLearningMaterial(request, existing, updatable, taken)
 
