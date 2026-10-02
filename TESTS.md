@@ -11,9 +11,9 @@
 - **门禁**：相关测试 38 个文件（含全仓扫描守卫与 test_packaging）735 项全过；其余见交付消息。
 - **真实 Jev**：真实 Jev 一次（`81f8e169a`，隔离 home、私有端口 8487；目录副本只含生产 Jev 档案 jev-1.13.0 和 MiniMax M2.7；生产 owner Skill 只读副本 + workspace-peek 插件，共 53 题）：`/experiment apply skill_tool 10m 1 60000 数一下当前目录里 notes.txt 一共有多少行`。B=77,982 字节、state 1,237 字节、经验上界 53,583，在标定范围内，预留后结算 charged；Jev 实际计费输入 21,489（上界的 0.40），输出 4,442。截断 description 52 条（11,491 字节）、when_to_use 49 条（11,582 字节）。Jev 选 3 项：workspace-peek 插件（include 概率 0.66，合理）、subagent-read-scope-check（0.56，不对；它的完整说明同样只讲子代理，不是截断造成）、verification-before-completion（0.41，边缘）；其余 50 项 not_needed。晋升评估 keep_observing（insufficient_samples、no_savings：插件被选中，没有可收起的工具）。证据 `~/.my-agent/decision-evidence/f1-jev-candidate-cap-81f8e169a/`。
 
-## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 `37b5166d2`）
+## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 `4dd56f627`）
 
-- 新增 `test_late_response_tool_fence.py`（4 例）：
+- 新增 `test_late_response_tool_fence.py`（4 例，9b 复审后增到 8 例，见下）：
   - 关门后一个工具都不启动，两条调用都记 `HOST_SHUTDOWN_TOOL_NOT_STARTED`（cancelled、未执行、not_started），`metadata.host_shutdown` 的原因码与关门原因一致，记录阶段含 cancelled，本轮上下文有停机说明；
   - 第一个工具执行期间关门，第二个不启动；
   - 已取消又已关门时记停机，不记 CANCELLED；
@@ -24,6 +24,9 @@
   - i03 原因码写错；
   - i04 状态记成 failed；
   - i05 记完不停（照样执行）。
+- 9b 复审后新增 4 例：等审批期间关门 → 批准 → 不执行（串行步、并行段各一，批准绑定不记）；停机加取消时提示用取消那句、记 round_cancelled；端到端用例断言落盘 `tool_execution.host_shutdown` 和账本记录逐字段相等；精简执行事实和耐久索引只放行白名单字段。
+- 复审修改的变异 7 个全部抓住：r01 审批后不读准入、r02 取消提示不生效、r03 不记 round_cancelled、r04 归档执行事实丢停机字段、r05 耐久索引丢停机字段、r06 精简执行事实丢停机字段、r07 索引白名单放进私有字段；原 i01–i05 在新代码上重跑仍全部抓住。
+- 9b 的原样探针（放进 tests 目录带 conftest 跑，跑完删除）：A 只进一次工具、两条都未执行；B 的落盘索引带 host_shutdown 和原因码。
 
 ## 语义记忆复审必须修 M1 / S1（be 复审 e75cf6061，2026-10-02，分支 `claude/38-semantic-memory-m1`，基于 `3c960c1d9`）
 

@@ -15,7 +15,7 @@
 - **代价与未做**：Jev 每个 Skill 只看到约 30 + 24 个汉字的说明，选得准不准要看真实样本。criteria 每题约 938 字节（53 题约 2.5 万上界 token）仍逐题重复；改成共享说明或换 UTF-8 编码（要重新标定 v2）留作后续选项，本轮不做。
 - **验证**：见 TESTS.md 同名节。
 
-## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 `claude/3a-step17e` `37b5166d2`（原基于 `e75cf6061`），已实现，待集成）
+## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 `claude/3a-step17e` `4dd56f627`（原基于 `e75cf6061`），已实现，待集成）
 
 - **问题**：J17 栅栏关门时（`close_model_call_admission`），只在账本里把在途模型调用记成 failed（原因码 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`）。
   - 物理 HTTP 调用还在跑，响应稍后照常回来；`_finish_model_generation` 不看账本终态（迟到的成功也不会重开终态），响应原样交回工具循环。
@@ -28,6 +28,11 @@
   - 之后下一次模型调用照旧被准入拒绝（`ModelCallAdmissionClosedError`），请求不发出，回合按宿主停机收尾（运行错误报告 `host_stopping`），和关门后被拒的回合是同一条路。
 - **不做**（goal 第 8 条）：发送层硬门；子代理停机后自动续跑不占次数。被拒回合重启后的续跑规则是 I4，单独交付。
 - **顺带（3a 定）**：`restart_gateway` 的审批说明按代码更正：ask 弹确认，auto / 完全放行不弹，安排后先等空闲再换进程。改了配置注释、工具模块头和 GATEWAY_SAFE_RESTART.md。
+- **9b 交叉复审后的修改**（证据 `~/.my-agent/decision-evidence/review-i3-7a55bd047/`）：
+  - 必须修：审批通过之后不再读准入，等审批期间关门、之后被批准的调用照样执行（探针 A 实测）。现在 `_resolve_tool_approval` 在批准之后、重新执行之前读一次 `model_call_admission_closure()`，已关门就配 `HOST_SHUTDOWN_TOOL_NOT_STARTED`、不执行、不记批准绑定；串行步和并行段之后补审批都经这一处。
+  - 落盘对账：工具账（任务工作区 `tool_outputs/index.jsonl` 的 `tool_execution`，以及续跑用的精简执行事实）按同一白名单带上 `host_shutdown`（reason_code / error_type / admission_error_code，round_cancelled 只认 True），事后能和模型调用账本逐字段对上。
+  - 停机和取消同时命中：错误码仍是 `HOST_SHUTDOWN_TOOL_NOT_STARTED`，给模型的提示改用取消那句（“停止派发新动作，保存已有进展后收尾”），并记 `round_cancelled=true`。用户 /stop 后 24 小时内续跑时，历史里的提示不能引导模型重做用户喊停的动作。
+  - 文案：`restart_gateway` 注释按 9b 的措辞写清两段排空（先等在跑的回合，最多 turn_wait 秒，没跑完的停在下一个副作用工具前、由新进程续跑；再等执行中的副作用工具，最多 drain_timeout 秒，超时取消这次重启、不强杀），`gateway_restart_drain_timeout_seconds` 上方原来那句“超过就先强制收尾”改对。
 
 ## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0 的流程、模板、检查器和核验声明（be，2026-10-02，分支 `claude/be-capability-packs-content-b2`，基于 ae 块 2 `ce2b833a7`，已实现，待 ae 审）
 
