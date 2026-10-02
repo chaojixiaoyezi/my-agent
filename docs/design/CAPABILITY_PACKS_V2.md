@@ -163,9 +163,12 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 - **返工**：提示 1 次。列出原件路径和副本位置，建议用 `cp` 把副本覆盖回原路径（字节要完全一致，手抄做不到），改动另存新文件。
   - 和交付物返工各自计数；同时出现时合成一条提示，原件在前。
   - 之后照常结束，最终事实带 `inputs_modified`、`input_rework_count`，宿主提示写明“任务开始时的输入 X 被就地改了”。
-- **只读保护依赖 be 的 H3**：
+- **只读保护依赖 be 的 H3**（块 4 已基于 `claude/3a-step17g-h3-preview` `71578e973`，回归用例 `test_pack_verification_protection.py`）：
   - 文件工具和写边界按路径判，所有任务都拒写；
   - Shell 只保护本次命令的工作目录和写根所在任务的 `data/pack_verification/`。Full Access 下别的任务的目录挡不住，这是 H3 写明的已知边界。
+  - 9b 的开关前提 (b) 已有用例：主代理和子代理 × 文件工具和真实 Shell、Full Access 和隔离两种模式，追加、覆盖、新建、改写、删除、整个目录改名都写不进，读照常。
+  - 账本目录在第一个 Shell 命令之前就已建好（run_command 的运行策略声明会改工作区，执行前先记基线），Linux bwrap 只能只读挂载已存在的路径。
+  - 结构上的缺口（已报 be/3a，用例标了 strict xfail）：Full Access 下，命令的工作目录和写根都在任务树外时，H3 找不到当前任务根，本任务的账本目录不在只读覆盖里。主链任务没有既有写根时，会注入本任务 `work/`、`output/` 作写根，这种形状已挡住，但不是结构保证。
 
 ## 5. 交付物存在（块 5）
 

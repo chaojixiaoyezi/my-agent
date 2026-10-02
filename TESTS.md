@@ -384,6 +384,32 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
+## 能力包 v2 块 4：输入原件清单、就地修改判定与返工、核验账本防伪造（2026-10-02，分支 `claude/ae-capability-packs-v2-b4h3`，基于 `claude/3a-step17g-h3-preview` `71578e973`）
+
+- **底座**：块 4 原先叠在块 3 的 `92a90fa9b` 上（分支 `b4r`），现在挑到 3a 的 h3-preview 上。h3-preview 等于 `43f29df6a` 加上 be 的 H3 九个提交。冲突只有常数目录，已重新生成。
+- **`test_pack_verification_inputs.py`**（9 项）：
+  - 原件清单一个任务只记一次，副本权限 600；副本数量、单个大小、总大小都有上限，被篡改的副本当作没有；
+  - 只把本回合的改动算到本回合头上；只对声明了 `preserve_originals` 的钉住包生效；
+  - 收尾返工 1 次，提示里给出副本位置和 cp 建议，用 cp 恢复后不再报；返工记不进账本就不返工；
+  - 输入问题和交付物问题合成一条提示，原件在前；
+  - 落盘找规范任务根，子代理也落到同一个任务根；基线读写往返保持原形状。
+- **`test_pack_verification_protection.py`**（新增，13 项，其中 1 项 strict xfail），对应 9b 定的开关前提 (b)：
+  - 位置一致：块 4 的 `PACK_VERIFICATION_DIRECTORY` 就是 H3 的 `HOST_STATE_TASK_PARTS`；账本、原件清单、副本经 `host_state_for_path` 都命中同一个目录；子代理工作目录往上能认出同一个任务根。
+  - 账本目录在第一个 Shell 命令之前就已建好（权限 700，不是符号链接）。Linux bwrap 只能只读挂载已存在的路径。
+  - 文件工具：主代理、子代理 × Full Access、隔离，共 4 组，每组试追加、覆盖原件清单、新建账本、edit_file 改写、apply_patch 删副本 5 种写法，全部 `PATH_HOST_STATE_WRITE_BLOCKED`；账本目录字节不变，读照常。
+  - 真实 Shell（macOS Seatbelt）：主代理在 task/work、主代理在项目目录且写根带本任务 work/ 和 output/、子代理在 work/agents/<run>，× 两种模式，共 6 组。每组试追加、覆盖、新建、rm、整个目录 mv 5 种写法，全部被拒。同样的工作目录和写根下，读账本、写自己的目录都照常，证明拒绝来自只读覆盖，而不是命令整个跑不起来。
+  - strict xfail：Full Access 下命令的工作目录和写根都在任务树外时，H3 找不到当前任务根，伪造记录能写进去。这是结构缺口，已报 be 和 3a；修好后这条会 XPASS，提醒去掉标记。
+- **变异 22/22 全部被抓住**（`cpv2-mut/mutations_b4h3.json`）：
+  - 块 4 原有 18 个：每回合重记原件、副本不限大小、接受被篡改的副本、不看保留原件的包、判本回合开始前就不在的文件、忽略回合开始时状态、忽略原件状态、返工不设上限、返工不先记账、task_input 不用副本、被改过的也当原样、不找规范任务根、段落顺序反了、事实漏输入、提示漏输入、副本对外可读、原件没记、task_input 从回合基线找；
+  - 新加 4 个，针对保护：H3 的任务状态声明换了名、命令沙箱不按工作目录和写根找任务根、账本目录对外可读、块 4 落盘目录换名。
+- **相关回归**：266 个文件（块 3 那批 263 个，再加 protection、host_files_access 等），5189 passed，12 skipped，5 xfailed（其中 1 个是本块的 strict xfail，其余 4 个原本就有）。
+- **门禁**逐项 rc=0（基线 `71578e973`）：
+  - import boundaries、ruff：首轮报新用例文件的 import 顺序，已修；
+  - `doc_sync --base 71578e973`；
+  - 常数目录 `--check`（866 项）、前端配置目录 `--check`；
+  - strict code-size：按确切基线比告警身份，新增 0。首轮多出 1 条（测试辅助函数 `_run` 有 5 个参数），把工作目录和写根合成一个参数后消掉；
+  - `git diff --check 71578e973..HEAD`、clean_package。
+
 ## 能力包 v2 块 3：宿主写完就查、收尾再查、返工 1 次、宿主提示与交付事实（2026-10-02，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`）
 
 - **新增** `agent_py_agent/tests/test_pack_verification_matching.py`（18 项）：

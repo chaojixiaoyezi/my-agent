@@ -975,6 +975,7 @@ agent_py_agent/
 |   |-- test_compact_capacity_facts.py # 候选过大失败带出最小候选/上限/摘要占比/保留条数/候选数，白名单与TUI失败行
 |   |-- test_compact_capacity_host_chain.py # 真实恢复宿主两入口：固定开销经只计量入口只在失败时量一次，保留IR按实际发送材料
 |   |-- test_host_managed_store_access.py # H2：宿主托管存储（插件安装库、包库）对文件工具和 shell 不开放：路径策略、遍历工具、Seatbelt/bwrap 隐藏与真实沙箱
+|   |-- test_pack_verification_protection.py # 能力包块 4：核验账本防伪造（主代理和子代理 × 文件工具和真实 Shell 写不进 data/pack_verification，读照常）
 |   |-- test_host_files_access.py # H3：宿主配置、运行状态、任务核验记录对模型只读，凭据对文件工具不可读：逐项文件工具与真实 Shell、A/B 两类、上级目录改名、大小写
 |   |-- test_task_run_settle_quiescent_children.py # TaskRun 收口：静止但未终态的子 run（attempt 终态且无锁）不再拦住父 TaskRun，closed 带证据、reopened 可逆、发现扫描能关存量
 |   |-- test_owner_wake_discovery_task_run_no_link.py # 发现层补关没有会话任务的 TaskRun（C12c）：关联文件确实不存在才按代理树关，读坏/active/根在跑/目录列不全都不关
