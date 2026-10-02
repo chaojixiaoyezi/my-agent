@@ -213,7 +213,7 @@ my-agent 自己配的规则（用户 2026-10-02 拍板）：
 
 设好以后要重启 Gateway 才生效。管理员的 my-agent 有安全重启工具（`restart_gateway`，默认开）时，可能顺手安排一次安全重启（先排空再换进程，TUI 和 IM 自动重连）；要不要先问你，看审批模式（自主工作 auto 和完全放行不会问）。没有这个工具时，它会提醒你用 `/restart` 或在终端运行 `my-agent gateway restart`。
 
-注意：工具的语义检索（`tool_vector_search_enabled`，默认开）和记忆共用同一个向量模型。选了向量模型以后，工具检索也会用它发嵌入请求。选向量模型的入口不会改这个开关。
+注意：工具的语义检索（`tool_vector_search_enabled`，默认开）和记忆共用同一个向量模型。选了向量模型以后，工具检索也会用它发嵌入请求。选向量模型的入口不会改这个开关；只想开记忆、不想让工具检索也发嵌入请求，就先发 `/settings set tool_vector_search_enabled false`，和选向量模型共用一次重启。
 
 ### 花多少
 
