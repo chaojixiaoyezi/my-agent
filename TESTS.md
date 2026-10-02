@@ -123,6 +123,24 @@
   - `test_runtime_gate_ledger.py::test_workspace_only_owner_control_metadata_stays_read_only`：权限文件改由路径策略拒写（`PATH_HOST_STATE_WRITE_BLOCKED`），不再出现在 ledger 的 `forbidden_write_roots` 里；写边界照样拒。
   - `test_shell_sandbox_boundary_facts.py` 两项：写根是 owner 的 `workspace/` 时，里面的 `workspace/runtime` 是宿主托管文件，边界事实把它列进 `read_only`。
 - **全量 12 分片（Mac）**：上面 3 项按新行为改期望后，其余全过。
+- **Docker Linux 车道**（`666880839`，带 NET_ADMIN）：
+  - 全量结果：12/12 rc=0，26641 passed / 0 failed / 103 skipped / 32 xfailed / 5 xpassed。证据在 `~/.my-agent/releases/claude-tools/linux-lane-666880839/`。
+  - H3、H2 两个文件在同一容器里单跑 115 passed、0 skipped，说明 bwrap 真实沙箱用例都跑了，包括：
+    - 断网、只读挂载、上级目录改名后挂载仍只读；
+    - 人格根改名；
+    - 逐项 Shell 拒写。
+- **变异**：41 个全部抓到，P14 第二轮被抓。变异覆盖：
+  - 各项声明删项；
+  - 大小写、硬链接；
+  - 凭据的四条规则与先后顺序；
+  - 写门、三个写工具的拒写码；
+  - 写边界、插件上下文；
+  - Shell 覆盖与边界事实；
+  - Seatbelt 上级目录规则、顺序、人格根、不存在路径；
+  - owner `config/` 预建；
+  - A 类各项、`.lock`；
+  - ledger 的 B 类；
+  - `restart_gateway` 审批。
 - **`test_gateway_restart_tool.py` 新增 1 项**：`restart_gateway` 在确认（ask）和自主或完全放行（auto）两种审批模式下，`ActionPolicy` 都给出 `ask`（3a 定的审批策略 always）。
 
 ## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`）
