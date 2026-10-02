@@ -29,6 +29,22 @@
   5 项 X11 防线自检在车道里按设计跳过；真链路点击用的 key 是 `ocr:1`（宿主接受带冒号的 key），改内容、移窗后照常 `stale`。
 - **门禁**：变基到含片 D 的 `afb15947b` 后，相关测试 31 个文件（另加片 D 的 `test_decision_action_execute.py`）694 项通过、7 项车道用例在 Mac 上按设计跳过；严格门禁全部通过，size diff 新增 0。
 
+## 续跑上限收口时插话的终态与提示（step17h，2026-10-02，分支 `claude/38-limit-steer-note`，基于 `afb15947b`）
+
+- 新增 `test_turn_resume_limit_steer.py`（10 例），用真实的 guidance 回执、入口回执和启动恢复：
+  - 已取走 + 进程被杀 + 到上限：插话被最后一代认领、送进主调用（submitted，有提交批次、没有确认批次）→ 收口后回执 rejected，`migration.dead_submission` 记下那次提交；入口回执 queued，备用请求原样排进 pending、没有续跑标记；提示是“你补充的话会作为新的一轮马上处理”，`guidance_settlement` 计数对得上；
+  - 未取走 + 到上限：同上，没有 dead_submission；
+  - 已写进历史：回执收成 consumed（settle_reason=recorded_in_transcript），入口回执 consumed，不再排备用请求；提示是“已记在会话里，发‘继续’会一起处理”；
+  - 上限答复已封存、插话还没结算时进程又挂了：启动补交照样结算，归档前把提示改成对应句子；
+  - 没有插话：原句，计数全 0；
+  - 卡死超时（非上限收口）：已提交的插话不动，入口回执 terminal_unknown，不排备用请求，答复里没有 guidance_settlement；
+  - 提示选句 4 种组合。
+- 变异 15 个全部抓住：
+  - 结算：上限入口不带死提交开关、死提交分支从不进；历史判断恒假、恒真、查错去重键；已在历史仍拒收；不记 dead_submission；
+  - 计数和提示：不记 backup_turns、不记 recorded_in_transcript；上限判断恒假、恒真（漏到超时收口）；提示不写进答复；两句优先级颠倒；
+  - 已封存补交：还用普通 reject_pending、不改提示。
+- 相关回归：插话、恢复、续跑相关 11 个测试文件 522 项通过（见交付消息里的门禁）。
+
 ## 同一回合因非计划重启最多自动续跑 3 次（I4 续，2026-10-02，分支 `claude/38-resume-limit`，基于 `72ddc2b5c`）
 
 - 新增 `test_turn_resume_limit.py`（9 例）：

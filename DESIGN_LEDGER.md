@@ -1,6 +1,6 @@
 # 设计台账
 
-## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已集成 step17g `7ed9e5c07`；插话说明 step17h 补记，分支 `claude/38-limit-steer-note`）
+## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已集成 step17g `7ed9e5c07`；插话终态与提示分句 step17h 已实现、待集成，分支 `claude/38-limit-steer-note`）
 
 - **起因**：I4 之后，被停机打断的回合重启后都会自动续跑，但启动续跑一直没有次数上限。本身会把进程弄崩的回合，每次重启都会再续一次，形成崩溃循环。3a 定：加上限。
 - **规则**：
@@ -24,13 +24,25 @@
   - 先按原执行编号、租约代次、心跳等核对，再归档：释放会话车道、收口插话，然后写 response、history 和流终态事件 `request_aborted`。
   - 失败结果的 `user_error` 和 `error` 都是那句提示：TUI 显示 `user_error`；IM 公开结果显示 `user_error`，管理员拿完整结果时 IM 显示 `error`。三处一致。
   - 续跑次数和上限放在结构化字段 `unplanned_resume_count` / `max_unplanned_resume_count`，供诊断读取。
-- **插话怎么办**（9b 复审建议 1，step17h 补记）：
-  - 回合到上限收口时，还没被续跑回合取走的插话（回执 pending / reserved）不会丢：收口时回执被拒，它的“备用下一轮”马上作为新回合跑起来，没有续跑标记，计数从 0 开始。
-  - 例外（step17g 冒烟观察，空跑和真实 M2.7 正式跑一样，证据 `~/.my-agent/decision-evidence/step17g-smoke-7ed9e5c07/`）：
-    - 第 3 代被拖住时插的一句话，被第 4 代续跑回合取走、放进了它那次主调用，回执变成 submitted；这次调用随第 4 次 kill -9 一起没了。
-    - 收口时这条回执已不是待处理，既不拒也不起备用下一轮，状态停在 submitted，用户看不到说明。
-    - 要不要把“送进的调用已确认随进程死掉、又没有答复记录”的插话也按待处理拒掉并起备用下一轮，待 3a 定。
-  - 文案：收口后如果紧接着跑插话的新一轮，“已停止自动续跑；发‘继续’可以接着做”可能让人困惑。38 的建议是按 reject 的结构化统计分两句（有备用下一轮时改成“你补充的话会作为新的一轮马上处理”），待 3a 定。
+- **插话怎么办**（9b 复审建议 1 + step17g 冒烟观察；3a 10-02 定，step17h 实现，分支 `claude/38-limit-steer-note`）：
+  - 原则（3a）：用户的插话不能悄悄悬着。续跑上限收口时每条插话都要有终态和用户看得到的说明，内容不丢、也不送两遍。
+  - 查清的事实：插话只有在模型答复后提交确认批次、回执记成 consumed 之后，才写进会话历史（去重键 `active-turn-input:<插话编号>`，只在 `transcript_dedupe_key` 一处生成）；被续跑回合取走、送进主调用（submitted）本身不写历史。
+  - 规则（只看结构化事实：回执状态、确认批次、历史里有没有这条插话的去重键）：
+    - 没被取走的（pending / reserved）：照旧拒收，入口回执把它排成“备用下一轮”马上跑，没有续跑标记、计数从 0。
+    - 已被续跑回合取走、送进主调用、随进程一起死掉的（submitted，确认批次修复后仍没有，历史里也没有）：和没被取走的一样拒收、起备用下一轮。step17g 冒烟看到的“悬着”就是这种。
+    - 已写进历史的（submitted 但历史里已有它的去重键；正常流程不会出现，按 3a 要求兜住）：收成 consumed，`migration.settle_reason=recorded_in_transcript`，不再起备用下一轮，免得模型看到两遍。
+    - 随进程死掉的那次提交都记在 `migration.dead_submission`（提交编号、认领尝试）。
+  - 范围：只在续跑上限收口时这样处理。`TURN_RESUME_LIMIT_EXCEEDED` 只在启动恢复里产生，提交插话的进程已证明死亡；卡死超时等收口时进程未必死了、结果未知，已提交的插话照旧不动。
+  - 提示（3a 定）：按插话结算的结构化计数选句，三句都在 `conversation/turn_resume_notice.py`（`turn_resume_limit_notice`）：
+    - 有备用下一轮：“这一轮被打断太多次，已停止自动续跑；你补充的话会作为新的一轮马上处理。”
+    - 只有已记在历史的：“这一轮被打断太多次，已停止自动续跑；你补充的话已记在会话里，发‘继续’会一起处理。”
+    - 都没有：原句。
+    - 两种都有时说前一句：备用的那一轮带着同一会话历史跑，已记下的补充也会被看到。
+  - 做法：
+    - `GuidanceRecovery.settle_dead_turn`（续跑上限收口专用，等于 `reject_pending(reject_reserved=True)` 再加上已提交插话的定终态）、`settle_dead_submission`、`turn_end_labels`；汇总计数新增 `dead_submissions` / `recorded_in_transcript` / `backup_turns`。
+    - Gateway 两处收口（terminalize，以及“上限答复已封存、插话还没结算时进程又挂了”的启动补交）都经 `_settle_turn_guidance` 分流。
+    - 上限收口时，计数写进答复 `guidance_settlement`，提示句同步写进 `user_error` 和 `error`；封存过的答复只在归档前改。terminalize 内联的插话收口抽成助手，函数反而变短。
+  - 已知边界：答复已经归档之后才发生的结算失败，提示不会再改（终态归档是完成权威）；入口对账失败照旧留给周期对账重试。
 - **已知边界 / 后续项**（I4 留下的，这次没动）：
   - 仍没有“打断太久就不续”的时间上限；
   - 停机那一刻仍不会立刻提示“将会续跑”。

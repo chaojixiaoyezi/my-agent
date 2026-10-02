@@ -1059,3 +1059,11 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - 非计划重启的续跑次数记在 `active_turn_recovery.unplanned_resume_count`。满 `MAX_UNPLANNED_RESUME_COUNT`（3）后再被打断，按 `TURN_RESUME_LIMIT_EXCEEDED` 收成 failed，和卡死超时共用 `_commit_stale_processing_failure`。
   - 安全重启接班、服务内租约过期不计。
   - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## 续跑上限收口时插话都有终态和提示（step17h，2026-10-02，分支 `claude/38-limit-steer-note`，基于 `afb15947b`）
+
+- **起因**：step17g 冒烟里，被最后一代续跑回合取走、送进被杀调用的插话停在 submitted，用户看不到说明（3a 定：不能悄悄悬着）。
+- **改动**：
+  - `recovery._settle_turn_guidance`：续跑上限收口改走 `GuidanceRecovery.settle_dead_turn`，没写进历史的死提交拒收、起备用下一轮，已写进历史的记成已消费。
+  - `_apply_limit_settlement`：按结算计数换提示句、写 `guidance_settlement`。terminalize 和已封存热记录的补交两处共用。
+  - 设计见台账同名节“插话怎么办”，测试与变异见 TESTS.md 同名节。
