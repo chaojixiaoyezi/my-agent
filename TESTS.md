@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## run_tests.py 导入即报错、手动运行也隔离 home 与端口（3a，2026-10-02，step17e）
+
+- **事故**：`agent_py_agent/tests/run_tests.py` 是手动运行的真实冒烟脚本，模块顶层就执行 CLI 命令，包括真实模型调用、`gateway stop --kill`、`gateway start --force`。09-26 和 10-02 两次被点名交给 pytest（`python_files=test_*.py` 只管目录发现，点名的文件照样收集），在导入阶段打到真实 `~/.my-agent`。10-02 这次（75 的门禁，10:45–10:58）：在生产 local/main 跑了一次 `run "测试动态 prompt"`，MiniMax-M2.7 调用 12 次、41.4 万 token（缓存读 32.9 万），工具 10 次全是只读；第 5 条命令 `remember` 参数不合法退出，没走到后面的 gateway stop/start。留下运行目录和两行用量，按 O4 的规则不删。
+- **守卫**：
+  - 脚本在导入之后、任何副作用之前检查 `__name__`：不是手动运行就抛 RuntimeError，什么也不执行；
+  - 手动运行时，home（`MY_AGENT_HOME` 和配置 `my_agent_home`）放进临时目录，Gateway 用一个空闲端口，不用 8420；
+  - 3a 的 `3a-scripts/run_files312.sh` 只接受 `test_*.py`，其它文件直接 rc=4 拒绝。
+- **用例** `test_run_tests_script_guard.py`：
+  - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
+  - 把脚本点名交给 pytest → 收集报错、rc 非 0。
+  - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
+
 ## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）
 
 - `test_owner_wake_discovery_task_run_no_link.py` 新增 7 项：

@@ -1,11 +1,18 @@
-"""仓库内置的本地冒烟测试入口。"""
+"""仓库内置的本地冒烟测试入口（只能手动运行：python3 agent_py_agent/tests/run_tests.py）。"""
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+if __name__ != "__main__":
+    # 这是真实冒烟脚本，模块顶层就会执行 CLI 命令（含真实模型调用和 gateway stop/start）。被 import 或被 pytest
+    # 点名收集时，conftest 的 home 隔离还没生效，会打到真实 ~/.my-agent：09-26 与 10-02 两次误收都是这样。
+    # 所以导入即报错、什么也不执行。
+    raise RuntimeError("run_tests.py 是手动运行的真实冒烟脚本，不能被 import 或交给 pytest 收集")
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT.parent
@@ -14,6 +21,12 @@ RUN_ENV.setdefault("PYTHONUTF8", "1")
 RUN_ENV.setdefault("PYTHONIOENCODING", "utf-8")
 TEST_TMP_HANDLE = tempfile.TemporaryDirectory(prefix="agent-full-smoke-")
 TEST_TMP = Path(TEST_TMP_HANDLE.name)
+# 手动运行也不碰真实数据目录和生产端口：home 放进临时目录，Gateway 用一个空闲端口（不用默认 8420）。
+TEST_HOME = TEST_TMP / "home"
+RUN_ENV["MY_AGENT_HOME"] = str(TEST_HOME)
+with socket.socket() as _probe:
+    _probe.bind(("127.0.0.1", 0))
+    TEST_GATEWAY_PORT = _probe.getsockname()[1]
 TEST_MEMORY = TEST_TMP / "memory.jsonl"
 TEST_LOCAL_STORE = TEST_TMP / "local_store"
 TEST_SUBAGENTS = TEST_TMP / "subagents"
@@ -28,6 +41,8 @@ _gateway_ws = str(TEST_GATEWAY).replace("\\", "/")
 TEST_CONFIG.write_text(
     (ROOT / "config" / "agent_config.yaml").read_text(encoding="utf-8")
     + "\n# full smoke test isolation\n"
+    + f'my_agent_home: "{str(TEST_HOME).replace(chr(92), "/")}"\n'
+    + f"gateway_port: {TEST_GATEWAY_PORT}\n"
     + f'memory_path: "{_memory_path}"\n'
     + f'local_store_path: "{_local_store_db}"\n'
     + f'local_store_files_dir: "{_local_store_files}"\n'
