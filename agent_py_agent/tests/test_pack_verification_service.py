@@ -344,6 +344,17 @@ def test_gateway_notice_is_built_from_facts(monkeypatch):
     assert notice.source == "pack_verification" and "out/d.json 有效，警告 2 条" in notice.text
     assert queued[0][0] == "thread-1"
     assert notice_module.queue_pack_verification_notice(context, conversation, types.SimpleNamespace()) == ()
+    # 块 4/5：没有检查结果、只有缺交付物（或只有输入原件被改）的回合也要发提示
+    missing = {"results": [], "deliverables_missing": [{"code": "DELIVERABLE_MISSING", "package_id": "story-content",
+                                                       "deliverable_id": "delivery", "path_patterns": ["out/*.json"], "paths": []}],
+               "closeout_checked": True, "rework_count": 0, "deliverable_rework_count": 2}
+    [notice] = notice_module.queue_pack_verification_notice(context, conversation, types.SimpleNamespace(pack_verifications=missing))
+    assert "交付物 delivery 本回合没有写出" in notice.text and dict(notice.details)["deliverables_missing_count"] == "1"
+    modified = {"results": [], "inputs_modified": [{"path": "in/source.json", "copy": "x"}], "input_rework_count": 1}
+    [notice] = notice_module.queue_pack_verification_notice(context, conversation, types.SimpleNamespace(pack_verifications=modified))
+    assert dict(notice.details)["inputs_modified_count"] == "1" and "in/source.json" in notice.text
+    assert notice_module.queue_pack_verification_notice(context, conversation, types.SimpleNamespace(
+        pack_verifications={"results": [], "inputs_modified": [], "deliverables_missing": []})) == ()
 
 
 def test_switch_defaults_off_and_is_an_admin_only_boundary():

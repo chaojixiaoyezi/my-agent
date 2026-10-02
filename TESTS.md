@@ -401,6 +401,7 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
 - **相关回归**：267 个文件（块 4 那批 266 个，加 test_pack_verification_deliverables.py），5197 passed，12 skipped，5 xfailed（其中 1 个是块 4 那条 H3 缺口的 strict xfail）。
 - **门禁**逐项 rc=0（基线 `f87afec4a`）：import boundaries、ruff、`doc_sync --base 780ff4c40`、常数目录 `--check`（868 项）、前端配置目录 `--check`、strict code-size（按确切基线比，新增 0）、`git diff --check 780ff4c40..HEAD`、clean_package。
 - **变异 12/12 全部被抓住**（`cpv2-mut/mutations_b5.json`，跑交付物、服务、输入三个测试文件）：没基线也查、返工上限失效、返工不先记账、打不开都记成缺、字段不匹配算打不开、不分 required、不确定的老文件算交了、事实漏掉缺交付物、提示漏掉缺交付物、段落顺序错、json 永远算能打开、只按路径算交了。
+- **块 5 补修（同分支第二个提交）**：块 8 准备 harness 时发现，Gateway 的宿主提示只在有检查结果时才发；只有输入原件被就地改、或只有缺交付物的回合，用户在 TUI 和飞书里看不到提示（`channel_delivery` 里有事实）。改为三类事实任一非空就发，提示的 details 加 `inputs_modified_count`、`deliverables_missing_count`。`test_gateway_notice_is_built_from_facts` 补了“只缺交付物”“只改原件”“三类都空不发”三种情况。
 - 先在旧底座 `f87afec4a` 上跑过一遍（变异 12/12、265 个文件 5079 passed、门禁全 rc=0，证据 `capability-packs-v2-b5/on-f87afec4a/`），随块 4 换底座后重跑，数字见上。
 
 ## 能力包 v2 块 4：输入原件清单、就地修改判定与返工、核验账本防伪造（2026-10-02，分支 `claude/ae-capability-packs-v2-b4h3`，基于 `claude/3a-step17g-h3-preview` `71578e973`）

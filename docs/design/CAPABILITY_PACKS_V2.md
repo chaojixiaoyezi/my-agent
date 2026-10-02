@@ -139,7 +139,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 开关关着时，最终结果阶段直接返回、不去读账本，每轮收尾零 I/O。
 - **对外**：
   - `AgentRunResult.pack_verifications`（`pack_verifications.v1`）→ `channel_delivery.pack_verifications`，不进公开投影白名单；
-  - 回合正常返回后，Gateway 用这些事实写一条 `HostNotice`（`source=pack_verification`，`code=summary`），排入原提示队列，和当轮其它提示一起发布。
+  - 回合正常返回后，Gateway 用这些事实写一条 `HostNotice`（`source=pack_verification`，`code=summary`），排入原提示队列，和当轮其它提示一起发布。检查结果、被就地改的输入原件、缺的必需交付物三类事实有任一项就发（块 4/5 起，只有后两类、没有检查结果的回合也发）。
   - 收尾跑过时，只报最后一次收尾检查覆盖的结果，也就是交付时的内容状态。
   - 没跑过收尾（工具轮次上限、失败、中断）时，报每个目标最后一次写入时的结果，并注明“没有正常收尾”。
 - **已知限制**：
