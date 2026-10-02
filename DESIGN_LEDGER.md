@@ -91,6 +91,31 @@
 - **真实验收**（隔离 home、私有端口 8438，目录副本只放 Jev 与 MiniMax，Jev 实际 2 次调用）：请求 `jev-latest` 返回 `jev-1.13.0`；钉住后请求 `jev-1.13.0` 返回 `jev-1.13.0`；两次选模型观察都成功（1.3 秒、1.5 秒），TLS 握手各约 0.9 秒（每次新建连接，留给 J1）。
 - **验证**：见 TESTS.md 同名节。
 
+## C12a／C12b：被中断任务的后台进程 Gateway 里 /stop 收不回；gateway stop 后的孤儿进程（2026-10-01，分支 `claude/38-c12-stop-after-interrupt`，基于 main `34e4d874e`，C12a 已实现待集成，C12b 复核无需改动）
+
+- **C12a 现象**（R10 深度切片 09-28）：回合被 `/interrupt` 后，同会话 `/stop` 回"当前没有运行中的内容"，任务的后台进程一直跑到 Gateway 停止以后。
+- **C12a 原因**（10-01 在隔离 Gateway + 假模型 + 真 TUI 上复现，代码与 step16x 相同）：
+  - `/interrupt` 只结束本轮，任务关联仍是 active。中断后马上 `/stop` 走正常任务停止，能收回（复现 1）。
+  - 约 2–4 分钟后，发现层账本自愈（`owner_wake_discovery._project_task_ledger_terminal`，operator `wake-discovery-ledger-heal`）看到"主执行轮已 cancelled、关联还 active"，把任务记成 cancelled、关掉 TaskRun，但后台进程不动。之后 `/stop` 找不到可控任务，只能回"没有运行中的内容"（复现 2）。R10 原证据的 runtime_events 也是这样：中断后 230 秒 ledger-heal 关单，32 秒后 `/stop` ok=false。
+  - 09-28 的修复 3f17b1e7a 只给本地 chat 入口加了"无回合时回收本会话遗留资源"。默认 TUI 和飞书走的 Gateway 入口一直没有。
+- **C12a 做法**：
+  - Gateway `/stop` 在没有热请求、也没有可控根任务时，改为回收本会话遗留的托管后台进程（`control_service._stop_session_leftovers`）。选择规则：
+    - 只认本会话精确 thread_id 的登记记录；
+    - 本会话仍 active 的任务（审计、分离任务、子代理投影，各有自己的入口）和执行状态里仍在跑的任务，一律不碰；
+    - 每条记录按自己的 (thread, root_task, run) 走任务停止同一个 `freeze_process_stop`，进程组回收交给锁外线程，和 `/stop` 停任务同一条路；
+    - 会话任务记录或执行状态读不出，就报 `TASK_RESOURCE_STOP_UNCONFIRMED`，一个都不停。
+  - 回执列出每个 pid 和 task/run 归属。TUI 和飞书都经这一个入口。
+  - 没有运行中回合时，`/interrupt` 在两个入口都只回"当前没有执行中的回合，无需中断。"，不碰任何资源（中断不冒充资源清理）。本地入口原来会顺手回收，这次一并对齐。
+  - 回执渲染 `background_resource_lines` 从 cli 移到 `gateway_parts/background_resource_report.py`，两个入口共用。
+- **C12b 复核**（R10 边界项"gateway stop 后两个任务后台进程由 init 接管继续跑"）：
+  - 09-28 的 2ffb30f51 合入在 R10 被测版本之后，已经处理了这一项。托管后台进程跨 Gateway 停止或重启存续是设计，生产依赖这一点。`gateway stop` 会列出它们（pid、所属任务、状态），并提示加 `--stop-background`；加上这个参数就按进程组回收。
+  - 10-01 在 base 代码上实测：普通 `gateway stop` 后，进程被列出并由 init 接管（PPID 1）继续跑；`gateway stop --stop-background` 后整组退出（SIGTERM，确认，组内无残留）。Gateway 再起来后，用户也能在原会话里用 `/stop` 收（见 C12a）。
+  - 结论：不改代码。
+- **待定**：
+  - 中断后几分钟，自愈会把仍 active 的中断任务记成 cancelled。之后同会话的新消息会开新任务目录，不再接着中断的任务；中断后马上发消息则会接着做。这不是 C12 的观察项，这次不改。要不要让自愈认出"用户中断"（例如 `/interrupt` 也把关联记成 interrupted），交集成方定。
+  - 先 `/interrupt` 再马上 `/stop` 时，TaskRun 不在 `/stop` 当下关，而是约 2 分钟后由发现层按 `conversation_task_interrupted` 关（实测）。不算泄漏，不改。
+- **验证**：见 TESTS.md 同名节。证据（仓库外）：`~/.my-agent/decision-evidence/c12-observations-20261001/`。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`

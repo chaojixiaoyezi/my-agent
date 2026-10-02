@@ -84,6 +84,24 @@
   - 证据：`~/.my-agent/decision-evidence/j5-j19-jev-version-30f177c5/`。
 - **门禁**：10 个守卫文件加决策相关 53 个文件，共 63 个文件 1569 passed；import 边界 0 条、ruff、doc_sync、diff --check、code-size strict（与 34e4d874e 逐条比对新增 0）、clean_package 都通过。
 
+## C12a／C12b：Gateway /stop 收回被中断任务的后台进程；gateway stop 孤儿进程复核（2026-10-01，分支 `claude/38-c12-stop-after-interrupt`，基于 main `34e4d874e`）
+
+- **真实链路复现**：隔离 home、私有端口 8471/8472（base，step16x 运行时）与 8473/8474（本分支），脚本化假模型先起后台心跳、再前台 `sleep 120`，用真 TUI 输入控制命令；只看结构化事实（请求状态、任务关联状态、runtime_events、托管进程登记、pid 存活）。证据在仓库外 `~/.my-agent/decision-evidence/c12-observations-20261001/`。
+  - base，中断后马上 `/stop`：回"已收到停止请求"，进程组被回收。
+  - base，中断后等到发现层自愈：约 132 秒后关联变 cancelled，`/stop` 回"当前没有运行中的内容，无需停止。"，心跳进程仍 running——复现 C12a。
+  - 本分支，同样等到自愈（约 237 秒）：空闲 `/interrupt` 回"无需中断"、进程不动；`/stop` 回"已受理停止本会话遗留的 1 个后台资源……"并列出 pid 与 task/run，登记 `killed`，SIGTERM 清理确认，host 与子进程都已退出。
+  - C12b：base 上普通 `gateway stop` 列出遗留进程，进程由 init 接管（PPID 1）继续跑；`gateway stop --stop-background` 后整组退出（SIGTERM，确认）。
+- **新增** `test_gateway_stop_session_leftovers.py`（5 项，真实 SimpleAgent、会话存储与托管进程登记表，锁外清理换成记录器、不向任何 pid 发信号）：
+  - 已被自愈记成 cancelled 的任务，遗留进程被冻结并列出 pid／归属；
+  - 空闲 `/interrupt` 不碰资源；
+  - 别的会话与本会话仍 active 的审计任务不受影响；
+  - 会话任务记录损坏时报未确认、不停；
+  - 什么都没有时照旧回"没有运行中的内容"。
+- **补充** `test_session_stop_background_resources.py` 一项：本地入口空闲 `/interrupt` 不回收。
+- **变异**：6 个全部被抓住（Gateway 回退去掉、空闲中断也回收、active 关联不保护、去掉 thread 过滤、记录损坏时放行、本地空闲中断也回收）。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 50 个加仓库级扫描守卫（含 `test_packaging.py`）：1253 passed；
+  Ruff、doc sync、strict code-size（与 `34e4d874e` 比新增 finding 0）、`git diff --check`、clean-package 全部通过。
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，

@@ -431,14 +431,18 @@ def _execute_local_control(
 
 
 # LLM: interrupt 不关闭执行权和资源；stop 在原 task guard 内关权并冻结，迟到回调由同一调用句柄拒绝。
-#   没有运行中回合不代表没有遗留资源：回合被 /interrupt 后托管后台进程按设计继续跑，因此这里再退一步
-#   回收本会话登记的资源，而不是直接回"没有运行中的内容"（D10 验收发现用户当时无路可走）。
-# 函数用途: 中断本地当前回合；无回合时回收本会话遗留资源；冻结失败单列未知，不伪报全部退出。
+#   没有运行中回合不代表没有遗留资源：回合被 /interrupt 后托管后台进程按设计继续跑，因此 /stop 再退一步
+#   回收本会话登记的资源，而不是直接回"没有运行中的内容"（D10 验收发现用户当时无路可走）。没有回合时的
+#   /interrupt 不走这条回收（中断不冒充资源清理，C12a 2026-10-01 与 Gateway 入口对齐）。
+# 函数用途: 中断本地当前回合；无回合时 /stop 回收本会话遗留资源、/interrupt 如实回无可中断；冻结失败单列未知，不伪报全部退出。
 def _execute_local_stop(
     execution: ChatControlExecution, command: ConversationControlCommand,
 ) -> ConversationControlResult:
     request_id = str(execution.state.request_id or "").strip()
     control = execution.state.local_run
+    if not request_id and command.operation == "interrupt":
+        # 中断不冒充资源清理（R10）：没有运行中回合时 /interrupt 什么都不停，遗留资源只归 /stop 收。
+        return ConversationControlResult("stop", False, "当前没有执行中的回合，无需中断。")
     if not request_id:
         return _stop_session_background_resources(execution, command)
     if control is not None and control.request_id != request_id:
@@ -489,6 +493,7 @@ def _stop_session_background_resources(
     thread_id = str(execution.state.session_id or "").strip()
     try:
         from ...agent.gateway_parts.background_resource_report import (
+            background_resource_lines,
             background_store_root,
             list_running_background_processes,
             session_background_processes,
@@ -525,47 +530,15 @@ def _stop_session_background_resources(
         return ConversationControlResult(
             "stop", False,
             f"已受理停止 {len(results)} 个后台资源，部分尚未确认退出：\n"
-            + "\n".join(_background_resource_lines(mine, results)),
+            + "\n".join(background_resource_lines(mine, results)),
             delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
         )
     return ConversationControlResult(
         "stop", True,
         f"已停止本会话遗留的 {len(results)} 个后台资源：\n"
-        + "\n".join(_background_resource_lines(mine, results)),
+        + "\n".join(background_resource_lines(mine, results)),
         delivery_status="accepted",
     )
-
-
-# LLM: 用户要能看见"到底停了谁"，所以回执不再只给数量：这里把 pid 与 task/run 归属拼成明细行。
-#   只读传入事实，不改任何状态；processes 是 session_background_processes 过滤后的行，
-#   results 是 stop_background_processes 的回执，两者按 session_id 配对；配对不上的行不编造停止状态
-#   （没有 host 回执就不写"已确认退出"）。
-# 函数用途: 生成本次已停/未确认后台资源的可读明细行。
-def _background_resource_lines(
-    processes: list[dict[str, object]], results: list[dict[str, object]],
-) -> list[str]:
-    stopped_by_session = {
-        str(row.get("session_id") or ""): bool(row.get("stopped")) for row in results
-    }
-    lines: list[str] = []
-    for facts in processes:
-        session_id = str(facts.get("session_id") or "")
-        try:
-            pid = int(facts.get("pid") or 0)
-        except (TypeError, ValueError):
-            pid = 0
-        task = str(facts.get("root_task_id") or "")
-        run = str(facts.get("run_id") or "")
-        owner = " / ".join(
-            part for part in (f"task {task}" if task else "", f"run {run}" if run else "") if part
-        )
-        line = f"- pid {pid}" if pid > 0 else "- pid 未知"
-        if owner:
-            line += f"（{owner}）"
-        if session_id in stopped_by_session and not stopped_by_session[session_id]:
-            line += "，尚未确认退出"
-        lines.append(line)
-    return lines
 
 
 # LLM: 插话持久操作经 guidance 领域组件； Local stop retires only the interrupted request's pending steer inputs.

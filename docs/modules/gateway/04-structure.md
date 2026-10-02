@@ -2137,6 +2137,16 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 登记表根地址两侧都必须用 `process_session_store_root(workspace, owner_home)`（写入端见
 `tooling/shell.py:1199`），换成 `agent.root` 或 `owner_home` 会读到不同目录。
 
+## 受管后台资源的第三个停止入口：Gateway 会话级 /stop（2026-10-01，C12a）
+
+`gateway_parts/control_service._stop_session_leftovers` 是 Gateway `/stop` 在"没有热请求、也没有可控根任务"时的出口（TUI 与飞书共用）。
+选择交给 `background_resource_report.freeze_session_leftover_processes`：本会话精确 `thread_id`，减去保护集——本会话仍 active 的任务
+关联加执行状态里仍在跑的任务（`_session_protected_task_ids`；任一来源读不出就抛错，入口报 `TASK_RESOURCE_STOP_UNCONFIRMED`）。
+冻结走任务停止同一个 `tooling/process_resource_stop.freeze_process_stop`（按记录自己的 thread/root_task/run，空 run 不停），回收在锁外线程
+调 `cleanup_session_leftover_processes`。与本地入口的差别：本地入口仍走 `stop_background_processes`，同步等 host 回收、按真实终态
+报告；Gateway 入口不在控制请求里等待（控制请求有 30 秒客户端上限），回执只说"已受理、正在按进程组回收"。没有运行中回合时的
+`/interrupt` 两个入口都不进这里。
+
 # Gateway Structure
 
 ## 派发线程存活账本与扫描门取样时机（2026-09-28）

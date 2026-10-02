@@ -432,11 +432,7 @@ def execute_gateway_conversation_control(
             return _stop_active_task(
                 agent, live_task, scope, interrupt_only=command.operation == "interrupt",
             )
-        return ConversationControlResult(
-            "stop",
-            False,
-            "当前没有运行中的内容，无需停止。",
-        )
+        return _stop_session_leftovers(agent, scope, command)
     active = _active_control_target(agent, paths, scope)
     if command.kind == "steer":
         expected_turn_id = _steer_expected_turn_id(scope)
@@ -644,6 +640,77 @@ def steer_active_conversation_if_running(
             guidance_dedupe_key=result.guidance_dedupe_key,
         )
     return result
+
+
+# LLM: C12a（2026-10-01）：没有热请求、也没有可控根任务时 `/stop` 的会话级出口。/interrupt 按设计保留已启动的后台进程，
+#   几分钟后发现层账本自愈还会把仍 active 的中断任务记成 cancelled——原来这里只回"没有运行中的内容"，这些进程从此
+#   没有入口能停。只认本会话精确 thread_id 的托管登记；仍 active 的任务与执行状态里仍在跑的任务（审计、分离任务等由
+#   各自入口管）一律保护；会话任务记录或执行状态读不出就 fail closed（报未确认、一个都不停）。`/interrupt` 不进这里：
+#   中断不冒充资源清理。冻结同步完成，进程组回收交给锁外线程；回执列出 pid 与 task/run 归属。TUI 与飞书共用本入口。
+#   改口径同步 test_gateway_stop_session_leftovers.py 与 cli/chat_parts/control_runtime 的本地同名出口。
+# 函数用途: 无运行中回合时 /stop 停止本会话遗留的后台资源（什么都没有时照旧回"没有运行中的内容"），/interrupt 如实回无可中断。
+def _stop_session_leftovers(
+    agent: object, scope: GatewayControlScope, command: ConversationControlCommand,
+) -> ConversationControlResult:
+    from .background_resource_report import (
+        background_resource_lines,
+        cleanup_session_leftover_processes,
+        freeze_session_leftover_processes,
+    )
+
+    if command.operation == "interrupt":
+        return ConversationControlResult("stop", False, "当前没有执行中的回合，无需中断。")
+    nothing = ConversationControlResult("stop", False, "当前没有运行中的内容，无需停止。")
+    try:
+        owner_agent = _request_agent_for_scope(agent, scope)
+        store = owner_agent.conversation_store
+        thread = store.threads.resolve(
+            channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id,
+        )
+        if thread is None:
+            return nothing
+        owner_home = str(Path(str(owner_agent.home_paths.owner_home_dir)).expanduser().resolve(strict=False))
+        frozen = freeze_session_leftover_processes(
+            owner_home, thread.thread_id, _session_protected_task_ids(store, thread.thread_id),
+        )
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return ConversationControlResult(
+            "stop", False, "本会话资源状态暂时不可读，未执行停止。", delivery_status="unknown",
+            error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
+    if not frozen.processes:
+        return nothing
+    threading.Thread(
+        target=cleanup_session_leftover_processes, args=(frozen,),
+        name=f"stop-leftovers-{thread.thread_id}", daemon=True,
+    ).start()
+    lines = "\n".join(background_resource_lines(list(frozen.processes), list(frozen.failed)))
+    if frozen.unconfirmed:
+        return ConversationControlResult(
+            "stop", False, f"已受理停止本会话遗留的 {len(frozen.processes)} 个后台资源，部分停止尚未确认：\n{lines}",
+            delivery_status="unknown", error_code="TASK_RESOURCE_STOP_UNCONFIRMED",
+        )
+    return ConversationControlResult(
+        "stop", True, f"已受理停止本会话遗留的 {len(frozen.processes)} 个后台资源，正在按进程组回收：\n{lines}",
+        delivery_status="accepted",
+    )
+
+
+# LLM: 会话级遗留停止的保护集：本会话仍 active 的任务关联（普通根任务前面已走 _stop_active_task，剩下的是审计、
+#   分离任务、子代理投影这类由各自入口控制的），加上执行状态里仍在跑的任务。任一来源读不出就抛错，调用方 fail closed。
+# 函数用途: 返回本会话里不能被"遗留资源"停止碰到的根任务编号集合。
+def _session_protected_task_ids(store: object, thread_id: str) -> frozenset[str]:
+    from ..conversation.task_promotion import conversation_thread_execution_state
+
+    links, load_errors = store.tasks.list_report(thread_id)
+    execution = conversation_thread_execution_state(store, thread_id)
+    if load_errors or execution.get("state_available") is not True:
+        raise ValueError("会话任务或执行状态读不出，不能确认哪些资源仍归运行中的任务")
+    active = {
+        str(getattr(link, "task_id", "") or "") for link in links
+        if str(getattr(link, "status", "") or "").strip().lower() == "active"
+    }
+    return frozenset(active | {str(item) for item in execution.get("running_task_ids") or []})
 
 
 # LLM: 派活回合跑在后台片里，不属于前台窗口请求集合。它真实存在的结构化事实是**会话任务的绑定**

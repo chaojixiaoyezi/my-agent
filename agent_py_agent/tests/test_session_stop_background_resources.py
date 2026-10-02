@@ -168,3 +168,27 @@ def test_stop_reports_unknown_when_store_unreadable(tmp_path: Path):
     assert result.ok is False
     assert result.error_code == "TASK_RESOURCE_STOP_UNCONFIRMED"
     assert "没有运行中的内容" not in result.message
+
+
+class _InterruptCommand:
+    operation = "interrupt"
+
+
+def test_interrupt_without_running_turn_never_reclaims(tmp_path: Path):
+    """中断不冒充资源清理（C12a，与 Gateway 入口一致）：没有运行中回合时 /interrupt 什么都不停。"""
+    owner = tmp_path / "owner-int"
+    _seed_running(tmp_path, "bg-session-int", thread="t-int", owner=str(owner))
+    agent = _FakeAgent(tmp_path, owner)
+    execution = ChatControlExecution(
+        agent, False, ChatControlState(
+            running=False, queued_count=0, prompt="", started_at=0.0,
+            session_id="t-int", request_id="", local_run=None,
+        ),
+    )
+
+    result = _execute_local_stop(execution, _InterruptCommand())
+
+    assert result.ok is False
+    assert result.message == "当前没有执行中的回合，无需中断。"
+    store = ProcessSessionStore(process_session_store_root(tmp_path, str(owner)))
+    assert store.load("bg-session-int").record["stop_requested"] is False

@@ -778,3 +778,11 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **改动**：`request_execution._execute_gateway_conversation_turn` 用户消息写入成功后调用 `reset_goal_progress_fuse`。
 - **O2**：不是竞态，是熔断用调度 tick 的 `now` 记 `updated_at`，那一片其实就是触发熔断的第 3 片；不改代码，见设计台账同名节。
 - 测试与变异见 TESTS.md 同名节。
+
+## Gateway 会话内 /stop 收回被中断任务的后台进程（C12a，2026-10-01，分支 `claude/38-c12-stop-after-interrupt`，基于 main `34e4d874e`）
+
+09-28 的"会话内 /stop 回收遗留资源"只接在本地 chat 入口，默认 TUI 和飞书走的 Gateway 入口没有。所以中断后几分钟、发现层自愈把
+任务记成 cancelled 以后，Gateway `/stop` 仍只回"当前没有运行中的内容"（10-01 真实链路复现）。现在 `control_service` 在没有热请求、
+也没有可控根任务时调用 `_stop_session_leftovers`。它只收本会话精确 thread_id 的登记记录，保护仍 active 的任务和执行状态里仍在跑的
+任务，按每条记录的 (thread, root_task, run) 走 `freeze_process_stop`，锁外按进程组回收，回执列出 pid 与 task/run；读不出就报未确认、
+不停。没有运行中回合时的 `/interrupt` 两个入口都不碰资源。合同测试 `test_gateway_stop_session_leftovers.py`。

@@ -1378,9 +1378,10 @@ docs/
 - `agent_py_agent/agent/gateway_parts/background_sessions.py`：Gateway 停机收尾只读列出 owner 后台会话权威目录里仍未终态的受管进程（含监听范围事实），供停机事件与 status 投影；不停止、不改记录。
 - `agent_py_agent/agent/gateway_parts/loop_health.py`：Gateway 派发线程健康的唯一事实源（进程内、不做 IO）——起止、每次 tick 起止与派发数、从 tick 逃逸的异常、循环错误打印本身失败的次数；`dispatcher_alive` 由登记/退出记录加线程仍在 `threading.enumerate()` 判定。心跳与 `/status` 只扁平并入 `snapshot()`，不另算存活。
 - `agent_py_agent/cli/gateway_loop_backoff.py`：`LoopErrorBackoff`，派发循环与后台主循环共用的"连续出错退避 + 打印限流"小工具：只算节奏不记账不打印，成功一次清零；防止 tick 持续出错时每 0.2 秒一条错误日志把刚腾出的磁盘再写满。
-- `agent_py_agent/agent/gateway_parts/background_resource_report.py`：`gateway stop` 与本地 `/stop` 共用的受管后台进程事实投影与停止入口；只读登记表（根地址与写入端同用 `process_session_store_root(workspace, owner_home)`），投影不含命令正文/cwd/输出路径，按精确执行身份冻结停止意图、等真实终态后如实报告是否停止。`session_background_processes` 只按精确 `thread_id` 筛本会话资源，不做 owner 全量。
+- `agent_py_agent/agent/gateway_parts/background_resource_report.py`：`gateway stop`、本地 `/stop` 与 Gateway 会话级 `/stop`（C12a：无运行中回合时冻结本会话遗留进程，回执渲染 `background_resource_lines` 也在这里）共用的受管后台进程事实投影与停止入口；只读登记表（根地址与写入端同用 `process_session_store_root(workspace, owner_home)`），投影不含命令正文/cwd/输出路径，按精确执行身份冻结停止意图、等真实终态后如实报告是否停止。`session_background_processes` 只按精确 `thread_id` 筛本会话资源，不做 owner 全量。
 - `agent_py_agent/tests/test_gateway_stop_background_resources.py`：gateway stop 侧合同（只列运行中、跨 task/run 不误停、空身份被拒、未终态如实报未停、按进程组回收孙进程）。
 - `agent_py_agent/tests/test_session_stop_background_resources.py`：会话内 `/stop` 回收被中断任务遗留后台资源的合同（无回合时不再回"没有运行中的内容"、会话隔离精确匹配、登记表不可读时报 unknown）。
+- `agent_py_agent/tests/test_gateway_stop_session_leftovers.py`：Gateway 会话内 `/stop` 回收被中断任务遗留后台进程的合同（C12a：自愈后仍能收、空闲 `/interrupt` 不碰、别的会话与仍 active 的审计任务不碰、任务记录损坏时不停）。
 - `agent_py_agent/agent/gateway_parts/owner_retention.py`：复核既有硬事实后回收空闲实例和轮询登记，不关闭持久任务或共享插件。
 - `docs/design/TUI_RESOURCE_LIFETIME.md`：身份、执行槽、连接和历史规模的边界与参考源码。
 
