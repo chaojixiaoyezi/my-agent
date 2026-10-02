@@ -31,6 +31,7 @@ from .process_session_records import (
 )
 from .process_session_store import ProcessSessionStore
 
+# 后台进程宿主存活轮询间隔 50ms：足够灵敏又不烧 CPU。
 _HOST_POLL_SECONDS = 0.05
 # 监听范围核对的间隔：读 socket 表有成本，不必跟 50ms 的存活轮询同频。
 _LISTEN_CHECK_SECONDS = 2.0

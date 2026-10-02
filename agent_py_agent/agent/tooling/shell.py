@@ -88,6 +88,7 @@ from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable
 from .shell_syntax import contains_unmanaged_background_operator
 
+# shell 命令输出默认最多回 12000 字符：防超长输出撑爆工具结果。
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
 _DEFAULT_ACCESS_MODE = "workspace-write"
 _ShellSandboxRoots = tuple[
@@ -479,10 +480,13 @@ def _apply_owner_scoped_pip_env(env: dict[str, str], owner_home: object) -> None
 
 logger = logging.getLogger(__name__)
 
+# 后台进程日志文件上限 1 GiB：防止日志无限增长写满磁盘。
 _MAX_BG_LOG_BYTES = (
     1_000_000_000  # 后台命令日志字节上限(1GB);超限杀进程组,防失控/恶意命令写满磁盘(审计 #16)
 )
+# 进程管道排空超时 2 秒：收尾时防止子进程输出把管道堵死。
 _PROCESS_PIPE_DRAIN_SECONDS = 2.0
+# 前台命令退出探测间隔 0.25 秒：平衡退出响应速度与轮询开销。
 _FOREGROUND_EXIT_PROBE_SECONDS = 0.25
 
 
@@ -738,7 +742,7 @@ def _background_command_argv(
 
 # background_jobs 登记台账上限:后台任务每启一个登记一条,原裸 append 永不回收 → 长跑无界增长
 # (审计 #16)。有界 append 只留最近 N 条(纯观测/孤儿排查用,丢最旧可接受),磁盘恒定。
-_MAX_BACKGROUND_JOB_RECORDS = 1000
+_MAX_BACKGROUND_JOB_RECORD_COUNT = 1000
 
 
 # 函数用途: 把后台任务登记到 .background_jobs/registry.jsonl(供观测/孤儿排查;
@@ -761,7 +765,7 @@ def _record_background_job(
     }
     try:
         append_jsonl_capped(
-            jobs_dir / "registry.jsonl", record, max_records=_MAX_BACKGROUND_JOB_RECORDS
+            jobs_dir / "registry.jsonl", record, max_records=_MAX_BACKGROUND_JOB_RECORD_COUNT
         )
     except OSError:
         pass
@@ -1675,7 +1679,7 @@ def _shell_failure_effect_outcome(
 # 终止入口在这两种核对结果下一个信号都没发：启动时没取到出生标识，或标识对不上。后代进程完全没被碰过。
 _CLEANUP_NOT_ATTEMPTED_METHODS = frozenset({"identity_unavailable", "identity_changed"})
 # 清理没做成时正文最多列这么多个进程号，让“核对”能落地又不撑爆输出；完整列表在 termination 回执里。
-_CLEANUP_WARNING_PID_LIMIT = 8
+_CLEANUP_WARNING_PID_LIMIT_COUNT = 8
 
 
 # LLM: 按 termination.method 区分两种说法：没发任何信号（_CLEANUP_NOT_ATTEMPTED_METHODS）时写明“无法核对进程身份，
@@ -1686,8 +1690,8 @@ def _cleanup_warning_text(return_code: object, termination: object) -> str:
         return (f"\n[进程清理未确认] 命令已退出（退出码 {return_code}），上面就是它的执行结果；"
                 "但它启动的部分进程尚未确认已结束，可能仍在运行。需要时核对这些进程，不要为此重跑命令。")
     pids = tuple(getattr(termination, "unresolved_pids", ()) or ())
-    listed = "、".join(str(pid) for pid in pids[:_CLEANUP_WARNING_PID_LIMIT])
-    more = "等" if len(pids) > _CLEANUP_WARNING_PID_LIMIT else ""
+    listed = "、".join(str(pid) for pid in pids[:_CLEANUP_WARNING_PID_LIMIT_COUNT])
+    more = "等" if len(pids) > _CLEANUP_WARNING_PID_LIMIT_COUNT else ""
     where = f"（相关进程号 / 进程组：{listed}{more}）" if listed else ""
     return (f"\n[进程清理未尝试] 命令已退出（退出码 {return_code}），上面就是它的执行结果；"
             f"但无法核对进程身份，没有尝试结束它启动的进程，它们可能仍在运行{where}。"

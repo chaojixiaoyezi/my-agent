@@ -12,9 +12,13 @@ from ..common.cancellation import ToolCancelled
 if TYPE_CHECKING:
     from .models import ToolHandlerOutcome
 
+# 单文件语法诊断上限 256 KiB：超长文件不诊断，防解析大文件耗时失控。
 MAX_FILE_SYNTAX_BYTES = 256 * 1024
+# 单次工具调用语法诊断的源码上限 512 KiB：超长跳过诊断，防诊断本身拖垮响应。
 MAX_CALL_SYNTAX_BYTES = 512 * 1024
-MAX_SYNTAX_OBSERVATIONS = 16
+# 语法诊断最多收集 16 条观察：限制反馈条数，防问题清单膨胀。
+MAX_SYNTAX_OBSERVATION_COUNT = 16
+# 语法诊断反馈最多 4096 字符：超长截断，保持反馈紧凑不撑爆 prompt。
 MAX_SYNTAX_FEEDBACK_CHARS = 4096
 
 
@@ -79,7 +83,7 @@ class FileSyntaxDiagnostics:
     def observe_candidate(self, target: Path, source: BinaryIO) -> FileSyntaxObservation | None:
         if self.unavailable or target.suffix.lower() != ".json":
             return None
-        if self.attempt_count >= MAX_SYNTAX_OBSERVATIONS:
+        if self.attempt_count >= MAX_SYNTAX_OBSERVATION_COUNT:
             return FileSyntaxObservation(str(target), "not_checked", "SYNTAX_OBSERVATION_LIMIT")
         self.attempt_count += 1
         remaining = MAX_CALL_SYNTAX_BYTES - self.bytes_read
@@ -106,7 +110,7 @@ class FileSyntaxDiagnostics:
     def record(self, observation: FileSyntaxObservation | None) -> None:
         if observation is None:
             return
-        if observation.path in self.observations or len(self.observations) < MAX_SYNTAX_OBSERVATIONS:
+        if observation.path in self.observations or len(self.observations) < MAX_SYNTAX_OBSERVATION_COUNT:
             self.observations[observation.path] = observation
         else:
             self.omitted_receipts += 1

@@ -49,7 +49,9 @@ from .models import (
 )
 
 _RESULT_SCHEMA = "tool_execution_result.v1"
+# 工具操作租约最短 900 秒：低于此值没有并发保护意义。
 _MINIMUM_LEASE_SECONDS = 900
+# 工具操作租约宽限 300 秒：操作即将超时前给收尾机会。
 _LEASE_GRACE_SECONDS = 300
 
 # S-D1（2026-08-20 SUB-D 真机）：workspace 锁冲突（另一执行者持有同一 scope
@@ -57,7 +59,7 @@ _LEASE_GRACE_SECONDS = 300
 # 几百毫秒到几秒内释放。直接返回 BUSY_CONFLICT 会让 create_subagents 整批
 # 失败且从不重试（b1_1 实锤）。这里做有界短重试：3 次 × 0.5s/1s/2s 递增，
 # 重试耗尽才报冲突。
-_BUSY_RETRY_ATTEMPTS = 3
+_BUSY_RETRY_ATTEMPT_COUNT = 3
 _BUSY_RETRY_DELAYS = (0.5, 1.0, 2.0)
 
 
@@ -172,7 +174,7 @@ def _claim_operation(
     )
     lease_expires_at = time.time() + lease_seconds
     conflict_error: RuntimeConflictError | None = None
-    for attempt in range(_BUSY_RETRY_ATTEMPTS + 1):
+    for attempt in range(_BUSY_RETRY_ATTEMPT_COUNT + 1):
         try:
             claim = request.store.claim_tool_operation(
                 ToolOperationClaimRequest(
@@ -197,7 +199,7 @@ def _claim_operation(
             # S-D1: 锁冲突是瞬态并发语义——有界短重试（0.5s/1s/2s），
             # 重试耗尽才映射为 BUSY_CONFLICT（高频派工不再整批失败）。
             conflict_error = exc
-            if attempt >= _BUSY_RETRY_ATTEMPTS:
+            if attempt >= _BUSY_RETRY_ATTEMPT_COUNT:
                 break
             time.sleep(_BUSY_RETRY_DELAYS[attempt])
         except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
@@ -232,7 +234,7 @@ def _claim_operation(
         result = _operation_error(
             request.tool_name,
             "TOOL_OPERATION_BUSY_CONFLICT",
-            f"工具执行冲突（另一执行者正在处理同一操作，已重试 {_BUSY_RETRY_ATTEMPTS} 次仍冲突）: {exc}",
+            f"工具执行冲突（另一执行者正在处理同一操作，已重试 {_BUSY_RETRY_ATTEMPT_COUNT} 次仍冲突）: {exc}",
             reported_error_code="TOOL_OPERATION_BUSY_CONFLICT",
         )
         _attach_operation_facts(

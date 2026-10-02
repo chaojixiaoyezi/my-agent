@@ -40,11 +40,12 @@ from typing import Any
 
 # 默认浏览器动作超时(毫秒)。导航给足时间(动态站慢),其余动作短一些。
 DEFAULT_NAV_TIMEOUT_MS = 30_000
+# 浏览器动作默认超时 15 秒（导航单独 30 秒）：动态站加载慢，给足时间又不让单步卡死。
 DEFAULT_ACTION_TIMEOUT_MS = 15_000
 # a11y 快照给模型的最大字符数,超了截断(避免把 prompt 撑爆)。
 SNAPSHOT_MAX_CHARS = 8_000
 # 一页最多标注多少个可交互元素的 ref(防超大页生成天量 ref)。
-MAX_REFS_PER_PAGE = 400
+MAX_REFS_PER_PAGE_COUNT = 400
 
 # 可交互元素选择器:链接/按钮/输入/下拉/可编辑区 + 常见 ARIA role。
 # 用于注入 data-agent-ref,让 click/type 能按 ref 精确定位。
@@ -207,7 +208,7 @@ class BrowserSessionManager:
             aria_text = ""
         # 2. 注入 ref 并收集可交互元素
         try:
-            refs = page.evaluate(_INJECT_REFS_JS, MAX_REFS_PER_PAGE)
+            refs = page.evaluate(_INJECT_REFS_JS, MAX_REFS_PER_PAGE_COUNT)
         except Exception:
             refs = []
         session.ref_map = {item["ref"]: item for item in refs if isinstance(item, dict) and item.get("ref")}

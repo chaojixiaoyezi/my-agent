@@ -35,7 +35,7 @@ from .models import (
 
 TOOL_NAME = "admin_controls"
 # list 最多列出的用户数
-_MAX_OWNERS = 200
+_MAX_OWNERS_COUNT = 200
 # 拒绝原因码到错误码：身份/范围类是权限拒绝，策略文件坏了按持久化阻塞，其余按参数错误
 _REASON_CODES = {"not_admin": "ADMIN_CONTROL_DENIED", "admin_self_only": "ADMIN_CONTROL_DENIED",
                  "policy_unreadable": "TOOL_PERSISTENCE_FAILED"}
@@ -73,7 +73,7 @@ class AdminControlsTool(BaseTool):
                     "additionalProperties": False, "minProperties": 1,
                     "description": "set 必填：要修改的开关，值为 true/false；cross_owner_audit_allowed 只能对 local/main 设置。",
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_OWNERS, "description": "list 最多列出的用户数，默认 50。"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_OWNERS_COUNT, "description": "list 最多列出的用户数，默认 50。"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -118,8 +118,8 @@ class AdminControlsTool(BaseTool):
             return _refuse("not_admin", "只有本机管理员能使用此工具。")
         if action == "list":
             limit = params.get("limit", 50)
-            if type(limit) is not int or not 1 <= limit <= _MAX_OWNERS:
-                return _refuse("invalid_changes", f"limit 须为 1 到 {_MAX_OWNERS} 的整数。")
+            if type(limit) is not int or not 1 <= limit <= _MAX_OWNERS_COUNT:
+                return _refuse("invalid_changes", f"limit 须为 1 到 {_MAX_OWNERS_COUNT} 的整数。")
             owners, truncated = list_owner_home_paths(home, limit=limit)
             report = {"action": "list", "owners": [_owner_row(owner_id, owner_home) for owner_id, owner_home in owners],
                       "truncated": truncated}

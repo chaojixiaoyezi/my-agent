@@ -14,6 +14,7 @@ from typing import Any
 LISTEN_SCOPES = ("loopback", "lan")
 DEFAULT_LISTEN_SCOPE = "loopback"
 LISTEN_SCOPE_VIOLATION = "listen_scope_violation"
+# lsof 查监听表超时 2 秒：监听状态核对不能无限等外部命令。
 _LSOF_TIMEOUT_SECONDS = 2.0
 
 

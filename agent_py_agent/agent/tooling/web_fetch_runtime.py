@@ -72,7 +72,8 @@ class FetchFormatRequest:
     cache_hit: bool
 
 
-_MAX_REDIRECTS = 5
+# 跟随重定向最多 5 次：防重定向环无限跳转。
+_MAX_REDIRECT_COUNT = 5
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _CROSS_ORIGIN_SAFE_HEADERS = frozenset({
     "accept", "accept-encoding", "accept-language", "cache-control", "content-language",
@@ -187,7 +188,7 @@ def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_p
     """
     url, body = request.url, request.data
     deadline = time.monotonic() + max(0.0, float(request.timeout))
-    for _hop in range(_MAX_REDIRECTS + 1):
+    for _hop in range(_MAX_REDIRECT_COUNT + 1):
         if cancellation_requested():
             return _network_failure(request.tool, ToolCancelled("cancelled"))
         pin = resolve_pin(url)

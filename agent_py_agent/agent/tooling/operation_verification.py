@@ -8,11 +8,16 @@ import json
 from collections import OrderedDict
 from typing import Any
 
-_MAX_PROMPT_RECENT_CALLS = 6
-_MAX_PROMPT_ARCHIVE_REFS = 4
-_MAX_MUTATING_CALLS = 64
-_MAX_VISIBLE_OPERATION_GROUPS = 12
-_MAX_REFS_PER_CALL = 4
+# prompt 最近调用最多 6 条：只展示够用的最近记录。
+_MAX_PROMPT_RECENT_CALL_COUNT = 6
+# prompt 归档引用最多 4 条：控制上下文注入体积。
+_MAX_PROMPT_ARCHIVE_REF_COUNT = 4
+# 验证回执同批最多 64 个变更调用：限制批次规模，防回执爆炸。
+_MAX_MUTATING_CALL_COUNT = 64
+# 验证回执最多显示 12 个分组：控制回执体积。
+_MAX_VISIBLE_OPERATION_GROUP_COUNT = 12
+# 单次调用引用最多 4 条：控制验证回执体积。
+_MAX_REFS_PER_CALL_COUNT = 4
 _MUTATING_EFFECTS = frozenset({"mutating", "dangerous"})
 _PRE_HANDLER_FAILURE_STAGES = frozenset(
     {"protocol", "authorization", "validation", "runtime_gate"}
@@ -57,8 +62,8 @@ def render_current_turn_execution_facts(agent: object, records: list[dict[str, o
         "scope": "latest_completed_tool_batch",
         "request_call_count": len(rows),
         "batch_call_count": len(batch),
-        "calls": [_execution_call(agent, row) for row in batch[-_MAX_PROMPT_RECENT_CALLS:]],
-        "omitted_batch_call_count": max(0, len(batch) - _MAX_PROMPT_RECENT_CALLS),
+        "calls": [_execution_call(agent, row) for row in batch[-_MAX_PROMPT_RECENT_CALL_COUNT:]],
+        "omitted_batch_call_count": max(0, len(batch) - _MAX_PROMPT_RECENT_CALL_COUNT),
         "raw_archive_refs": _recent_raw_archive_refs(batch),
     }
     if has_key:
@@ -103,10 +108,10 @@ def build_operation_verification(
         "status": _overall_verification_status(all_operations),
         "operation_count": len(all_operations),
         "omitted_operation_count": max(
-            0, len(all_operations) - _MAX_MUTATING_CALLS
+            0, len(all_operations) - _MAX_MUTATING_CALL_COUNT
         ),
         "counts": counts,
-        "operations": all_operations[-_MAX_MUTATING_CALLS:],
+        "operations": all_operations[-_MAX_MUTATING_CALL_COUNT:],
     }
 
 
@@ -152,7 +157,7 @@ def public_operation_verification(
     value = verification if isinstance(verification, dict) else {}
     operations = value.get("operations")
     if isinstance(operations, list):
-        groups = _visible_operation_groups(operations)[:_MAX_VISIBLE_OPERATION_GROUPS]
+        groups = _visible_operation_groups(operations)[:_MAX_VISIBLE_OPERATION_GROUP_COUNT]
     else:
         groups = _normalized_public_groups(value.get("groups"))
     status = str(value.get("status") or "none")
@@ -417,7 +422,7 @@ def _normalized_public_groups(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
     groups: list[dict[str, object]] = []
-    for item in value[:_MAX_VISIBLE_OPERATION_GROUPS]:
+    for item in value[:_MAX_VISIBLE_OPERATION_GROUP_COUNT]:
         if not isinstance(item, dict):
             continue
         status = str(item.get("status") or "unverified")
@@ -506,7 +511,7 @@ def _record_refs(record: dict[str, object]) -> list[str]:
     if isinstance(envelope, dict):
         for key in ("url", "path", "target_path", "output_path", "source_ref", "artifact_ref"):
             _append_ref(refs, envelope.get(key))
-    return refs[:_MAX_REFS_PER_CALL]
+    return refs[:_MAX_REFS_PER_CALL_COUNT]
 
 
 def _recent_raw_archive_refs(
@@ -519,7 +524,7 @@ def _recent_raw_archive_refs(
         text = str(record.get("raw_archive_path") or "").strip()
         if text and text not in refs:
             refs.append(text)
-        if len(refs) >= _MAX_PROMPT_ARCHIVE_REFS:
+        if len(refs) >= _MAX_PROMPT_ARCHIVE_REF_COUNT:
             break
     return list(reversed(refs))
 

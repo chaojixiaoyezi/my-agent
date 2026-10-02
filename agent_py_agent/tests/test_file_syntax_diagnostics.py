@@ -104,7 +104,7 @@ def test_control_exceptions_are_never_soft_diagnostics(monkeypatch, error):
 
 
 def test_count_and_feedback_limits_do_not_claim_complete_coverage(monkeypatch):
-    monkeypatch.setattr(diagnostics, "MAX_SYNTAX_OBSERVATIONS", 2)
+    monkeypatch.setattr(diagnostics, "MAX_SYNTAX_OBSERVATION_COUNT", 2)
     monkeypatch.setattr(diagnostics, "MAX_SYNTAX_FEEDBACK_CHARS", 280)
     budget = diagnostics.FileSyntaxDiagnostics()
     for index in range(5):

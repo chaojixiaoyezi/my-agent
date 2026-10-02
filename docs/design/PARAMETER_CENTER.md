@@ -100,6 +100,15 @@
   `_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH`/`_DEFAULT_DEPTH` 深度）只补说明挪入无单位组。数值一律不变；
   目录重建 802 项 `--check` 一致；白名单 225→164＋无单位组 32→36（只减不增）。
 
+- **P10 第六批（2026-10-02，ds2，分支 `worker/ds2-p10-batch6`，已实现，待集成）**：整改 `agent_py_agent/agent/tooling/`
+  目录 **74 个**常数（73 个唯一名）：数量上限类补 `_COUNT` 改名 24 个（`_MAX_OWNERS→_MAX_OWNERS_COUNT` 两处定义同步、
+  `_MAX_SESSIONS→_MAX_SESSION_COUNT`、`_NEAR_NAME_MAX_SUGGESTIONS→_NEAR_NAME_MAX_SUGGESTION_COUNT` 等），
+  字符/长度类补 `_CHARS` 改名 1 个（`_NEAR_NAME_MAX_NAME_LENGTH→…_CHARS`），时间类补 `_SECONDS` 改名 4 个
+  （`_DEFAULT_CONNECT_TIMEOUT→…_SECONDS`、`_FINAL_CONFIRM_SECONDS_WITH_HANDLE→_FINAL_CONFIRM_WITH_HANDLE_SECONDS` 等）；
+  已有单位后缀 42 个只补中文说明；无物理单位 2 个（`_FIREWALL_NOT_RUNNING` 协议值、`_MAX_DISCOVERY_DEPTH` 深度）只补说明
+  挪入无单位组。数值一律不变，改名引用全仓同步（22 文件 98 处，重 grep 0 残留）；目录重建 802 项 `--check` 一致；
+  白名单 225→152＋无单位组 32→34（只减不增）。
+
 ## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
 
 > 2026-10-01 修订（3a 评审 5a51735c1 后）：capability 写入目标与运行值改走运行时实际读取的路径；runtime_guard 改为只读来源。

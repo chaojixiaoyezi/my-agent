@@ -632,7 +632,7 @@ def test_missing_path_recovery_does_not_sink_into_one_large_repository(tmp_path:
     report_dir = workspace / "reports"
     large_repo.mkdir(parents=True)
     report_dir.mkdir()
-    for index in range(path_recovery_mod._MAX_ENTRIES_PER_DIRECTORY + 20):
+    for index in range(path_recovery_mod._MAX_ENTRIES_PER_DIRECTORY_COUNT + 20):
         (large_repo / f"generated-{index:04d}.txt").write_text("x", encoding="utf-8")
     report = report_dir / "finding_report.md"
     report.write_text("real report", encoding="utf-8")

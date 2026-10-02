@@ -5,6 +5,7 @@ import re
 from html.parser import HTMLParser
 from typing import Any
 
+# HTML 预览原文最多 4000 字符：超长截断，防预览撑爆 prompt。
 _HTML_PREVIEW_RAW_MAX_CHARS = 4_000
 _HTML_SKIP_TAGS = {"head", "script", "style", "noscript", "svg"}
 _HTML_BLOCK_TAGS = {

@@ -17,7 +17,9 @@ from typing import Any
 
 NETWORK_STATUS_SCHEMA = "managed_process_network_status.v1"
 _LISTEN_STATE = "0A"
+# 查防火墙状态超时 1.5 秒：网络状态回执不能因防火墙查询拖太久。
 _FIREWALL_TIMEOUT_SECONDS = 1.5
+# firewall-cmd 未运行的公开退出码 252：按协议退出码判断状态，不从错误文案猜。
 _FIREWALL_NOT_RUNNING = 252  # firewall-cmd 的公开退出码，不从错误文案猜运行状态。
 
 

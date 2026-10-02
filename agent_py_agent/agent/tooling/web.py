@@ -26,6 +26,7 @@ from .web_fetch_tools import WebFetchTool as _WebFetchTool
 from .web_fetch_tools import WebRuntimeDeps
 from .web_http_helpers import MIN_RESPONSE_PREVIEW_CHARS, scalar_text
 
+# URL 最多 4096 字符：超长拒绝，防异常输入。
 _MAX_URL_CHARS = 4096
 
 

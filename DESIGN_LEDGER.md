@@ -104,6 +104,24 @@
   - 真实链路改前、改后对照见证据 `~/.my-agent/decision-evidence/c5-o4-user-msg-first-20261002/`（仓库外）：
     改后第 3 片记账时 `user_turn_on_lane=True`、不记账；用户回合写入后清零；之后第 4、5、6 片计 1、2、3，第 6 片熔断，熔断照常有效。
 
+## P10 常数整改第六批（2026-10-02，ds2，分支 `worker/ds2-p10-batch6`，基于 `aea277a92`，已实现，待集成）
+
+- **背景**：P10 白名单按模块分批清理。本批范围是 `agent_py_agent/agent/tooling/` 目录 74 个待整改常数
+  （30 个文件、73 个唯一名，`_MAX_OWNERS` 在 admin_controls_tool.py 与 audit_records_tool.py 两处定义）。
+- **做法**：
+  - 按生成器后缀表改名 29 个唯一名：数量上限类补 `_COUNT` 24 个（`_MAX_OWNERS→_MAX_OWNERS_COUNT`、
+    `_MAX_SESSIONS→_MAX_SESSION_COUNT`、`_NEAR_NAME_MAX_SUGGESTIONS→_NEAR_NAME_MAX_SUGGESTION_COUNT` 等），
+    字符/长度类补 `_CHARS` 1 个（`_NEAR_NAME_MAX_NAME_LENGTH→_NEAR_NAME_MAX_NAME_LENGTH_CHARS`），
+    时间类补 `_SECONDS` 4 个（`_DEFAULT_CONNECT_TIMEOUT→…_SECONDS`、`_FINAL_CONFIRM_SECONDS_WITH_HANDLE→_FINAL_CONFIRM_WITH_HANDLE_SECONDS` 等）；
+  - 已有单位后缀 42 个只补上方中文说明；无物理单位 2 个（`_FIREWALL_NOT_RUNNING` firewall-cmd 退出码协议值、
+    `_MAX_DISCOVERY_DEPTH` 深度）只补说明、挪入白名单无单位组。
+  - 数值一律不变、不碰其它模块；改名引用全仓同步（脚本 tmp/sync-batch6-refs.py，词边界、按长度降序，22 文件 98 处），
+    重 grep 旧名 0 残留；`test_constant_names_unique._ALLOWED` 键 `MAX_OWNERS→MAX_OWNERS_COUNT`。
+- **白名单/目录**：待整改 225→152（groups[0]，只减不增），无物理单位组 32→34；目录重建 802 项 `--check` 一致。
+- **验证**：守卫 13 passed；guards9 168 passed；相关单元测试全过；import 0 条、ruff 过、doc-sync PASS、
+  code-size strict hard=0、diff-check 过、clean-package OK、size_diff 新增 0。真实子进程类测试在沙箱失败/超时
+  （基线 aea277a92 同样失败，环境限制，3a 沙箱外复核）。详见 TESTS.md 第六批节。
+
 ## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`，已实现，待集成）
 
 - **来源**：C12d 的留意项。运行中的子代理被接替后由 runner 自停，运行账 `agent_run.completed` 事件记的是

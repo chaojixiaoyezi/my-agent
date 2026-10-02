@@ -4641,7 +4641,7 @@
       "value": 10.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "无 ripgrep 时后备遍历最多 10 秒：超时标不完整，保护 Gateway 不被大目录占住。"
     },
     {
       "name": "_MAX_PATH_CHARS",
@@ -4649,7 +4649,7 @@
       "value": 4096,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "路径最多 4096 字符：超长拒绝，防异常输入。"
     },
     {
       "name": "_MAX_SEARCH_LINE_CHARS",
@@ -4657,7 +4657,7 @@
       "value": 500,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "搜索命中行最多 500 字符：超长行截断，防撑爆结果。"
     },
     {
       "name": "_MAX_SEARCH_QUERY_CHARS",
@@ -4665,7 +4665,7 @@
       "value": 4000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "搜索查询最多 4000 字符：超长拒绝，防异常输入。"
     },
     {
       "name": "_MAX_WRITE_TEXT_CHARS",
@@ -4673,7 +4673,7 @@
       "value": 1000000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "写文件正文最多 100 万字符：超长拒绝，防异常输入。"
     },
     {
       "name": "_MAX_MISSING_CONTEXT_PREVIEW_CHARS",
@@ -4681,13 +4681,13 @@
       "value": 4000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "缺上下文预览最多 4000 字符：控制补丁回执体积。"
     },
     {
-      "name": "_MAX_OWNERS",
+      "name": "_MAX_OWNERS_COUNT",
       "file": "agent_py_agent/agent/tooling/admin_controls_tool.py",
       "value": 200,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "list 最多列出的用户数"
     },
@@ -4700,12 +4700,12 @@
       "description": "artifact 正文读取预算的固定滚动窗口（10 分钟）；额度只由 tool_artifact_read_budget_max_chars 决定（原窗口配置已并入）。"
     },
     {
-      "name": "_MAX_LINK_ISSUE_EXAMPLES",
+      "name": "_MAX_LINK_ISSUE_EXAMPLE_COUNT",
       "file": "agent_py_agent/agent/tooling/artifact_integrity.py",
       "value": 5,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "链接完整性检查最多报 5 条问题示例：反馈够定位又不刷屏。"
     },
     {
       "name": "_MAX_LINK_LABEL_CHARS",
@@ -4713,13 +4713,13 @@
       "value": 60,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "链接标签最多 60 字符：超长截断，控制回执体积。"
     },
     {
-      "name": "_MAX_OWNERS",
+      "name": "_MAX_OWNERS_COUNT",
       "file": "agent_py_agent/agent/tooling/audit_records_tool.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "跨用户审计一次最多覆盖的用户数"
     },
@@ -4729,7 +4729,7 @@
       "value": 0.05,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "后台进程宿主存活轮询间隔 50ms：足够灵敏又不烧 CPU。"
     },
     {
       "name": "_LISTEN_CHECK_SECONDS",
@@ -4745,7 +4745,7 @@
       "value": 0.5,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "后台进程启动后等 0.5 秒再判定存活/收集输出：给进程留出启动时间，避免误报启动失败。"
     },
     {
       "name": "DEFAULT_ACTION_TIMEOUT_MS",
@@ -4753,7 +4753,7 @@
       "value": 15000,
       "unit": "毫秒",
       "category": "超时",
-      "description": ""
+      "description": "浏览器动作默认超时 15 秒（导航单独 30 秒）：动态站加载慢，给足时间又不让单步卡死。"
     },
     {
       "name": "DEFAULT_NAV_TIMEOUT_MS",
@@ -4764,10 +4764,10 @@
       "description": "默认浏览器动作超时(毫秒)。导航给足时间(动态站慢),其余动作短一些。"
     },
     {
-      "name": "MAX_REFS_PER_PAGE",
+      "name": "MAX_REFS_PER_PAGE_COUNT",
       "file": "agent_py_agent/agent/tooling/browser_session.py",
       "value": 400,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "一页最多标注多少个可交互元素的 ref(防超大页生成天量 ref)。"
     },
@@ -4785,7 +4785,7 @@
       "value": 0.05,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "逐键输入间隔 50ms：防止输入过快被目标程序丢键。"
     },
     {
       "name": "MAX_INLINE_WRITE_CONTENT_CHARS",
@@ -4801,7 +4801,7 @@
       "value": 2000,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "恢复写文件的单块建议 2000 字符：控制单次写入大小，失败重试粒度适中。"
     },
     {
       "name": "STREAMING_INLINE_WRITE_ABORT_CHARS",
@@ -4809,7 +4809,7 @@
       "value": 32000,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "流式内联写超过 32000 字符立即中止：防止失控写入无限增长。"
     },
     {
       "name": "MAX_CALL_SYNTAX_BYTES",
@@ -4817,7 +4817,7 @@
       "value": 524288,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "单次工具调用语法诊断的源码上限 512 KiB：超长跳过诊断，防诊断本身拖垮响应。"
     },
     {
       "name": "MAX_FILE_SYNTAX_BYTES",
@@ -4825,7 +4825,7 @@
       "value": 262144,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "单文件语法诊断上限 256 KiB：超长文件不诊断，防解析大文件耗时失控。"
     },
     {
       "name": "MAX_SYNTAX_FEEDBACK_CHARS",
@@ -4833,23 +4833,23 @@
       "value": 4096,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "语法诊断反馈最多 4096 字符：超长截断，保持反馈紧凑不撑爆 prompt。"
     },
     {
-      "name": "MAX_SYNTAX_OBSERVATIONS",
+      "name": "MAX_SYNTAX_OBSERVATION_COUNT",
       "file": "agent_py_agent/agent/tooling/file_syntax_diagnostics.py",
       "value": 16,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "语法诊断最多收集 16 条观察：限制反馈条数，防问题清单膨胀。"
     },
     {
-      "name": "_MAX_DIRECTORIES_PER_REQUEST",
+      "name": "_MAX_DIRECTORIES_PER_REQUEST_COUNT",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 128,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "路径发现一次请求最多展开 128 个目录：限制单次请求的遍历规模。"
     },
     {
       "name": "_MAX_DISCOVERY_DEPTH",
@@ -4857,55 +4857,55 @@
       "value": 8,
       "unit": "",
       "category": "上限预算",
-      "description": ""
+      "description": "路径发现最多 8 层深度：常规项目够用，防止深层目录拖垮遍历。"
     },
     {
-      "name": "_MAX_ENTRIES_PER_DIRECTORY",
+      "name": "_MAX_ENTRIES_PER_DIRECTORY_COUNT",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 256,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "路径发现单目录最多取 256 条：控制单目录展开规模。"
     },
     {
-      "name": "_MAX_VISITED_PER_REQUEST",
+      "name": "_MAX_VISITED_PER_REQUEST_COUNT",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 1024,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "路径发现一次请求最多访问 1024 个条目：限制遍历规模。"
     },
     {
-      "name": "_NEAR_NAME_DISTANCE_LIMIT",
+      "name": "_NEAR_NAME_DISTANCE_LIMIT_COUNT",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "常量用途: 同一目录内\"写错文件名\"提示的距离上限、建议条数与目录条目上限。"
     },
     {
-      "name": "_NEAR_NAME_MAX_DIRECTORY_ENTRIES",
+      "name": "_NEAR_NAME_MAX_DIRECTORY_ENTRY_COUNT",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 512,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "按单次查找耗时实测取值（10000 条约 37ms，512 条约 2ms）；真实目录极少超过 133 条。"
     },
     {
-      "name": "_NEAR_NAME_MAX_NAME_LENGTH",
+      "name": "_NEAR_NAME_MAX_NAME_LENGTH_CHARS",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 64,
-      "unit": "",
+      "unit": "字符",
       "category": "上限预算",
       "description": "常量用途: 超过这个长度的名字不做近名匹配，把最坏耗时卡住（距离计算是 O(长度^2)）。"
     },
     {
-      "name": "_NEAR_NAME_MAX_SUGGESTIONS",
+      "name": "_NEAR_NAME_MAX_SUGGESTION_COUNT",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "近名匹配建议最多 2 条：够提示又不刷屏。"
     },
     {
       "name": "_LSOF_TIMEOUT_SECONDS",
@@ -4913,15 +4913,15 @@
       "value": 2.0,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "lsof 查监听表超时 2 秒：监听状态核对不能无限等外部命令。"
     },
     {
-      "name": "_DEFAULT_CONNECT_TIMEOUT",
+      "name": "_DEFAULT_CONNECT_TIMEOUT_SECONDS",
       "file": "agent_py_agent/agent/tooling/mcp_client.py",
       "value": 30.0,
-      "unit": "",
+      "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "MCP 初始化握手超时 30 秒：慢 server 也够用，又不让卡死拖住调用。"
     },
     {
       "name": "_DEFAULT_MAX_CONTENT_CHARS",
@@ -4940,52 +4940,52 @@
       "description": "时，readline 会无上限读进内存；这里超限即丢弃该消息，绝不让一行把 agent 内存撑爆。"
     },
     {
-      "name": "_DEFAULT_TOOL_TIMEOUT",
+      "name": "_DEFAULT_TOOL_TIMEOUT_SECONDS",
       "file": "agent_py_agent/agent/tooling/mcp_client.py",
       "value": 60.0,
-      "unit": "",
+      "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "MCP 单次 tools/call 超时 60 秒：正常工具调用足够，防止失控 server 占住线程。"
     },
     {
-      "name": "_MAX_MUTATING_CALLS",
+      "name": "_MAX_MUTATING_CALL_COUNT",
       "file": "agent_py_agent/agent/tooling/operation_verification.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "验证回执同批最多 64 个变更调用：限制批次规模，防回执爆炸。"
     },
     {
-      "name": "_MAX_PROMPT_ARCHIVE_REFS",
+      "name": "_MAX_PROMPT_ARCHIVE_REF_COUNT",
       "file": "agent_py_agent/agent/tooling/operation_verification.py",
       "value": 4,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "prompt 归档引用最多 4 条：控制上下文注入体积。"
     },
     {
-      "name": "_MAX_PROMPT_RECENT_CALLS",
+      "name": "_MAX_PROMPT_RECENT_CALL_COUNT",
       "file": "agent_py_agent/agent/tooling/operation_verification.py",
       "value": 6,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "prompt 最近调用最多 6 条：只展示够用的最近记录。"
     },
     {
-      "name": "_MAX_REFS_PER_CALL",
+      "name": "_MAX_REFS_PER_CALL_COUNT",
       "file": "agent_py_agent/agent/tooling/operation_verification.py",
       "value": 4,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "单次调用引用最多 4 条：控制验证回执体积。"
     },
     {
-      "name": "_MAX_VISIBLE_OPERATION_GROUPS",
+      "name": "_MAX_VISIBLE_OPERATION_GROUP_COUNT",
       "file": "agent_py_agent/agent/tooling/operation_verification.py",
       "value": 12,
-      "unit": "",
+      "unit": "个",
       "category": "比例阈值",
-      "description": ""
+      "description": "验证回执最多显示 12 个分组：控制回执体积。"
     },
     {
       "name": "_FIREWALL_NOT_RUNNING",
@@ -4993,7 +4993,7 @@
       "value": 252,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "firewall-cmd 未运行的公开退出码 252：按协议退出码判断状态，不从错误文案猜。"
     },
     {
       "name": "_FIREWALL_TIMEOUT_SECONDS",
@@ -5001,7 +5001,7 @@
       "value": 1.5,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "查防火墙状态超时 1.5 秒：网络状态回执不能因防火墙查询拖太久。"
     },
     {
       "name": "DEFAULT_CAPTURE_BYTES",
@@ -5009,21 +5009,21 @@
       "value": 4194304,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "进程输出捕获默认上限 4 MiB：防止后台进程刷屏把内存/磁盘打爆。"
     },
     {
-      "name": "_FINAL_CONFIRM_SECONDS_WITHOUT_HANDLE",
+      "name": "_FINAL_CONFIRM_WITHOUT_HANDLE_SECONDS",
       "file": "agent_py_agent/agent/tooling/process_registry.py",
       "value": 2.0,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "无 Popen 句柄的停止方 SIGKILL 后核对 2 秒：慢主机上防漏判刚死的实例（2026-09-25 CI 3.10 复现）。"
     },
     {
-      "name": "_FINAL_CONFIRM_SECONDS_WITH_HANDLE",
+      "name": "_FINAL_CONFIRM_WITH_HANDLE_SECONDS",
       "file": "agent_py_agent/agent/tooling/process_registry.py",
       "value": 0.5,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
       "description": "把它记成未确认（2026-09-25 CI 3.10 复现）。有句柄时 proc.wait(2) 已经等过，这里只需短核对。"
     },
@@ -5036,10 +5036,10 @@
       "description": "(还活着就 SIGKILL 硬杀整组),避免留下孤儿子进程。"
     },
     {
-      "name": "_MAX_FINISHED",
+      "name": "_MAX_FINISHED_COUNT",
       "file": "agent_py_agent/agent/tooling/process_registry.py",
       "value": 128,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "最多保留多少条已结束的进程记录,超了按启动时间淘汰最老的(防内存无界增长)。"
     },
@@ -5057,7 +5057,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "进程会话默认等待 30 秒：给命令足够完成时间，又不无限等。"
     },
     {
       "name": "_MAX_WAIT_SECONDS",
@@ -5065,7 +5065,7 @@
       "value": 600.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "进程等待上限 600 秒：长时间命令也够，又不无限等。"
     },
     {
       "name": "_DEFAULT_READ_BYTES",
@@ -5073,7 +5073,7 @@
       "value": 32000,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "PTY 会话单次读取默认 32000 字节：平衡吞吐与响应延迟。"
     },
     {
       "name": "_MAX_BUFFER_BYTES",
@@ -5081,31 +5081,31 @@
       "value": 1000000,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "PTY 输出缓冲上限 1 MiB：防输出积压撑爆内存。"
     },
     {
-      "name": "_MAX_SESSIONS",
+      "name": "_MAX_SESSION_COUNT",
       "file": "agent_py_agent/agent/tooling/pty_sessions.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "PTY 会话最多 32 个：防失控并发把资源占满。"
     },
     {
-      "name": "_MAX_TERMINAL_COLUMNS",
+      "name": "_MAX_TERMINAL_COLUMN_COUNT",
       "file": "agent_py_agent/agent/tooling/pty_sessions.py",
       "value": 1000,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "PTY 终端列数上限 1000：防畸形尺寸请求。"
     },
     {
-      "name": "_MAX_TERMINAL_ROWS",
+      "name": "_MAX_TERMINAL_ROW_COUNT",
       "file": "agent_py_agent/agent/tooling/pty_sessions.py",
       "value": 1000,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "PTY 终端行数上限 1000：防畸形尺寸请求。"
     },
     {
       "name": "_MAX_WRITE_BYTES",
@@ -5113,7 +5113,7 @@
       "value": 64000,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "PTY 单次写入最多 64 KiB：控制单次写入体积。"
     },
     {
       "name": "_WRITE_TIMEOUT_SECONDS",
@@ -5121,7 +5121,7 @@
       "value": 5.0,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "PTY 写入超时 5 秒：慢终端不无限等，防写操作卡死。"
     },
     {
       "name": "_MAX_EXCEPTION_MESSAGE_CHARS",
@@ -5129,13 +5129,13 @@
       "value": 500,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "异常信息最多回 500 字符：超长截断，防堆栈撑爆反馈。"
     },
     {
-      "name": "_CLEANUP_WARNING_PID_LIMIT",
+      "name": "_CLEANUP_WARNING_PID_LIMIT_COUNT",
       "file": "agent_py_agent/agent/tooling/shell.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "清理没做成时正文最多列这么多个进程号，让“核对”能落地又不撑爆输出；完整列表在 termination 回执里。"
     },
@@ -5145,7 +5145,7 @@
       "value": 12000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "shell 命令输出默认最多回 12000 字符：防超长输出撑爆工具结果。"
     },
     {
       "name": "_FOREGROUND_EXIT_PROBE_SECONDS",
@@ -5153,13 +5153,13 @@
       "value": 0.25,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "前台命令退出探测间隔 0.25 秒：平衡退出响应速度与轮询开销。"
     },
     {
-      "name": "_MAX_BACKGROUND_JOB_RECORDS",
+      "name": "_MAX_BACKGROUND_JOB_RECORD_COUNT",
       "file": "agent_py_agent/agent/tooling/shell.py",
       "value": 1000,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "(审计 #16)。有界 append 只留最近 N 条(纯观测/孤儿排查用,丢最旧可接受),磁盘恒定。"
     },
@@ -5169,7 +5169,7 @@
       "value": 1000000000,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "后台进程日志文件上限 1 GiB：防止日志无限增长写满磁盘。"
     },
     {
       "name": "_PROCESS_PIPE_DRAIN_SECONDS",
@@ -5177,13 +5177,13 @@
       "value": 2.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "进程管道排空超时 2 秒：收尾时防止子进程输出把管道堵死。"
     },
     {
-      "name": "_BUSY_RETRY_ATTEMPTS",
+      "name": "_BUSY_RETRY_ATTEMPT_COUNT",
       "file": "agent_py_agent/agent/tooling/tool_operation_coordinator.py",
       "value": 3,
-      "unit": "",
+      "unit": "个",
       "category": "重试",
       "description": "重试耗尽才报冲突。"
     },
@@ -5193,7 +5193,7 @@
       "value": 300,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "工具操作租约宽限 300 秒：操作即将超时前给收尾机会。"
     },
     {
       "name": "_MINIMUM_LEASE_SECONDS",
@@ -5201,7 +5201,7 @@
       "value": 900,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "工具操作租约最短 900 秒：低于此值没有并发保护意义。"
     },
     {
       "name": "_MAX_URL_CHARS",
@@ -5209,7 +5209,7 @@
       "value": 4096,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "URL 最多 4096 字符：超长拒绝，防异常输入。"
     },
     {
       "name": "_MAX_BODY_BYTES",
@@ -5220,12 +5220,12 @@
       "description": "从网络读取的响应体上限（字节，含解压后）；给模型的字符上限另见 web_http_helpers.MAX_BODY_CHARS。"
     },
     {
-      "name": "_MAX_REDIRECTS",
+      "name": "_MAX_REDIRECT_COUNT",
       "file": "agent_py_agent/agent/tooling/web_fetch_runtime.py",
       "value": 5,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "跟随重定向最多 5 次：防重定向环无限跳转。"
     },
     {
       "name": "_HTML_PREVIEW_RAW_MAX_CHARS",
@@ -5233,7 +5233,7 @@
       "value": 4000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "HTML 预览原文最多 4000 字符：超长截断，防预览撑爆 prompt。"
     },
     {
       "name": "MAX_BODY_CHARS",
@@ -5241,7 +5241,7 @@
       "value": 1000000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "HTTP 响应体最多取 100 万字符：超长响应截断，防超大 body 撑爆上下文。"
     },
     {
       "name": "MIN_RESPONSE_PREVIEW_CHARS",
@@ -5257,7 +5257,7 @@
       "value": 100,
       "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "HTTP 头最多 100 个：超限拒绝，防头注入式放大。"
     },
     {
       "name": "_MAX_HEADER_JSON_CHARS",
@@ -5265,7 +5265,7 @@
       "value": 65536,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "HTTP 头序列化 JSON 最多 64 KiB：控制头体积。"
     },
     {
       "name": "_MAX_HEADER_NAME_CHARS",
@@ -5273,7 +5273,7 @@
       "value": 128,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "HTTP 头名最多 128 字符：超长拒绝，防畸形头。"
     },
     {
       "name": "_MAX_HEADER_VALUE_CHARS",
@@ -5281,7 +5281,7 @@
       "value": 8192,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "HTTP 头值最多 8192 字符：超长截断，防头值注入。"
     },
     {
       "name": "_MAX_METHOD_CHARS",
@@ -5289,7 +5289,7 @@
       "value": 16,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "HTTP 方法最多 16 字符：超长拒绝，防畸形请求。"
     },
     {
       "name": "_MAX_QUERY_CHARS",
@@ -5297,15 +5297,15 @@
       "value": 512,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "搜索查询词最多 512 字符：超长拒绝，防畸形查询。"
     },
     {
-      "name": "_MAX_SEARCH_RESULTS",
+      "name": "_MAX_SEARCH_RESULT_COUNT",
       "file": "agent_py_agent/agent/tooling/web_search.py",
       "value": 10,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "搜索最多返回 10 条结果：够用又不刷屏。"
     },
     {
       "name": "_MAX_BOUNDARY_PATH_CHARS",
@@ -5313,7 +5313,7 @@
       "value": 4096,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "写边界路径最多 4096 字符：超长路径拒绝，防异常输入。"
     },
     {
       "name": "ADMIN_PASSWORD_FAILURE_WINDOW_SECONDS",

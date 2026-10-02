@@ -26,9 +26,13 @@ _DISCOVERY_IGNORES = frozenset({
     "venv",
 })
 
-_MAX_VISITED_PER_REQUEST = 1_024
-_MAX_DIRECTORIES_PER_REQUEST = 128
-_MAX_ENTRIES_PER_DIRECTORY = 256
+# 路径发现一次请求最多访问 1024 个条目：限制遍历规模。
+_MAX_VISITED_PER_REQUEST_COUNT = 1_024
+# 路径发现一次请求最多展开 128 个目录：限制单次请求的遍历规模。
+_MAX_DIRECTORIES_PER_REQUEST_COUNT = 128
+# 路径发现单目录最多取 256 条：控制单目录展开规模。
+_MAX_ENTRIES_PER_DIRECTORY_COUNT = 256
+# 路径发现最多 8 层深度：常规项目够用，防止深层目录拖垮遍历。
 _MAX_DISCOVERY_DEPTH = 8
 
 # LLM: Near-name suggestions are a separate, narrower feature from tree discovery: they only run
@@ -36,15 +40,16 @@ _MAX_DISCOVERY_DEPTH = 8
 # the requested path. The caps are internal constants on purpose -- exposing them as user config
 # would invite values that silently disable the feature or make every miss scan a huge directory.
 # 常量用途: 同一目录内"写错文件名"提示的距离上限、建议条数与目录条目上限。
-_NEAR_NAME_DISTANCE_LIMIT = 2
-_NEAR_NAME_MAX_SUGGESTIONS = 2
+_NEAR_NAME_DISTANCE_LIMIT_COUNT = 2
+# 近名匹配建议最多 2 条：够提示又不刷屏。
+_NEAR_NAME_MAX_SUGGESTION_COUNT = 2
 # 按单次查找耗时实测取值（10000 条约 37ms，512 条约 2ms）；真实目录极少超过 133 条。
-_NEAR_NAME_MAX_DIRECTORY_ENTRIES = 512
+_NEAR_NAME_MAX_DIRECTORY_ENTRY_COUNT = 512
 # LLM: Edit distance is O(len^2), so a very long name dominates the cost even inside a small
 # directory. Skipping near-name matching for long names bounds the worst case without changing the
 # algorithm (2026-09-28 review, N5). 64 is well above any realistic filename.
 # 常量用途: 超过这个长度的名字不做近名匹配，把最坏耗时卡住（距离计算是 O(长度^2)）。
-_NEAR_NAME_MAX_NAME_LENGTH = 64
+_NEAR_NAME_MAX_NAME_LENGTH_CHARS = 64
 
 
 # LLM: One budget is shared by parent probing and every workspace root so multiple roots cannot
@@ -52,8 +57,8 @@ _NEAR_NAME_MAX_NAME_LENGTH = 64
 # 类用途: 记录一次缺失路径候选搜索还允许查看多少目录项和目录。
 @dataclass
 class CandidateScanBudget:
-    remaining_entries: int = _MAX_VISITED_PER_REQUEST
-    remaining_directories: int = _MAX_DIRECTORIES_PER_REQUEST
+    remaining_entries: int = _MAX_VISITED_PER_REQUEST_COUNT
+    remaining_directories: int = _MAX_DIRECTORIES_PER_REQUEST_COUNT
 
 
 @dataclass(frozen=True)
@@ -110,7 +115,7 @@ class AccessGate:
 class NearNameScope:
     workspace_roots: list[Path]
     expected_kind: str = "any"
-    limit: int = _NEAR_NAME_MAX_SUGGESTIONS
+    limit: int = _NEAR_NAME_MAX_SUGGESTION_COUNT
     # 工具自己的路径裁决；每个候选都过一遍，跟 resolve_path 用同一条规则。
     access: AccessGate = field(default_factory=AccessGate)
 
@@ -243,13 +248,13 @@ def suggest_near_name_paths(raw_name: str, parent: Path, scope: NearNameScope) -
         return []
     # 超长名字直接不做近名匹配：编辑距离是 O(长度^2)，长名字会把最坏耗时拉起来，
     # 而真实文件名远短于这个上限（2026-09-28 复审 N5 的便宜解法）。
-    if len(raw_name) > _NEAR_NAME_MAX_NAME_LENGTH:
+    if len(raw_name) > _NEAR_NAME_MAX_NAME_LENGTH_CHARS:
         return []
     roots = _normalized_roots(scope.workspace_roots)
     # 越权目录直接不扫 —— 不能靠"相近文件名"泄露墙外有哪些文件。
     if not _is_under_any_root(parent, roots):
         return []
-    entries = _scan_entries_within_cap(parent, _NEAR_NAME_MAX_DIRECTORY_ENTRIES)
+    entries = _scan_entries_within_cap(parent, _NEAR_NAME_MAX_DIRECTORY_ENTRY_COUNT)
     if entries is None:
         return []
     scored = _score_near_name_entries(entries, raw_name, parent, scope)
@@ -289,7 +294,7 @@ def _score_near_name_entries(
     for entry in entries:
         if entry.name == raw_name or not scope.admits(entry):
             continue
-        distance = _edit_distance_within(raw_name.lower(), entry.name.lower(), _NEAR_NAME_DISTANCE_LIMIT)
+        distance = _edit_distance_within(raw_name.lower(), entry.name.lower(), _NEAR_NAME_DISTANCE_LIMIT_COUNT)
         if distance is None:
             continue
         # 报告条目自身路径（仍在授权目录内）；不 resolve，避免暴露链接目标。
@@ -374,7 +379,7 @@ def _score_parent_siblings(
         return
     with iterator:
         for index, entry in enumerate(iterator):
-            if index >= _MAX_ENTRIES_PER_DIRECTORY or budget.remaining_entries <= 0:
+            if index >= _MAX_ENTRIES_PER_DIRECTORY_COUNT or budget.remaining_entries <= 0:
                 break
             budget.remaining_entries -= 1
             if entry.name in _DISCOVERY_IGNORES:
@@ -422,7 +427,7 @@ def _walk_candidate_items(
             continue
         with iterator:
             for index, entry in enumerate(iterator):
-                if index >= _MAX_ENTRIES_PER_DIRECTORY or budget.remaining_entries <= 0:
+                if index >= _MAX_ENTRIES_PER_DIRECTORY_COUNT or budget.remaining_entries <= 0:
                     break
                 budget.remaining_entries -= 1
                 if entry.name in _DISCOVERY_IGNORES:

@@ -104,7 +104,7 @@ def test_cleanup_unconfirmed_returns_the_real_result_with_a_warning(tmp_path, mo
 @pytest.mark.parametrize("method", ["identity_unavailable", "identity_changed"])
 def test_cleanup_not_attempted_says_so_and_lists_bounded_pids(tmp_path, monkeypatch, method):
     completed = subprocess.CompletedProcess("generic-command", 0, "original-output", "")
-    pids = tuple(range(4001, 4001 + shell._CLEANUP_WARNING_PID_LIMIT + 3))
+    pids = tuple(range(4001, 4001 + shell._CLEANUP_WARNING_PID_LIMIT_COUNT + 3))
     completed.termination = registry.ProcessTerminationReceipt(method, False, None, 0, pids)
     tool = shell.ShellTool(tmp_path)
     monkeypatch.setattr(tool, "_run_command", lambda *args: completed)
@@ -114,9 +114,9 @@ def test_cleanup_not_attempted_says_so_and_lists_bounded_pids(tmp_path, monkeypa
     assert (result.ok, result.effect_outcome) == (True, "")
     assert "[进程清理未尝试]" in result.output and "没有尝试结束" in result.output
     assert "[进程清理未确认]" not in result.output
-    shown = pids[:shell._CLEANUP_WARNING_PID_LIMIT]
+    shown = pids[:shell._CLEANUP_WARNING_PID_LIMIT_COUNT]
     assert "、".join(str(pid) for pid in shown) + "等" in result.output
-    assert str(pids[shell._CLEANUP_WARNING_PID_LIMIT]) not in result.output
+    assert str(pids[shell._CLEANUP_WARNING_PID_LIMIT_COUNT]) not in result.output
     assert result.result_envelope["process"]["cleanup_confirmed"] is False
 
 

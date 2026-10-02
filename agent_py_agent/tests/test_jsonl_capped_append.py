@@ -58,9 +58,9 @@ def test_record_background_job_caps_registry(tmp_path: Path) -> None:
 
     jobs = tmp_path / ".background_jobs"
     jobs.mkdir()
-    n = shell._MAX_BACKGROUND_JOB_RECORDS + 200
+    n = shell._MAX_BACKGROUND_JOB_RECORD_COUNT + 200
     for i in range(n):
         shell._record_background_job(jobs, pid=1000 + i, command=f"cmd {i}", log_path=tmp_path / f"{i}.log")
     recs = read_jsonl_objects(jobs / "registry.jsonl")
-    assert len(recs) == shell._MAX_BACKGROUND_JOB_RECORDS  # 登记台账封顶
+    assert len(recs) == shell._MAX_BACKGROUND_JOB_RECORD_COUNT  # 登记台账封顶
     assert recs[-1]["pid"] == 1000 + n - 1  # 最近的后台任务在册

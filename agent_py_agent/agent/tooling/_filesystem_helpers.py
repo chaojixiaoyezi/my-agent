@@ -10,13 +10,18 @@ from typing import Any
 from ..contracts.error_taxonomy import ERROR_CONTRACTS
 from .models import ToolFailureStage, ToolHandlerOutcome
 
+# 路径最多 4096 字符：超长拒绝，防异常输入。
 _MAX_PATH_CHARS = 4096
+# 搜索查询最多 4000 字符：超长拒绝，防异常输入。
 _MAX_SEARCH_QUERY_CHARS = 4000
+# 搜索命中行最多 500 字符：超长行截断，防撑爆结果。
 _MAX_SEARCH_LINE_CHARS = 500
+# 写文件正文最多 100 万字符：超长拒绝，防异常输入。
 _MAX_WRITE_TEXT_CHARS = 1_000_000
 # 没有 ripgrep 等外部工具时，Python 后备遍历的存活上限（文件查找与内容搜索共用一份）：超过这么多候选文件或这么多秒就停，
 # 结果标为不完整，不能据此判定“没有匹配”；只保护单个 Gateway 不被大目录长期占住。
 _FALLBACK_SCAN_MAX_FILES = 20_000
+# 无 ripgrep 时后备遍历最多 10 秒：超时标不完整，保护 Gateway 不被大目录占住。
 _FALLBACK_SCAN_MAX_SECONDS = 10.0
 _INTERNAL_AGENT_STATUS_FILES = frozenset(
     {

@@ -43,7 +43,9 @@ _HTML_ID_RE = re.compile(r"\bid\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
 _HTML_ANCHOR_TAG_RE = re.compile(r"<a\b(?P<attrs>[^>]*)>(?P<label>.*?)</a>", re.IGNORECASE | re.DOTALL)
 _HTML_HREF_ATTR_RE = re.compile(r"\bhref\s*=\s*(['\"])(?P<href>.*?)\1", re.IGNORECASE | re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
-_MAX_LINK_ISSUE_EXAMPLES = 5
+# 链接完整性检查最多报 5 条问题示例：反馈够定位又不刷屏。
+_MAX_LINK_ISSUE_EXAMPLE_COUNT = 5
+# 链接标签最多 60 字符：超长截断，控制回执体积。
 _MAX_LINK_LABEL_CHARS = 60
 
 
@@ -152,7 +154,7 @@ def _html_link_issues(text: str) -> list[ArtifactIntegrityIssue]:
         bucket = buckets.setdefault(code, {"count": 0, "examples": [], "first_href": cleaned})
         bucket["count"] = int(bucket["count"]) + 1
         examples = bucket["examples"]
-        if isinstance(examples, list) and len(examples) < _MAX_LINK_ISSUE_EXAMPLES:
+        if isinstance(examples, list) and len(examples) < _MAX_LINK_ISSUE_EXAMPLE_COUNT:
             examples.append(_html_link_issue_example(label, cleaned))
     return [
         ArtifactIntegrityIssue(
@@ -216,7 +218,7 @@ def _clean_anchor_label(label: str) -> str:
 def _examples_text(examples: list[str]) -> str:
     if not examples:
         return ""
-    return f"（示例: {'; '.join(examples[:_MAX_LINK_ISSUE_EXAMPLES])}）"
+    return f"（示例: {'; '.join(examples[:_MAX_LINK_ISSUE_EXAMPLE_COUNT])}）"
 
 
 def _issue_brief(issue: ArtifactIntegrityIssue) -> str:

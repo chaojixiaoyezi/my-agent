@@ -34,6 +34,7 @@ from .workspace_read_scope import build_workspace_read_context
 from .workspace_write_scope import build_workspace_write_context
 from .write_boundary import RUNTIME_INSTALL_ROOTS_KEY, WRITE_TOOL_NAMES, validate_write_boundary
 
+# 异常信息最多回 500 字符：超长截断，防堆栈撑爆反馈。
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
 _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
     "find_files",

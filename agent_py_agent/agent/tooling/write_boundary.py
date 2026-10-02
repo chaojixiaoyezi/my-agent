@@ -22,6 +22,7 @@ from ..path_access_policy import PathAccessPolicy
 # 常量用途: 统一文件写工具的展示顺序与成员集合，避免主代理、子代理和权限门各维护一份后漂移。
 WRITE_TOOL_ORDER = ("write_file", "edit_file", "apply_patch")
 WRITE_TOOL_NAMES = frozenset(WRITE_TOOL_ORDER)
+# 写边界路径最多 4096 字符：超长路径拒绝，防异常输入。
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _INTERNAL_OUTPUT_JSON_NAME = "output.json"
 # 正在运行的 my-agent 安装目录（宿主结构化事实，见 agent_core/runtime_write_guards）。它不属于写入范围键：

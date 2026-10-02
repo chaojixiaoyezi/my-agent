@@ -35,8 +35,9 @@ _IS_WINDOWS = os.name == "nt"
 _KILL_GRACE_SECONDS = 3.0
 # 没有 Popen 句柄的停止方（如从别的进程停插件宿主）拿不到 wait()；SIGKILL 后只留 0.5 秒核对在慢主机上会漏掉刚死的实例，
 # 把它记成未确认（2026-09-25 CI 3.10 复现）。有句柄时 proc.wait(2) 已经等过，这里只需短核对。
-_FINAL_CONFIRM_SECONDS_WITH_HANDLE = 0.5
-_FINAL_CONFIRM_SECONDS_WITHOUT_HANDLE = 2.0
+_FINAL_CONFIRM_WITH_HANDLE_SECONDS = 0.5
+# 无 Popen 句柄的停止方 SIGKILL 后核对 2 秒：慢主机上防漏判刚死的实例（2026-09-25 CI 3.10 复现）。
+_FINAL_CONFIRM_WITHOUT_HANDLE_SECONDS = 2.0
 
 
 # LLM: 该回执只证明本次观察到的进程树是否已终止，不证明命令成功或外部系统已回滚。
@@ -51,7 +52,7 @@ class ProcessTerminationReceipt:
 # 滚动输出缓冲:查询时从日志文件尾部最多读这么多字符,够看进度/结论又不撑爆 prompt。
 _OUTPUT_TAIL_CHARS = 4000
 # 最多保留多少条已结束的进程记录,超了按启动时间淘汰最老的(防内存无界增长)。
-_MAX_FINISHED = 128
+_MAX_FINISHED_COUNT = 128
 
 
 # LLM: 结构化错误区别权威损坏和记录不存在，不展开其它会话的记录内容。
@@ -464,9 +465,9 @@ class ProcessRegistry:
     def _prune_finished_locked(self, store_root: Path) -> None:
         finished = [(key, rec) for key, rec in self._processes.items() if rec.is_terminal()]
         finished.sort(key=lambda item: item[1].finished_at or item[1].started_at)
-        for key, _record in finished[:max(0, len(finished) - _MAX_FINISHED)]:
+        for key, _record in finished[:max(0, len(finished) - _MAX_FINISHED_COUNT)]:
             self._processes.pop(key, None)
-        ProcessSessionStore(store_root).prune_finished(_MAX_FINISHED)
+        ProcessSessionStore(store_root).prune_finished(_MAX_FINISHED_COUNT)
 
     # LLM: 只丢本进程缓存，不修改持久记录或杀资源；测试负责精确回收自己创建的资源。
     # 函数用途: 清除缓存以验证跨进程恢复或隔离测试。
@@ -593,7 +594,7 @@ def terminate_process_tree(
             pass
     _wait_process_snapshot_gone(
         snapshot, proc,
-        _FINAL_CONFIRM_SECONDS_WITH_HANDLE if proc is not None else _FINAL_CONFIRM_SECONDS_WITHOUT_HANDLE,
+        _FINAL_CONFIRM_WITH_HANDLE_SECONDS if proc is not None else _FINAL_CONFIRM_WITHOUT_HANDLE_SECONDS,
         terminated,
     )
     unresolved = tuple(member for member, token in snapshot.items()

@@ -31,7 +31,9 @@ from .process_scope import process_access_scope
 from .process_session_cleanup import ProcessSessionCleanupError
 from .process_session_store import process_session_store_root
 
+# 进程会话默认等待 30 秒：给命令足够完成时间，又不无限等。
 _DEFAULT_WAIT_SECONDS = 30.0
+# 进程等待上限 600 秒：长时间命令也够，又不无限等。
 _MAX_WAIT_SECONDS = 600.0
 # 只读动作：无副作用，因此读不出权威时 effect 是已知的「没开始」而不是 unknown。
 # 新增只读动作时必须一起加进来，否则会退回 unknown 并误触发主代理的「结果未知就收口」。

@@ -6,6 +6,7 @@ import os
 import threading
 import time
 
+# 进程输出捕获默认上限 4 MiB：防止后台进程刷屏把内存/磁盘打爆。
 DEFAULT_CAPTURE_BYTES = 4 * 1024 * 1024
 
 

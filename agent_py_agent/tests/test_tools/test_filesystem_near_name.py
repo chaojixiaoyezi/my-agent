@@ -179,7 +179,7 @@ def test_directory_cap_stops_reading_instead_of_materializing_all(tmp_path: Path
     root = tmp_path / "workspace"
     big = root / "big"
     big.mkdir(parents=True)
-    cap = recovery._NEAR_NAME_MAX_DIRECTORY_ENTRIES
+    cap = recovery._NEAR_NAME_MAX_DIRECTORY_ENTRY_COUNT
     for index in range(cap + 200):
         (big / f"generated-{index:05d}.txt").write_text("x", encoding="utf-8")
 
@@ -243,10 +243,10 @@ def test_overlong_name_skips_near_name_matching(tmp_path: Path):
     root = tmp_path / "workspace"
     docs = root / "docs"
     docs.mkdir(parents=True)
-    long_name = "a" * recovery._NEAR_NAME_MAX_NAME_LENGTH + ".md"
+    long_name = "a" * recovery._NEAR_NAME_MAX_NAME_LENGTH_CHARS + ".md"
     (docs / long_name).write_text("x", encoding="utf-8")
     # 只差一个字符：若真的做了匹配，它必然被建议出来。
-    typo = "a" * recovery._NEAR_NAME_MAX_NAME_LENGTH + "_x.md"
+    typo = "a" * recovery._NEAR_NAME_MAX_NAME_LENGTH_CHARS + "_x.md"
 
     found = recovery.suggest_near_name_paths(
         typo, docs, recovery.NearNameScope(workspace_roots=[root])
@@ -261,7 +261,7 @@ def test_name_at_the_length_limit_still_matches(tmp_path: Path):
     root = tmp_path / "workspace"
     docs = root / "docs"
     docs.mkdir(parents=True)
-    limit = recovery._NEAR_NAME_MAX_NAME_LENGTH
+    limit = recovery._NEAR_NAME_MAX_NAME_LENGTH_CHARS
     suffix = ".md"
     name = "b" * (limit - len(suffix)) + suffix   # 长度正好 = limit
     assert len(name) == limit
@@ -282,8 +282,8 @@ def test_distance_limit_two_and_suggestion_cap_two(tmp_path: Path):
     """LLM: Distance limit and suggestion count are separate caps and both must hold."""
     from agent_py_agent.agent.tooling import filesystem_path_recovery as recovery
 
-    assert recovery._NEAR_NAME_DISTANCE_LIMIT == 2
-    assert recovery._NEAR_NAME_MAX_SUGGESTIONS == 2
+    assert recovery._NEAR_NAME_DISTANCE_LIMIT_COUNT == 2
+    assert recovery._NEAR_NAME_MAX_SUGGESTION_COUNT == 2
 
     root = tmp_path / "workspace"
     docs = root / "docs"
@@ -552,7 +552,7 @@ def test_two_suggestion_cap_with_three_close_names(tmp_path: Path):
 
     # 先确认前提成立：三个名字都在距离上限内
     distances = [
-        recovery._edit_distance_within("report_x.md", name, recovery._NEAR_NAME_DISTANCE_LIMIT)
+        recovery._edit_distance_within("report_x.md", name, recovery._NEAR_NAME_DISTANCE_LIMIT_COUNT)
         for name in ("report_a.md", "report_b.md", "report_c.md")
     ]
     assert all(d is not None for d in distances), f"前提不成立，距离={distances}"

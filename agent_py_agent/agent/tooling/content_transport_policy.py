@@ -9,8 +9,10 @@ from types import MappingProxyType
 # 写文件内联正文的建议上限：参数减量第 3 批（2026-09-27）起不再是配置项 tool_write_inline_max_chars，也不再经 settings/defaults 转一手，
 # 这里是唯一定义；模型生成侧的流式截断、写文件工具的提示与工具注册表都从这里 import。
 MAX_INLINE_WRITE_CONTENT_CHARS = 12_000
+# 流式内联写超过 32000 字符立即中止：防止失控写入无限增长。
 STREAMING_INLINE_WRITE_ABORT_CHARS = 32_000
 RECOMMENDED_WRITE_CHUNK_CHARS = "1500-2000"
+# 恢复写文件的单块建议 2000 字符：控制单次写入大小，失败重试粒度适中。
 RECOVERY_WRITE_CHUNK_CHARS = 2000
 RECOVERY_STREAMING_INLINE_WRITE_ABORT_CHARS = STREAMING_INLINE_WRITE_ABORT_CHARS
 

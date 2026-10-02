@@ -47,13 +47,20 @@ from .shell import (
     parse_shell_command,
 )
 
-_MAX_SESSIONS = 32
+# PTY 会话最多 32 个：防失控并发把资源占满。
+_MAX_SESSION_COUNT = 32
+# PTY 输出缓冲上限 1 MiB：防输出积压撑爆内存。
 _MAX_BUFFER_BYTES = 1_000_000
+# PTY 单次写入最多 64 KiB：控制单次写入体积。
 _MAX_WRITE_BYTES = 64_000
+# PTY 写入超时 5 秒：慢终端不无限等，防写操作卡死。
 _WRITE_TIMEOUT_SECONDS = 5.0
+# PTY 会话单次读取默认 32000 字节：平衡吞吐与响应延迟。
 _DEFAULT_READ_BYTES = 32_000
-_MAX_TERMINAL_COLUMNS = 1000
-_MAX_TERMINAL_ROWS = 1000
+# PTY 终端列数上限 1000：防畸形尺寸请求。
+_MAX_TERMINAL_COLUMN_COUNT = 1000
+# PTY 终端行数上限 1000：防畸形尺寸请求。
+_MAX_TERMINAL_ROW_COUNT = 1000
 
 
 # LLM: 访问快照与执行归属分别冻结；close_lock 串行同一进程的终止，回执确认后才宣称已停止。
@@ -203,8 +210,8 @@ class PtySessionRegistry:
         with self._lock:
             self._prune_finished()
             active = sum(session.process.poll() is None for session in self._sessions.values())
-            if active + len(self._pending_starts) >= _MAX_SESSIONS:
-                raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSIONS}")
+            if active + len(self._pending_starts) >= _MAX_SESSION_COUNT:
+                raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSION_COUNT}")
             self._counter += 1
             session_id = f"pty-{self._counter}-{int(time.time())}"
             self._pending_starts[session_id] = _PtyStart(execution_scope)
@@ -284,7 +291,7 @@ class PtySessionRegistry:
     # 函数用途: 保留最近 32 个已结束 PTY，避免常驻 Gateway 累积历史对象和缓冲。
     def _prune_finished(self) -> None:
         finished = [key for key, item in self._sessions.items() if item.closed and item.process.poll() is not None]
-        for key in finished[:-_MAX_SESSIONS]:
+        for key in finished[:-_MAX_SESSION_COUNT]:
             del self._sessions[key]
 
     # LLM: Listing is an exact-scope projection over the bounded in-memory registry; never expose
@@ -512,13 +519,13 @@ class TerminalSessionTool(BaseTool):
                 "columns": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": _MAX_TERMINAL_COLUMNS,
+                    "maximum": _MAX_TERMINAL_COLUMN_COUNT,
                     "description": "resize 后的终端列数。",
                 },
                 "rows": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": _MAX_TERMINAL_ROWS,
+                    "maximum": _MAX_TERMINAL_ROW_COUNT,
                     "description": "resize 后的终端行数。",
                 },
             },
@@ -764,8 +771,8 @@ class TerminalSessionTool(BaseTool):
             )
         if (
             not session_id
-            or not 1 <= columns <= _MAX_TERMINAL_COLUMNS
-            or not 1 <= rows <= _MAX_TERMINAL_ROWS
+            or not 1 <= columns <= _MAX_TERMINAL_COLUMN_COUNT
+            or not 1 <= rows <= _MAX_TERMINAL_ROW_COUNT
         ):
             return self._error(
                 "TOOL_INVALID_ARGUMENTS",

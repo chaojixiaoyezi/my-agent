@@ -8,13 +8,19 @@ from typing import Any
 
 from .models import ToolHandlerOutcome
 
+# HTTP 响应体最多取 100 万字符：超长响应截断，防超大 body 撑爆上下文。
 MAX_BODY_CHARS = 1_000_000
 # 响应正文预览的下限（web 工具共用一份）：模型请求的 max_chars 不低于它，HTTP 错误正文也按它截取预览。
 MIN_RESPONSE_PREVIEW_CHARS = 256
+# HTTP 头序列化 JSON 最多 64 KiB：控制头体积。
 _MAX_HEADER_JSON_CHARS = 65536
+# HTTP 头最多 100 个：超限拒绝，防头注入式放大。
 _MAX_HEADER_COUNT = 100
+# HTTP 头名最多 128 字符：超长拒绝，防畸形头。
 _MAX_HEADER_NAME_CHARS = 128
+# HTTP 头值最多 8192 字符：超长截断，防头值注入。
 _MAX_HEADER_VALUE_CHARS = 8192
+# HTTP 方法最多 16 字符：超长拒绝，防畸形请求。
 _MAX_METHOD_CHARS = 16
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _HTTP_METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]*$")

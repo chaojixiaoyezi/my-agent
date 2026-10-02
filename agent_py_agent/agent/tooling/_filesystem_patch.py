@@ -35,6 +35,7 @@ from .models import (
     ToolRuntimePolicy,
 )
 
+# 缺上下文预览最多 4000 字符：控制补丁回执体积。
 _MAX_MISSING_CONTEXT_PREVIEW_CHARS = 4_000
 
 

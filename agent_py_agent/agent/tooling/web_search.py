@@ -32,8 +32,10 @@ from .models import (
 from .web import _has_control_chars, _normalize_url
 from .web_http_helpers import scalar_text
 
+# 搜索查询词最多 512 字符：超长拒绝，防畸形查询。
 _MAX_QUERY_CHARS = 512
-_MAX_SEARCH_RESULTS = 10
+# 搜索最多返回 10 条结果：够用又不刷屏。
+_MAX_SEARCH_RESULT_COUNT = 10
 
 
 @dataclass(frozen=True)
@@ -232,7 +234,7 @@ def _search_limit(value: Any, configured_max: int) -> int:
         limit = int(value) if value not in (None, "") else configured_max
     except (TypeError, ValueError):
         limit = configured_max
-    return max(1, min(configured_max, _MAX_SEARCH_RESULTS, limit))
+    return max(1, min(configured_max, _MAX_SEARCH_RESULT_COUNT, limit))
 
 
 def _normalize_domain_filter(value: Any, *, name: str) -> list[str]:
@@ -315,7 +317,7 @@ def _dedupe_search_results(results: list[_SearchResult], limit: int) -> list[_Se
 class WebSearchTool(BaseTool):
 
     def __init__(self, *, max_results: int = 5, timeout: int, providers: list[WebSearchProvider] | None = None):
-        self.max_results = max(1, min(_MAX_SEARCH_RESULTS, max_results))
+        self.max_results = max(1, min(_MAX_SEARCH_RESULT_COUNT, max_results))
         self.timeout = timeout
         # 多后端冗余(Bing 首选,DuckDuckGo 兜底):任一可用即可,告别单点故障。
         self.providers = providers or [

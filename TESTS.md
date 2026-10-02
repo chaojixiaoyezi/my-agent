@@ -117,6 +117,30 @@
 - **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 21 个（含仓库级守卫与 `test_packaging.py`）：294 passed；Ruff、doc sync、
   strict code-size（与 `ed64438fc` 按身份比新增 0）、`git diff --check`、clean-package 全部通过。
 
+## 常数整改第六批：agent/tooling 74 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch6`，基于 `aea277a92`）
+
+- **范围**：`agent_py_agent/agent/tooling/` 目录 74 个待整改常数（30 个文件；73 个唯一名，`_MAX_OWNERS` 两处定义）。数值一律不变、不碰其它模块。
+- **做法**：
+  - 数量上限类补 `_COUNT` 改名 24 个唯一名（`_MAX_OWNERS→_MAX_OWNERS_COUNT` 两处定义同步、`_MAX_SESSIONS→_MAX_SESSION_COUNT`、
+    `_MAX_REDIRECTS→_MAX_REDIRECT_COUNT`、`_MAX_SEARCH_RESULTS→_MAX_SEARCH_RESULT_COUNT`、`_NEAR_NAME_MAX_SUGGESTIONS→_NEAR_NAME_MAX_SUGGESTION_COUNT` 等）；
+  - 字符/长度类补 `_CHARS` 改名 1 个（`_NEAR_NAME_MAX_NAME_LENGTH→_NEAR_NAME_MAX_NAME_LENGTH_CHARS`）；
+  - 时间类补 `_SECONDS` 改名 4 个（`_DEFAULT_CONNECT_TIMEOUT→_DEFAULT_CONNECT_TIMEOUT_SECONDS`、`_DEFAULT_TOOL_TIMEOUT→_DEFAULT_TOOL_TIMEOUT_SECONDS`、
+    `_FINAL_CONFIRM_SECONDS_WITH_HANDLE→_FINAL_CONFIRM_WITH_HANDLE_SECONDS`、`_FINAL_CONFIRM_SECONDS_WITHOUT_HANDLE→_FINAL_CONFIRM_WITHOUT_HANDLE_SECONDS`）；
+  - 已有单位后缀的 42 个只补上方中文说明；无物理单位 2 个（`_FIREWALL_NOT_RUNNING` firewall-cmd 退出码协议值、`_MAX_DISCOVERY_DEPTH` 深度）
+    只补说明、挪入白名单无单位组（32→34）；脚本 tmp/add-batch6-comments.py 批量补 63 处，与生成器 `_description` 同判定。
+  - 改名引用全仓同步（脚本 tmp/sync-batch6-refs.py，词边界、按长度降序，22 文件 98 处），重 grep 旧名 0 残留；
+    `test_constant_names_unique._ALLOWED` 键 `MAX_OWNERS→MAX_OWNERS_COUNT`（两处仍同名），`WRITE_TIMEOUT_SECONDS` 条目保留（command_stream 与 pty_sessions 两处定义仍在）。
+- **白名单/目录**：待整改 225→152（groups[0]，只减不增），无物理单位组 32→34；目录重建 802 项，`--check` 一致。
+- **验证**：守卫（test_constants_catalog + test_constant_names_unique）**13 passed**；改名直接相关测试全过
+  （web 66 passed、pty/artifact/write_boundary/filesystem_write/语法诊断/operation_store/decision/browser_lite/mcp_operation_outcomes 等全过）；
+  guards9 全量 **168 passed**；check_import_boundaries **0 条**；ruff **All checks passed**；check_doc_sync **PASS**；
+  code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
+  `size_diff.sh` **新增告警 0 / 消失 2**（消失为集成分支其它提交所致）。
+- **沙箱环境限制（非本批所致，基线 aea277a92 同样失败）**：真实子进程/后台进程/网络监听类测试在沙箱失败或超时
+  （test_shell_foreground_cleanup 8、test_mcp_client 1 + test_r223 2、test_process_sessions 8 均经基线验证同失败；
+  test_tooling_shell 报 `sandbox-exec: sandbox_apply: Operation not permitted`、test_process_sessions 报进程身份采集不可用），
+  3a 在沙箱外复核。
+
 ## 常数整改第五批：agent/conversation 96 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch5`，基于 `ed64438fc`）
 
 - **范围**：`agent_py_agent/agent/conversation/` 目录 96 个待整改常数（35 个产品文件）。数值一律不变、不碰其它模块。
@@ -3481,7 +3505,7 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
 - **N5 最坏耗时（已用便宜办法解决）**：曾试着改成带状 DP 提速，**但实测它算错**——与朴素实现
   随机对拍 **20000 例里 1306 例不一致**，因此**回退**到原先的两行滚动数组（回退后 8000 例对拍
   0 不一致）；这条教训写进了代码注释，避免下一个人再尝试同样的重写。最终按集成者建议改用
-  **不改算法的便宜解法**：请求的文件名超过 `_NEAR_NAME_MAX_NAME_LENGTH`（**64**）就完全不做
+  **不改算法的便宜解法**：请求的文件名超过 `_NEAR_NAME_MAX_NAME_LENGTH_CHARS`（**64**）就完全不做
   近名匹配。目录条目最多 513 条、名字长度也有上限，最坏耗时因此被卡住。补了两条测试：
   超长名字不触发匹配（放一个距离 1 的兄弟文件，断言它不被建议出来，证明是"跳过"而非"没找到"），
   以及长度正好等于上限时仍正常匹配（防 off-by-one）。变异验证：去掉长度上限 → 恰好那一条变红。

@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import time
 
+# 逐键输入间隔 50ms：防止输入过快被目标程序丢键。
 _KEY_INTERVAL_SECONDS = 0.05
 
 

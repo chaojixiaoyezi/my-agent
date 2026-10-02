@@ -33,7 +33,7 @@ _SCOPES = ("current_thread", "owner", "all_owners")
 _DEFAULT_HOURS, _MAX_HOURS = 24, 24 * 30
 _DEFAULT_LIMIT, _MAX_LIMIT = 20, 100
 # 跨用户审计一次最多覆盖的用户数
-_MAX_OWNERS = 64
+_MAX_OWNERS_COUNT = 64
 
 
 # LLM: 一次审计已校验的结构化参数：thread_id 只在 scope=current_thread 时取自宿主运行上下文，其余为空；since 为时间窗起点。
@@ -126,7 +126,7 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
 
     home = agent.home_paths
     if query.scope == "all_owners":
-        homes, truncated = list_owner_home_paths(home, limit=_MAX_OWNERS)
+        homes, truncated = list_owner_home_paths(home, limit=_MAX_OWNERS_COUNT)
         targets = [(owner_id, _owner_host(agent, owner_home)) for owner_id, owner_home in homes]
     else:
         truncated, targets = False, [(str(home.owner_id or "local/main"), agent)]
@@ -147,7 +147,7 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
 def _requests_topic(agent: object, query: AuditQuery) -> dict:
     from .audit_requests_topic import requests_topic
 
-    return requests_topic(agent, query, max_owners=_MAX_OWNERS)
+    return requests_topic(agent, query, max_owners=_MAX_OWNERS_COUNT)
 
 
 _TOPIC_COLLECTORS = {"decision": _decision_topic, "requests": _requests_topic}

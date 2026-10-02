@@ -29,6 +29,7 @@ from .process_session_store import ProcessSessionStore
 if TYPE_CHECKING:
     from ..plugin_activation_ref import PluginActivationRef
 
+# 后台进程启动后等 0.5 秒再判定存活/收集输出：给进程留出启动时间，避免误报启动失败。
 BACKGROUND_START_SETTLE_SECONDS = 0.5
 LAUNCH_SPEC_SCHEMA = "background_process_launch.v6"
 

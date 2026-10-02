@@ -54,8 +54,10 @@ if TYPE_CHECKING:
 MCP_PROTOCOL_VERSION = "2024-11-05"
 _SUPPORTED_PROTOCOL_VERSIONS = frozenset({"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"})
 
-_DEFAULT_CONNECT_TIMEOUT = 30.0  # initialize 握手超时（秒）
-_DEFAULT_TOOL_TIMEOUT = 60.0     # 单次 tools/call 超时（秒）
+# MCP 初始化握手超时 30 秒：慢 server 也够用，又不让卡死拖住调用。
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0  # initialize 握手超时（秒）
+# MCP 单次 tools/call 超时 60 秒：正常工具调用足够，防止失控 server 占住线程。
+_DEFAULT_TOOL_TIMEOUT_SECONDS = 60.0     # 单次 tools/call 超时（秒）
 # 仅限制独立 preview；完整 content 与 blocks 交给统一工具输出归档，不能在协议归一化阶段丢正文。
 _DEFAULT_MAX_CONTENT_CHARS = 16 * 1024
 # 读 server stdout 的单行字符上限（纯防 OOM 安全底线）。话痨/失控/被入侵的 server 吐一行超大 JSON
@@ -135,8 +137,8 @@ class MCPServerConfig:
     command: str
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
-    timeout: float = _DEFAULT_TOOL_TIMEOUT
-    connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT
+    timeout: float = _DEFAULT_TOOL_TIMEOUT_SECONDS
+    connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS
     cwd: str = ""
     max_content_chars: int = _DEFAULT_MAX_CONTENT_CHARS  # 工具结果喂模型的文本上限,超截断
     max_line_chars: int = _DEFAULT_MAX_LINE_CHARS        # 读 stdout 单行字符上限,超丢弃(防 OOM)
@@ -182,8 +184,8 @@ class MCPServerConfig:
             command=command,
             args=[str(item) for item in args_raw],
             env={str(k): str(v) for k, v in env_raw.items()},
-            timeout=_coerce_timeout(raw.get("timeout"), _DEFAULT_TOOL_TIMEOUT),
-            connect_timeout=_coerce_timeout(raw.get("connect_timeout"), _DEFAULT_CONNECT_TIMEOUT),
+            timeout=_coerce_timeout(raw.get("timeout"), _DEFAULT_TOOL_TIMEOUT_SECONDS),
+            connect_timeout=_coerce_timeout(raw.get("connect_timeout"), _DEFAULT_CONNECT_TIMEOUT_SECONDS),
             cwd=str(raw.get("cwd") or "").strip(),
             max_content_chars=_coerce_positive_int(raw.get("max_content_chars"), _DEFAULT_MAX_CONTENT_CHARS),
             max_line_chars=_coerce_positive_int(raw.get("max_line_chars"), _DEFAULT_MAX_LINE_CHARS),

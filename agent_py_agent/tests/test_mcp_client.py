@@ -344,8 +344,8 @@ def test_config_invalid_timeout_falls_back_to_default():
     config = MCPServerConfig.from_mapping(
         "demo", {"command": "x", "timeout": "not-a-number", "connect_timeout": -5}
     )
-    assert config.timeout == 60.0  # _DEFAULT_TOOL_TIMEOUT
-    assert config.connect_timeout == 30.0  # _DEFAULT_CONNECT_TIMEOUT
+    assert config.timeout == 60.0  # _DEFAULT_TOOL_TIMEOUT_SECONDS
+    assert config.connect_timeout == 30.0  # _DEFAULT_CONNECT_TIMEOUT_SECONDS
 
 
 def test_config_catalog_category_defaults_and_validates():

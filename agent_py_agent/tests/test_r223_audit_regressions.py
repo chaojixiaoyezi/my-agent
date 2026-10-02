@@ -483,7 +483,7 @@ def test_pty_pending_start_reserves_last_slot(tmp_path, monkeypatch):
         pytest.skip("POSIX PTY admission")
     registry = pty.PtySessionRegistry()
     entered, release = threading.Event(), threading.Event()
-    monkeypatch.setattr(pty, "_MAX_SESSIONS", 1)
+    monkeypatch.setattr(pty, "_MAX_SESSION_COUNT", 1)
     def spawn(*args, **kwargs):
         entered.set()
         release.wait(1)
