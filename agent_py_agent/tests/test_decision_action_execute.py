@@ -300,6 +300,52 @@ def test_second_round_on_the_same_observation_does_not_execute_again(prepared, m
     assert [row["result_category"] for row in auto_rows(host)] == ["auto_execution:executed", "auto_execution:skipped:already_acted"]
 
 
+# 函数用途: 同一 run 里的第二次观察：新的观察编号与候选编号（重新观察后都会换），Jev 仍选 c1。
+def second_observation(record):
+    cands = [{"candidate_id": "cand-" + d * 16, "key": f"key-{d}", "role": "button", "label": "提交订单", "actions": [_CLICK]} for d in "ab"]
+    result = canonical_history_result(replace(record.call, call_id="read-2"), '{"items": ["page-output-2"]}', ok=True,
+                                      handler_details={"observation": observation(observation_id="obs-" + "b" * 24, candidates=cands)})
+    return replace(record, call=replace(record.call, call_id="read-2"), result=result, idx=3)
+
+
+def test_second_observation_in_the_same_run_hits_the_run_limit_and_is_recorded(prepared, monkeypatch):
+    host, record, _repo = arm(prepared)
+    quiet_recording(monkeypatch)
+    install(monkeypatch, choice="c1")
+    executor = Executor()
+    run_round(host, record, executor)
+    run_round(host, second_observation(record), executor)
+    assert len(executor.calls) == 1, "重新观察后 Jev 再选同一个按钮，宿主不再点（假执行器只收到 1 次）"
+    assert [row["result_category"] for row in auto_rows(host)] == ["auto_execution:executed", "auto_execution:skipped:run_limit_reached"]
+    assert auto_rows(host)[-1]["auto_execution"]["reason"] == execute.SKIP_RUN_LIMIT and record.params.host_actions == []
+    assert execute.AUTO_EXECUTIONS_PER_RUN_MAX_COUNT == 1
+
+
+def test_model_actions_do_not_count_toward_the_run_limit(prepared, monkeypatch):
+    host, record, repo = arm(prepared)
+    quiet_recording(monkeypatch)
+    repo.append_event(event_type="tool_completed", attempt_id="attempt-1", agent_run_id="agentrun-run-1", payload={
+        "operation_id": "op-model", "tool": _CLICK, "ok": True, "actor": "model",
+        "observation_action": {"observation_id": "obs-" + "c" * 24, "candidate_id": "cand-" + "c" * 16, "tool": _CLICK, "task_id": "task-1"}})
+    install(monkeypatch, choice="c1")
+    executor = Executor()
+    run_round(host, record, executor)
+    assert len(executor.calls) == 1, "模型自己点过别的观察不占宿主的上限"
+
+
+def test_material_lists_host_executed_actions_only_after_one_happened(prepared, monkeypatch):
+    host, record, _repo = arm(prepared)
+    quiet_recording(monkeypatch)
+    calls = install(monkeypatch, choice="c1")
+    run_round(host, record, Executor())
+    assert "executed_actions" not in calls[0][2]["state"], "第一次观察时还没执行过"
+    run_round(host, second_observation(record), Executor())
+    executed = calls[-1][2]["state"]["executed_actions"]
+    assert executed.startswith("<untrusted_tool_result") and all(piece in executed for piece in ("button", "提交订单", "\"result\":\"ok\""))
+    assert "cand-" not in executed and "key-" not in executed, "候选编号与插件 key 不外发"
+    assert execute.host_executed_actions(record.params)[0] == {"result": "ok", "role": "button", "label": "提交订单"}
+
+
 def test_model_action_on_the_observation_blocks_host_execution(prepared, monkeypatch):
     host, record, repo = arm(prepared)
     quiet_recording(monkeypatch)

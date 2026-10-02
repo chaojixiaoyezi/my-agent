@@ -253,9 +253,11 @@
 - **一次只做一次**：复核拒绝（stale / not_found）、执行失败、用户拒绝、取消都只记账，不重试、不改选候选；同一观察第二次进决策点会被幂等事实挡下（`already_acted`）。
 - **真实验收（片 F，2026-10-02，Linux 车道容器，M3 + 真 Jev）**：四档各一次 prompt 都跑通，auto 档宿主以 actor=decision 自动点击、两本账都带 decision_ref；
   结果与一条待定问题见第 8 节第 5 条。`observe_window` 之外的来源（插件/MCP）只要声明了 `observation_ref` 且只需候选编号，规则一样适用，但没有真实验收。
-- **待定（片 F 真实验收发现）**：模型按提示“再操作请先重新观察”重新观察后，新观察是新的 observation_id，Jev 又选中同一个按钮（材料里没有“本 run 已做过什么”），
-  宿主按幂等规则（按观察编号）又点了一次，等于重复提交。候选方向：同一 run 内同一目标（target_ref_hash）只自动执行一次；或把本 run 已执行的动作事实
-  放进 Jev 材料让它能答 not_needed。等 ae 定，片 D 规则暂不改。
+- **同一 run 最多自动执行一次（片 F 真实验收发现后 ae 定，3a 同意）**：模型按提示重新观察后，新观察是新的 observation_id、候选编号也换，Jev 又选中同一个按钮，
+  按观察编号的幂等挡不住重复提交（第二轮 auto 档 Tk 收到 2 次点击）。收紧：模块常数 `AUTO_EXECUTIONS_PER_RUN_MAX_COUNT = 1`（不做配置项），判定事实 = 当前 run/task
+  里 actor=decision 的 observation_action 事实计数（runtime_events），到上限记 `run_limit_reached` 进决策账补充行；不按目标分（OCR 候选跨观察没有稳定身份）；主模型自己的
+  动作不计入上限，模型点过的观察仍按 `already_acted` 不执行。另加软约束：本 run 宿主已自动执行过的动作（候选 role、label、粗位置、结果 ok/failed:<码>，取自本 run 内存归档）
+  以 `executed_actions` 外部数据进 Jev 材料，题面不变，Jev 仍可选 not_needed；它不替代上限。
 
 ## 8. 开关、测试与验收
 

@@ -932,7 +932,8 @@
     四档各一次 prompt（第二轮全部跑通，auto 档宿主以 actor=decision 自动点击、两本账带 decision_ref；第一轮 prompt 写了窗口标题导致 observe_window not_found，两轮都留证据）；
     `/plugins list` 末尾加 MCP 服务段（运行/发布状态、工具数、拒绝原因码），TUI 直连读本进程注册表、Gateway/IM 只借已加载的 owner 实例。真实验收暴露的可用性问题
     （模型把窗口标题传给 `observe_window`）按 3a/ae 的规则修了：`window` 接受与展示标题完全相同的唯一匹配、多个同名报 `window_ambiguous`，not_found/ambiguous 带可见窗口清单
-    （设计稿第 3 节）。**待定**：重新观察后 Jev 再选同一按钮、宿主按观察编号幂等又点一次（重复提交），方向见设计稿第 7 节，等 ae 定。
+    （设计稿第 3 节）。真实验收发现重新观察后 Jev 再选同一按钮、宿主按观察编号幂等又点一次（重复提交）——ae 定、3a 同意后收紧为“同一 run 最多自动执行一次”
+    （`AUTO_EXECUTIONS_PER_RUN_MAX_COUNT = 1`，跳过记 `run_limit_reached`，模型自己的动作不计），并把本 run 已自动执行的动作作为外部数据进 Jev 材料（设计稿第 7 节）。
   - **片 D 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` 72ddc2b5c，ae 定规则）**：决策材料多一项归一化粗位置
     （有 region 和 frame 才有，先夹后舍入）；能力开关 `action_candidate_auto_execute_enabled`（默认关，管理员边界）打开且建议已采用时，宿主按结构化条件
     （本机管理员主代理、所选候选恰有一个只凭候选编号的动作、同一观察没被碰过）计划一次 `actor=decision` 的宿主调用，走模型调用同一条执行/审批/记录链；

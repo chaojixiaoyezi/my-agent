@@ -1127,8 +1127,12 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   （脚本 `run_mutations_j16f.py` 在证据目录 harness/）。补跑（证据 `run3/`）：第一轮那句提到标题的 prompt 只跑 apply 一档——`observe_window(window="J16 Smoke")`
   第一次就命中（审批 ask → 批准 → ok，4 个候选），失败码序列为空；Jev 2 次（1.24 s / 1.23 s）选中，模型 click_candidate 点中 Submit，再按别名观察确认 `status submitted`；
   M3 4 次 / 11.2 万输入 token，Tk 1 次点击，耗时 14.3 s。
-- **门禁**：ruff 0；常数目录重生成 866 + --check 0；import boundaries 0；strict code-size hard=0；size_diff 新增 0；doc_sync PASS；diff --check 0；node --check 0；clean_package。
-- **未做**：auto 档“重新观察后再次自动点击”的修法等 ae 裁定后另开；macOS 真机只读核对由 3a 安排。
+- **同一 run 最多自动执行一次（ae 裁定，第三个提交）**：`test_decision_action_execute.py` 加 3 项——同一 run 第二次观察（新观察编号/候选编号）Jev 再选 c1，宿主不再点
+  （假执行器只收到 1 次）、决策账记 `auto_execution:skipped:run_limit_reached`、常数为 1；模型自己点过别的观察不占上限；Jev 材料只在宿主执行过之后才带 `executed_actions`
+  （外部数据块，含 role/label/结果，不含候选编号与插件 key）。变异 5/5 抓到：去掉上限、上限退回按观察编号计、到上限跳过不记账、模型动作也计入、材料不带已执行动作
+  （脚本 `run_mutations_j16f_cap.py` 在证据目录 harness/）。
+- **门禁**：ruff 0；常数目录重生成 + --check 0；import boundaries 0；strict code-size hard=0；size_diff 新增 0；doc_sync PASS；diff --check 0；node --check 0；clean_package。
+- **未做**：macOS 真机只读核对由 3a 安排；收紧后的 auto 档没有再跑真实模型（规则由假 Jev 用例钉住；要真跑一档 auto 约 M3 3 次 / Jev 2 次，等 3a 说要不要）。
 
 ## J16 片 D：决策点粗位置 + 自动执行能力开关 + 假 Jev 四档（2026-10-02，ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` 72ddc2b5c）
 

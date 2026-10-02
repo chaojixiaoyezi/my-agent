@@ -49,7 +49,12 @@ from ...settings.decision_settings_schema import POINT_RUNTIME_SCOPES
 from ...settings.defaults import decision_request_max_chars
 from ...tooling.output_projection import project_tool_output_body
 from ...tooling.runtime_contracts import ToolCall, ToolResult
-from .decision_action_execute import AutoExecutionSelection, coarse_position, plan_auto_execution
+from .decision_action_execute import (
+    AutoExecutionSelection,
+    coarse_position,
+    host_executed_actions,
+    plan_auto_execution,
+)
 
 # URL 查询串拒绝沿用外部材料首片的同一策略，不在本点另立第二份规则。
 from .external_material_order import _URL_WITH_QUERY
@@ -265,8 +270,9 @@ def _has_request(params: object) -> bool:
 
 
 # LLM: 外发只有脱敏当前请求、目标类型和候选别名/role/label/粗位置（label 在同一个 external_data 块里；粗位置是宿主按几何扩展
-#   派生的 0–1 归一值，有 region 和 frame 才有，不发绝对坐标）；候选编号、插件 key、目标引用、代次与动作名只进本地版本摘要。
-#   题目唯一，候选之外只有保留原结果的非选择项。
+#   派生的 0–1 归一值，有 region 和 frame 才有，不发绝对坐标）；本 run 宿主已自动执行过的动作（role/label/粗位置/结果，ae 定的软约束，
+#   只在有过时才带 executed_actions，同样按外部数据投影）；候选编号、插件 key、目标引用、代次与动作名只进本地版本摘要。
+#   题目唯一，候选之外只有保留原结果的非选择项；题面不变。
 #   当前请求可能是首尾节选，current_request_completeness 如实标注并进入版本摘要。
 # 函数用途: 冻结一次操作建议材料和单选题，并给等待后的来源复核生成版本值。
 def _material(record: object, archive: dict, observation: dict, limit: int) -> tuple[dict, dict, str]:
@@ -277,6 +283,9 @@ def _material(record: object, archive: dict, observation: dict, limit: int) -> t
     state = {"current_request": _safe_external({"current_request": request}),
              "current_request_completeness": completeness,
              "target_kind": observation["target_kind"], "candidates": _safe_external({"candidates": rows})}
+    executed = host_executed_actions(record.params)
+    if executed:
+        state["executed_actions"] = _safe_external({"executed_actions": executed})
     criteria = {row["candidate"]: {"role": row["role"]} for row in rows}
     questions = {_QUESTION: {"type": "choice", "instructions": _INSTRUCTIONS,
                              "criteria": {**criteria, **_NON_SELECTIONS}}}

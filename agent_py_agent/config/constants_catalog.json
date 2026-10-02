@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 874,
+  "count": 875,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -482,6 +482,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "决策点提示文字的最大字符数，控制上下文占用。"
+    },
+    {
+      "name": "AUTO_EXECUTIONS_PER_RUN_MAX_COUNT",
+      "file": "agent_py_agent/agent/agent_core/tool_context/decision_action_execute.py",
+      "value": 1,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同一 run 里宿主自动执行的硬上限（ae 定，不做配置项）：重新观察后 Jev 可能再选同一个按钮，按观察编号的幂等挡不住重复提交"
     },
     {
       "name": "_DIGEST_PREFIX_CHARS",

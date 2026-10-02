@@ -2,7 +2,9 @@
 #   action_candidate_auto_execute_enabled 为 True（capability_config_for_agent，只认 True）、宿主是本机管理员主代理（本轮快照
 #   owner_type=main_agent 且 home 身份结构化 local/main，两者都查）、所选候选恰有一个"可自动执行"的动作（本轮快照里有该工具、
 #   处理器带 observation_ref 绑定、schema 的 required ⊆ {observation_ref.param}；0 个不执行，≥2 个算 ambiguous，不按名字挑）、
-#   且本 run 里还没有任何动作碰过这个观察（runtime_events 里的 observation_action 事实，宿主执行与模型执行共用）。满足就把一次宿主
+#   且本 run 里还没有任何动作碰过这个观察（runtime_events 里的 observation_action 事实，宿主执行与模型执行共用）、且本 run 里宿主自动执行
+#   的次数还没到 AUTO_EXECUTIONS_PER_RUN_MAX_COUNT（ae 定：同一 run 最多一次，不按目标分；重新观察后观察编号/候选编号都会换，按观察编号
+#   幂等挡不住重复提交；模型自己的动作不计入上限）。满足就把一次宿主
 #   ToolCall（operation_id = action_candidate:auto:<observation_id>，幂等键由它派生）计划进 params.host_actions；执行、审批、记录
 #   由 tool_loop/round_execution 走模型调用同一条链。不执行输入类动作、同一观察只计划一次、复核拒绝/失败/用户拒绝/取消都不重试、
 #   不改选别的候选。决策账补充行 record_kind=auto_execution 与工具账共用 decision_ref。改动须同步 test_decision_action_execute.py。
@@ -26,12 +28,15 @@ SKIP_OWNER_SCOPE = "owner_scope"
 SKIP_NO_AUTO_ACTION = "no_auto_action"
 SKIP_AMBIGUOUS_ACTION = "ambiguous_action"
 SKIP_ALREADY_ACTED = "already_acted"
+SKIP_RUN_LIMIT = "run_limit_reached"
 SKIP_INTERRUPTED = "interrupted"
 AUTO_RECORD_KIND = "auto_execution"
 _OPERATION_PREFIX = "action_candidate:auto:"
 _CALL_ID_PREFIX = "host-action-"
 # decision_ref 里取响应输入摘要的前缀长度，够区分同一操作下的不同响应
 _DIGEST_PREFIX_CHARS = 16
+# 同一 run 里宿主自动执行的硬上限（ae 定，不做配置项）：重新观察后 Jev 可能再选同一个按钮，按观察编号的幂等挡不住重复提交
+AUTO_EXECUTIONS_PER_RUN_MAX_COUNT = 1
 
 
 # LLM: 一次已采用的决策选择的结构化事实：阶段（operation_id/run/task）、结果（含响应摘要）、宿主校验过的观察与所选候选。
@@ -83,7 +88,7 @@ def plan_auto_execution(agent: object, record: object, selection: AutoExecutionS
     snapshot = getattr(params, "tool_runtime_snapshot", None)
     reason = _scope_reason(agent, snapshot)
     runtime, param, reason = (None, "", reason) if reason else _auto_action(snapshot, selection.candidate)
-    reason = reason or _idempotency_reason(agent, record, selection)
+    reason = reason or _history_reason(agent, record, selection)
     if not reason and not isinstance(actions, list):
         reason = SKIP_NO_AUTO_ACTION
     if reason:
@@ -134,14 +139,52 @@ def _candidate_only_param(runtime: object) -> str:
     return param if required_names <= {param} else ""
 
 
-# LLM: 幂等事实只读 owner 权威库 runtime_events 里当前 run/task 的 observation_action（宿主执行与模型执行共用），不读正文；
-#   同一观察已有任何动作（含失败/被提供方拒绝的发送）就不再执行。没有权威库按"没有动作"处理（新鲜度门已先要求有库）。
-# 函数用途: 这个观察已被动作碰过时给出原因码。
-def _idempotency_reason(agent: object, record: object, selection: AutoExecutionSelection) -> str:
+# LLM: 历史事实只读 owner 权威库 runtime_events 里当前 run/task 的 observation_action（宿主执行与模型执行共用），不读正文：
+#   同一观察已有任何动作（含失败/被提供方拒绝的发送）就不再执行（already_acted）；本 run 里 actor=decision 的动作数已到
+#   AUTO_EXECUTIONS_PER_RUN_MAX_COUNT 也不再执行（run_limit_reached），模型自己的动作不计。没有权威库按"没有动作"处理（新鲜度门已先要求有库）。
+# 函数用途: 这个观察已被碰过、或本 run 的自动执行已到上限时给出原因码。
+def _history_reason(agent: object, record: object, selection: AutoExecutionSelection) -> str:
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
     observation_id = selection.observation["observation_id"]
     acted = observation_actions(repo, run_id=record.call.run_id, task_id=str(getattr(record.params, "task_id", "") or ""))
-    return SKIP_ALREADY_ACTED if any(item.get("observation_id") == observation_id for item in acted) else ""
+    if any(item.get("observation_id") == observation_id for item in acted):
+        return SKIP_ALREADY_ACTED
+    if sum(1 for item in acted if item.get("actor") == AUTO_ACTOR) >= AUTO_EXECUTIONS_PER_RUN_MAX_COUNT:
+        return SKIP_RUN_LIMIT
+    return ""
+
+
+# LLM: 只读本 run 内存里的归档列表（params.archive_tool_calls）：actor=decision 且信封带 observation_action 的记录，按观察编号/候选编号
+#   回到同一列表里那次观察的归档取 role/label/region（归档是候选内容的唯一权威），再算粗位置；结果只有 ok 或 failed:<错误码>。
+#   给 Jev 材料当外部数据（软约束，不替代宿主侧的上限）；不读权威库、不读正文。
+# 函数用途: 列出本 run 宿主已自动执行过的动作（role、label、粗位置、结果），没有就空列表。
+def host_executed_actions(params: object) -> list[dict]:
+    archives = [item for item in (getattr(params, "archive_tool_calls", None) or ()) if isinstance(item, dict)]
+    observations = {}
+    for item in archives:
+        observation = (item.get("tool_result_envelope") or {}).get("observation")
+        if isinstance(observation, dict) and isinstance(observation.get("observation_id"), str):
+            observations[observation["observation_id"]] = observation
+    rows = []
+    for item in archives:
+        action = (item.get("tool_result_envelope") or {}).get("observation_action")
+        if item.get("actor") != AUTO_ACTOR or not isinstance(action, dict):
+            continue
+        rows.append(_executed_row(observations.get(str(action.get("observation_id") or "")), action, item))
+    return rows
+
+
+# 函数用途: 一条已执行动作的外部数据投影：候选 role/label/粗位置 + 结果（ok / failed:<错误码>）；候选找不到时只有结果。
+def _executed_row(observation: dict | None, action: dict, archive: dict) -> dict:
+    candidates = (observation or {}).get("candidates") or []
+    candidate = next((c for c in candidates if isinstance(c, dict) and c.get("candidate_id") == action.get("candidate_id")), None)
+    row: dict = {"result": "ok" if archive.get("ok") is True else f"failed:{archive.get('error_code') or ''}"}
+    if candidate is not None:
+        row.update({"role": candidate.get("role"), "label": candidate.get("label")})
+        position = coarse_position((observation or {}).get("frame"), candidate.get("region"))
+        if position is not None:
+            row["position"] = position
+    return row
 
 
 # LLM: 宿主调用身份：call_id/operation_id 都从观察编号铸，幂等键由 ToolCall 按 (run, operation) 派生；run/turn/attempt/协议沿原观察
@@ -215,7 +258,8 @@ def coarse_position(frame: object, region: object) -> dict[str, float] | None:
 
 
 __all__ = [
-    "AUTO_ACTOR", "AUTO_RECORD_KIND", "SKIP_ALREADY_ACTED", "SKIP_AMBIGUOUS_ACTION", "SKIP_INTERRUPTED", "SKIP_NO_AUTO_ACTION",
-    "SKIP_OWNER_SCOPE", "AutoExecutionSelection", "HostAction", "auto_execution_enabled", "coarse_position",
-    "plan_auto_execution", "record_auto_execution", "record_auto_skip",
+    "AUTO_ACTOR", "AUTO_EXECUTIONS_PER_RUN_MAX_COUNT", "AUTO_RECORD_KIND", "SKIP_ALREADY_ACTED", "SKIP_AMBIGUOUS_ACTION",
+    "SKIP_INTERRUPTED", "SKIP_NO_AUTO_ACTION", "SKIP_OWNER_SCOPE", "SKIP_RUN_LIMIT", "AutoExecutionSelection", "HostAction",
+    "auto_execution_enabled", "coarse_position", "host_executed_actions", "plan_auto_execution", "record_auto_execution",
+    "record_auto_skip",
 ]
