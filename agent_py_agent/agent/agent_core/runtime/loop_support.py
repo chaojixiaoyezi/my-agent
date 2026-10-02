@@ -371,7 +371,7 @@ def _tool_snapshots_for_run(
     from ...tooling.models import ToolRuntimeSnapshot
     from ..native_tool_protocol import select_tool_protocol
 
-    protocol_snapshot = select_tool_protocol(agent, run_id=request.run_id)
+    protocol_snapshot = select_tool_protocol(agent, run_id=request.run_id, request_id=request.request_id)
     if agent.config.enable_tools:
         runtime_snapshot = _frozen_tool_snapshot(agent, request)
     else:

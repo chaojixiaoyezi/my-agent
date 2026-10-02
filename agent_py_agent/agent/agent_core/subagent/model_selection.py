@@ -455,7 +455,7 @@ def _candidate_projection(agent: object, preparation: SubagentFirstRequestPrepar
     )
     if modality.status != "applicable":
         raise _CandidateUnavailable(modality.reason_code, modality.as_dict())
-    protocol = select_tool_protocol(agent, run_id=params.run_id)
+    protocol = select_tool_protocol(agent, run_id=params.run_id, request_id=getattr(params, "request_id", ""))
     candidate_params = replace(params, tool_protocol_snapshot=protocol)
     prompt_input = agent.prompts.prepare_render_input(preparation.prompt_request)
     tools = resolve_native_tools(agent, candidate_params)

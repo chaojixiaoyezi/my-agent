@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 813,
+  "count": 814,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4466,6 +4466,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "设置修改台账单条文本最多 500 字符：防超长记录撑爆台账。"
+    },
+    {
+      "name": "PROBE_MAX_OUTPUT_TOKENS",
+      "file": "agent_py_agent/agent/settings/reasoning_probe.py",
+      "value": 40000,
+      "unit": "tokens",
+      "category": "上限预算",
+      "description": "远高于判定所需的 200 token 差距，截断不会压平 low/max 差异；与档案输出上限取小后才是真实发送值。"
     },
     {
       "name": "_REQUEST_TIMEOUT_SECONDS",

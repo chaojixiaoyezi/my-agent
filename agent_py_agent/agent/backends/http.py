@@ -14,7 +14,7 @@ from .errors import (
 )
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
-from .provider_headers import endpoint_parts, request_headers
+from .provider_headers import current_probe_accounting, endpoint_parts, request_headers
 
 # 探针只缓存成功证据；短暂失败允许之后重试，但单次探测有界。
 _PROBE_MAX_ATTEMPT_COUNT = 3
@@ -26,6 +26,52 @@ def bounded_output_tokens(configured: int, requested: int | None) -> int:
     if requested is None:
         return configured
     return max(1, min(configured, int(requested)))
+
+
+# LLM: 探测记账只在宿主绑定的 scope 内生效；函数内导入避免 backends 与 agent_core 互相依赖。
+#   每次真实 generate 一条记录（重试也算），成功用供应商 usage 收尾，失败记 failed。
+#   无 scope（直调、测试替身）直接返回空 call_id，不产生任何账本副作用。
+# 函数用途: 登记一次工具能力探测的模型调用开始（输入按实际发送的提示估算），返回本次探测的记账 id。
+def _start_probe_call(scope: object | None, backend: object, prompt: str) -> str:
+    if scope is None:
+        return ""
+    from ..contracts.model_call_ledger import ModelCallStartedParams
+    from ..memory_archive import estimate_tokens
+
+    call_id = f"probe:tool_capability:{secrets.token_hex(8)}"
+    scope.ledger.started(
+        ModelCallStartedParams(
+            call_id=call_id,
+            backend=str(getattr(backend, "name", "") or ""),
+            model=str(getattr(backend, "model_name", "") or ""),
+            input_tokens=estimate_tokens(prompt),
+            output_tokens_estimate=0,
+            request_id=str(getattr(scope, "request_id", "") or ""),
+            run_id=str(getattr(scope, "run_id", "") or ""),
+            is_probe=True,
+            metadata={"purpose": "probe:tool_capability", "logical_call_id": call_id},
+        )
+    )
+    return call_id
+
+
+# LLM: 探测响应没有用户可见正文，usage 是否上报由原收尾函数按结构化字段决定；失败原因只记类型与错误码。
+# 函数用途: 探测请求成功返回后按供应商用量收尾记账；无 scope 时直接跳过。
+def _finish_probe_call(scope: object | None, call_id: str, response: object) -> None:
+    if scope is None or not call_id:
+        return
+    from ..agent_core.model.call_runtime import record_model_call_finished
+
+    record_model_call_finished(scope.ledger, call_id, response)
+
+
+# 函数用途: 探测请求抛异常时把该次调用记为失败，不改变探测自身的异常传播；无 scope 时直接跳过。
+def _fail_probe_call(scope: object | None, call_id: str, exc: BaseException) -> None:
+    if scope is None or not call_id:
+        return
+    from ..agent_core.model.call_runtime import record_model_call_failed
+
+    record_model_call_failed(scope.ledger, call_id, exc)
 
 
 # LLM: HTTP 请求控制只在显式给出时透传；流入口与测试替身须保持既有调用合同，不在此重试。
@@ -140,24 +186,30 @@ class HttpBackend(BaseBackend):
                     "additionalProperties": False,
                 },
             }
+            prompt = (
+                "Call my_agent_capability_probe exactly once with nonce "
+                f"{nonce}. Do not answer in prose."
+            )
+            scope = current_probe_accounting()
+            call_id = _start_probe_call(scope, self, prompt)
             try:
                 response = self.generate(
-                    (
-                        "Call my_agent_capability_probe exactly once with nonce "
-                        f"{nonce}. Do not answer in prose."
-                    ),
+                    prompt,
                     tools=[probe_tool],
                     tool_choice=ToolChoice.auto("native_capability_probe"),
                 )
-            except (ProviderRecoverableError, ProviderConfigurationError):
+            except (ProviderRecoverableError, ProviderConfigurationError) as exc:
+                _fail_probe_call(scope, call_id, exc)
                 # 保留供应商失败分类，让调用方处理配置、额度和网络，不能改成能力不足。
                 raise
             except Exception as exc:
+                _fail_probe_call(scope, call_id, exc)
                 # 本地确定性异常(解析/配置错)重试无意义, 立即落 evidence。
                 code = str(getattr(exc, "error_code", "") or "").strip().upper()
                 suffix = f":{code}" if code else ""
                 evidence = f"live_probe_failed:{type(exc).__name__}{suffix}"
                 break
+            _finish_probe_call(scope, call_id, response)
             blocks = list(getattr(response, "tool_use_blocks", None) or ())
             supported = any(
                 isinstance(block, dict)

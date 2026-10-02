@@ -6,6 +6,8 @@ C7 八档扩展已在 `worker/sol-effort-levels` 本地实施，尚未集成/部
 
 2026-10-02 小输出上限预算修复已在 `worker/sol2-anthropic-budget` 本地实施，基于集成线 `b35796a60`，待集成/真实入口核对。它修复的是 C7 之前已有的空预算区间，不新增档位、开关或协议字段，合同见第 10 节。
 
+2026-10-02 C7 计量与说法修正已在 `worker/ds2-effort-probe-metering` 本地实施，基于集成线 `claude/3a-step16z`（b5be542e8），待集成。两处修正：探测调用计入用量账（独立用途标签 `probe:tool_capability`），自动检测加输出上限并把回执说法改成由结构化事实算出，合同见第 11 节。
+
 ## 1. 背景
 
 用户要求：能设置模型的智能程度，包括给子代理单独设置，并实测。
@@ -182,7 +184,9 @@ my-agent 为了确认 opencode.ai 是否支持 `reasoning_effort`，先后 3 次
 - 09-30 起 Responses 协议也按档位发送（第 3 节），所以同样可以检测；未声明档位时“最高”按 high 发送参与比较。判定门槛不变（最高档至少比低档多 200 个推理 token 且 1.5 倍、两组不重叠），题目很简单时即使支持也可能判“不支持”，ChatGPT 订阅由已知表直接按档位发送，不依赖检测。
 
 - 凭据只在正式后端内部使用，不进入模型上下文、工具参数、检测记录或回执。测试断言假密钥不出现在回执、检测记录和账本里。
-- 每次检测会额外发 9 次请求、消耗少量 token（DeepSeek 最高档每次约 2000 推理 token）。
+- 每次检测发 9 次请求；每次请求显式带输出上限 `PROBE_MAX_OUTPUT_TOKENS`（40000，与档案输出上限取小后才是真实发送值），
+  回执按结构化事实写“每次输出上限 N token，最多约 9×N token”，不再写死“1～5 分钟/少量 token”（2026-10-02 起，
+  见第 11 节）。实测 MiniMax-M2.7 上 9 次检测约 23 分钟、单次输出最多 32867 token，长输出模型可能更久。
 - 标定只有 2026-09-26 的单次实测与完整主代理上下文的波动范围，没有独立短题的多次采样。真实服务商上的误判率要靠真实验收确认。
 
 ## 9. C7：用户可选 xhigh / ultra（已实施，指定台账日期 2026-10-01）
@@ -237,3 +241,37 @@ my-agent 为了确认 opencode.ai 是否支持 `reasoning_effort`，先后 3 次
   真实控制服务的 chat/feishu 路由和参数中心用隔离 home 测回执。所有实际 HTTP 入口默认拒绝，夹具遗漏会本地失败。
 - 三项变异分别破坏空区间判据、2048 包含边界和回执上限来源，均被拦截并恢复；命令与结果见 TESTS.md 顶部。
   这些是组件证据，真实供应商、实际 TUI/IM 客户端及生产 Gateway 未验证，未部署。
+
+## 11. C7 计量与说法修正（2026-10-02，分支 `worker/ds2-effort-probe-metering`）
+
+**解决问题**：①每个模型第一次被用时宿主先发一次 `probe_tool_capability`（工具能力探测，按模型缓存），
+该调用不进 `model_usage`，用量账不完整；②`/effort` 自动检测回执写“约需 1～5 分钟、会额外消耗少量 token”，
+实测 MiniMax-M2.7 上 9 次检测约 23 分钟、单次输出最多 32867 token、合计约 10 万输出 token，说法低估且成本无上界。
+
+### 探测调用计入用量账
+
+- 探测每次真实 `generate` 都记账（重试也算）：开始记 `ModelCallStartedParams(is_probe=True,
+  metadata={"purpose": "probe:tool_capability"})`，成功用供应商 usage 收尾、失败记 failed；按模型缓存的行为不变，
+  命中缓存不重复记账。
+- 用途独立成桶：`model_call_ledger._PURPOSE_BUCKETS` 与 `store_usage._PURPOSES` 同步加 `probe:tool_capability`，
+  和业务调用分开统计；探测无宿主绑定 scope（直调、测试替身）时不记账。
+- 记账范围经 `probe_accounting_scope`（ContextVar）从 `select_tool_protocol` 的三个调用点
+  （loop_support、model_selection、gateway_model_adoption）透传到后端，附 request_id/run_id。
+
+### 自动检测成本上界
+
+- 新常数 `reasoning_probe.PROBE_MAX_OUTPUT_TOKENS = 40000`（进常数目录 constants_catalog.json，
+  名字带 `_TOKENS` 单位后缀、上方有中文说明）；每次检测请求经 `ProviderRequestOptions(max_output_tokens=...)`
+  显式带上限，与档案输出上限取小后才是真实发送值。base/anthropic/openai_chat 适配器 `generate()` 透传该字段。
+- 回执改为按结构化事实生成：“每次输出上限 40000 token，最多约 360000 token；长输出模型可能更久”，删除写死的
+  “1～5 分钟/少量 token”。不改变“自动检测是否默认触发”（开关与五条触发条件原样）。
+- 判定（`reasoning_probe_judge`，纯函数只读 usage 结构化字段）所需的最低输出差仅 200 token，上限 40000 远高于此，
+  截断不会压平 low/max 差异；对应测试用替身构造截断到上限的输出验证判定仍返回“支持”。
+
+### 测试与门禁
+
+- 新增 `test_probe_tool_capability_metering.py`（用途标签/次数/scope、缓存命中不重复记账、无 scope 直调不记账、
+  失败记 failed）；`test_reasoning_probe.py` 追加检测请求带上限+回执按事实、截断输出下判定仍 supported。
+- 5 个独立变异（purpose 分支删除、不带输出上限、回执写死旧文案、去掉 ledger.started、store_usage 桶集合不同步）
+  全部被拦截并恢复；命令与结果见 TESTS.md 顶部。
+- 真实 Gateway 交互、真实服务商上的检测耗时与用量账未验证，由 3a 集成后核对。

@@ -429,3 +429,26 @@ def test_responses_models_are_auto_probed_and_confirmed(tmp_path, monkeypatch):
     assert {str((row.get("reasoning") or {}).get("effort") or "") for row in wire.payloads} == {"low", "high", ""}
     assert len(wire.payloads) == 9 and _declared(agent, profile_id) == "effort"
     assert "支持按档位调节" in _run(agent, "/effort").message
+
+
+def test_detection_requests_carry_output_cap_and_receipt_is_fact_based(tmp_path, monkeypatch):
+    # C7：检测请求显式带输出上限（与档案上限取小后就是真实发送值）；回执的耗时/token 由次数 × 每次上限算出，
+    # 不再写死“约需 1～5 分钟 / 少量 token”。用小上限区分“确实传了上限”与“沿档案默认”。
+    agent, _profile_id = _agent(tmp_path)
+    wire = _Wire(_DEEPSEEK).install(monkeypatch)
+    monkeypatch.setattr(probe, "_spawn", lambda target: target())
+    monkeypatch.setattr(probe, "PROBE_MAX_OUTPUT_TOKENS", 500)
+    started = _run(agent, "/effort high")
+    assert started.ok and "每次输出上限 500 token" in started.message
+    assert "最多约 4500 token" in started.message  # 9 次 × 500
+    assert "长输出模型可能更久" in started.message
+    assert "约需 1～5 分钟" not in started.message and "会额外消耗少量 token" not in started.message
+    assert all(payload.get("max_tokens") == 500 for payload in wire.payloads)  # min(档案 32000, 上限 500)
+
+
+def test_judge_still_supports_when_max_output_hits_the_cap():
+    # C7：输出被上限截断（max 档顶到上限）时，只要 low 档明显更低，判定仍应判“支持”，上限不能破坏判定。
+    cap = probe.PROBE_MAX_OUTPUT_TOKENS
+    samples = [ProbeSample("low", 400)] * 3 + [ProbeSample("max", cap)] * 3 + [ProbeSample("", 900)] * 3
+    verdict = judge_reasoning_samples(samples)
+    assert (verdict.verdict, verdict.reason) == ("supported", "max_above_low")

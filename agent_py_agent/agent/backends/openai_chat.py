@@ -126,6 +126,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 tool_choice=tool_choice,
                 messages=messages,
                 thinking_disabled=provider_options.thinking_disabled,
+                max_output_tokens=provider_options.max_output_tokens,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
                 reasoning_effort=provider_options.reasoning_effort,
             )

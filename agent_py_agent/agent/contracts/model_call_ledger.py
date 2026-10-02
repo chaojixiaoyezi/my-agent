@@ -32,7 +32,7 @@ _TERMINAL_STATUSES = frozenset({"failed", "finished", "timed_out"})
 # 没拿到供应商用量就结束的终态；已发起过 HTTP 尝试时，其本地估算输入单独记在 estimated.unfinished_*。
 _UNFINISHED_STATUSES = frozenset({"failed", "timed_out"})
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens")
-_PURPOSE_BUCKETS = ("main", "auxiliary", "decision")
+_PURPOSE_BUCKETS = ("main", "auxiliary", "decision", "probe:tool_capability")
 # 进行中的调用多久没有任何活动（开始、首字、流活动、HTTP 尝试）就算失联，单位秒（6 小时）。远超任何供应商首字/静默超时，
 #   只防“永远收不到结束或失败”的在途明细无限堆积：失联明细和已结束明细一样可以被裁，并计入 stale_open_calls_trimmed。
 _OPEN_CALL_STALE_SECONDS = 21_600.0
@@ -439,11 +439,14 @@ def _partitioned_usage(record: ModelCallRecord) -> dict[str, int]:
     return empty
 
 
-# LLM: 用途来自宿主结构化 metadata；未声明 decision 的辅助调用仍归辅助，普通调用默认归主桶。
+# LLM: 用途来自宿主结构化 metadata；未声明 decision 的辅助调用仍归辅助，普通调用默认归主桶，
+#   工具能力探测按显式 purpose 标签独立成桶，与业务调用分开统计。
 # 函数用途: 为累计账选一个互斥用途分区，不读取提示词、后端名或响应正文猜测用途。
 def model_call_purpose(record: ModelCallRecord) -> str:
     if record.metadata.get("purpose") == "decision":
         return "decision"
+    if record.metadata.get("purpose") == "probe:tool_capability":
+        return "probe:tool_capability"
     return "auxiliary" if record.metadata.get("auxiliary") is True else "main"
 
 

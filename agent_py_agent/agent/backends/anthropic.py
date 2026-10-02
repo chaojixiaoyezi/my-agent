@@ -57,6 +57,93 @@ class _AnthropicGenerateRequest:
     reasoning_effort: str = ""
 
 
+# LLM: 流式回调一起传递，避免 _anthropic_stream_text_once 超过 4 个参数；收集器按非空字段逐个接线。
+# 类用途: 汇总一次流式请求的观察者回调与首事件等待预算，供模块级流收集函数使用。
+@dataclass(frozen=True)
+class _StreamCallbacks:
+    on_chunk: Callable[[str], None] | None = None
+    on_thinking_delta: Callable[[str], None] | None = None
+    on_tool_input_progress: Callable[[dict[str, object]], None] | None = None
+    first_event_timeout_seconds: float | None = None
+
+
+# 函数用途: 把流式观察者回调与首事件等待预算收成一个不可变回调包，保持调用点紧凑。
+def _stream_callbacks(
+    on_chunk: Callable[[str], None] | None,
+    on_thinking_delta: Callable[[str], None] | None,
+    on_tool_input_progress: Callable[[dict[str, object]], None] | None,
+    first_event_timeout_seconds: float | None,
+) -> _StreamCallbacks:
+    return _StreamCallbacks(
+        on_chunk=on_chunk,
+        on_thinking_delta=on_thinking_delta,
+        on_tool_input_progress=on_tool_input_progress,
+        first_event_timeout_seconds=first_event_timeout_seconds,
+    )
+
+
+# LLM: 关闭思考优先（兼容 Anthropic 官方 thinking 参数，不识别的端点如 MiniMax 静默忽略）；否则按档位经
+#   reasoning_control 唯一表换算并过滤模型声明，预算夹在本次 max_tokens 以内；同步 test_reasoning_effort。
+# 函数用途: 按后端冻结的思考控制方式计算本次 Messages 请求的思考字段，不改动共享后端。
+def anthropic_thinking_fields(
+    backend: AnthropicCompatibleBackend,
+    request: _AnthropicGenerateRequest,
+    max_tokens: int,
+) -> dict[str, Any]:
+    if request.thinking_disabled:
+        return {"thinking": {"type": "disabled"}}
+    if request.reasoning_effort:
+        return reasoning_payload_fields(
+            backend.reasoning_control,
+            request.reasoning_effort,
+            "anthropic",
+            ReasoningPayloadLimits(max_tokens, backend.reasoning_levels),
+        )
+    return {}
+
+
+# LLM: 单次物理流必须把 delta、block-stop 与参数 observer 一起交给 collector；重试边界仍由调用方掌权，
+#   不能在此创建工具、展示重放或重试状态。回调收成 _StreamCallbacks 以控制参数个数。
+# 函数用途: 读取并收集一条 Anthropic SSE 响应，保留供应商原始块顺序，返回正文、用量、块与完成信息。
+def _anthropic_stream_text_once(
+    backend: AnthropicCompatibleBackend,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    callbacks: _StreamCallbacks,
+) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
+    lines = backend.request_stream_iter if callbacks.on_chunk is not None else backend.request_stream
+    return collect_anthropic_stream_with_completion(
+        request_stream_lines(
+            lines,
+            "/v1/messages",
+            payload,
+            headers,
+            callbacks.first_event_timeout_seconds,
+        ),
+        on_chunk=callbacks.on_chunk,
+        on_thinking_delta=callbacks.on_thinking_delta,
+        on_tool_input_progress=callbacks.on_tool_input_progress,
+    )
+
+
+# LLM: Auxiliary JSON 调用与普通 Messages 共用同一条发送链，但输出上限只作用于本次请求的组包，
+#   不触碰后端全局 max_tokens；模块级实现让 AnthropicCompatibleBackend 保持短小。
+# 函数用途: 给聚焦判读等短 JSON 请求设置有界输出并发送，返回统一 ModelResponse。
+def anthropic_generate_json(
+    backend: AnthropicCompatibleBackend,
+    prompt: str,
+    max_tokens: int | None,
+    messages: list[dict[str, Any]] | None,
+) -> ModelResponse:
+    return backend._generate_request(
+        _AnthropicGenerateRequest(
+            prompt,
+            messages=messages,
+            max_output_tokens=max_tokens,
+        )
+    )
+
+
 # LLM: Messages 的缓存、原生块与流事件由此适配；能力端点使用 HTTP 同源规则，联合思考、工具和 OAuth 测试。
 # 类用途: 发送 Messages 协议请求，并统一返回正文、思考、工具调用及用量。
 class AnthropicCompatibleBackend(HttpBackend):
@@ -114,6 +201,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 tools=tools,
                 tool_choice=tool_choice,
                 messages=messages,
+                max_output_tokens=provider_options.max_output_tokens,
                 thinking_disabled=provider_options.thinking_disabled,
                 on_thinking_delta=on_thinking_delta,
                 on_tool_input_progress=on_tool_input_progress,
@@ -192,13 +280,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         max_tokens: int | None = None,
         messages: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
-        return self._generate_request(
-            _AnthropicGenerateRequest(
-                prompt,
-                messages=messages,
-                max_output_tokens=max_tokens,
-            )
-        )
+        return anthropic_generate_json(self, prompt, max_tokens, messages)
 
     # LLM: 普通 generate 的只读出站投影复用原组包；不读认证、不探针、不记录诊断，也不证明窗口或工具能力。
     # 函数用途: 返回本后端实际发送的 JSON 内容供宿主验证，未知重写实现返回 None，输入与结果不共享可变容器。
@@ -222,17 +304,6 @@ class AnthropicCompatibleBackend(HttpBackend):
         if self.stream_enabled:
             payload["stream"] = True
         return deepcopy(payload)
-
-    # LLM: 关闭思考优先（兼容 Anthropic 官方 thinking 参数，不识别的端点如 MiniMax 静默忽略）；否则按档位经
-    #   reasoning_control 唯一表换算并过滤模型声明，预算夹在本次 max_tokens 以内；同步 test_reasoning_effort。
-    # 函数用途: 返回本次 Messages 请求真实发送的思考字段，保留关闭优先和预算夹紧，不修改共享后端。
-    def _thinking_fields(self, request: _AnthropicGenerateRequest, max_tokens: int) -> dict[str, Any]:
-        if request.thinking_disabled:
-            return {"thinking": {"type": "disabled"}}
-        if request.reasoning_effort:
-            return reasoning_payload_fields(self.reasoning_control, request.reasoning_effort, "anthropic",
-                                            ReasoningPayloadLimits(max_tokens, self.reasoning_levels))
-        return {}
 
     # LLM: 普通发送、短JSON和只读投影共用组包；媒体按同预算有界读盘及核对哈希，不执行传输或修改canonical引用。
     #   历史先经 wire_contract.repair_native_messages 修整副本，最终消息由 validate_anthropic_messages 复核，不合规在本地抛错不发送。
@@ -262,7 +333,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         )
         if cache_projection.system:
             payload["system"] = cache_projection.system
-        payload.update(self._thinking_fields(request, payload["max_tokens"]))
+        payload.update(anthropic_thinking_fields(self, request, payload["max_tokens"]))
         selected_tools = tools_for_choice(request.tools, request.tool_choice)
         payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
             prompt=cache_projection.prompt,
@@ -381,13 +452,14 @@ class AnthropicCompatibleBackend(HttpBackend):
         """保留已生成的思考；真正空流才沿既有预算重试一次。"""
         text, usage, blocks, completion = "", {}, [], StreamCompletion()
         for attempt in range(2):
-            text, usage, blocks, completion = self._stream_text_once(
+            text, usage, blocks, completion = _anthropic_stream_text_once(
+                self,
                 payload,
                 headers,
-                on_chunk,
-                on_thinking_delta=on_thinking_delta,
-                on_tool_input_progress=on_tool_input_progress,
-                first_event_timeout_seconds=first_event_timeout_seconds,
+                _stream_callbacks(
+                    on_chunk, on_thinking_delta, on_tool_input_progress,
+                    first_event_timeout_seconds,
+                ),
             )
             incomplete = incomplete_response_fields(
                 completion.stop_reason, incomplete_reason=completion.incomplete_reason
@@ -429,33 +501,6 @@ class AnthropicCompatibleBackend(HttpBackend):
             assistant_content_blocks=list(completion.assistant_content_blocks),
             truncated=completion.truncated,
             stop_reason=completion.stop_reason,
-        )
-
-    # LLM: 单次物理流必须把 delta、block-stop 与参数 observer 一起交给 collector；重试边界
-    # 仍由上层 _generate_stream 掌权，不能在此创建工具、展示重放或重试状态。
-    # 函数用途: 读取并收集一条 Anthropic SSE 响应，并保留供应商原始块顺序。
-    def _stream_text_once(
-        self,
-        payload: dict[str, Any],
-        headers: dict[str, str],
-        on_chunk: Callable[[str], None] | None,
-        *,
-        on_thinking_delta: Callable[[str], None] | None = None,
-        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
-        first_event_timeout_seconds: float | None = None,
-    ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
-        lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        return collect_anthropic_stream_with_completion(
-            request_stream_lines(
-                lines,
-                "/v1/messages",
-                payload,
-                headers,
-                first_event_timeout_seconds,
-            ),
-            on_chunk=on_chunk,
-            on_thinking_delta=on_thinking_delta,
-            on_tool_input_progress=on_tool_input_progress,
         )
 
 

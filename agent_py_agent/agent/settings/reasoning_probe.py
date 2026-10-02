@@ -56,6 +56,9 @@ from .user_config_capability import user_config_path
 
 # 与 2026-09-26 实测同一道题（答案 64），需要几步推理；只要最后的数字，答案部分很短，token 差别主要来自思考。
 PROBE_PROMPT = "请计算：1 到 2000 中，既是 3 的倍数、各位数字之和又能被 7 整除的整数有多少个？最后只写出这个数字。"
+# 每次检测请求的输出 token 上界（含推理）：MiniMax-M2.7 实测单次最多 32867 token，取 40000 保留余量，
+# 远高于判定所需的 200 token 差距，截断不会压平 low/max 差异；与档案输出上限取小后才是真实发送值。
+PROBE_MAX_OUTPUT_TOKENS = 40000
 _RECORDS_SCHEMA = "reasoning_probe_records.v1"
 # 单次请求的等待上限（max 档可能想很久）；running 记录超过这个时长仍未结束视为已中断（例如 Gateway 重启）。
 _REQUEST_TIMEOUT_SECONDS = 180
@@ -218,8 +221,10 @@ def _start(agent: object, target: ProbeTarget, trigger: str) -> str:
     clear_host_notices(getattr(agent, "conversation_store", None), target.thread_id, _NOTICE_SOURCE)  # 旧结论已作废
     _spawn(lambda: _run(job))
     head = "当前模型还没检测过是否支持调节智能程度，已" if trigger == "auto" else "已"
+    # LLM: 回执的耗时与 token 说法只由结构化事实算出：次数 × 每次输出上限；实测长输出模型会更久，不再写死分钟数。
     return (f"{head}在后台开始检测：同一道短题按“低”“最高”和不带参数各发 {PROBE_ROUND_COUNT} 次，共 {_TOTAL_REQUESTS} 次请求，"
-            "约需 1～5 分钟，会额外消耗少量 token；完成后发 /effort 查看结果。")
+            f"每次输出上限 {PROBE_MAX_OUTPUT_TOKENS} token，最多约 {_TOTAL_REQUESTS * PROBE_MAX_OUTPUT_TOKENS} token；"
+            "长输出模型可能更久，完成后发 /effort 查看结果。")
 
 
 # 函数用途: 起一个后台守护线程执行检测（测试里替换成同步执行）。
@@ -309,10 +314,17 @@ def _collect_samples(job: _ProbeJob) -> list[ProbeSample]:
 
 
 # LLM: 只保留档位、token 数、HTTP 状态和异常类型；回复正文与异常消息都不保存（可能回显密钥或请求头）。
+#   检测请求显式带上输出上限：成本有上界，且上限远高于判定门槛，截断不会改变 low/max 差异结论。
 # 函数用途: 发一次检测请求并得到一个样本。
 def _one_sample(backend: object, level: str) -> ProbeSample:
     try:
-        response = backend.generate(PROBE_PROMPT, request_options=ProviderRequestOptions(reasoning_effort=level))
+        response = backend.generate(
+            PROBE_PROMPT,
+            request_options=ProviderRequestOptions(
+                reasoning_effort=level,
+                max_output_tokens=PROBE_MAX_OUTPUT_TOKENS,
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 - 单次失败只记成失败样本，由判定决定结论。
         return ProbeSample(level, status_code=_status_code(exc), error_type=type(exc).__name__ or "Error")
     usage = getattr(response, "usage", None)

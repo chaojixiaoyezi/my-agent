@@ -820,7 +820,8 @@ agent_py_agent/
 |   |-- test_skill_learning.py          # 自学习 S3：触发判据、请求有界脱敏、create/update/skip、各闸门拒绝码、上限、重试、忙时顺延、回滚删除
 |   |-- test_reasoning_effort.py        # 智能程度：换算与优先级、两种协议真实组包、线程档位、投影一致、子代理继承、/effort、档案字段与配置
 |   |-- test_anthropic_reasoning_budget.py # 空预算区间：工厂边界、非流/流式出站与完整投影、控制服务及参数中心回执同源、正常大上限、HTTP 默认禁外发
-|   |-- test_reasoning_probe.py         # 智能程度检测：回放标定与阈值、自动触发条件、出站字段、写档案与撤销、管理员门槛、记录失效、凭据不外泄
+|   |-- test_reasoning_probe.py         # 智能程度检测：回放标定与阈值、自动触发条件、出站字段、检测请求带输出上限与回执按事实、截断下判定仍正确、写档案与撤销、管理员门槛、记录失效、凭据不外泄
+|   |-- test_probe_tool_capability_metering.py # 工具能力探测计量：purpose=probe:tool_capability 独立成桶、每次真实 generate 记账、缓存命中不重复、无 scope 不记账、失败记 failed
 |   |-- test_host_notices.py            # 宿主提示：存取与清洗、模型看不到、Gateway 发布与提交即已读、失败保留、飞书正文前、TUI 灰行、历史回放、检测结论
 |   |-- test_steer_delivery_recovery.py # TUI 插话：失败调用按编号退回并重提交、超时与瞬断重试只见一次、隔离 Gateway 端到端、定时任务目标终态后排到下一轮
 |   |-- test_structured_output_mode.py  # 结构化输出方式：方式解析、DeepSeek 用 json_object 且 schema 进提示、其余仍 json_schema、档案字段、缓存键、TUI 与配置

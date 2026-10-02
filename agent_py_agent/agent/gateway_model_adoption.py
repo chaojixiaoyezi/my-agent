@@ -196,7 +196,7 @@ class GatewayModelAdoption:
         if not decision_service.decision_outcome_is_current(agent, self.observation.params, self.stage, self.outcome):
             raise ValueError("decision_changed")
         with model_dependencies_scope(agent, dependencies), provider_request_budget(self.outcome.deadline - time.monotonic()):
-            protocol = select_tool_protocol(agent, run_id=params.run_id)
+            protocol = select_tool_protocol(agent, run_id=params.run_id, request_id=getattr(params, "request_id", ""))
             candidate_params = replace(params, tool_protocol_snapshot=protocol)
             candidate_input = replace(prepared, tool_protocol_snapshot=protocol,
                                       system_instruction=provider_system_instruction(agent.backend))

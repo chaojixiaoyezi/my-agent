@@ -16,7 +16,8 @@ from .models import ConversationThread, ThreadModelUsageEvent
 from .store_io import jsonl_error, now, read_jsonl_report, safe_file_stem
 
 _PURPOSE_SCHEMA = "model_call_purpose_breakdown.v1"
-_PURPOSES = ("main", "auxiliary", "decision")
+# LLM: 用途桶必须与 model_call_ledger._PURPOSE_BUCKETS 保持同一集合；探测调用独立成桶，持久账校验按同一集合放行。
+_PURPOSES = ("main", "auxiliary", "decision", "probe:tool_capability")
 
 
 # LLM: 模型计费事件与 preflight 显示分别保存，各自有唯一口径；共享 store 原子写入，不新增旁路文件。

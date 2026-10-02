@@ -25,6 +25,33 @@
   - ruff、import 边界、doc_sync、`diff --check`、`size_diff`、clean_package 通过。
   - 没有新增分支逻辑，未做变异。
 
+## C7 计量与说法修正：探测计入用量账 + 自动检测成本上界（2026-10-02，分支 `worker/ds2-effort-probe-metering`，基于 `claude/3a-step16z` `b5be542e8`）
+
+**来源**：C7 真实核对时 ae 的两处观察（证据 `~/.my-agent/decision-evidence/c7-effort-levels-4c649/`）：
+①首次用模型时的 `probe_tool_capability` 不进 `model_usage`；②自动检测回执写“约需 1～5 分钟/少量 token”，实测 MiniMax-M2.7 9 次约 23 分钟、单次最多 32867 token。
+
+**新增用例**：
+- `test_probe_tool_capability_metering.py`（4 项）：
+  - 有宿主 scope 时每次真实探测 generate 记一条 `purpose=probe:tool_capability`（is_probe=True、带 request_id/run_id），成功用供应商 usage 收尾；
+  - 缓存命中不重复记账（第二次走缓存无新记录）；
+  - 无 scope 直调（测试替身）不记账；
+  - 探测请求抛异常记 failed 且异常照常传播。
+- `test_reasoning_probe.py` 追加 2 项：
+  - `test_detection_requests_carry_output_cap_and_receipt_is_fact_based`：检测请求的 `ProviderRequestOptions` 带 `max_output_tokens=PROBE_MAX_OUTPUT_TOKENS`；回执文本由事实算出（“每次输出上限 40000 token，最多约 360000 token；长输出模型可能更久”），不含旧文案“约需 1～5 分钟/少量 token”；
+  - `test_judge_still_supports_when_max_output_hits_the_cap`：把 low/max 两组样本的输出都截断到 40000，判定仍返回“支持”（上限远高于 200 token 门槛，截断不压平差异）。
+
+**变异（5 个全部被拦住并恢复，`python3 tmp/run-mutations.py`）**：purpose 分支删除（探测归 main 桶）、检测请求不带输出上限、
+回执写死旧文案、去掉 `ledger.started`（探测不记账）、`store_usage._PURPOSES` 缺 probe 桶（收口报 DataCorruptionError）。
+
+**门禁结果**：
+- 相关测试合集（探测计量、reasoning_probe/reasoning_effort、后端/协议、模型调用账本、gateway 收口/选模、决策调用、usage 标签/重投影、wire_contract）：全过（约 440 个）。
+- guards9 全量通过；`check_import_boundaries.py` findings=0；`ruff check` All checks passed；
+  `check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` OK；
+  `check_code_size.py --mode strict` blocked=False（hard=0，报告已 checkout 还原）；
+  `check_clean_package.py .` OK；
+  `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 新增告警 0。
+- 沙箱限制：不启动 Gateway/真实供应商请求、不跑全仓 pytest；真实 /effort 回执与用量账由 3a 集成后核对。
+
 ## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `ee3bd09f7`）
 
 - **新增用例** `test_decision_audit_controls.py::test_adoption_statuses_carry_a_fixed_note_that_they_are_not_settled`：

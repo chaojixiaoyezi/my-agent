@@ -20,8 +20,10 @@ class ToolProtocolSelectionError(RuntimeError):
 
 
 # LLM: 只探测 backend 的原生能力，不读任何协议配置；enable_tools 关闭时直接给空工具的 native 快照。
+#   探测期间绑定探测记账 scope（账本 + 请求身份），让真实探测请求计入 model_usage；缓存命中时不会进入
+#   http 探测循环，因此不会虚增记录。request_id 为空时探测只按 run_id 归属，仍能进 run 累计。
 # 函数用途: 在 run 开始前冻结一次工具协议快照；模型不支持原生 tool_use 就报错，不做文本降级。
-def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
+def select_tool_protocol(agent: object, *, run_id: str, request_id: str = "") -> ToolProtocolSnapshot:
     """Probe once before the run; native is the only supported protocol."""
 
     config = getattr(agent, "config", None)
@@ -36,11 +38,19 @@ def select_tool_protocol(agent: object, *, run_id: str) -> ToolProtocolSnapshot:
         return ToolProtocolSnapshot(run_id, _NATIVE_PROTOCOL, capability)
 
     probe = getattr(backend, "probe_tool_capability", None)
-    capability = probe() if callable(probe) else _declared_capability(
-        backend,
-        native_supported=False,
-        evidence="backend_has_no_capability_probe",
-    )
+    if callable(probe):
+        from ..agent_core.model.call_runtime import model_call_ledger
+        from ..backends.provider_headers import ProbeAccountingScope, probe_accounting_scope
+
+        scope = ProbeAccountingScope(model_call_ledger(agent), request_id=str(request_id or ""), run_id=str(run_id or ""))
+        with probe_accounting_scope(scope):
+            capability = probe()
+    else:
+        capability = _declared_capability(
+            backend,
+            native_supported=False,
+            evidence="backend_has_no_capability_probe",
+        )
     if not isinstance(capability, ProviderToolCapability):
         raise TypeError("backend probe_tool_capability must return ProviderToolCapability")
     if capability.native_supported:

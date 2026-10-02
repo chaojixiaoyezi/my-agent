@@ -7,9 +7,40 @@ import json
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from uuid import uuid4
 
 _SESSION: ContextVar[str] = ContextVar("provider_session", default="")
+# LLM: 探测记账只在该 scope 内生效：宿主在探测前绑定账本与请求身份，http 探测每次真实请求按它记账；
+#   没有 scope 的调用（测试直调 backend、旧路径）保持不记账，不改变探测行为与缓存。
+_PROBE_ACCOUNTING: ContextVar[object | None] = ContextVar("probe_accounting", default=None)
+
+
+# LLM: ledger 是唯一模型调用账本；request_id/run_id 决定探测用量归到哪个请求的累计 scope，
+#   与主请求收尾的快照同一身份，快照才能把探测一并算进去。纯身份容器，不含密钥与正文。
+# 类用途: 一次工具能力探测要记入的账本与请求归属。
+@dataclass(frozen=True)
+class ProbeAccountingScope:
+    ledger: object
+    request_id: str = ""
+    run_id: str = ""
+
+
+# LLM: 嵌套探测不可能发生（单线程内 select_tool_protocol 同步调用）；scope 退出必须恢复原值，防止串到相邻请求。
+# 函数用途: 在探测调用期间绑定记账范围，退出即恢复。
+@contextmanager
+def probe_accounting_scope(scope: ProbeAccountingScope):
+    token = _PROBE_ACCOUNTING.set(scope)
+    try:
+        yield
+    finally:
+        _PROBE_ACCOUNTING.reset(token)
+
+
+# 函数用途: 读取当前线程的探测记账范围；没有绑定时返回 None（不记账）。
+def current_probe_accounting() -> ProbeAccountingScope | None:
+    value = _PROBE_ACCOUNTING.get()
+    return value if isinstance(value, ProbeAccountingScope) else None
 _NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _PROTECTED = frozenset({
     "host", "content-length", "transfer-encoding", "connection", "proxy-authorization",

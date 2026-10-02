@@ -88,6 +88,10 @@ class ProviderRequestOptions:
     thinking_disabled: bool = False
     first_event_timeout_seconds: float | None = None
     reasoning_effort: str = ""
+    # LLM: 仅限本次请求的输出封顶（如推理强度自动检测的成本上界）；None 沿后端配置，显式值经
+    #   bounded_output_tokens 与后端配置取小，绝不放大既有上限。
+    # 字段用途: 携带调用方显式给出的本次请求输出 token 上限，供适配器构造请求体。
+    max_output_tokens: int | None = None
 
 
 # LLM: 后端 capability flag 决定上层能否传真实 system instruction；未声明支持的旧实现保持原关键字形态。

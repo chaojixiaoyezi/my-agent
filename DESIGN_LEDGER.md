@@ -38,6 +38,27 @@
 - **开关**：点位仍默认关闭，生产是否打开由集成方定。
 - **验证**：见 TESTS.md 同名节。
 
+## C7 计量与说法修正：探测计入用量账 + 自动检测成本上界（2026-10-02，分支 `worker/ds2-effort-probe-metering`，基于 `claude/3a-step16z` `b5be542e8`，已实现，待集成）
+
+- **问题**：①每个模型第一次被用时宿主先发一次 `probe_tool_capability`（工具能力探测，按模型缓存），该调用不进
+  `model_usage`，用量账不完整；②`/effort` 自动检测回执写“约需 1～5 分钟、会额外消耗少量 token”，实测 MiniMax-M2.7
+  上 9 次检测约 23 分钟、单次输出最多 32867 token、合计约 10 万输出 token，说法低估且成本无上界。
+- **做法**：
+  - 探测每次真实 `generate` 都记账（重试也算）：开始记 `ModelCallStartedParams(is_probe=True, metadata={"purpose": "probe:tool_capability"})`，
+    成功用供应商 usage 收尾、失败记 failed；按模型缓存的行为与命中缓存不重复记账均不变。
+    用途独立成桶：`model_call_ledger._PURPOSE_BUCKETS` 与 `store_usage._PURPOSES` 同步加 `probe:tool_capability`（两者不同步会在收口时报
+    DataCorruptionError，已用测试和变异钉住）。记账范围经 `probe_accounting_scope`（ContextVar）从 `select_tool_protocol` 的三个调用点
+    （loop_support、model_selection、gateway_model_adoption）透传到后端，附 request_id/run_id；无宿主绑定 scope（直调、测试替身）不记账。
+  - 新常数 `reasoning_probe.PROBE_MAX_OUTPUT_TOKENS = 40000`（进常数目录 constants_catalog.json，名字带 `_TOKENS` 单位后缀、上方有中文说明）；
+    每次检测请求经 `ProviderRequestOptions(max_output_tokens=...)` 显式带上限，与档案输出上限取小后才是真实发送值；
+    base/anthropic/openai_chat 适配器 `generate()` 透传该字段。
+  - 回执改为按结构化事实生成：“每次输出上限 40000 token，最多约 360000 token；长输出模型可能更久”，删除写死的“1～5 分钟/少量 token”。
+    不改变“自动检测是否默认触发”（开关与五条触发条件原样）。判定所需最低输出差仅 200 token，上限远高于此，截断不会压平 low/max 差异。
+- **副作用与边界**：探测开始进用量账是行为变更（用量账更完整）；探测的 request_id 来自触发它的选模/网关调用点，缓存命中时无新记录。
+  `AnthropicCompatibleBackend` 为压回代码尺寸做了内部重构：`_thinking_fields`/`_stream_text_once` 外移为模块级函数（回调收成
+  `_StreamCallbacks` 小数据类）、`generate_json` 委托模块级函数，协议方法签名与行为不变。
+- **验证**：见 TESTS.md 顶部同名节；5 个变异全部被拦截。
+
 ## 选模型两个点位的仓库默认期限定为 5 秒（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）（2026-10-02，分支 `claude/be-selection-timeout-default`，基于 `claude/3a-step16z` `a44f2ad62`，已实现，待集成）
 
 - **背景**：J5 把前台通用期限默认改成 3 秒，但选模型（`model_selection`、`subagent_model`）在冷连接下 Jev 实测约 3.2 秒，按 3 秒会超时、保留原模型。
