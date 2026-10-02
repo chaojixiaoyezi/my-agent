@@ -163,3 +163,30 @@ def pin_package_reference(
         raise
     except (OSError, ValueError, RuntimeError) as exc:
         raise SkillSnapshotError("SKILL_TASK_REFERENCE_UNAVAILABLE") from exc
+
+
+# LLM: 只读原任务 pins（子代理读本 run 的 task 引用，主会话读 TaskLink.skill_snapshot_refs），只返回规范后的能力包引用。
+#   供宿主核验（能力包 v2 块 3）使用：没有任务绑定、绑定不对或读不了时返回空列表，不抛；读不到就不核验，不影响本轮其它行为。
+# 函数用途: 列出当前回合钉住的能力包引用。
+def pinned_package_references(agent: object, attrs: object) -> list[dict[str, str]]:
+    try:
+        refs = [normalize_skill_reference(row) for row in _raw_pins(agent, attrs)]
+    except (SkillSnapshotError, SkillReferenceError, OSError, ValueError, RuntimeError):
+        return []
+    return [ref for ref in refs if ref.get("kind") == "capability_package"]
+
+
+# 函数用途: 读当前回合的原始 pins：子代理读本 run 的 task，主会话读当前任务链接；没有绑定时返回空。
+def _raw_pins(agent: object, attrs: object) -> list:
+    run_id = current_subagent_run_id(agent)
+    if run_id:
+        subagents = getattr(agent, "subagents", None)
+        return task_skill_references(subagents.load(run_id)) if subagents is not None else []
+    task_id, thread_id = _conversation_binding(attrs)
+    store = getattr(agent, "conversation_store", None)
+    if not task_id or store is None:
+        return []
+    link, error = store.tasks.load_report(task_id)
+    if error or link is None or link.thread_id != thread_id:
+        return []
+    return list(link.skill_snapshot_refs)

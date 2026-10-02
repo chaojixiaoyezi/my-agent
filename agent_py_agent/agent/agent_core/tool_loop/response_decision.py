@@ -905,7 +905,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # EXEC-39(2026-09-11): 在子代理 run 里恢复它的**严格子集**——只校验宿主自己声明过的
         # 交付清单(required_file_refs/output_refs…)，主代理用户会话永不生效，且有界放行。
         # 真机证据: 子代理声明了要写 core_*.go，收工时一个都不存在却报完成。
-        deliverable_block = deliverable_closeout_block(request.params)
+        deliverable_block = deliverable_closeout_block(request.params) or _pack_verification_closeout(request)
         if deliverable_block:
             request.params.tool_context.append(deliverable_block)
             return ToolLoopResponseDecision("continue", None, [], request.counters)
@@ -941,6 +941,15 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         )
     final = protected_tool_marker_block_response(request.response.backend)
     return ToolLoopResponseDecision("break", final, [], request.counters)
+
+
+# LLM: 能力包 v2 块 3 的收尾核验：只在子代理交付闸没拦时运行，复用同一个返工通道（追加宿主提示后 continue）；
+#   返工次数由核验账本计（上限 1），开关关着或没有钉住包时返回空串，行为与原来逐字节相同。局部导入避免工具循环依赖能力包子系统。
+# 函数用途: 收尾前用钉住的原版检查程序核验本回合改过的交付物，必要时给出一次返工提示。
+def _pack_verification_closeout(request: _NoToolCallsRequest) -> str:
+    from ...capability.pack_verification_hooks import closeout_rework_block
+
+    return closeout_rework_block(request.agent, request.params)
 
 
 # LLM: 触发完全结构化，两条判据都在 provider_timeout_resume_eligible 里：

@@ -169,6 +169,7 @@ BOUNDARY_KEYS: dict[str, str] = {
                                 "设好后模型也不能经 manage_models 改地址、挪服务商或删除把它换到别的主机，其余情况模型不能改"),
     "enable_capability_package_selection": "决定模型能否在新任务里一次选择能力包（C16：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
     "enable_memory_search_tool": "决定主模型是否多一个读取本人长期记忆的工具（J9：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
+    "capability_pack_host_verification_enabled": "决定宿主是否自动运行能力包里的检查程序（执行包内代码，属于安全边界）；仅用户经 /settings 修改，模型不能改",
     "my_agent_home": "宿主数据根，属于宿主控制面",
     "my_agent_owner_provider": "owner 身份解析，属于宿主控制面",
     "my_agent_owner_kind": "owner 身份解析，属于宿主控制面",
@@ -182,7 +183,8 @@ BOUNDARY_KEYS: dict[str, str] = {
 # 常量用途: 列出用户设置命令可以修改、模型工具始终不能修改的边界参数。
 USER_SETTINGS_BOUNDARY_KEYS = frozenset(
     {"memory_curator_model_profile", "embedding_model_profile", "enable_capability_package_selection",
-     "enable_memory_search_tool", "subagent_takeover_hint_enabled", "subagent_input_media_enabled"})
+     "enable_memory_search_tool", "subagent_takeover_hint_enabled", "subagent_input_media_enabled",
+     "capability_pack_host_verification_enabled"})
 
 # 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据。
 # 常见缩写与组合（DB_PASS、MYSQL_PWD、SSH_PRIVATE_KEY、AWS_SECRET_ACCESS_KEY、BASIC_AUTH）同样按完整末尾片段认；

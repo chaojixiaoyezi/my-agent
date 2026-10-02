@@ -26,6 +26,18 @@ _HOST_SHUTDOWN_TEXT_KEYS = ("reason_code", "error_type", "admission_error_code")
 _HOST_SHUTDOWN_TEXT_MAX_CHARS = 128
 
 
+# LLM: 摘要由宿主写进回执（能力包 v2 块 3），条数和码数已夹过界；只有非空列表才出这一段，未钉包任务的回执不变。
+# 函数用途: 生成宿主核验结论段（写工具回执里模型可见的部分）。
+def _pack_verification_section(summaries: object) -> list[str]:
+    if not isinstance(summaries, list) or not summaries:
+        return []
+    return ["[pack-verification]\n"
+            "宿主刚用本任务钉住的能力包原版检查程序（沙箱、断网）核验了这次写出的交付物，结论以宿主为准："
+            "status=failed 时按 error_codes 和 error_samples 修正后再写；not_run/error 表示没检查成，原因见 reason_code。"
+            "不要复制、改写或自己编写检查程序来代替，也不要把这段内部标签转述给用户。\n"
+            + json.dumps({"pack_verification": summaries}, ensure_ascii=False, sort_keys=True)]
+
+
 # LLM: 保留已有verification块的字节顺序（键排序输出，新增的 verification_evidence_chain 只在 && 串联通过时出现，
 #   verification_skipped 只在验证命令因管道、;、|| 或后台没有计入时出现）；
 #   process只取显式字段，不能用工具成功或空PID列表推断清理成功。
@@ -53,6 +65,7 @@ def render_tool_runtime_facts(details: Mapping[str, object]) -> str:
             "这些字段来自本次工具执行回执；命令退出、资源清理和业务完成各自独立，缺失或未确认不代表成功。\n"
             + json.dumps({"process": process}, ensure_ascii=False, sort_keys=True)
         )
+    sections.extend(_pack_verification_section(details.get("pack_verification")))
     sandbox = project_sandbox_runtime_facts(details.get("sandbox"))
     if sandbox:
         sections.append(

@@ -344,6 +344,7 @@ class FinalizationService:
             message_tool_deliveries=_message_tool_deliveries(ctx),
             operation_verification=operation_verification,
             tool_runtime_evidence=dict(ctx.tool_runtime_evidence or {}),
+            pack_verifications=_pack_verification_facts(self._agent, ctx),
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
             canonical_native_messages=list(ctx.canonical_native_messages or []),
             **compact_auto_cycle_fields(
@@ -509,6 +510,17 @@ def _artifact_refs(records: list[object]) -> list[str]:
             continue
         refs.extend(str(record.get(key) or "") for key in keys if str(record.get(key) or ""))
     return refs
+
+
+# LLM: 只读本 run 的能力包核验账本（能力包 v2 块 3）；读不了时没有事实，不影响交付。局部导入避免收尾依赖能力包子系统初始化。
+# 函数用途: 取本 run 的能力包宿主核验事实，供最终结果和 Gateway 提示使用。
+def _pack_verification_facts(agent: object, ctx: FinalizeContext) -> dict[str, object] | None:
+    from ..capability.pack_verification_report import run_pack_verification_facts
+
+    try:
+        return run_pack_verification_facts(agent, ctx)
+    except (OSError, ValueError):
+        return None
 
 
 # LLM: Channel attachments come only from ready artifact-registry records for declared output targets.

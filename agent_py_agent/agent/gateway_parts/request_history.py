@@ -118,6 +118,9 @@ def persist_gateway_assistant_result(
         getattr(result, "archive_tool_calls", None),
     )
     channel_delivery["operation_verification"] = operation_verification
+    if getattr(result, "pack_verifications", None):
+        # 能力包宿主核验事实只来自核验账本；不进公开投影白名单，只随本轮交付记录保存。
+        channel_delivery["pack_verifications"] = result.pack_verifications
     result.channel_delivery = channel_delivery
     commentaries_persisted = _persist_gateway_assistant_commentaries(
         context,

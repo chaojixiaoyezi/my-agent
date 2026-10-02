@@ -96,6 +96,13 @@ subagent_takeover_hint_enabled: false
 # - false: 推荐默认值；工具说明和请求内容与原来逐字节一致，传了 input_media_refs 会被结构化拒绝（SUBAGENT_INPUT_MEDIA_DISABLED）。
 # 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后下一次读取生效。
 subagent_input_media_enabled: false
+
+# 能力包宿主核验（能力包 v2，第 11 条）：任务钉住了声明检查程序的能力包时，宿主是否自动运行包里按 sha 钉住的原版检查程序。
+# - true: 写工具写出声明的交付物后马上检查，回执附有上限的结论；收尾时对本回合改过的交付物再查一次，有错误给模型一次返工提示；
+#   回合结束时宿主发一条检查结论提示。检查程序只在沙箱里跑（断网、交付物只读、只写临时目录），没有沙箱就不跑。
+# - false: 推荐默认值；宿主执行包里的代码属于安全边界，先由用户显式开启（启用包时仍要单独确认检查程序）。
+# 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后重启 Gateway 生效。
+capability_pack_host_verification_enabled: false
 # 决策能力点默认关闭；observe 也会发请求并产生用量；模式不授予执行权限。
 decision_subagent_model_mode: off
 # 子代理执行模型候选的原模型目录 ID；[] 使用全部当前授权的 agentic 模型。可按用户长期或会话设置覆盖，不按名称猜服务商。

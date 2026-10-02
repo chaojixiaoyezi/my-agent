@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, SandboxUnavailableError
@@ -40,8 +40,14 @@ MAX_VERIFIER_OUTPUT_BYTES = 1_048_576
 MAX_VERIFIER_MEMBER_BYTES = 4_194_304
 # 结果里保留的不同错误/警告码个数上限；超出部分只计入总数。
 MAX_VERIFIER_DISTINCT_CODES_COUNT = 64
-# 有界摘要里列出的前几条错误码个数（写工具回执只附这么多）。
+# 有界摘要里列出的前几条错误码、警告码个数（写工具回执只附这么多）。
 MAX_VERIFIER_SUMMARY_CODES_COUNT = 5
+# 结果里保留的前几条错误样例（code + 位置）个数，供返工提示定位；摘要只带其中前几条。
+MAX_VERIFIER_ERROR_SAMPLES_COUNT = 10
+# 有界摘要里附带的错误样例条数。
+MAX_VERIFIER_SUMMARY_SAMPLES_COUNT = 3
+# 错误样例里位置文字的字符上限；位置由检查程序给出，宿主不解释，只截断后转给模型定位。
+MAX_VERIFIER_LOCATION_CHARS = 128
 # 沙箱超时回收后返回的退出码（AttemptExecutionSandbox.run 的 TERM→KILL 约定）。
 _SANDBOX_TIMEOUT_EXIT_CODE = 143
 
@@ -60,7 +66,8 @@ class PackVerifierRequest:
 
 
 # LLM: 事实字段是入账的唯一来源；status 只有 passed/failed/not_run/error 四种，reason_code 说明 not_run/error 的结构化原因。
-#   计数按 code 聚合且有上限，不保存 message 或 location 正文。inputs 每项记参数名、来源、是否必需、相对路径和 sha256（没找到时为空）。
+#   计数按 code 聚合且有上限，不保存 message；error_samples 只留前几条错误的 code 和截断后的 location（宿主不解释，只转给模型定位）。
+#   inputs 每项记参数名、来源、是否必需、相对路径和 sha256（没找到时为空）。
 # 类用途: 保存一次宿主检查的结构化结果，并给出入账事实和有界摘要两种投影。
 @dataclass(frozen=True)
 class PackVerificationResult:
@@ -81,21 +88,39 @@ class PackVerificationResult:
     duration_ms: int = 0
     error_counts: dict[str, int] = field(default_factory=dict)
     warning_counts: dict[str, int] = field(default_factory=dict)
+    error_samples: tuple[dict, ...] = ()
 
     # 函数用途: 生成写进运行事件和 channel_delivery 的完整结构化事实。
     def to_fact(self) -> dict:
         fact = {key: (dict(value) if isinstance(value, dict) else value) for key, value in self.__dict__.items()}
         fact["inputs"] = [dict(item) for item in self.inputs]
+        fact["error_samples"] = [dict(item) for item in self.error_samples]
         return fact
 
-    # LLM: 只给通过/失败、错误与警告总数和前几条错误码；不含路径以外的正文，供写工具回执附带。
+    # LLM: 只接受本模块 to_fact 写出的形状（宿主自己的账本），未知键忽略；用于收尾复用写后结果，不重跑检查程序。
+    # 函数用途: 从入账事实恢复检查结果。
+    @classmethod
+    def from_fact(cls, fact: dict) -> PackVerificationResult:
+        names = {item.name for item in fields(cls)}
+        values = {key: value for key, value in fact.items() if key in names}
+        values["inputs"] = tuple(dict(item) for item in values.get("inputs", ()))
+        values["error_samples"] = tuple(dict(item) for item in values.get("error_samples", ()))
+        return cls(**values)
+
+    # LLM: 只给通过/失败、错误与警告总数、前几条错误码和警告码、前几条错误样例；不含 message，供写工具回执附带。
     # 函数用途: 生成有界的检查摘要。
     def summary(self) -> dict:
-        codes = sorted(self.error_counts, key=lambda code: (-self.error_counts[code], code))
         return {"verifier_id": self.verifier_id, "status": self.status, "reason_code": self.reason_code,
                 "valid": self.valid, "error_count": sum(self.error_counts.values()),
                 "warning_count": sum(self.warning_counts.values()),
-                "error_codes": codes[:MAX_VERIFIER_SUMMARY_CODES_COUNT], "target": self.target}
+                "error_codes": _top_codes(self.error_counts), "warning_codes": _top_codes(self.warning_counts),
+                "error_samples": [dict(item) for item in self.error_samples[:MAX_VERIFIER_SUMMARY_SAMPLES_COUNT]],
+                "target": self.target}
+
+
+# 函数用途: 按出现次数取前几个 code（次数相同按名字排）。
+def _top_codes(counts: dict[str, int]) -> list[str]:
+    return sorted(counts, key=lambda code: (-counts[code], code))[:MAX_VERIFIER_SUMMARY_CODES_COUNT]
 
 
 # LLM: 任何一步不满足都返回结构化 not_run/error，不抛异常给调用方，不退回无沙箱执行，也不改用工作区副本。
@@ -230,7 +255,19 @@ def _parsed_result(stdout: str, base: dict) -> PackVerificationResult:
     if errors is None or warnings is None or payload["valid"] != (not errors):
         return PackVerificationResult(**base, status="error", reason_code="verifier_output_invalid")
     return PackVerificationResult(**base, status="passed" if payload["valid"] else "failed", valid=payload["valid"],
-                                  error_counts=errors, warning_counts=warnings)
+                                  error_counts=errors, warning_counts=warnings,
+                                  error_samples=_error_samples(payload.get("errors", [])))
+
+
+# LLM: 只在 _code_counts 已确认每项都有合法 code 之后调用；location 不是字符串就记空串，去掉控制字符并截断。
+# 函数用途: 取前几条错误的 code 和位置，供返工提示定位。
+def _error_samples(items: list) -> tuple[dict, ...]:
+    samples = []
+    for item in items[:MAX_VERIFIER_ERROR_SAMPLES_COUNT]:
+        location = item.get("location") if isinstance(item.get("location"), str) else ""
+        cleaned = "".join(char for char in location if ord(char) >= 32 and ord(char) != 127)
+        samples.append({"code": item["code"], "location": cleaned[:MAX_VERIFIER_LOCATION_CHARS]})
+    return tuple(samples)
 
 
 # 函数用途: 在字节上限内把 stdout 解析成 JSON 对象，失败返回 None。

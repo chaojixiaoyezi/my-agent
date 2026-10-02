@@ -65,6 +65,8 @@ class CapabilityConfig:
     subagent_takeover_hint_enabled: bool = False
     # 派子代理时允许按 media_ref 把本会话附件交给子代理（第 14 条）：会改变模型看到的工具说明与本轮附件清单，默认关闭。
     subagent_input_media_enabled: bool = False
+    # 能力包宿主核验：宿主自动运行钉住包里声明的原版检查程序；执行包内代码属于安全边界，默认关闭。
+    capability_pack_host_verification_enabled: bool = False
     # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。
     # 默认关闭——拆分会创建新任务并改变原任务状态，需用户显式开启。
     subagent_failure_auto_split_enabled: bool = False

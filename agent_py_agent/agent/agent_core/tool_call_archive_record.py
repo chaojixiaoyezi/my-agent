@@ -656,6 +656,8 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         # 插件观察候选：plugin_observation.parse_observation 已按形状与数量夹过界，归档是它的唯一权威位置
         "observation",
         "observation_rejected",
+        # 能力包宿主核验的有界摘要：pack_verification_service 已按条数和码数夹过界，恢复/续跑重渲染回执时要读它
+        "pack_verification",
     )
     compact = {key: envelope[key] for key in keys if key in envelope}
     if process := project_process_runtime_facts(envelope.get("process")):

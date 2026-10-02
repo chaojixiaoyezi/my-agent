@@ -107,6 +107,9 @@ class AgentRunResult:
     # Read-only projection of the exact run snapshots and completion decision.
     # It is observability evidence and never feeds authorization or execution.
     tool_runtime_evidence: dict[str, object] | None = None
+    # LLM: 能力包宿主核验事实（pack_verifications.v1），只来自本 run 的核验账本；None 表示本回合没有核验结果。
+    # 字段用途: 供 Gateway 生成宿主提示并写进 channel_delivery.pack_verifications。
+    pack_verifications: dict[str, object] | None = None
     conversation_persist_degraded: bool = False
     conversation_persist_error: str = ""
     channel_delivery: dict[str, object] | None = None

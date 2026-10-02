@@ -84,6 +84,7 @@ from .request_errors import (
     gateway_model_response_error_projection,
     gateway_request_load_error_response,
 )
+from .request_pack_verification_notice import queue_pack_verification_notice
 from .stream_writer import BufferedChunkStreamWriter, open_chunk_stream, write_host_notice_events
 
 if TYPE_CHECKING:
@@ -442,6 +443,7 @@ def _execute_gateway_conversation_turn(
     )
     # 实验收尾只在回合正常返回后执行；普通请求零 I/O，停止/失败不补写，任何异常都不改变本轮结果。
     promoted = request_experiment_records.finish_decision_experiment_turn(context, result)
+    promoted += queue_pack_verification_notice(context, conversation, result)
     notices += _publish_gateway_host_notices(context, conversation, notices=promoted)
     return request_history.persist_gateway_assistant_result(context, conversation, result, host_notices=notices)
 

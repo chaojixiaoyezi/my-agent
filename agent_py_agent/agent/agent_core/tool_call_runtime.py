@@ -158,6 +158,9 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         prepared_request = replace(runtime_request, call=call)
         outcome = guarded_tool_call_result(prepared_request) or prepared_promotion_outcome
         if outcome is None:
+            # 能力包 v2 块 3：本 run 第一次改工作区之前记基线（开关关着时零开销）。
+            _pack_verification_hooks().capture_baseline_before_tool(
+                runtime_request.agent, runtime_request.request.params, call.tool_name)
             return None
         return apply_tool_execution_facts(
             outcome,
@@ -200,6 +203,8 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         **execution.call.arguments,
     }
     result = _record_passive_verification(runtime_request.agent, execution.call, result)
+    result = _pack_verification_hooks().attach_post_write_verification(
+        runtime_request.agent, runtime_request.request.params, execution.call.tool_name, result)
     execution = replace(execution, result=result)
     audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
     if one_shot_keys and _one_shot_result_consumes_key(result):
@@ -246,6 +251,14 @@ def _record_passive_verification(
     from ..verification.runtime import record_tool_verification
 
     return record_tool_verification(agent, call, result)
+
+
+# LLM: 局部导入，和 _record_passive_verification 一样让通用工具运行时不在模块初始化时依赖能力包子系统。
+# 函数用途: 返回能力包宿主核验的工具钩子模块（执行前记基线、写后核验）。
+def _pack_verification_hooks():
+    from ..capability import pack_verification_hooks
+
+    return pack_verification_hooks
 
 
 # LLM: 晋升条件仍只读原 ToolRuntimePolicy；实际晋升与参数同步复用 conversation.task_promotion 的活动回合事务，和宿主准备共用原身份。
