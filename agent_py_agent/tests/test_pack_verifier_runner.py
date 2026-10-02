@@ -72,9 +72,11 @@ def _verification(args, runtime="python", inputs=False):
             "verifiers": [verifier]}
 
 
-def _installed(tmp_path, script, *, args=("{target}",), runtime="python", inputs=False, consent=True):
+# options：args（参数模板）、runtime、inputs（是否声明关联输入）、consent（是否写入同意摘要）。
+def _installed(tmp_path, script, **options):
     def change(manifest):
-        manifest["capability"]["verification"] = _verification(list(args), runtime, inputs)
+        manifest["capability"]["verification"] = _verification(
+            list(options.get("args", ("{target}",))), options.get("runtime", "python"), options.get("inputs", False))
     bundle = content_bundle(files={"CAPABILITY.md": b"# c\n", "scripts/check.py": script.encode()}, change=change)
     owner = resolve_owner_home(tmp_path / "home")
     store = PluginInstallStore(owner)
@@ -82,7 +84,8 @@ def _installed(tmp_path, script, *, args=("{target}",), runtime="python", inputs
     details = verifier_confirmation_details(entry.manifest, entry.package_sha256)
     activation = PluginContentActivation("enable", entry.manifest.plugin_id, entry.package_sha256, entry.revision,
                                          entry.settings_revision,
-                                         verifier_consent_sha256=verifier_consent_sha256(details) if consent else "")
+                                         verifier_consent_sha256=verifier_consent_sha256(details)
+                                         if options.get("consent", True) else "")
     store.change_activation(PluginActivationRequest("enable", entry.revision, activation))
     return owner, store.snapshot()[0]
 
@@ -266,8 +269,9 @@ def test_network_isolation_unavailable_fails_closed_without_running(tmp_path, mo
     from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
 
     monkeypatch.setattr(AttemptExecutionSandbox, "probe", lambda self, **kwargs: SandboxReadiness(True, "SANDBOX_READY", "ok"))
-    monkeypatch.setattr(AttemptExecutionSandbox, "_probe_network_isolation",
-                        lambda self: SandboxReadiness(False, "SANDBOX_NETWORK_ISOLATION_UNAVAILABLE", "no"))
+    monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox._network_checked",
+                        lambda report, platform_name, spec: report if spec.network_access
+                        else SandboxReadiness(False, "SANDBOX_NETWORK_ISOLATION_UNAVAILABLE", "no"))
     monkeypatch.setattr(AttemptExecutionSandbox, "run", lambda *a, **k: pytest.fail("must not run"))
     AttemptExecutionSandbox._READINESS_CACHE.clear()
     try:

@@ -206,35 +206,13 @@ class AttemptExecutionSandbox:
             if cached is not None:
                 self._ready = cached
             else:
-                report = self.probe()
-                if report.ready and not self.spec.network_access:
-                    report = self._probe_network_isolation()
+                report = _network_checked(self.probe(), self._platform, self.spec)
                 self._ready = self._cache_readiness(key, report)
         if not self._ready.ready:
             raise SandboxUnavailableError(
                 f"SANDBOX_UNAVAILABLE: {self._ready.code}: {self._ready.detail}"
             )
         return self._ready
-
-    # LLM: 要求断网时，平台沙箱本身可用还不够，必须真能隔离网络：Linux 实跑一次 bwrap --unshare-net（容器里缺 NET_ADMIN
-    #   时回环配置会失败），macOS 实跑一次带 (deny network*) 的 Seatbelt。失败按沙箱不可用 fail-closed，
-    #   不能让命令以“bwrap 启动失败”的形态跑完再被误判成程序自己的输出。结果随 readiness 缓存。
-    # 函数用途: 探测本机能否在沙箱里切断网络。
-    def _probe_network_isolation(self) -> SandboxReadiness:
-        command = [sys.executable, "-I", "-S", "-c", "pass"]
-        if self._platform == "Linux":
-            binary = self.spec.bwrap_path or find_bwrap()
-            argv = [str(binary), "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--", *command]
-        else:
-            binary = self.spec.macos_sandbox_exec or shutil.which("sandbox-exec")
-            argv = [str(binary), "-p", "(version 1)\n(allow default)\n(deny network*)", "--", *command]
-        try:
-            completed = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
-        except (OSError, subprocess.SubprocessError):
-            completed = None
-        if completed is None or completed.returncode != 0:
-            return SandboxReadiness(False, "SANDBOX_NETWORK_ISOLATION_UNAVAILABLE", "本机沙箱无法切断网络")
-        return SandboxReadiness(True, "SANDBOX_READY", "沙箱可用且能切断网络")
 
     # ---------------------------------------------------------------- 执行
     def build_argv(self, command_argv: list[str]) -> list[str]:
@@ -473,6 +451,28 @@ def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[st
                 f"(deny file-write* (literal {json.dumps(str(candidate.resolve()))}))"
             )
     return denies
+
+
+# LLM: 要求断网时，平台沙箱本身可用还不够，必须真能隔离网络：Linux 实跑一次 bwrap --unshare-net（容器里缺 NET_ADMIN
+#   时回环配置会失败），macOS 实跑一次带 (deny network*) 的 Seatbelt。失败按沙箱不可用 fail-closed，
+#   不能让命令以“bwrap 启动失败”的形态跑完再被误判成程序自己的输出。结果由 require_ready 随 readiness 缓存。
+# 函数用途: 平台沙箱可用且要求断网时，再探测一次本机能否在沙箱里切断网络；其余情况原样返回平台探测结果。
+def _network_checked(report: SandboxReadiness, platform_name: str, spec: AttemptSandboxSpec) -> SandboxReadiness:
+    if not report.ready or spec.network_access:
+        return report
+    command = [sys.executable, "-I", "-S", "-c", "pass"]
+    if platform_name == "Linux":
+        argv = [str(spec.bwrap_path or find_bwrap()), "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--", *command]
+    else:
+        binary = spec.macos_sandbox_exec or shutil.which("sandbox-exec")
+        argv = [str(binary), "-p", "(version 1)\n(allow default)\n(deny network*)", "--", *command]
+    try:
+        completed = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        completed = None
+    if completed is None or completed.returncode != 0:
+        return SandboxReadiness(False, "SANDBOX_NETWORK_ISOLATION_UNAVAILABLE", "本机沙箱无法切断网络")
+    return SandboxReadiness(True, "SANDBOX_READY", "沙箱可用且能切断网络")
 
 
 # LLM: 断网只看结构化 network_access；规则放在整份配置最后（Seatbelt 后写覆盖先写），full_access 也同样生效。
