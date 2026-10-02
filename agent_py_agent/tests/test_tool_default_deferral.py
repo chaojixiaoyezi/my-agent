@@ -82,6 +82,7 @@ def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
 @pytest.mark.parametrize(("query", "tool"), [
     ("看一下这个直播流", "watch_stream"),
     ("帮我换个模型", "manage_models"),
+    ("帮我配置一个向量模型", "manage_models"),
     ("改一下配置项", "user_config"),
     ("明天早上提醒我", "schedule"),
     ("重启网关", "restart_gateway"),

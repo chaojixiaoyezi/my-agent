@@ -245,7 +245,7 @@ def build_manage_models_model_spec() -> ToolModelSpec:
             keywords=_KEYWORDS,
             examples=_EXAMPLES,
             default_deferred=True,
-            deferred_summary="新增、切换、删除或测试模型与服务商（等同 /model）",
+            deferred_summary="新增、切换、删除或测试模型与服务商，含语义记忆的向量模型（等同 /model）",
         ),
     )
 
