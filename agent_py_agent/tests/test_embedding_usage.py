@@ -68,6 +68,8 @@ class _Stub(BaseHTTPRequestHandler):
             payload = {"data": [{"embedding": vector} for vector in vectors]}
             if _Stub.mode == "usage":
                 payload["usage"] = {"prompt_tokens": 7 * len(texts), "total_tokens": 7 * len(texts)}
+            elif _Stub.mode == "prompt_only":
+                payload["usage"] = {"prompt_tokens": 3 * len(texts)}
         raw = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -121,6 +123,14 @@ def test_unreported_tokens_are_not_estimated(stub):
         MiniMaxEmbedder(api_base=stub).embed(["y", "z"])
 
     assert _row("memory_rebuild") == {"requests": 2, "texts": 3, "failures": 0, "tokens": 0, "tokens_unreported_requests": 2}
+
+
+def test_openai_compatible_falls_back_to_prompt_tokens_when_total_is_missing(stub):
+    _Stub.mode = "prompt_only"
+    with embedding_purpose("tool_retrieval"):
+        OpenAICompatibleEmbedder(api_base=stub, model="m").embed(["a", "b"])
+    assert _row("tool_retrieval") == {"requests": 1, "texts": 2, "failures": 0, "tokens": 6, "tokens_unreported_requests": 0}, \
+        "只回报 prompt_tokens 也算回报，不当成未回报"
 
 
 def test_failed_requests_count_and_still_raise(stub):
@@ -252,3 +262,35 @@ def test_member_vector_view_does_not_show_process_wide_usage(host, monkeypatch, 
     views = _vector_views(host, monkeypatch, stub)
 
     assert all("本次 Gateway 启动以来" not in view.message and "只能查看" in view.message for view in views)
+
+
+# ---------------------------------------------------------------- 日志去重（S7 顺带修）
+
+
+def test_profile_unavailable_warning_is_logged_once_per_owner_and_reason(monkeypatch, caplog):
+    import logging
+
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent.backends.errors import ModelNotConfiguredError
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    reasons = iter(["profile_not_found"] * 3 + ["profile_not_found", "credential_missing"])
+
+    def unavailable(agent):
+        raise ModelNotConfiguredError(profile_id="p-1", profile_reason=next(reasons))
+
+    monkeypatch.setattr(core, "_embedding_client", unavailable)
+    monkeypatch.setattr(core, "_PROFILE_WARNINGS_SEEN", set())
+
+    def build(owner):
+        agent = SimpleNamespace(config=AgentConfig(memory_semantic_recall=True), home_paths=SimpleNamespace(owner_id=owner))
+        status: dict[str, str] = {}
+        assert core._build_memory_embedder(agent, diagnostics=status) is None
+        return status
+
+    with caplog.at_level(logging.WARNING, logger=core.__name__):
+        statuses = [build("owner-a"), build("owner-a"), build("owner-a"), build("owner-b"), build("owner-b")]
+    lines = [record.getMessage() for record in caplog.records if "语义记忆档案不可用" in record.getMessage()]
+    assert lines == ["语义记忆档案不可用（profile_not_found）；当前使用关键词召回"] * 2 + \
+        ["语义记忆档案不可用（credential_missing）；当前使用关键词召回"], "同一 (owner, 原因) 只打一次；换 owner 或换原因各打一次"
+    assert all(status["error_code"] == "MEMORY_EMBEDDING_PROFILE_UNAVAILABLE" for status in statuses), "结构化诊断每次照写"

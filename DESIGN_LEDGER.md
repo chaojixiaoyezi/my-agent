@@ -1,6 +1,6 @@
 # 设计台账
 
-## 嵌入用量与召回方式看得到（S7，be，2026-10-02，分支 `claude/be-embedding-usage-facts`，基于 `claude/3a-step17g` `43f29df6a`，已实现，待集成）
+## 嵌入用量与召回方式看得到（S7，be 实现、75 接手收尾，2026-10-02，分支 `claude/75-embedding-usage-facts`（接 `claude/be-embedding-usage-facts`），基于 `claude/3a-step17h` `afb15947b`，已实现，待 9b 复审）
 
 - **起因**（3a 查生产）：
   - 写入时嵌入在工作：embo-01、1536 维，向量 24 → 25。
@@ -16,6 +16,7 @@
   - 展示：管理员发 `/model vector`（TUI 与 IM 同一个 Gateway 入口）时多几行“本次 Gateway 启动以来”，只有数字和原因码。
     - 计数是全进程的，含其他用户，所以普通用户看不到这几行。
     - `my-agent memory vectors status` 是另起的进程，计数为空，那里不加。
+- **顺带修日志刷屏**：`core._build_memory_embedder` 每物化一个 owner 的 agent 就打一行“语义记忆档案不可用（profile_not_found）；当前使用关键词召回”，17f 的 start.log 里有三百多行，都是其它 owner 按设计（S4）退回关键词。改成同一进程里同一（owner, 原因）只打一次（`core._first_profile_warning`），结构化诊断 status 照旧每次写。
 - **为什么不进 model_usage / model call ledger**：那里有准入、停机关门、预算、上下文校准等语义，是给对话模型调用的；嵌入不经过这些门，硬塞进去会让关门、预算判断把嵌入也算进去，或者反过来被嵌入的记录污染校准。嵌入只需要“次数和 token 是多少”，所以单独一份只读计数。
 - **测试与证据**：见 TESTS 同名条目；真实核对（隔离 home、embo-01）在 `~/.my-agent/decision-evidence/embedding-usage-facts-s7/`。
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -784,7 +785,25 @@ def _embedding_client(agent: object):
     return factory(api_base=api_base, model=model, api_key=api_key)
 
 
+# 本进程已经告警过“语义记忆档案不可用”的 (owner, 原因)：Gateway 每物化一个 owner 的 agent 都会建一次嵌入客户端，
+# 其它 owner 按设计（S4）退回关键词时不能每次都刷一行日志（17f 的 start.log 里有三百多行）。
+_PROFILE_WARNINGS_SEEN: set[tuple[str, str]] = set()
+_PROFILE_WARNINGS_LOCK = threading.Lock()
+
+
+# LLM: 只管日志去重：结构化诊断 status 每次照写，不受影响。owner 取 agent.home_paths.owner_id（没有就是空串）。线程安全。
+# 函数用途: 同一进程里同一 (owner, 原因) 第一次返回 True（该打日志），之后都返回 False。
+def _first_profile_warning(agent: object, reason: str) -> bool:
+    key = (str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""), reason)
+    with _PROFILE_WARNINGS_LOCK:
+        if key in _PROFILE_WARNINGS_SEEN:
+            return False
+        _PROFILE_WARNINGS_SEEN.add(key)
+        return True
+
+
 # LLM: 构建失败仅影响派生向量检索；诊断必须区分未开启、未配置、档案失效和初始化失败，不记录密钥或异常正文。
+#   “档案不可用”的警告同一进程里同一 (owner, 原因) 只打一次（_first_profile_warning），诊断照旧每次写。
 # 函数用途: 创建可选记忆向量接口，向健康面板报告降级原因，不中断正式记忆读写。
 def _build_memory_embedder(agent: object, *, diagnostics: dict[str, str] | None = None):
     """记忆语义召回的 embedder(检索拓宽 #1):默认关 / 没配 embedding 档案 → None(纯关键词,不变)。
@@ -804,7 +823,8 @@ def _build_memory_embedder(agent: object, *, diagnostics: dict[str, str] | None 
     except ModelNotConfiguredError as exc:
         status.update(state="degraded", error_code="MEMORY_EMBEDDING_PROFILE_UNAVAILABLE",
                       profile_id=exc.profile_id, profile_reason=exc.profile_reason)
-        logging.getLogger(__name__).warning("语义记忆档案不可用（%s）；当前使用关键词召回", exc.profile_reason)
+        if _first_profile_warning(agent, str(exc.profile_reason)):
+            logging.getLogger(__name__).warning("语义记忆档案不可用（%s）；当前使用关键词召回", exc.profile_reason)
         return None
     except Exception as exc:
         status.update(state="degraded", error_code="MEMORY_EMBEDDING_INIT_FAILED", error_type=type(exc).__name__)
