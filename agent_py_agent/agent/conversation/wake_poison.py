@@ -435,10 +435,13 @@ def _is_uncounted(error: Exception) -> bool:
     return is_provider_environment_fault(error) or _is_transient(error)
 
 
-# LLM: 瞬时类型清单；与 _is_uncounted 的环境级判定分开，便于逐项测试。
+# LLM: 瞬时类型清单；与 _is_uncounted 的环境级判定分开，便于逐项测试。宿主停机关闭模型调用准入后的拒绝
+#   （contracts.model_call_ledger.find_model_call_admission_error，含显式原因链里的）也不计数：这是宿主生命周期，
+#   不是这条唤醒有毒，否则每次重启部署都会给在途唤醒记一次失败，几次之后把健康唤醒隔离掉。
 # 函数用途: 判断一个异常是否属于不计数的瞬时类。
 def _is_transient(error: Exception) -> bool:
     from ..backends.errors import ProviderTimeoutError, is_provider_transient_error
+    from ..contracts.model_call_ledger import find_model_call_admission_error
     from ..runtime_db.operations import RuntimeConflictError
     from ..settings.thread_model_selection import is_model_configuration_unavailable
     from .background_execution import BackgroundCompactSliceYield
@@ -448,6 +451,8 @@ def _is_transient(error: Exception) -> bool:
                           RuntimeConflictError, BackgroundCompactSliceYield)):
         return True
     if is_provider_transient_error(error) or is_provider_quota_failure(error):
+        return True
+    if find_model_call_admission_error(error) is not None:
         return True
     if is_model_configuration_unavailable(error):
         return True

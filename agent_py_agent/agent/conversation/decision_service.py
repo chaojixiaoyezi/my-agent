@@ -31,6 +31,7 @@ from ..backends.typesafe_decision import decision_backend_from_profile
 from ..common.cancellation import ToolCancelled, current_cancellation_token, raise_if_cancelled
 from ..concurrency.interrupt import InterruptHandle, is_interrupted
 from ..contracts.model_call_budget import ModelCallBudgetError
+from ..contracts.model_call_ledger import find_model_call_admission_error
 from ..llm_scale.concurrency import ConcurrencyTimeout
 from ..runtime_context import (
     current_subagent_attempt_id,
@@ -621,7 +622,9 @@ def _revoked(active: ActiveDecision, mode: str) -> DecisionOutcome | None:
 
 
 # LLM: 用户中断仍传播；管理员禁用、发送许可拒绝与预算/上界拒绝按固定代码显式返回，绝不调用 record_failure 触发连接退避。
-# 只有 typed provider/超时错误进入原冷却表，其余错误保持原分类。
+#   宿主停机两种事实都按现有停机结果合同返回 stale/host_shutdown（保留原方案、不进冷却），排在设置撤销之后（同 _revoked 的先后）：
+#   在途决策已被停机取消（active.shutdown_cancelled），或模型调用账本已关门、这次调用登记时被拒（ModelCallAdmissionClosedError，
+#   请求没有发出）。只有 typed provider/超时错误进入原冷却表，其余错误保持原分类。改动同步 test_gateway_decision_shutdown_cancel。
 # 函数用途: 把一次调用异常转换成保留原方案的决策结果。
 def _failure_outcome(request: DecisionRequest, exc: Exception, active: ActiveDecision, *, mode: str,
                      key: tuple) -> DecisionOutcome:
@@ -636,6 +639,8 @@ def _failure_outcome(request: DecisionRequest, exc: Exception, active: ActiveDec
         return DecisionOutcome(mode, "experiment_unavailable", reason=exc.reason)
     if active.settings_cancelled:
         return DecisionOutcome(mode, "stale", reason="settings_changed")
+    if active.shutdown_cancelled or find_model_call_admission_error(exc) is not None:
+        return DecisionOutcome(mode, "stale", reason="host_shutdown")
     if isinstance(exc, ModelProfileError):
         return DecisionOutcome(mode, "stale", reason="configuration_changed")
     if isinstance(exc, DecisionInputError):

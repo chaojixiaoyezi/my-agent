@@ -1,6 +1,33 @@
 # 设计台账
 
-## J17 必须修：Gateway 停机准入栅栏——结清之后不再接新的模型调用（2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 `claude/3a-step16z` `7b21f38b9`，已实现，待集成）
+## 停机准入拒绝的调用方收尾：决策、子代理、运行错误报告、唤醒毒丸按“宿主停机”处理（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `claude/3a-step16z` `00bcf7d45`，已实现，待集成）
+
+- **问题**：sol2 复审 J17 栅栏（`bc639caa7`）后确认：没有锁倒置，窗口确实拦住了。但三个调用方不认识新的准入拒绝 `ModelCallAdmissionClosedError`，把正常停机说成了别的错误。
+  - **决策入口**（必须修）：ActiveDecision 已登记、进模型账本前关门，`started_retained()` 被拒，`_failure_outcome` 兜底成 `error/enhancement_failed`；`active.shutdown_cancelled` 已置位却没用上。sol2 实测 active_decisions_cancelled=[1]、backend_decide_calls=0、cooldown_entries=0。
+  - **子代理**（必须修）：`_subagent_run_failure_type()` 不认识新异常，返回默认 `runner_error`，并写进结果和恢复快照的 error_code。`runner_error` 还在自动重跑名单里，`MODEL_CALL_ADMISSION_CLOSED`“不可重试、停止”的合同丢了。
+  - **运行错误报告**（建议修）：`runtime_error_report` 把它归成 `programmer_bug`。
+  - **唤醒毒丸**（38 修复时发现的同类第 4 处）：`wake_poison.verdict_for_error` 把它当普通异常计数。每次重启部署，在途唤醒都会被记一次失败，满 5 次就把健康唤醒隔离掉。
+- **做法**：
+  - `contracts/model_call_ledger.find_model_call_admission_error(exc)` 是四处共用的唯一判定。它只沿显式 `__cause__`（raise ... from）找 `ModelCallAdmissionClosedError`，不沿 `__context__`、不读异常文本，有环防护。
+  - **决策**：`_failure_outcome` 在设置撤销之后、通用兜底之前，认两个宿主停机事实，都按现有停机结果合同返回 `stale/host_shutdown`（保留原方案、不调 record_failure、不进连接冷却）：
+    - 在途决策已被停机取消（`active.shutdown_cancelled`）；
+    - 这次调用登记时被准入拒绝。
+    - 先后顺序与 `_revoked` 一致：设置撤销优先。同步和后台 observe 都走这一处。
+  - **子代理**：新增失败类型 `FailureType.MODEL_CALL_ADMISSION_CLOSED`（值 `model_call_admission_closed`，大写后正是已登记的错误码）。
+    - 失败分类最先认它，结果的 failure_type 和恢复快照的 error_code 都写它。
+    - 它不进 `RETRYABLE_RUNNER_FAILURE_TYPES`：本进程正在停机，自动重跑只会再被拒，还白白烧掉重跑次数。
+    - 界面标签显示“宿主停机中断”。
+  - **运行错误报告**：最先认准入拒绝，报 `category=host_stopping`、`recoverable=False`，并带两个结构化原因码，都取自异常属性：
+    - `error_code=MODEL_CALL_ADMISSION_CLOSED`；
+    - `reason_code`= 关门原因（Gateway 停机是 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`）。
+  - **唤醒毒丸**：`_is_transient` 认准入拒绝（含原因链里的），判不计数，与取消、压缩让出同类；原因码仍按结构化规则生成。
+- **边界**：
+  - 重启后不会自动续跑这类 run。父级按完成唤醒里的失败类型决定是否续派。之前 runner_error 会被自动重跑，但要占一次重跑次数；停机期间的重跑还会被栅栏立即拒掉。
+  - 如果要“重启后自动续跑、不占重跑次数”，另开一条，在派发处按本进程准入状态判定。
+  - “已登记、未发出的调用在发送层硬门”仍是待办。
+- **验证**：见 TESTS.md 同名节。
+
+## J17 必须修：Gateway 停机准入栅栏——结清之后不再接新的模型调用（2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 `claude/3a-step16z` `7b21f38b9`，已集成 `bc639caa7`，待上线 step17c）
 
 - **问题**（sol2 只读审查）：停机结清只拿一次账本快照，再逐本把在途调用记 failed，没有同时关掉新调用的准入。
   - Gateway 对三条循环各等 2 秒，排空不完整也照样结清；之后还活着的 worker 能在已结清的账本上登记新的 started。

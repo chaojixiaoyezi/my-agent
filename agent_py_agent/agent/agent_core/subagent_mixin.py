@@ -540,14 +540,19 @@ def _planner_record_status(parsed, state: dict) -> tuple[bool, str, str, str]:
     return ok, decision, message, parse_error
 
 
-# LLM: 只按异常类型和结构化错误码分：供应超时、额度用完、供应瞬时，其余记 RUNNER_ERROR；不读异常正文。
+# LLM: 只按异常类型和结构化错误码分：宿主停机准入拒绝、供应超时、额度用完、供应瞬时，其余记 RUNNER_ERROR；不读异常正文。
+#   停机准入拒绝（含显式 __cause__ 链里的，见 contracts.model_call_ledger.find_model_call_admission_error）最先判，记成
+#   MODEL_CALL_ADMISSION_CLOSED：它随结果和恢复快照的 error_code 落盘，不进自动重跑名单，不能被兜底成可重跑的 runner_error。
 #   额度用完只读会话层唯一判定 conversation.compact_guard.is_provider_quota_failure，含大线程压缩调用撞额度的
 #   ConversationCompactError 包装，与唤醒、车道、策略失败账、毒丸同口径（懒导入，避免 agent_core 初始化时拉起会话层）。
 #   改动时联测 test_provider_transient_auto_resume 的子代理额度用例与 test_subagent_compact_recovery。
 # 函数用途: 给失败的子代理 run 选失败类型，决定它按额度不足、超时、临时故障还是程序错误收尾。
 def _subagent_run_failure_type(exc: BaseException) -> str:
+    from ..contracts.model_call_ledger import find_model_call_admission_error
     from ..conversation.compact_guard import is_provider_quota_failure
 
+    if find_model_call_admission_error(exc) is not None:
+        return FailureType.MODEL_CALL_ADMISSION_CLOSED.value
     if is_provider_timeout_error(exc):
         return FailureType.PROVIDER_TIMEOUT.value
     if is_provider_quota_failure(exc):

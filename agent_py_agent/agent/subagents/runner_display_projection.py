@@ -9,6 +9,8 @@ _DETAIL_BY_FAILURE = {
     FailureType.PERMISSION_BLOCKED.value: "等待授权",
     FailureType.WRITE_PERMISSION_BLOCKED.value: "等待授权",
     FailureType.PROVIDER_QUOTA_EXHAUSTED.value: "额度不足",
+    # 宿主停机关门后新模型调用被拒（J17 停机准入栅栏）：说清是停机打断，不笼统显示“失败”。
+    FailureType.MODEL_CALL_ADMISSION_CLOSED.value: "宿主停机中断",
     FailureType.STRUCTURED_OUTPUT_PARSE_ERROR.value: "结果格式异常",
 }
 

@@ -23,6 +23,10 @@ from agent_py_agent.agent.backends.errors import (
     ProviderUsageLimitError,
 )
 from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotError
+from agent_py_agent.agent.contracts.model_call_ledger import (
+    ModelCallAdmissionClosedError,
+    ModelCallAdmissionClosure,
+)
 from agent_py_agent.agent.conversation import wake_poison
 from agent_py_agent.agent.conversation.background_execution import BackgroundCompactSliceYield
 from agent_py_agent.agent.conversation.wake_poison import (
@@ -159,6 +163,16 @@ class TestError:
     def test_request_level_rejections_still_count_with_their_status(self, status):
         error = ProviderRequestRejectedError("bad request", status_code=status)
         assert verdict_for_error(error) == _failure(f"error:PROVIDER_REQUEST_REJECTED:http_{status}")
+
+    def test_host_shutdown_admission_rejection_is_not_counted(self):
+        """sol2 复审 J17 栅栏的同类问题（2026-10-02）：宿主停机关门后在途唤醒的新模型调用被拒，改前按普通异常计数，
+        每次重启部署都给健康唤醒记一次失败。现在本身和显式原因链包装的都不计数，原因码仍按结构化规则生成。"""
+        admission = ModelCallAdmissionClosedError(
+            ModelCallAdmissionClosure("HostShutdownInterrupted", "MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN"))
+        wrapped = RuntimeError("wake turn failed")
+        wrapped.__cause__ = admission
+        assert verdict_for_error(admission) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:MODEL_CALL_ADMISSION_CLOSED")
+        assert verdict_for_error(wrapped) == WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:host_stopping:RuntimeError")
 
     def test_base_exceptions_are_not_counted(self):
         assert verdict_for_error(KeyboardInterrupt()) == WakeAttemptVerdict(

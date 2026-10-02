@@ -991,6 +991,20 @@ def close_model_call_admission(closure: ModelCallAdmissionClosure) -> tuple[Mode
     return tuple(record for ledger in ledgers for record in _fail_open_calls(ledger, closure))
 
 
+# LLM: 调用方（决策入口、子代理失败分类、运行错误报告）认“停机准入拒绝”的唯一判定：只沿显式 __cause__（raise ... from）
+#   往里找 ModelCallAdmissionClosedError，不沿 __context__、不读异常文本；有环防护。找不到返回 None。
+# 函数用途: 从异常及其显式原因链里找出停机准入拒绝，供调用方按“宿主停机”而不是普通失败收尾。
+def find_model_call_admission_error(exc: BaseException | None) -> ModelCallAdmissionClosedError | None:
+    seen: set[int] = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ModelCallAdmissionClosedError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__
+    return None
+
+
 # LLM: 关门后才调用，所以本账本不会再有新调用进来；只改仍在途的记录，返回本次改写的记录。
 # 函数用途: 把一本账本里仍在途的调用按关门原因记成 failed。
 def _fail_open_calls(ledger: ModelCallLedger, closure: ModelCallAdmissionClosure) -> tuple[ModelCallRecord, ...]:
@@ -1128,5 +1142,6 @@ __all__ = [
     "ModelCallStartedParams",
     "ModelCallTimeoutParams",
     "close_model_call_admission",
+    "find_model_call_admission_error",
     "summarize_model_call_records",
 ]

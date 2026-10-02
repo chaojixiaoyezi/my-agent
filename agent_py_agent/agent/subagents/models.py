@@ -88,6 +88,9 @@ class FailureType(str, Enum):
     INCOMPLETE_DELIVERABLES = "incomplete_deliverables"
     MISSING_CAPABILITY = "missing_capability"
     MISSING_EVIDENCE = "missing_evidence"
+    # 宿主（Gateway）停机已关闭模型调用准入，这次 run 的新模型调用登记时被拒、请求没有发出（MODEL_CALL_ADMISSION_CLOSED）。
+    # 不是任务失败也不是代码错误；不进自动重跑名单（本进程正在停机，重跑也只会再被拒），重启后由父级按这个原因决定是否续派。
+    MODEL_CALL_ADMISSION_CLOSED = "model_call_admission_closed"
     MODEL_ERROR = "model_error"
     NO_PROGRESS_FUSE = "no_progress_fuse"
     PERMISSION_BLOCKED = "permission_blocked"

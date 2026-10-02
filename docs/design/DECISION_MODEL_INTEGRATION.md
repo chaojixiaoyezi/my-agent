@@ -299,7 +299,7 @@ agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 
 设置通知单调合并 owner/thread 版本，恢复继承也按新的实际路由取消；跨进程修改由结果采用前复读拒绝旧建议，
 当前不承诺跨进程主动即时中断 socket。
 
-宿主关闭时的在途取消（P4-F，2026-09-25，已合入 main `25650830d`）：Gateway 停止收尾在置位停止事件后立即调用 `decision_policy.cancel_active_decisions_for_shutdown()`。它在索引锁内置位进程关闭标记并标记全部在途决策，再在锁外取消各自句柄。等待中的前台和后台调用立即返回 `stale/host_shutdown`：不冒充用户停止，不进入连接冷却；调用账按原取消路径记 `DECISION_CANCELLED`，worker 仍沿 bounded_call 自行退出。关闭开始后新的决策在登记时即返回 `stale/host_shutdown`，不联网。收尾里这一步用 try/except 包住，出错只记异常类型事件 `gateway_decision_cancel_failed`，不中断后续清理。它只取消本进程内登记的句柄，不读写持久状态。主线 owner 的 `settle_open_model_calls_for_shutdown()`（`db4d46398`）在停 HTTP 与收线程之后，把仍未结束的模型调用结清为 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`；排空窗口内正常结束的调用照常结算。非 Gateway 的本地 TUI 退出即进程结束；Gateway 模式下关掉 TUI 不会停止 Gateway 里的回合，这是既有设计。
+宿主关闭时的在途取消（P4-F，2026-09-25，已合入 main `25650830d`）：Gateway 停止收尾在置位停止事件后立即调用 `decision_policy.cancel_active_decisions_for_shutdown()`。它在索引锁内置位进程关闭标记并标记全部在途决策，再在锁外取消各自句柄。等待中的前台和后台调用立即返回 `stale/host_shutdown`：不冒充用户停止，不进入连接冷却；调用账按原取消路径记 `DECISION_CANCELLED`，worker 仍沿 bounded_call 自行退出。关闭开始后新的决策在登记时即返回 `stale/host_shutdown`，不联网。收尾里这一步用 try/except 包住，出错只记异常类型事件 `gateway_decision_cancel_failed`，不中断后续清理。它只取消本进程内登记的句柄，不读写持久状态。主线 owner 的 `settle_open_model_calls_for_shutdown()`（`db4d46398`）在停 HTTP 与收线程之后，把仍未结束的模型调用结清为 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`；排空窗口内正常结束的调用照常结算。J17 停机准入栅栏之后（2026-10-02）：已登记的决策在进模型账本前遇到关门（准入被拒 `MODEL_CALL_ADMISSION_CLOSED`，请求没有发出），或在途决策已被停机取消后又抛别的异常，`_failure_outcome` 同样返回 `stale/host_shutdown`，不进连接冷却。非 Gateway 的本地 TUI 退出即进程结束；Gateway 模式下关掉 TUI 不会停止 Gateway 里的回合，这是既有设计。
 
 Curator 与插件相关点的并发组合（P4-F，同一分支，`test_decision_curator_plugin_concurrency.py` 经真实本地传输栈验证）：
 - 后台 `curator` 慢响应时，前台 `skill_tool`（插件工具短名单所用的点）照常在期限内完成；两者各记一条 purpose=decision 的原账。

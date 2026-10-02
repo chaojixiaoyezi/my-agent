@@ -78,6 +78,44 @@ def test_after_shutdown_new_decisions_return_without_sending(tmp_path, server): 
     assert server.requests == [] and decision_policy.host_shutdown_started()
 
 
+@pytest.mark.parametrize("scenario", ["both", "admission-only", "cancel-only"])
+def test_admission_closed_before_the_ledger_records_the_call_is_host_shutdown(
+    tmp_path, server, monkeypatch, scenario,  # noqa: F811
+):
+    """sol2 复审 J17 栅栏（2026-10-02）：ActiveDecision 已登记、进模型账本前宿主关门，started_retained 被准入拒绝。
+    改前兜底成 error/enhancement_failed；现在按停机结果合同返回 stale/host_shutdown，不发请求、不进冷却。
+    admission-only：没取消在途决策，只有“准入被拒”这一个事实；cancel-only：在途决策已被停机取消、随后抛的是别的异常。
+    两个事实各自都要认成宿主停机。"""
+    from agent_py_agent.agent.agent_core.model.call_runtime import (
+        model_call_ledger,
+        settle_open_model_calls_for_shutdown,
+    )
+    from agent_py_agent.agent.user_space import owner_admin_controls
+
+    host, params, _thread, stage = configured(tmp_path, server)
+    before, cancelled = dict(decision_policy._FAILURES), []
+    original = owner_admin_controls.owner_decision_model_allowed
+    cancel_decisions, close_admission = scenario != "admission-only", scenario != "cancel-only"
+
+    # 函数用途: 在“已登记 ActiveDecision、还没进模型账本”这一刻执行 Gateway 收尾的两步：取消在途决策、关门结清。
+    def shut_down_between_registration_and_ledger(home_paths):
+        if cancel_decisions:
+            cancelled.append(decision_policy.cancel_active_decisions_for_shutdown())
+        if not close_admission:
+            raise RuntimeError("worker torn down by host shutdown")
+        settle_open_model_calls_for_shutdown()
+        return original(home_paths)
+
+    monkeypatch.setattr(owner_admin_controls, "owner_decision_model_allowed", shut_down_between_registration_and_ledger)
+    outcome = decide(host, params, stage)
+
+    assert (outcome.status, outcome.reason) == ("stale", "host_shutdown") and not outcome.may_apply
+    assert cancelled == ([1] if cancel_decisions else [])
+    assert server.requests == [], "请求没有发出"
+    assert dict(decision_policy._FAILURES) == before, "宿主停机不是连接故障，不能新增冷却记录"
+    assert model_call_ledger(host).records() == (), "被拒的调用不进账"
+
+
 def test_settings_revocation_is_reported_first_when_both_happen(tmp_path, server):  # noqa: F811
     server.block = True
     host, params, thread, stage = configured(tmp_path, server, timeout=2)

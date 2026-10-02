@@ -19,6 +19,10 @@ from .backends.errors import (
     is_provider_transient_error,
     provider_error_http_status,
 )
+from .contracts.model_call_ledger import (
+    ModelCallAdmissionClosedError,
+    find_model_call_admission_error,
+)
 from .runtime_db.operations import RuntimeExecutionBusyError
 
 # 错误文本最多回 300 字符：超长截断，防错误信息撑爆回执。
@@ -104,10 +108,14 @@ class RuntimeErrorTemplate:
 
 
 # LLM: 分类优先遵循异常类型；请求拒绝必须在配置父类前处理，本地形状错误（请求拒绝的子类）又在请求拒绝之前；
+#   宿主停机准入拒绝（异常本身或显式原因链里）最先判，报 host_stopping，不能掉进 programmer_bug 兜底；
 #   调用方不得从 model_message 推断重试或执行结果。
 # 函数用途: 生成主代理、子代理和运行账共用的小型错误报告，不推测服务端未返回的拒绝原因。
 def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, Any]:
     """Return the canonical small report for model-visible recoverable errors."""
+    admission = find_model_call_admission_error(exc)
+    if admission is not None:
+        return _host_stopping_report(exc, admission, context=context)
     if isinstance(exc, DataCorruptionError):
         return _report(
             exc,
@@ -185,6 +193,32 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
     # 包装异常（如 SchedulerDueIndexError）的显式原因链里若是环境错误，只补归因字段，不改 category：
     # category 参与控制流（取消工具等），环境归因只给循环错误打印与账本看。
     report.update(environment_cause_fields(exc))
+    return report
+
+
+# LLM: 宿主停机关闭模型调用准入后，新调用登记时被拒：请求没有发出，不是代码错误也不是供应商失败。
+#   原因码只取结构化属性：error_code=MODEL_CALL_ADMISSION_CLOSED（异常的固定码），reason_code=关门原因的错误码
+#   （Gateway 停机是 MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN）；不读异常文本。本进程内不可重试（recoverable=False）。
+# 函数用途: 生成“宿主正在停机、模型调用没有发出”的错误报告，并带上结构化原因码。
+def _host_stopping_report(
+    exc: BaseException,
+    admission: ModelCallAdmissionClosedError,
+    *,
+    context: str,
+) -> dict[str, Any]:
+    report = _report(
+        exc,
+        _template(
+            "host_stopping",
+            "宿主正在停机，本进程已不再接新的模型调用，这次请求没有发出；此前已执行的工作不会因此撤销。"
+            "不要重试，等宿主重启后由原恢复流程继续。",
+            "host is shutting down; model call admission closed, nothing was sent",
+            recoverable=False,
+        ),
+        context=context,
+    )
+    report["error_code"] = admission.error_code
+    report["reason_code"] = admission.closure.error_code
     return report
 
 

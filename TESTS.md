@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 停机准入拒绝的调用方收尾（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `00bcf7d45`）
+
+- `test_gateway_decision_shutdown_cancel.py` 新增 1 项，参数化成 3 种情形。走真实本地 HTTP 决策链，在“已登记 ActiveDecision、还没进模型账本”这一刻执行收尾步骤：
+  - both：先取消在途决策，再关门结清；
+  - admission-only：只关门；
+  - cancel-only：取消后抛别的异常。
+  - 三种都得 `stale/host_shutdown`，请求没有发出，冷却表不变，被拒的调用不进账。
+- `test_gateway_model_call_shutdown_settlement.py` 新增 2 项：
+  - **子代理**：经 `SubagentLifecycleService.handle_run_failure` 跑产品 mixin，异常分别是准入拒绝本身和显式原因链包装的。结果的 failure_type 与快照的 error_code 都是 `model_call_admission_closed`，不在自动重跑名单，界面标签“宿主停机中断”。
+  - **运行错误报告**：本身和包装两种都报 `host_stopping`，`error_code`/`reason_code` 取结构化属性；消息文本相同的普通 RuntimeError 仍是 `programmer_bug`，即不从文本反推。
+- `test_wake_poison.py` 新增 1 项：准入拒绝本身和包装的都判不计数，原因码分别是 `error:MODEL_CALL_ADMISSION_CLOSED` 和 `error:host_stopping:RuntimeError`。
+
 ## J17 必须修：停机准入栅栏（2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 `7b21f38b9`）
 
 - `test_gateway_model_call_shutdown_settlement.py` 新增 4 项：

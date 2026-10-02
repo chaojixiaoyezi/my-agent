@@ -328,3 +328,12 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 - **起因**：C4 真实核对发现，`recover_exited_runner` 给的 `executor_effects_unknown` 不在 `FailureType` 枚举里，被结果状态改写成
   可自动重跑族里的通用 `runner_error`，父级唤醒分不出“效果未知、要先核对”。
 - **改动**：枚举正式登记 `EXECUTOR_EFFECTS_UNKNOWN`（不进可自动重跑族），`recover_exited_runner` 改用枚举值。测试与变异见 TESTS.md 同名节。
+
+## 子代理回合被停机准入拒绝时记准确的停止原因（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 step16z `00bcf7d45`）
+
+- **起因**：栅栏关门后，子代理回合的新模型调用被拒。`_subagent_run_failure_type` 不认识这个异常，兜底成可自动重跑的 `runner_error`，并写进恢复快照的 error_code。
+- **改动**：
+  - 枚举登记 `MODEL_CALL_ADMISSION_CLOSED`（不进可自动重跑族）；
+  - 失败分类最先认它，含显式原因链里的；
+  - 结果和快照都写它，界面标签“宿主停机中断”。
+  - 设计见台账“停机准入拒绝的调用方收尾”节，测试与变异见 TESTS.md 同名节。

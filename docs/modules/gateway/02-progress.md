@@ -980,3 +980,13 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - `settle_open_model_calls_for_shutdown()` 先关门再结清；
   - 删掉 `track_shutdown_ledger`。
   - 事件和原因码不变。设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## 停机准入拒绝的调用方收尾（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 step16z `00bcf7d45`）
+
+- **起因**：栅栏关门后，决策入口把准入拒绝说成 `enhancement_failed`，子代理说成可自动重跑的 `runner_error`，运行错误报告说成 `programmer_bug`，唤醒毒丸还把它计数。
+- **改动**：四处共用 `find_model_call_admission_error`。
+  - 决策返回 `stale/host_shutdown`，不进冷却；
+  - 子代理记 `model_call_admission_closed`，不自动重跑；
+  - 运行错误报告给 `host_stopping`，带结构化原因码；
+  - 唤醒毒丸判不计数。
+  - 设计见台账同名节，测试与变异见 TESTS.md 同名节。

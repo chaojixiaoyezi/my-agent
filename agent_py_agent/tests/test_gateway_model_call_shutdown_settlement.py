@@ -334,3 +334,65 @@ def test_shutdown_failure_keeps_late_transport_facts_until_retention_is_released
     worker.release()
     assert [item.call_id for item in ledger.records()] == ["short-call"]
     assert ledger.cumulative_summary(request_id="gwreq-9")["status_counts"].get("failed") == 1
+
+
+# 函数用途: 关门后在一本新账本上登记调用，取回真实的准入拒绝异常（与运行时同一条路径产生）。
+def _admission_error() -> ModelCallAdmissionClosedError:
+    settle_open_model_calls_for_shutdown()
+    with pytest.raises(ModelCallAdmissionClosedError) as caught:
+        _start(ModelCallLedger(), "late-call", run_id="subagent-late")
+    return caught.value
+
+
+def test_subagent_run_rejected_at_admission_keeps_the_stop_reason():
+    """sol2 复审 J17 栅栏（2026-10-02）：子代理回合的新模型调用被准入拒绝，改前 _subagent_run_failure_type 兜底成 runner_error，
+    写进结果和恢复快照的 error_code，还进了自动重跑名单。现在经 handle_run_failure 记成 model_call_admission_closed，不自动重跑。"""
+    from agent_py_agent.agent.agent_core.subagent.lifecycle_service import SubagentLifecycleService
+    from agent_py_agent.agent.agent_core.subagent.params import SubagentRunFailureParams
+    from agent_py_agent.agent.agent_core.subagent_mixin import SimpleAgentSubagentMixin
+    from agent_py_agent.agent.subagents.models import RETRYABLE_RUNNER_FAILURE_TYPES, FailureType
+    from agent_py_agent.agent.subagents.runner_display_projection import runner_display_label
+
+    # 类用途: 只替换结果账与快照落盘，失败分类与写入顺序走产品的 mixin。
+    class _Agent(SimpleAgentSubagentMixin):
+        # 函数用途: 记下写入的结果参数与快照参数。
+        def __init__(self):
+            self.results, self.snapshots = [], []
+            self.subagents = SimpleNamespace(runner_result=SimpleNamespace(record_runner_result=self._record))
+
+        # 函数用途: 记下结果参数，按产品结果对象的字段返回。
+        def _record(self, params):
+            self.results.append(params)
+            return SimpleNamespace(status=params.status, message=params.message, failure_type=params.failure_type)
+
+        # 函数用途: 记下恢复快照参数，不落盘。
+        def _write_subagent_recovery_snapshot(self, params):
+            self.snapshots.append(params)
+
+    error = _admission_error()
+    wrapped = RuntimeError("subagent model turn failed")
+    wrapped.__cause__ = error
+    for exc in (error, wrapped):
+        agent = _Agent()
+        result = SubagentLifecycleService(agent).handle_run_failure(SubagentRunFailureParams(
+            "subagent-late", "attempt-1", exc, SimpleNamespace(goal="整理资料"), "prompt"))
+        expected = FailureType.MODEL_CALL_ADMISSION_CLOSED.value
+        assert [item.failure_type for item in agent.results] == [expected] and result.status == "FAILED"
+        assert [(item.status, item.error_code) for item in agent.snapshots] == [("FAILED", expected)]
+    assert expected not in RETRYABLE_RUNNER_FAILURE_TYPES, "本进程正在停机，自动重跑只会再被拒"
+    assert runner_display_label("FAILED", expected) == "宿主停机中断"
+
+
+def test_runtime_error_report_names_host_stopping_with_structured_codes():
+    """sol2 建议：准入拒绝不能掉进 programmer_bug 兜底；报 host_stopping，原因码取异常的结构化属性，不读消息文本。"""
+    from agent_py_agent.agent.runtime_errors import runtime_error_report
+
+    error = _admission_error()
+    wrapped = RuntimeError("wrapped")
+    wrapped.__cause__ = error
+    for exc in (error, wrapped):
+        report = runtime_error_report(exc, context="subagent.run")
+        assert (report["category"], report["recoverable"]) == ("host_stopping", False)
+        assert (report["error_code"], report["reason_code"]) == ("MODEL_CALL_ADMISSION_CLOSED", MODEL_CALL_INTERRUPTED_ERROR_CODE)
+    unrelated = RuntimeError("model call admission closed: MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN")
+    assert runtime_error_report(unrelated)["category"] == "programmer_bug", "只认结构化异常，不从消息文本反推"
