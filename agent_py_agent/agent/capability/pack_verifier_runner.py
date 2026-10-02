@@ -1,7 +1,9 @@
 # LLM: 能力包 v2 第 11 条的唯一执行入口：宿主用“已安装、按 sha 钉住、启用时经管理员确认”的包内原版检查程序检查交付物。
 #   成员字节只从安装 blob 读（PluginInstallStore.package_bytes 核整包 sha 与描述，read_plugin_member 核成员 sha），工作区副本一律不用；
 #   运行只经唯一沙箱入口 AttemptExecutionSandbox：断网、整根只读、只写本次临时目录；沙箱不可用就不跑，记 sandbox_unavailable。
-#   结果只认 stdout 的 pack_verifier_result.v1 结构化字段（valid、errors/warnings 的 code），不解释 message，不读模型自述。
+#   结果只认 stdout 的 pack_verifier_result.v1 结构化字段（valid、errors/warnings 的 code），不解释 message，不读模型自述；
+#   valid 必须与“errors 为空”一致，退出码不参与判定（只用来识别超时）。
+#   关联输入由调用方按包声明解析好再传入，这里只按声明顺序传声明过的参数名；必需输入缺失就不跑，记 verifier_input_unresolved。
 #   本模块不决定返工或展示，调用方（块 3）按 PackVerificationResult 入账、生成有界摘要。改动同步 test_pack_verifier_runner.py。
 # 模块用途: 在沙箱里运行能力包声明的检查程序，返回可入账的结构化检查事实。
 
@@ -17,7 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, SandboxUnavailableError
-from ..capability_verification_manifest import TARGET_PLACEHOLDER, VerifierDeclaration
+from ..capability_verification_manifest import (
+    TARGET_PLACEHOLDER,
+    VerifierDeclaration,
+    VerifierInput,
+)
 from ..capability_verifier_consent import verifier_consent_matches
 from ..plugin_content_activation import PluginContentActivation
 from ..plugin_install_store import PluginInstallStore
@@ -39,7 +45,8 @@ MAX_VERIFIER_SUMMARY_CODES_COUNT = 5
 _SANDBOX_TIMEOUT_RC = 143
 
 
-# LLM: 请求只带宿主已解析的结构化身份与绝对路径；target/baseline 必须是普通文件，由调用方按交付物声明挑出。
+# LLM: 请求只带宿主已解析的结构化身份与绝对路径；target 和 inputs 里的文件由调用方按交付物/输入声明挑出。
+#   inputs 是 (参数名, 路径) 对，只有包里声明过的参数名会被传给检查程序。
 # 类用途: 描述一次“用某个包的某个检查程序检查某个交付物”的宿主请求。
 @dataclass(frozen=True)
 class PackVerifierRequest:
@@ -48,11 +55,11 @@ class PackVerifierRequest:
     verifier_id: str
     target: Path
     workspace_root: Path
-    baseline: Path | None = None
+    inputs: tuple[tuple[str, Path], ...] = ()
 
 
 # LLM: 事实字段是入账的唯一来源；status 只有 passed/failed/not_run/error 四种，reason_code 说明 not_run/error 的结构化原因。
-#   计数按 code 聚合且有上限，不保存 message 或 location 正文。
+#   计数按 code 聚合且有上限，不保存 message 或 location 正文。inputs 每项记参数名、来源、是否必需、相对路径和 sha256（没找到时为空）。
 # 类用途: 保存一次宿主检查的结构化结果，并给出入账事实和有界摘要两种投影。
 @dataclass(frozen=True)
 class PackVerificationResult:
@@ -67,8 +74,7 @@ class PackVerificationResult:
     runtime: str = ""
     target: str = ""
     target_sha256: str = ""
-    baseline: str = ""
-    baseline_sha256: str = ""
+    inputs: tuple[dict, ...] = ()
     valid: bool | None = None
     returncode: int | None = None
     duration_ms: int = 0
@@ -77,7 +83,9 @@ class PackVerificationResult:
 
     # 函数用途: 生成写进运行事件和 channel_delivery 的完整结构化事实。
     def to_fact(self) -> dict:
-        return {key: (dict(value) if isinstance(value, dict) else value) for key, value in self.__dict__.items()}
+        fact = {key: (dict(value) if isinstance(value, dict) else value) for key, value in self.__dict__.items()}
+        fact["inputs"] = [dict(item) for item in self.inputs]
+        return fact
 
     # LLM: 只给通过/失败、错误与警告总数和前几条错误码；不含路径以外的正文，供写工具回执附带。
     # 函数用途: 生成有界的检查摘要。
@@ -104,6 +112,10 @@ def run_pack_verifier(request: PackVerifierRequest) -> PackVerificationResult:
     refusal = _refusal_reason(entry, verifier)
     if refusal:
         return PackVerificationResult(**base, status="not_run", reason_code=refusal)
+    base.update(inputs=tuple(_input_fact(item, path, request.workspace_root)
+                             for item, path in _provided_inputs(verifier, request)))
+    if any(item["required"] and not item["path"] for item in base["inputs"]):
+        return PackVerificationResult(**base, status="not_run", reason_code="verifier_input_unresolved")
     if not request.target.is_file():
         return PackVerificationResult(**base, status="error", reason_code="target_missing")
     try:
@@ -111,9 +123,6 @@ def run_pack_verifier(request: PackVerifierRequest) -> PackVerificationResult:
     except (PluginInstallationError, PluginPackageError, ValueError):
         return PackVerificationResult(**base, status="error", reason_code="verifier_member_mismatch")
     base.update(member_sha256=hashlib.sha256(member_bytes).hexdigest(), target_sha256=_file_sha256(request.target))
-    if request.baseline is not None:
-        base.update(baseline=_relative(request.baseline, request.workspace_root),
-                    baseline_sha256=_file_sha256(request.baseline))
     return _run_in_sandbox(request, verifier, member_bytes, base)
 
 
@@ -170,23 +179,44 @@ def _sandbox_spec(request: PackVerifierRequest, temp: Path) -> AttemptSandboxSpe
                               extra_write_roots=(temp,), read_only_root=True)
 
 
-# LLM: 解释器用宿主自身的 Python（-I -S：不读环境变量、不加 site），参数模板只替换唯一的 {target}，基线参数名来自包声明。
+# LLM: 解释器用宿主自身的 Python（-I -S：不读环境变量、不加 site），参数模板只替换唯一的 {target}，
+#   关联输入的参数名只来自包声明，按声明顺序追加，没找到的不传。
 # 函数用途: 组装在沙箱里运行检查程序的命令行。
 def _argv(script: Path, verifier: VerifierDeclaration, request: PackVerifierRequest) -> list[str]:
     args = [str(request.target) if arg == TARGET_PLACEHOLDER else arg for arg in verifier.args]
-    if request.baseline is not None and verifier.baseline is not None:
-        args.extend((verifier.baseline.flag, str(request.baseline)))
+    for item, path in _provided_inputs(verifier, request):
+        if path is not None:
+            args.extend((item.flag, str(path)))
     return [sys.executable, "-I", "-S", str(script), *args]
 
 
-# LLM: 只认 schema 与 valid 布尔，以及 errors/warnings 里每项的字符串 code；格式不对一律 verifier_output_invalid。
+# LLM: 只遍历包声明的输入；调用方多给的参数名直接忽略，不是普通文件的按没找到处理（返回 None）。
+# 函数用途: 把调用方解析好的输入按包声明顺序对齐。
+def _provided_inputs(verifier: VerifierDeclaration, request: PackVerifierRequest) -> list[tuple[VerifierInput, Path | None]]:
+    provided = dict(request.inputs)
+    pairs = []
+    for item in verifier.inputs:
+        path = provided.get(item.flag)
+        pairs.append((item, path if isinstance(path, Path) and path.is_file() else None))
+    return pairs
+
+
+# 函数用途: 生成一条关联输入的入账事实（没找到时路径和摘要为空）。
+def _input_fact(item: VerifierInput, path: Path | None, root: Path) -> dict:
+    return {"flag": item.flag, "source": item.source, "required": item.required,
+            "path": _relative(path, root) if path is not None else "",
+            "sha256": _file_sha256(path) if path is not None else ""}
+
+
+# LLM: 只认 schema 与 valid 布尔，以及 errors/warnings 里每项的字符串 code；valid 必须等于“没有错误”，
+#   自相矛盾（声称有效却带错误，或声称无效却没有错误）和格式不对一律 verifier_output_invalid。
 # 函数用途: 把检查程序 stdout 解析成结构化检查结果。
 def _parsed_result(stdout: str, base: dict) -> PackVerificationResult:
     payload = _json_object(stdout)
     if payload is None or payload.get("schema") != PACK_VERIFIER_RESULT_SCHEMA or type(payload.get("valid")) is not bool:
         return PackVerificationResult(**base, status="error", reason_code="verifier_output_invalid")
     errors, warnings = _code_counts(payload.get("errors", [])), _code_counts(payload.get("warnings", []))
-    if errors is None or warnings is None:
+    if errors is None or warnings is None or payload["valid"] != (not errors):
         return PackVerificationResult(**base, status="error", reason_code="verifier_output_invalid")
     return PackVerificationResult(**base, status="passed" if payload["valid"] else "failed", valid=payload["valid"],
                                   error_counts=errors, warning_counts=warnings)

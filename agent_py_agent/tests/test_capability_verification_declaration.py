@@ -26,7 +26,9 @@ VERIFICATION = {
                       "field_match": {"format": "json", "field": "schema", "equals": ["story_delivery.v1"]}}],
     "verifiers": [{"id": "check-delivery", "member": "scripts/check.py", "runtime": "python",
                    "applies_to": "delivery", "args": ["{target}", "--host-json"], "timeout_seconds": 20,
-                   "baseline": {"source": "input_same_deliverable", "flag": "--baseline-project"}}],
+                   "inputs": [{"flag": "--baseline-project", "source": "task_input", "path_patterns": ["**/*.json"],
+                               "required": False,
+                               "field_match": {"format": "json", "field": "schema", "equals": ["story_delivery.v1"]}}]}],
     "input_policy": "preserve_originals",
 }
 
@@ -67,7 +69,15 @@ def test_capability_declaration_rejects_unknown_keys(extra):
     lambda v: v["deliverables"][0].update(path_patterns=["a**b/x.json"]),
     lambda v: v["deliverables"][0]["field_match"].update(field="has space"),
     lambda v: v["deliverables"].append(dict(v["deliverables"][0])),
-    lambda v: v["verifiers"][0]["baseline"].update(flag="no-dash"),
+    lambda v: v["verifiers"][0]["inputs"][0].update(flag="no-dash"),
+    lambda v: v["verifiers"][0]["inputs"][0].update(required="yes"),
+    lambda v: v["verifiers"][0]["inputs"][0].update(path_patterns=["../up.json"]),
+    lambda v: v["verifiers"][0]["inputs"][0].update(extra=1),
+    lambda v: v["verifiers"][0]["inputs"].append(dict(v["verifiers"][0]["inputs"][0])),
+    lambda v: v["verifiers"][0].update(args=["{target}", "--baseline-project"]),
+    lambda v: v["verifiers"][0].update(inputs=[dict(v["verifiers"][0]["inputs"][0], flag=f"--in{index}")
+                                               for index in range(5)]),
+    lambda v: v["verifiers"][0].update(baseline={"source": "input_same_deliverable", "flag": "--b"}),
 ])
 def test_invalid_verification_shapes_are_rejected(mutate):
     payload = json.loads(json.dumps(VERIFICATION))
@@ -81,6 +91,7 @@ def test_unknown_runtime_format_and_policy_are_open_world_not_rejected():
     payload["verifiers"][0]["runtime"] = "node"
     payload["deliverables"][0]["field_match"]["format"] = "yaml"
     payload["input_policy"] = "future_policy"
+    payload["verifiers"][0]["inputs"][0]["source"] = "future_source"
     assert VerificationDeclaration.from_payload(payload).to_payload() == payload
 
 
@@ -105,8 +116,13 @@ def test_consent_details_code_and_mismatch_on_any_change():
     changed["verifiers"][0]["timeout_seconds"] = 21
     other = inspect_plugin_package(_with_verification(changed))
     assert not verifier_consent_matches(other.manifest, package.sha256, consent)
+    required = json.loads(json.dumps(VERIFICATION))
+    required["verifiers"][0]["inputs"][0]["required"] = True
+    assert not verifier_consent_matches(inspect_plugin_package(_with_verification(required)).manifest,
+                                        package.sha256, consent)
     message = verifier_confirmation_message({**details, "confirm_code": consent[:12]})
     assert "scripts/check.py" in message and f"--confirm {consent[:12]}" in message
+    assert "--baseline-project（任务开始时已有的文件）" in message
 
 
 def test_content_activation_without_consent_keeps_old_payload_and_identity():

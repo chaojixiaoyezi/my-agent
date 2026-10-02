@@ -1508,6 +1508,14 @@
       "description": "一个检查程序最多的固定参数个数（含 {target} 占位）。"
     },
     {
+      "name": "MAX_VERIFIER_INPUTS_COUNT",
+      "file": "agent_py_agent/agent/capability_verification_manifest.py",
+      "value": 4,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "一个检查程序最多声明的关联输入条数（输入原件、本回合另一份交付物等）；每条都要宿主找文件，必须有界。"
+    },
+    {
       "name": "MAX_VERIFIER_TIMEOUT_SECONDS",
       "file": "agent_py_agent/agent/capability_verification_manifest.py",
       "value": 120,

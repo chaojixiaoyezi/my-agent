@@ -49,23 +49,32 @@ WRITE = HEADER + (
     "except OSError:\n    ok = False\n"
     "print(json.dumps({'schema': 'pack_verifier_result.v1', 'valid': not ok, "
     "'errors': [{'code': 'target_dir_writable'}] if ok else []}))\n")
-BASELINE = HEADER + (
-    "ok = len(sys.argv) == 4 and sys.argv[2] == '--baseline-project' and open(sys.argv[3]).read() == 'old'\n"
-    "print(json.dumps({'schema': 'pack_verifier_result.v1', 'valid': ok}))\n")
+# 每个关联输入文件的内容写成它的参数名；检查程序核对内容，并把看到的参数按顺序报成警告码，供断言传参顺序。
+INPUTS = HEADER + (
+    "args = sys.argv[2:]\npairs = list(zip(args[::2], args[1::2]))\n"
+    "ok = len(args) % 2 == 0 and all(open(p).read() == f for f, p in pairs)\n"
+    "print(json.dumps({'schema': 'pack_verifier_result.v1', 'valid': ok, "
+    "'errors': [] if ok else [{'code': 'bad_input'}], "
+    "'warnings': [{'code': 'flag' + str(i) + f} for i, (f, p) in enumerate(pairs)]}))\n")
+DECLARED_INPUTS = [
+    {"flag": "--source", "source": "task_input", "path_patterns": ["**/*.json"], "required": True,
+     "field_match": {"format": "json", "field": "schema", "equals": ["source.v1"]}},
+    {"flag": "--handoff", "source": "turn_output", "path_patterns": ["**/*.json"], "required": False},
+]
 
 
-def _verification(args, runtime="python", baseline=False):
+def _verification(args, runtime="python", inputs=False):
     verifier = {"id": "check", "member": "scripts/check.py", "runtime": runtime, "applies_to": "delivery",
                 "args": args, "timeout_seconds": 2}
-    if baseline:
-        verifier["baseline"] = {"source": "input_same_deliverable", "flag": "--baseline-project"}
+    if inputs:
+        verifier["inputs"] = DECLARED_INPUTS
     return {"deliverables": [{"id": "delivery", "path_patterns": ["**/*.json"], "required": True}],
             "verifiers": [verifier]}
 
 
-def _installed(tmp_path, script, *, args=("{target}",), runtime="python", baseline=False, consent=True):
+def _installed(tmp_path, script, *, args=("{target}",), runtime="python", inputs=False, consent=True):
     def change(manifest):
-        manifest["capability"]["verification"] = _verification(list(args), runtime, baseline)
+        manifest["capability"]["verification"] = _verification(list(args), runtime, inputs)
     bundle = content_bundle(files={"CAPABILITY.md": b"# c\n", "scripts/check.py": script.encode()}, change=change)
     owner = resolve_owner_home(tmp_path / "home")
     store = PluginInstallStore(owner)
@@ -88,14 +97,15 @@ def _target(tmp_path, content='{"schema": "x"}'):
 
 
 def _run(tmp_path, script, **kwargs):
-    baseline_text = kwargs.pop("baseline_text", None)
+    provided = kwargs.pop("provided", ())
     owner, entry = _installed(tmp_path, script, **kwargs)
     workspace, target = _target(tmp_path)
-    baseline = None
-    if baseline_text is not None:
-        baseline = workspace / "inputs.json"
-        baseline.write_text(baseline_text)
-    return run_pack_verifier(PackVerifierRequest(owner, entry, "check", target, workspace, baseline)), target
+    inputs = []
+    for flag in provided:
+        path = workspace / f"{flag.strip('-')}.json"
+        path.write_text(flag)
+        inputs.append((flag, path))
+    return run_pack_verifier(PackVerifierRequest(owner, entry, "check", target, workspace, tuple(inputs))), target
 
 
 def _sandbox_ready(tmp_path) -> bool:
@@ -175,10 +185,35 @@ def test_target_directory_is_read_only(tmp_path, real_sandbox):
     assert not (target.parent / "pwn.txt").exists()
 
 
-def test_baseline_is_passed_with_declared_flag(tmp_path, real_sandbox):
-    result, _ = _run(tmp_path, BASELINE, baseline=True, baseline_text="old")
+@pytest.mark.parametrize("provided,seen", [
+    (("--evil", "--handoff", "--source"), {"flag0--source": 1, "flag1--handoff": 1}),
+    (("--source",), {"flag0--source": 1}),
+])
+def test_declared_inputs_are_passed_in_declaration_order_and_recorded(tmp_path, real_sandbox, provided, seen):
+    result, _ = _run(tmp_path, INPUTS, inputs=True, provided=provided)
     assert result.status == "passed", result
-    assert result.baseline == "inputs.json" and len(result.baseline_sha256) == 64
+    assert result.warning_counts == seen
+    facts = result.to_fact()["inputs"]
+    assert [item["flag"] for item in facts] == ["--source", "--handoff"]
+    assert facts[0]["path"] == "source.json" and len(facts[0]["sha256"]) == 64 and facts[0]["required"]
+    assert facts[1]["path"] == ("handoff.json" if "--handoff" in provided else "")
+
+
+def test_missing_required_input_is_not_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(AttemptExecutionSandbox, "run", lambda *a, **k: pytest.fail("must not run"))
+    result, _ = _run(tmp_path, INPUTS, inputs=True, provided=("--handoff",))
+    assert result.status == "not_run" and result.reason_code == "verifier_input_unresolved"
+    assert [item["path"] for item in result.to_fact()["inputs"]] == ["", "handoff.json"]
+
+
+def test_required_input_that_is_not_a_regular_file_counts_as_unresolved(tmp_path, monkeypatch):
+    monkeypatch.setattr(AttemptExecutionSandbox, "run", lambda *a, **k: pytest.fail("must not run"))
+    owner, entry = _installed(tmp_path, INPUTS, inputs=True)
+    workspace, target = _target(tmp_path)
+    (workspace / "folder.json").mkdir()
+    for path in (workspace / "folder.json", workspace / "gone.json"):
+        result = run_pack_verifier(PackVerifierRequest(owner, entry, "check", target, workspace, (("--source", path),)))
+        assert result.status == "not_run" and result.reason_code == "verifier_input_unresolved", path
 
 
 def test_workspace_copy_is_never_used(tmp_path, real_sandbox):
@@ -244,7 +279,6 @@ def test_network_isolation_unavailable_fails_closed_without_running(tmp_path, mo
     assert result.status == "not_run" and result.reason_code == "sandbox_unavailable"
 
 
-
 def test_output_contract_requires_schema_and_bounds_summary():
     from agent_py_agent.agent.capability.pack_verifier_runner import _parsed_result
 
@@ -254,6 +288,10 @@ def test_output_contract_requires_schema_and_bounds_summary():
     bad_item = _parsed_result(json.dumps({"schema": "pack_verifier_result.v1", "valid": False,
                                           "errors": [{"message": "no code"}]}), dict(base))
     assert bad_item.reason_code == "verifier_output_invalid"
+    for valid, errors in ((True, [{"code": "e"}]), (False, [])):
+        inconsistent = _parsed_result(json.dumps({"schema": "pack_verifier_result.v1", "valid": valid,
+                                                  "errors": errors}), dict(base))
+        assert inconsistent.reason_code == "verifier_output_invalid", (valid, errors)
     many = [{"code": f"e{index}"} for index in range(7)]
     result = _parsed_result(json.dumps({"schema": "pack_verifier_result.v1", "valid": False, "errors": many}), dict(base))
     assert result.status == "failed" and len(result.summary()["error_codes"]) == 5

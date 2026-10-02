@@ -12,7 +12,7 @@ import json
 CONSENT_KIND = "capability_verifiers"
 
 
-# LLM: 只收录声明和安装事实：包身份、每个检查程序的成员路径与 sha、运行方式、参数模板、超时、基线参数名；
+# LLM: 只收录声明和安装事实：包身份、每个检查程序的成员路径与 sha、运行方式、参数模板、超时、关联输入的完整声明；
 #   不含本机路径、用户信息或设置值。成员 sha 取包声明的 files，宿主运行时还会按安装 blob 复核。
 # 函数用途: 为一个声明了检查程序的内容包生成启用前确认内容。
 def verifier_confirmation_details(manifest, package_sha256: str) -> dict:
@@ -25,7 +25,7 @@ def verifier_confirmation_details(manifest, package_sha256: str) -> dict:
             "id": item.id, "member": item.member, "member_sha256": digests.get(item.member, ""),
             "runtime": item.runtime, "applies_to": item.applies_to, "args": list(item.args),
             "timeout_seconds": item.timeout_seconds,
-            "baseline_flag": item.baseline.flag if item.baseline is not None else "",
+            "inputs": [entry.to_payload() for entry in item.inputs],
         } for item in verification.verifiers],
     }
 
@@ -58,9 +58,20 @@ def verifier_confirmation_message(confirmation: dict) -> str:
              f"能力包：{confirmation.get('plugin_id')} {confirmation.get('version')}"
              f"（包摘要 {str(confirmation.get('package_sha256'))[:16]}…）"]
     for item in confirmation.get("verifiers") or []:
-        baseline = f"，对照原件参数 {item['baseline_flag']}" if item.get("baseline_flag") else ""
         lines.append(f"  - {item.get('id')}：用 {item.get('runtime')} 运行包内 {item.get('member')}"
                      f"（sha256 {str(item.get('member_sha256'))[:16]}…），参数 {' '.join(item.get('args') or [])}，"
-                     f"超时 {item.get('timeout_seconds')} 秒{baseline}")
+                     f"超时 {item.get('timeout_seconds')} 秒{_inputs_text(item.get('inputs') or [])}")
     lines.append(f"确认无误后输入：/plugins enable {confirmation.get('plugin_id')} --confirm {confirmation.get('confirm_code')}")
     return "\n".join(lines)
+
+
+# 来源名给人看的说明；不认识的来源原样显示，不参与机器判断。
+_INPUT_SOURCE_LABELS = {"task_input": "任务开始时已有的文件", "turn_output": "本回合写出的文件"}
+
+
+# LLM: 只把关联输入的参数名、来源和是否必需排成中文，给确认说明用；不参与机器判断。
+# 函数用途: 生成确认说明里“还会只读交给它哪些文件”的一段文字。
+def _inputs_text(inputs: list) -> str:
+    parts = [f"{entry.get('flag')}（{_INPUT_SOURCE_LABELS.get(entry.get('source'), entry.get('source'))}"
+             f"{'，必需' if entry.get('required') else ''}）" for entry in inputs]
+    return f"，另外只读交给它：{'、'.join(parts)}" if parts else ""

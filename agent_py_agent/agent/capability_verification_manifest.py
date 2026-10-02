@@ -23,10 +23,11 @@ MAX_VERIFIER_ARGS_COUNT = 16
 MAX_VERIFIER_TIMEOUT_SECONDS = 120
 # 单个模式、参数或取值的字节上限。
 MAX_VERIFICATION_TEXT_BYTES = 256
+# 一个检查程序最多声明的关联输入条数（输入原件、本回合另一份交付物等）；每条都要宿主找文件，必须有界。
+MAX_VERIFIER_INPUTS_COUNT = 4
 
 TARGET_PLACEHOLDER = "{target}"
 INPUT_POLICY_PRESERVE_ORIGINALS = "preserve_originals"
-BASELINE_FROM_INPUT_SAME_DELIVERABLE = "input_same_deliverable"
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,47}\Z")
 _TOKEN = re.compile(r"[a-z][a-z0-9_.-]{0,31}\Z")
 _FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
@@ -73,12 +74,7 @@ class DeliverableDeclaration:
     def __post_init__(self) -> None:
         if not _matches(_ID, self.id) or not isinstance(self.required, bool):
             raise ValueError("交付物声明无效")
-        if not isinstance(self.path_patterns, tuple) or not 1 <= len(self.path_patterns) <= MAX_DELIVERABLE_PATH_PATTERNS_COUNT:
-            raise ValueError("交付物路径模式无效")
-        for pattern in self.path_patterns:
-            _validate_path_pattern(pattern)
-        if self.field_match is not None and not isinstance(self.field_match, DeliverableFieldMatch):
-            raise ValueError("交付物字段匹配无效")
+        _validate_file_match(self.path_patterns, self.field_match)
 
     # 函数用途: 序列化；未声明字段匹配时省略该键。
     def to_payload(self) -> dict:
@@ -95,32 +91,44 @@ class DeliverableDeclaration:
         return cls(row["id"], _string_tuple(row["path_patterns"]), match, row["required"])
 
 
-# LLM: 基线只有一种开放来源名，宿主按名字找“本任务开始前就存在、且符合同一交付物声明的输入文件”；flag 是字面量参数名。
-#   来源名不认识时宿主不传基线，不拒绝安装。
-# 类用途: 描述检查程序可选的“对照原件”参数。
+# LLM: 检查程序除了 target 之外还要看的文件（输入原件、本回合写出的另一份交付物等），由宿主按结构化匹配找，不靠文件名语义。
+#   source 是开放字符串：task_input 指任务开始时已有的文件，turn_output 指本回合写出或改过的文件（不含 target 本身）；
+#   恰好匹配一个才算找到，0 个或多个都算找不到。宿主不认识的来源一律按找不到处理，不拒绝安装。
+#   required 的输入找不到时宿主不运行该检查程序（记 verifier_input_unresolved），非必需的找不到就不带这个参数。
+# 类用途: 描述检查程序的一条关联输入：用哪个参数名、从哪类文件里、按什么模式和字段找。
 @dataclass(frozen=True)
-class VerifierBaseline:
-    source: str
+class VerifierInput:
     flag: str
+    source: str
+    path_patterns: tuple[str, ...]
+    field_match: DeliverableFieldMatch | None = None
+    required: bool = False
 
-    # 函数用途: 校验来源名与参数名。
+    # 函数用途: 校验参数名、来源名、匹配模式和必需标记。
     def __post_init__(self) -> None:
-        if not _matches(_TOKEN, self.source) or not _matches(_FLAG, self.flag):
-            raise ValueError("检查程序基线声明无效")
+        if not _matches(_FLAG, self.flag) or not _matches(_TOKEN, self.source) or not isinstance(self.required, bool):
+            raise ValueError("检查程序输入声明无效")
+        _validate_file_match(self.path_patterns, self.field_match)
 
-    # 函数用途: 序列化为固定字段。
+    # 函数用途: 序列化；未声明字段匹配时省略该键。
     def to_payload(self) -> dict:
-        return {"source": self.source, "flag": self.flag}
+        payload = {"flag": self.flag, "source": self.source, "path_patterns": list(self.path_patterns),
+                   "required": self.required}
+        if self.field_match is not None:
+            payload["field_match"] = self.field_match.to_payload()
+        return payload
 
-    # 函数用途: 从包声明恢复基线声明。
+    # 函数用途: 从包声明恢复一条关联输入。
     @classmethod
-    def from_payload(cls, value: object) -> VerifierBaseline:
-        row = _exact(value, {"source", "flag"})
-        return cls(row["source"], row["flag"])
+    def from_payload(cls, value: object) -> VerifierInput:
+        row = _exact(value, {"flag", "source", "path_patterns", "required"}, optional={"field_match"})
+        match = DeliverableFieldMatch.from_payload(row["field_match"]) if "field_match" in row else None
+        return cls(row["flag"], row["source"], _string_tuple(row["path_patterns"]), match, row["required"])
 
 
 # LLM: member 必须是本包 files 里带 sha256 的成员（在 validate_verification_members 里核对），宿主只从安装 blob 取原件跑；
 #   args 里恰好一个 {target}，其余只能是不含花括号的字面量，模型和用户都不能注入参数。runtime 是开放字符串。
+#   inputs 的参数名互不相同，也不能和 args 里的字面量重名，避免同一参数被传两次。
 # 类用途: 描述一个可由宿主在沙箱里运行的包内检查程序。
 @dataclass(frozen=True)
 class VerifierDeclaration:
@@ -130,7 +138,7 @@ class VerifierDeclaration:
     applies_to: str
     args: tuple[str, ...]
     timeout_seconds: int
-    baseline: VerifierBaseline | None = None
+    inputs: tuple[VerifierInput, ...] = ()
 
     # 函数用途: 校验编号、成员路径、运行方式、参数模板与超时。
     def __post_init__(self) -> None:
@@ -146,24 +154,23 @@ class VerifierDeclaration:
         if (type(self.timeout_seconds) is not int
                 or not 1 <= self.timeout_seconds <= MAX_VERIFIER_TIMEOUT_SECONDS):
             raise ValueError("检查程序超时无效")
-        if self.baseline is not None and not isinstance(self.baseline, VerifierBaseline):
-            raise ValueError("检查程序基线声明无效")
+        _validate_inputs(self.inputs, self.args)
 
-    # 函数用途: 序列化；没有基线时省略该键。
+    # 函数用途: 序列化；没有关联输入时省略该键。
     def to_payload(self) -> dict:
         payload = {"id": self.id, "member": self.member, "runtime": self.runtime, "applies_to": self.applies_to,
                    "args": list(self.args), "timeout_seconds": self.timeout_seconds}
-        if self.baseline is not None:
-            payload["baseline"] = self.baseline.to_payload()
+        if self.inputs:
+            payload["inputs"] = [item.to_payload() for item in self.inputs]
         return payload
 
     # 函数用途: 从包声明恢复检查程序。
     @classmethod
     def from_payload(cls, value: object) -> VerifierDeclaration:
-        row = _exact(value, {"id", "member", "runtime", "applies_to", "args", "timeout_seconds"}, optional={"baseline"})
-        baseline = VerifierBaseline.from_payload(row["baseline"]) if "baseline" in row else None
+        row = _exact(value, {"id", "member", "runtime", "applies_to", "args", "timeout_seconds"}, optional={"inputs"})
+        inputs = tuple(VerifierInput.from_payload(item) for item in _list(row.get("inputs", [])))
         return cls(row["id"], row["member"], row["runtime"], row["applies_to"], _string_tuple(row["args"]),
-                   row["timeout_seconds"], baseline)
+                   row["timeout_seconds"], inputs)
 
 
 # LLM: 三类声明的容器；编号各自唯一，检查程序只能指向本包声明的交付物。input_policy 为空串表示不要求保留原件，
@@ -228,6 +235,28 @@ def validate_verification_members(verification: VerificationDeclaration, file_pa
     missing = [item.member for item in verification.verifiers if item.member not in file_paths]
     if missing:
         raise ValueError("检查程序引用了未声明的包文件")
+
+
+# LLM: 交付物和检查程序输入共用同一种“路径模式 + 可选字段匹配”，保证两处认文件的口径一致。
+# 函数用途: 校验路径模式元组和可选字段匹配。
+def _validate_file_match(path_patterns: object, field_match: object) -> None:
+    if not isinstance(path_patterns, tuple) or not 1 <= len(path_patterns) <= MAX_DELIVERABLE_PATH_PATTERNS_COUNT:
+        raise ValueError("交付物路径模式无效")
+    for pattern in path_patterns:
+        _validate_path_pattern(pattern)
+    if field_match is not None and not isinstance(field_match, DeliverableFieldMatch):
+        raise ValueError("交付物字段匹配无效")
+
+
+# LLM: 参数名唯一且不与 args 字面量重名；条数有上限。
+# 函数用途: 校验一个检查程序的关联输入列表。
+def _validate_inputs(inputs: object, args: tuple[str, ...]) -> None:
+    if (not isinstance(inputs, tuple) or len(inputs) > MAX_VERIFIER_INPUTS_COUNT
+            or any(not isinstance(item, VerifierInput) for item in inputs)):
+        raise ValueError("检查程序输入声明无效")
+    flags = [item.flag for item in inputs]
+    if len(set(flags)) != len(flags) or any(flag in args for flag in flags):
+        raise ValueError("检查程序输入参数名重复")
 
 
 # LLM: glob 只用于匹配工作区相对路径；拒绝绝对路径、反斜杠、.. 段和控制字符，** 只能整段出现。

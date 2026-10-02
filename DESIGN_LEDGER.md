@@ -40,7 +40,7 @@
   - IM `/status`：Gateway `_subagent_status` 把"异常"按 `runner_display_label` 细分（`ConversationTaskStatus.subagent_other_labels`），文字成"异常 3：宿主停机中断 2，失败 1"；没有异常时原文逐字不变。TUI 走 Gateway 时有界解析这项细分。
 - **验证**：见 TESTS.md 同名节。
 
-## 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条，2026-10-02，分支 `claude/ae-capability-packs-v2`，基于 `claude/3a-step17d` `81221a667`，已确认设计、实施中）
+## 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条，2026-10-02，块 1 已进 `claude/3a-step17e`，块 2 分支 `claude/ae-capability-packs-v2-b2` 基于 `2e5a36af0`，已确认设计、实施中）
 
 - **为什么做**：冻结重跑业务审阅只有 10/27。模型改写检查器后谎报“已验证”、就地改原输入、不交付，宿主都看不见；检查器也漏了占位、编造引用 ID、整理变改写等可以确定性查出的问题。
 - **设计**见 [CAPABILITY_PACKS_V2](docs/design/CAPABILITY_PACKS_V2.md)，三样通用机制都由包的结构化声明触发：
@@ -49,6 +49,7 @@
   - **交付存在**：缺失或打不开返工 2 次。
   - 开关 `capability_pack_host_verification_enabled` 仓库默认 false。
 - **块 2 已实现**：`capability/pack_verifier_runner.py`。它只从安装 blob 取钉住的原件，在 `AttemptExecutionSandbox` 里跑（断网、整根只读、只写临时目录），只认 `pack_verifier_result.v1`。`AttemptSandboxSpec.network_access=False` 在 macOS 补了 `(deny network*)`，就绪检查会实际试一次断网，失败就不跑。macOS 和 Linux 车道都实测过，车道要加 `NET_ADMIN` 才能真跑断网用例。
+- **声明协议调整（块 2 内，ae 定，待 3a 审）**：检查程序的 `baseline` 换成 `inputs` 列表（最多 4 条，每条 `{flag, source, path_patterns, field_match?, required}`）。起因是 be 对齐包内容时发现，A 的检查器要另一种 schema 的原文，B 要本回合写出的交接文件，只有一个同交付物基线不够用。来源 `task_input`/`turn_output` 是开放字符串，恰好匹配一个才算找到；必需的找不到就不跑（`verifier_input_unresolved`），非必需的找不到就不传。`valid` 必须等于“errors 为空”，退出码不参与判定。
 - **块 1 已实现**：
   - v7 可选块 `capability.verification`（交付物按路径模式加可选结构化字段识别，格式、运行方式、输入策略都是开放字符串）；
   - 声明了检查程序的包启用前要确认码，同意摘要写进内容激活，为空时旧记录与代次逐字节不变。

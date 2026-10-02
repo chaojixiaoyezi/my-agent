@@ -1,6 +1,6 @@
 # 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条）
 
-- **状态：已确认设计、实施中**（2026-10-02，3a 审定）。块 1 已实现，见第 7 节进度表。
+- **状态：已确认设计、实施中**（2026-10-02，3a 审定）。块 1、2 已实现，见第 7 节进度表。块 2 内把检查程序的 `baseline` 推广成 `inputs`（见第 2 节），由 ae 定、待 3a 审。
 - **依据**：用户第 10 条（“包要好好做，我很看重能力包”）和第 11 条（宿主证实包检查真跑过）。
 - **底子**：`c13-frozen-reruns-28435`，业务审阅 10/27（A 包 1/9、B 包 1/9、不该用包的 8/9）。17 次失败的逐条归因在证据目录 `capability-packs-v2-design/attribution.md`：
   - 宿主机制 5 次；
@@ -29,8 +29,9 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   "deliverables": [{"id": "delivery", "path_patterns": ["**/*.json"], "required": true,
                     "field_match": {"format": "json", "field": "schema", "equals": ["drama_text_delivery.v3"]}}],
   "verifiers": [{"id": "check-delivery", "member": "scripts/check_delivery.py", "runtime": "python",
-                 "applies_to": "delivery", "args": ["{target}", "--host-json"], "timeout_seconds": 20,
-                 "baseline": {"source": "input_same_deliverable", "flag": "--baseline-project"}}],
+                 "applies_to": "delivery", "args": ["--delivery", "{target}", "--host-json"], "timeout_seconds": 20,
+                 "inputs": [{"flag": "--source", "source": "task_input", "path_patterns": ["**/*.json"], "required": true,
+                             "field_match": {"format": "json", "field": "schema", "equals": ["drama_text_source.v1"]}}]}],
   "input_policy": "preserve_originals"
 }
 ```
@@ -45,12 +46,17 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - `args` 里恰好一个 `{target}`，其余只能是不含花括号的字面量；
   - 超时 1–120 秒；
   - `runtime` 是开放字符串，宿主不支持的只记 `unsupported_runtime`，不跑，也不拒绝安装。
-- **基线**：来源名 `input_same_deliverable` 指“本任务开始前就存在、且符合同一交付物声明的输入文件”，宿主找到唯一一个时才用声明的参数名把它交给检查程序。
+- **关联输入**（`inputs`，每个检查程序最多 4 条）：检查程序除了 target 还要看的文件，比如另一种 schema 的原文、本回合写出的交接文件、改动前的原件。
+  - 每条 `{flag, source, path_patterns, field_match?, required}`，匹配写法和交付物一样；参数名互不相同，也不能和 `args` 里的字面量重名。
+  - `source` 是开放字符串，宿主首期认两种：`task_input` 指任务开始时已有的文件，被就地改过时交宿主存的原件副本，没有副本就算找不到；`turn_output` 指本回合写出或改过的文件，不含 target 本身。不认识的来源按找不到处理，不拒绝安装。
+  - 恰好匹配一个才算找到，0 个或多个都算找不到。`required` 的找不到时不运行，记 `verifier_input_unresolved`，不返工，进事实和收尾通知；非必需的找不到时照跑，只是不带这个参数。
+  - 宿主只按声明顺序传声明过的参数名，调用方多给的一律不传。检查器需要的其它参数（例如要读懂交接内容才能拼出来的文件清单）宿主不拼，否则就成了专项合同。
+  - 改动缘由：be 对齐包内容时发现，A 的检查器要 `drama_text_source.v1` 原文，B 要本回合的 `handoff.v2`，原来只有一个“同交付物基线”不够用。
 - **输入策略**：开放字符串，宿主只执行 `preserve_originals`。
 - **启用前确认**（`agent/capability_verifier_consent.py`）：
-  - 声明了检查程序的包，`/plugins enable` 先返回确认回执（`kind=capability_verifiers`），列出每个检查程序的成员、sha256、运行方式、参数和超时；凭确认码才启用，和 v6 程序确认是同一条回执路径。
+  - 声明了检查程序的包，`/plugins enable` 先返回确认回执（`kind=capability_verifiers`），列出每个检查程序的成员、sha256、运行方式、参数、超时和关联输入；凭确认码才启用，和 v6 程序确认是同一条回执路径。
   - 确认内容的完整摘要写进 `PluginContentActivation.verifier_consent_sha256`；为空时不输出，旧记录和旧代次不变。
-  - 宿主运行前用 `verifier_consent_matches` 重算比对：包、成员摘要、参数、超时任何一项变了，旧同意就失效。
+  - 宿主运行前用 `verifier_consent_matches` 重算比对：包、成员摘要、参数、超时、关联输入任何一项变了，旧同意就失效。
   - 没声明检查程序的包，启用流程不变。
 
 ## 3. 宿主跑钉住的原版检查程序（块 2、3）
@@ -66,7 +72,11 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 宿主触发检查程序前先显式调用 `require_ready()`，不就绪时一个进程都不起。
   - 检查程序只由宿主触发，模型只看到结论摘要。插件管理工具对模型不可见，模型拿不到确认码。
 - **成员原件**：从已安装的包 blob 按 sha256 读出成员字节（`read_capability_member` 一类入口，核对激活代次），放进宿主临时目录，用宿主自己的 Python（`-I -S`）运行。工作区里的副本一律不用。
-- **输出合同**：stdout 是一个 JSON 对象，`schema=pack_verifier_result.v1`，内容 `{valid, errors[{code, location}], warnings[{code, location}], metrics}`。宿主只读 `valid`、code 和计数，不解释 message；格式不对记 `verifier_output_invalid`。
+- **输出合同**：stdout 是一个 JSON 对象（不超过 1 MB，日志写 stderr），`schema=pack_verifier_result.v1`，内容 `{valid, errors[{code, location}], warnings[{code, location}], metrics}`。
+  - 宿主只读 `valid`、code 和计数，不解释 message，也不读不存 `location`、`metrics`。code 是非空字符串，不超过 128 字符；不同 code 最多 64 个，超出的计入 `_other`。
+  - `valid` 必须等于“errors 为空”。自相矛盾、格式不对都记 `verifier_output_invalid`。
+  - 退出码不参与判定，只用来识别超时。检查器写出 v1 就退 0；目标坏了给 `valid=false` 加错误码，崩溃没写出 v1 时宿主记 `verifier_output_invalid`。
+  - 运行形态：宿主只把这一个成员拷进临时目录、改名后用 `python -I -S` 跑。检查器必须是单文件、只用标准库，不 import 包里其它文件，也不读包里的模板或资源。
 - **什么时候跑**（不新增工具）：
   - **写完就查**：钉住包的任务里，写工具写出声明的交付物后马上检查。写工具回执只附**有上限的摘要**：通过或失败、错误码计数、前几条错误码；全文进账本，不把工具结果撑大。
   - **收尾再查**：回合结束前，对本回合写过、改过的全部匹配交付物各跑一次，shell 写出来的也算。
@@ -74,7 +84,8 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 检查程序身份：包 ID、版本、整包 sha、成员路径和 sha、runtime；
   - 目标和基线：相对路径和 sha256；
   - 运行结果：rc、`valid`、各 code 计数、耗时；
-  - 原因码：`verifier_timeout`、`verifier_output_invalid`、`sandbox_unavailable`、`verifier_member_mismatch`、`verifier_consent_missing`、`unsupported_runtime`。
+  - 关联输入：每条的参数名、来源、是否必需、相对路径和 sha256（没找到时为空）；
+  - 原因码：`verifier_timeout`、`verifier_output_invalid`、`sandbox_unavailable`、`verifier_member_mismatch`、`verifier_consent_missing`、`unsupported_runtime`、`verifier_input_unresolved`。
   - 写进运行事件和 `channel_delivery.pack_verifications`。
 - **质量走返工，不前置硬拦**：收尾检查有错误时，返工提示 1 次；返工后仍有错误，照常结束并带收尾说明；只有警告不返工。
 - **结论来源**：最终的检查结论由宿主用 `HostNotice`（`source=pack_verification`）给出，模型自述不算事实。
@@ -116,7 +127,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 | 块 | 内容 | 状态 |
 | --- | --- | --- |
 | 1 | `verification` 声明与安装校验；启用前执行确认；同意摘要写入内容激活 | 已实现（`test_capability_verification_declaration.py`） |
-| 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测） | 已实现（`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
+| 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测）；`baseline` 推广成 `inputs` | 已实现（`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
 | 3 | 写完就查、收尾检查、返工、`HostNotice` 和 `channel_delivery` 事实、开关 | 待做 |
 | 4 | 输入基线、原件副本、收尾比对、返工 | 待做 |
 | 5 | 交付存在和返工 | 待做 |
