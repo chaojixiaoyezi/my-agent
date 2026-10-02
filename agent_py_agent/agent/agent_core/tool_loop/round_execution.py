@@ -1,4 +1,6 @@
 # LLM: 本模块执行一轮 canonical ToolCall；仅将连续段判定交给窄查询，审批、并发、取消与 provider 顺序记账仍由原链负责。
+#   每个未启动调用前的顺序屏障先读本进程模型调用准入是否已关（宿主停机，contracts.model_call_ledger）：关了就不再启动
+#   任何工具，当前及后续调用记成 HOST_SHUTDOWN_TOOL_NOT_STARTED（I3：停机后才到的迟到响应里的工具不执行）。
 # 模块用途: 装配实时调度事实并执行工具轮，隔离线程依赖、输出配对结果，用户拒绝后阻止相同调用重复弹框。
 
 from __future__ import annotations
@@ -14,6 +16,11 @@ from typing import ClassVar, Literal
 
 from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
+from ...contracts.model_call_ledger import (
+    MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
+    ModelCallAdmissionClosure,
+    model_call_admission_closure,
+)
 from ...contracts.required_actions import required_action_assessment_failed
 from ...contracts.tool_approval import (
     ToolApprovalDecision,
@@ -288,6 +295,10 @@ def _gate_all_calls_for_no_action(
     return False
 
 
+# LLM: 每个未启动调用（串行步或并行段开头）前的顺序屏障，按优先级：宿主停机关门 → 任务取消 → compact 延后；命中就把当前
+#   及后续未启动调用各配一条宿主结果并结束本轮，不留孤儿 ToolCall。停机只读结构化事实 model_call_admission_closure()，
+#   不看文本；关门发生在本轮中途时，已启动的调用照常收尾，只拦还没启动的。改动同步 test_late_response_tool_fence.py。
+# 函数用途: 判断从这个位置起的工具调用还能不能启动；不能就记好未执行结果并返回 True。
 def _defer_unstarted_calls_if_needed(
     request: ToolRoundExecutionRequest,
     calls: list[ToolCall],
@@ -296,6 +307,18 @@ def _defer_unstarted_calls_if_needed(
 ) -> bool:
     idx = position + 1
     call = calls[position]
+    closure = model_call_admission_closure()
+    if closure is not None:
+        _record_unstarted_calls(
+            request,
+            calls,
+            start_idx=idx,
+            result_factory=partial(_host_shutdown_result, closure=closure),
+            phase="interrupted",
+            status="停机中断",
+        )
+        progress.deferred_reason = "宿主正在停机，本进程已不再接新的模型调用和工具调用"
+        return True
     # 取消是顺序屏障：当前及后续未启动调用都得到 cancelled 结果，不能留下孤儿 ToolCall。
     if _round_cancelled(request):
         _record_unstarted_calls(
@@ -980,6 +1003,26 @@ def _interrupted_result(call: ToolCall) -> ToolResult:
         error_code="CANCELLED",
         failure_stage="runtime_gate",
         facts=ToolFailureFacts(status="cancelled"),
+    )
+
+
+# LLM: 宿主停机关门后没启动的调用（I3）：handler 不执行、effect_outcome=not_started、状态按取消屏障同口径记 cancelled；
+#   metadata.host_shutdown 带关门原因（reason_code/error_type 与模型调用账本把在途调用结清成 failed 时用的是同一份
+#   ModelCallAdmissionClosure），准入拒绝的固定码另记 admission_error_code。正文只给模型看，不参与任何判断。
+# 函数用途: 给停机后没启动的工具调用一条“宿主停机、未执行、无副作用”的结构化结果。
+def _host_shutdown_result(call: ToolCall, *, closure: ModelCallAdmissionClosure) -> ToolResult:
+    payload = json.dumps(
+        {"error": "宿主正在停机，本工具未执行，没有任何副作用。", "hint": "不要再发起新动作；重启后按当前状态重新判断是否还需要。"},
+        ensure_ascii=False,
+    )
+    shutdown = {"reason_code": closure.error_code, "error_type": closure.error_type,
+                "admission_error_code": MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE}
+    return ToolResult.failed(
+        call,
+        payload,
+        error_code="HOST_SHUTDOWN_TOOL_NOT_STARTED",
+        failure_stage="runtime_gate",
+        facts=ToolFailureFacts(status="cancelled", metadata={"host_shutdown": shutdown}),
     )
 
 

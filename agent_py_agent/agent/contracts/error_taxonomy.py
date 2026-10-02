@@ -2217,6 +2217,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "（仍有持久工作的 Audit 来源保持 PENDING，重启后照常接续）。"
         ),
     ),
+    "HOST_SHUTDOWN_TOOL_NOT_STARTED": ErrorContract(
+        code="HOST_SHUTDOWN_TOOL_NOT_STARTED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "宿主（Gateway）正在停机，本进程已关闭模型调用准入；这条工具调用排在关门之后（例如停机后才收到的模型响应里的调用），"
+            "宿主没有执行它，没有任何副作用，不是工具失败。本进程里不要再发起动作；重启后如果还需要，按当前状态重新判断再调用。"
+        ),
+    ),
     "EMBEDDING_HOST_DIFFERS": ErrorContract(
         code="EMBEDDING_HOST_DIFFERS",
         category="permission",
