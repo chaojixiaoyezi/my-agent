@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 832,
+  "count": 831,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1090,14 +1090,6 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "检查程序 stdout 的字节上限；超过即判输出无效，防止异常程序把账本撑大。"
-    },
-    {
-      "name": "_SANDBOX_TIMEOUT_RC",
-      "file": "agent_py_agent/agent/capability/pack_verifier_runner.py",
-      "value": 143,
-      "unit": "",
-      "category": "超时",
-      "description": "沙箱超时回收后返回的退出码（AttemptExecutionSandbox.run 的 TERM→KILL 约定）。"
     },
     {
       "name": "_DEFAULT_TTL_SECONDS",

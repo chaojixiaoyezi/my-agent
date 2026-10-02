@@ -42,7 +42,7 @@ MAX_VERIFIER_DISTINCT_CODES_COUNT = 64
 # 有界摘要里列出的前几条错误码个数（写工具回执只附这么多）。
 MAX_VERIFIER_SUMMARY_CODES_COUNT = 5
 # 沙箱超时回收后返回的退出码（AttemptExecutionSandbox.run 的 TERM→KILL 约定）。
-_SANDBOX_TIMEOUT_RC = 143
+_SANDBOX_TIMEOUT_EXIT_CODE = 143
 
 
 # LLM: 请求只带宿主已解析的结构化身份与绝对路径；target 和 inputs 里的文件由调用方按交付物/输入声明挑出。
@@ -166,7 +166,7 @@ def _run_in_sandbox(request: PackVerifierRequest, verifier: VerifierDeclaration,
     finally:
         shutil.rmtree(temp, ignore_errors=True)
     base.update(returncode=completed.returncode, duration_ms=int(elapsed * 1000))
-    if completed.returncode == _SANDBOX_TIMEOUT_RC and elapsed >= verifier.timeout_seconds:
+    if completed.returncode == _SANDBOX_TIMEOUT_EXIT_CODE and elapsed >= verifier.timeout_seconds:
         return PackVerificationResult(**base, status="error", reason_code="verifier_timeout")
     return _parsed_result(completed.stdout or "", base)
 
