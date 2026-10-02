@@ -15,6 +15,12 @@ J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`�
 - IM 仍走原 watcher/DeliveryService，无新线程、通道或通知账；沿原“提交即已读”与原队列失败口径。
 - 111 项聚焦、166 项守卫与三项变异有本地证据；真实终端/飞书收信未验证，详细命令和风险见 TESTS 的 J6 节。
 
+C10（2026-10-01，sol，本地实现，待集成）：飞书、QQ 等 IM 的 `/plugins` 与 `/plugins@<插件ID>` 已进入
+会话控制，`/ask`、`/control` 先记原持久控制回执，不再走无回执的提前插件分路。执行复用 TUI 的
+`plugin_command_service` / `PluginManagement`；IM 的管理员资格照 `/settings` 取可信解析 owner，
+不从正文取得角色。错误码保留在结构字段和纯文本；可执行程序启用沿原预览、`--confirm`，不另开审批通道。
+定向 155 项与三个独立变异已验，真实 IM 收发未验证；命令重放及边界见结构文档与 TESTS。
+
 `/effort` 查看回执列出可选档位（分支 `claude/3a-effort-picker`，2026-09-30）：`control_service._execute_effort_control` 在查看
 （operation=view）时于回执末尾追加 `reasoning_control.describe_level_choices()` 一行（可选档位与“/effort 加档位只改本会话、
 /effort default 回到全局默认”），设置/检测/撤销回执不变。TUI 单独 `/effort` 改由本地档位菜单（`cli/chat_parts/tui_effort_menu.py`）

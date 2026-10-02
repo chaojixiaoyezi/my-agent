@@ -442,7 +442,7 @@ agent_py_agent/
 |   |   |-- child_recovery.py           # /recover 子代理分支：按线程列出未关 TaskRun 里 unknown 子代理执行轮；事务内复核后显式恢复
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
-|   |   |-- plugin_command_service.py  # 原管理员授权、可信 owner 目录与插件 HTTP 命令入口
+|   |   |-- plugin_command_service.py  # TUI HTTP 与 IM 会话共用插件服务、可信 owner 目录和管理员授权
 |   |   |-- plugin_panels_http.py      # /client/plugin-panels：作用域解析、只读活动投影与展示服务调用
 |   |   |-- command_stream_protocol.py # 命令有界消息、规范 owner 握手与原审批路径
 |   |   |-- command_stream.py          # 原 HTTP 线程执行、审批运输和断连取消
@@ -789,6 +789,7 @@ agent_py_agent/
 |   |-- test_value_display_parity.py   # 回显值文字一致：8 种值（False/0/True/None/空串/空列表/空映射/凭据）在 user_config 查看/搜索/改参回执、/settings show、config get 下显示相同，聊天空值显示“（空）”，走不到的格子核对原因
 |   |-- test_parameter_changes.py      # 参数中心写入：按类型写入并真正生效、拒绝不改文件、回读不一致回滚、记录与回滚链、user_config 工具
 |   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、常用/全部两种视图、完整修改与回滚流程
+|   |-- test_plugins_chat_control.py   # IM 插件公共解析、共享服务、权限错误码、启用确认和持久控制重放
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置
 |   |-- test_merged_config_knobs.py    # 参数减量第 2 批：11 组合并后的单一旋钮语义（空/0/数字）、旧键只告警不转值、随包 YAML 与默认值一致
 |   |-- test_param_reduction_e_group.py # 参数减量第 3 批 E 组：14 个内部参数降为常量（值不变）、旧键只告警、注册表用常量、模型可见提示不再指向已删的键
@@ -1322,7 +1323,9 @@ docs/
 ### 关键文件说明
 
 - `docs/guides/MODEL_GUIDE.md`：给用户的模型管理使用说明，覆盖新增（含 ChatGPT 订阅登录勾选）、切换与默认、`/effort` 智能程度、删除、管理员共享与初始模型、派子代理选模与 `manage_models` 对话式管理。
-- `docs/guides/CAPABILITY_PACK_GUIDE.md`：给用户的能力包使用说明，覆盖装/启用/停用/更新/回退/卸载（`/plugins`，IM 暂不支持）、按任务发现与使用、版本固定、派子代理授权、自制包与安全边界。
+- `docs/guides/CAPABILITY_PACK_GUIDE.md`：给用户的能力包使用说明，覆盖装/启用/停用/更新/回退/卸载（TUI、IM 的 `/plugins`，管理仅管理员）、按任务发现与使用、版本固定、派子代理授权、自制包与安全边界。
+- `agent_py_agent/tests/test_plugins_chat_control.py`：IM 与 TUI 的共享插件服务回归；用假渠道及真实持久回执核对路由、原参数、管理员权限、文本错误码和非 Python 启用预览，不替代真实 IM 收发验收。
+- `docs/tasks/C10_IM_PLUGINS_HANDOFF.md`：C10 的文件范围、开发测试、独立变异、未验证边界与集成复查入口。
 - `docs/design/COMPACT_GENERATION_FACTS.md`：摘要来源与请求关联的交接设计，明确旧检查点未知和诊断不参与恢复权威。
 - `agent_py_agent/agent/capability/task_references.py`：连接原任务 pins、授权 grants 和调度引用，不另建状态库。
 - `agent_py_agent/agent/capability/package_read.py`：原工具与宿主共用准确原字节、分页、来源与任务pin。

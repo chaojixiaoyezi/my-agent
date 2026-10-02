@@ -21,7 +21,7 @@
 
 ## 二、怎么装、启用、停用、更新、回退、卸载
 
-所有操作都通过 `/plugins` 命令（**目前只能在 TUI 终端里用；IM 暂不支持，请在 TUI 里操作**）。命令形式：`/plugins install <本地包路径>` 这类，完整动作如下：
+所有操作都通过 `/plugins` 命令（**TUI 终端与飞书等 IM 共用同一个插件服务；查看按当前用户权限，安装、配置、启停、更新和卸载仅管理员**）。在 IM 私聊中管理前，先通过已有的 `/admin` 验证管理员身份；群聊或正文里声称自己是管理员不会获得权限。命令形式：`/plugins install <本地包路径>` 这类，完整动作如下：
 
 | 动作 | 做什么 | 注意 |
 | --- | --- | --- |
@@ -35,7 +35,9 @@
 | `/plugins status <请求编号>` | 查询一次管理请求的结果 | 网络/后台请求不确定时用它查 |
 | `/plugins list` / `info` / `help` | 查看 | 列出已安装、看说明、看动作参数 |
 
-小例子：你拿到一个能力包文件 `report-pack.zip`，在 TUI 里 `/plugins install report-pack.zip` → 看到安装成功但默认停用 → `/plugins enable report-pack` → 它开始可用。想换新版就 `/plugins update report-pack report-pack-v2.zip`；想退回旧版就拿旧包再 update 一次。
+小例子：你拿到一个能力包文件 `report-pack.zip`，管理员在 TUI 或已绑定管理员的 IM 私聊里 `/plugins install report-pack.zip` → 看到安装成功但默认停用 → `/plugins enable report-pack` → 按回执核对启用结果。想换新版就 `/plugins update report-pack report-pack-v2.zip`；想退回旧版就拿旧包再 update 一次。路径是宿主机器上已有且获准访问的本地路径，不是 IM 附件自动下载地址。
+
+插件包若带可执行文件或使用外部解释器，首次启用只给程序、文件摘要、解释器与风险预览，**不会启动程序**；用户本人核对后原样发送回执里的 `/plugins enable <插件ID> --confirm <确认码>`。包内容、平台或解释器变化后旧码失效。TUI 和 IM 使用同一确认规则；普通工具审批仍受现有权限和确认通道限制，纯文本 IM 不提供 TUI 本地插件面板。
 
 注意：
 - 更新不是无缝热升级：旧任务不会在停用后悄悄改用新版。
@@ -145,7 +147,7 @@ python3 scripts/build_capability_package.py \
 - **为什么装了包却没反应？** 安装后**默认停用**，先 `/plugins enable <包ID>` 启用；另外推荐开关要开着（默认开），并且是"新任务"才会按包做。
 - **为什么旧任务还用旧版本？** 任务开始后版本被固定，换代/停用不影响已开始的任务；新任务才用新版本。
 - **为什么 my-agent 说这个包不可用？** 包被停用、卸载或版本被换后，旧任务里的引用会标记为不可用，不会偷偷换成别的包。
-- **IM 里能不能管能力包？** 目前不行——`/plugins` 只在 TUI 里可用，IM 暂不支持，请在 TUI 里操作。
+- **IM 里能不能管能力包？** 可以发 `/plugins` 查看和查询；安装、启停、配置、更新、卸载只允许已验证的管理员。`/plugins@<插件ID> [动作]` 也走同一插件服务，按原业务权限裁决并回纯文本；被拒会带错误码。源码入口于 2026-10-01 接通，真实渠道收发仍需部署后验收。
 - **子代理说 skill_search 报 SKILL_SNAPSHOT_UNAVAILABLE？** 说明它没拿到这个包的授权：要么父级派工时的 `allowed_skills` 没传 `capability:<包ID>`，要么它申请后还没被批准。让父级在派工参数里授权，或让子代理走 `capability_request` 申请、父级 `resolve_capability_requests` 批准后再读。
 - **父级拒绝能力申请会怎样？** 确定拒绝并带错误码：写目录越界是 `PATH_OUTSIDE_WORKSPACE`，工具/Skill 超出父级是 `MISSING_CAPABILITY`，裁决异常是 `TOOL_ERROR`；不会记成"结果未知"。子代理按拒绝原因调整方案即可。
 - **界面和我看到的不一样？** 以实际界面为准；这份说明按 2026-10-01 的 `/plugins` 动作和真实运行观察编写。

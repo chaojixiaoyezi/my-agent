@@ -169,6 +169,67 @@ $PY -m pytest agent_py_agent/tests/test_decision_experiment_notice.py \
   -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/j6-focused.xml
 $PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) \
   -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 --junitxml=tmp/j6-guards.xml
+
+## C10：IM 共用 /plugins 服务（2026-10-01，sol）
+
+- **来源**：三线收尾 C10，基于 main `34e4d874e`，分支 `worker/sol-im-plugins`；IM 缺插件入口。
+- **做法**：会话只保留公共命名空间和原文，`/ask`、`/control` 共用原持久控制回执，
+  IM/TUI 共用 `PluginManagement` 和目录/解析/工具/确认流程；IM 管理员照 `/settings` 的可信 owner。
+- **新测试**：`test_plugins_chat_control.py` 核对假渠道与服务调用的原参数、六类非管理员修改拒绝且双重保留错误码、
+  TUI/IM 同动作文本、原启用预览与错误确认码都不启动程序、HTTP 持久回执只执行一次、未知结果不重试。
+  原命名空间测试改为专用插件控制（仍不进聊天/stop）；旧 HTTP 用例区分独立目录入口与持久会话入口。
+- **红测**：实现前新文件失败在 `unsupported != plugins` 和 HTTP 未进入持久分派，不是导入失败。
+  中途一致性测试暴露业务拒绝文本含请求编号却结构编号为空，IM 投影已保留本次原编号。
+
+所有命令在指定工作树根运行，只用给定 CI Python；`-o addopts=''` 仅避免仓库默认双重 quiet 隐藏汇总。
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_plugins_chat_control.py \
+  agent_py_agent/tests/test_conversation_control_commands.py \
+  agent_py_agent/tests/test_plugin_management.py \
+  agent_py_agent/tests/test_plugin_command_client.py \
+  agent_py_agent/tests/test_gateway_plugin_management.py \
+  agent_py_agent/tests/test_settings_chat_control.py \
+  agent_py_agent/tests/test_gateway_plugin_commands.py::test_all_http_command_entries_keep_invalid_and_stale_input_out_of_task_queue \
+  agent_py_agent/tests/test_gateway_plugin_commands.py::test_cold_owner_directory_uses_host_identity_without_loading_agent_or_state \
+  agent_py_agent/tests/test_gateway_plugin_commands.py::test_source_authentication_precedes_body_and_catalog_access \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol -o addopts=''
+```
+
+结果：**155 passed**，变异恢复后同组再次 155 passed；不相加。未运行会启动 HTTP Server 的旧真实 Gateway 用例，
+不是为了变绿而跳过断言：本轮禁止启停 Gateway；真实持久控制函数用隔离临时 owner 和假 handler 验证。
+
+### 独立变异（逐个修改、逐个恢复）
+
+均用上面相同 Python/环境和 pytest 参数，只把测试目标换成下表的精确用例。
+
+| 变异 | 临时改动 | 测试目标（均在 test_plugins_chat_control.py） | 结果 |
+| --- | --- | --- | --- |
+| M1 | `_scope_management` 将 IM `is_admin` 强置 True | `test_non_admin_mutations_are_rejected_with_visible_and_structured_code` | 6 failed，被抓到：错误权限码改变，remove 还错误返回成功 |
+| M2 | `control_service` 的 plugins 分派不调服务，直接回成功 | `test_http_control_receipt_replays_plugin_text_without_resubmitting` | 2 failed，被抓到：真实服务调用次数 0，不是 1 |
+| M3 | IM 投影把 `error_code` 置空（文本仍带码） | `test_non_admin_mutations_are_rejected_with_visible_and_structured_code` | 6 failed，被抓到：结构化码丢失 |
+
+恢复后 SHA256 与变异前相同：`gateway_parts/plugin_command_service.py` 为
+`3af7013b9f8aef5fb9fb6a9aa9b396f0309b1c764946bfa05214790a3442c483`，
+`gateway_parts/control_service.py` 为 `6ed153c78ca1cc5840a8e1b431df4c1fb1b7f932aed2a9ec60edc802a488ec20`。
+
+### 架构与收尾门禁
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_architecture_guardrails.py \
+  agent_py_agent/tests/test_config_field_readers.py \
+  agent_py_agent/tests/test_constant_names_unique.py \
+  agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+  agent_py_agent/tests/test_parameter_registry.py \
+  agent_py_agent/tests/test_recovery_actions.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+  agent_py_agent/tests/test_subagent_config_inheritance.py \
+  agent_py_agent/tests/test_packaging.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol -o addopts=''
 $PY scripts/check_import_boundaries.py
 $PY -m ruff check agent_py_agent scripts
 $PY scripts/check_doc_sync.py
@@ -200,6 +261,16 @@ $PY scripts/check_clean_package.py .
 - **变异 4/4**：把冲突阈值由 2 改成 3、清空 ActionPolicy 的结构化 details、停止剥离 provider 宿主扩展、禁用模型可见互斥渲染，四项各自均被对应测试抓住；每项之后恢复正式实现。
 - **真实模型边界**：本轮明确禁止启动 Gateway 和运行 `my-agent`，因此这里只验证仓库内真实 ToolExecutor→ToolResult→`render_for_model_prompt()` 链路；真实模型是否据此恢复 source_ref 调用尚未验证。
 - **严格门禁**：最终版本上，8 个直接相关测试文件与 `guards9.txt` 的 10 个架构／打包守卫分别退出 0；`check_import_boundaries.py` 为 0 条，Ruff、doc sync、`git diff --check`、clean-package 全部通过。strict code-size 首次准确拦住 `_render_validation_issues` 新增的第三层嵌套，拆成单条 issue 渲染函数后重跑为 `hard=0`、`blocked=False`，随后还原 `CODE_SIZE_REPORT.md`。没有新增配置或重要文件。
+
+- guards9 的全部十份文件（含 packaging）：**166 passed**。
+- 导入边界：**findings=0**；全范围 Ruff：**All checks passed**（中途三处测试导入格式失败已修正）。
+- 严格尺寸：**hard=0，blocked=False**；存在基线内的风险/软提示，不代表仓库零提示，基线未改，生成报告已还原。
+- 文档同步：**DOC_SYNC_PASS**；工作树与暂存 diff 检查通过；clean-package：**未发现发布阻塞项**。
+  首次 clean-package 因新增测试尚未 git add 报 UNTRACKED_FILE，正常纳入交付索引后同一入口通过，没有删除测试规避。
+- 未新增配置项、未删除/skip/xfail 有效测试；尺寸报告不提交。
+- **未验证**：真实 IM 平台投递、真实管理员绑定、完整可执行插件正确码后的 IM 启动/释放和危险业务审批。
+  原 `--confirm` 运输已复用，不自创额外确认通道；普通工具审批运输和 TUI 本地面板不是这组纯文本测试的覆盖。
+  没有启动/停止 Gateway、my-agent 命令、联网安装依赖或读取真实会话/记忆正文；线上 CI 未作为验收来源。
 
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 

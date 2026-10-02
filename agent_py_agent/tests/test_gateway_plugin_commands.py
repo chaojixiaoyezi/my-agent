@@ -71,11 +71,16 @@ def test_cold_owner_directory_uses_host_identity_without_loading_agent_or_state(
 def test_all_http_command_entries_keep_invalid_and_stale_input_out_of_task_queue(
     host, monkeypatch, entry
 ):
-    monkeypatch.setattr(
-        http_handlers,
-        "_handle_persistent_control_operation",
-        Mock(side_effect=AssertionError("禁止旧控制分派")),
+    # /client/plugins 保留目录版本合同；/ask 与 /control 现在走同一持久会话控制，不能进模型队列。
+    from agent_py_agent.agent.gateway_parts.control_service import (
+        execute_gateway_conversation_control,
     )
+
+    def persistent(handler, server, **kwargs):
+        result = execute_gateway_conversation_control(server.agent, None, kwargs["command"], kwargs["scope"])
+        handler._send_json(200, result.to_dict())
+
+    monkeypatch.setattr(http_handlers, "_handle_persistent_control_operation", persistent)
     snapshot = catalog(host)
     texts = [
         ("/plugins help install", "", True, None),
@@ -105,9 +110,13 @@ def test_all_http_command_entries_keep_invalid_and_stale_input_out_of_task_queue
             http_handlers.handle_control(handler, host)
         assert handler.reply[0] == 200
         result = handler.reply[1]
-        assert result["ok"] is ok and result.get("error_code") == error
-        assert result["request_id"] == ""
-        assert result["catalog"] == snapshot.to_payload()
+        # 会话输入没有客户端目录握手；宿主使用本次目录，旧客户端版本仅在 /client/plugins 校验。
+        expected_ok, expected_error = (True, None) if entry != "catalog" and revision == "old-revision" else (ok, error)
+        assert result["ok"] is expected_ok and result.get("error_code") == expected_error
+        if entry == "catalog":
+            assert result["request_id"] == "" and result["catalog"] == snapshot.to_payload()
+        else:
+            assert result["kind"] == "plugins" and isinstance(result["message"], str)
 
 
 def test_cross_owner_revision_is_rejected_and_cannot_authorize_another_owner(host):

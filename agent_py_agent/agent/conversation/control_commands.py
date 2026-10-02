@@ -1,4 +1,4 @@
-# LLM: 会话控制保留原类型、参数语义和回执格式；词法声明读取公共目录，插件不可进入旧控制执行器。
+# LLM: 会话控制保留原类型、参数语义和回执格式；插件只保留公共命名空间和原输入，参数与执行归共享插件服务。
 # /experiment 与 /audit 准备轮同为任务命令：参数冻结进 system_task，只有任务正文进入模型。
 # /admin、/approve 的密码只在 command.value 中，任何持久化之前经 persisted_control_command_text 脱敏。
 # 模块用途: 将明确命令解释为会话控制或任务，供终端与 IM 共用，普通语言不获得控制权。
@@ -17,7 +17,7 @@ from ..command_catalog import (
     system_slash_command_name,
     unavailable_command_message,
 )
-from ..plugin_commands import plugin_command_response
+from ..plugin_commands import plugin_namespace
 from ..runtime_db.operations import ATTEMPT_EFFECT_DISPOSITIONS
 from .authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
@@ -47,6 +47,7 @@ ControlKind = Literal[
     "deny",
     "skills",
     "settings",
+    "plugins",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -182,7 +183,7 @@ def parse_conversation_control(
     return command if isinstance(command, ConversationControlCommand) else None
 
 
-# LLM: 名称和正文读取公共声明；插件实际入口另行消费其只读回执，此控制解析器仍拒绝插件，不能执行旧 stop 分支。
+# LLM: 名称和正文读取公共声明；插件仅以原文本进入专用控制分派，不能在这里重写参数、执行 stop 或退入模型。
 #   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
 # /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
@@ -193,6 +194,8 @@ def parse_conversation_command(
     reject_unknown_slash: bool = False,
 ) -> ConversationCommand | None:
     raw = str(text or "").strip()
+    if plugin_namespace(raw) is not None:
+        return ConversationControlCommand("plugins", value=raw)
     name, trailing = match_conversation_command(raw) or ("", None)
     if name == "status":
         return _argumentless_command("status", trailing, "/status")
@@ -257,12 +260,11 @@ def parse_conversation_command(
     if raw.lower().startswith("/effort"):
         return ConversationControlCommand("effort", valid=False, usage=_EFFORT_USAGE)
     if reject_unknown_slash and (name := system_slash_command_name(raw)):
-        plugin_result = plugin_command_response(raw)
         return ConversationControlCommand(
             "unsupported",
             operation=name,
             valid=False,
-            usage=str(plugin_result["message"]) if plugin_result else unavailable_command_message(name),
+            usage=unavailable_command_message(name),
         )
     return None
 

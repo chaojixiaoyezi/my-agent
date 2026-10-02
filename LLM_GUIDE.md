@@ -1,5 +1,10 @@
 # LLM_GUIDE
 
+C10（2026-10-01，sol，本地实现、待集成）：IM 的 `/plugins` 和 `/plugins@<插件ID>` 已复用 TUI
+插件服务；管理仅可信管理员，含可执行程序的启用保留原预览与 `--confirm`。定向 155 项、架构守卫
+166 项、导入边界零条与三个变异已验；真实 IM 收发未验证。本轮没有新配置、Gateway 启停或部署。
+后续由集成者核对组合后在真实普通用户、管理员私聊和群聊验收；详见 TESTS 与 Gateway 模块文档。
+
 当前能力包验收：固定 27 次执行完成，业务 16/27、原资源执行 12/18；原失败保持，Goal active。归因文档已到 3fd3cff4c，当前十二步骤与七组完整缺项见[唯一 TODO](docs/tasks/CAPABILITY_INTERNALIZATION_GOAL.md#唯一-todo)及[收口审计](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。Mac 两版记录已核，Linux 两版未部署；容器源码测试不代替 wheel 发布。C22 的 65536 只证明机制，历史较大窗口提交不能补算当前能力包生产规模。建议下一步先由 Claude 集成缺项文档；只读可并行，产品／发布归 Claude，私有运行归 root，本轮不新开真实模型或 owner 用例。
 
 以下阶段记录保留原时点，其“0/27／待开始”不覆盖当前结果。

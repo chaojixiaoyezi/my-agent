@@ -181,6 +181,17 @@
 - **验证边界**：声明解析、单组和多组冲突、无冲突、provider 投影、真实 write_file schema、handler 未执行及模型可见结果已有仓库测试和变异覆盖。本分支按任务约束没有启动 Gateway 或运行真实模型，改善真实模型恢复行为仍待后续复测。
 - **验证**：见 TESTS.md 同名节。
 
+## C10：IM 的 /plugins 入口（2026-10-01，sol，已实现，本地定向与变异已验，待集成）
+
+- **解决问题**：插件和能力包装卸只有 TUI 入口，IM 用户无法直接查看或管理。
+- **做法**：会话层只识别公共插件命名空间并保留原文；`/ask`、`/control` 进入原持久控制回执，
+  `plugin_command_service` 为 IM 与 TUI 组装同一 `PluginManagement`，不另写参数解析、执行器或审批账。
+- **权限**：查看及业务调用沿原插件规则；管理动作仅管理员。IM 与 `/settings` 一样，以完整且已解析的
+  `local/main` 身份判断管理员（含已绑定管理员的私聊），正文中的角色、owner 自述无效。拒绝保留结构化及可见错误码。
+- **确认**：含可执行文件或外部解释器的包沿原启用预览与 `--confirm <确认码>`，未确认前不启动；
+  普通危险工具审批仍受原工具策略约束，本轮不另造 IM 确认通道。IM 纯文本不实现 TUI 本地面板动作。
+- **状态**：本地开发验证见 TESTS；未启动或部署 Gateway，真实飞书/QQ 收发尚未验证。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`
@@ -419,7 +430,7 @@
 
 - **内容**：把散落在多份设计文档里的能力包能力整理成给用户看的中文大白话说明（每个功能带小例子）：能力包是什么（纯内容包，和 MCP/插件/Skill 的区别）、装/启用/停用/更新/回退/卸载（`/plugins` 各动作，安装默认停用、回退=显式指定旧版本包、卸载保留任务产物）、按任务发现与使用（推荐开关默认开、一次选择默认关、新任务才用新版本）、版本固定与派子代理授权（`allowed_skills=["capability:<包ID>"]`）、自制包（`scripts/build_capability_package.py` 用法与声明字段）、安全边界（只按声明读取、改动过的包拒绝、不执行包内代码、不含密钥）、常见疑问。
 - **位置**：`docs/guides/CAPABILITY_PACK_GUIDE.md`（与 MODEL_GUIDE.md 同目录、同风格）；README.md「能力包（开发候选）」与 docs/README.md「入口」已加链接。
-- **明确边界**：`/plugins` 目前只在 TUI 可用，IM 会话控制命令里没有 `/plugins`——说明书写明「IM 暂不支持，请在 TUI 里操作」（3a 已核实）。
+- **明确边界（2026-10-01 更新）**：源码已支持 TUI 与 IM 的 `/plugins` 和 `/plugins@<插件ID>`，共用插件服务；管理动作仅管理员，含可执行程序的启用先预览再确认。真实 IM 收发待集成方部署验收。
 - **依据**：docs/design/CAPABILITY_PACKS.md、PLUGIN_PACKAGES.md、agent/command_catalog.py（/plugins 动作）、scripts/build_capability_package.py、agent_py_agent/config/capability_config.yaml（推荐/选择开关与默认值）；验收过程记录（docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md）只用于确认「哪些已真实验证、哪些还没有」，未写入用户说明。
 - **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
 

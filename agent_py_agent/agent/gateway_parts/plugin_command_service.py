@@ -1,19 +1,22 @@
 # LLM: 入口复用可信来源检查与 GatewayControlScope；命令文本、客户端 scope_ref/revision 不参与 owner 解析。
-# 模块用途: 向 TUI 提供 owner 安装目录和原管理执行入口，冷用户保持未加载，未知结果可按原请求查询。
+# 模块用途: 向 TUI 与 IM 提供同一插件管理和业务入口，冷用户保持未加载，未知结果可按原请求查询。
 
 from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
 from ..plugin_command_service import (
     plugin_catalog_unavailable,
     plugin_command_unknown,
 )
 from ..plugin_management import PluginManagement, plugin_management_context
+from ..user_space.owner_access import is_local_admin_owner
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import resolve_gateway_scope_owner
 from .owner_conversation_store import owner_conversation_store
@@ -50,11 +53,14 @@ def plugin_http_response(handler, server, body: dict, *, text: str | None = None
         return plugin_catalog_unavailable() if text is None else plugin_command_unknown(request_id)
 
 
-# LLM: 只在结构化 state=rejected 时记一行，只含错误码、子命令名和请求编号，不记命令原文、路径或 owner 目录；
+# LLM: 非成功回执的错误码同时保留在结构字段和纯文本；原 rejected 回执已由管理层带码，不重复追加。
+#   只在结构化 state=rejected 时记一行，只含错误码、子命令名和请求编号，不记命令原文、路径或 owner 目录；
 #   用 WARNING 是因为 Gateway 进程不配置日志级别，只有 WARNING 及以上会进 gateway.log。管理员正常执行不产生这行。
-# 函数用途: 把执行前被拒的插件命令写进 Gateway 日志，方便按错误码检索；原样返回结果。
+# 函数用途: 为 TUI 和 IM 保留可见错误码，并把执行前拒绝写入无私有正文的 Gateway 诊断。
 def _log_rejection(result: dict, text: str, request_id: str) -> dict:
     code = result.get("error_code") if isinstance(result, dict) else None
+    if code and not result.get("ok") and result.get("state") != "rejected":
+        result = {**result, "message": f"{result.get('message', '')}\n错误码：{code}"}
     if isinstance(code, str) and code and result.get("state") == "rejected":
         logging.getLogger(__name__).warning("PLUGIN_COMMAND_REJECTED error_code=%s action=%s request_id=%s",
                                             code, _action_name(text), request_id or "-")
@@ -83,7 +89,6 @@ def _management(handler, server, body: dict) -> PluginManagement:
     from ..auth.middleware import _handler_peer_ip, _is_loopback_peer
     from .http_handlers import _gateway_control_scope, _request_channel
     from .http_service import _is_loopback_host
-    from .workspace_scope import gateway_request_workspace_scope
 
     base = server.agent
     middleware = getattr(handler, "_auth_middleware", None)
@@ -102,21 +107,48 @@ def _management(handler, server, body: dict) -> PluginManagement:
                     and peer is not None and _is_loopback_peer(peer))
     scope = _gateway_control_scope(handler, body, user_id=actor, channel=channel)
     scope = replace(scope, user_id=actor, channel=channel)
+    return _scope_management(base, scope, is_admin)
+
+
+# LLM: TUI 的 HTTP 角色或 IM 的已解析完整 owner 是唯一授权源；正文不能选择管理员，冷读取不构造 Agent。
+# 函数用途: 为两个入口组装同一 PluginManagement，显式工作目录仍经原 Gateway 路径权限门。
+def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManagement:
+    from .workspace_scope import gateway_request_workspace_scope
+
     owner = resolve_owner_home(base.home_paths.root, resolve_gateway_scope_owner(base, scope))
     home = home_paths_with_owner(base.home_paths, owner)
+    if is_admin is None:
+        identity = owner.identity
+        is_admin = bool(identity.provider and identity.owner_kind and identity.owner_id) and is_local_admin_owner(home)
     store = owner_conversation_store(base, home, initialize=False)
     context = plugin_management_context(
-        owner, home, base.config, store.threads, actor_id=actor, channel=channel,
+        owner, home, base.config, store.threads, actor_id=scope.user_id, channel=scope.channel,
         conversation_id=scope.conversation_id, is_admin=is_admin,
     )
-    if "workspace" in body:
+    if scope.workspace is not None:
         narrow_host = SimpleNamespace(
             config=SimpleNamespace(my_agent_owner_provider=owner.identity.provider),
             tools=SimpleNamespace(owner_scope_root=str(context.path_policy.owner_scope_root or "")),
         )
-        cwd, _roots = gateway_request_workspace_scope(narrow_host, body)
+        cwd, _roots = gateway_request_workspace_scope(narrow_host, {"workspace": scope.workspace})
         context = replace(context, workspace=Path(cwd))
     return PluginManagement(context)
+
+
+# LLM: IM 没有 Tab 目录握手，因此宿主冻结本次目录版本；解析、权限、原 HostCommand 和 --confirm 均沿同一管理服务。
+#   同消息重送由调用方的持久控制回执去重；异常保留原插件请求编号，不能重跑或宣称没有执行。
+# 函数用途: 把会话插件命令交给 TUI 的同一服务，投影为纯文本回执，不调用模型或新建审批通道。
+def execute_plugin_control(base, command: ConversationControlCommand, scope) -> ConversationControlResult:
+    request_id = uuid.uuid4().hex
+    try:
+        manager = _scope_management(base, scope)
+        result = manager.command(command.value, revision=manager.catalog().revision, request_id=request_id)
+    except Exception:  # noqa: BLE001 副作用可能已发生；不泄露内部路径，不自动重试。
+        result = plugin_command_unknown(request_id)
+    result = _log_rejection(result, command.value, request_id)
+    return ConversationControlResult("plugins", bool(result.get("ok")), str(result.get("message") or ""),
+                                     request_id=str(result.get("request_id") or request_id),
+                                     error_code=str(result.get("error_code") or ""))
 
 
 # LLM: 来源检查先于正文读取；交互只接受布尔声明，路径和 owner 由原服务器绑定，命令仍在原 HTTP 线程执行一次。

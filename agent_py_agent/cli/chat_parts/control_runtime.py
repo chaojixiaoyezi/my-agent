@@ -1,4 +1,5 @@
 # LLM: Gateway 沿持久回执控制；direct 沿 worker 句柄绑定真实执行身份，interrupt 与资源停止分离。
+# 插件正常由独立 PluginCommandClient 消费；进入共享控制时保留原文，不能降成停止任务。
 # 模块用途: 将终端控制交给共享协议，保留会话身份、目录、可重试消息编号及不同控制的边界。
 from __future__ import annotations
 
@@ -369,7 +370,7 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
 
 # LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
 # 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
-# context/compact/recover/endtask/wakes/effort、/model 文字形式、/skills 与 /settings 依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
+# context/compact/recover/endtask/wakes/effort、/model 文字形式、/skills、/settings 与会话插件控制依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
 # 未列出的类型会落到下面的停止分支，所以新增 Gateway 专用控制必须加进这个集合。
 def _execute_local_control(
     execution: ChatControlExecution,
@@ -377,7 +378,7 @@ def _execute_local_control(
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
-    if command.kind in {"context", "compact", "recover", "endtask", "wakes", "model", "effort", "skills", "settings"}:
+    if command.kind in {"context", "compact", "recover", "endtask", "wakes", "model", "effort", "skills", "settings", "plugins"}:
         return ConversationControlResult(
             command.kind,
             False,
@@ -621,9 +622,11 @@ def _cleanup_local_resources(request_id: str, resources: object | None) -> None:
 
 
 # LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 原样带结构化处置值，/model 保留 default 前缀，
-#   /effort revert 保留子命令（解析后 value 只剩编号）。
+#   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
 # 函数用途: 将界面的结构化控制还原为服务端共用的命令协议，不发送给模型。
 def _command_text(command: ConversationControlCommand) -> str:
+    if command.kind == "plugins":
+        return command.value
     if command.kind == "stop" and command.operation == "interrupt":
         return "/interrupt"
     if command.kind == "context":

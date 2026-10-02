@@ -1,5 +1,5 @@
 # LLM: 公共命令目录只拥有声明、词法边界和展示事实；调用方仍负责身份、权限、控制回执及副作用。
-# 模块用途: 让会话解析、Gateway 守门、帮助和 TUI 补全共用名称与别名，不导入 UI 或加载插件。
+# 模块用途: 让 TUI 与 IM 会话解析、Gateway 守门、帮助和补全共用名称与别名，不导入 UI 或加载插件。
 
 from __future__ import annotations
 
@@ -263,8 +263,9 @@ COMMAND_CATALOG = (
     CommandSpec(
         "plugins",
         "/plugins [管理动作]",
-        "查看插件、管理本地安装与查询请求",
-        help_variants=(("/plugins@<插件ID> [动作] [参数]", "使用已启用插件的动作"),),
+        "查看插件与查询请求（TUI、IM 可用；安装、配置、启停、更新和卸载仅管理员）",
+        help_variants=(("/plugins@<插件ID> [动作] [参数]", "使用已启用插件的动作（TUI、IM 共用权限和纯文本回执）"),
+                       ("/plugins enable <插件ID> --confirm <确认码>", "含可执行文件或外部解释器的包先预览，再按回执确认")),
         namespace_separator="@",
         actions=(
             CommandActionSpec("help", "查看管理动作的参数说明", (ArgumentSpec("action", "管理动作名称"),)),

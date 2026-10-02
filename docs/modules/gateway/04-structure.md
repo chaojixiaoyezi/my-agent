@@ -9,6 +9,20 @@
 - 原 `host_notice` 流 → TUI 灰行/历史恢复；原 final metadata/channel_delivery → IM 原最终回复/DeliveryService，模型输入不含提示。
 - 原请求回执和线程队列非跨文件事务，不补投旧回执；IM 重试保持原 final/sent 幂等身份，不新增通知账。
 
+## IM 插件命令（C10，2026-10-01）
+
+- `conversation.control_commands` 只用 `plugin_namespace` 识别协议边界，将完整原文封进 `kind=plugins`；
+  引号、参数、插件 ID 大小写和非法输入仍由唯一插件解析器处理，不进入模型或默认停止。
+- `/ask`、`/control` 统一沿 `control_operation_service` 的原消息 ID 去重；会话结果保持 `status=control`、
+  `disposition=system_command`，重送完成消息只读原结果，不再运行插件命令。
+- `plugin_command_service.execute_plugin_control` 与 TUI `/client/plugins` 的 `_management` 共用
+  `_scope_management`，沿 `owner_conversation_store(initialize=False)` 组装原 `PluginManagement`，冷用户不加载完整 Agent。
+  IM 无 Tab 目录握手，宿主冻结当前目录版本；TUI 仍校验客户端提交版本，安装表 CAS 和工具策略都不变。
+- HTTP 管理保留原认证角色规则；IM 管理用与 `/settings` 相同的完整已解析管理员 owner，
+  `scope.metadata` 中的 is_admin、owner、actor 不能授权；业务调用不借管理员资格。
+- IM 只投影原服务的纯文本、请求编号和结构化错误码；含可执行程序/外部解释器的启用预览及确认码不重写。
+  插件 `display` 动作仍是 TUI 本地面板，不在 IM 执行；普通工具审批没有新增 IM 运输。
+
 `control_service._execute_effort_control` 只在查看 `/effort` 时附加 `backends/reasoning_control.describe_level_choices()` 生成的
 可选档位行（只由档位表生成，不判断模型能力）；TUI 的档位菜单在客户端（`cli/chat_parts/tui_effort_menu.py`），不新增 Gateway 路由。
 

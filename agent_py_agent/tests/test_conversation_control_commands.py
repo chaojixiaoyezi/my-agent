@@ -90,8 +90,7 @@ def test_reserved_plugin_namespace_never_becomes_chat_or_stop(raw: str) -> None:
     assert system_slash_command_name(raw).startswith("plugins@")
     command = parse_conversation_control(raw, reject_unknown_slash=True)
     assert command is not None
-    assert command.kind == "unsupported" and not command.valid
-    assert "插件 ID" in command.usage or "当前目录没有这个插件" in command.usage
+    assert command.kind == "plugins" and command.valid and command.value == raw
     assert parse_conversation_task_command(raw) is None
 
 

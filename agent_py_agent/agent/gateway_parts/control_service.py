@@ -333,6 +333,7 @@ def reconcile_gateway_steer_delivery(
 # /restart 只交给 restart_control 校验管理员后写安全重启请求；
 # /admin、/approve、/deny 交给 admin_control_service：只读 base agent 的 home/config 与 Gateway 队列，不构造 scoped Agent。
 # /skills 交给 skill_control_service：只读写当前范围 owner 的技能提案与自动 Skill，必须在 steer/stop 默认路径之前分派。
+# /plugins 交给 plugin_command_service：与 TUI 同一管理服务，IM 权限取已解析 owner，不能落入 steer/stop 默认路径。
 # 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
@@ -382,6 +383,10 @@ def execute_gateway_conversation_control(
         from .settings_control_service import execute_settings_control
 
         return execute_settings_control(agent, command, scope)
+    if command.kind == "plugins":
+        from .plugin_command_service import execute_plugin_control
+
+        return execute_plugin_control(agent, command, scope)
     steer_receipt: _SteerReceiptState | None = None
     if command.kind == "steer":
         try:
