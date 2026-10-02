@@ -1,16 +1,20 @@
 # LLM: 这里只保存有界的冷却摘要（含连续失败次数）、在途取消索引和宿主关闭标记，不是 worker/资源池；实际退出仍由
-#   bounded_call 跟踪。
+#   bounded_call 跟踪。冷却表可经 restore/persist_cooldown_snapshot 落盘到 owner 数据域（自学习状态文件旁），
+#   让 CLI 新进程与重启后的 Gateway 沿用上一进程的退避，不再按进程清零；文件只存该 owner 的键、有字节上限，
+#   过期条目在加载时清除。
 # 模块用途: 隔离决策连接故障并按连续失败逐步加长冷却，同时将同进程设置撤销与宿主关闭转交给原精确中断句柄。
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..backends.errors import (
     ProviderConfigurationError,
@@ -167,6 +171,140 @@ def _store_failure(key: tuple[str, ...], item: tuple[str, str, float | None, int
 def record_success(key: tuple[str, ...]) -> None:
     with _LOCK:
         _FAILURES.pop(key, None)
+
+
+COOLDOWN_FILE_SCHEMA = "decision-cooldown.v1"
+# 文件字节上限：进程内表最多 512 条 × 单条约 60 字节的留量，超限拒绝读写，退避回退到进程内。
+MAX_COOLDOWN_FILE_BYTES = 32 * 1024
+
+
+# LLM: 只处理本 owner 的键（键首元是 decision_owner_ref 哈希）；monotonic 时间跨进程无效，落盘前换算成墙上时间，
+#   加载时再换回本进程 monotonic。过期条目（截止已过）在加载时直接丢弃（可清理），configuration_required 行
+#   （until=None）保留但只在配置修订未变时生效。坏文件、超限或 schema/owner 不符按 0 处理，绝不因此影响决策主链路。
+# 函数用途: 把 owner 冷却文件里的退避记录合并进进程内表，返回加载条数。
+def restore_cooldown_snapshot(path: Path, owner_ref: str) -> int:
+    payload = _read_cooldown_payload(path, owner_ref)
+    if payload is None:
+        return 0
+    now_wall, now_mono = time.time(), time.monotonic()
+    with _LOCK:
+        return _restore_entries_locked(payload, owner_ref, now_wall, now_mono)
+
+
+# LLM: 读文件与 schema/owner 校验集中在这里；任何一步失败都返回 None，调用方按 0 处理，不让坏文件影响主链路。
+# 函数用途: 读取并校验冷却文件，返回解析后的 payload 或 None。
+def _read_cooldown_payload(path: Path, owner_ref: str) -> dict | None:
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    if len(raw) > MAX_COOLDOWN_FILE_BYTES:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != COOLDOWN_FILE_SCHEMA \
+            or str(payload.get("owner") or "") != owner_ref:
+        return None
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        return None
+    return payload
+
+
+# LLM: 调用方持有 _LOCK；每条记录单独解析与校验，坏条目跳过、其余按剩余冷却换算回本进程 monotonic。
+# 函数用途: 在锁内把文件里的条目合入进程内表并计数。
+def _restore_entries_locked(payload: dict, owner_ref: str, now_wall: float, now_mono: float) -> int:
+    restored = 0
+    for key_text, item in payload.get("entries").items():
+        entry = _cooldown_entry(key_text, item, owner_ref, (now_wall, now_mono))
+        if entry is None:
+            continue
+        key, status, revision, until, streak = entry
+        _store_failure(key, (status, revision, until, streak))
+        restored += 1
+    return restored
+
+
+# LLM: 一条记录必须是本 owner 的键且未过期；键 JSON 或字段不合规返回 None。now 收成二元组保持参数在 4 个以内。
+# 函数用途: 解析并校验单条冷却快照，返回可合入进程内表的条目或 None。
+def _cooldown_entry(
+    key_text: object,
+    item: object,
+    owner_ref: str,
+    now: tuple[float, float],
+) -> tuple[tuple[str, ...], str, str, float | None, int] | None:
+    try:
+        key = tuple(json.loads(str(key_text)))
+        status, revision, until_wall, streak = _snapshot_item(item, key)
+    except (ValueError, TypeError):
+        return None
+    now_wall, now_mono = now
+    if not key or key[0] != owner_ref or (until_wall is not None and until_wall <= now_wall):
+        return None
+    until = now_mono + max(0.0, until_wall - now_wall) if until_wall is not None else None
+    return key, status, revision, until, streak
+
+
+# LLM: 调用方持锁读表；只写本 owner 的键，直到期换算成墙上时间；原子替换防止半截文件被下次读取。写失败返回 0，
+#   冷却丢失只是少一次退避，安全方向，不阻断决策。
+# 函数用途: 把进程内表中本 owner 的退避记录原子写入冷却文件，返回写入条数。
+def persist_cooldown_snapshot(path: Path, owner_ref: str) -> int:
+    now_wall, now_mono = time.time(), time.monotonic()
+    with _LOCK:
+        entries = _collect_owner_entries(owner_ref, now_wall, now_mono)
+    if not entries:
+        return 0
+    return _write_cooldown_payload(path, owner_ref, now_wall, entries)
+
+
+# LLM: 调用方持有 _LOCK；只取本 owner 的键，条目形状与进程内表一致，键序列化保持稳定排序。
+# 函数用途: 收集进程内表中本 owner 的全部退避记录，返回可写文件的 entries 字典。
+def _collect_owner_entries(owner_ref: str, now_wall: float, now_mono: float) -> dict[str, list]:
+    entries: dict[str, list] = {}
+    for key, item in _FAILURES.items():
+        if not key or key[0] != owner_ref:
+            continue
+        status, revision, until, streak = item
+        until_wall = None if until is None else now_wall + max(0.0, until - now_mono)
+        entries[json.dumps(key, sort_keys=True)] = [status, revision, until_wall, streak]
+    return entries
+
+
+# LLM: 正文带 schema 与 owner 标识；超字节上限不写；临时文件同目录原子替换，OSError 一律返回 0 不抛出。
+# 函数用途: 把冷却 entries 序列化并原子写入冷却文件，返回写入条数。
+def _write_cooldown_payload(path: Path, owner_ref: str, now_wall: float, entries: dict[str, list]) -> int:
+    body = json.dumps({"schema": COOLDOWN_FILE_SCHEMA, "owner": owner_ref, "saved_at": now_wall,
+                       "entries": entries}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    if len(body) > MAX_COOLDOWN_FILE_BYTES:
+        return 0
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(target.name + ".tmp")
+        temp.write_bytes(body)
+        os.replace(temp, target)
+    except OSError:
+        return 0
+    return len(entries)
+
+
+# LLM: 单条快照形状固定为 [status, revision, until_wall|None, streak]；任何字段不合规都让整条跳过。
+# 函数用途: 校验并解析一条冷却快照记录。
+def _snapshot_item(item: object, key: tuple) -> tuple[str, str, float | None, int]:
+    if not isinstance(item, (list, tuple)) or len(item) != 4:
+        raise ValueError("invalid cooldown snapshot entry")
+    status, revision = str(item[0]), str(item[1])
+    until_wall = item[2]
+    if until_wall is not None:
+        until_wall = float(until_wall)
+        if until_wall != until_wall:
+            raise ValueError("invalid cooldown until")
+    streak = int(item[3])
+    if streak < 0 or not status or not revision or len(key) < 3:
+        raise ValueError("invalid cooldown snapshot entry")
+    return status, revision, until_wall, streak
 
 
 # LLM: 比较有效开关/模式/绑定及 Skill/tool 展示策略；时间变化不延长旧请求，也不在通知中重置时钟。

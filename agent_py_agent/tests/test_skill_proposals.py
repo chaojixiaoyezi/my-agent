@@ -155,6 +155,23 @@ def test_one_lesson_yields_exactly_one_idempotent_proposal(tmp_path: Path) -> No
     assert not (ctx.home.owner_home_dir / "skills" / record["target"]["skill_name"]).exists()
 
 
+def test_scenario_wording_labels_applies_when_not_goal(tmp_path: Path) -> None:
+    # applies_when 是“何时适用”的条件说明（这里来自任务 goal），场景标签措辞必须叫“适用场景”，不能叫“任务目标”。
+    ctx = _proposal_ctx(tmp_path)
+    when_to_use = ctx.proposal.draft.when_to_use
+    assert when_to_use.startswith("处理与来源子代理任务相似的工作时参考；适用场景：")
+    assert GOAL in when_to_use
+    assert "任务目标" not in when_to_use
+    # 无场景说明时用固定文案，仍不带“任务目标”字样。
+    bare = skill_proposals.render_lesson_draft(SimpleNamespace(
+        candidate_type="lesson", origin="subagent_lesson", source_task_ids=("project-root",),
+        source_run_ids=("run-1",), status="observed", content=LESSON, content_hash="f" * 64,
+        scope={"applies_when": ""}, candidate_id="memory-candidate-1",
+    ), "lesson-ffffffffffff").when_to_use
+    assert bare == "处理与来源子代理任务相似的工作时参考。"
+    assert "任务目标" not in bare
+
+
 def test_non_lesson_model_inferred_and_provenance_less_candidates_are_ignored(tmp_path: Path) -> None:
     ctx = _runtime(tmp_path)
     findings = ctx.manager.memory_candidates.record_result_candidates(

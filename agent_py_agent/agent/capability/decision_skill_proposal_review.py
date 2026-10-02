@@ -10,15 +10,22 @@ import hashlib
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
-from ..backends.decision_protocol import DecisionInputError, decision_json
+from ..agent_core.tool_context.external_material_order import _URL_WITH_QUERY
+from ..backends.decision_protocol import DecisionInputError, DecisionPrivacySkip, decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation import decision_point_limits as limits
+from ..conversation.decision_outcome_log import material_or_skip
+from ..conversation.decision_policy import (
+    decision_owner_ref,
+    persist_cooldown_snapshot,
+    restore_cooldown_snapshot,
+)
 from ..conversation.decision_reach_counts import (
     CALLED,
-    counted_material,
     note_decision_reach,
     stage_miss_reason,
 )
@@ -83,6 +90,8 @@ class SkillProposalReviewOrder:
 # LLM: 入口先按登记与待确认条数快退，不满足时零读取零请求；普通失败一律返回 None，取消/中断上抛。
 #   不写提案或 Skill；只经 decision_reach_counts 计一次到达结果（条数不符记 pending_count，诊断计数副作用）。
 #   条数界限读 decision_point_limits.SKILL_PROPOSALS_MIN/MAX（与诊断大白话共用，调用时现读）。
+#   冷却持久化：CLI 与 Gateway 都是独立进程/进程生命周期，每次入口先加载本 owner 的冷却快照、结束前写回，
+#   让“进程各自持有冷却表、重启清零”变成 owner 数据域里的一份有界文件；无 home_paths 的宿主保持纯进程内行为。
 # 函数用途: 为 CLI 列表计算可选审核顺序；返回 None 表示保持原输出。
 def skill_proposal_review_order(host: object, service: object,
                                 proposals: list[SkillProposal] | tuple[SkillProposal, ...]) -> SkillProposalReviewOrder | None:
@@ -92,6 +101,9 @@ def skill_proposal_review_order(host: object, service: object,
     if not limits.SKILL_PROPOSALS_MIN <= len(pending) <= limits.SKILL_PROPOSALS_MAX:
         note_decision_reach(host, _POINT, "pending_count")
         return None
+    cooldown_file = _cooldown_file(host)
+    if cooldown_file is not None:
+        restore_cooldown_snapshot(cooldown_file, decision_owner_ref(host))
     try:
         return _review(host, service, tuple(proposals), pending)
     except (InterruptedError, ToolCancelled):
@@ -99,6 +111,20 @@ def skill_proposal_review_order(host: object, service: object,
     except Exception:
         _check_interrupted()
         return None
+    finally:
+        if cooldown_file is not None:
+            persist_cooldown_snapshot(cooldown_file, decision_owner_ref(host))
+
+
+# LLM: 冷却文件与 S1/S2 提案状态文件同目录（owner 数据域 data/skill_proposals/）；文件名以点开头，避开
+#   SkillProposalService.list 的 *.json 提案扫描。宿主没有 home_paths 或路径字段时返回 None，调用方保持纯进程内冷却。
+# 函数用途: 取当前 owner 的冷却持久化文件路径，取不到返回 None。
+def _cooldown_file(host: object) -> Path | None:
+    home = getattr(host, "home_paths", None)
+    directory = getattr(home, "owner_skill_proposals_dir", None)
+    if not directory:
+        return None
+    return Path(directory) / ".cooldown.json"
 
 
 # LLM: 顺序固定：阶段（关闭即返回）→材料→决策→逐题校验→配置/期限复核→重读待确认提案比对版本与草稿 hash→采用。
@@ -114,7 +140,10 @@ def _review(host: object, service: object, proposals: tuple, pending: tuple) -> 
         return None
     _check_interrupted()
     facts = _facts(pending)
-    state, questions, revision = counted_material(host, _POINT, lambda: _material(pending, facts))
+    material = material_or_skip(host, stage, _POINT, lambda: _material(pending, facts))
+    if material is None:
+        return None
+    state, questions, revision = material
     note_decision_reach(host, _POINT, CALLED)
     outcome = decide(host, params, stage, point=_POINT, state=state, questions=questions, candidates_revision=revision,
                      source_refs=tuple(f"skill_proposal:{item.proposal_id}" for item in pending))
@@ -177,12 +206,15 @@ def _material(pending: tuple, facts: tuple) -> tuple[dict, dict, str]:
 
 
 # LLM: 只取宿主模板生成的 description/when_to_use 与有界经验摘录，整体经 external_data/default 脱敏和指令边界投影；
-#   不含来源段（候选/任务/运行编号）、目标 Skill 名或任何路径。
+#   不含来源段（候选/任务/运行编号）、目标 Skill 名或任何路径。草稿摘要含完整或协议相对 URL 查询串时整点放弃，
+#   抛 DecisionPrivacySkip（原因码 privacy_url），由 material_or_skip 留一条 skipped 审计记录，URL 不外发。
 # 函数用途: 把一条提案草稿投影成可外发的安全摘要文本。
 def _safe_draft(proposal: SkillProposal) -> str:
     draft = proposal.draft
     text = decision_json({"description": draft.description, "when_to_use": draft.when_to_use,
                           "lesson_excerpt": _lesson_excerpt(draft.body)}).decode("utf-8")
+    if _URL_WITH_QUERY.search(text):
+        raise DecisionPrivacySkip("提案草稿摘要含有不应转发的 URL 查询串。")
     return project_tool_output_body(tool=_POINT, output=text, trust="external_data", redaction="default")
 
 

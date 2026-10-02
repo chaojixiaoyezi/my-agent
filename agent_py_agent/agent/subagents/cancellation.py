@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..conversation.goal_delegation import transition_delegated_goal
 from ..runtime_db.operations import RuntimeConflictError
@@ -23,6 +24,7 @@ from .cancellation_hosts import (
     freeze_runner_stop,
     signal_runner_attempt,
 )
+from .lesson_ledger import LessonIdentity, append_run_status
 from .model_capabilities import capability_request_requires_parent_resolution
 from .models import SUBAGENT_RECOVERY_CLOSED_STATUSES, FailureType, SubAgentTask
 
@@ -252,6 +254,7 @@ def _close_projection(agent: object, request: CancelSubagentTaskRequest, authori
         task = agent.subagents.mutate(task.id, close)
     if not preserved:
         agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED reason={request.reason}")
+        _record_cancelled_lesson_status(task, attempt_id, now)
     transition_delegated_goal(agent.subagents, task, expected_status="active", status="paused")
     link = _sync_cancelled_conversation_link(agent, task.id) if not preserved else {"status": "preserved"}
     return {
@@ -282,6 +285,24 @@ def _findings_ledger_snapshot(task: SubAgentTask) -> tuple[str, int]:
             return path, sum(1 for line in handle if line.strip())
     except OSError:
         return path, 0
+
+
+# LLM: 取消也必须按结构化状态在 lesson 账本记一笔（标明 cancelled），不靠文字判断；账本路径来自任务记录字段，
+#   写入失败只记日志，绝不能影响取消本身。状态行按 (run, cancelled) 幂等，同一 run 只记一次。
+# 函数用途: 给被取消的 run 的经验账本追加一行 run_status=cancelled。
+def _record_cancelled_lesson_status(task: SubAgentTask, attempt_id: str, now: float) -> None:
+    ledger = str(getattr(task, "agent_run_lessons_jsonl", "") or "").strip()
+    if not ledger:
+        return
+    try:
+        append_run_status(
+            Path(ledger),
+            LessonIdentity(run_id=task.id, attempt_id=attempt_id, task_id=str(getattr(task, "root_id", "") or task.id)),
+            "cancelled",
+            created_at=now,
+        )
+    except Exception:  # noqa: BLE001 - 可选账本写入失败不得阻断取消收口。
+        logging.getLogger(__name__).warning("取消时写入 lesson 账本状态失败: run_id=%s", task.id)
 
 
 # LLM: 取消仅关闭仍需父级裁决的原能力申请，不授予能力、不创建新的申请或裁决记录。

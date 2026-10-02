@@ -40,9 +40,11 @@ from agent_py_agent.agent.subagents.lesson_ledger import (
     LESSON_FIELD_LIMITS,
     MAX_LESSON_LEDGER_BYTES,
     MAX_LESSONS_PER_RUN,
+    MAX_RUN_STATUSES_PER_RUN,
     LessonFields,
     LessonIdentity,
     append_lesson_record,
+    append_run_status,
     lesson_id_for,
     lesson_ledger_record,
     read_lesson_ledger,
@@ -405,6 +407,77 @@ def test_ledger_read_back_caps_entries_and_skips_oversized_files(tmp_path: Path)
     assert [entry.lesson_id for entry in capped.entries] == [row["id"] for row in rows[:MAX_LESSONS_PER_RUN]]
     assert capped.rejected == 7 - MAX_LESSONS_PER_RUN
     assert (oversized.status, oversized.entries) == (LEDGER_OVERSIZED, ())
+
+
+# ---- run 状态行：取消等收口按结构化状态记账，不占经验条数上限 ----
+
+
+def test_cancelled_run_is_recorded_as_structured_status_and_read_back(tmp_path: Path) -> None:
+    ledger = tmp_path / "run-1" / "lessons.jsonl"
+    identity = LessonIdentity(run_id="run-1", attempt_id="a-1", task_id="root-1")
+    lesson = lesson_ledger_record(_fields(LESSON_A), identity, created_at=10.0)
+    assert append_lesson_record(ledger, lesson).status == "recorded"
+    result = append_run_status(ledger, identity, "cancelled", created_at=20.0)
+    report = read_lesson_ledger(str(ledger), run_id="run-1")
+
+    assert result.status == "recorded"
+    assert report.status == LEDGER_OK
+    assert report.run_statuses == (("cancelled", 20.0),)
+    assert [entry.lesson_id for entry in report.entries] == [lesson["id"]]
+    assert report.rejected == 0
+    assert read_lesson_ledger(str(ledger), run_id="").run_statuses == ()
+
+
+def test_run_status_is_idempotent_per_run_and_status(tmp_path: Path) -> None:
+    ledger = tmp_path / "run-1" / "lessons.jsonl"
+    identity = LessonIdentity(run_id="run-1", attempt_id="a-1", task_id="root-1")
+    assert append_run_status(ledger, identity, "cancelled", created_at=20.0).status == "recorded"
+    again = append_run_status(ledger, identity, "cancelled", created_at=30.0)
+
+    assert again.status == "already_recorded"
+    assert read_lesson_ledger(str(ledger), run_id="run-1").run_statuses == (("cancelled", 20.0),)
+    # 另一 run 的取消是独立事实，应照常记录。
+    other = append_run_status(ledger, LessonIdentity("run-2", "a-2", "root-1"), "cancelled", created_at=40.0)
+    assert other.status == "recorded"
+
+
+def test_run_status_has_own_bound_and_does_not_consume_lesson_limit(tmp_path: Path) -> None:
+    ledger = tmp_path / "run-1" / "lessons.jsonl"
+    identity = LessonIdentity(run_id="run-1", attempt_id="", task_id="root-1")
+    for index in range(MAX_LESSONS_PER_RUN):
+        assert append_lesson_record(
+            ledger, lesson_ledger_record(_fields(_lesson(index)), identity, created_at=1.0)
+        ).status == "recorded"
+    for index in range(MAX_RUN_STATUSES_PER_RUN):
+        assert append_run_status(ledger, identity, f"status-{index}", created_at=2.0).status == "recorded"
+    full = append_run_status(ledger, identity, "overflow", created_at=3.0)
+
+    assert full.status == "limit_reached"
+    report = read_lesson_ledger(str(ledger), run_id="run-1")
+    assert len(report.entries) == MAX_LESSONS_PER_RUN
+    assert len(report.run_statuses) == MAX_RUN_STATUSES_PER_RUN
+    assert report.rejected == 0
+
+
+def test_run_status_blank_value_is_refused_without_writing(tmp_path: Path) -> None:
+    ledger = tmp_path / "run-1" / "lessons.jsonl"
+    identity = LessonIdentity(run_id="run-1", attempt_id="a-1", task_id="root-1")
+
+    assert append_run_status(ledger, identity, "  ", created_at=1.0).status == "limit_reached"
+    assert not ledger.exists()
+
+
+def test_foreign_or_tampered_run_status_rows_are_counted_rejected(tmp_path: Path) -> None:
+    ledger = tmp_path / "run-1" / "lessons.jsonl"
+    identity = LessonIdentity(run_id="run-1", attempt_id="a-1", task_id="root-1")
+    assert append_run_status(ledger, identity, "cancelled", created_at=10.0).status == "recorded"
+    ledger.open("a", encoding="utf-8").write(json.dumps(
+        {"version": 1, "kind": "run_status", "status": "cancelled", "run_id": "run-2",
+         "attempt_id": "a-9", "task_id": "root-1", "created_at": 11.0}, ensure_ascii=False) + "\n")
+
+    report = read_lesson_ledger(str(ledger), run_id="run-1")
+    assert report.run_statuses == (("cancelled", 10.0),)
+    assert report.rejected == 1
 
 
 # ---- 结果收口：合并进 output.json / runner result ----

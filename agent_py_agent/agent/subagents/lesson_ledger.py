@@ -17,6 +17,10 @@ from ..common.json_io import locked_json_path, read_jsonl_objects_report
 
 LESSON_LEDGER_VERSION = 1
 LESSON_LEDGER_SOURCE = "record_lesson_tool"
+# run 状态行：宿主（取消等收口路径）按结构化状态写入，标明 run 的结局（如 cancelled），不靠文字判断。
+RUN_STATUS_KIND = "run_status"
+# 状态行只按 run 幂等、不占经验条数上限；同一 run 的状态行数也有界。
+MAX_RUN_STATUSES_PER_RUN = 5
 # 字段名与字符上限：工具 Schema、写入校验和读回复核共用这一份；四项之和保证渲染正文不超过候选 2000 字上限。
 LESSON_FIELD_LIMITS: tuple[tuple[str, int], ...] = (
     ("title", 120),
@@ -103,13 +107,15 @@ class LessonAppendResult:
 
 
 # LLM: status 取 LEDGER_* 四值之一；rejected 统计不合规、重复或超出上限而未采用的行，结果收口据此写工作日志。
-# 类用途: 汇总一次账本读回的已采用条目与被拒条数。
+#   run_statuses 是本账本里按合同校验通过的 run 状态行（如取消），只含 (status, created_at)，供收口与审计按结构化事实判断。
+# 类用途: 汇总一次账本读回的已采用条目、run 状态行与被拒条数。
 @dataclass(frozen=True)
 class LessonLedgerReport:
     ledger_ref: str = ""
     status: str = LEDGER_ABSENT
     entries: tuple[LessonLedgerEntry, ...] = ()
     rejected: int = 0
+    run_statuses: tuple[tuple[str, float], ...] = ()
 
 
 # LLM: 只做确定性的空白与不可打印字符归一，不改写措辞、不按语义截断；上限按原始长度判定，与 Schema maxLength 一致。
@@ -207,6 +213,46 @@ def append_lesson_record(path: Path, record: dict[str, object]) -> LessonAppendR
     return LessonAppendResult(status, lesson_id, len(rows), size)
 
 
+# LLM: 状态行（如取消）由宿主收口路径写入，与经验行共用同一账本与字节上限、同一把锁；只按 (run, status) 幂等、
+#   不占经验条数上限，状态行数自身有界。status 空白或非字符串时按拒绝处理，不写任何行。
+# 函数用途: 给本 run 账本追加一条结构化 run 状态（标明 cancelled 等），返回记录/已记录/超限结论。
+def append_run_status(path: Path, identity: LessonIdentity, status: str, *, created_at: float) -> LessonAppendResult:
+    status = _single_line(status)
+    if not status:
+        return LessonAppendResult(APPEND_LIMIT_REACHED, "", 0, 0)
+    record = {
+        "version": LESSON_LEDGER_VERSION,
+        "kind": RUN_STATUS_KIND,
+        "status": status,
+        "task_id": identity.task_id,
+        "run_id": identity.run_id,
+        "attempt_id": identity.attempt_id,
+        "created_at": float(created_at),
+    }
+    line = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with locked_json_path(path):
+        rows, size = _rows_for_append(path)
+        status_outcome = _status_decision(rows, identity.run_id, status, size + len(line))
+        if status_outcome == APPEND_RECORDED:
+            _append_line_no_follow(path, line)
+            return LessonAppendResult(status_outcome, "", len(rows) + 1, size + len(line))
+    return LessonAppendResult(status_outcome, "", len(rows), size)
+
+
+# LLM: 顺序固定：同 run 同状态已在账本→已记录；状态行数满→拒绝；追加后超字节上限→拒绝；否则可写。
+# 函数用途: 决定一次 run 状态追加的结构化结论。
+def _status_decision(rows: Sequence[Mapping[str, object]], run_id: str, status: str, size_after: int) -> str:
+    if any(row.get("kind") == RUN_STATUS_KIND and str(row.get("run_id") or "") == run_id
+           and row.get("status") == status for row in rows):
+        return APPEND_ALREADY_RECORDED
+    if sum(1 for row in rows if row.get("kind") == RUN_STATUS_KIND) >= MAX_RUN_STATUSES_PER_RUN:
+        return APPEND_LIMIT_REACHED
+    if size_after > MAX_LESSON_LEDGER_BYTES:
+        return APPEND_BYTES_EXCEEDED
+    return APPEND_RECORDED
+
+
 # LLM: 与 record_finding 同一 fail-closed 口径：任何损坏行都拒绝追加，避免在坏账本后面继续累积。
 # 函数用途: 在锁内读出现有行和当前字节数。
 def _rows_for_append(path: Path) -> tuple[list[dict[str, object]], int]:
@@ -242,9 +288,9 @@ def _append_line_no_follow(path: Path, line: bytes) -> None:
 
 
 # LLM: 只读宿主给出的 run 账本路径；缺失/空路径是 absent，符号链接或加锁/读失败是 unreadable，超字节上限整本不采用。
-#   逐行按写入合同复核并去重，最多采用 MAX_LESSONS_PER_RUN 条；任何 OSError 都转成状态，不能打断结果收口。
-#   副作用：账本存在时会创建同名锁文件。
-# 函数用途: 读回本 run 已记录的经验，供结果收口合并与生成候选。
+#   逐行按写入合同复核并去重，最多采用 MAX_LESSONS_PER_RUN 条；run 状态行单独校验进 run_statuses，不占经验条数。
+#   任何 OSError 都转成状态，不能打断结果收口。副作用：账本存在时会创建同名锁文件。
+# 函数用途: 读回本 run 已记录的经验与 run 状态，供结果收口合并与生成候选。
 def read_lesson_ledger(ledger_ref: str, *, run_id: str) -> LessonLedgerReport:
     path_text = str(ledger_ref or "").strip()
     if not path_text:
@@ -271,28 +317,64 @@ def _read_report_locked(path: Path, ledger_ref: str, run_id: str) -> LessonLedge
     if size > MAX_LESSON_LEDGER_BYTES:
         return LessonLedgerReport(ledger_ref, LEDGER_OVERSIZED)
     report = read_jsonl_objects_report(path, context="subagent.lesson_ledger.read")
-    entries, rejected = _valid_entries(report.records, ledger_ref, run_id)
-    return LessonLedgerReport(ledger_ref, LEDGER_OK, tuple(entries), rejected + len(report.load_errors))
+    entries, rejected, run_statuses = _valid_entries(report.records, ledger_ref, run_id)
+    return LessonLedgerReport(ledger_ref, LEDGER_OK, tuple(entries), rejected + len(report.load_errors),
+                              run_statuses)
 
 
-# LLM: 首个合法 id 生效，重复 id 与超出条数上限的合法行都计入 rejected。
-# 函数用途: 从账本行里挑出可采用的经验条目。
+# LLM: 首个合法 id 生效，重复 id 与超出条数上限的合法行都计入 rejected；run 状态行交给独立扫描，
+#   两类行共用 rejected 计数（总数与逐行顺序无关），状态行不占经验条数。
+# 函数用途: 从账本行里挑出可采用的经验条目与 run 状态行。
 def _valid_entries(
     rows: Sequence[Mapping[str, object]],
     ledger_ref: str,
     run_id: str,
-) -> tuple[list[LessonLedgerEntry], int]:
+) -> tuple[list[LessonLedgerEntry], int, tuple[tuple[str, float], ...]]:
     entries: list[LessonLedgerEntry] = []
     seen: set[str] = set()
     rejected = 0
     for row in rows:
+        if row.get("kind") == RUN_STATUS_KIND:
+            continue
         entry = _entry_from_row(row, ledger_ref, run_id)
         if entry is None or entry.lesson_id in seen or len(entries) >= MAX_LESSONS_PER_RUN:
             rejected += 1
             continue
         seen.add(entry.lesson_id)
         entries.append(entry)
-    return entries, rejected
+    run_statuses, status_rejected = _run_statuses_from_rows(rows, run_id)
+    return entries, rejected + status_rejected, tuple(run_statuses)
+
+
+# LLM: 状态行按 (run, status) 去重、单独有界，超上限或不合规的行计 rejected；与经验行扫描共用同一 rejected 总数。
+# 函数用途: 从账本行里挑出本 run 的 run 状态记录。
+def _run_statuses_from_rows(
+    rows: Sequence[Mapping[str, object]],
+    run_id: str,
+) -> tuple[list[tuple[str, float]], int]:
+    run_statuses: list[tuple[str, float]] = []
+    rejected = 0
+    for row in rows:
+        if row.get("kind") != RUN_STATUS_KIND:
+            continue
+        status_item = _status_from_row(row, run_id)
+        if status_item is None or status_item in run_statuses or len(run_statuses) >= MAX_RUN_STATUSES_PER_RUN:
+            rejected += 1
+            continue
+        run_statuses.append(status_item)
+    return run_statuses, rejected
+
+
+# LLM: 状态行只认宿主写的结构：版本、run 归属与规范单行状态；时间只作观察时间，坏值回退 0。
+# 函数用途: 把一行 run 状态记录转成 (status, created_at)，不合规返回 None。
+def _status_from_row(row: Mapping[str, object], run_id: str) -> tuple[str, float] | None:
+    version = row.get("version")
+    if isinstance(version, bool) or version != LESSON_LEDGER_VERSION or not run_id or row.get("run_id") != run_id:
+        return None
+    status = row.get("status")
+    if not isinstance(status, str) or not _single_line(status):
+        return None
+    return _single_line(status), _timestamp(row.get("created_at"))
 
 
 # LLM: 复核版本、run 归属、字段已是规范单行且不超上限、id 等于内容 hash；任何一项不符都不采用（返回 None）。
@@ -362,6 +444,8 @@ __all__ = [
     "LESSON_LEDGER_VERSION",
     "MAX_LESSONS_PER_RUN",
     "MAX_LESSON_LEDGER_BYTES",
+    "MAX_RUN_STATUSES_PER_RUN",
+    "RUN_STATUS_KIND",
     "LessonAppendResult",
     "LessonFieldError",
     "LessonFields",
@@ -370,6 +454,7 @@ __all__ = [
     "LessonLedgerEntry",
     "LessonLedgerReport",
     "append_lesson_record",
+    "append_run_status",
     "lesson_id_for",
     "lesson_ledger_record",
     "merge_lesson_texts",

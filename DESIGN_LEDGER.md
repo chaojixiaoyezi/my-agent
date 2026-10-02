@@ -1,5 +1,25 @@
 # 设计台账
 
+## J15 自学习收尾四项（2026-10-01，ds1，分支 `worker/ds1-self-learning-tail`，已实现，待集成）
+
+- **背景**：`DECISION_MODEL_FINAL_HANDOFF.md` 剩余风险"自学习"一条的四个收尾项：
+  取消的 run 不进教训账本、S1 草稿场景标签措辞不准、S2 缺 privacy_url 跳过、冷却按进程算重启清零。
+- **做法**：
+  1. **取消记账**：`lesson_ledger.py` 新增 run 状态行（`kind=run_status`，独立于经验行，各自有界、
+     幂等、读回按结构化字段分流），`cancellation.py` 在取消收口时按结构化状态写 `cancelled` 一笔，
+     不读模型文字；经验行合同与上限不变。
+  2. **S1 措辞**：`skill_proposals.py` 草稿适用场景标签由"来源任务目标"改为"适用场景"，
+     description/when_to_use 与固定模板渲染不变，hash 语义不变（草稿正文未改，只改人读标签）。
+  3. **S2 privacy_url 跳过**：`decision_skill_proposal_review.py` 草稿外发编码后按结构化字段
+     `_URL_WITH_QUERY` 检查，命中即抛 `DecisionPrivacySkip`（reason=privacy_url），由
+     `material_or_skip` 记 skipped 审计，URL 不外发；无查询串的 URL 照常发送。
+  4. **冷却持久化**：`decision_policy.py` 新增 `persist_cooldown_snapshot`/`restore_cooldown_snapshot`
+     （schema 带版本、owner 校验、32KB 上限、过期条目加载即弃、monotonic↔墙上时间换算、原子替换）；
+     S2 入口每次调用在 `owner_skill_proposals_dir/.cooldown.json`（点开头避开提案 `*.json` 扫描）
+     恢复/落盘。有界（32KB + 过期即清），可清理（删文件即回退纯进程内冷却，安全方向）。
+- **验证**：相关测试 156 passed（含 6 个新增测试文件/用例）；6 个变异逐一验证均红后还原；
+  收尾门禁见 TESTS.md。
+
 ## 熔断体验修复 code-size 拆平（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）
 
 - **背景**：`fa781d169` 合入后相对 step16y 告警基线多出 3 条 code-size 高风险（纯重构，行为不变）：

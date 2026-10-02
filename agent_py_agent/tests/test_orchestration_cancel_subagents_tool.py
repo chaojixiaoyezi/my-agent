@@ -250,6 +250,31 @@ def test_cancel_subagents_tool_abandons_active_attempt_and_audits(tmp_path):
     assert loaded.attributes["cancel_subagents"]["abandoned_attempt_id"] == "attempt-live"
 
 
+def test_cancel_records_structured_cancelled_status_in_lesson_ledger(tmp_path):
+    from pathlib import Path
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents.lesson_ledger import read_lesson_ledger
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    task = agent.subagents.create_run(
+        params=CreateRunParams(goal="读项目 B", thought="取消账本测试", plan=["创建任务"], allowed_tools=["read_file"])
+    )
+    ledger = Path(task.agent_run_lessons_jsonl)
+    task.status = "RUNNING"
+    task.runner_active_attempt_id = "attempt-live"
+    agent.subagents.save(task)
+
+    result = _execute_cancel_subagents(agent, {"run_ids": [task.id], "reason": "测试取消"})
+
+    assert json.loads(result.output)["ok"] is True
+    assert ledger.is_file()
+    report = read_lesson_ledger(str(ledger), run_id=task.id)
+    assert [status for status, _ts in report.run_statuses] == ["cancelled"]
+
+
 def test_cancel_subagents_tool_can_interrupt_retryable_child(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig

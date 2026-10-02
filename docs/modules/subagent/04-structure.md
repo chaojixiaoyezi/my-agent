@@ -78,6 +78,7 @@
 ## lesson 账本与 record_lesson（结构化经验通道）
 
 - `subagents/lesson_ledger.py` 是 `lessons.jsonl` 的唯一合同：定义四个字段的上限、单行规范化、内容 hash id、固定四行渲染模板，以及锁内的读判写追加（先查同 id，再查 5 条/16 KiB 上限，最后以 O_NOFOLLOW 追加）和逐行复核读回。坏行或符号链接一律拒绝追加。
+  run 状态行（2026-10-01，J15）：同一账本还接受 `kind=run_status` 的状态记录（如取消写 `cancelled`），与经验行共用文件但各自有界（每 run 状态行上限、总字节上限不变），追加幂等、读回按 `kind` 分流，状态行不参与经验条数统计。
 - `agent_core/runtime/record_lesson_tool.py` 只做身份与结果映射：`current_subagent_run_id/attempt_id` 取身份，`subagents.load(run_id)` 取任务记录里的 `agent_run_lessons_jsonl` 与 root 任务；所有拒绝都声明 `effect_outcome=not_started`。
 - 路径登记：`memory_archive/agent_run_workspace.py::AgentRunWorkspacePaths.lessons_jsonl` → `services/task_workspace_adapter.py::_sync_agent_run_paths` → `SubAgentTask.agent_run_lessons_jsonl`。工作区同步从不创建或覆盖该文件。
 - 暴露：`role_templates.RECORD_LESSON_TOOL` 进入 `ROLE_BASE_TOOLS`、`orchestration/tool_grants.py` 两个预设和 `services/hierarchy/tool_policy.py` 的缺省候选；`tooling/registry.py::_DEFAULT_HIDDEN_TOOL_NAMES` 让主线程看不到它；`core.py::_register_orchestration_tools` 只在启用子代理时注册。

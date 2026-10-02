@@ -815,6 +815,7 @@ agent_py_agent/
 |   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
 |   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
+|   |-- test_decision_cooldown_persistence.py # 冷却持久化：快照恢复/落盘、过期丢弃、坏文件回退、S2 入口落盘 .cooldown.json
 |   |-- test_decision_skill_proposal_review_integration.py # 自学习 S2 经真实 CLI/设置/决策服务（只替换 HTTP）：输出字节、observe 记账、冷却超时、菜单与默认值
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
 |   |-- test_model_usage_tags.py       # 模型用途标签：规范化与拒绝、决策模型不收、不进运行时配置、两处决策候选与 /model 表单

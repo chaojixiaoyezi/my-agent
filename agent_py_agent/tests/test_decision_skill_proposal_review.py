@@ -105,11 +105,13 @@ def run(ctx: SimpleNamespace, proposals=None):
     return module.skill_proposal_review_order(SimpleNamespace(), ctx.service, ctx.proposals if proposals is None else proposals)
 
 
-# LLM: 只读提案目录、owner skills 目录与候选账本的实际字节，不解析内容。
+# LLM: 只读提案目录、owner skills 目录与候选账本的实际字节，不解析内容；点开头文件是运行期状态
+#   （.proposals 锁、.cooldown.json 冷却快照），不属于审核顺序点应当保持不变的业务文件，快照里排除。
 # 函数用途: 生成审核前后比较用的文件快照。
 def trees(ctx: SimpleNamespace) -> dict:
     roots = (ctx.home.owner_skill_proposals_dir, ctx.home.owner_home_dir / "skills", ctx.home.owner_memory_candidates_jsonl.parent)
-    return {str(root): {str(path): path.read_bytes() for path in root.rglob("*") if path.is_file()} if root.exists() else {}
+    return {str(root): {str(path): path.read_bytes() for path in root.rglob("*")
+                        if path.is_file() and not path.name.startswith(".")} if root.exists() else {}
             for root in roots}
 
 
@@ -449,3 +451,42 @@ def test_pending_bounds_and_their_label_share_one_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(limits, "SKILL_PROPOSALS_MAX", 2)
     assert module.skill_proposal_review_order(host, ctx.service, ctx.service.list()) is None and calls == []
     assert reasons() == ({"pending_count": 1}, 0) and "超过 2 条" in miss_reason_label("pending_count")
+
+
+def test_draft_with_query_url_is_skipped_with_structured_privacy_reason(tmp_path, monkeypatch):
+    url_lesson = "调用接口前把链接 https://example.com/endpoint?token=abc123 原样外发会泄露凭据。"
+    ctx = seeded(tmp_path, 3, lesson=url_lesson)
+    host = SimpleNamespace(home_paths=ctx.home, config=SimpleNamespace(decision_skip_records_enabled=True))
+    reasons = reach_counter(host, monkeypatch, module._POINT, tmp_path)
+    calls = install(monkeypatch)
+
+    def review():
+        return module.skill_proposal_review_order(host, ctx.service, ctx.service.list())
+
+    assert review() is None
+    assert [name for name, _ in calls] == ["stage"]  # 材料阶段就放弃，不发送任何内容
+    assert reasons() == ({"privacy_url": 1}, 0)
+    rows = [json.loads(line) for line in ctx.home.owner_decision_outcomes_jsonl.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    matched = [row for row in rows if row.get("point") == module._POINT and row.get("status") == "skipped"
+               and row.get("reason") == "privacy_url"]
+    assert matched  # 结构化原因码落盘，审计能读到“因隐私跳过”
+
+
+def test_draft_with_protocol_relative_query_url_is_also_skipped(tmp_path, monkeypatch):
+    ctx = seeded(tmp_path, 3, lesson="外发前先去掉 //cdn.example.com/asset?v=1 这种协议相对查询串。")
+    host = SimpleNamespace(home_paths=ctx.home, config=SimpleNamespace(decision_skip_records_enabled=True))
+    calls = install(monkeypatch)
+
+    assert module.skill_proposal_review_order(host, ctx.service, ctx.service.list()) is None
+    assert [name for name, _ in calls] == ["stage"]
+
+
+def test_draft_without_query_url_still_sends(tmp_path, monkeypatch):
+    ctx = seeded(tmp_path, 3, lesson="普通做法：先读取当前版本再写入，参考 https://example.com/docs 无查询串。")
+    host = SimpleNamespace(home_paths=ctx.home, config=SimpleNamespace(decision_skip_records_enabled=True))
+    calls = install(monkeypatch, {"proposal_3": "review_first"})
+
+    result = module.skill_proposal_review_order(host, ctx.service, ctx.service.list())
+    assert result is not None
+    assert [name for name, _ in calls] == ["stage", "decide"]

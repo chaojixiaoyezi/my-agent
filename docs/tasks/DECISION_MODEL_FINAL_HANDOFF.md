@@ -146,6 +146,9 @@ python3 scripts/check_clean_package.py .
 - 两处保守取舍：采用前复核按整份策略版本判断，owner 级任何设置改动都会让同 owner 其他点的在途建议作废；冷却按连接共享，后台超时会让同连接的前台点在冷却期直接保留原方案（2026-09-26 已修订：超时只冷却本点位，连接错误才冷却整条连接，见 `docs/design/DECISION_MODEL_INTEGRATION.md`）。两者都只会少一条建议。
 - 模态只按保守规则处理：带图片的子任务不会换到能看图的候选。
 - 自学习：被取消的 run 不收取 lesson 账本；S1 草稿的场景标签措辞不准；S2 的 CLI 进程各自持有冷却表，含查询串的 URL 仍会外发。
+  **（已完成，2026-10-01）**：取消的 run 按结构化状态 `cancelled` 记入 lesson 账本（独立于经验行的 run 状态行）；
+  S1 草稿适用场景标签改为"适用场景"；S2 草稿含查询串 URL 时按 `privacy_url` 结构化原因跳过并记 skipped 审计，不外发；
+  S2 冷却持久化到 `owner_skill_proposals_dir/.cooldown.json`（有界、过期即清、可删文件回退）。详见 DESIGN_LEDGER。
 - 决策实验自动晋升后，TUI 没有主动提示。
 - Gateway 停止时，runner worker 账本里的在途调用还没有同类结清（主线跟进）。
 - 动作候选只用 browser-lite 一个插件、一张简单测试页验证过；OCR/computer_use 还没有声明观察候选。工具描述让模型以为能用 `file://`，真实样本里两次被宿主拦下、页面没打开。

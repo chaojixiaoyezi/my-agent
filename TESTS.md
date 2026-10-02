@@ -24,6 +24,27 @@
   （参数用 `run_request` 命名，避开 params 计数里 `request` 名单的 +1 规则），行为逐行不变；拆后背景相关 8 文件测试与
   guards9 重跑全过，`size_diff.sh` 新增告警 **0**。
 
+## J15 自学习收尾四项（2026-10-01，ds1，分支 `worker/ds1-self-learning-tail`，基于 `efaedfab2`）
+
+- 改动：取消的 run 按结构化状态记 lesson 账本（`cancellation.py` + `lesson_ledger.py` run 状态行）；
+  S1 草稿场景标签措辞（`skill_proposals.py`）；S2 privacy_url 跳过（`decision_skill_proposal_review.py`）；
+  冷却持久化（`decision_policy.py` 快照函数 + S2 入口落盘 `.cooldown.json`）。
+- 命令（`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，basetemp=/private/tmp/claude-501/m-ds1）：
+  `$PY -m pytest agent_py_agent/tests/test_subagent_lesson_ledger.py agent_py_agent/tests/test_orchestration_cancel_subagents_tool.py agent_py_agent/tests/test_skill_proposals.py agent_py_agent/tests/test_decision_skill_proposal_review.py agent_py_agent/tests/test_decision_cooldown_persistence.py agent_py_agent/tests/test_decision_skill_proposal_review_integration.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1`
+  → **156 passed**。
+- 变异验证（6 个，逐个改代码→对应测试红→还原）：
+  1. 去掉取消记账调用 → `test_cancel_records_structured_cancelled_status_in_lesson_ledger` 红；
+  2. 去掉账本读回 run 状态分流 → `test_subagent_lesson_ledger` 3 个 run 状态测试红；
+  3. S1 措辞改回旧文案 → `test_scenario_wording_labels_applies_when_not_goal` 红；
+  4. 去掉 `_URL_WITH_QUERY` 检查 → privacy_url 两个测试红；
+  5. 去掉 persist 落盘 → `test_review_entry_persists_cooldown_next_to_proposals` 红；
+  6. restore 不过滤过期 → `test_restore_drops_expired_entries` 红。
+- 收尾门禁（全部通过）：guards9（10 文件）→ **167 passed**；`check_import_boundaries.py` → **0 条**；
+  `ruff check agent_py_agent scripts` → **All checks passed**；`check_doc_sync.py` → **DOC_SYNC_PASS**；
+  `check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → **hard=0, blocked=False**
+  （跑完还原 CODE_SIZE_REPORT.md）；`git diff --check` → 通过；`check_clean_package.py .` → **OK**；
+  `size_diff.sh` → **新增告警 0**（3 条 nesting 拆平后归零，消失 2 条）。
+
 ## P17 合入后的 code-size 拆平，行为不变（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`）
 
 - 拆掉 P17 新增的 3 条 high-risk 告警（只重构，不改行为、错误码、回执字段）：

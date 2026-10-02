@@ -398,12 +398,13 @@ def render_skill_markdown(skill_name: str, draft: SkillProposalDraft) -> str:
     )
 
 
-# LLM: 适用场景只作人读说明；没有来源任务目标时使用固定文案，不从正文推断场景。
+# LLM: 适用场景只作人读说明；applies_when 是“何时适用”的条件说明（账本经验取 when_to_use、结构化 lessons 取任务
+#   goal），不是任务目标本身，措辞统一叫“适用场景”，避免把条件标签误标成任务目标。没有来源说明时使用固定文案。
 # 函数用途: 生成 frontmatter 的 when_to_use 文案。
 def _when_to_use_text(scenario: str) -> str:
     if not scenario:
         return "处理与来源子代理任务相似的工作时参考。"
-    return "处理与来源任务相似的工作时参考；来源任务目标：" + _excerpt(scenario, _SCENARIO_EXCERPT_CHARS)
+    return "处理与来源子代理任务相似的工作时参考；适用场景：" + _excerpt(scenario, _SCENARIO_EXCERPT_CHARS)
 
 
 # LLM: 与 skills._parse_meta 的极简 YAML 子集对齐：# 之后会被当作注释截掉，值两端引号会被剥掉。
