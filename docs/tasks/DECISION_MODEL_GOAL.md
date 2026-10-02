@@ -279,3 +279,26 @@ P1-F 只读调查已用无网络小复现确认：原账本 failed/timed_out 可
 - 第一次真实运行发现新鲜度恒为 False：只读工具的归档没有 `runtime_gate`，宿主因此从不写 `tool_completed` 事件。插件线按通用方式修复（main `6a50d84aa`），决策侧集成测试改走真实写入口。
 - 合并后代码的 off/observe/apply/过期四档在隔离 owner 上全部成立，Jev 共 6 次（含修复前临时构建 3 次），累计 113 次。决策线测试机没有浏览器，本次在本机隔离目录与 8431 上跑，未碰 8420 与日常数据。
 - 同批发现：browser-lite 的相对路径、`file://` 与本机 http 地址和宿主门不一致（插件线后续项）；模型起的后台 http.server 监听所有网卡且 Gateway 停止后仍在（待主线评估）。两者都已登记台账。
+
+## 2026-09-26～09-29 后续合入（文档对账补充，2026-10-01）
+
+P1—P5 Goal 于 2026-09-25 关闭后，以下决策相关提交在 09-26～09-29 陆续合入 main（按 git log 摘录主要功能/修复，docs 记录不逐条列）：
+
+- `2cf214bd5` feat(decision)：observe 不挡主链路，会话范围 observe 调用转后台单 worker 执行（开关默认关）。
+- `611a2923a` feat(decision)：Jev 决策调用链路分段计时落盘，超时估算输入进 model_usage。
+- `57a26743e` feat(decision)：决策统计讲清“缺报”，没发出去的单列、不计入 Jev 失败率。
+- `5bafa2831` feat(decision)：非决策调用的“缺报”按决策段同一口径统一。
+- `b52913b29` fix(decision)：给每个后台决策点独立期限，不再受阶段倒计时残值约束。
+- `1e611a693` feat(decision)：observe 采样开关，成功满 6 次后本小时不再调用决策模型（默认关）。
+- `a6b3580cd` fix(user_config)：decision_patch 拒绝时指名是哪个未知字段。
+- `30163064a` feat：说明每个决策点为什么没触发（到达计数与未触发原因）。
+- `e236b5c48`／`bff1c6968`／`4852055b2` feat(decision)：model_selection／subagent_model／skill_tool 到达与未触发原因计数。
+- `619e45f18` refactor(decision)：点位期限与模型引用只留覆盖层。
+- `1b69ce34b` feat(settings)：三个决策点共用一个请求长度参数。
+- `54a384147` feat(decision)：长请求按带头带尾的标签片段发送。
+- `756d4b9bb` fix：逐点记录 Jev 决策，只冷却超时点（点位退避）。
+- `1b4248daf` fix(memory)：Curator 决策输入去重并提供窗口兜底，消除超窗 invalid_input。
+- `80b4afed8` feat(memory)：Curator 关系对按 BM25 词面相关度挑选（DESIGN_LEDGER 缺口 4）。
+- `2b25e38b3` fix(memory)：没配模型的 owner 不再每隔几分钟就失败一次。
+- `343eefce0` refactor(settings)：参数减量 C 组第 3 批，Curator 批大小与重试 2 键降为常量。
+- `421918865` docs(decision)：Jev 观察线收尾复测——observe_nonblocking 保持关闭。

@@ -234,7 +234,7 @@ IM 管理员身份与聊天内审批（主线，2026-09-26 合入，用户决定
 
 Gateway 安全重启第二批（主线，2026-09-26）：终端 `gateway restart` 默认经 `cli/gateway_restart_handover.safe_restart_from_cli` 写 kind=cli 请求并按状态文件等新进程号 running 或本请求 cancelled（托管自己的工具进程仍拒绝），`--force` 保留先停后起；排空期间 `_RequestDispatcher` 以 `hold_reason=gateway_restart_draining` 调 `dispatch_pending_requests`，只给待处理请求写 `admission_wait_*` 等待事实、不认领，客户端据此续期；TUI `tui_upgrade_follow` 读 `restart_drain.phase` 在页脚提示正在安全重启。回归见 `test_gateway_safe_restart.py`、`test_tui_upgrade_follow.py`、`test_gateway_commands.py`（旧先停后起用例改为显式 `--force`）。
 
-审计只读决策观察（决策线，2026-09-25，本地分支 `claude/decision-audit-controls`，待合并）：新增 `gateway_parts/request_audit_records.py`，
+审计只读决策观察（决策线，2026-09-25，本地分支 `claude/decision-audit-controls`，已合入 main `2093631e5`）：新增 `gateway_parts/request_audit_records.py`，
 为统一审计工具 `audit_records` 只读扫描请求记录里的 `model_selection_observation` 与 `capability_presentation_observation`，
 按 `conversation_claim.thread_id` 归属调用方给出的 owner 会话，字段白名单投影（不含 prompt、工具名清单等），
 只看窗口内修改过的记录、一次最多读 300 份，超出标 `truncated`，不写任何文件。入口是 `GatewayTaskBindingWriter.decision_audit_observations`：
@@ -255,11 +255,11 @@ Gateway 停止时结清在途模型调用（主线，2026-09-24，用户决定�
 
 Gateway 停止时主动取消在途决策（已合入 main `25650830d`，主线 owner 同意的一行）：`_cmd_gateway_run_cleanup` 置位停止事件后，立即调用 `decision_policy.cancel_active_decisions_for_shutdown()`，让正在等待决策模型的前台/后台调用回到原方案，关闭后不再发新决策。它只取消本进程内登记的决策句柄，不读写持久状态；用 try/except 包住，出错只记异常类型事件 `gateway_decision_cancel_failed`，不中断后续清理。停止时后台模型请求的结构化"被中断"记录由主线 owner 紧接着另加。详见[接入设计](../../design/DECISION_MODEL_INTEGRATION.md)第 4.2 节。
 
-决策实验对照记录与授权内自动晋升（本地分支 `claude/decision-experiment-records`，待审）：只观察实验调用经原账结算后，结构化对照条目（身份、配置版本、基线/候选名单、结算视图）经能力观察出口拆出写进同一请求记录的 `experiment_records`；回合正常收尾时按结构化工具账补写实际调用工具名，停止/关闭的回合不补写。`/experiment apply skill_tool …` 另授权宿主在证据规则（≥3 可比较样本、全部 charged、短名单召回 1.0、有节省）满足时，于回合收尾在精确回合锁内经原设置 CAS 把本会话 skill_tool 改为 apply，用户后改、撤销、到期、被替换都跳过不覆盖；回执写在 `experiment_records.promotion`，已有即不重试。普通请求零 I/O、请求字节不变。详见[E1 交接第三片](../../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第三片e2-对照记录f1-证据评估与授权内自动晋升2026-09-25)。
+决策实验对照记录与授权内自动晋升（本地分支 `claude/decision-experiment-records`，已合入 main `5306c9483`）：只观察实验调用经原账结算后，结构化对照条目（身份、配置版本、基线/候选名单、结算视图）经能力观察出口拆出写进同一请求记录的 `experiment_records`；回合正常收尾时按结构化工具账补写实际调用工具名，停止/关闭的回合不补写。`/experiment apply skill_tool …` 另授权宿主在证据规则（≥3 可比较样本、全部 charged、短名单召回 1.0、有节省）满足时，于回合收尾在精确回合锁内经原设置 CAS 把本会话 skill_tool 改为 apply，用户后改、撤销、到期、被替换都跳过不覆盖；回执写在 `experiment_records.promotion`，已有即不重试。普通请求零 I/O、请求字节不变。详见[E1 交接第三片](../../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第三片e2-对照记录f1-证据评估与授权内自动晋升2026-09-25)。
 
-决策实验授权入口（本地分支 `claude/decision-experiment-send-gate`，待审）：HTTP `/ask` 与文件队列沿 `/audit … prepare` 同一任务命令机制接收 `/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>`，参数冻结进排队请求的 `system_task`、模型只见任务正文；新增 `request_experiment.py` 在主轮绑定后、首个模型调用前于精确回合锁内写 `experiment_grant` 回执并调用 E1 授权原语，重放/重启不再授权，失败只提示用户、不阻断业务。发送硬门、经验输入上界与结算归决策服务和传输层，详见[E1 交接](../../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第二片experiment-授权入口经验输入上界与发送硬门2026-09-24)。
+决策实验授权入口（本地分支 `claude/decision-experiment-send-gate`，已合入 main `2cf214bd5` 等）：HTTP `/ask` 与文件队列沿 `/audit … prepare` 同一任务命令机制接收 `/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>`，参数冻结进排队请求的 `system_task`、模型只见任务正文；新增 `request_experiment.py` 在主轮绑定后、首个模型调用前于精确回合锁内写 `experiment_grant` 回执并调用 E1 授权原语，重放/重启不再授权，失败只提示用户、不阻断业务。发送硬门、经验输入上界与结算归决策服务和传输层，详见[E1 交接](../../tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第二片experiment-授权入口经验输入上界与发送硬门2026-09-24)。
 
-能力推荐观测写进请求记录（本地分支 `claude/decision-capability-observation`，待审）：真的发起过能力推荐决策时，结构化观测（码、版本、名称与计数，无正文）经独立 observer 追加到 `capability_presentation_observation.entries`，最多 8 条；与模型观察同一 active-turn 事务，回合终结时照原语义抛中断，其它写盘失败只放弃这一条，内存请求同步更新。原展示回调、已有键不变。
+能力推荐观测写进请求记录（本地分支 `claude/decision-capability-observation`，已合入 main（P4-G 真实验收随 `7143ef631` 关闭 item 13））：真的发起过能力推荐决策时，结构化观测（码、版本、名称与计数，无正文）经独立 observer 追加到 `capability_presentation_observation.entries`，最多 8 条；与模型观察同一 active-turn 事务，回合终结时照原语义抛中断，其它写盘失败只放弃这一条，内存请求同步更新。原展示回调、已有键不变。
 
 Gateway 消息文件流式读取（本地分支 `claude/decision-gateway-message-reads`，待审）：建索引、近期产物、追加与补写去重不再按行数整块物化尾部，改为与原实现逐项等价的字节有界流式读取；4.2M 字符夹具上准备期峰值 21.33→0.82MB、全程 22.65→10.03MB，每次请求三次读取约 122→19ms。详见[容量审计](../../tasks/DECISION_MODEL_CONTEXT_AUDIT.md#gateway-213mb-峰值来自整块读取消息文件2026-09-24已实施待审)。
 

@@ -89,7 +89,7 @@ Gateway 用户的记忆总闸按各自 home 生效（分支 `claude/9b-owner-pat
 
 子代理 run 工作区登记 `lessons.jsonl`（2026-09-25，已合入 main `52e0190e1`；已端到端真实验收）：`AgentRunWorkspacePaths` 新增 `lessons_jsonl`，与 `findings.jsonl` 同目录，由子代理 `record_lesson` 工具独占追加；工作区同步不创建也不覆盖它。账本经验经子代理结果收口进入 owner `candidates.jsonl`，成为 `subagent_lesson` 候选：适用场景取 `when_to_use`，证据引用账本条目。晋升规则不变，正式 lesson 仍要 approved、重复独立证据（occurrence≥2）并通过威胁扫描。
 
-召回证据落上下文包（本地分支 `claude/decision-recall-evidence`，待审）：上下文包 `memory_refs` 新增本轮实际注入记忆的来源清单与记忆决策发现码，区分原完整召回与召回前补充；提示段字节不变。为第 14 项 P5-A 的真实收益实验提供结构化证据。
+召回证据落上下文包（本地分支 `claude/decision-recall-evidence`，已合入 main `ab23a2666`；真实验收随 `2efbbcd68` 记录）：上下文包 `memory_refs` 新增本轮实际注入记忆的来源清单与记忆决策发现码，区分原完整召回与召回前补充；提示段字节不变。为第 14 项 P5-A 的真实收益实验提供结构化证据。
 
 child历史说明在不展示正文时不再提前读取完整来源或计算展示窗口，保留原线程说明及核验；三文件31项通过。三宿主seed物化峰值已定位，后续延后/释放尚未实施，12.4未完成。
 
@@ -249,7 +249,7 @@ dev 同时裁定 `criteria` **不上提**成共享引用：它是与 Jev 决策�
 新增测试 `test_decision_curator_relation_selection.py` 9 项：越界相关对可达、同输入同输出、空材料三种边界、
 覆盖声明能区分"全部比过"与"只比了一部分"、同分退回原枚举序、无嵌入入口。变异两处（分数方向反转、去掉同分
 原序兜底）都被杀死，各恰好 1 条红。定向回归 125 项通过（含 relation 原 44 项、curator、架构护栏、打包边界）。
-真机 Jev 样本对比未做，按 dev 安排合入 main 后先不部署、等 Jev 复测取数。
+真机 Jev 样本对比未做，已合入 main（`80b4afed8`），等 Jev 复测取数。
 
 2026-09-28 retention 扫描覆盖新版运行根（dsh-9b 盘点零风险缺口，dev 派单）：`MemoryRetentionService` 原来只扫
 `O/tasks`，新版运行工作区 `O/runs` 不在范围内，那部分恢复材料永远不会被回收。现新增
