@@ -250,4 +250,3 @@ def test_host_shutdown_mark_only_touches_its_own_running_executor(tmp_path):
     finally:
         release.set()
         worker.join(5)
-

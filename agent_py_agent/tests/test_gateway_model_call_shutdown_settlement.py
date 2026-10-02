@@ -578,4 +578,3 @@ def test_gateway_cleanup_survives_a_failing_executor_mark(monkeypatch):
     assert report["host_shutdown_executors"] == 0 and "heartbeat" in order
     failed = [payload for name, payload in events if name == "gateway_executor_shutdown_mark_failed"]
     assert failed == [{"error_type": "RuntimeError"}], "只记异常类型，不记异常正文"
-
