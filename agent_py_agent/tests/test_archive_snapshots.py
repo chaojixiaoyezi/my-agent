@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
 class TestEstimateTokens:
     """测试 token 估算函数。"""
 
