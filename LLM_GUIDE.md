@@ -1,40 +1,40 @@
 # LLM_GUIDE
 
-C7（2026-10-02，sol，本地已实施、待集成）：用户智能程度固定八档，唯一换算表在 backends/reasoning_control；
+C7（2026-10-02，sol，已上线 step17a，main de222698b，2026-10-02）：用户智能程度固定八档，唯一换算表在 backends/reasoning_control；
 菜单/命令/schema 不再另写档位白名单，发送和回执共用声明筛选。线程/child 保留用户值，投影与发送按候选模型降档。
 不要为 Responses 借用 Chat 容量投影或按型号猜支持。三个变异有组件证据，旧 Gateway 控制失败保持在 TESTS；
 真实模型、终端与 IM 客户端未验证，建议由 3a 集成后核 xhigh/ultra 出站值及降档回执。
 
-J10（2026-10-02，sol2，本地实现、待集成）：`delivery_quality` 沿原 `_optional_result_hints` 消费成功写入的 stale/last_verification_id，
+J10（2026-10-02，sol2，已上线 step17a，main de222698b，2026-10-02）：`delivery_quality` 沿原 `_optional_result_hints` 消费成功写入的 stale/last_verification_id，
 核对同 run/task 较早焦点；只有多个 stale 才选择，保留总焦点 2—12 界限。两入口共用本轮参数集合逐记录一次，
 去重不是工具幂等或完成状态，不持久化；observe 不追加、子代理及已收口不触发、来源/设置/期限变化丢弃。
 定向 208、guards9 168 项与三项变异有离线证据，真实 Jev/采用由 be 集成后复测，不增加完成门或强制续跑，详见 TESTS。
 
-J11（2026-10-02，sol56，本地实现、待集成/真实验收）：主会话与子代理首轮选模共用结构化输入模态判定。
+J11（2026-10-02，sol56，已上线 step17a，main de222698b，2026-10-02；真实验收仍待做）：主会话与子代理首轮选模共用结构化输入模态判定。
 只认 Gateway `input_media`、冻结 canonical media 块与档案 `input_modalities`；不读普通正文、不从文件名或模型名猜能力。
 image/video 候选须显式声明支持；全无兼容候选保留原模型并记结构化提示；纯文本兼容旧档案，未知历史仍为
 `history_modality_unknown`。本地聚焦 205+18 项、三个变异、guards9 168 项和全部静态门禁已验，size_diff 新增 0；命令见 TESTS。
 真实 Gateway/TUI/Decision/收费模型及真实带图自动换模未验证，后续由 3a 集成后按主会话与 child 各复核一例。
 
-P12（2026-10-01，sol，本地实现、待集成/部署）：Curator 的固定引用只走原模型目录解析与后端工厂，默认空值仍沿 owner 选择。
+P12（2026-10-01，sol，已上线 step17a，main de222698b，2026-10-02）：Curator 的固定引用只走原模型目录解析与后端工厂，默认空值仍沿 owner 选择。
 `memory_curator_model_profile` 是安全边界，模型 set/reset/revert 不可改；只在可信管理员用户 `/settings` 的同步作用域允许此键，
 actor 标签不是授权。失效保留原未配置失败码、退避及运行账诊断，不回退聊天凭据；旧两覆盖键不保留兼容转换。
 定向 235、守卫 167 项与三个变异有组件证据，恢复回归 99 项通过；真实模型、Gateway、终端与 IM 客户端未验证，不能写成生产可用。
 后续由 3a 集成部署，绑定实际 deepseek-v4-flash 档案并复核重启与渠道显示；多 owner 须遵守原共享授权。详见 TESTS 和记忆模块文档。
 
-C14 M-B1（2026-10-01，sol2，本地候选已实现、待外部复验/集成）：`plugins/shuohao-novel-gates/` 提供五阶段只读门，
+C14 M-B1（2026-10-01，sol2，已上线 step17a，main de222698b，2026-10-02；宿主启用链仍需沙箱外复核）：`plugins/shuohao-novel-gates/` 提供五阶段只读门，
 同源声明、逐次读取上下文、原样来源/NUL 与无工作区日志有仓库证据。缺依赖门 skipped，不把 passed 当全部已验。
 宿主结果分层 JSON 解码；本机宿主启用失败、嵌套 Seatbelt 跳过仍保留，由 3a 沙箱外复验；真实 TUI/模型未验证。
 没有新增配置或宿主通道；后续修改需联测 `test_shuohao_novel_gates.py`、74+20 向量和固定来源摘要，详见 TESTS 与插件 README。
 收尾补充（2026-10-02，3a）：只跑 M-B1/跨语言样例等直接相关文件与 guards9，不再执行全仓或无文件列表的-x。
 跨语言样例 2 passed、2 failed，均在启用确认处失败；本机限制交外部复核，未变输入的有效证据复用。
 
-C14 第一批 M-A1 + M-A2（2026-10-01，sol56，本地实现、待 ae 审查/3a 集成）：`drama-media-shell` 已迁入固定 MIT 上游的
+C14 第一批 M-A1 + M-A2（2026-10-01，sol56，已上线 step17a，main de222698b，2026-10-02）：`drama-media-shell` 已迁入固定 MIT 上游的
 四个离线提示词检查器和 fixture-only 生产作业流程。工作区只走 SDK 0.2.0 逐次上下文，作业记录只进插件私有目录；
 包内明确没有付费供应商适配器、Remotion 或限用途小说样例，fixture 不算真实生成。实际包/MCP 聚焦 9 项已验；真实 TUI、
 真实模型和正式部署未验证。本轮未启动 Gateway、未改用户配置。后续先审查许可/来源与付费代码排除，再在集成版做原生验收。
 
-C10（2026-10-01，sol，本地实现、待集成）：IM 的 `/plugins` 和 `/plugins@<插件ID>` 已复用 TUI
+C10（2026-10-01，sol，已上线 step17a，main de222698b，2026-10-02）：IM 的 `/plugins` 和 `/plugins@<插件ID>` 已复用 TUI
 插件服务；管理仅可信管理员，含可执行程序的启用保留原预览与 `--confirm`。定向 155 项、架构守卫
 166 项、导入边界零条与三个变异已验；真实 IM 收发未验证。本轮没有新配置、Gateway 启停或部署。
 后续由集成者核对组合后在真实普通用户、管理员私聊和群聊验收；详见 TESTS 与 Gateway 模块文档。
@@ -765,6 +765,6 @@ def example(...):
 <!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
 新增 TUI 图片/视频输入沿 owner 私有内容引用、Gateway ask 和原生消息传递；官网 M3 已识别图片与视频并在重连后继续读取。官网 M2.7 已完成 100 独立身份/50 执行槽真模型验收，替代前轮假模型的验收结论。默认环境仍未切换，见 [媒体合同](docs/design/TUI_INPUT_MEDIA.md) 与 TESTS。
 
-决策实验晋升提示 J6（2026-10-01，本地待集成）：只从新写入的 applied 回执生成提示，沿原 host_notice 队列、当轮流、canonical final
+决策实验晋升提示 J6（2026-10-01，已上线 step17a，main de222698b，2026-10-02）：只从新写入的 applied 回执生成提示，沿原 host_notice 队列、当轮流、canonical final
 和 IM DeliveryService 送达，不开第二条通道；原 promotion 是唯一幂等账。回执冻结规则与 promotion_id，设置撤销走 /model 本会话逐字段恢复继承。
 隔离链路、TUI renderer 与三项变异有证据，真实终端/飞书收信未验证；改动时联测晋升、host_notices 与 adapter_manager，见 TESTS 的 J6 节。

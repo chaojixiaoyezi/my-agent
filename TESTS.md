@@ -9,6 +9,41 @@
 - `test_tool_operation_idempotency.py` 的“本机已死持有者”用例改用 `tool_operation_host_id()` 造同主机持有者，原来用的是主机名。
 - 变异 4 个，全部被拦住：持有者仍记主机名、工具操作租约仍按主机名比、本地核对标记仍按主机名比、runtime.db 核对标记仍按主机名比。
 
+## step17a 文档状态对账（2026-10-02，分支 `worker/ds2-docs-reconcile-step17a`；只改文档，无产品/测试代码变更）
+
+**来源**：step17a 已上线（main `de222698b`，10-02 03:43 部署本机生产），但台账/状态/路线图/模块文档里随它上线的条目仍写“待集成/未部署”。
+
+**判据（唯一）**：`git show de222698b:DESIGN_LEDGER.md`（以及同名文件在 `de222698b` 的版本）里是否已有该章节标题；
+有 = 随 step17a 上线，无 = 本分支新增未上线。再用 `git log -S'<原文>' de222698b -- <文件>` 取引入提交，
+`git merge-base --is-ancestor <引入提交> de222698b` 复核。不按标题里的“基于某个基线”推断（那是作者当时的基线，不代表上线时点）。
+
+**核对结果**：DESIGN_LEDGER 当前 170 章 vs de222698b 版 161 章；**恰好 10 章是当前独有**——3a 点名的 9 个
+（主机名 SIGTERM、C5 登记组件探针、C5 剩余竞态、IM 出口脱敏、J16 Computer Use、插件来源越权、J9 memory_search、
+P14 必须修、P13+P14 嵌入档案）加本次新增的对账段。这 9 章保持“待上线（下一版）”，其余 160 章标“已上线 step17a”。
+
+**改动范围**（只改状态字样，正文/结论/数字不动）：
+- `DESIGN_LEDGER.md`：160 章标题状态；顶部新增本节与对账说明段。
+- `STATUS.md`、`docs/ROADMAP.md`、`docs/COMPLETED.md`、`LLM_GUIDE.md`、`docs/design/PARAMETER_CENTER.md`、
+  `docs/modules/gateway/{02-progress,04-structure}.md`、`docs/modules/memory/02-progress.md`：对应条目状态。
+- `TESTS.md`：删掉 5 个合并残留的重复 `##` 标题（保留正文更长的），新增本节。
+
+**验证命令与结果**：
+```
+python tmp/ledger-authority-check.py                       # 权威判据：列出本分支独有章节
+git show de222698b:DESIGN_LEDGER.md > /tmp/ledger-de222698b.md   # 比对基准
+python scripts/check_doc_sync.py        # DOC_SYNC_PASS
+git diff --check                        # rc=0
+python scripts/check_import_boundaries.py  # findings=0
+python -m ruff check agent_py_agent scripts   # All checks passed!
+python scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+                                        # hard=0 high-risk=1527 soft=707 blocked=False（报告已 checkout 还原）
+python scripts/check_clean_package.py .  # OK
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告警 0、消失 1
+```
+**变异/反向核对**：用同一判据反查“本分支独有却标已上线”的章节，初版脚本曾把 8 个未上线章节误标，
+经完整标题集合比对后全部改回；`P13+P14 嵌入档案`（基于 `ed64438fc`）初版误判为未上线，grep `de222698b` 版确认
+其实已存在，改回已上线。**没有产品代码或测试代码改动**，未跑 pytest（本轮无被测对象）。
+
 ## 主机名变化后 SIGTERM 仍能停网关（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`）
 
 - `test_gateway_host_identity.py`（新增，7 项）：
@@ -585,7 +620,7 @@
   - frontend 配置目录用 `node frontend/scripts/sync-backend-config.mjs` 重新生成（246 fields）。
 - **未验证**：生产真实嵌入模型请求、运行中的 Gateway、真实 TUI/IM 展示与权限链路（沙箱外由 3a 复核）。
 
-## J10：成功写入后多个 stale 焦点的交付复核（2026-10-02，sol2，待集成/真实复测）
+## J10：成功写入后多个 stale 焦点的交付复核（2026-10-02，sol2，已上线 step17a，main de222698b，2026-10-02；真实复测仍待做）
 
 - **来源与做法**：落实 DESIGN_LEDGER 的“改后未复核”（指定实施标记 2026-10-01）。成功写入只消费原
   `verification_state.status=stale/last_verification_id`，核对 canonical/归档与同 run/task 较早焦点；总焦点仍 2—12，
@@ -742,7 +777,7 @@ bash "$HOME/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh" "$PWD"
 
 ## C7：/effort xhigh / ultra（2026-10-02，sol，分支 `worker/sol-effort-levels`，基于 `b49e93ae8`）
 
-**状态**：本地八档实现及组件验收完成，未集成/部署，未调用真实模型；台账原待定项按要求注明“已实施（2026-10-01）”，本节为实际验证日期。
+**状态**：八档实现及组件验收完成，已随 step17a 上线（main de222698b，2026-10-02），未调用真实模型；台账原待定项按要求注明“已实施（2026-10-01）”，本节为实际验证日期。
 解决声明了高档却无法选择的问题；唯一换算表同时供菜单、schema、实际组包与效果回执使用，显式声明无交集不发送 effort。
 Chat/Messages 的 xhigh→high、ultra→max/high；Responses 依声明筛选；预算新值及原夹紧、强制关闭思考均保留。
 
@@ -1159,7 +1194,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
 - 未验证：`test_backend_config_catalog.py`/`test_frontend_settings_labels.py`（前端目录守卫，P17 未动 frontend/、只加行尾注释不改键，理论不受影响，
   未单独跑）；真实 Gateway 进程里的 `/settings` 交互（测试走控制服务单测，未启动 Gateway）。
 
-## P12：Curator 固定模型档案（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，未集成/部署）
+## P12：Curator 固定模型档案（2026-10-01，sol，`worker/sol-curator-profile`，已上线 step17a，main de222698b，2026-10-02）
 
 - 来源：3a 的 P12 合同；新增 `test_curator_model_profile.py`，使用临时 owner 目录、假凭据和模型响应，不读生产正文或调用真实服务。
 - 做法：复用原档案整组解析、后端工厂和 Curator 失败运行账；新键空值沿 owner 选择，失效不回退；仅管理员用户 `/settings` 的可信调用作用域可写，模型 set/reset/revert 仍拒绝。
@@ -1457,7 +1492,7 @@ git diff --check
 - **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 50 个加仓库级扫描守卫（含 `test_packaging.py`）：1253 passed；
   Ruff、doc sync、strict code-size（与 `34e4d874e` 比新增 finding 0）、`git diff --check`、clean-package 全部通过。
 
-## J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，本地待集成）
+## J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，已上线 step17a，main de222698b，2026-10-02）
 
 - **来源与做法**：DESIGN_LEDGER 原“决策实验自动晋升后没有主动提示”。新 `applied` 回执冻结 `promotion_id` 和 `evaluation.rule`，
   经 Goal 熔断共用的宿主提示队列、当轮流、canonical final 与原 IM DeliveryService 送达，不读自然语言、不新开通知通道。
@@ -3778,25 +3813,6 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
   - 只数、没有删除现有的克隆；用户日常 Chrome（pid 4415）全程没碰。
 - 只跑相关定向测试，basetemp 跑完即删，测试未生成 pycache。
 
-## audit-log --cleanup 按 owner canonical 路径解析（2026-09-28，分支 `my-agent/self-dev-4`，基于 `80b4afed8`）
-
-- **来源**：dsh-9b 的产品持久数据盘点（`docs/design/STORAGE_RETENTION.md`）零风险缺口之一——`audit-log --cleanup` 按相对路径解析，指到了错误的文件。
-- **根因**：`audit/paths.py:resolve_audit_paths` 把配置里的相对值（默认 `data/audit`）直接 `Path(...)` 展开，于是相对**进程 cwd**。Agent 启动时 `core.py:450 apply_runtime_paths_to_config` 会把 canonical 的绝对 `audit_log_path`（`owner_logs_dir/audit`）注入 config，所以写入端没问题；但 CLI 的 `audit-log` 只 `load_config`、没有走 runtime paths，于是拿到空串 → 落到 `data/audit`，随启动目录漂移。在不同 cwd 下执行会清到不同文件，甚至可能清掉工作区里恰好同名的 `data/audit/audit.jsonl`。
-- **做法**：`resolve_audit_paths(config, *, root=None)` 新增可选基准；给了基准且配置值是相对路径时，按基准展开，绝对路径原样尊重；不传时保持旧的相对语义（不影响既有测试与旧调用方）。`AuditQuery.__init__` 同样接受 `root`。CLI 用 `workspace_resolution.owner_home_workspace_root(config)` 取 canonical owner home 传入，替换原先取到就没用上的 `resolve_workspace_root`。
-- **新增测试**：`test_audit_cleanup_path.py`（9 项）——相对路径按基准解析、绝对路径不被改写、无基准保持旧语义、**两个不同 cwd 下清的都是 canonical 那一个且工作区同名文件绝不被碰**、保留期 ≤ 0 不删任何记录、清理不越出给定 owner home、查询视图的 root 与 file 两个字段都跟着基准、带后缀的相对路径、生产同形路径落在 owner home 内。
-- **变异验证**：`_mutate_audit_path.py`（工作目录 `tasks/2026-09-28/storage-retention-fixes/`）两处，先 `git diff` 存补丁、`git checkout -- .` + `git apply` 还原：
-  - 完全去掉基准解析（回到随 cwd 漂移）→ 6 条红；
-  - 假装支持基准但实际用 `Path.cwd()` 兜底 → 同样 6 条红；
-  - 还原后 9 项全绿。
-- **定向回归**：`test_audit_cleanup_path.py` + `test_audit_class.py` + `test_audit_redaction.py` 共 26 项通过。
-- **复现**：
-  ```
-  cd <worktree>
-  python3 -m pytest agent_py_agent/tests/test_audit_cleanup_path.py agent_py_agent/tests/test_audit_class.py agent_py_agent/tests/test_audit_redaction.py -q
-  python3 <工作目录>/_mutate_audit_path.py ignore-root      # 期望 6 条红
-  ```
-- **未覆盖**：没在真实生产 home 上跑 `audit-log --cleanup`（会真删生产审计记录），只在小规模临时目录里验证。
-
 ## 会话互通：list_owner_sessions 模型工具（2026-09-28，分支 `claude/75-list-owner-sessions`，基于 `80b4afed8`）
 
 - **范围**：新文件 `orchestration/tools/list_owner_sessions.py`（工具 + 可见性判定）；`core._register_orchestration_tools`
@@ -4752,24 +4768,6 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **变异验证**：摘掉 `status.py` 的新判定后，跨 owner 与不存在两条用例重新变红。
 - 同类静默清单（`task_progress`、`cancel_subagents`）见交流板；该项已转由 my-agent-2 统一收口。
 
-## Jev curator invalid_input 快速失败修复（2026-09-28，分支 `my-agent/self-dev-4`）
-
-- **node 与 bun 的差别**：没有差别。同一基线上 `node frontend/scripts/sync-backend-config.mjs` 与 `bun …` 生成的目录逐字相同，
-  `--check` 两种都通过；脚本只读仓库里三份 YAML，用自带解析器，没有环境、排序或 locale 依赖。“大量无关差异”其实是目录自
-  `8ba5bf013`（278 项）以来没再生成：相对它，新目录只有 C 组删掉的 14 个键、其后 196 个字段的全局 `order` 顺移（77 个组内位置
-  变化）；说明没有变化。
-- **孤立分组标题**：杂项批 `35259e86c` 删掉 `conversation_pending_wake_limit` 时，留下的分组标题注释与
-  `background_context_max_total_tokens` 自己的注释连成一段；前端生成器（空行不打断注释）与后端
-  `parameter_registry._descriptions_from_lines` 都把整段并进说明。第二个提交按集成者决定删掉这段标题：后端 222 个键里只有这一个
-  键的说明变回它自己那句，目录相对 `8ba5bf013` 的说明变化归零；说明基线是空说明名单、不含此键，未改。只加空行不行：
-  后端会恢复，前端生成器不会。
-- **设置页**：14 个键里只有 `memory_resume_auto_context_limit` 还有表单项（`SettingsMemory.tsx`），已删；store 默认值暂留
-  （沿 `3af7c94df`）。
-- **验证**：两个提交后各跑一次，`node … --check` 与 `bun … --check` 均 rc=0；参数注册表与说明基线等 55 个相关测试文件
-  1075 passed；`bun build frontend/src/main.tsx --packages external --target browser`
-  rc=0（`@apply` 为既有 CSS 提示）；Bun TSX 转译器转译 `frontend/src` 下 47 个 TS/TSX 全部通过；静态门禁 ruff、doc_sync、
-  strict code_size、diff --check、clean_package。
-
 ## 能力配置随包模板与 dataclass 逐项一致，删除 12 个死字段（2026-09-28，分支 `claude/9a-lark-and-capcfg`）
 
 - **起因**：
@@ -4852,31 +4850,6 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **变异**：2 个变异都变红：不带任何接替键；无论有没有值都带上两个键。
 - **回归**：11 个文件，包括新测试、本地存储与 local_doctor 相关测试、test_architecture_guardrails 和 test_constant_names_unique；结果 146 passed。
 - **门禁**：ruff、doc_sync、strict code-size、`git diff --check`、check_clean_package 全部退出 0，CODE_SIZE_REPORT.md 在提交前已还原。
-
-## 会话间消息与派活第 2 片：TUI 命令 /tell 与 /sessions threads（2026-09-28，分支 `my-agent/self-dev-3`）
-
-- **来源**：开发交流板第 2 片（TUI 命令：列会话、发消息）。dev 指出 `/sessions`（SessionManager 的 CLI 恢复记录）
-  与会话消息目标 `ConversationThread` 不是同一套，需要处理映射。
-- **做法**：
-  - `command_catalog.py` 新增 `tell` 命令声明（`/tell <目标会话> <消息>`），并给 `/sessions` 加
-    `/sessions threads` 用法变体；帮助文案自动带上。
-  - `slash_commands.py` 新增 `_handle_tell_command` + `_tell_message` + `_thread_channel` + `_print_message_targets`；
-    注册进 `handlers` 元组。
-  - **映射处理**：`/sessions`（无参数）保持原样，仍列 SessionManager 的 CLI 恢复记录；
-    新增 `/sessions threads` 专门列 canonical `ConversationThread`（消息目标的权威），
-    两套记录不混用，也不再从会话正文猜标题。
-  - `/tell` 与模型工具**共用同一权限判定与投递语义**：读 `home_paths` 结构化身份 → 权限判定
-    → `guidance.append_once` 幂等入队 → 目标 active 时 `wake.raise_signal`；
-    失败返回带稳定错误码的文案（`SESSION_IDENTITY_UNAVAILABLE` / `SESSION_MESSAGING_DISABLED` /
-    `SESSION_TARGET_OUT_OF_SCOPE` / `SESSION_TARGET_CHANNEL_UNSUPPORTED`）。
-- **新测试**：`test_tell_command.py`（8 项）——命令已声明、缺参数给用法、身份缺失 fail closed、
-  开关关闭返回 DISABLED、目标不存在返回越界码、成功入队并唤醒、IM 目标拒绝、`/sessions threads` 列目标。
-- **复现**：`python3 -m pytest agent_py_agent/tests/test_tell_command.py agent_py_agent/tests/test_session_messaging_permissions.py agent_py_agent/tests/test_send_session_message_tool.py agent_py_agent/tests/test_session_message_rendering.py agent_py_agent/tests/test_recovery_code_policy.py -q`（66 项）。
-- **测试设计踩坑**：`capability_config_for_agent` 只认真正的 `CapabilityConfig` 实例，替身对象会被跳过并回落到
-  真实文件加载（于是测试改开关无效）；测试改用真正的 `CapabilityConfig` 后恢复正常。
-- **未完成**（如实标注）：dev 要求的"目标 TUI 显示收到的消息/任务及来源、发送方 TUI 显示投递与任务状态"
-  中，**显示部分只在 /tell 回执里做了发送方一侧**；接收方 TUI 的展示与任务状态显示要等第 3 片（派任务）一起做。
-- 五项静态 gate（ruff/doc_sync/strict code-size/diff --check）通过。
 
 ## 参数减量杂项批：compact 语义摘要 4 键 + 唤醒消费/合并窗口 2 键降为常量（2026-09-28，分支 `my-agent/self-dev-2`）
 
@@ -6451,23 +6424,6 @@ C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 check
 - **触发行为不变**：各点位原有测试全部原样通过（只把三处替身目标从 `_eligible` 改名为 `_miss_reason`）。
 - **集成复核补测**（集成者）：独立变异抽查 5 种，“汇总忽略时间窗（7 天数据冒充近 24 小时）”与“读取不校验格式版本”两种存活；补 `test_summary_counts_only_hours_inside_the_window_and_ignores_foreign_schemas` 后两种都被抓住。全仓 12 分片 22,234 passed、0 失败。
 
-## Compact：带归档引用的工具回执可以移入摘要来源（2026-09-27，分支 `claude/compact-archived-refs`，基于 main `54a384147`）
-
-- **来源**：Codex G02 真实验收（通用能力包，65k 窗口）。五组工具往返各含外置输出或 read_artifact 的引用回执；分区把任何带引用回执都判为不完整，
-  整组留在保留区、同四元归档被连带排除，`partition_recovery_tool_source` 返回 None，强制恢复报 `COMPACT_TOOL_COVERAGE_UNKNOWN`。
-- **做法**：引用值等于同一四元身份原归档自己写下的输出位置（`output_path`/`artifact_ref`/`source_artifact_ref`）才算由归档保存；
-  其余引用（工具自报、媒体、未记录）和 json/数据块照旧整组保留；`CarriedToolCompactSource` 用自身 source_records 重算同一判据。
-- **新测试**：
-  - `test_compact_tool_partition.py` 新增 9 项：外置输出引用可移入；read_artifact 来源引用按值匹配；6 种保留情形（未记录、工具自报、媒体、
-    json 块、带数据的文本块、无归档记录）；来源对象按自身归档复核。
-  - 新文件 `test_compact_tool_ref_archive_chain.py`（4 项），零网络组合复现：沿真实外置/归档投影、与 executor 同形的回执、归档记录、
-    reducer 实时投影、原生 IR 记录器和真实 read_artifact 读取器。外置与内联同组、read_artifact 来源引用、恢复 attempt 的调用整组移入，
-    工具自报引用的组保留；摘要素材等于原 IR。同步用例钉住：投影给出的完整输出引用总是归档自有字段，工具自报引用从不属于这些字段。
-- **复现**：组合用例放到修复前的 `54a384147` 上运行，分区返回 None，与 G02 现场一致。
-- **变异验证**：12 个变异抓到 11 个（改回“有引用即不完整”、接受未记录引用、没有归档也接受、去掉媒体判断、去掉数据块判断、计入顶层
-  tool_result_refs、计入信封引用、去掉 source_artifact_ref、引用块不核对值、来源对象跳过归档复核、分区不用归档）。去掉 `artifact_ref`
-  字段的变异存活：真实记录里它总与 `output_path` 或 `source_artifact_ref` 同值出现，属等价变异。
-- **相关测试**：压缩、归档与投影相关的 34 个测试文件加新文件、架构守卫、常数名守卫，600 passed、4 xpassed（原有非严格 xfail）。
 ## 参数中心第二批：凭据脱敏与边界收紧、说明纠正、回执补全（2026-09-27，分支 `claude/be-param-descriptions` 第二个提交）
 
 - **来源**：集成者转来分类子代理的发现。`input_media_token_reserve` 等 8 个数量/上限参数因名字里有 token/prompt/path/owner/home/audit
@@ -10546,14 +10502,6 @@ python3 scripts/check_clean_package.py .
 注释与示例清理要比较生产 Python AST、默认配置值、协议与依赖标识。允许的人类展示字符串变化需单列；构建包检查 LICENSE/NOTICE、vendor 许可和不含秘密数据。历史重写须先备份、只改授权引用、带 lease 更新，验证发布树不变。
 
 <!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
-## 真实开发长任务验收方法
-
-用户明确要求长对话验收使用真实项目开发过程，禁止把重复生成的大行数当作真实任务通过依据。
-当前选择让官网 MiniMax-M2.7 的 my-agent 在原生 TUI 中把 GitHub `sharkdp/fd` 从 Rust 复刻为 Python，
-自行读源码、实现、运行测试、修复并提交项目产物。测试者只提交一次普通中文需求并观察，不能代写或补交产物。
-记录自然产生的模型/工具回合、Compact、TUI 状态、CPU/RSS、退出/恢复与任务结果；未实际发生的长历史边界不计为通过。
-下文合成一万/千万行记录只作为存储边界和缺陷复现，不代表此类真实开发工作负载。当前真实开发验收待完成。
-
 ## 官网真模型与TUI媒体验收
 
 2026-09-23，独立候选线，专用测试机限制为 1 CPU / 2 GiB；官网直连，不通过中转，不使用假模型作为本轮验收。

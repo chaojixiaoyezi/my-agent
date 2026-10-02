@@ -1,15 +1,15 @@
 # 当前状态
 
-C7（2026-10-02，sol，`worker/sol-effort-levels`，本地已实施、待集成）：/effort 可选八档，Responses 依声明选择 xhigh/ultra，
+C7（2026-10-02，sol，`worker/sol-effort-levels`，已上线 step17a，main de222698b，2026-10-02）：/effort 可选八档，Responses 依声明选择 xhigh/ultra，
 Chat/Messages 沿原 high/max，budget 保留原夹紧，回执说出实际值。组件与三个变异有证据，扩展回归旧失败保留 TESTS。
 真实模型及实际 TUI/IM 未验证；本线没有部署、改生产配置或启停 Gateway，下一步由 3a 集成后核对新档。
 
-J10（2026-10-02，sol2，`worker/sol2-j10-delivery-stale`，本地已实现、待集成）：成功写入使已有验证焦点 stale 时，
+J10（2026-10-02，sol2，`worker/sol2-j10-delivery-stale`，已上线 step17a，main de222698b，2026-10-02）：成功写入使已有验证焦点 stale 时，
 原交付复核消费者会在多个 stale 中可选挑一个；一个 stale 不请 Jev，写入与命令共用本轮逐记录一次，observe 只记账。
 原结果、验证账、Todo、收口和最终回复不改，无完成门或强制续跑。定向 208 项、guards9 168 项及三项变异有本地证据，详见 TESTS。
 真实 Jev/模型采用/交付质量未验证，由 3a 集成后交 be 复测；本线无真实设置、供应商调用或 Gateway 操作。
 
-P12（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，待集成/部署）：Curator 可引用固定的 agentic 模型档案，
+P12（2026-10-01，sol，`worker/sol-curator-profile`，已上线 step17a，main de222698b，2026-10-02）：Curator 可引用固定的 agentic 模型档案，
 完整采用其自身连接；空值沿 owner 选择，失效不回退，原未配置失败码/退避与结构化诊断保留。旧 provider/model 键只告警，
 新键仅管理员用户 `/settings` 可写，TUI/IM 共用编号与型号展示。定向 235、守卫 167 项通过，三个变异拦截后恢复回归 99 项通过。
 真实模型、Gateway 重启及实际 TUI/IM 未验证。下一步由 3a 集成部署后绑定实际 deepseek-v4-flash 档案，详见 TESTS。
@@ -27,14 +27,14 @@ C14 第一批 M-A1 + M-A2（2026-10-01，`worker/sol56-c14-ma12`，本地已实�
 读写走 SDK 0.2.0 逐次上下文，作业账只在插件私有目录；包内没有付费供应商代码、Remotion 或限用途小说样例。
 聚焦实际包/MCP 测试 9 项通过；未启动 Gateway，真实 TUI 安装/调用和真实模型自然调用未验证。下一步由 ae 审查、3a 合入后原生验收。
 
-C10（2026-10-01，sol，源码已支持、待集成）：IM `/plugins` 与 `/plugins@<插件ID>` 走 TUI 同一
+C10（2026-10-01，sol，已上线 step17a，main de222698b，2026-10-02）：IM `/plugins` 与 `/plugins@<插件ID>` 走 TUI 同一
 插件服务，管理权限、纯文本错误码、原非 Python 启用预览和持久控制重放已在本地开发用例验证。
 定向 155 项、架构守卫 166 项通过，三个变异均被拦截；真实飞书/QQ 收发与正式部署未验证。
 未启动或停止 Gateway，未改用户配置。下一步由集成者审核合并，并在实际 IM 入口复核权限与确认。
 
 最新（2026-10-01，C13 第一部分本地完成）：`worker/sol56-arg-conflicts` 已实现通用工具参数互斥组、统一校验、结构化 `conflicting_arguments`／`exclusive_group` 及模型可见冲突提示，并将 write_file 三种内容来源迁入该合同。仓库链路测试与 4 个变异已覆盖；尚未集成、部署或运行真实模型复测，原能力包业务 16/27、原资源执行 12/18 和其它未覆盖范围不变。下一步由集成者固定提交后做真实模型恢复复测。
 
-J6 决策实验自动晋升提示（2026-10-01，本地分支 `worker/sol2-promotion-notice`，待集成/部署）：新回执沿原宿主提示通道在当轮 TUI 和
+J6 决策实验自动晋升提示（2026-10-01，本地分支 `worker/sol2-promotion-notice`，已上线 step17a，main de222698b，2026-10-02）：新回执沿原宿主提示通道在当轮 TUI 和
 同会话 IM final 显示点位、前后模式、样本/门槛与恢复继承入口；原回执保证消费后重启不补投。聚焦 111 passed、架构守卫 166 passed，
 三项变异全部抓到并撤回。只验证隔离模型/传输的真实产品链和 TUI renderer，真实终端与飞书收信未验证；不改既有全仓历史基线，详见 TESTS。
 

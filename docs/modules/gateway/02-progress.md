@@ -28,7 +28,7 @@
   provider/kind/id 都是非空字符串，且是本机 local/main。
 - 记忆向量重建入口 `my-agent memory vectors rebuild --confirmed` 共用这一条，不再各写一份。插件管理和 user_config 工具里还有两处同规则的内联写法，本轮没动。
 
-## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，待集成）
+## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，已上线 step17a，main de222698b，2026-10-02）
 
 - `settings_control_service` 的 `/settings show` 修复三处：
   - capability 来源键的“用户配置里”计入 capability 文件（运行时路径）里的覆盖（`_override_text`）；
@@ -38,7 +38,7 @@
 - capability 配置文件唯一位置（`capability/runtime_config_reload`）：用户位置 `<owner home>/config/capability_config.yaml`，
   随包默认只读；旧候选非随包默认文件挂结构化告警。
 
-## P13：/settings 展示嵌入档案（2026-10-02，ds1，本地已实现，待集成）
+## P13：/settings 展示嵌入档案（2026-10-02，ds1，已上线 step17a，main de222698b，2026-10-02）
 
 - `settings_control_service` 新增 `embedding_model_profile` 的 show 支持：展示档案编号、模型名或失效原因，不含连接凭据；
   `_curator_profile_text` 泛化为 `_profile_text` 供两个档案共用。
@@ -65,7 +65,7 @@ agent/session_lock、agent/user_space、agent/adapter 5 个模块 115 个待整�
 
 2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。`gateway_parts/request_context.py` 与 `owner_wake_discovery.py` 的常数改名/补说明，如 `DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS`→`DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`（网关轮内子代理完成回执展示上限），数值不变。
 
-## C7：智能程度八档（2026-10-02，sol，本地已实施，待集成）
+## C7：智能程度八档（2026-10-02，sol，已上线 step17a，main de222698b，2026-10-02）
 
 TUI 菜单与 TUI/IM 共用命令均接受 xhigh/ultra，配置枚举与派工 schema 同步；用户档位不在入口提前降档。
 回执与实际后端共用 reasoning_control 唯一表，依候选模型声明给实际发送值，无交集说明不改变请求。
@@ -81,7 +81,7 @@ Gateway 控制通道，与 user_config action=search 的 constants 结果同数�
 （目录与源码一致且**不比较行号**——目录唯一失效时机是常数增删、改名、改值、改说明或改单位/类别；待整改白名单只短不长、协议类排除；
 只在常数上方插空行的行号漂移用例 `--check` 必须仍通过）。`control_commands._settings_command` 新增 internal 子命令（词法同 search）。
 
-## P12：Curator 档案设置与编号展示（2026-10-01，sol，本地已实现，待集成/部署）
+## P12：Curator 档案设置与编号展示（2026-10-01，sol，已上线 step17a，main de222698b，2026-10-02）
 
 - `/settings show memory_curator_model_profile` 在原参数详情后补运行编号/型号；有未生效修改时另列保存编号/型号，TUI 与 IM 共用回执。
 - `execute_settings_control` 只在原完整管理员身份校验后开启用户专属边界写作用域，退出还原；模型 set/reset/revert、伪造 actor 和普通 owner 仍拒绝。
@@ -118,14 +118,14 @@ capability 按运行时路径读（owner 有覆盖时显示覆盖值），runtim
 回归见 `test_parameter_sources.py`（16 项：三来源 search/view、capability 写运行时文件且运行时入口读到新值、文件缺失时新建、
 只读来源结构化拒绝、回读失败恢复/删除、覆盖值显示、边界拒绝、user_config 工具链路）。
 
-J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，本地待集成）：
+J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，已上线 step17a，main de222698b，2026-10-02）：
 - 原请求晋升回执追加唯一 `promotion_id` 与冻结规则；只返回新写入的 applied 回执，旧回执消费后重启不补投。
 - 新 `request_experiment_notice.py` 只读结构化回执生成点位、前后模式、样本/门槛与真实恢复继承路径，排进原宿主提示队列。
 - `finish_decision_experiment_turn` 返回本轮新提示；执行编排沿原发布 helper 追加并合入同批 final，保留开轮已发布提示且不捎带其它后台新提示。
 - IM 仍走原 watcher/DeliveryService，无新线程、通道或通知账；沿原“提交即已读”与原队列失败口径。
 - 111 项聚焦、166 项守卫与三项变异有本地证据；真实终端/飞书收信未验证，详细命令和风险见 TESTS 的 J6 节。
 
-C10（2026-10-01，sol，本地实现，待集成）：飞书、QQ 等 IM 的 `/plugins` 与 `/plugins@<插件ID>` 已进入
+C10（2026-10-01，sol，已上线 step17a，main de222698b，2026-10-02）：飞书、QQ 等 IM 的 `/plugins` 与 `/plugins@<插件ID>` 已进入
 会话控制，`/ask`、`/control` 先记原持久控制回执，不再走无回执的提前插件分路。执行复用 TUI 的
 `plugin_command_service` / `PluginManagement`；IM 的管理员资格照 `/settings` 取可信解析 owner，
 不从正文取得角色。错误码保留在结构字段和纯文本；可执行程序启用沿原预览、`--confirm`，不另开审批通道。

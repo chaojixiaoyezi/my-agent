@@ -41,7 +41,7 @@
   - runtime_guard 键的 `show` 写"只能由用户在宿主入口或配置文件里改"，但这个来源没有用户覆盖层，和 set 被拒时的说法不一致。
   - 回执文案"原来 是默认值""现在是 默认值"中间多了一个空格。
 
-### 2026-10-02 P8/P17 验收后续（P18 缺陷修复，ds2，分支 `worker/ds2-p17-p8-followups`，基于 `a3a4eb28a`，已实现，待集成）
+### 2026-10-02 P8/P17 验收后续（P18 缺陷修复，ds2，分支 `worker/ds2-p17-p8-followups`，基于 `a3a4eb28a`，已上线 step17a，main de222698b，2026-10-02）
 
 上节观察项与失败项的处理结论（“一个概念一个权威位置”）：
 
@@ -69,7 +69,7 @@
 - **P18 失败项（/settings internal TypeError）** 已在分支上修好（`_internal` 接住 `capability_path`），
   并补了经调度入口的用例（test_settings_chat_control::test_internal_lists_code_constants_through_the_real_dispatch）。
 
-## 2026-10-01 模块级数值常数只读目录与守卫（P10，分支 `worker/ds1-constants-catalog`，已实现，待集成）
+## 2026-10-01 模块级数值常数只读目录与守卫（P10，分支 `worker/ds1-constants-catalog`，已上线 step17a，main de222698b，2026-10-02）
 
 - **设计定案（常数不迁入登记表）**：常数留在读取它的地方（那里是唯一权威，符合“一个概念一个权威位置”；不搬进中央常数模块，
   也不变成用户配置项——用户已嫌参数太多）。目录是投影：`scripts/build_constants_catalog.py` 用 ast 静态扫描 agent_py_agent
@@ -97,21 +97,21 @@
   `_BRIEF_MAX→_BRIEF_MAX_CHARS` 等），时间/字符/字节类补中文说明；BM25 参数 `_BM25_B/_BM25_K1` 无物理单位只补说明挪入单独组
   （7→9）。数值一律不变；白名单 575→523＋9；目录重新生成 800 项 `--check` 一致。
 
-- **P10 第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，已实现，待集成）**：整改 subagents/contracts/plugin_display/
+- **P10 第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，已上线 step17a，main de222698b，2026-10-02）**：整改 subagents/contracts/plugin_display/
   memory_archive/retrieval/common/verification/concurrency/llm_scale、attempt/io/local_storage 与 13 个单文件范围内的
   **103 个**常数：补上方中文说明 32 个；按后缀表改名 53 个（如 `PARENT_CHAIN_LIMIT`→`PARENT_CHAIN_COUNT`、
   `ARCHIVE_SEARCH_FILE_LIMIT`→`ARCHIVE_SEARCH_FILE_COUNT`、`DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS`→
   `DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`）；无物理单位 18 个只补说明、在白名单单列一组（深度/维度/比率/倍数/协议值/
   权限位/小时点/水位/ngram/BM25 参数等，后缀表无合适单位）。数值一律不变；目录重建 800 项 `--check` 一致；
   白名单 685→600（只减不增）。
-- **P10 第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，已实现，待集成）**：整改 `agent_py_agent/cli/` 目录
+- **P10 第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，已上线 step17a，main de222698b，2026-10-02）**：整改 `agent_py_agent/cli/` 目录
   （41 个文件，不碰 `cli/chat_parts/tui_effort_menu.py`——sol 的 C7）范围内 **100 个**常数：补上方中文说明 43 个；
   按后缀表改名 56 个（`_LIMIT_COUNT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、`_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、
   宽度类加 `_CHARS` 等，如 `DAEMON_LIMIT`→`DAEMON_COUNT`、`TOOL_PREVIEW_MAX_LINES`→`TOOL_PREVIEW_MAX_LINE_COUNT`、
   `_BACKGROUND_OWNER_WORKERS`→`_BACKGROUND_OWNER_WORKER_COUNT`、`PASTE_THRESHOLD`→`PASTE_THRESHOLD_CHARS`）；
   无物理单位 1 个（`_SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH` 深度）只补说明、挪入白名单无单位组。数值一律不变；
   目录重建 800 项 `--check` 一致；白名单 497→398（只减不增）。
-- **P10 第五批（2026-10-02，ds2，分支 `worker/ds2-p10-batch5`，已实现，待集成）**：整改 `agent_py_agent/agent/conversation/`
+- **P10 第五批（2026-10-02，ds2，分支 `worker/ds2-p10-batch5`，已上线 step17a，main de222698b，2026-10-02）**：整改 `agent_py_agent/agent/conversation/`
   目录 **96 个**常数：数量上限类补 `_COUNT` 改名 45 个（`ACTION_CANDIDATES_MIN→…_COUNT`、`_MAX_RECORDS→…_COUNT`、
   `_SCAN_INDEX_MAX_RECORDS_PER_FILE→…_COUNT` 等），字符/长度类补 `_CHARS` 改名 10 个（`_TEXT_LIMIT→_HOST_NOTICE_TEXT_LIMIT_CHARS`
   避开既有 `TEXT_LIMIT_CHARS` 撞名、`BACKGROUND_TRANSCRIPT_TEXT_LIMIT→…_CHARS` 等），token 类补 `_TOKENS` 1 个、
@@ -119,7 +119,7 @@
   `_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER` 倍数、`_WAKE_FACT_DEPTH_LIMIT` 深度、`_CHARS_PER_TOKEN_WINDOW` 换算率）只补说明
   挪入无单位组。数值一律不变；目录重建 800 项 `--check` 一致；白名单 320→225＋无单位组 28→32（只减不增；
   `_MAX_RECORDS` 恢复是回滚 sync 脚本误删，非新增）。
-- **P10 第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，已实现，待集成）**：白名单主组 **41→0 清空**——
+- **P10 第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，已上线 step17a，main de222698b，2026-10-02）**：白名单主组 **41→0 清空**——
   整改 `agent_py_agent/agent/backends/`（26 个）、`agent/settings/`（约 10 个）及 agent 根/零散几个（`_PROBE_MAX_ATTEMPTS`
   在 http.py 与 vision_capability.py 两处定义）共 41 个待整改常数：按后缀表改名 19 个唯一名（数量上限补 `_COUNT` 17 个，
   如 `_PROBE_MAX_ATTEMPTS→_PROBE_MAX_ATTEMPT_COUNT`、`MAX_TEXT_CALLS→MAX_TEXT_CALL_COUNT`、`MAX_DELIVERY_ATTEMPTS→
@@ -128,7 +128,7 @@
   无物理单位 5 个（`MAX_DECISION_JSON_DEPTH`/`_STRICT_JSON_MAX_DEPTH` 深度、`_JEV_BOUND_TOKENS_PER_QUESTION` 换算率、
   `MODEL_OUTPUT_WINDOW_DIVISOR` 除数、`_MIN_RATIO` 比率）只补说明挪入无单位组。数值一律不变；
   目录重建 804 项 `--check` 一致；白名单 41→0＋无单位组 39→44（只减不增）。
-- **P10 第八批（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，已实现，待集成）**：整改 `agent_py_agent/agent/capability/`
+- **P10 第八批（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，已上线 step17a，main de222698b，2026-10-02）**：整改 `agent_py_agent/agent/capability/`
   目录（16 个文件）范围内 **49 个**待整改常数：已有单位后缀 28 个只补中文说明（`_CHARS/_SECONDS/_BYTES/_PERCENT/_TOKENS/_REQUESTS` 等，
   含 `_APPROX_BYTES_PER_TOKEN`）；按后缀表改名 20 个（`_MAX_ATTACHMENTS→_MAX_ATTACHMENT_COUNT`、
   `_MAX_EVIDENCE_REFS→_MAX_EVIDENCE_REF_COUNT`、`_BASELINE_NAME_LIMIT→_BASELINE_NAME_LIMIT_CHARS`、
@@ -137,7 +137,7 @@
   `_MAX_SKILLS_PER_ROOT→_MAX_SKILLS_PER_ROOT_COUNT` 等；词边界替换按文件限定，避开 audit_records_tool/tui_subscription_models
   同名异义元组解包常数）；无物理单位 1 个（`_MAX_SCAN_DEPTH` 深度）只补说明挪入无单位组。数值一律不变；
   目录重建 803 项 `--check` 一致；白名单 164→115＋无单位组 36→37（只减不增）。
-- **P10 第七批（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，已实现，待集成）**：整改 `agent_py_agent/agent/agent_core/`
+- **P10 第七批（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，已上线 step17a，main de222698b，2026-10-02）**：整改 `agent_py_agent/agent/agent_core/`
   目录（34 个文件）范围内 **64 条**（61 个唯一名字）待整改常数：按后缀表改名 40 个（`_LIMIT`→`_COUNT` 如
   `PENDING_TURN_INPUT_INVALIDATION_LIMIT→…_COUNT`、`_ISSUE_LIMIT→_ISSUE_COUNT`、`DEFAULT_HARD_FAILURE_HALT_THRESHOLD→…_THRESHOLD_COUNT`，
   `_MAX_TIMEOUT→_MAX_TIMEOUT_SECONDS`、`_REF_TEXT_LIMIT→_REF_TEXT_LIMIT_CHARS`、`DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP→
@@ -146,7 +146,7 @@
   `_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH`/`_DEFAULT_DEPTH` 深度）只补说明挪入无单位组。数值一律不变；
   目录重建 802 项 `--check` 一致；白名单 225→164＋无单位组 32→36（只减不增）。
 
-- **P10 第六批（2026-10-02，ds2，分支 `worker/ds2-p10-batch6`，已实现，待集成）**：整改 `agent_py_agent/agent/tooling/`
+- **P10 第六批（2026-10-02，ds2，分支 `worker/ds2-p10-batch6`，已上线 step17a，main de222698b，2026-10-02）**：整改 `agent_py_agent/agent/tooling/`
   目录 **74 个**常数（73 个唯一名）：数量上限类补 `_COUNT` 改名 24 个（`_MAX_OWNERS→_MAX_OWNERS_COUNT` 两处定义同步、
   `_MAX_SESSIONS→_MAX_SESSION_COUNT`、`_NEAR_NAME_MAX_SUGGESTIONS→_NEAR_NAME_MAX_SUGGESTION_COUNT` 等），
   字符/长度类补 `_CHARS` 改名 1 个（`_NEAR_NAME_MAX_NAME_LENGTH→…_CHARS`），时间类补 `_SECONDS` 改名 4 个
@@ -155,7 +155,7 @@
   挪入无单位组。数值一律不变，改名引用全仓同步（22 文件 98 处，重 grep 0 残留）；目录重建 802 项 `--check` 一致；
   白名单 225→152＋无单位组 32→34（只减不增）。
 
-## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
+## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已上线 step17a，main de222698b，2026-10-02）
 
 > 2026-10-01 修订（3a 评审 5a51735c1 后）：capability 写入目标与运行值改走运行时实际读取的路径；runtime_guard 改为只读来源。
 > 2026-10-01 删除 log_analysis 来源（分支 `worker/ds2-del-log-analysis`）：log_analysis_config.yaml 是死配置——产品代码无任何读取点，
@@ -191,7 +191,7 @@
   （用 `_descriptions_from_lines` 逐条替换）；2026-10-01 删除 log_analysis 来源后由生成器重新生成目录（270→250 项），
   `--check` 通过；`test_backend_config_catalog.py`/`test_frontend_settings_labels.py` 已跑通。
 
-## 2026-10-01 Curator 固定档案引用（P12，本地已实现，待集成/部署）
+## 2026-10-01 Curator 固定档案引用（P12，已上线 step17a，main de222698b，2026-10-02）
 
 - `memory_curator_model_profile`：字符串档案编号，默认空；空值沿用 owner 当前选中模型，不改成当前线程聊天模型。
   非空复用 `/model` 唯一解析器，要求模型与服务商存在、启用且支持 agentic，使用该连接自己的凭据、端点、协议、请求头及模型选项。
@@ -210,7 +210,7 @@
 - 多 owner 时私有编号只在对应 owner 目录有效；需要全局共享连接时须采用已授权的 `shared:<编号>`，仍由原共享解析器核权。
   生产指向 deepseek-v4-flash 的实际编号由 3a 部署后设置，本线未读/改生产档案或配置。
 
-## 2026-10-01 参数登记表元数据（P8，分支 `worker/ds2-registry-metadata`，已实现，待集成）
+## 2026-10-01 参数登记表元数据（P8，分支 `worker/ds2-registry-metadata`，已上线 step17a，main de222698b，2026-10-02）
 
 - 设计目标 1 落地：登记表每条参数补「单位、范围、归属模块、读取方」四项元数据，全部由 `agent/settings/parameter_metadata.py` 自动推导、
   不手工抄：
@@ -528,13 +528,13 @@
       2026-09-27 核查（只看计数）：本机与测试机在用配置都没设这 10 个键，本次部署无需迁移。
     - 同批清理：`retrieval/embedding.build_embedder(dict)`、`_resolve_api_key` 没有产品调用方，删除；`LocalHashingEmbedder` 只被测试
       当确定性替身，原样搬到 `tests/_hashing_embedder.py`。回归见 `test_embedding_service.py`（此前 `_build_tool_embedder` 没有测试）。
-    - 已实施（P13+P14，2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，待集成）：`/model` 档案正式成为嵌入运行时消费者——
+    - 已实施（P13+P14，2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，已上线 step17a，main de222698b，2026-10-02）：`/model` 档案正式成为嵌入运行时消费者——
       4 个平铺键收成 1 个引用 `embedding_model_profile`（档案编号，必须有 `embedding` 能力；空 = 不建客户端、只走关键词；
       旧键只告警、不留别名、生产未设无需迁移）。该键是边界项，模型不能改；`/settings show` 展示编号/模型名/失效原因。
       向量库旁写 `memory_vectors.json.meta.json`（档案编号/服务商/模型名/维度/写入时间），读取时身份不一致或无元数据就把
       已有向量视为不存在、语义召回退回关键词并给原因码，不静默混用向量空间；管理员经 `memory vectors status` 预览、
       `memory vectors rebuild --confirmed` 显式确认后清库重嵌。详见本文件 §6 与 TESTS.md。
-    - P14 必须修（2026-10-02，分支 `claude/38-p14-embedding-fixes`，待集成）取代上面的旁路 meta：
+    - P14 必须修（2026-10-02，分支 `claude/38-p14-embedding-fixes`，待上线（下一版），未随 step17a 上线）取代上面的旁路 meta：
       - 身份改为档案编号 + 线路协议 + 端点摘要 + 模型名，从实际客户端取；
       - 身份、实际维度和向量放进同一个快照文件，在正式跨进程锁里读写；
       - 重建全有或全无；

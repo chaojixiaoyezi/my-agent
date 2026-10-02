@@ -22,6 +22,22 @@
 
 ## 主机名变化后 SIGTERM 仍能停网关：主机身份进程内缓存 + macOS 硬件 UUID（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，已实现，待集成）
 
+## step17a 文档状态对账（2026-10-02，分支 `worker/ds2-docs-reconcile-step17a`，本轮改动，未随 step17a 上线）
+
+- **背景**：step17a 已上线（main `de222698b`，10-02 03:43 部署到本机生产），但 `DESIGN_LEDGER.md`、`STATUS.md`、
+  `docs/ROADMAP.md`、`docs/COMPLETED.md`、`LLM_GUIDE.md`、`TESTS.md`、`docs/design/PARAMETER_CENTER.md` 与各模块
+  `02-progress`/`04-structure` 里，很多随它上线的条目还写着“待集成”“本地待集成”“已实现，待集成”“未集成/部署”。
+- **做法**：只改状态字样，正文、结论、数字一律不动。每个条目先用 `git log -S'<标题原文>'` 找到引入提交，
+  再用 `git merge-base --is-ancestor <引入提交> de222698b` 判定是否随 step17a 上线；只有判定在线的才改写。
+  未判定的保持原状并列入交接报告，不误标。
+- **唯一判据**：引入提交是 `de222698b` 的祖先 = 已上线；不是 = 留在“待上线（下一版）”。不按“基于某个基线”推断。
+- **清掉合并残留**：`TESTS.md` 里同一 `##` 标题出现两次的（合并时留下的短片段），保留正文更长的那一份，删掉另一份。
+  纯结构判定（同名标题分组 + 正文行数），不按语义猜。
+- **明确不动的**：与集成分支无关的其它工作流记录；引入提交在 `de222698b` 之外的条目（C14 2c、P14 修复、C5 车道闸、J9、
+  主机名修复、IM 路径说明、J16 观察候选、插件来源越权回执等）。
+
+## 主机名变化后 SIGTERM 仍能停网关：主机身份进程内缓存 + macOS 硬件 UUID（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，待上线（下一版），未随 step17a 上线）
+
 - **现场**（3a，step17a 切换）：macOS 没有 /etc/machine-id，`process_host_id` 退回 `socket.gethostname()`；换网络后主机名变成 anonymous。
   网关 SIGTERM 处理函数 `_record_gateway_signal_stop_request` 现算 `build_process_identity()`，host_id 和启动时记下的对不上，
   主循环把停止请求当成发给别的进程的而一直忽略，网关停不下来。当时 3a 用 `write_targeted_gateway_stop_request`（从 pid 记录取 host_id）绕过去。
@@ -42,7 +58,7 @@
 - **没动的**：`tool_operations`、`managed_operation_store` 里还有三处直接拿 `socket.gethostname()` 判断同一主机。主机名变了它们按“另一主机、
   租约到期前视为存活”处理，是保守方向，不会误判已死；要统一到 `process_host_id` 会改变落盘的 holder_host 格式，留作后续。
 
-## C5 登记组件探针固化（2026-10-02，分支 `worker/ds2-run-claim-probe-tests`，基于 `claude/3a-step16z` `78fc5c209`，已实现，待集成）
+## C5 登记组件探针固化（2026-10-02，分支 `worker/ds2-run-claim-probe-tests`，基于 `claude/3a-step16z` `78fc5c209`，待上线（下一版），未随 step17a 上线）
 
 - **来源**：sol2 只读审查 C5 的“建议修”（`gwreq-1790933078` 报告），要求把审查时临时使用的登记组件探针固化为仓库测试。
 - **做法**：只新增测试文件 `agent_py_agent/tests/test_run_claim_probe_paths.py`，不改任何产品语义；测试按 C5 修复后（车道闸）的实现写。
@@ -67,6 +83,8 @@
 
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，已实现，待集成）
 
+## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
+
 - **来源**：sol2 只读审查第 1 条。“用户回合在场”的查询只短暂持有登记表锁，之后的 `record_continuation_fuse` 落账不受保护。
   查询返回“不在场”之后、暂停真正落盘之前，进来的用户回合照样会被熔断抢先暂停。sol2 用屏障复现到 paused/3；用户消息写入后变成 paused/0，暂停仍在。
 - **做法**：`conversation/run_claim` 给每条车道一把进程内闸（键同登记表，即本会话执行租约文件路径）。
@@ -85,7 +103,7 @@
 - **没做**：sol2 的“建议修”（把领取失败、执行抛错、收尾抛错、心跳启动失败、双等待者、跨会话与 owner 隔离等登记探针固化成测试）这次没做；
   第 2 条 Anthropic 小上限预算区间属于既有缺陷，不在本轮范围。
 
-## IM 出口脱敏了宿主绝对路径时，整条消息末尾统一附一次说明（C14 复核 2c 后续）（2026-10-02，分支 `claude/be-im-path-note`，基于 `claude/3a-step16z` `4c624ecd4`，已实现，待集成）
+## IM 出口脱敏了宿主绝对路径时，整条消息末尾统一附一次说明（C14 复核 2c 后续）（2026-10-02，分支 `claude/be-im-path-note`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
 
 - **问题**：飞书等对外通道按规则把宿主绝对路径缩成最后一段，插件越界提示就成了“请把插件包放到 main 下再试”，用户不知道这是被脱敏过的路径。
 - **做法**（集成方定 (a)：脱敏规则不开例外，做成通用做法）：
@@ -126,6 +144,8 @@
 
 ## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，已实现，待集成）
 
+## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
+
 - **问题**：插件包放在当前 owner 范围外时，允许的根目录只拼在给模型看的异常文字里；用户在 TUI 和 IM 看到的仍是通用的“插件、来源文件或配置无效，或读取未获授权。”。
 - **做法**：
   - 安装、更新两个工具共用 `plugin_source_error_envelope(exc, policy)` 生成回执信封：`reason=source_unauthorized`、`source_base`、`allowed_root`。
@@ -134,7 +154,7 @@
   - 没有 owner 根时（不是按用户隔离的部署），说明改为提示放到当前会话工作区或显式授权的目录。说明不回显用户给的越权路径。
 - **验证**：见 TESTS.md 同名节。
 
-## J9：主模型的只读长期记忆检索工具 `memory_search`（P5-A 缺口 2）（2026-10-02，分支 `claude/ae-j9-memory-tool`，基于 `claude/3a-step16z` `25882221f`，已实现，待集成）
+## J9：主模型的只读长期记忆检索工具 `memory_search`（P5-A 缺口 2）（2026-10-02，分支 `claude/ae-j9-memory-tool`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
 
 - **缺口**：自动召回漏掉的事实，主模型自己查不到（`remember list` 整表列出、不过滤不截断；`session_search` 查的是会话历史）。
 - **做法**：新增只读工具 `memory_search`，参数为 `query`、`limit`（1–10，默认 5）、可选 `kind`，返回条目编号、类型、范围、更新时间和前 300 字摘录。
@@ -151,7 +171,7 @@
   - 和 P14 修复交叉后，语义用例要配档案编号才能算出空间身份，已补上。
   - 语义通道被关掉时，`fallback_reason` 改为按存储层结构化诊断写明原因（如 `embedding_identity_unavailable`、`semantic_recall_disabled`），不再笼统写 `embedder_unavailable`。
 
-## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `claude/3a-step16z` `58c674d46`，已实现，待集成）
+## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `claude/3a-step16z` `58c674d46`，已上线 step17a（main de222698b，2026-10-02））
 
 - **问题**：
   - J12 基准里 recall 只有 12/30。对无关或次要的记忆，Jev 回答 `not_needed`/`no_match`，而不是 `later`/`normal`。
@@ -168,7 +188,7 @@
 - **开关**：recall 点位仍默认关闭，生产是否打开由集成方定。
 - **验证**：见 TESTS.md 同名节。
 
-## P14 必须修：向量空间身份、同代快照、重建如实计数、实际维度、管理员入口（2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`，已实现，待集成）
+## P14 必须修：向量空间身份、同代快照、重建如实计数、实际维度、管理员入口（2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`，待上线（下一版），未随 step17a 上线）
 
 - **来源**：sol 只读审查 P14（`918285cc1`）的 6 个必须修，外加 4 条建议修。生产还没开嵌入，这批要在任何人打开嵌入之前合入。
 - **决策 1：空间身份 = 档案编号 + 线路协议 + 端点摘要 + 模型名，从实际发请求的客户端对象取**（第 1、2 条）。
@@ -214,7 +234,7 @@
   - TUI 和 IM 里没有 vectors 管理入口（本来就只有 CLI）。
   - 没测真实的多个网关进程同时写同一 owner 的向量库，用“子进程持锁”用例代替。
 
-## J17：Gateway 停机时一并结清进程内 runner worker 与 owner 池 agent 的在途模型调用（2026-10-02，分支 `claude/38-j17-stop-settles-runner-calls`，基于 `claude/3a-step16z` `51e52f04a`，已实现，待集成）
+## J17：Gateway 停机时一并结清进程内 runner worker 与 owner 池 agent 的在途模型调用（2026-10-02，分支 `claude/38-j17-stop-settles-runner-calls`，基于 `claude/3a-step16z` `51e52f04a`，已上线 step17a（main de222698b，2026-10-02））
 
 - **缺口**：停机结清（`call_runtime.settle_open_model_calls_for_shutdown`）原来只结网关 agent 自己的账本。
   - 非 local/main 的 owner（飞书、local/user）走进程内线程派工，每个 runner worker 都新建一个 SimpleAgent，各有一本账；
@@ -233,7 +253,7 @@
   - kill -9、断电这类非正常退出，仍靠启动对账。
 - **验证**：`test_gateway_model_call_shutdown_settlement.py` 加 3 项（原 5 项不变）；5 个变异全部被抓住。见 TESTS.md 同名节。
 
-## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复）（2026-10-02，分支 `claude/be-curator-identity`，基于 `claude/3a-step16z` `85740cde6`，已实现，待集成）
+## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复）（2026-10-02，分支 `claude/be-curator-identity`，基于 `claude/3a-step16z` `85740cde6`，已上线 step17a（main de222698b，2026-10-02））
 
 - **起因**：
   - J13 在隔离环境真实复测时，同一批输入 3 次 `CURATOR_COMMIT_FAILED`，宿主报错“candidate observation identity was reused for a different typed subject”；生产 10-02 也有一次同类提交失败（原因类型 ValueError）。
@@ -266,7 +286,7 @@
     - 代价：依赖模型遵守，不遵守时仍会合并（只是多一条可见警告）；改提示会影响所有提取输出，需要重跑提取质量对照；主题键变细后，召回与晋升里按主题匹配的逻辑也要复核。
 - **验证**：见 TESTS.md 同名节。
 
-## 执行器退出且效果未知时保留宿主给的失败类型（2026-10-02，分支 `claude/38-executor-failure-type`，基于 `claude/3a-step16z` `00ec92b77`，已实现，待集成）
+## 执行器退出且效果未知时保留宿主给的失败类型（2026-10-02，分支 `claude/38-executor-failure-type`，基于 `claude/3a-step16z` `00ec92b77`，已上线 step17a（main de222698b，2026-10-02））
 
 - **来源**：C4 真实核对的顺带发现。`executor_recovery.recover_exited_runner` 在“执行器已退出、有工具效果未确认”时给
   `failure_type=executor_effects_unknown`，但这个值不在 `FailureType` 枚举里。`runner_result_state._apply_unstructured_failure` 只认枚举里的
@@ -280,7 +300,7 @@
   - 恢复成改前状态；
   - 效果未知时仍记 runner_error。
 
-## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，基于 `a3a4eb28a`，已实现，待集成）
+## P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，基于 `a3a4eb28a`，已上线 step17a（main de222698b，2026-10-02））
 
 - **capability 配置文件唯一位置**（最重要）：`default_capability_config_path` 原来有两个候选
   （`<root>/agent_py_agent/config/` 与 `<root>/config/`，哪个存在用哪个），P18 验收发现参数中心在 owner
@@ -311,7 +331,7 @@
 - **验证**：相关测试全过（test_parameter_sources 22、test_settings_chat_control 34、test_parameter_metadata、
   capability 相关 323、前端/会话工具 49 等）；门禁与 size_diff 见 TESTS.md P18 后续节。
 
-## P10 常数整改第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，基于 `d55cb266c`，已实现，待集成）
+## P10 常数整改第九批（最后一批，2026-10-02，ds2，分支 `worker/ds2-p10-batch9`，基于 `d55cb266c`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：P10 白名单按模块分批清理，本批是最后一批——白名单主组 groups[0] 剩余全部 41 个常数
   （`agent/backends/` 约 26 个、`agent/settings/` 约 10 个、agent 根/零散几个；`_PROBE_MAX_ATTEMPTS`
@@ -331,7 +351,7 @@
 - **验证**：守卫 13 passed；相关 22 个测试文件全过（累计 492）；guards9 168 passed；import 0 条、ruff 过、
   doc-sync PASS、code-size strict hard=0、diff-check 过、clean-package OK、size_diff 新增 0。详见 TESTS.md 第九批节。
 
-## 决策模型中文质量基准与每个点位的阈值（J12）（2026-10-02，分支 `claude/be-jev-quality-bench`，基于 `claude/3a-step16z` `8ec88808d`，已实现，待集成）
+## 决策模型中文质量基准与每个点位的阈值（J12）（2026-10-02，分支 `claude/be-jev-quality-bench`，基于 `claude/3a-step16z` `8ec88808d`，已上线 step17a（main de222698b，2026-10-02））
 
 - **做什么**：
   - 一组固定的中文用例，按点位放在 `scripts/bench/decision_quality/cases/<点位>.json`。
@@ -369,7 +389,7 @@
   适配层有现成入口：盘点结论是除 subagent_model 外都能用轻量假对象调用真实构造函数。
 - **局限**：用例是测试方编写的合成样本，数量少，不能外推为线上整体质量。达标只是默认打开的必要条件，还要看真实收益与代价。
 
-## C14 第一批两个插件验收后续：确认回执、越界提示、管理文案、跳过语义与说明对齐（2026-10-02，ds1，分支 `worker/ds1-c14-followups`，基于 `claude/3a-step16z` `d55cb266c`，已实现，待集成）
+## C14 第一批两个插件验收后续：确认回执、越界提示、管理文案、跳过语义与说明对齐（2026-10-02，ds1，分支 `worker/ds1-c14-followups`，基于 `claude/3a-step16z` `d55cb266c`，已上线 step17a（main de222698b，2026-10-02））
 
 针对 C14 验收记录（docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md C14 节）里 ae 审查提出的建议逐条收尾，均不挡已通过的验收，但要做到位：
 
@@ -389,7 +409,7 @@
 
 - **验证**：宿主侧 141 个相关测试全过（test_plugins_chat_control、test_gateway_plugin_commands、test_plugin_management、test_plugin_commands、test_plugin_command_catalog）；shuohao 33 passed、1 failed、1 skipped；drama 包 9 passed。具体命令与结果见 TESTS.md 同名节。宿主安装/启用与沙箱子进程类用例在沙箱里失败/跳过（环境限制），由 3a 在沙箱外复核。
 
-## 补充查询片段材料：先预检每个片段能新增的事实（J8，P5-A 缺口 1）（2026-10-02，分支 `claude/be-jev-snippet-facts`，基于 `claude/3a-step16z` `918285cc1`，已实现，待集成）
+## 补充查询片段材料：先预检每个片段能新增的事实（J8，P5-A 缺口 1）（2026-10-02，分支 `claude/be-jev-snippet-facts`，基于 `claude/3a-step16z` `918285cc1`，已上线 step17a（main de222698b，2026-10-02））
 
 - **问题**：09-25 语义召回实验里，K3a 两批都选了主题已被原召回覆盖的片段，补不出东西。原因是 Jev 只看得到基线摘要和片段文字，不知道哪个片段真能补出新事实。
 - **做法**：
@@ -410,7 +430,7 @@
 - **打开与关闭**：仓库默认 `query_text`；生产不打开（3a 10-02）。要试用时 owner 级 `decision_patch`：`{"changes":{"points.pre_recall.fragment_material":"with_new_facts"}}`。
 - **验证**：见 TESTS.md 同名节。
 
-## P10 常数整改第八批：capability 目录 49 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，基于 `f0bb62254`，已实现，待集成）
+## P10 常数整改第八批：capability 目录 49 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch8`，基于 `f0bb62254`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：P10 白名单按模块分批清理。本批接第七批之后，范围是 `agent_py_agent/agent/capability/` 目录（16 个文件）
   的 49 条待整改常数，不碰其它目录（其它会话并行处理各自的批）。
@@ -476,7 +496,7 @@
   P10 新加的 `_internal` 没接这个参数。约定：`/settings` 子命令处理函数一律接受同一组关键字参数（用不到也要接住），
   新子命令要经 `run_settings_control` 真实调度测一次，不能只直接调处理函数。
 
-## P10 常数整改第七批：agent_core 目录 64 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，基于 `b3195b809`，已实现，待集成）
+## P10 常数整改第七批：agent_core 目录 64 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，基于 `b3195b809`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：P10 白名单按模块分批清理。本批接前几批之后，范围是 `agent_py_agent/agent/agent_core/` 目录（34 个文件）
   的 64 条目录条目（61 个唯一名字），不碰其它目录（其它会话并行处理各自的批）。
@@ -512,7 +532,7 @@
   模型档案的修改账本与推理探测文件、config/tests 下的测试配置；复查 config 目录下没有组/其他可读的文件。
 - **验证**：`test_config_write_permissions.py` 5 项；变异 5 个全抓到（不抄权限、json_io 不保留、账本 0644、回到固定 .tmp 名、配置新建 0644）。
 
-## C5/O4：持续目标空片熔断时用户消息先处理（2026-10-02，分支 `claude/38-c5-user-msg-before-fuse`，基于 `claude/3a-step16z` `f9ca83242`，已实现，待集成）
+## C5/O4：持续目标空片熔断时用户消息先处理（2026-10-02，分支 `claude/38-c5-user-msg-before-fuse`，基于 `claude/3a-step16z` `f9ca83242`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**（真实链路复现，代码 `f9ca83242`，隔离 Gateway + TUI + 脚本化假模型）：
   - 第 3 个空片还在跑时，用户从 TUI 发来一条消息；
@@ -553,7 +573,7 @@
   - 真实链路改前、改后对照见证据 `~/.my-agent/decision-evidence/c5-o4-user-msg-first-20261002/`（仓库外）：
     改后第 3 片记账时 `user_turn_on_lane=True`、不记账；用户回合写入后清零；之后第 4、5、6 片计 1、2、3，第 6 片熔断，熔断照常有效。
 
-## P10 常数整改第六批（2026-10-02，ds2，分支 `worker/ds2-p10-batch6`，基于 `aea277a92`，已实现，待集成）
+## P10 常数整改第六批（2026-10-02，ds2，分支 `worker/ds2-p10-batch6`，基于 `aea277a92`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：P10 白名单按模块分批清理。本批范围是 `agent_py_agent/agent/tooling/` 目录 74 个待整改常数
   （30 个文件、73 个唯一名，`_MAX_OWNERS` 在 admin_controls_tool.py 与 audit_records_tool.py 两处定义）。
@@ -571,7 +591,7 @@
   code-size strict hard=0、diff-check 过、clean-package OK、size_diff 新增 0。真实子进程类测试在沙箱失败/超时
   （基线 aea277a92 同样失败，环境限制，3a 沙箱外复核）。详见 TESTS.md 第六批节。
 
-## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`，已实现，待集成）
+## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`，已上线 step17a（main de222698b，2026-10-02））
 
 - **来源**：C12d 的留意项。运行中的子代理被接替后由 runner 自停，运行账 `agent_run.completed` 事件记的是
   `runtime_reason=InterruptedError`、`runtime_source` 为空；静止来源走 `settle_taken_over_run` 记的是 `subagent_takeover`／`taken_over`。
@@ -606,7 +626,7 @@
 - **没覆盖**：真实 TUI 审批框加 `/plugins disable` 命令这一段没再跑，它们用的是同一个执行器和同一张安装表；G05 情况 1 已用内容包在 TUI 上跑过迟到批准。
 - **验证**：见 TESTS.md 同名节。
 
-## P10 常数整改第五批（2026-10-02，ds2，分支 `worker/ds2-p10-batch5`，基于 `ed64438fc`，已实现，待集成）
+## P10 常数整改第五批（2026-10-02，ds2，分支 `worker/ds2-p10-batch5`，基于 `ed64438fc`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：P10 白名单按模块分批清理。本批接第一~四批之后，范围是 `agent_py_agent/agent/conversation/` 目录
   （35 个产品文件）的 **96 个**待整改常数；不碰 tooling/agent_core/capability/backends/settings（留给后续批次）。
@@ -629,7 +649,7 @@
   ruff/doc_sync/code-size strict/diff --check/clean_package 全过；`size_diff.sh` 新增告警 1（`test_gateway_conversation_control.py`
   的测试函数 soft 告警，该文件本轮未改、由集成分支 7e0fbcec1 引入，非本批所致）/消失 3。
 
-## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，基于 `ed64438fc`，已实现，待集成；P14 的旁路 meta 方案已被顶部“P14 必须修”取代）
+## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，基于 `ed64438fc`，已上线 step17a，main de222698b，2026-10-02；P14 的旁路 meta 方案已被顶部“P14 必须修”取代）
 
 - **背景**：嵌入连接此前是 4 个平铺键（embedding_model/api_base/api_key/api_key_env），`/model` 目录已有 embedding 能力档案却无运行时消费者；
   `memory_vectors.json` 不记录生成它的模型，同维度换模型会静默混用两个向量空间。
@@ -646,7 +666,7 @@
   无 meta/重建/CLI）；迁移相关 13 个测试文件全过（唯一 2 个失败为沙箱 Popen 环境性失败，基线 ed64438fc 复现同样失败）；guards9 167 passed；
   import boundaries 0；ruff/doc_sync/code-size strict/diff --check/clean_package 全过；3 个变异全部被测试拦截；size_diff 新增告警 0。
 
-## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`，已实现，待集成）
+## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：P10 白名单按模块分批清理。本批接第一、二批之后，范围是 `agent_py_agent/cli/` 目录（41 个文件）的 100 个待整改常数，
   不碰 `cli/chat_parts/tui_effort_menu.py`（sol 的 C7）与 ds2 第三批的 memory_store/gateway_parts/core.py。
@@ -679,7 +699,7 @@
   `runtime_source` 为空；静止来源走 `settle_taken_over_run` 时记的是 `subagent_takeover`／`taken_over`。现在两边同一口径。
 - **证据**：`~/.my-agent/decision-evidence/c12-observations-20261001/c12d/`（仓库外）。
 
-## J10 交付复核焦点覆盖改后未复核（2026-10-01 已实施；2026-10-02 本地复核，待集成/真实验收）
+## J10 交付复核焦点覆盖改后未复核（2026-10-01 已实施；2026-10-02 本地复核，已上线 step17a（main de222698b，2026-10-02））
 
 - **解决问题**：最后一次验证后又改文件，若不再运行命令，旧触发点不会提示多个过期焦点的复核顺序。
 - **实现**：沿 `_optional_result_hints` 的原信封接缝消费成功写入的 `verification_state.status=stale` 和正整数
@@ -690,7 +710,7 @@
 - **本地证据**：四文件定向 208 项通过；三个独立变异分别产生 1/4/1 个预期失败，原字节恢复后 208 项再通过。
   真实 Jev/模型采用与交付质量未验证，由 be 在 3a 集成后复测；命令及门禁结果见 [TESTS](TESTS.md)。
 
-## J11 按结构化输入模态选模型（2026-10-02，sol56，分支 `worker/sol56-j11-modality`，本地已实现、待集成）
+## J11 按结构化输入模态选模型（2026-10-02，sol56，分支 `worker/sol56-j11-modality`，本地已上线 step17a（main de222698b，2026-10-02））
 
 - **事实来源**：主会话只读 Gateway 已校验的 `request.input_media`；真实请求捕获后只读 canonical
   `UserTurn.media` 和 provider 顶层 user `local_file` image/video 块。模型能力只读档案
@@ -709,7 +729,7 @@
   guards9 168 项、导入边界 0、Ruff、文档同步、strict code-size、diff 与 clean package 全部通过，完整命令见 TESTS。
   真实 Gateway/TUI/收费模型和真实带图自动换模未验证。
 
-## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已实现，待集成）
+## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：P10 定案“常数留在读取点、目录只是投影”后，待整改白名单按模块分批清理。本批接第一批之后，
   范围是 subagents/contracts/plugin_display/memory_archive/retrieval/common/verification/concurrency/llm_scale、
@@ -729,7 +749,7 @@
 - **验证**：目录守卫 13 passed；26 个相关测试文件 + 5 个引用新名测试文件全过；guards9 167 passed；import boundaries 0；
   ruff/doc_sync/code-size strict/diff --check/clean_package 全过；size_diff 新增告警 0（消失 2）。
 
-## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`，已实现，待集成）
+## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`，已上线 step17a（main de222698b，2026-10-02））
 
 - **起因**：P10 白名单（575 个待整改名字）继续分批清账；本批覆盖 memory_store 23 个、gateway_parts 28 个、core.py 3 个
   （合计 54 个，其中 `_POLL_SECONDS` 在两处定义，白名单按名字记 53 个）。数值一律不变、行为不变。
@@ -741,7 +761,7 @@
 - **验证**：守卫＋改名相关 7 文件全过、memory_store 19 文件与 gateway_parts 14 文件相关测试全过（插件宿主类沙箱限制除外）、
   guards9 168 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package 全过；size_diff.sh 新增告警 0。详见 TESTS.md。
 
-## C7：/effort 八档与声明过滤（2026-10-02，sol，已实施，待集成/真实模型核对）
+## C7：/effort 八档与声明过滤（2026-10-02，sol，已上线 step17a（main de222698b，2026-10-02））
 
 - **解决问题**：模型已声明 xhigh/ultra，但菜单、命令与派工只有六档，用户选不到。
 - **做法**：用户扩为八档；中文标签、Responses/Chat/Messages 候选及预算只在 reasoning_control 一张表定义。
@@ -751,7 +771,7 @@
 - **验证与状态**：本地组件和三个独立变异有证据，扩展测试的既有失败保留，门禁记录见 TESTS；真实核对由 3a 集成后做。
   原“GPT xhigh/ultra 档位”待定项按要求登记为已实施（2026-10-01），详细合同见 [智能程度](docs/design/REASONING_EFFORT.md) 第 9 节。
 
-## J15 自学习收尾四项（2026-10-01，ds1，分支 `worker/ds1-self-learning-tail`，已实现，待集成）
+## J15 自学习收尾四项（2026-10-01，ds1，分支 `worker/ds1-self-learning-tail`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：`DECISION_MODEL_FINAL_HANDOFF.md` 剩余风险"自学习"一条的四个收尾项：
   取消的 run 不进教训账本、S1 草稿场景标签措辞不准、S2 缺 privacy_url 跳过、冷却按进程算重启清零。
@@ -771,7 +791,7 @@
 - **验证**：相关测试 156 passed（含 6 个新增测试文件/用例）；6 个变异逐一验证均红后还原；
   收尾门禁见 TESTS.md。
 
-## 常数整改第一批：5 模块 115 个常数合规（2026-10-01，分支 `worker/ds2-p10-batch1`，基于 `45610148e`，已实现，待集成）
+## 常数整改第一批：5 模块 115 个常数合规（2026-10-01，分支 `worker/ds2-p10-batch1`，基于 `45610148e`，已上线 step17a（main de222698b，2026-10-02））
 
 - **起因**：P10 建常数目录时 685 个历史不合规常数进待整改白名单（无单位后缀或无上方中文说明）；按阶段 3 分批整改，
   本批是第一批，覆盖 ingestion / scheduler / session_lock / user_space / adapter 5 个模块 115 个。数值一律不变、行为不变。
@@ -782,7 +802,7 @@
 - **验证**：守卫 13 passed、相关 26 文件 438 passed、guards9 167 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package
   全过；size_diff.sh 新增告警 0。详见 TESTS.md。
 
-## H2：宿主托管存储（插件安装库、包库）对模型的文件工具和 shell 不开放（2026-10-01，分支 `claude/38-h2-host-store-read`，基于 `claude/3a-step16z` `efaedfab2`，已实现，待集成）
+## H2：宿主托管存储（插件安装库、包库）对模型的文件工具和 shell 不开放（2026-10-01，分支 `claude/38-h2-host-store-read`，基于 `claude/3a-step16z` `efaedfab2`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**（ae 的 C3 真实补测）：Goal 续跑时宿主正确地把旧 pin 投影成不可用，模型随后用 `run_command` 执行
   `unzip -p data/plugins/packages/<旧包摘要>.zip steps/step2.md`，读出已停用、已换代的旧包，照旧完成任务。这等于绕过了能力包的停用和换代。
@@ -811,7 +831,7 @@
 - **真实模型复核**：照原场景用 MiniMax-M2.7 跑了一次，再加一条新的自然需求，模型两次都没有尝试绕路（未命中原触发）。
   同一个真实隔离 home 上的宿主侧复核确认：本分支读不到旧包，base 代码原样读出。详见 TESTS.md。
 
-## 选模型只在结构变化时问（J4）（2026-10-01，分支 `claude/be-jev-selection-cadence`，基于 `claude/be-jev-keepalive-z` `24f1bd287`，已实现，待集成）
+## 选模型只在结构变化时问（J4）（2026-10-01，分支 `claude/be-jev-selection-cadence`，基于 `claude/be-jev-keepalive-z` `24f1bd287`，已上线 step17a（main de222698b，2026-10-02））
 
 - **做法**：
   - 选模型点加专属字段 `points.model_selection.cadence`（every_turn / structure_change），配置 `decision_model_selection_cadence` 默认 every_turn（关）。
@@ -829,7 +849,7 @@
 - **打开与关闭（生产由集成方做）**：owner 级 `decision_patch`，`{"changes":{"points.model_selection.cadence":"structure_change"}}`；关闭改回 `every_turn`。
 - **验证**：见 TESTS.md 同名节。
 
-## Jev 决策调用复用长连接（J1，B 第 1 步）与后台等待 5→15 秒净效果（J2）（2026-10-01，分支 `claude/be-jev-keepalive-z`，基于 `claude/3a-step16z` `efaedfab2`，已实现，待集成）
+## Jev 决策调用复用长连接（J1，B 第 1 步）与后台等待 5→15 秒净效果（J2）（2026-10-01，分支 `claude/be-jev-keepalive-z`，基于 `claude/3a-step16z` `efaedfab2`，已上线 step17a（main de222698b，2026-10-02））
 
 - **先确认空闲上限**（经本机代理实测，探针只发轻量 GET）：
   - Jev 支持保活（Cloudflare 后，`Connection: keep-alive`），同一连接上第二次请求约 0.3 秒，新连接光 TLS 就约 0.9 秒。
@@ -857,7 +877,7 @@
   - 代理链的空闲上限取决于用户当前的代理节点；换节点后若上限低于 60 秒，取出前的 select 检查仍能挡掉已断开的连接，只是复用率会降低。
 - **验证**：见 TESTS.md 同名节。
 
-## 熔断体验修复 code-size 拆平（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）
+## 熔断体验修复 code-size 拆平（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：`fa781d169` 合入后相对 step16y 告警基线多出 3 条 code-size 高风险（纯重构，行为不变）：
   class `BackgroundMainAgentRuntime` 202/250、params `_background_external_delivery`、测试函数过长。
@@ -871,7 +891,7 @@
 - **验证**：warn 基线相对 step16y（3598 条）三个目标文件 **0 新增**（全部新增集合也为空）；
   strict code-size 2239 blocked=False；相关测试 217 passed（5+8+204）、guards9 166 passed。
 
-## 删除死配置 log_analysis_config.yaml，参数中心改三来源（2026-10-01，分支 `worker/ds2-del-log-analysis`，基于 `claude/3a-step16z` 的 `904b441b4`，已实现，待集成）
+## 删除死配置 log_analysis_config.yaml，参数中心改三来源（2026-10-01，分支 `worker/ds2-del-log-analysis`，基于 `claude/3a-step16z` 的 `904b441b4`，已上线 step17a（main de222698b，2026-10-02））
 
 - **起因**：P17 修订时核实 log_analysis 产品代码无任何读取点；3a 确认 `agent/log_analysis/` 包早已不存在，
   `log_analysis_config.yaml`（20 键）是死配置。按铁律“确定不用的旧字段、旧目录、旧兼容分支要删；配置必须真的生效”删除。
@@ -887,7 +907,7 @@
   集成分支其它提交引入的新增；按规则 9 拆平——`_run_agent` 尾部收尾段抽成模块级函数 `_finalize_background_execution`
   （参数命名避开 `request` 名单的 params +1 规则），行为逐行不变，拆后 size_diff 新增告警 0。
 
-## P17 合入后的 code-size 拆平（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`，已实现，待集成）
+## P17 合入后的 code-size 拆平（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`，已上线 step17a（main de222698b，2026-10-02））
 
 - **起因**：集成分支合入 P17 后，相对已上线 step16y 多出 3 条 high-risk（UserConfigTool 类行数接近软上限、
   revert_change / read_config_fact 嵌套 3 层）。本轮只做结构拆平，行为、错误码、回执字段一律不变。
@@ -896,7 +916,7 @@
 - **验证**：相关 174 passed、guards9 167 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package 全过；
   warn 基线比对 step16y → ADDED=0。详见 TESTS.md。
 
-## A/B 能力包补确定性检查（C13 第二部分）：A0.4.0、B0.2.0（2026-10-01，分支 `claude/ae-c13-pack-checks`，基于 `claude/3a-step16z` `a4e97dd69`，已实现，待集成）
+## A/B 能力包补确定性检查（C13 第二部分）：A0.4.0、B0.2.0（2026-10-01，分支 `claude/ae-c13-pack-checks`，基于 `claude/3a-step16z` `a4e97dd69`，已上线 step17a（main de222698b，2026-10-02））
 
 - **依据**：固定最终矩阵 11 次业务失败的独立审计（A 9 次、B 2 次），逐条判断哪些能靠结构化字段确定性核对。
   - **A**：大多数失败是散文语义问题，例如漏标新增、出处说错、意译冲突、同镜自相矛盾，检查器抓不到，仍靠方法和审阅。
@@ -930,7 +950,7 @@
   - 用户在飞书设了一个"等我发笔记"的持续目标。前台确认之后，3 个续跑片每片都给出一句很短的"在等你"，每句都按后台送达规则主动推给了用户（`reason=thread_goal_continue delivery=sent`），10 秒内连收 3 条。
   - 熔断暂停后，提示 `GOAL_CONTINUATION_NO_PROGRESS` 只进了线程的 `pending_host_notices`，要等用户下一次说话才随回复送达。用户不说话，就只看到 3 条"在等你"，不知道续跑已经停了。
 - **现有合同**：两条都符合现有设计。续跑片的最终回复按后台送达规则外发；宿主提示随下一次正常回复送出，停止与失败不取走。所以这不是缺陷。
-- **实施定案（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）**：
+- **实施定案（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已上线 step17a（main de222698b，2026-10-02））**：
   - **空转片不外发**：续跑片按熔断同一口径判空片——`runtime._background_goal_idle_slice` 复用
     `goal_progress_fuse.slice_has_progress`（只读结构化字段，不另写一套）；判为无进展的片，回复正文不主动推到
     外部通道，只经 `background_delivery.record_background_response(local_transcript_only=True)` 落权威转录
@@ -942,7 +962,7 @@
     保证同一提示只推一次、下一条回复不再重复带出；投递失败不取走，留待送达队列由下一次回复补出。纯 TUI 线程只排队。
   - 不加新配置。
 
-## 参数中心 P10：模块级数值常数的“只读目录 + 守卫”（2026-10-01，分支 `worker/ds1-constants-catalog`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已实现，待集成）
+## 参数中心 P10：模块级数值常数的“只读目录 + 守卫”（2026-10-01，分支 `worker/ds1-constants-catalog`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已上线 step17a（main de222698b，2026-10-02））
 
 - **设计定案**：常数留在读取它的地方（那里是唯一权威），不搬进中央常数模块、不变成用户配置项；目录是投影——由
   `scripts/build_constants_catalog.py` 用 ast 静态扫描（不 import 产品代码）生成随包 JSON
@@ -967,7 +987,7 @@
 - **验证**：新增守卫 9 项 + 相关既有测试 185 项通过；3 个变异（协议排除清空、单位推导恒空、说明提取恒空）全部被抓住；
   详情见 TESTS.md 同名节。
 
-## 参数中心 P17 修订：capability 写入/运行值走运行时实际路径，runtime_guard/log_analysis 改只读来源（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `claude/3a-step16z` 的 `f15b0a19f`，在 5a51735c1 上修订，已实现，待集成）
+## 参数中心 P17 修订：capability 写入/运行值走运行时实际路径，runtime_guard/log_analysis 改只读来源（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `claude/3a-step16z` 的 `f15b0a19f`，在 5a51735c1 上修订，已上线 step17a（main de222698b，2026-10-02））
 
 - **起因**：3a 评审发现初版把 capability 写进“用户配置同目录”的 `capability_config.yaml`，但运行时唯一读取入口是
   `capability_config_for_agent(agent)`（`agent.capability_config_path` 或 `default_capability_config_path(agent.root)`，
@@ -984,7 +1004,7 @@
   import boundaries 0、ruff/doc-sync/code-size strict/diff-check/clean-package 全过；3 个变异（写目标改回旧路径、去掉只读拒绝、
   running_value 忽略运行时路径）均被杀红并还原。详见 TESTS.md。
 
-## 参数中心 P17：capability/runtime_guard/log_analysis 三份配置纳入登记表与写入口（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已实现，待集成）
+## 参数中心 P17：capability/runtime_guard/log_analysis 三份配置纳入登记表与写入口（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已上线 step17a（main de222698b，2026-10-02））
 
 - **来源维度**：`ParameterSpec` 加 `source`（agent/capability/runtime_guard/log_analysis），登记表从 224 键扩到 297 键
   （capability 31、runtime_guard 22、log_analysis 20）；说明/类型/默认值从各随包 YAML 与 dataclass 取，规则与主配置一致。
@@ -997,7 +1017,7 @@
 - **验证**：相关 153 passed（含新 `test_parameter_sources.py` 10 项）、guards9 167 passed、import boundaries 0、ruff/doc-sync/code-size
   strict/diff-check/clean-package 全过；3 个变异被杀红并还原。详见 TESTS.md。
 
-## P12：记忆整理引用固定模型档案（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，待集成/部署）
+## P12：记忆整理引用固定模型档案（2026-10-01，sol，`worker/sol-curator-profile`，本地已上线 step17a（main de222698b，2026-10-02）/部署）
 
 - 解决问题：聊天模型套餐或连接失败时，后台记忆整理也跟着失效；只覆盖协议/型号、却借用聊天凭据的旧组合容易配错。
 - 新键 `memory_curator_model_profile` 默认空，沿用 owner 当前选中模型；非空只引用原模型目录，完整采用该档案的服务商凭据、端点、协议与选项。
@@ -1029,7 +1049,7 @@
   历史日志保留但不作为 M-B1 当前验收门，不修改无关旧接口失败。
   完整证据见 [TESTS](TESTS.md)，能力边界见 [迁移设计](docs/design/CAPABILITY_UPSTREAM_MIGRATION.md)与 [README](plugins/shuohao-novel-gates/README.md)。
 
-## C14 第一批 M-A1 + M-A2：drama-media-shell（2026-10-01，分支 `worker/sol56-c14-ma12`，本地已实现，待 ae 审查/集成）
+## C14 第一批 M-A1 + M-A2：drama-media-shell（2026-10-01，分支 `worker/sol56-c14-ma12`，已上线 step17a，main de222698b，2026-10-02）
 
 - **范围**：按固定上游 `zenstory-ai/drama-skills@0e8929881bb59248618c4f402707c64723adc017` 迁移四个纯离线提示词检查器，
   并把 `production_tool.py` 的 prepare/confirm/run/status/audit/collect 作业合同收进同一 Python 插件；运行依赖只有精确
@@ -1047,7 +1067,7 @@
 - **验证边界**：实际包、`tools/list` 同源性、重复构建字节、上游 selftest 合同、读写上下文、符号链接拒绝、fixture 状态机
   和 MCP 进程组件已由仓库测试覆盖；真实 TUI 安装/调用与真实模型自然调用按分工留给 3a/ae 集成后验收，不把组件测试外推。
 
-## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已实现，待集成）
+## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已上线 step17a（main de222698b，2026-10-02））
 
 - **P15 脱敏补两种写法**（唯一实现 `user_config_capability.masked_structure`/`mask_value`，未另写一份）：
   - (a) 请求头/环境变量容器开关（`--headers`、`--env`）后“名字 值”分成两项时，名字和值两项都遮（名字可能是 Authorization/x-api-key
@@ -1076,14 +1096,14 @@
   - ffmpeg 剪辑为可选第三批。
 - **分工**：实现派给 my-agent 会话，ae 审查。详见[迁移清单](docs/design/CAPABILITY_UPSTREAM_MIGRATION.md)。
 
-## 压缩触发绝对上限默认改为 300000（2026-10-01，分支 `claude/3a-cap-default`，已实现，待集成）
+## 压缩触发绝对上限默认改为 300000（2026-10-01，分支 `claude/3a-cap-default`，已上线 step17a（main de222698b，2026-10-02））
 
 - **事故**：生产 `memory_compact_auto_trigger_max_tokens` 09-29 设为 300000 后，09-30 07:49Z 被一个 my-agent 会话经 user_config `reset`（账本 actor=model）退回当时的默认 0，即不封顶；之后 1M 窗口的 deepseek-v4-flash 会话要到约 90 万才压缩，10-01 把 gpt-6-luna 档案窗口改为实测的 900000 后也一样（约 81 万）。这正是 09-29「1M 窗口、90% 触发」429 的形状。ae 在 C1 准备时只读发现，集成者核实后已经正式写回 300000（变更号 77e58ca0038e，重启 Gateway 生效）。
 - **根修**：默认值改为 300000（AgentConfig、MemorySettings、随包 YAML 与运行时 `DEFAULT_COMPACT_TRIGGER_MAX_TOKENS` 一致），`reset` 回到安全值；显式 0 仍表示不封顶；乱填、负数、布尔与缺失都回到 300000（配置解析与运行时同一口径，原来回到 0）。
 - **影响面**：窗口 ≤333K 的模型按 90% 先触发，不受影响；只有 1M 级窗口会在 30 万处压缩。参数仍是 free（模型可改），改为 0 会在账本留下记录。
 - **验证**：见 TESTS.md 同名节；属于共享默认值，推送前跑 12 片全量车道。
 
-## decision_patch / decision_reset 接受可选 reason（2026-10-01，分支 `worker/ds1-decision-reason`，基于 `claude/3a-step16y` 的 `e08507ea4`，已实现，待集成）
+## decision_patch / decision_reset 接受可选 reason（2026-10-01，分支 `worker/ds1-decision-reason`，基于 `claude/3a-step16y` 的 `e08507ea4`，已上线 step17a（main de222698b，2026-10-02））
 
 - **触发条件已核实（3a 10-01 真实探测）**：隔离环境用真实 deepseek-v4-flash 做 4 条“改决策设置”自然语言请求，decision_patch 首次调用
   3 次里错 2 次，都是多带 `reason` 被拒（TOOL_INVALID_ARGUMENTS，unknown_fields=reason），第二次才改对；gpt-6-luna 3 次全对；
@@ -1099,7 +1119,7 @@
   3 个变异实测被抓住（去掉 reason 允许 / 不写账本 / 不标截断）。
 - **验证**：相关 decision 测试 123 passed（详见 TESTS.md）。
 
-## 参数登记表元数据：单位/范围/归属模块/读取方（2026-10-01，分支 `worker/ds2-registry-metadata`，已实现，待集成）
+## 参数登记表元数据：单位/范围/归属模块/读取方（2026-10-01，分支 `worker/ds2-registry-metadata`，已上线 step17a（main de222698b，2026-10-02））
 
 - **P8（三线收尾）设计目标 1 落地**：登记表每条参数补「单位、范围、归属模块、读取方」四项元数据，全部由
   `agent/settings/parameter_metadata.py` 自动推导、不手工抄，推不出的留空：单位按键名后缀（_seconds/_ms/_chars/_bytes/_tokens/
@@ -1112,7 +1132,7 @@
 - **验证**：test_parameter_metadata.py 7 项 + 3 个变异（删 _seconds 后缀/删 request_timeout 范围/field_readers 跳过全部文件）均被杀红；
   相关 pytest 96+90 passed、架构守卫 182 passed、import boundaries 0 条、ruff/doc sync/diff --check 通过。详见 TESTS.md。
 
-## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`，已实现，待集成）
+## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`，已上线 step17a（main de222698b，2026-10-02））
 
 - **决定（集成者，三线收尾 goal P11）**：不再按“约 100 项”的数量目标减量。219 个随包键里 218 个在 `/settings` 列表与搜索出现；
   `model_auth_ref`（/model 登录生成的 OAuth 运行引用，注释写“请勿手填”）归入新集合 `MANAGED_ELSEWHERE_KEYS`：只从列表与搜索隐藏，
@@ -1121,7 +1141,7 @@
   [参数中心](docs/design/PARAMETER_CENTER.md) 的“减量收口”一条。
 - **验证**：见 TESTS.md 同名节。
 
-## 前端设置页与前端数据清理：删除已不存在的配置项（2026-10-01，分支 `worker/ds1-frontend-settings`，基于 `claude/3a-step16y` 的 `5761f77bf`，已实现，待集成）
+## 前端设置页与前端数据清理：删除已不存在的配置项（2026-10-01，分支 `worker/ds1-frontend-settings`，基于 `claude/3a-step16y` 的 `5761f77bf`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**：设置页有 29 个表单项对不上任何当前配置键（`label="键（` 逐一核对，均不在三份随包 YAML 与 `backend-config-catalog.json` 的
   270 项权威键集合里）：真删过的键（scheduler_mode、task_max_grandchildren、Dispatch Loop 三项、enable_watchdog 等）和从来不是
@@ -1141,13 +1161,13 @@
   （tsc: command not found）跑不了，未联网安装；tsc/vite 构建验证留待集成环境。
 - **文档**：PARAMETER_CENTER.md、ROADMAP.md 同步（两个“未排期/暂留”条目标完成）。
 
-## 参数中心 P7 全量默认值一致性测试与 P3 补齐 8 个保留键说明（2026-10-01，分支 `worker/ds2-param-parity`，已实现，待集成）
+## 参数中心 P7 全量默认值一致性测试与 P3 补齐 8 个保留键说明（2026-10-01，分支 `worker/ds2-param-parity`，已上线 step17a（main de222698b，2026-10-02））
 
 - **P7**：新增 `agent_py_agent/tests/test_config_defaults_parity.py`——用正式加载器 `load_config` 读随包 agent_config.yaml，对 `AgentConfig` 全部字段逐个断言加载值等于 dataclass 默认值（219 个 YAML 键当前全部一致，值级白名单为空）。5 个加载器运行时元数据键（config_layers/config_path/config_sources/config_warnings/memory_config_warnings）跳过值比较但断言仍存在；值级白名单结构保留且要求“放进去的键必须仍不一致”，防止白名单烂掉。api_key 由 `api_key_env` 环境变量注入，测试先清 `AGENT_API_KEY` 再加载，避免本机环境污染。实现了 PARAMETER_CENTER.md 目标第 2 条“随包 YAML、AgentConfig 默认值和文档一致，由测试核对”的全量落点。
 - **P3**：基线 `parameter_description_baseline.json` 第二组 8 个保留 advanced 键补中文说明（写进 agent_config.yaml 各键正上方注释：dynamic_timeout_min、home_lesson_stale_caveat_days、local_store_fts_enabled、memory_curator_daily_finalize_hour、memory_curator_model、memory_curator_provider、memory_hot_min_occurrences、memory_lesson_min_occurrences）；后台 Memory Curator 整段挂在 `memory_curator_enabled` 上的注释块拆开归到各自键，删掉已删除键（batch_message_limit、max_retries）的说明。基线只剩 5 个加载器元数据键，`test_parameter_registry.py` 通过。
 - **验证**：`test_parameter_registry.py` + `test_config_defaults_parity.py` + `test_config_validation.py` + `test_merged_config_knobs.py` 共 134 passed；架构守卫 guards9 与静态 gate 全过（详见 TESTS.md）。
 
-## 前端参数目录生成器修正、重新生成与守卫（2026-10-01，分支 `worker/ds1-config-catalog`，基于 main `34e4d874e`，已实现，待集成）
+## 前端参数目录生成器修正、重新生成与守卫（2026-10-01，分支 `worker/ds1-config-catalog`，基于 main `34e4d874e`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**：`frontend/config/backend-config-catalog.json` 过期：缺 `goal_continuation_idle_limit`、`model_reasoning_levels`；
   `5c224e6df` 手插一项后头部 fieldCount 写 216 实际 217、后续 order 未顺移，`node frontend/scripts/sync-backend-config.mjs --check` 必然失败。
@@ -1165,7 +1185,7 @@
 - **P2 守卫**：新增 `agent_py_agent/tests/test_backend_config_catalog.py`（3 项，不依赖 node）：各随包 YAML 键集合 == 目录键集合（分别比，
   失败列差异）、目录 description 与后端一致、`restartRequired` 全 true；YAML 注释或键变化后目录未重新生成时会立刻失败。
 
-## Jev 前台默认期限 2→3 秒（J5）与实际版本号落结构化事实（J19）（2026-10-01，分支 `claude/be-jev-deadline-version`，基于 main `34e4d874e`，已实现，待集成）
+## Jev 前台默认期限 2→3 秒（J5）与实际版本号落结构化事实（J19）（2026-10-01，分支 `claude/be-jev-deadline-version`，基于 main `34e4d874e`，已上线 step17a（main de222698b，2026-10-02））
 
 - **J5 前台默认期限**：`decision_timeout_seconds` 的仓库默认值（dataclass 与随包 YAML）从 2.0 改为 3.0；点位不单独设期限时继承它，阶段默认 4 秒不变。
   - 为什么：Jev 经本机代理单次常在 2–3 秒，2 秒下约六成超时，超时的请求供应商多半照样计费却没有产出。
@@ -1180,7 +1200,7 @@
 - **真实验收**（隔离 home、私有端口 8438，目录副本只放 Jev 与 MiniMax，Jev 实际 2 次调用）：请求 `jev-latest` 返回 `jev-1.13.0`；钉住后请求 `jev-1.13.0` 返回 `jev-1.13.0`；两次选模型观察都成功（1.3 秒、1.5 秒），TLS 握手各约 0.9 秒（每次新建连接，留给 J1）。
 - **验证**：见 TESTS.md 同名节。
 
-## C12a／C12b：被中断任务的后台进程 Gateway 里 /stop 收不回；gateway stop 后的孤儿进程（2026-10-01，分支 `claude/38-c12-stop-after-interrupt`，基于 main `34e4d874e`，C12a 已实现待集成，C12b 复核无需改动）
+## C12a／C12b：被中断任务的后台进程 Gateway 里 /stop 收不回；gateway stop 后的孤儿进程（2026-10-01，分支 `claude/38-c12-stop-after-interrupt`，基于 main `34e4d874e`，已上线 step17a（main de222698b，2026-10-02））
 
 - **C12a 现象**（R10 深度切片 09-28）：回合被 `/interrupt` 后，同会话 `/stop` 回"当前没有运行中的内容"，任务的后台进程一直跑到 Gateway 停止以后。
 - **C12a 原因**（10-01 在隔离 Gateway + 假模型 + 真 TUI 上复现，代码与 step16x 相同）：
@@ -1205,7 +1225,7 @@
   - 先 `/interrupt` 再马上 `/stop` 时，TaskRun 不在 `/stop` 当下关，而是约 2 分钟后由发现层按 `conversation_task_interrupted` 关（实测）。不算泄漏，不改。
 - **验证**：见 TESTS.md 同名节。证据（仓库外）：`~/.my-agent/decision-evidence/c12-observations-20261001/`。
 
-## J6 决策实验自动晋升提示（已实施（2026-10-01），分支 `worker/sol2-promotion-notice`，本地待集成）
+## J6 决策实验自动晋升提示（已实施（2026-10-01），分支 `worker/sol2-promotion-notice`，已上线 step17a（main de222698b，2026-10-02））
 
 - **解决问题**：授权内 off→apply 改了本会话决策设置，但用户在 TUI 和飞书都看不到提示。
 - **实现**：回执 `gateway_decision_experiment_promotion.v1` 追加 `promotion_id`（授权编号派生，每授权最多一份）和冻结的 `evaluation.rule`。
@@ -1215,10 +1235,10 @@
 - **去重**：`notice_id=promotion_id`；原请求已有任何晋升回执便不再返回新回执，消费后重建 Store/执行代次不补投；IM 沿原 final/sent 回执去重。
 - **撤销**：`/model → 选择模型 → 决策模型 → 本会话临时设置 → 逐字段恢复继承 → points.skill_tool.mode`；也可让助手经原设置服务恢复本会话继承。
   `/experiment` 的授权撤销不是设置回滚，不编造 `/experiment revoke` 命令。
-- **验证边界**：111 项聚焦回归、166 项架构守卫与 3 项变异已有本地证据，详见 TESTS 同名节。真实终端及真实飞书收信未验证，待集成后复核。
+- **验证边界**：111 项聚焦回归、166 项架构守卫与 3 项变异已有本地证据，详见 TESTS 同名节。已随 step17a 上线（main de222698b，2026-10-02）；真实终端及真实飞书收信仍未验证，待沙箱外复核。
   沿原“提交即已读”口径；回执写盘与线程提示队列非跨文件事务，极端中断/排队失败可能漏提示，不扫旧回执补发。
 
-## 工具参数互斥组单处声明与模型可见冲突详情（2026-10-01，分支 `worker/sol56-arg-conflicts`，基于 main `34e4d874e`，已实现，待集成与真实模型复测）
+## 工具参数互斥组单处声明与模型可见冲突详情（2026-10-01，分支 `worker/sol56-arg-conflicts`，基于 main `34e4d874e`，已上线 step17a（main de222698b，2026-10-02）与真实模型复测）
 
 - **现象**：能力包真实验收里，模型三次把 `write_file.source_ref` 与 `content` 同传。旧 handler 虽以 `TOOL_INVALID_ARGUMENTS` 拒绝且回执完整，但没有机器可读的冲突参数列表；模型随后改为手抄正文或自建脚本，没有恢复原样复制链。
 - **合同**：工具在唯一 `ToolModelSpec.input_schema` 中用宿主扩展 `x-exclusive-argument-groups` 声明互斥组。canonicalizer 在快照构造时校验组至少两个字段、字段不重复且都属于同层 `properties`；声明参与 `schema_hash`，公共输入 validator 按声明顺序检查所有对象节点。判断只看参数名是否实际出现，空串和 `null` 也不会被静默丢弃。
@@ -1243,7 +1263,7 @@
   按同一规则算管理员，与 `/settings` 一致。旧的 `/ask`、`/control` 短路用例已按此更新（`7e0fbcec1`、`b6f25978c`）。
 - **状态**：本地开发验证见 TESTS；未启动或部署 Gateway，真实飞书/QQ 收发尚未验证。
 
-## 能力包版本字段抄错不再报"快照失效"，改为可修参数（H1，同分支含 H3、H4）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `626b8576c`（初版在 `34e4d874e`），已实现，待集成）
+## 能力包版本字段抄错不再报"快照失效"，改为可修参数（H1，同分支含 H3、H4）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `626b8576c`（初版在 `34e4d874e`），已上线 step17a（main de222698b，2026-10-02））
 
 - **来源**：能力包验收 C1 第 1 次真实运行（gpt-6-luna）。模型读 A 包时把 `expected_package_sha256` 抄错（前 36 位对，后面是编的），
   `skill_search` 回 `SKILL_SNAPSHOT_UNAVAILABLE`（details `SKILL_SNAPSHOT_STALE`），模型看到的恢复建议是"停止使用旧授权，由父代理按当前
@@ -1269,7 +1289,7 @@
   - **问题**：子代理的 `capability_request` 在写申请账之前，会因参数不全（`TOOL_PARAMETER_REQUIRED`）、root 不可申请（`TOOL_NOT_ALLOWED`）等被拒。这些拒绝没有声明 `effect_outcome`，又不在执行前确定失败白名单里，操作账因此落成 `UNKNOWN`（`TOOL_OPERATION_OUTCOME_UNKNOWN`，reconcile）。这和 D2 是同一类问题。
   - **做法**：唯一的失败出口 `_capability_error` 固定声明 `effect_outcome=not_started`，操作账改落 failed。
 
-## C12c：发现层补关"根本没有会话任务"的执行总账（D3 崩溃窗口）（2026-10-01，分支 `claude/38-c12c-discovery-no-link`，基于 main `34e4d874e`，已实现，待集成）
+## C12c：发现层补关"根本没有会话任务"的执行总账（D3 崩溃窗口）（2026-10-01，分支 `claude/38-c12c-discovery-no-link`，基于 main `34e4d874e`，已上线 step17a（main de222698b，2026-10-02））
 
 - **来源**：D3 修复的待定项。主执行轮已在运行库收口、TaskRun 收口边还没跑时进程崩溃，发现层的崩溃重放（`owner_wake_discovery._reconcile_terminal_conversation_task_runs`）只认可读的终态关联，分不出"没有关联"和"关联读坏"，没人补关。
 - **真实链路复现**（隔离 home，测试侧暂停钩子停在 `task_run_closeout.settle_terminal_task_run` 入口、再 SIGKILL；base = step16x 代码）：
@@ -1283,7 +1303,7 @@
 - **边界**：发现层只认默认布局下的会话存储。配置了 `conversation_workspace` 指向别处的部署，关联文件不在扫描范围内，会被当成不存在；生产配置里没有这一项。若误关一条，之后的新执行会照常 `task_run.reopened`，可以恢复。
 - **验证**：见 TESTS.md 同名节。证据（仓库外）：`~/.my-agent/decision-evidence/c12-observations-20261001/c12c/`。
 
-## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
+## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`
   结束，错误码只是异常类名 `PROVIDERRESPONSEERROR`；当时估算上下文 235358／272000（触发线 244800）。宿主把服务商给的错误对象整个
@@ -1462,7 +1482,7 @@
 - **依据**：agent_py_agent/agent/agent_core/agent_tree/node_rendering.py（list_agents 节点投影）、docs/modules/subagent/ORCHESTRATION_TOOL_REFERENCE.md（节点字段说明）、docs/design/REASONING_EFFORT.md 第 2 节「2026-09-30 复测」表与第 5 节、agent_py_agent/agent/backends/reasoning_control.py（describe_config_reasoning_effect 回执）。
 - **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
 
-## 没有会话任务的请求，代理树结束后 TaskRun 也关闭（2026-09-30，分支 `claude/38-taskrun-close-without-conversation-runtime`，基于 main `a8c71f0e0`，已实现，待集成）
+## 没有会话任务的请求，代理树结束后 TaskRun 也关闭（2026-09-30，分支 `claude/38-taskrun-close-without-conversation-runtime`，基于 main `a8c71f0e0`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**（ae 真实模型验收 D3，bf4f740c3 与 10041de02 各复现）：请求 record 没有 `conversation_runtime`、`conversations/tasks/<请求>.json`
   不存在（只调 list_agents、管理员 `manage_models set_shared`、不调工具），请求 done、主 agent_run done，TaskRun 却永远
@@ -1511,7 +1531,7 @@
   这条运行要等取消入口处理，记为待定（2026-10-01 C12d 真实链路核对：runner 心跳会自己停下，见上方 C12d 条目）；避开了 1 号会话正在改的 `takeover/record.py` 与 Codex 在重构的 `conversation/runtime.py`。
 - **验证**：`test_subagent_takeover_runtime_closeout.py` 6 项；7 个变异全部被杀。见 TESTS.md 同名节。
 
-## 工具参数无效改为有界纠正：长任务不再因一次坏参数整轮失败（2026-09-30，已实现，待上线）
+## 工具参数无效改为有界纠正：长任务不再因一次坏参数整轮失败（2026-09-30，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**（真实）：2 号 deepseek-v4-flash 工作会话做开发任务，写了一半测试时一次工具参数不是合法 JSON，474 秒的工作整轮以
   `MODEL_TOOL_ARGUMENTS_INVALID` 失败。此前设计是“参数无效就停止本轮”（为了让用户看到失败而不是停在半句话上）。
@@ -1526,11 +1546,11 @@
 
 - **内容**：把散落在多份设计文档里的能力包能力整理成给用户看的中文大白话说明（每个功能带小例子）：能力包是什么（纯内容包，和 MCP/插件/Skill 的区别）、装/启用/停用/更新/回退/卸载（`/plugins` 各动作，安装默认停用、回退=显式指定旧版本包、卸载保留任务产物）、按任务发现与使用（推荐开关默认开、一次选择默认关、新任务才用新版本）、版本固定与派子代理授权（`allowed_skills=["capability:<包ID>"]`）、自制包（`scripts/build_capability_package.py` 用法与声明字段）、安全边界（只按声明读取、改动过的包拒绝、不执行包内代码、不含密钥）、常见疑问。
 - **位置**：`docs/guides/CAPABILITY_PACK_GUIDE.md`（与 MODEL_GUIDE.md 同目录、同风格）；README.md「能力包（开发候选）」与 docs/README.md「入口」已加链接。
-- **明确边界（2026-10-01 更新）**：源码已支持 TUI 与 IM 的 `/plugins` 和 `/plugins@<插件ID>`，共用插件服务；管理动作仅管理员，含可执行程序的启用先预览再确认。真实 IM 收发待集成方部署验收。
+- **明确边界（2026-10-02 更新）**：TUI 与 IM 的 `/plugins` 和 `/plugins@<插件ID>` 已随 step17a 上线（main de222698b，2026-10-02），共用插件服务；管理动作仅管理员，含可执行程序的启用先预览再确认。真实 IM 收发仍待沙箱外验收。
 - **依据**：docs/design/CAPABILITY_PACKS.md、PLUGIN_PACKAGES.md、agent/command_catalog.py（/plugins 动作）、scripts/build_capability_package.py、agent_py_agent/config/capability_config.yaml（推荐/选择开关与默认值）；验收过程记录（docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md）只用于确认「哪些已真实验证、哪些还没有」，未写入用户说明。
 - **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
 
-## list_agents 显示子代理实际使用的模型与智能程度（2026-09-30，已实现，待上线）
+## list_agents 显示子代理实际使用的模型与智能程度（2026-09-30，已上线 step17a（main de222698b，2026-10-02））
 
 - **背景**：功能验收发现——派出去的子代理实际用了哪个模型、哪个智能程度，my-agent 的 list_agents 看不到（节点只有 goal_digest/status 等，无 model/effort）。宿主核实子代理线程 model_profile_id=536c11f9（deepseek-v4.1-flash）、reasoning_effort=low，但工具回执不展示。
 - **做法**：权威来源是已物化子代理线程的 `ConversationThread.model_profile_id` / `reasoning_effort`（创建时从任务属性写入）；线程未物化或读取失败时回退 kernel 快照里冻结的 `host_model_profile.v1` / `host_reasoning_effort.v1`。节点新增 `model`（“名称（编号）”，default→“继承会话默认”，失败→“未知”）与 `reasoning_effort`（档位或“默认”）；任何读取失败显示“未知”且不让 list_agents 失败；输出绝不含密钥、地址或请求头。
@@ -1558,13 +1578,13 @@
   DeepSeek 官方（v4-pro 明显，v4-flash 在这道题上差距小）。只能开 / 关：DeepSeek Anthropic 兼容、opencode v4.1-flash（关思考生效）、
   MiniMax M3（用 budget）。不支持：opencode v4-flash、MiniMax M2.7。本地 qwen 与 step7 relay 不可达。
 - **已改**：`/effort` 回执与 Responses 实际发送同一换算（`79b398484`）。已知表不改：同一中转 / 服务商下模型表现不同，按档案声明。
-- **待集成者经产品入口写档案（待定）**：
+- **可经产品入口写档案的后续项（待定）**：
   - ChatGPT 订阅五个档案补 `reasoning_levels`（从订阅目录重新勾选即可刷新）；
   - opencode `deepseek-v4.1-flash` 声明 `reasoning_control: effort`（主要为了关思考生效）；
   - MiniMax `M3` 声明 `reasoning_control: budget`（只开 / 关）；
   - opencode `deepseek-v4-flash`、MiniMax `M2.7` 保持不声明（none）。
 
-## WebSocket 断开加固：不再主动发心跳、断开带诊断，Compact 摘要遇瞬时错误原地重发（2026-09-30，已实现，待上线）
+## WebSocket 断开加固：不再主动发心跳、断开带诊断，Compact 摘要遇瞬时错误原地重发（2026-09-30，已上线 step17a（main de222698b，2026-10-02））
 
 - **来源**：38 的智能程度审计里，订阅 WebSocket 49 次请求有 2 次在第 23–24 秒"回复完成前断开"（握手已成功），都紧跟客户端
   第 20 秒的心跳 ping；错误里没有关闭码，也分不清断在哪个阶段。另查到 Compact 摘要走辅助调用，没有任何瞬时错误重试。
@@ -1576,7 +1596,7 @@
   [摘要请求的瞬时错误重发](docs/design/CONVERSATION_CONTEXT_DESIGN.md#摘要请求的瞬时错误重发2026-09-30)。
 - **待观察**：去掉客户端 ping 后的断开率要靠上线后的真实请求统计确认；如果仍有断开，下一步参考 Codex 的会话级回退（重试用完后本会话改走 HTTP）。
 
-## GPT 长任务回合内压缩失败：Responses 思考块被当成未知内容（2026-09-30，已实现，待上线）
+## GPT 长任务回合内压缩失败：Responses 思考块被当成未知内容（2026-09-30，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**（真实）：主会话切到 gpt-6-luna 后派一个开发任务，开头的会话压缩正常（47.3 万→7.5 万），做了 10 轮工具、1137 秒后整轮
   失败，`error_code=COMPACT_REQUEST_NON_TEXT`，没有任何产出。
@@ -1600,7 +1620,7 @@
   - 验证：`test_compact_message_source.py` 新增 4 项（两种来源都剥密文且保留摘要与 id、原消息不改、整请求仍带密文、投影来源早退关闭上游、
     可读内容变化仍被发现）；6 个变异全部被杀。见 [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md) 同名节。
 
-## Responses 请求带会话级提示缓存键 prompt_cache_key（2026-09-30，分支 `worker/ds1-responses-cache-key`，基于 main `bf4f740c3`，已实现，待集成）
+## Responses 请求带会话级提示缓存键 prompt_cache_key（2026-09-30，分支 `worker/ds1-responses-cache-key`，基于 main `bf4f740c3`，已上线 step17a（main de222698b，2026-10-02））
 
 - **用户要求**（集成负责人 3a）：OpenAI 官方 Codex 在每个 Responses 请求体里带 `prompt_cache_key`（值是会话编号），让服务商把同一会话路由到同一份提示缓存，命中更高、更快、更省额度；我们的 Responses 后端 `_generate` 没有带。
 - **做法**：`provider_headers.py` 新增公开只读函数 `current_provider_session()`，返回当前线程绑定的稳定会话编号（owner+thread 的 sha256，来自 `provider_session_scope` / `provider_runtime_scope`），未绑定时返回空串；其它模块不直接读私有 `_SESSION`。
@@ -1615,7 +1635,7 @@
 - **依据**：`agent/command_catalog.py`（`/model`、`/effort` 声明与 IM 可用性）、`agent/capability/model_profile_tool.py`（`manage_models` 动作）、`agent/settings/model_profiles.py`（`resolve_child_model_profile` 权限、初始模型解析）、`agent/backends/reasoning_control.py`（档位换算），以及 docs/design 下 TUI_MODEL_PROFILES / MODEL_OAUTH / REASONING_EFFORT / SHARED_MODEL_CATALOG / SESSION_MODEL_SELECTION。
 - **验证**：纯文档改动，未改代码；`scripts/check_doc_sync.py` 与 `git diff --check` 通过（详见 TESTS.md 同名节）。
 
-## 上下文数字第二个来源：owner 级按分词身份的校准比值缓存（2026-09-30，分支 `claude/38-context-calibration-carry`，基于 main `bf4f740c3`，已实现，待集成）
+## 上下文数字第二个来源：owner 级按分词身份的校准比值缓存（2026-09-30，分支 `claude/38-context-calibration-carry`，基于 main `bf4f740c3`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**（3a 用同一只读脚本取数）：09-30 11:07 新开的两个会话第一次调用都显示 44,852，实际 35,806 / 35,807，偏高 25.3%；
   第二次调用只差 +1.1% / +0.7%。
@@ -1635,7 +1655,7 @@
 - **验证**：`test_context_calibration_carry.py` 8 个合同用例；10 个变异全部被杀；详见 TESTS.md 同名节与
   [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md) 同日一节。
 
-## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已实现，待上线）
+## GPT 长回复断线根因与 WebSocket 传输、Responses 智能程度、子代理选模权限、删除模型入口（2026-09-30，已上线 step17a（main de222698b，2026-10-02））
 
 - **用户要求**（长任务 goal 第 1、2 项）：找到断线原因并修好，用 gpt-6-luna 实测，"不能固定模型"；检修模型配置和 effort，保证能调的
   都真的可用；派子代理可选模型和智能程度（管理员不限，普通用户只能用自己添加的模型）；补删除模型入口，这些操作 my-agent 自己也能做。
@@ -1654,7 +1674,7 @@
 - **验证**：`test_responses_websocket.py`、`test_responses_reasoning.py`、`test_model_profile_tool.py`、`test_tui_manage_models.py` 与更新后的
   共享/决策子代理用例；真实 gpt-6-luna 实验记录在 3a scratchpad `diag-1031/`（e1–e4 SSE 断线、c1 对照、w1–w2 与 f1–f2 WebSocket）。
 
-## TUI 上下文数字忽高忽低：持久校准指纹改成跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`，已实现，待集成）
+## TUI 上下文数字忽高忽低：持久校准指纹改成跨进程稳定（2026-09-30，分支 `claude/38-context-usage-flicker`，基于 `c80c8b5c2`，已上线 step17a（main de222698b，2026-10-02））
 
 - **现象**：用户长期会话（local/main `thread-de866e7291f846db`）的状态条 Context 一会儿高一会儿低。
 - **数据**（只读结构化字段，证据 `~/.my-agent/decision-evidence/context-number-flicker-20260930/`）：
@@ -1684,7 +1704,7 @@
 - **验证**：`test_responses_backend.py` 三个新用例（终态无 output 取流内条目、终态有 output 不被覆盖、流式能力探针通过）；
   真实订阅账号 gpt-6.1-sol / gpt-5.6-sol 能力检查通过、短问候有正文（隔离目录副本，不刷新令牌）。
 
-## /model 菜单改成五项、其他用户的初始模型、补全高亮（2026-09-30，分支 `claude/3a-chatgpt-browser-login`，已实现，待上线）
+## /model 菜单改成五项、其他用户的初始模型、补全高亮（2026-09-30，分支 `claude/3a-chatgpt-browser-login`，已上线 step17a（main de222698b，2026-10-02））
 
 - **用户反馈**：菜单九项、每项下面又一堆，容易绕晕；OpenCode 这种要加头的服务商在「新增模型」里加就行；希望管理员能给其他
   用户指定初始模型；`/model` 打全后补全高亮会消失。用户确认的方案是顶层五项。
@@ -2035,7 +2055,7 @@
   各记录的 status、error_code 和 provider_attempt_count。顺带观察（只记，未评估影响）：后台策略运行没有调度 run id 时，
   turn_id 退回用 task_id（`runtime._run_agent`），同一任务的多次策略运行共用一个 turn 身份。
 
-## 持久化指纹必须分版本、兼容旧数据（2026-09-29，分支 `claude/38-guidance-receipt-digest-compat`，基于 `bac2f176d`，本地验证通过，待集成）
+## 持久化指纹必须分版本、兼容旧数据（2026-09-29，分支 `claude/38-guidance-receipt-digest-compat`，基于 `bac2f176d`，已上线 step17a（main de222698b，2026-10-02））
 
 - 已落地：插话幂等回执指纹分 v1/v2，旧回执两种任一匹配、新回执记版本严格校验；对账把"带错误的终态未知"计入 summary 并抛给循环守卫，
   状态与错误没变不重写。规矩：改持久化指纹口径 = 加版本 + 保留旧计算 + 钉固定样本，不得原地改。
@@ -2072,13 +2092,13 @@
 - **不做什么**：本次不动错误码，只记这一条；换码会牵动 `ERROR_CONTRACTS`、操作账口径和既有测试，
   属于新的控制语义。
 
-## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`，本地验证通过，待集成）
+## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`，已上线 step17a（main de222698b，2026-10-02））
 
 - 来源：定时任务停摆排查时，工具操作账的 `unknown_reason` 只剩 `effect_outcome_unknown:TOOL_OPERATION_OUTCOME_UNKNOWN`。`claude/75-scheduler-waiting-deadlock`（`0b04e6fbe`）已补 `run_command` 后台三处，这里补剩下三处。
 - 已实现：错误码与 `effect_outcome=unknown` 不变（仍不自动重做），只加 `reported_error_code`：`process_session` 权威读不出 → `PROCESS_SESSION_AUTHORITY_UNREADABLE`，清理结果未定（`ProcessSessionCleanupError`）→ `PROCESS_SESSION_CLEANUP_UNCONFIRMED`，停止后进程树退出未确认 → `PROCESS_STOP_UNCONFIRMED`；`terminal_session` 关闭未确认 → `PTY_CLOSE_UNCONFIRMED`。四个码登记进 `ERROR_CONTRACTS`（不可自动重试、人工核对），工具操作账的 `unknown_reason` 随之写成 `effect_outcome_unknown:<具体码>`。
 - 边界：只让原因可归因，不改变结果未知的判定条件和恢复路径。
 
-## Gateway 派发线程存活成为结构化事实（2026-09-28，分支 `claude/38-gateway-dispatcher-resilience`，基于 `c101d325a`，本地验证通过，待集成）
+## Gateway 派发线程存活成为结构化事实（2026-09-28，分支 `claude/38-gateway-dispatcher-resilience`，基于 `c101d325a`，已上线 step17a（main de222698b，2026-10-02））
 
 - 现状：派发线程的起止、每次 tick 起止、逃逸异常与"错误打印本身失败"记在进程内账本 `gateway_parts/loop_health.py`，
   心跳与 `/status` 扁平并入 `dispatcher_alive`/`dispatcher_state`/`last_dispatch_tick_at` 等字段；所有后台循环共用的错误打印入口不再抛异常；
@@ -2164,11 +2184,11 @@
 - 从核对 attempt 到做 CAS 之间，可能有唤醒新起一个 attempt（9a 记录，不挡合并）；确认前后都只认结构化事实，CAS 仍只在 active 时改。
 - 设计细节见 [CLI 参考](CLI_REFERENCE.md) 的 `/endtask` 说明。
 
-## 定时执行没做完时只凭后续工作事实决定 waiting（2026-09-29，分支 `claude/75-scheduler-waiting-deadlock`，基于 `c101d325a`，本地验证通过，待集成）
+## 定时执行没做完时只凭后续工作事实决定 waiting（2026-09-29，分支 `claude/75-scheduler-waiting-deadlock`，基于 `c101d325a`，已上线 step17a（main de222698b，2026-10-02））
 
 来源：my-agent-2/4 的 300 秒定时任务永久停摆。一次前台 `run_command` 回报 `TOOL_OPERATION_OUTCOME_UNKNOWN`，回合以 unfinished 结束、会话任务仍是 active；`_finish_scheduler_wake_claim` 无条件 `park_waiting`，而 waiting 只在任务终态时对账、`_job_has_active_run` 又让同一 job 有 run 就不派发，于是死锁。两条操作的 `unknown_reason` 都只剩通用码、受管账本的 `result` 为空，排障也无从下手。
 
-已实现（状态：本地通过，待集成）：
+已上线 step17a（main de222698b，2026-10-02）：
 - 进 waiting 的前提是结构化后续工作事实：`conversation/task_follow_up.task_follow_up_facts` 只读活跃 Goal、指向该任务的待处理 guidance、未终态子代理、指向该任务的待处理唤醒（排除定时触发本身和正在处理的唤醒）、未发完成通知的受管后台命令、启用的进度策略。某一项读取失败只记这一项（`FollowUpFacts.unreadable`：项目名 + 结构化错误码），按仍有后续工作处理（fail closed）。
 - 读不出来不能变成永远等（be 复审 M1）：
   - 唤醒、进度策略、后台命令三项读的是 owner 全量数据：读到的记录里已有本任务的匹配就直接算存在，同类坏记录不能遮住它（be 复审 A 的 P2）；没有匹配时，读错误先按记录归属限定：坏记录能解析出属于别的任务（唤醒的 `root_task_id`、策略的 `task_id`、后台命令没有完成通知目标——缺键或盘上的规范空形状 `{}`（be 复审 A 的 P1）——或指向别的任务/会话存储）就不计入，解析不出归属的仍计入；
@@ -2373,7 +2393,7 @@
   - B 第 1 步（连接复用）暂不排期，记为后续设计项：现在 Jev 调用只剩后台 curator，而且要先确认代理和服务端的空闲连接上限。
   - 详见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 18 节。
 
-## capability 配置缺文件就用 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`，本地验证通过，待集成）
+## capability 配置缺文件就用 dataclass 默认值（2026-09-28，分支 `claude/9a-capcfg-missing-defaults`，基于 `025573d5e`，已上线 step17a（main de222698b，2026-10-02））
 
 - **问题**：
   - 生产 Gateway 的 agent 根目录是 owner home，那里通常没有 `config/capability_config.yaml`。
@@ -2438,7 +2458,7 @@
   - 直接度量：改后 curator 已发出 94 次，其中耗时超过 5 秒仍成功的 2 次（2.1%）。
   - 复测口径和被审脚本的改法见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 18 节。
 
-## 已结束子代理被接替：终态不改写，只追加接替关系（2026-09-28，分支 `claude/ae-done-takeover-fix`，基于 `53477806d`，本地验证通过，待集成）
+## 已结束子代理被接替：终态不改写，只追加接替关系（2026-09-28，分支 `claude/ae-done-takeover-fix`，基于 `53477806d`，已上线 step17a（main de222698b，2026-10-02））
 
 来源：G03 脚本模型端到端验证（9f88e4905）发现，接替一个已 DONE 的子代理时，create_subagents 回执报 `recorded`、也写了 TAKEOVER.md，但持久化边界 `_restore_newer_closed_state` 把 TAKEN_OVER 静默还原成 DONE，takeover_by 为空，回执与权威状态不符。语义由集成方定：
 - 终态不改写：已关闭来源（DONE/ABANDONED/CANCELLED）被接替时状态保持，只追加 `SubAgentTask.superseded_by` 与一条 TakeoverRecord；这两项列入已关闭记录的单调追加白名单（`_closed_record_appends`），同状态旧快照也冲不掉。未关闭来源（BLOCKED 等）照旧转 TAKEN_OVER。
@@ -2453,18 +2473,18 @@
 
 脚本模型端到端复核（BR/HI）已通过，见 CAPABILITY_PACK_ACCEPTANCE 的 G03 节。模块细节见 [子代理结构](docs/modules/subagent/04-structure.md#接替关系的唯一落账入口2026-09-28)。
 
-## 主代理同一失败调用的回合硬上限（2026-09-28，分支 `claude/75-repeat-failure-halt`，本地验证通过，待集成）
+## 主代理同一失败调用的回合硬上限（2026-09-28，分支 `claude/75-repeat-failure-halt`，已上线 step17a（main de222698b，2026-10-02））
 
 来源：G05 补测中，脚本模型在一次 Goal 续跑回合里重复同一个失败的 `skill_search get`，共 393 个模型轮，宿主没有硬停。根因是既有机制只给提示：同类失败每满 `repeated_failure_halt_threshold`（15）次就追加一次强返工提示，并清掉失败段；清段的同时也清掉了 action guardrail 的同参计数，于是 3N（30 次）同参拒绝永远到不了。
 
-已实现（状态：本地通过，待集成）：
+已上线 step17a（main de222698b，2026-10-02）：
 - 判定只看结构化事实：主代理（非 `task_local`）同一回合里，工具名、规范化参数摘要（`ToolCall.args_hash`）、归一化 `error_code` 三者都相同，并且连续失败。中间出现任一成功、换参数、换工具或换错误码，都从头计数；同一批里后到的成功会撤销已经写下的收口。
 - 阈值复用 `repeated_failure_halt_threshold`（默认 15，≤0 关闭），不新增参数。主代理路径通过 `task_attributes → runtime_guard_policy → runtime_guard_config.yaml` 读取，单测和 fake LLM 都验证了默认 15 生效。
 - 命中后只结束当前回合：`runtime_status=unfinished`，`runtime_reason=REPEATED_IDENTICAL_TOOL_FAILURE`，`runtime_source=tool_loop`，`turn_end_reason` 按原协议推为 `interrupted`。任务不收成完成，Goal 状态不变。宿主按结构化字段直接写收口文字（含工具名、错误码、次数），不再追加一次收口模型调用，所以 TUI、IM 和历史回放都能看到原因。
 - Goal 不会原样重跑：这个原因不在 `CONTINUABLE_REASONS` 里，前台 finalization 的 `_schedule_typed_unfinished_continuation` 和后台 `goal_continuation_allowed` 都不会自动开下一轮。Goal 保持 active，用户发新消息后才继续；新回合的连续段从空开始。
 - 既有的“连续 2 次失败”软提示、同类失败强返工提示和 action guardrail 提示保留；这个硬上限是最后一道闸。
 
-子代理版本（2026-09-28，分支 `claude/75-repeat-failure-halt-subagent`，基于主代理两个提交，本地验证通过，待集成）：
+子代理版本（2026-09-28，分支 `claude/75-repeat-failure-halt-subagent`，基于主代理两个提交，已上线 step17a（main de222698b，2026-10-02））：
 - 同一 `identical_failure` 模块也对 `task_local` 子代理生效，阈值同样是 `repeated_failure_halt_threshold`。命中后沿授权阶段收口的同一路径结束本轮：`blocked`、`turn_end_reason=blocked`、`runtime_reason=REPEATED_IDENTICAL_TOOL_FAILURE`，宿主自写收口文字，不调用模型；runner 收成 BLOCKED，不会被立即重派。
 - 父级可见：finalize 按工具循环的同一口径，从本 run 归档复算末尾的同调用失败段，写入原有 `tool_failure_halt` 事实（schema `subagent-tool-failure-halt.v1`，含原因码、工具、错误码、阶段、次数、参数名，不带参数值）。完成信封、wake metadata、前台活动回合事件和直属孩子行都经同一合同投影保留这份事实；唤醒摘要按 `reason_code` 区分两种说法。原因码与授权阶段收口码一起唯一定义在 `subagents/tool_failure_ledger.py`。
 - 优先级：同一次调用先判授权阶段收口。两者同时满足时按授权阶段收口，因为授权不会因重试改变，需要父级调整授权。已经写下的收口不会被另一种原因改写；同批后到的成功各自撤销对应收口。
@@ -2488,7 +2508,7 @@
 [SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md)。状态：**第一期已实现并已上线**
 （模型工具、TUI 命令、权威存储、防循环守卫、结果回报与取消都已交付）。
 
-**第一期遗留缺口已补上（2026-09-28，分支 `claude/75-list-owner-sessions`，本地验证通过，待集成）**：
+**第一期遗留缺口已补上（2026-09-28，分支 `claude/75-list-owner-sessions`，已上线 step17a（main de222698b，2026-10-02））**：
 模型工具 `list_owner_sessions` 只给管理员、跟随两个管理员开关，列出本 owner 会话的结构化 id、状态、最近活动、
 渠道、是否当前会话和可用发送类型，不含正文；别的 owner 的会话不列出也不计数。细节见
 [SESSION_MESSAGING.md](docs/design/SESSION_MESSAGING.md) 实现落点一节。
@@ -2650,11 +2670,11 @@
   `load` 一条，O(1)；不是派活回合（定时 run、会话消息唤醒）直接返回 False，不再扫描。控制面 `_bound_background_turn_is_running`
   的全量读取不在这次范围里，照旧。
 
-## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，本地验证通过，待集成）
+## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`，已上线 step17a（main de222698b，2026-10-02））
 
 显式传入超出当前 owner 可见范围的 run_id 时，`list_agents` 原先只返回 `nodes=[]`/`root_id=""`，并把请求的 id 回显成 `effective` 范围，调用方无法区分"这个 id 不存在"和"它不属于你的可见范围"。规则：显式 run_id 在整棵可见树里没有匹配行（且不是 main run、当前没有子 runner 身份）时，查询折成 `root_tree`，`effective` 不保留该 id，并在既有 `ScopeResolution` 上追加唯一裁决码 `requested_run_id_not_in_visible_scope`；`scope_warnings` 恒为列表（无告警时空列表），模型视图转发该顶层字段。两种原因共用同一分支、同一个码和同一响应形状，因此答复不泄露目标是否存在；合法查询行为不变。同类静默问题（`task_progress` 显式 run_id 静默换账本、`cancel_subagents` 解析空列表不说明原因）按同一码语义收口，已转由 my-agent-2 处理。验证见 TESTS。
 
-## 能力配置的实际生效位置与随包模板一致性（2026-09-28，分支 `claude/9a-lark-and-capcfg`，基于 `3d76ac687`，本地验证通过，待集成）
+## 能力配置的实际生效位置与随包模板一致性（2026-09-28，分支 `claude/9a-lark-and-capcfg`，基于 `3d76ac687`，已上线 step17a（main de222698b，2026-10-02））
 
 - **生效位置**：
   - Gateway 和本地会话按 agent 根目录找配置：先找 `agent_py_agent/config/capability_config.yaml`，再找 `config/capability_config.yaml`。
@@ -2671,7 +2691,7 @@
   - 用户配置里残留这些键只告警、照常加载。
   - 测试进一步锁定：dataclass 的每个字段都必须写进模板。不用的字段直接删，不在模板外保留。
 - **不变**：读取逻辑和路径解析都不变；Gateway 找不到文件时的行为也不变。
-## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，本地验证通过，待集成）
+## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，已上线 step17a（main de222698b，2026-10-02））
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。
 
@@ -2679,7 +2699,7 @@
 
 十二步骤收口审计保持原范围：固定 27 次业务 16/27、原资源执行 12/18，三次完整错误回执后的自建程序属于模型恢复质量限制，未确认新宿主缺陷；不实施未验证的冲突字段候选。七组未覆盖或部分覆盖范围完整列入验收记录，不以最新四项摘要掩盖旧缺项，不因本轮不运行而豁免。C22 的 65536 只证明机制；历史 77 个大窗口检查点中 43 个压缩前估算达到 128K，17 个手动、60 个触发未知，缺当前包 pins 与后继原资源执行。Mac 两版记录已核、Linux 两版未部署，容器源码测试不代替发布；Goal active。建议下一步由 Claude 集成本文档补记，只读可并行，本轮不新增真实模型或 owner 用例；详见[收口审计与完整缺项](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#收口审计与七组未覆盖范围2026-09-28)。
 
-## TaskRun 收口允许“静止但未终态”的子 run（2026-09-28，分支 `claude/38-taskrun-settle`，基于 `d0318486e`，本地验证通过，待集成）
+## TaskRun 收口允许“静止但未终态”的子 run（2026-09-28，分支 `claude/38-taskrun-settle`，基于 `d0318486e`，已上线 step17a（main de222698b，2026-10-02））
 
 **问题**（dsh-be 分析，集成方认可）：子代理以 BLOCKED / unfinished 等非终态 runtime_status 结束时，设计上只关闭 attempt、删掉执行锁，`agent_runs.status` 停在 created（展示面读 canonical，不受影响）。`settle_task_run_if_agent_tree_terminal` 要求树上所有 AgentRun 终态，父 TaskRun 因此永远 `closed_at=0`、不写 `task_run.closed`；两个调用方（`runtime_mixin._settle_terminal_conversation_task_run`、`owner_wake_discovery._reconcile_terminal_conversation_task_runs`）忽略返回值，`open_task_runs` 只增不减，发现扫描每轮对这些行白跑一次。
 
@@ -2713,7 +2733,7 @@ Goal 工具已核为 active，最终 0/27。下一步按原 conversation_request
 
 后续委派验收增加父级生命周期唤醒无重复派工的结构化观察，须等 Claude 原作者的固定补片；按原请求对应的 delegation 和 TOOL_ONE_SHOT 事实，不依据模型说“已派过”。本线不修改 conversation/runtime.py，设计实施与发布保持原作者唯一写入。旧“校准待交付”“C21 未运行”段落保留原时点；当前 Goal 工具 blocked，协作继续，最终 0/27。
 
-## Compact 候选接受门与预检同一校准口径（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`，本地验证通过，待集成）
+## Compact 候选接受门与预检同一校准口径（2026-09-28，分支 `claude/38-compact-calibration`，基于 `59fdcabbf`，已上线 step17a（main de222698b，2026-10-02））
 
 **根因（压缩异常②）**：真机单回合多次 `read_file` 后，预检按供应商观测校准过的可见上下文越过触发线（本地估算比供应商实际高约 43%：242,207 对 169,217），恢复压缩却按未校准的本地投影量候选，候选被 `COMPACT_CANDIDATE_TOO_LARGE` 拒掉；压缩开始时 `_gateway_compact_progress_callback` 又把未校准的“压缩前”写成线程 `model_context_usage` 快照。两条链说的不是同一种数。
 
@@ -2728,7 +2748,7 @@ Goal 工具已核为 active，最终 0/27。下一步按原 conversation_request
 
 **不在范围**：after ≥ before 不告警（集成方决定）；派生基线不持久化到线程；`/compact` 手动路径与阈值以外的旧事件不带 `trigger_source`。回归见 `test_compact_calibrated_candidate_gate.py`（含隔离 home 假 LLM 两回合复现），详见 [会话上下文设计](docs/design/CONVERSATION_CONTEXT_DESIGN.md#压缩候选与预检同一校准口径2026-09-28分支-claude38-compact-calibration)。
 
-## TUI插话：失败调用退回重提交、后台目标按任务终态收尾（2026-09-28，分支`claude/be-steer-loss`，待集成）
+## TUI插话：失败调用退回重提交、后台目标按任务终态收尾（2026-09-28，分支`claude/be-steer-loss`，已上线 step17a（main de222698b，2026-10-02））
 
 **根因**：生产结构化记录显示，09-27 22:54 一条插话随模型调用提交，这次调用随即 `ProviderTransientError`。旧规则里，两层重试都因为“有未确认插话”不重发，attempt 失败；新 attempt 又不重发“提交不明”的插话。入口回执因此永远停在 `active_pending`，TUI 已轮询上千次。定时任务目标 `srun_*` 没有 Gateway 请求文件，回合生命周期永远判成未知，所以回合结束后插话也从不收尾。
 
@@ -2740,7 +2760,7 @@ Goal 工具已核为 active，最终 0/27。下一步按原 conversation_request
 
 结构见 [Gateway 结构](docs/modules/gateway/04-structure.md)，回归见 `test_steer_delivery_recovery.py`。
 
-**被放弃调用的迟到线程（2026-09-29，分支 `claude/38-abandoned-call-steer-race`，待集成）**：墙钟超时或用户停止让 guard 放弃一次物理调用后，它的工作线程可能才走到发出前登记，把插话提交到已作废的调用编号上，重试提交随即撞上账本的 `guidance submission was not reserved`。规则：每次物理调用带一份 liveness；guard 放弃时置位，工作线程在同一把锁内复核“仍是当前调用”后才做发出前登记（子代理业务标记、发送前钩子、插话提交）并发请求；已放弃则三步都不做、不发请求，只在模型调用账本记 `submission_skipped_after_abandon` 事件并以 `ModelCallAbandonedError` 结束该线程。放弃后的退回与重试判据不变；state 必须带 liveness（测试替身也要带），没有缺字段兜底；被放弃的调用不记成失败的 LLM 调用；放弃标记会等一次有界的进行中登记做完，这点延迟是正确性所需。回归见 `test_abandoned_call_steer_race.py`。
+**被放弃调用的迟到线程（2026-09-29，分支 `claude/38-abandoned-call-steer-race`，已上线 step17a（main de222698b，2026-10-02））**：墙钟超时或用户停止让 guard 放弃一次物理调用后，它的工作线程可能才走到发出前登记，把插话提交到已作废的调用编号上，重试提交随即撞上账本的 `guidance submission was not reserved`。规则：每次物理调用带一份 liveness；guard 放弃时置位，工作线程在同一把锁内复核“仍是当前调用”后才做发出前登记（子代理业务标记、发送前钩子、插话提交）并发请求；已放弃则三步都不做、不发请求，只在模型调用账本记 `submission_skipped_after_abandon` 事件并以 `ModelCallAbandonedError` 结束该线程。放弃后的退回与重试判据不变；state 必须带 liveness（测试替身也要带），没有缺字段兜底；被放弃的调用不记成失败的 LLM 调用；放弃标记会等一次有界的进行中登记做完，这点延迟是正确性所需。回归见 `test_abandoned_call_steer_race.py`。
 
 ## Compact 校准与计量收口（2026-09-28，方案审阅，待原作者实现验收）
 
@@ -2762,15 +2782,15 @@ C21 用小型明确输入驱动离线交接 CLI 的实际开发，复用 A/B 原
 
 C18把猜错成员路径误归快照失效，原恢复因此要求重新授权。现仅在原受限包与预期代次核验之后，以同一`package.resolve`判定声明成员；未命中沿既有`TOOL_INVALID_ARGUMENTS/repair_tool_arguments`返回失败及同代入口`next_read`。建议须由模型再次显式调用，不自动读取、pin、授权或新增循环。入口文件名来自声明，未知包、旧代及真实成员读取失败仍走原错误；取消和中断继续传播，失败get的原任务晋升策略保持。6文件119项、独立窄审及本地严格gate通过，原生C18失败保留；详见[读取合同](docs/design/CAPABILITY_PACKS.md#发现作用域和按需读取)和[本轮验证](TESTS.md#c18包成员参数纠错2026-09-27)。
 
-## 显式包申请沿原直属父级裁决（2026-09-27，本地组件通过，未部署）
+## 显式包申请沿原直属父级裁决（2026-09-27，已上线 step17a，main de222698b，2026-10-02）
 
 自动语义路由会把合法包申请提前记GAP，混合工具申请还会局部授予后结清整条请求。现沿既有包命名域和PARENT_RESOLUTION_REQUIRED复用父级裁决链：owner路径判断保持在先，含capability:引用的申请整条保留OPEN；前缀不证明可授予，原resolve仍从直属父级当前快照解析完整七字段引用。未知包批准失败后仍可拒绝收口，不自动补裸包名前缀，不增加状态账或首请求资格。5例旧4红1绿、修后全绿，7文件111项通过；真实采用待验，见[当前验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17显式包申请回到原父级裁决2026-09-27)。
 
-## 子代理资料引用保持软线索（2026-09-27，本地修复，未部署）
+## 子代理资料引用保持软线索（2026-09-27，已上线 step17a，main de222698b，2026-10-02）
 
 G05首次提示准备被长input_refs的路径查询异常中断。修复复用原read_refs/unresolved合同：每个候选exists/resolve的OSError仅影响该候选，InterruptedError继续传播，其它根和引用正常查找；不截短引用、不从说明猜路径、不增加授权或状态。参考仅核本地Hermes逐引用异常隔离，未引入其解析器。65项定向及独立窄审通过，原生失败和包申请自动路由缺口分别保留，见[当前验收](docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c17并发资料交接与输入引用修复2026-09-27)。
 
-## 工具说明按调用方实际路径范围给出（2026-09-27，分支 `claude/9b-read-file-scope`，本地验证通过，待集成）
+## 工具说明按调用方实际路径范围给出（2026-09-27，分支 `claude/9b-read-file-scope`，已上线 step17a（main de222698b，2026-10-02））
 
 read_file / list_files 原说明“可直接读任意绝对路径……无需额外授权”对有 owner 墙的调用方不成立（所有子代理、远程/IM owner、非 Full Access 的本机主代理），87cf12677 现场的子代理据此反复重试墙外路径。现在说明末句按本 run 的读取范围三选一：有墙时写明只能读自己的数据目录、shared 公共区和本任务明确授权的外部工作目录，其它路径在授权阶段被拒并返回 PATH_OWNER_SCOPE_BLOCKED 等 PATH_*_BLOCKED 错误码；无墙 full 保持原句；无墙 normal 在原句后补危险目录与凭据文件的例外。三句与 `PathAccessPolicy.check` 一一对应，由测试钉住。
 

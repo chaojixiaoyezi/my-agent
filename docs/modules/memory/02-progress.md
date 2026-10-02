@@ -6,12 +6,12 @@
 - 只读、只是线索：不写/删/改记忆，不写访问信号，结果不进自动召回；子代理回合与记忆总闸关闭时不可用。
 - 开关 `enable_memory_search_tool` 默认关，属于安全边界（模型不能自己打开，用户经 `/settings` 可改）。详见 DESIGN_LEDGER 同名条目。
 
-## 召回后排序逐条题的候选措辞修正（J12b，2026-10-02，分支 `claude/be-recall-criteria`，已实现，待集成）
+## 召回后排序逐条题的候选措辞修正（J12b，2026-10-02，分支 `claude/be-recall-criteria`，已上线 step17a，main de222698b，2026-10-02）
 
 - `decision_recall` 逐条记忆题的候选说明改为写明“这一条”的含义，无关记忆明确指向 `later`；候选键、题目结构和非排序回答的处理不变。
 - 质量基准里 recall 从 12/30 升到 30/30，成绩已登记；点位仍默认关闭。详见 DESIGN_LEDGER 同名条目。
 
-## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复，2026-10-02，分支 `claude/be-curator-identity`，已实现，待集成）
+## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复，2026-10-02，分支 `claude/be-curator-identity`，已上线 step17a，main de222698b，2026-10-02）
 
 - 同身份比对和身份计算用同一套规范化：主题键按 `fold_key`，范围按规范键。
 - 与已有观察身份冲突的单条候选在提交前剔除，记 `curator_candidate_identity_conflict_dropped:<条数>`；共用合并函数保持严格，冲突改抛 ValueError 子类 `CandidateIdentityConflictError`。
@@ -38,7 +38,7 @@
 - 状态预览：没有嵌入客户端时也独立读文件，报能确认的数量；读不了报 None，不用 0 冒充。
 - 详见 DESIGN_LEDGER 与 TESTS.md 同名节。
 
-## 补充查询片段材料：先预检每个片段能新增的事实（J8，2026-10-02，分支 `claude/be-jev-snippet-facts`，已实现，待集成）
+## 补充查询片段材料：先预检每个片段能新增的事实（J8，2026-10-02，分支 `claude/be-jev-snippet-facts`，已上线 step17a，main de222698b，2026-10-02）
 
 - 新增 `points.pre_recall.fragment_material`，配置 `memory_decision_pre_recall_fragment_material` 默认 `query_text`，与原做法逐字节相同。
 - `with_new_facts` 时：
@@ -49,7 +49,7 @@
 - 真实 Jev 对照：候选检索写死成模拟语义召回的结果，因为嵌入模型不在授权名单。被覆盖的片段不再给选，没有可补时不调 Jev；选择准确率的提升没有被证明，语义召回下的端到端效果未验证。
 - 详见 [召回前审计](../../tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md) 与 TESTS.md 同名节。
 
-## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，本地已实现，待集成；P14 的旁路 meta 方案已被上节取代）
+## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，已上线 step17a，main de222698b，2026-10-02；P14 的旁路 meta 方案已被上节取代）
 
 - P13：`embedding_model_profile` 取代 `embedding_model/embedding_api_base/embedding_api_key/embedding_api_key_env` 四个平铺键
   （旧键仅告警，不留别名）。`core._embedding_client` 按档案的服务商凭据与端点构建，空档案 = 不建客户端、只走关键词；
@@ -68,7 +68,7 @@
 
 2026-10-02（分支 `worker/ds1-p10-batch4`）：常数整改第四批。`cli/memory_archive_commands.py` 与 `cli/memory_commands/` 的常数改名/补说明（如 `_CLI_MEMORY_ARCHIVE_LIMIT`→`_CLI_MEMORY_ARCHIVE_COUNT`、`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`→`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`），数值不变。
 
-## P12：固定提炼模型档案（2026-10-01，sol，本地已实现，待集成/部署）
+## P12：固定提炼模型档案（2026-10-01，sol，已上线 step17a，main de222698b，2026-10-02）
 
 - 解决聊天连接失效拖累后台提炼、旧覆盖键混用聊天凭据的问题：`memory_curator_model_profile` 非空时完整采用固定档案连接，空时保持 owner 选择行为。
 - 旧 provider/model 配置键删除，仅未知键告警；新引用参与 Curator 配置修订，不改变模型输出合同、游标或晋升规则。

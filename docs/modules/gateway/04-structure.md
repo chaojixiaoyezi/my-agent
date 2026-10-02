@@ -7,7 +7,7 @@
 - 收拢（2026-10-02）：`gateway_parts/plugin_command_service._scope_management`（IM 插件管理）与
   `tooling/user_config_tool._is_main_owner`（本机配置动作）也改为调用它，不再各写一份。
 
-## 设置服务 P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，待集成）
+## 设置服务 P8/P17 验收后续（P18 缺陷修复，2026-10-02，ds2，分支 `worker/ds2-p17-p8-followups`，已上线 step17a，main de222698b，2026-10-02）
 
 - `gateway_parts/settings_control_service`：`show` 的 capability 来源键覆盖判断扩展到来运行时 capability 文件
   （`_override_text`）；runtime_guard 键“能否修改”文案与 `parameter_changes._writable_spec` 拒绝文案一致；
@@ -17,7 +17,7 @@
   （用户位置优先、缺失回落随包默认）。`parameter_changes` 对解析成随包默认的 capability_path 拒绝写入
   （`CAPABILITY_IS_PACKAGED`），新建目录 0700。`parameter_metadata` 的读取方统计排除定义/规范化/登记类文件。
 
-## 设置服务与嵌入档案（P13，2026-10-02，ds1，待集成）
+## 设置服务与嵌入档案（P13，2026-10-02，ds1，已上线 step17a，main de222698b，2026-10-02）
 
 - `gateway_parts/settings_control_service`：`/settings show embedding_model_profile` 经 `embedding_profile_description`
   投影编号/模型名/失效原因；`BOUNDARY_KEYS` 收录 `embedding_model_profile`，模型与聊天动作写入被 `PARAMETER_BOUNDARY` 拒绝。
@@ -29,14 +29,14 @@ gateway_parts 28 个常数合规：`_SCAN_LIMIT→_SCAN_LIMIT_COUNT`、`_CAPABIL
 `_LIST_LIMIT→_LIST_LIMIT_COUNT`、`_QUARANTINED_LIST_LIMIT→_QUARANTINED_LIST_LIMIT_COUNT`、`_DEFAULT_MAX_SCOPES/_DEFAULT_MAX_KEYS_PER_SCOPE`
 补 `_COUNT`，`_BRIEF_MAX→_BRIEF_MAX_CHARS`、`_SHORT_ID→_SHORT_ID_CHARS`；时间/长度类补中文说明。数值不变。
 
-## P10 第四批常数整改（2026-10-02，ds1，待集成）
+## P10 第四批常数整改（2026-10-02，ds1，已上线 step17a，main de222698b，2026-10-02）
 
 cli 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补中文说明：`gateway_loops.py`（`_BACKGROUND_OWNER_WORKER_COUNT`、
 `_BACKGROUND_PER_OWNER_THREAD_COUNT`、`_MEMORY_CURATOR_WORKER_COUNT`、`_CURATOR_DAILY_QUOTA_COUNT`）、
 `gateway_loop_backoff.py`（`LOOP_ERROR_PRINT_EVERY_COUNT`）、`gateway_lane_retry.py`、`gateway_restart_handover.py`；
 数值不变，随包目录投影与源码一致。
 
-## Curator 档案控制 P12（2026-10-01，本地待集成）
+## Curator 档案控制 P12（2026-10-01，已上线 step17a，main de222698b，2026-10-02）
 
 - `settings_control_service.execute_settings_control` 从可信 scope 解析完整管理员 home；只有原身份校验通过，才进入
   `parameter_changes.user_settings_write_scope` 执行同步设置命令。作用域不读取 actor/client 标志，退出即清理，不授予其它边界项。
@@ -52,7 +52,7 @@ cli 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补
   数值不变，引用全仓同步（含测试）；无物理单位常数（倍数/指数/深度）只补说明进白名单单独组。
 - 白名单 685→575＋7；`_ALLOWED` 删 TIMEOUT_S、加 REQUEST_TIMEOUT_SECONDS；`constants_catalog.json` 重新生成 799 项 `--check` 一致。
 
-## P10 第二批常数整改（2026-10-02，待集成）
+## P10 第二批常数整改（2026-10-02，已上线 step17a，main de222698b，2026-10-02）
 
 `gateway_parts/request_context.py::DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`（原 DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS，子代理完成回执最多展示条数）与 `owner_wake_discovery.py` 的常数改名/补中文说明；数值不变，目录投影随源码一致。
 
@@ -66,7 +66,7 @@ cli 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补
   `fixtures/shuohao_skills/` 仅供自检和沙箱 report 子进程验证，不进生产插件 ZIP。
 - 本片未修改 Gateway 生产模块；真实 TUI/模型调用和固定提交沙箱外宿主复验由集成者负责。
 
-## 决策实验晋升提示 J6（2026-10-01，本地待集成）
+## 决策实验晋升提示 J6（2026-10-01，已上线 step17a，main de222698b，2026-10-02）
 
 - `request_experiment_promotion.py`：原请求回执仍是唯一幂等权威，新增 promotion_id 和冻结的 evaluation.rule；只返回本次新写入的回执。
 - `request_experiment_notice.py`：只读回执生成中文宿主提示，notice_id 复用 promotion_id，排入授权所绑定会话的原 pending_host_notices。
@@ -95,7 +95,7 @@ cli 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补
   `plugin_command_catalog` schema v3→v4 增加该字段，旧载荷缺字段时宽容回退。
   安装包越界时按路径策略 `policy.owner_scope_root` 提示当前允许放置的根目录，不泄露其它 owner 私有路径。
 
-## /effort 八档控制 C7（2026-10-02，本地待集成）
+## /effort 八档控制 C7（2026-10-02，已上线 step17a，main de222698b，2026-10-02）
 
 - `conversation.control_commands._effort_command` 与派工 schema 读取 `backends/reasoning_control.REASONING_LEVELS`，
   用户八档与标签、协议候选、预算均由唯一换算表派生；TUI/IM 共用解析，不新增 Gateway 路由或第二份白名单。
