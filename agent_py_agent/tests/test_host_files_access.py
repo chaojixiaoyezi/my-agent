@@ -800,7 +800,6 @@ def test_configured_home_wins_over_a_different_env_home(tmp_path, monkeypatch):
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.tooling.registry_invoke import (
         RegistryToolInvokeRequest,
-        _invocation_context,
         _request_local_tool_for_invocation,
     )
     from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
@@ -832,14 +831,36 @@ def test_configured_home_wins_over_a_different_env_home(tmp_path, monkeypatch):
     scoped = _request_local_tool_for_invocation(write, request=request, workspace_roots=[owner])
     assert scoped.path_access_policy.agent_home_root == configured, "每次调用换的策略也沿用宿主数据根"
     assert scoped.path_access_policy.check_write(owner / "permissions.json").code == STATE_CODE
-    # 数据根只有一个来源：构造出的每个工具策略都是宿主数据根（包括眼下不靠它判的 Shell），插件读写上下文也跟写边界走。
+
+
+def test_every_tool_policy_and_plugin_context_use_the_host_data_root(tmp_path, monkeypatch):
+    """数据根只有一个来源：agent 构造出的每个工具策略（包括眼下不靠它判的 Shell）都是宿主解析出的数据根；registry 每次调用给
+    插件组装的读写上下文也跟写边界里宿主写的 owner home 走，不退回环境变量。"""
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        write_boundary_with_runtime_ledger,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        RegistryToolInvokeRequest,
+        _invocation_context,
+    )
+    from agent_py_agent.tests.test_runtime_gate_ledger import _loop_params
+
+    configured = (tmp_path / "configured-home").resolve()
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "env-home"))
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(configured), path_access_mode="full",
+                                    access_mode="full-access"), tmp_path / "work")
+    owner = Path(agent.home_paths.owner_home_dir)
     roots = {name: tool.path_access_policy.agent_home_root for name, tool in agent.tools.tools.items()
              if getattr(tool, "path_access_policy", None) is not None}
     assert {"write_file", "run_command"} <= set(roots) and set(roots.values()) == {configured}, roots
-    from dataclasses import replace
-
+    boundary = write_boundary_with_runtime_ledger(agent, _loop_params(write_boundary={}))
+    request = RegistryToolInvokeRequest(tool_name="write_file", arguments={}, tools={}, workspace_root=owner,
+                                        workspace_roots=[owner], allowed_tools=None, write_boundary=boundary,
+                                        path_access_mode="full", runtime_snapshot=SimpleNamespace())
     # 快照只原样透传给插件，这里只看路径上下文。
-    context = _invocation_context(replace(request, runtime_snapshot=SimpleNamespace()))
+    context = _invocation_context(request)
     assert context.workspace_write_context.check(owner / "permissions.json").code == STATE_CODE
     assert context.workspace_read_context.external_policy.agent_home_root == configured
 
