@@ -46,6 +46,35 @@
 - **变异**：8 个全部抓住。包括回执不按原因生成说明、信封漏字段、根目录给成会话工作区、说明忽略根目录、安装和更新工具各自退回旧信封、原因码写错、不看原因码就给根目录。
 - **门禁**：插件相关测试文件加 10 个守卫通过，`size_diff` 新增 0（首个提交 56819e4fa 曾多出两条尺寸告警，已在后续提交拆函数消除）。
 
+## J9：主模型的只读长期记忆检索工具 `memory_search`（2026-10-02，分支 `claude/ae-j9-memory-tool`，基于 `25882221f`）
+
+- **新增 `test_memory_search_tool.py`（10 项）**：都用临时 home 和 `tests/_hashing_embedder.py`，不读真实记忆，不联网。
+  - 开关关：工具不注册，经注册表调用报 `TOOL_NOT_IN_RUNTIME_SNAPSHOT`。
+  - 开关开：效果 `read_only`，schema 只有 query/limit/kind 且不收其它字段。
+  - 写参数（action/content/entry_id/remove）在执行前报 `TOOL_INVALID_ARGUMENTS`，正式记忆和候选账字节不变。
+  - 范围：只返回 personal 和库里实际存在的 project 范围；别的公司范围和无范围旧记录查不到；`kind` 精确过滤。
+  - 跨 owner：alice 记的事实 bob 查不到。
+  - 上限：默认 5 条，最多 10 条，`limit=11` 被 schema 拒；绕过 schema 直接调用也不超过 10 条；摘录 300 字并标截断。
+  - 检索方式：哈希嵌入时报 `semantic`；嵌入失败退回 `keyword` 并给 `embedding_failed`；没有嵌入端时给 `embedder_unavailable`。
+  - 不进召回账：工具调用后访问信号为 0；对照组用自动召回入口，同一条会记 1 次。
+  - 抑制：`task_local`/`control_plane` 回合在快照里报 `TOOL_UNAVAILABLE`；记忆总闸关闭时不可用。
+  - 开关是边界项：模型身份修改报 `PARAMETER_BOUNDARY`，文件不变。
+- **门禁**：
+  - 相关测试 34 个文件 805 项通过。
+  - guards9 共 10 个文件 170 项通过。另外第一轮门禁脚本出错，意外跑成了全仓 pytest，结果是 25949 passed、21 skipped、32 xfailed、5 xpassed。出错原因：macOS 的 bash 3.2 没有 `mapfile`，守卫清单为空。
+  - import 边界 0 条；ruff、doc_sync、code-size strict、`diff --check`、clean_package 通过；`size_diff` 新增 0。
+  - 检索 mixin 加完后一度超过硬上限，已把检索事实投影挪到模块级，回到原 soft 档。
+  - 前端参数目录和常数目录已重新生成。
+- **变异**：10 个全部抓住，分别是：
+  - 报告入口登记访问信号；工具不按范围过滤；降级原因写死；可用性不看抑制；摘录不截断；
+  - 范围不加已有 project；开关默认开；开关不是边界项；注册不看开关；条数不收口。
+- **真实模型核对**（MiniMax-M2.7，被测 `015684caa`）：
+  - 环境：隔离 home，端口 8457，开关开，`memory_top_k=1`，种了 5 条假的个人事实，只发一次 prompt。
+  - 自动召回只注入了车牌号那一条。模型自己调 `memory_search(query=停车位, limit=10)`，拿到没被召回的停车位那一条，检索方式 `keyword`（这个环境没配嵌入），范围内 5 条。
+  - 用同样参数重放工具，输出的 sha256 和字节数与工具账本一致。
+  - 记忆文件只有原 5 条写入，没有改动或访问记录，候选账为空；共 2 次模型调用。
+  - 证据：`~/.my-agent/decision-evidence/j9-memory-search-015684caa/`。
+
 ## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `58c674d46`）
 
 - **改动**：只改 `decision_recall` 逐条记忆题的候选说明与题面，键和结构不变。现有 recall 测试与基准测试照常通过（候选键和非排序处理没有变）。
