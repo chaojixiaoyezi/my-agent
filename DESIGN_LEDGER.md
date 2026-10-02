@@ -15,6 +15,20 @@
 - **文档**：PARAMETER_CENTER.md 脱敏节 209-210 漏网写法改为已补；第 2 节目标第 5 条补记落地。
 - **验证**：脱敏/改名相关测试 204 passed（详见 TESTS.md）。
 
+## 上游未迁内容：许可核对与迁移清单（C14）（2026-10-01，分支 `claude/ae-c14-migration-list`，清单已定，未实施）
+
+- **结论**：
+  - A（MIT）、B（Apache-2.0 + NOTICE）的代码可以迁，随迁移文件保留许可原文和来源说明；
+  - Toonflow 不迁：补充协议要求产品分发前取得书面商业授权，且不得删改标识；
+  - Remotion 不打包、不自动安装：员工超过 3 人的公司须购买 Company License；
+  - A 的限用途评测小说及其派生样例、B 的作者二维码和推广图不迁。
+- **清单**：
+  - B 的 5 个 CLI 做成 Node 插件（v6 interpreter），分两批：先上只读门工具（outline 14、art 11、script 10、storyboard 17 道，加 characters 的逐字核对）；
+    写文件的工具要等 Node 写入上下文移植好、补齐一致性用例后再上；
+  - A 的 4 个提示词检查器加上生产作业外壳（只配离线夹具）做成 Python 插件，**不带付费供应商适配器**；
+  - ffmpeg 剪辑为可选第三批。
+- **分工**：实现派给 my-agent 会话，ae 审查。详见[迁移清单](docs/design/CAPABILITY_UPSTREAM_MIGRATION.md)。
+
 ## 压缩触发绝对上限默认改为 300000（2026-10-01，分支 `claude/3a-cap-default`，已实现，待集成）
 
 - **事故**：生产 `memory_compact_auto_trigger_max_tokens` 09-29 设为 300000 后，09-30 07:49Z 被一个 my-agent 会话经 user_config `reset`（账本 actor=model）退回当时的默认 0，即不封顶；之后 1M 窗口的 deepseek-v4-flash 会话要到约 90 万才压缩，10-01 把 gpt-6-luna 档案窗口改为实测的 900000 后也一样（约 81 万）。这正是 09-29「1M 窗口、90% 触发」429 的形状。ae 在 C1 准备时只读发现，集成者核实后已经正式写回 300000（变更号 77e58ca0038e，重启 Gateway 生效）。

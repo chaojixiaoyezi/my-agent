@@ -56,6 +56,7 @@
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
 |-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口
+|-- docs/design/CAPABILITY_UPSTREAM_MIGRATION.md # 上游未迁内容的许可核对、迁移清单与不迁原因（C14）
 |-- docs/design/FILE_SYNTAX_DIAGNOSTICS.md # 文件原子发布的有界语法观察及工具反馈边界
 |-- docs/guides/MODEL_GUIDE.md        # 给用户的模型管理使用说明：新增/切换/默认/effort/删除/共享/派子代理选模
 |-- docs/guides/CAPABILITY_PACK_GUIDE.md # 给用户的能力包使用说明：装/启用/停用/更新/回退/卸载/发现使用/派子代理授权/自制包/安全边界
@@ -1345,6 +1346,7 @@ docs/
 - `docs/design/CAPABILITY_PACKS.md`：包级发现、私有方法、原安装与任务授权的边界。
 - `docs/design/CAPABILITY_MIGRATION.md`：固定来源、完整覆盖表、候选构建和原命令发布／回退的可执行步骤。
 - `docs/design/CAPABILITY_SOURCE_COVERAGE.md`：两个固定短剧来源的全部入口、阅读深度、样包映射及未迁移项；索引覆盖不等于能力全部迁移。
+- `docs/design/CAPABILITY_UPSTREAM_MIGRATION.md`：上游未迁内容按许可证分成可迁（B 的 `.mjs` 门做 Node 插件、A 的图像/视频工具只做外壳）与不迁（Toonflow、Remotion、限用途样例），给出分批、验收与审查要点。
 - `docs/design/FILE_SYNTAX_DIAGNOSTICS.md`：原生文件修改的语法反馈设计，区分写入成功、观察结果与任务质量。
 - `agent_py_agent/tests/test_capability_package_resource_scope.py`：验证包成员和业务路径的区分、同代搜索导航、受限隔离，以及归档后原生消息保留完整资源引用。
 - `agent_py_agent/tests/test_capability_resource_input_schema.py`：验证模型完整来源schema、原执行器在handler前拒绝缺字段/类型错误，以及原身份/代次/摘要边界不变。
