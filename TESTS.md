@@ -31,6 +31,7 @@
   - 阶段默认断言 4→5；`stage.deadline` 104→105，阶段到期的时刻跟着改到 105。
   - 借 `subagent_model` 测通用期限的辅助函数（`test_decision_service_http.configured`、`test_decision_observe_nonblocking.nonblocking`）
     把同一期限显式覆盖到点位上，测的仍是通用期限的语义。
+- **集成补漏（3a，`fee992ab5`）**：`test_subagent_first_request_selection._automatic_child` 也借通用期限测点位，下限上线后点位实际变成 5 秒，`test_late_probe_cannot_adopt_after_deadline_retained` 得到 `provider_tool_support_unknown`（Linux 车道 `b5be542e8` 第 4 片，本地复现）；夹具同样把期限显式写到 `points.subagent_model.timeout_seconds`，45 项通过。
 - **变异 10/10 杀死**：不套下限、已覆盖也套下限、下限直接替换不取较大值、dataclass 阶段默认退回 4、YAML 阶段默认退回 4、
   登记表漏 `subagent_model`、登记表误加 `planning`、下限写成 4 秒、TUI 不认来源、来源记成继承。
 - **门禁**：
