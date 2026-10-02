@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`）
+
+- **`test_curator_thread_model_routing.py` 新增 6 项**（共 21 项）：
+  - 会话 A 的模型每次都连不上（`CURATOR_MODEL_FAILED`）、默认模型正常：前 2 次失败、游标不动、默认模型没被调用；第 3 次不再调 A 的模型，默认模型补跑 A 再处理 B，两个会话游标都推进，记录写 model-d 并带 `curator_thread_model_failed:CURATOR_MODEL_FAILED:transient`；A 来了新消息后先回到 A 自己的模型。
+  - 默认模型补跑时也连不上：失败记在 model-d 名下、带同一条原因，state 失败码是 `CURATOR_MODEL_FAILED`（照旧退避，不是熔断）；默认模型恢复后直接用它，不回头试 A 的模型。
+  - B 夹在中间成功不清零 A 的连续失败。
+  - 读运行账出错按没达到处理：照常试 A 的模型，不调默认模型。
+  - 默认组自己连不上：每次照常试、照常退避，不出现 `curator_thread_model_failed`。
+  - 纯函数 `transient_fallback_code`：超时也算；只失败一次不够；夹着确定性失败、本组游标变了、中间有成功都不算；返回最近一次的失败码。
+- **相关回归**：全部 `test_curator_*.py`、`test_memory_curator_v2.py`、`test_collect_curator_evidence.py`、`test_owner_wake_discovery*.py` 加 guards9，434 项通过。
+- **变异**：14 个全部抓到（次数改 3、去掉预判、默认组也改道、去掉 `CURATOR_MODEL_FAILED` 或 `CURATOR_MODEL_TIMEOUT`、不比游标、身份在成功后才改、失败或成功记录缺原因、读账出错外抛、取最早的失败码、要多一条记录、不按组筛历史、原因不带 `:transient`）。
+
 ## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（75，2026-10-02，分支 `claude/75-jev-candidate-cap`）
 
 - **新增 `test_jev_candidate_projection.py`**（7 项）：白名单字段（工具、Skill、能力包、插件组四种行），完整行不被改写，共用说明不再逐题；三个字段各自按转义字节截最长前缀（恰好等于上限原样保留、多 1 字节就截、ASCII 段后的汉字放不下就停、补充平面字符按 12 字节），截断计数等于截掉的转义字节；插件组内工具说明同样截并记账；非字符串原样通过；最坏情况 53 题（state 4,096 字节、三段文字满额汉字、ref 很长也不上线）经验上界 ≤ 57,600，54 题拒发；真实决策链路上 state 只带一次共用说明、不带完整行和计数，候选不带 ref，上线文字都在上限内。

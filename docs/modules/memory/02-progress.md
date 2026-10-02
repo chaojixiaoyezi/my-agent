@@ -1,5 +1,9 @@
 # 记忆与上下文维护状态
 
+## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（2026-10-02，分支 `claude/be-curator-transient-fallback`，已实现，待集成）
+
+- 非默认组在同一输入上连续 2 次连接类失败（`CURATOR_MODEL_FAILED`、`CURATOR_MODEL_TIMEOUT`）后，下一次运行直接用 owner 默认模型，记 `curator_thread_model_failed:<码>:transient`；默认模型自己的失败照旧退避或熔断，不按组隔离熔断。详见 DESIGN_LEDGER 同名条目。
+
 ## 记忆整理：同一条消息里同主题、不同内容各存一条（用户拍板第 6 条，2026-10-02，分支 `claude/be-curator-content-identity`，已实现，待集成）
 
 - Curator 观察身份加规范化内容指纹：“我对花生过敏，也对芒果过敏”不再塌成一条；规范化后内容相同的照旧合并、不增加出现次数。

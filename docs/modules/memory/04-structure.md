@@ -667,6 +667,7 @@ retention 扫描根与深度不再写死在本模块：`retention_scan._recovery
 - `curator_routing.route_batch` 挑本次处理的那组（批内第一条消息所在的组），切出只含这组会话的子批；工具审计事件只跟默认组。
 - `_CuratorRunMixin.run` 依次调用 `_run_once`（每组一次完整运行），没成功就停；`_extract_for_route` 在会话模型确定性失败时用默认模型补跑一次。路由警告在 `_prepare_outputs` 里排到运行记录警告最前，失败记录也带（`_commit_failure`）。整批路由警告由 `core._curator_route_warnings` 生成：指定档案退回原因、owner 默认模型来源（`settings/curator_profile.curator_default_model_source`）。
 - `_replay_breaker` 在分组时用 `group_breaker_history` + `group_cursor_view` 只看本组历史，熔断码与退避仍写 owner 级 state。
+- `_CuratorRunMixin._transient_fallback`（`_extract_for_route` 最先调用）用同一份本组历史和 `curator_routing.transient_fallback_code` 判断：非默认组连续 `CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT` 次连接类失败后，这次直接用默认模型，运行身份先改成默认模型。
 
 ## Curator 提交前的身份冲突剔除与重放熔断（2026-10-02）
 
