@@ -20,15 +20,17 @@ MAX_NOTICE_RESULTS_COUNT = 4
 MAX_NOTICE_TEXT_CHARS = 480
 
 
-# LLM: 没有任何检查结果、也没有被就地改的输入原件时返回 None（未钉包、开关关着或本回合没写交付物），对外事实保持不出现这个键。
-#   inputs_modified 取最后一次收尾的输入原件检查（块 4）。
+# LLM: 没有任何检查结果、没有被就地改的输入原件、也没有缺的交付物时返回 None（未钉包、开关关着或本回合没改工作区），
+#   对外事实保持不出现这个键。inputs_modified 取最后一次收尾的输入原件检查（块 4），deliverables_missing 取最后一次交付存在检查（块 5）。
 # 函数用途: 从核验账本生成本 run 的结构化核验事实。
 def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | None:
     records = ledger.records() if ledger is not None else []
     results = [row for row in records if row.get("kind") == "result" and isinstance(row.get("fact"), dict)]
     input_checks = [row for row in records if row.get("kind") == "input_check" and isinstance(row.get("items"), list)]
     inputs_modified = [dict(item) for item in input_checks[-1]["items"]] if input_checks else []
-    if not results and not inputs_modified:
+    deliverable_checks = [row for row in records if row.get("kind") == "deliverable_check" and isinstance(row.get("items"), list)]
+    deliverables_missing = [dict(item) for item in deliverable_checks[-1]["items"]] if deliverable_checks else []
+    if not results and not inputs_modified and not deliverables_missing:
         return None
     closeouts = [row for row in records if row.get("kind") == "closeout"]
     keys = set(closeouts[-1].get("keys") or []) if closeouts else None
@@ -47,6 +49,8 @@ def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | Non
             "rework_count": sum(1 for row in records if row.get("kind") == "rework"),
             "input_rework_count": sum(1 for row in records if row.get("kind") == "input_rework"),
             "inputs_modified": inputs_modified[:MAX_RUN_FACT_RESULTS_COUNT],
+            "deliverable_rework_count": sum(1 for row in records if row.get("kind") == "deliverable_rework"),
+            "deliverables_missing": deliverables_missing[:MAX_RUN_FACT_RESULTS_COUNT],
             "results": list(latest.values())[:MAX_RUN_FACT_RESULTS_COUNT]}
 
 
@@ -68,6 +72,9 @@ def pack_verification_notice_text(facts: dict) -> str:
     lines = [f"宿主检查：任务开始时的输入 {item.get('path')} 被就地改了"
              f"（{'原件副本已保存' if item.get('copy_path') else '没有原件副本'}）。"
              for item in facts.get("inputs_modified", [])[:MAX_NOTICE_RESULTS_COUNT]]
+    lines += [f"宿主检查：{item.get('package_id')} 要求的交付物 {item.get('deliverable_id')} "
+              f"{'写出了但打不开' if item.get('code') == 'DELIVERABLE_UNREADABLE' else '本回合没有写出'}。"
+              for item in facts.get("deliverables_missing", [])[:MAX_NOTICE_RESULTS_COUNT]]
     lines += [_notice_line(item) for item in facts.get("results", [])[:MAX_NOTICE_RESULTS_COUNT]]
     if not facts.get("closeout_checked"):
         lines.append("本回合没有正常收尾，上面是写入时的检查结果。")

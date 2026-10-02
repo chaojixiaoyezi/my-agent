@@ -170,11 +170,20 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 账本目录在第一个 Shell 命令之前就已建好（run_command 的运行策略声明会改工作区，执行前先记基线），Linux bwrap 只能只读挂载已存在的路径。
   - 结构上的缺口（已报 be/3a，用例标了 strict xfail）：Full Access 下，命令的工作目录和写根都在任务树外时，H3 找不到当前任务根，本任务的账本目录不在只读覆盖里。主链任务没有既有写根时，会注入本任务 `work/`、`output/` 作写根，这种形状已挡住，但不是结构保证。
 
-## 5. 交付物存在（块 5）
+## 5. 交付物存在（块 5，已实现：`capability/pack_verification_deliverables.py`）
 
-- **判定**：声明了 `required` 的交付物，收尾时本回合没写出任何匹配文件，记 `DELIVERABLE_MISSING`；有匹配文件但打不开或解析不了，记 `DELIVERABLE_UNREADABLE`。都是客观事实。
-- **返工**：沿用子代理交付闸的做法，最多返工 2 次，然后照常结束并带收尾说明，不改结束原因。
-- **只审不交付的任务**（ae 定，块 7 复审时）：两个包的交付物保持 `required`。B05-t5 那次没交付就是靠这条兜住的；按“任务意图”区分要读懂用户的话，铁律不允许。代价是只审不改的任务最多多两次软返工提示。返工提示里要写明“如果用户这次只要审阅、不要交付物，在答复里说明即可”。
+- **触发条件**（3a 定）：只在“本回合改过工作区”时才查，也就是本回合有块 3 的基线（至少执行过一次写工具，或者运行策略声明了 `mutates_workspace` 的工具，比如 shell）。
+  - 纯问答回合、只读审稿回合都不触发。块 7 复审时担心的“只审不改的任务会多出两次返工”，因此基本消除。
+  - **已知限制**：模型一个工具都不调、直接在答复里贴内容的回合查不到；审阅时一眼能看出来，冻结用例里也没出现过。
+- **判定**：只看本回合确定新建或改过的文件。基线截断时状态“不确定”的老文件不算交付证据。
+  - 声明了 `required` 的交付物，路径加字段都匹配上的文件一个都没有：如果有路径匹配、但按声明格式打不开的（json 解析不了），记 `DELIVERABLE_UNREADABLE` 并列出这些文件；否则记 `DELIVERABLE_MISSING`。
+  - 路径匹配、能打开、但字段不匹配的文件，不算这个交付物。
+  - 都是客观事实，事实里带包 ID、交付物编号、路径模式和字段要求。
+- **返工**：沿用子代理交付闸的上限，最多 2 次，先记账再发，记账失败就不返工；之后照常结束，宿主提示写明。
+  - 提示末尾写“如果用户这次只要审阅、不要交付物，在答复里说明即可”。
+  - 收尾三段的顺序：输入原件 → 交付物存在 → 交付物检查，同时出现就合成一条提示，三段各自计返工次数。
+- **最终事实**：`deliverables_missing`（最后一次收尾的检查结果）、`deliverable_rework_count`。
+- **只审不交付的任务**（ae 定，块 7 复审时）：两个包的交付物保持 `required`。B05-t5 那次没交付就是靠这条兜住的；按“任务意图”区分要读懂用户的话，铁律不允许。有了上面的触发条件，只读审稿回合本来就不会触发。
 
 ## 6. 开关、测试、重跑
 
@@ -204,7 +213,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 | 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测）；`baseline` 推广成 `inputs` | 已实现（`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
 | 3 | 写完就查、收尾检查、返工、`HostNotice` 和 `channel_delivery` 事实、开关 | 已实现（`capability/pack_verification_*.py`，`test_pack_verification_service.py`、`test_pack_verification_matching.py`） |
 | 4 | 输入原件清单、原件副本、收尾比对、返工；宿主托管文件统一落到规范任务根（只读保护依赖 be 的 H3） | 已实现（`capability/pack_verification_originals.py`、`pack_verification_inputs.py`，`test_pack_verification_inputs.py`） |
-| 5 | 交付存在和返工 | 待做 |
+| 5 | 交付存在和返工（只在本回合改过工作区时查） | 已实现（`capability/pack_verification_deliverables.py`，`test_pack_verification_deliverables.py`） |
 | 6 | 变异、门禁、文档收口 | 待做 |
 | 7 | A 0.5.0、B 0.3.0（be） | 复审通过（`claude/be-capability-packs-content-b2` 5bf9bb61d） |
 | 8 | 重跑和独立审阅 | 待做 |

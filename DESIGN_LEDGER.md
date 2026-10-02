@@ -321,6 +321,10 @@
   - **交付存在**：缺失或打不开返工 2 次。
   - 开关 `capability_pack_host_verification_enabled` 仓库默认 false。
 - **块 2 已实现**：`capability/pack_verifier_runner.py`。它只从安装 blob 取钉住的原件，在 `AttemptExecutionSandbox` 里跑（断网、整根只读、只写临时目录），只认 `pack_verifier_result.v1`。`AttemptSandboxSpec.network_access=False` 在 macOS 补了 `(deny network*)`，就绪检查会实际试一次断网，失败就不跑。macOS 和 Linux 车道都实测过，车道要加 `NET_ADMIN` 才能真跑断网用例。
+- **块 5 已实现**（分支 `claude/ae-capability-packs-v2-b5h3`，基于块 4 头 `780ff4c40`；原分支 `claude/ae-capability-packs-v2-b5` 作废）：
+  - 只在本回合改过工作区（有块 3 基线）时检查钉住包的必需交付物（3a 定）；
+  - 缺了记 `DELIVERABLE_MISSING`，路径匹配但打不开记 `DELIVERABLE_UNREADABLE`，最多返工 2 次；
+  - 纯问答和只读审稿回合不触发；不调任何工具、直接在答复里贴内容的回合查不到，写进已知限制。
 - **块 4 已实现**（分支 `claude/ae-capability-packs-v2-b4h3`，基于 `claude/3a-step17g-h3-preview` `71578e973`；原分支 `claude/ae-capability-packs-v2-b4r` 作废）：
   - 输入原件清单在任务第一次改工作区前记一次，范围是已启用、声明了核验的包的声明模式（3a 同意的偏离：原设计是“首读记”）；
   - 不超过 1 MB 的原件存副本；原件在本回合被改或删就记 `INPUT_MODIFIED_IN_PLACE`，返工 1 次，提示里给出副本位置和 cp 恢复建议；

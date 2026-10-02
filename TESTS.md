@@ -384,6 +384,25 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
+## 能力包 v2 块 5：必需交付物缺失或打不开时返工（2026-10-02，分支 `claude/ae-capability-packs-v2-b5h3`，基于块 4 `claude/ae-capability-packs-v2-b4h3` `780ff4c40`）
+
+- **新增** `agent_py_agent/tests/test_pack_verification_deliverables.py`（8 项）：
+  - 本回合改过工作区、却没写出 required 交付物：收尾返工，最多 2 次；最终事实记 `DELIVERABLE_MISSING`，宿主提示带上这一条；
+  - 纯问答回合（没有基线）、只调读工具的回合都不查；
+  - 路径匹配但按声明格式打不开的记 `DELIVERABLE_UNREADABLE`，只列打不开的文件；能打开、字段不匹配的不算这个交付物；
+  - 基线截断时漏扫的老文件不算本回合交付；本回合真写出交付物后不再报；
+  - 返工记不进账本就不返工；
+  - 收尾提示的段落顺序固定：输入原件 → 交付物 → 检查结果；
+  - 只查 required 交付物；`file_readable` 按声明格式判断（json 要能解析，没有字段匹配或格式宿主不认识时只要能读）。
+- **改了 4 个原有用例的预期**（块 5 让“没交交付物”也会返工，原用例的场景本来就没交）：
+  - 块 4 两个输入原件用例补写交付物，只看输入原件这一段；“恢复原样后不再报”改成 `inputs_modified == []`；
+  - 块 3“最终事实按最后一次收尾”：交付物被删现在会返工，并断言 `DELIVERABLE_MISSING`；
+  - 块 3“基线截断”：补一个本回合写出的合格交付物，免得被块 5 的缺交付物返工盖住原来要测的“漏扫老文件不返工”。
+- **相关回归**：267 个文件（块 4 那批 266 个，加 test_pack_verification_deliverables.py），5197 passed，12 skipped，5 xfailed（其中 1 个是块 4 那条 H3 缺口的 strict xfail）。
+- **门禁**逐项 rc=0（基线 `f87afec4a`）：import boundaries、ruff、`doc_sync --base 780ff4c40`、常数目录 `--check`（868 项）、前端配置目录 `--check`、strict code-size（按确切基线比，新增 0）、`git diff --check 780ff4c40..HEAD`、clean_package。
+- **变异 12/12 全部被抓住**（`cpv2-mut/mutations_b5.json`，跑交付物、服务、输入三个测试文件）：没基线也查、返工上限失效、返工不先记账、打不开都记成缺、字段不匹配算打不开、不分 required、不确定的老文件算交了、事实漏掉缺交付物、提示漏掉缺交付物、段落顺序错、json 永远算能打开、只按路径算交了。
+- 先在旧底座 `f87afec4a` 上跑过一遍（变异 12/12、265 个文件 5079 passed、门禁全 rc=0，证据 `capability-packs-v2-b5/on-f87afec4a/`），随块 4 换底座后重跑，数字见上。
+
 ## 能力包 v2 块 4：输入原件清单、就地修改判定与返工、核验账本防伪造（2026-10-02，分支 `claude/ae-capability-packs-v2-b4h3`，基于 `claude/3a-step17g-h3-preview` `71578e973`）
 
 - **底座**：块 4 原先叠在块 3 的 `92a90fa9b` 上（分支 `b4r`），现在挑到 3a 的 h3-preview 上。h3-preview 等于 `43f29df6a` 加上 be 的 H3 九个提交。冲突只有常数目录，已重新生成。

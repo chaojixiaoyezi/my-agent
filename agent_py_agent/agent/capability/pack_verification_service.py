@@ -4,6 +4,7 @@
 #   - pack_verification_closeout_block：模型不再调工具准备收尾时，先查输入原件有没有被就地改（块 4，钉住包声明了 preserve_originals
 #     时），再对本回合新建或改过的全部匹配交付物各跑一次（shell 写的也算）；两类问题各自最多返工一次，同时出现就合成一条提示。
 #   块 4 起基线同时记任务的输入原件清单，task_input 只从原件清单找（原件被改过就交副本）。
+#   块 5 起收尾还查必需交付物有没有交（缺或打不开最多返工 2 次）；三段顺序：输入原件 → 交付物存在 → 交付物检查。
 #   只看结构化事实：开关、pins、安装项、路径模式和字段匹配、文件摘要、检查程序的 pack_verifier_result.v1；不读模型文字。
 #   同样的内容（包、检查程序、目标和各输入的摘要都相同）只跑一次，结果和返工次数都记在本 run 的核验账本里。
 #   副作用：读工作区文件、在沙箱里运行包内检查程序、写核验账本和 runtime_events。改动同步 test_pack_verification_service.py。
@@ -19,6 +20,11 @@ from functools import cached_property
 from pathlib import Path
 
 from ..capability_verification_manifest import VerifierDeclaration
+from .pack_verification_deliverables import (
+    MAX_DELIVERABLE_REWORK_COUNT,
+    deliverable_rework_text,
+    missing_deliverables,
+)
 from .pack_verification_inputs import (
     MAX_INPUT_REWORK_COUNT,
     capture_originals_for_run,
@@ -120,14 +126,14 @@ def verify_written_files(agent: object, params: object, paths: list[Path]) -> li
     return [result.summary() for _, result in checked]
 
 
-# LLM: 没有基线说明本回合没改过工作区，什么都不查。输入原件检查在前（它的返工提示要模型先恢复原件），交付物检查在后；
-#   两段各自记账、各自计返工次数，同时需要返工时合成一条提示。
+# LLM: 没有基线说明本回合没改过工作区，什么都不查（块 5 的触发条件也就是它）。输入原件检查在前（它的返工提示要模型先恢复原件），
+#   交付物存在其次，交付物检查最后；三段各自记账、各自计返工次数，同时需要返工时合成一条提示。
 # 函数用途: 收尾时检查输入原件和本回合改过的交付物，必要时返回一次返工提示。
 def pack_verification_closeout_block(agent: object, params: object) -> str:
     scope = _run_scope(agent, params)
     if scope is None or scope.baseline is None:
         return ""
-    sections = (_input_section(scope), _verification_section(scope))
+    sections = (_input_section(scope), _deliverable_section(scope), _verification_section(scope))
     return "\n\n".join(section for section in sections if section)
 
 
@@ -142,6 +148,19 @@ def _input_section(scope: _RunScope) -> str:
     if not scope.ledger.append({"kind": "input_rework", "paths": [item["path"] for item in items]}):
         return ""
     return input_rework_text(items)
+
+
+# LLM: 只按本回合确定新建或改过的文件判断（基线截断时的“不确定”文件不算交付证据，也不算缺）；每次收尾记一条 deliverable_check，
+#   返工提示先记 deliverable_rework 再返回，记不进账本就不返工，上限 MAX_DELIVERABLE_REWORK_COUNT。
+# 函数用途: 收尾时检查钉住包的必需交付物本回合有没有交。
+def _deliverable_section(scope: _RunScope) -> str:
+    items = missing_deliverables(scope.packages, _changed_paths(scope), scope.root)
+    scope.ledger.append({"kind": "deliverable_check", "items": items})
+    if not items or scope.ledger.count("deliverable_rework") >= MAX_DELIVERABLE_REWORK_COUNT:
+        return ""
+    if not scope.ledger.append({"kind": "deliverable_rework", "deliverables": [item["deliverable_id"] for item in items]}):
+        return ""
+    return deliverable_rework_text(items)
 
 
 # LLM: 目标 = 本回合新建或内容变了的、符合钉住包交付物声明的文件（按基线比对，shell 写的也算）。

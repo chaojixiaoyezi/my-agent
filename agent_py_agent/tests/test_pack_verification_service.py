@@ -289,9 +289,10 @@ def test_final_facts_follow_the_last_closeout_not_stale_writes(env, fake_runner)
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "bad": True})
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
     target.unlink()
-    assert closeout_rework_block(env.agent, env.params) == ""
+    assert "本回合没有写出" in closeout_rework_block(env.agent, env.params), "交付物被删就是没交（块 5）"
     facts = run_pack_verification_facts(env.agent, env.params)
     assert facts["closeout_checked"] and facts["results"] == [], "被删掉的文件不再报写入时的结论"
+    assert [item["code"] for item in facts["deliverables_missing"]] == ["DELIVERABLE_MISSING"]
 
 
 def test_no_tool_calls_decision_uses_the_pack_closeout(env, fake_runner):
@@ -564,9 +565,12 @@ def test_truncated_baseline_only_reworks_files_proven_written_this_run(env, fake
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     monkeypatch.setattr(matching, "MAX_SCAN_MATCHED_FILES_COUNT", 512)
     assert "out/old.json" not in env.ledger.baseline()["scan"]["files"] and env.ledger.baseline()["scan"]["truncated"]
+    good = _write(env.workspace / "out/good.json", {"schema": "delivery.v1"})
+    attach_post_write_verification(env.agent, env.params, _tool_result(good))
     assert closeout_rework_block(env.agent, env.params) == "", "漏扫的老文件只记事实，不返工"
     facts = run_pack_verification_facts(env.agent, env.params)
-    assert facts["uncertain_targets"] == ["out/old.json"] and [item["target"] for item in facts["results"]] == ["out/old.json"]
+    assert facts["uncertain_targets"] == ["out/old.json"]
+    assert sorted(item["target"] for item in facts["results"]) == ["out/good.json", "out/old.json"]
     new = _write(env.workspace / "out/new.json", {"schema": "delivery.v1", "bad": True})
     attach_post_write_verification(env.agent, env.params, _tool_result(new))
     assert "out/new.json" in closeout_rework_block(env.agent, env.params), "有写工具回执证明的新文件照常返工"

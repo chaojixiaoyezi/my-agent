@@ -102,6 +102,19 @@ def field_matches(path: Path, field_match: object) -> bool:
     return isinstance(document, dict) and document.get(field_match.field) in field_match.equals
 
 
+# LLM: 块 5 用来区分“写了但打不开”：声明了 json 字段匹配的要能在上限内解析成 JSON；其它格式（含没声明字段匹配）只要求是普通文件且能读。
+# 函数用途: 判断一个文件按声明的格式能不能打开。
+def file_readable(path: Path, field_match: object) -> bool:
+    if field_match is not None and field_match.format == FIELD_MATCH_FORMAT_JSON:
+        return _json_document(path) is not None
+    try:
+        with path.open("rb") as handle:
+            handle.read(1)
+    except OSError:
+        return False
+    return not path.is_symlink()
+
+
 # 函数用途: 在字节上限内把文件解析成 JSON，失败返回 None。
 def _json_document(path: Path) -> object:
     try:

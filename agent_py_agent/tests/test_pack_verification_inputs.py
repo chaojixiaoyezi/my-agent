@@ -134,6 +134,7 @@ def test_closeout_reworks_once_for_in_place_edits_and_cp_restore_clears_it(env, 
     source = _write(env.workspace / "in/source.json", {"schema": "source.v1"})
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     source.write_text(json.dumps({"schema": "source.v1", "edited": True}))
+    _write(env.workspace / "out/d.json", {"schema": "delivery.v1"})  # 交付物齐全，只看输入原件这一段
     text = closeout_rework_block(env.agent, env.params)
     copy = original_copy_path(_pack_root(env), load_task_originals(_pack_root(env))["in/source.json"])
     assert "in/source.json" in text and str(copy) in text and f'cp "{copy}" "in/source.json"' in text
@@ -143,13 +144,14 @@ def test_closeout_reworks_once_for_in_place_edits_and_cp_restore_clears_it(env, 
     assert "任务开始时的输入 in/source.json 被就地改了（原件副本已保存）" in pack_verification_notice_text(facts)
     shutil.copyfile(copy, source)
     assert closeout_rework_block(env.agent, env.params) == ""
-    assert run_pack_verification_facts(env.agent, env.params) is None, "恢复原样后不再报"
+    assert run_pack_verification_facts(env.agent, env.params)["inputs_modified"] == [], "恢复原样后不再报"
 
 
 def test_no_input_rework_when_it_cannot_be_recorded(env, fake_runner, monkeypatch):
     source = _write(env.workspace / "in/source.json", {"schema": "source.v1"})
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     source.write_text("{}")
+    _write(env.workspace / "out/d.json", {"schema": "delivery.v1"})
     original = PackVerificationLedger.append
     monkeypatch.setattr(PackVerificationLedger, "append",
                         lambda self, record: False if record.get("kind") == "input_rework" else original(self, record))

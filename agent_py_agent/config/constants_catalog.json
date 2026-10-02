@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 880,
+  "count": 882,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1114,6 +1114,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "一次最多返回几条（schema 上限与执行时截断共用）。"
+    },
+    {
+      "name": "MAX_DELIVERABLE_REWORK_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_deliverables.py",
+      "value": 2,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "收尾发现缺交付物时最多给几次返工提示（3a 审定 2 次，沿用子代理交付闸的上限）。"
+    },
+    {
+      "name": "MAX_DELIVERABLE_REWORK_ITEMS_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_deliverables.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "返工提示里最多列几个缺的交付物。"
     },
     {
       "name": "MAX_INPUT_REWORK_COUNT",

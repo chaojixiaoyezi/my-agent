@@ -21,6 +21,7 @@
 |-- agent_py_agent/agent/capability/pack_verification_report.py # 从核验账本生成最终交付事实和宿主提示文字
 |-- agent_py_agent/agent/capability/pack_verification_originals.py # 任务输入原件清单与副本（规范任务根 data/pack_verification，一个任务只记一次）
 |-- agent_py_agent/agent/capability/pack_verification_inputs.py # 输入保护：task_input 候选、就地修改判定与返工提示
+|-- agent_py_agent/agent/capability/pack_verification_deliverables.py # 交付存在：本回合改过工作区时查必需交付物缺失或打不开，返工提示
 |-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
 |-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
 |-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数
