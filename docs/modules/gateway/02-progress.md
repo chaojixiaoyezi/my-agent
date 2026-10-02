@@ -970,3 +970,13 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 
 - **起因**：停机结清只结网关 agent 自己的账本；非 local/main owner 的进程内 runner worker 和 owner 池作用域 agent 各有账本，停机后在途调用一直是 started。
 - **改动**：`call_runtime.track_shutdown_ledger` 弱引用登记（runner worker 构建、owner 池建 agent 两处），停机结清一并处理；事件与原因码不变。设计见台账 J17 节，测试与变异见 TESTS.md 同名节。
+
+## Gateway 停机准入栅栏：结清之后不再接新的模型调用（J17 必须修，2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 step16z `7b21f38b9`）
+
+- **起因**：sol2 审查发现停机结清只拿一次账本快照。排空没收住的 worker 在结清后还能登记新调用，快照后新建的账本也会漏掉（`still_open=["started-after-shutdown-snapshot"]`）。
+- **改动**：
+  - `contracts/model_call_ledger` 加进程级模型调用准入表（账本构造即登记）和 `close_model_call_admission`；
+  - `started` 在关门后抛 `MODEL_CALL_ADMISSION_CLOSED`；
+  - `settle_open_model_calls_for_shutdown()` 先关门再结清；
+  - 删掉 `track_shutdown_ledger`。
+  - 事件和原因码不变。设计见台账同名节，测试与变异见 TESTS.md 同名节。

@@ -4,7 +4,7 @@
 同一 agent 上另一会话发了约 139 次调用，进行中的摘要调用明细被裁，收尾时 _require_record 抛 KeyError，压缩失败。锁定：
 1. 裁剪只针对已结束的历史；进行中（started / first_token）且近期有活动的调用不裁，之后照常写活动与终态；
 2. 它所属请求的累计数（状态计数、用量）不因别的请求涌入而丢；
-3. 停机结清 fail_open_calls 仍能看到这些长调用（J17）；
+3. 停机结清 close_model_call_admission 仍能看到这些长调用（J17）；
 4. 防泄漏：在途调用超过 open_call_stale_seconds 无活动算失联，可像已结束明细一样被裁，并计入 stale_open_calls_trimmed；
 5. 产品路径：压缩摘要（辅助调用）和主回合长调用进行中，同一 agent 上另发 129 次调用，收尾不抛 KeyError，账面“完成”数对得上。
 """
@@ -22,12 +22,14 @@ from agent_py_agent.agent.agent_core.model.call_runtime import (
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallActivityParams,
+    ModelCallAdmissionClosure,
     ModelCallFinishParams,
     ModelCallFirstTokenParams,
     ModelCallLedger,
     ModelCallLedgerContext,
     ModelCallLedgerOptions,
     ModelCallStartedParams,
+    close_model_call_admission,
 )
 from agent_py_agent.agent.conversation.auxiliary_model_call import (
     AuxiliaryModelCallRequest,
@@ -103,7 +105,7 @@ def test_shutdown_settlement_still_sees_long_open_calls():
     _start(ledger, "long-call", "long-request")
     ledger.first_token(ModelCallFirstTokenParams(call_id="long-call", output_tokens_seen=1))
     _flood(ledger)
-    settled = ledger.fail_open_calls(error_type="GatewayShutdown", error_code="MODEL_CALL_INTERRUPTED_BY_SHUTDOWN")
+    settled = close_model_call_admission(ModelCallAdmissionClosure("GatewayShutdown", "MODEL_CALL_INTERRUPTED_BY_SHUTDOWN"))
     assert [record.call_id for record in settled] == ["long-call"]  # J17：停机能结清它
 
 

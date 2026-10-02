@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -37,6 +38,8 @@ _PURPOSE_BUCKETS = ("main", "auxiliary", "decision", "probe:tool_capability")
 #   只防“永远收不到结束或失败”的在途明细无限堆积：失联明细和已结束明细一样可以被裁，并计入 stale_open_calls_trimmed。
 _OPEN_CALL_STALE_SECONDS = 21_600.0
 _LOGGER = logging.getLogger(__name__)
+# 停机准入栅栏关门后再登记新调用时抛出的固定错误码；已登记的调用不受影响，仍按首个终态规则结清。
+MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE = "MODEL_CALL_ADMISSION_CLOSED"
 
 
 @dataclass(frozen=True)
@@ -519,7 +522,44 @@ class ModelCallRetention:
         self._ledger._release_retained_call(self)
 
 
+# LLM: 关门原因是结构化事实：error_type/error_code 同时用于把在途调用记成 failed 终态，和拒绝之后的新调用时附带说明。
+# 类用途: 记录本进程模型调用准入为什么关闭（例如 Gateway 停机），结清与拒绝引用同一份原因。
+@dataclass(frozen=True)
+class ModelCallAdmissionClosure:
+    error_type: str
+    error_code: str
+
+
+# LLM: 准入关闭后到来的新 call_id 一律抛它，调用方据此不发请求；重复登记同一 call_id 仍返回原记录、不抛。
+#   不是供应商错误，不参与供应商重试；错误码固定，关门原因放在 closure。
+# 类用途: 表示宿主已进入停机结清，这次模型调用没有被接纳、请求没有发出。
+class ModelCallAdmissionClosedError(RuntimeError):
+    error_code = MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE
+
+    # 函数用途: 带上关门原因建立拒绝错误，消息只含错误码，不含提示词或正文。
+    def __init__(self, closure: ModelCallAdmissionClosure) -> None:
+        super().__init__(f"model call admission closed: {closure.error_code}")
+        self.closure = closure
+
+
+# LLM: 本进程唯一的模型调用准入表。每本账本构造时在 lock 内弱登记，所以关门快照一定包含关门前建的全部账本；
+#   ModelCallLedger.started 在账本锁内读 closure，所以每次登记要么早于这本账被结清（会被结清成 failed），要么被拒绝，
+#   没有“快照之后迟到”的窗口，也不靠再扫一次。只由停机结清关门，进程内不重开；弱引用不延长账本寿命。
+#   测试按用例换整张表隔离（tests/conftest.py 的 _isolate_model_call_admission）。
+# 类用途: 让宿主停机时一次性关闭本进程所有模型调用账本的新调用准入，并找到所有要结清的账本。
+class _ModelCallAdmissionRegistry:
+    # 函数用途: 建立空的进程准入表：登记锁、账本弱引用集合和关门原因（未关门为 None）。
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.ledgers: weakref.WeakSet[ModelCallLedger] = weakref.WeakSet()
+        self.closure: ModelCallAdmissionClosure | None = None
+
+
+_ADMISSION_REGISTRY = _ModelCallAdmissionRegistry()
+
+
 # LLM: ledger 是唯一调用事实源；显式预算原语不接普通调用，HTTP 观察不充当发送硬门，保留仍沿原 worker 生命周期。
+#   构造即登记进进程准入表（_register_ledger_admission），停机关门后 started 拒绝新调用。
 # 类用途: 线程安全地登记调用及用途用量，并保留仍有物理观察来源的准确记录，避免迟到响应重新打开终态。
 class ModelCallLedger(ModelCallInputBudgetMethods):
     # LLM: 普通 scope 保持原有界 LRU；实例代次只用于拒绝旧实验重建余额，初始化不建立任何实验容器。
@@ -538,6 +578,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
         self._stale_open_calls_trimmed = 0
         self._lock = threading.RLock()
         self.ledger_id = uuid.uuid4().hex
+        _register_ledger_admission(self)
 
     # LLM: 仅宿主明确新授权建立原累计容器；同编号绝不重置，异进程代次拒绝，普通调用不进入此方法。
     # 函数用途: 在原模型账中登记固定预算；丢失账本后的旧授权不能重新使用。
@@ -588,11 +629,13 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             self._trim_scope_aggregates()
 
     # LLM: call_id 是一次物理调用的唯一身份；重复启动不得改身份、清空用量或重开终态，真正重试必须使用新 call_id。
-    # 函数用途: 建立调用明细与累计记录，重复登记时返回原记录。
+    #   新调用先过进程准入栅栏（在本账本锁内读关门状态）：停机关门后抛 ModelCallAdmissionClosedError，不建记录。
+    # 函数用途: 建立调用明细与累计记录，重复登记时返回原记录；宿主停机关门后拒绝新调用。
     def started(self, params: ModelCallStartedParams) -> ModelCallRecord:
         with self._lock:
             if params.call_id in self._index:
                 return self._require_record(params.call_id)
+            _require_call_admission()
             now = float(self.context.now())
             record = ModelCallRecord(
                 call_id=params.call_id,
@@ -758,17 +801,6 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             self._replace(updated)
             return updated
 
-    # LLM: 宿主停机时的批量终态：只把仍活动（started/first_token）的调用一次性记为 failed 并带同一结构化原因码；
-    #   已终态记录不动，首个终态规则不变，重复调用返回空元组。返回被改写的记录供宿主写停机事件，不在此写盘。
-    # 函数用途: Gateway 停止排空窗口过后，把还没结清的模型调用统一标成"被宿主停机中断"，交给收尾写事件。
-    def fail_open_calls(self, *, error_type: str, error_code: str) -> tuple[ModelCallRecord, ...]:
-        with self._lock:
-            open_ids = [record.call_id for record in self._records if record.status not in _TERMINAL_STATUSES]
-            return tuple(
-                self.failed(ModelCallFailureParams(call_id=call_id, error_type=error_type, error_code=error_code))
-                for call_id in open_ids
-            )
-
     # LLM: 物理观察允许晚于逻辑终态，但只修改 HTTP 事实及诊断；终态时钟、状态和用量不变，请求面仅按同线程或 run 比较。
     #   status=PROGRESS_STATUS 只替换该尝试的 transport 分段计时，不改状态、完成/活动时间、尝试数和事件，未知尝试忽略。
     # 函数用途: 记录真实 HTTP 尝试、传输分段计时与缓存前缀变化，保留取消后仍在退出的 worker 观察结果。
@@ -900,7 +932,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
         return self._records[self._index[call_id]]
 
     # LLM: 普通明细仍只保留最新 max_records 条；裁剪只针对已结束的历史，还在进行（started/first_token）且近期有活动的调用
-    #   一律保留：调用方随后还要写首字、活动和终态，停机结清（fail_open_calls）也要看得到。显式活令牌仍可多留已终态记录
+    #   一律保留：调用方随后还要写首字、活动和终态，停机结清（close_model_call_admission）也要看得到。显式活令牌仍可多留已终态记录
     #   （迟到的物理观察）。防泄漏：超过 open_call_stale_seconds 无活动的在途调用算失联，和已结束明细一样可裁，并累计
     #   stale_open_calls_trimmed、打一条只含计数的警告。2026-10-02 生产缺陷：长压缩期间同一 agent 上另一会话发了约 139 次
     #   调用，进行中的摘要调用明细被裁，收尾时 _require_record 抛 KeyError，压缩记成 COMPACT_KEYERROR。
@@ -925,6 +957,49 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
 
     def _rebuild_index(self) -> None:
         self._index = {record.call_id: index for index, record in enumerate(self._records)}
+
+
+# LLM: 只在 ModelCallLedger.__init__ 末尾调用：在准入表锁内弱登记，与 close_model_call_admission 的关门快照互斥。
+# 函数用途: 把新建的账本登记进本进程模型调用准入表，停机时才找得到它。
+def _register_ledger_admission(ledger: ModelCallLedger) -> None:
+    registry = _ADMISSION_REGISTRY
+    with registry.lock:
+        registry.ledgers.add(ledger)
+
+
+# LLM: 只在 ModelCallLedger.started 持账本锁时调用（锁序固定为账本锁→准入表锁，关门方从不在持准入表锁时拿账本锁）。
+# 函数用途: 准入已关闭就抛 ModelCallAdmissionClosedError，让这次新调用不被登记、不发请求。
+def _require_call_admission() -> None:
+    registry = _ADMISSION_REGISTRY
+    with registry.lock:
+        closure = registry.closure
+    if closure is not None:
+        raise ModelCallAdmissionClosedError(closure)
+
+
+# LLM: 宿主停机结清的唯一入口：先在准入表锁内置关门原因并取全部在册账本，放锁后逐本在账本锁内把仍在途（started/
+#   first_token）的调用记成 failed（带关门原因的类型与错误码）。已终态记录不动，迟到的成功/失败也不重开（首个终态规则）；
+#   重复调用沿用第一次的关门原因，只返回本次新结清的记录（已无在途则为空）。返回记录供宿主写停机事件，这里不写盘。
+#   物理线程可能仍在退出：迟到的 HTTP 观察照常写进 failed 记录，保留句柄照常释放，见 provider_attempt / ModelCallRetention。
+# 函数用途: 关闭本进程模型调用准入，把所有账本里仍在途的调用记成被停机中断，返回被结清的记录。
+def close_model_call_admission(closure: ModelCallAdmissionClosure) -> tuple[ModelCallRecord, ...]:
+    registry = _ADMISSION_REGISTRY
+    with registry.lock:
+        if registry.closure is None:
+            registry.closure = closure
+        closure, ledgers = registry.closure, list(registry.ledgers)
+    return tuple(record for ledger in ledgers for record in _fail_open_calls(ledger, closure))
+
+
+# LLM: 关门后才调用，所以本账本不会再有新调用进来；只改仍在途的记录，返回本次改写的记录。
+# 函数用途: 把一本账本里仍在途的调用按关门原因记成 failed。
+def _fail_open_calls(ledger: ModelCallLedger, closure: ModelCallAdmissionClosure) -> tuple[ModelCallRecord, ...]:
+    with ledger._lock:
+        open_ids = [record.call_id for record in ledger._records if record.status not in _TERMINAL_STATUSES]
+        return tuple(
+            ledger.failed(ModelCallFailureParams(call_id=call_id, error_type=closure.error_type, error_code=closure.error_code))
+            for call_id in open_ids
+        )
 
 
 # LLM: 在途且最近有活动（距最后活动不到 stale_seconds）才算仍在进行；已结束或失联的都不受裁剪豁免。只读。
@@ -1037,7 +1112,10 @@ def _decrement_counter(counter: dict[Any, int], key: Any) -> None:
 
 
 __all__ = [
+    "MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE",
     "ModelCallActivityParams",
+    "ModelCallAdmissionClosedError",
+    "ModelCallAdmissionClosure",
     "ModelCallFailureParams",
     "ModelCallFinishParams",
     "ModelCallFirstTokenParams",
@@ -1049,5 +1127,6 @@ __all__ = [
     "ModelCallProviderAttemptParams",
     "ModelCallStartedParams",
     "ModelCallTimeoutParams",
+    "close_model_call_admission",
     "summarize_model_call_records",
 ]

@@ -2194,6 +2194,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "不是供应商失败也不是任务失败；墙钟超时的重试由放弃方自动进行，用户停止则按停止处理，不要据此报阻塞或放弃任务。"
         ),
     ),
+    "MODEL_CALL_ADMISSION_CLOSED": ErrorContract(
+        code="MODEL_CALL_ADMISSION_CLOSED",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.STOP.value,
+        recovery_hint=(
+            "宿主（Gateway）正在停机，本进程已关闭模型调用准入，这次模型调用没有登记、请求根本没有发出；"
+            "不是供应商失败也不是任务失败，不要重试或换模型重发，等宿主重启后由原恢复流程继续。"
+        ),
+    ),
     "UNSUPPORTED_OPERATION": ErrorContract(
         code="UNSUPPORTED_OPERATION",
         category="tool",

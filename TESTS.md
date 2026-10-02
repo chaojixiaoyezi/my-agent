@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## J17 必须修：停机准入栅栏（2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 `7b21f38b9`）
+
+- `test_gateway_model_call_shutdown_settlement.py` 新增 4 项：
+  - **结清后迟到 started**（sol2 复现，走真实 `_cmd_gateway_run_cleanup`）：
+    - 新调用被拒，错误码 `MODEL_CALL_ADMISSION_CLOSED`；
+    - 账上只剩被结清的那一条，still_open 为空，被拒的调用不进累计数；
+    - 重复登记同一 call_id 只返回原记录。
+  - **快照后新账本登记**：结清之后新建的账本都不接新调用，包括 runner worker 账本、owner 池 agent 账本和直接新建的账本；再结清一次为空。
+  - **结清进行到一半**：用确定的交错把结清停在一本账上。
+    - 此时在已关门、还没轮到的账本上登记新调用，被拒；新建账本也被拒；
+    - 放行后，两本账关门前的在途调用都被结清。
+  - **逻辑终态与物理退出分开**：
+    - 停机记 failed 后，迟到的 HTTP 观察照记，迟到的成功不重开终态；
+    - caller 放了保留权，明细还在；worker 也放了，明细才被裁；
+    - 累计数始终是 failed 1。
+- 原有用例改用新接口：
+  - `close_model_call_admission` 取代 `fail_open_calls`；`settle_open_model_calls_for_shutdown()` 不再带 agent；
+  - runner worker / owner 池账本的结清用例原样通过；
+  - `test_model_call_ledger_open_calls.py` 的停机用例同步换接口。
+- `tests/conftest.py` 新增 `_isolate_model_call_admission`：每个用例一张新的准入表。
+
 ## C4 接替提示开关进管理员 /settings 白名单（2026-10-02，3a，step17b 集成）
 
 - 新增 `test_subagent_takeover_hint.py::test_switch_is_a_boundary_only_the_admin_settings_command_can_flip`：模型 `set_parameter` 得 `PARAMETER_BOUNDARY` 且不建 capability 文件；`user_settings_write_scope()` 内开、关都成功，`load_capability_config` 回读一致，新建文件 0600。
@@ -119,7 +140,7 @@
 - `test_model_call_ledger_open_calls.py`（新增，7 项）：
   - 进行中调用（started 和 first_token 两种状态）被 129 次别的调用灌过后仍在，照常写活动与终态；结束之后照常被裁；
   - 它所属请求的累计数完整：状态计数恰好“完成 1”，用量对得上；
-  - 停机结清 `fail_open_calls` 能看到它；
+  - 停机结清（J17，现为 `close_model_call_admission`）能看到它；
   - 防泄漏：6 小时无活动的在途调用被裁并计数，同时还有活动的照样保留；
   - 产品路径：压缩摘要（`generate_auxiliary_model_response`）和主回合（`start_model_call_record`）长调用进行中，
     同一 agent 上另发 129 次调用，收尾不抛 KeyError，账面“完成”数对得上。

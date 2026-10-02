@@ -487,17 +487,18 @@ def _join_gateway_loops(request: GatewayRunCleanupRequest) -> list[str]:
     return [name for name, thread in threads.items() if thread.is_alive()]
 
 
-# LLM: 排空窗口之后才结清：这时仍在途的模型调用会随进程退出被切断，由唯一账本按同一原因码记 failed（用量按缺报），
+# LLM: 排空窗口之后才结清：先关闭本进程模型调用准入（停机准入栅栏），再把仍在途的调用由唯一账本按同一原因码记 failed
+#   （用量按缺报）；关门后排空没收住的 worker 再登记新调用会被拒绝（MODEL_CALL_ADMISSION_CLOSED），不会留下新的在途调用。
 #   有在途调用才写结构化事件 gateway_model_calls_interrupted（只含身份/用途/时长字段，不含正文）；账本模块出错只记
-#   异常类型事件 gateway_model_call_settlement_failed，不能中断收尾。覆盖本进程的账本：Gateway agent 自己的，加上登记过的
-#   进程内 runner worker 与 owner 池作用域 agent 的（J17，call_runtime.track_shutdown_ledger）；local/main 子进程 runner 各自收口。
-# 函数用途: Gateway 停止时给还没结清的前台/后台模型调用留下"被中断、未结算"的事实，返回条数。
+#   异常类型事件 gateway_model_call_settlement_failed，不能中断收尾。覆盖本进程全部账本（构造即登记：Gateway agent、
+#   进程内 runner worker、owner 池作用域 agent 等）；local/main 子进程 runner 各自收口。
+# 函数用途: Gateway 停止时关闭模型调用准入，给还没结清的前台/后台模型调用留下"被中断、未结算"的事实，返回条数。
 def _settle_interrupted_model_calls(request: GatewayRunCleanupRequest, *, drain_complete: bool) -> int:
     agent = request.context.agent
     try:
         from ..agent.agent_core.model.call_runtime import settle_open_model_calls_for_shutdown
 
-        interrupted = settle_open_model_calls_for_shutdown(agent)
+        interrupted = settle_open_model_calls_for_shutdown()
     except Exception as exc:  # noqa: BLE001 - 停止收尾不能因账本模块出错而中断
         log_gateway_event(agent, "gateway_model_call_settlement_failed", {"error_type": type(exc).__name__})
         return 0
@@ -556,7 +557,7 @@ def _flush_decision_reach_counts(request: GatewayRunCleanupRequest) -> None:
 
 
 # LLM: 停止收尾顺序固定：先置停止事件，再取消本进程在途决策（并最多等 2 秒让 observe 后台执行器落账），再停 HTTP 与
-#   收三条循环，排空窗口后把仍在途的模型调用记成被停机中断（只记结构化事实，不猜用量），再把决策点到达计数的尾巴落盘，
+#   收三条循环，排空窗口后关闭模型调用准入并把仍在途的模型调用记成被停机中断（只记结构化事实，不猜用量），再把决策点到达计数的尾巴落盘，
 #   最后清 pid/停止请求并写心跳与收尾事件；
 #   决策取消、账本结清或计数落盘出错只记异常类型事件，不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py、
 #   test_gateway_model_call_shutdown_settlement.py 与 Gateway 停止相关回归。

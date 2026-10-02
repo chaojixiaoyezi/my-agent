@@ -171,6 +171,18 @@ def _isolate_decision_reach_counts(monkeypatch):
     monkeypatch.setattr(decision_reach_counts, "_PENDING", {})
     monkeypatch.setattr(decision_reach_counts, "_LAST_FLUSH", {})
 
+
+@pytest.fixture(autouse=True)
+def _isolate_model_call_admission(monkeypatch):
+    """每个测试用自己的模型调用准入表，测完丢弃。
+
+    准入表（contracts/model_call_ledger）是进程级的：Gateway 收尾会关门、进程内不重开，账本构造时登记进去。
+    不隔离的话，一条跑过收尾的测试之后，同一测试进程里所有账本都不再接新调用；别的测试留下的在途调用也会混进停机结清。
+    """
+    from agent_py_agent.agent.contracts import model_call_ledger
+
+    monkeypatch.setattr(model_call_ledger, "_ADMISSION_REGISTRY", model_call_ledger._ModelCallAdmissionRegistry())
+
 def _loopback_no_proxy(current: str) -> str:
     values = [item.strip() for item in str(current or "").split(",") if item.strip()]
     for item in ("127.0.0.1", "localhost", "::1"):

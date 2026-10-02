@@ -16,6 +16,7 @@
 
 - 停止：`cli/gateway_process.py::_cmd_gateway_run_cleanup` 置停止事件、停 HTTP、对心跳/请求/后台三个循环各 join 2 秒后退出，
   不等在途回合。正在执行的工具子进程、模型调用随进程退出被切断；模型调用按 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN` 结清。
+  结清时先关闭本进程模型调用准入，之后再登记的新调用被拒（`MODEL_CALL_ADMISSION_CLOSED`），不会留下新的在途调用（J17 停机准入栅栏）。
 - 启动恢复：`gateway_parts/recovery.py` 在启动时把 processing 里的请求按“同一回合”重新排队，不计失败次数；
   `request_execution._recover_gateway_active_turn_authority` 调 `RuntimeRepository.recover_recorded_active_turn_attempt`，
   只有“所有已启动的有副作用工具都已终态且有耐久记录”才放行续跑，否则报 `ACTIVE_TURN_OUTCOME_UNCERTAIN`，run 停在 unknown。

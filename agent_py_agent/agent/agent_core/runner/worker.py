@@ -211,13 +211,10 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
     return worker
 
 
-# LLM: 每个建好的 worker（含按有效配置重建的那个）都经这里；J17 把它的模型调用账本登记为随 Gateway 停机一并结清
-#   （进程内线程派工时 worker 与网关同进程，进程退出会切断它的在途调用）。登记是弱引用，worker 结束被回收后自动消失。
-# 函数用途: 给 worker 装上后端覆盖、本地存储，并登记它的账本以便停机结清。
+# LLM: 每个建好的 worker（含按有效配置重建的那个）都经这里。它的模型调用账本在构造时已登记进进程准入表
+#   （contracts.model_call_ledger），随 Gateway 停机一并关门结清，这里不用再登记。
+# 函数用途: 给 worker 装上后端覆盖和本地存储。
 def _attach_worker_runtime(worker, params: RunSubagentWorkerParams) -> None:
-    from ..model.call_runtime import track_shutdown_ledger
-
-    track_shutdown_ledger(worker)
     if params.backend_override is not None:
         worker.backend = params.backend_override
         worker._subagent_worker_backend_override = params.backend_override

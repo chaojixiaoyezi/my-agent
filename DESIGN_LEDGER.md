@@ -1,5 +1,38 @@
 # 设计台账
 
+## J17 必须修：Gateway 停机准入栅栏——结清之后不再接新的模型调用（2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 `claude/3a-step16z` `7b21f38b9`，已实现，待集成）
+
+- **问题**（sol2 只读审查）：停机结清只拿一次账本快照，再逐本把在途调用记 failed，没有同时关掉新调用的准入。
+  - Gateway 对三条循环各等 2 秒，排空不完整也照样结清；之后还活着的 worker 能在已结清的账本上登记新的 started。
+  - 快照之后才登记的账本（迟到完成构建的 runner worker、owner 池 agent）不在那次遍历里。
+  - sol2 复现：`settled=["visible-before-shutdown"]`、`still_open=["started-after-shutdown-snapshot"]`。J17 之前的结清函数也有这个窗口，不是 J17 引入的回归。
+- **做法**（结构化栅栏，不靠再扫一次）：
+  - `contracts/model_call_ledger.py` 新增本进程唯一的模型调用准入表 `_ModelCallAdmissionRegistry`：账本弱引用集合，加关门原因 `ModelCallAdmissionClosure`（error_type/error_code）。
+  - 每本 `ModelCallLedger` 构造时在准入表锁内登记，所以关门快照一定包含关门前建的全部账本；关门后新建的账本同样受准入表约束。
+  - `ModelCallLedger.started` 在本账本锁内检查准入：已关门就抛 `ModelCallAdmissionClosedError`，不建记录，调用方不发请求。
+    - 错误码 `MODEL_CALL_ADMISSION_CLOSED` 已登记错误分类：不可重试，处理动作为停止。
+    - 重复登记同一 call_id 仍只返回原记录。
+  - `close_model_call_admission(closure)` 分两步：先在准入表锁内置关门原因、取在册账本；再逐本在账本锁内把在途调用记 failed。
+    started 和结清在同一把账本锁里排队，所以每次登记要么早于这本账被结清（被结清成 failed），要么被拒绝，没有窗口。
+    锁序固定为“账本锁 → 准入表锁”，结清方不会在持有准入表锁时去拿账本锁。
+  - `call_runtime.settle_open_model_calls_for_shutdown()` 改成调用它，不再带 agent 参数。关门原因沿用原来的 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN` / `HostShutdownInterrupted`。
+    Gateway 收尾顺序、事件 `gateway_model_calls_interrupted` 和投影字段都不变。
+  - 删掉 J17 的显式登记 `track_shutdown_ledger` 与 `_SHUTDOWN_LEDGERS`，runner worker 构建、owner 池建 agent 两处调用一并删掉。
+    构造即登记已经覆盖它们，还覆盖了原来没登记的进程内账本，例如 gateway supervisor 建的 agent。
+  - 只有停机结清会关门，进程内不重开。
+    - 测试在 `tests/conftest.py` 里按用例换一张新的准入表（`_isolate_model_call_admission`）。
+    - 不换的话，一条跑过收尾的测试之后，同一进程里后面的测试全部拒绝调用。
+- **已登记调用照原规则结清**（首个终态规则）：
+  - 停机记的 failed 是逻辑终态，物理线程可能还在退出；
+  - 迟到的 HTTP 观察照记，迟到的成功或失败不重开终态；
+  - 保留句柄照常释放，全部放掉后明细才按原规则被裁（sol2 建议 2，已加用例）。
+- **累计容器**（sol2 建议 1）：在途调用所属的 request/run 累计容器不被 LRU 淘汰（`_live_open_scope_keys`，COMPACT_KEYERROR 修复里已做）。停机结清和迟到观察之后，累计数仍对得上。
+- **边界**：
+  - 栅栏只拦“新调用的登记”。关门前已登记、还没真正发出 HTTP 的调用，账上已记 failed，但物理上仍可能发出去。要拦实际发送，得在各发送点复核，不在这次范围。
+  - 被拒的调用由调用方按普通异常处理（回合失败）。关门只发生在进程退出前。
+  - local/main 子进程 runner 不在本进程，各自收口；kill -9、断电仍靠启动对账。
+- **验证**：见 TESTS.md 同名节。
+
 ## C4 接替提示开关进管理员 /settings 白名单（2026-10-02，3a，集成分支 `claude/3a-step16z`，已实现，待上线（step17b））
 
 - **问题**：`subagent_takeover_hint_enabled` 在 capability 配置里，按 P17 规则默认是安全边界（会改变父级模型看到的内容，模型不能改），但没进 `USER_SETTINGS_BOUNDARY_KEYS`，结果管理员 `/settings set` 也被 `PARAMETER_BOUNDARY` 拒绝，只剩手改文件一条路；已定做法 5 要求“生产打开并给关闭命令”，做不到。部署前用参数中心预演时发现。
@@ -131,7 +164,7 @@
   - 修复后，同样负载下第 23 代正常生成。
 - **修法（账本层，覆盖所有调用方）**：
   - 裁剪只针对已结束的历史：进行中（started/first_token）且近期有活动的调用一律保留，调用方之后照常写首字、活动和终态；
-  - 停机结清 `fail_open_calls`（J17）也能看到这些调用；
+  - 停机结清（J17，现为 `close_model_call_admission`）也能看到这些调用；
   - 这些调用所属的 request/run 累计容器同样不被 LRU 淘汰，否则收尾时会落进新建的空容器，请求用量和状态计数就丢了；
   - 显式活令牌的语义不变，仍可多留已终态记录，给迟到的物理观察用。
 - **防泄漏**（3a 要求）：进行中的调用超过 `open_call_stale_seconds`（默认 6 小时）没有任何活动就算失联，可以像已结束明细一样被裁。
@@ -477,6 +510,7 @@
   - local/main 的子进程 runner 带 `start_new_session`，网关停了它还在，在自己的生命周期里收口，不在这次范围。
   - kill -9、断电这类非正常退出，仍靠启动对账。
 - **验证**：`test_gateway_model_call_shutdown_settlement.py` 加 3 项（原 5 项不变）；5 个变异全部被抓住。见 TESTS.md 同名节。
+- **后续**：停机准入栅栏（台账顶部“J17 必须修”节）删掉了 `track_shutdown_ledger` 显式登记，改为账本构造即登记，并在结清时关闭新调用准入。
 
 ## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复）（2026-10-02，分支 `claude/be-curator-identity`，基于 `claude/3a-step16z` `85740cde6`，已上线 step17a（main de222698b，2026-10-02））
 
