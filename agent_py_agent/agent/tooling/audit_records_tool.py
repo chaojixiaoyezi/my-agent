@@ -82,7 +82,7 @@ def _owner_host(agent: object, home: object) -> SimpleNamespace:
 #   result_category 是结构化结果类别（selected / non_selection:* / dropped:*），两个展示面共用
 #   decision_outcome_log.result_category_label 翻译成大白话；旧记录没有字段时显示“未记录”，不按状态猜。
 #   逐点位的类别计数取 decision_outcome_summary 的 result_categories_by_point（同时间窗全部行、含 dropped 补充行），
-#   与 TUI 决策菜单共用这一处，审计不再自己按 recent 行补标签。
+#   与 TUI 决策菜单共用这一处，审计不再自己按 recent 行补标签；它属于点位诊断，同样按 owner 统计（见 _owner_point_categories）。
 # 函数用途: 汇总一个 owner 的决策设置、管理员控制、时间窗内的调用统计、各接入点的决策结果与未触发原因。
 def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], query: AuditQuery) -> dict:
     from ..conversation.decision_audit import decision_settings_summary, decision_usage_summary
@@ -108,8 +108,20 @@ def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], q
             "settings": settings, "usage": decision_usage_summary(host.conversation_store, thread_ids, since=query.since),
             "points": outcomes,
             "point_diagnostics": decision_point_diagnostics(POINTS, settings.get("points"), reach,
-                                                            outcomes.get("result_categories_by_point")),
+                                                            _owner_point_categories(host, query, outcomes)),
             "diagnostics_scope": "owner", "diagnostics_coverage_since": reach.get("coverage_since")}
+
+
+# LLM: 点位诊断按 owner 统计（diagnostics_scope=owner，与 reach 计数同口径），不随 current_thread 缩小：
+#   current_thread 时 points 已按会话过滤，这里另读一份 owner 范围的逐点类别；其它范围直接复用同一份汇总，不多读文件。只读。
+# 函数用途: 取点位诊断用的逐点位结果类别计数（owner 范围）。
+def _owner_point_categories(host: object, query: AuditQuery, outcomes: dict) -> dict:
+    from ..conversation.decision_outcome_log import decision_outcome_summary
+
+    if query.scope != "current_thread":
+        return outcomes.get("result_categories_by_point") or {}
+    owner_wide = decision_outcome_summary(host.home_paths, since=query.since, thread_ids=None)
+    return owner_wide.get("result_categories_by_point") or {}
 
 
 # LLM: 请求记录只经宿主写入器读取（Gateway 运行时才有），读取器不存在即报告不可用，不改从日志或配置推导队列位置。

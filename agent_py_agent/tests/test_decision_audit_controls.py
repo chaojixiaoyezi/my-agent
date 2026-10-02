@@ -334,6 +334,15 @@ def test_low_frequency_point_categories_visible_in_audit_and_menu_same_window(tm
     read = execute_local_model_operation(alice, "local-session", "decision_read", {"decision": {"scope": "owner"}})
     assert read["point_diagnostics"]["external_material_order"]["result_categories"] == audit_categories
 
+    # 按当前会话查询时 points 缩到本会话；点位诊断的类别仍按 owner 统计，与检查/调用次数同口径。
+    mine = alice.conversation_store.threads.get_or_create({"canonical_user_id": "ou-alice", "owner_id": ALICE})
+    _in_gateway_turn(alice, tmp_path / "gateway", mine.thread_id)
+    outcome, report = _call(alice, "audit_records", {"topic": "decision", "scope": "current_thread"})
+    assert outcome.ok, outcome.output
+    [owner] = report["owners"]
+    assert owner["points"]["result_categories_by_point"] == {}
+    assert owner["point_diagnostics"]["external_material_order"]["result_categories"] == audit_categories
+
 
 def test_all_owners_scope_needs_admin_and_explicit_cross_owner_permission(tmp_path, monkeypatch):
     alice = _agent(tmp_path, monkeypatch, ALICE_OWNER)

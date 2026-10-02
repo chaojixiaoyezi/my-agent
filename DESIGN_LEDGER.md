@@ -175,7 +175,7 @@
     结果 provider 为纯空白、kind 为 main 的身份会被认作管理员；/settings 一直不认。收拢后两边都不认，方向是变严格。
   - user_config 原本就去空白，没有变化。
 
-## 决策账补结构化“结果类别”，分清选中 / 非选择 / 被丢弃（J10 复测观察）（2026-10-02，分支 `worker/ds1-decision-outcome-category`，基于 `claude/3a-step16z` `78fc5c209`，已实现，待集成）
+## 决策账补结构化“结果类别”，分清选中 / 非选择 / 被丢弃（J10 复测观察）（2026-10-02，分支 `worker/ds1-decision-outcome-category`，基于 `claude/3a-step16z` `78fc5c209`，已实现，已集成，待上线（step17b））
 
 - **来源**：ae 做 J10 真实复测时的观察。决策结果日志只记 mode、status，Jev 调用成功之后看不出它是选中了某个候选，还是给了 `not_needed`/`need_data`/`abstain`
   这类非选择；也看不出宿主有没有因为来源、设置、期限变化把建议丢掉。于是“没出提示”到底是 Jev 没选、还是选了被丢，只能靠猜。
@@ -212,6 +212,7 @@
     `decision_planning._drop` 挪到常量之后；`decision_outcome_log` 的 `# LLM:` 续行改 `#   `。
   - 补测试：强制门不通过时日志恰好一行 dropped（原因码是门给的码）；低频点位早于最近 20 行但在 24 小时窗口内，TUI 与审计诊断都能看到且一致。
   - 变异验证 2 个（本轮）：去掉“不重复登记”、审计诊断不传类别，均被新测试拦下并还原。
+- **集成补漏（3a，step17b）**：审计 `scope=current_thread` 时 `points` 按会话过滤，但点位诊断按 owner 统计（`diagnostics_scope=owner`）；类别计数改由 `audit_records_tool._owner_point_categories` 另读一份 owner 范围，与检查/调用次数同口径。`test_decision_transport_timing` 的 recent 行形状断言补上 `result_category`、`result_category_label` 两个展示字段。
 
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
 

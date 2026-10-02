@@ -211,6 +211,7 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
 - **变异验证 2 个，全部被拦下并还原（先备份再拷回）**：
   1. 门不通过时调用方又 `drop_and_return` 登记一行（去掉“不重复登记”） → `test_gate_failure_records_exactly_one_dropped_row` 红（`assert 2 == 1`）；
   2. 审计调 `decision_point_diagnostics` 不传类别 → `test_low_frequency_point_categories_visible_in_audit_and_menu_same_window` 红（审计侧 `result_categories` 为空 `{}`）。
+- **集成补漏（3a）**：同一用例追加 `scope=current_thread`：`points.result_categories_by_point` 为空（本会话无行），点位诊断的类别仍与 owner 范围一致；变异“current_thread 也直接用会话过滤后的类别”被拦下（1 failed）后还原。`test_decision_transport_timing.py` recent 行形状补两个类别字段。102 个相关测试文件 + guards9：3086 passed 后补这两处，相关两文件 39 passed、审计 23 passed。
 
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 

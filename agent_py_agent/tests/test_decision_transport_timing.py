@@ -475,7 +475,9 @@ def test_calls_that_never_reach_the_network_carry_no_transport(tmp_path, link, m
 def test_outcome_rows_without_transport_keep_the_original_recent_shape():
     from agent_py_agent.agent.conversation.decision_outcome_log import _recent_row
 
+    # 结果类别（result_category 与大白话标签）是每行都有的展示字段；没有链路事实的行仍不带 transport。
     assert set(_recent_row({"point": "p", "status": "off"})) == {
-        "created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms", "blocking"}
+        "created_at", "point", "scope", "mode", "status", "result_category", "result_category_label", "reason",
+        "elapsed_ms", "blocking"}
     assert _recent_row({"point": "p", "transport": {"call_status": "finished"}})["transport"] == {
         "call_status": "finished"}
