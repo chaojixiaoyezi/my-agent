@@ -35,6 +35,7 @@ from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
 from .plugin_runtime_facts import confirmation_message, runtime_problem, runtime_reason_message
 from .plugin_sandbox import plugin_sandbox_problem
+from .plugin_sources import source_unauthorized_message
 from .plugin_update import PLUGIN_UPDATE_TOOL
 from .plugin_update_tool import PluginUpdateTool
 from .runtime_db.host_command_execution import execute_host_command, query_host_command
@@ -434,6 +435,9 @@ class PluginManagement:
         if details.get("reason") == "confirmation_required" and isinstance(details.get("confirmation"), dict):
             # 非 Python 插件启用前的用户确认：展示将要运行的程序与确认码，不套用通用的参数错误说明
             result["message"] = confirmation_message(details["confirmation"])
+        elif details.get("reason") == "source_unauthorized":
+            # 来源在当前 owner 范围外：按信封里的 allowed_root/source_base 告诉用户包该放哪里，不读输出文本
+            result["message"] = source_unauthorized_message(details)
         elif runtime_reason_message(details.get("reason")):
             # 平台不符、解释器缺失或被替换：按结构化原因码给出具体说明与下一步
             result["message"] = runtime_reason_message(details.get("reason"))

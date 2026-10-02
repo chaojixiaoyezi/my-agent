@@ -215,6 +215,31 @@ def test_confirmation_receipt_keeps_code_out_of_text_on_both_im_and_tui(host, mo
     assert tui["details"]["state"] == "confirmation_required"
 
 
+def test_unauthorized_source_explains_the_allowed_root_on_both_im_and_tui(host, tmp_path, monkeypatch):
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+    from agent_py_agent.tests.test_plugin_management import manager
+    from agent_py_agent.tests.test_plugin_package import _bundle
+
+    root = tmp_path / "owner-root"
+    root.mkdir()
+    service, _source = manager(tmp_path, workspace=root,
+                               path_policy=PathAccessPolicy.from_values(mode="normal", owner_scope_root=str(root)))
+    outside = tmp_path / "elsewhere" / "pkg.zip"
+    outside.parent.mkdir()
+    outside.write_bytes(_bundle())
+    monkeypatch.setattr(module, "_scope_management", lambda *_args, **_kwargs: service)
+    text = f'/plugins install "{outside}"'
+    im = _run(host, text, _scope(admin=True))
+    handler = Handler({"conversation_id": "session-a"})
+    monkeypatch.setattr(module, "resolve_gateway_scope_owner", lambda *_: _scope(admin=True).resolved_owner)
+    tui_body = {**handler.body, "catalog_revision": service.catalog().revision, "plugin_request_id": "tui-unauthorized"}
+    tui = module.plugin_http_response(handler, SimpleNamespace(agent=host), tui_body, text=text)
+    expected = f"请把插件包放到 {root.resolve()} 下再试"
+    assert expected in im.message and "未获授权" in im.message and str(outside) not in im.message
+    assert expected in tui["message"] and str(outside) not in tui["message"]
+    assert tui["details"]["reason"] == "source_unauthorized" and tui["details"]["allowed_root"] == str(root.resolve())
+
+
 @pytest.mark.parametrize("entry", ["ask", "control"])
 def test_http_control_receipt_replays_plugin_text_without_resubmitting(host, tmp_path, monkeypatch, entry):
     from agent_py_agent.agent.core import SimpleAgent

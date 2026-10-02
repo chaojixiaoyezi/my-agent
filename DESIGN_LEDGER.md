@@ -1,5 +1,15 @@
 # 设计台账
 
+## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，已实现，待集成）
+
+- **问题**：插件包放在当前 owner 范围外时，允许的根目录只拼在给模型看的异常文字里；用户在 TUI 和 IM 看到的仍是通用的“插件、来源文件或配置无效，或读取未获授权。”。
+- **做法**：
+  - `PluginSourceError` 新增结构字段 `allowed_root`。只在越权时给，且只取路径策略冻结的当前 owner 根（`PathAccessPolicy.owner_scope_root`），不含其它 owner 或宿主路径。
+  - 安装、更新两个工具共用 `plugin_source_error_envelope` 生成回执信封：`reason=source_unauthorized`、`source_base`、`allowed_root`。
+  - `plugin_management._reply` 在 `reason=source_unauthorized` 时，用 `source_unauthorized_message` 按信封字段生成说明，写法与 `confirmation_required` 一致，不解析输出文本。模型看到的异常文字也用同一个函数生成，两边一句话。
+  - 没有 owner 根时（不是按用户隔离的部署），说明改为提示放到当前会话工作区或显式授权的目录。说明不回显用户给的越权路径。
+- **验证**：见 TESTS.md 同名节。
+
 ## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `claude/3a-step16z` `58c674d46`，已实现，待集成）
 
 - **问题**：
