@@ -1,5 +1,40 @@
 # 测试与发布验收
 
+## 飞书：假飞书 + 真网关 + 真适配器 + 真模型，验后台完成送达与 Goal 熔断提示（C11）（2026-10-01，ae，被测 `claude/3a-step16z` `6b2f56dc7`）
+
+- **做法**：
+  - **隔离与模型**：隔离 home，Gateway 127.0.0.1:8443，模型 MiniMax-M2.7（目录副本只留这一个服务商，600，用后删除）。
+  - **真适配器**：`adapter start --channel feishu` 用产品自带的 webhook 模式，回调端口 8463，私聊闲置锁关闭（锁留给手测）。
+  - **假飞书的两头**：
+    - **入站**：测试脚本把 `im.message.receive_v1` 事件按飞书的 token 校验方式 POST 给真适配器。
+    - **出站**：Gateway 和适配器进程各加载一个测试方 `sitecustomize`，它只把飞书 Open API 的地址指到本机假服务 127.0.0.1:8464。
+  - **全是产品原代码**：渲染、分片、幂等 uuid、重试、投递 worker、宿主提示渲染、后台路由。
+  - **凭据**：飞书 app id、secret、token 都是明显的假值，没有任何真实凭据。
+  - **假服务只记结构化字段**：路径、receive_id、msg_type、uuid、正文长度与 sha256，再加两个布尔值——正文里有没有宿主模板"【提示】"、有没有"【提示】持续目标连续"。消息原文不记。
+- **结果**：
+
+| 场景 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| 管理员绑定（`/admin <密码>`） | 通过 | 适配器按敏感命令一次性直交：控制回执 `admin ok`，写出 `admin-channel-identities.json`。这一步之后，密码没有出现在任何新的持久文件里 |
+| 系统命令（`/status`） | 通过 | 控制回执 `status ok`，适配器引用回复 |
+| 后台完成主动送达 | 通过 | **前台**：自然需求"后台派子代理统计目录"，适配器两次引用回复（43 字、173 字）。<br>**后台**：子代理 DONE；+60 秒 Gateway 自己取 token，向 `receive_id=open_id` 主动发 post（234 字、带 uuid）。<br>**日志**：Gateway 记 `reason=subagent_runner_finished delivery=sent commit=external_delivery route=external wake_handled=True`；子代理的能力申请唤醒 `delivery=suppressed`（内部协议，不打扰用户） |
+| Goal 熔断提示 | 通过 | **熔断**：自然需求"设成持续目标，等我发笔记再整理"；3 个续跑片后 Goal `paused`，`GOAL_CONTINUATION_NO_PROGRESS`，提示进入线程 `pending_host_notices`。<br>**送达**：用户再问"目标现在什么状态"，这次引用回复里带上了熔断提示行；`pending_host_notices` 清空，Goal 保持 paused，空片计数被这条前台消息清零（D4 口径） |
+
+- **观察（交 3a 判断，见设计台账同日条目）**：
+  - **空转片也在推送**：3 个空转续跑片每片都把一句很短的"在等你"主动推给了飞书用户（`reason=thread_goal_continue delivery=sent`，19/11/18 字），10 秒内连收 3 条；
+  - **熔断提示要等用户开口**：熔断提示本身不主动推送，要等用户下一次说话才随回复送达。
+- **测试者偏差（如实记录）**：
+  - **经过**：第一次绑定时脚本漏了 `/admin ` 前缀，假用户实际只发出了密码本身。产品把它当普通私聊消息：未绑定的 feishu/user owner 没有模型，请求以 `MODEL_NOT_CONFIGURED` 结束，没有调用模型；这条消息像普通消息一样落了 9 个隔离文件。
+  - **处置**：用的是一次性假密码，测试根已整体删除，修正脚本后重发。
+  - **结论**：这次偏差不是产品缺陷——带前缀的 `/admin` 走敏感直交，没有落盘。
+- **人工补测**：[飞书 5 分钟手测清单](docs/guides/FEISHU_QUICK_CHECK.md)。
+- **证据**：`~/.my-agent/decision-evidence/c11-fake-feishu-6b2f/`（仓库外）：
+  - 假飞书出入站逐条记录；
+  - `c11-facts.json`；
+  - Gateway 和适配器的结构化日志行；
+  - 各需求原文、`fault-log.txt`、完整 harness。
+  - 已扫过，没有密钥和密码。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `02568822d`）
 
 - **P15**：`test_structured_masking.py` 新增 2 例：
