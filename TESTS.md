@@ -39,6 +39,20 @@
     `test_user_config_decision_patch.py`、`test_gateway_decision_shutdown_cancel.py` 加 10 个守卫：1773 passed。
   - ruff、import 边界、doc_sync、`diff --check`、`size_diff`、clean_package、前端目录 `--check`。
 
+## 模型调用账不裁进行中的调用（COMPACT_KEYERROR 生产缺陷，2026-10-02，分支 `claude/38-compact-keyerror`，基于 `claude/3a-step16z` `df6033475`）
+
+- `test_model_call_ledger_open_calls.py`（新增，7 项）：
+  - 进行中调用（started 和 first_token 两种状态）被 129 次别的调用灌过后仍在，照常写活动与终态；结束之后照常被裁；
+  - 它所属请求的累计数完整：状态计数恰好“完成 1”，用量对得上；
+  - 停机结清 `fail_open_calls` 能看到它；
+  - 防泄漏：6 小时无活动的在途调用被裁并计数，同时还有活动的照样保留；
+  - 产品路径：压缩摘要（`generate_auxiliary_model_response`）和主回合（`start_model_call_record`）长调用进行中，
+    同一 agent 上另发 129 次调用，收尾不抛 KeyError，账面“完成”数对得上。
+- `test_model_call_ledger_partitions.py`：3 个依赖“没带令牌的在途调用会被裁掉”旧规则的用例，改为先让调用结束再释放令牌或灌入新调用。
+- 变异 5 个，全部被拦住：去掉在途豁免（7 项全挂）、不保护在途调用的请求累计、失联规则失效、失联裁剪不计数、只保护首字状态。
+- 真实数据复现：sol 线程数据的隔离副本，加上假模型和模拟负载，改前 KeyError（调用栈与生产一致），改后第 23 代正常生成；副本已删。
+- J17 停机结清用例 `test_gateway_model_call_shutdown_settlement.py` 全部通过。
+
 ## 工具操作持有者同主机判定改用 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`）
 
 - `test_tool_operation_host_identity.py`（新增，3 项）：

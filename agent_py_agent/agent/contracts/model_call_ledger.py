@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -32,11 +33,17 @@ _TERMINAL_STATUSES = frozenset({"failed", "finished", "timed_out"})
 _UNFINISHED_STATUSES = frozenset({"failed", "timed_out"})
 _USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens")
 _PURPOSE_BUCKETS = ("main", "auxiliary", "decision")
+# 进行中的调用多久没有任何活动（开始、首字、流活动、HTTP 尝试）就算失联，单位秒（6 小时）。远超任何供应商首字/静默超时，
+#   只防“永远收不到结束或失败”的在途明细无限堆积：失联明细和已结束明细一样可以被裁，并计入 stale_open_calls_trimmed。
+_OPEN_CALL_STALE_SECONDS = 21_600.0
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class ModelCallLedgerOptions:
     max_records: int = 128
+    # 在途调用无活动超过这么多秒算失联、可被裁剪（防泄漏），默认见 _OPEN_CALL_STALE_SECONDS。
+    open_call_stale_seconds: float = _OPEN_CALL_STALE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -525,6 +532,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
         self._index: dict[str, int] = {}
         self._scope_aggregates: dict[tuple[str, str], _ModelCallAggregate] = {}
         self._retained_calls: dict[str, set[ModelCallRetention]] = {}
+        self._stale_open_calls_trimmed = 0
         self._lock = threading.RLock()
         self.ledger_id = uuid.uuid4().hex
 
@@ -863,7 +871,9 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
         return tuple(aggregates)
 
     # LLM: 普通 scope 保持原 LRU；原输入预算在固定期限前保留，包括撤销态，避免裁剪后同编号重建额度。
-    # 函数用途: 清理历史累计容器，同时保留物理调用来源及尚未过期的显式预算原账。
+    #   有保留令牌的调用、以及还没结束（started/first_token）的调用，所属 request/run 的累计容器都不淘汰：
+    #   否则长调用收尾时会落进一个新建的空容器，这次请求的用量与状态计数就丢了。
+    # 函数用途: 清理历史累计容器，同时保留物理调用来源、进行中调用及尚未过期的显式预算原账。
     def _trim_scope_aggregates(self) -> None:
         max_scopes = max(2, max(1, int(self.options.max_records)) * 2)
         if len(self._scope_aggregates) <= max_scopes:
@@ -876,6 +886,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             keep.update(key for key, budget in budgets.items() if now < budget.limits.deadline)
         for call_id in self._retained_calls:
             keep.update(_model_call_scope_keys(self._require_record(call_id)))
+        keep.update(_live_open_scope_keys(self._records, float(self.context.now()), self.options.open_call_stale_seconds))
         for scope_key in tuple(self._scope_aggregates):
             if scope_key not in keep:
                 del self._scope_aggregates[scope_key]
@@ -885,18 +896,55 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             raise KeyError(f"unknown model call id: {call_id}")
         return self._records[self._index[call_id]]
 
-    # LLM: 普通明细仍只保留最新 max_records；额外记录必须有显式活令牌，解除后立即恢复裁剪，不保留全部终态。
-    # 函数用途: 清理过期明细，但让尚未收尾的 caller 或 worker 继续向准确调用写事实。
+    # LLM: 普通明细仍只保留最新 max_records 条；裁剪只针对已结束的历史，还在进行（started/first_token）且近期有活动的调用
+    #   一律保留：调用方随后还要写首字、活动和终态，停机结清（fail_open_calls）也要看得到。显式活令牌仍可多留已终态记录
+    #   （迟到的物理观察）。防泄漏：超过 open_call_stale_seconds 无活动的在途调用算失联，和已结束明细一样可裁，并累计
+    #   stale_open_calls_trimmed、打一条只含计数的警告。2026-10-02 生产缺陷：长压缩期间同一 agent 上另一会话发了约 139 次
+    #   调用，进行中的摘要调用明细被裁，收尾时 _require_record 抛 KeyError，压缩记成 COMPACT_KEYERROR。
+    #   改动同步 test_model_call_ledger_open_calls。
+    # 函数用途: 清理过期的已结束或失联明细，但让尚未收尾的 caller 或 worker 继续向准确调用写事实。
     def _trim_records(self) -> None:
         max_records = max(1, int(self.options.max_records))
         if len(self._records) <= max_records:
             return
+        now, stale_seconds = float(self.context.now()), float(self.options.open_call_stale_seconds)
         keep = set(self._retained_calls) | {record.call_id for record in self._records[-max_records:]}
+        keep.update(record.call_id for record in self._records if _is_live_open_call(record, now, stale_seconds))
+        self._stale_open_calls_trimmed += _count_stale_open_trimmed(self._records, keep, stale_seconds)
         self._records = [record for record in self._records if record.call_id in keep]
         self._rebuild_index()
 
+    # LLM: 只读计数：因长时间无活动被当作失联裁掉的在途调用累计数（防泄漏规则触发次数），供诊断与测试核对，不落盘。
+    # 函数用途: 返回本账本累计裁掉的失联在途调用数。
+    def stale_open_calls_trimmed(self) -> int:
+        with self._lock:
+            return self._stale_open_calls_trimmed
+
     def _rebuild_index(self) -> None:
         self._index = {record.call_id: index for index, record in enumerate(self._records)}
+
+
+# LLM: 在途且最近有活动（距最后活动不到 stale_seconds）才算仍在进行；已结束或失联的都不受裁剪豁免。只读。
+# 函数用途: 判断一条调用记录是不是仍在进行、不能被裁剪。
+def _is_live_open_call(record: ModelCallRecord, now: float, stale_seconds: float) -> bool:
+    if record.status in _TERMINAL_STATUSES:
+        return False
+    return now - max(record.last_activity_at, record.started_at) < stale_seconds
+
+
+# LLM: 进行中调用所属的 request/run 累计容器不能被 LRU 淘汰，否则收尾时落进新建的空容器、请求用量与计数丢失。只读。
+# 函数用途: 返回所有仍在进行的调用所属的累计容器键。
+def _live_open_scope_keys(records: list[ModelCallRecord], now: float, stale_seconds: float) -> set[tuple[str, str]]:
+    return {key for record in records if _is_live_open_call(record, now, stale_seconds) for key in _model_call_scope_keys(record)}
+
+
+# LLM: 数出这次会被裁掉的在途调用（没进保留名单又还没结束，即失联的），有就打一条只含计数的警告；只读，不改明细。
+# 函数用途: 统计并报告本次因失联被裁的在途调用数。
+def _count_stale_open_trimmed(records: list[ModelCallRecord], keep: set[str], stale_seconds: float) -> int:
+    stale_open = sum(record.call_id not in keep and record.status not in _TERMINAL_STATUSES for record in records)
+    if stale_open:
+        _LOGGER.warning("model call ledger trimmed %d stale open calls (no activity for %.0fs)", stale_open, stale_seconds)
+    return stale_open
 
 
 def _append_event(events: tuple[str, ...], event: str) -> tuple[str, ...]:

@@ -53,6 +53,31 @@
   - TUI 和 IM 没有直接展示这个标记的界面，用户都是经审计工具的回答看到它，所以说明加在审计投影上。
 - **验证**：见 TESTS.md 同名节。
 
+## 模型调用账不再裁掉进行中的调用（生产缺陷：sol 会话压缩 COMPACT_KEYERROR，2026-10-02，分支 `claude/38-compact-keyerror`，基于 `claude/3a-step16z` `df6033475`，已实现，待集成）
+
+- **现场**：step17a 上 sol 会话（thread-de866e7291f846db，gpt-6.1-sol）的压缩在 04:32:22 开始，约 11 分钟后失败，
+  失败码 COMPACT_KEYERROR。账上这次的压缩辅助调用是“完成 1、首字 1”：第二次调用既没完成也没失败。
+- **根因**：同一个 agent 共用一本 ModelCallLedger，明细只留最新 128 条（`_trim_records`）。只有拿了活令牌的调用不被裁，
+  目前只有决策调用和带预算的调用拿令牌，主回合与辅助调用（压缩摘要）都没有。sol 压缩期间，同一 agent 上另一会话
+  （gwreq-1790940678）发了约 139 次调用，把进行中的摘要调用明细挤掉了。摘要调用收尾时，`record_model_call_finished`
+  在 `_require_record` 查不到调用编号，抛 KeyError；except 分支的 `record_model_call_failed` 又抛一次；最后被包成 COMPACT_KEYERROR。
+- **复现**：把该线程数据复制到隔离目录（700/600，用完即删），走手动 /compact 入口加假模型。
+  - 无负载时第 23 代正常生成，数据本身没问题。
+  - 在摘要调用进行中模拟另一会话发 129 次调用，调用栈与生产一致。
+  - 修复后，同样负载下第 23 代正常生成。
+- **修法（账本层，覆盖所有调用方）**：
+  - 裁剪只针对已结束的历史：进行中（started/first_token）且近期有活动的调用一律保留，调用方之后照常写首字、活动和终态；
+  - 停机结清 `fail_open_calls`（J17）也能看到这些调用；
+  - 这些调用所属的 request/run 累计容器同样不被 LRU 淘汰，否则收尾时会落进新建的空容器，请求用量和状态计数就丢了；
+  - 显式活令牌的语义不变，仍可多留已终态记录，给迟到的物理观察用。
+- **防泄漏**（3a 要求）：进行中的调用超过 `open_call_stale_seconds`（默认 6 小时）没有任何活动就算失联，可以像已结束明细一样被裁。
+  - 裁掉的数量累计在 `ModelCallLedger.stale_open_calls_trimmed()`，同时打一条只含计数的警告。
+  - 6 小时远超任何供应商的首字或静默超时，正常长调用不会被误判；永远收不到终态的明细不会无限堆积。
+- **改动的既有用例**：`test_model_call_ledger_partitions.py` 里 3 个用例原本断言“没带令牌的在途调用会被裁掉”，这正是这次要改掉的规则。
+  改为先让调用正常结束，再释放令牌或灌入新调用，原意（令牌释放后恢复普通裁剪、被裁记录不被重建）保持不变。
+- **结构**：判定和计数放在模块级函数 `_is_live_open_call` / `_live_open_scope_keys` / `_count_stale_open_trimmed`，
+  `ModelCallLedger` 类回到 350 行硬线以内，告警身份与底版相同。
+
 ## 工具操作持有者的同主机判定统一到 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`，已实现，待集成）
 
 - **背景**：网关 host_id 修复后，`tool_operations` 和 `managed_operation_store` 里还有三处直接拿 `socket.gethostname()` 判同主机：

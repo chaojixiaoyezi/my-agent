@@ -319,6 +319,8 @@ def test_retention_context_exception_and_duplicate_release_restore_original_limi
         with token:
             _other_scoped_calls(ledger)
             assert len(ledger.records()) == 2
+            # worker 先把调用记成失败再离开保留区间，才恢复普通裁剪（在途调用本身不裁，见 test_model_call_ledger_open_calls）。
+            _event(ledger, "failed")
             raise LookupError("worker failed")
     token.release()
     token.release()
@@ -351,6 +353,7 @@ def test_retain_unknown_call_fails_without_recreating_trimmed_records():
     with pytest.raises(KeyError, match="unknown model call id"):
         ledger.retain_call("missing")
     _start(ledger)
+    _event(ledger, "finished")  # 已结束的明细才会被裁；在途调用不裁
     _other_scoped_calls(ledger)
     with pytest.raises(KeyError, match="unknown model call id"):
         ledger.retain_call("call")
@@ -368,6 +371,7 @@ def test_started_retained_holds_caller_record_before_any_worker_exists():
     assert record.status == "started" and ledger._retained_calls == {"call": {token}}
     _other_scoped_calls(ledger)
     assert "call" in {item.call_id for item in ledger.records()}
+    _event(ledger, "finished")  # 调用结束后释放令牌，才恢复普通裁剪
     token.release()
     assert ledger._retained_calls == {} and len(ledger.records()) == 1
 

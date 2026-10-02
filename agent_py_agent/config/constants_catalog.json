@@ -1516,6 +1516,14 @@
       "description": "模型预算用量占比的告警线（0.8=80%）；达到后记告警但不断调用（无物理单位）。"
     },
     {
+      "name": "_OPEN_CALL_STALE_SECONDS",
+      "file": "agent_py_agent/agent/contracts/model_call_ledger.py",
+      "value": 21600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "只防“永远收不到结束或失败”的在途明细无限堆积：失联明细和已结束明细一样可以被裁，并计入 stale_open_calls_trimmed。"
+    },
+    {
       "name": "_REVIEW_MAX_LOG_BYTES",
       "file": "agent_py_agent/agent/contracts/real_run_review.py",
       "value": 1000000,

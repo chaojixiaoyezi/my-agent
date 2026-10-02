@@ -968,6 +968,7 @@ agent_py_agent/
 |   |-- test_decision_experiment_gateway_turn.py # 真实 Gateway 回合：本地 HTTP 实验、真实工具账实际用量与链上晋升
 |   |-- test_model_call_input_budget.py # 原账带标签上界预留、单次发送许可、拒绝/绕过结算与代次/LRU 隔离
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
+|   |-- test_model_call_ledger_open_calls.py # 账本裁剪不丢进行中的调用：长压缩/主回合遇另一会话 129 次调用不 KeyError、请求计数完整、停机结清可见、6 小时无活动算失联可裁
 |   |-- test_decision_usage_metrics.py  # 决策用途增量、迟到补账、未知输入与原 TUI 一行展示
 |   |-- test_decision_protocol.py       # 决策快照、复杂度上限、逐题失败与用量未知合同
 |   |-- test_typesafe_decision.py       # 原生请求、绝对期限及本地 HTTP 组合验收
