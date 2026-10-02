@@ -74,6 +74,13 @@ def test_result_category_separates_selection_non_selection_and_unrecorded():
     # 多题混答：只要有一题真的选了候选，就是选中，不因别的题说不需要而误报非选择。
     assert decision_result_category(SimpleNamespace(mode="observe", status="success", reason="",
                                                     response=_response("not_needed", "candidate_1"))) == "selected"
+    # 多题全非选择：去重后按名排序、以 + 连接；重复与题序不产生新键（S1）。
+    assert decision_result_category(SimpleNamespace(mode="observe", status="success", reason="",
+                                                    response=_response("not_needed", "not_needed", "not_needed"))) == "non_selection:not_needed"
+    assert decision_result_category(SimpleNamespace(mode="observe", status="success", reason="",
+                                                    response=_response("not_needed", "no_match"))) == "non_selection:no_match+not_needed"
+    assert decision_result_category(SimpleNamespace(mode="observe", status="success", reason="",
+                                                    response=_response("no_match", "not_needed"))) == "non_selection:no_match+not_needed"
     # 逐题错误那题不算选择，也不算非选择（这里唯一一题就错了，于是没有可判定结果）。
     errored = SimpleNamespace(mode="observe", status="success", reason="",
                               response=_response("candidate_1", errors=("bad",)))
@@ -131,7 +138,12 @@ def test_result_category_records_host_drops_with_the_existing_reason_code(tmp_pa
     record_decision_dropped(agent, _stage(), outcome, "")
     record_decision_dropped(agent, _stage(), SimpleNamespace(mode="observe", status="success", reason="",
                                                              may_apply=False, response=outcome.response), "deadline")
+    # M1：模型没选（not_needed）时即使要丢弃也不追加 dropped 行——主行已是 non_selection:…，
+    # 不能把“没选”报成“选了被丢”；真选中 + 期限过则仍然恰好一行 dropped（被丢弃是选中的子集）。
+    record_decision_dropped(agent, _stage(), _bound_outcome(value="not_needed"), "adoption_deadline")
     assert len(rows()) == 1
+    record_decision_dropped(agent, _stage(), _bound_outcome(value="candidate_9"), "adoption_deadline")
+    assert len(rows()) == 2 and rows()[-1]["result_category"] == "dropped:adoption_deadline"
     # 写盘失败只记日志：调用返回 None、不抛异常，主链路结果不变。
     def broken(*_args, **_kwargs):
         raise OSError("disk full")

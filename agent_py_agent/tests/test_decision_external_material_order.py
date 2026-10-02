@@ -391,3 +391,30 @@ def test_gate_failure_records_exactly_one_dropped_row(prepared, monkeypatch):
     row = rows[0]
     assert (row["record_kind"], row["result_category"]) == ("dropped", "dropped:policy_changed")
     assert row["point"] == module._POINT
+
+
+def test_not_needed_with_expired_adoption_deadline_records_no_dropped_row(prepared, monkeypatch):
+    # be 探针场景：三页都答 not_needed（模型没选）+ 采用期限已过。_material_stale 在解析选择之前返回
+    # adoption_deadline，但 record_decision_dropped 只给真选中登记（M1），所以日志里不应出现 dropped 行。
+    host, record, archive = prepared
+    outcomes = host.root / "decision-outcomes.jsonl"
+    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=outcomes)
+    install(monkeypatch, choices=("not_needed", "not_needed", "not_needed"),
+            mutate=lambda outcome: setattr(outcome, "deadline", 0))
+    assert module.external_material_order_hint(host, record, archive) == ""
+    assert not outcomes.exists() or outcomes.read_text(encoding="utf-8").strip() == ""
+
+
+def test_selected_with_expired_adoption_deadline_records_exactly_one_dropped_row(prepared, monkeypatch):
+    # 对照：响应真的选中了候选（有排序值）+ 采用期限已过，_material_stale 路径仍恰好登记一行 dropped。
+    host, record, archive = prepared
+    outcomes = host.root / "decision-outcomes.jsonl"
+    host.home_paths = SimpleNamespace(owner_decision_outcomes_jsonl=outcomes)
+    install(monkeypatch, choices=("later", "first", "first"),
+            mutate=lambda outcome: setattr(outcome, "deadline", 0))
+    assert module.external_material_order_hint(host, record, archive) == ""
+    rows = [json.loads(line) for line in outcomes.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["record_kind"], row["result_category"]) == ("dropped", "dropped:adoption_deadline")
+    assert row["point"] == module._POINT

@@ -240,6 +240,29 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   2. 审计调 `decision_point_diagnostics` 不传类别 → `test_low_frequency_point_categories_visible_in_audit_and_menu_same_window` 红（审计侧 `result_categories` 为空 `{}`）。
 - **集成补漏（3a）**：同一用例追加 `scope=current_thread`：`points.result_categories_by_point` 为空（本会话无行），点位诊断的类别仍与 owner 范围一致；变异“current_thread 也直接用会话过滤后的类别”被拦下（1 failed）后还原。`test_decision_transport_timing.py` recent 行形状补两个类别字段。102 个相关测试文件 + guards9：3086 passed 后补这两处，相关两文件 39 passed、审计 23 passed。
 
+## 决策账结果类别：be 独立审查返工（2026-10-02，分支 `worker/ds1-decision-outcome-category-fix2`，基于集成分支 `94d3bf12b`）
+
+- **改动**（1 必须 + 4 建议，其余要点不动）：
+  - M1：`record_decision_dropped` 只给“响应真的选中了候选”（`decision_result_category == "selected"`）登记——模型没选（非选择）即使来源/期限复核在解析选择之前失败也不追加 dropped 行；
+    be 探针（external_material_order 三页 not_needed + 采用期限过）不再多出 `('dropped', 'dropped:adoption_deadline')`；强制门 `decision_outcome_is_current` 的登记同走此函数一并生效。
+  - S1：`_answer_category` 多题非选择去重后按名排序、以 `+` 连接（如 `non_selection:no_match+not_needed`），题序/重复不产生新键。
+  - S3：原因码说法统一为“新增 4 个丢弃原因码”（sources_changed/runtime_changed/adoption_deadline/review_failed，identity_changed 是宿主既有码），
+    DESIGN_LEDGER 列码表（码、含义、哪些点位用）；`decision_outcome_is_current`/`_adoption_reason` 注释按 `_stale` 实际返回值写实（identity_changed/disabled/policy_changed/实验码；
+    settings_changed 是 model_selection 的选择原因、host_shutdown 是关闭取消路径的码，均不来自 `_stale`）；`_adoption_reason` 的 `"identity_changed"` 字面量改用 `DROP_IDENTITY_CHANGED` 常量。
+  - S2/S4（文档）：selected ≠ 已采用（采用与否看 finding/status；recall、external_material_order 要求全部题都是排序值才采用）；同一次调用类别统计记两行（主行 selected + 补充行 dropped），被丢弃是选中的子集。
+- **新增/改写用例**（`agent_py_agent/tests/`）：
+  - `test_decision_outcome_log.py`：`test_result_category_separates_selection_non_selection_and_unrecorded` 补多题非选择断言（三题 not_needed → `non_selection:not_needed`；no_match+not_needed 两种题序 → 同一键 `non_selection:no_match+not_needed`）；
+    `test_result_category_records_host_drops_with_the_existing_reason_code` 补 M1 断言（not_needed 不登记；candidate_9 选中仍登记一行）。
+  - `test_decision_external_material_order.py`：新增 `test_not_needed_with_expired_adoption_deadline_records_no_dropped_row`（be 探针场景：三页 not_needed + 期限过 → 日志无 dropped 行）、
+    `test_selected_with_expired_adoption_deadline_records_exactly_one_dropped_row`（对照：真选中 + 期限过 → 恰好一行 `dropped:adoption_deadline`）。
+- **验证命令与结果**（Python：`~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，工作目录根，`--basetemp=/private/tmp/claude-501/m-ds1-fix2`）：
+  - 上一轮 22 个相关测试文件 + `test_decision_transport_timing.py` → **915 passed**；
+  - guards9 → **170 passed**；`check_import_boundaries` findings=0；ruff All checks passed；`check_doc_sync` DOC_SYNC_PASS；
+    `check_code_size --mode strict` hard=0 blocked=False（跑后还原 CODE_SIZE_REPORT.md）；`git diff --check` 干净；`check_clean_package` OK；`size_diff.sh` 新增告警 0。
+- **变异验证 2 个，全部被拦下并还原（先备份再拷回，sha256 与备份一致）**：
+  1. 去掉 M1 守卫（非选择也登记） → `test_result_category_records_host_drops_with_the_existing_reason_code`、`test_not_needed_with_expired_adoption_deadline_records_no_dropped_row` 红；
+  2. S1 改回空格连接（`" ".join`） → `test_result_category_separates_selection_non_selection_and_unrecorded` 红（多题非选择键变成 `non_selection:not_needed no_match`）。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：

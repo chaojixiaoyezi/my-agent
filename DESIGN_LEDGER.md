@@ -203,18 +203,28 @@
 - **取值族**（封闭但可扩展，只记类别与结构化取值/原因码，不记候选文字与正文）：
   - `selected`：至少有一题给了可判定的选择。
   - `non_selection:<取值>`：Jev 明确说不需要或给不了；取值原样透传（各点位词表不同，收敛判据见下）。
-  - `dropped:<原因码>`：宿主把建议丢了，原因码原样用既有宿主码，不新造同义码。
+  - `dropped:<原因码>`：宿主把建议丢了，原因码见下方码表（本批新增 4 个消费者采用前复核码 + 宿主既有 `identity_changed`），不新造同义码。
   - `no_selection_recorded`：成功但没有可判定的选择（无响应、逐题错误、空答案、旧替身）；`unrecorded` 只在统计时给“写该行时还没有这个字段”的旧记录，不写回日志。
 - **唯一写入处**：`conversation/decision_outcome_log` 的投影 `decision_outcome_row` 加 `result_category`，由纯函数 `decision_result_category(outcome)` 从结构化事实推导，
   判定优先级：带 `dropped_reason` → 逐题答案里命中非选择取值 → 至少一题有可判定选择 → 兜底。不做点位专项分支，不解析模型正文。
 - **宿主丢弃怎么落账**：原结果行在 `decide()` 落盘后不可改写，所以消费者在丢掉建议时调 `record_decision_dropped(agent, stage, outcome, reason)`
-  另追加一行补充记录（`record_kind="dropped"`，复用同点位/身份 + `result_category=dropped:<原因码>`）。只在“确有可采用的建议”（`may_apply` 且带响应）时记，
-  免得把“本来就没有建议”误记成丢弃；原因码为空不写；写失败只记日志，不影响采用逻辑。审计按点位与时间把两行配对，就能分辨“选了被丢”。
+  另追加一行补充记录（`record_kind="dropped"`，复用同点位/身份 + `result_category=dropped:<原因码>`）。只在“确有可采用的建议”（`may_apply` 且带响应）、
+  且响应真的选中了候选（`decision_result_category == "selected"`）时记——被丢弃是“选中”的子集，模型没选（`non_selection`）即使来源/期限复核
+  不通过也不追加 dropped 行，避免把“没选”报成“选了被丢”；原因码为空不写；写失败只记日志，不影响采用逻辑。审计按点位与时间把两行配对，就能分辨“选了被丢”。
 - **共用复核门是唯一强制接入点**：`decision_service.decision_outcome_is_current` 拆成薄门 + `_adoption_review(...)`，后者返回第一个不通过原因码
-  （`identity_changed` / `adoption_deadline` / `_stale` 的既有码如 `disabled`、`policy_changed`、`settings_changed`、`host_shutdown` / 异常兜底 `review_failed`），
-  门内在返回 False 前调 `record_decision_dropped`。另外 10 个消费者点位（delivery_quality、action_candidate、external_material_order、recall、pre_recall、
+  （新增码 `adoption_deadline` / `review_failed`，以及 `_stale` 的既有码 `identity_changed` / `disabled` / `policy_changed`，实验路径另有 `experiment_*` / `connection_changed`；
+  `settings_changed` 是 model_selection 的选择原因、`host_shutdown` 是关闭取消路径的码，均不来自 `_stale`），门内在返回 False 前调 `record_decision_dropped`
+  （自带“选中才登记”守卫）。另外 10 个消费者点位（delivery_quality、action_candidate、external_material_order、recall、pre_recall、
   planning、skill_tool、curator、curator_relation、skill_proposal_review、subagent_model）的既有丢弃出口按变化性质登记
-  `sources_changed` / `runtime_changed` / `adoption_deadline` 三个补登记码（模块级常量，消费者与复核门共用，避免字符串漂移）。
+  **本批新增的 4 个丢弃原因码**（模块级常量，消费者与复核门共用，避免字符串漂移；与 decide 内部的 stale/deadline 不同义）：
+
+  | 原因码 | 含义 | 哪些点位用 |
+  | --- | --- | --- |
+  | `sources_changed` | 采用前复核发现候选来源/材料/上下文版本变化 | planning、decision_subagent、action_candidate、delivery_quality、external_material_order、skill_proposal_review、curator、curator_relation、recall、pre_recall、decision_recommendation |
+  | `runtime_changed` | 采用前复核发现运行环境变化（工具集/后端/策略/主模型身份/任务属性） | decision_recommendation、recall、pre_recall |
+  | `adoption_deadline` | 采用期限已过 | 全部消费点 + 复核门 `_adoption_reason` |
+  | `review_failed` | 采用前复核自身抛异常（兜底） | 复核门 `decision_outcome_is_current` |
+  | `identity_changed`（宿主既有码，`_stale` 也在用） | 身份不再匹配 | 复核门 `_adoption_reason` |
 - **汇总与展示**：`decision_outcome_summary` 加 `result_categories`（缺字段旧行归 `unrecorded`，按次数降序再按名排序）；丢弃补充行不进 `points`/`not_sent`（不是一次独立调用），
   只进类别统计与 recent。`result_category_label` 是唯一翻译函数，两个展示面共用：`audit_records` 的 recent 行加 `result_category_label`（保留结构化 `result_category` 供机器读），
   TUI 决策菜单 `_diagnosis` 行尾显示次数最多的一项（“最近结果：…”），旧记录显示“未记录”。
@@ -233,6 +243,15 @@
     `decision_planning._drop` 挪到常量之后；`decision_outcome_log` 的 `# LLM:` 续行改 `#   `。
   - 补测试：强制门不通过时日志恰好一行 dropped（原因码是门给的码）；低频点位早于最近 20 行但在 24 小时窗口内，TUI 与审计诊断都能看到且一致。
   - 变异验证 2 个（本轮）：去掉“不重复登记”、审计诊断不传类别，均被新测试拦下并还原。
+- **第二次返工（2026-10-02，be 独立只读审查后追加提交，分支 `worker/ds1-decision-outcome-category-fix2`）**：
+  - M1（必须）：`record_decision_dropped` 只给“响应真的选中了候选”登记（`decision_result_category == "selected"`）——模型没选（非选择）即使来源/期限复核在解析选择之前失败也不追加 dropped 行，
+    be 探针（external_material_order 三页 not_needed + 采用期限过）不再多出 `('dropped', 'dropped:adoption_deadline')`；强制门 `decision_outcome_is_current` 的登记同走此函数一并生效。
+  - S1：`_answer_category` 多题非选择取值去重后按名排序、以 `+` 连接（如 `non_selection:no_match+not_needed`），题数/组合/顺序变化不再产生新键，逐点计数不被拆散。
+  - S2（语义）：`selected` 只表示“至少一题选了真实选项”，不等于宿主会采用；采用与否看 finding/status（recall、external_material_order 要求全部题都是排序值才采用，部分非排序时按规则保留原顺序）。
+  - S3（说法统一）：`sources_changed`/`runtime_changed`/`adoption_deadline`/`review_failed` 是**新增的 4 个丢弃原因码**（消费者采用前复核的新事实，与 decide 内部 stale/deadline 不同义），
+    `identity_changed` 是宿主既有码；`decision_outcome_is_current`/`_adoption_reason` 注释按 `_stale` 实际返回值写实（`identity_changed`/`disabled`/`policy_changed`，实验路径另有 `experiment_*`/`connection_changed`），
+    `settings_changed` 是 model_selection 的选择原因、`host_shutdown` 是关闭取消路径的码，均不来自 `_stale`；`_adoption_reason` 的 `"identity_changed"` 字面量改用 `DROP_IDENTITY_CHANGED` 常量。
+  - S4（统计语义）：同一次调用在类别统计里记两行（主行 selected + 补充行 dropped），“选中了 N 次”包含后来被丢弃的；被丢弃是选中的子集（M1 修好后成立），补充行仍不进 `points`/`not_sent`/`model_versions`。
 - **集成补漏（3a，step17b）**：审计 `scope=current_thread` 时 `points` 按会话过滤，但点位诊断按 owner 统计（`diagnostics_scope=owner`）；类别计数改由 `audit_records_tool._owner_point_categories` 另读一份 owner 范围，与检查/调用次数同口径。`test_decision_transport_timing` 的 recent 行形状断言补上 `result_category`、`result_category_label` 两个展示字段。
 
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）

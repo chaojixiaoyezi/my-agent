@@ -31,7 +31,10 @@ RESULT_UNRECORDED = "unrecorded"
 NO_SELECTION_RECORDED = "no_selection_recorded"
 # 决策模型明确说“不要做选择”的取值集合：这些是正常结论，不是失败，也不是 provider 报错。
 _NON_SELECTION_VALUES = frozenset({"not_needed", "no_match", "abstain", "need_data"})
-# 宿主丢弃建议时用的既有原因码：来源变化、运行环境变化、采用期限已过、身份不再匹配。消费者直接引用，不新造同义码。
+# 本批新增的 4 个丢弃原因码，表达“消费者采用前复核”这个新事实，与 decide 内部的 stale/deadline 码不同义：
+# 来源变化（sources_changed）、运行环境变化（runtime_changed）、采用期限已过（adoption_deadline）、
+# 复核自身异常（review_failed）。DROP_IDENTITY_CHANGED 是宿主既有身份码（_stale 也在用），一并定义在这里，
+# 消费者与复核门共用常量，避免字符串漂移、不新造同义码。
 DROP_SOURCES_CHANGED = "sources_changed"
 DROP_RUNTIME_CHANGED = "runtime_changed"
 DROP_ADOPTION_DEADLINE = "adoption_deadline"
@@ -99,6 +102,8 @@ def decision_result_category(outcome: object) -> str:
 
 # LLM: 只看答案的结构化取值，与逐题错误码：某题带 error_code 说明那题没得到有效回答，不计入选择；
 #   只要还有一题的取值不是宿主已知的非选择取值，就是选中了候选（返回 None 表示“选中了”）。
+#   多题非选择取值去重后按名排序、以 + 连接（如 no_match+not_needed）：题数、组合、顺序变化不产生新键，
+#   逐点计数才不会被同一组答案拆散；单一取值就是它本身。
 # 函数用途: 从响应里取出作答类别；返回 None 表示选中，返回空串表示无法归类。
 def _answer_category(response: object) -> str | None:
     values = [str(getattr(answer, "value", "") or "").strip().lower()
@@ -106,15 +111,20 @@ def _answer_category(response: object) -> str | None:
               if not str(getattr(answer, "error_code", "") or "")]
     if any(value and value not in _NON_SELECTION_VALUES for value in values):
         return None
-    return " ".join(value for value in values if value in _NON_SELECTION_VALUES).strip()
+    picks = sorted({value for value in values if value in _NON_SELECTION_VALUES})
+    return "+".join(picks) if picks else ""
 
 
-# LLM: 写补充行的前提是“本来就有一条可采用的建议”：非 apply、没有响应或没给原因码时不记，避免把正常没选当丢弃。
-#   点位取响应自身的绑定（stage 上没有点位）；写入复用同一条投影（多一个 record_kind 标识别它是补充行），
-#   写失败只记日志，绝不影响主链路。
+# LLM: 写补充行的前提是“本来就有一条可采用的建议”：非 apply、没有响应或没给原因码时不记；
+#   且只有响应真的选中了候选（decision_result_category == selected）才登记——模型没选（非选择/无可判定）时
+#   主行已是 non_selection:…，再追加 dropped 行就会把“没选”报成“选了被丢”。多个消费点把来源/期限复核放在
+#   解析选择之前，守卫集中在这里一处生效，不用逐个点位调顺序。点位取响应自身的绑定（stage 上没有点位）；
+#   写入复用同一条投影（多一个 record_kind 标识别它是补充行），写失败只记日志，绝不影响主链路。
 # 函数用途: 给被宿主丢弃的建议追加一行 dropped 结果（写文件副作用）。
 def record_decision_dropped(agent: object, stage: object, outcome: object, reason: str) -> None:
     if not reason or outcome is None or not getattr(outcome, "may_apply", False) or getattr(outcome, "response", None) is None:
+        return
+    if decision_result_category(outcome) != "selected":
         return
     marked = SimpleNamespace(mode=getattr(outcome, "mode", ""), status=getattr(outcome, "status", ""), reason="",
                              response=outcome.response, dropped_reason=str(reason))

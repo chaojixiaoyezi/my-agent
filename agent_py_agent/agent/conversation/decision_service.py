@@ -47,6 +47,7 @@ from . import decision_point_limits as decision_limits
 from .decision_observe_nonblocking import NonblockingObserve, enqueue_nonblocking_observe
 from .decision_outcome_log import (
     DROP_ADOPTION_DEADLINE,
+    DROP_IDENTITY_CHANGED,
     DROP_REVIEW_FAILED,
     append_decision_outcome,
     decision_outcome_row,
@@ -664,9 +665,11 @@ def _failure_key(key: tuple[str, str, str], point: str, exc: Exception) -> tuple
 
 
 # LLM: 消费者在刷新候选后共用此只读门；沿原非阻塞设置/身份复核，不联网、不重置期限，用户取消不能吞成可选失败。
-#   复核不通过且这条建议本来可用（apply 且有响应）时，按结构化原因码追加一行丢弃记录（record_decision_dropped），
-#   让审计能分辨“选了但被宿主丢掉”；原因码是既有码（identity_changed/disabled/policy_changed/settings_changed/
-#   host_shutdown）或本轮登记的码（adoption_deadline 采用期限已过、review_failed 复核自身异常）。
+#   复核不通过且这条建议真的选中了候选（apply、带响应）时追加一行丢弃记录——record_decision_dropped 自带
+#   “结果类别是 selected 才登记”的守卫，没选（non_selection）不会在这里留下 dropped 行，让审计能分辨“选了被丢”；
+#   原因码是 _adoption_reason 给的新增丢弃码（adoption_deadline 采用期限已过、review_failed 复核自身异常）或
+#   _stale 返回的宿主码（identity_changed/disabled/policy_changed，实验路径另有实验码）。
+#   settings_changed 是 model_selection 的选择原因、host_shutdown 是关闭取消路径的码，都不出自这里，不写进注释混淆。
 #   没有可采用的建议（非 apply、无响应、无连接版本）不记录，也不改变“不采用”的返回值。
 # 函数用途: 在真正采用建议前检查关闭、配置更改和期限；失败时消费者保留当前合法基础方案，并留下丢弃原因码。
 def decision_outcome_is_current(agent: object, params: object, stage: DecisionStage, outcome: DecisionOutcome) -> bool:
@@ -685,15 +688,16 @@ def decision_outcome_is_current(agent: object, params: object, stage: DecisionSt
     return False
 
 
-# LLM: 采用前复核的具体判定，按判定顺序返回第一个不通过的原因码；全部通过返回空串。身份与 _stale 的码是宿主既有
-#   结构化码，原样透传（identity_changed/disabled/policy_changed/settings_changed/host_shutdown/实验码）；
+# LLM: 采用前复核的具体判定，按判定顺序返回第一个不通过的原因码；全部通过返回空串。身份变化与 _stale 的码是宿主
+#   既有结构化码，原样透传（identity_changed/disabled/policy_changed，实验路径另有 experiment_* / connection_changed）；
+#   settings_changed 是 model_selection 的选择原因、host_shutdown 是关闭取消路径的码，都不出自这里。
 #   期限统一登记为 adoption_deadline（发送阶段的 late_response/late_validation 是另一回事，不混用）。
 # 函数用途: 复核一条建议是否仍可被采用；返回空串表示可采用，否则给出结构化原因码。
 def _adoption_reason(agent: object, run_params: object, stage: DecisionStage, outcome: DecisionOutcome) -> str:
     binding = outcome.response.binding
     identity = (binding.owner_ref, binding.thread_id, binding.run_id, binding.task_id, binding.operation_id)
     if identity != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id, stage.operation_id):
-        return "identity_changed"
+        return DROP_IDENTITY_CHANGED
     if time.monotonic() >= _adoption_deadline(stage, outcome):
         return DROP_ADOPTION_DEADLINE
     stale = _stale(agent, run_params, stage, binding.point, binding.policy_revision, outcome.connection_revision)
