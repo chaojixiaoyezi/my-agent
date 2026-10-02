@@ -20,8 +20,6 @@
   - 诊断里看到的 holder_host 从主机名变成摘要，可读性下降，换来主机名变化后判断不出错。
 - **没动的**：`curator_state` 里记的 `host` 和 `runtime_db/repository` 的 instance_id 只做展示，不参与同主机判定，仍用主机名。
 
-## 主机名变化后 SIGTERM 仍能停网关：主机身份进程内缓存 + macOS 硬件 UUID（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，已实现，待集成）
-
 ## step17a 文档状态对账（2026-10-02，分支 `worker/ds2-docs-reconcile-step17a`，本轮改动，未随 step17a 上线）
 
 - **背景**：step17a 已上线（main `de222698b`，10-02 03:43 部署到本机生产），但 `DESIGN_LEDGER.md`、`STATUS.md`、
@@ -81,8 +79,6 @@
     结果 provider 为纯空白、kind 为 main 的身份会被认作管理员；/settings 一直不认。收拢后两边都不认，方向是变严格。
   - user_config 原本就去空白，没有变化。
 
-## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，已实现，待集成）
-
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
 
 - **来源**：sol2 只读审查第 1 条。“用户回合在场”的查询只短暂持有登记表锁，之后的 `record_continuation_fuse` 落账不受保护。
@@ -141,8 +137,6 @@
   - skill_proposal_review：“密钥泄露立刻轮换”给了 normal。
 - **点位默认值一律不变**（全部 off）。哪个点位改成默认打开，由集成方按成绩、阈值和真实收益决定；`test_decision_quality_bench.py` 仍强制“默认打开必须有当前有效且达标的成绩”。
 - **验证**：见 TESTS.md 同名节。
-
-## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，已实现，待集成）
 
 ## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
 
