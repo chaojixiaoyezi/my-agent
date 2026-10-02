@@ -16,6 +16,8 @@ import pytest
 from agent_py_agent.agent import core
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.gateway_parts import settings_control_service as settings
+from agent_py_agent.agent.retrieval import embedding as embedding_module
+from agent_py_agent.agent.settings import model_profiles as model_profiles_module
 from agent_py_agent.agent.settings.config import load_config
 from agent_py_agent.agent.settings.model_profiles import (
     execute_model_profile_operation,
@@ -131,3 +133,39 @@ def test_settings_show_describes_profile_without_secrets(host, monkeypatch):
     assert "fake-emb-credential" not in show.message  # 展示不含凭据
     bad = _command(host, monkeypatch, f"/settings show {KEY}")
     assert "不可用" not in bad.message
+
+
+def test_semantic_settings_are_global_for_owner_scoped_agents(host):
+    """S4 查清：embedding_model_profile 与 memory_semantic_recall 没有 owner 级覆盖——owner 池建作用域 agent 时
+    只换 owner 三字段，其余原样继承 Gateway 配置。所以模型自配（manage_models 选向量模型）只对 local/main 开放。"""
+    from agent_py_agent.agent.owner_scoped_pool import _config_with_owner
+
+    host.config.embedding_model_profile, host.config.memory_semantic_recall = "admin-embo", True
+    owner = SimpleNamespace(provider="feishu", owner_kind="user", owner_id="ou_member")
+    scoped = _config_with_owner(host.config, owner)
+
+    assert (scoped.embedding_model_profile, scoped.memory_semantic_recall) == ("admin-embo", True)
+    assert scoped.my_agent_owner_id == "ou_member"
+
+
+def test_ordinary_owner_cannot_resolve_the_admin_profile_and_never_reads_its_key(host, monkeypatch):
+    """S4（用户 10-02 拍板）：全局档案编号指向管理员目录里的嵌入档案时，普通 owner 自己的目录里没有它：
+    语义通道关闭、只走关键词，并带结构化诊断；全程只读普通 owner 自己的目录，不读管理员目录，也不建嵌入客户端，
+    所以绝不会拿管理员的密钥去嵌普通用户的记忆。"""
+    admin_profile, _listing = _add(host)  # 管理员（local/main）目录里的嵌入档案，带密钥
+    member_home = SimpleNamespace(root=host.home_paths.root, config_dir=host.home_paths.config_dir,
+                                  owner_provider="feishu", owner_kind="user", owner_id="ou_member")
+    member = _agent(SimpleNamespace(home_paths=member_home, config=host.config), admin_profile)
+    reads, clients = [], []
+    real_read = model_profiles_module.read_model_profiles
+    monkeypatch.setattr(model_profiles_module, "read_model_profiles", lambda path: reads.append(Path(path)) or real_read(path))
+    monkeypatch.setattr(embedding_module, "MiniMaxEmbedder", lambda **kwargs: clients.append(kwargs))
+    monkeypatch.setattr(embedding_module, "OpenAICompatibleEmbedder", lambda **kwargs: clients.append(kwargs))
+    status: dict[str, str] = {}
+
+    assert core._memory_semantic_channel(member, status) == (None, None)
+
+    assert status == {"state": "degraded", "error_code": "MEMORY_EMBEDDING_PROFILE_UNAVAILABLE",
+                      "profile_id": admin_profile, "profile_reason": "profile_not_found"}
+    assert reads == [model_profiles_path(member_home)], "只读普通 owner 自己的目录"
+    assert model_profiles_path(host.home_paths) not in reads and clients == [], "不碰管理员目录，不建客户端"
