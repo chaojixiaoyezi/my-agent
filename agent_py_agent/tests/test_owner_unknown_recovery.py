@@ -17,6 +17,7 @@ from agent_py_agent.agent.conversation.control_commands import parse_conversatio
 from agent_py_agent.agent.gateway_parts import control_service
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.gateway_parts.turn_recovery_control import execute_turn_recovery_control
+from agent_py_agent.agent.runtime_db import owner_recovery
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
 _ADMIN = SimpleNamespace(owner_provider="local", owner_kind="main", owner_id="local/main")
@@ -150,6 +151,29 @@ def test_owner_recovery_requires_complete_trusted_local_admin_identity(owner_wor
     assert _events(owner_world.repo, "attempt_recovered") == []
 
 
+def test_targeted_recovery_without_thread_cannot_reach_owner_history(owner_world):
+    with owner_world.repo.transaction() as conn:
+        conn.execute(
+            "UPDATE task_runs SET closed_at=0 WHERE task_run_id=?",
+            (owner_world.root["task_run_id"],),
+        )
+    denied_owner = SimpleNamespace(
+        subagents=owner_world.owner.subagents,
+        home_paths=_NON_ADMIN,
+        conversation_store=owner_world.owner.conversation_store,
+    )
+    command = parse_conversation_control("/recover recorded owner-root")
+    assert command is not None and command.valid is True
+
+    denied = execute_turn_recovery_control(denied_owner, None, command)
+
+    assert denied.ok is False and denied.error_code == "RUN_RECOVERY_REJECTED"
+    assert getattr(denied, "details", {}).get("reason") == "target_out_of_scope"
+    assert _status(owner_world.repo, owner_world.root) == ("unknown", "unknown")
+    assert _status(owner_world.repo, owner_world.child) == ("unknown", "unknown")
+    assert _events(owner_world.repo, "attempt_recovered") == []
+
+
 def test_owner_confirmation_code_expires_when_target_set_changes(owner_world):
     _preview_result, code = _preview(owner_world)
     added = owner_world.repo.record_run_creation(
@@ -188,6 +212,34 @@ def test_owner_confirm_uses_shared_cas_and_records_structured_events(owner_world
     assert all(event["recovery_source"] == "owner_history" for event in events)
     assert all(event["owner_id"] == "local/main" for event in events)
     assert all(event["owner_recovery_confirmation_code"] == code for event in events)
+
+
+def test_owner_partial_success_reports_committed_work_as_success(owner_world, monkeypatch):
+    _preview_result, code = _preview(owner_world, "recorded")
+    original = owner_recovery._recover_unknown_attempt_conn
+    call_count = 0
+
+    def recover_first_only(repository, conn, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            return {"recovered": False, "reason": "not_unknown"}
+        return original(repository, conn, **kwargs)
+
+    monkeypatch.setattr(owner_recovery, "_recover_unknown_attempt_conn", recover_first_only)
+
+    applied = _run(owner_world, f"/recover owner recorded --confirm {code}")
+
+    assert applied.ok is True
+    assert applied.message == '已处理 1 条，跳过 1 条（原因码计数：{"not_unknown": 1}）。'
+    assert getattr(applied, "details", {}) == {
+        "scope": "owner", "target_count": 2, "success_count": 1, "skipped_count": 1,
+        "reason_counts": {"not_unknown": 1}, "confirmation_code": code, "idempotent": False,
+    }
+    assert _status(owner_world.repo, owner_world.root) == ("created", "recovered")
+    assert _status(owner_world.repo, owner_world.child) == ("unknown", "unknown")
+    assert len(_events(owner_world.repo, "attempt_recovered")) == 1
+    assert len(_events(owner_world.repo, "owner_recovery.completed")) == 1
 
 
 def test_owner_confirmation_is_idempotent_and_feishu_uses_same_gateway_entry(owner_world, tmp_path, monkeypatch):

@@ -12,6 +12,7 @@
 # 模块用途: 实现会话控制 /recover，查看阻塞本会话的未知执行轮（含本会话子代理留下的），并在用户显式确认处置后解除阻塞。
 from __future__ import annotations
 
+import json
 import time
 
 from ..conversation.control_commands import (
@@ -39,6 +40,7 @@ from ..user_space.owner_access import is_complete_local_admin_owner
 
 _OPERATOR = "conversation-control:/recover"
 _NO_BLOCK = "当前会话没有等待核对的执行，无需恢复。"
+_RECOVERY_CONTINUATION = "下一条消息会接着原任务继续；系统不会自动重做那些未确认的操作。"
 _DISPOSITION_LABELS = {
     "recorded": "已核实生效并记下",
     "confirmed_noop": "已核实没有生效",
@@ -57,6 +59,7 @@ _REFUSAL_LABELS = {
     "target_not_found": "找不到这个编号，请重新输入 /recover 查看。",
     "target_not_unknown": "这个编号的执行轮已不再是结果未知，请重新输入 /recover 查看。",
     "target_out_of_scope": "这个编号不在本线程未关闭的 TaskRun 范围内。",
+    "target_ambiguous": "本线程未关闭的 TaskRun 中有多条记录使用这个编号，无法安全选择目标。",
     "target_set_changed": "owner 历史待恢复目标集合已经变化，请重新预览并使用新的确认码。",
 }
 _NO_OPERATIONS = "没有记录到进行中的工具操作；执行者中途退出，结果无法自动确认。"
@@ -106,7 +109,10 @@ def _execute_targeted_recovery(
         return _refused(result)
     if result.get("recovery_target") != "child_agent_run":
         label = _DISPOSITION_LABELS.get(command.value, command.value)
-        return ConversationControlResult("recover", True, f"已按「{label}」解除执行 {command.target_id} 的阻塞。")
+        return ConversationControlResult(
+            "recover", True,
+            f"已按「{label}」解除执行 {command.target_id} 的阻塞。{_RECOVERY_CONTINUATION}",
+        )
     target = ChildRecoveryTarget(
         agent_run_id=str(result.get("agent_run_id") or ""), run_id=str(result.get("run_id") or ""),
         role=str(result.get("role") or ""), attempt_id=str(result.get("attempt_id") or ""),
@@ -165,7 +171,8 @@ def _preview_owner_recovery(
     )
 
 
-# LLM: 写入口自己在 BEGIN IMMEDIATE 中重读目标并校验确认码；服务层只投影固定统计字段，不能把内部异常或正文带到 IM。
+# LLM: 写入口自己在 BEGIN IMMEDIATE 中重读目标并校验确认码；服务层按 success_count 区分全成、部分成和零成功，
+#   不能因部分目标跳过而把已经提交的恢复说成“没有恢复”，也不能把内部异常或正文带到 IM。
 # 函数用途: 执行已确认的 owner 历史恢复并返回结构化计数回执。
 def _apply_owner_recovery(
     repo: object,
@@ -176,11 +183,20 @@ def _apply_owner_recovery(
         repo, OwnerRecoveryRequest(owner_id, command.value, command.confirmation_code),
     )
     details = _owner_outcome_details(outcome, command.confirmation_code)
-    if not outcome.get("recovered"):
+    success_count = int(details["success_count"])
+    skipped_count = int(details["skipped_count"])
+    if success_count == 0:
         return ConversationControlResult(
             "recover", False, "没有恢复：" + _REFUSAL_LABELS.get(
                 str(outcome.get("reason") or ""), "恢复条件不再成立，请重新预览。",
             ), error_code="RUN_RECOVERY_REJECTED", details=details,
+        )
+    if skipped_count:
+        reason_counts = json.dumps(details["reason_counts"], ensure_ascii=False, sort_keys=True)
+        return ConversationControlResult(
+            "recover", True,
+            f"已处理 {success_count} 条，跳过 {skipped_count} 条（原因码计数：{reason_counts}）。",
+            details=details,
         )
     prefix = "该确认已处理过" if outcome.get("idempotent") else "owner 历史未知执行轮已处理"
     return ConversationControlResult(
@@ -260,8 +276,7 @@ def _execute_main_recovery(
     return ConversationControlResult(
         "recover",
         True,
-        f"已按「{_DISPOSITION_LABELS.get(command.value, command.value)}」解除阻塞。"
-        "下一条消息会接着原任务继续；系统不会自动重做那些未确认的操作。",
+        f"已按「{_DISPOSITION_LABELS.get(command.value, command.value)}」解除阻塞。{_RECOVERY_CONTINUATION}",
     )
 
 

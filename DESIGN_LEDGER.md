@@ -323,11 +323,11 @@
 - **验证**：先红后绿、工厂边界 1024/2047/2048/2049、真实组包/投影的流式和非流式替身、控制服务与参数中心回执、正常大上限及三个独立变异；结果和门禁见 TESTS.md。没有新配置，未做真实供应商验收或 Gateway 操作；早期夹具遗漏的假地址外部传输尝试保留在 TESTS.md。
 - 详细合同见 [智能程度第 10 节](docs/design/REASONING_EFFORT.md#10-anthropic-小输出上限的预算边界2026-10-02)。真实供应商及实际 TUI/IM 客户端未验证，由 3a 集成后复核。
 
-## C8/C9：/recover 按编号处置与管理员 owner 历史恢复入口（2026-10-02，分支 `worker/sol56-c8c9-recover`，基于 `claude/3a-step16z` `b35796a60`，已实现，待集成）
+## C8/C9：/recover 按编号处置与管理员 owner 历史恢复入口（2026-10-02，分支 `worker/sol56-c8c9-recover`，基于 `claude/3a-step16z` `b35796a60`，审查返工 `1e1ed1040`，已实现，已集成，待上线（step17b））
 
 - **C8 指定编号**：`/recover <处置> <编号>` 的编号只接受 `common/opaque_id.py` 规则；写入口在同一个 `BEGIN IMMEDIATE`
   事务里重新定位编号并复核 thread、未关闭 TaskRun、current attempt 仍为 unknown，再复用主链唯一 unknown→recovered CAS。
-  不存在、越界、已非 unknown 分别返回 `target_not_found`、`target_out_of_scope`、`target_not_unknown`，统一沿
+  不存在、越界、范围内重号、已非 unknown 分别返回 `target_not_found`、`target_out_of_scope`、`target_ambiguous`、`target_not_unknown`，统一沿
   `RUN_RECOVERY_REJECTED`。不带编号时旧行为不变：唯一一条才处置，多条只列清单。
 - **C9 owner 历史入口**：仅完整可信的本机 `local/main` 管理员可用 `/recover owner`。只读投影仅取本 owner、
   `tasks.thread_id=''`、current attempt=unknown 的根/子代理编号、角色、开始时间和未确认操作数，不读 title、goal 或会话正文；
@@ -338,7 +338,10 @@
   相同确认重送只读原批次回执，不重复恢复或追加事件。
 - **入口与边界**：TUI 仍只把命令原文交给 Gateway，飞书经同一个 `control_service` 分派；正文自述、actor 或 metadata 不授权。
   只有显式处置写库，不新增自动处置、过期规则、静止规则或 TaskRun 树规则，也不跨 owner。
-- **验证状态**：临时 runtime.db 的三份聚焦测试 25 项通过；五个关键变异均被捕获并还原。真实运行中 Gateway、TUI 和飞书未在本分支启动或验证，待集成后复核。
+- **审查返工**：按编号写入口在事务前拒绝空白 thread，避免新 IM 会话把 `tasks.thread_id=''` 的 owner 历史当成本线程；
+  同范围重号拒绝而不替用户挑；owner 批次按 `success_count` 区分全成、部分成和零成功，部分成功如实返回已提交计数；
+  根代理编号回执与主链共用继续提示常量，幂等 LIKE 粗筛已注释其对事件 JSON 默认分隔符的耦合。
+- **验证状态**：临时 runtime.db 的三份聚焦测试 29 项通过；原五个变异与本次 M1/S1/S2 三个返工变异均被捕获并还原。真实运行中 Gateway、TUI 和飞书未在本分支启动或验证，待集成后复核。
 
 ## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
 

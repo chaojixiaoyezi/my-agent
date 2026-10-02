@@ -10,12 +10,12 @@
 ## C8/C9：/recover 指定编号与管理员 owner 历史恢复（2026-10-02，本地实现完成、未集成/部署）
 
 - `/recover <处置> <编号>` 按查看清单中的 opaque ID 定位，写事务内复核 thread、未关 TaskRun 和 current unknown；
-  不存在、越界、已变化均给结构化 reason，不带编号的旧兼容行为保持。
+  空 thread 在事务前拒绝；不存在、越界、同范围重号、已变化均给结构化 reason，不带编号的旧兼容行为保持。
 - `/recover owner` 仅完整可信 local/main 管理员可用；查看只投影空 thread 历史 unknown 的编号、根/子角色、开始时间、
   未确认操作数，不读取任务或会话正文，也不跨 owner。
 - owner 处置先预览再确认；确认码绑定 owner、处置和完整目标集合，集合变化零写入。每条复用共享 CAS 并写 owner 来源事件，
-  批次回执给目标/成功/跳过和原因码；相同确认重送幂等。
-- TUI 原文与飞书共用 Gateway 服务入口有组件测试；临时库三文件 25 项、五个变异被捕获。真实 Gateway/TUI/飞书与生产历史处置未验证，见 [TESTS](../TESTS.md) 和 [ROADMAP](ROADMAP.md)。
+  批次回执给目标/成功/跳过和原因码；部分成功按已提交成功数返回 ok，相同确认重送幂等。
+- TUI 原文与飞书共用 Gateway 服务入口有组件测试；临时库三文件 29 项、首轮五个与返工三个变异被捕获。真实 Gateway/TUI/飞书与生产历史处置未验证，见 [TESTS](../TESTS.md) 和 [ROADMAP](ROADMAP.md)。
 
 ## C7：智能程度八档（2026-10-02，已上线 step17a，main de222698b，2026-10-02）
 

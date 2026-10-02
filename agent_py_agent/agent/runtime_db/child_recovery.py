@@ -89,11 +89,14 @@ def unknown_child_attempts_for_thread(repository: Any, thread_id: str) -> list[C
     ]
 
 
-# LLM: 带编号的写入口必须在同一个 BEGIN IMMEDIATE 事务里定位编号并复核 thread/open TaskRun/current unknown；
-#   三类失败分别返回 target_not_found、target_out_of_scope、target_not_unknown，不能退回“恰好一条”或按正文猜目标。
+# LLM: 带编号的写入口先拒绝空线程（无法证明会话归属，且不得让空串命中 owner 历史），再在同一个 BEGIN IMMEDIATE
+#   事务里定位编号并复核 thread/open TaskRun/current unknown；
+#   找不到、越界、范围内重号、已非 unknown 分别返回稳定原因码，不能退回“恰好一条”或按正文猜目标。
 #   成功仍调用主链唯一 _recover_unknown_attempt_conn，并在事件里保留目标类型、线程和 TaskRun。
 # 函数用途: 按查看结果里的 opaque 编号恢复本线程一条根或子代理未知执行轮。
 def recover_thread_attempt_unknown(repository: Any, request: ThreadRecoveryRequest) -> dict[str, Any]:
+    if not str(request.thread_id or "").strip():
+        return {"recovered": False, "reason": "target_out_of_scope"}
     if request.disposition not in ATTEMPT_EFFECT_DISPOSITIONS:
         return {"recovered": False, "reason": "invalid_effect_disposition"}
     if not is_opaque_id(request.target_id, kind="run_id"):
@@ -107,6 +110,8 @@ def recover_thread_attempt_unknown(repository: Any, request: ThreadRecoveryReque
                   and float(row["closed_at"] or 0) == 0]
         if not scoped:
             return {"recovered": False, "reason": "target_out_of_scope"}
+        if len(scoped) > 1:
+            return {"recovered": False, "reason": "target_ambiguous"}
         row = scoped[0]
         if str(row["attempt_status"] or "") != ATTEMPT_STATUS_UNKNOWN:
             return {"recovered": False, "reason": "target_not_unknown"}

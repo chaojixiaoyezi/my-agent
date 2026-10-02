@@ -89,6 +89,18 @@ def _finish_main(world) -> None:
     _settle_main_agent_run(world.owner, params, _OK)
 
 
+def _mark_unknown(world, rec) -> None:
+    with world.repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=?",
+            (time.time(), rec["attempt_id"]),
+        )
+        conn.execute(
+            "UPDATE agent_runs SET status='unknown' WHERE agent_run_id=?",
+            (rec["agent_run_id"],),
+        )
+
+
 def _statuses(world, rec) -> tuple[str, str]:
     conn = world.repo._runtime_connect()
     run = conn.execute("SELECT status FROM agent_runs WHERE agent_run_id=?", (rec["agent_run_id"],)).fetchone()
@@ -254,6 +266,32 @@ def test_targeted_recovery_rejects_missing_not_unknown_and_out_of_scope(world):
     changed = _recover(world, "/recover recorded subagent-current")
     assert changed.ok is False and getattr(changed, "details", {}).get("reason") == "target_not_unknown"
     assert len(_events(world, "attempt_recovered")) == 1
+
+
+def test_targeted_recovery_rejects_duplicate_ids_in_the_same_thread_scope(world):
+    first = _tree_root(world.repo, "run-duplicate", "gwreq-duplicate-a", THREAD)
+    second = _tree_root(world.repo, "run-duplicate", "gwreq-duplicate-b", THREAD)
+    _mark_unknown(world, first)
+    _mark_unknown(world, second)
+
+    result = _recover(world, "/recover recorded run-duplicate")
+
+    assert result.ok is False and result.error_code == "RUN_RECOVERY_REJECTED"
+    assert getattr(result, "details", {}).get("reason") == "target_ambiguous"
+    assert _statuses(world, first) == ("unknown", "unknown")
+    assert _statuses(world, second) == ("unknown", "unknown")
+    assert _events(world, "attempt_recovered") == []
+
+
+def test_targeted_root_recovery_keeps_the_main_continuation_guidance(world):
+    root = _tree_root(world.repo, "run-targeted-root", "gwreq-targeted-root", THREAD)
+    _mark_unknown(world, root)
+
+    result = _recover(world, "/recover recorded run-targeted-root")
+
+    assert result.ok is True
+    assert "下一条消息会接着原任务继续；系统不会自动重做那些未确认的操作。" in result.message
+    assert _statuses(world, root) == ("created", "recovered")
 
 
 def test_projection_is_limited_to_this_thread_open_task_runs_and_non_root_runs(world):

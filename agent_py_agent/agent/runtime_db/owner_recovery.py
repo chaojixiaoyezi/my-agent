@@ -219,6 +219,8 @@ def _append_batch_event(
 
 
 # LLM: 用确认码先缩小事件查询，再逐条解析并核对 owner/处置/来源；LIKE 不是授权判据，JSON 精确字段才是。
+#   LIKE 中的冒号与空格依赖 repository._append_event_conn 当前 json.dumps 默认分隔符，仅是查询粗筛；若该序列化分隔符改动，
+#   test_owner_confirmation_is_idempotent_and_feishu_uses_same_gateway_entry 必须变红，提醒同步这里的粗筛而不是放宽精确核对。
 # 函数用途: 读取已完成的同一 owner 恢复批次，支持重复确认幂等返回。
 def _completed_outcome(conn: Any, request: OwnerRecoveryRequest) -> dict[str, Any] | None:
     rows = conn.execute(
