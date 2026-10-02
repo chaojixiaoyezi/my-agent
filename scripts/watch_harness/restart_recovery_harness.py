@@ -210,7 +210,7 @@ def _supervision_revive(owner_home: Path, *, disable_residue_fix: bool) -> tuple
         dispatch_subagents=lambda *a, **k: SimpleNamespace(records=[], summary={}),
     )
     import agent.agent_core.orchestration.background.dispatch as bg_dispatch
-    import agent.agent_core.runner.dispatch as runner_dispatch
+    import agent.subagents.process_control as process_control
 
     started: list[list[str]] = []
 
@@ -219,15 +219,15 @@ def _supervision_revive(owner_home: Path, *, disable_residue_fix: bool) -> tuple
         return {"status": "started", "run_ids": [t.id for t in tasks_arg]}
 
     original_auto_start = bg_dispatch.auto_start_tasks
-    original_stale = runner_dispatch._background_start_record_stale
+    original_stale = process_control.background_start_record_stale
     bg_dispatch.auto_start_tasks = _capture_auto_start
     if disable_residue_fix:
-        runner_dispatch._background_start_record_stale = lambda task, background: False
+        process_control.background_start_record_stale = lambda task, background: False
     try:
         summary = sweep_mod.supervise_stalled_orphans(agent)
     finally:
         bg_dispatch.auto_start_tasks = original_auto_start
-        runner_dispatch._background_start_record_stale = original_stale
+        process_control.background_start_record_stale = original_stale
     return sorted({rid for batch in started for rid in batch}), summary
 
 

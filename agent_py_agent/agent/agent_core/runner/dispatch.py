@@ -66,11 +66,10 @@ def _runner_active_attempt_id(task: object) -> str:
 # runner_concurrency 为 auto（或留空）时的并发上限，与单个根会话 8 个子代理槽位一致。
 _DEFAULT_RUNNER_CONCURRENCY_COUNT = 8
 
-# launching→running 是秒级过渡;记录冻在 launching(或 running 而线程宿主已死)超过
-# 这个窗即视为宿主硬死亡残留,不再挡续派。比 supervision 周期(60s)宽,防误判慢启动。
-_BACKGROUND_START_STALE_SECONDS = 180.0
 
-
+# LLM: 派工候选的“正在启动”判定：本批自己的 launch 不算；launching/running 记录是否已成宿主残留只问
+#   subagents.process_control.background_start_record_stale（与 existing_runner_launch 同一权威）。只读。
+# 函数用途: 判断这个任务是不是还有一个活着的后台启动在路上，有就不再重复派工。
 def _background_start_active(task: object, *, background_launch_id: str = "") -> bool:
     attrs = getattr(task, "attributes", {}) or {}
     if not isinstance(attrs, dict):
@@ -83,33 +82,10 @@ def _background_start_active(task: object, *, background_launch_id: str = "") ->
         return False
     if status not in {"launching", "running"}:
         return False
-    return not _background_start_record_stale(task, background)
+    # 过期判定的唯一权威在 subagents.process_control（重复投递复用也调它）；运行时取模块属性，便于 harness 替换。
+    from ...subagents import process_control
 
-
-def _background_start_record_stale(task: object, background: dict) -> bool:
-    """launching/running 记录是否为宿主硬死亡残留(P2 真机实锤:网关被杀时状态冻在
-    launching/running,重启后该 run 被本判定永久排除——supervision 复活扫描也救不回,
-    PENDING 卡死)。判据全结构化:pid 存活 > runner 会话心跳 > 记录时效,按证据强度取用;
-    误判"在启"最多延迟一个 stale 窗被复活,误判"已死"由候选判定的 fresh-session 闸兜住双跑。"""
-    try:
-        pid = int(background.get("pid") or 0)
-    except (TypeError, ValueError):
-        pid = 0
-    if pid > 0:
-        from ...subagents.process_control import is_pid_alive
-
-        return not is_pid_alive(pid)
-    if has_fresh_runner_session(task):
-        return False
-    try:
-        updated_at = float(background.get("updated_at") or 0.0)
-    except (TypeError, ValueError):
-        updated_at = 0.0
-    if updated_at <= 0:
-        return True  # 极老残留(权威构造一直写 updated_at):无从判活,按残留放行续派
-    import time as _time
-
-    return (_time.time() - updated_at) > _BACKGROUND_START_STALE_SECONDS
+    return not process_control.background_start_record_stale(task, background)
 
 
 # LLM: 唯一的家是 AgentConfig.runner_failure_retry_limit（原 runner_failure_policy 与守卫文件里的

@@ -45,10 +45,14 @@ class RunSubagentWorkerParams:
 
 
 # LLM: worker 先精确激活再发布 session，退出后把原 attempt 传给待续跑核对；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
+#   入口先问准入关门（_admission_closed_refusal）：这是顺序批次（gate.run_single_runner）与并行批次（gate._counted_worker）
+#   共同的启动边界，关门时不建 worker、不激活、不续派也不唤醒父级。
 # 函数用途: 运行子代理工作片，续租并诊断长等待，落盘后继续同一 run 的待执行工作或唤醒直属父级。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
+    if (refusal := _admission_closed_refusal(params)) is not None:
+        return refusal
     worker = _build_worker_agent(SimpleAgent, params)
     attempt_id = ""
     launch_id = ""
@@ -117,6 +121,28 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     _continue_pending_run_after_session(worker, params.run_id, attempt_id=attempt_id)
     _resume_direct_parent_after_session(worker, params.run_id)
     return result
+
+
+# LLM: 只读本进程模型调用准入表（contracts.model_call_ledger.model_call_admission_closure），不读文本。宿主停机关门后，
+#   新启动的 runner 第一次模型调用必被拒，会白占尝试次数并写成 FAILED；所以这里不激活执行轮、不写结果或 FAILED，返回只在内存里的
+#   拒绝结果（status=PENDING），原预留（RuntimeDB pending attempt / 文件 background_start）原样保留，重启后孤儿监督或同步派工
+#   按同一执行轮续上。local/main 的派工子进程有自己的准入表，不随 Gateway 关门，也不随它退出，这里对它没有影响。
+#   预览（dry_run）不发模型调用，不拦。改动同步 test_subagent_reserved_start_restart_pickup。
+# 函数用途: 宿主停机后不再启动新的子代理 runner，返回不落盘的拒绝结果；没停机或只是预览时返回 None。
+def _admission_closed_refusal(params: RunSubagentWorkerParams) -> SubAgentRunnerResult | None:
+    from ...contracts.model_call_ledger import (
+        MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
+        model_call_admission_closure,
+    )
+
+    if params.dry_run or model_call_admission_closure() is None:
+        return None
+    return SubAgentRunnerResult(
+        run_id=params.run_id, dry_run=False, ok=False, status="PENDING", verification_status="UNVERIFIED",
+        message="宿主停机中：模型调用准入已关闭，没有启动 runner，预留的执行轮留到重启后续上",
+        turn_end_reason=FailureType.MODEL_CALL_ADMISSION_CLOSED.value,
+        runner_last_error=MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
+    )
 
 
 # LLM: 原 result 可能早于并发授权；session 结束后复读 canonical，只为原 attempt 的 PENDING 接续。

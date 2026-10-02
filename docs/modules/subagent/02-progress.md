@@ -369,3 +369,9 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 
 - `runner_display_projection` 新增 `runner_failure_label`：失败类型专属标签的唯一出口（宿主停机中断、额度不足等），`runner_display_label` 复用它。
 - Gateway 名册行带出 `failure_label`，TUI 名册、子代理页头部与终态活动文字都用它；IM `/status` 的“异常”按同一权威细分。设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## 已预留未启动的子代理：停机不启动、重启照样拉起（I5，2026-10-02，分支 `claude/9b-runner-admission`，基于 step17e `20125c9d2`）
+
+- 根修：宿主死在“已预留、未激活”窗口里留下冻住的启动记录，重启后被 `existing_runner_launch` 原样复用、永久卡住；现在过期记录不复用并先收掉（受管标 reclaimed 沿用同一 pending attempt，文件撤销旧预留重新预留），过期判定的唯一权威挪到 `process_control.background_start_record_stale`。
+- 计数：`orphans_revived` 只算真派出去的，复用现存启动另记 `orphan_launches_reused` / `launch_reused`。
+- I5：`worker._run_subagent_worker` 入口读准入关门，顺序与并行批次都不启动、不写 FAILED、保留预留。设计见台账两节，测试与变异见 TESTS.md 同名节。

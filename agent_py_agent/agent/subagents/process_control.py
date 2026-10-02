@@ -176,6 +176,39 @@ def build_background_start_record(previous: object, update: BackgroundStartUpdat
     return record
 
 
+# 后台启动记录冻在 launching/running(无 pid、无新鲜 runner 会话)超过这个秒数即视为宿主已死的残留;比监督周期 60 秒宽,防误判慢启动。
+BACKGROUND_START_STALE_SECONDS = 180.0
+
+
+# LLM: 后台启动记录“宿主是否已死”的唯一权威判定，派工候选（agent_core.runner.dispatch._background_start_active）与
+#   重复投递复用（runner_start.existing_runner_launch）都直接调这里，不得另写一份。判据全结构化，按证据强度取用：
+#   pid 存活 > runner 会话心跳 > 记录时效（BACKGROUND_START_STALE_SECONDS）。误判“在启”最多延迟一个窗；误判“已死”
+#   由候选判定的 fresh-session 闸与 RuntimeDB 原子激活兜住双跑。只读，不改记录。改动同步 test_dispatch_liveness_and_revive
+#   与 test_subagent_reserved_start_restart_pickup。
+# 函数用途: 判断一条 launching/running 的后台启动记录是不是宿主已死留下的残留（P2 真机实锤：网关被杀时状态冻住，
+#   重启后被当成“正在启动”永久挡住续派）。
+def background_start_record_stale(task: object, record: dict) -> bool:
+    from .runner_session_liveness import has_fresh_runner_session
+
+    try:
+        pid = int(record.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid > 0:
+        return not is_pid_alive(pid)
+    if has_fresh_runner_session(task):
+        return False
+    try:
+        updated_at = float(record.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        updated_at = 0.0
+    if updated_at <= 0:
+        return True  # 极老残留(权威构造一直写 updated_at):无从判活,按残留放行续派
+    import time as _time
+
+    return (_time.time() - updated_at) > BACKGROUND_START_STALE_SECONDS
+
+
 # LLM: Reclaiming a launch updates the same canonical background_start record;
 # callers must not hand-edit status dictionaries and accidentally lose the pid or activation fact.
 # 函数用途: 将已失效 runner 的后台启动残留标成 reclaimed，令同一任务可以安全续派。

@@ -91,7 +91,7 @@ def _audit_source_lifecycle_signal(signal: Any) -> bool:
 #   scoped owner 走进程内线程/base 走独立进程)拉起——真机实锤唤醒轮上下文里同步
 #   _redispatch 拉 PLANNING 不稳,auto_start 可靠。非阻塞(不占唤醒 tick 线程),
 #   防重靠 background_start=launching + 候选判定的 launch_in_progress/心跳排除。
-# 函数用途: 把"没人管的可派孤儿"用可靠的后台派工路一次性拉起来,返回动作摘要。
+# 函数用途: 把"没人管的可派孤儿"用可靠的后台派工路一次性拉起来,返回动作摘要(started 只算真派出去的,复用现存启动记 launch_reused)。
 def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -124,20 +124,20 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     from ..background.dispatch import auto_start_tasks
 
     result = auto_start_tasks(agent, stalled, {})
-    started = (
-        list(result.get("run_ids") or []) if str(result.get("status") or "") == "started" else []
-    )
+    started, reused = _split_auto_start_result(result)
     return {
         "started": len(started),
+        "launch_reused": len(reused),
         "status": str(result.get("status") or ""),
         "run_ids": started,
+        "reused_run_ids": reused,
         "authority_recovery_blocked": len(recovery_blocks),
         "recovery_blocks": recovery_blocks,
     }
 
 
 # 函数用途：在一个 runner session 已经持久化终态后，只续派指定的孤儿 run；
-# 复用统一候选判定、会话判活和 durable auto-start，不扫描或带起其他任务。
+# 复用统一候选判定、会话判活和 durable auto-start，不扫描或带起其他任务。started 只算真派出去的，复用现存启动记 launch_reused。
 def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     key = str(run_id or "").strip()
@@ -166,14 +166,25 @@ def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
     from ..background.dispatch import auto_start_tasks
 
     result = auto_start_tasks(agent, [task], {})
-    started = (
-        list(result.get("run_ids") or []) if str(result.get("status") or "") == "started" else []
-    )
+    started, reused = _split_auto_start_result(result)
     return {
         "started": len(started),
+        "launch_reused": len(reused),
         "status": str(result.get("status") or ""),
         "run_ids": started,
+        "reused_run_ids": reused,
     }
+
+
+# LLM: auto_start_tasks 的 run_ids 含原样复用的现存启动（reused_run_ids，见 runner_start.existing_runner_launch）；
+#   只有真正新派出去的才算“复活/启动”，复用单独计数，否则在途启动会让监督日志每轮报假复活。只读回执，不改状态。
+#   改动同步 auto_start_stalled_orphans、auto_start_orphan_run 与 test_subagent_reserved_start_restart_pickup。
+# 函数用途: 把一次自动启动回执拆成“真派出去的 run”和“复用现存启动的 run”两组。
+def _split_auto_start_result(result: dict[str, object]) -> tuple[list[str], list[str]]:
+    if str(result.get("status") or "") != "started":
+        return [], []
+    reused = [str(item) for item in result.get("reused_run_ids") or []]
+    return [str(item) for item in result.get("run_ids") or [] if str(item) not in reused], reused
 
 
 # LLM: Delegate eligibility and failed-run retry policy to the canonical runner candidate gate.
@@ -258,6 +269,7 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
         return {
             "running_reclaimed": 0,
             "orphans_revived": 0,
+            "orphan_launches_reused": 0,
             "skipped_locked": 1,
         }
     with stack:
@@ -280,6 +292,7 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         "stalled_source_hosts_cleanup_attempted": 0,
         "stalled_source_hosts_terminated": 0,
         "orphans_revived": 0,
+        "orphan_launches_reused": 0,
         "orphan_authority_recovery_blocked": 0,
         "runtime_closeouts_recovered": 0,
         "runtime_closeouts_pending": 0,
@@ -350,9 +363,9 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
             for item in (workers if isinstance(workers, list) else [])
         ):
             try:
-                summary["orphans_revived"] += int(
-                    auto_start_stalled_orphans(agent).get("started") or 0
-                )
+                revive = auto_start_stalled_orphans(agent)
+                summary["orphans_revived"] += int(revive.get("started") or 0)
+                summary["orphan_launches_reused"] += int(revive.get("launch_reused") or 0)
             except Exception:
                 _LOGGER.debug(
                     "supervision reconciled source revive failed",
@@ -399,12 +412,14 @@ def _merge_running_reclaim_summary(
 
 # LLM: Supervisor reporting must distinguish accepted starts from authority
 # blocks without duplicating the orphan-start policy or changing task state.
+#   orphans_revived 只算真正新派出去的 run；复用现存启动的单独记 orphan_launches_reused（Gateway 日志只按前者触发）。
 # 函数用途: 把一次孤儿恢复扫描的结构化结果合并到 Gateway 监督摘要。
 def _merge_orphan_revive_summary(
     summary: dict[str, object],
     revive_summary: dict[str, object],
 ) -> None:
     summary["orphans_revived"] = int(revive_summary.get("started") or 0)
+    summary["orphan_launches_reused"] = int(revive_summary.get("launch_reused") or 0)
     summary["orphan_authority_recovery_blocked"] = int(
         revive_summary.get("authority_recovery_blocked") or 0
     )

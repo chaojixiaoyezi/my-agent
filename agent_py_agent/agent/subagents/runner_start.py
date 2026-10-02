@@ -4,15 +4,26 @@ from __future__ import annotations
 
 from ..runtime_db.operations import RuntimeConflictError
 from .models import task_status_in
+from .process_control import background_start_record_stale, reclaim_background_start
 
 
 # LLM: 调用方持 creation guard；这里只确认原启动接纳尚属当前执行轮，不把启动回执当进程存活证明。
-# 函数用途: 重复创建或投递时复用已有后台接纳，避免为同一轮再开线程。
+#   宿主已死的旧启动（process_control.background_start_record_stale，与派工候选同一权威）不算现存接纳，并在锁内先收掉旧记录
+#   （lifecycle.update_background_start 不许 replace_launch 覆盖仍是 launching/running 的记录）：受管模式标成 reclaimed，
+#   随后 reserve_runner_start 沿用同一 pending attempt、launching 以 replace_launch 换新记录（误判仍活的旧宿主与新启动只有一个
+#   能在 RuntimeDB 原子激活）；文件模式撤销旧预留（旧执行轮进放弃名单，旧宿主再也激活不了），随后重新预留。
+#   否则冻住的记录会被原样复用、什么都不派，永久卡住。
+# 函数用途: 重复创建或投递时复用仍在进行的后台接纳，避免为同一轮再开线程；宿主已死的旧启动不复用，并写盘收掉它的记录。
 def existing_runner_launch(manager: object, run_id: str, expected_attempt_id: str | None) -> bool:
     task = manager.load(run_id)
     record = (task.attributes or {}).get("background_start") or {}
     if (task_status_in(task.status, {"DONE", "CANCELLED", "ABANDONED", "TAKEN_OVER"})
             or not record.get("launch_id") or record.get("status") not in {"launching", "running"}):
+        return False
+    if background_start_record_stale(task, record):
+        from .file_runner_start import revoke_file_runner_start
+
+        manager.mutate(run_id, revoke_file_runner_start if manager.runtime_db is None else reclaim_background_start)
         return False
     original = str(record.get("attempt_id") or "")
     if expected_attempt_id is not None and expected_attempt_id != original:

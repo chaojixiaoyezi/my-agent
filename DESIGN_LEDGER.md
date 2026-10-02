@@ -1,5 +1,31 @@
 # 设计台账
 
+## 宿主死在“已预留、未激活”窗口里的子代理，重启后永久卡住（根修，I5 前提探针发现，2026-10-02，分支 `claude/9b-runner-admission`，基于 `claude/3a-step17e` `20125c9d2`，已实现，待集成）
+
+- **现象**（9b 探针，证据 `~/.my-agent/decision-evidence/i5-restart-pickup-probe-20261002/`）：派工已经预留执行轮、写下后台启动记录，进程在派工线程收尾前就没了（kill -9、停机时正落在这个窗口；进程内线程没有 pid，或 local/main 派工子进程的 pid 已死），启动记录冻在 launching/running。重启后：
+  - 派工候选判定已按过期放行（没有 pid 的过 180 秒；pid 已死的立刻）；
+  - 但 `_start_background_dispatch` 里的 `existing_runner_launch` 不判过期，把冻住的记录当成现存启动原样复用，回 started + reused_run_ids，实际什么都不派；
+  - 孤儿监督每轮还把它计进 `orphans_revived=1`，推到一天后仍然如此——永久卡住，日志一直报假复活。
+  - 同步派工路径（唤醒前预扫、watch、CLI 经 `collect_runner_candidates` → `reserve_runner_start(launch_id="")`）能接上，但只在相应事件发生时才走到。
+- **做法**：
+  - 过期判定只有一处权威：`subagents/process_control.background_start_record_stale`（pid 存活 > runner 会话心跳 > `BACKGROUND_START_STALE_SECONDS`=180 秒），派工候选 `runner/dispatch._background_start_active` 与重复投递复用 `runner_start.existing_runner_launch` 都直接调它。原先它在 `agent_core/runner/dispatch.py`，但 subagents 层不能导入 agent_core（`check_import_boundaries`），而它的输入（pid 判活、会话心跳）和启动记录的构造、回收本来就在 subagents，所以挪到这里，原处不留副本；`scripts/watch_harness/restart_recovery_harness.py` 的替换点随之改到新位置。
+  - 过期的旧启动不算现存接纳，并在 creation 锁内先收掉旧记录（`lifecycle.update_background_start` 不许 replace_launch 覆盖仍是 launching/running 的记录）：
+    - 受管模式：标成 reclaimed，随后 `reserve_runner_start` 沿用同一 pending attempt，launching 以 replace_launch 换成新启动记录；万一旧宿主其实还活着，它和新启动只有一个能在 RuntimeDB 原子激活。
+    - 文件模式：`revoke_file_runner_start` 撤销旧预留（旧执行轮进放弃名单，旧宿主再也激活不了），随后重新预留新执行轮。
+  - 计数：自动启动回执拆成“真派出去的”和“复用现存启动的”（`capability_auto_sweep._split_auto_start_result`）。监督摘要 `orphans_revived` 只算前者，复用另记 `orphan_launches_reused`；定向续派 `auto_start_orphan_run` 同样给 `started` / `launch_reused`。Gateway 监督日志仍只按 `orphans_revived` 触发。
+- **验证**：见 TESTS.md“已预留未启动的子代理”节。
+
+## Runner 启动边界统一读准入关门（I5，2026-10-02，分支 `claude/9b-runner-admission`，基于 `20125c9d2`，已实现，待集成）
+
+- **问题**：宿主停机关闭本进程模型调用准入后，已经排进批次的 runner 仍会激活执行轮，第一次模型调用被拒，写成 FAILED/model_call_admission_closed、白占尝试次数。75 复审 5a56714dc 建议在 `gate._counted_worker` 读关门事实；9b 核实发现只有一个任务的批次（单个孤儿复活、单个子代理自启，最常见）和 `runner_concurrency=1` 走 `_run_sequential_batch` → `run_single_runner`，不经过 `_counted_worker`。
+- **做法**：检查点放在两条批次路的公共入口 `agent_core/runner/worker._run_subagent_worker`（`_admission_closed_refusal`）：
+  - 关门时不建 worker、不激活执行轮、不写结果也不写 FAILED，不续派、不唤醒父级；返回只在内存里的拒绝结果（status=PENDING，`turn_end_reason=model_call_admission_closed`，`runner_last_error=MODEL_CALL_ADMISSION_CLOSED`）。`handle_runner_failure` 只处理 BLOCKED/TIMEOUT，所以也不注入失败记忆。
+  - 预留原样保留（RuntimeDB pending attempt / 文件 background_start）：派工线程收尾成 finished 时，重启后孤儿监督第一轮就按同一执行轮拉起；进程来不及收尾、记录冻住时，由上一节的根修接上。
+  - 这一处同时盖住 `runner_batches.collect_runner_candidates` 派出的批次、唤醒前预扫 `capability_auto_sweep._redispatch_stalled_subagents`、watch_service 和 CLI 派工——它们都经 `run_runner_batch` 进 worker。
+  - 预览（dry_run）不发模型调用，不拦。
+  - **local/main 的派工子进程**：它有自己的准入表，Gateway 关门不影响它，它也不随 Gateway 退出；这里对它没有影响，行为保持不变。
+- **验证**：见 TESTS.md 同一节。没有做 sdkit 故障注入的真实 kill -9 演练（3a 列为加分项）。
+
 ## 子代理被宿主停机打断时界面显示“宿主停机中断”（ae step17d 冒烟发现，2026-10-02，分支 `claude/9b-shutdown-label`，基于 `claude/3a-step17e` `2e5a36af0`，已实现，待集成）
 
 - **问题**：子代理被宿主停机打断后结构化状态是对的（`failure_type=host_shutdown_interrupted` 或 `model_call_admission_closed`，`current_step="宿主停机中断"`），但用户看到的是"失败"：

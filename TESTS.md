@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 已预留未启动的子代理：停机不启动、重启照样拉起（I5 + 冻住启动记录的根修，2026-10-02，分支 `claude/9b-runner-admission`，基于 `20125c9d2`）
+
+- 新增 `test_subagent_reserved_start_restart_pickup.py`（真实 SubAgentManager，受管 = 带 owner runtime.db、文件 = 显式无库；只截获最终的 dispatch_subagents，在截获处按 worker 的顺序激活）：
+  - ① 线程收尾成 finished（两种形态）：旧进程派工线程在关门后才走真实 `run_single_runner`，worker 拒绝（PENDING、不写 FAILED、预留原样）；同进程监督不再派；重启后第一轮监督拉起并激活成 RUNNING，受管模式沿用同一执行轮，`orphans_revived=1`、`orphan_launches_reused=0`。
+  - ② 启动记录冻在 running（两种形态 × 进程内线程无 pid / 派工子进程 pid 已死）：重启后过期窗内不抢跑，过期后被拉起；新启动记录换掉旧 launch；受管沿用同一 pending attempt，文件模式旧执行轮进放弃名单。
+  - 同步派工路径：对冻住的现场 `reserve_runner_start(launch_id="")` 沿用原执行轮并激活。
+  - 计数：只复用 / 混合两种回执，监督与定向续派都把复用和真派分开计。
+  - 检查点：顺序与并行两种批次关门后都拒绝且不碰状态；准入开着时照常走到建 worker（对照）；预览不拦。
+- `test_gateway_model_call_shutdown_settlement.py` 的 `test_child_closeout_keeps_the_waiting_parent_pending_after_admission_closes` 补上重启这一步：关门期间等待调和不释放；换一张开着的准入表后 `reconcile_all_parent_waits` 释放父级。
+- 变异 11/11 被杀（草稿副本上逐个精确替换、按字节恢复）：过期记录仍被复用、过期记录不收掉、受管也按文件撤销、复用算成复活、合并丢掉复用计数、检查点不在公共入口、关门时写 FAILED、候选不用权威判定、过期判定不看死 pid、重启后父级不释放、预览也被拦。
+- 探针证据：`~/.my-agent/decision-evidence/i5-restart-pickup-probe-20261002/`。
+
 ## 子代理被宿主停机打断时界面显示“宿主停机中断”（2026-10-02，分支 `claude/9b-shutdown-label`，基于 `2e5a36af0`）
 
 - 新增 `test_tui_shutdown_failure_label.py`（14 项，真实 SubAgentManager、Gateway 名册行、TUI runtime/导航/渲染）：

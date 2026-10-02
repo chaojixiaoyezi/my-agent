@@ -1399,3 +1399,10 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 
 - `subagents/runner_display_projection.py`：`runner_failure_label(status, failure_type)` 给失败类型专属标签（没有时为空、RUNNING 为空），`runner_display_label` 在它之上补按状态的默认标签。
 - 读方：结算时写 `current_step`（`runner_result_state`）、Gateway 名册行 `failure_label` 与终态活动文字（`conversation/agent_activity`）、`/status` 异常细分（经 `agent_activity.subagent_display_label`，网关层不直接导入 subagents）。客户端（TUI、IM）只读这些标量，不另写失败类型映射。
+
+## 后台启动记录的过期判定与停机启动边界（2026-10-02）
+
+- `subagents/process_control.py`：`background_start_record_stale(task, record)` 是后台启动记录“宿主已死”的唯一权威（pid 存活 > runner 会话心跳 > `BACKGROUND_START_STALE_SECONDS`）。读方：派工候选 `agent_core/runner/dispatch._background_start_active`、重复投递复用 `runner_start.existing_runner_launch`、`scripts/watch_harness/restart_recovery_harness.py`（替换它做对照）。
+- `subagents/runner_start.existing_runner_launch`：过期的旧启动不复用，并在 creation 锁内收掉旧记录（受管 `reclaim_background_start`，文件 `file_runner_start.revoke_file_runner_start`），之后照常 `reserve_runner_start`。
+- 监督计数：`capability_auto_sweep._split_auto_start_result` 把自动启动回执拆成真派与复用；`orphans_revived` 只算真派（上文 2026-08-24 节“不把未启动的进程计作 `orphans_revived`”的口径由此落实到复用场景）。
+- 停机启动边界：`agent_core/runner/worker._admission_closed_refusal` 在 `_run_subagent_worker` 入口读本进程准入表，顺序批次（`gate.run_single_runner`）与并行批次（`gate._counted_worker`）共用；local/main 派工子进程有自己的准入表，不受 Gateway 关门影响。

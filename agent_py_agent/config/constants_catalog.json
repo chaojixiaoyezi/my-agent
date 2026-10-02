@@ -348,14 +348,6 @@
       "description": "派生代理名里的默认层级深度，用于生成可读的系统血缘名字。"
     },
     {
-      "name": "_BACKGROUND_START_STALE_SECONDS",
-      "file": "agent_py_agent/agent/agent_core/runner/dispatch.py",
-      "value": 180.0,
-      "unit": "秒",
-      "category": "其它",
-      "description": "这个窗即视为宿主硬死亡残留,不再挡续派。比 supervision 周期(60s)宽,防误判慢启动。"
-    },
-    {
       "name": "_DEFAULT_RUNNER_CONCURRENCY_COUNT",
       "file": "agent_py_agent/agent/agent_core/runner/dispatch.py",
       "value": 8,
@@ -4698,6 +4690,14 @@
       "unit": "秒",
       "category": "超时",
       "description": "patch 测试命令的超时秒数；超时即判测试失败，防止测试命令挂死。"
+    },
+    {
+      "name": "BACKGROUND_START_STALE_SECONDS",
+      "file": "agent_py_agent/agent/subagents/process_control.py",
+      "value": 180.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "后台启动记录冻在 launching/running(无 pid、无新鲜 runner 会话)超过这个秒数即视为宿主已死的残留;比监督周期 60 秒宽,防误判慢启动。"
     },
     {
       "name": "DEFAULT_TERMINATE_GRACE_SECONDS",

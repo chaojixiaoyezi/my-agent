@@ -510,7 +510,9 @@ def test_child_closeout_keeps_the_waiting_parent_pending_after_admission_closes(
     """75 复审 38d7c8615（2026-10-02）：嵌套子代理收尾时 _resume_direct_parent_after_session 先删父级的等待标记，再在停机进程里
     启动父级——父级第一次调用被拒成 FAILED/model_call_admission_closed、尝试次数 +1，还逐层往上传；进程直接退出反而保留
     PENDING + 等待标记，重启后等待调和照常续上。走真实等待调和、孤儿续派和自动派发入口，只截获最终启动副作用：
-    准入开着时照常释放并启动（对照）；关门后不释放标记、不请求启动，父级保持 PENDING + 等待标记。"""
+    准入开着时照常释放并启动（对照）；关门后不释放标记、不请求启动，父级保持 PENDING + 等待标记。
+    I5（2026-10-02）补上重启这一步：关门期间等待调和照样不释放（reason=host_shutdown）；换一张开着的准入表（新进程）后，
+    reconcile_all_parent_waits 释放父级的等待标记，父级重新可派。"""
     from agent_py_agent.agent.agent_core.orchestration.background import (
         dispatch as background_dispatch,
     )
@@ -518,6 +520,7 @@ def test_child_closeout_keeps_the_waiting_parent_pending_after_admission_closes(
     from agent_py_agent.agent.subagents.direct_parent_lifecycle import (
         mark_parent_waiting_for_direct_children,
         parent_wait_blocks_dispatch,
+        reconcile_all_parent_waits,
     )
     from agent_py_agent.agent.subagents.manager import SubAgentManager
     from agent_py_agent.tests.test_dispatch_liveness_and_revive import _agent
@@ -546,6 +549,16 @@ def test_child_closeout_keeps_the_waiting_parent_pending_after_admission_closes(
     loaded = manager.load(parent.id)
     assert started == ([] if closed else [[parent.id]])
     assert loaded.status == "PENDING" and parent_wait_blocks_dispatch(loaded) is closed, "关门后等待标记必须还在"
+    if not closed:
+        return
+    assert reconcile_all_parent_waits(manager)["released_run_ids"] == [], "关门期间的等待调和也不释放"
+    monkeypatch.setattr(ledger_module, "_ADMISSION_REGISTRY", ledger_module._ModelCallAdmissionRegistry())
+
+    reconciled = reconcile_all_parent_waits(manager)
+
+    assert (reconciled["checked"], reconciled["released_run_ids"]) == (1, [parent.id]), "重启后等待调和释放父级"
+    released = manager.load(parent.id)
+    assert released.status == "PENDING" and not parent_wait_blocks_dispatch(released)
 
 
 def test_gateway_cleanup_marks_in_process_executors_after_settlement(monkeypatch):

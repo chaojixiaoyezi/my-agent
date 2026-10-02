@@ -379,7 +379,7 @@ agent_py_agent/
 |   |   |-- kernel.py                   # 子代理树快照
 |   |   |-- manager_work_orders.py      # 工单路径、默认文件、校验
 |   |   |-- models.py                   # 子代理数据模型
-|   |   |-- process_control.py          # 子代理宿主存活/启动事实，复用公共进程树终止并保留核对回执
+|   |   |-- process_control.py          # 子代理宿主存活/启动事实，复用公共进程树终止并保留核对回执；后台启动记录过期判定的唯一权威
 |   |   |-- direct_parent_lifecycle.py # 直属父子等待、事件唤醒、同批合并与结果上下文
 |   |   |-- runner_completion_payload.py # 完成正文、产物引用与父级交接信封的只读投影
 |   |   |-- runner_display_projection.py # 已裁决子代理状态到 TUI 活动标签的纯投影
@@ -993,6 +993,7 @@ agent_py_agent/
 |   |-- test_repo_tree_guard.py  # 仓库树防线自检：MagicMock 当路径被识别并清理、残留不动不算违规、残留里新增条目算违规、报错文字
 |   |-- test_decision_call_resources.py # 有界调用与原模型准入的组合、普通模型保留名额
 |   |-- test_subagent_process_control.py # 公共进程树终止覆盖后代、升级、宿主保留及未确认回执
+|   |-- test_subagent_reserved_start_restart_pickup.py # 已预留未启动的子代理：停机后 worker 入口不启动、冻住的启动记录不复用、重启后被拉起、复用与复活分开计数
 |   |-- test_subagent_resource_stop.py  # 固定原子树、终态资源、恢复隔离及 Goal/creation 锁序
 |   |-- test_runner_stop_relay.py       # 独立 Python 宿主心跳转交精确取消、共享隔离及旧配置投影
 |   |-- test_runtime_module_boundaries.py # 公共后端合同和纯策略不加载执行器/HTTP 的导入边界回归
@@ -1661,7 +1662,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/runner_result_commit.py`：在结果文件与 task 投影落盘后按原 WAL→运行账→父通知→已交付→清账顺序推进；显式接收原 RuntimeDB、保存与绑定交付回调；使用既有 runtime_closeout 恢复原语，不建立第二份权威。
 - `agent_py_agent/agent/subagents/services/runtime_closeout.py`：WAL、结算、事件分页还原和逐条恢复仍沿原事实；只接显式 repo/load/save/list/notify，通知 Protocol 保留本次结果与 exact attempt；唯一生产装配在既有 capability sweep。
 - `agent_py_agent/agent/subagents/runner_completion_payload.py`：从已有子代理结果构造有界完成正文和规范产物引用；根通知、递归父级和直属父交接共用，既不写状态也不投递通知。
-- `agent_py_agent/agent/subagents/runner_start.py`：在原创建锁内预留准确 pending 并核对原身份；启动记录实际写入归既有 lifecycle 服务，CLI 与进程内入口直接调用服务，不保留旧转发函数。
+- `agent_py_agent/agent/subagents/runner_start.py`：在原创建锁内预留准确 pending 并核对原身份；启动记录实际写入归既有 lifecycle 服务，CLI 与进程内入口直接调用服务，不保留旧转发函数。宿主已死的旧启动（`process_control.background_start_record_stale`）不当现存接纳复用，锁内先收掉旧记录。
 - `agent_py_agent/agent/subagents/file_runner_start.py`：显式无数据库模式在原 canonical 启动记录中预留和消费准确身份；停止可撤销，旧快照不能覆盖新预留或激活，普通保存只可回收同一身份。
 - `agent_py_agent/agent/subagents/coordination.py`：复用原 owner 创建锁协调 canonical 创建、执行轮变更和插话预留；只记录本线程持锁事实，不保存任务状态，启动和退出等待不得持锁。
 - `agent_py_agent/agent/agent_core/runner/activity_diagnostics.py`：复用现有心跳与调用账，阶段长等待只通知直属父级，不强杀或自动重派。
