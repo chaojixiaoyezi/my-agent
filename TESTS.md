@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 外部材料阅读优先级逐页题的候选措辞修正（2026-10-02，分支 `claude/be-material-criteria`，基于 `b5be542e8`）
+
+- **改动**：只改 `external_material_order` 逐页题的候选说明与题面，键和结构不变。现有本点位测试与基准测试照常通过（候选键和非排序处理没有变）。
+- **基准重跑**：`decision_quality_bench.py --points external_material_order --reps 2 --record`。
+  - 环境：`env -i` 隔离，只用 Jev 连接文件（0600，用完删）。
+  - 结果：22/36 → **36/36**，Jev 12 次调用全部成功，`jev-1.13.0`，期望答案未改。
+  - 同一时段旧措辞对照（不登记，另 12 次）：仍 22/36。两轮共 24 次，在 3 倍上限 36 次以内。
+  - 其余 11 个点位登记的用例摘要和材料摘要都与当前代码一致（`--check` 比对）。
+- **门禁**：
+  - 本点位、集成、基准、复用其辅助函数的 action_candidate/delivery_quality/delivery_stale 测试加 10 个守卫：580 passed。
+  - ruff、import 边界、doc_sync、`diff --check`、`size_diff`、clean_package 通过。
+  - 没有新增分支逻辑，未做变异。
+
 ## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `ee3bd09f7`）
 
 - **新增用例** `test_decision_audit_controls.py::test_adoption_statuses_carry_a_fixed_note_that_they_are_not_settled`：

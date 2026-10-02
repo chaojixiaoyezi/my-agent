@@ -543,6 +543,8 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 
 完整合法的建议只把原页码排序作为可忽略的文字附在已归档结果之后；原工具结果、页序、失败项、引用、账本、权限及 text/native IR 的执行事实保持。`observe` 仍会发请求但不附提示；用户取消传播，设置关闭和来源变动令在途建议失效。首片本地生产/归档/设置组合 349 项通过；隔离真实 Jev 的一组非选择保留原展示、另一组自动追加2→3→1，但页面源为本地受控材料，不能外推实际检索质量。`web_search`、本地检索、历史检索、规划、工具动作、质量和自学习点不由这片冒充完成，详见[P5-C 交接](../tasks/DECISION_MODEL_EXTERNAL_MATERIAL_ORDER_HANDOFF.md)。
 
+2026-10-02 逐页题措辞修正（照 J12b）：每档写明对“这一页”的含义，无关页明确指向 `later`，非排序回答写明“选它会让本次不给任何阅读建议”；候选键、题目结构和非排序回答的处理不变。中文基准 22/36 → 36/36，见[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md)末节。
+
 ### P5-C 质量提示首片：交付复核焦点 `delivery_quality`
 
 当前状态：已合入 main（`8c6d29c5f`），默认关闭；离线合同、fake 后端组合与变异验证通过，2026-09-25 两个真实 TUI 任务各跑 off/apply，链路成立但没有实际追加提示，不证明交付质量提升（见[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节）。依据是[只读审计](../tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md)的最小安全接缝：首片只用验证事件做候选，不用 artifact ref。

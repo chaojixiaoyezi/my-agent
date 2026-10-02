@@ -1,5 +1,25 @@
 # 设计台账
 
+## 外部材料阅读优先级逐页题的候选措辞修正（照 J12b）（2026-10-02，分支 `claude/be-material-criteria`，基于 `claude/3a-step16z` `b5be542e8`，已实现，待集成）
+
+- **问题**：
+  - J12 续基准里 external_material_order 只有 22/36（0.61，阈值 0.8）。14 道错题全是无关页答 `not_needed`/`no_match`，而不是 `later`。
+  - 任何非排序回答都会让整次不给阅读顺序提示，所以 apply 下这些调用都白跑。
+  - 根源和 recall 改前一样是措辞：`not_needed` 写“无需额外建议”，`no_match` 写“无法匹配优先级”，Jev 把它们读成“这一页用不上”。
+- **做法**：只改 `_CHOICES`、`_NON_SELECTIONS` 的说明文字和逐页题题面；候选键、题目结构、`_RANKS` 和非排序回答的处理都不变，采用复核与返回路径没动。
+  - `first`、`normal`、`later` 写明这一页与当前问题“直接相关”“有些关系”“无关或很弱，放到后面读、原页仍保留”。
+  - `not_needed`、`no_match`、`abstain` 写明“选它会让本次不给任何阅读建议”，前两个提示“只是与问题无关请选 later”。
+  - 题面写明三档各对应什么情况。
+- **为什么不把逐页的 `not_needed`/`no_match` 直接当作 later**：开发铁律规定状态别名不隐式兼容；改措辞只动给模型看的软材料，不动机器语义。
+- **结果**：重跑本点位基准，22/36 → **36/36**（准确率 1.0，阈值 0.8），Jev 12 次调用全部成功，期望答案没有改，成绩已登记进 `results.json`。
+  - 同一时段用旧措辞对照跑一遍（不登记）：仍是 22/36，所以提升来自措辞。
+  - 耗时：新措辞中位 2.2 秒、最长 3.5 秒（12 次里 1 次超过 3 秒）；同时段旧措辞中位 2.2 秒、最长 4.1 秒。
+    早上首轮是中位 1.4 秒，变慢来自这个时段的网络，不是措辞（旧措辞同时段 12 次里 2 次超过 3 秒）。这个点位是前台点位（默认 3 秒），打开前要考虑这一点。
+  - 每页题的说明多了约 200 个汉字，离决策输入上限（256 KB）很远。
+  - 证据：`~/.my-agent/decision-evidence/j12-quality-bench/*material-*`。
+- **开关**：点位仍默认关闭，生产是否打开由集成方定。
+- **验证**：见 TESTS.md 同名节。
+
 ## 选模型两个点位的仓库默认期限定为 5 秒（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）（2026-10-02，分支 `claude/be-selection-timeout-default`，基于 `claude/3a-step16z` `a44f2ad62`，已实现，待集成）
 
 - **背景**：J5 把前台通用期限默认改成 3 秒，但选模型（`model_selection`、`subagent_model`）在冷连接下 Jev 实测约 3.2 秒，按 3 秒会超时、保留原模型。
@@ -161,7 +181,7 @@
   - 7 个达标：planning、model_selection、action_candidate、skill_tool 满分；skill_proposal_review 0.92；subagent_model 0.9 与 delivery_quality 0.8 都刚好压线。
   - **external_material_order 0.61 未达标。**
   - 证据：`~/.my-agent/decision-evidence/j12-quality-bench/*8points*`。
-- **external_material_order 的原因与方向（未实施）**：
+- **external_material_order 的原因与方向（已按改措辞实施，见顶部同名条目，重跑后 36/36）**：
   - 原因与 recall 改措辞前完全相同：无关页答 `not_needed`/`no_match`，而不是 `later`；按现有规则任一非排序回答就整次放弃，所以这些调用在 apply 下都不会给出阅读顺序提示。
   - 方向：照 J12b 改逐页题的候选说明（写明“这一页”的含义、无关页选 later），不做隐式别名；改完重跑本基准。
 - **压线点位的错题**：

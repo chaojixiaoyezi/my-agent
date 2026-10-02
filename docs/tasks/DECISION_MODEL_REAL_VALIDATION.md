@@ -1014,3 +1014,12 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
   - external_material_order 22/36，**未达标**：无关页答 not_needed/no_match 而不是 later，与 recall 改措辞前同一问题。
 - **结论**：12 个点位都有了中文基准成绩，11 个达标。external_material_order 的修正方向已登记台账。所有点位默认值不变。
 - **证据**：`~/.my-agent/decision-evidence/j12-quality-bench/*8points*`。
+
+## 外部材料阅读优先级措辞修正后的基准重跑（2026-10-02，分支 `claude/be-material-criteria`，基于 `b5be542e8`）
+
+- **做法**：只改逐页题的候选说明与题面（键和结构不变），用同一基准、同一期望重跑 external_material_order。环境 `env -i` 隔离，只用 Jev 连接文件（0600，用完删）。
+- **结果**：22/36 → **36/36**。Jev 12 次调用全部成功，`jev-1.13.0`。原来答 `not_needed`/`no_match` 的无关页，现在都答 `later`。
+- **对照**：同一时段旧措辞再跑一遍（不登记）仍是 22/36，提升来自措辞。
+- **耗时**：新措辞中位 2.2 秒、最长 3.5 秒；同时段旧措辞中位 2.2 秒、最长 4.1 秒；早上首轮中位 1.4 秒。变慢是时段网络造成的。本点位是前台点位（默认 3 秒）：这个时段新措辞 12 次里有 1 次超过 3 秒，打开后这类调用会超时、保留原展示（样本小，不外推比例）。
+- **结论**：12 个点位全部达标。点位仍默认关闭。
+- **证据**：`~/.my-agent/decision-evidence/j12-quality-bench/*material-*`。

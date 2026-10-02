@@ -69,19 +69,19 @@
       "scored_questions": 20
     },
     "external_material_order": {
-      "accuracy": 0.6111,
+      "accuracy": 1.0,
       "call_failures": 0,
       "calls": 12,
       "cases_digest": "2f83982ad9ad581e852bd379ed8120b3574da3fb66f0df775be81490b1fbe777",
-      "elapsed_ms_max": 2177,
-      "elapsed_ms_median": 1406.5,
-      "material_digest": "74a15c3bcac7b7b42b7d8c7f63a123aba0289dc35fa89bacb3c5d31206019261",
-      "met": false,
+      "elapsed_ms_max": 3538,
+      "elapsed_ms_median": 2155.5,
+      "material_digest": "63eea3389ed1b8dd9f1e2de3a00cf67ef02fee8b615235f894cc485d8014dcfe",
+      "met": true,
       "models": [
         "jev-1.13.0"
       ],
-      "passed": 22,
-      "recorded_at": "2026-10-02T04:08:52-0700",
+      "passed": 36,
+      "recorded_at": "2026-10-02T05:10:13-0700",
       "reps": 2,
       "scored_questions": 36
     },

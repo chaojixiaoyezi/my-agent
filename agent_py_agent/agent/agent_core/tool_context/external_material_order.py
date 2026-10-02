@@ -26,8 +26,17 @@ _POINT = "external_material_order"
 _MAX_HINT_CHARS = 1024
 _URL_WITH_QUERY = re.compile(r"(?:\b[A-Za-z][A-Za-z0-9+.-]*:)?//[^\s<>\"']*\?")
 _RANKS = {"first": 0, "normal": 1, "later": 2}
-_CHOICES = {"first": "优先阅读", "normal": "按原顺序阅读", "later": "稍后阅读，仍保留原页"}
-_NON_SELECTIONS = {"not_needed": "无需额外建议", "no_match": "无法匹配优先级", "abstain": "无法可靠判断"}
+# 逐页题的候选说明（照 J12b，2026-10-02）：旧措辞 not_needed=“无需额外建议”、no_match=“无法匹配优先级”被决策模型读成
+# “这一页用不上”，对无关页答 not_needed/no_match；任何非排序回答都会让整次不给提示（基准 0.61，14 道错题全是这种）。
+# 现在每档都写明对“这一页”意味着什么，无关页明确指向 later；候选键与题目结构不变，非排序回答的处理也不变。
+_CHOICES = {"first": "这一页与当前问题直接相关：优先阅读",
+            "normal": "这一页与当前问题有一些关系：按原顺序阅读",
+            "later": "这一页与当前问题无关或关系很弱：放到后面读（原页仍保留在结果里，不会被删除）"}
+_NON_SELECTIONS = {
+    "not_needed": "不打算给这一页排阅读优先级；选它会让本次不给任何阅读建议。只是与问题无关请选 later",
+    "no_match": "first/normal/later 三档都不适合这一页；选它会让本次不给任何阅读建议。只是与问题无关请选 later",
+    "abstain": "无法可靠判断这一页，明确弃权；选它会让本次不给任何阅读建议",
+}
 
 
 # LLM: 只在独立点注册且启用后准备材料；原阶段期限覆盖准备/发送/消费，真实停止传播，普通故障不得影响已执行结果。
@@ -172,7 +181,8 @@ def _material(record: object, archive: dict) -> tuple[dict, dict, str]:
         rows.append({"id": key, "content_hash": page["content_hash"],
                      "excerpt": _safe_excerpt({"title": page["title"], "preview": page["preview"]})})
         questions[key] = {"type": "choice", "instructions": {
-            "page_id": key, "question": "依据当前问题建议本页阅读优先级；这是展示建议，不删除或改写来源。"},
+            "page_id": key, "question": "给这一页选阅读优先级：与当前问题直接相关选 first，有些关系选 normal，"
+                                        "无关或很弱选 later；这是展示建议，不删除或改写来源。"},
             "criteria": {**_CHOICES, **_NON_SELECTIONS, "need_data": {
                 "meaning": "现有摘录不足；本增强不补读，保留原结果",
                 "required_refs": [{"kind": "existing_page", "ref": key}],
