@@ -69,6 +69,7 @@ class _Observer:
         return dict(self.result)
 
     def click_candidate(self, meta, *, cancelled=None):
+        self.received_cancelled = cancelled  # 记下接管层传下来的取消判定，用例断言它就是 CallContext.cancelled
         if cancelled is not None and cancelled():
             raise ObservationError("cancelled", "宿主已取消，未点击")
         self.calls.append(("click", meta))
@@ -95,13 +96,14 @@ def test_call_observation_tool_keeps_the_payload_out_of_the_body_and_encodes_fai
     observer.error = ObservationError("not_found", "没有这一代")
     assert glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, context)[1] == {"my_agent_observation_error": {"code": "not_found"}}
     observer.error = None
+    assert observer.received_cancelled is context.cancelled, "接管层把 CallContext.cancelled 原样传给核心的 click_candidate"
     gone = glue.CallContext(meta=meta, cancelled=lambda: True)
-    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, gone)
-    assert (is_error, structured) == (True, {"my_agent_observation_error": {"code": "cancelled"}}) and observer.calls[-1][0] != "click" or observer.calls[-1] == ("click", meta)
-    assert all(call != ("click", meta) or call is not None for call in observer.calls)
     before = len(observer.calls)
+    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, gone)
+    assert (is_error, structured) == (True, {"my_agent_observation_error": {"code": "cancelled"}})
+    assert len(observer.calls) == before, "已取消的点击不碰 observer"
     assert glue.call_observation_tool(observer, "observe_window", {}, gone)[1] == {"my_agent_observation_error": {"code": "cancelled"}}
-    assert len(observer.calls) == before, "已取消的调用不碰 observer"
+    assert len(observer.calls) == before, "已取消的观察也不碰 observer"
 
 
 # 函数用途: 假的 mcp.types：只造 ServerResult / CallToolResult / TextContent / CallToolRequest 四个形状。
@@ -415,3 +417,22 @@ def test_cancelled_click_queued_behind_a_cancelled_slow_observation_never_clicks
     asyncio.run(scenario())
     assert [call for call in observer.calls if call[0] == "click"] == [], "用户按了停止之后屏幕上不会多点一下"
     assert observer.calls == [("observe", None)], observer.calls
+
+
+def test_cancellation_during_recheck_reaches_the_real_observer_through_the_glue():
+    from agent_py_agent.tests.test_screen_observation_core import _meta, _observer
+
+    backend, observer = _observer()
+    meta = _meta(observer.observe())
+    flag = {"cancelled": False}
+    original_capture = backend.capture
+
+    def capture_then_cancel(info):  # 复核重采样期间宿主取消了：只有接管层把 cancelled 传下去，核心才看得见
+        flag["cancelled"] = True
+        return original_capture(info)
+
+    backend.capture = capture_then_cancel
+    context = glue.CallContext(meta=meta, cancelled=lambda: flag["cancelled"])
+    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "cand-x"}, context)
+    assert (is_error, structured, body["code"]) == (True, {"my_agent_observation_error": {"code": "cancelled"}}, "OBSERVATION_CANCELLED")
+    assert backend.clicks == [], "复核期间被取消，真正点击前拦住"
