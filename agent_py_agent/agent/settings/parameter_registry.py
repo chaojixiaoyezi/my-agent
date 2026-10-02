@@ -30,11 +30,10 @@ from .user_config_capability import (
 
 SAFETY_FREE = "free"
 SAFETY_BOUNDARY = "boundary"
-# 参数来源文件（P17，2026-10-01）：登记表覆盖四份配置，写入按 source 选文件与正式加载器回读。
+# 参数来源文件（P17，2026-10-01）：登记表覆盖三份配置（log_analysis 已删除，2026-10-01），写入按 source 选文件与正式加载器回读。
 SOURCE_AGENT = "agent"
 SOURCE_CAPABILITY = "capability"
 SOURCE_RUNTIME_GUARD = "runtime_guard"
-SOURCE_LOG_ANALYSIS = "log_analysis"
 # 键名按下划线切成记号，命中任一记号即为安全边界：凭据、权限与审批、管理员、访问与信任名单、网络与外部地址、端口、
 # 请求头与回调、环境变量、锁（含飞书私聊闲置锁定这类访问控制时长）。宁可多拦：边界项只是模型不能改，用户仍可在宿主入口或配置文件里改。
 _BOUNDARY_TOKENS = frozenset({
@@ -103,7 +102,7 @@ class ParameterSpec:
     range: str = ""
     owner_module: str = ""
     reader: str = ""
-    # 来源文件（P17，2026-10-01）：agent/capability/runtime_guard/log_analysis；写入口按它选目标文件与回读加载器。
+    # 来源文件（P17，2026-10-01）：agent/capability/runtime_guard；写入口按它选目标文件与回读加载器。
     source: str = SOURCE_AGENT
 
     @property
@@ -149,7 +148,7 @@ _EXTRA_FREE_KEYS: dict[str, str] = {
 
 # LLM: 主配置沿用键名记号判定；其余来源默认边界，只有 _EXTRA_FREE_KEYS 显式名单放行。新来源键的 writable
 #   只由这份安全等级与 BOUNDARY_KEYS/TUNABLE_KEYS 决定，不看说明文字。
-# 函数用途: 按参数来源给安全等级（capability/runtime_guard/log_analysis 默认边界）。
+# 函数用途: 按参数来源给安全等级（capability/runtime_guard 默认边界）。
 def _safety_for(source: str, key: str, value_type: str) -> str:
     if source == SOURCE_AGENT:
         return classify_safety(key, value_type)
@@ -201,14 +200,14 @@ def _yaml_descriptions() -> dict[str, str]:
     return _descriptions_from_lines(packaged_config_path().read_text(encoding="utf-8").splitlines())
 
 
-# 函数用途: 返回另三份随包配置（capability/runtime_guard/log_analysis）的路径，与主配置同目录。
+# 函数用途: 返回另两份随包配置（capability/runtime_guard）的路径，与主配置同目录。
 def _packaged_extra_config_path(source: str) -> Path:
     return packaged_config_path().with_name(f"{source}_config.yaml")
 
 
 # LLM: 另三份配置没有 dataclass 的按 YAML 顶层键登记：说明、默认值、类型都从随包 YAML 取（与主配置同一注释规则）。
 #   这些配置没有加载器元数据键，全部进登记表；effect 统一是重启生效（进程会缓存已加载配置）。
-# 函数用途: 从一份随包 YAML 生成参数登记（runtime_guard / log_analysis 共用）。
+# 函数用途: 从一份随包 YAML 生成参数登记（runtime_guard 用）。
 def _yaml_source_specs(source: str) -> dict[str, ParameterSpec]:
     from .config_io import load_simple_yaml
 
@@ -253,7 +252,7 @@ def _capability_specs() -> dict[str, ParameterSpec]:
 
 
 # LLM: 进程内缓存一次；四份随包配置或 dataclass 变化只随新版本发布生效，不需要热刷新。
-# 函数用途: 返回全部参数的登记表（键 → ParameterSpec），主配置 + capability + runtime_guard + log_analysis。
+# 函数用途: 返回全部参数的登记表（键 → ParameterSpec），主配置 + capability + runtime_guard。
 @lru_cache(maxsize=1)
 def parameter_registry() -> dict[str, ParameterSpec]:
     descriptions = _yaml_descriptions()
@@ -276,13 +275,12 @@ def parameter_registry() -> dict[str, ParameterSpec]:
         )
     registry.update(_capability_specs())
     registry.update(_yaml_source_specs(SOURCE_RUNTIME_GUARD))
-    registry.update(_yaml_source_specs(SOURCE_LOG_ANALYSIS))
     return registry
 
 
 # LLM: 只读。展示层问“这个参数现在运行用的值”：主配置用调用方持有的 Gateway 启动配置；capability 读运行时
 #   实际加载的那份文件（capability_path 由调用方按 capability_config_for_agent 同一路径解析，文件不存在时
-#   运行时按默认实例走，这里也回落登记默认）；runtime_guard/log_analysis 运行时只读随包文件、没有用户覆盖层，
+#   运行时按默认实例走，这里也回落登记默认）；runtime_guard 运行时只读随包文件、没有用户覆盖层，
 #   所以固定读随包默认。不写文件、不调模型。
 # 函数用途: 返回一个参数当前的运行值（按来源分派读取）。
 def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None) -> object:
@@ -300,12 +298,7 @@ def running_value(spec: ParameterSpec, config: object | None = None, *, capabili
         from .runtime_guard_config import runtime_guard_data
 
         return runtime_guard_data().get(spec.key, spec.default)
-    from .config_io import load_simple_yaml
-
-    try:
-        return load_simple_yaml(_packaged_extra_config_path(SOURCE_LOG_ANALYSIS)).get(spec.key, spec.default)
-    except OSError:
-        return spec.default
+    return spec.default
 
 
 # 加载器写进 AgentConfig 的元数据（配置文件路径、来源、分层、告警），不是用户参数：/settings 的列表与计数、参数搜索都不列出。
@@ -418,7 +411,6 @@ __all__ = [
     "SAFETY_FREE",
     "SOURCE_AGENT",
     "SOURCE_CAPABILITY",
-    "SOURCE_LOG_ANALYSIS",
     "SOURCE_RUNTIME_GUARD",
     "ParameterSpec",
     "applied_value",

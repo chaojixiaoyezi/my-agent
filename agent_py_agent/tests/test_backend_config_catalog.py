@@ -23,12 +23,10 @@ CATALOG_PATH = REPO_ROOT / "frontend" / "config" / "backend-config-catalog.json"
 YAML_FILES = (
     ("agent_config", "agent_py_agent/config/agent_config.yaml"),
     ("capability_config", "agent_py_agent/config/capability_config.yaml"),
-    ("log_analysis_config", "agent_py_agent/config/log_analysis_config.yaml"),
 )
 SOURCE_TO_ID = {
     "agent_config.yaml": "agent_config",
     "capability_config.yaml": "capability_config",
-    "log_analysis_config.yaml": "log_analysis_config",
 }
 
 

@@ -55,8 +55,8 @@
   - 设置变更记录：500 条；
   - 渠道投递记录：7 天；
   - 后台进程会话：保留最近 128 个。
-- **其它**：`O/quota.json` 的 `max_disk_mb` 默认 0，即不设磁盘上限；`log_analysis_config.yaml` 的 `source_retention_days: 30`
-  没有任何 Python 代码读取。
+- **其它**：`O/quota.json` 的 `max_disk_mb` 默认 0，即不设磁盘上限。
+  （注：`log_analysis_config.yaml` 已于 2026-10-01 删除——死配置，其 `source_retention_days: 30` 无任何 Python 代码读取。）
 
 ## 4. 按大小排序（管理员 home 与全局，产品写入）
 

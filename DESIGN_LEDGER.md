@@ -14,6 +14,22 @@
 - **验证**：warn 基线相对 step16y（3598 条）三个目标文件 **0 新增**（全部新增集合也为空）；
   strict code-size 2239 blocked=False；相关测试 217 passed（5+8+204）、guards9 166 passed。
 
+## 删除死配置 log_analysis_config.yaml，参数中心改三来源（2026-10-01，分支 `worker/ds2-del-log-analysis`，基于 `claude/3a-step16z` 的 `904b441b4`，已实现，待集成）
+
+- **起因**：P17 修订时核实 log_analysis 产品代码无任何读取点；3a 确认 `agent/log_analysis/` 包早已不存在，
+  `log_analysis_config.yaml`（20 键）是死配置。按铁律“确定不用的旧字段、旧目录、旧兼容分支要删；配置必须真的生效”删除。
+  仓库根目录 `mutation_testing.py`/`mutation_tester.py` 是开发辅助脚本仍引用旧模块，按 3a 指示本轮不动。
+- **做法**：删随包文件；参数中心去掉 log_analysis 来源——`parameter_registry` 删 `SOURCE_LOG_ANALYSIS` 与登记/运行值分支
+  （`running_value` 未知来源回落 `spec.default`）、`parameter_changes._effective` 删 log_analysis 加载器分派、只读来源集合只剩
+  `runtime_guard`、`settings_control_service`/`user_config_tool`/`user_config_capability` 只读标注同步；前端
+  `sync-backend-config.mjs` 去来源/分类/categoryFor/requiresUnlock/source 文案并重新生成目录（270→250 项，`--check` 通过）；
+  `scripts/code_size_rules.py` 清掉 JUNK_NAME_BASELINE 指向已删包的两条死条目。
+- **验证**：相关 11 文件 186 passed、guards9 全量 167 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package 全过；
+  warn 基线比对 step16y → ADDED=0；size_diff.sh 新增告警 0。详见 TESTS.md。
+- **size_diff 顺手拆平**：warn 首跑发现 `runtime.py::BackgroundMainAgentRuntime`（class high-risk，202 行）相对 step16y 是
+  集成分支其它提交引入的新增；按规则 9 拆平——`_run_agent` 尾部收尾段抽成模块级函数 `_finalize_background_execution`
+  （参数命名避开 `request` 名单的 params +1 规则），行为逐行不变，拆后 size_diff 新增告警 0。
+
 ## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察 → 已实施）
 
 ## P17 合入后的 code-size 拆平（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`，已实现，待集成）

@@ -10,7 +10,6 @@ const outputPath = resolve(frontendRoot, "config/backend-config-catalog.json");
 const sources = [
   ["agent_config", "agent_config.yaml", "agent_py_agent/config/agent_config.yaml"],
   ["capability_config", "capability_config.yaml", "agent_py_agent/config/capability_config.yaml"],
-  ["log_analysis_config", "log_analysis_config.yaml", "agent_py_agent/config/log_analysis_config.yaml"],
 ].map(([id, label, path]) => ({ id, label, path: resolve(repoRoot, path) }));
 
 const categoryMeta = {
@@ -24,7 +23,6 @@ const categoryMeta = {
   security: ["安全 / 审计", "权限、审计、通知、并发锁和 watchdog", 8],
   cli: ["CLI / 展示", "命令行默认 limit、预览和折叠配置", 9],
   capability: ["能力路由", "skill、tool、MCP、授权和能力上抛配置", 10],
-  log_analysis: ["日志分析", "安全日志分析模块独立配置", 11],
 };
 
 const choiceMap = {
@@ -169,7 +167,6 @@ function trailingComment(line) {
 
 function inferCategory(sourceId, key) {
   if (sourceId === "capability_config") return "capability";
-  if (sourceId === "log_analysis_config") return "log_analysis";
   if (key.startsWith("memory_") || key.startsWith("local_store_") || key === "auto_save_memory") return "memory";
   if (
     key.startsWith("subagent_") ||
@@ -262,7 +259,6 @@ function fieldMeta(source, entry, order) {
 function isAdvanced(key, category) {
   return (
     category === "capability" ||
-    category === "log_analysis" ||
     key.includes("debug") ||
     key.includes("timeout") ||
     key.includes("limit") ||
@@ -284,7 +280,6 @@ function restartRequired(key) {
 function requiresUnlock(key, category) {
   if (category === "subagent") return !["enable_subagents", "subagent_board_limit"].includes(key);
   if (category === "capability") return true;
-  if (category === "log_analysis") return key.endsWith("_enabled") || key.includes("execution") || key.includes("dispatch");
   return false;
 }
 
@@ -294,7 +289,7 @@ function riskForField(key, category, type) {
     return { level: "high", warning: "会改变运行边界或加载来源，建议只在明确知道影响时修改。" };
   }
   if (requiresUnlock(key, category)) {
-    return { level: "medium", warning: "默认保护字段，修改后可能影响子代理、能力路由或安全日志分析行为。" };
+    return { level: "medium", warning: "默认保护字段，修改后可能影响子代理或能力路由行为。" };
   }
   if (category === "tools" && (key.includes("write") || key.includes("shell") || key.includes("web"))) {
     return { level: "medium", warning: "放宽工具边界会影响模型调用成本和执行风险。" };
@@ -343,7 +338,7 @@ function buildCatalog() {
       categories,
       meta: {
         lastUpdated: "generated-from-backend-config",
-        source: "agent_config.yaml + capability_config.yaml + log_analysis_config.yaml",
+        source: "agent_config.yaml + capability_config.yaml",
         editable: true,
         exportFormats: ["yaml", "json"],
       },

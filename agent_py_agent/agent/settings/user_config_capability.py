@@ -407,7 +407,7 @@ def mask_value(key: str, value: object) -> str:
 
 
 # LLM: 非 agent 来源的读取文件路径按 source 解析：capability 的用户文件是运行时实际读取的那份（capability_path，
-#   调用方按 capability_config_for_agent 同一路径解析）；runtime_guard/log_analysis 没有用户覆盖层，只有随包默认。
+#   调用方按 capability_config_for_agent 同一路径解析）；runtime_guard 没有用户覆盖层，只有随包默认。
 #   早返回压平嵌套：主配置/未知来源直接回原路径。
 # 函数用途: 按参数来源给出读取用户值与随包默认值要用的两个文件路径。
 def _fact_paths(
@@ -430,7 +430,7 @@ def _fact_paths(
 #   能不能改只由参数中心登记表的 writable 回答；这里不再给旧白名单的 tunable 字段（09-27 模型见 writable=true、
 #   tunable=false 两个口径，误以为 max_tokens 改不了）。P17 起按登记表的 source 选文件：主配置用传入的
 #   user_path/default_path；capability 的用户文件是运行时实际读取的那份（capability_path，调用方按
-#   capability_config_for_agent 同一路径解析）；runtime_guard/log_analysis 没有用户覆盖层，只有随包默认。
+#   capability_config_for_agent 同一路径解析）；runtime_guard 没有用户覆盖层，只有随包默认。
 # 函数用途: 读取某个键的用户值与随包默认值，并给出当前生效值与来源。
 def read_config_fact(
     key: str, *, user_path: Path | None, default_path: Path, capability_path: Path | None = None

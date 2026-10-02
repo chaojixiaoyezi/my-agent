@@ -628,7 +628,7 @@ agent_py_agent/
 |   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机
 |   |   |-- constants_catalog.py      # 代码常数目录的运行时只读入口（/settings internal 与 user_config search 共用），只读随包 JSON
 
-|   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机、来源文件（agent/capability/runtime_guard/log_analysis）
+|   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机、来源文件（agent/capability/runtime_guard）
 |   |   |-- parameter_metadata.py    # 参数登记表元数据自动推导（单位/范围/归属模块/读取方），只读纯函数
 |   |   |-- parameter_changes.py      # 参数中心唯一写入口：按来源写对应文件、按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用

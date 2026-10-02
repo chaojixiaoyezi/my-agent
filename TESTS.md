@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## 删除死配置 log_analysis_config.yaml，参数中心改三来源（2026-10-01，分支 `worker/ds2-del-log-analysis`，基于 `904b441b4`）
+
+- **删除**：`agent_py_agent/config/log_analysis_config.yaml`（20 键）。依据：P17 修订时核实 log_analysis 产品代码无任何读取点，
+  3a 确认 `agent/log_analysis/` 包早已不存在；仓库根目录 `mutation_testing.py`/`mutation_tester.py` 是开发辅助脚本仍引用旧模块，
+  按 3a 指示本轮不动（只记录）。
+- **参数中心**：`parameter_registry` 删 `SOURCE_LOG_ANALYSIS`、登记与 `running_value` 分支（未知来源回落 `spec.default`）；
+  `parameter_changes` 删 `_effective` 的 log_analysis 加载器分派，只读来源集合只剩 `runtime_guard`（`PARAMETER_SOURCE_READ_ONLY`
+  语义不变）；`settings_control_service`/`user_config_tool`/`user_config_capability` 的只读标注与注释同步；
+  `scripts/code_size_rules.py` 清掉 JUNK_NAME_BASELINE 指向已删包的两条死条目。
+- **前端**：`sync-backend-config.mjs` 去掉来源数组、分类、categoryFor、requiresUnlock、source 文案；重新生成
+  `backend-config-catalog.json` 270→250 项，`node frontend/scripts/sync-backend-config.mjs --check` 通过。
+- **测试**：`test_parameter_registry.py`/`test_parameter_sources.py`/`test_frontend_settings_labels.py`/
+  `test_backend_config_catalog.py`/`test_parameter_metadata.py` 更新（去掉 log_analysis 键断言、只读来源用例只剩 runtime_guard、
+  前端权威键集合两份 YAML、YAML_FILES 去掉该文件）；新增断言：随包 config 目录不再有 `log_analysis_config.yaml` 且登记表无
+  `log_analysis` 来源键（`test_log_analysis_config_removed_from_packaged_config`）。
+- **验证**：相关 11 文件 **186 passed**；guards9 全量 **167 passed**（含 test_packaging）；check_import_boundaries **0 条**；
+  ruff **All checks passed**；check_doc_sync **PASS**；code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；
+  check_clean_package **OK**；warn 基线比对 step16y **ADDED=0**；`size_diff.sh` **新增告警 0**。
+- **size_diff 顺手拆平（集成分支其它提交引入，非本轮 log_analysis 改动所致）**：warn 基线首跑发现
+  `runtime.py::BackgroundMainAgentRuntime`（class high-risk，202 行接近软上限）相对 step16y 是新增；按规则 9 拆平——
+  `_run_agent` 尾部收尾段（取消兜底 + 收集执行结果 + 会话任务回报）抽成模块级函数 `_finalize_background_execution`
+  （参数用 `run_request` 命名，避开 params 计数里 `request` 名单的 +1 规则），行为逐行不变；拆后背景相关 8 文件测试与
+  guards9 重跑全过，`size_diff.sh` 新增告警 **0**。
+
 ## P17 合入后的 code-size 拆平，行为不变（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`）
 
 - 拆掉 P17 新增的 3 条 high-risk 告警（只重构，不改行为、错误码、回执字段）：

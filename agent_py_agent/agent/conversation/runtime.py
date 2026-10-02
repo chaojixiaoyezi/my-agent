@@ -977,30 +977,38 @@ class BackgroundMainAgentRuntime:
         except Exception as exc:
             _settle_unconsumed_background_turn_input(self.agent, request, exc)
             raise
-        # LLM: 取消可能在本片进入模型调用之后才到；调用返回时这一片的答复**不得交付**，任务也不许按
-        #   "正常完成"收口。这里是**纵深防线**，不是常规停法：常规停法有两道，都在它之前——
-        #   ①停止控制把旗立到本线程后，在途模型调用在等待关卡里看到旗就丢掉结果并抛中断
-        #     （tool_model_generation._wait_for_generation_result）；
-        #   ②调用返回后，run_with_heartbeat 的二次检查会把认领结算成 cancelled。
-        #   判据**不能用本线程的 is_interrupted()**——它是 per-thread 的，停止旗不在本线程时读不到。
-        #   所以这里读**持久的结构化事实**：这条会话任务是否已被取消（cancelled 是终态，跨线程可见、不会被撤销）。
-        #   实测（故障注入"停止照常回报确认但不立旗"）：去掉这一段，只有这个窗口会交付迟到的答复 → 它确实生效。
-        #   判据按任务号读（不按绑定反查），所以开跑后、第一次认领正文之前到的取消（任务还没绑定回合）也在这里兜住：
-        #   那一次没有正文的模型调用已经发生（已知代价），答复在这里丢弃，随后按同一判据结案唤醒。
-        if _session_task_turn_was_cancelled(self.agent, request):
-            raise InterruptedError("后台回合在交付前发现任务已取消")
-        execution = collect_background_execution_result(self.agent, result, display_snapshot)
-        # LLM: 会话间派活：本次回合若属于某条会话任务，就在这里推进到终态并把结构化结果回报给发送方。
-        #   只读结构化字段（唤醒信封的回合号 + 任务记录里的绑定），不解析正文；回报失败不影响本回合交付。
-        #   回合号必须与注入正文时用的同一个，所以按与 `_run_params` 相同的来源算，而不是另取一路。
-        # 函数用途: 把目标回合的正常结束变成发送方可见的任务回报。
-        _close_out_session_task_turn(
-            self.agent,
-            request,
-            execution,
-            turn_id=_scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request),
-        )
-        return execution
+        # 模型调用返回后统一收尾（取消兜底、收集执行结果、回报会话任务），见 _finalize_background_execution。
+        return _finalize_background_execution(self.agent, request, result, display_snapshot)
+
+
+# LLM: 后台片正常返回模型调用结果后，取消可能在本片进入模型调用之后才到；调用返回时这一片的答复
+#   不得交付，任务也不许按“正常完成”收口。这里是纵深防线，不是常规停法：常规停法有两道，都在它之前——
+#   ①停止控制把旗立到本线程后，在途模型调用在等待关卡里看到旗就丢掉结果并抛中断
+#     （tool_model_generation._wait_for_generation_result）；②调用返回后 run_with_heartbeat 的二次检查
+#   会把认领结算成 cancelled。判据不能用本线程的 is_interrupted()（per-thread，停止旗不在本线程时读不到），
+#   只能读持久的结构化事实：这条会话任务是否已被取消（cancelled 是终态，跨线程可见、不会被撤销）。
+#   判据按任务号读（不按绑定反查），所以开跑后、第一次认领正文之前到的取消（任务还没绑定回合）也在这里兜住：
+#   那一次没有正文的模型调用已经发生（已知代价），答复在这里丢弃，随后按同一判据结案唤醒。
+# 函数用途: 收尾一次正常结束的后台执行：取消兜底、收集执行结果、回报会话任务发送方，返回执行结果。
+def _finalize_background_execution(
+    agent: object,
+    run_request: BackgroundRunRequest,
+    result: object,
+    display_snapshot: object,
+) -> BackgroundExecutionResult:
+    if _session_task_turn_was_cancelled(agent, run_request):
+        raise InterruptedError("后台回合在交付前发现任务已取消")
+    execution = collect_background_execution_result(agent, result, display_snapshot)
+    # LLM: 会话间派活：本次回合若属于某条会话任务，就在这里推进到终态并把结构化结果回报给发送方。
+    #   只读结构化字段（唤醒信封的回合号 + 任务记录里的绑定），不解析正文；回报失败不影响本回合交付。
+    #   回合号必须与注入正文时用的同一个，所以按与 _run_params 相同的来源算，而不是另取一路。
+    _close_out_session_task_turn(
+        agent,
+        run_request,
+        execution,
+        turn_id=_scheduler_run_id(run_request) or _session_task_run_id(run_request) or _session_message_run_id(run_request),
+    )
+    return execution
 
 
 # LLM: 后台片没有正常结束（模型调用失败、被取消或中断）时，对这一片的精确回合号走与前台终态（request_execution.

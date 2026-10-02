@@ -71,8 +71,8 @@ def test_ranges_table_has_no_blank_entries():
 
 def test_every_listed_key_has_a_reader():
     """主配置的 219 个用户可见参数都有读取方与归属模块（加载器元数据不在其中）；推导表本身不读真实文件正文。
-    P17 起登记表还含 capability/runtime_guard/log_analysis 三份配置：这些键按各自加载器读取，不在
-    parameter_metadata 的 AgentConfig 推导范围内（log_analysis 尚无产品读取方），不强制有读取方。"""
+    P17 起登记表还含 capability/runtime_guard 两份配置：这些键按各自加载器读取，不在
+    parameter_metadata 的 AgentConfig 推导范围内，不强制有读取方。"""
     registry = parameter_registry()
     readers = field_readers()
     missing = sorted(

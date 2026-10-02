@@ -35,8 +35,6 @@ JUNK_NAMES = {
     "utils.py",
 }
 JUNK_NAME_BASELINE = {
-    "agent_py_agent/agent/log_analysis/analytics/detectors/helpers.py",
-    "agent_py_agent/agent/log_analysis/parsers/common.py",
     "agent_py_agent/agent/subagents/utils.py",
     "agent_py_agent/cli/common.py",
 }

@@ -19,7 +19,6 @@ from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
 from .parameter_registry import (
     SOURCE_AGENT,
     SOURCE_CAPABILITY,
-    SOURCE_LOG_ANALYSIS,
     SOURCE_RUNTIME_GUARD,
     ParameterSpec,
     applied_value_with,
@@ -53,7 +52,7 @@ class ChangeOrigin:
 
 # LLM: 写入口要写哪个文件由参数来源决定：agent 主配置写在用户配置（user_path），capability 写在运行时实际读取的
 #   那份文件（capability_path，由调用方按 capability_config_for_agent 同一路径解析，不是用户配置同目录）。
-#   runtime_guard/log_analysis 运行时没有用户覆盖层，写入口整体拒绝，不在这里给路径。
+#   runtime_guard 运行时没有用户覆盖层，写入口整体拒绝，不在这里给路径。
 # 类用途: 一次参数修改可能涉及的各来源文件路径。
 @dataclass(frozen=True)
 class WritePaths:
@@ -108,8 +107,8 @@ def _target(user_path: Path | None) -> Path:
 
 # LLM: 按参数来源给写入目标。agent 主配置必须已存在；capability 写运行时实际读取的那份文件
 #   （agent.capability_config_path 或 default_capability_config_path(agent.root)，由调用方解析传入），
-#   文件不存在时允许新建（运行时读不到时按默认实例走，所以建好文件后重启就能读到）。runtime_guard /
-#   log_analysis 运行时没有用户覆盖层，写什么都不会生效，这里直接拒绝，不给目标路径。
+#   文件不存在时允许新建（运行时读不到时按默认实例走，所以建好文件后重启就能读到）。runtime_guard
+#   运行时没有用户覆盖层，写什么都不会生效，这里直接拒绝，不给目标路径。
 # 函数用途: 按参数来源给出实际写入目标（主配置=用户配置文件，capability=运行时读取的文件）。
 def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
     if spec.source == SOURCE_AGENT:
@@ -126,13 +125,13 @@ def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
 
 
 # LLM: 先查登记表，再查边界：BOUNDARY_KEYS 给出原因原样回显；其余边界项给统一原因。
-#   运行时没有覆盖层的来源（runtime_guard/log_analysis）先于安全边界拒绝，原因要结构化（PARAMETER_SOURCE_READ_ONLY）。
+#   运行时没有覆盖层的来源（runtime_guard）先于安全边界拒绝，原因要结构化（PARAMETER_SOURCE_READ_ONLY）。
 # 函数用途: 取出一个可写参数的登记信息，不可写时拒绝。
 def _writable_spec(key: str) -> ParameterSpec:
     spec = parameter_registry().get(str(key or "").strip())
     if spec is None:
         raise ParameterChangeError("PARAMETER_UNKNOWN", f"没有名为 '{key}' 的参数；可以先搜索参数名。")
-    if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS}:
+    if spec.source == SOURCE_RUNTIME_GUARD:
         raise ParameterChangeError(
             "PARAMETER_SOURCE_READ_ONLY",
             f"'{spec.key}' 属于 {spec.source} 配置：运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索。")
@@ -181,7 +180,7 @@ def _render_number(spec: ParameterSpec, text: str) -> tuple[object, str]:
 
 # LLM: 用正式加载器读出进程重启后会拿到的值；这是“改了是否真的生效”的唯一判据。主配置用 load_config，
 #   capability 用 load_capability_config（capability 目标路径是运行时实际读取的那份，见 _write_target），
-#   runtime_guard 用 runtime_guard_policy（values 字典），log_analysis 用 load_simple_yaml（config_io 是它的读取器）。
+#   runtime_guard 用 runtime_guard_policy（values 字典）。
 # 函数用途: 读取目标文件经完整加载后的某个参数值（按来源选加载器）。
 def _effective(path: Path, key: str) -> object:
     source = getattr(parameter_registry().get(key), "source", SOURCE_AGENT)
@@ -193,10 +192,6 @@ def _effective(path: Path, key: str) -> object:
         from .runtime_guard_config import runtime_guard_policy
 
         return runtime_guard_policy(path=path).values.get(key)
-    if source == SOURCE_LOG_ANALYSIS:
-        from .config_io import load_simple_yaml
-
-        return load_simple_yaml(path).get(key)
     from .config import load_config
 
     return getattr(load_config(path), key)

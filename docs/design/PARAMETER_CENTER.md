@@ -22,14 +22,17 @@
   文件按名字定位（`settings/constants_catalog.locate_line`/`entry_with_line`），定位不到就只显示文件。
 - **后续按模块分批整改**（改名、合并、补单位与说明）时以目录为准，每批完成后重新生成目录并删掉对应的白名单条目。
 
-## 2026-10-01 登记表增加来源维度：四份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
+## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
 
-> 2026-10-01 修订（3a 评审 5a51735c1 后）：capability 写入目标与运行值改走运行时实际读取的路径；runtime_guard/log_analysis 改为只读来源。
+> 2026-10-01 修订（3a 评审 5a51735c1 后）：capability 写入目标与运行值改走运行时实际读取的路径；runtime_guard 改为只读来源。
+> 2026-10-01 删除 log_analysis 来源（分支 `worker/ds2-del-log-analysis`）：log_analysis_config.yaml 是死配置——产品代码无任何读取点，
+> agent/log_analysis/ 包早已移除，仓库仅根目录 mutation_testing.py、mutation_tester.py 两个开发辅助脚本还引用旧模块（本轮不动）；
+> 按“确定不用的旧字段、旧目录要删；配置必须真的生效”铁律删除。当前三来源 agent/capability/runtime_guard，合计 277 键。
 
-- **来源维度**：`ParameterSpec` 增加 `source` 字段，四来源 `agent`（agent_config.yaml，224 键）/`capability`（capability_config.yaml，31 键）/
-  `runtime_guard`（runtime_guard_config.yaml，22 键）/`log_analysis`（log_analysis_config.yaml，20 键），合计 297 键；说明、类型、默认值
+- **来源维度**：`ParameterSpec` 增加 `source` 字段，三来源 `agent`（agent_config.yaml，224 键）/`capability`（capability_config.yaml，31 键）/
+  `runtime_guard`（runtime_guard_config.yaml，22 键），合计 277 键；说明、类型、默认值
   从各随包 YAML 与 dataclass 取，规则与主配置一致（说明取 YAML 注释、无注释用键名兜底并计数）。
-- **统一入口**：`/settings` 与 user_config 的 search/view/history/revert 四来源全覆盖；`_show` 加「来源：<source>_config.yaml」行。
+- **统一入口**：`/settings` 与 user_config 的 search/view/history/revert 三来源全覆盖；`_show` 加「来源：<source>_config.yaml」行。
   写入口仍只有 `parameter_changes` 一套，按来源选目标文件与正式加载器回读校验，写后回读不一致恢复原文件（或删除新建文件）并记
   settings-changes 账本，不另写一套写入：
   - **capability**：写入运行时实际读取的那份文件——`capability_config_for_agent(agent)` 用的路径（`agent.capability_config_path` 或
@@ -37,21 +40,23 @@
     `runtime_config_reload.capability_config_path_for` 解析；文件不存在时新建、只写被改的键（与主配置“只写非默认项”一致），
     用同一个 `load_capability_config` 回读，不一致恢复原文件/删除新建文件并报 PARAMETER_NOT_EFFECTIVE；回执如实写生效时机
     （capability 改动要重启 Gateway 才生效）。账本记在 agent 用户配置旁（settings-changes.jsonl）。
-  - **runtime_guard / log_analysis**：运行时没有用户覆盖层（runtime_guard 固定读随包 `DEFAULT_RUNTIME_GUARD_CONFIG_PATH`，
-    log_analysis 无产品读取点），参数中心里只读——可查看、搜索、看说明，修改一律拒绝并给结构化原因
+  - **runtime_guard**：运行时没有用户覆盖层（固定读随包 `DEFAULT_RUNTIME_GUARD_CONFIG_PATH`），参数中心里只读——
+    可查看、搜索、看说明，修改一律拒绝并给结构化原因
     `PARAMETER_SOURCE_READ_ONLY`（“只能查看和搜索”），不新造运行时读不到的文件。
 - **安全等级**：默认按边界（授权、权限、路径、执行权威链、运行时门、审批、白名单、执行开关、audit 一律模型不可改，用户经宿主入口改）；
   capability 的 17 个能力数值上限键为显式 free 名单（`_EXTRA_FREE_KEYS`，逐键带理由：模型/tool 上下文窗口、skill 检索上限、
-  subagent 数量上限等纯数值容量类，不含任何授权语义）；runtime_guard/log_analysis 全部边界（且只读）。
+  subagent 数量上限等纯数值容量类，不含任何授权语义）；runtime_guard 全部边界（且只读）。
 - **运行值口径**：`running_value` 对 capability 按运行时路径读（owner 有覆盖时显示覆盖值，未传路径回落随包默认）；
   只读来源显示随包默认并标「随包默认、不可覆盖」（`/settings` 与 user_config view 的 source_readonly 字段）。
-- **守卫**：`test_parameter_sources.py` 14 项（四来源 search/view、running_value 真实读文件与覆盖值、capability 写运行时文件且
+- **守卫**：`test_parameter_sources.py` 16 项（三来源 search/view、running_value 真实读文件与覆盖值、capability 写运行时文件且
   `capability_config_for_agent` 读到新值、文件缺失时新建只写被改键、set/reset/revert 链且运行时入口读回默认、只读来源结构化拒绝
-  文件不动、回读失败恢复/删除、边界拒绝文件不动、user_config 工具 set/history/revert/deny 链路、view 标 source_readonly）；
+  文件不动、回读失败恢复/删除、边界拒绝文件不动、user_config 工具 set/history/revert/deny 链路、view 标 source_readonly、
+  随包 config 目录不再有 log_analysis_config.yaml）；
   变异验证 3 个（capability 写目标改回旧路径→运行时入口读不到新值、去掉只读拒绝→结构化码变 PARAMETER_BOUNDARY、running_value
   capability 忽略运行时路径→覆盖值不显示）均被杀红。
-- **前端**：P17 给三份 YAML 补行尾说明注释后，`backend-config-catalog.json` 里 capability/log_analysis 组 14 处占位说明已同步为后端注释
-  （用 `_descriptions_from_lines` 逐条替换）；`test_backend_config_catalog.py`/`test_frontend_settings_labels.py` 已跑通。
+- **前端**：P17 给两份 YAML 补行尾说明注释后，`backend-config-catalog.json` 里 capability 组占位说明已同步为后端注释
+  （用 `_descriptions_from_lines` 逐条替换）；2026-10-01 删除 log_analysis 来源后由生成器重新生成目录（270→250 项），
+  `--check` 通过；`test_backend_config_catalog.py`/`test_frontend_settings_labels.py` 已跑通。
 
 ## 2026-10-01 参数登记表元数据（P8，分支 `worker/ds2-registry-metadata`，已实现，待集成）
 

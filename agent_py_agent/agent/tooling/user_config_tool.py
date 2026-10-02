@@ -419,7 +419,7 @@ def _decision_model_operation(agent: object | None, operation: str, params: dict
 
 # LLM: 只有主 owner 能走到这里（execute 已拦普通 owner）；写入统一交给参数中心，actor 记为 model。有写文件副作用。
 #   set/reset/revert 回执对登记了派生规则的参数附上新值在本片会话模型上的实际效果（_with_applied_effect）。
-#   capability 键写入目标=运行时实际读取的那份文件（capability_path），runtime_guard/log_analysis 会被写入口拒绝。
+#   capability 键写入目标=运行时实际读取的那份文件（capability_path），runtime_guard 会被写入口拒绝。
 # 函数用途: 执行参数中心的查找、修改、恢复默认、查看记录与回滚。
 def _parameter_action(agent: object, params: dict) -> dict[str, object]:
     action = str(params.get("action") or "").strip().lower()
@@ -476,12 +476,12 @@ def _spec_metadata(spec: object) -> dict[str, object]:
 # LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。common 标出参数中心的常用层级（COMMON_KEYS），
 #   只用于推荐，不影响能否修改。登记了派生规则的参数另给 applied_value/applied_rule
 #   （按传入 config 即本片会话模型计算，等于后端实际发送值的同一公式）。capability 键运行值按运行时路径读；
-#   runtime_guard/log_analysis 只读随包并标 source_readonly。只读。
+#   runtime_guard 只读随包并标 source_readonly。只读。
 # 函数用途: 把一条参数登记信息投影成给模型看的结构化事实。
 def _spec_view(spec: object, config: object, *, brief: bool = False,
                capability_path: object | None = None) -> dict[str, object]:
     description = str(spec.description)
-    readonly = spec.source in {"runtime_guard", "log_analysis"}
+    readonly = spec.source == "runtime_guard"
     view = {
         "key": spec.key, "category": spec.category, "writable": spec.writable, "common": spec.common,
         "value_type": spec.value_type, "source": spec.source,

@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: contract tests for the extension plugin registry.
 
 给人看的解释：
-这个测试保证未来 log_analysis/BAS/code_review 插件能通过统一注册入口接入。
+这个测试保证未来 BAS/code_review 等插件能通过统一注册入口接入。
 """
 
 import sys

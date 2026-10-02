@@ -24,7 +24,6 @@ from ..settings.parameter_changes import (
 )
 from ..settings.parameter_registry import (
     SOURCE_CAPABILITY,
-    SOURCE_LOG_ANALYSIS,
     SOURCE_RUNTIME_GUARD,
     ParameterSpec,
     applied_value,
@@ -165,7 +164,7 @@ def _brief(description: str) -> str:
 
 
 # LLM: 显示 Gateway 启动配置里的当前运行值；用户配置改过就注明默认值，改了还没重启就注明“发 /restart 后生效”。
-#   capability 键按运行时路径读（capability_path），runtime_guard/log_analysis 只读随包并标注。值都经 mask_value 脱敏。只读。
+#   capability 键按运行时路径读（capability_path），runtime_guard 只读随包并标注。值都经 mask_value 脱敏。只读。
 # 函数用途: 把一个常用参数排成一行中文。
 def _common_line(spec: ParameterSpec, config: object, stored: dict, capability_path: Path | None = None) -> str:
     running = running_value(spec, config, capability_path=capability_path)
@@ -174,7 +173,7 @@ def _common_line(spec: ParameterSpec, config: object, stored: dict, capability_p
         marks += f"（改过，默认 {_value(spec, spec.default)}）"
     if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(running):
         marks += f"（已改成 {_value(spec, stored[spec.key])}，发 /restart 后生效）"
-    note = "（随包默认、不可覆盖）" if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else ""
+    note = "（随包默认、不可覆盖）" if spec.source == SOURCE_RUNTIME_GUARD else ""
     return f"- {spec.key} = {_value(spec, running)}{marks}{note}：{_brief(spec.description)}"
 
 
@@ -256,12 +255,12 @@ def _category_lines(registry: dict[str, ParameterSpec], config: object, changed:
 
 
 # LLM: 值经 _value（凭据仍脱敏）；［安全边界］只看登记表的 writable，不按说明文字判断。
-#   capability 键运行值按运行时路径读；runtime_guard/log_analysis 只读随包并标注。只读。
+#   capability 键运行值按运行时路径读；runtime_guard 只读随包并标注。只读。
 # 函数用途: 把一个参数排成全部视图里的一行：当前运行值，改过标［改过］，不能在这里改标［安全边界］。
 def _all_line(spec: ParameterSpec, config: object, changed: set[str],
               capability_path: Path | None = None) -> str:
     marks = ("［改过］" if spec.key in changed else "") + ("" if spec.writable else "［安全边界］")
-    note = "（随包默认、不可覆盖）" if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else ""
+    note = "（随包默认、不可覆盖）" if spec.source == SOURCE_RUNTIME_GUARD else ""
     return f"- {spec.key} = {_value(spec, running_value(spec, config, capability_path=capability_path))}{marks}{note}"
 
 
@@ -274,7 +273,7 @@ def _search(config: object, argument: str, *, capability_path: Path | None = Non
     for spec in found:
         flag = "可改" if spec.writable else "安全边界"
         summary = spec.description[:60] + ("…" if len(spec.description) > 60 else "")
-        note = "（随包默认、不可覆盖）" if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else ""
+        note = "（随包默认、不可覆盖）" if spec.source == SOURCE_RUNTIME_GUARD else ""
         lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, running_value(spec, config, capability_path=capability_path))}{note}："
                      f"{summary or '（没有说明）'}")
     return "\n".join(lines)
@@ -323,9 +322,9 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
     metadata_lines += [line for field, label in (("unit", "单位"), ("range", "范围"),
                                                  ("owner_module", "归属模块"), ("reader", "读取方"))
                        if (line := _metadata_line(spec, field, label))]
-    # 运行时没有覆盖层的来源（runtime_guard/log_analysis）只能看随包默认，修改会走只读拒绝。
+    # 运行时没有覆盖层的来源（runtime_guard）只能看随包默认，修改会走只读拒绝。
     readonly_note = ("（随包默认、不可覆盖：该配置运行时没有用户覆盖层，写了也不会生效）"
-                     if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else "")
+                     if spec.source == SOURCE_RUNTIME_GUARD else "")
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
         f"说明：{spec.description or '（没有说明）'}",
@@ -358,7 +357,7 @@ def _applied_text(report: dict[str, object], config: object) -> str:
 
 
 # LLM: 登记了派生规则的参数再附一句实际效果（_applied_text），让用户当下就知道改了是否真的起作用。有写文件副作用。
-#   capability 键写入目标=运行时实际读取的那份文件（capability_path），runtime_guard/log_analysis 会被写入口拒绝。
+#   capability 键写入目标=运行时实际读取的那份文件（capability_path），runtime_guard 会被写入口拒绝。
 # 函数用途: /settings set <参数名> <值> —— 修改一个参数并记账。
 def _set(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     key, _, value = argument.partition(" ")
