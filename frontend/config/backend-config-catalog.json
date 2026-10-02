@@ -199,7 +199,7 @@
           {
             "key": "home_context_enabled",
             "label": "home_context_enabled（home context enabled）",
-            "description": "家目录运行时开关： - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。 - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。 - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加\"记忆可能过期\"提示；0 表示不加提示。 防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。 - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。",
+            "description": "家目录运行时开关： - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。 - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。 - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -216,7 +216,7 @@
           {
             "key": "home_lesson_stale_caveat_days",
             "label": "home_lesson_stale_caveat_days（home lesson stale caveat days）",
-            "description": "agent_config.yaml 中的 home_lesson_stale_caveat_days 配置项。",
+            "description": "召回的 lesson 超过多少天未更新就附加\"记忆可能过期\"提示；0 表示不加提示。 防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。",
             "type": "number",
             "defaultValue": 7,
             "currentValue": 7,
@@ -2507,7 +2507,7 @@
           {
             "key": "local_store_fts_enabled",
             "label": "local_store_fts_enabled（local store fts enabled）",
-            "description": "agent_config.yaml 中的 local_store_fts_enabled 配置项。",
+            "description": "本地记忆库是否启用全文检索（FTS5）：关闭后相关记忆的关键词召回退化为慢速扫描。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -2541,7 +2541,7 @@
           {
             "key": "memory_curator_enabled",
             "label": "memory_curator_enabled（memory curator enabled）",
-            "description": "后台 Memory Curator（统一每日经历提炼服务）： - enabled: 是否启用后台策展；关闭时保留现有游标和候选，不调用辅助模型。 - provider: auto 表示继承主后端；指定 provider 时由统一后端工厂创建，不改变输出 Schema。 - model: 留空继承主模型；填写时只影响后台提炼模型，不改变主会话模型。 - interval_seconds: 有新经历且距离上次成功达到多少秒时触发，默认 3 小时。 - turn_threshold: 游标后累计多少个新用户轮次触发，默认 10 轮。 - batch_message_limit: 单批最多读取多少条 ConversationStore 消息。 - max_input_chars: 单批模型输入字符上限；长工具输出只传预览和引用。 - timeout_seconds: 单次后台模型调用超时秒数。 - max_retries: Schema、超时或模型错误后的有界重试次数；失败不推进游标。 - workers: 记忆策展独立后台车道的全局并发数；超出的 owner 保留在登记表，下一拍继续，不抢主会话线程。 - daily_finalize_hour: owner 当地时间每天收尾小时，取值 0-23。 - auto_promotion_policy: 自动晋升机器策略版本；conservative_v1 只允许精确证据、无冲突的新长期事实。 - lesson_min_occurrences: 普通教训晋升所需最少独立观察次数，默认 2。 - hot_min_occurrences: 已接受教训晋升 HOT 所需最少独立观察次数，默认 3。",
+            "description": "是否启用后台 Memory Curator（统一每日经历提炼服务）：关闭时保留现有游标和候选，不调用辅助模型。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -2558,7 +2558,7 @@
           {
             "key": "memory_curator_provider",
             "label": "memory_curator_provider（memory curator provider）",
-            "description": "agent_config.yaml 中的 memory_curator_provider 配置项。",
+            "description": "后台策展使用的服务商：auto 表示继承主后端；指定 provider 时由统一后端工厂创建，不改变输出 Schema。",
             "type": "string",
             "defaultValue": "auto",
             "currentValue": "auto",
@@ -2575,7 +2575,7 @@
           {
             "key": "memory_curator_model",
             "label": "memory_curator_model（memory curator model）",
-            "description": "agent_config.yaml 中的 memory_curator_model 配置项。",
+            "description": "后台策展使用的模型：留空继承主模型；填写时只影响后台提炼模型，不改变主会话模型。",
             "type": "string",
             "defaultValue": "",
             "currentValue": "",
@@ -2683,7 +2683,7 @@
           {
             "key": "memory_curator_daily_finalize_hour",
             "label": "memory_curator_daily_finalize_hour（memory curator daily finalize hour）",
-            "description": "agent_config.yaml 中的 memory_curator_daily_finalize_hour 配置项。",
+            "description": "后台策展每天在 owner 当地时间的几点做每日收尾，取值 0-23。",
             "type": "number",
             "defaultValue": 23,
             "currentValue": 23,
@@ -2717,7 +2717,7 @@
           {
             "key": "memory_lesson_min_occurrences",
             "label": "memory_lesson_min_occurrences（memory lesson min occurrences）",
-            "description": "agent_config.yaml 中的 memory_lesson_min_occurrences 配置项。",
+            "description": "普通教训晋升为长期记忆所需的最少独立观察次数。",
             "type": "number",
             "defaultValue": 2,
             "currentValue": 2,
@@ -2734,7 +2734,7 @@
           {
             "key": "memory_hot_min_occurrences",
             "label": "memory_hot_min_occurrences（memory hot min occurrences）",
-            "description": "agent_config.yaml 中的 memory_hot_min_occurrences 配置项。",
+            "description": "已接受的教训晋升为 HOT 热点教训所需的最少独立观察次数。",
             "type": "number",
             "defaultValue": 3,
             "currentValue": 3,
@@ -3297,7 +3297,7 @@
           {
             "key": "dynamic_timeout_min",
             "label": "dynamic_timeout_min（dynamic timeout min）",
-            "description": "agent_config.yaml 中的 dynamic_timeout_min 配置项。",
+            "description": "自动估算请求超时时允许的最小值（秒）；避免把超时压得太短、请求还没发完就中断。",
             "type": "number",
             "defaultValue": 30,
             "currentValue": 30,
