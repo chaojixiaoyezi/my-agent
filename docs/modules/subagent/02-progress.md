@@ -2,6 +2,12 @@
 
 2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。subagents 目录 10 个文件的常数补齐上方中文说明，缺单位的按生成器后缀表改名（如 `PARENT_CHAIN_LIMIT`→`PARENT_CHAIN_COUNT`、`MAX_LESSONS_PER_RUN`→`MAX_LESSONS_PER_RUN_COUNT`），数值一律不变；待整改白名单 685→600，目录重建后 --check 一致。
 
+## C7：子代理八档与首轮投影（2026-10-02，sol，本地已实施，待集成）
+
+顶层及逐项 effort schema 从唯一八档定义派生，xhigh/ultra 显式或继承时仍保存用户值；不保存父模型已降档的值。
+child 首业务请求与候选投影依自身后端声明换算，原冻结属性、线程优先、采用门与关闭思考优先不变。
+原首请求真实产品调用链配假 HTTP 的用例覆盖新档，组件证据不代表真实子代理模型验收。详见 TESTS 与智能程度第 9 节。
+
 2026-09-30（分支 `worker/ds1-takeover-event`）：接替已结束或阻塞的子代理时，追加式事件日志新增专门审计事件 `subagent_takeover_recorded`
 （`services/takeover/record.py` 在落盘核对通过、TAKEOVER.md 写完后追加，复用 `manager.log_local_record` 通道），payload 带
 `source_run_id`／`successor_run_id`／`disposition`（superseded 或 taken_over）／`record_id`／`created_at`；只读投影，不改状态语义，

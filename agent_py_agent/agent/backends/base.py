@@ -73,14 +73,14 @@ class BackendOptions:
     top_p: float | None = None
     # 已解析的思考控制方式（effort/budget/none，见 reasoning_control.py）；随 profile 冻结，档位按请求传入。
     reasoning_control: str = "none"
-    # 模型档案声明的服务商思考档位（Responses 用来把用户档位对应到真实取值）；空表示未声明。
+    # 模型档案声明的服务商思考档位（所有 effort 协议按声明过滤）；空表示未声明，沿各协议原通用范围。
     reasoning_levels: tuple[str, ...] = ()
     # 已解析的结构化输出方式（native/json_object，见 structured_output_mode.py）；随 profile 冻结。
     structured_output: str = "native"
 
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。
-#   reasoning_effort 只会是 low/medium/high/max 或空串（off 已折成 thinking_disabled），由后端按控制方式换算字段。
+#   reasoning_effort 只会是 low/medium/high/xhigh/max/ultra 或空串（off 已折成 thinking_disabled），由后端按控制方式及声明换算字段。
 # 类用途: 携带一次模型请求的宿主 system 指令、思考开关、智能程度档位和首个流式事件等待预算，不混入用户正文或工具历史。
 @dataclass(frozen=True)
 class ProviderRequestOptions:

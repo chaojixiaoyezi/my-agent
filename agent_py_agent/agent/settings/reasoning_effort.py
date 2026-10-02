@@ -1,7 +1,7 @@
 # LLM: “智能程度”档位的唯一解析与持久化入口。档位是会话线程属性：主会话由 /effort 写入，子代理线程在创建时
 #   写入（create_subagents 的 effort，省略则取父级本轮实际档位）；线程没有设置时回落到全局 model_reasoning_effort。
 #   每次模型请求按本轮 params 的 agent_thread_id/conversation_thread_id 现读线程，真实请求与自动选模投影共用
-#   request_reasoning_options，保证载荷一致。档位换算与控制方式归 backends/reasoning_control.py。
+#   request_reasoning_options，保证载荷一致。用户八档及其换算与控制方式归 backends/reasoning_control.py。
 #   同步检查 tool_model_generation._do_backend_generate、gateway_model_adoption、subagent/model_selection、
 #   orchestration/create_policy、conversation/agent_thread 与 test_reasoning_effort*.py。
 # 模块用途: 解析一次运行的智能程度档位，保存会话档位，并在创建子代理时确定子代理档位。
@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ..backends.reasoning_control import normalize_reasoning_level, reasoning_request_values
+from ..backends.reasoning_control import (
+    REASONING_LEVELS,
+    normalize_reasoning_level,
+    reasoning_request_values,
+)
 
 THREAD_FIELD = "reasoning_effort"
 CHILD_ATTR = "host_reasoning_effort.v1"
@@ -52,26 +56,26 @@ def request_reasoning_options(agent: object, params: object, backend: object, *,
     return reasoning_request_values(run_reasoning_level(agent, params), control, forced=forced)
 
 
-# LLM: 只改线程自己的档位字段（原子更新）；空串表示清除会话设置、回落全局默认。非法档位抛 ValueError。
+# LLM: 只改线程自己的档位字段（原子更新）；空串表示清除会话设置、回落全局默认。八档取唯一表，非法档位抛 ValueError。
 # 函数用途: 保存或清除某个会话的智能程度档位。
 def set_thread_reasoning_level(store: object, thread_id: str, level: str) -> object:
     normalized = normalize_reasoning_level(level) if level else ""
     if level and not normalized:
-        raise ValueError("reasoning effort must be one of: auto, off, low, medium, high, max")
+        raise ValueError(f"智能程度只接受：{'、'.join(REASONING_LEVELS)}")
     return store.threads.update_atomic(
         thread_id, lambda latest: replace(latest, **{THREAD_FIELD: normalized}),
     )
 
 
 # LLM: 宿主属性先移除伪造值；显式 effort 必须是合法档位（否则在整批创建前报错），省略则冻结父级本轮实际档位，
-#   子代理之后不随父会话的 /effort 变化。副作用：写 attrs[CHILD_ATTR]。
+#   子代理之后不随父会话的 /effort 变化，xhigh/ultra 不在这里提前降档。副作用：写 attrs[CHILD_ATTR]。
 # 函数用途: 为即将创建的子代理确定并记录智能程度档位。
 def inherit_reasoning_effort(attrs: dict, agent: object, effort: object = None) -> None:
     attrs.pop(CHILD_ATTR, None)
     if effort is not None and str(effort).strip():
         level = normalize_reasoning_level(effort)
         if not level:
-            raise ValueError("子代理 effort 只接受 auto、off、low、medium、high、max；省略则继承当前会话的智能程度。")
+            raise ValueError(f"子代理 effort 只接受 {'、'.join(REASONING_LEVELS)}；省略则继承当前会话的智能程度。")
     else:
         level = run_reasoning_level(agent, getattr(agent, "_current_run_params", None))
     attrs[CHILD_ATTR] = {"level": level}

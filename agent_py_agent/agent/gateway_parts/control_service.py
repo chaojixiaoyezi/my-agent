@@ -874,7 +874,7 @@ def _execute_goal_control(
         return ConversationControlResult("goal", False, "持续目标状态暂时不可用，请稍后重试。")
 
 
-_EFFORT_USAGE = ("用法：/effort [auto|off|low|medium|high|max|default]（default 清除本会话设置，回到全局默认）；"
+_EFFORT_USAGE = ("用法：/effort [auto|off|low|medium|high|xhigh|max|ultra|default]（default 清除本会话设置，回到全局默认）；"
                  "/effort probe 检测当前模型是否支持调节；/effort revert <编号> 撤销检测写入的档案修改")
 
 # LLM: 会话设置类命令（/verbose、/effort）可在第一条消息之前执行，因此按已认证 scope 取或建精确 owner/thread。
@@ -1237,7 +1237,7 @@ def _stop_targeted_manual_compact(
 # LLM: 智能程度是会话线程设置（reasoning_effort），命令文本不进入模型轮；set 只写本线程字段，default 清除回落全局默认。
 #   检测相关（set 时的自动检测、probe、revert）全交给 settings/reasoning_probe.effort_probe_lines，先执行再渲染，
 #   回执里的“当前模型效果”因此反映撤销之后的状态。检测在后台跑，这里不等网络。回执按当前会话模型的结构化控制方式
-#   说明实际效果，模型不支持时如实说明不改变请求，绝不假装已生效。查看时末尾附“可选档位和怎么改”（IM 没有选择菜单）。
+#   说明实际效果，xhigh/ultra 降档与发送共用唯一表；模型不支持时如实说明不改变请求。查看时末尾附八档提示（IM 没有菜单）。
 # 函数用途: 查看或设置本会话的智能程度、检测或撤销检测写入，并说明在当前模型上怎样生效。
 def _execute_effort_control(
     base_agent: object,
@@ -1262,7 +1262,7 @@ def _execute_effort_control(
 
 
 # LLM: 只由线程档位、全局默认与当前会话模型的运行配置生成文案（describe_config_reasoning_effect 与发送同一换算）；
-#   模型暂不可解析时仍显示档位并说明原因。
+#   模型暂不可解析时仍显示用户档位并说明原因；降档必须写出实际发给服务商的值，不把用户八档原样当作已生效。
 # 函数用途: 渲染 /effort 的中文回执。
 def _render_effort(owner_agent: object, thread: object, command: ConversationControlCommand) -> str:
     from ..backends.reasoning_control import LEVEL_LABELS, describe_config_reasoning_effect

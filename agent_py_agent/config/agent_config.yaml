@@ -747,7 +747,7 @@ top_p: null
 # 智能程度（推理强度）全局默认档位，会话里可用 /effort 单独设置，派子代理时可用 effort 单独指定：
 # - auto：不发任何推理参数，由服务商按默认方式思考（默认）。
 # - off：请求时关闭思考。
-# - low / medium / high / max：由低到高的思考深度。
+# - low / medium / high / xhigh / max / ultra：由低到高的思考深度；实际发送只取当前协议和模型允许的档位。
 # 实际怎么发送取决于当前模型的思考控制方式（下一项）；模型不支持时本设置不改变请求，/effort 会如实说明。
 model_reasoning_effort: auto
 # 当前模型的思考控制方式，通常由 /model 档案的"思考控制"字段带入：
@@ -757,10 +757,11 @@ model_reasoning_effort: auto
 # - budget：按思考预算发送（Anthropic 兼容接口写 thinking.budget_tokens；部分服务商只按开/关生效）。
 # - none：不支持调节，不发任何推理参数。
 model_reasoning_control: auto
-# 当前模型声明的服务商思考档位（例如 [low, medium, high, xhigh, max]），通常由 /model 档案带入（ChatGPT 订阅模型添加时
-# 从服务商目录自动带上）；只用于 OpenAI Responses 接口把 /effort 档位对应到服务商真实支持的取值：
-# - 留空（默认）= 未声明，只发通用的 low / medium / high（“最高”也按 high 发），不发可能被拒的取值。
-# - 填写后 = “最高”按 max → xhigh → high 取第一个存在的；“关闭思考”只在声明了 none 或 minimal 时发送。
+# 当前模型声明的服务商思考档位（例如 [low, medium, high, xhigh, max, ultra]），通常由 /model 档案带入（ChatGPT 订阅模型添加时
+# 从服务商目录自动带上）；所有 effort 控制协议只发声明内的值：
+# - 留空（默认）= 未声明，Responses 沿通用 low / medium / high，Chat/Messages 沿原 low / medium / high / max。
+# - Responses 的 xhigh 按 xhigh → high，ultra 按 ultra → max → xhigh → high；max 仍按 max → xhigh → high。
+# - Chat/Messages 的 xhigh 按 high、ultra 按 max → high；Responses 关闭思考只在声明了 none 或 minimal 时发送。
 model_reasoning_levels: []
 # 智能程度自动检测：用户把 /effort 设成 auto 以外的档位，而当前模型没有声明思考控制方式、又不在上面已核对的名单里时，
 # 宿主用已保存的凭据在后台检测一次：同一道短题按“低”“最高”和不带参数各发 3 次，比较用量里的推理 token

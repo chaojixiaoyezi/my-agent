@@ -1,6 +1,7 @@
 """智能程度（推理强度）：档位换算、真实组包、会话/子代理档位解析、/effort、模型档案字段与配置；传输全部为本地 fake。"""
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -13,7 +14,9 @@ from agent_py_agent.agent.agent_core.tool_model_generation import _provider_requ
 from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
 from agent_py_agent.agent.backends.reasoning_control import (
+    ReasoningPayloadLimits,
     describe_reasoning_effect,
+    normalize_reasoning_level,
     reasoning_payload_fields,
     reasoning_request_values,
     resolved_reasoning_control,
@@ -38,6 +41,7 @@ from agent_py_agent.agent.settings.reasoning_effort import (
     set_thread_reasoning_level,
 )
 from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+from agent_py_agent.agent.tooling.user_config_tool import UserConfigTool
 from agent_py_agent.tests.test_gateway_conversation_control import _command, _scope
 from agent_py_agent.tests.test_model_profiles import Host, add
 from agent_py_agent.tests.test_provider_sampling import capture_payload
@@ -77,13 +81,14 @@ def test_request_values_keep_forced_tool_choice_first(level, control, forced, ex
 
 
 def test_payload_fields_per_protocol_and_budget_clamp():
-    assert reasoning_payload_fields("effort", "low", "openai", 16314) == {"reasoning_effort": "low"}
-    assert reasoning_payload_fields("effort", "max", "anthropic", 16314) == {"output_config": {"effort": "max"}}
-    assert reasoning_payload_fields("budget", "low", "anthropic", 16314) == {"thinking": {"type": "enabled", "budget_tokens": 2048}}
-    assert reasoning_payload_fields("budget", "max", "anthropic", 16314)["thinking"]["budget_tokens"] == 15290
-    assert reasoning_payload_fields("budget", "high", "anthropic", 1500)["thinking"]["budget_tokens"] == 1024
-    assert reasoning_payload_fields("budget", "medium", "openai", 16314) == {"thinking": {"type": "enabled"}}
-    assert reasoning_payload_fields("none", "high", "openai", 16314) == {}
+    limits = ReasoningPayloadLimits(16314)
+    assert reasoning_payload_fields("effort", "low", "openai", limits) == {"reasoning_effort": "low"}
+    assert reasoning_payload_fields("effort", "max", "anthropic", limits) == {"output_config": {"effort": "max"}}
+    assert reasoning_payload_fields("budget", "low", "anthropic", limits) == {"thinking": {"type": "enabled", "budget_tokens": 2048}}
+    assert reasoning_payload_fields("budget", "max", "anthropic", limits)["thinking"]["budget_tokens"] == 15290
+    assert reasoning_payload_fields("budget", "high", "anthropic", ReasoningPayloadLimits(1500))["thinking"]["budget_tokens"] == 1024
+    assert reasoning_payload_fields("budget", "medium", "openai", limits) == {"thinking": {"type": "enabled"}}
+    assert reasoning_payload_fields("none", "high", "openai", limits) == {}
     assert "不支持调节" in describe_reasoning_effect("high", "none")
     assert describe_reasoning_effect("auto", "effort").startswith("不额外发送")
 
@@ -229,17 +234,17 @@ def test_effort_command_sets_views_and_resets_with_real_model_effect(tmp_path):
 
     assert view.ok and "自动（服务商默认）（全局默认）" in view.message and "不额外发送推理参数" in view.message
     # 查看回执末尾告诉用户能选哪些档位、怎么改（IM 没有选择菜单）；设置回执不重复这行。
-    assert view.message.endswith("可选档位：auto 自动（服务商默认）、off 关闭思考、low 低、medium 中、high 高、max 最高。"
+    assert view.message.endswith("可选档位：auto 自动（服务商默认）、off 关闭思考、low 低、medium 中、high 高、xhigh 超高、max 最高、ultra 极限。"
                                  "发送 /effort 加档位只改本会话；/effort default 回到全局默认。")
     assert "可选档位" not in low.message and "可选档位" not in reset.message
     assert low.ok and "低（本会话设置）" in low.message
     assert "deepseek-v4-flash" in low.message and "按推理强度档位发送：低" in low.message
     assert reset.ok and "（全局默认）" in reset.message
-    assert helped.ok and helped.message.startswith("用法：/effort [auto|off|low|medium|high|max|default]")
+    assert helped.ok and helped.message.startswith("用法：/effort [auto|off|low|medium|high|xhigh|max|ultra|default]")
     assert "fake-key" not in json.dumps([view.message, low.message, reset.message], ensure_ascii=False)
 
 
-def _responses_effort_run(root, levels):
+def _responses_effort_run(root, levels, scope=None):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(root / "home"), prompt_files=[],
                                     gateway_per_user_owner_scoping=False), root / "ws")
     profile_id = str(uuid4())
@@ -250,7 +255,7 @@ def _responses_effort_run(root, levels):
     assert execute_model_profile_operation(agent, "add", {"profile_id": profile_id, "profile": profile})["ok"]
     execute_model_profile_operation(agent, "set_default", {"profile_id": profile_id})
     paths = gateway_paths(agent)
-    return lambda text: execute_gateway_conversation_control(agent, paths, _command(text), _scope()).message
+    return lambda text: execute_gateway_conversation_control(agent, paths, _command(text), scope or _scope()).message
 
 
 def test_effort_command_receipt_follows_responses_levels(tmp_path):
@@ -322,3 +327,124 @@ def test_config_defaults_and_normalization(tmp_path):
     normalized, warnings = normalize_agent_config({"model_reasoning_effort": "HIGH", "model_reasoning_control": "turbo"})
     assert normalized["model_reasoning_effort"] == "high" and normalized["model_reasoning_control"] == "auto"
     assert any("model_reasoning_control" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("level", ["xhigh", "ultra"])
+@pytest.mark.parametrize("control", ["effort", "budget", "none"])
+def test_extended_levels_keep_control_and_forced_choice_contract(level, control):
+    assert normalize_reasoning_level(f" {level.upper()} ") == level
+    assert reasoning_request_values(level, control, forced=False) == (False, level if control != "none" else "")
+    assert reasoning_request_values(level, control, forced=True) == (True, "")
+
+
+@pytest.mark.parametrize("protocol", ["openai_compatible", "anthropic_compatible"])
+@pytest.mark.parametrize("case", [
+    ("xhigh", (), "high"), ("ultra", (), "max"),
+    ("xhigh", ("high", "xhigh", "max", "ultra"), "high"),
+    ("ultra", ("high", "xhigh", "max", "ultra"), "max"),
+    ("ultra", ("high",), "high"), ("xhigh", ("ultra",), ""),
+])
+def test_extended_effort_wire_uses_protocol_and_declared_levels(monkeypatch, protocol, case):
+    level, levels, expected = case
+    config = _config(protocol, "https://example.test/v1", model_reasoning_control="effort", model_reasoning_levels=list(levels))
+    backend, payload = capture_payload(monkeypatch, config)
+    backend.generate("hi", request_options=ProviderRequestOptions(reasoning_effort=level))
+    sent = payload.get("reasoning_effort", "") if protocol == "openai_compatible" else payload.get("output_config", {}).get("effort", "")
+    assert sent == expected
+    effect = describe_reasoning_effect(level, "effort", protocol="openai" if protocol == "openai_compatible" else "anthropic", levels=levels)
+    assert f"发送 {expected}" in effect if expected else "不改变请求" in effect
+    assert backend.project_generate_payload("hi", request_options=ProviderRequestOptions(reasoning_effort=level)) == payload
+
+
+@pytest.mark.parametrize("case", [("xhigh", 65536, 24576), ("ultra", 65536, 64512),
+                                  ("xhigh", 16314, 15290), ("ultra", 1500, 1024)])
+@pytest.mark.parametrize("levels", [(), ("high", "xhigh", "max", "ultra")])
+def test_extended_budget_values_and_existing_clamp(case, levels):
+    level, cap, expected = case
+    context = ReasoningPayloadLimits(cap, levels)
+    assert reasoning_payload_fields("budget", level, "anthropic", context) == {
+        "thinking": {"type": "enabled", "budget_tokens": expected}}
+    assert reasoning_payload_fields("budget", level, "openai", context) == {"thinking": {"type": "enabled"}}
+    assert reasoning_payload_fields("none", level, "anthropic", context) == {}
+
+
+@pytest.mark.parametrize("case", [("xhigh", 24576), ("ultra", 64512)])
+@pytest.mark.parametrize("protocol", ["openai_compatible", "anthropic_compatible"])
+@pytest.mark.parametrize("levels", [(), ("high", "xhigh", "max", "ultra")])
+def test_extended_budget_actual_wire_and_projection_agree(monkeypatch, case, protocol, levels):
+    level, budget = case
+    config = _config(protocol, "https://example.test/v1", model_reasoning_control="budget",
+                     model_reasoning_levels=list(levels), max_tokens=65536, model_context_window_tokens=262144)
+    backend, payload = capture_payload(monkeypatch, config)
+    options = ProviderRequestOptions(reasoning_effort=level)
+    backend.generate("hi", request_options=options)
+    expected = {"type": "enabled", "budget_tokens": budget} if protocol == "anthropic_compatible" else {"type": "enabled"}
+    assert payload["thinking"] == expected and "reasoning_effort" not in payload and "output_config" not in payload
+    assert backend.project_generate_payload("hi", request_options=options) == payload
+
+
+@pytest.mark.parametrize("level", ["xhigh", "ultra"])
+@pytest.mark.parametrize("protocol", ["openai_compatible", "anthropic_compatible"])
+def test_extended_level_reaches_thread_child_and_gateway_projection(tmp_path, level, protocol):
+    assert normalize_reasoning_level(level) == level
+    agent, params, thread = _thread_agent(tmp_path, level)
+    attrs = create_task_attributes({"goal": "查资料", "effort": level}, None)
+    assert attrs[CHILD_ATTR] == {"level": level}
+    store = agent.conversation_store
+    child = ensure_agent_thread_record(store.threads, {"thread_id": "child-1", "agent_run_id": "run-1", "reasoning_effort": level})
+    assert child.reasoning_effort == level and store.threads.load(thread.thread_id).reasoning_effort == level
+    backend = get_backend(protocol, _config(protocol, "https://example.test/v1", model_reasoning_control="effort",
+                           model_reasoning_levels=["high", "xhigh", "max", "ultra"]))
+    state = SimpleNamespace(agent=agent, params=params, system_instruction="", first_token_timeout_seconds=5)
+    options = _provider_request_options(backend, state, forced=False)
+    projected = _payload(backend, "hi", _PayloadSurface(None, ToolChoice.auto(), None, "", agent, params))
+    expected = "high" if level == "xhigh" else "max"
+    sent = projected.get("reasoning_effort") if protocol == "openai_compatible" else projected["output_config"]["effort"]
+    assert options.reasoning_effort == level and sent == expected
+    assert projected == backend.project_generate_payload("hi", request_options=options)
+
+
+def test_responses_adoption_still_rejects_unavailable_projection(tmp_path):
+    # Responses 当前没有容量投影，不能为 C7 冒充 Chat 载荷而扩大自动采用范围；其发送字段由真实组包测试覆盖。
+    agent, params, _thread = _thread_agent(tmp_path, "ultra")
+    backend = get_backend("openai_responses", _config("openai_responses", "https://chatgpt.com/backend-api/codex"))
+    with pytest.raises(ValueError, match="provider_request_surface_unknown"):
+        _payload(backend, "hi", _PayloadSurface(None, ToolChoice.auto(), None, "", agent, params))
+
+
+@pytest.mark.parametrize("channel", ["chat", "feishu"])
+@pytest.mark.parametrize("case", [("xhigh", ("high", "xhigh", "max", "ultra"), "xhigh"),
+                                  ("ultra", ("high", "xhigh", "max", "ultra"), "ultra"),
+                                  ("ultra", ("high", "xhigh", "max"), "max"), ("xhigh", (), "high")])
+def test_extended_effort_command_on_tui_and_im_reports_actual_wire(tmp_path, channel, case):
+    level, levels, expected = case
+    run = _responses_effort_run(tmp_path, levels, replace(_scope(), channel=channel))
+    message = run(f"/effort {level}")
+    assert "本会话设置" in message and f"发送 {expected}" in message
+    assert f"发送 {expected}" in run("/effort")
+    assert "全局默认" in run("/effort default")
+
+
+@pytest.mark.parametrize("level", ["xhigh", "ultra"])
+def test_user_config_accepts_extended_default_and_reports_mapping(tmp_path, monkeypatch, level):
+    user_path = tmp_path / "user.yaml"
+    user_path.write_text("model_reasoning_effort: auto\n", encoding="utf-8")
+    monkeypatch.setenv("MY_AGENT_CONFIG", str(user_path))
+    agent = _deepseek_agent(tmp_path)
+    agent.config = selected_model_config(agent)
+    tool = UserConfigTool(agent)
+    result = tool.execute({"action": "set", "key": "model_reasoning_effort", "value": level})
+    assert result.ok, result.output
+    assert load_config(user_path).model_reasoning_effort == level
+    assert "restart_gateway" in result.output
+    assert f"实际发送 {'high' if level == 'xhigh' else 'max'}" in json.loads(result.output)["applied_value"]
+
+
+def test_orchestration_native_schema_has_all_eight_levels():
+    from agent_py_agent.agent.agent_core.orchestration.tool_spec_schemas import (
+        _CREATE_PARAMETER_SCHEMA,
+    )
+
+    expected = ["auto", "off", "low", "medium", "high", "xhigh", "max", "ultra"]
+    assert _CREATE_PARAMETER_SCHEMA["effort"]["enum"] == expected
+    assert _CREATE_PARAMETER_SCHEMA["items"]["items"]["properties"]["effort"]["enum"] == expected

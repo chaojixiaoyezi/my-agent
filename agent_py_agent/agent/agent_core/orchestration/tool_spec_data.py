@@ -1,4 +1,5 @@
 # LLM: 参数说明只补充工具级规则；嵌套 role 复用顶层索引，包引用经 allowed_skills 解析，不从资料线索推断授权。
+#   effort 是用户八档而不是供应商原始字段，创建时冻结，发送时沿唯一换算表过滤模型声明。
 # 模块用途: 集中保存派工参数与示例；保留 exact covers、模型、角色、工作区和显式包授权含义。
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ _CREATE_PARAMETERS = {
     "role": "子代理角色模板 id，默认 worker",
     "agent_name": "可选展示名；只影响状态树和报告里的名字，不改变权限",
     "model": "可选；指定 /model 已新增的模型名称或配置编号。省略继承父级当前模型；只影响新建 child，不切换主代理",
-    "effort": "可选智能程度（推理强度）：auto 服务商默认、off 关闭思考、low/medium/high/max。省略继承当前会话的档位；只影响新建 child",
+    "effort": "可选智能程度（推理强度）：auto 服务商默认、off 关闭思考、low/medium/high/xhigh/max/ultra。省略继承当前会话的档位；按模型声明换算，只影响新建 child",
     "tool_preset": "工具预设；通常省略。有效值：coding/read_only/none",
     "allowed_tools": "工具偏好提示；通常省略，基础读写工具会自动补齐",
     "allowed_skills": "可选；把当前快照中点名的 Skill 或能力包授权给子代理；包用 capability:<package_id>",

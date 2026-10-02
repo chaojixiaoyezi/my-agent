@@ -1,4 +1,5 @@
 # LLM: 公共命令目录只拥有声明、词法边界和展示事实；调用方仍负责身份、权限、控制回执及副作用。
+#   /effort 帮助列出用户八档，实际可发送值仍归 reasoning_control 的唯一换算表。
 # 模块用途: 让 TUI 与 IM 会话解析、Gateway 守门、帮助和补全共用名称与别名，不导入 UI 或加载插件。
 
 from __future__ import annotations
@@ -117,7 +118,7 @@ COMMAND_CATALOG = (
     ),
     CommandSpec(
         "effort",
-        "/effort [auto|off|low|medium|high|max|default|probe|revert <编号>]",
+        "/effort [auto|off|low|medium|high|xhigh|max|ultra|default|probe|revert <编号>]",
         "查看或设置本会话的智能程度（推理强度），检测当前模型是否支持调节",
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(\S+(?:\s+\S+)?))?\s*$",

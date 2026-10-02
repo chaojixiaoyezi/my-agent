@@ -1,7 +1,7 @@
 # LLM: TUI 里单独输入 /effort 时弹出的本地选择菜单，与 /model、/permissions 菜单共用 _dialog 与 _my_agent_model_menu_active
 #   互斥标志。菜单只产出结构化档位值；选中后由调用方注入的 submit 把“/effort <值>”交给既有 Gateway 控制出站箱
 #   （tui_actions._tui_submit_control_operation），本模块不发请求、不写线程、不解析回执文字。档位与中文名取自
-#   backends/reasoning_control（与 Gateway 解析、发送同源）；改选项须同步 conversation/control_commands 的 /effort 语法、
+#   backends/reasoning_control 的八档（含 xhigh/ultra，与 Gateway 解析、发送同源）；改选项须同步 conversation/control_commands 的 /effort 语法、
 #   tui_keybindings._dispatch_tui_slash_input 与 test_tui_effort_menu.py。
 # 模块用途: 让 TUI 用户用上下键挑选本会话的智能程度，不用记 /effort 后面能跟什么。
 
@@ -22,7 +22,7 @@ _TITLE = "智能程度 /effort（只改本会话）"
 _INTRO = "选中后回车；回执会说明在当前模型上实际怎么发送。"
 
 
-# LLM: 行值必须是 /effort 能解析的参数（status 解析为查看）；显示文字带英文档位名，方便与 IM 里的文字命令对照。
+# LLM: 行值必须是 /effort 能解析的参数（status 解析为查看）；八档直接从唯一表生成，显示文字带英文档位名，方便与 IM 对照。
 # 函数用途: 生成菜单行：（命令参数，显示文字）。
 def effort_menu_rows() -> list[tuple[str, str]]:
     levels = [(level, f"{level} · {LEVEL_LABELS[level]}") for level in REASONING_LEVELS]

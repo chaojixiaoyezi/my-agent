@@ -392,20 +392,22 @@ def test_automatic_adoption_binds_first_and_following_tool_payloads(tmp_path, mo
     assert evidence[-1]["protocol"]["native_supported"]
 
 
-def test_automatic_adoption_keeps_the_child_reasoning_level_on_the_adopted_model(tmp_path, monkeypatch):
-    # 子代理线程档位 low，候选为 DeepSeek 官方 OpenAI 兼容接口（控制方式 effort）：投影与真实首轮必须同样带档位才会采用。
+@pytest.mark.parametrize("level,sent", [("low", "low"), ("xhigh", "high"), ("ultra", "max")])
+def test_automatic_adoption_keeps_the_child_reasoning_level_on_the_adopted_model(tmp_path, monkeypatch, level, sent):
+    # 线程保留用户档位；候选的 Chat 控制方式 effort 沿原可发范围降档，投影与真实首轮必须完全相同才会采用。
     from agent_py_agent.agent.settings.reasoning_effort import set_thread_reasoning_level
 
     agent, task, key = _automatic_child(tmp_path, backend="openai_compatible", model="deepseek-v4-flash",
                                         window=1_000_000, output_limit=65_536, endpoint="https://api.deepseek.com")
-    set_thread_reasoning_level(agent.conversation_store, task.agent_thread_id, "low")
+    set_thread_reasoning_level(agent.conversation_store, task.agent_thread_id, level)
     material = tmp_path / "material.txt"
     material.write_text("材料内容用于验证真实工具读取。", encoding="utf-8")
     calls, _probes = _install_automatic_provider(monkeypatch, agent, task, material)
     agent.run_subagent(task.id, dry_run=False, probe=False)
     first_wire, first_thread = calls[0]
     assert first_wire["model"] == "deepseek-v4-flash" and first_thread.model_profile_id == key
-    assert first_wire["reasoning_effort"] == "low"
+    assert first_wire["reasoning_effort"] == sent
+    assert first_thread.reasoning_effort == level
     assert first_thread.metadata[SUBAGENT_MODEL_ADVICE_KEY]["status"] == "adopted"
 
 

@@ -264,6 +264,90 @@
   补同文件中文注释）；code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
   `size_diff.sh` **新增告警 0**（消失 2）。
 
+## C7：/effort xhigh / ultra（2026-10-02，sol，分支 `worker/sol-effort-levels`，基于 `b49e93ae8`）
+
+**状态**：本地八档实现及组件验收完成，未集成/部署，未调用真实模型；台账原待定项按要求注明“已实施（2026-10-01）”，本节为实际验证日期。
+解决声明了高档却无法选择的问题；唯一换算表同时供菜单、schema、实际组包与效果回执使用，显式声明无交集不发送 effort。
+Chat/Messages 的 xhigh→high、ultra→max/high；Responses 依声明筛选；预算新值及原夹紧、强制关闭思考均保留。
+
+### 环境与定向验证
+
+全部 pytest 在本工作树根运行，固定 Python，不联网安装依赖、不运行 my-agent、不启停 Gateway。以下均使用：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+# 每条显式列测试文件；-o addopts='' 仅清空随包附加参数，不删、跳过或放宽测试。
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <下面的显式文件> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol -o addopts=''
+```
+
+- **先红**：`test_reasoning_effort.py test_responses_reasoning.py test_tui_effort_menu.py`（均在 `agent_py_agent/tests/`）加
+  `-k 'extended or all_eight or every_menu_row'` → **45 failed、65 deselected**。失败为档位/请求字段/命令/schema/菜单断言，不是导入错误。
+- **最终十文件定向及恢复回归**：下面完整命令 → **414 passed**（37.37s），无失败或跳过；与下方守卫、扩展回归重叠，不相加：
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_reasoning_effort.py agent_py_agent/tests/test_reasoning_probe.py agent_py_agent/tests/test_responses_reasoning.py agent_py_agent/tests/test_tui_effort_menu.py agent_py_agent/tests/test_subagent_first_request_selection.py agent_py_agent/tests/test_gateway_model_adoption.py agent_py_agent/tests/test_provider_sampling.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_parameter_metadata.py agent_py_agent/tests/test_backend_config_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol -o addopts=''
+```
+
+- **覆盖**：xhigh/ultra 的 effort、budget、none 及关闭优先；声明/无声明/无交集；三协议真实 builder + 假传输；
+  预算出站值与纯投影逐字一致；菜单固定八档及标签；TUI/IM 共用解析和控制服务；user_config 写盘、正式读回与实际效果；
+  顶层/逐项派工 schema、线程/child 用户值不提前降档、Gateway 自动采用和 child 首业务请求载荷同源。
+- **guard 同步**：旧 max 回执断言已同步新增的“发送 max”，没有改为宽松的存在性检查；另加参数中心 xhigh/ultra 声明与降档断言。
+  Responses 自动采用所需的完整容量投影仍未知，保留原拒绝断言，不为新档伪造 Chat 投影。
+
+### 三个独立变异
+
+逐次只改 `reasoning_control.py` 一处，跑真实功能断言红测，再撤回；不是删测试或注入导入错误：
+
+| 变异 | 显式测试文件及 -k（沿上面统一命令） | 实际结果 |
+|---|---|---|
+| M1：xhigh 的 Responses 候选误改 high→xhigh | `test_responses_reasoning.py`，`level_mapping_uses_only_declared_or_generic_efforts or extended_responses_wire` | 2 failed、23 passed、10 deselected |
+| M2：Chat/Messages 的 xhigh 误发原始 xhigh | `test_reasoning_effort.py`，`extended_effort_wire_uses_protocol_and_declared_levels` | 2 failed、10 passed、71 deselected |
+| M3：xhigh 预算误改为 high 的 12288 | `test_reasoning_effort.py`，`extended_budget_values or extended_budget_actual_wire` | 6 failed、10 passed、67 deselected |
+
+每次撤回后核对该文件 SHA256 均为 `697e58514ebf57c7bda42c6804e4fd83ed351801c4458bfaaf7eb18c1243b6f3`。
+后续只为 Ruff 增加空行/整理 import；最终十文件的 414 passed 验证撤回后的交付版本。
+
+### 扩展回归与保留失败
+
+曾显式运行 25 文件 → **19 failed、794 passed**（98.16s）；此结果是失败，不称整组通过。文件为最终十文件中除
+`test_parameter_registry.py` 之外的九文件，再加 `test_structured_output_mode.py`、`test_tool_model_generation.py`、
+`test_decision_subagent.py`、`test_request_content_capacity.py`、`test_subagent_models.py`、`test_subagent_model_normalizers.py`、
+`test_subagent_model_visible_refs.py`、`test_model_profiles.py`、`test_gateway_conversation_control.py`、`test_conversation_control_commands.py`、
+`test_orchestration_tool_specs.py`、`test_orchestration_create_subagents_tool.py`、`test_orchestration_create_subagents_items.py`、
+`test_orchestration_create_subagents_idempotency.py`、`test_user_config_capability.py`、`test_settings_chat_control.py`。
+
+失败均在未修改的 `test_gateway_conversation_control.py`：
+- `test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop` 的 16 个参数例：旧断言期待 kind=plugin_command，实际为 plugins。
+  开工 HEAD 的同观察点同样 16 例失败，属于本轮继承的产品/测试合同不一致，不在 C7 内顺手修。
+- `test_goal_and_task_resource_controls_are_independent` 的 3 例：两例 sandbox-exec 子进程退出 71，一例无 termination。
+  HEAD 对照中 pause/stop 仍失败，clear 未再次失败，存在时序差异；只记录这些观察，不以退出码单独证明隔离根因。
+  用户已说明不能嵌套 Seatbelt，沙箱外复核留给 3a，未删断言或增加 skip。
+- **基线对照命令**：同一工作树暂存完整补丁后将受改文件还原 HEAD，显式只跑
+  `test_gateway_conversation_control.py -k 'goal_and_task_resource_controls_are_independent or http_plugin_help_and_errors_do_not_call_model_guidance_or_stop'`
+  → **18 failed、3 passed、107 deselected**（23.55s）。随后 C7 补丁逐字节恢复，前后 patch SHA256 一致
+  `b56d3c47b4c6ed4e5234fe7ffcd3195012097dbdef01dac2e2cfcf23b1314d2a`，临时补丁已删除。
+
+### 收尾门禁与真实边界
+
+- `guards9.txt` 十文件完整 pytest（同环境/参数，含 packaging）→ **169 passed**（67.99s）。原 1 例回执断言同步后整单重跑通过。
+- `$PY scripts/check_import_boundaries.py` → **IMPORT_BOUNDARIES findings=0**。
+- `$PY -m ruff check agent_py_agent scripts` → **All checks passed**。
+- `node frontend/scripts/sync-backend-config.mjs --check` → **in sync（249 fields）**；目录由原脚本重生成，只同步两条档位说明。
+- `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → **hard=0、blocked=False**；生成报告已还原，不提交报告或修改 baseline。
+- `$PY scripts/check_clean_package.py .` → **OK：未发现发布阻塞项**；`git diff --check` → 退出 0、无输出。
+- `$PY scripts/check_doc_sync.py` → **DOC_SYNC_PASS**。首跑因 Gateway 的 `04-structure.md` 漏更失败，补齐八档的数据流与边界后，重跑同一入口通过。
+- `PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` → 退出 0。
+  按 `(kind, path, name, severity)` 与线上身份基线逐条比对，不只比较总量；实测完整输出为：
+
+```text
+新增告警: 0
+消失告警: 2
+```
+
+- 未验证：真实服务商、实际 TUI/IM 客户端、集成发布版本；未跑全仓 pytest，线上 CI 未作为证据。
+  未新增配置项、重要文件或第二状态源。建议 3a 合入后核 gpt-6.1-sol / gpt-5.6-sol 新档与 gpt-6-luna 的 ultra→max，
+  同时对照真实出站字段及回执；插件旧断言另行裁决，子进程用例沙箱外复核。只读审查可并行，生产档案和请求归集成者。
+
 ## 删除死配置 log_analysis_config.yaml，参数中心改三来源（2026-10-01，分支 `worker/ds2-del-log-analysis`，基于 `904b441b4`）
 
 - **删除**：`agent_py_agent/config/log_analysis_config.yaml`（20 键）。依据：P17 修订时核实 log_analysis 产品代码无任何读取点，

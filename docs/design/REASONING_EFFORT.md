@@ -2,6 +2,8 @@
 
 状态：已合入 main `7a15c9c91` 并双机部署（运行时 `step12k-e5b2f8bc`，2026-09-26），隔离真实验收通过（结果见第 7 节与 TESTS.md 顶部）。第 8 节“自动检测是否支持调节”已合入 main（2026-09-27，随 step13t 部署），真实服务商验收待做。本文是“智能程度”的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
 
+C7 八档扩展已在 `worker/sol-effort-levels` 本地实施，尚未集成/部署（验收记录日期 2026-10-02）；真实模型由 3a 集成后核对，不能沿用上述旧版真实结果证明新档已生效。新增合同见第 9 节。
+
 ## 1. 背景
 
 用户要求：能设置模型的智能程度，包括给子代理单独设置，并实测。
@@ -51,15 +53,15 @@ v4.1-flash 的关闭思考现在都生效。结论不变的：opencode v4-flash 
 
 ## 3. 档位和控制方式
 
-- **档位**（用户层）：`auto`（不发任何参数，服务商默认）、`off`（关闭思考）、`low`、`medium`、`high`、`max`。
+- **档位**（用户层）：`auto`（不发任何参数，服务商默认）、`off`（关闭思考）、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`。
 - **控制方式**（模型层，`reasoning_control`）：
   - `effort`：OpenAI 兼容接口写 `reasoning_effort: <档位>`，Anthropic 兼容接口写 `output_config.effort`；`off` 写 `thinking: disabled`。
-  - `budget`：Anthropic 兼容接口写 `thinking: {type: enabled, budget_tokens: N}`。N 取值：low 2048、medium 6144、high 12288、max 为上限，再夹到 `[1024, max_tokens-1024]`。OpenAI 兼容接口只写 `thinking: enabled`。`off` 写 `thinking: disabled`。
+  - `budget`：Anthropic 兼容接口写 `thinking: {type: enabled, budget_tokens: N}`。N 取值：low 2048、medium 6144、high 12288、xhigh 24576、max/ultra 为原可用上限，再沿原规则夹紧。OpenAI 兼容接口只写 `thinking: enabled`。`off` 写 `thinking: disabled`。
   - `none`：不发任何字段。回执如实说明“不支持调节”。
   - `auto`（默认）：只对实测确认的供应商给默认值——`api.deepseek.com` 的 OpenAI 兼容接口取 `effort`，Anthropic 兼容接口取 `budget`，`chatgpt.com` 的 Responses 接口（ChatGPT 订阅）取 `effort`；其余一律 `none`。这张表只是优化，可在 `/model` 编辑里显式声明覆盖（例如把 MiniMax M3 声明为 `budget`）。
   - **Responses 协议（09-30 接入）**：`effort` 写 `reasoning: {effort: <服务商档位>}`。服务商档位按模型档案的 `reasoning_levels`（服务商声明的可用档位，
     ChatGPT 订阅模型添加时从目录 `supported_reasoning_levels` 自动带上，其它服务商可在 `/model` 编辑的「高级」里填）对应：
-    low/medium/high 取同名；`max` 依次取 max → xhigh → high 中第一个存在的；`off`（或强制工具要求关闭思考）只在声明了 none 或 minimal 时发送，
+    low/medium/high 取同名；`xhigh` 依次取 xhigh → high，`max` 依次取 max → xhigh → high，`ultra` 依次取 ultra → max → xhigh → high 中第一个存在的；`off`（或强制工具要求关闭思考）只在声明了 none 或 minimal 时发送，
     否则不发字段、交服务商默认。未声明档位时只发通用的 low/medium/high（`max` 发 high），不发可能被拒的取值。
     09-30 真实核对 gpt-6-luna：`low` 推理 token 0、未声明时 `max`→high 为 24、声明后 `max`→max 为 59，服务商均接受。
 - **优先级**：强制调用工具（原有逻辑）要求关闭思考时，优先于任何档位。DeepSeek 历史里缺 `reasoning_content` 而被迫关思考时，同样不再带档位。
@@ -79,13 +81,13 @@ v4.1-flash 的关闭思考现在都生效。结论不变的：opencode v4-flash 
 - `/effort`：显示本会话档位（及来源：本会话设置 / 全局默认），以及在当前会话模型上的实际效果；末尾一行列出可选档位和怎么改
   （2026-09-30 起，`reasoning_control.describe_level_choices`，IM 没有菜单靠它知道能怎么改）。
 - TUI 里单独 `/effort`（2026-09-30 起）：打开本地档位菜单 `cli/chat_parts/tui_effort_menu.py`，上下键选查看 / auto / off / low /
-  medium / high / max / default / probe，回车后以 `/effort <值>` 经控制出站箱发给 Gateway，Esc 不发；带参数的文字形式照旧直接发送。
+  medium / high / xhigh / max / ultra / default / probe，回车后以 `/effort <值>` 经控制出站箱发给 Gateway，Esc 不发；带参数的文字形式照旧直接发送。
   起因：用户只看到“最高（全局默认）”，从补全选中 `/effort` 回车会立刻提交，没机会输入档位。
 - 回执与发送同一换算（2026-09-30 起，`reasoning_control.describe_config_reasoning_effect`，`/effort` 与参数中心共用）：
   Responses 模型上，没有声明 none / minimal 时 `/effort off` 实际不发字段，回执写“本设置不改变请求”；没有声明更高档位时
   `/effort max` 实际发 high，回执写“实际发送 high”；声明了就写“发送 max”。此前回执一律写“请求时关闭思考”“最高”，
   与 ChatGPT 订阅的实际请求不符（订阅目录没有任何模型声明 none / minimal，旧档案没有 reasoning_levels）。
-- `/effort auto|off|low|medium|high|max`：设置本会话档位；`/effort default` 清除；`/effort help` 显示用法。回执总是说明当前模型会怎样生效，模型不支持时明确说“本设置暂不改变请求”。
+- `/effort auto|off|low|medium|high|xhigh|max|ultra`：设置本会话档位；`/effort default` 清除；`/effort help` 显示用法。回执总是说明当前模型会怎样生效，模型不支持时明确说“本设置暂不改变请求”。
 - `/effort probe`：在后台检测当前模型是否真的支持按档位调节；`/effort revert <编号>` 撤销检测写入的档案修改（见第 8 节）。
 - `/model` 编辑模型：新增“思考控制”单选（自动 / 按档位 / 按预算 / 不支持），存为档案字段 `reasoning_control`（只有显式声明且不是 auto 才写键，旧档案逐字节不变）；`manage_models` 工具同一字段。
 - 本地（非 Gateway）模式与 `/model` 等一样提示改用 `chat --gateway`。
@@ -180,3 +182,31 @@ my-agent 为了确认 opencode.ai 是否支持 `reasoning_effort`，先后 3 次
 - 凭据只在正式后端内部使用，不进入模型上下文、工具参数、检测记录或回执。测试断言假密钥不出现在回执、检测记录和账本里。
 - 每次检测会额外发 9 次请求、消耗少量 token（DeepSeek 最高档每次约 2000 推理 token）。
 - 标定只有 2026-09-26 的单次实测与完整主代理上下文的波动范围，没有独立短题的多次采样。真实服务商上的误判率要靠真实验收确认。
+
+## 9. C7：用户可选 xhigh / ultra（已实施，指定台账日期 2026-10-01）
+
+**解决问题**：模型档案已声明 xhigh/ultra，但用户菜单与命令白名单只有六档，无法直接选择。
+用户层固定八档 `auto/off/low/medium/high/xhigh/max/ultra`；服务商层 `reasoning_levels` 仍允许新的合法字符串声明，不反过来限制成这八档。
+
+唯一换算表在 `agent/backends/reasoning_control.py::_REASONING_LEVEL_RULES`，同时定义中文标签、两个 effort 方言的候选顺序与预算：
+
+| 用户档位 | Responses 的候选顺序 | OpenAI Chat / Anthropic effort 的候选顺序 | budget 原始值 |
+|---|---|---|---|
+| xhigh（超高） | xhigh → high | high | 24576 |
+| max（最高，原档） | max → xhigh → high | max → high | 原上限 |
+| ultra（极限） | ultra → max → xhigh → high | max → high | 与 max 相同 |
+
+- 有声明时只取候选与声明的第一个交集，交集为空不发 effort 字段；不按型号、展示文案、模型回复猜能力。
+- 无声明时保留原协议通用范围：Responses 为 low/medium/high（新档回落 high），Chat/Messages 为 low/medium/high/max。
+  新用户档位不能因此原样发到不支持的新接口；Chat/Messages 的 xhigh/ultra 仍落到原已能发送的 high/max。
+- Anthropic 预算仍为 `max(1024, min(原始预算, max(1024, max_tokens - 1024)))`，其中 max_tokens 是本次载荷沿原规则计算的输出上限。
+  OpenAI budget 仍只有 thinking.enabled；预算与 none 控制不发送服务商档位字符串。
+- auto 不加字段，off/强制工具选择优先，DeepSeek 缺 reasoning_content 的原关闭逻辑保持。
+- 菜单、TUI/IM 共用命令、配置枚举与派工顶层/逐项 schema 都沿唯一档位定义；线程和 child 属性保存用户档位，不能在继承时提前降档。
+  真实发送、Gateway 自动采用和 child 首轮候选投影按候选后端自身声明换算，不能沿用父模型的实际发出值。
+- `/effort` 和 user_config 的“实际效果”与发送使用同一个候选筛选，降档写“实际发送 high/max”等；无对应值写“不改变请求”。
+  budget 回执说明开关、原始预算和夹紧规则，不把展示时的预算假装成每个请求已发出的最终数值。配置 set 的重启语义不变。
+- Responses 仍无自动采用所需的完整容量投影，保留原 `provider_request_surface_unknown`；本项只扩档位，不冒用 Chat 投影扩大选模范围。
+
+组件覆盖包括声明/无声明/无交集、三种控制方式、出站字段与回执、八档菜单、配置保存、两处选模投影与首业务请求。
+三个独立变异各自被拦且逐字节还原，扩展回归中的既有失败保留在 TESTS。真实模型及实际 TUI/IM 客户端未验证，由 3a 集成后核对；本线不触碰生产配置或启停 Gateway。

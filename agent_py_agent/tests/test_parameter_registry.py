@@ -106,7 +106,7 @@ def test_reasoning_effort_applied_value_says_whether_the_model_supports_it():
     control = resolved_reasoning_control("auto", _OPENCODE["api_base"], "openai_compatible")
     assert value == describe_reasoning_effect("max", control) and "不改变请求" in value and "思考控制方式" in rule
     deepseek = SimpleNamespace(**{**_OPENCODE, "api_base": "https://api.deepseek.com/v1"}, model_reasoning_effort="max")
-    assert applied_value("model_reasoning_effort", deepseek)[0] == "按推理强度档位发送：最高。"
+    assert applied_value("model_reasoning_effort", deepseek)[0] == "按推理强度档位发送：最高（发送 max）。"
     assert "不额外发送" in applied_value("model_reasoning_effort", SimpleNamespace(model_reasoning_effort="auto"))[0]
     # Responses 协议与发送同一换算：ChatGPT 订阅旧档案没有声明档位时，最高档实际发 high，关闭思考不发字段。
     chatgpt = {"model_backend": "openai_responses", "api_base": "https://chatgpt.com/backend-api/codex", "model_reasoning_control": "auto"}
@@ -114,6 +114,14 @@ def test_reasoning_effort_applied_value_says_whether_the_model_supports_it():
     assert "不改变请求" in applied_value("model_reasoning_effort", SimpleNamespace(**chatgpt, model_reasoning_effort="off"))[0]
     declared = SimpleNamespace(**chatgpt, model_reasoning_effort="max", model_reasoning_levels=["low", "high", "max"])
     assert applied_value("model_reasoning_effort", declared)[0].endswith("（发送 max）。")
+
+
+def test_extended_effort_applied_value_names_the_provider_effort():
+    for level, levels, sent in [("xhigh", ["high", "xhigh"], "xhigh"), ("ultra", ["high", "max", "ultra"], "ultra"),
+                               ("ultra", ["high", "max"], "max"), ("xhigh", [], "high")]:
+        config = SimpleNamespace(model_backend="openai_responses", model_reasoning_control="effort", api_base="",
+                                 model_reasoning_effort=level, model_reasoning_levels=levels)
+        assert f"发送 {sent}" in applied_value("model_reasoning_effort", config)[0]
 
 
 def test_applied_value_with_uses_the_new_value_without_touching_the_config():

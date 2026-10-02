@@ -107,6 +107,29 @@ def test_actual_gateway_adopts_only_after_full_payload_and_persists_intent(tmp_p
     assert model_call_summary(fixture.agent, request_id=fixture.context.request_id)["purpose_breakdown"]["decision"]["usage_breakdown"]["provider"]["input_tokens"] == 17
 
 
+@pytest.mark.parametrize("level,sent", [("xhigh", "high"), ("ultra", "max")])
+def test_gateway_adoption_preserves_extended_level_and_actual_effort(tmp_path, monkeypatch, level, sent):
+    from agent_py_agent.agent.settings.reasoning_effort import set_thread_reasoning_level
+
+    fixture = actual_request(tmp_path, candidate_backend="openai_compatible")
+    path = model_profiles.model_profiles_path(fixture.agent.home_paths)
+    profile = model_profiles.read_model_profiles(path)["profiles"][fixture.candidate]
+    model_profiles.execute_model_profile_operation(fixture.agent, "save_model", {
+        "profile_id": fixture.candidate, "editing": True, "profile": {
+            **profile,
+            "reasoning_control": "effort", "reasoning_levels": ["high", "max", "ultra"],
+        },
+    })
+    set_thread_reasoning_level(fixture.agent.conversation_store, fixture.thread_id, level)
+    install_backend(monkeypatch, fixture)
+    business, _ = fake_http(monkeypatch, fixture)
+    result = request_execution._run_gateway_ask(fixture.context)
+    assert result.response == "资料整理完成。" and len(business) == 1
+    wire, thread = business[0]
+    assert wire["model"] == "candidate-large" and wire["reasoning_effort"] == sent
+    assert thread.model_profile_id == fixture.candidate and thread.reasoning_effort == level
+
+
 @pytest.mark.parametrize("original_window,window", [(250_000, 1_000_000), (1_000_000, 250_000)])
 def test_capacity_can_select_up_or_down_without_parent_window_gate(tmp_path, monkeypatch, original_window, window):
     fixture = actual_request(tmp_path, original_window=original_window, window=window)

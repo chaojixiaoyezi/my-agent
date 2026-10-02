@@ -1,4 +1,5 @@
-# LLM: 此模块独占 Chat Completions 转换；只读出站投影与真实发送共用组包，保持历史、思考、工具、采样与用量合同。
+# LLM: 此模块独占 Chat Completions 转换；只读出站投影与真实发送共用组包；八档换算和声明过滤归 reasoning_control，
+#   本模块只传同次输出上限与冻结声明，保持历史、思考、工具、采样与用量合同。
 # 模块用途: 调用 Chat 接口，转换消息和流式结果；网络、回调及显式启用的私有诊断写入均在既有边界内。
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from .errors import (
 )
 from .http import HttpBackend, bounded_output_tokens, request_stream_lines
 from .provider_headers import endpoint_parts
-from .reasoning_control import reasoning_payload_fields
+from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -52,7 +53,7 @@ class _OpenAIGenerateRequest:
     thinking_disabled: bool = False
     max_output_tokens: int | None = None
     first_event_timeout_seconds: float | None = None
-    # 智能程度档位（low/medium/high/max 或空串），按 self.reasoning_control 换算成 reasoning_effort/thinking。
+    # 智能程度用户档位或空串；off 已折为开关，两个新档按协议与声明换算，不能直接透传。
     reasoning_effort: str = ""
 
 
@@ -198,7 +199,8 @@ class OpenAICompatibleBackend(HttpBackend):
 
     # LLM: 发送和预览共用唯一组包；媒体按预算读文件并校验hash后编码，不修改canonical历史或推断模态容量。
     #   历史先经 wire_contract.repair_native_messages 修整副本，转换后由 validate_chat_messages 复核，不合规在本地抛错不发送。
-    # 函数用途: 构造Chat历史、工具和输出格式，保留原思考语义；媒体输入包含有界文件读取。
+    #   智能程度只交唯一换算点，传冻结档位声明与本次输出上限；联合 test_reasoning_effort 和采样、工具历史测试。
+    # 函数用途: 构造Chat历史、工具和输出格式，保留原思考优先级与声明过滤；媒体输入包含有界文件读取。
     def _request_payload(self, request: _OpenAIGenerateRequest) -> dict[str, Any]:
         from .sampling import chat_sampling_fields
 
@@ -246,7 +248,8 @@ class OpenAICompatibleBackend(HttpBackend):
         if request.reasoning_effort and payload.get("thinking") != {"type": "disabled"}:
             # LLM: 档位放在工具历史检查之后：DeepSeek 缺 reasoning_content 被迫关思考时不能再带档位。
             payload.update(reasoning_payload_fields(
-                self.reasoning_control, request.reasoning_effort, "openai", payload["max_tokens"],
+                self.reasoning_control, request.reasoning_effort, "openai",
+                ReasoningPayloadLimits(payload["max_tokens"], self.reasoning_levels),
             ))
         if request.response_schema is not None:
             payload["response_format"] = {

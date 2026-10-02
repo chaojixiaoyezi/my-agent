@@ -31,7 +31,9 @@ class _Outbox:
 
 def test_every_menu_row_is_a_valid_effort_command():
     rows = effort_menu_rows()
+    assert REASONING_LEVELS == ("auto", "off", "low", "medium", "high", "xhigh", "max", "ultra")
     assert [value for value, _ in rows] == ["status", *REASONING_LEVELS, "default", "probe"]
+    assert len(rows[1:-2]) == 8 and "xhigh · 超高" in dict(rows).values() and "ultra · 极限" in dict(rows).values()
     parsed = {value: parse_conversation_control(f"/effort {value}", reject_unknown_slash=True) for value, _ in rows}
     assert all(command.kind == "effort" and command.valid for command in parsed.values())
     assert parsed["status"].operation == "view" and parsed["probe"].operation == "probe"

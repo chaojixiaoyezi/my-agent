@@ -1,5 +1,5 @@
 # LLM: schema 与创建参数解析保持一致；model 只允许公开引用，不能通过工具传递端点或凭据；
-#   effort 只是智能程度档位枚举，由宿主换算，不能携带任何供应商原始字段。
+#   effort 的八档枚举直接取唯一换算表，由宿主按模型声明降档，不能携带任何供应商原始字段。
 # 模块用途: 声明派工和权限工具的结构字段，模型与档位字段可选且不扩大 owner 边界。
 """Native tool_use input-schema fragments for orchestration tools.
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...backends.reasoning_control import REASONING_LEVELS
+
 _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "goal": {"type": "string"},
     "persistent_goal": {"type": "string", "minLength": 1, "maxLength": 4000},
@@ -23,7 +25,7 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "agent_name": {"type": "string"},
     "model": {"type": "string", "minLength": 1},
     # 智能程度档位；枚举与 backends/reasoning_control.REASONING_LEVELS 一致，省略则继承当前会话的档位。
-    "effort": {"type": "string", "enum": ["auto", "off", "low", "medium", "high", "max"]},
+    "effort": {"type": "string", "enum": list(REASONING_LEVELS)},
     "tool_preset": {"type": "string", "enum": ["coding", "read_only", "none"]},
     "allowed_tools": {"type": "array", "items": {"type": "string"}},
     "allowed_skills": {"type": "array", "items": {"type": "string"}},

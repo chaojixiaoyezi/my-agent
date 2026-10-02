@@ -1,5 +1,10 @@
 # LLM_GUIDE
 
+C7（2026-10-02，sol，本地已实施、待集成）：用户智能程度固定八档，唯一换算表在 backends/reasoning_control；
+菜单/命令/schema 不再另写档位白名单，发送和回执共用声明筛选。线程/child 保留用户值，投影与发送按候选模型降档。
+不要为 Responses 借用 Chat 容量投影或按型号猜支持。三个变异有组件证据，旧 Gateway 控制失败保持在 TESTS；
+真实模型、终端与 IM 客户端未验证，建议由 3a 集成后核 xhigh/ultra 出站值及降档回执。
+
 P12（2026-10-01，sol，本地实现、待集成/部署）：Curator 的固定引用只走原模型目录解析与后端工厂，默认空值仍沿 owner 选择。
 `memory_curator_model_profile` 是安全边界，模型 set/reset/revert 不可改；只在可信管理员用户 `/settings` 的同步作用域允许此键，
 actor 标签不是授权。失效保留原未配置失败码、退避及运行账诊断，不回退聊天凭据；旧两覆盖键不保留兼容转换。

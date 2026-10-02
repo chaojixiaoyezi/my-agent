@@ -77,7 +77,7 @@ event 把进展、阻塞和结束通知直接父级；模型不能循环调用 `
 
 每个子代理节点还会带 `model` 与 `reasoning_effort` 两个只读字段，展示这个子代理实际使用的模型与智能程度：
 模型显示为“名称（档案编号）”（如 `deepseek-v4.1-flash（536c11f9）`），`default` 显示“继承会话默认”，
-档案被删除或目录不可读时显示“未知”；智能程度显示档位（low/medium/high/max/auto/off），未设置显示“默认”。
+档案被删除或目录不可读时显示“未知”；智能程度显示用户八档（auto/off/low/medium/high/xhigh/max/ultra），未设置显示“默认”。
 权威来源是已物化的子代理线程（`ConversationThread.model_profile_id` / `reasoning_effort`），线程未物化或
 读取失败时回退创建时冻结的任务属性（`host_model_profile.v1` / `host_reasoning_effort.v1`）；只显示名称与编号，
 绝不带地址、密钥或请求头，任何读取失败都不让 list_agents 失败。

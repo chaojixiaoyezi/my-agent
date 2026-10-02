@@ -1,4 +1,5 @@
-# LLM: 此模块独占 Messages 转换；只读出站投影与真实发送共用组包，保持缓存、思考、工具及错误合同，联合 native IR 回归。
+# LLM: 此模块独占 Messages 转换；八档换算归 reasoning_control，同次输出上限与冻结档位声明不能在投影/发送间丢失。
+#   只读出站投影与真实发送共用组包，保持缓存、思考、工具及错误合同，联合 native IR 回归。
 # 模块用途: 调用 Messages 接口并规范化流式或完整响应，保留历史、用量和请求局部控制。
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from .errors import (
 )
 from .http import HttpBackend, bounded_output_tokens, request_stream_lines
 from .provider_headers import endpoint_parts
-from .reasoning_control import reasoning_payload_fields
+from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -52,7 +53,7 @@ class _AnthropicGenerateRequest:
     on_thinking_delta: Callable[[str], None] | None = None
     on_tool_input_progress: Callable[[dict[str, object]], None] | None = None
     first_event_timeout_seconds: float | None = None
-    # 智能程度档位（low/medium/high/max 或空串），按 self.reasoning_control 换算成 thinking/output_config。
+    # 用户档位或空串；off 已折为开关，xhigh/ultra 只在唯一换算点转成协议字段。
     reasoning_effort: str = ""
 
 
@@ -223,13 +224,14 @@ class AnthropicCompatibleBackend(HttpBackend):
         return deepcopy(payload)
 
     # LLM: 关闭思考优先（兼容 Anthropic 官方 thinking 参数，不识别的端点如 MiniMax 静默忽略）；否则按档位经
-    #   reasoning_control 统一换算，预算夹在 max_tokens 以内；都没有时不写任何思考字段。
-    # 函数用途: 返回本次 Messages 请求要合入的思考/智能程度字段。
+    #   reasoning_control 唯一表换算并过滤模型声明，预算夹在本次 max_tokens 以内；同步 test_reasoning_effort。
+    # 函数用途: 返回本次 Messages 请求真实发送的思考字段，保留关闭优先和预算夹紧，不修改共享后端。
     def _thinking_fields(self, request: _AnthropicGenerateRequest, max_tokens: int) -> dict[str, Any]:
         if request.thinking_disabled:
             return {"thinking": {"type": "disabled"}}
         if request.reasoning_effort:
-            return reasoning_payload_fields(self.reasoning_control, request.reasoning_effort, "anthropic", max_tokens)
+            return reasoning_payload_fields(self.reasoning_control, request.reasoning_effort, "anthropic",
+                                            ReasoningPayloadLimits(max_tokens, self.reasoning_levels))
         return {}
 
     # LLM: 普通发送、短JSON和只读投影共用组包；媒体按同预算有界读盘及核对哈希，不执行传输或修改canonical引用。

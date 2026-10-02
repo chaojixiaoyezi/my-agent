@@ -262,6 +262,16 @@
 - **验证**：守卫＋改名相关 7 文件全过、memory_store 19 文件与 gateway_parts 14 文件相关测试全过（插件宿主类沙箱限制除外）、
   guards9 168 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package 全过；size_diff.sh 新增告警 0。详见 TESTS.md。
 
+## C7：/effort 八档与声明过滤（2026-10-02，sol，已实施，待集成/真实模型核对）
+
+- **解决问题**：模型已声明 xhigh/ultra，但菜单、命令与派工只有六档，用户选不到。
+- **做法**：用户扩为八档；中文标签、Responses/Chat/Messages 候选及预算只在 reasoning_control 一张表定义。
+  Responses 的 xhigh→xhigh/high、ultra→ultra/max/xhigh/high；Chat/Messages 沿原 high/max，显式声明过滤。
+  budget 的 xhigh=24576、ultra 同 max，原夹紧、关闭优先、线程/子代理冻结和两处同源投影不变。
+- **边界**：服务商声明仍开放，交集为空不发字段；回执说出实际档位。未新增配置项或选模旁路，未调用真实模型。
+- **验证与状态**：本地组件和三个独立变异有证据，扩展测试的既有失败保留，门禁记录见 TESTS；真实核对由 3a 集成后做。
+  原“GPT xhigh/ultra 档位”待定项按要求登记为已实施（2026-10-01），详细合同见 [智能程度](docs/design/REASONING_EFFORT.md) 第 9 节。
+
 ## J15 自学习收尾四项（2026-10-01，ds1，分支 `worker/ds1-self-learning-tail`，已实现，待集成）
 
 - **背景**：`DECISION_MODEL_FINAL_HANDOFF.md` 剩余风险"自学习"一条的四个收尾项：
@@ -905,10 +915,10 @@
   当前档位（TUI 拿不到结构化值，也不解析回执文字），所以默认停在“查看”一行；不改全局默认（那是用户自己的设置，`/settings` 可改）。
 - **验证**：见 TESTS.md 同名节。上线后（10-01 06:35，`runtime-step16v-234636ed`）在正式 TUI 里实测：单独 `/effort` 弹出档位菜单，
   Esc 关闭后 Gateway 控制账条数不变（没有发出任何命令）。
-- **待定**：ChatGPT 订阅模型的服务商档位比用户档位多（如 gpt-6.1-sol 声明 low/medium/high/xhigh/max/ultra），现在只能选到
-  low/medium/high/max，xhigh 和 ultra 选不到（max 按 max→xhigh→high 取第一个）。服务商档位会继续增加，按“开放世界不靠封闭枚举”
-  应允许直接选当前模型声明的服务商档位（例如 `/effort xhigh`），但 `/effort` 的参数白名单在 `conversation/control_commands.py`
-  （Codex 重构区），等重构告一段落再做；菜单届时按模型声明多列几行。
+- **GPT xhigh/ultra 档位：已实施（2026-10-01）**：C7 将用户档位、菜单、命令、配置与派工扩为固定八档，
+  Responses 按当前模型声明选 xhigh/ultra 或明确降档，Chat/Messages 与预算沿原合同；不是按模型名加专项分支。
+  服务商声明继续开放，用户界面按本次明确合同显示八档，不动态透传未知原始值。组件验收记录日期 2026-10-02，
+  尚未集成/部署，真实核对留给 3a。详见 [智能程度](docs/design/REASONING_EFFORT.md) 第 9 节和 TESTS。
 
 ## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30，分支 `claude/38-recover-child-unknown`，基于 step16v `199c1933e`，第一步已实现，已合入 main `3fdaa3130`）
 

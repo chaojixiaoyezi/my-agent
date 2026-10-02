@@ -72,8 +72,18 @@ cli 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补
 - IM 只投影原服务的纯文本、请求编号和结构化错误码；含可执行程序/外部解释器的启用预览及确认码不重写。
   插件 `display` 动作仍是 TUI 本地面板，不在 IM 执行；普通工具审批没有新增 IM 运输。
 
-`control_service._execute_effort_control` 只在查看 `/effort` 时附加 `backends/reasoning_control.describe_level_choices()` 生成的
-可选档位行（只由档位表生成，不判断模型能力）；TUI 的档位菜单在客户端（`cli/chat_parts/tui_effort_menu.py`），不新增 Gateway 路由。
+## /effort 八档控制 C7（2026-10-02，本地待集成）
+
+- `conversation.control_commands._effort_command` 与派工 schema 读取 `backends/reasoning_control.REASONING_LEVELS`，
+  用户八档与标签、协议候选、预算均由唯一换算表派生；TUI/IM 共用解析，不新增 Gateway 路由或第二份白名单。
+- `control_service._execute_effort_control` 保留原线程设置、清除和探测入口；查看 `/effort` 时附加
+  `reasoning_control.describe_level_choices()` 的八档提示，不把档位可选性当模型能力。TUI 菜单仍归客户端
+  `cli/chat_parts/tui_effort_menu.py`，只提交用户选择，Esc 不提交。
+- `/effort` 和参数中心的实际效果共用 `describe_config_reasoning_effect`，模型声明只在原协议组包时筛选；
+  xhigh/ultra 降档明确写出实际发送值，无声明交集时不发 effort。线程和子线程仍保存用户档，不保存父模型降档值。
+- `gateway_model_adoption` 与子代理首轮投影仍沿 `settings.reasoning_effort.request_reasoning_options` 和真实后端 builder；
+  八档进入同次冻结载荷，预算使用本次输出上限及原夹紧规则。Responses 缺完整容量投影时继续拒绝自动采用，
+  不为新档借用 Chat 投影。组件回归与真实客户端/服务商的未验边界见 `TESTS.md` 的 C7 节。
 
 `user_space/owner_maintenance.run_owner_retention_if_due` 是 owner 维护的唯一入口（默认 24 小时一次，已在 `locked_json_path` 内执行）：
 它先跑 retention 计划，再调 `_reclaim_text_vector_cache_orphans` 回收 `memory_text_vectors.json` 里不属于任何 active 记忆的键。

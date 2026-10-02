@@ -1,6 +1,7 @@
 # LLM: 会话控制保留原类型、参数语义和回执格式；插件只保留公共命名空间和原输入，参数与执行归共享插件服务。
 # /experiment 与 /audit 准备轮同为任务命令：参数冻结进 system_task，只有任务正文进入模型。
 # /admin、/approve 的密码只在 command.value 中，任何持久化之前经 persisted_control_command_text 脱敏。
+# /effort 的八档白名单取唯一换算表，TUI/IM 共用解析，不按模型名或展示文字扩大取值。
 # 模块用途: 将明确命令解释为会话控制或任务，供终端与 IM 共用，普通语言不获得控制权。
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from ..backends.reasoning_control import REASONING_LEVELS
 from ..command_catalog import (
     match_conversation_command,
     system_slash_command_name,
@@ -388,12 +390,12 @@ def _goal_command(trailing: object) -> ConversationControlCommand:
 
 
 _MODEL_USAGE = "用法：/model 查看可选模型；/model <编号> 选为本会话模型；/model default <编号> 设为新会话默认。"
-_EFFORT_USAGE = ("用法：/effort [auto|off|low|medium|high|max|default]；/effort probe 检测当前模型是否支持调节；"
+_EFFORT_USAGE = (f"用法：/effort [{'|'.join(REASONING_LEVELS)}|default]；/effort probe 检测当前模型是否支持调节；"
                  "/effort revert <编号> 撤销检测写入的档案修改。")
-_EFFORT_WORDS = frozenset({"auto", "off", "low", "medium", "high", "max", "default", "help", "probe"})
+_EFFORT_WORDS = frozenset((*REASONING_LEVELS, "default", "help", "probe"))
 
 
-# LLM: 档位取值与 backends/reasoning_control.REASONING_LEVELS 一致；default 清除本会话设置；probe 手动检测当前模型
+# LLM: 档位取值直接来自 backends/reasoning_control.REASONING_LEVELS，含 xhigh/ultra；default 清除本会话设置；probe 手动检测当前模型
 #   （settings/reasoning_probe）；revert 只接一个至少 6 位的字母数字编号。current/status 视同查看。
 # 函数用途: 把 `/effort` 的各种写法解析成结构化控制（查看、设置、帮助、检测、撤销）。
 def _effort_command(trailing: object) -> ConversationControlCommand:

@@ -1,5 +1,9 @@
 # 当前状态
 
+C7（2026-10-02，sol，`worker/sol-effort-levels`，本地已实施、待集成）：/effort 可选八档，Responses 依声明选择 xhigh/ultra，
+Chat/Messages 沿原 high/max，budget 保留原夹紧，回执说出实际值。组件与三个变异有证据，扩展回归旧失败保留 TESTS。
+真实模型及实际 TUI/IM 未验证；本线没有部署、改生产配置或启停 Gateway，下一步由 3a 集成后核对新档。
+
 P12（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，待集成/部署）：Curator 可引用固定的 agentic 模型档案，
 完整采用其自身连接；空值沿 owner 选择，失效不回退，原未配置失败码/退避与结构化诊断保留。旧 provider/model 键只告警，
 新键仅管理员用户 `/settings` 可写，TUI/IM 共用编号与型号展示。定向 235、守卫 167 项通过，三个变异拦截后恢复回归 99 项通过。

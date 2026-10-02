@@ -30,6 +30,17 @@ WITH_NONE = ("none", "low", "medium", "high")
     ("max", LUNA, False, "max"),
     ("max", ("low", "medium", "high", "xhigh"), False, "xhigh"),
     ("max", (), False, "high"),  # 未声明档位：最高只发通用的 high
+    ("xhigh", LUNA, False, "xhigh"),
+    ("xhigh", ("low", "medium", "high"), False, "high"),
+    ("xhigh", (), False, "high"),
+    ("xhigh", ("max", "ultra"), False, ""),
+    ("ultra", (*LUNA, "ultra"), False, "ultra"),
+    ("ultra", LUNA, False, "max"),
+    ("ultra", ("xhigh", "high"), False, "xhigh"),
+    ("ultra", ("high",), False, "high"),
+    ("ultra", (), False, "high"),
+    ("ultra", ("low", "future_level"), False, ""),
+    ("ultra", WITH_NONE, True, "none"),
     ("medium", (), False, "medium"),
     ("off", LUNA, False, ""),  # 模型没声明 none/minimal：不发，交服务商默认
     ("", WITH_NONE, True, "none"),  # 强制工具选择或 /effort off 折成 disabled
@@ -140,3 +151,11 @@ def test_receipt_names_the_effort_actually_sent(levels):
             assert f"发送 {sent}" in text and "不改变请求" not in text
         else:
             assert "不改变请求" in text and "发送" not in text.replace("不额外发送", "")
+
+
+@pytest.mark.parametrize("case", [("xhigh", LUNA, "xhigh"), ("ultra", (*LUNA, "ultra"), "ultra"),
+                                  ("ultra", LUNA, "max"), ("xhigh", (), "high"), ("ultra", (), "high")])
+def test_extended_responses_wire_and_receipt_agree(monkeypatch, case):
+    level, levels, expected = case
+    assert payload_for(monkeypatch, control="effort", levels=levels, effort=level)["reasoning"] == {"effort": expected}
+    assert f"发送 {expected}" in describe_config_reasoning_effect(level, _chatgpt(levels))

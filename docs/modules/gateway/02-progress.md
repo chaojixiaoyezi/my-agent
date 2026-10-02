@@ -27,6 +27,13 @@ agent/session_lock、agent/user_space、agent/adapter 5 个模块 115 个待整�
 
 2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。`gateway_parts/request_context.py` 与 `owner_wake_discovery.py` 的常数改名/补说明，如 `DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS`→`DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`（网关轮内子代理完成回执展示上限），数值不变。
 
+## C7：智能程度八档（2026-10-02，sol，本地已实施，待集成）
+
+TUI 菜单与 TUI/IM 共用命令均接受 xhigh/ultra，配置枚举与派工 schema 同步；用户档位不在入口提前降档。
+回执与实际后端共用 reasoning_control 唯一表，依候选模型声明给实际发送值，无交集说明不改变请求。
+Gateway 自动采用的候选与首发送字段有本地替身传输组件证据，未启动正式 Gateway 或验证真实客户端。
+扩展回归旧失败见 TESTS；建议 3a 合入后核真实 TUI/IM 与模型出站字段。合同见 `docs/design/REASONING_EFFORT.md` 第 9 节。
+
 `/settings internal <关键词>` 查代码常数（参数中心 P10，分支 `worker/ds1-constants-catalog`，2026-10-01）：
 `settings_control_service._internal` 调 `settings/constants_catalog.search_constants`（只读随包
 `config/constants_catalog.json`，由 `scripts/build_constants_catalog.py` 用 ast 静态扫描生成，799 项/328 文件；
