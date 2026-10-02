@@ -1178,7 +1178,7 @@
           {
             "key": "embedding_model_profile",
             "label": "embedding_model_profile（embedding model profile）",
-            "description": "/model 里 embedding 用途的模型档案编号（在 /model 列表查看）。留空就是不用语义检索：记忆和工具都只按关键词找， 不发任何嵌入请求。指定时必须存在、启用且支持 embedding；档案失效明确失败、不回退到聊天模型，语义通道退回关键词。 档案决定把记忆内容发给哪个服务商，属于安全边界：只有本机管理员能改，入口是 /model → 选择模型 → 向量模型（IM：/model vector） 或 /settings；my-agent 只能在“档案在管理员自己目录里、与默认对话模型同一服务商主机”时代为设置（用户 10-02 拍板），主机不同 会请用户自己在 /model 里选。全局设置，所有用户共用；重启 Gateway 后生效。 换成另一个档案后，已存下的记忆向量不会自动重算，语义召回会退回关键词；由本机管理员在终端运行 my-agent memory vectors rebuild --confirmed 重新嵌入。",
+            "description": "/model 里 embedding 用途的模型档案编号（在 /model 列表查看）。留空就是不用语义检索：记忆和工具都只按关键词找， 不发任何嵌入请求。指定时必须存在、启用且支持 embedding；档案失效明确失败、不回退到聊天模型，语义通道退回关键词。 档案决定把记忆内容发给哪个服务商，属于安全边界：只有本机管理员能改，入口是 /model → 选择模型 → 向量模型（IM：/model vector） 或 /settings；my-agent 只能在“档案在管理员自己目录里、与默认对话模型（按 Gateway 启动时的那个）同一服务商主机”时代为设置 （用户 10-02 拍板），主机不同会请用户自己在 /model 里选；设好后 my-agent 也不能改地址、挪服务商或删除把它换到别的主机。 全局设置，所有用户共用；重启 Gateway 后生效。 换成另一个档案后，已存下的记忆向量不会自动重算，语义召回会退回关键词；由本机管理员在终端运行 my-agent memory vectors rebuild --confirmed 重新嵌入。",
             "type": "string",
             "defaultValue": "",
             "currentValue": "",

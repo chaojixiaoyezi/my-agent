@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 语义记忆复审必须修 M1 / S1（be 复审 e75cf6061，2026-10-02，分支 `claude/38-semantic-memory-m1`，基于 `3c960c1d9`）
+
+- `test_embedding_selection.py` 从 33 例增到 42 例：
+  - be 的 M1 探针改成断言：同主机设好后 `save_provider(editing)` 改地址 → 不写，回 needs_user_choice，嵌入地址仍是原主机；
+  - be 的 S1 探针改成断言：同一次运行里 `set_default` 换别家 → `set_embedding` 别家被拦 → 换回来，配置和账本都没动；
+  - 新增：`save_model` 把档案挪到别的服务商被拦；`delete_model` 被拦，菜单里删了以后模型用同一编号在别处 `add` 也被拦；
+  - 新增：只在运行值里（保存值已清空、等重启）的档案同样受保护；不影响主机的修改（改展示名、加别的模型）照常通过；
+  - 新增：TUI 人工改不拦；没有启动快照时请用户选；“重启”重新记快照后按新的默认对话模型比对；
+  - 新增：启动快照那次读取不会混进外层 `capture_selected_model_read`（Gateway 冻结请求模型用的“第一次读取”记录）。
+- fixture 记启动快照（`remember_startup_chat_host`），原来按目录当前默认值比对的两例改成先模拟重启。
+- 变异 8 个全部抓住：
+  - n01 检查不运行、n02 写前快照和写后同一对象、n07 工具不带检查；
+  - n03 不保护运行值、n04 不保护保存值；
+  - n05 改回读目录当前默认值；
+  - n06 拒绝被映射成 MODEL_PROFILE_INVALID；
+  - n08 启动快照读取不包自己的作用域。
+- be 的原样探针在本分支上：对照组仍被拒；M1、S1 两条“绕过成立”的断言都失败（证据目录 `review-semantic-memory-e75cf6061`）。
+
 ## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0（be，2026-10-02，分支 `claude/be-capability-packs-content`）
 
 - **新增 `test_capability_package_drama_text_v05.py`**：A 包 7 项新检查各有正例、反例（占位文字按字段和写法参数化，真文字里带标点或 todo 样词不误报；内嵌引文不逐字、不在台词里、段落不属本镜三种；改编原文可跨段、纯新增留空；道具首次出现已有人拿着的两种情形；画外点名与可见点名；秒数下限可配，非法下限是参数错误）；`--host-json` 只输出 v1 字段、无效也退 0、读不了交付物给 `target_unreadable`。

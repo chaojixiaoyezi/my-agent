@@ -61,6 +61,18 @@
   - **local/main 的派工子进程**：它有自己的准入表，Gateway 关门不影响它，它也不随 Gateway 退出；这里对它没有影响，行为保持不变。
 - **验证**：见 TESTS.md 同一节。没有做 sdkit 故障注入的真实 kill -9 演练（3a 列为加分项）。
 
+## 语义记忆复审必须修：manage_models 不能把当前向量模型挪到别的主机（M1），自配只比对启动时的默认对话模型（S1）（be 复审 e75cf6061，2026-10-02，分支 `claude/38-semantic-memory-m1`，基于 `claude/3a-step17e` `3c960c1d9`，已实现，待集成）
+
+- **M1（必须修）**：同主机 `set_embedding` 之后，同一个 manage_models 能用 `save_provider(editing)` 改那个服务商的地址，或用 `save_model` 把档案挪到别的服务商；两步都不审批、也不再核对主机。重启后嵌入客户端就用新地址，提问和要现嵌的记忆正文都发到新主机。
+  - 做法（3a 定做法 a）：manage_models 的目录写入，只要会改变当前向量档案（用户配置里的保存值、进程里的运行值都算）解析出的端点主机，就不写，回 `needs_user_choice` / `EMBEDDING_HOST_DIFFERS`，请用户去 /model 自己处理。“改变”包括改地址、挪服务商、删掉、从无到有（先在菜单里删了，再让模型用同一个编号在别处建）。
+  - 实现：`model_profiles.model_profile_write_check` 写前检查作用域。`execute_model_profile_operation` 在同一把目录锁里、落盘前调用检查（写前快照 vs 写后快照），抛错就不落盘，没有“查完再写”的竞态，函数签名不变。检查本身是 `embedding_selection.catalog_write_check`，只比较 scheme + 主机 + 端口。
+  - 管理员在 TUI / IM 里亲手改，不进这个检查（人的动作）。不影响向量档案主机的修改照常通过。
+- **S1（一起修）**：三步绕过——先 `set_default` 换成另一家，再 `set_embedding` 另一家的嵌入档案，再 `set_default` 换回来。
+  - 做法：`model_set_embedding` 比对的“默认对话模型主机”改成组合根启动时记下的那一份（`core._wire_memory_authorities` 调 `remember_startup_chat_host`，和嵌入客户端同一时刻定下，写在 `agent.embedding_chat_host_snapshot`），不再读目录当前值。
+  - 同一次运行里先改默认再设向量会被拦；重启是用户的动作，重启后快照更新。没有快照或当时解析不出来，一律请用户自己选。
+- **S2（记成后续项，这轮不做）**：候选、日事件、经验、整理事务备份这些文件也装着记忆正文，还是普通写入（没有 0600 / 0700）。要不要统一走私有写，后续定。
+- **验证**：be 的原样探针在本分支上，M1、S1 两条“绕过成立”的断言都失败了（save_provider 回 `EMBEDDING_HOST_DIFFERS`、嵌入地址没变；换默认后 set_embedding 回 `EMBEDDING_HOST_DIFFERS`）；用例与变异见 TESTS.md 同名节。
+
 ## 子代理被宿主停机打断时界面显示“宿主停机中断”（ae step17d 冒烟发现，2026-10-02，分支 `claude/9b-shutdown-label`，基于 `claude/3a-step17e` `2e5a36af0`，已实现，待集成）
 
 - **问题**：子代理被宿主停机打断后结构化状态是对的（`failure_type=host_shutdown_interrupted` 或 `model_call_admission_closed`，`current_step="宿主停机中断"`），但用户看到的是"失败"：

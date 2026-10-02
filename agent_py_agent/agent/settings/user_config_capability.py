@@ -165,7 +165,8 @@ BOUNDARY_KEYS: dict[str, str] = {
     "memory_curator_model_profile": "决定把记忆内容发给哪个服务商；仅用户经 /settings 修改，模型不能改",
     "embedding_model_profile": ("决定把记忆内容发给哪个嵌入服务商；用户经 /settings 或 /model → 选择模型 → 向量模型 修改。"
                                 "模型只在本机管理员下、目标是本人目录里的嵌入档案且端点主机与默认对话模型相同时，经 manage_models "
-                                "代为设置（用户 10-02 拍板）；主机不同要用户自己在 /model 里选，其余情况模型不能改"),
+                                "代为设置（用户 10-02 拍板；比对的是启动时的默认对话模型）；主机不同要用户自己在 /model 里选。"
+                                "设好后模型也不能经 manage_models 改地址、挪服务商或删除把它换到别的主机，其余情况模型不能改"),
     "enable_capability_package_selection": "决定模型能否在新任务里一次选择能力包（C16：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
     "enable_memory_search_tool": "决定主模型是否多一个读取本人长期记忆的工具（J9：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
     "my_agent_home": "宿主数据根，属于宿主控制面",

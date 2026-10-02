@@ -112,6 +112,12 @@
   外部编号按 `TOOL_PERMISSION_DENIED`）+ 嵌入用途可用 + 端点主机（scheme+主机+端口，去掉账号口令、补齐默认端口）与默认对话模型相同
   → 直接写；主机不同或默认对话模型解析不出 → 不写，回 `needs_user_choice` / `EMBEDDING_HOST_DIFFERS`（恢复动作 request_user_input），
   请用户在菜单里自己选。参数中心写入失败按 `TOOL_EXECUTION_FAILED`、原码进 `reported_error_code`，副作用未知交给对账。
+- be 复审两条必须修（2026-10-02）：
+  - “默认对话模型”只认组合根启动时记下的快照（`core._wire_memory_authorities` → `remember_startup_chat_host`，写在
+    `agent.embedding_chat_host_snapshot`），同一次运行里先 `set_default` 换别家、再 `set_embedding`、再换回来，第二步就被拦；没有快照按需要用户选。
+  - manage_models 的目录写入都在 `model_profile_write_check(catalog_write_check(agent))` 里做：`execute_model_profile_operation` 在同一把
+    目录锁里、落盘前比较写前写后快照；当前向量档案（保存值、运行值都算）解析出的端点主机只要变了（改地址、挪服务商、删掉、从无到有）
+    就不落盘，回 `needs_user_choice` / `EMBEDDING_HOST_DIFFERS`。TUI/IM 里管理员亲手改不进这个检查。
 - `list` 回执附带 `semantic_memory`（只给本机管理员，`embedding_selection.semantic_memory_view`）：运行值、保存值、`restart_pending`、
   可选嵌入档案（编号+模型名）和按这些事实选出的下一步提示。工具说明写明“用户要求开/关语义记忆就是授权，直接调用”，只有回执
   `needs_user_choice` 才请用户去菜单。由来：真实核对第 1 次（f95a38b40，变基后 214465417）模型只 list 不设，加视图后第 2 次（8eb9f8771，变基后 5236901ea）一次设好。
