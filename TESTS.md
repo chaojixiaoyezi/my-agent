@@ -11,6 +11,28 @@
   - 跨进程：有稳定来源时，主机名变化后对活进程仍判活；只剩主机名时，新进程对旧记录给 None，不判死。
 - `test_gateway_commands.py` 两个信号用例改为传入启动身份（`_record_gateway_signal_stop_request` 的身份参数改为必传）。
 
+## C5 登记组件探针固化（2026-10-02，分支 `worker/ds2-run-claim-probe-tests`，基于 `claude/3a-step16z` `78fc5c209`，只加测试）
+
+- 来源：sol2 只读审查 C5 的“建议修”——把审查时临时用的登记组件探针固化成仓库测试。测试按 C5 修复后（车道闸，`ad8e3d74d`）的实现写。
+- 新文件 `agent_py_agent/tests/test_run_claim_probe_paths.py`（7 项）：用真实 `conversation_run_lane`、`SimpleAgent` 的 ConversationStore 和临时目录，不替换被测函数。
+  1. 领取车道失败（车道被占 + interrupt 立刻为真）；
+  2. 回合执行中抛错；
+  3. 收尾阶段抛错（把租约文件的原子写换成必抛）；
+  4. 心跳启动失败（把心跳线程 `start` 换成必抛）；
+  5. 同一会话两个等待者分别被取消；
+  6. 同一 Store 两个会话互不影响；
+  7. 两个 owner home 下同名会话互相隔离。
+- 每条都断言：登记计数回到 0、车道可再次获取、登记在撤销前确实生效过（避免恒真断言），并直接核对登记表内容。
+- 验证命令与结果：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_run_claim_probe_paths.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds2` → **7 passed**；
+  - 同命令叠加 C5 相关三个文件（`test_goal_fuse_user_turn_first.py`、`test_gateway_goal_fuse_reset.py`、`test_goal_progress_fuse.py`）→ **25 passed**。
+- 变异（`tmp/run-mutations.sh`，作用在真实 `run_claim` 上，跑完自动恢复）：**5 个全部被抓住**——
+  去掉 finally 撤销、撤销不减计数、跨会话共用键、撤销只置 0 不删键、登记调用被去掉；每个都让本文件多项用例变红。
+- 已知覆盖边界（不夸大）：`_register_user_input_turn` 里“登记要过车道闸”只影响互斥时序，不改任何可观察状态，
+  黑盒功能测试无法区分（已实测：删掉 `gate.lock` 后本文件仍 7 passed，登记表内容完全一致）；
+  这条由 C5 自己的确定性交错用例（`test_goal_fuse_user_turn_first.py` 的两项 + `test_gateway_goal_fuse_reset.py`）守着。
+  同理，登记键“线程为空时返回空串”这一分支当前无用例覆盖。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：
