@@ -23,6 +23,7 @@ from agent_py_agent.agent.settings.model_profiles import (
 )
 from agent_py_agent.agent.settings.parameter_changes import (
     ChangeOrigin,
+    WritePaths,
     reset_parameter,
     revert_change,
     set_parameter,
@@ -157,11 +158,11 @@ def test_admin_settings_writes_and_resets_but_model_actions_and_spoofed_actor_ca
     assert getattr(load_config(host.config.config_path), KEY) == profile_id
     assert parameter_registry()[KEY].writable is False
     for actor in ("model", "chat"):
-        assert set_parameter(KEY, "", user_path=host.config.config_path, origin=ChangeOrigin(actor)).get("code") == "PARAMETER_BOUNDARY"
-        assert reset_parameter(KEY, user_path=host.config.config_path, origin=ChangeOrigin(actor)).get("code") == "PARAMETER_BOUNDARY"
+        assert set_parameter(KEY, "", paths=WritePaths(user_path=host.config.config_path), origin=ChangeOrigin(actor)).get("code") == "PARAMETER_BOUNDARY"
+        assert reset_parameter(KEY, paths=WritePaths(user_path=host.config.config_path), origin=ChangeOrigin(actor)).get("code") == "PARAMETER_BOUNDARY"
     history = _command(host, monkeypatch, f"/settings history {KEY}")
     change_id = history.message.splitlines()[1].split()[1]
-    assert revert_change(change_id, user_path=host.config.config_path, origin=ChangeOrigin("model")).get("code") == "PARAMETER_BOUNDARY"
+    assert revert_change(change_id, paths=WritePaths(user_path=host.config.config_path), origin=ChangeOrigin("model")).get("code") == "PARAMETER_BOUNDARY"
     assert _command(host, monkeypatch, f"/settings revert {change_id}").ok
     assert getattr(load_config(host.config.config_path), KEY) == ""
     assert _command(host, monkeypatch, f"/settings set {KEY} {profile_id}").ok
@@ -197,8 +198,8 @@ def test_model_text_and_tui_lists_display_the_stable_profile_id(host, monkeypatc
     async def request(*_args, **_kwargs):
         return listing
 
-    async def dialog(_app, _title, choices, _actions, **_kwargs):
-        labels.extend(label for _, label in choices.values)
+    async def dialog(*args, **_kwargs):
+        labels.extend(label for _, label in args[2].values)  # args = (app, title, choices, actions)
         return None
 
     async def choose(_app, _title, rows):

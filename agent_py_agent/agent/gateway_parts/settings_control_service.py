@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -82,9 +83,9 @@ def execute_settings_control(base_agent: object, command: ConversationControlCom
         # 展示与写入用的 capability 文件路径也按运行时同一逻辑解析（agent.capability_config_path 或 root 默认），
         # 不拿 agent_config 用户文件同目录猜——两者目录不同（2026-10-01 评审抓出）。
         with user_settings_write_scope():
-            text = run_settings_control(getattr(base_agent, "config", None), command,
-                                        capability_config=capability_config_for_agent(base_agent),
-                                        capability_path=capability_config_path_for(base_agent), home_paths=home)
+            context = SettingsControlContext(capability_config=capability_config_for_agent(base_agent),
+                                             capability_path=capability_config_path_for(base_agent), home_paths=home)
+            text = run_settings_control(getattr(base_agent, "config", None), command, context=context)
     except SettingsControlError as exc:
         return ConversationControlResult(_KIND, False, str(exc))
     except Exception:  # noqa: BLE001 - 控制回执不能带堆栈或本机路径之外的内部细节。
@@ -107,14 +108,23 @@ def _is_admin(home: object) -> bool:
     return all(type(item) is str and item.strip() for item in identity) and is_local_admin_owner(home)
 
 
-# LLM: 按解析器给出的 operation 分派；config 是 Gateway 启动时加载的配置（当前运行值与用户配置路径的来源）。
-#   capability_config 由调用方经统一入口取得，只交给要显示配置告警的总览与全部视图；不传时这两处只显示主配置告警。
-#   capability_path 是运行时实际读取的 capability 文件路径，展示与写入口都要用（否则显示的运行值/写入目标对不上）。
-#   home_paths 仅用于固定档案展示，身份授权仍在 execute_settings_control，不由字段或文案决定。
+# LLM: /settings 一次执行用到的外部事实，都由调用方经统一入口取得：capability_config 只交给要显示配置告警的总览与
+#   全部视图；capability_path 是运行时实际读取的 capability 文件路径，展示与写入口都要用；home_paths 仅用于固定档案
+#   展示，身份授权仍在 execute_settings_control，不由字段或文案决定。缺省时只看主配置、不显示档案型号。只读载体。
+# 类用途: 把 run_settings_control 的三项可选上下文打成一个参数，避免参数表过长。
+@dataclass(frozen=True)
+class SettingsControlContext:
+    capability_config: object = None
+    capability_path: Path | None = None
+    home_paths: object = None
+
+
+# LLM: 按解析器给出的 operation 分派；config 是 Gateway 启动时加载的配置（当前运行值与用户配置路径的来源），
+#   其余外部事实见 SettingsControlContext。改动分派时同步 test_settings_chat_control 与 test_curator_model_profile。
 # 函数用途: 对管理员执行 /settings 的一个子命令，返回中文回执。
 def run_settings_control(config: object, command: ConversationControlCommand, *,
-                         capability_config: object = None, capability_path: Path | None = None,
-                         home_paths: object = None) -> str:
+                         context: SettingsControlContext | None = None) -> str:
+    ctx = context or SettingsControlContext()
     if command.operation == "help":
         return command.usage
     handler = _HANDLERS.get(command.operation)
@@ -122,11 +132,11 @@ def run_settings_control(config: object, command: ConversationControlCommand, *,
         raise SettingsControlError(command.usage)
     _operation, _, argument = command.value.partition(" ")
     if command.operation == "show" and argument.strip() == "memory_curator_model_profile":
-        return _show(config, argument.strip()) + _curator_profile_text(config, home_paths)
+        return _show(config, argument.strip()) + _curator_profile_text(config, ctx.home_paths)
     if command.operation in _WARNING_VIEWS:
-        return handler(config, argument.strip(), capability_config=capability_config,
-                       capability_path=capability_path)
-    return handler(config, argument.strip(), capability_path=capability_path)
+        return handler(config, argument.strip(), capability_config=ctx.capability_config,
+                       capability_path=ctx.capability_path)
+    return handler(config, argument.strip(), capability_path=ctx.capability_path)
 
 
 # LLM: 展示复用同一连接解析规则，只返回编号、型号和原因；区分启动值与已保存值，不把保存当成热生效。

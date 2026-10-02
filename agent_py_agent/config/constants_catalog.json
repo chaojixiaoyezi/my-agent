@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 799,
+  "count": 800,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2002,6 +2002,14 @@
       "unit": "",
       "category": "其它",
       "description": "不是供应商题数上限。"
+    },
+    {
+      "name": "MAX_COOLDOWN_FILE_BYTES",
+      "file": "agent_py_agent/agent/conversation/decision_policy.py",
+      "value": 32768,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "文件字节上限：进程内表最多 512 条 × 单条约 60 字节的留量，超限拒绝读写，退避回退到进程内。"
     },
     {
       "name": "_BASE_COOLDOWN_SECONDS",
