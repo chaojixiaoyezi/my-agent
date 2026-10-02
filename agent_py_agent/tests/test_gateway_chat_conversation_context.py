@@ -1147,20 +1147,24 @@ def test_scoped_local_tui_preserves_paths_in_final_stream_and_history(tmp_path, 
     path = "/home/example/owners/providers/sample-provider/users/example-user/tasks/req-path-test/report.md"
     raw = f"入口：`{path}`；内部请求 req-path-test"
     expected = f"入口：`{path if private else 'report.md'}`；内部请求 当前请求"
+    # 整条最终回复在对外通道上脱敏过路径时，末尾统一附一次说明；逐段的流式进度不附（见 test_im_path_redaction_note.py）。
+    from agent_py_agent.agent.conversation.channels import HOST_PATH_REDACTION_NOTE
+
+    final_expected = expected if private else f"{expected}\n\n{HOST_PATH_REDACTION_NOTE}"
     monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: SimpleNamespace(
         response=raw, runtime_status="ok", delivery_artifacts=[],
     ))
     result = _run_claimed_gateway_ask(GatewayAskRunContext(
         agent, request, tmp_path / "req.json", tmp_path / "resp.json", "req-path-test", lambda _chunk: None,
     ))
-    assert result.channel_delivery["content"] == expected
+    assert result.channel_delivery["content"] == final_expected
     thread = agent.conversation_store.threads.resolve(
         channel=provider, channel_conversation_id="local-session", channel_user_id="example-user",
     )
     rows = agent.conversation_store.messages.recent(thread.thread_id, limit=10)
-    assert rows[-1].content == expected
+    assert rows[-1].content == final_expected
     events = conversation_history_display_events(rows)
-    assert any(event.get("payload", {}).get("text") == expected for event in events)
+    assert any(event.get("payload", {}).get("text") == final_expected for event in events)
     assert request["metadata"]["channel"] == provider
     writer = BufferedChunkStreamWriter(tmp_path / "chunks.jsonl", delivery_channel=gateway_request_channel(request))
     writer.set_identifier_redactions((("providers/sample-provider/users/example-user", "当前空间"),

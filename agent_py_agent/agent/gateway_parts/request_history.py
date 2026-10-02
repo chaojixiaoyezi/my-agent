@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from ..conversation.channels import (
     LOCAL_CHAT_CHANNEL,
     LOCAL_CHAT_SOURCE,
-    project_host_paths_for_channel,
+    project_message_paths_for_channel,
     project_user_reply,
     redact_structured_identifiers,
     thread_channel,
@@ -97,8 +97,9 @@ def persist_gateway_assistant_result(
     if not delivery_projection.content and not gateway_model_response_error_projection(result):
         raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
+    # 整条最终回复走整条消息出口：对外通道脱敏过宿主绝对路径时末尾附一次说明（之后投递服务不会再附）。
     public_content = redact_structured_identifiers(
-        project_host_paths_for_channel(
+        project_message_paths_for_channel(
             delivery_projection.content,
             gateway_conversation_channel(context, conversation),
         ),
@@ -214,8 +215,9 @@ def _persist_gateway_assistant_commentaries(
     all_persisted = True
     for index, raw in enumerate(raw_messages, start=1):
         projection = project_user_reply(str(raw or ""))
+        # 每条说明消息各自是一条完整消息，同样走整条消息出口（脱敏过路径才附说明，每条最多一次）。
         content = redact_structured_identifiers(
-            project_host_paths_for_channel(projection.content, channel),
+            project_message_paths_for_channel(projection.content, channel),
             identifiers,
             channel=channel,
         ).strip()

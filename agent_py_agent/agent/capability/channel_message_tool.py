@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..artifacts.registry import ArtifactRegistryRecord, resolve_artifact_record_report
 from ..conversation.channels import (
-    project_host_paths_for_channel,
+    project_message_paths_for_channel,
     project_user_reply,
     redact_host_absolute_paths,
 )
@@ -562,7 +562,7 @@ def _success_result(
                 "delivery_status": "sent",
                 "source_owner_delivery": True,
                 "channel": provider,
-                "content": project_host_paths_for_channel(
+                "content": project_message_paths_for_channel(
                     project_user_reply(message).content, provider
                 ),
                 "receipt_id": str(payload.get("receipt_id") or ""),

@@ -13,6 +13,22 @@
 - 变异 6 个，全部被拦住：登记不经过闸、闸只罩查询不罩落账、熔断不用闸、运行时不接闸、闸里总报不在场、同一车道不共用闸。
   其中“登记不经过闸”在网关用例上失败在 `[True] == [False]`，即 sol2 描述的“落账前用户回合已在场”。
 
+## IM 出口脱敏了宿主绝对路径时，整条消息末尾统一附一次说明（2026-10-02，分支 `claude/be-im-path-note`，基于 `4c624ecd4`）
+
+- **新增 `test_im_path_redaction_note.py`（8 项）**：
+  - 插件越界提示经真实插件管理服务生成、再经真实 `DeliveryService` 投到飞书：只留最后一段，末尾附一次说明。
+  - 不含宿主路径的普通消息不附说明。
+  - 一条消息里多处路径只附一次，再经一次出口不重复。
+  - TUI/chat/CLI/local 保留完整路径、不附说明。
+  - 摘要片段投影不附说明。
+- **更新期望**：
+  - `test_gateway_chat_conversation_context.py`：对外通道的最终回复与会话历史末尾多一次说明，流式进度不变。
+  - `test_delivery_service.py`、`test_adapter_manager.py`：含宿主路径的投递正文末尾多一次说明。
+- **门禁**：
+  - 相关 171 个测试文件加 10 个守卫：除上述两处按新口径改期望外全部通过（改后 56 项复跑通过）。
+  - ruff、import 边界、doc_sync、`diff --check`、`size_diff` 新增 0、clean_package。
+- **变异**：6 个全部抓住。包括不管替换与否都附、从不附、每替换一处附一次、本机通道也脱敏、投递服务退回旧投影、请求历史退回旧投影。
+
 ## 去抖：唤醒发现事实缓存用例显式推进策略文件 mtime（2026-10-02，3a）
 
 - **现象**：Linux 车道（`25882221f`）第 10 片 `test_scheduler_scan_costs.py::test_fact_cache_respects_policy_due_deadline` 第 949 行 `[] == ['u1']`；Mac 连跑通过。

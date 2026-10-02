@@ -2398,3 +2398,9 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 `_conversation_task_link_dirs` 列全规范目录（根不存在算空、列目录出错返回 None 不补关）、任何目录都没有 `<task_id>.json`
 （读坏的文件算"有"）、根主执行轮已终态 → `no_conversation_task`。两条都只经仓库的 `settle_task_run_if_agent_tree_terminal`
 写（operator `wake-discovery-task-run-reconcile`），与 `conversation/task_run_closeout.settle_terminal_task_run` 的运行时收口边同口径。
+
+## 对外通道的路径脱敏说明（2026-10-02）
+
+- `conversation/channels.py` 的 `project_host_paths_report` 返回脱敏后正文和替换处数。
+- `project_message_paths_for_channel` 只给整条消息出口用：`DeliveryService.deliver`、`request_history` 的最终回复与逐条说明、消息工具的投递记录。替换过路径就在末尾附 `HOST_PATH_REDACTION_NOTE`。
+- 摘要片段与流式进度仍用 `project_host_paths_for_channel`，不附说明。

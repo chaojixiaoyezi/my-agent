@@ -33,6 +33,7 @@ from agent_py_agent.agent.adapter.manager import (
     _gateway_submission_watch_kind,
 )
 from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
+from agent_py_agent.agent.conversation.channels import HOST_PATH_REDACTION_NOTE
 
 
 class DummyAdapter(BaseChannelAdapter):
@@ -569,7 +570,8 @@ class TestChannelManagerRouteMessage:
             assert manager._send_gateway_reply(msg, "gw-1", raw, "typing") is True
 
         outgoing = finalize.call_args.args[2]
-        assert outgoing.content == "报告已经整理好，文件位于 report.pdf。"
+        # 对外通道脱敏过宿主绝对路径时，整条消息末尾统一附一次说明。
+        assert outgoing.content == f"报告已经整理好，文件位于 report.pdf。\n\n{HOST_PATH_REDACTION_NOTE}"
         assert "TOOL_CALL" not in outgoing.content
         assert "/root/private" not in outgoing.content
         assert outgoing.metadata["projection_status"] == "internal_protocol_removed"

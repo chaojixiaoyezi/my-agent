@@ -6,6 +6,10 @@
 - 网关前台用户回合的登记也要过这把闸：要么在判定之前登记（空片不计入），要么等落账做完再登记（D4 只清计数）。
 - 设计与锁顺序见设计台账同名节，测试与变异见 TESTS.md 同名节。
 
+## IM 出口脱敏宿主路径时附统一说明（2026-10-02，分支 `claude/be-im-path-note`，基于 `claude/3a-step16z` `4c624ecd4`，待集成）
+
+请求历史的最终回复正文与逐条说明消息改走 `project_message_paths_for_channel`：对外通道脱敏过宿主绝对路径时，末尾附一次“路径只显示最后一段，完整路径请在本机 TUI 查看。”。之后投递服务看到的正文里已没有路径，不会重复附。TUI 等本机通道不变。详见 DESIGN_LEDGER 同名条目。
+
 ## /settings 管理员判定改用统一函数（P14 第 6 条，2026-10-02，分支 `claude/38-p14-embedding-fixes`，基于 `claude/3a-step16z` `f8ae11fe5`，待集成）
 
 - `settings_control_service._is_admin` 改为调用 `user_space/owner_access.is_complete_local_admin_owner`，规则不变：

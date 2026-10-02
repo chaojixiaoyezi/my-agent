@@ -45,11 +45,31 @@ LOCAL_PRIVATE_CHANNELS = frozenset(
 )
 
 
+# 对外通道把宿主绝对路径收成最后一段后，附在整条消息末尾的统一说明；脱敏规则本身不开例外。
+HOST_PATH_REDACTION_NOTE = "（路径只显示最后一段，完整路径请在本机 TUI 查看。）"
+
+
 # 函数用途: 按通道决定正文里的宿主绝对路径是保留还是收敛成 basename。
 def project_host_paths_for_channel(text: object, channel: object) -> str:
+    return project_host_paths_report(text, channel)[0]
+
+
+# LLM: 与 project_host_paths_for_channel 同一规则，额外返回本次替换了几处宿主绝对路径（结构化事实，不读正文语义）；
+#   本机私有通道不替换，计数为 0。
+# 函数用途: 投影路径并报告这次是否真的替换过路径。
+def project_host_paths_report(text: object, channel: object) -> tuple[str, int]:
     if str(channel or "").strip().lower() in LOCAL_PRIVATE_CHANNELS:
-        return str(text or "")
-    return redact_host_absolute_paths(str(text or ""))
+        return str(text or ""), 0
+    return _HOST_ABSOLUTE_PATH_RE.subn(_host_path_basename, str(text or ""))
+
+
+# LLM: 只给“整条消息”的出口用（投递服务、请求历史的最终正文、消息工具的投递记录）；摘要片段与逐行进度仍用
+#   project_host_paths_for_channel，免得一条消息里出现多次说明。是否附说明只看本次替换计数；已投影过的正文里不再有
+#   宿主绝对路径、说明本身也不含路径，所以同一条消息再经一次出口时计数为 0，说明只会出现一次。
+# 函数用途: 对外通道脱敏了宿主绝对路径时，在消息末尾统一附一句说明。
+def project_message_paths_for_channel(text: object, channel: object) -> str:
+    projected, replaced = project_host_paths_report(text, channel)
+    return f"{projected.rstrip()}\n\n{HOST_PATH_REDACTION_NOTE}" if replaced else projected
 
 
 # 内部交付/运行信号前缀:这些是出口门/调度用的结构化标记,不是给用户看的正文。
@@ -343,6 +363,9 @@ __all__ = [
     "project_host_paths_for_channel",
     "thread_channel",
     "redact_host_absolute_paths",
+    "HOST_PATH_REDACTION_NOTE",
+    "project_host_paths_report",
+    "project_message_paths_for_channel",
 ]
 
 

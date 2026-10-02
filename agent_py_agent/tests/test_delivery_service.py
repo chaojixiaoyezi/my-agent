@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from agent_py_agent.agent.conversation.channels import HOST_PATH_REDACTION_NOTE
 from agent_py_agent.agent.delivery import (
     ChannelAdapterRegistry,
     ChannelCapabilities,
@@ -107,7 +108,8 @@ def test_reply_projection_blocks_internal_protocol_for_every_adapter() -> None:
     )
 
     assert receipt.delivery_status == "sent"
-    assert adapter.finalized[0][2] == "报告已经整理好，文件位于 report.pdf。"
+    # 对外通道脱敏过宿主绝对路径时，整条消息末尾统一附一次说明。
+    assert adapter.finalized[0][2] == f"报告已经整理好，文件位于 report.pdf。\n\n{HOST_PATH_REDACTION_NOTE}"
     assert "TOOL_CALL" not in adapter.finalized[0][2]
     assert "/private" not in adapter.finalized[0][2]
 
