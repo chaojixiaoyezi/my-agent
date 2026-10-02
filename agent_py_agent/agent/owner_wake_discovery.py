@@ -1071,8 +1071,8 @@ def _reconcile_terminal_conversation_task_runs(
 
 # LLM: 关联文件的唯一扫描入口，在册任务发现与补关共用同一份结果。默认布局部分与旧实现逐字一致（同一通配、
 #   同一排序、列不全时文件按空、目录按 None）。runtime_tasks_dir 是调用方 agent 实际会话存储的关联目录；
-#   只有它不在默认通配之内（配置了 conversation_workspace 指向别处）才额外扫，并补进补关的目录清单；它列不全时
-#   目录清单为 None，补关一律保持打开。只做目录与文件元数据读取。
+#   只有它不在默认通配之内（配置了 conversation_workspace 指向别处）才额外扫，并补进补关的目录清单；它列不全或
+#   整个不存在时目录清单为 None，补关一律保持打开。只做目录与文件元数据读取。
 # 函数用途: 列出本 owner 全部会话任务关联文件，以及补关判断"关联是否存在"要查的目录清单。
 def _conversation_task_link_scan(
     links_root: Path, runtime_tasks_dir: Path | None,
@@ -1085,8 +1085,12 @@ def _conversation_task_link_scan(
             link_files = []
     link_dirs = _conversation_task_link_dirs(links_root)
     extra = _configured_task_links_dir(links_root, runtime_tasks_dir)
-    if extra is None or not extra.is_dir():
+    if extra is None:
         return link_files, link_dirs
+    # 会话存储初始化时就建好关联目录（store_layout.managed_dirs），这里不在只可能是异常（如外接盘没挂上）：
+    # 当作列不全，补关一律保持打开，不能把"看不到"当成"没有关联"。
+    if not extra.is_dir():
+        return link_files, None
     try:
         extra_files = sorted(extra.glob("*.json"), reverse=True)
     except OSError:

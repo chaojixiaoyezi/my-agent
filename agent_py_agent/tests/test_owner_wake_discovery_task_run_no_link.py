@@ -200,6 +200,18 @@ def test_unlistable_configured_root_keeps_task_run_open(home, tmp_path, monkeypa
     assert _task_run(repo, created["task_run_id"])["closed_at"] == 0
 
 
+def test_missing_configured_root_keeps_task_run_open(home, tmp_path):
+    """配置位置整个不在（存储初始化时就会建好，不在只可能是外接盘没挂上这类异常）：按列不全处理，保持打开。"""
+    repo = RuntimeRepository(home / "runtime.db")
+    created = _request_run(repo, "gwreq-unmounted")
+    (_links(home) / "other-task.json").write_text(json.dumps({"task_id": "other-task", "status": "active"}))
+
+    unfinished_task_ids(home, conversation_tasks_dir=tmp_path / "unmounted" / "conversations" / "tasks")
+
+    assert _task_run(repo, created["task_run_id"])["closed_at"] == 0
+    assert _closed_events(repo, created["task_run_id"]) == []
+
+
 def test_default_layout_tasks_dir_behaves_like_no_argument(home, monkeypatch):
     """传进来的就是默认布局里的目录：与不传逐字一致（缺关联照常按 no_conversation_task 补关，不重复扫描）。"""
     repo = RuntimeRepository(home / "runtime.db")

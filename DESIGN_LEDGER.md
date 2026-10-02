@@ -1718,6 +1718,7 @@
   - 基础 owner 的补关入口是会话运行时的低频唤醒对账（`_reconcile_wake_queue`）。它把本 agent 实际会话存储的 `storage.tasks_dir` 交给 `unfinished_task_ids`。
     这个目录由 `runtime_paths` 的同一解析入口算出，与 `ConversationStore` 一致，配置了 `conversation_workspace` 时就是配置的位置，不另推路径。
   - `_conversation_task_link_scan` 是唯一扫描入口：它在默认布局通配之外时额外扫这个目录，并补进补关判断"关联是否存在"的目录清单；列不全时补关一律保持打开。
+  - 3a 集成时补一条：配置的目录整个不在时也按列不全处理、保持打开。会话存储初始化时就建好这个目录（`store_layout.managed_dirs`），它不在只可能是外接盘没挂上这类异常，不能把"看不到"当成"没有关联"。
   - Gateway 发现层只扫 `owners/providers/*` 下的 owner。这些 owner 的作用域 agent 清空了运行路径覆盖（`_config_without_runtime_paths`），会话存储一定在默认布局，所以发现层不传目录，行为不变。
   - 默认布局行为逐字不变；传进来的目录本身就在默认布局里时不重复扫描。
   - 万一误关一条，之后的新执行会照常 `task_run.reopened`，可以恢复。
