@@ -657,6 +657,6 @@ def test_focus_bounds_and_their_label_share_one_limit(prepared, monkeypatch):
     host, record, archive = prepared
     reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
     calls = install(monkeypatch)
-    monkeypatch.setattr(limits, "DELIVERY_FOCUSES_MAX", 2)
+    monkeypatch.setattr(limits, "DELIVERY_FOCUSES_MAX_COUNT", 2)
     assert module.delivery_quality_hint(host, record, archive) == "" and not calls
     assert reasons() == ({"focus_count": 1}, 0) and "超过 2 组" in miss_reason_label("focus_count")

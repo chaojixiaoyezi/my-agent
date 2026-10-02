@@ -35,13 +35,36 @@
 - **没覆盖**：真实 TUI 审批框加 `/plugins disable` 命令这一段没再跑，它们用的是同一个执行器和同一张安装表；G05 情况 1 已用内容包在 TUI 上跑过迟到批准。
 - **验证**：见 TESTS.md 同名节。
 
+## P10 常数整改第五批（2026-10-02，ds2，分支 `worker/ds2-p10-batch5`，基于 `ed64438fc`，已实现，待集成）
+
+- **背景**：P10 白名单按模块分批清理。本批接第一~四批之后，范围是 `agent_py_agent/agent/conversation/` 目录
+  （35 个产品文件）的 **96 个**待整改常数；不碰 tooling/agent_core/capability/backends/settings（留给后续批次）。
+- **做法**：
+  1. **改名 57 个**：数量上限类补 `_COUNT`（45 个：`ACTION_CANDIDATES_MIN→ACTION_CANDIDATES_MIN_COUNT`、
+     `_MAX_RECORDS→_MAX_RECORDS_COUNT`、`_SCAN_INDEX_MAX_RECORDS_PER_FILE→…_COUNT` 等）；字符/长度类补 `_CHARS`
+     （10 个：`_TEXT_LIMIT→_HOST_NOTICE_TEXT_LIMIT_CHARS`——因为 skill_learning_request.py 已有 `TEXT_LIMIT_CHARS`，
+     剥下划线后撞名，改带模块前缀的名字避开；`BACKGROUND_TRANSCRIPT_TEXT_LIMIT→…_CHARS` 等）；token 类补 `_TOKENS`
+     （`INPUT_MEDIA_TOKEN_RESERVE→INPUT_MEDIA_TOKEN_RESERVE_TOKENS`）；`_HOUR→_HOUR_SECONDS`（3600 是一小时的秒数）。
+     全仓引用（agent/cli/tests 的 .py 与文档代码引用）词边界、按旧名长度降序同步（脚本 tmp/sync-batch5-refs.py，
+     84 文件 423 处），重 grep 旧名 0 残留。
+  2. **补说明 73 处**：35 个已有单位后缀的只补中文说明；4 个无物理单位的也补说明。脚本 tmp/add-batch5-comments.py
+     按生成器 `_description` 同判定（最近非空注释行含中文字符）逐处插入。
+  3. **无物理单位 4 个**：`REQUIRED_RECALL`（比率 1.0）、`_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER`（倍数 8）、
+     `_WAKE_FACT_DEPTH_LIMIT`（深度 3）、`_CHARS_PER_TOKEN_WINDOW`（每 token 字符换算率 3）只补说明，挪入白名单无单位组。
+  4. 数值一律不变；`test_constant_names_unique._ALLOWED` 删掉过期条目 `MAX_RECORDS`（decision_outcome_log 改名后
+     `MAX_RECORDS` 不再重复）。
+- **白名单/目录**：待整改白名单 320→225（groups[0]）＋无物理单位组 28→32，只减不增；目录重建 800 项，`--check` 一致。
+- **验证**：目录守卫 13 passed；改名直接相关 30 个测试文件全过；guards9 全量 168 passed；import boundaries 0；
+  ruff/doc_sync/code-size strict/diff --check/clean_package 全过；`size_diff.sh` 新增告警 1（`test_gateway_conversation_control.py`
+  的测试函数 soft 告警，该文件本轮未改、由集成分支 7e0fbcec1 引入，非本批所致）/消失 3。
+
 ## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`，已实现，待集成）
 
 - **背景**：P10 白名单按模块分批清理。本批接第一、二批之后，范围是 `agent_py_agent/cli/` 目录（41 个文件）的 100 个待整改常数，
   不碰 `cli/chat_parts/tui_effort_menu.py`（sol 的 C7）与 ds2 第三批的 memory_store/gateway_parts/core.py。
 - **做法**：
   1. **A 补说明 43 个**：定义上方补一句中文说明（管什么、为什么是这个值），满足生成器“最近注释行含中文字符”规则。
-  2. **B 改名 56 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名（`_LIMIT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、
+  2. **B 改名 56 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名（`_LIMIT_COUNT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、
      `_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、`_ITEMS`→`_ITEM_COUNT`、宽度类加 `_CHARS` 等），
      全仓引用（agent/cli/tests 的 .py）词边界一起改，旧名零残留；`_BACKGROUND_THREADS_PER_OWNER` 因 `_PER_OWNER`
      后缀不匹配，改为 `_BACKGROUND_PER_OWNER_THREAD_COUNT`。
@@ -78,7 +101,7 @@
   ingestion/scheduler/session_lock/user_space/adapter。
 - **做法**：
   1. **A 补说明 32 个**：定义上方补一句中文说明（管什么、为什么是这个值），按生成器“最近注释行含中文字符”规则合规。
-  2. **B 改名 53 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名（`_LIMIT`→`_COUNT`、裸秒→`_SECONDS`、裸字节→`_BYTES`、
+  2. **B 改名 53 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名（`_LIMIT_COUNT`→`_COUNT`、裸秒→`_SECONDS`、裸字节→`_BYTES`、
      裸字符→`_CHARS`、裸 token→`_TOKENS` 等），全仓引用（agent/cli/tests 的 .py，含 `__all__`）词边界一起改，旧名零残留。
   3. **C 无物理单位 18 个**：深度/维度/比率/倍数/协议值/权限位/小时点/水位/ngram/BM25 参数等后缀表无合适单位，
      只补中文说明，在白名单单列一组（reason 注明“无物理单位”）。

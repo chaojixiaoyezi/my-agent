@@ -294,7 +294,7 @@ def test_degraded_segment_keeps_source_coverage_and_stops_on_interrupt(monkeypat
     total = len(json.dumps(request.messages, ensure_ascii=False))
     assert progress[-1] == (total, total)
     # 每个片段最多一次首答加有界纠正，仍无有效摘要就机械降级，不再让整轮压缩作废。
-    assert len(calls) % (1 + budget_module._SEGMENT_REPAIR_LIMIT) == 0
+    assert len(calls) % (1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT) == 0
     assert responses_cover_source(response.text, total)
     assert response.tool_use_blocks == [] and response.truncated is False
     assert "PRIVATE-HISTORY" not in caplog.text
@@ -371,7 +371,7 @@ def test_invalid_segment_repairs_in_place_then_degrades(monkeypatch, caplog, res
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or response)
     result = budget_module.generate_bounded_compact_response(_request("很短的历史记录" * 500))
     texts = [call.prompt for call in calls]
-    first_segment = texts[: 1 + budget_module._SEGMENT_REPAIR_LIMIT]
+    first_segment = texts[: 1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT]
     assert "纠正要求" not in first_segment[0]
     assert hint in first_segment[1] and hint in first_segment[2]
     # 同一条源片段被原地纠正，覆盖区间不变。
@@ -496,7 +496,7 @@ def test_tool_call_reply_is_returned_when_strict_segments_cannot_cover_the_sourc
 
     # 严格来源不接受降级摘录：分段链报 typed 错误时同样交回原回复，保留原机械回退与完整来源行为。
     assert budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True) is tool_call
-    assert len(calls) == 1 + 1 + budget_module._SEGMENT_REPAIR_LIMIT
+    assert len(calls) == 1 + 1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
 
 
 def test_tool_call_fallback_does_not_hide_a_source_that_changed_during_segments(monkeypatch):

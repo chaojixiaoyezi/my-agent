@@ -33,9 +33,10 @@ from .store import ConversationStore
 from .task_runtime_state import task_runtime_state
 
 # 参数减量第 3 批 E 组：后台唤醒上下文的近期记录窗口、待处理唤醒条数上限不再是配置项（值不变）。
-# BACKGROUND_PENDING_WAKE_PROMPT_LIMIT 也被 runtime.py 的唤醒合批选择读取，只在这里定义。
-CONVERSATION_CONTEXT_RECENT_LIMIT = 20
-BACKGROUND_PENDING_WAKE_PROMPT_LIMIT = 20
+# BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT 也被 runtime.py 的唤醒合批选择读取，只在这里定义。
+CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT = 20
+# 后台唤醒上下文：单轮合批最多取 20 条待处理唤醒的 prompt，避免一次注入过多挤爆上下文。
+BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT = 20
 
 
 # LLM: 这是上下文准备的结构化读取接口，不保存状态、不要求生产请求继承；调用方提供已裁决的身份与唤醒。
@@ -423,14 +424,14 @@ def load_context_bundle(state: BackgroundContextLoad) -> dict[str, Any]:
             messages_deferred = bool(str(state.task_id or "").strip())
             bundle, load_errors = state.store.context_bundle_report(
                 state.thread.thread_id,
-                recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
+                recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT,
                 **({"include_messages": False} if messages_deferred else {}),
             )
             state.load_errors.extend(load_errors)
         else:
             bundle = state.store.context_bundle(
                 state.thread.thread_id,
-                recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
+                recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT,
             )
         return _task_scoped_operational_context(state, bundle, messages_deferred=messages_deferred)
     except Exception as exc:
@@ -494,7 +495,7 @@ def _task_scoped_operational_context(
     decision = task_scope_decision(state, bundle)
     if messages_deferred and not decision.detached:
         rows, errors = state.store.messages.recent_report(
-            state.thread.thread_id, limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
+            state.thread.thread_id, limit=CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT,
         )
         state.load_errors.extend(errors)
         bundle = {**bundle, "messages": [row.to_dict() for row in rows]}
@@ -590,7 +591,7 @@ def _detached_task_messages(
         selected = select_message_snapshot(
             state.store.messages, state.thread.thread_id,
             selector_factory=history_scope_selector_factory(decision),
-            retain_limit=CONVERSATION_CONTEXT_RECENT_LIMIT,
+            retain_limit=CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT,
         )
         return [row.to_dict() for row in selected]
     except Exception as exc:
@@ -743,7 +744,7 @@ def _pending_wake_signals(state: BackgroundContextLoad) -> list[dict[str, Any]]:
     try:
         if callable(getattr(getattr(state.store, 'wakes', None), 'pending_report', None)):
             signals, load_errors = state.store.wakes.pending_report(
-                limit=BACKGROUND_PENDING_WAKE_PROMPT_LIMIT,
+                limit=BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT,
             )
             state.load_errors.extend(load_errors)
             payload = [
@@ -757,7 +758,7 @@ def _pending_wake_signals(state: BackgroundContextLoad) -> list[dict[str, Any]]:
                 for item in pending_wake_payload(
                     state.store,
                     state.thread.thread_id,
-                    limit=BACKGROUND_PENDING_WAKE_PROMPT_LIMIT,
+                    limit=BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT,
                 )
             ]
         if not state.task_id:

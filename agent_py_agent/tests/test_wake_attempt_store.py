@@ -25,7 +25,7 @@ from agent_py_agent.agent.conversation.store_wake_publication import _stable_sig
 from agent_py_agent.agent.conversation.wake_poison import (
     WAKE_ATTEMPT_NEUTRAL,
     WAKE_ATTEMPT_SUCCESS,
-    WAKE_POISON_SAME_CAUSE_LIMIT,
+    WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
     WAKE_REASON_ATTEMPT_ABANDONED,
     WAKE_REASON_GATEWAY_STOPPED,
     WAKE_REASON_LEDGER_CORRUPT,
@@ -66,7 +66,7 @@ def _with_observation(store):
 
 def _poison(store, signal, *, verdict=BUG):
     outcome = None
-    for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+    for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         store.wakes.attempts.begin(signal, WakeAttemptStart(f"claim-{attempt}"), now=100.0 + attempt)
         outcome = store.wakes.attempts.record(signal, verdict, now=100.5 + attempt, error=RuntimeError("boom"))
     return outcome
@@ -86,7 +86,7 @@ class TestLedger:
     def test_failures_accumulate_and_decide_at_the_limit(self, tmp_path):
         store = _store(tmp_path)
         signal = _raise(store)
-        for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT - 1):
+        for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1):
             store.wakes.attempts.begin(signal, WakeAttemptStart("c"), now=float(attempt))
             outcome = store.wakes.attempts.record(signal, BUG, now=float(attempt), error=RuntimeError("x"))
             assert outcome.decision is None
@@ -96,7 +96,7 @@ class TestLedger:
         assert ledger["in_flight"] is None and ledger["last_error"]["type"] == "RuntimeError"
         assert ledger["thread_id"] == "thread-a"
         state, error = store.wakes.attempts.state_report(signal.wake_signal_id)
-        assert error is None and state.total_count == 2 * WAKE_POISON_SAME_CAUSE_LIMIT - 1
+        assert error is None and state.total_count == 2 * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1
 
     def test_success_deletes_the_ledger_and_neutral_only_clears_in_flight(self, tmp_path):
         store = _store(tmp_path)
@@ -276,8 +276,8 @@ class TestQuarantine:
         broken.write_text("{not json", encoding="utf-8")
         rows, errors = store.wakes.attempts.quarantined()
         assert rows == [{"wake_signal_id": signal.wake_signal_id, "thread_id": "thread-a", "reason": "session_task",
-                         "reason_code": BUG.reason_code, "same_cause_count": WAKE_POISON_SAME_CAUSE_LIMIT,
-                         "total_count": WAKE_POISON_SAME_CAUSE_LIMIT, "mixed_causes": False,
+                         "reason_code": BUG.reason_code, "same_cause_count": WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
+                         "total_count": WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, "mixed_causes": False,
                          "quarantined_at": 200.0, "replay_count": 0}]
         assert len(errors) == 1 and "派活正文摘要" not in json.dumps(rows, ensure_ascii=False)
 
@@ -604,7 +604,7 @@ class TestQuarantineUnreadableAndCorrupt:
         assert result.ledger_preserved_at == ""
         assert not store.storage.wake_quarantine_ledger_path(signal.wake_signal_id).exists()
         record = _json(store.storage.wake_quarantine_path(signal.wake_signal_id))
-        assert record["quarantine"]["attempts"]["same_cause_count"] == WAKE_POISON_SAME_CAUSE_LIMIT
+        assert record["quarantine"]["attempts"]["same_cause_count"] == WAKE_POISON_SAME_CAUSE_LIMIT_COUNT
 
 
     def test_crash_between_removing_pending_and_moving_the_ledger_leaves_only_an_orphan(self, tmp_path, monkeypatch):

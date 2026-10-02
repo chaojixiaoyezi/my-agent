@@ -11,7 +11,8 @@ from collections.abc import Callable, Mapping
 
 TOOL_INPUT_PROGRESS_SCHEMA = "provider_tool_input_progress.v1"
 TOOL_INPUT_PROGRESS_PHASES = frozenset({"started", "streaming", "ready"})
-TOOL_INPUT_PROGRESS_TOOL_NAME_LIMIT = 80
+# 工具输入进度：工具名最多 80 字符，超长截断避免撑爆事件结构。
+TOOL_INPUT_PROGRESS_TOOL_NAME_LIMIT_CHARS = 80
 
 
 # LLM: 该函数是公开进度 payload 的 fail-closed 白名单；新增字段前必须确认不会
@@ -25,7 +26,7 @@ def public_tool_input_progress(value: object) -> dict[str, object]:
     phase = str(value.get("phase") or "").strip().lower()
     if phase not in TOOL_INPUT_PROGRESS_PHASES:
         return {}
-    tool = str(value.get("tool") or "Tool").strip()[:TOOL_INPUT_PROGRESS_TOOL_NAME_LIMIT]
+    tool = str(value.get("tool") or "Tool").strip()[:TOOL_INPUT_PROGRESS_TOOL_NAME_LIMIT_CHARS]
     try:
         stream_index = max(0, int(value.get("stream_index") or 0))
         received_chars = max(0, int(value.get("received_chars") or 0))

@@ -92,7 +92,7 @@ def test_settings_revocation_is_reported_first_when_both_happen(tmp_path, server
 
 def test_capacity_refusal_keeps_its_own_reason_before_shutdown(tmp_path, server, monkeypatch):  # noqa: F811
     host, params, _thread, stage = configured(tmp_path, server)
-    monkeypatch.setattr(decision_policy, "_MAX_ACTIVE", 0)
+    monkeypatch.setattr(decision_policy, "_MAX_ACTIVE_COUNT", 0)
     outcome = decide(host, params, stage)
     assert (outcome.status, outcome.reason) == ("error", "notification_capacity") and server.requests == []
 

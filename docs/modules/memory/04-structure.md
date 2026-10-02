@@ -580,7 +580,7 @@ Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致�
 标签与关系各自拿完整点位预算，共用绝对 caller deadline；后续关系等待结束后还会按标签自己的点位期限复核较早标签的配置与期限。
 `decision_curator_relation.py` 只消费当前批次，不新建候选 store、后台代理、提取入口或晋升动作。
 
-到达计数：`decision_recall`、`decision_curator`、`decision_curator_relation` 在每次到达时调用 `conversation/decision_reach_counts.note_decision_reach` 记原因码或 `called`，材料构建包在 `counted_material` 里（输入不合格记 `bad_material` 后原样上抛）。Curator 的阶段只建一次，`_note_stage_misses` 为两个点位各记一次阶段原因。计数不参与任何召回、标注或游标判断，开关 `decision_skip_records_enabled` 关闭时不记。召回重排“普通记忆至少几条”读 `conversation/decision_point_limits.RECALL_MEMORIES_MIN`（调用时现读，诊断标签同源）。按用户作用域的 `owner_memory_policy_json` 由 `owner_resolver.home_paths_with_owner` 重设到该用户 home，记忆总闸不再借用本机主用户的策略文件。
+到达计数：`decision_recall`、`decision_curator`、`decision_curator_relation` 在每次到达时调用 `conversation/decision_reach_counts.note_decision_reach` 记原因码或 `called`，材料构建包在 `counted_material` 里（输入不合格记 `bad_material` 后原样上抛）。Curator 的阶段只建一次，`_note_stage_misses` 为两个点位各记一次阶段原因。计数不参与任何召回、标注或游标判断，开关 `decision_skip_records_enabled` 关闭时不记。召回重排“普通记忆至少几条”读 `conversation/decision_point_limits.RECALL_MEMORIES_MIN_COUNT`（调用时现读，诊断标签同源）。按用户作用域的 `owner_memory_policy_json` 由 `owner_resolver.home_paths_with_owner` 重设到该用户 home，记忆总闸不再借用本机主用户的策略文件。
 
 - `CuratorFormalMemoryInput.authority_version/content_chars` 是宿主事实：long-term 版本取原 `MemoryRecord.version`，
   正文长度取原规范化全正文。原 `to_model` 不增加字段，因此增强关闭时原 Curator 输入字节不变。

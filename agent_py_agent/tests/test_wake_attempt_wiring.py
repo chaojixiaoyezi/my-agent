@@ -27,7 +27,7 @@ from agent_py_agent.agent.conversation.wake_attempt_tracking import (
     wake_attempt_deferred,
 )
 from agent_py_agent.agent.conversation.wake_poison import (
-    WAKE_POISON_SAME_CAUSE_LIMIT,
+    WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
     WAKE_REASON_GATEWAY_STOPPED,
     WAKE_REASON_LEDGER_CORRUPT,
 )
@@ -90,7 +90,7 @@ def test_unknown_admission_is_quarantined_after_the_same_cause_limit(tmp_path, m
     _inject_admission(monkeypatch, "host_delivery_consumed")
     claims = _spy_claims(chain, monkeypatch)
     gaps = []
-    for count in range(1, WAKE_POISON_SAME_CAUSE_LIMIT):
+    for count in range(1, WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         _tick_after_backoff(chain, wake)
         state = _state(chain, wake)
         assert (state.reason_code, state.same_cause_count) == ("admission:host_delivery_consumed", count)
@@ -119,7 +119,7 @@ def test_program_error_in_the_slice_is_counted_and_quarantined(tmp_path, monkeyp
         raise RuntimeError("程序错误")
 
     monkeypatch.setattr(chain.scheduler.runtime, "run_once", broken)
-    for _index in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+    for _index in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         with pytest.raises(RuntimeError):
             _tick_after_backoff(chain, wake)
     rows, _errors = _attempts(chain).quarantined()

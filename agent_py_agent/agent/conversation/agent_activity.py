@@ -37,12 +37,18 @@ from .models import (
 from .tool_input_progress import public_tool_input_progress
 
 _SCHEMA_VERSION = "conversation_agent_activity.v6"
-_MAX_PROJECTED_SUBAGENTS = 64
-_MAX_PROJECTED_PROGRESS_ITEMS = 128
-_MAX_PROJECTED_GOALS = 16
-_ACTIVITY_TEXT_LIMIT = 240
-_AGENT_PROMPT_TEXT_LIMIT = 10_000
-_GOAL_OBJECTIVE_TEXT_LIMIT = 4_000
+# 活动投影：子代理最多 64 个。
+_MAX_PROJECTED_SUBAGENTS_COUNT = 64
+# 活动投影：进度条目最多 128 条。
+_MAX_PROJECTED_PROGRESS_ITEMS_COUNT = 128
+# 活动投影：目标最多 16 个。
+_MAX_PROJECTED_GOALS_COUNT = 16
+# 活动投影：单条活动文本最多 240 字符，避免投影过大。
+_ACTIVITY_TEXT_LIMIT_CHARS = 240
+# 活动投影：agent prompt 文本最多 10000 字符，控制投影体积。
+_AGENT_PROMPT_TEXT_LIMIT_CHARS = 10_000
+# 活动投影：目标 objective 文本最多 4000 字符。
+_GOAL_OBJECTIVE_TEXT_LIMIT_CHARS = 4_000
 _MAIN_ACTIVITY_STATE_ATTR = "_conversation_main_activity_projection"
 _MAIN_ACTIVITY_LOCK_ATTR = "_conversation_main_activity_projection_lock"
 _MAIN_ACTIVITY_SETUP_LOCK = threading.Lock()
@@ -127,7 +133,7 @@ class BackgroundMainActivitySink:
     # 函数用途: 把后台主代理最近一段真实思考显示在 main 行，避免用户误判卡死。
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
         self._transcript.write_thinking(text, duration_seconds=duration_seconds)
-        activity = _bounded_text(text, limit=_ACTIVITY_TEXT_LIMIT)
+        activity = _bounded_text(text, limit=_ACTIVITY_TEXT_LIMIT_CHARS)
         self._publish("thinking", activity or "思考中")
 
     # LLM: 数字来自同一 provider-preflight schema，前后台共用发布函数；更新数字不改变活动阶段。
@@ -274,7 +280,7 @@ def publish_main_activity(
             "projection_id": source.projection_id,
             "task_id": task_id,
             "phase": phase or current.get("phase") or "running",
-            "activity": _bounded_text(activity or current.get("activity"), limit=_ACTIVITY_TEXT_LIMIT),
+            "activity": _bounded_text(activity or current.get("activity"), limit=_ACTIVITY_TEXT_LIMIT_CHARS),
             "started_at": source.started_at,
             "updated_at": time.time(),
         }
@@ -327,7 +333,7 @@ def background_main_activity(
     public = {
         "task_id": task_id,
         "phase": _bounded_text(row.get("phase"), limit=40),
-        "activity": _bounded_text(row.get("activity"), limit=_ACTIVITY_TEXT_LIMIT),
+        "activity": _bounded_text(row.get("activity"), limit=_ACTIVITY_TEXT_LIMIT_CHARS),
         "started_at": max(0.0, _safe_float(row.get("started_at"))),
         "updated_at": max(0.0, _safe_float(row.get("updated_at"))),
     }
@@ -470,7 +476,7 @@ def conversation_agent_activity(
     )
     if _todo_panel_should_collapse(display_links, rows):
         progress_items = ()
-    visible = rows[:_MAX_PROJECTED_SUBAGENTS]
+    visible = rows[:_MAX_PROJECTED_SUBAGENTS_COUNT]
     return replace(
         display,
         active_task_count=len(live_task_ids),
@@ -556,7 +562,7 @@ def _conversation_goal_rows(
             "name": _bounded_text(getattr(goal, "name", ""), limit=240),
             "objective": _bounded_text(
                 getattr(goal, "objective", ""),
-                limit=_GOAL_OBJECTIVE_TEXT_LIMIT,
+                limit=_GOAL_OBJECTIVE_TEXT_LIMIT_CHARS,
             ),
             "status": status,
             "tokens_used": max(0, int(getattr(goal, "tokens_used", 0) or 0)),
@@ -570,7 +576,7 @@ def _conversation_goal_rows(
             row["duration_seconds"] = max(1, int(duration_seconds))
         rows.append(row)
     rows.sort(key=lambda item: (float(item.get("created_at") or 0.0), str(item["goal_id"])))
-    return rows[:_MAX_PROJECTED_GOALS], []
+    return rows[:_MAX_PROJECTED_GOALS_COUNT], []
 
 
 # LLM: TUI liveness follows the active-turn boundary, not the resumable
@@ -679,7 +685,7 @@ def _conversation_main_activity(
         "task_id": str(workspace_task_id).strip(),
         "phase": _bounded_text(row.get("phase"), limit=40) or "waiting",
         "activity": (
-            _bounded_text(row.get("activity"), limit=_ACTIVITY_TEXT_LIMIT)
+            _bounded_text(row.get("activity"), limit=_ACTIVITY_TEXT_LIMIT_CHARS)
             or "等待后续事件"
         ),
         "started_at": started_at,
@@ -751,7 +757,7 @@ def conversation_agent_view(
             **row,
             "goal": _public_agent_text(
                 getattr(task, "goal", "") or getattr(task, "description", ""),
-                limit=_AGENT_PROMPT_TEXT_LIMIT,
+                limit=_AGENT_PROMPT_TEXT_LIMIT_CHARS,
             ),
             "activity": _subagent_current_activity(
                 task,
@@ -761,10 +767,10 @@ def conversation_agent_view(
             "model_metrics": model_metrics_from_thread(store, thread_id),
         },
         "terminal": terminal,
-        "children": rows[:_MAX_PROJECTED_SUBAGENTS],
+        "children": rows[:_MAX_PROJECTED_SUBAGENTS_COUNT],
         "goals": goals,
         "goal_projection_ok": not goal_warnings,
-        "hidden_child_count": max(0, len(rows) - _MAX_PROJECTED_SUBAGENTS),
+        "hidden_child_count": max(0, len(rows) - _MAX_PROJECTED_SUBAGENTS_COUNT),
         "task_progress_items": list(progress_items),
         "task_progress_generation_id": progress_generation_id,
         "task_progress_plan_revision": progress_plan_revision,
@@ -981,11 +987,11 @@ def _task_progress_items_from_links(
         rows.append(
             {
                 "id": item_id,
-                "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT),
+                "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT_CHARS),
                 "status": _bounded_text(item.get("status"), limit=32) or "pending",
             }
         )
-        if len(rows) >= _MAX_PROJECTED_PROGRESS_ITEMS:
+        if len(rows) >= _MAX_PROJECTED_PROGRESS_ITEMS_COUNT:
             break
     return tuple(rows), generation_id, plan_revision, []
 
@@ -1320,7 +1326,7 @@ def _subagent_current_activity(
         getattr(task, "last_progress_summary", ""),
         getattr(task, "latest_summary", ""),
     ):
-        if text := _bounded_text(value, limit=_ACTIVITY_TEXT_LIMIT):
+        if text := _bounded_text(value, limit=_ACTIVITY_TEXT_LIMIT_CHARS):
             return text
     return {
         "PLANNING": "准备任务",
@@ -1391,14 +1397,14 @@ def _task_progress_items_for_run(
     rows = [
         {
             "id": _bounded_text(item.get("id"), limit=128),
-            "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT),
+            "title": _bounded_text(item.get("title"), limit=_ACTIVITY_TEXT_LIMIT_CHARS),
             "status": _bounded_text(item.get("status"), limit=32) or "pending",
         }
         for item in raw_items
         if isinstance(item, dict)
         and _bounded_text(item.get("id"), limit=128)
         and _bounded_text(item.get("id"), limit=128) not in hidden
-    ][:_MAX_PROJECTED_PROGRESS_ITEMS]
+    ][:_MAX_PROJECTED_PROGRESS_ITEMS_COUNT]
     return tuple(rows), generation_id, plan_revision, []
 
 
@@ -1478,7 +1484,7 @@ def _progress_item_ids(task: object) -> list[str]:
 # 函数用途: 选择一句能说明“这个子代理干什么”的短标题，供面板按宽度截断。
 def _subagent_description(task: object) -> str:
     for field_name in ("description", "goal", "role"):
-        text = _bounded_text(getattr(task, field_name, ""), limit=_ACTIVITY_TEXT_LIMIT)
+        text = _bounded_text(getattr(task, field_name, ""), limit=_ACTIVITY_TEXT_LIMIT_CHARS)
         if text:
             return text
     return ""

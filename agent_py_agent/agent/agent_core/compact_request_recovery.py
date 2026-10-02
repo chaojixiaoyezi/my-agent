@@ -295,7 +295,7 @@ class PreparedCompactRecovery:
 
 
 # LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
-#   已知图块按常量 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
+#   已知图块按常量 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE_TOKENS 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
 #   纯投影的原始计量再按 select 冻结的校准（recovery.calibration）折算后才与上限比较（与预检同一观测）；投影本身不读宿主状态。
 # 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型；recovery 是恢复宿主本身。
 def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source) -> bool:

@@ -116,7 +116,7 @@ observe 的建议永远不会被采用，同步等待只会拖慢回复（生产
 
 - **范围**：只转普通 thread 范围、点位有效模式为 observe 的调用。apply（时序完全不变）、实验、用户后台（owner_background）点位始终同步。
 - **返回**：`decide` 在冷却检查和在途登记之后，当场返回 `deferred` 占位（`may_apply=False`、`blocking=False`），不写结果行。调用点照原有失败路径保留原方案，例如召回会记 `memory_recall_decision:observe:deferred`。
-- **执行器**：`conversation/decision_observe_nonblocking.py`。进程内只有一个后台 worker，串行执行，排队上限 `OBSERVE_NONBLOCKING_MAX_PENDING=8`。队列满时记 `skipped/observe_nonblocking_busy` 结果行，外加一个 reach 内部码（不计入 reached/called）。
+- **执行器**：`conversation/decision_observe_nonblocking.py`。进程内只有一个后台 worker，串行执行，排队上限 `OBSERVE_NONBLOCKING_MAX_PENDING_COUNT=8`。队列满时记 `skipped/observe_nonblocking_busy` 结果行，外加一个 reach 内部码（不计入 reached/called）。
 - **期限**：从 worker 开始执行时起算 `background_timeout_seconds`，不占前台阶段预算，也不受调用方期限约束。结果行里的耗时只算执行部分。
 - **身份与复核**：
   - worker 先装入发起时捕获的 runner 身份：run 取阶段身份，任务属性取拷贝，发起回合之后再改它也不影响后台。

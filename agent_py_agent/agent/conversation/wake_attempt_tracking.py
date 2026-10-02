@@ -28,7 +28,7 @@ from .wake_poison import (
     WAKE_ATTEMPT_PATH_CLAIMED,
     WAKE_ATTEMPT_PATH_QUOTA_FALLBACK,
     WAKE_CLAIM_FINISHED,
-    WAKE_POISON_SAME_CAUSE_LIMIT,
+    WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
     WAKE_REASON_LEDGER_CORRUPT,
     WAKE_VERDICT_FAILURE,
     WAKE_VERDICT_NEUTRAL,
@@ -245,7 +245,7 @@ class WakeAttemptTracker:
         if verdict.kind == WAKE_VERDICT_FAILURE:
             _log("wake_attempt_failed", member, {
                 "reason_code": verdict.reason_code, "same_cause_count": outcome.state.same_cause_count,
-                "limit": WAKE_POISON_SAME_CAUSE_LIMIT, "next_attempt_at": outcome.state.next_attempt_at})
+                "limit": WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, "next_attempt_at": outcome.state.next_attempt_at})
         if outcome.stall_alert is not None:
             wake_uncounted_stalled(self._scheduler, member, outcome.stall_alert)
         if outcome.decision is not None:

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import hashlib
 
+# 后台进度失败退避基数 300 秒：首次失败等 5 分钟再试。
 _FAILURE_BASE_BACKOFF_SECONDS = 300
+# 后台进度失败退避封顶 3600 秒（1 小时）：防止等待无限拉长。
 _FAILURE_MAX_BACKOFF_SECONDS = 3600
 
 

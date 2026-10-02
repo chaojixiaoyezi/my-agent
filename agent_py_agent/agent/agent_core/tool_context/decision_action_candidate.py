@@ -128,7 +128,7 @@ def _miss_reason(agent: object, record: object, archive: dict) -> str:
         observation = _observation(archive)
     except DecisionInputError:
         return "bad_observation"
-    if len(observation["candidates"]) < limits.ACTION_CANDIDATES_MIN:
+    if len(observation["candidates"]) < limits.ACTION_CANDIDATES_MIN_COUNT:
         return "few_candidates"
     available = _available_tools(record.params)
     if not any(set(candidate["actions"]) & available for candidate in observation["candidates"]):

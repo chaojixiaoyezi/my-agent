@@ -25,10 +25,14 @@ from .tool_approval_scope import (
 
 AGENT_TOOL_APPROVAL_SCHEMA = "subagent_tool_approval.v1"
 AGENT_TOOL_APPROVAL_CONSUMER_SCHEMA = "subagent_tool_approval_consumer.v1"
+# 子代理工具审批：发现/查询一次审批记录的等待上限 1.5 秒，避免阻塞主链路太久。
 AGENT_TOOL_APPROVAL_DISCOVERY_SECONDS = 1.5
+# 子代理工具审批：消费者拿到的租约 15 秒，超时未提交就让位，避免卡死的审批占住队列。
 AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS = 15.0
+# 子代理工具审批：轮询间隔 0.05 秒（20 次/秒），足够灵敏又不烧 CPU。
 AGENT_TOOL_APPROVAL_POLL_SECONDS = 0.05
-AGENT_TOOL_APPROVAL_MAX_PENDING = 32
+# 子代理工具审批：同一时刻最多挂起 32 条审批，超出直接拒绝，防止积压。
+AGENT_TOOL_APPROVAL_MAX_PENDING_COUNT = 32
 
 
 # LLM: 句柄冻结 canonical 归属、完整请求与 main claim；等待及决定必须核对同一记录，不能换成后续执行。
@@ -201,7 +205,7 @@ def list_pending_agent_tool_approvals(
     agent: object,
     *,
     root_task_id: str,
-    limit: int = AGENT_TOOL_APPROVAL_MAX_PENDING,
+    limit: int = AGENT_TOOL_APPROVAL_MAX_PENDING_COUNT,
 ) -> list[dict[str, object]]:
     root = validate_opaque_id(root_task_id, kind="root_task_id")
     directory = _approval_root(agent, root)

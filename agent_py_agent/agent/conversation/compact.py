@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     from .store import ConversationStore
 
 _MAX_COMPACT_OPERATION_EVENTS = 32
+# 空响应回退文本最多 12000 字符：控制重放体积。
 _EMPTY_RESPONSE_FALLBACK_MAX_CHARS = 12_000
 _VERIFICATION_COUNT_KEYS = (
     "succeeded",

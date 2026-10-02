@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..user_space.owner_resolver import OwnerIdentity
-from .wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT
+from .wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT_COUNT
 
 # kind 结构化取值：消息与任务。
 SESSION_KIND_MESSAGE = "message"
@@ -52,7 +52,7 @@ SESSION_MESSAGE_HOST_EVENT_MARKER = "[SESSION_MESSAGE_HOST_EVENT]"
 SESSION_MESSAGE_KEY_FIELD = "message_dedupe_key"
 # 目标回合没消费就结束（/stop、报错、崩溃）时，会话消息释放回队列、交给下一回合正式认领；同一条消息最多释放这么多次，
 #   和毒丸同因上限一个数（一条会让回合崩溃的消息不能无限循环）。常量不进配置：它是防死循环的安全兜底。
-SESSION_MESSAGE_RELEASE_LIMIT = WAKE_POISON_SAME_CAUSE_LIMIT
+SESSION_MESSAGE_RELEASE_LIMIT = WAKE_POISON_SAME_CAUSE_LIMIT_COUNT
 # 达到释放上限后回执转 rejected，并在回执的 migration.rejection_code 里记这个码（登记在 ERROR_CONTRACTS）。
 SESSION_MESSAGE_RELEASE_LIMIT_REACHED = "SESSION_MESSAGE_RELEASE_LIMIT_REACHED"
 

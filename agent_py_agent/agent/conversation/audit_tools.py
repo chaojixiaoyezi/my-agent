@@ -44,7 +44,8 @@ from .workspace_paths import validated_durable_work_path
 
 _SOURCE_PROBE_REF_RE = re.compile(r"^ws-[0-9a-f]{10}$")
 _SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_MAX_SOURCE_PROBE_REFS = 256
+# 来源探测引用最多 256 个：限制审计输出体积。
+_MAX_SOURCE_PROBE_REFS_COUNT = 256
 
 
 @dataclass(frozen=True)
@@ -162,7 +163,7 @@ class PublishAuditUpdateTool(BaseTool):
                     },
                     "source_probe_refs": {
                         "type": "array",
-                        "maxItems": _MAX_SOURCE_PROBE_REFS,
+                        "maxItems": _MAX_SOURCE_PROBE_REFS_COUNT,
                         "items": {"type": "string", "pattern": r"^ws-[0-9a-f]{10}$"},
                         "description": "Successful watch_id values from final watch_stream(open) probes in this prepare turn.",
                     },
@@ -173,7 +174,7 @@ class PublishAuditUpdateTool(BaseTool):
                     },
                     "remove_source_ids": {
                         "type": "array",
-                        "maxItems": _MAX_SOURCE_PROBE_REFS,
+                        "maxItems": _MAX_SOURCE_PROBE_REFS_COUNT,
                         "items": {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
                         "description": "Exact persisted source IDs intentionally omitted by replace.",
                     },
@@ -754,9 +755,9 @@ def _validated_evidence_refs(agent: object, link: object, value: object) -> list
 def _normalized_source_probe_refs(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list) or len(value) > _MAX_SOURCE_PROBE_REFS:
+    if not isinstance(value, list) or len(value) > _MAX_SOURCE_PROBE_REFS_COUNT:
         raise ValueError(
-            f"source_probe_refs 必须是最多 {_MAX_SOURCE_PROBE_REFS} 项的 watch_id 数组"
+            f"source_probe_refs 必须是最多 {_MAX_SOURCE_PROBE_REFS_COUNT} 项的 watch_id 数组"
         )
     refs: list[str] = []
     seen: set[str] = set()
@@ -774,9 +775,9 @@ def _normalized_source_probe_refs(value: object) -> tuple[str, ...]:
 def _normalized_remove_source_ids(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list) or len(value) > _MAX_SOURCE_PROBE_REFS:
+    if not isinstance(value, list) or len(value) > _MAX_SOURCE_PROBE_REFS_COUNT:
         raise ValueError(
-            f"remove_source_ids 必须是最多 {_MAX_SOURCE_PROBE_REFS} 项的 source_id 数组"
+            f"remove_source_ids 必须是最多 {_MAX_SOURCE_PROBE_REFS_COUNT} 项的 source_id 数组"
         )
     ids: list[str] = []
     seen: set[str] = set()

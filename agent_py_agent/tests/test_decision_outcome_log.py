@@ -53,7 +53,7 @@ def test_append_writes_only_the_owner_path_and_stays_bounded(tmp_path, monkeypat
     append_decision_outcome(SimpleNamespace(home_paths=SimpleNamespace()), decision_outcome_row(_stage(), "recall", _outcome(), 0))
     assert not path.exists()
 
-    monkeypatch.setattr(decision_outcome_log, "_MAX_RECORDS", 3)
+    monkeypatch.setattr(decision_outcome_log, "_MAX_RECORDS_COUNT", 3)
     agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=path))
     for index in range(5):
         append_decision_outcome(agent, decision_outcome_row(_stage(), f"p{index}", _outcome(), 0))

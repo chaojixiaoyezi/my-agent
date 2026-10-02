@@ -206,7 +206,7 @@ def test_background_timeout_is_billed_like_a_foreground_timeout(tmp_path, server
 
 
 def test_one_worker_and_a_bounded_queue_refuse_with_a_structured_reason(tmp_path, server, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(limits, "OBSERVE_NONBLOCKING_MAX_PENDING", 2)
+    monkeypatch.setattr(limits, "OBSERVE_NONBLOCKING_MAX_PENDING_COUNT", 2)
     server.block = True
     host, params, thread, stage = nonblocking(tmp_path, server)
     first = decide(host, params, stage)
@@ -232,7 +232,7 @@ def test_one_worker_and_a_bounded_queue_refuse_with_a_structured_reason(tmp_path
 
 
 def test_queue_limit_is_the_frozen_eight():
-    assert limits.OBSERVE_NONBLOCKING_MAX_PENDING == 8
+    assert limits.OBSERVE_NONBLOCKING_MAX_PENDING_COUNT == 8
 
 
 def test_user_stop_before_send_skips_the_request_without_usage(tmp_path, server):  # noqa: F811

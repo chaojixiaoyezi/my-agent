@@ -36,7 +36,7 @@ from agent_py_agent.agent.conversation.wake_domain_closeout import (
     wake_domain_terminal,
 )
 from agent_py_agent.agent.conversation.wake_poison import (
-    WAKE_POISON_SAME_CAUSE_LIMIT,
+    WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
     QuarantineDecision,
     WakeStallAlert,
 )
@@ -175,7 +175,7 @@ def test_scheduler_closes_out_the_domain_when_a_wake_is_quarantined(tmp_path, mo
     """经调度器逐拍推进：未知准入码同因满上限结案时，派活任务收成 failed 带码并回报，会话消息回执不动（做法 2），B 有宿主提示。"""
     chain, wake = _chain_with_b_wake(tmp_path, monkeypatch, kind)
     wiring._inject_admission(monkeypatch, "host_delivery_consumed")
-    for _index in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+    for _index in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         wiring._tick_after_backoff(chain, wake)
     assert wiring._b_wakes(chain) == [], "应当已结案"
     if kind == "task":

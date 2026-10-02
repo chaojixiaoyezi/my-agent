@@ -410,7 +410,7 @@ def test_memory_floor_and_its_label_share_one_limit(prepared, monkeypatch, tmp_p
     host, request, records, scope = prepared
     reasons = reach_counter(host, monkeypatch, "recall", tmp_path)
     calls = install(monkeypatch)
-    monkeypatch.setattr(limits, "RECALL_MEMORIES_MIN", 4)
+    monkeypatch.setattr(limits, "RECALL_MEMORIES_MIN_COUNT", 4)
     result = module.rerank_recalled_memories(host, request, records, recall_scope=scope, refresh=lambda: list(records))
     assert result == (records, "") and not calls
     assert reasons() == ({"memory_count": 1}, 0) and "不到 4 条" in miss_reason_label("memory_count")

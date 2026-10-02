@@ -12,9 +12,13 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 DISPLAY_ARCHIVE_SCHEMA = "display_archive_ref.v1"
-DISPLAY_PAGE_ROWS = 256
+# 展示归档：单页最多 256 行，控制分页行数。
+DISPLAY_PAGE_ROWS_COUNT = 256
+# 展示归档：单页最多 12000 字符，控制分页大小。
 DISPLAY_PAGE_CHARS = 12_000
+# 展示归档：单行最多 2000 字符，超长行截断显示。
 DISPLAY_ROW_CHARS = 2_000
+# 展示归档单页最大 256000 字节：控制分页存储体积。
 _MAX_PAGE_BYTES = 256_000
 _ID = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 _ARCHIVE_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -52,7 +56,7 @@ def archive_display_rows(agent: object, *, thread_id: str, rows: Iterable[Mappin
         count = max(1, (len(text) + DISPLAY_ROW_CHARS - 1) // DISPLAY_ROW_CHARS)
         for part_index in range(count):
             chunk = text[part_index * DISPLAY_ROW_CHARS:(part_index + 1) * DISPLAY_ROW_CHARS]
-            if page and (len(page) >= DISPLAY_PAGE_ROWS or page_chars + len(chunk) > DISPLAY_PAGE_CHARS):
+            if page and (len(page) >= DISPLAY_PAGE_ROWS_COUNT or page_chars + len(chunk) > DISPLAY_PAGE_CHARS):
                 _write_json_new(directory / f"{page_index}.json", {"rows": page})
                 page_index += 1
                 page, page_chars = [], 0
@@ -174,7 +178,7 @@ def _open_archive_file(path: Path, flags: int) -> int:
 # LLM: Disk is untrusted input too; corruption cannot turn a bounded page into unlimited rendering.
 # 函数用途: 校验磁盘页大小和分片字段，防止损坏记录拖垮终端。
 def _validate_page_rows(rows: object) -> None:
-    valid = isinstance(rows, list) and len(rows) <= DISPLAY_PAGE_ROWS
+    valid = isinstance(rows, list) and len(rows) <= DISPLAY_PAGE_ROWS_COUNT
     chars = 0
     for row in rows if valid else ():
         if (not isinstance(row, dict) or not isinstance(row.get("text"), str)

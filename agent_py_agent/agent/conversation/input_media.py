@@ -10,7 +10,9 @@ import re
 import tempfile
 from pathlib import Path
 
+# 单条输入媒体默认最大 16 MiB：超出拒绝，防超大附件拖垮请求。
 DEFAULT_MEDIA_BYTES = 16 * 1024 * 1024
+# 一次请求默认最多 8 个媒体文件：限制批量上传成本。
 DEFAULT_MEDIA_FILES = 8
 
 

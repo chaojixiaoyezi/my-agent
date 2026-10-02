@@ -39,11 +39,19 @@
   白名单 685→600（只减不增）。
 - **P10 第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，已实现，待集成）**：整改 `agent_py_agent/cli/` 目录
   （41 个文件，不碰 `cli/chat_parts/tui_effort_menu.py`——sol 的 C7）范围内 **100 个**常数：补上方中文说明 43 个；
-  按后缀表改名 56 个（`_LIMIT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、`_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、
+  按后缀表改名 56 个（`_LIMIT_COUNT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、`_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、
   宽度类加 `_CHARS` 等，如 `DAEMON_LIMIT`→`DAEMON_COUNT`、`TOOL_PREVIEW_MAX_LINES`→`TOOL_PREVIEW_MAX_LINE_COUNT`、
   `_BACKGROUND_OWNER_WORKERS`→`_BACKGROUND_OWNER_WORKER_COUNT`、`PASTE_THRESHOLD`→`PASTE_THRESHOLD_CHARS`）；
   无物理单位 1 个（`_SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH` 深度）只补说明、挪入白名单无单位组。数值一律不变；
   目录重建 800 项 `--check` 一致；白名单 497→398（只减不增）。
+- **P10 第五批（2026-10-02，ds2，分支 `worker/ds2-p10-batch5`，已实现，待集成）**：整改 `agent_py_agent/agent/conversation/`
+  目录 **96 个**常数：数量上限类补 `_COUNT` 改名 45 个（`ACTION_CANDIDATES_MIN→…_COUNT`、`_MAX_RECORDS→…_COUNT`、
+  `_SCAN_INDEX_MAX_RECORDS_PER_FILE→…_COUNT` 等），字符/长度类补 `_CHARS` 改名 10 个（`_TEXT_LIMIT→_HOST_NOTICE_TEXT_LIMIT_CHARS`
+  避开既有 `TEXT_LIMIT_CHARS` 撞名、`BACKGROUND_TRANSCRIPT_TEXT_LIMIT→…_CHARS` 等），token 类补 `_TOKENS` 1 个、
+  `_HOUR→_HOUR_SECONDS` 1 个；已有单位后缀 35 个只补中文说明；无物理单位 4 个（`REQUIRED_RECALL` 比率、
+  `_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER` 倍数、`_WAKE_FACT_DEPTH_LIMIT` 深度、`_CHARS_PER_TOKEN_WINDOW` 换算率）只补说明
+  挪入无单位组。数值一律不变；目录重建 800 项 `--check` 一致；白名单 320→225＋无单位组 28→32（只减不增；
+  `_MAX_RECORDS` 恢复是回滚 sync 脚本误删，非新增）。
 
 ## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
 
@@ -475,7 +483,7 @@
     `probe_window_samples`、`probe_outlier_trim` → `model/call_monitor.FirstTokenTimeoutOptions` 的字段默认值（200/2/5/True），
     `call_runtime.first_token_timeout_options` 不再传入（`bool_config` 随之删除）；`anthropic_version` → `backends/anthropic.AnthropicCompatibleBackend`
     构造参数默认值（2023-06-01），工厂与 OAuth 构造不再传入，`model_scope` 缓存键去掉该字段；`input_media_token_reserve`、
-    `compact_vision_digest_max_requests` → `conversation/compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE`（1600）/
+    `compact_vision_digest_max_requests` → `conversation/compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE_TOKENS`（1600）/
     `COMPACT_VISION_DIGEST_MAX_REQUESTS`（4），`media_token_reserve()` / `vision_digest_max_requests()` 不再收 agent；
     `tool_context_microcompact_min_chars` → 已有的 `tool_context/microcompact.DEFAULT_MICROCOMPACT_MIN_CHARS`（1500）；`max_protocol_repairs`
     → `agent_core/_runtime_params.MAX_PROTOCOL_REPAIRS`（2，`ToolLoopExecuteParams` 字段默认值同源）。`/settings` 与 `user_config`
@@ -487,7 +495,7 @@
     - 后台上下文预算：`background_context_max_string_chars/list_items/dict_items/max_depth` 固定用
       `conversation/context_budget.BackgroundContextBudget` 的默认值（1200/20/80/6），`background_context_max_total_tokens` 仍可配置；
       `conversation_context_recent_limit`、`background_pending_wake_prompt_limit` 成为 `background_context` 的
-      `CONVERSATION_CONTEXT_RECENT_LIMIT`、`BACKGROUND_PENDING_WAKE_PROMPT_LIMIT`（都是 20），runtime 的三处唤醒合批选择从这里 import。
+      `CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT`、`BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT`（都是 20），runtime 的三处唤醒合批选择从这里 import。
     - 终态工具折叠：`conversation_terminal_tool_fold_max_chars` 成为 `tool_context_window._TERMINAL_TOOL_FOLD_MAX_CHARS`（6000），
       开关 `conversation_terminal_tool_fold_enabled` 与热期秒数不变。
     - 工具目录/详情上限：`core.TOOL_CATALOG_LIMIT`（80）、`core.TOOL_DETAIL_MAX_CHARS`（4000）；目录单条截断与分页起点直接用

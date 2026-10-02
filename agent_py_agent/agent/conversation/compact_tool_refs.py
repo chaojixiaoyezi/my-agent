@@ -11,7 +11,8 @@ from .display_checkpoint import is_display_checkpoint
 from .models import is_audit_background_transcript_entry
 from .native_history import canonical_native_messages_from_metadata
 
-_LIMIT = 24
+# 工具引用清单最多保留 24 条：限制 compact 引用体积。
+_LIMIT_COUNT = 24
 _PATH_ARGUMENTS = ("path", "working_dir")
 
 
@@ -31,7 +32,7 @@ def merge_compact_tool_refs(previous: object, rows: Iterable[object]) -> list[di
         key = (ref["argument"], ref["path"])
         unique.pop(key, None)
         unique[key] = ref
-    return list(unique.values())[-_LIMIT:]
+    return list(unique.values())[-_LIMIT_COUNT:]
 
 
 # LLM: Accept only this projection's bounded scalar fields; incomplete entries cannot become a
@@ -41,7 +42,7 @@ def normalize_compact_tool_refs(value: object) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
     result = []
-    for item in value[-_LIMIT:]:
+    for item in value[-_LIMIT_COUNT:]:
         if not isinstance(item, dict):
             continue
         fields = {key: item.get(key) for key in ("tool", "call_id", "argument", "path")}

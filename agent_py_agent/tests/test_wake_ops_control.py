@@ -31,7 +31,7 @@ from agent_py_agent.agent.conversation.store_wake_quarantine_archive import (
     archive_stale_wake_quarantine,
 )
 from agent_py_agent.agent.conversation.wake_poison import (
-    WAKE_POISON_SAME_CAUSE_LIMIT,
+    WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
     WAKE_VERDICT_FAILURE,
     WakeAttemptVerdict,
 )
@@ -71,7 +71,7 @@ def _quarantined(store, thread_id: str, *, wake=None, code="error:SKILL_TASK_BIN
     })
     verdict = WakeAttemptVerdict(WAKE_VERDICT_FAILURE, code)
     decision = None
-    for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+    for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         store.wakes.attempts.begin(signal, WakeAttemptStart(f"claim-{attempt}"), now=100.0 + attempt)
         decision = store.wakes.attempts.record(signal, verdict, now=100.5 + attempt, error=RuntimeError("boom")).decision
     store.wakes.attempts.quarantine(signal.wake_signal_id, decision, now=QUARANTINED_AT)
@@ -140,7 +140,7 @@ def test_list_shows_structured_rows_with_open_reason_codes(tmp_path):
 # 函数用途: 给一条唤醒连续记同因失败到上限，返回结案判定。
 def _decision(store, signal):
     decision = None
-    for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+    for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         decision = store.wakes.attempts.record(
             signal, WakeAttemptVerdict(WAKE_VERDICT_FAILURE, "run:no_report"), now=13.0 + attempt).decision
     return decision

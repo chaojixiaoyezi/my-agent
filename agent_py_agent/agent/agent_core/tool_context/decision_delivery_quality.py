@@ -118,7 +118,7 @@ def _miss_reason(agent: object, record: object, archive: dict) -> str:
         focuses = _focuses(record, archive)
     except DecisionInputError:
         return "bad_verification"
-    if not limits.DELIVERY_FOCUSES_MIN <= len(focuses) <= limits.DELIVERY_FOCUSES_MAX:
+    if not limits.DELIVERY_FOCUSES_MIN_COUNT <= len(focuses) <= limits.DELIVERY_FOCUSES_MAX_COUNT:
         return "focus_count"
     if not any(focus["current"] for focus in focuses):
         return "record_mismatch"

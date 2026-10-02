@@ -27,10 +27,13 @@ from ..settings.model_profiles import model_profiles_path
 
 _LOCK = threading.Lock()
 _SALT = secrets.token_bytes(32)
-_MAX_FAILURES = 512
-_MAX_ACTIVE = 256
+# 决策模型单连接最多记 512 次失败：防失败计数无限累积。
+_MAX_FAILURES_COUNT = 512
+# 决策模型同一连接最大活跃 256 条：防止失控并发。
+_MAX_ACTIVE_COUNT = 256
 # 瞬时失败与超时的首次冷却；同一连接冷却过后再次失败时翻倍，封顶与额度冷却相同。
 _BASE_COOLDOWN_SECONDS = 30.0
+# 决策模型冷却封顶 300 秒（5 分钟）：失败后最长冷却 5 分钟。
 _MAX_COOLDOWN_SECONDS = 300.0
 # 值为 (状态, 设置修订, 冷却截止或 None, 连续失败次数)；冷却过期后保留次数，成功或显式重试才清除。
 _FAILURES: OrderedDict[tuple[str, ...], tuple[str, str, float | None, int]] = OrderedDict()
@@ -74,7 +77,7 @@ class ActiveDecision:
 # 函数用途: 发布一个准备发送的取消目标，覆盖关闭发生在 worker 注册前的窗口。
 def register_active(key: str, active: ActiveDecision) -> bool:
     with _LOCK:
-        if _HOST_SHUTDOWN or key in _ACTIVE or len(_ACTIVE) >= _MAX_ACTIVE:
+        if _HOST_SHUTDOWN or key in _ACTIVE or len(_ACTIVE) >= _MAX_ACTIVE_COUNT:
             return False
         _ACTIVE[key] = active
         return True
@@ -162,7 +165,7 @@ def _next_cooldown(previous: tuple | None, now: float, quota: bool) -> tuple[int
 def _store_failure(key: tuple[str, ...], item: tuple[str, str, float | None, int]) -> None:
     _FAILURES[key] = item
     _FAILURES.move_to_end(key)
-    while len(_FAILURES) > _MAX_FAILURES:
+    while len(_FAILURES) > _MAX_FAILURES_COUNT:
         _FAILURES.popitem(last=False)
 
 

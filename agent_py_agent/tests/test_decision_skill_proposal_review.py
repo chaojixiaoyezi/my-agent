@@ -448,7 +448,7 @@ def test_pending_bounds_and_their_label_share_one_limit(tmp_path, monkeypatch):
     host = SimpleNamespace(home_paths=ctx.home)
     reasons = reach_counter(host, monkeypatch, module._POINT, tmp_path)
     calls = install(monkeypatch)
-    monkeypatch.setattr(limits, "SKILL_PROPOSALS_MAX", 2)
+    monkeypatch.setattr(limits, "SKILL_PROPOSALS_MAX_COUNT", 2)
     assert module.skill_proposal_review_order(host, ctx.service, ctx.service.list()) is None and calls == []
     assert reasons() == ({"pending_count": 1}, 0) and "超过 2 条" in miss_reason_label("pending_count")
 

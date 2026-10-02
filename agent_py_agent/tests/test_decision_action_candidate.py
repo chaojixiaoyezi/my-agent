@@ -653,6 +653,6 @@ def test_candidate_floor_and_its_label_share_one_limit(prepared, monkeypatch):
     host, record, archive = prepared
     reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
     calls = install(monkeypatch)
-    monkeypatch.setattr(limits, "ACTION_CANDIDATES_MIN", 4)
+    monkeypatch.setattr(limits, "ACTION_CANDIDATES_MIN_COUNT", 4)
     assert module.action_candidate_hint(host, record, archive) == "" and calls == []
     assert reasons() == ({"few_candidates": 1}, 0) and "不到 4 个" in miss_reason_label("few_candidates")

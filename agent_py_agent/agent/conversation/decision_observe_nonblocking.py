@@ -1,6 +1,6 @@
 # LLM: 决策服务“observe 不挡主链路”的唯一后台执行器，只承接 decision_service 判定为非阻塞的调用（普通 thread 范围、
 #   点位有效模式 observe、决策设置 observe_nonblocking_enabled 为真；apply 与实验永不进来）。整个进程只有一个 worker
-#   串行执行，排队中的调用最多 decision_point_limits.OBSERVE_NONBLOCKING_MAX_PENDING 条，满了入队失败、由决策服务记拒绝。
+#   串行执行，排队中的调用最多 decision_point_limits.OBSERVE_NONBLOCKING_MAX_PENDING_COUNT 条，满了入队失败、由决策服务记拒绝。
 #   worker 在执行前装入发起时捕获的 runner 身份（让原复核在后台线程算出阶段身份），send 返回后立即恢复，之后的写行、结算
 #   与完成回调都在恢复后的上下文里运行；不继承发起回合的取消（令牌检查由决策服务的 send 做）。
 #   每条调用结束后在这里写一行结果日志（blocking=false）、把独立用量范围结算进会话 model_usage，再交回调方的完成回调；
@@ -53,7 +53,7 @@ class NonblockingObserve:
 def enqueue_nonblocking_observe(job: NonblockingObserve) -> bool:
     global _WORKER
     with _LOCK:
-        if len(_PENDING) >= limits.OBSERVE_NONBLOCKING_MAX_PENDING:
+        if len(_PENDING) >= limits.OBSERVE_NONBLOCKING_MAX_PENDING_COUNT:
             return False
         _PENDING.append(job)
         if _WORKER is not None:

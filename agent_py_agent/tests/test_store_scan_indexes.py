@@ -19,7 +19,7 @@ import pytest
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation import store_index as store_module
 from agent_py_agent.agent.conversation.store_index import (
-    _SCAN_INDEX_MAX_RECORDS_PER_FILE,
+    _SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT,
     _SCAN_INDEX_SCHEMA,
 )
 
@@ -598,7 +598,7 @@ def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> N
         "thread-huge",
         [
             _observation_row(f"obs-huge-{position:05d}", thread_id="thread-huge")
-            for position in range(_SCAN_INDEX_MAX_RECORDS_PER_FILE + 10)
+            for position in range(_SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT + 10)
         ],
     )
     assert _observation_snapshot(budget) == _observation_snapshot(ConversationStore(root))

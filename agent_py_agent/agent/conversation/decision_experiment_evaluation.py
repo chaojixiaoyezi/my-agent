@@ -7,11 +7,11 @@ from __future__ import annotations
 EXPERIMENT_RECORD_SCHEMA = "decision_experiment_record.v1"
 EVALUATION_SCHEMA = "decision_experiment_evaluation.v1"
 # 至少 3 个可比较的已完成样本才可能提出建议：一两次命中可能是巧合，不足以证明短名单不会漏掉实际要用的工具。
-MIN_COMPARABLE_SAMPLES = 3
+MIN_COMPARABLE_SAMPLES_COUNT = 3
 # 可信指标是短名单召回：实际调用过、且属于本次快照的工具必须全部在候选短名单内；漏一个就意味着 apply 会让模型多绕一次搜索。
 REQUIRED_RECALL = 1.0
 # 只看最近 8 个已完成样本（与请求记录条目上限一致），更早的样本不再参与，避免很久以前的环境左右当前判断。
-WINDOW_SAMPLES = 8
+WINDOW_SAMPLES_COUNT = 8
 # 只有 charged 表示供应商实际输入已完整入账；usage_unknown/send_refused/gate_bypassed 等都不能当作晋升证据。
 CHARGED_OUTCOME = "charged"
 SKILL_TOOL_PROPOSAL = {"point": "skill_tool", "field": "points.skill_tool.mode", "from": "off", "to": "apply",
@@ -37,7 +37,7 @@ def completed_samples(entries: list, *, owner_ref: str, thread_id: str) -> list[
             continue
         seen.add(entry["record_id"])
         selected.append(entry)
-    return selected[:WINDOW_SAMPLES]
+    return selected[:WINDOW_SAMPLES_COUNT]
 
 
 # LLM: 名单只按结构化字段比较：命中=在短名单，漏掉=在延迟名单；两边都不在的是本次快照外的工具，不计入分母。
@@ -83,15 +83,15 @@ def evaluate_skill_tool_samples(entries: list, *, owner_ref: str, thread_id: str
     samples = [sample_view(entry) for entry in completed_samples(entries, owner_ref=owner_ref, thread_id=thread_id)]
     comparable = [sample for sample in samples if sample["comparable"]]
     reasons = [code for code, failed in (
-        ("insufficient_samples", len(comparable) < MIN_COMPARABLE_SAMPLES),
+        ("insufficient_samples", len(comparable) < MIN_COMPARABLE_SAMPLES_COUNT),
         ("settlement_not_charged", any(sample["outcome"] != CHARGED_OUTCOME for sample in samples)),
         ("recall_below_one", any(sample["shortlist_recall"] < REQUIRED_RECALL for sample in comparable)),
         ("no_savings", any(sample["deferred_count"] <= 0 for sample in comparable)),
     ) if failed]
     return {"schema": EVALUATION_SCHEMA, "point": "skill_tool", "status": "keep_observing" if reasons else "proposal",
             "reasons": reasons, "sample_count": len(samples), "comparable_count": len(comparable),
-            "rule": {"min_comparable_samples": MIN_COMPARABLE_SAMPLES, "required_recall": REQUIRED_RECALL,
-                     "required_outcome": CHARGED_OUTCOME, "window_samples": WINDOW_SAMPLES},
+            "rule": {"min_comparable_samples": MIN_COMPARABLE_SAMPLES_COUNT, "required_recall": REQUIRED_RECALL,
+                     "required_outcome": CHARGED_OUTCOME, "window_samples": WINDOW_SAMPLES_COUNT},
             "proposal": None if reasons else dict(SKILL_TOOL_PROPOSAL), "samples": samples}
 
 

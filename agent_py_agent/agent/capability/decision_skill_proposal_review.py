@@ -89,7 +89,7 @@ class SkillProposalReviewOrder:
 
 # LLM: 入口先按登记与待确认条数快退，不满足时零读取零请求；普通失败一律返回 None，取消/中断上抛。
 #   不写提案或 Skill；只经 decision_reach_counts 计一次到达结果（条数不符记 pending_count，诊断计数副作用）。
-#   条数界限读 decision_point_limits.SKILL_PROPOSALS_MIN/MAX（与诊断大白话共用，调用时现读）。
+#   条数界限读 decision_point_limits.SKILL_PROPOSALS_MIN_COUNT/MAX（与诊断大白话共用，调用时现读）。
 #   冷却持久化：CLI 与 Gateway 都是独立进程/进程生命周期，每次入口先加载本 owner 的冷却快照、结束前写回，
 #   让“进程各自持有冷却表、重启清零”变成 owner 数据域里的一份有界文件；无 home_paths 的宿主保持纯进程内行为。
 # 函数用途: 为 CLI 列表计算可选审核顺序；返回 None 表示保持原输出。
@@ -98,7 +98,7 @@ def skill_proposal_review_order(host: object, service: object,
     if _POINT not in POINT_RUNTIME_SCOPES:
         return None
     pending = tuple(item for item in proposals if item.status == PROPOSAL_PENDING)
-    if not limits.SKILL_PROPOSALS_MIN <= len(pending) <= limits.SKILL_PROPOSALS_MAX:
+    if not limits.SKILL_PROPOSALS_MIN_COUNT <= len(pending) <= limits.SKILL_PROPOSALS_MAX_COUNT:
         note_decision_reach(host, _POINT, "pending_count")
         return None
     cooldown_file = _cooldown_file(host)

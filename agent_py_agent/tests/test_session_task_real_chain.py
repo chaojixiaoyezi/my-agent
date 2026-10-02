@@ -52,7 +52,7 @@ from agent_py_agent.agent.conversation.session_tasks import (
 )
 from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.conversation.wake_domain_closeout import WAKE_POISON_NOTICE_SOURCE
-from agent_py_agent.agent.conversation.wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT
+from agent_py_agent.agent.conversation.wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT_COUNT
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service, request_context, request_execution
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
@@ -826,18 +826,18 @@ def test_message_wake_counted_failures_are_closed_by_the_poison_first(tmp_path, 
     _require(sent.get("ok") is True, f"消息没有发出：{sent}")
     (wake,) = _pending_wakes(chain, "C")
     attempts = chain.agent.conversation_store.wakes.attempts
-    for _attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+    for _attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         state, _error = attempts.state_report(wake.wake_signal_id)
         with pytest.raises(RuntimeError):
             chain.scheduler.tick(now=max(time.time(), state.next_attempt_at) + 1)
-    _require(len([call for call in chain.wire.calls if call["kind"] == "program-error"]) == WAKE_POISON_SAME_CAUSE_LIMIT,
+    _require(len([call for call in chain.wire.calls if call["kind"] == "program-error"]) == WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
              "前提不成立：每一拍都应当遇到一次程序错误")
 
     assert not _pending_wakes(chain, "C"), "同因计数满上限，唤醒应当已结案"
     rows, errors = attempts.quarantined()
     assert errors == [] and [row["reason_code"] for row in rows] == ["error:programmer_bug:RuntimeError"]
     receipt = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
-    assert (receipt.status, receipt.migration.get("release_count")) == ("pending", WAKE_POISON_SAME_CAUSE_LIMIT)
+    assert (receipt.status, receipt.migration.get("release_count")) == ("pending", WAKE_POISON_SAME_CAUSE_LIMIT_COUNT)
     notices = [row for row in pending_host_notices(chain.agent.conversation_store, chain.threads["C"])
                if row.source == WAKE_POISON_NOTICE_SOURCE]
     assert [(row.code, dict(row.details).get("message_receipt_status")) for row in notices] == [
@@ -857,7 +857,7 @@ def test_message_still_failing_in_the_foreground_is_rejected_at_the_release_limi
     sent = chain.tool_outputs("send_session_message")[-1]
     (wake,) = _pending_wakes(chain, "C")
     attempts = chain.agent.conversation_store.wakes.attempts
-    for _attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+    for _attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
         state, _error = attempts.state_report(wake.wake_signal_id)
         with pytest.raises(RuntimeError):
             chain.scheduler.tick(now=max(time.time(), state.next_attempt_at) + 1)

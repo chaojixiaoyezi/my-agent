@@ -11,10 +11,13 @@ from dataclasses import dataclass, replace
 from uuid import uuid4
 
 # 每个会话最多暂存的提示条数（同一来源只留最新一条，超出时丢最旧的）；正文与名字的长度上限。
-HOST_NOTICE_LIMIT = 5
-_TEXT_LIMIT = 500
-_NAME_LIMIT = 64
-_DETAIL_LIMIT = 200
+HOST_NOTICE_LIMIT_COUNT = 5
+# 宿主提示正文最多 500 字符：超长截断。
+_HOST_NOTICE_TEXT_LIMIT_CHARS = 500
+# 宿主提示来源名最多 64 字符：超长截断。
+_NAME_LIMIT_CHARS = 64
+# 宿主提示详情最多 200 字符：超长截断，保持提示紧凑。
+_DETAIL_LIMIT_CHARS = 200
 _LINE_PREFIX = "【提示】"
 
 
@@ -41,14 +44,14 @@ class HostNotice:
 # LLM: 正文去掉控制字符、合并空白并限长；来源与代码只保留有限长度；details 的键与值同样清洗限长，空键丢弃。生成新的随机编号。
 # 函数用途: 由宿主代码创建一条新提示。
 def host_notice(source: str, code: str, text: str, *, details: Mapping[str, object] | None = None) -> HostNotice:
-    return HostNotice(uuid4().hex[:12], _clean(source, _NAME_LIMIT), _clean(code, _NAME_LIMIT), _clean(text, _TEXT_LIMIT),
+    return HostNotice(uuid4().hex[:12], _clean(source, _NAME_LIMIT_CHARS), _clean(code, _NAME_LIMIT_CHARS), _clean(text, _HOST_NOTICE_TEXT_LIMIT_CHARS),
                       _details(details))
 
 
 # 函数用途: 把结构化事实清洗成排好序的 (键, 值) 元组；不是映射时为空。
 def _details(value: object) -> tuple[tuple[str, str], ...]:
     rows = value.items() if isinstance(value, Mapping) else ()
-    cleaned = ((_clean(key, _NAME_LIMIT), _clean(item, _DETAIL_LIMIT)) for key, item in rows)
+    cleaned = ((_clean(key, _NAME_LIMIT_CHARS), _clean(item, _DETAIL_LIMIT_CHARS)) for key, item in rows)
     return tuple(sorted((key, item) for key, item in cleaned if key))
 
 
@@ -68,7 +71,7 @@ def host_notices_from(values: object) -> tuple[HostNotice, ...]:
 
 # 函数用途: 解析一条提示字典，缺关键字段时返回 None。
 def _notice_from(row: Mapping) -> HostNotice | None:
-    notice = HostNotice(*(_clean(row.get(key), _TEXT_LIMIT if key == "text" else _NAME_LIMIT)
+    notice = HostNotice(*(_clean(row.get(key), _HOST_NOTICE_TEXT_LIMIT_CHARS if key == "text" else _NAME_LIMIT_CHARS)
                           for key in ("notice_id", "source", "code", "text")), _details(row.get("details")))
     return notice if notice.notice_id and notice.source and notice.text else None
 
@@ -86,7 +89,7 @@ def queue_host_notice(store: object, thread_id: str, notice: HostNotice, *, repl
     # 函数用途: 替换同来源（或同来源同 code）旧提示并追加新提示。
     def update(thread):
         kept = [row for row in host_notices_from(thread.pending_host_notices) if not replaced(row)]
-        rows = (*kept, notice)[-HOST_NOTICE_LIMIT:]
+        rows = (*kept, notice)[-HOST_NOTICE_LIMIT_COUNT:]
         return replace(thread, pending_host_notices=tuple(row.to_dict() for row in rows))
 
     return _update(store, thread_id, update)
@@ -149,7 +152,7 @@ def with_host_notice_lines(content: str, notices: object) -> str:
 
 
 __all__ = [
-    "HOST_NOTICE_LIMIT",
+    "HOST_NOTICE_LIMIT_COUNT",
     "HostNotice",
     "clear_host_notices",
     "host_notice",

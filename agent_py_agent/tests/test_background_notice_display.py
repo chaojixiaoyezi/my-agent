@@ -984,7 +984,7 @@ def test_background_transcript_lru_eviction_keeps_cursor_forward(monkeypatch) ->
     """纯展示线程被 LRU 淘汰后，同会话重现仍使用更大的全局事件序号。"""
     from agent_py_agent.agent.conversation import background_transcript
 
-    monkeypatch.setattr(background_transcript, "BACKGROUND_TRANSCRIPT_MAX_THREADS", 2)
+    monkeypatch.setattr(background_transcript, "BACKGROUND_TRANSCRIPT_MAX_THREADS_COUNT", 2)
     agent = SimpleNamespace()
     first = background_transcript.BackgroundTranscriptSink(
         agent,

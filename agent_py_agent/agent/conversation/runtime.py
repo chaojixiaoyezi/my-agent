@@ -41,7 +41,7 @@ from .authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from .background_context import (
-    BACKGROUND_PENDING_WAKE_PROMPT_LIMIT,
+    BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT,
     is_narrow_audit_event,
     policy_snapshot_from_request,
 )
@@ -104,7 +104,7 @@ from .session_tasks import SESSION_TASK_CANCELLED
 from .store import ConversationStore
 
 # 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略（阈值只在 store_progress 定义一次）。
-from .store_progress import _POLICY_FAILURE_RETIRE_AFTER
+from .store_progress import _POLICY_FAILURE_RETIRE_AFTER_COUNT
 from .wake_attempt_tracking import (
     current_wake_attempt,
     isolate_wake_batch,
@@ -2615,8 +2615,10 @@ _TASK_LINK_TERMINAL_STATUSES = frozenset(
 # 误判终态会把「子代理卡住」的信号当 stale 丢弃。BLOCKED 只在这里(=有 policy
 # 挂它)当终态:父代理靠 BLOCKED 事件链唤醒,不靠 watch policy。
 _POLICY_RETIRE_TERMINAL_STATUSES = frozenset(_TASK_LINK_TERMINAL_STATUSES | {"BLOCKED"})
+# 进度策略至少落后 7200 秒（2 小时）才触发追平：避免频繁补扫。
 _MIN_PROGRESS_POLICY_CATCHUP_SECONDS = 7200
-_MAX_PROGRESS_POLICY_CATCHUP_INTERVALS = 4
+# 进度策略追平最多 4 个间隔：防止一次补扫过多。
+_MAX_PROGRESS_POLICY_CATCHUP_INTERVALS_COUNT = 4
 
 # 陈旧账本 gc 节奏:tick ~2 分钟一次,这里最多 6 小时跑一趟归档(问题8)。
 _LEDGER_GC_INTERVAL_SECONDS = 6 * 3600
@@ -2655,7 +2657,7 @@ def _consume_pending_wake_signals(
     reported: set[str] = set()
     handled: set[str] = set()
     attempted: set[str] = set()
-    wake_limit = PENDING_WAKE_CONSUME_LIMIT
+    wake_limit = PENDING_WAKE_CONSUME_LIMIT_COUNT
     # Store 本来就会读取全部 pending 后再切片；这里保留完整队列，令前排被
     # recovery block 保留的旧事件不占掉新任务的消费窗口。
     wake_signals = scheduler.store.wakes.pending(limit=0)
@@ -2888,7 +2890,7 @@ def _select_audit_finding_batch(
     if not _typed_audit_finding_signal(primary) or cached_owner_delivery(primary) is not None:
         return (primary,)
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
-    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT
+    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
     # Keep half the bounded background projection for the fixed prompt, exact
     # source/task facts, and the model-authored report.  Whole wake envelopes
@@ -2946,7 +2948,7 @@ def _select_successful_completion_batch(
     signals: list[WakeSignal],
 ) -> tuple[WakeSignal, ...]:
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
-    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT
+    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
     batch_token_budget = max(1536, (context_tokens * 3) // 4)
     from ..memory_archive.tokens import estimate_tokens
@@ -2989,7 +2991,7 @@ def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
     return not _typed_audit_finding_signal(primary) and not _typed_audit_finding_signal(sibling)
 
 
-# LLM: 合批只收排在 primary 之后、同任务同原因的唤醒，条数上限 BACKGROUND_PENDING_WAKE_PROMPT_LIMIT（常量），
+# LLM: 合批只收排在 primary 之后、同任务同原因的唤醒，条数上限 BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT（常量），
 #   token 预算取 background_context_max_total_tokens 的一半；每条唤醒仍单独持久，只在这一轮提交后才确认。只读。
 # 函数用途: 从待处理唤醒里选一批同原因的事件放进同一个后台模型回合，其余留在原队列。
 def _select_same_reason_wake_batch(
@@ -3005,7 +3007,7 @@ def _select_same_reason_wake_batch(
     """
 
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
-    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT
+    item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
     batch_token_budget = max(1024, context_tokens // 2)
     from ..memory_archive.tokens import estimate_tokens
@@ -3264,15 +3266,16 @@ def _run_observation_batch(
 
 # 参数减量第 3 批 B 组（2026-09-27）：一次后台 tick 最多消费多少条需要主代理处理的观察，不再是配置项
 # conversation_unhandled_observation_limit；0 表示不限。
-CONVERSATION_UNHANDLED_OBSERVATION_LIMIT = 20
+CONVERSATION_UNHANDLED_OBSERVATION_LIMIT_COUNT = 20
 
 # 参数减量杂项批（2026-09-28）：待处理唤醒记录的单轮消费上限与成功完成事件的合并窗口不再是配置项，
 # 只在这里保留一处定义；消费上限 0 表示不限，合并窗口 0 表示不合并，语义与降级前一致。
-PENDING_WAKE_CONSUME_LIMIT = 100
+PENDING_WAKE_CONSUME_LIMIT_COUNT = 100
+# 成功完成事件的合并窗口 5 秒：窗口内同批事件合并为一次交付，减少唤醒抖动。
 COMPLETION_COALESCE_WINDOW_SECONDS = 5
 
 
-# LLM: 先按 task 隔离再计算限额（上限是代码常量 CONVERSATION_UNHANDLED_OBSERVATION_LIMIT），unknown 来源保留；
+# LLM: 先按 task 隔离再计算限额（上限是代码常量 CONVERSATION_UNHANDLED_OBSERVATION_LIMIT_COUNT），unknown 来源保留；
 #   原 supply guard 内调用观察编排，不提前查路由或重复确认来源。
 # 函数用途: 消费没有可用 wake 的观察批次，经原会话 claim 运行并收集报告；正文仍由 canonical 消息流显示。
 def _consume_observation_batches(
@@ -3283,7 +3286,7 @@ def _consume_observation_batches(
     *,
     target_thread_id: str = "",
 ) -> None:
-    observation_limit = CONVERSATION_UNHANDLED_OBSERVATION_LIMIT
+    observation_limit = CONVERSATION_UNHANDLED_OBSERVATION_LIMIT_COUNT
     pending_observations = scheduler.store.observations.unhandled_requiring_main(limit=0)
     pending_observations = [
         observation
@@ -3806,7 +3809,7 @@ class _BackgroundSchedulerTickMixin:
             self.scheduler_service.reconcile_waiting_runs(now=now)
             self.scheduler_service.enqueue_ready_runs(
                 now=now,
-                limit=PENDING_WAKE_CONSUME_LIMIT,
+                limit=PENDING_WAKE_CONSUME_LIMIT_COUNT,
             )
         except Exception:
             _HEARTBEAT_LOGGER.warning("owner scheduler enqueue failed", exc_info=True)
@@ -4809,9 +4812,9 @@ class _BackgroundSchedulerExecutionMixin:
                 now=recorded_at,
                 backoff_seconds=backoff,
                 failure_count=failures,
-                retire_after=_POLICY_FAILURE_RETIRE_AFTER,
+                retire_after=_POLICY_FAILURE_RETIRE_AFTER_COUNT,
             )
-            if failures >= _POLICY_FAILURE_RETIRE_AFTER:
+            if failures >= _POLICY_FAILURE_RETIRE_AFTER_COUNT:
                 _HEARTBEAT_LOGGER.warning(
                     "progress policy retired after %s failures: policy_id=%s backoff=%s",
                     failures,
@@ -5350,7 +5353,7 @@ def _progress_policy_is_stale(policy: ProgressPolicy, *, now: float) -> bool:
         return False
     interval = max(1, int(policy.interval_seconds or 1))
     catchup_window = max(
-        _MIN_PROGRESS_POLICY_CATCHUP_SECONDS, interval * _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS
+        _MIN_PROGRESS_POLICY_CATCHUP_SECONDS, interval * _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS_COUNT
     )
     return now - policy.next_due_at > catchup_window
 

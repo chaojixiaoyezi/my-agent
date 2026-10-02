@@ -25,6 +25,7 @@ from .background_transcript import (
 from .store_io import read_jsonl_tail_report
 
 AGENT_TRANSCRIPT_MAX_EVENTS = 1024
+# agent 转录文件最大 8 MiB：超过即截断/轮转，防止转录无限增长占满磁盘。
 AGENT_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
 
 

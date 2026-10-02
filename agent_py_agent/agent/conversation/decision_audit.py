@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from .model_metrics import split_unsent_failures, unfinished_usage_facts
 
 # 每个 owner 最多展示这么多条按调用次数排序的会话明细
-_THREAD_ROWS = 10
+_THREAD_ROWS_COUNT = 10
 _STATUS_KEYS = ("finished", "failed", "timed_out")
 
 
@@ -84,7 +84,7 @@ def _thread_usage(usage: object, thread_id: str, since: float) -> tuple[dict | N
 
 
 # LLM: 只读 model_usage 领域的 revision/events_report；in_flight = 调用次数 − 已结束（finished/failed/timed_out），
-#   表示记账时尚未结束的调用。会话明细按调用次数取前 _THREAD_ROWS 条。
+#   表示记账时尚未结束的调用。会话明细按调用次数取前 _THREAD_ROWS_COUNT 条。
 #   jev_failures / not_sent_calls 在合计与每个会话上都按跨事件累加后的原始次数推导。
 # 函数用途: 汇总这些会话在时间窗内的决策调用次数、成败与已报输入 token，并给出调用最多的会话明细。
 def decision_usage_summary(store: object, thread_ids: list[str], *, since: float) -> dict:
@@ -100,7 +100,7 @@ def decision_usage_summary(store: object, thread_ids: list[str], *, since: float
     totals["threads_with_calls"] = len(rows)
     totals["in_flight"] = max(0, totals["calls"] - sum(totals[key] for key in _STATUS_KEYS))
     rows.sort(key=lambda item: item["calls"], reverse=True)
-    return {**totals, "threads": rows[:_THREAD_ROWS]}
+    return {**totals, "threads": rows[:_THREAD_ROWS_COUNT]}
 
 
 __all__ = ["decision_settings_summary", "decision_usage_summary"]

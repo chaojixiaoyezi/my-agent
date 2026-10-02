@@ -124,7 +124,7 @@ def test_sampling_switch_is_a_registered_general_boolean_field():
 
 def test_sampling_off_never_skips_even_with_many_successes(tmp_path):
     agent = _agent(tmp_path)
-    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT * 5):
+    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT * 5):
         note_observe_sample_success(agent, POINT)
     row = {"effective_mode": "observe"}
     assert _observe_sampled_out(agent, POINT, row, _settings(enabled=False)) is False
@@ -137,7 +137,7 @@ def test_seventh_successful_call_is_skipped_and_reported_with_a_reason(tmp_path,
     settings = _settings(enabled=True)
     _patch_decide(monkeypatch, agent, settings, row)
 
-    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT):
+    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT):
         assert _observe_sampled_out(agent, POINT, row, settings) is False
         outcome = _decide_outcome(agent, params, _call(stage))
         assert (outcome.status, outcome.mode) == ("success", "observe"), outcome.reason
@@ -172,30 +172,30 @@ def test_sample_quota_boundary_is_exactly_the_named_constant(tmp_path):
     agent = _agent(tmp_path)
     row = {"effective_mode": "observe"}
     settings = _settings(enabled=True)
-    for index in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT):
+    for index in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT):
         assert _observe_sampled_out(agent, POINT, row, settings) is False, f"第 {index + 1} 次就跳了，阈值偏小"
         note_observe_sample_success(agent, POINT)
-    assert observe_sample_success_count(agent.home_paths, POINT) == limits.OBSERVE_SAMPLED_SUCCESS_LIMIT
+    assert observe_sample_success_count(agent.home_paths, POINT) == limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT
     assert _observe_sampled_out(agent, POINT, row, settings) is True
 
 
 def test_observe_sample_limit_is_the_frozen_six(tmp_path):
     """上限是内部常量：值本身被钉住，避免有人顺手调大/调小而没人发现。"""
-    assert limits.OBSERVE_SAMPLED_SUCCESS_LIMIT == 6
+    assert limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT == 6
 
 
 def test_quota_resets_in_the_next_natural_hour(tmp_path):
     agent = _agent(tmp_path)
     now = time.time()
-    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT):
+    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT):
         note_observe_sample_success(agent, POINT)
-    assert observe_sample_success_count(agent.home_paths, POINT, now=now) == limits.OBSERVE_SAMPLED_SUCCESS_LIMIT
+    assert observe_sample_success_count(agent.home_paths, POINT, now=now) == limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT
     assert observe_sample_success_count(agent.home_paths, POINT, now=now + 3600) == 0
 
 
 def test_apply_point_is_not_sampled(tmp_path):
     agent = _agent(tmp_path)
-    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT + 3):
+    for _ in range(limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT + 3):
         note_observe_sample_success(agent, POINT)
     assert _observe_sampled_out(agent, POINT, {"effective_mode": "apply"}, _settings(enabled=True, mode="apply")) is False
 

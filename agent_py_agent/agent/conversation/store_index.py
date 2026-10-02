@@ -16,10 +16,14 @@ from typing import Any
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
 
 _SCAN_INDEX_SCHEMA = "conversation.scan_index.v1"
-_SCAN_INDEX_WARNING_LIMIT = 32
-_SCAN_INDEX_MAX_ENTRIES = 8192
-_SCAN_INDEX_MAX_RECORDS = 30000
-_SCAN_INDEX_MAX_RECORDS_PER_FILE = 10000
+# 扫描索引警告阈值 32 条：超限告警。
+_SCAN_INDEX_WARNING_LIMIT_COUNT = 32
+# 扫描索引最多 8192 条入口：防止索引膨胀。
+_SCAN_INDEX_MAX_ENTRIES_COUNT = 8192
+# 扫描索引最多 30000 条记录。
+_SCAN_INDEX_MAX_RECORDS_COUNT = 30000
+# 扫描索引单文件最多 10000 条记录：控制文件大小。
+_SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT = 10000
 _SCAN_INDEX_REGISTRY_LOCK = threading.Lock()
 
 
@@ -89,7 +93,7 @@ class ScanIndex:
     # LLM: 该对象只保存"上次权威读取的负载",不保存任何裁决状态;调用方必须先给出刚刚
     # stat 到的指纹才能取用条目,因此并发写只会造成未命中,不会读到过期内容。
     # 函数用途: 初始化空的有界缓存、计数和锁；目录数据在首次读取时才进入索引。
-    def __init__(self, name: str, *, max_entries: int = _SCAN_INDEX_MAX_ENTRIES) -> None:
+    def __init__(self, name: str, *, max_entries: int = _SCAN_INDEX_MAX_ENTRIES_COUNT) -> None:
         self.name = name
         self.schema = _SCAN_INDEX_SCHEMA
         self.max_entries = max(0, int(max_entries))
@@ -184,7 +188,7 @@ class ScanIndex:
             )
             if duplicate:
                 return record
-            if len(self.warnings) < _SCAN_INDEX_WARNING_LIMIT:
+            if len(self.warnings) < _SCAN_INDEX_WARNING_LIMIT_COUNT:
                 self.warnings.append(record)
         _STORE_LOGGER.warning(
             "conversation.scan_index.unusable %s",
@@ -234,11 +238,11 @@ class ScanIndex:
     ) -> None:
         name = path.name
         records = len(payload) if ok and isinstance(payload, list) else 0
-        if records > _SCAN_INDEX_MAX_RECORDS_PER_FILE:
+        if records > _SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT:
             self.warn(
                 "entry_record_budget_exceeded",
                 key=name,
-                details={"path": str(path), "records": records, "limit": _SCAN_INDEX_MAX_RECORDS_PER_FILE},
+                details={"path": str(path), "records": records, "limit": _SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT},
             )
             return
         with self._lock:
@@ -254,16 +258,16 @@ class ScanIndex:
             self._records += records
             while self._entries and (
                 len(self._entries) > self.max_entries
-                or (self._records > _SCAN_INDEX_MAX_RECORDS and len(self._entries) > 1)
+                or (self._records > _SCAN_INDEX_MAX_RECORDS_COUNT and len(self._entries) > 1)
             ):
                 self._evict_oldest()
-            if self._records > _SCAN_INDEX_MAX_RECORDS:
+            if self._records > _SCAN_INDEX_MAX_RECORDS_COUNT:
                 # 单条负载本身超全局记录预算:不缓存它(与旧口径一致),避免为它清空整个索引。
                 self._drop_entry(name)
                 self.warn(
                     "record_budget_exceeded",
                     key=name,
-                    details={"path": str(path), "records": records, "limit": _SCAN_INDEX_MAX_RECORDS},
+                    details={"path": str(path), "records": records, "limit": _SCAN_INDEX_MAX_RECORDS_COUNT},
                 )
 
     # LLM: 淘汰与显式丢弃共用同一条记账路径,否则 _records 会因漏减而失真,让记录维度
@@ -299,7 +303,7 @@ class ScanIndex:
                 "entries": len(self._entries),
                 "records": self._records,
                 "max_entries": self.max_entries,
-                "max_records": _SCAN_INDEX_MAX_RECORDS,
+                "max_records": _SCAN_INDEX_MAX_RECORDS_COUNT,
                 "hits": self.hits,
                 "misses": self.misses,
                 "stale": self.stale,

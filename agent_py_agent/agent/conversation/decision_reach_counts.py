@@ -38,9 +38,12 @@ COVERED_POINTS = ("planning", "delivery_quality", "action_candidate", "external_
                   "skill_tool", "subagent_model")
 # 点位的适用范围说明（宿主事实，不是原因码）：诊断里带出，审计与菜单照原样显示，免得把“这里本来就不判断”看成没接线。
 _POINT_NOTES = {"model_selection": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}
+# 决策触达计数每 60 秒刷一次盘：控制写放大。
 _FLUSH_SECONDS = 60.0
+# 决策触达计数保留 7 天（秒）：过期清理。
 _RETAIN_SECONDS = 7 * 86400
-_HOUR = 3600
+# 一小时折合 3600 秒：决策触达按小时桶计数的时间步长。
+_HOUR_SECONDS = 3600
 _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _LOCK = threading.Lock()
@@ -111,7 +114,7 @@ def note_decision_reach(agent: object, point: str, reason: str, *, flush: bool =
     path = getattr(getattr(agent, "home_paths", None), "owner_decision_reach_counts_json", None)
     if not isinstance(path, Path) or not point:
         return
-    key = (int(time.time() // _HOUR) * _HOUR, str(point), str(reason or CALLED))
+    key = (int(time.time() // _HOUR_SECONDS) * _HOUR_SECONDS, str(point), str(reason or CALLED))
     with _LOCK:
         pending = _PENDING.setdefault(str(path), {})
         pending[key] = pending.get(key, 0) + 1
@@ -133,7 +136,7 @@ def observe_sample_success_count(home_paths: object, point: str, *, now: float |
     path = getattr(home_paths, "owner_decision_reach_counts_json", None)
     if not isinstance(path, Path) or not point:
         return 0
-    hour = int((time.time() if now is None else float(now)) // _HOUR) * _HOUR
+    hour = int((time.time() if now is None else float(now)) // _HOUR_SECONDS) * _HOUR_SECONDS
     hours = _read_hours(path)
     with _LOCK:
         pending = dict(_PENDING.get(str(path), {}))
@@ -177,15 +180,15 @@ def miss_reason_label(reason: str) -> str:
 # 函数用途: 生成“数量不够或太多”这类原因的大白话。
 def _limit_labels() -> dict[str, str]:
     return {
-        "focus_count": (f"这轮跑过的不同测试不到 {limits.DELIVERY_FOCUSES_MIN} 组"
-                        f"（或超过 {limits.DELIVERY_FOCUSES_MAX} 组），不需要挑复核重点"),
-        "few_candidates": f"页面上可选的操作不到 {limits.ACTION_CANDIDATES_MIN} 个，不需要挑",
-        "single_page": f"这次抓到的网页不到 {limits.MATERIAL_PAGES_MIN} 个，不需要排阅读顺序",
-        "todo_count": (f"未完成的待办不到 {limits.PLANNING_TODOS_MIN} 个"
-                       f"（或超过 {limits.PLANNING_TODOS_MAX} 个），不需要排优先级"),
-        "pending_count": (f"待确认的 Skill 提案不到 {limits.SKILL_PROPOSALS_MIN} 条"
-                          f"（或超过 {limits.SKILL_PROPOSALS_MAX} 条），不需要排审核顺序"),
-        "memory_count": f"这轮找到的普通记忆不到 {limits.RECALL_MEMORIES_MIN} 条，不需要重新排序",
+        "focus_count": (f"这轮跑过的不同测试不到 {limits.DELIVERY_FOCUSES_MIN_COUNT} 组"
+                        f"（或超过 {limits.DELIVERY_FOCUSES_MAX_COUNT} 组），不需要挑复核重点"),
+        "few_candidates": f"页面上可选的操作不到 {limits.ACTION_CANDIDATES_MIN_COUNT} 个，不需要挑",
+        "single_page": f"这次抓到的网页不到 {limits.MATERIAL_PAGES_MIN_COUNT} 个，不需要排阅读顺序",
+        "todo_count": (f"未完成的待办不到 {limits.PLANNING_TODOS_MIN_COUNT} 个"
+                       f"（或超过 {limits.PLANNING_TODOS_MAX_COUNT} 个），不需要排优先级"),
+        "pending_count": (f"待确认的 Skill 提案不到 {limits.SKILL_PROPOSALS_MIN_COUNT} 条"
+                          f"（或超过 {limits.SKILL_PROPOSALS_MAX_COUNT} 条），不需要排审核顺序"),
+        "memory_count": f"这轮找到的普通记忆不到 {limits.RECALL_MEMORIES_MIN_COUNT} 条，不需要重新排序",
     }
 
 
@@ -210,7 +213,7 @@ def decision_reach_summary(home_paths: object, *, since: float) -> dict[str, obj
         pending = dict(_PENDING.get(str(path), {}))
     for key, count in pending.items():
         _add(hours, key, count)
-    floor = int(since // _HOUR) * _HOUR
+    floor = int(since // _HOUR_SECONDS) * _HOUR_SECONDS
     totals: dict[str, dict[str, int]] = {}
     for hour, points in hours.items():
         if hour >= floor:

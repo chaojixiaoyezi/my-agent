@@ -194,9 +194,9 @@ def test_summary_counts_only_hours_inside_the_window_and_ignores_foreign_schemas
 
 def test_threshold_labels_are_built_from_the_shared_limits(monkeypatch):
     # 每个原因码 → (下限常量, 上限常量或 None)；改成互不相同的数字后，下限必须出现在“不到”后、上限必须出现在“超过”后。
-    uses = {"focus_count": ("DELIVERY_FOCUSES_MIN", "DELIVERY_FOCUSES_MAX"), "few_candidates": ("ACTION_CANDIDATES_MIN", None),
-            "single_page": ("MATERIAL_PAGES_MIN", None), "todo_count": ("PLANNING_TODOS_MIN", "PLANNING_TODOS_MAX"),
-            "pending_count": ("SKILL_PROPOSALS_MIN", "SKILL_PROPOSALS_MAX"), "memory_count": ("RECALL_MEMORIES_MIN", None)}
+    uses = {"focus_count": ("DELIVERY_FOCUSES_MIN_COUNT", "DELIVERY_FOCUSES_MAX_COUNT"), "few_candidates": ("ACTION_CANDIDATES_MIN_COUNT", None),
+            "single_page": ("MATERIAL_PAGES_MIN_COUNT", None), "todo_count": ("PLANNING_TODOS_MIN_COUNT", "PLANNING_TODOS_MAX_COUNT"),
+            "pending_count": ("SKILL_PROPOSALS_MIN_COUNT", "SKILL_PROPOSALS_MAX_COUNT"), "memory_count": ("RECALL_MEMORIES_MIN_COUNT", None)}
     assert not set(uses) & set(counts._LABELS), "带数量界限的说明不能写死在静态表里"
     numbers = {}
     for number, name in enumerate((name for pair in uses.values() for name in pair if name), 71):

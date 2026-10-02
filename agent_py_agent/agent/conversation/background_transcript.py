@@ -31,11 +31,14 @@ from .tool_input_progress import ToolInputProgressSinkMixin
 
 BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
 BACKGROUND_TRANSCRIPT_MAX_EVENTS = 1024
-BACKGROUND_TRANSCRIPT_MAX_THREADS = 256
-BACKGROUND_TRANSCRIPT_TEXT_LIMIT = 12_000
+# 后台转录最多跟踪 256 个线程：防止失控并发把事件环挤满。
+BACKGROUND_TRANSCRIPT_MAX_THREADS_COUNT = 256
+# 单条后台转录正文最多 12000 字符：截断后保留头部，避免单条超长撑爆存储。
+BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS = 12_000
 # 远端 TUI 每秒读取一次过程页；比这个频率更密的逐 token thinking 事件只会
 # 挤满有界环并拖慢 reducer，合到短批次后仍能保持肉眼连续更新。
 BACKGROUND_TRANSCRIPT_DELTA_FLUSH_SECONDS = 0.25
+# 后台转录增量：累计 256 字符才刷一次，平衡远端 TUI 刷新频率与环形缓冲压力。
 BACKGROUND_TRANSCRIPT_DELTA_FLUSH_CHARS = 256
 
 _TRANSCRIPT_STATE_ATTR = "_conversation_background_transcript_projection"
@@ -270,7 +273,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     # enters the ring; a later full event replaces it at terminal freeze.
     # 函数用途: 实时追加后台主代理的显式思考增量。
     def write_thinking_delta(self, text: str) -> bool:
-        remaining = BACKGROUND_TRANSCRIPT_TEXT_LIMIT - len(self._thinking_text)
+        remaining = BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS - len(self._thinking_text)
         if remaining <= 0:
             self._thinking_truncated = True
             return False
@@ -621,8 +624,8 @@ def _emit_active_input_consumed(
     messages = [
         {
             "message_id": message_id,
-            "text": text[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT],
-            "truncated": len(text) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT,
+            "text": text[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS],
+            "truncated": len(text) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS,
         }
         for raw_id, raw_text in tuple(client_messages or ())
         if (message_id := str(raw_id or "").strip()) in accepted
@@ -658,8 +661,8 @@ def _emit_active_input_submitted(
     messages = [
         {
             "message_id": message_id,
-            "text": text[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT],
-            "truncated": len(text) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT,
+            "text": text[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS],
+            "truncated": len(text) > BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS,
         }
         for raw_id, raw_text in tuple(client_messages or ())
         if (message_id := str(raw_id or "").strip()) in accepted
@@ -753,7 +756,7 @@ def _background_thread_state(
     if state is not None:
         rows.move_to_end(thread_key)
         return state
-    while len(rows) >= BACKGROUND_TRANSCRIPT_MAX_THREADS:
+    while len(rows) >= BACKGROUND_TRANSCRIPT_MAX_THREADS_COUNT:
         rows.popitem(last=False)
     state = _ThreadTranscriptState()
     rows[thread_key] = state

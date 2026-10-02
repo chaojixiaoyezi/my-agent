@@ -368,6 +368,6 @@ def test_page_floor_and_its_label_share_one_limit(prepared, monkeypatch):
     host, record, archive = prepared
     reasons = reach_counter(host, monkeypatch, module._POINT, host.root)
     calls, _ = install(monkeypatch)
-    monkeypatch.setattr(limits, "MATERIAL_PAGES_MIN", 4)
+    monkeypatch.setattr(limits, "MATERIAL_PAGES_MIN_COUNT", 4)
     assert module.external_material_order_hint(host, record, archive) == "" and not calls
     assert reasons() == ({"single_page": 1}, 0) and "不到 4 个" in miss_reason_label("single_page")

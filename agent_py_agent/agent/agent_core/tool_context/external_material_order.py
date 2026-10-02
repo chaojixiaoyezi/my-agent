@@ -82,7 +82,7 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
 
 # LLM: 只认原调用配对、成功执行、external_data/default 投影和已有归档摘要；任意 JSON 正文不是候选事实。
 #   返回宿主原因码，空串表示满足；各条件与原先的整体判断一一对应，不改变触发结果。网页数下限读
-#   decision_point_limits.MATERIAL_PAGES_MIN（与诊断大白话共用，调用时现读）。
+#   decision_point_limits.MATERIAL_PAGES_MIN_COUNT（与诊断大白话共用，调用时现读）。
 # 函数用途: 在不编码正文的前提下判断回执能否进入独立增强，不能时给出原因码；单页、失败和重放保持原路径。
 def _miss_reason(record: object, archive: dict) -> str:
     call, result = record.call, record.result
@@ -97,7 +97,7 @@ def _miss_reason(record: object, archive: dict) -> str:
     pages = details.get("pages") if type(details) is dict and details.get("mode") == "extract" else None
     if type(pages) is not list:
         return "not_extract"
-    if len(pages) < limits.MATERIAL_PAGES_MIN:
+    if len(pages) < limits.MATERIAL_PAGES_MIN_COUNT:
         return "single_page"
     matches = (archive.get("tool") == call.tool_name and archive.get("id") == call.call_id
                and archive.get("run_id") == call.run_id and bool(archive.get("scoped_call_id"))

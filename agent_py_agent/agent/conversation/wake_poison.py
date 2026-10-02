@@ -15,15 +15,17 @@ from ..runtime_errors import is_structured_error_code
 
 # 同一原因连续失败到这个次数就结案。比进度策略的 3 次宽，给类型没覆盖到的短暂竞态留余量；
 # 7b83c8730 那类程序错误最多被领取 5 次，而不是每 30 秒一次直到有人发现。
-WAKE_POISON_SAME_CAUSE_LIMIT = 5
+WAKE_POISON_SAME_CAUSE_LIMIT_COUNT = 5
 # 不要求同因的总上限：防止两个原因交替出现、逃过连续判定。
-WAKE_POISON_TOTAL_LIMIT = 12
+WAKE_POISON_TOTAL_LIMIT_COUNT = 12
 # 计数失败后的退避：第 k 次后等 min(30·2^(k−1), 300) 秒，同因 5 次从首次失败到结案约 7.5 分钟。
 # 批次失败后也按基础间隔 30 秒再试，下一次逐条单独执行。
 WAKE_POISON_BACKOFF_BASE_SECONDS = 30.0
+# 唤醒毒化计数失败后的退避封顶 300 秒：同因 5 次从首次失败到结案约 7.5 分钟。
 WAKE_POISON_BACKOFF_MAX_SECONDS = 300.0
 # 只重投路径（已有冻结交付、不调模型）单独退避：便宜但不能无限循环；封顶 15 分钟，渠道恢复后最多再等 15 分钟。
 WAKE_REDELIVERY_BACKOFF_BASE_SECONDS = 30.0
+# 只重投路径（不调模型）单独退避封顶 900 秒（15 分钟）：渠道恢复后最多再等 15 分钟。
 WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0
 # 从第一次重投失败起满 24 小时（>=）仍送不出去就结案；足够覆盖一次渠道长时间故障或人工处理。
 WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0
@@ -329,9 +331,9 @@ def _after_uncounted(state: WakePoisonState, reason_code: str, now: float) -> Wa
 #   批次失败与不计数结果永远不会触发结案。
 # 函数用途: 判断当前状态是否应当结案。
 def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
-    if state.same_cause_count >= WAKE_POISON_SAME_CAUSE_LIMIT:
+    if state.same_cause_count >= WAKE_POISON_SAME_CAUSE_LIMIT_COUNT:
         return _decision(state, state.reason_code, mixed_causes=False)
-    if state.total_count >= WAKE_POISON_TOTAL_LIMIT:
+    if state.total_count >= WAKE_POISON_TOTAL_LIMIT_COUNT:
         return _decision(state, state.reason_code, mixed_causes=True)
     if state.redelivery_failures and (
             state.last_redelivery_failed_at - state.first_redelivery_failed_at >= WAKE_REDELIVERY_GIVE_UP_SECONDS):
@@ -532,8 +534,8 @@ __all__ = [
     "WAKE_EXPECTED_WAIT_ADMISSIONS",
     "WAKE_POISON_BACKOFF_BASE_SECONDS",
     "WAKE_POISON_BACKOFF_MAX_SECONDS",
-    "WAKE_POISON_SAME_CAUSE_LIMIT",
-    "WAKE_POISON_TOTAL_LIMIT",
+    "WAKE_POISON_SAME_CAUSE_LIMIT_COUNT",
+    "WAKE_POISON_TOTAL_LIMIT_COUNT",
     "WAKE_REASON_ATTEMPT_ABANDONED",
     "WAKE_REASON_CHANNEL_UNAVAILABLE",
     "WAKE_REASON_COMPACT_YIELD",

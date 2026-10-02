@@ -33,7 +33,7 @@ _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER = 8
 # 这里只持久化调度层判定后的普通执行失败；供应/配置错误不计入策略退休。
 # 调度层传入按 policy_id 确定的退避，连续失败达阈值后停用；成功报告清零。
 # 退休策略不再参与 due 扫描，原失败事实仍保留在 metadata，供应冷却另由进程内组件管理。
-_POLICY_FAILURE_RETIRE_AFTER = 3
+_POLICY_FAILURE_RETIRE_AFTER_COUNT = 3
 
 
 # LLM: 策略解析和建模错误必须保持同一 context、path、policy_id 口径。
@@ -251,7 +251,7 @@ class ProgressStore:
         now: float | None = None,
         backoff_seconds: float,
         failure_count: int,
-        retire_after: int = _POLICY_FAILURE_RETIRE_AFTER,
+        retire_after: int = _POLICY_FAILURE_RETIRE_AFTER_COUNT,
     ) -> ProgressPolicy | None:
         """失败续跑记账:写 failure_count/last_failure_at 并退避顺延,超阈值退休。
 

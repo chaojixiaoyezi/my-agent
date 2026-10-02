@@ -28,7 +28,7 @@ from agent_py_agent.agent.conversation.background_transcript import (
 )
 from agent_py_agent.agent.conversation.history_display import conversation_history_display_events
 from agent_py_agent.agent.conversation.host_notices import (
-    HOST_NOTICE_LIMIT,
+    HOST_NOTICE_LIMIT_COUNT,
     HostNotice,
     clear_host_notices,
     host_notice,
@@ -109,7 +109,7 @@ def test_notices_are_cleaned_replaced_capped_taken_and_cleared(tmp_path):
     for index in range(6):
         queue_host_notice(store, thread_id, host_notice(f"src-{index}", "c", f"提示{index}"))
     pending = pending_host_notices(store, thread_id)
-    assert len(pending) == HOST_NOTICE_LIMIT and [notice.text for notice in pending] == [f"提示{i}" for i in range(1, 6)]
+    assert len(pending) == HOST_NOTICE_LIMIT_COUNT and [notice.text for notice in pending] == [f"提示{i}" for i in range(1, 6)]
     assert take_host_notices(store, thread_id, [pending[0].notice_id, "missing"]) == (pending[0],)
     assert pending_host_notices(store, thread_id) == pending[1:]
     assert clear_host_notices(store, thread_id, "src-5") and pending_host_notices(store, thread_id) == pending[1:4]

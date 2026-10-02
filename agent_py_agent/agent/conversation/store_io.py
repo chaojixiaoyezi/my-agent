@@ -46,6 +46,7 @@ def read_jsonl_report(path: Path, *, context: str) -> JsonlReadReport:
     return JsonlReadReport(rows, errors)
 
 
+# 读取 JSONL 尾部每块 64 KiB：控制读尾的 IO 粒度。
 _TAIL_BLOCK_BYTES = 64 * 1024
 
 

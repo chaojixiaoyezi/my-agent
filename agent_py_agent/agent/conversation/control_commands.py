@@ -53,7 +53,9 @@ ControlKind = Literal[
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
 
 _AUDIT_UNIT_SECONDS = {"d": 86400, "h": 3600, "m": 60}
+# 审计窗口最大 400 天（秒）：防止误传超大窗口拖垮查询。
 _AUDIT_WINDOW_MAX_SECONDS = 400 * 86400
+# 任务工作名最多 64 字符：限制命令入参长度。
 _WORK_NAME_MAX_CHARS = 64
 DECISION_EXPERIMENT_TASK_KIND = "decision_experiment"
 # 只开放有经验输入上界标定和只观察消费者的接入点；其它点即使授权也无法发送，因此在入口直接拒绝。
@@ -469,7 +471,8 @@ _SETTINGS_USAGE = (
 # 参数名沿用 AgentConfig 字段命名；修改记录编号是 12 位十六进制，聊天里允许用至少 6 位前缀。
 _SETTING_KEY = re.compile(r"[a-z][a-z0-9_]{1,79}")
 _SETTING_CHANGE_REF = re.compile(r"[0-9a-f]{6,12}")
-_SETTING_VALUE_MAX = 500
+# 设置值字符串最多 500 字符：防止超长注入。
+_SETTING_VALUE_MAX_CHARS = 500
 
 
 # LLM: 只做词法解析：子命令大小写不敏感，参数名与记录编号小写后拒绝式校验；set 的值保留原样（可含空格与中文），
@@ -486,7 +489,7 @@ def _settings_command(trailing: object) -> ConversationControlCommand:
     if head == "set":
         key, _, value = rest.partition(" ")
         key, value = key.casefold(), value.strip()
-        valid = bool(_SETTING_KEY.fullmatch(key)) and 0 < len(value) <= _SETTING_VALUE_MAX and "\n" not in value
+        valid = bool(_SETTING_KEY.fullmatch(key)) and 0 < len(value) <= _SETTING_VALUE_MAX_CHARS and "\n" not in value
         return ConversationControlCommand("settings", value=f"set {key} {value}", operation="set", valid=valid,
                                           usage=_SETTINGS_USAGE)
     argument = rest.casefold() if head != "search" else rest

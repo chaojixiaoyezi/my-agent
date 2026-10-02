@@ -513,7 +513,7 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
     返回之后）——唯一可以清等待项、写回复欠账、写 guidance transcript 的边界。
 - 身份只用 `channel_message_id`（→ guidance metadata → 事件 `client_message_ids`）+ `request_id` +
   `provider_call_id`；**禁止**按正文匹配、按长度或顺序猜消费。正文只用于展示与重连重放，并受
-  `BACKGROUND_TRANSCRIPT_TEXT_LIMIT` 约束。
+  `BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS` 约束。
 - 展示规则（TUI）：已提交后用户消息**立刻**按原提交序号进入可见历史（`created_seq=pending.seq`），
   等待区改成"已送入当前回合，等待模型回应"且不再重复正文；已确认只收起标记，**不得再插第二行**；
   回合终态仍未确认时降级为"已送入但未获模型确认；不会自动重发"；Gateway 入口回执收成 `terminal_unknown` 后，

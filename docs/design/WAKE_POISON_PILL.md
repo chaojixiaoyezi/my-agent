@@ -101,8 +101,8 @@ model_profile_id、model_selection_revision 与所选模型连接字段的进程
 
 ## 5. N 与退避（内部常量，不进配置）
 
-- `WAKE_POISON_SAME_CAUSE_LIMIT = 5`；
-- `WAKE_POISON_TOTAL_LIMIT = 12`（第 3 节的总上限）；
+- `WAKE_POISON_SAME_CAUSE_LIMIT_COUNT = 5`；
+- `WAKE_POISON_TOTAL_LIMIT_COUNT = 12`（第 3 节的总上限）；
 - `WAKE_POISON_BACKOFF_BASE_SECONDS = 30.0`，`WAKE_POISON_BACKOFF_MAX_SECONDS = 300.0`。
 
 第 k 次计数失败后，下次最早尝试 = 失败时刻 + min(30·2^(k−1), 300) 秒。也就是 30、60、120、240 秒后

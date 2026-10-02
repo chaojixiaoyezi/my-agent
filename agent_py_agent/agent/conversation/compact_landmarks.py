@@ -29,11 +29,17 @@ _RECALL_LINE = (
     "or current_thread=true to search or page through this conversation"
 )
 _OMITTED_PREFIX = "- omitted_user_messages: "
+# compact 地标：默认最大 20000 tokens 的裁剪窗口。
 _DEFAULT_MAX_TOKENS = 20_000
+# compact 地标：最少保留 500 tokens 的窗口。
 _MIN_TOKENS = 500
+# compact 地标：窗口占最近记录的 10%：控制裁剪比例。
 _WINDOW_PERCENT = 10
+# compact 地标：裁剪最少 200 tokens，避免过短裁剪没意义。
 _MIN_CLIP_TOKENS = 200
-_OMITTED_ID_LIMIT = 30
+# compact 地标：省略的用户消息 id 最多记 30 条。
+_OMITTED_ID_LIMIT_COUNT = 30
+# compact 地标：为省略清单预留 320 tokens，防止裁剪挤爆。
 _OMITTED_RESERVE_TOKENS = 320
 _ROLES = ("user", "assistant_final")
 _ENTRY_PATTERN = re.compile(r"^- (user|assistant_final)(?: \[([^\]\s]+)(?: [^\]]*)?\])?: ")
@@ -274,7 +280,7 @@ def _clipped_line(entry: _Landmark, text: str, budget: int) -> str:
 # 函数用途: 生成“被省略的用户消息”一行；没有被省略的用户消息时返回空串。
 def _omitted_line(source: LandmarkSource, omitted: list[_Landmark]) -> str:
     ids = list(dict.fromkeys([*source.carried_omitted, *(entry.message_id for entry in omitted if entry.message_id)]))
-    shown = ids[-_OMITTED_ID_LIMIT:]
+    shown = ids[-_OMITTED_ID_LIMIT_COUNT:]
     unlisted = source.carried_unlisted + len(ids) - len(shown) + sum(1 for entry in omitted if not entry.message_id)
     if not shown and not unlisted:
         return ""

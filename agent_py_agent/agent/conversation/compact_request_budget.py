@@ -41,7 +41,7 @@ from .input_media import InputMediaError
 
 # LLM: Bounded repair budget for one source segment, driven by the typed response reason only.
 # 常量用途: 同一片段最多再纠正几次；1 + 该值就是单个片段允许的最大模型调用次数。
-_SEGMENT_REPAIR_LIMIT = 2
+_SEGMENT_REPAIR_LIMIT_COUNT = 2
 
 # LLM: A degraded segment keeps a deterministic, size-bounded excerpt of its own bytes instead of a
 # model summary. The bound is what keeps a mechanical fallback from re-inflating the window.
@@ -312,7 +312,7 @@ def _summarize_segment(
         text, reason = compact_summary_response_outcome(response, request=base)
         if not reason:
             return _SegmentOutcome(text, end, budget, response)
-        if repairs >= _SEGMENT_REPAIR_LIMIT:
+        if repairs >= _SEGMENT_REPAIR_LIMIT_COUNT:
             return _SegmentOutcome(
                 summary, end, budget, response, _mechanical_segment_text(source, offset, end, reason)
             )

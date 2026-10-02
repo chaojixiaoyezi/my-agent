@@ -2,7 +2,7 @@
 #   结构化记录；observe 转后台时 decide 返回的 deferred 占位不写，由后台执行器完成后写这一行（blocking=false）。
 #   只含点位、范围、模式、状态、原因、耗时、是否阻塞调用方和宿主身份编号，不含状态、题目、候选或回答正文；建了调用记录的行另带
 #   transport 链路事实（各次 HTTP 尝试的分段毫秒、超时时所处阶段、发送前本地估算输入；attempts 为空即请求没发出），同样无正文。位置只认 owner 规范路径
-#   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总，
+#   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS_COUNT 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总，
 #   汇总时把请求根本没发出去的失败类结果单列（not_sent），不计入 Jev 的超时率和失败率。
 #   成功拿到供应商响应的行另带 requested_model（请求时的模型名，如 jev-latest）与 model_version（响应里供应商实际给的
 #   版本号，如 jev-1.13.0）；汇总按（请求名, 实际版本）计次 model_versions，用于发现别名背后的版本变化，不参与任何判定。
@@ -27,8 +27,10 @@ from ..common.json_io import append_jsonl_capped, read_jsonl_objects_report
 SCHEMA = "decision_outcome.v1"
 SKIPPED_STATUS = "skipped"
 _T = TypeVar("_T")
-_MAX_RECORDS = 1000
-_RECENT_ROWS = 20
+# 决策结果日志最多保留 1000 条记录：超限轮转。
+_MAX_RECORDS_COUNT = 1000
+# 决策结果日志近期展示 20 行。
+_RECENT_ROWS_COUNT = 20
 _RECENT_FIELDS = ("created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms", "blocking")
 # 只有失败类结果才区分“发出去了没有”；成功、关闭、跳过、作废等照原状态计数。
 _FAILURE_STATUSES = frozenset({"deadline", "error", "cooldown", "configuration_required"})
@@ -74,7 +76,7 @@ def append_decision_outcome(agent: object, row: dict[str, object]) -> None:
     if not path:
         return
     try:
-        append_jsonl_capped(Path(path), row, max_records=_MAX_RECORDS)
+        append_jsonl_capped(Path(path), row, max_records=_MAX_RECORDS_COUNT)
     except (OSError, ValueError, TypeError):
         _LOGGER.warning("决策结果日志写入失败：point=%s status=%s", row.get("point"), row.get("status"))
 
@@ -128,7 +130,7 @@ def decision_outcome_summary(home_paths: object, *, since: float,
         target, key = (unsent, code) if code else (points, str(row.get("status") or ""))
         counts = target.setdefault(str(row.get("point") or ""), {})
         counts[key] = counts.get(key, 0) + 1
-    recent = [_recent_row(row) for row in rows[-_RECENT_ROWS:]]
+    recent = [_recent_row(row) for row in rows[-_RECENT_ROWS_COUNT:]]
     return {"available": True, "points": points, "not_sent": unsent, "model_versions": _model_versions(rows),
             "recent": recent, "unreadable_rows": len(report.load_errors)}
 

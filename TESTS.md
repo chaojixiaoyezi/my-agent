@@ -40,6 +40,29 @@
 - **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 21 个（含仓库级守卫与 `test_packaging.py`）：294 passed；Ruff、doc sync、
   strict code-size（与 `ed64438fc` 按身份比新增 0）、`git diff --check`、clean-package 全部通过。
 
+## 常数整改第五批：agent/conversation 96 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch5`，基于 `ed64438fc`）
+
+- **范围**：`agent_py_agent/agent/conversation/` 目录 96 个待整改常数（35 个产品文件）。数值一律不变、不碰其它模块。
+- **做法**：
+  - 数量上限类补 `_COUNT` 改名 45 个（`ACTION_CANDIDATES_MIN→ACTION_CANDIDATES_MIN_COUNT`、`_LIMIT→_LIMIT_COUNT`、
+    `_MAX_RECORDS→_MAX_RECORDS_COUNT`、`_SCAN_INDEX_MAX_RECORDS_PER_FILE→_SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT` 等）；
+  - 字符/长度类补 `_CHARS` 改名 10 个（`_TEXT_LIMIT→_HOST_NOTICE_TEXT_LIMIT_CHARS`——避开与 skill_learning_request.py
+    既有 `TEXT_LIMIT_CHARS` 撞名、`BACKGROUND_TRANSCRIPT_TEXT_LIMIT→…_CHARS`、`TOOL_INPUT_PROGRESS_TOOL_NAME_LIMIT→…_CHARS` 等）；
+  - token 类补 `_TOKENS` 1 个（`INPUT_MEDIA_TOKEN_RESERVE→INPUT_MEDIA_TOKEN_RESERVE_TOKENS`）、`_HOUR→_HOUR_SECONDS` 1 个；
+  - 已有单位后缀的 35 个只补上方中文说明（脚本 tmp/add-batch5-comments.py 批量补 73 处，与生成器 `_description` 同判定）；
+  - 无物理单位 4 个（`REQUIRED_RECALL` 比率、`_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER` 倍数、`_WAKE_FACT_DEPTH_LIMIT` 深度、
+    `_CHARS_PER_TOKEN_WINDOW` 每 token 字符换算率）只补说明、挪入白名单无单位组（28→32）。
+  - 改名引用全仓同步（脚本 tmp/sync-batch5-refs.py，词边界、按长度降序，84 文件 423 处），重 grep 旧名 0 残留；
+    误伤的 `agent_core/tool_guard/call_guardrail.py`（`_MAX_RECORDS` 是它自己的定义，非本批范围）已回滚，
+    并把 `_MAX_RECORDS` 恢复进白名单；`test_constant_names_unique._ALLOWED` 删除过期条目 `MAX_RECORDS`。
+- **白名单/目录**：待整改 320→225（groups[0]，只减不增；`_MAX_RECORDS` 恢复是回滚误删，不是新增），
+  无物理单位组 28→32；目录重建 800 项，`--check` 一致。
+- **验证**：守卫（test_constants_catalog + test_constant_names_unique）**13 passed**；改名直接相关 30 个测试文件全过；
+  guards9 全量 **168 passed**；check_import_boundaries **0 条**；ruff **All checks passed**；check_doc_sync **PASS**；
+  code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
+  `size_diff.sh` **新增告警 1 / 消失 3**（新增 1 条 soft 告警是 `test_gateway_conversation_control.py` 的测试函数，
+  该文件本轮未改、告警身份由集成分支 7e0fbcec1 集成修正引入，非本批所致，建议 3a 合入后由该提交处理）。
+
 ## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
 
 - **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数
@@ -61,7 +84,7 @@
 ## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`）
 
 - **范围**：`agent_py_agent/cli/` 目录（41 个文件，不碰 `cli/chat_parts/tui_effort_menu.py`），共 **100 个**待整改常数。
-- **做法**：A 补上方中文说明 43 个；B 按生成器后缀表改名 56 个（`_LIMIT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、
+- **做法**：A 补上方中文说明 43 个；B 按生成器后缀表改名 56 个（`_LIMIT_COUNT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、
   `_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、宽度类加 `_CHARS`，如 `DAEMON_LIMIT`→`DAEMON_COUNT`、
   `TOOL_PREVIEW_MAX_LINES`→`TOOL_PREVIEW_MAX_LINE_COUNT`、`_BACKGROUND_OWNER_WORKERS`→`_BACKGROUND_OWNER_WORKER_COUNT`、
   `PASTE_THRESHOLD`→`PASTE_THRESHOLD_CHARS`、`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`→`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`），
@@ -3895,7 +3918,7 @@ python3 -m pytest agent_py_agent/tests/test_tool_scope_resolution.py \
 - **来源/做法**：dev 派活任务 4（从 my-agent-1 队列转来）。背景是 11 个点位全 observe、48 小时 276 次调用只换来观察记录。
 - **开关**：通用字段 `observe_sampling_enabled`（默认 false），走 decision_settings 的 GENERAL_FIELDS，与 `enabled`/
   `experiment_enabled` 同一套布尔校验；`AgentConfig`、随包 YAML（中文注释）、`services/_normalize` 运行布尔表同步。
-- **上限**：`conversation/decision_point_limits.OBSERVE_SAMPLED_SUCCESS_LIMIT = 6`，内部常量、不进用户参数。
+- **上限**：`conversation/decision_point_limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT = 6`，内部常量、不进用户参数。
 - **判定**：`decision_service._sampled_outcome` 只对 `observe_sampling_enabled=true` 且点位 `effective_mode == "observe"` 生效；
   命中返回 `DecisionOutcome("observe", "skipped", reason="observe_sampled_out")`（`may_apply=False`，保留原业务方案）。
   apply 与实验路径不进（`_decide_outcome` 里 `not stage.experiment and ...` 两个前置条件）。
@@ -4155,7 +4178,7 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
   `_max_input_chars`(12000) 直接复用 `agent/memory_archive/compact_semantic_summary.py` 里既有的 `_DEFAULT_*` 常量；
   `semantic_summary_config` 只从 config 读 `enabled`，配套删掉不再使用的 `_int_field`。
 - **唤醒消费与合并窗口 2 键**：`conversation_pending_wake_limit`(100)、`background_completion_coalesce_seconds`(5) 降为
-  `agent/conversation/runtime.py` 的 `PENDING_WAKE_CONSUME_LIMIT` / `COMPLETION_COALESCE_WINDOW_SECONDS`；消费上限 0 表示不限、
+  `agent/conversation/runtime.py` 的 `PENDING_WAKE_CONSUME_LIMIT_COUNT` / `COMPLETION_COALESCE_WINDOW_SECONDS`；消费上限 0 表示不限、
   合并窗口 0 表示不合并的原语义不变，只替换读这两个键的三行（`_consume_pending_wake_signals`、
   `_successful_completion_waiting_for_batch`、`_enqueue_scheduler_runs`），没有重构唤醒逻辑。
 - **配置面同步删除**：`AgentConfig` 6 字段、随包 `agent_config.yaml` 6 行与相应注释、`services/_normalize` 6 条规格、说明基线 3 个条目。
@@ -4825,9 +4848,9 @@ Linux 两版原 12 分片另计，各 23833 passed、60 skipped、32 xfailed、5
 - **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package 均通过；code-size 身份差集相对基线新增 0、
   减少 1。`run_background_turn_with_compact` 曾因本次两行越过 100 行硬线，已把每次尝试的上下文准备和溢出携带合并抽成
   两个小函数，行为不变。
-- **补修（集成者全仓发现）**：`lifecycle_wake_event` 的上限常数原名 `_TEXT_LIMIT`、`_LIST_LIMIT`，去掉前导下划线后与
+- **补修（集成者全仓发现）**：`lifecycle_wake_event` 的上限常数原名 `_TEXT_LIMIT_CHARS`、`_LIST_LIMIT`，去掉前导下划线后与
   `host_notices.TEXT_LIMIT`、`settings_control_service.LIST_LIMIT` 撞名（概念不同），`test_constant_names_unique.py` 失败；
-  三个上限统一改名为 `_WAKE_FACT_TEXT_LIMIT`、`_WAKE_FACT_LIST_LIMIT`、`_WAKE_FACT_DEPTH_LIMIT`，行为不变。原门禁清单漏了
+  三个上限统一改名为 `_WAKE_FACT_TEXT_LIMIT_CHARS`、`_WAKE_FACT_LIST_LIMIT_COUNT`、`_WAKE_FACT_DEPTH_LIMIT`，行为不变。原门禁清单漏了
   这类全仓扫描测试；之后的门禁固定带上扫描产品代码的守卫测试（含 `test_constant_names_unique.py`、
   `test_config_field_readers.py`、`test_main_agent_has_no_case_runtime.py`、`test_orchestration_tool_constants.py`）。
 

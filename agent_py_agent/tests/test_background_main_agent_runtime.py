@@ -146,15 +146,15 @@ def test_background_run_params_carry_structured_conversation_task_identity() -> 
 def _patch_recent_limit(monkeypatch, value: int) -> None:
     from agent_py_agent.agent.conversation import background_context
 
-    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT", value)
+    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT", value)
 
 
 def _patch_pending_wake_prompt_limit(monkeypatch, value: int) -> None:
     from agent_py_agent.agent.conversation import background_context
     from agent_py_agent.agent.conversation import runtime as runtime_module
 
-    monkeypatch.setattr(background_context, "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT", value)
-    monkeypatch.setattr(runtime_module, "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT", value)
+    monkeypatch.setattr(background_context, "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT", value)
+    monkeypatch.setattr(runtime_module, "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT", value)
 
 
 def test_background_context_overflow_resumes_after_committed_recovery_same_slice(monkeypatch, tmp_path) -> None:
@@ -4905,7 +4905,7 @@ def test_unknown_old_task_preserves_event_without_blocking_new_task_on_same_thre
 ) -> None:
     from agent_py_agent.agent.conversation import runtime as runtime_module
 
-    monkeypatch.setattr(runtime_module, "CONVERSATION_UNHANDLED_OBSERVATION_LIMIT", 1)
+    monkeypatch.setattr(runtime_module, "CONVERSATION_UNHANDLED_OBSERVATION_LIMIT_COUNT", 1)
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=False,

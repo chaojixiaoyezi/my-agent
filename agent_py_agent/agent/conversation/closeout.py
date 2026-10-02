@@ -23,7 +23,7 @@ STATE_RESUME_ROUND = "resume_round"
 # EXEC-30: 同一收口 reason 连续续跑上限(对照 会话运行时/轻量运行时 写完即测即收的
 # 天然收敛机制的机制等价物)。同因 3 次仍不收敛=模型在同一模式无限迭代,
 # 强制收口移交。
-SAME_REASON_RESUME_LIMIT = 3
+SAME_REASON_RESUME_LIMIT_COUNT = 3
 
 
 # LLM: 机器输入事实——全部结构化, 由调用方从权威来源(policy/load_goal/
@@ -81,7 +81,7 @@ def decide_closeout(facts: CloseoutFacts) -> CloseoutOutcome:
             STATE_WAIT_HANDOFF, "no_active_goal", "wait_handoff"
         )
     # EXEC-30 同因收敛: 连续同因达上限强制收口移交, 不再续跑。
-    if int(facts.same_reason_streak or 0) >= SAME_REASON_RESUME_LIMIT:
+    if int(facts.same_reason_streak or 0) >= SAME_REASON_RESUME_LIMIT_COUNT:
         return CloseoutOutcome(
             STATE_WAIT_HANDOFF,
             "same_reason_resume_limit_reached",

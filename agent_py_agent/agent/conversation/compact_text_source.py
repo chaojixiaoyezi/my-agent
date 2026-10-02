@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 
 from .compact_guard import ConversationCompactError, raise_if_compact_interrupted
 
+# 文本源分块 8192 字符：控制单次处理窗口，避免整块超长。
 _CHUNK_CHARS = 8192
 
 

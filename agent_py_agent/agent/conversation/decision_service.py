@@ -319,7 +319,7 @@ def _sampled_outcome(agent: object, point: str, row: dict, settings: dict) -> De
         return None
     if str(row.get("effective_mode") or "") != "observe":
         return None
-    if observe_sample_success_count(agent.home_paths, point) < decision_limits.OBSERVE_SAMPLED_SUCCESS_LIMIT:
+    if observe_sample_success_count(agent.home_paths, point) < decision_limits.OBSERVE_SAMPLED_SUCCESS_LIMIT_COUNT:
         return None
     return DecisionOutcome("observe", "skipped", reason="observe_sampled_out")
 

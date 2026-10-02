@@ -314,6 +314,6 @@ def test_todo_bounds_and_their_label_share_one_limit(prepared, monkeypatch):
     agent, _, root = prepared
     reasons = reach_counter(agent, monkeypatch, module._POINT, root)
     calls = install(monkeypatch)
-    monkeypatch.setattr(limits, "PLANNING_TODOS_MIN", 3)
+    monkeypatch.setattr(limits, "PLANNING_TODOS_MIN_COUNT", 3)
     assert "planning_priority_hint" not in _read(agent) and not calls
     assert reasons() == ({"todo_count": 1}, 0) and "不到 3 个" in miss_reason_label("todo_count")

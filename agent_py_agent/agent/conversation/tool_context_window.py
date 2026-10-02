@@ -16,13 +16,18 @@ from ..memory_archive.tool_output_externalizer import model_visible_tool_paramet
 from ..tooling.output_projection import project_tool_output_body
 from .authority import conversation_transcript_is_authoritative
 
+# 工具上下文窗口默认 48000 字符上限：防止单轮输入过大。
 _DEFAULT_MAX_CHARS = 48_000
+# 活跃回合交接文本上限 12000 字符：控制跨回合传递体积。
 _DEFAULT_ACTIVE_TURN_HANDOFF_MAX_CHARS = 12_000
 # 参数减量第 3 批 E 组：已结束回合的工具折叠字数上限不再是配置项（原 conversation_terminal_tool_fold_max_chars，值不变）。
 _TERMINAL_TOOL_FOLD_MAX_CHARS = 6_000
+# 已结束回合的工具折叠文本最多存 48000 字符：控制存储体积。
 _MAX_STORED_TERMINAL_TOOL_FOLD_CHARS = 48_000
+# 每 token 折合 3 字符的换算率：触发 token 数乘该值估算折叠预算下限，无物理单位。
 _CHARS_PER_TOKEN_WINDOW = 3
-_RECENT_REF_LIMIT = 8
+# 近期工具引用最多 8 条：控制上下文窗口。
+_RECENT_REF_LIMIT_COUNT = 8
 TERMINAL_TOOL_FOLD_METADATA_KEY = "terminal_tool_fold"
 TERMINAL_TOOL_FOLD_SCHEMA_V1 = "conversation_terminal_tool_fold.v1"
 TERMINAL_TOOL_FOLD_SCHEMA = "conversation_terminal_tool_fold.v2"
@@ -678,7 +683,7 @@ def _recent_archive_refs(records: list) -> list[str]:
         ref = _archive_ref(record)
         if ref and ref not in refs:
             refs.append(ref)
-        if len(refs) >= _RECENT_REF_LIMIT:
+        if len(refs) >= _RECENT_REF_LIMIT_COUNT:
             break
     return list(reversed(refs))
 

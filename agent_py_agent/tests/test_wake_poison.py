@@ -38,8 +38,8 @@ from agent_py_agent.agent.conversation.wake_poison import (
     WAKE_CLAIM_NOT_EXECUTED,
     WAKE_CLAIM_YIELDED,
     WAKE_EXPECTED_WAIT_ADMISSIONS,
-    WAKE_POISON_SAME_CAUSE_LIMIT,
-    WAKE_POISON_TOTAL_LIMIT,
+    WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
+    WAKE_POISON_TOTAL_LIMIT_COUNT,
     WAKE_REASON_CHANNEL_UNAVAILABLE,
     WAKE_REASON_COMPACT_YIELD,
     WAKE_REASON_GATEWAY_STOPPED,
@@ -219,12 +219,12 @@ class TestErrorCodeShape:
 
 class TestStreak:
     def test_same_cause_quarantines_exactly_at_the_limit(self):
-        almost = _feed([_failure("error:X")] * (WAKE_POISON_SAME_CAUSE_LIMIT - 1))
+        almost = _feed([_failure("error:X")] * (WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1))
         assert quarantine_decision(almost) is None
         decision = quarantine_decision(next_poison_state(almost, _failure("error:X"), now=5000.0))
         assert decision is not None and decision.to_dict() == {
-            "reason_code": "error:X", "same_cause_count": WAKE_POISON_SAME_CAUSE_LIMIT,
-            "total_count": WAKE_POISON_SAME_CAUSE_LIMIT, "redelivery_failures": 0, "mixed_causes": False}
+            "reason_code": "error:X", "same_cause_count": WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
+            "total_count": WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, "redelivery_failures": 0, "mixed_causes": False}
 
     def test_changed_cause_restarts_the_streak_but_total_keeps_counting(self):
         state = _feed([_failure("error:X")] * 4 + [_failure("error:Y")])
@@ -232,17 +232,17 @@ class TestStreak:
         assert quarantine_decision(state) is None
 
     def test_neutral_results_neither_count_nor_break_the_streak(self):
-        pattern = [_failure("error:X"), WAKE_ATTEMPT_NEUTRAL] * (WAKE_POISON_SAME_CAUSE_LIMIT - 1) + [_failure("error:X")]
+        pattern = [_failure("error:X"), WAKE_ATTEMPT_NEUTRAL] * (WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1) + [_failure("error:X")]
         state = _feed(pattern)
-        assert (state.same_cause_count, state.total_count) == (WAKE_POISON_SAME_CAUSE_LIMIT, WAKE_POISON_SAME_CAUSE_LIMIT)
+        assert (state.same_cause_count, state.total_count) == (WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, WAKE_POISON_SAME_CAUSE_LIMIT_COUNT)
         assert quarantine_decision(state) is not None
 
     def test_alternating_causes_hit_the_total_limit_as_mixed(self):
-        alternating = [_failure("error:A"), _failure("error:B")] * (WAKE_POISON_TOTAL_LIMIT // 2)
+        alternating = [_failure("error:A"), _failure("error:B")] * (WAKE_POISON_TOTAL_LIMIT_COUNT // 2)
         assert quarantine_decision(_feed(alternating[:-1])) is None
         decision = quarantine_decision(_feed(alternating))
         assert decision is not None and decision.mixed_causes is True
-        assert (decision.reason_code, decision.total_count) == ("error:B", WAKE_POISON_TOTAL_LIMIT)
+        assert (decision.reason_code, decision.total_count) == ("error:B", WAKE_POISON_TOTAL_LIMIT_COUNT)
 
     def test_success_clears_everything(self):
         state = _feed([_failure("error:X")] * 4 + [WAKE_ATTEMPT_SUCCESS])
@@ -261,7 +261,7 @@ class TestStreak:
         assert (state.first_failed_at, state.last_failed_at, state.next_attempt_at) == (100.0, 250.0, 310.0)
 
     def test_abandoned_attempts_count_as_their_own_cause(self):
-        state = _feed([WAKE_ATTEMPT_ABANDONED] * WAKE_POISON_SAME_CAUSE_LIMIT)
+        state = _feed([WAKE_ATTEMPT_ABANDONED] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT)
         assert quarantine_decision(state).reason_code == "attempt:abandoned"
 
 
@@ -288,7 +288,7 @@ class TestBatchIsolation:
 
     def test_isolated_failures_count_and_keep_isolating_until_success(self):
         state = _feed([WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")]
-                      + [_failure("error:X")] * (WAKE_POISON_SAME_CAUSE_LIMIT - 1))
+                      + [_failure("error:X")] * (WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1))
         assert needs_isolation(state) and quarantine_decision(state) is None
         assert quarantine_decision(next_poison_state(state, _failure("error:X"), now=9999.0)) is not None
         assert needs_isolation(next_poison_state(state, WAKE_ATTEMPT_SUCCESS, now=9999.0)) is False
@@ -495,11 +495,11 @@ class TestReplaysOfTodaysBadBuilds:
             now = max(now, state.next_attempt_at)
             state = next_poison_state(state, verdict_for_error(error), now=now)
             claims += 1
-        assert claims == WAKE_POISON_SAME_CAUSE_LIMIT and now == 30 + 60 + 120 + 240
+        assert claims == WAKE_POISON_SAME_CAUSE_LIMIT_COUNT and now == 30 + 60 + 120 + 240
         assert quarantine_decision(state).reason_code == "error:SKILL_TASK_BINDING_INVALID"
 
     def test_204f4ddf9_nonexecuted_claim_stops_after_five_claims(self):
-        state = _feed([verdict_for_admission("host_delivery_consumed")] * WAKE_POISON_SAME_CAUSE_LIMIT)
+        state = _feed([verdict_for_admission("host_delivery_consumed")] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT)
         assert quarantine_decision(state).reason_code == "admission:host_delivery_consumed"
 
 

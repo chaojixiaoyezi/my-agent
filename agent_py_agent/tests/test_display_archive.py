@@ -7,7 +7,7 @@ import pytest
 
 from agent_py_agent.agent.conversation.display_archive import (
     DISPLAY_PAGE_CHARS,
-    DISPLAY_PAGE_ROWS,
+    DISPLAY_PAGE_ROWS_COUNT,
     DisplayArchiveError,
     archive_display_rows,
     read_display_archive_page,
@@ -42,7 +42,7 @@ def test_pages_reconstruct_all_long_unicode_rows_and_keep_snapshots(tmp_path):
     assert ref["page_count"] >= 5
     for index in range(ref["page_count"]):
         page = read_display_archive_page(agent.conversation_store, ref, index)
-        assert len(page["rows"]) <= DISPLAY_PAGE_ROWS
+        assert len(page["rows"]) <= DISPLAY_PAGE_ROWS_COUNT
         assert sum(len(row["text"]) for row in page["rows"]) <= DISPLAY_PAGE_CHARS
         assert page["has_next"] == (index + 1 < ref["page_count"])
         for row in page["rows"]:

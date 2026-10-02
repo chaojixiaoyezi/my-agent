@@ -1,5 +1,5 @@
 # LLM: 随图摘要（B 路径）的唯一发送实现：不再把整段压缩范围连图一起发，而是把范围里含媒体的回合按摘要预算打包成若干
-#   "看图小请求"（每请求：该请求文字估算 + 图块数 × compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE ≤ 摘要预算；请求数 ≤
+#   "看图小请求"（每请求：该请求文字估算 + 图块数 × compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE_TOKENS ≤ 摘要预算；请求数 ≤
 #   COMPACT_VISION_DIGEST_MAX_REQUESTS，两者都是代码常量），每次只让视觉模型写图中要点；要点文字交给随后的普通文字摘要请求，图块本身不再进
 #   大范围请求，因此阈值自动压缩、手动 /compact 走同一条路。任一小请求 typed 失败（COMPACT_VISION_SUMMARY_FAILED）或空回复
 #   即停止，剩余图块按归档引用；一次都没成功则整体回落 A 并保留该失败码。只读结构化媒体事实、回合身份与 provider 缓存面，

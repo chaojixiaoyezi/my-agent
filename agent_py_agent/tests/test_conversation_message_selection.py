@@ -205,7 +205,7 @@ def test_deferred_bundle_keeps_ordinary_history_limit_semantics(conversation, ta
     first = _append(store, tid, "第一条")
     last = _append(store, tid, "第二条")
     # 近期记录窗口已是常量（参数减量第 3 批 E 组），这里 patch 常量来钉 0=全部、N=最近 N 条的语义。
-    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT", limit)
+    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT", limit)
     state = BackgroundContextLoad(SimpleNamespace(), store, store.threads.require(tid), task_id, SimpleNamespace(), None, [])
     bundle = load_context_bundle(state)
     assert not state.load_errors
@@ -228,7 +228,7 @@ def test_bundle_message_deferral_does_not_suppress_later_canonical_error(convers
         handle.write(b"broken\n")
     deferred, errors = store.context_bundle_report(tid, recent_limit=0, include_messages=False)
     assert deferred["messages"] == [] and not errors
-    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT", 0)
+    monkeypatch.setattr(background_context, "CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT", 0)
     state = BackgroundContextLoad(SimpleNamespace(), store, store.threads.require(tid), "ordinary-task",
                                   SimpleNamespace(), None, [])
     load_context_bundle(state)

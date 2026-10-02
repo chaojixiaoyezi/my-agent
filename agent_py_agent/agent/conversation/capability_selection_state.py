@@ -12,6 +12,7 @@ from typing import ClassVar
 
 CAPABILITY_SELECTION_KEY = "host_capability_selection.v1"
 CAPABILITY_SELECTION_INVALID = "CAPABILITY_SELECTION_MARKER_INVALID"
+# 能力选择结果持久化上限 1 MiB：防止超大候选结果撑爆状态文件。
 SELECTION_RESULT_MAX_BYTES = 1024 * 1024
 _CLAIM_FIELDS = ("claim_id", "request_id", "run_id", "attempt_id", "candidate_digest", "model_binding_digest")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")

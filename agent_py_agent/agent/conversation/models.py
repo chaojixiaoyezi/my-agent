@@ -468,7 +468,7 @@ class ConversationThread:
     # 字段用途: 保存本会话的推理强度设置，多个窗口打开同一会话共享。
     reasoning_effort: str = ""
     # LLM: 待送达的宿主提示（conversation/host_notices.HostNotice.to_dict），由同一会话下一次前台回复按编号取走；
-    #   不进入模型上下文（MODEL_HIDDEN_THREAD_FIELDS），同一来源只留最新一条，最多 HOST_NOTICE_LIMIT 条。
+    #   不进入模型上下文（MODEL_HIDDEN_THREAD_FIELDS），同一来源只留最新一条，最多 HOST_NOTICE_LIMIT_COUNT 条。
     # 字段用途: 暂存要在下一条回复顶部告诉用户的宿主提示（如智能程度检测结论）。
     pending_host_notices: tuple[dict[str, object], ...] = ()
     created_at: float = 0.0
@@ -922,6 +922,7 @@ def normalize_guidance_target_type(value: object) -> str:
 THREAD_GOAL_STATUSES = frozenset(
     {"active", "paused", "blocked", "usage_limited", "budget_limited", "complete"}
 )
+# 会话目标正文最多 4000 字符：限制单目标描述长度。
 THREAD_GOAL_OBJECTIVE_MAX_CHARS = 4000
 
 

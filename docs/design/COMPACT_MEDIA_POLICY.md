@@ -66,7 +66,7 @@
 ## 配置与错误码
 
 - `agent_config.yaml`/`AgentConfig`：`compact_media_policy`（默认 `auto`）。每个图块的预留 token 数与看图小请求次数自参数减量第 3 批 D 组（2026-09-27）起是
-  `compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE`（1600）与 `COMPACT_VISION_DIGEST_MAX_REQUESTS`（4）两个代码常量，读取点经 `media_token_reserve()` /
+  `compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE_TOKENS`（1600）与 `COMPACT_VISION_DIGEST_MAX_REQUESTS`（4）两个代码常量，读取点经 `media_token_reserve()` /
   `vision_digest_max_requests()` 取值，测试 patch 常量即可；原配置项 `input_media_token_reserve`、`compact_vision_digest_max_requests` 已删除。
 - 错误码：保留 `COMPACT_REQUEST_NON_TEXT`（unknown 非文本或 `policy=off`）；新增 `COMPACT_VISION_SUMMARY_FAILED`（不可重试、建议保留原文），登记到错误分类表与 `gateway_client_error_message`。
 

@@ -27,7 +27,7 @@ from agent_py_agent.agent.conversation.store_wake_quarantine_archive import (
     archive_stale_wake_quarantine,
 )
 from agent_py_agent.agent.conversation.wake_poison import (
-    WAKE_POISON_SAME_CAUSE_LIMIT,
+    WAKE_POISON_SAME_CAUSE_LIMIT_COUNT,
     WAKE_STATUS_FAILED_PERMANENTLY,
     WAKE_VERDICT_FAILURE,
     WakeAttemptVerdict,
@@ -54,7 +54,7 @@ def _raise(store, *, thread="thread-a", key=""):
 
 def _quarantine(store, signal, *, at=QUARANTINED_AT, decision=None):
     if decision is None:
-        for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT):
+        for attempt in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT):
             store.wakes.attempts.begin(signal, WakeAttemptStart(f"claim-{attempt}"), now=100.0 + attempt)
             decision = store.wakes.attempts.record(signal, BUG, now=100.5 + attempt, error=RuntimeError("boom")).decision
     return store.wakes.attempts.quarantine(signal.wake_signal_id, decision, now=at)

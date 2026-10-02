@@ -1,4 +1,4 @@
-"""已知图块按 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE 折进上下文估算：预检与自动压缩判定不再低估多图上下文。"""
+"""已知图块按 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE_TOKENS 折进上下文估算：预检与自动压缩判定不再低估多图上下文。"""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -63,8 +63,8 @@ def test_preflight_estimate_reads_the_reserve_constant_through_real_entry(monkey
             live_archive_state={}, tool_context=[], tool_ir_history=[], provider_history_messages=list(history),
         )
 
-    monkeypatch.setattr(compact_media_policy, "INPUT_MEDIA_TOKEN_RESERVE", 0)
+    monkeypatch.setattr(compact_media_policy, "INPUT_MEDIA_TOKEN_RESERVE_TOKENS", 0)
     without = model_visible_context_tokens(agent, params(), "继续")
-    monkeypatch.setattr(compact_media_policy, "INPUT_MEDIA_TOKEN_RESERVE", 1600)
+    monkeypatch.setattr(compact_media_policy, "INPUT_MEDIA_TOKEN_RESERVE_TOKENS", 1600)
     with_reserve = model_visible_context_tokens(agent, params(), "继续")
     assert with_reserve - without == 3 * 1600

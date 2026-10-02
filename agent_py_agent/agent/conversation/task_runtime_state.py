@@ -27,7 +27,8 @@ from ..task_progress_guidance import (
     task_progress_closeout_guidance_enabled,
 )
 
-_PLAN_CONTINUATION_ID_LIMIT = 64
+# 计划续接 id 最多保留 64 个：限制状态体积。
+_PLAN_CONTINUATION_ID_LIMIT_COUNT = 64
 
 
 # LLM: Background turns must reconcile the same exact covers and task-path
@@ -131,7 +132,7 @@ def _plan_continuation_contract(
         if str(item.get("id") or "").strip()
         and not task_progress_status_is_closed(item.get("status"))
     ]
-    limit = _PLAN_CONTINUATION_ID_LIMIT
+    limit = _PLAN_CONTINUATION_ID_LIMIT_COUNT
     return {
         "schema_version": "plan-continuation.v1",
         "ledger_run_id": str(summary.get("run_id") or ""),

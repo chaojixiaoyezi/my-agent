@@ -212,13 +212,14 @@ def vision_summary_admission(
 
 # 参数减量第 3 批 D 组（2026-09-27）：这两个数不再是配置项（原 input_media_token_reserve / compact_vision_digest_max_requests），
 # 这里是唯一定义；预检、自动压缩判定、恢复候选计量与看图小请求打包都经下面两个访问函数读取，测试 patch 这两个常量即可。
-INPUT_MEDIA_TOKEN_RESERVE = 1600  # 每个已知图块折进上下文估算 / 摘要预算的 token 数
+INPUT_MEDIA_TOKEN_RESERVE_TOKENS = 1600  # 每个已知图块折进上下文估算 / 摘要预算的 token 数
+# 随图摘要一次压缩最多发 4 次看图小请求（最小 1），限制多图摘要的请求成本。
 COMPACT_VISION_DIGEST_MAX_REQUESTS = 4  # 随图摘要一次压缩最多发几次看图小请求，最小 1
 
 
 # 函数用途: 取每个图块的预留 token 数（读取点统一走这里，便于测试替换常量）。
 def media_token_reserve() -> int:
-    return max(0, int(INPUT_MEDIA_TOKEN_RESERVE))
+    return max(0, int(INPUT_MEDIA_TOKEN_RESERVE_TOKENS))
 
 
 # 函数用途: 取一次压缩最多发几次看图小请求，最小 1。

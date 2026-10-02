@@ -107,13 +107,13 @@ def rerank_recalled_memories(agent: object, request: object, records: list, *, r
 
 
 # LLM: 只看宿主操作编号与候选记录的结构化 kind；HOT/lesson 固定槽不参与重排，普通记忆少于
-#   decision_point_limits.RECALL_MEMORIES_MIN 条就没有可排的（界限与诊断大白话共用这一处，调用时现读）。
+#   decision_point_limits.RECALL_MEMORIES_MIN_COUNT 条就没有可排的（界限与诊断大白话共用这一处，调用时现读）。
 # 函数用途: 判断这次召回是否具备重排的输入条件，不具备时返回原因码（不建决策阶段）。
 def _recall_input_miss_reason(operation: str, records: list) -> str:
     if not operation:
         return "no_run_context"
     ordinary = sum(record.kind not in _FIXED_KINDS for record in records)
-    return "" if ordinary >= limits.RECALL_MEMORIES_MIN else "memory_count"
+    return "" if ordinary >= limits.RECALL_MEMORIES_MIN_COUNT else "memory_count"
 
 
 # LLM: 与原先的整体判断一一对应：先看输入（可选查询、空余名额、剩余字数），再看阶段错误与点位开关。
