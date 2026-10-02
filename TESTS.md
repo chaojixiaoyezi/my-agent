@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `ee3bd09f7`）
+
+- **新增用例** `test_decision_audit_controls.py::test_adoption_statuses_carry_a_fixed_note_that_they_are_not_settled`：
+  - 三份请求记录的选模型标记分别是 `send_intent_uncertain`、`commit_unknown`、`observed`，经 `audit_records` 工具读出。
+  - 状态值原样保留；前两个带 `status_note`（分别说明“不随请求结束结清、看 usage”和“不跨模型重发”），`observed` 不带。
+- **既有设计用例**：`test_gateway_model_adoption.py::test_actual_gateway_adopts_only_after_full_payload_and_persists_intent` 跑完整个业务请求后，仍断言状态是 `send_intent_uncertain`，“故意不结清”这一点由它锁定，本次不改。
+- **门禁与变异**：见交付记录。
+
 ## 工具操作持有者同主机判定改用 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`）
 
 - `test_tool_operation_host_identity.py`（新增，3 项）：

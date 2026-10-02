@@ -19,6 +19,13 @@ _SCAN_LIMIT_COUNT = 300
 _MODEL_FIELDS = ("status", "reason", "requested_mode", "choice", "adopted", "adoption_eligibility", "frozen_profile_id")
 # 能力推荐观察只投影这些字段（不含工具名清单等细节）
 _CAPABILITY_FIELDS = ("point", "mode", "status", "reason", "adopted", "retain_reason")
+# 选模型采用的两个状态设计上不随请求结束结清（采用事务只记发送意图，HTTP 事实在用量账），给读审计的人一句固定说明；
+# 只按结构化 status 取，其它状态不附说明，也不参与任何判定。
+_MODEL_STATUS_NOTES = {
+    "send_intent_uncertain": ("已采用该模型并记下发送意图；这个状态设计上不随请求结束结清，不代表供应商一定收到。"
+                              "实际发往哪个模型、成功几次以 usage（会话用量账）为准。"),
+    "commit_unknown": "采用写入线程的结果未能确认；本请求不发业务请求、也不跨模型重发，不要当成已经换了模型。",
+}
 
 
 # LLM: 只取标量字段；非标量（列表、字典）一律丢弃，防止把大块内容带进审计结果。
@@ -28,12 +35,17 @@ def _pick(block: dict, fields: tuple[str, ...]) -> dict:
 
 
 # LLM: 一份请求记录可同时有选模型观察（至多一条）和能力推荐观察（至多 8 条）；结构不符的块按不存在处理。
+#   选模型采用状态（send_intent_uncertain/commit_unknown）附固定 status_note，说明它们设计上不结清、HTTP 事实看用量账。
 # 函数用途: 把一份请求记录里的决策观察转成审计条目列表。
 def _observations(payload: dict) -> list[dict]:
     result = []
     model = payload.get(MODEL_OBSERVATION_KEY)
     if isinstance(model, dict):
-        result.append({"kind": "model_selection", "point": "model_selection", **_pick(model, _MODEL_FIELDS)})
+        entry = {"kind": "model_selection", "point": "model_selection", **_pick(model, _MODEL_FIELDS)}
+        note = _MODEL_STATUS_NOTES.get(str(entry.get("status") or ""))
+        if note:
+            entry["status_note"] = note
+        result.append(entry)
     capability = payload.get(CAPABILITY_OBSERVATION_KEY)
     entries = capability.get("entries") if isinstance(capability, dict) else None
     for entry in entries if isinstance(entries, list) else ():

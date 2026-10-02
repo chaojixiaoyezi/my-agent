@@ -2194,6 +2194,7 @@ blocked，由 Gateway 停止该 request，避免重复副作用。
 本请求的一次 Jev 建议；`gateway_model_adoption.py` 用原模型请求回调检查同一冻结材料、provider payload、工具与历史，
 在实际发送前按模型目录 generation guard → Gateway active-turn T → 原 thread CAS 的顺序提交。
 同一事务保存 `source=automatic`、递增选择版本和 `send_intent_uncertain`；该状态只证明发送意图，HTTP 事实仍读原观察账。
+这个状态**故意不在请求终态时结清**（2026-10-02 复核）：请求标记只是采用事务的投影，“实际发往哪个模型、供应商是否收到”只在原调用观察账（model_usage）里有权威事实，标记不另存第二份。审计投影给它和 `commit_unknown` 附一句固定 `status_note`。
 发送前明确拒绝可沿原模型执行一次；提交后或写盘结果未知不跨模型重发。容量记录为有余量的工程估计，
 未知模态/协议保持原模型。fake HTTP 联合302项通过，真实供应商主会话仍待验；细节见
 `docs/tasks/DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md`。

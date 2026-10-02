@@ -1,5 +1,23 @@
 # 设计台账
 
+## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `claude/3a-step16z` `ee3bd09f7`，已实现，待集成）
+
+- **问题**：J11 真实复核时发现，主会话自动采用后，请求记录里的选模型标记停在 `send_intent_uncertain`，请求 done 后也不变，看记录的人容易误读成“发送状态没确认”。
+- **复核结论：这是故意不结清**，所以不改状态机。依据：
+  - 采用事务（`gateway_model_adoption`）在发送前的线程 CAS 里只记“发送意图”。
+  - `record_adoption` 的合同是“发送意图不能写成 HTTP 已接收、终态后重试不覆盖既存事实”。
+  - 设计交接（`DECISION_MODEL_MAIN_MODEL_ADOPTION_HANDOFF.md` 第 5 条）与 gateway 结构文档都写明：HTTP 事实只读原调用观察账，请求标记只是结果投影。
+  - 现有用例 `test_actual_gateway_adopts_only_after_full_payload_and_persists_intent` 跑完整个业务请求后，仍断言这个状态。
+  - 如果在请求终态把它改成 `adopted_sent` 一类的值，等于把 HTTP 事实再存一份，违反“一个概念一个权威位置”。
+- **含义**：
+  - `send_intent_uncertain`：已采用该模型，线程选择已提交，只证明发送意图。实际发往哪个模型、成功几次，以会话用量账（`model_usage`）为准。
+  - `commit_unknown`：线程写入没能确认；本请求不发业务请求，也不跨模型重发。
+- **做法**：
+  - `gateway_parts/request_audit_records` 投影选模型观察时，对这两个状态附一句固定的 `status_note`，按结构化 status 取，其它状态不附。
+  - `audit_records` 工具说明补一句。
+  - TUI 和 IM 没有直接展示这个标记的界面，用户都是经审计工具的回答看到它，所以说明加在审计投影上。
+- **验证**：见 TESTS.md 同名节。
+
 ## 工具操作持有者的同主机判定统一到 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`，已实现，待集成）
 
 - **背景**：网关 host_id 修复后，`tool_operations` 和 `managed_operation_store` 里还有三处直接拿 `socket.gethostname()` 判同主机：

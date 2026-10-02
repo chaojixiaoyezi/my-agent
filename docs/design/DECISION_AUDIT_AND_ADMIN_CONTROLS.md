@@ -129,6 +129,7 @@
      按 `conversation_claim.thread_id` 归属 owner，字段白名单投影（不含 prompt、工具名清单等），
      队列位置只取宿主写入器的请求路径（`GatewayTaskBindingWriter.decision_audit_observations`），
      一次最多读 300 份窗口内记录，超出如实标 `truncated`；不在 Gateway 回合里时报告 `no_gateway_request_context`。
+     选模型采用的两个状态附固定 `status_note`（2026-10-02）：`send_intent_uncertain` 是“已采用、只记发送意图”，设计上不随请求结束结清，实际发往哪个模型看 usage；`commit_unknown` 是线程写入未确认、本请求不发业务请求也不跨模型重发。
 - 参数：`topic`（必填）、`scope`、`since_hours`（默认 24，≤720）、`limit`（观察条数，默认 20，≤100）。
 - 实现：`tooling/audit_records_tool.py`、`conversation/decision_audit.py`、`gateway_parts/request_audit_records.py`。
 - 各主题收集器在返回值里自带 `sources`，工具不再写死来源。

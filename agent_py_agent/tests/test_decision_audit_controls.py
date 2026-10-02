@@ -252,6 +252,29 @@ def test_audit_reads_own_usage_and_observations_within_the_window_only(tmp_path,
 
 
 
+
+def test_adoption_statuses_carry_a_fixed_note_that_they_are_not_settled(tmp_path, monkeypatch):
+    # 采用状态设计上不随请求结束结清：审计按结构化 status 附固定说明，其它状态不附；原状态值原样保留。
+    alice = _agent(tmp_path, monkeypatch, ALICE_OWNER)
+    mine = alice.conversation_store.threads.get_or_create({"canonical_user_id": "ou-alice", "owner_id": ALICE})
+    queue = tmp_path / "gateway"
+    statuses = {"req-sent": "send_intent_uncertain", "req-unknown": "commit_unknown", "req-observed": "observed"}
+    for request_id, status in statuses.items():
+        path = _request_record(queue, request_id, mine.thread_id)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["model_selection_observation"].update(status=status, adopted=status != "observed")
+        path.write_text(json.dumps(record), encoding="utf-8")
+    _in_gateway_turn(alice, queue, mine.thread_id)
+
+    outcome, report = _call(alice, "audit_records", {"topic": "decision"})
+    assert outcome.ok, outcome.output
+    notes = {entry["request_id"]: (entry["status"], entry.get("status_note", ""))
+             for entry in report["observations"]["entries"] if entry["kind"] == "model_selection"}
+    assert {request_id: status for request_id, (status, _note) in notes.items()} == statuses
+    assert "不随请求结束结清" in notes["req-sent"][1] and "usage" in notes["req-sent"][1]
+    assert "不跨模型重发" in notes["req-unknown"][1]
+    assert notes["req-observed"][1] == ""
+
 def test_audit_and_menu_read_explain_why_points_did_not_trigger(tmp_path, monkeypatch):
     monkeypatch.setattr(reach_counts, "_PENDING", {})
     monkeypatch.setattr(reach_counts, "_LAST_FLUSH", {})
