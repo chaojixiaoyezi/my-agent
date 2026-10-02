@@ -1,5 +1,22 @@
 # 设计台账
 
+## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`，已实现，待集成）
+
+- **来源**：C12d 的留意项。运行中的子代理被接替后由 runner 自停，运行账 `agent_run.completed` 事件记的是
+  `runtime_reason=InterruptedError`、`runtime_source` 为空；静止来源走 `settle_taken_over_run` 记的是 `subagent_takeover`／`taken_over`。
+  同一件事两种写法，审计时要分别认。
+- **做法**：
+  - `agent_core/runtime_mixin._settle_main_agent_run_exception` 改为经新函数 `_exception_closeout_reason` 取原因和来源；
+  - 只有“中断异常，且 `subagents.taken_over_successor(run_id)` 返回接替者”时写 `taken_over`／`subagent_takeover`
+    （来源常量复用 `runtime_db/run_takeover.TAKEOVER_RUNTIME_SOURCE`）；
+  - 主代理、子代理记录读不到、普通中断、其它异常都照旧记异常类名、来源为空；
+  - 只改这两个结构化字段：运行状态仍是 cancelled，状态机和 runner 的停止判据都不变；读失败回落类名，不会盖住原异常。
+- **判据选择**：用 `taken_over_successor`，不直接比 `status == TAKEN_OVER`。它是“这个 run 是否被接替”的唯一判据，
+  `record_takeover` 的运行账收口和网关 `/recover` 都用它。拆分产生的 TAKEN_OVER（`split_into`，没有 `takeover_by`）不算接替，
+  静止来源那边也不按接替补账，两边一致。
+- **验证**：`test_subagent_takeover_runtime_closeout.py` 加 1 项（被接替后自停 → 接替口径；普通中断 → 仍记 `InterruptedError`）；
+  3 个变异全部被杀。见 TESTS.md 同名节。
+
 ## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`，已实现，待集成）
 
 - **背景**：P10 白名单按模块分批清理。本批接第一、二批之后，范围是 `agent_py_agent/cli/` 目录（41 个文件）的 100 个待整改常数，
@@ -29,8 +46,8 @@
   - 这个判据把 canonical `TAKEN_OVER` 当作“本轮已停”，于是 runner 中断自己，并结束子进程。
   - 所以运行中的来源本来就会停，不需要接替落账再开一个停止入口；另开一个只会和 runner 的自停抢着收尾，违反“不加兜底旁路”。
 - **做法**：不改产品代码。在 `test_subagent_takeover_runtime_closeout.py` 加一项，锁住这条判据：接替后 `runner_attempt_cancelled` 必须为真。
-- **留意**：这种情况下运行账结束事件里的原因是 `InterruptedError`，`runtime_source` 为空。静止来源走 `settle_taken_over_run` 时，记的是
-  `subagent_takeover`／`taken_over`。两种写法并存，只影响审计时怎么读，不影响状态。
+- **留意**（2026-10-02 已改，见上方“接替自停的结束原因口径”）：这种情况下运行账结束事件里的原因原来是 `InterruptedError`，
+  `runtime_source` 为空；静止来源走 `settle_taken_over_run` 时记的是 `subagent_takeover`／`taken_over`。现在两边同一口径。
 - **证据**：`~/.my-agent/decision-evidence/c12-observations-20261001/c12d/`（仓库外）。
 
 ## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已实现，待集成）

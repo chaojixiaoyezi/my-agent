@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`）
+
+- **新增用例**：`test_subagent_takeover_runtime_closeout.py::test_runner_self_stop_after_takeover_records_the_takeover_reason`。
+  - 运行中的来源被 `record_takeover` 接替后，按 runner 自停的异常路径收口：运行账 `agent_run.completed` 记
+    `runtime_status=cancelled`、`runtime_source=subagent_takeover`、`runtime_reason=taken_over`，`agent_run`／`attempt` 都是 cancelled；
+  - 没被接替的子代理普通中断：仍记 `runtime_reason=InterruptedError`、来源为空。
+- **变异**（3 个，抓到 3 个）：始终记异常类名；来源写空；把“记录读得到但没被接替”（空串）也当成接替。
+
 ## C12d：被接替时仍在运行的来源会自己停（2026-10-01，分支 `claude/38-c12d-takeover-stop`，基于 `claude/3a-step16z` `2ab1c20e3`）
 
 - **真实链路核对**（隔离 home，私有端口 8483/8484，脚本化假模型；证据 `~/.my-agent/decision-evidence/c12-observations-20261001/c12d/`）：

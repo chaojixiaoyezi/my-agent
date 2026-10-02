@@ -149,3 +149,28 @@ def test_running_source_taken_over_is_stopped_by_its_own_runner_check(tmp_path):
     manager.record_takeover(source_id, take_over_by="run-successor", reason="接管")
 
     assert runner_attempt_cancelled(manager, source_id, attempt_id) is True
+
+
+def test_runner_self_stop_after_takeover_records_the_takeover_reason(tmp_path):
+    """接替口径（2026-10-02）：运行中的来源被接替后由 runner 自停，异常收口写的运行账结束事件要与静止来源同一口径
+    （subagent_takeover / taken_over）。改前真实链路（C12d 探针）记成 runtime_reason=InterruptedError、runtime_source 为空；
+    运行状态仍是 cancelled，状态机不变。普通中断（未被接替）照旧记异常类名。"""
+    from agent_py_agent.agent.agent_core.runtime_mixin import _settle_main_agent_run_exception
+
+    manager, source_id, agent_run_id, attempt_id = _managed(tmp_path / "taken")
+    manager.record_takeover(source_id, take_over_by="run-successor", reason="接管")
+    agent = SimpleNamespace(subagents=manager, conversation_store=None)
+    params = SimpleNamespace(run_id=source_id, attempt_id=attempt_id, task_id="")
+    _settle_main_agent_run_exception(agent, params, InterruptedError("runner 原执行轮已停止"))
+
+    assert _run(manager, agent_run_id) == ("cancelled", "cancelled")
+    [event] = _completed_events(manager, agent_run_id)
+    assert (event["runtime_status"], event["runtime_source"], event["runtime_reason"]) == (
+        "cancelled", "subagent_takeover", "taken_over")
+
+    plain, plain_id, plain_run_id, plain_attempt = _managed(tmp_path / "plain")
+    plain_agent = SimpleNamespace(subagents=plain, conversation_store=None)
+    plain_params = SimpleNamespace(run_id=plain_id, attempt_id=plain_attempt, task_id="")
+    _settle_main_agent_run_exception(plain_agent, plain_params, InterruptedError())
+    [plain_event] = _completed_events(plain, plain_run_id)
+    assert (plain_event["runtime_source"], plain_event["runtime_reason"]) == ("", "InterruptedError")

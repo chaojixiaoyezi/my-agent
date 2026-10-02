@@ -24,6 +24,7 @@ from ..concurrency.interrupt import is_interrupted
 from ..conversation.authority import conversation_transcript_is_authoritative
 from ..conversation.task_run_closeout import settle_terminal_task_run
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
+from ..runtime_db.run_takeover import TAKEOVER_RUNTIME_SOURCE
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
 from .cli_run_conversation import (
@@ -557,17 +558,38 @@ def _settle_terminal_conversation_task_run(agent: object, params: object) -> Non
     )
 
 
+# LLM: 执行异常的运行账收口，只决定 cancelled/failed 与结构化原因；原因来源见 _exception_closeout_reason。
+#   调用方在 except 里随后重新抛出原异常，所以这里必须 fail-silent，不能盖住原异常。改动同步 test_run_audit_terminal.py。
+# 函数用途: 执行中途抛错或被中断时，把本轮写成 cancelled（中断）或 failed（其它异常），并顺带核对整棵任务能否关账。
 def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseException) -> None:
     """异常路径收口：InterruptedError → 'cancelled'，其余 → 'failed'。"""
     status = "cancelled" if isinstance(exc, InterruptedError) else "failed"
+    reason, source = _exception_closeout_reason(agent, params, exc)
     _settle_main_agent_run_status(
         agent,
         run_id=str(params.run_id or "").strip(),
         attempt_id=str(params.attempt_id or "").strip(),
         runtime_status=status,
-        runtime_reason=type(exc).__name__,
+        runtime_reason=reason,
+        runtime_source=source,
     )
     _settle_terminal_conversation_task_run(agent, params)
+
+
+# LLM: 子代理被 canonical 接替（TAKEN_OVER）后由 runner 心跳自停，中断收口要与静止来源的接替补账
+#   （runtime_db/run_takeover）同一口径 taken_over / subagent_takeover；是否被接替只认 subagents.taken_over_successor
+#   这一个判据（与 record_takeover 收口、网关 /recover 共用）。主代理、记录读不到、非中断异常都保留异常类名。
+#   只读，不改 runtime_status、不改状态机；读失败回落类名，不能盖住原异常。改动同步 test_subagent_takeover_runtime_closeout.py。
+# 函数用途: 给异常收口挑运行账结束事件的原因和来源，被接替而自停的子代理不再记成 InterruptedError、来源为空。
+def _exception_closeout_reason(agent, params: RunParams, exc: BaseException) -> tuple[str, str]:
+    successor_of = getattr(getattr(agent, "subagents", None), "taken_over_successor", None)
+    if not isinstance(exc, InterruptedError) or not callable(successor_of):
+        return type(exc).__name__, ""
+    try:
+        taken_over = bool(successor_of(str(params.run_id or "").strip()))
+    except Exception:  # noqa: BLE001 审计标签读失败只回落异常类名，绝不盖住原异常
+        taken_over = False
+    return ("taken_over", TAKEOVER_RUNTIME_SOURCE) if taken_over else (type(exc).__name__, "")
 
 
 # LLM: 先绑定 canonical run/新 attempt 再写归档，request 仍是消息身份；返回参数贯穿 Compact 与收尾。
