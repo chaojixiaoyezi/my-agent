@@ -1,8 +1,9 @@
 # LLM: 只注册给本机管理员主代理（owner_type=main_agent）且 enable_gateway_restart_tool 开启；子代理运行里不可用。
 # 工具只写一份重启请求就返回，真正的排空与换进程由 Gateway 服务主循环执行（gateway_parts/restart_service）。
 # 发起方身份只取结构化事实：owner 三元组、会话 thread_id、会话存储根；不接受模型传入的进程号或路径。
-# effect=dangerous：默认确认（ask）模式走统一危险动作审批；自主工作（auto）与完全放行（full access）不弹确认（以
-#   tooling.action_policy._approval_decision 为准）。安排后由 restart_service 两段排空：先等在跑的回合，最多 turn_wait 秒，
+# effect=dangerous，审批策略 always（3a 2026-10-02 定）：任何审批模式都弹确认，含自主工作（auto）和完全放行（full access）；
+#   IM 走现有审批卡（以 tooling.action_policy._approval_decision 为准）。理由：重启影响所有会话，本来就该用户点头；也堵上
+#   S1 的“改默认模型 → 重启刷新启动快照 → set_embedding”。安排后由 restart_service 两段排空：先等在跑的回合，最多 turn_wait 秒，
 #   到时没跑完的停在下一个副作用工具前、由新进程续跑；再等执行中的副作用工具跑完，最多 drain_timeout 秒，超时就取消这次
 #   重启、不强杀。改动须同步 test_gateway_restart_tool.py。
 # 模块用途: 让管理员的 my-agent 在排查中发现需要重启时，自己安排一次不会切断回合的 Gateway 安全重启。
@@ -16,6 +17,7 @@ from ..gateway_parts.paths import gateway_paths
 from ..gateway_parts.restart_service import hosting_gateway_pid, submit_restart_request
 from ..runtime_context import current_subagent_run_id
 from .models import (
+    ApprovalPolicy,
     BaseTool,
     EffectResolverPolicy,
     IdempotencyPolicy,
@@ -77,6 +79,7 @@ class RestartGatewayTool(BaseTool):
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("dangerous"),
+        approval_policy=ApprovalPolicy("always"),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("gateway:current",)),
         promotes_task=False,

@@ -112,6 +112,7 @@
     - 断网 + 只读覆盖 + 上级目录拒写同时生效：写配置失败；改名数据根再写失败且目录原样；普通写成功；连本机监听端口失败。
     - 只有人格文件受保护时，改名人格根再改 `SOUL.md` 也失败。
   - 隔离 Shell 失败时的边界事实：声明自家根为写根时，`read_only` 列出自家 `config/`、`runtime.db` 等；不列别人的；写根只是工作区时与原来完全一样。
+- **`test_gateway_restart_tool.py` 新增 1 项**：`restart_gateway` 在确认（ask）和自主或完全放行（auto）两种审批模式下，`ActionPolicy` 都给出 `ask`（3a 定的审批策略 always）。
 
 ## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`）
 

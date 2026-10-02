@@ -217,7 +217,7 @@ my-agent 自己配的规则（用户 2026-10-02 拍板）：
 
 小例子：默认对话模型是 MiniMax M2.7（`https://api.minimaxi.com/anthropic`），向量模型 embo-01 在 `https://api.minimaxi.com/v1`，主机相同，my-agent 直接设好；如果向量模型是另一家服务商的，它会说明主机不同、没有修改。
 
-设好以后要重启 Gateway 才生效。管理员的 my-agent 有安全重启工具（`restart_gateway`，默认开）时，可能顺手安排一次安全重启（先排空再换进程，TUI 和 IM 自动重连）；要不要先问你，看审批模式（自主工作 auto 和完全放行不会问）。没有这个工具时，它会提醒你用 `/restart` 或在终端运行 `my-agent gateway restart`。
+设好以后要重启 Gateway 才生效。管理员的 my-agent 有安全重启工具（`restart_gateway`，默认开）时，可能顺手安排一次安全重启（先排空再换进程，TUI 和 IM 自动重连）；它总会先问你（任何审批模式都弹确认，IM 里是审批卡），你点允许才安排。没有这个工具时，它会提醒你用 `/restart` 或在终端运行 `my-agent gateway restart`。
 
 注意：工具的语义检索（`tool_vector_search_enabled`，默认开）和记忆共用同一个向量模型。选了向量模型以后，工具检索也会用它发嵌入请求。选向量模型的入口不会改这个开关；只想开记忆、不想让工具检索也发嵌入请求，就先发 `/settings set tool_vector_search_enabled false`，和选向量模型共用一次重启。
 

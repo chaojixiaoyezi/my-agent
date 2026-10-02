@@ -63,3 +63,19 @@ def test_registered_only_for_admin_main_agent_when_enabled(tmp_path):
     assert "restart_gateway" in enabled.tools.tools
     disabled = _agent(tmp_path / "off", enable_gateway_restart_tool=False)
     assert "restart_gateway" not in disabled.tools.tools
+
+
+def test_restart_always_asks_even_in_autonomous_or_full_access_mode(tmp_path):
+    """3a 2026-10-02：重启影响所有会话，任何审批模式都弹确认（完全放行在审批层也是 auto）；也堵上 S1 的重启刷新快照路径。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+    from agent_py_agent.tests._tool_runtime_harness import canonical_test_call, runtime_snapshot_for_tools
+
+    tool = SimpleNamespace(model_spec=RestartGatewayTool.model_spec, runtime_policy=RestartGatewayTool.runtime_policy)
+    snapshot = runtime_snapshot_for_tools({"restart_gateway": tool})
+    call = canonical_test_call(snapshot, "restart_gateway", {"reason": "用户要求重启"})
+
+    for mode in ("ask", "auto"):
+        decision = ActionPolicy().decide(ActionPolicyRequest(call, snapshot, tmp_path, approval_mode=mode))
+        assert decision.status == "ask", mode
