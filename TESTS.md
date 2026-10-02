@@ -20,9 +20,29 @@
 | 后台完成主动送达 | 通过 | **前台**：自然需求"后台派子代理统计目录"，适配器两次引用回复（43 字、173 字）。<br>**后台**：子代理 DONE；+60 秒 Gateway 自己取 token，向 `receive_id=open_id` 主动发 post（234 字、带 uuid）。<br>**日志**：Gateway 记 `reason=subagent_runner_finished delivery=sent commit=external_delivery route=external wake_handled=True`；子代理的能力申请唤醒 `delivery=suppressed`（内部协议，不打扰用户） |
 | Goal 熔断提示 | 通过 | **熔断**：自然需求"设成持续目标，等我发笔记再整理"；3 个续跑片后 Goal `paused`，`GOAL_CONTINUATION_NO_PROGRESS`，提示进入线程 `pending_host_notices`。<br>**送达**：用户再问"目标现在什么状态"，这次引用回复里带上了熔断提示行；`pending_host_notices` 清空，Goal 保持 paused，空片计数被这条前台消息清零（D4 口径） |
 
-- **观察（交 3a 判断，见设计台账同日条目）**：
+- **观察（2026-10-01，已实施修复，ds1，分支 `worker/ds1-goal-fuse-ux`）**：
   - **空转片也在推送**：3 个空转续跑片每片都把一句很短的"在等你"主动推给了飞书用户（`reason=thread_goal_continue delivery=sent`，19/11/18 字），10 秒内连收 3 条；
   - **熔断提示要等用户开口**：熔断提示本身不主动推送，要等用户下一次说话才随回复送达。
+- **实现与验证（ds1，2026-10-01）**：
+  - **空转片不外发**：`runtime._background_goal_idle_slice` 复用 `goal_progress_fuse.slice_has_progress` 判空片；
+    空片回复经 `background_delivery.record_background_response(local_transcript_only=True)` 只落权威转录
+    （TUI 可见、不冻结重投、wake 按 local_only 确认）；有进展的片照常外发；内部/TUI 线程行为不变。
+  - **熔断主动提示**：`goal_progress_fuse.push_goal_no_progress_notice` 先排队，再对可主动外呼通道投递一次
+    （幂等键 `goal-no-progress:{goal_id}`），成功即 `take_host_notices` 取走并落一条会话消息，同一提示只推一次、
+    下一条回复不再重复带出；投递失败留队列。`runtime._background_goal_dependencies` 的 `queue_no_progress_notice`
+    改绑该函数。不加新配置。
+  - **新测试** `agent_py_agent/tests/test_goal_idle_delivery.py`（4 项，假适配器 + 假后端 + 真 runtime 链路）：
+    ①feishu 3 空片全部不外发、熔断后恰好外发 1 条提示、提示从 pending_host_notices 取走；②有进展片照常外发、
+    之后空片不外发（enable_tools 真实工具片 + 3 空片，共 1 正文 + 1 提示）；③纯 TUI（internal）线程行为不变
+    （3 条"在等你"进转录、pending_host_notices 保留、Goal paused）；④无外发通道只排队不推送、有 feishu 时
+    推送并取走。
+  - **命令与结果**：
+    `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_goal_idle_delivery.py agent_py_agent/tests/test_goal_progress_fuse.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **12 passed**
+    回归 `agent_py_agent/tests/test_background_main_agent_runtime.py` → **204 passed**
+  - **变异验证（临时改实现→测试变红→还原）**：①`_background_goal_idle_slice` 恒 False（禁空片判定）→
+    测试 1/2 红（feishu 收到 4/5 条，`assert 4 == 1`、`assert 5 == 2`）；②推送后不 `take_host_notices` →
+    测试 1/2/4 红（`pending_host_notices` 非空）；③`supports_proactive` 恒 False（禁主动推送）→ 测试 1/2/4 红
+    （feishu 收不到提示）。3 个变异全部被抓住（MUT1/2/3_EXIT=1），已还原。
 - **测试者偏差（如实记录）**：
   - **经过**：第一次绑定时脚本漏了 `/admin ` 前缀，假用户实际只发出了密码本身。产品把它当普通私聊消息：未绑定的 feishu/user owner 没有模型，请求以 `MODEL_NOT_CONFIGURED` 结束，没有调用模型；这条消息像普通消息一样落了 9 个隔离文件。
   - **处置**：用的是一次性假密码，测试根已整体删除，修正脚本后重发。

@@ -223,7 +223,7 @@ def reset_goal_progress_fuse(store: object, thread_id: str, *, clear_reason: boo
 # LLM: 通知正文由宿主固定生成，结构原因码随 notice 保存；复用 TUI/IM 同一最终消息投递口并按来源/代码替换去重。
 # 函数用途: 把熔断结果排入会话的待送达宿主提示，不另建消息或推送通道。
 def queue_goal_no_progress_notice(store: object, goal: object) -> bool:
-    from .host_notices import host_notice, queue_host_notice
+    from .host_notices import queue_host_notice
 
     thread_id = str(getattr(goal, "thread_id", "") or "")
     goal_id = str(getattr(goal, "goal_id", "") or "")
@@ -232,27 +232,115 @@ def queue_goal_no_progress_notice(store: object, goal: object) -> bool:
         return False
     with goals.transition_guard(thread_id):
         current = goals.load(thread_id, goal_id=goal_id)
-        current_metadata = getattr(current, "metadata", {})
-        current_state = (
-            current_metadata.get(FUSE_METADATA_KEY)
-            if isinstance(current_metadata, Mapping)
-            else {}
-        )
-        if (
-            current is None
-            or current.status != "paused"
-            or not isinstance(current_state, Mapping)
-            or current_state.get("reason_code") != NO_PROGRESS_REASON_CODE
-        ):
+        notice = _no_progress_notice(current)
+        if notice is None:
             return False
-        current_count = int(current_state.get("idle_slices", 0) or 0)
-        notice = host_notice(
-            NO_PROGRESS_NOTICE_SOURCE,
-            NO_PROGRESS_REASON_CODE,
-            f"持续目标连续 {current_count} 片没有工具调用或目标/任务状态变化，自动续跑已暂停。请检查进度后用 /goal resume 恢复。",
-            details={"goal_id": goal_id, "reason_code": NO_PROGRESS_REASON_CODE},
-        )
         return queue_host_notice(store, thread_id, notice, replace_same_code=True)
+
+
+# LLM: 只有处于熔断暂停状态的 Goal 才生成提示；notice_id 是去重与取走的唯一标识，
+#   source/code 供同来源替换。文案由宿主固定生成，不读模型正文。
+# 函数用途: 按当前 Goal 的 fuse 状态构造熔断提示，未暂停或原因码不符时返回 None。
+def _no_progress_notice(goal: object) -> object | None:
+    from .host_notices import host_notice
+
+    thread_id = str(getattr(goal, "thread_id", "") or "")
+    goal_id = str(getattr(goal, "goal_id", "") or "")
+    metadata = getattr(goal, "metadata", {})
+    current_state = metadata.get(FUSE_METADATA_KEY) if isinstance(metadata, Mapping) else {}
+    if (
+        goal is None
+        or not thread_id
+        or not goal_id
+        or getattr(goal, "status", "") != "paused"
+        or not isinstance(current_state, Mapping)
+        or current_state.get("reason_code") != NO_PROGRESS_REASON_CODE
+    ):
+        return None
+    current_count = int(current_state.get("idle_slices", 0) or 0)
+    return host_notice(
+        NO_PROGRESS_NOTICE_SOURCE,
+        NO_PROGRESS_REASON_CODE,
+        f"持续目标连续 {current_count} 片没有工具调用或目标/任务状态变化，自动续跑已暂停。请检查进度后用 /goal resume 恢复。",
+        details={"goal_id": goal_id, "reason_code": NO_PROGRESS_REASON_CODE},
+    )
+
+
+# LLM: 熔断提示的“主动推送”唯一入口：先按原规则排队，再对可主动外呼的通道立即投递一次并把
+#   同一条 notice 取走（已读，下一条回复不再重复带出）；纯 TUI/无外发通道线程只排队、行为不变。
+#   投递失败不取走，提示留在待送达队列由下一次前台回复补出。副作用：改写 pending_host_notices、
+#   可能调用外部投递服务并在成功时追加一条会话消息。
+# 函数用途: 熔断时对外发通道线程主动推一次提示，并保证同一提示不会重复送达。
+def push_goal_no_progress_notice(
+    store: object,
+    goal: object,
+    *,
+    channels: object,
+    route_deps: object,
+) -> bool:
+    from .background_routing import resolve_background_route
+    from .channels import DeliveryContext, ReplyEnvelope
+    from .host_notices import queue_host_notice, take_host_notices
+
+    notice = _no_progress_notice(goal)
+    if notice is None:
+        return False
+    thread_id = str(getattr(goal, "thread_id", "") or "")
+    goal_id = str(getattr(goal, "goal_id", "") or "")
+    if not thread_id or not goal_id:
+        return False
+    if not queue_host_notice(store, thread_id, notice, replace_same_code=True):
+        return False
+    channel, target = resolve_background_route(route_deps, thread_id)
+    try:
+        supports_proactive = bool(target and channels.supports_proactive(channel))
+    except Exception:  # noqa: BLE001 - 主动推送失败只保留待送达提示，不影响熔断主链。
+        supports_proactive = False
+    if not supports_proactive:
+        return True
+    receipt = channels.deliver(
+        DeliveryContext(
+            channel=channel,
+            target=target,
+            mode="proactive",
+            thread_id=thread_id,
+            task_id=str(getattr(goal, "task_id", "") or ""),
+            idempotency_key=f"goal-no-progress:{goal_id}",
+        ),
+        ReplyEnvelope(content=notice.text),
+    )
+    if str(getattr(receipt, "delivery_status", "") or "").strip().lower() == "sent":
+        taken = take_host_notices(store, thread_id, [notice.notice_id])
+        if taken:
+            _record_no_progress_pushed_message(store, goal, notice, channel)
+    return True
+
+
+# LLM: 与额度通知同一模式：主动推送的提示也留一条会话记录，让同一线程的 TUI 用户能回看已送达内容。
+# 函数用途: 把已主动推送的熔断提示追加为一条后台 assistant 消息。
+def _record_no_progress_pushed_message(store: object, goal: object, notice: object, channel: str) -> None:
+    thread_id = str(getattr(goal, "thread_id", "") or "")
+    if not thread_id or store is None or getattr(store, "messages", None) is None:
+        return
+    try:
+        store.messages.append(
+            {
+                "thread_id": thread_id,
+                "role": "assistant",
+                "content": str(getattr(notice, "text", "") or ""),
+                "channel": str(channel or "internal"),
+                "metadata": {
+                    "reason": "thread_goal_no_progress_push",
+                    "notice_id": str(getattr(notice, "notice_id", "") or ""),
+                    "source": NO_PROGRESS_NOTICE_SOURCE,
+                    "code": NO_PROGRESS_REASON_CODE,
+                    "goal_id": str(getattr(goal, "goal_id", "") or ""),
+                    "task_id": str(getattr(goal, "task_id", "") or ""),
+                },
+            }
+        )
+    except Exception:  # noqa: BLE001 - 落记录失败不反噬已成功的主动推送。
+        _LOGGER.warning("no-progress notice message record failed(thread=%s)", thread_id, exc_info=True)
 
 
 __all__ = [
@@ -262,6 +350,7 @@ __all__ = [
     "WAKE_SNAPSHOT_KEY",
     "goal_progress_snapshot",
     "next_idle_slice_count",
+    "push_goal_no_progress_notice",
     "queue_goal_no_progress_notice",
     "record_goal_continuation_fuse",
     "reset_goal_continuation_fuse",

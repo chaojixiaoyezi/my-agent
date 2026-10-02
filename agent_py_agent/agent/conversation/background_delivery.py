@@ -66,6 +66,7 @@ def record_background_response(
     delivery_reason: str,
     route_supports_transcript: bool | None = None,
     frozen_retry: FrozenOwnerDelivery | None = None,
+    local_transcript_only: bool = False,
 ) -> BackgroundDeliveryCommit:
     # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
     # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
@@ -77,19 +78,12 @@ def record_background_response(
         deliver=deliver,
         projection_content=projection.content,
         has_attachments=bool(_channel_attachments(delivery_artifacts)),
+        local_transcript_only=local_transcript_only,
     ):
         return _uncommitted_delivery(projection.content if deliver else "", "suppressed")
     # 信封只携带用户投影，避免投递层把内部控制正文当作普通回复。
     attachments = _channel_attachments(delivery_artifacts)
-    evidence_refs = (
-        frozen_retry.evidence_refs
-        if frozen_retry is not None and frozen_retry.evidence_refs
-        else (
-            background_delivery_evidence_refs(request)
-            if audit_finding_report_event(request)
-            else background_evidence_refs(request)
-        )
-    )
+    evidence_refs = _background_evidence_refs_for(delivery, request, frozen_retry)
     # 重投路径由 redeliver_cached_wake 把冻结载荷的 delivery_artifacts 当作 delivery_artifacts
     # 传进来，因此附件与过程回复必须继续从参数推导；重投只额外接管 metadata 与"是否已外发"。
     envelope = ReplyEnvelope(
@@ -115,11 +109,13 @@ def record_background_response(
         delivery_context,
         route_supports_transcript=route_supports_transcript,
     )
+    route = _local_only_route(route, local_transcript_only)
     receipt, delivery_status = _background_external_delivery(
         delivery,
         delivery_context,
         envelope,
         frozen_retry=frozen_retry,
+        local_transcript_only=local_transcript_only,
     )
     # 投递服务执行最终脱敏，历史保存其回执正文；缺少正文的既有替身保留已净化投影。
     committed_content = str(getattr(receipt, "content", projection.content) or "")
@@ -206,7 +202,7 @@ def _freeze_pending_owner_delivery(
     if not (str(freeze.content or "").strip() or freeze.delivery_artifacts):
         return False
     status = str(freeze.delivery_status or "").strip().lower()
-    if status == "suppressed":
+    if status in {"suppressed", "local_only"}:
         return False
     obligation = _background_delivery_obligation(
         target=freeze.target,
@@ -313,6 +309,7 @@ def _background_external_delivery(
     envelope: ReplyEnvelope,
     *,
     frozen_retry: FrozenOwnerDelivery | None,
+    local_transcript_only: bool = False,
 ) -> tuple[object, str]:
     if frozen_retry is not None and frozen_retry.external_sent:
         return (
@@ -326,6 +323,20 @@ def _background_external_delivery(
                 replayed=True,
             ),
             "sent",
+        )
+    if local_transcript_only:
+        # 空片正文不主动推给用户，只作为本地转录保存；delivery_status 用 local_only
+        # 表示"这条不欠外发"，唤醒确认与冻结判定都按本地转录处理。
+        return (
+            SimpleNamespace(
+                delivery_status="local_only",
+                channel=delivery_context.channel,
+                target=delivery_context.target,
+                content=envelope.content,
+                evidence_refs=envelope.evidence_refs,
+                receipt_id="",
+            ),
+            "local_only",
         )
     receipt = delivery.channels.deliver(delivery_context, envelope)
     return receipt, str(getattr(receipt, "delivery_status", "") or "sent")
@@ -342,8 +353,9 @@ def _background_reply_suppressed(
     deliver: bool,
     projection_content: str,
     has_attachments: bool,
+    local_transcript_only: bool = False,
 ) -> bool:
-    if not deliver:
+    if not deliver and not local_transcript_only:
         return True
     terminal_status = delivery.task_status(request)
     goal_terminal_delivery = delivery_reason in {
@@ -843,6 +855,38 @@ class _OwnerDeliveryRoute:
     canonical_record: bool
 
 
+# LLM: 证据引用归属随工作片类型与重投状态而定：重投用冻结载荷里的原引用，
+#   审计报告片用审计引用，普通后台片用通用引用。调用点统一走这里，避免各算一套。
+# 函数用途: 解析一条后台投递应携带的证据引用。
+def _background_evidence_refs_for(
+    delivery: BackgroundDeliveryDependencies,
+    request: BackgroundDeliveryRequest,
+    frozen_retry: FrozenOwnerDelivery | None,
+) -> tuple[str, ...]:
+    if frozen_retry is not None and frozen_retry.evidence_refs:
+        return frozen_retry.evidence_refs
+    if audit_finding_report_event(request):
+        return background_delivery_evidence_refs(request)
+    return background_evidence_refs(request)
+
+
+# LLM: 空转片（Goal 无进展）的正文只进权威会话转录：不欠外部投递、不参与冻结重投、
+#   也不能让它被当成普通外部回复。用结构化的路线改写表达这一事实，调用点不各自推算。
+# 函数用途: 把一次后台投递的路线改写为“纯转录投影”或原样返回。
+def _local_only_route(
+    route: _OwnerDeliveryRoute,
+    local_transcript_only: bool,
+) -> _OwnerDeliveryRoute:
+    if not local_transcript_only:
+        return route
+    return replace(
+        route,
+        transcript_route=True,
+        canonical_record=True,
+        obligation=False,
+    )
+
+
 # LLM: 路线事实只能由"投递边界声明 + 可信 context"推出；禁止在调用点各自推算，
 # 否则 canonical 归属、冻结触发和唤醒确认会各算一套。
 # 函数用途: 解析一次后台投递的路线事实。
@@ -899,6 +943,9 @@ def background_owner_delivery_committed(
     if status == "sent":
         # 外发成功但这条路线本来要靠 canonical 承担交付时，本地落账失败同样不能确认：
         # 否则"用户读过的那份记录"永远缺一条，而且没人会再补。
+        return bool(commit.persisted) or not canonical_record
+    if status == "local_only":
+        # 空转片正文只做本地转录，不欠外部投递；转录落账成功即完成，失败留待重试。
         return bool(commit.persisted) or not canonical_record
     if status == "suppressed":
         # 投递层显式判定这是内部协议内容：交付义务归零，重投只会得到同样结论。

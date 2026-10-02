@@ -1,16 +1,22 @@
 # 设计台账
 
-## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察，待 3a/用户定）
+## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察 → 已实施）
 
 - **现象**（假飞书 + 真网关 + 真模型，`6b2f56dc7`）：
   - 用户在飞书设了一个"等我发笔记"的持续目标。前台确认之后，3 个续跑片每片都给出一句很短的"在等你"，每句都按后台送达规则主动推给了用户（`reason=thread_goal_continue delivery=sent`），10 秒内连收 3 条。
   - 熔断暂停后，提示 `GOAL_CONTINUATION_NO_PROGRESS` 只进了线程的 `pending_host_notices`，要等用户下一次说话才随回复送达。用户不说话，就只看到 3 条"在等你"，不知道续跑已经停了。
 - **现有合同**：两条都符合现有设计。续跑片的最终回复按后台送达规则外发；宿主提示随下一次正常回复送出，停止与失败不取走。所以这不是缺陷。
-- **可选方向（未定，不实施）**：
-  - **方向一**：熔断暂停时，对有外发通道的线程主动推一次提示，复用 `background_owner_delivery_committed` 的送达账。
-  - **方向二**：续跑片没有工具调用、也没有状态变化时不外发正文，只计空片。
-  - 两条都会改变用户可见行为，需要 3a 或用户决定。
-- **证据**：见 TESTS.md 的 C11 节。
+- **实施定案（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）**：
+  - **空转片不外发**：续跑片按熔断同一口径判空片——`runtime._background_goal_idle_slice` 复用
+    `goal_progress_fuse.slice_has_progress`（只读结构化字段，不另写一套）；判为无进展的片，回复正文不主动推到
+    外部通道，只经 `background_delivery.record_background_response(local_transcript_only=True)` 落权威转录
+    （TUI 可见、不冻结重投、wake 按 local_only 确认）。有进展的片照常外发。内部/TUI 线程（无外发通道）行为不变。
+  - **熔断主动提示**：`goal_progress_fuse.push_goal_no_progress_notice` 先按原规则
+    `queue_host_notice(replace_same_code=True)` 排队，再对有外发通道的线程主动投递一次
+    （`DeliveryContext(mode="proactive")`，幂等键 `goal-no-progress:{goal_id}`）；投递成功后
+    `take_host_notices` 把同一条提示取走（已读），并用 `_record_no_progress_pushed_message` 落一条会话消息，
+    保证同一提示只推一次、下一条回复不再重复带出；投递失败不取走，留待送达队列由下一次回复补出。纯 TUI 线程只排队。
+  - 不加新配置。
 
 ## 参数中心 P10：模块级数值常数的“只读目录 + 守卫”（2026-10-01，分支 `worker/ds1-constants-catalog`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已实现，待集成）
 
