@@ -174,6 +174,19 @@ def test_observe_click_and_reobserve_on_a_real_xvfb_desktop(lane):
     lane.evidence["second_observation"] = {"generation": json.loads(second.output)["structuredContent"]["generation"], "status_label": changed["label"]}
 
 
+def test_switch_off_publishes_only_the_upstream_tools_on_the_real_adapter(desktop):
+    registry = _Registry(_Repo())
+    servers = computer_use_mcp_servers({}, enabled=True, is_local_admin=True, access_mode="full-access", environ=desktop.env, python_executable=sys.executable)
+    clients = register_mcp_servers(registry, with_computer_use_observation(servers, enabled=False))
+    try:
+        assert clients[0].publication.status == "published", str(clients[0].publication)
+        assert not {name for name in registry.tools if name.endswith("observe_window") or name.endswith("click_candidate")}, "开关关着适配器不交出观察工具"
+        assert "mcp__computer_use__list_windows" in registry.tools and "mcp__computer_use__type_text" in registry.tools
+    finally:
+        for client in clients:
+            client.stop()
+
+
 def test_moved_window_makes_the_candidate_stale_and_unknown_alias_is_structured(lane):
     first = _call(lane, "mcp__computer_use__observe_window", {}, "op-1")
     assert first.ok, first.output

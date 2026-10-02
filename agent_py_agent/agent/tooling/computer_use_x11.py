@@ -12,8 +12,8 @@ from .screen_observation import TextRegion, WindowInfo
 from .screen_observation_store import WindowGeometry
 from .screen_region_digest import PixelBuffer
 
-# _NET_WM_DESKTOP 里"所有桌面"的约定值
-_ALL_DESKTOPS_VALUE = 0xFFFFFFFF
+# _NET_WM_DESKTOP 里"所有桌面"的 EWMH 协议约定值（协议常数，不进常数目录）
+_ALL_DESKTOPS_PROTOCOL_VALUE = 0xFFFFFFFF
 
 
 # LLM: display 可注入（测试 / 复用），默认第一次用时按 DISPLAY 打开；每个方法都重新读属性，不缓存窗口状态（复核要新鲜事实）。
@@ -120,7 +120,7 @@ class X11Backend:
             native_id=xid, title=title,
             geometry=WindowGeometry((int(origin.x), int(origin.y)), (int(geometry.width), int(geometry.height)), (1, 1)),
             viewable=attributes.map_state == self._x().IsViewable, hidden=intern("_NET_WM_STATE_HIDDEN") in states,
-            desktop=None if desktop in (None, _ALL_DESKTOPS_VALUE) else desktop, current_desktop=current,
+            desktop=None if desktop in (None, _ALL_DESKTOPS_PROTOCOL_VALUE) else desktop, current_desktop=current,
             normal=not types or intern("_NET_WM_WINDOW_TYPE_NORMAL") in types,
         )
 

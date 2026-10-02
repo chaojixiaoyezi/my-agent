@@ -145,6 +145,60 @@ def test_owner_scope_direct_call_by_name_is_rejected_when_the_tool_is_not_in_the
         assert decision.status == "deny" and "TOOL_NOT_IN_RUNTIME_SNAPSHOT" in decision.reason_codes
 
 
+# 类用途: 假的底层 Server：记录 list_tools / call_tool 装饰器绑定的协程，处理器放在公开的 request_handlers 字典里。
+class _LowServer:
+    def __init__(self, name):
+        self.name, self.bound, self.request_handlers = name, {}, {}
+
+    def list_tools(self):
+        def decorator(fn):
+            self.bound["list_tools"] = fn
+            return fn
+        return decorator
+
+    def call_tool(self, *, validate_input=True):
+        def decorator(fn):
+            self.bound["call_tool"] = fn
+            self.request_handlers[sys.modules["mcp.types"].CallToolRequest] = ("delegate", fn)
+            return fn
+        return decorator
+
+
+# 类用途: 假 FastMCP：固定名字、上游工具目录、add_tool 记录。
+class _FastMCP:
+    def __init__(self):
+        self.name, self.tools, self.added = "my-agent Computer Use", [{"name": "list_windows", "inputSchema": {}}], []
+
+    async def list_tools(self):
+        return list(self.tools) + [{"name": name, "inputSchema": {}} for _, name, _ in self.added]
+
+    async def call_tool(self, name, arguments):
+        return {"called": name}
+
+    def add_tool(self, fn, name, description):
+        self.added.append((fn, name, description))
+
+
+@pytest.mark.parametrize("flag,expect_tools", [({}, 1), ({OBSERVATION_ENV_FLAG: "0"}, 1), ({OBSERVATION_ENV_FLAG: "1"}, 3)])
+def test_build_adapter_server_registers_observation_tools_only_when_the_flag_is_on(monkeypatch, flag, expect_tools):
+    types = _fake_types()
+    monkeypatch.setitem(sys.modules, "mcp", SimpleNamespace(types=types))
+    monkeypatch.setitem(sys.modules, "mcp.types", types)
+    monkeypatch.setitem(sys.modules, "mcp.server", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "mcp.server.lowlevel", SimpleNamespace(Server=_LowServer))
+    fastmcp, factory_calls = _FastMCP(), []
+    low = glue.build_adapter_server(fastmcp, flag, lambda: factory_calls.append(1) or _Observer())
+    assert low.name == fastmcp.name and low.bound["list_tools"] == fastmcp.list_tools and low.bound["call_tool"] == fastmcp.call_tool
+    listed = asyncio.run(low.bound["list_tools"]())
+    assert len(listed) == expect_tools and [t["name"] for t in listed][:1] == ["list_windows"]
+    handler = low.request_handlers[types.CallToolRequest]
+    if expect_tools == 1:
+        assert handler == ("delegate", fastmcp.call_tool) and fastmcp.added == [] and factory_calls == [], "关时目录与处理器都不变，不碰 X11"
+    else:
+        assert [name for _, name, _ in fastmcp.added] == ["observe_window", "click_candidate"] and factory_calls == [1]
+        assert callable(handler) and not isinstance(handler, tuple), "开时接管层已装上"
+
+
 def test_declaration_functions_only_describe_and_register_the_tools():
     registered = []
     glue.register_observation_tools(SimpleNamespace(add_tool=lambda fn, name, description: registered.append((fn, name, description))))

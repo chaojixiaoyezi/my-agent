@@ -987,6 +987,12 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   ruff 通过；`check_import_boundaries` 0；常数目录重生成（844 项）后 `--check` 通过；`node sync-backend-config --check` 通过；strict code-size hard=0；size_diff 新增 0。
 - **变异 10/10 抓到**：不按代次找快照（拿最新一代）、忽略窗口实例（补孪生窗口用例后抓到）、不查可见性、不比几何、不查点击点遮挡、不比区域像素、
   摘要容差放宽到整格、先点击后复核（10 红）、开关关着仍并入声明、接管层不拦截观察工具。脚本 `run_mutations_j16b.py` 在会话 scratchpad。
+- **ae 复审修正（同分支第 2 个提交）**：M1 `computer_use_x11._ALL_DESKTOPS_VALUE` 没有单位后缀，`test_constants_catalog.py::test_pending_fixes_whitelist_covers_all_noncompliant_constants` 抓到——
+  改名 `_ALL_DESKTOPS_PROTOCOL_VALUE`（EWMH 协议常数，目录不收），目录重生成为 843 项；教训：`build_constants_catalog --check` 不是守卫本体，`test_constants_catalog.py` 进本线门禁清单。
+  M2 开关关着时适配器注册没有用例（ae 变异“serve() 不看标记总是注册”漏网）：装配拆成 `computer_use_observation_tools.build_adapter_server(fastmcp, environ, observer_factory)`，
+  `serve()` 只剩注册上游工具与 stdio；新用例用假 FastMCP + 假底层 Server 覆盖标记关（目录与处理器都不变、observer_factory 零调用）、标记 "0"、标记开（多两个工具、接管层装上）；
+  车道用例追加 `test_switch_off_publishes_only_the_upstream_tools_on_the_real_adapter`（真适配器开关关着只交出上游工具）。S1 `_meta` 版本不对/缺失/形状不对 → `missing_context` 且不点击（ae 变异“不查 version”漏网）。
+  复跑：五文件 `42 passed, 3 skipped`；车道容器 `3 passed in 13.84s`；strict size hard=0、size_diff 新增 0。
 - **未做**：真实模型验收（片 F）；`/plugins` 的 MCP 段（片 F）；带闪动光标输入框的误判统计（片 C）；macOS 后端（片 E）。
 
 复现（工作树根目录）：

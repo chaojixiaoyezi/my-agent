@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 847,
+  "count": 846,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5026,14 +5026,6 @@
       "unit": "秒",
       "category": "其它",
       "description": "逐键输入间隔 50ms：防止输入过快被目标程序丢键。"
-    },
-    {
-      "name": "_ALL_DESKTOPS_VALUE",
-      "file": "agent_py_agent/agent/tooling/computer_use_x11.py",
-      "value": 4294967295,
-      "unit": "",
-      "category": "其它",
-      "description": "_NET_WM_DESKTOP 里\"所有桌面\"的约定值"
     },
     {
       "name": "MAX_INLINE_WRITE_CONTENT_CHARS",

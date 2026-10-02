@@ -105,7 +105,24 @@ def install_observation_handler(low_server: Any, observer: Any) -> None:
     low_server.request_handlers[types.CallToolRequest] = observation_call_handler(delegate, observer)
 
 
+# LLM: 适配器进程的唯一装配入口（stdio 收发留在 computer_use_server.serve）：底层 Server 的 list_tools / call_tool 直接绑 FastMCP
+#   的公开协程；只有环境标记为 "1" 时才注册两个观察工具并装接管层、才调用 observer_factory（它会碰 X11）。标记关着时 tools/list
+#   与只有上游工具时逐字节一致，tools/call 处理器就是原 delegate——"关时工具目录不变"靠这里保证。
+# 函数用途: 按环境标记装配底层 Server。
+def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_factory: Callable[[], Any]) -> Any:
+    from mcp.server.lowlevel import Server
+
+    low = Server(fastmcp.name)
+    low.list_tools()(fastmcp.list_tools)
+    low.call_tool(validate_input=False)(fastmcp.call_tool)
+    if observation_tools_enabled(environ):
+        register_observation_tools(fastmcp)
+        install_observation_handler(low, observer_factory())
+    return low
+
+
 __all__ = [
-    "OBSERVATION_TOOL_NAMES", "call_observation_tool", "click_candidate", "encode_call_result", "install_observation_handler",
+    "OBSERVATION_TOOL_NAMES", "build_adapter_server", "call_observation_tool", "click_candidate", "encode_call_result",
+    "install_observation_handler",
     "observation_call_handler", "observation_tools_enabled", "observe_window", "register_observation_tools",
 ]

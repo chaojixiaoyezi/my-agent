@@ -235,6 +235,11 @@ def test_click_requires_the_snapshot_and_key_and_passes_when_nothing_changed():
     with pytest.raises(ObservationError) as no_meta:
         observer.click_candidate(None)
     assert no_meta.value.code == "missing_context" and backend.clicks == []
+    for broken in ({**meta, "version": "2"}, {k: v for k, v in meta.items() if k != "version"}, {**meta, "target": "win:b00t:1"}, {**meta, "key": 1}):
+        with pytest.raises(ObservationError) as bad_meta:
+            observer.click_candidate(broken)
+        assert bad_meta.value.code == "missing_context", broken
+    assert backend.clicks == [], "上下文形状不对一律不点"
     observer.observe()  # 更新的观察不影响同一代、核对全过的候选
     clicked = observer.click_candidate(meta)
     assert clicked == {"clicked": {"window": "win:b00t:1", "generation": "b00t-1-1", "key": "t1"}, "point": [150, 89]}

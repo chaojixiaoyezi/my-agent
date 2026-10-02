@@ -15,15 +15,10 @@ from typing import Optional
 import pyautogui
 from computer_control_mcp import core as upstream
 from mcp.server.fastmcp import FastMCP
-from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from .computer_text_input import type_desktop_text
-from .computer_use_observation_tools import (
-    install_observation_handler,
-    observation_tools_enabled,
-    register_observation_tools,
-)
+from .computer_use_observation_tools import build_adapter_server
 
 mcp = FastMCP("my-agent Computer Use")
 
@@ -63,20 +58,19 @@ def scroll_screen(
     }
 
 
-# LLM: 底层 Server 的 list_tools / call_tool 直接绑 FastMCP 的公开协程（参数校验仍由 FastMCP 做）；观察开关开着时才注册观察工具
-#   并把接管层装到 tools/call 处理器上。不另起第二个服务。
-# 函数用途: 适配器进程的唯一启动入口：注册上游工具，按环境标记装观察层，跑 stdio。
+# 函数用途: 观察开关开着时才会被调用：X11 后端只在这里构造。
+def _screen_observer():
+    from .computer_use_x11 import X11Backend
+    from .screen_observation import ScreenObserver
+
+    return ScreenObserver(X11Backend())
+
+
+# LLM: 装配在 build_adapter_server（可单测：按环境标记决定是否注册观察工具），这里只做注册上游工具与 stdio 收发。不另起第二个服务。
+# 函数用途: 适配器进程的唯一启动入口。
 async def serve() -> None:
     await register_upstream_tools()
-    low = Server(mcp.name)
-    low.list_tools()(mcp.list_tools)
-    low.call_tool(validate_input=False)(mcp.call_tool)
-    if observation_tools_enabled(os.environ):
-        from .computer_use_x11 import X11Backend
-        from .screen_observation import ScreenObserver
-
-        register_observation_tools(mcp)
-        install_observation_handler(low, ScreenObserver(X11Backend()))
+    low = build_adapter_server(mcp, os.environ, _screen_observer)
     async with stdio_server() as (read_stream, write_stream):
         await low.run(read_stream, write_stream, low.create_initialization_options())
 
