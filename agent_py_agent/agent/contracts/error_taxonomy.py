@@ -169,6 +169,23 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recovery_hint="目标在宿主托管存储（插件安装库、包库）里，模型工具不能直接读写；能力包内容只经宿主的能力工具读取，"
         "停用或换代后的旧内容不能再用。",
     ),
+    # H3：宿主配置只读、凭据不可读（path_access_policy 的 HOST_CONFIG_* / HOST_CREDENTIAL_* 声明）。
+    "PATH_HOST_CONFIG_WRITE_BLOCKED": ErrorContract(
+        code="PATH_HOST_CONFIG_WRITE_BLOCKED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="宿主配置目录对模型工具只读：改设置用 user_config（参数中心，带边界检查、修改记录和撤销），"
+        "改模型和服务商用 manage_models；不要换别的工具或命令去写这些文件。",
+    ),
+    "PATH_HOST_CREDENTIAL_BLOCKED": ErrorContract(
+        code="PATH_HOST_CREDENTIAL_BLOCKED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标是宿主凭据（用户配置、模型档案、管理员密码、密钥目录），文件工具不能读写；看设置用 user_config，"
+        "看模型和服务商用 manage_models，它们给的是脱敏视图。",
+    ),
     "PATH_DANGEROUS_ROOT_BLOCKED": ErrorContract(
         code="PATH_DANGEROUS_ROOT_BLOCKED",
         category="permission",

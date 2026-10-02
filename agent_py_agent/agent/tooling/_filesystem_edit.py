@@ -125,7 +125,7 @@ class EditFileTool(FileSystemTool):
             if old == new:
                 raise ValueError("old_string 与 new_string 相同，无需编辑")
         except WriteScopeError as exc:
-            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="WRITE_FORBIDDEN")
+            return ToolHandlerOutcome("edit_file", False, str(exc), error_code=exc.access_code or "WRITE_FORBIDDEN")
         except ValueError as exc:
             return ToolHandlerOutcome("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         # 文件不存在是路径/状态问题，不是"改 old_string/new_string 格式"能修的：

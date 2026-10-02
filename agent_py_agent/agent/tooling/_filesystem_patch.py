@@ -206,7 +206,7 @@ class ApplyPatchTool(FileSystemTool):
             # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
             return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="PATH_NOT_FOUND")
         except WriteScopeError as exc:
-            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="WRITE_FORBIDDEN")
+            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code=exc.access_code or "WRITE_FORBIDDEN")
         except ValueError as exc:
             return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         except OSError as exc:

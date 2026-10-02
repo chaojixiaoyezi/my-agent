@@ -473,10 +473,29 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
     return SandboxReadiness(True, "SANDBOX_READY", "沙箱可用且能切断网络")
 
 
-# LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、隐藏路径、断网；断网必须最后（Seatbelt 后写覆盖先写）。
+# LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、上级目录写拒绝、隐藏路径、断网；隐藏路径排在读放行之后，
+#   断网必须最后（Seatbelt 后写覆盖先写）。上级目录规则只拒写，不影响前面的读规则。
 # 函数用途: 汇总按 spec 生成的 macOS 附加规则。
 def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
-    return [*_private_read_rules(spec), *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access)]
+    return [*_private_read_rules(spec), *_ancestor_write_denies(spec), *_hidden_path_rules(spec.hidden_paths),
+            *_network_rules(spec.network_access)]
+
+
+# LLM: 沙箱通用规则（H3 探针发现，2026-10-02）：Seatbelt 的 subpath/literal 拒绝只认当前路径，命令先把上级目录改名
+#   （mv ~/.my-agent ~/.my-agent2）、写完再改回，只读覆盖、人格文件、隐藏路径就全部落空。所以给每个受保护路径的全部上级目录
+#   （直到 /）各加一条 literal 写拒绝：只拦改名、删除、chmod、touch 上级目录本身，上级目录里的普通读写照常（本机实测
+#   mkdir -p、git、cp、tar 均正常）。只拒写，所以排在私有读规则之后、隐藏路径之前都不改变读裁决。Linux 只读挂载跟着
+#   目录项走，不需要这条。改动须同步 test_host_config_access.py 的真实 sandbox-exec 用例。
+# 函数用途: 生成受保护路径（只读覆盖、隐藏路径、人格根）所有上级目录的写拒绝；没有受保护路径时返回空列表。
+def _ancestor_write_denies(spec: AttemptSandboxSpec) -> list[str]:
+    protected = [*spec.protected_write_paths, *spec.hidden_paths]
+    persona = [spec.protected_persona_root] if spec.protected_persona_root is not None else []
+    ancestors = {parent for path in (*protected, *persona) for parent in Path(path).resolve(strict=False).parents}
+    ancestors.update(Path(path).resolve(strict=False) for path in persona)
+    if not ancestors:
+        return []
+    literals = sorted(json.dumps(str(path)) for path in ancestors)
+    return ["(deny file-write* " + " ".join(f"(literal {path})" for path in literals) + ")"]
 
 
 # LLM: 断网只看结构化 network_access；规则放在整份配置最后（Seatbelt 后写覆盖先写），full_access 也同样生效。
@@ -488,6 +507,8 @@ def _network_rules(network_access: bool) -> list[str]:
 
 # LLM: Seatbelt needs explicit deny rules for host control metadata because broader owner-home
 # write grants are allowed. Directories use subpath+literal; files use literal.
+#   还不存在的路径也写规则（literal+subpath，H3）：Seatbelt 按路径匹配，不需要目标存在，这样命令也建不出它（本机实测）。
+#   Linux 的只读挂载做不到，由 tooling/sandbox._append_readonly_mounts 只挂已存在的。
 # 函数用途: 把 forbidden_write_roots 转成比宽泛写入白名单更具体的 macOS 只读规则。
 def _readonly_path_denies(paths: tuple[Path, ...]) -> list[str]:
     denies: list[str] = []
@@ -497,14 +518,14 @@ def _readonly_path_denies(paths: tuple[Path, ...]) -> list[str]:
             path = Path(raw).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             continue
-        if path in seen or not path.exists():
+        if path in seen:
             continue
         seen.add(path)
         encoded = json.dumps(str(path))
-        if path.is_dir():
-            denies.append(f"(deny file-write* (literal {encoded}) (subpath {encoded}))")
-        else:
+        if path.is_file():
             denies.append(f"(deny file-write* (literal {encoded}))")
+        else:
+            denies.append(f"(deny file-write* (literal {encoded}) (subpath {encoded}))")
     return denies
 
 

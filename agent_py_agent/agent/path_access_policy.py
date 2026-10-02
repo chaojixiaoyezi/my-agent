@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,27 @@ UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/et
 #   本模块被原样打进插件 SDK，所以布局写成路径片段而不是导入 owner_resolver。
 # 常量用途: 列出对模型工具不开放的宿主托管存储相对 owner home 的位置。
 HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (("data", "plugins"),)
+
+# H3（2026-10-02）宿主配置的唯一声明：改配置只有参数中心（user_config、/settings）和 manage_models（/model）两个权威入口，
+#   模型的文件工具和命令直接写这些目录会绕过边界键、修改账本、撤销和模型目录检查（be 复审语义记忆时发现）。读取照常，只拒写。
+#   数据根下 config/（用户配置及备份、模型目录、共享模型档案、修改账本、管理员密码）与 system/config/；每个 owner home 的 config/
+#   （capability_config.yaml）。必须与 home_layout 的 config_dir、system_config_dir 及 runtime_config_reload.default_capability_config_path
+#   一致（test_host_config_access 有守卫用例）。本模块被原样打进插件 SDK，所以写成路径片段。
+# 常量用途: 列出对模型工具只读的宿主配置目录（分别相对数据根、相对 owner home）。
+HOST_CONFIG_HOME_PARTS: tuple[tuple[str, ...], ...] = (("config",), ("system", "config"))
+HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
+
+# H3 凭据（3a 定）：宿主配置里存放密钥的位置，文件工具连读也拒；命令只拒写不拒读（my-agent CLI 要读它们，已知边界）。相对数据根。
+#   用户配置的文件名由部署决定（Gateway --config），所以按“数据根 config/ 下名字里有 yaml/yml 段的文件”认，备份
+#   desktop.yaml.bak-* 一并算上；数据根里 owner home 之外任何一层叫 secrets 的目录也按密钥目录处理。
+# 常量用途: 列出对模型文件工具不可读的宿主凭据位置。
+HOST_CREDENTIAL_HOME_PARTS: tuple[tuple[str, ...], ...] = (
+    ("config", "admin-password.json"),
+    ("config", "shared-model-profiles.json"),
+    ("config", "model-profiles"),
+)
+HOST_CONFIG_YAML_SEGMENTS = frozenset({"yaml", "yml"})
+HOST_SECRET_DIR_NAME = "secrets"
 
 # 选项1-B 凭据文件名 denylist(抄 长期助手 file_safety):这些每每装 API key/密码,文件工具一律拒。
 _CREDENTIAL_FILENAMES = frozenset(
@@ -132,8 +154,9 @@ class PathAccessPolicy:
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope,
                    agent_home_root=_home_root_from_owner_scope(scope) if scope else _my_agent_home_root())
 
-    # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；只读构造时冻结的根，不受另一个
-    #   会话或子进程环境影响，原凭据与危险根顺序保持。
+    # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；模式放行后再拒宿主凭据
+    #   （PATH_HOST_CREDENTIAL_BLOCKED，H3），所以原有拒绝码不变。只读构造时冻结的根，不受另一个会话或子进程环境影响。
+    #   这是读写共用的裁决；写还要再过 check_write / host_config_write_decision。
     # 函数用途: 解析目标并判断是否位于当前 owner 或管理员允许访问的路径范围，不读取内容。
     def check(self, path: str | Path) -> PathAccessDecision:
         try:
@@ -149,6 +172,60 @@ class PathAccessPolicy:
                 f"宿主托管存储（插件安装库、包库）不对模型工具开放，能力包内容请经宿主工具读取: target={resolved}",
                 str(store),
             )
+        decision = self._mode_decision(resolved)
+        if not decision.allowed:
+            return decision
+        return self._host_credential_decision(resolved)
+
+    # LLM: H3 写门：先走 check（读写共用的全部拒绝），再拒宿主配置目录。核心写边界（tooling/write_boundary）与插件写入上下文
+    #   （workspace_write_context）都调它，两边裁决保持一致；文件工具的 resolve_write_path 因要先过墙外授权根，单独调
+    #   host_config_write_decision。
+    # 函数用途: 判断模型工具能否写这个路径。
+    def check_write(self, path: str | Path) -> PathAccessDecision:
+        decision = self.check(path)
+        if not decision.allowed:
+            return decision
+        return self.host_config_write_decision(path)
+
+    # LLM: H3：只判宿主配置（声明见 HOST_CONFIG_HOME_PARTS / HOST_CONFIG_OWNER_PARTS），按解析后的真实路径、大小写无关地比较；
+    #   目标与配置目录里某个文件是同一个硬链接时同样拒绝。不读文件内容，硬链接比对只读目录元数据。数据根未知时放行。
+    # 函数用途: 目标落在宿主配置目录里时返回 PATH_HOST_CONFIG_WRITE_BLOCKED，提示改用 user_config / manage_models。
+    def host_config_write_decision(self, path: str | Path) -> PathAccessDecision:
+        try:
+            resolved = Path(path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
+        if self.agent_home_root is None:
+            return PathAccessDecision(True)
+        root = host_config_root_for_path(resolved, self.agent_home_root) or _hardlinked_host_config(
+            resolved, self.agent_home_root)
+        if root is None:
+            return PathAccessDecision(True)
+        return PathAccessDecision(
+            False,
+            "PATH_HOST_CONFIG_WRITE_BLOCKED",
+            "宿主配置目录不对模型工具开放写入：改设置请用 user_config（参数中心，带边界检查、修改记录和撤销），"
+            f"改模型和服务商请用 manage_models；读取不受影响: target={resolved}",
+            str(root),
+        )
+
+    # LLM: H3 凭据只在模式已放行之后才拒（owner 墙、危险根等原拒绝码优先）；判定见 host_credential_for_path，只做路径运算。
+    # 函数用途: 目标是宿主凭据时返回 PATH_HOST_CREDENTIAL_BLOCKED，提示改用脱敏的 user_config / manage_models。
+    def _host_credential_decision(self, resolved: Path) -> PathAccessDecision:
+        secret = host_credential_for_path(resolved, self.agent_home_root) if self.agent_home_root else None
+        if secret is None:
+            return PathAccessDecision(True)
+        return PathAccessDecision(
+            False,
+            "PATH_HOST_CREDENTIAL_BLOCKED",
+            "宿主凭据（用户配置、模型档案、管理员密码、密钥目录）不对模型的文件工具开放：看设置用 user_config，"
+            f"看模型和服务商用 manage_models（都是脱敏视图）: target={resolved}",
+            str(secret),
+        )
+
+    # LLM: check 拆出的模式裁决，顺序不变：owner 墙 → full → normal（凭据文件名、数据根豁免、危险根）。
+    # 函数用途: 按 owner 墙和路径模式判断一个已解析路径是否可访问。
+    def _mode_decision(self, resolved: Path) -> PathAccessDecision:
         # owner 隔离是租户边界，不是普通安全模式。远程 owner 的文件可见面
         # 只有自己 home + shared；不仅是 .my-agent 里的其他目录，宿主其他位置也默认拒绝。
         # 必须先于 full 判定，避免 path_access_mode=full 变成跨租户/跨宿主读权。
@@ -363,18 +440,18 @@ def agent_home_root_for_owner(owner_home: object) -> Path | None:
 
 # LLM: 与 user_space.owner_resolver._owner_home_dir 互为逆运算（owners/local/main 或 owners/providers/<p>/<users|groups>/<id>），
 #   只做路径运算、不读文件；调用方传已 resolve 的路径与数据根。改布局时两处一起改（守卫用例在 test_host_managed_store_access）。
+#   比较大小写无关（见 _relative_folded），返回值取输入路径自己的写法。
 # 函数用途: 从规范布局反推一个路径所在的 owner home；不在任何 owner home 里返回 None。
 def owner_home_containing(path: Path, agent_home_root: Path) -> Path | None:
-    owners = agent_home_root / "owners"
-    try:
-        parts = path.relative_to(owners).parts
-    except ValueError:
+    parts = _relative_folded(path, agent_home_root / "owners")
+    if parts is None:
         return None
+    depth = 0
     if parts[:2] == ("local", "main"):
-        return owners / "local" / "main"
-    if len(parts) >= 4 and parts[0] == "providers" and parts[2] in {"users", "groups"}:
-        return owners.joinpath(*parts[:4])
-    return None
+        depth = 2
+    elif len(parts) >= 4 and parts[0] == "providers" and parts[2] in {"users", "groups"}:
+        depth = 4
+    return _prefix_of(path, parts, depth) if depth else None
 
 
 # LLM: 只做路径运算：路径落在任一 owner home 的托管存储（含存储根本身）里就返回该存储根，否则 None。路径策略据此统一拒绝。
@@ -383,11 +460,106 @@ def host_managed_store_for_path(path: Path, agent_home_root: Path) -> Path | Non
     home = owner_home_containing(path, agent_home_root)
     if home is None:
         return None
-    for parts in HOST_MANAGED_OWNER_STORE_PARTS:
-        store = home.joinpath(*parts)
-        if path == store or store in path.parents:
-            return store
+    return _declared_root_containing(path, home, HOST_MANAGED_OWNER_STORE_PARTS)
+
+
+# LLM: H3 只做路径运算：数据根 config/、system/config/ 或任一 owner home 的 config/（含目录本身）里就返回该目录，否则 None。
+#   与 owner 墙无关：隔离 owner 声明自家根为工作目录时，自家 config/ 也靠它拒写。
+# 函数用途: 判断一个已解析路径是否落在宿主配置目录里。
+def host_config_root_for_path(path: Path, agent_home_root: Path) -> Path | None:
+    found = _declared_root_containing(path, agent_home_root, HOST_CONFIG_HOME_PARTS)
+    if found is not None:
+        return found
+    home = owner_home_containing(path, agent_home_root)
+    return None if home is None else _declared_root_containing(path, home, HOST_CONFIG_OWNER_PARTS)
+
+
+# LLM: H3 凭据只做路径运算（声明见 HOST_CREDENTIAL_HOME_PARTS）：命中声明位置、数据根 config/ 下的 YAML 配置文件（含备份），
+#   或 owner home 之外名为 secrets 的目录时返回命中的那一层，否则 None。owner home 里是用户自己的工作，不按目录名拦。
+# 函数用途: 判断一个已解析路径是否是宿主凭据。
+def host_credential_for_path(path: Path, agent_home_root: Path) -> Path | None:
+    found = _declared_root_containing(path, agent_home_root, HOST_CREDENTIAL_HOME_PARTS)
+    if found is not None:
+        return found
+    parts = _relative_folded(path, agent_home_root)
+    if parts is None or owner_home_containing(path, agent_home_root) is not None:
+        return None
+    if len(parts) == 2 and parts[0] == "config" and HOST_CONFIG_YAML_SEGMENTS & set(parts[1].split(".")[1:]):
+        return path
+    if HOST_SECRET_DIR_NAME in parts:
+        return _prefix_of(path, parts, parts.index(HOST_SECRET_DIR_NAME) + 1)
     return None
+
+
+# LLM: H3：给命令沙箱列只读覆盖。owner_home 给出时只列这个 owner 的 config/（数据根的本来就在 owner 墙外）；为空时列数据根的
+#   config/、system/config/ 和全部已存在 owner home 的 config/。不按存在过滤：macOS 对还不存在的目录也能拒写，Linux 由挂载层
+#   只挂已存在的。只读目录元数据。
+# 函数用途: 列出要对模型命令设成只读的宿主配置目录。
+def host_config_dirs(agent_home_root: Path, owner_home: Path | None = None) -> tuple[Path, ...]:
+    if owner_home is not None:
+        return tuple(owner_home.joinpath(*parts) for parts in HOST_CONFIG_OWNER_PARTS)
+    homes = _existing_owner_homes(agent_home_root)
+    return (*(agent_home_root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS),
+            *(home.joinpath(*parts) for home in homes for parts in HOST_CONFIG_OWNER_PARTS))
+
+
+# LLM: H3 硬链接加固：文件工具自己建不了硬链接，但会顺着已有的硬链接写进去。只在目标是有多个链接的普通文件时才逐个比对
+#   宿主配置目录里的文件（st_dev + st_ino），平时不扫描；只读元数据，列目录出错按没命中处理。
+# 函数用途: 目标和某个宿主配置文件是同一个文件时返回那个配置目录，否则 None。
+def _hardlinked_host_config(path: Path, agent_home_root: Path) -> Path | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if info.st_nlink < 2 or not stat.S_ISREG(info.st_mode):
+        return None
+    for root in host_config_dirs(agent_home_root):
+        if any(_same_file(info, item) for item in _files_under(root)):
+            return root
+    return None
+
+
+# 函数用途: 列出目录下全部文件（含子目录）；目录不存在或读取出错时返回空元组。
+def _files_under(root: Path) -> tuple[Path, ...]:
+    try:
+        return tuple(item for item in root.rglob("*") if item.is_file())
+    except OSError:
+        return ()
+
+
+# 函数用途: 判断一个路径是否就是已 stat 过的那个文件（同一设备同一 inode）。
+def _same_file(info: os.stat_result, candidate: Path) -> bool:
+    try:
+        return os.path.samestat(info, candidate.stat())
+    except OSError:
+        return False
+
+
+# LLM: 返回 path 落在 base 下某个声明片段里时的那一层（写法取自 path），否则 None；比较大小写无关。
+# 函数用途: 在基准目录下按声明的路径片段找出包含目标的那一层。
+def _declared_root_containing(path: Path, base: Path, declared: tuple[tuple[str, ...], ...]) -> Path | None:
+    parts = _relative_folded(path, base)
+    if parts is None:
+        return None
+    for item in declared:
+        if parts[:len(item)] == tuple(part.casefold() for part in item):
+            return _prefix_of(path, parts, len(item))
+    return None
+
+
+# LLM: macOS 与 Windows 默认文件系统大小写不敏感，而 Path.resolve 保留输入的大小写（本机实测：config/desktop.yaml 写成
+#   CONFIG/Desktop.YAML 照样打开同一个文件）。宿主声明位置因此按 casefold 比较；Linux 大小写敏感时只会多拦数据根里
+#   仅大小写不同的同名目录，不会少拦。Seatbelt 按磁盘上的真实路径匹配，不受影响。
+# 函数用途: 返回 path 相对 base 的各段（已 casefold）；path 不在 base 下时返回 None。
+def _relative_folded(path: Path, base: Path) -> tuple[str, ...] | None:
+    folded = tuple(part.casefold() for part in path.parts)
+    prefix = tuple(part.casefold() for part in base.parts)
+    return folded[len(prefix):] if folded[:len(prefix)] == prefix else None
+
+
+# 函数用途: 取 path 里 base 之后再往下 depth 段的那一层目录（relative 是 path 相对 base 的各段）。
+def _prefix_of(path: Path, relative: tuple[str, ...], depth: int) -> Path:
+    return Path(*path.parts[:len(path.parts) - len(relative) + depth])
 
 
 # LLM: owner_home 给出时只列这个 owner 的；为空时列数据根下全部 owner 的（Full Access 的进程沙箱用）。只列已存在的目录，
@@ -494,7 +666,12 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 __all__ = [
     "DEFAULT_DANGEROUS_PATH_ROOTS",
     "DEFAULT_PATH_ACCESS_MODE",
+    "HOST_CONFIG_HOME_PARTS",
+    "HOST_CONFIG_OWNER_PARTS",
+    "HOST_CONFIG_YAML_SEGMENTS",
+    "HOST_CREDENTIAL_HOME_PARTS",
     "HOST_MANAGED_OWNER_STORE_PARTS",
+    "HOST_SECRET_DIR_NAME",
     "PATH_ACCESS_MODE_FULL",
     "PATH_ACCESS_MODE_NORMAL",
     "PATH_SCOPE_FULL",
@@ -506,6 +683,9 @@ __all__ = [
     "agent_home_root_for_owner",
     "effective_owner_scope_root",
     "granted_external_work_roots",
+    "host_config_dirs",
+    "host_config_root_for_path",
+    "host_credential_for_path",
     "host_managed_store_dirs",
     "host_managed_store_for_path",
     "inheritable_declared_work_roots",

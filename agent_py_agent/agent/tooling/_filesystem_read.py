@@ -107,8 +107,16 @@ _READ_FILE_EXAMPLES = [
 ]
 
 
+# LLM: 写工具把它统一转成 WRITE_FORBIDDEN；只有 access_code 非空（目前仅 H3 宿主配置拒写 PATH_HOST_CONFIG_WRITE_BLOCKED）时改报
+#   这个码，让模型和宿主都能按结构化码区分。access_code 只由 resolve_write_path 从 PathAccessDecision.code 写入。
+# 类用途: 表示写目标不在本次结构化写入范围内，或落在宿主配置目录里。
 class WriteScopeError(ValueError):
     """A mutating file target is outside this invocation's structured write roots."""
+
+    # 函数用途: 保存拒绝原因和可选的结构化拒绝码（空表示沿用 WRITE_FORBIDDEN）。
+    def __init__(self, message: str, access_code: str = "") -> None:
+        super().__init__(message)
+        self.access_code = str(access_code or "").strip()
 
 
 # LLM: Preserve the distinction between an invalid path argument and a policy denial so mutating tools fail closed with WRITE_FORBIDDEN.
@@ -259,7 +267,9 @@ class FileSystemTool(BaseTool):
 
     # LLM: owner-scoped 的写操作只能落在当前结构化 workspace_roots；registry 会把
     #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。
-    # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd。
+    #   H3：任何模式下宿主配置目录都拒写（PATH_HOST_CONFIG_WRITE_BLOCKED 随 WriteScopeError.access_code 上报），在墙外授权
+    #   复核之后、工作区范围之前判定，所以 Full Access 管理员与声明了自家根的隔离 owner 同样被拒。
+    # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd，也防止直接改宿主配置。
     def resolve_write_path(self, raw_path: str | Path) -> Path:
         """解析写路径，并在多用户模式下强制命中本轮已授权工作区。"""
         try:
@@ -275,6 +285,9 @@ class FileSystemTool(BaseTool):
             raise WriteScopeError(
                 f"{exc} 可用的写入位置: {'、'.join(str(p) for p in allowed) or '（无）'}"
             ) from exc
+        config_decision = self.path_access_policy.host_config_write_decision(candidate)
+        if not config_decision.allowed:
+            raise WriteScopeError(config_decision.message, config_decision.code)
         if self.path_access_policy.owner_scope_root is None:
             return candidate
         if any(_path_is_under(candidate, root) for root in self.workspace_roots):

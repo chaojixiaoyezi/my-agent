@@ -60,7 +60,8 @@ def _path_text(raw_path: object, *, label: str = "path") -> str:
 
 # LLM: Dangerous-path policy applies to every filesystem mutation; the narrower task boundary
 # is optional, but once any structured scope field exists, missing/empty allowed roots fail closed.
-# 函数用途: 在文件写入前先守全局危险路径，再按当前任务的结构化允许、禁止和锁定范围裁决。
+#   路径门用 PathAccessPolicy.check_write（含 H3 宿主配置拒写），与插件写入上下文 workspace_write_context 保持同一裁决。
+# 函数用途: 在文件写入前先守全局危险路径和宿主配置，再按当前任务的结构化允许、禁止和锁定范围裁决。
 def validate_write_boundary(
     tool_name: str,
     params: dict[str, Any],
@@ -94,7 +95,7 @@ def validate_write_boundary(
             target = _resolve_boundary_path(raw_path, workspace_root, roots)
         except ValueError as exc:
             return f"写入被阻止: {exc}"
-        access_decision = path_policy.check(target)
+        access_decision = path_policy.check_write(target)
         if not access_decision.allowed:
             return f"写入被阻止: {access_decision.message}"
         install_error = _runtime_install_error(target, write_boundary, workspace_root)

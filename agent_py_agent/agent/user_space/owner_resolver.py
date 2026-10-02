@@ -266,9 +266,13 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
     )
 
 
+# LLM: ensure_owner_home 按这份清单建目录（副作用在调用方）。config/ 是 H3 宿主配置目录（capability_config.yaml 的唯一用户位置，
+#   对模型工具只读）：提前建出来，Linux 命令沙箱才能把它挂成只读，模型命令不能抢先建目录再写（bwrap 只能挂已存在的路径）。
+# 函数用途: 列出新建 owner home 时要确保存在的目录。
 def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
     return (
         result.home_dir,
+        result.home_dir / "config",
         result.daily_memory_dir,
         result.lessons_memory_dir,
         result.routing_memory_dir,

@@ -241,7 +241,7 @@ class WriteFileTool(FileSystemTool):
                 "write_file",
                 False,
                 str(exc),
-                error_code="WRITE_FORBIDDEN",
+                error_code=exc.access_code or "WRITE_FORBIDDEN",
                 effect_outcome="not_started",
             )
         except ValueError as exc:

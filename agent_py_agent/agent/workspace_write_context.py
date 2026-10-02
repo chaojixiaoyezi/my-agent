@@ -54,14 +54,15 @@ class WorkspaceWriteContext:
                    _path_list(value["locked_files"]), output_json, _path_list(value["product_roots"]),
                    _read_policy(value["path_policy"]))
 
-    # LLM: 顺序与宿主一致：路径策略 → 写入根 → 内部结果文件 → 禁止根（更具体的写入根优先，同层禁止胜出）→ 锁定文件。
+    # LLM: 顺序与宿主一致：路径策略（check_write，含 H3 宿主配置拒写）→ 写入根 → 内部结果文件 → 禁止根（更具体的写入根优先，
+    #   同层禁止胜出）→ 锁定文件。
     # 函数用途: 判断一个目标路径是否允许写入，不创建或打开文件。
     def check(self, path: str | Path) -> PathAccessDecision:
         try:
             target = (self.cwd / Path(path)).resolve(strict=False)
         except (OSError, RuntimeError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败。")
-        decision = self.path_policy.check(target)
+        decision = self.path_policy.check_write(target)
         if not decision.allowed:
             return decision
         matching = [root for root in self.write_roots if target.is_relative_to(root)]
