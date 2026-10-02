@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## C12d：被接替时仍在运行的来源会自己停（2026-10-01，分支 `claude/38-c12d-takeover-stop`，基于 `claude/3a-step16z` `2ab1c20e3`）
+
+- **真实链路核对**（隔离 home，私有端口 8483/8484，脚本化假模型；证据 `~/.my-agent/decision-evidence/c12-observations-20261001/c12d/`）：
+  - 子代理在独立 runner 进程里执行 `sleep 120` 时，测试者用 `manager.record_takeover` 落一次接替。
+  - 12 秒内 runner 与子进程都退出，运行账 cancelled（结束原因 `InterruptedError`），canonical `TAKEN_OVER`。
+  - 未复现“来源没有停”，不改代码。
+- **补充** `test_subagent_takeover_runtime_closeout.py` 一项：仍在运行的来源被接替后，`runner_control.runner_attempt_cancelled` 为真
+  （runner 心跳据此自停）。变异：把 `TAKEN_OVER` 从判据里去掉，用例失败（1 个，抓到 1 个）。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 16 个（含仓库级守卫与 `test_packaging.py`）：247 passed；
+  Ruff、doc sync、strict code-size（`size_diff.sh` 新增 0）、`git diff --check`、clean-package 全部通过。
+
 ## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
 
 - **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数

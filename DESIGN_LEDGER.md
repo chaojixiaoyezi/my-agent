@@ -17,6 +17,22 @@
   worktree 复现同样失败）；guards9 全过；import boundaries 0；ruff/doc_sync/code-size strict/diff --check/clean_package 全过；
   size_diff 新增告警 0（消失 2）。
 
+## C12d：被接替时仍在运行的来源会不会停（2026-10-01，分支 `claude/38-c12d-takeover-stop`，基于 `claude/3a-step16z` `2ab1c20e3`，真实链路未复现，不改代码）
+
+- **来源**：“被接替的子代理在运行账里补终态”条目的待定项——接替落账只改 canonical 状态，仍在运行的来源不在那里停执行轮。
+- **真实链路核对**（隔离 Gateway + 脚本化假模型，代码 = `2ab1c20e3`）：
+  - 父代理派出子代理，子代理在独立 runner 进程里执行 `sleep 120`；
+  - 测试者用产品自己的 `manager.record_takeover` 对它落一次接替（宿主侧注入）。
+  - 12 秒内：runner 进程和它的 `sleep` 子进程都退出了，`agent_run`、`attempt` 都是 cancelled，canonical 状态 `TAKEN_OVER`。
+- **原因**：
+  - runner 自己的心跳每 5 秒（`_RUNNER_SESSION_HEARTBEAT_SECONDS`）调用一次 `subagents/runner_control.runner_attempt_cancelled`；
+  - 这个判据把 canonical `TAKEN_OVER` 当作“本轮已停”，于是 runner 中断自己，并结束子进程。
+  - 所以运行中的来源本来就会停，不需要接替落账再开一个停止入口；另开一个只会和 runner 的自停抢着收尾，违反“不加兜底旁路”。
+- **做法**：不改产品代码。在 `test_subagent_takeover_runtime_closeout.py` 加一项，锁住这条判据：接替后 `runner_attempt_cancelled` 必须为真。
+- **留意**：这种情况下运行账结束事件里的原因是 `InterruptedError`，`runtime_source` 为空。静止来源走 `settle_taken_over_run` 时，记的是
+  `subagent_takeover`／`taken_over`。两种写法并存，只影响审计时怎么读，不影响状态。
+- **证据**：`~/.my-agent/decision-evidence/c12-observations-20261001/c12d/`（仓库外）。
+
 ## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已实现，待集成）
 
 - **背景**：P10 定案“常数留在读取点、目录只是投影”后，待整改白名单按模块分批清理。本批接第一批之后，
@@ -730,7 +746,7 @@
   `SubAgentBaseService.record_takeover` 在接替落账后、来源确实转成 TAKEN_OVER 时调用它的尽力版本，失败只记日志，不影响已落盘的接替。
   `agent_run.completed` 事件带 `runtime_source=subagent_takeover`、`runtime_reason=taken_over`、`takeover_by`。
 - **不改**：已关闭来源被接替（只记 superseded）运行账不动；仍在运行的来源被接管时不在这里停执行轮（归取消入口，runner 结果会被准入拒绝），
-  这条运行要等取消入口处理，记为待定；避开了 1 号会话正在改的 `takeover/record.py` 与 Codex 在重构的 `conversation/runtime.py`。
+  这条运行要等取消入口处理，记为待定（2026-10-01 C12d 真实链路核对：runner 心跳会自己停下，见上方 C12d 条目）；避开了 1 号会话正在改的 `takeover/record.py` 与 Codex 在重构的 `conversation/runtime.py`。
 - **验证**：`test_subagent_takeover_runtime_closeout.py` 6 项；7 个变异全部被杀。见 TESTS.md 同名节。
 
 ## 工具参数无效改为有界纠正：长任务不再因一次坏参数整轮失败（2026-09-30，已实现，待上线）

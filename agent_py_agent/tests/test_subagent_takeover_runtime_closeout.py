@@ -135,3 +135,17 @@ def test_settle_guards_the_observed_attempt_status():
     assert outcome == {"settled": False, "reason": "attempt_status_conflict", "attempt_id": "at-1"}
     assert [(call["status"], call["attempt_id"], call["expected_attempt_status"]) for call in calls] == [
         ("cancelled", "at-1", "failed")]
+
+
+def test_running_source_taken_over_is_stopped_by_its_own_runner_check(tmp_path):
+    """C12d（2026-10-01）：仍在执行的来源被接替后，原 runner 的心跳（每 5 秒）经 runner_attempt_cancelled 把 canonical
+    TAKEN_OVER 当成本轮已停，自己中断并结束子进程（真实链路：runner 与它的 sleep 子进程 12 秒内退出，运行账 cancelled）。
+    接替落账本身不另开停止入口；这条判据被删，运行中的来源就会和接替者并行干同一件事。"""
+    from agent_py_agent.agent.subagents.runner_control import runner_attempt_cancelled
+
+    manager, source_id, _agent_run_id, attempt_id = _managed(tmp_path)
+    assert runner_attempt_cancelled(manager, source_id, attempt_id) is False
+
+    manager.record_takeover(source_id, take_over_by="run-successor", reason="接管")
+
+    assert runner_attempt_cancelled(manager, source_id, attempt_id) is True
