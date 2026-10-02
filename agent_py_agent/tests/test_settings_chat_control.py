@@ -119,6 +119,13 @@ def test_admin_can_find_change_review_and_revert(monkeypatch, user_config):
     assert reverted.ok and "max_tokens:" not in user_config.read_text(encoding="utf-8")
 
 
+# P18 真实验收：internal 经真实调度入口（会统一带上 capability_path）也要能查到常数，不能被兜底吞成“读不到”。
+def test_internal_lists_code_constants_through_the_real_dispatch(monkeypatch, user_config):
+    found = _run(monkeypatch, user_config, "/settings internal TOOL_PREVIEW_MAX_LINE_COUNT")
+    assert found.ok, found.message
+    assert "TOOL_PREVIEW_MAX_LINE_COUNT" in found.message and "只读" in found.message
+
+
 def test_show_reports_the_applied_output_cap_for_the_default_model(monkeypatch, user_config):
     monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
     agent = SimpleNamespace(config=SimpleNamespace(

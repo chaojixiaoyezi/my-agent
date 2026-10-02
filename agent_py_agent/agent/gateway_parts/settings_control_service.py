@@ -322,9 +322,10 @@ def _search(config: object, argument: str, *, capability_path: Path | None = Non
 # LLM: 代码常数目录是只读投影（权威位置是读取常数的那行源码），这里只按名字/说明/文件查找并展示
 #   文件:行、值、单位、类别与中文说明，绝不提供修改。与 user_config search 的常数结果同一数据源
 #   （settings/constants_catalog.search_constants）。行号在运行时按名字只读定位（entry_with_line），
-#   定位不到就只显示文件。只读，不需要 config。
+#   定位不到就只显示文件。只读，不需要 config。和其它子命令同一调度签名：run_settings_control 统一传 capability_path，
+#   这里用不到但必须接住，否则 TypeError 会被兜底吞成“参数暂时读不到”（P18 真实验收发现）。
 # 函数用途: /settings internal <关键词> —— 查代码里的模块级数值常数（只读，改动需改代码）。
-def _internal(_config: object, argument: str) -> str:
+def _internal(_config: object, argument: str, *, capability_path: Path | None = None) -> str:
     from ..settings.constants_catalog import entry_with_line, search_constants
 
     found = search_constants(argument, limit=10)

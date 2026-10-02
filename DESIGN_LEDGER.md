@@ -1,5 +1,11 @@
 # 设计台账
 
+## /settings internal 与 P17 统一调度的接缝（2026-10-02，3a，step16z，已修）
+
+- P18 真实验收发现 `/settings internal` 在 TUI 和飞书都被兜底成“参数暂时读不到”：P17 给所有子命令统一传 `capability_path`，
+  P10 新加的 `_internal` 没接这个参数。约定：`/settings` 子命令处理函数一律接受同一组关键字参数（用不到也要接住），
+  新子命令要经 `run_settings_control` 真实调度测一次，不能只直接调处理函数。
+
 ## 配置与账本写回保留权限，参数中心新建文件一律 0600（2026-10-02，3a，step16z，已实现；生产权限已手工收回）
 
 - **来源**：ae 做 P18 时发现，`/settings set` 后隔离环境的 gateway.yaml 从 600 变成 644，新建的 settings-changes.jsonl 也是 644。

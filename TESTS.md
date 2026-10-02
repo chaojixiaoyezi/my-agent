@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 集成修正：/settings internal 接住统一调度传的 capability_path（2026-10-02，3a，step16z）
+
+- **起因**：ae 的 P18 真实验收（TUI 与假飞书）里 `/settings internal <常数名>` 只回“参数暂时读不到”。P17 让 `run_settings_control`
+  给每个子命令都传 `capability_path=`，P10 的 `_internal(_config, argument)` 不收这个参数，TypeError 被兜底吞掉。
+- **做法**：`_internal` 加只接不用的 `capability_path` 关键字参数，和其它子命令同一调度签名；行为不变。
+- **验证**：`test_settings_chat_control.py` 新增经真实调度入口查 `TOOL_PREVIEW_MAX_LINE_COUNT` 的用例；把签名改回去时该用例失败（变异 1 个，抓到）。
+
 ## 配置与账本写回保留权限（2026-10-02，3a，step16z）
 
 - **新增**：`agent_py_agent/tests/test_config_write_permissions.py` 5 项——参数中心 set/reset/revert 后用户配置与账本都还是 0600；
