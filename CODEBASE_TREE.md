@@ -623,6 +623,7 @@ agent_py_agent/
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |   |-- user_config_capability.py  # 用户配置路径（当前加载的配置文件）、显式白名单校验、边界名单与生效时机说明
 |   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机
+|   |   |-- parameter_metadata.py    # 参数登记表元数据自动推导（单位/范围/归属模块/读取方），只读纯函数
 |   |   |-- parameter_changes.py      # 参数中心唯一写入口：按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
 |   |   |-- decision_probe.py           # 显式原生连接测试，共用后端/worker/账本，不改开关或聊天选择

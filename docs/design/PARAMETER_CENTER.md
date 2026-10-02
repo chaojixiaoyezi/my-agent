@@ -2,6 +2,25 @@
 
 状态：阶段 0 已实现（分支 `claude/param-center-phase0`，2026-09-27）；阶段 1、2、2b 已完成，阶段 3 部分完成（A/B/D/E/C 组已合入 main，剩余少量内部键分派中），按下文顺序推进。
 
+## 2026-10-01 参数登记表元数据（P8，分支 `worker/ds2-registry-metadata`，已实现，待集成）
+
+- 设计目标 1 落地：登记表每条参数补「单位、范围、归属模块、读取方」四项元数据，全部由 `agent/settings/parameter_metadata.py` 自动推导、
+  不手工抄：
+  - **单位**：按键名结尾后缀（_seconds→秒、_ms→毫秒、_chars→字符、_bytes→字节、_tokens→tokens、_percent→%、_days→天、
+    _hour→小时、_turns→轮、_files→个文件、_requests→次），长后缀优先，推不出留空不猜；
+  - **范围**：从现有规范化/校验规格取——`_memory_coercion._FIELDS`（含 compact_trigger/recovery_percent 的 50-100/25-80）、
+    `runtime_tool_field_specs.TOOL_INT_FIELDS`、`services/_normalize` 的 GatewayFieldsService 整数/浮点规格与各枚举
+    （model_backend、reasoning_effort/control、structured_output、log_level、access_mode、tool_catalog_mode、path_access_mode）、
+    `backends/sampling.validate_top_p`（0-1），没有校验的留空；
+  - **读取方与归属模块**：与 `test_config_field_readers` 同一套属性访问/字符串键引用扫描产品代码（排除 config.py、登记表自身），
+    归属模块取主要读取方相对 agent_py_agent 的顶层（agent 包内细分到第二段）；`decision_*`/`memory_decision_*` 按
+    `decision_config_fields()` 映射补读取方（decision_settings_defaults），与读取方守卫同一判据。
+- 展示：`/settings show` 对有值的参数补「单位/范围/归属模块/读取方」四行（`settings_control_service._metadata_line`）；
+  user_config 的 view/search 同口径只在有值时带这四个字段（`user_config_tool._spec_view`）。
+- 守卫：`test_parameter_metadata.py` 7 项（推导规则各几例、真实字段挂接、范围表无空项、219 个用户可见参数都有读取方与归属模块、
+  归属模块不含路径分隔符、两处展示只在有值时出现）；变异验证 3 个（删 _seconds 后缀、删 request_timeout 范围、field_readers
+  跳过全部文件）均被杀红。
+
 ## 2026-10-01 前端设置页与前端数据清理（P4/P5）
 
 - 设置页删掉 **29 个**对不上任何当前配置键的表单项（不在三份随包 YAML、也不在 `backend-config-catalog.json`）：Dispatch Loop 三项

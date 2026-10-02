@@ -18,6 +18,7 @@ from functools import lru_cache
 from .config import AgentConfig
 from .config_io import yaml_trailing_comment
 from .defaults import effective_max_output_tokens
+from .parameter_metadata import field_readers, ranges, unit_for_key
 from .user_config_capability import (
     BOUNDARY_KEYS,
     EFFECT_GATEWAY_RESTART,
@@ -91,6 +92,11 @@ class ParameterSpec:
     effect: str
     # 是否属于常用层级（COMMON_KEYS）；只用于展示和推荐，不影响能否修改。
     common: bool = False
+    # 元数据（P8，2026-10-01）：单位/范围/归属模块/读取方，全部由 parameter_metadata 自动推导；推不出的留空。
+    unit: str = ""
+    range: str = ""
+    owner_module: str = ""
+    reader: str = ""
 
     @property
     def writable(self) -> bool:
@@ -158,17 +164,22 @@ def _yaml_descriptions() -> dict[str, str]:
 @lru_cache(maxsize=1)
 def parameter_registry() -> dict[str, ParameterSpec]:
     descriptions = _yaml_descriptions()
+    range_texts = ranges()
+    readers = field_readers()
     registry: dict[str, ParameterSpec] = {}
     for item in fields(AgentConfig):
         default = item.default if item.default is not MISSING else (
             item.default_factory() if item.default_factory is not MISSING else None)
         value_type = _value_type(default, item.type)
+        owner_module, reader = readers.get(item.name, ("", ""))
         registry[item.name] = ParameterSpec(
             key=item.name, default=default, value_type=value_type,
             description=descriptions.get(item.name, ""), category=category_for(item.name),
             safety=classify_safety(item.name, value_type), masked=is_masked(item.name),
             effect=TUNABLE_KEYS[item.name].effect if item.name in TUNABLE_KEYS else EFFECT_GATEWAY_RESTART,
             common=item.name in COMMON_KEYS,
+            unit=unit_for_key(item.name), range=range_texts.get(item.name, ""),
+            owner_module=owner_module, reader=reader,
         )
     return registry
 

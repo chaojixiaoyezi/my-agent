@@ -1,5 +1,13 @@
 # Gateway 维护状态
 
+`/settings show` 显示参数元数据（参数中心 P8，分支 `worker/ds2-registry-metadata`，2026-10-01）：`settings_control_service._show`
+对有值的参数补四行“单位／范围／归属模块／读取方”（`_metadata_line`，没推导出就不出现），来源是 `settings/parameter_metadata.py`
+的自动推导：单位按键名后缀（_seconds/_ms/_chars/_bytes/_tokens/_percent 等，推不出留空）、范围取自现有规范化/校验规格
+（_memory_coercion._FIELDS、runtime_tool_field_specs、services/_normalize 的 Service 规格与枚举、backends/sampling.validate_top_p）、
+读取方与归属模块按 `test_config_field_readers` 同一套属性访问/字符串键引用扫描（decision_*/memory_decision_* 按
+`decision_config_fields()` 映射补，读取方为 decision_settings_defaults）。user_config 的 view/search 同口径只在有值时带这四个字段。
+回归见 `test_parameter_metadata.py`。
+
 `/effort` 查看回执列出可选档位（分支 `claude/3a-effort-picker`，2026-09-30）：`control_service._execute_effort_control` 在查看
 （operation=view）时于回执末尾追加 `reasoning_control.describe_level_choices()` 一行（可选档位与“/effort 加档位只改本会话、
 /effort default 回到全局默认”），设置/检测/撤销回执不变。TUI 单独 `/effort` 改由本地档位菜单（`cli/chat_parts/tui_effort_menu.py`）

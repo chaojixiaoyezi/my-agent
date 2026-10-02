@@ -18,6 +18,25 @@
 - 命令与结果：
   `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_decision_settings_reason.py agent_py_agent/tests/test_user_config_decision_patch.py agent_py_agent/tests/test_decision_settings.py agent_py_agent/tests/test_decision_settings_notifications.py agent_py_agent/tests/test_decision_settings_scope.py agent_py_agent/tests/test_user_config_decision_operations.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **123 passed**
 
+## 参数登记表元数据 P8（2026-10-01，分支 `worker/ds2-registry-metadata`，已实现）
+
+- 新增 `agent_py_agent/tests/test_parameter_metadata.py` 7 项：单位按键名后缀推导（秒/毫秒/字符/字节/tokens/百分比/天，model_name 留空）、
+  真实字段单位挂接、范围从校验规格取（request_timeout 1-600、max_tokens ≥1、memory_curator_interval_seconds 60-604800、
+  memory_compact_auto_trigger_percent 50-100、top_p 0-1、log_level 枚举、agent_name 留空）、范围表无空项、
+  219 个用户可见参数都有读取方与归属模块（decision_*/memory_decision_* 经 `decision_config_fields()` 映射补，与
+  `test_config_field_readers` 同一判据）、归属模块不含路径分隔符、`/settings show` 与 user_config view 只在有值时显示。
+- 变异验证 3 个（都杀掉推导逻辑应变红，已逐个实测）：①删 `_UNIT_SUFFIXES` 的 ("_seconds","秒") → `test_unit_derived_from_key_suffix` 红；
+  ②删 `_EXTRA_INT_RANGES` 的 request_timeout → `test_range_from_validation_specs` 红；③`field_readers` 跳过全部文件 →
+  `test_every_listed_key_has_a_reader` 红。
+- 验证命令与结果：
+  - `test_parameter_metadata.py` + `test_parameter_registry.py` + `test_config_defaults_parity.py` + `test_config_field_readers.py`：96 passed
+  - `test_settings_chat_control.py` + `test_value_display_parity.py` + `test_decision_settings.py`：90 passed
+  - 架构守卫（guards9.txt 全文件清单，含 test_packaging.py）：182 passed
+  - `$PY scripts/check_import_boundaries.py`：0 条；`$PY -m ruff check agent_py_agent scripts`：通过；
+    `$PY scripts/check_doc_sync.py`：DOC_SYNC_PASS；`git diff --check`：通过
+- 顺带修复基线 ruff 问题：`test_settings_chat_control.py:225` 既有 SIM300（Yoda 条件，f89247a29 引入）改为语义等价的
+  `{"model_auth_ref"} == ... and set(registry) >= ...`，仅为了收尾 ruff 门禁。
+
 ## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`）
 
 - 新用例 `test_settings_chat_control.py::test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works`：列表、搜索、`/settings all` 都不出现 `model_auth_ref`，`/settings show` 仍可查看且提示不能在这里修改；原加载器元数据用例的计数同步扣除隐藏集合。

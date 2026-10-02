@@ -23,6 +23,19 @@
   3 个变异实测被抓住（去掉 reason 允许 / 不写账本 / 不标截断）。
 - **验证**：相关 decision 测试 123 passed（详见 TESTS.md）。
 
+## 参数登记表元数据：单位/范围/归属模块/读取方（2026-10-01，分支 `worker/ds2-registry-metadata`，已实现，待集成）
+
+- **P8（三线收尾）设计目标 1 落地**：登记表每条参数补「单位、范围、归属模块、读取方」四项元数据，全部由
+  `agent/settings/parameter_metadata.py` 自动推导、不手工抄，推不出的留空：单位按键名后缀（_seconds/_ms/_chars/_bytes/_tokens/
+  _percent/_days/_hour/_turns/_files/_requests），范围取自现有规范化/校验规格（_memory_coercion._FIELDS、TOOL_INT_FIELDS、
+  services/_normalize 的 Service 规格与枚举、backends/sampling.validate_top_p 0-1），读取方按 test_config_field_readers 同一套
+  属性访问/字符串键引用扫描（decision_*/memory_decision_* 经 decision_config_fields() 映射补，读取方 decision_settings_defaults）。
+- **展示**：`/settings show` 与 user_config 的 view/search 只在有值时显示这四项（settings_control_service._metadata_line、
+  user_config_tool._spec_view）。
+- **顺带修复**：test_settings_chat_control.py:225 既有 SIM300（Yoda 条件，f89247a29 引入）改为语义等价写法，只为收尾 ruff 门禁。
+- **验证**：test_parameter_metadata.py 7 项 + 3 个变异（删 _seconds 后缀/删 request_timeout 范围/field_readers 跳过全部文件）均被杀红；
+  相关 pytest 96+90 passed、架构守卫 182 passed、import boundaries 0 条、ruff/doc sync/diff --check 通过。详见 TESTS.md。
+
 ## 参数减量收口：model_auth_ref 只隐藏、目标改为实际下限（2026-10-01，分支 `claude/3a-p11-close`，已实现，待集成）
 
 - **决定（集成者，三线收尾 goal P11）**：不再按“约 100 项”的数量目标减量。219 个随包键里 218 个在 `/settings` 列表与搜索出现；

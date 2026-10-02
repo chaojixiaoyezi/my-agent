@@ -454,6 +454,11 @@ def _spec_view(spec: object, config: object, *, brief: bool = False) -> dict[str
     }
     if not brief:
         view.update({"safety": spec.safety, "effect_when": spec.effect})
+        # 元数据（单位/范围/归属模块/读取方）只在有值时给模型看，避免空字段噪音。
+        for field in ("unit", "range", "owner_module", "reader"):
+            value = getattr(spec, field, "")
+            if value:
+                view[field] = value
     applied = applied_value(spec.key, config)
     if applied is not None:
         view["applied_value"], view["applied_rule"] = applied

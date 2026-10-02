@@ -272,14 +272,26 @@ def _show(config: object, argument: str) -> str:
     applied = applied_value(spec.key, config)
     applied_line = ([f"实际效果：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
                     if applied is not None else [])
+    # 元数据行只在有值时显示：单位、范围、归属模块、主要读取方。
+    metadata_lines = [line for field, label in (("unit", "单位"), ("range", "范围"),
+                                                ("owner_module", "归属模块"), ("reader", "读取方"))
+                      if (line := _metadata_line(spec, field, label))]
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
         f"说明：{spec.description or '（没有说明）'}",
         f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, getattr(config, spec.key, spec.default))}；"
         f"用户配置里：{override}",
+        *metadata_lines,
         *applied_line,
         f"能否修改：{writable}",
     ])
+
+
+# LLM: 元数据是自动推导的展示事实；没有值就不出现对应行，避免空字段噪音。
+# 函数用途: 生成 /settings show 里一行“单位/范围/归属模块/读取方”，没推导出时返回空串。
+def _metadata_line(spec: object, field: str, label: str) -> str:
+    value = str(getattr(spec, field, "") or "").strip()
+    return f"{label}：{value}" if value else ""
 
 
 def _checked(report: dict[str, object]) -> dict[str, object]:
