@@ -71,9 +71,11 @@ def start(installed, data: Path) -> MCPStdioClient:
     return client
 
 
-# LLM: write=False 模拟宿主不给只读工具写权限；权限值全部由核心同源构造器产生，测试不手写协议。
+# LLM: 默认不给写权限（模拟宿主不给只读工具写权限）；需要写时传 _write=True，它不会作为工具参数发出。
+#   权限值全部由核心同源构造器产生，测试不手写协议。
 # 函数用途: 调用一个真实 MCP 工具并解析结构化 JSON 正文。
-def invoke(client, workspace: Path, tool: str, *, write: bool = False, **arguments):
+def invoke(client, workspace: Path, tool: str, **arguments):
+    write = bool(arguments.pop("_write", False))
     metadata = {WORKSPACE_READ_EXTENSION: read_context(workspace).to_payload()}
     if write:
         policy = PathAccessPolicy.from_values(mode="normal", dangerous_roots=[])
@@ -176,7 +178,7 @@ def test_fixture_job_flow_private_records_and_collect(drama, dirs):
     assert not error and confirmed["state"] == "confirmed"
     error, missing = invoke(drama, workspace, "production_run", job_id=job["job_id"])
     assert error and missing["code"] == "MISSING_WRITE_CONTEXT"
-    error, run = invoke(drama, workspace, "production_run", write=True, job_id=job["job_id"])
+    error, run = invoke(drama, workspace, "production_run", _write=True, job_id=job["job_id"])
     assert not error and run["state"] == "fixture_succeeded" and run["fixture"] is True
     assert run["generation_success"] is False and NOTICE in run["notice"]
     target = workspace / job["outputs"][0]
@@ -184,7 +186,7 @@ def test_fixture_job_flow_private_records_and_collect(drama, dirs):
     error, status = invoke(drama, workspace, "production_status", job_id=job["job_id"])
     assert not error and status["state"] == "fixture_succeeded" and status["fixture"] is True
     target.unlink()
-    error, collected = invoke(drama, workspace, "production_collect", write=True, job_id=job["job_id"])
+    error, collected = invoke(drama, workspace, "production_collect", _write=True, job_id=job["job_id"])
     assert not error and collected["collected"] is True and collected["generation_success"] is False
     assert target.read_bytes().startswith(b"RIFF")
     error, audit = invoke(drama, workspace, "production_audit")
@@ -203,7 +205,7 @@ def test_real_provider_request_is_structurally_refused(drama, dirs):
     _, confirmed = invoke(drama, workspace, "production_confirm", job_id=job["job_id"],
                           confirmation=preview["confirmation"])
     assert confirmed["state"] == "confirmed"
-    error, refused = invoke(drama, workspace, "production_run", write=True, job_id=job["job_id"])
+    error, refused = invoke(drama, workspace, "production_run", _write=True, job_id=job["job_id"])
     assert error and refused == {
         "code": "PROVIDER_NOT_CONFIGURED", "provider": "seedance",
         "message": "未配置供应商，本插件不调用付费生成。", "paid_generation_called": False,
@@ -350,7 +352,7 @@ def test_read_and_write_symlinks_are_rejected(drama, dirs):
     real = workspace / "real.wav"
     real.write_bytes(b"do-not-overwrite")
     (workspace / job["outputs"][0]).symlink_to("../real.wav")
-    error, refused_write = invoke(drama, workspace, "production_run", write=True, job_id=job["job_id"])
+    error, refused_write = invoke(drama, workspace, "production_run", _write=True, job_id=job["job_id"])
     assert error and refused_write["code"] == "UNSAFE_OUTPUT_PATH"
     assert real.read_bytes() == b"do-not-overwrite"
 
@@ -370,6 +372,6 @@ def test_confirmed_input_change_requires_reconfirmation(drama, dirs):
     source.write_text("version two", encoding="utf-8")
     error, status = invoke(drama, workspace, "production_status", job_id=job["job_id"])
     assert not error and status["state"] == "needs_reconfirmation"
-    error, refused = invoke(drama, workspace, "production_run", write=True, job_id=job["job_id"])
+    error, refused = invoke(drama, workspace, "production_run", _write=True, job_id=job["job_id"])
     assert error and refused["code"] == "NEEDS_RECONFIRMATION"
     assert not (workspace / job["outputs"][0]).exists()
