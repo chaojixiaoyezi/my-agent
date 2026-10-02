@@ -116,3 +116,21 @@
 - **检查器身份**：报告新增 `checker`（包 ID、版本、按本文件实际字节算出的 sha256），帮助区分原包程序与自写脚本。它不是安全控制，也不能替代宿主的执行记录。
 
 **不覆盖的范围**：漏标的创作新增、把原文事实说成改编、意译后的冲突、同一镜正文自相矛盾、人物离场是否交代、实际在不在画面、台词够不够排演——这些仍要靠方法和独立阅读。根据这些失败改动之后，原冻结用例再跑一次只能算"已见回归"，不是新的保留集。
+
+## 0.5.0 修订范围（能力包 v2 块 7）
+
+固定来源不变。这次依据冻结重跑（`c13-frozen-reruns-28435`，业务审阅 A 包 1/9）的逐条归因，补了检查器能确定性查出的盲区（K 类）和流程、模板没写到的地方（P 类）。资料仍是 `drama_text_delivery.v3`，报告仍是 `drama_text_check.v3`，只增加可选字段和键；新增 `--host-json` 输出宿主核验用的 `pack_verifier_result.v1`。
+
+| 新检查 | 级别 | 来自哪次失败 |
+| --- | --- | --- |
+| `placeholder_text`：摘要、起止状态、动作、台词、道具状态是 `{}`、TODO、纯标点或没填的模板提示 | error | A10-t4 |
+| `embedded_quote_not_verbatim` / `embedded_quote_not_in_line`：台词里声明的原文片段要在台词里、并且一字不差 | error | A05-t4、A08-t6 |
+| `adaptation_original_not_in_source`：改编条目的 `original_quote` 必须真在原文里 | error | A05-t4、A10-t5 |
+| `prop_states_missing`：动作里出现已登记道具，这一镜却没写它的状态 | warning | A08-t6 |
+| `prop_origin_unstated`：道具第一次出现就有人拿着，却没写 `origin` | warning | A08-t5 |
+| `named_character_offscreen`：起止状态或动作点名的人物被列为画外 | warning | A10-t6、A08-t4、A10-t4 |
+| `shot_too_short`：单镜秒数低于下限（默认 2 秒，`--min-shot-seconds` 可改） | warning | A08-t5 |
+
+**和上游的差异**：仍然只认作者写成结构化字段的内容。内嵌引文只查 `embedded_quotes` 里声明的片段，不扫描台词里的引号；道具和人物只按字面名字匹配；`origin` 只看写没写。
+
+**不覆盖的范围**：把原文已有的事实说成改编、改了结局或因果、上下镜语义矛盾、动作能不能在给定秒数内完成——这些仍要靠方法和独立阅读。根据这些失败改动之后，原冻结用例再跑一次只能算“已见回归”，不是新的保留集。

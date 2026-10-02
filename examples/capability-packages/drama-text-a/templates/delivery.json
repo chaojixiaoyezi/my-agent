@@ -13,14 +13,20 @@
       "text_match_skip_reason": ""
     }
   ],
-  "props": [],
+  "props": [
+    {
+      "id": "<道具ID，例：PR01>",
+      "name": "<道具名，例：旧书>",
+      "origin": "<第一次出现时从哪来、谁交给谁；原文写了就写段落ID>"
+    }
+  ],
   "scenes": [
     {
       "id": "",
       "source_ids": [],
       "character_ids": [],
       "seconds": null,
-      "summary": ""
+      "summary": "<这一场里发生了什么变化>"
     }
   ],
   "shots": [
@@ -28,19 +34,47 @@
       "id": "",
       "scene_id": "",
       "seconds": null,
-      "start_state": "",
-      "action": "",
-      "end_state": "",
+      "start_state": "<这一镜第一帧能看到的状态，例：门口旧书无人触碰>",
+      "action": "<这一镜里发生的动作，例：店员拾起旧书>",
+      "end_state": "<这一镜最后一帧的状态，例：旧书被店员拿在手上>",
       "visible_character_ids": [],
       "source_ids": [],
-      "adaptations": [],
+      "adaptations": [
+        {
+          "text": "<新增或改写了什么>",
+          "original_quote": "<被改写的原文逐字片段；纯新增写空字符串>"
+        }
+      ],
       "unresolved": [],
       "offscreen_character_ids": [],
-      "lines": [],
-      "source_quotes": [],
+      "lines": [
+        {
+          "speaker_id": null,
+          "text": "<台词或字幕>",
+          "embedded_quotes": []
+        }
+      ],
+      "source_quotes": [
+        {
+          "source_id": "<本镜引用的段落ID>",
+          "text": "<原文里一字不差的一小段>"
+        }
+      ],
       "prop_states": {
-        "start": [],
-        "end": []
+        "start": [
+          {
+            "prop_id": "<道具ID>",
+            "holder_id": null,
+            "state": "<短标签，例：淋湿>"
+          }
+        ],
+        "end": [
+          {
+            "prop_id": "<道具ID>",
+            "holder_id": null,
+            "state": "<短标签，例：装进防水袋>"
+          }
+        ]
       }
     }
   ],

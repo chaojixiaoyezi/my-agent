@@ -44,6 +44,7 @@
 |-- agent_py_agent/tests/test_capability_package_drama_text_basis.py # A包v3镜头来源、改编与未知声明及报告版本
 |-- agent_py_agent/tests/test_capability_package_drama_text_visibility.py # A包人物字面覆盖、画外声明及有界诊断
 |-- agent_py_agent/tests/test_capability_package_drama_text_lines.py # A包0.4.0可选台词、逐字引用、道具状态接续与检查器身份
+|-- agent_py_agent/tests/test_capability_package_drama_text_v05.py # A包0.5.0新增7项检查（占位、内嵌引文、改编原文、道具状态/来源、画外点名、过短镜头）与--host-json宿主核验输出
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
 |-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
@@ -1444,6 +1445,7 @@ docs/
 - `agent_py_agent/tests/test_capability_package_drama_text_duration.py` 与 `test_capability_package_drama_workflow_duration.py`：合成输入下验证样包原脚本的时长聚合、目标缺失/非法、浮点和溢出边界，不执行真实任务产物。
 - `agent_py_agent/tests/test_capability_package_drama_text_basis.py`：验证 A 包 v3 镜头声明、本场来源、失败回执版本和结构不代表语义的边界。
 - `agent_py_agent/tests/test_capability_package_drama_text_visibility.py`：以公开合成资料通过原 CLI 验证代称/退出、可见/画外、歧义与长短词、原位置及预算/裁剪计数；不修改真实产物。
+- `agent_py_agent/tests/test_capability_package_drama_text_v05.py`：A 包 0.5.0（能力包 v2 块 7）的 7 项新检查各一个正例一个反例，以及 `--host-json` 只输出 `pack_verifier_result.v1` 结构化字段、写出即退 0；不读真实产物。
 - `agent_py_agent/tests/test_capability_package_drama_text_lines.py`：A 包 0.4.0 可选字段——台词结构与说话人声明、逐字引用只按子串（不归一化）、道具持有人/相邻状态接续与 `continuity_break`、报告 `checker` 身份与声明版本一致。
 - `agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py`：B 包 0.2.0——`--baseline-project` 的换说话人（含重编号）、节拍类型改变、对象删除提醒，交接覆盖真实改动（根地址不算）、虚假新增/省略报错、检查器身份与项目摘要。
 - `examples/capability-packages/drama-text-a/methods/visible-characters.md`：A0.3.0 人物依据回填的私有方法与v3诊断合同；只说明字面覆盖，不生成宿主完成状态。

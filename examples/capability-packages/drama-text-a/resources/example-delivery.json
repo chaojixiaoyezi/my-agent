@@ -26,7 +26,8 @@
   "props": [
     {
       "id": "PR01",
-      "name": "旧书"
+      "name": "旧书",
+      "origin": "P01：打烊前出现在店门口，无人持有。"
     }
   ],
   "scenes": [
@@ -81,7 +82,10 @@
         "P01"
       ],
       "adaptations": [
-        "补写店员拾书的动作，衔接后续装袋。"
+        {
+          "text": "补写店员拾书的动作，衔接后续装袋。",
+          "original_quote": ""
+        }
       ],
       "unresolved": [],
       "offscreen_character_ids": [],
@@ -129,7 +133,10 @@
         "P02"
       ],
       "adaptations": [
-        "将夹在书页中的便条改为由赶车人指认，属于可视化改编。"
+        {
+          "text": "将夹在书页中的便条改为由赶车人指认，属于可视化改编。",
+          "original_quote": "书页里夹着写给远方孩子的便条"
+        }
       ],
       "unresolved": [],
       "offscreen_character_ids": [],

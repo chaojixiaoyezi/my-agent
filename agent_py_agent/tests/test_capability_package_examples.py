@@ -103,7 +103,7 @@ def test_samples_build_reproducibly_and_expose_only_one_package(package, tmp_pat
     assert "declaration.json" not in members
     assert all(item.executable is False for item in members.values())
     if package == "drama-text-a":
-        assert manifest.version == "0.4.0"
+        assert manifest.version == "0.5.0"
         assert len(members) == 15 and "methods/visible-characters.md" in members
     with ZipFile(first) as archive:
         assert set(archive.namelist()) == {"plugin.json", *members}
