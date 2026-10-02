@@ -8,6 +8,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -46,7 +47,8 @@ class MCPProcessBinding:
 # LLM: 请求锁、写锁、响应箱均是连接私有；撤销先关闭准入，再在独立清理锁下回收固定进程。
 # 类用途: 承载一次启动的 MCP 连接，保留真实清理回执并隔离旧请求与重连。
 class MCPTransport:
-    # LLM: 托管连接只能绑定该原句柄和已登记出生身份；非托管 MCP 保持原路径，不能据可选字段猜测资源归属。
+    # LLM: 托管连接只能绑定该原句柄和已登记出生身份；非托管 MCP 保持原路径，不能据可选字段猜测资源归属。每次构造生成唯一的
+    #   connection_id（uuid4），观察绑定的 MCP 代次只取它：出生身份在 macOS 只精确到秒、取不到时为空，不能当代次。
     # 函数用途: 为一次启动创建收发与清理句柄，插件清理保留完整原资源回执。
     def __init__(self, process: subprocess.Popen, name: str, *, max_line_chars: int, connect_timeout: float,
                  managed: ManagedMCPProcess | None = None):
@@ -54,6 +56,8 @@ class MCPTransport:
             raise ValueError("MCP 托管进程绑定冲突")
         birth = managed.hosted.record["pid_birth_token"] if managed is not None else capture_process_birth_token(process.pid)
         self.binding = MCPProcessBinding(process, birth, managed)
+        # 宿主生成的连接随机串：观察绑定用它区分连接代次，不依赖进程出生身份，也不做取不到时的退回
+        self.connection_id = uuid.uuid4().hex
         self.inbox = MCPInbox(name)
         self.max_line_chars = max_line_chars
         self.connect_timeout = connect_timeout

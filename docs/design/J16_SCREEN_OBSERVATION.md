@@ -90,6 +90,7 @@
 1. **宿主层**，发送前；沿用插件线的 `resolve_action_candidate`：
    - `candidate_id` 必须属于本 run/task 这个窗口的最新一次观察（按 `tool_completed` 事件序）；
    - 候选的 `actions` 里必须有这个工具。
+   - 候选所属观察的 `activation_id` 必须等于当前绑定的（提供方换代——MCP 连接重建或插件重新激活——后旧候选一律过期）。这是对所有提供方都成立的唯一一层保证：第三方 MCP 服务不一定实现下面第 2 层复核；插件侧旧代理随激活撤销已不可用，不会误伤。
    - 不满足就返回 `OBSERVATION_STALE` 或 `OBSERVATION_CANDIDATE_UNKNOWN`，记 `not_started`，不发送。
    - 满足就把 `{observation_id, key, target{ref, generation}}` 放进 `_meta["my-agent/observation"]`。
 2. **适配器层**，真动之前：按 `_meta` 里的代次找到当时的快照（找不到就是 `not_found`），然后重新只读采样这个窗口，逐项核对：
@@ -126,9 +127,9 @@
 - **片 A 实施定稿（2026-10-02，ae 定、ef 实施，分支 `claude/ef-j16-slice-a`）**：
   - 三件套在 `agent/tooling/observation_binding.py` 的 `ObservationBinding`，`PluginProxyTool` 与 `MCPProxyTool` 共用；绑定为 None 的 MCP 代理行为逐字节不变。声明复用 manifest v5 的 `PluginToolObservation / PluginToolObservationRef`（已搬到 `plugin_observation.py`，manifest 与 MCP 共用同一条配对规则 `validate_observation_declaration`）。
   - 来源字段只留 `provider_id`（`plugin:<id>` / `mcp:<server>`）：记录、上下文、归档信封统一改名，新信封不再写 `plugin_id`；旧归档不迁移，宿主没有逻辑读它。
-  - MCP 的 `activation_id` = `mcp:<server>:<sha256(本次固定连接的 pid_birth_token)[:16]>`，子进程重启换代。宿主复核多一条：候选所属观察的 activation_id 必须等于本绑定的，否则 `OBSERVATION_STALE`、不发送（换代后旧候选不交给新实例猜）。
+  - MCP 的 `activation_id` = `mcp:<server>:<连接随机串前 16 位>`：随机串由宿主在 `MCPTransport` 构造时 `uuid4` 生成，不依赖 ps 的进程出生身份（macOS 只精确到秒、取不到时为空，同一秒重启会撞车），也不做取不到再退回的兜底；子进程重启或重连就换代。宿主复核多一条（ae 复审裁决保留，已写进 3.2 节第 1 层）：候选所属观察的 activation_id 必须等于本绑定的，否则 `OBSERVATION_STALE`、不发送。
   - MCP 逐工具声明表：`mcp_servers.<server>.tool_approvals`（只能等于或严于默认 dangerous：dangerous / mutating / always；`never` 配置非法）与 `tool_observations`（和 v5 同形），部署者也可对第三方服务声明；Computer Use 由 `computer_use_profile.py` 一张表产出三项（片 A 只搬现有工具，审批与观察为空）。
-  - 核对只按本次发现到的工具算：坏项（observation 挂非只读工具、ref 参数不在 schema 或不是可选 string、ref 没有同类观察配对）整个服务拒绝发布，`MCPDeclarationError` 带结构化 reasons，不连带别的服务；声明了但没发现的工具只记 notice。发布结果记成客户端的 `publication`（published / rejected / unavailable，含 code / reasons / notices），`mcp_registration.mcp_server_facts(registry)` 是只读投影；挂到哪个面板由集成时定。
+  - 核对只按本次发现到的工具算：坏项（observation 挂非只读工具、ref 参数不在 schema 或不是可选 string、ref 没有同类观察配对、工具 schema 本身不可规范化 `input_schema_invalid`）整个服务拒绝发布，`MCPDeclarationError` 带结构化 reasons，不连带别的服务；`tool_observations` / `tool_approvals` 里声明了但没发现的工具只记 notice。发布结果记成客户端的 `publication`（published / rejected / unavailable，含 code / reasons / notices），`mcp_registration.mcp_server_facts(registry)` 是只读投影；挂到哪个面板由集成时定。
   - 几何扩展：`frame` 必填 space / origin / size / scale（origin 可为负），可选 captured_at / capture / occluded，多余键拒绝，数值判定排除 bool；候选 `region=[x,y,w,h]` 用截图像素、`x+w ≤ size_w×scale_x`，有 region 必须有 frame；原因码 `frame` / `candidate_region`。region 进候选规范形式（参与 content_hash 与 observation_id），frame 不进；几何只进归档信封与 `tool_completed` 事件（候选 region、frame 的 size/scale），不进模型投影。
   - 审批核实三层：合同单测（profile → `from_mapping` → 发布 → `approval_policy.mode == "always"` 且 effect read_only）、`tool_manifest_contract` 投影、`ActionPolicy` 在自主（auto）模式下仍 ask；真链路读屏审批放到片 F 的真实验收。
 

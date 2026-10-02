@@ -1,7 +1,7 @@
 # LLM: 部署者在 mcp_servers.<server> 下的 tool_approvals / tool_observations 是宿主侧逐工具声明（和插件 manifest v5 同形），不是
 #   server 自报，不授予权限：审批只能等于或严于 ApprovalPolicy 默认的 dangerous（never 等于免审 dangerous 工具，配置非法）；
 #   观察声明按 plugin_observation.validate_observation_declaration 的同一套规则核对。核对只按本次发现到的工具算：坏项抛
-#   MCPDeclarationError（整个服务拒绝发布，带结构化 reasons），声明了但本次没发现的工具只记 notice。发布结果记成
+#   MCPDeclarationError（整个服务拒绝发布，带结构化 reasons），tool_observations / tool_approvals 里声明了但本次没发现的工具只记 notice。发布结果记成
 #   MCPPublication 挂在客户端上，供状态投影读取。改动须同步 mcp_client.MCPServerConfig.from_mapping、
 #   mcp_registration.refresh_registered_mcp_client、computer_use_profile 的声明表与 test_mcp_observation_binding。
 # 模块用途: 把 YAML 里的逐工具声明变成结构化对象，并在工具目录发布前核对它们和真实工具对不对得上。
@@ -21,14 +21,15 @@ from .mcp_protocol import MCPError
 
 # 允许的逐工具审批模式：等于或严于默认 dangerous；never 会免去 dangerous 工具的审批，属于放宽安全边界，不接受
 VALID_TOOL_APPROVALS = frozenset({"dangerous", "mutating", "always"})
-# 声明与发现到的工具对不上时整服务拒绝的状态码；notice 里"声明了但没发现"的原因码
+# 声明与发现到的工具对不上时整服务拒绝的状态码；notice 里"声明了但没发现"的原因码；工具输入 schema 本身不可规范化的原因码
 DECLARATION_INVALID_CODE = "MCP_DECLARATION_INVALID"
 DECLARED_TOOL_NOT_DISCOVERED = "declared_tool_not_discovered"
+INPUT_SCHEMA_INVALID = "input_schema_invalid"
 _OBSERVATION_KINDS = ("observation", "observation_ref")
 
 
-# LLM: reasons 是结构化列表 [{"tool", "code"}]，code 来自 ObservationDeclarationError.code 或 observation_ref_unpaired；
-#   message 不含配置值。
+# LLM: reasons 是结构化列表 [{"tool", "code"}]，code 来自 ObservationDeclarationError.code、observation_ref_unpaired 或
+#   input_schema_invalid（声明了观察但工具 schema 规范化失败）；message 不含配置值。
 # 类用途: 逐工具声明与发现到的工具对不上时的整服务拒绝。
 class MCPDeclarationError(MCPError):
     def __init__(self, server_name: str, reasons: list[dict[str, str]]) -> None:
@@ -140,26 +141,29 @@ def resolve_server_declarations(config: Any, tools: list[Any]) -> ResolvedServer
                    if item.observation_ref is not None and item.observation_ref.target_kind not in observed_kinds)
     if reasons:
         raise MCPDeclarationError(config.name, reasons)
-    notices = tuple({"tool": name, "code": DECLARED_TOOL_NOT_DISCOVERED} for name in config.tool_observations if name not in resolved)
+    declared = dict.fromkeys((*config.tool_observations, *(name for name in config.tool_approvals if name != "*")))
+    notices = tuple({"tool": name, "code": DECLARED_TOOL_NOT_DISCOVERED} for name in declared if name not in resolved)
     return ResolvedServerDeclarations(resolved, notices)
 
 
-# 函数用途: 一个工具的观察声明是否合规；返回结构化原因码，合规返回空串。没有声明的工具不做任何核对。
+# 函数用途: 一个工具的观察声明是否合规；返回结构化原因码（schema 规范化失败单独记 input_schema_invalid），合规返回空串。
+#   没有声明的工具不做任何核对。
 def _declaration_issue(observation: object, observation_ref: object, *, effect: str, raw_schema: object) -> str:
     if observation is None and observation_ref is None:
         return ""
     try:
         schema = canonicalize_tool_input_schema(raw_schema if isinstance(raw_schema, dict) else {})
+    except (TypeError, ValueError):
+        return INPUT_SCHEMA_INVALID
+    try:
         validate_observation_declaration(observation, observation_ref, effect=effect, input_schema=schema)
     except ObservationDeclarationError as exc:
         return exc.code
-    except (TypeError, ValueError):
-        return "observation_ref_param"
     return ""
 
 
 __all__ = [
-    "DECLARATION_INVALID_CODE", "DECLARED_TOOL_NOT_DISCOVERED", "MCPDeclarationError", "MCPPublication",
+    "DECLARATION_INVALID_CODE", "DECLARED_TOOL_NOT_DISCOVERED", "INPUT_SCHEMA_INVALID", "MCPDeclarationError", "MCPPublication",
     "ResolvedServerDeclarations", "ResolvedToolDeclaration", "VALID_TOOL_APPROVALS", "parse_tool_approvals",
     "parse_tool_observations", "resolve_server_declarations",
 ]

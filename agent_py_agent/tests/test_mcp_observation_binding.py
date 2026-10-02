@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,7 @@ from agent_py_agent.agent.tooling.mcp_client import MCPError, MCPServerConfig, M
 from agent_py_agent.agent.tooling.mcp_declarations import (
     DECLARATION_INVALID_CODE,
     DECLARED_TOOL_NOT_DISCOVERED,
+    INPUT_SCHEMA_INVALID,
     MCPDeclarationError,
     resolve_server_declarations,
 )
@@ -34,6 +36,7 @@ from agent_py_agent.agent.tooling.mcp_registration import (
     refresh_registered_mcp_client,
     register_mcp_servers,
 )
+from agent_py_agent.agent.tooling.mcp_transport import MCPTransport
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_test_call,
     runtime_snapshot_for_tools,
@@ -137,9 +140,9 @@ class _Registry:
         self._mcp_clients = []
 
 
-# 函数用途: 固定连接替身：只带进程出生身份。
+# 函数用途: 固定连接替身：带进程出生身份和宿主连接随机串（真 MCPTransport 构造时也是这样生成的）。
 def _transport(birth: str = "proc:1234"):
-    return SimpleNamespace(binding=SimpleNamespace(birth_token=birth))
+    return SimpleNamespace(binding=SimpleNamespace(birth_token=birth), connection_id=uuid.uuid4().hex)
 
 
 def _read_result(observation):
@@ -155,11 +158,11 @@ def _observation():
                            {"key": "t2", "role": "ocr_text", "label": "取消", "actions": ["click"], "region": [90, 20, 60, 18]}]}
 
 
-# 函数用途: 经发布链拿到带绑定的代理，并把一次观察调用的归档记进假库。
-def _published(repo, client, birth="proc:1234"):
+# 函数用途: 经发布链拿到带绑定的代理（transport 不给就用替身）。
+def _published(repo, client, transport=None):
     registry = _Registry(repo)
     registry._mcp_clients.append(client)
-    assert refresh_registered_mcp_client(registry, client, transport=_transport(birth)) == 3
+    assert refresh_registered_mcp_client(registry, client, transport=transport or _transport()) == 3
     return registry
 
 
@@ -190,12 +193,14 @@ def test_published_read_tool_mints_host_ids_with_mcp_provider_and_connection_gen
     assert mcp_server_facts(registry) == [{"server": "srv", "running": True, "publication": client.publication.as_dict()}]
 
 
-def test_connection_generation_changes_activation_id_so_old_candidates_go_stale():
+def test_each_connection_gets_its_own_activation_id_even_with_equal_or_empty_birth_tokens():
     repo, client = _Repo(), _Client(_config(), _read_result(_observation()))
-    first = _published(repo, client, birth="proc:1")
+    first = _published(repo, client, transport=_transport(birth=""))
     candidates = json.loads(_recorded(repo, first).output)["structuredContent"][OBSERVATION_KEY]["candidates"]
-    second = _published(repo, client, birth="proc:2")
-    assert second.tools["mcp__srv__read"].observation_binding.activation_id != first.tools["mcp__srv__read"].observation_binding.activation_id
+    second = _published(repo, client, transport=_transport(birth=""))
+    first_id = first.tools["mcp__srv__read"].observation_binding.activation_id
+    assert first_id != second.tools["mcp__srv__read"].observation_binding.activation_id, "出生身份相同甚至为空，代次仍由宿主随机串区分"
+    assert first_id.startswith("mcp:srv:") and len(first_id) == len("mcp:srv:") + 16
     sent_before = len(client.sent)
     stale = second.tools["mcp__srv__click"].execute({"candidate_id": candidates[0]["candidate_id"], "__run_scope": RUN_SCOPE})
     assert stale.reported_error_code == OBSERVATION_STALE and stale.effect_outcome == "not_started", "子进程重启换代后旧候选一律过期"
@@ -225,6 +230,24 @@ def test_action_tool_rechecks_candidate_before_sending_and_lifts_provider_reject
     assert (lifted.reported_error_code, lifted.effect_outcome, lifted.result_envelope["observation_rejected"]) == (OBSERVATION_STALE, "not_started", OBSERVATION_STALE)
     plain = click.execute({"selector": "#go", "__run_scope": RUN_SCOPE})
     assert plain.reported_error_code == "TOOL_EXECUTION_FAILED" and client.sent[-1]["meta"] is None, "没填候选沿原路径，不附 _meta、不提升"
+
+
+def test_real_transport_mints_a_host_connection_id_independent_of_process_birth():
+    transports = [MCPTransport(SimpleNamespace(pid=0, stderr=None), "srv", max_line_chars=1024, connect_timeout=1) for _ in range(2)]
+    assert transports[0].binding.birth_token == transports[1].binding.birth_token, "同一 pid 的出生身份相同（取不到时都为空）"
+    assert len(transports[0].connection_id) == 32 and transports[0].connection_id != transports[1].connection_id
+    repo, client = _Repo(), _Client(_config(), _read_result(_observation()))
+    ids = {_published(repo, client, transport=transport).tools["mcp__srv__read"].observation_binding.activation_id for transport in transports}
+    assert len(ids) == 2 and all(item == f"mcp:srv:{transport.connection_id[:16]}" for item, transport in zip(sorted(ids), sorted(transports, key=lambda t: t.connection_id)))
+
+
+def test_schema_canonicalization_failure_and_undiscovered_approvals_get_their_own_codes():
+    broken = [MCPToolInfo("read", "采样", {"type": "object", "properties": {"window": "not-a-schema"}}), TOOLS[1]]
+    with pytest.raises(MCPDeclarationError) as info:
+        resolve_server_declarations(_config(), broken)
+    assert list(info.value.reasons) == [{"tool": "read", "code": INPUT_SCHEMA_INVALID}]
+    resolved = resolve_server_declarations(_config(tool_approvals={"read": "always", "ghost": "mutating", "*": "dangerous"}), TOOLS)
+    assert resolved.notices == ({"tool": "ghost", "code": DECLARED_TOOL_NOT_DISCOVERED},), "审批声明了但没发现的工具也提醒；通配 * 不算"
 
 
 def test_server_without_declarations_publishes_byte_identical_proxies():

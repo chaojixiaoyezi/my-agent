@@ -906,7 +906,8 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
 - **插件回归不改断言**：`test_plugin_proxy_observation.py` 原样通过；`test_plugin_observation.py` 原用例只把上下文构造的 `plugin_id="browser-lite"` 改成 `provider_id="plugin:browser-lite"`（合同改名）；`test_computer_use_profile.py` 追加声明映射断言。
 - **结果**：25 个相关文件 `589 passed, 2 failed`（两处是新用例自身的夹具问题：假客户端缺 `connection()`、换代用例期望写反）→ 修后三文件 `60 passed`；guards9 `170 passed`；`check_import_boundaries` 0；ruff 全仓通过；常数目录重生成后 `--check` 通过（`MAX_OBSERVATION_CANDIDATE_COUNT` 并入 `plugin_observation.MAX_CANDIDATE_COUNT`）；`node frontend/scripts/sync-backend-config.mjs --check` 通过。
 - **变异 8/8 抓到**：跳过 region 几何校验（5 红）、MCP 不按声明设 always（2 红）、动作发送前不复核（5 红）、YAML never 被接受（1 红）、region 不进 content_hash（4 红）、换代后不判 stale（1 红）、未发现当坏项（1 红）、坏项只跳过单工具不整服务拒绝（3 红）。脚本 `run_mutations_j16a.py` 在会话 scratchpad，改完按 sha256 复原核对。
-- **未做**：TUI 真链路读屏审批（放片 F）；发布状态投影 `mcp_server_facts` 还没挂到任何面板；`_validated_refs` 的 InputMediaError 原文改结构化码留到复用图片通道的那一片。
+- **ae 复审修正（同分支第 2 个提交）**：M1 MCP 代次改用宿主在 `MCPTransport` 构造时生成的 `connection_id`（uuid4）前 16 位，不再哈希 ps 出生身份（macOS 只精确到秒、可能为空，同一秒重启会撞车）；补两项用例：替身出生身份相同或为空时代次仍不同、真 `MCPTransport` 两次构造 `connection_id` 不同且绑定代次随之不同。M2 `agent_config.yaml` 注释改了之后前端目录过期，重新生成 `frontend/config/backend-config-catalog.json`；`node frontend/scripts/sync-backend-config.mjs --check` 进本线门禁清单（改注释也要跑）。S1 工具 schema 规范化失败单独记 `input_schema_invalid`；S2 `tool_approvals` 声明了但没发现的工具同样进 notice（`*` 不算）；各补一项用例。
+- **未做**：TUI 真链路读屏审批（放片 F）；发布状态投影 `mcp_server_facts` 按 3a 定在片 F 挂进 `/plugins` 的 MCP 段（TUI 与 IM）；`_validated_refs` 的 InputMediaError 原文改结构化码留到复用图片通道的那一片。
 
 复现（工作树根目录）：
 

@@ -27,7 +27,6 @@ Tool Gateway。部署者只能通过 ``mcp_servers.<server>.tool_effects`` 逐�
 部署者可为需要首轮直接可见的受控服务声明独立分类。分类只影响模型目录，不改变 owner、effect、审批或执行权限。
 """
 
-import hashlib
 import json
 import logging
 import re
@@ -470,15 +469,15 @@ class _BindingSource:
     repo: object | None
 
 
-# LLM: MCP 的 activation_id 取本次固定连接进程出生身份（pid_birth_token）的哈希：子进程重启就换代，旧观察自然 stale；复核库与
-#   插件同源（registry 构造参数 runtime_repo），不新建存储。
+# LLM: MCP 的 activation_id 取本次固定连接的宿主随机串（MCPTransport.connection_id，构造时 uuid4）前 16 位：子进程重启或重连就
+#   换代，旧观察自然 stale。不用 ps 出生身份（macOS 只精确到秒、取不到时为空，同一秒重启会撞车），也不做"取不到再退回"的兜底。
+#   复核库与插件同源（registry 构造参数 runtime_repo），不新建存储。
 # 函数用途: 汇集本次发布的观察绑定来源事实。
-def _binding_source(registry: Any, client: MCPStdioClient, transport: MCPTransport | None) -> _BindingSource:
-    birth = getattr(getattr(transport, "binding", None), "birth_token", "") if transport is not None else ""
-    digest = hashlib.sha256(str(birth).encode("utf-8")).hexdigest()[:16]
+def _binding_source(registry: Any, client: MCPStdioClient, transport: MCPTransport) -> _BindingSource:
+    connection_id = str(transport.connection_id)
     return _BindingSource(
         server_name=client.config.name, provider_id="mcp:" + client.config.name,
-        activation_id=f"mcp:{client.config.name}:{digest}",
+        activation_id=f"mcp:{client.config.name}:{connection_id[:16]}",
         repo=getattr(getattr(registry, "_construction_params", None), "runtime_repo", None),
     )
 
