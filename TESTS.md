@@ -43,6 +43,15 @@
   - 每组都断言与 /settings 一致。
 - 变异 5 个，全部被拦住：插件退回旧的真值判断、插件不要求完整身份、user_config 不要求完整身份、共享判定不去空白、插件恒为非管理员。
 
+## J9 集成后续：语义用例配档案编号，语义通道关闭原因如实写出（2026-10-02，分支 `claude/ae-j9-identity-fix`，基于 `6980e5f41`）
+
+- **背景**：J9 与 P14 修复（`4c624ecd4`）交叉后，`test_semantic_mode_and_keyword_fallback_when_embedding_fails` 拿到 keyword。原因是 P14 起语义通道要用档案编号、协议、端点、模型一起算出空间身份，用例没配档案编号，通道被整条关闭。
+- **改动**：
+  - 用例补 `embedding_model_profile="embed-test"`（与 `test_semantic_recall_integration` 同写法）。
+  - 新增 `test_closed_semantic_channel_reports_the_structured_reason`：开了语义但没有档案编号时，`fallback_reason` 是 `embedding_identity_unavailable`，`semantic_recall.error_code` 是 `MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE`。
+  - 没开语义召回时，原因从 `embedder_unavailable` 改成 `semantic_recall_disabled`。
+- **门禁**：见交付记录（相关测试、guards9、import 边界、ruff、doc_sync、code-size strict、`diff --check`、clean_package、`size_diff`）。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：

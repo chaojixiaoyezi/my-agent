@@ -108,6 +108,9 @@
 - **开关**：`enable_memory_search_tool`，默认关，属于安全边界。模型不能自己打开，用户可经 `/settings` 或配置文件打开。
 - **开销**：语义开着时，每次多 1 次查询嵌入，加上范围内未缓存条目的正文嵌入；没有模型调用。
 - 设计见[决策模型接入设计](docs/design/DECISION_MODEL_INTEGRATION.md)“P5-A 缺口 2”节，验证见 TESTS.md 同名节。
+- **集成后续**（2026-10-02，分支 `claude/ae-j9-identity-fix`，基于 `6980e5f41`）：
+  - 和 P14 修复交叉后，语义用例要配档案编号才能算出空间身份，已补上。
+  - 语义通道被关掉时，`fallback_reason` 改为按存储层结构化诊断写明原因（如 `embedding_identity_unavailable`、`semantic_recall_disabled`），不再笼统写 `embedder_unavailable`。
 
 ## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `claude/3a-step16z` `58c674d46`，已实现，待集成）
 

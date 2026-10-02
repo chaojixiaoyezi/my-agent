@@ -483,7 +483,11 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
   - `entries`：每条给 `entry_id`、`version`、`kind`、`scope`、`subject_key`、`updated_at`（UTC ISO），正文摘录 `excerpt`（前 300 字），以及 `content_chars` 和 `excerpt_truncated`。
   - `retrieval`：这次检索的结构化事实。
     - `mode`：`semantic`（词面加向量融合）、`keyword`（只有词面）、`none`（范围内没有条目，没检索）。
-    - `fallback_reason`：没走语义时写原因，`embedder_unavailable` 是没有嵌入端，`embedding_failed` 是这次嵌入失败。
+    - `fallback_reason`：没走语义时写原因。
+      - `semantic_recall_disabled`：没开语义召回。
+      - `embedding_failed`：这次嵌入失败。
+      - 语义通道被关掉时，从存储层诊断码推导：去掉 `MEMORY_` 前缀、转小写。例如 P14 的空间身份不可用写成 `embedding_identity_unavailable`，档案不可用写成 `embedding_profile_unavailable`。新增诊断码不用改代码。
+      - 没有诊断码时写 `embedder_unavailable`。
     - `semantic_recall`：存储层的语义召回状态（含档案不可用之类的原因码）。
     - `scoped_entries`：范围内的正式条目数。
   - `authority=clue_only` 加一句说明。

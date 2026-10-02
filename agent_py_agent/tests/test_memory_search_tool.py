@@ -96,7 +96,7 @@ def test_only_current_scope_entries_with_keyword_mode_and_fallback_reason(tmp_pa
     # 与自动召回同一范围：personal 加记忆库里实际存在的 project；别的公司与无范围旧记录查不到。
     assert {entry["entry_id"] for entry in payload["entries"]} == {personal, project}
     assert payload["retrieval"]["mode"] == "keyword"
-    assert payload["retrieval"]["fallback_reason"] == "embedder_unavailable"
+    assert payload["retrieval"]["fallback_reason"] == "semantic_recall_disabled"
     assert payload["retrieval"]["scoped_entries"] == 2
     assert payload["authority"] == "clue_only"
     only_projects = _call(agent, {"query": "借阅服务端口", "kind": "project"})
@@ -138,7 +138,8 @@ def test_limit_and_excerpt_are_bounded(tmp_path):
 
 def test_semantic_mode_and_keyword_fallback_when_embedding_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_build_memory_embedder", lambda agent, **kwargs: LocalHashingEmbedder(dim=128))
-    agent = _agent(tmp_path, memory_semantic_recall=True)
+    # P14 起语义通道要能由同一客户端算出空间身份（档案编号 + 协议 + 端点 + 模型），所以配上档案编号。
+    agent = _agent(tmp_path, memory_semantic_recall=True, embedding_model_profile="embed-test")
     fact = _remember(agent, "周会固定在星期三下午三点")
 
     semantic = _call(agent, {"query": "周会什么时候开"})
@@ -154,6 +155,18 @@ def test_semantic_mode_and_keyword_fallback_when_embedding_fails(tmp_path, monke
     assert fallback["retrieval"]["mode"] == "keyword"
     assert fallback["retrieval"]["fallback_reason"] == "embedding_failed"
     assert [entry["entry_id"] for entry in fallback["entries"]] == [fact]
+
+
+def test_closed_semantic_channel_reports_the_structured_reason(tmp_path, monkeypatch):
+    # 开了语义召回、客户端也建得出来，但没有档案编号 → 空间身份不可用，通道整条关闭；原因如实来自结构化诊断码。
+    monkeypatch.setattr(core, "_build_memory_embedder", lambda agent, **kwargs: LocalHashingEmbedder(dim=128))
+    agent = _agent(tmp_path, memory_semantic_recall=True)
+    _remember(agent, "周会固定在星期三下午三点")
+
+    retrieval = _call(agent, {"query": "周会星期三"})["retrieval"]
+    assert retrieval["mode"] == "keyword"
+    assert retrieval["fallback_reason"] == "embedding_identity_unavailable"
+    assert retrieval["semantic_recall"]["error_code"] == "MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE"
 
 
 def test_results_do_not_enter_recall_access_accounting(tmp_path):

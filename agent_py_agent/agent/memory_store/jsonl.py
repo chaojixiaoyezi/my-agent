@@ -1009,16 +1009,31 @@ class _JsonlMemoryLifecycleMixin:
 
 # LLM: 只读投影：没有检索器（top_k<=0 或范围内没有条目）时 mode=none；semantic_recall 是存储层状态副本，
 #   含档案不可用等原因码，不含正文和凭据。放在模块级是为了不撑大检索 mixin。
+#   没有嵌入端时，fallback_reason 按存储层结构化诊断写明为什么没有（见 _semantic_unavailable_reason）。
 # 函数用途: 把一次 scoped 检索的方式、降级原因和范围条目数整理成结构化事实。
 def _scoped_retrieval_facts(
     retriever: object | None, scoped_entries: int, semantic_status: dict[str, str]
 ) -> dict[str, object]:
+    reason = str(getattr(retriever, "last_fallback_reason", "") or "")
+    if reason == "embedder_unavailable":
+        reason = _semantic_unavailable_reason(semantic_status)
     return {
         "mode": str(getattr(retriever, "last_retrieval_mode", "none") or "none"),
-        "fallback_reason": str(getattr(retriever, "last_fallback_reason", "") or ""),
+        "fallback_reason": reason,
         "scoped_entries": scoped_entries,
         "semantic_recall": dict(semantic_status),
     }
+
+
+# LLM: 只读 composition root 写下的结构化诊断（state/error_code），不读日志文案：没开语义召回是 semantic_recall_disabled；
+#   通道降级时从诊断码本身推导（去掉 MEMORY_ 前缀、转小写，如 MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE →
+#   embedding_identity_unavailable），新增诊断码不用改这里；没有诊断码时保持 embedder_unavailable。
+# 函数用途: 说明这次检索为什么没有嵌入端可用。
+def _semantic_unavailable_reason(semantic_status: dict[str, str]) -> str:
+    if str(semantic_status.get("state") or "") == "disabled":
+        return "semantic_recall_disabled"
+    code = str(semantic_status.get("error_code") or "").strip().lower()
+    return code.removeprefix("memory_") or "embedder_unavailable"
 
 
 # LLM: This mixin owns reads and rebuildable search projections; it never becomes the formal memory authority.

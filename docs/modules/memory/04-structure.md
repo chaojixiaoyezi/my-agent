@@ -11,6 +11,7 @@
   - 检索事实有 `mode`（semantic/keyword/none）、`fallback_reason`、`scoped_entries`、`semantic_recall`。
   - `_search_scoped` 改为返回二元组，两个原入口取第一项，结果与副作用不变。
 - `retrieval/hybrid.HybridRetriever`：每次 `rank` 记下 `last_retrieval_mode` 与 `last_fallback_reason`（`embedder_unavailable`/`embedding_failed`），只是观察，不参与排序。
+- `memory_store/jsonl._semantic_unavailable_reason`：没有嵌入端时，按存储层 `semantic_recall` 的 state 和 error_code 推出原因（`semantic_recall_disabled`，或诊断码去掉 `MEMORY_` 前缀转小写，如 `embedding_identity_unavailable`）。
 - `memory_store/recall`：
   - 新增 `runtime_long_term_scope`（task 范围加记忆库里实际存在的 project 范围）。
   - 新增 `formal_recall_suppressed`/`is_isolated_recall_context`（`task_local`/`control_plane` 或记忆总闸关）。
