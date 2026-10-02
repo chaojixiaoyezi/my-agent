@@ -2,6 +2,17 @@
 
 ## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察 → 已实施）
 
+## P17 合入后的 code-size 拆平（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`，已实现，待集成）
+
+- **起因**：集成分支合入 P17 后，相对已上线 step16y 多出 3 条 high-risk（UserConfigTool 类行数接近软上限、
+  revert_change / read_config_fact 嵌套 3 层）。本轮只做结构拆平，行为、错误码、回执字段一律不变。
+- **做法**：`_decision`/`_decision_model_operation` 移成模块级函数（函数名不变，保持基线告警身份）；
+  `revert_change` 抽 `_revert_entry` 早返回压平；`read_config_fact` 抽 `_fact_paths` 按 source 早返回路径。
+- **验证**：相关 174 passed、guards9 167 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package 全过；
+  warn 基线比对 step16y → ADDED=0。详见 TESTS.md。
+
+## 飞书上 Goal 空转片逐片推送、熔断提示不主动推送（2026-10-01，C11 实测观察，待 3a/用户定）
+
 - **现象**（假飞书 + 真网关 + 真模型，`6b2f56dc7`）：
   - 用户在飞书设了一个"等我发笔记"的持续目标。前台确认之后，3 个续跑片每片都给出一句很短的"在等你"，每句都按后台送达规则主动推给了用户（`reason=thread_goal_continue delivery=sent`），10 秒内连收 3 条。
   - 熔断暂停后，提示 `GOAL_CONTINUATION_NO_PROGRESS` 只进了线程的 `pending_host_notices`，要等用户下一次说话才随回复送达。用户不说话，就只看到 3 条"在等你"，不知道续跑已经停了。

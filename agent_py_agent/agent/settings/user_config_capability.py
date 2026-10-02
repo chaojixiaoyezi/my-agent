@@ -406,6 +406,25 @@ def mask_value(key: str, value: object) -> str:
     return str(masked or "")
 
 
+# LLM: 非 agent 来源的读取文件路径按 source 解析：capability 的用户文件是运行时实际读取的那份（capability_path，
+#   调用方按 capability_config_for_agent 同一路径解析）；runtime_guard/log_analysis 没有用户覆盖层，只有随包默认。
+#   早返回压平嵌套：主配置/未知来源直接回原路径。
+# 函数用途: 按参数来源给出读取用户值与随包默认值要用的两个文件路径。
+def _fact_paths(
+    spec: object, *, user_path: Path | None, default_path: Path, capability_path: Path | None
+) -> tuple[Path | None, Path]:
+    if spec is None or getattr(spec, "source", "agent") == "agent":
+        return user_path, default_path
+    source = spec.source
+    base = Path(default_path).parent
+    packaged = base / f"{source}_config.yaml"
+    if source == "capability":
+        return capability_path, packaged
+    if user_path is not None:
+        return Path(user_path).with_name(f"{source}_config.yaml"), packaged
+    return None, packaged
+
+
 # LLM: 生效值＝用户配置文件里的值优先；没写才回落到随包默认 YAML。报告必须同时给出两者与来源，
 #   否则模型会把随包默认当成"用户配置"（真机：模型去读安装目录里的 agent_config.yaml 当答案）。
 #   能不能改只由参数中心登记表的 writable 回答；这里不再给旧白名单的 tunable 字段（09-27 模型见 writable=true、
@@ -421,17 +440,10 @@ def read_config_fact(
     from .parameter_registry import parameter_registry
 
     spec = parameter_registry().get(name)
+    user_path, default_path = _fact_paths(spec, user_path=user_path, default_path=default_path,
+                                          capability_path=capability_path)
     if spec is not None and getattr(spec, "source", "agent") != "agent":
         source = spec.source
-        base = Path(default_path).parent
-        default_path = base / f"{source}_config.yaml"
-        if source == "capability":
-            user_path = capability_path
-        elif user_path is not None:
-            user_path = Path(user_path).with_name(f"{source}_config.yaml")
-        else:
-            # runtime_guard/log_analysis 没有用户覆盖层：没有可读的用户文件，只有随包默认。
-            user_path = None
     user_values = load_simple_yaml(user_path) if user_path is not None and user_path.exists() else {}
     default_values = load_simple_yaml(default_path) if default_path.exists() else {}
     user_value = user_values.get(name)

@@ -1,5 +1,27 @@
 # 测试与发布验收
 
+## P17 合入后的 code-size 拆平，行为不变（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`）
+
+- 拆掉 P17 新增的 3 条 high-risk 告警（只重构，不改行为、错误码、回执字段）：
+  - `user_config_tool.py::UserConfigTool` 类行数接近软上限 → `_decision`、`_decision_model_operation` 两个与类状态无关的方法
+    移成模块级函数（`execute` 改调 `_decision(self._agent, ...)` / `_decision_model_operation(self._agent, ...)`），类内只留
+    `__init__`/`execute`/`_view` 与声明；函数名不变，基线已有的 `_decision_model_operation` nesting 告警身份保持。
+  - `parameter_changes.py::revert_change` 嵌套 3 层（def→try→if/if）→ 抽出 `_revert_entry`（早返回压平：
+    masked 提前抛 CHANGE_MASKED、无覆盖提前抛 PARAMETER_NOT_OVERRIDDEN），`revert_change` 只留查找 + try/except 包装。
+  - `user_config_capability.py::read_config_fact` 嵌套 3 层（def→if→if/elif）→ 抽出 `_fact_paths`（按 source 早返回
+    用户文件/随包路径），`read_config_fact` 只留一次路径解析 + 值合并。
+- 比对（3a 要求）：`--mode warn --write-baseline` 输出 `/private/tmp/claude-501/m-ds2-after.json`，与 step16y 基线
+  `bl-claude-3a-step16y.json` 按 (kind, path, name, severity) 集合比对 → **ADDED=0**（REMOVED 2 条为集成分支其它提交所致，
+  与本轮文件无关）。
+- 命令与结果（`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，basetemp=/private/tmp/claude-501/m-ds2）：
+  - 相关 8 文件（test_parameter_sources/test_settings_chat_control/test_user_config_capability/test_parameter_registry/
+    test_user_config_decision_patch/test_value_display_parity/test_parameter_changes/test_structured_masking）→ **174 passed**；
+  - guards9 全量（10 文件，含 test_packaging）→ **167 passed**；
+  - `check_import_boundaries.py` → **0 条**；`ruff check agent_py_agent scripts` → **All checks passed**；
+  - `check_doc_sync.py` → **DOC_SYNC_PASS**；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
+    → **hard=0, blocked=False**（跑完 `git checkout -- CODE_SIZE_REPORT.md` 还原）；`git diff --check` → 通过；
+    `check_clean_package.py .` → **OK**。
+
 ## 飞书：假飞书 + 真网关 + 真适配器 + 真模型，验后台完成送达与 Goal 熔断提示（C11）（2026-10-01，ae，被测 `claude/3a-step16z` `6b2f56dc7`）
 
 - **做法**：

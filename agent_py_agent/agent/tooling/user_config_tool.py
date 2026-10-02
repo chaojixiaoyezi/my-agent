@@ -285,9 +285,9 @@ class UserConfigTool(BaseTool):
     def execute(self, params: dict) -> ToolHandlerOutcome:
         action = str(params.get("action") or "view").strip().lower()
         if action in {"decision_read", "decision_patch", "decision_reset", "decision_experiment_revoke"}:
-            return self._decision(action.removeprefix("decision_"), params)
+            return _decision(self._agent, action.removeprefix("decision_"), params)
         if action in {"decision_models", "decision_probe"}:
-            return self._decision_model_operation(action, params)
+            return _decision_model_operation(self._agent, action, params)
         if not _is_main_owner(self._agent):
             return ToolHandlerOutcome("user_config", False, "当前用户不能访问本机全局配置。",
                 error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
@@ -302,91 +302,6 @@ class UserConfigTool(BaseTool):
             "不支持的配置 action。",
             error_code="TOOL_INVALID_ARGUMENTS",
         )
-
-    # LLM: 主会话可读取宿主线程本地 RunParams，子代理只读自身 runner 身份；撤销只能引用原许可并使用完整 CAS。
-    #   read 在本会话已有实验授权时附只读实验证据评估（_with_experiment_evaluation），模型无法据此授权或晋升。
-    #   patch 的等待时间先按能力配置上下限检查，越界直接拒绝（DECISION_TIMEOUT_OUT_OF_BOUNDS），不进设置服务；
-    #   read 回显该范围与管理员是否允许本用户使用 Jev（admin_decision_model_allowed，只读，模型改不了）。
-    #   本工具各动作共用一份扁平 schema，reason/key/value 等别的动作的字段也能过 schema；这里不替模型删字段，
-    #   服务拒绝时回执写明 unknown_fields 与 allowed_fields（2026-09-28 生产上连续被拒三次，旧回执看不出是哪个字段）。
-    # 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖，自调等待时间受上下限约束。
-    def _decision(self, operation: str, params: dict) -> ToolHandlerOutcome:
-        from ..settings.decision_settings import execute_decision_settings_operation
-        from ..settings.decision_settings_schema import (
-            DecisionSettingsAccessError,
-            DecisionSettingsConflict,
-            DecisionSettingsUnknownFields,
-        )
-        from ..settings.model_provider_schema import ModelProfileError
-
-        if self._agent is None:
-            return ToolHandlerOutcome("user_config", False, "缺少可信用户配置上下文。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
-        thread_id, source = _decision_thread_scope(self._agent)
-        payload = {key: value for key, value in params.items() if key != "action"}
-        if payload.get("scope") == "thread" and not thread_id:
-            return ToolHandlerOutcome("user_config", False, "当前运行没有可信会话，不能写入临时覆盖。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
-        refusal = _timeout_refusal(self._agent, operation, payload.get("changes"))
-        if refusal is not None:
-            return refusal
-        try:
-            report = execute_decision_settings_operation(self._agent, operation, payload, thread_id=thread_id)
-        except DecisionSettingsConflict as exc:
-            return ToolHandlerOutcome("user_config", False, str(exc), error_code="STALE_VERSION", reported_error_code="DECISION_SETTINGS_CONFLICT", effect_outcome="not_started")
-        except DecisionSettingsAccessError as exc:
-            return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
-        except DecisionSettingsUnknownFields as exc:
-            return _unknown_fields_refusal(exc)
-        except ModelProfileError as exc:
-            return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
-        except OSError:
-            return ToolHandlerOutcome("user_config", False, "配置存储读写失败，请重新读取核对是否保存。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
-        report["scope_resolution"] = {"source": source, "effective": {"thread_id": thread_id, "scope": report["scope"]}}
-        if operation == "read":
-            report = _with_experiment_evaluation(self._agent, {**_read_facts(self._agent), **report}, thread_id)
-        # 原投影先列 revision，再列大段字段目录；排序会把 CAS 版本挤出有界模型预览。
-        return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False))
-
-    # LLM: 目录与探测复用同一可信 thread 裁决；不重建后端或配置器，拒绝显式身份和秘密，取消原样传播。
-    # 函数用途: 按当前可信会话列出决策配置或发起一次用户要求的测试；真实测试失败保持工具失败及结构化报告。
-    def _decision_model_operation(self, operation: str, params: dict) -> ToolHandlerOutcome:
-        from ..settings.decision_settings_schema import (
-            DecisionSettingsAccessError,
-            positive_seconds,
-            profile_reference,
-        )
-        from ..settings.model_profiles import execute_model_profile_operation
-        from ..settings.model_provider_schema import ModelProfileError
-
-        if self._agent is None:
-            return ToolHandlerOutcome("user_config", False, "缺少可信用户配置上下文。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
-        thread_id, source = _decision_thread_scope(self._agent)
-        try:
-            required = {"action", "profile_id", "timeout_seconds"} if operation == "decision_probe" else {"action"}
-            if set(params) != required:
-                raise ModelProfileError("决策目录仅接受 action；连接测试必须且只能填写 action、profile_id、timeout_seconds，不能指定身份或连接凭据。")
-            payload = {}
-            if operation == "decision_probe":
-                payload = {"profile_id": profile_reference(params["profile_id"]), "timeout_seconds": positive_seconds(params["timeout_seconds"])}
-                if not payload["profile_id"]:
-                    raise ModelProfileError("连接测试需要明确选择已保存的决策模型编号。")
-                if not thread_id:
-                    raise DecisionSettingsAccessError("当前运行没有可信会话，不能发起决策连接测试。")
-            report = execute_model_profile_operation(self._agent, operation, payload, thread_id=thread_id)
-        except InterruptedError:
-            raise
-        except DecisionSettingsAccessError as exc:
-            return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
-        except ModelProfileError as exc:
-            return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
-        except OSError:
-            return ToolHandlerOutcome("user_config", False, "决策配置读取或测试记录保存失败，请重新读取核对。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
-        scope = "thread" if operation == "decision_probe" else "owner"
-        report = {**report, "scope_resolution": {"source": source, "effective": {"thread_id": thread_id, "scope": scope}}}
-        output = json.dumps(report, ensure_ascii=False, sort_keys=True)
-        if report.get("ok") is not True:
-            return ToolHandlerOutcome("user_config", False, output, result_envelope={"decision_report": report},
-                error_code="TOOL_EXECUTION_FAILED", reported_error_code="DECISION_PROBE_FAILED", effect_outcome="unknown")
-        return ToolHandlerOutcome("user_config", True, output, result_envelope={"decision_report": report})
 
     # LLM: 用户配置路径取当前进程实际加载的配置文件（见 user_config_path）；参数事实来自参数中心登记表。
     #   capability 键的读取（read_config_fact）与运行值（_spec_view）都按运行时实际路径走，不拿用户配置同目录猜。
@@ -411,6 +326,95 @@ class UserConfigTool(BaseTool):
         return ToolHandlerOutcome(
             "user_config", True, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         )
+
+
+# LLM: 主会话可读取宿主线程本地 RunParams，子代理只读自身 runner 身份；撤销只能引用原许可并使用完整 CAS。
+#   read 在本会话已有实验授权时附只读实验证据评估（_with_experiment_evaluation），模型无法据此授权或晋升。
+#   patch 的等待时间先按能力配置上下限检查，越界直接拒绝（DECISION_TIMEOUT_OUT_OF_BOUNDS），不进设置服务；
+#   read 回显该范围与管理员是否允许本用户使用 Jev（admin_decision_model_allowed，只读，模型改不了）。
+#   本工具各动作共用一份扁平 schema，reason/key/value 等别的动作的字段也能过 schema；这里不替模型删字段，
+#   服务拒绝时回执写明 unknown_fields 与 allowed_fields（2026-09-28 生产上连续被拒三次，旧回执看不出是哪个字段）。
+#   与类状态无关，抽成模块级函数给 execute 调用，避免 UserConfigTool 类超行数软上限。
+# 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖，自调等待时间受上下限约束。
+def _decision(agent: object | None, operation: str, params: dict) -> ToolHandlerOutcome:
+    from ..settings.decision_settings import execute_decision_settings_operation
+    from ..settings.decision_settings_schema import (
+        DecisionSettingsAccessError,
+        DecisionSettingsConflict,
+        DecisionSettingsUnknownFields,
+    )
+    from ..settings.model_provider_schema import ModelProfileError
+
+    if agent is None:
+        return ToolHandlerOutcome("user_config", False, "缺少可信用户配置上下文。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+    thread_id, source = _decision_thread_scope(agent)
+    payload = {key: value for key, value in params.items() if key != "action"}
+    if payload.get("scope") == "thread" and not thread_id:
+        return ToolHandlerOutcome("user_config", False, "当前运行没有可信会话，不能写入临时覆盖。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+    refusal = _timeout_refusal(agent, operation, payload.get("changes"))
+    if refusal is not None:
+        return refusal
+    try:
+        report = execute_decision_settings_operation(agent, operation, payload, thread_id=thread_id)
+    except DecisionSettingsConflict as exc:
+        return ToolHandlerOutcome("user_config", False, str(exc), error_code="STALE_VERSION", reported_error_code="DECISION_SETTINGS_CONFLICT", effect_outcome="not_started")
+    except DecisionSettingsAccessError as exc:
+        return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+    except DecisionSettingsUnknownFields as exc:
+        return _unknown_fields_refusal(exc)
+    except ModelProfileError as exc:
+        return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+    except OSError:
+        return ToolHandlerOutcome("user_config", False, "配置存储读写失败，请重新读取核对是否保存。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
+    report["scope_resolution"] = {"source": source, "effective": {"thread_id": thread_id, "scope": report["scope"]}}
+    if operation == "read":
+        report = _with_experiment_evaluation(agent, {**_read_facts(agent), **report}, thread_id)
+    # 原投影先列 revision，再列大段字段目录；排序会把 CAS 版本挤出有界模型预览。
+    return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False))
+
+
+# LLM: 目录与探测复用同一可信 thread 裁决；不重建后端或配置器，拒绝显式身份和秘密，取消原样传播。
+#   与类状态无关，抽成模块级函数给 execute 调用，避免 UserConfigTool 类超行数软上限。
+# 函数用途: 按当前可信会话列出决策配置或发起一次用户要求的测试；真实测试失败保持工具失败及结构化报告。
+def _decision_model_operation(agent: object | None, operation: str, params: dict) -> ToolHandlerOutcome:
+    from ..settings.decision_settings_schema import (
+        DecisionSettingsAccessError,
+        positive_seconds,
+        profile_reference,
+    )
+    from ..settings.model_profiles import execute_model_profile_operation
+    from ..settings.model_provider_schema import ModelProfileError
+
+    if agent is None:
+        return ToolHandlerOutcome("user_config", False, "缺少可信用户配置上下文。", error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+    thread_id, source = _decision_thread_scope(agent)
+    try:
+        required = {"action", "profile_id", "timeout_seconds"} if operation == "decision_probe" else {"action"}
+        if set(params) != required:
+            raise ModelProfileError("决策目录仅接受 action；连接测试必须且只能填写 action、profile_id、timeout_seconds，不能指定身份或连接凭据。")
+        payload = {}
+        if operation == "decision_probe":
+            payload = {"profile_id": profile_reference(params["profile_id"]), "timeout_seconds": positive_seconds(params["timeout_seconds"])}
+            if not payload["profile_id"]:
+                raise ModelProfileError("连接测试需要明确选择已保存的决策模型编号。")
+            if not thread_id:
+                raise DecisionSettingsAccessError("当前运行没有可信会话，不能发起决策连接测试。")
+        report = execute_model_profile_operation(agent, operation, payload, thread_id=thread_id)
+    except InterruptedError:
+        raise
+    except DecisionSettingsAccessError as exc:
+        return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_PERMISSION_DENIED", effect_outcome="not_started")
+    except ModelProfileError as exc:
+        return ToolHandlerOutcome("user_config", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+    except OSError:
+        return ToolHandlerOutcome("user_config", False, "决策配置读取或测试记录保存失败，请重新读取核对。", error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
+    scope = "thread" if operation == "decision_probe" else "owner"
+    report = {**report, "scope_resolution": {"source": source, "effective": {"thread_id": thread_id, "scope": scope}}}
+    output = json.dumps(report, ensure_ascii=False, sort_keys=True)
+    if report.get("ok") is not True:
+        return ToolHandlerOutcome("user_config", False, output, result_envelope={"decision_report": report},
+            error_code="TOOL_EXECUTION_FAILED", reported_error_code="DECISION_PROBE_FAILED", effect_outcome="unknown")
+    return ToolHandlerOutcome("user_config", True, output, result_envelope={"decision_report": report})
 
 
 # LLM: 只有主 owner 能走到这里（execute 已拦普通 owner）；写入统一交给参数中心，actor 记为 model。有写文件副作用。

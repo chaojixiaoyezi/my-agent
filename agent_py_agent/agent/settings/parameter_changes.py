@@ -357,30 +357,38 @@ def revert_change(change_id: str, *, paths: WritePaths, origin: ChangeOrigin) ->
     try:
         user_path = paths.user_path if paths.user_path is not None else Path()
         entry = _find_change(parameter_history(user_path=user_path, limit=0), change_id)
-        spec = _writable_spec(str(entry.get("key") or ""))
-        path = _write_target(spec, paths)
-        if entry.get("masked"):
-            raise ParameterChangeError("CHANGE_MASKED", f"'{spec.key}' 是凭据类参数，记录里只有脱敏值，不能回滚；请重新设置。")
-        target = entry.get("previous")
-        existed = path.is_file()
-        original = path.read_text(encoding="utf-8") if existed else ""
-        if not existed:
-            if target is None:
-                raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# 由参数中心创建（只含被改的键，其余按随包默认）\n", encoding="utf-8")
-        current = unset_simple_yaml_value(path, spec.key) if target is None else set_simple_yaml_raw(path, spec.key, str(target))[0]
-        actual = _effective(path, spec.key)
-        if target is None and current is None:
-            _restore(path, original, existed)
-            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
-        row = _ChangeRow("revert", current, None if target is None else str(target), origin, reverts=str(entry["id"]))
-        entry_out = _record(paths.user_path if paths.user_path is not None else path, spec, row)
-        return _receipt(path, spec, entry_out, actual)
+        return _revert_entry(paths, entry, origin)
     except ParameterChangeError as error:
         return _failure(error)
     except (OSError, ValueError) as error:
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+
+
+# LLM: 回滚单条记录的核心写入：先把当前配置值写回 previous（或删除覆盖行），再用正式加载器回读核对。
+#   凭据类记录只有脱敏值、不能回滚；capability 文件原本不存在且目标就是默认时按没有覆盖拒绝。
+#   嵌套用早返回压平：masked、无覆盖、回读没变化各自提前抛错，不把 if 叠起来。副作用：写配置与账本。
+# 函数用途: 执行一条修改记录的回滚写入与回读核对，返回结构化回执。
+def _revert_entry(paths: WritePaths, entry: dict[str, object], origin: ChangeOrigin) -> dict[str, object]:
+    spec = _writable_spec(str(entry.get("key") or ""))
+    path = _write_target(spec, paths)
+    if entry.get("masked"):
+        raise ParameterChangeError("CHANGE_MASKED", f"'{spec.key}' 是凭据类参数，记录里只有脱敏值，不能回滚；请重新设置。")
+    target = entry.get("previous")
+    existed = path.is_file()
+    original = path.read_text(encoding="utf-8") if existed else ""
+    if not existed and target is None:
+        raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
+    if not existed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# 由参数中心创建（只含被改的键，其余按随包默认）\n", encoding="utf-8")
+    current = unset_simple_yaml_value(path, spec.key) if target is None else set_simple_yaml_raw(path, spec.key, str(target))[0]
+    actual = _effective(path, spec.key)
+    if target is None and current is None:
+        _restore(path, original, existed)
+        raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
+    row = _ChangeRow("revert", current, None if target is None else str(target), origin, reverts=str(entry["id"]))
+    entry_out = _record(paths.user_path if paths.user_path is not None else path, spec, row)
+    return _receipt(path, spec, entry_out, actual)
 
 
 # LLM: 编号至少 6 位前缀，在给定记录里找唯一一条；找不到或不唯一都拒绝。只读。
