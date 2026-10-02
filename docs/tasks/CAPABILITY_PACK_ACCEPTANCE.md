@@ -1054,6 +1054,17 @@ MiniMax-M2.7，两边各只发一次需求，需求里不提插件名。
     - enable 的本人确认回执末尾带"错误码：TOOL_INVALID_ARGUMENTS"，看起来像失败；
     - 包放在 owner 范围外时只报"读取未获授权"，可以直接说明应该放到哪里。
 
+### 后续已修（2026-10-02，分支 `worker/ds1-c14-followups`，基于 `d55cb266c`）
+
+上面的"建议"已逐条收尾，均不挡本验收结论，详见 DESIGN_LEDGER 顶部同名段：
+
+- **确认回执**：`details.reason == "confirmation_required"` 仍作结构化判定；回执带 `state = "confirmation_required"`，文本不再追加通用错误码；error_taxonomy 正式登记 `PLUGIN_CONFIRMATION_REQUIRED`（category=state、retryable=True、RecoveryAction.REQUEST_USER_INPUT）。TUI 与 IM（/ask、/control 持久控制回执）两个入口都经 `plugin_command_service._log_rejection` 统一生效。
+- **越界提示**：安装包在 owner 范围外时，按路径策略的结构化事实（`policy.owner_scope_root`）提示当前允许放置插件包的根目录；策略不可用时提示放到当前会话工作区（或显式授权目录）。
+- **管理动作文案（C10）**：普通用户看到被权限拒的管理动作标"（仅管理员可用）"（与 PluginManagement 授权判定同一来源的结构化事实），真正未开放的动作仍标"（尚未开放）"；TUI 与 IM 一致。
+- **gates 跳过语义**：cast 无名字 → no-names 跳过；大纲无 props → prop-cap 跳过；shots 空数组 → shot-recipe 跳过，shots input_schema 加 `minItems: 1`。跳过报 skipped，不计通过。
+- **media-shell 说明与元数据**：`production_collect` 说明改为"重新生成同一份夹具字节"（行为不变）；`production_prepare`/`production_confirm` 保留 read_only 声明（宿主合同里只管工作区写权限），说明补写会写插件私有记录；PROVENANCE 补注 MP4 夹具是本仓新增、不是上游的；wheel 许可元数据 `Apache-2.0 AND MIT`。
+- **待定（不改行为）**：确认码由 prepare 直接返回、模型可自行 confirm 的问题已记入 DESIGN_LEDGER；当前不接付费生成，接任何真实供应商前必须改为宿主层面的本人确认。
+
 ### 证据
 `~/.my-agent/decision-evidence/c14-plugin-acceptance-bf4a2/`（仓库外）：
 - 构建与包摘要、stage-report；

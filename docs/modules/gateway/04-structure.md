@@ -71,6 +71,12 @@ cli 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补
   `scope.metadata` 中的 is_admin、owner、actor 不能授权；业务调用不借管理员资格。
 - IM 只投影原服务的纯文本、请求编号和结构化错误码；含可执行程序/外部解释器的启用预览及确认码不重写。
   插件 `display` 动作仍是 TUI 本地面板，不在 IM 执行；普通工具审批没有新增 IM 运输。
+- 2026-10-02（C14 后续，ds1）：`plugin_command_service._log_rejection` 对确认预览回执
+  （`details.reason == "confirmation_required"`）不再追加“错误码：X”，回执带 `state=confirmation_required`
+  与 `PLUGIN_CONFIRMATION_REQUIRED`；TUI 与 IM 一致。管理动作可用性按结构化原因渲染：
+  `CommandActionSpec.unavailable_reason`（admin_only → “（仅管理员可用）”，其它 → “（尚未开放）”），
+  `plugin_command_catalog` schema v3→v4 增加该字段，旧载荷缺字段时宽容回退。
+  安装包越界时按路径策略 `policy.owner_scope_root` 提示当前允许放置的根目录，不泄露其它 owner 私有路径。
 
 ## /effort 八档控制 C7（2026-10-02，本地待集成）
 

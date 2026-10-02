@@ -18,14 +18,18 @@ def declaration_list(value: object) -> list:
 
 
 # LLM: 序列化字段与 dataclass 同源；完整字段及精确类型是协议要求，禁止隐式补全或强制转换。
+#   老包声明缺可选字段（如 unavailable_reason）时，由调用方在传入前补齐默认值，这里不做特判。
 # 函数用途: 校验跨进程命令声明的字段集合和基础类型。
 def _record(
-    value: object, kind: type, *, strings: tuple[str, ...], booleans: tuple[str, ...] = ()
+    value: object, kind: type, *, strings: tuple[str, ...], booleans: tuple[str, ...] = (),
 ) -> dict:
-    if not isinstance(value, dict) or set(value) != {item.name for item in fields(kind)}:
+    expected = {item.name for item in fields(kind)}
+    if not isinstance(value, dict):
+        raise ValueError("声明必须是对象")
+    if (expected - set(value)) or (set(value) - expected):
         raise ValueError("声明字段不完整或存在未知字段")
-    if any(not isinstance(value[key], str) for key in strings) or any(
-        type(value[key]) is not bool for key in booleans
+    if any(not isinstance(value[key], str) for key in strings if key in value) or any(
+        type(value[key]) is not bool for key in booleans if key in value
     ):
         raise ValueError("声明字段类型错误")
     return dict(value)
@@ -48,12 +52,15 @@ def _argument(value: object) -> ArgumentSpec:
 
 
 # LLM: kind/target 仍只是声明；目录与安装调用方必须继续核对作用域和实际执行权限。
+#   unavailable_reason 由宿主按身份计算，老包声明没有该字段时按默认空串处理，不拒绝旧载荷。
 # 函数用途: 用公共合同读取一个动作及其参数，不取得或运行 handler。
 def command_action_from_payload(value: object) -> CommandActionSpec:
+    if not isinstance(value, dict):
+        raise ValueError("声明必须是对象")
     row = _record(
-        value,
+        {**value, "unavailable_reason": value.get("unavailable_reason", "")},
         CommandActionSpec,
-        strings=("name", "summary", "kind", "target"),
+        strings=("name", "summary", "kind", "target", "unavailable_reason"),
         booleans=("available",),
     )
     row["arguments"] = tuple(_argument(item) for item in declaration_list(row["arguments"]))

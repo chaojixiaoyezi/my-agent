@@ -83,6 +83,8 @@ class ArgumentSpec:
 
 
 # LLM: kind/target 是分派描述而非权限；available 仅声明当前入口是否实现，执行前仍需宿主核对。
+#   unavailable_reason 是宿主按身份/策略算出的结构化不可用原因（admin_only / not_implemented），
+#   只用于帮助文案区分"权限不足"与"尚未开放"，不能替代权限判定。
 # 类用途: 汇集一个动作的参数与用途，统一驱动帮助、解析和补全。
 @dataclass(frozen=True)
 class CommandActionSpec:
@@ -92,6 +94,16 @@ class CommandActionSpec:
     kind: Literal["management", "tool", "model", "display"] = "management"
     target: str = ""
     available: bool = True
+    unavailable_reason: str = ""
+
+    # LLM: 帮助文案只按结构化不可用原因选择，不解析自然语言；空原因按"尚未开放"处理。
+    # 函数用途: 生成动作不可用时的中文标注，区分权限不足与功能未开放。
+    def unavailable_label(self) -> str:
+        if self.available:
+            return ""
+        if self.unavailable_reason == "admin_only":
+            return "（仅管理员可用）"
+        return "（尚未开放）"
 
     # LLM: 同动作内参数身份及选项别名必须唯一；不从 summary 或 usage 推断必填与数量。
     # 函数用途: 拒绝歧义声明，保证多值位置参数只占最后一个位置。

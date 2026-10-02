@@ -61,6 +61,19 @@ def test_nonadmin_is_rejected_before_creating_owner_or_thread(tmp_path):
     assert not service.context.owner.home_dir.exists()
 
 
+def test_catalog_marks_admin_only_actions_with_structured_reason(tmp_path):
+    user, _ = manager(tmp_path, is_admin=False)
+    actions = {action.name: action for action in user.catalog().management_actions}
+    assert actions["install"].available is False
+    assert actions["install"].unavailable_reason == "admin_only"
+    assert actions["enable"].unavailable_reason == "admin_only"
+    # 只读动作不标权限原因；管理员看到的是可用
+    assert actions["list"].available is True and actions["list"].unavailable_reason == ""
+    admin = manager(tmp_path)[0]
+    admin_actions = {action.name: action for action in admin.catalog().management_actions}
+    assert admin_actions["install"].available is True and admin_actions["install"].unavailable_reason == ""
+
+
 def test_readonly_missing_query_does_not_create_storage(tmp_path):
     service, _source = manager(tmp_path)
     result = service.command("/plugins status missing", revision="", request_id="query")

@@ -18,6 +18,55 @@
   - 结果：pre_recall 0.875、curator 1.0、curator_relation 1.0 达标；recall 0.40 未达标，原因见 DESIGN_LEDGER 同名条目。
   - 证据：`~/.my-agent/decision-evidence/j12-quality-bench/`。
 
+## C14 第一批两个插件验收后续：确认回执、越界提示、管理文案、跳过语义与说明对齐（2026-10-02，ds1，分支 `worker/ds1-c14-followups`，基于 `d55cb266c`）
+
+- **改了什么**（详见 DESIGN_LEDGER 顶部同名段）：
+  1. 非 Python 插件 enable 的确认预览回执：回执带 `state="confirmation_required"`，error_taxonomy 登记
+     `PLUGIN_CONFIRMATION_REQUIRED`（category=state、retryable=True、RecoveryAction.REQUEST_USER_INPUT），
+     文本不再追加通用错误码；`plugin_command_service._log_rejection` 对 `details.reason=="confirmation_required"`
+     不再追加"错误码：X"，TUI（plugin_http_response）与 IM（execute_plugin_control）统一生效。
+  2. 安装包越界提示：按路径策略的结构化事实 `policy.owner_scope_root` 提示当前允许放置插件包的根目录。
+  2b. 管理动作文案：`CommandActionSpec` 加 `unavailable_reason` + `unavailable_label()`；`plugin_management._catalog()`
+      按当前身份是否管理员标 `admin_only`/`not_implemented`；`plugin_command_catalog._SCHEMA` 升 v4
+      （`command_declarations._record` 用 optional_strings 宽容旧载荷缺失字段）。
+  3. shuohao 跳过语义：cast 无名字 → no-names、大纲无 props → prop-cap、shots 空数组 → shot-recipe；
+     跳过报 skipped 不计通过；declaration.json shots input_schema 加 `minItems: 1`。
+  4. drama 说明与元数据：collect 说明改"重新生成同一份夹具字节"（行为不变）；prepare/confirm 保留 read_only
+     （宿主合同只管工作区写权限），说明补写私有记录；PROVENANCE 补 MP4 夹具非上游；pyproject license 改
+     `Apache-2.0 AND MIT`。
+- **验证命令**（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugins_chat_control.py \
+    agent_py_agent/tests/test_gateway_plugin_commands.py \
+    agent_py_agent/tests/test_plugin_management.py \
+    agent_py_agent/tests/test_plugin_commands.py \
+    agent_py_agent/tests/test_plugin_command_catalog.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1-c14f
+  # → 141 passed（含新增：确认回执 error_code/无"错误码"文本（IM+TUI）、
+  #   非管理员看到"仅管理员可用"、catalog 里 unavailable_reason 结构化断言）
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_shuohao_novel_gates.py -q --tb=short \
+    -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1-c14f
+  # → 33 passed、1 failed、1 skipped；failed=宿主带确认码启用（MCP 候选启动被沙箱拒绝，
+  #   plugin_endpoint_failed，非本次改动路径）；skipped=沙箱不可用
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_drama_media_shell_package.py -q --tb=short \
+    -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1-c14f
+  # → 9 passed（含新加：collect/prepare/confirm 说明断言、wheel METADATA
+  #   "License-Expression: Apache-2.0 AND MIT"、PROVENANCE 含"MP4 夹具/不是上游"）
+  ```
+- **变异 3 个（全部被测试拦截后还原）**：①确认回执 error_code 改回 TOOL_INVALID_ARGUMENTS →
+  `test_real_confirmation_gate_stays_closed_before_explicit_user_confirmation`（executable/interpreter 两个参数化）红；
+  ②gates.js 去掉 prop-cap 跳过分支 → `test_outline_without_props_skips_prop_cap_gate` 红；
+  ③unavailable_label 恒返回"（尚未开放）" → `test_non_admin_sees_admin_only_label_instead_of_not_open`（/plugins、
+  /plugins help install 两个入口）红。
+- **门禁**：guards9 清单 + `check_import_boundaries.py`（0 条）+ ruff + `check_doc_sync.py` +
+  `check_code_size.py --mode strict`（跑完还原 CODE_SIZE_REPORT.md）+ `git diff --check` +
+  `check_clean_package.py .` + `size_diff.sh`（新增告警 0），结果见下方"门禁全套"节。
+- **未验证/环境限制**：宿主安装/启用、沙箱子进程类用例在沙箱内失败/跳过（`/bin/ps` 与嵌套 Seatbelt 被拒），
+  3a 在沙箱外复核；shuohao 聚焦 1 failed 与基线（C14 验收记录 L55）一致，非本次改动引入。
+
 ## 补充查询片段材料：先预检每个片段能新增的事实（J8）（2026-10-02，分支 `claude/be-jev-snippet-facts`，基于 `918285cc1`）
 
 - **`test_decision_pre_recall.py` 新增 11 项**（夹具默认把片段材料固定为 `query_text`，读取失败用例走真实读取入口）：

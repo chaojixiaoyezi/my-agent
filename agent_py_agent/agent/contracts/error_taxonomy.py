@@ -377,6 +377,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="原插件已停用或激活失效；不要重试同一调用，换可执行工具或申请能力，是否重新启用由用户决定。",
     ),
+    "PLUGIN_CONFIRMATION_REQUIRED": ErrorContract(
+        code="PLUGIN_CONFIRMATION_REQUIRED", category="state", retryable=True,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint=(
+            "启用前需要你确认插件会运行的程序；这是等待用户确认的预览回执，不是参数错误。"
+            "核对回执后输入 /plugins enable <插件ID> --confirm <确认码>，不要重复提交其它参数。"
+        ),
+    ),
     "MCP_CONNECTION_CLOSED": ErrorContract(
         code="MCP_CONNECTION_CLOSED", category="tool", retryable=False,
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,

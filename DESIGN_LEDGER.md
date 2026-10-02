@@ -58,6 +58,26 @@
   适配层有现成入口：盘点结论是除 subagent_model 外都能用轻量假对象调用真实构造函数。
 - **局限**：用例是测试方编写的合成样本，数量少，不能外推为线上整体质量。达标只是默认打开的必要条件，还要看真实收益与代价。
 
+## C14 第一批两个插件验收后续：确认回执、越界提示、管理文案、跳过语义与说明对齐（2026-10-02，ds1，分支 `worker/ds1-c14-followups`，基于 `claude/3a-step16z` `d55cb266c`，已实现，待集成）
+
+针对 C14 验收记录（docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md C14 节）里 ae 审查提出的建议逐条收尾，均不挡已通过的验收，但要做到位：
+
+1. **非 Python 插件 enable 的确认预览回执**：之前末尾会显示"错误码：TOOL_INVALID_ARGUMENTS"，像失败。
+   - 结构化判定只用 `details.reason == "confirmation_required"`；回执带自己的状态 `state = "confirmation_required"`，文本不再追加通用错误码。
+   - error_taxonomy.py 正式登记 `PLUGIN_CONFIRMATION_REQUIRED`（category=state、retryable=True、RecoveryAction.REQUEST_USER_INPUT），不拿文案判断，也不再像参数错误。
+   - TUI（plugin_http_response）与 IM（execute_plugin_control 持久控制回执）都经 `plugin_command_service._log_rejection` 统一生效。
+2. **安装包越界提示**：包放在 owner 允许范围外时不再只报"读取未获授权"，改用路径策略的结构化事实（`policy.owner_scope_root`）告诉用户当前允许放置插件包的根目录；只有路径策略本身可用时给出该目录，否则提示放到当前会话工作区（或显式授权目录）。不泄露其它 owner 或宿主的私有路径。
+2b. **C10 管理动作文案**：普通用户看 `/plugins` 与 `/plugins help install` 时，被权限拒的管理动作不再标"（尚未开放）"，按与 PluginManagement 授权判定同一来源的结构化事实（当前身份是否管理员）标"（仅管理员可用）"；真正未开放的动作仍标"（尚未开放）"。TUI 与 IM 两个入口一致。
+3. **shuohao-novel-gates 跳过语义**：按数据内容跳过的门不再报"通过"——cast 没有名字 → no-names 跳过；大纲没有 props 字段 → prop-cap 跳过；shots 为空数组 → shot-recipe 跳过（上游对 --shots 目录要求至少一张卡）。跳过就报 skipped，不计通过；declaration.json 的 shots input_schema 加 `minItems: 1`。
+4. **drama-media-shell 说明与元数据对齐实际行为**：
+   - `production_collect` 说明改为"重新生成同一份夹具字节"，行为不变；
+   - `production_prepare`/`production_confirm` 保留 read_only 声明（宿主合同里 read_only 只管工作区写权限，见 docs/design/PLUGIN_WORKSPACE_WRITE.md），说明补写清会写插件私有数据目录的作业记录/一次性确认回执；
+   - PROVENANCE 补注 MP4 夹具是本仓新增的最小 ftyp isom 容器字节，不是上游的；
+   - pyproject.toml 许可元数据改为 `Apache-2.0 AND MIT`（包装代码 Apache-2.0、随包上游 MIT）。
+5. **待定（不改行为，已记账）**：确认码由 prepare 直接返回，模型自己就能 confirm。当前不接付费生成（已定做法第 8 条），所以暂不处理；但接任何真实供应商之前，必须改成宿主层面的本人确认（确认码只经宿主回执给本人、模型不可直接持有并自行 confirm），改之前不得接入付费链路。
+
+- **验证**：宿主侧 141 个相关测试全过（test_plugins_chat_control、test_gateway_plugin_commands、test_plugin_management、test_plugin_commands、test_plugin_command_catalog）；shuohao 33 passed、1 failed、1 skipped；drama 包 9 passed。具体命令与结果见 TESTS.md 同名节。宿主安装/启用与沙箱子进程类用例在沙箱里失败/跳过（环境限制），由 3a 在沙箱外复核。
+
 ## 补充查询片段材料：先预检每个片段能新增的事实（J8，P5-A 缺口 1）（2026-10-02，分支 `claude/be-jev-snippet-facts`，基于 `claude/3a-step16z` `918285cc1`，已实现，待集成）
 
 - **问题**：09-25 语义召回实验里，K3a 两批都选了主题已被原召回覆盖的片段，补不出东西。原因是 Jev 只看得到基线摘要和片段文字，不知道哪个片段真能补出新事实。

@@ -36,8 +36,14 @@ def read_plugin_source(source: str, workspace: Path, policy: PathAccessPolicy, *
             source=source, base=workspace,
         ) from exc
     if not policy.check(path).allowed:
+        # 越权时给出当前 owner 允许放包的根目录：只用路径策略冻结的结构化根，不泄露其它 owner 或宿主私有路径。
+        if policy.owner_scope_root is not None:
+            hint = f"当前允许放置插件包的根目录是 {policy.owner_scope_root}"
+        else:
+            hint = "请把插件包放到当前会话工作区（或显式授权的目录）下"
         raise PluginSourceError(
-            "unauthorized", "插件来源未获授权：该路径在当前身份可访问范围之外（WorkspaceOnly 下只能读 owner 目录内的包）。",
+            "unauthorized",
+            f"插件来源未获授权：该路径在当前身份可访问范围之外（{hint}；相对路径会按当前会话工作区解析）。",
             source=source, base=workspace,
         )
     content = read_bytes_beneath(Path(path.anchor), path.parts[1:], max_bytes=max_bytes, require_dir_fd=True)

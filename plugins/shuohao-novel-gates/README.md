@@ -7,6 +7,8 @@
 状态（2026-10-02）：已合入集成分支。ae 审查后修了一处门判定（只给 cast、不给 outline 时剧本的 `refs-characters`
 不再错报通过），并在隔离环境完成真实 TUI 安装/确认/调用和一次真实模型自然调用，
 见[验收记录](../../docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c14-第一批两个插件的审查与真实验收2026-10-02)。
+C14 后续（分支 `worker/ds1-c14-followups`）把按数据内容跳过的门从"报通过"改为"报跳过"，与上游一致：
+cast 没有名字 → no-names、大纲没有 props 字段 → prop-cap、shots 为空数组 → shot-recipe，且 shots 输入要求非空数组。
 当前执行环境的 `/bin/ps` 启动拒绝和嵌套 Seatbelt 拒绝分别保留为宿主测试失败和沙箱测试跳过，
 不关闭宿主出生身份校验，也不以普通子进程测试冒充沙箱验证。完整命令和结果见
 [TESTS](../../TESTS.md)。
@@ -35,7 +37,10 @@
   `passed=true/false/null` 和缺依赖的 `reason`；跳过不计入通过数。
 - `counts` 分开记录 `total/passed/failed/skipped`；角色另有 `character_count` 和问题数。
 - 顶层 `passed=true` 只代表已执行的检查没有失败；有 skipped 时 `complete=false`，
-  **不能据此声称全部门已验**。完整私有 shot-recipes 卡库未迁入，未传 `shots` 时该门如实跳过。
+  **不能据此声称全部门已验**。按数据内容跳过的门与上游一致：cast 没有名字 → no-names 跳过、
+  大纲没有 props 字段 → prop-cap 跳过、未传 `shots`（或空数组）→ shot-recipe 跳过；
+  跳过只报 `status=skipped`，不计入 passed，也不计入 failed。`shots` 参数 schema 要求非空数组
+  （`minItems: 1`），与上游 CLI 对 --shots 目录至少一张卡的要求一致。完整私有 shot-recipes 卡库未迁入。
 - `validate` 包含上游结构校验问题，`checkup` 返回门报告。门不通过仍是成功计算的业务结果；
   路径/参数/上下文错误才是 MCP `isError=true`，用稳定结构化错误码说明。
 - MCP 工具 `content[0].text` 是 JSON 文本。宿主命令 `output` 还有一层 JSON 信封，
@@ -95,9 +100,12 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest \
 ```
 
 测试覆盖真实 Node MCP、tools/list 与声明同源、74+20 读取向量、六份上游自检、
-无工作区改写、越界与伪上下文拒绝、可复现打包及原样许可/NUL。
+无工作区改写、越界与伪上下文拒绝、可复现打包及原样许可/NUL，以及三条跳过语义回归
+（cast 无名字 → no-names、大纲无 props → prop-cap、shots 空数组 → shot-recipe）。
 完整宿主安装→本人解释器确认→五注册工具和 report 平台沙箱测试保留，环境拒绝不改成通过。
 收尾范围（2026-10-02，3a）：只跑本插件、跨语言样例等直接相关测试和 guards9，不再跑全仓或无文件列表的-x。
-跨语言样例为 2 passed、2 failed，均在宿主启用确认处失败；严格静态门禁通过，详见 TESTS，不外推为插件全链通过。
+本分支聚焦结果（2026-10-02，ds1）：33 passed、1 failed、1 skipped——失败是宿主在带确认码启用处
+（MCP 候选启动被沙箱环境拒绝，`plugin_endpoint_failed`，非本次改动路径），跳过是沙箱不可用；
+宿主侧 141 个相关测试（确认回执、管理文案、目录提示、目录 schema）全过。
 建议下一步：3a 在沙箱外重跑固定提交的完整文件，ae 可并行只读核许可和包装边界；
 确认后再合入，并按迁移设计做真实 TUI 与一次真实模型自然调用。

@@ -54,12 +54,15 @@ def plugin_http_response(handler, server, body: dict, *, text: str | None = None
 
 
 # LLM: 非成功回执的错误码同时保留在结构字段和纯文本；原 rejected 回执已由管理层带码，不重复追加。
+#   确认预览回执（details.reason == "confirmation_required"）不是失败，同样不追加错误码文本；
 #   只在结构化 state=rejected 时记一行，只含错误码、子命令名和请求编号，不记命令原文、路径或 owner 目录；
 #   用 WARNING 是因为 Gateway 进程不配置日志级别，只有 WARNING 及以上会进 gateway.log。管理员正常执行不产生这行。
 # 函数用途: 为 TUI 和 IM 保留可见错误码，并把执行前拒绝写入无私有正文的 Gateway 诊断。
 def _log_rejection(result: dict, text: str, request_id: str) -> dict:
     code = result.get("error_code") if isinstance(result, dict) else None
-    if code and not result.get("ok") and result.get("state") != "rejected":
+    details = result.get("details") if isinstance(result, dict) else None
+    confirmation = (isinstance(details, dict) and details.get("reason") == "confirmation_required")
+    if code and not result.get("ok") and result.get("state") != "rejected" and not confirmation:
         result = {**result, "message": f"{result.get('message', '')}\n错误码：{code}"}
     if isinstance(code, str) and code and result.get("state") == "rejected":
         logging.getLogger(__name__).warning("PLUGIN_COMMAND_REJECTED error_code=%s action=%s request_id=%s",

@@ -196,6 +196,31 @@ def test_directory_errors_are_safe_and_do_not_fallback(host, monkeypatch):
     assert "private-secret" not in json.dumps(handler.reply)
 
 
+@pytest.mark.parametrize("command", ["/plugins", "/plugins help install"])
+def test_non_admin_sees_admin_only_label_instead_of_not_open(host, command):
+    handler = Handler({"conversation_id": "session-a", "operation": "command", "command": command,
+                       "catalog_revision": ""})
+    plugin_command_service.handle_client_plugins(handler, host)
+    result = handler.reply[1]
+    assert result["ok"] is True
+    assert "仅管理员可用" in result["message"]
+    assert "尚未开放" not in result["message"]
+    install = next(action for action in result["catalog"]["management_actions"] if action["name"] == "install")
+    assert install["available"] is False and install["unavailable_reason"] == "admin_only"
+
+
+@pytest.mark.parametrize("command", ["/plugins", "/plugins help install"])
+def test_admin_sees_no_unavailable_label(host, command):
+    handler = Handler({"conversation_id": "session-a", "operation": "command", "command": command,
+                       "catalog_revision": ""}, user="admin")
+    plugin_command_service.handle_client_plugins(handler, host)
+    result = handler.reply[1]
+    assert result["ok"] is True
+    assert "仅管理员可用" not in result["message"] and "尚未开放" not in result["message"]
+    install = next(action for action in result["catalog"]["management_actions"] if action["name"] == "install")
+    assert install["available"] is True and install["unavailable_reason"] == ""
+
+
 def test_real_http_route_roundtrips_catalog_and_preserves_original_identity(tmp_path, monkeypatch):
     import urllib.request
 

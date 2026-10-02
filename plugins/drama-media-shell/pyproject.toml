@@ -7,7 +7,7 @@ name = "my-agent-drama-media-shell"
 version = "0.1.0"
 description = "离线短剧提示词检查与夹具生产作业外壳"
 requires-python = ">=3.10"
-license = "Apache-2.0"
+license = "Apache-2.0 AND MIT"
 dependencies = ["my-agent-plugin-api==0.2.0"]
 
 [tool.setuptools]

@@ -134,17 +134,20 @@ class PluginManagement:
         return self._catalog(self.installations.snapshot())
 
     # LLM: 同次快照派生原提交引用以区分重装，避免目录/目标读取竞态；可用性和引用均不授予权限。
+    #   不可用的管理动作给出结构化原因：非管理员是权限不足（admin_only），管理员仍不可用才是未开放（not_implemented）。
     # 函数用途: 将当前权限及同一份安装事实投影成不含私有配置的目录。
     def _catalog(self, entries):
         context = self.context
-        actions = tuple(replace(action, available=(
-            action.name in {"help", "list", "info", "status"}
-            or action.name in _MANAGEMENT_TOOLS and context.enabled and context.is_admin
-            and self._allowed(_MANAGEMENT_TOOLS[action.name])
-        )) for action in COMMAND_INDEX["plugins"].actions)
+        actions = []
+        for action in COMMAND_INDEX["plugins"].actions:
+            available = (action.name in {"help", "list", "info", "status"}
+                         or action.name in _MANAGEMENT_TOOLS and context.enabled and context.is_admin
+                         and self._allowed(_MANAGEMENT_TOOLS[action.name]))
+            reason = "" if available else ("admin_only" if not context.is_admin else "not_implemented")
+            actions.append(replace(action, available=available, unavailable_reason=reason))
         return replace(read_plugin_catalog(context.owner.identity, channel=context.channel,
                                            conversation_id=context.conversation_id),
-                       management_actions=actions,
+                       management_actions=tuple(actions),
                        plugins=tuple(replace(row.manifest.command_spec, installation_revision=row.revision,
                                              installation_ref=row.installation_ref,
                                              enabled=row.enabled, activation_id=row.activation_id)

@@ -220,6 +220,48 @@ def test_missing_optional_references_are_skipped_not_counted_as_passes(tmp_path)
 
 
 @pytest.mark.skipif(NODE is None, reason="本机没有 node")
+def test_cast_without_names_skips_no_names_gate(tmp_path):
+    _declaration()
+    _workspace(tmp_path)
+    (tmp_path / "cast-noname.json").write_text(
+        json.dumps({"characters": [{"id": "c1", "tier": "lead"}]}), encoding="utf-8")
+    art = {"operation": "checkup", "path": "渡口-art.json", "cast": "cast-noname.json"}
+    value = _value(_rpc(tmp_path, [_call("art_check", art, tmp_path)])[-1])
+    gate = next(item for item in value["gates"] if item["id"] == "no-names")
+    assert gate["status"] == "skipped" and gate["passed"] is None
+    assert value["counts"]["skipped"] >= 1
+
+
+@pytest.mark.skipif(NODE is None, reason="本机没有 node")
+def test_outline_without_props_skips_prop_cap_gate(tmp_path):
+    _declaration()
+    _workspace(tmp_path)
+    (tmp_path / "outline-noprops.json").write_text(json.dumps(
+        {"params": {"episodes": 1}, "characters": [], "scenes": [], "beats": [], "episodes": []}),
+        encoding="utf-8")
+    outline = {"operation": "checkup", "path": "outline-noprops.json"}
+    value = _value(_rpc(tmp_path, [_call("outline_check", outline, tmp_path)])[-1])
+    gate = next(item for item in value["gates"] if item["id"] == "prop-cap")
+    assert gate["status"] == "skipped" and gate["passed"] is None
+    assert value["counts"]["skipped"] >= 1
+
+
+@pytest.mark.skipif(NODE is None, reason="本机没有 node")
+def test_empty_shots_array_skips_shot_recipe_and_schema_requires_min_items(tmp_path):
+    declaration = _declaration()
+    shots_schema = next(tool for tool in declaration["tools"]
+                        if tool["name"] == "storyboard_check")["input_schema"]["properties"]["shots"]
+    assert shots_schema.get("minItems") == 1
+    _workspace(tmp_path)
+    board = {"operation": "checkup", "path": "渡口-storyboard.json",
+             "script": "渡口-script.json", "shots": []}
+    value = _value(_rpc(tmp_path, [_call("storyboard_check", board, tmp_path)])[-1])
+    gate = next(item for item in value["gates"] if item["id"] == "shot-recipe")
+    assert gate["status"] == "skipped" and gate["passed"] is None
+    assert value["counts"]["skipped"] >= 1
+
+
+@pytest.mark.skipif(NODE is None, reason="本机没有 node")
 def test_script_character_refs_gate_is_skipped_without_outline_even_with_cast(tmp_path):
     _declaration()
     _workspace(tmp_path)

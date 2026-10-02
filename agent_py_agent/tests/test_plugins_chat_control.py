@@ -177,14 +177,42 @@ def test_real_confirmation_gate_stays_closed_before_explicit_user_confirmation(t
     monkeypatch.setattr(module, "_scope_management", lambda *_: service)
     first = _run(None, f"/plugins enable {PLUGIN_ID}", _scope(admin=True))
     assert not first.ok and "--confirm " in first.message and "/plugins enable " + PLUGIN_ID in first.message
+    # 确认预览是等待用户确认的状态，不是参数错误：专用错误码只在结构里，文本不再追加通用错误码行
+    assert first.error_code == "PLUGIN_CONFIRMATION_REQUIRED"
+    assert "错误码" not in first.message and first.message.startswith("启用前需要你确认")
     if interpreter:
         assert str(interpreter.resolve()) in first.message
     wrong = _run(None, f"/plugins enable {PLUGIN_ID} --confirm 000000000000", _scope(admin=True))
     assert not wrong.ok and "--confirm " in wrong.message
+    assert wrong.error_code == "PLUGIN_CONFIRMATION_REQUIRED" and "错误码" not in wrong.message
     assert service.installations.snapshot()[0].activation is None
     owner = service.context.owner
     assert not (owner.plugins_dir / "data" / PLUGIN_ID / "started").exists()
     assert not (owner.plugins_dir / "environments").exists() or not any((owner.plugins_dir / "environments").iterdir())
+
+
+def test_confirmation_receipt_keeps_code_out_of_text_on_both_im_and_tui(host, monkeypatch):
+    _command("/plugins enable demo")
+    preview = "启用前需要你确认：这个插件会以你本人的权限在本机运行下面的程序。\n插件：demo 0.1.0（包摘要 abcdef0123456789…）"
+    payload = {"ok": False, "state": "not_started", "error_code": "PLUGIN_CONFIRMATION_REQUIRED",
+               "request_id": "r-confirm-1", "details": {"reason": "confirmation_required",
+                                                        "state": "confirmation_required",
+                                                        "commit_state": "not_committed",
+                                                        "confirmation": {"plugin_id": "demo", "version": "0.1.0",
+                                                                         "package_sha256": "abcdef0123456789",
+                                                                         "confirm_code": "abc123"}},
+               "message": preview}
+    monkeypatch.setattr(PluginManagement, "command", lambda *a, **k: payload)
+    im = _run(host, "/plugins enable demo", _scope(admin=True))
+    handler = Handler({"conversation_id": "session-a"})
+    monkeypatch.setattr(module, "resolve_gateway_scope_owner", lambda *_: _scope(admin=True).resolved_owner)
+    tui = module.plugin_http_response(handler, SimpleNamespace(agent=host), handler.body, text="/plugins enable demo")
+    assert im.message == preview and "错误码" not in im.message
+    assert im.error_code == "PLUGIN_CONFIRMATION_REQUIRED"
+    assert tui["message"] == preview and "错误码" not in tui["message"]
+    assert tui["error_code"] == "PLUGIN_CONFIRMATION_REQUIRED"
+    assert tui["details"]["reason"] == "confirmation_required"
+    assert tui["details"]["state"] == "confirmation_required"
 
 
 @pytest.mark.parametrize("entry", ["ask", "control"])

@@ -69,7 +69,7 @@
     },
     {
       "name": "collect",
-      "summary": "从私有夹具缓存重新收集产物",
+      "summary": "重新生成同一份夹具字节并写回输出",
       "arguments": [{"name": "job_id", "summary": "作业编号", "options": ["--job-id"], "value_type": "string", "required": true, "multiple": false, "default": null, "choices": [], "path": false}],
       "kind": "tool", "target": "production_collect", "available": true
     }
@@ -101,13 +101,13 @@
     },
     {
       "name": "production_prepare",
-      "description": "读取并冻结离线夹具作业，返回精确确认文本；夹具产物不算生成成功。",
+      "description": "读取并冻结离线夹具作业，返回精确确认文本；会在插件私有数据目录写入作业记录（不写工作区）。夹具产物不算生成成功。",
       "requested_effect": "read_only",
       "input_schema": {"type": "object", "properties": {"job_path": {"type": "string", "minLength": 1, "maxLength": 4096}}, "required": ["job_path"], "additionalProperties": false}
     },
     {
       "name": "production_confirm",
-      "description": "确认 prepare 返回的精确离线夹具作业；夹具产物不算生成成功。",
+      "description": "确认 prepare 返回的精确离线夹具作业；会在插件私有数据目录写入一次性确认回执（不写工作区）。夹具产物不算生成成功。",
       "requested_effect": "read_only",
       "input_schema": {"type": "object", "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 80}, "confirmation": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["job_id", "confirmation"], "additionalProperties": false}
     },
@@ -131,7 +131,7 @@
     },
     {
       "name": "production_collect",
-      "description": "从插件私有夹具缓存重新收集已运行作业的产物；夹具产物不算生成成功。",
+      "description": "按已完成的夹具运行记录重新生成同一份夹具字节并写回输出；不接供应商，不再次消费确认。夹具产物不算生成成功。",
       "requested_effect": "mutating",
       "input_schema": {"type": "object", "properties": {"job_id": {"type": "string", "minLength": 1, "maxLength": 80}}, "required": ["job_id"], "additionalProperties": false}
     }

@@ -578,6 +578,13 @@ TUI 媒体请求已接通：input_media refs 与 ask 执行选项及幂等指纹
   `PLUGIN_PERMISSION_DENIED`），Gateway 普通回执与交互命令流两条路径都按 WARNING 记 `PLUGIN_COMMAND_REJECTED error_code=… action=…
   request_id=…`。此前服务层已有码，但只转成中文说明、TUI 只打印说明、Gateway 不记日志，面板与日志都看不到码（R16 实测）。
   管理员执行行为与执行后的失败/成功文案不变；合同测试见 test_plugin_management、test_gateway_plugin_management、test_host_command_stream。
+- 2026-10-02（C14 后续，ds1，分支 `worker/ds1-c14-followups`）：非 Python 插件 enable 的确认预览回执不再是“被拒”，
+  `plugin_command_service._log_rejection` 对 `details.reason == "confirmation_required"` 不再追加“错误码：X”文本；
+  回执带自己的状态 `state=confirmation_required`，error_taxonomy 登记 `PLUGIN_CONFIRMATION_REQUIRED`
+  （category=state、retryable=True、RecoveryAction.REQUEST_USER_INPUT），不按文案或参数错误处理。
+  TUI（plugin_http_response）与 IM（execute_plugin_control）同经 `_log_rejection`，两入口一致；
+  普通被拒（如权限）仍按 2026-09-28 口径追加错误码。普通用户看到的管理动作文案也改为结构化区分：
+  权限不足标“（仅管理员可用）”，真正未开放的动作仍标“（尚未开放）”，见 04-structure 的 C10 段。
 
 
 ## gateway stop 列出遗留后台进程，并可显式一并停止（2026-09-28，分支 `my-agent/self-dev-4`）

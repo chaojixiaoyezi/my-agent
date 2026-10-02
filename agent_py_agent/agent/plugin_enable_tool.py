@@ -81,10 +81,12 @@ class PluginEnableTool(BaseTool):
         if self.runtime is not None:
             confirmation = self._confirmation()
             if params.get("confirm") != confirmation["confirm_code"]:
+                # 非 Python 插件启用前的确认预览：结构化 state 供回执层识别，专用错误码不是参数错误
                 return ToolHandlerOutcome(
                     PLUGIN_ENABLE_TOOL, False, "启用前需要你确认这个插件会运行的程序。",
-                    error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started",
+                    error_code="PLUGIN_CONFIRMATION_REQUIRED", effect_outcome="not_started",
                     result_envelope={PLUGIN_ENABLE_TOOL: {"reason": "confirmation_required",
+                                                          "state": "confirmation_required",
                                                           "commit_state": "not_committed", "confirmation": confirmation}})
         try:
             result = self._enable()

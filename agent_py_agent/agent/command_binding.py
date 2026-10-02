@@ -167,5 +167,5 @@ def render_action_help(prefix: str, action: CommandActionSpec) -> str:
         if spec.default is not None:
             facts.append(f"默认：{spec.default}")
         details.append(f"  {label}{value if spec.options else ''}  {'；'.join(facts)}")
-    state = "" if action.available else "（业务尚未开放，仅可查看声明）"
+    state = action.unavailable_label()
     return "\n".join((f"{action.summary}{state}", render_action_usage(prefix, action), *details, "  -h, --help  查看帮助；-- 之后全部作为位置参数"))

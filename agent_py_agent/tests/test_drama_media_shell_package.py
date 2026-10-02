@@ -111,6 +111,11 @@ def test_manifest_tools_resources_and_reproducible_build(installed_drama, tmp_pa
         **dict.fromkeys(EXPECTED_TOOLS - {"production_run", "production_collect"}, "read_only"),
         "production_run": "mutating", "production_collect": "mutating",
     }
+    # C14 后续：说明与行为一致——collect 重新生成同一份夹具字节；read_only 只保证不写工作区，会写插件私有记录
+    by_name = {tool.name: tool for tool in manifest.tools}
+    assert "重新生成同一份夹具字节" in by_name["production_collect"].description
+    assert "插件私有数据目录" in by_name["production_prepare"].description
+    assert "插件私有数据目录" in by_name["production_confirm"].description
     with ZipFile(first) as outer:
         assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in outer.infolist())
         wheel_name = manifest.entry_wheel
@@ -120,10 +125,14 @@ def test_manifest_tools_resources_and_reproducible_build(installed_drama, tmp_pa
             assert not any("creator-first" in name or "evaluations/" in name or "让你管账号" in name for name in names)
             license_name, = [name for name in names if name.endswith("drama_media_shell/LICENSE.drama-skills")]
             provenance_name, = [name for name in names if name.endswith("drama_media_shell/PROVENANCE.md")]
+            metadata_name, = [name for name in names if name.endswith(".dist-info/METADATA")]
             assert b"Copyright (c) 2026 drama-skills contributors" in wheel.read(license_name)
+            # wheel 许可元数据是 Apache-2.0 AND MIT：包装代码 Apache-2.0，随包上游 MIT
+            assert "License-Expression: Apache-2.0 AND MIT" in wheel.read(metadata_name).decode("utf-8")
             provenance = wheel.read(provenance_name).decode("utf-8")
             assert "0e8929881bb59248618c4f402707c64723adc017" in provenance
             assert "provider_adapters.py" in provenance and "未迁移" in provenance
+            assert "MP4 夹具" in provenance and "不是上游" in provenance
     second = build_plugin_package(PROJECT, "drama_media_shell/declaration.json", (sdk,), tmp_path / "second.zip")
     assert first.read_bytes() == second.read_bytes()
 

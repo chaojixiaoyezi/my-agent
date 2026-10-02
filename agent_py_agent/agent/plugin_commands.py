@@ -154,7 +154,7 @@ def parse_plugin_command(
 # 函数用途: 根据同一动作目录生成分组帮助。
 def render_plugin_help(namespace: PluginNamespace, actions: tuple[CommandActionSpec, ...]) -> str:
     lines = [f"用法：{namespace.prefix} [动作] [参数]"]
-    lines.extend(f"  {action.name}  {action.summary}" + ("（尚未开放）" if not action.available else "") for action in actions)
+    lines.extend(f"  {action.name}  {action.summary}{action.unavailable_label()}" for action in actions)
     lines.append(f"输入 {namespace.prefix} <动作> --help 查看参数。")
     if not namespace.plugin_id:
         lines.append("插件业务入口：/plugins@<插件ID> [动作] [参数]；可用动作以当前目录为准。")

@@ -20,13 +20,14 @@ async function loadModules() {
 }
 
 // LLM: 不用上游 loadCtx 的直接 fs 读取；每份参考资料与每张卡片单独过宿主权限门。
+//   空数组 shots 等于没给：不挂载配方库，shot-recipe 门走跳过。
 // 函数用途: 为剧本、分镜等跨阶段对账构造内存参考对象。
 function references(context, args, modules) {
   const result = {};
   for (const key of ["outline", "cast", "art", "script"]) {
     if (args[key]) result[key] = readJson(context, args[key]);
   }
-  if (args.shots) {
+  if (args.shots && args.shots.length > 0) {
     const cards = args.shots.map((file) => modules.storyboard.parseCardFields(readText(context, file))).filter(Boolean);
     result.recipes = new Map(cards.map((card) => [card.id, card]));
   }
@@ -34,10 +35,12 @@ function references(context, args, modules) {
 }
 
 // LLM: 缺依赖的门必须按结构化依赖标 skipped；不得解析上游 detail 里的“跳过”文字或把原 ok=true 当完整验过。
+//   按数据内容跳过的门也一样：cast 没名字（no-names）、大纲没有 props 字段（prop-cap）、没挂配方库（shot-recipe）。
 // 函数用途: 给未实际检查的门标出原因，保留稳定门编号。
-function skippedGates(stage, refs) {
+function skippedGates(stage, refs, names, document) {
   const skipped = new Map();
-  if (stage === "art" && !refs.cast) skipped.set("no-names", "未提供 cast");
+  if (stage === "outline" && !Array.isArray(document?.props)) skipped.set("prop-cap", "大纲没有 props 字段");
+  if (stage === "art" && (!refs.cast || names.length === 0)) skipped.set("no-names", "未提供 cast 或 cast 没有名字");
   if (stage === "script" && !refs.outline) skipped.set("beats-claimed", "未提供 outline");
   if (stage === "script" && !refs.outline) skipped.set("refs-characters", "未提供 outline");
   if (stage === "script" && !refs.art) skipped.set("refs-scenes", "未提供 art");
@@ -95,9 +98,10 @@ function runCheck(modules, stage, context, args) {
       counts: { total: 0, passed: 0, failed: 0, skipped: 0, problems: cast.problems.length } };
   }
   const refs = references(context, args, modules);
-  const options = stage === "outline" ? args.stage || "full" : stage === "art" ? (refs.cast ? module.castNamesOf(refs.cast) : null) : refs;
+  const names = stage === "art" && refs.cast ? module.castNamesOf(refs.cast) : [];
+  const options = stage === "outline" ? args.stage || "full" : stage === "art" ? (names.length ? names : null) : refs;
   const raw = stage === "outline" ? module.gateReport(document) : module.gateReport(document, options);
-  const result = summarizeGates(raw, skippedGates(stage, refs));
+  const result = summarizeGates(raw, skippedGates(stage, refs, names, document));
   const problems = operation === "validate" ? problemsOf(module, stage, document, options) : [];
   return { stage, operation, ...result, problems, passed: result.counts.failed === 0 && problems.length === 0 };
 }
