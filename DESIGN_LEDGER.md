@@ -74,6 +74,7 @@
 - **后续项（未做）**：
   - 普通用户各自开语义记忆：要有 owner 级配置、各自的嵌入档案和费用归属；现在普通用户只按关键词召回。
   - `tool_vector_search_enabled` 默认开：选了向量模型后工具检索也会用同一档案发嵌入请求。要不要和语义记忆一起管，待定。
+  - TUI「新增模型」只按接口推出用途（聊天接口一律 agentic），加嵌入模型要再改连接（勾 Embedding）和模型（用途 Embedding）两处；manage_models `add` 带 `capability=embedding` 可以一步加好。要不要在「新增模型」里直接给用途选项，待定。
 - **验证**：见 TESTS.md 同名节。
 
 ## 记忆整理：同一条消息里同主题、不同内容各存一条（用户拍板第 6 条，2026-10-02，分支 `claude/be-curator-content-identity`，基于 `claude/3a-step16z` `5e972003e`，已实现，待集成）

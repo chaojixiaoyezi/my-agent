@@ -191,7 +191,11 @@ ChatGPT 订阅不需要填接口地址和模型编号：
 
 ### 怎么开
 
-1. 先加一个向量模型：`/model` →「新增模型」，用途选 `embedding`。小例子：MiniMax 的 `embo-01`，接口地址填 `https://api.minimaxi.com/v1`，密钥用你的 MiniMax 密钥。模型名以 `embo` 开头的按 MiniMax 自己的格式发请求，其它模型按 OpenAI 兼容的 `/embeddings` 发。
+1. 先有一个向量模型（用途是 embedding 的模型）。两种加法任选：
+   - 让 my-agent 加，最省事：直接说「帮我加一个向量模型 embo-01，接口地址 https://api.minimaxi.com/v1，密钥 sk-xxxx」。它用模型管理工具一步存成 embedding 用途。
+   - 在 TUI 里加：`/model` →「新增模型」→ OpenAI Chat，接口地址填 `https://api.minimaxi.com/v1`、填密钥，手动填模型名 `embo-01` 添加。这一步存下来的是对话用途，还要再改两处：「管理已有模型」→ 选这个连接 →「改地址/密钥/请求头」→「高级」勾上 Embedding；再「编辑模型」embo-01 →「高级」→ 用途选 Embedding。两处都改了，它才会出现在「向量模型」列表里。
+
+   模型名以 `embo` 开头的按 MiniMax 自己的格式发请求，其它模型按 OpenAI 兼容的 `/embeddings` 发。
 2. 选中它并打开语义记忆，三种方式任选一种：
    - TUI：`/model` →「选择模型」→「向量模型」，选中后保存；选「关闭（只按关键词召回）」就关掉。
    - 聊天里（飞书等 IM，TUI 也能打）：`/model vector` 查看，`/model vector <编号>` 选用，`/model vector off` 关闭。
