@@ -29,10 +29,11 @@
   - 遮挡：只算压在前面的窗口（身后的大窗口不算），alpha=0 的覆盖层不算，部分压住只记事实、整个盖住 `occluded`，点击前点击点被新弹出的窗口压住 → `stale`。
   - 回退（6 种原因参数化）：导入失败 / 系统太老 / 绑定缺失 / 回调报错 / 没出图 / 超时，都退回 mss 名义分辨率截图，`capture_fallback{reason}` 在结果顶层，scale 1.0，点击点照样准。窗口不在可分享内容里 → `capture_failed` 不回退；用户拒绝授权按 domain+code 判（文字写着 declined 也不算）；超时后晚到的回调不会被下一次调用当成自己的；观察走主路径、复核退回区域截图 → scale 变了判 `stale`。
   - 后端选择：darwin → MacBackend，其余 → X11Backend，构造不碰屏幕。
-- **新增 `test_screen_capture_guard.py`**：不注入假框架时列窗口、上层矩形、截图、点击都当场 `RealScreenAccessForbidden`，且没有 import 任何真实框架；核心截图外层吞不掉它；扫描守卫在当前 tests/ 下零违规，样例文本覆盖违规与不违规。
+- **新增 `test_screen_capture_guard.py`**：真实库的模块名先换成一碰就炸的绊线；不注入假库时 macOS 后端的列窗口、上层矩形、截图、点击、点击权限确认，和 X11 后端的列窗口、上层矩形、截图、点击都当场 `RealScreenAccessForbidden`（X11 那组在车道容器里跳过）；核心截图外层吞不掉它；扫描守卫在当前 tests/ 下（递归）零违规，临时目录里子目录和辅助模块的违规文件都扫得出，样例文本覆盖违规与不违规。
+- **复审应修补的用例**：`test_screen_observation_core.py` 加 71 点 / 124 像素的非整数缩放（两轴点数 × scale ≥ 像素数、宿主接受贴右下边缘的候选、复核照常通过）和“点击权限在复核之前问、拒绝时不重新列窗口不点击”；`test_computer_use_macos.py` 加没有辅助功能权限 / 绑定导入失败两种 → `accessibility_not_permitted`、复核前就拒绝；`test_computer_use_observation_tools.py` 的 X11 用例改为注入 `X11Libraries`（不再替换 `sys.modules` 里的 mss / pyautogui）。
 - **改了的旧用例**：`test_screen_observation_core.py` 假后端返回 `ScreenCapture`，新增采样方式与顶层回退原因（宿主照常接受）、scale 按截图算（列表给 1、截图 2 倍）、宽高比例对不上 `capture_failed`、复核时 scale 变了 `stale`、后端结构化码透传与旧形状被拒；`test_computer_use_observation_tools.py` 的 X11 用例断言 `screen_region`。
-- **变异**：20 个全部抓到（遮挡判反、主屏 scale、丢显示器原点、回退不给原因、跳过预检、列表不翻转、非 0 层算普通、alpha=0 算可见、守卫可被吞、window_missing 走回退、晚到回调被采用、预检在列窗之后、拒绝授权按文字判、capture_fallback 进 frame、scale 取列表、复核不比 scale、删系统版本检查、核心吞后端结构化码、行填充没去掉、宽高比例不一致放过）。
-- **门禁**：相关测试 28 个文件（屏幕观察、Computer Use、观察绑定、常数目录与全仓扫描守卫、test_packaging）585 项通过、7 项车道用例按设计跳过；严格门禁全部通过，size diff 新增 0。
+- **变异**：27 个全部抓到（遮挡判反、主屏 scale、丢显示器原点、回退不给原因、跳过预检、列表不翻转、非 0 层算普通、alpha=0 算可见、守卫可被吞、window_missing 走回退、晚到回调被采用、预检在列窗之后、拒绝授权按文字判、capture_fallback 进 frame、scale 取列表、复核不比 scale、删系统版本检查、核心吞后端结构化码、行填充没去掉、宽高比例不一致放过；复审后加：跳过点击权限预检、权限放到复核之后、macOS 忽略没授权、绑定缺失当已授权、scale 不保证覆盖像素、扫描只看顶层 test_ 文件、X11 守卫没装——最后这个只碰到绊线，没有碰真实库）。故意不做“X11 点击绕过入口”这种变异：它会让注入了假库的旧用例去 import 真的 pyautogui。
+- **门禁**：相关测试 28 个文件（屏幕观察、Computer Use、观察绑定、常数目录与全仓扫描守卫、test_packaging）596 项通过、7 项车道用例按设计跳过；严格门禁全部通过，size diff 新增 0。
 
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`）
 

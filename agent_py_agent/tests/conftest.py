@@ -15,7 +15,7 @@ import pytest
 
 from agent_py_agent.agent.capability import CapabilityRouter, SkillsService
 from agent_py_agent.agent.subagents.models import SubAgentTask
-from agent_py_agent.agent.tooling import computer_use_macos
+from agent_py_agent.agent.tooling import computer_use_macos, computer_use_x11
 from agent_py_agent.tests._desktop_open_guard import (
     REAL_DESKTOP_MARKER,
     DesktopOpenGuard,
@@ -30,7 +30,11 @@ from agent_py_agent.tests._repo_tree_guard import (
     tracked_report_failure_message,
     tracked_report_fingerprint,
 )
-from agent_py_agent.tests._screen_capture_guard import forbidden_real_macos_frameworks
+from agent_py_agent.tests._screen_capture_guard import (
+    LANE_SKIP_MARKER,
+    forbidden_real_macos_frameworks,
+    forbidden_real_x11_libraries,
+)
 
 _DESKTOP_GUARD: DesktopOpenGuard | None = None
 # 会话级 fixture 在最后一条测试收尾时就结束了，会话结束检查要用这份不清空的引用。
@@ -65,12 +69,15 @@ def _desktop_open_guard(tmp_path_factory):
 
 @pytest.fixture(scope="session", autouse=True)
 def _real_screen_guard():
-    """会话级防线：macOS 屏幕观察后端唯一的真实框架加载入口换成直接失败（见 _screen_capture_guard），测试永远碰不到真实屏幕。
+    """会话级防线：两个桌面后端唯一的真实库加载入口换成直接失败（见 _screen_capture_guard），测试永远碰不到真实屏幕。
 
-    注入假框架的后端不走这个入口；子进程那一层由 test_screen_capture_guard 的扫描守卫兜住。
+    X11 的入口只在 Linux 车道容器（车道标记为 1）里不换，那里是 Xvfb 假桌面；注入假库的后端不走这两个入口；
+    子进程那一层由 test_screen_capture_guard 的扫描守卫兜住。
     """
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(computer_use_macos, "load_real_macos_frameworks", forbidden_real_macos_frameworks)
+        if os.environ.get(LANE_SKIP_MARKER) != "1":
+            patch.setattr(computer_use_x11, "load_real_x11_libraries", forbidden_real_x11_libraries)
         yield
 
 

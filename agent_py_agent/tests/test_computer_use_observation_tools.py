@@ -314,7 +314,7 @@ def test_x11_backend_lists_stacking_order_with_states_and_computes_above_rects(f
 
 
 def test_x11_backend_capture_ocr_and_click_use_the_public_library_calls(monkeypatch, fake_xlib):
-    from agent_py_agent.agent.tooling.computer_use_x11 import X11Backend
+    from agent_py_agent.agent.tooling.computer_use_x11 import X11Backend, X11Libraries
     from agent_py_agent.agent.tooling.screen_observation import WindowInfo
     from agent_py_agent.agent.tooling.screen_observation_store import WindowGeometry
 
@@ -331,8 +331,6 @@ def test_x11_backend_capture_ocr_and_click_use_the_public_library_calls(monkeypa
             grabs.append(monitor)
             return SimpleNamespace(width=monitor["width"], height=monitor["height"], rgb=bytes(monitor["width"] * monitor["height"] * 3))
 
-    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=lambda: _Grabber()))
-    monkeypatch.setitem(sys.modules, "pyautogui", SimpleNamespace(click=lambda x, y: clicks.append((x, y))))
     monkeypatch.setitem(sys.modules, "numpy", SimpleNamespace(uint8="u8", frombuffer=lambda data, dtype: SimpleNamespace(reshape=lambda h, w, c: _Arr()),
                                                               ascontiguousarray=lambda a: a))
     monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", SimpleNamespace(RapidOCR=lambda: (lambda image: ([[[[10, 20], [70, 20], [70, 38], [10, 38]], "提交", 0.9]], 0.1))))
@@ -341,7 +339,8 @@ def test_x11_backend_capture_ocr_and_click_use_the_public_library_calls(monkeypa
         def __getitem__(self, item):
             return self
 
-    backend = X11Backend(_Display(_Win(0x1, (0, 0, 10, 10)), {}))
+    libraries = X11Libraries(open_display=lambda: None, grabber=_Grabber, click=lambda x, y: clicks.append((x, y)))
+    backend = X11Backend(_Display(_Win(0x1, (0, 0, 10, 10)), {}), libraries)
     info = WindowInfo(native_id=0x10, title="t", geometry=WindowGeometry((100, 50), (320, 200), (1, 1)), viewable=True, hidden=False, desktop=0, current_desktop=0)
     capture = backend.capture(info)
     buffer = capture.buffer
@@ -349,8 +348,9 @@ def test_x11_backend_capture_ocr_and_click_use_the_public_library_calls(monkeypa
     assert (capture.kind, capture.fallback_reason) == ("screen_region", None), "mss 按区域截屏，如实报 screen_region"
     regions = backend.ocr(buffer)
     assert [(r.text, r.region) for r in regions] == [("提交", (10, 20, 60, 18))]
+    backend.ensure_click_permitted()
     backend.click(150, 89)
-    assert clicks == [(150, 89)]
+    assert clicks == [(150, 89)], "X11 注入点击不需要额外授权"
 
 
 def test_lowlevel_handler_runs_observations_off_the_event_loop_one_at_a_time(monkeypatch):

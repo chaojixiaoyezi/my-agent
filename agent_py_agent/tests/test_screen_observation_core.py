@@ -63,8 +63,10 @@ class _Backend:
         self.clicks = []
         self.fail_capture = self.fail_ocr = False
         self.capture_kind, self.fallback_reason, self.capture_error = SCREEN_REGION_CAPTURE, None, None
+        self.click_permission_error, self.list_calls = None, 0
 
     def list_windows(self):
+        self.list_calls += 1
         return list(self.windows)
 
     def above_rects(self, native_id):
@@ -84,6 +86,10 @@ class _Backend:
 
     def click(self, x, y):
         self.clicks.append((x, y))
+
+    def ensure_click_permitted(self):
+        if self.click_permission_error is not None:
+            raise self.click_permission_error
 
     # 函数用途: 替换唯一窗口的字段。
     def replace_window(self, **changes):
@@ -239,6 +245,35 @@ def test_frame_scale_is_measured_from_the_capture_not_taken_from_the_listing():
     with pytest.raises(ObservationError) as uneven:
         observer.observe()
     assert uneven.value.code == "capture_failed", "宽高两个方向的像素/点比对不上"
+
+
+def test_non_integer_scale_still_lets_the_host_accept_a_candidate_touching_the_edge():
+    backend, observer = _observer()
+    backend.replace_window(geometry=WindowGeometry((100, 50), (71, 71), (1, 1)))
+    edge = (94, 112, 30, 12)  # 贴着右下边缘：x+w = y+h = 124
+    backend.buffers[0x1a] = _buffer(124, 124, patches={edge: (30, 30, 30)})
+    backend.ocr_rows = [TextRegion("确定", edge)]
+    assert 124 / 71 * 71 < 124, "前提：原始比值乘回来比像素数小一点"
+    result = observer.observe()
+    frame = result["frame"]
+    assert all(size * scale >= 124 for size, scale in zip(frame["size"], frame["scale"])), "两轴都保证 点数 × scale ≥ 像素数"
+    assert all(abs(scale - 124 / 71) < 1e-12 for scale in frame["scale"])
+    record = parse_observation(json.loads(json.dumps(result["my_agent_observation"])), _context())
+    assert [list(item.region) for item in record.candidates] == [[94, 112, 30, 12]], "宿主照常接受贴边候选，不整份拒绝"
+    assert observer.click_candidate(_meta(result))["clicked"]["key"] == "t1", "复核时同一张图算出同一个 scale"
+
+
+def test_click_asks_the_backend_for_click_permission_before_rechecking():
+    backend, observer = _observer()
+    meta = _meta(observer.observe())
+    backend.list_calls = 0
+    backend.click_permission_error = ObservationError("accessibility_not_permitted", "没有辅助功能权限")
+    with pytest.raises(ObservationError) as denied:
+        observer.click_candidate(meta)
+    assert denied.value.code == "accessibility_not_permitted"
+    assert backend.list_calls == 0 and backend.clicks == [], "复核之前就拒绝：不重新列窗口、不点击"
+    backend.click_permission_error = None
+    assert observer.click_candidate(meta)["clicked"]["key"] == "t1" and backend.list_calls == 1
 
 
 def test_recheck_is_stale_when_the_capture_scale_changes_even_if_pixels_look_alike():

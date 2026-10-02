@@ -2,13 +2,17 @@
 #   （带几何扩展）；动作前按 ae 定稿做适配器层五项复核：按 _meta 代次找快照（找不到 / key 不在 → not_found）→ boot/instance →
 #   可见、未最小化、同桌面 → 原点与尺寸相等 → 点击点不被遮挡（动作时重新查叠放）→ 重新截图的 scale 相等 → 候选区域摘要在容差内，
 #   任一项不过 → stale，零副作用；
-#   复核通过后立刻点击，中间不做任何别的 I/O。后端是鸭子类型（X11 / macOS 真后端 / 单测假后端），本模块不 import 任何桌面库。
-#   截图由后端给 ScreenCapture（像素、采样方式、回退原因）；frame.scale 取截图自己的像素/点比（不取显示器的），复核时 scale 变了也判 stale。
+#   复核通过后立刻点击，中间不做任何别的 I/O；复核之前先问后端能不能真的点（ensure_click_permitted，macOS 是辅助功能权限）。
+#   后端是鸭子类型（X11 / macOS 真后端 / 单测假后端），本模块不 import 任何桌面库。
+#   截图由后端给 ScreenCapture（像素、采样方式、回退原因）；frame.scale 取截图自己的像素/点比（不取显示器的），复核时 scale 变了也判 stale；
+#   非整数比时 scale 往上调到"点数 × scale ≥ 像素数"，宿主按 size × scale 校验贴边候选才不会误拒。
 #   错误码集合开放（宿主只提升 stale / not_found，其它原样透传）：window_not_found | not_viewable | capture_failed | ocr_failed | occluded |
-#   not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted；后端主动抛的 ObservationError 原样透传。
+#   not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted | accessibility_not_permitted；
+#   后端主动抛的 ObservationError 原样透传。
 # 模块用途: "看一眼窗口、给出可点的候选、点之前再确认一遍没变"的全部判断逻辑，可在没有桌面的机器上用假后端完整测试。
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -174,10 +178,12 @@ class ScreenObserver:
             raise ObservationError("stale", "候选区域的像素已变")
         return snapshot, candidate, point
 
-    # LLM: 复核通过后立刻点击，中间不做任何别的 I/O（只看一眼宿主是否已取消，已取消就零副作用返回 cancelled）；返回值只证明
-    #   "提交了点击"，结果要靠下一次 observe 确认。
+    # LLM: 先问后端能不能真的点（没权限时系统会悄悄丢掉点击、工具却报已点击）：放在复核之前，零副作用报 accessibility_not_permitted，
+    #   保持"复核完立刻点击"。复核通过后中间不做任何别的 I/O（只看一眼宿主是否已取消，已取消就零副作用返回 cancelled）；
+    #   返回值只证明"提交了点击"，结果要靠下一次 observe 确认。
     # 函数用途: 按宿主复核过的候选点击一次。
     def click_candidate(self, meta: object, *, cancelled: Callable[[], bool] | None = None) -> dict[str, object]:
+        self.backend.ensure_click_permitted()
         snapshot, candidate, point = self.recheck(meta)
         if cancelled is not None and cancelled():
             raise ObservationError("cancelled", "宿主已取消，未点击")
@@ -253,10 +259,20 @@ def captured_geometry(listed: WindowGeometry, buffer: PixelBuffer) -> WindowGeom
     width, height = listed.size
     if width <= 0 or height <= 0:
         raise ObservationError("capture_failed", "窗口外框面积不是正数")
-    scale = (buffer.width / width, buffer.height / height)
+    scale = (covering_scale(buffer.width, width), covering_scale(buffer.height, height))
     if abs(buffer.height - height * scale[0]) > 1:
         raise ObservationError("capture_failed", "截图宽高比例与窗口外框不一致")
     return WindowGeometry(listed.origin, listed.size, scale)
+
+
+# LLM: 宿主按 size × scale 算截图宽高再校验候选（x+w ≤ 宽）；非整数比时浮点乘回来可能比像素数小一点（71 点、124 像素 →
+#   123.99999999999999），贴边候选会让整份观察被拒。这里把 scale 往上挪到乘回来不小于像素数为止（通常一个最小浮点步长）。
+# 函数用途: 一个轴的截图缩放：像素 ÷ 点，并保证 点 × 缩放 ≥ 像素。
+def covering_scale(pixels: int, points: int) -> float:
+    scale = pixels / points
+    while scale * points < pixels:
+        scale = math.nextafter(scale, math.inf)
+    return scale
 
 
 # 函数用途: 校验宿主附的 _meta 观察上下文形状，返回 (ref, generation, key)。
@@ -283,6 +299,6 @@ def _clip_region(region: object, buffer: PixelBuffer) -> tuple[int, int, int, in
 
 __all__ = [
     "CLICK_ACTION", "OBSERVATION_SPACE", "OCR_ROLE", "SCREEN_REGION_CAPTURE", "WINDOW_IMAGE_CAPTURE", "WINDOW_TARGET_KIND",
-    "ObservationError", "ScreenCapture", "ScreenObserver", "TextRegion", "WindowInfo", "captured_geometry", "click_point",
+    "ObservationError", "ScreenCapture", "ScreenObserver", "TextRegion", "WindowInfo", "captured_geometry", "click_point", "covering_scale",
     "point_in_rect", "rect_contains", "rects_intersect", "sanitize_label", "window_rect",
 ]

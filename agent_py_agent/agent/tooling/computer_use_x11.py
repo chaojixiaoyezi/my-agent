@@ -1,13 +1,18 @@
 # LLM: J16 片 B 的 Linux X11 真后端：只用 python-xlib（pywinctl 带入）、mss、RapidOCR、pyautogui 的公开接口，给
 #   screen_observation.ScreenObserver 提供"窗口列表（按叠放底→顶）、上层矩形、窗口截图、OCR 文字区域、点击"五个事实；不切焦点、
-#   不激活、不移动鼠标（click 除外）。所有桌面库都在方法里惰性 import：没有 DISPLAY 的进程也能构造后端，错误在调用时变成
-#   ObservationError。坐标：X11 全局坐标就是像素，缩放固定 1；几何取客户区（translate_coords 到根窗口），遮挡矩形加 _NET_FRAME_EXTENTS 边框。
+#   不激活、不移动鼠标（click 除外）。所有桌面库都在用到时才 import：没有 DISPLAY 的进程也能构造后端，错误在调用时变成
+#   ObservationError。打开 X 连接、截屏、点击这三个真碰桌面的库只经 load_real_x11_libraries() 一个入口拿（与 macOS 后端同一套），
+#   测试侧守卫在会话级把它换成直接失败（Linux 车道容器里不换），pyautogui 在 Mac 上也能点，不能靠每个测试自觉替换模块。
+#   X11 注入点击不需要额外授权，ensure_click_permitted 什么都不做。坐标：X11 全局坐标就是像素，缩放固定 1；几何取客户区（translate_coords 到根窗口），遮挡矩形加 _NET_FRAME_EXTENTS 边框。
 #   截图是 mss 按区域截屏：压在上面的窗口也会被拍进去，所以如实报 capture="screen_region"（片 E 起由后端报，核心不再写死）。
 #   OCR 用与 macOS 后端共用的 screen_ocr.RapidOcrReader。
 #   不调上游 computer_control_mcp 的内部对象。真实验证只在 Linux 车道容器（Xvfb + openbox）做，Mac 上只用假后端。
 # 模块用途: 把 X11 桌面变成观察核心能理解的几个事实，自己不做任何判定。
 from __future__ import annotations
 
+import importlib
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .screen_observation import SCREEN_REGION_CAPTURE, ScreenCapture, TextRegion, WindowInfo
@@ -19,11 +24,30 @@ from .screen_region_digest import PixelBuffer
 _ALL_DESKTOPS_PROTOCOL_VALUE = 0xFFFFFFFF
 
 
-# LLM: display 可注入（测试 / 复用），默认第一次用时按 DISPLAY 打开；每个方法都重新读属性，不缓存窗口状态（复核要新鲜事实）。
+# LLM: 测试注入假库时整份替换；open_display 打开 X 连接，grabber 返回 mss 的截屏上下文，click 在全局像素点点击。
+# 类用途: X11 后端里真会碰桌面的三个库入口。
+@dataclass(frozen=True)
+class X11Libraries:
+    open_display: Callable[[], Any]
+    grabber: Callable[[], Any]
+    click: Callable[[int, int], None]
+
+
+# LLM: 唯一拿真实桌面库的入口；本身不 import 任何库（python-xlib 的 Display、mss、pyautogui 都在调用时才 import）。
+#   测试侧守卫在会话级把它换成直接失败（Linux 车道容器 MY_AGENT_XVFB_LANE=1 里不换）。
+# 函数用途: 加载真实的 X11 桌面库。
+def load_real_x11_libraries() -> X11Libraries:
+    return X11Libraries(lambda: importlib.import_module("Xlib.display").Display(), lambda: importlib.import_module("mss").mss(),
+                        lambda x, y: importlib.import_module("pyautogui").click(x, y))
+
+
+# LLM: display、libraries 可注入（测试 / 复用），默认第一次用时经 load_real_x11_libraries 按 DISPLAY 打开；每个方法都重新读属性，
+#   不缓存窗口状态（复核要新鲜事实）。
 # 类用途: 观察核心的 X11 后端。
 class X11Backend:
-    def __init__(self, display: Any | None = None) -> None:
+    def __init__(self, display: Any | None = None, libraries: X11Libraries | None = None) -> None:
         self._display = display
+        self._libraries = libraries
         self._ocr = RapidOcrReader()
 
     # 函数用途: 按 _NET_CLIENT_LIST_STACKING 底→顶列出客户端窗口及其当下事实。
@@ -51,10 +75,8 @@ class X11Backend:
 
     # 函数用途: 用 mss 按窗口客户区矩形截屏（RGB 原始字节），采样方式如实报 screen_region。
     def capture(self, info: WindowInfo) -> ScreenCapture:
-        import mss
-
         origin, size = info.geometry.origin, info.geometry.size
-        with mss.mss() as grabber:
+        with self._libs().grabber() as grabber:
             shot = grabber.grab({"left": int(origin[0]), "top": int(origin[1]), "width": int(size[0]), "height": int(size[1])})
         return ScreenCapture(PixelBuffer(int(shot.width), int(shot.height), bytes(shot.rgb)), SCREEN_REGION_CAPTURE)
 
@@ -64,17 +86,23 @@ class X11Backend:
 
     # 函数用途: 在全局像素坐标点一下（复核通过后立刻调用，中间不做别的 I/O）。
     def click(self, x: int, y: int) -> None:
-        import pyautogui
+        self._libs().click(int(x), int(y))
 
-        pyautogui.click(int(x), int(y))
+    # 函数用途: 点击前的权限确认：X11 注入点击不需要额外授权，什么都不做（与 macOS 后端同一个鸭子接口）。
+    def ensure_click_permitted(self) -> None:
+        return None
 
     # 函数用途: 惰性打开 X 连接并返回 (display, root)。
     def _root(self) -> tuple[Any, Any]:
         if self._display is None:
-            from Xlib import display as xdisplay
-
-            self._display = xdisplay.Display()
+            self._display = self._libs().open_display()
         return self._display, self._display.screen().root
+
+    # 函数用途: 取桌面库：注入的直接用，否则第一次用时经唯一入口加载真实库。
+    def _libs(self) -> X11Libraries:
+        if self._libraries is None:
+            self._libraries = load_real_x11_libraries()
+        return self._libraries
 
     # 函数用途: Xlib 常量模块（IsViewable 等）。
     @staticmethod
@@ -149,4 +177,4 @@ def _first(values: list[Any]) -> object:
     return values[0] if values else None
 
 
-__all__ = ["X11Backend"]
+__all__ = ["X11Backend", "X11Libraries", "load_real_x11_libraries"]

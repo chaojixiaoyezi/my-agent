@@ -10,6 +10,9 @@
 #     拿不到时退回 mss 区域截图并给结构化原因（unavailable / too_old / timeout / failed）。窗口不在可分享内容里 → capture_failed，
 #     不回退（回退会把后面别的窗口拍成这个窗口的候选）；用户拒绝授权按 NSError 的 domain+code 判 → screen_recording_not_permitted。
 #     mss 的 macOS 实现内部用已废弃的 CGWindowListCreateImage、按名义分辨率出图：回退截图 scale 由核心按像素/点比算出是 1。
+#   - 点击权限：pyautogui 用 CGEventPost 发事件，宿主没有辅助功能权限时系统会悄悄丢掉、不报错。核心在复核之前调
+#     ensure_click_permitted()，这里用 AXIsProcessTrusted()（只查不弹窗，绝不调带提示选项的 AXIsProcessTrustedWithOptions）问一次，
+#     没权限 / 绑定导入失败 → accessibility_not_permitted（无法确认就不点）。
 #   - 真实框架只经 load_real_macos_frameworks() 这一个入口拿；构造时注入假框架就不碰它。测试侧守卫在会话级把它换成直接失败。
 #   改动同步 test_computer_use_macos 与设计稿 J16 第 3.2 节 macOS 口径。
 # 模块用途: 把 macOS 桌面变成观察核心能理解的几个事实，自己不做任何判定；单测全用假 Quartz / 假 ScreenCaptureKit。
@@ -41,7 +44,7 @@ SCREENSHOT_MANAGER_MIN_MACOS_MAJOR_VERSION = 14
 
 
 # LLM: 测试注入假框架时整份替换；quartz / screencapturekit 是模块对象（常量和函数都从它上面取，不写死数值），grabber 返回 mss
-#   的截屏上下文，click 在全局点点击；screencapturekit 为 None 表示导入失败。
+#   的截屏上下文，click 在全局点点击；screencapturekit 为 None 表示导入失败；accessibility_trusted 只查辅助功能权限、不弹窗。
 # 类用途: macOS 后端用到的全部系统框架与系统版本。
 @dataclass(frozen=True)
 class MacFrameworks:
@@ -50,9 +53,10 @@ class MacFrameworks:
     grabber: Callable[[], Any]
     click: Callable[[int, int], None]
     macos_version: tuple[int, ...]
+    accessibility_trusted: Callable[[], bool]
 
 
-# LLM: 唯一拿真实系统框架的入口（会 import pyobjc 的 Quartz / ScreenCaptureKit；mss、pyautogui 用到时才 import）。
+# LLM: 唯一拿真实系统框架的入口（会 import pyobjc 的 Quartz / ScreenCaptureKit；mss、pyautogui、ApplicationServices 用到时才 import）。
 #   Quartz 导入失败抛 ImportError，由后端变成结构化失败；ScreenCaptureKit 导入失败记 None，截图时退回区域截图并给原因。
 #   测试侧守卫在会话级把这个函数换成直接失败，测试永远碰不到真实屏幕。
 # 函数用途: 加载真实的 macOS 框架。
@@ -63,7 +67,8 @@ def load_real_macos_frameworks() -> MacFrameworks:
     except ImportError:
         screencapturekit = None
     return MacFrameworks(quartz, screencapturekit, lambda: importlib.import_module("mss").mss(),
-                         lambda x, y: importlib.import_module("pyautogui").click(x, y), _macos_version())
+                         lambda x, y: importlib.import_module("pyautogui").click(x, y), _macos_version(),
+                         lambda: bool(importlib.import_module("ApplicationServices").AXIsProcessTrusted()))
 
 
 # LLM: 每个方法都重新读系统事实，不缓存窗口状态（复核要新鲜事实）；frameworks 为 None 时第一次用才加载真实框架。
@@ -111,6 +116,19 @@ class MacBackend:
     # 函数用途: 在全局点坐标点一下（复核通过后立刻调用，中间不做别的 I/O）。
     def click(self, x: int, y: int) -> None:
         self._fw().click(int(x), int(y))
+
+    # LLM: 核心在复核之前调（不放在"复核通过 → 点击"之间）；只查不弹窗。绑定导入失败按没权限处理：确认不了就不点，
+    #   免得系统丢掉点击、工具却报已点击，给自动执行留下假的成功事实。
+    # 函数用途: 点击前确认宿主有辅助功能权限，没有就报 accessibility_not_permitted。
+    def ensure_click_permitted(self) -> None:
+        accessibility_trusted = self._fw().accessibility_trusted
+        try:
+            trusted = accessibility_trusted()
+        except ImportError:
+            trusted = False
+        if not trusted:
+            raise ObservationError("accessibility_not_permitted",
+                                   "没有辅助功能权限（或无法确认）：系统会悄悄丢掉点击，请在系统设置的隐私与安全性里允许辅助功能")
 
     # 函数用途: 取框架：注入的假框架直接用，否则第一次用时加载真实框架（缺 pyobjc 变成结构化失败）。
     def _fw(self) -> MacFrameworks:

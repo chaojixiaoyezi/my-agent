@@ -8,6 +8,7 @@
 4. ScreenCaptureKit 拿不到时退回 mss 区域截图（名义分辨率，frame.scale=1），结果顶层带 capture_fallback{reason}；
    窗口不在可分享内容里 → capture_failed 不回退；用户拒绝授权按 NSError domain+code 判，不看文字；回调超时后晚到的结果
    不会被下一次调用误用；观察走主路径、复核退回区域截图 → scale 变了判 stale。
+5. 点击前（复核之前）先查辅助功能权限：没授权或绑定导入失败 → accessibility_not_permitted，不重新列窗口、不点击。
 """
 from __future__ import annotations
 
@@ -208,11 +209,19 @@ def _ocr(buffer):
     return [TextRegion("提交", tuple(round(value * scale) for value in PATCH))]
 
 
+# 函数用途: 假 AXIsProcessTrusted：给异常类就抛（模拟绑定导入失败），否则返回是否已授权。
+def _accessibility(state):
+    if isinstance(state, type) and issubclass(state, BaseException):
+        raise state("ApplicationServices")
+    return state
+
+
 # 函数用途: 组装一套假框架的后端与观察核心；返回 (observer, quartz, kit, grabs, clicks)。
-def _setup(*, kit="default", version=(15, 1)):
+def _setup(*, kit="default", version=(15, 1), trusted=True):
     quartz, grabs, clicks = _Quartz(), [], []
     kit = _Kit() if kit == "default" else kit
-    backend = MacBackend(MacFrameworks(quartz, kit, lambda: _Grabber(grabs), lambda x, y: clicks.append((x, y)), version))
+    backend = MacBackend(MacFrameworks(quartz, kit, lambda: _Grabber(grabs), lambda x, y: clicks.append((x, y)), version,
+                                       lambda: _accessibility(trusted)))
     backend._ocr = SimpleNamespace(read=_ocr)
     observer = ScreenObserver(backend, registry=WindowInstanceRegistry(boot="mac0"), clock=lambda: 1790000000.5)
     return observer, quartz, kit, grabs, clicks
@@ -236,7 +245,7 @@ def test_listing_is_bottom_to_top_with_identity_layer_and_visibility_facts():
     quartz.windows.append(_row(202, (10, 10, 80, 80), onscreen=False, name="最小化"))
     quartz.windows.append(_row(203, (5000, 5000, 80, 80), name="不在任何显示器上"))
     quartz.windows.append(_row(204, (-1800, 100, 400, 300), pid=777, name="副屏"))
-    windows = MacBackend(MacFrameworks(quartz, _Kit(), lambda: None, lambda x, y: None, (15, 1))).list_windows()
+    windows = MacBackend(MacFrameworks(quartz, _Kit(), lambda: None, lambda x, y: None, (15, 1), lambda: True)).list_windows()
     assert [w.native_id for w in windows] == [(204, 777), (203, 500), (202, 500), (BACKDROP, 500), (FORM, 500), (MENUBAR, 500), (201, 500)], "前→后翻成底→顶"
     facts = {w.native_id[0]: (w.normal, w.viewable, w.geometry.scale, w.geometry.origin) for w in windows}
     assert facts[MENUBAR][0] is False and facts[FORM][0] is True, "layer==0 才算普通窗口"
@@ -300,6 +309,17 @@ def test_only_windows_in_front_of_the_target_occlude_it():
     with pytest.raises(ObservationError) as covered:
         observer.observe()
     assert covered.value.code == "occluded" and clicks == []
+
+
+@pytest.mark.parametrize("state", [False, ImportError], ids=["not_trusted", "binding_missing"])
+def test_click_without_accessibility_permission_fails_before_rechecking(state):
+    observer, quartz, _kit, _grabs, clicks = _setup(trusted=state)
+    meta = _meta(observer.observe())
+    listed = len(quartz.list_calls)
+    with pytest.raises(ObservationError) as denied:
+        observer.click_candidate(meta)
+    assert denied.value.code == "accessibility_not_permitted", "系统会悄悄丢掉点击，不能报已点击；确认不了也不点"
+    assert len(quartz.list_calls) == listed and clicks == [], "复核之前就拒绝：不重新列窗口、不点击"
 
 
 def test_a_window_moved_over_the_click_point_makes_the_click_stale():

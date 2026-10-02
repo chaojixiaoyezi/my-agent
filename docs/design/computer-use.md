@@ -36,10 +36,12 @@
   `CGWindowListCopyWindowInfo`、遮挡 `kCGWindowListOptionOnScreenAboveWindow`、截图 ScreenCaptureKit 单窗口（macOS 14+），
   拿不到退回 mss 区域截图并在结果顶层带 `capture_fallback{reason}`。
 - 需要在“系统设置 → 隐私与安全性 → 屏幕录制”里允许运行适配器的程序；没授权时 `observe_window` 返回 `screen_recording_not_permitted`，
-  适配器不会弹授权窗。
+  适配器不会弹授权窗。点击还要“辅助功能”权限：`click_candidate` 在复核之前先查（`AXIsProcessTrusted`，只查不弹窗），
+  没授权返回 `accessibility_not_permitted`，不会出现系统丢掉点击、工具却报已点击的情况。
 - 截图返回值统一为 `ScreenCapture(buffer, kind, fallback_reason)`；`frame.capture` 由后端如实报（X11 是 `screen_region`），
   `frame.scale` 取截图自己的像素/点比。细节与已知限制见设计稿 3.2 第 5 条。
-- 测试全程不碰真实屏幕：假 Quartz / 假 ScreenCaptureKit 单测，conftest 会话级防线让真实框架入口一被调用就失败；真机只读核对另行安排。
+- 测试全程不碰真实屏幕：假 Quartz / 假 ScreenCaptureKit 单测，conftest 会话级防线让 macOS 与 X11 两个真实库入口一被调用就失败
+  （X11 的只在 Linux 车道容器里放行）；真机只读核对另行安排。
 
 ## 解决问题
 
