@@ -946,6 +946,11 @@ def test_fact_cache_respects_policy_due_deadline(fact_cache, tmp_path) -> None:
 
     # 时间推进到 policy 到点之后:即使文件没变,也必须重新判定并判活。
     _write_policy(_store_root(home), "p", enabled=True, next_due_at=time.time() - 1)
+    # 改写不换 inode、长度可能相同;Linux 的 mtime 按粗粒度时钟更新,毫秒内连写两次签名可能不变(车道上出现过),
+    # 所以显式把 mtime 往后推 1 秒,保证缓存看得到这次改写。
+    policy = _store_root(home) / "progress_policies" / "p.json"
+    stat = policy.stat()
+    os.utime(policy, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
     assert [owner.owner_id for owner in discover_wake_pending_owners(owners)] == ["u1"]
 
 
