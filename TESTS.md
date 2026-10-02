@@ -76,7 +76,7 @@
 - 新增 `test_semantic_memory_storage.py`（S3）：umask 0 下写出即 600/700；把文件放宽到 644、目录 755 后再写一次仍收紧（钉住“替换后”）；第一次召回只嵌查询；换身份全部重嵌；文本对不上的那条单独重嵌。
 - `test_embedding_model_profile.py` 新增 2 例（S4）：语义设置对 owner 作用域 agent 是全局的；普通 owner 解析不到管理员档案时只走关键词、只读自己的目录、不建嵌入客户端。
 - 同步：`test_memory_vector_cache.py` 故障注入按私有写的临时文件名（前导点）匹配；`test_vector_snapshot_consistency.py` 改打补丁到新的私有写函数名。
-- 变异 19 个全部抓住（m01–m19）：主机规则关掉、端口丢失、菜单管理员检查关掉、本人目录守卫关掉、关闭/选中顺序对调、默认对话模型解析异常不再兜住、工具拒绝码映射关掉、IM `off` 词、TUI 重建丢 vector、本地分派关掉、列表不按 embedding 过滤、私有写抄回旧权限、目录不收紧、复用不比文本、复用不比身份、list 不附视图、视图给普通 owner、提示不看状态。
+- 变异 20 个全部抓住（m01–m20）：主机规则关掉、端口丢失、菜单管理员检查关掉、本人目录守卫关掉、关闭/选中顺序对调、默认对话模型解析异常不再兜住、工具拒绝码映射关掉、IM `off` 词、TUI 重建丢 vector、本地分派关掉、列表不按 embedding 过滤、私有写抄回旧权限、目录不收紧、复用不比文本、复用不比身份、list 不附视图、视图给普通 owner、提示不看状态、逐项写入遇到失败不停。尺寸门收口（复用查找挪到模块级、写入循环拆函数）后重跑了受影响的 m03/m05/m06/m15 并加 m20，全部抓住。
 - 真实核对两次（MiniMax M2.7 + embo-01，隔离 home、8441，各只发一次“帮我开语义记忆”）：第 1 次未通过（只 list）；修契约后第 2 次通过（list → set_embedding → restart_gateway，重启后 `/model vector` 显示运行中已开，新组合根真实召回为 semantic 且只嵌查询）。详情与证据路径见 DESIGN_LEDGER 同名条目。
 
 ## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）

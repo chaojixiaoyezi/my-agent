@@ -92,17 +92,27 @@ def apply_embedding_choice(host: object, profile_id: str, *, actor: str) -> dict
         raise ModelProfileError("当前没有加载用户配置文件，不能保存向量模型设置。")
     steps = ((_PROFILE_KEY, profile_id), (_RECALL_KEY, "true")) if profile_id else ((_RECALL_KEY, "false"), (_PROFILE_KEY, ""))
     origin = ChangeOrigin(actor=actor, reason="/model 向量模型" if actor != "model" else "manage_models 向量模型")
-    change_ids: list[str] = []
     with user_settings_write_scope():
-        for key, value in steps:
-            report = set_parameter(key, value, paths=WritePaths(user_path=path), origin=origin)
-            if not report.get("ok"):
-                return {"ok": False, "error_code": str(report.get("code") or ""), "change_ids": change_ids,
-                        "message": str(report.get("error") or "向量模型设置没有保存。")}
-            change_ids.append(str(report["change_id"]))
+        failure, change_ids = _write_steps(steps, WritePaths(user_path=path), origin)
+    if failure is not None:
+        return {"ok": False, "error_code": str(failure.get("code") or ""), "change_ids": change_ids,
+                "message": str(failure.get("error") or "向量模型设置没有保存。")}
     done = f"向量模型已设为 {model_name}，语义记忆已打开。" if profile_id else "已关闭语义记忆（只按关键词召回），向量模型已清空。"
     return {"ok": True, "profile_id": profile_id, "model_name": model_name, "semantic_recall": bool(profile_id),
             "restart_required": True, "change_ids": change_ids, "message": done + effect_text(EFFECT_GATEWAY_RESTART)}
+
+
+# LLM: 必须在 user_settings_write_scope 里调用（边界授权由调用方给）；按顺序逐项写，遇到第一个失败就停，返回失败回执和已成功的
+#   账本编号。有写文件副作用（用户配置 + 修改账本）。
+# 函数用途: 依次写入向量模型的两项设置。
+def _write_steps(steps: tuple, paths: WritePaths, origin: ChangeOrigin) -> tuple[dict | None, list[str]]:
+    change_ids: list[str] = []
+    for key, value in steps:
+        report = set_parameter(key, value, paths=paths, origin=origin)
+        if not report.get("ok"):
+            return report, change_ids
+        change_ids.append(str(report["change_id"]))
+    return None, change_ids
 
 
 # LLM: 模型自配的结构化裁决（用户 10-02 拍板）：只给本机管理员；只认本人目录里的嵌入档案；端点主机与默认对话模型一致才写，

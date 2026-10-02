@@ -248,11 +248,12 @@ def test_manage_models_partial_write_keeps_unknown_effect(host, monkeypatch):
 def _menu(monkeypatch, listing, picked):
     calls, shown = [], []
 
-    async def request(app, agent, session_id, operation, payload=None):
+    async def request(*call):  # 与 _request(app, agent, session_id, operation, payload=None) 同位置
+        operation, payload = call[3], (call[4] if len(call) > 4 else None)
         calls.append((operation, payload))
         return listing if operation == "embedding_list" else {"ok": True, "message": "已保存，重启 Gateway 后生效"}
 
-    async def dialog(app, title, body, actions, *, focus=None, completion=None):
+    async def dialog(*_call, focus=None, **_options):
         shown.append([value for value, _label in focus.values])
         return picked
 

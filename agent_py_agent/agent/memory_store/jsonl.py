@@ -688,7 +688,7 @@ class _JsonlMemorySearchMixin:
 
     # LLM: 检索侧缓存只是派生索引，读取失败必须静默退化为"没有缓存"（现嵌），结果不变。
     #   先用权威向量库 memory_vectors.json 里已有的向量（_stored_vectors_for：身份对上、文本完全一致），剩下的才查正文哈希缓存；
-    #   第一次召回因此不再把写入/重建时嵌过的记忆再嵌一遍（S3，用户 10-02 拍板）。
+    #   第一次召回因此不再把写入/重建时嵌过的记忆再嵌一遍（S3，用户 10-02 拍板）。两段查找放在模块级，免得撑大检索 mixin。
     #   竞态（取缓存之后事实才被删/被替换）统一在回写点用 active 身份复核收口，
     #   见 `_remember_cached_vectors`，此处不做第二套判定（重复判据会变成不可达的冗余防御）。
     # 函数用途: 取出本轮检索可复用的文档向量（先向量库、后正文哈希缓存），避免重复嵌入。
@@ -696,47 +696,9 @@ class _JsonlMemorySearchMixin:
         self,
         docs: list[tuple[str, str]],
     ) -> dict[str, list[float]]:
-        reused = self._stored_vectors_for(docs)
+        reused = _stored_vectors_for(self, docs)
         rest = [(doc_id, text) for doc_id, text in docs if doc_id not in reused]
-        return {**reused, **self._text_cache_vectors_for(rest)}
-
-    # LLM: 只读权威向量库：库不可用、身份对不上或读失败都返回空（等于没有可复用的），不报错、不写盘；只认条目 text 与本轮
-    #   索引文本逐字相同的向量（写入与重建都按 index_text 嵌入并存这段文本，旧条目只要文本不同就不复用）。维度由检索器再核。
-    # 函数用途: 从 memory_vectors.json 取出能直接复用的文档向量。
-    def _stored_vectors_for(self, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
-        if not docs:
-            return {}
-        try:
-            store = self._vector_store()
-            stored = store.stored_vectors(doc_id for doc_id, _text in docs) if store is not None else {}
-        except Exception:
-            return {}
-        texts = dict(docs)
-        return {doc_id: vector for doc_id, (vector, text) in stored.items() if text == texts.get(doc_id)}
-
-    # LLM: 正文哈希缓存（memory_text_vectors.json）只补向量库没有的那部分；读失败等于没有缓存。
-    # 函数用途: 按正文哈希取出已缓存的向量。
-    def _text_cache_vectors_for(self, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
-        try:
-            # 懒建缓存必须放进 try：构造缓存时会读盘，读错误不能冒出检索路径
-            # （模块合同：读失败等价于没有缓存，检索结果不变）。
-            cache = self._text_vector_cache()
-            if cache is None or not docs:
-                return {}
-            from ..retrieval.text_vector_cache import embedder_fingerprint
-
-            fingerprint = embedder_fingerprint(self._embedder)
-            keys = {doc_id: self._cache_key(fingerprint, text) for doc_id, text in docs}
-            found = cache.get(list(keys.values()))
-            self._record_semantic_health("cache_read")
-            return {
-                doc_id: found[key]
-                for doc_id, key in keys.items()
-                if isinstance(found.get(key), list)
-            }
-        except Exception as exc:
-            self._record_semantic_health("cache_read", exc)
-            return {}
+        return {**reused, **_text_cache_vectors_for(self, rest)}
 
     # LLM: 缓存写失败不能影响检索结果；只把本轮真正现嵌过的向量按正文哈希写回。
     #   竞态收口：写回前用 active 身份复核每个 id，索引文本变了或记录已不在 active，
@@ -1046,6 +1008,43 @@ def _scoped_retrieval_facts(
         "scoped_entries": scoped_entries,
         "semantic_recall": dict(semantic_status),
     }
+
+
+# LLM: 只读权威向量库：库不可用、身份对不上或读失败都返回空（等于没有可复用的），不报错、不写盘；只认条目 text 与本轮
+#   索引文本逐字相同的向量（写入与重建都按 index_text 嵌入并存这段文本，旧条目只要文本不同就不复用）。维度由检索器再核。
+#   memory 是检索 mixin 所在的 JsonlMemory；放在模块级是为了不撑大检索 mixin。
+# 函数用途: 从 memory_vectors.json 取出能直接复用的文档向量。
+def _stored_vectors_for(memory: object, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
+    if not docs:
+        return {}
+    try:
+        store = memory._vector_store()
+        stored = store.stored_vectors(doc_id for doc_id, _text in docs) if store is not None else {}
+    except Exception:
+        return {}
+    texts = dict(docs)
+    return {doc_id: vector for doc_id, (vector, text) in stored.items() if text == texts.get(doc_id)}
+
+
+# LLM: 正文哈希缓存（memory_text_vectors.json）只补向量库没有的那部分；读失败等于没有缓存，并记入语义健康状态。
+#   懒建缓存必须放进 try：构造缓存时会读盘，读错误不能冒出检索路径（模块合同：读失败等价于没有缓存，检索结果不变）。
+#   放在模块级是为了不撑大检索 mixin。
+# 函数用途: 按正文哈希取出已缓存的向量。
+def _text_cache_vectors_for(memory: object, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
+    try:
+        cache = memory._text_vector_cache()
+        if cache is None or not docs:
+            return {}
+        from ..retrieval.text_vector_cache import embedder_fingerprint
+
+        fingerprint = embedder_fingerprint(memory._embedder)
+        keys = {doc_id: memory._cache_key(fingerprint, text) for doc_id, text in docs}
+        found = cache.get(list(keys.values()))
+        memory._record_semantic_health("cache_read")
+        return {doc_id: found[key] for doc_id, key in keys.items() if isinstance(found.get(key), list)}
+    except Exception as exc:
+        memory._record_semantic_health("cache_read", exc)
+        return {}
 
 
 # LLM: 只读 composition root 写下的结构化诊断（state/error_code），不读日志文案：没开语义召回是 semantic_recall_disabled；
