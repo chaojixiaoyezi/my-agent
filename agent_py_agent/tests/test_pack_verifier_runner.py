@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import socket
+import subprocess
 import sys
 import threading
 
@@ -268,10 +269,15 @@ def test_fact_is_json_serializable(tmp_path, real_sandbox):
 def test_network_isolation_unavailable_fails_closed_without_running(tmp_path, monkeypatch):
     from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
 
+    probes = []
+
+    # 平台沙箱本身可用，但实测断网失败（如容器里缺 NET_ADMIN 时 bwrap 回环配置报错）。
+    def failing_isolation_probe(argv, **kwargs):
+        probes.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, b"", b"loopback: Failed RTM_NEWADDR")
+
     monkeypatch.setattr(AttemptExecutionSandbox, "probe", lambda self, **kwargs: SandboxReadiness(True, "SANDBOX_READY", "ok"))
-    monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox._network_checked",
-                        lambda report, platform_name, spec: report if spec.network_access
-                        else SandboxReadiness(False, "SANDBOX_NETWORK_ISOLATION_UNAVAILABLE", "no"))
+    monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox.subprocess.run", failing_isolation_probe)
     monkeypatch.setattr(AttemptExecutionSandbox, "run", lambda *a, **k: pytest.fail("must not run"))
     AttemptExecutionSandbox._READINESS_CACHE.clear()
     try:
@@ -281,6 +287,8 @@ def test_network_isolation_unavailable_fails_closed_without_running(tmp_path, mo
     finally:
         AttemptExecutionSandbox._READINESS_CACHE.clear()
     assert result.status == "not_run" and result.reason_code == "sandbox_unavailable"
+    assert len(probes) == 1, probes
+    assert "--unshare-net" in probes[0] or "(deny network*)" in " ".join(probes[0])
 
 
 def test_output_contract_requires_schema_and_bounds_summary():
