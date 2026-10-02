@@ -195,3 +195,37 @@ def test_a_result_without_a_hint_clears_the_previous_one():
     assert task.attributes[TAKEOVER_HINT_ATTR] == hint and task.attributes[TAKEOVER_HINT_ATTR] is not hint
     record_takeover_hint(task, None)
     assert TAKEOVER_HINT_ATTR not in task.attributes
+
+
+def test_switch_is_a_boundary_only_the_admin_settings_command_can_flip(tmp_path):
+    # 开关改变父级模型看到的内容：模型工具不能改；已认证管理员 /settings 的写作用域可以开/关，写进运行时读的 capability 文件。
+    import os
+    import stat
+
+    from agent_py_agent.agent.capability.config import load_capability_config
+    from agent_py_agent.agent.settings.parameter_changes import (
+        ChangeOrigin,
+        WritePaths,
+        set_parameter,
+        user_settings_write_scope,
+    )
+    from agent_py_agent.agent.settings.parameter_registry import parameter_registry
+    from agent_py_agent.agent.settings.user_config_capability import USER_SETTINGS_BOUNDARY_KEYS
+
+    spec = parameter_registry()["subagent_takeover_hint_enabled"]
+    assert spec.default is False and spec.writable is False
+    assert "subagent_takeover_hint_enabled" in USER_SETTINGS_BOUNDARY_KEYS
+    user_config = tmp_path / "user.yaml"
+    user_config.write_text("", encoding="utf-8")
+    capability = tmp_path / "owner" / "config" / "capability_config.yaml"
+    paths = WritePaths(user_path=user_config, capability_path=capability)
+    refused = set_parameter("subagent_takeover_hint_enabled", True, paths=paths, origin=ChangeOrigin("model"))
+    assert refused["ok"] is False and refused["code"] == "PARAMETER_BOUNDARY" and not capability.exists()
+    with user_settings_write_scope():
+        report = set_parameter("subagent_takeover_hint_enabled", True, paths=paths, origin=ChangeOrigin("chat"))
+    assert report["ok"] is True, report
+    assert load_capability_config(capability).subagent_takeover_hint_enabled is True
+    assert stat.S_IMODE(os.stat(capability).st_mode) == 0o600
+    with user_settings_write_scope():
+        assert set_parameter("subagent_takeover_hint_enabled", False, paths=paths, origin=ChangeOrigin("chat"))["ok"]
+    assert load_capability_config(capability).subagent_takeover_hint_enabled is False

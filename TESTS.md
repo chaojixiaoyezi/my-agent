@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## C4 接替提示开关进管理员 /settings 白名单（2026-10-02，3a，step17b 集成）
+
+- 新增 `test_subagent_takeover_hint.py::test_switch_is_a_boundary_only_the_admin_settings_command_can_flip`：模型 `set_parameter` 得 `PARAMETER_BOUNDARY` 且不建 capability 文件；`user_settings_write_scope()` 内开、关都成功，`load_capability_config` 回读一致，新建文件 0600。
+- 变异：从 `USER_SETTINGS_BOUNDARY_KEYS` 删掉该键 → 新用例失败（1 failed, 8 passed），还原后 sha256 一致。
+- 相关：`test_subagent_takeover_hint.py`、`test_memory_search_tool.py`、`test_parameter_*.py`、`test_settings_chat_control.py` 182 passed。
+
 ## 交付复核焦点题面措辞修正（delivery_quality 压线核查）（2026-10-02，分支 `claude/be-delivery-criteria`，基于 `d8474300f`）
 
 - **改动**：只改 `decision_delivery_quality` 的非选择候选说明与题面，键和结构不变。

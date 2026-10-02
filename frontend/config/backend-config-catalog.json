@@ -4415,7 +4415,7 @@
           {
             "key": "subagent_takeover_hint_enabled",
             "label": "subagent_takeover_hint_enabled（subagent takeover hint enabled）",
-            "description": "子代理执行器已退出（宿主证实、这一轮没有结果）时，是否在给直属父级的完成通知里附结构化接替提示（哪个 run、退出原因、怎么用 replacement_for_run_ids 声明接替）。 - true: 父级模型在唤醒回执里看到这条提示；只是提示，不自动派工或接管，是否接替仍由父级决定。 - false: 推荐默认值；会改变父级模型看到的内容，先由用户显式开启。",
+            "description": "子代理执行器已退出（宿主证实、这一轮没有结果）时，是否在给直属父级的完成通知里附结构化接替提示（哪个 run、退出原因、怎么用 replacement_for_run_ids 声明接替）。 - true: 父级模型在唤醒回执里看到这条提示；只是提示，不自动派工或接管，是否接替仍由父级决定。 - false: 推荐默认值；会改变父级模型看到的内容，先由用户显式开启。 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后重启 Gateway 生效。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,

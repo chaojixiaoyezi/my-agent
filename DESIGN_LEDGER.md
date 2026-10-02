@@ -1,5 +1,11 @@
 # 设计台账
 
+## C4 接替提示开关进管理员 /settings 白名单（2026-10-02，3a，集成分支 `claude/3a-step16z`，已实现，待上线（step17b））
+
+- **问题**：`subagent_takeover_hint_enabled` 在 capability 配置里，按 P17 规则默认是安全边界（会改变父级模型看到的内容，模型不能改），但没进 `USER_SETTINGS_BOUNDARY_KEYS`，结果管理员 `/settings set` 也被 `PARAMETER_BOUNDARY` 拒绝，只剩手改文件一条路；已定做法 5 要求“生产打开并给关闭命令”，做不到。部署前用参数中心预演时发现。
+- **做法**：加进 `user_config_capability.USER_SETTINGS_BOUNDARY_KEYS`，与 `enable_memory_search_tool` 同类：模型工具仍拒绝，已认证管理员 `/settings` 的短生命周期写作用域可以开关，写进运行时实际读取的 `<owner home>/config/capability_config.yaml`（不存在时新建 600），重启 Gateway 生效。随包 `capability_config.yaml` 注释补一句修改途径。
+- **验证**：`test_subagent_takeover_hint.py::test_switch_is_a_boundary_only_the_admin_settings_command_can_flip`（模型被拒且不建文件；管理员作用域开/关、回读一致、文件 0600）；变异“从白名单删掉该键”被拦下后还原。
+
 ## 交付复核焦点题面写明“全部通过且没改动时选 not_needed”（delivery_quality 压线核查）（2026-10-02，分支 `claude/be-delivery-criteria`，基于 `claude/3a-step16z` `d8474300f`，已实现，待集成）
 
 - **问题**：J12 续基准里 delivery_quality 16/20，刚好压线（阈值 0.8）。
