@@ -140,7 +140,8 @@
   - 聚焦回归（313 个文件：改动模块相关 + guards9 + packaging）：`6413 passed`，1 条旧用例按新口径改期望（见下）。
   - Mac 全量 12 片（`f21039671`）：26753 passed / 0 failed / 21 skipped / 32 xfailed / 5 xpassed。
   - Docker Linux 车道（`f21039671`，NET_ADMIN）：12/12 rc=0，26669 passed / 0 failed / 105 skipped / 32 xfailed / 5 xpassed，证据 `~/.my-agent/releases/claude-tools/linux-lane-f21039671/`。`dadcc2576` 只加测试，H3 测试文件另在容器里单跑。
-  - 变异 29 个全部抓到（第一轮 25 个；D5 registry 插件上下文漏传数据根、D6 Shell 漏传数据根（行为上等价，按合同钉住）、G5 正则不锚开头、C5 透传非宿主码，补用例后第二轮抓到）。覆盖：数据根 6 个构造点、data/ 拆分与 agents/、B 类、task_root、正则 5 项、透传 5 项、环境标记 3 项、CLI 守卫 4 项。
+  - 最终头 `9e8dd00b6`（之后只加测试、把 `validate_write_boundary` 里一处调用折成两行回到 59 行、拆分数据根用例）：引用写边界的 108 个文件（含 H3、guards9）Mac 2841 passed，Docker Linux 2839 passed、2 skipped（正则只 macOS；隔离视图看不到源码），0 失败；严格门禁全过，code-size 告警身份对确切基线 `8a832d4e1` 新增 0。
+  - 变异 29 个全部抓到（第一轮 25 个；D5 registry 插件上下文漏传数据根、D6 Shell 漏传数据根（行为上等价，按合同钉住）、G5 正则不锚开头、C5 透传非宿主码，补用例后第二轮抓到；折行重构后 D3、D5、D6、C1、C5 第三轮复核仍抓到）。覆盖：数据根 6 个构造点、data/ 拆分与 agents/、B 类、task_root、正则 5 项、透传 5 项、环境标记 3 项、CLI 守卫 4 项。
   - ae 块 4 的 strict xfail（`780ff4c40` 叠本修复）：macOS 上 XPASS(strict) 翻红；Linux 上 ae 直接调 ShellTool、不经 registry 的 3 个 Full Access 场景失败（不再从工作目录或写根反推任务，3a 定），改走 registry 投影（`_tool_params_with_runtime_boundary`，写边界带 `task_root`）后 4 个场景（含 xfail 那条）在 Linux 上全过。证据 `~/.my-agent/decision-evidence/host-config-guard-design/second-review-f21039671/`。
 - **改了期望的旧用例**（行为变化，不是放宽）：
   - `test_runtime_gate_ledger.py::test_workspace_only_owner_control_metadata_stays_read_only`：权限文件改由路径策略拒写（`PATH_HOST_STATE_WRITE_BLOCKED`），不再出现在 ledger 的 `forbidden_write_roots` 里；写边界照样拒。
