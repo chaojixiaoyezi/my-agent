@@ -24,6 +24,7 @@ from ..agent.settings.thread_model_selection import is_model_configuration_unava
 
 # 环境级故障暂停后的探测间隔：首次 60 秒，每次探测再失败翻倍，封顶 900 秒。安全兜底用内部常量，不进配置。
 LANE_ENVIRONMENT_PROBE_BASE_SECONDS = 60.0
+# 环境级故障探测间隔封顶 900 秒：翻倍退避到上限后不再增长
 LANE_ENVIRONMENT_PROBE_MAX_SECONDS = 900.0
 
 

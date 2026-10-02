@@ -25,6 +25,7 @@ from ...agent.common.json_io import read_json_object_report
 HANDOFF_ENV = "MY_AGENT_TUI_HANDOFF"
 _HANDOFF_SCHEMA = "my_agent.tui_handoff.v1"
 _SESSION_ID = re.compile(r"[A-Za-z0-9._:-]{1,200}")
+# 升级跟随轮询目标进程状态的间隔 5 秒
 POLL_SECONDS = 5.0
 NOTICE_KIND = "gateway_upgrade"
 BUSY_NOTICE_TEXT = "Gateway 已升级到新版本，界面空闲时会原地切换，不需要重开。"
@@ -34,8 +35,11 @@ FAILED_NOTICE_TEXT = "切换到新版本失败，当前界面继续可用；方�
 RESTART_NOTICE_KIND = "gateway_restart"
 RESTART_DRAIN_NOTICE_TEXT = "Gateway 正在安全重启：等在跑的回合和工具结束后换新进程；新消息会排队，重启后自动处理。"
 _RESTART_DRAIN_PHASES = frozenset({"turn_wait", "tool_drain"})
+# 重启提示条展示 6 秒
 _NOTICE_SECONDS = 6.0
+# 重启提示每 30 秒重复展示一次，提醒尚未完成
 _NOTICE_REPEAT_SECONDS = 30.0
+# 切换渲染延迟 0.25 秒，合并快速连续切换
 _SWITCH_RENDER_DELAY_SECONDS = 0.25
 # 新进程没能接管终端就退出时，把旧界面留下的全屏、鼠标、括号粘贴、隐藏光标都撤掉，让 shell 回到正常样子。
 _TERMINAL_RESET = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?25h\x1b[?1049l"

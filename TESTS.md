@@ -18,6 +18,26 @@
   code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
   `size_diff.sh` **新增告警 0**（消失 2 条为集成分支其它提交所致）。
 
+## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`）
+
+- **范围**：`agent_py_agent/cli/` 目录（41 个文件，不碰 `cli/chat_parts/tui_effort_menu.py`），共 **100 个**待整改常数。
+- **做法**：A 补上方中文说明 43 个；B 按生成器后缀表改名 56 个（`_LIMIT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、
+  `_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、宽度类加 `_CHARS`，如 `DAEMON_LIMIT`→`DAEMON_COUNT`、
+  `TOOL_PREVIEW_MAX_LINES`→`TOOL_PREVIEW_MAX_LINE_COUNT`、`_BACKGROUND_OWNER_WORKERS`→`_BACKGROUND_OWNER_WORKER_COUNT`、
+  `PASTE_THRESHOLD`→`PASTE_THRESHOLD_CHARS`、`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`→`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`），
+  全仓引用（agent/cli/tests 的 .py）一起改，旧名零残留；C 无物理单位 1 个（`_SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH` 深度）
+  只补说明并挪到白名单无单位组。数值一律不变；`compileall` 通过。
+- **白名单/目录**：待整改白名单 497→398（删 A 43 + B 旧名 56；C 1 挪入无单位组），只减不增；目录重建 800 项，`--check` 一致。
+- **验证**：`test_constants_catalog.py` + `test_constant_names_unique.py` **13 passed**（`_ALLOWED` 无需改动，POLL_SECONDS
+  两处仍同名不同义）；cli 相关 57 个测试文件（test_tui_*/test_chat_*/test_cli_*）**除 1 个外全过**——唯一的失败
+  `test_chat_control_runtime.py::test_local_interrupt_stops_foreground_shell_without_resource_reclaim` 是沙箱环境限制
+  （ShellTool 子进程无法写 started 文件），与本次改动无关：该文件未被修改、不引用任何改名，且已用 HEAD 基线 worktree
+  复现同样失败，需 3a 在沙箱外复核；guards9（10 文件）全过。
+- **收尾门禁**：check_import_boundaries **0 条**；ruff **All checks passed**；check_doc_sync **PASS**（补 memory/gateway
+  模块的 02-progress+04-structure，并为 memory_archive_commands/memory_doctor_cmd/memory_query_cmd 补同文件中文注释）；
+  code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
+  `size_diff.sh` **新增告警 0**（消失 2）。
+
 ## 常数整改第一批：5 模块 115 个常数合规（2026-10-01，分支 `worker/ds2-p10-batch1`，基于 `45610148e`）
 
 - **范围**：agent/ingestion（15 文件）、agent/scheduler（4 文件）、agent/session_lock（2 文件）、agent/user_space（6 文件）、

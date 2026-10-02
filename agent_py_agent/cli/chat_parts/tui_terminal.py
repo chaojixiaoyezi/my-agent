@@ -12,7 +12,9 @@ from .tui_view_model import TuiViewSnapshot
 
 TITLE_ANIMATION_FRAMES = ("⠂", "⠐")
 TITLE_STATIC_PREFIX = "✳"
+# 终端标题动画每帧间隔 0.96 秒，避免标题闪烁过快
 TITLE_ANIMATION_INTERVAL_SECONDS = 0.96
+# 终端标题最多 80 字符，超出截断
 TITLE_MAX_CHARS = 80
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 

@@ -42,7 +42,7 @@ class _FakeAgent:
         )
         self.conversation_store = _FakeStore()
         self.subagents = SimpleNamespace(runtime_db=None)
-        # cli_resume_max_rounds 已降为 resume_loop._RESUME_MAX_ROUNDS 常量（2026-09-28 参数减量）。
+        # cli_resume_max_rounds 已降为 resume_loop._RESUME_MAX_ROUND_COUNT 常量（2026-09-28 参数减量）。
         self.config = SimpleNamespace()
         self._current_run_task_workspace = workspace_root
         self.run_calls = []

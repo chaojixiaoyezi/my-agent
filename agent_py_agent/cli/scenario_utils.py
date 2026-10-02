@@ -135,6 +135,7 @@ def scenario_command(paths: ScenarioPaths, *parts: str) -> list[str]:
 # 场景 Gateway 就绪等待预算：跟随本次 ask 超时换算，夹在 10-60 秒之间。全仓分片高负载时默认的 3 秒
 # 会把“还在起来”的 Gateway 报成启动失败（exit 2）；这里只决定等多久，就绪判据仍由 gateway start 自己裁决。
 _SCENARIO_GATEWAY_READY_MIN_SECONDS = 10.0
+# 场景脚本等待 Gateway 就绪的预算上限 60 秒
 _SCENARIO_GATEWAY_READY_MAX_SECONDS = 60.0
 # --force 会先停旧实例再冷启动，start 子进程自身的时限要在就绪预算之外再留出停止等待的余量。
 _SCENARIO_GATEWAY_START_EXTRA_SECONDS = 60.0

@@ -13,7 +13,8 @@ from ..agent.common.value_parsing import string_list
 from ..agent.local_storage import AgentRuntimeQueryContext
 from ..agent.startup_recovery import is_recent_board_item
 
-_SHARED_PROGRESS_ROOT_LIMIT = 8
+# 共享进度根目录最多跟踪 8 个
+_SHARED_PROGRESS_ROOT_COUNT = 8
 
 
 def shared_progress_for_board(agent: Any, board: Any, *, purpose: str) -> list[dict[str, Any]]:
@@ -98,7 +99,7 @@ def _root_ids_from_board(board: Any) -> list[str]:
         root_id = str(getattr(item, "root_id", "") or getattr(item, "id", ""))
         if root_id and root_id not in roots:
             roots.append(root_id)
-        if len(roots) >= _SHARED_PROGRESS_ROOT_LIMIT:
+        if len(roots) >= _SHARED_PROGRESS_ROOT_COUNT:
             break
     return roots
 

@@ -22,11 +22,16 @@ from .models import DaemonOptions
 # daemon_limit / daemon_max_cycles / daemon_max_cards / daemon_probe / daemon_reviewer），值不变，命令行 flag 仍优先；
 # daemon_mutate_state / daemon_start_runners / daemon_runner_instruction 仍是配置项（安全边界与用户文案）。
 DAEMON_PLANNER = True  # 有待处理事项时调用父代理 LLM planner
+# 每轮调度处理完后等待 30 秒再进下一轮；0 表示不等待
 DAEMON_INTERVAL_SECONDS = 30  # 每轮调度结束后等多久；0 表示不等待
-DAEMON_DEFAULT_MAX_RUNNERS = 1  # 原配置 "auto" 的保守映射：每轮最多推进 1 个 runner
-DAEMON_LIMIT = 0  # 每个阶段最多处理多少条记录；0 表示不限制
-DAEMON_MAX_CYCLES = 0  # 最多循环次数；0 表示持续运行
-DAEMON_MAX_CARDS = 0  # runner 最多注入多少张能力卡；0 表示不限制
+# 无配置时每轮最多推进 1 个 runner（原配置 auto 的保守映射）
+DAEMON_DEFAULT_MAX_RUNNER_COUNT = 1  # 原配置 "auto" 的保守映射：每轮最多推进 1 个 runner
+# 每个阶段最多处理 0 条记录；0 表示不限制
+DAEMON_COUNT = 0  # 每个阶段最多处理多少条记录；0 表示不限制
+# 最多循环 0 次；0 表示持续运行
+DAEMON_MAX_CYCLE_COUNT = 0  # 最多循环次数；0 表示持续运行
+# runner 最多注入 0 张能力卡；0 表示不限制
+DAEMON_MAX_CARD_COUNT = 0  # runner 最多注入多少张能力卡；0 表示不限制
 DAEMON_PROBE = True  # 执行 runner 前做通道健康检查
 DAEMON_REVIEWER = "parent-daemon"  # patch/acceptance 审核者标识
 
@@ -121,7 +126,7 @@ def _validate_daemon_numbers(numbers: DaemonNumberOptions) -> str:
     return ""
 
 
-# LLM: 只解析命令行 --max-runners（整数或 auto）；缺省时调用方直接用 DAEMON_DEFAULT_MAX_RUNNERS，不经过这里。
+# LLM: 只解析命令行 --max-runners（整数或 auto）；缺省时调用方直接用 DAEMON_DEFAULT_MAX_RUNNER_COUNT，不经过这里。
 # 函数用途: 把 --max-runners 的文本转成整数，auto/空串按保守值 1。
 def _resolve_daemon_max_runners(value: object) -> int:
 
@@ -192,10 +197,10 @@ def _daemon_numeric_options(args) -> tuple[float, int, int, int, int]:
     interval = getattr(args, "interval", None)
     interval = DAEMON_INTERVAL_SECONDS if interval is None else interval
     raw_max_runners = getattr(args, "max_runners", None)
-    max_runners = DAEMON_DEFAULT_MAX_RUNNERS if raw_max_runners is None else _resolve_daemon_max_runners(raw_max_runners)
-    limit = int_arg_or_default(args, "limit", DAEMON_LIMIT)
-    max_cycles = int_arg_or_default(args, "max_cycles", DAEMON_MAX_CYCLES)
-    max_cards = int_arg_or_default(args, "max_cards", DAEMON_MAX_CARDS)
+    max_runners = DAEMON_DEFAULT_MAX_RUNNER_COUNT if raw_max_runners is None else _resolve_daemon_max_runners(raw_max_runners)
+    limit = int_arg_or_default(args, "limit", DAEMON_COUNT)
+    max_cycles = int_arg_or_default(args, "max_cycles", DAEMON_MAX_CYCLE_COUNT)
+    max_cards = int_arg_or_default(args, "max_cards", DAEMON_MAX_CARD_COUNT)
     return interval, max_runners, limit, max_cycles, max_cards
 
 

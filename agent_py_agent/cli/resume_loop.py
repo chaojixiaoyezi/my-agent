@@ -32,7 +32,7 @@ from .resume_contract import (
 
 # CLI 自动/手动续跑的进程内轮数护栏（含首轮之外的续跑轮）。属无人值守稳定性参数，
 # 2026-09-28 参数减量从配置降为常量（值不变，原默认 8）。
-_RESUME_MAX_ROUNDS = 8
+_RESUME_MAX_ROUND_COUNT = 8
 
 
 @dataclass(frozen=True)
@@ -276,7 +276,7 @@ def run_with_resume(
     新实现判 max_rounds_reached)。
     """
     if max_rounds is None:
-        max_rounds = _RESUME_MAX_ROUNDS
+        max_rounds = _RESUME_MAX_ROUND_COUNT
     # EXEC-35: 上次运行异常中断(429/kill)后, 旧 attempt 可能仍是 running
     # (僵尸执行者)。目录级执行锁已移除；仍须用进程事实纠正 attempt 状态，
     # 避免停止、恢复和持久运行展示继续引用已退出的执行者。
@@ -504,7 +504,7 @@ def run_manual_resume(
         parent_attempt_id=facts.get("latest_attempt_id", ""),
     )
     if max_rounds is None:
-        max_rounds = _RESUME_MAX_ROUNDS
+        max_rounds = _RESUME_MAX_ROUND_COUNT
     prompt = (
         f"继续执行之前的任务（{facts.get('title') or facts['task_id']}）。"
         "请基于现有工作目录里的进度继续推进直到完成交付。"

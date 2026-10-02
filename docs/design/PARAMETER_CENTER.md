@@ -37,6 +37,13 @@
   `DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`）；无物理单位 18 个只补说明、在白名单单列一组（深度/维度/比率/倍数/协议值/
   权限位/小时点/水位/ngram/BM25 参数等，后缀表无合适单位）。数值一律不变；目录重建 800 项 `--check` 一致；
   白名单 685→600（只减不增）。
+- **P10 第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，已实现，待集成）**：整改 `agent_py_agent/cli/` 目录
+  （41 个文件，不碰 `cli/chat_parts/tui_effort_menu.py`——sol 的 C7）范围内 **100 个**常数：补上方中文说明 43 个；
+  按后缀表改名 56 个（`_LIMIT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、`_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、
+  宽度类加 `_CHARS` 等，如 `DAEMON_LIMIT`→`DAEMON_COUNT`、`TOOL_PREVIEW_MAX_LINES`→`TOOL_PREVIEW_MAX_LINE_COUNT`、
+  `_BACKGROUND_OWNER_WORKERS`→`_BACKGROUND_OWNER_WORKER_COUNT`、`PASTE_THRESHOLD`→`PASTE_THRESHOLD_CHARS`）；
+  无物理单位 1 个（`_SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH` 深度）只补说明、挪入白名单无单位组。数值一律不变；
+  目录重建 800 项 `--check` 一致；白名单 497→398（只减不增）。
 
 ## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
 

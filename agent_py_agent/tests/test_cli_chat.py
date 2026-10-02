@@ -47,9 +47,9 @@ class TestCollapseResponseText:
 
         验证超过行数阈值的文本被折叠。
         """
-        from agent_py_agent.cli.chat import COLLAPSE_PREVIEW_LINES, collapse_response_text
+        from agent_py_agent.cli.chat import COLLAPSE_PREVIEW_LINE_COUNT, collapse_response_text
 
-        lines = ["line " + str(i) for i in range(COLLAPSE_PREVIEW_LINES + 5)]
+        lines = ["line " + str(i) for i in range(COLLAPSE_PREVIEW_LINE_COUNT + 5)]
         text = "\n".join(lines)
         result, collapsed = collapse_response_text(text)
 
@@ -667,11 +667,11 @@ class TestCollapseEdgeCases:
         """
         from agent_py_agent.cli.chat import (
             COLLAPSE_PREVIEW_CHARS,
-            COLLAPSE_PREVIEW_LINES,
+            COLLAPSE_PREVIEW_LINE_COUNT,
             collapse_response_text,
         )
 
-        lines = ["line " + str(i) for i in range(COLLAPSE_PREVIEW_LINES)]
+        lines = ["line " + str(i) for i in range(COLLAPSE_PREVIEW_LINE_COUNT)]
         text = "\n".join(lines)
         # 确保字符数也在阈值内
         assert len(text) <= COLLAPSE_PREVIEW_CHARS

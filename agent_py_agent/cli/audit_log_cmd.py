@@ -8,7 +8,7 @@ import time
 from ..agent.audit import AuditAction, AuditQuery
 
 # 参数减量第 3 批：audit-log 默认条数不再是配置项，--limit 仍优先。
-_CLI_AUDIT_LIMIT = 100
+_CLI_AUDIT_COUNT = 100
 
 
 def _show_recent_users(query: AuditQuery, args) -> int:
@@ -145,7 +145,7 @@ def cmd_audit_log(args) -> int:
 # 函数用途: 取 --limit，没给时用代码默认条数。
 def _audit_limit(args) -> int:
     value = getattr(args, "limit", None)
-    return int(_CLI_AUDIT_LIMIT if value is None else value)
+    return int(_CLI_AUDIT_COUNT if value is None else value)
 
 
 __all__ = ["cmd_audit_log"]

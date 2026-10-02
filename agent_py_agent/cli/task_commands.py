@@ -18,7 +18,7 @@ from .common import ROOT, int_arg_or_default, resolve_workspace_root
 from .models import TaskIdOptions, TaskListOptions, TaskSearchOptions
 
 # 参数减量第 3 批：任务列表默认条数不再是配置项，--limit 仍优先；home 运行时命令共用同一常量。
-CLI_TASK_LIST_LIMIT = 50
+CLI_TASK_LIST_COUNT = 50
 
 
 def _task_store(config_path: str):
@@ -155,7 +155,7 @@ def _task_list_options(args) -> TaskListOptions:
         config=args.config,
         user_id=args.user_id,
         status=args.status,
-        limit=int_arg_or_default(args, "limit", CLI_TASK_LIST_LIMIT),
+        limit=int_arg_or_default(args, "limit", CLI_TASK_LIST_COUNT),
     )
 
 

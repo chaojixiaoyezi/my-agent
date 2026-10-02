@@ -8,12 +8,12 @@ from dataclasses import asdict
 from ..agent.capability.config import load_capability_config
 from ..agent.subagents.models import SubAgentChannelProbeOptions, SubAgentDueCheckOptions
 from ..agent.subagents.run_budget import SubagentRunBudgetRequest
-from ._board import SUBAGENT_CLI_DEFAULT_LIMIT
+from ._board import SUBAGENT_CLI_DEFAULT_COUNT
 from .common import int_arg_or_default, make_agent
 from .models import SubagentContextOptions, SubagentsDueCheckOptions, SubagentsProbeOptions
 
 # 参数减量第 3 批：channel probe 默认条数不再是配置项，--limit 仍优先。
-_SUBAGENT_PROBE_DEFAULT_LIMIT = 20
+_SUBAGENT_PROBE_DEFAULT_COUNT = 20
 
 
 def cmd_subagents_due_check(args) -> int:
@@ -115,7 +115,7 @@ def cmd_subagent_context(args) -> int:
 def _subagents_due_check_options(args, *, agent=None) -> SubagentsDueCheckOptions:
     return SubagentsDueCheckOptions(
         all=bool(args.all),
-        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT),
+        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_COUNT),
         root_id=str(getattr(args, "root_id", "") or ""),
     )
 
@@ -123,7 +123,7 @@ def _subagents_due_check_options(args, *, agent=None) -> SubagentsDueCheckOption
 def _subagents_probe_options(args, *, agent=None) -> SubagentsProbeOptions:
     return SubagentsProbeOptions(
         run_ids=args.run_id or None,
-        limit=int_arg_or_default(args, "limit", _SUBAGENT_PROBE_DEFAULT_LIMIT),
+        limit=int_arg_or_default(args, "limit", _SUBAGENT_PROBE_DEFAULT_COUNT),
     )
 
 

@@ -1051,7 +1051,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             return
         self._confirmed_steer_ids[normalized] = None
         self._confirmed_steer_ids.move_to_end(normalized)
-        while len(self._confirmed_steer_ids) > _MAX_CONFIRMED_STEER_IDS:
+        while len(self._confirmed_steer_ids) > _MAX_CONFIRMED_STEER_ID_COUNT:
             self._confirmed_steer_ids.popitem(last=False)
 
     # 函数用途: 判断某条插话是否已经处于"已确认"终态。
@@ -1229,7 +1229,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
 # LLM: TuiStateStore 将 journal 与 reducer 锁在同一原子 publish 内，并只在接受新事件后通知 UI。
 # 类用途: 提供跨 worker/UI 线程安全的 publish、snapshot 和 redraw 订阅。
 # LLM: 已确认身份集合上界:确认是终态,条目只保留最近若干条身份即可挡住现实的迟到/重放事件。
-_MAX_CONFIRMED_STEER_IDS = 1024
+_MAX_CONFIRMED_STEER_ID_COUNT = 1024
 
 
 # LLM: store 是 reducer 变更的唯一发布入口；缓存只复用不可变显示投影，不改变事件接收或业务状态。

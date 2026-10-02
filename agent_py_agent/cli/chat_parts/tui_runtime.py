@@ -517,8 +517,10 @@ class _TuiBackgroundActivityController:
         return True
 
 
-_SUBAGENT_ACTIVITY_ROW_LIMIT = 64
-_GOAL_ACTIVITY_ROW_LIMIT = 16
+# 子代理活动面板最多显示 64 行
+_SUBAGENT_ACTIVITY_ROW_COUNT = 64
+# 目标活动面板最多显示 16 行
+_GOAL_ACTIVITY_ROW_COUNT = 16
 _MAIN_ACTIVITY_FIELDS = frozenset(
     {"task_id", "phase", "activity", "started_at", "updated_at", "ended_at"}
 )
@@ -690,7 +692,7 @@ def _normalize_goal_activity_rows(value: object) -> tuple[dict[str, object], ...
     if not isinstance(value, list | tuple):
         return ()
     rows: list[dict[str, object]] = []
-    for item in value[:_GOAL_ACTIVITY_ROW_LIMIT]:
+    for item in value[:_GOAL_ACTIVITY_ROW_COUNT]:
         if not isinstance(item, Mapping):
             continue
         goal_id = str(item.get("goal_id") or "").strip()[:240]
@@ -791,7 +793,7 @@ def _normalize_subagent_activity_rows(
     if not isinstance(value, list | tuple):
         return ()
     rows: list[dict[str, object]] = []
-    for item in value[:_SUBAGENT_ACTIVITY_ROW_LIMIT]:
+    for item in value[:_SUBAGENT_ACTIVITY_ROW_COUNT]:
         if not isinstance(item, Mapping):
             continue
         row = {

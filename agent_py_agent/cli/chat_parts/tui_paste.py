@@ -6,8 +6,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-PASTE_THRESHOLD = 800
-PASTE_VISIBLE_LINE_BREAKS = 2
+# 粘贴内容超过 800 字符时进入粘贴处理流程
+PASTE_THRESHOLD_CHARS = 800
+# 粘贴预览最多显示 2 个换行符
+PASTE_VISIBLE_LINE_BREAK_COUNT = 2
 _PASTED_TEXT_REFERENCE = re.compile(
     r"\[Pasted text #(\d+)(?: \+(\d+) lines)?\]"
 )
@@ -41,8 +43,8 @@ def collapse_tui_paste(
     text: str,
     *,
     paste_id: int,
-    threshold: int = PASTE_THRESHOLD,
-    visible_line_breaks: int = PASTE_VISIBLE_LINE_BREAKS,
+    threshold: int = PASTE_THRESHOLD_CHARS,
+    visible_line_breaks: int = PASTE_VISIBLE_LINE_BREAK_COUNT,
 ) -> tuple[str, TuiPastedTextRef | None]:
     normalized = str(text or "")
     line_breaks = normalized.count("\n")
@@ -92,8 +94,8 @@ def merge_tui_paste_refs(
 
 
 __all__ = [
-    "PASTE_THRESHOLD",
-    "PASTE_VISIBLE_LINE_BREAKS",
+    "PASTE_THRESHOLD_CHARS",
+    "PASTE_VISIBLE_LINE_BREAK_COUNT",
     "TuiPastedTextRef",
     "collapse_tui_paste",
     "expand_tui_paste_refs",

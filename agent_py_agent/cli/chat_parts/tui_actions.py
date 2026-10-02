@@ -19,7 +19,9 @@ from .tui_params import TuiHandleCommandParams
 if TYPE_CHECKING:
     from .tui_keybindings import TuiCreateKeybindingsParams
 
+# 活跃轮重试的初始退避 0.25 秒：首试失败后先等一小会儿再重试
 ACTIVE_TURN_RETRY_INITIAL_SECONDS = 0.25
+# 活跃轮重试的退避上限 3 秒：封顶防止重试等待拖长前台回合
 ACTIVE_TURN_RETRY_MAX_SECONDS = 3.0
 
 

@@ -73,7 +73,9 @@ from .models import GatewayRunContext
 # 参数减量第 3 批 B 组（2026-09-27）：后台车道的三个节奏不再是配置项（原 gateway_request_poll_interval /
 # background_main_error_backoff_seconds / background_owner_wake_rescan_seconds），值不变；心跳节奏见 lease_service。
 GATEWAY_REQUEST_POLL_INTERVAL_SECONDS = 0.2  # request worker 空闲时多久检查一次 pending
+# 后台主代理车道出错后冷却 30 秒再重试，避免崩溃循环空转
 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS = 30.0  # 后台普通宿主异常按 owner/thread 冷却多久再重试
+# owner 唤醒发现整轮磁盘扫描结束后休眠 120 秒再扫下一轮
 BACKGROUND_OWNER_WAKE_RESCAN_SECONDS = 120.0  # 磁盘级 owner 唤醒发现整轮扫完后休眠多久
 
 
@@ -510,17 +512,18 @@ def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -
 
 # 后台会话的全局并发基数：owner 与 thread 都已分车道，超出的保留在持久队列。
 # 可由 config background_owner_workers 覆盖，此常量是无配置时的兜底。
-_BACKGROUND_OWNER_WORKERS = 8
+_BACKGROUND_OWNER_WORKER_COUNT = 8
 # 同 owner 后台会话并发上限：一条长会话不再占住整个 owner，但也不允许
 # 一个 owner 用大量待处理会话占满全局后台模型池。
-_BACKGROUND_THREADS_PER_OWNER = 4
-_MEMORY_CURATOR_WORKERS = 2
+_BACKGROUND_PER_OWNER_THREAD_COUNT = 4
+# 记忆策展并发 worker 数 2
+_MEMORY_CURATOR_WORKER_COUNT = 2
 _BASE_SCHEDULER_KEY = "base"
 # 调度器存活心跳节流(秒):>5 分钟没更新即疑死,配合 systemd 快速定位。
 _HEARTBEAT_INTERVAL_SECONDS = 60
 # 策展每日全局配额(默认 5000 次/天,config curator_daily_quota 覆盖):LLM 提取烧钱,
 # 归档类晚一天无害,超限顺延;紧急车道(pending reason)不受此限。
-_CURATOR_DAILY_QUOTA = 5000
+_CURATOR_DAILY_QUOTA_COUNT = 5000
 # 算实际消耗的 run 结果状态:只有真正执行了一次 curator 事务才记账;not_due(interval
 # 未到/无新消息)、busy(他人持 lease)、disabled 都没碰 LLM,不算消耗。
 _CURATOR_CONSUMED_STATUSES = frozenset({"succeeded", "failed"})
@@ -538,12 +541,12 @@ def _agent_memory_enabled(agent: object) -> bool:
 
 
 def _background_owner_workers(agent: object) -> int:
-    value = getattr(getattr(agent, "config", None), "background_owner_workers", _BACKGROUND_OWNER_WORKERS)
+    value = getattr(getattr(agent, "config", None), "background_owner_workers", _BACKGROUND_OWNER_WORKER_COUNT)
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        return _BACKGROUND_OWNER_WORKERS
-    return parsed if parsed > 0 else _BACKGROUND_OWNER_WORKERS
+        return _BACKGROUND_OWNER_WORKER_COUNT
+    return parsed if parsed > 0 else _BACKGROUND_OWNER_WORKER_COUNT
 
 
 # LLM: This configurable cap bounds simultaneous model turns for different
@@ -553,13 +556,13 @@ def _background_threads_per_owner(agent: object) -> int:
     value = getattr(
         getattr(agent, "config", None),
         "background_threads_per_owner",
-        _BACKGROUND_THREADS_PER_OWNER,
+        _BACKGROUND_PER_OWNER_THREAD_COUNT,
     )
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        return _BACKGROUND_THREADS_PER_OWNER
-    return parsed if parsed > 0 else _BACKGROUND_THREADS_PER_OWNER
+        return _BACKGROUND_PER_OWNER_THREAD_COUNT
+    return parsed if parsed > 0 else _BACKGROUND_PER_OWNER_THREAD_COUNT
 
 
 # LLM: Memory extraction has its own bounded lane so low-priority owner backlog
@@ -569,13 +572,13 @@ def _memory_curator_workers(agent: object) -> int:
     value = getattr(
         getattr(agent, "config", None),
         "memory_curator_workers",
-        _MEMORY_CURATOR_WORKERS,
+        _MEMORY_CURATOR_WORKER_COUNT,
     )
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        return _MEMORY_CURATOR_WORKERS
-    return parsed if parsed > 0 else _MEMORY_CURATOR_WORKERS
+        return _MEMORY_CURATOR_WORKER_COUNT
+    return parsed if parsed > 0 else _MEMORY_CURATOR_WORKER_COUNT
 
 
 # LLM: This mixin owns only process-local planning/execution slots; durable
@@ -1031,7 +1034,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         )
 
     def _curator_daily_quota(self) -> int:
-        return _positive_int_config(self._base_agent, "curator_daily_quota", default=_CURATOR_DAILY_QUOTA)
+        return _positive_int_config(self._base_agent, "curator_daily_quota", default=_CURATOR_DAILY_QUOTA_COUNT)
 
     def _curator_quota_available(self) -> bool:
         """常规车道当日剩余配额检查(不记账)。提交前调用:还有额度才发起 curator run。"""

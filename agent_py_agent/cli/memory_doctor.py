@@ -26,7 +26,7 @@ from ..agent.user_space.home_doctor import build_home_doctor_report
 from ..agent.user_space.home_layout import DEFAULT_ROUTE_INDEX, resolve_route_index_target
 from ..agent.user_space.home_runtime_query import home_runtime_status
 from .common import make_agent
-from .memory_commands.memory_doctor_cmd import MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT
+from .memory_commands.memory_doctor_cmd import MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT
 
 
 def cmd_memory_doctor(args) -> int:
@@ -111,7 +111,7 @@ def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | 
         "today_path": str(today_path),
         "recent_files": [
             _archive_file_payload(path)
-            for path in files[:MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT]
+            for path in files[:MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT]
         ],
     }
 

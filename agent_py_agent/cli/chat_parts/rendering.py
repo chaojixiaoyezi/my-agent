@@ -15,7 +15,7 @@ from .renderer import (
     BLUE,
     BOLD,
     COLLAPSE_PREVIEW_CHARS,
-    COLLAPSE_PREVIEW_LINES,
+    COLLAPSE_PREVIEW_LINE_COUNT,
     CYAN,
     GRAY,
     GREEN,

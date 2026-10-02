@@ -7,7 +7,9 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
+# 聊天历史最多保留 20 轮对话，避免长期会话上下文无限膨胀
 MAX_HISTORY_TURNS = 20
+# 历史里助手消息预览最多保留 500 字符，超出折叠
 ASSISTANT_PREVIEW_CHARS = 500
 
 

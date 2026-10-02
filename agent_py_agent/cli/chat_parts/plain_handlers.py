@@ -32,7 +32,8 @@ from .plain_ui import _make_chunk_handler, _render_assistant_response
 from .rendering import GRAY, RESET, _cprint
 
 # 参数减量第 3 批：长输出折叠时保留的预览行数/字数不再是配置项。
-_CHAT_COLLAPSE_PREVIEW_LINES = 12
+_CHAT_COLLAPSE_PREVIEW_LINE_COUNT = 12
+# 聊天长输出折叠保留预览 900 字符
 _CHAT_COLLAPSE_PREVIEW_CHARS = 900
 
 
@@ -176,7 +177,7 @@ def _render_if_needed(
                 text=response_text,
                 assistant_outputs=ctx.assistant_outputs,
                 agent_name=ctx.agent.config.agent_name,
-                preview_lines=_CHAT_COLLAPSE_PREVIEW_LINES,
+                preview_lines=_CHAT_COLLAPSE_PREVIEW_LINE_COUNT,
                 preview_chars=_CHAT_COLLAPSE_PREVIEW_CHARS,
             )
         )

@@ -10,7 +10,7 @@ from typing import Any
 
 from ..agent.startup_recovery import is_recent_board_item
 from .common import format_local_time
-from .local_status_payload import SUBAGENT_BOARD_LIMIT
+from .local_status_payload import SUBAGENT_BOARD_COUNT
 from .shared_progress import (
     format_shared_progress_lines,
     format_takeover_view_lines,
@@ -87,7 +87,7 @@ def print_status_human(ctx: StatusPrintContext):
     print("")
     _format_active_work_block(ctx.active_work_summary)
     print("")
-    _format_subagents_section(ctx.board, SUBAGENT_BOARD_LIMIT)
+    _format_subagents_section(ctx.board, SUBAGENT_BOARD_COUNT)
     print("")
     _format_shared_progress_section(getattr(ctx.board, "shared_progress", []))
     print("")

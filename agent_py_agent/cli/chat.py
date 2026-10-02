@@ -13,7 +13,7 @@ from .chat_parts.renderer import (
     BLUE,
     BOLD,
     COLLAPSE_PREVIEW_CHARS,
-    COLLAPSE_PREVIEW_LINES,
+    COLLAPSE_PREVIEW_LINE_COUNT,
     CYAN,
     GRAY,
     GREEN,
@@ -238,13 +238,13 @@ def _has_prompt_toolkit() -> bool:
 
 
 # 参数减量第 3 批：chat 默认带入的记忆条数不再是配置项，--memory-limit 仍优先。
-_CLI_CHAT_MEMORY_LIMIT = 5
+_CLI_CHAT_MEMORY_COUNT = 5
 
 
 # 函数用途: 没给 --memory-limit 时补上代码默认条数。
 def _ensure_chat_memory_limit(args) -> None:
     if getattr(args, "memory_limit", None) is None:
-        args.memory_limit = _CLI_CHAT_MEMORY_LIMIT
+        args.memory_limit = _CLI_CHAT_MEMORY_COUNT
 
 
 # 函数用途: 显式 resume <session_id> 只连接指定会话(owner seq1943 语义③ +

@@ -16,7 +16,9 @@ CYAN = "\033[38;2;6;182;212m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
-COLLAPSE_PREVIEW_LINES = 12
+# 折叠输出保留预览 12 行
+COLLAPSE_PREVIEW_LINE_COUNT = 12
+# 折叠输出保留的预览字符数 900
 COLLAPSE_PREVIEW_CHARS = 900
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -29,7 +31,7 @@ def progress_bar(ratio: float, width: int = 10) -> str:
 def collapse_response_text(
     text: str,
     *,
-    preview_lines: int = COLLAPSE_PREVIEW_LINES,
+    preview_lines: int = COLLAPSE_PREVIEW_LINE_COUNT,
     preview_chars: int = COLLAPSE_PREVIEW_CHARS,
 ) -> tuple[str, bool]:
     lines = text.splitlines()
@@ -123,7 +125,7 @@ __all__ = [
     "RESET",
     "YELLOW",
     "COLLAPSE_PREVIEW_CHARS",
-    "COLLAPSE_PREVIEW_LINES",
+    "COLLAPSE_PREVIEW_LINE_COUNT",
     "collapse_response_text",
     "color_text",
     "progress_bar",

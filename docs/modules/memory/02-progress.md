@@ -6,6 +6,8 @@
 `CURATOR_MAX_RETRIES→CURATOR_MAX_RETRY_COUNT`），`_EN_KEYWORD_MIN_LEN→_EN_KEYWORD_MIN_LEN_CHARS`、`_TIMEOUT_SHRINK_FLOOR→_TIMEOUT_SHRINK_FLOOR_COUNT`；
 字符/字节/秒类补中文说明；BM25 参数 `_BM25_B/_BM25_K1` 无物理单位，只补说明并挪入白名单无单位组。数值一律不变。
 
+2026-10-02（分支 `worker/ds1-p10-batch4`）：常数整改第四批。`cli/memory_archive_commands.py` 与 `cli/memory_commands/` 的常数改名/补说明（如 `_CLI_MEMORY_ARCHIVE_LIMIT`→`_CLI_MEMORY_ARCHIVE_COUNT`、`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`→`MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`），数值不变。
+
 ## P12：固定提炼模型档案（2026-10-01，sol，本地已实现，待集成/部署）
 
 - 解决聊天连接失效拖累后台提炼、旧覆盖键混用聊天凭据的问题：`memory_curator_model_profile` 非空时完整采用固定档案连接，空时保持 owner 选择行为。

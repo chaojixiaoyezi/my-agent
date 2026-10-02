@@ -28,7 +28,8 @@ from .tui_runtime import TuiRuntime
 
 QUEUE_EDIT_PLACEHOLDER = "Press up to edit queued messages"
 _IGNORED_PATH_NAMES = frozenset({".git", ".hg", ".svn", "__pycache__"})
-_COMPLETION_MENU_MAX_ITEMS = 6
+# 补全菜单最多显示 6 项
+_COMPLETION_MENU_MAX_ITEM_COUNT = 6
 
 
 # LLM: TuiCompletion 只携带 UI 接受动作，不改变命令权限；submit 仍必须进入既有 command dispatcher。
@@ -76,7 +77,7 @@ class TuiHistoryAutoSuggest(AutoSuggestFromHistory):
 class TuiCompletionMenuControl(UIControl):
     # LLM: buffer 由输入 TextArea 创建并贯穿 app 生命周期；control 不持有候选副本。
     # 函数用途: 绑定输入 buffer 和最大可见候选数。
-    def __init__(self, buffer: Any, max_items: int = _COMPLETION_MENU_MAX_ITEMS) -> None:
+    def __init__(self, buffer: Any, max_items: int = _COMPLETION_MENU_MAX_ITEM_COUNT) -> None:
         self.buffer = buffer
         self.max_items = max(1, int(max_items))
 

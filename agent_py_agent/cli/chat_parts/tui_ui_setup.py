@@ -43,11 +43,14 @@ from .tui_view import (
 # LLM: 仅合并可见帧，不延迟工具/消息账和按键处理；终端整屏布局需限制频率，避免流式 token 占满单核。
 # 常量用途: 流式输出最多每秒绘制 20 帧，输入和滚动事件仍立即请求下一帧。
 APP_REDRAW_INTERVAL_SECONDS = 1 / 20
+# 终端整屏渲染的最小帧间隔 1/20 秒：限频绘制，输入/滚动事件仍立即请求下一帧
 APP_RENDER_POSTPONE_SECONDS = 1 / 20
+# 判定输入是否为转义序列的窗口 0.1 秒：窗口内凑齐前缀与后续字节
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.1
+# 转义序列前缀后的后续字节等待窗口 0.05 秒
 TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS = 0.05
 # 参数减量第 3 批：滚轮/翻页每次滚动的行数不再是配置项。
-CHAT_TRANSCRIPT_SCROLL_LINES = 10
+CHAT_TRANSCRIPT_SCROLL_LINE_COUNT = 10
 
 
 # LLM: 输入保留原 history 与补全；插件客户端只在显式 Tab/提交读取，候选原 revision 跟随输入框，不增加启动请求。
@@ -970,7 +973,7 @@ def _make_tui_keybindings(
             parts.transcript_state,
             parts.transcript_search_area,
             parts.permission_feedback_area,
-            CHAT_TRANSCRIPT_SCROLL_LINES,
+            CHAT_TRANSCRIPT_SCROLL_LINE_COUNT,
             app_config.tui_runtime,
             agent_navigation=app_config.agent_navigation,
             local_run_ref=app_config.local_run_ref,

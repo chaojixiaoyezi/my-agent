@@ -7,7 +7,7 @@ import json
 from ..agent.capability.config import load_capability_config
 from ..agent.subagents.models import SubAgentCapabilityRouteOptions, SubAgentPlanActionsOptions
 from ..agent.subagents.services.actions import ActionApplyOptions
-from ._board import SUBAGENT_CLI_DEFAULT_LIMIT
+from ._board import SUBAGENT_CLI_DEFAULT_COUNT
 from .common import int_arg_or_default, make_agent, make_capability_router
 from .models import SubagentsCapabilityRouteOptions, SubagentsPlanActionsOptions
 
@@ -46,7 +46,7 @@ def cmd_subagents_plan_actions(args) -> int:
 def _subagents_plan_actions_options(args, *, agent=None) -> SubagentsPlanActionsOptions:
     return SubagentsPlanActionsOptions(
         all=bool(args.all),
-        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT),
+        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_COUNT),
         root_id=str(getattr(args, "root_id", "") or ""),
     )
 
@@ -88,7 +88,7 @@ def _subagents_action_apply_options(args, *, agent=None) -> ActionApplyOptions:
         run_id=getattr(args, "run_id", None) or "",
         take_over_by=getattr(args, "take_over_by", None) or "",
         locked_files=getattr(args, "locked_file", None) or [],
-        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT),
+        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_COUNT),
     )
 
 
@@ -133,5 +133,5 @@ def _subagents_capability_route_options(args, *, agent=None) -> SubagentsCapabil
     return SubagentsCapabilityRouteOptions(
         apply=bool(args.apply),
         run_ids=args.run_id or None,
-        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT),
+        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_COUNT),
     )

@@ -11,12 +11,16 @@ from pathlib import Path
 from .tui_identity_window import TuiIdentityWindow
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
+# TUI 界面刷新最小间隔 0.25 秒，限频重绘
 TUI_REFRESH_INTERVAL_SECONDS = 0.25
 # S-BG1: 后台主代理轮和子代理面板走 Gateway 轻量快照。会话运行时 用服务端事件推送；
 # 当前 HTTP 兼容协议在有任务时按 1 秒刷新，完全空闲时降到 5 秒，兼顾近实时与单 Gateway 负载。
 TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS = 1.0
+# TUI 完全空闲时后台通知轮询间隔降为 5 秒
 TUI_BACKGROUND_NOTICE_IDLE_INTERVAL_SECONDS = 5.0
+# 后台通知拉取失败后的首次重试间隔 0.5 秒
 TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS = 0.5
+# 后台通知拉取失败的重试间隔封顶 8 秒
 TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS = 8.0
 
 

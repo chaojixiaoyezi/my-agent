@@ -10,9 +10,10 @@ from typing import Any
 from ..agent.startup_recovery import is_recent_board_item
 from .shared_progress import shared_progress_for_board
 
+# 子代理看板里 goal 文本预览最多 180 字符
 _SUBAGENT_GOAL_PREVIEW_CHARS = 180
 # 参数减量第 3 批：status 看板展示多少条子代理不再是配置项；local_status_view 共用同一常量。
-SUBAGENT_BOARD_LIMIT = 5
+SUBAGENT_BOARD_COUNT = 5
 
 
 @dataclass(frozen=True)
@@ -102,14 +103,14 @@ def _active_work_payload(active_work_summary: Any) -> dict | None:
 
 def _subagents_payload(ctx: StatusPayloadContext) -> dict:
     hot = _current_hot_items(ctx.board.hot_list, now=time.time())
-    recent = list(ctx.board.recent[: SUBAGENT_BOARD_LIMIT])
+    recent = list(ctx.board.recent[: SUBAGENT_BOARD_COUNT])
     return {
         "summary": ctx.board.summary,
         "current_summary": _status_items_summary([*hot, *recent]),
         "hot_count": len(hot),
         "historical_hot_count": max(0, len(ctx.board.hot_list) - len(hot)),
         "recent_count": len(ctx.board.recent),
-        "hot": [_board_item_payload(item) for item in hot[: SUBAGENT_BOARD_LIMIT]],
+        "hot": [_board_item_payload(item) for item in hot[: SUBAGENT_BOARD_COUNT]],
         "recent": [_board_item_payload(item) for item in recent],
         "shared_progress": shared_progress_for_board(ctx.agent, ctx.board, purpose="status"),
     }

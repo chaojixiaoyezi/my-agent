@@ -6,6 +6,11 @@
 
 ---
 
+2026-10-02（分支 `worker/ds1-p10-batch4`）：常数整改第四批。cli 目录 41 个文件 100 个待整改常数已合规——按生成器后缀表补后缀改名
+（如 `DAEMON_LIMIT`→`DAEMON_COUNT`、`_BACKGROUND_OWNER_WORKERS`→`_BACKGROUND_OWNER_WORKER_COUNT`、
+`LOOP_ERROR_PRINT_EVERY`→`LOOP_ERROR_PRINT_EVERY_COUNT`、`TOOL_PREVIEW_MAX_LINES`→`TOOL_PREVIEW_MAX_LINE_COUNT`），
+全部补上方中文说明；深度类无物理单位只补说明并挪入白名单单独组（reason“无物理单位”）。数值一律不变；白名单 497→398。
+
 常数整改第一批（参数中心 P10，分支 `worker/ds2-p10-batch1`，2026-10-01）：agent/ingestion、agent/scheduler、
 agent/session_lock、agent/user_space、agent/adapter 5 个模块 115 个待整改常数（无单位后缀或无中文说明）已合规——
 时间/长度/个数类按生成器后缀表补后缀改名（如 `_RETIRE_STALE_WINDOWS→_RETIRE_STALE_WINDOW_COUNT`、`_KEY_LEN→_KEY_LEN_BYTES`），

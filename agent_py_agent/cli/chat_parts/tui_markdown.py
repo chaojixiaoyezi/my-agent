@@ -23,12 +23,13 @@ FormattedLine = tuple[Fragment, ...]
 
 # LLM: 净化 memo 的边界：单条上限决定"不缓存长正文"，条目上限决定常驻内存；两者都必须有界。
 # 常量用途: 短 fragment 净化缓存的最大条目数与单条最大字符数。
-_SANITIZE_MEMO_ENTRIES = 8_192
+_SANITIZE_MEMO_ENTRY_COUNT = 8_192
+# 净化 memo 单条缓存最多 512 字符，长正文不缓存
 _SANITIZE_MEMO_MAX_CHARS = 512
 
 # LLM: cluster 宽度缓存条目上限；TUI 常用字符集远小于该值，命中率接近 100%，越界后 LRU 淘汰只影响速度。
 # 常量用途: 单个 grapheme cluster 显示宽度缓存的条目数上限。
-_CLUSTER_WIDTH_ENTRIES = 4_096
+_CLUSTER_WIDTH_ENTRY_COUNT = 4_096
 
 
 # LLM: Every model/tool/user string is untrusted terminal data. This helper removes C0/C1
@@ -49,7 +50,7 @@ def sanitize_terminal_text(text: object) -> str:
 # LLM: 净化是纯函数，memo 只影响速度；缓存键是 fragment 文本本身，条数与单条长度都设上限，
 # 因此不会像渲染缓存那样随流式版本增长，长正文也不会被缓存持有。
 # 函数用途: 为短 fragment 提供有界净化缓存。
-@lru_cache(maxsize=_SANITIZE_MEMO_ENTRIES)
+@lru_cache(maxsize=_SANITIZE_MEMO_ENTRY_COUNT)
 def _memoized_sanitize(value: str) -> str:
     return _strip_terminal_controls(value)
 
@@ -523,7 +524,7 @@ def _append_table_row(
 # LLM: cluster 宽度只由 cluster 文本决定，缓存命中不会改变几何；maxsize 是有界内存约束，
 # 淘汰只影响速度。emoji ZWJ 序列与含组合符的 cluster 也会入缓存，因此键必须保留完整 cluster 文本。
 # 函数用途: 带缓存的 cluster 显示宽度计算。
-@lru_cache(maxsize=_CLUSTER_WIDTH_ENTRIES)
+@lru_cache(maxsize=_CLUSTER_WIDTH_ENTRY_COUNT)
 def _cluster_width(cluster: str) -> int:
     return max(0, wcswidth(cluster))
 

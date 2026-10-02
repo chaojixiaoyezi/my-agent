@@ -51,10 +51,15 @@ from .thinking_spinner import ThinkingSpinner
 
 # 参数减量第 3 批（2026-09-27）：这些命令的默认条数/预览字数不再是配置项；命令行显式 --limit / --preview-chars 仍优先。
 _CLI_STATUS_LIMIT = 5
-_CLI_TIMELINE_LIMIT = 20
-_CLI_MEMORY_LIST_LIMIT = 20
-_CLI_MEMORY_SEARCH_LIMIT = 5
-_CLI_LOCAL_SEARCH_LIMIT = 5
+# timeline 默认最多返回 20 条，--limit 优先
+_CLI_TIMELINE_COUNT = 20
+# memory list 默认最多返回 20 条，--limit 优先
+_CLI_MEMORY_LIST_COUNT = 20
+# memory search 默认最多返回 5 条，--limit 优先
+_CLI_MEMORY_SEARCH_COUNT = 5
+# 本地搜索默认最多返回 5 条，--limit 优先
+_CLI_LOCAL_SEARCH_COUNT = 5
+# 本地搜索命令结果预览 500 字符
 _CLI_LOCAL_SEARCH_PREVIEW_CHARS = 500
 
 
@@ -159,7 +164,7 @@ def _detect_active_work_summary(agent):
 def cmd_timeline(args) -> int:
 
     agent = make_agent(args)
-    args.limit = int_arg_or_default(args, "limit", _CLI_TIMELINE_LIMIT)
+    args.limit = int_arg_or_default(args, "limit", _CLI_TIMELINE_COUNT)
     options = _timeline_options(args)
     items = agent.local_store.timeline(
         limit=options.limit,
@@ -313,7 +318,7 @@ def cmd_remember(args) -> int:
 def cmd_memory_list(args) -> int:
 
     agent = make_agent(args)
-    limit = int_arg_or_default(args, "limit", _CLI_MEMORY_LIST_LIMIT)
+    limit = int_arg_or_default(args, "limit", _CLI_MEMORY_LIST_COUNT)
     records = agent.memory.all()[-limit:]
     for rec in records:
         print(json.dumps(rec.__dict__, ensure_ascii=False))
@@ -323,7 +328,7 @@ def cmd_memory_list(args) -> int:
 def cmd_memory_search(args) -> int:
 
     agent = make_agent(args)
-    limit = int_arg_or_default(args, "limit", _CLI_MEMORY_SEARCH_LIMIT)
+    limit = int_arg_or_default(args, "limit", _CLI_MEMORY_SEARCH_COUNT)
     for rec in agent.recall(args.query, limit):
         print(json.dumps(rec.__dict__, ensure_ascii=False))
     return 0
@@ -339,7 +344,7 @@ def cmd_local_store_status(args) -> int:
 def cmd_local_search(args) -> int:
 
     agent = make_agent(args)
-    args.limit = int_arg_or_default(args, "limit", _CLI_LOCAL_SEARCH_LIMIT)
+    args.limit = int_arg_or_default(args, "limit", _CLI_LOCAL_SEARCH_COUNT)
     args.preview_chars = int_arg_or_default(args, "preview_chars", _CLI_LOCAL_SEARCH_PREVIEW_CHARS)
     options = _local_search_options(args)
     hits = agent.local_store.search(

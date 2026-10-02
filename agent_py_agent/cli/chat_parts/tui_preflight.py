@@ -18,7 +18,9 @@ from .tui_runtime import TuiRuntime
 # LLM: "启动中"提示只走 runtime 既有的 footer notice 通道，带独立 notice_kind 便于精确清除；
 #   它不写 journal、不创建 turn、不改 Gateway 状态，只反映结构化 readiness 观测。
 _GATEWAY_STARTING_NOTICE_KIND = "gateway_startup"
+# “启动中”提示展示 2 秒
 _GATEWAY_STARTING_NOTICE_SECONDS = 2.0
+# “启动中”提示的刷新间隔 1 秒
 _GATEWAY_STARTING_NOTICE_REFRESH_SECONDS = 1.0
 _GATEWAY_STARTING_NOTICE_TEXT = "Gateway 启动中…（等待 HTTP 就绪）"
 

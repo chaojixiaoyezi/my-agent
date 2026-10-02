@@ -5476,11 +5476,11 @@
       "description": "准入 slot 等待超时秒数；超时按拒绝处理，避免请求无限排队。"
     },
     {
-      "name": "SUBAGENT_CLI_DEFAULT_LIMIT",
+      "name": "SUBAGENT_CLI_DEFAULT_COUNT",
       "file": "agent_py_agent/cli/_board.py",
       "value": 20,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "参数减量第 3 批：子代理命令（board/plan-actions/patches/due-check…）的默认条数不再是配置项，--limit 仍优先。"
     },
     {
@@ -5489,7 +5489,7 @@
       "value": 180,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "看板里 goal 文本预览最多 180 字符"
     },
     {
       "name": "_SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH",
@@ -5500,19 +5500,19 @@
       "description": "参数减量第 3 批：层级创建默认深度与恢复树默认节点数不再是配置项，--max-depth / --max-nodes 仍优先。"
     },
     {
-      "name": "_SUBAGENT_HIERARCHY_RECOVERY_MAX_NODES",
+      "name": "_SUBAGENT_HIERARCHY_RECOVERY_MAX_NODE_COUNT",
       "file": "agent_py_agent/cli/_hierarchy.py",
       "value": 200,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "恢复代理树最多重建 200 个节点，--max-nodes 优先"
     },
     {
-      "name": "_SUBAGENT_PROBE_DEFAULT_LIMIT",
+      "name": "_SUBAGENT_PROBE_DEFAULT_COUNT",
       "file": "agent_py_agent/cli/_inspection.py",
       "value": 20,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "参数减量第 3 批：channel probe 默认条数不再是配置项，--limit 仍优先。"
     },
     {
@@ -5524,19 +5524,19 @@
       "description": "适配器常驻进程每隔多久把自己的状态写进 adapter_state.json（channel_health 按 30 秒判陈旧）。"
     },
     {
-      "name": "_CLI_AUDIT_LIMIT",
+      "name": "_CLI_AUDIT_COUNT",
       "file": "agent_py_agent/cli/audit_log_cmd.py",
       "value": 100,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "参数减量第 3 批：audit-log 默认条数不再是配置项，--limit 仍优先。"
     },
     {
-      "name": "_CLI_CHAT_MEMORY_LIMIT",
+      "name": "_CLI_CHAT_MEMORY_COUNT",
       "file": "agent_py_agent/cli/chat.py",
       "value": 5,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "参数减量第 3 批：chat 默认带入的记忆条数不再是配置项，--memory-limit 仍优先。"
     },
     {
@@ -5561,7 +5561,7 @@
       "value": 500,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "历史里助手消息预览最多保留 500 字符，超出折叠"
     },
     {
       "name": "MAX_HISTORY_TURNS",
@@ -5569,7 +5569,7 @@
       "value": 20,
       "unit": "轮",
       "category": "上限预算",
-      "description": ""
+      "description": "聊天历史最多保留 20 轮对话，避免长期会话上下文无限膨胀"
     },
     {
       "name": "_CHAT_COLLAPSE_PREVIEW_CHARS",
@@ -5577,13 +5577,13 @@
       "value": 900,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "聊天长输出折叠保留预览 900 字符"
     },
     {
-      "name": "_CHAT_COLLAPSE_PREVIEW_LINES",
+      "name": "_CHAT_COLLAPSE_PREVIEW_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/plain_handlers.py",
       "value": 12,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "参数减量第 3 批：长输出折叠时保留的预览行数/字数不再是配置项。"
     },
@@ -5593,15 +5593,15 @@
       "value": 900,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "折叠输出保留的预览字符数 900"
     },
     {
-      "name": "COLLAPSE_PREVIEW_LINES",
+      "name": "COLLAPSE_PREVIEW_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/renderer.py",
       "value": 12,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "折叠输出保留预览 12 行"
     },
     {
       "name": "ACTIVE_TURN_RETRY_INITIAL_SECONDS",
@@ -5609,7 +5609,7 @@
       "value": 0.25,
       "unit": "秒",
       "category": "重试",
-      "description": ""
+      "description": "活跃轮重试的初始退避 0.25 秒：首试失败后先等一小会儿再重试"
     },
     {
       "name": "ACTIVE_TURN_RETRY_MAX_SECONDS",
@@ -5617,23 +5617,23 @@
       "value": 3.0,
       "unit": "秒",
       "category": "重试",
-      "description": ""
+      "description": "活跃轮重试的退避上限 3 秒：封顶防止重试等待拖长前台回合"
     },
     {
-      "name": "INPUT_RECEIPT_EXPANDED_ITEM_LIMIT",
+      "name": "INPUT_RECEIPT_EXPANDED_ITEM_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 4,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "常量用途: 控制输入框附近何时从逐条预览切换为有界队列摘要，不改变真实队列内容。"
     },
     {
-      "name": "PENDING_INPUT_PREVIEW_LINE_LIMIT",
+      "name": "PENDING_INPUT_PREVIEW_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 3,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "排队输入预览最多 3 行，超出折叠为有界摘要"
     },
     {
       "name": "SPINNER_METRICS_AFTER_SECONDS",
@@ -5641,7 +5641,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "等待超过 30 秒后 spinner 切换为带耗时指标的显示"
     },
     {
       "name": "SPINNER_STALL_AFTER_SECONDS",
@@ -5649,39 +5649,39 @@
       "value": 3.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "等待超过 3 秒后开始显示 spinner 动画"
     },
     {
-      "name": "TODO_COLLAPSED_MAX_ITEMS",
+      "name": "TODO_COLLAPSED_MAX_ITEM_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 4,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "折叠的 todo 列表最多展开 4 项"
     },
     {
-      "name": "TOOL_PREVIEW_MAX_LINES",
+      "name": "TOOL_PREVIEW_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 6,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "工具输出预览最多 6 行"
     },
     {
-      "name": "TOOL_RICH_EXPANDED_MAX_LINES",
+      "name": "TOOL_RICH_EXPANDED_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 40,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "富文本工具输出展开最多 40 行"
     },
     {
-      "name": "TOOL_RICH_PREVIEW_MAX_LINES",
+      "name": "TOOL_RICH_PREVIEW_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 12,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "富文本工具输出预览最多 12 行"
     },
     {
       "name": "USER_MESSAGE_HEAD_CHARS",
@@ -5689,7 +5689,7 @@
       "value": 2500,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "用户长消息预览保留开头 2500 字符"
     },
     {
       "name": "USER_MESSAGE_MAX_CHARS",
@@ -5697,7 +5697,7 @@
       "value": 10000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "用户消息渲染预览最多 10000 字符，超出折叠为摘要"
     },
     {
       "name": "USER_MESSAGE_TAIL_CHARS",
@@ -5705,23 +5705,23 @@
       "value": 2500,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "用户长消息预览保留结尾 2500 字符"
     },
     {
-      "name": "WELCOME_CARD_MAX_WIDTH",
+      "name": "WELCOME_CARD_MAX_WIDTH_CHARS",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 95,
-      "unit": "",
+      "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "欢迎卡片最大宽度 95 字符"
     },
     {
-      "name": "WRITE_PREVIEW_MAX_LINES",
+      "name": "WRITE_PREVIEW_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 10,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "写文件预览最多 10 行"
     },
     {
       "name": "_ASSISTANT_RENDER_DETAIL_MAX_CHARS",
@@ -5729,15 +5729,15 @@
       "value": 40000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "助手消息详情展开最多渲染 40000 字符"
     },
     {
-      "name": "_ASSISTANT_RENDER_DETAIL_MAX_LINES",
+      "name": "_ASSISTANT_RENDER_DETAIL_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 2000,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "助手消息详情展开最多渲染 2000 行"
     },
     {
       "name": "_ASSISTANT_RENDER_MAX_CHARS",
@@ -5748,10 +5748,10 @@
       "description": "只裁显示投影，canonical block.text 与发给模型的上下文都不受影响，完整原文仍走 Ctrl+E 分页。"
     },
     {
-      "name": "_ASSISTANT_RENDER_MAX_LINES",
+      "name": "_ASSISTANT_RENDER_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 200,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "只裁 UI 投影, canonical block.text 原文保留(与 _bounded_user_text 同思路)。"
     },
@@ -5764,10 +5764,10 @@
       "description": "函数用途: 判断 block 是否处于逐帧更新的流式活动状态。"
     },
     {
-      "name": "_THINKING_LIVE_MAX_LINES",
+      "name": "_THINKING_LIVE_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 50,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "超长折叠为提示行，Ctrl+O 看全部）。"
     },
@@ -5777,23 +5777,23 @@
       "value": 40000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "工具消息详情展开最多渲染 40000 字符"
     },
     {
-      "name": "_TOOL_RENDER_DETAIL_MAX_LINES",
+      "name": "_TOOL_RENDER_DETAIL_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 2000,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "工具消息详情展开最多渲染 2000 行"
     },
     {
-      "name": "_TOOL_RENDER_MAX_LINES",
+      "name": "_TOOL_RENDER_MAX_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_block_renderer.py",
       "value": 200,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "工具消息渲染最多 200 行，超出折叠为提示行"
     },
     {
       "name": "DETAIL_PAGE_CHARS",
@@ -5801,15 +5801,15 @@
       "value": 12000,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "详情页最多渲染 12000 字符，防止单页超大输出拖垮 TUI"
     },
     {
-      "name": "DETAIL_PAGE_ROWS",
+      "name": "DETAIL_PAGE_ROW_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_complete_detail.py",
       "value": 256,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "详情页最多渲染 256 行"
     },
     {
       "name": "DETAIL_ROW_CHARS",
@@ -5817,15 +5817,15 @@
       "value": 2000,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "详情页单行最多 2000 字符，超出截断该行"
     },
     {
-      "name": "_COMPLETION_MENU_MAX_ITEMS",
+      "name": "_COMPLETION_MENU_MAX_ITEM_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_input.py",
       "value": 6,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "补全菜单最多显示 6 项"
     },
     {
       "name": "PASTE_FEEDBACK_SECONDS",
@@ -5833,29 +5833,29 @@
       "value": 0.1,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "粘贴提示条展示 0.1 秒后消失"
     },
     {
-      "name": "TRANSCRIPT_SCROLL_LINES",
+      "name": "TRANSCRIPT_SCROLL_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_keybindings.py",
       "value": 10,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "转录区滚轮/翻页每次滚动 10 行"
     },
     {
-      "name": "_CLUSTER_WIDTH_ENTRIES",
+      "name": "_CLUSTER_WIDTH_ENTRY_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_markdown.py",
       "value": 4096,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "常量用途: 单个 grapheme cluster 显示宽度缓存的条目数上限。"
     },
     {
-      "name": "_SANITIZE_MEMO_ENTRIES",
+      "name": "_SANITIZE_MEMO_ENTRY_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_markdown.py",
       "value": 8192,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "常量用途: 短 fragment 净化缓存的最大条目数与单条最大字符数。"
     },
@@ -5865,31 +5865,31 @@
       "value": 512,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "净化 memo 单条缓存最多 512 字符，长正文不缓存"
     },
     {
-      "name": "PASTE_THRESHOLD",
+      "name": "PASTE_THRESHOLD_CHARS",
       "file": "agent_py_agent/cli/chat_parts/tui_paste.py",
       "value": 800,
-      "unit": "",
+      "unit": "字符",
       "category": "比例阈值",
-      "description": ""
+      "description": "粘贴内容超过 800 字符时进入粘贴处理流程"
     },
     {
-      "name": "PASTE_VISIBLE_LINE_BREAKS",
+      "name": "PASTE_VISIBLE_LINE_BREAK_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_paste.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "粘贴预览最多显示 2 个换行符"
     },
     {
-      "name": "_RESOLVED_EXTERNAL_LIMIT",
+      "name": "_RESOLVED_EXTERNAL_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_permission_queue.py",
       "value": 512,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "已解决的外部申请保留 512 条"
     },
     {
       "name": "MAX_BACKOFF_SECONDS",
@@ -5897,23 +5897,23 @@
       "value": 10.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "插件面板轮询失败的退避上限 10 秒"
     },
     {
-      "name": "MAX_VISIBLE_PANELS",
+      "name": "MAX_VISIBLE_PANEL_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_plugin_panels.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "插件面板最多同时显示 2 个"
     },
     {
-      "name": "PANEL_BODY_LINES",
+      "name": "PANEL_BODY_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_plugin_panels.py",
       "value": 6,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "插件面板正文最多 6 行"
     },
     {
       "name": "POLL_SECONDS",
@@ -5921,7 +5921,7 @@
       "value": 1.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "插件面板轮询 Gateway 快照的间隔 1 秒"
     },
     {
       "name": "_GATEWAY_STARTING_NOTICE_REFRESH_SECONDS",
@@ -5929,7 +5929,7 @@
       "value": 1.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "“启动中”提示的刷新间隔 1 秒"
     },
     {
       "name": "_GATEWAY_STARTING_NOTICE_SECONDS",
@@ -5937,23 +5937,23 @@
       "value": 2.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "“启动中”提示展示 2 秒"
     },
     {
-      "name": "_GOAL_ACTIVITY_ROW_LIMIT",
+      "name": "_GOAL_ACTIVITY_ROW_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_runtime.py",
       "value": 16,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "目标活动面板最多显示 16 行"
     },
     {
-      "name": "_SUBAGENT_ACTIVITY_ROW_LIMIT",
+      "name": "_SUBAGENT_ACTIVITY_ROW_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_runtime.py",
       "value": 64,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "子代理活动面板最多显示 64 行"
     },
     {
       "name": "TITLE_ANIMATION_INTERVAL_SECONDS",
@@ -5961,7 +5961,7 @@
       "value": 0.96,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "终端标题动画每帧间隔 0.96 秒，避免标题闪烁过快"
     },
     {
       "name": "TITLE_MAX_CHARS",
@@ -5969,7 +5969,7 @@
       "value": 80,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "终端标题最多 80 字符，超出截断"
     },
     {
       "name": "TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS",
@@ -5977,7 +5977,7 @@
       "value": 0.5,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "后台通知拉取失败后的首次重试间隔 0.5 秒"
     },
     {
       "name": "TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS",
@@ -5985,7 +5985,7 @@
       "value": 8.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "后台通知拉取失败的重试间隔封顶 8 秒"
     },
     {
       "name": "TUI_BACKGROUND_NOTICE_IDLE_INTERVAL_SECONDS",
@@ -5993,7 +5993,7 @@
       "value": 5.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "TUI 完全空闲时后台通知轮询间隔降为 5 秒"
     },
     {
       "name": "TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS",
@@ -6009,7 +6009,7 @@
       "value": 0.25,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "TUI 界面刷新最小间隔 0.25 秒，限频重绘"
     },
     {
       "name": "APP_REDRAW_INTERVAL_SECONDS",
@@ -6025,13 +6025,13 @@
       "value": 0.05,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "终端整屏渲染的最小帧间隔 1/20 秒：限频绘制，输入/滚动事件仍立即请求下一帧"
     },
     {
-      "name": "CHAT_TRANSCRIPT_SCROLL_LINES",
+      "name": "CHAT_TRANSCRIPT_SCROLL_LINE_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_ui_setup.py",
       "value": 10,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "参数减量第 3 批：滚轮/翻页每次滚动的行数不再是配置项。"
     },
@@ -6041,7 +6041,7 @@
       "value": 0.1,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "判定输入是否为转义序列的窗口 0.1 秒：窗口内凑齐前缀与后续字节"
     },
     {
       "name": "TERMINAL_ESCAPE_PREFIX_TIMEOUT_SECONDS",
@@ -6049,7 +6049,7 @@
       "value": 0.05,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "转义序列前缀后的后续字节等待窗口 0.05 秒"
     },
     {
       "name": "POLL_SECONDS",
@@ -6057,7 +6057,7 @@
       "value": 5.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "升级跟随轮询目标进程状态的间隔 5 秒"
     },
     {
       "name": "_NOTICE_REPEAT_SECONDS",
@@ -6065,7 +6065,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "重启提示每 30 秒重复展示一次，提醒尚未完成"
     },
     {
       "name": "_NOTICE_SECONDS",
@@ -6073,7 +6073,7 @@
       "value": 6.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "重启提示条展示 6 秒"
     },
     {
       "name": "_SWITCH_RENDER_DELAY_SECONDS",
@@ -6081,31 +6081,39 @@
       "value": 0.25,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "切换渲染延迟 0.25 秒，合并快速连续切换"
     },
     {
-      "name": "DEFAULT_TRANSCRIPT_WIDTH",
+      "name": "DEFAULT_TRANSCRIPT_WIDTH_CHARS",
       "file": "agent_py_agent/cli/chat_parts/tui_view.py",
       "value": 80,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "默认转录面板宽度 80 字符"
     },
     {
-      "name": "_MAX_CONFIRMED_STEER_IDS",
+      "name": "_MAX_CONFIRMED_STEER_ID_COUNT",
       "file": "agent_py_agent/cli/chat_parts/tui_view_model.py",
       "value": 1024,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "LLM: 已确认身份集合上界:确认是终态,条目只保留最近若干条身份即可挡住现实的迟到/重放事件。"
     },
     {
-      "name": "DAEMON_DEFAULT_MAX_RUNNERS",
+      "name": "DAEMON_COUNT",
+      "file": "agent_py_agent/cli/daemon.py",
+      "value": 0,
+      "unit": "个",
+      "category": "其它",
+      "description": "每个阶段最多处理 0 条记录；0 表示不限制"
+    },
+    {
+      "name": "DAEMON_DEFAULT_MAX_RUNNER_COUNT",
       "file": "agent_py_agent/cli/daemon.py",
       "value": 1,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "无配置时每轮最多推进 1 个 runner（原配置 auto 的保守映射）"
     },
     {
       "name": "DAEMON_INTERVAL_SECONDS",
@@ -6113,31 +6121,23 @@
       "value": 30,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "每轮调度处理完后等待 30 秒再进下一轮；0 表示不等待"
     },
     {
-      "name": "DAEMON_LIMIT",
+      "name": "DAEMON_MAX_CARD_COUNT",
       "file": "agent_py_agent/cli/daemon.py",
       "value": 0,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "runner 最多注入 0 张能力卡；0 表示不限制"
     },
     {
-      "name": "DAEMON_MAX_CARDS",
+      "name": "DAEMON_MAX_CYCLE_COUNT",
       "file": "agent_py_agent/cli/daemon.py",
       "value": 0,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
-    },
-    {
-      "name": "DAEMON_MAX_CYCLES",
-      "file": "agent_py_agent/cli/daemon.py",
-      "value": 0,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "description": "最多循环 0 次；0 表示持续运行"
     },
     {
       "name": "LANE_ENVIRONMENT_PROBE_BASE_SECONDS",
@@ -6153,7 +6153,7 @@
       "value": 900.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "环境级故障探测间隔封顶 900 秒：翻倍退避到上限后不再增长"
     },
     {
       "name": "LOOP_ERROR_BACKOFF_BASE_SECONDS",
@@ -6169,15 +6169,15 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "网关主循环连续出错的退避封顶 30 秒"
     },
     {
-      "name": "LOOP_ERROR_PRINT_EVERY",
+      "name": "LOOP_ERROR_PRINT_EVERY_COUNT",
       "file": "agent_py_agent/cli/gateway_loop_backoff.py",
       "value": 10,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "同种错误第 1 次打印，之后每 10 次打 1 次，限流刷屏"
     },
     {
       "name": "BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS",
@@ -6185,7 +6185,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "后台主代理车道出错后冷却 30 秒再重试，避免崩溃循环空转"
     },
     {
       "name": "BACKGROUND_OWNER_WAKE_RESCAN_SECONDS",
@@ -6193,7 +6193,7 @@
       "value": 120.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "owner 唤醒发现整轮磁盘扫描结束后休眠 120 秒再扫下一轮"
     },
     {
       "name": "GATEWAY_REQUEST_POLL_INTERVAL_SECONDS",
@@ -6204,26 +6204,26 @@
       "description": "background_main_error_backoff_seconds / background_owner_wake_rescan_seconds），值不变；心跳节奏见 lease_service。"
     },
     {
-      "name": "_BACKGROUND_OWNER_WORKERS",
+      "name": "_BACKGROUND_OWNER_WORKER_COUNT",
       "file": "agent_py_agent/cli/gateway_loops.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "可由 config background_owner_workers 覆盖，此常量是无配置时的兜底。"
     },
     {
-      "name": "_BACKGROUND_THREADS_PER_OWNER",
+      "name": "_BACKGROUND_PER_OWNER_THREAD_COUNT",
       "file": "agent_py_agent/cli/gateway_loops.py",
       "value": 4,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "一个 owner 用大量待处理会话占满全局后台模型池。"
     },
     {
-      "name": "_CURATOR_DAILY_QUOTA",
+      "name": "_CURATOR_DAILY_QUOTA_COUNT",
       "file": "agent_py_agent/cli/gateway_loops.py",
       "value": 5000,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "归档类晚一天无害,超限顺延;紧急车道(pending reason)不受此限。"
     },
@@ -6236,12 +6236,12 @@
       "description": "调度器存活心跳节流(秒):>5 分钟没更新即疑死,配合 systemd 快速定位。"
     },
     {
-      "name": "_MEMORY_CURATOR_WORKERS",
+      "name": "_MEMORY_CURATOR_WORKER_COUNT",
       "file": "agent_py_agent/cli/gateway_loops.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "记忆策展并发 worker 数 2"
     },
     {
       "name": "_NONBLOCKING_DRAIN_SECONDS",
@@ -6257,15 +6257,15 @@
       "value": 60.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "重启交接等待前任进程退出最多 60 秒，超时按异常处理"
     },
     {
-      "name": "_CLI_LOCAL_SEARCH_LIMIT",
+      "name": "_CLI_LOCAL_SEARCH_COUNT",
       "file": "agent_py_agent/cli/local_commands.py",
       "value": 5,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "本地搜索默认最多返回 5 条，--limit 优先"
     },
     {
       "name": "_CLI_LOCAL_SEARCH_PREVIEW_CHARS",
@@ -6273,46 +6273,46 @@
       "value": 500,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "本地搜索命令结果预览 500 字符"
     },
     {
-      "name": "_CLI_MEMORY_LIST_LIMIT",
+      "name": "_CLI_MEMORY_LIST_COUNT",
       "file": "agent_py_agent/cli/local_commands.py",
       "value": 20,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "memory list 默认最多返回 20 条，--limit 优先"
     },
     {
-      "name": "_CLI_MEMORY_SEARCH_LIMIT",
+      "name": "_CLI_MEMORY_SEARCH_COUNT",
       "file": "agent_py_agent/cli/local_commands.py",
       "value": 5,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "memory search 默认最多返回 5 条，--limit 优先"
     },
     {
-      "name": "_CLI_TIMELINE_LIMIT",
+      "name": "_CLI_TIMELINE_COUNT",
       "file": "agent_py_agent/cli/local_commands.py",
       "value": 20,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "timeline 默认最多返回 20 条，--limit 优先"
     },
     {
-      "name": "_CLI_LOCAL_DOCTOR_LIMIT",
+      "name": "_CLI_LOCAL_DOCTOR_COUNT",
       "file": "agent_py_agent/cli/local_repair_commands.py",
       "value": 20,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "参数减量第 3 批：local-doctor 默认条数不再是配置项，--limit 仍优先。"
     },
     {
-      "name": "SUBAGENT_BOARD_LIMIT",
+      "name": "SUBAGENT_BOARD_COUNT",
       "file": "agent_py_agent/cli/local_status_payload.py",
       "value": 5,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "参数减量第 3 批：status 看板展示多少条子代理不再是配置项；local_status_view 共用同一常量。"
     },
     {
@@ -6321,37 +6321,37 @@
       "value": 180,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "子代理看板里 goal 文本预览最多 180 字符"
     },
     {
-      "name": "_CLI_MEMORY_ARCHIVE_LIMIT",
+      "name": "_CLI_MEMORY_ARCHIVE_COUNT",
       "file": "agent_py_agent/cli/memory_archive_commands.py",
       "value": 20,
-      "unit": "",
-      "category": "上限预算",
-      "description": "参数减量第 3 批：memory-archive 系列命令默认条数不再是配置项，--limit 仍优先。"
+      "unit": "个",
+      "category": "其它",
+      "description": "memory-archive 命令默认最多返回 20 条记录，--limit 优先"
     },
     {
-      "name": "MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT",
+      "name": "MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT",
       "file": "agent_py_agent/cli/memory_commands/memory_doctor_cmd.py",
       "value": 5,
-      "unit": "",
-      "category": "上限预算",
-      "description": "参数减量第 3 批：doctor 列出最近多少个归档文件不再是配置项；旧入口 cli/memory_doctor.py 从这里 import，只定义一次。"
+      "unit": "个",
+      "category": "其它",
+      "description": "doctor 列出最近 5 个归档文件，旧入口 cli/memory_doctor.py 从这里 import"
     },
     {
-      "name": "_CLI_MEMORY_ROUTE_LIMIT",
+      "name": "_CLI_MEMORY_ROUTE_COUNT",
       "file": "agent_py_agent/cli/memory_commands/memory_query_cmd.py",
       "value": 5,
-      "unit": "",
-      "category": "上限预算",
-      "description": "参数减量第 3 批：memory-route 默认条数不再是配置项，--limit 仍优先。"
+      "unit": "个",
+      "category": "其它",
+      "description": "memory-route 默认最多返回 5 条，--limit 优先"
     },
     {
-      "name": "_RESUME_MAX_ROUNDS",
+      "name": "_RESUME_MAX_ROUND_COUNT",
       "file": "agent_py_agent/cli/resume_loop.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "2026-09-28 参数减量从配置降为常量（值不变，原默认 8）。"
     },
@@ -6361,7 +6361,7 @@
       "value": 60.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "场景脚本等待 Gateway 就绪的预算上限 60 秒"
     },
     {
       "name": "_SCENARIO_GATEWAY_READY_MIN_SECONDS",
@@ -6388,19 +6388,19 @@
       "description": "正式 stop 停不掉时按 pid 升级终止：SIGTERM 后等这么久，仍活着再 SIGKILL 并再等一次。"
     },
     {
-      "name": "_SHARED_PROGRESS_ROOT_LIMIT",
+      "name": "_SHARED_PROGRESS_ROOT_COUNT",
       "file": "agent_py_agent/cli/shared_progress.py",
       "value": 8,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "unit": "个",
+      "category": "其它",
+      "description": "共享进度根目录最多跟踪 8 个"
     },
     {
-      "name": "CLI_TASK_LIST_LIMIT",
+      "name": "CLI_TASK_LIST_COUNT",
       "file": "agent_py_agent/cli/task_commands.py",
       "value": 50,
-      "unit": "",
-      "category": "上限预算",
+      "unit": "个",
+      "category": "其它",
       "description": "参数减量第 3 批：任务列表默认条数不再是配置项，--limit 仍优先；home 运行时命令共用同一常量。"
     }
   ]

@@ -259,7 +259,7 @@ class _RuntimeBudgetConfigFields:
     background_context_max_total_tokens: int = 8000
     # 后台会话执行权的租约秒数；续约心跳按它自动推导（原 background_claim_heartbeat_interval_seconds 已并入）。
     background_claim_ttl_seconds: int = 90
-    # CLI 续跑轮数护栏已降为 cli/resume_loop._RESUME_MAX_ROUNDS（2026-09-28 参数减量）。
+    # CLI 续跑轮数护栏已降为 cli/resume_loop._RESUME_MAX_ROUND_COUNT（2026-09-28 参数减量）。
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 

@@ -34,7 +34,8 @@ from .tui_reading import (
 from .tui_transcript import TuiTranscriptModeState, complete_detail_window
 from .tui_view_model import TuiStateStore, TuiViewSnapshot
 
-DEFAULT_TRANSCRIPT_WIDTH = 80
+# 默认转录面板宽度 80 字符
+DEFAULT_TRANSCRIPT_WIDTH_CHARS = 80
 
 
 # LLM: 选区坐标只属于当前宽度下的可见 transcript；resize 会清除，不能持久化或成为会话正文引用。
@@ -108,7 +109,7 @@ class TuiFrameProvider:
         self.context_factory = context_factory
         self.block_cache = block_cache or TuiBlockRenderCache()
         self.transcript_state = transcript_state
-        self.last_width = DEFAULT_TRANSCRIPT_WIDTH
+        self.last_width = DEFAULT_TRANSCRIPT_WIDTH_CHARS
         self._cached_key: tuple[Any, ...] | None = None
         self._cached_frame: TuiRenderFrame | None = None
         self._block_key_sources: tuple[object, ...] = ()

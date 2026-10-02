@@ -11,8 +11,11 @@ from typing import Any
 from .tui_markdown import FormattedLine, sanitize_terminal_text, wrap_fragments
 from .tui_view_model import TuiBlock, TuiViewSnapshot
 
-DETAIL_PAGE_ROWS = 256
+# 详情页最多渲染 256 行
+DETAIL_PAGE_ROW_COUNT = 256
+# 详情页最多渲染 12000 字符，防止单页超大输出拖垮 TUI
 DETAIL_PAGE_CHARS = 12_000
+# 详情页单行最多 2000 字符，超出截断该行
 DETAIL_ROW_CHARS = 2_000
 
 
@@ -97,7 +100,7 @@ def build_complete_detail_pages(snapshot: TuiViewSnapshot) -> CompleteDetailPage
             continue
         for row_index, (style, text) in enumerate(_block_rows(block)):
             for part_index, part in enumerate(_split_row(text)):
-                if rows and (len(rows) >= DETAIL_PAGE_ROWS or chars + len(part) > DETAIL_PAGE_CHARS):
+                if rows and (len(rows) >= DETAIL_PAGE_ROW_COUNT or chars + len(part) > DETAIL_PAGE_CHARS):
                     pages.append(CompleteDetailPage(tuple(rows), origins=tuple(origins)))
                     rows, origins, chars = [], [], 0
                 if part_index and rows:
@@ -186,7 +189,7 @@ def _display_rows(display: dict[str, Any]) -> Iterator[tuple[str, str]]:
 # LLM: Gateway返回的kind只是公开显示样式，不得进入状态裁决；未知类型按普通原文处理。
 # 函数用途: 把已鉴权的一页归档行映射为本地样式，保留分片的所有字符。
 def archive_page_rows(rows: object, *, block_id: str = "") -> CompleteDetailPage:
-    if not isinstance(rows, list) or len(rows) > DETAIL_PAGE_ROWS:
+    if not isinstance(rows, list) or len(rows) > DETAIL_PAGE_ROW_COUNT:
         raise ValueError("invalid archive rows")
     if any(not isinstance(row, dict) or not isinstance(row.get("text"), str)
            or len(row["text"]) > DETAIL_ROW_CHARS for row in rows):

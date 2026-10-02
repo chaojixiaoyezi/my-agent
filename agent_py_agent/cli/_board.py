@@ -19,8 +19,9 @@ from .shared_progress import (
 )
 
 # 参数减量第 3 批：子代理命令（board/plan-actions/patches/due-check…）的默认条数不再是配置项，--limit 仍优先。
-SUBAGENT_CLI_DEFAULT_LIMIT = 20
+SUBAGENT_CLI_DEFAULT_COUNT = 20
 
+# 看板里 goal 文本预览最多 180 字符
 _BOARD_GOAL_PREVIEW_CHARS = 180
 
 
@@ -55,7 +56,7 @@ def cmd_spawn(args) -> int:
 def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
-    limit = int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT)
+    limit = int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_COUNT)
     board = agent.subagents.board.write_board(
         options=SubAgentBoardOptions(
             recent_limit=limit,

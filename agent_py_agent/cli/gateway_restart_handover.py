@@ -32,6 +32,7 @@ from .gateway_host_guard import refuse_stopping_hosting_gateway
 from .gateway_service import _get_launchd_label, get_service_name
 from .models import GatewayRunContext
 
+# 重启交接等待前任进程退出最多 60 秒，超时按异常处理
 PREDECESSOR_EXIT_WAIT_SECONDS = 60.0
 
 

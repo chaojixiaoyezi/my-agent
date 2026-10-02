@@ -45,7 +45,8 @@ from .memory_archive_roots import (
 from .memory_resume_compact_rendering import print_memory_resume_from_compact
 
 # 参数减量第 3 批：memory-archive 系列命令默认条数不再是配置项，--limit 仍优先。
-_CLI_MEMORY_ARCHIVE_LIMIT = 20
+# memory-archive 命令默认最多返回 20 条记录，--limit 优先
+_CLI_MEMORY_ARCHIVE_COUNT = 20
 # 参数减量 C 组（2026-09-28）：归档检索文件上限、正文预览字符数与恢复推荐路径数也从配置降为常量，
 # 本文件直接从 memory_archive.resume_context / query.archive_io 导入，不再读 agent.config。
 
@@ -215,4 +216,4 @@ def _compact_resume_exit_ok(payload: dict[str, Any]) -> bool:
 
 
 def _apply_archive_default_limit(args) -> None:
-    args.limit = int_arg_or_default(args, "limit", _CLI_MEMORY_ARCHIVE_LIMIT)
+    args.limit = int_arg_or_default(args, "limit", _CLI_MEMORY_ARCHIVE_COUNT)

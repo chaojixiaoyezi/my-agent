@@ -16,7 +16,7 @@ from ..agent.user_space.home_runtime_query import (
     read_daily_memory_records_report,
 )
 from .common import int_arg_or_default, make_agent
-from .task_commands import CLI_TASK_LIST_LIMIT
+from .task_commands import CLI_TASK_LIST_COUNT
 
 
 # LLM: Home runtime commands expose only canonical owner paths; Daily filters follow v2 actor/
@@ -178,7 +178,7 @@ def cmd_runtime_stale_attempts(args) -> int:
 
 # 函数用途: 取 --limit，没给时用任务列表的代码默认条数。
 def _limit_from_args(args) -> int:
-    return int_arg_or_default(args, "limit", CLI_TASK_LIST_LIMIT)
+    return int_arg_or_default(args, "limit", CLI_TASK_LIST_COUNT)
 
 
 # LLM: Human output renders only bounded Daily v2 summaries and ordering IDs, never referenced

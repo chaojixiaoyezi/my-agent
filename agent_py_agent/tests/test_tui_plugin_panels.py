@@ -11,7 +11,7 @@ from agent_py_agent.cli.chat_parts.tui_plugin_commands import (
 )
 from agent_py_agent.cli.chat_parts.tui_plugin_panels import (
     MAX_BACKOFF_SECONDS,
-    PANEL_BODY_LINES,
+    PANEL_BODY_LINE_COUNT,
     POLL_SECONDS,
     PluginPanelBoard,
     render_plugin_panels,
@@ -112,7 +112,7 @@ def test_render_caps_body_lines():
                                                           "truncated": False}}]}
     board.poll_once()
     lines = "".join(text for _s, text in render_plugin_panels(board.views())).splitlines()
-    assert len(lines) == 1 + PANEL_BODY_LINES and "还有" in lines[-1]
+    assert len(lines) == 1 + PANEL_BODY_LINE_COUNT and "还有" in lines[-1]
 
 
 def test_close_and_stop_event_end_background_thread():

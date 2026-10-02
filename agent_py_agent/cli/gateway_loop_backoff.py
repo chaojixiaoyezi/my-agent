@@ -7,8 +7,10 @@ from __future__ import annotations
 
 # 连续出错的退避：0.2 秒起步翻倍，封顶 30 秒；打印限流：同种错误第 1 次打，之后每 10 次打 1 次。
 LOOP_ERROR_BACKOFF_BASE_SECONDS = 0.2
+# 网关主循环连续出错的退避封顶 30 秒
 LOOP_ERROR_BACKOFF_CAP_SECONDS = 30.0
-LOOP_ERROR_PRINT_EVERY = 10
+# 同种错误第 1 次打印，之后每 10 次打 1 次，限流刷屏
+LOOP_ERROR_PRINT_EVERY_COUNT = 10
 
 
 # LLM: 单线程使用（每个循环线程自己一份），不加锁；delay() 只读当前连续次数，record_failure/record_success 改状态。
@@ -22,7 +24,7 @@ class LoopErrorBackoff:
         *,
         base_seconds: float = LOOP_ERROR_BACKOFF_BASE_SECONDS,
         cap_seconds: float = LOOP_ERROR_BACKOFF_CAP_SECONDS,
-        print_every: int = LOOP_ERROR_PRINT_EVERY,
+        print_every: int = LOOP_ERROR_PRINT_EVERY_COUNT,
     ) -> None:
         self._base = max(0.0, float(base_seconds))
         self._cap = max(self._base, float(cap_seconds))

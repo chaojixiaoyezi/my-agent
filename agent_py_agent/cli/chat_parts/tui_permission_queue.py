@@ -12,7 +12,8 @@ from dataclasses import dataclass
 
 from ...agent.contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
 
-_RESOLVED_EXTERNAL_LIMIT = 512
+# 已解决的外部申请保留 512 条
+_RESOLVED_EXTERNAL_COUNT = 512
 
 
 # LLM: 宿主复用回合适配器的审批接口，不创建模型回合、正文或生命周期；真实归属保留在服务端原请求。
@@ -195,7 +196,7 @@ class TuiPermissionCoordinator:
             return
         self._resolved_external.add(key)
         self._resolved_order.append(key)
-        while len(self._resolved_order) > _RESOLVED_EXTERNAL_LIMIT:
+        while len(self._resolved_order) > _RESOLVED_EXTERNAL_COUNT:
             expired = self._resolved_order.popleft()
             self._resolved_external.discard(expired)
 

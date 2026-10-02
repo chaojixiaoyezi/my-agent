@@ -1,5 +1,22 @@
 # 设计台账
 
+## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`，已实现，待集成）
+
+- **背景**：P10 白名单按模块分批清理。本批接第一、二批之后，范围是 `agent_py_agent/cli/` 目录（41 个文件）的 100 个待整改常数，
+  不碰 `cli/chat_parts/tui_effort_menu.py`（sol 的 C7）与 ds2 第三批的 memory_store/gateway_parts/core.py。
+- **做法**：
+  1. **A 补说明 43 个**：定义上方补一句中文说明（管什么、为什么是这个值），满足生成器“最近注释行含中文字符”规则。
+  2. **B 改名 56 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名（`_LIMIT`→`_COUNT`、`_LINES`→`_LINE_COUNT`、
+     `_ENTRIES`→`_ENTRY_COUNT`、`_WORKERS`→`_WORKER_COUNT`、`_ITEMS`→`_ITEM_COUNT`、宽度类加 `_CHARS` 等），
+     全仓引用（agent/cli/tests 的 .py）词边界一起改，旧名零残留；`_BACKGROUND_THREADS_PER_OWNER` 因 `_PER_OWNER`
+     后缀不匹配，改为 `_BACKGROUND_PER_OWNER_THREAD_COUNT`。
+  3. **C 无物理单位 1 个**：`_SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH`（深度）只补说明，挪入白名单无单位组。
+  4. 数值一律不变；`test_constant_names_unique._ALLOWED` 无需改动（POLL_SECONDS 两个定义处仍同名不同义、条目保留）。
+- **白名单/目录**：待整改白名单 497→398（主组 372 + 无单位组 26，只减不增）；目录重建 800 项，`--check` 一致。
+- **验证**：目录守卫 13 passed；cli 相关 57 个测试文件除 1 个沙箱环境性失败外全过（该失败与本次改动无关，已用 HEAD 基线
+  worktree 复现同样失败）；guards9 全过；import boundaries 0；ruff/doc_sync/code-size strict/diff --check/clean_package 全过；
+  size_diff 新增告警 0（消失 2）。
+
 ## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已实现，待集成）
 
 - **背景**：P10 定案“常数留在读取点、目录只是投影”后，待整改白名单按模块分批清理。本批接第一批之后，

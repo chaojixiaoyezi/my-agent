@@ -14,7 +14,8 @@ from .common import int_arg_or_default, make_agent
 
 # 参数减量第 3 批：层级创建默认深度与恢复树默认节点数不再是配置项，--max-depth / --max-nodes 仍优先。
 _SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH = 0
-_SUBAGENT_HIERARCHY_RECOVERY_MAX_NODES = 200
+# 恢复代理树最多重建 200 个节点，--max-nodes 优先
+_SUBAGENT_HIERARCHY_RECOVERY_MAX_NODE_COUNT = 200
 
 
 def _parse_child_spec(raw: str) -> HierarchyChildSpec:
@@ -75,7 +76,7 @@ def cmd_subagents_recovery_tree(args) -> int:
             root_run_id=args.run_id,
             requested_by=args.requested_by or "parent",
             include_healthy=not bool(args.hide_healthy),
-            max_nodes=int_arg_or_default(args, "max_nodes", _SUBAGENT_HIERARCHY_RECOVERY_MAX_NODES),
+            max_nodes=int_arg_or_default(args, "max_nodes", _SUBAGENT_HIERARCHY_RECOVERY_MAX_NODE_COUNT),
             heartbeat_timeout=float(capability_config.subagent_heartbeat_timeout),
             run_timeout=float(capability_config.subagent_run_timeout),
         )

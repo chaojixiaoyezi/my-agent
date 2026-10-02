@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from ..agent.subagents.patch import PatchApplyOptions, PatchReviewOptions
-from ._board import SUBAGENT_CLI_DEFAULT_LIMIT
+from ._board import SUBAGENT_CLI_DEFAULT_COUNT
 from ._review_tests import cmd_subagents_tests as _cmd_subagents_tests
 from .common import int_arg_or_default, make_agent
 from .models import SubagentsPatchOptions
@@ -88,7 +88,7 @@ def _subagents_patch_options(args, *, agent=None) -> SubagentsPatchOptions:
         run_ids=getattr(args, "run_id", None) or None,
         reviewer=getattr(args, "reviewer", None),
         note=getattr(args, "note", None) or "",
-        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_LIMIT),
+        limit=int_arg_or_default(args, "limit", SUBAGENT_CLI_DEFAULT_COUNT),
     )
 
 

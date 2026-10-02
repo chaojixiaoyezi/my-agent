@@ -40,37 +40,54 @@ from .tui_view_model import (
     TuiViewSnapshot,
 )
 
-WELCOME_CARD_MAX_WIDTH = 95
-TOOL_PREVIEW_MAX_LINES = 6
-TOOL_RICH_PREVIEW_MAX_LINES = 12
-TOOL_RICH_EXPANDED_MAX_LINES = 40
-WRITE_PREVIEW_MAX_LINES = 10
+# 欢迎卡片最大宽度 95 字符
+WELCOME_CARD_MAX_WIDTH_CHARS = 95
+# 工具输出预览最多 6 行
+TOOL_PREVIEW_MAX_LINE_COUNT = 6
+# 富文本工具输出预览最多 12 行
+TOOL_RICH_PREVIEW_MAX_LINE_COUNT = 12
+# 富文本工具输出展开最多 40 行
+TOOL_RICH_EXPANDED_MAX_LINE_COUNT = 40
+# 写文件预览最多 10 行
+WRITE_PREVIEW_MAX_LINE_COUNT = 10
+# 用户消息渲染预览最多 10000 字符，超出折叠为摘要
 USER_MESSAGE_MAX_CHARS = 10_000
+# 用户长消息预览保留开头 2500 字符
 USER_MESSAGE_HEAD_CHARS = 2_500
 # R2-1: 模型/工具输出洪水(如 seq 5000)若全量渲染会拖垮 TUI——渲染层截断,
 # 只裁 UI 投影, canonical block.text 原文保留(与 _bounded_user_text 同思路)。
-_ASSISTANT_RENDER_MAX_LINES = 200
-_ASSISTANT_RENDER_DETAIL_MAX_LINES = 2_000
+_ASSISTANT_RENDER_MAX_LINE_COUNT = 200
+# 助手消息详情展开最多渲染 2000 行
+_ASSISTANT_RENDER_DETAIL_MAX_LINE_COUNT = 2_000
 # R256: 行数上限挡不住"无换行巨行"——单行 1M 字符仍会整段进 Markdown 排版（实测 494ms/帧、
 # 生成 17773 显示行）。字符预算必须在排版前生效，与用户消息路径（USER_MESSAGE_MAX_CHARS）对齐；
 # 只裁显示投影，canonical block.text 与发给模型的上下文都不受影响，完整原文仍走 Ctrl+E 分页。
 _ASSISTANT_RENDER_MAX_CHARS = 10_000
+# 助手消息详情展开最多渲染 40000 字符
 _ASSISTANT_RENDER_DETAIL_MAX_CHARS = 40_000
 # 活动思考内容的默认可见行数上限（终端交互 行为：灰色实时可见；
 # 超长折叠为提示行，Ctrl+O 看全部）。
-_THINKING_LIVE_MAX_LINES = 50
-_TOOL_RENDER_MAX_LINES = 200
-_TOOL_RENDER_DETAIL_MAX_LINES = 2_000
+_THINKING_LIVE_MAX_LINE_COUNT = 50
+# 工具消息渲染最多 200 行，超出折叠为提示行
+_TOOL_RENDER_MAX_LINE_COUNT = 200
+# 工具消息详情展开最多渲染 2000 行
+_TOOL_RENDER_DETAIL_MAX_LINE_COUNT = 2_000
+# 工具消息详情展开最多渲染 40000 字符
 _TOOL_RENDER_DETAIL_MAX_CHARS = 40_000
+# 用户长消息预览保留结尾 2500 字符
 USER_MESSAGE_TAIL_CHARS = 2_500
+# 等待超过 30 秒后 spinner 切换为带耗时指标的显示
 SPINNER_METRICS_AFTER_SECONDS = 30.0
+# 等待超过 3 秒后开始显示 spinner 动画
 SPINNER_STALL_AFTER_SECONDS = 3.0
-PENDING_INPUT_PREVIEW_LINE_LIMIT = 3
+# 排队输入预览最多 3 行，超出折叠为有界摘要
+PENDING_INPUT_PREVIEW_LINE_COUNT = 3
 # LLM: 少量回执保持完整预览；超过阈值后必须切成固定摘要，避免大量排队输入把
 # prompt_toolkit HSplit 的最小高度撑过终端并退化成 `Window too small`。
 # 常量用途: 控制输入框附近何时从逐条预览切换为有界队列摘要，不改变真实队列内容。
-INPUT_RECEIPT_EXPANDED_ITEM_LIMIT = 4
-TODO_COLLAPSED_MAX_ITEMS = 4
+INPUT_RECEIPT_EXPANDED_ITEM_COUNT = 4
+# 折叠的 todo 列表最多展开 4 项
+TODO_COLLAPSED_MAX_ITEM_COUNT = 4
 TERMINAL_RENDER_PHASES = frozenset({"completed", "failed", "interrupted"})
 FOCUSED_AGENT_TERMINAL_STATUSES = frozenset(
     {
@@ -1384,7 +1401,7 @@ def _render_welcome(block: TuiBlock, context: TuiRenderContext) -> tuple[Formatt
     version = str(block.metadata.get("version") or context.version)
     model = str(context.model_name or block.metadata.get("model") or "模型不可用")
     workspace = str(block.metadata.get("workspace") or context.workspace or ".")
-    card_width = min(WELCOME_CARD_MAX_WIDTH, context.width)
+    card_width = min(WELCOME_CARD_MAX_WIDTH_CHARS, context.width)
     if card_width >= 80:
         lines = _wide_welcome_card(context.agent_name, version, model, workspace, card_width)
     else:
@@ -1545,7 +1562,7 @@ def _render_assistant(block: TuiBlock, context: TuiRenderContext) -> tuple[Forma
     content_width = max(1, context.width - 2)
     text = _bounded_render_text(
         block.text,
-        max_lines=_ASSISTANT_RENDER_DETAIL_MAX_LINES if context.detailed_transcript else _ASSISTANT_RENDER_MAX_LINES,
+        max_lines=_ASSISTANT_RENDER_DETAIL_MAX_LINE_COUNT if context.detailed_transcript else _ASSISTANT_RENDER_MAX_LINE_COUNT,
         max_chars=(
             _ASSISTANT_RENDER_DETAIL_MAX_CHARS
             if context.detailed_transcript
@@ -1604,12 +1621,12 @@ def _render_thinking(block: TuiBlock, context: TuiRenderContext) -> tuple[Format
             # 先限制Markdown输入，再按视口折叠；不能先排版十万字再丢掉大部分。
             preview, truncated = _thinking_preview_text(block.text, live=True)
             content_lines = _thinking_content_lines(preview, context, closed=False)
-            if truncated or len(content_lines) > _THINKING_LIVE_MAX_LINES:
-                lines.extend(content_lines[:_THINKING_LIVE_MAX_LINES])
+            if truncated or len(content_lines) > _THINKING_LIVE_MAX_LINE_COUNT:
+                lines.extend(content_lines[:_THINKING_LIVE_MAX_LINE_COUNT])
                 lines.extend(
                     _thinking_live_fold_hint(
                         block.text, preview,
-                        hidden_preview_lines=max(0, len(content_lines) - _THINKING_LIVE_MAX_LINES),
+                        hidden_preview_lines=max(0, len(content_lines) - _THINKING_LIVE_MAX_LINE_COUNT),
                         context=context,
                     )
                 )
@@ -1994,7 +2011,7 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
         title += f" · 另有 {unrepresented_active_child_count} 个子代理运行中"
     if hidden_count:
         title += "（Ctrl+T 展开）"
-    elif context.todos_expanded and len(public_items) > TODO_COLLAPSED_MAX_ITEMS:
+    elif context.todos_expanded and len(public_items) > TODO_COLLAPSED_MAX_ITEM_COUNT:
         title += "（Ctrl+T 收起）"
     lines: list[FormattedLine] = [
         (("class:tui-todo-title", _truncate_text(title, context.width)),)
@@ -2042,7 +2059,7 @@ def _todo_window_items(
     *,
     expanded: bool,
 ) -> tuple[list[dict[str, object]], int]:
-    if expanded or len(items) <= TODO_COLLAPSED_MAX_ITEMS:
+    if expanded or len(items) <= TODO_COLLAPSED_MAX_ITEM_COUNT:
         return list(items), 0
     statuses = [str(item.get("status") or "pending").strip().lower() for item in items]
     running = [index for index, status in enumerate(statuses) if status == "in_progress"]
@@ -2081,7 +2098,7 @@ def _todo_window_items(
             add(index)
     for index in range(len(items)):
         add(index)
-    selected = sorted(priority[:TODO_COLLAPSED_MAX_ITEMS])
+    selected = sorted(priority[:TODO_COLLAPSED_MAX_ITEM_COUNT])
     return [items[index] for index in selected], len(items) - len(selected)
 
 
@@ -2124,10 +2141,10 @@ def _render_tool(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     if context.show_all:
         detail_lines = _bounded_render_text(
             "\n".join(detail_lines),
-            max_lines=_TOOL_RENDER_DETAIL_MAX_LINES,
+            max_lines=_TOOL_RENDER_DETAIL_MAX_LINE_COUNT,
             max_chars=_TOOL_RENDER_DETAIL_MAX_CHARS,
         ).splitlines()
-    visible_lines = detail_lines if context.show_all else detail_lines[:TOOL_PREVIEW_MAX_LINES]
+    visible_lines = detail_lines if context.show_all else detail_lines[:TOOL_PREVIEW_MAX_LINE_COUNT]
     for index, detail_line in enumerate(visible_lines):
         marker = "  ⎿ " if index == 0 else "    "
         wrapped = wrap_fragments(
@@ -2191,7 +2208,7 @@ def _render_tool_diff(
     )
     raw_rows = display.get("lines")
     rows = [row for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
-    visible, hidden = _visible_rich_items(rows, context, normal_limit=TOOL_RICH_PREVIEW_MAX_LINES)
+    visible, hidden = _visible_rich_items(rows, context, normal_limit=TOOL_RICH_PREVIEW_MAX_LINE_COUNT)
     hidden += max(0, int(display.get("hidden_lines") or 0))
     number_width = max(
         2,
@@ -2322,7 +2339,7 @@ def _render_tool_write(
     visible, hidden = _visible_rich_items(
         content_lines,
         context,
-        normal_limit=WRITE_PREVIEW_MAX_LINES,
+        normal_limit=WRITE_PREVIEW_MAX_LINE_COUNT,
     )
     hidden += max(0, int(display.get("hidden_lines") or 0))
     number_width = max(2, len(str(total_lines or len(content_lines))))
@@ -2380,7 +2397,7 @@ def _visible_rich_items(
 ) -> tuple[list[Any], int]:
     if context.show_all:
         return items, 0
-    limit = TOOL_RICH_EXPANDED_MAX_LINES if context.detailed_transcript else normal_limit
+    limit = TOOL_RICH_EXPANDED_MAX_LINE_COUNT if context.detailed_transcript else normal_limit
     return items[:limit], max(0, len(items) - limit)
 
 
@@ -2390,11 +2407,11 @@ def _visible_command_items(
     items: list[tuple[str, str]],
     context: TuiRenderContext,
 ) -> tuple[list[tuple[str, str]], int]:
-    if context.show_all or len(items) <= TOOL_PREVIEW_MAX_LINES:
+    if context.show_all or len(items) <= TOOL_PREVIEW_MAX_LINE_COUNT:
         return items, 0
     if not context.detailed_transcript:
-        return items[-TOOL_PREVIEW_MAX_LINES:], len(items) - TOOL_PREVIEW_MAX_LINES
-    limit = TOOL_RICH_EXPANDED_MAX_LINES
+        return items[-TOOL_PREVIEW_MAX_LINE_COUNT:], len(items) - TOOL_PREVIEW_MAX_LINE_COUNT
+    limit = TOOL_RICH_EXPANDED_MAX_LINE_COUNT
     if len(items) <= limit:
         return items, 0
     head = limit // 2
@@ -2517,7 +2534,7 @@ def _render_input_status(
 ) -> tuple[FormattedLine, ...]:
     lines: list[FormattedLine] = []
     receipt_count = len(snapshot.pending_steers) + len(snapshot.queued_inputs)
-    if receipt_count > INPUT_RECEIPT_EXPANDED_ITEM_LIMIT:
+    if receipt_count > INPUT_RECEIPT_EXPANDED_ITEM_COUNT:
         lines.extend(
             _render_compact_input_receipts(
                 snapshot.pending_steers,
@@ -3033,8 +3050,8 @@ def _render_pending_input_message(
         first_prefix=(("class:tui-muted", "  ↳ "),),
         continuation_prefix=(("class:tui-muted", "    "),),
     )
-    visible = list(wrapped[:PENDING_INPUT_PREVIEW_LINE_LIMIT])
-    if len(wrapped) > PENDING_INPUT_PREVIEW_LINE_LIMIT:
+    visible = list(wrapped[:PENDING_INPUT_PREVIEW_LINE_COUNT])
+    if len(wrapped) > PENDING_INPUT_PREVIEW_LINE_COUNT:
         visible.append((("class:tui-muted", "    …"),))
     return tuple(visible)
 

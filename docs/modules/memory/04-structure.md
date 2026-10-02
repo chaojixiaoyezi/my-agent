@@ -6,6 +6,13 @@ memory_store 23 个常数合规：`_MAX_CONDITION_CHARS/_MAX_CONTENT_CHARS/_MAX_
 _MESSAGE_PREVIEW_CHARS/_MAX_LIST_ITEM_CHARS/_MAX_SUMMARY_CHARS/_MAX_HOT_RULE_CHARS/_MAX_CANDIDATE_CHARS/_DAY_SECONDS` 补中文说明；
 数量类改名补 `_COUNT`（见 02-progress）；`_BM25_B/_BM25_K1` 无物理单位只补说明。数值不变。
 
+## P10 第四批常数整改（2026-10-02，ds1，待集成）
+
+`cli/memory_archive_commands.py::_CLI_MEMORY_ARCHIVE_COUNT`（memory-archive 默认最多返回 20 条）、
+`cli/memory_commands/memory_doctor_cmd.py::MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`（doctor 列出最近 5 个归档文件）、
+`cli/memory_commands/memory_query_cmd.py::_CLI_MEMORY_ROUTE_COUNT`（memory-route 默认最多返回 5 条）；
+数值不变，随包目录投影与源码一致。
+
 ## Curator 固定模型档案（P12，2026-10-01）
 
 `AgentConfig` / `MemorySettings` / `_memory_coercion` 只保留 `memory_curator_model_profile`，默认空。

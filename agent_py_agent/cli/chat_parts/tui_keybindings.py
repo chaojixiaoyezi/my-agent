@@ -53,7 +53,9 @@ from .tui_interaction import TuiDraft, TuiInteractionState
 from .tui_plugin_commands import submit_plugin_command
 from .tui_transcript import TuiTranscriptModeState
 
-TRANSCRIPT_SCROLL_LINES = 10
+# 转录区滚轮/翻页每次滚动 10 行
+TRANSCRIPT_SCROLL_LINE_COUNT = 10
+# 粘贴提示条展示 0.1 秒后消失
 PASTE_FEEDBACK_SECONDS = 0.1
 # 单条消息字符上限（会话运行时 同款 2^20）：超限拒发且保留原文，绝不静默丢失。
 MAX_USER_INPUT_CHARS = 1 << 20
@@ -91,7 +93,7 @@ class TuiCreateKeybindingsParams:
     transcript_state: Any
     transcript_search_area: Any
     permission_feedback_area: Any
-    transcript_scroll_lines: int = TRANSCRIPT_SCROLL_LINES
+    transcript_scroll_lines: int = TRANSCRIPT_SCROLL_LINE_COUNT
     tui_runtime: Any | None = None
     agent_navigation: Any | None = None
     active_input_reconciler: Any | None = None

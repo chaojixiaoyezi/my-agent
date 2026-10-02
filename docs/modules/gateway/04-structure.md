@@ -7,6 +7,13 @@ gateway_parts 28 个常数合规：`_SCAN_LIMIT→_SCAN_LIMIT_COUNT`、`_CAPABIL
 `_LIST_LIMIT→_LIST_LIMIT_COUNT`、`_QUARANTINED_LIST_LIMIT→_QUARANTINED_LIST_LIMIT_COUNT`、`_DEFAULT_MAX_SCOPES/_DEFAULT_MAX_KEYS_PER_SCOPE`
 补 `_COUNT`，`_BRIEF_MAX→_BRIEF_MAX_CHARS`、`_SHORT_ID→_SHORT_ID_CHARS`；时间/长度类补中文说明。数值不变。
 
+## P10 第四批常数整改（2026-10-02，ds1，待集成）
+
+cli 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补中文说明：`gateway_loops.py`（`_BACKGROUND_OWNER_WORKER_COUNT`、
+`_BACKGROUND_PER_OWNER_THREAD_COUNT`、`_MEMORY_CURATOR_WORKER_COUNT`、`_CURATOR_DAILY_QUOTA_COUNT`）、
+`gateway_loop_backoff.py`（`LOOP_ERROR_PRINT_EVERY_COUNT`）、`gateway_lane_retry.py`、`gateway_restart_handover.py`；
+数值不变，随包目录投影与源码一致。
+
 ## Curator 档案控制 P12（2026-10-01，本地待集成）
 
 - `settings_control_service.execute_settings_control` 从可信 scope 解析完整管理员 home；只有原身份校验通过，才进入

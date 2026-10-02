@@ -9,10 +9,14 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-MAX_VISIBLE_PANELS = 2
+# 插件面板最多同时显示 2 个
+MAX_VISIBLE_PANEL_COUNT = 2
+# 插件面板轮询 Gateway 快照的间隔 1 秒
 POLL_SECONDS = 1.0
+# 插件面板轮询失败的退避上限 10 秒
 MAX_BACKOFF_SECONDS = 10.0
-PANEL_BODY_LINES = 6
+# 插件面板正文最多 6 行
+PANEL_BODY_LINE_COUNT = 6
 _STATE_LABEL = {"loading": "加载中", "refreshing": "", "ready": "", "error": "出错", "unavailable": "不可用"}
 
 
@@ -57,7 +61,7 @@ class PluginPanelBoard:
                 self._visible.remove(key)
                 self._views.pop(key, None)
                 outcome = "closed"
-            elif len(self._visible) >= MAX_VISIBLE_PANELS:
+            elif len(self._visible) >= MAX_VISIBLE_PANEL_COUNT:
                 return "limit"
             else:
                 self._visible.append(key)
@@ -181,7 +185,7 @@ def _body(display: object, current: PanelView | None) -> tuple[str, ...]:
     return tuple(lines)
 
 
-# LLM: 纯函数；每个面板一行标题加至多 PANEL_BODY_LINES 行正文，总高度有上限，不读时钟或网络。
+# LLM: 纯函数；每个面板一行标题加至多 PANEL_BODY_LINE_COUNT 行正文，总高度有上限，不读时钟或网络。
 # 函数用途: 生成面板区域的 prompt_toolkit 格式化片段。
 def render_plugin_panels(views: tuple[PanelView, ...]) -> list[tuple[str, str]]:
     fragments: list[tuple[str, str]] = []
@@ -192,8 +196,8 @@ def render_plugin_panels(views: tuple[PanelView, ...]) -> list[tuple[str, str]]:
         body = list(view.body)
         if view.state == "error" and view.error:
             body = [view.error] + body
-        if len(body) > PANEL_BODY_LINES:
-            body = body[: PANEL_BODY_LINES - 1] + [f"…还有 {len(body) - PANEL_BODY_LINES + 1} 行"]
+        if len(body) > PANEL_BODY_LINE_COUNT:
+            body = body[: PANEL_BODY_LINE_COUNT - 1] + [f"…还有 {len(body) - PANEL_BODY_LINE_COUNT + 1} 行"]
         for line in body:
             fragments.append(("", f"  {line}\n"))
     return fragments
@@ -213,6 +217,6 @@ def make_plugin_panel_window(board: PluginPanelBoard):
         except Exception:  # noqa: BLE001 面板渲染故障不能冻结核心界面
             return []
 
-    max_height = MAX_VISIBLE_PANELS * (PANEL_BODY_LINES + 1)
+    max_height = MAX_VISIBLE_PANEL_COUNT * (PANEL_BODY_LINE_COUNT + 1)
     return Window(content=FormattedTextControl(fragments), height=Dimension(min=0, max=max_height),
                   dont_extend_height=True, wrap_lines=False)
