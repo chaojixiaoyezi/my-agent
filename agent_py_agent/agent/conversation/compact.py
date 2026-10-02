@@ -289,13 +289,13 @@ class _LandmarkRebuild:
     # LLM: 只重算备份段；语义摘要与尾随原文逐字不变，负数预算按 0 处理。
     # 函数用途: 用给定的原话备份 token 上限重建摘要全文（复用第一遍结果，只按下标重读被选中的行）。
     def render(self, max_tokens: int) -> str:
-        options = replace(self.options, max_tokens=max(0, max_tokens))
+        options = replace(self.options, landmark_budget_tokens=max(0, max_tokens))
         return render_landmarked_summary(self.semantic, self.source, options).text + self.trailing
 
     # LLM: 预算为 0 时备份段仍保留标题、省略编号与回查说明；收缩判断必须计入这部分，不能按整段可删到 0 估算。
     # 函数用途: 返回备份段能缩到的最小 token 数（不读任何原文正文）。
     def minimum_tokens(self) -> int:
-        return render_landmarked_summary(self.semantic, self.source, replace(self.options, max_tokens=0)).used_tokens
+        return render_landmarked_summary(self.semantic, self.source, replace(self.options, landmark_budget_tokens=0)).used_tokens
 
 
 # LLM: 摘要模型返回后的收尾输入；rows 是本次全部行（机械回退保留原文用），foreground_rows 是去掉后台审计投递的行。

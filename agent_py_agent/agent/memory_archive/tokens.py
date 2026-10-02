@@ -29,63 +29,9 @@ class TurnTokenUsage:
     created_at: str
 
 
-@dataclass(frozen=True)
-class TokenBudgetResult:
-
-    status: str  # "ok" | "warning" | "block"
-    current_tokens: int
-    max_tokens: int
-    ratio: float
-    archive_level: int
-    message: str
-
-
-# 不同 archive level 的告警和阻断阈值
-# level 越低，保留内容越多，预算越紧
-_LEVEL_WARNING_RATIO = {0: 0.6, 1: 0.7, 2: 0.75, 3: 0.8}
-_LEVEL_BLOCK_RATIO = {0: 0.85, 1: 0.9, 2: 0.95, 3: 1.0}
-
 # 小对象复用公开直接编码入口，避免高频窗口试算积累流式编码器闭包；大对象仍不复制整份JSON。
 _SMALL_JSON_MAX_BYTES = 512 * 1024
 _SMALL_JSON_MAX_DEPTH = 64
-
-
-def check_token_budget(
-    current_tokens: int,
-    max_tokens: int,
-    archive_level: int = 3,
-) -> TokenBudgetResult:
-
-    level = max(0, min(3, int(archive_level) if not isinstance(archive_level, bool) else 3))
-    if max_tokens <= 0:
-        return TokenBudgetResult(
-            status="ok",
-            current_tokens=current_tokens,
-            max_tokens=max_tokens,
-            ratio=0.0,
-            archive_level=level,
-            message="max_tokens 未设置，跳过预算检查。",
-        )
-    ratio = current_tokens / max_tokens
-    warning_threshold = _LEVEL_WARNING_RATIO.get(level, 0.75)
-    block_threshold = _LEVEL_BLOCK_RATIO.get(level, 0.95)
-    if ratio >= block_threshold:
-        status = "block"
-        msg = f"token 预算已超限（{current_tokens}/{max_tokens}，{ratio:.0%}），archive level={level}，必须压缩。"
-    elif ratio >= warning_threshold:
-        status = "warning"
-        msg = f"token 预算接近上限（{current_tokens}/{max_tokens}，{ratio:.0%}），archive level={level}，建议压缩。"
-    else:
-        status = "ok"
-        msg = f"token 预算正常（{current_tokens}/{max_tokens}，{ratio:.0%}），archive level={level}。"
-    return TokenBudgetResult(
-        status=status,
-        current_tokens=current_tokens,
-        max_tokens=max_tokens,
-        ratio=ratio,
-        archive_level=level,
-        message=msg,
-    )
 
 
 # LLM: 同一sort/default JSON序列按结构上界选择有界直接编码或流式累计；估算数值及异常回退不变，最大单值/字典排序仍需内存。

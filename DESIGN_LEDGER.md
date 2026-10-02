@@ -1,5 +1,20 @@
 # 设计台账
 
+## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已实现，待集成）
+
+- **P15 脱敏补两种写法**（唯一实现 `user_config_capability.masked_structure`/`mask_value`，未另写一份）：
+  - (a) 请求头/环境变量容器开关（`--headers`、`--env`）后“名字 值”分成两项时，名字和值两项都遮（名字可能是 Authorization/x-api-key
+    这类敏感请求头名）；凭据名开关（`--api-key`、`--pass`）仍是单值写法，只遮值，不把后面的参数误当“值”。
+  - (b) 不紧跟开关、名字又不像凭据的单独一项 `名字=值` 里，值形如密钥（常见 token 前缀 sk-/ghp_/eyJ 等，或 >=24 字符的字母数字
+    混用长串）也遮值；规则只看结构（长度、字符集、前缀），不写死服务商；普通值（主机名、纯数字、网址、路径、短串）不遮。
+  - 测试：`test_structured_masking.py` 新增两例（分两项遮 + 密钥形态遮/不误遮），`test_value_display_parity` 等守卫通过。
+- **P9 同名不同义改名**：压缩摘要“原话备份”段的 `LandmarkOptions.max_tokens` 改名 `landmark_budget_tokens`（整段备份的 token 预算，
+  不是模型输出上限），compact_landmarks.py 与 compact.py（render/minimum_tokens 的 replace）及测试（test_compact_landmarks /
+  test_goal_lifecycle_recovery / test_gateway_conversation_compact）全量同步，数值不变；只被测试调用的
+  `memory_archive.tokens.check_token_budget`（连同 `TokenBudgetResult` 与阈值表、`__init__` 导出、`test_archive_snapshots` 用例）删除。
+- **文档**：PARAMETER_CENTER.md 脱敏节 209-210 漏网写法改为已补；第 2 节目标第 5 条补记落地。
+- **验证**：脱敏/改名相关测试 204 passed（详见 TESTS.md）。
+
 ## 压缩触发绝对上限默认改为 300000（2026-10-01，分支 `claude/3a-cap-default`，已实现，待集成）
 
 - **事故**：生产 `memory_compact_auto_trigger_max_tokens` 09-29 设为 300000 后，09-30 07:49Z 被一个 my-agent 会话经 user_config `reset`（账本 actor=model）退回当时的默认 0，即不封顶；之后 1M 窗口的 deepseek-v4-flash 会话要到约 90 万才压缩，10-01 把 gpt-6-luna 档案窗口改为实测的 900000 后也一样（约 81 万）。这正是 09-29「1M 窗口、90% 触发」429 的形状。ae 在 C1 准备时只读发现，集成者核实后已经正式写回 300000（变更号 77e58ca0038e，重启 Gateway 生效）。

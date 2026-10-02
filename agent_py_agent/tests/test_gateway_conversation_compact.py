@@ -668,7 +668,7 @@ def test_long_final_answers_cannot_displace_short_user_requirements_from_landmar
                             content=f"旧结论-{i}：" + "尚未验证的长篇分析。" * 180,
                             metadata={"assistant_part_id": "final"}),
         ])
-    options = LandmarkOptions(max_tokens=2_000)
+    options = LandmarkOptions(landmark_budget_tokens=2_000)
     first = summary_with_conversation_landmarks("粗略摘要", "", rows, options=options)
     assert first.used_tokens <= 2_000 and estimate_tokens(first.text.split("\n\n", 1)[1]) == first.used_tokens
     # 用户原话先分预算：18 条短要求全部保留，长篇助手结论放不下；被省略的只有助手答复，不写用户省略行。
@@ -688,7 +688,7 @@ def test_landmark_user_overflow_prefers_recent_requests_without_growing_budget()
 
     rows = [MessageLogEntry(message_id=f"u{i}", thread_id="t", role="user", content=f"request-{i} " + "x" * 240)
             for i in range(20)]
-    selected = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(max_tokens=1_000))
+    selected = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(landmark_budget_tokens=1_000))
     assert selected.used_tokens <= 1_000 and estimate_tokens(selected.text) == selected.used_tokens
     assert "request-19 " in selected.text
     assert "request-0 " not in selected.text

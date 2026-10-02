@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `02568822d`）
+
+- **P15**：`test_structured_masking.py` 新增 2 例：
+  - `test_credential_flag_with_two_part_name_value_masks_both_parts`：容器开关后“名字 值”两项都遮（--headers Authorization Bearer-xxx、
+    --env GITHUB_TOKEN ghp_xxx）；普通开关（--timeout 30）不遮；容器开关后“名字: 值”单参数仍只留名字；
+  - `test_key_like_values_in_plain_name_value_are_masked_without_overhiding`：名字不凭据但值形如密钥（sk- 前缀、>=24 字长串、JWT）
+    遮值；普通值（localhost、纯数字、网址、路径、带空格句子）不遮。
+- **P9**：`LandmarkOptions.max_tokens` → `landmark_budget_tokens`（compact_landmarks.py 定义/构造/使用、compact.py render/minimum_tokens、
+  test_compact_landmarks / test_goal_lifecycle_recovery / test_gateway_conversation_compact 同步）；`memory_archive.tokens.check_token_budget`
+  （含 TokenBudgetResult、阈值表、`__init__` 导出、`test_archive_snapshots` 的 TestCheckTokenBudget 类）删除——生产代码无读取方。
+- 命令与结果：
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_structured_masking.py agent_py_agent/tests/test_value_display_parity.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_compact_landmarks.py agent_py_agent/tests/test_archive_snapshots.py agent_py_agent/tests/test_goal_lifecycle_recovery.py agent_py_agent/tests/test_gateway_conversation_compact.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **204 passed**
+
 ## 压缩触发绝对上限默认改为 300000（2026-10-01，分支 `claude/3a-cap-default`）
 
 - `test_compact_trigger_cap.py`：默认值 300000、显式 0 不封顶、乱填/负数/布尔/缺失回到 300000（配置解析与运行时一致）；`test_runtime_context_pressure.py` 的窗口准入用例显式写 0，只测按窗口算的输入上限。

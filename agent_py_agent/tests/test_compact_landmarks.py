@@ -57,10 +57,10 @@ def test_budget_scales_with_the_window_and_respects_the_config_cap():
         return SimpleNamespace(config=SimpleNamespace(**values), backend=None,
                                tools=SimpleNamespace(tools={"session_search": object()}))
 
-    assert landmark_options(agent(262_144)) == LandmarkOptions(max_tokens=20_000, recall_hint=True)
-    assert landmark_options(agent(128_000)).max_tokens == 12_800
-    assert landmark_options(agent(2_000)).max_tokens == 500
-    assert landmark_options(agent(262_144, compact_landmark_max_tokens=0)).max_tokens == 0
+    assert landmark_options(agent(262_144)) == LandmarkOptions(landmark_budget_tokens=20_000, recall_hint=True)
+    assert landmark_options(agent(128_000)).landmark_budget_tokens == 12_800
+    assert landmark_options(agent(2_000)).landmark_budget_tokens == 500
+    assert landmark_options(agent(262_144, compact_landmark_max_tokens=0)).landmark_budget_tokens == 0
     assert landmark_options(agent(262_144, compact_recall_hint_enabled=False)).recall_hint is False
     # 没注册 session_search 的 agent 不提示回查，避免指向一个用不了的工具。
     bare = agent(262_144)
@@ -72,7 +72,7 @@ def test_every_line_carries_its_message_id_and_the_recall_hint_is_optional():
     rows = [_user("msg-a", "第一条要求：金额保留两位小数。"),
             MessageLogEntry(message_id="msg-b", thread_id="t", role="assistant", content="好的。",
                             metadata={"assistant_part_id": "final"})]
-    plain = summary_with_conversation_landmarks("摘要", "", rows, options=LandmarkOptions(max_tokens=2_000)).text
+    plain = summary_with_conversation_landmarks("摘要", "", rows, options=LandmarkOptions(landmark_budget_tokens=2_000)).text
     assert '- user [msg-a]: "第一条要求：金额保留两位小数。"' in plain
     assert '- assistant_final [msg-b]: "好的。"' in plain
     assert "- recall:" not in plain and "omitted_user_messages" not in plain
@@ -83,7 +83,7 @@ def test_every_line_carries_its_message_id_and_the_recall_hint_is_optional():
 def test_short_older_requests_are_kept_before_a_long_newest_one_is_clipped_head_and_tail():
     long = "开头规则：金额保留两位小数。" + "数据行。" * 3000 + "结尾规则：按城市拼音排序。"
     rows = [_user("u-old", "较早的要求：人名只写姓氏加某。"), _user("u-new", long)]
-    result = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(max_tokens=1_500))
+    result = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(landmark_budget_tokens=1_500))
     assert result.used_tokens <= 1_500
     # 短要求整条保留；最新的长消息用剩余预算保留开头和结尾，写明原长度与省略字数。
     assert '- user [u-old]: "较早的要求：人名只写姓氏加某。"' in result.text
@@ -96,7 +96,7 @@ def test_short_older_requests_are_kept_before_a_long_newest_one_is_clipped_head_
 
 def test_omitted_requests_are_listed_by_id_newest_last_and_the_list_is_bounded():
     rows = [_user(f"u{index:02d}", f"要求-{index:02d}：" + "细节" * 200) for index in range(50)]
-    result = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(max_tokens=1_200))
+    result = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(landmark_budget_tokens=1_200))
     omitted = _lines(result.text, "- omitted_user_messages: ")[0]
     ids = omitted.split("[", 1)[1].split("]", 1)[0].split()
     kept = [line for line in _lines(result.text, "- user [") if "clipped" not in line]
@@ -114,14 +114,14 @@ def test_previous_generation_lines_and_omitted_ids_are_carried_in_both_formats()
         "- omitted_user_messages: 2 older or oversized [msg-gone-1 msg-gone-2]",
     ])
     result = summary_with_conversation_landmarks("新摘要", previous, [_user("msg-new", "本轮要求：按城市排序。")],
-                                                 options=LandmarkOptions(max_tokens=2_000)).text
+                                                 options=LandmarkOptions(landmark_budget_tokens=2_000)).text
     assert result.count(LANDMARK_HEADING) == 1 and semantic_summary_text(result) == "新摘要"
     assert '- user: "旧格式要求：日期写成 YYYY-MM-DD。"' in result
     assert '- user [msg-kept]: "新格式要求：零库存标红。"' in result and '- user [msg-new]: "本轮要求：按城市排序。"' in result
     assert "[msg-gone-1 msg-gone-2]" in result
     # 预算为 0 时不留原话，但编号全部转入省略行（旧格式无编号只计数），模型仍能按编号读回。
     empty = summary_with_conversation_landmarks("新摘要", previous, [_user("msg-new", "本轮要求。")],
-                                                options=LandmarkOptions(max_tokens=0, recall_hint=True)).text
+                                                options=LandmarkOptions(landmark_budget_tokens=0, recall_hint=True)).text
     assert not _lines(empty, "- user") and "- recall:" in empty
     assert _lines(empty, "- omitted_user_messages: ") == [
         "- omitted_user_messages: 5 older or oversized [msg-gone-1 msg-gone-2 msg-kept msg-new]; earliest 1 not listed"]
@@ -136,13 +136,13 @@ def test_omitted_count_accumulates_across_generations_and_only_the_section_itsel
         "- omitted_user_messages: 3 older or oversized [x1 x2 x3]",
     ])
     rows = [_user("msg-new", "本轮要求。")]
-    kept = summary_with_conversation_landmarks("新摘要", previous, rows, options=LandmarkOptions(max_tokens=2_000)).text
+    kept = summary_with_conversation_landmarks("新摘要", previous, rows, options=LandmarkOptions(landmark_budget_tokens=2_000)).text
     # 段后内容（机械回退附带的旧摘要、原文与其中的列表）不会被当成备份继承。
     assert "模型摘要正文里的列表" not in kept and "x1" not in kept and _lines(kept, '- user [msg-kept]: "保留的要求。"')
     assert _lines(kept, "- omitted_user_messages: ") == [
         f"- omitted_user_messages: 40 older or oversized [{' '.join(listed)}]; earliest 10 not listed"]
     # 预算为 0 时两条原话也转入省略：列表只留最近 30 个，没列出的数量逐代累加，总数不缩水。
-    empty = summary_with_conversation_landmarks("新摘要", previous, rows, options=LandmarkOptions(max_tokens=0)).text
+    empty = summary_with_conversation_landmarks("新摘要", previous, rows, options=LandmarkOptions(landmark_budget_tokens=0)).text
     shown = [*listed[2:], "msg-kept", "msg-new"]
     assert _lines(empty, "- omitted_user_messages: ") == [
         f"- omitted_user_messages: 42 older or oversized [{' '.join(shown)}]; earliest 12 not listed"]
@@ -150,7 +150,7 @@ def test_omitted_count_accumulates_across_generations_and_only_the_section_itsel
 
 def test_a_newline_heavy_request_just_over_budget_is_clipped_not_dropped():
     text = "HEAD-" + "a\n" * 3_000 + "-TAIL"
-    result = summary_with_conversation_landmarks("", "", [_user("u-rows", text)], options=LandmarkOptions(max_tokens=2_900))
+    result = summary_with_conversation_landmarks("", "", [_user("u-rows", text)], options=LandmarkOptions(landmark_budget_tokens=2_900))
     # 整行（含换行转义）放不下、按原文估算却像放得下：按整行折算保留头尾，而不是整条丢掉。
     clipped = _lines(result.text, "- user [u-rows clipped ")
     assert clipped and result.used_tokens <= 2_900 and "omitted_user_messages" not in result.text
@@ -186,7 +186,7 @@ class _CountingRows(list):
 
 def test_only_selected_rows_are_read_back_for_rendering():
     rows = _CountingRows([_user(f"u{index}", f"要求-{index}：" + "细节" * 300) for index in range(40)])
-    result = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(max_tokens=2_000))
+    result = summary_with_conversation_landmarks("", "", rows, options=LandmarkOptions(landmark_budget_tokens=2_000))
     rendered = _lines(result.text, "- user [")
     # 第一遍只流式迭代；第二遍只按下标重读被选中的行，不会把 40 条正文同时读进来。
     assert rendered and len(rows.indexed) == len(rendered) < len(rows)

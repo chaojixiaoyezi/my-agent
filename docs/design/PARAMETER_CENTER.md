@@ -75,6 +75,9 @@
 3. 用户和 my-agent 都能通过结构化入口（`user_config` 工具、TUI 与 IM 的 `/settings`）查看和修改非安全参数；每次修改记账、可回滚。
 4. 模块里散落的“可调常数”（超时、上限、预算、阈值）迁入；协议常量（状态码、事件名、schema 版本）不迁。
 5. 同名不同义的参数改名区分；没有读取方的配置删除（“配置必须真的生效”）。
+   - 2026-10-01 落地（分支 `worker/ds1-mask-rename`）：压缩摘要“原话备份”段的 `LandmarkOptions.max_tokens` 改名
+     `landmark_budget_tokens`（它是整段备份的 token 预算，不是模型输出上限，与 `max_tokens` 同名不同义）；数值不变，
+     调用方与测试全量同步；只被测试调用的 `memory_archive.tokens.check_token_budget`（连同 `TokenBudgetResult` 与阈值表）删除。
 
 ## 3. 安全等级
 

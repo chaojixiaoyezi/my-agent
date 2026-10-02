@@ -40,11 +40,11 @@ _ENTRY_PATTERN = re.compile(r"^- (user|assistant_final)(?: \[([^\]\s]+)(?: [^\]]
 _UNLISTED_PATTERN = re.compile(r"; earliest (\d+) not listed$")
 
 
-# LLM: max_tokens 是整段（标题、条目、omitted 与回查行）的上限；0 表示不附原话条目，只保留编号与回查说明。
+# LLM: landmark_budget_tokens 是整段（标题、条目、omitted 与回查行）的上限；0 表示不附原话条目，只保留编号与回查说明。
 # 类用途: 一次生成原话备份段的选项。
 @dataclass(frozen=True)
 class LandmarkOptions:
-    max_tokens: int
+    landmark_budget_tokens: int
     recall_hint: bool = False
 
 
@@ -89,7 +89,7 @@ def landmark_options(agent: object) -> LandmarkOptions:
     budget = min(cap, max(_MIN_TOKENS, window * _WINDOW_PERCENT // 100)) if cap > 0 else 0
     registered = getattr(getattr(agent, "tools", None), "tools", None) or {}
     recall = bool(getattr(config, "compact_recall_hint_enabled", True)) and "session_search" in registered
-    return LandmarkOptions(max_tokens=budget, recall_hint=recall)
+    return LandmarkOptions(landmark_budget_tokens=budget, recall_hint=recall)
 
 
 # LLM: 语义摘要里已有的旧备份段先剥掉再追加新段，保证全文只有一段；没有任何候选原话时原样返回语义摘要。
@@ -197,7 +197,7 @@ def _deduplicated(entries: list[_Landmark]) -> list[_Landmark]:
 # 函数用途: 在 token 预算内组装原话备份段。
 def _landmark_section(source: LandmarkSource, options: LandmarkOptions) -> str:
     fixed = "\n".join([*_HEADER_LINES, *([_RECALL_LINE] if options.recall_hint else [])])
-    remaining = max(0, options.max_tokens - estimate_tokens(fixed) - _OMITTED_RESERVE_TOKENS)
+    remaining = max(0, options.landmark_budget_tokens - estimate_tokens(fixed) - _OMITTED_RESERVE_TOKENS)
     picks: dict[int, int] = {}
     for role in _ROLES:
         remaining = _select_role(source.entries, role, remaining, picks)

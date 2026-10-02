@@ -86,7 +86,6 @@ from .task_workspace import (
 from .tokens import (
     TurnTokenUsage,
     append_session_token_usage,
-    check_token_budget,
     estimate_tokens,
     token_ledger_dir,
 )
@@ -136,7 +135,6 @@ __all__ = [
     "build_compact_action_guard",
     "build_memory_compact_suggestion",
     "run_memory_compact_auto_cycle",
-    "check_token_budget",
     "clear_compression_hooks",
     "compression_snapshot_dir",
     "compression_snapshot_file_for",

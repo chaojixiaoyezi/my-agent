@@ -301,7 +301,7 @@ def test_compact_keeps_correction_without_editing_goal(tmp_path):
     store = agent.conversation_store
     store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": goal.objective})
     store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": correction})
-    options = LandmarkOptions(max_tokens=6_000)
+    options = LandmarkOptions(landmark_budget_tokens=6_000)
     first = summary_with_conversation_landmarks("正在整理资料", "", store.messages.recent(thread.thread_id), options=options).text
     second = summary_with_conversation_landmarks("继续整理下一批", first, [], options=options).text
     assert correction in first and correction in second
