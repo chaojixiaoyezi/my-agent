@@ -29,6 +29,27 @@
 - **常数目录**已用 `scripts/build_constants_catalog.py` 重新生成。
 - **变异 12/12 全部被抓住**：总是输出 verification、能力声明接受未知键、去掉参数模板校验、不核成员归属、启用跳过确认、不记同意、同意不含包摘要、激活总输出同意键、去掉超时上限、放行 .. 路径、同意不含超时、把 runtime 封闭成只认 python。首轮 M2 漏网，补了“能力声明拒绝未知键”用例后抓住。脚本在 scratchpad `cpv2-mut/run_mut.sh`，每个变异后 git checkout 还原，结束确认工作区干净。
 
+## 隔离模式的 Shell 碰到沙箱边界时让模型知道并换个做法（第 16 条，2026-10-02，分支 `claude/9b-sandbox-boundary-facts`，基于 `3c7565bf2`）
+
+- 新增 `test_shell_sandbox_boundary_facts.py`（11 项）：
+  - 回执事实（命令执行替换，平台无关）：
+    - 非零退出 → `sandbox_active`、`allowed_roots`（工作目录可写、owner home 只读）、`boundary_hint` 与三个建议码，渲染出 `[runtime-sandbox-facts]`；拒读根不出现在允许目录里；
+    - 成功 → 信封里有允许目录，但不渲染沙箱段；
+    - 超时、起不来 → 不带 `boundary_hint`；
+    - 显式写根（`__sandbox_write_roots`）→ 允许目录就是这些写根；
+    - 开关关掉、Full Access → 信封只剩原三个字段；
+    - 说明提示只在 owner 隔离且开关打开时出现；畸形或非越界的沙箱事实不渲染。
+  - 配置：默认开，随包 YAML 一致，带引号的 "false" 规范成 False，经 `SimpleAgent` 装配到 Shell 工具。
+  - macOS 真实 Seatbelt：读别的 owner 的文件、`find` 递归扫描 my-agent 根，都在沙箱里非零退出并带边界事实；读自己的笔记成功、不带提示；沙箱本身没有放宽。
+  - 真实链路：真实 Gateway worker 入口 + 脚本化假模型（只替换供应商传输）+ 真实 Seatbelt：模型第一次调 `run_command` 读别的 owner 的文件，下一次请求的工具消息里就有 `[runtime-sandbox-facts]`、建议码和本 owner 的允许目录。
+- `test_sandbox.py` 的 3 个整份信封比对补上新字段（合同变化）：owner 隔离成功时多 `sandbox_active` 与 `allowed_roots`，非零退出再多 `boundary_hint`。
+- 变异 8/8 被杀（草稿副本上逐个精确替换、按字节恢复）：从不加边界事实、任何失败都给提示、渲染忽略沙箱段、成功也渲染、说明提示总出现、core 与 registry_bootstrap 两处开关没接上、隐式写根投影丢失。
+- 真实验收（MiniMax-M2.7，隔离 home，私有端口 8436，证据 `~/.my-agent/decision-evidence/sandbox-boundary-facts-bbd6bef1e/`）：
+  - TUI（本机管理员）与 IM（假飞书私聊普通用户经产品适配器转换后 POST 真实 Gateway `/ask`）各发一次"看看 owners 目录占了多少磁盘空间"；
+  - 两边第一次 `run_command` 都在沙箱里非零退出，模型看到的工具结果里有 `[runtime-sandbox-facts]`（提示、建议码、允许目录都在本 owner 家目录内，拒读根不列出）；
+  - TUI 随后换了一条命令成功；IM 没有再原样重试 Shell，收尾答复；沙箱本身没有放宽。
+  - 另一次"统计 .md"的 TUI 任务里模型用了专用文件工具 `find_files`，不走 Shell，本条功能不触发（发现，不重发）。
+
 ## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）
 
 - `test_owner_wake_discovery_task_run_no_link.py` 新增 7 项：

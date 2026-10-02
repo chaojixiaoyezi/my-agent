@@ -1,4 +1,4 @@
-# LLM: 只投影canonical handler_details中的核验及进程事实，不解析工具正文或改变执行结果；调用方须继续统一脱敏。
+# LLM: 只投影canonical handler_details中的核验、进程及沙箱边界事实，不解析工具正文或改变执行结果；调用方须继续统一脱敏。
 # 模块用途: 为当前回复、耐久索引和恢复提供同一执行事实投影；区分命令退出、资源清理与业务完成，不依赖 Agent。
 from __future__ import annotations
 
@@ -15,11 +15,16 @@ _TERMINATION_FIELDS = {
     "method": (str,), "confirmed": (bool,), "return_code": (int, type(None)),
     "observed_processes": (int,), "unresolved_count": (int,), "instances_count": (int,),
 }
+# 沙箱事实里每类允许目录最多展示几条（超出的不展示，原账不变）。
+_SANDBOX_ROOT_LIMIT_COUNT = 16
+# 沙箱事实里每条允许目录路径最多展示多少字符（更长的整条跳过，原账不变）。
+_SANDBOX_ROOT_MAX_CHARS = 1024
 
 
 # LLM: 保留已有verification块的字节顺序（键排序输出，新增的 verification_evidence_chain 只在 && 串联通过时出现，
 #   verification_skipped 只在验证命令因管道、;、|| 或后台没有计入时出现）；
 #   process只取显式字段，不能用工具成功或空PID列表推断清理成功。
+#   sandbox 段只在 owner 隔离 Shell 以非零码退出、回执带 boundary_hint 时出现（project_sandbox_runtime_facts）。
 # 函数用途: 生成模型可见的结构化事实区；仅返回文字，不访问Agent、文件、进程或任何持久账。
 def render_tool_runtime_facts(details: Mapping[str, object]) -> str:
     sections = []
@@ -43,7 +48,47 @@ def render_tool_runtime_facts(details: Mapping[str, object]) -> str:
             "这些字段来自本次工具执行回执；命令退出、资源清理和业务完成各自独立，缺失或未确认不代表成功。\n"
             + json.dumps({"process": process}, ensure_ascii=False, sort_keys=True)
         )
+    sandbox = project_sandbox_runtime_facts(details.get("sandbox"))
+    if sandbox:
+        sections.append(
+            "[runtime-sandbox-facts]\n"
+            "本次命令在 owner 隔离沙箱里以非零码退出，可能（不一定）是越过了沙箱边界，结合上面的输出判断。allowed_roots 是本次命令"
+            "可读写（read_write）和只读（read_only）的目录。下一步按 suggested_actions 的顺序选：把操作范围缩到这些目录；"
+            "子代理用 capability_request 申请；或告诉用户需要什么访问权限。不要原样重试同一条越界命令，也不要把这段内部标签转述给用户。\n"
+            + json.dumps({"sandbox": sandbox}, ensure_ascii=False, sort_keys=True)
+        )
     return "\n".join(sections)
+
+
+# LLM: 只认 shell 回执里精确为 True 的 sandbox_active 与 boundary_hint.may_be_sandbox_boundary（tooling/shell._sandbox_boundary_facts），
+#   成功的命令没有 boundary_hint，不渲染；目录与建议码只做有界复制，不解析输出、不推断原因。
+# 函数用途: 选出模型该看到的沙箱边界事实：允许目录与"可能越界"的下一步建议；不是越界提示时返回空。
+def project_sandbox_runtime_facts(source: object) -> dict[str, object]:
+    if not isinstance(source, Mapping) or source.get("sandbox_active") is not True:
+        return {}
+    hint = source.get("boundary_hint")
+    if not isinstance(hint, Mapping) or hint.get("may_be_sandbox_boundary") is not True:
+        return {}
+    roots = source.get("allowed_roots")
+    roots = roots if isinstance(roots, Mapping) else {}
+    actions = hint.get("suggested_actions")
+    return {
+        "sandbox_active": True,
+        "allowed_roots": {key: _bounded_paths(roots.get(key)) for key in ("read_write", "read_only")},
+        "boundary_hint": {
+            "may_be_sandbox_boundary": True,
+            "suggested_actions": [item for item in actions if isinstance(item, str) and _bounded_scalar(item)]
+            if isinstance(actions, list) else [],
+        },
+    }
+
+
+# 函数用途: 有界复制一组路径文本；非字符串或过长的条目跳过。
+def _bounded_paths(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    paths = [item for item in value if isinstance(item, str) and 0 < len(item) <= _SANDBOX_ROOT_MAX_CHARS]
+    return paths[:_SANDBOX_ROOT_LIMIT_COUNT]
 
 
 # LLM: 只复制既有显式标量，不转换字符串布尔值或互补退出码别名；超长诊断留原账，不把正文混进事实区。

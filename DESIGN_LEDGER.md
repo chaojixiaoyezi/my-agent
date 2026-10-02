@@ -14,6 +14,20 @@
   - 测试见 TESTS.md 同名节。
 - **分工**：宿主线（块 1–6）ae；包内容 A 0.5.0、B 0.3.0（块 7）be，ae 审；重跑和独立审阅（块 8）ae。验收按 C16：某个包冻结重跑 9/9 才装进生产。
 
+## 隔离模式的 Shell 碰到沙箱边界时让模型知道并换个做法（第 16 条，用户 10-02 拍板，2026-10-02，分支 `claude/9b-sandbox-boundary-facts`，基于 `claude/3a-step16z` `3c7565bf2`，已实现，待集成）
+
+- **问题**：owner 隔离（普通 IM 用户都是这个模式，本机管理员偶尔也是）的 Shell 跑在系统沙箱里。macOS 上递归扫描等操作碰到被拒读的目录会报 EPERM 中途退出（祖先目录元数据已放行，见下方"第一步的回归与热修复"），模型只看到命令失败，不知道是沙箱边界，常见反应是换个写法原样重试。
+- **做法**（只用结构化事实，不解析 stderr，不放宽沙箱）：
+  - 回执信封 `result_envelope.sandbox` 在 owner 隔离时新增 `sandbox_active=true` 与 `allowed_roots`（`read_write` / `read_only`）。
+    - 数据来自本次启动沙箱用的同一份根：`request.sandbox_roots`（写根为空时沙箱把本次工作目录当可写根，这里同样投影）与 owner home。
+    - 拒读根（my-agent 数据根、用户家目录）不列出，不把宿主结构交给模型。
+  - 命令真的在沙箱里跑起来并以非零码退出时（`COMMAND_FAILED` 且 `process.status=exited`、带退出码）再加 `boundary_hint`：`may_be_sandbox_boundary=true` 与建议码 `limit_to_allowed_roots` / `request_capability` / `ask_user`。只说"可能"，由模型结合输出判断；超时、取消、沙箱不可用、起不来都不带。
+  - `tooling/runtime_facts.render_tool_runtime_facts` 在带 `boundary_hint` 时多渲染一节 `[runtime-sandbox-facts]`：允许目录、下一步建议的中文说明与 JSON。成功的命令不渲染，不增加 token。
+  - `run_command` 说明的提示里多一条静态边界提示（不含具体路径），只在 owner 隔离且开关打开时出现。
+- **开关**：`shell_sandbox_boundary_facts`（默认开），会改变模型看到的内容，按规矩可关；关掉后回执与说明都恢复旧样子。经 `AgentConfig` → `ToolRegistryParams` → `ShellToolOptions` 传到工具。Full Access 不受影响。
+- **下一步怎么走**：主代理直接告诉用户需要什么访问权限（用户可经 `/permissions` 等宿主入口决定）；子代理用已有的 `capability_request` 申请；或把范围缩到允许目录。安全边界不变。
+- **验证**：见 TESTS.md 同名节。真实 MiniMax-M2.7 验收（TUI 本机管理员 + 假飞书私聊普通用户经真实 Gateway，证据 `~/.my-agent/decision-evidence/sandbox-boundary-facts-bbd6bef1e/`）：两边越界的 `du` 都在沙箱里非零退出，模型看到的工具结果带着边界事实；TUI 随后换了一条命令成功，IM 没有再原样重试 Shell 而是收尾答复。另记一条发现："统计 .md 文件"这类需求模型优先用专用文件工具（由文件工具自己的 owner 墙管），不走 Shell，本条功能不触发。
+
 ## 记忆整理：同一条消息里同主题、不同内容各存一条（用户拍板第 6 条，2026-10-02，分支 `claude/be-curator-content-identity`，基于 `claude/3a-step16z` `5e972003e`，已实现，待集成）
 
 - **问题**（J13 复测登记，见下方 J13 条目里的“待定”）：用户说“我对花生过敏，也对芒果过敏。”，模型给出两条候选，主题键都是 `health.allergy`。宿主的观察身份不含内容，两条算出同一个观察键；芒果那条在候选库合并时按观察键找到花生那条，被当成同一次观察的改写并进去，候选库只剩“花生”。

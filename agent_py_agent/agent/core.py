@@ -949,6 +949,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             shell_tool_timeout=config.tool_shell_timeout,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
             background_process_listen_scope_enforce=config.background_process_listen_scope_enforce,
+            shell_sandbox_boundary_facts=config.shell_sandbox_boundary_facts,
             path_access_mode=effective_path_access_mode,
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,

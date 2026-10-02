@@ -1156,6 +1156,7 @@ agent_py_agent/
 |   |-- test_gateway_status_tool.py    # Gateway 权威身份、端点与生命周期日志诊断回归
 |   |-- test_sandbox.py                # bwrap argv、自检协议、owner-scoped fail-closed
 |   |-- test_shell_hide_user_home.py   # macOS 非管理员 owner 拒读用户家目录开关、HOME 改指向与真实 Seatbelt 验证
+|   |-- test_shell_sandbox_boundary_facts.py # 隔离 Shell 碰到沙箱边界时的结构化事实：允许目录、可能越界提示、开关与真实 Seatbelt
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
 scripts/

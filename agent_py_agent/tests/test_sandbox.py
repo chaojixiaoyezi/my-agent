@@ -371,10 +371,16 @@ def test_owner_scoped_shell_failure_explains_hidden_host_paths(tmp_path, monkeyp
     assert result.ok is False
     assert result.error_code == "COMMAND_FAILED"
     assert "未挂载路径的不存在、拒绝或沙箱内成功都不能证明宿主路径状态" in result.output
+    # 第 16 条：owner 隔离时另附本次允许的目录；在沙箱里非零退出再附"可能越界"的提示与建议码。
+    roots = {"read_write": [str(owner.resolve())], "read_only": [str(owner.resolve())]}
     assert result.result_envelope["sandbox"] == {
         "file_scope": "owner_workspace_only",
         "external_host_paths_hidden": True,
         "host_path_absence_proven": False,
+        "sandbox_active": True,
+        "allowed_roots": roots,
+        "boundary_hint": {"may_be_sandbox_boundary": True,
+                          "suggested_actions": ["limit_to_allowed_roots", "request_capability", "ask_user"]},
     }
 
 
@@ -444,10 +450,13 @@ def test_owner_scoped_shell_success_explains_isolated_absolute_paths(
     assert result.ok is True
     assert "uid=0、/root 或其它绝对路径都不代表宿主权限" in result.output
     assert "只有结构化授权写根内的结果会持久化到宿主" in result.output
+    roots = {"read_write": [str(owner.resolve())], "read_only": [str(owner.resolve())]}
     assert result.result_envelope["sandbox"] == {
         "file_scope": "owner_workspace_only",
         "external_host_paths_hidden": True,
         "host_path_absence_proven": False,
+        "sandbox_active": True,
+        "allowed_roots": roots,
     }
 
 
@@ -483,6 +492,8 @@ def test_owner_scoped_shell_on_macos_says_host_paths_are_readable(tmp_path, monk
         "file_scope": "owner_workspace_only",
         "external_host_paths_hidden": False,
         "host_path_absence_proven": False,
+        "sandbox_active": True,
+        "allowed_roots": {"read_write": [str(owner.resolve())], "read_only": [str(owner.resolve())]},
     }
 
 

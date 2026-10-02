@@ -961,6 +961,12 @@ background_process_listen_scope_enforce: true
 #   git 等工具照常可用，但用不了你本人的 git/SSH 配置和凭据。本机管理员（local/main）与 Full Access 不受影响；
 #   Linux 的 bubblewrap 本来就不挂载家目录，也不受影响。修改后重启 Gateway 生效。
 shell_sandbox_hide_user_home: false
+# owner 隔离（普通 IM 用户都是这个模式）的 Shell 命令碰到沙箱边界时，是否把边界当作结构化事实告诉模型（默认开启）：
+# - true：命令以非零码退出时，结果附带本次允许读写的目录（allowed_roots）、"可能越过了沙箱边界"的提示和下一步建议
+#   （把范围缩到这些目录、子代理用 capability_request 申请、或告诉用户需要什么访问权限）；run_command 的说明里也多一条
+#   边界提示。只改变模型看到的内容，不放宽沙箱本身；失败的命令结果会多几百字符。
+# - false：恢复旧行为，模型只看到命令失败和输出末尾的沙箱范围说明。Full Access 不受影响。修改后重启 Gateway 生效。
+shell_sandbox_boundary_facts: true
 
 # 工具目录展示模式：
 # - compact：给模型一份精简工具目录，默认推荐。

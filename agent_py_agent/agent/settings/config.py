@@ -221,6 +221,9 @@ class _ToolConfigFields:
     background_process_listen_scope_enforce: bool = True
     # macOS 上对非本机管理员的 owner 拒读用户家目录（本 owner 可见范围除外），并把其 Shell 的 HOME 指到 owner home。默认关闭。
     shell_sandbox_hide_user_home: bool = False
+    # owner 隔离的 Shell 命令以非零码退出时，结果附带沙箱边界事实（本次允许读写的目录、可能越界的提示与下一步建议），
+    # run_command 说明里多一条边界提示；只改变模型看到的内容，不放宽沙箱。默认开启。
+    shell_sandbox_boundary_facts: bool = True
     stream_enabled: bool = True
     tool_catalog_mode: str = "compact"
     tool_catalog_categories: list[str] = field(default_factory=list)

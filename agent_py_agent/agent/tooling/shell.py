@@ -97,6 +97,14 @@ _ShellSandboxRoots = tuple[
     tuple[Path, ...] | None,
 ]
 _ACCESS_MODES = frozenset({"restricted", "workspace-write", "full-access"})
+# owner 隔离 Shell 以非零码退出时给模型的下一步建议码（结构化，顺序即推荐顺序）：缩到允许目录、申请能力、告诉用户。
+_SANDBOX_BOUNDARY_ACTIONS = ("limit_to_allowed_roots", "request_capability", "ask_user")
+# owner 隔离时 run_command 说明里的静态边界提示（不含具体路径）；具体允许目录在失败结果的 [runtime-sandbox-facts] 里。
+_OWNER_SANDBOX_BOUNDARY_HINT = (
+    "Owner 隔离沙箱：命令只能写本任务允许的写根，读不到 my-agent 数据目录里本 owner 以外的部分（开了家目录隔离时还有用户家目录里"
+    "的其它内容）。命令以非零码退出时结果里的 [runtime-sandbox-facts] 会列出 allowed_roots：先把操作范围缩到这些目录；确需越界时，"
+    "子代理用 capability_request 申请，主代理直接告诉用户需要什么访问权限。不要原样重试同一条越界命令。"
+)
 _ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
@@ -125,6 +133,8 @@ class ShellToolOptions:
     # owner 隔离时沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录），其中本 owner 的可见范围
     # 仍放行；full access 不生效。空=不加读拒绝。HOME 落在这些根里时，子进程 HOME 改指到 owner home。
     host_private_roots: tuple[str, ...] = ()
+    # 来自配置 shell_sandbox_boundary_facts：owner 隔离时命令以非零码退出，结果附带沙箱边界事实，说明里多一条边界提示。
+    sandbox_boundary_facts: bool = True
 
 
 # LLM: This immutable request carries the exact ActionPolicy operation decision into shell recovery;
@@ -773,9 +783,11 @@ def _record_background_job(
 
 # LLM: 模型与执行使用同一 Schema；持久进程走结构化 run_in_background，命令不设人为字符上限。
 # 安全策略、后台归属和时间预算各自保持，修改时联测模型快照与真实执行入口。
+#   owner_sandbox_hint 只在 owner 隔离且开关 shell_sandbox_boundary_facts 打开时为真：多一条静态的沙箱边界提示（不含具体路径，
+#   具体允许目录只在失败结果的 [runtime-sandbox-facts] 里给）。
 # 函数用途: 描述 Shell 工具可接受的参数，避免 Schema 提前挡住合法长脚本而与执行能力冲突。
 def _build_shell_tool_model_spec(
-    access_mode: str, default_timeout: int, max_output_chars: int
+    access_mode: str, default_timeout: int, max_output_chars: int, owner_sandbox_hint: bool = False,
 ) -> ToolModelSpec:
     return ToolModelSpec(
         name="run_command",
@@ -845,6 +857,7 @@ def _build_shell_tool_model_spec(
                 "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
                 "Do not run sleep or polling commands for subagent progress; end the turn and let the host lifecycle event resume the direct parent.",
                 "盯守/轮询数据流→用 watch_stream,禁自写轮询脚本(无游标持久/覆盖账目,实测误报泛滥)。",
+                *((_OWNER_SANDBOX_BOUNDARY_HINT,) if owner_sandbox_hint else ()),
             ),
             keywords=("shell", "command", "terminal", "bash", "cmd", "script"),
             examples=(
@@ -941,8 +954,10 @@ class ShellTool(BaseTool):
         self.default_timeout = options.default_timeout
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.listen_scope_enforce = bool(options.listen_scope_enforce)
+        self.sandbox_boundary_facts = bool(options.sandbox_boundary_facts)
         self.model_spec = _build_shell_tool_model_spec(
-            self.access_mode, self.default_timeout, self.max_output_chars
+            self.access_mode, self.default_timeout, self.max_output_chars,
+            owner_sandbox_hint=self.sandbox_boundary_facts and self.path_access_policy.owner_scope_root is not None,
         )
         self.runtime_policy = _build_shell_runtime_policy(self.default_timeout)
 
@@ -1478,6 +1493,47 @@ def _sandbox_scope_notice(hidden: bool, *, private_hidden: bool = False, home_hi
     )
 
 
+# LLM: 边界事实只来自本次启动沙箱用的同一份根（request.sandbox_roots 与 owner home），不读 stderr、不猜原因：
+#   写根为 None 时沙箱把本次工作目录当可写根（implicit_attempt_write_roots），这里同样投影；owner home 与授权读根只读。
+#   boundary_hint 只在命令真的在沙箱里跑起来并以非零码退出时给（COMMAND_FAILED + status=exited + return_code），超时、取消、
+#   沙箱不可用都不给；它只说"可能"，由模型结合输出自己判断。拒读根（my-agent 数据根、用户家目录）不列出，不把宿主结构交给模型。
+#   渲染见 tooling/runtime_facts 的 [runtime-sandbox-facts]；改字段要同步那里与 test_shell_sandbox_boundary_facts.py。
+# 函数用途: 生成 owner 隔离 Shell 的沙箱边界事实：本次允许读写的目录，以及失败时"可能越界"的结构化提示和下一步建议。
+def _sandbox_boundary_facts(
+    request: _ShellArtifactExecutionRequest, error_code: str, process_facts: dict[str, Any],
+) -> dict[str, object]:
+    write_roots, read_roots, _protected = request.sandbox_roots
+    read_write = tuple(write_roots) if write_roots is not None else (request.target,)
+    read_only = (request.tool.path_access_policy.owner_scope_root, *(read_roots or ()))
+    facts: dict[str, object] = {
+        "sandbox_active": True,
+        "allowed_roots": {"read_write": _distinct_root_texts(read_write), "read_only": _distinct_root_texts(read_only)},
+    }
+    exited_nonzero = (
+        error_code == "COMMAND_FAILED"
+        and process_facts.get("status") == "exited"
+        and process_facts.get("return_code") is not None
+    )
+    if exited_nonzero:
+        facts["boundary_hint"] = {
+            "may_be_sandbox_boundary": True,
+            "suggested_actions": list(_SANDBOX_BOUNDARY_ACTIONS),
+        }
+    return facts
+
+
+# 函数用途: 把一组根目录规范成去重、保序的绝对路径文本，空值跳过。
+def _distinct_root_texts(roots: tuple[object, ...]) -> list[str]:
+    texts: list[str] = []
+    for root in roots:
+        if root is None or not str(root).strip():
+            continue
+        text = str(Path(str(root)).expanduser().resolve(strict=False))
+        if text not in texts:
+            texts.append(text)
+    return texts
+
+
 # LLM: The result envelope exposes process and sandbox facts but never owner-private backup paths.
 # Artifact postcheck failure overrides provider success and stays UNKNOWN for durable reconciliation.
 # 函数用途: 把 shell 进程、沙箱和产物复核事实组装成统一工具结果。
@@ -1502,14 +1558,17 @@ def _build_protected_shell_outcome(
                                             tool.host_private_roots))
         notice = _sandbox_scope_notice(hidden, private_hidden=bool(tool.host_private_roots), home_hidden=home_hidden)
         output = f"{output}\n{notice}"
+    sandbox: dict[str, object] = {
+        "file_scope": "owner_workspace_only" if owner_scoped else "full_access",
+        "external_host_paths_hidden": hidden,
+        "host_path_absence_proven": False,
+    }
+    if owner_scoped and tool.sandbox_boundary_facts:
+        sandbox.update(_sandbox_boundary_facts(request, error_code, process_facts))
     result_envelope: dict[str, object] = {
         "artifact_protection": artifact_summary,
         "process": process_facts,
-        "sandbox": {
-            "file_scope": "owner_workspace_only" if owner_scoped else "full_access",
-            "external_host_paths_hidden": hidden,
-            "host_path_absence_proven": False,
-        },
+        "sandbox": sandbox,
     }
     if isinstance(display, dict):
         result_envelope["display"] = display

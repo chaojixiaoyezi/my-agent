@@ -110,6 +110,8 @@ class ToolRegistryParams:
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
     background_process_listen_scope_enforce: bool = True
+    # 来自配置 shell_sandbox_boundary_facts：owner 隔离 Shell 失败时是否附带沙箱边界事实。
+    shell_sandbox_boundary_facts: bool = True
     catalog_mode: str = "compact"
     # 参数减量第 3 批 E 组：分页起点与目录单条截断的默认值就是生产值，core.py 不再从配置传入。
     catalog_offset: int = 0

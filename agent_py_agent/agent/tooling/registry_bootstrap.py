@@ -119,6 +119,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             max_output_chars=params.shell_tool_output_max_chars,
             listen_scope_enforce=params.background_process_listen_scope_enforce,
             host_private_roots=params.host_private_roots,
+            sandbox_boundary_facts=params.shell_sandbox_boundary_facts,
         ),
     )
     registry.register(shell_tool)
