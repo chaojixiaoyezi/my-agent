@@ -79,6 +79,9 @@ class AttemptSandboxSpec:
     # 再加用户家目录。拒读后仍放行本 owner home、attempt view、staging、授权读根和写根。Linux bwrap 本来就不挂载这些路径；
     # macOS 由 Seatbelt 读拒绝实现。full_access 不生效。
     private_read_roots: tuple[Path, ...] = ()
+    # H2：对模型命令完全隐藏的宿主托管存储目录（插件安装库、包库），任何模式都生效（含 full_access）：Linux 盖一层只读空
+    # tmpfs，macOS 在规则最后拒读写。只由模型 shell 的 _sandbox_exec 填写；插件进程沙箱不填，插件仍能读自己的环境目录。
+    hidden_paths: tuple[Path, ...] = ()
 
 
 class AttemptExecutionSandbox:
@@ -242,7 +245,7 @@ class AttemptExecutionSandbox:
             read_only_paths=self.spec.protected_write_paths,
             full_access=self.spec.full_access,
             network_access=self.spec.network_access,
-            read_only_root=self.spec.read_only_root,
+            read_only_root=self.spec.read_only_root, hidden_paths=self.spec.hidden_paths,
         )
         return [*build_bwrap_argv(spec), "--", *command_argv]
 
@@ -264,7 +267,7 @@ class AttemptExecutionSandbox:
             protected_write_paths=self.spec.protected_write_paths,
             implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
             full_access=self.spec.full_access,
-        ), *_private_read_rules(self.spec)])
+        ), *_private_read_rules(self.spec), *_hidden_path_rules(self.spec.hidden_paths)])
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
     # LLM: 同步批处理无 stdin 注入协议，必须返回 EOF；不改变 build_argv、显式 PTY 通道和超时回收契约。
@@ -416,6 +419,14 @@ def _ancestor_metadata_rules(hidden_roots: tuple[Path, ...], visible: set[Path])
     if not ancestors:
         return []
     return ["(allow file-read-metadata " + " ".join(f"(literal {path})" for path in ancestors) + ")"]
+
+
+# LLM: H2：宿主托管存储对模型命令既不可读也不可写。Seatbelt 后写覆盖先写，所以这些拒绝必须排在整份规则最后，压过 owner home 的读放行；
+#   存储在 owner home 内，上层目录本来就可读，不需要额外的元数据放行。改动须同步 test_host_managed_store_access.py 的真实 sandbox-exec 用例。
+# 函数用途: 把要隐藏的宿主托管存储目录转成 Seatbelt 的读写拒绝规则。
+def _hidden_path_rules(paths: tuple[Path, ...]) -> list[str]:
+    roots = sorted({json.dumps(str(Path(path).resolve(strict=False))) for path in paths})
+    return [f"(deny file-read* file-write* (subpath {root}))" for root in roots]
 
 
 def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[str]:

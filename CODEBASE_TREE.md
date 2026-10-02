@@ -909,6 +909,7 @@ agent_py_agent/
 |   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
 |   |-- test_compact_capacity_facts.py # 候选过大失败带出最小候选/上限/摘要占比/保留条数/候选数，白名单与TUI失败行
 |   |-- test_compact_capacity_host_chain.py # 真实恢复宿主两入口：固定开销经只计量入口只在失败时量一次，保留IR按实际发送材料
+|   |-- test_host_managed_store_access.py # H2：宿主托管存储（插件安装库、包库）对文件工具和 shell 不开放：路径策略、遍历工具、Seatbelt/bwrap 隐藏与真实沙箱
 |   |-- test_task_run_settle_quiescent_children.py # TaskRun 收口：静止但未终态的子 run（attempt 终态且无锁）不再拦住父 TaskRun，closed 带证据、reopened 可逆、发现扫描能关存量
 |   |-- test_owner_wake_discovery_task_run_no_link.py # 发现层补关没有会话任务的 TaskRun（C12c）：关联文件确实不存在才按代理树关，读坏/active/根在跑/目录列不全都不关
 |   |-- _postgres_test_schema.py       # 测试专用：每个 pytest 进程一个 PostgreSQL schema（URL options 设 search_path），并行分片不互删表
@@ -1447,6 +1448,7 @@ docs/
 - `agent_py_agent/agent/gateway_parts/background_sessions.py`：Gateway 停机收尾只读列出 owner 后台会话权威目录里仍未终态的受管进程（含监听范围事实），供停机事件与 status 投影；不停止、不改记录。
 - `agent_py_agent/agent/gateway_parts/loop_health.py`：Gateway 派发线程健康的唯一事实源（进程内、不做 IO）——起止、每次 tick 起止与派发数、从 tick 逃逸的异常、循环错误打印本身失败的次数；`dispatcher_alive` 由登记/退出记录加线程仍在 `threading.enumerate()` 判定。心跳与 `/status` 只扁平并入 `snapshot()`，不另算存活。
 - `agent_py_agent/cli/gateway_loop_backoff.py`：`LoopErrorBackoff`，派发循环与后台主循环共用的"连续出错退避 + 打印限流"小工具：只算节奏不记账不打印，成功一次清零；防止 tick 持续出错时每 0.2 秒一条错误日志把刚腾出的磁盘再写满。
+- `agent_py_agent/tests/test_host_managed_store_access.py`：H2 合同：宿主托管存储（`path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS`）对模型的文件工具与 shell 不开放，用户工作区同名目录与 zip 不受影响；含 macOS/Linux 真实沙箱用例。
 - `agent_py_agent/agent/gateway_parts/background_resource_report.py`：`gateway stop`、本地 `/stop` 与 Gateway 会话级 `/stop`（C12a：无运行中回合时冻结本会话遗留进程，回执渲染 `background_resource_lines` 也在这里）共用的受管后台进程事实投影与停止入口；只读登记表（根地址与写入端同用 `process_session_store_root(workspace, owner_home)`），投影不含命令正文/cwd/输出路径，按精确执行身份冻结停止意图、等真实终态后如实报告是否停止。`session_background_processes` 只按精确 `thread_id` 筛本会话资源，不做 owner 全量。
 - `agent_py_agent/tests/test_gateway_stop_background_resources.py`：gateway stop 侧合同（只列运行中、跨 task/run 不误停、空身份被拒、未终态如实报未停、按进程组回收孙进程）。
 - `agent_py_agent/tests/test_session_stop_background_resources.py`：会话内 `/stop` 回收被中断任务遗留后台资源的合同（无回合时不再回"没有运行中的内容"、会话隔离精确匹配、登记表不可读时报 unknown）。

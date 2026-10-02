@@ -96,6 +96,34 @@
 - **验证**：守卫 13 passed、相关 26 文件 438 passed、guards9 167 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package
   全过；size_diff.sh 新增告警 0。详见 TESTS.md。
 
+## H2：宿主托管存储（插件安装库、包库）对模型的文件工具和 shell 不开放（2026-10-01，分支 `claude/38-h2-host-store-read`，基于 `claude/3a-step16z` `efaedfab2`，已实现，待集成）
+
+- **现象**（ae 的 C3 真实补测）：Goal 续跑时宿主正确地把旧 pin 投影成不可用，模型随后用 `run_command` 执行
+  `unzip -p data/plugins/packages/<旧包摘要>.zip steps/step2.md`，读出已停用、已换代的旧包，照旧完成任务。这等于绕过了能力包的停用和换代。
+- **为什么没挡住**：插件库就在 owner home 里（`data/plugins`：`installations.json`、`packages/`、`environments/`、`data/`）。
+  - 路径策略在 owner 墙内整个放行自己的 owner home；没有墙时，整个数据根豁免；Full Access 更是不限。
+  - shell 沙箱一样：Linux bwrap 挂载整个 owner home；macOS Seatbelt 只拒读数据根里本 owner 以外的部分。
+  - 宿主自己的读包路径是对的，漏洞只在模型工具对宿主托管存储的读写权限。
+- **做法**（一条通用规则，不写专项判断）：
+  - **唯一声明**：`path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS = (("data", "plugins"),)`，即规范布局的 `plugins_dir`；
+    `owner_home_containing` 是 `owner_resolver._owner_home_dir` 的逆运算。这个模块会原样打进插件 SDK，只能依赖标准库，所以写成路径片段；
+    守卫用例钉住它与规范布局一致。以后新增同类存储只在这里加。
+  - **文件工具**：`PathAccessPolicy.check` 最先判定，在 owner 墙、Full Access、数据根豁免之前。数据根下任何 owner 的托管存储一律拒绝，
+    错误码 `PATH_HOST_MANAGED_STORE_BLOCKED`（已登记 `error_taxonomy`，恢复提示指向宿主能力工具）。
+    - 隔离插件进程按协议字段重建的策略同样拒绝。
+    - `list_files`、`find_files` 的遍历不交出存储里的条目；`search_text` 逐条经 `resolve_path`，本来就拒绝。
+  - **shell**：前台、后台、终端会话都经 `tooling/shell._sandbox_exec`，由它填 `AttemptSandboxSpec.hidden_paths`。
+    - owner 隔离时只盖本 owner 的存储；其它 owner 的家 Linux 不挂载、macOS 已整体拒读，不为隐藏它们去新建挂载点暴露路径。
+    - Full Access 盖数据根下全部 owner 的存储。
+    - Linux bwrap 在所有挂载之后盖一层只读空 tmpfs；macOS Seatbelt 在规则最后同时拒读和拒写。
+    - 插件进程沙箱不填这个字段，插件仍能读自己的环境目录。
+- **不误伤**：只认 owner home 下的规范位置。用户工作区里自己的 zip、项目里同名的 `data/plugins` 目录，照常可读写。
+- **边界与代价**：
+  - macOS 上从 owner home 递归扫描（`grep -r`、`find`）时，这个目录会报 Operation not permitted；Linux 上它是空目录。
+  - 没有 owner 墙的管理员，如果数据根不在默认位置、又没设 `MY_AGENT_HOME`，文件工具推不出数据根，这条规则不生效（生产用默认位置）。
+  - 子代理经批准的 `controlled_exec` 不走 OS 沙箱，不在这次范围。
+- **验证**：见 TESTS.md 同名节。
+
 ## 熔断体验修复 code-size 拆平（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）
 
 - **背景**：`fa781d169` 合入后相对 step16y 告警基线多出 3 条 code-size 高风险（纯重构，行为不变）：

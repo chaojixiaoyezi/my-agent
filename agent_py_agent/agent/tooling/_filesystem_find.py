@@ -280,6 +280,9 @@ def _find_directory_matches_with_python(
         include_ignored=request.include_ignored,
         scan_state=scan_state,
     ):
+        # H2：后备遍历不交出宿主托管存储里的文件，与路径策略同一判定（rg 路径逐条经 resolve_path 已拒绝）。
+        if tool.path_access_policy.host_managed_store(item) is not None:
+            continue
         rel = tool.display_path(item)
         if not _matches_find_pattern(rel, item.name, request.pattern):
             continue

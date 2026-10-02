@@ -140,6 +140,8 @@ class SandboxSpec:
     # 整根只读形态：读范围与宿主相同，只有 write_roots 可写（插件进程沙箱试点用）；
     # 默认 False 时两种既有形态的 argv 逐字节不变。
     read_only_root: bool = False
+    # H2：对模型命令隐藏的宿主托管存储目录，最后盖一层只读空 tmpfs（整根 bind 与 owner 形态都生效，整根只读的插件形态不用）。
+    hidden_paths: tuple[Path, ...] = ()
 
 
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
@@ -171,6 +173,7 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         ]
         _append_readonly_mounts(argv, spec.read_only_paths)
         _append_persona_readonly_mounts(argv, spec.protected_persona_root or spec.owner_home)
+        _append_hidden_mounts(argv, spec.hidden_paths)
         argv += ["--chdir", str(spec.workspace)]
         return argv
     argv = [
@@ -256,6 +259,7 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         argv,
         spec.protected_persona_root or spec.owner_home,
     )
+    _append_hidden_mounts(argv, spec.hidden_paths)
     argv += ["--chdir", str(spec.workspace)]
     return argv
 
@@ -330,6 +334,19 @@ def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
             continue
         seen.add(path)
         argv += ["--ro-bind", str(path), str(path)]
+
+
+# LLM: H2：宿主托管存储对模型命令隐藏。只盖已存在的目录（宿主按 owner 布局列出），排在所有挂载之后才能压过可写父目录；
+#   --tmpfs 换成空目录、--remount-ro 让它只读，写进去也不会落到真实存储。改动须同步 test_host_managed_store_access.py。
+# 函数用途: 在 bwrap 参数末尾用只读空目录盖住要隐藏的宿主托管存储。
+def _append_hidden_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
+    seen: set[Path] = set()
+    for raw in paths:
+        path = Path(raw).resolve(strict=False)
+        if path in seen or not path.is_dir():
+            continue
+        seen.add(path)
+        argv += ["--tmpfs", str(path), "--remount-ro", str(path)]
 
 
 # LLM: 所有 POSIX shell 命令都必须经此入口，保证管道任一阶段失败会成为命令失败。

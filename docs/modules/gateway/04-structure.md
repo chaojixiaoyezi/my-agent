@@ -1135,6 +1135,7 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
   模型投影 `owner_workspace_only`、`host_path_absence_proven=false`，`external_host_paths_hidden` 按平台沙箱的结构化事实
   `attempt/sandbox.sandbox_hides_host_paths()` 取值（Linux 为 true，macOS 为 false），回执文本与之同源；macOS 版写明工作区外
   的路径不在任务授权内。该投影解释可见性，不参与授权、operation 终态或副作用裁决。
+- 宿主托管存储（H2，2026-10-01）：唯一声明 `path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS`（现为插件安装库 `data/plugins`，守卫用例钉住与 `owner_resolver` 的 `plugins_dir` 一致）。文件工具经 `PathAccessPolicy.check` 最先拒绝（`PATH_HOST_MANAGED_STORE_BLOCKED`，owner 墙、Full Access、数据根豁免都不放行），`list_files`/`find_files` 遍历用 `PathAccessPolicy.host_managed_store` 过滤；shell 由 `tooling/shell._host_managed_hidden_paths` 填 `AttemptSandboxSpec.hidden_paths`（owner 隔离只盖本 owner 的，Full Access 盖全部），Linux 用只读空 tmpfs 盖住、macOS 在 Seatbelt 规则最后拒读写；插件进程沙箱不填。
 - `run_command` 的唯一机器退出事实仍是 shell 最终 return code。供应商若在失败动作后追加恒成功命令，底座
   不从 stdout 或自然语言猜中间动作；model spec 明确要求直接使用工具自带退出码，避免 `; echo $?` 遮蔽。
 

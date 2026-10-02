@@ -691,12 +691,28 @@ def _sandbox_exec(
         private_read_roots=tuple(
             Path(str(root)).expanduser().resolve(strict=False) for root in private_roots if str(root or "").strip()
         ) if owner_text else (),
+        hidden_paths=_host_managed_hidden_paths(owner_text, persona_text),
     )
     sandbox = AttemptExecutionSandbox(spec)
     # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，
     # 生产既有 except SandboxUnavailable → SANDBOX_UNAVAILABLE 捕获链直接生效。
     argv = sandbox.build_argv(strict_posix_shell_argv(command))
     return argv, False
+
+
+# LLM: H2：模型命令看不到宿主托管存储（唯一声明 path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS）。owner 隔离时只盖本 owner 的
+#   （其它 owner 的家 Linux 不挂载、macOS 已整体拒读，不能为隐藏去新建挂载点暴露它们的路径）；Full Access 没有 owner 墙，盖数据根下
+#   全部 owner 的。数据根只从规范 owner home 反推，推不出（非规范布局）时不隐藏任何目录。只读目录元数据。
+# 函数用途: 计算本次模型命令要隐藏的宿主托管存储目录。
+def _host_managed_hidden_paths(owner_text: str, persona_text: str) -> tuple[Path, ...]:
+    from ..path_access_policy import agent_home_root_for_owner, host_managed_store_dirs
+
+    anchor = owner_text or persona_text
+    agent_home = agent_home_root_for_owner(anchor) if anchor else None
+    if agent_home is None:
+        return ()
+    owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
+    return host_managed_store_dirs(agent_home, owner)
 
 
 # LLM: 显式后台命令使用前台相同的已校验沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。

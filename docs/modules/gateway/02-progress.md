@@ -872,3 +872,11 @@ D3 让运行时收口边在关联文件确实不存在时按代理树关 TaskRun
 `owner_wake_discovery._task_run_reconcile_reason` 补上同一规则：规范目录列全、任何目录里都没有 `<task_id>.json`（读坏的文件算"有"）、
 根主执行轮已终态，才以 `no_conversation_task` 走树终态 CAS。Gateway 前台请求的崩溃由重启时的请求恢复重跑补上（实测），不靠这条。
 合同测试 `test_owner_wake_discovery_task_run_no_link.py`。
+
+## 宿主托管存储（插件安装库、包库）对模型的文件工具和 shell 不开放（H2，2026-10-01，分支 `claude/38-h2-host-store-read`，基于 `claude/3a-step16z` `efaedfab2`）
+
+ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插件库读出已停用、已换代的旧包。原因是插件库就在 owner home 里，
+而路径策略与 shell 沙箱都整个放行 owner home。现在由 `path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS` 唯一声明宿主托管存储：
+- 文件工具经 `PathAccessPolicy.check` 最先拒绝（`PATH_HOST_MANAGED_STORE_BLOCKED`），遍历类工具不交出其中条目；
+- shell 沙箱把它们藏起来（Linux 用只读空 tmpfs、macOS 用 Seatbelt 末尾拒读写）。
+用户工作区里同名目录和自己的 zip 不受影响。合同测试 `test_host_managed_store_access.py`。

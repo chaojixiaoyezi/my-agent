@@ -165,6 +165,9 @@ class ListFilesTool(FileSystemTool):
                 return False
         if _internal_agent_status_ref(item, include_agent_directory=True):
             return False
+        # H2：宿主托管存储（插件安装库、包库）不进目录列表，与路径策略同一判定。
+        if self.path_access_policy.host_managed_store(item) is not None:
+            return False
         if not request.file_glob:
             return True
         display = self.display_path(item)

@@ -43,6 +43,14 @@ _CHILD_CONTEXT_SCOPES = frozenset({"task_local", "control_plane"})
 # 常量用途: 列出不得作为可继承工作根自动下发的根级目录。
 UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/etc", "/etc")
 
+# H2（2026-10-01）宿主托管存储的唯一声明：owner home 里内容只由宿主组件按生命周期读写的目录（相对 owner home 的路径片段）。
+#   data/plugins 是插件安装库（installations.json、packages/ 包库、environments/ 解压环境、data/ 插件私有数据），由安装、启用、停用、
+#   换代统一裁决；模型的文件工具和 shell 直接读写会绕过这些裁决（真实复现：run_command 用 unzip 从包库读出已停用、已换代的旧包）。
+#   必须与规范布局 user_space.owner_resolver 的 plugins_dir 一致（test_host_managed_store_access 有守卫用例）；新增同类存储只在这里加。
+#   本模块被原样打进插件 SDK，所以布局写成路径片段而不是导入 owner_resolver。
+# 常量用途: 列出对模型工具不开放的宿主托管存储相对 owner home 的位置。
+HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (("data", "plugins"),)
+
 # 选项1-B 凭据文件名 denylist(抄 长期助手 file_safety):这些每每装 API key/密码,文件工具一律拒。
 _CREDENTIAL_FILENAMES = frozenset(
     {
@@ -124,13 +132,23 @@ class PathAccessPolicy:
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope,
                    agent_home_root=_home_root_from_owner_scope(scope) if scope else _my_agent_home_root())
 
-    # LLM: owner 墙强于模式；只读构造时冻结的根，不受另一个会话或子进程环境影响，原凭据与危险根顺序保持。
+    # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；只读构造时冻结的根，不受另一个
+    #   会话或子进程环境影响，原凭据与危险根顺序保持。
     # 函数用途: 解析目标并判断是否位于当前 owner 或管理员允许访问的路径范围，不读取内容。
     def check(self, path: str | Path) -> PathAccessDecision:
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
+        # H2：宿主托管存储（插件安装库、包库）不随 owner 墙、Full Access 或数据根豁免开放，最先判定。
+        store = self._host_managed_store_of(resolved)
+        if store is not None:
+            return PathAccessDecision(
+                False,
+                "PATH_HOST_MANAGED_STORE_BLOCKED",
+                f"宿主托管存储（插件安装库、包库）不对模型工具开放，能力包内容请经宿主工具读取: target={resolved}",
+                str(store),
+            )
         # owner 隔离是租户边界，不是普通安全模式。远程 owner 的文件可见面
         # 只有自己 home + shared；不仅是 .my-agent 里的其他目录，宿主其他位置也默认拒绝。
         # 必须先于 full 判定，避免 path_access_mode=full 变成跨租户/跨宿主读权。
@@ -175,6 +193,23 @@ class PathAccessPolicy:
                     str(root),
                 )
         return PathAccessDecision(True)
+
+    # LLM: H2（2026-10-01）：宿主托管存储的唯一声明是本模块的 HOST_MANAGED_OWNER_STORE_PARTS；这里只用构造时冻结的
+    #   agent_home_root 做路径运算（不读文件、不读环境），数据根未知时返回 None。check 与目录遍历类工具（list/find）共用它。
+    # 函数用途: 返回路径所在的宿主托管存储根；不在其中返回 None。
+    def host_managed_store(self, path: str | Path) -> Path | None:
+        try:
+            resolved = Path(path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return None
+        return self._host_managed_store_of(resolved)
+
+    # LLM: 调用方已 resolve；只做路径运算。本模块会被原样打进插件 SDK（scripts/build_plugin_api.SDK_SOURCES），必须只依赖标准库。
+    # 函数用途: 用冻结的数据根判断已解析路径是否落在宿主托管存储里。
+    def _host_managed_store_of(self, resolved: Path) -> Path | None:
+        if self.agent_home_root is None:
+            return None
+        return host_managed_store_for_path(resolved, self.agent_home_root)
 
     # LLM: 只有 owner 普通墙拒绝允许原明确授权根复核，跨 owner/控制面等拒绝不能覆盖；插件须传宿主冻结的 external_policy。
     # 函数用途: 为核心文件工具和隔离插件统一检查已授权的墙外工作路径。
@@ -326,6 +361,61 @@ def agent_home_root_for_owner(owner_home: object) -> Path | None:
     return None
 
 
+# LLM: 与 user_space.owner_resolver._owner_home_dir 互为逆运算（owners/local/main 或 owners/providers/<p>/<users|groups>/<id>），
+#   只做路径运算、不读文件；调用方传已 resolve 的路径与数据根。改布局时两处一起改（守卫用例在 test_host_managed_store_access）。
+# 函数用途: 从规范布局反推一个路径所在的 owner home；不在任何 owner home 里返回 None。
+def owner_home_containing(path: Path, agent_home_root: Path) -> Path | None:
+    owners = agent_home_root / "owners"
+    try:
+        parts = path.relative_to(owners).parts
+    except ValueError:
+        return None
+    if parts[:2] == ("local", "main"):
+        return owners / "local" / "main"
+    if len(parts) >= 4 and parts[0] == "providers" and parts[2] in {"users", "groups"}:
+        return owners.joinpath(*parts[:4])
+    return None
+
+
+# LLM: 只做路径运算：路径落在任一 owner home 的托管存储（含存储根本身）里就返回该存储根，否则 None。路径策略据此统一拒绝。
+# 函数用途: 判断一个已解析路径是否属于宿主托管存储。
+def host_managed_store_for_path(path: Path, agent_home_root: Path) -> Path | None:
+    home = owner_home_containing(path, agent_home_root)
+    if home is None:
+        return None
+    for parts in HOST_MANAGED_OWNER_STORE_PARTS:
+        store = home.joinpath(*parts)
+        if path == store or store in path.parents:
+            return store
+    return None
+
+
+# LLM: owner_home 给出时只列这个 owner 的；为空时列数据根下全部 owner 的（Full Access 的进程沙箱用）。只列已存在的目录，
+#   只读目录元数据，不读内容。
+# 函数用途: 列出要对模型进程隐藏的宿主托管存储目录。
+def host_managed_store_dirs(agent_home_root: Path, owner_home: Path | None = None) -> tuple[Path, ...]:
+    homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
+    return tuple(
+        home.joinpath(*parts) for home in homes for parts in HOST_MANAGED_OWNER_STORE_PARTS
+        if home.joinpath(*parts).is_dir()
+    )
+
+
+# LLM: 按规范布局列出数据根下已存在的 owner home；列目录出错时只返回已确认的本机主用户，不猜路径。
+# 函数用途: 给 Full Access 沙箱枚举所有 owner home。
+def _existing_owner_homes(agent_home_root: Path) -> tuple[Path, ...]:
+    owners = agent_home_root / "owners"
+    main = owners / "local" / "main"
+    try:
+        providers = sorted(
+            path for path in owners.glob("providers/*/*/*")
+            if path.parent.name in {"users", "groups"} and path.is_dir()
+        )
+    except OSError:
+        providers = []
+    return ((main,) if main.is_dir() else ()) + tuple(providers)
+
+
 # LLM: 用户显式声明的工作目录（宿主写入 conversation_execution_cwd /
 #   conversation_runtime_workspace_roots，或已授权的 allowed_write_roots）是结构化事实，
 #   可以下发成子代理工作根与工具执行根；但文件系统根级目录、以及 my-agent 自己的运行记录区
@@ -404,6 +494,7 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 __all__ = [
     "DEFAULT_DANGEROUS_PATH_ROOTS",
     "DEFAULT_PATH_ACCESS_MODE",
+    "HOST_MANAGED_OWNER_STORE_PARTS",
     "PATH_ACCESS_MODE_FULL",
     "PATH_ACCESS_MODE_NORMAL",
     "PATH_SCOPE_FULL",
@@ -415,7 +506,10 @@ __all__ = [
     "agent_home_root_for_owner",
     "effective_owner_scope_root",
     "granted_external_work_roots",
+    "host_managed_store_dirs",
+    "host_managed_store_for_path",
     "inheritable_declared_work_roots",
     "normalize_path_access_mode",
+    "owner_home_containing",
     "path_scope_regime",
 ]

@@ -161,6 +161,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="普通 owner 不能访问管理员授权事实源；停止该访问，不得尝试自行授权。",
     ),
+    "PATH_HOST_MANAGED_STORE_BLOCKED": ErrorContract(
+        code="PATH_HOST_MANAGED_STORE_BLOCKED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标在宿主托管存储（插件安装库、包库）里，模型工具不能直接读写；能力包内容只经宿主的能力工具读取，"
+        "停用或换代后的旧内容不能再用。",
+    ),
     "PATH_DANGEROUS_ROOT_BLOCKED": ErrorContract(
         code="PATH_DANGEROUS_ROOT_BLOCKED",
         category="permission",

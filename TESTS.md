@@ -134,6 +134,28 @@
   （跑完还原 CODE_SIZE_REPORT.md）；`git diff --check` → 通过；`check_clean_package.py .` → **OK**；
   `size_diff.sh` → **新增告警 0**（3 条 nesting 拆平后归零，消失 2 条）。
 
+## H2：宿主托管存储（插件安装库、包库）对模型的文件工具和 shell 不开放（2026-10-01，分支 `claude/38-h2-host-store-read`，基于 `claude/3a-step16z` `efaedfab2`）
+
+- **新增** `test_host_managed_store_access.py`（9 项，真实目录布局与真实工具；本机 macOS 跑了两项真实 sandbox-exec 用例，Linux 由车道的 bwrap 覆盖）：
+  - owner 墙策略拒绝存储根、包库 zip、解压环境文件，错误码 `PATH_HOST_MANAGED_STORE_BLOCKED`；
+  - 用户自己的 zip、工作区里同名的 `data/plugins`、名字只是前缀相同的目录都照常可读；
+  - Full Access 策略拒绝数据根下每个 owner 的存储；
+  - 插件读取上下文按协议往返后同样拒绝；
+  - 真实 `read_file` 拒绝；`search_text`、`find_files`、`list_files` 从 owner home 遍历都不交出存储里的东西；
+  - shell 隐藏范围：owner 隔离只盖本 owner 的，Full Access 盖全部，非规范布局不盖；
+  - Seatbelt 拒绝排在规则最后（含 Full Access）；bwrap 的只读空 tmpfs 排在所有 bind 之后；
+  - 真实沙箱里，`unzip -p` 包库与 `cat` 解压环境文件都失败，输出里没有旧包内容；用户 zip 与工作区 `data/plugins` 照常可读（owner 隔离、Full Access 各一遍）。
+  - base（`efaedfab2`）上跑同一文件 9 项全部失败；其中真实 shell 用例 `unzip -p` 返回 ok，读出 18 个字符的旧包内容，即原现象。
+- **补充**：`find_files` 没有 rg 时的 Python 后备遍历同样不交出存储里的文件；守卫用例钉住 `HOST_MANAGED_OWNER_STORE_PARTS` 与规范布局 `plugins_dir`
+  一致、`owner_home_containing` 能反推三类 owner。共 11 项。
+- **插件 SDK 约束**：`path_access_policy.py` 会被原样打进插件 SDK。第一版从这里延迟导入 `owner_resolver`，插件进程一做路径检查就退出
+  （7 个插件包测试文件 63 项 `MCP 连接已关闭`）。改为把声明与布局反推写进本模块（只用标准库）、加守卫用例后全部通过。
+- **变异**：8 个全部被抓住（去掉策略拒绝、存储根本身放行、认不出 provider owner、list 不过滤、find 后备不过滤、Seatbelt 不加拒绝、
+  bwrap 不加覆盖、Full Access 只盖自己的）。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 172 个（含路径策略、沙箱、插件包、文件工具与全部仓库级守卫，
+  含 `test_packaging.py`）：3367 passed、11 skipped、3 xfailed；Ruff、doc sync、strict code-size（`size_diff.sh` 对线上清单新增 0）、
+  `git diff --check`、clean-package 全部通过。
+
 ## P17 合入后的 code-size 拆平，行为不变（2026-10-01，分支 `worker/ds2-p17-size-fix`，基于 `1aabb7f13`）
 
 - 拆掉 P17 新增的 3 条 high-risk 告警（只重构，不改行为、错误码、回执字段）：
