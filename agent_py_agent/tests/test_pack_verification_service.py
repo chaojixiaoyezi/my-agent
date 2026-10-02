@@ -374,3 +374,48 @@ def test_real_sandbox_post_write_and_closeout(env):
     assert closeout_rework_block(env.agent, env.params) == ""
     facts = run_pack_verification_facts(env.agent, env.params)
     assert [item["status"] for item in facts["results"]] == ["passed"] and len(facts["results"][0]["member_sha256"]) == 64
+
+
+# LLM: 光有钩子正确还不够——要证明工具执行唯一缝隙真的调用了它们：基线钩子在 handler 之前（pre_handler_gate 放行时），
+#   写后钩子作用在最终结果上。守卫、审计、追踪等与本块无关的重件用替身挡掉，执行器是只调 pre_handler_gate 的假执行器。
+# 函数用途: 验证 execute_traced_tool_call 把两个宿主核验钩子接在正确位置。
+def test_tool_execution_seam_calls_both_hooks(monkeypatch, tmp_path):
+    from dataclasses import dataclass
+
+    from agent_py_agent.agent.agent_core import tool_call_runtime
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+
+    order = []
+    hooks = types.SimpleNamespace(
+        capture_baseline_before_tool=lambda agent, params, tool: order.append(("baseline", tool)),
+        attach_post_write_verification=lambda agent, params, tool, result: order.append(("post", tool)) or "attached")
+    monkeypatch.setattr(tool_call_runtime, "_pack_verification_hooks", lambda: hooks)
+    monkeypatch.setattr(tool_call_runtime, "guarded_tool_call_result", lambda request: None)
+    monkeypatch.setattr(tool_call_runtime, "_record_passive_verification", lambda agent, call, result: result)
+    monkeypatch.setattr(tool_call_runtime, "audit_privileged_tool_call", lambda *args: None)
+    monkeypatch.setattr(tool_call_runtime, "trace_runner_tool_call_finished", lambda *args: None)
+    monkeypatch.setattr(tool_call_runtime, "write_boundary_with_runtime_ledger", lambda agent, params: {})
+    monkeypatch.setattr("agent_py_agent.agent.conversation.process_events.process_completion_target", lambda *a: None)
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.tool_loop.recovery.runtime_run_scope",
+                        lambda *a: types.SimpleNamespace(to_dict=dict))
+
+    @dataclass(frozen=True)
+    class Execution:
+        call: object
+        result: object
+
+    def execute_tool(call, **kwargs):
+        assert kwargs["pre_handler_gate"](call) is None
+        order.append(("handler", call.tool_name))
+        return Execution(call, "raw")
+
+    call = ToolCall("c1", "write_file", {"path": str(tmp_path / "a.json")}, "native", "sha256:" + "0" * 64,
+                    "run-1", "turn-1", "att-1")
+    params = types.SimpleNamespace(tool_runtime_snapshot=None, task_attributes={}, cancellation_token=None,
+                                   one_shot_tool_calls=set())
+    agent = types.SimpleNamespace(tools=types.SimpleNamespace(execute_tool=execute_tool))
+    request = types.SimpleNamespace(params=params, tool_rounds=0, idx=0, model_call=None)
+    execution = tool_call_runtime.execute_traced_tool_call(
+        tool_call_runtime.ToolCallRuntimeRequest(agent=agent, request=request, call=call))
+    assert order == [("baseline", "write_file"), ("handler", "write_file"), ("post", "write_file")]
+    assert execution.result == "attached"
