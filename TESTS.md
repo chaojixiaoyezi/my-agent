@@ -261,6 +261,13 @@
   含 `test_packaging.py`）：3367 passed、11 skipped、3 xfailed；Ruff、doc sync、strict code-size（`size_diff.sh` 对线上清单新增 0）、
   `git diff --check`、clean-package 全部通过。
 
+## J14 第四轮子代理 selection_changed 复现（2026-10-02，分支 `claude/be-jev-j14-repro`，被测 `795409761`，未命中）
+
+- **只改文档**：真实复现记录写进 `docs/tasks/DECISION_MODEL_REAL_VALIDATION.md` 的 J14 节，`DECISION_MODEL_P4G_REPORT.md` 第 5 条补上终态。
+- **做法**：隔离 home、真实 Gateway + TUI，还原第四轮条件。子代理选模 apply、候选只限官方 DeepSeek、4 秒期限；3 次各不相同的普通中文需求，每次派一个子代理。
+- **结果**：3 次都是 `adopted / first_request_validated`，子代理都用 DeepSeek 完成，Jev 3 次调用。没有复现保留；终态记“未命中”。
+- **证据**：`~/.my-agent/decision-evidence/j14-child-selection-repro/`（子代理建议状态/原因、会话模型来源、按会话的实际模型、结果日志行，不含正文与密钥）。
+
 ## 选模型只在结构变化时问（J4）（2026-10-01，分支 `claude/be-jev-selection-cadence`，基于 `24f1bd287`）
 
 - **新增 `test_decision_selection_cadence.py`**（7 项）：

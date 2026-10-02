@@ -890,3 +890,26 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 2. 06:51–11:37 链路中断的原因没有查：代理没有结构化日志。
 3. B 第 1 步（连接复用）：60 秒保活每次约省 0.34 秒，收益中等。要挡住建连超时需要长保活，得先确认代理和 Jev 服务端的空闲连接上限。
    现在 Jev 调用只剩后台 curator，建议暂不排期，记为后续设计项。
+
+## J14 第四轮子代理 selection_changed 复现（2026-10-02，隔离 home，被测 `795409761`，未命中）
+
+**目的**：09-23 第四轮真实样本里，Jev 合法选了 DeepSeek，子代理建议却记成 `retained / selection_changed`，子代理沿 M2.7 完成。
+当时提交阶段的各种失败都收拢成同一个原因，事后无法归因。09-24 起，每个复核失败点都有了独立原因码：
+`model_catalog_busy/changed`、`source_thread_busy`、`settings_changed`、`task_changed`、`permission_changed`、`advice_changed`、`selection_revision_changed`、`commit_lock_busy`。
+这次按当时的条件重跑，看能否复现并归因。
+
+**条件**（还原第四轮）：
+- 主模型 MiniMax-M2.7。子代理选模点 apply，候选只限 DeepSeek（官方 `deepseek-v4-flash`，Anthropic 协议），单次期限 4 秒，其它决策点位关。
+- 工具开、审批 auto。真实 Gateway + TUI，端口 8441。
+- 工作区放一份测试方写的小恢复模块。每次发一条普通中文需求，请主模型派一个子代理审查其中的并发和恢复逻辑。
+- 3 次的需求各不相同，都没改成两个子代理或其它刻意制造竞争的形态。
+
+**结果**：3 次都没有复现。
+- 3 次子代理选模的 Jev 调用分别是 2.3、1.3、1.6 秒，都成功，都合法选中 DeepSeek。
+- 建议都记成 `adopted / first_request_validated`，会话模型来源 `automatic`；3 个子代理都用 `deepseek-v4-flash` 完成（DONE），主任务都 done。
+- Jev 实际 3 次调用，与预计一致。证据：`~/.my-agent/decision-evidence/j14-child-selection-repro/`。
+
+**结论（终态：未命中）**：
+- 在当前代码和当时的条件下，提交阶段 3 次都正常采用。第四轮的那次保留没有复现，原因仍不可补推。
+- 以后不论在哪里再出现，记录里都会是上面的某个具体原因码，不会再是笼统的 `selection_changed`。
+- 生产上子代理选模目前是 observe，只记录不提交，所以生产不会再产生这类记录。
