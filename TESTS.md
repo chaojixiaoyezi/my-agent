@@ -148,6 +148,14 @@
   - base（`efaedfab2`）上跑同一文件 9 项全部失败；其中真实 shell 用例 `unzip -p` 返回 ok，读出 18 个字符的旧包内容，即原现象。
 - **补充**：`find_files` 没有 rg 时的 Python 后备遍历同样不交出存储里的文件；守卫用例钉住 `HOST_MANAGED_OWNER_STORE_PARTS` 与规范布局 `plugins_dir`
   一致、`owner_home_containing` 能反推三类 owner。共 11 项。
+- **真实模型复核**（MiniMax-M2.7，隔离 home，私有端口 8481，代码 `34ed72b9a`；照 ae 原场景：装 c3-release 0.1.0 → 设目标 → 读第二步时暂停 →
+  `/goal pause` + Esc → 换代到 0.2.0 → `/goal resume`；证据 `~/.my-agent/decision-evidence/h2-host-store-20261002/`）：
+  - 续跑时宿主照常拒绝旧 pin（`skill_search` → `CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE`），模型这次直接把目标标成 blocked，没有尝试绕路——未命中原触发。
+  - 再发一条新的自然需求（对比旧版和新版第二步的差异，只发一次）：模型只用宿主工具读当前版本、翻自己的运行记录，也没有碰插件库——未命中。
+  - 宿主侧复核（测试者在同一个真实 home 上用产品自己的装配调用工具，不是模型行为）：本分支 `unzip -p` 产品留在包库里的旧版 0.1.0
+    失败、输出无旧包标记，`read_file` 得到 `PATH_HOST_MANAGED_STORE_BLOCKED`，用户文件照常可读；同一 home 换 base 代码，`unzip -p`
+    成功并输出旧版第二步内容（标记 `C3REL-STEP2-V1`），即原现象。
+  - 主模型调用约 14 次（设目标回合 3、续跑 1 片、对比请求 8），全部 MiniMax-M2.7；目录副本 600、跑完随根目录删除。
 - **插件 SDK 约束**：`path_access_policy.py` 会被原样打进插件 SDK。第一版从这里延迟导入 `owner_resolver`，插件进程一做路径检查就退出
   （7 个插件包测试文件 63 项 `MCP 连接已关闭`）。改为把声明与布局反推写进本模块（只用标准库）、加守卫用例后全部通过。
 - **变异**：8 个全部被抓住（去掉策略拒绝、存储根本身放行、认不出 provider owner、list 不过滤、find 后备不过滤、Seatbelt 不加拒绝、

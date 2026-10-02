@@ -122,6 +122,8 @@
   - macOS 上从 owner home 递归扫描（`grep -r`、`find`）时，这个目录会报 Operation not permitted；Linux 上它是空目录。
   - 没有 owner 墙的管理员，如果数据根不在默认位置、又没设 `MY_AGENT_HOME`，文件工具推不出数据根，这条规则不生效（生产用默认位置）。
   - 子代理经批准的 `controlled_exec` 不走 OS 沙箱，不在这次范围。
+- **真实模型复核**：照原场景用 MiniMax-M2.7 跑了一次，再加一条新的自然需求，模型两次都没有尝试绕路（未命中原触发）。
+  同一个真实隔离 home 上的宿主侧复核确认：本分支读不到旧包，base 代码原样读出。详见 TESTS.md。
 - **验证**：见 TESTS.md 同名节。
 
 ## 熔断体验修复 code-size 拆平（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）
