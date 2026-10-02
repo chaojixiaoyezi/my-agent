@@ -2,8 +2,9 @@
 
 ## 工具瘦身第一阶段：默认收起 + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `60f909b12`）
 
-- `test_tool_default_deferral.py`（24 项）：开关默认关且提示词与可见工具逐字不变；打开后 9 个声明工具离开原生 Schema、目录给出“名字：用途”索引且不重复进名字串；名单钉死、用途句不超过 60 字；tool_search 一步加载并在下一次调用可见；9 条自然说法（如“看一下这个直播流”“帮我换个模型”“改一下配置项”“查审计记录”）都能搜到对应工具；显式 allowed_tools 全量可见且目录无索引；tool_search 不可用/不可见/被类别收起时不收起；发现入口即使声明也不收起；与决策点投影取并集且短名单不裁索引；只有声明收起的工具时名字串不留空冒号；语义文档只对有用途句的工具变化；YAML 字符串开关归一化；hint 声明收起必须带用途句。
-- `test_tool_default_deferral_chain.py`（3 项，真实链路 + 脚本化供应商）：本机管理员和飞书普通用户两种 owner 走真实 Gateway 前台 ask：首个请求不带 schedule、带 tool_search；tool_search 之后那次请求带上 schedule 并真正执行（`handler_executed=true`）；开关关闭时首个请求照旧直接带 schedule。
+- `test_tool_default_deferral.py`（24 项，另含下面盲调兜底 12 项）：开关默认关且提示词与可见工具逐字不变；打开后 9 个声明工具离开原生 Schema、目录给出“名字：用途”索引且不重复进名字串；名单钉死、用途句不超过 60 字；tool_search 一步加载并在下一次调用可见；9 条自然说法（如“看一下这个直播流”“帮我换个模型”“改一下配置项”“查审计记录”）都能搜到对应工具；显式 allowed_tools 全量可见且目录无索引；tool_search 不可用/不可见/被类别收起时不收起；发现入口即使声明也不收起；与决策点投影取并集且短名单不裁索引；只有声明收起的工具时名字串不留空冒号；语义文档只对有用途句的工具变化；YAML 字符串开关归一化；hint 声明收起必须带用途句。
+- `test_tool_default_deferral_chain.py`（3 项 + 盲调 1 项，真实链路 + 脚本化供应商）：本机管理员和飞书普通用户两种 owner 走真实 Gateway 前台 ask：首个请求不带 schedule、带 tool_search；tool_search 之后那次请求带上 schedule 并真正执行（`handler_executed=true`）；开关关闭时首个请求照旧直接带 schedule。
+- 盲调兜底：`test_tool_default_deferral.py` 另加 12 项（命中时加进下一次请求并给提示；执行阶段的参数错误按错误合同的修参数动作也触发；开关关闭、调用成功、非参数错误、未知错误码、本来可见、快照里没有、已加载都不触发；开关关闭时类别收起的 web_fetch 也不触发）；`test_tool_default_deferral_chain.py` 加 1 项真实链路：不带必填参数直接调 schedule，宿主校验失败后下一次请求带上 schedule 并重试成功。变异 7 个全部被抓住。
 - `test_tool_description_trim.py`（4 项）：create_subagents 的 items[] 只把长重复说明换成“同顶层 X。”且结构与顶层逐项相同、covers 和 input_media_refs 保留完整说明，子代理带图开关关闭时说明里不出现 input_media_refs；remember 批量 scope 结构与顶层一致、说明不重复；user_config 各接入点 profile_id 指回共享字段。
 - 变异 29 个全部被抓住（收起判定的 allowed/可用/可见/类别/发现入口五个条件、并集、索引追加与短名单、名字串去重、空冒号、开关接线三处、hint 校验两处、检索文本两处、搜索范围、目录配置，以及精简的 7 处）。
 - 门禁：相关测试 162 个文件（含 guards9 与 test_packaging）全过；ruff、import boundaries 0、doc sync、code-size 告警身份与基线比对新增 0、`git diff --check`、常数目录 `--check`、前端参数目录 `--check`（新增 1 个字段，其余只是序号顺延）。

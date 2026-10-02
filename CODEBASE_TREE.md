@@ -347,6 +347,7 @@ agent_py_agent/
 |   |   |-- tool_loop/closeout.py       # 绑定原收口操作，按结构化副作用事实生成未完成交接
 |   |   |-- tool_loop/model_turn.py     # 绑定模型请求／超限恢复、用量与输入确认，保持原顺序
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
+|   |   |-- tool_loop/deferred_schema_reload.py # 收起工具被盲调且参数校验失败时，下一次请求带上它的完整定义（默认收起开关打开时）
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
 |   |   |   |-- decision_delivery_quality.py # 新验证或成功写入后多个 stale 焦点的可选提示，共用逐记录一次，只追加宿主事实
 |   |   |   |-- decision_action_candidate.py # 插件观察归档后的可选动作候选提示，只选宿主铸的候选、不执行动作

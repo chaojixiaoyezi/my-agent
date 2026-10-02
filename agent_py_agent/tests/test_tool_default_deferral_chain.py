@@ -26,10 +26,16 @@ from agent_py_agent.tests.test_session_task_real_chain import (
 _PROMPT = "RC-DEFER 帮我看一下现在有哪些定时任务"
 
 
-# 类用途: 进程内的供应商假线路：每个前台回合按调用次序出招（tool_search → schedule → 回复），记下每次请求带的工具名。
+_SEARCH_THEN_CALL = (("tool_search", {"query": "schedule 定时任务", "limit": 3}), ("schedule", {"action": "list"}))
+# 盲调：不先 tool_search、也不带必填参数直接调用收起的工具，宿主在参数校验阶段拒绝后应把完整定义带进下一次请求。
+_BLIND_THEN_RETRY = (("schedule", {}), ("schedule", {"action": "list"}))
+
+
+# 类用途: 进程内的供应商假线路：每个前台回合按调用次序出招（默认 tool_search → schedule → 回复），记下每次请求带的工具名。
 class _DeferralWire:
-    def __init__(self) -> None:
+    def __init__(self, script=_SEARCH_THEN_CALL) -> None:
         self._ids = itertools.count(1)
+        self._script = script
         self.calls: list[tuple[str, ...]] = []
         self.tool_results: list[dict] = []
 
@@ -47,10 +53,8 @@ class _DeferralWire:
         self.calls.append(names)
         self.tool_results = [message for message in messages if message.get("role") == "tool"]
         step = len(self.calls)
-        if step == 1:
-            return self._reply(payload, None, ("tool_search", {"query": "schedule 定时任务", "limit": 3}))
-        if step == 2:
-            return self._reply(payload, None, ("schedule", {"action": "list"}))
+        if step <= len(self._script):
+            return self._reply(payload, None, self._script[step - 1])
         return self._reply(payload, "目前没有定时任务。", None)
 
     # 函数用途: 把脚本动作包装成 OpenAI chat.completion 响应。
@@ -70,11 +74,11 @@ class _DeferralWire:
 
 
 # 函数用途: 搭一个只有一个会话的真实前台环境，owner 可指定（默认本机管理员）。
-def _chain(tmp_path, monkeypatch, *, deferral: bool, **owner: str) -> tuple[RealChain, _DeferralWire]:
+def _chain(tmp_path, monkeypatch, *, deferral: bool, script=_SEARCH_THEN_CALL, **owner: str) -> tuple[RealChain, _DeferralWire]:
     config = _agent_config(tmp_path, **owner)
     config.tool_default_deferral_enabled = deferral
     agent = SimpleAgent(config, tmp_path / "root")
-    wire = _DeferralWire()
+    wire = _DeferralWire(script)
     monkeypatch.setattr(http, "post_json", wire)
     chain = RealChain(agent, _ready_gateway_paths(agent), wire, {}, scheduler=None)
     chain.open_session("A")
@@ -106,3 +110,18 @@ def test_switch_off_keeps_the_tool_in_the_first_request(tmp_path, monkeypatch):
     chain, wire = _chain(tmp_path, monkeypatch, deferral=False)
     chain.ask("A", _PROMPT)
     assert "schedule" in wire.calls[0]
+
+
+def test_blind_call_of_a_deferred_tool_gets_its_schema_on_the_next_request(tmp_path, monkeypatch):
+    chain, wire = _chain(tmp_path, monkeypatch, deferral=True, script=_BLIND_THEN_RETRY)
+    chain.ask("A", _PROMPT)
+
+    assert len(wire.calls) == 3, wire.calls
+    first, second, _final = wire.calls
+    assert "schedule" not in first, "收起后首个请求不带 schedule"
+    assert "schedule" in second, "盲调在参数校验阶段失败后，下一次请求带上 schedule 的完整定义"
+    heads = [_text_of(message.get("content")) for message in wire.tool_results]
+    assert len(heads) == 2, heads
+    assert "tool=schedule; status=failed" in heads[0].split("\n", 1)[0]
+    assert "[tool-schema-loaded] schedule " in heads[0]
+    assert "tool=schedule; status=succeeded; handler_executed=true" in heads[1].split("\n", 1)[0]

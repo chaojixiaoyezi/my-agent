@@ -189,3 +189,56 @@ def test_explicit_allowed_tools_catalog_has_no_declared_index(tmp_path):
     section = agent.tools.render_catalog_section(allowed_tools=["user_config", "read_file", "tool_search"])
     assert "默认收起的工具" not in section
     assert agent.tools.search_deferred_specs("user_config", allowed_tools=["user_config", "tool_search"]) == []
+
+
+def _blind_call(agent, tool="audit_records", *, ok=False, stage="validation", loaded=None, error_code=""):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_loop.deferred_schema_reload import (
+        reload_schema_after_blind_call,
+    )
+
+    params = SimpleNamespace(tool_runtime_snapshot=agent.tools.runtime_snapshot(), allowed_tools=None,
+                             loaded_tool_names=set(loaded or ()))
+    record = {"tool": tool, "ok": ok, "error_code": error_code,
+              "tool_execution": {"failure_stage": stage, "handler_executed": False}}
+    return reload_schema_after_blind_call(agent, params, record), params.loaded_tool_names
+
+
+def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    hint, loaded = _blind_call(agent)
+    assert loaded == {"audit_records"}
+    assert hint.startswith("\n[tool-schema-loaded] audit_records ")
+    assert "audit_records" in _visible(agent, loaded_tool_names=loaded)
+
+
+@pytest.mark.parametrize(("deferral", "tool", "ok", "stage"), [
+    (False, "audit_records", False, "validation"),
+    (False, "web_fetch", False, "validation"),
+    (True, "audit_records", True, "validation"),
+    (True, "audit_records", False, "execution"),
+    (True, "read_file", False, "validation"),
+    (True, "no_such_tool", False, "validation"),
+])
+def test_blind_call_reload_only_for_declared_deferral_validation_failures(tmp_path, deferral, tool, ok, stage):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=deferral)
+    assert _blind_call(agent, tool, ok=ok, stage=stage) == ("", set())
+
+
+def test_blind_call_already_loaded_is_left_alone(tmp_path):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    assert _blind_call(agent, loaded={"audit_records"}) == ("", {"audit_records"})
+
+
+@pytest.mark.parametrize(("stage", "error_code", "reloads"), [
+    ("execution", "TOOL_INVALID_ARGUMENTS", True),
+    ("execution", "TOOL_PARAMETER_REQUIRED", True),
+    ("execution", "TOOL_TIMEOUT", False),
+    ("execution", "NO_SUCH_ERROR_CODE", False),
+])
+def test_handler_side_argument_errors_also_reload_the_schema(tmp_path, stage, error_code, reloads):
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    hint, loaded = _blind_call(agent, "update_persona", stage=stage, error_code=error_code)
+    assert (loaded == {"update_persona"}) is reloads
+    assert bool(hint) is reloads

@@ -112,6 +112,7 @@ from .tool_loop.completion import (
     queue_reply_for_audit_prepare,
     task_local_wait_response_for_open_subagents,
 )
+from .tool_loop.deferred_schema_reload import reload_schema_after_blind_call
 from .tool_loop.model_turn import (
     ModelTurnRequest,
     request_model_response,
@@ -2360,6 +2361,7 @@ def _mark_tool_call_halts(agent, record: ToolCallRecordParams) -> None:
 # LLM: Archive once, then feed the same bounded projection to text and native histories before any
 # later compact/window logic; do not let raw result refs bypass this choke point. Optional decision
 # hints only append to that shared display and never change results, ledgers or refs.
+#   收起的工具被盲调且参数校验失败时，reload_schema_after_blind_call 把它加进下一次请求的临时可见名单并附一行提示。
 # 函数用途: 记录一次工具调用、更新运行事实，并把安全结果及可忽略的可选建议续入下一轮模型上下文。
 def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     from ..contracts.required_actions import settle_required_action
@@ -2381,6 +2383,7 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         record.params.executed_tools.append(record.result.tool_name)
     archive_record = archive_tool_call_record(agent, record)
     _load_discovered_tools(record.params, archive_record)
+    schema_hint = reload_schema_after_blind_call(agent, record.params, archive_record)
     archive_tool_call_if_enabled(
         agent,
         record.params,
@@ -2392,7 +2395,7 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     record.params.archive_tool_calls.append(archive_record)
     update_runtime_fact_progress_if_enabled(agent, record.params, tool_round=record.tool_rounds)
     result_rendered = render_tool_result_for_live_prompt(record.result, archive_record)
-    result_rendered += _optional_result_hints(agent, record, archive_record)
+    result_rendered += _optional_result_hints(agent, record, archive_record) + schema_hint
     record.params.tool_context.append(
         f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
         f"{render_tool_payload_for_live_prompt(record.model_payload)}\n"
