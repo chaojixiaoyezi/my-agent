@@ -4418,12 +4418,14 @@ def _record_quota_fallback_message(
 
 
 # LLM: 领域对象沿原 scheduler 读取；状态、子树、注册表及 wake 发布仍在组件需要它们时调用。
+#   user_turn_on_lane 读同一 store 的车道登记（C5/O4 用户消息先处理），与网关前台车道登记用同一个键。
 # 函数用途: 为后台目标处理绑定精确能力，不查询账本、不复制 Agent/Store，也不建立新状态。
 def _background_goal_dependencies(
     scheduler: BackgroundMainAgentScheduler,
 ) -> GoalContinuationDependencies:
     from .goal_progress_fuse import push_goal_no_progress_notice
     from .goal_runtime import raise_goal_continuation_wake
+    from .run_claim import user_input_turn_on_lane
 
     config = getattr(scheduler.runtime.agent, "config", None)
 
@@ -4454,6 +4456,7 @@ def _background_goal_dependencies(
             "task_registry",
             None,
         ),
+        user_turn_on_lane=partial(user_input_turn_on_lane, scheduler.store),
     )
 
 

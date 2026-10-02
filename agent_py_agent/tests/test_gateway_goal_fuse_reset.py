@@ -5,10 +5,13 @@ reset_goal_progress_fuse 只接在 ChannelMessageRuntime.receive 和 CLI 入口�
 （request_execution._execute_gateway_conversation_turn）写入用户消息后没有重置。钉住两个方向（真实 echo Gateway + 真实后台调度器）：
 1. Gateway 前台用户消息写入成功后清零计数；熔断暂停的 Goal 只清计数、保留暂停原因（与另两个入口同口径）；写入失败不清；
 2. Goal 自动续跑片走后台 wake，不经过这条前台路径：清零之后仍要连续 3 个空片才熔断。
+3. C5/O4（2026-10-02）：第 3 个空片还在跑时用户发来消息，用户消息先处理——这一片不计入，消息写入后清零，目标不暂停。
 """
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -124,3 +127,59 @@ def test_unpersisted_gateway_message_does_not_reset_the_count(world, monkeypatch
 
     assert response["ok"] is False
     assert _fuse(world) == ("active", 2, "")
+
+
+def _wait_until(predicate, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "等待条件超时"
+        time.sleep(0.01)
+
+
+def test_user_message_queued_during_the_third_idle_slice_is_handled_first(world, monkeypatch):
+    from agent_py_agent.agent.conversation import runtime as conversation_runtime
+    from agent_py_agent.agent.conversation.run_claim import user_input_turn_on_lane
+
+    raise_goal_continuation_wake(world.store, world.goal, now=100.0)
+    _background_slice(world, 101.0)
+    _background_slice(world, 102.0)
+    assert _fuse(world) == ("active", 2, "")
+    slice_accounted, worker = threading.Event(), []
+    original_append = request_history.append_gateway_conversation_message
+    original_invoke = conversation_runtime._invoke_background_main_agent
+
+    def append_after_accounting(*args, **kwargs):
+        # 用户回合已排到车道，停在写入会话之前，直到第 3 片记完账（复现 O4 的先后：记账在用户消息写入之前）。
+        slice_accounted.wait(10)
+        return original_append(*args, **kwargs)
+
+    def third_slice(*args, **kwargs):
+        if not worker:
+            # 第 3 片持有本会话车道时用户发来消息：网关回合排队等车道。
+            assert world.store.claims.load(world.thread_id).get("status") == "running"
+            submit_gateway_ask(world.paths, params=GatewayAskParams(
+                prompt="我补充一句：先别停", save=False, chat_session_id=_SESSION, agent=world.agent))
+            worker.append(threading.Thread(target=_process_gateway_requests, args=(world.agent, world.paths),
+                                           daemon=True))
+            worker[0].start()
+            _wait_until(lambda: user_input_turn_on_lane(world.store, world.thread_id))
+        return original_invoke(*args, **kwargs)
+
+    monkeypatch.setattr(request_history, "append_gateway_conversation_message", append_after_accounting)
+    monkeypatch.setattr(conversation_runtime, "_invoke_background_main_agent", third_slice)
+    _background_slice(world, 103.0)
+
+    # 改前这里已是 ("paused", 3, NO_PROGRESS_REASON_CODE)：第 3 片记账时熔断，用户消息之后只能清计数。
+    assert _fuse(world) == ("active", 2, "")
+    slice_accounted.set()
+    worker[0].join(10)
+    assert not worker[0].is_alive()
+    # 用户消息写入会话后按 D4 清零，目标没有暂停；用户回合离开车道后不再算在场。
+    assert _fuse(world) == ("active", 0, "")
+    assert not user_input_turn_on_lane(world.store, world.thread_id)
+    # 之后仍要连续 3 个空片才熔断。
+    _background_slice(world, 104.0)
+    _background_slice(world, 105.0)
+    assert _fuse(world) == ("active", 2, "")
+    _background_slice(world, 106.0)
+    assert _fuse(world) == ("paused", 3, NO_PROGRESS_REASON_CODE)

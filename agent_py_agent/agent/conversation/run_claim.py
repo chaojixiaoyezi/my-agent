@@ -1,6 +1,6 @@
 # LLM: Share one durable claim lane; host-bound foreground recovery must retain exact task affinity.
 # 租约操作统一访问 store.claims；线程存在性、心跳和最终释放仍使用同一原文件及调用顺序。
-# 模块用途: 前后台共用执行权、心跳与释放流程，不新增队列或模型重试。
+# 模块用途: 前后台共用执行权、心跳与释放流程，不新增队列或模型重试；另在进程内登记“用户回合在场”，供 Goal 熔断记账读取。
 """One durable execution lane shared by foreground and background turns."""
 
 from __future__ import annotations
@@ -16,6 +16,10 @@ from functools import partial
 from ..runtime_errors import runtime_error_report
 
 _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
+# 进程内登记（键是本会话执行租约文件路径，值是在场的用户回合数）：只供后台 Goal 熔断记账判断“用户消息先处理”，
+# 不是执行权、不落盘；进程退出即消失，重启后排队的请求重新等车道时再登记。
+_USER_INPUT_TURNS: dict[str, int] = {}
+_USER_INPUT_TURNS_LOCK = threading.Lock()
 
 
 # LLM: Callers publish any recoverable task binding before acquiring; this flag carries no authority.
@@ -35,6 +39,8 @@ class ConversationRunLaneRequest:
     runtime_facts: dict[str, object] = field(default_factory=dict)
     recover_same_task_only: bool = False
     acquire_transition: Callable[[str, Callable], dict | None] | None = None
+    # 这一回合携带用户消息（网关前台用户回合）：从开始排队到退出车道都登记为“用户回合在场”，见 user_input_turn_on_lane。
+    carries_user_input: bool = False
 
 
 # LLM: 续约间隔默认只由租约 TTL 推导（配置里已没有单独的心跳键，原 background_claim_heartbeat_interval_seconds
@@ -134,12 +140,70 @@ def _acquire_conversation_run_claim(request: ConversationRunLaneRequest) -> dict
         time.sleep(max(0.05, request.retry_seconds))
 
 
+# LLM: 车道入口：携带用户消息的回合先登记“用户回合在场”，再排队领取执行权，直到退出车道才撤销（覆盖后台片释放车道
+#   之后、熔断记账之前的空档）；其余回合（手动 Compact 等）不登记。执行权语义全在 _held_conversation_run_lane，不因登记改变。
+#   改动同步 test_goal_fuse_user_turn_first.py。
+# 函数用途: 为一个模型回合取得并持有本会话执行车道，必要时让后台 Goal 熔断知道有用户消息在排队或执行。
+@contextmanager
+def conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]:
+    """Hold the durable per-thread execution claim for one complete model turn."""
+    with _user_input_turn_registered(request), _held_conversation_run_lane(request) as claim:
+        yield claim
+
+
+# LLM: 只读进程内登记，不读写租约文件；键与登记时同一个租约文件路径，所以只认同一 owner 存储里的同一会话。
+#   后台 Goal 熔断记账用它判断“空片结束时本会话是否有用户消息在排队或执行”（C5/O4：用户消息先处理）。
+# 函数用途: 回答这个会话的执行车道上此刻有没有携带用户消息的回合（排队中或执行中）。
+def user_input_turn_on_lane(store: object, thread_id: str) -> bool:
+    key = _user_input_lane_key(store, thread_id)
+    with _USER_INPUT_TURNS_LOCK:
+        return bool(key) and key in _USER_INPUT_TURNS
+
+
+# LLM: 登记与撤销成对出现在同一个 with 里，异常、中断、取消都会撤销；不携带用户消息或算不出键时什么都不做。
+# 函数用途: 在携带用户消息的回合排队和执行期间登记“用户回合在场”，退出车道时撤销。
+@contextmanager
+def _user_input_turn_registered(request: ConversationRunLaneRequest) -> Iterator[None]:
+    key = _user_input_lane_key(request.store, request.thread_id) if request.carries_user_input else ""
+    _adjust_user_input_turns(key, 1)
+    try:
+        yield
+    finally:
+        _adjust_user_input_turns(key, -1)
+
+
+# LLM: 键取本会话执行租约文件路径（store.claims.storage.background_claim_path），与租约同一份 owner 存储；
+#   线程号不合法或存储不可用时返回空串，调用方按“没有登记”处理。
+# 函数用途: 算出“用户回合在场”登记用的键。
+def _user_input_lane_key(store: object, thread_id: str) -> str:
+    storage = getattr(getattr(store, "claims", None), "storage", None)
+    selected = str(thread_id or "").strip()
+    if storage is None or not selected:
+        return ""
+    try:
+        return str(storage.background_claim_path(selected))
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+# LLM: 计数到 0 就删除键，查询只看键在不在；空键不登记。
+# 函数用途: 在锁内增减某个会话在场的用户回合数。
+def _adjust_user_input_turns(key: str, delta: int) -> None:
+    if not key:
+        return
+    with _USER_INPUT_TURNS_LOCK:
+        count = _USER_INPUT_TURNS.get(key, 0) + delta
+        if count > 0:
+            _USER_INPUT_TURNS[key] = count
+        else:
+            _USER_INPUT_TURNS.pop(key, None)
+
+
 # LLM: Ordinary lanes finish in finally. Gateway's write-ahead recovery binding makes terminal
 # commit responsible for releasing pinned lanes, including the crash gap after returning a result.
 # 函数用途: 保持心跳直到本轮退出；恢复专属车道由请求终态释放，避免返回结果后被抢先续跑。
 @contextmanager
-def conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]:
-    """Hold the durable per-thread execution claim for one complete model turn."""
+def _held_conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator[dict]:
     claim = _acquire_conversation_run_claim(request)
     claim_id = str(claim.get("claim_id") or "")
     heartbeat = ConversationRunClaimHeartbeat(
@@ -181,4 +245,5 @@ __all__ = [
     "claim_heartbeat_interval_seconds",
     "conversation_run_lane",
     "detached_task_claim_scope_id",
+    "user_input_turn_on_lane",
 ]

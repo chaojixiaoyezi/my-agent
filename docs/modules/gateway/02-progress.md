@@ -865,6 +865,13 @@ reconcile_error 是 DataCorruptionError「input digest mismatch」，每 15 秒�
 - **O2**：不是竞态，是熔断用调度 tick 的 `now` 记 `updated_at`，那一片其实就是触发熔断的第 3 片；不改代码，见设计台账同名节。
 - 测试与变异见 TESTS.md 同名节。
 
+## 持续目标空片熔断时用户消息先处理（C5/O4，2026-10-02，分支 `claude/38-c5-user-msg-before-fuse`，基于 step16z `f9ca83242`）
+
+- **起因**：第 3 个空片还在跑时用户发来消息，消息转成下一轮排队；第 3 片记账先熔断暂停，用户回合写入后只清计数，目标仍暂停（真实链路复现）。
+- **改动**：网关前台车道（`request_binding.gateway_conversation_execution_lane`）标 `carries_user_input=True`，从排队到退出车道在
+  `conversation/run_claim` 里登记“用户回合在场”；后台 Goal 记账时用户回合在场的空片不计入。清零仍按 D4 在用户消息写入后完成。
+- 设计与边界见设计台账同名节，测试与变异见 TESTS.md 同名节。
+
 ## Gateway 会话内 /stop 收回被中断任务的后台进程（C12a，2026-10-01，分支 `claude/38-c12-stop-after-interrupt`，基于 main `34e4d874e`）
 
 09-28 的"会话内 /stop 回收遗留资源"只接在本地 chat 入口，默认 TUI 和飞书走的 Gateway 入口没有。所以中断后几分钟、发现层自愈把

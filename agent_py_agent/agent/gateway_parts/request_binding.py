@@ -402,6 +402,8 @@ def gateway_request_is_active_turn_recovery(request: object, request_id: str) ->
 
 # LLM: Write-ahead request binding precedes pinned claim acquisition; terminalization owns crash
 # cleanup. Background child wake may take this lane only after the foreground yields or finishes.
+#   网关前台请求都是用户提交（TUI/IM/HTTP 与 scale 转发，见 D4 台账），所以车道标 carries_user_input：排队和执行期间
+#   后台 Goal 空片不计入熔断（C5/O4 用户消息先处理）；计数清零仍等用户消息写入会话后由 D4 的重置完成。
 # 函数用途: 将原请求绑定到共用车道，重启后由原请求接续，不让后台先重复执行同一任务。
 def gateway_conversation_execution_lane(context: request_context.GatewayAskRunContext, thread_id: str):
     """Serialize one thread's foreground and background model turns.
@@ -444,6 +446,7 @@ def gateway_conversation_execution_lane(context: request_context.GatewayAskRunCo
                 context.request_path, request_id,
                 str(context.request.get("execution_attempt_id") or "").strip() or request_id,
             ),
+            carries_user_input=True,
         )
     )
 

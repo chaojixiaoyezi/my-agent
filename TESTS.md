@@ -23,6 +23,21 @@
 - **做法**：删掉这两组用例，其余 46 个 token 估算与账本用例不动；全仓已无对这两个名字的引用。
 - **验证**：`test_archive_tokens.py` 46 passed；随后整版重跑 12 片车道（见本版发布证据）。
 
+## C5/O4：持续目标空片熔断时用户消息先处理（2026-10-02，分支 `claude/38-c5-user-msg-before-fuse`，基于 `claude/3a-step16z` `f9ca83242`）
+
+- **新增** `test_goal_fuse_user_turn_first.py`（3 项）：
+  - 携带用户消息的车道从排队（后台片仍持有车道）到拿到车道、再到退出，都登记“用户回合在场”，退出后撤销；
+  - 产品里的手动 Compact 车道（缺省值）不登记；排队中被中断放弃的回合也会撤销；
+  - 用户回合在场时空片不记账、续跑链照常接下一片；有进展的片照常记账；不在场时空片照常计数。
+- **新增** `test_gateway_goal_fuse_reset.py::test_user_message_queued_during_the_third_idle_slice_is_handled_first`：
+  - 真实 echo Gateway、真实后台调度器；第 3 片持有车道时提交用户请求，网关回合真实排队等车道；
+  - 用户回合拿到车道后停在写入会话之前，等第 3 片记完账（固定 O4 的先后顺序）；
+  - 断言第 3 片记账后仍是 ("active", 2, "")（改前是 ("paused", 3, NO_PROGRESS)），用户消息写入后 ("active", 0, "")，
+    之后仍要连续 3 个空片才熔断。
+- **变异**（7 个，抓到 7 个）：网关车道不标用户消息；去掉空片不计入；拿到车道就撤销登记；有进展的片也跳过；标记缺省改成 True；
+  运行时不接登记查询；计数到 0 不删键。
+- **真实链路**：改前复现、改后核对（隔离 Gateway + TUI + 脚本化假模型），证据 `~/.my-agent/decision-evidence/c5-o4-user-msg-first-20261002/`。
+
 ## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`）
 
 - **新增用例**：`test_subagent_takeover_runtime_closeout.py::test_runner_self_stop_after_takeover_records_the_takeover_reason`。

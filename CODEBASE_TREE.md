@@ -1010,7 +1010,8 @@ agent_py_agent/
 |   |-- test_tui_superseded_marker.py   # “已被 X 接替”：Gateway 行摊平 kernel replaced_by、名册与子代理页头部标注（含窄屏）、渲染缓存键
 |   |-- test_agent_goals.py            # 单代理单 Goal、主子隔离、版本冲突、停止和同执行轮持续工作回归
 |   |-- test_goal_progress_fuse.py     # Goal 连续无进展熔断的结构化判据、计数重置、用户消息与通知幂等
-|   |-- test_gateway_goal_fuse_reset.py # Gateway 前台用户消息清零 Goal 空片计数（保留暂停原因、写入失败不清），后台续跑片仍 3 片熔断
+|   |-- test_gateway_goal_fuse_reset.py # Gateway 前台用户消息清零 Goal 空片计数（保留暂停原因、写入失败不清），后台续跑片仍 3 片熔断；第 3 片排队的用户消息先处理
+|   |-- test_goal_fuse_user_turn_first.py # 车道“用户回合在场”登记（排队到退出车道）与空片不计入规则（C5/O4）
 |   |-- test_goal_idle_delivery.py     # Goal 空转片不外发外部通道、熔断提示主动推送一次并去重、纯 TUI 行为不变（C11 修复）
 |   |-- test_tui_resource_lifetime.py  # 缓存净化、异常退出、事件和冻结阅读预算回归
 |   |-- test_gateway_owner_retention.py # 空闲回收、配置、在途及新消息竞态回归
