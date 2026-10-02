@@ -4,70 +4,23 @@ import {
   AdminSection,
   NumberField,
   StringField,
-  ChoiceField,
-  ToggleField,
 } from "../../components/settings/SettingsFieldComponents";
 import { SettingsPageHeader } from "../../components/settings/SettingsPageHeader";
 import { useSettingsSection } from "../../components/settings/useSettingsSection";
 import { useDirtyGuard } from "../../components/settings/useDirtyGuard";
-import { Activity, Server } from "lucide-react";
+import { Activity } from "lucide-react";
 
 export default function SettingsDispatch() {
   const isAdmin = useAuthStore((s) => s.isAdmin);
-  const dispatch = useSettingsStore((s) => s.dispatchParams);
-  const setDispatch = useSettingsStore((s) => s.setDispatchParams);
   const runner = useSettingsStore((s) => s.runnerParams);
   const setRunner = useSettingsStore((s) => s.setRunnerParams);
-  const daemon = useSettingsStore((s) => s.daemonParams);
-  const setDaemon = useSettingsStore((s) => s.setDaemonParams);
   const errors = useSettingsStore((s) => s.errors);
   const { dirty, saving, markDirty, handleSave } = useSettingsSection("调度参数");
   useDirtyGuard(dirty);
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <SettingsPageHeader title="调度参数（Dispatch）" subtitle="Dispatch Loop、Runner 调度策略和 Daemon 后台任务参数" saving={saving} onSave={handleSave} dirty={dirty} />
-
-      {/* Dispatch Loop */}
-      <AdminSection
-        icon={Activity}
-        title="调度循环（Dispatch Loop）"
-        subtitle="控制主代理调度循环的并发和轮次策略"
-      >
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          <NumberField
-            label="max_consecutive_rounds（最大连续轮数）"
-            description="单次 dispatch_loop 最多执行多少轮"
-            value={dispatch.max_consecutive_rounds}
-            onChange={(v) => { setDispatch({ max_consecutive_rounds: v }); markDirty(); }}
-            min={1}
-            max={100}
-            unit="轮"
-            disabled={!isAdmin}
-            error={errors["dp_rounds"]}
-          />
-          <NumberField
-            label="max_runners（最大并发执行器）"
-            description="单轮调度中同时启动的最大 runner 数量"
-            value={dispatch.max_runners}
-            onChange={(v) => { setDispatch({ max_runners: v }); markDirty(); }}
-            min={1}
-            max={20}
-            unit="个"
-            disabled={!isAdmin}
-          />
-          <NumberField
-            label="limit（单次调度上限）"
-            description="单轮 dispatch 中处理的候选上限"
-            value={dispatch.limit}
-            onChange={(v) => { setDispatch({ limit: v }); markDirty(); }}
-            min={1}
-            max={100}
-            unit="个"
-            disabled={!isAdmin}
-          />
-        </div>
-      </AdminSection>
+      <SettingsPageHeader title="调度参数（Dispatch）" subtitle="Runner 调度策略" saving={saving} onSave={handleSave} dirty={dirty} />
 
       {/* Runner / Scheduler */}
       <AdminSection
@@ -76,14 +29,6 @@ export default function SettingsDispatch() {
         subtitle="执行器并发控制与调度策略"
       >
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          <ChoiceField
-            label="scheduler_mode（调度器模式）"
-            description="runner 的调度策略"
-            value={runner.scheduler_mode}
-            choices={["priority", "round-robin", "fifo", "adaptive"]}
-            onChange={(v) => { setRunner({ scheduler_mode: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
           <NumberField
             label="runner_concurrency（并发数）"
             description="同时运行的 runner 数量上限"
@@ -132,32 +77,6 @@ export default function SettingsDispatch() {
             unit="秒"
             disabled={!isAdmin}
           />
-        </div>
-      </AdminSection>
-
-      {/* Daemon */}
-      <AdminSection
-        icon={Server}
-        title="后台任务（Daemon）"
-        subtitle="Daemon 自动执行的后台任务参数"
-      >
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <ToggleField
-              label="daemon_apply（启用 Apply）"
-              description="Daemon 是否自动应用变更"
-              checked={daemon.apply}
-              onChange={(v) => { setDaemon({ apply: v }); markDirty(); }}
-              disabled={!isAdmin}
-            />
-            <ToggleField
-              label="daemon_execute_runners（启用 Runner）"
-              description="Daemon 是否自动执行 runner"
-              checked={daemon.execute_runners}
-              onChange={(v) => { setDaemon({ execute_runners: v }); markDirty(); }}
-              disabled={!isAdmin}
-            />
-          </div>
         </div>
       </AdminSection>
     </div>

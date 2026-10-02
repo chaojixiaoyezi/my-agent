@@ -13,8 +13,6 @@ import { Database } from "lucide-react";
 
 export default function SettingsMemory() {
   const isAdmin = useAuthStore((s) => s.isAdmin);
-  const mem = useSettingsStore((s) => s.memoryParams);
-  const setMem = useSettingsStore((s) => s.setMemoryParams);
   const adv = useSettingsStore((s) => s.memoryAdvanced);
   const setAdv = useSettingsStore((s) => s.setMemoryAdvanced);
   const errors = useSettingsStore((s) => s.errors);
@@ -23,45 +21,7 @@ export default function SettingsMemory() {
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <SettingsPageHeader title="记忆参数（Memory）" subtitle="记忆存储上限、保留策略、归档规则与高级路由" saving={saving} onSave={handleSave} dirty={dirty} />
-
-      {/* Basic Memory */}
-      <AdminSection
-        icon={Database}
-        title="基础记忆（Basic Memory）"
-        subtitle="控制记忆存储上限、保留策略和归档"
-      >
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          <NumberField
-            label="memory_limit（记忆条目上限）"
-            description="单代理保留的最大记忆条目数"
-            value={mem.limit}
-            onChange={(v) => { setMem({ limit: v }); markDirty(); }}
-            min={100}
-            max={50000}
-            unit="条"
-            disabled={!isAdmin}
-            error={errors["mem_limit"]}
-          />
-          <NumberField
-            label="retention_days（保留天数）"
-            description="记忆自动清理前的保留天数"
-            value={mem.retention_days}
-            onChange={(v) => { setMem({ retention_days: v }); markDirty(); }}
-            min={1}
-            max={365}
-            unit="天"
-            disabled={!isAdmin}
-          />
-          <ToggleField
-            label="enable_archive（启用归档）"
-            description="超出上限的记忆是否自动归档到磁盘"
-            checked={mem.enable_archive}
-            onChange={(v) => { setMem({ enable_archive: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-        </div>
-      </AdminSection>
+      <SettingsPageHeader title="记忆参数（Memory）" subtitle="路由规则、Hook、上下文恢复与压缩策略" saving={saving} onSave={handleSave} dirty={dirty} />
 
       {/* Advanced Memory */}
       <AdminSection

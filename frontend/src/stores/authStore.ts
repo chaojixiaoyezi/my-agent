@@ -7,7 +7,6 @@ const SENSITIVE_FIELDS = new Set([
   "api_key",
   "api_base",
   "model_backend",
-  "tool_agent_budget_window_seconds",
   "tool_agent_budget_max_calls",
 ]);
 

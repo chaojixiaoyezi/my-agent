@@ -4,10 +4,7 @@ import { useAuthStore } from "../../stores/authStore";
 import {
   AdminSection,
   NumberField,
-  StringField,
-  ChoiceField,
   ToggleField,
-  Divider,
 } from "../../components/settings/SettingsFieldComponents";
 import { SettingsPageHeader } from "../../components/settings/SettingsPageHeader";
 import { useSettingsSection } from "../../components/settings/useSettingsSection";
@@ -25,10 +22,6 @@ export default function SettingsSubagents() {
     s.subagentParams);
   const setSub = useSettingsStore((s) =>
     s.setSubagentParams);
-  const acceptance = useSettingsStore((s) =>
-    s.acceptanceParams);
-  const setAcceptance = useSettingsStore((s) =>
-    s.setAcceptanceParams);
   const workflow = useSettingsStore((s) =>
     s.workflowParams);
   const setWorkflow = useSettingsStore((s) =>
@@ -87,52 +80,14 @@ export default function SettingsSubagents() {
       <AdminSection
         icon={Users}
         title="子代理限制（Subagent Limits）"
-        subtitle="任务拆分深度、并发限制与工作流目录"
+        subtitle="任务拆分深度与并发限制"
       >
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          <ToggleField
-            label="subagent_builtin_workflows（内置工作流）"
-            description="是否启用内置工作流模板"
-            checked={sub.builtin_workflows}
-            onChange={(v) => { setSub({ builtin_workflows: v }); markDirty(); }}
-            disabled={protectedDisabled}
-          />
-          <StringField
-            label="subagent_user_workflow_dirs（用户工作流目录）"
-            description="用户自定义工作流的目录路径"
-            value={sub.user_workflow_dirs.join(", ")}
-            onChange={(v) => {
-              setSub({ user_workflow_dirs: v.split(",").map((item) => item.trim()).filter(Boolean) });
-              markDirty();
-            }}
-            placeholder="多个路径用逗号分隔"
-            disabled={protectedDisabled}
-          />
-          <NumberField
-            label="subagent_workflow_review_rounds（审核轮数）"
-            description="工作流产出审核的最大轮数"
-            value={sub.workflow_review_rounds}
-            onChange={(v) => { setSub({ workflow_review_rounds: v }); markDirty(); }}
-            min={0}
-            max={10}
-            unit="轮"
-            disabled={protectedDisabled}
-          />
           <NumberField
             label="task_max_subagents（最大子代理数）"
             description="单个任务最多派生的直接子代理数"
             value={sub.task_max_subagents}
             onChange={(v) => { setSub({ task_max_subagents: v }); markDirty(); }}
-            min={0}
-            max={1000}
-            unit="个"
-            disabled={protectedDisabled}
-          />
-          <NumberField
-            label="task_max_grandchildren（最大孙代理数）"
-            description="单个任务最多派生的间接子代理总数"
-            value={sub.task_max_grandchildren}
-            onChange={(v) => { setSub({ task_max_grandchildren: v }); markDirty(); }}
             min={0}
             max={1000}
             unit="个"
@@ -145,36 +100,10 @@ export default function SettingsSubagents() {
       <AdminSection
         icon={GitBranch}
         title="验收与工作流（Acceptance & Workflow）"
-        subtitle="验收策略、工作流模式和自学习开关"
+        subtitle="自学习开关"
       >
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
-            <ChoiceField
-              label="reviewer_mode（审核者模式）"
-              description="验收流程由谁负责审核"
-              value={acceptance.reviewer_mode}
-              choices={["parent-dispatch", "auto", "human-in-loop"]}
-              onChange={(v) => { setAcceptance({ reviewer_mode: v }); markDirty(); }}
-              disabled={protectedDisabled}
-            />
-            <ToggleField
-              label="auto_accept（自动验收）"
-              description="低风险产出是否自动通过验收"
-              checked={acceptance.auto_accept}
-              onChange={(v) => { setAcceptance({ auto_accept: v }); markDirty(); }}
-              disabled={protectedDisabled}
-            />
-          </div>
-          <Divider />
-          <div className="grid grid-cols-2 gap-4">
-            <ChoiceField
-              label="workflow_mode（工作流模式）"
-              description="子代理调度的工作流策略"
-              value={workflow.mode}
-              choices={["off", "sequential", "parallel", "adaptive"]}
-              onChange={(v) => { setWorkflow({ mode: v }); markDirty(); }}
-              disabled={protectedDisabled}
-            />
             <ToggleField
               label="enable_self_learning（启用自学习）"
               description="成功 runner 的 lessons 是否生成 learning draft"

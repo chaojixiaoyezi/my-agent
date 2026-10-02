@@ -2,6 +2,24 @@
 
 状态：阶段 0 已实现（分支 `claude/param-center-phase0`，2026-09-27）；阶段 1—3 规划中，按下文顺序推进。
 
+## 2026-10-01 前端设置页与前端数据清理（P4/P5）
+
+- 设置页删掉 **29 个**对不上任何当前配置键的表单项（不在三份随包 YAML、也不在 `backend-config-catalog.json`）：Dispatch Loop 三项
+  （max_consecutive_rounds/max_runners/limit）、scheduler_mode、daemon_apply/daemon_execute_runners、timeout、memory_limit/retention_days/
+  enable_archive、enable_watchdog、feishu_webhook_url、qq_*（4 项）、max_input_length/max_path_length/forbid_dangerous_chars/
+  path_whitelist_only、notification_store_path/notification_channel_timeout_seconds、subagent_builtin_workflows/subagent_user_workflow_dirs/
+  subagent_workflow_review_rounds/task_max_grandchildren、reviewer_mode/auto_accept、workflow_mode。
+- `settingsStore.ts` 与 `frontend-runtime-config.json` 同步清理：dispatch/memory/acceptance/security/notification/watchdog 整组删除；
+  daemon（保留 runner_instruction）、runner（保留 concurrency/start_rate/timeout_seconds/dynamic_timeout_min/max）、subagent（保留
+  task_max_subagents）、workflow（保留 enable_self_learning）、memoryAdvanced/tools 各死字段删除；model 删 timeout/anthropic_version/
+  auto_bench_model_on_first_use。外部引用一并处理：Tools.tsx 预算窗口卡片（引用已删的 window_seconds）、authStore.ts 敏感字段清单。
+- 保留项：audit/localStore/session 组、log_level、daemon_runner_instruction（在权威集合）；SettingsTools 的“检索限制”是前端本地设置
+  （label 明确“不对应后端配置键”），不属于后端键，保留。
+- 守卫：新增 `agent_py_agent/tests/test_frontend_settings_labels.py`（不依赖 node）：设置页所有 `label="键（` 必须都在权威键集合，
+  settingsStore 引用的运行时配置组必须存在；YAML/目录键变化后设置页未同步会立刻失败。
+- **验证限制**：`bun run build`（tsc -b && vite build）因本机 `frontend/node_modules` 缺失（tsc: command not found）跑不了，未联网安装；
+  删除正确性由守卫与逐键核对（dead=0）支撑，未做真实 tsc/构建验证。
+
 ## 2026-09-30 新增参数
 
 - `goal_continuation_idle_limit`：连续多少个持续目标自动续跑片没有工具调用或 Goal/任务结构化状态变化时自动暂停；默认 3，设为 0 表示不限。
@@ -285,7 +303,7 @@
     生成的目录，在本批之前已经过期，本批未重新生成；前端设置页仍有 12 个已删键的表单项，留给前端单独清理。
     （2026-09-27 由分支 `claude/9a-batch3-e` 处理：目录按当前随包 YAML 重新生成为 313 项，`npm run check:config` 通过；设置页共清掉
     24 个已删键的表单项——本批 12 个、第 2 批被吸收的 6 个、第 3 批 A/E 组降为常量的 6 个，看门狗整段一并删除。store 与
-    `frontend-runtime-config.json` 里这些字段的默认值暂留，等能跑 tsc 类型检查时再清，见 ROADMAP。）
+    `frontend-runtime-config.json` 里这些字段的默认值暂留，等能跑 tsc 类型检查时再清，见 ROADMAP。**（2026-10-01 由分支 `worker/ds1-frontend-settings` 清掉 store 与 JSON 里的残留字段，ROADMAP 对应条目已关闭。）**）
   - **决策点位的期限与模型引用只留覆盖层（2026-09-27，集成者，分支 `claude/decision-point-fields`）**：12 个点位的
     `timeout_seconds`/`profile_id` 原来在 agent/memory/capability 三份配置里各有一个字段（24 个），与用户长期设置、会话设置里
     按点位覆盖是同一概念的两个家。现只保留覆盖层：配置里只有通用 `decision_timeout_seconds`、`decision_background_timeout_seconds`、
@@ -358,7 +376,7 @@
     删掉 C 组的 14 个键、其后字段的全局 `order` 与组内位置顺移。杂项批删掉 `conversation_pending_wake_limit` 后，原来挂在它上面
     的分组标题注释与 `background_context_max_total_tokens` 自己的注释连成一段，前后端解析器都把整段并进说明；随后按集成者决定
     删掉这段已无对象的分组标题，前后端说明都回到该键自己那句（说明基线是空说明名单，不含此键，无需改）。设置页清掉
-    `memory_resume_auto_context_limit` 表单项；store 默认值暂留（沿 3af7c94df 的做法）。
+    `memory_resume_auto_context_limit` 表单项；store 默认值暂留（沿 3af7c94df 的做法）。**（2026-10-01 已由 `worker/ds1-frontend-settings` 清理 store 与 JSON 中包括该键在内的全部死字段。）**
   - `tool_write_inline_max_chars`（写文件指引的软建议，集成者追加，分支 `claude/38-internal-constants-bd`）：常量统一到
     `tooling/content_transport_policy.MAX_INLINE_WRITE_CONTENT_CHARS`（12000），`settings/defaults` 里重复的
     `DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS` 删除；`core.py` 不再传入，`tool_model_generation` 两处直接用常量；`ToolRegistryParams`

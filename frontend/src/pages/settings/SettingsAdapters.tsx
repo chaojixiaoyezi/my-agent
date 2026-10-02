@@ -61,53 +61,6 @@ export default function SettingsAdapters() {
             onChange={(v) => { setAdapters({ feishu_app_secret: v }); markDirty(); }}
             disabled={!isAdmin}
           />
-          <StringField
-            label="feishu_webhook_url（Webhook URL）"
-            description="飞书自定义机器人的 Webhook 地址"
-            value={adapters.feishu_webhook_url}
-            onChange={(v) => { setAdapters({ feishu_webhook_url: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-        </div>
-      </AdminSection>
-
-      {/* QQ */}
-      <AdminSection
-        icon={Puzzle}
-        title="QQ"
-        subtitle="QQ 机器人配置与群聊白名单"
-      >
-        <div className="grid grid-cols-2 gap-4">
-          <StringField
-            label="qq_bot_uin（机器人 QQ 号）"
-            description="QQ 机器人的 QQ 号码"
-            value={adapters.qq_bot_uin}
-            onChange={(v) => { setAdapters({ qq_bot_uin: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
-          <StringField
-            label="qq_http_api_url（HTTP API 地址）"
-            description="go-cqhttp 或 mirai 的 HTTP API 地址"
-            value={adapters.qq_http_api_url}
-            onChange={(v) => { setAdapters({ qq_http_api_url: v }); markDirty(); }}
-            placeholder="http://localhost:5700"
-            disabled={!isAdmin}
-          />
-          <StringField
-            label="qq_group_whitelist（群聊白名单）"
-            description="允许交互的 QQ 群号列表"
-            value={adapters.qq_group_whitelist}
-            onChange={(v) => { setAdapters({ qq_group_whitelist: v }); markDirty(); }}
-            placeholder="多个群号用逗号分隔"
-            disabled={!isAdmin}
-          />
-          <StringField
-            label="qq_admin_qq（管理员 QQ）"
-            description="拥有管理权限的 QQ 号"
-            value={adapters.qq_admin_qq}
-            onChange={(v) => { setAdapters({ qq_admin_qq: v }); markDirty(); }}
-            disabled={!isAdmin}
-          />
         </div>
       </AdminSection>
     </div>

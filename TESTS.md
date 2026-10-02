@@ -5,6 +5,19 @@
 - 新用例 `test_settings_chat_control.py::test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works`：列表、搜索、`/settings all` 都不出现 `model_auth_ref`，`/settings show` 仍可查看且提示不能在这里修改；原加载器元数据用例的计数同步扣除隐藏集合。
 - 验证：`test_settings_chat_control.py`、`test_parameter_registry.py`、`test_user_config_capability.py` 124 passed。
 
+## 前端设置页与前端数据清理（2026-10-01，分支 `worker/ds1-frontend-settings`，基于 `5761f77bf`）
+
+- 设置页删除 29 个死表单项、settingsStore/frontend-runtime-config.json 同步清理（详见 DESIGN_LEDGER 同名节）。
+- 新增守卫 `agent_py_agent/tests/test_frontend_settings_labels.py`（2 项，不依赖 node）：
+  - `test_settings_labels_all_exist_in_authority_keys`：设置页所有 `label="键（` 必须在权威键集合（三份随包 YAML + backend-config-catalog.json），
+    失败列出差异；
+  - `test_settings_store_groups_exist_in_runtime_config`：settingsStore 引用的运行时配置组必须存在。
+  - 命令与结果：
+    `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_frontend_settings_labels.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **2 passed**
+- 核对：清理后设置页 label 键 46 个全部在权威键集合（dead=0）。
+- **未验证**：`bun run build`（tsc -b && vite build）因本机 `frontend/node_modules` 缺失（`tsc: command not found`）失败，
+  未联网安装依赖；tsc/vite 真实构建与页面渲染未在本机验证，需集成环境跑 `bun run build` 复核。
+
 ## 参数中心 P7 / P3（2026-10-01，分支 `worker/ds2-param-parity`，已实现）
 
 - **P7 全量默认值一致性**：新增 `test_config_defaults_parity.py` 2 项——随包 agent_config.yaml 用正式 `load_config` 加载后，`AgentConfig` 全部字段（224 个，其中 219 个 YAML 键）逐个断言等于 dataclass 默认值；5 个运行时元数据键跳过值比较但断言仍存在；值级白名单为空并校验结构不烂。

@@ -9,6 +9,26 @@
   [参数中心](docs/design/PARAMETER_CENTER.md) 的“减量收口”一条。
 - **验证**：见 TESTS.md 同名节。
 
+## 前端设置页与前端数据清理：删除已不存在的配置项（2026-10-01，分支 `worker/ds1-frontend-settings`，基于 `claude/3a-step16y` 的 `5761f77bf`，已实现，待集成）
+
+- **现象**：设置页有 29 个表单项对不上任何当前配置键（`label="键（` 逐一核对，均不在三份随包 YAML 与 `backend-config-catalog.json` 的
+  270 项权威键集合里）：真删过的键（scheduler_mode、task_max_grandchildren、Dispatch Loop 三项、enable_watchdog 等）和从来不是
+  AgentConfig 字段的键（qq_*、memory_limit 等）混在一起；`settingsStore.ts` 与 `frontend-runtime-config.json` 也留着这些已删键。
+- **做法（P4）**：
+  - 删 29 个死表单项：SettingsDispatch（Dispatch Loop 段、scheduler_mode、Daemon 段）、SettingsModel（timeout）、SettingsMemory
+    （Basic Memory 段）、SettingsGateway（enable_watchdog）、SettingsAdapters（feishu_webhook_url、QQ 段）、SettingsSecurity
+    （Security Policy 段、Notifications 段）、SettingsSubagents（工作流/验收/孙代理相关 7 项）。
+  - store/JSON 同步：dispatch/memory/acceptance/security/notification/watchdog 整组删除；daemon 保留 runner_instruction、runner 保留
+    5 个在用键、subagent 保留 task_max_subagents、workflow 保留 enable_self_learning、memoryAdvanced/tools/model 死字段删除。
+  - 外部引用一并处理：Tools.tsx 预算窗口卡片（引用已删的 window_seconds）、authStore.ts 敏感字段清单里的已删键。
+  - 保留：audit/localStore/session 组、log_level、daemon_runner_instruction（在权威集合）；SettingsTools 的“检索限制”是前端本地设置
+    （label 明确“不对应后端配置键”），保留。
+- **P5 守卫**：新增 `agent_py_agent/tests/test_frontend_settings_labels.py`（不依赖 node）：设置页所有 `label="键（` 必须都在权威键集合
+  （失败列差异），settingsStore 引用的运行时配置组必须存在。
+- **验证**：守卫 2 passed；设置页 label 键 46 个全部在权威集合（dead=0）。`bun run build` 因本机无 `frontend/node_modules`
+  （tsc: command not found）跑不了，未联网安装；tsc/vite 构建验证留待集成环境。
+- **文档**：PARAMETER_CENTER.md、ROADMAP.md 同步（两个“未排期/暂留”条目标完成）。
+
 ## 参数中心 P7 全量默认值一致性测试与 P3 补齐 8 个保留键说明（2026-10-01，分支 `worker/ds2-param-parity`，已实现，待集成）
 
 - **P7**：新增 `agent_py_agent/tests/test_config_defaults_parity.py`——用正式加载器 `load_config` 读随包 agent_config.yaml，对 `AgentConfig` 全部字段逐个断言加载值等于 dataclass 默认值（219 个 YAML 键当前全部一致，值级白名单为空）。5 个加载器运行时元数据键（config_layers/config_path/config_sources/config_warnings/memory_config_warnings）跳过值比较但断言仍存在；值级白名单结构保留且要求“放进去的键必须仍不一致”，防止白名单烂掉。api_key 由 `api_key_env` 环境变量注入，测试先清 `AGENT_API_KEY` 再加载，避免本机环境污染。实现了 PARAMETER_CENTER.md 目标第 2 条“随包 YAML、AgentConfig 默认值和文档一致，由测试核对”的全量落点。

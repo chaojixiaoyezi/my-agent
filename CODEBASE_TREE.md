@@ -780,6 +780,7 @@ agent_py_agent/
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
 |   |-- test_parameter_registry.py     # 参数中心登记表：覆盖全部字段、YAML 说明（上方注释优先，其次行尾注释）、空说明基线、安全等级、凭据脱敏、搜索排序、派生实际效果、常用层级守卫
 |   |-- test_backend_config_catalog.py # 前端参数目录守卫（不依赖 node）：随包 YAML 键集合==目录键集合、目录说明与后端一致、restartRequired 全 true
+|   |-- test_frontend_settings_labels.py # 前端设置页守卫（不依赖 node）：设置页 label 键必须在权威键集合、store 引用的运行时配置组必须存在
 |   |-- fixtures/parameter_description_baseline.json # 说明为空的参数基线名单（按原因分组）；名单外新增或名单里已有说明/已删除都让测试失败
 |   |-- test_structured_masking.py     # 字典/列表参数结构脱敏：请求头与环境变量只留键名，任意开关后的“名字: 值/名字=值”只留名字，凭据开关、连接串与网址密码遮值，各回显与记账出口无明文
 |   |-- test_value_display_parity.py   # 回显值文字一致：8 种值（False/0/True/None/空串/空列表/空映射/凭据）在 user_config 查看/搜索/改参回执、/settings show、config get 下显示相同，聊天空值显示“（空）”，走不到的格子核对原因

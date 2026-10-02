@@ -60,16 +60,6 @@ export default function SettingsModel() {
             disabled={!isAdmin}
             error={errors["mp_tokens"]}
           />
-          <NumberField
-            label="timeout（请求超时）"
-            description="单次模型请求超时时间"
-            value={model.timeout}
-            onChange={(v) => { setModel({ timeout: v }); markDirty(); }}
-            min={5}
-            max={600}
-            unit="秒"
-            disabled={!isAdmin}
-          />
         </div>
       </AdminSection>
 

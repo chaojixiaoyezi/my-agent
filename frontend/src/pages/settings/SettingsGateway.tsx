@@ -3,7 +3,6 @@ import { useAuthStore } from "../../stores/authStore";
 import {
   AdminSection,
   NumberField,
-  ToggleField,
 } from "../../components/settings/SettingsFieldComponents";
 import { SettingsPageHeader } from "../../components/settings/SettingsPageHeader";
 import { useSettingsSection } from "../../components/settings/useSettingsSection";
@@ -82,13 +81,6 @@ export default function SettingsGateway() {
             min={5}
             max={300}
             unit="秒"
-            disabled={!isAdmin}
-          />
-          <ToggleField
-            label="enable_watchdog（启用看门狗）"
-            description="是否启用 Gateway 进程看门狗监控"
-            checked={gw.enable_watchdog}
-            onChange={(v) => { setGw({ enable_watchdog: v }); markDirty(); }}
             disabled={!isAdmin}
           />
         </div>

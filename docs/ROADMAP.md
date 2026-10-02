@@ -338,10 +338,13 @@ pending 插话重放已按原 mailbox 锁内最新状态和准确 DB 预留收�
    长思考折叠计数真实流式更新已验；慢模型单槽位排队超时与推理耗尽输出预算仍待分别治理。
    方案见 [并行执行](design/SUBAGENT_PARALLEL_EXECUTION.md)。
 
-- **前端设置页 30 个非 AgentConfig 标签键（未排期）**：设置页表单项标签里有 30 个键从来不是 AgentConfig 字段（如 `qq_*`、`enable_watchdog`、`scheduler_mode`），可能属于别的配置或早已失效，需逐个核对归属再决定删改；用户主要用 TUI 和 IM，优先级低。
-- **前端 JSON 与 store 残留已删后端键的旧字段（等能跑 tsc 时再清）**：`frontend/config/frontend-runtime-config.json` 与
-  `frontend/src/stores/settingsStore.ts` 里仍有参数减量删掉的后端键对应的默认值（设置页表单项已清）。本机没有
-  `frontend/node_modules`，删字段后查不出引用断裂，所以现在不删；`runtimeConfig.ts` 的类型由 JSON 推导，清 JSON 时自动跟上。
+- ~~前端设置页 30 个非 AgentConfig 标签键（未排期）~~：**已完成（2026-10-01，分支 `worker/ds1-frontend-settings`）**。设置页 29 个对不上任何
+  当前配置键的表单项已删（含 `qq_*`、`enable_watchdog`、`scheduler_mode`、Dispatch Loop 三项、任务拆分深度/工作流/验收相关键），
+  并加了不依赖 node 的 pytest 守卫 `test_frontend_settings_labels.py`（label 键必须在权威键集合里）。
+- ~~前端 JSON 与 store 残留已删后端键的旧字段（等能跑 tsc 时再清）~~：**已完成（2026-10-01，分支 `worker/ds1-frontend-settings`）**。
+  `frontend/config/frontend-runtime-config.json` 与 `frontend/src/stores/settingsStore.ts` 里已删后端键对应的默认值和字段已清掉
+  （dispatch/memory/acceptance/security/notification/watchdog 整组，以及 daemon/runner/subagent/tools/memoryAdvanced/model 里的死字段）；
+  `runtimeConfig.ts` 的类型由 JSON 推导，清 JSON 时自动跟上；仅有的外部引用（`Tools.tsx` 预算窗口、`authStore.ts` 敏感字段）一并处理。
 - ~~前端目录生成器的注释归属与后端统一（未排期，低优先级）~~：**已完成（2026-10-01，分支 `worker/ds1-config-catalog`）**。生成器
   `frontend/scripts/sync-backend-config.mjs` 的注释归属按后端 `parameter_registry._descriptions_from_lines` 规则统一（空行/任何非注释行
   中断注释块、无上方注释取行尾注释，不再跨空行累积、不再截断到 8 行），删掉已删键映射，`restartRequired` 与后端 effect 语义一致（全部需要重启）；

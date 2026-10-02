@@ -107,13 +107,6 @@ export default function Tools() {
 
       <div className="grid grid-cols-3 gap-3">
         <div className="bg-card rounded-2xl border border-border p-4 shadow-card">
-          <div className="text-xs text-ink-secondary mb-1">工具预算窗口</div>
-          <div className="text-lg font-semibold text-ink">
-            {frontendRuntimeConfig.tools.budget.window_seconds} 秒
-          </div>
-          <div className="text-[11px] text-ink-tertiary">每 10 分钟重置</div>
-        </div>
-        <div className="bg-card rounded-2xl border border-border p-4 shadow-card">
           <div className="text-xs text-ink-secondary mb-1">最大调用次数</div>
           <div className="text-lg font-semibold text-ink">
             {frontendRuntimeConfig.tools.budget.max_calls} 次
