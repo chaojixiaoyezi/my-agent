@@ -1,4 +1,6 @@
 # LLM: 能力包 B 的独立单文件检查器；只按显式 CLI 文件授权核对结构、时长、handoff.v2 及可选基线差异，不启动模型/资源或写宿主状态；同步包方法及组件测试。
+#   0.3.0 加缺表/缺外键、编造参考 ID、动作节拍缺角色、出镜人物缺参考，以及“与基线不同且 handoff 没列”的节拍/对应关系/schema/时长
+#   改动和“handoff 声称改了其实没改”；--host-json 输出宿主核验结果，宿主模式下交接文件按摘要和宿主给的文件对应，不读别的路径。
 # 模块用途: 只读制作资料、明确绑定的交接文件和可选基线项目，用同次字节核对摘要、对象地址与逐 ID 差异，向 stdout 输出分项结果或已转义的静态报告。
 
 from __future__ import annotations
@@ -21,9 +23,17 @@ MAX_JSON_DEPTH = 64
 MAX_POINTER_CHARS = 2048
 MAX_POINTER_PARTS = 64
 PACKAGE_ID = "drama-workflow-b"
-PACKAGE_VERSION = "0.2.0"
+PACKAGE_VERSION = "0.3.0"
 PROJECT_TABLES = ("episodes", "characters", "locations", "props", "scenes", "shots", "references")
 MAX_DIFF_ITEMS = 100
+HOST_RESULT_SCHEMA = "pack_verifier_result.v1"
+# 宿主核验合同建议 metrics 平铺成“键 → 数字”且不超过 16 个键。
+HOST_METRICS_MAX_COUNT = 16
+# 宿主模式下输入读不了时，按参数换成宿主读的结构化码。
+HOST_UNREADABLE_CODES = {"--project": "target_unreadable", "--handoff": "handoff_unreadable",
+                         "--baseline-project": "baseline_unreadable"}
+# 参考 ID 前缀从本项目 references 表的 ID 推出（开头字母加第一个分隔符，例如 REF-C01 → REF-），不写死格式。
+REFERENCE_PREFIX = re.compile(r"[A-Za-z]+[-_:]")
 
 
 # LLM: 只携带确定错误码，不回显文件正文、任意异常或凭据；CLI 将其归入实际检查范围。
@@ -224,6 +234,82 @@ def check_episode_seconds(catalog: dict, errors: list[dict], warnings: list[dict
     return totals
 
 
+# LLM: 动作节拍用 character_ids 写出参与的角色（只能是本场角色）；没写或写空只提醒 beat_character_missing（纯环境动作可以没有角色），
+#   写了却不是本场角色是 error。对白节拍仍用 character_id。
+# 函数用途: 核对一个动作节拍的角色列表。
+def action_beat_characters(beat: dict, beat_id: str, scene_characters: set[str], errors: list[dict],
+                           warnings: list[dict]) -> None:
+    values = beat.get("character_ids")
+    if values is None or values == []:
+        warnings.append({"code": "beat_character_missing", "path": beat_id})
+    elif not isinstance(values, list) or not all(isinstance(value, str) and value in scene_characters for value in values):
+        errors.append({"code": "unknown_reference", "path": f"{beat_id}.character_ids"})
+
+
+# LLM: 镜头的出镜角色 = 它引用的节拍里的说话人和动作角色。项目里有人物参考时，出镜角色在本镜 reference_ids 里没有一条
+#   kind=character 的参考就提醒；项目完全没有人物参考计划时不提醒（不要求虚构参考）。只比 ID。
+# 函数用途: 提醒出镜人物缺本镜人物参考。
+def shot_reference_warnings(catalog: dict, beat_catalog: dict, warnings: list[dict]) -> None:
+    subjects = {identifier: row.get("subject_id") for identifier, row in catalog["references"].items()
+                if row.get("kind") == "character"}
+    if not subjects:
+        return
+    for identifier, shot in catalog["shots"].items():
+        beats = beat_catalog.get(shot.get("scene_id"), {}) if isinstance(shot.get("scene_id"), str) else {}
+        beat_ids = shot.get("beat_ids") if isinstance(shot.get("beat_ids"), list) else []
+        reference_ids = shot.get("reference_ids") if isinstance(shot.get("reference_ids"), list) else []
+        covered = {subjects[value] for value in reference_ids if isinstance(value, str) and value in subjects}
+        for character in sorted(beat_characters(beats, beat_ids) - covered):
+            warnings.append({"code": "shot_character_reference_missing", "path": identifier, "character_id": character})
+
+
+# 函数用途: 取一组节拍里的说话人和动作角色 ID。
+def beat_characters(beats: dict, beat_ids: list) -> set[str]:
+    result = set()
+    for value in beat_ids:
+        beat = beats.get(value) if isinstance(value, str) else None
+        if not isinstance(beat, dict):
+            continue
+        if isinstance(beat.get("character_id"), str):
+            result.add(beat["character_id"])
+        values = beat.get("character_ids")
+        if isinstance(values, list):
+            result.update(item for item in values if isinstance(item, str))
+    return result
+
+
+# LLM: 参考 ID 的写法从本项目 references 表推出前缀（如 REF-），再在整份 JSON 的所有字符串里找这种写法的 ID；找到但表里没有就是
+#   编造的参考 ID（含缺项说明、unresolved 这类自由字段）。references 自己的 id 和镜头 reference_ids（另有外键检查）不重复报。
+#   推不出前缀（表空或 ID 没有分隔符）就不查。只按 ID 字面比对，不解析句意；明细最多 MAX_DIFF_ITEMS 条。
+# 函数用途: 找出文字里提到、但参考表里不存在的参考 ID。
+def reference_mentions(document: object, references: dict) -> list[dict]:
+    prefixes = {match.group(0) for match in (REFERENCE_PREFIX.match(value) for value in references) if match}
+    if not prefixes:
+        return []
+    pattern = re.compile("(?:" + "|".join(map(re.escape, sorted(prefixes))) + r")[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*")
+    errors = []
+    for pointer, text in string_values(document, ""):
+        if re.fullmatch(r"/references/\d+/id|/shots/\d+/reference_ids/\d+", pointer):
+            continue
+        errors.extend({"code": "unknown_reference_mention", "path": pointer, "reference_id": token}
+                      for token in pattern.findall(text) if token not in references)
+    return errors[:MAX_DIFF_ITEMS]
+
+
+# LLM: 深度已由 parse_document 限制；地址用 JSON Pointer（RFC 6901 转义）。只产出字符串值，不改输入。
+# 函数用途: 列出一份 JSON 里每个字符串值及其地址。
+def string_values(value: object, pointer: str) -> list[tuple[str, str]]:
+    if isinstance(value, str):
+        return [(pointer, value)]
+    if isinstance(value, dict):
+        items = ((str(key).replace("~", "~0").replace("/", "~1"), child) for key, child in value.items())
+    elif isinstance(value, list):
+        items = ((str(position), child) for position, child in enumerate(value))
+    else:
+        return []
+    return [found for key, child in items for found in string_values(child, f"{pointer}/{key}")]
+
+
 # LLM: 只验证跨表关系及显式时长对账；不改输入或宿主状态，结构通过不代表内容、真实媒体或创作节奏通过。
 # 函数用途: 找出剧集、场次、人物、道具、节拍与镜头的断链，并逐集报告镜头合计与目标不一致。
 def check_project(project: object) -> dict:
@@ -232,8 +318,11 @@ def check_project(project: object) -> dict:
         return {"structure_valid": False, "errors": [{"code": "object_required", "path": "$"}]}
     if project.get("schema") != "drama_workflow_project.v1":
         errors.append({"code": "unsupported_schema", "path": "schema"})
-    catalog = {key: index_rows(project, key, errors) for key in
-               ("episodes", "characters", "locations", "props", "scenes", "shots", "references")}
+    catalog = {}
+    for key in PROJECT_TABLES:
+        if key not in project:
+            errors.append({"code": "missing_table", "path": key})
+        catalog[key] = index_rows(project, key, errors) if key in project else {}
     for key in ("episodes", "scenes", "shots"):
         if not catalog[key]:
             errors.append({"code": "nonempty_required", "path": key})
@@ -241,7 +330,9 @@ def check_project(project: object) -> dict:
     for identifier, scene in catalog["scenes"].items():
         for key, target in (("episode_id", "episodes"), ("location_id", "locations")):
             value = scene.get(key)
-            if not isinstance(value, str) or value not in catalog[target]:
+            if key not in scene:
+                errors.append({"code": "missing_foreign_key", "path": f"{identifier}.{key}"})
+            elif not isinstance(value, str) or value not in catalog[target]:
                 errors.append({"code": "unknown_reference", "path": f"{identifier}.{key}"})
         scene_characters[identifier] = references(scene, "character_ids", catalog["characters"], identifier, errors)
         references(scene, "prop_ids", catalog["props"], identifier, errors)
@@ -254,12 +345,16 @@ def check_project(project: object) -> dict:
                 speaker = beat.get("character_id")
                 if not isinstance(speaker, str) or speaker not in scene_characters[identifier]:
                     errors.append({"code": "speaker_outside_scene", "path": beat_id})
-            elif beat.get("kind") != "action":
+            elif beat.get("kind") == "action":
+                action_beat_characters(beat, beat_id, scene_characters[identifier], errors, warnings)
+            else:
                 errors.append({"code": "unknown_beat_kind", "path": beat_id})
     covered, shot_seconds = {}, []
     for identifier, shot in catalog["shots"].items():
         scene_id = shot.get("scene_id")
-        if not isinstance(scene_id, str) or scene_id not in beat_catalog:
+        if "scene_id" not in shot:
+            errors.append({"code": "missing_foreign_key", "path": f"{identifier}.scene_id"})
+        elif not isinstance(scene_id, str) or scene_id not in beat_catalog:
             errors.append({"code": "unknown_scene", "path": identifier})
         else:
             refs = references(shot, "beat_ids", beat_catalog[scene_id], identifier, errors)
@@ -278,11 +373,15 @@ def check_project(project: object) -> dict:
     for identifier, reference in catalog["references"].items():
         kind, subject = reference.get("kind"), reference.get("subject_id")
         target = {"character": "characters", "location": "locations", "prop": "props"}.get(kind) if isinstance(kind, str) else None
-        if target is None or not isinstance(subject, str) or subject not in catalog[target]:
+        if "subject_id" not in reference:
+            errors.append({"code": "missing_foreign_key", "path": f"{identifier}.subject_id"})
+        elif target is None or not isinstance(subject, str) or subject not in catalog[target]:
             errors.append({"code": "unknown_reference_subject", "path": identifier})
         if reference.get("state") not in ("planned", "provided"):
             errors.append({"code": "invalid_reference_state", "path": identifier})
         warnings.append({"code": "reference_media_not_verified", "path": identifier})
+    shot_reference_warnings(catalog, beat_catalog, warnings)
+    errors.extend(reference_mentions(project, catalog["references"]))
     warnings.append({"code": "creative_quality_and_media_not_checked"})
     total_seconds = duration_sum(shot_seconds, "shots", errors)
     episode_seconds = check_episode_seconds(catalog, errors, warnings)
@@ -305,11 +404,13 @@ def check_fields(row: object, required: set[str], at: str, errors: list[dict], o
     return required <= row.keys() and row.keys() <= required | optional
 
 
-# LLM: 只验证声明非空，不从文字推导故事、权限、质量或完成状态。
+# LLM: 只验证声明非空、不是整段照抄模板的 <…> 提示（0.3.0），不从文字推导故事、权限、质量或完成状态。
 # 函数用途: 检查用途、理由与复核说明是否实际填写。
 def check_text(value: object, at: str, errors: list[dict]) -> None:
     if not isinstance(value, str) or not value.strip():
         errors.append({"code": "text_required", "path": at})
+    elif value.strip().startswith("<") and value.strip().endswith(">"):
+        errors.append({"code": "placeholder_text", "path": at})
 
 
 # LLM: 交接 ID 是精确字符串，不猜名称或把空白修成另一个身份。
@@ -447,12 +548,15 @@ def check_handoff_relations(rows: dict, files: dict, stages: dict, documents: di
 
 
 # LLM: CLI 的 file_id=path 才是文件授权；任何 JSON 路径、摘要或未知 ID 都不能扩大集合；全量预检失败即零文件读取。
+#   bindings 为 None 是宿主模式（文件按摘要对应宿主给的文件，见 check_handoff 的 known）：只查路径和摘要的形状。
 # 函数用途: 在读取前对齐交接清单与显式绑定，拒绝漏项、多余绑定、路径替换及无效摘要。
-def check_file_grants(files: dict, bindings: dict[str, Path], errors: list[dict]) -> None:
-    for identifier in files.keys() - bindings.keys():
-        errors.append({"code": "input_not_authorized", "path": f"files[{identifier}]"})
-    for identifier in bindings.keys() - files.keys():
-        errors.append({"code": "unknown_binding", "path": f"bindings[{identifier}]"})
+def check_file_grants(files: dict, bindings: dict[str, Path] | None, errors: list[dict]) -> None:
+    if bindings is not None:
+        for identifier in files.keys() - bindings.keys():
+            errors.append({"code": "input_not_authorized", "path": f"files[{identifier}]"})
+        for identifier in bindings.keys() - files.keys():
+            errors.append({"code": "unknown_binding", "path": f"bindings[{identifier}]"})
+    bindings = bindings or {}
     for identifier, row in files.items():
         at = f"files[{identifier}]"
         path = row["path"]
@@ -488,8 +592,11 @@ def load_handoff_documents(files: dict, bindings: dict[str, Path], snapshots: di
 
 
 # LLM: handoff.v2 是包内制作资料；只核机械关系，结果不能证明实际生产阶段发生或语义正确，不写任务/授权/采用账。
+#   known 不为 None 是宿主模式：宿主只给了 target 和基线，没有 --input-file 授权；files 里摘要等于 known 某份字节摘要的条目就用
+#   那份文档，其余条目记 handoff_file_not_available 提醒、不读，结论不依赖它们。
 # 函数用途: 两阶段验证交接，先拒绝畸形声明与越权文件，再检查原字节摘要和真实对象地址。
-def check_handoff(handoff: object, bindings: dict[str, Path], snapshots: dict | None = None) -> dict:
+def check_handoff(handoff: object, bindings: dict[str, Path] | None, snapshots: dict | None = None,
+                  known: dict[str, object] | None = None) -> dict:
     errors, warnings = [], [{"code": "handoff_semantics_and_execution_not_checked"}]
     fields = {
         "files": {"id", "path", "sha256"},
@@ -505,7 +612,7 @@ def check_handoff(handoff: object, bindings: dict[str, Path], snapshots: dict | 
             errors.append({"code": "unsupported_schema", "path": "schema"})
         rows = {key: handoff_rows(handoff, key, required, errors) for key, required in fields.items()}
         files = {row["id"]: row for row in rows["files"]}
-        check_file_grants(files, bindings, errors)
+        check_file_grants(files, None if known is not None else bindings, errors)
         for row in rows["stages"]:
             identifier = row["id"]
             for field in ("scope", "review_notes"):
@@ -518,11 +625,17 @@ def check_handoff(handoff: object, bindings: dict[str, Path], snapshots: dict | 
         check_handoff_relations(rows, files, stages, None, errors)
         if rows["unresolved_differences"]:
             warnings.append({"code": "unresolved_differences_present", "count": len(rows["unresolved_differences"])})
-        if not errors:
+        if not errors and known is not None:
+            documents = {identifier: known[row["sha256"]] for identifier, row in files.items() if row["sha256"] in known}
+            warnings.extend({"code": "handoff_file_not_available", "path": f"files[{identifier}]"}
+                            for identifier in sorted(files.keys() - documents.keys()))
+            check_handoff_relations(rows, files, stages, documents, errors)
+        elif not errors:
             documents = load_handoff_documents(files, bindings, snapshots if snapshots is not None else {}, errors)
             check_handoff_relations(rows, files, stages, documents, errors)
         if not errors:
             errors.extend(false_change_claims(rows, stages, documents))
+            errors.extend(mapping_claims_without_change(rows, documents))
             undeclared = undeclared_changes(rows, stages, documents)
             warnings.extend(undeclared[:MAX_DIFF_ITEMS])
             if len(undeclared) > MAX_DIFF_ITEMS:
@@ -644,13 +757,13 @@ def address_covers(addresses: set[tuple[str, str]], file_id: str, pointer: str) 
                for owner, declared in addresses)
 
 
-# LLM: 交接行的全部结构化地址都参与覆盖判断；只读已校验通过的行，不解析 reason 等说明文字。
-# 函数用途: 收集某个阶段交接行里声明过的 (文件, 地址)。
-def stage_addresses(rows: dict, stage_id: str) -> set[tuple[str, str]]:
+# LLM: 交接行的全部结构化地址都参与覆盖判断；只读已校验通过的行，不解析 reason 等说明文字。stage_id 为 None 时收集全部阶段。
+# 函数用途: 收集某个阶段（或全部阶段）交接行里声明过的 (文件, 地址)。
+def stage_addresses(rows: dict, stage_id: str | None) -> set[tuple[str, str]]:
     addresses = set()
     for section in ("object_mappings", "omissions", "additions", "unresolved_differences"):
         for row in rows[section]:
-            if row.get("stage_id") != stage_id:
+            if stage_id is not None and row.get("stage_id") != stage_id:
                 continue
             references = row.get("refs") if section == "unresolved_differences" else [row.get("source"), row.get("target")]
             for reference in references if isinstance(references, list) else []:
@@ -714,6 +827,83 @@ def false_change_claims(rows: dict, stages: dict, documents: dict) -> list[dict]
     return errors
 
 
+# LLM: 对象映射写的是“来源对象 → 目标对象”的改动；两端都在已读文档里、地址指向的值逐字段完全相同，就是声称改了其实没改。
+#   只比较能定位的两端，不解析 reason 文字。
+# 函数用途: 找出交接里没有真实发生的映射改动。
+def mapping_claims_without_change(rows: dict, documents: dict) -> list[dict]:
+    errors = []
+    for position, row in enumerate(rows["object_mappings"]):
+        values = []
+        for field in ("source", "target"):
+            reference = row.get(field)
+            document = documents.get(reference.get("file_id")) if isinstance(reference, dict) else None
+            try:
+                values.append(pointer_value(document, pointer_parts(reference.get("pointer"))) if document is not None else None)
+            except InputProblem:
+                values.append(None)
+        if values[0] is not None and values[0] == values[1]:
+            errors.append({"code": "handoff_claim_without_change", "path": f"object_mappings[{position}]"})
+    return errors
+
+
+# LLM: 交接里所有结构化地址（四类行的 source/target/refs）按文件 ID 收集；文件 ID 按 files[].sha256 对应到本次项目（after）
+#   或基线（before）的实际字节摘要，不读路径。没有交接时什么都不算列出。
+# 函数用途: 生成“某处改动有没有在交接里列出”的判断函数。
+def handoff_listing(handoff: object, project_sha256: str | None, baseline_sha256: str | None):
+    sides = {"after": set(), "before": set()}
+    addresses = set()
+    if isinstance(handoff, dict):
+        for row in handoff.get("files") if isinstance(handoff.get("files"), list) else []:
+            if isinstance(row, dict) and isinstance(row.get("id"), str):
+                sides["after"].update([row["id"]] if row.get("sha256") == project_sha256 else [])
+                sides["before"].update([row["id"]] if row.get("sha256") == baseline_sha256 else [])
+        rows = {section: [row for row in handoff[section] if isinstance(row, dict)]
+                if isinstance(handoff.get(section), list) else []
+                for section in ("object_mappings", "omissions", "additions", "unresolved_differences")}
+        addresses = stage_addresses(rows, None)
+    return lambda side, pointer: any(address_covers(addresses, file_id, pointer) for file_id in sides[side])
+
+
+# LLM: 整理不等于改写：节拍增删（重新编号）或台词改动、镜头和节拍/参考的对应关系、schema 名、镜头秒数和分集目标秒数与基线不同，
+#   而交接没列出这处地址，就是 error（用户要求的改动必须写进交接）。说话人、类型等其它差异仍只提醒（compare_with_baseline）。
+#   只按 ID 和字段值比较，不判断改动好坏。
+# 函数用途: 找出没在交接里列出的基线改动。
+def baseline_violations(baseline: dict, project: dict, listed) -> list[dict]:
+    old, new = project_objects(baseline), project_objects(project)
+    found = []
+    if baseline.get("schema") != project.get("schema"):
+        found.append(("baseline_schema_or_duration_changed", "schema", "after", "/schema"))
+    for table, field in (("shots", "seconds"), ("episodes", "target_seconds")):
+        for identifier in sorted(old[table].keys() & new[table].keys()):
+            if old[table][identifier][1].get(field) != new[table][identifier][1].get(field):
+                found.append(("baseline_schema_or_duration_changed", f"{table}:{identifier}", "after",
+                              f"/{table}/{new[table][identifier][0]}/{field}"))
+    for identifier in sorted(old["shots"].keys() | new["shots"].keys()):
+        if shot_relations(old["shots"].get(identifier)) != shot_relations(new["shots"].get(identifier)):
+            side, rows = ("after", new) if identifier in new["shots"] else ("before", old)
+            found.append(("baseline_relation_changed", f"shots:{identifier}", side, f"/shots/{rows['shots'][identifier][0]}"))
+    old_beats, new_beats = project_beats(old), project_beats(new)
+    for key in sorted(old_beats.keys() | new_beats.keys()):
+        before, after = old_beats.get(key), new_beats.get(key)
+        if before is None or after is None or dialogue_text(before[1]) != dialogue_text(after[1]):
+            side, pointer = ("after", after[0]) if after is not None else ("before", before[0])
+            found.append(("baseline_beat_changed", "beats:" + ".".join(key), side, pointer))
+    return [{"code": code, "path": path, "pointer": pointer} for code, path, side, pointer in found
+            if not listed(side, pointer)][:MAX_DIFF_ITEMS]
+
+
+# 函数用途: 取一个镜头和节拍、参考的对应关系（集合，忽略顺序）；镜头不存在时为空。
+def shot_relations(entry: tuple[int, dict] | None) -> tuple[frozenset, frozenset]:
+    shot = entry[1] if entry is not None else {}
+    return tuple(frozenset(value for value in shot.get(key, []) if isinstance(value, str))
+                 if isinstance(shot.get(key), list) else frozenset() for key in ("beat_ids", "reference_ids"))
+
+
+# 函数用途: 对白节拍返回台词原文，其它节拍返回 None（动作文字改动不算台词改动）。
+def dialogue_text(beat: dict) -> object:
+    return beat.get("text") if beat.get("kind") == "dialogue" else None
+
+
 # LLM: 绑定来自重复 CLI 参数，不读取或推断 handoff 中的路径；重复绑定不得采用最后一个值。
 # 函数用途: 解析明确的 file_id=path 授权，保留非法与重复输入错误。
 def parse_bindings(values: list[str], errors: list[dict]) -> dict[str, Path]:
@@ -733,29 +923,40 @@ def parse_bindings(values: list[str], errors: list[dict]) -> dict[str, Path]:
     return bindings
 
 
-# LLM: 基线是另一份显式 CLI 授权的项目 v1，同一 reader 与上限读取；只对比、不改判 project；项目读不出时标 not_checked 而不是通过。
-# 函数用途: 读取可选基线并与本次项目逐 ID 对比，返回分项结果与状态。
-def evaluate_baseline(baseline_path: Path | None, project: object) -> tuple[dict, str]:
+# LLM: 基线是另一份显式 CLI 授权的项目 v1，同一 reader 与上限读取；读不出或不是项目 v1 时带失败结果返回，不让后续比较。
+# 函数用途: 读取可选基线，返回 {"status", "raw", "document"} 或失败结果。
+def read_baseline(baseline_path: Path | None) -> dict:
     if baseline_path is None:
-        return {"errors": [], "warnings": [], "metrics": {}}, "not_requested"
+        return {"status": "not_requested", "errors": []}
     try:
         raw, baseline = read_snapshot(baseline_path)
     except InputProblem as exc:
-        return {"errors": [{"code": "invalid_input", "cause": exc.code, "path": "--baseline-project"}]}, "failed"
+        return {"status": "failed", "errors": [{"code": "invalid_input", "cause": exc.code, "path": "--baseline-project"}]}
     if not isinstance(baseline, dict) or baseline.get("schema") != "drama_workflow_project.v1":
-        return {"errors": [{"code": "unsupported_schema", "path": "--baseline-project"}]}, "failed"
+        return {"status": "failed", "errors": [{"code": "unsupported_schema", "path": "--baseline-project"}]}
+    return {"status": "read", "raw": raw, "document": baseline, "errors": []}
+
+
+# LLM: 只对比、不改判 project；项目读不出时标 not_checked 而不是通过。差异明细只提醒；节拍、对应关系、schema、时长的改动没在交接里
+#   列出（listed 判断）时是 error，基线范围记 failed。
+# 函数用途: 把已读的基线与本次项目逐 ID 对比，返回分项结果与状态。
+def evaluate_baseline(baseline: dict, project: object, listed) -> tuple[dict, str]:
+    if baseline["status"] != "read":
+        return {"errors": baseline["errors"], "warnings": [], "metrics": {}}, baseline["status"]
     if not isinstance(project, dict):
         return {"errors": [], "warnings": [{"code": "baseline_not_compared"}], "metrics": {}}, "not_checked"
-    metrics, warnings = compare_with_baseline(baseline, project, raw)
-    return {"errors": [], "warnings": warnings, "metrics": metrics}, "passed"
+    metrics, warnings = compare_with_baseline(baseline["document"], project, baseline["raw"])
+    errors = baseline_violations(baseline["document"], project, listed)
+    return {"errors": errors, "warnings": warnings, "metrics": metrics}, "failed" if errors else "passed"
 
 
 # LLM: CLI 聚合只形成一份报告；project 原函数语义不变，handoff 未请求不等于通过；本次缓存仅按原 Path 绑定复用，不能折叠 ..；
-#   基线差异只给 warning，报告附检查器身份与项目摘要。
+#   基线差异多数只给 warning（未列出的节拍/对应关系/schema/时长改动除外），报告附检查器身份与项目摘要。
+#   host_mode 且没有 --input-file 时，交接文件按摘要对应宿主给的项目和基线（check_handoff 的 known），不读其它路径。
 # 函数用途: 沿显式文件参数完成项目、可选交接和可选基线检查，分别标出范围和失败原因。
 def evaluate_inputs(project_path: Path, handoff_path: Path | None, binding_values: list[str],
-                    baseline_path: Path | None = None) -> tuple[object, dict]:
-    project, snapshots, binding_errors, project_sha256 = None, {}, [], None
+                    baseline_path: Path | None = None, *, host_mode: bool = False) -> tuple[object, dict]:
+    project, snapshots, binding_errors, project_sha256, handoff = None, {}, [], None, None
     bindings = parse_bindings(binding_values, binding_errors)
     try:
         snapshot = read_snapshot(project_path)
@@ -765,6 +966,7 @@ def evaluate_inputs(project_path: Path, handoff_path: Path | None, binding_value
         project_check = check_project(project)
     except InputProblem as exc:
         project_check = {"structure_valid": False, "errors": [{"code": "invalid_input", "cause": exc.code, "path": "--project"}]}
+    baseline_input = read_baseline(baseline_path)
     handoff_check = {"errors": [], "warnings": [{"code": "handoff_not_checked"}], "metrics": {}}
     handoff_status = "not_requested"
     if binding_values and handoff_path is None:
@@ -775,11 +977,15 @@ def evaluate_inputs(project_path: Path, handoff_path: Path | None, binding_value
     elif handoff_path is not None:
         try:
             handoff = read_document(handoff_path)
-            handoff_check = check_handoff(handoff, bindings, snapshots)
+            known = known_documents(project_sha256, project, baseline_input) if host_mode and not binding_values else None
+            handoff_check = check_handoff(handoff, bindings, snapshots, known)
+            handoff_check["errors"].extend(reference_mentions(handoff, project_objects(project)["references"]))
         except InputProblem as exc:
             handoff_check = {"errors": [{"code": "invalid_input", "cause": exc.code, "path": "--handoff"}]}
         handoff_status = "failed" if handoff_check["errors"] else "passed"
-    baseline_check, baseline_status = evaluate_baseline(baseline_path, project)
+    baseline_sha256 = hashlib.sha256(baseline_input["raw"]).hexdigest() if baseline_input["status"] == "read" else None
+    baseline_check, baseline_status = evaluate_baseline(baseline_input, project,
+                                                        handoff_listing(handoff, project_sha256, baseline_sha256))
     scopes = (("project", project_check), ("handoff", handoff_check), ("baseline", baseline_check))
     errors = [{**item, "scope": scope} for scope, check in scopes for item in check.get("errors", [])]
     warnings = [{**item, "scope": scope} for scope, check in scopes for item in check.get("warnings", [])]
@@ -789,6 +995,38 @@ def evaluate_inputs(project_path: Path, handoff_path: Path | None, binding_value
                      "errors": errors, "warnings": warnings,
                      "metrics": {**project_check.get("metrics", {}), "project_sha256": project_sha256},
                      "handoff_metrics": handoff_check.get("metrics", {}), "baseline_metrics": baseline_check.get("metrics", {})}
+
+
+# LLM: 宿主模式下交接能对上的只有宿主交来的项目（target）和基线；按各自实际字节的 sha256 建索引，交接 files 的摘要等于它才算同一文件。
+# 函数用途: 返回 摘要 → 文档 的已读文件表。
+def known_documents(project_sha256: str | None, project: object, baseline: dict) -> dict[str, object]:
+    known = {project_sha256: project} if project_sha256 is not None else {}
+    if baseline["status"] == "read":
+        known[hashlib.sha256(baseline["raw"]).hexdigest()] = baseline["document"]
+    return known
+
+
+# LLM: 宿主核验合同 pack_verifier_result.v1 的条目只带 code 和 location（沿本报告的 path）；宿主模式下输入读不了的 invalid_input
+#   按参数换成 target_unreadable 等结构化码（HOST_UNREADABLE_CODES），不带 message、cause 或 scope。
+# 函数用途: 把报告里的错误或警告列表投影成宿主读的条目。
+def host_items(rows: list[dict]) -> list[dict]:
+    items = []
+    for row in rows:
+        code, path = str(row.get("code") or ""), str(row.get("path") or "$")
+        if code == "invalid_input" and path in HOST_UNREADABLE_CODES:
+            code, path = HOST_UNREADABLE_CODES[path], "$"
+        items.append({"code": code, "location": path})
+    return items
+
+
+# LLM: --host-json 时输出 pack_verifier_result.v1（ae 块 2/3 定）：valid 必须等于“errors 为空”；metrics 只留顶层数字（不含布尔、
+#   分集字典、摘要字符串），最多 16 个键。不加参数时原 drama_workflow_check.v2 报告不变。
+# 函数用途: 把检查报告投影成宿主读的结构化结果。
+def host_result(report: dict) -> dict:
+    numbers = [(key, value) for key, value in report.get("metrics", {}).items()
+               if isinstance(value, (int, float)) and not isinstance(value, bool)]
+    return {"schema": HOST_RESULT_SCHEMA, "valid": not report.get("errors"), "errors": host_items(report.get("errors", [])),
+            "warnings": host_items(report.get("warnings", [])), "metrics": dict(numbers[:HOST_METRICS_MAX_COUNT])}
 
 
 # LLM: 报告只展示输入及确定性核对结果，所有文本转义；不是浏览器执行容器或生产媒体。
@@ -803,16 +1041,24 @@ def render_report(project: object, result: dict) -> str:
 
 
 # LLM: 只读指定 JSON、--input-file 的显式绑定与可选 --baseline-project，JSON/HTML 写 stdout；handoff 路径不授予读取其它文件或执行资源的权限。
-# 函数用途: 运行项目与可选交接核对，按所选格式输出新版本分项报告，任何所请求检查失败均退出 1。
+#   --host-json 时（宿主用钉住的原件跑：--project 是 {target}，--handoff 是本回合写出的交接，--baseline-project 是任务开始前的项目）：
+#   只要写出了 v1 就退 0，有效与否只看 valid。
+# 函数用途: 运行项目与可选交接核对，按所选格式输出新版本分项报告；普通模式任何所请求检查失败均退出 1，宿主模式写出结果即退 0。
 def main() -> int:
     parser = argparse.ArgumentParser(description="核对短剧工作流资料的跨表连续性")
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--handoff", type=Path, help="可选 handoff.v2 交接资料")
     parser.add_argument("--input-file", action="append", default=[], metavar="FILE_ID=PATH", help="明确授权读取的交接文件，可重复")
-    parser.add_argument("--baseline-project", type=Path, help="可选：改动前的项目 v1，用于逐 ID 对比（只给 warning）")
+    parser.add_argument("--baseline-project", type=Path,
+                        help="可选：改动前的项目 v1，逐 ID 对比；节拍、对应关系、schema、时长的改动没在交接里列出时报错，其它差异只提醒")
     parser.add_argument("--format", choices=("json", "html"), default="json")
+    parser.add_argument("--host-json", action="store_true", help="按宿主核验合同 pack_verifier_result.v1 输出")
     arguments = parser.parse_args()
-    project, result = evaluate_inputs(arguments.project, arguments.handoff, arguments.input_file, arguments.baseline_project)
+    project, result = evaluate_inputs(arguments.project, arguments.handoff, arguments.input_file, arguments.baseline_project,
+                                      host_mode=arguments.host_json)
+    if arguments.host_json:
+        print(json.dumps(host_result(result), ensure_ascii=False, allow_nan=False))
+        return 0
     print(render_report(project, result) if arguments.format == "html" else
           json.dumps(result, ensure_ascii=False, allow_nan=False))
     return 0 if result["structure_valid"] else 1

@@ -21,7 +21,7 @@
       "character_ids": [""],
       "prop_ids": [""],
       "beats": [
-        {"id": "", "kind": "action", "text": ""},
+        {"id": "", "kind": "action", "character_ids": [""], "text": ""},
         {"id": "", "kind": "dialogue", "character_id": "", "text": ""}
       ]
     }

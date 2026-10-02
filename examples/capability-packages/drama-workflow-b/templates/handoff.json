@@ -6,10 +6,10 @@
   "stages": [
     {
       "id": "",
-      "scope": "",
+      "scope": "<这一阶段做了什么>",
       "input_file_ids": [""],
       "output_file_ids": [""],
-      "review_notes": ""
+      "review_notes": "<复核了什么、还有什么没核>"
     }
   ],
   "object_mappings": [
@@ -17,16 +17,16 @@
       "stage_id": "",
       "source": {"file_id": "", "pointer": "", "object_id": ""},
       "target": {"file_id": "", "pointer": "", "object_id": ""},
-      "reason": ""
+      "reason": "<基线值> → <新值>：<为什么改，对应用户哪条要求>"
     }
   ],
   "omissions": [
-    {"stage_id": "", "source": {"file_id": "", "pointer": "", "object_id": ""}, "reason": ""}
+    {"stage_id": "", "source": {"file_id": "", "pointer": "", "object_id": ""}, "reason": "<省略了什么、为什么>"}
   ],
   "additions": [
-    {"stage_id": "", "target": {"file_id": "", "pointer": "", "object_id": ""}, "reason": ""}
+    {"stage_id": "", "target": {"file_id": "", "pointer": "", "object_id": ""}, "reason": "<新增了什么、为什么>"}
   ],
   "unresolved_differences": [
-    {"stage_id": "", "refs": [{"file_id": "", "pointer": "", "object_id": ""}], "difference": "", "next_step": ""}
+    {"stage_id": "", "refs": [{"file_id": "", "pointer": "", "object_id": ""}], "difference": "<还没对上的地方>", "next_step": "<下一步谁来做什么>"}
   ]
 }

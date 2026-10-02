@@ -1,4 +1,5 @@
-# LLM: 只用公开合成项目验证 B 包 0.2.0 的基线对比、交接覆盖/真实性和检查器身份；不读保留集或真实任务产物。
+# LLM: 只用公开合成项目验证 B 包的基线对比（0.2.0 起）、交接覆盖/真实性和检查器身份；不读保留集或真实任务产物。
+#   0.3.0 起台词、节拍编号、对应关系、schema、时长的未列出改动是 error，另见 test_capability_package_drama_workflow_v03.py。
 # 模块用途: 证明“改了原设定却没人发现”这类改动会被逐 ID 报出，提醒不改变结构结论，交接里的虚假新增/省略报错。
 
 from __future__ import annotations
@@ -66,7 +67,9 @@ def test_speaker_swap_on_same_beat_is_flagged(tmp_path, edit_text):
         beat["text"] += "（改写）"
     report = _run(tmp_path, {"p.json": project, "b.json": _project()},
                   "--project", "p.json", "--baseline-project", "b.json")
-    assert report["structure_valid"]
+    # 只换说话人仍只提醒；连台词一起改、交接没列出时，0.3.0 起是 baseline_beat_changed 错误。
+    assert report["structure_valid"] is not edit_text
+    assert ({item["code"] for item in report["errors"]} == {"baseline_beat_changed"}) is edit_text
     assert ("dialogue_speaker_changed", f"{scene['id']}.{beat['id']}") in _warnings(report, "baseline")
     assert report["baseline_metrics"]["modified"]["items"] == [f"beats:{scene['id']}.{beat['id']}"]
 

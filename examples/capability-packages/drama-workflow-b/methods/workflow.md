@@ -61,6 +61,21 @@ CLI 报告升级为 `drama_workflow_check.v2`：`checks.project` 与 `checks.han
 
 这些是制作资料的方法，不是宿主执行合同。机械检查发现断链应提示修订；创作深度、镜头美感和节奏效果继续由模型/人审阅，不加入通用宿主硬门。
 
+## 0.3.0 新增写法和检查
+
+- **表和外键齐全**：七张表缺了哪张报 `missing_table`；场次缺 `episode_id`/`location_id`、镜头缺 `scene_id`、参考缺 `subject_id` 这几个键报 `missing_foreign_key`。键在但值不对，仍是原来的 `unknown_reference` 等错误。
+- **动作节拍写角色**：动作节拍加 `character_ids`，列出参与动作的本场角色。没写或写空报 `beat_character_missing` 提醒（纯环境动作可以没有角色）；写了不是本场角色报错。
+- **出镜人物要有参考**：项目里有人物参考时，一个镜头引用的节拍里出现的角色（说话人和动作角色），这一镜的 `reference_ids` 里要有他的人物参考，否则报 `shot_character_reference_missing` 提醒。项目完全没有人物参考计划时不提醒。
+- **不编造参考 ID**：检查器从本项目 `references` 的 ID 推出写法（如 `REF-`），在整份项目和交接的所有文字里找这种写法的 ID，表里没有就报 `unknown_reference_mention` 错误。
+- **改动前后对比更严**：带 `--baseline-project` 时，下面这些改动没在交接里列出就是错误，`checks.baseline` 记 `failed`：
+  - `baseline_beat_changed`：节拍增删（包括重新编号）或台词改动；
+  - `baseline_relation_changed`：镜头和节拍、参考的对应关系变了（不看顺序）；
+  - `baseline_schema_or_duration_changed`：schema 名、镜头秒数或分集目标秒数变了。
+  - “列出”指交接里有一条地址（`source`、`target` 或 `refs`）点到这处改动，文件按 `files[].sha256` 对应到改前或改后的项目。换说话人、节拍类型、对象删除等仍只是提醒。
+- **交接只列真实改动**：对象映射两端在已读文件里、值完全相同，报 `handoff_claim_without_change` 错误；声称新增却原样已有、声称省略却原样还在，仍报原来的错误。
+- **交接模板**：`templates/handoff.json` 里 `<…>` 是填写提示；改动写成“基线值 → 新值：为什么改”。整段照抄提示报 `placeholder_text` 错误。
+- **宿主模式**：宿主开启包检查时，用 `--host-json` 跑本检查器，交接文件按摘要对应宿主交来的项目和基线；对不上的文件报 `handoff_file_not_available` 提醒，不读、不影响结论。
+
 ## 和改动前的项目对比（0.2.0）
 
 在已有项目上修改时（比如用户给了原制作资料、要求改一部分），检查时加上 `--baseline-project <改动前的项目文件>`。这个参数也是显式授权，读取方式和上限与 `--input-file` 相同。
@@ -69,7 +84,7 @@ CLI 报告升级为 `drama_workflow_check.v2`：`checks.project` 与 `checks.han
   - `dialogue_speaker_changed`：同一节拍换了说话人，或者同场一句一字不差的台词换了人（常见于重新编号时顺手换了人）。
   - `beat_kind_changed`：节拍的类型变了。
   - `baseline_object_removed`：原有对象没了。
-- **只是提醒**：这些都是 warning。用户确实要求改的，在交付说明或交接里写明即可；检查器不知道用户说了什么，也不判断改得对不对。
+- **只是提醒**：这些都是 warning。用户确实要求改的，在交付说明或交接里写明即可；检查器不知道用户说了什么，也不判断改得对不对。（0.3.0 起节拍、台词、对应关系、schema 和时长的改动没在交接里列出是错误，见上一节。）
 - **交接文件**：带 `--handoff` 时，同一阶段里输入、输出都是本包项目的，检查器会逐对象比较。
   - 真实改了但没有任何交接行点到的，报 `change_not_declared_in_handoff`。
   - 交接声称新增的整对象在输入里原样已有，报 error；声称省略的整对象在输出里原样还在，也报 error。

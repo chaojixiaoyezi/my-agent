@@ -87,8 +87,8 @@ def test_unfilled_template_is_not_a_valid_delivery(check_project):
 
 
 @pytest.mark.parametrize(("path", "code"), [
-    (("scenes", 0, "episode_id"), "unknown_reference"),
-    (("scenes", 0, "location_id"), "unknown_reference"),
+    (("scenes", 0, "episode_id"), "missing_foreign_key"),
+    (("scenes", 0, "location_id"), "missing_foreign_key"),
     (("scenes", 0, "character_ids"), "references_required"),
     (("scenes", 0, "prop_ids"), "references_required"),
     (("scenes", 0, "beats"), "list_required"),
@@ -97,7 +97,7 @@ def test_unfilled_template_is_not_a_valid_delivery(check_project):
     (("shots", 0, "beat_ids"), "beat_reference_required"),
     (("shots", 0, "reference_ids"), "references_required"),
     (("shots", 0, "seconds"), "positive_seconds_required"),
-    (("references", 0, "subject_id"), "unknown_reference_subject"),
+    (("references", 0, "subject_id"), "missing_foreign_key"),
     (("references", 0, "state"), "invalid_reference_state"),
 ])
 def test_missing_required_template_field_still_fails(check_project, path, code):
@@ -187,7 +187,7 @@ def test_handoff_and_complete_template_are_declared_private_resources(tmp_path):
     declaration = json.loads((PACKAGE_ROOT / "declaration.json").read_text(encoding="utf-8"))
     bundle = build_capability_package(declaration, PACKAGE_ROOT, tmp_path / "package.zip")
     manifest = inspect_plugin_package(bundle.read_bytes()).manifest
-    assert manifest.version == "0.2.0"
+    assert manifest.version == "0.3.0"
     assert manifest.is_content_only and not manifest.skills and not manifest.tools
     files = {member.path: member for member in manifest.files}
     with ZipFile(bundle) as archive:

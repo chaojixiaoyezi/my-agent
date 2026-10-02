@@ -60,3 +60,24 @@
 - **兼容**：项目 v1、交接 v2 格式不变；报告仍是 `drama_workflow_check.v2`，`checks` 增加 `baseline`，另增 `baseline_metrics`。
 
 **仍不判断的事**：改动是不是用户要求的、改得合不合理、交接说明文字是否真实、媒体是否完成——这些仍是审阅的事。根据这些失败改动之后，原冻结用例再跑一次只能算"已见回归"，不是新的保留集。
+
+## 本包 0.3.0 修订（能力包 v2 块 7）
+
+依据冻结重跑（`c13-frozen-reruns-28435`，业务审阅 B 包 1/9）的逐条归因，补了检查器能确定性查出的盲区（K 类）和流程、模板没写到的地方（P 类）。这一版本仍是仓库自写，不是上游脚本移植；项目 v1、交接 v2 格式不变（动作节拍可选 `character_ids`），报告仍是 `drama_workflow_check.v2`。
+
+| 新检查 | 级别 | 来自哪次失败 |
+| --- | --- | --- |
+| `unknown_reference_mention`：任何文字里提到的参考 ID 必须在参考表里 | error | B05-t4、B10-t5 |
+| `baseline_relation_changed`：镜头和参考、节拍的对应关系与基线不同，交接没列 | error | B05-t4 |
+| `baseline_beat_changed`：节拍增删或台词与基线不同，交接没列 | error | B10-t6 |
+| `baseline_schema_or_duration_changed`：schema 名、镜头时长、分集目标与基线不同，交接没列 | error | B10-t6 |
+| `handoff_claim_without_change`：交接列的映射改动在基线和产物之间并不存在 | error | B08-t4 |
+| `missing_table` / `missing_foreign_key`：缺必备表或外键键 | error | B05-t4、B05-t6 |
+| `beat_character_missing`：动作节拍没有 `character_ids` | warning | B08-t4、B10-t5 |
+| `shot_character_reference_missing`：出镜人物在本镜没有人物参考 | warning | B08-t4 |
+
+另加：交接文字整段照抄模板 `<…>` 提示报 `placeholder_text`；`--host-json` 输出宿主核验用的 `pack_verifier_result.v1`，宿主模式下交接文件按摘要对应宿主交来的项目和基线，不需要 `--input-file`。
+
+**和 0.2.0 的差别**：0.2.0 的基线差异全是 warning；0.3.0 起上表四类未列出的改动是 error，其余差异仍是 warning。
+
+**仍不判断的事**：改动是不是用户要求的、改得合不合理、交接说明文字是否真实、媒体是否完成。根据这些失败改动之后，原冻结用例再跑一次只能算“已见回归”，不是新的保留集。

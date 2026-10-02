@@ -4,8 +4,8 @@
 
 | 包 | 当前源码版本 | 特点 | 交付与边界 |
 | --- | --- | --- | --- |
-| `drama-text-a` | `0.4.0` | 原文改编及成稿人物依据回填 | 文本方案、来源/时长声明、具名覆盖警告、可选台词/逐字引用/道具状态核对；不判在场或媒体 |
-| `drama-workflow-b` | `0.2.0` | 五类制作资料的结构和交接 | 跨表关系、分集时长、静态报告、可选基线对比与交接覆盖；不具备上游全部报告交互 |
+| `drama-text-a` | `0.5.0` | 原文改编及成稿人物依据回填 | 文本方案、来源/时长声明、具名覆盖警告、可选台词/逐字引用/道具状态核对、占位与改编原文核对；不判在场或媒体 |
+| `drama-workflow-b` | `0.3.0` | 五类制作资料的结构和交接 | 跨表关系、分集时长、静态报告、可选基线对比与交接覆盖、未列出改动报错；不具备上游全部报告交互 |
 | `security-evidence` | `0.1.0` | 范围明确的既有证据整理 | 证据摘要、来源去重、发现引用和待复核报告；不扫描、不验证漏洞 |
 
 `CAPABILITY.md` 是包入口。`methods/`、`templates/`、`resources/`、`scripts/` 只属于本包；三个包都有 `methods/review.md`，内容各不相同，不能按裸文件名覆盖。
@@ -28,6 +28,8 @@
 ## 当前来源与交接检查候选
 
 A0.3.0 的交付/报告显式升为 `drama_text_delivery.v3` / `drama_text_check.v3`，保留逐镜依据/改编/未知，增加显式代称与可见/画外声明；只诊断成稿字面覆盖，不判原文语义、真实在场或持物因果。新脚本不自动补旧v1/v2。具体方法、预算与未检查语义见[人物依据](drama-text-a/methods/visible-characters.md)，来源改写和缺项见[来源说明](drama-text-a/PROVENANCE.md#030-修订范围)。
+A0.5.0 / B0.3.0（能力包 v2 块 7）：按冻结重跑逐条归因补检查器盲区和流程模板——A 新增占位、内嵌引文、改编原文、道具状态/来源、画外点名、过短镜头 7 项检查，B 新增缺表/缺外键、编造参考 ID、动作节拍缺角色、出镜人物缺参考，以及未在交接列出的节拍/对应关系/schema/时长改动和“声称改了其实没改”；两包都加 `--host-json` 输出宿主核验用的 `pack_verifier_result.v1`。详见各自 PROVENANCE。
+
 A0.4.0 / B0.2.0（C13 第二部分）：A 新增可选 `lines`、`source_quotes`、`props`/`prop_states` 及对应核对，B 新增 `--baseline-project` 逐 ID 对比、交接覆盖真实改动与虚假新增/省略核对，两包报告都带 `checker` 身份；格式版本不变，详见各自 PROVENANCE。
 
 B0.1.4 沿用0.1.3的 `drama_workflow_handoff.v2`，使用明确的文件编号、JSON Pointer、对象编号及阶段范围；本次仅澄清场次/镜头自身 ID 与镜头场次外键的映射，脚本、格式和模板不变。
@@ -41,8 +43,8 @@ A0.3.0与B0.1.3已有私有原生使用记录；B0.1.4已通过原生TUI热更�
 在仓库根目录运行，输出目录由操作者指定，目标文件必须不存在：
 
 ```bash
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.4.0.zip
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.2.0.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.5.0.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.3.0.zip
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/security-evidence/declaration.json --files-root examples/capability-packages/security-evidence --output /tmp/security-evidence.zip
 ```
 

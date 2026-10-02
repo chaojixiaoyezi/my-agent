@@ -51,6 +51,9 @@
         {
           "id": "B01",
           "kind": "action",
+          "character_ids": [
+            "C01"
+          ],
           "text": "站务员拦住即将关上的车门。"
         },
         {
@@ -62,6 +65,9 @@
         {
           "id": "B03",
           "kind": "action",
+          "character_ids": [
+            "C02"
+          ],
           "text": "乘客接住包裹并点头。"
         }
       ]
@@ -76,6 +82,7 @@
       ],
       "seconds": 20,
       "reference_ids": [
+        "REF-C01",
         "REF-L01"
       ]
     },
@@ -99,6 +106,7 @@
       ],
       "seconds": 20,
       "reference_ids": [
+        "REF-C02",
         "REF-L01"
       ]
     }
@@ -108,6 +116,12 @@
       "id": "REF-C01",
       "kind": "character",
       "subject_id": "C01",
+      "state": "planned"
+    },
+    {
+      "id": "REF-C02",
+      "kind": "character",
+      "subject_id": "C02",
       "state": "planned"
     },
     {

@@ -243,7 +243,7 @@ def test_workflow_sample_keeps_media_unverified(tmp_path):
     assert report["metrics"] == {"episodes": 1, "scenes": 1, "shots": 3, "shot_seconds": 60.0,
                                  "episode_seconds": {"EP01": 60.0},
                                  "project_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-    assert sum(item["code"] == "reference_media_not_verified" for item in report["warnings"]) == 2
+    assert sum(item["code"] == "reference_media_not_verified" for item in report["warnings"]) == 3
 
 
 @pytest.mark.parametrize("path,value,code", [

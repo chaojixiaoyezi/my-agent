@@ -49,6 +49,7 @@
 |-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py # B包0.2.0基线逐ID对比、交接覆盖与虚假新增/省略、检查器身份
+|-- agent_py_agent/tests/test_capability_package_drama_workflow_v03.py # B包0.3.0新增检查（缺表/外键、编造参考ID、节拍角色、出镜参考、未列出基线改动、虚假改动声明）与--host-json按摘要对应交接
 |-- agent_py_agent/tests/test_subagent_package_entries.py # 子代理同代包入口的首请求、显式选模、权限和恢复组合
 |-- agent_py_agent/tests/test_file_syntax_diagnostics.py # 有界语法观察、反馈与诊断异常隔离
 |-- agent_py_agent/tests/test_filesystem_syntax_feedback.py # 三文件入口的真实发布、部分提交与取消回归
@@ -1446,6 +1447,7 @@ docs/
 - `agent_py_agent/tests/test_capability_package_drama_text_basis.py`：验证 A 包 v3 镜头声明、本场来源、失败回执版本和结构不代表语义的边界。
 - `agent_py_agent/tests/test_capability_package_drama_text_visibility.py`：以公开合成资料通过原 CLI 验证代称/退出、可见/画外、歧义与长短词、原位置及预算/裁剪计数；不修改真实产物。
 - `agent_py_agent/tests/test_capability_package_drama_text_v05.py`：A 包 0.5.0（能力包 v2 块 7）的 7 项新检查各一个正例一个反例，以及 `--host-json` 只输出 `pack_verifier_result.v1` 结构化字段、写出即退 0；不读真实产物。
+- `agent_py_agent/tests/test_capability_package_drama_workflow_v03.py`：B 包 0.3.0（能力包 v2 块 7）的新检查各一个正例一个反例；带基线时未在交接列出的改动报错、列出的放行（宿主按摘要对应和 `--input-file` 两种模式）；`--host-json` 只输出 v1 结构化字段。
 - `agent_py_agent/tests/test_capability_package_drama_text_lines.py`：A 包 0.4.0 可选字段——台词结构与说话人声明、逐字引用只按子串（不归一化）、道具持有人/相邻状态接续与 `continuity_break`、报告 `checker` 身份与声明版本一致。
 - `agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py`：B 包 0.2.0——`--baseline-project` 的换说话人（含重编号）、节拍类型改变、对象删除提醒，交接覆盖真实改动（根地址不算）、虚假新增/省略报错、检查器身份与项目摘要。
 - `examples/capability-packages/drama-text-a/methods/visible-characters.md`：A0.3.0 人物依据回填的私有方法与v3诊断合同；只说明字面覆盖，不生成宿主完成状态。
