@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 818,
+  "count": 819,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4178,6 +4178,14 @@
       "unit": "个",
       "category": "重试",
       "description": ": K.6：投递重试上限，超限进 dead-letter（完整证据保留，可人工重放）。"
+    },
+    {
+      "name": "USER_INTERRUPT_RESUME_SECONDS",
+      "file": "agent_py_agent/agent/runtime_db/user_interrupt.py",
+      "value": 86400,
+      "unit": "秒",
+      "category": "其它",
+      "description": "过了这个时长仍没人回来，自愈照原规则把它收成 cancelled（原因 user_interrupt_expired）。"
     },
     {
       "name": "_MAX_ERROR_TEXT_CHARS",
