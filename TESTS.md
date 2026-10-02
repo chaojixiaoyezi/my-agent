@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 常数整改第一批：5 模块 115 个常数合规（2026-10-01，分支 `worker/ds2-p10-batch1`，基于 `45610148e`）
+
+- **范围**：agent/ingestion（15 文件）、agent/scheduler（4 文件）、agent/session_lock（2 文件）、agent/user_space（6 文件）、
+  agent/adapter（11 文件）的 115 个待整改常数（无单位后缀或无上方中文说明）。数值一律不变。
+- **做法**：时间/长度/个数类按生成器后缀表补后缀改名（`_SECONDS/_MS/_CHARS/_BYTES/_TOKENS/_COUNT/_PERCENT` 等，例如
+  `_RETIRE_STALE_WINDOWS→_RETIRE_STALE_WINDOW_COUNT`、`_KEY_LEN→_KEY_LEN_BYTES`、`_TARGET_SAMPLE_MIN_PCT→_TARGET_SAMPLE_MIN_PERCENT`、
+  `_AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS_PER_RECORD→_PER_RECORD_AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS`），改名引用全仓同步
+  （含测试，脚本 tmp/sync-ingestion-refs.py 等）；全部补上方中文说明。
+- **无物理单位组**：倍数/指数/深度 7 个名字（`_MAX_DEPTH`、`_MAX_PATH_DEPTH`、`_SCRYPT_N`、`_SCRYPT_P`、`_SCRYPT_R`、
+  `_FOLLOW_UP_UNREADABLE_DEADLINE_FACTOR`、`_WAITING_GRACE_SUPERVISION_FACTOR`）只补说明，白名单单独组 reason“无物理单位”。
+- **白名单**：685 → 575（groups[0]）＋7（无物理单位组）；`test_constant_names_unique._ALLOWED` 删 TIMEOUT_S（改名后不再重复）、
+  加 REQUEST_TIMEOUT_SECONDS（飞书应用注册请求超时与推理探测等待上限含义不同）。
+- **目录**：`scripts/build_constants_catalog.py` 重新生成 `constants_catalog.json`（799 项），`--check` 一致。
+- **验证**：守卫（test_constants_catalog + test_constant_names_unique）**13 passed**；相关 26 文件 **438 passed**；
+  guards9 全量 **167 passed**；check_import_boundaries **0 条**；ruff **All checks passed**；check_doc_sync **PASS**；
+  code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
+  `size_diff.sh` **新增告警 0**（消失 2 条为集成分支其它提交所致）。
+
 ## 删除死配置 log_analysis_config.yaml，参数中心改三来源（2026-10-01，分支 `worker/ds2-del-log-analysis`，基于 `904b441b4`）
 
 - **删除**：`agent_py_agent/config/log_analysis_config.yaml`（20 键）。依据：P17 修订时核实 log_analysis 产品代码无任何读取点，

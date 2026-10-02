@@ -53,9 +53,13 @@ _ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running", "waiting"})
 # P0-4(HANDOFF 文档线): unknown = 崩溃执行终态(进程死亡被证实后归类),
 # 与 done/failed/cancelled/skipped 并列, 终态不可改写。
 _TERMINAL_RUN_STATUSES = frozenset({"done", "failed", "cancelled", "skipped", "unknown"})
+# 任务名最多 160 个字符：够长可读又不会让存储行与展示行失控。
 _MAX_NAME_CHARS = 160
+# 任务提示词最多 32000 字符：覆盖长需求又不至于把整份账本撑大。
 _MAX_PROMPT_CHARS = 32_000
-_MAX_SKILL_REFS = 32
+# 单个任务最多带 32 个 Skill 引用：引用太多会让认领快照过大，实际任务用不到这么多。
+_MAX_SKILL_REFS_COUNT = 32
+# 手动派活默认推迟 2 秒再入队：给调用方一个可确认的窗口，避免同一时刻重复派发。
 _MANUAL_DISPATCH_DELAY_SECONDS = 2.0
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,8 +71,10 @@ _LOGGER = logging.getLogger(__name__)
 # A hit therefore requires the same stat key *and* the same content digest, so any external or
 # in-process rewrite (even same-size, same-timestamp) invalidates it. store.json stays the single
 # authority; this is a read-through projection of it, never a second source of state.
-_WAITING_PROJECTION_MAX_ENTRIES = 4
-_WAITING_PROJECTION_MAX_ROWS = 512
+# waiting 投影缓存最多缓存 4 个 owner 账本快照：每次对账只重解析未变化的文件，够日常并发又防缓存膨胀。
+_WAITING_PROJECTION_MAX_ENTRIES_COUNT = 4
+# 单个 waiting 投影最多 512 行：行数太多说明账本异常，按满行直接视为需要全量重读。
+_WAITING_PROJECTION_MAX_ROWS_COUNT = 512
 _WAITING_PROJECTION_CACHE: OrderedDict[tuple[str, str, str, str], _WaitingRunsProjection] = (
     OrderedDict()
 )
@@ -829,7 +835,7 @@ class _SchedulerStoreSupport:
             errors=tuple(errors),
         )
         _bump_projection_stat("miss")
-        if probe is None or len(rows) > _WAITING_PROJECTION_MAX_ROWS:
+        if probe is None or len(rows) > _WAITING_PROJECTION_MAX_ROWS_COUNT:
             # 字节不可用 / 超界行数: 不缓存,退化为逐次全量解析(与改动前同,不会更差)。
             _bump_projection_stat("skip")
             return projection
@@ -840,7 +846,7 @@ class _SchedulerStoreSupport:
         with _WAITING_PROJECTION_LOCK:
             _WAITING_PROJECTION_CACHE[cache_key] = projection
             _WAITING_PROJECTION_CACHE.move_to_end(cache_key)
-            while len(_WAITING_PROJECTION_CACHE) > _WAITING_PROJECTION_MAX_ENTRIES:
+            while len(_WAITING_PROJECTION_CACHE) > _WAITING_PROJECTION_MAX_ENTRIES_COUNT:
                 _WAITING_PROJECTION_CACHE.popitem(last=False)
         return projection
 
@@ -1257,7 +1263,7 @@ def _cached_waiting_projection(cache_key: tuple[str, str, str, str]) -> _Waiting
 
 # LLM: 命中判定与 LRU 更新必须**同锁原子**完成。投影缓存是多 owner 共享的(每个 owner 的
 # store.json 文件锁互不互斥),旧实现"先 lookup 释放锁、再单独 move_to_end"中间会被其它 owner
-# 的写入淘汰掉这条 key(上限只有 _WAITING_PROJECTION_MAX_ENTRIES 条),随后 move_to_end 直接
+# 的写入淘汰掉这条 key(上限只有 _WAITING_PROJECTION_MAX_ENTRIES_COUNT 条),随后 move_to_end 直接
 # KeyError 冒到等待任务对账路径。这里把"读条目 + 核对 stat 键 + 核对内容摘要 + 提到最新"放进
 # 同一把锁:条目要么整条命中(并原子提级),要么整条不命中,不存在"确认过却又消失"的中间态。
 # 函数用途: 原子判定投影是否命中;第二个返回值表示"有条目但内容摘要已变"(调用方据此走守卫回退)。
@@ -1646,8 +1652,8 @@ def _normalize_skill_refs(raw: object) -> list[dict[str, str]]:
     from ..capability.task_references import normalize_skill_reference
 
     rows = raw if isinstance(raw, list) else []
-    if len(rows) > _MAX_SKILL_REFS:
-        raise ScheduleValidationError(f"skill_refs exceeds {_MAX_SKILL_REFS} entries")
+    if len(rows) > _MAX_SKILL_REFS_COUNT:
+        raise ScheduleValidationError(f"skill_refs exceeds {_MAX_SKILL_REFS_COUNT} entries")
     normalized: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows:

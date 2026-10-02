@@ -20,6 +20,17 @@
 - **验证**：相关测试 156 passed（含 6 个新增测试文件/用例）；6 个变异逐一验证均红后还原；
   收尾门禁见 TESTS.md。
 
+## 常数整改第一批：5 模块 115 个常数合规（2026-10-01，分支 `worker/ds2-p10-batch1`，基于 `45610148e`，已实现，待集成）
+
+- **起因**：P10 建常数目录时 685 个历史不合规常数进待整改白名单（无单位后缀或无上方中文说明）；按阶段 3 分批整改，
+  本批是第一批，覆盖 ingestion / scheduler / session_lock / user_space / adapter 5 个模块 115 个。数值一律不变、行为不变。
+- **做法**：时间/长度/个数类按生成器后缀表补后缀改名（`_COUNT/_CHARS/_BYTES/_SECONDS/_PERCENT/_TOKENS` 等），改名引用全仓同步
+  （含测试）；全部补上方中文说明；无物理单位常数（倍数/指数/深度 7 个名字）只补说明并挪入白名单单独组（reason“无物理单位”）。
+  白名单 685→575＋7；`_ALLOWED` 删 TIMEOUT_S（改名后不再重复）、加 REQUEST_TIMEOUT_SECONDS（两处含义不同）；
+  目录重新生成 799 项 `--check` 一致。
+- **验证**：守卫 13 passed、相关 26 文件 438 passed、guards9 167 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package
+  全过；size_diff.sh 新增告警 0。详见 TESTS.md。
+
 ## 熔断体验修复 code-size 拆平（2026-10-01，ds1，分支 `worker/ds1-goal-fuse-ux`，已实现，待集成）
 
 - **背景**：`fa781d169` 合入后相对 step16y 告警基线多出 3 条 code-size 高风险（纯重构，行为不变）：

@@ -53,11 +53,14 @@ from .watch_feedback import (
 )
 from .window_counter import SlidingWindowCounter
 
-_CENSUS_CAP = 50000
-_SNAPSHOT_CENSUS_CAP = 20000
-_COLD_START_PREPASS_MIN = 64
+# 普查账累计键数上限 5 万：防异常来源把账本撑爆。
+_CENSUS_CAP_COUNT = 50000
+# 快照普查账键数上限 2 万：快照只保留有限来源，防止无限增长。
+_SNAPSHOT_CENSUS_CAP_COUNT = 20000
+# 冷启动预扫最少 64 条：来源记录太少时先攒够再进入常规普查节奏。
+_COLD_START_PREPASS_MIN_COUNT = 64
 # 规则命中账的键数上限(规则条目数本身受 spec 解析上限约束,这里只防坏快照)。
-_RULE_HITS_CAP = 256
+_RULE_HITS_CAP_COUNT = 256
 # 累计账键:前 7 个是原有主漏斗账;后 5 个是召回三件套账(抽检发出/抽检确认/反馈车道
 # 抬升/收件箱确认见闻/对账环未命中);audit_throttled 是判读吞吐反压钳掉的抽检名额
 # (真机洪泛净负的观测口:>0 说明反压在干活)。restore 只回填已知键。
@@ -272,7 +275,7 @@ class StreamDigestEngine:
         return _full_read_active(self.tuning, events, judge_headroom, content_mode)
 
     def _cold_start_prepass(self, events: list[tuple[int, dict]]) -> list[list[tuple[str, object]]] | None:
-        if self._first_call_done or len(events) < _COLD_START_PREPASS_MIN:
+        if self._first_call_done or len(events) < _COLD_START_PREPASS_MIN_COUNT:
             return None
         flats = [self._flat(event) for _seq, event in events]
         for flat in flats:
@@ -394,7 +397,7 @@ class StreamDigestEngine:
         return _bump_census(self._census, signature)
 
     def snapshot(self, now: float) -> dict[str, Any]:
-        ranked = sorted(self._census.items(), key=lambda kv: (-kv[1], kv[0]))[:_SNAPSHOT_CENSUS_CAP]
+        ranked = sorted(self._census.items(), key=lambda kv: (-kv[1], kv[0]))[:_SNAPSHOT_CENSUS_CAP_COUNT]
         return {
             "profiles": self.profiles.snapshot(),
             "head_profiles": self.head_profiles.snapshot(),
@@ -419,11 +422,11 @@ def _restore_engine(engine: StreamDigestEngine, payload: dict[str, Any], now: fl
         if key in engine.totals:
             engine.totals[key] = int(value)
     for signature, count in dict(payload.get("census") or {}).items():
-        if len(engine._census) >= _CENSUS_CAP:
+        if len(engine._census) >= _CENSUS_CAP_COUNT:
             break
         engine._census[str(signature)] = int(count)
     engine.feedback.restore(dict(payload.get("feedback") or {}), now)
-    raw_rules = list(dict(payload.get("rule_hits") or {}).items())[:_RULE_HITS_CAP]
+    raw_rules = list(dict(payload.get("rule_hits") or {}).items())[:_RULE_HITS_CAP_COUNT]
     engine.rule_hits = {str(key): int(count) for key, count in raw_rules}
     # 温启动=画像已收敛,不再做冷启动预热遍(与重置前 events_seen>0 的旧语义一致)。
     engine._first_call_done = engine.totals["events_seen"] > 0
@@ -434,7 +437,7 @@ def _bump_census(census: dict[str, int], signature: str) -> int:
     if current is not None:
         census[signature] = current + 1
         return current + 1
-    if len(census) >= _CENSUS_CAP:
+    if len(census) >= _CENSUS_CAP_COUNT:
         return 1
     census[signature] = 1
     return 1

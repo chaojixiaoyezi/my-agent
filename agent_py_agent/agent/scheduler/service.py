@@ -23,6 +23,7 @@ from .repository import (
 )
 
 _SCHEDULER_WAKE_REASON = "scheduled_job_due"
+# 认领租约默认 300 秒：够一次定时回合正常跑完，超时让其它调度器实例接管。
 _DEFAULT_CLAIM_SECONDS = 300
 # blocked 对这一次定时执行是终态（需要人来看），job 的后续周期照常派发；结算码为 SCHEDULED_TASK_BLOCKED。
 _TASK_STATUS_TO_RUN_STATUS = {

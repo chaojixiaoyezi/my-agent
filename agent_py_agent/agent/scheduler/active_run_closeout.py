@@ -31,6 +31,7 @@ SCHEDULED_TASK_FOLLOW_UP_UNREADABLE = "SCHEDULED_TASK_FOLLOW_UP_UNREADABLE"
 # 宽限期下限：存量 waiting 至少停这么久才允许按"没有后续工作"结算。实际宽限期取
 # max(下限, 5 × orphan_supervision_interval_seconds)：静默死亡的子代理要等孤儿巡查发现，巡查间隔越长宽限期越长。
 _WAITING_GRACE_FLOOR_SECONDS = 600.0
+# 宽限期按孤儿巡查间隔的 5 倍放大（无物理单位，倍数）：巡查发现越慢，给子代理的自救时间越多。
 _WAITING_GRACE_SUPERVISION_FACTOR = 5
 # 存量 waiting 的后续工作判定每个 run 最多隔这么久算一次：后台 1 秒一拍，正常的长等待不能每拍全量重算。
 _STALE_CHECK_INTERVAL_SECONDS = 60.0
@@ -39,7 +40,7 @@ _FOLLOW_UP_UNREADABLE_DEADLINE_FACTOR = 6
 # 同一个 run 的"后续工作读不出来"告警至少隔这么久才再打一次，避免对账每拍刷日志。
 _UNREADABLE_WARNING_INTERVAL_SECONDS = 600.0
 # 进程内的节流表（run_id → 上次时间）超过这个条数时清掉已过窗口的条目。
-_THROTTLE_TRACK_LIMIT = 256
+_THROTTLE_TRACK_LIMIT_COUNT = 256
 _unreadable_warned_at: dict[str, float] = {}
 _stale_checked_at: dict[str, float] = {}
 # run_id → 首次观察到"只剩读不出"的时间；有会自己消失的后续工作或读全时清掉，进程重启归零。
@@ -191,9 +192,9 @@ def _absence_confirmed(run_id: str, code: str, now: float) -> bool:
     if code != SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP:
         _absent_since.pop(run_id, None)
         return True
-    if run_id not in _absent_since and len(_absent_since) >= _THROTTLE_TRACK_LIMIT:
+    if run_id not in _absent_since and len(_absent_since) >= _THROTTLE_TRACK_LIMIT_COUNT:
         # sorted 在 C 层一次性取完快照，并发插入不会让遍历出错。
-        for key, _at in sorted(_absent_since.items(), key=lambda item: item[1])[:_THROTTLE_TRACK_LIMIT // 2]:
+        for key, _at in sorted(_absent_since.items(), key=lambda item: item[1])[:_THROTTLE_TRACK_LIMIT_COUNT // 2]:
             _absent_since.pop(key, None)
     return now - _absent_since.setdefault(run_id, now) >= _STALE_CHECK_INTERVAL_SECONDS
 
@@ -223,7 +224,7 @@ def _follow_up(
 
 
 # LLM: 只剩读不出（没有会自己推进的事实）时记下首次观察时间并打节流告警；有这类事实或读全时清掉首次时间。
-#   表超过 _THROTTLE_TRACK_LIMIT 条时丢掉最早的一半（进程内状态，丢掉只会让计时从头开始，不会误结算）。
+#   表超过 _THROTTLE_TRACK_LIMIT_COUNT 条时丢掉最早的一半（进程内状态，丢掉只会让计时从头开始，不会误结算）。
 # 函数用途: 维护"只剩读不出"的首次观察时间，并在读不出时打告警。
 def _track_unreadable(run_id: str, facts: FollowUpFacts, now: float) -> None:
     if facts.unreadable:
@@ -231,21 +232,21 @@ def _track_unreadable(run_id: str, facts: FollowUpFacts, now: float) -> None:
     if not facts.unreadable or _has_lasting_follow_up(facts):
         _unreadable_since.pop(run_id, None)
         return
-    if run_id not in _unreadable_since and len(_unreadable_since) >= _THROTTLE_TRACK_LIMIT:
+    if run_id not in _unreadable_since and len(_unreadable_since) >= _THROTTLE_TRACK_LIMIT_COUNT:
         # sorted 在 C 层一次性取完快照，并发插入不会让遍历出错。
-        for key, _at in sorted(_unreadable_since.items(), key=lambda item: item[1])[:_THROTTLE_TRACK_LIMIT // 2]:
+        for key, _at in sorted(_unreadable_since.items(), key=lambda item: item[1])[:_THROTTLE_TRACK_LIMIT_COUNT // 2]:
             _unreadable_since.pop(key, None)
     _unreadable_since.setdefault(run_id, now)
 
 
 # LLM: 进程内节流：同一 run 距上次记录不足 interval 返回 True（本次跳过）；否则记下本次时间返回 False。
-#   表超过 _THROTTLE_TRACK_LIMIT 条时清掉已过窗口的条目。副作用：改节流表。
+#   表超过 _THROTTLE_TRACK_LIMIT_COUNT 条时清掉已过窗口的条目。副作用：改节流表。
 # 函数用途: 按 run 节流一类动作（告警、存量判定）。
 def _throttled(table: dict[str, float], run_id: str, now: float, interval: float) -> bool:
     last = table.get(run_id)
     if last is not None and now - last < interval:
         return True
-    if len(table) >= _THROTTLE_TRACK_LIMIT:
+    if len(table) >= _THROTTLE_TRACK_LIMIT_COUNT:
         # 先拍快照再遍历：Gateway 跨 owner 并发时别的线程可能同时插入，直接遍历共享 dict 会抛 RuntimeError。
         for key in [key for key, at in list(table.items()) if now - at >= interval]:
             table.pop(key, None)

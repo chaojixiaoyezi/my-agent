@@ -19,6 +19,7 @@ from ..common.json_io import (
 from .home_layout import MyAgentHomePaths
 from .home_retention import OwnerRetentionPlan, apply_owner_retention
 
+# 维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。
 _DEFAULT_INTERVAL_SECONDS = 86_400
 
 

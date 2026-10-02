@@ -23,7 +23,8 @@ from ..io import append_jsonl
 from .home_layout import MyAgentHomePaths
 from .owner_resolver import OwnerHomeResult
 
-_INDEX_WRITE_CACHE_CAPACITY = 50_000
+# 写缓存最多缓存 5 万条索引键（个数）：批量写入前先攒内存，满了强制刷盘防失控。
+_INDEX_WRITE_CACHE_CAPACITY_COUNT = 50_000
 _INDEX_WRITE_CACHE: OrderedDict[tuple[str, ...], str] = OrderedDict()
 _INDEX_WRITE_LOCK = threading.Lock()
 
@@ -307,7 +308,7 @@ def _index_fingerprint(payload: dict[str, Any]) -> str:
 def _remember_index_fingerprint(cache_key: tuple[str, ...], fingerprint: str) -> None:
     _INDEX_WRITE_CACHE[cache_key] = fingerprint
     _INDEX_WRITE_CACHE.move_to_end(cache_key)
-    while len(_INDEX_WRITE_CACHE) > _INDEX_WRITE_CACHE_CAPACITY:
+    while len(_INDEX_WRITE_CACHE) > _INDEX_WRITE_CACHE_CAPACITY_COUNT:
         _INDEX_WRITE_CACHE.popitem(last=False)
 
 

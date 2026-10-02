@@ -69,7 +69,7 @@ COMPACT_COOLDOWN_SECONDS = 6 * 60 * 60
 
 # LLM: 流式扫描时每这么多行让出一次 GIL，避免连续几秒拖慢请求线程（维护跑在 Gateway 里）。
 # 函数用途: 让出执行权的行间隔。
-_YIELD_EVERY_LINES = 20_000
+_YIELD_EVERY_LINES_COUNT = 20_000
 
 
 @dataclass(frozen=True)
@@ -218,7 +218,7 @@ def _scan_last_line_per_key(
                 break
             offset += len(raw)
             line_count += 1
-            if line_index and line_index % _YIELD_EVERY_LINES == 0:
+            if line_index and line_index % _YIELD_EVERY_LINES_COUNT == 0:
                 time.sleep(0)  # 让出 GIL，别连续几秒占着请求线程
             key = _record_key(raw, key_fields)
             if key is None:
@@ -262,7 +262,7 @@ def _write_kept_lines(target: Path, prefix_len: int, keep: set[int], tmp: Path) 
                     dst.write(raw)
                     kept += 1
                 line_index += 1
-                if line_index % _YIELD_EVERY_LINES == 0:
+                if line_index % _YIELD_EVERY_LINES_COUNT == 0:
                     time.sleep(0)
     except OSError:
         return None

@@ -11,15 +11,16 @@ import re
 
 # 分隔符:空白 + 常见结构符(冒号/分号/逗号/竖线/等号/括号/引号/反引号)。
 _HEAD_SPLIT = re.compile(r"[\s:;,|=\[\](){}<>\"'`]+")
-_HEAD_CAP = 48
+# 文本头部最多取 48 个 token：足够判别类型，不浪费上下文。
+_HEAD_CAP_TOKENS = 48
 
 
 def head_token(text: str) -> str:
-    """取文本开头到第一个分隔符之前的一段(截断到 _HEAD_CAP);空/纯分隔返回空串。"""
+    """取文本开头到第一个分隔符之前的一段(截断到 _HEAD_CAP_TOKENS);空/纯分隔返回空串。"""
     stripped = str(text).strip()
     if not stripped:
         return ""
-    return _HEAD_SPLIT.split(stripped, maxsplit=1)[0][:_HEAD_CAP]
+    return _HEAD_SPLIT.split(stripped, maxsplit=1)[0][:_HEAD_CAP_TOKENS]
 
 
 __all__ = ["head_token"]

@@ -9,7 +9,7 @@
       "value": 120.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "认领一次外部投递的默认租约 120 秒：超时未提交就让位，避免进程崩溃后锁死待发唤醒。"
     },
     {
       "name": "_SENT_RECEIPT_RETENTION_SECONDS",
@@ -17,47 +17,47 @@
       "value": 604800,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "已外发回执正文保留 7 天：足够排查与重放，又不长期占用会话存储。"
     },
     {
-      "name": "_FEISHU_IDEMPOTENT_SEND_ATTEMPTS",
+      "name": "_FEISHU_IDEMPOTENT_SEND_ATTEMPT_COUNT",
       "file": "agent_py_agent/agent/adapter/feishu.py",
       "value": 3,
-      "unit": "",
+      "unit": "个",
       "category": "重试",
-      "description": ""
+      "description": "幂等发送最多尝试 3 次：飞书接口偶发网络错误时重发，靠 message_id 去重防止重复投递。"
     },
     {
-      "name": "_DEFAULT_EXPIRE_S",
+      "name": "_DEFAULT_EXPIRE_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_app_registration.py",
       "value": 600,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "注册凭据默认有效期 600 秒（10 分钟）：到期前自动续期。"
     },
     {
-      "name": "_DEFAULT_POLL_INTERVAL_S",
+      "name": "_DEFAULT_POLL_INTERVAL_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_app_registration.py",
       "value": 5,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "注册轮询间隔 5 秒：平衡响应速度与请求量。"
     },
     {
-      "name": "_REQUEST_TIMEOUT_S",
+      "name": "_REQUEST_TIMEOUT_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_app_registration.py",
       "value": 12,
-      "unit": "",
+      "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "注册接口请求超时 12 秒：飞书公网接口慢时留足时间，避免误报注册失败。"
     },
     {
-      "name": "_TIMEOUT_S",
+      "name": "_FEISHU_CARD_TIMEOUT_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_card.py",
       "value": 10.0,
-      "unit": "",
+      "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "飞书卡片接口请求超时 10 秒：卡片交互要快，超时过长会让用户感觉卡顿。"
     },
     {
       "name": "MAX_FILE_BYTES",
@@ -65,7 +65,7 @@
       "value": 31457280,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "普通文件上传上限 30 MB：飞书媒体接口限制，超限直接拒绝。"
     },
     {
       "name": "MAX_IMAGE_BYTES",
@@ -73,15 +73,15 @@
       "value": 10485760,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "图片上传上限 10 MB：飞书媒体接口限制，超限直接拒绝并提示压缩。"
     },
     {
-      "name": "_TIMEOUT_S",
+      "name": "_FEISHU_PROFILE_TIMEOUT_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_profile.py",
       "value": 8.0,
-      "unit": "",
+      "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "查名网络超时 8 秒：短超时 fail-open，不让资料读取拖慢首聊热路径。"
     },
     {
       "name": "MAX_MESSAGE_CHARS",
@@ -89,31 +89,31 @@
       "value": 8000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "单条飞书消息正文最多 8000 字符：超过则按行边界拆片发送。"
     },
     {
-      "name": "DEFAULT_PER_USER_CAP",
+      "name": "DEFAULT_PER_USER_CAP_COUNT",
       "file": "agent_py_agent/agent/adapter/feishu_unlock_queue.py",
       "value": 20,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "每个用户锁定期待送消息最多 20 条：防止单个用户刷爆队列，超出直接拒收。"
     },
     {
-      "name": "DEFAULT_RECENT_ID_CAP",
+      "name": "DEFAULT_RECENT_ID_CAP_COUNT",
       "file": "agent_py_agent/agent/adapter/feishu_unlock_queue.py",
       "value": 10000,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "最近去重 ID 保留 1 万个：防止去重集合无限增长。"
     },
     {
-      "name": "DEFAULT_TOTAL_CAP",
+      "name": "DEFAULT_TOTAL_CAP_COUNT",
       "file": "agent_py_agent/agent/adapter/feishu_unlock_queue.py",
       "value": 10000,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "全队列总条目上限 1 万：锁定期极长时防内存被待送消息撑爆。"
     },
     {
       "name": "WS_OPEN_TIMEOUT_SECONDS",
@@ -121,31 +121,31 @@
       "value": 45.0,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "WebSocket 建连超时 45 秒：飞书长连接首连/重连需要合理等待窗口，太长会拖住看门狗。"
     },
     {
-      "name": "_RECONNECT_INITIAL_BACKOFF_S",
+      "name": "_RECONNECT_INITIAL_BACKOFF_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_ws.py",
       "value": 1.0,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
-      "description": "指数退避 + jitter;稳定连过(>STABLE 秒)又断则退避归零,避免长连一闪而过却背着大退避。"
+      "description": "重连初始退避 1 秒：首断快速重试。"
     },
     {
-      "name": "_RECONNECT_MAX_BACKOFF_S",
+      "name": "_RECONNECT_MAX_BACKOFF_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_ws.py",
       "value": 30.0,
-      "unit": "",
+      "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "重连最大退避 30 秒：防止反复失败时高频打飞书网关。"
     },
     {
-      "name": "_RECONNECT_STABLE_RESET_S",
+      "name": "_RECONNECT_STABLE_RESET_SECONDS",
       "file": "agent_py_agent/agent/adapter/feishu_ws.py",
       "value": 60.0,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "稳定连接超过 60 秒后再断，退避归零重新从 1 秒起步。"
     },
     {
       "name": "_TERMINAL_RETENTION_SECONDS",
@@ -153,15 +153,15 @@
       "value": 604800,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "入站记录保留 7 天：足够排查与审计，又不长期占用存储。"
     },
     {
-      "name": "BLOCK_SIZE",
+      "name": "BLOCK_SIZE_BYTES",
       "file": "agent_py_agent/agent/adapter/wecom_crypto.py",
       "value": 32,
-      "unit": "",
+      "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "企业微信回调 AES-CBC 的 PKCS7 块长固定 32 字节（官方协议要求）。"
     },
     {
       "name": "PENDING_TURN_INPUT_INVALIDATION_LIMIT",
@@ -2780,60 +2780,60 @@
       "description": ""
     },
     {
-      "name": "_CENSUS_CAP",
+      "name": "_CENSUS_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/engine.py",
       "value": 50000,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "普查账累计键数上限 5 万：防异常来源把账本撑爆。"
     },
     {
-      "name": "_COLD_START_PREPASS_MIN",
+      "name": "_COLD_START_PREPASS_MIN_COUNT",
       "file": "agent_py_agent/agent/ingestion/engine.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "冷启动预扫最少 64 条：来源记录太少时先攒够再进入常规普查节奏。"
     },
     {
-      "name": "_RULE_HITS_CAP",
+      "name": "_RULE_HITS_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/engine.py",
       "value": 256,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "规则命中账的键数上限(规则条目数本身受 spec 解析上限约束,这里只防坏快照)。"
     },
     {
-      "name": "_SNAPSHOT_CENSUS_CAP",
+      "name": "_SNAPSHOT_CENSUS_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/engine.py",
       "value": 20000,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "快照普查账键数上限 2 万：快照只保留有限来源，防止无限增长。"
     },
     {
-      "name": "_LITERAL_TEXT_CAP",
+      "name": "_LITERAL_TEXT_CAP_CHARS",
       "file": "agent_py_agent/agent/ingestion/field_profile.py",
       "value": 48,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "字面文本字段最多保留 48 个字符的样本：足够判别高低基数，不放大存储。"
     },
     {
-      "name": "_MONOTONE_MIN_SAMPLES",
+      "name": "_MONOTONE_MIN_SAMPLE_COUNT",
       "file": "agent_py_agent/agent/ingestion/field_profile.py",
       "value": 16,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "单调数判定最少需要 16 个样本：样本太少不轻易下\"单调递增\"结论。"
     },
     {
-      "name": "_MAX_ARRAY_SCAN",
+      "name": "_MAX_ARRAY_SCAN_COUNT",
       "file": "agent_py_agent/agent/ingestion/flatten.py",
       "value": 16,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "数组最多扫描 16 个元素：数组只做抽样判别，不展开全部下标。"
     },
     {
       "name": "_MAX_DEPTH",
@@ -2841,15 +2841,15 @@
       "value": 8,
       "unit": "",
       "category": "上限预算",
-      "description": ""
+      "description": "嵌套深度最多 8 层：再深的结构按叶子收敛，防止递归压平被恶意深 JSON 打爆。"
     },
     {
-      "name": "_MAX_PAIRS",
+      "name": "_MAX_PAIR_COUNT",
       "file": "agent_py_agent/agent/ingestion/flatten.py",
       "value": 128,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "单事件最多压平 128 个键值对：超限丢弃多余字段，保证事件处理耗时可控。"
     },
     {
       "name": "_INGEST_RATE_STALE_SECONDS",
@@ -2857,7 +2857,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "摄入速率窗口超过 30 秒未更新即视为过期：停止用陈旧速率做反压判断。"
     },
     {
       "name": "_INGEST_RATE_WINDOW_SECONDS",
@@ -2865,7 +2865,7 @@
       "value": 10.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "摄入速率统计窗口 10 秒：滑动窗口内计数，识别瞬时洪泛。"
     },
     {
       "name": "_LEASE_FRESH_SECONDS",
@@ -2884,12 +2884,12 @@
       "description": "源连续失败时的最大退避(不放弃:源恢复即续,缺口由游标+账目如实体现)。"
     },
     {
-      "name": "_RECENT_PROCESSING_LATENCY_SAMPLE_LIMIT",
+      "name": "_RECENT_PROCESSING_LATENCY_SAMPLE_LIMIT_COUNT",
       "file": "agent_py_agent/agent/ingestion/harvester.py",
       "value": 512,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "最近处理延迟样本最多保留 512 条：环形缓冲防无限增长，统计口径稳定。"
     },
     {
       "name": "_SPOOL_ROTATE_BYTES",
@@ -2908,12 +2908,12 @@
       "description": "一轮源抓取的时间预算，同时也是 watch_stream 单次 HTTP 抓取的超时（watch_tool 与 harvester 共用这一份）。"
     },
     {
-      "name": "_SKETCH_FIELD_CAP",
+      "name": "_SKETCH_FIELD_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/signature.py",
       "value": 14,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "单事件签名最多计入 14 个字段：字段画像足够判别事件类型，再多只是噪声。"
     },
     {
       "name": "_MAX_CHECKPOINT_BYTES",
@@ -2921,7 +2921,7 @@
       "value": 262144,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "检查点正文上限 256 KB：检查点只存游标等小状态。"
     },
     {
       "name": "_MAX_CONTEXT_BYTES",
@@ -2929,7 +2929,7 @@
       "value": 262144,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "单来源上下文正文上限 256 KB：控制内存占用。"
     },
     {
       "name": "_MAX_INPUT_BYTES",
@@ -2937,7 +2937,7 @@
       "value": 16777216,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "单次拉取输入正文上限 16 MB：与采集源约定，超限截断。"
     },
     {
       "name": "_MAX_OUTPUT_BYTES",
@@ -2945,15 +2945,15 @@
       "value": 16777216,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "适配器输出正文上限 16 MB：防源头数据爆炸撑爆下游。"
     },
     {
-      "name": "_MAX_RECORDS_PER_PAGE",
+      "name": "_MAX_RECORDS_PER_PAGE_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_adapter.py",
       "value": 100000,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "每页最多 10 万条记录：分页拉取的页大小上限。"
     },
     {
       "name": "_MAX_SCRIPT_BYTES",
@@ -2961,7 +2961,7 @@
       "value": 262144,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "采集脚本正文上限 256 KB：防恶意超大脚本拖垮适配器。"
     },
     {
       "name": "_TIMEOUT_SECONDS",
@@ -2969,23 +2969,23 @@
       "value": 5.0,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "单次适配器调用超时 5 秒：卡死的来源快速失败，不让轮询线程被拖住。"
     },
     {
-      "name": "_MAX_AUDIT_SOURCES",
+      "name": "_MAX_AUDIT_SOURCE_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_binding.py",
       "value": 256,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "单个绑定最多挂 256 个审计来源：防止绑定表无限膨胀。"
     },
     {
-      "name": "_MAX_BINDINGS",
+      "name": "_MAX_BINDING_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_http.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "每个来源最多 32 个绑定：防止绑定数量失控。"
     },
     {
       "name": "_MAX_BODY_BYTES",
@@ -2993,7 +2993,7 @@
       "value": 1000000,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "响应体上限 1 MB：HTTP 采集源返回超大正文时截断，防内存被打爆。"
     },
     {
       "name": "_MAX_PATH_DEPTH",
@@ -3001,71 +3001,71 @@
       "value": 16,
       "unit": "",
       "category": "上限预算",
-      "description": ""
+      "description": "字段路径最多 16 层：嵌套过深的字段按叶子收敛，防递归爆栈。"
     },
     {
-      "name": "_QUERY_CHUNK",
+      "name": "_QUERY_CHUNK_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_record_index.py",
       "value": 400,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "记录索引查询每批最多 400 条：分批取回防一次查询撑爆内存。"
     },
     {
-      "name": "_MATCH_VALUE_DISPLAY_CAP",
+      "name": "_MATCH_VALUE_DISPLAY_CAP_CHARS",
       "file": "agent_py_agent/agent/ingestion/source_spec.py",
       "value": 160,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "命中值展示最多 160 字符：展示裁剪，防输出刷屏。"
     },
     {
-      "name": "_MAX_CONTAINS",
+      "name": "_MAX_CONTAINS_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_spec.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "contains 条件最多 32 个：限制单规则复杂度。"
     },
     {
-      "name": "_MAX_FIELD_PATH_LEN",
+      "name": "_MAX_FIELD_PATH_LEN_CHARS",
       "file": "agent_py_agent/agent/ingestion/source_spec.py",
       "value": 200,
-      "unit": "",
+      "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "字段路径最长 200 字符：超长路径按叶子处理，防路径空间爆炸。"
     },
     {
-      "name": "_MAX_IGNORE_FIELDS",
+      "name": "_MAX_IGNORE_FIELD_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_spec.py",
       "value": 128,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "忽略字段最多 128 个：忽略列表有限，防配置爆炸。"
     },
     {
-      "name": "_MAX_NORMAL_VALUES",
+      "name": "_MAX_NORMAL_VALUE_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_spec.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "普通取值最多 64 个：基数画像只保留高频值。"
     },
     {
-      "name": "_MAX_TARGET_VALUES",
+      "name": "_MAX_TARGET_VALUE_COUNT",
       "file": "agent_py_agent/agent/ingestion/source_spec.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "目标取值最多 64 个：target 列表有限，防规则体积失控。"
     },
     {
-      "name": "_MAX_VALUE_LEN",
+      "name": "_MAX_VALUE_LEN_CHARS",
       "file": "agent_py_agent/agent/ingestion/source_spec.py",
       "value": 400,
-      "unit": "",
+      "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "单个取值最长 400 字符：超长值不建画像，只记\"长文本\"标记。"
     },
     {
       "name": "_MAX_FILE_RECORD_BYTES",
@@ -3076,20 +3076,20 @@
       "description": "合法记录完整保留；超过安全上限明确失败并停在原游标，绝不把一条切成多条或静默截短。"
     },
     {
-      "name": "_HEAD_CAP",
+      "name": "_HEAD_CAP_TOKENS",
       "file": "agent_py_agent/agent/ingestion/text_tokens.py",
       "value": 48,
-      "unit": "",
+      "unit": "tokens",
       "category": "其它",
-      "description": ""
+      "description": "文本头部最多取 48 个 token：足够判别类型，不浪费上下文。"
     },
     {
-      "name": "_AUDITED_CAP",
+      "name": "_AUDITED_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_feedback.py",
       "value": 4096,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "已审计键最多 4096 个：审计账上限，防坏快照撑爆。"
     },
     {
       "name": "_AUDIT_BUCKET_SECONDS",
@@ -3097,7 +3097,7 @@
       "value": 5,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "审计统计分桶 5 秒：桶内计数，平滑突发。"
     },
     {
       "name": "_AUDIT_WINDOW_SECONDS",
@@ -3105,79 +3105,79 @@
       "value": 60,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "审计统计窗口 60 秒：窗口内聚合判定，避免瞬时抖动。"
     },
     {
-      "name": "_FEATURE_MAJORITY_MIN_SUPPORT",
+      "name": "_FEATURE_MAJORITY_MIN_SUPPORT_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_feedback.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "特征多数判定最少支持 8 条样本：证据不足不下结论，避免误判。"
     },
     {
-      "name": "_INBOX_LINE_CAP",
+      "name": "_INBOX_LINE_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_feedback.py",
       "value": 4096,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "收件箱行数上限 4096 行：防确认见闻账无限增长。"
     },
     {
-      "name": "_LEARNED_CAP",
+      "name": "_LEARNED_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_feedback.py",
       "value": 128,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "已学习特征键最多 128 个：特征空间有限，防画像膨胀。"
     },
     {
-      "name": "_RETIRE_STALE_WINDOWS",
+      "name": "_RETIRE_STALE_WINDOW_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_feedback.py",
       "value": 2,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "过期窗口最多保留 2 个：窗口收敛后及时退役，防账本累积。"
     },
     {
-      "name": "_RING_CAP",
+      "name": "_RING_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_feedback.py",
       "value": 2048,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "环形反馈账最多 2048 条：防内存无限增长，满则淘汰最老。"
     },
     {
-      "name": "_DIGEST_PATHS_CAP",
+      "name": "_DIGEST_PATHS_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 96,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "摘要字段路径最多 96 个：摘要体积有限，防失控。"
     },
     {
-      "name": "_DISTINCT_TRACK_CAP",
+      "name": "_DISTINCT_TRACK_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 48,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "不同取值跟踪最多 48 个：基数画像只跟踪高频值。"
     },
     {
-      "name": "_JUDGMENT_NOTE_CAP",
+      "name": "_JUDGMENT_NOTE_CAP_CHARS",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 2000,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "判断笔记最多 2000 字符：判读理由精简落盘。"
     },
     {
-      "name": "_SAMPLE_DEFAULT",
+      "name": "_SAMPLE_DEFAULT_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 200,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "默认抽检样本 200 条：样本量足够统计又不过大。"
     },
     {
       "name": "_SAMPLE_FETCH_SECONDS",
@@ -3185,23 +3185,23 @@
       "value": 15,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "抽检拉取窗口 15 秒：每次抽检只取近期记录。"
     },
     {
-      "name": "_SAMPLE_MAX",
+      "name": "_SAMPLE_MAX_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 1000,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "最大抽检样本 1000 条：防超大来源抽检成本失控。"
     },
     {
-      "name": "_SAMPLE_MIN",
+      "name": "_SAMPLE_MIN_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 20,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "最小抽检样本 20 条：来源记录太少时先攒样本。"
     },
     {
       "name": "_TARGET_SAMPLE_MIN_COUNT",
@@ -3212,52 +3212,52 @@
       "description": "target 频次拒错闸(§7.1):样本证据下,配为 target 的取值出现 >= 次数且 >= 占比即拒。"
     },
     {
-      "name": "_TARGET_SAMPLE_MIN_PCT",
+      "name": "_TARGET_SAMPLE_MIN_PERCENT",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 2.0,
-      "unit": "",
-      "category": "其它",
-      "description": ""
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "目标取值最低占比 2%：证据不足时拒绝\"配为 target\"的判定。"
     },
     {
-      "name": "_TOP_VALUES_SHOWN",
+      "name": "_TOP_VALUES_SHOWN_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "高频值展示最多 8 个：判别视图只列头部值。"
     },
     {
-      "name": "_VALUE_DISPLAY_CAP",
+      "name": "_VALUE_DISPLAY_CAP_CHARS",
       "file": "agent_py_agent/agent/ingestion/watch_learn.py",
       "value": 80,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "单个值展示最多 80 字符：裁剪超长取值。"
     },
     {
-      "name": "_CONTENT_RULES_SHOWN",
+      "name": "_CONTENT_RULES_SHOWN_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_payloads.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "内容规则展示最多 32 条：判读视图只列规则头部。"
     },
     {
-      "name": "_EXEMPLAR_JSON_CAP",
+      "name": "_EXEMPLAR_JSON_CAP_CHARS",
       "file": "agent_py_agent/agent/ingestion/watch_payloads.py",
       "value": 500,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "示例 JSON 最多 500 字符：示例只作展示，防超大示例刷屏。"
     },
     {
-      "name": "_OVERFLOW_SAMPLE_CAP",
+      "name": "_OVERFLOW_SAMPLE_CAP_COUNT",
       "file": "agent_py_agent/agent/ingestion/watch_payloads.py",
       "value": 20,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "溢出样本最多 20 条：溢出视图裁剪。"
     },
     {
       "name": "_AUDIT_DEFAULT_BATCH_WAIT_SECONDS",
@@ -3265,15 +3265,15 @@
       "value": 15.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "审计批量默认等 15 秒再凑批：批量判定攒样本，减少单条判定抖动。"
     },
     {
-      "name": "_AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS_PER_RECORD",
+      "name": "_PER_RECORD_AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS",
       "file": "agent_py_agent/agent/ingestion/watch_tool.py",
       "value": 64,
-      "unit": "",
+      "unit": "tokens",
       "category": "其它",
-      "description": ""
+      "description": "每条记录初始判定预留 64 tokens 输出：够放标记、分类、分数与简短理由。"
     },
     {
       "name": "_BASE_BACKOFF_MS",
@@ -4076,10 +4076,10 @@
       "description": "存量 waiting 的后续工作判定每个 run 最多隔这么久算一次：后台 1 秒一拍，正常的长等待不能每拍全量重算。"
     },
     {
-      "name": "_THROTTLE_TRACK_LIMIT",
+      "name": "_THROTTLE_TRACK_LIMIT_COUNT",
       "file": "agent_py_agent/agent/scheduler/active_run_closeout.py",
       "value": 256,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "进程内的节流表（run_id → 上次时间）超过这个条数时清掉已过窗口的条目。"
     },
@@ -4105,7 +4105,7 @@
       "value": 5,
       "unit": "",
       "category": "比例阈值",
-      "description": ""
+      "description": "宽限期按孤儿巡查间隔的 5 倍放大（无物理单位，倍数）：巡查发现越慢，给子代理的自救时间越多。"
     },
     {
       "name": "_MANUAL_DISPATCH_DELAY_SECONDS",
@@ -4113,7 +4113,7 @@
       "value": 2.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "手动派活默认推迟 2 秒再入队：给调用方一个可确认的窗口，避免同一时刻重复派发。"
     },
     {
       "name": "_MAX_NAME_CHARS",
@@ -4121,7 +4121,7 @@
       "value": 160,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "任务名最多 160 个字符：够长可读又不会让存储行与展示行失控。"
     },
     {
       "name": "_MAX_PROMPT_CHARS",
@@ -4129,39 +4129,39 @@
       "value": 32000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "任务提示词最多 32000 字符：覆盖长需求又不至于把整份账本撑大。"
     },
     {
-      "name": "_MAX_SKILL_REFS",
+      "name": "_MAX_SKILL_REFS_COUNT",
       "file": "agent_py_agent/agent/scheduler/repository.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "单个任务最多带 32 个 Skill 引用：引用太多会让认领快照过大，实际任务用不到这么多。"
     },
     {
-      "name": "_WAITING_PROJECTION_MAX_ENTRIES",
+      "name": "_WAITING_PROJECTION_MAX_ENTRIES_COUNT",
       "file": "agent_py_agent/agent/scheduler/repository.py",
       "value": 4,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "waiting 投影缓存最多缓存 4 个 owner 账本快照：每次对账只重解析未变化的文件，够日常并发又防缓存膨胀。"
     },
     {
-      "name": "_WAITING_PROJECTION_MAX_ROWS",
+      "name": "_WAITING_PROJECTION_MAX_ROWS_COUNT",
       "file": "agent_py_agent/agent/scheduler/repository.py",
       "value": 512,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "单个 waiting 投影最多 512 行：行数太多说明账本异常，按满行直接视为需要全量重读。"
     },
     {
-      "name": "_CRON_PARTS",
+      "name": "_CRON_PARTS_COUNT",
       "file": "agent_py_agent/agent/scheduler/schedule.py",
       "value": 5,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "cron 表达式固定 5 段（分 时 日 月 周）：与标准 cron 语法一致，少一段多一段都按格式错误拒绝。"
     },
     {
       "name": "_MAX_CRON_SEARCH_DAYS",
@@ -4169,7 +4169,7 @@
       "value": 2928,
       "unit": "天",
       "category": "上限预算",
-      "description": ""
+      "description": "一次性 cron 最多向前搜索 8 年（366*8 天）：覆盖常见“每月/每年”需求又避免无界循环。"
     },
     {
       "name": "_MAX_INTERVAL_SECONDS",
@@ -4177,7 +4177,7 @@
       "value": 31622400,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "定时任务最大间隔 1 年：超过一年的周期用一次性任务表达更合理。"
     },
     {
       "name": "_MIN_INTERVAL_SECONDS",
@@ -4185,7 +4185,7 @@
       "value": 60,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "定时任务最小间隔 60 秒：太密的周期会拖垮调度对账，需要更密的用常驻服务而非定时任务。"
     },
     {
       "name": "_DEFAULT_CLAIM_SECONDS",
@@ -4193,15 +4193,15 @@
       "value": 300,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "认领租约默认 300 秒：够一次定时回合正常跑完，超时让其它调度器实例接管。"
     },
     {
-      "name": "_KEY_LEN",
+      "name": "_KEY_LEN_BYTES",
       "file": "agent_py_agent/agent/session_lock/passwords.py",
       "value": 32,
-      "unit": "",
+      "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "派生密钥 32 字节：与 SHA-256 输出等长，强度足够又不会让哈希串过长。"
     },
     {
       "name": "_SALT_BYTES",
@@ -4209,7 +4209,7 @@
       "value": 16,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "盐 16 字节：随机盐防彩虹表，16 字节碰撞概率可忽略。"
     },
     {
       "name": "_SCRYPT_N",
@@ -4217,7 +4217,7 @@
       "value": 16384,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "scrypt 内存/CPU 成本参数 N=2^14（无物理单位）：官方推荐档，本机校验约几十毫秒、可防 GPU 批量爆破。"
     },
     {
       "name": "_SCRYPT_P",
@@ -4225,7 +4225,7 @@
       "value": 1,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "scrypt 并行度 p=1（无物理单位）：单线程校验足够，保持与哈希格式里的参数一致。"
     },
     {
       "name": "_SCRYPT_R",
@@ -4233,7 +4233,7 @@
       "value": 8,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "scrypt 块大小参数 r=8（无物理单位）：与 N、p 搭配的标准推荐值，改小会降低抗爆破成本。"
     },
     {
       "name": "DEFAULT_IDLE_SECONDS",
@@ -4241,15 +4241,15 @@
       "value": 10800,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "会话闲置 3 小时自动锁定：不影响活跃使用，又避免离开后会话长期暴露。"
     },
     {
-      "name": "MAX_FAILURE_ENTRIES",
+      "name": "MAX_FAILURE_ENTRIES_COUNT",
       "file": "agent_py_agent/agent/session_lock/service.py",
       "value": 8192,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "失败账最多 8192 条（个数）：防大量不同用户撑爆内存，满则淘汰最老。"
     },
     {
       "name": "UNLOCK_LOCKOUT_BASE_SECONDS",
@@ -4257,7 +4257,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "解锁失败退避起点 30 秒：第一次退避足够打断快速重试。"
     },
     {
       "name": "UNLOCK_LOCKOUT_CAP_SECONDS",
@@ -4265,15 +4265,15 @@
       "value": 900.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "解锁失败退避上限 15 分钟：防长时间锁死，同时保证暴破窗口成本足够高。"
     },
     {
-      "name": "UNLOCK_MAX_FAILURES",
+      "name": "UNLOCK_MAX_FAILURES_COUNT",
       "file": "agent_py_agent/agent/session_lock/service.py",
       "value": 5,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": "把在线暴破从\"只受 scrypt 单次成本约束\"压到每窗口 ~1 次;成功即清零。"
+      "description": "连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。"
     },
     {
       "name": "DEFAULT_DECISION_REQUEST_MAX_CHARS",
@@ -5289,7 +5289,7 @@
       "value": 600.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "失败统计窗口 600 秒：窗口内失败次数清零，锁定期只跟最后一次失败时间相关。"
     },
     {
       "name": "ADMIN_PASSWORD_LOCK_SECONDS",
@@ -5297,23 +5297,23 @@
       "value": 600.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "锁定 600 秒：足够打断自动暴破节奏，又不至于让管理员等太久。"
     },
     {
-      "name": "ADMIN_PASSWORD_MAX_FAILURES",
+      "name": "ADMIN_PASSWORD_MAX_FAILURES_COUNT",
       "file": "agent_py_agent/agent/user_space/admin_password.py",
       "value": 5,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "一个窗口内连续失败超过 5 次即锁（个数）：手误不会连续 5 次，超过就按暴破处理。"
     },
     {
-      "name": "ADMIN_PASSWORD_MIN_LENGTH",
+      "name": "ADMIN_PASSWORD_MIN_LENGTH_CHARS",
       "file": "agent_py_agent/agent/user_space/admin_password.py",
       "value": 8,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "管理员密码最少 8 个字符：短密码易被猜中，8 位是最低可接受强度。"
     },
     {
       "name": "_HASH_BYTES",
@@ -5321,7 +5321,7 @@
       "value": 32,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "派生密钥 32 字节：与 SHA-256 输出等长，强度足够且哈希串不长。"
     },
     {
       "name": "_SALT_BYTES",
@@ -5329,15 +5329,15 @@
       "value": 16,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "盐 16 字节：随机盐防彩虹表，16 字节碰撞概率可忽略。"
     },
     {
-      "name": "_SCRYPT_MAXMEM",
+      "name": "_SCRYPT_MAXMEM_BYTES",
       "file": "agent_py_agent/agent/user_space/admin_password.py",
       "value": 67108864,
-      "unit": "",
+      "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "scrypt 允许最大内存 64 MiB：拦配置错误（N/r/p 过大导致校验时内存失控），正常参数远用不到。"
     },
     {
       "name": "_SCRYPT_N",
@@ -5345,7 +5345,7 @@
       "value": 16384,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "scrypt 成本参数 N=2^14（无物理单位）：官方推荐档，单次校验约几十毫秒、可防 GPU 批量爆破。"
     },
     {
       "name": "_SCRYPT_P",
@@ -5353,7 +5353,7 @@
       "value": 1,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "scrypt 并行度 p=1（无物理单位）：单线程校验足够，与哈希格式参数一致。"
     },
     {
       "name": "_SCRYPT_R",
@@ -5361,7 +5361,7 @@
       "value": 8,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "scrypt 块大小 r=8（无物理单位）：与 N、p 搭配的标准推荐值。"
     },
     {
       "name": "MAIN_CONTEXT_BUNDLE_PROMPT_MAX_CHARS",
@@ -5369,7 +5369,7 @@
       "value": 1600,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "主上下文捆的最大提示段 1600 字符：够放身份/范围/契约摘要，又不至于挤占实际对话预算。"
     },
     {
       "name": "COMPACT_COOLDOWN_SECONDS",
@@ -5388,20 +5388,20 @@
       "description": "函数用途: 低于这个大小不压缩，避免对小文件白跑一遍 IO。"
     },
     {
-      "name": "_YIELD_EVERY_LINES",
+      "name": "_YIELD_EVERY_LINES_COUNT",
       "file": "agent_py_agent/agent/user_space/home_index_compact.py",
       "value": 20000,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
       "description": "函数用途: 让出执行权的行间隔。"
     },
     {
-      "name": "_INDEX_WRITE_CACHE_CAPACITY",
+      "name": "_INDEX_WRITE_CACHE_CAPACITY_COUNT",
       "file": "agent_py_agent/agent/user_space/home_indexes.py",
       "value": 50000,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "写缓存最多缓存 5 万条索引键（个数）：批量写入前先攒内存，满了强制刷盘防失控。"
     },
     {
       "name": "_DEFAULT_INTERVAL_SECONDS",
@@ -5409,7 +5409,7 @@
       "value": 86400,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。"
     },
     {
       "name": "_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS",
@@ -5417,7 +5417,7 @@
       "value": 15.0,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。"
     },
     {
       "name": "_MAX_FACT_FILE_BYTES",

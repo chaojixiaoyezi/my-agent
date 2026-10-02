@@ -26,7 +26,8 @@ try:
 except ImportError:
     _HAS_CRYPTO = False
 
-BLOCK_SIZE = 32
+# 企业微信回调 AES-CBC 的 PKCS7 块长固定 32 字节（官方协议要求）。
+BLOCK_SIZE_BYTES = 32
 
 
 class WecomCryptoError(Exception):
@@ -71,7 +72,7 @@ def _aes_key(encoding_aes_key: str) -> bytes:
 
 
 def _pkcs7_pad(data: bytes) -> bytes:
-    pad = BLOCK_SIZE - (len(data) % BLOCK_SIZE) or BLOCK_SIZE
+    pad = BLOCK_SIZE_BYTES - (len(data) % BLOCK_SIZE_BYTES) or BLOCK_SIZE_BYTES
     return data + bytes([pad]) * pad
 
 
@@ -79,7 +80,7 @@ def _pkcs7_unpad(data: bytes) -> bytes:
     if not data:
         raise WecomCryptoError("密文为空")
     pad = data[-1]
-    if pad < 1 or pad > BLOCK_SIZE or pad > len(data):
+    if pad < 1 or pad > BLOCK_SIZE_BYTES or pad > len(data):
         raise WecomCryptoError("填充非法")
     return data[:-pad]
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+# 嵌套深度最多 8 层：再深的结构按叶子收敛，防止递归压平被恶意深 JSON 打爆。
 _MAX_DEPTH = 8
-_MAX_PAIRS = 128
-_MAX_ARRAY_SCAN = 16
+# 单事件最多压平 128 个键值对：超限丢弃多余字段，保证事件处理耗时可控。
+_MAX_PAIR_COUNT = 128
+# 数组最多扫描 16 个元素：数组只做抽样判别，不展开全部下标。
+_MAX_ARRAY_SCAN_COUNT = 16
 
 
 def flatten_event(event: object) -> list[tuple[str, object]]:
@@ -16,7 +19,7 @@ def flatten_event(event: object) -> list[tuple[str, object]]:
 
 
 def _walk(path: str, value: object, pairs: list[tuple[str, object]], depth: int) -> None:
-    if len(pairs) >= _MAX_PAIRS:
+    if len(pairs) >= _MAX_PAIR_COUNT:
         return
     if depth >= _MAX_DEPTH:
         pairs.append((path or "$", "<max-depth>"))
@@ -39,7 +42,7 @@ def _walk_mapping(path: str, value: dict, pairs: list[tuple[str, object]], depth
 def _walk_sequence(path: str, value: object, pairs: list[tuple[str, object]], depth: int) -> None:
     items = list(value)  # type: ignore[arg-type]
     pairs.append((f"{path}.__len__" if path else "$.__len__", len(items)))
-    for item in items[:_MAX_ARRAY_SCAN]:
+    for item in items[:_MAX_ARRAY_SCAN_COUNT]:
         _walk(f"{path}[]" if path else "$[]", item, pairs, depth + 1)
 
 

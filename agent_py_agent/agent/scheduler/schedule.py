@@ -16,9 +16,13 @@ from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _UTC = timezone.utc
-_CRON_PARTS = 5
+# cron 表达式固定 5 段（分 时 日 月 周）：与标准 cron 语法一致，少一段多一段都按格式错误拒绝。
+_CRON_PARTS_COUNT = 5
+# 一次性 cron 最多向前搜索 8 年（366*8 天）：覆盖常见“每月/每年”需求又避免无界循环。
 _MAX_CRON_SEARCH_DAYS = 366 * 8
+# 定时任务最小间隔 60 秒：太密的周期会拖垮调度对账，需要更密的用常驻服务而非定时任务。
 _MIN_INTERVAL_SECONDS = 60
+# 定时任务最大间隔 1 年：超过一年的周期用一次性任务表达更合理。
 _MAX_INTERVAL_SECONDS = 366 * 24 * 60 * 60
 _MONTH_NAMES = {name.lower(): index for index, name in enumerate(calendar.month_abbr) if name}
 _DOW_NAMES = {
@@ -214,7 +218,7 @@ def next_cron_timestamp(expression: str, *, timezone_name: str, after: float) ->
 @lru_cache(maxsize=512)
 def parse_cron(expression: str) -> CronFields:
     parts = str(expression or "").strip().split()
-    if len(parts) != _CRON_PARTS:
+    if len(parts) != _CRON_PARTS_COUNT:
         raise ScheduleValidationError("cron must contain exactly five fields")
     expanded: list[tuple[frozenset[int], bool]] = []
     for index, part in enumerate(parts):

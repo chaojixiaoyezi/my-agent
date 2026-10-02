@@ -8,6 +8,7 @@ from typing import Any
 from ..common.value_parsing import text_value as _text
 from ..contracts.tool_manifest_contract import tool_manifest_payload
 
+# 主上下文捆的最大提示段 1600 字符：够放身份/范围/契约摘要，又不至于挤占实际对话预算。
 MAIN_CONTEXT_BUNDLE_PROMPT_MAX_CHARS = 1600
 MAIN_CONTEXT_BUNDLE_REQUIRED_FIELDS = [
     "identity",

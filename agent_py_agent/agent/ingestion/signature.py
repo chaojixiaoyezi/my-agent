@@ -7,7 +7,8 @@ from hashlib import sha1
 from .field_profile import ProfileTable
 from .flatten import flatten_event
 
-_SKETCH_FIELD_CAP = 14
+# 单事件签名最多计入 14 个字段：字段画像足够判别事件类型，再多只是噪声。
+_SKETCH_FIELD_CAP_COUNT = 14
 
 
 def classed_pairs(event: object, profiles: ProfileTable) -> tuple[tuple[str, str], ...]:
@@ -32,9 +33,9 @@ def signature_of(pairs: tuple[tuple[str, str], ...]) -> str:
 
 def sketch_of(pairs: tuple[tuple[str, str], ...]) -> dict[str, str]:
     """给被压组看的结构速写:全部分类记号,超上限截断(纯投影,不做取舍判断)。"""
-    sketch = dict(pairs[:_SKETCH_FIELD_CAP])
-    if len(pairs) > _SKETCH_FIELD_CAP:
-        sketch["…"] = f"+{len(pairs) - _SKETCH_FIELD_CAP} fields"
+    sketch = dict(pairs[:_SKETCH_FIELD_CAP_COUNT])
+    if len(pairs) > _SKETCH_FIELD_CAP_COUNT:
+        sketch["…"] = f"+{len(pairs) - _SKETCH_FIELD_CAP_COUNT} fields"
     return sketch
 
 

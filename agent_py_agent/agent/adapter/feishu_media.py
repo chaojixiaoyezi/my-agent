@@ -11,7 +11,9 @@ import secrets
 from pathlib import Path
 from typing import Any
 
+# 图片上传上限 10 MB：飞书媒体接口限制，超限直接拒绝并提示压缩。
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# 普通文件上传上限 30 MB：飞书媒体接口限制，超限直接拒绝。
 MAX_FILE_BYTES = 30 * 1024 * 1024
 
 _DOC_UPLOAD_TYPES = {

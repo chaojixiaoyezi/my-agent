@@ -20,7 +20,8 @@ from pathlib import Path
 from .watch_state import WatchState, state_dir
 
 _SCHEMA_VERSION = "audit-source-record-index.v1"
-_QUERY_CHUNK = 400
+# 记录索引查询每批最多 400 条：分批取回防一次查询撑爆内存。
+_QUERY_CHUNK_COUNT = 400
 
 
 class SourceRecordIndexError(OSError):
@@ -136,8 +137,8 @@ def _committed_keys(
 ) -> set[str]:
     committed: set[str] = set()
     unique = list(dict.fromkeys(keys))
-    for offset in range(0, len(unique), _QUERY_CHUNK):
-        chunk = unique[offset : offset + _QUERY_CHUNK]
+    for offset in range(0, len(unique), _QUERY_CHUNK_COUNT):
+        chunk = unique[offset : offset + _QUERY_CHUNK_COUNT]
         placeholders = ",".join("?" for _ in chunk)
         rows = connection.execute(
             f"SELECT record_key FROM committed_record_keys "  # noqa: S608

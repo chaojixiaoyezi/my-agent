@@ -24,7 +24,8 @@ from .source_http import (
 from .watch_tool_spec import build_watch_stream_model_spec
 
 _AUDIT_SOURCE_OPEN_FIELD_SET = frozenset(AUDIT_SOURCE_OPEN_FIELDS)
-_MAX_AUDIT_SOURCES = 256
+# 单个绑定最多挂 256 个审计来源：防止绑定表无限膨胀。
+_MAX_AUDIT_SOURCE_COUNT = 256
 _SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
@@ -55,8 +56,8 @@ def normalize_audit_source_bindings(value: object) -> tuple[dict[str, Any], ...]
 
     if value is None:
         return ()
-    if not isinstance(value, list) or len(value) > _MAX_AUDIT_SOURCES:
-        raise ValueError(f"source_bindings 必须是最多 {_MAX_AUDIT_SOURCES} 项的数组")
+    if not isinstance(value, list) or len(value) > _MAX_AUDIT_SOURCE_COUNT:
+        raise ValueError(f"source_bindings 必须是最多 {_MAX_AUDIT_SOURCE_COUNT} 项的数组")
     rows: list[dict[str, Any]] = []
     source_ids: set[str] = set()
     source_urls: set[str] = set()

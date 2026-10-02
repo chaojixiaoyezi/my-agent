@@ -20,16 +20,24 @@ from .text_tokens import head_token
 from .watch_state import WatchState, persist_state
 
 _TOOL_NAME = "watch_stream"
-_SAMPLE_DEFAULT = 200
-_SAMPLE_MIN = 20
-_SAMPLE_MAX = 1000
+# 默认抽检样本 200 条：样本量足够统计又不过大。
+_SAMPLE_DEFAULT_COUNT = 200
+# 最小抽检样本 20 条：来源记录太少时先攒样本。
+_SAMPLE_MIN_COUNT = 20
+# 最大抽检样本 1000 条：防超大来源抽检成本失控。
+_SAMPLE_MAX_COUNT = 1000
+# 抽检拉取窗口 15 秒：每次抽检只取近期记录。
 _SAMPLE_FETCH_SECONDS = 15
 _RAW_EVENTS_SHOWN = 20
 _RAW_EVENT_JSON_CAP = 1200
-_TOP_VALUES_SHOWN = 8
-_DISTINCT_TRACK_CAP = 48
-_VALUE_DISPLAY_CAP = 80
-_DIGEST_PATHS_CAP = 96
+# 高频值展示最多 8 个：判别视图只列头部值。
+_TOP_VALUES_SHOWN_COUNT = 8
+# 不同取值跟踪最多 48 个：基数画像只跟踪高频值。
+_DISTINCT_TRACK_CAP_COUNT = 48
+# 单个值展示最多 80 字符：裁剪超长取值。
+_VALUE_DISPLAY_CAP_CHARS = 80
+# 摘要字段路径最多 96 个：摘要体积有限，防失控。
+_DIGEST_PATHS_CAP_COUNT = 96
 
 SAMPLE_GUIDANCE = (
     "raw_events 是只读样本，field_digest 是纯结构统计；程序不解释业务含义。"
@@ -129,7 +137,8 @@ def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict
     return [event for _seq, event in drain.events], drain.error, drain.error_code
 
 
-_JUDGMENT_NOTE_CAP = 2000
+# 判断笔记最多 2000 字符：判读理由精简落盘。
+_JUDGMENT_NOTE_CAP_CHARS = 2000
 
 
 def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolHandlerOutcome:
@@ -165,7 +174,7 @@ def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolHandlerOutc
             state.source_spec = spec.to_payload()
             state.engine.apply_spec(spec)
         if note is not None:
-            state.judgment_note = str(note).strip()[:_JUDGMENT_NOTE_CAP]
+            state.judgment_note = str(note).strip()[:_JUDGMENT_NOTE_CAP_CHARS]
         persist_state(state)
     payload = {
         "ok": True,
@@ -196,9 +205,9 @@ def _field_stats(events: list[dict]) -> dict[str, dict[str, Any]]:
 
 def _field_digest(stats: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """分布的模型可读视图:出现数/去重数/top 取值/示例。"""
-    digest = {path: _field_row(row) for path, row in sorted(stats.items())[:_DIGEST_PATHS_CAP]}
-    if len(stats) > _DIGEST_PATHS_CAP:
-        digest["…"] = f"+{len(stats) - _DIGEST_PATHS_CAP} fields"
+    digest = {path: _field_row(row) for path, row in sorted(stats.items())[:_DIGEST_PATHS_CAP_COUNT]}
+    if len(stats) > _DIGEST_PATHS_CAP_COUNT:
+        digest["…"] = f"+{len(stats) - _DIGEST_PATHS_CAP_COUNT} fields"
     return digest
 
 
@@ -206,14 +215,15 @@ def _sample_cache(sampled_events: int, stats: dict[str, dict[str, Any]]) -> dict
     """分布的持久化缓存态(configure 校验 target 频次用):每字段出现数+完整取值计数。"""
     fields = {
         path: {"events": row["events"], "values": dict(row["values"])}
-        for path, row in sorted(stats.items())[:_DIGEST_PATHS_CAP]
+        for path, row in sorted(stats.items())[:_DIGEST_PATHS_CAP_COUNT]
     }
     return {"sampled_events": sampled_events, "sampled_at": round(time.time(), 3), "fields": fields}
 
 
 # target 频次拒错闸(§7.1):样本证据下,配为 target 的取值出现 >= 次数且 >= 占比即拒。
 _TARGET_SAMPLE_MIN_COUNT = 3
-_TARGET_SAMPLE_MIN_PCT = 2.0
+# 目标取值最低占比 2%：证据不足时拒绝"配为 target"的判定。
+_TARGET_SAMPLE_MIN_PERCENT = 2.0
 
 
 def _high_frequency_target_error(state: WatchState, spec: SourceSpec) -> str:
@@ -286,7 +296,7 @@ def _frequency_verdict(target: str, count: int, field_events: int, location: str
     if field_events <= 0:
         return ""
     pct = 100.0 * count / field_events
-    if count < _TARGET_SAMPLE_MIN_COUNT or pct < _TARGET_SAMPLE_MIN_PCT:
+    if count < _TARGET_SAMPLE_MIN_COUNT or pct < _TARGET_SAMPLE_MIN_PERCENT:
         return ""
     return (
         f"spec 被拒:配为 target 的取值 '{target}' 在{location}里出现 "
@@ -305,10 +315,10 @@ def _observe_field(stats: dict[str, dict[str, Any]], path: str, canon: str) -> N
     row = stats.setdefault(path, {"events": 0, "values": {}, "overflow": False, "example": canon})
     row["events"] += 1
     values = row["values"]
-    shown = canon[:_VALUE_DISPLAY_CAP]
+    shown = canon[:_VALUE_DISPLAY_CAP_CHARS]
     if shown in values:
         values[shown] += 1
-    elif len(values) < _DISTINCT_TRACK_CAP:
+    elif len(values) < _DISTINCT_TRACK_CAP_COUNT:
         values[shown] = 1
     else:
         row["overflow"] = True
@@ -316,13 +326,13 @@ def _observe_field(stats: dict[str, dict[str, Any]], path: str, canon: str) -> N
 
 def _field_row(row: dict[str, Any]) -> dict[str, Any]:
     values: dict[str, int] = row["values"]
-    top = sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))[:_TOP_VALUES_SHOWN]
-    distinct = f"{_DISTINCT_TRACK_CAP}+" if row["overflow"] else len(values)
+    top = sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))[:_TOP_VALUES_SHOWN_COUNT]
+    distinct = f"{_DISTINCT_TRACK_CAP_COUNT}+" if row["overflow"] else len(values)
     return {
         "events": row["events"],
         "distinct_values": distinct,
         "top_values": [[value, count] for value, count in top],
-        "example": row["example"][:_VALUE_DISPLAY_CAP],
+        "example": row["example"][:_VALUE_DISPLAY_CAP_CHARS],
     }
 
 
@@ -335,10 +345,10 @@ def _capped_event(event: dict) -> Any:
 
 def _sample_count(params: dict[str, Any]) -> int:
     try:
-        parsed = int(str(params.get("sample_count") or _SAMPLE_DEFAULT).strip())
+        parsed = int(str(params.get("sample_count") or _SAMPLE_DEFAULT_COUNT).strip())
     except (TypeError, ValueError):
-        return _SAMPLE_DEFAULT
-    return max(_SAMPLE_MIN, min(_SAMPLE_MAX, parsed))
+        return _SAMPLE_DEFAULT_COUNT
+    return max(_SAMPLE_MIN_COUNT, min(_SAMPLE_MAX_COUNT, parsed))
 
 
 def _ok(payload: dict[str, Any]) -> ToolHandlerOutcome:

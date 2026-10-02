@@ -23,19 +23,29 @@ from ..common.nofollow_fs import read_text_beneath, unlink_file_beneath, write_t
 
 ADMIN_PASSWORD_SCHEMA = "admin_password.v1"
 ADMIN_PASSWORD_ATTEMPTS_SCHEMA = "admin_password_attempts.v1"
-ADMIN_PASSWORD_MIN_LENGTH = 8
-ADMIN_PASSWORD_MAX_FAILURES = 5
+# 管理员密码最少 8 个字符：短密码易被猜中，8 位是最低可接受强度。
+ADMIN_PASSWORD_MIN_LENGTH_CHARS = 8
+# 一个窗口内连续失败超过 5 次即锁（个数）：手误不会连续 5 次，超过就按暴破处理。
+ADMIN_PASSWORD_MAX_FAILURES_COUNT = 5
+# 失败统计窗口 600 秒：窗口内失败次数清零，锁定期只跟最后一次失败时间相关。
 ADMIN_PASSWORD_FAILURE_WINDOW_SECONDS = 600.0
+# 锁定 600 秒：足够打断自动暴破节奏，又不至于让管理员等太久。
 ADMIN_PASSWORD_LOCK_SECONDS = 600.0
 CONFIG_DIR_NAME = "config"
 _PASSWORD_FILE = "admin-password.json"
 _ATTEMPTS_FILE = "admin-password-attempts.json"
+# scrypt 成本参数 N=2^14（无物理单位）：官方推荐档，单次校验约几十毫秒、可防 GPU 批量爆破。
 _SCRYPT_N = 2**14
+# scrypt 块大小 r=8（无物理单位）：与 N、p 搭配的标准推荐值。
 _SCRYPT_R = 8
+# scrypt 并行度 p=1（无物理单位）：单线程校验足够，与哈希格式参数一致。
 _SCRYPT_P = 1
+# 盐 16 字节：随机盐防彩虹表，16 字节碰撞概率可忽略。
 _SALT_BYTES = 16
+# 派生密钥 32 字节：与 SHA-256 输出等长，强度足够且哈希串不长。
 _HASH_BYTES = 32
-_SCRYPT_MAXMEM = 64 * 1024 * 1024
+# scrypt 允许最大内存 64 MiB：拦配置错误（N/r/p 过大导致校验时内存失控），正常参数远用不到。
+_SCRYPT_MAXMEM_BYTES = 64 * 1024 * 1024
 _REFUSAL_TEXT = "管理员身份验证未通过。"
 
 
@@ -62,8 +72,8 @@ def admin_password_path(home_root: str | Path) -> Path:
 # LLM: 规则只看长度和字符类别，不做强度猜测；首尾空白与控制字符会让 IM 里的 `/admin <密码>` 无法无歧义地还原，所以拒绝。
 # 函数用途: 检查新密码是否可以设置，不合格时抛出固定中文说明。
 def validate_admin_password(password: object) -> str:
-    if not isinstance(password, str) or len(password) < ADMIN_PASSWORD_MIN_LENGTH:
-        raise AdminPasswordError(f"管理员密码至少 {ADMIN_PASSWORD_MIN_LENGTH} 个字符。")
+    if not isinstance(password, str) or len(password) < ADMIN_PASSWORD_MIN_LENGTH_CHARS:
+        raise AdminPasswordError(f"管理员密码至少 {ADMIN_PASSWORD_MIN_LENGTH_CHARS} 个字符。")
     if password != password.strip():
         raise AdminPasswordError("管理员密码首尾不能有空白字符。")
     if any(not character.isprintable() for character in password):
@@ -140,7 +150,7 @@ def verify_admin_password(
             return AdminPasswordCheck(True)
         failures = [value for value in entry.get("failures") or () if moment - ADMIN_PASSWORD_FAILURE_WINDOW_SECONDS < value <= moment]
         failures.append(moment)
-        if len(failures) >= ADMIN_PASSWORD_MAX_FAILURES:
+        if len(failures) >= ADMIN_PASSWORD_MAX_FAILURES_COUNT:
             identities[key] = {"failures": [], "locked_until": moment + ADMIN_PASSWORD_LOCK_SECONDS}
         else:
             identities[key] = {"failures": failures, "locked_until": 0.0}
@@ -195,7 +205,7 @@ def _read_password_record(home_root: str | Path) -> dict[str, object] | None:
         payload.get("schema") == ADMIN_PASSWORD_SCHEMA
         and payload.get("algorithm") == "scrypt"
         and n >= 2**10 and n & (n - 1) == 0 and 1 <= r <= 32 and 1 <= p <= 16
-        and 128 * n * r * p <= _SCRYPT_MAXMEM // 2
+        and 128 * n * r * p <= _SCRYPT_MAXMEM_BYTES // 2
         and len(salt) >= _SALT_BYTES and 16 <= len(digest) <= 64
         and math.isfinite(updated_at)
     )
@@ -222,7 +232,7 @@ def _password_matches(home_root: str | Path, password: object) -> bool:
 # LLM: 纯函数；只在内存中派生，不记录任何输入。
 # 函数用途: 计算 scrypt 派生值。
 def _derive(secret: str, salt: bytes, n: int, r: int, p: int, length: int) -> bytes:
-    return hashlib.scrypt(secret.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=length, maxmem=_SCRYPT_MAXMEM)
+    return hashlib.scrypt(secret.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=length, maxmem=_SCRYPT_MAXMEM_BYTES)
 
 
 # LLM: 损坏的节流记录必须抛错让调用方拒绝，不能当作“没有失败记录”而放开暴力猜测。
@@ -265,8 +275,8 @@ def _write_attempts(home_root: str | Path, identities: dict[str, dict[str, objec
 
 __all__ = [
     "ADMIN_PASSWORD_LOCK_SECONDS",
-    "ADMIN_PASSWORD_MAX_FAILURES",
-    "ADMIN_PASSWORD_MIN_LENGTH",
+    "ADMIN_PASSWORD_MAX_FAILURES_COUNT",
+    "ADMIN_PASSWORD_MIN_LENGTH_CHARS",
     "AdminPasswordCheck",
     "AdminPasswordError",
     "admin_password_path",

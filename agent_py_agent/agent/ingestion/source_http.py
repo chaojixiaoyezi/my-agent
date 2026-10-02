@@ -33,8 +33,11 @@ _REQUEST_FIELDS = frozenset(
 )
 _BINDING_FIELDS = frozenset({"location", "name", "path", "initial", "offset"})
 _SECRET_BINDING_FIELDS = frozenset({"location", "name", "path", "secret_ref"})
+# 响应体上限 1 MB：HTTP 采集源返回超大正文时截断，防内存被打爆。
 _MAX_BODY_BYTES = 1_000_000
-_MAX_BINDINGS = 32
+# 每个来源最多 32 个绑定：防止绑定数量失控。
+_MAX_BINDING_COUNT = 32
+# 字段路径最多 16 层：嵌套过深的字段按叶子收敛，防递归爆栈。
 _MAX_PATH_DEPTH = 16
 _SENSITIVE_PLAIN_HEADERS = frozenset(
     {
@@ -419,8 +422,8 @@ def _normalize_binding(raw: object, *, kind: str) -> dict[str, Any] | None:
 def _normalize_secret_bindings(value: object) -> list[dict[str, Any]]:
     if value is None:
         return []
-    if not isinstance(value, list) or len(value) > _MAX_BINDINGS:
-        raise ValueError(f"secret_bindings 必须是最多 {_MAX_BINDINGS} 项的数组")
+    if not isinstance(value, list) or len(value) > _MAX_BINDING_COUNT:
+        raise ValueError(f"secret_bindings 必须是最多 {_MAX_BINDING_COUNT} 项的数组")
     rows: list[dict[str, Any]] = []
     for raw in value:
         if not isinstance(raw, dict):

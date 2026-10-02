@@ -79,7 +79,9 @@ _AUDIT_SOURCE_REF_RE = re.compile(
 _AUDIT_DELIVERY_REF_SCHEMA = "audit-delivery.v1"
 _AUDIT_VERDICT_TOKEN_SCHEMA = "audit-verdict-token.v1"
 _AUDIT_BATCH_RECOVERY_SCHEMA = "audit-batch-recovery.v1"
+# 摄入速率统计窗口 10 秒：滑动窗口内计数，识别瞬时洪泛。
 _INGEST_RATE_WINDOW_SECONDS = 10.0
+# 摄入速率窗口超过 30 秒未更新即视为过期：停止用陈旧速率做反压判断。
 _INGEST_RATE_STALE_SECONDS = 30.0
 
 
@@ -1888,7 +1890,8 @@ def _with_batch_recovery_growth(
     return {**cursor, "batch_recovery": recovery}
 
 
-_RECENT_PROCESSING_LATENCY_SAMPLE_LIMIT = 512
+# 最近处理延迟样本最多保留 512 条：环形缓冲防无限增长，统计口径稳定。
+_RECENT_PROCESSING_LATENCY_SAMPLE_LIMIT_COUNT = 512
 
 
 def _with_recent_processing_latency(
@@ -1909,7 +1912,7 @@ def _with_recent_processing_latency(
         observed_at = float(row.get("observed_at") or 0.0)
         if observed_at > 0 and now >= observed_at:
             samples.append(round(now - observed_at, 3))
-    samples = samples[-_RECENT_PROCESSING_LATENCY_SAMPLE_LIMIT:]
+    samples = samples[-_RECENT_PROCESSING_LATENCY_SAMPLE_LIMIT_COUNT:]
     if not samples:
         return dict(cursor)
     ordered = sorted(samples)

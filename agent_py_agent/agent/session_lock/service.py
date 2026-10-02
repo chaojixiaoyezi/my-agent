@@ -15,13 +15,18 @@ from dataclasses import dataclass
 from .passwords import PasswordPolicyError, hash_password, verify_password
 from .store import SessionLockStore
 
+# 会话闲置 3 小时自动锁定：不影响活跃使用，又避免离开后会话长期暴露。
 DEFAULT_IDLE_SECONDS = 3 * 60 * 60
 # 解锁口令暴破节流:前几次失败不锁(容忍手误),超阈值后每次失败指数退避(封顶),
 # 把在线暴破从"只受 scrypt 单次成本约束"压到每窗口 ~1 次;成功即清零。
-UNLOCK_MAX_FAILURES = 5
+# 连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。
+UNLOCK_MAX_FAILURES_COUNT = 5
+# 解锁失败退避起点 30 秒：第一次退避足够打断快速重试。
 UNLOCK_LOCKOUT_BASE_SECONDS = 30.0
+# 解锁失败退避上限 15 分钟：防长时间锁死，同时保证暴破窗口成本足够高。
 UNLOCK_LOCKOUT_CAP_SECONDS = 900.0
-MAX_FAILURE_ENTRIES = 8192  # _failures 上限(防大量不同 user 撑爆内存),满淘汰最老
+# 失败账最多 8192 条（个数）：防大量不同用户撑爆内存，满则淘汰最老。
+MAX_FAILURE_ENTRIES_COUNT = 8192
 
 
 @dataclass(frozen=True)
@@ -103,12 +108,12 @@ class UnlockService:
         with self._fail_lock:
             count = self._failures.get(user_id, (0, 0.0))[0] + 1
             locked_until = 0.0
-            if count >= UNLOCK_MAX_FAILURES:  # 超阈值后每次失败指数退避(封顶)
-                over = count - UNLOCK_MAX_FAILURES
+            if count >= UNLOCK_MAX_FAILURES_COUNT:  # 超阈值后每次失败指数退避(封顶)
+                over = count - UNLOCK_MAX_FAILURES_COUNT
                 backoff = min(UNLOCK_LOCKOUT_CAP_SECONDS, UNLOCK_LOCKOUT_BASE_SECONDS * (2.0**over))
                 locked_until = now + backoff
             # LRU 封顶:满且是新 user 时淘汰最老(dict 保插入序,首个即最老)。
-            if len(self._failures) >= MAX_FAILURE_ENTRIES and user_id not in self._failures:
+            if len(self._failures) >= MAX_FAILURE_ENTRIES_COUNT and user_id not in self._failures:
                 self._failures.pop(next(iter(self._failures)), None)
             self._failures[user_id] = (count, locked_until)
 

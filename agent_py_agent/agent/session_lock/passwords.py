@@ -10,11 +10,16 @@ import hashlib
 import hmac
 import secrets
 
+# scrypt 内存/CPU 成本参数 N=2^14（无物理单位）：官方推荐档，本机校验约几十毫秒、可防 GPU 批量爆破。
 _SCRYPT_N = 2**14
+# scrypt 块大小参数 r=8（无物理单位）：与 N、p 搭配的标准推荐值，改小会降低抗爆破成本。
 _SCRYPT_R = 8
+# scrypt 并行度 p=1（无物理单位）：单线程校验足够，保持与哈希格式里的参数一致。
 _SCRYPT_P = 1
+# 盐 16 字节：随机盐防彩虹表，16 字节碰撞概率可忽略。
 _SALT_BYTES = 16
-_KEY_LEN = 32
+# 派生密钥 32 字节：与 SHA-256 输出等长，强度足够又不会让哈希串过长。
+_KEY_LEN_BYTES = 32
 
 
 class PasswordPolicyError(ValueError):
@@ -44,7 +49,7 @@ def hash_password(password: str) -> str:
         n=_SCRYPT_N,
         r=_SCRYPT_R,
         p=_SCRYPT_P,
-        dklen=_KEY_LEN,
+        dklen=_KEY_LEN_BYTES,
     )
     return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${digest.hex()}"
 

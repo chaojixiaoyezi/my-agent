@@ -11,9 +11,12 @@ from .source_http import public_source_envelope
 from .watch_state import WatchState
 
 _EVENT_JSON_CAP = 1600
-_EXEMPLAR_JSON_CAP = 500
-_OVERFLOW_SAMPLE_CAP = 20
-_CONTENT_RULES_SHOWN = 32
+# 示例 JSON 最多 500 字符：示例只作展示，防超大示例刷屏。
+_EXEMPLAR_JSON_CAP_CHARS = 500
+# 溢出样本最多 20 条：溢出视图裁剪。
+_OVERFLOW_SAMPLE_CAP_COUNT = 20
+# 内容规则展示最多 32 条：判读视图只列规则头部。
+_CONTENT_RULES_SHOWN_COUNT = 32
 
 # 判读优先序(B 回炉②:有限判力先给高价值车道):反馈车道(与已确认真目标同特征)最先,
 # 判据命中次之,通用稀有车道再次,随机抽检殿后。只排序不丢行(逐条送达不破)。
@@ -157,7 +160,7 @@ def frequent_hit_rows(digest: CallDigest) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in digest.frequent_hits.values():
         shaped = dict(row)
-        shaped["exemplar_event"] = _capped_json(dict(row.get("exemplar_event") or {}), _EXEMPLAR_JSON_CAP)
+        shaped["exemplar_event"] = _capped_json(dict(row.get("exemplar_event") or {}), _EXEMPLAR_JSON_CAP_CHARS)
         rows.append(shaped)
     return rows
 
@@ -188,7 +191,7 @@ def content_rules_block(engine) -> dict[str, Any]:
     纯账目搬运;规则本体在 source_spec(normal_*),账随 spec 版本重置。"""
     ranked = sorted(engine.rule_hits.items(), key=lambda kv: (-kv[1], kv[0]))
     rules = []
-    for key, hits in ranked[:_CONTENT_RULES_SHOWN]:
+    for key, hits in ranked[:_CONTENT_RULES_SHOWN_COUNT]:
         mode, _sep, entry = key.partition("\x1e")
         rules.append({"mode": mode, "rule": entry, "hits": hits})
     return {
@@ -392,7 +395,7 @@ def _group_row(group: GroupDigest) -> dict[str, Any]:
         "window_count": group.window_count,
         "count_this_call": group.call_count,
         "exemplar_stream_pos": group.exemplar_seq,
-        "exemplar_event": _capped_json(group.exemplar, _EXEMPLAR_JSON_CAP),
+        "exemplar_event": _capped_json(group.exemplar, _EXEMPLAR_JSON_CAP_CHARS),
     }
 
 
@@ -400,7 +403,7 @@ def _overflow_block(digest: CallDigest) -> dict[str, Any]:
     return {
         "count": len(digest.overflow),
         "note": "达标但超出本批候选上限的事件(坐标见 sample;完整清单在审计账)",
-        "sample_stream_pos": [record.seq_hint for record in digest.overflow[:_OVERFLOW_SAMPLE_CAP]],
+        "sample_stream_pos": [record.seq_hint for record in digest.overflow[:_OVERFLOW_SAMPLE_CAP_COUNT]],
     }
 
 

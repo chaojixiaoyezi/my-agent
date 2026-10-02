@@ -51,8 +51,8 @@ def test_begin_falls_back_when_expires_missing():
     raw = {"device_code": "D", "verification_uri_complete": "https://x/?q=1"}
     with patch(f"{_MOD}._post_registration", return_value=raw):
         b = far.begin_app_registration("feishu")
-    assert b.expire_in == far._DEFAULT_EXPIRE_S
-    assert b.interval == far._DEFAULT_POLL_INTERVAL_S
+    assert b.expire_in == far._DEFAULT_EXPIRE_SECONDS
+    assert b.interval == far._DEFAULT_POLL_INTERVAL_SECONDS
 
 
 def test_poll_success():

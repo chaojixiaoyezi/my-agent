@@ -17,7 +17,8 @@ if TYPE_CHECKING:
     from ..capability.persona_repository import PersonaRepository
 
 _OPEN_BASE = {"feishu": "https://open.feishu.cn", "lark": "https://open.larksuite.com"}
-_TIMEOUT_S = 8.0  # 查名网络超时(短,fail-open;不进首聊热路径慢太久)
+# 查名网络超时 8 秒：短超时 fail-open，不让资料读取拖慢首聊热路径。
+_FEISHU_PROFILE_TIMEOUT_SECONDS = 8.0
 # 匹配 USER.md 里"称呼"为空的行(- 称呼:  后面没填),半/全角冒号都认
 _CALL_NAME_RE = re.compile(r"^([ \t]*-[ \t]*称呼[:：])[ \t]*$", re.MULTILINE)
 
@@ -36,7 +37,7 @@ def fetch_feishu_display_name(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(tok_req, timeout=_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(tok_req, timeout=_FEISHU_PROFILE_TIMEOUT_SECONDS) as resp:
             token = json.loads(resp.read()).get("tenant_access_token")
         if not token:
             return None
@@ -46,7 +47,7 @@ def fetch_feishu_display_name(
         info_req = urllib.request.Request(
             url, headers={"Authorization": f"Bearer {token}"}, method="GET"
         )
-        with urllib.request.urlopen(info_req, timeout=_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(info_req, timeout=_FEISHU_PROFILE_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read())
         if data.get("code") != 0:
             return None  # 无权限/无此人:code!=0

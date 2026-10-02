@@ -30,9 +30,12 @@ _ACCOUNTS_URL = {
 }
 _REGISTRATION_PATH = "/oauth/v1/app/registration"
 
-_REQUEST_TIMEOUT_S = 12
-_DEFAULT_POLL_INTERVAL_S = 5
-_DEFAULT_EXPIRE_S = 600
+# 注册接口请求超时 12 秒：飞书公网接口慢时留足时间，避免误报注册失败。
+_REQUEST_TIMEOUT_SECONDS = 12
+# 注册轮询间隔 5 秒：平衡响应速度与请求量。
+_DEFAULT_POLL_INTERVAL_SECONDS = 5
+# 注册凭据默认有效期 600 秒（10 分钟）：到期前自动续期。
+_DEFAULT_EXPIRE_SECONDS = 600
 
 
 class FeishuRegistrationError(Exception):
@@ -71,7 +74,7 @@ def _post_registration(domain: FeishuDomain, body: dict[str, str]) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_SECONDS) as resp:
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         # 4xx 也带 JSON 体(pending/error 状态),读出来交给上层判定。
@@ -110,8 +113,8 @@ def begin_app_registration(domain: FeishuDomain = "feishu") -> BeginResult:
     qr_url = complete
 
     # 实测字段是 expires_in;通道运行时 接口写的 expire_in 不准,两个都兜。
-    expire_in = res.get("expires_in") or res.get("expire_in") or _DEFAULT_EXPIRE_S
-    interval = res.get("interval") or _DEFAULT_POLL_INTERVAL_S
+    expire_in = res.get("expires_in") or res.get("expire_in") or _DEFAULT_EXPIRE_SECONDS
+    interval = res.get("interval") or _DEFAULT_POLL_INTERVAL_SECONDS
     return BeginResult(
         device_code=device_code,
         qr_url=qr_url,
@@ -131,7 +134,7 @@ def poll_app_registration(
     interval = begin.interval
     domain: FeishuDomain = initial_domain
     domain_switched = False
-    deadline = time.monotonic() + max(begin.expire_in, _DEFAULT_POLL_INTERVAL_S)
+    deadline = time.monotonic() + max(begin.expire_in, _DEFAULT_POLL_INTERVAL_SECONDS)
 
     while time.monotonic() < deadline:
         if should_abort and should_abort():

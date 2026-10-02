@@ -404,7 +404,7 @@ def test_waiting_runs_skips_caching_when_store_changes_during_parse(
 
 def test_waiting_projection_cache_is_bounded(tmp_path, waiting_projection) -> None:
     """条目上界:多个账本不会让投影缓存无限增长。"""
-    limit = waiting_projection._WAITING_PROJECTION_MAX_ENTRIES
+    limit = waiting_projection._WAITING_PROJECTION_MAX_ENTRIES_COUNT
     for index in range(limit + 2):
         root = tmp_path / f"owner-{index}" / "scheduler"
         root.mkdir(parents=True)
@@ -423,7 +423,7 @@ def test_waiting_projection_hit_survives_concurrent_lru_eviction(
     旧实现"先 lookup 释放锁、再单独 move_to_end",中间被其它 owner 的写入挤掉就 KeyError。
     这里在命中路径上注入一次真实淘汰(填满缓存后让第 5 个 owner 写入)。
     """
-    limit = waiting_projection._WAITING_PROJECTION_MAX_ENTRIES
+    limit = waiting_projection._WAITING_PROJECTION_MAX_ENTRIES_COUNT
     target = tmp_path / "owner-0" / "scheduler"
     target.mkdir(parents=True)
     _write_store(target / "store.json", _store_with_waiting(1))
@@ -492,7 +492,7 @@ def test_waiting_runs_is_thread_safe_across_many_owners(tmp_path, waiting_projec
     assert errors == []
     assert mismatches == []
     assert len(waiting_projection._WAITING_PROJECTION_CACHE) <= (
-        waiting_projection._WAITING_PROJECTION_MAX_ENTRIES
+        waiting_projection._WAITING_PROJECTION_MAX_ENTRIES_COUNT
     )
     # 并发结束后每个 owner 仍然给出自己的 waiting 行(缓存淘汰只影响耗时,不影响结论)。
     for repository, expected in owners:

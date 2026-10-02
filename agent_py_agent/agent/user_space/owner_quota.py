@@ -14,6 +14,7 @@ from pathlib import Path
 from ..common.json_io import locked_json_path, read_json_object_report
 
 _QUOTA_LOCK_BASENAME = ".owner-quota"
+# 原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。
 _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
 
 

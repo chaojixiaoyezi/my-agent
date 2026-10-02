@@ -10,6 +10,12 @@
 - `model_profile_service.render_model_choices`、`tui_model_menu` 与 `tui_provider_menu` 展示原 catalog 的稳定 id，
   私有/共享权限和会话选择编号合同不变；跨 owner 引用仍由原共享目录解析器授权。
 
+## 常数整改第一批（P10，2026-10-01，分支 `worker/ds2-p10-batch1`）
+
+- ingestion/scheduler/session_lock/user_space/adapter 5 个模块 115 个待整改常数补中文说明、按后缀表补单位后缀改名；
+  数值不变，引用全仓同步（含测试）；无物理单位常数（倍数/指数/深度）只补说明进白名单单独组。
+- 白名单 685→575＋7；`_ALLOWED` 删 TIMEOUT_S、加 REQUEST_TIMEOUT_SECONDS；`constants_catalog.json` 重新生成 799 项 `--check` 一致。
+
 ## 决策实验晋升提示 J6（2026-10-01，本地待集成）
 
 - `request_experiment_promotion.py`：原请求回执仍是唯一幂等权威，新增 promotion_id 和冻结的 evaluation.rule；只返回本次新写入的回执。

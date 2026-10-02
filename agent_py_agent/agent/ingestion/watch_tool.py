@@ -79,13 +79,15 @@ from .watch_tool_spec import (
 )
 
 _TOOL_NAME = "watch_stream"
+# 审计批量默认等 15 秒再凑批：批量判定攒样本，减少单条判定抖动。
 _AUDIT_DEFAULT_BATCH_WAIT_SECONDS = 15.0
 # Before a source has one successful delivery, reserve enough output for the
 # opaque per-row token, classification, score and a useful reason.  Afterwards
 # the durable cursor derives this estimate from the model's actual serialized
 # verdict rows.  This is a transport budget only: it never interprets a score,
 # note, field name or business conclusion.
-_AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS_PER_RECORD = 64
+# 每条记录初始判定预留 64 tokens 输出：够放标记、分类、分数与简短理由。
+_PER_RECORD_AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS = 64
 _SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _AUDIT_SOURCE_REF_RE = re.compile(
     r"^audit://(?P<watch_id>ws-[0-9a-f]{10})/candidate/(?P<ack_id>[0-9]+:[0-9]+)$"
@@ -3391,7 +3393,7 @@ def _audit_verdict_output_budget(
         fixed_reserve += math.ceil(observed_max_row_bytes / 3.0)
         verdict_output_estimate_source = "observed_serialization"
     else:
-        verdict_output_tokens_per_record = _AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS_PER_RECORD
+        verdict_output_tokens_per_record = _PER_RECORD_AUDIT_INITIAL_VERDICT_OUTPUT_TOKENS
         verdict_output_estimate_source = "initial_protocol_reserve"
     estimated_output_safe_records = (
         max(

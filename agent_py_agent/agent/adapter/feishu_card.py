@@ -15,7 +15,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://open.feishu.cn/open-apis"
-_TIMEOUT_S = 10.0
+# 飞书卡片接口请求超时 10 秒：卡片交互要快，超时过长会让用户感觉卡顿。
+_FEISHU_CARD_TIMEOUT_SECONDS = 10.0
 _TARGET_LABEL = {"soul": "长期人设(SOUL)"}
 _TARGET_FIELD = {"soul": "soul_md"}
 
@@ -257,7 +258,7 @@ def _post_json(
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
-    with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+    with urllib.request.urlopen(req, timeout=_FEISHU_CARD_TIMEOUT_SECONDS) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 

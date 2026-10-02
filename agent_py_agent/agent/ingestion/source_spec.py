@@ -23,13 +23,20 @@ from typing import Any
 
 from .text_tokens import head_token
 
-_MAX_FIELD_PATH_LEN = 200
-_MAX_VALUE_LEN = 400
-_MAX_TARGET_VALUES = 64
-_MAX_CONTAINS = 32
-_MAX_NORMAL_VALUES = 64
-_MAX_IGNORE_FIELDS = 128
-_MATCH_VALUE_DISPLAY_CAP = 160
+# 字段路径最长 200 字符：超长路径按叶子处理，防路径空间爆炸。
+_MAX_FIELD_PATH_LEN_CHARS = 200
+# 单个取值最长 400 字符：超长值不建画像，只记"长文本"标记。
+_MAX_VALUE_LEN_CHARS = 400
+# 目标取值最多 64 个：target 列表有限，防规则体积失控。
+_MAX_TARGET_VALUE_COUNT = 64
+# contains 条件最多 32 个：限制单规则复杂度。
+_MAX_CONTAINS_COUNT = 32
+# 普通取值最多 64 个：基数画像只保留高频值。
+_MAX_NORMAL_VALUE_COUNT = 64
+# 忽略字段最多 128 个：忽略列表有限，防配置爆炸。
+_MAX_IGNORE_FIELD_COUNT = 128
+# 命中值展示最多 160 字符：展示裁剪，防输出刷屏。
+_MATCH_VALUE_DISPLAY_CAP_CHARS = 160
 
 
 @dataclass(frozen=True)
@@ -94,7 +101,7 @@ class SourceSpec:
         return normal_hit
 
     def _match_value(self, canon: str) -> SpecMatch | None:
-        shown = canon[:_MATCH_VALUE_DISPLAY_CAP]
+        shown = canon[:_MATCH_VALUE_DISPLAY_CAP_CHARS]
         if self._in_set(canon, self.target_values):
             return SpecMatch(self.result_field, shown, "target_value")
         if any(token in canon for token in self.target_value_contains):
@@ -169,15 +176,15 @@ def parse_source_spec(raw: object) -> SourceSpec:
     if not isinstance(raw, dict):
         raise ValueError("spec 须是 JSON 对象")
     result_field = str(raw.get("result_field") or "").strip()
-    if len(result_field) > _MAX_FIELD_PATH_LEN:
-        raise ValueError(f"result_field 过长(>{_MAX_FIELD_PATH_LEN})")
+    if len(result_field) > _MAX_FIELD_PATH_LEN_CHARS:
+        raise ValueError(f"result_field 过长(>{_MAX_FIELD_PATH_LEN_CHARS})")
     spec = SourceSpec(
         result_field=result_field,
-        target_values=frozenset(_str_list(raw, "target_values", _MAX_TARGET_VALUES)),
-        target_value_contains=tuple(_str_list(raw, "target_value_contains", _MAX_CONTAINS)),
-        normal_values=frozenset(_str_list(raw, "normal_values", _MAX_NORMAL_VALUES)),
-        normal_value_contains=tuple(_str_list(raw, "normal_value_contains", _MAX_CONTAINS)),
-        ignore_fields=frozenset(_str_list(raw, "ignore_fields", _MAX_IGNORE_FIELDS)),
+        target_values=frozenset(_str_list(raw, "target_values", _MAX_TARGET_VALUE_COUNT)),
+        target_value_contains=tuple(_str_list(raw, "target_value_contains", _MAX_CONTAINS_COUNT)),
+        normal_values=frozenset(_str_list(raw, "normal_values", _MAX_NORMAL_VALUE_COUNT)),
+        normal_value_contains=tuple(_str_list(raw, "normal_value_contains", _MAX_CONTAINS_COUNT)),
+        ignore_fields=frozenset(_str_list(raw, "ignore_fields", _MAX_IGNORE_FIELD_COUNT)),
         max_per_pull=_max_per_pull(raw),
         passthrough=_as_bool(raw.get("passthrough")),
     )
@@ -228,8 +235,8 @@ def _str_list(raw: dict, key: str, cap: int) -> list[str]:
         text = canon_value(item) if not isinstance(item, str) else item
         if not text:
             raise ValueError(f"{key} 里有空值")
-        if len(text) > _MAX_VALUE_LEN:
-            raise ValueError(f"{key} 里有超长取值(>{_MAX_VALUE_LEN})")
+        if len(text) > _MAX_VALUE_LEN_CHARS:
+            raise ValueError(f"{key} 里有超长取值(>{_MAX_VALUE_LEN_CHARS})")
         out.append(text)
     return out
 

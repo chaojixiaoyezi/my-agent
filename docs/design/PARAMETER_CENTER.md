@@ -21,6 +21,10 @@
   常数，显示文件:行、值、单位、类别、说明，并标明“代码常数，只读，改动需改代码”。行号不在目录里，由运行时只读打开那一个
   文件按名字定位（`settings/constants_catalog.locate_line`/`entry_with_line`），定位不到就只显示文件。
 - **后续按模块分批整改**（改名、合并、补单位与说明）时以目录为准，每批完成后重新生成目录并删掉对应的白名单条目。
+- **第一批已完成（2026-10-01，分支 `worker/ds2-p10-batch1`）**：ingestion / scheduler / session_lock / user_space / adapter
+  5 个模块 115 个待整改常数合规——时间/长度/个数类按后缀表补后缀改名（`_RETIRE_STALE_WINDOWS→_RETIRE_STALE_WINDOW_COUNT`、
+  `_KEY_LEN→_KEY_LEN_BYTES` 等），全部补上方中文说明；无物理单位常数（倍数/指数/深度 7 个名字）只补说明、挪入白名单单独组
+  （reason“无物理单位”）。数值一律不变，改名引用全仓同步（含测试）；白名单 685→575＋7；目录重新生成 799 项 `--check` 一致。
 
 ## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
 

@@ -33,12 +33,19 @@ _SPEC_FIELDS = frozenset({"path", "sha256"})
 _PLAN_FIELDS = frozenset({"request", "context"})
 _ACCEPT_FIELDS = frozenset({"records", "checkpoint", "has_more", "record_keys"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# 采集脚本正文上限 256 KB：防恶意超大脚本拖垮适配器。
 _MAX_SCRIPT_BYTES = 256 * 1024
+# 单次拉取输入正文上限 16 MB：与采集源约定，超限截断。
 _MAX_INPUT_BYTES = 16 * 1024 * 1024
+# 适配器输出正文上限 16 MB：防源头数据爆炸撑爆下游。
 _MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+# 检查点正文上限 256 KB：检查点只存游标等小状态。
 _MAX_CHECKPOINT_BYTES = 256 * 1024
+# 单来源上下文正文上限 256 KB：控制内存占用。
 _MAX_CONTEXT_BYTES = 256 * 1024
-_MAX_RECORDS_PER_PAGE = 100_000
+# 每页最多 10 万条记录：分页拉取的页大小上限。
+_MAX_RECORDS_PER_PAGE_COUNT = 100_000
+# 单次适配器调用超时 5 秒：卡死的来源快速失败，不让轮询线程被拖住。
 _TIMEOUT_SECONDS = 5.0
 
 
@@ -145,7 +152,7 @@ def accept_source_response(
     }
     output = _invoke(owner_home, audit_id, adapter, payload)
     _reject_extras(output, _ACCEPT_FIELDS, phase="accept")
-    record_limit = max(1, min(int(max_records), _MAX_RECORDS_PER_PAGE))
+    record_limit = max(1, min(int(max_records), _MAX_RECORDS_PER_PAGE_COUNT))
     raw_records = output.get("records")
     if not isinstance(raw_records, list) or len(raw_records) > record_limit:
         raise SourceAdapterError(

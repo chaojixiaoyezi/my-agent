@@ -21,12 +21,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# WebSocket 建连超时 45 秒：飞书长连接首连/重连需要合理等待窗口，太长会拖住看门狗。
 WS_OPEN_TIMEOUT_SECONDS = 45.0
 # 进程内重连(借鉴 长期助手 每通道看门狗):lark 客户端整体死掉(内部重连耗尽)后,原地重建重连,
 # 指数退避 + jitter;稳定连过(>STABLE 秒)又断则退避归零,避免长连一闪而过却背着大退避。
-_RECONNECT_INITIAL_BACKOFF_S = 1.0
-_RECONNECT_MAX_BACKOFF_S = 30.0
-_RECONNECT_STABLE_RESET_S = 60.0
+# 重连初始退避 1 秒：首断快速重试。
+_RECONNECT_INITIAL_BACKOFF_SECONDS = 1.0
+# 重连最大退避 30 秒：防止反复失败时高频打飞书网关。
+_RECONNECT_MAX_BACKOFF_SECONDS = 30.0
+# 稳定连接超过 60 秒后再断，退避归零重新从 1 秒起步。
+_RECONNECT_STABLE_RESET_SECONDS = 60.0
 _ws_connect_patched = False
 
 
@@ -250,7 +254,7 @@ def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> Non
     """跑长连;lark 客户端整体死掉(内部重连耗尽)时,**进程内指数退避重连**——不靠重启整个进程。
     只在 close()(主动停)时退出循环。借鉴 长期助手 每通道断线重连看门狗:补上"WS 彻底死后没人救"的洞
     (旧实现死一次就 on_dead,而 systemd 部署无 supervisor 消费它、进程不退 → 飞书永久断线)。"""
-    backoff = _RECONNECT_INITIAL_BACKOFF_S
+    backoff = _RECONNECT_INITIAL_BACKOFF_SECONDS
     attempt = 0
     while not client._stopped:
         connected_at = time.monotonic()
@@ -262,14 +266,14 @@ def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> Non
         if client._stopped:
             break  # 主动停:不再重连
         # 稳定连过一段又断 → 退避归零(是"连上后掉线"而非"连不上死循环")
-        if time.monotonic() - connected_at >= _RECONNECT_STABLE_RESET_S:
-            backoff, attempt = _RECONNECT_INITIAL_BACKOFF_S, 0
+        if time.monotonic() - connected_at >= _RECONNECT_STABLE_RESET_SECONDS:
+            backoff, attempt = _RECONNECT_INITIAL_BACKOFF_SECONDS, 0
         attempt += 1
         wait = backoff + random.uniform(0, min(backoff, 1.0))
         safe = reason.replace(client.app_secret, "***") if getattr(client, "app_secret", "") else reason
         logger.warning(f"飞书长连断开(第 {attempt} 次),{wait:.1f}s 后进程内重连: {safe}")
         time.sleep(wait)
-        backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_S)
+        backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
     on_dead()  # 主动停 → 置 _running=False
 
 

@@ -33,7 +33,8 @@ from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming
 logger = logging.getLogger(__name__)
 
 _FEIHSU_API_BASE = "https://open.feishu.cn/open-apis"
-_FEISHU_IDEMPOTENT_SEND_ATTEMPTS = 3
+# 幂等发送最多尝试 3 次：飞书接口偶发网络错误时重发，靠 message_id 去重防止重复投递。
+_FEISHU_IDEMPOTENT_SEND_ATTEMPT_COUNT = 3
 _FEISHU_RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
@@ -57,7 +58,7 @@ def _feishu_msg_api_with_retry(
 ) -> dict[str, Any]:
     """只在请求带飞书原生 uuid 时重试传输故障；所有尝试复用同一 uuid。"""
     attempts = (
-        _FEISHU_IDEMPOTENT_SEND_ATTEMPTS
+        _FEISHU_IDEMPOTENT_SEND_ATTEMPT_COUNT
         if str(body.get("uuid") or "").strip()
         else 1
     )

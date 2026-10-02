@@ -1,5 +1,13 @@
 # Gateway 维护状态
 
+常数整改第一批（参数中心 P10，分支 `worker/ds2-p10-batch1`，2026-10-01）：agent/ingestion、agent/scheduler、
+agent/session_lock、agent/user_space、agent/adapter 5 个模块 115 个待整改常数（无单位后缀或无中文说明）已合规——
+时间/长度/个数类按生成器后缀表补后缀改名（如 `_RETIRE_STALE_WINDOWS→_RETIRE_STALE_WINDOW_COUNT`、`_KEY_LEN→_KEY_LEN_BYTES`），
+全部补上方中文说明；无物理单位常数（倍数/指数/深度）只补说明并挪入白名单单独组（reason“无物理单位”）。
+数值一律不变，改名引用全仓同步（含测试）。白名单 685→575＋7（无物理单位组）；`test_constant_names_unique._ALLOWED`
+删 TIMEOUT_S（改名后不再重复）、加 REQUEST_TIMEOUT_SECONDS（飞书注册请求超时与推理探测等待上限含义不同）；
+目录重新生成 799 项 `--check` 一致。详见 TESTS.md。
+
 `/settings internal <关键词>` 查代码常数（参数中心 P10，分支 `worker/ds1-constants-catalog`，2026-10-01）：
 `settings_control_service._internal` 调 `settings/constants_catalog.search_constants`（只读随包
 `config/constants_catalog.json`，由 `scripts/build_constants_catalog.py` 用 ast 静态扫描生成，799 项/328 文件；

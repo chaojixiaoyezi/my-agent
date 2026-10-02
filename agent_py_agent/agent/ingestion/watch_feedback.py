@@ -33,15 +33,22 @@ if TYPE_CHECKING:  # pragma: no cover - 仅类型标注,运行期不导入(防�
     from .engine import StreamDigestEngine
     from .watch_state import WatchState
 
-_RING_CAP = 2048
-_LEARNED_CAP = 128
-_AUDITED_CAP = 4096
+# 环形反馈账最多 2048 条：防内存无限增长，满则淘汰最老。
+_RING_CAP_COUNT = 2048
+# 已学习特征键最多 128 个：特征空间有限，防画像膨胀。
+_LEARNED_CAP_COUNT = 128
+# 已审计键最多 4096 个：审计账上限，防坏快照撑爆。
+_AUDITED_CAP_COUNT = 4096
 _FEATURE_KEYS_PER_EVENT = 8
-_RETIRE_STALE_WINDOWS = 2
+# 过期窗口最多保留 2 个：窗口收敛后及时退役，防账本累积。
+_RETIRE_STALE_WINDOW_COUNT = 2
+# 审计统计窗口 60 秒：窗口内聚合判定，避免瞬时抖动。
 _AUDIT_WINDOW_SECONDS = 60
+# 审计统计分桶 5 秒：桶内计数，平滑突发。
 _AUDIT_BUCKET_SECONDS = 5
 _AUDIT_BOOTSTRAP_MIN_EVENTS_FACTOR = 4
-_INBOX_LINE_CAP = 4096
+# 收件箱行数上限 4096 行：防确认见闻账无限增长。
+_INBOX_LINE_CAP_COUNT = 4096
 
 
 class FeedbackState:
@@ -71,7 +78,7 @@ class FeedbackState:
         entry = self.learned.get(key)
         if entry is not None:
             return entry
-        if len(self.learned) >= _LEARNED_CAP:
+        if len(self.learned) >= _LEARNED_CAP_COUNT:
             self._evict_weakest()
         entry = {"c": 0, "l": 0, "fa": now, "la": now, "r": 0}
         self.learned[key] = entry
@@ -82,7 +89,7 @@ class FeedbackState:
             self.learned.items(),
             key=lambda kv: (0 if kv[1].get("r") else 1, int(kv[1].get("c") or 0), float(kv[1].get("la") or 0.0)),
         )
-        for key, _entry in ranked[: max(1, len(ranked) - _LEARNED_CAP + 1)]:
+        for key, _entry in ranked[: max(1, len(ranked) - _LEARNED_CAP_COUNT + 1)]:
             self.learned.pop(key, None)
 
     def record_lift(self, key: str, now: float, *, retire_min_lifted: int, window_seconds: int) -> None:
@@ -92,7 +99,7 @@ class FeedbackState:
         if entry is None:
             return
         entry["l"] = int(entry["l"]) + 1
-        stale = now - float(entry.get("la") or 0.0) > _RETIRE_STALE_WINDOWS * max(1, window_seconds)
+        stale = now - float(entry.get("la") or 0.0) > _RETIRE_STALE_WINDOW_COUNT * max(1, window_seconds)
         if retire_min_lifted > 0 and int(entry["l"]) >= retire_min_lifted and int(entry["c"]) <= 1 and stale:
             entry["r"] = 1
 
@@ -104,7 +111,7 @@ class FeedbackState:
     def remember_position(self, pos: int, keys: list[str], *, audit: bool) -> None:
         if pos in self.ring:
             self.ring.pop(pos)
-        elif len(self.ring) >= _RING_CAP:
+        elif len(self.ring) >= _RING_CAP_COUNT:
             oldest = next(iter(self.ring))
             self.ring.pop(oldest)
         self.ring[pos] = {"k": list(keys), "a": 1 if audit else 0}
@@ -113,7 +120,7 @@ class FeedbackState:
 
     def bump_audited(self, signature: str) -> None:
         count = self.audited.get(signature)
-        if count is None and len(self.audited) >= _AUDITED_CAP:
+        if count is None and len(self.audited) >= _AUDITED_CAP_COUNT:
             self._evict_low_audited()
         self.audited[signature] = int(count or 0) + 1
 
@@ -134,18 +141,18 @@ class FeedbackState:
 
     def restore(self, payload: dict[str, Any], now: float) -> None:
         for key, entry in dict(payload.get("learned") or {}).items():
-            if isinstance(entry, dict) and len(self.learned) < _LEARNED_CAP:
+            if isinstance(entry, dict) and len(self.learned) < _LEARNED_CAP_COUNT:
                 self.learned[str(key)] = _learned_entry(entry)
         self._restore_ring(list(payload.get("ring") or []))
         for signature, count in dict(payload.get("audited") or {}).items():
-            if len(self.audited) >= _AUDITED_CAP:
+            if len(self.audited) >= _AUDITED_CAP_COUNT:
                 break
             self.audited[str(signature)] = int(count)
         self.audit_window.restore(dict(payload.get("audit_window") or {}), now)
 
     def _restore_ring(self, items: list) -> None:
         for item in items:
-            if len(self.ring) >= _RING_CAP:
+            if len(self.ring) >= _RING_CAP_COUNT:
                 return
             if not (isinstance(item, (list, tuple)) and len(item) == 2 and isinstance(item[1], dict)):
                 continue
@@ -180,7 +187,8 @@ def head_feature_key(path: str, head_class: str) -> str:
     return f"hv{_KEY_SEP}{path}{_KEY_SEP}{head_class}"
 
 
-_FEATURE_MAJORITY_MIN_SUPPORT = 8
+# 特征多数判定最少支持 8 条样本：证据不足不下结论，避免误判。
+_FEATURE_MAJORITY_MIN_SUPPORT_COUNT = 8
 
 
 def event_feature_keys(engine: StreamDigestEngine, flat: list[tuple[str, object]], now: float) -> list[str]:
@@ -196,7 +204,7 @@ def event_feature_keys(engine: StreamDigestEngine, flat: list[tuple[str, object]
         value_count = engine.value_counter.window_count(keyed, now)
         field_key = f"f{_KEY_SEP}{path}" if keyed.startswith("v") else f"hf{_KEY_SEP}{path}"
         field_count = engine.value_counter.window_count(field_key, now)
-        if field_count >= _FEATURE_MAJORITY_MIN_SUPPORT and value_count * 2 > field_count:
+        if field_count >= _FEATURE_MAJORITY_MIN_SUPPORT_COUNT and value_count * 2 > field_count:
             continue
         scored.append((value_count, keyed))
     scored.sort(key=lambda item: (item[0], item[1]))
@@ -347,7 +355,7 @@ def _read_new_lines(path: Path, offset: int) -> tuple[list[str], int]:
 
 
 def _confirmation_pos(line: str) -> int | None:
-    if len(line) > _INBOX_LINE_CAP:
+    if len(line) > _INBOX_LINE_CAP_COUNT:
         return None
     try:
         record = json.loads(line)

@@ -20,7 +20,9 @@ from ..common.json_io import locked_json_path
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA_VERSION = 6
+# 已外发回执正文保留 7 天：足够排查与重放，又不长期占用会话存储。
 _SENT_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
+# 认领一次外部投递的默认租约 120 秒：超时未提交就让位，避免进程崩溃后锁死待发唤醒。
 _DEFAULT_CLAIM_TTL_SECONDS = 120.0
 _PENDING_WATCH_KINDS = frozenset(
     {"input_receipt", "request_result", "control_receipt"}

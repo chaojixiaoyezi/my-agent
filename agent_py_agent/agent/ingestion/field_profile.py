@@ -10,8 +10,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
-_LITERAL_TEXT_CAP = 48
-_MONOTONE_MIN_SAMPLES = 16
+# 字面文本字段最多保留 48 个字符的样本：足够判别高低基数，不放大存储。
+_LITERAL_TEXT_CAP_CHARS = 48
+# 单调数判定最少需要 16 个样本：样本太少不轻易下"单调递增"结论。
+_MONOTONE_MIN_SAMPLE_COUNT = 16
 
 TOKEN_HIGH_CARD_TEXT = "s:*"
 TOKEN_MONOTONE_NUMBER = "n:mono"
@@ -76,7 +78,7 @@ class FieldProfile:
         return f"n:e{_magnitude(value)}"
 
     def _is_monotone(self) -> bool:
-        return self.numeric_count >= _MONOTONE_MIN_SAMPLES and self.monotone_breaks == 0
+        return self.numeric_count >= _MONOTONE_MIN_SAMPLE_COUNT and self.monotone_breaks == 0
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -140,7 +142,7 @@ class ProfileTable:
 
 def _literal_key(value: object) -> str:
     if isinstance(value, str):
-        text = value if len(value) <= _LITERAL_TEXT_CAP else f"{value[:_LITERAL_TEXT_CAP]}…"
+        text = value if len(value) <= _LITERAL_TEXT_CAP_CHARS else f"{value[:_LITERAL_TEXT_CAP_CHARS]}…"
         return f"s:{text}"
     if isinstance(value, float):
         return f"n:{value!r}"

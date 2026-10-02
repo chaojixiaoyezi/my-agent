@@ -21,6 +21,7 @@ from .delivery import GatewayClaimLeaseConfig, GatewayReplyDeliveryWorker
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA_VERSION = 2
+# 入站记录保留 7 天：足够排查与审计，又不长期占用存储。
 _TERMINAL_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _INGRESS_STATES = frozenset(
     {"prepared", "payload_ready", "submitted", "placeholder_ready", "completed"}

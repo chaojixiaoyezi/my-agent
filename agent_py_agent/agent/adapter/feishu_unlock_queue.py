@@ -16,9 +16,12 @@ from .protocol import IncomingMessage
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PER_USER_CAP = 20
-DEFAULT_TOTAL_CAP = 10_000
-DEFAULT_RECENT_ID_CAP = 10_000
+# 每个用户锁定期待送消息最多 20 条：防止单个用户刷爆队列，超出直接拒收。
+DEFAULT_PER_USER_CAP_COUNT = 20
+# 全队列总条目上限 1 万：锁定期极长时防内存被待送消息撑爆。
+DEFAULT_TOTAL_CAP_COUNT = 10_000
+# 最近去重 ID 保留 1 万个：防止去重集合无限增长。
+DEFAULT_RECENT_ID_CAP_COUNT = 10_000
 
 EnqueueStatus = Literal["added", "duplicate", "full", "inactive"]
 _MessageKey = tuple[str, str, str, str]
@@ -30,9 +33,9 @@ class FeishuUnlockQueue:
     def __init__(
         self,
         *,
-        per_user_cap: int = DEFAULT_PER_USER_CAP,
-        total_cap: int = DEFAULT_TOTAL_CAP,
-        recent_id_cap: int = DEFAULT_RECENT_ID_CAP,
+        per_user_cap: int = DEFAULT_PER_USER_CAP_COUNT,
+        total_cap: int = DEFAULT_TOTAL_CAP_COUNT,
+        recent_id_cap: int = DEFAULT_RECENT_ID_CAP_COUNT,
     ) -> None:
         self._per_user_cap = max(1, int(per_user_cap))
         self._total_cap = max(self._per_user_cap, int(total_cap))
@@ -220,9 +223,9 @@ class FeishuUnlockResumeMixin:
 
 
 __all__ = [
-    "DEFAULT_PER_USER_CAP",
-    "DEFAULT_RECENT_ID_CAP",
-    "DEFAULT_TOTAL_CAP",
+    "DEFAULT_PER_USER_CAP_COUNT",
+    "DEFAULT_RECENT_ID_CAP_COUNT",
+    "DEFAULT_TOTAL_CAP_COUNT",
     "EnqueueStatus",
     "FeishuUnlockQueue",
     "FeishuUnlockResumeMixin",

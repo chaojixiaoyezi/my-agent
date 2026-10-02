@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 
+# 单条飞书消息正文最多 8000 字符：超过则按行边界拆片发送。
 MAX_MESSAGE_CHARS = 8000
 
 # markdown 痕迹:标题/列表/有序列表/围栏/行内码/粗体/删除线/斜体链接/引用。
