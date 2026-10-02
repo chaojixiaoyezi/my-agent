@@ -1025,6 +1025,10 @@ def _finish_claimed_gateway_request(
         raise DataCorruptionError(
             "gateway terminal response identity conflicts with the claimed request"
         )
+    if isinstance(response.get("restart_resume"), dict):
+        # I4：宿主停机准入拒绝的回合不写终态，请求留在 processing，重启后由 recovery 按死进程重排续跑（见
+        # request_execution._host_shutdown_resume_marker）。
+        return
     target_folder = gateway_terminal_projection_folder(paths, response)
     response_path = gateway_response_path(paths, request_id)
     archive_result = archive_request(

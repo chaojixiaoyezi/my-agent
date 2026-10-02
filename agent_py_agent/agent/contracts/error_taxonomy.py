@@ -2201,9 +2201,10 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.STOP.value,
         recovery_hint=(
             "宿主（Gateway）正在停机，本进程已关闭模型调用准入，这次模型调用没有登记、请求根本没有发出；"
-            "不是供应商失败也不是任务失败，不要在本进程里重试或换模型重发。重启后不会自动重跑："
-            "子代理 run 记为 model_call_admission_closed，由父级按 recovery_decision 用同一 run 续派"
-            "（仍有持久工作的 Audit 来源保持 PENDING，重启后照常接续）；被拒的用户回合不会续跑，需要用户重新发送。"
+            "不是供应商失败也不是任务失败，不要在本进程里重试或换模型重发。重启后：子代理 run 不自动重跑，"
+            "记为 model_call_admission_closed，由父级按 recovery_decision 用同一 run 续派"
+            "（仍有持久工作的 Audit 来源保持 PENDING，重启后照常接续）；被拒的 Gateway 用户回合不写失败终态，"
+            "和随进程消失的回合一样自动续跑，用户会看到“已自动续跑”的提示。"
         ),
     ),
     "HOST_SHUTDOWN_INTERRUPTED": ErrorContract(

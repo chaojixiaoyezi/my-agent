@@ -20,6 +20,7 @@ from ...agent.contracts.tool_approval import (
 from ...agent.conversation.compact_progress import normalize_conversation_compact_progress
 from ...agent.conversation.model_metrics import newer_model_metrics, public_model_metrics
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
+from ...agent.conversation.turn_resume_notice import turn_resumed_notice_text
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
 from .tui_identity_window import TuiIdentityWindow
 from .tui_permission_queue import (
@@ -65,13 +66,8 @@ _BACKGROUND_TRANSCRIPT_KINDS = frozenset(
 _BACKGROUND_TRANSCRIPT_PHASES = frozenset(
     {"started", "delta", "updated", "completed", "failed", "interrupted"}
 )
-# 续跑提示按 recovery 标记的结构化 cause 选文案；表里没有的新原因用通用提示，不拒绝也不显示原始取值。
-_TURN_RESUMED_NOTICES = {
-    "gateway_safe_restart": "Gateway 安全重启打断了这一轮，已自动续跑。",
-    "gateway_restart": "Gateway 重启打断了这一轮，已自动续跑。",
-    "processing_lease_expired": "这一轮执行超时中断，Gateway 已自动续跑。",
-}
-_TURN_RESUMED_FALLBACK_NOTICE = "这一轮执行被打断，已自动续跑。"
+# 续跑提示按 recovery 标记的结构化 cause 选文案（文案表在 agent.conversation.turn_resume_notice，与 IM 共用）；
+# 表里没有的新原因用通用提示，不拒绝也不显示原始取值。
 
 
 # LLM: TuiTurnSummary 是 finalize 的结构化输入；error/status/token 不能从格式化 timing 文案反解析。
@@ -2590,7 +2586,7 @@ def _close_resumed_turn_generation(
             "system_message",
             "completed",
             f"turn-resumed:{adapter.request_id}:{adapter._resume_generation}",
-            {"text": _TURN_RESUMED_NOTICES.get(cause, _TURN_RESUMED_FALLBACK_NOTICE)},
+            {"text": turn_resumed_notice_text(cause)},
             request_id=adapter.request_id,
         )
     return True

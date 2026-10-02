@@ -42,7 +42,13 @@ from ..conversation.compact_carry import compact_overflow_carry
 from ..conversation.compact_progress import COMPACT_TRIGGER_PREFLIGHT
 from ..conversation.control_commands import conversation_task_attributes
 from ..conversation.goal_progress_fuse import reset_goal_progress_fuse
-from ..conversation.host_notices import HostNotice, host_notices_from, pending_host_notices
+from ..conversation.host_notices import (
+    HostNotice,
+    host_notice,
+    host_notices_from,
+    pending_host_notices,
+)
+from ..conversation.turn_resume_notice import turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..tooling.operation_verification import public_operation_verification
 from . import (
@@ -168,6 +174,8 @@ def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
 def _update_response_from_result(response: dict, result, request: dict) -> None:
     channel_delivery = dict(getattr(result, "channel_delivery", {}) or {})
     public_delivery = _public_channel_delivery(channel_delivery)
+    if notice := _turn_resumed_host_notice(request, str(response.get("id") or "")):
+        public_delivery["host_notices"] = [notice.to_dict(), *public_delivery.get("host_notices", [])]
     # An empty projected body is authoritative: it means the channel boundary
     # intentionally suppressed an internal/runtime payload.  Falling back to
     # the raw model response here would undo that safety decision.
@@ -238,6 +246,18 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
         }
     )
     response.update(gateway_model_response_error_projection(result))
+
+
+# LLM: 续跑回合（gateway_request_is_active_turn_recovery，只认 recovery 写下的结构化标记）在最终结果 channel_delivery.host_notices
+#   的最前面补一条提示，IM 把它渲染在回复正文前（I4：用户看得出来这一轮被打断过、已自动续跑）。TUI 已在续跑边界（turn_resumed 事件）
+#   显示同一句话，且不读 channel_delivery，不会重复。文案按 cause 查 conversation.turn_resume_notice 的共用表。
+# 函数用途: 给重启后续跑完成的回合生成一条给 IM 看的宿主提示；不是续跑回合返回 None。
+def _turn_resumed_host_notice(request: dict, request_id: str) -> HostNotice | None:
+    if not request_binding.gateway_request_is_active_turn_recovery(request, request_id):
+        return None
+    marker = request.get("active_turn_recovery")
+    cause = str(marker.get("cause") or "").strip() if isinstance(marker, dict) else ""
+    return host_notice("gateway_turn_resume", cause or "resumed", turn_resumed_notice_text(cause))
 
 
 # LLM: Gateway 客户端不需要服务器 path；跨轮复用引用只进 owner transcript metadata，不进公开响应。
@@ -1216,17 +1236,38 @@ def _handle_gateway_request(
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()
+        resume_marker = _host_shutdown_resume_marker(failure, request_path, context["request_id"])
         # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
         # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
-        _settle_pending_gateway_guidance(agent, context["request_id"], failure)
+        # 留给重启续跑的回合不收口：和进程消失一样，由重启恢复按死掉的 attempt 释放预留，续跑回合再认领。
+        if resume_marker is None:
+            _settle_pending_gateway_guidance(agent, context["request_id"], failure)
         _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
         stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
+    if resume_marker is not None:
+        # I4：不写终态、不记审计，请求原样留在 processing；worker 收尾见 request_worker._finish_claimed_gateway_request。
+        response["restart_resume"] = resume_marker
+        return response
     _project_observed_gateway_run_facts(response, chunk_writer)
     if request_binding.gateway_cancel_requested(request_path, context["request_id"]):
         _apply_cancelled_gateway_response(response)
     _finalize_gateway_response(context, response)
     _complete_gateway_request_audit(agent, context, request_path, response)
     return response
+
+
+# LLM: I4（第 8 条②，统一续跑规则）：宿主停机准入拒绝（find_model_call_admission_error，只沿显式原因链）打断的回合不写失败终态，
+#   原样留在 processing，和随进程消失的回合走同一条重启恢复（recovery 按死进程重排、续跑时写 turn_resumed 边界并给 IM 补宿主提示）。
+#   用户已对这条请求发过停止（cancel_requested）时以用户为准，返回 None、照常按取消收尾。只读结构化事实，不读异常文本。
+# 函数用途: 判断这次失败要不要留给重启续跑；要就返回结构化标记（准入拒绝码与关门原因码），否则 None。
+def _host_shutdown_resume_marker(failure: Exception | None, request_path: Path, request_id: str) -> dict | None:
+    from ..contracts.model_call_ledger import find_model_call_admission_error
+
+    admission = find_model_call_admission_error(failure)
+    if admission is None or request_binding.gateway_cancel_requested(request_path, request_id):
+        return None
+    return {"schema_version": "gateway_restart_resume.v1", "error_code": admission.error_code,
+            "reason_code": admission.closure.error_code}
 
 
 # LLM: 插话持久操作经 guidance 领域组件； 回合结束时未消费的 steer/guidance 必须收口（reject），否则残留消息占住

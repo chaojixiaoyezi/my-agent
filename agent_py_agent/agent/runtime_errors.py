@@ -211,7 +211,8 @@ def _host_stopping_report(
         _template(
             "host_stopping",
             "宿主正在停机，本进程已不再接新的模型调用，这次请求没有发出；此前已执行的工作不会因此撤销。"
-            "不要在本进程里重试；重启后不会自动续跑这次被拒的回合或子代理 run，需要时由用户重发或父级按恢复决定续派。",
+            "不要在本进程里重试。Gateway 前台用户回合不写失败终态，重启后和随进程消失的回合一样自动续跑；"
+            "子代理 run 不自动重跑，由父级按恢复决定续派。",
             "host is shutting down; model call admission closed, nothing was sent",
             recoverable=False,
         ),
