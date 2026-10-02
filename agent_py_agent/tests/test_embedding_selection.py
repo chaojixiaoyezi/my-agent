@@ -42,7 +42,7 @@ SECRET = "fake-embedding-credential-5678"
 def host(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_API_KEY", raising=False)
     home = SimpleNamespace(root=tmp_path, config_dir=tmp_path / "config", owner_provider="local",
-                           owner_kind="main", owner_id="main")
+                           owner_kind="main", owner_id="local/main")  # 与生产 owner_resolver 的路径式编号一致
     path = tmp_path / "desktop.yaml"
     path.write_text('agent_name: "embedding-selection-test"\n', encoding="utf-8")
     config = load_config(path)
@@ -59,7 +59,8 @@ def _add(host, api_base="https://api.minimax.test/v1", capability="embedding"):
 
 
 def _member(host):
-    host.home_paths.owner_provider, host.home_paths.owner_kind, host.home_paths.owner_id = "feishu", "user", "member"
+    host.home_paths.owner_provider, host.home_paths.owner_kind = "feishu", "user"
+    host.home_paths.owner_id = "providers/feishu/users/member"
     return host
 
 
@@ -141,10 +142,17 @@ def test_unresolvable_default_chat_model_asks_the_user_instead_of_writing(host):
     assert result["status"] == "needs_user_choice" and _file(host) == original
 
 
+def _reference(host, kind):
+    if kind == "shared":  # 真实共享出去的嵌入档案：共享引用一律不认，只认本人目录里的原记录
+        profile_id = _add(host)
+        execute_model_profile_operation(host, "set_shared", {"profile_id": profile_id, "enabled": True})
+        return f"shared:{profile_id}"
+    return str(uuid4()) if kind == "foreign" else _add(host, capability="agentic")
+
+
 @pytest.mark.parametrize("reference", ["shared", "foreign", "chat_capability"])
 def test_shared_foreign_or_non_embedding_profiles_are_refused_without_writing(host, reference):
-    profile_id = {"shared": f"shared:{uuid4()}", "foreign": str(uuid4()),
-                  "chat_capability": _add(host, capability="agentic")}[reference]
+    profile_id = _reference(host, reference)
     original = _file(host)
     with pytest.raises(ModelProfileError) as caught:
         embedding_selection.model_set_embedding(host, profile_id)
