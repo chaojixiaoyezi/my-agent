@@ -265,3 +265,15 @@ def test_a_control_that_changed_after_observe_makes_typing_stale_without_clickin
     with pytest.raises(ObservationError) as info:
         observer.type_into_candidate(meta, "x")
     assert info.value.code == "stale" and not info.value.clicked and typed == []
+
+
+def test_a_pyobjc_conversion_error_after_the_click_is_reported_as_clicked_not_typed(monkeypatch):
+    ax = FakeAx()
+    _install_form(ax)
+    observer, _quartz, _kit, typed = _observer(ax)
+    result = observer.observe()
+    monkeypatch.setattr(ax, "AXValueCreate", lambda kind, payload: (_ for _ in ()).throw(TypeError("could not convert")))
+    with pytest.raises(ObservationError) as info:
+        observer.type_into_candidate(_meta_for(result, "ax:2"), "你好", True)
+    assert (info.value.code, info.value.clicked) == ("clear_failed", True) and "已点击、未输入" in str(info.value)
+    assert typed == [("click", 160, 250)], "点过了、一个字都没打"

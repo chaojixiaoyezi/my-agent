@@ -299,3 +299,33 @@ def test_cancellation_is_checked_before_the_click_after_focus_and_right_before_t
         observer.type_into_candidate(meta, "不该打进去", True, cancelled=lambda: flag["set"])
     assert (info.value.code, info.value.clicked) == ("cancelled", clicked)
     assert backend.events == events and all(not isinstance(event, tuple) for event in backend.events), "取消之后一个字都不打"
+
+
+@pytest.mark.parametrize("hook,code,events", [
+    ("ui_focused", "focus_not_acquired", ["click"]),
+    ("ui_select_all", "clear_failed", ["click", "focus"]),
+], ids=["focus_raises", "select_all_raises"])
+def test_unstructured_errors_after_the_click_still_report_clicked(hook, code, events):
+    backend, observer, result = _ui_observer()
+
+    def boom(native):
+        raise TypeError("pyobjc 转换失败")
+
+    setattr(backend, hook, boom)
+    with pytest.raises(ObservationError) as info:
+        observer.type_into_candidate(_meta_for(result, "ax:2"), "x", True)
+    assert (info.value.code, info.value.clicked) == (code, True) and "已点击、未输入" in str(info.value), "不能变成笼统失败"
+    assert backend.events == events, "一个字都没打"
+
+
+def test_reading_control_facts_that_raises_during_recheck_is_stale_and_does_not_click():
+    backend, observer, result = _ui_observer()
+    meta = _meta_for(result, "ax:2")
+    backend.ui_facts = lambda native: (_ for _ in ()).throw(TypeError("pyobjc 转换失败"))
+    with pytest.raises(ObservationError) as info:
+        observer.type_into_candidate(meta, "x")
+    assert (info.value.code, info.value.clicked) == ("stale", False) and backend.events == [], "确认不了控件还是原样就不点"
+    backend.ui_facts = lambda native: (_ for _ in ()).throw(ObservationError("accessibility_not_permitted", "没授权"))
+    with pytest.raises(ObservationError) as passthrough:
+        observer.click_candidate(meta)
+    assert passthrough.value.code == "accessibility_not_permitted" and backend.clicks == [], "结构化错误原样透传"

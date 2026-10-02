@@ -203,7 +203,7 @@ class ScreenObserver:
         if geometry.scale != snapshot.geometry.scale:
             raise ObservationError("stale", "截图缩放已变（换了采样方式或显示器），区域摘要不可比")
         if candidate.facts is not None:
-            if self.backend.ui_facts(candidate.native) != candidate.facts:
+            if _current_facts(self.backend, candidate.native) != candidate.facts:
                 raise ObservationError("stale", "控件已变（不在了，或角色、可用、外框、名称、可编辑有变化）")
         elif not grid_unchanged(candidate.grid, region_grid(capture.buffer, candidate.region)):
             raise ObservationError("stale", "候选区域的像素已变")
@@ -223,7 +223,8 @@ class ScreenObserver:
 
     # LLM: 顺序是合同：校验文字（零副作用）→ 点击权限 → 两层复核 → 候选真有输入动作、要清空时能全选 → 看取消 → 点击（让控件拿焦点）→
     #   等焦点（拿不到 → focus_not_acquired，已点击、未输入）→ [清空：看取消 → AX 全选，失败 → clear_failed] → 看取消 → 打字（text 为空
-    #   时按删除键清掉选区）。点击之后的失败都带 clicked=true。不读回控件的值核对（防密码泄露），结果 application_verified=False，
+    #   时按删除键清掉选区）。点击之后的每一次后端调用都经 _require_after_click / _type_or_delete：返回假或抛了非结构化异常都变成
+    #   带 clicked=true 的结构化错误（ObservationError 原样抛，测试防线的 BaseException 不吞）。不读回控件的值核对（防密码泄露），结果 application_verified=False，
     #   内容是否真的进去要靠下一次 observe。
     # 函数用途: 往宿主复核过的可编辑控件里输入一段显式文字，可选先清空原有内容。
     def type_into_candidate(self, meta: object, text: object, clear_existing: object = False, *,
@@ -235,12 +236,10 @@ class ScreenObserver:
         stop = cancelled or _never_cancelled
         _raise_if_cancelled(stop, clicked=False)
         self.backend.click(point[0], point[1])
-        if not self._wait_for_focus(candidate.native):
-            raise ObservationError("focus_not_acquired", "已点击、未输入：控件没有拿到焦点", clicked=True)
+        _require_after_click(lambda: self._wait_for_focus(candidate.native), "focus_not_acquired", "已点击、未输入：控件没有拿到焦点")
         if clear_existing:
             _raise_if_cancelled(stop, clicked=True)
-            if not self.backend.ui_select_all(candidate.native):
-                raise ObservationError("clear_failed", "已点击、未输入：没能选中原有内容", clicked=True)
+            _require_after_click(lambda: self.backend.ui_select_all(candidate.native), "clear_failed", "已点击、未输入：没能选中原有内容")
         _raise_if_cancelled(stop, clicked=True)
         _type_or_delete(self.backend, str(text))
         return {"typed": {"window": snapshot.ref, "generation": snapshot.generation, "key": candidate.key},
@@ -366,6 +365,32 @@ def _require_typing_target(candidate: CandidateSnapshot, clear_existing: bool) -
         raise ObservationError("invalid_arguments", "这个候选不能输入文字")
     if clear_existing and not candidate.facts.selection_settable:
         raise ObservationError("clear_unsupported", "这个控件不支持全选，无法清空原有内容；未点击")
+
+
+# LLM: 复核时重新读控件事实；后端抛了非结构化异常（如 pyobjc 转换失败）就当作确认不了控件还是原样 → 返回 None，复核判 stale、不点。
+#   ObservationError 原样抛；测试防线的 BaseException 不吞。
+# 函数用途: 复核用：读控件当下的结构化事实，读不了返回 None。
+def _current_facts(backend: object, native: object) -> object:
+    try:
+        return backend.ui_facts(native)
+    except ObservationError:
+        raise
+    except Exception:  # noqa: BLE001 读不了就不点
+        return None
+
+
+# LLM: 点击之后的一步（等焦点、全选）：返回假，或抛了非结构化异常（pyobjc 转换失败等），都变成带 clicked=true 的 code 错误，
+#   正文写"已点击、未输入"；ObservationError 原样抛，测试防线的 BaseException 不吞。
+# 函数用途: 点击之后执行一步后端调用，失败时如实报告已经点过。
+def _require_after_click(step: Callable[[], bool], code: str, message: str) -> None:
+    try:
+        ok = step()
+    except ObservationError:
+        raise
+    except Exception as exc:  # noqa: BLE001 点击已发生，任何异常都只能变成带 clicked 的结构化失败
+        raise ObservationError(code, f"{message}（{type(exc).__name__}）", clicked=True) from exc
+    if not ok:
+        raise ObservationError(code, message, clicked=True)
 
 
 # 函数用途: 打字（text 为空时按删除键清掉已全选的内容）；后端异常变成 type_failed（已点击，可能只输入了一部分）。
