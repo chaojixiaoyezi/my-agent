@@ -43,14 +43,18 @@ _HINT_TAG = "[delivery-review-focus]"
 _FACT_TOKEN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _FACT_KEYS = ("kind", "scope", "status")
 _LOCAL_KEYS = ("root", "canonical_command", "created_at")
+# 非选择候选与题面的措辞（2026-10-02，照 J12b）：旧题面只写“选一个最值得复核的焦点”，not_needed 只写“无需额外复核建议”，
+# 没说什么情况该选它；基准里“全部通过且之后没改动”的用例两遍都选了最新焦点（16/20）。现在题面写明哪些焦点值得先复核、
+# 全部通过且没改动时选 not_needed；候选键、题目结构和非选择回答的处理都不变。
 _NON_SELECTIONS = {
-    "not_needed": "无需额外复核建议，保留原结果",
-    "no_match": "现有焦点均不适合优先复核",
-    "abstain": "无法可靠判断",
+    "not_needed": "所有焦点的验证都通过了，且验证之后都没再改过文件（edited_after 都是 false）：不需要复核建议，选它本次不给建议",
+    "no_match": "现有焦点都不适合优先复核：选它本次不给建议",
+    "abstain": "无法可靠判断，明确弃权：选它本次不给建议",
     "need_data": "现有事实不足以判断；本增强不补读材料、不运行测试，保留原结果",
 }
-_INSTRUCTIONS = ("依据当前请求，从本轮已有验证焦点中选一个交付前最值得主模型先复核的焦点。order 越大越新；"
-                 "edited_after 表示该验证之后同一项目又有文件修改。只能选择已有焦点，"
+_INSTRUCTIONS = ("依据当前请求，从本轮已有验证焦点中选一个交付前最值得主模型先复核的焦点：验证没通过的，"
+                 "或验证之后同一项目又改过文件（edited_after 为 true）的，值得先复核；所有焦点都通过且之后没再改过文件时，"
+                 "不要硬选一个，选 not_needed。order 越大越新；只能选择已有焦点，"
                  "不能要求运行测试、补读材料或判定任务完成。current_request 可能是首尾节选（见 current_request_completeness），信息不足时选 need_data。")
 
 

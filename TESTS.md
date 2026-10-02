@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 交付复核焦点题面措辞修正（delivery_quality 压线核查）（2026-10-02，分支 `claude/be-delivery-criteria`，基于 `d8474300f`）
+
+- **改动**：只改 `decision_delivery_quality` 的非选择候选说明与题面，键和结构不变。
+- **基准重跑**：`decision_quality_bench.py --points delivery_quality --reps 2`，先跑旧措辞对照（不登记），再跑新措辞（`--record`）。
+  - 环境：`env -i` 隔离，只用 Jev 连接文件（0600，用完删）。
+  - 结果：旧措辞 16/20（错题同首轮），新措辞 **20/20**，Jev 共 40 次调用全部成功，`jev-1.13.0`，期望答案未改。
+  - 跑前写下预计 40 次（上限 120 次），实际 40 次。
+- **门禁**：
+  - 所有提到 delivery_quality 的测试文件（9 个）、基准测试，加 10 个守卫。
+  - ruff、import 边界、doc_sync、`diff --check`、`size_diff`、clean_package。
+  - 只改说明文字、没有分支逻辑，未做变异。
+
 ## 外部材料阅读优先级逐页题的候选措辞修正（2026-10-02，分支 `claude/be-material-criteria`，基于 `b5be542e8`）
 
 - **改动**：只改 `external_material_order` 逐页题的候选说明与题面，键和结构不变。现有本点位测试与基准测试照常通过（候选键和非排序处理没有变）。
