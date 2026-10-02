@@ -1694,7 +1694,14 @@
   - "确实不存在"用文件系统事实判断，并且在 CAS 前一刻现查：规范目录 `*/conversations/tasks` 下有任何 `<task_id>.json`，不管读不读得出来，都保持打开；目录列不全也保持打开。
   - 还要求根主执行轮已终态才去试 CAS；整棵树是否终态或静止，仍由 `settle_task_run_if_agent_tree_terminal` 判断，unknown 不算静止。
 - **生产影响**（只读试算，把各 owner 的 runtime.db 拷到 scratch 上试跑同一个 CAS）：上线后第一轮发现会一次性补关 338 条历史总账，全部是建成超过一天的，绝大多数是 step16v 之前 D3 留下的。分布：local/main 327 条，飞书用户 6 条，测试 owner 5 条。另有 55 条树未结束（含 unknown）继续保持打开，不受影响。读开放 TaskRun 的只有发现层和 /recover 子代理分支，后者要求 unknown 执行轮，这类行本来就不会被关。
-- **边界**：发现层只认默认布局下的会话存储。配置了 `conversation_workspace` 指向别处的部署，关联文件不在扫描范围内，会被当成不存在；生产配置里没有这一项。若误关一条，之后的新执行会照常 `task_run.reopened`，可以恢复。
+- **边界**：原先补关扫描只认默认布局下的会话存储，配置了 `conversation_workspace` 指向别处时，关联文件不在扫描范围内，会被当成不存在而误关。
+  已按第 15 条修复（用户拍板：补关扫描跟着配置走；2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `claude/3a-step16z` `5e972003e`，待集成）：
+  - 基础 owner 的补关入口是会话运行时的低频唤醒对账（`_reconcile_wake_queue`）。它把本 agent 实际会话存储的 `storage.tasks_dir` 交给 `unfinished_task_ids`。
+    这个目录由 `runtime_paths` 的同一解析入口算出，与 `ConversationStore` 一致，配置了 `conversation_workspace` 时就是配置的位置，不另推路径。
+  - `_conversation_task_link_scan` 是唯一扫描入口：它在默认布局通配之外时额外扫这个目录，并补进补关判断"关联是否存在"的目录清单；列不全时补关一律保持打开。
+  - Gateway 发现层只扫 `owners/providers/*` 下的 owner。这些 owner 的作用域 agent 清空了运行路径覆盖（`_config_without_runtime_paths`），会话存储一定在默认布局，所以发现层不传目录，行为不变。
+  - 默认布局行为逐字不变；传进来的目录本身就在默认布局里时不重复扫描。
+  - 万一误关一条，之后的新执行会照常 `task_run.reopened`，可以恢复。
 - **验证**：见 TESTS.md 同名节。证据（仓库外）：`~/.my-agent/decision-evidence/c12-observations-20261001/c12c/`。
 
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已上线 step17a（main de222698b，2026-10-02））

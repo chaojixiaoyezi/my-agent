@@ -960,6 +960,7 @@ def unfinished_task_ids(
     owner_home: Path,
     *,
     deadline_out: list[float] | None = None,
+    conversation_tasks_dir: Path | None = None,
 ) -> list[str]:
     """owner 名下未完成任务 id 列表——link active(生命周期权威)且账本非终态(交叉验证)。
 
@@ -975,33 +976,31 @@ def unfinished_task_ids(
     用它把任务落成续跑 wake——两处同一把尺。坏文件跳过。
 
     LLM: ``deadline_out`` 只用于收集"执行权锁过期"这一时间边界(锁过期后同一任务会重新进入
-    候选,none → hard);不传参时行为与旧实现逐字一致。"""
+    候选,none → hard);不传参时行为与旧实现逐字一致。``conversation_tasks_dir`` 是调用方 agent 实际
+    在用的会话存储关联目录(``conversation_store.storage.tasks_dir``,由 runtime_paths 同一解析入口算出);
+    配置了 conversation_workspace 指向默认布局之外时,它补进扫描与补关,不传或就在默认布局里时行为不变。"""
     links_root = owner_home / "workspace" / "runtime" / "workspaces"
     active_ids: list[str] = []
     links_by_task: dict[str, Path] = {}
     link_statuses: dict[str, set[str]] = {}
-    if links_root.is_dir():
+    link_files, link_dirs = _conversation_task_link_scan(links_root, conversation_tasks_dir)
+    for path in link_files:
         try:
-            link_files = sorted(links_root.glob("*/conversations/tasks/*.json"), reverse=True)
-        except OSError:
-            link_files = []
-        for path in link_files:
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            task_id = str(payload.get("task_id") or "").strip()
-            status = str(payload.get("status") or "").strip().lower()
-            if task_id:
-                link_statuses.setdefault(task_id, set()).add(status)
-            if task_id and status == THREAD_TASK_LINK_ACTIVE_STATUS and task_id not in active_ids:
-                active_ids.append(task_id)
-                links_by_task[task_id] = path
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        task_id = str(payload.get("task_id") or "").strip()
+        status = str(payload.get("status") or "").strip().lower()
+        if task_id:
+            link_statuses.setdefault(task_id, set()).add(status)
+        if task_id and status == THREAD_TASK_LINK_ACTIVE_STATUS and task_id not in active_ids:
+            active_ids.append(task_id)
+            links_by_task[task_id] = path
     repo = _runtime_repo_for_owner(owner_home)
     if repo is not None:
-        _reconcile_terminal_conversation_task_runs(repo, link_statuses, links_root)
+        _reconcile_terminal_conversation_task_runs(repo, link_statuses, link_dirs)
     if not active_ids:
         return []
     # 新记录在 runs，存量在 tasks；仅扫描标准宿主 state 叶子，不从业务文件名推断活跃运行。
@@ -1036,21 +1035,21 @@ def unfinished_task_ids(
 #   (conversation/task_run_closeout): one unambiguous terminal link status, or — C12c, 2026-10-01 — a link file that truly
 #   does not exist (the request never promoted a conversation task, so its own agent tree governs; reason
 #   no_conversation_task). "Truly absent" is a filesystem fact checked right before the CAS: any `<task_id>.json` under the
-#   canonical `*/conversations/tasks` dirs, readable or not, keeps the TaskRun open, and so does an incomplete directory
-#   scan. The absent branch also requires the root main run to be terminal before trying the CAS. Active, conflicting,
+#   canonical `*/conversations/tasks` dirs or the caller runtime's configured conversation tasks dir (link_dirs from
+#   _conversation_task_link_scan), readable or not, keeps the TaskRun open, and so does an incomplete directory scan
+#   (link_dirs is None). The absent branch also requires the root main run to be terminal before trying the CAS. Active, conflicting,
 #   unreadable or unknown link states, and unknown/active trees, stay open. Side effect: may write task_run.closed.
 #   Change together with test_task_run_close_without_conversation_task.py and test_owner_wake_discovery_task_run_no_link.py.
 # 函数用途: 网关启动或周期发现时补齐“会话链接已结束（或根本没有会话任务）、代理树也已结束，但执行总账未关”的崩溃窗口。
 def _reconcile_terminal_conversation_task_runs(
     repo: RuntimeRepository,
     link_statuses: dict[str, set[str]],
-    links_root: Path,
+    link_dirs: tuple[Path, ...] | None,
 ) -> None:
     try:
         open_runs = repo.open_task_runs()
     except Exception:  # noqa: BLE001 恢复投影失败不能阻断 owner 发现
         return
-    link_dirs = _conversation_task_link_dirs(links_root)
     for task_run in open_runs:
         task_id = str(task_run["task_id"] or "").strip()
         try:
@@ -1068,6 +1067,47 @@ def _reconcile_terminal_conversation_task_runs(
             )
         except Exception:  # noqa: BLE001 单条坏账不影响其它 owner 任务发现
             continue
+
+
+# LLM: 关联文件的唯一扫描入口，在册任务发现与补关共用同一份结果。默认布局部分与旧实现逐字一致（同一通配、
+#   同一排序、列不全时文件按空、目录按 None）。runtime_tasks_dir 是调用方 agent 实际会话存储的关联目录；
+#   只有它不在默认通配之内（配置了 conversation_workspace 指向别处）才额外扫，并补进补关的目录清单；它列不全时
+#   目录清单为 None，补关一律保持打开。只做目录与文件元数据读取。
+# 函数用途: 列出本 owner 全部会话任务关联文件，以及补关判断"关联是否存在"要查的目录清单。
+def _conversation_task_link_scan(
+    links_root: Path, runtime_tasks_dir: Path | None,
+) -> tuple[list[Path], tuple[Path, ...] | None]:
+    link_files: list[Path] = []
+    if links_root.is_dir():
+        try:
+            link_files = sorted(links_root.glob("*/conversations/tasks/*.json"), reverse=True)
+        except OSError:
+            link_files = []
+    link_dirs = _conversation_task_link_dirs(links_root)
+    extra = _configured_task_links_dir(links_root, runtime_tasks_dir)
+    if extra is None or not extra.is_dir():
+        return link_files, link_dirs
+    try:
+        extra_files = sorted(extra.glob("*.json"), reverse=True)
+    except OSError:
+        return link_files, None
+    return [*link_files, *extra_files], (None if link_dirs is None else (*link_dirs, extra))
+
+
+# LLM: 默认布局的关联目录都匹配 `<links_root>/*/conversations/tasks`，已在通配里，返回 None 免得同一目录扫两遍；
+#   其余（配置的 conversation_workspace 在别处）原样返回。按 resolve(strict=False) 比较，不创建目录。
+# 函数用途: 判断运行时实际会话存储的关联目录是否需要额外扫描。
+def _configured_task_links_dir(links_root: Path, runtime_tasks_dir: Path | None) -> Path | None:
+    if runtime_tasks_dir is None:
+        return None
+    folder = Path(runtime_tasks_dir)
+    resolved = folder.resolve(strict=False)
+    in_default_layout = (
+        resolved.name == "tasks"
+        and resolved.parent.name == "conversations"
+        and resolved.parent.parent.parent == links_root.resolve(strict=False)
+    )
+    return None if in_default_layout else folder
 
 
 # LLM: 会话任务关联的规范位置是 `<owner>/workspace/runtime/workspaces/<工作区>/conversations/tasks/<task_id>.json`

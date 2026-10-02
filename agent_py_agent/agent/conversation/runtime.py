@@ -3712,6 +3712,10 @@ class _BackgroundSchedulerTickMixin:
         except Exception:
             _HEARTBEAT_LOGGER.warning("wake queue consume scan failed", exc_info=True)
 
+    # LLM: 低频对账也是基础 owner 补关历史 TaskRun 的入口（unfinished_task_ids 内的 C12c 重放）；会话关联目录取本 agent
+    #   实际会话存储的 storage.tasks_dir，不另推路径。改扫描范围要同步 owner_wake_discovery._conversation_task_link_scan
+    #   与 test_owner_wake_discovery_task_run_no_link.py。副作用：可能写 wake 字条、清字条、写 task_run.closed。
+    # 函数用途: 每 5 分钟把待唤醒字条与未完成任务对一次账，顺带补关崩溃留下的执行总账。
     def _reconcile_wake_queue(self, *, now: float) -> None:
         """低频三源对账: 同步"等待者名单"(wake_queue)与任务档案。"""
         try:
@@ -3722,7 +3726,10 @@ class _BackgroundSchedulerTickMixin:
                 return
             from ..owner_wake_discovery import unfinished_task_ids
 
-            unfinished = set(unfinished_task_ids(Path(owner_home)))
+            # 会话存储位置可配置（conversation_workspace）：把本 agent 实际在用的关联目录交给扫描，
+            # 配在默认布局之外时补关也能看到关联文件，不会当成"根本没有会话任务"误关。
+            tasks_dir = getattr(getattr(getattr(agent, "conversation_store", None), "storage", None), "tasks_dir", None)
+            unfinished = set(unfinished_task_ids(Path(owner_home), conversation_tasks_dir=tasks_dir))
             pending = repo.list_pending_wakes(limit=1000)
             pending_tasks = {str(row.get("root_task_id") or "") for row in pending}
             # EXEC-39(owner 拍板): 普通任务不自动续跑——字条只给有 active goal

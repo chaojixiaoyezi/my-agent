@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## 补关扫描跟随 conversation_workspace（第 15 条，2026-10-02，分支 `claude/9b-taskrun-scan-conv-root`，基于 `5e972003e`）
+
+- `test_owner_wake_discovery_task_run_no_link.py` 新增 7 项：
+  - 合同层，传入默认布局之外的关联目录：
+    - 那里有活跃关联 → TaskRun 保持打开（修复前按 `no_conversation_task` 误关）；
+    - 那里的关联读坏 → 保持打开；
+    - 那里是终态关联 → 按 `conversation_task_completed` 补关；
+    - 那个目录列不全 → 保持打开。
+  - 默认布局：传进来的就是默认布局里的目录时，与不传一致，缺关联照常按 `no_conversation_task` 补关，关联文件只读一次。
+  - 真实链路（参数化 2 项）：真实 `SimpleAgent` 分别在配置了 `conversation_workspace` 与默认布局两种情况下建会话存储、登记任务，再跑唤醒低频对账：
+    - 关联活跃时不关；
+    - 改成 completed 后按 `conversation_task_completed` 补关。
+- 变异 6/6 被杀，草稿副本上逐个精确替换、按字节恢复：
+  - 对账不传会话目录、从不额外扫配置位置、额外目录的文件不读、额外目录不进补关目录清单；
+  - 额外目录列不全时不当作不全、默认布局去重判深度写错。
+  - 其中"对账不传会话目录"由真实链路的配置位置那一项杀掉。
+
 ## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`）
 
 **来源**：3a 派活；ds2 两轮加固 be 审过之后剩下的四处可选尾巴。设计与“挂 /status 不挂审计”的理由见 DESIGN_LEDGER 同名节。

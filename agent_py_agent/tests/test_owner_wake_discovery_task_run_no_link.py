@@ -130,3 +130,135 @@ def test_incomplete_link_scan_keeps_task_run_open(home, monkeypatch):
     unfinished_task_ids(home)
 
     assert _task_run(repo, created["task_run_id"])["closed_at"] == 0
+
+
+# ---- 配置了 conversation_workspace 指向默认布局之外（第 15 条，2026-10-02）----
+# 补关扫描要跟着运行时实际在用的会话存储走：调用方把 conversation_store.storage.tasks_dir 交进来，
+# 关联文件在那里时不能当成"根本没有会话任务"误关；默认布局行为不变。
+
+
+def _custom_links(tmp_path: Path) -> Path:
+    folder = tmp_path / "elsewhere" / "conversations" / "tasks"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def test_active_link_in_configured_root_keeps_task_run_open(home, tmp_path):
+    repo = RuntimeRepository(home / "runtime.db")
+    created = _request_run(repo, "task-configured")
+    (_links(home) / "other-task.json").write_text(json.dumps({"task_id": "other-task", "status": "active"}))
+    custom = _custom_links(tmp_path)
+    (custom / "task-configured.json").write_text(json.dumps({"task_id": "task-configured", "status": "active"}))
+
+    unfinished_task_ids(home, conversation_tasks_dir=custom)
+
+    assert _task_run(repo, created["task_run_id"])["closed_at"] == 0
+    assert _closed_events(repo, created["task_run_id"]) == []
+
+
+def test_unreadable_link_in_configured_root_keeps_task_run_open(home, tmp_path):
+    """配置位置下文件在、读不出：与默认布局同一规则，保持打开。"""
+    repo = RuntimeRepository(home / "runtime.db")
+    created = _request_run(repo, "gwreq-broken-elsewhere")
+    (_custom_links(tmp_path) / "gwreq-broken-elsewhere.json").write_text("{broken", encoding="utf-8")
+
+    unfinished_task_ids(home, conversation_tasks_dir=_custom_links(tmp_path))
+
+    assert _task_run(repo, created["task_run_id"])["closed_at"] == 0
+
+
+def test_terminal_link_in_configured_root_closes_with_its_status(home, tmp_path):
+    repo = RuntimeRepository(home / "runtime.db")
+    created = _request_run(repo, "task-done-elsewhere")
+    custom = _custom_links(tmp_path)
+    (custom / "task-done-elsewhere.json").write_text(
+        json.dumps({"task_id": "task-done-elsewhere", "status": "completed"})
+    )
+
+    unfinished_task_ids(home, conversation_tasks_dir=custom)
+
+    [closed] = _closed_events(repo, created["task_run_id"])
+    assert closed["reason"] == "conversation_task_completed"
+
+
+def test_unlistable_configured_root_keeps_task_run_open(home, tmp_path, monkeypatch):
+    """配置位置列不全：同样不能把"没扫到"当成"没有关联"。"""
+    repo = RuntimeRepository(home / "runtime.db")
+    created = _request_run(repo, "gwreq-elsewhere")
+    custom = _custom_links(tmp_path)
+    original = Path.glob
+
+    def flaky_glob(self, pattern, *args, **kwargs):
+        if self == custom:
+            raise OSError("scan failed")
+        return original(self, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", flaky_glob)
+
+    unfinished_task_ids(home, conversation_tasks_dir=custom)
+
+    assert _task_run(repo, created["task_run_id"])["closed_at"] == 0
+
+
+def test_default_layout_tasks_dir_behaves_like_no_argument(home, monkeypatch):
+    """传进来的就是默认布局里的目录：与不传逐字一致（缺关联照常按 no_conversation_task 补关，不重复扫描）。"""
+    repo = RuntimeRepository(home / "runtime.db")
+    created = _request_run(repo, "gwreq-default")
+    default_dir = _links(home)
+    (default_dir / "task-live.json").write_text(json.dumps({"task_id": "task-live", "status": "active"}))
+    reads: list[Path] = []
+    original = Path.read_text
+
+    def counting_read(self, *args, **kwargs):
+        if self.suffix == ".json" and self.parent == default_dir:
+            reads.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read)
+    unfinished_task_ids(home, conversation_tasks_dir=default_dir)
+    monkeypatch.undo()
+
+    assert reads == [default_dir / "task-live.json"]
+    [closed] = _closed_events(repo, created["task_run_id"])
+    assert closed["reason"] == "no_conversation_task"
+
+
+def _scheduler_tick(agent):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _BackgroundSchedulerTickMixin
+
+    tick = _BackgroundSchedulerTickMixin()
+    tick.runtime = SimpleNamespace(agent=agent)
+    tick.store = agent.conversation_store
+    return tick
+
+
+@pytest.mark.parametrize("configured", [True, False], ids=["configured-root", "default-layout"])
+def test_wake_reconcile_follows_the_runtime_conversation_store(tmp_path, configured):
+    """真实链路：agent 按配置建会话存储并登记任务，唤醒对账（基础 owner 的补关入口）看得到关联。"""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    extra = {"conversation_workspace": str(tmp_path / "elsewhere" / "conversations")} if configured else {}
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", enable_tools=False, my_agent_home=str(tmp_path / "home"), **extra), tmp_path,
+    )
+    store = agent.conversation_store
+    owner_home = Path(agent.home_paths.owner_home_dir)
+    assert (store.storage.root == tmp_path / "elsewhere" / "conversations") is configured
+    if configured:  # 配置的会话存储确实在 owner 默认布局之外
+        assert owner_home not in store.storage.root.parents
+    thread = store.threads.get_or_create({"canonical_user_id": "u-elsewhere", "now": 10.0})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-elsewhere", "now": 20.0})
+    repo = agent.subagents.runtime_db
+    created = _request_run(repo, "task-elsewhere")
+    tick = _scheduler_tick(agent)
+
+    tick._reconcile_wake_queue(now=100.0)
+    assert _task_run(repo, created["task_run_id"])["closed_at"] == 0
+
+    store.tasks.update_status({"task_id": "task-elsewhere", "status": "completed", "now": 30.0})
+    tick._reconcile_wake_queue(now=200.0)
+    [closed] = _closed_events(repo, created["task_run_id"])
+    assert closed["reason"] == "conversation_task_completed"
