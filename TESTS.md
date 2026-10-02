@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 集成修正：删掉测已删函数 check_token_budget 的旧用例（2026-10-02，3a，step16z）
+
+- **起因**：P9（`0a9a78720`）按“只有测试在调”删了 `memory_archive.tokens.check_token_budget` 与 `TokenBudgetResult`，
+  并删了 `test_archive_snapshots.py` 里的对应用例，但漏了 `test_archive_tokens.py` 的 `TestTokenBudgetResult`、
+  `TestCheckTokenBudgetLevels` 两组（5 个），Docker Linux 12 片车道在 `b6f25978c` 的第 0 片报 ImportError。
+- **做法**：删掉这两组用例，其余 46 个 token 估算与账本用例不动；全仓已无对这两个名字的引用。
+- **验证**：`test_archive_tokens.py` 46 passed；随后整版重跑 12 片车道（见本版发布证据）。
+
 ## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`）
 
 - **新增用例**：`test_subagent_takeover_runtime_closeout.py::test_runner_self_stop_after_takeover_records_the_takeover_reason`。
