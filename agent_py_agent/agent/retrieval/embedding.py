@@ -21,6 +21,8 @@ import urllib.error
 import urllib.request
 from typing import Protocol, runtime_checkable
 
+from .embedding_usage import count_embedding_request, reported_tokens
+
 # 默认 embedding 向量维度；未配置模型时按此维度生成占位向量（无物理单位）。
 DEFAULT_EMBED_DIM = 256
 # embedding 调用超时秒数；超时按失败处理并回退，不让检索链路卡死。
@@ -146,9 +148,14 @@ class OpenAICompatibleEmbedder:
     def api_base(self) -> str:
         return self._api_base
 
+    # LLM: 计数统一经 embedding_usage.count_embedding_request（S7：次数、条数、失败、供应商回报的 token），请求本身不变。
+    # 函数用途: 把一批文本嵌成 L2 归一的向量；失败抛 EmbeddingError。
     def embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
+        return count_embedding_request(texts, self._request)
+
+    # LLM: token 只取响应 usage.total_tokens（没有时 prompt_tokens），都没有就是 None（未回报），不估算。
+    # 函数用途: 发一次 /embeddings 请求，返回 (向量, 供应商回报的 token)。
+    def _request(self, texts: list[str]) -> tuple[list[list[float]], int | None]:
         body = json.dumps({"model": self._model, "input": list(texts)}).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -156,11 +163,16 @@ class OpenAICompatibleEmbedder:
         req = urllib.request.Request(f"{self._api_base}/embeddings", data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8")).get("data")
+                payload = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
             raise EmbeddingError(f"embedding 端点调用失败:{type(exc).__name__}") from exc
+        payload = payload if isinstance(payload, dict) else {}
+        data = payload.get("data")
         rows = data if isinstance(data, list) else []
-        return _parse_vectors([item.get("embedding") if isinstance(item, dict) else None for item in rows], len(texts))
+        vectors = _parse_vectors([item.get("embedding") if isinstance(item, dict) else None for item in rows], len(texts))
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        tokens = reported_tokens(usage.get("total_tokens"))
+        return vectors, tokens if tokens is not None else reported_tokens(usage.get("prompt_tokens"))
 
 
 class MiniMaxEmbedder:
@@ -200,9 +212,14 @@ class MiniMaxEmbedder:
     def api_base(self) -> str:
         return self._api_base
 
+    # LLM: 与 OpenAI 兼容实现同契约：计数统一经 embedding_usage.count_embedding_request，请求本身不变。
+    # 函数用途: 把一批文本嵌成 L2 归一的向量；失败抛 EmbeddingError。
     def embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
+        return count_embedding_request(texts, self._request)
+
+    # LLM: token 只取响应顶层 total_tokens（MiniMax 原生协议的字段），没有就是 None（未回报），不估算。
+    # 函数用途: 发一次 MiniMax /embeddings 请求，返回 (向量, 供应商回报的 token)。
+    def _request(self, texts: list[str]) -> tuple[list[list[float]], int | None]:
         body = json.dumps({"model": self._model, "texts": list(texts), "type": "db"}).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -213,6 +230,8 @@ class MiniMaxEmbedder:
                 payload = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
             raise EmbeddingError(f"MiniMax embedding 端点调用失败:{type(exc).__name__}") from exc
+        payload = payload if isinstance(payload, dict) else {}
         if (payload.get("base_resp") or {}).get("status_code") not in (0, None):
             raise EmbeddingError(f"MiniMax embedding 返回错误:{(payload.get('base_resp') or {}).get('status_msg')}")
-        return _parse_vectors(payload.get("vectors"), len(texts))  # 守卫:数量/形状不符→EmbeddingError
+        vectors = _parse_vectors(payload.get("vectors"), len(texts))  # 守卫:数量/形状不符→EmbeddingError
+        return vectors, reported_tokens(payload.get("total_tokens"))

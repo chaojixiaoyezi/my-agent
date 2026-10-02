@@ -22,6 +22,7 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.text_norm import fold_key, nfc
+from ..retrieval.embedding_usage import EMBEDDING_USAGE, counted_as
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
 
 
@@ -525,7 +526,9 @@ class _JsonlMemorySearchMixin:
     #   身份不一致、没有身份、维度不符或库读不了时，把已有向量当作不存在（退回关键词），不静默混用两个向量空间。
     #   前置 identity_status 只为省一次付费嵌入；真正的裁决在 search 里对同一份快照再做一次（P14 第 3 条）。
     #   检索成功会清掉 identity/search 两类旧错误（别的进程重建后本进程自动恢复）。
+    #   嵌入请求按“召回”计入进程用量（S7，embedding_usage）。
     # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果，失败保留可观察降级状态。
+    @counted_as("memory_recall")
     def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
         from ..retrieval.vector_store import VectorIdentityError
 
@@ -639,7 +642,9 @@ class _JsonlMemorySearchMixin:
 
     # LLM: 正式与候选检索只能在访问确认时分叉；索引、scope 与排序必须完全相同。检索事实（第二个返回值）只是观察，
     #   取自 HybridRetriever 的 last_retrieval_mode/last_fallback_reason，不参与排序。
+    #   这里发出的嵌入请求（查询与缺向量的条目）按“召回”计入进程用量（S7，embedding_usage）。
     # 函数用途: 执行原 scoped 检索；正式召回记录访问，候选检索只返回记录；同时返回本次检索方式。
+    @counted_as("memory_recall")
     def _search_scoped(
         self,
         query: str,
@@ -992,22 +997,25 @@ class _JsonlMemoryLifecycleMixin:
         }
 
 
-# LLM: 只读投影：没有检索器（top_k<=0 或范围内没有条目）时 mode=none；semantic_recall 是存储层状态副本，
+# LLM: 投影：没有检索器（top_k<=0 或范围内没有条目）时 mode=none；semantic_recall 是存储层状态副本，
 #   含档案不可用等原因码，不含正文和凭据。放在模块级是为了不撑大检索 mixin。
 #   没有嵌入端时，fallback_reason 按存储层结构化诊断写明为什么没有（见 _semantic_unavailable_reason）。
-# 函数用途: 把一次 scoped 检索的方式、降级原因和范围条目数整理成结构化事实。
+#   每次 scoped 检索恰好调用一次，所以也是召回方式进程计数（S7，EMBEDDING_USAGE.record_retrieval）的唯一记录点。
+# 函数用途: 把一次 scoped 检索的方式、降级原因和范围条目数整理成结构化事实，并记一次召回方式计数。
 def _scoped_retrieval_facts(
     retriever: object | None, scoped_entries: int, semantic_status: dict[str, str]
 ) -> dict[str, object]:
     reason = str(getattr(retriever, "last_fallback_reason", "") or "")
     if reason == "embedder_unavailable":
         reason = _semantic_unavailable_reason(semantic_status)
-    return {
+    facts = {
         "mode": str(getattr(retriever, "last_retrieval_mode", "none") or "none"),
         "fallback_reason": reason,
         "scoped_entries": scoped_entries,
         "semantic_recall": dict(semantic_status),
     }
+    EMBEDDING_USAGE.record_retrieval(str(facts["mode"]), reason)
+    return facts
 
 
 # LLM: 只读权威向量库：库不可用、身份对不上或读失败都返回空（等于没有可复用的），不报错、不写盘；只认条目 text 与本轮
@@ -1113,7 +1121,9 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
 
     # LLM: 向量写失败不改变权威提交；metadata 仍需携带可与 active JSONL 复核的完整身份。
     #   身份不一致时拒绝写入（不把新模型的向量混进旧库），降级状态可见，等重建修正。
+    #   嵌入请求按“记忆写入”计入进程用量（S7，embedding_usage）。
     # 函数用途: 尽力把一条正式记忆写入向量索引，失败进入健康诊断，不回滚正式记忆。
+    @counted_as("memory_write")
     def _index_vector(self, record: MemoryRecord) -> None:
         try:
             store = self._vector_store()
@@ -1307,7 +1317,9 @@ class _JsonlMemoryVectorAdminMixin:
 
     # LLM: 重建的嵌入阶段：一次只嵌一条，便于准确计数；首个失败即停并返回 ("embed", 原因码或异常类型名)，不吞成功。
     #   与写入、召回同一段索引文本（index_text），条目 text 存这段文本，召回才能直接复用重建好的向量（S3）。
+    #   嵌入请求按“重建”计入进程用量（S7，embedding_usage）。
     # 函数用途: 为全部 active 记忆生成重建行，返回 (已成功的行, 失败信息或 None)。
+    @counted_as("memory_rebuild")
     def _embed_rebuild_rows(self, records: list[MemoryRecord]) -> tuple[list[tuple], tuple[str, str] | None]:
         from ..retrieval.text_vector_cache import index_text
 

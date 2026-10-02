@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
+from ..retrieval.embedding_usage import EMBEDDING_USAGE
 from ..settings.embedding_selection import (
     EMBEDDING_OPERATIONS,
     apply_embedding_choice,
@@ -111,12 +113,15 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
 
 # LLM: 向量模型（语义记忆）是全局设置：谁都能查看，改只给本机管理员（判定在 settings.embedding_selection）；编号按本人可用的
 #   嵌入档案列表从 1 起，也接受精确档案编号；off/关闭 表示关闭语义记忆。回执带“保存后重启 Gateway 生效”的说明。有写文件副作用。
+#   查看时，管理员（listing.can_change）另看到本 Gateway 进程启动以来的嵌入用量与召回方式（S7，只有数字和原因码；计数是全进程的，
+#   含其他用户，所以普通用户看不到）。TUI 的 /model vector 也转到这里，两边同一份结果。
 # 函数用途: 执行 /model vector [编号|off]，返回中文回执。
 def _vector_text_control(host, value: str) -> ConversationControlResult:
     listing = embedding_choices(host)
     target = str(value or "").strip()
     if not target:
-        return ConversationControlResult("model", True, render_vector_choices(listing))
+        usage = render_embedding_usage(EMBEDDING_USAGE.snapshot()) if listing.get("can_change") else ""
+        return ConversationControlResult("model", True, render_vector_choices(listing) + usage)
     if target.lower() in {"off", "关闭"}:
         result = apply_embedding_choice(host, "", actor="chat")
     else:
@@ -127,6 +132,46 @@ def _vector_text_control(host, value: str) -> ConversationControlResult:
             return ConversationControlResult("model", False, f"没有编号为 {target} 的向量模型。\n" + render_vector_choices(listing))
         result = apply_embedding_choice(host, row["id"], actor="chat")
     return ConversationControlResult("model", bool(result.get("ok")), str(result.get("message") or ""))
+
+
+# 嵌入用途在“本次启动以来”几行里的中文名，顺序即展示顺序；other（没标注用途的请求）只有发生过才显示。
+_EMBEDDING_PURPOSE_LABELS = (("memory_write", "记忆写入"), ("memory_recall", "召回"), ("memory_rebuild", "重建"),
+                             ("tool_retrieval", "工具检索"), ("other", "其他"))
+
+
+# LLM: 只渲染计数快照里的数字和结构化原因码，不含任何正文、模型名或地址。token 只写供应商回报的数；有请求没回报的单独说明，
+#   全部没回报写“未回报”，不估算。计数随进程生灭（不落盘），所以写明从什么时候起、重启归零。
+# 函数用途: 把进程内嵌入用量与召回方式计数排成几行中文。
+def render_embedding_usage(snapshot: dict) -> str:
+    started = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(snapshot.get("started_at") or 0)))
+    lines = ["", f"本次 Gateway 启动以来（{started} 起，本进程计数，不落盘，重启归零）："]
+    embedding = snapshot.get("embedding") or {}
+    for key, label in _EMBEDDING_PURPOSE_LABELS:
+        row = embedding.get(key) or {}
+        if key == "other" and not row.get("requests"):
+            continue
+        lines.append(f"- 嵌入·{label}：{_embedding_usage_text(row)}")
+    retrieval = snapshot.get("retrieval") or {}
+    last = str(retrieval.get("last_mode") or "") or "还没有"
+    reason = str(retrieval.get("last_fallback_reason") or "") or "无"
+    lines.append(f"- 召回方式：semantic {retrieval.get('semantic', 0)} 次，keyword {retrieval.get('keyword', 0)} 次，"
+                 f"none {retrieval.get('none', 0)} 次；最近一次 {last}，降级原因 {reason}")
+    return "\n".join(lines)
+
+
+# 函数用途: 一种用途的嵌入计数排成一句：请求次数、文本条数、失败次数、供应商回报的 token。
+def _embedding_usage_text(row: dict) -> str:
+    requests = int(row.get("requests") or 0)
+    if not requests:
+        return "请求 0 次"
+    failures = int(row.get("failures") or 0)
+    unreported = int(row.get("tokens_unreported_requests") or 0)
+    reported_requests = requests - failures - unreported
+    if reported_requests <= 0:
+        tokens = "token 未回报" if unreported else "token 无（都失败了）"
+    else:
+        tokens = f"token {int(row.get('tokens') or 0)}" + (f"（另有 {unreported} 次未回报）" if unreported else "")
+    return f"请求 {requests} 次、{int(row.get('texts') or 0)} 条，失败 {failures} 次，{tokens}"
 
 
 # LLM: 只渲染模型名、服务商名和稳定档案编号，不渲染接口地址或密钥；列表序号与 /model vector <编号> 共用。

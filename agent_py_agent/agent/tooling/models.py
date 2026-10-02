@@ -16,6 +16,7 @@ from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
 from ..retrieval.embedding import EmbeddingProvider, cosine
+from ..retrieval.embedding_usage import counted_as
 from ..workspace_read_context import WorkspaceReadContext
 from ..workspace_write_context import WorkspaceWriteContext
 
@@ -1325,6 +1326,9 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
         self.last_error = ""
         return hits[:limit]
 
+    # LLM: 查询与工具说明的嵌入请求都按“工具检索”计入进程用量（S7，retrieval.embedding_usage）；失败照原样抛给 search 降级。
+    # 函数用途: 用嵌入向量给工具排序。
+    @counted_as("tool_retrieval")
     def _semantic_search(
         self,
         query: str,

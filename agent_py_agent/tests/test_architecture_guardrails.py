@@ -23,6 +23,10 @@ JUNK_NAME_BASELINE = {
 FORBIDDEN_CLASS_BASELINE: set[str] = set()
 
 BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
+    "agent_py_agent/agent/retrieval/embedding_usage.py:wrapper": (
+        "Transparent purpose-labelling decorator (counted_as) must preserve arbitrary method signatures; "
+        "嵌入用量计数的用途标注，不是产品服务接口。"
+    ),
     "agent_py_agent/agent/adapter/feishu.py:log_message": (
         "HTTPRequestHandler-style logging override accepts formatter arguments; "
         "not a product service parameter entry point."
@@ -97,6 +101,10 @@ BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
 }
 
 BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
+    "agent_py_agent/agent/retrieval/embedding_usage.py:wrapper": (
+        "Transparent purpose-labelling decorator (counted_as) must preserve arbitrary method signatures; "
+        "嵌入用量计数的用途标注，不是产品服务接口。"
+    ),
     "agent_py_agent/agent/concurrency/retry.py:wrapper": (
         "Transparent retry decorator forwarding must preserve arbitrary callable signatures; "
         "this is infrastructure, not a product service interface."
