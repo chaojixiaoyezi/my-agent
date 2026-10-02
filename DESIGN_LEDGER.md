@@ -1,5 +1,21 @@
 # 设计台账
 
+## 配置与账本写回保留权限，参数中心新建文件一律 0600（2026-10-02，3a，step16z，已实现；生产权限已手工收回）
+
+- **来源**：ae 做 P18 时发现，`/settings set` 后隔离环境的 gateway.yaml 从 600 变成 644，新建的 settings-changes.jsonl 也是 644。
+  查生产（只看权限位）：`~/.my-agent/config/desktop.yaml`（含飞书 app secret）已经是 644，账本也是 644；9/27、9/29 的备份仍是 600，
+  说明是之后某次参数写回放宽的。config 目录本身是 700，其它本机用户进不去，但文件本身不该放宽。
+- **根因**：`config_io._write_config_lines` 和 `set_simple_yaml_value` 用 `write_text` 写固定名 `<name>.tmp`（权限随 umask，644），
+  再替换原文件，原文件的 600 就丢了；固定临时名在并发写或同名残留时也会出错。`json_io` 的原子写（JSON、JSONL 账本）同样让目标
+  继承临时文件权限，所以账本每次整文件重写都会变回 644。参数中心新建配置文件、账本时也按 umask 建。
+- **做法**（通用，不针对某个文件）：
+  - `json_io._replace_with_retry` 替换前先把目标原有的权限位抄到临时文件（`_keep_target_mode`），所有原子写共用；目标不存在时不改。
+  - `config_io._write_config_lines` 改用同目录 `mkstemp`（0600 起步）+ 抄原权限 + `os.replace`；`set_simple_yaml_value` 也走它。
+  - 参数中心新建配置文件（`_create_config_file`）和首次建账本（`_ensure_private_file`）一律 0600。
+- **生产处置**（3a，10-02 01:2x）：`chmod 600` desktop.yaml、settings-changes.jsonl、desktop.yaml 旧备份、shared-model-profiles.json、
+  模型档案的修改账本与推理探测文件、config/tests 下的测试配置；复查 config 目录下没有组/其他可读的文件。
+- **验证**：`test_config_write_permissions.py` 5 项；变异 5 个全抓到（不抄权限、json_io 不保留、账本 0644、回到固定 .tmp 名、配置新建 0644）。
+
 ## 接替自停的结束原因口径（2026-10-02，分支 `claude/38-takeover-stop-reason`，基于 `claude/3a-step16z` `6f09b1853`，已实现，待集成）
 
 - **来源**：C12d 的留意项。运行中的子代理被接替后由 runner 自停，运行账 `agent_run.completed` 事件记的是

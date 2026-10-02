@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import ast
+import os
+import stat
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -167,9 +170,7 @@ def set_simple_yaml_value(path: Path, key: str, value: str) -> tuple[str | None,
     old = _replace_top_level_line(lines, key, new_line)
     if old is None:
         lines.append(new_line)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_config_lines(path, lines)
     return old, new_line
 
 
@@ -191,11 +192,29 @@ def _is_top_level_key_line(raw: str, key: str) -> bool:
     return raw.split(":", 1)[0].strip() == key
 
 
-# 函数用途: 同目录临时文件 + 原子替换写回配置，避免写一半把文件弄残。副作用：改写配置文件。
+# LLM: 同目录唯一临时文件（mkstemp 以 0600 新建）+ 原子替换；目标已存在时先把它原来的权限位抄到临时文件，
+#   600 的配置写回后仍是 600。不用固定的 "<name>.tmp"：并发写会互相覆盖，同名目录或残留文件也会让写回失败。
+#   set_simple_yaml_value 与参数中心的 set_simple_yaml_raw / unset_simple_yaml_value 共用这一个写回点。
+# 函数用途: 原子写回配置文件并保留原权限，避免写一半把文件弄残。副作用：改写配置文件。
 def _write_config_lines(path: Path, lines: list[str]) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        _copy_mode(path, tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# 函数用途: 把已存在文件的权限位抄到另一个文件上；源文件不存在时什么都不做。副作用：chmod 目标文件。
+def _copy_mode(source: Path, target: Path) -> None:
+    try:
+        mode = stat.S_IMODE(source.stat().st_mode)
+    except FileNotFoundError:
+        return
+    os.chmod(target, mode)
 
 
 # LLM: 值由调用方按字段类型渲染成合法标量（布尔、数字不加引号，字符串已加引号），这里只拒绝换行与多行结构；

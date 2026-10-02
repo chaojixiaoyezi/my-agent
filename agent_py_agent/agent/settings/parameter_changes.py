@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -247,6 +248,7 @@ def _append_record(ledger: Path, key: str, row: _ChangeRow, masked: bool) -> dic
         "previous": previous, "value": value,
     }
     entry.update({name: item for name, item in (("target", row.target), ("reverts", row.reverts)) if item})
+    _ensure_private_file(ledger)
     append_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORDS)
     return entry
 
@@ -280,8 +282,7 @@ def set_parameter(key: object, value: object, *, paths: WritePaths, origin: Chan
         existed = path.is_file()
         original = path.read_text(encoding="utf-8") if existed else ""
         if not existed:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# 由参数中心创建（只含被改的键，其余按随包默认）\n", encoding="utf-8")
+            _create_config_file(path)
         previous, _line = set_simple_yaml_raw(path, spec.key, rendered)
         actual = _effective(path, spec.key)
         if not _same(expected, actual):
@@ -294,6 +295,27 @@ def set_parameter(key: object, value: object, *, paths: WritePaths, origin: Chan
         return _failure(error)
     except (OSError, ValueError) as error:
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+
+
+# LLM: 参数中心新建的配置文件可能放凭据类键（capability 来源也会走到这里），一律以 0600 新建；已存在就报错交给调用方，
+#   调用方只在确认不存在时才调用。之后的写回由 config_io 保留这个权限。
+# 函数用途: 以仅本人可读写的权限新建一份只含说明行的配置文件。副作用：新建文件。
+def _create_config_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("# 由参数中心创建（只含被改的键，其余按随包默认）\n")
+
+
+# LLM: 修改账本和配置放在同一目录，记录里有脱敏前后的键名与原因；首次创建时以 0600 建空文件，
+#   之后 append_jsonl_capped 的原子重写会保留这个权限（json_io._keep_target_mode）。已存在时不改。
+# 函数用途: 确保账本文件存在且新建时只有本人可读写。副作用：可能新建空文件。
+def _ensure_private_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        return
 
 
 # LLM: 文件原本不存在时恢复 = 删除新建文件，避免留下半截配置；原本存在则原样写回。
@@ -391,8 +413,7 @@ def _revert_entry(paths: WritePaths, entry: dict[str, object], origin: ChangeOri
     if not existed and target is None:
         raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
     if not existed:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# 由参数中心创建（只含被改的键，其余按随包默认）\n", encoding="utf-8")
+        _create_config_file(path)
     current = unset_simple_yaml_value(path, spec.key) if target is None else set_simple_yaml_raw(path, spec.key, str(target))[0]
     actual = _effective(path, spec.key)
     if target is None and current is None:

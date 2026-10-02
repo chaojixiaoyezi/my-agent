@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 配置与账本写回保留权限（2026-10-02，3a，step16z）
+
+- **新增**：`agent_py_agent/tests/test_config_write_permissions.py` 5 项——参数中心 set/reset/revert 后用户配置与账本都还是 0600；
+  capability 文件由参数中心新建时是 0600；`set_simple_yaml_value`/`set_simple_yaml_raw` 保留原权限（600 与 640 各一例）；
+  同目录放一个名为 `desktop.yaml.tmp` 的目录时写回仍成功且不留临时文件；`write_json_file_atomic`、`append_jsonl_capped` 重写后保留 0600。
+- **变异**：5 个全抓到（见 DESIGN_LEDGER 同名节）。
+- **命令**：`bash 3a-scripts/run_files312.sh <worktree> q3a agent_py_agent/tests/test_config_write_permissions.py agent_py_agent/tests/test_parameter_changes.py agent_py_agent/tests/test_cli_config.py`。
+
 ## 集成修正：删掉测已删函数 check_token_budget 的旧用例（2026-10-02，3a，step16z）
 
 - **起因**：P9（`0a9a78720`）按“只有测试在调”删了 `memory_archive.tokens.check_token_budget` 与 `TokenBudgetResult`，

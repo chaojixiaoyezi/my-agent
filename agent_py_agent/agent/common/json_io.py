@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import threading
 import time
 import uuid
@@ -348,7 +350,11 @@ def _flock_unlock(handle) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+# LLM: 所有原子写（JSON、JSONL 账本、文本）都经这里替换；替换前先让临时文件带上目标原来的权限位，
+#   否则 600 的配置/账本每写一次就按 umask 变成 644（2026-10-02 ae 在 P18 发现生产 desktop.yaml 被放宽）。
+# 函数用途: 带重试地把临时文件原子替换到目标位置，并保留目标原有权限。副作用：替换目标文件。
 def _replace_with_retry(tmp: Path, path: Path) -> None:
+    _keep_target_mode(tmp, path)
     last_error: OSError | None = None
     for attempt in range(8):
         try:
@@ -359,6 +365,16 @@ def _replace_with_retry(tmp: Path, path: Path) -> None:
             time.sleep(0.01 * (attempt + 1))
     if last_error is not None:
         raise last_error
+
+
+# LLM: 目标不存在（新建）时不改临时文件权限，沿用调用方/umask 的默认；只抄权限位，不改属主。
+# 函数用途: 把目标文件现有的权限位抄到临时文件上。副作用：chmod 临时文件。
+def _keep_target_mode(tmp: Path, path: Path) -> None:
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return
+    os.chmod(tmp, mode)
 
 
 def _unlink_tmp_file(tmp: Path) -> None:
