@@ -423,8 +423,11 @@ task workspace 摘要同步）同样改用它，避免"读时切开、写回落�
     - `response_chars`（响应字符数）、`truncated`；
     - `stop_reason`（上游短码，不像代码的记 `other`）、`output_tokens`。
     - 用 `cause_pos` 对照 `response_chars` 能分出截断、空内容和中途格式坏。
+  - 哪一项不合格（2026-10-02，`_violation_facts`，只读异常上的结构化属性，沿 `__cause__` 链找）：
+    - `violation_code`：输出不合合同时是 `curator_schema.CuratorOutputViolation` 的宿主短码（`json_invalid`、`schema_version_unsupported`、`invalid_type`、`enum_mismatch`、`missing_property`、`unknown_property`、`below_minimum`、`above_maximum`、`non_string_key`、`nesting_too_deep`、`bounded_limit_exceeded`）；证据不合格时是 `CuratorEvidenceError.detail_code`。≤40 字。
+    - `violation_path`：只由 schema 字段名和下标拼成的 JSONPath，如 `$.candidates[0].confidence`；多出来的键名是模型写的，路径只到所在对象；不知道下标的嵌套字段写 `$..<字段名>`。≤80 字。
 
-  超过单条 300 字符时先缩短 `message`，仍超出就退回只含 `error_type` 的形状，绝不裁 JSON 本体。请求体、响应体、根因正文、记忆内容都不入账。
+  超过单条 300 字符时先缩短 `message`，仍超出就退回只含 `error_type` 的形状（有违规码/路径时一起留，类名只留 100 字），绝不裁 JSON 本体。请求体、响应体、根因正文、记忆内容都不入账。
 
 - `CuratorRunRecord.failure_diagnostic` 是**诊断投影**，不是失败权威：权威仍是 `failure_code` +
   attempt/lease 状态。字段只允许机器可判定形状（异常类名、可选 HTTP 状态码、根因类名/errno/解析出错位置、

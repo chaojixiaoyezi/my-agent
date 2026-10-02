@@ -155,6 +155,10 @@
   - 指定档案只对能解析到它的 owner 生效；能解析到的 owner 和以前完全一样（不路由、建实例时建一次后端）。解析不到的 owner 每次运行重新解析一次，档案后来能用了就自动用它。
   - 退回时不按会话分组，整批用该 owner 默认模型；owner 默认模型也不可用时，仍是带指定档案编号和原因的类型化失败（`CURATOR_MODEL_NOT_CONFIGURED`，按原规则退避一小时）。
   - `/settings show memory_curator_model_profile` 写“本用户不可用：<原因>（改用本用户默认模型：<型号>）”。这改了 P12 原来“指定档案失效不回退”的约定。
+- **`CURATOR_SCHEMA_INVALID` 能直接看出哪一项不合格**（3a 要求：ae 的 step17d 冒烟里 M2.7 手动整理失败，记录看不出原因）：
+  - 解析和 schema 校验改抛 `curator_schema.CuratorOutputViolation`（仍是 `ValueError`，消息原文和失败码都不变），带宿主短码 `violation_code` 和只由 schema 字段名、下标拼成的 `violation_path`。
+  - 失败诊断 `failure_diagnostic=` 里加这两个键（证据不合格时沿用 `CuratorEvidenceError.detail_code`），不带模型正文，也不带模型自己写的键名。键表见 `docs/modules/memory/04-structure.md` 的 R257 节。
+  - 补跑规则不变：非默认组的 `CURATOR_SCHEMA_INVALID` 用 owner 默认模型补跑一次；默认模型自己出这个错照原熔断规则计数。
 - **有意不做**：按组隔离失败（一组坏了别的组照跑）需要按组记失败与退避，熔断也要按组持久化，工作量约翻倍，记成后续可选项。现在一个模型持续失败时，熔断前后都会挡住所有组，和改动前（一个模型、全体受阻）相同。
 - **已知局限**：前台忙闲判断（`foreground_model_active`）仍按服务启动时建的默认后端判断，没有按每组的后端判断。
 - **真实核对**（隔离 home、官方 MiniMax M2.7 设为 owner 默认、官方 DeepSeek flash 给会话 A，档案副本 0600 用完删）：一次触发分两次运行、2 次真实调用约 18.7 秒；DeepSeek 处理会话 A、MiniMax 处理会话 B，各 1 条候选，两个会话游标都推进。证据 `~/.my-agent/decision-evidence/j13-curator-retest/thread-model-routing-20261002/`。

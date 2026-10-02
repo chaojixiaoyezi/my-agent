@@ -202,6 +202,19 @@ def build_curator_response_schema(
     return _strict_object(properties)
 
 
+# LLM: 模型输出不合合同时抛出：仍是 ValueError（curator._failure_code 照旧归 CURATOR_SCHEMA_INVALID，消息原文不变），
+#   另带两个结构化字段供失败诊断：violation_code 是宿主写死的短码，violation_path 只由 schema 字段名和下标拼成
+#   （JSONPath，不含模型写的键名或值；不知道下标的嵌套字段写 $..<字段名>）。改动同步 curator._violation_facts 与
+#   test_curator_failure_attribution.py。
+# 类用途: 标记“模型输出哪一项不合格”，不带任何正文。
+class CuratorOutputViolation(ValueError):
+    # 函数用途: 保存原消息、违规码和字段路径。
+    def __init__(self, message: str, *, code: str, path: str) -> None:
+        super().__init__(message)
+        self.violation_code = code
+        self.violation_path = path
+
+
 # LLM: Anthropic-compatible providers may only receive the schema through the prompt, so the
 # host must enforce the exact same recursive contract instead of filling omitted fields.
 # 函数用途: 依据 Curator 自有 JSON Schema 校验一次 provider 输出，拒绝缺字段、额外字段和坏类型。
@@ -223,7 +236,7 @@ def _validate_schema_node(
     depth: int,
 ) -> None:
     if depth > 32:
-        raise ValueError("curator response schema nesting is too deep")
+        raise CuratorOutputViolation("curator response schema nesting is too deep", code="nesting_too_deep", path=path)
     allowed_keywords = {
         "type",
         "enum",
@@ -238,9 +251,9 @@ def _validate_schema_node(
     if unknown:
         raise RuntimeError(f"unsupported curator schema keyword: {sorted(unknown)[0]}")
     if not _schema_type_matches(value, schema.get("type")):
-        raise ValueError(f"curator response field {path} has an invalid type")
+        raise CuratorOutputViolation(f"curator response field {path} has an invalid type", code="invalid_type", path=path)
     if "enum" in schema and value not in schema["enum"]:
-        raise ValueError(f"curator response field {path} is outside the allowed enum")
+        raise CuratorOutputViolation(f"curator response field {path} is outside the allowed enum", code="enum_mismatch", path=path)
     if isinstance(value, dict):
         _validate_schema_object(value, schema, path=path, depth=depth)
     elif isinstance(value, list):
@@ -273,18 +286,17 @@ def _validate_schema_object(
     if not isinstance(properties, dict) or not isinstance(required, list):
         raise RuntimeError("curator object schema lacks properties or required")
     if any(not isinstance(key, str) for key in value):
-        raise ValueError(f"curator response field {path} contains a non-string key")
+        raise CuratorOutputViolation(f"curator response field {path} contains a non-string key", code="non_string_key", path=path)
     names = set(value)
     missing = set(required) - names
     extra = names - set(properties)
     if missing:
-        raise ValueError(
-            f"curator response field {path} is missing {sorted(missing)[0]}"
-        )
+        # 缺的字段名来自 schema 的 required，可以进路径；多出来的字段名是模型写的，只记所在对象。
+        raise CuratorOutputViolation(f"curator response field {path} is missing {sorted(missing)[0]}",
+                                     code="missing_property", path=f"{path}.{sorted(missing)[0]}")
     if extra and schema.get("additionalProperties") is False:
-        raise ValueError(
-            f"curator response field {path} contains unknown {sorted(extra)[0]}"
-        )
+        raise CuratorOutputViolation(f"curator response field {path} contains unknown {sorted(extra)[0]}",
+                                     code="unknown_property", path=path)
     for name, child_schema in properties.items():
         if name not in value:
             continue
@@ -332,9 +344,9 @@ def _validate_number_bounds(
     path: str,
 ) -> None:
     if "minimum" in schema and value < schema["minimum"]:
-        raise ValueError(f"curator response field {path} is below minimum")
+        raise CuratorOutputViolation(f"curator response field {path} is below minimum", code="below_minimum", path=path)
     if "maximum" in schema and value > schema["maximum"]:
-        raise ValueError(f"curator response field {path} is above maximum")
+        raise CuratorOutputViolation(f"curator response field {path} is above maximum", code="above_maximum", path=path)
 
 
 # LLM: Model cursor output is advisory and structurally bounded; host calculation remains

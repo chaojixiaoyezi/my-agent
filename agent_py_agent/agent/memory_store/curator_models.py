@@ -20,6 +20,7 @@ from .candidate_models import (
     normalize_reference_list,
 )
 from .curator_schema import (
+    CuratorOutputViolation,
     build_curator_response_schema,
     validate_curator_response_payload,
 )
@@ -334,8 +335,6 @@ def validate_curator_state(state: MemoryCuratorState) -> None:
         raise ValueError("memory curator pending_reason_generations must be a non-negative reason map")
 
 
-# LLM: 只接受 response.text 中一个 JSON 对象；不从代码块或前后自然语言猜 JSON。
-# 函数用途: 把 provider 输出转成严格 daily/candidate extraction。
 # LLM: 缺失可空顶层字段的宿主默认值(warnings=[] 等);只用于模型偶发漏字段的确定性补全,不引入新权威。
 _EMPTY_FIELD_DEFAULT = {
     "daily_events": [],
@@ -348,13 +347,18 @@ _EMPTY_FIELD_DEFAULT = {
 }
 
 
+# LLM: 只接受 response.text 中一个 JSON 对象；不从代码块或前后自然语言猜 JSON。不合合同一律抛
+#   curator_schema.CuratorOutputViolation（ValueError，消息原文不变，仍归 CURATOR_SCHEMA_INVALID），带宿主短码和只由
+#   schema 字段名拼成的路径，供失败诊断写“哪一项不合格”（2026-10-02）。
+# 函数用途: 把 provider 输出转成严格 daily/candidate extraction，不合格时说明是哪一项。
 def parse_curator_extraction(text: str) -> CuratorExtraction:
     try:
         payload = json.loads(str(text or ""))
     except json.JSONDecodeError as exc:
-        raise ValueError("curator response is not strict JSON") from exc
+        raise CuratorOutputViolation("curator response is not strict JSON", code="json_invalid", path="$") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != CURATOR_OUTPUT_SCHEMA_VERSION:
-        raise ValueError("unsupported curator output schema_version")
+        raise CuratorOutputViolation("unsupported curator output schema_version", code="schema_version_unsupported",
+                                     path="$.schema_version")
     required = {
         "schema_version",
         "daily_events",
@@ -368,7 +372,7 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
     missing = required - set(payload)
     extra = set(payload) - required
     if extra:
-        raise ValueError("curator response fields do not match the strict contract")
+        raise CuratorOutputViolation("curator response fields do not match the strict contract", code="unknown_property", path="$")
     # 宿主容错:模型偶发漏掉可空顶层字段(如 warnings)时按空默认补全,不阻断整批。
     # 结构化生成仍强制主字段;缺失补全是纯宿主侧确定性修复,不引入新权威。
     if missing:
@@ -453,7 +457,7 @@ def _parse_candidate_observation(payload: dict[str, object]) -> CandidateObserva
 def _object_array(payload: dict[str, object], name: str) -> list[dict[str, object]]:
     value = payload.get(name)
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-        raise ValueError(f"curator {name} must be an array of objects")
+        raise CuratorOutputViolation(f"curator {name} must be an array of objects", code="invalid_type", path=f"$.{name}")
     return [dict(item) for item in value]
 
 
@@ -462,7 +466,7 @@ def _object_array(payload: dict[str, object], name: str) -> list[dict[str, objec
 def _object(payload: dict[str, object], name: str) -> dict[str, object]:
     value = payload.get(name)
     if not isinstance(value, dict):
-        raise ValueError(f"curator {name} must be an object")
+        raise CuratorOutputViolation(f"curator {name} must be an object", code="invalid_type", path=f"$.{name}")
     return dict(value)
 
 
@@ -477,10 +481,11 @@ def _short_string_array(
 ) -> list[str]:
     value = payload.get(name, [])
     if not isinstance(value, (list, tuple)):
-        raise ValueError(f"curator {name} must be a string array")
+        raise CuratorOutputViolation(f"curator {name} must be a string array", code="invalid_type", path=f"$..{name}")
     items = [str(item).strip() for item in value if str(item).strip()]
     if len(items) > max_items or any(len(item) > max_chars for item in items):
-        raise ValueError(f"curator {name} exceeds bounded output limits")
+        raise CuratorOutputViolation(f"curator {name} exceeds bounded output limits", code="bounded_limit_exceeded",
+                                     path=f"$..{name}")
     return list(dict.fromkeys(items))
 
 

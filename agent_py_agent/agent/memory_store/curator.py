@@ -1172,7 +1172,8 @@ def _corrupt_run_id(quarantine: dict[str, object]) -> str:
 # LLM: 失败账保留已领取租约与恢复来源；异常消息经统一脱敏及 200 字符截断后才能持久化，
 # 不能保存请求或响应正文，也不能因为诊断改变原失败码、游标与退避规则。
 # 缺配置异常仅补档案编号和原因；包装异常根因与解析失败响应形状只并入
-# 无正文标量;键集同步 docs/modules/memory/04-structure.md 与 test_curator_failure_attribution.py。
+# 无正文标量;输出不合格时并入违规码和字段路径（_violation_facts）;键集同步 docs/modules/memory/04-structure.md
+# 与 test_curator_failure_attribution.py。
 # 函数用途: 构造失败 run audit 的诊断字典(类名、HTTP 状态码、脱敏截断后的异常正文、根因、响应形状)。
 def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     """提取机器可判定的失败形状：异常类名 + 供应商 HTTP 状态码（能拿到才记）+ 脱敏异常正文。
@@ -1199,6 +1200,7 @@ def _failure_diagnostic(exc: BaseException) -> dict[str, object]:
     if message:
         diagnostic["message"] = message
     diagnostic.update(_cause_facts(exc))
+    diagnostic.update(_violation_facts(exc))
     facts = getattr(exc, "response_facts", None)
     if isinstance(facts, dict):
         diagnostic.update({key: value for key, value in facts.items() if isinstance(value, (bool, int, str))})
@@ -1225,12 +1227,30 @@ def _cause_facts(exc: BaseException) -> dict[str, object]:
     return facts
 
 
+# LLM: 只读异常对象上的结构化属性，不解析消息正文：沿显式 __cause__ 链（最多 8 层）找第一个带
+#   violation_code（curator_schema.CuratorOutputViolation：输出不合合同）或 detail_code（CuratorEvidenceError：证据不合格）
+#   的异常，记 violation_code（≤40 字）和 violation_path（≤80 字，只有 schema 字段名和下标）。两者都是宿主写死或
+#   schema 派生的，不含模型正文。2026-10-02 3a 要求：SCHEMA_INVALID 时运行记录能直接看出哪一项不合格。
+# 函数用途: 从失败异常里取出“哪一项不合格”的违规码和字段路径。
+def _violation_facts(exc: BaseException) -> dict[str, object]:
+    chain = [exc]
+    while len(chain) < 8 and chain[-1].__cause__ is not None:
+        chain.append(chain[-1].__cause__)
+    source = next((item for item in chain if getattr(item, "violation_code", "") or getattr(item, "detail_code", "")), None)
+    if source is None:
+        return {}
+    code = str(getattr(source, "violation_code", "") or getattr(source, "detail_code", ""))[:40]
+    path = str(getattr(source, "violation_path", "") or "")[:80]
+    return {"violation_code": code, **({"violation_path": path} if path else {})}
+
+
 # LLM: run 账的字段集是**严格 v2 契约**（`from_record` 要求键集合完全一致，历史行必须能读回来），
 # 所以诊断不能新增 dataclass 字段——那会让所有既有行校验失败，把失败记账本身变成
 # CURATOR_RUN_AUDIT_FAILED（本仓库真机踩过）。改为写进既有 `warnings`（v2 字段、有界、可解析）。
 # 单条 warning 上限 300 字符由 curator_run_log._bounded_warnings 把关;超限先只缩短 message,
 # 绝不裁 JSON 本体(否则账读不回来)。每个字符 JSON 编码后至少占 1 位,砍掉超出的字符数一次就够。
-# 去掉 message 仍超限(类名异常长)时退回只含类名的最小形状:宁缺诊断,也不能让失败记账本身失败。
+# 去掉 message 仍超限(类名异常长)时退回最小形状:类名,有违规码/字段路径时也留着(它们最能直接归因,
+# 各自有界,类名相应只留 100 字);宁缺诊断,也不能让失败记账本身失败。
 # 函数用途: 把失败诊断编码为一条稳定、有界、可解析的 warning 文本，供运维读账定位。
 def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
     text = _encode_failure_diagnostic(diagnostic)
@@ -1242,7 +1262,9 @@ def _failure_diagnostic_warning(diagnostic: dict[str, object]) -> str:
             del trimmed["message"]
         text = _encode_failure_diagnostic(trimmed)
     if len(text) > 300:
-        text = _encode_failure_diagnostic({"error_type": str(diagnostic.get("error_type") or "")[:200]})
+        violation = {key: diagnostic[key] for key in ("violation_code", "violation_path") if key in diagnostic}
+        limit = 100 if violation else 200
+        text = _encode_failure_diagnostic({"error_type": str(diagnostic.get("error_type") or "")[:limit], **violation})
     return text
 
 

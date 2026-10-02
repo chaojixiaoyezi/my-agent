@@ -16,6 +16,8 @@ import errno
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.memory_store.candidates import CandidateService
@@ -162,6 +164,8 @@ def test_truncated_response_records_shape_without_body(tmp_path: Path) -> None:
         "truncated": True,
         "stop_reason": "length",
         "output_tokens": 8192,
+        "violation_code": "json_invalid",
+        "violation_path": "$",
     }
     joined = "\n".join(record.warnings)
     assert "daily_events" not in joined and "macOS" not in joined
@@ -300,3 +304,72 @@ def test_diagnostic_warning_stays_bounded() -> None:
     huge = _failure_diagnostic_warning({**diagnostic, "error_type": "E" * 400})
     assert len(huge) <= 300
     assert json.loads(huge.split("=", 1)[1]) == {"error_type": "E" * 200}
+
+
+# 函数用途: 造一条除了被改的字段外都合合同的候选（引用第一条消息）。
+def _candidate(message_id: str, **overrides: object) -> dict[str, object]:
+    return {"candidate_type": "long_term_fact", "content": "用户的个人电脑使用 macOS", "subject_key": "fact.os",
+            "scope": {"scope_type": "personal", "scope_key": "personal", "applies_when": "", "excludes_when": ""},
+            "origin": "user_explicit", "source_message_refs": [{"message_id": message_id}], "source_tool_refs": [],
+            "source_artifact_refs": [], "observed_at": None, "valid_from": None, "valid_until": None,
+            "confidence": 0.9, "proposed_action": "add", "target_entry_id": None, "conflicts_with": [],
+            "promotion_target": "long_term", **overrides}
+
+
+# 函数用途: (8) 输出不合 schema 时，失败诊断带宿主写死的违规码和只由 schema 字段名/下标拼成的路径，不带正文。
+def test_schema_violation_records_code_and_field_path(tmp_path: Path) -> None:
+    store, thread, messages = _conversation(tmp_path)
+    ids = [item.message_id for item in messages]
+    payload = json.loads(_valid_text(thread.thread_id, ids))
+    payload["candidates"] = [_candidate(ids[0], confidence=1.5)]
+    backend = _ResponseBackend([ModelResponse(text=json.dumps(payload, ensure_ascii=False), backend="b")])
+    service = _service(tmp_path, backend, store)
+
+    result = service.run(reason="admin")
+
+    assert (result.status, result.failure_code) == ("failed", "CURATOR_SCHEMA_INVALID")
+    [record] = service.run_log.list()
+    diagnostic = _diagnostic(record)
+    assert (diagnostic["violation_code"], diagnostic["violation_path"]) == ("above_maximum", "$.candidates[0].confidence")
+    assert "macOS" not in "\n".join(record.warnings), "正文不进运行记录"
+
+
+# 函数用途: (9) 模型自己写的多余键名不进结构化路径（只到所在对象）；缺的字段名来自 schema，路径带上它。
+@pytest.mark.parametrize("change,expected", [
+    ("extra", ("unknown_property", "$.candidates[0]")),
+    ("missing", ("missing_property", "$.candidates[0].scope")),
+])
+def test_unknown_or_missing_nested_key_paths(tmp_path: Path, change: str, expected: tuple[str, str]) -> None:
+    store, thread, messages = _conversation(tmp_path)
+    ids = [item.message_id for item in messages]
+    payload = json.loads(_valid_text(thread.thread_id, ids))
+    candidate = _candidate(ids[0], zz_model_key="x") if change == "extra" else _candidate(ids[0])
+    if change == "missing":
+        del candidate["scope"]
+    payload["candidates"] = [candidate]
+    service = _service(tmp_path, _ResponseBackend([ModelResponse(text=json.dumps(payload), backend="b")]), store)
+
+    service.run(reason="admin")
+
+    diagnostic = _diagnostic(service.run_log.list()[0])
+    assert (diagnostic["violation_code"], diagnostic["violation_path"]) == expected
+
+
+# 函数用途: (10) 证据不合格沿用已有的 detail_code；包装异常也能沿 __cause__ 找到违规码；超长时最小形状仍留违规码和路径。
+def test_violation_facts_follow_the_cause_chain_and_survive_the_bound() -> None:
+    from agent_py_agent.agent.memory_store.curator_validation import CuratorEvidenceError
+
+    assert _failure_diagnostic(CuratorEvidenceError("candidate_without_evidence"))["violation_code"] == "candidate_without_evidence"
+    try:
+        try:
+            raise CuratorEvidenceError("daily_without_evidence")
+        except CuratorEvidenceError as inner:
+            raise RuntimeError("wrapped") from inner
+    except RuntimeError as outer:
+        assert _failure_diagnostic(outer)["violation_code"] == "daily_without_evidence"
+    assert "violation_code" not in _failure_diagnostic(ValueError("plain"))
+    huge = _failure_diagnostic_warning({"error_type": "E" * 400, "message": "m" * 200, "response_chars": 1,
+                                        "violation_code": "c" * 40, "violation_path": "$" + "p" * 79})
+    assert len(huge) <= 300
+    assert json.loads(huge.split("=", 1)[1]) == {"error_type": "E" * 100, "violation_code": "c" * 40,
+                                                  "violation_path": "$" + "p" * 79}

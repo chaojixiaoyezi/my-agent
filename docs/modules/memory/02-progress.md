@@ -9,6 +9,7 @@
 
 - `memory_curator_model_profile` 留空时，一批里不同会话、不同模型的消息按会话模型分组，每组一次完整运行；没选或不可用的会话用 owner 默认，并带结构化原因。
 - 会话模型输出坏 JSON 时，本次用 owner 默认补跑一次；熔断仍是 owner 级，但只数同一组的失败。指定了档案仍固定用它；某个 owner 在自己的目录（含管理员共享）里解析不到指定档案时，改用该 owner 默认模型并记 `curator_profile_unavailable_fallback:<原因>`。详见 DESIGN_LEDGER 同名条目。
+- `CURATOR_SCHEMA_INVALID` 的失败诊断加 `violation_code` 和 `violation_path`（宿主短码 + 只由 schema 字段名拼成的路径，不带正文），能直接看出哪一项不合格。
 
 ## 主模型只读长期记忆检索工具 `memory_search`（J9，2026-10-02，分支 `claude/ae-j9-memory-tool`，已实现，待集成）
 

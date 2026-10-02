@@ -191,6 +191,8 @@ schema 不看开关 → 1；不重验上限/附件根 → 1；不查重复引用
 - 没有自己档案的普通用户（model-less）：记忆整理的默认模型和 `selected_model_config`（主代理同一条解析）一致——部署配置有模型时用它并记 `curator_default_model_source:deployment_default`，管理员指定初始模型后跟着换成它并记 `admin_initial`；部署配置也没模型时主代理和记忆整理都是未配置，运行失败 `CURATOR_MODEL_NOT_CONFIGURED`，失败记录带 `deployment_default`，游标不动。
 - 全局指定的档案只在管理员目录里：管理员不路由；普通用户改用自己的默认模型、不按会话分组，路由表带 `curator_profile_unavailable_fallback:profile_not_found`，这条警告进运行记录并排最前（只有审计事件的运行也带）。
 
+**`test_curator_failure_attribution.py` 加 3 项、改 1 项**：输出 `confidence=1.5` → 失败诊断 `violation_code=above_maximum`、`violation_path=$.candidates[0].confidence`，正文不进记录；候选里多出模型自写的键 → `unknown_property`，路径只到 `$.candidates[0]`；证据错误沿用 `detail_code`、包装异常沿 `__cause__` 找到、超长时最小形状仍留违规码和路径；原截断用例的诊断多了 `json_invalid` / `$`。
+
 **改 `test_curator_model_profile.py`**：原“指定档案失效不回退”拆成两条，7 种失效（编号不存在、写 default、用途不符、停用、服务商停用、服务商用途不符、缺凭据）→ 改用 owner 默认模型、建的是默认模型的后端、路由表带 `curator_profile_unavailable_fallback:<原因>`；owner 默认也停用时（再加目录损坏），仍是带指定档案编号和原因的类型化失败。`/settings show` 写“改用本用户默认模型：<型号>”。
 
 **变异 13 个、拦下 12 个**：挑最后一条消息的组、审计跟任何组走、剩余组数恒为 0、不补跑、任何失败码都补跑、补跑成功仍记会话模型、熔断不按组筛、本组历史留下别的模型的失败、宿主警告不进运行记录、解析时给会话写默认、不可用档案不记原因、指定档案时仍路由。
