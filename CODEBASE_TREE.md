@@ -897,6 +897,7 @@ agent_py_agent/
 |   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、超时只冷却本点而连接故障冷却全部、关闭一起取消
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
+|   |-- test_late_response_tool_fence.py # 停机关门后迟到的模型响应里的工具不启动，记 HOST_SHUTDOWN_TOOL_NOT_STARTED，原因码与账本同源（I3）
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
 |   |-- test_gateway_host_identity.py # 主机名变化后 SIGTERM 仍能停网关：信号用启动身份、host_id 进程内缓存、macOS 硬件 UUID、跨进程核验表现
 |   |-- test_tool_operation_host_identity.py # 工具操作持有者同主机判定用 process_host_id：主机名变化后本机死进程可接管、老主机名记录等租约到期

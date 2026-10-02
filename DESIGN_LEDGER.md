@@ -15,6 +15,20 @@
 - **代价与未做**：Jev 每个 Skill 只看到约 30 + 24 个汉字的说明，选得准不准要看真实样本。criteria 每题约 938 字节（53 题约 2.5 万上界 token）仍逐题重复；改成共享说明或换 UTF-8 编码（要重新标定 v2）留作后续选项，本轮不做。
 - **验证**：见 TESTS.md 同名节。
 
+## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 `claude/3a-step17e` `37b5166d2`（原基于 `e75cf6061`），已实现，待集成）
+
+- **问题**：J17 栅栏关门时（`close_model_call_admission`），只在账本里把在途模型调用记成 failed（原因码 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`）。
+  - 物理 HTTP 调用还在跑，响应稍后照常回来；`_finish_model_generation` 不看账本终态（迟到的成功也不会重开终态），响应原样交回工具循环。
+  - 于是响应里的工具调用照常执行，例如写文件。用例复现：不加这次的屏障，迟到响应里的 `write_file` 真的把文件写出来了（变异 i01）。
+- **做法**（只认结构化事实，不看文本）：
+  - 工具轮里每个未启动调用前本来就有一道顺序屏障（`round_execution._defer_unstarted_calls_if_needed`，原先管取消和 compact 延后）。现在它先读本进程准入的关门事实 `model_call_admission_closure()`。
+  - 关门后，当前及后续调用一律不启动，各配一条宿主结果：新登记的 `HOST_SHUTDOWN_TOOL_NOT_STARTED`（status=cancelled、handler 未执行、effect not_started，恢复动作 stop）。
+  - `metadata.host_shutdown` 带关门原因：`reason_code` / `error_type` 和账本把这次模型调用结清成 failed 时用的是同一份 `ModelCallAdmissionClosure`，另记准入拒绝的固定码 `admission_error_code=MODEL_CALL_ADMISSION_CLOSED`。所以账本和工具账对得上：模型调用是“停机中断、未结算”，它带来的工具调用是“停机、未执行”。
+  - 轮中途才关门时，已启动的调用照常收尾，只拦还没启动的；停机优先于普通取消（两者都命中时记停机）。
+  - 之后下一次模型调用照旧被准入拒绝（`ModelCallAdmissionClosedError`），请求不发出，回合按宿主停机收尾（运行错误报告 `host_stopping`），和关门后被拒的回合是同一条路。
+- **不做**（goal 第 8 条）：发送层硬门；子代理停机后自动续跑不占次数。被拒回合重启后的续跑规则是 I4，单独交付。
+- **顺带（3a 定）**：`restart_gateway` 的审批说明按代码更正：ask 弹确认，auto / 完全放行不弹，安排后先等空闲再换进程。改了配置注释、工具模块头和 GATEWAY_SAFE_RESTART.md。
+
 ## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0 的流程、模板、检查器和核验声明（be，2026-10-02，分支 `claude/be-capability-packs-content-b2`，基于 ae 块 2 `ce2b833a7`，已实现，待 ae 审）
 
 - **依据**：冻结重跑逐条归因（`capability-packs-v2-design/attribution.md`）里 K 类 7 次、P 类 2 次，按 ae 的设计（[CAPABILITY_PACKS_V2](docs/design/CAPABILITY_PACKS_V2.md) 第 2 节）补包内容。只改 `examples/capability-packages/` 下两个包，不改宿主。

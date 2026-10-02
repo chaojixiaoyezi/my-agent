@@ -1021,3 +1021,9 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 ## schedule 工具声明默认收起（工具瘦身 T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `c6f28b150`）
 
 - `scheduler/tool.py` 的 `schedule` 在 ToolModelHints 里声明 `default_deferred` 和用途句“创建、查看、暂停或删除定时任务与提醒”。开关 `tool_default_deferral_enabled` 打开时前台回合不再每轮发它的 Schema，目录索引列出它，模型说“提醒我…”时 tool_search 一步加载。工具行为不变。设计见台账同名节，测试见 TESTS.md 同名节。
+
+## 停机关门后迟到的模型响应里的工具不执行（I3，第 8 条①，2026-10-02，分支 `claude/38-late-tool-fence`，基于 step17e `37b5166d2`）
+
+- **起因**：停机结清只在账本里把在途模型调用记成 failed；物理响应稍后照常回到工具循环，响应里的工具调用（例如写文件）照常执行。
+- **改动**：工具轮每个未启动调用前的顺序屏障先读 `model_call_admission_closure()`；关门后当前及后续调用不启动，记 `HOST_SHUTDOWN_TOOL_NOT_STARTED`（cancelled、未执行），关门原因码与账本同源；之后下一次模型调用照旧被准入拒绝，回合按宿主停机收尾。
+  - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
