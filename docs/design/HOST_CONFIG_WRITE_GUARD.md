@@ -19,7 +19,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 宿主配置 | `HOST_CONFIG_HOME_PARTS`、`HOST_CONFIG_OWNER_PARTS` | 数据根 `config/`、`system/config/`；每个 owner home 的 `config/` | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_CONFIG_WRITE_BLOCKED` |
 | 宿主运行状态 | `HOST_STATE_OWNER_FILES`（连 `.lock`）、`HOST_STATE_OWNER_DIRS`、`HOST_STATE_OWNER_SQLITE`（连 `SQLITE_SIDECAR_SUFFIXES`） | owner home 里，按路径拒写、不管存不存在。文件：`permissions.json`、`quota.json`、`retention.json`、`memory_policy.json`、`skill_policy.json`、`tool_policy.json`、`audit_log.jsonl`、`memory/ops.jsonl`、`memory/candidates.jsonl`，每个旁边的 `.lock`；`runtime.db` 和 `-wal`/`-shm`/`-journal`。目录：`capability_requests/`、`temporary_grants/`、`compact/`、`logs/`、`audit/`、`workspace/runtime/`、`memory/curator/`、`memory_archive/`、`cache/`、`trash/`、`skills/`、家目录根的 `.agents/skills/` | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_STATE_WRITE_BLOCKED` |
-| 任务核验记录 | `TASK_ROOT_LAYOUT` + `HOST_STATE_TASK_PARTS` | 规范任务根（owner home 下 `runs/<日期>/<键>`、`tasks/<日期>/<名>`、`audits/<编号>`）的 `data/pack_verification/` | 拒写，读照常 | 只保护本次命令工作目录和写根所在的任务 | `PATH_HOST_STATE_WRITE_BLOCKED` |
+| 任务核验记录 | `TASK_ROOT_LAYOUT` + `HOST_STATE_TASK_PARTS` | 规范任务根（owner home 下 `runs/<日期>/<键>`、`tasks/<日期>/<名>`、`audits/<编号>`）的 `data/pack_verification/` | 拒写，读照常 | 只保护本次命令所在的任务（写边界里的 `task_root`，加上工作目录与写根认出的任务） | `PATH_HOST_STATE_WRITE_BLOCKED` |
 | 宿主凭据 | `HOST_CREDENTIAL_HOME_PARTS`、`HOST_CONFIG_YAML_SEGMENTS`、`HOST_SECRET_DIR_NAME` | 数据根 `config/` 下的 `admin-password.json`、`shared-model-profiles.json`、`model-profiles/`、名字里有 yaml/yml 段的文件（用户配置及 `desktop.yaml.bak-*` 等备份）；数据根里 owner home 之外任何一层叫 `secrets` 的目录 | 读写都拒 | 拒写，**读照常**（已知边界） | `PATH_HOST_CREDENTIAL_BLOCKED` |
 
 - 用户配置的文件名由部署决定（Gateway `--config`），所以按“数据根 `config/` 下的 YAML 文件”认，不写死 `desktop.yaml`。
@@ -79,7 +79,9 @@
 - `shell.host_readonly_paths_for(owner, persona, task_anchors)` 并进 `protected_write_paths`，覆盖范围按模式分：
   - **隔离 owner**：只盖本 owner 的 `config/`、运行状态文件。数据根的配置在 owner 墙外。
   - **Full Access**：盖数据根的 `config/`、`system/config/`，加全部 owner 的。
-  - 两种模式都加上 task_anchors（工作目录与写根）所在任务的 `data/pack_verification/`。子代理的工作目录 `<任务根>/work/agents/<run>` 也能认出任务根。
+  - 两种模式都加上本任务的 `data/pack_verification/`，来源有两个：
+    - 写边界里宿主写的结构化 `task_root`：`registry_invoke` 经 `task_host_state_paths` 放进 `__sandbox_protected_write_paths`。命令在任务树外（用户项目目录）跑、写根也不含本任务时照样只读。这是 ae 块 4 发现的缺口，2026-10-02 修好。
+    - task_anchors：工作目录与写根所在的任务。子代理的工作目录 `<任务根>/work/agents/<run>` 也能认出任务根。
 - Seatbelt 侧的两处修改：
   - `_readonly_path_denies` 不再跳过还不存在的路径，写 literal+subpath。Seatbelt 按路径匹配，不要求目标存在，所以命令也建不出这些路径。
   - **沙箱通用规则 `_ancestor_write_denies`**（探针发现的已有口子）：

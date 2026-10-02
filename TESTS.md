@@ -119,6 +119,11 @@
     - 断网 + 只读覆盖 + 上级目录拒写同时生效：写配置失败；改名数据根再写失败且目录原样；普通写成功；连本机监听端口失败。
     - 只有人格文件受保护时，改名人格根再改 `SOUL.md` 也失败。
   - 隔离 Shell 失败时的边界事实：声明自家根为写根时，`read_only` 列出自家 `config/`、`runtime.db` 等；不列别人的；写根只是工作区时与原来完全一样。
+- **补洞用例**（ae 块 4 发现）：
+  - `test_task_records_reach_the_sandbox_from_the_boundary_task_root`：`run_command` 与 `terminal_session` 的沙箱参数里带本任务核验目录；没有 `task_root` 时不臆造。
+  - `test_real_full_access_shell_outside_the_task_tree_cannot_forge_the_records`：真实沙箱里，工作目录和写根都在任务树外的用户项目目录，追加伪造被拒，内容不变；读记录、写项目目录照常。
+  - 去掉 registry 这一行的变异会被抓到。
+  - 在 ae 分支 ed1cc34c6 上叠本修复后，用真实 registry 投影的参数复跑 ae 那条场景（5 种伪造方式），全部被拒。ae 那条 xfail 用例直接调 ShellTool、绕过了 registry 投影，要改成走 `_tool_params_with_runtime_boundary` 才能体现修复。
 - **改了期望的旧用例**（行为变化，不是放宽）：
   - `test_runtime_gate_ledger.py::test_workspace_only_owner_control_metadata_stays_read_only`：权限文件改由路径策略拒写（`PATH_HOST_STATE_WRITE_BLOCKED`），不再出现在 ledger 的 `forbidden_write_roots` 里；写边界照样拒。
   - `test_shell_sandbox_boundary_facts.py` 两项：写根是 owner 的 `workspace/` 时，里面的 `workspace/runtime` 是宿主托管文件，边界事实把它列进 `read_only`。
