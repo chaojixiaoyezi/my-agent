@@ -40,7 +40,8 @@ if TYPE_CHECKING:
 _GATEWAY_FOREGROUND_CLAIM_REASON = "gateway_foreground_turn"
 MODEL_OBSERVATION_KEY = "model_selection_observation"
 CAPABILITY_OBSERVATION_KEY = "capability_presentation_observation"
-_CAPABILITY_OBSERVATION_LIMIT = 8
+# 一条请求最多保留 8 条能力观测记录：正常每轮一次，防异常循环撑爆。
+_CAPABILITY_OBSERVATION_LIMIT_COUNT = 8
 
 
 # LLM: This writer is the only bridge from a promoted conversation task back to the exact
@@ -339,7 +340,7 @@ def record_capability_presentation_observation(context: object, observation: dic
         entries = list(block.get("entries") or ()) if isinstance(block, dict) else []
         return {**current, CAPABILITY_OBSERVATION_KEY: {
             "schema": "gateway_capability_presentation_observation.v1",
-            "entries": [*entries, entry][-_CAPABILITY_OBSERVATION_LIMIT:],
+            "entries": [*entries, entry][-_CAPABILITY_OBSERVATION_LIMIT_COUNT:],
         }}
 
     transition = GatewayActiveTurnTransition(context.request_path, context.request_id,

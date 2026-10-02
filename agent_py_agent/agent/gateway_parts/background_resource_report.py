@@ -24,6 +24,7 @@ from ..tooling.process_session_store import ProcessSessionStore, process_session
 
 # 停止意图落到记录后，原 host 的监控循环按自己的轮询间隔发现；等待回收要留足余量。
 DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS = 10.0
+# 资源报告轮询间隔 0.1 秒：接近实时又不过度占 CPU。
 _POLL_SECONDS = 0.1
 
 

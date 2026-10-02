@@ -24,6 +24,7 @@ from .retention_models import (
     retention_action_id,
 )
 
+# 一天按 86400 秒算：保留期换算成秒的统一口径。
 _DAY_SECONDS = 86_400
 _SUBAGENT_SCRATCH_PATHS = (
     Path("inbox"),

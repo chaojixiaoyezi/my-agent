@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
+
+- **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数
+  （无单位后缀或无上方中文说明）。数值一律不变、不碰其它模块。
+- **做法**：数量上限类按后缀表补 `_COUNT` 改名（如 `LOOP_GUARD_LIMIT→LOOP_GUARD_LIMIT_COUNT`、
+  `_RECORD_LIMIT→_RECORD_LIMIT_COUNT`、`_MAX_RELATION_PAIRS→_MAX_RELATION_PAIRS_COUNT`、`CURATOR_MAX_RETRIES→CURATOR_MAX_RETRY_COUNT`、
+  `_TIMEOUT_SHRINK_LIMIT→_TIMEOUT_SHRINK_LIMIT_COUNT`），字符/长度类补 `_CHARS`（`_BRIEF_MAX→_BRIEF_MAX_CHARS`、
+  `_SHORT_ID→_SHORT_ID_CHARS`、`_EN_KEYWORD_MIN_LEN→_EN_KEYWORD_MIN_LEN_CHARS`）、`_TIMEOUT_SHRINK_FLOOR→_TIMEOUT_SHRINK_FLOOR_COUNT`；
+  时间/字符/字节类补上方中文说明；改名引用全仓同步（含测试，脚本 tmp/sync-batch3-refs.py，重 grep 0 残留）。
+- **无物理单位组**：BM25 参数 `_BM25_B`/`_BM25_K1` 只补说明，白名单单独组 reason“无物理单位”（7→9）。
+- **白名单**：575 → 523（groups[0]，其中 `_WRITE_TIMEOUT_SECONDS` 因 tooling/pty_sessions.py 仍有不合规定义、非本批范围，名字级白名单保留）＋9（无物理单位组）。
+- **目录**：重新生成 `constants_catalog.json`（800 项），`--check` 一致。
+- **验证**：守卫（test_constants_catalog + test_constant_names_unique）＋改名直接相关 7 文件 **全过**；memory_store 19 文件、
+  gateway_parts 14 文件相关测试全过（test_host_command_stream.py 的插件宿主 enable 用例在沙箱返回 outcome_unknown，属环境限制，
+  3a 沙箱外复核）；guards9 全量 **168 passed**；check_import_boundaries **0 条**；ruff **All checks passed**；check_doc_sync **PASS**；
+  code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
+  `size_diff.sh` **新增告警 0**（消失 2 条为集成分支其它提交所致）。
+
 ## 常数整改第一批：5 模块 115 个常数合规（2026-10-01，分支 `worker/ds2-p10-batch1`，基于 `45610148e`）
 
 - **范围**：agent/ingestion（15 文件）、agent/scheduler（4 文件）、agent/session_lock（2 文件）、agent/user_space（6 文件）、

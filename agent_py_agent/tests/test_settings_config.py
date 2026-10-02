@@ -241,7 +241,7 @@ class TestNormalizeAgentConfig:
     def test_agent_config_default_tool_catalog_is_short(self):
         from dataclasses import fields as dataclass_fields
 
-        from agent_py_agent.agent.core import TOOL_CATALOG_LIMIT, TOOL_DETAIL_MAX_CHARS
+        from agent_py_agent.agent.core import TOOL_CATALOG_LIMIT_COUNT, TOOL_DETAIL_MAX_CHARS
         from agent_py_agent.agent.tooling.registry import ToolRegistryParams
 
         config = AgentConfig()
@@ -249,7 +249,7 @@ class TestNormalizeAgentConfig:
 
         assert config.tool_catalog_include_examples is False
         # 参数减量第 3 批 E 组：目录条数、单条截断、详情截断和分页起点是代码常量或参数默认值，不再是配置项。
-        assert (TOOL_CATALOG_LIMIT, params["catalog_entry_max_chars"], TOOL_DETAIL_MAX_CHARS) == (80, 700, 4000)
+        assert (TOOL_CATALOG_LIMIT_COUNT, params["catalog_entry_max_chars"], TOOL_DETAIL_MAX_CHARS) == (80, 700, 4000)
         assert params["catalog_offset"] == 0
 
     def test_normalize_agent_config_access_mode(self):

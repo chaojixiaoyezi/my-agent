@@ -94,6 +94,7 @@ _GATEWAY_STARTING_STATUS = "starting"
 _GATEWAY_FAILED_STATUSES = ("failed", "interrupted", "http_server_error")
 _GATEWAY_SOURCE_STATE = "state"
 _GATEWAY_SOURCE_HEARTBEAT = "heartbeat"
+# 就绪状态轮询间隔 0.2 秒：重启后尽快显示新状态。
 _GATEWAY_READY_POLL_SECONDS = 0.2
 
 
@@ -139,6 +140,7 @@ class _GatewayRecordFacts:
     load_errors: dict[str, dict] = field(default_factory=dict)
 
 
+# 日志采样最多 64 KiB：状态面板预览够用，避免整份日志进渲染。
 _GATEWAY_LOG_SAMPLE_MAX_BYTES = 64 * 1024
 _EXCEPTION_SIGNATURE_RE = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_.]*\.)?([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Interrupt)):\s*"

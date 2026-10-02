@@ -118,8 +118,11 @@ _STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 _SCOPE_KEY_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
+# 候选内容最多 2000 字符：超长正文截断，防记忆候选撑爆输入。
 _MAX_CONTENT_CHARS = 2_000
+# 候选条件最多 500 字符：条件说明保持简短。
 _MAX_CONDITION_CHARS = 500
+# 候选证据引用最多 4096 字节：ref 过长视为异常，防止坏快照入库。
 _MAX_REF_BYTES = 4_096
 
 

@@ -32,7 +32,8 @@ from .curator_backend import curator_prompt
 from .curator_inputs import CuratorDecisionAnnotation, CuratorInputBatch
 from .decision_curator_relation import annotate_curator_relations
 
-_MAX_ANNOTATED_ITEMS = 32  # 每来源两题；这是本地延迟/输入保护，不是供应商题数上限，未标注材料仍完整提取。
+# 每来源最多标注 32 条：本地延迟/输入保护，未标注材料仍完整提取。
+_MAX_ANNOTATED_ITEMS_COUNT = 32
 _TAGS = {
     "fact": "可能包含可核验事实", "preference": "可能包含用户偏好",
     "lesson": "可能包含可复用经验", "event": "可能包含经历或事件",
@@ -170,7 +171,7 @@ def _decision_material(batch: CuratorInputBatch, *, window_tokens: int = 0) -> t
     items.extend(("audit", item.event_id, item.content_hash,
                   (("artifact_ref", item.artifact_ref),) if item.artifact_ref else (("source_context_ref", f"audit:{item.event_id}"),))
                  for item in batch.audit_events)
-    annotated_items = items[:_MAX_ANNOTATED_ITEMS]
+    annotated_items = items[:_MAX_ANNOTATED_ITEMS_COUNT]
     fitted_items = _fit_items_to_window(state, annotated_items, window_tokens=window_tokens)
     for index, (kind, source_id, content_hash, required_refs) in enumerate(fitted_items):
         ref = f"{kind}:{source_id}"

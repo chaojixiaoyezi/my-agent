@@ -16,10 +16,13 @@ from .curator_backend import curator_prompt
 from .curator_formal import _long_term_items
 from .curator_inputs import CuratorInputBatch, CuratorRelationAnnotation
 
-_MAX_RELATION_PAIRS = 32  # 本地延迟保护；没有覆盖的材料仍完整交原提取，不代表供应商题数限制。
+# 关系对最多 32 对：本地延迟保护，未覆盖材料仍完整交原提取。
+_MAX_RELATION_PAIRS_COUNT = 32
 _RELATION_SELECTION = "bm25_then_source_order"
 _TOKEN_PATTERN = re.compile(r"[0-9a-z_]+|[\u4e00-\u9fff]")
+# BM25 参数 k1（词频饱和）：1.2 是常用默认值，无物理单位。
 _BM25_K1 = 1.2
+# BM25 参数 b（文档长度归一）：0.75 是常用默认值，无物理单位。
 _BM25_B = 0.75
 _RELATIONS = {
     "possible_duplicate": "新来源可能重述这一条正式事实；只建议核对，不能省略来源或直接去重",
@@ -70,7 +73,7 @@ def annotate_curator_relations(agent, batch: CuratorInputBatch, params, stage, *
 # LLM: 纯函数、只用标准库；不改输入、不联网、不调用嵌入，同样输入必然同样输出，供同批两次复核得到同一 revision。
 # 函数用途: 给消息与正式条目对打词面相似度分，按分数从高到低挑出上限内的对，同分保持原枚举顺序。
 def _select_pairs(messages: tuple, formal: tuple) -> tuple:
-    limit = _MAX_RELATION_PAIRS
+    limit = _MAX_RELATION_PAIRS_COUNT
     pairs = tuple((index, source, item) for index, (source, item) in enumerate(
         (source, item) for source in messages for item in formal))
     if not pairs or len(pairs) <= limit:
@@ -133,7 +136,7 @@ def _relation_material(batch: CuratorInputBatch) -> tuple[dict, dict, tuple, str
         "coverage": {"kind": "presented_pairs_only", "pair_count": len(pairs),
                      "batch_source_count": len(batch.messages) + len(batch.audit_events), "batch_formal_count": len(batch.formal_memories),
                      "total_pair_count": len(messages) * len(formal), "selection": _RELATION_SELECTION,
-                     "selection_limit": _MAX_RELATION_PAIRS},
+                     "selection_limit": _MAX_RELATION_PAIRS_COUNT},
         "sources": {source.message_id: source.to_model() for source, _item in pairs},
         "formal": {item.authority_ref: {**item.to_model(), "authority_version": item.authority_version,
                                         "content_chars": item.content_chars, "content_complete": True} for _source, item in pairs},

@@ -847,13 +847,13 @@ def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple
     return workspace_root, workspace_roots
 
 
-# 参数减量第 3 批 E 组：提示词工具目录每页条数、推荐区单个工具详情的截断字数不再是配置项（值不变）；
-# 目录单条截断与分页起点沿用 ToolRegistryParams 的默认值（700 字、从第一个工具开始）。
-TOOL_CATALOG_LIMIT = 80
+# 工具目录每页最多展示多少条：分页起点与单条截断沿用 ToolRegistryParams 默认值（2026-09-28 参数减量降为常量）。
+TOOL_CATALOG_LIMIT_COUNT = 80
+# 单个工具详情在提示词里的截断字数：超长详情只留前 4000 字，防止目录膨胀。
 TOOL_DETAIL_MAX_CHARS = 4000
-# 每次注入 prompt 的"工具详细说明"条数。属检索内部实现参数（调大只多花 token、调小会漏工具），
+# 每次注入 prompt 的“工具详细说明”条数上限：调大只多花 token、调小会漏工具；
 # 2026-09-28 参数减量从配置降为常量（值不变）。
-TOOL_RETRIEVAL_LIMIT = 12
+TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
 # LLM: ToolRegistry 唯一装配入口；owner、来源合同和语法反馈开关取可信配置，执行仍取受限快照；联查文件诊断配置测试。
@@ -911,13 +911,13 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             max_matches=config.tool_search_max_matches,
             web_max_chars=config.tool_web_max_chars,
             http_timeout=config.tool_http_timeout,
-            catalog_limit=TOOL_CATALOG_LIMIT,
+            catalog_limit=TOOL_CATALOG_LIMIT_COUNT,
             catalog_mode=config.tool_catalog_mode,
             catalog_categories=config.tool_catalog_categories,
             catalog_deferred_categories=config.tool_catalog_deferred_categories,
             catalog_include_examples=config.tool_catalog_include_examples,
             tool_detail_max_chars=TOOL_DETAIL_MAX_CHARS,
-            retrieval_limit=TOOL_RETRIEVAL_LIMIT,
+            retrieval_limit=TOOL_RETRIEVAL_LIMIT_COUNT,
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,

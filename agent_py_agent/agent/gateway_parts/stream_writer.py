@@ -26,7 +26,9 @@ from .stream_events import (
     thinking_event,
 )
 
+# 分块流刷新间隔 0.08 秒：输出攒够 128 字符或超时即推给对端。
 _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
+# 分块流攒满 128 字符即刷新：低延迟又不至于每字一包。
 _CHUNK_STREAM_FLUSH_CHARS = 128
 
 

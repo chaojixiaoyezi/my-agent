@@ -46,7 +46,7 @@ def test_e_group_constants_keep_the_old_defaults():
     assert background_context.CONVERSATION_CONTEXT_RECENT_LIMIT == 20
     assert background_context.BACKGROUND_PENDING_WAKE_PROMPT_LIMIT == 20
     assert tool_context_window._TERMINAL_TOOL_FOLD_MAX_CHARS == 6_000
-    assert (core.TOOL_CATALOG_LIMIT, core.TOOL_DETAIL_MAX_CHARS) == (80, 4_000)
+    assert (core.TOOL_CATALOG_LIMIT_COUNT, core.TOOL_DETAIL_MAX_CHARS) == (80, 4_000)
     assert (contract_status.CONTRACT_STATUS_RECENT_FINDINGS_LIMIT, contract_status.CONTRACT_STATUS_MAX_SCAN_FILES,
             contract_status.CONTRACT_STATUS_MAX_REPORT_BYTES) == (20, 1_000, 2_000_000)
 

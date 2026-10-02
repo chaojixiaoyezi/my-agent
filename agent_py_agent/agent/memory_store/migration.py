@@ -44,6 +44,7 @@ _LEGACY_ARCHIVE_DIR = "memory-migration"
 # LLM: 唯一权威的遗留来源目录名；写入方已删除，只剩迁移读取方，任何新增都必须先补测试。
 # 常量用途: 迁移扫描与稳态探针共用的遗留目录名清单。
 _LEGACY_SOURCE_NAMES = ("memory_gate", "learning_drafts")
+# 单个迁移候选内容最多 2000 字符：超长截断，防坏快照撑爆。
 _MAX_CANDIDATE_CHARS = 2_000
 _CONTENT_KEYS = ("content", "candidate_content", "body", "text", "lesson", "summary", "claim")
 

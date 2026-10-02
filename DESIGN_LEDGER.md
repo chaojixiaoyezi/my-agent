@@ -20,6 +20,18 @@
 - **验证**：目录守卫 13 passed；26 个相关测试文件 + 5 个引用新名测试文件全过；guards9 167 passed；import boundaries 0；
   ruff/doc_sync/code-size strict/diff --check/clean_package 全过；size_diff 新增告警 0（消失 2）。
 
+## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`，已实现，待集成）
+
+- **起因**：P10 白名单（575 个待整改名字）继续分批清账；本批覆盖 memory_store 23 个、gateway_parts 28 个、core.py 3 个
+  （合计 54 个，其中 `_POLL_SECONDS` 在两处定义，白名单按名字记 53 个）。数值一律不变、行为不变。
+- **做法**：数量上限类补 `_COUNT`、字符/长度类补 `_CHARS` 后缀改名（如 `LOOP_GUARD_LIMIT→LOOP_GUARD_LIMIT_COUNT`、
+  `_BRIEF_MAX→_BRIEF_MAX_CHARS`、`CURATOR_MAX_RETRIES→CURATOR_MAX_RETRY_COUNT`、`_TIMEOUT_SHRINK_FLOOR→_TIMEOUT_SHRINK_FLOOR_COUNT`），
+  改名引用全仓同步（含测试）；时间/字符/字节类补中文说明；BM25 参数 `_BM25_B/_BM25_K1` 无物理单位只补说明并挪入白名单单独组
+  （reason“无物理单位”）。`_WRITE_TIMEOUT_SECONDS` 的 tooling/pty_sessions.py 定义处（非本批范围）仍不合规，名字保留在白名单。
+  目录重新生成 800 项 `--check` 一致。
+- **验证**：守卫＋改名相关 7 文件全过、memory_store 19 文件与 gateway_parts 14 文件相关测试全过（插件宿主类沙箱限制除外）、
+  guards9 168 passed、import 0、ruff/doc-sync/code-size strict/diff/clean-package 全过；size_diff.sh 新增告警 0。详见 TESTS.md。
+
 ## J15 自学习收尾四项（2026-10-01，ds1，分支 `worker/ds1-self-learning-tail`，已实现，待集成）
 
 - **背景**：`DECISION_MODEL_FINAL_HANDOFF.md` 剩余风险"自学习"一条的四个收尾项：

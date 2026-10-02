@@ -36,7 +36,8 @@ if TYPE_CHECKING:
     from ...core import SimpleAgent
 
 
-_MAX_RECENT_TASK_WORKSPACES = 4
+# 上下文最近任务工作区最多保留 4 个：只给模型最近几个可续做的现场。
+_MAX_RECENT_TASK_WORKSPACES_COUNT = 4
 
 
 # LLM: 当前请求持有同一个 agent、队列记录与流 sink；字段只传递已解析输入，不创建存储或执行权。
@@ -809,7 +810,7 @@ def _gateway_recent_task_workspaces(
             }
         )
         seen_paths.add(task_path)
-        if len(rows) >= _MAX_RECENT_TASK_WORKSPACES:
+        if len(rows) >= _MAX_RECENT_TASK_WORKSPACES_COUNT:
             break
     return tuple(rows)
 

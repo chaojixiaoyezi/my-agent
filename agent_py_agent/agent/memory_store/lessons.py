@@ -24,6 +24,7 @@ HOT_SCHEMA_VERSION = "my-agent.hot-rule.v1"
 _LESSON_META_PREFIX = "<!-- my-agent-lesson-meta:"
 _HOT_META_PREFIX = "<!-- my-agent-hot-meta:"
 _META_SUFFIX = " -->"
+# 单条热门规则元数据最多 300 字符：防止超长规则撑爆内存。
 _MAX_HOT_RULE_CHARS = 300
 # 注入预算：HOT 全量注入的硬顶（字符≈token，中文 1:1）。超出的按活跃度截断，
 # 冷条目在写入时降级回 lessons（lesson 正文保留，路由仍可命中，零信息丢失）。

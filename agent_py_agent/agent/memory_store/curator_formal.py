@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
+# 单条记忆项预览最多 1200 字符：给模型看够判断的摘要，避免整条灌入。
 _ITEM_PREVIEW_CHARS = 1_200
 
 

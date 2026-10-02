@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+常数整改第三批（P10，分支 `worker/ds2-p10-batch3`，2026-10-02）：agent/gateway_parts 28 个＋agent/core.py 3 个待整改常数合规——
+数量上限类补 `_COUNT` 后缀改名（如 `LOOP_GUARD_LIMIT→LOOP_GUARD_LIMIT_COUNT`、`_RECORD_LIMIT→_RECORD_LIMIT_COUNT`、
+`_BRIEF_MAX→_BRIEF_MAX_CHARS`、`_SHORT_ID→_SHORT_ID_CHARS`），时间/长度类补上方中文说明（数值一律不变，改名引用全仓同步含测试）。
+
+---
+
 常数整改第一批（参数中心 P10，分支 `worker/ds2-p10-batch1`，2026-10-01）：agent/ingestion、agent/scheduler、
 agent/session_lock、agent/user_space、agent/adapter 5 个模块 115 个待整改常数（无单位后缀或无中文说明）已合规——
 时间/长度/个数类按生成器后缀表补后缀改名（如 `_RETIRE_STALE_WINDOWS→_RETIRE_STALE_WINDOW_COUNT`、`_KEY_LEN→_KEY_LEN_BYTES`），

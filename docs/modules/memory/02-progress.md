@@ -1,5 +1,11 @@
 # 记忆与上下文维护状态
 
+常数整改第三批（P10，分支 `worker/ds2-p10-batch3`，2026-10-02）：agent/memory_store 23 个待整改常数合规——数量上限类补
+`_COUNT` 后缀改名（如 `_MAX_LIST_ITEMS→_MAX_LIST_ITEMS_COUNT`、`_MAX_ANNOTATED_ITEMS→_MAX_ANNOTATED_ITEMS_COUNT`、
+`_MAX_RELATION_PAIRS→_MAX_RELATION_PAIRS_COUNT`、`_EN_KEYWORD_MAX→_EN_KEYWORD_MAX_COUNT`、`_TIMEOUT_SHRINK_LIMIT→_TIMEOUT_SHRINK_LIMIT_COUNT`、
+`CURATOR_MAX_RETRIES→CURATOR_MAX_RETRY_COUNT`），`_EN_KEYWORD_MIN_LEN→_EN_KEYWORD_MIN_LEN_CHARS`、`_TIMEOUT_SHRINK_FLOOR→_TIMEOUT_SHRINK_FLOOR_COUNT`；
+字符/字节/秒类补中文说明；BM25 参数 `_BM25_B/_BM25_K1` 无物理单位，只补说明并挪入白名单无单位组。数值一律不变。
+
 ## P12：固定提炼模型档案（2026-10-01，sol，本地已实现，待集成/部署）
 
 - 解决聊天连接失效拖累后台提炼、旧覆盖键混用聊天凭据的问题：`memory_curator_model_profile` 非空时完整采用固定档案连接，空时保持 owner 选择行为。

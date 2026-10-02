@@ -11,8 +11,10 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-_DEFAULT_MAX_SCOPES = 256
-_DEFAULT_MAX_KEYS_PER_SCOPE = 128
+# 审批会话默认最多容纳的作用域个数：防一次会话把全部作用域占满。
+_DEFAULT_MAX_SCOPES_COUNT = 256
+# 审批会话单个作用域默认最多容纳的键个数：键太多时强制分批审批。
+_DEFAULT_MAX_KEYS_PER_SCOPE_COUNT = 128
 _AGENT_CACHE_ATTR = "_gateway_tool_approval_session_cache"
 _AGENT_CACHE_INIT_LOCK = threading.Lock()
 
@@ -22,8 +24,8 @@ _AGENT_CACHE_INIT_LOCK = threading.Lock()
 # 类用途: 线程安全地保存少量会话审批键，并用 LRU 上限防止长期 Gateway 因大量会话持续涨内存。
 @dataclass
 class ToolApprovalSessionCache:
-    max_scopes: int = _DEFAULT_MAX_SCOPES
-    max_keys_per_scope: int = _DEFAULT_MAX_KEYS_PER_SCOPE
+    max_scopes: int = _DEFAULT_MAX_SCOPES_COUNT
+    max_keys_per_scope: int = _DEFAULT_MAX_KEYS_PER_SCOPE_COUNT
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _scopes: OrderedDict[str, OrderedDict[str, None]] = field(
         default_factory=OrderedDict,
@@ -35,10 +37,10 @@ class ToolApprovalSessionCache:
     # at construction and keep all later operations bounded under the same lock.
     # 函数用途: 校正缓存上限，避免错误参数让常驻 Gateway 的审批记录无限增长。
     def __post_init__(self) -> None:
-        self.max_scopes = max(1, int(self.max_scopes or _DEFAULT_MAX_SCOPES))
+        self.max_scopes = max(1, int(self.max_scopes or _DEFAULT_MAX_SCOPES_COUNT))
         self.max_keys_per_scope = max(
             1,
-            int(self.max_keys_per_scope or _DEFAULT_MAX_KEYS_PER_SCOPE),
+            int(self.max_keys_per_scope or _DEFAULT_MAX_KEYS_PER_SCOPE_COUNT),
         )
 
     # LLM: A hit requires both exact opaque scope and exact item key. Touching LRU order may

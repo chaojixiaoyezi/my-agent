@@ -38,8 +38,11 @@ DAILY_ACTORS = frozenset({"user", "main_agent", "subagent", "tool", "system"})
 DAILY_ORIGINS = frozenset(
     {"user_explicit", "tool_verified", "model_inferred", "subagent_finding", "reviewed"}
 )
+# 每日汇总摘要最多 1500 字符：一屏可读的总结。
 _MAX_SUMMARY_CHARS = 1_500
-_MAX_LIST_ITEMS = 24
+# 每日列表最多列 24 条：防止一次拉全量。
+_MAX_LIST_ITEMS_COUNT = 24
+# 单条列表项最多 500 字符：条目保持精简。
 _MAX_LIST_ITEM_CHARS = 500
 
 
@@ -315,7 +318,7 @@ def normalize_daily_event(
 # 函数用途: 限制 decisions/lessons/next_actions 的数量和单项长度。
 def _bounded_text_list(value: object, field_name: str) -> list[str]:
     items = normalize_string_list(value)
-    if len(items) > _MAX_LIST_ITEMS:
+    if len(items) > _MAX_LIST_ITEMS_COUNT:
         raise ValueError(f"daily {field_name} contains too many items")
     if any(len(item) > _MAX_LIST_ITEM_CHARS for item in items):
         raise ValueError(f"daily {field_name} item is too long")

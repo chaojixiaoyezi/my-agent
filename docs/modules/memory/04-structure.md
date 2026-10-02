@@ -1,5 +1,11 @@
 # Memory Structure
 
+## 常数整改第三批（P10，2026-10-02，分支 `worker/ds2-p10-batch3`）
+
+memory_store 23 个常数合规：`_MAX_CONDITION_CHARS/_MAX_CONTENT_CHARS/_MAX_REF_BYTES/_ITEM_PREVIEW_CHARS/_AUDIT_PREVIEW_CHARS/
+_MESSAGE_PREVIEW_CHARS/_MAX_LIST_ITEM_CHARS/_MAX_SUMMARY_CHARS/_MAX_HOT_RULE_CHARS/_MAX_CANDIDATE_CHARS/_DAY_SECONDS` 补中文说明；
+数量类改名补 `_COUNT`（见 02-progress）；`_BM25_B/_BM25_K1` 无物理单位只补说明。数值不变。
+
 ## Curator 固定模型档案（P12，2026-10-01）
 
 `AgentConfig` / `MemorySettings` / `_memory_coercion` 只保留 `memory_curator_model_profile`，默认空。

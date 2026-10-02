@@ -27,7 +27,7 @@ from agent_py_agent.agent.memory_store.curator import (
     MemoryCuratorService,
 )
 from agent_py_agent.agent.memory_store.curator_backend import (
-    _TIMEOUT_SHRINK_LIMIT,
+    _TIMEOUT_SHRINK_LIMIT_COUNT,
     CuratorModelCallError,
     CuratorModelTimeoutError,
     adaptive_timeout_seconds,
@@ -442,7 +442,7 @@ def test_shrink_retries_stay_within_lease_budget(monkeypatch) -> None:
         for prompt, seconds in captured
     )
     # 预算是硬上界:它在缩批上限之前收口,且至少允许一次缩批重试。
-    assert 2 <= len(captured) < 1 + _TIMEOUT_SHRINK_LIMIT
+    assert 2 <= len(captured) < 1 + _TIMEOUT_SHRINK_LIMIT_COUNT
     # 输入确实一批比一批小。
     lengths = [len(prompt) for prompt, _seconds in captured]
     assert lengths == sorted(lengths, reverse=True)
@@ -515,7 +515,7 @@ def test_repeated_timeouts_stop_at_bound_with_typed_failure(tmp_path: Path) -> N
     assert result.status == "failed"
     # 供应商超时沿用既有失败码分类(不新增失败码/不新增账本字段)。
     assert result.failure_code == "CURATOR_MODEL_FAILED"
-    assert len(backend.prompts) == 1 + _TIMEOUT_SHRINK_LIMIT
+    assert len(backend.prompts) == 1 + _TIMEOUT_SHRINK_LIMIT_COUNT
     lengths = [len(prompt) for prompt in backend.prompts]
     assert lengths == sorted(lengths, reverse=True)
     assert lengths[0] > lengths[-1]

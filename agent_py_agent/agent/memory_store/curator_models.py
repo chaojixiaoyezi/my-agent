@@ -45,10 +45,10 @@ CURATOR_TRIGGER_REASONS = frozenset(
 )
 
 # LLM: Curator 单批消息条数与模型调用重试次数，2026-09-28 参数减量 C 组后不再是用户参数；只在这里保留一份定义，
-#   其他模块要改就从本模块导入，不要再退回成配置读取。
-# 函数用途: 给出后台记忆整理一次最多送多少条消息、单批模型调用失败最多重试几次。
-CURATOR_BATCH_MESSAGE_LIMIT = 80
-CURATOR_MAX_RETRIES = 1
+# 后台记忆整理一次最多送 80 条消息：批量有界，防单批模型调用过大。
+CURATOR_BATCH_MESSAGE_LIMIT_COUNT = 80
+# 单批模型调用失败最多重试 1 次：失败即让位，避免无界重试。
+CURATOR_MAX_RETRY_COUNT = 1
 
 
 # LLM: 这是 Curator 唯一有效配置快照；模型档案编号参与修订，不保留单独覆盖协议或型号的拼接旁路。
@@ -59,10 +59,10 @@ class MemoryCuratorConfig:
     model_profile: str = ""
     interval_seconds: int = 10_800
     turn_threshold: int = 10
-    batch_message_limit: int = CURATOR_BATCH_MESSAGE_LIMIT
+    batch_message_limit: int = CURATOR_BATCH_MESSAGE_LIMIT_COUNT
     max_input_chars: int = 40_000
     timeout_seconds: int = 90
-    max_retries: int = CURATOR_MAX_RETRIES
+    max_retries: int = CURATOR_MAX_RETRY_COUNT
     daily_finalize_hour: int = 23
     auto_promotion_policy: str = "conservative_v1"
 
@@ -100,6 +100,7 @@ class MemoryCuratorConfig:
 # owner 没有可用模型是需要人处理的永久配置问题，不是临时故障：退避拉长到一小时，避免每个维护周期都重建
 # owner 实例、整批收集后再失败；配好模型后（IM owner 空闲回收后重建会读到新配置）最迟一小时恢复。
 CURATOR_MODEL_NOT_CONFIGURED = "CURATOR_MODEL_NOT_CONFIGURED"
+# 模型未配置时最多等 1 小时再重试：避免高频空转，配好后最迟一小时恢复。
 CURATOR_NOT_CONFIGURED_RETRY_SECONDS = 3600
 
 

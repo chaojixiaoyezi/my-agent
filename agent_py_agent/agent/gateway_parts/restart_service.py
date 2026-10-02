@@ -29,14 +29,18 @@ HOSTING_GATEWAY_PID_ENV = "MY_AGENT_HOSTING_GATEWAY_PID"
 REQUEST_SCHEMA = "gateway_restart_request.v1"
 COMPLETED_SCHEMA = "gateway_restart_completed.v1"
 STATE_SCHEMA = "gateway_restart_state.v1"
+# 重启循环守卫窗口 10 分钟：窗口内连续重启达到上限就停止自动重启。
 LOOP_GUARD_WINDOW_SECONDS = 600.0
-LOOP_GUARD_LIMIT = 3
+# 10 分钟窗口内最多自动重启 3 次：超过即熔断，防止死循环重启。
+LOOP_GUARD_LIMIT_COUNT = 3
+# 重启标记文件超过 10 分钟视为过期：避免旧标记误判为新重启。
 MARKER_MAX_AGE_SECONDS = 600.0
 CONTINUATION_EVENT_TYPE = "gateway_restart_completed"
 CANCELLED_EVENT_TYPE = "gateway_restart_cancelled"
+# 排空轮询间隔 0.25 秒：平滑等待在途请求排空后重启。
+_POLL_SECONDS = 0.25
 # 排空期间待处理请求上的结构化等待原因（admission_wait_reason），客户端据等待事实续期。
 RESTART_DRAIN_HOLD_REASON = "gateway_restart_draining"
-_POLL_SECONDS = 0.25
 
 _phase_lock = threading.Lock()
 _phase: dict[str, object] = {"phase": "idle", "request_id": "", "since": 0.0}
@@ -159,7 +163,7 @@ def _cooldown_or_loop_refusal(
         if isinstance(item, dict) and str(item.get("thread_id") or "") == thread_id
         and now - float(item.get("requested_at") or 0.0) <= LOOP_GUARD_WINDOW_SECONDS
     ]
-    if len(recent) >= LOOP_GUARD_LIMIT:
+    if len(recent) >= LOOP_GUARD_LIMIT_COUNT:
         return {"status": "loop_guard", "recent_count": len(recent)}
     return None
 

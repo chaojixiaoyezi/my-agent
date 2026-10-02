@@ -34,7 +34,8 @@ from ..conversation.wake_poison import (
 from ..user_space.approval_mode import is_permission_admin
 
 _KIND = "wakes"
-_QUARANTINED_LIST_LIMIT = 30
+# 隔离唤醒列表最多列 30 条：列表有界，防止一次拉全量。
+_QUARANTINED_LIST_LIMIT_COUNT = 30
 _ADMIN_ONLY = "WAKE_OPS_ADMIN_ONLY"
 _REASON_TEXT = {
     WAKE_REASON_RUN_NO_REPORT: "执行结束但没有报告",
@@ -133,7 +134,7 @@ def _render_plan(signal: WakeSignal, record: dict[str, Any]) -> str:
     ))
 
 
-# LLM: 行来自 attempts.quarantined()（已排除归档与重放留档），按结案时间倒序最多列 _QUARANTINED_LIST_LIMIT 条；读不出的只报条数与位置。
+# LLM: 行来自 attempts.quarantined()（已排除归档与重放留档），按结案时间倒序最多列 _QUARANTINED_LIST_LIMIT_COUNT 条；读不出的只报条数与位置。
 # 函数用途: 生成已结案唤醒的列表文字。
 def _render_list(store: object) -> str:
     rows, errors = store.wakes.attempts.quarantined()
@@ -141,9 +142,9 @@ def _render_list(store: object) -> str:
         return "没有已结案的后台唤醒。"
     rows = sorted(rows, key=lambda row: _number(row.get("quarantined_at")), reverse=True)
     lines = [f"已结案的后台唤醒 {len(rows)} 条（反复失败后不再自动领取；超过 14 天的会移进归档）："]
-    lines.extend(_row_line(row) for row in rows[:_QUARANTINED_LIST_LIMIT])
-    if len(rows) > _QUARANTINED_LIST_LIMIT:
-        lines.append(f"……另有 {len(rows) - _QUARANTINED_LIST_LIMIT} 条没有列出。")
+    lines.extend(_row_line(row) for row in rows[:_QUARANTINED_LIST_LIMIT_COUNT])
+    if len(rows) > _QUARANTINED_LIST_LIMIT_COUNT:
+        lines.append(f"……另有 {len(rows) - _QUARANTINED_LIST_LIMIT_COUNT} 条没有列出。")
     if errors:
         lines.append(f"另有 {len(errors)} 条读不出（信封或结案记录损坏），原字节留在 quarantine/unreadable/ 或结案目录，不能重放。")
     if rows:

@@ -42,6 +42,7 @@ from .control_service import (
 from .paths import GatewayPaths, claimed_request_chunk_path
 from .permission_bridge import gateway_permission_decision_path, write_gateway_permission_decision
 
+# 管理操作汇总文本的最大字符数：超长只保留前 200 字，避免状态面板被刷屏。
 _SUMMARY_MAX_CHARS = 200
 _BASE_CHANNEL_REFUSAL = (
     "本机终端已经是管理员；/admin、/approve、/deny 只用于飞书等 IM 私聊，终端里的工具确认请直接在审批面板中选择。"

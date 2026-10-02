@@ -18,7 +18,9 @@ from .command_stream_protocol import (
 from .paths import GatewayPaths
 from .stream_approval import StreamApproval
 
+# 命令流心跳间隔 1 秒：让对端及时感知连接存活。
 _HEARTBEAT_SECONDS = 1.0
+# 命令流写入超时 3 秒：对端不消费时及时放弃，避免写线程卡死。
 _WRITE_TIMEOUT_SECONDS = 3.0
 
 

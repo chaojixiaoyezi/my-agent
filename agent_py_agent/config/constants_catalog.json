@@ -2468,12 +2468,12 @@
       "description": "因为这些结果按定义属于预期等待、瞬时或环境故障，长时间故障里自动结案会误伤健康的工作。"
     },
     {
-      "name": "TOOL_CATALOG_LIMIT",
+      "name": "TOOL_CATALOG_LIMIT_COUNT",
       "file": "agent_py_agent/agent/core.py",
       "value": 80,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": "目录单条截断与分页起点沿用 ToolRegistryParams 的默认值（700 字、从第一个工具开始）。"
+      "description": "工具目录每页最多展示多少条：分页起点与单条截断沿用 ToolRegistryParams 默认值（2026-09-28 参数减量降为常量）。"
     },
     {
       "name": "TOOL_DETAIL_MAX_CHARS",
@@ -2481,13 +2481,13 @@
       "value": 4000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "单个工具详情在提示词里的截断字数：超长详情只留前 4000 字，防止目录膨胀。"
     },
     {
-      "name": "TOOL_RETRIEVAL_LIMIT",
+      "name": "TOOL_RETRIEVAL_LIMIT_COUNT",
       "file": "agent_py_agent/agent/core.py",
       "value": 12,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "2026-09-28 参数减量从配置降为常量（值不变）。"
     },
@@ -2513,23 +2513,23 @@
       "value": 200,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "管理操作汇总文本的最大字符数：超长只保留前 200 字，避免状态面板被刷屏。"
     },
     {
-      "name": "_DEFAULT_MAX_KEYS_PER_SCOPE",
+      "name": "_DEFAULT_MAX_KEYS_PER_SCOPE_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/approval_session.py",
       "value": 128,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "审批会话单个作用域默认最多容纳的键个数：键太多时强制分批审批。"
     },
     {
-      "name": "_DEFAULT_MAX_SCOPES",
+      "name": "_DEFAULT_MAX_SCOPES_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/approval_session.py",
       "value": 256,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "审批会话默认最多容纳的作用域个数：防一次会话把全部作用域占满。"
     },
     {
       "name": "DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS",
@@ -2545,7 +2545,7 @@
       "value": 0.1,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "资源报告轮询间隔 0.1 秒：接近实时又不过度占 CPU。"
     },
     {
       "name": "_HEARTBEAT_STALE_SECONDS",
@@ -2553,7 +2553,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "心跳超过 30 秒未更新判为失联：比心跳周期宽裕，容忍瞬时抖动。"
     },
     {
       "name": "_HEARTBEAT_SECONDS",
@@ -2561,7 +2561,7 @@
       "value": 1.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "命令流心跳间隔 1 秒：让对端及时感知连接存活。"
     },
     {
       "name": "_WRITE_TIMEOUT_SECONDS",
@@ -2569,7 +2569,7 @@
       "value": 3.0,
       "unit": "秒",
       "category": "超时",
-      "description": ""
+      "description": "命令流写入超时 3 秒：对端不消费时及时放弃，避免写线程卡死。"
     },
     {
       "name": "COMMAND_STREAM_MAX_BYTES",
@@ -2577,15 +2577,15 @@
       "value": 4194304,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "单条命令帧最大 4 MiB：足够承载大工具输出，又防止无界消息撑爆内存。"
     },
     {
-      "name": "_CANDIDATE_LIMIT",
+      "name": "_CANDIDATE_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/end_task_control.py",
       "value": 20,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "结束任务候选上限 20 条：列表有界，避免一次列出全部任务。"
     },
     {
       "name": "STREAM_CHUNK_READ_MAX_BYTES",
@@ -2609,31 +2609,31 @@
       "value": 0.05,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "审批轮询间隔 0.05 秒：及时看到用户批复，轮询成本可忽略。"
     },
     {
-      "name": "_SCAN_LIMIT",
+      "name": "_SCAN_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/request_audit_records.py",
       "value": 300,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "一次审计最多读这么多份请求记录（按修改时间新到旧），保证工具调用有界"
     },
     {
-      "name": "_CAPABILITY_OBSERVATION_LIMIT",
+      "name": "_CAPABILITY_OBSERVATION_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/request_binding.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "一条请求最多保留 8 条能力观测记录：正常每轮一次，防异常循环撑爆。"
     },
     {
-      "name": "_MAX_RECENT_TASK_WORKSPACES",
+      "name": "_MAX_RECENT_TASK_WORKSPACES_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/request_context.py",
       "value": 4,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "上下文最近任务工作区最多保留 4 个：只给模型最近几个可续做的现场。"
     },
     {
       "name": "_CHAIN_REQUESTS",
@@ -2644,18 +2644,18 @@
       "description": "证据链最多回读 16 条原请求记录，读路径与回合收尾都保持有界 I/O。"
     },
     {
-      "name": "_REALIZED_NAME_LIMIT",
+      "name": "_REALIZED_NAME_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/request_experiment_records.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "实际调用的不同工具名截到 64 个；超过时显式标记截断，评估器不据此计算召回。"
     },
     {
-      "name": "_RECORD_LIMIT",
+      "name": "_RECORD_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/request_experiment_records.py",
       "value": 8,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
       "description": "与能力观测同口径：一条请求最多保留最近 8 条实验记录（正常每轮只有一次实验调用）。"
     },
@@ -2668,12 +2668,12 @@
       "description": "后台照常执行同时留在系统里。"
     },
     {
-      "name": "LOOP_GUARD_LIMIT",
+      "name": "LOOP_GUARD_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/restart_service.py",
       "value": 3,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "10 分钟窗口内最多自动重启 3 次：超过即熔断，防止死循环重启。"
     },
     {
       "name": "LOOP_GUARD_WINDOW_SECONDS",
@@ -2681,7 +2681,7 @@
       "value": 600.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "重启循环守卫窗口 10 分钟：窗口内连续重启达到上限就停止自动重启。"
     },
     {
       "name": "MARKER_MAX_AGE_SECONDS",
@@ -2689,7 +2689,7 @@
       "value": 600.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": ""
+      "description": "重启标记文件超过 10 分钟视为过期：避免旧标记误判为新重启。"
     },
     {
       "name": "_POLL_SECONDS",
@@ -2697,23 +2697,23 @@
       "value": 0.25,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "排空轮询间隔 0.25 秒：平滑等待在途请求排空后重启。"
     },
     {
-      "name": "_BRIEF_MAX",
+      "name": "_BRIEF_MAX_CHARS",
       "file": "agent_py_agent/agent/gateway_parts/settings_control_service.py",
       "value": 40,
-      "unit": "",
+      "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "说明摘要最多截到 40 字：列表项保持一行可读。"
     },
     {
-      "name": "_LIST_LIMIT",
+      "name": "_LIST_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/settings_control_service.py",
       "value": 20,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "一次最多列出 20 个参数：列表有界，避免一屏刷不完。"
     },
     {
       "name": "_BODY_MAX_CHARS",
@@ -2721,15 +2721,15 @@
       "value": 3000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "提案正文最多 3000 字符：超长截断，避免回执消息过大。"
     },
     {
-      "name": "_SHORT_ID",
+      "name": "_SHORT_ID_CHARS",
       "file": "agent_py_agent/agent/gateway_parts/skill_control_service.py",
       "value": 8,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "提案短 ID 取前 8 个字符：消息里展示够辨识又不占地方。"
     },
     {
       "name": "GATEWAY_STALE_SECONDS",
@@ -2745,7 +2745,7 @@
       "value": 65536,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "日志采样最多 64 KiB：状态面板预览够用，避免整份日志进渲染。"
     },
     {
       "name": "_GATEWAY_READY_POLL_SECONDS",
@@ -2753,7 +2753,7 @@
       "value": 0.2,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "就绪状态轮询间隔 0.2 秒：重启后尽快显示新状态。"
     },
     {
       "name": "_CHUNK_STREAM_FLUSH_CHARS",
@@ -2761,7 +2761,7 @@
       "value": 128,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "分块流攒满 128 字符即刷新：低延迟又不至于每字一包。"
     },
     {
       "name": "_CHUNK_STREAM_FLUSH_INTERVAL_SECONDS",
@@ -2769,15 +2769,15 @@
       "value": 0.08,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "分块流刷新间隔 0.08 秒：输出攒够 128 字符或超时即推给对端。"
     },
     {
-      "name": "_QUARANTINED_LIST_LIMIT",
+      "name": "_QUARANTINED_LIST_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/wake_ops_control.py",
       "value": 30,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "隔离唤醒列表最多列 30 条：列表有界，防止一次拉全量。"
     },
     {
       "name": "_CENSUS_CAP_COUNT",
@@ -3513,7 +3513,7 @@
       "value": 500,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "候选条件最多 500 字符：条件说明保持简短。"
     },
     {
       "name": "_MAX_CONTENT_CHARS",
@@ -3521,7 +3521,7 @@
       "value": 2000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "候选内容最多 2000 字符：超长正文截断，防记忆候选撑爆输入。"
     },
     {
       "name": "_MAX_REF_BYTES",
@@ -3529,23 +3529,23 @@
       "value": 4096,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "候选证据引用最多 4096 字节：ref 过长视为异常，防止坏快照入库。"
     },
     {
-      "name": "_TIMEOUT_SHRINK_FLOOR",
+      "name": "_TIMEOUT_SHRINK_FLOOR_COUNT",
       "file": "agent_py_agent/agent/memory_store/curator_backend.py",
       "value": 1,
-      "unit": "",
+      "unit": "个",
       "category": "超时",
-      "description": "可能推进游标,只会白花一次调用。"
+      "description": "缩批下限：仍然存在的输入族至少保留 1 条，绝不产生空批次——空批无证据也推不动游标。"
     },
     {
-      "name": "_TIMEOUT_SHRINK_LIMIT",
+      "name": "_TIMEOUT_SHRINK_LIMIT_COUNT",
       "file": "agent_py_agent/agent/memory_store/curator_backend.py",
       "value": 3,
-      "unit": "",
+      "unit": "个",
       "category": "超时",
-      "description": "配置项,因为它是\"绝不无界重试\"的护栏,不该被配置放大成无界。"
+      "description": "超时收缩最多 3 次、每次至少减半：把超大输入降到千字符量级；写死为护栏，不被配置放大成无界。"
     },
     {
       "name": "_ITEM_PREVIEW_CHARS",
@@ -3553,7 +3553,7 @@
       "value": 1200,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "单条记忆项预览最多 1200 字符：给模型看够判断的摘要，避免整条灌入。"
     },
     {
       "name": "_AUDIT_PREVIEW_CHARS",
@@ -3561,7 +3561,7 @@
       "value": 1000,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "审计事件预览最多 1000 字符：事件详情截断，保留判定要点。"
     },
     {
       "name": "_MESSAGE_PREVIEW_CHARS",
@@ -3569,23 +3569,23 @@
       "value": 6000,
       "unit": "字符",
       "category": "其它",
-      "description": ""
+      "description": "消息预览最多 6000 字符：多轮消息给足上下文又不过载。"
     },
     {
-      "name": "CURATOR_BATCH_MESSAGE_LIMIT",
+      "name": "CURATOR_BATCH_MESSAGE_LIMIT_COUNT",
       "file": "agent_py_agent/agent/memory_store/curator_models.py",
       "value": 80,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": "函数用途: 给出后台记忆整理一次最多送多少条消息、单批模型调用失败最多重试几次。"
+      "description": "后台记忆整理一次最多送 80 条消息：批量有界，防单批模型调用过大。"
     },
     {
-      "name": "CURATOR_MAX_RETRIES",
+      "name": "CURATOR_MAX_RETRY_COUNT",
       "file": "agent_py_agent/agent/memory_store/curator_models.py",
       "value": 1,
-      "unit": "",
+      "unit": "个",
       "category": "重试",
-      "description": ""
+      "description": "单批模型调用失败最多重试 1 次：失败即让位，避免无界重试。"
     },
     {
       "name": "CURATOR_NOT_CONFIGURED_RETRY_SECONDS",
@@ -3593,7 +3593,7 @@
       "value": 3600,
       "unit": "秒",
       "category": "重试",
-      "description": ""
+      "description": "模型未配置时最多等 1 小时再重试：避免高频空转，配好后最迟一小时恢复。"
     },
     {
       "name": "_QUARANTINE_BACKOFF_SECONDS",
@@ -3604,12 +3604,12 @@
       "description": "审计, 不新增行), 期满才再试一条新审计——防 quarantine 长期失败时 run_log 无限刷屏。"
     },
     {
-      "name": "_MAX_LIST_ITEMS",
+      "name": "_MAX_LIST_ITEMS_COUNT",
       "file": "agent_py_agent/agent/memory_store/daily.py",
       "value": 24,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "每日列表最多列 24 条：防止一次拉全量。"
     },
     {
       "name": "_MAX_LIST_ITEM_CHARS",
@@ -3617,7 +3617,7 @@
       "value": 500,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "单条列表项最多 500 字符：条目保持精简。"
     },
     {
       "name": "_MAX_SUMMARY_CHARS",
@@ -3625,15 +3625,15 @@
       "value": 1500,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "每日汇总摘要最多 1500 字符：一屏可读的总结。"
     },
     {
-      "name": "_MAX_ANNOTATED_ITEMS",
+      "name": "_MAX_ANNOTATED_ITEMS_COUNT",
       "file": "agent_py_agent/agent/memory_store/decision_curator.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "每来源最多标注 32 条：本地延迟/输入保护，未标注材料仍完整提取。"
     },
     {
       "name": "_BM25_B",
@@ -3641,7 +3641,7 @@
       "value": 0.75,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "BM25 参数 b（文档长度归一）：0.75 是常用默认值，无物理单位。"
     },
     {
       "name": "_BM25_K1",
@@ -3649,15 +3649,15 @@
       "value": 1.2,
       "unit": "",
       "category": "其它",
-      "description": ""
+      "description": "BM25 参数 k1（词频饱和）：1.2 是常用默认值，无物理单位。"
     },
     {
-      "name": "_MAX_RELATION_PAIRS",
+      "name": "_MAX_RELATION_PAIRS_COUNT",
       "file": "agent_py_agent/agent/memory_store/decision_curator_relation.py",
       "value": 32,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "关系对最多 32 对：本地延迟保护，未覆盖材料仍完整交原提取。"
     },
     {
       "name": "HOT_MAX_INJECT_CHARS",
@@ -3673,7 +3673,7 @@
       "value": 300,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "单条热门规则元数据最多 300 字符：防止超长规则撑爆内存。"
     },
     {
       "name": "_MAX_CANDIDATE_CHARS",
@@ -3681,23 +3681,23 @@
       "value": 2000,
       "unit": "字符",
       "category": "上限预算",
-      "description": ""
+      "description": "单个迁移候选内容最多 2000 字符：超长截断，防坏快照撑爆。"
     },
     {
-      "name": "_EN_KEYWORD_MAX",
+      "name": "_EN_KEYWORD_MAX_COUNT",
       "file": "agent_py_agent/agent/memory_store/promotion.py",
       "value": 12,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "每条记录最多保留 12 个英文关键词：关键词集合有界。"
     },
     {
-      "name": "_EN_KEYWORD_MIN_LEN",
+      "name": "_EN_KEYWORD_MIN_LEN_CHARS",
       "file": "agent_py_agent/agent/memory_store/promotion.py",
       "value": 3,
-      "unit": "",
+      "unit": "字符",
       "category": "其它",
-      "description": "英文关键词抽取:只收 ASCII 词面(结构化),不做词义判断;用于 BM25 臂跨语言命中。"
+      "description": "英文关键词最短 3 个字符：太短没有区分度；只收 ASCII 词面，用于 BM25 跨语言命中。"
     },
     {
       "name": "_DAY_SECONDS",
@@ -3705,7 +3705,7 @@
       "value": 86400,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "一天按 86400 秒算：保留期换算成秒的统一口径。"
     },
     {
       "name": "_ADVISORY_LOCK_KEY",

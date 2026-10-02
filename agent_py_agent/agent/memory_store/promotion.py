@@ -35,9 +35,10 @@ _LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project"})
 # 写路径查重:表述变体(LCS 覆盖率)与长度差双闸,只合并"逐字近重复"的同一断言,
 # 绝不把不同事实(加信息/换词义)并掉——漏并多存一条,误并丢信息,后者更糟。
 
-# 英文关键词抽取:只收 ASCII 词面(结构化),不做词义判断;用于 BM25 臂跨语言命中。
-_EN_KEYWORD_MIN_LEN = 3
-_EN_KEYWORD_MAX = 12
+# 英文关键词最短 3 个字符：太短没有区分度；只收 ASCII 词面，用于 BM25 跨语言命中。
+_EN_KEYWORD_MIN_LEN_CHARS = 3
+# 每条记录最多保留 12 个英文关键词：关键词集合有界。
+_EN_KEYWORD_MAX_COUNT = 12
 _EN_KEYWORD_STOPWORDS = frozenset(
     {
         "the", "and", "for", "with", "from", "that", "this", "have", "has",
@@ -907,11 +908,11 @@ def _english_keywords(text: str) -> list[str]:
     kept: list[str] = []
     for word in words:
         low = word.lower()
-        if len(low) < _EN_KEYWORD_MIN_LEN or low in _EN_KEYWORD_STOPWORDS:
+        if len(low) < _EN_KEYWORD_MIN_LEN_CHARS or low in _EN_KEYWORD_STOPWORDS:
             continue
         if low not in kept:
             kept.append(low)
-    return kept[:_EN_KEYWORD_MAX]
+    return kept[:_EN_KEYWORD_MAX_COUNT]
 
 
 # LLM: 中文关键词来自稳定 subject_key 的机械拆段(与 lessons routing 同法),不读正文。

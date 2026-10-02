@@ -48,7 +48,7 @@ def test_relevant_pair_beyond_sequential_cutoff_is_selected():
     formal_memories.append(formal(31, "部署窗口的密码轮换流程需要两步确认。"))
     # 逐条给相关对之外的条目加噪声，保证相关对的分最高。
     state, questions, pairs = material(messages, formal_memories)
-    assert len(pairs) == relation._MAX_RELATION_PAIRS
+    assert len(pairs) == relation._MAX_RELATION_PAIRS_COUNT
     assert (messages[1], formal_memories[31]) in pairs, "相关的第 33 对必须被挑中"
     # 旧逻辑下 message-1 不会出现在任何一对里；这条断言就是缺口的回归线。
     assert any(source.message_id == "message-1" for source, _item in pairs)
@@ -94,9 +94,9 @@ def test_coverage_declares_total_presented_and_rule():
     state, _questions, pairs = material(messages, formal_memories)
     coverage = state["coverage"]
     assert coverage["total_pair_count"] == 40
-    assert coverage["pair_count"] == len(pairs) == relation._MAX_RELATION_PAIRS
+    assert coverage["pair_count"] == len(pairs) == relation._MAX_RELATION_PAIRS_COUNT
     assert coverage["selection"] == relation._RELATION_SELECTION
-    assert coverage["selection_limit"] == relation._MAX_RELATION_PAIRS
+    assert coverage["selection_limit"] == relation._MAX_RELATION_PAIRS_COUNT
     assert coverage["kind"] == "presented_pairs_only"
 
 

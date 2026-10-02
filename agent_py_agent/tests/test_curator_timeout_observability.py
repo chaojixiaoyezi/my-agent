@@ -30,7 +30,7 @@ from agent_py_agent.agent.memory_store.curator import (
     _attempt_shape_warnings,
 )
 from agent_py_agent.agent.memory_store.curator_backend import (
-    _TIMEOUT_SHRINK_LIMIT,
+    _TIMEOUT_SHRINK_LIMIT_COUNT,
     CuratorModelAttempt,
     adaptive_timeout_seconds,
     attempt_shape_payload,
@@ -209,7 +209,7 @@ def test_failed_run_records_per_attempt_shape_in_warnings(tmp_path: Path) -> Non
     result = service.run(reason="admin")
 
     assert result.status == "failed"
-    assert len(backend.prompts) == 1 + _TIMEOUT_SHRINK_LIMIT
+    assert len(backend.prompts) == 1 + _TIMEOUT_SHRINK_LIMIT_COUNT
     records = service.run_log.list()
     assert [record.failure_code for record in records] == ["CURATOR_MODEL_FAILED"]
     shapes = _parse_attempt_warnings(records[0].warnings)

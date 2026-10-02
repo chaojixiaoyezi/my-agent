@@ -1170,7 +1170,7 @@ def _render_catalog_spec(spec: ToolModelSpec, config: CatalogRenderConfig) -> st
     )
 
 
-# LLM: 分页大小是代码常量（core.TOOL_CATALOG_LIMIT），模型改不了，所以提示指向 list_tools 看完整清单，不提配置键。只读。
+# LLM: 分页大小是代码常量（core.TOOL_CATALOG_LIMIT_COUNT），模型改不了，所以提示指向 list_tools 看完整清单，不提配置键。只读。
 # 函数用途: 目录只列了一部分工具时，告诉模型总数、下一页位置和怎么看全部。
 def _catalog_page_notice(config: CatalogRenderConfig, *, total: int, returned: int) -> str:
     next_offset = config.offset + returned

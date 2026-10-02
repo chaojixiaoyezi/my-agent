@@ -25,6 +25,10 @@
   5 个模块 115 个待整改常数合规——时间/长度/个数类按后缀表补后缀改名（`_RETIRE_STALE_WINDOWS→_RETIRE_STALE_WINDOW_COUNT`、
   `_KEY_LEN→_KEY_LEN_BYTES` 等），全部补上方中文说明；无物理单位常数（倍数/指数/深度 7 个名字）只补说明、挪入白名单单独组
   （reason“无物理单位”）。数值一律不变，改名引用全仓同步（含测试）；白名单 685→575＋7；目录重新生成 799 项 `--check` 一致。
+- **第三批已完成（2026-10-02，分支 `worker/ds2-p10-batch3`）**：memory_store / gateway_parts / core.py 54 个待整改常数合规——
+  数量上限类补 `_COUNT`、字符/长度类补 `_CHARS` 改名（`LOOP_GUARD_LIMIT→LOOP_GUARD_LIMIT_COUNT`、
+  `_BRIEF_MAX→_BRIEF_MAX_CHARS` 等），时间/字符/字节类补中文说明；BM25 参数 `_BM25_B/_BM25_K1` 无物理单位只补说明挪入单独组
+  （7→9）。数值一律不变；白名单 575→523＋9；目录重新生成 800 项 `--check` 一致。
 
 - **P10 第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，已实现，待集成）**：整改 subagents/contracts/plugin_display/
   memory_archive/retrieval/common/verification/concurrency/llm_scale、attempt/io/local_storage 与 13 个单文件范围内的

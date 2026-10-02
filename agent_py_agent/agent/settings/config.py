@@ -233,7 +233,7 @@ class _ToolConfigFields:
     tool_catalog_deferred_categories: list[str] = field(
         default_factory=lambda: ["collaboration", "web", "vision", "meta", "mcp"]
     )
-    # 推荐区和 tool_search 的检索容量已降为 agent/core.py 的具名常量 TOOL_RETRIEVAL_LIMIT（2026-09-28 参数减量）。
+    # 推荐区和 tool_search 的检索容量已降为 agent/core.py 的具名常量 TOOL_RETRIEVAL_LIMIT_COUNT（2026-09-28 参数减量）。
     # 工具语义检索开关；向量来自与记忆语义召回共用的嵌入服务 embedding_*（没配模型时只走关键词）。
     tool_vector_search_enabled: bool = True
     # MCP 客户端(短板6)：声明要连接的外部 MCP server，把社区现成工具(GitHub/DB/Slack 等)

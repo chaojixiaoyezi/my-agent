@@ -1,7 +1,7 @@
 # LLM: 审计只读 Gateway 请求记录里宿主写下的结构化事实：决策观察块（model_selection_observation、capability_presentation_observation）
 #   与请求结果（状态、错误码、渠道、私聊/群聊、耗时）。决策观察按 conversation_claim.thread_id 归属 owner；请求结果优先用
 #   宿主写进终态响应的 owner_id，旧记录再退回线程归属。字段白名单投影；不读 prompt/goal/正文/附件/用户可见文案，也不读日志。
-#   扫描有界：只看修改时间落在窗口内的记录，按新到旧最多读 _SCAN_LIMIT 份，超出如实标 truncated。只读，不写任何文件。
+#   扫描有界：只看修改时间落在窗口内的记录，按新到旧最多读 _SCAN_LIMIT_COUNT 份，超出如实标 truncated。只读，不写任何文件。
 #   调用方：GatewayTaskBindingWriter.decision_audit_observations / request_audit_outcomes（audit_records 工具经宿主运行参数调用）。
 # 模块用途: 为审计工具提供 Gateway 请求记录里的决策观察和请求结果（谁的请求、成败、错误码与处理建议），不含任何对话内容。
 from __future__ import annotations
@@ -14,7 +14,7 @@ from .io import read_json_file_report
 from .request_binding import CAPABILITY_OBSERVATION_KEY, MODEL_OBSERVATION_KEY
 
 # 一次审计最多读这么多份请求记录（按修改时间新到旧），保证工具调用有界
-_SCAN_LIMIT = 300
+_SCAN_LIMIT_COUNT = 300
 # 选模型观察只投影这些宿主写下的结构化字段
 _MODEL_FIELDS = ("status", "reason", "requested_mode", "choice", "adopted", "adoption_eligibility", "frozen_profile_id")
 # 能力推荐观察只投影这些字段（不含工具名清单等细节）
@@ -71,7 +71,7 @@ def decision_observation_records(paths: object, *, thread_owners: dict[str, str]
     entries: list[dict] = []
     seen: set[str] = set()
     unreadable = 0
-    for mtime, path in candidates[:_SCAN_LIMIT]:
+    for mtime, path in candidates[:_SCAN_LIMIT_COUNT]:
         report = read_json_file_report(path, context="gateway.audit_records.read")
         if report.load_error is not None:
             unreadable += 1
@@ -87,8 +87,8 @@ def decision_observation_records(paths: object, *, thread_owners: dict[str, str]
             entries.append({**item, "request_id": request_id, "thread_id": thread_id,
                             "owner_id": thread_owners[thread_id], "recorded_at": round(mtime, 3)})
     return {"available": True, "entries": entries[:max(0, limit)], "matched": len(entries),
-            "scanned": min(len(candidates), _SCAN_LIMIT), "in_window": len(candidates),
-            "truncated": len(candidates) > _SCAN_LIMIT or len(entries) > limit, "unreadable": unreadable}
+            "scanned": min(len(candidates), _SCAN_LIMIT_COUNT), "in_window": len(candidates),
+            "truncated": len(candidates) > _SCAN_LIMIT_COUNT or len(entries) > limit, "unreadable": unreadable}
 
 
 UNATTRIBUTED_OWNER = "unattributed"
@@ -163,7 +163,7 @@ def request_outcome_records(paths: object, query: OutcomeQuery) -> dict:
     entries: list[dict] = []
     seen: set[str] = set()
     unreadable = 0
-    for mtime, path in candidates[:_SCAN_LIMIT]:
+    for mtime, path in candidates[:_SCAN_LIMIT_COUNT]:
         report = read_json_file_report(path, context="gateway.audit_records.outcomes.read")
         if report.load_error is not None:
             unreadable += 1
@@ -175,8 +175,8 @@ def request_outcome_records(paths: object, query: OutcomeQuery) -> dict:
         seen.add(request_id)
         entries.append(_outcome_entry(report.payload, mtime, owner_id))
     return {"available": True, "entries": entries[:max(0, query.limit)], "counts": _outcome_counts(entries),
-            "matched": len(entries), "scanned": min(len(candidates), _SCAN_LIMIT), "in_window": len(candidates),
-            "truncated": len(candidates) > _SCAN_LIMIT or len(entries) > query.limit, "unreadable": unreadable}
+            "matched": len(entries), "scanned": min(len(candidates), _SCAN_LIMIT_COUNT), "in_window": len(candidates),
+            "truncated": len(candidates) > _SCAN_LIMIT_COUNT or len(entries) > query.limit, "unreadable": unreadable}
 
 
 # 函数用途: 按状态、错误码、渠道汇总请求结果条数。

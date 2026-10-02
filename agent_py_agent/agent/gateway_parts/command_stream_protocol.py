@@ -13,6 +13,7 @@ from ..user_space.owner_resolver import OwnerIdentity
 from .paths import GatewayPaths
 
 COMMAND_STREAM_MEDIA_TYPE = "application/x-ndjson"
+# 单条命令帧最大 4 MiB：足够承载大工具输出，又防止无界消息撑爆内存。
 COMMAND_STREAM_MAX_BYTES = 4 * 1024 * 1024
 _SCHEMA = "host_command_stream.v1"
 _KINDS = frozenset({"connected", "heartbeat", "permission_requested", "permission_resolved", "result"})

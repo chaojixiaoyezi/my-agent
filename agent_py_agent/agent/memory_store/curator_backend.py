@@ -101,11 +101,11 @@ class _CuratorBackendResource:
 # 同输入重试次数)。两者互不污染:非超时错误永不缩批,超时永不消耗同输入重试额度。
 # 3 步 + 每次至少减半,足以把 40000 字符上限的输入降到千字符量级;写死为模块常量而不是新增
 # 配置项,因为它是"绝不无界重试"的护栏,不该被配置放大成无界。
-_TIMEOUT_SHRINK_LIMIT = 3
+# 超时收缩最多 3 次、每次至少减半：把超大输入降到千字符量级；写死为护栏，不被配置放大成无界。
+_TIMEOUT_SHRINK_LIMIT_COUNT = 3
 
-# LLM: 缩批下限:仍然存在的输入族至少保留 1 条,绝不产生空消息/空审计批次——空批既无证据也不
-# 可能推进游标,只会白花一次调用。
-_TIMEOUT_SHRINK_FLOOR = 1
+# 缩批下限：仍然存在的输入族至少保留 1 条，绝不产生空批次——空批无证据也推不动游标。
+_TIMEOUT_SHRINK_FLOOR_COUNT = 1
 
 _ShrinkItem = TypeVar("_ShrinkItem")
 
@@ -230,7 +230,7 @@ def _shrink_prefix(
 def shrink_batch_for_timeout(
     batch: CuratorInputBatch,
     *,
-    min_items: int = _TIMEOUT_SHRINK_FLOOR,
+    min_items: int = _TIMEOUT_SHRINK_FLOOR_COUNT,
 ) -> CuratorInputBatch | None:
     floor = max(1, int(min_items))
     messages = _shrink_prefix(batch.messages, floor=floor)
@@ -316,7 +316,7 @@ def extract_with_retries(
     granted_seconds = 0
     budget_seconds = extraction_budget_seconds(config)
     retries_left = config.max_retries
-    shrinks_left = _TIMEOUT_SHRINK_LIMIT
+    shrinks_left = _TIMEOUT_SHRINK_LIMIT_COUNT
     last_error: BaseException | None = None
     shapes: list[CuratorModelAttempt] = []
     while True:
@@ -355,7 +355,7 @@ def extract_with_retries(
             return CuratorExtractionAttempt(
                 batch=effective,
                 extraction=_parse_response(response),
-                shrink_attempts=_TIMEOUT_SHRINK_LIMIT - shrinks_left,
+                shrink_attempts=_TIMEOUT_SHRINK_LIMIT_COUNT - shrinks_left,
             )
         last_error = failure
         # 仍在运行、被中断，或没有可用模型这类永久配置错误：同输入再试没有新信息，直接按原语义失败。

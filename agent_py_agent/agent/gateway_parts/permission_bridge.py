@@ -11,6 +11,7 @@ from pathlib import Path
 from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
 from .io import read_json_file_report, write_json_file_atomic
 
+# 审批轮询间隔 0.05 秒：及时看到用户批复，轮询成本可忽略。
 _APPROVAL_POLL_SECONDS = 0.05
 
 

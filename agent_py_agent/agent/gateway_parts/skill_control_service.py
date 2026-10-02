@@ -37,7 +37,9 @@ from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_hom
 from .control_service import resolve_gateway_scope_owner
 
 _KIND = "skills"
-_SHORT_ID = 8
+# 提案短 ID 取前 8 个字符：消息里展示够辨识又不占地方。
+_SHORT_ID_CHARS = 8
+# 提案正文最多 3000 字符：超长截断，避免回执消息过大。
 _BODY_MAX_CHARS = 3000
 _EVENT_ROWS = 10
 _STATUS_LABELS = {"pending_confirmation": "待确认", "committed": "已确认并安装", "rejected": "已拒绝"}
@@ -169,7 +171,7 @@ def _proposal_entry_lines(index: int, proposal: SkillProposal, label: str) -> li
 # LLM: 只有待确认提案给出确认/拒绝命令，版本号取当前版本；编号用短前缀，服务端仍按完整编号与版本复核。
 # 函数用途: 生成一条提案可直接复制的操作命令。
 def _proposal_commands(proposal: SkillProposal) -> str:
-    ref = proposal.proposal_id[:_SHORT_ID]
+    ref = proposal.proposal_id[:_SHORT_ID_CHARS]
     commands = f"查看 /skills show {ref}"
     if proposal.status == PROPOSAL_PENDING:
         commands += f"　确认 /skills confirm {ref} {proposal.revision}　拒绝 /skills reject {ref} {proposal.revision}"
@@ -219,7 +221,7 @@ def _outcome_text(outcome: SkillProposalOutcome, proposal: SkillProposal) -> str
         raise SkillControlError(_FAILURE_HINTS.get(outcome.code, f"没有执行（{outcome.code}）。"))
     if outcome.code == CODE_COMMITTED:
         return f"已确认并安装 Skill：{proposal.target.skill_name}。"
-    return f"已拒绝提案 {proposal.proposal_id[:_SHORT_ID]}（{proposal.target.skill_name}）。"
+    return f"已拒绝提案 {proposal.proposal_id[:_SHORT_ID_CHARS]}（{proposal.target.skill_name}）。"
 
 
 # LLM: 事实来自 skill_learning_report（与 CLI 同一推导）；只读。

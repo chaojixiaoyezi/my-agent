@@ -31,7 +31,7 @@ from agent_py_agent.agent.memory_store.curator_inputs import (
     CuratorMessageInput,
 )
 from agent_py_agent.agent.memory_store.decision_curator import (
-    _MAX_ANNOTATED_ITEMS,
+    _MAX_ANNOTATED_ITEMS_COUNT,
     _decision_material,
 )
 
@@ -86,7 +86,7 @@ def test_request_fits_model_window_without_dropping_material(oversized_batch):
     request = DecisionRequest(binding, state, questions)
     payload = typesafe_payload(request, "jev-latest")  # 超窗会在这里抛 DecisionInputError
     assert estimate_tokens(payload) <= WINDOW * 9 // 10
-    available = min(len(oversized_batch.audit_events) + len(oversized_batch.messages), _MAX_ANNOTATED_ITEMS)
+    available = min(len(oversized_batch.audit_events) + len(oversized_batch.messages), _MAX_ANNOTATED_ITEMS_COUNT)
     assert 0 < len(sources) <= available
 
 
@@ -94,7 +94,7 @@ def test_window_budget_keeps_all_items_when_they_fit(oversized_batch):
     """窗口足够时不得因为预算计算而丢来源：预算只在真正超窗时才裁。"""
     wide_state, wide_questions, wide_sources, wide_revision = _decision_material(
         oversized_batch, window_tokens=200_000)
-    available = min(len(oversized_batch.audit_events) + len(oversized_batch.messages), _MAX_ANNOTATED_ITEMS)
+    available = min(len(oversized_batch.audit_events) + len(oversized_batch.messages), _MAX_ANNOTATED_ITEMS_COUNT)
     assert len(wide_sources) == available
     assert estimate_tokens({"state": wide_state, "questions": wide_questions}) <= 200_000 * 9 // 10
     assert decision_json({"state": wide_state, "questions": wide_questions})

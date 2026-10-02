@@ -13,6 +13,7 @@ from .process_control import is_pid_alive
 _HEALTH_STATES = frozenset(
     {"not_probed", "registered", "starting", "healthy", "unhealthy", "stopped"}
 )
+# 心跳超过 30 秒未更新判为失联：比心跳周期宽裕，容忍瞬时抖动。
 _HEARTBEAT_STALE_SECONDS = 30.0
 
 

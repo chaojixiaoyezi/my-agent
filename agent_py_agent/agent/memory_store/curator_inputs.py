@@ -17,7 +17,9 @@ from ..common.json_io import read_jsonl_objects_report
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
 
+# 消息预览最多 6000 字符：多轮消息给足上下文又不过载。
 _MESSAGE_PREVIEW_CHARS = 6_000
+# 审计事件预览最多 1000 字符：事件详情截断，保留判定要点。
 _AUDIT_PREVIEW_CHARS = 1_000
 _SUCCESS_TOOL_STATUSES = frozenset(
     {"success", "succeeded", "ok", "completed", "committed", "applied"}

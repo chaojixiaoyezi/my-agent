@@ -99,7 +99,7 @@ def test_cooldown_after_drained_restart_and_zero_disables_it(tmp_path):
 def test_loop_guard_limits_restarts_from_one_thread(tmp_path):
     paths = _paths(tmp_path)
     now = time.time()
-    for index in range(service.LOOP_GUARD_LIMIT):
+    for index in range(service.LOOP_GUARD_LIMIT_COUNT):
         result = service.submit_restart_request(
             paths, target_pid=100 + index, requester={"thread_id": "loop"}, reason="r",
             cooldown_seconds=0, now=now + index,
@@ -109,7 +109,7 @@ def test_loop_guard_limits_restarts_from_one_thread(tmp_path):
     blocked = service.submit_restart_request(
         paths, target_pid=200, requester={"thread_id": "loop"}, reason="r", cooldown_seconds=0, now=now + 10,
     )
-    assert blocked == {"status": "loop_guard", "recent_count": service.LOOP_GUARD_LIMIT}
+    assert blocked == {"status": "loop_guard", "recent_count": service.LOOP_GUARD_LIMIT_COUNT}
     other = service.submit_restart_request(
         paths, target_pid=200, requester={"thread_id": "other"}, reason="r", cooldown_seconds=0, now=now + 10,
     )

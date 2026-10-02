@@ -15,7 +15,8 @@ from ..runtime_db.operations import attempt_status_is_terminal
 from ..user_space.approval_mode import is_permission_admin
 
 _KIND = "endtask"
-_CANDIDATE_LIMIT = 20
+# 结束任务候选上限 20 条：列表有界，避免一次列出全部任务。
+_CANDIDATE_LIMIT_COUNT = 20
 # 结束任务只改会话任务与定时账本，不停它启动的受管后台命令；预览和确认结果都如实交代这个副作用（9a 复审）。
 _BACKGROUND_NOTE = "结束任务不会停止它启动的后台命令；这些命令结束后的通知会落到已取消的任务上。"
 # 定时执行收口过了宽限期就不再计入 GRACE_BOUND_FACTS 里的事实；列表和预览在这些码后面固定加这句，免得被读成“还会自己推进”。
@@ -177,16 +178,16 @@ def _render_plan(facts: _EndTaskFacts, follow_up: str) -> str:
     ))
 
 
-# LLM: 候选只来自定时账本里 waiting 的运行，逐条补会话任务状态、执行树事实与后续工作事实码；最多列 _CANDIDATE_LIMIT 条，
+# LLM: 候选只来自定时账本里 waiting 的运行，逐条补会话任务状态、执行树事实与后续工作事实码；最多列 _CANDIDATE_LIMIT_COUNT 条，
 #   账本坏行只计数。
 # 函数用途: 生成 /endtask 无参数时的候选清单，标出哪些可以结束、哪些为什么不行。
 def _render_candidates(owner_agent: object) -> str:
     runs, errors = owner_agent.scheduler_repository.waiting_runs()
-    candidates = [_task_facts(owner_agent, str(run.get("run_id") or "")) for run in runs[:_CANDIDATE_LIMIT]]
+    candidates = [_task_facts(owner_agent, str(run.get("run_id") or "")) for run in runs[:_CANDIDATE_LIMIT_COUNT]]
     lines = [_candidate_line(facts, _follow_up_text(owner_agent, facts)) for facts in candidates]
     if not lines:
         return "没有等待中的定时执行。" + (f"（定时账本有 {len(errors)} 条无法解析的记录）" if errors else "")
-    head = f"等待中的定时执行 {len(runs)} 条" + (f"，只列前 {_CANDIDATE_LIMIT} 条" if len(runs) > _CANDIDATE_LIMIT else "") + "："
+    head = f"等待中的定时执行 {len(runs)} 条" + (f"，只列前 {_CANDIDATE_LIMIT_COUNT} 条" if len(runs) > _CANDIDATE_LIMIT_COUNT else "") + "："
     return "\n".join([head, *lines, "预览：/endtask <任务ID>；结束：/endtask <任务ID> confirm"])
 
 

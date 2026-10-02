@@ -22,10 +22,11 @@ from .request_experiment import EXPERIMENT_GRANT_KEY
 
 EXPERIMENT_RECORDS_KEY = "experiment_records"
 _RECORDS_SCHEMA = "gateway_decision_experiment_records.v1"
-# 与能力观测同口径：一条请求最多保留最近 8 条实验记录（正常每轮只有一次实验调用）。
-_RECORD_LIMIT = 8
+# 与能力观测同口径：一条请求最多保留最近 8 条实验记录（正常每轮只有一次实验调用），
+# 超出的旧记录直接丢弃，防止实验账无限增长。
+_RECORD_LIMIT_COUNT = 8
 # 实际调用的不同工具名截到 64 个；超过时显式标记截断，评估器不据此计算召回。
-_REALIZED_NAME_LIMIT = 64
+_REALIZED_NAME_LIMIT_COUNT = 64
 # 证据链最多回读 16 条原请求记录，读路径与回合收尾都保持有界 I/O。
 _CHAIN_REQUESTS = 16
 # 请求编号只作文件名使用，拒绝路径分隔符、冒号（Windows 盘符相对路径）等异常字符，防止证据链指针越出请求目录。
@@ -89,7 +90,7 @@ def record_decision_experiment_sample(context: object, record: dict) -> None:
     def change(block: dict) -> dict | None:
         if any(item.get("record_id") == entry["record_id"] for item in block["entries"]):
             return None
-        return {**block, "entries": [*block["entries"], entry][-_RECORD_LIMIT:]}
+        return {**block, "entries": [*block["entries"], entry][-_RECORD_LIMIT_COUNT:]}
 
     try:
         run_in_turn(context, "experiment_record", lambda: update_experiment_records(context, change))
@@ -120,8 +121,8 @@ def realized_tool_usage(result: object) -> dict:
     if names is None:
         return {**base, "known": False, "reason": "archive_unavailable"}
     listed = sorted(names)
-    return {**base, "known": True, "reason": "", "tool_names": listed[:_REALIZED_NAME_LIMIT],
-            "tool_count": len(listed), "names_truncated": len(listed) > _REALIZED_NAME_LIMIT, "call_count": len(records)}
+    return {**base, "known": True, "reason": "", "tool_names": listed[:_REALIZED_NAME_LIMIT_COUNT],
+            "tool_count": len(listed), "names_truncated": len(listed) > _REALIZED_NAME_LIMIT_COUNT, "call_count": len(records)}
 
 
 # LLM: 只认本请求当前执行代次写下且尚未补写的条目；崩溃恢复后的新代次不接管旧代次的候选。

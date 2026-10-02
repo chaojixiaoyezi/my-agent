@@ -50,13 +50,15 @@ from .control_service import resolve_gateway_scope_owner
 
 _KIND = "settings"
 _ORIGIN = ChangeOrigin("chat", "聊天 /settings")
-_LIST_LIMIT = 20
+# 一次最多列出 20 个参数：列表有界，避免一屏刷不完。
+_LIST_LIMIT_COUNT = 20
 _NOT_ADMIN = "只有管理员能查看和修改全局参数（本机 TUI，或已用 /admin 绑定管理员身份的私聊）。"
 _UNCONFIRMED = "参数暂时读不到或这次操作没能完整确认；请先发 /settings history 查看当前状态，再决定是否重试。"
 _BOUNDARY_TEXT = "属于安全边界（凭据、权限、身份、路径、外部地址、会运行代码的设置等），只能由用户在宿主入口或配置文件里改"
-# 常用视图每项只取说明的第一句（遇到句号、分号、冒号或“ - ”列表开头就停），最多 40 字。
+# 说明摘要最多截到 40 字：列表项保持一行可读。
+_BRIEF_MAX_CHARS = 40
+# 常用视图每项只取说明的第一句（遇到句号、分号、冒号或“ - ”列表开头就停）。
 _BRIEF_STOP = re.compile(r"[。；：:;\n]| - ")
-_BRIEF_MAX = 40
 
 
 # LLM: 只表示可预期的用户输入问题，消息直接给用户看。
@@ -192,13 +194,13 @@ def _changed_keys(registry: dict[str, ParameterSpec], stored: dict) -> list[str]
             if key in stored and _compare_text(stored[key]) != _compare_text(spec.default)]
 
 
-# LLM: 只做文字截取（遇到 _BRIEF_STOP 就停，超过 _BRIEF_MAX 加省略号），不改写说明内容。纯函数。
+# LLM: 只做文字截取（遇到 _BRIEF_STOP 就停，超过 _BRIEF_MAX_CHARS 加省略号），不改写说明内容。纯函数。
 # 函数用途: 取参数说明的第一句当大白话标签；没有说明时如实写“暂无说明”。
 def _brief(description: str) -> str:
     head = _BRIEF_STOP.split(description.strip(), maxsplit=1)[0].strip()
     if not head:
         return "（暂无说明）"
-    return head if len(head) <= _BRIEF_MAX else head[:_BRIEF_MAX] + "…"
+    return head if len(head) <= _BRIEF_MAX_CHARS else head[:_BRIEF_MAX_CHARS] + "…"
 
 
 # LLM: 显示 Gateway 启动配置里的当前运行值；用户配置改过就注明默认值，改了还没重启就注明“发 /restart 后生效”。
@@ -429,7 +431,7 @@ def _history_line(item: dict[str, object]) -> str:
 
 # 函数用途: /settings history [参数名] —— 最近 20 条修改记录（最新在前）。
 def _history(config: object, argument: str, *, capability_path: Path | None = None) -> str:
-    items = parameter_history(user_path=_user_path(config), key=argument, limit=_LIST_LIMIT)
+    items = parameter_history(user_path=_user_path(config), key=argument, limit=_LIST_LIMIT_COUNT)
     if not items:
         return "还没有参数修改记录。"
     return "\n".join(["参数修改记录（最新在前）："] + [_history_line(item) for item in items]
