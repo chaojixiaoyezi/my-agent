@@ -26,10 +26,16 @@ from ..conversation.decision_service import (
 )
 from ..settings.defaults import context_window_or_default
 
-_PRIORITIES = {"first": "优先参考", "normal": "按原相关性参考", "later": "稍后参考，不能删除或省略"}
+# 逐条记忆题的候选说明（J12b，2026-10-02）：旧措辞里 not_needed 写“不需要额外重排”，决策模型把它读成“这条记忆用不上”，
+# 对无关记忆答 not_needed/no_match，任何非排序回答都让整批保持原顺序，重排永远不生效（基准 recall 12/30）。
+# 现在每档都写明对“这一条”意味着什么，无关记忆明确指向 later；候选键与题目结构不变，非排序回答的处理也不变。
+_PRIORITIES = {"first": "这条与本轮问题直接相关：优先参考",
+               "normal": "这条与本轮问题有一些关系：按原顺序参考",
+               "later": "这条与本轮问题无关或关系很弱：放到后面参考（仍保留在上下文里，不会被删除）"}
 _NON_SELECTIONS = {
-    "not_needed": "不需要额外重排", "no_match": "当前优先级候选不匹配",
-    "abstain": "无法可靠判断，明确弃权",
+    "not_needed": "不打算给这条排优先级；选它会让整批保持原顺序。只是与问题无关请选 later",
+    "no_match": "first/normal/later 三档都不适合这条；选它会让整批保持原顺序。只是与问题无关请选 later",
+    "abstain": "无法可靠判断这条，明确弃权；选它会让整批保持原顺序",
 }
 _RANK = {"first": 0, "normal": 1, "later": 2}
 _FIXED_KINDS = frozenset({"hot", "lesson"})
@@ -335,7 +341,8 @@ def _material(agent: object, request: object, records: list, scope: object) -> t
         if row["kind"] in _FIXED_KINDS:
             continue
         questions[f"memory_{index}"] = {"type": "choice", "instructions": {
-            "entry_id": row["entry_id"], "question": "建议此已授权记忆的参考优先级，不改变正文、权限或选中集合"},
+            "entry_id": row["entry_id"], "question": "给这条已授权记忆选参考优先级：直接相关选 first，有些关系选 normal，"
+                                                     "无关或很弱选 later；不改变正文、权限或选中集合"},
             "criteria": {**_PRIORITIES, **_NON_SELECTIONS, "need_data": {
                 "required_refs": [{"kind": "memory_source_ref", "ref": f"memory:{row['entry_id']}"}],
             }}}

@@ -52,19 +52,19 @@
       "scored_questions": 16
     },
     "recall": {
-      "accuracy": 0.4,
+      "accuracy": 1.0,
       "call_failures": 0,
       "calls": 12,
       "cases_digest": "4372075de245b5aa4b109164031ac5190b6f97b9cd4b413816480e3cc83c3026",
-      "elapsed_ms_max": 1488,
-      "elapsed_ms_median": 1236.5,
-      "material_digest": "8f365ed042b7de220e65be051743d35777c6a8cf81e3f7044dcf1ac1cd02a280",
-      "met": false,
+      "elapsed_ms_max": 1421,
+      "elapsed_ms_median": 1272.0,
+      "material_digest": "aa721b4d78f3516313508150691f4104f0d41c364a1acfec36d5748a0ff4961a",
+      "met": true,
       "models": [
         "jev-1.13.0"
       ],
-      "passed": 12,
-      "recorded_at": "2026-10-02T02:10:56-0700",
+      "passed": 30,
+      "recorded_at": "2026-10-02T03:09:35-0700",
       "reps": 2,
       "scored_questions": 30
     }

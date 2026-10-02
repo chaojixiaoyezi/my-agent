@@ -1,5 +1,22 @@
 # 设计台账
 
+## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `claude/3a-step16z` `58c674d46`，已实现，待集成）
+
+- **问题**：
+  - J12 基准里 recall 只有 12/30。对无关或次要的记忆，Jev 回答 `not_needed`/`no_match`，而不是 `later`/`normal`。
+  - 任何非排序回答都会让整批保持原顺序，所以重排几乎不会生效。
+  - 根源是旧措辞：`not_needed` 写的是“不需要额外重排”，`no_match` 写的是“当前优先级候选不匹配”，Jev 把它们读成“这条记忆用不上”。
+- **做法**：只改说明文字，候选键、题目结构和非排序回答的处理都不变。
+  - `first`、`normal`、`later` 分别写明“直接相关”“有些关系”“无关或很弱，放到后面、仍保留”。
+  - `not_needed`、`no_match`、`abstain` 写明“选它会让整批保持原顺序”，并提示“只是与问题无关请选 later”。
+  - 题面写明三档各对应什么情况。
+- **为什么不把逐条的 `not_needed`/`no_match` 直接当作 later**：开发铁律规定状态别名不隐式兼容，把一个协议回答悄悄当成另一个，正是被禁止的做法。改措辞只动给模型看的软材料，不动机器语义。
+- **结果**：重跑基准，recall 30/30（准确率 1.0，阈值 0.75），Jev 12 次调用全部成功。期望答案没有改。成绩已登记进 `results.json`。
+  - 证据：`~/.my-agent/decision-evidence/j12-quality-bench/*recall-reworded*`。
+  - 局限：基准只给有明确期望的题计分；未计分题是否也都回答了排序值，这次没有记录。
+- **开关**：recall 点位仍默认关闭，生产是否打开由集成方定。
+- **验证**：见 TESTS.md 同名节。
+
 ## J17：Gateway 停机时一并结清进程内 runner worker 与 owner 池 agent 的在途模型调用（2026-10-02，分支 `claude/38-j17-stop-settles-runner-calls`，基于 `claude/3a-step16z` `51e52f04a`，已实现，待集成）
 
 - **缺口**：停机结清（`call_runtime.settle_open_model_calls_for_shutdown`）原来只结网关 agent 自己的账本。
@@ -146,7 +163,7 @@
   | recall | 12/30 | **未达标** |
 
   证据：`~/.my-agent/decision-evidence/j12-quality-bench/`。
-- **recall 未达标的原因与方向（未实施）**：
+- **recall 未达标的原因与方向（已按改措辞实施，见顶部 J12b 条目，重跑后 30/30）**：
   - 对无关或次要的记忆，Jev 回答 `not_needed`/`no_match`，而不是 `later`/`normal`。
   - 按现有规则，有任一非排序回答就整次保留原顺序，所以这 12 次在 apply 下一次都不会重排。
   - 根源是逐条记忆题的候选措辞：`not_needed` 写的是“不需要额外重排”，Jev 读成“这条用不上”。

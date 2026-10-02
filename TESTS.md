@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 召回后排序逐条题的候选措辞修正（J12b）（2026-10-02，分支 `claude/be-recall-criteria`，基于 `58c674d46`）
+
+- **改动**：只改 `decision_recall` 逐条记忆题的候选说明与题面，键和结构不变。现有 recall 测试与基准测试照常通过（候选键和非排序处理没有变）。
+- **基准重跑**：`decision_quality_bench.py --points recall --reps 2 --record`。
+  - 环境：`env -i` 隔离，只用 Jev 连接文件（0600，用完删）。
+  - 结果：recall 12/30 → **30/30**，Jev 12 次调用全部成功，`jev-1.13.0`，期望答案未改。
+  - 其余 3 个点位登记的用例摘要和材料摘要都与当前代码一致（`--check` 比对）。
+- **门禁**：
+  - 相关测试加 10 个守卫通过；ruff、import 边界、doc_sync、`diff --check`、`size_diff`、clean_package 通过。
+  - 没有新增分支逻辑，未做变异。
+
 ## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复）（2026-10-02，分支 `claude/be-curator-identity`，基于 `85740cde6`）
 
 - **新增 `test_curator_observation_identity.py`（9 项）**：用真实 ConversationStore、候选库、state、运行账和脚本化后端，不发网络请求。
