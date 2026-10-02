@@ -986,7 +986,18 @@ def _build_compact_candidate(
                    if media_decision is not None and media_decision.policy != MEDIA_POLICY_OFF else MediaArchiveFacts())
     if media_decision is not None and media_facts.blocks > 0:
         # 只有范围内确有媒体块才解析视觉能力事实（声明或缓存探针）；纯文字候选零额外请求。
-        media_decision = resolve_vision_candidate(request.agent, media_decision)
+        # LLM: 解析可能触发一次未缓存的工具能力探针，照选模调用点绑定记账 scope（账本 + 请求身份），
+        #   让压缩触发的探测也进 model_usage 的 probe:tool_capability 桶；缓存命中不重复记账。
+        from ..agent_core.model.call_runtime import model_call_ledger
+        from ..backends.provider_headers import ProbeAccountingScope, probe_accounting_scope
+
+        scope = ProbeAccountingScope(
+            model_call_ledger(request.agent),
+            request_id=str(request.request_id or ""),
+            run_id=str(request.run_id or ""),
+        )
+        with probe_accounting_scope(scope):
+            media_decision = resolve_vision_candidate(request.agent, media_decision)
     base_summary = (request.compact_context.view.summary if request.compact_context is not None
                     else request.thread.summary)
     base_evidence = (request.compact_context.view.operation_evidence if request.compact_context is not None

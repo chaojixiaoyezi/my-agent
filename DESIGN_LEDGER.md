@@ -65,6 +65,25 @@
   `_StreamCallbacks` 小数据类）、`generate_json` 委托模块级函数，协议方法签名与行为不变。
 - **验证**：见 TESTS.md 顶部同名节；5 个变异全部被拦截。
 
+### C7 三件小加固（2026-10-02，分支 `worker/ds2-probe-accounting-hardening`，基于 `claude/3a-step16z` `7b21f38b9`，已含上一轮 C7 计量修正，已实现，待集成）
+
+38 审查上一轮 C7 提交后建议的三件加固（无必须修项）：
+
+- **用途桶开放世界（store_usage.py）**：写入端 `probe:tool_capability` 只在本快照或同范围先前行真有探测用量时才落键，老三个桶照写，
+  多数线程的行与上一版逐字节一致（`_purpose_breakdown_delta` 模块级小函数按需组装，避免加深 `_model_usage_snapshot_delta` 嵌套）；
+  读取端 `_purpose_rows` / `_sum_purpose_breakdowns` 接受不认识的用途键，按“已知键 + 出现过的键”求和并原样保留（以后再加用途桶，
+  旧读法不再读坏新行，回滚实测 17b 写 → 17a 读的 DataCorruptionError 由此消除）。三条严格规则照旧：purpose_breakdown 值必须是对象、
+  桶值不能嵌套 purpose_breakdown、schema 版本不对报 DataCorruptionError。
+- **压缩入口绑定探测记账（compact.py + http.py）**：`_build_compact_candidate` 在范围内确有媒体块解析视觉能力事实时，照选模调用点用
+  `probe_accounting_scope` 绑定账本 + request_id/run_id，让压缩触发的工具能力探测也进 `probe:tool_capability` 桶；缓存命中不重复记账。
+  对“没有绑定记账范围”的真实探测尝试留进程内结构化计数（http.py `unaccounted_probe_attempt_count()` 只读诊断入口 + 测试用 reset），不静默。
+  视觉探测本身（看图那次 generate）记账是另一件事，本轮不做，列入待办台账。
+- **/effort 回执按实际生效上限算（reasoning_probe.py）**：每次输出上限与总上限改用 `min(PROBE_MAX_OUTPUT_TOKENS, effective_max_output_tokens(档案))`；
+  默认窗口 128000 的档案输出上限 32000，回执写“每次输出上限 32000 token，最多约 288000 token”，不再按常量 40000 虚报。
+- **验证**：4 组用例全过（`test_store_usage_open_world.py` 新增 6 个、`test_probe_tool_capability_metering.py` 新增 3 个、
+  `test_reasoning_probe.py` 新增 1 个）；4 个变异（读端恢复封闭集合、写端恢复无条件写、压缩移除绑定、回执恢复常量）全部被拦且逐字节恢复；
+  相关回归 86 + 149 + 54、guards9 170 全过；size_diff 新增 0。详见 TESTS.md 顶部同名节。
+
 ## 选模型两个点位的仓库默认期限定为 5 秒（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）（2026-10-02，分支 `claude/be-selection-timeout-default`，基于 `claude/3a-step16z` `a44f2ad62`，已实现，待集成）
 
 - **背景**：J5 把前台通用期限默认改成 3 秒，但选模型（`model_selection`、`subagent_model`）在冷连接下 Jev 实测约 3.2 秒，按 3 秒会超时、保留原模型。

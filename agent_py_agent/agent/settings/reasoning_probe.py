@@ -29,6 +29,7 @@ from ..backends.reasoning_control import (
 )
 from ..common.json_io import locked_json_path, read_json_object, write_json_file_atomic_unlocked
 from ..conversation.host_notices import clear_host_notices, host_notice, queue_host_notice
+from .defaults import effective_max_output_tokens
 from .model_profiles import model_profiles_path, selected_model_config
 from .parameter_changes import (
     ChangeOrigin,
@@ -221,9 +222,11 @@ def _start(agent: object, target: ProbeTarget, trigger: str) -> str:
     clear_host_notices(getattr(agent, "conversation_store", None), target.thread_id, _NOTICE_SOURCE)  # 旧结论已作废
     _spawn(lambda: _run(job))
     head = "当前模型还没检测过是否支持调节智能程度，已" if trigger == "auto" else "已"
-    # LLM: 回执的耗时与 token 说法只由结构化事实算出：次数 × 每次输出上限；实测长输出模型会更久，不再写死分钟数。
+    # LLM: 回执的耗时与 token 说法只由结构化事实算出：次数 × 每次实际生效的输出上限
+    #   （min(探测常量, 档案输出上限)，配置更低时按配置说，不再虚报 40000）。
+    per_request_cap = min(PROBE_MAX_OUTPUT_TOKENS, effective_max_output_tokens(target.config))
     return (f"{head}在后台开始检测：同一道短题按“低”“最高”和不带参数各发 {PROBE_ROUND_COUNT} 次，共 {_TOTAL_REQUESTS} 次请求，"
-            f"每次输出上限 {PROBE_MAX_OUTPUT_TOKENS} token，最多约 {_TOTAL_REQUESTS * PROBE_MAX_OUTPUT_TOKENS} token；"
+            f"每次输出上限 {per_request_cap} token，最多约 {_TOTAL_REQUESTS * per_request_cap} token；"
             "长输出模型可能更久，完成后发 /effort 查看结果。")
 
 

@@ -58,6 +58,36 @@
   `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 新增告警 0。
 - 沙箱限制：不启动 Gateway/真实供应商请求、不跑全仓 pytest；真实 /effort 回执与用量账由 3a 集成后核对。
 
+### C7 三件小加固（2026-10-02，分支 `worker/ds2-probe-accounting-hardening`，基于 `claude/3a-step16z` `7b21f38b9`）
+
+**来源**：38 审查上一轮 C7 提交后的建议（证据 `~/.my-agent/decision-evidence/probe-accounting-review-20261002/rollback_check.txt`：
+17b 写 4 个用途桶 → 17a 读 `summary()` 抛 DataCorruptionError，只是生产链路没有调用方所以严重性低）。
+
+**新增用例**：
+- `test_store_usage_open_world.py`（新文件，6 项）：
+  - 带未知用途键的行能读、能求和、键原样保留（模块级 `_sum_purpose_breakdowns` 与经 `ConversationStore` 落盘读回两处）；
+  - 没有探测用量时写出的行不含 `probe:tool_capability` 键，老三个桶照写；
+  - 有探测用量时写出的行含 probe 键且数值正确；
+  - 三条严格规则仍报错：schema 版本不对 / 桶值非对象 / 桶值嵌套 purpose_breakdown / 根值非对象 / 未知键的桶值非法。
+- `test_probe_tool_capability_metering.py` 追加 3 项：
+  - `test_compact_vision_resolution_probe_is_accounted`：`resolve_vision_candidate` 在记账 scope 内触发工具能力探针时进 probe 桶（request_id/run_id 正确，有界重试 3 次都记账）；
+  - `test_compact_build_binds_probe_accounting_scope`：`_build_compact_candidate` 范围内确有媒体块时，`resolve_vision_candidate` 调用时刻记账 scope 已绑定（账本与请求身份一致）；
+  - `test_unaccounted_probe_attempt_is_counted`：无 scope 直调探测使 `unaccounted_probe_attempt_count()` 加一，绑定 scope 的探测不计入。
+- `test_reasoning_probe.py` 追加 1 项：`test_effort_receipt_uses_effective_output_cap_when_config_is_lower`——
+  窗口 128000 的档案（输出上限 32000）回执写“每次输出上限 32000 token，最多约 288000 token”，不含 40000，发送 max_tokens=32000。
+
+**变异（4 个全部被拦且逐字节恢复，`python3 tmp/run-mutations-hardening.py`）**：
+读端恢复封闭集合（未知键报错）、写端恢复无条件写（空 probe 桶也落键）、压缩入口移除记账 scope 绑定、回执恢复按常量 40000 算。
+
+**门禁结果**：
+- 核心 4 文件（store 开放世界 + 探测计量 + reasoning_probe + conversation_store）86 个全过；
+- store/compact 回归（compact_media_policy、compact_media_vision、model_selection_isolation、gateway_model_observation、runtime_module_boundaries）149 个全过；
+- 压缩主链 `test_gateway_conversation_compact.py` 54 个全过；
+- guards9 170 个全过；`check_import_boundaries.py` findings=0；ruff All checks passed；doc_sync PASS；`git diff --check` OK；
+  code-size strict blocked=False（hard=0，报告已 checkout 还原）；`size_diff.sh` 新增告警 0。
+- 已知环境限制：`test_gateway_conversation_control.py` 3 个 PTY + `sandbox-exec` 子进程用例（`/goal` 资源控制）在沙箱内被宿主拦（returncode 71），与本次改动无关，3a 在沙箱外复核。
+- 沙箱限制：不启动 Gateway/真实供应商请求、不跑全仓 pytest；压缩触发的真实探测记账由 3a 集成后核对。
+
 ## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `ee3bd09f7`）
 
 - **新增用例** `test_decision_audit_controls.py::test_adoption_statuses_carry_a_fixed_note_that_they_are_not_settled`：

@@ -452,3 +452,16 @@ def test_judge_still_supports_when_max_output_hits_the_cap():
     samples = [ProbeSample("low", 400)] * 3 + [ProbeSample("max", cap)] * 3 + [ProbeSample("", 900)] * 3
     verdict = judge_reasoning_samples(samples)
     assert (verdict.verdict, verdict.reason) == ("supported", "max_above_low")
+
+
+def test_effort_receipt_uses_effective_output_cap_when_config_is_lower(tmp_path, monkeypatch):
+    # C7 加固：回执按实际生效的上限 min(探测常量, 档案输出上限) 算。窗口 128000 的档案输出
+    # 上限是 32000（低于常量 40000），回执写 32000 和 288000，不再按常量虚报。
+    agent, _profile_id = _agent(tmp_path)
+    wire = _Wire(_DEEPSEEK).install(monkeypatch)
+    monkeypatch.setattr(probe, "_spawn", lambda target: target())
+    started = _run(agent, "/effort high")
+    assert started.ok
+    assert "每次输出上限 32000 token，最多约 288000 token" in started.message
+    assert "40000" not in started.message
+    assert all(payload.get("max_tokens") == 32000 for payload in wire.payloads)

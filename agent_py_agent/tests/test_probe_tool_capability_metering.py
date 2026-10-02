@@ -9,14 +9,31 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.agent_core.native_tool_protocol import select_tool_protocol
+from agent_py_agent.agent.agent_core.runtime.context_compactor import RuntimeCompactPolicy
 from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.errors import ProviderRecoverableError
+from agent_py_agent.agent.backends.http import (
+    reset_unaccounted_probe_attempt_count,
+    unaccounted_probe_attempt_count,
+)
+from agent_py_agent.agent.backends.provider_headers import (
+    ProbeAccountingScope,
+    current_probe_accounting,
+    probe_accounting_scope,
+)
+from agent_py_agent.agent.backends.vision_capability import reset_vision_capability_cache
 from agent_py_agent.agent.contracts.model_call_ledger import ModelCallLedger, model_call_purpose
+from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation import compact as compact_module
+from agent_py_agent.agent.conversation.compact import _CompactRunRequest
+from agent_py_agent.agent.conversation.compact_media_policy import CompactMediaDecision
+from agent_py_agent.agent.conversation.native_history import CANONICAL_NATIVE_MESSAGES_METADATA_KEY
 
 _API = "https://relay.example.test/v1"
 _KEY = "<redacted>"
@@ -46,20 +63,25 @@ def _backend_config() -> SimpleNamespace:
 
 
 class _ProbeWire:
-    """按探测提示里的 nonce 回放一次成功的原生工具调用，记录每次出站载荷。"""
+    """按探测提示里的 nonce 回放一次原生工具调用（native=False 时回放不支持），记录每次出站载荷。"""
 
-    # 函数用途: 准备假传输；fail 为真时每次请求都抛供应商可恢复错误。
-    def __init__(self, *, fail: bool = False) -> None:
+    # 函数用途: 准备假传输；fail 为真时每次请求都抛供应商可恢复错误，native=False 时回放无工具调用。
+    def __init__(self, *, fail: bool = False, native: bool = True) -> None:
         self.payloads: list[dict] = []
         self.fail = fail
+        self.native = native
 
-    # 函数用途: 记录载荷并按 nonce 返回带 my_agent_capability_probe 工具调用的响应。
+    # 函数用途: 记录载荷并按 nonce 返回带 my_agent_capability_probe 工具调用（或空响应）的回复。
     def request_json(self, path, payload, headers):
         self.payloads.append(dict(payload))
         if self.fail:
             raise ProviderRecoverableError("probe transport failed")
         prompt = str(payload["messages"][-1]["content"])
         nonce = prompt.split("with nonce ", 1)[1].split(".", 1)[0].strip()
+        if not self.native:
+            return {"choices": [{"message": {"role": "assistant", "content": "no tool call"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 30, "completion_tokens": 5, "total_tokens": 35}}
         return {
             "choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "call-probe-1", "type": "function",
@@ -138,3 +160,88 @@ def test_probe_failure_is_accounted_as_failed(monkeypatch):
     record = agent._model_call_ledger.records()[0]
     assert record.status == "failed" and record.error_type == "ProviderRecoverableError"
     assert model_call_purpose(record) == "probe:tool_capability"
+
+
+def test_compact_vision_resolution_probe_is_accounted(monkeypatch):
+    # 压缩入口绑定记账 scope 后，resolve_vision_candidate 触发的工具能力探测进 probe 桶；
+    # 探针未证明原生工具支持时视觉探针不发（本轮范围），决策回落到归档引用。
+    reset_vision_capability_cache()
+    try:
+        wire = _ProbeWire(native=False)
+        agent = _agent(wire, monkeypatch)
+        scope = ProbeAccountingScope(agent._model_call_ledger, request_id="req-compact", run_id="run-compact")
+        decision = CompactMediaDecision("archived_refs", "vision_fact_pending", vision_candidate=True)
+        with probe_accounting_scope(scope):
+            resolved = compact_module.resolve_vision_candidate(agent, decision)
+        assert resolved.policy == "archived_refs" and resolved.fact_source == "probe_unavailable"
+        records = agent._model_call_ledger.records()
+        # 工具能力探针有界重试 3 次（不支持结论不缓存），每次真实 generate 都记账
+        assert len(records) == 3
+        assert all(model_call_purpose(record) == "probe:tool_capability" for record in records)
+        assert all((record.request_id, record.run_id) == ("req-compact", "run-compact") for record in records)
+        assert all(record.status == "finished" for record in records)
+    finally:
+        reset_vision_capability_cache()
+
+
+def test_compact_build_binds_probe_accounting_scope(monkeypatch, tmp_path):
+    # 压缩候选构造（_build_compact_candidate）在范围内确有媒体块时，把 resolve_vision_candidate
+    # 包在带 request_id/run_id 的记账 scope 里；spy 确认调用时刻 scope 已绑定且账本一致。
+    wire = _ProbeWire()
+    agent = _agent(wire, monkeypatch)
+    store = ConversationStore(Path(tmp_path) / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "compact-probe"})
+    image = {"type": "image", "source": {"type": "local_file", "path": "/owner/attachments/x", "sha256": "b" * 64,
+                                         "media_type": "image/png", "size_bytes": 321, "name": "chart.png"}}
+    envelope = {"schema": "conversation_native_messages.v1", "messages": [
+        {"role": "user", "content": [image]}]}
+    rows = [SimpleNamespace(role="user", metadata={CANONICAL_NATIVE_MESSAGES_METADATA_KEY: envelope})]
+
+    seen: dict[str, object] = {}
+
+    def spy(agent_arg, decision):
+        seen["scope"] = current_probe_accounting()
+        return CompactMediaDecision("archived_refs", "test")
+
+    monkeypatch.setattr(compact_module, "resolve_vision_candidate", spy)
+    monkeypatch.setattr(compact_module, "_candidate_limits", lambda request: SimpleNamespace(target=1, ceiling=10 ** 9))
+    monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "s")
+    monkeypatch.setattr(compact_module, "_measure_candidate",
+                        lambda request, tail, summary: compact_module._MeasuredSummary(summary, None, 100))
+    monkeypatch.setattr(compact_module, "_fit_landmarks_to_target",
+                        lambda limits, measured, landmark_outcome, remeasure: measured)
+
+    policy = RuntimeCompactPolicy(
+        context_window_tokens=128000, trigger_percent=80, trigger_tokens=102400,
+        recovery_target_percent=60, recovery_target_tokens=76800, allow_persistent_apply=True,
+        recent_tail_max_turns=4, recent_tail_tokens=20000, failure_threshold=3, failure_cooldown_seconds=60,
+    )
+    request = _CompactRunRequest(
+        agent=agent, store=store, thread=thread, current_prompt="", pending=rows,
+        policy=policy, projected_tokens=0, forced=False, attempted_at=0.0, operation_id="op-1",
+        request_id="req-compact", run_id="run-compact",
+    )
+    decision = CompactMediaDecision("archived_refs", "vision_fact_pending", vision_candidate=True)
+    compact_module._build_compact_candidate(
+        request, rows, [], media_decision=decision, provider_surface=None,
+    )
+
+    scope = seen["scope"]
+    assert isinstance(scope, ProbeAccountingScope)
+    assert (scope.request_id, scope.run_id) == ("req-compact", "run-compact")
+    assert scope.ledger is agent._model_call_ledger
+
+
+def test_unaccounted_probe_attempt_is_counted(monkeypatch):
+    # 没有绑定记账范围的真实探测尝试留结构化计数（诊断入口只读），绑定 scope 的探测不计入。
+    reset_unaccounted_probe_attempt_count()
+    wire = _ProbeWire()
+    backend2 = get_backend("openai_compatible", _backend_config())
+    monkeypatch.setattr(backend2, "request_json", wire.request_json)
+    assert backend2.probe_tool_capability().native_supported is True
+    assert unaccounted_probe_attempt_count() == 1
+    reset_unaccounted_probe_attempt_count()
+    agent = _agent(wire, monkeypatch)
+    select_tool_protocol(agent, run_id="run-1", request_id="req-1")
+    assert unaccounted_probe_attempt_count() == 0, "绑定记账 scope 的探测不计入未绑定计数"
+    assert len(agent._model_call_ledger.records()) == 1

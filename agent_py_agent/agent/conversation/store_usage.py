@@ -369,12 +369,27 @@ def _model_usage_snapshot_delta(
     if include_purposes:
         current_rows, prior_rows = _purpose_rows(snapshot), _purpose_rows(prior)
         if current_rows or prior_rows:
-            delta["purpose_breakdown"] = {"schema": _PURPOSE_SCHEMA, **{
-                purpose: _model_usage_snapshot_delta(current_rows.get(purpose, {}),
-                    [prior_rows.get(purpose, {})], include_purposes=False)
-                for purpose in _PURPOSES
-            }}
+            delta["purpose_breakdown"] = _purpose_breakdown_delta(current_rows, prior_rows)
     return delta
+
+
+# LLM: 用途增量只落有事实的桶；探测桶只在真有探测用量时写（本快照或同范围先前行任一有值），
+#   不给每行都写空桶；老三个桶照写，多数线程的行与上一版逐字节一致。
+# 函数用途: 按需组装快照相对先行的用途增量结构（probe 空桶省略，其余照写）。
+def _purpose_breakdown_delta(
+    current_rows: dict[str, dict[str, Any]],
+    prior_rows: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    purpose_breakdown: dict[str, Any] = {"schema": _PURPOSE_SCHEMA}
+    for purpose in _PURPOSES:
+        current_row = current_rows.get(purpose, {})
+        prior_row = prior_rows.get(purpose, {})
+        if purpose == "probe:tool_capability" and not current_row and not prior_row:
+            continue
+        purpose_breakdown[purpose] = _model_usage_snapshot_delta(
+            current_row, [prior_row], include_purposes=False
+        )
+    return purpose_breakdown
 
 
 # LLM: 持久行已经是增量，不能当作新累计；用途复用同一求和且不递归嵌套，不改变旧字段含义。
@@ -408,29 +423,31 @@ def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purpos
     return total
 
 
-# LLM: 用途是宿主定义的互斥角色分区，不是模型自述；未知版本、非对象与递归桶不能静默吞掉。
-# 函数用途: 读取明确版本的用途快照，旧账缺字段保持无分区。
+# LLM: 用途是宿主定义的互斥角色分区，不是模型自述；开放世界只认 schema 与桶值形状，
+#   不认识的用途键按“出现过的键”保留并参与求和（以后再加用途桶，旧读法也不会读坏新行）。
+# 函数用途: 读取明确版本的用途快照，未知用途键原样保留；版本、非对象与递归桶仍严格报错。
 def _purpose_rows(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if "purpose_breakdown" not in summary:
         return {}
     value = summary["purpose_breakdown"]
-    if not isinstance(value, dict) or value.get("schema") != _PURPOSE_SCHEMA or set(value) - {"schema", *_PURPOSES}:
+    if not isinstance(value, dict) or value.get("schema") != _PURPOSE_SCHEMA:
         raise DataCorruptionError("model usage purpose breakdown is invalid")
-    rows = {purpose: value.get(purpose, {}) for purpose in _PURPOSES}
+    rows = {purpose: row for purpose, row in value.items() if purpose != "schema"}
     if any(not isinstance(row, dict) or "purpose_breakdown" in row for row in rows.values()):
         raise DataCorruptionError("model usage purpose bucket is invalid")
     return rows
 
 
-# LLM: 三桶互斥但复用根摘要加法；没有显式用途事实时不合成历史分区，不能倒推旧调用用途。
-# 函数用途: 合并已声明用途的增量，保留完整原始总账供计费和回放。
+# LLM: 各桶互斥但复用根摘要加法；按“已知桶 + 出现过的桶”求和并保留，不能倒推旧调用用途。
+# 函数用途: 合并已声明用途的增量，未知用途键一并求和并保留，供计费和回放。
 def _sum_purpose_breakdowns(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     rows = [_purpose_rows(summary) for summary in summaries]
     if not any(rows):
         return {}
+    purposes = [*_PURPOSES, *sorted({purpose for row in rows for purpose in row} - set(_PURPOSES))]
     return {"schema": _PURPOSE_SCHEMA, **{
         purpose: _sum_model_call_summaries([row.get(purpose, {}) for row in rows], include_purposes=False)
-        for purpose in _PURPOSES
+        for purpose in purposes
     }}
 
 
