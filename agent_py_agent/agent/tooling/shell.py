@@ -154,6 +154,8 @@ class _ShellArtifactExecutionRequest:
     tool_call_id: str
     operation_id: str
     operation_managed: bool
+    # H3：registry 给的本任务核验记录保护状态（protected / no_task_root），原样进回执；没经 registry 时为空、回执不加这一项。
+    task_records: str = ""
 
 
 # LLM: Prepared state binds snapshots to one stable private operation key and must not be rebuilt
@@ -697,8 +699,7 @@ def _sandbox_exec(
         public_read_roots=tuple(Path(r).expanduser().resolve(strict=False) for r in (read_roots or ())),
         protected_write_paths=tuple(
             Path(r).expanduser().resolve(strict=False)
-            for r in (*(protected_write_paths or ()),
-                      *host_readonly_paths_for(owner_text, persona_text, (Path(target), *(write_roots or ()))))
+            for r in (*(protected_write_paths or ()), *host_readonly_paths_for(owner_text, persona_text))
         ),
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
@@ -732,10 +733,11 @@ def _host_managed_hidden_paths(owner_text: str, persona_text: str) -> tuple[Path
 
 # LLM: H3：宿主托管文件对模型命令只读（唯一声明 path_access_policy 的 HOST_CONFIG_* / HOST_STATE_*，列法见 host_readonly_paths）。
 #   owner 隔离时只盖本 owner 的（数据根的配置在 owner 墙外，Linux 不挂载、macOS 写入本来就只落写根）；Full Access 盖数据根的
-#   配置和全部 owner 的。task_anchors（工作目录与写根）所在任务的核验记录也盖上。数据根只从规范 owner home 反推，推不出时不加
-#   覆盖（与 H2 同口径）。只拒写不拒读：my-agent CLI 要读配置。隔离 Shell 的边界事实也用它。只读元数据。
-# 函数用途: 计算本次模型命令要设成只读的宿主托管路径。
-def host_readonly_paths_for(owner_text: str, persona_text: str, task_anchors: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+#   配置和全部 owner 的。本任务的核验记录不在这里：registry_invoke 按写边界的 task_root 放进 __sandbox_protected_write_paths
+#   （3a 定：不从工作目录或写根反推）。数据根只从规范 owner home 反推，推不出时不加覆盖（与 H2 同口径）。只拒写不拒读：
+#   my-agent CLI 要读配置。只读元数据。
+# 函数用途: 计算本次模型命令要设成只读的 owner 级宿主托管路径。
+def host_readonly_paths_for(owner_text: str, persona_text: str) -> tuple[Path, ...]:
     from ..path_access_policy import agent_home_root_for_owner, host_readonly_paths
 
     anchor = owner_text or persona_text
@@ -743,8 +745,7 @@ def host_readonly_paths_for(owner_text: str, persona_text: str, task_anchors: tu
     if agent_home is None:
         return ()
     owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
-    anchors = tuple(Path(item).expanduser().resolve(strict=False) for item in task_anchors)
-    return host_readonly_paths(agent_home, owner, anchors)
+    return host_readonly_paths(agent_home, owner)
 
 
 # LLM: 显式后台命令使用前台相同的已校验沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。
@@ -912,6 +913,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
                 "__sandbox_write_roots",
                 "__sandbox_read_roots",
                 "__sandbox_protected_write_paths",
+                "__sandbox_task_records",
                 "__access_mode",
                 "__run_scope",
                 "__process_completion_target",
@@ -1113,6 +1115,7 @@ class ShellTool(BaseTool):
                 tool_call_id=str(params.get("__tool_call_id") or ""),
                 operation_id=str(params.get("__operation_id") or ""),
                 operation_managed=params.get("__operation_managed") is True,
+                task_records=str(params.get("__sandbox_task_records") or ""),
             )
         )
 
@@ -1516,16 +1519,17 @@ def _sandbox_scope_notice(hidden: bool, *, private_hidden: bool = False, home_hi
 #   boundary_hint 只在命令真的在沙箱里跑起来并以非零码退出时给（COMMAND_FAILED + status=exited + return_code），超时、取消、
 #   沙箱不可用都不给；它只说"可能"，由模型结合输出自己判断。拒读根（my-agent 数据根、用户家目录）不列出，不把宿主结构交给模型。
 #   渲染见 tooling/runtime_facts 的 [runtime-sandbox-facts]；改字段要同步那里与 test_shell_sandbox_boundary_facts.py。
-#   H3：本 owner 的宿主托管文件（config/、runtime.db 等、本任务核验记录）即使落在可写根里也只读；只把落在 read_write 根里的
-#   那些列进 read_only（不在可写根里的本来就只读，不多列）。
+#   H3：本 owner 的宿主托管文件（config/、runtime.db 等）和本次的受保护路径（含 registry 按 task_root 给的本任务核验记录）即使
+#   落在可写根里也只读；只把落在 read_write 根里的那些列进 read_only（不在可写根里的本来就只读，不多列）。
 # 函数用途: 生成 owner 隔离 Shell 的沙箱边界事实：本次允许读写的目录，以及失败时"可能越界"的结构化提示和下一步建议。
 def _sandbox_boundary_facts(
     request: _ShellArtifactExecutionRequest, error_code: str, process_facts: dict[str, Any],
 ) -> dict[str, object]:
-    write_roots, read_roots, _protected = request.sandbox_roots
+    write_roots, read_roots, protected = request.sandbox_roots
     read_write = tuple(write_roots) if write_roots is not None else (request.target,)
     owner_text = str(request.tool.path_access_policy.owner_scope_root or "")
-    host_files = host_readonly_paths_for(owner_text, "", (request.target, *(write_roots or ())))
+    host_files = (*host_readonly_paths_for(owner_text, ""),
+                  *(Path(str(path)).expanduser().resolve(strict=False) for path in (protected or ())))
     writable = tuple(Path(str(root)).expanduser().resolve(strict=False) for root in read_write)
     read_only = (request.tool.path_access_policy.owner_scope_root, *(read_roots or ()),
                  *(path for path in host_files if any(path.is_relative_to(root) for root in writable)))
@@ -1589,6 +1593,8 @@ def _build_protected_shell_outcome(
     }
     if owner_scoped and tool.sandbox_boundary_facts:
         sandbox.update(_sandbox_boundary_facts(request, error_code, process_facts))
+    if request.task_records:
+        sandbox["task_records"] = request.task_records
     result_envelope: dict[str, object] = {
         "artifact_protection": artifact_summary,
         "process": process_facts,

@@ -571,6 +571,7 @@ class TerminalSessionTool(BaseTool):
                 "__sandbox_write_roots",
                 "__sandbox_read_roots",
                 "__sandbox_protected_write_paths",
+                "__sandbox_task_records",
                 "__access_mode",
                 "__run_scope",
             ),

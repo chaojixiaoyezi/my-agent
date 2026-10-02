@@ -615,11 +615,14 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
         ]
         if request.tool_name in {"run_command", "terminal_session"}:
             # 禁止写根与正在运行的安装目录一起交给沙箱设为只读（Full Access 的 Seatbelt/bwrap 同样执行）。
+            task_records = _task_host_state_path_strings(request.write_boundary)
             params["__sandbox_protected_write_paths"] = list(dict.fromkeys([
                 *_boundary_path_strings(request.write_boundary, "forbidden_write_roots"),
                 *_boundary_path_strings(request.write_boundary, RUNTIME_INSTALL_ROOTS_KEY),
-                *_task_host_state_path_strings(request.write_boundary),
+                *task_records,
             ]))
+            # 结构化原因（3a 定）：没有 task_root 时这次调用没有任务上下文（例如直聊命令），也就没有核验记录可保护，不去猜。
+            params["__sandbox_task_records"] = "protected" if task_records else "no_task_root"
         raw_write_roots = request.write_boundary.get("allowed_write_roots")
         if isinstance(raw_write_roots, (list, tuple)):
             # 文件工具已有 validate_write_boundary；shell 内部的重定向/open/cp 无法从

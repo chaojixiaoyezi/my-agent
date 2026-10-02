@@ -541,25 +541,22 @@ def task_root_containing(path: Path, owner_home: Path) -> Path | None:
     return None
 
 
-# LLM: H3：给命令沙箱列只读覆盖。owner_home 给出时只列这个 owner 的 config/ 和运行状态文件（数据根的配置本来就在 owner 墙外）；
-#   为空时列数据根的 config/、system/config/ 和全部已存在 owner home 的。anchors（本次命令的工作目录与写根）所在任务根里的
-#   宿主托管位置也列上（别的任务不枚举）。不按存在过滤：macOS 对还不存在的路径也能拒写，Linux 由挂载层只挂已存在的。
-# 函数用途: 列出要对模型命令设成只读的宿主托管路径。
-def host_readonly_paths(agent_home_root: Path, owner_home: Path | None = None,
-                        anchors: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+# LLM: H3：给命令沙箱列 owner 级的只读覆盖。owner_home 给出时只列这个 owner 的 config/ 和运行状态文件（数据根的配置本来就在
+#   owner 墙外）；为空时列数据根的 config/、system/config/ 和全部已存在 owner home 的。任务里的宿主托管位置不在这里：
+#   它们只按写边界的结构化 task_root 由 registry_invoke 交给沙箱（3a 定：不从工作目录或写根反推）。不按存在过滤：macOS 对
+#   还不存在的路径也能拒写，Linux 由挂载层只挂已存在的。
+# 函数用途: 列出要对模型命令设成只读的 owner 级宿主托管路径。
+def host_readonly_paths(agent_home_root: Path, owner_home: Path | None = None) -> tuple[Path, ...]:
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
     home_parts = () if owner_home is not None else HOST_CONFIG_HOME_PARTS
     paths = [*(agent_home_root.joinpath(*parts) for parts in home_parts),
              *(home.joinpath(*parts) for home in homes for parts in (*HOST_CONFIG_OWNER_PARTS, *_owner_state_parts()))]
-    for anchor in anchors:
-        home = owner_home_containing(anchor, agent_home_root)
-        task = task_root_containing(anchor, home) if home is not None else None
-        paths.extend(task_host_state_paths(task) if task is not None else ())
     return tuple(dict.fromkeys(paths))
 
 
-# LLM: 宿主已知的任务根（写边界里的结构化 task_root，或从路径认出的规范任务根）→ 任务里的宿主托管位置（HOST_STATE_TASK_PARTS）。
-#   只做路径拼接；registry_invoke 用它把本任务的位置交给命令沙箱，不依赖命令的工作目录在不在任务树里（ae 块 4 发现的缺口）。
+# LLM: 写边界里宿主写的结构化 task_root（当前任务；子代理是它所属任务的 task_workspace_dir）→ 任务里的宿主托管位置
+#   （HOST_STATE_TASK_PARTS）。只做路径拼接；registry_invoke 用它把本任务的位置交给命令沙箱，不依赖命令的工作目录在哪
+#   （ae 块 4 发现的缺口，3a 定口径）。
 # 函数用途: 列出一个任务根里对模型只读的宿主托管位置。
 def task_host_state_paths(task_root: Path) -> tuple[Path, ...]:
     return tuple(task_root.joinpath(*parts) for parts in HOST_STATE_TASK_PARTS)

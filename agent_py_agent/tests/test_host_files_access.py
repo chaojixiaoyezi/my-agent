@@ -406,12 +406,13 @@ def test_shell_lists_host_files_per_mode(tmp_path):
              "capability_requests", "temporary_grants", "compact", "logs", "audit", "workspace/runtime", "memory/curator",
              "memory_archive", "cache", "trash", "skills", ".agents/skills")
 
-    scoped = set(host_readonly_paths_for(str(main), "", (task / "work",)))
-    assert scoped == {main / "config", *(main / name for name in state), home["verification"]}
-    full = set(host_readonly_paths_for("", str(main), (task / "work" / "agents" / "r-1",)))
+    scoped = set(host_readonly_paths_for(str(main), ""))
+    assert scoped == {main / "config", *(main / name for name in state)}
+    full = set(host_readonly_paths_for("", str(main)))
     owners = (main, feishu, bare)
     assert full == {root / "config", root / "system" / "config", *(home_dir / "config" for home_dir in owners),
-                    *(home_dir / name for home_dir in owners for name in state), home["verification"]}
+                    *(home_dir / name for home_dir in owners for name in state)}
+    assert home["verification"] not in full | scoped and task, "任务核验记录只按写边界的 task_root 给（3a 定），不从路径反推"
     assert host_readonly_paths_for(str(tmp_path / "loose-owner"), "") == (), "非规范布局推不出数据根时不加覆盖"
 
 
@@ -480,8 +481,12 @@ def test_real_full_access_shell_cannot_write_host_files(tmp_path):
     ledger = config / "settings-changes.jsonl"
     before = {path: path.read_bytes() for path in (ledger, main / "runtime.db-wal", home["verification"] / "originals.json")}
 
+    # 生产里命令都经 registry 投影：写边界带结构化 task_root，本任务核验记录才进只读覆盖。
+    sandbox = {key: value for key, value in _dispatch_params(home, main).items() if key.startswith("__sandbox_")}
+    sandbox.pop("__sandbox_write_roots", None)  # Full Access 没有写根限制
+
     def run(command: str, cwd: Path = main):
-        return shell.execute({"command": command, "working_dir": str(cwd)})
+        return shell.execute({"command": command, "working_dir": str(cwd), **sandbox})
 
     assert not run(f"printf x >> {ledger}").ok
     assert not run(f"printf x >> {main / 'runtime.db-wal'}").ok
@@ -746,3 +751,29 @@ def test_real_full_access_shell_outside_the_task_tree_cannot_forge_the_records(t
     assert not run(f"printf forged >> {record}").ok
     assert record.read_text(encoding="utf-8") == "{}"
     assert run(f"cat {record}").ok and run(f"printf ok > {project / 'out.txt'}").ok, "读和写项目目录照常"
+
+
+def test_receipt_says_whether_task_records_were_protected(tmp_path, monkeypatch):
+    """3a 定：没有 task_root（没有任务上下文的直聊命令）时给结构化原因 no_task_root——那种情况本来就没有核验记录。"""
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        AuthorizedToolDispatchRequest,
+        _tool_params_with_runtime_boundary,
+    )
+
+    home = _home(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    shell = _shell(home, scoped=False)
+    monkeypatch.setattr(shell, "_run_command", lambda *_args, **_kwargs: subprocess.CompletedProcess(
+        args=["bash"], returncode=0, stdout="", stderr=""))
+    with_task = _dispatch_params(home, project)
+    without_task = _tool_params_with_runtime_boundary(AuthorizedToolDispatchRequest(
+        tool_name="run_command", tool=SimpleNamespace(), tool_params={"command": "true"}, workspace_root=project,
+        write_boundary={"allowed_write_roots": [str(project)]}))
+    for params, state in ((with_task, "protected"), (without_task, "no_task_root")):
+        assert params["__sandbox_task_records"] == state
+        outcome = shell.execute({"command": "true", "working_dir": str(project),
+                                 **{key: value for key, value in params.items() if key.startswith("__sandbox_")}})
+        assert outcome.result_envelope["sandbox"]["task_records"] == state
+    plain = shell.execute({"command": "true", "working_dir": str(project)})
+    assert "task_records" not in plain.result_envelope["sandbox"], "没经 registry 时不加这一项，旧回执不变"
