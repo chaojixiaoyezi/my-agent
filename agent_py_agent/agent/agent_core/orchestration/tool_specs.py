@@ -12,6 +12,8 @@ from .tool_spec_data import (
     _CREATE_DEPENDENCY_ORDER_RULE,
     _CREATE_DISJOINT_WRITE_SCOPE_RULE,
     _CREATE_EXAMPLES,
+    _CREATE_INPUT_MEDIA_DETAILS,
+    _CREATE_INPUT_MEDIA_PARAMETERS,
     _CREATE_ITEM_PARAMETER_DETAILS,
     _CREATE_KEYWORDS,
     _CREATE_PARAMETER_DETAILS,
@@ -19,8 +21,8 @@ from .tool_spec_data import (
     _CREATE_USE_CASES,
 )
 from .tool_spec_schemas import (
-    _CREATE_PARAMETER_SCHEMA,
     _RESOLVE_CAPABILITY_PARAMETER_SCHEMA,
+    create_parameter_schema,
 )
 
 
@@ -62,13 +64,17 @@ def _hints(
     )
 
 
-# LLM: 嵌套参数保留本项 goal/职责说明；role 引用同工具顶层索引，不重复整份角色目录。字段和验证规则不变。
+# LLM: 嵌套参数保留本项 goal/职责说明；role 引用同工具顶层索引，不重复整份角色目录。字段和验证规则不变；
+#   input_media 为真时顶层与 items[] 各多一个 input_media_refs（说明与形状同源），为假时与原 schema 逐字节一致。
 # 函数用途: 为 create_subagents 的每个 items[] 字段补齐必要说明，批量项也能选择相同工具、模型和角色。
-def _create_subagents_input_schema() -> dict[str, object]:
-    details = _with_role_template_index(_CREATE_PARAMETER_DETAILS)
+def _create_subagents_input_schema(*, input_media: bool = False) -> dict[str, object]:
+    parameters = {**_CREATE_PARAMETERS, **(_CREATE_INPUT_MEDIA_PARAMETERS if input_media else {})}
+    details = _with_role_template_index(
+        {**_CREATE_PARAMETER_DETAILS, **(_CREATE_INPUT_MEDIA_DETAILS if input_media else {})}
+    )
     schema = _input_schema(
-        _CREATE_PARAMETERS,
-        _CREATE_PARAMETER_SCHEMA,
+        parameters,
+        create_parameter_schema(input_media=input_media),
         details=details,
         required=(),
     )
@@ -77,7 +83,7 @@ def _create_subagents_input_schema() -> dict[str, object]:
     item_shape = items_shape.get("items") if isinstance(items_shape, dict) else None
     item_properties = item_shape.get("properties") if isinstance(item_shape, dict) else None
     descriptions = {
-        **_CREATE_PARAMETERS,
+        **parameters,
         **details,
         **_CREATE_ITEM_PARAMETER_DETAILS,
     }
@@ -90,7 +96,7 @@ def _create_subagents_input_schema() -> dict[str, object]:
 
 # LLM: 工具级说明保留并发/分工语义，参数级说明负责 covers/output_files 细节；不宣称 owner 内业务目录互相隔离。
 # 函数用途: 构造统一递归派工工具，减少重复文案但保持自动启动、事件回传与完整参数。
-def build_create_subagents_model_spec() -> ToolModelSpec:
+def build_create_subagents_model_spec(*, input_media: bool = False) -> ToolModelSpec:
     return ToolModelSpec(
         name="create_subagents",
         description=(
@@ -104,7 +110,7 @@ def build_create_subagents_model_spec() -> ToolModelSpec:
             "但 goal 和产物路径不能扩大当前权限。不要重复派工或为凑数量派工。派工后的职责边界："
             + coordinator_tool_boundary_text()
         ),
-        input_schema=_create_subagents_input_schema(),
+        input_schema=_create_subagents_input_schema(input_media=input_media),
         hints=_hints(
             use_cases=_CREATE_USE_CASES,
             avoid_when=(

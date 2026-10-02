@@ -68,6 +68,37 @@
     - Audit 来源例外：和 `model_call_admission_closed` 同属 `HOST_SHUTDOWN_FAILURE_TYPES`，结果归并改回 PENDING 时保留原因，重启后接续。
 - **验证**：见 TESTS.md 同名节。
 
+## 第 14 条：派子代理时把图片一起传过去——按 media_ref 结构化引用，走现有附件/媒体管线（2026-10-02，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`，已实现，待集成；默认关）
+
+- **问题**：J11 让主会话带图时按模态自动选模，但父代理用 `create_subagents` 派活没有入口把本轮图片交给子代理，子代理带图的真实链路没有入口。
+- **做法**（开关 `subagent_input_media_enabled`，仓库默认 false，打开由 3a 验收后决定）：
+  - **引用 = 附件内容哈希**。开关打开且用户轮带 typed media 时，`runtime/loop_support._with_input_media_manifest` 在当前回合初始 IR 末尾追加一条
+    宿主事实 `RuntimeFactsTurn(source=input_media_manifest)`：`[INPUT_MEDIA_MANIFEST]` + JSON（每个附件 `media_ref`=sha256、name、media_type、
+    size_bytes，不含路径）。放在开头项/交接/插话之后，不动 `_current_turn_opener_count` 的位置约定；主会话与子代理同一入口，
+    所以 child 也能把图再派给孙代理。它是模型可见请求内容的变化，故受开关控制；关闭时逐字节不变。
+  - **工具合同**：`create_subagents` 顶层与 `items[]` 多 `input_media_refs`（字符串数组）；说明与 schema 由 `CreateSubagentsTool.__init__`
+    按本 agent 开关决定（`build_create_subagents_model_spec(input_media=True)`，只认 `True`，MagicMock 不算），关闭时与原说明逐字节一致
+    （schema_hash 相同）。`tool_spec_data.py` 仍 ≤120 行。
+  - **宿主解析（唯一入口 `orchestration/input_media_refs.bind_subagent_input_media`，挂在 `create_policy.create_task_attributes`，根与递归共用）**：
+    先清掉模型塞进 `attributes.input_media` 的同名值（host-owned 键）；引用格式必须是 64 位十六进制；先在父级当前回合的
+    `task_attributes.input_media`（主会话由 Gateway 校验后写入，child 是自己首轮的属性）找，没找全再按父级 transcript
+    （child 用 `agent_thread_id`，主会话用 `conversation_thread_id`）用 `messages.visit_all_report` 顺序扫 canonical 行里顶层用户
+    `local_file` 媒体块；不查别的线程、不按 owner 附件根里“文件存在”放行。找到的引用用 Gateway 同一函数
+    `validate_input_media`（owner 附件根、`input_media_max_bytes/files`）重验，写进 child 任务属性 `input_media`——与主会话同键。
+  - **拒绝**（创建任何 run 之前，整批 `not_started`）：开关关 → `SUBAGENT_INPUT_MEDIA_DISABLED`（不可重试，结构化开关事实）；
+    格式错/重复/找不到/超限 → `SUBAGENT_INPUT_MEDIA_INVALID`，回执 `invalid_media_refs` 逐项 `reason_code`（malformed/duplicate/not_found/limit）。
+    两个码登记在 `error_taxonomy.py` 末尾独立块。
+  - **child 侧零新路径**：`context_bundle_refs.runtime_task_attributes` 原样投影 `input_media` → runner 的 `_native_turn_opener` 把它挂到
+    `UserTurn.media` → 适配器渲染 `local_file` 块 → 发送边界展开 base64。首轮选模（`subagent_model` 点位、首请求模态过滤）读的是同一份
+    冻结请求，J11 的 `candidate_input_modality_decision` 自然看到 image：不声明的候选不适用，全无兼容候选保留原模型并记结构化原因。
+    child 线程 canonical 行保留 `local_file` 引用，压缩侧 `media_archive_facts` 统计得到；恢复/续派重新从任务属性投影，
+    文件被删或改写按确定失败（`InputMediaError`）整批拒绝，与主会话一致；`replacement_for_run_ids` 接管的新 child 由父级重新点名引用。
+- **边界/未做**：没有为“图片”写专项分支，按 `media_type` 的 image/video 声明处理；视频同样走这条路；不放宽跨模型 reasoning 限制；
+  被 `project_input_media` 按预算归档或被压缩摘要掉的历史附件，模型手里可能没有 `media_ref`（归档占位文字只给名字/路径），
+  这与主会话重新添加附件的现状一致，本轮不改占位文字。工具结果里现在没有图片通道（ToolResult 只有文本），J16 截图应复用
+  `UserTurn.media` 这条通道。
+- **验证**：见 TESTS.md 同名节；真实 MiniMax M3 隔离核对见同节“真实核对”。
+
 ## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
 
 - **问题**：step17c 冒烟基本链路（`decision-evidence/step17c-shutdown-rehearsal-38d7c8615/`）里，父代理被子代理完成唤醒的那一轮，

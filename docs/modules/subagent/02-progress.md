@@ -1,5 +1,14 @@
 # 子代理维护状态
 
+2026-10-02（第 14 条，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`，本地已实现、待集成，默认关）：派子代理时可以把父会话的
+图片/视频按结构化引用交给子代理。开关 `subagent_input_media_enabled` 打开后：带附件的回合在当前回合 IR 末尾多一条宿主事实
+`[INPUT_MEDIA_MANIFEST]`（每个附件一个 `media_ref`=sha256，不含路径）；`create_subagents` 顶层与 `items[]` 多 `input_media_refs`；
+宿主 `orchestration/input_media_refs.bind_subagent_input_media` 只在父级本轮附件和父级 transcript 的 canonical 用户媒体块里按哈希查找，
+再按 owner 附件根与配置上限重验，写进 child 任务属性 `input_media`（与主会话同键）；未知/重复/格式错/超限整批 `not_started`
+（`SUBAGENT_INPUT_MEDIA_INVALID`），开关关闭传了引用整批 `SUBAGENT_INPUT_MEDIA_DISABLED`，模型塞进 attributes 的同名键丢弃。
+child 首个请求的用户轮经原 typed media 管线带上媒体，首轮选模的冻结请求按 J11 同一函数判定模态；child 线程 canonical 行保留 `local_file`，
+压缩/恢复沿主会话同一路径。仓库 fake/组件链已验；真实带图 child 待 MiniMax M3 隔离核对。
+
 2026-10-02（J11，分支 `worker/sol56-j11-modality`，本地已实现、待集成）：子代理首轮自动选模现在从冻结的
 `ToolLoopRequestInput` 读取 canonical `UserTurn.media` / provider `local_file` 媒体块，并与模型档案
 `input_modalities` 共用 Gateway 同一判定函数。image/video 只允许显式声明支持的候选；未声明、缺失模态和全无兼容候选都有

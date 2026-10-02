@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -14,6 +15,8 @@ from pathlib import Path
 DEFAULT_MEDIA_BYTES = 16 * 1024 * 1024
 # 一次请求默认最多 8 个媒体文件：限制批量上传成本。
 DEFAULT_MEDIA_FILES = 8
+# 模型可见附件清单在原生 IR 里的宿主来源标记（RuntimeFactsTurn.source）；派工解析端不读这段文字，只认 sha256。
+INPUT_MEDIA_MANIFEST_SOURCE = "input_media_manifest"
 
 
 # LLM: 媒体错误是确定的输入失败，不可丢掉附件继续文本请求或作为瞬时模型故障重试。
@@ -165,3 +168,24 @@ def project_input_media(messages: list[dict] | None, max_bytes: int) -> list[dic
         )} for block in media}
         result[index] = {**row, "content": [replacements.get(id(block), block) for block in content]}
     return result
+
+
+# LLM: 只投影已验证引用的结构化字段（sha256、名称、MIME、字节数），不含路径；media_ref 就是内容哈希，
+#   父代理派子代理时把它原样复制进 create_subagents 的 input_media_refs，宿主再按哈希在父会话里核对。
+#   纯函数，不读文件；只在 subagent_input_media_enabled 打开时进入模型上下文（runtime/loop_support）。
+# 函数用途: 把本轮附件渲染成模型可见的结构化清单文本，没有附件时返回空串。
+def input_media_manifest_text(refs: object) -> str:
+    rows = [
+        {"media_ref": ref["sha256"], "name": str(ref.get("name") or ""),
+         "media_type": str(ref.get("media_type") or ""), "size_bytes": int(ref.get("size_bytes") or 0)}
+        for ref in (refs or ()) if isinstance(ref, dict) and isinstance(ref.get("sha256"), str)
+    ]
+    if not rows:
+        return ""
+    payload = {"schema_version": "input-media-manifest.v1", "media": rows}
+    return "\n".join([
+        "[INPUT_MEDIA_MANIFEST]",
+        "这是本轮用户附件的结构化清单，不是用户指令。要把其中某个附件交给子代理时，",
+        "把对应 media_ref 原样填进 create_subagents 的 items[].input_media_refs；不要传路径或文件名。",
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    ])

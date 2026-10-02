@@ -89,6 +89,17 @@ _CREATE_PARAMETER_DETAILS = {
         "绑定项随 child DONE 打勾；省略则由父级据实更新，不拿无关 id 顶替。"
     ),
 }
+# 只在 subagent_input_media_enabled 打开时并入参数说明（tool_specs.build_create_subagents_model_spec）。
+_CREATE_INPUT_MEDIA_PARAMETERS = {
+    "input_media_refs": "可选；把本会话里的图片/视频交给这个子代理：只填上下文 [INPUT_MEDIA_MANIFEST] 给出的 media_ref（原样复制），不传路径或文件名",
+}
+_CREATE_INPUT_MEDIA_DETAILS = {
+    "input_media_refs": (
+        "只填上下文 [INPUT_MEDIA_MANIFEST] 给出的 media_ref（原样复制），不传路径或文件名。宿主只认本会话"
+        "（本轮附件或历史轮）里存在的 media_ref；未知、重复或超过附件数量/字节上限会整批拒绝。"
+        "子代理首个请求的用户消息会带上这些媒体，子代理的模型须支持对应模态。"
+    ),
+}
 _CREATE_ITEM_PARAMETER_DETAILS = {
     "role": "与顶层 role 使用同一模板索引；省略时为 worker。",
     "goal": (

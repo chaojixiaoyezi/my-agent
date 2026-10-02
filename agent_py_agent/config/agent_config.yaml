@@ -299,6 +299,12 @@ subagent_hierarchy_max_children_per_tool_call: 0
 # 平时不用改；只有当你担心自动接管会一直往下套、想强制收口时才需要设一个正数。
 # 填 `0` 表示不设深度上限，也就是允许一直接管下去。
 subagent_takeover_chain_max_depth: 0
+# 派子代理时能不能把本会话里的图片/视频一起交给子代理（默认关）。
+# 开启后：带附件的回合会在模型上下文里多一段结构化附件清单 [INPUT_MEDIA_MANIFEST]（每个附件一个 media_ref），
+# create_subagents 多一个 input_media_refs 参数；父代理把 media_ref 原样填进去，宿主核对附件确实属于父会话
+# （本轮附件或历史轮），再把媒体放进子代理首个请求的用户消息，走现有附件和媒体管线，子代理首轮选模按同一模态规则。
+# 关闭时工具说明和请求内容与原来逐字节一致；传了 input_media_refs 会被结构化拒绝（SUBAGENT_INPUT_MEDIA_DISABLED）。
+subagent_input_media_enabled: false
 
 # 子代理调试追踪等级。
 # - 0: 默认关闭

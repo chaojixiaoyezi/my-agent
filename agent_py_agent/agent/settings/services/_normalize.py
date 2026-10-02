@@ -387,7 +387,7 @@ _RUNTIME_BOOL_FIELDS = (
     "decision_observe_sampling_enabled", "decision_observe_nonblocking_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning",
-    "audit_enabled",
+    "audit_enabled", "subagent_input_media_enabled",
 )
 
 

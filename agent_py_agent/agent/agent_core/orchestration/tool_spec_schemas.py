@@ -39,18 +39,31 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "service_window_seconds": {"type": "integer", "minimum": 1},
     "audit_source_id": {"type": "string", "minLength": 1, "maxLength": 128},
 }
-_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
-    **_CREATE_ITEM_PARAMETER_SCHEMA,
-    "items": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": _CREATE_ITEM_PARAMETER_SCHEMA,
-            "required": ["goal"],
-            "additionalProperties": False,
-        },
-    },
+# 开关 subagent_input_media_enabled 打开时才进入 schema：media_ref 是 64 位十六进制内容哈希，宿主解析端再校验格式。
+_CREATE_INPUT_MEDIA_ITEM_SCHEMA: dict[str, Any] = {
+    "input_media_refs": {"type": "array", "items": {"type": "string"}},
 }
+
+
+# LLM: 顶层与 items[] 共用同一份 item 字段；input_media 为真时两层都多 input_media_refs，为假时与原 schema 逐字节一致。
+# 函数用途: 按开关生成 create_subagents 的参数形状（顶层 + 批量项）。
+def create_parameter_schema(*, input_media: bool = False) -> dict[str, Any]:
+    item_schema = {**_CREATE_ITEM_PARAMETER_SCHEMA, **(_CREATE_INPUT_MEDIA_ITEM_SCHEMA if input_media else {})}
+    return {
+        **item_schema,
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": item_schema,
+                "required": ["goal"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+_CREATE_PARAMETER_SCHEMA: dict[str, Any] = create_parameter_schema()
 _RESOLVE_CAPABILITY_PARAMETER_SCHEMA: dict[str, Any] = {
     "run_id": {"type": "string"},
     "decision": {"type": "string", "enum": ["grant", "deny"]},

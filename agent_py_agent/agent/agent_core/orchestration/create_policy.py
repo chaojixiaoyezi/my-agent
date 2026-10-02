@@ -445,8 +445,10 @@ def _config_access_mode(agent) -> str:
     return text or DEFAULT_COMMAND_ACCESS_MODE
 
 
-# LLM: 根/递归共用属性装配，宿主工具上限、模型引用和智能程度档位覆盖伪造值，决策与命名来源只能由宿主在准备后写入。
-# 函数用途: 保留显式属性并绑定父工具上限、原模型引用和档位；移除伪造建议及线程 pending，无效显式模型或档位在整批创建前报错。
+# LLM: 根/递归共用属性装配，宿主工具上限、模型引用和智能程度档位覆盖伪造值，决策与命名来源只能由宿主在准备后写入；
+#   input_media_refs 经 input_media_refs.bind_subagent_input_media 解析成 host-owned input_media，失败抛
+#   SubagentInputMediaError（调用方与 ModelProfileError 同样转成 not_started）。
+# 函数用途: 保留显式属性并绑定父工具上限、原模型引用、档位和点名附件；无效显式模型、档位或附件引用在整批创建前报错。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
     attrs = (
         dict(raw_params.get("attributes") or {})
@@ -487,12 +489,21 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     _add_current_task_workspace(attrs, agent)
     _inherit_audit_guarantee(attrs, agent)
     _clamp_service_window_to_audit_deadline(attrs)
+    _bind_host_owned_selection(attrs, raw_params, agent)
+    return attrs
+
+
+# LLM: 宿主专有的三项绑定按固定顺序：点名附件（模型塞进 attributes 的同名值先丢弃）、模型引用、智能程度档位；
+#   任一失败都在整批创建前抛错（SubagentInputMediaError / ModelProfileError，调用方转 not_started）。
+# 函数用途: 给 child 任务属性绑定父代理点名的附件、继承或显式的模型与档位。
+def _bind_host_owned_selection(attrs: dict[str, object], raw_params: dict[str, object], agent) -> None:
     from ...settings.model_profiles import inherit_model_profile
     from ...settings.reasoning_effort import inherit_reasoning_effort
+    from .input_media_refs import bind_subagent_input_media
 
+    bind_subagent_input_media(attrs, raw_params, agent)
     inherit_model_profile(attrs, agent, model=raw_params.get("model"))
     inherit_reasoning_effort(attrs, agent, raw_params.get("effort"))
-    return attrs
 
 
 # LLM: Every descendant keeps the originating ordinary-conversation request id as typed

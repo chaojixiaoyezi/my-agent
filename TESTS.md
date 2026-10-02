@@ -77,6 +77,37 @@
   - 打记号出错时只记异常类型，收尾照常；
   - 结果归并规则加一组：`host_shutdown_interrupted` 也被保留。
 
+## 第 14 条：派子代理时把图片一起传过去（2026-10-02，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`）
+
+**新增用例** `test_subagent_input_media.py`（13 项，真实 `SimpleAgent` + echo/假 HTTP，不启动 Gateway、不发真实请求）：
+- 清单：`input_media_manifest_text` 只含 media_ref/name/media_type/size_bytes，不含路径；`_with_input_media_manifest` 只在开关为 True
+  且用户轮带 media 时在末尾追加 `RuntimeFactsTurn(source=input_media_manifest)`，False/MagicMock/无附件原样返回；
+- 工具合同：开关关的 `CreateSubagentsTool.model_spec` 与类属性 schema_hash 相同、没有 `input_media_refs`；开关开顶层与 items[] 都有且说明含
+  “media_ref/不传路径”；MagicMock agent 不算开；
+- 根服务：开关关传引用 → `SUBAGENT_INPUT_MEDIA_DISABLED`/not_started/零创建；开关开从本轮 `task_attributes.input_media` 解析 → child
+  `attributes.input_media` 是完整已验证引用、不点名的 item 没有该键、`runtime_task_attributes` 原样投影；
+- 拒绝：同批里 owner 附件根有但不属于本会话的文件、未知哈希、格式错、重复 → `SUBAGENT_INPUT_MEDIA_INVALID`，`invalid_media_refs`
+  四类 reason_code 齐全，整批零创建；`input_media_max_files=1` 时两张图 → reason_code=limit；
+- 来源：只有 `conversation_thread_id`、本轮无附件时从父级 transcript 的 canonical 用户 `local_file` 块找到历史附件；换成别的线程 → not_found；
+  模型塞进 `attributes.input_media` 的值被丢弃（带/不带引用两种）；
+- 递归：`set_current_subagent_context` 绑定 child 的 `input_media` 后 `_hierarchy_child_spec` 解析成功，未知引用 not_started；
+- 真实产品链（两项）：创建带图 child 并真实跑完首个业务请求——供应商看到的用户消息里恰有一个 base64 image 块、字节等于原件、
+  不含 `local_file` 路径、带 `[INPUT_MEDIA_MANIFEST]`；首轮选模冻结请求用 `candidate_input_modality_decision` 判定：
+  只声明 text 的候选 `candidate_input_modalities_missing`，声明 image 才 applicable；child 线程 canonical 行 `media_archive_facts` 统计到 1 块；
+- `requested_media_refs` 接受 JSON 字符串/列表并去空白。
+
+**变异（6 个，全部拦住、sha256 逐字节恢复；脚本在 Claude 会话 scratchpad `run_mutations_media.py`）**：
+归属放水（owner 附件根里有文件就当父会话的）→ 2 failed；不丢弃模型塞的 attributes.input_media → 1；清单不看开关 → 1；
+schema 不看开关 → 1；不重验上限/附件根 → 1；不查重复引用 → 1。
+
+**门禁结果（本地，线上 CI 未作为验收来源）**：
+- 新文件 13 passed；受影响回归 14 文件（orchestration 工具规格/schema/创建服务/coordinator seed、子代理首请求选模、input_media、
+  参数登记/元数据/变更、model_profiles、audit finding、gateway 选模采用、compact 媒体两件）368 passed；
+- guards9 170 passed；import_boundaries findings=0；ruff All checks passed；doc_sync PASS；code-size strict blocked=False（hard=0，报告已还原）；
+  size_diff 新增 0（消失 5 为基线既有差异）；常数目录 `--check` 一致（无新增数值常数）；`git diff --check` OK；clean_package 以提交后为准。
+- 环境：`claude-tools/ci-venv-312`，basetemp `/private/tmp/claude-501/pef*`。
+- **真实核对**：MiniMax M3 隔离核对另记本节“真实核对”小节（做完补）。
+
 ## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`）
 
 **来源**：3a 派活；ds2 两轮加固 be 审过之后剩下的四处可选尾巴。设计与“挂 /status 不挂审计”的理由见 DESIGN_LEDGER 同名节。

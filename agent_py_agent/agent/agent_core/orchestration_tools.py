@@ -82,6 +82,7 @@ from .orchestration.finding_relation import (
     fence_inactive_audit_investigations,
     prepare_audit_finding_relation,
 )
+from .orchestration.input_media_refs import SubagentInputMediaError
 from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
@@ -240,7 +241,18 @@ def _role_suffix(role: str) -> str:
     return suffix
 
 
+# LLM: 模型引用错误沿原 TOOL_INVALID_ARGUMENTS；附件引用错误带自己的结构化码（异常属性），都是整批 not_started。
+# 函数用途: 把创建前属性装配抛出的参数错误转成模型可修正的 not_started 回执。
+def _not_started_create_result(exc: Exception) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        "create_subagents", False, str(exc),
+        error_code=str(getattr(exc, "error_code", "") or "TOOL_INVALID_ARGUMENTS"), effect_outcome="not_started",
+    )
+
+
 # LLM: 唯一模型派工工具只向原根/递归服务传递权限与取消快照；不得在外层锁住可选网络建议。
+#   model_spec 按本 agent 的 subagent_input_media_enabled（只认 True）在构造时定：开关开才多 input_media_refs，
+#   关闭时与类属性同一份说明；注册快照读实例属性。
 # 类用途: 暴露创建直属孩子的统一工具，复用原服务校验、幂等、保存和启动链。
 class CreateSubagentsTool(BaseTool):
     model_spec = build_create_subagents_model_spec()
@@ -265,6 +277,9 @@ class CreateSubagentsTool(BaseTool):
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
+        config = getattr(agent, "config", None)
+        if getattr(config, "subagent_input_media_enabled", False) is True:
+            self.model_spec = build_create_subagents_model_spec(input_media=True)
 
     # LLM: 根和递归各自持有同一 manager 创建边界；本层不得包住整个调用，否则锁外决策会重新落到锁内。
     # 函数用途: 将直属或递归派工送入原创建服务，并把停止转成明确的中断回执。
@@ -524,8 +539,8 @@ def _prepare_single_mode(
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     try:
         return allowed_tools, create_run_params(agent, params, goal, allowed_tools)
-    except ModelProfileError as exc:
-        return ToolHandlerOutcome("create_subagents", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+    except (ModelProfileError, SubagentInputMediaError) as exc:
+        return _not_started_create_result(exc)
 
 
 # LLM: A cancellation after materialization but before publication must leave the record visible
@@ -612,8 +627,8 @@ def _prepare_items(
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     try:
         task_params = _indexed_item_run_params(agent, capped)
-    except ModelProfileError as exc:
-        return ToolHandlerOutcome("create_subagents", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+    except (ModelProfileError, SubagentInputMediaError) as exc:
+        return _not_started_create_result(exc)
     if invalid := _replacement_preflight_result(agent, task_params):
         return invalid
     if invalid := _input_read_scope_result(agent, capped, task_params):

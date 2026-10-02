@@ -43,6 +43,7 @@ from .orchestration.decision_subagent import (
     prepare_subagent_model_decision,
 )
 from .orchestration.dispatch.state_contract import dispatch_state_contract_payload
+from .orchestration.input_media_refs import SubagentInputMediaError
 from .orchestration.lifecycle import (
     CreatedSubagentLifecycleRequest,
     publish_created_subagents,
@@ -519,8 +520,11 @@ def _hierarchy_child_spec(
         return _schedule_error("children 每一项必须包含 goal。", tool_name=tool_name)
     try:
         attrs = create_task_attributes(raw, agent)
-    except ModelProfileError as exc:
-        return ToolHandlerOutcome(tool_name, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+    except (ModelProfileError, SubagentInputMediaError) as exc:
+        return ToolHandlerOutcome(
+            tool_name, False, str(exc),
+            error_code=str(getattr(exc, "error_code", "") or "TOOL_INVALID_ARGUMENTS"), effect_outcome="not_started",
+        )
     attrs["host_agent_name_origin.v1"] = {"explicit": bool(str(raw.get("agent_name") or "").strip())}
     return HierarchyChildSpec(
         goal=goal,

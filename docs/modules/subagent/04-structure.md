@@ -453,6 +453,22 @@ case 写回 `open`（非法状态文本保留读到的状态），也会丢掉�
 名册和子页同次读取数字及代次，缺值用 `context_known=false` 显示破折号，不能把未知说成零 token。
 原 runner 阶段追踪继续刷新心跳，不改生命周期；显示字段从模型 bundle 排除，计费和校准继续用原账本。
 
+## 子代理带图：input_media_refs（第 14 条，默认关）
+
+`create_subagents.input_media_refs` / `items[].input_media_refs` → `create_policy.create_task_attributes` →
+`orchestration/input_media_refs.bind_subagent_input_media`：引用只认 sha256（父代理从本轮宿主事实
+`[INPUT_MEDIA_MANIFEST]` 原样复制，清单由 `runtime/loop_support._with_input_media_manifest` 在开关
+`subagent_input_media_enabled` 为 True 且用户轮带 typed media 时追加到当前回合 IR 末尾）。宿主先看父级当前回合的
+`task_attributes.input_media`（主会话由 Gateway 写、child 由自己首轮属性），没找全再按父级 transcript
+（child 用 `agent_thread_id`，主会话用 `conversation_thread_id`）的 canonical 用户 `local_file` 媒体块查；都没有就
+`not_found`。找到的引用按 `conversation/input_media.validate_input_media`（owner 附件根、`input_media_max_bytes/files`）
+重验后写进 child 任务属性 `input_media`，`context_bundle_refs.runtime_task_attributes` 原样投影，runner 的用户轮
+（`_native_turn_opener`）据此带媒体，供应商适配前再展开 base64；首轮选模冻结请求与压缩侧媒体事实都读同一份 canonical
+引用。失败整批 `not_started`：`SUBAGENT_INPUT_MEDIA_DISABLED`（开关关）/ `SUBAGENT_INPUT_MEDIA_INVALID`
+（`invalid_media_refs` 逐项 reason_code：malformed/duplicate/not_found/limit）。模型塞进 `attributes.input_media` 的值一律丢弃。
+工具说明与 schema 由 `CreateSubagentsTool.__init__` 按本 agent 开关决定（`build_create_subagents_model_spec(input_media=...)`），
+关闭时与原说明逐字节一致。
+
 ## 独立模型选择入口
 
 `create_subagents.model` / `items[].model` → `create_policy.create_task_attributes` →

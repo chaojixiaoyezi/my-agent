@@ -3306,3 +3306,30 @@ ERROR_CONTRACTS.update({
         ),
     ),
 })
+
+
+# ---- 子代理带图（第 14 条，2026-10-02 ef）：独立块，合并冲突时整块保留，不与上方表格交错 ----
+# LLM: 两个码只由 orchestration/input_media_refs.bind_subagent_input_media 产生，都是创建前整批 not_started；
+#   DISABLED 是结构化开关事实，INVALID 可按回执里的 invalid_media_refs 修正后重试。改文案须同步 test_subagent_input_media。
+ERROR_CONTRACTS.update({
+    "SUBAGENT_INPUT_MEDIA_DISABLED": ErrorContract(
+        code="SUBAGENT_INPUT_MEDIA_DISABLED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "派子代理带附件的开关（subagent_input_media_enabled）当前关闭，本批没有创建任何子代理；"
+            "去掉 input_media_refs 重发，或把需要的内容写进任务正文，是否开启由管理员在配置里决定。"
+        ),
+    ),
+    "SUBAGENT_INPUT_MEDIA_INVALID": ErrorContract(
+        code="SUBAGENT_INPUT_MEDIA_INVALID",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint=(
+            "input_media_refs 只认本会话 [INPUT_MEDIA_MANIFEST] 里的 media_ref；按 invalid_media_refs 修正"
+            "（去掉未知、重复、格式错的项或减少附件数量/大小）后整批重试，本批没有创建任何子代理。"
+        ),
+    ),
+})
