@@ -257,6 +257,26 @@ def _search(config: object, argument: str) -> str:
     return "\n".join(lines)
 
 
+# LLM: 代码常数目录是只读投影（权威位置是读取常数的那行源码），这里只按名字/说明/文件查找并展示
+#   文件:行、值、单位、类别与中文说明，绝不提供修改。与 user_config search 的常数结果同一数据源
+#   （settings/constants_catalog.search_constants）。只读，不需要 config。
+# 函数用途: /settings internal <关键词> —— 查代码里的模块级数值常数（只读，改动需改代码）。
+def _internal(_config: object, argument: str) -> str:
+    from ..settings.constants_catalog import search_constants
+
+    found = search_constants(argument, limit=10)
+    if not found:
+        return f"没有找到和“{argument}”相关的代码常数；可以试试 /settings search <关键词> 找用户可调参数。"
+    lines = [f"和“{argument}”相关的代码常数（最多 10 个，只读，改动需改代码）："]
+    for entry in found:
+        unit = f"（{entry['unit']}）" if entry.get("unit") else ""
+        summary = str(entry.get("description") or "").strip()
+        summary = (summary[:60] + "…" if len(summary) > 60 else summary) or "（没有中文说明）"
+        lines.append(f"- {entry['file']}:{entry['line']} {entry['name']} = {entry.get('value')}{unit}"
+                     f"［{entry.get('category', '其它')}］：{summary}")
+    return "\n".join(lines)
+
+
 # LLM: config 是 Gateway 启动配置，所以登记了派生规则的参数（如 max_tokens、推理强度）按默认模型算实际效果，并注明
 #   /model 切换过的会话可能不同；派生公式只在参数中心 applied_value 背后的原权威位置。只读。
 # 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、实际效果（有派生规则时）、用户配置里的值与能否修改。
@@ -359,6 +379,7 @@ _HANDLERS: dict[str, Callable[..., str]] = {
     "overview": _overview,
     "all": _all,
     "search": _search,
+    "internal": _internal,
     "show": _show,
     "set": _set,
     "reset": _reset,

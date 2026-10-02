@@ -35,6 +35,25 @@
   - 各需求原文、`fault-log.txt`、完整 harness。
   - 已扫过，没有密钥和密码。
 
+## 参数中心 P10：模块级数值常数的只读目录 + 守卫（2026-10-01，分支 `worker/ds1-constants-catalog`，基于 `f15b0a19f`）
+
+- 新增 `agent_py_agent/tests/test_constants_catalog.py`（9 项）：
+  - 目录与源码一致（`scripts/build_constants_catalog.py` 的 `check_catalog`，改源码不重新生成目录即失败）；
+  - 待整改白名单（`tests/fixtures/constants_catalog_pending_fixes.json`，685 个历史遗留名字）覆盖全部不合规常数；
+    白名单只短不长（已合规或已删除的条目必须删掉）；
+  - 协议类排除样例（HTTP_STATUS_OK/SCHEMA_VERSION/EVENT_READY/EXIT_CODE/MESSAGE_TYPE 不收，REQUEST_TIMEOUT_SECONDS 等收）；
+  - 单位/类别推导样例；扫描行为样例（只收模块级全大写数值，函数内/布尔/字符串/导入不收，简单算术算出值）；
+  - 运行时只读模块 `agent_py_agent/agent/settings/constants_catalog.py` 的 load/search 真实目录搜索。
+- 查看入口（只读）：`/settings internal <关键词>`（control_commands 词法 + settings_control_service `_internal`，TUI 与 IM 共用）；
+  user_config action=search 附 `constants` 结果与 `constants_note`（“代码常数，只读，改动需改代码”）。
+- 打包：pyproject.toml package-data 加 `config/*.json`，test_packaging 断言同步。
+- 变异验证（临时改生成器→测试失败→还原）：①清空协议类排除（2 用例失败，扫描 839 vs 目录 799）；②单位推导恒空
+  （2 用例失败，99 个常数逃出白名单）；③说明提取恒空（2 用例失败）。3 个变异全部被抓住。
+- 命令与结果：
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_constants_catalog.py agent_py_agent/tests/test_packaging.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **24 passed**
+  相关既有测试（settings_chat_control / user_config_decision_operations / user_config_decision_patch / parameter_registry /
+  parameter_metadata / constant_names_unique / value_display_parity）→ **185 passed**
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `02568822d`）
 
 - **P15**：`test_structured_masking.py` 新增 2 例：

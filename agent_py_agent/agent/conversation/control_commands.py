@@ -463,7 +463,8 @@ _SETTINGS_USAGE = (
     "用法：/settings 查看常用参数；/settings all 查看全部参数与改过的项；/settings search <关键词> 找参数；"
     "/settings show <参数名> 看说明与当前值；"
     "/settings set <参数名> <值> 修改；/settings reset <参数名> 恢复默认；/settings history [参数名] 看修改记录；"
-    "/settings revert <记录编号> 回滚一次修改。只有管理员可用，修改在重启 Gateway 后生效（发 /restart）。"
+    "/settings revert <记录编号> 回滚一次修改；/settings internal <关键词> 查代码里的常数（只读，改动需改代码）。"
+    "只有管理员可用，修改在重启 Gateway 后生效（发 /restart）。"
 )
 # 参数名沿用 AgentConfig 字段命名；修改记录编号是 12 位十六进制，聊天里允许用至少 6 位前缀。
 _SETTING_KEY = re.compile(r"[a-z][a-z0-9_]{1,79}")
@@ -491,6 +492,7 @@ def _settings_command(trailing: object) -> ConversationControlCommand:
     argument = rest.casefold() if head != "search" else rest
     checks = {
         "search": lambda: 0 < len(argument) <= 80 and "\n" not in argument,
+        "internal": lambda: 0 < len(argument) <= 80 and "\n" not in argument,
         "show": lambda: bool(_SETTING_KEY.fullmatch(argument)),
         "reset": lambda: bool(_SETTING_KEY.fullmatch(argument)),
         "history": lambda: not argument or bool(_SETTING_KEY.fullmatch(argument)),

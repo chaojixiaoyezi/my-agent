@@ -180,7 +180,7 @@ install.sh                              # 默认一键容器安装；生成透�
 TUI_EXTREME_TEST_MATRIX.md              # 五路 TUI 持续轮转、边界/组合/fuzz/soak 用例与客观证据权威账本
 agent_py_agent/
 |-- __main__.py                         # python -m agent_py_agent CLI 入口
-|-- config/                             # 默认 YAML 配置
+|-- config/                             # 默认 YAML 配置与常数目录（constants_catalog.json 由 scripts/build_constants_catalog.py 生成）
 |-- vendor/bubblewrap/                  # 随 Linux 离线二进制携带的许可、对应源码 RPM、构建及来源说明
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
@@ -626,6 +626,7 @@ agent_py_agent/
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
 |   |   |-- user_config_capability.py  # 用户配置路径（当前加载的配置文件）、显式白名单校验、边界名单与生效时机说明
 |   |   |-- parameter_registry.py     # 参数中心登记表：每个配置字段的说明（取自 YAML 注释）、类型、分类、安全等级、生效时机
+|   |   |-- constants_catalog.py      # 代码常数目录的运行时只读入口（/settings internal 与 user_config search 共用），只读随包 JSON
 |   |   |-- parameter_metadata.py    # 参数登记表元数据自动推导（单位/范围/归属模块/读取方），只读纯函数
 |   |   |-- parameter_changes.py      # 参数中心唯一写入口：按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
@@ -783,6 +784,8 @@ agent_py_agent/
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
 |   |-- test_parameter_registry.py     # 参数中心登记表：覆盖全部字段、YAML 说明（上方注释优先，其次行尾注释）、空说明基线、安全等级、凭据脱敏、搜索排序、派生实际效果、常用层级守卫
+|   |-- test_constants_catalog.py      # 常数目录守卫（P10）：目录与源码一致、待整改白名单只短不长、协议类排除、单位/类别/扫描样例、运行时搜索
+|   |-- fixtures/constants_catalog_pending_fixes.json # 常数目录待整改白名单：无单位后缀或无上方中文说明的历史遗留（只短不长）
 |   |-- test_backend_config_catalog.py # 前端参数目录守卫（不依赖 node）：随包 YAML 键集合==目录键集合、目录说明与后端一致、restartRequired 全 true
 |   |-- test_frontend_settings_labels.py # 前端设置页守卫（不依赖 node）：设置页 label 键必须在权威键集合、store 引用的运行时配置组必须存在
 |   |-- fixtures/parameter_description_baseline.json # 说明为空的参数基线名单（按原因分组）；名单外新增或名单里已有说明/已删除都让测试失败
@@ -1116,6 +1119,7 @@ agent_py_agent/
 |   |-- test_container_install.py      # 假 runtime 验证一键 build/probe/透明包装器
 |   `-- test_check_clean_package.py    # untracked、运行目录和 tar/wheel 制品门
 scripts/
+|-- build_constants_catalog.py              # 模块级数值常数只读目录生成器（ast 静态扫描，不 import 产品代码；--check 校验）
 |-- build_plugin_api.py                # 固定共用源码原字节投影，标准构建零运行依赖 SDK wheel
 |-- build_plugin_package.py            # 构建自有插件并沿原包/依赖校验生成安装 ZIP
 |-- build_plugin_files_package.py      # 构建非 Python（任意语言）插件的 v6 安装包：生成摘要、固定时间戳、宿主读包器复核
@@ -1364,6 +1368,7 @@ docs/
 - `agent_py_agent/cli/skill_learning_commands.py`：`my-agent skills learned list/show/revert/remove`，只读写 `SkillLearningStore` 与 `skills/learned/`，不构造 Agent、不调模型。
 - `agent_py_agent/tests/test_skill_learning.py`、`test_skill_learning_integration.py`：S3 的离线合同（假 backend）与接线（组合根、收口 helper、Gateway 车道、CLI、S1 自动确认、配置）。
 - `agent/settings/parameter_registry.py` 与 `parameter_changes.py`：参数中心。登记表是“有哪些参数、什么意思、谁能改”的唯一来源；写入口是 my-agent 的 `user_config` 工具与聊天 `/settings` 共用的唯一修改路径（记录与回滚）。
+- `scripts/build_constants_catalog.py` 与 `agent/settings/constants_catalog.py`：代码常数只读目录（P10）。生成器用 ast 静态扫描产品代码生成随包 `config/constants_catalog.json`，运行时模块只读该 JSON 供 `/settings internal` 与 user_config search 查找；常数权威位置仍是读取它的那行源码，目录只是投影。
 - `docs/design/PARAMETER_CENTER.md`：参数中心的唯一模块设计：来源、目标、安全等级、修改与回滚、my-agent 开发工作树、阶段与验收。
 - `docs/design/SKILL_AUTO_SUMMARY.md`：自学习 S3 的唯一模块设计：用户决定、上游参考取舍、触发、材料、后台执行、输出合同、自动闸门、存储所有权、用户入口与边界。
 - `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。

@@ -75,6 +75,7 @@ exclude = ["agent_py_agent.tests*"]
 [tool.setuptools.package-data]
 agent_py_agent = [
   "config/*.yaml",
+  "config/*.json",
   "prompts/*.md",
   "agent/subagents/role_template_catalog/builtin/*.json",
   "skills/**/*",

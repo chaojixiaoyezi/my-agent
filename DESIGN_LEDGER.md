@@ -12,6 +12,27 @@
   - 两条都会改变用户可见行为，需要 3a 或用户决定。
 - **证据**：见 TESTS.md 的 C11 节。
 
+## 参数中心 P10：模块级数值常数的“只读目录 + 守卫”（2026-10-01，分支 `worker/ds1-constants-catalog`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已实现，待集成）
+
+- **设计定案**：常数留在读取它的地方（那里是唯一权威），不搬进中央常数模块、不变成用户配置项；目录是投影——由
+  `scripts/build_constants_catalog.py` 用 ast 静态扫描（不 import 产品代码）生成随包 JSON
+  `agent_py_agent/config/constants_catalog.json`（**799 项**、328 个文件），统一查找和查看；改常数就是改那一行源码。
+  与原计划“每批先把常数收进登记表并证明读取方真的读到，再删原常数”的差别：迁移仍按模块分批做（改名、合并、补说明），
+  但不再把常数搬进参数登记表——登记表只收用户可调参数，常数只进只读目录。
+- **生成器**：收集模块级、全大写、值为数字字面量或简单算术（四则/整除/取模/乘方/正负）的常数，每条记名字、文件:行、
+  计算值、单位（后缀推导：_SECONDS/_MS/_CHARS/_BYTES/_TOKENS/_COUNT/_PERCENT 等，推不出记空）、类别（上限预算/超时/
+  比例阈值/重试/其它，按名字关键字顺序命中）、说明（紧挨着上方的中文注释行）；协议类不收（名字含 VERSION/STATUS/EVENT/
+  SCHEMA/PROTOCOL/CODE 或以 _TYPE 结尾）；`--check` 模式只比较不写，守卫测试直接调它。
+- **守卫**（`agent_py_agent/tests/test_constants_catalog.py`）：目录与源码一致；不合规常数（无单位后缀或无上方中文说明）
+  只允许出现在 `tests/fixtures/constants_catalog_pending_fixes.json` 的待整改白名单里（当前 685 个名字，历史遗留快照），
+  名单外的常数必须合规，名单里的常数已合规或已删除时必须删条目（只短不长）；协议类排除、单位/类别推导、扫描行为样例钉住。
+- **查看入口**（只读）：`/settings internal <关键词>`（TUI 与 IM 共用 Gateway 控制通道）按名字/说明/文件搜索，显示
+  文件:行、值、单位、类别、说明；user_config 的 action=search 同数据源附 constants 结果并标明“代码常数，只读，改动需改代码”。
+  运行时只读模块 `agent_py_agent/agent/settings/constants_catalog.py` 读随包 JSON（缺失/损坏返回空目录）。
+- **打包**：pyproject.toml package-data 加 `config/*.json`，test_packaging 加断言。
+- **验证**：新增守卫 9 项 + 相关既有测试 185 项通过；3 个变异（协议排除清空、单位推导恒空、说明提取恒空）全部被抓住；
+  详情见 TESTS.md 同名节。
+
 ## 脱敏补两种写法 + LandmarkOptions 同名不同义改名（2026-10-01，分支 `worker/ds1-mask-rename`，基于 `claude/3a-step16z` 的 `02568822d`，已实现，待集成）
 
 - **P15 脱敏补两种写法**（唯一实现 `user_config_capability.masked_structure`/`mask_value`，未另写一份）：

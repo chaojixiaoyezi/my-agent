@@ -32,6 +32,7 @@ def test_production_package_excludes_tests_and_dev_harnesses():
     assert data["tool"]["setuptools"]["include-package-data"] is False
     assert "agent_py_agent.tests*" in data["tool"]["setuptools"]["packages"]["find"]["exclude"]
     assert "skills/**/*" in data["tool"]["setuptools"]["package-data"]["agent_py_agent"]
+    assert "config/*.json" in data["tool"]["setuptools"]["package-data"]["agent_py_agent"]
     assert (
         "agent/subagents/role_template_catalog/builtin/*.json"
         in data["tool"]["setuptools"]["package-data"]["agent_py_agent"]

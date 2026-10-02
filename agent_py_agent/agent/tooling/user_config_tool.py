@@ -414,7 +414,18 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
     if action == "search":
         config = getattr(agent, "config", None)
         found = search_parameters(str(params.get("query") or key), limit=20)
-        return {"ok": True, "parameters": [_spec_view(spec, config, brief=True) for spec in found]}
+        report = {"ok": True, "parameters": [_spec_view(spec, config, brief=True) for spec in found]}
+        from ..settings.constants_catalog import search_constants
+
+        constants = search_constants(str(params.get("query") or key), limit=10)
+        if constants:
+            report["constants"] = [{"name": entry["name"], "file": entry["file"], "line": entry["line"],
+                                    "value": entry.get("value"), "unit": entry.get("unit", ""),
+                                    "category": entry.get("category", "其它"),
+                                    "description": str(entry.get("description") or "")[:160]}
+                                   for entry in constants]
+            report["constants_note"] = "以下为代码里的常数（模块级数值），只读，改动需改代码（按文件:行修改源码）；不是用户配置。"
+        return report
     if action == "history":
         changes = parameter_history(user_path=user_path, key=key, limit=20)
         return {"ok": True, "changes": [displayed_change(item) for item in changes]}

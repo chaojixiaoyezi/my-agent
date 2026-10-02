@@ -1,5 +1,12 @@
 # Gateway 维护状态
 
+`/settings internal <关键词>` 查代码常数（参数中心 P10，分支 `worker/ds1-constants-catalog`，2026-10-01）：
+`settings_control_service._internal` 调 `settings/constants_catalog.search_constants`（只读随包
+`config/constants_catalog.json`，由 `scripts/build_constants_catalog.py` 用 ast 静态扫描生成，799 项/328 文件），
+按名字/说明/文件搜索，显示文件:行、值、单位、类别、中文说明，回执首行标“只读，改动需改代码”；TUI 与 IM 共用
+Gateway 控制通道，与 user_config action=search 的 constants 结果同数据源。守卫见 `test_constants_catalog.py`
+（目录与源码一致、待整改白名单只短不长、协议类排除）。`control_commands._settings_command` 新增 internal 子命令（词法同 search）。
+
 `/settings show` 显示参数元数据（参数中心 P8，分支 `worker/ds2-registry-metadata`，2026-10-01）：`settings_control_service._show`
 对有值的参数补四行“单位／范围／归属模块／读取方”（`_metadata_line`，没推导出就不出现），来源是 `settings/parameter_metadata.py`
 的自动推导：单位按键名后缀（_seconds/_ms/_chars/_bytes/_tokens/_percent 等，推不出留空）、范围取自现有规范化/校验规格
