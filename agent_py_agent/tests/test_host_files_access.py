@@ -183,7 +183,8 @@ def test_host_credentials_are_unreadable_by_file_tools(tmp_path, monkeypatch, mo
         assert policy.check_write(target).code == CREDENTIAL_CODE, "读写都拒，凭据码优先"
     # 其它配置照旧可读；用户自己工作区里的 secrets/ 和同名 desktop.yaml 不受影响。
     for target in (config / "settings-changes.jsonl", config / "admin-password-attempts.json",
-                   config / "tests" / "fixture.yaml", home["main"] / "config" / "capability_config.yaml",
+                   config / "tests" / "fixture.yaml", config / "archive.yaml.d" / "notes.txt",  # 只认 config/ 下直接的 YAML 文件
+                   home["main"] / "config" / "capability_config.yaml",
                    home["ws"] / "secrets" / "token.txt", home["ws"] / "desktop.yaml"):
         assert policy.check(target).allowed, target
 
