@@ -1,5 +1,7 @@
 # GW-03 / 慢模型相关配对基准
 
+> 决策模型中文质量基准（`decision_quality_bench.py`、`decision_quality/`）是另一组工具，说明见 [decision_quality/README.md](decision_quality/README.md)。
+
 这一组脚本是 **A 项（owner 事实缓存快照绑定）与 GW-03（锁内全量解析）** 的长期可复跑基准，
 从当时的验收脚本整理而来，只保留结构化夹具，不含任何真实会话内容、个人路径或密钥，也不引入新依赖。
 

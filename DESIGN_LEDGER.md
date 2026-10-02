@@ -20,6 +20,44 @@
 - **验证**：守卫 13 passed；相关 22 个测试文件全过（累计 492）；guards9 168 passed；import 0 条、ruff 过、
   doc-sync PASS、code-size strict hard=0、diff-check 过、clean-package OK、size_diff 新增 0。详见 TESTS.md 第九批节。
 
+## 决策模型中文质量基准与每个点位的阈值（J12）（2026-10-02，分支 `claude/be-jev-quality-bench`，基于 `claude/3a-step16z` `8ec88808d`，已实现，待集成）
+
+- **做什么**：
+  - 一组固定的中文用例，按点位放在 `scripts/bench/decision_quality/cases/<点位>.json`。
+  - 运行器 `scripts/bench/decision_quality_bench.py` 用产品的决策后端直接问 Jev，按每题可接受答案集合打分。
+  - `thresholds.json` 给全部 12 个点位定阈值，包括准确率、计分题数和调用失败率；`results.json` 登记各点位最近一次成绩。
+- **用例怎么变成请求**：
+  - 用例只写结构化输入，适配层 `decision_quality_adapters.py` 把它交给各点位**真实的材料构造代码**，所以发出去的请求和产品逐字节同形。
+  - pre_recall 的材料是在补充查询入口里内联拼的，适配层截获这份材料。
+  - 成绩里记着用例摘要和材料摘要。构造代码一改，旧成绩就失效。
+- **默认打开的前提（强制）**：
+  - 随包默认模式不是 `off` 的点位，必须有一份用例与材料摘要都和当前一致、并达到阈值的登记成绩。
+  - `test_decision_quality_bench.py` 检查这一条。用户自己在菜单里开哪个点位不受影响。
+- **为什么用测试强制**：这条规则管的是开发时“改仓库默认值”的门槛，不是运行时硬门；主链路行为不变。
+  只写在文档里，默认值被顺手改掉时没人能看出来。“配置必须真的生效”要求它有结构化检查。
+- **阈值怎么定**：跑之前按 apply 模式的危害定，不按结果回调：
+  - 会换模型的点位（选模、子代理选模）要 0.9；
+  - 往上下文里加东西或会引导替换的点位（pre_recall、curator_relation）以及能力推荐（skill_tool）要 0.85；
+  - 只排序或只加提示的点位要 0.75—0.8。
+- **首轮真实成绩**（Jev 52 次，全部成功，`jev-1.13.0`）：
+
+  | 点位 | 准确率 | 结论 |
+  | --- | --- | --- |
+  | pre_recall | 14/16 | 达标 |
+  | curator | 38/38 | 达标 |
+  | curator_relation | 32/32 | 达标 |
+  | recall | 12/30 | **未达标** |
+
+  证据：`~/.my-agent/decision-evidence/j12-quality-bench/`。
+- **recall 未达标的原因与方向（未实施）**：
+  - 对无关或次要的记忆，Jev 回答 `not_needed`/`no_match`，而不是 `later`/`normal`。
+  - 按现有规则，有任一非排序回答就整次保留原顺序，所以这 12 次在 apply 下一次都不会重排。
+  - 根源是逐条记忆题的候选措辞：`not_needed` 写的是“不需要额外重排”，Jev 读成“这条用不上”。
+  - 方向：改逐条题的非排序候选措辞，或把逐条的 `not_needed`/`no_match` 当作“稍后参考”。两种都会改变产品行为，要单独做并重跑本基准。
+- **没有用例的点位**：model_selection、subagent_model、skill_tool、planning、delivery_quality、action_candidate、external_material_order、skill_proposal_review 只有阈值，因此不能默认打开。
+  适配层有现成入口：盘点结论是除 subagent_model 外都能用轻量假对象调用真实构造函数。
+- **局限**：用例是测试方编写的合成样本，数量少，不能外推为线上整体质量。达标只是默认打开的必要条件，还要看真实收益与代价。
+
 ## 补充查询片段材料：先预检每个片段能新增的事实（J8，P5-A 缺口 1）（2026-10-02，分支 `claude/be-jev-snippet-facts`，基于 `claude/3a-step16z` `918285cc1`，已实现，待集成）
 
 - **问题**：09-25 语义召回实验里，K3a 两批都选了主题已被原召回覆盖的片段，补不出东西。原因是 Jev 只看得到基线摘要和片段文字，不知道哪个片段真能补出新事实。

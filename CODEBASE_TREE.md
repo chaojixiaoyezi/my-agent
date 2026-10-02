@@ -1146,7 +1146,10 @@ scripts/
 |-- build_plugin_package.py            # 构建自有 Python 插件；wheel 与外层 ZIP 都固定归档元数据并经原包/依赖校验
 |-- build_plugin_files_package.py      # 构建非 Python（任意语言）插件的 v6 安装包：生成摘要、固定时间戳、宿主读包器复核
 |-- plugin_build.py                    # 开发构建后端调用、wheel 元数据读取与独占产物写入
-|-- bench/                             # GW-03/慢模型配对基准：锁内解析成本、owner 事实缓存各路径（配对交替，比值只在组内）
+|-- bench/                             # GW-03/慢模型配对基准：锁内解析成本、owner 事实缓存各路径（配对交替，比值只在组内）；决策模型中文质量基准
+|   |-- decision_quality_bench.py      # 决策质量基准运行器：离线核对、真实打分、阈值比对、登记成绩、“点位默认打开”前提检查
+|   |-- decision_quality_adapters.py   # 点位适配：中文用例 → 各点位真实材料构造代码 → 请求材料与每题可接受答案
+|   `-- decision_quality/              # thresholds.json（12 点位阈值）、results.json（登记成绩）、cases/<点位>.json、README
 |-- live_lab/                          # 真实链路 harness；真实 preflight、main-artifact、tool-recovery
 |-- tui_ansi_snapshot.py               # pyte 开发工具：从 raw ANSI/offset 账还原文本、样式、光标和标题快照
 |-- tui_reference_fixture_server.py    # loopback 确定性 Anthropic 服务：驱动 TUI Markdown/思考/权限/错误黑盒场景
@@ -1787,6 +1790,7 @@ docs/
 - `agent_py_agent/tests/test_adapter_state_write_resilience.py`：通道适配器常驻进程合同——周期状态写入撞 ENOSPC 不杀进程、下一轮恢复并把失败次数写进状态文件；异常退出先停适配器、删 pid 文件、状态写 failed，状态写不进去也留 ERROR 日志；`adapter_process_facts` 只按 adapter.pid 进程存活判活、只读不清理。
 - `agent_py_agent/tests/test_gateway_loop_backoff_coverage.py`：Gateway 全部后台循环的退避/限流/记账覆盖——维护、调度器到期、孤儿恢复循环出错等 max(自身间隔, 退避)，心跳循环只限流不退避，派发 tick 段内错误空闲时退避、请求在流动时不减速；`runtime_error_report` 对包装异常沿原因链把 OSError/sqlite3.OperationalError 归为 io 并带 cause_type。
 - `agent_py_agent/tests/test_guidance_receipt_digest_compat.py`：插话幂等回执指纹的持久化稳定性合同——固定样本的 v1/v2 指纹十六进制钉死，a646a4885 之前口径写的回执能读、同键重试回同一条、记了版本的严格按版本；对账遇到旧回执自然收敛为排队；真坏账保持 terminal_unknown 但不重写文件、计入 summary 并经 raise_if_input_reconcile_unsettled 抛给循环守卫。
+- `scripts/bench/decision_quality_bench.py` 与 `scripts/bench/decision_quality/`：决策模型中文质量基准（J12）。用例经各点位真实材料构造生成请求，按可接受答案集合打分；`thresholds.json` 给全部点位定阈值，`results.json` 登记成绩。`test_decision_quality_bench.py` 强制：随包默认打开的点位必须有用例与材料摘要都和当前一致、且达标的成绩。
 - `scripts/bench/`：GW-03 与慢模型 A 项的长期可复跑配对基准（`measure_scheduler_reads.py` 锁内解析成本、`bench_owner_fact_kind.py` 各路径单测、`paired_owner_fact_kind.py` 两 checkout 交替比较）。只含结构化夹具，无真实会话内容；README 说明"锁更短 ≠ 整体更快"与"跨组数字不可相除"的证据边界。
 - `agent_py_agent/tests/test_scheduler_scan_costs.py`：调度账本读取成本的合同——waiting 投影缓存的锁外探针 + 锁内三重校验（命中/外部改写/同 stat 不同内容/缓存清空都不得改变调用方结果）、`runtime_snapshot` 的锁外解析与旧实现参考投影逐字一致且锁内不再做 JSON/逐 run 解析、owner 事实判定缓存的签名失效与 TTL 边界。
 

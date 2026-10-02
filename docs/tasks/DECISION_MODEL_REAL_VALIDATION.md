@@ -945,3 +945,21 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
 - 预检挡不住弱相关事实，Jev 仍会选。
 - 语义召回下的端到端效果（真实嵌入 + Gateway 对话）未验证。仓库默认 `query_text`，生产不打开。
 - 证据：`~/.my-agent/decision-evidence/j8-fragment-material/`。
+
+## J12 决策模型中文质量基准首轮真实成绩（2026-10-02，分支 `claude/be-jev-quality-bench`，基于 `8ec88808d`）
+
+- **做法**：
+  - 用 `scripts/bench/decision_quality_bench.py` 把固定中文用例交给各点位真实的材料构造代码，再用产品决策后端直接问 Jev。
+  - `env -i` 隔离，连接文件只含 Jev 一个 provider（0600，用完删）。
+  - 4 个点位 26 个用例，各跑 2 遍。
+- **调用**：52 次，与预计一致。全部成功，`jev-1.13.0`，中位约 1.2—1.4 秒。
+- **结果**：
+  - pre_recall 14/16，达标。错的都是“爬香山 / 车子保养”这一条，两遍都选了爬香山。
+  - curator 38/38，达标。
+  - curator_relation 32/32，达标。
+  - recall 12/30，**未达标**：对无关或次要的记忆，Jev 回答 `not_needed`/`no_match`，不是 `later`/`normal`。按现有规则整次保留原顺序，12 次在 apply 下都不会重排。
+- **结论**：
+  - curator 与 curator_relation 在这批样本上判断稳定。
+  - recall 的问题出在逐条题的候选措辞，属材料设计问题，方向已登记台账。
+  - 成绩已登记进 `scripts/bench/decision_quality/results.json`。所有点位仍默认关闭。
+- **证据**：`~/.my-agent/decision-evidence/j12-quality-bench/`。

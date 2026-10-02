@@ -1,0 +1,78 @@
+{
+  "schema": "decision_quality_thresholds.v1",
+  "note": "每个点位默认打开（随包默认模式不是 off）的前提：results.json 里有用例与材料摘要都和当前一致、且达到这里阈值的成绩。阈值在跑基准之前定，不按结果回调。",
+  "points": {
+    "pre_recall": {
+      "min_accuracy": 0.85,
+      "min_scored_questions": 16,
+      "max_call_failure_rate": 0.1,
+      "reason": "apply 只追加事实；选错会把无关事实放进上下文、挤占名额"
+    },
+    "recall": {
+      "min_accuracy": 0.75,
+      "min_scored_questions": 24,
+      "max_call_failure_rate": 0.1,
+      "reason": "只在原槽位内重排，任一题不确定就保留原顺序，选错危害小"
+    },
+    "curator": {
+      "min_accuracy": 0.75,
+      "min_scored_questions": 30,
+      "max_call_failure_rate": 0.1,
+      "reason": "只给提取请求附临时注释，提取、校验与晋升仍走原链"
+    },
+    "curator_relation": {
+      "min_accuracy": 0.85,
+      "min_scored_questions": 24,
+      "max_call_failure_rate": 0.1,
+      "reason": "提示会把更新类事实指向原条目；误判可能引导替换（仍被晋升链挡住）"
+    },
+    "model_selection": {
+      "min_accuracy": 0.9,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "apply 会换掉主会话这一轮的模型，影响整轮回答"
+    },
+    "subagent_model": {
+      "min_accuracy": 0.9,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "apply 会换掉子代理的执行模型"
+    },
+    "skill_tool": {
+      "min_accuracy": 0.85,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "漏推相关能力会让主模型看不到需要的工具"
+    },
+    "planning": {
+      "min_accuracy": 0.8,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "只追加软提示，待办账与顺序不变"
+    },
+    "delivery_quality": {
+      "min_accuracy": 0.8,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "只追加复核提示，不跑测试、不改结果"
+    },
+    "action_candidate": {
+      "min_accuracy": 0.8,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "只追加候选编号提示，不执行动作"
+    },
+    "external_material_order": {
+      "min_accuracy": 0.8,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "只追加阅读顺序，原结果与归档不变"
+    },
+    "skill_proposal_review": {
+      "min_accuracy": 0.8,
+      "min_scored_questions": 20,
+      "max_call_failure_rate": 0.1,
+      "reason": "只重排展示并加标签，不确认或改写提案"
+    }
+  }
+}

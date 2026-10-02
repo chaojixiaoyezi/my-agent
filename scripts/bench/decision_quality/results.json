@@ -1,0 +1,73 @@
+{
+  "points": {
+    "curator": {
+      "accuracy": 1.0,
+      "call_failures": 0,
+      "calls": 12,
+      "cases_digest": "1ebc180e0e0884257c6ff5cf2ebbf853d9ba765f9d1c4c2cc3301d504dbba77c",
+      "elapsed_ms_max": 3256,
+      "elapsed_ms_median": 1318.5,
+      "material_digest": "f123b1e640bf577e47cd11777e8ba9e512a71ccdc9f25196b70cc968564787bd",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 38,
+      "recorded_at": "2026-10-02T02:11:15-0700",
+      "reps": 2,
+      "scored_questions": 38
+    },
+    "curator_relation": {
+      "accuracy": 1.0,
+      "call_failures": 0,
+      "calls": 12,
+      "cases_digest": "08b9809feebf97e4017cf594c096fd9d9ea733413e176fba649e96503da64870",
+      "elapsed_ms_max": 1864,
+      "elapsed_ms_median": 1404.0,
+      "material_digest": "e71e8e8cc1a8a6325294715c6fa2f707e6feb106e1d8eb58119f11ee7bd5c5a3",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 32,
+      "recorded_at": "2026-10-02T02:11:32-0700",
+      "reps": 2,
+      "scored_questions": 32
+    },
+    "pre_recall": {
+      "accuracy": 0.875,
+      "call_failures": 0,
+      "calls": 16,
+      "cases_digest": "bb52b8c8dcc156d51defb74780b5e5e09bea5fd9a3ab9eb15b429ffc1098765a",
+      "elapsed_ms_max": 2335,
+      "elapsed_ms_median": 1363.5,
+      "material_digest": "f16b94a82252cd26bb10faa9f6985a24081f034ce68e7e838c774367be2e59bd",
+      "met": true,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 14,
+      "recorded_at": "2026-10-02T02:10:40-0700",
+      "reps": 2,
+      "scored_questions": 16
+    },
+    "recall": {
+      "accuracy": 0.4,
+      "call_failures": 0,
+      "calls": 12,
+      "cases_digest": "4372075de245b5aa4b109164031ac5190b6f97b9cd4b413816480e3cc83c3026",
+      "elapsed_ms_max": 1488,
+      "elapsed_ms_median": 1236.5,
+      "material_digest": "8f365ed042b7de220e65be051743d35777c6a8cf81e3f7044dcf1ac1cd02a280",
+      "met": false,
+      "models": [
+        "jev-1.13.0"
+      ],
+      "passed": 12,
+      "recorded_at": "2026-10-02T02:10:56-0700",
+      "reps": 2,
+      "scored_questions": 30
+    }
+  },
+  "schema": "decision_quality_results.v1"
+}

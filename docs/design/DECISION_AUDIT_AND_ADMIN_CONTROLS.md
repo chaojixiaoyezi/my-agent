@@ -18,6 +18,8 @@
 存储值仍只有 `off/observe/apply` 三个（`points.<点>.mode`），设置服务、CAS、继承与恢复都不变，只改界面呈现。
 新开启的点默认勾着观察模式（先观察再正式用）。实现：`cli/chat_parts/tui_decision_menu.py` 的 `_mode_control`。
 
+**随包默认打开的前提**（J12，2026-10-02）：用户自己在菜单里开哪个点不受限制。但仓库里把某个点位的随包默认模式改成非 `off`，必须先在[决策质量基准](../../scripts/bench/decision_quality/README.md)里有登记成绩，且该成绩的用例与材料摘要都和当前一致、达到该点位阈值；`test_decision_quality_bench.py` 强制检查。
+
 ## 2. 决策超时可调，my-agent 可在上下限内自调
 
 - 用户在菜单里改等待时间不受限（仍须有限正秒数）。

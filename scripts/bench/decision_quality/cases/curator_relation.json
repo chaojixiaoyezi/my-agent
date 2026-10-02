@@ -1,0 +1,105 @@
+{
+  "schema": "decision_quality_cases.v1",
+  "point": "curator_relation",
+  "note": "记忆关系：新消息与正式条目的关系。重述同一事实期望 possible_duplicate；事实变了期望 possible_update（与旧条目矛盾，possible_conflict 也算对）；没写期望的对期望 no_match。期望按“消息编号|条目编号”写。",
+  "shared": {},
+  "cases": [
+    {
+      "id": "cr-01-car",
+      "messages": {
+        "m1": "我把车换了，现在开的是一辆蓝色的 Model 3。"
+      },
+      "formal": {
+        "e1": "我开一辆白色 2021 款卡罗拉双擎。",
+        "e2": "老家在湖南衡阳。",
+        "e3": "我对芒果过敏。"
+      },
+      "expected": {
+        "m1|e1": [
+          "possible_update",
+          "possible_conflict"
+        ]
+      }
+    },
+    {
+      "id": "cr-02-mango",
+      "messages": {
+        "m1": "再提醒一下，我对芒果过敏，别给我推荐芒果甜品。"
+      },
+      "formal": {
+        "e1": "我对芒果过敏。",
+        "e2": "每年 4 月去三里屯的诊所洗牙。"
+      },
+      "expected": {
+        "m1|e1": [
+          "possible_duplicate"
+        ]
+      }
+    },
+    {
+      "id": "cr-03-hometown",
+      "messages": {
+        "m1": "其实我老家不是衡阳，是湖南邵阳，之前说错了。"
+      },
+      "formal": {
+        "e1": "老家在湖南衡阳。",
+        "e2": "我开一辆白色 2021 款卡罗拉双擎。"
+      },
+      "expected": {
+        "m1|e1": [
+          "possible_conflict",
+          "possible_update"
+        ]
+      }
+    },
+    {
+      "id": "cr-04-repayment",
+      "messages": {
+        "m1": "信用卡还款日改成每月 25 号了。",
+        "m2": "今天天气不错，出去走了走。"
+      },
+      "formal": {
+        "e1": "信用卡到期还款日是每月 23 号。",
+        "e2": "母亲每天早上吃一片氨氯地平（5mg）控制血压。"
+      },
+      "expected": {
+        "m1|e1": [
+          "possible_update",
+          "possible_conflict"
+        ]
+      }
+    },
+    {
+      "id": "cr-05-cat",
+      "messages": {
+        "m1": "团子今年三岁了，是只英短蓝猫。"
+      },
+      "formal": {
+        "e1": "家里的猫叫团子，三岁，英短蓝猫，对鸡肉过敏。",
+        "e2": "女儿读小学三年级，每周三下午有钢琴课。"
+      },
+      "expected": {
+        "m1|e1": [
+          "possible_duplicate"
+        ]
+      }
+    },
+    {
+      "id": "cr-06-office",
+      "messages": {
+        "m1": "公司搬家了，现在在国贸上班，通勤改坐 1 号线。"
+      },
+      "formal": {
+        "e1": "公司在望京，通勤坐地铁 14 号线。",
+        "e2": "喜欢喝手冲咖啡，常买耶加雪菲。",
+        "e3": "车险每年 7 月到期，在平安续保。"
+      },
+      "expected": {
+        "m1|e1": [
+          "possible_update",
+          "possible_conflict"
+        ]
+      }
+    }
+  ]
+}
