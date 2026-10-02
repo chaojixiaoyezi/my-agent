@@ -21,7 +21,10 @@ from agent_py_agent.agent.gateway_parts import (
     submit_gateway_ask,
     write_json_file,
 )
-from agent_py_agent.agent.gateway_parts.recovery import repair_gateway_terminal_projections
+from agent_py_agent.agent.gateway_parts.recovery import (
+    MAX_UNPLANNED_RESUME_COUNT,
+    repair_gateway_terminal_projections,
+)
 from agent_py_agent.agent.gateway_parts.request_worker import _iter_pending_request_paths
 from agent_py_agent.agent.io import append_jsonl
 from agent_py_agent.agent.local_storage import LocalStore
@@ -148,7 +151,8 @@ def test_repeated_gateway_restart_is_not_a_processing_failure(tmp_path):
     paths = gateway_paths(agent)
     _ensure_gateway_dirs(paths)
     path = _write_processing_request(paths, "gwreq-restarts", 20, "继续原长任务")
-    for attempt in range(20, 24):
+    # 重启不算卡死次数；非计划重启的续跑另有上限（用完收成 TURN_RESUME_LIMIT_EXCEEDED，见 test_turn_resume_limit）。
+    for attempt in range(20, 20 + MAX_UNPLANNED_RESUME_COUNT):
         result = recover_gateway_processing_requests(paths, startup=True, agent=agent)
         assert result["requeued"] == 1
         assert result["failed"] == 0
@@ -157,6 +161,7 @@ def test_repeated_gateway_restart_is_not_a_processing_failure(tmp_path):
         assert payload["attempts"] == attempt
         assert payload["processing_failure_count"] == 0
         assert payload["active_turn_recovery"]["cause"] == "gateway_restart"
+        assert payload["active_turn_recovery"]["unplanned_resume_count"] == attempt - 19
         assert payload["id"] == "gwreq-restarts"
         assert not (paths.terminal / path.name).exists()
         payload.update(status="processing", attempts=attempt + 1, lease_started_at=time.time() - 20)
@@ -236,6 +241,7 @@ def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
             "dead_execution_attempt_id": "",
             "requeued_at": old_payload["requeued_at"],
             "cause": "gateway_restart",
+            "unplanned_resume_count": 1,
         }
 
         fresh_id, fresh_path, _ = submit_gateway_ask(

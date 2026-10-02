@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 861,
+  "count": 862,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2914,6 +2914,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "审批轮询间隔 0.05 秒：及时看到用户批复，轮询成本可忽略。"
+    },
+    {
+      "name": "MAX_UNPLANNED_RESUME_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/recovery.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同一个 Gateway 用户回合因非计划重启自动续跑的次数上限；用完后再被打断就收成 failed，不再续跑。"
     },
     {
       "name": "_SCAN_LIMIT_COUNT",

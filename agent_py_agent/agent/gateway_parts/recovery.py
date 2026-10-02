@@ -1,6 +1,7 @@
 # LLM: Reconcile exact request leases and canonical terminal receipts; dispatch generations
 # never imply task failure. Startup resume preserves effects/history, expired processing leases
-# consume their own persisted budget. Terminal commit releases exact request-affine claims; failed
+# consume their own persisted budget, and unplanned-restart resumes stop at MAX_UNPLANNED_RESUME_COUNT
+# (TURN_RESUME_LIMIT_EXCEEDED). Terminal commit releases exact request-affine claims; failed
 # cleanup stays retryable without re-execution. Check heartbeat/terminal/owner tests on changes.
 # 中断展示事件直接使用 paths/stream_writer，不通过请求执行器反向导入，也不改变终态写账顺序。
 # 模块用途: 恢复 Gateway 中断的请求，分清服务重启和真正卡死，并保证同一回合只有一个终态和执行者。
@@ -10,6 +11,8 @@ from __future__ import annotations
 
 gateway 如果崩在半路，请求会留在 processing 目录。
 服务重启按原身份退回 pending；真实 processing 租约失效才累计失败，上限用尽写失败响应并归档。
+非计划重启（崩溃、直接停止再启动）的自动续跑另计次数，同一回合最多续 MAX_UNPLANNED_RESUME_COUNT 次，
+再被打断就按 TURN_RESUME_LIMIT_EXCEEDED 收成失败；安全重启接班不计。
 processing liveness 直接读取 lease_service，不再经过 runtime 聚合层。
 """
 
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..conversation.turn_resume_notice import TURN_RESUME_LIMIT_NOTICE
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .io import (
     GATEWAY_REQUEST_FINGERPRINT_SCHEMA,
@@ -39,6 +43,13 @@ if TYPE_CHECKING:
 _TERMINAL_PROJECTION_MARKER_SCHEMA = "gateway_terminal_projection_complete.v1"
 _ACTIVE_TURN_RECOVERY_SCHEMA = "gateway_active_turn_recovery.v1"
 GATEWAY_SAFE_RESTART_CAUSE = "gateway_safe_restart"
+# 续跑次数用完时请求收口的错误码（登记在 contracts.error_taxonomy，恢复动作 request_user_input）。
+TURN_RESUME_LIMIT_ERROR_CODE = "TURN_RESUME_LIMIT_EXCEEDED"
+# 为什么设上限（3a 10-02 定）：本身会把进程弄崩的回合，每次非计划重启都会再续一次，形成崩溃循环。3 次够扛过偶发崩溃
+#   和手动停启，再多就交给用户（发“继续”是新回合，不受此限）。安全重启接班不计：旧进程已排空并确认退出，不是崩溃，
+#   重启工具另有冷却和防循环；本模块原有约定是部署多次也不能把健康的长任务停掉。
+# 同一个 Gateway 用户回合因非计划重启自动续跑的次数上限；用完后再被打断就收成 failed，不再续跑。
+MAX_UNPLANNED_RESUME_COUNT = 3
 
 
 @dataclass(frozen=True)
@@ -207,7 +218,8 @@ def _ensure_recovery_dirs(paths: GatewayPaths) -> None:
 
 
 # LLM: Dispatch attempts fence executions but are not failure counts. Startup restores the
-# same turn; only expired live-service processing leases consume the recovery failure budget.
+# same turn; only expired live-service processing leases consume the recovery failure budget,
+# and unplanned startup resumes consume the separate resume cap (see _settle_stale_processing).
 # Keep terminal/CAS/unknown-operation fences unchanged and never derive cause from last_error prose.
 # 函数用途: 区分服务重启续接和真正卡死，避免一个健康长任务因部署多次就被错误终止。
 def _recover_one_processing_request(
@@ -238,19 +250,31 @@ def _recover_one_processing_request(
         )
     if not _processing_request_stale(payload, request_path, context):
         return ""
+    return _settle_stale_processing(paths, request_path, payload, context)
+
+
+# LLM: 已确认过期的请求三选一，只读结构化计数、不读 last_error 文本：服务内租约过期累计 processing_failure_count，
+#   用尽按 GATEWAY_PROCESSING_TIMEOUT 收口；非计划重启的续跑累计 active_turn_recovery.unplanned_resume_count，
+#   已到 MAX_UNPLANNED_RESUME_COUNT 就按 TURN_RESUME_LIMIT_EXCEEDED 收口；其余重排续跑。两个计数互不影响。
+# 函数用途: 决定一个过期的 processing 请求是收成失败，还是重排续跑。
+def _settle_stale_processing(
+    paths: GatewayPaths,
+    request_path: Path,
+    payload: dict,
+    context: _RecoveryContext,
+) -> str:
     failures = _gateway_processing_failure_count(payload) + (0 if context.startup else 1)
+    base = {"paths": paths, "request_path": request_path, "payload": payload, "agent": context.agent}
     if not context.startup and context.max_attempts > 0 and failures >= context.max_attempts:
-        return _fail_stale_processing(
-            {
-                "paths": paths,
-                "request_path": request_path,
-                "payload": payload,
-                "timeout_seconds": context.lease_stale_seconds or context.timeout_seconds,
-                "attempts": _gateway_request_attempts(payload),
-                "processing_failure_count": failures,
-                "agent": context.agent,
-            }
-        )
+        return _fail_stale_processing({
+            **base,
+            "timeout_seconds": context.lease_stale_seconds or context.timeout_seconds,
+            "attempts": _gateway_request_attempts(payload),
+            "processing_failure_count": failures,
+        })
+    resumes = _unplanned_resume_count(payload)
+    if _counts_as_unplanned_resume(context) and resumes >= MAX_UNPLANNED_RESUME_COUNT:
+        return _fail_resume_limit_processing({**base, "unplanned_resume_count": resumes})
     return _requeue_stale_processing(paths, request_path, payload, context)
 
 
@@ -695,10 +719,8 @@ def _gateway_lease_heartbeat(payload: dict) -> float:
 # remains the authority before any archive or visible response is written.
 # 函数用途: 真正卡死次数用尽时提交失败及准确诊断，不把进程恢复代次说成任务超时次数。
 def _fail_stale_processing(context: dict) -> str:
-    paths = context["paths"]
-    request_path = context["request_path"]
     failure_context = {
-        "request_path": request_path,
+        "request_path": context["request_path"],
         "payload": context["payload"],
         "status": "failed",
         "error_code": "GATEWAY_PROCESSING_TIMEOUT",
@@ -711,6 +733,39 @@ def _fail_stale_processing(context: dict) -> str:
     }
     response = _build_gateway_failure_response(failure_context)
     response["processing_failure_count"] = context["processing_failure_count"]
+    return _commit_stale_processing_failure(context, failure_context, response)
+
+
+# LLM: 续跑次数用完（3a 10-02 定）：按 TURN_RESUME_LIMIT_EXCEEDED 收成 failed，走与卡死超时同一条带 CAS 的终态提交。
+#   error 与 user_error 都放 turn_resume_notice 表里同一句话：TUI 显示 user_error，IM 公开结果显示 user_error、
+#   管理员完整结果显示 error，三处一致；续跑次数和上限另放结构化字段，供诊断读取。
+# 函数用途: 一个回合被非计划重启打断太多次时停止自动续跑，告诉用户发“继续”接着做。
+def _fail_resume_limit_processing(context: dict) -> str:
+    failure_context = {
+        "request_path": context["request_path"],
+        "payload": context["payload"],
+        "status": "failed",
+        "error_code": TURN_RESUME_LIMIT_ERROR_CODE,
+        "error": TURN_RESUME_LIMIT_NOTICE,
+        "event_type": "gateway_request_processing_failed",
+        "agent": context["agent"],
+    }
+    response = _build_gateway_failure_response(failure_context)
+    response.update({
+        "user_error": TURN_RESUME_LIMIT_NOTICE,
+        "unplanned_resume_count": context["unplanned_resume_count"],
+        "max_unplanned_resume_count": MAX_UNPLANNED_RESUME_COUNT,
+    })
+    return _commit_stale_processing_failure(context, failure_context, response)
+
+
+# LLM: 过期请求收成失败的唯一提交口：在回合锁内按原执行编号、租约代次、心跳、状态、阶段和取消标记做 CAS，
+#   terminalize 同时释放执行车道、收口插话；归档成功后才写 response、history 和 request_aborted 流事件。
+#   归档 I/O 失败只记副作用错误、返回空串，留给下次恢复重试，不重跑模型。
+# 函数用途: 把已经构造好的失败答复按精确执行身份提交成终态并对外发布。
+def _commit_stale_processing_failure(context: dict, failure_context: dict, response: dict) -> str:
+    paths = context["paths"]
+    request_path = context["request_path"]
     request_id = request_path.stem
     conversation_store = _recovery_conversation_store(
         context.get("agent"),
@@ -756,7 +811,8 @@ def _requeue_cause(context: _RecoveryContext) -> str:
 
 # LLM: Preserve request/run identity and committed effects while replacing only the dead lease.
 # Record observed processing failures under the existing turn lock; startup resumes do not
-# consume that budget or reset earlier failures. This does not start/restart the Gateway itself.
+# consume that budget or reset earlier failures. The resume marker carries unplanned_resume_count
+# forward (_active_turn_recovery_marker). This does not start/restart the Gateway itself.
 # 函数用途: 精确重排原回合；服务重启沿用原任务，卡死单独计数，保留启动退避及旧副作用保护。
 def _requeue_stale_processing(
     paths: GatewayPaths,
@@ -788,13 +844,7 @@ def _requeue_stale_processing(
                     "processing_failure_count": (
                         _gateway_processing_failure_count(fresh) + (0 if context.startup else 1)
                     ),
-                    "active_turn_recovery": {
-                        "schema_version": _ACTIVE_TURN_RECOVERY_SCHEMA,
-                        "request_id": request_id,
-                        "dead_execution_attempt_id": dead_attempt_id,
-                        "requeued_at": context.now,
-                        "cause": _requeue_cause(context),
-                    },
+                    "active_turn_recovery": _active_turn_recovery_marker(request_id, dead_attempt_id, fresh, context),
                     "last_error": (
                         "gateway restarted before request completed"
                         if context.startup
@@ -816,6 +866,47 @@ def _requeue_stale_processing(
         _report_gateway_side_effect_error("requeue_gateway_request", request_path.stem, exc)
         return ""
     return "requeued"
+
+
+# LLM: 续跑标记只由 recovery 写：身份字段供续跑核对，cause 供排序和提示；unplanned_resume_count 在旧标记基础上
+#   按 _counts_as_unplanned_resume 累加，安全重启接班和服务内租约过期原样带过去。认领时整条请求记录原样保留，
+#   所以计数能跨重启累计；用户发的新请求没有这个标记，从 0 开始。
+# 函数用途: 生成重排请求要写的 active_turn_recovery 标记。
+def _active_turn_recovery_marker(
+    request_id: str,
+    dead_attempt_id: str,
+    fresh: dict,
+    context: _RecoveryContext,
+) -> dict:
+    return {
+        "schema_version": _ACTIVE_TURN_RECOVERY_SCHEMA,
+        "request_id": request_id,
+        "dead_execution_attempt_id": dead_attempt_id,
+        "requeued_at": context.now,
+        "cause": _requeue_cause(context),
+        "unplanned_resume_count": (
+            _unplanned_resume_count(fresh) + (1 if _counts_as_unplanned_resume(context) else 0)
+        ),
+    }
+
+
+# LLM: 只有“启动恢复、且不是安全重启接班”的续跑计入续跑上限，和 _requeue_cause 的 gateway_restart 是同一个判断。
+# 函数用途: 判断这次重排算不算一次非计划重启后的自动续跑。
+def _counts_as_unplanned_resume(context: _RecoveryContext) -> bool:
+    return context.startup and not context.planned_restart
+
+
+# LLM: 计数只存在 active_turn_recovery 标记里；没有标记或旧版标记按 0。坏值（非整数、布尔、负数）按数据损坏
+#   fail-closed，不当 0 把已用掉的次数重置（同 processing_failure_count 的约定），由恢复报告带出诊断。
+# 函数用途: 读出这个请求已经因非计划重启自动续跑了几次。
+def _unplanned_resume_count(payload: dict) -> int:
+    marker = payload.get("active_turn_recovery")
+    if not isinstance(marker, dict):
+        return 0
+    value = marker.get("unplanned_resume_count", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DataCorruptionError("invalid gateway active_turn_recovery.unplanned_resume_count")
+    return value
 
 
 def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:

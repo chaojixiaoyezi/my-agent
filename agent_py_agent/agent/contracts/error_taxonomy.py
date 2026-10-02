@@ -2218,6 +2218,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "（仍有持久工作的 Audit 来源保持 PENDING，重启后照常接续）。"
         ),
     ),
+    "TURN_RESUME_LIMIT_EXCEEDED": ErrorContract(
+        code="TURN_RESUME_LIMIT_EXCEEDED",
+        category="orchestration",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint=(
+            "同一个 Gateway 用户回合因非计划重启（崩溃、直接停止再启动）已经自动续跑到上限，又被打断，"
+            "宿主不再自动续跑，这条请求收成 failed；不是模型或工具失败，此前已执行的工作不会撤销。"
+            "等用户决定：用户发“继续”是新回合，不受这个上限影响。"
+        ),
+    ),
     "HOST_SHUTDOWN_TOOL_NOT_STARTED": ErrorContract(
         code="HOST_SHUTDOWN_TOOL_NOT_STARTED",
         category="orchestration",
