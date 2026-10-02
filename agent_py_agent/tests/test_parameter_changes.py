@@ -27,7 +27,7 @@ def _user(tmp_path, text: str = "agent_name: \"myagent\"\n"):
 
 
 def _set(path, key, value):
-    return changes.set_parameter(key, value, user_path=path, origin=_ORIGIN)
+    return changes.set_parameter(key, value, paths=changes.WritePaths(user_path=path), origin=_ORIGIN)
 
 
 def test_values_are_written_by_type_and_really_take_effect(tmp_path):
@@ -54,7 +54,7 @@ def test_refusals_leave_the_file_untouched(tmp_path):
         assert (report["ok"], report["code"]) == (False, code), key
     assert path.read_text(encoding="utf-8") == before
     assert changes.parameter_history(user_path=path) == []
-    packaged = changes.set_parameter("max_tokens", "1024", user_path=packaged_config_path(), origin=_ORIGIN)
+    packaged = changes.set_parameter("max_tokens", "1024", paths=changes.WritePaths(user_path=packaged_config_path()), origin=_ORIGIN)
     assert packaged["code"] == "USER_CONFIG_IS_PACKAGED"
 
 
@@ -72,15 +72,15 @@ def test_reset_history_and_revert_chain(tmp_path):
     first = _set(path, "max_tokens", "32768")
     second = _set(path, "max_tokens", "16384")
     assert [item["id"] for item in changes.parameter_history(user_path=path)] == [second["change_id"], first["change_id"]]
-    undo = changes.revert_change(second["change_id"][:6], user_path=path, origin=_ORIGIN)
+    undo = changes.revert_change(second["change_id"][:6], paths=changes.WritePaths(user_path=path), origin=_ORIGIN)
     assert undo["ok"] and load_config(path).max_tokens == 32768
-    back_to_default = changes.revert_change(first["change_id"], user_path=path, origin=_ORIGIN)
+    back_to_default = changes.revert_change(first["change_id"], paths=changes.WritePaths(user_path=path), origin=_ORIGIN)
     assert back_to_default["ok"] and "max_tokens:" not in path.read_text(encoding="utf-8")
-    assert changes.reset_parameter("max_tokens", user_path=path, origin=_ORIGIN)["code"] == "PARAMETER_NOT_OVERRIDDEN"
+    assert changes.reset_parameter("max_tokens", paths=changes.WritePaths(user_path=path), origin=_ORIGIN)["code"] == "PARAMETER_NOT_OVERRIDDEN"
     _set(path, "request_timeout", "300")
-    reset = changes.reset_parameter("request_timeout", user_path=path, origin=_ORIGIN)
+    reset = changes.reset_parameter("request_timeout", paths=changes.WritePaths(user_path=path), origin=_ORIGIN)
     assert reset["ok"] and load_config(path).request_timeout == AgentConfig().request_timeout
-    assert changes.revert_change("abc", user_path=path, origin=_ORIGIN)["code"] == "CHANGE_NOT_FOUND"
+    assert changes.revert_change("abc", paths=changes.WritePaths(user_path=path), origin=_ORIGIN)["code"] == "CHANGE_NOT_FOUND"
 
 
 def test_secret_changes_are_masked_and_cannot_be_reverted(tmp_path):
@@ -89,7 +89,7 @@ def test_secret_changes_are_masked_and_cannot_be_reverted(tmp_path):
     assert report["ok"] and "abcdefsecret" not in json.dumps(report, ensure_ascii=False)
     entry = changes.parameter_history(user_path=path)[0]
     assert entry["masked"] and "abcdefsecret" not in json.dumps(entry, ensure_ascii=False)
-    assert changes.revert_change(entry["id"], user_path=path, origin=_ORIGIN)["code"] == "CHANGE_MASKED"
+    assert changes.revert_change(entry["id"], paths=changes.WritePaths(user_path=path), origin=_ORIGIN)["code"] == "CHANGE_MASKED"
 
 
 def _main_agent(path):

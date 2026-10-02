@@ -51,6 +51,16 @@ class ChangeOrigin:
     reason: str = ""
 
 
+# LLM: 写入口要写哪个文件由参数来源决定：agent 主配置写在用户配置（user_path），capability 写在运行时实际读取的
+#   那份文件（capability_path，由调用方按 capability_config_for_agent 同一路径解析，不是用户配置同目录）。
+#   runtime_guard/log_analysis 运行时没有用户覆盖层，写入口整体拒绝，不在这里给路径。
+# 类用途: 一次参数修改可能涉及的各来源文件路径。
+@dataclass(frozen=True)
+class WritePaths:
+    user_path: Path | None
+    capability_path: Path | None = None
+
+
 # LLM: 账本里的一行在写入前的内容；previous/value 是配置文件里的原样标量文本（None 表示没有覆盖），凭据类由 _record 脱敏。
 #   target 只在修改对象不是用户配置文件时给出（模型档案：{kind, profile_id, model_name}），回滚据此写回原处。
 # 类用途: 一条待记账的参数修改。
@@ -81,7 +91,7 @@ class ParameterChangeError(Exception):
         self.code = code
 
 
-# LLM: 随包默认 YAML 不是用户配置；没有路径或文件不存在都拒绝写，不自动创建。
+# LLM: 随包默认 YAML 不是用户配置；没有路径或文件不存在都拒绝写，不自动创建。只用于 agent 主配置。
 # 函数用途: 确认写入目标是存在的用户配置文件。
 def _target(user_path: Path | None) -> Path:
     if user_path is None:
@@ -96,27 +106,36 @@ def _target(user_path: Path | None) -> Path:
     return path
 
 
-# LLM: P17 起另三份配置也经参数中心写入：目标文件放在用户配置（agent_config）同目录，文件名按来源，
-#   例如 capability_config.yaml；用户没建这份文件就拒绝写（与 agent 一致，不自动创建，避免写出运行时读不到的散文件）。
-# 函数用途: 按参数来源给出实际写入目标（主配置就是用户配置文件，其余为同目录的 <source>_config.yaml）。
-def _write_target(spec: ParameterSpec, user_path: Path | None) -> Path:
-    path = _target(user_path)
+# LLM: 按参数来源给写入目标。agent 主配置必须已存在；capability 写运行时实际读取的那份文件
+#   （agent.capability_config_path 或 default_capability_config_path(agent.root)，由调用方解析传入），
+#   文件不存在时允许新建（运行时读不到时按默认实例走，所以建好文件后重启就能读到）。runtime_guard /
+#   log_analysis 运行时没有用户覆盖层，写什么都不会生效，这里直接拒绝，不给目标路径。
+# 函数用途: 按参数来源给出实际写入目标（主配置=用户配置文件，capability=运行时读取的文件）。
+def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
     if spec.source == SOURCE_AGENT:
-        return path
-    target = path.with_name(f"{spec.source}_config.yaml")
-    if not target.is_file():
-        raise ParameterChangeError(
-            "USER_CONFIG_MISSING",
-            f"{spec.source} 配置的用户文件不存在：{target}；请先从随包 {spec.source}_config.yaml 复制一份到同目录再改。")
-    return target
+        return _target(paths.user_path)
+    if spec.source == SOURCE_CAPABILITY:
+        path = paths.capability_path
+        if path is None:
+            raise ParameterChangeError("USER_CONFIG_MISSING",
+                                       "当前进程没有 capability 配置的运行时路径，不能安全写入。")
+        return Path(path).expanduser()
+    raise ParameterChangeError(
+        "PARAMETER_SOURCE_READ_ONLY",
+        f"'{spec.source}' 配置运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索，不能修改。")
 
 
 # LLM: 先查登记表，再查边界：BOUNDARY_KEYS 给出原因原样回显；其余边界项给统一原因。
+#   运行时没有覆盖层的来源（runtime_guard/log_analysis）先于安全边界拒绝，原因要结构化（PARAMETER_SOURCE_READ_ONLY）。
 # 函数用途: 取出一个可写参数的登记信息，不可写时拒绝。
 def _writable_spec(key: str) -> ParameterSpec:
     spec = parameter_registry().get(str(key or "").strip())
     if spec is None:
         raise ParameterChangeError("PARAMETER_UNKNOWN", f"没有名为 '{key}' 的参数；可以先搜索参数名。")
+    if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS}:
+        raise ParameterChangeError(
+            "PARAMETER_SOURCE_READ_ONLY",
+            f"'{spec.key}' 属于 {spec.source} 配置：运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索。")
     if not spec.writable:
         reason = BOUNDARY_KEYS.get(spec.key, _BOUNDARY_REASON)
         raise ParameterChangeError("PARAMETER_BOUNDARY", f"'{spec.key}' 属于安全边界，不能由模型自行修改：{reason}")
@@ -161,9 +180,9 @@ def _render_number(spec: ParameterSpec, text: str) -> tuple[object, str]:
 
 
 # LLM: 用正式加载器读出进程重启后会拿到的值；这是“改了是否真的生效”的唯一判据。主配置用 load_config，
-#   capability 用 load_capability_config，runtime_guard 用 runtime_guard_policy（values 字典），
-#   log_analysis 没有产品加载器，用与写同一套的 load_simple_yaml 读回（config_io 是它唯一的正式读取器）。
-# 函数用途: 读取用户配置经完整加载后的某个参数值（按来源选加载器）。
+#   capability 用 load_capability_config（capability 目标路径是运行时实际读取的那份，见 _write_target），
+#   runtime_guard 用 runtime_guard_policy（values 字典），log_analysis 用 load_simple_yaml（config_io 是它的读取器）。
+# 函数用途: 读取目标文件经完整加载后的某个参数值（按来源选加载器）。
 def _effective(path: Path, key: str) -> object:
     source = getattr(parameter_registry().get(key), "source", SOURCE_AGENT)
     if source == SOURCE_CAPABILITY:
@@ -237,38 +256,58 @@ def _failure(error: ParameterChangeError) -> dict[str, object]:
     return report
 
 
-# LLM: 写前保留原文，回读不一致即恢复并报 PARAMETER_NOT_EFFECTIVE（例如加载器又把值夹取成别的）。副作用：写用户配置与账本。
+# LLM: 写前保留原文（capability 文件原本不存在时记空串），回读不一致即恢复原文件（新建的删掉）并报 PARAMETER_NOT_EFFECTIVE。
+#   capability 目标文件不存在时新建：运行时读不到配置时按默认实例走，建好文件后重启 Gateway 就能读到，
+#   所以允许从空文件开始，只写被改的键。账本统一记在用户配置（agent_config）旁，不随 capability 文件位置走。
 # 函数用途: 修改一个参数并返回结构化回执。
-def set_parameter(key: object, value: object, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
+def set_parameter(key: object, value: object, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
     try:
         spec = _writable_spec(str(key or ""))
-        path = _write_target(spec, user_path)
+        path = _write_target(spec, paths)
         expected, rendered = _render(spec, value)
-        original = path.read_text(encoding="utf-8")
+        existed = path.is_file()
+        original = path.read_text(encoding="utf-8") if existed else ""
+        if not existed:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# 由参数中心创建（只含被改的键，其余按随包默认）\n", encoding="utf-8")
         previous, _line = set_simple_yaml_raw(path, spec.key, rendered)
         actual = _effective(path, spec.key)
         if not _same(expected, actual):
-            path.write_text(original, encoding="utf-8")
+            _restore(path, original, existed)
             raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE",
                                        f"'{spec.key}' 写入后加载得到的值与目标不一致，已恢复原文件，没有生效。")
-        return _receipt(path, spec, _record(path, spec, _ChangeRow("set", previous, rendered, origin)), actual)
+        ledger = paths.user_path if paths.user_path is not None else path
+        return _receipt(path, spec, _record(ledger, spec, _ChangeRow("set", previous, rendered, origin)), actual)
     except ParameterChangeError as error:
         return _failure(error)
     except (OSError, ValueError) as error:
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
 
 
-# LLM: 删除用户配置里的覆盖行，让参数回到随包默认；本来就没有覆盖时拒绝。副作用：写用户配置与账本。
+# LLM: 文件原本不存在时恢复 = 删除新建文件，避免留下半截配置；原本存在则原样写回。
+# 函数用途: 把写入失败/不一致的目标文件恢复成写入前的样子。
+def _restore(path: Path, original: str, existed: bool) -> None:
+    if existed:
+        path.write_text(original, encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+
+
+# LLM: 删除用户配置里的覆盖行，让参数回到随包默认；本来就没有覆盖时拒绝。capability 文件不存在 = 没有覆盖。
+#   副作用：写用户配置（或 capability 运行时文件）与账本。
 # 函数用途: 把一个参数恢复成默认值并返回结构化回执。
-def reset_parameter(key: object, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
+def reset_parameter(key: object, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
     try:
         spec = _writable_spec(str(key or ""))
-        path = _write_target(spec, user_path)
+        path = _write_target(spec, paths)
+        if not path.is_file():
+            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有用户覆盖，已经是默认值。")
         previous = unset_simple_yaml_value(path, spec.key)
         if previous is None:
             raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有用户覆盖，已经是默认值。")
         actual = _effective(path, spec.key)
-        return _receipt(path, spec, _record(path, spec, _ChangeRow("reset", previous, None, origin)), actual)
+        ledger = paths.user_path if paths.user_path is not None else path
+        return _receipt(path, spec, _record(ledger, spec, _ChangeRow("reset", previous, None, origin)), actual)
     except ParameterChangeError as error:
         return _failure(error)
     except (OSError, ValueError) as error:
@@ -311,25 +350,32 @@ def parameter_history(*, user_path: Path | None, key: str = "", limit: int = 20)
 
 
 # LLM: 编号可用至少 6 位前缀，不唯一或找不到都拒绝；凭据类记录只有脱敏值，不能回滚。回滚本身也记账并可再回滚。
-#   写入沿用 set 的原文恢复规则：原值为空（原来没有覆盖）时删除覆盖行。副作用：写用户配置与账本。
+#   写入沿用 set 的原文恢复规则：原值为空（原来没有覆盖）时删除覆盖行；capability 文件原本不存在且目标也是默认
+#   时按没有覆盖拒绝。副作用：写用户配置（或 capability 运行时文件）与账本。
 # 函数用途: 把某次修改撤销，恢复到那次修改之前的值。
-def revert_change(change_id: str, *, user_path: Path | None, origin: ChangeOrigin) -> dict[str, object]:
+def revert_change(change_id: str, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
     try:
-        path = _target(user_path)
-        entry = _find_change(parameter_history(user_path=path, limit=0), change_id)
+        user_path = paths.user_path if paths.user_path is not None else Path()
+        entry = _find_change(parameter_history(user_path=user_path, limit=0), change_id)
         spec = _writable_spec(str(entry.get("key") or ""))
-        path = _write_target(spec, user_path)
+        path = _write_target(spec, paths)
         if entry.get("masked"):
             raise ParameterChangeError("CHANGE_MASKED", f"'{spec.key}' 是凭据类参数，记录里只有脱敏值，不能回滚；请重新设置。")
         target = entry.get("previous")
-        original = path.read_text(encoding="utf-8")
+        existed = path.is_file()
+        original = path.read_text(encoding="utf-8") if existed else ""
+        if not existed:
+            if target is None:
+                raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# 由参数中心创建（只含被改的键，其余按随包默认）\n", encoding="utf-8")
         current = unset_simple_yaml_value(path, spec.key) if target is None else set_simple_yaml_raw(path, spec.key, str(target))[0]
         actual = _effective(path, spec.key)
         if target is None and current is None:
-            path.write_text(original, encoding="utf-8")
+            _restore(path, original, existed)
             raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
         row = _ChangeRow("revert", current, None if target is None else str(target), origin, reverts=str(entry["id"]))
-        entry_out = _record(path, spec, row)
+        entry_out = _record(paths.user_path if paths.user_path is not None else path, spec, row)
         return _receipt(path, spec, entry_out, actual)
     except ParameterChangeError as error:
         return _failure(error)
@@ -454,6 +500,7 @@ __all__ = [
     "ChangeOrigin",
     "ParameterChangeError",
     "ProfileFieldChange",
+    "WritePaths",
     "displayed_change",
     "ledger_path",
     "parameter_history",

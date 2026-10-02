@@ -37,6 +37,23 @@
 - **验证**：新增守卫 9 项 + 相关既有测试 185 项通过；3 个变异（协议排除清空、单位推导恒空、说明提取恒空）全部被抓住；
   详情见 TESTS.md 同名节。
 
+## 参数中心 P17 修订：capability 写入/运行值走运行时实际路径，runtime_guard/log_analysis 改只读来源（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `claude/3a-step16z` 的 `f15b0a19f`，在 5a51735c1 上修订，已实现，待集成）
+
+- **起因**：3a 评审发现初版把 capability 写进“用户配置同目录”的 `capability_config.yaml`，但运行时唯一读取入口是
+  `capability_config_for_agent(agent)`（`agent.capability_config_path` 或 `default_capability_config_path(agent.root)`，
+  对 Gateway owner 即 `<owner home>/config/capability_config.yaml`），写了不生效；runtime_guard/log_analysis 运行时没有用户覆盖层。
+- **capability**：`runtime_config_reload` 新增公开函数 `capability_config_path_for(agent)`（与运行时入口同一路径逻辑）；
+  写入口 `parameter_changes` 新增 `WritePaths(user_path, capability_path)`，capability 写运行时路径，文件不存在时新建、只写被改的键，
+  用同一个 `load_capability_config` 回读，不一致恢复原文件（或删除新建文件）并报 PARAMETER_NOT_EFFECTIVE；账本记在 agent 用户配置旁；
+  回执如实写生效时机（capability 改动重启 Gateway 才生效）。
+- **runtime_guard/log_analysis**：`_writable_spec` 先于安全边界抛 PARAMETER_SOURCE_READ_ONLY（结构化原因“只能查看和搜索”），
+  set/reset/revert 一律拒绝，不新造运行时读不到的文件。
+- **运行值**：`running_value` capability 按运行时路径读（owner 有覆盖时显示覆盖值），只读来源显示随包默认并标「随包默认、不可覆盖」。
+- **前端**：三份 YAML 补行尾注释后，`backend-config-catalog.json` 14 处占位说明同步为后端注释；前端两个目录守卫跑通。
+- **验证**：相关 233 passed（含重写后的 `test_parameter_sources.py` 14 项）、guards9 167 passed、前端两守卫 5 passed、
+  import boundaries 0、ruff/doc-sync/code-size strict/diff-check/clean-package 全过；3 个变异（写目标改回旧路径、去掉只读拒绝、
+  running_value 忽略运行时路径）均被杀红并还原。详见 TESTS.md。
+
 ## 参数中心 P17：capability/runtime_guard/log_analysis 三份配置纳入登记表与写入口（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `claude/3a-step16z` 的 `f15b0a19f`，已实现，待集成）
 
 - **来源维度**：`ParameterSpec` 加 `source`（agent/capability/runtime_guard/log_analysis），登记表从 224 键扩到 297 键

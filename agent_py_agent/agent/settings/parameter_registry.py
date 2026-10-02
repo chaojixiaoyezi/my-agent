@@ -280,17 +280,20 @@ def parameter_registry() -> dict[str, ParameterSpec]:
     return registry
 
 
-# LLM: 只读。展示层问“这个参数现在运行用的值”：主配置用调用方持有的 Gateway 启动配置；另三份配置从各自
-#   随包默认文件读（用户配置里没有覆盖时就是实际运行值，读不到就回落登记默认）。不写文件、不调模型。
+# LLM: 只读。展示层问“这个参数现在运行用的值”：主配置用调用方持有的 Gateway 启动配置；capability 读运行时
+#   实际加载的那份文件（capability_path 由调用方按 capability_config_for_agent 同一路径解析，文件不存在时
+#   运行时按默认实例走，这里也回落登记默认）；runtime_guard/log_analysis 运行时只读随包文件、没有用户覆盖层，
+#   所以固定读随包默认。不写文件、不调模型。
 # 函数用途: 返回一个参数当前的运行值（按来源分派读取）。
-def running_value(spec: ParameterSpec, config: object | None = None) -> object:
+def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None) -> object:
     if spec.source == SOURCE_AGENT:
         return getattr(config, spec.key, spec.default) if config is not None else spec.default
     if spec.source == SOURCE_CAPABILITY:
         from ..capability.config import load_capability_config
 
+        path = capability_path or _packaged_extra_config_path(SOURCE_CAPABILITY)
         try:
-            return getattr(load_capability_config(_packaged_extra_config_path(SOURCE_CAPABILITY)), spec.key)
+            return getattr(load_capability_config(path), spec.key)
         except (OSError, ValueError):
             return spec.default
     if spec.source == SOURCE_RUNTIME_GUARD:

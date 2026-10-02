@@ -33,6 +33,7 @@ from .model_profiles import model_profiles_path, selected_model_config
 from .parameter_changes import (
     ChangeOrigin,
     ProfileFieldChange,
+    WritePaths,
     revert_profile_change,
     set_parameter,
     set_profile_field,
@@ -335,7 +336,8 @@ def _apply_supported(job: _ProbeJob) -> dict:
     if target.profile_id == "default":
         if not job.admin:
             return {"ok": False, "kind": "config", "code": "NEEDS_ADMIN"}
-        report = set_parameter("model_reasoning_control", "effort", user_path=user_config_path(job.agent.config), origin=origin)
+        report = set_parameter("model_reasoning_control", "effort",
+                               paths=WritePaths(user_path=user_config_path(job.agent.config)), origin=origin)
         return _applied_summary(report, "config")
     if shared_profile_key(target.profile_id):
         return {"ok": False, "kind": "shared", "code": "SHARED_PROFILE"}

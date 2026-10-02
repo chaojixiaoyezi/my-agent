@@ -4492,7 +4492,7 @@
           {
             "key": "decision_skill_tool_mode",
             "label": "decision_skill_tool_mode（decision skill tool mode）",
-            "description": "capability_config.yaml 中的 decision_skill_tool_mode 配置项。",
+            "description": "技能/工具上下文决策点模式（off/observe/apply）；默认关闭，observe 也会发请求并产生用量",
             "type": "string",
             "defaultValue": "off",
             "currentValue": "off",
@@ -4528,7 +4528,7 @@
           {
             "key": "decision_agent_timeout_max_seconds",
             "label": "decision_agent_timeout_max_seconds（decision agent timeout max seconds）",
-            "description": "capability_config.yaml 中的 decision_agent_timeout_max_seconds 配置项。",
+            "description": "my-agent 自调决策等待时间上限（秒）；0 表示该侧不限制",
             "type": "number",
             "defaultValue": 30,
             "currentValue": 30,
@@ -4661,7 +4661,7 @@
           {
             "key": "capability_level",
             "label": "capability_level（capability level）",
-            "description": "log_analysis_config.yaml 中的 capability_level 配置项。",
+            "description": "能力等级标记（当前占位，默认 L0）",
             "type": "choice",
             "defaultValue": "L0",
             "currentValue": "L0",
@@ -4686,7 +4686,7 @@
           {
             "key": "config_version",
             "label": "config_version（config version）",
-            "description": "log_analysis_config.yaml 中的 config_version 配置项。",
+            "description": "配置版本号",
             "type": "number",
             "defaultValue": 1,
             "currentValue": 1,
@@ -4737,7 +4737,7 @@
           {
             "key": "security_prompt_enabled",
             "label": "security_prompt_enabled（security prompt enabled）",
-            "description": "log_analysis_config.yaml 中的 security_prompt_enabled 配置项。",
+            "description": "是否启用安全提示生成（默认关闭）",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -4754,7 +4754,7 @@
           {
             "key": "auto_dispatch_enabled",
             "label": "auto_dispatch_enabled（auto dispatch enabled）",
-            "description": "log_analysis_config.yaml 中的 auto_dispatch_enabled 配置项。",
+            "description": "是否自动派发分析任务（默认关闭）",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -4771,7 +4771,7 @@
           {
             "key": "ml_enabled",
             "label": "ml_enabled（ml enabled）",
-            "description": "log_analysis_config.yaml 中的 ml_enabled 配置项。",
+            "description": "是否启用机器学习分析（默认关闭）",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -4788,7 +4788,7 @@
           {
             "key": "cluster_enabled",
             "label": "cluster_enabled（cluster enabled）",
-            "description": "log_analysis_config.yaml 中的 cluster_enabled 配置项。",
+            "description": "是否启用聚类分析（默认关闭）",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -4805,7 +4805,7 @@
           {
             "key": "response_execution_enabled",
             "label": "response_execution_enabled（response execution enabled）",
-            "description": "log_analysis_config.yaml 中的 response_execution_enabled 配置项。",
+            "description": "是否允许分析结果直接执行响应（默认关闭）",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -4886,7 +4886,7 @@
           {
             "key": "query_max_limit",
             "label": "query_max_limit（query max limit）",
-            "description": "log_analysis_config.yaml 中的 query_max_limit 配置项。",
+            "description": "单次查询返回的最大条数上限",
             "type": "number",
             "defaultValue": 1000,
             "currentValue": 1000,
@@ -4924,7 +4924,7 @@
           {
             "key": "payload_preview_max_chars",
             "label": "payload_preview_max_chars（payload preview max chars）",
-            "description": "log_analysis_config.yaml 中的 payload_preview_max_chars 配置项。",
+            "description": "负载预览的最大字符数",
             "type": "number",
             "defaultValue": 2048,
             "currentValue": 2048,
@@ -4962,7 +4962,7 @@
           {
             "key": "dispatch_budget_per_hour",
             "label": "dispatch_budget_per_hour（dispatch budget per hour）",
-            "description": "log_analysis_config.yaml 中的 dispatch_budget_per_hour 配置项。",
+            "description": "每小时自动派发分析师的预算；0 关闭预算（不是“不限制”）",
             "type": "number",
             "defaultValue": 0,
             "currentValue": 0,
@@ -4996,7 +4996,7 @@
           {
             "key": "detector_window_minutes",
             "label": "detector_window_minutes（detector window minutes）",
-            "description": "log_analysis_config.yaml 中的 detector_window_minutes 配置项。",
+            "description": "检测器滑动窗口分钟数",
             "type": "number",
             "defaultValue": 15,
             "currentValue": 15,

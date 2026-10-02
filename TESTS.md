@@ -71,6 +71,39 @@
   parameter_metadata / constant_names_unique / value_display_parity）→ **185 passed**
   guards9 架构守卫（含 test_packaging）→ **166 passed**
 
+## 参数中心 P17 修订：capability 写运行时路径、只读来源拒绝（2026-10-01，分支 `worker/ds2-registry-sources`，在 5a51735c1 上修订）
+
+- **产品改动**：`runtime_config_reload.capability_config_path_for(agent)`（与 `capability_config_for_agent` 同一路径逻辑）；
+  `parameter_changes.WritePaths(user_path, capability_path)`——capability 写运行时实际读取的文件（不存在时新建、只写被改的键），
+  用同一个 `load_capability_config` 回读，不一致恢复/删除并报 PARAMETER_NOT_EFFECTIVE；`_writable_spec` 对 runtime_guard/log_analysis
+  先抛 PARAMETER_SOURCE_READ_ONLY；`running_value` capability 按运行时路径读覆盖值、只读来源显示随包默认。
+- `test_parameter_sources.py` 重写为 14 项：四来源 search/view、running_value 随包默认与 owner 覆盖值、capability_config_path_for
+  与运行时入口同路径、新来源默认边界+free 名单与理由必填、capability 写运行时文件且 `capability_config_for_agent` 读到新值、
+  文件缺失时新建只写被改键、set/reset/revert 链且运行时入口读回默认、`_effective` 按来源分派加载器、只读来源
+  PARAMETER_SOURCE_READ_ONLY 拒绝且文件不动/无账本、回读不一致恢复原文件或删除新建文件、capability 边界键拒绝文件不动、
+  user_config 工具 set/history/revert/deny 链路、工具 view 标 source_readonly。`test_parameter_changes.py` 与
+  `test_structured_masking.py` 的 set/reset/revert 调用改 `WritePaths(user_path=...)`。
+- 前端目录：capability/log_analysis 组 14 处占位说明（“XXX.yaml 中的 KEY 配置项。”）同步为后端 `_descriptions_from_lines` 注释，
+  `test_backend_config_catalog.py` / `test_frontend_settings_labels.py` 跑通。
+- 变异验证 3 个（临时改实现→守卫测试变红→还原，备份在 /private/tmp/claude-501/）：
+  - capability 写入目标改回旧路径（user_path 同目录）→ `test_capability_write_writes_the_runtime_file_and_runtime_entry_reads_it` 红
+    （assert 5 == 8，运行时入口读不到新值）；
+  - 去掉 PARAMETER_SOURCE_READ_ONLY 分支 → `test_readonly_sources_reject_modification_with_structured_code` 红
+    （结构化码变 PARAMETER_BOUNDARY）；
+  - `running_value` capability 忽略 capability_path → `test_running_value_shows_owner_override_when_capability_file_has_one` 红
+    （覆盖值 9 显示成随包 5）。
+- 命令与结果（`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，basetemp=/private/tmp/claude-501/m-ds2）：
+  - 相关 14 文件（test_parameter_sources/changes/structured_masking/settings_chat_control/user_config_capability/compact_trigger_cap/
+    parameter_registry/parameter_metadata/value_display_parity/config_field_readers/config_defaults_parity/reasoning_probe/
+    backend_config_catalog/frontend_settings_labels）→ **233 passed**；
+  - guards9 全量（10 文件，含 test_packaging）→ **167 passed**；
+  - `scripts/check_import_boundaries.py` → **0 条**；`ruff check agent_py_agent scripts` → **All checks passed**；
+  - `scripts/check_doc_sync.py` → **DOC_SYNC_PASS**；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
+    → **hard=0, blocked=False**（跑完 `git checkout -- CODE_SIZE_REPORT.md` 还原，未提交）；`git diff --check` → 通过；
+    `scripts/check_clean_package.py .` → **OK: 未发现发布阻塞项**。
+- 未验证：真实 Gateway 进程里的 `/settings` 交互与 capability 改动重启生效（测试走控制服务单测与运行时入口函数，未启动 Gateway、
+  未重启进程）。
+
 ## 参数中心 P17：三份配置纳入登记表与写入口（2026-10-01，分支 `worker/ds2-registry-sources`，基于 `f15b0a19f`）
 
 - 新增 `agent_py_agent/tests/test_parameter_sources.py`（10 项）：

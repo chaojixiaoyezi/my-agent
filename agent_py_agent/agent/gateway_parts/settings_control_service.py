@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
 from ..settings.config_io import load_simple_yaml
 from ..settings.parameter_changes import (
     ChangeOrigin,
+    WritePaths,
     applied_after_change,
     displayed_change,
     parameter_history,
@@ -21,6 +23,9 @@ from ..settings.parameter_changes import (
     set_parameter,
 )
 from ..settings.parameter_registry import (
+    SOURCE_CAPABILITY,
+    SOURCE_LOG_ANALYSIS,
+    SOURCE_RUNTIME_GUARD,
     ParameterSpec,
     applied_value,
     common_parameters,
@@ -64,11 +69,17 @@ def execute_settings_control(base_agent: object, command: ConversationControlCom
     try:
         if not _is_admin(_scoped_home(base_agent, scope)):
             return ConversationControlResult(_KIND, False, _NOT_ADMIN)
-        from ..capability.runtime_config_reload import capability_config_for_agent
+        from ..capability.runtime_config_reload import (
+            capability_config_for_agent,
+            capability_config_path_for,
+        )
 
         # capability 告警要从统一入口取：AgentConfig 上没有 capability_config，旧写法永远拿不到。
+        # 展示与写入用的 capability 文件路径也按运行时同一逻辑解析（agent.capability_config_path 或 root 默认），
+        # 不拿 agent_config 用户文件同目录猜——两者目录不同（2026-10-01 评审抓出）。
         text = run_settings_control(getattr(base_agent, "config", None), command,
-                                    capability_config=capability_config_for_agent(base_agent))
+                                    capability_config=capability_config_for_agent(base_agent),
+                                    capability_path=capability_config_path_for(base_agent))
     except SettingsControlError as exc:
         return ConversationControlResult(_KIND, False, str(exc))
     except Exception:  # noqa: BLE001 - 控制回执不能带堆栈或本机路径之外的内部细节。
@@ -93,9 +104,10 @@ def _is_admin(home: object) -> bool:
 
 # LLM: 按解析器给出的 operation 分派；config 是 Gateway 启动时加载的配置（当前运行值与用户配置路径的来源）。
 #   capability_config 由调用方经统一入口取得，只交给要显示配置告警的总览与全部视图；不传时这两处只显示主配置告警。
+#   capability_path 是运行时实际读取的 capability 文件路径，展示与写入口都要用（否则显示的运行值/写入目标对不上）。
 # 函数用途: 对管理员执行 /settings 的一个子命令，返回中文回执。
 def run_settings_control(config: object, command: ConversationControlCommand, *,
-                         capability_config: object = None) -> str:
+                         capability_config: object = None, capability_path: Path | None = None) -> str:
     if command.operation == "help":
         return command.usage
     handler = _HANDLERS.get(command.operation)
@@ -103,8 +115,9 @@ def run_settings_control(config: object, command: ConversationControlCommand, *,
         raise SettingsControlError(command.usage)
     _operation, _, argument = command.value.partition(" ")
     if command.operation in _WARNING_VIEWS:
-        return handler(config, argument.strip(), capability_config=capability_config)
-    return handler(config, argument.strip())
+        return handler(config, argument.strip(), capability_config=capability_config,
+                       capability_path=capability_path)
+    return handler(config, argument.strip(), capability_path=capability_path)
 
 
 def _user_path(config: object):
@@ -152,16 +165,17 @@ def _brief(description: str) -> str:
 
 
 # LLM: 显示 Gateway 启动配置里的当前运行值；用户配置改过就注明默认值，改了还没重启就注明“发 /restart 后生效”。
-#   值都经 mask_value 脱敏。只读。
+#   capability 键按运行时路径读（capability_path），runtime_guard/log_analysis 只读随包并标注。值都经 mask_value 脱敏。只读。
 # 函数用途: 把一个常用参数排成一行中文。
-def _common_line(spec: ParameterSpec, config: object, stored: dict) -> str:
-    running = running_value(spec, config)
+def _common_line(spec: ParameterSpec, config: object, stored: dict, capability_path: Path | None = None) -> str:
+    running = running_value(spec, config, capability_path=capability_path)
     marks = ""
     if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(spec.default):
         marks += f"（改过，默认 {_value(spec, spec.default)}）"
     if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(running):
         marks += f"（已改成 {_value(spec, stored[spec.key])}，发 /restart 后生效）"
-    return f"- {spec.key} = {_value(spec, running)}{marks}：{_brief(spec.description)}"
+    note = "（随包默认、不可覆盖）" if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else ""
+    return f"- {spec.key} = {_value(spec, running)}{marks}{note}：{_brief(spec.description)}"
 
 
 # LLM: 未知/已删配置键只告警不生效，用户看不到就等于白配；这里把两个来源拼成给用户看的几行。只读，不解析消息文字。
@@ -189,12 +203,13 @@ def _config_warning_lines(config: object, capability_config: object = None) -> l
 # LLM: 默认视图只列参数中心的常用层级（COMMON_KEYS），再用一句大白话说总数和怎么看全部；常用以外改过的只报个数，
 #   详情在 /settings all。总数与改过的统计只算 listed_parameters（加载器元数据不列出）。只读。
 # 函数用途: /settings —— 列出常用参数与当前值，提示用 /settings all 看全部。
-def _overview(config: object, _argument: str, *, capability_config: object = None) -> str:
+def _overview(config: object, _argument: str, *, capability_config: object = None,
+              capability_path: Path | None = None) -> str:
     registry = listed_parameters()
     stored = _stored(config)
     common = common_parameters()
     lines = [f"常用参数（{len(common)} 项，平时要调的基本都在这里）："]
-    lines += [_common_line(spec, config, stored) for spec in common]
+    lines += [_common_line(spec, config, stored, capability_path) for spec in common]
     others = [key for key in _changed_keys(registry, stored) if not registry[key].common]
     if others:
         lines.append(f"另外你还改过 {len(others)} 个其它参数，发 /settings all 查看。")
@@ -209,7 +224,8 @@ def _overview(config: object, _argument: str, *, capability_config: object = Non
 #   改过的标［改过］，不能在这里改的标［安全边界］。值都经 mask_value 脱敏；IM 适配器会按行切成多条消息。
 #   只列 listed_parameters：配置文件路径、来源、分层与告警这类加载器元数据不是参数，不出现在清单和总数里。只读。
 # 函数用途: /settings all —— 给管理员看全部参数。
-def _all(config: object, _argument: str, *, capability_config: object = None) -> str:
+def _all(config: object, _argument: str, *, capability_config: object = None,
+         capability_path: Path | None = None) -> str:
     registry = listed_parameters()
     path = _user_path(config)
     changed = set(_changed_keys(registry, _stored(config)))
@@ -221,32 +237,36 @@ def _all(config: object, _argument: str, *, capability_config: object = None) ->
     if recent:
         lines += ["最近修改："] + [_history_line(item) for item in recent]
     lines += _config_warning_lines(config, capability_config)
-    lines += _category_lines(registry, config, changed)
+    lines += _category_lines(registry, config, changed, capability_path)
     return "\n".join(lines + ["看说明发 /settings show <参数名>；只看常用参数发 /settings。"])
 
 
 # LLM: 分类沿用登记表的 category，按参数第一次出现的顺序排，“其它”放最后；每项一行当前运行值与标记。只读。
 # 函数用途: 按分类排出全部参数的清单行。
-def _category_lines(registry: dict[str, ParameterSpec], config: object, changed: set[str]) -> list[str]:
+def _category_lines(registry: dict[str, ParameterSpec], config: object, changed: set[str],
+                    capability_path: Path | None = None) -> list[str]:
     groups: dict[str, list[ParameterSpec]] = {}
     for spec in registry.values():
         groups.setdefault(spec.category, []).append(spec)
     lines: list[str] = []
     for category in sorted(groups, key=lambda name: name == "其它"):
         lines.append(f"【{category}】{len(groups[category])} 项")
-        lines += [_all_line(spec, config, changed) for spec in groups[category]]
+        lines += [_all_line(spec, config, changed, capability_path) for spec in groups[category]]
     return lines
 
 
-# LLM: 值经 _value（凭据仍脱敏）；［安全边界］只看登记表的 writable，不按说明文字判断。只读。
+# LLM: 值经 _value（凭据仍脱敏）；［安全边界］只看登记表的 writable，不按说明文字判断。
+#   capability 键运行值按运行时路径读；runtime_guard/log_analysis 只读随包并标注。只读。
 # 函数用途: 把一个参数排成全部视图里的一行：当前运行值，改过标［改过］，不能在这里改标［安全边界］。
-def _all_line(spec: ParameterSpec, config: object, changed: set[str]) -> str:
+def _all_line(spec: ParameterSpec, config: object, changed: set[str],
+              capability_path: Path | None = None) -> str:
     marks = ("［改过］" if spec.key in changed else "") + ("" if spec.writable else "［安全边界］")
-    return f"- {spec.key} = {_value(spec, running_value(spec, config))}{marks}"
+    note = "（随包默认、不可覆盖）" if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else ""
+    return f"- {spec.key} = {_value(spec, running_value(spec, config, capability_path=capability_path))}{marks}{note}"
 
 
 # 函数用途: /settings search <关键词> —— 按参数名与中文说明找参数。
-def _search(config: object, argument: str) -> str:
+def _search(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     found = search_parameters(argument, limit=10)
     if not found:
         return f"没有找到和“{argument}”相关的参数。"
@@ -254,7 +274,9 @@ def _search(config: object, argument: str) -> str:
     for spec in found:
         flag = "可改" if spec.writable else "安全边界"
         summary = spec.description[:60] + ("…" if len(spec.description) > 60 else "")
-        lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, running_value(spec, config))}：{summary or '（没有说明）'}")
+        note = "（随包默认、不可覆盖）" if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else ""
+        lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, running_value(spec, config, capability_path=capability_path))}{note}："
+                     f"{summary or '（没有说明）'}")
     return "\n".join(lines)
 
 
@@ -284,7 +306,7 @@ def _internal(_config: object, argument: str) -> str:
 # LLM: config 是 Gateway 启动配置，所以登记了派生规则的参数（如 max_tokens、推理强度）按默认模型算实际效果，并注明
 #   /model 切换过的会话可能不同；派生公式只在参数中心 applied_value 背后的原权威位置。只读。
 # 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、实际效果（有派生规则时）、用户配置里的值与能否修改。
-def _show(config: object, argument: str) -> str:
+def _show(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     spec = parameter_registry().get(argument)
     if spec is None:
         raise SettingsControlError(f"没有名为 {argument} 的参数；可以发 /settings search <关键词> 找一找。")
@@ -301,11 +323,14 @@ def _show(config: object, argument: str) -> str:
     metadata_lines += [line for field, label in (("unit", "单位"), ("range", "范围"),
                                                  ("owner_module", "归属模块"), ("reader", "读取方"))
                        if (line := _metadata_line(spec, field, label))]
+    # 运行时没有覆盖层的来源（runtime_guard/log_analysis）只能看随包默认，修改会走只读拒绝。
+    readonly_note = ("（随包默认、不可覆盖：该配置运行时没有用户覆盖层，写了也不会生效）"
+                     if spec.source in {SOURCE_RUNTIME_GUARD, SOURCE_LOG_ANALYSIS} else "")
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
         f"说明：{spec.description or '（没有说明）'}",
-        f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, running_value(spec, config))}；"
-        f"用户配置里：{override}",
+        f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, running_value(spec, config, capability_path=capability_path))}"
+        f"{readonly_note}；用户配置里：{override}",
         *metadata_lines,
         *applied_line,
         f"能否修改：{writable}",
@@ -333,10 +358,12 @@ def _applied_text(report: dict[str, object], config: object) -> str:
 
 
 # LLM: 登记了派生规则的参数再附一句实际效果（_applied_text），让用户当下就知道改了是否真的起作用。有写文件副作用。
+#   capability 键写入目标=运行时实际读取的那份文件（capability_path），runtime_guard/log_analysis 会被写入口拒绝。
 # 函数用途: /settings set <参数名> <值> —— 修改一个参数并记账。
-def _set(config: object, argument: str) -> str:
+def _set(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     key, _, value = argument.partition(" ")
-    report = _checked(set_parameter(key, value, user_path=_user_path(config), origin=_ORIGIN))
+    paths = WritePaths(user_path=_user_path(config), capability_path=capability_path)
+    report = _checked(set_parameter(key, value, paths=paths, origin=_ORIGIN))
     previous = report.get("previous")
     return (f"已把 {key} 改为 {report['saved']}（原来 {previous if previous is not None else '是默认值'}），"
             f"记录编号 {str(report['change_id'])[:8]}。{report['effect_text']}{_applied_text(report, config)}")
@@ -344,8 +371,9 @@ def _set(config: object, argument: str) -> str:
 
 # LLM: 与 set 同一口径附实际效果（按默认值算）。有写文件副作用。
 # 函数用途: /settings reset <参数名> —— 删除覆盖、恢复默认并记账。
-def _reset(config: object, argument: str) -> str:
-    report = _checked(reset_parameter(argument, user_path=_user_path(config), origin=_ORIGIN))
+def _reset(config: object, argument: str, *, capability_path: Path | None = None) -> str:
+    paths = WritePaths(user_path=_user_path(config), capability_path=capability_path)
+    report = _checked(reset_parameter(argument, paths=paths, origin=_ORIGIN))
     return (f"已把 {argument} 恢复为默认值（原来 {report.get('previous')}），记录编号 {str(report['change_id'])[:8]}。"
             f"{report['effect_text']}{_applied_text(report, config)}")
 
@@ -361,7 +389,7 @@ def _history_line(item: dict[str, object]) -> str:
 
 
 # 函数用途: /settings history [参数名] —— 最近 20 条修改记录（最新在前）。
-def _history(config: object, argument: str) -> str:
+def _history(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     items = parameter_history(user_path=_user_path(config), key=argument, limit=_LIST_LIMIT)
     if not items:
         return "还没有参数修改记录。"
@@ -371,8 +399,9 @@ def _history(config: object, argument: str) -> str:
 
 # LLM: 与 set 同一口径附实际效果（按回滚后的值算，回到默认时按默认值）。有写文件副作用。
 # 函数用途: /settings revert <记录编号> —— 撤销一次修改并记账。
-def _revert(config: object, argument: str) -> str:
-    report = _checked(revert_change(argument, user_path=_user_path(config), origin=_ORIGIN))
+def _revert(config: object, argument: str, *, capability_path: Path | None = None) -> str:
+    paths = WritePaths(user_path=_user_path(config), capability_path=capability_path)
+    report = _checked(revert_change(argument, paths=paths, origin=_ORIGIN))
     now = report.get("saved") if report.get("saved") is not None else "默认值"
     return (f"已回滚记录 {argument}：{report['key']} 现在是 {now}，新记录编号 {str(report['change_id'])[:8]}。"
             f"{report['effect_text']}{_applied_text(report, config)}")

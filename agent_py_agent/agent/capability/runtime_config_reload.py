@@ -24,6 +24,17 @@ def default_capability_config_path(root: str | Path) -> Path:
     return candidates[0]
 
 
+# LLM: 参数中心写入口与展示层要写/读的就是这份文件：agent 上有 capability_config_path 用它的，否则按
+#   agent.root 用 default_capability_config_path（与 capability_config_for_agent 同一逻辑），不能拿
+#   agent_config 用户文件同目录猜——两者目录不同（owner home 与用户配置目录是两回事，2026-10-01 评审抓出）。
+# 函数用途: 返回运行时实际读取的 capability 配置文件路径（按 agent 对象解析，没有 agent 信息时给默认路径）。
+def capability_config_path_for(agent: object) -> Path:
+    return Path(
+        str(getattr(agent, "capability_config_path", "") or "")
+        or default_capability_config_path(getattr(agent, "root", "."))
+    )
+
+
 # LLM: "从 agent 对象取 capability 配置"的唯一权威入口：优先 agent 上的运行时快照
 #   _capability_config_runtime_snapshot，否则按 capability_config_path/默认路径加载并把
 #   快照缓存回 agent（副作用）。缓存里不是 CapabilityConfig 的对象一律不认，

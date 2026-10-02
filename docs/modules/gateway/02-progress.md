@@ -20,11 +20,16 @@ Gateway 控制通道，与 user_config action=search 的 constants 结果同数�
 登记表增加来源维度（参数中心 P17，分支 `worker/ds2-registry-sources`，2026-10-01）：`parameter_registry.ParameterSpec` 加 `source` 字段，
 四来源 `agent`（agent_config.yaml，224 键）/`capability`（capability_config.yaml，31 键）/`runtime_guard`（runtime_guard_config.yaml，22 键）/
 `log_analysis`（log_analysis_config.yaml，20 键），合计 297 键；说明、类型、默认值从各随包 YAML 与 dataclass 取，规则与主配置一致。
-写入口 `parameter_changes._write_target` 按来源把写入重定向到用户配置同目录 `<source>_config.yaml`，`_effective` 按来源选正式加载器
-（capability→`load_capability_config`、runtime_guard→`runtime_guard_policy`、log_analysis→`load_simple_yaml`）回读校验，写后回读不一致恢复原文件并记 settings-changes 账本。
-安全等级默认按边界（授权、权限、路径、执行权威链一律模型不可改），capability 的 17 个能力数值上限键为显式 free 名单（`_EXTRA_FREE_KEYS`，逐键带理由），
-runtime_guard/log_analysis 全部边界。`settings_control_service._show` 对每条参数加“来源：<source>_config.yaml”行，`_search/_all/_common_line` 运行值改走
-`running_value`（非 agent 键从随包文件实时读）。回归见 `test_parameter_sources.py`（10 项：四来源 search/view、真实文件写链、回读失败恢复、边界拒绝）。
+写入口 `parameter_changes` 仍是唯一一套：agent 写在用户配置（user_path），capability 写在运行时实际读取的那份文件
+（`capability_config_for_agent` 同一路径，由 `capability_config_path_for` 解析，文件不存在时新建、只写被改的键），
+`_effective` 按来源选正式加载器（capability→`load_capability_config`、runtime_guard→`runtime_guard_policy`、log_analysis→`load_simple_yaml`）
+回读校验，写后回读不一致恢复原文件（或删除新建文件）并记 settings-changes 账本；capability 改动要重启 Gateway 才生效。
+runtime_guard/log_analysis 运行时没有用户覆盖层，修改一律拒绝（PARAMETER_SOURCE_READ_ONLY，结构化原因“只能查看和搜索”），不新造写入口。
+安全等级默认按边界（授权、权限、路径、执行权威链一律模型不可改），capability 的 17 个能力数值上限键为显式 free 名单（`_EXTRA_FREE_KEYS`，逐键带理由）。
+`settings_control_service._show` 对每条参数加“来源：<source>_config.yaml”行，`_search/_all/_common_line` 运行值改走 `running_value`：
+capability 按运行时路径读（owner 有覆盖时显示覆盖值），runtime_guard/log_analysis 显示随包默认并标“（随包默认、不可覆盖）”。
+回归见 `test_parameter_sources.py`（14 项：四来源 search/view、capability 写运行时文件且运行时入口读到新值、文件缺失时新建、
+只读来源结构化拒绝、回读失败恢复/删除、覆盖值显示、边界拒绝、user_config 工具链路）。
 
 J6 决策实验自动晋升提示（2026-10-01，`worker/sol2-promotion-notice`，本地待集成）：
 - 原请求晋升回执追加唯一 `promotion_id` 与冻结规则；只返回新写入的 applied 回执，旧回执消费后重启不补投。

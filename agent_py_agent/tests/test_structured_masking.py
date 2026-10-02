@@ -139,16 +139,16 @@ def test_settings_overview_show_and_search_never_show_structured_secrets(tmp_pat
 
 def test_receipts_ledger_and_history_are_masked_and_masked_rows_cannot_be_reverted(tmp_path, monkeypatch):
     path = _user_config(tmp_path)
-    report = changes.set_parameter("agent_name", _URL_WITH_SECRETS, user_path=path, origin=ChangeOrigin("test"))
+    report = changes.set_parameter("agent_name", _URL_WITH_SECRETS, paths=changes.WritePaths(user_path=path), origin=ChangeOrigin("test"))
     assert report["ok"] and not _leaks(json.dumps(report, ensure_ascii=False))
     ledger = ledger_path(path).read_text(encoding="utf-8")
     assert not _leaks(ledger) and json.loads(ledger.splitlines()[-1])["masked"] is True
-    refused = changes.revert_change(report["change_id"], user_path=path, origin=ChangeOrigin("test"))
+    refused = changes.revert_change(report["change_id"], paths=changes.WritePaths(user_path=path), origin=ChangeOrigin("test"))
     assert refused["ok"] is False and refused["code"] == "CHANGE_MASKED"  # 回滚会把 *** 写回配置，拒绝
     # 文本参数里的连接串同样遮住、标 masked、不能回滚
-    dsn = changes.set_parameter("agent_name", "host=db password=FAKE-PG-25", user_path=path, origin=ChangeOrigin("test"))
+    dsn = changes.set_parameter("agent_name", "host=db password=FAKE-PG-25", paths=changes.WritePaths(user_path=path), origin=ChangeOrigin("test"))
     assert dsn["ok"] and not _leaks(json.dumps(dsn, ensure_ascii=False) + ledger_path(path).read_text(encoding="utf-8"))
-    assert changes.revert_change(dsn["change_id"], user_path=path, origin=ChangeOrigin("test"))["code"] == "CHANGE_MASKED"
+    assert changes.revert_change(dsn["change_id"], paths=changes.WritePaths(user_path=path), origin=ChangeOrigin("test"))["code"] == "CHANGE_MASKED"
     # 脱敏收紧前写下的旧记录可能含明文：历史回显出口仍然遮住
     old_row = {"id": "0ld0ld0ld0ld", "at": "2026-09-01T00:00:00+00:00", "key": "agent_name", "action": "set",
                "actor": "model", "reason": "", "masked": False, "previous": None, "value": f'"{_URL_WITH_SECRETS}"'}

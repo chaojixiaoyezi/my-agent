@@ -410,10 +410,11 @@ def mask_value(key: str, value: object) -> str:
 #   否则模型会把随包默认当成"用户配置"（真机：模型去读安装目录里的 agent_config.yaml 当答案）。
 #   能不能改只由参数中心登记表的 writable 回答；这里不再给旧白名单的 tunable 字段（09-27 模型见 writable=true、
 #   tunable=false 两个口径，误以为 max_tokens 改不了）。P17 起按登记表的 source 选文件：主配置用传入的
-#   user_path/default_path，capability/runtime_guard/log_analysis 用同目录的 <source>_config.yaml。
+#   user_path/default_path；capability 的用户文件是运行时实际读取的那份（capability_path，调用方按
+#   capability_config_for_agent 同一路径解析）；runtime_guard/log_analysis 没有用户覆盖层，只有随包默认。
 # 函数用途: 读取某个键的用户值与随包默认值，并给出当前生效值与来源。
 def read_config_fact(
-    key: str, *, user_path: Path | None, default_path: Path
+    key: str, *, user_path: Path | None, default_path: Path, capability_path: Path | None = None
 ) -> dict[str, object]:
     name = str(key or "").strip()
     source = "agent"
@@ -424,8 +425,13 @@ def read_config_fact(
         source = spec.source
         base = Path(default_path).parent
         default_path = base / f"{source}_config.yaml"
-        if user_path is not None:
+        if source == "capability":
+            user_path = capability_path
+        elif user_path is not None:
             user_path = Path(user_path).with_name(f"{source}_config.yaml")
+        else:
+            # runtime_guard/log_analysis 没有用户覆盖层：没有可读的用户文件，只有随包默认。
+            user_path = None
     user_values = load_simple_yaml(user_path) if user_path is not None and user_path.exists() else {}
     default_values = load_simple_yaml(default_path) if default_path.exists() else {}
     user_value = user_values.get(name)
@@ -470,7 +476,9 @@ def packaged_config_path() -> Path:
 
 
 # LLM: 兼容入口：写入统一走参数中心 parameter_changes.set_parameter（登记表判定可写、按类型渲染、正式 load_config 回读、
-#   写账本），这里不再维护第二套白名单写法。actor 固定为 model（只有模型工具调用它）。副作用：写用户配置与账本。
+#   写账本），这里不再维护第二套白名单写法。actor 固定为 model（只有模型工具调用它）。capability 等非主配置来源
+#   需要调用方给 capability 运行时路径（capability_path），本入口没有 agent 就拿不到，只用于主配置键。
+#   副作用：写用户配置与账本。
 # 函数用途: 校验并写入一个模型可修改的配置项，返回结构化回执。
 def set_tunable_value(
     key: object,
@@ -478,10 +486,10 @@ def set_tunable_value(
     *,
     user_path: Path | None = None,
 ) -> dict[str, object]:
-    from .parameter_changes import ChangeOrigin, set_parameter
+    from .parameter_changes import ChangeOrigin, WritePaths, set_parameter
 
     path = user_path if user_path is not None else user_config_path()
-    return set_parameter(key, value, user_path=path, origin=ChangeOrigin("model"))
+    return set_parameter(key, value, paths=WritePaths(user_path=path), origin=ChangeOrigin("model"))
 
 
 # LLM: 可写范围以参数中心登记表为准（两百多项，不整表塞进模型上下文）：给数量、查找方法、生效时机和永不可写的显式清单。
