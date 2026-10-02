@@ -4114,10 +4114,7 @@ def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
     assert not interrupted.is_set()
     # C10（2026-10-01）起 IM 的 /plugins 走持久控制回执（同一消息重送不重复执行），不再在 /ask、/control 里提前短路；
     # 非插件的未知命令仍不进持久控制。
-    if kind == "plugins":
-        control.assert_called()
-    else:
-        control.assert_not_called()
+    assert control.called is (kind == "plugins")
     model.assert_not_called()
 
 
