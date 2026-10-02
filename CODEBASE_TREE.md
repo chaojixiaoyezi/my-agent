@@ -128,6 +128,7 @@
     |-- PLUGIN_WORKSPACE_WRITE.md        # 逐次写入工作区协议，与内置写工具同一裁决且只可能更严
     |-- PLUGIN_HOST_API.md               # 界面型插件的宿主只读 API：v4 声明、按激活发令牌、主题白名单
     |-- PLUGIN_OBSERVATION_CANDIDATES.md # 插件观察候选结构设计稿：manifest 声明、宿主铸 ID、两层执行前复核与动作候选决策点
+    |-- J16_SCREEN_OBSERVATION.md        # J16 屏幕识别设计（已确认、未实施）：自家适配器结构化窗口观察、两层复核、自动执行默认关
     |-- PLUGIN_ANY_LANGUAGE.md           # 任意语言插件（v6）：随包可执行文件/系统解释器、启用前用户确认、解释器固定与跨语言读取检查用例
     |-- PLUGIN_PROCESS_SANDBOX.md        # 插件进程 OS 沙箱试点：开关语义、失败拒绝、已知限制与验证
     |-- WORKSPACE_PEEK.md                # 首个自有只读插件的预览、分页、安全打开与构建边界
@@ -1534,6 +1535,10 @@ docs/
 - `agent_py_agent/agent/plugin_activation_ref.py`：只定位原安装表的可信引用；严格核对原 owner/root/scope，启动和发送不缓存授权。
 - `docs/design/PLUGIN_ACTIVATION.md`：激活身份、持久撤销、释放/证据消费及重新启用；卸载、显式业务命令及实际多 TUI 仍待完成。
 - `docs/design/PLUGIN_OBSERVATION_CANDIDATES.md`：插件观察候选结构设计稿（插件线已实施，决策点 `action_candidate` 已接入并真实验收）：只读工具在 manifest 声明观察、结果给出目标代次与有限候选，宿主铸 ID 写进原归档，动作前两层复核；是第 15 项动作候选决策点的前置条件。
+- `docs/design/J16_SCREEN_OBSERVATION.md`：J16 屏幕识别设计（3a 已确认、未实施）。
+  - **做什么**：在自家 Computer Use 适配器里用操作系统和库的公开接口给出稳定窗口身份、代次、坐标变换的结构化观察，接插件线同一套观察合同和 `action_candidate`；两层复核防按旧建议点错；自动执行由能力开关控制，默认关。
+  - **范围**：属主范围同 Computer Use。
+  - **实施与测试**：按片 A→G 实施，只在 Linux 车道 Xvfb 里测试。
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v4 显式保留和激活归属，旧 v2/v3 原版本恢复边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，列表／详情投影当前安装快照，查询只读原请求。

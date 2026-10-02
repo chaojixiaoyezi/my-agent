@@ -499,13 +499,19 @@
 - **不受影响**：TUI、CLI 等本机私有通道仍原样保留完整路径，也不附说明。
 - **验证**：见 TESTS.md 同名节。
 
-## J16：Computer Use 观察候选前置合同核对（2026-10-02，`worker/sol-j16-observation`，设计已记录，产品实现阻塞）
+## J16：屏幕识别——结构化观察 + 动作候选（2026-10-02，已确认设计、未实施）
 
-- 目标是沿原观察归档/事件与 `action_candidate` 接 OCR/窗口候选，坐标只由宿主解析，默认开关及审批不变。
-- 固定 `computer-control-mcp==0.3.13` 公开 OCR 返回 tuple 文本，无截图身份/时刻/坐标变换；窗口列表无稳定窗口 ID，按窗 OCR 还切焦点。
-  在“只组合公开 MCP 工具、不改上游”范围内无法满足只读观察和换窗/换代拒绝，未写假接口或私有 API 旁路。
-- [设计及源代码证据](docs/design/PLUGIN_OBSERVATION_CANDIDATES.md#7-j16computer-use--ocr-接入设计与上游合同阻塞2026-10-02)已写明所需合同、宿主校验、动作解析与 image-text 无动作工具故不接。
-- 未实施产品代码；假 MCP 功能测试、四变异及真实桌面/模型均未验证。先由 3a 补齐公开接口或明确调整适配边界，再续做。
+- **来由**：用户第 13 条要做、要“功能做全”，先像观察模式那样只给建议、不自动点；并把原来“只组合上游公开 MCP 工具”的边界放宽为“别等上游”。3a 审定的设计见 [J16_SCREEN_OBSERVATION](docs/design/J16_SCREEN_OBSERVATION.md)（分支 `claude/ae-j16-screen-observation`，ae 起草）。
+- **设计要点**：
+  - **新工具**：在自家 Computer Use 适配器里新增 `observe_window`（read_only，审批策略 always），直接用操作系统和库的公开接口（X11/EWMH、Quartz、ScreenCaptureKit、mss、RapidOCR），给出稳定窗口身份、代次、坐标原点和缩放、遮挡、成功状态。还有 `click_candidate`；`type_into_candidate` 随片 G 注册。
+  - **三件套共用**：插件线观察三件套抽成 `ObservationBinding`，插件和 MCP 共用，几何是通用扩展，只进归档。
+  - **两层复核**：宿主先确认是最新观察；适配器再重新采样，核对实例、几何、遮挡和候选区域像素。
+  - **决策与执行**：`action_candidate` 生产用 observe；自动执行由能力开关 `action_candidate_auto_execute_enabled` 控制，默认关，只限点击，走同一个 Tool Gateway。
+  - **属主范围**：同现有 Computer Use，只限结构化 local/main、Full Access、`computer_use_enabled`，非 local/main 的 owner 看不到也调不了。
+- **不新增第三方依赖**：pyobjc 和 python-xlib 已由 `pywinctl` 带入。Linux AT-SPI 只作可选评估，不进默认依赖。
+- **测试**：只在 Linux 车道容器里用 Xvfb，不碰用户真实屏幕；真实验收用 M3 + Jev。
+- **分工**：ef 做完第 14 条后按 A→G 分片实施，ae 做每片设计评审。给 M3 附截图要复用第 14 条的图片通道。
+- **原阻塞记录**（上游 0.3.13 缺稳定窗口身份、截图代次、坐标变换，按窗 OCR 切焦点）保留在 [插件观察候选结构第 7 节](docs/design/PLUGIN_OBSERVATION_CANDIDATES.md#7-j16computer-use--ocr-接入设计与上游合同阻塞2026-10-02)。
 
 ## 决策质量基准补齐全部 12 个点位（J12 续）（2026-10-02，分支 `claude/be-bench-more-points`，基于 `claude/3a-step16z` `b35796a60`，已实现，待集成）
 

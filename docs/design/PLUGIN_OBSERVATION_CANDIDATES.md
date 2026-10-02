@@ -184,6 +184,8 @@
 ## 7. J16：Computer Use / OCR 接入设计与上游合同阻塞（2026-10-02）
 
 **状态：设计已记录，产品实现阻塞。** 本节不表示 Computer Use 已产出观察，也不替代第 6 节的 browser-lite 实施记录。
+
+> **2026-10-02 更新**：用户放宽了本节“只组合上游公开 MCP 工具”的边界（改为“别等上游”）。接替本节的设计是 [J16_SCREEN_OBSERVATION](J16_SCREEN_OBSERVATION.md)：在自家适配器里用操作系统和库的公开接口补齐结构化观察，状态是已确认设计、未实施。本节保留为原阻塞证据。
 工作分支 `worker/sol-j16-observation`，基于 `claude/3a-step16z` 的 `b35796a60`。只允许改适配层与宿主校验，
 且适配层只组合上游公开 MCP 工具；在此边界内，固定 `computer-control-mcp==0.3.13` 尚不能提供安全接入所需事实。
 

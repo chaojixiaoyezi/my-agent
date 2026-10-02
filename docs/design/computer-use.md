@@ -8,6 +8,13 @@
 不修改上游、不绕公开 MCP 组合边界。现有 computer_use 开关、effect 与执行行为保持；OCR 观察候选尚未接通。
 `image-text` 没有动作工具，保持原图片 OCR 数据工具。新增链路的假 MCP 功能/变异、真实桌面及真实模型均未验证。
 
+**2026-10-02 更新**：用户放宽边界为“别等上游”。新设计 [J16_SCREEN_OBSERVATION](J16_SCREEN_OBSERVATION.md) 已由 3a 确认、尚未实施：
+- 在本适配器里新增 `observe_window`、`click_candidate`，以及随片 G 注册的 `type_into_candidate`；
+- 只用操作系统和库的公开接口，不新增依赖；
+- 可用条件和本节的 Computer Use 完全相同（结构化 local/main + Full Access + `computer_use_enabled`），另加新开关 `computer_use_observation_enabled`。
+
+上游原有工具保持不变。
+
 ## 解决问题
 
 my-agent 需要操作终端之外的系统界面：查看窗口、读取屏幕文字、点击、键入、按键和等待状态变化。但鼠标、
