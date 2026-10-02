@@ -12,6 +12,37 @@
 - **为什么不在失败的那次运行里马上补跑**：一次运行的租约只有一整次提取的预算加 90 秒（`_lease_seconds`）。超时类失败已经把它用掉，再补跑一次会丢租约，提交被拒。下一次运行直接用默认模型，还省掉对一个已知连不上的服务商再烧一轮重试（生产那次约 44 秒）。代价：每批新消息最多先失败 2 次（每次之后退避 30–300 秒）才换到默认模型。
 - 实现：`memory_store/curator_routing.py`（常数与纯函数 `transient_fallback_code`）、`memory_store/curator.py`（`_CuratorRunMixin._transient_fallback`）。测试见 TESTS 同名条目。
 
+## 被宿主停机打断的回合重启后统一自动续跑，TUI 和 IM 都看得到（I4，第 8 条②，用户选 B，2026-10-02，分支 `claude/38-resume-rule`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，待集成）
+
+- **现状（查清）**：Gateway 停机时，在跑的用户回合有两种结局，全看时间先后，不是策略：
+  - 被拒（A）：收尾关闭模型调用准入后，回合的下一次模型调用被拒（`MODEL_CALL_ADMISSION_CLOSED`）。请求写成 failed，重启后不续跑，用户只看到一句泛泛的“模型本轮响应未完成”。
+  - 消失（B）：进程先退出，请求留在 processing。重启时启动恢复按死进程把它重排（`gateway_restart` / 安全重启是 `gateway_safe_restart`）并自动续跑；TUI 显示“已自动续跑”，IM 什么都没有。
+  - 安全重启也受影响：排空第一段到时后没跑完的回合，如果下一步是模型调用，就会走 A，和“没跑完的回合由新进程续跑”的承诺不一致。
+- **规则（我定，用户 10-02 选 B 后交给我）**：被宿主停机打断的用户回合，重启后**都自动续跑**，并且 TUI、IM 都看得到“这一轮被重启打断、已自动续跑”。
+- **为什么选“都续上”，不选“都不续、只提示”**：
+  - 停机是宿主的事，不是任务失败。`MODEL_CALL_ADMISSION_CLOSED` 的合同本来就写着“不是供应商失败也不是任务失败”，写成 failed 等于让用户为宿主的维护动作买单。
+  - 续跑本来就是现有设计：崩溃恢复和安全重启都会续跑，A 是唯一的例外，而且只是时间巧合造成的。反过来让 B 也不续，要在启动恢复里新造一条“写失败终态”的路，还会打破安全重启的承诺。
+  - 用户被打断后习惯发“继续”。自动续跑之后：
+    - 用户什么都不用做；
+    - 习惯性发的“继续”照现有输入投递规则进同一会话，不会让旧回合从头再跑：续跑从耐久工具账接着往下走，已执行的工具不重做。
+  - 安全：A 停在“模型调用边界”上，关门之后的工具不会启动（I3）；已执行的工具由续跑恢复从耐久工具账带回，不重做；没有执行中的工具，就不会出现“结果不确定”。
+- **做法**（只认结构化事实，不读异常文本）：
+  - `request_execution._host_shutdown_resume_marker`：失败沿显式原因链认出宿主停机准入拒绝（`find_model_call_admission_error`）时返回 `restart_resume` 标记（准入拒绝码 + 关门原因码）。
+    - 这时不收口插话、不记审计；`request_worker._finish_claimed_gateway_request` 见到标记就直接返回，请求原样留在 processing。
+    - 这样 A 的持久状态就和 B 一样，重启后走同一条恢复：按死进程重排；续跑认领时写 `turn_resumed` 边界；死进程留下的会话车道占用立即接管；还没提交给模型的插话预留按死掉的 attempt 退回待处理，由续跑回合再认领。
+  - 被拒那次 attempt 已记 failed，不挡续跑：续跑核对按精确 task+run 查（不看任务账是否已关），对已终态的 attempt 返回 not_required，同一主 run 开新 attempt。真实链路用例跑通了这条路。
+  - 用户停止优先：执行中用户已发过停止（请求上的 `cancel_requested`）的，不留给续跑，照常按取消收尾。普通失败照旧写 failed。
+  - IM 看得到：续跑回合的最终结果在 `channel_delivery.host_notices` 最前面补一条宿主提示（来源 `gateway_turn_resume`，code 是 cause），飞书等适配器把它渲染在回复正文前。
+    - TUI 已在续跑边界显示同一句话，且不读 `channel_delivery`，不会重复。
+    - 文案表从 TUI 挪到 `conversation/turn_resume_notice.py`，两边共用。
+  - `MODEL_CALL_ADMISSION_CLOSED` 的恢复提示和 `runtime_errors` 的 host_stopping 说明，改成“Gateway 前台用户回合重启后自动续跑；子代理 run 不自动重跑”。
+- **不做**（goal 第 8 条）：发送层硬门；子代理停机中断后自动续跑不占次数（子代理照旧由父级按 recovery_decision 续派）。
+- **已知边界 / 后续项**：
+  - 启动续跑没有次数上限（B 原本就是这样）。如果某个回合本身会把进程弄崩，每次重启都会再续一次，要不要加续跑次数上限，待定。
+  - 没有“打断太久就不续”的时间上限：停机一天后再启动，那一轮照样续跑。
+  - 停机那一刻 TUI/IM 不会立刻提示“将会续跑”：TUI 看到的是 Gateway 断开 / 正在安全重启，提示在续跑开始（TUI）和续跑完成（IM）时出现。
+- **验证**：见 TESTS.md 同名节。
+
 ## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（T2 续，75，2026-10-02，分支 `claude/75-jev-candidate-cap`，基于 `claude/3a-step17e` `4dd56f627`，已实现，真实 Jev 一次通过，待集成）
 
 - **问题**：生产 skill_tool 候选 53 题（52 个 Skill + 1 个插件组），Jev 请求 129,941 字节，按 `jev_wire_bytes.v1` 上界 79,563 > 57,600，实验路径 `input_bound_out_of_calibration` 拒发，F1 晋升走不下去（step17b 生产记录）。

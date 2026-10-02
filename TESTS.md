@@ -12,6 +12,26 @@
 - **相关回归**：全部 `test_curator_*.py`、`test_memory_curator_v2.py`、`test_collect_curator_evidence.py`、`test_owner_wake_discovery*.py` 加 guards9，434 项通过。
 - **变异**：14 个全部抓到（次数改 3、去掉预判、默认组也改道、去掉 `CURATOR_MODEL_FAILED` 或 `CURATOR_MODEL_TIMEOUT`、不比游标、身份在成功后才改、失败或成功记录缺原因、读账出错外抛、取最早的失败码、要多一条记录、不按组筛历史、原因不带 `:transient`）。
 
+## 被宿主停机打断的回合重启后统一自动续跑（I4，第 8 条②，2026-10-02，分支 `claude/38-resume-rule`，基于 `f6b63ab35`）
+
+- 新增 `test_shutdown_turn_resume.py`（9 例）：
+  - 准入拒绝（直接抛、经显式原因链包一层）：响应带 `restart_resume` 标记，不收口插话、不记审计，请求留在 processing，没有终态、failed 和 responses 文件；
+  - 普通失败照旧写 failed 终态；执行中用户发过停止、随后被准入拒绝，按取消收尾（interrupted）；
+  - 普通重启 / 安全重启后续跑：cause 分别是 `gateway_restart` / `gateway_safe_restart`，chunk 里有一条同 cause 的 `turn_resumed`（TUI），最终结果的 `host_notices` 第一条是同一句提示，IM 渲染后以“【提示】…已自动续跑。”开头；
+  - 普通回合没有续跑提示；TUI 与 IM 用同一张文案表；
+  - 真实链路（真实 SimpleAgent + Gateway 入口，只替换供应商传输）：第一次主调用途中停机结清 → 下一次模型调用被拒、请求留在 processing → 新准入表 + 新 agent 模拟重启，启动恢复重排、死进程车道立即接管 → 续跑完成（“SR-DONE”），IM 提示 code 是 gateway_restart，只多发一次模型调用，同一主 run 最终 done。
+- 变异 7 个全部抓住（rebase 到 `f6b63ab35` 后重跑）：
+  - g01 从不留给重启；
+  - g02 忽略用户停止；
+  - g03 worker 照样写终态；
+  - g04 照样收口插话；
+  - g05 不给 IM 提示；
+  - g06 每轮都给提示；
+  - g07 不沿显式原因链。
+  - 第一次 g02 存活：用例的停止标记在执行前就写好了，请求根本没执行；改成执行中写入后抓住。
+  - g07 第一版把 import 写在使用之后，抓到的是 UnboundLocalError，不算数；改正后只有“经显式原因链包一层”那例失败，算真正抓住。
+- 相关回归：`test_gateway_safe_restart.py`、`test_tui_runtime.py`、`test_gateway_request_runtime_errors.py`、`test_gateway_model_call_shutdown_settlement.py`、`test_user_interrupt_resume.py`、`test_host_notices.py` 全过。
+
 ## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（75，2026-10-02，分支 `claude/75-jev-candidate-cap`）
 
 - **新增 `test_jev_candidate_projection.py`**（7 项）：白名单字段（工具、Skill、能力包、插件组四种行），完整行不被改写，共用说明不再逐题；三个字段各自按转义字节截最长前缀（恰好等于上限原样保留、多 1 字节就截、ASCII 段后的汉字放不下就停、补充平面字符按 12 字节），截断计数等于截掉的转义字节；插件组内工具说明同样截并记账；非字符串原样通过；最坏情况 53 题（state 4,096 字节、三段文字满额汉字、ref 很长也不上线）经验上界 ≤ 57,600，54 题拒发；真实决策链路上 state 只带一次共用说明、不带完整行和计数，候选不带 ref，上线文字都在上限内。
