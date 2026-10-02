@@ -267,9 +267,11 @@ def _automatic_child(tmp_path, *, backend="anthropic_compatible", model="MiniMax
     jev, _ = decision(agent)
     source = agent.conversation_store.threads.get_or_create({"canonical_user_id": agent.home_paths.owner_id,
                                                             "owner_id": agent.home_paths.owner_id})
+    # 选模型点位有“不低于 5 秒”的点位默认（已定做法 10），这里把同一期限显式覆盖到点位上，
+    # 晚到探测等用例才能真按 timeout_seconds 过期限。
     settings = patch(agent, {"enabled": True, "profile_id": jev, "points.subagent_model.mode": "apply",
                              "points.subagent_model.candidate_profile_ids": [key], "timeout_seconds": timeout_seconds,
-                             "stage_timeout_seconds": 10})
+                             "points.subagent_model.timeout_seconds": timeout_seconds, "stage_timeout_seconds": 10})
     generation = model_profile_generation(agent, key, initialize=True)
     if not persist_child:
         return agent, source, key
