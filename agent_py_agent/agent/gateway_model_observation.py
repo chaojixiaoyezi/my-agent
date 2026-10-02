@@ -96,6 +96,32 @@ def _request_modality_filter(context: object, candidates: dict) -> object:
     return filter_model_candidates_by_input_modality(prepared, declared)
 
 
+# LLM: apply 模式先冻结候选目录代次（采用只能落在冻结的代次上），observe 只读当前目录；不探针、不保存选择。
+# 函数用途: 准备本次模型观察的候选与可采用代次，供 _decide 使用。
+def _prepared_candidates(agent: object, mode: str, deadline: float) -> tuple[dict, dict]:
+    candidates = _candidates(agent, deadline)
+    if mode != "apply":
+        return candidates, {}
+    from .gateway_model_adoption import freeze_selection_candidates
+
+    return freeze_selection_candidates(agent, candidates, deadline)
+
+
+# LLM: J11 模态过滤只按结构化附件事实与档案 input_modalities 判定；事实未知或全无适用候选时记到达原因，
+#   返回“保留原模型”的结果由调用方直接返回。候选与可采用代次按同一允许集合裁剪，采用只能落在 Jev 见过的候选上。
+# 函数用途: 按本轮输入模态过滤候选，返回（候选, 代次, 模态提示, 提前结束时的保留结果或 None）。
+def _filter_by_modality(context: object, candidates: dict, generations: dict) -> tuple[dict, dict, dict, dict | None]:
+    modality_filter = _request_modality_filter(context, candidates)
+    hint = modality_filter.as_dict()
+    if modality_filter.status == "unknown" or not modality_filter.applicable_profile_ids:
+        note_decision_reach(context.agent, "model_selection", modality_filter.reason_code)
+        return candidates, generations, hint, {"status": "retained", "reason": modality_filter.reason_code,
+                                               "adopted": False, "input_modality_filter": hint}
+    allowed = set(modality_filter.applicable_profile_ids)
+    return ({key: row for key, row in candidates.items() if key in allowed},
+            {key: row for key, row in generations.items() if key in allowed}, hint, None)
+
+
 # LLM: 只截头部、不改写；截断与否写进 input_completeness，不能把截断后的材料冒充完整输入。limit<=0 表示不截断。
 # 函数用途: 按字符上限截取一段材料，并返回它的完整性标注。
 def _bounded_text(value: str, limit: int) -> tuple[str, dict]:
@@ -333,25 +359,13 @@ class GatewayModelObservation:
         if reason:
             note_decision_reach(agent, "model_selection", reason)
             return {"status": "skipped", "reason": stage.error_code or "disabled"}
-        candidates = _candidates(agent, stage.deadline)
-        generations = {}
-        if mode == "apply":
-            from .gateway_model_adoption import freeze_selection_candidates
-
-            candidates, generations = freeze_selection_candidates(agent, candidates, stage.deadline)
+        candidates, generations = _prepared_candidates(agent, mode, stage.deadline)
         if not candidates:
             note_decision_reach(agent, "model_selection", "no_candidates")
             return {"status": "skipped", "reason": "no_candidates"}
-        modality_filter = _request_modality_filter(self.context, candidates)
-        modality_hint = modality_filter.as_dict()
-        if modality_filter.status == "unknown" or not modality_filter.applicable_profile_ids:
-            reason = modality_filter.reason_code
-            note_decision_reach(agent, "model_selection", reason)
-            return {"status": "retained", "reason": reason, "adopted": False,
-                    "input_modality_filter": modality_hint}
-        allowed = set(modality_filter.applicable_profile_ids)
-        candidates = {profile_id: row for profile_id, row in candidates.items() if profile_id in allowed}
-        generations = {profile_id: row for profile_id, row in generations.items() if profile_id in allowed}
+        candidates, generations, modality_hint, retained = _filter_by_modality(self.context, candidates, generations)
+        if retained is not None:
+            return retained
         state, questions, revision = counted_material(
             agent, "model_selection", lambda: _material(self.context, thread, self.captured,
                                                          (candidates, modality_hint)))
