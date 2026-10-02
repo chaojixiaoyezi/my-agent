@@ -39,7 +39,7 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "service_window_seconds": {"type": "integer", "minimum": 1},
     "audit_source_id": {"type": "string", "minLength": 1, "maxLength": 128},
 }
-# 开关 subagent_input_media_enabled 打开时才进入 schema：media_ref 是 64 位十六进制内容哈希，宿主解析端再校验格式。
+# capability 开关 subagent_input_media_enabled 打开时才进入 schema：media_ref 是 64 位十六进制内容哈希，宿主解析端再校验格式。
 _CREATE_INPUT_MEDIA_ITEM_SCHEMA: dict[str, Any] = {
     "input_media_refs": {"type": "array", "items": {"type": "string"}},
 }

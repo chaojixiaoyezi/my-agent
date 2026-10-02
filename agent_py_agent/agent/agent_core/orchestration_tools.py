@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from ..capability.runtime_config_reload import capability_config_for_agent
 from ..capability.skill_snapshot import SkillSnapshotError
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
@@ -251,8 +252,8 @@ def _not_started_create_result(exc: Exception) -> ToolHandlerOutcome:
 
 
 # LLM: 唯一模型派工工具只向原根/递归服务传递权限与取消快照；不得在外层锁住可选网络建议。
-#   model_spec 按本 agent 的 subagent_input_media_enabled（只认 True）在构造时定：开关开才多 input_media_refs，
-#   关闭时与类属性同一份说明；注册快照读实例属性。
+#   model_spec 按本 agent 的 capability 开关 subagent_input_media_enabled（capability_config_for_agent，只认 True）
+#   在构造时定：开关开才多 input_media_refs，关闭时与类属性同一份说明；注册快照读实例属性。
 # 类用途: 暴露创建直属孩子的统一工具，复用原服务校验、幂等、保存和启动链。
 class CreateSubagentsTool(BaseTool):
     model_spec = build_create_subagents_model_spec()
@@ -277,8 +278,7 @@ class CreateSubagentsTool(BaseTool):
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        config = getattr(agent, "config", None)
-        if getattr(config, "subagent_input_media_enabled", False) is True:
+        if getattr(capability_config_for_agent(agent), "subagent_input_media_enabled", False) is True:
             self.model_spec = build_create_subagents_model_spec(input_media=True)
 
     # LLM: 根和递归各自持有同一 manager 创建边界；本层不得包住整个调用，否则锁外决策会重新落到锁内。

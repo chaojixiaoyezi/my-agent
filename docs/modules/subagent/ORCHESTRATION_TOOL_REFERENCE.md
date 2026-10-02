@@ -51,7 +51,7 @@ create/list/guidance/cancel/resolve 五个直属下级控制入口；普通 leaf
   `work/agents/<run_id>/` 里的内部状态文件。历史 `system_default_output_ref` 只作恢复迁移，不进入这些
   模型可见结果字段。
 - 替换旧子代理时使用 `replacement_for_run_ids`，让系统记录结构化接管关系。
-- `input_media_refs`（只在配置 `subagent_input_media_enabled: true` 时出现）：把父会话里的图片/视频交给子代理。只填本轮
+- `input_media_refs`（只在 capability 配置 `subagent_input_media_enabled: true` 时出现）：把父会话里的图片/视频交给子代理。只填本轮
   宿主事实 `[INPUT_MEDIA_MANIFEST]` 给出的 `media_ref`（附件内容哈希），不传路径或文件名；宿主只认本会话（本轮附件或
   历史轮）里存在的引用，未知、重复、格式错或超过附件数量/字节上限整批 `not_started`
   （`SUBAGENT_INPUT_MEDIA_INVALID`，回执 `invalid_media_refs` 逐项给原因）；开关关闭时传了整批

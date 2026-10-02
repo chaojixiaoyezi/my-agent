@@ -30,6 +30,7 @@ from agent_py_agent.agent.agent_core.orchestration.input_media_refs import (
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 from agent_py_agent.agent.agent_core.runtime.loop_support import _with_input_media_manifest
 from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn, UserTurn
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation.input_media import (
     INPUT_MEDIA_MANIFEST_SOURCE,
     import_input_media,
@@ -45,11 +46,23 @@ _PNG = base64.b64decode(
 )
 
 
-# 函数用途: 建一个真实 SimpleAgent（echo 后端，不发请求），开关按参数设。
+# 函数用途: 把开关写进该 agent 的用户 capability 配置文件（<root>/config/capability_config.yaml），走运行时真实读法。
+def _enable_input_media(agent: SimpleAgent, enabled: bool = True) -> Path:
+    from agent_py_agent.agent.capability.runtime_config_reload import default_capability_config_path
+
+    path = default_capability_config_path(agent.root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"subagent_input_media_enabled: {'true' if enabled else 'false'}\n", encoding="utf-8")
+    agent._capability_config_runtime_snapshot = None
+    return path
+
+
+# 函数用途: 建一个真实 SimpleAgent（echo 后端，不发请求），开关按参数写进 capability 配置（主配置里没有这个键）。
 def _agent(tmp_path: Path, *, enabled: bool, **overrides) -> SimpleAgent:
-    config = AgentConfig(model_backend="echo", enable_subagents=True, max_subagents=10,
-                         subagent_input_media_enabled=enabled, **overrides)
-    return SimpleAgent(config, tmp_path)
+    config = AgentConfig(model_backend="echo", enable_subagents=True, max_subagents=10, **overrides)
+    agent = SimpleAgent(config, tmp_path)
+    _enable_input_media(agent, enabled)
+    return agent
 
 
 # 函数用途: 把一张图导进当前 owner 的附件根，返回已验证引用（与 Gateway 入口写进 task_attributes 的形状一致）。
@@ -80,13 +93,16 @@ def test_manifest_lists_media_refs_without_paths():
 def test_manifest_is_appended_only_when_switch_is_true():
     media = ({"sha256": "b" * 64, "media_type": "image/png", "size_bytes": 3, "name": "b.png", "path": "/p"},)
     history = [UserTurn("# User Task\n看图", media=media), RuntimeFactsTurn("x", source="carried")]
-    enabled = SimpleNamespace(config=SimpleNamespace(subagent_input_media_enabled=True))
+    enabled = SimpleNamespace(_capability_config_runtime_snapshot=SimpleNamespace(
+        config=CapabilityConfig(subagent_input_media_enabled=True)))
     result = _with_input_media_manifest(enabled, history)
     assert result[:2] == history and len(result) == 3, "清单追加在末尾，不动开头项与交接"
     assert isinstance(result[2], RuntimeFactsTurn) and result[2].source == INPUT_MEDIA_MANIFEST_SOURCE
     assert ("b" * 64) in result[2].text
-    # 关闭、MagicMock（真值但不是 True）、没有附件：原样返回
-    for agent in (SimpleNamespace(config=SimpleNamespace(subagent_input_media_enabled=False)), MagicMock()):
+    # 关闭（随包默认）、MagicMock（替身自动属性不是 CapabilityConfig）、主配置里写了也不算、没有附件：原样返回
+    disabled = SimpleNamespace(_capability_config_runtime_snapshot=SimpleNamespace(config=CapabilityConfig()))
+    main_config_only = SimpleNamespace(config=SimpleNamespace(subagent_input_media_enabled=True))
+    for agent in (disabled, main_config_only, MagicMock()):
         assert _with_input_media_manifest(agent, history) is history
     assert _with_input_media_manifest(enabled, [UserTurn("纯文字")]) == [UserTurn("纯文字")]
 
@@ -103,6 +119,8 @@ def test_tool_spec_adds_input_media_refs_only_when_switch_is_true(tmp_path):
     assert "不传路径" in on.parameter_descriptions["input_media_refs"]
     mock_agent = MagicMock()
     assert CreateSubagentsTool(mock_agent).model_spec.schema_hash == off.schema_hash, "MagicMock 不算开"
+    main_only = SimpleNamespace(config=SimpleNamespace(subagent_input_media_enabled=True), root=tmp_path / "main-only")
+    assert CreateSubagentsTool(main_only).model_spec.schema_hash == off.schema_hash, "主配置里的同名键不算开"
 
 
 def test_refs_are_rejected_when_switch_is_off(tmp_path):
@@ -231,9 +249,9 @@ def _run_child_with_media(tmp_path: Path, monkeypatch) -> tuple[dict, object, ob
     agent = SimpleAgent(AgentConfig(
         model_backend="anthropic_compatible", model_name="vision-model", api_base="https://relay.example.test/anthropic",
         api_key="fake-private-key", stream_enabled=False, enable_tools=False, enable_subagents=True, max_subagents=10,
-        max_tool_rounds=1, model_context_window_tokens=200_000, subagent_input_media_enabled=True,
-        model_input_modalities=["text", "image"],
+        max_tool_rounds=1, model_context_window_tokens=200_000, model_input_modalities=["text", "image"],
     ), tmp_path)
+    _enable_input_media(agent)
     ref = _import_image(agent, tmp_path)
     _bind_current_turn(agent, [ref])
     outcome = orchestration_tools.execute_create_subagents_service(
@@ -301,3 +319,38 @@ def test_requested_refs_accept_json_string_and_trim(tmp_path):
     assert requested_media_refs(["x", None, "  "]) == ["x"]
     assert requested_media_refs(None) == []
     assert re.fullmatch(r"[a-f0-9]{64}", _PNG and ("0" * 64))
+
+
+# LLM: 开关住在 capability 配置（AGENTS.md：子代理相关参数不进主配置），是改变模型可见内容的功能开关：登记表默认 False、
+#   模型不可写、在 USER_SETTINGS_BOUNDARY_KEYS 里；只有已认证管理员 /settings 的写作用域能开关，写进运行时读的 capability 文件。
+# 函数用途: 开关只能由管理员 /settings 翻，模型翻被拒；主配置 AgentConfig 没有这个字段。
+def test_switch_lives_in_capability_config_and_only_admin_settings_can_flip(tmp_path):
+    import os
+    import stat
+
+    from agent_py_agent.agent.capability.config import load_capability_config
+    from agent_py_agent.agent.settings.parameter_changes import (
+        ChangeOrigin,
+        WritePaths,
+        set_parameter,
+        user_settings_write_scope,
+    )
+    from agent_py_agent.agent.settings.parameter_registry import parameter_registry
+    from agent_py_agent.agent.settings.user_config_capability import USER_SETTINGS_BOUNDARY_KEYS
+
+    assert not hasattr(AgentConfig(), "subagent_input_media_enabled"), "主配置里没有这个键"
+    assert CapabilityConfig().subagent_input_media_enabled is False
+    spec = parameter_registry()["subagent_input_media_enabled"]
+    assert spec.default is False and spec.writable is False and spec.source == "capability"
+    assert "subagent_input_media_enabled" in USER_SETTINGS_BOUNDARY_KEYS
+    user_config = tmp_path / "user.yaml"
+    user_config.write_text("", encoding="utf-8")
+    capability = tmp_path / "owner" / "config" / "capability_config.yaml"
+    paths = WritePaths(user_path=user_config, capability_path=capability)
+    refused = set_parameter("subagent_input_media_enabled", True, paths=paths, origin=ChangeOrigin("model"))
+    assert refused["ok"] is False and refused["code"] == "PARAMETER_BOUNDARY" and not capability.exists()
+    with user_settings_write_scope():
+        report = set_parameter("subagent_input_media_enabled", True, paths=paths, origin=ChangeOrigin("chat"))
+    assert report["ok"] is True, report
+    assert load_capability_config(capability).subagent_input_media_enabled is True
+    assert stat.S_IMODE(os.stat(capability).st_mode) == 0o600

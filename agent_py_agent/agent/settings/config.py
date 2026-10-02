@@ -393,8 +393,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     task_max_subagents: int = 0
     subagent_hierarchy_max_children_per_tool_call: int = 0
     subagent_takeover_chain_max_depth: int = 0
-    # 派子代理时允许按 media_ref 把本会话附件交给子代理；开关只改模型可见的工具说明/附件清单与派工参数，默认关。
-    subagent_input_media_enabled: bool = False
     subagent_debug_trace_level: int = 0
     # 自学习默认关闭；开启后主代理完成的多轮工具任务会在后台自动总结成 owner 的 skills/learned/ Skill（自动闸门代替人工确认），
     # 子代理 lesson 提案也会立即走原确认链自动安装。

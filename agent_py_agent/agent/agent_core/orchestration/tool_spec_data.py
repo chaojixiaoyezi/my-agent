@@ -89,7 +89,7 @@ _CREATE_PARAMETER_DETAILS = {
         "绑定项随 child DONE 打勾；省略则由父级据实更新，不拿无关 id 顶替。"
     ),
 }
-# 只在 subagent_input_media_enabled 打开时并入参数说明（tool_specs.build_create_subagents_model_spec）。
+# 只在 capability 开关 subagent_input_media_enabled 打开时并入参数说明（tool_specs.build_create_subagents_model_spec）。
 _CREATE_INPUT_MEDIA_PARAMETERS = {
     "input_media_refs": "可选；把本会话里的图片/视频交给这个子代理：只填上下文 [INPUT_MEDIA_MANIFEST] 给出的 media_ref（原样复制），不传路径或文件名",
 }

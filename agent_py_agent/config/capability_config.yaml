@@ -89,6 +89,13 @@ subagent_tool_wait_notice_seconds: 900
 # - false: 推荐默认值；会改变父级模型看到的内容，先由用户显式开启。
 # 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后重启 Gateway 生效。
 subagent_takeover_hint_enabled: false
+# 派子代理时能不能把本会话里的图片/视频一起交给子代理（第 14 条）。
+# - true: 带附件的回合在模型上下文里多一段结构化附件清单 [INPUT_MEDIA_MANIFEST]（每个附件一个 media_ref）；create_subagents 多一个
+#   input_media_refs 参数；父代理把 media_ref 原样填进去，宿主核对附件确实属于父会话（本轮附件或历史轮）再交给子代理首个请求，
+#   走现有附件和媒体管线，子代理首轮选模按同一模态规则。
+# - false: 推荐默认值；工具说明和请求内容与原来逐字节一致，传了 input_media_refs 会被结构化拒绝（SUBAGENT_INPUT_MEDIA_DISABLED）。
+# 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后下一次读取生效。
+subagent_input_media_enabled: false
 # 决策能力点默认关闭；observe 也会发请求并产生用量；模式不授予执行权限。
 decision_subagent_model_mode: off
 # 子代理执行模型候选的原模型目录 ID；[] 使用全部当前授权的 agentic 模型。可按用户长期或会话设置覆盖，不按名称猜服务商。

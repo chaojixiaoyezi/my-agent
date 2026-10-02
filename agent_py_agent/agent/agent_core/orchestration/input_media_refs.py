@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from ...backends.request_content import is_local_media_block
+from ...capability.runtime_config_reload import capability_config_for_agent
 from ...conversation.authority import AGENT_THREAD_ID_ATTR, current_conversation_task_attributes
 from ...conversation.input_media import InputMediaError, input_media_root, validate_input_media
 from ...conversation.native_history import canonical_native_messages_from_metadata
@@ -36,15 +37,15 @@ class SubagentInputMediaError(ValueError):
 
 
 # LLM: 唯一入口，根与递归创建共用（create_task_attributes）。attrs 里的 input_media 是宿主专有键，先清掉模型
-#   可能塞进 attributes 的同名值；没传引用时不做任何事。开关只认 True（MagicMock/字符串不算开）。
+#   可能塞进 attributes 的同名值；没传引用时不做任何事。开关读 capability 配置（capability_config_for_agent），
+#   只认 True（MagicMock/字符串/读取失败都不算开）；主配置里没有这个键。
 # 函数用途: 把 raw_params 的 input_media_refs 变成 child 任务属性里的已验证附件引用，或整批拒绝。
 def bind_subagent_input_media(attrs: dict[str, Any], raw_params: dict[str, Any], agent: object) -> None:
     attrs.pop(INPUT_MEDIA_ATTR, None)
     requested = requested_media_refs(raw_params.get(INPUT_MEDIA_REFS_PARAM))
     if not requested:
         return
-    config = getattr(agent, "config", None)
-    if getattr(config, "subagent_input_media_enabled", False) is not True:
+    if getattr(capability_config_for_agent(agent), "subagent_input_media_enabled", False) is not True:
         raise SubagentInputMediaError(INPUT_MEDIA_DISABLED_ERROR_CODE, {"requested_media_refs": requested})
     issues = _ref_issues(requested)
     wanted = [ref for ref in dict.fromkeys(requested) if _SHA256.match(ref)]

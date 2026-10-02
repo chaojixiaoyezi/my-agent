@@ -172,7 +172,7 @@ def project_input_media(messages: list[dict] | None, max_bytes: int) -> list[dic
 
 # LLM: 只投影已验证引用的结构化字段（sha256、名称、MIME、字节数），不含路径；media_ref 就是内容哈希，
 #   父代理派子代理时把它原样复制进 create_subagents 的 input_media_refs，宿主再按哈希在父会话里核对。
-#   纯函数，不读文件；只在 subagent_input_media_enabled 打开时进入模型上下文（runtime/loop_support）。
+#   纯函数，不读文件；只在 capability 开关 subagent_input_media_enabled 打开时进入模型上下文（runtime/loop_support）。
 #   首行软提示“附件已直接给你”来自 ef 的 M3 真实核对：子代理先说“没有解码附件的工具”才去看图（3a 集成补）。
 # 函数用途: 把本轮附件渲染成模型可见的结构化清单文本，没有附件时返回空串。
 def input_media_manifest_text(refs: object) -> str:

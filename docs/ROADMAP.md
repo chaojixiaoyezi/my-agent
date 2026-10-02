@@ -38,7 +38,7 @@
 ## 第 14 条：派子代理时把图片一起传过去（2026-10-02，本地已实现、待集成；默认关）
 
 父代理可按本轮宿主事实里的 `media_ref` 把附件交给子代理（`create_subagents.input_media_refs`），宿主只认父会话里的引用并重验后写进 child
-任务属性，child 首轮沿原 typed media 管线带图、按 J11 模态规则选模。开关 `subagent_input_media_enabled` 默认关；下一步由 3a 审查合入后决定
+任务属性，child 首轮沿原 typed media 管线带图、按 J11 模态规则选模。capability 开关 `subagent_input_media_enabled` 默认关；下一步由 3a 审查合入后决定
 生产是否打开，并在真实 Gateway 的 TUI/IM 带图派工各复核一例。详见 DESIGN_LEDGER 与 TESTS 同名节。
 
 ## J11：按输入模态选模型（2026-10-02，已上线 step17a，main de222698b，2026-10-02；真实带图验收仍待做）

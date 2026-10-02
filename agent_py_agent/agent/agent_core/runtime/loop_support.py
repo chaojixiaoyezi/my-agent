@@ -1159,13 +1159,15 @@ def _reconstructed_native_initial_ir(
     )
 
 
-# LLM: 开关 subagent_input_media_enabled（只认 True）打开且本轮用户轮带 typed media 时，在当前回合初始 IR 末尾追加
-#   一条宿主事实（RuntimeFactsTurn，source=INPUT_MEDIA_MANIFEST_SOURCE），列出每个附件的 media_ref=sha256。
-#   放在开头项、交接与插话之后，不改变 _current_turn_opener_count 的位置约定；主会话与子代理同一入口；
+# LLM: capability 开关 subagent_input_media_enabled（capability_config_for_agent，只认 True）打开且本轮用户轮带 typed media 时，
+#   在当前回合初始 IR 末尾追加一条宿主事实（RuntimeFactsTurn，source=INPUT_MEDIA_MANIFEST_SOURCE），列出每个附件的
+#   media_ref=sha256。放在开头项、交接与插话之后，不改变 _current_turn_opener_count 的位置约定；主会话与子代理同一入口；
 #   关闭或没有附件时原样返回。纯计算，不读文件、不发请求。
 # 函数用途: 让父代理能按 media_ref 把本轮附件交给子代理（create_subagents.input_media_refs）。
 def _with_input_media_manifest(agent: object, history: list[object]) -> list[object]:
-    if getattr(getattr(agent, "config", None), "subagent_input_media_enabled", False) is not True:
+    from ...capability.runtime_config_reload import capability_config_for_agent
+
+    if getattr(capability_config_for_agent(agent), "subagent_input_media_enabled", False) is not True:
         return history
     from ...backends.tool_ir import RuntimeFactsTurn, UserTurn
     from ...conversation.input_media import INPUT_MEDIA_MANIFEST_SOURCE, input_media_manifest_text

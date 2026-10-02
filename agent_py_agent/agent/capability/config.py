@@ -63,6 +63,8 @@ class CapabilityConfig:
     subagent_tool_wait_notice_seconds: int = 900
     # 执行器已退出（宿主证实）时给直属父级附结构化接替提示；会改变父级模型看到的内容，默认关闭。
     subagent_takeover_hint_enabled: bool = False
+    # 派子代理时允许按 media_ref 把本会话附件交给子代理（第 14 条）：会改变模型看到的工具说明与本轮附件清单，默认关闭。
+    subagent_input_media_enabled: bool = False
     # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。
     # 默认关闭——拆分会创建新任务并改变原任务状态，需用户显式开启。
     subagent_failure_auto_split_enabled: bool = False

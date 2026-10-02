@@ -12,6 +12,32 @@
 - 变异 10/10 被杀（草稿副本上逐个精确替换、按字节恢复）：徽标不读标签、名册行不带标签、活动文字不用标签、runtime 与 view model
   两道白名单漏放、导航快照漏带、/status 文字不拼细分、计数不算细分、TUI 不解析细分、渲染缓存键漏掉标签。
 
+## 第 14 条开关挪到 capability 配置（2026-10-02，ef，分支 `claude/ef-media-switch-capcfg`，基于 `claude/3a-step17e` `1175278cc`）
+
+**来源**：3a 车道 `test_config_normalize.py::TestNormalizeSubagentAgentConfig::test_default_config_exposes_current_subagent_runtime_knobs` 失败——
+该用例钉住主配置允许出现的 `subagent_*` 键；第 14 条首版把 `subagent_input_media_enabled` 放进了主配置，违反 AGENTS.md 规矩。
+按 C4 `subagent_takeover_hint_enabled` 的做法挪到 capability 配置，用例期望清单不改。
+
+**改动**：`agent_config.yaml`/`AgentConfig`/`_normalize` bool 名单删键；`CapabilityConfig` + 随包 `capability_config.yaml` 加键（中文注释，默认 false）；
+三处读法（`orchestration/input_media_refs.bind_subagent_input_media`、`runtime/loop_support._with_input_media_manifest`、`CreateSubagentsTool.__init__`）
+改为 `capability_config_for_agent(agent).subagent_input_media_enabled is True`；加进 `USER_SETTINGS_BOUNDARY_KEYS`（模型不可写，管理员 `/settings` 可开关）；
+全仓 grep 旧读法为零（只剩注释与错误文案里的键名）。前端配置目录重新生成（键从主配置段挪到 capability 段）。
+
+**用例**：`test_subagent_input_media.py` 改为把开关写进 `<root>/config/capability_config.yaml` 走真实读法（`_enable_input_media`），纯函数用例注入
+`CapabilityConfig` 快照；新增“主配置里写同名键不算开”两处断言，以及 `test_switch_lives_in_capability_config_and_only_admin_settings_can_flip`
+（`AgentConfig` 没有该字段、登记表 source=capability/default False/不可写、模型 set_parameter 被拒 `PARAMETER_BOUNDARY`、管理员写作用域可开关、文件 600）。
+原 13 项照样成立，“开关关时 schema_hash 和原来一样”照样成立。
+
+**变异（7 个，全部拦住、sha256 逐字节恢复）**：原 6 个照旧（归属放水 2 failed、不丢弃模型塞的 attributes.input_media、清单不看开关、
+schema 不看开关、不重验上限/附件根、不查重复引用各 1 failed），新增 1 个“解析端改从主配置 `agent.config` 读开关” → 7 failed（开关在 capability
+配置里，主配置读不到就等于永远关）。
+
+**门禁（最终树，全部 rc=0）**：13 文件 257 passed（含 test_config_normalize、takeover hint、参数登记/元数据/变更、capability 配置 5 件、runtime config、
+工具规格）；回归 12 文件 302 passed（schema/创建服务/coordinator seed/首请求选模/input_media/model_profiles/audit finding/gateway 选模采用/
+compact 媒体两件/user_config_capability/settings_chat_control）；guards9 170 passed；import_boundaries 0；ruff 过；常数目录 `--check` 一致（829 项，
+无新增数值常数）；前端目录重新生成后 `--check` 过（253 项）；doc_sync PASS；code-size strict blocked=False hard=0（报告已还原）；size_diff 新增 0；
+`git diff --check` OK；clean_package OK。
+
 ## run_tests.py 导入即报错、手动运行也隔离 home 与端口（3a，2026-10-02，step17e）
 
 - **事故**：`agent_py_agent/tests/run_tests.py` 是手动运行的真实冒烟脚本，模块顶层就执行 CLI 命令，包括真实模型调用、`gateway stop --kill`、`gateway start --force`。09-26 和 10-02 两次被点名交给 pytest（`python_files=test_*.py` 只管目录发现，点名的文件照样收集），在导入阶段打到真实 `~/.my-agent`。10-02 这次（75 的门禁，10:45–10:58）：在生产 local/main 跑了一次 `run "测试动态 prompt"`，MiniMax-M2.7 调用 12 次、41.4 万 token（缓存读 32.9 万），工具 10 次全是只读；第 5 条命令 `remember` 参数不合法退出，没走到后面的 gateway stop/start。留下运行目录和两行用量，按 O4 的规则不删。

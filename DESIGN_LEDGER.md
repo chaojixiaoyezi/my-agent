@@ -149,7 +149,9 @@
 ## 第 14 条：派子代理时把图片一起传过去——按 media_ref 结构化引用，走现有附件/媒体管线（2026-10-02，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`，已实现，待集成；默认关）
 
 - **问题**：J11 让主会话带图时按模态自动选模，但父代理用 `create_subagents` 派活没有入口把本轮图片交给子代理，子代理带图的真实链路没有入口。
-- **做法**（开关 `subagent_input_media_enabled`，仓库默认 false，打开由 3a 验收后决定）：
+- **做法**（开关 `subagent_input_media_enabled` 住在 capability 配置 `config/capability_config.yaml` + `capability/config.py`，
+  仓库默认 false，打开由 3a 验收后决定；运行时三处读法都走 `capability_config_for_agent`，只认 True，主配置里没有这个键；
+  它在 `USER_SETTINGS_BOUNDARY_KEYS` 里：模型不可写，管理员 `/settings` 可开关）：
   - **引用 = 附件内容哈希**。开关打开且用户轮带 typed media 时，`runtime/loop_support._with_input_media_manifest` 在当前回合初始 IR 末尾追加一条
     宿主事实 `RuntimeFactsTurn(source=input_media_manifest)`：`[INPUT_MEDIA_MANIFEST]` + JSON（每个附件 `media_ref`=sha256、name、media_type、
     size_bytes，不含路径）。放在开头项/交接/插话之后，不动 `_current_turn_opener_count` 的位置约定；主会话与子代理同一入口，
@@ -177,6 +179,11 @@
   `UserTurn.media` 这条通道。
 - **验证**：见 TESTS.md 同名节；真实 MiniMax M3 隔离核对已做一次（父代理按 media_ref 派工、子代理首请求带图并正确描述形状颜色），
   证据 `~/.my-agent/decision-evidence/subagent-media-8378ff9a9/`。
+- **开关位置修正（2026-10-02，3a 车道 `test_config_normalize` 抓到）**：首版把开关放进了主配置 `agent_config.yaml`，违反 AGENTS.md
+  “子代理、skill/tool 授权、能力上抛相关参数不进主配置”的规矩（该用例钉住主配置允许出现的 `subagent_*` 键）。已按 C4 的
+  `subagent_takeover_hint_enabled` 挪到 capability 配置：主配置/`AgentConfig`/bool 名单删键，`CapabilityConfig` + 随包
+  `capability_config.yaml` 加键（中文注释），三处读法改 `capability_config_for_agent(agent).subagent_input_media_enabled`，
+  并加进 `USER_SETTINGS_BOUNDARY_KEYS`。行为不变；真实 M3 核对是在挪位置之前做的，当时开关在主配置，判断逻辑相同。
 - **3a 集成补**：ef 的 M3 真实核对里，子代理先说“没有解码附件的工具”才去看图。清单在标记行后加一句软提示“这些附件已作为本轮消息里的图片/视频直接给你，可以直接看，不需要工具读取或解码。”（只是提示，不参与任何判断）。
 
 ## 记忆整理跟着消息来源会话的主代理模型走（用户拍板第 2 条细化，2026-10-02，分支 `claude/be-curator-thread-model`，基于 `claude/3a-step16z` `5a56714dc`，已实现，待集成）

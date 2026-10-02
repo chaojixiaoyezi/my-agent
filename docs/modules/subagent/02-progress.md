@@ -1,7 +1,8 @@
 # 子代理维护状态
 
 2026-10-02（第 14 条，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`，本地已实现、待集成，默认关）：派子代理时可以把父会话的
-图片/视频按结构化引用交给子代理。开关 `subagent_input_media_enabled` 打开后：带附件的回合在当前回合 IR 末尾多一条宿主事实
+图片/视频按结构化引用交给子代理。capability 开关 `subagent_input_media_enabled`（`config/capability_config.yaml`，运行时经
+`capability_config_for_agent` 读，管理员 `/settings` 可开关；首版误放主配置，已挪）打开后：带附件的回合在当前回合 IR 末尾多一条宿主事实
 `[INPUT_MEDIA_MANIFEST]`（每个附件一个 `media_ref`=sha256，不含路径）；`create_subagents` 顶层与 `items[]` 多 `input_media_refs`；
 宿主 `orchestration/input_media_refs.bind_subagent_input_media` 只在父级本轮附件和父级 transcript 的 canonical 用户媒体块里按哈希查找，
 再按 owner 附件根与配置上限重验，写进 child 任务属性 `input_media`（与主会话同键）；未知/重复/格式错/超限整批 `not_started`
