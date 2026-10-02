@@ -1172,7 +1172,8 @@
 - **兜底值清理**（`claude/9a-capcfg-fallback-cleanup`）：
   - 已清 6 处：选包判定、子代理包入口开关、流式活动投影、活动提醒阈值、失败自动拆分、看板巡检阈值。
     各处改为 `capability_config_for_agent(...) or CapabilityConfig()` 后直接读字段，唯一权威是 dataclass 默认值。
-  - 会话互通三个工具文件与 `conversation/session_messaging.py` 仍有兜底，值与默认一致，待会话修复合入后再清。
+  - 会话互通三个工具文件（`create_session_task`、`send_session_message`、`list_owner_sessions`）已随会话修复合入改为
+    `capability_config_for_agent(...) or CapabilityConfig()` 直接读字段，不再自带兜底值，唯一权威是 dataclass 默认值。
 
 ## user_config 的 decision_patch 通道：多带字段时回执写明是哪个（2026-09-28，分支 `claude/be-decision-patch-fix`，基于 `fc494da3f`，本地验证通过，待集成）
 
@@ -2594,8 +2595,7 @@ auth 表单取消和参数拒绝已验，官方设备码在两处环境被 HTTP 
   参数减量第 3 批（internal 字段降级为读取点旁常量）：A 组 24 项命令/展示默认值（分支 `claude/38-internal-constants`）、
   E 组 14 项后台上下文预算/终态工具折叠/工具目录与详情上限/合同状态扫描预算（分支 `claude/9a-batch3-e`）已完成，
   加载器元数据（config_* 四项与 memory_config_warnings）已从 /settings 列表、计数与搜索隐藏；B 组 19 项 gateway/后台节奏与 daemon/dispatch 默认值、D 组 10 项动态超时探针/anthropic_version/媒体预留/微压缩/协议修复次数
-  与集成者追加的 `tool_write_inline_max_chars`（分支 `claude/38-internal-constants-bd`）已完成，C 组进行中，见参数中心 §6。
-  参数减量第 1 批已在分支 `claude/38-delete-dead-config` 完成（2026-09-27，待集成者审核合并）：按逐项分类删除 43 个没有产品读取方的配置项，
+  与集成者追加的 `tool_write_inline_max_chars`（分支 `claude/38-internal-constants-bd`）已完成，C 组已合入 main（第 1–3 批与杂项批、`3bba03e22`、`6dc18342e` 均已上线），见参数中心 §6。
   参数减量第 1 批已在分支 `claude/38-delete-dead-config` 完成（2026-09-27，已合入 main `8f73a512c`，双机 step13s）：按逐项分类删除 43 个没有产品读取方的配置项，
   连同只被测试引用的 `agent_core/watchdog.py`、`concurrency/task_lock.py`、`external_knowledge/` 模块；`tool_protocol` 改为代码常量 native，
   不再放行 text；子代理任务记录 `memory_scope` 升 v2。不改任何生效值；旧用户配置里残留的键只告警。细节见参数中心 §6。

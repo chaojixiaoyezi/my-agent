@@ -1,6 +1,6 @@
 # 参数中心：一个参数一个权威位置，my-agent 可自助修改非安全参数
 
-状态：阶段 0 已实现（分支 `claude/param-center-phase0`，2026-09-27）；阶段 1—3 规划中，按下文顺序推进。
+状态：阶段 0 已实现（分支 `claude/param-center-phase0`，2026-09-27）；阶段 1、2、2b 已完成，阶段 3 部分完成（A/B/D/E/C 组已合入 main，剩余少量内部键分派中），按下文顺序推进。
 
 ## 2026-10-01 前端设置页与前端数据清理（P4/P5）
 
@@ -71,7 +71,7 @@
 
 - 写入用户配置文件（`MY_AGENT_CONFIG`），随版本升级保留；随包 YAML 只提供默认值。用户配置只写与默认不同的项，不整份复制随包 YAML（测试机曾整份复制，把新默认值全部遮住）。
 - 生效时机如实报告：下一轮、下一次新会话或重启 Gateway（沿用 `user_config_capability` 的 effect 语义）。
-- 每次修改追加一条账本记录（键、原值、新值、操作者、原因、时间）；`/settings history` 查看，`/settings revert <键>` 回滚。
+- 每次修改追加一条账本记录（键、原值、新值、操作者、原因、时间）；`/settings history` 查看，`/settings revert <记录编号>` 回滚一次修改（编号见 history，允许至少 6 位十六进制前缀，不是键名；`control_commands.py` 的 `_SETTINGS_USAGE`）。
 - 不设确认队列（用户没时间审批）：靠范围校验、账本和一键回滚兜底。
 
 ## 5. my-agent 改代码的权限（阶段 2）
@@ -321,7 +321,7 @@
     改，模型不能改”结尾。每条“0 表示……”都追到代码里比较的那一行，途中发现 `cli_audit_cleanup_days` 的 0 会删光审计，已另修为永久保留。
     空说明基线相应删去这 50 个键；`test_parameter_registry` 的过渡名单随之删除，改为“常用参数必须都有说明”。
 
-- **减量第三批（2026-09-27，分支 `claude/38-internal-constants`，部分完成，待集成者审核）**：102 个只对程序内部有意义的字段降级为读取点旁边的
+- **减量第三批（2026-09-27，分支 `claude/38-internal-constants`，A/B/D/E/C 组均已合入 main）**：102 个只对程序内部有意义的字段降级为读取点旁边的
   具名常量（值不变），从 `AgentConfig`、随包 YAML、归一化表、字段规格表、说明基线和测试里删掉字段。规则：每个概念只定义一次
   （多读取点从定义处 import，遵守 `test_constant_names_unique` 与 import 边界），命令行显式 flag 仍优先于常量。
   - 已完成 A 组（24 项，命令与展示默认值）：`cli_*` 12 项、`subagent_cli_default_limit`、`subagent_probe_default_limit`、`subagent_board_limit`、
@@ -369,7 +369,7 @@
       参数搜索里隐藏（`parameter_registry.LOADER_METADATA_KEYS` + `listed_parameters()`，user_config 的可改数量同口径）；字段与
       登记表项不删，`/settings show` 仍可查看、仍是安全边界。
     - 回归见 `test_param_reduction_e_group.py` 与 `test_settings_chat_control.py`；原来通过配置对象改这些值的测试改为 patch 常量。
-  - 未完成：C 组（memory 归档预览/语义摘要/恢复/策展批次）、决策选模字数（D 组范围内的决策点位字段，按集成者要求不碰）。
+  - 已合入 main：C 组（memory 归档预览/语义摘要/恢复/策展批次，第 1–3 批随 `624367a69` 等提交）、决策选模字数（`3bba03e22`，选模型点位两个上限降为常量并同批重生成前端目录）。
   - 前端目录（C 组第 2、3 批与杂项批合入后，main `3d76ac687`，分支 `claude/9b-frontend-catalog-c`）：
     `frontend/config/backend-config-catalog.json` 按当前随包 YAML 重新生成为 264 项（agent_config 222、capability_config 22、
     log_analysis_config 20），`node` 与 `bun` 跑同一脚本输出逐字相同，`--check` 两种都通过。相对上次生成（278 项）只有：
@@ -383,6 +383,13 @@
     仍保留同名字段（默认即常量，只有测试显式传）。设置页表单项与 DEVELOPMENT_RULES 的说明同步。
   - E 组范围外、分类为 internal 但未归入任何一组的：`conversation_pending_wake_limit`、`memory_artifact_default_read_chars`，
     留给集成者分派（`conversation_unhandled_observation_limit` 已随 B 组前半降级）。
+  - **后续合入 main（2026-10-01 核对）**：
+    - 杂项批 `35259e86c`：compact 语义摘要与唤醒窗口 6 键降为常量（值不变）。
+    - C 组第 2 批 `624367a69`：恢复/归档 6 键降为常量（值不变）；C 组第 1、3 批同批合入。
+    - `3bba03e22`：选模型点位两个上限降为常量并同批重生成前端目录。
+    - `6dc18342e`：7 个内部实现参数降为读取点旁的具名常量。
+    - 09-28 后新增的 5 个参数随各自功能合入 main：`memory_compact_auto_trigger_max_tokens`、`memory_context_calibration_carry_enabled`、
+      `decision_observe_sampling_enabled`、`decision_observe_nonblocking_enabled`、`model_reasoning_levels`。
 
 ## 7. 验收
 
