@@ -15,7 +15,7 @@ from typing import Any
 from ..common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
-    write_text_file_atomic_unlocked,
+    write_private_text_file_atomic_unlocked,
 )
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaEnforcer
 from .candidate_models import normalize_iso_time, normalize_reference_list, normalize_string_list
@@ -350,15 +350,16 @@ def _load_daily_unlocked(path: Path) -> list[DailyMemoryEvent]:
     return events
 
 
-# LLM: 写入前再次序列化验证，并通过 owner quota admission 后原子替换。
-# 函数用途: 保存一个完整 daily 分片。
+# LLM: 写入前再次序列化验证，并通过 owner quota admission 后原子替换。日事件装记忆正文，走私有原子写（0600，目录 0700），
+#   已有 0644 的旧分片下次写入即收紧；改动同步 test_memory_file_permissions。
+# 函数用途: 以仅本人可读写的权限保存一个完整 daily 分片。
 def _write_daily_unlocked(path: Path, events: list[DailyMemoryEvent], *, admission: Any) -> None:
     text = "".join(
         json.dumps(event.to_record(), ensure_ascii=False, sort_keys=True) + "\n"
         for event in events
     )
     admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
-    write_text_file_atomic_unlocked(path, text)
+    write_private_text_file_atomic_unlocked(path, text)
 
 
 # LLM: quota 锁优先于 daily 文件锁，保持 owner 存储统一锁序。

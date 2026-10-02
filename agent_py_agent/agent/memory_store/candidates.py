@@ -14,7 +14,7 @@ from typing import Any
 from ..common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
-    write_text_file_atomic_unlocked,
+    write_private_text_file_atomic_unlocked,
 )
 from ..common.text_norm import fold_key
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaEnforcer
@@ -534,8 +534,9 @@ def _quota_admission(enforcer: OwnerQuotaEnforcer | None):
     return _Context()
 
 
-# LLM: 写入用完整当前态原子 replace；不能 append 第二条相同 candidate_id。
-# 函数用途: 通过 quota 后原子替换 candidates.jsonl。
+# LLM: 写入用完整当前态原子 replace；不能 append 第二条相同 candidate_id。候选装记忆正文，走私有原子写（0600，目录 0700），
+#   已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
+# 函数用途: 通过 quota 后以仅本人可读写的权限原子替换 candidates.jsonl。
 def _write_candidates_unlocked(
     path: Path,
     candidates: list[MemoryCandidate],
@@ -547,7 +548,7 @@ def _write_candidates_unlocked(
         for item in candidates
     )
     admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
-    write_text_file_atomic_unlocked(path, text)
+    write_private_text_file_atomic_unlocked(path, text)
 
 
 # LLM: 候选初次观察先记录 observed，再以同一状态图进入 pending/blocked，不允许直接 approved。

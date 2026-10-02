@@ -283,10 +283,10 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
         _unlink_tmp_file(tmp)
 
 
-# LLM: 记忆本体、归档、向量库、正文缓存这类带记忆原文或可反推内容的文件专用：临时文件一出生就是 0600
+# LLM: 记忆本体、归档、向量库、正文缓存，以及候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像这类带记忆原文或可反推内容的文件专用：临时文件一出生就是 0600
 #   （os.open 带 0o600，再显式 chmod，不受 umask 影响），替换后的目标自然是 0600；已有 644 的文件下次写入即被收紧。
 #   父目录按 0700 新建并收紧（只动直接父目录；收紧失败不挡写入，文件本身仍是 0600）。调用方须已持有 locked_json_path。
-#   改动同步 test_memory_file_permissions。
+#   改动同步 test_memory_file_permissions 与 test_semantic_memory_storage。
 # 函数用途: 以“仅本人可读写”的权限原子替换一个文本文件（写文件、可能 chmod 父目录）。
 def write_private_text_file_atomic_unlocked(path: Path, content: str) -> None:
     _ensure_private_dir(path.parent)

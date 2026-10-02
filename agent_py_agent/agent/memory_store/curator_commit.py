@@ -18,8 +18,7 @@ from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
     write_json_file_atomic,
-    write_text_file_atomic,
-    write_text_file_atomic_unlocked,
+    write_private_text_file_atomic_unlocked,
 )
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
@@ -237,6 +236,7 @@ class CuratorBatchCommitter:
 
     # LLM: Backups and the atomic manifest are complete before canonical mutation; an orphan
     # directory without a manifest is therefore safe to discard on restart.
+    #   事务前镜像（before-*.txt）是记忆正文副本：在各自路径锁下按私有原子写（0600，事务目录 0700）；manifest 无正文，照旧。
     # 函数用途: 保存事务前镜像和无正文运行元数据，形成崩溃恢复点。
     def _prepare_transaction(
         self,
@@ -253,7 +253,8 @@ class CuratorBatchCommitter:
             existed = path.exists()
             before = path.read_text(encoding="utf-8") if existed else ""
             backup = directory / f"before-{index:03d}.txt"
-            write_text_file_atomic(backup, before)
+            with locked_json_path(backup):
+                write_private_text_file_atomic_unlocked(backup, before)
             targets.append(
                 {
                     "path": str(path.resolve(strict=False)),
@@ -290,13 +291,14 @@ class CuratorBatchCommitter:
             self._write_target(path, changes[path])
 
     # LLM: This narrow method exists as a deterministic disk-failure seam for tests; production
-    # behavior is the canonical atomic writer under an already-held path lock.
-    # 函数用途: 原子替换一个已持锁的事务目标。
+    # behavior is the private atomic writer under an already-held path lock（日事件/候选等目标装记忆正文，
+    #   一律 0600，已有 0644 的目标在这次替换时收紧）。
+    # 函数用途: 以仅本人可读写的权限原子替换一个已持锁的事务目标。
     def _write_target(self, path: Path, content: str) -> None:
-        write_text_file_atomic_unlocked(path, content)
+        write_private_text_file_atomic_unlocked(path, content)
 
     # LLM: Restore verifies every backup/hash and never follows a manifest target outside the
-    # owner memory root.
+    # owner memory root. 恢复写回同样走私有原子写（0600），不把旧文件的 0644 带回来。
     # 函数用途: 将未提交事务的所有目标恢复到事务前状态。
     def _restore_transaction(
         self,
@@ -330,7 +332,7 @@ class CuratorBatchCommitter:
                     "curator transaction target changed outside the prepared batch"
                 )
             if bool(item["existed"]):
-                write_text_file_atomic_unlocked(path, before)
+                write_private_text_file_atomic_unlocked(path, before)
             else:
                 path.unlink(missing_ok=True)
 

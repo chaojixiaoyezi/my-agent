@@ -15,7 +15,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from ..common.json_io import jsonl_lines, locked_json_path, write_text_file_atomic_unlocked
+from ..common.json_io import jsonl_lines, locked_json_path, write_private_text_file_atomic_unlocked
 from .candidate_models import MemoryCandidate, utc_now_iso
 from .security import scan_memory_content
 
@@ -73,7 +73,8 @@ class HotRuleRecord:
     promoted_at: str
 
 
-# LLM: Repository 只接受 approved Candidate；模型和 subagent 都不能直接写 lesson 文件。
+# LLM: Repository 只接受 approved Candidate；模型和 subagent 都不能直接写 lesson 文件。lesson 正文与带正文摘录的 INDEX.md
+#   都走私有原子写（0600，目录 0700），已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
 # 类用途: 管理 lesson 文件及其确定性 routing/INDEX.md。
 class LessonRepository:
     # LLM: 构造器绑定唯一 lesson 正文目录与派生 routing index，不扫描 long-term lesson。
@@ -84,8 +85,8 @@ class LessonRepository:
         self.lessons_dir.mkdir(parents=True, exist_ok=True)
         self.routing_index_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # LLM: lesson 晋升要求审核、证据和跨任务/运行/日期重复；confidence 不能替代这些闸。
-    # 函数用途: 幂等创建一个正式 lesson 并重建 routing index。
+    # LLM: lesson 晋升要求审核、证据和跨任务/运行/日期重复；confidence 不能替代这些闸。lesson 文件按私有原子写落盘。
+    # 函数用途: 幂等创建一个正式 lesson（仅本人可读写）并重建 routing index。
     def promote(
         self,
         candidate: MemoryCandidate,
@@ -122,7 +123,7 @@ class LessonRepository:
                     raise RuntimeError("lesson path collision")
                 record = existing
             else:
-                write_text_file_atomic_unlocked(path, _render_lesson(record))
+                write_private_text_file_atomic_unlocked(path, _render_lesson(record))
         self.rebuild_routing_index()
         return record
 
@@ -157,8 +158,8 @@ class LessonRepository:
                 return record
         raise KeyError(target)
 
-    # LLM: routing 完全由 lesson metadata 确定性重建，模型不能重写索引全文。
-    # 函数用途: 更新 memory/routing/INDEX.md。
+    # LLM: routing 完全由 lesson metadata 确定性重建，模型不能重写索引全文。索引含正文摘录（topic），按私有原子写。
+    # 函数用途: 以仅本人可读写的权限更新 memory/routing/INDEX.md。
     def rebuild_routing_index(self) -> Path:
         sections = [_routing_section(record) for record in self.list()]
         text = "# Memory Routing Index\n\n"
@@ -168,11 +169,12 @@ class LessonRepository:
         if sections:
             text += "\n" + "\n\n".join(sections) + "\n"
         with locked_json_path(self.routing_index_path):
-            write_text_file_atomic_unlocked(self.routing_index_path, text)
+            write_private_text_file_atomic_unlocked(self.routing_index_path, text)
         return self.routing_index_path
 
 
-# LLM: HOT 只能引用 LessonRepository 中已存在的 active lesson，不能从一次候选直接抄入。
+# LLM: HOT 只能引用 LessonRepository 中已存在的 active lesson，不能从一次候选直接抄入。HOT 文件装规则正文，晋升与降级重写都走
+#   私有原子写（0600，目录 0700），已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
 # 类用途: 管理 memory-hot.md 中的少量短规则。
 class HotRuleRepository:
     # LLM: 构造器只绑定正式 HOT 文件；legacy 自由文本由 migration 处理而非运行时兼容。
@@ -210,7 +212,7 @@ class HotRuleRepository:
                 if prior.candidate_id != candidate.candidate_id or prior.rule != record.rule:
                     raise RuntimeError("HOT id collision")
                 return prior
-            write_text_file_atomic_unlocked(self.path, _render_hot([*existing, record]))
+            write_private_text_file_atomic_unlocked(self.path, _render_hot([*existing, record]))
             demoted = _demote_hot_excess_unlocked(self.path)
         if demoted:
             logger.warning(
@@ -456,7 +458,7 @@ def hot_records_within_budget(
     return kept
 
 
-# LLM: 只降级冷记录；同一批都超预算时逐条让位直到回到预算内，绝不整批清空。
+# LLM: 只降级冷记录；同一批都超预算时逐条让位直到回到预算内，绝不整批清空。重写按私有原子写（0600）。
 # 函数用途: 写入后检查 HOT 总字符，超预算则按活跃度从低到高移除并重写文件；返回被降级记录。
 def _demote_hot_excess_unlocked(path: Path) -> list[HotRuleRecord]:
     existing = _read_hot_records(path)
@@ -472,7 +474,7 @@ def _demote_hot_excess_unlocked(path: Path) -> list[HotRuleRecord]:
         demoted.append(record)
     if demoted:
         kept = [record for record in existing if record not in demoted]
-        write_text_file_atomic_unlocked(path, _render_hot(kept))
+        write_private_text_file_atomic_unlocked(path, _render_hot(kept))
     return demoted
 
 

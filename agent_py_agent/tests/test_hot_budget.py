@@ -132,8 +132,9 @@ def test_inject_keeps_everything_within_budget() -> None:
     assert hot_records_within_budget(small) == small
 
 
-def test_demote_cold_rules_rewrites_file_within_budget() -> None:
-    path = Path("/tmp/hot-budget-demote.md")
+def test_demote_cold_rules_rewrites_file_within_budget(tmp_path: Path) -> None:
+    # 写到 tmp_path：HOT 走私有写，会把直接父目录收紧到 0700，不能写在共享的 /tmp 下。
+    path = tmp_path / "hot-budget-demote.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     repo = HotRuleRepository(path)
     pile = _hot_pile()
@@ -153,8 +154,8 @@ def test_demote_cold_rules_rewrites_file_within_budget() -> None:
     assert repo.demote_cold_rules() == []
 
 
-def test_promote_demotes_excess_and_keeps_new_rule() -> None:
-    path = Path("/tmp/hot-budget-promote.md")
+def test_promote_demotes_excess_and_keeps_new_rule(tmp_path: Path) -> None:
+    path = tmp_path / "hot-budget-promote.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     repo = HotRuleRepository(path)
     path.write_text(_render_hot(_hot_pile()), encoding="utf-8")

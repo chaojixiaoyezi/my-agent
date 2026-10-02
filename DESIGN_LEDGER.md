@@ -34,6 +34,22 @@
   - 停机和取消同时命中：错误码仍是 `HOST_SHUTDOWN_TOOL_NOT_STARTED`，给模型的提示改用取消那句（“停止派发新动作，保存已有进展后收尾”），并记 `round_cancelled=true`。用户 /stop 后 24 小时内续跑时，历史里的提示不能引导模型重做用户喊停的动作。
   - 文案：`restart_gateway` 注释按 9b 的措辞写清两段排空（先等在跑的回合，最多 turn_wait 秒，没跑完的停在下一个副作用工具前、由新进程续跑；再等执行中的副作用工具，最多 drain_timeout 秒，超时取消这次重启、不强杀），`gateway_restart_drain_timeout_seconds` 上方原来那句“超过就先强制收尾”改对。
 
+## 记忆正文的其它文件也按私有原子写（S2，75，2026-10-02，分支 `claude/75-memory-private-writes`，基于 `claude/3a-step17e` `4dd56f627`，已实现，待集成）
+
+- **问题**：38 的 S3 只把记忆本体和向量文件改成私有写；候选、日事件、lesson/HOT、Curator 事务备份这些也装着记忆正文，仍是普通原子写：新文件按 umask（一般 0644），替换时还把旧文件的 0644 抄回去。
+- **做法**：复用 S3 的 `common/json_io.write_private_text_file_atomic_unlocked`（临时文件一建出来就是 0600，替换时不抄回旧权限，直接父目录 0700），不另写一份写法：
+  - `candidates.py` 候选整文件替换；`daily.py` 日事件分片替换；
+  - `lessons.py` lesson 文件、`routing/INDEX.md`（每条带正文摘录 `topic`）、HOT 晋升写入与超预算降级重写；
+  - `curator_commit.py` 事务前镜像 `before-*.txt`（在各自路径锁下写，事务目录 0700）、事务目标替换 `_write_target`（日事件、候选等）、回滚写回 `_restore_transaction`。
+  - 生产里已有的 0644 文件靠下一次写入收紧，不做一次性批量 chmod。
+- **全仓排查，没改的写入口**（都不装记忆正文，或不是记忆库）：
+  - `operations.py` 的 ops.jsonl、Curator 运行审计与状态文件、事务 `manifest.json`、retention 的 tombstone/绑定：按合同只记编号、哈希和元数据。
+  - retention 回收用 `shutil.move`、owner 备份用 `copytree/copy2`：沿用源文件权限，源文件收紧后副本也是 0600；已有的旧备份不动。
+  - `migration.py` 一次性旧数据迁移：备份用 `copy2` 复制旧记忆文件，旧文件若是 0644，`backups/<run_id>/` 里的副本也是 0644；MEMORY.md/HOT 只重置成模板。是否给迁移备份也加私有权限，留给 3a 定。
+  - `memory_archive/`（任务/运行事实索引、Compact 快照、任务工作区、外置工具输出）属于会话与任务数据，不是记忆库正文，这轮不动。
+- **测试顺带修正**：`test_hot_budget.py` 两个用例原来直接写 `/tmp/hot-budget-*.md`；HOT 改成私有写后会尝试把直接父目录收紧到 0700（以 root 跑测试时 `/tmp` 真会被改），改成写 `tmp_path`。
+- **验证**：见 TESTS.md 同名节。
+
 ## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0 的流程、模板、检查器和核验声明（be，2026-10-02，分支 `claude/be-capability-packs-content-b2`，基于 ae 块 2 `ce2b833a7`，已实现，待 ae 审）
 
 - **依据**：冻结重跑逐条归因（`capability-packs-v2-design/attribution.md`）里 K 类 7 次、P 类 2 次，按 ae 的设计（[CAPABILITY_PACKS_V2](docs/design/CAPABILITY_PACKS_V2.md) 第 2 节）补包内容。只改 `examples/capability-packages/` 下两个包，不改宿主。
@@ -104,7 +120,7 @@
 - **S1（一起修）**：三步绕过——先 `set_default` 换成另一家，再 `set_embedding` 另一家的嵌入档案，再 `set_default` 换回来。
   - 做法：`model_set_embedding` 比对的“默认对话模型主机”改成组合根启动时记下的那一份（`core._wire_memory_authorities` 调 `remember_startup_chat_host`，和嵌入客户端同一时刻定下，写在 `agent.embedding_chat_host_snapshot`），不再读目录当前值。
   - 同一次运行里先改默认再设向量会被拦；重启是用户的动作，重启后快照更新。没有快照或当时解析不出来，一律请用户自己选。
-- **S2（记成后续项，这轮不做）**：候选、日事件、经验、整理事务备份这些文件也装着记忆正文，还是普通写入（没有 0600 / 0700）。要不要统一走私有写，后续定。
+- **S2（记成后续项，这轮不做）**：候选、日事件、经验、整理事务备份这些文件也装着记忆正文，还是普通写入（没有 0600 / 0700）。要不要统一走私有写，后续定。（已做：见本台账“记忆正文的其它文件也按私有原子写（S2）”一节。）
 - **验证**：be 的原样探针在本分支上，M1、S1 两条“绕过成立”的断言都失败了（save_provider 回 `EMBEDDING_HOST_DIFFERS`、嵌入地址没变；换默认后 set_embedding 回 `EMBEDDING_HOST_DIFFERS`）；用例与变异见 TESTS.md 同名节。
 
 ## 子代理被宿主停机打断时界面显示“宿主停机中断”（ae step17d 冒烟发现，2026-10-02，分支 `claude/9b-shutdown-label`，基于 `claude/3a-step17e` `2e5a36af0`，已实现，待集成）
