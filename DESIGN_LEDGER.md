@@ -20,6 +20,32 @@
   - 证据：`~/.my-agent/decision-evidence/j13-curator-retest/content-identity-20261002/`。
 - **验证**：见 TESTS.md 同名节。
 
+## Esc／/interrupt 中断后过一会儿再发消息仍接着原任务：账本自愈认出"用户中断"（第 7 条，用户 10-02 选 A，2026-10-02，分支 `claude/9b-interrupt-resume`，基于 `claude/3a-step16z` `5a56714dc`，已实现，待集成）
+
+- **问题**（38 在 C12 观察里报告，见下方 C12a/C12b 条目的待定项）：
+  - TUI 里 Esc 与 `/interrupt` 同一入口，只中断本轮，任务关联保持 active。
+  - 约 2–4 分钟后发现层账本自愈（`owner_wake_discovery._project_task_ledger_terminal`，operator `wake-discovery-ledger-heal`）看到"主执行轮已 cancelled、关联还 active"，把任务收成 cancelled、关掉 TaskRun。
+  - 之后同会话的新消息开新任务目录，不再接着中断的任务；只有中断后马上发消息才会接着做。用户的习惯是 Esc 后过一会儿发"继续"。
+- **为什么不能只看运行库的原因码**：`/interrupt` 与 `/stop` 打断执行循环后落的是同一组 `runtime_reason=user_stop`、`runtime_source=conversation_control`，运行库本身分不出两者。
+- **为什么不把关联改成 interrupted**：Gateway 选本轮会话工作区任务时只认精确绑定的请求、未完成 Goal 和 active 任务（`request_context._gateway_workspace_task`），`completed/interrupted` 粘性任务"不能偷偷取得新任务的执行选择权"，改了反而接不上。
+- **做法**（只认结构化事实，不看用户发的文字）：
+  - 新模块 `runtime_db/user_interrupt.py` 是唯一事实源：中断真的打到一轮时，给被中断的主执行代次追加一条 runtime_events `agent_run.user_interrupted`（payload：task_id、来源、窗口秒数）。
+    - Gateway 入口：`control_service._stop_active_task(interrupt_only=True)` 在确认中断到一轮之后调 `_record_user_interrupt`，按任务取主执行轮当前代次；
+    - 本地 chat 入口：`control_runtime._execute_local_stop` 的中断分支用 `LocalRunControl` 已发布的精确身份记。
+    - 记录失败只退回旧行为，不影响中断本身；没有运行中回合的空闲 `/interrupt` 不记。
+  - 账本自愈 `_filter_by_runtime_authority`：主执行轮 cancelled 时，先看当前代次（`current_attempt_id`）有没有这条事件、是否还在窗口内。
+    - 在窗口内：不投影、不写 status_conflict 诊断、也不驱动；窗口截止时刻进 `deadline_out`，发现判定缓存到点重算。
+    - 事件绑定精确代次：用户再发消息开出新代次后自然失效，新代次被别的原因取消时照旧收口。
+  - 用户再发消息：关联仍是 active，Gateway 照常选中原任务，同一任务目录、同一主执行轮开新代次（与"中断后马上发消息"同一条路）。
+- **过期规则**（用户不回来时不能永远挂着）：窗口 `USER_INTERRUPT_RESUME_SECONDS` = 24 小时，从中断事件写入时刻算。过了窗口，账本自愈照原规则把关联记成 cancelled、任务账本 CANCELLED、关 TaskRun，审计原因记 `user_interrupt_expired`（普通陈旧账本仍是 `terminal_run_ledger_stale`）。
+  - 窗口长度是模块常量，事件里同时记下当时的窗口秒数；发现层按设计不读配置，所以没有做成配置项。要调长短或改成配置，交集成方定（待定）。
+- **`/stop` 不变**（C12 那组不退回）：
+  - 窗口内关联仍 active，`/stop` 走正常任务停止：关联改 interrupted、冻结并回收本任务的后台进程与子代理、暂停目标（与"中断后马上 `/stop`"同一条路）。
+  - 过了窗口自愈收口后，`/stop` 走 C12a 的会话遗留资源回收。
+  - 中断本身仍不碰资源；过期收口也不自动杀进程（与原自愈一致），遗留进程照旧由 `/stop` 或 `gateway stop --stop-background` 收。
+- **影响**：被中断任务在窗口内保持 active、TaskRun 保持打开，期间不会被自动续跑（运行库权威终态照旧排除驱动）。窗口内用户发的下一条消息，无论内容，都接着原任务目录，与原先"中断后马上发消息"的行为一致。
+- **验证**：见 TESTS.md 同名节。真实 MiniMax 链路未跑（组件 + 真实 Gateway ask 加脚本化假模型已覆盖），可在集成验收时补一轮。
+
 ## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
 
 - **问题**：step17c 冒烟基本链路（`decision-evidence/step17c-shutdown-rehearsal-38d7c8615/`）里，父代理被子代理完成唤醒的那一轮，
@@ -1641,7 +1667,7 @@
   - 10-01 在 base 代码上实测：普通 `gateway stop` 后，进程被列出并由 init 接管（PPID 1）继续跑；`gateway stop --stop-background` 后整组退出（SIGTERM，确认，组内无残留）。Gateway 再起来后，用户也能在原会话里用 `/stop` 收（见 C12a）。
   - 结论：不改代码。
 - **待定**：
-  - 中断后几分钟，自愈会把仍 active 的中断任务记成 cancelled。之后同会话的新消息会开新任务目录，不再接着中断的任务；中断后马上发消息则会接着做。这不是 C12 的观察项，这次不改。要不要让自愈认出"用户中断"（例如 `/interrupt` 也把关联记成 interrupted），交集成方定。
+  - （已按第 7 条处理，见台账顶部同名条目）中断后几分钟，自愈会把仍 active 的中断任务记成 cancelled，之后同会话的新消息会开新任务目录。现在自愈认出用户中断（运行库事件 `agent_run.user_interrupted`，绑定被中断的执行代次），24 小时窗口内不收口，用户再发消息接着原任务。
   - 先 `/interrupt` 再马上 `/stop` 时，TaskRun 不在 `/stop` 当下关，而是约 2 分钟后由发现层按 `conversation_task_interrupted` 关（实测）。不算泄漏，不改。
 - **验证**：见 TESTS.md 同名节。证据（仓库外）：`~/.my-agent/decision-evidence/c12-observations-20261001/`。
 

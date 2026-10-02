@@ -2314,6 +2314,8 @@ def _mark_request_stopping_locked(
 
 
 # LLM: interrupt 不改变任何 Goal/任务状态或资源；仅已中断的 active Goal 可沿同一 wake/claim 续跑。
+#   真的中断到一轮时另记一条“用户中断”运行事实（_record_user_interrupt），让账本自愈在续接窗口内不把任务收成
+#   cancelled，用户过一会儿再发消息仍接着原任务；/stop 分支不记，语义不变。
 # 函数用途: 将当前回合中断与明确任务停止分支隔离，旧执行退出前不另起执行器。
 def _stop_active_task(
     base_agent: object,
@@ -2335,13 +2337,7 @@ def _stop_active_task(
             interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
         if not (task_interrupted or linked_marked):
             return ConversationControlResult("stop", False, "当前没有执行中的回合，无需中断。", request_id=task_id)
-        continuing = _continue_goal_after_turn_interrupt(base_agent, active, scope)
-        return ConversationControlResult(
-            "stop", True,
-            ("已中断本轮；目标仍在进行，当前执行退出后继续。/goal pause 只暂停自动续跑，/stop 停止任务资源。"
-             if continuing else "已中断当前回合；目标状态和已启动的独立任务资源保留。"),
-            request_id=task_id,
-        )
+        return _turn_interrupted_result(base_agent, active, scope)
     try:
         owner_agent = _request_agent_for_scope(base_agent, scope)
         prepared = _prepare_main_task_stop(owner_agent, active, task_id, scope)
@@ -2375,6 +2371,38 @@ def _stop_active_task(
         "已收到停止请求，当前任务正在停止。",
         request_id=task_id,
     )
+
+
+# LLM: 中断已确认打到一轮后的收尾：先记用户中断事实（续接窗口），再按精确 active Goal 决定是否发续接 wake；不碰资源。
+#   从 _stop_active_task 抽出只为控制函数长度，语义不变。
+# 函数用途: 组装纯中断的成功回执，说明目标是否会继续、资源是否保留。
+def _turn_interrupted_result(
+    base_agent: object, active: _GatewayRequestRecord, scope: GatewayControlScope,
+) -> ConversationControlResult:
+    task_id = _record_id(active)
+    _record_user_interrupt(base_agent, scope, task_id)
+    continuing = _continue_goal_after_turn_interrupt(base_agent, active, scope)
+    return ConversationControlResult(
+        "stop", True,
+        ("已中断本轮；目标仍在进行，当前执行退出后继续。/goal pause 只暂停自动续跑，/stop 停止任务资源。"
+         if continuing else "已中断当前回合；目标状态和已启动的独立任务资源保留。"),
+        request_id=task_id,
+    )
+
+
+# LLM: 只追加 runtime_events（runtime_db.user_interrupt），不改任务关联、Goal 或资源；owner 运行库不可用或记录失败时
+#   静默退回旧行为（几分钟后账本自愈照旧收成 cancelled），绝不影响中断本身。
+# 函数用途: Esc / /interrupt 中断到一轮时，记下“这是用户中断的”，供账本自愈保留可续接的任务。
+def _record_user_interrupt(base_agent: object, scope: GatewayControlScope, task_id: str) -> None:
+    from ..runtime_db.user_interrupt import record_user_interrupt
+
+    try:
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        repo = getattr(getattr(owner_agent, "subagents", None), "runtime_db", None)
+        if repo is not None:
+            record_user_interrupt(repo, task_id, source="gateway_interrupt")
+    except Exception:  # noqa: BLE001 记录是续接的附加事实，失败只退回旧行为
+        return
 
 
 # LLM: 仅精确 active Goal 可保留执行授权；原 claim 未释放时 wake 不能运行，暂停/预算/未知状态不会自动恢复。

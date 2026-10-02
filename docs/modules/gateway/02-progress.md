@@ -996,3 +996,12 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - 运行错误报告给 `host_stopping`，带结构化原因码；
   - 唤醒毒丸判不计数。
   - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## Esc／/interrupt 中断后过一会儿再发消息仍接着原任务（第 7 条，2026-10-02，分支 `claude/9b-interrupt-resume`，基于 step16z `5a56714dc`）
+
+- **起因**：中断只结束本轮、关联保持 active，约 2–4 分钟后发现层账本自愈把它收成 cancelled，之后的新消息开新任务；用户习惯 Esc 后过一会儿发"继续"。
+- **改动**：
+  - `control_service._stop_active_task` 的纯中断分支在确认中断到一轮之后调 `_record_user_interrupt`，给主执行轮当前代次记 `agent_run.user_interrupted`（`runtime_db/user_interrupt.py`）；本地 chat 入口同一事实源。
+  - `owner_wake_discovery._filter_by_runtime_authority` 在 24 小时续接窗口内跳过这类 cancelled 执行，不投影、不诊断、不驱动；窗口截止时刻进发现缓存期限。过期照原规则收口，原因 `user_interrupt_expired`。
+  - `/stop` 语义不变：窗口内走正常任务停止并回收资源，过期后走 C12a 遗留资源回收。
+  - 设计见台账同名节，测试与变异见 TESTS.md 同名节。

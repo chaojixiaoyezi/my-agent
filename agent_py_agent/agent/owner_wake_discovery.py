@@ -55,6 +55,7 @@ from .runtime_db.repository import (
     RuntimeRepository,
 )
 from .runtime_db.schema import runtime_db_path
+from .runtime_db.user_interrupt import user_interrupt_resume_until
 from .user_space.run_workspace import FinishRunWorkspaceRequest, finish_run_workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -1162,6 +1163,8 @@ def _filter_by_runtime_authority(
         （残留是「待自愈」而非冲突）；投影失败才写 status_conflict 诊断
         （可观测）。无论投影结果如何都排除——权威终态绝不参与驱动
         （自喂循环真机根因：settle 置终态后仍被每 cooldown 挂新 attempt）。
+      - 权威 cancelled 但当前代次是用户 Esc / /interrupt 中断、仍在续接窗口内
+        （runtime_db.user_interrupt）→ 不投影、不诊断、也不驱动，用户再发消息接着原任务；过窗口照上一条收口。
       - 非终态但有活跃执行权锁（worker 在跑）→ 排除不催（驱动链 lease 感知）。
       - 其余（含无权威记录）→ 照旧驱动。
 
@@ -1186,6 +1189,8 @@ def _filter_by_runtime_authority(
             continue
         status = str(row["status"] or "")
         if status in AGENT_RUN_TERMINAL_STATUSES:
+            if status == "cancelled" and _user_interrupt_still_resumable(repo, row, deadline_out):
+                continue  # 用户中断后的续接窗口内：任务保持 active，不收成 cancelled、不写冲突诊断，也不驱动
             # 投影只对「任务终止语义」的终态执行：cancelled（孤儿回收/用户
             # 停止/会话控制）意味着任务生命周期终止，账本残留该自愈。done/
             # failed 是轮间/可重试形态——link active 是持续任务（audit/监控
@@ -1218,6 +1223,32 @@ def _filter_by_runtime_authority(
             continue  # worker 在跑 → 不催
         filtered.append(task_id)
     return filtered
+
+
+# LLM: 用户 Esc / /interrupt 中断的执行代次（runtime_db.user_interrupt 事件，绑定 current_attempt_id）在续接窗口内
+#   不算“任务终止”，账本自愈跳过它；窗口截止时刻进 deadline_out，判定缓存到点重算，过期后照原规则收口。
+#   读不到事件按旧规则处理（返回 False）。只读 runtime_events。
+# 函数用途: 判断一个已 cancelled 的主执行轮是否是用户中断、仍在可续接窗口内。
+def _user_interrupt_still_resumable(repo: RuntimeRepository, row, deadline_out: list[float] | None) -> bool:
+    try:
+        resume_until = user_interrupt_resume_until(repo, row)
+    except Exception:  # noqa: BLE001 读不到中断事实：按旧规则收口，不猜
+        return False
+    if resume_until <= time.time():
+        return False
+    _add_deadline(deadline_out, resume_until)
+    return True
+
+
+# LLM: 自愈收口原因只取结构化事实：带用户中断事件的（此时已过续接窗口）记 user_interrupt_expired，其余照旧
+#   terminal_run_ledger_stale。读事件失败按旧原因。只读 runtime_events。
+# 函数用途: 给账本自愈关 TaskRun 选择审计原因，区分“用户中断后没回来”和普通陈旧账本。
+def _ledger_heal_reason(repo: RuntimeRepository, run_row) -> str:
+    try:
+        expired = user_interrupt_resume_until(repo, run_row) > 0
+    except Exception:  # noqa: BLE001
+        expired = False
+    return "user_interrupt_expired" if expired else "terminal_run_ledger_stale"
 
 
 # LLM: 扫描快照不是写权限；与执行器换代共用 task transition 锁，重新核对当前 attempt 与 Goal。
@@ -1336,7 +1367,7 @@ def _project_task_ledger_terminal_locked(
             task_id=task_id,
             status="cancelled",
             operator="wake-discovery-ledger-heal",
-            reason="terminal_run_ledger_stale",
+            reason=_ledger_heal_reason(repo, run_row),
         )
     except Exception:  # noqa: BLE001
         return False

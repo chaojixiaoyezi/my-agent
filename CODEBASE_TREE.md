@@ -443,6 +443,7 @@ agent_py_agent/
 |   |   |-- operation_resources.py      # 同次只读核对原操作、holder/代数/epoch 与已领取资源锁
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   |-- run_takeover.py             # 被接替（TAKEN_OVER）的子代理运行收口为 cancelled：只在执行轮已静止时，CAS 核对 attempt 状态
+|   |   |-- user_interrupt.py           # 用户 Esc／/interrupt 中断事实：记到被中断的执行代次，账本自愈据此在续接窗口内不收口
 |   |   |-- child_recovery.py           # /recover 线程分支：列出 unknown 子代理；带编号时事务内复核根/子目标范围后恢复
 |   |   |-- owner_recovery.py           # /recover owner：空 thread 历史 unknown 只读投影、集合确认码、批量共享 CAS 与幂等回执
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
@@ -1479,6 +1480,7 @@ docs/
 - `agent_py_agent/agent/gateway_parts/background_resource_report.py`：`gateway stop`、本地 `/stop` 与 Gateway 会话级 `/stop`（C12a：无运行中回合时冻结本会话遗留进程，回执渲染 `background_resource_lines` 也在这里）共用的受管后台进程事实投影与停止入口；只读登记表（根地址与写入端同用 `process_session_store_root(workspace, owner_home)`），投影不含命令正文/cwd/输出路径，按精确执行身份冻结停止意图、等真实终态后如实报告是否停止。`session_background_processes` 只按精确 `thread_id` 筛本会话资源，不做 owner 全量。
 - `agent_py_agent/tests/test_gateway_stop_background_resources.py`：gateway stop 侧合同（只列运行中、跨 task/run 不误停、空身份被拒、未终态如实报未停、按进程组回收孙进程）。
 - `agent_py_agent/tests/test_session_stop_background_resources.py`：会话内 `/stop` 回收被中断任务遗留后台资源的合同（无回合时不再回"没有运行中的内容"、会话隔离精确匹配、登记表不可读时报 unknown）。
+- `agent_py_agent/tests/test_user_interrupt_resume.py`：Esc／/interrupt 后过一会儿再发消息接着原任务（第 7 条）：自愈窗口内不收口、过期按 `user_interrupt_expired` 收口、事件绑定精确代次、两个入口都记、窗口内 `/stop` 照旧停止回收，以及真实 Gateway ask + 脚本化假模型的"中断→5 分钟后自愈→继续"链路。
 - `agent_py_agent/tests/test_gateway_stop_session_leftovers.py`：Gateway 会话内 `/stop` 回收被中断任务遗留后台进程的合同（C12a：自愈后仍能收、空闲 `/interrupt` 不碰、别的会话与仍 active 的审计任务不碰、任务记录损坏时不停）。
 - `agent_py_agent/agent/gateway_parts/owner_retention.py`：复核既有硬事实后回收空闲实例和轮询登记，不关闭持久任务或共享插件。
 - `docs/design/TUI_RESOURCE_LIFETIME.md`：身份、执行槽、连接和历史规模的边界与参考源码。
@@ -1502,6 +1504,7 @@ docs/
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
 - `agent_py_agent/agent/runtime_db/run_takeover.py`：子代理被接替转 TAKEN_OVER 后的运行账收口。只在当前 attempt 已静止时用 `settle_agent_run` 写 cancelled（读到的 attempt 状态作 CAS 条件），仍在运行／排队／unknown 不动；由 `services/base.record_takeover` 在接替落账后尽力调用，失败不影响接替。
+- `agent_py_agent/agent/runtime_db/user_interrupt.py`：用户中断的唯一结构化事实。Gateway 与本地入口中断到一轮时追加 `agent_run.user_interrupted`（绑定被中断的执行代次），发现层账本自愈在 24 小时窗口内不把任务收成 cancelled，过期按原规则收口（原因 `user_interrupt_expired`）。
 - `agent_py_agent/agent/runtime_db/run_creation.py`：在调用方原事务内创建 Task→TaskRun→AgentRun→首次 Attempt 及委托/事件，普通调用与显式宿主命令共用，不能另开事务。
 - `agent_py_agent/agent/runtime_db/host_commands.py`：原事件索引与 TaskRun 冻结请求共同绑定唯一运行；本身不授予权限、不启动模型或任务调度。
 - `agent_py_agent/agent/runtime_db/host_command_execution.py`：只领取原 pending，强制原操作 Store，终态沿原运行收口；查询不初始化数据库，UNKNOWN 不重跑。

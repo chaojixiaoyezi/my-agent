@@ -39,6 +39,30 @@
 
 **真实核对**：官方 DeepSeek flash、隔离 home、1 次调用。3 条候选全部入库；模型自己把主题键分开了，没走到同主题路径（见 DESIGN_LEDGER 同名节）。
 
+## Esc／/interrupt 中断后过一会儿再发消息仍接着原任务（第 7 条，2026-10-02，分支 `claude/9b-interrupt-resume`，基于 `5a56714dc`）
+
+- 新增 `test_user_interrupt_resume.py`（8 项）：
+  - 合同，账本自愈（与 R1-03 自愈夹具同形：主执行轮 cancelled、关联 active、任务账本 RUNNING）：
+    - 用户中断事件写于 5 分钟前 → 关联仍 active、任务账本仍 RUNNING、TaskRun 不关、不写 status_conflict，`deadline_out` 是窗口截止时刻；
+    - 事件写于窗口之前 → 关联 cancelled、任务账本 CANCELLED、TaskRun 关闭，原因 `user_interrupt_expired`；
+    - 事件属于上一代、这一代是别的原因取消的 → 照旧收口，原因 `terminal_run_ledger_stale`。
+  - 合同，控制入口：
+    - Gateway `/interrupt` 中断到一轮时记下当前代次（来源 `gateway_interrupt`），关联保持 active；
+    - 空闲 `/interrupt`（没有运行中回合）不记；
+    - 本地 chat `/interrupt` 用已发布的精确身份记（来源 `local_interrupt`）；
+    - 中断、执行轮 cancelled、自愈跳过之后，窗口内 `/stop` 照旧走任务停止：回"当前任务正在停止"、关联改 interrupted、冻结的资源交给锁外清理。
+  - 真实链路：真实 Gateway worker 入口（`request_execution._handle_gateway_request`）加脚本化假模型（只替换供应商传输）：
+    - 第一轮 `list_files` 晋升会话任务后挂在模型调用上，`/interrupt` 打断，响应 `interrupted`；
+    - 事件回拨 5 分钟后跑一遍发现层自愈，关联仍 active；
+    - 再发"继续"：会话里仍只有原任务一条关联、任务目录不变、同一主执行轮开出新代次。
+    - 草稿副本上去掉修复（自愈照旧收口）后，这一项看到的正是用户报告的现象：自愈后关联 cancelled，"继续"另开了一个新任务。
+- 变异 7/7 被杀，草稿副本上逐个精确替换、按字节恢复：
+  - 续接判断恒不成立、窗口变成 0、不核对代次；
+  - Gateway 不记、本地入口不记；
+  - 过期原因不区分、不把窗口截止时刻交给发现缓存。
+  - 其中"续接判断恒不成立"和"Gateway 不记"由真实链路那一项单独就能杀掉。
+- 原有 `test_r103_ledger_selfheal.py` 不变、照常通过（没有用户中断事件时自愈行为不变）。
+
 ## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`）
 
 **来源**：3a 派活；ds2 两轮加固 be 审过之后剩下的四处可选尾巴。设计与“挂 /status 不挂审计”的理由见 DESIGN_LEDGER 同名节。

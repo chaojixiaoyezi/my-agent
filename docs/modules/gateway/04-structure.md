@@ -2425,3 +2425,10 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - `conversation/channels.py` 的 `project_host_paths_report` 返回脱敏后正文和替换处数。
 - `project_message_paths_for_channel` 只给整条消息出口用：`DeliveryService.deliver`、`request_history` 的最终回复与逐条说明、消息工具的投递记录。替换过路径就在末尾附 `HOST_PATH_REDACTION_NOTE`。
 - 摘要片段与流式进度仍用 `project_host_paths_for_channel`，不附说明。
+
+## 用户中断的续接窗口：控制入口与账本自愈怎么对上（2026-10-02，第 7 条）
+
+- 事实源只有一个：`runtime_db/user_interrupt.py` 的 runtime_events `agent_run.user_interrupted`，绑定被中断的主执行代次（`current_attempt_id`），payload 记 task_id、来源（`gateway_interrupt` / `local_interrupt`）和当时的窗口秒数。
+- 写方：Gateway `control_service._stop_active_task(interrupt_only=True)`（按任务取主执行轮当前代次）与本地 `control_runtime._execute_local_stop`（用 `LocalRunControl` 已发布的精确身份）。只在真的中断到一轮时写；写失败退回旧行为。
+- 读方：发现层 `_filter_by_runtime_authority` → `_user_interrupt_still_resumable`。主执行轮 cancelled 且当前代次有事件、未过 `USER_INTERRUPT_RESUME_SECONDS`（24 小时）时跳过；过期后 `_ledger_heal_reason` 给收口记 `user_interrupt_expired`。
+- 续接走原路：关联一直是 active，`request_context._gateway_workspace_task` 照常选中原任务；新代次开出后事件不再匹配，自然失效。

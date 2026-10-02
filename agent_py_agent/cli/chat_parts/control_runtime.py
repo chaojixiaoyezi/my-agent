@@ -432,6 +432,22 @@ def _execute_local_control(
     return _execute_local_stop(execution, command)
 
 
+# LLM: 与 Gateway 入口同一事实源：只追加 runtime_events（runtime_db.user_interrupt），用本次调用已发布的精确身份；
+#   还没发布身份（模型启动前就中断）或运行库不可用时不记，失败静默退回旧行为，不影响中断本身。
+# 函数用途: 本地入口中断到一轮时记下“这是用户中断的”，账本自愈据此在续接窗口内保留原任务。
+def _record_local_user_interrupt(execution: ChatControlExecution, binding: dict[str, str]) -> None:
+    from ...agent.runtime_db.user_interrupt import record_user_interrupt
+
+    repo = getattr(getattr(execution.agent, "subagents", None), "runtime_db", None)
+    task_id = str(binding.get("task_id") or "").strip()
+    if repo is None or not task_id:
+        return
+    try:
+        record_user_interrupt(repo, task_id, source="local_interrupt", binding=binding)
+    except Exception:  # noqa: BLE001 记录是续接的附加事实，失败只退回旧行为
+        return
+
+
 # LLM: interrupt 不关闭执行权和资源；stop 在原 task guard 内关权并冻结，迟到回调由同一调用句柄拒绝。
 #   没有运行中回合不代表没有遗留资源：回合被 /interrupt 后托管后台进程按设计继续跑，因此 /stop 再退一步
 #   回收本会话登记的资源，而不是直接回"没有运行中的内容"（D10 验收发现用户当时无路可走）。没有回合时的
@@ -457,6 +473,8 @@ def _execute_local_stop(
             control.request_interrupt() if control is not None
             else interrupt_by_name(conversation_request_interrupt_name(request_id))
         )
+        if interrupted and control is not None:
+            _record_local_user_interrupt(execution, control.runtime_authority())
         return ConversationControlResult(
             "stop", interrupted, "已中断本轮模型与工具执行链。" if interrupted else "当前回合已结束。",
             request_id=request_id,
