@@ -8,20 +8,7 @@
         "config_warnings",
         "memory_config_warnings"
       ],
-      "reason": "加载器写入的元数据，不在随包 YAML 里，不是用户参数"
-    },
-    {
-      "keys": [
-        "dynamic_timeout_min",
-        "home_lesson_stale_caveat_days",
-        "local_store_fts_enabled",
-        "memory_curator_daily_finalize_hour",
-        "memory_curator_model",
-        "memory_curator_provider",
-        "memory_hot_min_occurrences",
-        "memory_lesson_min_occurrences"
-      ],
-      "reason": "暂缺中文说明，等配置减量分类：多数将删除、合并或降级为代码常数，保留下来的再补说明"
+      "reason": "加载器写入的运行时元数据，不在随包 YAML 里，不是用户参数"
     }
   ],
   "note": "说明为空的参数只允许出现在这份名单里；名单外新增空说明、或名单里的参数已有说明/已删除，test_parameter_registry 都会失败。",

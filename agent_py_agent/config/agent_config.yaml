@@ -64,10 +64,10 @@ my_agent_owner_id: "main"
 # 家目录运行时开关：
 # - SimpleAgent 启动时固定创建 ~/.my-agent owner home 基础目录和 SOUL/USER/AGENTS/memory 入口文件。
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
-# - home_lesson_stale_caveat_days: 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
-#   防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
 # - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。
 home_context_enabled: true
+# 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
+# 防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
 home_lesson_stale_caveat_days: 7
 # 是否把每次运行的记录按日期归档成运行工作区。
 # 一般不用改；只有当你希望自己的空间完全不留下任何运行归档时才需要关掉它，关掉后代理照常工作、工具的工作目录也不变，只是不再保留这些记录和索引。
@@ -109,28 +109,17 @@ local_store_files_dir: ""
 # 一般不需要改，只有你想把这份数据放到独立数据盘或指定目录时才需要设；留空则用运行目录下的默认位置。
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 local_store_events_path: ""
+# 本地记忆库是否启用全文检索（FTS5）：关闭后相关记忆的关键词召回退化为慢速扫描。
 local_store_fts_enabled: true
 
 # 每轮请求最多带多少条相关记忆进入 prompt
 memory_top_k: 5
 
-# 后台 Memory Curator（统一每日经历提炼服务）：
-# - enabled: 是否启用后台策展；关闭时保留现有游标和候选，不调用辅助模型。
-# - provider: auto 表示继承主后端；指定 provider 时由统一后端工厂创建，不改变输出 Schema。
-# - model: 留空继承主模型；填写时只影响后台提炼模型，不改变主会话模型。
-# - interval_seconds: 有新经历且距离上次成功达到多少秒时触发，默认 3 小时。
-# - turn_threshold: 游标后累计多少个新用户轮次触发，默认 10 轮。
-# - batch_message_limit: 单批最多读取多少条 ConversationStore 消息。
-# - max_input_chars: 单批模型输入字符上限；长工具输出只传预览和引用。
-# - timeout_seconds: 单次后台模型调用超时秒数。
-# - max_retries: Schema、超时或模型错误后的有界重试次数；失败不推进游标。
-# - workers: 记忆策展独立后台车道的全局并发数；超出的 owner 保留在登记表，下一拍继续，不抢主会话线程。
-# - daily_finalize_hour: owner 当地时间每天收尾小时，取值 0-23。
-# - auto_promotion_policy: 自动晋升机器策略版本；conservative_v1 只允许精确证据、无冲突的新长期事实。
-# - lesson_min_occurrences: 普通教训晋升所需最少独立观察次数，默认 2。
-# - hot_min_occurrences: 已接受教训晋升 HOT 所需最少独立观察次数，默认 3。
+# 是否启用后台 Memory Curator（统一每日经历提炼服务）：关闭时保留现有游标和候选，不调用辅助模型。
 memory_curator_enabled: true
+# 后台策展使用的服务商：auto 表示继承主后端；指定 provider 时由统一后端工厂创建，不改变输出 Schema。
 memory_curator_provider: "auto"
+# 后台策展使用的模型：留空继承主模型；填写时只影响后台提炼模型，不改变主会话模型。
 memory_curator_model: ""
 # 后台记忆整理隔多久自动触发一次（秒）。
 # 想让记忆更及时沉淀就调小，想减少后台模型调用、省资源就调大；需要注意的是，光到时间还不够，期间必须有过新对话才会真的触发。
@@ -149,11 +138,14 @@ memory_curator_timeout_seconds: 90
 # 按用户空间分配名额，超出的整理任务排队留到下一轮再处理，不会抢占主会话。
 # 只有在后台整理明显积压、或你希望主动限制它占用的资源时才需要改。
 memory_curator_workers: 2
+# 后台策展每天在 owner 当地时间的几点做每日收尾，取值 0-23。
 memory_curator_daily_finalize_hour: 23
 # 后台记忆整理时是否自动晋升够格的候选记忆。
 # 如果你希望所有候选都等自己人工确认、不让程序自动写入长期记忆，就把它改成 `manual_only`；取值 `conservative_v1` 表示只自动晋升证据精确、没有冲突的新长期事实。
 memory_curator_auto_promotion_policy: "conservative_v1"
+# 普通教训晋升为长期记忆所需的最少独立观察次数。
 memory_lesson_min_occurrences: 2
+# 已接受的教训晋升为 HOT 热点教训所需的最少独立观察次数。
 memory_hot_min_occurrences: 3
 
 # 是否自动持久化运行归档、恢复事实和 task workspace。
@@ -421,6 +413,7 @@ runner_timeout_by_role: []
 
 # 主会话后台命令结束后主动通知，复用持久唤醒队列；关闭不影响 process_session 查询/长等待。
 background_process_notifications: true
+# 自动估算请求超时时允许的最小值（秒）；避免把超时压得太短、请求还没发完就中断。
 dynamic_timeout_min: 30
 # 自动估算请求超时时允许的最大值（秒）。
 # 只有合法任务确实需要跑更久、却被超时打断时才需要调大。

@@ -110,9 +110,19 @@
   - 说明也读行尾注释：键正上方的注释优先，没有再取 `key: 值  # 说明` 的行尾部分；判断“什么是注释”复用加载器同一条引号规则
     （`config_io.yaml_trailing_comment` 与 `_strip_yaml_comment` 同源），引号里的 `#` 不算。389 个字段里空说明从 216 降到 177，
     其中 39 个是原来没读到的行尾注释。
-  - 守卫：说明为空的字段只允许出现在 `agent_py_agent/tests/fixtures/parameter_description_baseline.json`（按原因分组：5 个加载器元数据；
-    172 个等配置减量分类，多数将删除、合并或降级）。名单外新增空说明、或名单里的字段已有说明或已删除，`test_parameter_registry` 都失败，
-    名单只会越来越短。这一轮不补写那 172 个说明。
+  - 守卫：说明为空的字段只允许出现在 `agent_py_agent/tests/fixtures/parameter_description_baseline.json`（按原因分组）。名单外新增空说明、
+    或名单里的字段已有说明或已删除，`test_parameter_registry` 都失败，名单只会越来越短。
+- **P3 补齐保留键说明（2026-10-01，分支 `worker/ds2-param-parity`）**：此前基线第二组 8 个保留 advanced 键无说明（dynamic_timeout_min、
+  home_lesson_stale_caveat_days、local_store_fts_enabled、memory_curator_daily_finalize_hour、memory_curator_model、memory_curator_provider、
+  memory_hot_min_occurrences、memory_lesson_min_occurrences）。已把它们的中文说明写进随包 agent_config.yaml 各键正上方注释；后台
+  Memory Curator 原整段挂在 `memory_curator_enabled` 上的注释块拆开归到各自的键，删掉已删除键（batch_message_limit、max_retries）的说明。
+  基线现在只剩 5 个加载器写入的运行时元数据键（config_layers / config_path / config_sources / config_warnings / memory_config_warnings），
+  `test_parameter_registry.py` 通过。
+- **P7 全量默认值一致性测试（2026-10-01）**：新增 `test_config_defaults_parity.py`——用正式加载器读随包 agent_config.yaml，
+  对 `AgentConfig` 全部字段逐个断言加载值等于 dataclass 默认值（219 个 YAML 键当前全部一致，无值级白名单项）；
+  5 个运行时元数据键跳过值比较但断言仍存在（键被删即失败）；值级白名单为空、结构保留（放进去的键必须写明原因且仍不一致，
+  变一致即失败，防止白名单烂掉）。api_key 由 `api_key_env` 指向的环境变量注入，测试里先清掉再加载，避免本机环境污染。
+  实现了目标第 2 条“随包 YAML、`AgentConfig` 默认值和文档都与权威定义一致，由测试核对”的全量落点。
   - 推理强度如实生效值：`model_reasoning_effort` 登记派生规则，读取函数与 `/effort` 回执同一组合——控制方式只由
     `resolved_reasoning_control(model_reasoning_control, api_base, model_backend)` 决定，说明只由 `describe_reasoning_effect` 生成，
     不另写支持判断。用户当前用的 opencode.ai 不在已确认名单里，查看时如实显示“当前模型不支持调节……本设置暂不改变请求”。

@@ -1,5 +1,11 @@
 # 设计台账
 
+## 参数中心 P7 全量默认值一致性测试与 P3 补齐 8 个保留键说明（2026-10-01，分支 `worker/ds2-param-parity`，已实现，待集成）
+
+- **P7**：新增 `agent_py_agent/tests/test_config_defaults_parity.py`——用正式加载器 `load_config` 读随包 agent_config.yaml，对 `AgentConfig` 全部字段逐个断言加载值等于 dataclass 默认值（219 个 YAML 键当前全部一致，值级白名单为空）。5 个加载器运行时元数据键（config_layers/config_path/config_sources/config_warnings/memory_config_warnings）跳过值比较但断言仍存在；值级白名单结构保留且要求“放进去的键必须仍不一致”，防止白名单烂掉。api_key 由 `api_key_env` 环境变量注入，测试先清 `AGENT_API_KEY` 再加载，避免本机环境污染。实现了 PARAMETER_CENTER.md 目标第 2 条“随包 YAML、AgentConfig 默认值和文档一致，由测试核对”的全量落点。
+- **P3**：基线 `parameter_description_baseline.json` 第二组 8 个保留 advanced 键补中文说明（写进 agent_config.yaml 各键正上方注释：dynamic_timeout_min、home_lesson_stale_caveat_days、local_store_fts_enabled、memory_curator_daily_finalize_hour、memory_curator_model、memory_curator_provider、memory_hot_min_occurrences、memory_lesson_min_occurrences）；后台 Memory Curator 整段挂在 `memory_curator_enabled` 上的注释块拆开归到各自键，删掉已删除键（batch_message_limit、max_retries）的说明。基线只剩 5 个加载器元数据键，`test_parameter_registry.py` 通过。
+- **验证**：`test_parameter_registry.py` + `test_config_defaults_parity.py` + `test_config_validation.py` + `test_merged_config_knobs.py` 共 134 passed；架构守卫 guards9 与静态 gate 全过（详见 TESTS.md）。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`

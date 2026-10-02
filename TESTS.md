@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 参数中心 P7 / P3（2026-10-01，分支 `worker/ds2-param-parity`，已实现）
+
+- **P7 全量默认值一致性**：新增 `test_config_defaults_parity.py` 2 项——随包 agent_config.yaml 用正式 `load_config` 加载后，`AgentConfig` 全部字段（224 个，其中 219 个 YAML 键）逐个断言等于 dataclass 默认值；5 个运行时元数据键跳过值比较但断言仍存在；值级白名单为空并校验结构不烂。
+- **P3 补齐 8 个保留键说明**：agent_config.yaml 里 dynamic_timeout_min、home_lesson_stale_caveat_days、local_store_fts_enabled、memory_curator_daily_finalize_hour、memory_curator_model、memory_curator_provider、memory_hot_min_occurrences、memory_lesson_min_occurrences 各键正上方补中文说明；Memory Curator 注释块拆分、删掉已删键（batch_message_limit、max_retries）说明；`parameter_description_baseline.json` 只剩 5 个加载器元数据键。
+- 验证命令与结果：
+  - `$PY -m pytest agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_config_defaults_parity.py agent_py_agent/tests/test_config_validation.py agent_py_agent/tests/test_merged_config_knobs.py -q --tb=short`：134 passed
+  - 架构守卫（guards9.txt 全文件清单）：通过（含 test_packaging.py）
+  - `$PY scripts/check_import_boundaries.py`：0 条
+  - `$PY -m ruff check agent_py_agent scripts`：通过
+  - `$PY scripts/check_doc_sync.py`：通过
+  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：通过
+  - `git diff --check`：通过；`$PY scripts/check_clean_package.py .`：通过
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，
