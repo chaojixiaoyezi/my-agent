@@ -21,8 +21,8 @@ CURATOR_MODEL_GROUP_MAX_COUNT = 8
 # 网络、额度、超时、提交失败都不补跑：那些换模型没用或可能已经写过东西。
 CURATOR_DEFAULT_FALLBACK_CODES = frozenset({"CURATOR_SCHEMA_INVALID"})
 # 会话自己的模型连不上（服务商故障、额度、超时）时不在同一次运行里补跑：一次运行的租约只够一整次提取，超时类失败已经
-# 用掉了它。改成同一组、同一起始游标上连续失败这么多次后，下一次运行这组直接用 owner 默认模型（3a 2026-10-02 生产：
-# 某会话选的模型连续 ProviderTransientError，那组排在最前，整个 owner 的整理都卡住）。2 次足以排除一次抖动。
+# 用掉了它（3a 2026-10-02 生产：某会话选的模型连续 ProviderTransientError，那组排在最前，整个 owner 的整理都卡住）。
+# 同一组同一起始游标上连续连接类失败几次后，下一次运行这组直接用 owner 默认模型：2 次足以排除一次抖动。
 CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT = 2
 CURATOR_TRANSIENT_FALLBACK_CODES = frozenset({"CURATOR_MODEL_FAILED", "CURATOR_MODEL_TIMEOUT"})
 

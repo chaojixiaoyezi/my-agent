@@ -3804,6 +3804,14 @@
       "description": "没处理到的组照常留到下一次触发。"
     },
     {
+      "name": "CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_routing.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "同一组同一起始游标上连续连接类失败几次后，下一次运行这组直接用 owner 默认模型：2 次足以排除一次抖动。"
+    },
+    {
       "name": "RUN_WARNINGS_MAX_COUNT",
       "file": "agent_py_agent/agent/memory_store/curator_run_log.py",
       "value": 32,
