@@ -1,14 +1,18 @@
-# LLM: 可选推荐和已采用展示的携带都只投影原快照；纯值不持有handler，权限/搜索/加载仍归原合同，失效保留基础输入。
-# 宿主授权的只观察实验与普通 observe/apply 互斥（仅普通模式 off 时运行），结果只写 finding 与不采用的 observation。
-# 模块用途: 在原模型循环前请求或复用本片短名单；复用不再次联网，不从历史或结果序列化恢复选择。
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
+from typing import NamedTuple
 
 from ..backends.decision_protocol import DecisionBinding
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
+from ..conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_RUNTIME_CHANGED,
+    DROP_SOURCES_CHANGED,
+    drop_and_return,
+)
 from ..conversation.decision_policy import connection_revision
 from ..conversation.decision_reach_counts import (
     CALLED,
@@ -33,6 +37,33 @@ from .decision_candidates import (
     selection_questions,
 )
 from .decision_experiment_sample import experiment_sample_record
+
+
+# LLM: 只读宿主结构化事实：来源版本与运行环境；返回首个命中的既有丢弃原因码，无命中返回空串。
+# 函数用途: 判断本次选中的能力短名单在正式采用前是否已作废，并给出丢弃原因码。
+def _stale_reason(agent, facts: _StaleFacts) -> str:
+    if (facts.material[2] != facts.revision
+            or facts.presentation != facts.presentation_revision):
+        return DROP_SOURCES_CHANGED
+    if (not _tools_current(facts.snapshot) or agent.backend is not facts.backend
+            or _policy(agent, facts.stage.thread_id) != facts.policy
+            or facts.outcome.response.binding.candidates_revision != facts.revision):
+        return DROP_RUNTIME_CHANGED
+    return ""
+
+
+# LLM: 判定用的结构化事实打包成具名元组，避免判定函数参数铺开（参数名含 request/options 会被尺寸规则额外计数）。
+# 类用途: 承载 skill_tool 短名单采用前的来源与运行环境快照。
+class _StaleFacts(NamedTuple):
+    material: tuple
+    presentation: str
+    revision: str
+    presentation_revision: str
+    snapshot: object
+    backend: object
+    stage: object
+    policy: dict
+    outcome: object
 
 
 # LLM: 只保存已采用展示的不可变名称与原绑定摘要，不含原响应/期限/handler；宿主只能在同一工作片内存中传递。
@@ -95,8 +126,7 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
             _check_cancelled()
             return original
         operation = getattr(params, "request_id", "") or getattr(params, "run_id", "")
-        reason = _context_miss_reason(agent, params, operation)
-        if reason:
+        if reason := _context_miss_reason(agent, params, operation):
             return _skip(original, agent, carried, reason)
         stage = begin_decision_stage(agent, params, operation_id="skill_tool:" + candidate_digest(operation))
         if stage.error_code or "skill_tool" not in stage.enabled_points:
@@ -126,17 +156,19 @@ def recommend_capabilities(agent, params, snapshot, contract) -> CapabilityPrese
         if reason:
             return _observed(replace(fallback, finding="skill_tool_decision:retain_original:" + reason), base, reason)
         fresh = agent.skill_snapshot_for_run_scope(skills.workspace_root)
-        if (_material(agent, params, snapshot, fresh, policy, discoverable)[2] != revision
-                or _presentation_revision(agent, params, snapshot, contract, fresh, policy) != presentation_revision
-                or not _tools_current(snapshot) or agent.backend is not backend
-                or _policy(agent, stage.thread_id) != policy
-                or outcome.response.binding.candidates_revision != revision):
-            return _observed(replace(fallback, finding="skill_tool_decision:stale"), base, "stale")
+        latest_material = _material(agent, params, snapshot, fresh, policy, discoverable)
+        latest_presentation = _presentation_revision(agent, params, snapshot, contract, fresh, policy)
+        stale = _observed(replace(fallback, finding="skill_tool_decision:stale"), base, "stale")
+        if code := _stale_reason(agent, _StaleFacts(latest_material, latest_presentation, revision,
+                                                    presentation_revision, snapshot, backend, stage, policy, outcome)):
+            return drop_and_return(agent, (stage, outcome), code, stale)
         projected = _project(params, snapshot, contract, fresh, selected, policy, discoverable)
         selection = _selection(outcome, presentation_revision, _presentation_turn_id(params), projected)
         _check_cancelled()
-        if not decision_outcome_is_current(agent, params, stage, outcome) or time.monotonic() >= stage.deadline:
-            return _observed(replace(fallback, finding="skill_tool_decision:stale"), base, "stale")
+        if not decision_outcome_is_current(agent, params, stage, outcome):
+            return stale
+        if time.monotonic() >= stage.deadline:
+            return drop_and_return(agent, (stage, outcome), DROP_ADOPTION_DEADLINE, stale)
         return _observed(replace(projected, selection=selection), base)
     except (InterruptedError, ToolCancelled):
         raise

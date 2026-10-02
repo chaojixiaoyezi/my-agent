@@ -10,6 +10,10 @@ from dataclasses import replace
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..backends.gateway_request_limits import remaining_deadline_seconds
+from ..conversation.decision_outcome_log import (
+    DROP_SOURCES_CHANGED,
+    record_decision_dropped,
+)
 from ..conversation.decision_reach_counts import CALLED, counted_material, note_decision_reach
 from ..conversation.decision_service import decide, decision_outcome_is_current
 from .curator_backend import curator_prompt
@@ -58,6 +62,8 @@ def annotate_curator_relations(agent, batch: CuratorInputBatch, params, stage, *
     response = outcome.response
     if (response.binding.candidates_revision != revision or _relation_material(batch)[3] != revision
             or not _formal_inputs_current(agent, pairs, stage.deadline)):
+        # 来源或正式条目在复核时变了：这条已经拿到的关系建议被丢弃，按既有原因码登记，结果日志才能分辨“选了被丢”。
+        record_decision_dropped(agent, stage, outcome, DROP_SOURCES_CHANGED)
         return batch, (*warnings, "memory_curator_relation:apply:stale")
     annotations = _relation_annotations(response, pairs)
     if not annotations:

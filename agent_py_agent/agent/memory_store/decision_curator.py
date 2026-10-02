@@ -14,6 +14,10 @@ from ..backends.decision_protocol import (
     decision_json,
 )
 from ..common.cancellation import ToolCancelled
+from ..conversation.decision_outcome_log import (
+    DROP_SOURCES_CHANGED,
+    record_decision_dropped,
+)
 from ..conversation.decision_reach_counts import (
     CALLED,
     counted_material,
@@ -124,7 +128,9 @@ def _annotate_source_tags(agent, batch, params, stage, *, max_input_chars):
         if not outcome.may_apply or outcome.response is None:
             return batch, (() if outcome.status == "off" else (*fitted_warning, warning)), None
         response = outcome.response
+        # 材料/候选版本在复核时变了：这条已经拿到的建议被丢弃，按既有原因码登记，结果日志才能分辨“选了被丢”。
         if response.binding.candidates_revision != revision or _decision_material(batch, window_tokens=window_tokens)[3] != revision:
+            record_decision_dropped(agent, stage, outcome, DROP_SOURCES_CHANGED)
             return batch, (*fitted_warning, "memory_curator_decision:apply:stale"), None
         annotations = _annotations(response, sources)
         if not annotations:

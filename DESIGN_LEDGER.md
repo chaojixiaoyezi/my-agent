@@ -175,6 +175,32 @@
     结果 provider 为纯空白、kind 为 main 的身份会被认作管理员；/settings 一直不认。收拢后两边都不认，方向是变严格。
   - user_config 原本就去空白，没有变化。
 
+## 决策账补结构化“结果类别”，分清选中 / 非选择 / 被丢弃（J10 复测观察）（2026-10-02，分支 `worker/ds1-decision-outcome-category`，基于 `claude/3a-step16z` `78fc5c209`，已实现，待集成）
+
+- **来源**：ae 做 J10 真实复测时的观察。决策结果日志只记 mode、status，Jev 调用成功之后看不出它是选中了某个候选，还是给了 `not_needed`/`need_data`/`abstain`
+  这类非选择；也看不出宿主有没有因为来源、设置、期限变化把建议丢掉。于是“没出提示”到底是 Jev 没选、还是选了被丢，只能靠猜。
+- **取值族**（封闭但可扩展，只记类别与结构化取值/原因码，不记候选文字与正文）：
+  - `selected`：至少有一题给了可判定的选择。
+  - `non_selection:<取值>`：Jev 明确说不需要或给不了；取值原样透传（各点位词表不同，收敛判据见下）。
+  - `dropped:<原因码>`：宿主把建议丢了，原因码原样用既有宿主码，不新造同义码。
+  - `no_selection_recorded`：成功但没有可判定的选择（无响应、逐题错误、空答案、旧替身）；`unrecorded` 只在统计时给“写该行时还没有这个字段”的旧记录，不写回日志。
+- **唯一写入处**：`conversation/decision_outcome_log` 的投影 `decision_outcome_row` 加 `result_category`，由纯函数 `decision_result_category(outcome)` 从结构化事实推导，
+  判定优先级：带 `dropped_reason` → 逐题答案里命中非选择取值 → 至少一题有可判定选择 → 兜底。不做点位专项分支，不解析模型正文。
+- **宿主丢弃怎么落账**：原结果行在 `decide()` 落盘后不可改写，所以消费者在丢掉建议时调 `record_decision_dropped(agent, stage, outcome, reason)`
+  另追加一行补充记录（`record_kind="dropped"`，复用同点位/身份 + `result_category=dropped:<原因码>`）。只在“确有可采用的建议”（`may_apply` 且带响应）时记，
+  免得把“本来就没有建议”误记成丢弃；原因码为空不写；写失败只记日志，不影响采用逻辑。审计按点位与时间把两行配对，就能分辨“选了被丢”。
+- **共用复核门是唯一强制接入点**：`decision_service.decision_outcome_is_current` 拆成薄门 + `_adoption_review(...)`，后者返回第一个不通过原因码
+  （`identity_changed` / `adoption_deadline` / `_stale` 的既有码如 `disabled`、`policy_changed`、`settings_changed`、`host_shutdown` / 异常兜底 `review_failed`），
+  门内在返回 False 前调 `record_decision_dropped`。另外 10 个消费者点位（delivery_quality、action_candidate、external_material_order、recall、pre_recall、
+  planning、skill_tool、curator、curator_relation、skill_proposal_review、subagent_model）的既有丢弃出口按变化性质登记
+  `sources_changed` / `runtime_changed` / `adoption_deadline` 三个补登记码（模块级常量，消费者与复核门共用，避免字符串漂移）。
+- **汇总与展示**：`decision_outcome_summary` 加 `result_categories`（缺字段旧行归 `unrecorded`，按次数降序再按名排序）；丢弃补充行不进 `points`/`not_sent`（不是一次独立调用），
+  只进类别统计与 recent。`result_category_label` 是唯一翻译函数，两个展示面共用：`audit_records` 的 recent 行加 `result_category_label`（保留结构化 `result_category` 供机器读），
+  TUI 决策菜单 `_diagnosis` 行尾显示次数最多的一项（“最近结果：…”），旧记录显示“未记录”。
+- **与 `_record_retained` 的边界**：`gateway_model_adoption` 的 `candidate_validation_unavailable`、`first_request_not_selected`、`candidate_rejected_before_provider` 等
+  属于“候选保留/未提交给模型”，不是“建议被丢”，这次不动、也不并进 `dropped:`；两者语义不同，文档在 `DECISION_AUDIT_AND_ADMIN_CONTROLS.md` 里写明。
+- **验证**：见 TESTS.md 同名节；变异验证 5 个（全部被现有测试拦下并还原）。
+
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
 
 - **来源**：sol2 只读审查第 1 条。“用户回合在场”的查询只短暂持有登记表锁，之后的 `record_continuation_fuse` 落账不受保护。

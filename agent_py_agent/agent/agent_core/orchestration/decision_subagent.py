@@ -14,6 +14,11 @@ from ...backends import get_backend
 from ...backends.decision_protocol import decision_json
 from ...contracts.idempotency import operation_id
 from ...conversation import decision_service
+from ...conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_SOURCES_CHANGED,
+    drop_and_return,
+)
 from ...conversation.decision_policy import connection_revision
 from ...conversation.decision_reach_counts import (
     CALLED,
@@ -271,15 +276,17 @@ def decide_subagent_models(agent: object, prepared: SubagentModelDecision) -> de
 def apply_subagent_model_decision(agent: object, prepared: SubagentModelDecision, outcome: decision_service.DecisionOutcome,
                                  children: list[SubagentModelInput]) -> dict[int, PendingSubagentModelAdvice]:
     proposals = {}
-    if outcome.response is None or time.monotonic() >= prepared.stage.deadline:
+    if outcome.response is None:
         return proposals
+    if time.monotonic() >= prepared.stage.deadline:
+        return drop_and_return(agent, (prepared.stage, outcome), DROP_ADOPTION_DEADLINE, proposals)
     try:
         if not _candidate_scope_is_current(agent, prepared):
-            return proposals
+            return drop_and_return(agent, (prepared.stage, outcome), DROP_SOURCES_CHANGED, proposals)
         current = _candidates(agent, deadline=min(prepared.stage.deadline, outcome.deadline),
                               candidate_profile_ids=prepared.candidate_profile_ids)
         if hashlib.sha256(decision_json(current)).hexdigest() != prepared.candidates_revision:
-            return proposals
+            return drop_and_return(agent, (prepared.stage, outcome), DROP_SOURCES_CHANGED, proposals)
         if not decision_service.decision_outcome_is_current(agent, prepared.params, prepared.stage, outcome):
             return proposals
         mode = outcome.mode

@@ -10,7 +10,12 @@ from ...backends.decision_protocol import DecisionInputError, DecisionPrivacySki
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
 from ...conversation import decision_point_limits as limits
-from ...conversation.decision_outcome_log import material_or_skip
+from ...conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_SOURCES_CHANGED,
+    drop_and_return,
+    material_or_skip,
+)
 from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
     begin_decision_stage,
@@ -67,27 +72,42 @@ def external_material_order_hint(agent: object, record: object, archive_record: 
             if not outcome.may_apply or outcome.response is None:
                 return ""
             deadline = min(stage.deadline, outcome.deadline)
-            if (time.monotonic() >= deadline
-                    or outcome.response.binding.candidates_revision != revision
-                    or _miss_reason(record, archive_record)
-                    or _context_revision(params) != context_revision
-                    or _material(record, archive_record)[2] != revision):
-                return ""
+            if stale := _material_stale(agent, record, archive_record, (params, outcome, revision, context_revision, deadline, None)):
+                return drop_and_return(agent, (stage, outcome), stale, "")
             order = _reading_order(outcome.response, questions)
-            hint = _render_hint(order)
-            if not hint or not decision_outcome_is_current(agent, params, stage, outcome):
+            if not (hint := _render_hint(order)):
                 return ""
             _check_interrupted()
-            if (_context_revision(params) != context_revision
-                    or _material(record, archive_record)[2] != revision):
-                return ""
-            return hint if time.monotonic() < deadline else ""
+            if stale := _material_stale(agent, record, archive_record, (params, outcome, revision, context_revision, deadline, stage)):
+                return drop_and_return(agent, (stage, outcome), stale, "")
+            return hint
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
         with bind_cancellation_token(getattr(record.params, "cancellation_token", None)):
             _check_interrupted()
         return ""
+
+
+# LLM: 两段出口共用同一套复核：到期算 adoption_deadline，候选 revision/宿主来源/上下文 revision 任一变化算 sources_changed；
+#   第二段在渲染后还要过一次唯一强制门（decision_outcome_is_current），所以由 ctx 里的 gate 决定是否调用。
+#   判定顺序与原先两个 if 逐字对应，不新增语义；ctx 是 (params, outcome, revision, context_revision, deadline, stage) 六元组。
+# 函数用途: 复核外部材料阅读顺序建议是否仍成立，返回原因码（空串表示可采用）。
+def _material_stale(agent, record, archive_record, ctx) -> str:
+    params, outcome, revision, context_revision, deadline, stage = ctx
+    if stage is None:
+        # 渲染前那一段：期限先判，再比来源；此时还没有强制门可过。
+        if time.monotonic() >= deadline:
+            return DROP_ADOPTION_DEADLINE
+    elif not decision_outcome_is_current(agent, params, stage, outcome):
+        return DROP_SOURCES_CHANGED
+    if (outcome.response.binding.candidates_revision != revision or _miss_reason(record, archive_record)
+            or _context_revision(params) != context_revision or _material(record, archive_record)[2] != revision):
+        return DROP_SOURCES_CHANGED
+    if stage is not None and time.monotonic() >= deadline:
+        # 渲染后那一段：期限压在最后判，保证先过强制门（与原先两个 if 的次序逐字一致）。
+        return DROP_ADOPTION_DEADLINE
+    return ""
 
 
 # LLM: 只认原调用配对、成功执行、external_data/default 投影和已有归档摘要；任意 JSON 正文不是候选事实。

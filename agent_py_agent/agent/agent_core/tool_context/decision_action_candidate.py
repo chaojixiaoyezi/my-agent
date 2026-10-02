@@ -17,7 +17,12 @@ from ...backends.decision_protocol import (
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
 from ...conversation import decision_point_limits as limits
-from ...conversation.decision_outcome_log import material_or_skip
+from ...conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_SOURCES_CHANGED,
+    material_or_skip,
+    record_decision_dropped,
+)
 from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
     begin_decision_stage,
@@ -104,17 +109,25 @@ def _advise(agent: object, record: object, archive: dict) -> str:
     outcome = decide(agent, params, stage, point=_POINT, state=state, questions=questions,
                      candidates_revision=revision, source_refs=(archive["scoped_call_id"],))
     _check_interrupted()
-    if (not outcome.may_apply or outcome.response is None
-            or outcome.response.binding.candidates_revision != revision):
+    if not outcome.may_apply or outcome.response is None:
+        return ""
+    if outcome.response.binding.candidates_revision != revision:
+        record_decision_dropped(agent, stage, outcome, DROP_SOURCES_CHANGED)
         return ""
     hint = _render_hint(_selected_candidate(outcome.response, observation), _available_tools(params))
-    if not hint or not decision_outcome_is_current(agent, params, stage, outcome):
+    if not hint:
+        return ""
+    if not decision_outcome_is_current(agent, params, stage, outcome):
         return ""
     _check_interrupted()
     # 来源复核同时重问新鲜度权威：等待期间同一目标有了更新观察，旧候选就不再提示。
     if _current_sources(agent, record, archive, limit) != frozen:
+        record_decision_dropped(agent, stage, outcome, DROP_SOURCES_CHANGED)
         return ""
-    return hint if time.monotonic() < min(stage.deadline, outcome.deadline) else ""
+    if time.monotonic() >= min(stage.deadline, outcome.deadline):
+        record_decision_dropped(agent, stage, outcome, DROP_ADOPTION_DEADLINE)
+        return ""
+    return hint
 
 
 # LLM: 触发只看结构化事实：当前调用与归档配对、主代理、无收口标记、观察形状合规且候选数不少于 decision_point_limits 的下限、观察仍为当前、

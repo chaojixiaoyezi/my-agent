@@ -18,6 +18,17 @@
   - 这几条从 `agent_core/runtime/loop_support` 原样抽出，自动召回与工具共用，保证“自动召回不读的回合模型也查不到、范围一致”。
 - 不改嵌入客户端构建和向量文件格式。设计见 [决策模型接入设计](../../design/DECISION_MODEL_INTEGRATION.md) “P5-A 缺口 2”节。
 
+## 记忆侧决策点登记被丢弃的建议（2026-10-02，ds1，分支 `worker/ds1-decision-outcome-category`，待集成）
+
+- `memory_store/decision_recall.py`（recall 与 pre_recall 两段）、`decision_curator.py`、`decision_curator_relation.py` 的“保留原顺序/不采用”出口，
+  在丢掉一条已经拿到的建议时调 `conversation/decision_outcome_log.record_decision_dropped(agent, stage, outcome, 原因码)`，
+  追加一行 `record_kind="dropped"` 的补充记录，带 `result_category="dropped:<原因码>"`：
+  - 期限到期 → `DROP_ADOPTION_DEADLINE`（`adoption_deadline`）；
+  - 运行时身份/后端变更 → `DROP_RUNTIME_CHANGED`（`runtime_changed`）；
+  - 候选/材料/正式条目版本变化 → `DROP_SOURCES_CHANGED`（`sources_changed`）。
+- 登记只写观察记录，不改召回顺序、不重放、不推进游标；写失败只记日志。结果日志因此能分辨“Jev 选了但被宿主丢掉”。
+- 详见[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近是选中非选择还是被丢弃2026-10-02分支-workerds1-decision-outcome-category)。
+
 ## 嵌入档案与向量身份（P13+P14，2026-10-02，ds1，待集成）
 
 - `settings/embedding_profile.embedding_model_config`：按档案编号解析嵌入连接（capability="embedding"），空值返回 None；

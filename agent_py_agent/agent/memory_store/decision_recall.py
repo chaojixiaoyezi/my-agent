@@ -8,11 +8,28 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NamedTuple
+
+
+# LLM: 召回复核的只读上下文会随判断阶段变化（早段有来源列、晚段有主模型），用具名元组区分两段，
+#   避免函数签名为了塞参数越界，也让每个判定字段在函数体里可读。
+# 类用途: 重排建议采用前的两段只读复核输入。
+class _StaleStage(NamedTuple):
+    run_request: object
+    stage: object
+    outcome: object
+    payload: tuple
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation import decision_point_limits as limits
+from ..conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_RUNTIME_CHANGED,
+    DROP_SOURCES_CHANGED,
+    drop_and_return,
+)
 from ..conversation.decision_reach_counts import (
     CALLED,
     counted_material,
@@ -93,15 +110,14 @@ def rerank_recalled_memories(agent: object, request: object, records: list, *, r
         finding = f"memory_recall_decision:{outcome.mode}:{outcome.status}"
         if not outcome.may_apply or outcome.response is None:
             return records, "" if outcome.status == "off" else finding
-        # 新投影仍只选原 ID；已删除/过期/撤销的记录不能因旧建议回到本轮上下文。
+        # 新投影仍只选原 ID；丢弃出口按变化性质登记原因码（期限/运行时身份/来源），使结果日志能分辨“Jev 选了但被宿主丢弃”。
         baseline = refresh()
         _check_interrupted()
-        if (time.monotonic() >= stage.deadline or getattr(agent, "backend", None) is not backend
-                or attrs_revision != _digest(getattr(request, "task_attributes", None))
-                or [record.entry_id for record in baseline] != [row["entry_id"] for row in state["memories"]]
-                or outcome.response.binding.candidates_revision != revision
-                or _material(agent, request, baseline, recall_scope)[2] != revision):
-            return baseline, "memory_recall_decision:apply:stale"
+        reason = _recall_early_stale(agent, _StaleStage(request, stage, outcome,
+                                                       (baseline, revision, [r["entry_id"] for r in state["memories"]],
+                                                        recall_scope, backend, attrs_revision)))
+        if reason:
+            return drop_and_return(agent, (stage, outcome), reason, (baseline, "memory_recall_decision:apply:stale"))
         ranks, reasons = _ranks(outcome.response, questions)
         if reasons:
             return baseline, "memory_recall_decision:apply:retain_order:" + ",".join(reasons)
@@ -109,16 +125,85 @@ def rerank_recalled_memories(agent: object, request: object, records: list, *, r
         _check_interrupted()
         if not decision_outcome_is_current(agent, request, stage, outcome):
             return baseline, "memory_recall_decision:apply:stale"
-        if time.monotonic() >= stage.deadline:
-            return baseline, "memory_recall_decision:apply:deadline"
-        if (getattr(agent, "backend", None) is not backend or _model_identity(agent) != state["primary_model"]
-                or attrs_revision != _digest(getattr(request, "task_attributes", None))):
-            return baseline, "memory_recall_decision:apply:stale"
+        if reason := _recall_late_stale(agent, _StaleStage(request, stage, outcome, (backend, attrs_revision, state["primary_model"]))):
+            suffix = "deadline" if reason == DROP_ADOPTION_DEADLINE else "stale"
+            return drop_and_return(agent, (stage, outcome), reason, (baseline, f"memory_recall_decision:apply:{suffix}"))
         return ordered, finding
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
         return baseline, "memory_recall_decision:enhancement_failed"
+
+
+# LLM: 只读结构化事实，按原先的整体判断顺序给出第一个不通过的原因码：期限已到算 adoption_deadline，
+#   后端身份或任务属性变了算 runtime_changed，来源（记录 ID 列/候选 revision/材料 revision）变了算 sources_changed，
+#   都通过返回空串。判定内容与原先后两个 if 逐字对应，不新增语义。
+#   ctx 是 (baseline 记录, 当前 revision, 当前 memories ID 列, recall_scope, backend, attrs_revision) 六元组，收成一个参数。
+# 函数用途: 复核召回建议在采用前是否仍然成立，返回被丢弃的原因码（空串表示仍可采用）。
+def _recall_early_stale(agent, ctx) -> str:
+    run_request, stage, outcome, payload = ctx
+    records, revision, memories, scope, backend, attrs = payload
+    if time.monotonic() >= stage.deadline:
+        return DROP_ADOPTION_DEADLINE
+    if getattr(agent, "backend", None) is not backend or attrs != _digest(getattr(run_request, "task_attributes", None)):
+        return DROP_RUNTIME_CHANGED
+    if ([record.entry_id for record in records] != memories
+            or outcome.response.binding.candidates_revision != revision
+            or _material(agent, run_request, records, scope)[2] != revision):
+        return DROP_SOURCES_CHANGED
+    return ""
+
+
+# LLM: 重排完成后的第二次复核：期限、后端/主模型身份、任务属性任一变化都算不可采用；判定与原 if 一一对应。
+# 函数用途: 复核重排结果在交回前是否仍然成立，返回被丢弃的原因码（空串表示仍可采用）。
+def _recall_late_stale(agent, ctx) -> str:
+    run_request, stage, _outcome, payload = ctx
+    backend, attrs, primary_model = payload
+    if time.monotonic() >= stage.deadline:
+        return DROP_ADOPTION_DEADLINE
+    if (getattr(agent, "backend", None) is not backend or _model_identity(agent) != primary_model
+            or attrs != _digest(getattr(run_request, "task_attributes", None))):
+        return DROP_RUNTIME_CHANGED
+    return ""
+
+
+# LLM: 抽自 supplement_recalled_memories 的中段：按原结构造决策材料 state（含决策模型看到的新增事实预览）、
+#   选择型问题 questions（含 not_needed/no_match/abstain/need_data 四个非选择取值）与 candidates_revision。
+#   三个返回值与原来完全一致，只做搬移，不改内容与判定。
+#   ctx 是 (冻结记录视图, 查询片段, 预览材料, 空余名额, 检索条数, 剩余字数) 六元组，收成一个参数。
+# 函数用途: 组装补充召回决策的输入材料与候选修订号，供 decide 使用。
+def _pre_recall_material(agent, ctx) -> tuple:
+    request, stage = ctx[0]
+    bound, queries, previews, scope_keys, slots, remaining_chars = ctx[1]
+    state = {"notice": "原完整问题已执行正式召回；只建议一个补充查询，不更改权限、原结果或数量预算。",
+             "query": request.user_prompt, "scope": [list(pair) for pair in scope_keys],
+             "selected": [{"entry_id": row["entry_id"], "version": row["version"],
+                           "summary": row["content"][:160]} for row in bound], "free_slots": slots,
+             "remaining_chars": remaining_chars, "primary_model": _model_identity(agent)}
+    if previews is not None:
+        state.update(_preview_material(previews))
+    criteria = dict(queries)
+    criteria.update({"not_needed": "不需要补充查询", "no_match": "候选均不合适",
+                     "abstain": "无法可靠选择", "need_data": "缺少已有资料，不向用户追问"})
+    questions = {"supplemental_query": {"type": "choice",
+                 "instructions": "仅从给定查询片段选择一个可补充原正式召回的检索文本；不建议跳过原结果。",
+                 "criteria": criteria}}
+    revision = counted_material(agent, "pre_recall", lambda: _digest({"state": state, "questions": questions,
+                                                                       "selected_full": bound}))
+    return state, questions, revision
+
+
+# LLM: 与被替换掉的三段 if 一一对应：先看基线记录视图是否与冻结视图一致（来源变化），
+#   再看主模型身份（运行时变化），最后看期限；都通过返回空串。首段不检查主模型（原口径没有这一条）。
+#   ctx 是 (最新记录, 冻结的记录视图, 决策材料 state) 三元组，收成一个参数。
+# 函数用途: 复核补充召回建议在采用前是否仍然成立，返回被丢弃的原因码（空串表示仍可采用）。
+def _pre_recall_stale(agent, stage, outcome, ctx) -> str:
+    latest, bound, state = ctx
+    if [_record_view(row) for row in latest] != bound:
+        return DROP_SOURCES_CHANGED
+    if _model_identity(agent) != state["primary_model"]:
+        return DROP_RUNTIME_CHANGED
+    return DROP_ADOPTION_DEADLINE if time.monotonic() >= stage.deadline else ""
 
 
 # LLM: 只看宿主操作编号与候选记录的结构化 kind；HOT/lesson 固定槽不参与重排，普通记忆少于
@@ -158,52 +243,34 @@ def supplement_recalled_memories(
     baseline = records
     try:
         bound = [_record_view(record) for record in records]
-        search = FragmentSearch(agent, recall_scope, frozenset(row["entry_id"] for row in bound),
-                                (slots, search_top_k, remaining_chars))
+        search = FragmentSearch(agent, recall_scope, frozenset(row["entry_id"] for row in bound), (slots, search_top_k, remaining_chars))
         queries, previews = _fragment_choices(agent, stage, search, queries)
         if not queries:
             note_decision_reach(agent, "pre_recall", NO_NEW_FACTS)
             return records, ""
-        state = {"notice": "原完整问题已执行正式召回；只建议一个补充查询，不更改权限、原结果或数量预算。",
-                 "query": request.user_prompt, "scope": [list(pair) for pair in recall_scope.keys],
-                 "selected": [{"entry_id": row["entry_id"], "version": row["version"],
-                               "summary": row["content"][:160]} for row in bound], "free_slots": slots,
-                 "remaining_chars": remaining_chars, "primary_model": _model_identity(agent)}
-        if previews is not None:
-            state.update(_preview_material(previews))
-        criteria = dict(queries)
-        criteria.update({"not_needed": "不需要补充查询", "no_match": "候选均不合适",
-                         "abstain": "无法可靠选择", "need_data": "缺少已有资料，不向用户追问"})
-        questions = {"supplemental_query": {"type": "choice",
-                     "instructions": "仅从给定查询片段选择一个可补充原正式召回的检索文本；不建议跳过原结果。",
-                     "criteria": criteria}}
-        revision = counted_material(agent, "pre_recall", lambda: _digest({"state": state, "questions": questions,
-                                                                           "selected_full": bound}))
+        state, questions, revision = _pre_recall_material(agent, (
+            (request, stage), (bound, queries, previews, recall_scope.keys, slots, remaining_chars)))
         note_decision_reach(agent, "pre_recall", CALLED)
-        outcome = decide(agent, request, stage, point="pre_recall", state=state, questions=questions,
-                         candidates_revision=revision)
+        outcome = decide(agent, request, stage, point="pre_recall", state=state, questions=questions, candidates_revision=revision)
         finding = f"memory_pre_recall_decision:{outcome.mode}:{outcome.status}"
         if not outcome.may_apply or outcome.response is None:
             return records, "" if outcome.status == "off" else finding
         answer = next((row for row in outcome.response.answers if row.question_id == "supplemental_query"), None)
         selected = dict(queries).get(getattr(answer, "value", None)) if answer and not answer.error_code else None
         if selected is None:
-            reason = getattr(answer, "value", "missing_answer") if answer else "missing_answer"
-            return records, f"memory_pre_recall_decision:apply:retain_original:{reason}"
+            missing = getattr(answer, "value", "missing_answer") if answer else "missing_answer"
+            return records, f"memory_pre_recall_decision:apply:retain_original:{missing}"
         baseline = refresh()
         _check_interrupted()
-        if ([_record_view(row) for row in baseline] != bound
-                or _model_identity(agent) != state["primary_model"]
-                or time.monotonic() >= stage.deadline):
-            return baseline, "memory_pre_recall_decision:apply:stale"
+        if reason := _pre_recall_stale(agent, stage, outcome, (baseline, bound, state)):
+            return drop_and_return(agent, (stage, outcome), reason, (baseline, "memory_pre_recall_decision:apply:stale"))
         # 开了预检就用决策模型看到的那份新增事实（基线已核对未变）；最终仍由 confirm_scoped_access 重读正式源确认。
         chosen = previews[answer.value] if previews is not None else search.additions(selected)
-        latest = refresh()
-        baseline = latest
+        baseline = latest = refresh()
         _check_interrupted()
-        if ([_record_view(row) for row in latest] != bound
-                or time.monotonic() >= stage.deadline
-                or not decision_outcome_is_current(agent, request, stage, outcome)):
+        if reason := _pre_recall_stale(agent, stage, outcome, (latest, bound, state)):
+            return drop_and_return(agent, (stage, outcome), reason, (latest, "memory_pre_recall_decision:apply:stale"))
+        if not decision_outcome_is_current(agent, request, stage, outcome):
             return latest, "memory_pre_recall_decision:apply:stale"
         confirmed = agent.memory.confirm_scoped_access(chosen, search.predicate) if chosen else []
         return [*latest, *confirmed], finding if confirmed else f"{finding}:no_addition"

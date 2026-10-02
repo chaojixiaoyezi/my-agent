@@ -252,6 +252,34 @@ my-agent 据此写出“这几个点位宿主代码未接线”的开发需求�
   这一段，一次性命令行运行可能少计。不注册 atexit，避免解释器退出（包括测试进程）时写盘。
 - 意外异常（比如新鲜度权威抛错）不计入到达次数，仍走各点位原有的失败回退。
 
+### 每个点位最近是选中、非选择还是被丢弃（2026-10-02，分支 `worker/ds1-decision-outcome-category`）
+
+**起因**：J10 真实复测里“没出提示”到底是 Jev 没选，还是选了被宿主丢掉，只靠 mode/status 分不出来。
+
+**做法**：
+- 结果日志每行新增 `result_category`，只在 `conversation/decision_outcome_log.decision_outcome_row` 一处写入，由纯函数
+  `decision_result_category` 从结构化事实推导，所有决策点共用，不做点位专项分支。取值族：
+  - `selected`（至少一题给了可判定的选择）；
+  - `non_selection:<取值>`（Jev 说不需要/给不了；取值原样透传，收敛判据是宿主已知的非选择取值 `not_needed`/`no_match`/`abstain`/`need_data`）；
+  - `dropped:<原因码>`（宿主把建议丢了，原因码原样用既有宿主码，不新造同义码）；
+  - `no_selection_recorded`（成功但没有可判定的选择：无响应、逐题错误、空答案、旧替身）；
+  - `unrecorded` 只在统计里给“写该行时还没有这个字段”的旧记录，不写回日志。
+- 宿主丢弃的落账：原结果行在 `decide()` 落盘后不可改写，所以 `record_decision_dropped(agent, stage, outcome, reason)` 另追加一行
+  补充记录（`record_kind="dropped"`，同点位/身份 + `result_category=dropped:<原因码>`）。只在“确有可采用的建议”（`may_apply` 且带响应）时记，
+  免得把“本来就没有建议”误记成丢弃；原因码为空不写；写失败只记日志，不影响采用逻辑。审计按点位与时间把两行配对即可分辨“选了被丢”。
+- 强制接入点是共用复核门 `decision_service.decision_outcome_is_current`（薄门 + `_adoption_review`），返回第一个不通过原因码：
+  `identity_changed`、`adoption_deadline`，或 `_stale` 给出的既有码（`disabled`/`policy_changed`/`settings_changed`/`host_shutdown` 等），异常兜底 `review_failed`。
+  另外 10 个消费者点位的既有丢弃出口按变化性质登记补登记码 `sources_changed` / `runtime_changed` / `adoption_deadline`（模块级常量，两处共用）。
+- **与发送路径“保留候选”的边界**：`agent/backends/gateway_model_adoption` 的 `candidate_validation_unavailable`、`first_request_not_selected`、
+  `candidate_rejected_before_provider`、`request_facts_unknown`、`model_catalog_changed`、`request_capacity_*`、`history_modality_or_projection_unknown`
+  是“候选被保留/没提交给模型”，不是“模型给了建议又被宿主丢掉”，这次不并入 `dropped:`，两套码语义不同，展示时也不互相翻译。
+
+**展示**：
+- `audit_records topic=decision` 的 `recent` 行：原样保留结构化 `result_category`（机器可读），另加 `result_category_label`（大白话，给人看）。
+- `point_diagnostics` 每个点位多一个 `result_categories`：`{category, label, calls}`，按次数降序（旧记录缺字段归 `unrecorded`，展示为“未记录”）。
+- TUI 决策菜单“逐接入点设置”行尾追加“；最近结果：<大白话>（N次）”，取次数最多的一项；旧 Gateway 没有这块数据时不显示这一段。
+- 汇总 `decision_outcome_summary` 新增 `result_categories`；丢弃补充行不算一次独立调用，不进 `points`/`not_sent`，只进类别统计与 `recent`。
+
 ### 主题 `requests`：请求成败（2026-09-26，用户要求“这种东西以后 my-agent 能帮我解决”）
 
 起因：管理员设好密码后没先 `/admin` 就在飞书私聊发消息，请求按飞书普通用户运行，全部 `MODEL_NOT_CONFIGURED`，

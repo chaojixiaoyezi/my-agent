@@ -45,7 +45,13 @@ from ..settings.model_provider_schema import ModelProfileError
 from ..user_space.owner_admin_controls import owner_decision_model_allowed
 from . import decision_point_limits as decision_limits
 from .decision_observe_nonblocking import NonblockingObserve, enqueue_nonblocking_observe
-from .decision_outcome_log import append_decision_outcome, decision_outcome_row
+from .decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_REVIEW_FAILED,
+    append_decision_outcome,
+    decision_outcome_row,
+    record_decision_dropped,
+)
 from .decision_policy import (
     ActiveDecision,
     connection_revision,
@@ -658,24 +664,40 @@ def _failure_key(key: tuple[str, str, str], point: str, exc: Exception) -> tuple
 
 
 # LLM: 消费者在刷新候选后共用此只读门；沿原非阻塞设置/身份复核，不联网、不重置期限，用户取消不能吞成可选失败。
-# 函数用途: 在真正采用建议前检查关闭、配置更改和期限；失败时消费者保留当前合法基础方案。
+#   复核不通过且这条建议本来可用（apply 且有响应）时，按结构化原因码追加一行丢弃记录（record_decision_dropped），
+#   让审计能分辨“选了但被宿主丢掉”；原因码是既有码（identity_changed/disabled/policy_changed/settings_changed/
+#   host_shutdown）或本轮登记的码（adoption_deadline 采用期限已过、review_failed 复核自身异常）。
+#   没有可采用的建议（非 apply、无响应、无连接版本）不记录，也不改变“不采用”的返回值。
+# 函数用途: 在真正采用建议前检查关闭、配置更改和期限；失败时消费者保留当前合法基础方案，并留下丢弃原因码。
 def decision_outcome_is_current(agent: object, params: object, stage: DecisionStage, outcome: DecisionOutcome) -> bool:
     _check_interrupted()
     try:
         if not outcome.may_apply or outcome.response is None or not outcome.connection_revision:
             return False
-        binding = outcome.response.binding
-        if (binding.owner_ref, binding.thread_id, binding.run_id, binding.task_id, binding.operation_id) != (
-            stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id, stage.operation_id,
-        ):
-            return False
-        deadline = _adoption_deadline(stage, outcome)
-        if time.monotonic() >= deadline:
-            return False
-        stale = _stale(agent, params, stage, binding.point, binding.policy_revision, outcome.connection_revision)
-        _check_interrupted()
-        return not stale and time.monotonic() < deadline
+        reason = _adoption_reason(agent, params, stage, outcome)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
-        return False
+        reason = DROP_REVIEW_FAILED
+    if not reason:
+        return True
+    record_decision_dropped(agent, stage, outcome, reason)
+    return False
+
+
+# LLM: 采用前复核的具体判定，按判定顺序返回第一个不通过的原因码；全部通过返回空串。身份与 _stale 的码是宿主既有
+#   结构化码，原样透传（identity_changed/disabled/policy_changed/settings_changed/host_shutdown/实验码）；
+#   期限统一登记为 adoption_deadline（发送阶段的 late_response/late_validation 是另一回事，不混用）。
+# 函数用途: 复核一条建议是否仍可被采用；返回空串表示可采用，否则给出结构化原因码。
+def _adoption_reason(agent: object, run_params: object, stage: DecisionStage, outcome: DecisionOutcome) -> str:
+    binding = outcome.response.binding
+    identity = (binding.owner_ref, binding.thread_id, binding.run_id, binding.task_id, binding.operation_id)
+    if identity != (stage.owner_ref, stage.thread_id, stage.run_id, stage.task_id, stage.operation_id):
+        return "identity_changed"
+    if time.monotonic() >= _adoption_deadline(stage, outcome):
+        return DROP_ADOPTION_DEADLINE
+    stale = _stale(agent, run_params, stage, binding.point, binding.policy_revision, outcome.connection_revision)
+    _check_interrupted()
+    if stale:
+        return stale
+    return "" if time.monotonic() < _adoption_deadline(stage, outcome) else DROP_ADOPTION_DEADLINE

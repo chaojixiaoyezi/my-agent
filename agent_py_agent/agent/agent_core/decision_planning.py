@@ -10,6 +10,11 @@ from ..backends.decision_protocol import decision_json, decision_request_excerpt
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation import decision_point_limits as limits
+from ..conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_SOURCES_CHANGED,
+    record_decision_dropped,
+)
 from ..conversation.decision_reach_counts import (
     CALLED,
     counted_material,
@@ -35,6 +40,14 @@ from .orchestration.dispatch_progress_seed import _known_child_run_ids
 from .runtime.task_identity import progress_ledger_id
 
 _POINT = "planning"
+
+
+# LLM: 已拿到的建议被宿主丢弃时记一笔结构化原因码，然后按调用方语义返回空结果。
+#   返回 None 而不是布尔，这样丢弃出口可以写成一行 `return _drop(...)`，不撑大原函数。
+# 函数用途: 登记这条建议被丢弃的原因，并返回 None。
+def _drop(agent: object, stage: object, outcome: object, reason: str) -> None:
+    record_decision_dropped(agent, stage, outcome, reason)
+    return None
 _NON_SELECTIONS = {
     "not_needed": "无需额外优先级建议，继续原计划",
     "no_match": "现有候选均不适合优先推荐",
@@ -70,18 +83,18 @@ def todo_priority_hint(agent: object, root: Path, run_id: str, payload: dict) ->
             return None
         deadline = min(stage.deadline, outcome.deadline)
         if time.monotonic() >= deadline or outcome.response.binding.candidates_revision != revision:
-            return None
+            return _drop(agent, stage, outcome, DROP_ADOPTION_DEADLINE if time.monotonic() >= deadline else DROP_SOURCES_CHANGED)
         selected = _selected_id(outcome.response, state)
         if not selected:
             return None
         latest = read_task_progress(root, run_id)
         if _miss_reason(agent, params, (root, run_id, latest)) or _material(agent, latest)[2] != revision:
-            return None
+            return _drop(agent, stage, outcome, DROP_SOURCES_CHANGED)
         if not decision_outcome_is_current(agent, params, stage, outcome):
             return None
         _check_interrupted()
         if time.monotonic() >= deadline or _material(agent, read_task_progress(root, run_id))[2] != revision:
-            return None
+            return _drop(agent, stage, outcome, DROP_ADOPTION_DEADLINE if time.monotonic() >= deadline else DROP_SOURCES_CHANGED)
         return {
             "schema_version": "decision-planning-priority.v1",
             "item_id": selected,

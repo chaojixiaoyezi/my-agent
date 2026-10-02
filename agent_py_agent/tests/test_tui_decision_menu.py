@@ -195,16 +195,32 @@ def scope_index(gateway, action, *, thread=False):
 def test_point_diagnosis_line_uses_host_labels_and_marks_uncounted_points():
     view = {"point_diagnostics": {
         "recall": {"covered": True, "reached": 3, "called": 1, "not_called": [
-            {"reason": "memory_count", "label": "这轮找到的普通记忆不到 2 条，不需要重新排序", "count": 2}]},
+            {"reason": "memory_count", "label": "这轮找到的普通记忆不到 2 条，不需要重新排序", "count": 2}],
+            "result_categories": [{"category": "non_selection:no_match", "label": "没有选择（no_match）", "calls": 1}]},
         "planning": {"covered": True, "reached": 0, "called": 0, "not_called": []},
         "future_point": {"covered": False, "reached": 0, "called": 0, "not_called": []},
         "model_selection": {"covered": True, "reached": 0, "called": 0, "not_called": [],
                             "note": "只在经 Gateway 的对话里判断，本机直连 TUI 不判断"}}}
-    assert _diagnosis(view, "recall") == " · 近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）"
+    assert _diagnosis(view, "recall") == (" · 近24小时检查3次、调用1次，最多是因为：这轮找到的普通记忆不到 2 条，不需要重新排序（2次）"
+                                         "；最近结果：没有选择（no_match）（1次）")
     assert _diagnosis(view, "planning") == " · 近24小时检查0次、调用0次"
     assert _diagnosis(view, "future_point") == " · 近24小时：未统计未触发原因"
     assert _diagnosis(view, "model_selection") == " · 近24小时检查0次、调用0次（只在经 Gateway 的对话里判断，本机直连 TUI 不判断）"
     assert _diagnosis({}, "recall") == "" and _diagnosis(view, "curator") == ""
+    # 旧 Gateway 的 point_diagnostics 没有 result_categories 这一块：行尾照旧，不显示空类别、也不当成未记录。
+    legacy = {"point_diagnostics": {"recall": {"covered": True, "reached": 1, "called": 1, "not_called": []}}}
+    assert _diagnosis(legacy, "recall") == " · 近24小时检查1次、调用1次"
+    # 类别表首项不是字典（宿主不该出现，但要容错）：不显示类别而不是崩；未知类别照结构化字符串原样带出。
+    odd = {"point_diagnostics": {"recall": {"covered": True, "reached": 1, "called": 1, "not_called": [],
+                                            "result_categories": ["oops"]}}}
+    assert _diagnosis(odd, "recall") == " · 近24小时检查1次、调用1次"
+    novel = {"point_diagnostics": {"recall": {"covered": True, "reached": 1, "called": 1, "not_called": [],
+                                              "result_categories": [{"category": "brand_new:thing", "calls": 2}]}}}
+    assert _diagnosis(novel, "recall") == " · 近24小时检查1次、调用1次；最近结果：brand_new:thing（2次）"
+    # 没有类别字段、或类别值为空：翻译成“未记录”，如实显示旧记录没有这个字段。
+    empty = {"point_diagnostics": {"recall": {"covered": True, "reached": 1, "called": 1, "not_called": [],
+                                              "result_categories": [{"category": None, "calls": 1}]}}}
+    assert _diagnosis(empty, "recall").endswith("；最近结果：未记录（1次）")
 
 
 def test_pipe_point_rows_show_recent_reach_from_the_real_decision_read(tmp_path, monkeypatch):

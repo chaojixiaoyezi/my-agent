@@ -16,7 +16,12 @@ from ...backends.decision_protocol import (
 from ...common.cancellation import ToolCancelled, bind_cancellation_token, raise_if_cancelled
 from ...concurrency.interrupt import is_interrupted
 from ...conversation import decision_point_limits as limits
-from ...conversation.decision_outcome_log import material_or_skip
+from ...conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_SOURCES_CHANGED,
+    material_or_skip,
+    record_decision_dropped,
+)
 from ...conversation.decision_reach_counts import CALLED, note_decision_reach, stage_miss_reason
 from ...conversation.decision_service import (
     begin_decision_stage,
@@ -76,7 +81,7 @@ def delivery_quality_hint(agent: object, record: object, archive_record: dict) -
 
 
 # LLM: 资格与材料只读结构化事实；发送前领取本轮请求标记，写入与 run_command 共用精确调用键，非选择/失败也不重试。
-#   采用前在配置复核之后再比对原来源/参数版本与同一绝对期限，任一变化都不采用。
+#   采用前在配置复核之后再比对原来源/参数版本与同一绝对期限，任一变化都不采用，并按结构化原因码留下丢弃记录。
 # 函数用途: 完成一次“资格→阶段→材料→领取→决策→复核→渲染”，只改临时去重与原诊断/用量账，不改工具或收口事实。
 def _advise(agent: object, record: object, archive: dict) -> str:
     reason = _miss_reason(agent, record, archive)
@@ -101,17 +106,25 @@ def _advise(agent: object, record: object, archive: dict) -> str:
     outcome = decide(agent, params, stage, point=_POINT, state=state, questions=questions,
                      candidates_revision=revision, source_refs=(archive["scoped_call_id"],))
     _check_interrupted()
-    if (not outcome.may_apply or outcome.response is None
-            or outcome.response.binding.candidates_revision != revision):
+    if not outcome.may_apply or outcome.response is None:
+        return ""
+    if outcome.response.binding.candidates_revision != revision:
+        record_decision_dropped(agent, stage, outcome, DROP_SOURCES_CHANGED)
         return ""
     # 渲染可能读到等待期间变化后的来源；最后的来源版本比对会整体丢弃这种建议。
     hint = _render_hint(_selected_focus(outcome.response, _review_focuses(record, archive)))
-    if not hint or not decision_outcome_is_current(agent, params, stage, outcome):
+    if not hint:
+        return ""
+    if not decision_outcome_is_current(agent, params, stage, outcome):
         return ""
     _check_interrupted()
     if _current_sources(agent, record, archive, limit) != frozen:
+        record_decision_dropped(agent, stage, outcome, DROP_SOURCES_CHANGED)
         return ""
-    return hint if time.monotonic() < min(stage.deadline, outcome.deadline) else ""
+    if time.monotonic() >= min(stage.deadline, outcome.deadline):
+        record_decision_dropped(agent, stage, outcome, DROP_ADOPTION_DEADLINE)
+        return ""
+    return hint
 
 
 # LLM: 新验证或成功写入 stale 引用须与原归档配对；主代理、无收口、同 run/task 焦点数沿原界限。

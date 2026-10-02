@@ -38,13 +38,209 @@ def _stage():
 def test_row_keeps_only_structured_facts():
     row = decision_outcome_row(_stage(), "recall", _outcome("deadline", "provider_failed"), 1.2345)
 
-    assert set(row) == {"schema", "created_at", "point", "scope", "mode", "status", "reason", "elapsed_ms",
-                        "thread_id", "run_id", "task_id", "experiment", "blocking"}
+    assert set(row) == {"schema", "created_at", "point", "scope", "mode", "status", "result_category", "reason",
+                        "elapsed_ms", "thread_id", "run_id", "task_id", "experiment", "blocking"}
     assert (row["point"], row["status"], row["reason"], row["elapsed_ms"]) == ("recall", "deadline", "provider_failed", 1234)
     # 结果对象没有 blocking 字段（旧替身、skipped 行）时按同步记；后台 observe 的结果带 blocking=False 原样投影。
     assert row["blocking"] is True
     background = SimpleNamespace(mode="observe", status="success", reason="", blocking=False)
     assert decision_outcome_row(_stage(), "recall", background, 0.5)["blocking"] is False
+    # 没有响应、也没有丢弃标记的旧替身：类别如实写“未记录可选结果”，不按状态猜成选中。
+    assert row["result_category"] == "no_selection_recorded"
+
+
+# 函数用途: 造一个带逐题答案的决策响应（selected 候选或非选择取值都由 value 决定）。
+def _response(*values, errors=()):
+    from agent_py_agent.agent.backends.decision_protocol import DecisionAnswer, DecisionResponse
+
+    answers = tuple(DecisionAnswer(question_id=f"q{index}", kind="choice", value=value,
+                                   error_code=errors[index] if index < len(errors) else "")
+                    for index, value in enumerate(values))
+    return DecisionResponse(binding=None, input_digest="d", requested_model="jev-latest", model="jev-1.13.0",
+                            answers=answers, _usage_json=b"{}")
+
+
+def test_result_category_separates_selection_non_selection_and_unrecorded():
+    from agent_py_agent.agent.conversation.decision_outcome_log import decision_result_category
+
+    def with_response(value, errors=()):
+        return SimpleNamespace(mode="observe", status="success", reason="", response=_response(value, errors=errors))
+
+    # 选中了某个候选（value 是候选标识，不是宿主已知的非选择取值）。
+    assert decision_result_category(with_response("candidate_3")) == "selected"
+    # 各类非选择原样进后缀，不新造同义码。
+    for value in ("not_needed", "no_match", "abstain", "need_data"):
+        assert decision_result_category(with_response(value)) == f"non_selection:{value}"
+    # 多题混答：只要有一题真的选了候选，就是选中，不因别的题说不需要而误报非选择。
+    assert decision_result_category(SimpleNamespace(mode="observe", status="success", reason="",
+                                                    response=_response("not_needed", "candidate_1"))) == "selected"
+    # 逐题错误那题不算选择，也不算非选择（这里唯一一题就错了，于是没有可判定结果）。
+    errored = SimpleNamespace(mode="observe", status="success", reason="",
+                              response=_response("candidate_1", errors=("bad",)))
+    assert decision_result_category(errored) == "no_selection_recorded"
+    # 一题错、另一题真的选了候选：整行仍算选中。
+    mixed_ok = SimpleNamespace(mode="observe", status="success", reason="",
+                               response=_response("candidate_1", "candidate_2", errors=("bad",)))
+    assert decision_result_category(mixed_ok) == "selected"
+    assert decision_result_category(SimpleNamespace(mode="observe", status="success", reason="",
+                                                    response=_response("", errors=("bad",)))) == "no_selection_recorded"
+    # 没有响应（超时、冷却、跳过等消费前结果）不猜类别。
+    assert decision_result_category(_outcome("deadline", "provider_failed")) == "no_selection_recorded"
+
+
+# 函数用途: 造一个带真实信封绑定的 apply 结果替身（丢弃补充行要从绑定里取点位）。
+def _bound_outcome(*, point="delivery_quality", value="candidate_1", may_apply=True):
+    from agent_py_agent.agent.backends.decision_protocol import (
+        DecisionAnswer,
+        DecisionBinding,
+        DecisionResponse,
+    )
+
+    binding = DecisionBinding(point=point, owner_ref="owner-1", operation_id="op-1", policy_revision="policy-1",
+                              candidates_revision="rev-1")
+    response = DecisionResponse(binding=binding, input_digest="d", requested_model="jev-latest", model="jev-1.13.0",
+                                answers=(DecisionAnswer(question_id="q0", kind="choice", value=value),), _usage_json=b"{}")
+    return SimpleNamespace(mode="apply", status="success", reason="", may_apply=may_apply, response=response)
+
+
+def test_result_category_records_host_drops_with_the_existing_reason_code(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.decision_outcome_log import (
+        decision_result_category,
+        record_decision_dropped,
+    )
+
+    path = tmp_path / "outcomes.jsonl"
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=path))
+    outcome = _bound_outcome()
+    # 类别推导：带 dropped_reason 的对象判成 dropped:<码>（写补充行时走的就是这条）。
+    marked = SimpleNamespace(mode="apply", status="success", reason="", response=outcome.response,
+                             dropped_reason="policy_changed")
+    assert decision_result_category(marked) == "dropped:policy_changed"
+
+    def rows():
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    # 消费者丢掉建议：另追加一行补充记录，带宿主原有原因码与同一点位/身份，不复制正文。
+    record_decision_dropped(agent, _stage(), outcome, "policy_changed")
+    row = rows()[0]
+    assert (row["result_category"], row["record_kind"]) == ("dropped:policy_changed", "dropped")
+    assert (row["point"], row["mode"], row["status"]) == ("delivery_quality", "apply", "success")
+    assert (row["scope"], row["thread_id"], row["run_id"], row["task_id"]) == ("thread", "thread-1", "run-1", "task-1")
+    assert set(row) == set(decision_outcome_row(_stage(), "delivery_quality", _outcome(), 0.0)) | {"record_kind"}
+    # 空原因码不改判；本来就没有可采用的建议（非 apply、无响应）不记丢弃。
+    record_decision_dropped(agent, _stage(), outcome, "")
+    record_decision_dropped(agent, _stage(), SimpleNamespace(mode="observe", status="success", reason="",
+                                                             may_apply=False, response=outcome.response), "deadline")
+    assert len(rows()) == 1
+    # 写盘失败只记日志：调用返回 None、不抛异常，主链路结果不变。
+    def broken(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(decision_outcome_log, "append_jsonl_capped", broken)
+    assert record_decision_dropped(agent, _stage(), outcome, "deadline") is None
+
+
+def test_summary_counts_result_categories_and_marks_old_rows_unrecorded(tmp_path):
+    path = tmp_path / "outcomes.jsonl"
+    now = time.time()
+    rows = [{"point": "recall", "status": "success", "result_category": "selected"},
+            {"point": "recall", "status": "success", "result_category": "non_selection:not_needed"},
+            {"point": "curator", "status": "success", "result_category": "dropped:policy_changed"},
+            {"point": "planning", "status": "success"},
+            {"point": "delivery_quality", "status": "success", "result_category": "dropped:policy_changed",
+             "record_kind": "dropped"}]
+    path.write_text("".join(json.dumps({"schema": SCHEMA, "created_at": now, **row}) + "\n" for row in rows),
+                    encoding="utf-8")
+
+    summary = decision_outcome_summary(SimpleNamespace(owner_decision_outcomes_jsonl=path), since=now - 60)
+
+    # 没有字段的旧记录归 unrecorded，不按状态或 reason 猜类别；等次数时按类别名排序。
+    assert summary["result_categories"] == [
+        {"category": "dropped:policy_changed", "calls": 2}, {"category": "non_selection:not_needed", "calls": 1},
+        {"category": "selected", "calls": 1}, {"category": "unrecorded", "calls": 1}]
+    assert [row["result_category"] for row in summary["recent"]] == [
+        "selected", "non_selection:not_needed", "dropped:policy_changed", None, "dropped:policy_changed"]
+    # 丢弃补充行不是一次独立调用：进类别统计与最近行，但不进按状态的调用统计。
+    assert summary["points"] == {"recall": {"success": 2}, "curator": {"success": 1}, "planning": {"success": 1}}
+
+
+def test_adoption_review_records_drop_with_reason_code(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends.decision_protocol import (
+        DecisionAnswer,
+        DecisionBinding,
+        DecisionResponse,
+    )
+    from agent_py_agent.agent.conversation.decision_service import (
+        DecisionOutcome,
+        DecisionStage,
+        decision_outcome_is_current,
+    )
+
+    path = tmp_path / "outcomes.jsonl"
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=path))
+    now = time.monotonic()
+    stage = DecisionStage(operation_id="op-1", owner_ref="owner-1", thread_id="t-1", run_id="r-1", task_id="k-1",
+                          started_at=now, deadline=now + 60)
+
+    def make_outcome(*, thread="t-1", deadline=now + 60, may_apply=True):
+        binding = DecisionBinding(point="delivery_quality", owner_ref="owner-1", operation_id="op-1",
+                                  policy_revision="policy-1", candidates_revision="rev-1",
+                                  thread_id=thread, run_id="r-1", task_id="k-1")
+        response = DecisionResponse(binding=binding, input_digest="d", requested_model="jev-latest", model="jev-1.13.0",
+                                    answers=(DecisionAnswer(question_id="q0", kind="choice", value="candidate_1"),),
+                                    _usage_json=b"{}")
+        return DecisionOutcome(mode="apply", status="success", response=response, may_apply=may_apply,
+                               connection_revision="conn-1", deadline=deadline)
+
+    def rows():
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    # 身份不再匹配：不采用，并留下既有原因码。
+    assert decision_outcome_is_current(agent, SimpleNamespace(), stage, make_outcome(thread="t-2")) is False
+    assert rows()[-1]["result_category"] == "dropped:identity_changed"
+    # 采用期限已过：登记 adoption_deadline，不误用发送阶段码。
+    assert decision_outcome_is_current(agent, SimpleNamespace(), stage, make_outcome(deadline=0.0)) is False
+    assert rows()[-1]["result_category"] == "dropped:adoption_deadline"
+    # 设置/策略变化（_stale 给出的既有码）原样进，不新造同义码。
+    monkeypatch.setattr(decision_service, "_stale", lambda *args: "policy_changed")
+    assert decision_outcome_is_current(agent, SimpleNamespace(), stage, make_outcome()) is False
+    assert rows()[-1]["result_category"] == "dropped:policy_changed"
+    # 复核通过：可采用，且不写丢弃记录。
+    monkeypatch.setattr(decision_service, "_stale", lambda *args: "")
+    assert decision_outcome_is_current(agent, SimpleNamespace(), stage, make_outcome()) is True
+    assert len(rows()) == 3
+    # 没有可采用的建议（observe 结果）不算丢弃。
+    assert decision_outcome_is_current(agent, SimpleNamespace(), stage, make_outcome(may_apply=False)) is False
+    assert len(rows()) == 3
+
+
+def test_result_category_label_translates_both_halves_and_tolerates_the_unknown():
+    from agent_py_agent.agent.conversation.decision_outcome_log import result_category_label
+
+    assert result_category_label("selected") == "选中了某个候选"
+    assert result_category_label("non_selection:need_data") == "没有选择（need_data）"
+    assert result_category_label("dropped:privacy_url") == "建议被宿主丢弃（privacy_url）"
+    # 旧记录没有字段、或宿主写了没登记过的类别：显示“未记录”/原样显示，不拒绝、不改写。
+    assert result_category_label(None) == "未记录" and result_category_label("") == "未记录"
+    assert result_category_label("unrecorded") == "未记录"
+    assert result_category_label("brand_new:thing") == "brand_new:thing"
+
+
+def test_row_write_failure_never_changes_the_decision_result(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import decision_outcome_log
+    from agent_py_agent.agent.conversation.decision_outcome_log import record_decision_skip
+
+    def broken(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(decision_outcome_log, "append_jsonl_capped", broken)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=tmp_path / "outcomes.jsonl"))
+    # 写盘失败只记日志：调用返回 None、不抛异常，调用方原有决策结果不变。
+    assert append_decision_outcome(agent, decision_outcome_row(_stage(), "recall", _outcome(), 0)) is None
+    record_decision_skip(agent, SimpleNamespace(error_code="", enabled_points=("recall",), scope="thread",
+                                                thread_id="t", run_id="r", task_id="k", experiment=False),
+                         "recall", "privacy_url")
+    assert not (tmp_path / "outcomes.jsonl").exists()
 
 
 def test_append_writes_only_the_owner_path_and_stays_bounded(tmp_path, monkeypatch):
@@ -222,3 +418,25 @@ def test_a_real_success_through_the_transport_logs_the_version_the_provider_retu
     report = _decision_owner_report("alice", env.host, [env.thread.thread_id], query)
     assert report["points"]["model_versions"] == [
         {"requested_model": "jev-test", "model_version": "jev-resolved-test", "calls": 1}]
+
+
+def test_audit_recent_rows_carry_a_plain_language_category_label(tmp_path, lanes):  # noqa: F811
+    env = configured(tmp_path, lanes)
+    path = tmp_path / "owner-data" / "decision" / "outcomes.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    env.host.home_paths.owner_decision_outcomes_jsonl = path
+    now = time.time()
+    # 三种真实形态 + 一条没有字段的旧记录：最近行原样保留结构化类别，另配大白话标签给用户看。
+    rows = [{"point": "recall", "status": "success", "result_category": "selected"},
+            {"point": "recall", "status": "success", "result_category": "non_selection:need_data"},
+            {"point": "planning", "status": "success", "result_category": "dropped:sources_changed"},
+            {"point": "curator", "status": "success"}]
+    path.write_text("".join(json.dumps({"schema": SCHEMA, "created_at": now, **row}) + "\n" for row in rows),
+                    encoding="utf-8")
+
+    query = AuditQuery(topic="decision", scope="owner", thread_id="", since=now - 60, limit=20)
+    report = _decision_owner_report("alice", env.host, [env.thread.thread_id], query)
+
+    assert [(row.get("result_category"), row["result_category_label"]) for row in report["points"]["recent"]] == [
+        ("selected", "选中了某个候选"), ("non_selection:need_data", "没有选择（need_data）"),
+        ("dropped:sources_changed", "建议被宿主丢弃（sources_changed）"), (None, "未记录")]

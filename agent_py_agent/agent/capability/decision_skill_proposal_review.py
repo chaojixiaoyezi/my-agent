@@ -18,7 +18,12 @@ from ..backends.decision_protocol import DecisionInputError, DecisionPrivacySkip
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from ..conversation import decision_point_limits as limits
-from ..conversation.decision_outcome_log import material_or_skip
+from ..conversation.decision_outcome_log import (
+    DROP_ADOPTION_DEADLINE,
+    DROP_SOURCES_CHANGED,
+    material_or_skip,
+    record_decision_dropped,
+)
 from ..conversation.decision_policy import (
     decision_owner_ref,
     persist_cooldown_snapshot,
@@ -149,16 +154,22 @@ def _review(host: object, service: object, proposals: tuple, pending: tuple) -> 
     outcome = decide(host, params, stage, point=_POINT, state=state, questions=questions, candidates_revision=revision,
                      source_refs=tuple(f"skill_proposal:{item.proposal_id}" for item in pending))
     _check_interrupted()
-    if (not outcome.may_apply or outcome.response is None
-            or outcome.response.binding.candidates_revision != revision):
+    if not outcome.may_apply or outcome.response is None:
+        return None
+    if outcome.response.binding.candidates_revision != revision:
+        record_decision_dropped(host, stage, outcome, DROP_SOURCES_CHANGED)
         return None
     suggestions = _suggestions(outcome.response, len(pending))
-    if suggestions is None or not decision_outcome_is_current(host, params, stage, outcome):
+    if suggestions is None:
+        return None
+    if not decision_outcome_is_current(host, params, stage, outcome):
         return None
     _check_interrupted()
     if _facts(service.list(status=PROPOSAL_PENDING)) != facts:
+        record_decision_dropped(host, stage, outcome, DROP_SOURCES_CHANGED)
         return None
     if time.monotonic() >= min(stage.deadline, outcome.deadline):
+        record_decision_dropped(host, stage, outcome, DROP_ADOPTION_DEADLINE)
         return None
     return _adopted(proposals, pending, suggestions)
 

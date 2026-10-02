@@ -151,6 +151,27 @@ def test_diagnostics_mark_uncovered_points_and_enabled_state(tmp_path):
     assert unknown["enabled"] is False and unknown["mode"] == "unknown"
 
 
+def test_diagnostics_carry_per_point_result_categories_and_tolerate_missing_data(tmp_path):
+    agent = _agent(tmp_path)
+    reach = decision_reach_summary(agent.home_paths, since=0)
+    categories = {"delivery_quality": {"selected": 2, "dropped:sources_changed": 1}, "planning": {"unrecorded": 3}}
+
+    rows = decision_point_diagnostics(("delivery_quality", "planning", "recall"), {"delivery_quality": "apply"}, reach,
+                                      categories)
+
+    # 结构化类别翻成大白话，按次数降序；旧记录缺字段归 unrecorded，展示为“未记录”。
+    assert rows["delivery_quality"]["result_categories"] == [
+        {"category": "selected", "label": "选中了某个候选", "calls": 2},
+        {"category": "dropped:sources_changed", "label": "建议被宿主丢弃（sources_changed）", "calls": 1}]
+    assert rows["planning"]["result_categories"] == [{"category": "unrecorded", "label": "未记录", "calls": 3}]
+    # 没有这个点位的结果日志行（或整块数据缺）：空表，不能显示成 0 次或伪造类别。
+    assert rows["recall"]["result_categories"] == []
+    assert decision_point_diagnostics(("planning",), None, reach)["planning"]["result_categories"] == []
+    # 计数表里出现非数字、未知类别：次数按整数转换、类别原样带出，不崩。
+    odd = decision_point_diagnostics(("planning",), None, reach, {"planning": {"brand_new:thing": 2}})["planning"]
+    assert odd["result_categories"] == [{"category": "brand_new:thing", "label": "brand_new:thing", "calls": 2}]
+
+
 # LLM: 各点位测试共用的读数口；只隔离进程内计数并给替身宿主补上规范路径（真实宿主已有该字段，保持不动），不改点位行为。
 # 函数用途: 让测试宿主开始计数，返回“读出某点位 ({原因: 次数}, 调用次数)”的函数。
 def reach_counter(host, monkeypatch, point, tmp_path):

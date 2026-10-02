@@ -8,6 +8,7 @@ import math
 from prompt_toolkit.layout import HSplit, ScrollablePane
 from prompt_toolkit.widgets import CheckboxList, Label, RadioList, TextArea
 
+from ...agent.conversation.decision_outcome_log import result_category_label
 from ...agent.settings.decision_settings_schema import (
     BOOLEAN_FIELDS,
     POINTS,
@@ -169,7 +170,9 @@ async def _edit_point(app, agent, session: str, view: dict) -> str:
 
 # LLM: 只读 decision_read 附带的 point_diagnostics（近 24 小时、按 owner）；旧 Gateway 没有这块数据时不显示任何东西，
 #   未接入计数的点位明说“未统计”，不能显示成 0 次。label 与 note 都是宿主给用户的大白话，菜单照原样显示，不再翻译。
-# 函数用途: 把一个点位最近为什么没触发压成一句话，附在“逐接入点设置”列表的行尾。
+#   result_categories 是同一窗口的结果类别（选中/非选择/被丢弃/未记录），这里只显示次数最多的一项，
+#   类别名带结构化前缀，用共用的翻译函数翻成大白话；旧记录没有这个字段时显示“未记录”。
+# 函数用途: 把一个点位最近为什么没触发、结果是什么类别压成一句话，附在“逐接入点设置”列表的行尾。
 def _diagnosis(view: dict, point: str) -> str:
     row = (view.get("point_diagnostics") or {}).get(point)
     if not isinstance(row, dict):
@@ -179,7 +182,23 @@ def _diagnosis(view: dict, point: str) -> str:
     missed = row.get("not_called") or []
     top = f"，最多是因为：{missed[0].get('label')}（{missed[0].get('count')}次）" if missed else ""
     note = f"（{row['note']}）" if row.get("note") else ""
-    return f" · 近24小时检查{int(row.get('reached') or 0)}次、调用{int(row.get('called') or 0)}次{top}{note}"
+    return (f" · 近24小时检查{int(row.get('reached') or 0)}次、调用{int(row.get('called') or 0)}次{top}{note}"
+            + _top_category(row.get("result_categories")))
+
+
+# LLM: 只读诊断里的结果类别小表；缺字段或空表（旧 Gateway、还没写过结果日志）返回空串，菜单照旧不显示这一段。
+#   取次数最多的一项，次数一并显示，类别名只能来自结构化字符串，未知类别由翻译函数原样带出。
+# 函数用途: 把点位最近的主要结果类别压成一句话（“最近结果：选中了某个候选（3次）”）。
+def _top_category(rows: object) -> str:
+    if not isinstance(rows, list) or not rows:
+        return ""
+    top = rows[0]
+    if not isinstance(top, dict):
+        return ""
+    label = result_category_label(top.get("category"))
+    if not label:
+        return ""
+    return f"；最近结果：{label}（{int(top.get('calls') or 0)}次）"
 
 
 # LLM: 模型列表只读原脱敏目录的 decision 用途；不可用配置仍可绑定，保存验证和共享撤销仍由原服务执行。

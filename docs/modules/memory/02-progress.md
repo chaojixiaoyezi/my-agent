@@ -6,6 +6,13 @@
 - 只读、只是线索：不写/删/改记忆，不写访问信号，结果不进自动召回；子代理回合与记忆总闸关闭时不可用。
 - 开关 `enable_memory_search_tool` 默认关，属于安全边界（模型不能自己打开，用户经 `/settings` 可改）。详见 DESIGN_LEDGER 同名条目。
 
+## 记忆侧四个决策点（recall / pre_recall / curator / curator_relation）登记被丢弃的建议（2026-10-02，分支 `worker/ds1-decision-outcome-category`，已实现，待集成）
+
+- 决策结果日志新增结构化 `result_category`（`selected` / `non_selection:<取值>` / `dropped:<原因码>` / `no_selection_recorded`）。
+- 四个记忆点位的采纳前复核出口在丢掉一条已拿到的建议时调 `record_decision_dropped` 登记原因码：期限 `adoption_deadline`、
+  运行时身份变化 `runtime_changed`、来源或正式条目变化 `sources_changed`。行为不变（仍保留原材料/原顺序），只多一行补充记录。
+- 详见 DESIGN_LEDGER 同名条目与[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近是选中非选择还是被丢弃2026-10-02分支-workerds1-decision-outcome-category)。
+
 ## 召回后排序逐条题的候选措辞修正（J12b，2026-10-02，分支 `claude/be-recall-criteria`，已上线 step17a，main de222698b，2026-10-02）
 
 - `decision_recall` 逐条记忆题的候选说明改为写明“这一条”的含义，无关记忆明确指向 `later`；候选键、题目结构和非排序回答的处理不变。

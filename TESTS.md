@@ -161,6 +161,29 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   - 没开语义召回时，原因从 `embedder_unavailable` 改成 `semantic_recall_disabled`。
 - **门禁**：见交付记录（相关测试、guards9、import 边界、ruff、doc_sync、code-size strict、`diff --check`、clean_package、`size_diff`）。
 
+## 决策账补结构化“结果类别”（2026-10-02，分支 `worker/ds1-decision-outcome-category`，基于 `claude/3a-step16z` `78fc5c209`）
+
+- **改动产品面**：`conversation/decision_outcome_log`（`result_category` 字段、`decision_result_category`、`record_decision_dropped`、`result_category_label`、
+  `_result_category_counts`，以及 `decision_point_diagnostics` 新增 `outcome_categories` 参数）、`conversation/decision_service`（复核门 + `_adoption_review`）、
+  10 个消费者点位的丢弃出口、`settings/model_profiles._with_point_diagnostics` + `_category_calls_by_point`、`tooling/audit_records_tool._label_recent_categories`、
+  `cli/chat_parts/tui_decision_menu._diagnosis` + `_top_category`。
+- **新增/改写用例**（`agent_py_agent/tests/`）：
+  - `test_decision_outcome_log.py`：字段集合含 `result_category`；选中 / 各类非选择 / 多题混答 / 逐题错误；丢弃补充行（原因码、同点位身份、`record_kind=dropped`、空原因码与非 apply 不记、写盘失败返回 None）；
+    汇总 `result_categories`（旧记录归 `unrecorded`，丢弃补充行不进 `points`）；采用复核门四类原因码；标签翻译；`audit_records` recent 行带 `result_category_label`；
+  - `test_decision_reach_counts.py`：`decision_point_diagnostics` 逐点 `result_categories`（排序、旧记录归未记录、无数据点位空表、未知类别原样带出）；
+  - `test_tui_decision_menu.py`：`_diagnosis` 行尾“最近结果：…”，旧 Gateway 无该字段时不显示，首项不是字典不崩。
+- **验证命令与结果**（Python：`~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，工作目录根，`--basetemp=/private/tmp/claude-501/m-ds1-*`）：
+  - `pytest test_decision_outcome_log.py test_decision_reach_counts.py test_tui_decision_menu.py test_decision_audit_controls.py` → 82 passed；
+  - 消费者点位相关 11 个文件（delivery_quality、delivery_quality_integration、delivery_stale、action_candidate、external_material_order、recall、pre_recall、planning、curator、curator_relation、skill_proposal_review）→ 645 passed；
+  - 展示与服务相关 8 个文件（decision_audit_controls、model_profiles、model_operations、tui_model_menu、audit_requests_topic、decision_service、decision_subagent、skill_proposal_review_integration）→ 190 passed。
+- **变异验证 5 个，全部被拦住并已还原**：
+  1. `decision_result_category` 不读 `dropped_reason` → `test_result_category_records_host_drops_with_the_existing_reason_code`、`test_adoption_review_records_drop_with_reason_code` 红；
+  2. 非选择取值当普通非空值（判成 `selected`） → `test_result_category_separates_selection_non_selection_and_unrecorded` 红；
+  3. 汇总不跳过 `record_kind=dropped` → `test_summary_counts_result_categories_and_marks_old_rows_unrecorded` 红（`points` 多出丢弃行）；
+  4. `_result_category_counts` 缺字段不归 `unrecorded` → 同上测试红（出现空类别）；
+  5. 去掉 `record_decision_dropped` 的 `may_apply` 前置 → `test_result_category_records_host_drops_with_the_existing_reason_code` 红（多出一行）。
+- **未做/未验证**：这批测试只在 Mac 隔离 venv 跑；没在真实 home/Gateway 上做端到端复测（沙箱不允许起 Gateway），真实链路由 3a 在沙箱外复核。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：

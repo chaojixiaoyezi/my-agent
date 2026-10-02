@@ -24,6 +24,7 @@ from ..common.json_io import (
     write_json_file_atomic_unlocked,
 )
 from . import decision_point_limits as limits
+from .decision_outcome_log import RESULT_UNRECORDED, result_category_label
 
 SCHEMA = "decision_reach.v1"
 CALLED = "called"
@@ -227,18 +228,34 @@ def decision_reach_summary(home_paths: object, *, since: float) -> dict[str, obj
             "coverage_since": min(hours) if hours else None, "retention_days": _RETAIN_SECONDS // 86400}
 
 
-# LLM: 纯函数；modes 是设置摘要里的 {点位: effective_mode}（读不到时传 None），reach 是 decision_reach_summary 的结果。
+# LLM: 纯函数；modes 是设置摘要里的 {点位: effective_mode}（读不到时传 None），reach 是 decision_reach_summary 的结果，
+#   outcome_categories 是 decision_outcome_summary 的 result_categories（读不到时传 None，表示这块数据缺）。
 #   未接入计数的点位 covered=False 并写明“未统计”，不能显示成 0 次；点位全集来自调用方给的 points。
 #   note 是点位适用范围的宿主说明（没有则为空串），展示方照原样显示。
-# 函数用途: 生成每个点位一行的诊断：是否开启、检查次数、调用次数、没调用的原因（原因码 + 大白话 + 次数）。
-def decision_point_diagnostics(points: tuple[str, ...], modes: Mapping | None, reach: Mapping) -> dict[str, dict]:
+#   result_categories 逐点给最近的结果类别（选中/非选择/被丢弃/未记录），旧记录缺字段时归 unrecorded，
+#   类别名自带结构（前缀 + 结构化取值），展示方只翻前缀、不解析正文。
+# 函数用途: 生成每个点位一行的诊断：是否开启、检查次数、调用次数、没调用的原因（原因码 + 大白话 + 次数）与结果类别。
+def decision_point_diagnostics(points: tuple[str, ...], modes: Mapping | None, reach: Mapping,
+                               outcome_categories: Mapping | None = None) -> dict[str, dict]:
     rows = {}
     for point in points:
         counts = (reach.get("points") or {}).get(point) or _point_row({})
         mode = str((modes or {}).get(point) or "") if modes is not None else ""
         rows[point] = {"enabled": bool(mode) and mode != "off", "mode": mode or "unknown",
-                       "covered": point in COVERED_POINTS, "note": _POINT_NOTES.get(point, ""), **counts}
+                       "covered": point in COVERED_POINTS, "note": _POINT_NOTES.get(point, ""),
+                       "result_categories": _result_category_rows((outcome_categories or {}).get(point)), **counts}
     return rows
+
+
+# LLM: 只读 result_category 结构化字符串；缺字段或值不是字符串的旧记录归 RESULT_UNRECORDED（展示为未记录），
+#   不按状态猜。返回按次数降序、再按名字排序，与结果日志汇总口径一致；label 用共用的翻译函数。
+# 函数用途: 把某点位的结果类别计数翻成诊断用的小表（category + 次数 + 大白话）。
+def _result_category_rows(counts: Mapping | None) -> list[dict[str, object]]:
+    if not isinstance(counts, Mapping):
+        return []
+    rows = sorted(((str(category), int(calls)) for category, calls in counts.items()),
+                  key=lambda item: (-item[1], item[0]))
+    return [{"category": category, "label": result_category_label(category), "calls": calls} for category, calls in rows]
 
 
 # 函数用途: 把一个点位的原因计数整理成 reached/called/not_called（按次数从多到少，带大白话）。

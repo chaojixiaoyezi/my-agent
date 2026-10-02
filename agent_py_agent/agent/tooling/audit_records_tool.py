@@ -79,10 +79,12 @@ def _owner_host(agent: object, home: object) -> SimpleNamespace:
 #   scope=current_thread 时 points 与用量、观察一样只统计可信的当前会话（不含其它会话与后台点位）。
 #   point_diagnostics 取 decision_reach_counts：每个点位是否开启、检查几次、调用几次、没调用的原因（原因码 + 大白话）与适用范围说明 note；
 #   它按 owner 统计（diagnostics_scope=owner），不随 current_thread 缩小。
+#   result_category 是结构化结果类别（selected / non_selection:* / dropped:*），两个展示面共用
+#   decision_outcome_log.result_category_label 翻译成大白话；旧记录没有字段时显示“未记录”，不按状态猜。
 # 函数用途: 汇总一个 owner 的决策设置、管理员控制、时间窗内的调用统计、各接入点的决策结果与未触发原因。
 def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], query: AuditQuery) -> dict:
     from ..conversation.decision_audit import decision_settings_summary, decision_usage_summary
-    from ..conversation.decision_outcome_log import decision_outcome_summary
+    from ..conversation.decision_outcome_log import decision_outcome_summary, result_category_label
     from ..conversation.decision_reach_counts import (
         decision_point_diagnostics,
         decision_reach_summary,
@@ -98,12 +100,23 @@ def _decision_owner_report(owner_id: str, host: object, thread_ids: list[str], q
         settings = {"unavailable": "settings_unreadable"}
     controls = read_owner_admin_controls(host.home_paths)
     reach = decision_reach_summary(host.home_paths, since=query.since)
+    outcomes = decision_outcome_summary(host.home_paths, since=query.since,
+                                        thread_ids=thread_ids if query.scope == "current_thread" else None)
+    _label_recent_categories(outcomes, result_category_label)
     return {"owner_id": owner_id, "admin_controls": {key: controls[key] for key in ("decision_model_allowed", "audit_allowed")},
             "settings": settings, "usage": decision_usage_summary(host.conversation_store, thread_ids, since=query.since),
-            "points": decision_outcome_summary(host.home_paths, since=query.since,
-                                               thread_ids=thread_ids if query.scope == "current_thread" else None),
+            "points": outcomes,
             "point_diagnostics": decision_point_diagnostics(POINTS, settings.get("points"), reach),
             "diagnostics_scope": "owner", "diagnostics_coverage_since": reach.get("coverage_since")}
+
+
+# LLM: 就地补充字段而不是另建结构：recent 行原样保留 result_category（结构化取值，机器可读），
+#   另加 result_category_label（大白话，给人看）。旧行没有类别时标签为“未记录”。只读，不改日志文件。
+# 函数用途: 给审计的最近决策结果行补上结果类别的大白话说明。
+def _label_recent_categories(outcomes: dict, label: object) -> None:
+    for row in outcomes.get("recent") or ():
+        if isinstance(row, dict):
+            row["result_category_label"] = label(row.get("result_category"))
 
 
 # LLM: 请求记录只经宿主写入器读取（Gateway 运行时才有），读取器不存在即报告不可用，不改从日志或配置推导队列位置。
