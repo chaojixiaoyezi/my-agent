@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 集成修正：插件目录 schema v4 的测试与文档同步（2026-10-02，3a）
+
+- C14 后续（`2ff572e5f`）把 `plugin_command_catalog` 升到 v4（管理动作加 `unavailable_reason`）。读取端只认当前版本，
+  旧版目录被拒后客户端重新拉取，和 v1→v2→v3 一致。`test_gateway_plugin_management.py` 仍写死 v3（沙箱里没跑到），改成 v4；
+  `test_plugin_command_catalog.py` 的“拒绝旧版本”用例加上 v3；`docs/design/PLUGIN_PACKAGES.md` 同步。
+- 沙箱外复核：`test_shuohao_novel_gates.py` 的宿主安装确认用例在沙箱外通过（ds1 沙箱里 MCP 启动被拒属环境限制）。
+- 发布提示：已开着的旧版 TUI 连上新网关后，插件目录会因版本不符被拒，重启 TUI 后恢复。
+
 ## 决策模型中文质量基准与每个点位的阈值（J12）（2026-10-02，分支 `claude/be-jev-quality-bench`，基于 `8ec88808d`）
 
 - **新增 `test_decision_quality_bench.py`（13 项，不发网络请求）**：

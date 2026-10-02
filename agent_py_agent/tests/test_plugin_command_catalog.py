@@ -83,6 +83,7 @@ def test_owner_schema_version_and_activation_changes_invalidate_revision():
         lambda row: row.update(schema_version="unknown.v2"),
         lambda row: row.update(schema_version="plugin_command_catalog.v1"),
         lambda row: row.update(schema_version="plugin_command_catalog.v2"),
+        lambda row: row.update(schema_version="plugin_command_catalog.v3"),
         lambda row: row.update(owner="forged"),
         lambda row: row.pop("management_actions"),
         lambda row: row["plugins"][0].update(enabled="false"),

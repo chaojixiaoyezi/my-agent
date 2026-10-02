@@ -136,7 +136,7 @@ def test_configure_http_original_chain_keeps_values_private_and_rejects_stale_ca
     status, result = request(server, body)
     assert status == 200 and result["state"] == "succeeded", result
     assert "synthetic-http-private-value" not in repr(result)
-    assert result["catalog"]["schema_version"] == "plugin_command_catalog.v3"
+    assert result["catalog"]["schema_version"] == "plugin_command_catalog.v4"
     assert PluginInstallStore(owner).snapshot()[0].revision == 2
     source.unlink()
     assert request(server, body)[1]["details"] == result["details"]

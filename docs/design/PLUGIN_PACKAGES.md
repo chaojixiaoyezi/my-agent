@@ -36,7 +36,7 @@ IM 可以发送 `/plugins [动作]` 或 `/plugins@<插件ID> [动作]`，与 TUI
 当前协议中 install 回执只可对应未配置状态；configure 回执必须匹配规范配置摘要和当前配置版本。
 prepare/activate/revoke 回执须绑定同一激活内容、计划和对应版本；准备与发布还须使用原启用操作身份，矛盾记录不能读成有效状态。
 
-公开目录为 `plugin_command_catalog.v3`，插件声明包含非敏感 `installation_revision` 和原提交派生的 `installation_ref`，
+公开目录为 `plugin_command_catalog.v4`（2026-10-02 起管理动作带 `unavailable_reason`，区分“仅管理员可用”与“尚未开放”；读取端只认当前版本，旧版目录被拒后由客户端重新拉取），插件声明包含非敏感 `installation_revision` 和原提交派生的 `installation_ref`，
 因此配置修改及同包卸载重装均使目录摘要变化；旧客户端明确拒绝未知协议，发布时客户端和 Gateway 同版。
 目录没有配置值或配置摘要，版本只是过期检测依据，不能授予权限或替代安装表的 CAS。
 激活预留、发布和撤销沿原表 CAS；实际 enable、普通 MCP 工具组合及 disable 的当前边界见 [激活权威](PLUGIN_ACTIVATION.md)。
