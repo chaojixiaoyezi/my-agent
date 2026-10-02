@@ -8,7 +8,10 @@ import pytest
 from agent_py_agent.agent.plugin_observation import ObservationHostContext, parse_observation
 from agent_py_agent.agent.tooling.screen_observation import (
     CLICK_ACTION,
+    SCREEN_REGION_CAPTURE,
+    WINDOW_IMAGE_CAPTURE,
     ObservationError,
+    ScreenCapture,
     ScreenObserver,
     TextRegion,
     WindowInfo,
@@ -59,6 +62,7 @@ class _Backend:
         self.ocr_rows = [TextRegion("提交", SUBMIT), TextRegion("取消", CANCEL)]
         self.clicks = []
         self.fail_capture = self.fail_ocr = False
+        self.capture_kind, self.fallback_reason, self.capture_error = SCREEN_REGION_CAPTURE, None, None
 
     def list_windows(self):
         return list(self.windows)
@@ -69,7 +73,9 @@ class _Backend:
     def capture(self, info):
         if self.fail_capture:
             raise RuntimeError("no display")
-        return self.buffers[info.native_id]
+        if self.capture_error is not None:
+            raise self.capture_error
+        return ScreenCapture(self.buffers[info.native_id], self.capture_kind, self.fallback_reason)
 
     def ocr(self, buffer):
         if self.fail_ocr:
@@ -204,6 +210,59 @@ def test_observe_reports_structured_failures_and_never_invents_candidates():
         observer.observe()
     assert ocr.value.code == "ocr_failed"
     assert sanitize_label(None) == "" and sanitize_label("  a\tb\n c ") == "a b c"
+
+
+def test_observe_reports_the_capture_kind_and_a_top_level_fallback_reason_the_host_accepts():
+    backend, observer = _observer()
+    plain = observer.observe()
+    assert plain["frame"]["capture"] == SCREEN_REGION_CAPTURE and "capture_fallback" not in plain
+    backend.capture_kind, backend.fallback_reason = SCREEN_REGION_CAPTURE, "screencapturekit_timeout"
+    result = observer.observe()
+    assert result["capture_fallback"] == {"reason": "screencapturekit_timeout"}, "回退原因在结果顶层"
+    payload = result["my_agent_observation"]
+    assert "capture_fallback" not in payload and "capture_fallback" not in payload["frame"], "不进观察载荷与 frame"
+    record = parse_observation(json.loads(json.dumps(payload)), _context())
+    assert record.frame["capture"] == SCREEN_REGION_CAPTURE, "宿主照常接受（frame 多一个键会整份拒绝）"
+    backend.capture_kind, backend.fallback_reason = WINDOW_IMAGE_CAPTURE, None
+    assert observer.observe()["frame"]["capture"] == WINDOW_IMAGE_CAPTURE
+
+
+def test_frame_scale_is_measured_from_the_capture_not_taken_from_the_listing():
+    backend, observer = _observer()
+    backend.buffers[0x1a] = _buffer(640, 400, patches={(40, 60, 120, 36): (30, 30, 30)})
+    backend.ocr_rows = [TextRegion("提交", (40, 60, 120, 36))]
+    result = observer.observe()
+    assert result["frame"]["scale"] == [2.0, 2.0] and result["frame"]["size"] == [320, 200], "列表给的是 1，截图是 2 倍像素"
+    clicked = observer.click_candidate(_meta(result))
+    assert clicked["point"] == [150, 89] and backend.clicks == [(150, 89)], "点击点 = 原点 + 区域中心 / 截图 scale"
+    backend.buffers[0x1a] = _buffer(640, 300)
+    with pytest.raises(ObservationError) as uneven:
+        observer.observe()
+    assert uneven.value.code == "capture_failed", "宽高两个方向的像素/点比对不上"
+
+
+def test_recheck_is_stale_when_the_capture_scale_changes_even_if_pixels_look_alike():
+    backend, observer = _observer()
+    backend.buffers[0x1a] = _buffer(640, 400)
+    backend.ocr_rows = [TextRegion("提交", (40, 60, 120, 36))]
+    meta = _meta(observer.observe())
+    backend.buffers[0x1a] = _buffer(320, 200)  # 复核时换成名义分辨率（比如主路径超时退回区域截图）
+    with pytest.raises(ObservationError) as info:
+        observer.click_candidate(meta)
+    assert info.value.code == "stale" and backend.clicks == [], "scale 变了，区域摘要不在同一套像素里"
+
+
+def test_backend_structured_errors_pass_through_and_bare_pixel_buffers_are_rejected():
+    backend, observer = _observer()
+    backend.capture_error = ObservationError("screen_recording_not_permitted", "没有屏幕录制权限")
+    with pytest.raises(ObservationError) as denied:
+        observer.observe()
+    assert denied.value.code == "screen_recording_not_permitted", "后端给的结构化码不能被吞成 capture_failed"
+    backend.capture_error = None
+    backend.capture = lambda info: backend.buffers[info.native_id]
+    with pytest.raises(ObservationError) as bare:
+        observer.observe()
+    assert bare.value.code == "capture_failed", "只返回像素的旧形状不再接受"
 
 
 def test_observe_picks_the_topmost_normal_visible_window_when_no_alias_is_given():

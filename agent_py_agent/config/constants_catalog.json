@@ -5156,6 +5156,14 @@
       "description": "逐键输入间隔 50ms：防止输入过快被目标程序丢键。"
     },
     {
+      "name": "MACOS_SCREENCAPTURE_CALLBACK_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/tooling/computer_use_macos.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "ScreenCaptureKit 每个异步回调（查可分享内容、单窗口截图）最多等多久，超时退回区域截图"
+    },
+    {
       "name": "MAX_INLINE_WRITE_CONTENT_CHARS",
       "file": "agent_py_agent/agent/tooling/content_transport_policy.py",
       "value": 12000,

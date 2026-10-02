@@ -24,10 +24,22 @@
   `isError` + `structuredContent`），因为固定的 MCP 1.13 不能把 `CallToolResult` 原样返回。不碰 FastMCP 私有属性。
 - 观察核心 `screen_observation.py`（来源无关）+ `screen_observation_store.py`（实例登记、每窗 4 代快照）+ `screen_region_digest.py`
   （区域像素摘要）+ `computer_use_x11.py`（python-xlib / mss / RapidOCR / pyautogui 的公开接口）。动作前五项复核与已知限制见设计稿 3.2 节。
-- macOS 后端（Quartz + ScreenCaptureKit）在片 E；`type_into_candidate` 随片 G。
+- `type_into_candidate` 随片 G。
 - 片 C：观察处理器把采样 + OCR 放到工作线程并加锁，宿主 `/stop` 的取消通知能被底层 Server 处理：宿主马上拿到 `CANCELLED`（车道用例 0.16 s），被丢弃的 OCR 在线程里跑完，取消后的下一次观察要排在它之后；不被堵的是取消通知和其他工具。已取消的调用拿到锁后不碰观察核心，点击在复核完、真正点之前再看一次取消标记，不会多点一下。
   Linux 车道的桌面层镜像定义 `Dockerfile.desktop` 与运行脚本 `xvfb_lane.sh` 在证据目录 harness/（正式位置由 3a 定），只在显式指定时构建；
   集成用例 `test_computer_use_xvfb_lane.py` / `test_computer_use_xvfb_cases.py` 只在 `MY_AGENT_XVFB_LANE=1` 时跑。闪动光标误判率 0.15–0.20（20 次循环），只记录不调容差。
+
+**片 E 实施（2026-10-02，macOS）**：
+- 后端按平台选：`tooling/computer_use_backends.select_backend()`，darwin → `computer_use_macos.MacBackend`，其余 → `X11Backend`；
+  `computer_use_server._screen_observer()` 只调它。OCR 两个后端共用 `tooling/screen_ocr.RapidOcrReader`。
+- macOS 后端只用 pyobjc（Quartz、ScreenCaptureKit，由 pywinctl 带入，按需导入）、mss、pyautogui 的公开接口：列窗口
+  `CGWindowListCopyWindowInfo`、遮挡 `kCGWindowListOptionOnScreenAboveWindow`、截图 ScreenCaptureKit 单窗口（macOS 14+），
+  拿不到退回 mss 区域截图并在结果顶层带 `capture_fallback{reason}`。
+- 需要在“系统设置 → 隐私与安全性 → 屏幕录制”里允许运行适配器的程序；没授权时 `observe_window` 返回 `screen_recording_not_permitted`，
+  适配器不会弹授权窗。
+- 截图返回值统一为 `ScreenCapture(buffer, kind, fallback_reason)`；`frame.capture` 由后端如实报（X11 是 `screen_region`），
+  `frame.scale` 取截图自己的像素/点比。细节与已知限制见设计稿 3.2 第 5 条。
+- 测试全程不碰真实屏幕：假 Quartz / 假 ScreenCaptureKit 单测，conftest 会话级防线让真实框架入口一被调用就失败；真机只读核对另行安排。
 
 ## 解决问题
 

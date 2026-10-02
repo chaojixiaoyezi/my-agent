@@ -1,8 +1,11 @@
 # LLM: 屏幕观察的来源无关核心（J16 片 B）：按后端给的窗口列表选目标、采样、OCR 候选、写快照、组装 plugin_observation.v1 载荷
 #   （带几何扩展）；动作前按 ae 定稿做适配器层五项复核：按 _meta 代次找快照（找不到 / key 不在 → not_found）→ boot/instance →
-#   可见、未最小化、同桌面 → 几何完全相等 → 点击点不被遮挡（动作时重新查叠放）→ 候选区域摘要在容差内，任一项不过 → stale，零副作用；
-#   复核通过后立刻点击，中间不做任何别的 I/O。后端是鸭子类型（X11 真后端 / 单测假后端），本模块不 import 任何桌面库。
-#   错误码：window_not_found | not_viewable | capture_failed | ocr_failed | occluded | not_found | stale | missing_context | invalid_arguments | cancelled。
+#   可见、未最小化、同桌面 → 原点与尺寸相等 → 点击点不被遮挡（动作时重新查叠放）→ 重新截图的 scale 相等 → 候选区域摘要在容差内，
+#   任一项不过 → stale，零副作用；
+#   复核通过后立刻点击，中间不做任何别的 I/O。后端是鸭子类型（X11 / macOS 真后端 / 单测假后端），本模块不 import 任何桌面库。
+#   截图由后端给 ScreenCapture（像素、采样方式、回退原因）；frame.scale 取截图自己的像素/点比（不取显示器的），复核时 scale 变了也判 stale。
+#   错误码集合开放（宿主只提升 stale / not_found，其它原样透传）：window_not_found | not_viewable | capture_failed | ocr_failed | occluded |
+#   not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted；后端主动抛的 ObservationError 原样透传。
 # 模块用途: "看一眼窗口、给出可点的候选、点之前再确认一遍没变"的全部判断逻辑，可在没有桌面的机器上用假后端完整测试。
 from __future__ import annotations
 
@@ -25,12 +28,14 @@ from .screen_observation_store import (
 )
 from .screen_region_digest import PixelBuffer, grid_unchanged, region_grid
 
-# 观察载荷里的固定取值：坐标空间、采样方式、目标类型、候选角色、候选动作工具名
+# 观察载荷里的固定取值：坐标空间、目标类型、候选角色、候选动作工具名
 OBSERVATION_SPACE = "screen_points"
-CAPTURE_KIND = "window_image"
 WINDOW_TARGET_KIND = "window"
 OCR_ROLE = "ocr_text"
 CLICK_ACTION = "click_candidate"
+# 截图采样方式（frame.capture）：单窗口内容（被压住的部分也拍得到）/ 按屏幕区域截屏（压在上面的窗口也会被拍进去）
+WINDOW_IMAGE_CAPTURE = "window_image"
+SCREEN_REGION_CAPTURE = "screen_region"
 
 
 # LLM: code 是稳定机器码，进 structuredContent.my_agent_observation_error.code；message 是中文说明，不含路径、标题正文或坐标。
@@ -64,6 +69,16 @@ class WindowInfo:
 class TextRegion:
     text: str
     region: tuple[int, int, int, int]
+
+
+# LLM: 所有后端的 capture() 都返回它（不另留只返回像素的旧形状）。kind 是采样方式的短标记（进 frame.capture，宿主按短标记校验）；
+#   fallback_reason 只在主路径拿不到、退回别的采样方式时给结构化原因码，进 observe 结果顶层的 capture_fallback，不进 frame 与观察载荷。
+# 类用途: 一次截图的像素与采样事实。
+@dataclass(frozen=True)
+class ScreenCapture:
+    buffer: PixelBuffer
+    kind: str
+    fallback_reason: str | None = None
 
 
 # 函数用途: 全局点矩形 (x, y, w, h) 是否相交（面积相交，边相切不算）。
@@ -121,17 +136,17 @@ class ScreenObserver:
         rect = window_rect(target.geometry)
         if any(rect_contains(other, rect) for other in above):
             raise ObservationError("occluded", "窗口被上层窗口完全盖住")
-        buffer = self._capture(target)
-        candidates = self._candidates(buffer)
+        capture, geometry = self._capture(target)
+        candidates = self._candidates(capture.buffer)
         ref = self.registry.ref_for(target.native_id)
         snapshot = WindowSnapshot(
             ref=ref, generation=self.store.next_generation(ref), native_id=target.native_id, captured_at=float(self.clock()),
-            geometry=target.geometry, desktop=target.desktop, occluded=any(rects_intersect(other, rect) for other in above),
-            candidates={item.key: item for item in (CandidateSnapshot(key, region, region_grid(buffer, region))
+            geometry=geometry, desktop=target.desktop, occluded=any(rects_intersect(other, rect) for other in above),
+            candidates={item.key: item for item in (CandidateSnapshot(key, region, region_grid(capture.buffer, region))
                                                      for key, _label, region in candidates)},
         )
         self.store.record(snapshot)
-        return self._result(snapshot, target, candidates)
+        return self._result(snapshot, target, candidates, capture)
 
     # LLM: 只读复核：按 _meta 找快照与候选（not_found），再重新采样逐项核对（任一项不符 → stale）；不点击。
     # 函数用途: 判定一个候选此刻是否仍可点，返回快照、候选与全局点击点。
@@ -147,12 +162,15 @@ class ScreenObserver:
             raise ObservationError("stale", "窗口实例已变")
         if not info.visible_now():
             raise ObservationError("stale", "窗口已不可见")
-        if info.geometry != snapshot.geometry:
-            raise ObservationError("stale", "窗口位置、尺寸或缩放已变")
+        if (info.geometry.origin, info.geometry.size) != (snapshot.geometry.origin, snapshot.geometry.size):
+            raise ObservationError("stale", "窗口位置或尺寸已变")
         point = click_point(snapshot.geometry, candidate.region)
         if any(point_in_rect(point, other) for other in self.backend.above_rects(info.native_id)):
             raise ObservationError("stale", "点击点被上层窗口盖住")
-        if not grid_unchanged(candidate.grid, region_grid(self._capture(info), candidate.region)):
+        capture, geometry = self._capture(info)
+        if geometry.scale != snapshot.geometry.scale:
+            raise ObservationError("stale", "截图缩放已变（换了采样方式或显示器），区域摘要不可比")
+        if not grid_unchanged(candidate.grid, region_grid(capture.buffer, candidate.region)):
             raise ObservationError("stale", "候选区域的像素已变")
         return snapshot, candidate, point
 
@@ -183,16 +201,19 @@ class ScreenObserver:
             raise ObservationError("window_not_found", "没有这个窗口" if window else "当前没有可见的普通窗口")
         return target
 
-    # 函数用途: 抓窗口像素；后端异常或尺寸对不上都算 capture_failed。
-    def _capture(self, target: WindowInfo) -> PixelBuffer:
+    # LLM: 后端主动抛的 ObservationError（如 screen_recording_not_permitted）原样透传，其它异常一律变成 capture_failed。
+    #   返回的几何是“列表里的原点、尺寸 + 截图自己的像素/点比”：scale 是这张截图的事实，不是显示器的。
+    # 函数用途: 抓窗口像素并算出这次截图的几何；形状不对或宽高比例对不上都算 capture_failed。
+    def _capture(self, target: WindowInfo) -> tuple[ScreenCapture, WindowGeometry]:
         try:
-            buffer = self.backend.capture(target)
+            capture = self.backend.capture(target)
+        except ObservationError:
+            raise
         except Exception as exc:  # noqa: BLE001 后端库的任何异常都只能变成结构化失败
             raise ObservationError("capture_failed", f"截图失败：{type(exc).__name__}") from exc
-        expected = (round(target.geometry.size[0] * target.geometry.scale[0]), round(target.geometry.size[1] * target.geometry.scale[1]))
-        if not isinstance(buffer, PixelBuffer) or (buffer.width, buffer.height) != expected:
-            raise ObservationError("capture_failed", "截图尺寸与窗口几何不符")
-        return buffer
+        if not isinstance(capture, ScreenCapture) or not isinstance(capture.buffer, PixelBuffer) or not capture.kind:
+            raise ObservationError("capture_failed", "截图结果形状不对")
+        return capture, captured_geometry(target.geometry, capture.buffer)
 
     # 函数用途: OCR 文字区域 → (key, label, region) 列表：去空标签、裁到截图范围、去零面积，最多 MAX_CANDIDATE_COUNT 个。
     def _candidates(self, buffer: PixelBuffer) -> list[tuple[str, str, tuple[int, int, int, int]]]:
@@ -207,18 +228,35 @@ class ScreenObserver:
                 rows.append((f"t{index}", label, region))
         return rows[:MAX_CANDIDATE_COUNT]
 
+    # LLM: capture_fallback 放结果顶层（和 window、generation 并列）：宿主的 frame 只认固定键，多一个键整份拒绝。
     # 函数用途: 组装给模型的结果与 plugin_observation.v1 载荷（含 frame 与候选 region）。
-    def _result(self, snapshot: WindowSnapshot, target: WindowInfo, candidates: Iterable[tuple[str, str, tuple[int, int, int, int]]]) -> dict[str, object]:
+    def _result(self, snapshot: WindowSnapshot, target: WindowInfo, candidates: Iterable[tuple[str, str, tuple[int, int, int, int]]],
+                capture: ScreenCapture) -> dict[str, object]:
         frame = {"space": OBSERVATION_SPACE, **snapshot.geometry.frame_fields(), "captured_at": snapshot.captured_at,
-                 "capture": CAPTURE_KIND, "occluded": snapshot.occluded}
+                 "capture": capture.kind, "occluded": snapshot.occluded}
         rows = [{"key": key, "role": OCR_ROLE, "label": label, "actions": [CLICK_ACTION], "region": list(region)}
                 for key, label, region in candidates]
         result: dict[str, object] = {"window": snapshot.ref, "generation": snapshot.generation, "title": sanitize_label(target.title),
                                      "frame": frame, "candidate_count": len(rows)}
+        if capture.fallback_reason:
+            result["capture_fallback"] = {"reason": capture.fallback_reason}
         if rows:
             result["my_agent_observation"] = {"schema": OBSERVATION_SCHEMA, "target": {"ref": snapshot.ref, "generation": snapshot.generation},
                                               "frame": frame, "candidates": rows}
         return result
+
+
+# LLM: scale 按截图算：宽 = 像素宽 ÷ 点宽，高 = 像素高 ÷ 点高；两轴差出一个像素以上（不是同一个缩放）就判 capture_failed。
+#   主路径按显示器缩放出图（Retina 为 2），按名义分辨率出图的回退为 1；核心的 click_point = origin + region / scale 两种都对。
+# 函数用途: 由列表几何与截图像素算出这次截图的几何（原点、尺寸照抄，scale 取截图自己的像素/点比）。
+def captured_geometry(listed: WindowGeometry, buffer: PixelBuffer) -> WindowGeometry:
+    width, height = listed.size
+    if width <= 0 or height <= 0:
+        raise ObservationError("capture_failed", "窗口外框面积不是正数")
+    scale = (buffer.width / width, buffer.height / height)
+    if abs(buffer.height - height * scale[0]) > 1:
+        raise ObservationError("capture_failed", "截图宽高比例与窗口外框不一致")
+    return WindowGeometry(listed.origin, listed.size, scale)
 
 
 # 函数用途: 校验宿主附的 _meta 观察上下文形状，返回 (ref, generation, key)。
@@ -244,6 +282,7 @@ def _clip_region(region: object, buffer: PixelBuffer) -> tuple[int, int, int, in
 
 
 __all__ = [
-    "CAPTURE_KIND", "CLICK_ACTION", "OBSERVATION_SPACE", "OCR_ROLE", "WINDOW_TARGET_KIND", "ObservationError", "ScreenObserver",
-    "TextRegion", "WindowInfo", "click_point", "point_in_rect", "rect_contains", "rects_intersect", "sanitize_label", "window_rect",
+    "CLICK_ACTION", "OBSERVATION_SPACE", "OCR_ROLE", "SCREEN_REGION_CAPTURE", "WINDOW_IMAGE_CAPTURE", "WINDOW_TARGET_KIND",
+    "ObservationError", "ScreenCapture", "ScreenObserver", "TextRegion", "WindowInfo", "captured_geometry", "click_point",
+    "point_in_rect", "rect_contains", "rects_intersect", "sanitize_label", "window_rect",
 ]

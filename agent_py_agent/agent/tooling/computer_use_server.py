@@ -58,12 +58,12 @@ def scroll_screen(
     }
 
 
-# 函数用途: 观察开关开着时才会被调用：X11 后端只在这里构造。
+# 函数用途: 观察开关开着时才会被调用：按平台选的桌面后端（computer_use_backends.select_backend）只在这里构造。
 def _screen_observer():
-    from .computer_use_x11 import X11Backend
+    from .computer_use_backends import select_backend
     from .screen_observation import ScreenObserver
 
-    return ScreenObserver(X11Backend())
+    return ScreenObserver(select_backend())
 
 
 # LLM: 装配在 build_adapter_server（可单测：按环境标记决定是否注册观察工具），这里只做注册上游工具与 stdio 收发。不另起第二个服务。

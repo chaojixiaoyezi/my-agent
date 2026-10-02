@@ -63,7 +63,7 @@
 {"schema": "plugin_observation.v1",
  "target": {"ref": "win:<boot>:<instance>", "generation": "<boot>-<instance>-<seq>"},
  "frame": {"space": "screen_points", "origin": [0, 0], "size": [800, 600], "scale": [1, 1],
-           "captured_at": 1790000000.123, "capture": "window_image", "occluded": false},
+           "captured_at": 1790000000.123, "capture": "screen_region", "occluded": false},
  "candidates": [{"key": "t3", "role": "ocr_text", "label": "提交", "actions": ["click_candidate"],
                  "region": [10, 20, 60, 18]}]}
 ```
@@ -77,13 +77,16 @@
   - Linux X11：全局坐标就是像素，缩放 1；
   - macOS：用 point，Retina 屏缩放 2.0。
   - `region` 是候选在窗口截图像素里的外框，宿主按 `frame` 换成全局点。
+  - `frame.scale` 是这张截图自己的像素/点比（核心按截图像素 ÷ 外框点算，宽高两向对不上就 `capture_failed`），不取显示器的（片 E 起）。
+  - `frame.capture` 由后端如实报：`window_image`（单窗口内容，被压住的部分也拍得到，macOS ScreenCaptureKit）或 `screen_region`（按屏幕区域截屏，压在上面的窗口也会被拍进去：X11 的 mss、macOS 的回退）。
 - **采样**（都不改焦点）：
   - Linux X11：用 EWMH 的 `_NET_CLIENT_LIST_STACKING`（需要窗口管理器，测试用 openbox）列窗口，`translate_coords` 换算到根窗口坐标，用 `mss` 按区域截图；再按叠放次序算有没有上层窗口压在这块区域上（`occluded`）。
-  - macOS：用 `CGWindowListCopyWindowInfo` 列窗口，用 ScreenCaptureKit 的单窗口截图（macOS 14 以上的公开接口）；拿不到时退回 `mss` 区域截图，同样算遮挡。不用已废弃的 `CGWindowListCreateImage`。
+  - macOS：用 `CGWindowListCopyWindowInfo` 列窗口，用 ScreenCaptureKit 的单窗口截图（macOS 14 以上的公开接口）；拿不到时退回 `mss` 区域截图，同样算遮挡。主路径不用已废弃的 `CGWindowListCreateImage`（回退用的 mss 内部用它，见 3.2 第 5 条已知限制）。片 E 实施细节见 3.2 第 5 条。
 - **候选**：
   - 片 B 起：RapidOCR 公开调用 `RapidOCR()(image)` 的文字区域。`role` 固定为 `ocr_text`，`actions` 只有 `click_candidate`；label 去控制字符，截到 120 字，只作外部数据（external_data）。
   - 片 G 起：无障碍树里的控件（见第 6 节），role 取自系统的结构化角色，可编辑控件才有 `type_into_candidate`。
-- **失败**：MCP `isError` 加 `structuredContent.my_agent_observation_error{code}`，code 取 `window_not_found | not_viewable | capture_failed | ocr_failed | occluded`。没有候选时不凭空造候选。
+- **失败**：MCP `isError` 加 `structuredContent.my_agent_observation_error{code}`，code 取 `window_not_found | not_viewable | capture_failed | ocr_failed | occluded | cancelled | screen_recording_not_permitted`（片 C：宿主已取消；片 E：macOS 没有屏幕录制权限）等。码集合是开放的：宿主只把 `stale` / `not_found` 提升为宿主错误码，其它码原样透传，新增码不用改宿主。没有候选时不凭空造候选。
+- **采样方式回退**：主路径拿不到、退回别的采样方式时，结果顶层（与 `window`、`generation` 并列）带 `capture_fallback{reason}`；不进 `frame`（宿主的 frame 只认固定键，多一个键整份拒绝），也不进观察载荷。
 
 ### 3.2 动作前两层复核
 
@@ -115,6 +118,16 @@
    - 遮挡：X11 用 `_NET_CLIENT_LIST_STACKING`（底→顶）里排在目标之后且可见的窗口，加根窗口下可见的 override-redirect 子窗口（菜单、tooltip），矩形带 `_NET_FRAME_EXTENTS` 边框；`frame.occluded` = 任一上层矩形与窗口相交，整个被盖住 → 错误码 `occluded`；点击点在动作时重新查叠放。跨桌面、未映射、`_NET_WM_STATE_HIDDEN` 一律 `not_viewable`。macOS 同口径留片 E。
    - 已知限制：半透明窗口也算遮挡；异形窗口按外框算；两次采样之间 XID 先消失又复用的情况靠几何和像素复核兜底。
    - 慢 OCR 与取消（片 C）：观察处理器把采样 + OCR 放到工作线程里 `await`（一次只跑一个，锁），事件循环保持可读，宿主 `/stop` 发来的 `notifications/cancelled` 能被底层 Server 处理——宿主马上拿到 `CANCELLED`、结果被丢弃，线程里的 OCR 跑完自然结束。有锁意味着取消后的下一次观察要排在被丢弃的那次 OCR 之后才开始；不被堵的是事件循环（取消通知、ping、其他工具）。协程被取消会置位本次调用的取消标记：排在锁后面的调用拿到锁先看它，点击在复核完、真正点之前再看一次，已取消就零副作用返回 `cancelled`——用户按了停止之后屏幕上不会多点一下。
+5. **片 E 实施定稿（2026-10-02，ae 定、75 实施，macOS 同口径）**：
+   - 列窗口：`CGWindowListCopyWindowInfo(kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements)`，前→后翻成底→顶。用 OptionAll 让最小化、在别的桌面的窗口也留在列表里，实例身份不断。身份是 `(kCGWindowNumber, owner PID)`，窗口号被别的进程复用算新实例。`kCGWindowLayer == 0` 才算普通窗口。
+   - 可见：`kCGWindowIsOnscreen` 且 alpha>0、外框面积为正、窗口中心落在某块显示器上。公开接口分不清最小化、在别的桌面、应用被隐藏，三者一律 `not_viewable`（与 X11 同口径）。
+   - 遮挡：`CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenAboveWindow, 目标窗口号)`，系统给的“压在它前面的所有在屏窗口”（跨层级：菜单、tooltip、Dock、通知、浮动面板；同应用的 sheet、popover 也算），去 alpha=0 的；判定交核心，口径同片 B。
+   - 坐标与缩放：外框与 `pyautogui.click` 同一套全局点（主屏左上为原点，副屏可为负）。截图请求按窗口中心所在显示器的显示模式（像素宽 ÷ 点宽）出图；`frame.scale` 由核心按截图算（主路径 2.0、回退 1.0）。观察和复核的 scale 不同（比如观察走主路径、复核退回区域截图）→ 区域摘要不在同一套像素里，判 `stale`。
+   - 权限：每次列窗口前先 `CGPreflightScreenCaptureAccess()`（只查不弹窗），没授权 → `screen_recording_not_permitted`，放在找窗口之前，免得标题拿不到被误报 `window_not_found`。绝不调用 `CGRequestScreenCaptureAccess`。
+   - 截图主路径：ScreenCaptureKit 先查可分享内容找到窗口号，`SCContentFilter(desktopIndependentWindow:)`，不带光标、不带阴影；两个异步回调各带超时（`MACOS_SCREENCAPTURE_CALLBACK_TIMEOUT_SECONDS`），超时后晚到的结果丢掉，每次调用的等待点互不共享。
+   - 回退到 mss 区域截图，原因码：`screencapturekit_unavailable`（导入失败或 pyobjc 没有 `SCScreenshotManager`，要 pyobjc 10 以上）、`screencapturekit_too_old`（`platform.mac_ver()` 低于 14）、`screencapturekit_timeout`、`screencapturekit_failed`。不回退的两种：窗口不在可分享内容里（刚关掉或应用禁止截图）→ `capture_failed`，回退会把后面别的窗口拍成它的候选；用户拒绝授权（按 NSError 的 `SCStreamErrorDomain` + `SCStreamErrorUserDeclined` 判，不看文字）→ `screen_recording_not_permitted`，没权限时区域截图只会拍到壁纸。
+   - 已知限制：回退用的 mss（10.x）在 macOS 上内部调已废弃的 `CGWindowListCreateImage`，并固定按名义分辨率出图，所以回退截图清晰度较低（scale 1）；ScreenCaptureKit 拍的是单窗口内容，候选可能落在被压住的部分，点击前复核会判 `stale`；半透明但 alpha>0 的覆盖窗口也算遮挡；横跨两块缩放不同显示器的窗口按中心所在那块算。
+   - 测试防线：真实框架只经 `computer_use_macos.load_real_macos_frameworks()` 一个入口拿，conftest 在会话级把它换成直接抛 `RealScreenAccessForbidden`（BaseException，核心吞不掉）；子进程一层由扫描守卫兜住：同时“打开屏幕观察”和“拉起 MCP 子进程”的测试文件必须带 `MY_AGENT_XVFB_LANE` 车道跳过标记。真机只读核对不在本片，由 3a 另行安排。
    - 适配器接入：固定的 MCP SDK 1.13 里 FastMCP 和底层 Server 都不能把 `CallToolResult` 原样返回，而观察合同要求失败结果是 `isError` + `structuredContent.my_agent_observation_error`，所以适配器改成单一运行路径——底层 `Server` 收发 stdio，`tools/list` 与普通 `tools/call` 交给 FastMCP 的公开协程，只有 `observe_window` / `click_candidate` 由 `computer_use_observation_tools` 的接管层按名字处理（读 `_meta` 里的观察上下文、自己编码结果）；不碰 FastMCP 私有属性。两个工具只在宿主写了 `MY_AGENT_COMPUTER_USE_OBSERVATION=1`（主配置 `computer_use_observation_enabled` 为 true 且 Computer Use 已装配）时注册。
 
 ## 4. 宿主侧：观察三件套抽成通用的
@@ -230,7 +243,7 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 5. **真实模型验收**（Linux 车道容器，主模型 MiniMax M3，Jev 真实）：
    - 四档各发一次 prompt；
    - 记录 Jev 用量、选中候选、提示和执行是否发生、复核拒绝次数、M3 是否采纳。
-6. **macOS 后端和片 G**：假 Quartz、假 ScreenCaptureKit、假 AX 单测；真机只读核对另行安排。
+6. **macOS 后端和片 G**：假 Quartz、假 ScreenCaptureKit、假 AX 单测；真机只读核对另行安排。片 E 已按此实施（`test_computer_use_macos.py`、`test_screen_capture_guard.py`）。
 
 ## 9. 给能看图的主模型附截图（第二期）
 
@@ -244,7 +257,7 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 | B | Linux X11 后端 + `observe_window`、`click_candidate` + 适配器复核 + profile 声明 + `computer_use_observation_enabled` + 属主范围用例 | 6–8 h |
 | C | 车道镜像加 Xvfb、openbox、Tk 测试窗口；集成测试；变异（已实施：`test_computer_use_xvfb_cases.py` 覆盖关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计 0.15–0.20；派生镜像 Dockerfile.desktop + xvfb_lane.sh 待 3a 落位；Debian 包清单与 pymonctl 要 xrandr 的硬性要求见 computer-use.md 当前边界） | 4–5 h |
 | D | `action_candidate` 接粗位置；自动执行路径和能力开关；假 Jev 四档 | 5–6 h |
-| E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测 | 4–5 h |
+| E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测（已实施 2026-10-02，75，分支 `claude/75-j16-slice-e`，待 ae 复审） | 4–5 h |
 | F | 真实验收（M3 + Jev，Linux 车道）+ 文档、台账、TESTS | 3–4 h |
 | G | macOS AX 候选 + `type_into_candidate` 注册；Linux AT-SPI 可选评估和安装说明；合并去重 | 5–7 h |
 

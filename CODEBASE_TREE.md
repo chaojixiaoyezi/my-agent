@@ -716,7 +716,10 @@ agent_py_agent/
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
 |   |   |-- computer_use_server.py    # 用公开 MCP 接口组合上游桌面工具、滚轮及文本输入；底层 Server 单一运行路径，按环境标记装观察接管层
 |   |   |-- computer_use_observation_tools.py # J16 屏幕观察两个工具的接入胶水：tools/list 声明、底层 tools/call 接管、_meta 读取与 isError+structuredContent 编码
-|   |   |-- computer_use_x11.py       # Linux X11 真后端：叠放列窗、上层矩形（含 override-redirect 与边框）、mss 截图、RapidOCR 区域、点击
+|   |   |-- computer_use_x11.py       # Linux X11 真后端：叠放列窗、上层矩形（含 override-redirect 与边框）、mss 区域截屏（screen_region）、点击
+|   |   |-- computer_use_macos.py     # macOS 真后端（片 E）：Quartz 列窗与遮挡、权限预检、ScreenCaptureKit 单窗口截图与 mss 回退（带原因）、点击
+|   |   |-- computer_use_backends.py  # 屏幕观察后端唯一选择入口：darwin → MacBackend，其余 → X11Backend
+|   |   |-- screen_ocr.py             # 两个桌面后端共用的 RapidOCR 识别器（文字区域 → TextRegion）
 |   |   |-- screen_observation.py     # 屏幕观察核心（来源无关）：选窗、采样、候选、快照、动作前五项复核、复核通过立刻点击
 |   |   |-- screen_observation_store.py # 窗口实例登记（boot + 实例号）与每窗最近 4 代快照环（只存几何、可见事实、候选 region/grid）
 |   |   |-- screen_region_digest.py   # 候选区域像素摘要口径：灰度 → 16×8 面积平均 → 16 级量化 → sha；容差判定
@@ -1030,6 +1033,9 @@ agent_py_agent/
 |   |-- test_computer_use_observation_tools.py # J16 片 B 接入：开关并入声明与环境标记、属主范围、工具调用三元组、底层处理器（假 mcp.types）、X11 后端假 Xlib
 |   |-- test_computer_use_xvfb_lane.py   # J16 车道 Xvfb 冒烟（默认跳过）：真适配器观察 → 点击 → 再观察、移动后过期、开关关着只有上游工具
 |   |-- test_computer_use_xvfb_cases.py  # J16 片 C 车道集成（默认跳过）：关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计
+|   |-- test_computer_use_macos.py # J16 片 E：假 Quartz/ScreenCaptureKit/mss 上的列窗、可见、遮挡、多显示器缩放、回退原因、权限与晚到回调
+|   |-- test_screen_capture_guard.py # 真实屏幕防线自检：真实框架入口一调就失败且吞不掉；“开观察 + 拉子进程”的测试必须带车道标记
+|   |-- _screen_capture_guard.py # 测试侧真实屏幕防线：RealScreenAccessForbidden 与车道标记扫描规则
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
 |   |-- test_subagent_takeover_hint.py   # 执行器退出后给父级的结构化接替提示：合同形状、开关开关两种回执、各消费方投影、只属一份结果（C4）
 |   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入

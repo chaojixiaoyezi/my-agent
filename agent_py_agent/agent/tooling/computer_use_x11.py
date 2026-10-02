@@ -2,14 +2,17 @@
 #   screen_observation.ScreenObserver 提供"窗口列表（按叠放底→顶）、上层矩形、窗口截图、OCR 文字区域、点击"五个事实；不切焦点、
 #   不激活、不移动鼠标（click 除外）。所有桌面库都在方法里惰性 import：没有 DISPLAY 的进程也能构造后端，错误在调用时变成
 #   ObservationError。坐标：X11 全局坐标就是像素，缩放固定 1；几何取客户区（translate_coords 到根窗口），遮挡矩形加 _NET_FRAME_EXTENTS 边框。
+#   截图是 mss 按区域截屏：压在上面的窗口也会被拍进去，所以如实报 capture="screen_region"（片 E 起由后端报，核心不再写死）。
+#   OCR 用与 macOS 后端共用的 screen_ocr.RapidOcrReader。
 #   不调上游 computer_control_mcp 的内部对象。真实验证只在 Linux 车道容器（Xvfb + openbox）做，Mac 上只用假后端。
 # 模块用途: 把 X11 桌面变成观察核心能理解的几个事实，自己不做任何判定。
 from __future__ import annotations
 
 from typing import Any
 
-from .screen_observation import TextRegion, WindowInfo
+from .screen_observation import SCREEN_REGION_CAPTURE, ScreenCapture, TextRegion, WindowInfo
 from .screen_observation_store import WindowGeometry
+from .screen_ocr import RapidOcrReader
 from .screen_region_digest import PixelBuffer
 
 # _NET_WM_DESKTOP 里"所有桌面"的 EWMH 协议约定值（协议常数，不进常数目录）
@@ -21,7 +24,7 @@ _ALL_DESKTOPS_PROTOCOL_VALUE = 0xFFFFFFFF
 class X11Backend:
     def __init__(self, display: Any | None = None) -> None:
         self._display = display
-        self._ocr_engine: Any | None = None
+        self._ocr = RapidOcrReader()
 
     # 函数用途: 按 _NET_CLIENT_LIST_STACKING 底→顶列出客户端窗口及其当下事实。
     def list_windows(self) -> list[WindowInfo]:
@@ -46,40 +49,24 @@ class X11Backend:
                 rects.append(self._frame_rect(display, root, child.id))
         return [rect for rect in rects if rect is not None]
 
-    # 函数用途: 用 mss 按窗口客户区矩形截图（RGB 原始字节）。
-    def capture(self, info: WindowInfo) -> PixelBuffer:
+    # 函数用途: 用 mss 按窗口客户区矩形截屏（RGB 原始字节），采样方式如实报 screen_region。
+    def capture(self, info: WindowInfo) -> ScreenCapture:
         import mss
 
         origin, size = info.geometry.origin, info.geometry.size
         with mss.mss() as grabber:
             shot = grabber.grab({"left": int(origin[0]), "top": int(origin[1]), "width": int(size[0]), "height": int(size[1])})
-        return PixelBuffer(int(shot.width), int(shot.height), bytes(shot.rgb))
+        return ScreenCapture(PixelBuffer(int(shot.width), int(shot.height), bytes(shot.rgb)), SCREEN_REGION_CAPTURE)
 
-    # 函数用途: RapidOCR 公开调用 RapidOCR()(image) 的文字区域；box 四点取外框。
+    # 函数用途: 截图里的文字区域（共用的 RapidOCR 识别器）。
     def ocr(self, buffer: PixelBuffer) -> list[TextRegion]:
-        import numpy
-
-        image = numpy.frombuffer(buffer.rgb, dtype=numpy.uint8).reshape(buffer.height, buffer.width, 3)[:, :, ::-1]
-        result, _elapsed = self._engine()(numpy.ascontiguousarray(image))
-        regions = []
-        for box, text, _score in result or []:
-            xs, ys = [float(point[0]) for point in box], [float(point[1]) for point in box]
-            regions.append(TextRegion(str(text), (round(min(xs)), round(min(ys)), round(max(xs) - min(xs)), round(max(ys) - min(ys)))))
-        return regions
+        return self._ocr.read(buffer)
 
     # 函数用途: 在全局像素坐标点一下（复核通过后立刻调用，中间不做别的 I/O）。
     def click(self, x: int, y: int) -> None:
         import pyautogui
 
         pyautogui.click(int(x), int(y))
-
-    # 函数用途: 惰性创建并缓存 OCR 引擎（加载模型较慢）。
-    def _engine(self) -> Any:
-        if self._ocr_engine is None:
-            from rapidocr_onnxruntime import RapidOCR
-
-            self._ocr_engine = RapidOCR()
-        return self._ocr_engine
 
     # 函数用途: 惰性打开 X 连接并返回 (display, root)。
     def _root(self) -> tuple[Any, Any]:

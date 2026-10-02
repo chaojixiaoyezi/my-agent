@@ -343,8 +343,10 @@ def test_x11_backend_capture_ocr_and_click_use_the_public_library_calls(monkeypa
 
     backend = X11Backend(_Display(_Win(0x1, (0, 0, 10, 10)), {}))
     info = WindowInfo(native_id=0x10, title="t", geometry=WindowGeometry((100, 50), (320, 200), (1, 1)), viewable=True, hidden=False, desktop=0, current_desktop=0)
-    buffer = backend.capture(info)
+    capture = backend.capture(info)
+    buffer = capture.buffer
     assert grabs == [{"left": 100, "top": 50, "width": 320, "height": 200}] and (buffer.width, buffer.height) == (320, 200)
+    assert (capture.kind, capture.fallback_reason) == ("screen_region", None), "mss 按区域截屏，如实报 screen_region"
     regions = backend.ocr(buffer)
     assert [(r.text, r.region) for r in regions] == [("提交", (10, 20, 60, 18))]
     backend.click(150, 89)

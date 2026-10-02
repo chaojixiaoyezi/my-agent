@@ -21,6 +21,19 @@
   - 同一 TUI 发“继续”，新请求 0.22 秒跑完。
   - 证据 `~/.my-agent/decision-evidence/resume-limit-20261002/real-kill9/`。
 
+## J16 片 E：macOS 屏幕观察后端（75，2026-10-02，分支 `claude/75-j16-slice-e`）
+
+- **新增 `test_computer_use_macos.py`**（全用假 Quartz / 假 ScreenCaptureKit / 假 mss，不碰真实屏幕、不触发授权弹窗）：
+  - 列窗口：没屏幕录制权限时直接 `screen_recording_not_permitted`，一次都没列窗口；前→后翻成底→顶、身份 (窗口号, PID)、layer≠0 不是普通窗口、主屏 Retina 2.0 与副屏负原点 1.0、alpha=0 / 不在屏上 / 不在任何显示器上都不可见；最小化或透明的别名报 `not_viewable`，恢复后实例身份不变。
+  - 主路径：Retina 上 `capture=window_image`、scale 2.0、截图配置 320×200 不带光标不带阴影，宿主接受载荷，点击点在全局点；副屏按自己的缩放出图、点击点带负原点。
+  - 遮挡：只算压在前面的窗口（身后的大窗口不算），alpha=0 的覆盖层不算，部分压住只记事实、整个盖住 `occluded`，点击前点击点被新弹出的窗口压住 → `stale`。
+  - 回退（6 种原因参数化）：导入失败 / 系统太老 / 绑定缺失 / 回调报错 / 没出图 / 超时，都退回 mss 名义分辨率截图，`capture_fallback{reason}` 在结果顶层，scale 1.0，点击点照样准。窗口不在可分享内容里 → `capture_failed` 不回退；用户拒绝授权按 domain+code 判（文字写着 declined 也不算）；超时后晚到的回调不会被下一次调用当成自己的；观察走主路径、复核退回区域截图 → scale 变了判 `stale`。
+  - 后端选择：darwin → MacBackend，其余 → X11Backend，构造不碰屏幕。
+- **新增 `test_screen_capture_guard.py`**：不注入假框架时列窗口、上层矩形、截图、点击都当场 `RealScreenAccessForbidden`，且没有 import 任何真实框架；核心截图外层吞不掉它；扫描守卫在当前 tests/ 下零违规，样例文本覆盖违规与不违规。
+- **改了的旧用例**：`test_screen_observation_core.py` 假后端返回 `ScreenCapture`，新增采样方式与顶层回退原因（宿主照常接受）、scale 按截图算（列表给 1、截图 2 倍）、宽高比例对不上 `capture_failed`、复核时 scale 变了 `stale`、后端结构化码透传与旧形状被拒；`test_computer_use_observation_tools.py` 的 X11 用例断言 `screen_region`。
+- **变异**：20 个全部抓到（遮挡判反、主屏 scale、丢显示器原点、回退不给原因、跳过预检、列表不翻转、非 0 层算普通、alpha=0 算可见、守卫可被吞、window_missing 走回退、晚到回调被采用、预检在列窗之后、拒绝授权按文字判、capture_fallback 进 frame、scale 取列表、复核不比 scale、删系统版本检查、核心吞后端结构化码、行填充没去掉、宽高比例不一致放过）。
+- **门禁**：相关测试 28 个文件（屏幕观察、Computer Use、观察绑定、常数目录与全仓扫描守卫、test_packaging）585 项通过、7 项车道用例按设计跳过；严格门禁全部通过，size diff 新增 0。
+
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`）
 
 - **`test_curator_thread_model_routing.py` 新增 2 项**（共 23 项）：
