@@ -332,11 +332,13 @@ def _render_hint(candidate: dict | None, available: frozenset[str]) -> str:
 
 
 # LLM: 自动执行已计划时的提示：写明宿主将以 actor=decision 调用哪个工具，但执行与否、结果如何只以随后的 [host-action-record]
-#   记录为准（没有那条记录就是没执行），不在这里预报成功。
+#   记录为准（没有那条记录就是没执行），不在这里预报成功。末尾提醒不要对同一候选重复执行（点击后按钮外观可能不变，两层复核都会放行，
+#   再点就是重复提交）：这是软提示，不加硬门。
 # 函数用途: 渲染“宿主将自动执行”的提示，超过展示预算则完全不追加。
 def _auto_hint(candidate: dict, tool_name: str) -> str:
     hint = (f"{_HINT_TAG}\n宿主将按建议以 actor=decision 自动执行候选 {candidate['candidate_id']}（{candidate['role']}）："
-            f"{tool_name}；是否执行、结果如何以随后的 [host-action-record] 记录为准，没有该记录即未执行。")
+            f"{tool_name}；是否执行、结果如何以随后的 [host-action-record] 记录为准，没有该记录即未执行。"
+            "宿主执行后，不要对同一候选重复执行；需要再操作请先重新观察。")
     return hint if len(hint) <= _MAX_HINT_CHARS else ""
 
 

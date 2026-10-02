@@ -228,7 +228,8 @@
   `actor`、`decision_ref`，动作调用另带 `observation_action{observation_id, candidate_id, tool, task_id}`；决策账追加 `record_kind=auto_execution` 补充行
   （`result_category = auto_execution:executed | auto_execution:skipped:<原因码>`，`auto_execution{operation_id, tool, ok, error_code, reported_error_code,
   effect_outcome, handler_executed, status}` 或 `{reason}`），与工具账共用 `decision_ref`。
-- **模型看到什么**：观察记录后的提示改成“宿主将按建议以 actor=decision 自动执行候选 X：工具；是否执行、结果如何以随后的 `[host-action-record]` 记录为准，没有该记录即未执行”；
+- **模型看到什么**：观察记录后的提示改成“宿主将按建议以 actor=decision 自动执行候选 X：工具；是否执行、结果如何以随后的 `[host-action-record]` 记录为准，没有该记录即未执行。
+  宿主执行后，不要对同一候选重复执行；需要再操作请先重新观察”（ae 复审建议：点击后按钮外观可能不变，两层复核都会放行，再点就是重复提交；软提示，不加硬门）；
   宿主调用的记录以 `[host-action-record round=R index=K actor=decision]` / `[host-action-output-record …]` 块进 tool_context（text 下同链展示；native 下它不是 IR 承载条目，
   经 runtime.guidance 转发，不伪造 assistant tool_use，也不进原生 IR 配对）。
 - **一次只做一次**：复核拒绝（stale / not_found）、执行失败、用户拒绝、取消都只记账，不重试、不改选候选；同一观察第二次进决策点会被幂等事实挡下（`already_acted`）。
