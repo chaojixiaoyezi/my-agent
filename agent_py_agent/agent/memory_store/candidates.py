@@ -16,6 +16,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_text_file_atomic_unlocked,
 )
+from ..common.text_norm import fold_key
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaEnforcer
 from .candidate_models import (
     CANDIDATE_ORIGINS,
@@ -38,6 +39,7 @@ from .candidate_models import (
     utc_now_iso,
 )
 from .operations import memory_content_hash
+from .scope_contract import canonical_scope_key
 
 
 # LLM: 损坏候选账本必须阻断写入；跳过坏行会在下一次原子写时永久丢数据。
@@ -341,6 +343,13 @@ class CandidateService:
         return records
 
 
+# LLM: 同一宿主观察身份被拿去对应另一个类型化主题时抛出；仍是 ValueError（原调用方的全有或全无语义不变），
+#   单列子类只为让 Curator 能精确识别这一种冲突并只丢弃那一条（split_identity_conflicts）。
+# 类用途: 表示一条观察撞上了已有观察身份、但类型化主题不同。
+class CandidateIdentityConflictError(ValueError):
+    pass
+
+
 # LLM: Curator batch commit and the ordinary observe_many path share this exact pure merge;
 # neither may invent a second candidate ID or occurrence-count rule.
 # 函数用途: 将一批 observation 合并进已验证账本并返回新的完整账本和对应当前态。
@@ -368,7 +377,7 @@ def merge_candidate_observations(
             result.append(candidate)
         else:
             if not _same_candidate_identity(existing, normalized):
-                raise ValueError(
+                raise CandidateIdentityConflictError(
                     "candidate observation identity was reused for a different typed subject"
                 )
             candidate = _merge_candidate(existing, normalized, observation_key)
@@ -379,6 +388,8 @@ def merge_candidate_observations(
 
 # LLM: An observation replay may paraphrase content, but it cannot change the typed candidate
 # subject, scope, action, target, or promotion authority behind the same host identity.
+#   主题键与范围必须按与身份计算（stable_candidate_id 的 fold_key、Curator 观察身份的规范范围键）同一口径比较：
+#   只差大小写/书写形式的主题不能被当成“另一个主题”而让整批提交失败（J13，2026-10-02）。
 # 函数用途: 判断一个已存在候选是否可安全接收同 observation key 的重放。
 def _same_candidate_identity(
     current: MemoryCandidate,
@@ -386,12 +397,42 @@ def _same_candidate_identity(
 ) -> bool:
     return (
         current.candidate_type == observation.candidate_type
-        and current.subject_key == observation.subject_key
-        and current.scope == MemoryScope.from_value(observation.scope).to_dict()
+        and fold_key(current.subject_key) == fold_key(observation.subject_key)
+        and _identity_scope(current.scope) == _identity_scope(observation.scope)
         and current.proposed_action == observation.proposed_action
         and current.target_entry_id == observation.target_entry_id
         and current.promotion_target == observation.promotion_target
     )
+
+
+# LLM: 与 Curator 观察身份（curator_validation._canonical_observation_id）同一口径：范围键取规范键，坏值保持原样。
+# 函数用途: 生成同身份比对用的范围投影。
+def _identity_scope(value: object) -> dict[str, object]:
+    scope = MemoryScope.from_value(value)
+    try:
+        key = canonical_scope_key(scope.scope_type, scope.scope_key)
+    except (ValueError, TypeError):
+        key = scope.scope_key
+    return {**scope.to_dict(), "scope_key": key}
+
+
+# LLM: 纯函数，不写账本：用与提交完全相同的 merge_candidate_observations 逐条试合并，只把抛
+#   CandidateIdentityConflictError 的那几条剔掉；其它校验错误照常上抛（原全有或全无语义不变）。
+#   供 Curator 在整批提交前调用，一条冲突不再拖死整批、也不再让同一批反复重放。
+# 函数用途: 把一批观察分成可提交的和身份冲突的，返回（可提交的观察, 剔除条数）。
+def split_identity_conflicts(
+    candidates: list[MemoryCandidate],
+    observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
+) -> tuple[tuple[CandidateObservation, ...], int]:
+    merged = list(candidates)
+    kept: list[CandidateObservation] = []
+    for observation in observations:
+        try:
+            merged, _committed = merge_candidate_observations(merged, [observation])
+        except CandidateIdentityConflictError:
+            continue
+        kept.append(observation)
+    return tuple(kept), len(observations) - len(kept)
 
 
 # LLM: Complete validation happens before the caller writes any ledger, preserving batch
@@ -794,6 +835,8 @@ def _candidate_index(candidates: list[MemoryCandidate], candidate_id: str) -> in
 __all__ = [
     "CandidateService",
     "CandidateStoreCorruptError",
+    "CandidateIdentityConflictError",
     "CandidateTransitionError",
     "merge_candidate_observations",
+    "split_identity_conflicts",
 ]

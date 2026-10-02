@@ -7,6 +7,7 @@ from __future__ import annotations
 # 模块用途: 调度增量策展、严格模型提取、整批提交、失败审计与保守自动晋升。
 
 import json
+import logging
 import time
 import uuid
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from ..backends.provider_headers import provider_session_scope
 from ..common.json_io import read_json_object_report
 from ..common.log_redaction import redact_sensitive_text
 from .candidate_models import CandidateObservation, host_promotion_mode, utc_now_iso
-from .candidates import CandidateService
+from .candidates import CandidateService, split_identity_conflicts
 from .curator_backend import (
     CuratorModelAttempt,
     CuratorModelCallError,
@@ -45,14 +46,23 @@ from .curator_inputs import (
 )
 from .curator_models import (
     CURATOR_MODEL_NOT_CONFIGURED,
+    CURATOR_REPLAY_BREAKER_FAILURE_COUNT,
+    CURATOR_REPLAY_BREAKER_OPEN,
+    CURATOR_REPLAY_DETERMINISTIC_CODES,
     CuratorExtraction,
     CuratorRunResult,
     MemoryCuratorConfig,
     MemoryCuratorState,
     curator_failure_retry_seconds,
+    curator_replay_breaker_tripped,
     validate_curator_state,
 )
-from .curator_run_log import CuratorRunLog, CuratorRunRecord
+from .curator_run_log import (
+    RUN_WARNING_MAX_CHARS,
+    RUN_WARNINGS_MAX_COUNT,
+    CuratorRunLog,
+    CuratorRunRecord,
+)
 from .curator_state import (
     CuratorLeaseLostError,
     CuratorStateCorruptError,
@@ -63,6 +73,7 @@ from .curator_state import (
 from .curator_validation import CuratorCursorAdvance, next_cursors, validate_extraction
 from .daily import DailyMemoryEvent, DailyMemoryStore
 
+_LOGGER = logging.getLogger(__name__)
 _RUN_STATUSES = frozenset({"succeeded", "failed", "busy", "disabled", "not_due"})
 _REASON_PRIORITY = (
     "pre_compact",
@@ -251,6 +262,7 @@ class _CuratorLifecycleMixin:
     ) -> CuratorRunResult:
         failure_code = _failure_code(exc)
         finished_at = utc_now_iso()
+        state_code, breaker_warnings = _replay_breaker(self.run_log, context, failure_code)
         try:
             self.run_log.append(
                 _failed_run_record(
@@ -262,15 +274,16 @@ class _CuratorLifecycleMixin:
                     failure_diagnostic=_failure_diagnostic(exc),
                     # 缩批/重试的形状来自本线程最后一次 extract_with_retries;失败时它是唯一能
                     # 说明"空批失败还是大批量超时"的证据,所以必须在失败审计里落盘。
-                    attempt_warnings=_attempt_shape_warnings(last_model_attempts()),
+                    attempt_warnings=(*breaker_warnings,
+                                      *_attempt_shape_warnings(last_model_attempts())[: RUN_WARNINGS_MAX_COUNT - 2]),
                 )
             )
         except Exception:
-            failure_code = "CURATOR_RUN_AUDIT_FAILED"
+            failure_code = state_code = "CURATOR_RUN_AUDIT_FAILED"
         try:
             self.state_store.commit_failure(
                 lease_id=context.lease_id,
-                failure_code=failure_code,
+                failure_code=state_code,
                 now=finished_at,
             )
         except CuratorStateCorruptError as exc:
@@ -538,7 +551,7 @@ class _CuratorExecutionMixin:
         *,
         extra_warnings: tuple[str, ...] = (),
     ) -> CuratorRunResult:
-        prepared = _prepare_outputs(context, batch, extraction)
+        prepared = _without_identity_conflicts(self.candidate_service, _prepare_outputs(context, batch, extraction))
         finished_at = utc_now_iso()
         run_record = _successful_run_record(
             context,
@@ -896,6 +909,40 @@ class _PreparedOutputs:
     warnings: tuple[str, ...]
 
 
+# LLM: 只读候选账本，用提交同一个合并函数预演：撞上已有观察身份但类型化主题不同的单条候选被剔除，
+#   记结构化警告 curator_candidate_identity_conflict_dropped:<条数> 并打日志告警，其余照常整批提交、游标照常推进。
+#   预演与提交之间若有别处写入造成新冲突，提交仍按原严格语义失败（极少见，由重放熔断兜底）。
+# 函数用途: 提交前剔除会让整批失败的观察身份冲突候选。
+def _without_identity_conflicts(candidate_service: CandidateService, prepared: _PreparedOutputs) -> _PreparedOutputs:
+    if not prepared.candidates:
+        return prepared
+    kept, dropped = split_identity_conflicts(candidate_service.list(), prepared.candidates)
+    if not dropped:
+        return prepared
+    _LOGGER.warning("memory curator dropped %d candidate(s) whose observation identity conflicts", dropped)
+    warnings = (*prepared.warnings[: RUN_WARNINGS_MAX_COUNT - 1], f"curator_candidate_identity_conflict_dropped:{dropped}")
+    return replace(prepared, candidates=kept, warnings=warnings)
+
+
+# LLM: 只读最近的运行账；本次是确定性失败（提交被拒/输出解析失败），且之前紧挨着的几次都在同一起始游标上
+#   确定性失败时，state 改记 CURATOR_REPLAY_BREAKER_OPEN（退避一小时，发现层同源），运行账保留真实失败码并加
+#   curator_replay_breaker_open:<真实失败码> 警告，打日志告警。读运行账出错时不熔断，按原失败码处理。
+# 函数用途: 判断同一批输入的重放是否达到上限，返回写进 state 的失败码与要加的运行账警告。
+def _replay_breaker(run_log: CuratorRunLog, context: _RunContext, failure_code: str) -> tuple[str, tuple[str, ...]]:
+    if failure_code not in CURATOR_REPLAY_DETERMINISTIC_CODES:
+        return failure_code, ()
+    try:
+        previous = run_log.recent_finished(CURATOR_REPLAY_BREAKER_FAILURE_COUNT - 1)
+    except Exception:
+        return failure_code, ()
+    cursor = _cursor_payload(context.state_before.per_thread_cursors, context.state_before.last_processed_audit_event_id)
+    if not curator_replay_breaker_tripped(failure_code, cursor, previous):
+        return failure_code, ()
+    _LOGGER.warning("memory curator replay breaker open: the same input failed %d times in a row (%s)",
+                    CURATOR_REPLAY_BREAKER_FAILURE_COUNT, failure_code)
+    return CURATOR_REPLAY_BREAKER_OPEN, (f"curator_replay_breaker_open:{failure_code}",)
+
+
 # LLM: Empty runs use the same output object and transaction, proving admin/finalize requests
 # release their lease without a second no-work commit path.
 # 函数用途: 将验证后的 extraction 转成宿主持有的提交对象。
@@ -918,6 +965,9 @@ def _prepare_outputs(
         batch,
         extraction,
     )
+    # 模型警告允许最长 500 字、最多 32 条（解析口径），运行账只收 300 字以内、总数 32 条；这里先截短限数并给
+    # 宿主警告留一个位置，免得一条长警告让整批记账失败、同一批被反复重放。
+    model_warnings = tuple(item[:RUN_WARNING_MAX_CHARS] for item in extraction.warnings)[: RUN_WARNINGS_MAX_COUNT - 1]
     extracted_at = utc_now_iso()
     daily = tuple(
         draft.to_daily_event(curator_run_id=context.run_id, extracted_at=extracted_at)
@@ -928,7 +978,7 @@ def _prepare_outputs(
     candidates = tuple(
         _fill_candidate_promotion_authority(item) for item in extraction.candidates
     )
-    return _PreparedOutputs(daily, candidates, cursor, tuple(extraction.warnings))
+    return _PreparedOutputs(daily, candidates, cursor, model_warnings)
 
 
 # LLM: Host authority comes from the shared typed candidate policy. This adapter only fills the

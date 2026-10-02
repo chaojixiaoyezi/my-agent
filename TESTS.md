@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复）（2026-10-02，分支 `claude/be-curator-identity`，基于 `85740cde6`）
+
+- **新增 `test_curator_observation_identity.py`（9 项）**：用真实 ConversationStore、候选库、state、运行账和脚本化后端，不发网络请求。
+  - 同一条消息里主题键只差大小写的两条候选：整批成功、游标推进、按同一观察合并（修复前是 `CURATOR_COMMIT_FAILED`）。
+  - 与账本已有观察身份冲突的单条：被剔除并记 `curator_candidate_identity_conflict_dropped:1`，其余照常写入，已有候选不改。
+  - 32 条模型警告、其中一条 450 字：整批成功，运行账警告都在 300 字、32 条以内。
+  - 同一输入连续 3 次输出解析失败：state 记熔断码，运行账保留真实失败码加熔断警告，退避 3600 秒，一小时内的待处理运行返回 `not_due`。
+  - 中间有一次成功时不熔断；网络类失败不计入。
+  - 熔断判断函数：游标不同、失败码不是确定性、条数不够、夹着成功都不熔断。
+  - 共用合并函数仍严格，冲突异常仍是 ValueError；剔除函数只剔身份冲突，其它校验错误照常上抛。
+  - 范围旧别名 `task:abc` 与规范键 `project:abc` 按同一范围比对。
+- **门禁**：
+  - 相关 32 个测试文件、本文件加 10 个守卫：786 passed。
+  - ruff、import 边界、doc_sync、`diff --check`、`size_diff` 新增 0、clean_package、常数目录重生成。
+- **变异**：12 个全部抓住。包括主题比对回到原样、范围比对回到原样、提交前不剔除、剔除吞掉所有 ValueError、合并抛普通 ValueError、模型警告不截短、永不熔断、网络类失败也计入、熔断码不拉长退避、不比游标、state 记真实失败码、熔断不看前几条状态。
+
 ## 去抖：探测超时用例的“不重试”断言改成最多 1 次（2026-10-02，3a）
 
 - **现象**：Linux 12 片车道（`92842d69b`）第 5 片 `test_decision_model_operations.py::test_native_probe_timeout_is_bounded_and_does_not_retry`

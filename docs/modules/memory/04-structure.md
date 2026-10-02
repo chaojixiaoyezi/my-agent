@@ -618,3 +618,10 @@ Curator 设置读回的 `runtime_scope=owner_background` 与实际服务一致�
 retention 的恢复材料扫描同样按这两个规范根进行（`retention_scan._recovery_roots` 返回 `owner_tasks_dir` 与 `owner_runs_dir`，`_iter_task_states` 逐个产出根与其下的 `work/state.json`）：旧 `O/tasks` 与新版 `O/runs` 共用同一套 `work/state.json` 合同，终态判断只读结构化 `status`（`TASK_TERMINAL_STATUSES` 白名单），不看 mtime 也不看目录名，保留天数沿用 `completed_task_days`；`audits` 与会话恢复材料不在本片范围。
 
 retention 扫描根与深度不再写死在本模块：`retention_scan._recovery_roots` 从 `conversation.workspace_paths` 推导规范根（`validated_durable_work_path` 列出全部持久工作根，`canonical_task_root(owner_home, path)` 判断"给定路径是不是规范任务根"），`O/runs/<date>/<key>`、旧 `O/tasks/<date>/<key>`（深度 2）与 `O/audits/<audit_id>`（深度 1）各按自己的深度校验，深一层或浅一层都不算任务根；三处 `rglob`（`_iter_task_states`、`_tool_output_actions`、`_subagent_scratch_actions`）都先过这个判断，`tool_output` 仍只扫旧 `O/tasks`，`audit` 类别（`O/audit/*.jsonl`）一律跳过。`retention.apply` 的整份拒绝维持原样（`plan.errors` 或 `legal_hold` 非空即 `applied=False`、零动作），单棵子树错误只隔离那一棵：`_without_errored_subtrees` 先算出错误路径自身的键集合（逐条解析后取并集）和"错误 + 全部祖先"集合，再对每个动作做两次 O(深度) 查表，判据是单向的"错误是动作的祖先"或"动作是错误的祖先"——两边都取祖先集合求交会命中公共祖先、把兄弟目录误判成同一棵树。
+
+## Curator 提交前的身份冲突剔除与重放熔断（2026-10-02）
+
+- `candidates.merge_candidate_observations` 是候选账本唯一合并入口，保持严格：同一观察身份对应不同类型化主题时，抛 `CandidateIdentityConflictError`（ValueError 子类）。
+- `_same_candidate_identity` 与身份计算同口径：主题键按 `fold_key` 比较，范围按 `scope_contract.canonical_scope_key` 规范键比较。
+- `candidates.split_identity_conflicts` 是纯函数，用同一个合并函数逐条预演，只剔除身份冲突的那几条。`curator.MemoryCuratorService._without_identity_conflicts` 在生成运行记录前调用它，并记警告。
+- 重放熔断的判断是纯函数 `curator_models.curator_replay_breaker_tripped`，读取最近运行记录用 `curator_run_log.CuratorRunLog.recent_finished`，退避由 `curator_failure_retry_seconds` 给出（熔断码 3600 秒）。

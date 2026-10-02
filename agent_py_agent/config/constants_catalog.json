@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 804,
+  "count": 808,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3618,6 +3618,38 @@
       "unit": "秒",
       "category": "重试",
       "description": "模型未配置时最多等 1 小时再重试：避免高频空转，配好后最迟一小时恢复。"
+    },
+    {
+      "name": "CURATOR_REPLAY_BREAKER_FAILURE_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_models.py",
+      "value": 3,
+      "unit": "个",
+      "category": "其它",
+      "description": "同一起始游标连续确定性失败几次就熔断（含本次）：3 次足以排除偶发，又不至于多烧几次大调用。"
+    },
+    {
+      "name": "CURATOR_REPLAY_BREAKER_RETRY_SECONDS",
+      "file": "agent_py_agent/agent/memory_store/curator_models.py",
+      "value": 3600,
+      "unit": "秒",
+      "category": "重试",
+      "description": "熔断后的退避秒数：同一批最多每小时重放一次；输入变了或成功后自动恢复原节奏。"
+    },
+    {
+      "name": "RUN_WARNINGS_MAX_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_run_log.py",
+      "value": 32,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "一条运行记录最多保留的警告条数：运行账只放诊断码/短标签，条数有界。"
+    },
+    {
+      "name": "RUN_WARNING_MAX_CHARS",
+      "file": "agent_py_agent/agent/memory_store/curator_run_log.py",
+      "value": 300,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "运行记录里每条警告的最大字符数；写入方须先截短，超出会让整次记账失败。"
     },
     {
       "name": "_QUARANTINE_BACKOFF_SECONDS",

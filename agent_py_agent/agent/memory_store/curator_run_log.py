@@ -20,6 +20,10 @@ from .candidate_models import normalize_iso_time, utc_now_iso
 from .curator_models import CURATOR_RUN_SCHEMA_VERSION, CURATOR_TRIGGER_REASONS
 
 _RUN_AUDIT_STATUSES = frozenset({"succeeded", "failed", "recovered_rollback"})
+# 一条运行记录最多保留的警告条数：运行账只放诊断码/短标签，条数有界。
+RUN_WARNINGS_MAX_COUNT = 32
+# 运行记录里每条警告的最大字符数；写入方须先截短，超出会让整次记账失败。
+RUN_WARNING_MAX_CHARS = 300
 _RUN_AUDIT_PHASES = frozenset({"final", "recovery"})
 
 
@@ -93,6 +97,19 @@ class CuratorRunLog:
             rows = merge_run_record(existing, normalized)
             write_text_file_atomic_unlocked(path, run_records_text(rows))
         return normalized
+
+    # LLM: 只读；从最新的日分片往前读，只收已结束（succeeded/failed）的记录，按完成时间新到旧，凑够 count 条即停。
+    #   供重放熔断判断“同一游标是否连续失败”，不扫全部历史。
+    # 函数用途: 返回最近 count 条已结束的运行记录（新到旧）。
+    def recent_finished(self, count: int) -> list[CuratorRunRecord]:
+        found: list[CuratorRunRecord] = []
+        for path in sorted(self.runs_dir.glob("*.jsonl"), reverse=True):
+            with locked_json_path(path):
+                rows = load_run_records_unlocked(path)
+            found.extend(row for row in rows if row.status in {"succeeded", "failed"})
+            if len(found) >= count:
+                break
+        return sorted(found, key=lambda row: row.finished_at, reverse=True)[:count]
 
     # LLM: Health and tests can inspect structured audit without parsing files independently.
     # 函数用途: 严格列出所有日分片中的 run audit。
@@ -223,7 +240,7 @@ def _bounded_warnings(values: object) -> list[str]:
     if not isinstance(values, (list, tuple)):
         raise ValueError("memory curator run warnings must be an array")
     result = [str(value).strip() for value in values if str(value).strip()]
-    if len(result) > 32 or any(len(value) > 300 for value in result):
+    if len(result) > RUN_WARNINGS_MAX_COUNT or any(len(value) > RUN_WARNING_MAX_CHARS for value in result):
         raise ValueError("memory curator run warnings exceed bounds")
     return list(dict.fromkeys(result))
 

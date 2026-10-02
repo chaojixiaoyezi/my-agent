@@ -963,3 +963,23 @@ P4-B 普通 user owner 的两轮隔离真实中文配置各有 **1 次 Jev HTTP*
   - recall 的问题出在逐条题的候选措辞，属材料设计问题，方向已登记台账。
   - 成绩已登记进 `scripts/bench/decision_quality/results.json`。所有点位仍默认关闭。
 - **证据**：`~/.my-agent/decision-evidence/j12-quality-bench/`。
+
+## J13 Curator“不是严格 JSON”复测与提交失败根因（2026-10-02，被测 `claude/3a-step16z` `8ec88808d`，含 P12）
+
+- **做法**：
+  - 隔离 home，按 P12 绑定生产 Curator 档案的副本：opencode 上的 deepseek-v4-flash，0600，用完删。
+  - 测试方生成合成中文对话，经产品消息接口写入 640 条。
+  - 经产品 `memory_curator.run(force=True)` 逐批整理。旁观器只记录响应形状、尝试形状和提交异常链里宿主自己的短报错。
+- **结果**：
+  - 7 次大批次（prompt 约 3.9 万字）全部严格解析成功，没有截断（`stop_reason=stop`）。输出 3–5.4 万字符、3–5.1 万输出 token，耗时 80–446 秒，期间没被断开。
+  - 生产 09-29 以来 115 次成功也是 0 次解析失败。
+  - **结论**：“不是严格 JSON”未复现，输出上限维持不变。
+- **新发现**：
+  - 同一批输入 3 次 `CURATOR_COMMIT_FAILED`，根因是观察身份冲突。已修复，见 DESIGN_LEDGER“Curator 整批提交不再被单条候选或长警告卡死”。
+  - 提交失败后重放同一批时，有一次模型只回了 292 字符，运行记为成功但处理了 0 条、游标不动。生产 09-28 之后没出现过，仅登记为观察项。
+- **证据偏差**：合成对话随机填词，造成大量互相矛盾的事实，模型把每个版本都输出成候选，所以输出量比真实会话偏大。
+- **额度事故**：
+  - 第 8 次起 opencode 通道报 `ProviderQuotaExhaustedError`，生产 Curator 随后也因同一额度失败。测试随即停止。
+  - 原因是测试只按调用次数止损、没有估算 token 量，而且用了生产共享的额度。
+  - 处理：集成方已把生产 Curator 档案改为官方 DeepSeek（`ff961d14`）。之后的补测只用官方 DeepSeek。
+- **证据**：`~/.my-agent/decision-evidence/j13-curator-retest/`（运行账结构化字段、逐轮记录、测试脚本，不含材料正文、模型输出正文和密钥）。

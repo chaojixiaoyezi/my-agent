@@ -1,5 +1,13 @@
 # 记忆与上下文维护状态
 
+## Curator 整批提交不再被单条候选或长警告卡死，同一批反复失败会熔断（J13 根因修复，2026-10-02，分支 `claude/be-curator-identity`，已实现，待集成）
+
+- 同身份比对和身份计算用同一套规范化：主题键按 `fold_key`，范围按规范键。
+- 与已有观察身份冲突的单条候选在提交前剔除，记 `curator_candidate_identity_conflict_dropped:<条数>`；共用合并函数保持严格，冲突改抛 ValueError 子类 `CandidateIdentityConflictError`。
+- 模型警告写运行账前先截到 300 字、留一个位置给宿主警告。
+- 同一起始游标连续 3 次确定性失败（提交被拒或输出解析失败）即熔断：state 记 `CURATOR_REPLAY_BREAKER_OPEN`，退避一小时，与发现层同源；运行账保留真实失败码。
+- 待定：同消息同主题不同内容会被合并（“花生/芒果”例子），两种做法与代价见 DESIGN_LEDGER 同名条目，交用户定。
+
 ## 补充查询片段材料：先预检每个片段能新增的事实（J8，2026-10-02，分支 `claude/be-jev-snippet-facts`，已实现，待集成）
 
 - 新增 `points.pre_recall.fragment_material`，配置 `memory_decision_pre_recall_fragment_material` 默认 `query_text`，与原做法逐字节相同。

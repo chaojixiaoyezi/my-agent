@@ -104,11 +104,34 @@ CURATOR_MODEL_NOT_CONFIGURED = "CURATOR_MODEL_NOT_CONFIGURED"
 CURATOR_NOT_CONFIGURED_RETRY_SECONDS = 3600
 
 
+# 同一批输入（同一起始游标）连续确定性失败到上限后写进 state 的失败码：退避拉长，防止大批次被无限重放烧额度。
+CURATOR_REPLAY_BREAKER_OPEN = "CURATOR_REPLAY_BREAKER_OPEN"
+# 同一起始游标连续确定性失败几次就熔断（含本次）：3 次足以排除偶发，又不至于多烧几次大调用。
+CURATOR_REPLAY_BREAKER_FAILURE_COUNT = 3
+# 熔断后的退避秒数：同一批最多每小时重放一次；输入变了或成功后自动恢复原节奏。
+CURATOR_REPLAY_BREAKER_RETRY_SECONDS = 3600
+# 对同一输入重放大概率得到同样结果的失败码（提交被拒、输出解析失败）；网络、额度、超时类不算，它们自己有退避。
+CURATOR_REPLAY_DETERMINISTIC_CODES = frozenset({"CURATOR_COMMIT_FAILED", "CURATOR_SCHEMA_INVALID"})
+_RETRY_SECONDS_BY_CODE = {CURATOR_MODEL_NOT_CONFIGURED: CURATOR_NOT_CONFIGURED_RETRY_SECONDS,
+                          CURATOR_REPLAY_BREAKER_OPEN: CURATOR_REPLAY_BREAKER_RETRY_SECONDS}
+
+
 # LLM: 唯一的失败退避口径，发现层 owner_wake_discovery 与 curator._run_pending_when_due 都必须调用它；只按
-#   结构化失败码判断，不读异常正文。同步 test_curator_model_not_configured.py。
+#   结构化失败码判断，不读异常正文。同步 test_curator_model_not_configured.py、test_curator_observation_identity.py。
 # 函数用途: 按上次失败码给出这次重试前要等待的秒数。
 def curator_failure_retry_seconds(failure_code: str, base_seconds: int) -> int:
-    return CURATOR_NOT_CONFIGURED_RETRY_SECONDS if failure_code == CURATOR_MODEL_NOT_CONFIGURED else base_seconds
+    return _RETRY_SECONDS_BY_CODE.get(failure_code, base_seconds)
+
+
+# LLM: 纯函数；previous 是本次之前最近的已结束运行记录（新到旧）。本次失败码是确定性失败，且之前紧挨着的
+#   CURATOR_REPLAY_BREAKER_FAILURE_COUNT-1 条全是同一起始游标上的确定性失败时返回 True。中间夹一次成功或游标变了就不算。
+# 函数用途: 判断这一次失败是否让同一批输入的重放达到熔断上限。
+def curator_replay_breaker_tripped(failure_code: str, cursor_before: dict, previous: list) -> bool:
+    needed = CURATOR_REPLAY_BREAKER_FAILURE_COUNT - 1
+    window = previous[:needed]
+    return (failure_code in CURATOR_REPLAY_DETERMINISTIC_CODES and len(window) == needed
+            and all(row.status == "failed" and row.failure_code in CURATOR_REPLAY_DETERMINISTIC_CODES
+                    and row.cursor_before == cursor_before for row in window))
 
 
 # LLM: state 是每 owner 唯一游标和 lease 权威；不能在 Gateway 内存另存一份成功游标。
@@ -439,6 +462,11 @@ def curator_response_schema() -> dict[str, Any]:
 
 __all__ = [
     "CURATOR_MODEL_NOT_CONFIGURED",
+    "CURATOR_REPLAY_BREAKER_FAILURE_COUNT",
+    "CURATOR_REPLAY_BREAKER_OPEN",
+    "CURATOR_REPLAY_BREAKER_RETRY_SECONDS",
+    "CURATOR_REPLAY_DETERMINISTIC_CODES",
+    "curator_replay_breaker_tripped",
     "CURATOR_NOT_CONFIGURED_RETRY_SECONDS",
     "CURATOR_OUTPUT_SCHEMA_VERSION",
     "CURATOR_MODEL_ORIGINS",
