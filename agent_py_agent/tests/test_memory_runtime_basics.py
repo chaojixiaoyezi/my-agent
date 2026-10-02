@@ -457,6 +457,34 @@ def test_run_no_save_still_persists_thread_model_usage_without_runtime_archive(
     ).exists()
 
 
+def test_wake_turn_usage_row_names_the_models_it_actually_called(tmp_path) -> None:
+    # 唤醒回合沿用前台请求的 request_id，落盘是同一累计账的增量；模型身份必须按本行调用记，不能被前台行“减掉”。
+    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent.backend = SequenceUsageBackend([{"input_tokens": 100, "output_tokens": 10}])
+    agent.backend.model_name = "usage-model-a"  # 真实后端都带 model_name，调用登记取它当模型身份
+    thread = agent.conversation_store.threads.get_or_create({"canonical_user_id": "local-wake-usage", "now": 10.0})
+    common = {"request_id": "gwreq-wake-usage", "allowed_tools": ["read_file"],
+              "task_attributes": {"conversation_thread_id": thread.thread_id}}
+
+    agent.run("前台先派一个子代理", save=False, run_id="", source="gateway", **common)
+    foreground_calls = {record.call_id for record in agent._model_call_ledger.records()}
+    agent.run("子代理完成，父代理被唤醒", save=False, run_id="", source="background_main_agent", **common)
+
+    wake_records = [record for record in agent._model_call_ledger.records() if record.call_id not in foreground_calls]
+    events, errors = agent.conversation_store.model_usage.events_report(thread.thread_id)
+    wake_rows = [event.model_calls for event in events if event.source == "background_main_agent"]
+    assert not errors and wake_records and len(wake_rows) == 1
+    wake = wake_rows[0]
+    called_models = sorted({record.model for record in wake_records})
+    called_backends = sorted({record.backend for record in wake_records})
+    assert wake["physical_model_attempt_count"] == len(wake_records)
+    assert wake["model_attempt_counts"] == {"usage-model-a": len(wake_records)}
+    assert called_models == ["usage-model-a"] and wake["models"] == called_models
+    assert called_backends and wake["backends"] == called_backends
+    assert wake["purpose_breakdown"]["main"]["models"] == called_models
+    assert wake["purpose_breakdown"]["main"]["backends"] == called_backends
+
+
 def test_saved_run_runtime_fact_keeps_delivery_contract_outputs(tmp_path):
     agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     requested = tmp_path / "requested-output" / "report.md"

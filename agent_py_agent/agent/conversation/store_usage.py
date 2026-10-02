@@ -36,6 +36,8 @@ _ADDITIVE_USAGE_FIELDS = (
     "provider_usage_call_count",
     "estimated_usage_call_count",
 )
+# 身份字段成对：名字列表 + 按名物理尝试次数（模型账本 to_summary 产出）。增量行的名字由次数差值决定。
+_IDENTITY_FIELDS = (("backends", "backend_attempt_counts"), ("models", "model_attempt_counts"))
 
 # LLM: 读取端放行未知用途键的进程内诊断计数：按键名计次，只给 GET /status 的 usage_accounting 段投影
 #   （gateway_parts/http_handlers._usage_accounting_diagnostics）。不写日志、不改求和结果、不报错，开放世界读法照旧。
@@ -371,6 +373,7 @@ def _model_usage_snapshot_digest_from_delta(model_calls: dict[str, Any]) -> str:
 
 
 # LLM: 同范围累计数不可倒退；用途桶复用同一增量规则且只下钻一层，不将分区重复加进根总量。
+#   backends/models 记“本行这些调用用到的名字”，由 _identity_delta 按次数差值算，不再是“本范围新出现的名字”。
 # 函数用途: 保存快照相对原增量的新增事实，用途只是同一本账的互斥分区。
 def _model_usage_snapshot_delta(
     snapshot: dict[str, Any],
@@ -389,16 +392,11 @@ def _model_usage_snapshot_delta(
         prior.get("status_counts"),
         "status_counts",
     )
-    prior_backends = {str(item) for item in prior.get("backends", []) if str(item)}
-    prior_models = {str(item) for item in prior.get("models", []) if str(item)}
-    delta["backends"] = sorted(
-        {str(item) for item in snapshot.get("backends", []) if str(item)}
-        - prior_backends
-    )
-    delta["models"] = sorted(
-        {str(item) for item in snapshot.get("models", []) if str(item)}
-        - prior_models
-    )
+    for names_key, counts_key in _IDENTITY_FIELDS:
+        names, counts = _identity_delta(snapshot, prior, names_key, counts_key)
+        delta[names_key] = names
+        if counts is not None:
+            delta[counts_key] = counts
     snapshot_usage = snapshot.get("usage_breakdown")
     prior_usage = prior.get("usage_breakdown")
     delta["usage_breakdown"] = _usage_breakdown_delta(snapshot_usage, prior_usage)
@@ -407,6 +405,26 @@ def _model_usage_snapshot_delta(
         if current_rows or prior_rows:
             delta["purpose_breakdown"] = _purpose_breakdown_delta(current_rows, prior_rows)
     return delta
+
+
+# LLM: 同一累计账（前台回合与随后的唤醒回合共用 request_id 与 usage_scope_id）分几次落盘时，本行用到的后端/模型
+#   只能从按名尝试次数的差值得出：差值大于 0 的名字就是本行调用用到的，次数增量随行保存供下次相减（只留正数）。
+#   旧快照没有按名次数时退回旧口径“本范围新出现的名字”，同名续用会是空，这是旧账已知局限，不猜。
+#   次数倒退按数据损坏报错（_usage_mapping_delta），名字只认结构化字段。
+# 函数用途: 算一条增量行的后端或模型名单，以及要随行保存的按名尝试次数。
+def _identity_delta(
+    snapshot: dict[str, Any],
+    prior: dict[str, Any],
+    names_key: str,
+    counts_key: str,
+) -> tuple[list[str], dict[str, int] | None]:
+    counts = snapshot.get(counts_key)
+    if not isinstance(counts, dict):
+        prior_names = {str(item) for item in prior.get(names_key, []) if str(item)}
+        return sorted({str(item) for item in snapshot.get(names_key, []) if str(item)} - prior_names), None
+    delta_counts = _usage_mapping_delta(counts, prior.get(counts_key), counts_key)
+    positive = {name: count for name, count in delta_counts.items() if count > 0}
+    return sorted(positive), positive
 
 
 # LLM: 与根加法字段同一增量口径，usage_breakdown 分 provider/estimated 两个映射做非负差值；schema 标签不参与。
@@ -483,6 +501,7 @@ def _purpose_usage_partition_has_value(usage: dict[str, Any]) -> bool:
 
 
 # LLM: 持久行已经是增量，不能当作新累计；用途复用同一求和且不递归嵌套，不改变旧字段含义。
+#   按名尝试次数是映射，由 _add_identity_counts 按名相加，不能落进下面的整数求和（会被当成 0，下次增量就重复记名）。
 # 函数用途: 合并原用量增量与其用途投影，供新快照去重。
 def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purposes: bool = True) -> dict[str, Any]:
     total: dict[str, Any] = {
@@ -493,7 +512,8 @@ def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purpos
     }
     for summary in summaries:
         for key, value in summary.items():
-            if key in {"schema", "usage_scope_id", "ledger_projection", "status_counts", "usage_breakdown", "purpose_breakdown"}:
+            if key in {"schema", "usage_scope_id", "ledger_projection", "status_counts", "usage_breakdown", "purpose_breakdown",
+                       "backend_attempt_counts", "model_attempt_counts"}:
                 continue
             if key in {"backends", "models"}:
                 known = {str(item) for item in total[key] if str(item)}
@@ -502,6 +522,7 @@ def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purpos
             else:
                 total[key] = _usage_int(total.get(key)) + _usage_int(value)
         _add_usage_mapping(total["status_counts"], summary.get("status_counts"))
+        _add_identity_counts(total, summary)
         usage = summary.get("usage_breakdown")
         usage = usage if isinstance(usage, dict) else {}
         _add_usage_mapping(total["usage_breakdown"]["provider"], usage.get("provider"))
@@ -511,6 +532,15 @@ def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purpos
         if purposes:
             total["purpose_breakdown"] = purposes
     return total
+
+
+# LLM: 只有行里真带按名尝试次数时才在总量里建这个键；旧行没有就不建，相减时按先前次数为 0 处理。
+#   是否退回旧口径只看当前快照有没有按名次数（见 _identity_delta），不看这里。
+# 函数用途: 把一条用量行的按名尝试次数按名累加进总量。
+def _add_identity_counts(total: dict[str, Any], summary: dict[str, Any]) -> None:
+    for _, counts_key in _IDENTITY_FIELDS:
+        if isinstance(summary.get(counts_key), dict):
+            _add_usage_mapping(total.setdefault(counts_key, {}), summary[counts_key])
 
 
 # LLM: 用途是宿主定义的互斥角色分区，不是模型自述；开放世界只认 schema 与桶值形状，

@@ -242,6 +242,9 @@ class _ModelCallTotals:
     status_counts: dict[str, int] = field(default_factory=dict)
     backends: set[str] = field(default_factory=set)
     models: set[str] = field(default_factory=set)
+    # 按名记物理尝试次数：同一累计账分几次落盘时，增量行靠次数差值说清“这一行的调用用了哪些后端/模型”。
+    backend_attempt_counts: dict[str, int] = field(default_factory=dict)
+    model_attempt_counts: dict[str, int] = field(default_factory=dict)
     accounted_input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
@@ -262,7 +265,8 @@ class _ModelCallTotals:
     provider_cache_write_input_tokens_reported_call_count: int = 0
 
     # LLM: 每个新 call_id 恰好调用一次；同 call_id 的状态变化必须走 observe_update，避免重复累计。
-    # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型和初始状态。
+    #   后端/模型在 started 时定下、之后的更新不改，所以按名尝试次数只在这里加，保证只增不减。
+    # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型（含按名尝试次数）和初始状态。
     def observe_new(self, record: ModelCallRecord) -> None:
         logical_call_id = _logical_call_id(record)
         self.logical_call_counts[logical_call_id] = (
@@ -274,8 +278,10 @@ class _ModelCallTotals:
         self.status_counts[record.status] = self.status_counts.get(record.status, 0) + 1
         if record.backend:
             self.backends.add(record.backend)
+            self.backend_attempt_counts[record.backend] = self.backend_attempt_counts.get(record.backend, 0) + 1
         if record.model:
             self.models.add(record.model)
+            self.model_attempt_counts[record.model] = self.model_attempt_counts.get(record.model, 0) + 1
         self._observe_usage_delta(None, record)
 
     # LLM: replacement delta 维护当前终态分布和尝试数；身份字段变化也必须成对撤销旧值再登记新值。
@@ -355,7 +361,9 @@ class _ModelCallTotals:
             )
 
     # LLM: 旧总量和信封调用计数保持意义；新字段计数仅代表明确报告，不能把 legacy None 解释成真实零。
-    # 函数用途: 生成公开统计快照，帮助消费端区分部分报告、完全缺失与真实零 token。
+    #   backends/models 仍是累计出现过的名字集合；backend_attempt_counts/model_attempt_counts 是按名物理尝试次数，
+    #   store_usage 落增量行时靠它们的差值算本行身份，改名或改口径要同步 store_usage._IDENTITY_FIELDS。
+    # 函数用途: 生成公开统计快照，帮助消费端区分部分报告、完全缺失与真实零 token，并带按名尝试次数。
     def to_summary(self) -> dict[str, object]:
         logical_count = len(self.logical_call_counts)
         physical_count = max(0, self.physical_model_attempt_count)
@@ -372,6 +380,8 @@ class _ModelCallTotals:
             "status_counts": statuses,
             "backends": sorted(self.backends),
             "models": sorted(self.models),
+            "backend_attempt_counts": dict(sorted(self.backend_attempt_counts.items())),
+            "model_attempt_counts": dict(sorted(self.model_attempt_counts.items())),
             "accounted_input_tokens": max(0, self.accounted_input_tokens),
             "output_tokens": max(0, self.output_tokens),
             "total_tokens": max(

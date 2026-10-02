@@ -35,6 +35,22 @@
 - 环境：`claude-tools/ci-venv-312`，basetemp `/private/tmp/claude-501/pef*`；不启动 Gateway、不碰 8420、不读产品会话正文。
   真实 Gateway 的 `curl /status` 看 `usage_accounting` 段由 3a 集成部署后核对。
 
+## 唤醒回合用量行带上模型身份（2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `c6f28b150`）
+
+- `test_memory_runtime_basics.py` 新增 1 项，走真实 `agent.run` 链路：
+  - 先跑前台回合（`source=gateway`），再用同一 `request_id` 跑唤醒回合（`source=background_main_agent`）。
+  - 唤醒行的物理调用数等于账本里新增的调用数。`models`、`backends` 以及 `purpose_breakdown.main` 里的名单，等于账本记录里这次调用的模型与后端（`usage-model-a`）。
+  - 修复前 `models` 是空列表。
+- `test_conversation_store.py` 新增 2 项：
+  - 用真实 `ModelCallLedger` 产出快照，同一范围分三次落盘：前台 A×2，换成 B×1，再回到 A×1。三行分别只记 A、B、A，按名次数分别是 {A:2}、{B:1}、{A:1}，用途桶同一口径。
+  - 没有按名次数的旧快照仍按“本范围新出现的名字”，不写次数键。
+- 变异 7/7 被杀，草稿副本上逐个精确替换、按字节恢复：
+  - 增量不看次数、正数过滤放宽成大于等于 0、求和漏掉次数；
+  - 账本不计模型次数、摘要不导出模型次数、增量行不保存次数；
+  - 旧口径不减先前名字。
+  - 真实链路那一项单独就能杀掉其中 4 个：增量不看次数、求和漏掉次数、账本不计模型次数、摘要不导出模型次数。
+- `test_model_call_ledger.py` 的 3 个整份摘要比对补上两个按名次数键（合同变化，值等于各用例的真实调用数）。
+
 ## 停机准入拒绝的调用方收尾（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `00bcf7d45`）
 
 - `test_gateway_decision_shutdown_cancel.py` 新增 1 项，参数化成 3 种情形。走真实本地 HTTP 决策链，在“已登记 ActiveDecision、还没进模型账本”这一刻执行收尾步骤：

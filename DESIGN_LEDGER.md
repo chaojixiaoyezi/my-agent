@@ -1,5 +1,28 @@
 # 设计台账
 
+## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
+
+- **问题**：step17c 冒烟基本链路（`decision-evidence/step17c-shutdown-rehearsal-38d7c8615/`）里，父代理被子代理完成唤醒的那一轮，
+  用量行 `source=background_main_agent` 的 `models` 与 `purpose_breakdown.main.models` 是空列表，物理调用却是 1 次、输入 40,570 token。不是回归。
+- **根因**（不是唤醒链少传字段）：
+  - 唤醒回合沿用前台请求的 `request_id`，模型账本按 request 取同一个累计容器（`usage_scope_id` 相同），所以唤醒回合落盘的是同一本累计账的第二次快照。
+  - `store_usage._model_usage_snapshot_delta` 对计数做数值差（3−2=1，对），对 `backends`/`models` 却做集合差，即“本范围新出现的名字”。
+    前台那行已经记过同一个模型，唤醒行就被减成空；用途桶复用同一规则，同样为空。
+  - 前台回合每次是新 request，没有同范围的先行行，所以一直没暴露。
+- **做法**（只认结构化字段）：
+  - 模型账本 `_ModelCallTotals` 新增按名物理尝试次数 `backend_attempt_counts` / `model_attempt_counts`，由 `to_summary` 导出，用途桶复用同一实现。
+    只在 `observe_new` 里加：后端和模型在 `started` 时定下，之后的更新不改，所以只增不减。
+  - 落增量行时由 `_identity_delta` 用次数差值算本行名单：差值大于 0 的名字就是本行调用用到的。本行的次数增量（只留正数）随行保存，供下次相减。
+    行里的 `backends`/`models` 从此表示“本行调用用到的名字”。
+  - 求和 `_sum_model_call_summaries` 由 `_add_identity_counts` 把两个次数按名相加，不进整数求和。
+  - 旧快照没有按名次数时退回旧口径（本范围新出现的名字），也不补写次数键。同一范围不会跨进程续账，新旧行不会混在一个范围里。
+- **影响**：
+  - 每条新用量行多两个映射键；会话总量 `summary()` 的用途行也带上这两个映射。
+  - 按行读 `models` 的地方（`scripts/reproject_model_usage.py`、外部采集脚本）从此拿到本行真实用到的模型。
+  - 快照事件编号由摘要内容派生，加键只影响同一进程内的幂等重放，不跨版本。
+- **边界**：已经落盘的空名单历史行不回填。
+- **验证**：见 TESTS.md 同名节。
+
 ## 用户 10-02 拍板：生产设置与后续方向（2026-10-02，3a 记录，状态分项标注）
 
 - **生产设置（已执行）**：

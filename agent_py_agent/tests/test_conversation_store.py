@@ -6,6 +6,11 @@ from threading import Barrier
 
 import pytest
 
+from agent_py_agent.agent.contracts.model_call_ledger import (
+    ModelCallFinishParams,
+    ModelCallLedger,
+    ModelCallStartedParams,
+)
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation.models import ConversationCompactCommit
 from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
@@ -187,6 +192,62 @@ def test_thread_model_usage_cumulative_snapshots_persist_only_new_deltas(
         "cache_write_input_tokens": 0,
         "call_count": 2,
     }
+
+
+def test_snapshot_rows_name_the_backends_and_models_their_own_calls_used(tmp_path) -> None:
+    # 前台回合与随后的唤醒回合共用 request_id，是同一本累计账分几次落盘；每行只记本行调用用到的名字。
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "user-usage-identity", "now": 10.0})
+    ledger = ModelCallLedger()
+    scope = {"thread_id": thread.thread_id, "request_id": "gwreq-identity", "run_id": "", "task_id": ""}
+
+    def call(call_id: str, backend: str, model: str) -> None:
+        ledger.started(ModelCallStartedParams(call_id=call_id, backend=backend, model=model,
+                                              input_tokens=100, request_id="gwreq-identity"))
+        ledger.finished(ModelCallFinishParams(call_id=call_id, output_tokens=10))
+
+    def settle(source: str) -> dict:
+        snapshot = {"schema": "model_call_summary.v1", **ledger.cumulative_summary(request_id="gwreq-identity")}
+        return store.model_usage.append_snapshot_once({**scope, "source": source, "model_calls": snapshot}).model_calls
+
+    call("call-1", "anthropic", "model-a")
+    call("call-2", "anthropic", "model-a")
+    foreground = settle("gateway")
+    call("call-3", "openai_chat", "model-b")
+    switched = settle("background_main_agent")
+    call("call-4", "anthropic", "model-a")
+    resumed = settle("background_main_agent")
+
+    assert (foreground["models"], foreground["backends"]) == (["model-a"], ["anthropic"])
+    assert foreground["model_attempt_counts"] == {"model-a": 2}
+    assert (switched["models"], switched["backends"]) == (["model-b"], ["openai_chat"])
+    assert switched["backend_attempt_counts"] == {"openai_chat": 1}
+    assert (resumed["models"], resumed["backends"]) == (["model-a"], ["anthropic"])
+    assert resumed["model_attempt_counts"] == {"model-a": 1}
+    assert resumed["physical_model_attempt_count"] == 1
+    assert resumed["purpose_breakdown"]["main"]["models"] == ["model-a"]
+    assert resumed["purpose_breakdown"]["main"]["backend_attempt_counts"] == {"anthropic": 1}
+
+
+def test_snapshot_without_attempt_counts_keeps_the_newly_seen_names_rule(tmp_path) -> None:
+    # 没有按名尝试次数的旧快照：只能报本范围新出现的名字，同名续用是空（旧账已知局限），也不补写次数键。
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "user-usage-legacy-identity", "now": 10.0})
+    scope = {"thread_id": thread.thread_id, "request_id": "request-legacy", "run_id": "", "task_id": "",
+             "source": "gateway"}
+    first = _cumulative_model_calls(physical=1, input_tokens=100, output_tokens=10, cache_read_tokens=0)
+    second = _cumulative_model_calls(physical=2, input_tokens=200, output_tokens=20, cache_read_tokens=0)
+
+    rows = [
+        store.model_usage.append_snapshot_once(
+            {**scope, "model_calls": {**calls, "backends": ["anthropic"], "models": names}}
+        ).model_calls
+        for calls, names in ((first, ["model-a"]), (second, ["model-a", "model-b"]))
+    ]
+
+    assert [row["models"] for row in rows] == [["model-a"], ["model-b"]]
+    assert [row["backends"] for row in rows] == [["anthropic"], []]
+    assert not any("model_attempt_counts" in row or "backend_attempt_counts" in row for row in rows)
 
 
 def test_snapshot_auto_identity_is_scope_and_content_bound(tmp_path):
