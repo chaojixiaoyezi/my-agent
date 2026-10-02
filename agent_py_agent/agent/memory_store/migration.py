@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
@@ -334,8 +335,10 @@ class _MigrationScanMixin:
 # LLM: This mixin owns explicit apply mechanics only; source discovery remains the read-only scan mixin above.
 # 类用途: 为已冻结快照执行全量备份、迁移写入、旧源归档与失败回滚。
 class _MigrationApplyMixin:
-    # LLM: 备份同时包含旧源和会被写入的正式目标；rollback 才能恢复到 apply 前精确状态。
-    # 函数用途: 复制本次所有输入/输出文件并记录缺失目标。
+    # LLM: 备份同时包含旧源和会被写入的正式目标；rollback 才能恢复到 apply 前精确状态。副本装旧记忆正文，一律私有复制：
+    #   文件 0600、backup_dir 及其下每级目录 0700（_copy_private / _private_backup_dirs），不碰共享的 system backups 目录；
+    #   manifest 只有路径与是否存在，照旧。已有的旧备份不批量 chmod。改动同步 test_memory_file_permissions。
+    # 函数用途: 私有地复制本次所有输入/输出文件并记录缺失目标（新建目录、写文件、改时间戳）。
     def _backup(self, snapshot: _MigrationSnapshot, backup_dir: Path) -> dict[Path, Path | None]:
         targets = {
             *snapshot.paths,
@@ -351,7 +354,7 @@ class _MigrationApplyMixin:
             *Path(self.home.owner_memory_lessons_dir).glob("*.md"),
         }
         mapping: dict[Path, Path | None] = {}
-        backup_dir.mkdir(parents=True, exist_ok=False)
+        backup_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         for source in sorted(targets, key=str):
             source = source.resolve(strict=False)
             if not source.exists() or not source.is_file():
@@ -359,8 +362,8 @@ class _MigrationApplyMixin:
                 continue
             relative = _backup_relative_path(source, self.owner_home, Path(self.home.root))
             destination = backup_dir / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            _private_backup_dirs(backup_dir, destination.parent)
+            _copy_private(source, destination)
             mapping[source] = destination
         write_json_file_atomic(
             backup_dir / "manifest.json",
@@ -1626,6 +1629,26 @@ def _file_hash(path: Path) -> str:
 def _migration_run_id(fingerprint: str) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"memory-v2-{stamp}-{fingerprint[:12]}"
+
+
+# LLM: 迁移备份是旧记忆正文的副本：目标在本次新建的 backup_dir 里以 0600 新建（umask 只会去掉权限位，不会放宽），只拷字节和访问/修改时间，
+#   不拷权限位（copy2 会把旧文件的 0644 抄过来）；回滚用 copy2 拷回原位时，恢复出的文件也随之是 0600，修改时间仍是原值。
+# 函数用途: 把一个文件私有地复制进本次迁移的备份目录（写文件、改时间戳）。
+def _copy_private(source: Path, destination: Path) -> None:
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as target, source.open("rb") as origin:
+        shutil.copyfileobj(origin, target)
+    status = source.stat()
+    os.utime(destination, ns=(status.st_atime_ns, status.st_mtime_ns))
+
+
+# LLM: 只在本次新建的 backup_dir 之下逐级以 0700 建目录（已存在的也是本次建的），不改 backup_dir 之外的任何目录。
+# 函数用途: 确保备份文件所在的每一级目录都只有本人可进入（新建目录）。
+def _private_backup_dirs(backup_dir: Path, directory: Path) -> None:
+    current = backup_dir
+    for part in directory.relative_to(backup_dir).parts:
+        current = current / part
+        current.mkdir(exist_ok=True, mode=0o700)
 
 
 # LLM: 备份相对路径不允许 ..；owner 外的 system 文件放 external/hash 下。

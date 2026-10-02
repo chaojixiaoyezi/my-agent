@@ -29,7 +29,7 @@
 |-- agent_py_agent/tests/test_responses_cache_key.py # Responses 请求体会话级缓存键：绑定会话带 prompt_cache_key、未绑定不带、同线程稳定、跨线程不同、不含凭据
 |-- agent_py_agent/tests/test_embedding_selection.py # 向量模型选择：同主机直设、异主机不写、共享/普通 owner 拒绝、关闭还原、TUI/IM/Gateway 入口与工具回执
 |-- agent_py_agent/tests/test_semantic_memory_storage.py # 向量文件 600/目录 700（替换后仍是）、第一次召回复用 memory_vectors.json 不重嵌
-|-- agent_py_agent/tests/test_memory_file_permissions.py # 候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像替换后 600/目录 700（S2）
+|-- agent_py_agent/tests/test_memory_file_permissions.py # 候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像替换后 600/目录 700（S2）；迁移备份私有复制
 |-- agent_py_agent/tests/test_capability_selection_state.py # 原TaskLink严格标记、损坏隔离和CAS
 |-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
 |-- agent_py_agent/tests/test_capability_config_missing_defaults.py # 缺配置文件给默认实例且不缓存、坏文件仍 None、决策默认值读 capability 文件

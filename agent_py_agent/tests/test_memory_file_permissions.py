@@ -1,4 +1,5 @@
-"""装记忆正文的其它文件也按私有原子写（S2，be 复审语义记忆的后续项）：候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像。
+"""装记忆正文的其它文件也按私有原子写（S2，be 复审语义记忆的后续项）：候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像，
+以及一次性迁移的备份副本（私有复制，保留原字节和修改时间）。
 
 钉的是“替换之后”的权限：先放 0644 的旧文件、0755 的目录，下一次写入后必须是 0600 / 0700；umask 放到 0 也一样
 （临时文件一出生就是 0600，替换时不抄回旧权限）。生产里已有的旧文件靠下次写入收紧，不做批量 chmod。
@@ -6,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 from dataclasses import replace
@@ -29,6 +31,7 @@ from agent_py_agent.tests.test_memory_curator_v2 import (
     _StaticStructuredBackend,
     _valid_output,
 )
+from agent_py_agent.tests.test_memory_migration_v2 import _runtime as _migration_runtime
 
 _POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX 权限位语义")
 _NOW = datetime(2026, 2, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -157,3 +160,29 @@ def test_curator_backups_targets_and_rollback_restore_are_private(tmp_path, open
     assert restarted.committer.recover_incomplete(now=datetime.now(timezone.utc) + timedelta(hours=1)) == 1
 
     assert candidates.read_text(encoding="utf-8") == "" and _mode(candidates) == 0o600, "回滚写回不带回 0644"
+
+
+@_POSIX_ONLY
+def test_migration_backup_copies_are_private_with_original_bytes_and_mtime(tmp_path, open_umask):
+    home, _candidates, _long_term, _daily, _lessons, migration = _migration_runtime(tmp_path)
+    draft = home.owner_data_dir / "learning_drafts" / "draft.json"
+    draft.parent.mkdir(parents=True)
+    draft.write_text(json.dumps({"content": "旧草稿正文。"}, ensure_ascii=False), encoding="utf-8")
+    legacy_lesson = home.owner_memory_lessons_dir / "legacy.md"
+    legacy_lesson.write_text("# 旧 lesson\n\n正文。\n", encoding="utf-8")
+    for path in (draft, legacy_lesson):
+        os.chmod(path, 0o644)  # 生产旧状态：旧记忆文件 0644
+    originals = {path.resolve(): (path.read_bytes(), path.stat().st_mtime_ns) for path in (draft, legacy_lesson)}
+
+    report = migration.apply()
+
+    assert report.applied is True
+    backup_dir = Path(report.backup_dir)
+    manifest = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
+    copies = {Path(item["source"]): Path(item["backup"]) for item in manifest["files"] if item["existed"]}
+    assert copies and {_mode(path) for path in copies.values()} == {0o600}, "备份副本一律 0600，不抄旧文件的 0644"
+    directories = [backup_dir, *(path for path in backup_dir.rglob("*") if path.is_dir())]
+    assert {_mode(path) for path in directories} == {0o700}, "备份目录每一级都是 0700"
+    checked = [(copies[source].read_bytes(), copies[source].stat().st_mtime_ns) == original
+               for source, original in originals.items()]
+    assert checked == [True, True], "副本保留原字节和修改时间，回滚才能原样拷回"

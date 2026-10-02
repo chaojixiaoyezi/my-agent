@@ -45,7 +45,9 @@
 - **全仓排查，没改的写入口**（都不装记忆正文，或不是记忆库）：
   - `operations.py` 的 ops.jsonl、Curator 运行审计与状态文件、事务 `manifest.json`、retention 的 tombstone/绑定：按合同只记编号、哈希和元数据。
   - retention 回收用 `shutil.move`、owner 备份用 `copytree/copy2`：沿用源文件权限，源文件收紧后副本也是 0600；已有的旧备份不动。
-  - `migration.py` 一次性旧数据迁移：备份用 `copy2` 复制旧记忆文件，旧文件若是 0644，`backups/<run_id>/` 里的副本也是 0644；MEMORY.md/HOT 只重置成模板。是否给迁移备份也加私有权限，留给 3a 定。
+  - `migration.py` 一次性旧数据迁移：MEMORY.md/HOT 只重置成模板，不动。
+- **补：迁移备份私有复制**（3a 定做，单独提交，基于 step17f `f6b63ab35`）：`_backup` 原来用 `copy2`，旧文件是 0644 时 `backups/<run_id>/` 里的副本也是 0644。改成 `_copy_private`：在本次新建的 `backup_dir` 里以 0600 新建，只拷字节和访问/修改时间（回滚用 `copy2` 拷回原位，恢复出的文件随之是 0600，修改时间仍是原值）；`backup_dir` 及其下每级目录 0700，不碰共享的 system backups 目录；manifest 只有路径和是否存在，照旧。已有的旧备份不批量 chmod。
+- **单独立项（3a 记后续项）**：`memory_archive/` 那批会话与任务数据的收紧。
   - `memory_archive/`（任务/运行事实索引、Compact 快照、任务工作区、外置工具输出）属于会话与任务数据，不是记忆库正文，这轮不动。
 - **测试顺带修正**：`test_hot_budget.py` 两个用例原来直接写 `/tmp/hot-budget-*.md`；HOT 改成私有写后会尝试把直接父目录收紧到 0700（以 root 跑测试时 `/tmp` 真会被改），改成写 `tmp_path`。
 - **验证**：见 TESTS.md 同名节。
