@@ -267,7 +267,7 @@ def test_audit_and_menu_read_explain_why_points_did_not_trigger(tmp_path, monkey
     assert (quality["enabled"], quality["mode"], quality["covered"], quality["reached"], quality["called"]) == (
         False, "off", True, 4, 1)
     assert quality["not_called"] == [
-        {"reason": "not_test_command", "label": "这一步不是运行测试的命令", "count": 2},
+        {"reason": "not_test_command", "label": "这一步既不是测试命令，也不是让已有验证过期的文件写入", "count": 2},
         {"reason": "focus_count", "label": reach_counts.miss_reason_label("focus_count"), "count": 1}]
     assert all(row["covered"] for row in rows.values()) and rows["planning"]["reached"] == 0
     assert rows["model_selection"]["covered"] is True and rows["model_selection"]["note"]
