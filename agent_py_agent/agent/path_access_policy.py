@@ -554,8 +554,15 @@ def host_readonly_paths(agent_home_root: Path, owner_home: Path | None = None,
     for anchor in anchors:
         home = owner_home_containing(anchor, agent_home_root)
         task = task_root_containing(anchor, home) if home is not None else None
-        paths.extend(task.joinpath(*parts) for parts in HOST_STATE_TASK_PARTS if task is not None)
+        paths.extend(task_host_state_paths(task) if task is not None else ())
     return tuple(dict.fromkeys(paths))
+
+
+# LLM: 宿主已知的任务根（写边界里的结构化 task_root，或从路径认出的规范任务根）→ 任务里的宿主托管位置（HOST_STATE_TASK_PARTS）。
+#   只做路径拼接；registry_invoke 用它把本任务的位置交给命令沙箱，不依赖命令的工作目录在不在任务树里（ae 块 4 发现的缺口）。
+# 函数用途: 列出一个任务根里对模型只读的宿主托管位置。
+def task_host_state_paths(task_root: Path) -> tuple[Path, ...]:
+    return tuple(task_root.joinpath(*parts) for parts in HOST_STATE_TASK_PARTS)
 
 
 # LLM: 写门的拒绝结果只在这里拼：配置优先于运行状态，再看硬链接（按它连到的那个文件归类）。提示文字给模型下一步该用的入口。
@@ -791,5 +798,6 @@ __all__ = [
     "normalize_path_access_mode",
     "owner_home_containing",
     "path_scope_regime",
+    "task_host_state_paths",
     "task_root_containing",
 ]

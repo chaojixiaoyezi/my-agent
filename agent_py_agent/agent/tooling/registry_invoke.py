@@ -586,9 +586,21 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
     )
 
 
+# LLM: 只认写边界里宿主写入的结构化 task_root（tool_runtime_ledger._attach_task_workspace_roots），不读模型参数；没有就返回空。
+# 函数用途: 把本任务的宿主托管位置（H3 声明）转成命令沙箱的只读路径。
+def _task_host_state_path_strings(boundary: dict[str, object]) -> list[str]:
+    from ..path_access_policy import task_host_state_paths
+
+    task_root = str(boundary.get("task_root") or "").strip()
+    if not task_root:
+        return []
+    return [str(path) for path in task_host_state_paths(Path(task_root).expanduser().resolve(strict=False))]
+
+
 # LLM: 内部运行参数只投影结构化 boundary；sandbox 写根的集合不变，但 task_work_dir 必须排在首位，
 # 供 Linux attempt 沙箱选择独立持久临时根，不能让 working_dir/项目目录承担临时缓存。只读保护路径 = forbidden_write_roots
-# 加 runtime_install_roots（正在运行的安装目录）。
+# 加 runtime_install_roots（正在运行的安装目录），再加本任务的宿主托管位置（H3：由 boundary.task_root 推出，命令在任务树外
+# 跑、写根也不含本任务时照样只读；ae 块 4 发现，2026-10-02）。
 # 函数用途: 给已授权工具补充模型不可见的写根、读根、临时根顺序和其它运行边界参数。
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
     if not isinstance(request.write_boundary, dict):
@@ -606,6 +618,7 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
             params["__sandbox_protected_write_paths"] = list(dict.fromkeys([
                 *_boundary_path_strings(request.write_boundary, "forbidden_write_roots"),
                 *_boundary_path_strings(request.write_boundary, RUNTIME_INSTALL_ROOTS_KEY),
+                *_task_host_state_path_strings(request.write_boundary),
             ]))
         raw_write_roots = request.write_boundary.get("allowed_write_roots")
         if isinstance(raw_write_roots, (list, tuple)):

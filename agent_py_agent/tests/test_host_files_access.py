@@ -28,6 +28,7 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -241,8 +242,6 @@ def test_isolated_owner_keeps_old_codes_and_cannot_write_its_own_host_files(tmp_
 
 def test_declarations_match_the_canonical_layout(tmp_path):
     """守卫：路径策略为能原样打进插件 SDK 写成路径片段，必须与宿主布局函数一致。"""
-    from types import SimpleNamespace
-
     from agent_py_agent.agent.capability.runtime_config_reload import default_capability_config_path
     from agent_py_agent.agent.conversation.workspace_paths import canonical_task_root
     from agent_py_agent.agent.path_access_policy import (
@@ -647,8 +646,6 @@ def test_every_host_state_item_is_read_only_for_commands(tmp_path, relative):
 
 def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeypatch):
     """B 类：runs/、agents/、data/、tasks/ 留在 tool_runtime_ledger，只在隔离模式挂、可被本任务工作目录穿透；A 类不再重复列。"""
-    from types import SimpleNamespace
-
     from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
         _attach_owner_control_write_guards,
     )
@@ -695,3 +692,57 @@ def test_host_memory_tool_still_writes_its_own_files(tmp_path, monkeypatch):
     blocked = tools["write_file"].execute({"path": str(candidates), "content": "forged"})
     assert (blocked.ok, blocked.error_code) == (False, STATE_CODE)
     assert "forged" not in candidates.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 命令在任务树外（ae 块 4 发现，2026-10-02）
+
+
+# 函数用途: 按 registry 的真实投影，算出本次命令沙箱拿到的内部参数（写根在任务树外，写边界带结构化 task_root）。
+def _dispatch_params(home: dict, project, tool_name: str = "run_command") -> dict:
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        AuthorizedToolDispatchRequest,
+        _tool_params_with_runtime_boundary,
+    )
+
+    boundary = {"task_root": str(home["task"]), "allowed_write_roots": [str(project)]}
+    return _tool_params_with_runtime_boundary(AuthorizedToolDispatchRequest(
+        tool_name=tool_name, tool=SimpleNamespace(), tool_params={"command": "true"},
+        workspace_root=project, write_boundary=boundary,
+    ))
+
+
+def test_task_records_reach_the_sandbox_from_the_boundary_task_root(tmp_path):
+    home = _home(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    for tool_name in ("run_command", "terminal_session"):
+        assert str(home["verification"]) in _dispatch_params(home, project, tool_name)["__sandbox_protected_write_paths"]
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        AuthorizedToolDispatchRequest,
+        _tool_params_with_runtime_boundary,
+    )
+
+    no_task = _tool_params_with_runtime_boundary(AuthorizedToolDispatchRequest(
+        tool_name="run_command", tool=SimpleNamespace(), tool_params={}, workspace_root=project,
+        write_boundary={"allowed_write_roots": [str(project)]}))
+    assert no_task["__sandbox_protected_write_paths"] == [], "没有 task_root 时不臆造"
+
+
+@needs_sandbox
+def test_real_full_access_shell_outside_the_task_tree_cannot_forge_the_records(tmp_path):
+    if not _sandbox_ready():
+        pytest.skip("平台沙箱不可用")
+    home = _home(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    shell = _shell(home, scoped=False)
+    params = _dispatch_params(home, project)
+    record = home["verification"] / "originals.json"
+
+    def run(command: str):
+        return shell.execute({"command": command, "working_dir": str(project), **{
+            key: value for key, value in params.items() if key.startswith("__sandbox_")}})
+
+    assert not run(f"printf forged >> {record}").ok
+    assert record.read_text(encoding="utf-8") == "{}"
+    assert run(f"cat {record}").ok and run(f"printf ok > {project / 'out.txt'}").ok, "读和写项目目录照常"
