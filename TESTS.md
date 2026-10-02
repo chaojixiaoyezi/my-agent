@@ -184,6 +184,38 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
+## 能力包 v2 块 3：宿主写完就查、收尾再查、返工 1 次、宿主提示与交付事实（2026-10-02，分支 `claude/ae-capability-packs-v2-b3`，基于块 2 头 `ce2b833a7`）
+
+- **新增** `agent_py_agent/tests/test_pack_verification_matching.py`（18 项）：
+  - glob 语义：`**` 匹配零个或多个整段，`*`、`?` 不跨目录，特殊字符按字面；
+  - json 顶层字段匹配：嵌套字段不算；读不了、超上限都判“不匹配”；没声明字段匹配或格式宿主不认识时只按路径认；
+  - 有界快照：只记匹配的普通文件，跳过符号链接，结果可重复；匹配数和走访数超限记 truncated；太大的文件只记大小；
+  - 工作区外的路径不算。
+- **新增** `agent_py_agent/tests/test_pack_verification_service.py`（16 项）：
+  - 开关关着时完全不起作用：不记基线、不写账本、回执原样；
+  - 基线只在会改工作区的工具执行前记一次，账本权限 600；
+  - 写后检查：只核验符合钉住包交付物声明的文件，回执附有界摘要（错误码、警告码、错误样例），写 runtime_events；不匹配、在工作区外、写失败时回执原样；
+  - 关联输入：task_input 只取基线里有、现在没变的文件；turn_output 取本回合新建或改过的文件，排除目标本身；恰好一个才交，入账匹配个数；
+  - 收尾：shell 写的交付物也会被查（按运行策略声明的 mutates_workspace 记基线）；基线里原有、本回合没动的交付物不查；内容没变就复用结果；返工只有 1 次；返工记不进账本就不返工；
+  - pin 的整包摘要和安装项对不上、没有钉住包、没有基线时，什么都不查；
+  - 最终事实只报最后一次收尾检查覆盖的结果，写后报过错但后来被删掉的文件不再出现；宿主提示文字只来自账本，回合没正常收尾时注明；
+  - 接线：`execute_traced_tool_call` 在 handler 之前记基线，在结果出来后跑写后检查；`_no_tool_calls_decision` 第一次 continue 并追加返工提示，第二次 break；
+  - 回执渲染 `[pack-verification]` 段、归档白名单保留 `pack_verification`、Gateway 提示排队、开关默认关且属于管理员边界项、主任务和子代理的 pins 读取；
+  - 真实沙箱：真实运行器、真实安装的包、真实 Seatbelt 或 bwrap 下跑一遍写后检查和收尾检查。
+- **macOS**（ci-venv-312，Seatbelt）：上面两个文件加块 2 运行器测试，共 53 passed，0 跳过（含真实沙箱用例）。
+- **Linux 车道**（`lane-b3/run_lane_b3.sh`，同一镜像，块 3 两个文件加 runner 和 attempt_sandbox）：
+  - 不加 `NET_ADMIN`：64 passed / 18 skipped，真实沙箱用例按设计跳过；
+  - 加 `--cap-add NET_ADMIN`：75 passed / 7 skipped（都是 macOS 专用），块 3 真实沙箱用例在 bwrap 下通过。
+- **相关回归**：252 个文件（capability、plugin、pack、工具循环、收尾、Gateway、归档、运行时事实、设置与参数、常数、沙箱、guards9、test_packaging），4789 passed / 12 skipped / 4 xfailed。
+- **门禁**逐项 rc=0：import boundaries、ruff、`doc_sync --base ce2b833a7`、常数目录 `--check`（846 项）、前端配置目录 `--check`（254 项）、strict code-size、`git diff --check ce2b833a7..HEAD`、clean_package。
+  - code-size 按确切基线 `ce2b833a7` 比告警身份：新增 0、消失 0。首轮多出 1 条（写后钩子参数），改成从结果取工具名后消掉。
+  - doc_sync 一开始只和 HEAD 比，漏了 gateway、verification 两个模块文档；改成和基线比之后发现并补上。块 2 按它的基线重查过，原本就通过。
+- **变异 25/25 全部被抓住**（`cpv2-mut/mutations_b3.json`），分三组：
+  - 记基线：每次都记基线、任何工具都算改工作区、忽略运行策略、基线钩子没接；
+  - 认文件与输入：不做字段匹配、被改过的输入算原件、目标不排除、多个匹配也交；
+  - 收尾、事实与接线：返工上限失效、不复用结果、收尾查没改过的文件、返工不先记账、事实不按最后一次收尾、提示漏掉“没正常收尾”、空摘要也挂上、空段也渲染、归档丢摘要、开关默认开、开关不是边界项、收尾没接、pin 摘要不核、删掉的旧地址算写出、账本可被别人读、写后钩子没接、返工提示不带位置。
+  - 写变异清单时发现，原有用例都直接调钩子，抓不住“钩子没接上”这类问题；所以先补了执行缝隙的接线用例，再跑变异。
+
 ## 能力包 v2 块 2：宿主在沙箱里跑钉住的原版检查程序（2026-10-02，分支 `claude/ae-capability-packs-v2-b2`，基于 `claude/3a-step17e` `2e5a36af0`）
 
 - **新增** `agent_py_agent/tests/test_pack_verifier_runner.py`（19 项）：
