@@ -47,6 +47,13 @@ def test_verification_roundtrip_and_old_capability_bytes_unchanged():
     assert manifest.to_payload()["capability"]["verification"] == VERIFICATION
 
 
+@pytest.mark.parametrize("extra", [{"verificaton": VERIFICATION}, {"future_field": 1}])
+def test_capability_declaration_rejects_unknown_keys(extra):
+    plain = {"description": "d", "keywords": ["k"], "entry_document": "CAPABILITY.md"}
+    with pytest.raises(ValueError):
+        CapabilityDeclaration.from_payload({**plain, **extra})
+
+
 @pytest.mark.parametrize("mutate", [
     lambda v: v.update(extra=1),
     lambda v: v["verifiers"][0].update(args=["--host-json"]),
