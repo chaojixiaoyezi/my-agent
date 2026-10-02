@@ -2166,6 +2166,7 @@ owner 处置分两步：`/recover owner <处置>` 只读预览并生成 12 位�
 
 生命周期命令的托管自停闸在 CLI 侧（`cli/gateway_host_guard.py`）：`cmd_gateway_run` 第一步写 `MY_AGENT_HOSTING_GATEWAY_PID`，
 `cmd_gateway_stop` 与 `cmd_gateway_start --force` 在写停止请求前调用 `refuse_stopping_hosting_gateway(pid)`；`restart` 经 stop 继承同一拒绝。
+`/model vector` 查看时，`model_profile_service._vector_text_control` 对管理员（`listing.can_change`）追加 `render_embedding_usage(EMBEDDING_USAGE.snapshot())`：进程内嵌入用量与召回方式计数（`retrieval/embedding_usage`，S7），只有数字和原因码。
 聊天 `/model` 文字控制由 `control_service` 按 kind 分派到 `model_profile_service.execute_model_text_control`，
 与 `/client/models` 共用 `_scoped_model_host`；为避免循环导入，分派处延迟导入该模块。
 

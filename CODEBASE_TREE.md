@@ -34,6 +34,8 @@
 |-- agent_py_agent/agent/capability/package_selection_runtime.py # 首个主业务请求前的一次领取和装配
 |-- agent_py_agent/tests/test_wire_contract.py # 出站协议合同：逐形状修整与校验、三个出口集成、修整被改坏时本地拦截、随机历史性质测试
 |-- agent_py_agent/tests/test_responses_cache_key.py # Responses 请求体会话级缓存键：绑定会话带 prompt_cache_key、未绑定不带、同线程稳定、跨线程不同、不含凭据
+|-- agent_py_agent/agent/retrieval/embedding_usage.py # 嵌入用量与召回方式的进程内计数（按用途：请求、条数、失败、供应商回报的 token；semantic/keyword/none），只给 /model vector 展示
+|-- agent_py_agent/tests/test_embedding_usage.py # S7：各用途计数、未回报 token、失败、真实记忆接线、召回方式、/model vector 的 TUI/IM 同一份且不含正文
 |-- agent_py_agent/tests/test_embedding_selection.py # 向量模型选择：同主机直设、异主机不写、共享/普通 owner 拒绝、关闭还原、TUI/IM/Gateway 入口与工具回执
 |-- agent_py_agent/tests/test_semantic_memory_storage.py # 向量文件 600/目录 700（替换后仍是）、第一次召回复用 memory_vectors.json 不重嵌
 |-- agent_py_agent/tests/test_memory_file_permissions.py # 候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像替换后 600/目录 700（S2）；迁移备份私有复制

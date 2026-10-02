@@ -1,5 +1,9 @@
 # 记忆与上下文维护状态
 
+## 嵌入用量与召回方式的进程内计数（S7，2026-10-02，分支 `claude/be-embedding-usage-facts`，已实现，待集成）
+
+- 嵌入客户端按用途（写入、召回、重建、工具检索）计请求、条数、失败和供应商回报的 token；scoped 检索计 semantic/keyword/none。不落盘，不进 model call ledger。详见 DESIGN_LEDGER 同名条目。
+
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（2026-10-02，分支 `claude/75-curator-fallback-threshold`，已实现，待 be 审）
 
 - 本组最近一次推进游标的是 `:transient` 默认补跑时，下一批阈值从 2 降到 1（`CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT`）；会话模型自己成功推进后回到 2。只读运行账，警告码由 `curator_routing.transient_fallback_warning` 统一生成。详见 DESIGN_LEDGER 同名条目。

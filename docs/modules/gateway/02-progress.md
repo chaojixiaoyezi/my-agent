@@ -9,6 +9,10 @@
   实例未加载时写“当前实例未加载，没有运行事实”。TUI 直连入口（`cli/chat_parts/plugin_command_client._direct_manager`）交本进程注册表，IM 与 TUI 经 Gateway 走同一段。
 - 测试见 TESTS.md“J16 片 F”。
 
+## `/model vector` 显示嵌入用量与召回方式（S7，2026-10-02，分支 `claude/be-embedding-usage-facts`，已实现，待集成）
+
+- 管理员查看 `/model vector` 时，末尾加“本次 Gateway 启动以来”几行：各用途的嵌入请求、条数、失败、供应商回报的 token，以及召回方式计数。TUI 与 IM 同一入口。普通用户看不到（计数是全进程的）。详见 DESIGN_LEDGER 同名条目。
+
 ## 能力包宿主核验结论随回合结束发宿主提示（2026-10-02，ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`，待集成）
 
 - 回合正常返回后，`request_pack_verification_notice.queue_pack_verification_notice` 用 `AgentRunResult.pack_verifications`（核验账本的结构化事实）写一条宿主提示：`source=pack_verification`，`code=summary`。

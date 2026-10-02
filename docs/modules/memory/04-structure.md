@@ -677,6 +677,14 @@ retention 扫描根与深度不再写死在本模块：`retention_scan._recovery
 - `candidates.split_identity_conflicts` 是纯函数，用同一个合并函数逐条预演，只剔除身份冲突的那几条。`curator.MemoryCuratorService._without_identity_conflicts` 在生成运行记录前调用它，并记警告。
 - 重放熔断的判断是纯函数 `curator_models.curator_replay_breaker_tripped`，读取最近运行记录用 `curator_run_log.CuratorRunLog.recent_finished`，退避由 `curator_failure_retry_seconds` 给出（熔断码 3600 秒）。
 
+## 嵌入用量与召回方式计数（S7，2026-10-02）
+
+- `retrieval/embedding_usage.py`：
+  - `EMBEDDING_USAGE` 是进程级计数。
+  - `count_embedding_request` 是两个嵌入客户端唯一的计数点。
+  - `counted_as` / `embedding_purpose` 按操作标用途。
+- JsonlMemory 的标注位置：`_index_vector` 记忆写入，`_search_scoped`、`_semantic_records` 召回，`_embed_rebuild_rows` 重建。`_scoped_retrieval_facts` 每次 scoped 检索记一次召回方式。
+
 ## 召回后排序逐条题的候选说明（2026-10-02）
 
 `decision_recall._PRIORITIES` / `_NON_SELECTIONS` 是逐条记忆题的候选说明，只是给决策模型看的软材料：键（first/normal/later 与非排序回答）和 `_ranks` 的处理是机器语义，不随措辞变化。改说明要重跑 `scripts/bench/decision_quality_bench.py --points recall` 并登记成绩。

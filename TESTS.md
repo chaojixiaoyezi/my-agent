@@ -45,6 +45,33 @@
   - 已封存补交：还用普通 reject_pending、不改提示。
 - 相关回归：插话、恢复、续跑相关 11 个测试文件 522 项通过（见交付消息里的门禁）。
 
+## 嵌入用量与召回方式看得到（S7，be，2026-10-02，分支 `claude/be-embedding-usage-facts`）
+
+- **新增 `test_embedding_usage.py`**（9 项；本机桩服务，OpenAI 兼容与 MiniMax 原生两种协议）：
+  - 各用途计数：写入 2 条一次（token 14）、召回 1 条一次（MiniMax token 5）、没标注的归 other；空列表不发请求、不计数；桩服务收到的请求与计数一一对应。
+  - 供应商没回报 token：两种协议都记“未回报”请求数，token 不估。
+  - 失败：HTTP 500 和连接被拒都计失败，照样抛 `EmbeddingError`。
+  - `counted_as` 标注方法、退出后恢复外层用途。
+  - 真实 `SimpleAgent` 接线（组合根、JsonlMemory、向量库身份都是真的，嵌入端换成桩服务）：
+    - 写一条（写入计 1 次、token 7）、`search_scoped` 召回（召回计数，方式 semantic）、重建（重建次数等于重建条数）；
+    - other 为 0；总请求数等于桩服务实际收到的请求数。
+  - 召回方式：没有记忆时 none；嵌入端出错时 keyword，最近原因码 `embedding_failed`。
+  - 工具语义检索：说明一批加查询一次，计在工具检索。
+  - `/model vector`：
+    - IM 文字与 TUI 发给 Gateway 的文字走同一入口 `execute_gateway_conversation_control`，两次结果逐字相同；
+    - 管理员看到写入、召回（“token 未回报”）、重建、工具检索各行和召回方式行；
+    - 用带标记的正文产生用量，回执里没有这段正文；
+    - 普通用户看不到这几行。
+- **`test_architecture_guardrails.py`**：`counted_as` 的透明装饰器 wrapper 加进 `*args`/`**kwargs` 豁免表，理由同已有的重试装饰器。
+- **相关回归**：涉及嵌入、召回、向量库、工具检索、`/model` 服务、记忆的 107 个文件，加 guards9，全部通过。
+- **变异**：15 个全部抓到，包括：
+  - 失败不计、未回报当 0、条数不计、空列表也计、默认用途改成召回、不留最近原因码；
+  - 两种协议丢 token；
+  - 写入、重建、召回、工具检索任一处不标注；
+  - 召回方式不记；
+  - 普通用户也显示；
+  - 未回报显示成数字。
+
 ## 同一回合因非计划重启最多自动续跑 3 次（I4 续，2026-10-02，分支 `claude/38-resume-limit`，基于 `72ddc2b5c`）
 
 - 新增 `test_turn_resume_limit.py`（9 例）：

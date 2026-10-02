@@ -1,5 +1,24 @@
 # 设计台账
 
+## 嵌入用量与召回方式看得到（S7，be，2026-10-02，分支 `claude/be-embedding-usage-facts`，基于 `claude/3a-step17g` `43f29df6a`，已实现，待集成）
+
+- **起因**（3a 查生产）：
+  - 写入时嵌入在工作：embo-01、1536 维，向量 24 → 25。
+  - 两个嵌入客户端直接发 HTTP，没有任何计数，嵌入调用也不进 model call ledger。
+  - 召回方式只在 `memory_search` 的工具正文里，按规矩不读。
+  - 所以 goal S6 要核对的两件事（召回真的走 semantic、嵌入次数和 token 与预估相符）核对不了，用户问的“每天要跑多少”也答不出真实数字。
+- **做法**（3a 定口径）：
+  - 每个进程一份内存计数 `retrieval/embedding_usage.EMBEDDING_USAGE`，线程安全，不写盘，不加开关（只是展示，不改请求）。
+  - 嵌入按用途计：记忆写入、召回、重建、工具检索；没标注的归 other，不猜。每种用途记请求次数、文本条数、失败次数、供应商回报的 token，以及没回报 token 的请求数（不估算）。
+  - 计数只有一处：两个嵌入客户端的 `embed` 都经 `count_embedding_request`，它们的 `_request` 返回供应商回报的 token（OpenAI 兼容取 `usage.total_tokens`，没有时取 `prompt_tokens`；MiniMax 取顶层 `total_tokens`）。
+  - 用途在操作入口用 `counted_as` 标注：JsonlMemory 的写入（`_index_vector`）、召回（`_search_scoped`、`_semantic_records`）、重建（`_embed_rebuild_rows`），以及工具语义检索（`VectorToolSearchProvider._semantic_search`）。
+  - 召回方式计数 semantic/keyword/none，留最近一次的 mode 和 fallback_reason，由 `_scoped_retrieval_facts` 记（每次 scoped 检索恰好一次：自动召回、memory_search、决策补充召回）。旧的 `search()` 只计嵌入，不计方式。
+  - 展示：管理员发 `/model vector`（TUI 与 IM 同一个 Gateway 入口）时多几行“本次 Gateway 启动以来”，只有数字和原因码。
+    - 计数是全进程的，含其他用户，所以普通用户看不到这几行。
+    - `my-agent memory vectors status` 是另起的进程，计数为空，那里不加。
+- **为什么不进 model_usage / model call ledger**：那里有准入、停机关门、预算、上下文校准等语义，是给对话模型调用的；嵌入不经过这些门，硬塞进去会让关门、预算判断把嵌入也算进去，或者反过来被嵌入的记录污染校准。嵌入只需要“次数和 token 是多少”，所以单独一份只读计数。
+- **测试与证据**：见 TESTS 同名条目；真实核对（隔离 home、embo-01）在 `~/.my-agent/decision-evidence/embedding-usage-facts-s7/`。
+
 ## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已集成 step17g `7ed9e5c07`；插话终态与提示分句 step17h 已实现、待集成，分支 `claude/38-limit-steer-note`）
 
 - **起因**：I4 之后，被停机打断的回合重启后都会自动续跑，但启动续跑一直没有次数上限。本身会把进程弄崩的回合，每次重启都会再续一次，形成崩溃循环。3a 定：加上限。
