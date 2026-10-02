@@ -26,6 +26,7 @@ from agent_py_agent.agent.settings import embedding_selection
 from agent_py_agent.agent.settings.config import load_config
 from agent_py_agent.agent.settings.embedding_profile import embedding_model_config
 from agent_py_agent.agent.settings.model_profiles import (
+    capture_selected_model_read,
     execute_model_profile_operation,
     model_profiles_path,
     read_model_profiles,
@@ -146,6 +147,13 @@ def test_switching_the_default_in_the_same_run_cannot_unlock_another_host(host):
     assert outcome.error_code == "EMBEDDING_HOST_DIFFERS" and body["status"] == "needs_user_choice"
     assert _run(tool, action="set_default", profile_id="default")[0].ok
     assert _saved(host)[:2] == ("", False) and _ledger(host) == []
+
+
+def test_startup_snapshot_is_not_recorded_as_a_request_model_read(host):
+    """agent 可能在 Gateway 冻结请求模型的作用域里被懒创建；启动快照那次读取不能冒充这次请求的第一次模型选择读取。"""
+    with capture_selected_model_read() as captured:
+        embedding_selection.remember_startup_chat_host(host)
+    assert captured == [] and host.embedding_chat_host_snapshot == "https://api.minimax.test:443"
 
 
 def test_missing_startup_snapshot_asks_the_user(host):

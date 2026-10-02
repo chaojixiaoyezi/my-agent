@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from ..user_space.owner_access import is_complete_local_admin_owner
 from .config_io import load_simple_yaml
 from .model_profiles import (
+    capture_selected_model_read,
     model_profiles_path,
     public_model_profiles,
     read_model_profiles,
@@ -160,11 +161,13 @@ def _own_embedding_profile(host: object, profile_id: str) -> dict:
 
 # LLM: 组合根（core._wire_memory_authorities）建 agent 时调用一次，和嵌入客户端同一时刻定下：记下当时本 owner 默认对话模型的
 #   端点主机，写在 agent.embedding_chat_host_snapshot 上，model_set_embedding 只比对它。读不出来记空串（之后设向量一律请用户
-#   自己选）。只读目录，不发请求；进程内不再刷新，重启才更新。
+#   自己选）。只读目录，不发请求；进程内不再刷新，重启才更新。读取包在自己的 capture_selected_model_read 作用域里：agent 可能在
+#   Gateway 冻结请求模型的作用域内被懒创建，这次读取不能冒充那次请求的“第一次模型选择读取”。
 # 函数用途: 记下启动时默认对话模型的端点主机，供 my-agent 自配向量模型时比对。
 def remember_startup_chat_host(agent: object) -> None:
     try:
-        chat_host = _default_chat_host(agent)
+        with capture_selected_model_read():
+            chat_host = _default_chat_host(agent)
     except (OSError, ValueError):
         chat_host = ""
     agent.embedding_chat_host_snapshot = chat_host
