@@ -19,6 +19,7 @@ from ..common.encoding_detect import encode_like_original
 from ..common.file_version import StaleFileVersionError, check_file_version, file_version
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..contracts.recovery import RecoveryAction
+from ..contracts.tool_input_schema import EXCLUSIVE_ARGUMENT_GROUPS_KEY
 from ..run_intent import reference_write_feedback
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from ._filesystem_display import (
@@ -198,6 +199,9 @@ class WriteFileTool(FileSystemTool):
                     },
                 },
                 "required": ["path"],
+                EXCLUSIVE_ARGUMENT_GROUPS_KEY: [
+                    ["content", "data_base64", *source_properties]
+                ],
                 "additionalProperties": False,
             },
             hints=ToolModelHints(
@@ -386,15 +390,15 @@ def _write_request(tool: WriteFileTool, params: dict[str, Any]) -> WriteRequest:
     )
 
 
-# LLM: resolver 是宿主可信闭包；缺装配、混合正文、追加和身份替换均在写前拒绝，不尝试读取其它来源。
-# 函数用途: 解析可选精确文件来源，保持字节不经过模型或文本编码转换。
+# LLM: resolver 是宿主可信闭包；输入来源互斥已由公共 schema 门统一拒绝，这里只处理来源装配、仅覆盖约束和身份替换。
+# 函数用途: 解析已通过公共参数校验的精确文件来源，保持字节不经过模型或文本编码转换。
 def _write_source(tool: WriteFileTool, params: dict[str, Any], mode: str) -> FileSourceContent | None:
     if "source_ref" not in params:
         return None
     if tool.source_resolver is None:
         raise FileSourceUnavailableError("当前未装配文件来源读取能力")
-    if "content" in params or "data_base64" in params or mode != "overwrite":
-        raise ValueError("source_ref 必须单独使用，不能同时提供 content/data_base64，且仅支持 overwrite")
+    if mode != "overwrite":
+        raise ValueError("source_ref 仅支持 overwrite")
     source = tool.source_resolver(params["source_ref"])
     if not isinstance(source, FileSourceContent) or dict(source.source_ref) != params["source_ref"]:
         raise ValueError("FILE_SOURCE_REFERENCE_MISMATCH")
@@ -497,12 +501,14 @@ def _artifact_integrity_envelope(web_decision: Any, target: Path) -> dict[str, o
     return {**base, "artifact_integrity": artifact_integrity_payload(web_decision, target)}
 
 
+# LLM: 来源互斥已由公共 schema 门按字段存在性处理；这里保留“至少有一个正文来源”和各载荷解码，不再维护第二份互斥字段清单。
+# 函数用途: 把已通过公共互斥校验的文本或 base64 参数转换为待写字节。
 def _write_payload(params: dict[str, Any]) -> tuple[str | None, bytes]:
     has_text = "content" in params and params.get("content") is not None
     has_base64 = _has_base64_payload(params)
-    if has_text == has_base64:
+    if not has_text and not has_base64:
         raise ValueError(
-            "write_file 的 content 和 data_base64 必须二选一，且只能提供其中一个。"
+            "write_file 必须提供 content 或 data_base64。"
             '写普通文本报告时用 content；超长文本用 mode="append" 分成多个规范 write_file 调用。'
         )
     if has_base64:

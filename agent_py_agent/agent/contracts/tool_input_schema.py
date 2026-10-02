@@ -23,6 +23,7 @@ _NUMBER_TEXT_RE = re.compile(
     r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z"
 )
 _NO_COERCION = object()
+EXCLUSIVE_ARGUMENT_GROUPS_KEY = "x-exclusive-argument-groups"
 
 
 # LLM: issue 只保存结构化路径和约束事实；展示文案由上层 gate 根据这些字段生成。
@@ -33,6 +34,7 @@ class ToolInputIssue:
     path: str
     expected: Any = None
     actual_type: str = ""
+    details: dict[str, Any] | None = None
 
     # LLM: 输出必须保持 JSON 可序列化，不能塞入原始参数值或敏感正文。
     # 函数用途: 把校验问题转换成可写入 gate evidence 的安全字典。
@@ -45,6 +47,8 @@ class ToolInputIssue:
             payload["expected"] = self.expected
         if self.actual_type:
             payload["actual_type"] = self.actual_type
+        if self.details:
+            payload["details"] = dict(self.details)
         return payload
 
 
@@ -87,6 +91,8 @@ class ToolInputValidation:
     @property
     def primary_error_code(self) -> str:
         keywords = {item.keyword for item in self.issues}
+        if "exclusiveArguments" in keywords:
+            return "TOOL_INVALID_ARGUMENTS"
         if "required" in keywords:
             return "TOOL_PARAMETER_REQUIRED"
         if "type" in keywords:
@@ -428,6 +434,7 @@ def _validate_object(
             name = str(raw_name)
             if name not in value:
                 issues.append(ToolInputIssue("required", _child_path(path, name), True, "missing"))
+    _validate_exclusive_arguments(value, schema, path, issues)
     additional = schema.get("additionalProperties", True)
     for raw_key, child in value.items():
         key = str(raw_key)
@@ -454,6 +461,35 @@ def _validate_object(
                 issues=issues,
             )
     _length_issue(len(value), schema, path, issues, "minProperties", "maxProperties", "object")
+
+
+# LLM: 互斥判断只看调用中是否实际出现字段名，并按冻结声明顺序报告；不能按真假值替模型丢掉空串、null 或任选一个来源。
+# 函数用途: 对对象节点的每个互斥组生成不含参数值的结构化冲突详情。
+def _validate_exclusive_arguments(
+    value: dict[Any, Any],
+    schema: dict[str, Any],
+    path: str,
+    issues: list[ToolInputIssue],
+) -> None:
+    groups = schema.get(EXCLUSIVE_ARGUMENT_GROUPS_KEY)
+    if not isinstance(groups, list):
+        return
+    for group in groups:
+        if len(issues) >= _MAX_ISSUES or not isinstance(group, list):
+            return
+        conflicting = [name for name in group if name in value]
+        if len(conflicting) < 2:
+            continue
+        issues.append(
+            ToolInputIssue(
+                "exclusiveArguments",
+                path,
+                details={
+                    "conflicting_arguments": list(conflicting),
+                    "exclusive_group": list(group),
+                },
+            )
+        )
 
 
 # LLM: 数组规则递归检查每个 items，并独立检查条目数量；不自动丢弃或截断元素。
@@ -684,6 +720,7 @@ def _child_path(parent: str, key: str) -> str:
 
 
 __all__ = [
+    "EXCLUSIVE_ARGUMENT_GROUPS_KEY",
     "ToolInputCoercion",
     "ToolInputIssue",
     "ToolInputNormalization",

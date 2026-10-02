@@ -1108,21 +1108,52 @@ def _render_validation_issues(raw: object) -> str:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        path = str(item.get("path") or "").strip()
-        keyword = str(item.get("keyword") or "").strip()
-        expected = item.get("expected")
-        actual = item.get("actual_type")
-        if keyword == "required":
-            parts.append(f"{path}: 必填缺失")
-        elif keyword == "additionalProperties":
-            parts.append(f"{path}: 未声明字段(该工具不接受额外参数)")
-        elif keyword == "type":
-            parts.append(f"{path}: 期望 {expected}, 实际 {actual or '?'}")
-        else:
-            parts.append(f"{path}: {keyword} 校验失败")
+        parts.append(_render_validation_issue(item))
         if len(parts) >= 4:
             break
     return "; ".join(parts)
+
+
+# LLM: 单条 issue 独立渲染，主循环只做有界收集；分支只读取结构化诊断字段，绝不检查参数正文。
+# 函数用途: 把一种参数校验问题转换成下一次调用可操作的安全提示。
+def _render_validation_issue(item: dict[str, object]) -> str:
+    path = str(item.get("path") or "").strip()
+    keyword = str(item.get("keyword") or "").strip()
+    if keyword == "required":
+        return f"{path}: 必填缺失"
+    if keyword == "additionalProperties":
+        return f"{path}: 未声明字段(该工具不接受额外参数)"
+    if keyword == "type":
+        return f"{path}: 期望 {item.get('expected')}, 实际 {item.get('actual_type') or '?'}"
+    if keyword == "exclusiveArguments":
+        return _render_exclusive_argument_issue(path, item.get("details"))
+    return f"{path}: {keyword} 校验失败"
+
+
+# LLM: 独立渲染一条互斥问题可让主循环保持两层以内；输出只消费安全提取器认可的字段名。
+# 函数用途: 把一组结构化冲突详情转换为模型可见的有界 JSON 文本。
+def _render_exclusive_argument_issue(path: str, raw: object) -> str:
+    details = _safe_conflict_details(raw)
+    if not details:
+        return f"{path}: exclusiveArguments 校验失败"
+    return f"{path}: 互斥参数冲突 details=" + json.dumps(
+        details,
+        ensure_ascii=False,
+    )
+
+
+# LLM: 模型提示只允许输出 schema 中冻结的参数名列表，忽略 issue 里其它任意字段，防止参数值或伪造控制数据借 details 泄露。
+# 函数用途: 从互斥 issue 中提取有界、可 JSON 展示的冲突参数名与完整参数组。
+def _safe_conflict_details(raw: object) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for key in ("conflicting_arguments", "exclusive_group"):
+        names = raw.get(key)
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            return {}
+        result[key] = [name[:128] for name in names[:32]]
+    return result
 
 
 def _task_id(request: ToolExecutorRequest) -> str:

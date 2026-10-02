@@ -63,6 +63,31 @@ def test_provider_schema_is_an_isolated_copy() -> None:
     assert spec.input_schema["properties"]["limit"]["minimum"] == 1
 
 
+def test_provider_schema_omits_host_only_exclusive_group_extension() -> None:
+    spec = ToolModelSpec(
+        name="write_like",
+        description="host validates the mutually exclusive payloads",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "data_base64": {"type": "string"},
+            },
+            "x-exclusive-argument-groups": [["content", "data_base64"]],
+            "additionalProperties": False,
+        },
+    )
+
+    projected = tool_model_spec_to_input_schema(spec)
+
+    assert spec.input_schema["x-exclusive-argument-groups"] == [
+        ["content", "data_base64"]
+    ]
+    assert "x-exclusive-argument-groups" not in projected
+    assert projected["properties"] == spec.input_schema["properties"]
+    spec.assert_schema_hash()
+
+
 def test_model_spec_rejects_non_object_and_unsupported_schemas() -> None:
     with pytest.raises(ValueError, match="top-level type"):
         ToolModelSpec("bad", "bad schema", {"type": "string"})

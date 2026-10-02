@@ -250,14 +250,27 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
             merged = {**call.arguments, **normalization.value}
             object.__setattr__(call, "arguments", merged)
         return None
+    issue_rows = [item.to_dict() for item in validation.issues]
+    evidence: dict[str, Any] = {
+        "tool_name": call.tool_name,
+        "issues": issue_rows,
+        "allowed_parameters": sorted(runtime.model_spec.input_schema.get("properties", {})),
+    }
+    conflict = next(
+        (
+            row.get("details")
+            for row in issue_rows
+            if row.get("keyword") == "exclusiveArguments"
+            and isinstance(row.get("details"), dict)
+        ),
+        None,
+    )
+    if conflict is not None:
+        evidence["details"] = dict(conflict)
     return _deny(
         validation.primary_error_code or "TOOL_INVALID_ARGUMENTS",
         stage="validation",
-        evidence={
-            "tool_name": call.tool_name,
-            "issues": [item.to_dict() for item in validation.issues],
-            "allowed_parameters": sorted(runtime.model_spec.input_schema.get("properties", {})),
-        },
+        evidence=evidence,
     )
 
 

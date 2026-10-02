@@ -142,6 +142,16 @@
 - **验证边界**：111 项聚焦回归、166 项架构守卫与 3 项变异已有本地证据，详见 TESTS 同名节。真实终端及真实飞书收信未验证，待集成后复核。
   沿原“提交即已读”口径；回执写盘与线程提示队列非跨文件事务，极端中断/排队失败可能漏提示，不扫旧回执补发。
 
+## 工具参数互斥组单处声明与模型可见冲突详情（2026-10-01，分支 `worker/sol56-arg-conflicts`，基于 main `34e4d874e`，已实现，待集成与真实模型复测）
+
+- **现象**：能力包真实验收里，模型三次把 `write_file.source_ref` 与 `content` 同传。旧 handler 虽以 `TOOL_INVALID_ARGUMENTS` 拒绝且回执完整，但没有机器可读的冲突参数列表；模型随后改为手抄正文或自建脚本，没有恢复原样复制链。
+- **合同**：工具在唯一 `ToolModelSpec.input_schema` 中用宿主扩展 `x-exclusive-argument-groups` 声明互斥组。canonicalizer 在快照构造时校验组至少两个字段、字段不重复且都属于同层 `properties`；声明参与 `schema_hash`，公共输入 validator 按声明顺序检查所有对象节点。判断只看参数名是否实际出现，空串和 `null` 也不会被静默丢弃。
+- **错误与模型提示**：冲突沿用登记过的 `TOOL_INVALID_ARGUMENTS`，每条 issue 的 `details` 以及 ActionDecision 的 `evidence.details` 都带 `conflicting_arguments` 和 `exclusive_group`。Executor 只从这些结构化字段渲染有界 JSON 提示，真实 `ToolResult.render_for_model_prompt()` 可见冲突参数名；不回显参数值，也不自动替模型选择保留项。
+- **provider 边界**：宿主扩展留在冻结 schema 中供运行时和 manifest 使用，发给 Anthropic/OpenAI 前从隔离副本递归剥离，避免把第三方未承诺支持的自定义关键字送出；标准 schema 约束保持不变。
+- **首个使用者**：`write_file` 只声明一组 `content`／`data_base64`／可选 `source_ref`。旧 handler 中两份互斥判断删除；`source_ref` 仅允许 overwrite、至少需要一个正文来源、base64 解码等不同业务约束仍留在原位置。
+- **验证边界**：声明解析、单组和多组冲突、无冲突、provider 投影、真实 write_file schema、handler 未执行及模型可见结果已有仓库测试和变异覆盖。本分支按任务约束没有启动 Gateway 或运行真实模型，改善真实模型恢复行为仍待后续复测。
+- **验证**：见 TESTS.md 同名节。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`

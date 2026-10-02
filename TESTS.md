@@ -175,6 +175,19 @@ $PY scripts/check_clean_package.py .
   模型和供应商传输是隔离替身，不能外推为真实用户已收信。沿原“提交即已读”，原请求回执与线程队列不是跨文件事务，
   写回执后、排队前的极端中断/排队失败可能少提示；不扫旧回执补投。建议 3a 固定集成版后按原授权用例复核两端收信与重启无重复。
 
+## 工具参数互斥组单处声明与模型可见冲突详情（2026-10-01，分支 `worker/sol56-arg-conflicts`）
+
+- **红灯**：实现前运行 `test_tool_input_schema.py`、`test_backends_tool_schema_precise.py`、`test_write_file_sources.py`，真实得到 7 failed；分别证明旧代码没有校验声明形状、没有发现互斥冲突、会把宿主扩展原样送 provider，且 write_file 尚未声明互斥组。
+- **合同测试**：
+  - `test_tool_input_schema.py`：声明深拷贝及未声明字段拒绝；同一组两个／三个实参冲突；两组同时冲突；零个或一个参数不改变归一化与校验结果；冲突继续使用 `TOOL_INVALID_ARGUMENTS`。
+  - `test_backends_tool_schema_precise.py`：互斥声明仍在 canonical schema 并参与 hash，但 provider 副本不含宿主扩展，原 properties 保持。
+  - `test_write_file_sources.py`：真实 `ToolExecutor` 在 handler/resolver 前拒绝 source_ref 与另外两种正文来源同传；`evidence.details` 和 issue details 都含 `conflicting_arguments`／`exclusive_group`；`render_for_model_prompt()` 的真实模型可见文本含字段名和冲突参数名。
+  - `test_tooling_filesystem_write.py`：普通 content/data_base64 冲突及空字符串冲突不再被静默忽略，单一文本、单一二进制和缺载荷的原行为分别保留。
+- **聚焦回归**：上述四个测试文件按规定 Python、`PYTHONPATH=$PWD`、禁写 pyc、短 `--basetemp=/private/tmp/claude-501/m-sol56` 运行，退出 0。
+- **变异 4/4**：把冲突阈值由 2 改成 3、清空 ActionPolicy 的结构化 details、停止剥离 provider 宿主扩展、禁用模型可见互斥渲染，四项各自均被对应测试抓住；每项之后恢复正式实现。
+- **真实模型边界**：本轮明确禁止启动 Gateway 和运行 `my-agent`，因此这里只验证仓库内真实 ToolExecutor→ToolResult→`render_for_model_prompt()` 链路；真实模型是否据此恢复 source_ref 调用尚未验证。
+- **严格门禁**：最终版本上，8 个直接相关测试文件与 `guards9.txt` 的 10 个架构／打包守卫分别退出 0；`check_import_boundaries.py` 为 0 条，Ruff、doc sync、`git diff --check`、clean-package 全部通过。strict code-size 首次准确拦住 `_render_validation_issues` 新增的第三层嵌套，拆成单条 issue 渲染函数后重跑为 `hard=0`、`blocked=False`，随后还原 `CODE_SIZE_REPORT.md`。没有新增配置或重要文件。
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，

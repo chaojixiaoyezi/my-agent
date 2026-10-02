@@ -13,6 +13,7 @@ from agent_py_agent.agent.tooling.content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     write_file_content_parameter_detail,
 )
+from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
 
 def test_write_file_writes_text_and_creates_parent_dirs(tmp_path: Path) -> None:
@@ -116,23 +117,36 @@ def test_write_file_requires_exactly_one_payload(tmp_path: Path) -> None:
     tool = WriteFileTool(workspace)
 
     missing = tool.execute({"path": "out.txt"})
-    duplicate = tool.execute({"path": "out.txt", "content": "x", "data_base64": "eA=="})
+    duplicate = execute_canonical_test_call(
+        workspace,
+        tools={"write_file": tool},
+        tool_name="write_file",
+        arguments={"path": "out.txt", "content": "x", "data_base64": "eA=="},
+    ).result
 
     assert not missing.ok
     assert not duplicate.ok
-    assert "二选一" in missing.output
-    assert "二选一" in duplicate.output
+    assert "必须提供 content 或 data_base64" in missing.output
+    assert duplicate.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert not duplicate.handler_executed
+    assert "conflicting_arguments" in duplicate.render_for_model_prompt()
 
 
-def test_write_file_ignores_empty_optional_data_base64_when_content_is_present(tmp_path: Path) -> None:
+def test_write_file_does_not_silently_drop_empty_conflicting_payload(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     tool = WriteFileTool(workspace)
 
-    result = tool.execute({"path": "out.txt", "content": "hello", "data_base64": ""})
+    result = execute_canonical_test_call(
+        workspace,
+        tools={"write_file": tool},
+        tool_name="write_file",
+        arguments={"path": "out.txt", "content": "hello", "data_base64": ""},
+    ).result
 
-    assert result.ok
-    assert (workspace / "out.txt").read_text(encoding="utf-8") == "hello"
+    assert not result.ok and result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert not result.handler_executed
+    assert not (workspace / "out.txt").exists()
 
 
 def test_write_file_allows_non_dangerous_external_path(tmp_path: Path) -> None:

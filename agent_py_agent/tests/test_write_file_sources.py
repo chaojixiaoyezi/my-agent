@@ -107,10 +107,41 @@ def test_source_host_schema_is_copied_before_the_tool_is_published(tmp_path):
 
 
 @pytest.mark.parametrize("extra", [{"content": "text"}, {"content": None}, {"data_base64": "AA=="},
-                                   {"data_base64": ""}, {"mode": "append"}])
-def test_source_is_exclusive_and_overwrite_only(tmp_path, extra):
+                                   {"data_base64": ""}])
+def test_source_payload_conflict_uses_common_schema_gate_and_model_visible_details(tmp_path, extra):
     tool, reference, reads = source_tool(tmp_path)
-    result = tool.execute({"path": "artifact.bin", "source_ref": reference, **extra})
+    execution = execute_canonical_test_call(
+        tmp_path,
+        tools={"write_file": tool},
+        tool_name="write_file",
+        arguments={"path": "artifact.bin", "source_ref": reference, **extra},
+    )
+    result = execution.result
+    provided = "content" if "content" in extra else "data_base64"
+    details = {
+        "conflicting_arguments": [provided, "source_ref"],
+        "exclusive_group": ["content", "data_base64", "source_ref"],
+    }
+
+    assert tool.model_spec.input_schema["x-exclusive-argument-groups"] == [
+        ["content", "data_base64", "source_ref"]
+    ]
+    assert not result.ok and result.effect_outcome == "not_started"
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS" and not result.handler_executed
+    assert execution.decision.evidence["details"] == details
+    assert execution.decision.evidence["issues"][0]["details"] == details
+    visible = result.render_for_model_prompt()
+    assert "conflicting_arguments" in visible and "exclusive_group" in visible
+    assert provided in visible and "source_ref" in visible
+    assert reads == []
+    assert not (tmp_path / "artifact.bin").exists()
+
+
+def test_source_remains_overwrite_only_after_common_exclusive_gate(tmp_path):
+    tool, reference, reads = source_tool(tmp_path)
+    result = tool.execute(
+        {"path": "artifact.bin", "source_ref": reference, "mode": "append"}
+    )
     assert not result.ok and result.effect_outcome == "not_started"
     assert result.error_code == "TOOL_INVALID_ARGUMENTS" and reads == []
     assert not (tmp_path / "artifact.bin").exists()

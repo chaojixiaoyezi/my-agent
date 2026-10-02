@@ -209,6 +209,107 @@ def test_validator_distinguishes_missing_and_type_errors() -> None:
     assert wrong.primary_error_code == "TOOL_PARAMETER_TYPE_INVALID"
 
 
+def test_exclusive_argument_group_declaration_is_canonical_and_validated() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "data_base64": {"type": "string"},
+            "source_ref": {"type": "object"},
+        },
+        "x-exclusive-argument-groups": [
+            ["content", "data_base64", "source_ref"],
+        ],
+        "additionalProperties": False,
+    }
+
+    canonical = canonicalize_tool_input_schema(schema)
+
+    assert canonical["x-exclusive-argument-groups"] == [
+        ["content", "data_base64", "source_ref"]
+    ]
+    schema["x-exclusive-argument-groups"][0].append("later")
+    assert canonical["x-exclusive-argument-groups"] == [
+        ["content", "data_base64", "source_ref"]
+    ]
+    with pytest.raises(ValueError, match="x-exclusive-argument-groups"):
+        canonicalize_tool_input_schema(
+            {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+                "x-exclusive-argument-groups": [["content", "missing"]],
+            }
+        )
+
+
+def test_exclusive_argument_groups_report_one_or_multiple_structured_conflicts() -> None:
+    schema = canonicalize_tool_input_schema(
+        {
+            "type": "object",
+            "properties": {
+                "alpha": {"type": "string"},
+                "beta": {"type": "string"},
+                "gamma": {"type": "string"},
+                "delta": {"type": "string"},
+            },
+            "x-exclusive-argument-groups": [
+                ["alpha", "beta", "gamma"],
+                ["gamma", "delta"],
+            ],
+            "additionalProperties": False,
+        }
+    )
+
+    one = validate_tool_input({"beta": "b", "alpha": "a"}, schema)
+    multiple = validate_tool_input(
+        {"delta": "d", "gamma": "g", "beta": "b", "alpha": "a"},
+        schema,
+    )
+
+    assert one.primary_error_code == "TOOL_INVALID_ARGUMENTS"
+    assert [issue.to_dict() for issue in one.issues] == [
+        {
+            "keyword": "exclusiveArguments",
+            "path": "$",
+            "details": {
+                "conflicting_arguments": ["alpha", "beta"],
+                "exclusive_group": ["alpha", "beta", "gamma"],
+            },
+        }
+    ]
+    assert [issue.to_dict()["details"] for issue in multiple.issues] == [
+        {
+            "conflicting_arguments": ["alpha", "beta", "gamma"],
+            "exclusive_group": ["alpha", "beta", "gamma"],
+        },
+        {
+            "conflicting_arguments": ["gamma", "delta"],
+            "exclusive_group": ["gamma", "delta"],
+        },
+    ]
+
+
+@pytest.mark.parametrize("arguments", [{}, {"alpha": ""}, {"beta": None}])
+def test_exclusive_argument_group_leaves_non_conflicting_input_unchanged(arguments) -> None:
+    schema = canonicalize_tool_input_schema(
+        {
+            "type": "object",
+            "properties": {
+                "alpha": {},
+                "beta": {},
+            },
+            "x-exclusive-argument-groups": [["alpha", "beta"]],
+            "additionalProperties": False,
+        }
+    )
+
+    normalized = normalize_tool_input(arguments, schema)
+
+    assert normalized.value == arguments
+    assert normalized.coercions == ()
+    assert validate_tool_input(normalized.value, schema).ok is True
+
+
 def test_model_schema_and_host_internal_parameters_remain_separate() -> None:
     spec = ToolModelSpec(
         name="demo",

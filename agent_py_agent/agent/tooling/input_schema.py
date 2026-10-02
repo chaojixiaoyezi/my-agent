@@ -12,6 +12,7 @@ from copy import deepcopy
 from typing import Any
 
 from ..contracts.tool_input_schema import (
+    EXCLUSIVE_ARGUMENT_GROUPS_KEY,
     ToolInputCoercion,
     ToolInputIssue,
     ToolInputNormalization,
@@ -135,6 +136,7 @@ def _validate_schema_node(schema: Any, *, path: str, depth: int) -> None:
     if invalid_types:
         raise ValueError(f"{path}.type has unknown JSON types: {', '.join(invalid_types)}")
     _validate_constraint_shapes(schema, path)
+    _validate_exclusive_argument_groups(schema, path)
     _validate_schema_mapping(schema.get("properties"), f"{path}.properties", depth)
     _validate_schema_mapping(schema.get("$defs"), f"{path}.$defs", depth)
     _validate_schema_mapping(schema.get("definitions"), f"{path}.definitions", depth)
@@ -164,6 +166,31 @@ def _validate_schema_node(schema: Any, *, path: str, depth: int) -> None:
         or not all(isinstance(item, str) and item for item in required)
     ):
         raise ValueError(f"{path}.required must contain non-empty field names")
+
+
+# LLM: 自定义互斥声明必须在快照构造时绑定到同层公开 properties；运行期只消费已验证结构，不能容忍拼错字段后形成假保护。
+# 函数用途: 校验互斥参数组由至少两个、不重复且已声明的字段名组成。
+def _validate_exclusive_argument_groups(schema: dict[str, Any], path: str) -> None:
+    groups = schema.get(EXCLUSIVE_ARGUMENT_GROUPS_KEY)
+    if groups is None:
+        return
+    if not isinstance(groups, list) or not groups:
+        raise ValueError(f"{path}.{EXCLUSIVE_ARGUMENT_GROUPS_KEY} must be a non-empty array")
+    properties = schema.get("properties")
+    property_names = set(properties) if isinstance(properties, dict) else set()
+    for index, group in enumerate(groups):
+        group_path = f"{path}.{EXCLUSIVE_ARGUMENT_GROUPS_KEY}[{index}]"
+        if not isinstance(group, list) or len(group) < 2:
+            raise ValueError(f"{group_path} must contain at least two field names")
+        if not all(isinstance(name, str) and name for name in group):
+            raise ValueError(f"{group_path} must contain non-empty field names")
+        if len(set(group)) != len(group):
+            raise ValueError(f"{group_path} must not repeat field names")
+        missing = [name for name in group if name not in property_names]
+        if missing:
+            raise ValueError(
+                f"{group_path} names undeclared properties: {', '.join(missing)}"
+            )
 
 
 def _validate_schema_mapping(value: Any, path: str, depth: int) -> None:

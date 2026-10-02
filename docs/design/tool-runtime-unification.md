@@ -35,6 +35,18 @@ my-agent 的工具系统只保留这一条权威链：
 4. required action 只防止“无证据假完成”。它不代替安全授权、不扫描目录、不判断业务质量，也不把
    普通 `task_progress` 开放项变成硬门。
 
+### 1.1 工具参数互斥组
+
+工具若有“至多提供一个”的参数关系，在唯一 `ToolModelSpec.input_schema` 用
+`x-exclusive-argument-groups` 声明字段组；不得在 provider schema、ActionPolicy 和业务 handler
+各维护一份字段清单。声明随 canonical schema 一起校验、深拷贝和计算 `schema_hash`，公共输入门按
+参数名是否实际出现判冲突，不按参数值真假静默忽略空串或 `null`。
+
+冲突沿用 `TOOL_INVALID_ARGUMENTS`。结构化 issue 的 `details.conflicting_arguments` 只列本次实际
+出现的字段，`details.exclusive_group` 列完整声明组；Executor 从这两个有界字段生成模型可见提示，
+不回显参数值、不自动选一个保留。该宿主扩展在 provider 投影阶段从隔离副本剥离，避免依赖服务商
+对未知 JSON Schema 关键字的处理；运行时冻结 schema 和 manifest 仍保留声明。
+
 ## 2. 当前证据边界
 
 本设计基于 2026-08-04 的实际 checkout，而不是项目名印象或索引摘要。
