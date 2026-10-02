@@ -1065,6 +1065,10 @@ decision_delivery_quality_mode: off  # 交付复核焦点：run_command 产生�
 decision_action_candidate_mode: off  # 动作候选：插件只读观察工具返回宿主校验过的候选后，建议下一步先核对哪个候选；observe 仅观察，apply 只追加提示，不执行动作、不生成参数
 decision_skill_proposal_review_mode: off  # 仅用户长期设置：`skills proposals list` 有 2—30 条待确认 Skill 提案时请决策模型建议审核先后；observe 仅观察，apply 只重排展示并加标签，不确认、拒绝或改写提案/Skill
 memory_decision_pre_recall_mode: off  # 召回前补充查询建议；始终先执行原召回，不依据自然语言或决策跳过历史
+# 召回前补充查询的片段材料：query_text 只给片段文字（默认，与原做法相同）；
+# with_new_facts 时宿主先按原检索预检每个片段能新增的正式事实（不记访问），把条数与摘要交给决策模型，补不出新事实的片段不给选，
+# 全都补不出就不调用。每个片段多一次查询嵌入。也可以在 TUI 决策菜单或让 my-agent 按会话单独设置。
+memory_decision_pre_recall_fragment_material: query_text
 memory_decision_recall_mode: off  # 记忆召回决策；不绕过原读取权限
 memory_decision_curator_mode: off  # 记忆整理决策；不授予写人格或晋升权限
 memory_decision_curator_relation_mode: off  # 用户后台独立开关：新来源与完整、带版本正式条目的关系建议；不直接合并或晋升

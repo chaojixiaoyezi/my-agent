@@ -31,6 +31,9 @@ _POINT_EXTRA_SCHEMAS = {"subagent_model": {
 }, "model_selection": {
     # 询问节奏：every_turn 每轮都问（默认）；structure_change 只在新会话、压缩之后、模型目录或当前模型变化时问。
     "cadence": {"type": "string", "enum": ["every_turn", "structure_change"]},
+}, "pre_recall": {
+    # 片段材料：query_text 只给查询片段文字（默认）；with_new_facts 先预检每个片段能新增的正式事实，连同摘要交给决策模型。
+    "fragment_material": {"type": "string", "enum": ["query_text", "with_new_facts"]},
 }}
 
 
@@ -158,6 +161,10 @@ def validate_decision_field(path: object, value: object, *, scope: str | None = 
     if field == "cadence":
         if type(value) is not str or value not in decision_field_schema(path)["enum"]:
             raise ModelProfileError("选模型询问节奏只能是 every_turn（每轮都问）或 structure_change（只在结构变化时问）。")
+        return value
+    if field == "fragment_material":
+        if type(value) is not str or value not in decision_field_schema(path)["enum"]:
+            raise ModelProfileError("补充查询片段材料只能是 query_text（只给片段文字）或 with_new_facts（预检每个片段能新增的事实）。")
         return value
     if type(value) is not str or value not in {"off", "observe", "apply"}:
         raise ModelProfileError("决策模式只能是 off、observe 或 apply。")

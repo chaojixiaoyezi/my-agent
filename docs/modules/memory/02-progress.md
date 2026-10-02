@@ -1,5 +1,16 @@
 # 记忆与上下文维护状态
 
+## 补充查询片段材料：先预检每个片段能新增的事实（J8，2026-10-02，分支 `claude/be-jev-snippet-facts`，已实现，待集成）
+
+- 新增 `points.pre_recall.fragment_material`，配置 `memory_decision_pre_recall_fragment_material` 默认 `query_text`，与原做法逐字节相同。
+- `with_new_facts` 时：
+  - 宿主在问 Jev 前，对每个片段做一次同规则的候选检索：原 scope，去掉基线已有的，按名额和字数截取，不记访问。
+  - 只给能补出新事实的片段，请求里带每个片段的新增条数与摘要；全都补不出就不调 Jev（到达原因 `no_new_facts`）。
+  - 采用的正是 Jev 看到的那份，最终仍经正式源确认。
+- 代价：语义召回下每个片段多一次查询嵌入，最多 4 次。
+- 真实 Jev 对照：候选检索写死成模拟语义召回的结果，因为嵌入模型不在授权名单。被覆盖的片段不再给选，没有可补时不调 Jev；选择准确率的提升没有被证明，语义召回下的端到端效果未验证。
+- 详见 [召回前审计](../../tasks/DECISION_MODEL_PRE_RECALL_AUDIT.md) 与 TESTS.md 同名节。
+
 ## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，本地已实现，待集成）
 
 - P13：`embedding_model_profile` 取代 `embedding_model/embedding_api_base/embedding_api_key/embedding_api_key_env` 四个平铺键

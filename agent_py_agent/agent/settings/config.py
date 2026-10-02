@@ -310,6 +310,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_path: str = ""
     # 记忆决策默认定义归 MemorySettings；这里镜像供现有 YAML 配置加载与展示。
     memory_decision_pre_recall_mode: str = "off"
+    # 召回前补充查询的片段材料（默认只给片段文字）：with_new_facts 时宿主先按原检索预检每个片段能新增的正式事实，
+    # 把条数与摘要交给决策模型，补不出新事实的片段不给选，全都补不出就不调用；每个片段多一次查询嵌入。
+    memory_decision_pre_recall_fragment_material: str = "query_text"
     memory_decision_recall_mode: str = "off"
     memory_decision_curator_mode: str = "off"
     memory_decision_curator_relation_mode: str = "off"

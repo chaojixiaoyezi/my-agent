@@ -28,13 +28,14 @@ _GENERAL = {"enabled": "总开关", "profile_id": "默认决策模型", "timeout
             "observe_nonblocking_enabled": "观察不挡回复（observe 点位改在后台问决策模型）"}
 _POINT_FIELDS = {"mode": "模式", "profile_id": "决策模型", "timeout_seconds": "单次上限（秒）",
                  "context_policy": "上下文减量策略", "optional_categories": "可选工具类别",
-                 "candidate_profile_ids": "子代理执行模型候选", "cadence": "询问节奏"}
+                 "candidate_profile_ids": "子代理执行模型候选", "cadence": "询问节奏", "fragment_material": "片段材料"}
 # 模式仍只有 off/observe/apply 三个存储值；界面按"开/关 + 观察模式"呈现（关=off，开+观察=observe，开+不观察=apply）
 _MODES = {"off": "关", "observe": "开 · 观察模式", "apply": "开 · 正式使用"}
 _CONTEXT_POLICIES = {"metadata": "仅精简名卡与推荐", "progressive": "名卡与可选工具渐进披露"}
 _CADENCES = {"every_turn": "每轮都问", "structure_change": "只在结构变化时问（新会话、压缩后、模型目录或当前模型变化）"}
+_FRAGMENT_MATERIALS = {"query_text": "只给片段文字", "with_new_facts": "先预检每个片段能新增的事实"}
 # 用单选编辑的点位枚举字段：后缀 → 存储值到界面文字。
-_ENUM_LABELS = {".context_policy": _CONTEXT_POLICIES, ".cadence": _CADENCES}
+_ENUM_LABELS = {".context_policy": _CONTEXT_POLICIES, ".cadence": _CADENCES, ".fragment_material": _FRAGMENT_MATERIALS}
 
 
 # LLM: 来源是原 settings 的结构化字段，中文仅用于显示，不根据展示文本生成修改或权限。
@@ -253,6 +254,8 @@ async def _edit_field(app, agent, session: str, view: dict, field: str) -> str:
                    "减量可改变缓存前缀/schema；原搜索和权限不变，仅在开启并采用建议时生效。" if field.endswith(".context_policy") else
                    "只在结构变化时问：新会话、本会话压缩之后、模型目录或当前模型变化才调用决策模型，其余轮次沿用上次判断。"
                    if field.endswith(".cadence") else
+                   "预检：问之前先按原检索看每个片段能补出哪些新事实（不记访问），补不出的片段不给选、全都补不出就不问；每个片段多一次查询嵌入。"
+                   if field.endswith(".fragment_material") else
                    "空格或回车勾选；关=不调用，开+观察=只记录建议，开+不勾观察=正式使用（采用前仍会复核）。Tab 到保存。"
                    if field.endswith(".mode") else
                    "恢复继承会删除本范围覆盖；清空模型只表示不绑定。")

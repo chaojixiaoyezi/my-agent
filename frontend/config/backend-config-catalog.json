@@ -4,7 +4,7 @@
     {
       "id": "agent_config",
       "path": "agent_py_agent/config/agent_config.yaml",
-      "fieldCount": 217
+      "fieldCount": 218
     },
     {
       "id": "capability_config",
@@ -2946,6 +2946,23 @@
             "order": 214
           },
           {
+            "key": "memory_decision_pre_recall_fragment_material",
+            "label": "memory_decision_pre_recall_fragment_material（memory decision pre recall fragment material）",
+            "description": "召回前补充查询的片段材料：query_text 只给片段文字（默认，与原做法相同）； with_new_facts 时宿主先按原检索预检每个片段能新增的正式事实（不记访问），把条数与摘要交给决策模型，补不出新事实的片段不给选， 全都补不出就不调用。每个片段多一次查询嵌入。也可以在 TUI 决策菜单或让 my-agent 按会话单独设置。",
+            "type": "string",
+            "defaultValue": "query_text",
+            "currentValue": "query_text",
+            "category": "memory",
+            "categoryLabel": "记忆配置",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 215
+          },
+          {
             "key": "memory_decision_recall_mode",
             "label": "memory_decision_recall_mode（memory decision recall mode）",
             "description": "记忆召回决策；不绕过原读取权限",
@@ -2960,7 +2977,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 215
+            "order": 216
           },
           {
             "key": "memory_decision_curator_mode",
@@ -2977,7 +2994,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 216
+            "order": 217
           },
           {
             "key": "memory_decision_curator_relation_mode",
@@ -2994,7 +3011,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 217
+            "order": 218
           }
         ]
       },

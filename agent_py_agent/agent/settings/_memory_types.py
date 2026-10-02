@@ -16,6 +16,7 @@ from typing import Any
 class MemorySettings:
     """Effective memory config after validation and default normalization."""
     memory_decision_pre_recall_mode: str = "off"
+    memory_decision_pre_recall_fragment_material: str = "query_text"
     memory_decision_recall_mode: str = "off"
     memory_decision_curator_mode: str = "off"
     memory_decision_curator_relation_mode: str = "off"

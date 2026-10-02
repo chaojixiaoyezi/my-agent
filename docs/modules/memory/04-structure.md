@@ -229,7 +229,7 @@ system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。�
 本地一致性校验仍用完整的 `_record_view`。
 读取之前即检查原 `task_local`/`control_plane` 范围和 owner `memory_enabled`，不在禁用范围继续扫描正式项目记忆；
 原任务本地与控制材料仍按其自身来源准备，此门不删除历史或改变工具权限。
-当前选中集合完整保留，HOT/lesson 只绑定不参与排序。P3 排序的来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数；P5-A 补充查询至多一次，候选未确认前不记访问。
+当前选中集合完整保留，HOT/lesson 只绑定不参与排序。P3 排序的来源刷新只查原正式仓库并投影原 ID，不新增检索或访问计数；P5-A 补充查询至多一次，候选未确认前不记访问。开了 `points.pre_recall.fragment_material=with_new_facts`（J8，默认关）时，问 Jev 前每个片段先做一次同规则的候选检索（`FragmentSearch.additions`，不记访问），补不出新事实的片段不给选；采用的正是预检那份，仍经 `confirm_scoped_access` 重读正式源确认。
 候选、请求属性、主模型或设置变更时拒绝旧建议；最后采用沿 `decision_outcome_is_current`。
 结果驻留原 PreparedRuntimeContext.memories，工具循环/Compact 复用该轮材料。同步本地文件 I/O 不承诺强制中断，迟到建议不会采用。
 召回前补充真正追加的记录编号写到 `RoutedMemoryContext.supplement_entry_ids`；上下文包 `memory_refs` 另写 `recalled_refs`（编号、版本、种类、`via` 为 baseline 或 supplement）与 `recall_findings`（`memory_*` 发现码），只写文件、不进提示段，供真实验收核对补充召回有没有带来新事实。

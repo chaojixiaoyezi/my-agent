@@ -79,6 +79,22 @@ python3 -m pytest -o addopts='' agent_py_agent/tests/test_decision_recall.py age
 - **限制**：Jev 只看到基线摘要，不知道各片段能否新增记录。可能的改进：宿主把"各片段可新增条数"这类客观事实交给 Jev，或在有空槽时确定性补位。这属于未实施的提议，需先评估额外嵌入开销和弱相关事实混入的风险。
 - 详见[真实验收](DECISION_MODEL_REAL_VALIDATION.md#14-p5-a-召回前补充查询语义召回下的真实收益2026-09-25main-ab23a2666)。默认仍关闭。
 
+## 片段材料：先预检每个片段能新增的事实（J8，2026-10-02）
+
+- **开关**：`points.pre_recall.fragment_material`，配置默认 `memory_decision_pre_recall_fragment_material: query_text`（只给片段文字，与原做法逐字节相同）。
+  owner 与会话两层都能覆盖：TUI 决策菜单“逐接入点设置 · 片段材料”，或让 my-agent 用 `user_config` 的 `decision_patch`。
+- **`with_new_facts` 时的流程**（都在原补充查询入口 `supplement_recalled_memories` 内，原召回先成立的前提不变）：
+  1. 对每个片段做一次候选检索。检索规则与采用时相同：原 scope，去掉基线已有的，按空余名额和剩余字数截取；不记访问。
+  2. 只把能新增事实的片段留作选项。请求 `state.fragment_additions` 写每个片段的新增条数与摘要（每条 160 字），另附一句说明：新增事实与问题无关时选 `not_needed` 或 `no_match`。
+  3. 一个都补不出就不调 Jev，到达诊断 `no_new_facts`。预检检索出错保留原召回，到达诊断 `preview_failed`，结果 `enhancement_failed`。
+  4. Jev 选中后，先核对基线未变，再直接用它看到的那份新增事实；最终仍经 `confirm_scoped_access` 重读正式源确认，只给真正注入的记访问。
+- **为什么交给 Jev 而不是有空槽就确定性补位**：检索命中不等于和问题相关，确定性补位会把弱相关事实直接塞进上下文。交给 Jev 至少有一次看摘要后选“不补”的机会。
+- **真实对照**（2026-10-02，隔离 home，真实 Jev；候选检索写死成模拟语义召回的结果，因为嵌入模型不在授权名单）：
+  - 能补出目标的三个样本，两种材料下 Jev 都选对，09-25 K3a 的失误没有复现，所以选择准确率的提升没有被证明。
+  - 对照样本开预检后不调 Jev。只能补出弱相关事实的干扰样本，两种材料下 Jev 都选了它。
+  - 语义召回下的端到端效果未验证。默认仍关，生产不打开。
+  - 证据：`~/.my-agent/decision-evidence/j8-fragment-material/`。
+
 ## 交接与建议下一步
 
 原只读审计只拥有本文件；上面的后续实施由主线完成。下一步是隔离真实接口验收与原召回对照，必要时再修通用接缝；与子代理异模、主会话选模并行时分别守住文件和 Gateway 所有权。风险守门点是：任何 Jev 建议均不得静默删掉原召回，任何补充命中均不得越过 owner/scope/数量/字符预算。

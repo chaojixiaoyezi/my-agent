@@ -16,9 +16,14 @@ from agent_py_agent.agent.memory_store.recall import (
 )
 from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
+# 夹具把片段材料设置换成固定值；读取失败用例要用真实读取入口。
+_REAL_FRAGMENT_MATERIAL = decision_recall._fragment_material
+
 
 @pytest.fixture
-def prepared():
+def prepared(monkeypatch):
+    # 片段材料默认只给文字（与仓库默认一致）；真实设置读取见下面的 _fragment_material 用例。
+    monkeypatch.setattr(decision_recall, "_fragment_material", lambda *_args: "query_text")
     original = MemoryRecord("user", "Orion release details", entry_id="original", kind="fact", version=1,
                             attributes={"scope_type": "personal", "scope_key": "personal"})
     extra = MemoryRecord("user", "Lyra deployment checklist", entry_id="extra", kind="fact", version=1,
@@ -300,3 +305,222 @@ def test_context_bundle_writes_recall_evidence_without_changing_the_prompt_secti
     assert refs["recall_findings"] == ["memory_pre_recall_decision:apply:success"]
     assert plain.bundle["memory_refs"]["recalled_refs"] == [] and plain.bundle["memory_refs"]["recall_findings"] == []
     assert evidence.prompt_section == plain.prompt_section, "来源清单只写文件，模型可见的提示段字节不变"
+
+
+# ---- J8：片段材料 with_new_facts（先预检每个片段能新增的正式事实）----
+
+QUERIES = (("query_1", "Orion release details"), ("query_2", "Lyra deployment checklist"))
+
+
+# 函数用途: 把片段材料设成预检，并让候选检索按查询文本返回不同结果（Orion 片段只命中基线，Lyra 片段多一条新事实）。
+def _previewing(prepared, monkeypatch, *, search=None):
+    agent, _request, _stage, _scope, original, extra = prepared
+    monkeypatch.setattr(decision_recall, "_fragment_material", lambda *_args: "with_new_facts")
+
+    def by_query(query, top_k, predicate):
+        agent.memory.calls.append((query, top_k))
+        rows = (original,) if query.startswith("Orion") else (original, extra)
+        return [row for row in rows if predicate(row)]
+
+    monkeypatch.setattr(agent.memory, "search_scoped_candidates", search or by_query)
+    agent.memory.calls.clear()
+    agent.memory.touches.clear()
+
+
+# 函数用途: 记下送给决策模型的 state/questions，并按给定选择返回一次成功结果。
+def _deciding(monkeypatch, *, choice="query_2", mode="apply"):
+    sent = []
+    response = SimpleNamespace(answers=(SimpleNamespace(question_id="supplemental_query", value=choice, error_code=""),))
+    outcome = SimpleNamespace(mode=mode, status="success", may_apply=mode == "apply", response=response)
+    monkeypatch.setattr(decision_recall, "decide", lambda *_args, **kwargs: sent.append(kwargs) or outcome)
+    monkeypatch.setattr(decision_recall, "decision_outcome_is_current", lambda *_args: True)
+    return sent
+
+
+# 函数用途: 用两个片段跑一次补充查询（空余 1 个名额）。
+def _supplement(prepared, queries=QUERIES):
+    agent, request, stage, scope, original, _extra = prepared
+    return decision_recall.supplement_recalled_memories(
+        agent, request, [original], recall_scope=scope, stage=stage, queries=queries, slots=1, search_top_k=5,
+        remaining_chars=100, refresh=lambda: [original])
+
+
+def test_query_text_default_keeps_the_original_request_material(prepared, monkeypatch):
+    sent = _deciding(monkeypatch, choice="query_2")
+    records, finding = _supplement(prepared)
+    assert "fragment_additions" not in sent[0]["state"] and "fragment_additions_note" not in sent[0]["state"]
+    assert list(sent[0]["questions"]["supplemental_query"]["criteria"])[:2] == ["query_1", "query_2"]
+    assert prepared[0].memory.calls == [("Lyra deployment checklist", 5)], "默认只在采用时检索一次所选片段"
+    assert (records, finding) == ([prepared[4], prepared[5]], "memory_pre_recall_decision:apply:success")
+
+
+def test_with_new_facts_offers_only_fragments_that_add_and_applies_what_jev_saw(prepared, monkeypatch):
+    _previewing(prepared, monkeypatch)
+    sent = _deciding(monkeypatch, choice="query_2")
+    records, finding = _supplement(prepared)
+    state, criteria = sent[0]["state"], sent[0]["questions"]["supplemental_query"]["criteria"]
+    assert state["fragment_additions"] == {"query_2": {"new_count": 1, "new_facts": [
+        {"entry_id": "extra", "summary": "Lyra deployment checklist"}]}}
+    assert "query_1" not in criteria and criteria["query_2"] == "Lyra deployment checklist", "主题已被原召回覆盖的片段不给选"
+    assert {"not_needed", "no_match", "abstain", "need_data"} <= set(criteria)
+    assert [query for query, _ in prepared[0].memory.calls] == ["Orion release details", "Lyra deployment checklist"]
+    assert (records, finding) == ([prepared[4], prepared[5]], "memory_pre_recall_decision:apply:success")
+    assert prepared[0].memory.touches == ["extra"], "预检不记访问；只有最终注入的经正式源确认"
+
+
+def test_with_new_facts_skips_the_call_when_no_fragment_adds(prepared, monkeypatch, tmp_path):
+    agent, _request, _stage, _scope, original, _extra = prepared
+    reasons = reach_counter(agent, monkeypatch, "pre_recall", tmp_path)
+    _previewing(prepared, monkeypatch, search=lambda query, top_k, predicate: [original])
+    monkeypatch.setattr(decision_recall, "decide", lambda *_args, **_kwargs: pytest.fail("补不出新事实时不应调用决策模型"))
+    assert _supplement(prepared) == ([original], "")
+    assert agent.memory.touches == []
+    assert reasons() == ({"no_new_facts": 1}, 0)
+
+
+def test_with_new_facts_preview_failure_is_counted_and_keeps_the_original(prepared, monkeypatch, tmp_path):
+    agent, _request, _stage, _scope, original, _extra = prepared
+    reasons = reach_counter(agent, monkeypatch, "pre_recall", tmp_path)
+
+    def broken(_query, _top_k, _predicate):
+        raise OSError("派生检索不可用")
+
+    _previewing(prepared, monkeypatch, search=broken)
+    monkeypatch.setattr(decision_recall, "decide", lambda *_args, **_kwargs: pytest.fail("预检出错时不应调用决策模型"))
+    assert _supplement(prepared) == ([original], "memory_pre_recall_decision:enhancement_failed")
+    assert reasons() == ({"preview_failed": 1}, 0)
+
+
+def test_with_new_facts_observe_previews_but_never_touches(prepared, monkeypatch):
+    _previewing(prepared, monkeypatch)
+    sent = _deciding(monkeypatch, choice="query_2", mode="observe")
+    assert _supplement(prepared) == ([prepared[4]], "memory_pre_recall_decision:observe:success")
+    assert sent[0]["state"]["fragment_additions"]["query_2"]["new_count"] == 1
+    assert len(prepared[0].memory.calls) == 2 and prepared[0].memory.touches == []
+
+
+def test_with_new_facts_preview_cancel_propagates(prepared, monkeypatch):
+    _previewing(prepared, monkeypatch)
+    checks = iter((None, InterruptedError("停止")))
+
+    def interrupt():
+        result = next(checks)
+        if result:
+            raise result
+
+    monkeypatch.setattr(decision_recall, "_check_interrupted", interrupt)
+    monkeypatch.setattr(decision_recall, "decide", lambda *_args, **_kwargs: pytest.fail("取消后不应调用决策模型"))
+    with pytest.raises(InterruptedError, match="停止"):
+        _supplement(prepared)
+    assert len(prepared[0].memory.calls) == 1, "第二个片段预检前就停下"
+
+
+def test_with_new_facts_on_a_lexical_store_asks_nothing_because_fragments_cannot_add(prepared, monkeypatch, tmp_path):
+    """词面检索下片段词一定在整句里，原召回已拿到全部正分事实；预检后直接不问，也不留访问。"""
+    agent, request, stage, scope, _original, _extra = prepared
+    monkeypatch.setattr(decision_recall, "_fragment_material", lambda *_args: "with_new_facts")
+    memory = JsonlMemory(tmp_path / "memory.jsonl", ops_path=tmp_path / "ops.jsonl")
+    for entry_id, content in (("orion", "Orion release details for Friday"),
+                              ("lyra", "Lyra deployment checklist before rollout")):
+        memory.add_record(MemoryRecord("user", content, entry_id=entry_id, kind="fact",
+                                       attributes={"scope_type": "personal", "scope_key": "personal"}))
+    agent.memory = memory
+
+    def predicate(row):
+        return long_term_record_matches_scope(row, scope)
+
+    base = memory.search_scoped(request.user_prompt, 3, predicate)
+    assert memory.flush_access_events() == 2
+    monkeypatch.setattr(decision_recall, "decide", lambda *_args, **_kwargs: pytest.fail("不应调用决策模型"))
+    ids = {row.entry_id for row in base}
+    records, finding = decision_recall.supplement_recalled_memories(
+        agent, request, base, recall_scope=scope, stage=stage,
+        queries=decision_recall.supplemental_query_candidates(request.user_prompt),
+        slots=1, search_top_k=3, remaining_chars=1000,
+        refresh=lambda: [row for row in memory.all() if row.entry_id in ids])
+    assert (records, finding) == (base, "")
+    assert memory.flush_access_events() == 0
+
+
+def test_with_new_facts_on_a_real_store_offers_the_missing_fact_only(prepared, monkeypatch, tmp_path):
+    agent, _request, stage, scope, _original, _extra = prepared
+    monkeypatch.setattr(decision_recall, "_fragment_material", lambda *_args: "with_new_facts")
+    memory = JsonlMemory(tmp_path / "memory.jsonl", ops_path=tmp_path / "ops.jsonl")
+    for entry_id, content in (("orion", "Orion release details and Orion timetable"),
+                              ("lyra", "Lyra deployment checklist before rollout")):
+        memory.add_record(MemoryRecord("user", content, entry_id=entry_id, kind="fact",
+                                       attributes={"scope_type": "personal", "scope_key": "personal"}))
+    agent.memory = memory
+    request = RuntimeContextRequest(
+        "请核对 Orion release details 与 Orion timetable。再找 Lyra deployment checklist。", None, False,
+        request_id="request", run_id="run", task_id="task", task_attributes={"agent_thread_id": "thread"})
+
+    def predicate(row):
+        return long_term_record_matches_scope(row, scope)
+
+    base = memory.search_scoped(request.user_prompt, 1, predicate)
+    assert [row.entry_id for row in base] == ["orion"] and memory.flush_access_events() == 1
+    sent = _deciding(monkeypatch, choice="query_2")
+    records, finding = decision_recall.supplement_recalled_memories(
+        agent, request, base, recall_scope=scope, stage=stage,
+        queries=decision_recall.supplemental_query_candidates(request.user_prompt),
+        slots=1, search_top_k=1, remaining_chars=1000,
+        refresh=lambda: [row for row in memory.all() if row.entry_id == "orion"])
+    criteria = sent[0]["questions"]["supplemental_query"]["criteria"]
+    assert "query_1" not in criteria and "query_2" in criteria
+    assert sent[0]["state"]["fragment_additions"]["query_2"]["new_facts"][0]["entry_id"] == "lyra"
+    assert ([row.entry_id for row in records], finding) == (["orion", "lyra"], "memory_pre_recall_decision:apply:success")
+    assert memory.flush_access_events() == 1, "预检两次检索都不记访问，只有新增事实确认一次"
+
+
+def test_fragment_material_is_registered_off_by_default_and_read_through_the_settings_service(tmp_path):
+    from agent_py_agent.agent.settings.config import AgentConfig, load_config
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_config_fields
+    from agent_py_agent.agent.settings.decision_settings_schema import validate_decision_field
+    from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
+    from agent_py_agent.agent.settings.user_config_capability import packaged_config_path
+    from agent_py_agent.tests.test_decision_settings import host_at, patch
+
+    path = "points.pre_recall.fragment_material"
+    assert decision_config_fields()[path] == ("memory", "memory_decision_pre_recall_fragment_material")
+    assert AgentConfig().memory_decision_pre_recall_fragment_material == "query_text"
+    assert load_config(packaged_config_path()).memory_decision_pre_recall_fragment_material == "query_text"
+    for bad in ("always", "", True, None):
+        with pytest.raises(ModelProfileError):
+            validate_decision_field(path, bad)
+    host = host_at(tmp_path)
+    stage = SimpleNamespace(thread_id="")
+    assert decision_recall._fragment_material(host, stage) == "query_text"
+    patch(host, {path: "with_new_facts"})
+    assert decision_recall._fragment_material(host, stage) == "with_new_facts"
+    (tmp_path / "agent.yaml").write_text("memory_decision_pre_recall_fragment_material: maybe\n", encoding="utf-8")
+    with pytest.raises(ModelProfileError):
+        load_config(tmp_path / "agent.yaml")
+
+
+# 函数用途: 让片段材料设置走真实读取入口，并返回“读取时抛给定错误再跑一次补充查询”的函数。
+@pytest.fixture
+def unreadable_setting(prepared, monkeypatch, tmp_path):
+    from agent_py_agent.agent.settings import decision_settings
+
+    agent, _request, stage, _scope, original, _extra = prepared
+    reasons = reach_counter(agent, monkeypatch, "pre_recall", tmp_path)
+    monkeypatch.setattr(decision_recall, "_fragment_material", _REAL_FRAGMENT_MATERIAL)
+    monkeypatch.setattr(decision_recall, "decide", lambda *_args, **_kwargs: pytest.fail("设置读不出时不应调用决策模型"))
+    stage.thread_id = "thread"
+
+    def run(error):
+        def unreadable(*_args, **_kwargs):
+            raise error
+
+        monkeypatch.setattr(decision_settings, "execute_decision_settings_operation", unreadable)
+        records, finding = _supplement(prepared)
+        return records == [original], finding, reasons()
+
+    return run
+
+
+@pytest.mark.parametrize("error,reason", [(BlockingIOError("设置正在保存"), "settings_busy"),
+                                          (OSError("读不出"), "configuration_unavailable")])
+def test_unreadable_fragment_setting_is_counted_and_keeps_the_original(unreadable_setting, error, reason):
+    assert unreadable_setting(error) == (True, "memory_pre_recall_decision:enhancement_failed", ({reason: 1}, 0))

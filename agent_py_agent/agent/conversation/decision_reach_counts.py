@@ -87,6 +87,8 @@ _LABELS = {
     "no_query_fragments": "这轮的问题拆不出可以补充搜索的片段",
     "no_free_slots": "这轮能放进来的长期记忆名额已经满了",
     "no_room": "这轮能放记忆的字数已经用完了",
+    "no_new_facts": "补充查询设成先预检片段：每个片段都补不出原召回之外的新事实，这次不问",
+    "preview_failed": "补充查询预检片段时检索出错，这次不问",
     "nothing_to_label": "这批要整理的记忆材料里没有能标注的内容",
     "nothing_to_compare": "这批材料里没有能和已有记忆对照的内容",
     "memory_changed": "已有记忆刚刚被改过，这次先不判断",

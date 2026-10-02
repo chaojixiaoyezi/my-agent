@@ -7,6 +7,7 @@ import hashlib
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
@@ -32,6 +33,14 @@ _NON_SELECTIONS = {
 }
 _RANK = {"first": 0, "normal": 1, "later": 2}
 _FIXED_KINDS = frozenset({"hot", "lesson"})
+# 补充查询片段材料（points.pre_recall.fragment_material）：with_new_facts 时先预检每个片段能新增的正式事实再问。
+FRAGMENT_MATERIAL_WITH_NEW_FACTS = "with_new_facts"
+# 到达诊断原因码：开了预检，每个片段都补不出原召回之外的新事实，所以没问。
+NO_NEW_FACTS = "no_new_facts"
+# 到达诊断原因码：开了预检，预检检索本身出错，所以没问。
+PREVIEW_FAILED = "preview_failed"
+# 预检结果里每条新增事实给决策模型看的摘要长度，与已选记忆的摘要长度一致。
+FRAGMENT_FACT_SUMMARY_MAX_CHARS = 160
 
 
 # LLM: 补充查询只从本轮原问题的有限语句片段生成，不解释文本为权限/必须召回标志；超长输入不截断冒充完整问题。
@@ -143,11 +152,19 @@ def supplement_recalled_memories(
     baseline = records
     try:
         bound = [_record_view(record) for record in records]
+        search = FragmentSearch(agent, recall_scope, frozenset(row["entry_id"] for row in bound),
+                                (slots, search_top_k, remaining_chars))
+        queries, previews = _fragment_choices(agent, stage, search, queries)
+        if not queries:
+            note_decision_reach(agent, "pre_recall", NO_NEW_FACTS)
+            return records, ""
         state = {"notice": "原完整问题已执行正式召回；只建议一个补充查询，不更改权限、原结果或数量预算。",
                  "query": request.user_prompt, "scope": [list(pair) for pair in recall_scope.keys],
                  "selected": [{"entry_id": row["entry_id"], "version": row["version"],
                                "summary": row["content"][:160]} for row in bound], "free_slots": slots,
                  "remaining_chars": remaining_chars, "primary_model": _model_identity(agent)}
+        if previews is not None:
+            state.update(_preview_material(previews))
         criteria = dict(queries)
         criteria.update({"not_needed": "不需要补充查询", "no_match": "候选均不合适",
                          "abstain": "无法可靠选择", "need_data": "缺少已有资料，不向用户追问"})
@@ -173,20 +190,8 @@ def supplement_recalled_memories(
                 or _model_identity(agent) != state["primary_model"]
                 or time.monotonic() >= stage.deadline):
             return baseline, "memory_pre_recall_decision:apply:stale"
-        from .recall import long_term_record_matches_scope
-
-        def predicate(row):
-            return long_term_record_matches_scope(row, recall_scope)
-        candidates = agent.memory.search_scoped_candidates(selected, search_top_k, predicate)
-        seen = {record.entry_id for record in baseline}
-        chosen = []
-        for candidate in candidates:
-            cost = len(candidate.content)
-            if (candidate.entry_id not in seen and cost <= remaining_chars
-                    and len(chosen) < slots):
-                chosen.append(candidate)
-                seen.add(candidate.entry_id)
-                remaining_chars -= cost
+        # 开了预检就用决策模型看到的那份新增事实（基线已核对未变）；最终仍由 confirm_scoped_access 重读正式源确认。
+        chosen = previews[answer.value] if previews is not None else search.additions(selected)
         latest = refresh()
         baseline = latest
         _check_interrupted()
@@ -194,12 +199,90 @@ def supplement_recalled_memories(
                 or time.monotonic() >= stage.deadline
                 or not decision_outcome_is_current(agent, request, stage, outcome)):
             return latest, "memory_pre_recall_decision:apply:stale"
-        confirmed = agent.memory.confirm_scoped_access(chosen, predicate) if chosen else []
+        confirmed = agent.memory.confirm_scoped_access(chosen, search.predicate) if chosen else []
         return [*latest, *confirmed], finding if confirmed else f"{finding}:no_addition"
     except (InterruptedError, ToolCancelled):
         raise
     except Exception:
         return baseline, "memory_pre_recall_decision:enhancement_failed"
+
+
+# LLM: 冻结值对象：同一 scope、同一基线 ID 与同一名额/字数预算（budget = 空余名额, 检索条数, 剩余字数）下做候选检索；
+#   预检与采用共用 additions，保证决策模型看到的新增事实与真正追加的是同一套规则。候选检索不记访问。
+# 类用途: 补充查询的一次候选检索：按原 scope 搜、去掉基线已有的、按名额和字数截取。
+@dataclass(frozen=True)
+class FragmentSearch:
+    agent: object
+    recall_scope: object
+    seen_ids: frozenset
+    budget: tuple[int, int, int]
+
+    # LLM: 只读 scope 判定，与原补充检索同一 long_term_record_matches_scope。
+    # 函数用途: 判断一条正式记录是否在本轮召回范围内。
+    def predicate(self, row: object) -> bool:
+        from .recall import long_term_record_matches_scope
+
+        return long_term_record_matches_scope(row, self.recall_scope)
+
+    # LLM: 调 search_scoped_candidates（语义召回时有一次查询嵌入，不记访问）；按检索顺序取不在基线里、放得下的记录。
+    # 函数用途: 返回某个查询文本选中后会追加的正式事实（还没确认，不能直接当已注入）。
+    def additions(self, query: str) -> list:
+        slots, top_k, remaining = self.budget
+        chosen, seen = [], set(self.seen_ids)
+        for candidate in self.agent.memory.search_scoped_candidates(query, top_k, self.predicate):
+            cost = len(candidate.content)
+            if candidate.entry_id not in seen and cost <= remaining and len(chosen) < slots:
+                chosen.append(candidate)
+                seen.add(candidate.entry_id)
+                remaining -= cost
+        return chosen
+
+
+# LLM: 经原设置读取入口（非阻塞）取 points.pre_recall.fragment_material 的生效值（配置默认 → owner → 本会话）。
+#   读不出时按阶段同口径记到达原因（settings_busy / configuration_unavailable）再上抛，由调用方按可选增强失败处理；取消原样上抛。
+# 函数用途: 读出这一轮补充查询的片段材料设置。
+def _fragment_material(agent: object, stage: object) -> str:
+    from ..settings.decision_settings import execute_decision_settings_operation
+
+    try:
+        settings = execute_decision_settings_operation(agent, "read", {}, thread_id=stage.thread_id, blocking=False)
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception as exc:
+        note_decision_reach(agent, "pre_recall",
+                            "settings_busy" if isinstance(exc, BlockingIOError) else "configuration_unavailable")
+        raise
+    return settings["effective"]["points"]["pre_recall"]["fragment_material"]
+
+
+# LLM: query_text（默认）原样返回、不检索，请求与改动前逐字节相同。with_new_facts 时逐片段预检（每片段一次候选检索，
+#   期间尊重取消），只留能新增事实的片段；预检出错记 preview_failed 再上抛。
+# 函数用途: 决定这次给决策模型哪些片段可选，以及（开了预检时）每个片段会新增的事实。
+def _fragment_choices(agent: object, stage: object, search: FragmentSearch, queries: tuple) -> tuple[tuple, dict | None]:
+    if _fragment_material(agent, stage) != FRAGMENT_MATERIAL_WITH_NEW_FACTS:
+        return queries, None
+    previews = {}
+    try:
+        for query_id, text in queries:
+            _check_interrupted()
+            previews[query_id] = search.additions(text)
+    except (InterruptedError, ToolCancelled):
+        raise
+    except Exception:
+        note_decision_reach(agent, "pre_recall", PREVIEW_FAILED)
+        raise
+    return tuple(pair for pair in queries if previews[pair[0]]), previews
+
+
+# LLM: 只放能新增事实的片段：条数与每条的编号、摘要（截到 FRAGMENT_FACT_SUMMARY_MAX_CHARS）；说明只是参考材料，不改选项含义。
+# 函数用途: 生成放进决策请求 state 的片段预检材料。
+def _preview_material(previews: dict) -> dict:
+    additions = {query_id: {"new_count": len(rows), "new_facts": [
+        {"entry_id": row.entry_id, "summary": row.content[:FRAGMENT_FACT_SUMMARY_MAX_CHARS]} for row in rows]}
+        for query_id, rows in previews.items() if rows}
+    return {"fragment_additions": additions,
+            "fragment_additions_note": "宿主已按原检索预检：fragment_additions 列出选中各片段后会追加的正式事实（已去掉原召回已有的，"
+                                       "按空余名额和字数截好）；补不出新事实的片段已不在选项里。新增事实与问题无关时选 not_needed 或 no_match。"}
 
 
 # LLM: 操作身份只来自现有请求和运行编号，不从用户文本或记忆正文解析；没有编号时不为增强合成持久任务。

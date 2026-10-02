@@ -386,6 +386,17 @@ def test_selection_cadence_is_offered_in_both_scopes_as_a_two_choice_radio(tmp_p
     assert control.current_value == "every_turn"
 
 
+def test_pre_recall_fragment_material_is_offered_in_both_scopes_as_a_two_choice_radio(tmp_path):
+    gateway = Gateway(tmp_path)
+    field = "points.pre_recall.fragment_material"
+    owner = settings(gateway.host, "read", {})
+    thread = settings(gateway.host, "read", {"scope": "thread"}, thread_id=gateway.thread.thread_id)
+    assert field in _fields(owner) and field in _fields(thread)
+    assert "只给片段文字" in _field_label(owner, field)
+    control = _plain_control(field, "query_text")
+    assert [value for value, _label in control.values] == ["query_text", "with_new_facts"]
+
+
 def test_scope_fields_are_finite_and_thread_has_no_unused_curator_controls(tmp_path):
     gateway = Gateway(tmp_path)
     owner = settings(gateway.host, "read", {})

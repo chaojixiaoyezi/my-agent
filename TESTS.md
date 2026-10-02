@@ -1,5 +1,25 @@
 # 测试与发布验收
 
+## 补充查询片段材料：先预检每个片段能新增的事实（J8）（2026-10-02，分支 `claude/be-jev-snippet-facts`，基于 `918285cc1`）
+
+- **`test_decision_pre_recall.py` 新增 11 项**（夹具默认把片段材料固定为 `query_text`，读取失败用例走真实读取入口）：
+  - 默认 `query_text` 的请求不带预检材料，只在采用时检索一次所选片段。
+  - `with_new_facts`：只给能补出新事实的片段，`fragment_additions` 写明条数与摘要；采用的正是预检那份，访问只确认最终注入的。
+  - 全都补不出就不调用，记 `no_new_facts`；预检出错保留原召回，记 `preview_failed`。
+  - observe 也预检、但不记访问；预检期间取消原样上抛。
+  - 真实 JSONL：词面检索下片段按构造补不出，直接不问、不留访问；基线漏掉的事实只给对应片段，采用后只确认一次访问。
+  - 字段登记、配置/随包 YAML 默认 `query_text`、校验只收两个值、经真实设置服务读取 owner 覆盖。
+  - 设置读不出（保存中/读不出）时按阶段同口径记原因，保留原召回。
+- **`test_tui_decision_menu.py` 新增 1 项**：owner 与会话两层都有“片段材料”二选一单选。
+- **门禁**：
+  - 相关 76 个文件加 10 个守卫，1928 passed。
+  - import 边界 0、ruff、doc_sync、`diff --check`、`size_diff` 新增 0、clean_package、前端目录 `--check` 都通过。
+  - 9 个变异全部抓住：不按设置一律预检、补不出的片段也给选、采用时重新检索、两处到达原因漏记、不去掉基线已有的、预检材料不进请求、读设置出错不记原因、预检期间不查取消。
+- **真实对照**（隔离 home、真实 Jev；候选检索写死成模拟语义召回的结果，因为嵌入模型不在授权名单）：
+  - 5 个样本 × 2 种材料 × 2 遍，Jev 18 次，全部 HTTP 200、`jev-1.13.0`，1.2—2.3 秒。
+  - 对照样本开预检后两次都不调 Jev。其余样本两种材料下选择相同。
+  - 证据：`~/.my-agent/decision-evidence/j8-fragment-material/`。
+
 ## 集成修正：/settings internal 接住统一调度传的 capability_path（2026-10-02，3a，step16z）
 
 - **起因**：ae 的 P18 真实验收（TUI 与假飞书）里 `/settings internal <常数名>` 只回“参数暂时读不到”。P17 让 `run_settings_control`

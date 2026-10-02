@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 803,
+  "count": 804,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3682,6 +3682,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "关系对最多 32 对：本地延迟保护，未覆盖材料仍完整交原提取。"
+    },
+    {
+      "name": "FRAGMENT_FACT_SUMMARY_MAX_CHARS",
+      "file": "agent_py_agent/agent/memory_store/decision_recall.py",
+      "value": 160,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "预检结果里每条新增事实给决策模型看的摘要长度，与已选记忆的摘要长度一致。"
     },
     {
       "name": "HOT_MAX_INJECT_CHARS",
