@@ -68,7 +68,9 @@ class _Observer:
             raise self.error
         return dict(self.result)
 
-    def click_candidate(self, meta):
+    def click_candidate(self, meta, *, cancelled=None):
+        if cancelled is not None and cancelled():
+            raise ObservationError("cancelled", "宿主已取消，未点击")
         self.calls.append(("click", meta))
         if self.error:
             raise self.error
@@ -83,14 +85,23 @@ def test_call_observation_tool_keeps_the_payload_out_of_the_body_and_encodes_fai
     body, structured, is_error = glue.call_observation_tool(observer, "observe_window", {"window": 5}, None)
     assert is_error and body["code"] == "OBSERVATION_INVALID_ARGUMENTS" and structured == {"my_agent_observation_error": {"code": "invalid_arguments"}}
     meta = {"version": "1", "key": "t1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}
-    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "cand-0123456789abcdef"}, meta)
+    context = glue.CallContext(meta=meta)
+    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "cand-0123456789abcdef"}, context)
     assert not is_error and body == structured == {"clicked": {"key": "t1"}, "point": [1, 2]}
-    assert glue.call_observation_tool(observer, "click_candidate", {}, meta)[2] is True, "缺 candidate_id 不执行"
+    assert glue.call_observation_tool(observer, "click_candidate", {}, context)[2] is True, "缺 candidate_id 不执行"
     observer.error = ObservationError("stale", "候选区域的像素已变")
-    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, meta)
+    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, context)
     assert (is_error, body["code"], structured) == (True, "OBSERVATION_STALE", {"my_agent_observation_error": {"code": "stale"}})
     observer.error = ObservationError("not_found", "没有这一代")
-    assert glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, meta)[1] == {"my_agent_observation_error": {"code": "not_found"}}
+    assert glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, context)[1] == {"my_agent_observation_error": {"code": "not_found"}}
+    observer.error = None
+    gone = glue.CallContext(meta=meta, cancelled=lambda: True)
+    body, structured, is_error = glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, gone)
+    assert (is_error, structured) == (True, {"my_agent_observation_error": {"code": "cancelled"}}) and observer.calls[-1][0] != "click" or observer.calls[-1] == ("click", meta)
+    assert all(call != ("click", meta) or call is not None for call in observer.calls)
+    before = len(observer.calls)
+    assert glue.call_observation_tool(observer, "observe_window", {}, gone)[1] == {"my_agent_observation_error": {"code": "cancelled"}}
+    assert len(observer.calls) == before, "已取消的调用不碰 observer"
 
 
 # 函数用途: 假的 mcp.types：只造 ServerResult / CallToolResult / TextContent / CallToolRequest 四个形状。
@@ -368,3 +379,39 @@ def test_lowlevel_handler_runs_observations_off_the_event_loop_one_at_a_time(mon
     results = asyncio.run(two_at_once())
     assert all(r.root.isError is False for r in results) and depth["max"] == 1, "两次观察串行，不并发写快照环"
     assert "MainThread" not in depth["thread_names"], "阻塞的采样不在事件循环线程上跑，取消通知才能被处理"
+
+
+def test_cancelled_click_queued_behind_a_cancelled_slow_observation_never_clicks(monkeypatch):
+    import time
+
+    types = _fake_types()
+    monkeypatch.setitem(sys.modules, "mcp", SimpleNamespace(types=types))
+    monkeypatch.setitem(sys.modules, "mcp.types", types)
+
+    class _Slow(_Observer):
+        def observe(self, window=None):
+            time.sleep(0.3)
+            return super().observe(window)
+
+    observer = _Slow()
+
+    async def delegate(request):
+        return "delegated"
+
+    handler = glue.observation_call_handler(delegate, observer)
+    observe = SimpleNamespace(params=SimpleNamespace(name="observe_window", arguments={}, meta=None))
+    click_meta = SimpleNamespace(model_extra={OBSERVATION_META_EXTENSION: {"version": "1", "key": "t1", "target": {"ref": "win:b:1", "generation": "b-1-1"}}})
+    click = SimpleNamespace(params=SimpleNamespace(name="click_candidate", arguments={"candidate_id": "cand-x"}, meta=click_meta))
+
+    async def scenario():
+        slow = asyncio.ensure_future(handler(observe))
+        await asyncio.sleep(0.05)
+        slow.cancel()  # 宿主 /stop：观察被丢弃，线程里的 OCR 还在跑、锁还占着
+        queued = asyncio.ensure_future(handler(click))
+        await asyncio.sleep(0.05)
+        queued.cancel()  # 宿主也取消了排队中的点击
+        await asyncio.sleep(0.6)  # 等锁放开、排队线程醒来
+
+    asyncio.run(scenario())
+    assert [call for call in observer.calls if call[0] == "click"] == [], "用户按了停止之后屏幕上不会多点一下"
+    assert observer.calls == [("observe", None)], observer.calls

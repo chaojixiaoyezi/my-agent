@@ -2,7 +2,7 @@
 #   （带几何扩展）；动作前按 ae 定稿做适配器层五项复核：按 _meta 代次找快照（找不到 / key 不在 → not_found）→ boot/instance →
 #   可见、未最小化、同桌面 → 几何完全相等 → 点击点不被遮挡（动作时重新查叠放）→ 候选区域摘要在容差内，任一项不过 → stale，零副作用；
 #   复核通过后立刻点击，中间不做任何别的 I/O。后端是鸭子类型（X11 真后端 / 单测假后端），本模块不 import 任何桌面库。
-#   错误码：window_not_found | not_viewable | capture_failed | ocr_failed | occluded | not_found | stale | missing_context | invalid_arguments。
+#   错误码：window_not_found | not_viewable | capture_failed | ocr_failed | occluded | not_found | stale | missing_context | invalid_arguments | cancelled。
 # 模块用途: "看一眼窗口、给出可点的候选、点之前再确认一遍没变"的全部判断逻辑，可在没有桌面的机器上用假后端完整测试。
 from __future__ import annotations
 
@@ -156,10 +156,13 @@ class ScreenObserver:
             raise ObservationError("stale", "候选区域的像素已变")
         return snapshot, candidate, point
 
-    # LLM: 复核通过后立刻点击，中间不做任何别的 I/O；返回值只证明"提交了点击"，结果要靠下一次 observe 确认。
+    # LLM: 复核通过后立刻点击，中间不做任何别的 I/O（只看一眼宿主是否已取消，已取消就零副作用返回 cancelled）；返回值只证明
+    #   "提交了点击"，结果要靠下一次 observe 确认。
     # 函数用途: 按宿主复核过的候选点击一次。
-    def click_candidate(self, meta: object) -> dict[str, object]:
+    def click_candidate(self, meta: object, *, cancelled: Callable[[], bool] | None = None) -> dict[str, object]:
         snapshot, candidate, point = self.recheck(meta)
+        if cancelled is not None and cancelled():
+            raise ObservationError("cancelled", "宿主已取消，未点击")
         self.backend.click(point[0], point[1])
         return {"clicked": {"window": snapshot.ref, "generation": snapshot.generation, "key": candidate.key}, "point": list(point)}
 

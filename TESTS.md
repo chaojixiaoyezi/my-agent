@@ -1008,12 +1008,13 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
 - **范围**：`test_computer_use_xvfb_cases.py`（复用片 B 车道夹具，设计稿 8.3 的三条 + 光标统计）；Tk 测试窗口加输入框（闪动光标）与 relabel / reopen 命令；
   `computer_use_observation_tools.observation_call_handler` 把采样 + OCR 放到工作线程里 `await`（一次只跑一个，锁），事件循环保持可读，宿主 `/stop` 发的
   `notifications/cancelled` 才能被底层 Server 处理；派生镜像定义 `Dockerfile.desktop` 与运行脚本 `xvfb_lane.sh`（证据目录 harness/，正式位置由 3a 定，不改现有车道脚本）。
-- **车道结果（容器内 `MY_AGENT_XVFB_LANE=1`，镜像同片 B）**：两文件 `7 passed in 39.68s`。
+- **车道结果（容器内 `MY_AGENT_XVFB_LANE=1`）**：开发镜像两文件 `7 passed in 39.68s`；正式桌面层镜像 `my-agent-linux-test:py312-desktop`（`claude-tools/linux-test/Dockerfile.desktop`，从头构建约 5 分钟、3.12 GB，`xvfb_lane.sh <工作树> <输出目录>` 运行）在变基到 43f29df6a 后的树上 `7 passed in 50.80s`，取消后的下一次观察 `after_stop_observe_seconds` 0.56 s。
   - 关掉再开：新窗口是新实例（`win:<boot>:2`），旧候选 `OBSERVATION_STALE`、未点击；
   - 改内容（按钮改成 "Submit!"）：旧候选 `OBSERVATION_STALE`、未点击，重新观察后新候选点中；
-  - `/stop` 中断慢 OCR：观察进行中 0.15 s 后用宿主 `CancellationToken.cancel()`，代理 0.16 s 返回 `CANCELLED`（`effect_outcome=unknown`，请求已发出），随后的观察照常——适配器没被慢 OCR 堵住；
-  - 闪动光标误判统计：输入框聚焦后 20 次"观察 → 点击"循环，本次 17 放行 / 3 误判过期（0.15），上一轮同样 20 次为 4 次（0.20）。按 ae 定的只记录，不调容差；数字进证据 `~/.my-agent/decision-evidence/j16-slice-c-xvfb-8371ca334/`。
-- **单测补充**：`test_lowlevel_handler_runs_observations_off_the_event_loop_one_at_a_time`（两次并发观察串行、不在事件循环线程上跑）；
+  - `/stop` 中断慢 OCR：观察进行中 0.15 s 后用宿主 `CancellationToken.cancel()`，代理 0.16 s 返回 `CANCELLED`（`effect_outcome=unknown`，请求已发出）；随后的观察要排在被丢弃的那次 OCR 之后才开始（证据记 `after_stop_observe_seconds`），不被堵的是事件循环（取消通知、其他工具）。前提：真实 OCR 比 0.15 s 慢；换到 OCR 更快的机器上这条会误报失败（不会误报通过）；
+  - 闪动光标误判统计：输入框聚焦后 20 次"观察 → 点击"循环，三次运行分别 3 / 4 / 8 次误判过期（0.15 / 0.20 / 0.40，方差不小，正式桌面层镜像那次最高）。按 ae 定的只记录，不调容差；数字进证据 `~/.my-agent/decision-evidence/j16-slice-c-xvfb-8371ca334/`。
+- **ae 复审修正**：宿主取消后排在锁后面的点击照样会点（ae 探针复现）→ 每次调用带取消标记：协程被取消时置位，`run` 拿到锁先看它、点击在复核完真正点之前再看一次，已取消零副作用返回 `cancelled`；用例 `test_cancelled_click_queued_behind_a_cancelled_slow_observation_never_clicks`（慢观察被取消后排一个点击再取消，无点击记录）与 `test_click_checks_host_cancellation_after_recheck_and_before_clicking`。
+- **单测补充**：`test_lowlevel_handler_runs_observations_off_the_event_loop_one_at_a_time`（两次并发观察串行、不在事件循环线程上跑；"不被堵"只有这条单测在证明，车道用例只证明随后的观察最终成功）；
   `test_pixel_changes_outside_the_candidate_region_do_not_invalidate_it`（只比候选区域不比整窗，让"只比整窗"变异能被抓到）。
 - **变异 12/12 抓到**：片 B 的 10 个 + 只比整窗不比区域（observe 与 recheck 两处同改）+ 观察不放工作线程。脚本 `run_mutations_j16c.py` 在会话 scratchpad。
 - **门禁**：ruff 通过；常数目录 `--check` 通过（843）；import boundaries 0；node --check 0；strict code-size hard=0；size_diff 新增 0；doc_sync PASS；diff --check 0；clean_package 无阻塞；

@@ -25,7 +25,7 @@
 - 观察核心 `screen_observation.py`（来源无关）+ `screen_observation_store.py`（实例登记、每窗 4 代快照）+ `screen_region_digest.py`
   （区域像素摘要）+ `computer_use_x11.py`（python-xlib / mss / RapidOCR / pyautogui 的公开接口）。动作前五项复核与已知限制见设计稿 3.2 节。
 - macOS 后端（Quartz + ScreenCaptureKit）在片 E；`type_into_candidate` 随片 G。
-- 片 C：观察处理器把采样 + OCR 放到工作线程并加锁，宿主 `/stop` 的取消通知能被处理（车道用例：取消 0.16 s 返回 `CANCELLED`，随后观察照常）。
+- 片 C：观察处理器把采样 + OCR 放到工作线程并加锁，宿主 `/stop` 的取消通知能被底层 Server 处理：宿主马上拿到 `CANCELLED`（车道用例 0.16 s），被丢弃的 OCR 在线程里跑完，取消后的下一次观察要排在它之后；不被堵的是取消通知和其他工具。已取消的调用拿到锁后不碰观察核心，点击在复核完、真正点之前再看一次取消标记，不会多点一下。
   Linux 车道的桌面层镜像定义 `Dockerfile.desktop` 与运行脚本 `xvfb_lane.sh` 在证据目录 harness/（正式位置由 3a 定），只在显式指定时构建；
   集成用例 `test_computer_use_xvfb_lane.py` / `test_computer_use_xvfb_cases.py` 只在 `MY_AGENT_XVFB_LANE=1` 时跑。闪动光标误判率 0.15–0.20（20 次循环），只记录不调容差。
 

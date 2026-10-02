@@ -297,3 +297,21 @@ def test_pixel_changes_outside_the_candidate_region_do_not_invalidate_it():
     changed[(20, 120, 200, 30)] = (0, 0, 0)  # 状态行那块变了（在候选外框之外）
     backend.buffers[0x1a] = _buffer(patches=changed)
     assert observer.click_candidate(meta)["clicked"]["key"] == "t1" and backend.clicks == [(150, 89)], "只比候选区域，不比整窗"
+
+
+def test_click_checks_host_cancellation_after_recheck_and_before_clicking():
+    backend, observer = _observer()
+    meta = _meta(observer.observe())
+    flag = {"cancelled": False}
+    original_capture = backend.capture
+
+    def capture_then_cancel(info):  # 复核的重采样期间宿主取消了
+        flag["cancelled"] = True
+        return original_capture(info)
+
+    backend.capture = capture_then_cancel
+    with pytest.raises(ObservationError) as info:
+        observer.click_candidate(meta, cancelled=lambda: flag["cancelled"])
+    assert info.value.code == "cancelled" and backend.clicks == [], "复核完、点之前再看一眼取消，已取消就不点"
+    backend.capture = original_capture
+    assert observer.click_candidate(meta, cancelled=lambda: False)["clicked"]["key"] == "t1" and backend.clicks == [(150, 89)]

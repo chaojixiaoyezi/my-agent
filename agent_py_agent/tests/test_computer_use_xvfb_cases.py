@@ -97,6 +97,9 @@ def test_stop_interrupts_a_slow_observation_and_the_adapter_stays_usable(lane):
     outcome = result.get("outcome")
     assert outcome is not None and not outcome.ok and outcome.error_code == "CANCELLED", getattr(outcome, "output", "no outcome")
     assert elapsed < 5, f"取消后不该等 OCR 跑完：{elapsed}s"
-    again = _observe(lane, "op-after-stop")  # 适配器还活着：慢 OCR 在工作线程里跑完被丢弃，不堵后面的调用
+    after_started = time.monotonic()
+    again = _observe(lane, "op-after-stop")  # 适配器还活着；这次观察要排在被丢弃的那次 OCR 之后才开始（有锁），量一下等了多久
+    after_seconds = round(time.monotonic() - after_started, 2)
     assert json.loads(again.output)["structuredContent"]["candidate_count"] >= 2
-    lane.evidence["stop"] = {"error_code": outcome.error_code, "elapsed_seconds": elapsed, "effect_outcome": outcome.effect_outcome}
+    lane.evidence["stop"] = {"error_code": outcome.error_code, "elapsed_seconds": elapsed, "effect_outcome": outcome.effect_outcome,
+                             "after_stop_observe_seconds": after_seconds}

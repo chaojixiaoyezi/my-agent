@@ -898,7 +898,7 @@
 - **设计要点**：
   - **新工具**：在自家 Computer Use 适配器里新增 `observe_window`（read_only，审批策略 always），直接用操作系统和库的公开接口（X11/EWMH、Quartz、ScreenCaptureKit、mss、RapidOCR），给出稳定窗口身份、代次、坐标原点和缩放、遮挡、成功状态。还有 `click_candidate`；`type_into_candidate` 随片 G 注册。
   - **三件套共用**：插件线观察三件套抽成 `ObservationBinding`，插件和 MCP 共用，几何是通用扩展，只进归档。
-  - **片 C 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-c`，叠在片 B 上）**：车道 Xvfb 集成用例（关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计 0.15–0.20 只记录不调）；观察处理器放工作线程加锁使取消可处理；派生镜像定义与运行脚本待 3a 落位；变异 12/12。
+  - **片 C 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-c`，叠在片 B 上）**：车道 Xvfb 集成用例（关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计 0.15–0.20 只记录不调）；观察处理器放工作线程加锁，宿主马上拿到 CANCELLED、后续观察排在被丢弃的 OCR 之后，不被堵的是事件循环；已取消的调用拿到锁不执行、点击前再查一次取消标记；派生镜像定义与运行脚本待 3a 落位；变异 12/12。
   - **片 B 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-b`，基于 `claude/3a-step17f` f6b63ab35，ae 定复核细节）**：主配置 `computer_use_observation_enabled`（默认关，管理员边界）；Linux X11 后端 + `observe_window`（read_only、always）/ `click_candidate`（dangerous）；适配器层五项复核按代次找快照不要求最新、通过后立刻点击；快照每窗 4 代、区域摘要 16×8/16 级/≤4 格、遮挡按叠放+override-redirect+边框；适配器改成底层 Server 单一运行路径以满足 isError+structuredContent 合同。细节见设计稿 3.2 节第 4 条。
   - **片 A 已实施（2026-10-02，ef，分支 `claude/ef-j16-slice-a`，基于 `claude/3a-step17e` 0dab27111，ae 定边界）**：`tooling/observation_binding.ObservationBinding` 共用三件套，绑定为 None 的 MCP 代理不变；来源字段统一为 `provider_id`；MCP 逐工具声明表 `tool_approvals`（只能更严，never 非法）/ `tool_observations`（v5 同形），坏项整服务拒绝并记客户端 `publication`，未发现只提醒；几何 `frame` / `region` 校验，region 进内容摘要、frame 不进；换代后旧候选判 stale。细节见设计稿第 4 节“片 A 实施定稿”。
   - **两层复核**：宿主先确认是最新观察；适配器再重新采样，核对实例、几何、遮挡和候选区域像素。

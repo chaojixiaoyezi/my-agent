@@ -11,6 +11,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from ..plugin_observation import OBSERVATION_ERROR_KEY, OBSERVATION_META_EXTENSION
@@ -18,6 +19,15 @@ from .computer_use_profile import OBSERVATION_ENV_FLAG
 from .screen_observation import ObservationError
 
 OBSERVATION_TOOL_NAMES = ("observe_window", "click_candidate")
+
+
+# LLM: 一次调用的宿主侧事实：_meta 里的观察上下文与"宿主已取消"的判定；cancelled 由接管层按协程取消设置，观察核心在拿到锁后、
+#   复核完真正点击前各看一次，已取消就零副作用返回。
+# 类用途: 观察工具调用的上下文（不是模型参数）。
+@dataclass(frozen=True)
+class CallContext:
+    meta: object = None
+    cancelled: Callable[[], bool] = lambda: False
 
 
 # 函数用途: 适配器子进程是否应装载屏幕观察工具（宿主按主配置开关写入环境标记）。
@@ -48,10 +58,13 @@ def register_observation_tools(server: Any) -> None:
 
 # LLM: 返回 (正文, structuredContent, isError)。观察载荷只进 structuredContent、正文不重复（和 browser-lite 一致）；失败正文带
 #   OBSERVATION_<CODE> 与中文说明，structuredContent 带 {my_agent_observation_error: {code}}，宿主据此提升 stale / not_found。
-# 函数用途: 执行一个观察工具调用并给出可编码的三元组。
-def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any], meta: object) -> tuple[dict, dict | None, bool]:
+# 函数用途: 执行一个观察工具调用并给出可编码的三元组；context 为 None 表示没有宿主上下文（也不会被取消）。
+def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any], context: CallContext | None) -> tuple[dict, dict | None, bool]:
+    context = context or CallContext()
     try:
-        body, structured = _observe(observer, arguments) if name == "observe_window" else _click(observer, arguments, meta)
+        if context.cancelled():
+            raise ObservationError("cancelled", "宿主已取消，未执行")
+        body, structured = _observe(observer, arguments) if name == "observe_window" else _click(observer, arguments, context)
     except ObservationError as exc:
         return {"code": "OBSERVATION_" + exc.code.upper(), "message": str(exc)}, {OBSERVATION_ERROR_KEY: {"code": exc.code}}, True
     return body, structured, False
@@ -66,12 +79,12 @@ def _observe(observer: Any, arguments: Mapping[str, Any]) -> tuple[dict, dict]:
     return {key: value for key, value in result.items() if key != "my_agent_observation"}, result
 
 
-# 函数用途: click_candidate 分支：candidate_id 必须是非空字符串，候选事实只来自 _meta。
-def _click(observer: Any, arguments: Mapping[str, Any], meta: object) -> tuple[dict, dict]:
+# 函数用途: click_candidate 分支：candidate_id 必须是非空字符串，候选事实只来自 _meta；复核完真正点击前再看一次是否已取消。
+def _click(observer: Any, arguments: Mapping[str, Any], context: CallContext) -> tuple[dict, dict]:
     candidate_id = arguments.get("candidate_id")
     if not isinstance(candidate_id, str) or not candidate_id.strip():
         raise ObservationError("invalid_arguments", "candidate_id 必须是非空字符串")
-    result = observer.click_candidate(meta)
+    result = observer.click_candidate(context.meta, cancelled=context.cancelled)
     return result, result
 
 
@@ -88,21 +101,28 @@ def encode_call_result(body: dict, structured: dict | None, is_error: bool) -> A
 # LLM: 宿主附的 _meta 以 RequestParams.Meta（extra=allow）到达，扩展键在 model_extra 里；没有就按缺上下文处理（由观察核心判定）。
 #   采样 + OCR 是阻塞的慢活，放到工作线程里跑并 await：事件循环保持可读，宿主 /stop 发来的 notifications/cancelled 才能被
 #   底层 Server 处理（取消这次等待、丢弃结果；线程里的 OCR 跑完自然结束）。同一时刻只跑一次观察（锁），快照环不被并发写。
+#   协程被取消时置位本次调用的 cancelled 事件：排在锁后面的调用拿到锁先看它，已取消就不碰 observer；点击在复核完、真正点之前再看
+#   一次——用户按了停止之后屏幕上不会多点一下。注意有锁：取消后的下一次观察要排在被丢弃的那次 OCR 之后，不被堵的是事件循环。
 # 函数用途: 生成底层 tools/call 处理器：观察工具自己处理，其余交给原处理器。
 def observation_call_handler(delegate: Callable[[Any], Any], observer: Any) -> Callable[[Any], Any]:
     gate = threading.Lock()
 
-    def run(name: str, arguments: dict, meta: object) -> tuple[dict, dict | None, bool]:
+    def run(name: str, arguments: dict, context: CallContext) -> tuple[dict, dict | None, bool]:
         with gate:
-            return call_observation_tool(observer, name, arguments, meta)
+            return call_observation_tool(observer, name, arguments, context)
 
     async def handler(request: Any) -> Any:
         params = request.params
         if params.name not in OBSERVATION_TOOL_NAMES:
             return await delegate(request)
         extra = getattr(getattr(params, "meta", None), "model_extra", None) or {}
-        loop = asyncio.get_running_loop()
-        body, structured, is_error = await loop.run_in_executor(None, run, params.name, dict(params.arguments or {}), extra.get(OBSERVATION_META_EXTENSION))
+        cancelled = threading.Event()
+        context = CallContext(meta=extra.get(OBSERVATION_META_EXTENSION), cancelled=cancelled.is_set)
+        try:
+            body, structured, is_error = await asyncio.get_running_loop().run_in_executor(None, run, params.name, dict(params.arguments or {}), context)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
         return encode_call_result(body, structured, is_error)
 
     return handler
@@ -133,7 +153,7 @@ def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_fact
 
 
 __all__ = [
-    "OBSERVATION_TOOL_NAMES", "build_adapter_server", "call_observation_tool", "click_candidate", "encode_call_result",
+    "OBSERVATION_TOOL_NAMES", "CallContext", "build_adapter_server", "call_observation_tool", "click_candidate", "encode_call_result",
     "install_observation_handler",
     "observation_call_handler", "observation_tools_enabled", "observe_window", "register_observation_tools",
 ]
