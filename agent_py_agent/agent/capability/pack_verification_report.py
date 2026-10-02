@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from .pack_verification_ledger import PackVerificationLedger, ledger_for_run
-from .pack_verification_scope import host_verification_enabled
+from .pack_verification_ledger import PackVerificationLedger, ledger_for_run, pack_verification_root
+from .pack_verification_scope import host_verification_enabled, verification_owner
 
 PACK_VERIFICATIONS_SCHEMA = "pack_verifications.v1"
 NOTICE_SOURCE = "pack_verification"
@@ -20,12 +20,15 @@ MAX_NOTICE_RESULTS_COUNT = 4
 MAX_NOTICE_TEXT_CHARS = 480
 
 
-# LLM: 没有任何检查结果时返回 None（未钉包、开关关着或本回合没写交付物），对外事实保持不出现这个键。
+# LLM: 没有任何检查结果、也没有被就地改的输入原件时返回 None（未钉包、开关关着或本回合没写交付物），对外事实保持不出现这个键。
+#   inputs_modified 取最后一次收尾的输入原件检查（块 4）。
 # 函数用途: 从核验账本生成本 run 的结构化核验事实。
 def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | None:
     records = ledger.records() if ledger is not None else []
     results = [row for row in records if row.get("kind") == "result" and isinstance(row.get("fact"), dict)]
-    if not results:
+    input_checks = [row for row in records if row.get("kind") == "input_check" and isinstance(row.get("items"), list)]
+    inputs_modified = [dict(item) for item in input_checks[-1]["items"]] if input_checks else []
+    if not results and not inputs_modified:
         return None
     closeouts = [row for row in records if row.get("kind") == "closeout"]
     keys = set(closeouts[-1].get("keys") or []) if closeouts else None
@@ -42,26 +45,30 @@ def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | Non
             "uncertain_targets": list(closeouts[-1].get("uncertain_targets") or []) if closeouts else [],
             "baseline_truncated": bool((baseline.get("scan") or {}).get("truncated")),
             "rework_count": sum(1 for row in records if row.get("kind") == "rework"),
+            "input_rework_count": sum(1 for row in records if row.get("kind") == "input_rework"),
+            "inputs_modified": inputs_modified[:MAX_RUN_FACT_RESULTS_COUNT],
             "results": list(latest.values())[:MAX_RUN_FACT_RESULTS_COUNT]}
 
 
-# LLM: 收尾阶段读同一本账：账本位置只靠任务存储根和 run_id；找不到账本就没有事实。
+# LLM: 收尾阶段读同一本账：账本位置只靠规范任务根下的宿主核验目录和 run_id；找不到账本就没有事实。
 # 函数用途: 为最终交付结果取本 run 的核验事实。
 def run_pack_verification_facts(agent: object, context: object) -> dict | None:
-    from ..agent_core.run_task_workspace_writer import current_run_task_workspace_root
-
     # 开关关着就不去开账本（9b 建议）：未开启时每轮收尾零 I/O
     if not host_verification_enabled(agent):
         return None
-    ledger = ledger_for_run(current_run_task_workspace_root(agent, context), str(getattr(context, "run_id", "") or ""))
-    return pack_verification_facts(ledger)
+    owner = verification_owner(agent)
+    root = pack_verification_root(agent, context, owner) if owner is not None else None
+    return pack_verification_facts(ledger_for_run(root, str(getattr(context, "run_id", "") or "")))
 
 
 # LLM: 文字只拼结构化事实：包 ID 和版本、检查程序成员、目标相对路径、有效与否、错误/警告条数、前几个错误码或原因码。
 #   HostNotice 会把换行合并成空格，所以各条直接首尾相接（每条以句号结尾）。
 # 函数用途: 生成给用户看的宿主核验提示正文。
 def pack_verification_notice_text(facts: dict) -> str:
-    lines = [_notice_line(item) for item in facts.get("results", [])[:MAX_NOTICE_RESULTS_COUNT]]
+    lines = [f"宿主检查：任务开始时的输入 {item.get('path')} 被就地改了"
+             f"（{'原件副本已保存' if item.get('copy_path') else '没有原件副本'}）。"
+             for item in facts.get("inputs_modified", [])[:MAX_NOTICE_RESULTS_COUNT]]
+    lines += [_notice_line(item) for item in facts.get("results", [])[:MAX_NOTICE_RESULTS_COUNT]]
     if not facts.get("closeout_checked"):
         lines.append("本回合没有正常收尾，上面是写入时的检查结果。")
     text = "".join(lines)

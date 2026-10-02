@@ -114,12 +114,11 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
     - 其余算“不确定”，收尾照样检查、入账（`uncertain_targets`），但它的失败不触发返工。
   - 收尾时的当前快照截断也记进 closeout 记录和最终事实（`current_truncated`）。
 - **关联输入怎么找**：
-  - `task_input`：基线里有、现在内容没变的文件；
+  - `task_input`：从任务的原件清单里找（块 4）。原件还是原样就交工作区里的文件；被改过但有可用副本就交副本；都不行就算找不到。
   - `turn_output`：本回合新建或内容变了的文件；
   - 两种都排除 target 本身，再按路径模式和字段匹配过滤，恰好一个才交给检查程序；
   - 每个参数名的匹配个数入账。
-  - 被就地改过的输入在块 4 之前算找不到，块 4 会改成交原件副本。
-  - 多回合任务里，上一回合写出的文件在本回合算“开始时已有”。如果因此匹配到多个，就按找不到处理，不会误交。
+  - 原件清单一个任务只记一次，后一回合写出的文件不会被当成“开始时已有”。
 - **写完就查**：
   - `write_file`、`edit_file`、`apply_patch` 成功后，从回执的宿主字段取写出的绝对路径（`artifact_refs` 里标 deleted 的旧地址不算），一次最多 4 个文件；
   - 对符合钉住包交付物声明的文件，跑 `applies_to` 指向它的检查程序；
@@ -131,8 +130,10 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 包、检查程序、目标和各输入的内容都没变时，复用写后结果，不重跑；
   - 有 `failed` 时给一次返工提示，列出目标、包、检查程序、错误数和“错误码 @ 位置”，最多 5 个目标、每个 5 条；
   - 返工先记账再发，记不进账就不返工，避免无界循环。
-- **唯一账本**：`<任务存储根>/data/pack_verification/<run>.jsonl`，文件权限 600，跟着任务归档的保留期走。
-  - 记录分四种：baseline、result、closeout、rework。
+- **唯一账本**：`<规范任务根>/data/pack_verification/<run>.jsonl`，文件权限 600，跟着任务归档的保留期走。
+  - 规范任务根是 `conversation/workspace_paths.canonical_task_root` 认的 `runs/<日期>/<键>`、`tasks/<日期>/<名>`、`audits/<编号>`。子代理 run 的工作目录在 `<任务根>/work/agents/<run>` 下，往上找到规范任务根再落盘，不会落进模型可写的 `work/`；不在规范任务根下就不核验。
+  - `data/pack_verification/` 整个目录由宿主托管，经 be 的 H3（`HOST_STATE_TASK_PARTS`）对模型只读，读照常；块 4 的原件清单和副本也在这里。
+  - 记录分八种：baseline、written、result、closeout、rework，以及块 4 的 input_check、input_rework（另有任务级的 originals.json）。
   - 返工次数和结果复用都只读这本账，Compact 续跑、进程重启后不会重置。
   - `runtime_events` 记 `pack_verification_completed`，只是可观测投影，不做决定。
   - 开关关着时，最终结果阶段直接返回、不去读账本，每轮收尾零 I/O。
@@ -145,12 +146,26 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 检查程序运行期间不响应 `/stop`（运行器拿不到取消信号），只受声明的超时约束，最长 120 秒；块 6 评估是否接入取消；
   - 回合没正常收尾时不做收尾检查。
 
-## 4. 输入保护（块 4）
+## 4. 输入保护（块 4，已实现）
 
-- **范围**：只对 `input_policy=preserve_originals` 的包、在钉住它的任务里生效。用户要求“改这个文件”的普通任务不受影响。
-- **记基线**：第一次成功读取一个任务开始前就存在的工作区文件时，记 `{path, sha256, size}`。不超过 1 MB 的文件同时存一份原件副本：放在本 owner 的任务归档里，权限 600，每个任务合计不超过 16 MB，跟着现有归档的保留期走。每个任务最多 64 个基线文件。
-- **比对**：收尾时重新算哈希，变了就记 `INPUT_MODIFIED_IN_PLACE`（路径和前后哈希），不管是哪个工具改的。
-- **返工**：提示 1 次（恢复原件，另存新文件，告诉模型原件副本在哪），之后照常结束并带收尾说明。
+- **范围**：只对本任务钉住、声明了 `input_policy=preserve_originals` 的包生效。用户要求“改这个文件”的普通任务不受影响。
+- **原件清单**（3a 同意的偏离：原设计是“第一次读取时记”，它抓不到没读就改的文件，也分不清文件是不是本任务前一回合写的）：
+  - 任务第一次改工作区前（复用块 3 的基线时机和同一次扫描），把已启用、声明了核验的包的声明（交付物和检查程序输入）匹配到的文件记成原件；
+  - 每个原件记 `{path, sha256, size, copied, packages}`，其中 packages 是匹配到的包 ID；
+  - 一个任务只记一次，清单是 `<规范任务根>/data/pack_verification/originals.json`；
+  - 最多 64 个文件；不超过 1 MB 的文件另存一份副本到同目录的 `originals/<sha256>`，权限 600，每个任务合计不超过 16 MB；超出的只记摘要。
+- **副本放哪**（3a 同意的偏离）：放在宿主托管目录 `data/pack_verification/` 下，对模型只读、读照常（H3）。
+  - 副本每次使用前按原件摘要核对，被改过就当作没有。
+  - 判定“有没有就地改”比的是清单里的摘要，不是副本，所以篡改副本也不能让检查通过。
+- **比对**：收尾时，原件在本回合被改或被删就记 `INPUT_MODIFIED_IN_PLACE`，带路径、原件摘要、现在的摘要和副本位置，不管是哪个工具改的。
+  - “本回合”的判断：本回合开始时的摘要和现在不同，并且现在也不是原样。
+  - 本回合开始时就不在的原件不判，免得把旧回合的事算到本回合头上。
+- **返工**：提示 1 次。列出原件路径和副本位置，建议用 `cp` 把副本覆盖回原路径（字节要完全一致，手抄做不到），改动另存新文件。
+  - 和交付物返工各自计数；同时出现时合成一条提示，原件在前。
+  - 之后照常结束，最终事实带 `inputs_modified`、`input_rework_count`，宿主提示写明“任务开始时的输入 X 被就地改了”。
+- **只读保护依赖 be 的 H3**：
+  - 文件工具和写边界按路径判，所有任务都拒写；
+  - Shell 只保护本次命令的工作目录和写根所在任务的 `data/pack_verification/`。Full Access 下别的任务的目录挡不住，这是 H3 写明的已知边界。
 
 ## 5. 交付物存在（块 5）
 
@@ -185,7 +200,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 | 1 | `verification` 声明与安装校验；启用前执行确认；同意摘要写入内容激活 | 已实现（`test_capability_verification_declaration.py`） |
 | 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测）；`baseline` 推广成 `inputs` | 已实现（`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
 | 3 | 写完就查、收尾检查、返工、`HostNotice` 和 `channel_delivery` 事实、开关 | 已实现（`capability/pack_verification_*.py`，`test_pack_verification_service.py`、`test_pack_verification_matching.py`） |
-| 4 | 输入基线、原件副本、收尾比对、返工 | 待做 |
+| 4 | 输入原件清单、原件副本、收尾比对、返工；宿主托管文件统一落到规范任务根（只读保护依赖 be 的 H3） | 已实现（`capability/pack_verification_originals.py`、`pack_verification_inputs.py`，`test_pack_verification_inputs.py`） |
 | 5 | 交付存在和返工 | 待做 |
 | 6 | 变异、门禁、文档收口 | 待做 |
 | 7 | A 0.5.0、B 0.3.0（be） | 复审通过（`claude/be-capability-packs-content-b2` 5bf9bb61d） |

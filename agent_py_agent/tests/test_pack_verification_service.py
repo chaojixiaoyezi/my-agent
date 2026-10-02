@@ -99,10 +99,12 @@ def _install(tmp_path, checker=REAL_CHECKER):
 # 函数用途: 搭一套宿主核验的测试环境（普通函数，供各测试文件的夹具调用）。
 def build_env(tmp_path, monkeypatch, installed=None):
     owner, ref = installed or _install(tmp_path)
-    workspace, task_root = tmp_path / "ws", tmp_path / "task"
+    # 规范任务根：<owner home>/runs/<日期>/<键>（核验目录只落在规范任务根下）
+    workspace, task_root = tmp_path / "ws", Path(owner.home_dir) / "runs" / "2026-10-02" / "task-1"
     workspace.mkdir()
     pins = [ref]
     monkeypatch.setattr(pack_verification_service, "verification_owner", lambda agent: owner)
+    monkeypatch.setattr("agent_py_agent.agent.capability.pack_verification_report.verification_owner", lambda agent: owner)
     monkeypatch.setattr(pack_verification_scope, "pinned_package_references", lambda agent, attrs: list(pins))
     monkeypatch.setattr(pack_verification_service, "_workspace_root", lambda agent, params: workspace)
     monkeypatch.setattr("agent_py_agent.agent.agent_core.run_task_workspace_writer.current_run_task_workspace_root",
@@ -165,7 +167,7 @@ def test_switch_off_is_inert(env, fake_runner):
     result = _tool_result(target)
     assert attach_post_write_verification(env.agent, env.params, result) is result
     assert closeout_rework_block(env.agent, env.params) == ""
-    assert not env.task_root.exists() and fake_runner == []
+    assert not (env.task_root / "data").exists() and fake_runner == []
 
 
 def test_baseline_is_captured_once_and_only_before_mutating_tools(env):
@@ -213,16 +215,19 @@ def test_inputs_are_resolved_by_source_and_must_be_unique(env, fake_runner):
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {"--source": source, "--handoff": handoff, "--peer": peer}
     peer.unlink()
+    original = source.read_bytes()
     source.write_text(json.dumps({"schema": "source.v1", "edited": True}))
     _write(target, {"schema": "delivery.v1", "v": 2})
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
-    assert dict(fake_runner[-1].inputs) == {"--handoff": handoff}, "被就地改过的输入不算任务开始时的原件"
+    copy = dict(fake_runner[-1].inputs)["--source"]
+    assert copy.parent == env.task_root / "data/pack_verification/originals", "被就地改过的输入交任务开始时的原件副本"
+    assert copy.read_bytes() == original and dict(fake_runner[-1].inputs)["--handoff"] == handoff
     _write(env.workspace / "out/handoff2.json", {"schema": "handoff.v1"})
     _write(target, {"schema": "delivery.v1", "v": 3})
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
-    assert dict(fake_runner[-1].inputs) == {}, "匹配到两个就不交"
+    assert dict(fake_runner[-1].inputs) == {"--source": copy}, "匹配到两个就不交"
     last = [row for row in env.ledger.records() if row["kind"] == "result"][-1]
-    assert last["input_matches"] == {"--source": 0, "--handoff": 2, "--peer": 0}
+    assert last["input_matches"] == {"--source": 1, "--handoff": 2, "--peer": 0}
 
 
 def test_closeout_checks_shell_written_files_reworks_once_and_reuses_results(env, fake_runner):

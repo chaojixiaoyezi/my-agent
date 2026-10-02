@@ -19,6 +19,8 @@
 |-- agent_py_agent/agent/capability/pack_verification_matching.py # 按“路径模式 + 字段匹配”认文件，及有界工作区快照
 |-- agent_py_agent/agent/capability/pack_verification_ledger.py # 每 run 一本的宿主核验账本（基线、结果、收尾、返工，权限 600）
 |-- agent_py_agent/agent/capability/pack_verification_report.py # 从核验账本生成最终交付事实和宿主提示文字
+|-- agent_py_agent/agent/capability/pack_verification_originals.py # 任务输入原件清单与副本（规范任务根 data/pack_verification，一个任务只记一次）
+|-- agent_py_agent/agent/capability/pack_verification_inputs.py # 输入保护：task_input 候选、就地修改判定与返工提示
 |-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
 |-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
 |-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数

@@ -321,6 +321,11 @@
   - **交付存在**：缺失或打不开返工 2 次。
   - 开关 `capability_pack_host_verification_enabled` 仓库默认 false。
 - **块 2 已实现**：`capability/pack_verifier_runner.py`。它只从安装 blob 取钉住的原件，在 `AttemptExecutionSandbox` 里跑（断网、整根只读、只写临时目录），只认 `pack_verifier_result.v1`。`AttemptSandboxSpec.network_access=False` 在 macOS 补了 `(deny network*)`，就绪检查会实际试一次断网，失败就不跑。macOS 和 Linux 车道都实测过，车道要加 `NET_ADMIN` 才能真跑断网用例。
+- **块 4 已实现**（分支 `claude/ae-capability-packs-v2-b4r`，基于块 3 复审修正头 `92a90fa9b`）：
+  - 输入原件清单在任务第一次改工作区前记一次，范围是已启用、声明了核验的包的声明模式（3a 同意的偏离：原设计是“首读记”）；
+  - 不超过 1 MB 的原件存副本；原件在本回合被改或删就记 `INPUT_MODIFIED_IN_PLACE`，返工 1 次，提示里给出副本位置和 cp 恢复建议；
+  - task_input 改为只从原件清单找；
+  - 宿主托管文件（账本、清单、副本）统一落在规范任务根的 `data/pack_verification/`，对模型只读靠 be 的 H3。细节见设计文档第 4 节。
 - **块 3 已实现**（分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`）：
   - 本 run 第一次改工作区前记基线；写工具成功后马上检查，回执附有界摘要；收尾时对本回合新建或改过的交付物再查（shell 写的也算），有错误返工 1 次；
   - 结果、返工次数都记在每 run 一本的核验账本，Compact 和重启后不重置；

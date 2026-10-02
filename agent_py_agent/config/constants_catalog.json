@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 875,
+  "count": 880,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1116,6 +1116,22 @@
       "description": "一次最多返回几条（schema 上限与执行时截断共用）。"
     },
     {
+      "name": "MAX_INPUT_REWORK_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_inputs.py",
+      "value": 1,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "收尾发现输入原件被就地改时最多给几次返工提示（3a 审定 1 次）。"
+    },
+    {
+      "name": "MAX_INPUT_REWORK_ITEMS_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_inputs.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "返工提示里最多列几个被改的原件。"
+    },
+    {
       "name": "MAX_FIELD_MATCH_FILE_BYTES",
       "file": "agent_py_agent/agent/capability/pack_verification_matching.py",
       "value": 4194304,
@@ -1146,6 +1162,30 @@
       "unit": "个",
       "category": "上限预算",
       "description": "工作区快照最多走访的目录条目数（文件和目录合计），防止在很大的目录树上卡住；超限记 truncated。"
+    },
+    {
+      "name": "MAX_ORIGINAL_COPIES_TOTAL_BYTES",
+      "file": "agent_py_agent/agent/capability/pack_verification_originals.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "一个任务全部原件副本合计的字节上限（3a 审定 16 MB）。"
+    },
+    {
+      "name": "MAX_ORIGINAL_COPY_BYTES",
+      "file": "agent_py_agent/agent/capability/pack_verification_originals.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个原件副本的字节上限（3a 审定 1 MB）；更大的只记摘要，不存副本。"
+    },
+    {
+      "name": "MAX_ORIGINAL_FILES_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_originals.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "一个任务最多记的原件个数（3a 审定）。"
     },
     {
       "name": "MAX_NOTICE_RESULTS_COUNT",

@@ -1,8 +1,9 @@
 # LLM: 能力包 v2 块 3 的宿主核验主流程（第 11 条“宿主证实包检查真跑过”）。三个入口都由宿主在固定缝隙调用，模型没有对应工具：
 #   - capture_pack_baseline：本 run 第一次改工作区的工具执行前，对工作区做一次有界快照（输入解析和“本回合改了什么”都靠它）；
 #   - verify_written_files：写工具成功后，对写出的、符合钉住包交付物声明的文件跑声明的检查程序，返回有界摘要附进写工具回执；
-#   - pack_verification_closeout_block：模型不再调工具准备收尾时，对本回合新建或改过的全部匹配交付物各跑一次（shell 写的也算），
-#     有错误时返回一次返工提示（上限 MAX_PACK_VERIFICATION_REWORK_COUNT），之后照常结束。
+#   - pack_verification_closeout_block：模型不再调工具准备收尾时，先查输入原件有没有被就地改（块 4，钉住包声明了 preserve_originals
+#     时），再对本回合新建或改过的全部匹配交付物各跑一次（shell 写的也算）；两类问题各自最多返工一次，同时出现就合成一条提示。
+#   块 4 起基线同时记任务的输入原件清单，task_input 只从原件清单找（原件被改过就交副本）。
 #   只看结构化事实：开关、pins、安装项、路径模式和字段匹配、文件摘要、检查程序的 pack_verifier_result.v1；不读模型文字。
 #   同样的内容（包、检查程序、目标和各输入的摘要都相同）只跑一次，结果和返工次数都记在本 run 的核验账本里。
 #   副作用：读工作区文件、在沙箱里运行包内检查程序、写核验账本和 runtime_events。改动同步 test_pack_verification_service.py。
@@ -18,7 +19,15 @@ from functools import cached_property
 from pathlib import Path
 
 from ..capability_verification_manifest import VerifierDeclaration
-from .pack_verification_ledger import PackVerificationLedger, ledger_for_run
+from .pack_verification_inputs import (
+    MAX_INPUT_REWORK_COUNT,
+    capture_originals_for_run,
+    input_rework_text,
+    modified_originals,
+    preserving_packages,
+    task_input_candidates,
+)
+from .pack_verification_ledger import PackVerificationLedger, ledger_for_run, pack_verification_root
 from .pack_verification_matching import (
     WorkspaceScan,
     file_matches,
@@ -26,11 +35,13 @@ from .pack_verification_matching import (
     scan_workspace,
     workspace_relpath,
 )
+from .pack_verification_originals import OriginalFile, load_task_originals
 from .pack_verification_scope import (
     PinnedVerificationPackage,
     enabled_verification_patterns,
     host_verification_enabled,
     pinned_verification_packages,
+    verification_declarations,
     verification_owner,
 )
 from .pack_verifier_runner import PackVerificationResult, PackVerifierRequest, run_pack_verifier
@@ -64,13 +75,15 @@ class _RunScope:
     run_ids: tuple[str, str]
     runtime_db: object = None
     written: frozenset[str] = frozenset()
+    pack_root: Path | None = None
+    originals: dict[str, OriginalFile] | None = None
 
     # 函数用途: 按钉住包声明的全部模式扫一次当前工作区。
     @cached_property
     def current(self) -> WorkspaceScan:
         patterns: list[str] = []
         for package in self.packages:
-            for declaration in _declarations(package):
+            for declaration in verification_declarations(package.verification):
                 patterns.extend(pattern for pattern in declaration.path_patterns if pattern not in patterns)
         return scan_workspace(self.root, tuple(patterns))
 
@@ -82,13 +95,15 @@ def capture_pack_baseline(agent: object, params: object) -> None:
     if not host_verification_enabled(agent):
         return
     owner = verification_owner(agent)
-    ledger = _ledger(agent, params)
+    ledger = _ledger(agent, params, owner)
     if owner is None or ledger is None or ledger.baseline() is not None:
         return
     patterns = enabled_verification_patterns(owner)
     if patterns:
-        scan = scan_workspace(_workspace_root(agent, params), patterns)
+        root = _workspace_root(agent, params)
+        scan = scan_workspace(root, patterns)
         ledger.append({"kind": "baseline", "patterns": list(patterns), "scan": scan.to_payload()})
+        capture_originals_for_run((ledger.path.parent, root), owner, scan)
 
 
 # LLM: paths 来自写工具回执里的宿主字段（绝对路径），只核验工作区内、符合钉住包交付物声明的文件；返回每次检查的有界摘要。
@@ -105,15 +120,36 @@ def verify_written_files(agent: object, params: object, paths: list[Path]) -> li
     return [result.summary() for _, result in checked]
 
 
-# LLM: 目标 = 本回合新建或内容变了的、符合钉住包交付物声明的文件（按基线比对，shell 写的也算）；没有基线说明本回合没改过工作区。
-#   基线截断时，不在基线里、又没有写工具回执证明本回合写过的文件只算“不确定”：照样检查、入账，但它的失败不触发返工（9b 应修 2）。
-#   当前快照也截断时记 current_truncated。有 failed 结果且本 run 返工次数没到上限时，先把返工记进账本再返回提示；
-#   记不进账本就不返工（避免无界循环）。
-# 函数用途: 收尾时核验本回合改过的全部交付物，必要时返回一次返工提示。
+# LLM: 没有基线说明本回合没改过工作区，什么都不查。输入原件检查在前（它的返工提示要模型先恢复原件），交付物检查在后；
+#   两段各自记账、各自计返工次数，同时需要返工时合成一条提示。
+# 函数用途: 收尾时检查输入原件和本回合改过的交付物，必要时返回一次返工提示。
 def pack_verification_closeout_block(agent: object, params: object) -> str:
     scope = _run_scope(agent, params)
     if scope is None or scope.baseline is None:
         return ""
+    sections = (_input_section(scope), _verification_section(scope))
+    return "\n\n".join(section for section in sections if section)
+
+
+# LLM: 被就地改的原件只按结构化摘要判定（不管哪个工具改的）；每次收尾都记一条 input_check（最终事实读最后一条），
+#   返工提示先记 input_rework 再返回，记不进账本就不返工。
+# 函数用途: 收尾时检查本回合有没有就地改输入原件。
+def _input_section(scope: _RunScope) -> str:
+    items = modified_originals(scope.originals, scope.baseline, (scope.root, scope.pack_root, preserving_packages(scope.packages)))
+    scope.ledger.append({"kind": "input_check", "items": items})
+    if not items or scope.ledger.count("input_rework") >= MAX_INPUT_REWORK_COUNT:
+        return ""
+    if not scope.ledger.append({"kind": "input_rework", "paths": [item["path"] for item in items]}):
+        return ""
+    return input_rework_text(items)
+
+
+# LLM: 目标 = 本回合新建或内容变了的、符合钉住包交付物声明的文件（按基线比对，shell 写的也算）。
+#   基线截断时，不在基线里、又没有写工具回执证明本回合写过的文件只算“不确定”：照样检查、入账，但它的失败不触发返工（9b 应修 2）。
+#   当前快照也截断时记 current_truncated。有 failed 结果且本 run 返工次数没到上限时，先把返工记进账本再返回提示；
+#   记不进账本就不返工（避免无界循环）。
+# 函数用途: 收尾时核验本回合改过的全部交付物。
+def _verification_section(scope: _RunScope) -> str:
     uncertain = set(_uncertain_paths(scope))
     targets = [scope.root / relpath for relpath in sorted({*_changed_paths(scope), *uncertain})
                if _applicable(scope, scope.root / relpath)]
@@ -123,7 +159,7 @@ def pack_verification_closeout_block(agent: object, params: object) -> str:
                          "uncertain_targets": sorted(rel for rel in uncertain if scope.root / rel in targets),
                          "current_truncated": scope.current.truncated})
     failed = [result for _, result in checked if result.status == "failed" and result.target not in uncertain]
-    if not failed or scope.ledger.rework_count() >= MAX_PACK_VERIFICATION_REWORK_COUNT:
+    if not failed or scope.ledger.count("rework") >= MAX_PACK_VERIFICATION_REWORK_COUNT:
         return ""
     if not scope.ledger.append({"kind": "rework", "keys": [key for key, result in checked if result in failed]}):
         return ""
@@ -135,7 +171,7 @@ def _run_scope(agent: object, params: object) -> _RunScope | None:
     if not host_verification_enabled(agent):
         return None
     owner = verification_owner(agent)
-    ledger = _ledger(agent, params)
+    ledger = _ledger(agent, params, owner)
     if owner is None or ledger is None:
         return None
     packages = tuple(pinned_verification_packages(agent, getattr(params, "task_attributes", None), owner))
@@ -145,7 +181,8 @@ def _run_scope(agent: object, params: object) -> _RunScope | None:
     return _RunScope(owner, _workspace_root(agent, params), ledger, packages,
                      WorkspaceScan.from_payload(baseline.get("scan")) if baseline else None,
                      (str(getattr(params, "run_id", "") or ""), str(getattr(params, "attempt_id", "") or "")),
-                     getattr(getattr(agent, "subagents", None), "runtime_db", None), ledger.written_paths())
+                     getattr(getattr(agent, "subagents", None), "runtime_db", None), ledger.written_paths(),
+                     ledger.path.parent, load_task_originals(ledger.path.parent))
 
 
 # 函数用途: 对一个目标文件跑全部适用的检查程序，返回 (复用键, 结果) 列表。
@@ -182,30 +219,27 @@ def _run_once(scope: _RunScope, pair: tuple, target: Path, trigger: str) -> tupl
     return key, result
 
 
-# LLM: 每条声明的输入按来源找候选：task_input = 基线里有、现在内容没变的文件；turn_output = 本回合新建或改过的文件；
-#   都排除 target 本身，再按路径模式和字段匹配过滤，恰好一个才交给检查程序。不认识的来源没有候选。没有基线时什么都找不到。
+# LLM: 每条声明的输入按来源找候选：task_input = 任务原件清单里的文件（原样就交工作区文件，被改过就交副本）；turn_output = 本回合
+#   新建或改过的文件；都排除 target 本身，再按路径模式和字段匹配过滤，恰好一个才交给检查程序。不认识的来源没有候选。
 # 函数用途: 为一个检查程序解析关联输入，返回 ((参数名, 路径)…) 和每个参数名的匹配个数。
 def _resolve_inputs(scope: _RunScope, verifier: VerifierDeclaration, target: Path) -> tuple[tuple, dict[str, int]]:
     target_relpath = workspace_relpath(target, scope.root)
     resolved, matches = [], {}
     for item in verifier.inputs:
-        found = [relpath for relpath in _candidates(scope, item.source)
-                 if relpath != target_relpath and file_matches(item, relpath, scope.root / relpath)]
+        found = [path for relpath, path in _candidates(scope, item.source)
+                 if relpath != target_relpath and file_matches(item, relpath, path)]
         matches[item.flag] = len(found)
         if len(found) == 1:
-            resolved.append((item.flag, scope.root / found[0]))
+            resolved.append((item.flag, found[0]))
     return tuple(resolved), matches
 
 
-# 函数用途: 按来源列出候选文件（工作区相对路径，排好序）。
-def _candidates(scope: _RunScope, source: str) -> list[str]:
-    if scope.baseline is None:
-        return []
+# 函数用途: 按来源列出候选 (工作区相对路径, 交给检查程序的路径)，排好序。
+def _candidates(scope: _RunScope, source: str) -> list[tuple[str, Path]]:
     if source == INPUT_SOURCE_TASK_INPUT:
-        return sorted(relpath for relpath, state in scope.baseline.files.items()
-                      if state.sha256 and scope.current.files.get(relpath) == state)
-    if source == INPUT_SOURCE_TURN_OUTPUT:
-        return _changed_paths(scope)
+        return task_input_candidates(scope.originals, scope.pack_root, scope.root)
+    if source == INPUT_SOURCE_TURN_OUTPUT and scope.baseline is not None:
+        return [(relpath, scope.root / relpath) for relpath in _changed_paths(scope)]
     return []
 
 
@@ -266,17 +300,11 @@ def _append_event(scope: _RunScope, result: PackVerificationResult, trigger: str
         return
 
 
-# 函数用途: 列出一个包的交付物声明和全部检查程序输入声明。
-def _declarations(package: PinnedVerificationPackage) -> list:
-    verification = package.verification
-    return [*verification.deliverables, *(item for verifier in verification.verifiers for item in verifier.inputs)]
-
-
-# 函数用途: 找到本 run 的核验账本（任务存储根 + run_id）。
-def _ledger(agent: object, params: object) -> PackVerificationLedger | None:
-    from ..agent_core.run_task_workspace_writer import current_run_task_workspace_root
-
-    return ledger_for_run(current_run_task_workspace_root(agent, params), str(getattr(params, "run_id", "") or ""))
+# 函数用途: 找到本 run 的核验账本（<规范任务根>/data/pack_verification/<run>.jsonl）；没有 owner 时为 None。
+def _ledger(agent: object, params: object, owner: object) -> PackVerificationLedger | None:
+    if owner is None:
+        return None
+    return ledger_for_run(pack_verification_root(agent, params, owner), str(getattr(params, "run_id", "") or ""))
 
 
 # LLM: 和工具调用用的是同一个可信 cwd（execution_cwd 优先，其次 Agent 启动时的项目目录），交付物的路径模式相对于它。

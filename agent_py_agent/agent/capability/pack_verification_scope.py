@@ -63,14 +63,26 @@ def pinned_verification_packages(agent: object, attrs: object, owner: object) ->
 # 函数用途: 汇总全部已启用、声明了核验的包的路径模式。
 def enabled_verification_patterns(owner: object) -> tuple[str, ...]:
     patterns: list[str] = []
-    for entry in PluginInstallStore(owner).snapshot():
-        activation = getattr(entry, "activation", None)
-        verification = _verification(entry)
-        if verification is None or getattr(activation, "phase", "") != "active":
-            continue
-        for declaration in (*verification.deliverables, *(item for row in verification.verifiers for item in row.inputs)):
+    for _, declarations in enabled_verification_declarations(owner):
+        for declaration in declarations:
             patterns.extend(pattern for pattern in declaration.path_patterns if pattern not in patterns)
     return tuple(patterns)
+
+
+# LLM: 已激活、声明了核验的包，各自的交付物与检查程序输入声明；块 4 记原件清单时用它判断文件属于哪些包。
+# 函数用途: 列出 [(包 ID, 该包全部交付物与输入声明)]。
+def enabled_verification_declarations(owner: object) -> list[tuple[str, list]]:
+    rows = []
+    for entry in PluginInstallStore(owner).snapshot():
+        verification = _verification(entry)
+        if verification is not None and getattr(getattr(entry, "activation", None), "phase", "") == "active":
+            rows.append((entry.manifest.plugin_id, verification_declarations(verification)))
+    return rows
+
+
+# 函数用途: 列出一个核验声明里的全部交付物与检查程序输入声明。
+def verification_declarations(verification: object) -> list:
+    return [*verification.deliverables, *(item for verifier in verification.verifiers for item in verifier.inputs)]
 
 
 # 函数用途: 取安装项里的能力核验声明（不是能力包或没声明时为 None）。
