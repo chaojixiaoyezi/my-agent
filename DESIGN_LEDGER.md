@@ -57,6 +57,18 @@
   - 确定性失败（坏 JSON）的补跑警告不带 `:transient`，不降阈值；账里看不到成功（太早）按 2 处理。
 - **验证**：见 TESTS.md 同名节。
 
+## 宿主配置目录对模型工具只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `4dd56f627`，设计待 3a 确认）
+
+- **起因**：管理员的文件工具和命令能直接写 `~/.my-agent/config/`，绕过参数中心的 `BOUNDARY_KEYS`、修改账本和 `manage_models` 的 M1 检查。
+- **做法**：
+  - 数据根的 `config/`、`system/config/` 和每个 owner home 的 `config/`，统一声明在 `path_access_policy`；
+  - 文件工具在唯一写门 `resolve_write_path` 上拦，错误码 `PATH_HOST_CONFIG_WRITE_BLOCKED`，提示指向 `user_config`、`manage_models`；
+  - 命令类工具在 `_sandbox_exec` 里加只读覆盖（Full Access 档也生效）；
+  - 读取不拦。
+- **探针发现**：macOS 上命令可以先把上级目录改名，再写原本只读的目录。人格目录现有的只读覆盖也有这个口子。做法是在所有上级目录上加 literal 写拒绝，作为沙箱通用规则。
+- **已知边界**：Windows 命令不进沙箱；Linux 上还没建 `config/` 的休眠 owner；沙箱外早已存在的硬链接；插件沙箱关闭时的插件进程。
+- 详细设计见 [HOST_CONFIG_WRITE_GUARD](docs/design/HOST_CONFIG_WRITE_GUARD.md)。
+
 ## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，待集成）
 
 - **生产事实**（3a，K1 上线后 local/main 的 curator/runs，只看结构化字段）：13:12 某会话选的 qwen3.8-flash 那组 `CURATOR_MODEL_FAILED`，两次 ProviderTransientError，各约 22 秒。

@@ -1442,6 +1442,7 @@ docs/
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
+|-- design/HOST_CONFIG_WRITE_GUARD.md # 宿主配置目录对模型文件工具和命令只读（H3）的拦截层、边界与探针结论
 |-- design/TUI_DESIGN.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
 |-- design/TUI_BEHAVIOR_CHECKLIST.md # 启动、消息、输入、权限、生命周期和命令映射逐项证据账
 |-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录
