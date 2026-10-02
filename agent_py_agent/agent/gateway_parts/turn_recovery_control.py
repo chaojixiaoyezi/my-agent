@@ -172,7 +172,8 @@ def _preview_owner_recovery(
 
 
 # LLM: 写入口自己在 BEGIN IMMEDIATE 中重读目标并校验确认码；服务层按 success_count 区分全成、部分成和零成功，
-#   不能因部分目标跳过而把已经提交的恢复说成“没有恢复”，也不能把内部异常或正文带到 IM。
+#   不能因部分目标跳过而把已经提交的恢复说成“没有恢复”；幂等重放无论全成或部分成，都必须先标明确认已处理过。
+#   回执只投影固定统计字段，不能把内部异常或正文带到 IM。
 # 函数用途: 执行已确认的 owner 历史恢复并返回结构化计数回执。
 def _apply_owner_recovery(
     repo: object,
@@ -185,6 +186,7 @@ def _apply_owner_recovery(
     details = _owner_outcome_details(outcome, command.confirmation_code)
     success_count = int(details["success_count"])
     skipped_count = int(details["skipped_count"])
+    replay_label = "该确认已处理过"
     if success_count == 0:
         return ConversationControlResult(
             "recover", False, "没有恢复：" + _REFUSAL_LABELS.get(
@@ -193,12 +195,13 @@ def _apply_owner_recovery(
         )
     if skipped_count:
         reason_counts = json.dumps(details["reason_counts"], ensure_ascii=False, sort_keys=True)
+        prefix = f"{replay_label}：" if outcome.get("idempotent") else ""
         return ConversationControlResult(
             "recover", True,
-            f"已处理 {success_count} 条，跳过 {skipped_count} 条（原因码计数：{reason_counts}）。",
+            f"{prefix}已处理 {success_count} 条，跳过 {skipped_count} 条（原因码计数：{reason_counts}）。",
             details=details,
         )
-    prefix = "该确认已处理过" if outcome.get("idempotent") else "owner 历史未知执行轮已处理"
+    prefix = replay_label if outcome.get("idempotent") else "owner 历史未知执行轮已处理"
     return ConversationControlResult(
         "recover", True,
         f"{prefix}：目标 {details['target_count']}，成功 {details['success_count']}，跳过 {details['skipped_count']}。",

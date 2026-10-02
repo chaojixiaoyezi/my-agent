@@ -402,7 +402,7 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
   - 解析与 TUI 原文还原覆盖 `/recover <处置> <编号>`，非法 opaque ID 被入口拒绝；
   - 多条 unknown 子代理仍可不带编号查看且不写，带编号后逐条处置；
   - 编号不存在、current attempt 已非 unknown、跨线程或 TaskRun 已关分别由结构化原因拒绝；
-  - thread 解析为空时，非管理员按编号不能命中空 thread 的 owner 历史；状态和事件均保持不变；
+  - thread 解析为 `None` 或纯空白时，非管理员按编号不能命中同样为空/空白 thread 的 owner 历史；状态和事件均保持不变；
   - 同一线程未关 TaskRun 中重复 run_id 返回 `target_ambiguous`，不静默取第一条；按编号恢复根代理保留主链继续提示；
   - 不带编号的唯一一条、主链优先、接替收口与 TaskRun 树旧规则继续回归。
 - **C9**（新增 `test_owner_unknown_recovery.py`）：
@@ -410,13 +410,14 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
   - 非管理员和缺任一可信身份字段都返回 `admin_required`，正文、actor 或 metadata 没有授权入口；
   - 预览后新增目标使旧确认码返回 `target_set_changed` 且零写入；
   - 确认后根/子两条都走共享 CAS，`attempt_recovered` 事件含 `recovery_target`、`recovery_source=owner_history`、owner 与确认码；
-  - 第二条 CAS 被替身拒绝时，第一条已提交恢复仍返回 `ok=True`，文案和 details 如实给成功、跳过及原因码计数；
+  - 第二条 CAS 被替身拒绝时，第一条已提交恢复仍返回 `ok=True`，文案和 details 如实给成功、跳过及原因码计数；同码重放以“该确认已处理过”开头、计数不变且不新增事件；
   - 相同确认经飞书共用 Gateway 分派重送时返回 `idempotent=true`，不增加恢复事件或批次事件。
 - **聚焦命令（变异全部还原后的当前源码）**：
   `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 ~/.my-agent/releases/claude-tools/ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_turn_recovery_control.py agent_py_agent/tests/test_turn_recovery_child_unknown.py agent_py_agent/tests/test_owner_unknown_recovery.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol56`
-  → **29 passed**。
+  → **30 passed**。
 - **变异**：首轮 5/5 保持；审查返工 3/3 被捕获——去掉空 thread 拒绝、重号仍取第一条、部分成功仍回“没有恢复”。
   本次三项均先把当前源码备份到工作区 `tmp/`，看到对应新增用例失败后再从备份拷回，未用 `git checkout` 还原；恢复后按上面三文件命令复跑 29 passed。
+- **复审尾补变异 2/2 被捕获**：去掉空线程判断的 `.strip()` 后，纯空白 thread 用例实际恢复目标并失败；部分成功重放不加前缀后，幂等文案断言失败。两项均先备份、变异、看到红灯，再从备份拷回；恢复后聚焦三文件 30 passed。
 - **最终门禁（当前工作树）**：`test_settings_chat_control.py` 34 项通过；`guards9.txt` 的 10 份测试文件（含 `test_packaging.py`）退出码 0；
   `check_import_boundaries.py` 为 `findings=0`；Ruff 为 `All checks passed!`；`check_doc_sync.py` 为 `DOC_SYNC_PASS`；
   strict code-size 为 `hard=0`、`blocked=False`；`git diff --check` 无输出；`check_clean_package.py .` 无发布阻塞项；

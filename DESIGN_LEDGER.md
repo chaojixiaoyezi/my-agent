@@ -329,7 +329,7 @@
 - **验证**：先红后绿、工厂边界 1024/2047/2048/2049、真实组包/投影的流式和非流式替身、控制服务与参数中心回执、正常大上限及三个独立变异；结果和门禁见 TESTS.md。没有新配置，未做真实供应商验收或 Gateway 操作；早期夹具遗漏的假地址外部传输尝试保留在 TESTS.md。
 - 详细合同见 [智能程度第 10 节](docs/design/REASONING_EFFORT.md#10-anthropic-小输出上限的预算边界2026-10-02)。真实供应商及实际 TUI/IM 客户端未验证，由 3a 集成后复核。
 
-## C8/C9：/recover 按编号处置与管理员 owner 历史恢复入口（2026-10-02，分支 `worker/sol56-c8c9-recover`，基于 `claude/3a-step16z` `b35796a60`，审查返工 `1e1ed1040`，已实现，已集成，待上线（step17b））
+## C8/C9：/recover 按编号处置与管理员 owner 历史恢复入口（2026-10-02，分支 `worker/sol56-c8c9-recover`，基于 `claude/3a-step16z` `b35796a60`，审查返工 `1e1ed1040`、尾补 `cee06c42c`，已实现，已集成，待上线（step17b））
 
 - **C8 指定编号**：`/recover <处置> <编号>` 的编号只接受 `common/opaque_id.py` 规则；写入口在同一个 `BEGIN IMMEDIATE`
   事务里重新定位编号并复核 thread、未关闭 TaskRun、current attempt 仍为 unknown，再复用主链唯一 unknown→recovered CAS。
@@ -347,7 +347,8 @@
 - **审查返工**：按编号写入口在事务前拒绝空白 thread，避免新 IM 会话把 `tasks.thread_id=''` 的 owner 历史当成本线程；
   同范围重号拒绝而不替用户挑；owner 批次按 `success_count` 区分全成、部分成和零成功，部分成功如实返回已提交计数；
   根代理编号回执与主链共用继续提示常量，幂等 LIKE 粗筛已注释其对事件 JSON 默认分隔符的耦合。
-- **验证状态**：临时 runtime.db 的三份聚焦测试 29 项通过；原五个变异与本次 M1/S1/S2 三个返工变异均被捕获并还原。真实运行中 Gateway、TUI 和飞书未在本分支启动或验证，待集成后复核。
+- **复审尾补**：纯空白 thread 与空 thread 一样在事务前拒绝；部分成功批次同码重放以“该确认已处理过”开头，复用原计数且不新增事件。
+- **验证状态**：临时 runtime.db 的三份聚焦测试 30 项通过；原五个、返工三个与尾补两个变异均被捕获并还原。真实运行中 Gateway、TUI 和飞书未在本分支启动或验证，待集成后复核。
 
 ## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
 

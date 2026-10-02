@@ -174,6 +174,34 @@ def test_targeted_recovery_without_thread_cannot_reach_owner_history(owner_world
     assert _events(owner_world.repo, "attempt_recovered") == []
 
 
+def test_targeted_recovery_rejects_whitespace_thread_identity(owner_world):
+    with owner_world.repo.transaction() as conn:
+        conn.execute(
+            "UPDATE task_runs SET closed_at=0 WHERE task_run_id=?",
+            (owner_world.root["task_run_id"],),
+        )
+        conn.execute(
+            "UPDATE tasks SET thread_id='  ' WHERE task_id=?",
+            (owner_world.root["task_id"],),
+        )
+    denied_owner = SimpleNamespace(
+        subagents=owner_world.owner.subagents,
+        home_paths=_NON_ADMIN,
+        conversation_store=owner_world.owner.conversation_store,
+    )
+    whitespace_thread = SimpleNamespace(thread_id="  ", workspace_task_id="")
+    command = parse_conversation_control("/recover recorded owner-root")
+    assert command is not None and command.valid is True
+
+    denied = execute_turn_recovery_control(denied_owner, whitespace_thread, command)
+
+    assert denied.ok is False and denied.error_code == "RUN_RECOVERY_REJECTED"
+    assert getattr(denied, "details", {}).get("reason") == "target_out_of_scope"
+    assert _status(owner_world.repo, owner_world.root) == ("unknown", "unknown")
+    assert _status(owner_world.repo, owner_world.child) == ("unknown", "unknown")
+    assert _events(owner_world.repo, "attempt_recovered") == []
+
+
 def test_owner_confirmation_code_expires_when_target_set_changes(owner_world):
     _preview_result, code = _preview(owner_world)
     added = owner_world.repo.record_run_creation(
@@ -238,6 +266,17 @@ def test_owner_partial_success_reports_committed_work_as_success(owner_world, mo
     }
     assert _status(owner_world.repo, owner_world.root) == ("created", "recovered")
     assert _status(owner_world.repo, owner_world.child) == ("unknown", "unknown")
+    assert len(_events(owner_world.repo, "attempt_recovered")) == 1
+    assert len(_events(owner_world.repo, "owner_recovery.completed")) == 1
+
+    repeated = _run(owner_world, f"/recover owner recorded --confirm {code}")
+
+    assert repeated.ok is True
+    assert repeated.message.startswith("该确认已处理过")
+    assert getattr(repeated, "details", {}) == {
+        "scope": "owner", "target_count": 2, "success_count": 1, "skipped_count": 1,
+        "reason_counts": {"not_unknown": 1}, "confirmation_code": code, "idempotent": True,
+    }
     assert len(_events(owner_world.repo, "attempt_recovered")) == 1
     assert len(_events(owner_world.repo, "owner_recovery.completed")) == 1
 
