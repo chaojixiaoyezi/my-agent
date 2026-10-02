@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..common.log_redaction import redact_sensitive_text
 from .background_process_launch import BackgroundLaunchError
+from .mcp_declarations import MCPPublication, parse_tool_approvals, parse_tool_observations
 from .mcp_protocol import MCPError, bounded_mcp_lock
 from .mcp_transport import MCPCleanupReceipt, MCPTransport
 from .process_registry import ProcessTerminationReceipt
@@ -48,6 +49,7 @@ from .process_session_cleanup import ProcessSessionCleanupError
 
 if TYPE_CHECKING:
     from ..plugin_activation_ref import PluginActivationRef
+    from ..plugin_observation import PluginToolObservation, PluginToolObservationRef
 
 # my-agent 侧协商的 MCP 协议版本。2024-11-05 是稳定且被绝大多数 server 接受的版本；
 # server 在 initialize 回包里必须返回已支持版本；未知版本不能按成功握手继续。
@@ -149,6 +151,12 @@ class MCPServerConfig:
     # 只有部署者显式配置的逐工具声明才可降低风险；server 自报 metadata 不具授权效力。
     default_effect: str = "dangerous"
     tool_effects: dict[str, str] = field(default_factory=dict)
+    # 逐工具审批模式（部署者声明，只能等于或严于默认 dangerous：dangerous / mutating / always；never 配置非法）。
+    # 未声明的工具沿用 ApprovalPolicy 默认的 dangerous；声明不授予权限，也不改变 effect。
+    tool_approvals: dict[str, str] = field(default_factory=dict)
+    # 逐工具观察声明（和插件 manifest v5 同形）：{tool: {"observation": {...}} | {"observation_ref": {...}}}。
+    # observation 只能挂只读工具，observation_ref 的 param 必须是该工具 schema 里可选的 string 参数，发布前按发现到的工具核对。
+    tool_observations: dict[str, PluginToolObservation | PluginToolObservationRef] = field(default_factory=dict)
 
     # LLM: Parse deployment-owned structure only. Reject malformed catalog categories instead of
     # silently changing whether a server's tools are direct or deferred.
@@ -179,6 +187,8 @@ class MCPServerConfig:
             field_name="default_effect",
         )
         tool_effects = _configured_tool_effects(raw.get("tool_effects"), server_name=name)
+        tool_approvals = parse_tool_approvals(raw.get("tool_approvals"), server_name=name)
+        tool_observations = parse_tool_observations(raw.get("tool_observations"), server_name=name)
         return cls(
             name=name,
             command=command,
@@ -195,12 +205,18 @@ class MCPServerConfig:
             ),
             default_effect=default_effect,
             tool_effects=tool_effects,
+            tool_approvals=tool_approvals,
+            tool_observations=tool_observations,
         )
 
     def effect_for_tool(self, tool_name: str) -> str:
         """Return the administrator-declared effect for a discovered tool."""
 
         return self.tool_effects.get(tool_name, self.tool_effects.get("*", self.default_effect))
+
+    # 函数用途: 返回部署者声明的审批模式；未声明沿用 ApprovalPolicy 默认的 dangerous（可用 "*" 兜底）。
+    def approval_for_tool(self, tool_name: str) -> str:
+        return self.tool_approvals.get(tool_name, self.tool_approvals.get("*", "dangerous"))
 
 
 _VALID_MCP_EFFECTS = frozenset({"read_only", "mutating", "dangerous"})
@@ -378,6 +394,8 @@ class MCPStdioClient:
         self._starting = False
         self._launch_failure: BackgroundLaunchError | ProcessSessionCleanupError | None = None
         self._exit_registered = False
+        # 最近一次目录发布的结构化结果（published / rejected / unavailable），由注册层写，状态投影只读
+        self.publication: MCPPublication | None = None
 
     # LLM: 永久关闭是本客户端终态，不由进程存活、目录缓存或后续重连覆盖。
     # 函数用途: 供注册层跳过已明确关闭的客户端。

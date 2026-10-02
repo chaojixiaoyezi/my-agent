@@ -122,6 +122,15 @@
   - 任何观察提供方都能用，不是屏幕专项合同。
 - **不新建观察账本**：唯一权威仍是该次调用的 `tool_result_envelope.observation` 和 `tool_completed` 事件。
 - **片 A 先核实**：`MCPProxyTool` 能否按工具声明 effect 和审批策略（`always`）。插件工具可以；MCP 这边如果还不行，就用同一张声明表补上，不另开一条路。
+  - 核实结果（2026-10-02）：不行。`build_proxy_tool` 只按 effect 组策略，`approval_policy` 一直是默认 dangerous；配置里只有 `tool_effects`。片 A 补上了下面的声明表。
+- **片 A 实施定稿（2026-10-02，ae 定、ef 实施，分支 `claude/ef-j16-slice-a`）**：
+  - 三件套在 `agent/tooling/observation_binding.py` 的 `ObservationBinding`，`PluginProxyTool` 与 `MCPProxyTool` 共用；绑定为 None 的 MCP 代理行为逐字节不变。声明复用 manifest v5 的 `PluginToolObservation / PluginToolObservationRef`（已搬到 `plugin_observation.py`，manifest 与 MCP 共用同一条配对规则 `validate_observation_declaration`）。
+  - 来源字段只留 `provider_id`（`plugin:<id>` / `mcp:<server>`）：记录、上下文、归档信封统一改名，新信封不再写 `plugin_id`；旧归档不迁移，宿主没有逻辑读它。
+  - MCP 的 `activation_id` = `mcp:<server>:<sha256(本次固定连接的 pid_birth_token)[:16]>`，子进程重启换代。宿主复核多一条：候选所属观察的 activation_id 必须等于本绑定的，否则 `OBSERVATION_STALE`、不发送（换代后旧候选不交给新实例猜）。
+  - MCP 逐工具声明表：`mcp_servers.<server>.tool_approvals`（只能等于或严于默认 dangerous：dangerous / mutating / always；`never` 配置非法）与 `tool_observations`（和 v5 同形），部署者也可对第三方服务声明；Computer Use 由 `computer_use_profile.py` 一张表产出三项（片 A 只搬现有工具，审批与观察为空）。
+  - 核对只按本次发现到的工具算：坏项（observation 挂非只读工具、ref 参数不在 schema 或不是可选 string、ref 没有同类观察配对）整个服务拒绝发布，`MCPDeclarationError` 带结构化 reasons，不连带别的服务；声明了但没发现的工具只记 notice。发布结果记成客户端的 `publication`（published / rejected / unavailable，含 code / reasons / notices），`mcp_registration.mcp_server_facts(registry)` 是只读投影；挂到哪个面板由集成时定。
+  - 几何扩展：`frame` 必填 space / origin / size / scale（origin 可为负），可选 captured_at / capture / occluded，多余键拒绝，数值判定排除 bool；候选 `region=[x,y,w,h]` 用截图像素、`x+w ≤ size_w×scale_x`，有 region 必须有 frame；原因码 `frame` / `candidate_region`。region 进候选规范形式（参与 content_hash 与 observation_id），frame 不进；几何只进归档信封与 `tool_completed` 事件（候选 region、frame 的 size/scale），不进模型投影。
+  - 审批核实三层：合同单测（profile → `from_mapping` → 发布 → `approval_policy.mode == "always"` 且 effect read_only）、`tool_manifest_contract` 投影、`ActionPolicy` 在自主（auto）模式下仍 ask；真链路读屏审批放到片 F 的真实验收。
 
 ## 5. 决策点 `action_candidate`
 

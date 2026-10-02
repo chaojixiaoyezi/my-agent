@@ -15,6 +15,7 @@ from agent_py_agent.agent.plugin_observation import (
     ObservationHostContext,
     ObservationRejected,
     current_observation,
+    observation_event_payload_from_envelope,
     observation_is_current,
     observation_meta,
     parse_observation,
@@ -26,7 +27,7 @@ ACTIONS = {"click": "plugin__browser-lite_1a2b3c4d__click_5e6f7a8b", "fill": "pl
 
 # 函数用途: 造一份宿主上下文；默认身份来自宿主字段，不取插件自报。
 def _context(**overrides) -> ObservationHostContext:
-    values = dict(run_id="run-1", task_id="task-1", operation_id="op-1", activation_id="a" * 64, plugin_id="browser-lite",
+    values = dict(run_id="run-1", task_id="task-1", operation_id="op-1", activation_id="a" * 64, provider_id="plugin:browser-lite",
                   tool_name="plugin__browser-lite_1a2b3c4d__read_00000000", target_kind="page", max_candidates=50, action_tools=ACTIONS)
     values.update(overrides)
     return ObservationHostContext(**values)
@@ -210,3 +211,83 @@ def test_resolve_action_candidate_checks_freshness_and_declared_actions():
     with pytest.raises(ObservationRejected) as stale:
         resolve_action_candidate(repo, run_id="run-1", task_id="task-1", candidate_id=textbox.candidate_id, action_tool=ACTIONS["fill"])
     assert stale.value.code == OBSERVATION_STALE, "新观察一到旧候选就过期"
+
+
+# ---------------------------------------------------------------------------
+# 通用几何扩展（J16 片 A）：frame / 候选 region 整份校验；几何只进归档与事件，不进模型投影
+# ---------------------------------------------------------------------------
+
+# 函数用途: 造一个合规 frame（800×600 点、缩放 1）。
+def _frame(**overrides) -> dict:
+    frame = {"space": "screen_points", "origin": [0, 0], "size": [800, 600], "scale": [1, 1]}
+    frame.update(overrides)
+    return frame
+
+
+# 函数用途: 带几何的载荷：第一个候选有 region，第二个没有。
+def _geometry_payload(region=(10, 20, 60, 18), **frame_overrides) -> dict:
+    payload = _payload(frame=_frame(**frame_overrides))
+    payload["candidates"][0]["region"] = list(region)
+    return payload
+
+
+def test_geometry_goes_to_envelope_and_event_but_not_model_projection():
+    record = parse_observation(_geometry_payload(captured_at=1790000000.5, capture="window_image", occluded=False), _context())
+    envelope = record.to_envelope()
+    assert envelope["frame"] == {"space": "screen_points", "origin": [0, 0], "size": [800, 600], "scale": [1, 1],
+                                 "captured_at": 1790000000.5, "capture": "window_image", "occluded": False}
+    assert envelope["candidates"][0]["region"] == [10, 20, 60, 18] and "region" not in envelope["candidates"][1]
+    assert envelope["provider_id"] == "plugin:browser-lite" and "plugin_id" not in envelope, "来源字段只有 provider_id 一个"
+    projection = json.dumps(record.model_projection())
+    assert "region" not in projection and "frame" not in projection, "几何不进模型可见投影"
+    event = record.event_payload()
+    assert event["frame"] == {"size": [800, 600], "scale": [1, 1]} and event["candidates"][0]["region"] == [10, 20, 60, 18]
+    assert "region" not in event["candidates"][1] and "captured_at" not in json.dumps(event)
+    assert observation_event_payload_from_envelope(envelope, task_id="task-1", operation_id="op-1") == event, "两条事件投影路径一致"
+
+
+def test_region_enters_content_hash_but_frame_does_not():
+    base = parse_observation(_geometry_payload(), _context())
+    moved = parse_observation(_geometry_payload(region=(11, 20, 60, 18)), _context())
+    assert moved.content_hash != base.content_hash and moved.observation_id != base.observation_id, "候选位置变了算内容变了"
+    later = parse_observation(_geometry_payload(captured_at=5.0, occluded=True), _context())
+    assert later.content_hash == base.content_hash and later.observation_id == base.observation_id, "frame 不进内容摘要"
+    plain = parse_observation(_payload(), _context())
+    assert plain.frame is None and "frame" not in plain.to_envelope() and "region" not in json.dumps(plain.to_envelope())
+    assert plain.content_hash == parse_observation(_payload(), _context()).content_hash
+
+
+def test_negative_origin_and_scaled_pixels_are_accepted():
+    record = parse_observation(_geometry_payload(region=(1500, 1100, 100, 100), origin=[-1920, -5], scale=[2, 2]), _context())
+    assert record.frame["origin"] == [-1920, -5] and record.candidates[0].region == (1500, 1100, 100, 100)
+
+
+@pytest.mark.parametrize("change", [
+    lambda f: f.pop("scale"), lambda f: f.update(dpi=96), lambda f: f.update(size=[True, 600]), lambda f: f.update(size=[0, 600]),
+    lambda f: f.update(scale=[1, -1]), lambda f: f.update(origin=[float("inf"), 0]), lambda f: f.update(origin=[0]),
+    lambda f: f.update(captured_at=-1), lambda f: f.update(captured_at=True), lambda f: f.update(occluded="no"),
+    lambda f: f.update(space="screen points"), lambda f: f.update(capture=""),
+])
+def test_malformed_frame_rejects_the_whole_observation(change):
+    payload = _geometry_payload()
+    change(payload["frame"])
+    with pytest.raises(ObservationRejected) as info:
+        parse_observation(payload, _context())
+    assert info.value.code == "frame"
+    with pytest.raises(ObservationRejected) as null_frame:
+        parse_observation(_payload(frame=None), _context())
+    assert null_frame.value.code == "frame"
+
+
+@pytest.mark.parametrize("region,frame_overrides", [
+    ((10, 20, 60, 18), {"drop_frame": True}), ((741, 20, 60, 18), {}), ((10, 583, 60, 18), {}), ((10, 20, 0, 18), {}),
+    ((-1, 20, 60, 18), {}), ((10, 20, 60, True), {}), ((10, 20, 60), {}), ((1501, 1100, 100, 100), {"scale": [2, 2]}),
+])
+def test_malformed_region_rejects_the_whole_observation(region, frame_overrides):
+    drop_frame = frame_overrides.pop("drop_frame", False)
+    payload = _geometry_payload(region=region, **frame_overrides)
+    if drop_frame:
+        payload.pop("frame")
+    with pytest.raises(ObservationRejected) as info:
+        parse_observation(payload, _context())
+    assert info.value.code == "candidate_region"

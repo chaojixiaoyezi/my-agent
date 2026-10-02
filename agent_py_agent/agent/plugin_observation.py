@@ -1,13 +1,18 @@
-# LLM: 插件观察候选的唯一宿主实现：校验只读插件工具结果里的 my_agent_observation 载荷形状（整份接受或整份拒绝，记结构化原因码），
-#   用宿主上下文铸 observation_id / candidate_id，生成写进该次调用原归档 tool_result_envelope.observation 的记录与模型可见的
-#   有界投影，并按 owner 权威库 runtime_events 里 tool_completed 事件的 seq 顺序判定"当前观察"和候选新鲜度。role/label 只是
-#   external_data，不参与任何机器判断；不解析自由文本；不另建观察账本。改动须同步 plugin_runtime.PluginProxyTool、
-#   agent_core/tool_runtime_ledger._append_runtime_event、runtime_db.repository.events_for_agent_run 与决策线的 action_candidate 点。
+# LLM: 观察候选的唯一宿主合同（插件与 MCP 共用）：声明数据类（PluginToolObservation / PluginToolObservationRef 及其与 effect、
+#   输入 schema 的配对规则 validate_observation_declaration）、校验只读工具结果里的 my_agent_observation 载荷形状（整份接受或整份
+#   拒绝，记结构化原因码；可选几何扩展 frame / 候选 region 同样整份校验，原因码 frame / candidate_region）、用宿主上下文铸
+#   observation_id / candidate_id，生成写进该次调用原归档 tool_result_envelope.observation 的记录与模型可见的有界投影（几何只进
+#   归档与 tool_completed 事件，不进投影；候选 region 进规范形式参与 content_hash，frame 不进），并按 owner 权威库 runtime_events
+#   里 tool_completed 事件的 seq 顺序判定"当前观察"和候选新鲜度。provider_id 只记来源（plugin:<id> / mcp:<server>），宿主逻辑不读它。
+#   role/label 只是 external_data，不参与任何机器判断；不解析自由文本；不另建观察账本。改动须同步 tooling/observation_binding、
+#   plugin_manifest、tooling/mcp_declarations、agent_core/tool_runtime_ledger、runtime_db.repository.events_for_agent_run 与决策线的
+#   action_candidate 点。
 # 模块用途: 让"这次观察看到了哪些可操作对象"成为结构化事实，供模型填候选 ID、宿主发送前复核新鲜度、决策点只在 ID 里选。
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping
@@ -24,7 +29,7 @@ OBSERVATION_META_VERSION = "1"
 # 宿主发送前复核的结构化拒绝码
 OBSERVATION_STALE = "OBSERVATION_STALE"
 OBSERVATION_CANDIDATE_UNKNOWN = "OBSERVATION_CANDIDATE_UNKNOWN"
-# 观察候选列表最多条数；超出截断，保持观察载荷有界。
+# 观察候选数量的宿主硬上限；声明的 max_candidates 不能超过它，载荷超出整份拒绝（不截断）。
 MAX_CANDIDATE_COUNT = 64
 # 单次观察最多报告的动作数；防止一次观察携带海量动作。
 MAX_ACTION_COUNT = 8
@@ -34,6 +39,74 @@ _OBSERVATION_ID = re.compile(r"obs-[0-9a-f]{24}\Z")
 _CANDIDATE_ID = re.compile(r"cand-[0-9a-f]{16}\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")     # key / role：短标识，不含空白
 _TARGET_TEXT = re.compile(r"[^\x00-\x1f\x7f]{1,128}\Z")           # target.ref ≤128、generation ≤64 由长度另限
+_TARGET_KIND = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")                 # 观察目标类型：开放字符串，只校验形状
+_OBSERVATION_PARAM = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")     # 动作工具接收候选 ID 的参数名（排除 "__" 宿主参数）
+# 几何扩展 frame 的必填键与可选键；候选项除固定四键外只允许可选 region
+_FRAME_REQUIRED_KEYS = frozenset({"space", "origin", "size", "scale"})
+_FRAME_OPTIONAL_KEYS = frozenset({"captured_at", "capture", "occluded"})
+_CANDIDATE_REQUIRED_KEYS = frozenset({"key", "role", "label", "actions"})
+
+
+# LLM: 观察声明只允许出现在 read_only 工具上（观察本身不能有副作用）；target_kind 是开放字符串，只校验形状，用于把观察和
+#   动作配对；max_candidates 由宿主再夹一次上限。声明不授予任何权限，也不改变结果的信任级别。插件 manifest v5 与 MCP
+#   逐工具声明表（mcp_servers.<server>.tool_observations）共用这个类型。
+# 类用途: 声明某只读工具的成功结果会带 my_agent_observation 候选载荷。
+@dataclass(frozen=True)
+class PluginToolObservation:
+    target_kind: str
+    max_candidates: int = MAX_CANDIDATE_COUNT
+
+    # 函数用途: 拒绝形状不合规的目标类型与越界的候选上限。
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_kind, str) or not _TARGET_KIND.fullmatch(self.target_kind):
+            raise ValueError("观察目标类型无效")
+        if type(self.max_candidates) is not int or not 1 <= self.max_candidates <= MAX_CANDIDATE_COUNT:
+            raise ValueError("观察候选上限无效")
+
+
+# LLM: param 指向动作工具输入 schema 里一个可选的 string 参数，名字由提供方自定，宿主只读这条映射；不能与 _meta 或宿主注入的
+#   "__" 参数同名（形状正则已排除）。同一提供方里必须有同 target_kind 的观察工具与之配对。
+# 类用途: 声明某动作工具可以接受同类观察的候选 ID。
+@dataclass(frozen=True)
+class PluginToolObservationRef:
+    target_kind: str
+    param: str
+
+    # 函数用途: 拒绝形状不合规的目标类型与参数名。
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_kind, str) or not _TARGET_KIND.fullmatch(self.target_kind):
+            raise ValueError("观察目标类型无效")
+        if not isinstance(self.param, str) or not _OBSERVATION_PARAM.fullmatch(self.param):
+            raise ValueError("候选参数名无效")
+
+
+# LLM: code 是稳定机器码：observation_conflict / observation_effect / observation_ref_shape / observation_ref_param；
+#   它是 ValueError 子类，manifest 调用方按 ValueError 处理，MCP 声明表按 code 转成结构化拒绝原因。
+# 类用途: 观察声明与工具 effect / 输入 schema 对不上时的结构化错误。
+class ObservationDeclarationError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# LLM: 插件 manifest 与 MCP 声明表共用的配对规则：观察只能挂只读工具；观察引用要求 param 在 schema.properties 里、type 为 string、
+#   不在 required 里；两者互斥。只看结构化字段，不看工具名或说明文字。
+# 函数用途: 校验一个工具的观察/观察引用声明与其 effect、输入 schema 是否一致。
+def validate_observation_declaration(observation: object, observation_ref: object, *, effect: str, input_schema: object) -> None:
+    if observation is not None and observation_ref is not None:
+        raise ObservationDeclarationError("observation_conflict", "观察工具不能同时是动作工具")
+    if observation is not None and (not isinstance(observation, PluginToolObservation) or effect != "read_only"):
+        raise ObservationDeclarationError("observation_effect", "只有只读工具可以声明观察")
+    if observation_ref is None:
+        return
+    if not isinstance(observation_ref, PluginToolObservationRef):
+        raise ObservationDeclarationError("observation_ref_shape", "观察引用无效")
+    properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
+    required = input_schema.get("required") if isinstance(input_schema, dict) else None
+    spec = properties.get(observation_ref.param) if isinstance(properties, dict) else None
+    if (not isinstance(spec, dict) or spec.get("type") != "string"
+            or (isinstance(required, list) and observation_ref.param in required)):
+        raise ObservationDeclarationError("observation_ref_param", "候选参数必须是输入 schema 里可选的 string 参数")
 
 
 # LLM: reason 是稳定机器码（observation_rejected:<code> 里的 code 部分）；错误正文不含载荷内容。
@@ -44,8 +117,8 @@ class ObservationRejected(ValueError):
         self.code = code
 
 
-# LLM: 身份全部来自宿主（run/task/operation/激活/注册名），不取插件自报；actions 映射是本包内"插件工具名 → 宿主注册名"，
-#   只含与本观察同 target_kind 的 observation_ref 工具。
+# LLM: 身份全部来自宿主（run/task/operation/激活/注册名），不取提供方自报；provider_id 只记来源（plugin:<id> / mcp:<server>），
+#   新鲜度与复核不读它；actions 映射是同一提供方内"远端动作工具名 → 宿主注册名"，只含与本观察同 target_kind 的 observation_ref 工具。
 # 类用途: 铸造观察 ID 与校验候选 actions 所需的宿主上下文。
 @dataclass(frozen=True)
 class ObservationHostContext:
@@ -53,14 +126,14 @@ class ObservationHostContext:
     task_id: str
     operation_id: str
     activation_id: str
-    plugin_id: str
+    provider_id: str
     tool_name: str
     target_kind: str
     max_candidates: int
     action_tools: Mapping[str, str]
 
 
-# 类用途: 一个宿主铸过 ID 的候选；key 是插件自己能解析回对象的键，宿主不解释它。
+# 类用途: 一个宿主铸过 ID 的候选；key 是提供方自己能解析回对象的键，宿主不解释它；region 是可选的截图像素外框 (x, y, w, h)。
 @dataclass(frozen=True)
 class ObservationCandidate:
     candidate_id: str
@@ -68,15 +141,17 @@ class ObservationCandidate:
     role: str
     label: str
     actions: tuple[str, ...]
+    region: tuple[float, ...] | None = None
 
 
-# LLM: to_envelope 是归档里的唯一权威形状（含插件自己的 target_ref 与代次，动作时要原样交还插件复核）；model_projection 隐去
-#   key / target_ref / 代次；event_payload 是写进 runtime_events 的查找投影（字段与信封一致，不含 label/role）。
+# LLM: to_envelope 是归档里的唯一权威形状（含提供方自己的 target_ref 与代次，动作时要原样交还提供方复核；几何 frame / 候选
+#   region 只在载荷带了时出现，旧载荷字节不变）；model_projection 隐去 key / target_ref / 代次 / 几何；event_payload 是写进
+#   runtime_events 的查找投影（字段与信封一致，不含 label/role，几何只带候选 region 与 frame 的 size/scale 供决策点算粗位置）。
 # 类用途: 一次合规观察的完整宿主记录。
 @dataclass(frozen=True)
 class ObservationRecord:
     observation_id: str
-    plugin_id: str
+    provider_id: str
     activation_id: str
     tool_name: str
     target_kind: str
@@ -88,16 +163,18 @@ class ObservationRecord:
     run_id: str = ""
     task_id: str = ""
     operation_id: str = ""
+    frame: Mapping[str, Any] | None = None
 
     # 函数用途: 归档 tool_result_envelope.observation 的写法。
     def to_envelope(self) -> dict[str, Any]:
         return {
-            "schema": OBSERVATION_SCHEMA, "observation_id": self.observation_id, "plugin_id": self.plugin_id,
+            "schema": OBSERVATION_SCHEMA, "observation_id": self.observation_id, "provider_id": self.provider_id,
             "activation_id": self.activation_id, "tool": self.tool_name, "target_kind": self.target_kind,
             "target_ref": self.target_ref, "target_ref_hash": self.target_ref_hash, "generation": self.generation,
             "content_hash": self.content_hash,
+            **({"frame": dict(self.frame)} if self.frame is not None else {}),
             "candidates": [{"candidate_id": c.candidate_id, "key": c.key, "role": c.role, "label": c.label,
-                            "actions": list(c.actions)} for c in self.candidates],
+                            "actions": list(c.actions), **_region_item(c.region)} for c in self.candidates],
         }
 
     # 函数用途: 模型可见结果里替换 my_agent_observation 的有界投影：只给宿主铸的 ID、role、label 与动作工具名。
@@ -106,14 +183,28 @@ class ObservationRecord:
                 "candidates": [{"candidate_id": c.candidate_id, "role": c.role, "label": c.label, "actions": list(c.actions)}
                                for c in self.candidates]}
 
-    # 函数用途: 写进 runtime_events tool_completed 载荷的查找投影（不含 label/role）。
+    # 函数用途: 写进 runtime_events tool_completed 载荷的查找投影（不含 label/role；几何只留候选 region 与 frame 的 size/scale）。
     def event_payload(self) -> dict[str, Any]:
         return {
             "observation_id": self.observation_id, "activation_id": self.activation_id, "target_kind": self.target_kind,
             "target_ref": self.target_ref, "target_ref_hash": self.target_ref_hash, "generation": self.generation,
             "content_hash": self.content_hash, "task_id": self.task_id, "operation_id": self.operation_id,
-            "candidates": [{"candidate_id": c.candidate_id, "key": c.key, "actions": list(c.actions)} for c in self.candidates],
+            **_frame_item(self.frame),
+            "candidates": [{"candidate_id": c.candidate_id, "key": c.key, "actions": list(c.actions), **_region_item(c.region)}
+                           for c in self.candidates],
         }
+
+
+# 函数用途: 候选 region 的投影片段：有几何时给 [x, y, w, h]，没有就什么都不加（旧载荷字节不变）。
+def _region_item(region: object) -> dict[str, Any]:
+    return {"region": list(region)} if isinstance(region, (list, tuple)) and len(region) == 4 else {}
+
+
+# 函数用途: frame 的事件投影片段：只带 size 与 scale（决策点算归一化粗位置用），没有 frame 就什么都不加。
+def _frame_item(frame: object) -> dict[str, Any]:
+    if not isinstance(frame, Mapping) or "size" not in frame or "scale" not in frame:
+        return {}
+    return {"frame": {"size": list(frame["size"]), "scale": list(frame["scale"])}}
 
 
 # 函数用途: 规范 JSON 后取 sha256 十六进制。
@@ -129,14 +220,41 @@ def _token(value: object, code: str) -> str:
 
 
 # LLM: 形状不合规就整份拒绝：schema、target.ref/generation、候选数量（1..min(声明, 宿主上限)）、key 重复、label 超长、
-#   actions 越界（必须是本包同 target_kind 的 observation_ref 工具名，1..8 个，不重复）都算不合规。不部分采纳。
-# 函数用途: 把插件载荷校验成宿主观察记录，并铸 observation_id / candidate_id。
+#   actions 越界（必须是同一提供方同 target_kind 的 observation_ref 工具名，1..8 个，不重复）、可选几何不合规（原因码 frame /
+#   candidate_region）都算不合规。不部分采纳。候选 region 进规范形式（参与 content_hash 与 observation_id），frame 不进
+#   （captured_at 每次都变）。
+# 函数用途: 把提供方载荷校验成宿主观察记录，并铸 observation_id / candidate_id。
 def parse_observation(payload: object, context: ObservationHostContext) -> ObservationRecord:
     if not isinstance(payload, dict) or payload.get("schema") != OBSERVATION_SCHEMA:
         raise ObservationRejected("schema")
-    if set(payload) - {"schema", "target", "candidates"}:
+    if set(payload) - {"schema", "target", "candidates", "frame"}:
         raise ObservationRejected("unknown_field")
-    target = payload.get("target")
+    ref, generation = _parse_target(payload.get("target"))
+    frame = _parse_frame(payload["frame"]) if "frame" in payload else None
+    rows = payload.get("candidates")
+    limit = max(1, min(int(context.max_candidates), MAX_CANDIDATE_COUNT))
+    if not isinstance(rows, list) or not 1 <= len(rows) <= limit:
+        raise ObservationRejected("candidate_count")
+    canonical = tuple(_canonical_candidate(row, context, frame) for row in rows)
+    if len({row["key"] for row in canonical}) != len(canonical):
+        raise ObservationRejected("duplicate_key")
+    identity = [context.run_id, context.task_id, context.operation_id, context.activation_id, context.tool_name, ref, generation, list(canonical)]
+    observation_id = "obs-" + _digest(identity)[:24]
+    candidates = tuple(
+        ObservationCandidate("cand-" + _digest([observation_id, row["key"]])[:16], row["key"], row["role"], row["label"],
+                             tuple(row["actions"]), tuple(row["region"]) if "region" in row else None)
+        for row in canonical
+    )
+    return ObservationRecord(
+        observation_id=observation_id, provider_id=context.provider_id, activation_id=context.activation_id,
+        tool_name=context.tool_name, target_kind=context.target_kind, target_ref=ref, target_ref_hash=_digest(ref)[:24],
+        generation=generation, content_hash=_digest(list(canonical))[:24], candidates=candidates,
+        run_id=context.run_id, task_id=context.task_id, operation_id=context.operation_id, frame=frame,
+    )
+
+
+# 函数用途: 校验 target{ref, generation} 并返回两项。
+def _parse_target(target: object) -> tuple[str, str]:
     if not isinstance(target, dict) or set(target) != {"ref", "generation"}:
         raise ObservationRejected("target")
     ref, generation = target.get("ref"), target.get("generation")
@@ -144,30 +262,59 @@ def parse_observation(payload: object, context: ObservationHostContext) -> Obser
         raise ObservationRejected("target_ref")
     if not isinstance(generation, str) or not 1 <= len(generation) <= 64 or not _TARGET_TEXT.fullmatch(generation):
         raise ObservationRejected("target_generation")
-    rows = payload.get("candidates")
-    limit = max(1, min(int(context.max_candidates), MAX_CANDIDATE_COUNT))
-    if not isinstance(rows, list) or not 1 <= len(rows) <= limit:
-        raise ObservationRejected("candidate_count")
-    canonical = tuple(_canonical_candidate(row, context) for row in rows)
-    if len({row["key"] for row in canonical}) != len(canonical):
-        raise ObservationRejected("duplicate_key")
-    identity = [context.run_id, context.task_id, context.operation_id, context.activation_id, context.tool_name, ref, generation, list(canonical)]
-    observation_id = "obs-" + _digest(identity)[:24]
-    candidates = tuple(
-        ObservationCandidate("cand-" + _digest([observation_id, row["key"]])[:16], row["key"], row["role"], row["label"], tuple(row["actions"]))
-        for row in canonical
-    )
-    return ObservationRecord(
-        observation_id=observation_id, plugin_id=context.plugin_id, activation_id=context.activation_id,
-        tool_name=context.tool_name, target_kind=context.target_kind, target_ref=ref, target_ref_hash=_digest(ref)[:24],
-        generation=generation, content_hash=_digest(list(canonical))[:24], candidates=candidates,
-        run_id=context.run_id, task_id=context.task_id, operation_id=context.operation_id,
-    )
+    return ref, generation
 
 
-# 函数用途: 校验一个候选项并把 actions 换成宿主注册名（顺序保留、去重）。
-def _canonical_candidate(row: object, context: ObservationHostContext) -> dict[str, Any]:
-    if not isinstance(row, dict) or set(row) != {"key", "role", "label", "actions"}:
+# 函数用途: 判断一个值是有限数（排除 bool：Python 里 True 也算 int）。
+def _finite(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+# 函数用途: 校验 frame 里的二元数组（origin / size / scale）；positive 要求两项都大于 0。
+def _pair(value: object, *, positive: bool) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or not all(_finite(item) for item in value):
+        raise ObservationRejected("frame")
+    if positive and any(item <= 0 for item in value):
+        raise ObservationRejected("frame")
+    return list(value)
+
+
+# LLM: 通用几何扩展，不是屏幕专项合同：space / origin / size / scale 必填（origin 可为负，多屏全局坐标可能是负的），
+#   captured_at / capture / occluded 可选；多余键、非有限数、bool 冒充数字、非正尺寸或缩放都整份拒绝，原因码 frame。
+# 函数用途: 校验并规范化观察载荷里的 frame。
+def _parse_frame(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or not set(value) >= _FRAME_REQUIRED_KEYS or set(value) - _FRAME_REQUIRED_KEYS - _FRAME_OPTIONAL_KEYS:
+        raise ObservationRejected("frame")
+    frame: dict[str, Any] = {"space": _token(value["space"], "frame"), "origin": _pair(value["origin"], positive=False),
+                             "size": _pair(value["size"], positive=True), "scale": _pair(value["scale"], positive=True)}
+    if "captured_at" in value:
+        if not _finite(value["captured_at"]) or value["captured_at"] < 0:
+            raise ObservationRejected("frame")
+        frame["captured_at"] = value["captured_at"]
+    if "capture" in value:
+        frame["capture"] = _token(value["capture"], "frame")
+    if "occluded" in value:
+        if not isinstance(value["occluded"], bool):
+            raise ObservationRejected("frame")
+        frame["occluded"] = value["occluded"]
+    return frame
+
+
+# LLM: region 用截图像素：x、y ≥ 0，w、h > 0，x+w ≤ size_w×scale_x，y+h ≤ size_h×scale_y；有 region 就必须有 frame。
+# 函数用途: 校验一个候选的外框，返回 [x, y, w, h]。
+def _parse_region(value: object, frame: dict[str, Any] | None) -> list[float]:
+    if frame is None or not isinstance(value, (list, tuple)) or len(value) != 4 or not all(_finite(item) for item in value):
+        raise ObservationRejected("candidate_region")
+    x, y, w, h = value
+    width, height = frame["size"][0] * frame["scale"][0], frame["size"][1] * frame["scale"][1]
+    if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > width or y + h > height:
+        raise ObservationRejected("candidate_region")
+    return [x, y, w, h]
+
+
+# 函数用途: 校验一个候选项并把 actions 换成宿主注册名（顺序保留、去重）；可选 region 校验后进规范形式。
+def _canonical_candidate(row: object, context: ObservationHostContext, frame: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(row, dict) or not set(row) >= _CANDIDATE_REQUIRED_KEYS or set(row) - _CANDIDATE_REQUIRED_KEYS - {"region"}:
         raise ObservationRejected("candidate_shape")
     key = _token(row["key"], "candidate_key")
     role = _token(row["role"], "candidate_role")
@@ -182,7 +329,10 @@ def _canonical_candidate(row: object, context: ObservationHostContext) -> dict[s
         if not isinstance(action, str) or action not in context.action_tools:
             raise ObservationRejected("action_not_declared")
         mapped.append(context.action_tools[action])
-    return {"key": key, "role": role, "label": label, "actions": mapped}
+    canonical: dict[str, Any] = {"key": key, "role": role, "label": label, "actions": mapped}
+    if "region" in row:
+        canonical["region"] = _parse_region(row["region"], frame)
+    return canonical
 
 
 # LLM: 只读 runtime_events：先按既有 run_id 找权威 AgentRun，再取该 agent_run 全部 tool_completed 事件（跨 attempt 共享），
@@ -272,15 +422,17 @@ def observation_event_payload_from_envelope(envelope: object, *, task_id: str, o
         "target_kind": envelope.get("target_kind"), "target_ref": envelope.get("target_ref", ""),
         "target_ref_hash": envelope.get("target_ref_hash"), "generation": envelope.get("generation"),
         "content_hash": envelope.get("content_hash"), "task_id": task_id, "operation_id": operation_id,
-        "candidates": [{"candidate_id": c.get("candidate_id"), "key": c.get("key"), "actions": list(c.get("actions") or [])}
-                       for c in candidates if isinstance(c, dict)],
+        **_frame_item(envelope.get("frame")),
+        "candidates": [{"candidate_id": c.get("candidate_id"), "key": c.get("key"), "actions": list(c.get("actions") or []),
+                        **_region_item(c.get("region"))} for c in candidates if isinstance(c, dict)],
     }
 
 
 __all__ = [
     "MAX_ACTION_COUNT", "MAX_CANDIDATE_COUNT", "MAX_LABEL_CHARS", "OBSERVATION_CANDIDATE_UNKNOWN", "OBSERVATION_ERROR_KEY",
     "OBSERVATION_KEY", "OBSERVATION_META_EXTENSION", "OBSERVATION_META_VERSION", "OBSERVATION_SCHEMA", "OBSERVATION_STALE",
-    "ObservationCandidate", "ObservationHostContext", "ObservationRecord", "ObservationRejected", "current_observation",
-    "observation_event_payload_from_envelope", "observation_is_current", "observation_meta", "parse_observation",
-    "resolve_action_candidate",
+    "ObservationCandidate", "ObservationDeclarationError", "ObservationHostContext", "ObservationRecord", "ObservationRejected",
+    "PluginToolObservation", "PluginToolObservationRef", "current_observation", "observation_event_payload_from_envelope",
+    "observation_is_current", "observation_meta", "parse_observation", "resolve_action_candidate",
+    "validate_observation_declaration",
 ]

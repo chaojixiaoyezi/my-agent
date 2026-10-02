@@ -279,7 +279,7 @@ agent_py_agent/
 |   |-- plugin_command_service.py      # 宿主作用域目录与旧版本拒绝，不拥有安装和执行权
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
 |   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影；v2 面板、v3 Skill、v4 宿主 API、v5 观察/观察引用声明
-|   |-- plugin_observation.py          # 插件观察候选：载荷整份校验、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
+|   |-- plugin_observation.py          # 观察候选宿主合同（插件与 MCP 共用）：声明类型与配对规则、载荷整份校验（含几何 frame/region）、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
 |   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
 |   |   `-- service.py                 # Gateway 进程内展示服务：固定代次连接、单在途、撤销与空闲回收
@@ -696,9 +696,11 @@ agent_py_agent/
 |   |   `-- tool_input_schema.py       # 工具参数有限 JSON Schema 纠正/完整校验与脱敏问题路径
 |   |-- tooling/                       # 唯一 ToolRuntime/ActionPolicy/ToolExecutor、写入边界与结果投影
 |   |   |-- mcp_client.py             # MCP 配置、握手、当前连接及永久关闭；目录发布核对同一连接
+|   |   |-- mcp_declarations.py       # MCP 逐工具声明表：审批只能更严、观察声明解析、按发现到的工具核对、发布结果事实
 |   |   |-- mcp_transport.py          # 固定进程与出生身份、请求队列、读写线程和原进程树清理
 |   |   |-- mcp_managed_process.py    # 插件 MCP 接原托管管道、资源锁准入和原生清理回执
 |   |   |-- mcp_protocol.py           # 每连接独立响应箱、有界诊断、期限与结构化协议错误
+|   |   |-- observation_binding.py    # 观察三件套的来源无关实现：发送前候选复核、结果铸 ID、提供方拒绝提升，插件与 MCP 共用
 |   |   |-- plugin_registration.py    # 新运行中同步原插件连接，各权限视图分别投影已验工具
 |   |   |-- process_output_capture.py   # stdout/stderr 有界保留与持续排空，公开截断和完整性
 |   |   |-- computer_use_profile.py   # MIT 开源桌面执行器的 local/main + Full Access MCP 薄装配与 effect 边界
@@ -1087,6 +1089,7 @@ agent_py_agent/
 |   |-- test_background_extension_tools.py # 后台续跑白名单按注册表代理类型并入插件/MCP 工具；显式配置/任务名单不并入；真实插件启停跟随
 |   |-- test_process_session_retry_settles_unknown.py # 重试停止按 PID 出生标识结清实例已消失的旧 unknown 记录；首次停止不凭空确认
 |   |-- test_plugin_proxy_observation.py # 插件代理观察路径：结果改写与归档信封、整份拒绝、动作候选 _meta、未知/过期不发送
+|   |-- test_mcp_observation_binding.py # MCP 逐工具声明与共用观察绑定：审批只能更严、整服务拒绝带原因码、未发现只提醒、代理铸 ID 与复核、always 真的审批
 |   |-- test_plugin_proxy_revoked_call.py # 插件代理发送前复核激活：撤销固定 TOOL_UNAVAILABLE/not_started 且不发送，激活有效沿原 MCP 链
 |   |-- test_plugin_tool_approval_recheck.py # C12e：真实插件进程+真实激活撤销+真实执行器审批流：批准后/审批前/发送前/下一轮四处复核都不让停用插件收到调用
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界

@@ -81,6 +81,13 @@ def test_authorized_profile_uses_current_python_gui_session_and_safe_effects() -
     }
     assert profile["timeout"] >= 120
     assert profile["max_line_chars"] >= 8 * 1024 * 1024
+    # J16 片 A：一张声明表产出三项逐工具声明；片 A 只搬现有工具，审批与观察声明为空，且能被 MCP 配置解析器原样接受
+    assert profile["tool_approvals"] == {} and profile["tool_observations"] == {}
+    from agent_py_agent.agent.tooling.mcp_client import MCPServerConfig
+
+    parsed = MCPServerConfig.from_mapping(COMPUTER_USE_MCP_SERVER_NAME, profile)
+    assert parsed.tool_effects == profile["tool_effects"] and parsed.tool_approvals == {} and parsed.tool_observations == {}
+    assert parsed.approval_for_tool("get_screen_size") == "dangerous"
 
 
 def test_computer_use_config_normalizes_boolean_and_shipped_default_matches() -> None:

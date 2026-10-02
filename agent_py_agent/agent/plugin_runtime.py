@@ -15,21 +15,6 @@ from .plugin_entry import FILES_DIRECTORY
 from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
-from .plugin_observation import (
-    OBSERVATION_CANDIDATE_UNKNOWN,
-    OBSERVATION_ERROR_KEY,
-    OBSERVATION_KEY,
-    OBSERVATION_META_EXTENSION,
-    OBSERVATION_STALE,
-    ObservationHostContext,
-    ObservationRejected,
-    observation_meta,
-    parse_observation,
-    resolve_action_candidate,
-)
-
-# 插件层候选复核失败码 → 宿主结构化 reported_error_code；插件合同保证这两种拒绝不产生副作用
-_PLUGIN_OBSERVATION_ERROR_CODES = {"stale": OBSERVATION_STALE, "not_found": OBSERVATION_CANDIDATE_UNKNOWN}
 from .plugin_runtime_facts import verified_runtime_command
 from .plugin_sandbox import SANDBOX_TMP_DIRECTORY, sandboxed_plugin_argv
 from .tooling.input_schema import canonicalize_tool_input_schema
@@ -41,6 +26,7 @@ from .tooling.models import (
     ToolHandlerOutcome,
     ToolInvocationContext,
 )
+from .tooling.observation_binding import ObservationBinding
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
 from .workspace_read_context import WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION
 from .workspace_write_context import WORKSPACE_WRITE_EXTENSION, WORKSPACE_WRITE_VERSION
@@ -89,8 +75,9 @@ class PluginProxyTool(MCPProxyTool):
     # LLM: 免审批调用不经过执行器复核，而 MCPProxyTool 先看连接再做发送准入：停用把连接关掉后，旧快照调用会先撞上
     #   MCP_CONNECTION_CLOSED（映射为可重试的 TOOL_EXECUTION_FAILED），结果码随清理快慢摆动。这里在发送前先鲜活复核原激活，
     #   撤销一律报 TOOL_UNAVAILABLE、effect_outcome=not_started，与审批前/批准后复核同一事实源；
-    #   这是生命周期第 6 条"旧快照在执行门检查撤销"的落点。不启动进程、不追随新代次。
-    # 函数用途: 停用后的插件调用固定报不可用且未执行；动作工具填了候选 ID 先复核新鲜度再发送；观察工具成功后校验并铸 ID。
+    #   这是生命周期第 6 条"旧快照在执行门检查撤销"的落点。不启动进程、不追随新代次。观察三件套在
+    #   tooling/observation_binding.ObservationBinding（与 MCPProxyTool 共用），这里只按声明构造绑定。
+    # 函数用途: 停用后的插件调用固定报不可用且未执行；有观察声明的工具走共用的观察执行链，否则原样发送。
     def _execute(self, params: dict[str, object], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
         if self._activation_revoked():
             return ToolHandlerOutcome(
@@ -98,98 +85,26 @@ class PluginProxyTool(MCPProxyTool):
                 error_code="TOOL_UNAVAILABLE", reported_error_code="PLUGIN_ACTIVATION_UNAVAILABLE",
                 effect_outcome="not_started",
             )
+        binding = self._observation_binding()
+        if binding is None:
+            return self._execute_with_meta(params, context, None)
+        return binding.execute(params, context, self._execute_with_meta)
+
+    # LLM: 身份全部取宿主：provider_id 是 plugin:<id>，activation 来自固定 client 的激活代次，复核库是 client.runtime_repo（owner
+    #   权威库）；actions 映射只含本包同 target_kind 的 observation_ref 工具。没有观察声明（含测试夹具的普通客户端）返回 None。
+    # 函数用途: 按已安装描述与固定激活构造本工具的观察绑定。
+    def _observation_binding(self) -> ObservationBinding | None:
         declared = self._declared_tool()
-        extra_meta = None
-        if declared is not None and declared.observation_ref is not None:
-            try:
-                extra_meta = self._observation_action_meta(params, declared)
-            except ObservationRejected as exc:
-                return ToolHandlerOutcome(
-                    self.model_spec.name, False,
-                    json.dumps({"error": "候选已过期或不存在，请先重新观察再操作", "code": exc.code}, ensure_ascii=False),
-                    error_code="TOOL_INVALID_ARGUMENTS", reported_error_code=exc.code, effect_outcome="not_started",
-                    result_envelope={"observation_rejected": exc.code},
-                )
-        outcome = self._execute_with_meta(params, context, extra_meta)
-        if declared is not None and declared.observation is not None and outcome.ok:
-            outcome = self._attach_observation(outcome, params, context, declared)
-        if extra_meta is not None and not outcome.ok:
-            outcome = self._lift_observation_error(outcome)
-        return outcome
-
-    # LLM: 插件按代次复核候选后拒绝执行时，在 isError 结果的 structuredContent.my_agent_observation_error.code 里给结构化原因
-    #   （stale / not_found）。这里把它提升成宿主的 reported_error_code（OBSERVATION_STALE / OBSERVATION_CANDIDATE_UNKNOWN）、
-    #   error_code TOOL_INVALID_ARGUMENTS、effect_outcome not_started（插件合同：这两种拒绝零副作用），信封记 observation_rejected；
-    #   其它错误原样保留，不解析正文。
-    # 函数用途: 让候选过期/不存在成为可结构化分支的失败，而不是笼统的 TOOL_EXECUTION_FAILED。
-    def _lift_observation_error(self, outcome: ToolHandlerOutcome) -> ToolHandlerOutcome:
-        try:
-            payload = json.loads(outcome.output)
-        except (TypeError, ValueError):
-            return outcome
-        structured = payload.get("structuredContent") if isinstance(payload, dict) else None
-        error = structured.get(OBSERVATION_ERROR_KEY) if isinstance(structured, dict) else None
-        code = _PLUGIN_OBSERVATION_ERROR_CODES.get(str(error.get("code") or "")) if isinstance(error, dict) else None
-        if code is None:
-            return outcome
-        return replace(
-            outcome, error_code="TOOL_INVALID_ARGUMENTS", reported_error_code=code, effect_outcome="not_started",
-            result_envelope={**outcome.result_envelope, "observation_rejected": code},
-        )
-
-    # LLM: 只在模型填了 observation_ref.param 时复核：候选按当前 run/task 的权威事件流解析，过期/未知抛 ObservationRejected
-    #   （调用方转成 TOOL_INVALID_ARGUMENTS、not_started，不发送）；没填参数保持现状（如按选择器执行）。复核通过才把插件自己的
-    #   key 与目标代次放进 _meta，arguments 不能冒充。
-    # 函数用途: 生成动作调用要附给插件的观察 _meta，或判定候选不可用。
-    def _observation_action_meta(self, params: dict[str, object], declared: PluginToolDeclaration) -> dict[str, object] | None:
-        candidate_id = params.get(declared.observation_ref.param)
-        if not isinstance(candidate_id, str) or not candidate_id.strip():
+        if declared is None or (declared.observation is None and declared.observation_ref is None):
             return None
-        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
-        observation, candidate = resolve_action_candidate(
-            getattr(self.client, "runtime_repo", None), run_id=str(scope.get("run_id") or ""),
-            task_id=str(scope.get("task_id") or ""), candidate_id=candidate_id.strip(), action_tool=self.model_spec.name,
-        )
-        return {OBSERVATION_META_EXTENSION: observation_meta(observation, candidate)}
-
-    # LLM: 只处理成功结果里 structuredContent.my_agent_observation；形状合规则铸 ID、把归档权威写进 result_envelope.observation，
-    #   模型可见投影只留 candidate_id/role/label/actions；不合规整份丢弃、模型看不到候选，信封记 observation_rejected 原因码。
-    #   身份全部取宿主：run/task 来自 __run_scope、operation 来自 __operation_id、激活来自固定 client，不取插件自报。
-    # 函数用途: 把插件的观察载荷变成宿主的结构化观察事实。
-    def _attach_observation(self, outcome: ToolHandlerOutcome, params: dict[str, object],
-                            context: ToolInvocationContext | None, declared: PluginToolDeclaration) -> ToolHandlerOutcome:
-        try:
-            payload = json.loads(outcome.output)
-        except (TypeError, ValueError):
-            return outcome
-        structured = payload.get("structuredContent") if isinstance(payload, dict) else None
-        if not isinstance(structured, dict) or OBSERVATION_KEY not in structured:
-            return outcome
-        envelope = dict(outcome.result_envelope)
-        try:
-            record = parse_observation(structured[OBSERVATION_KEY], self._observation_context(params, context, declared))
-        except ObservationRejected as exc:
-            structured.pop(OBSERVATION_KEY, None)
-            envelope["observation_rejected"] = exc.code
-        else:
-            structured[OBSERVATION_KEY] = record.model_projection()
-            envelope["observation"] = record.to_envelope()
-        return replace(outcome, output=json.dumps(payload, ensure_ascii=False), result_envelope=envelope)
-
-    # 函数用途: 汇集铸 ID 所需的宿主身份与本包同类动作工具的注册名映射。
-    def _observation_context(self, params: dict[str, object], context: ToolInvocationContext | None,
-                             declared: PluginToolDeclaration) -> ObservationHostContext:
-        scope = params.get("__run_scope") if isinstance(params.get("__run_scope"), dict) else {}
-        snapshot = getattr(context, "runtime_snapshot", None)
         manifest = self.client.installation.manifest
-        kind = declared.observation.target_kind
-        return ObservationHostContext(
-            run_id=str(scope.get("run_id") or getattr(snapshot, "run_id", "") or ""),
-            task_id=str(scope.get("task_id") or ""), operation_id=str(params.get("__operation_id") or ""),
-            activation_id=self.client.activation_ref.scope.activation_id, plugin_id=manifest.plugin_id,
-            tool_name=self.model_spec.name, target_kind=kind, max_candidates=declared.observation.max_candidates,
+        kind = (declared.observation or declared.observation_ref).target_kind
+        return ObservationBinding(
+            provider_id="plugin:" + manifest.plugin_id, activation_id=self.client.activation_ref.scope.activation_id,
+            tool_name=self.model_spec.name, observation=declared.observation, observation_ref=declared.observation_ref,
             action_tools={tool.name: plugin_tool_name(manifest.plugin_id, tool.name) for tool in manifest.tools
                           if tool.observation_ref is not None and tool.observation_ref.target_kind == kind},
+            repo=getattr(self.client, "runtime_repo", None),
         )
 
     # LLM: 声明来自固定 client 的已安装包描述；找不到（测试夹具的普通客户端）返回 None，此时不做任何观察处理。

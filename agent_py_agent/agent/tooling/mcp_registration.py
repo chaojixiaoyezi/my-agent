@@ -27,9 +27,11 @@ Tool Gateway。部署者只能通过 ``mcp_servers.<server>.tool_effects`` 逐�
 部署者可为需要首轮直接可见的受控服务声明独立分类。分类只影响模型目录，不改变 owner、effect、审批或执行权限。
 """
 
+import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..common.log_redaction import redact_sensitive_value
@@ -42,8 +44,15 @@ from .mcp_client import (
     redact_env_for_log,
     sanitize_credentials,
 )
+from .mcp_declarations import (
+    MCPDeclarationError,
+    MCPPublication,
+    ResolvedServerDeclarations,
+    resolve_server_declarations,
+)
 from .mcp_transport import MCPTransport
 from .models import (
+    ApprovalPolicy,
     BaseTool,
     ConcurrencyPolicy,
     EffectResolverPolicy,
@@ -52,11 +61,13 @@ from .models import (
     ResourceScopePolicy,
     ToolAvailability,
     ToolHandlerOutcome,
+    ToolInputPolicy,
     ToolInvocationContext,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from .observation_binding import ObservationBinding
 from .process_session_cleanup import ProcessSessionCleanupError
 
 logger = logging.getLogger(__name__)
@@ -129,6 +140,8 @@ class MCPProxyTool(BaseTool):
         self.model_spec = model_spec
         self.runtime_policy = runtime_policy
         self.transport = transport
+        # 观察绑定由注册层在发布前按逐工具声明设置一次；None 表示普通 MCP 工具，执行链完全不变
+        self.observation_binding: ObservationBinding | None = None
 
     # LLM: 只读原连接，不自动重启或跟随新的 current；目录可见不代替真正发送前的激活和任务权限检查。
     # 函数用途: 隐藏已断开的原代理，防止新连接让旧工具声明重新可用。
@@ -164,10 +177,13 @@ class MCPProxyTool(BaseTool):
     def _request_meta(self, context: ToolInvocationContext | None) -> dict[str, object] | None:
         return None
 
-    # LLM: 两入口共用执行链；完整 CallToolResult 的 isError 按失败结算，不声称未执行；传输与清理异常仍保留未知。
+    # LLM: 两入口共用执行链；完整 CallToolResult 的 isError 按失败结算，不声称未执行；传输与清理异常仍保留未知。有观察绑定时
+    #   走 ObservationBinding.execute（发送前复核、成功结果铸 ID、提供方拒绝提升为结构化码），没有绑定就原样发送。
     # 函数用途: 向固定连接发送本次参数和权限，保留可读失败回执，使原操作可查询且不阻塞后续独立调用。
     def _execute(self, params: dict[str, Any], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
-        return self._execute_with_meta(params, context, None)
+        if self.observation_binding is None:
+            return self._execute_with_meta(params, context, None)
+        return self.observation_binding.execute(params, context, self._execute_with_meta)
 
     # LLM: 唯一的发送主体：过滤 "__" 宿主参数、合并子类逐次 _meta（extra_meta 只能来自宿主复核过的结构化事实，不能来自 arguments），
     #   再走原客户端调用；错误映射与结果脱敏保持不变。子类需要按本次参数附 _meta 时调用它，而不是缓存到实例上（代理跨请求共享）。
@@ -354,6 +370,7 @@ def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioCli
             transport = client.start()
             registered = refresh_registered_mcp_client(registry, client, transport=transport)
         except MCPError as exc:
+            _note_unavailable(client, exc)
             logger.warning(
                 "MCP server '%s' 连接失败，跳过（command=%s env=%s）：%s",
                 config.name, config.command, redact_env_for_log(config.env), exc,
@@ -391,6 +408,12 @@ def refresh_registered_mcp_client(
     transport: MCPTransport,
 ) -> int:
     tools = client.list_tools(transport=transport)
+    try:
+        declarations = resolve_server_declarations(client.config, tools)
+    except MCPDeclarationError as exc:
+        client.publication = MCPPublication("rejected", code=exc.code, reasons=exc.reasons)
+        raise
+    source = _binding_source(registry, client, transport)
     current = dict(getattr(registry, "tools", {}) or {})
     old_names = {
         name
@@ -417,6 +440,7 @@ def refresh_registered_mcp_client(
                 exc,
             )
             continue
+        proxy = _declared_proxy(proxy, declarations, source)
         if proxy.model_spec.name in replacement:
             logger.warning(
                 "MCP 工具名冲突，跳过 server '%s' 的 '%s'（已存在 %s）",
@@ -431,6 +455,72 @@ def refresh_registered_mcp_client(
     # 函数用途: 在连接仍有效的最后边界，一次替换目录。
     def publish() -> int:
         registry.tools = replacement
+        client.publication = MCPPublication("published", tool_count=registered, notices=declarations.notices)
         return registered
 
     return client.publish_tools(transport, publish)
+
+
+# 类用途: 本次发布里所有观察绑定共用的来源事实：服务名、provider_id、连接代次与复核库。
+@dataclass(frozen=True)
+class _BindingSource:
+    server_name: str
+    provider_id: str
+    activation_id: str
+    repo: object | None
+
+
+# LLM: MCP 的 activation_id 取本次固定连接进程出生身份（pid_birth_token）的哈希：子进程重启就换代，旧观察自然 stale；复核库与
+#   插件同源（registry 构造参数 runtime_repo），不新建存储。
+# 函数用途: 汇集本次发布的观察绑定来源事实。
+def _binding_source(registry: Any, client: MCPStdioClient, transport: MCPTransport | None) -> _BindingSource:
+    birth = getattr(getattr(transport, "binding", None), "birth_token", "") if transport is not None else ""
+    digest = hashlib.sha256(str(birth).encode("utf-8")).hexdigest()[:16]
+    return _BindingSource(
+        server_name=client.config.name, provider_id="mcp:" + client.config.name,
+        activation_id=f"mcp:{client.config.name}:{digest}",
+        repo=getattr(getattr(registry, "_construction_params", None), "runtime_repo", None),
+    )
+
+
+# LLM: 审批与观察绑定只按核对过的声明设置；没有声明（审批仍是默认 dangerous 且无观察）时原代理原样返回，行为逐字节不变。
+#   有绑定的代理要宣告 __operation_id / __run_scope 宿主参数，执行器才会注入身份；绑定在发布前设置一次，不随请求变化。
+# 函数用途: 按逐工具声明给代理套上审批模式与观察绑定。
+def _declared_proxy(proxy: MCPProxyTool, declarations: ResolvedServerDeclarations, source: _BindingSource) -> MCPProxyTool:
+    declared = declarations.tools.get(proxy.remote_tool)
+    observes = declared is not None and (declared.observation is not None or declared.observation_ref is not None)
+    if declared is None or (declared.approval == "dangerous" and not observes):
+        return proxy
+    policy = replace(proxy.runtime_policy, approval_policy=ApprovalPolicy(declared.approval))
+    binding = None
+    if observes:
+        kind = (declared.observation or declared.observation_ref).target_kind
+        binding = ObservationBinding(
+            provider_id=source.provider_id, activation_id=source.activation_id, tool_name=proxy.model_spec.name,
+            observation=declared.observation, observation_ref=declared.observation_ref,
+            action_tools=declarations.action_tools(kind, lambda name: mcp_tool_name(source.server_name, name)),
+            repo=source.repo,
+        )
+        policy = replace(policy, input_policy=ToolInputPolicy(internal_parameters=tuple(dict.fromkeys(
+            (*policy.input_policy.internal_parameters, "__operation_id", "__run_scope")))))
+    declared_proxy = MCPProxyTool(proxy.client, proxy.remote_tool, proxy.model_spec, policy, transport=proxy.transport)
+    declared_proxy.observation_binding = binding
+    return declared_proxy
+
+
+# 函数用途: 启动/发现失败时记一条 unavailable 发布事实；声明拒绝已在发布前记成 rejected，不覆盖。
+def _note_unavailable(client: MCPStdioClient, exc: MCPError) -> None:
+    if getattr(client, "publication", None) is None or client.publication.status != "rejected":
+        client.publication = MCPPublication("unavailable", code=str(exc.code))
+
+
+# LLM: 只读投影：每个 MCP 客户端的服务名、是否在跑、最近一次发布结果（published / rejected / unavailable 与原因码、提醒）。
+#   不含命令、环境或路径；插件客户端也在列表里（没经这条发布链的 publication 为 None）。
+# 函数用途: 给状态面板和测试一个结构化的 MCP 服务状态清单。
+def mcp_server_facts(registry: Any) -> list[dict[str, Any]]:
+    facts = []
+    for client in tuple(getattr(registry, "_mcp_clients", ()) or ()):
+        publication = getattr(client, "publication", None)
+        facts.append({"server": client.config.name, "running": bool(client.is_running()),
+                      "publication": publication.as_dict() if publication is not None else None})
+    return facts

@@ -19,6 +19,12 @@ from .command_declarations import command_action_from_payload, declaration_list
 from .plugin_commands import PluginCommandSpec
 from .plugin_display.protocol import PanelDeclaration, validate_panels
 from .plugin_entry import PluginEntry, PluginFile, validate_entry_files
+from .plugin_observation import (
+    MAX_CANDIDATE_COUNT,
+    PluginToolObservation,
+    PluginToolObservationRef,
+    validate_observation_declaration,
+)
 from .tooling.input_schema import canonicalize_tool_input_schema, validate_tool_input
 
 PLUGIN_PACKAGE_SCHEMA = "plugin_package.v1"
@@ -35,10 +41,6 @@ PLUGIN_PACKAGE_SCHEMA_V5 = "plugin_package.v5"
 # 面板/Skill/宿主 API/观察字段照旧可选。Python 包继续用 v1–v5，读写字节不变
 PLUGIN_PACKAGE_SCHEMA_V6 = "plugin_package.v6"
 PLUGIN_HOST_API_PERMISSIONS = ("read",)
-# 观察候选数量的宿主硬上限；manifest 声明的 max_candidates 不能超过它
-MAX_OBSERVATION_CANDIDATE_COUNT = 64
-_TARGET_KIND = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
-_OBSERVATION_PARAM = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 # 单个插件最多可挂载的 skill 数；防止插件注入海量 skill 占用命名空间。
 MAX_PLUGIN_SKILL_COUNT = 8
@@ -76,38 +78,6 @@ class PluginWheel:
             raise ValueError("wheel 摘要无效")
 
 
-# LLM: 观察声明只允许出现在 read_only 工具上（观察本身不能有副作用）；target_kind 是开放字符串，只校验形状，用于把观察和
-#   动作配对；max_candidates 由宿主再夹一次上限。声明不授予任何权限，也不改变结果的信任级别。
-# 类用途: 声明某只读工具的成功结果会带 my_agent_observation 候选载荷。
-@dataclass(frozen=True)
-class PluginToolObservation:
-    target_kind: str
-    max_candidates: int = MAX_OBSERVATION_CANDIDATE_COUNT
-
-    # 函数用途: 拒绝形状不合规的目标类型与越界的候选上限。
-    def __post_init__(self) -> None:
-        if not isinstance(self.target_kind, str) or not _TARGET_KIND.fullmatch(self.target_kind):
-            raise ValueError("观察目标类型无效")
-        if type(self.max_candidates) is not int or not 1 <= self.max_candidates <= MAX_OBSERVATION_CANDIDATE_COUNT:
-            raise ValueError("观察候选上限无效")
-
-
-# LLM: param 指向动作工具输入 schema 里一个可选的 string 参数，名字由插件自定，宿主只读这条映射；不能与 _meta 或宿主注入的
-#   "__" 参数同名（形状正则已排除）。同一 manifest 里必须有同 target_kind 的观察工具与之配对。
-# 类用途: 声明某动作工具可以接受同类观察的候选 ID。
-@dataclass(frozen=True)
-class PluginToolObservationRef:
-    target_kind: str
-    param: str
-
-    # 函数用途: 拒绝形状不合规的目标类型与参数名。
-    def __post_init__(self) -> None:
-        if not isinstance(self.target_kind, str) or not _TARGET_KIND.fullmatch(self.target_kind):
-            raise ValueError("观察目标类型无效")
-        if not isinstance(self.param, str) or not _OBSERVATION_PARAM.fullmatch(self.param):
-            raise ValueError("候选参数名无效")
-
-
 # LLM: schema 用规范 JSON 冻结，读取时返回独立副本；requested_effect 不是宿主授予的权限或沙箱保证。
 #   observation / observation_ref 是 v5 的可选声明：前者只能挂在 read_only 工具上，后者要求 param 是输入 schema 里可选的
 #   string 参数；一个工具不能同时观察与动作。
@@ -140,24 +110,11 @@ class PluginToolDeclaration:
         return json.loads(self.input_schema_json)
 
 
-# LLM: 观察只能挂只读工具；观察引用要求 param 在 schema.properties 里、type 为 string、不在 required 里；两者互斥。
-# 函数用途: 校验一个工具声明里的观察/观察引用与其输入 schema 是否一致。
+# LLM: 规则本体在 plugin_observation.validate_observation_declaration（插件 manifest 与 MCP 声明表共用，错误是 ValueError 子类）；
+#   这里只把工具项的结构化字段交过去，不另写一份规则。
+# 函数用途: 校验一个工具声明里的观察/观察引用与其 effect、输入 schema 是否一致。
 def _validate_observation_declaration(tool: PluginToolDeclaration, canonical: object) -> None:
-    if tool.observation is not None and tool.observation_ref is not None:
-        raise ValueError("观察工具不能同时是动作工具")
-    if tool.observation is not None and (not isinstance(tool.observation, PluginToolObservation)
-                                         or tool.requested_effect != "read_only"):
-        raise ValueError("只有只读工具可以声明观察")
-    if tool.observation_ref is None:
-        return
-    if not isinstance(tool.observation_ref, PluginToolObservationRef):
-        raise ValueError("观察引用无效")
-    properties = canonical.get("properties") if isinstance(canonical, dict) else None
-    required = canonical.get("required") if isinstance(canonical, dict) else None
-    spec = properties.get(tool.observation_ref.param) if isinstance(properties, dict) else None
-    if (not isinstance(spec, dict) or spec.get("type") != "string"
-            or (isinstance(required, list) and tool.observation_ref.param in required)):
-        raise ValueError("候选参数必须是输入 schema 里可选的 string 参数")
+    validate_observation_declaration(tool.observation, tool.observation_ref, effect=tool.requested_effect, input_schema=canonical)
 
 
 # LLM: 这是包的不可变内容，不保存安装状态、owner 或激活代次；先校验声明再允许安装服务持久保存。
@@ -474,7 +431,7 @@ def _observation_from_payload(value: object) -> PluginToolObservation | None:
         return None
     if not isinstance(value, dict) or not {"target_kind"} <= set(value) or set(value) - {"target_kind", "max_candidates"}:
         raise ValueError("观察声明字段无效")
-    return PluginToolObservation(value["target_kind"], value.get("max_candidates", MAX_OBSERVATION_CANDIDATE_COUNT))
+    return PluginToolObservation(value["target_kind"], value.get("max_candidates", MAX_CANDIDATE_COUNT))
 
 
 # 函数用途: 从 JSON 对象恢复观察引用声明；两个字段都必须出现。

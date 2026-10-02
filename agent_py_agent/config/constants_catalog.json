@@ -4164,14 +4164,6 @@
       "description": "插件安装状态文件上限 16 MiB：防损坏/恶意状态文件撑爆内存。"
     },
     {
-      "name": "MAX_OBSERVATION_CANDIDATE_COUNT",
-      "file": "agent_py_agent/agent/plugin_manifest.py",
-      "value": 64,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "观察候选数量的宿主硬上限；manifest 声明的 max_candidates 不能超过它"
-    },
-    {
       "name": "MAX_PLUGIN_SKILL_COUNT",
       "file": "agent_py_agent/agent/plugin_manifest.py",
       "value": 8,
@@ -4201,7 +4193,7 @@
       "value": 64,
       "unit": "个",
       "category": "上限预算",
-      "description": "观察候选列表最多条数；超出截断，保持观察载荷有界。"
+      "description": "观察候选数量的宿主硬上限；声明的 max_candidates 不能超过它，载荷超出整份拒绝（不截断）。"
     },
     {
       "name": "MAX_LABEL_CHARS",

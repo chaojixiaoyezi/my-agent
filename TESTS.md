@@ -898,6 +898,25 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   `git diff --check` 退出 0；`PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 退出 0，新增告警 0、消失告警 0。
   未改产品，因此未跑相关 pytest、guards9、Ruff、strict-size、import-boundaries 或 clean-package；不宣称产品门禁全部通过。
 
+## J16 片 A：观察三件套共用 + MCP 逐工具声明表 + 几何扩展（2026-10-02，ef，分支 `claude/ef-j16-slice-a`，基于 `claude/3a-step17e` 0dab27111）
+
+- **范围**：`tooling/observation_binding.py`（三件套搬出 PluginProxyTool，MCPProxyTool 共用）、`tooling/mcp_declarations.py`（`tool_approvals` / `tool_observations` 解析与按发现工具核对、发布结果事实）、`plugin_observation.py`（声明类型搬入、`provider_id`、`frame` / `region` 几何校验）、`computer_use_profile.py` 声明表；无新配置项。
+- **新增 `test_mcp_observation_binding.py`**（10 项）：审批只能更严（never / auto / 非映射都拒）、观察声明解析成 v5 类型、整服务拒绝带 `[{tool, code}]`、未发现只提醒且配对只按发现工具算、经发布链的 read 工具铸 ID（`provider_id=mcp:srv`、`activation_id=mcp:srv:<16 位>`、几何进归档与事件不进投影）、换代后旧候选 stale 且不发送、动作发送前复核 / 提供方拒绝提升 / 不填候选沿原路径、无声明服务的代理与 `build_proxy_tool` 策略逐项相等、`always` 进 `tool_manifest_contract` 投影且 `ActionPolicy` 在 auto 下仍 ask、真 stdio 两服务（坏声明的拒绝、另一个照常发布，`mcp_server_facts` 两种状态）。
+- **`test_plugin_observation.py` 追加 5 项**：几何只进归档/事件、两条事件投影路径一致；region 进 content_hash 而 frame 不进；负 origin 与缩放像素；12 种坏 frame（缺必填、多余键、bool 冒充数字、非正尺寸/缩放、inf、负 captured_at、occluded 非 bool、space 带空格、frame 为 null）整份拒绝码 `frame`；8 种坏 region（无 frame、越界、零面积、负坐标、bool、长度错、缩放 2 越界）拒绝码 `candidate_region`。
+- **插件回归不改断言**：`test_plugin_proxy_observation.py` 原样通过；`test_plugin_observation.py` 原用例只把上下文构造的 `plugin_id="browser-lite"` 改成 `provider_id="plugin:browser-lite"`（合同改名）；`test_computer_use_profile.py` 追加声明映射断言。
+- **结果**：25 个相关文件 `589 passed, 2 failed`（两处是新用例自身的夹具问题：假客户端缺 `connection()`、换代用例期望写反）→ 修后三文件 `60 passed`；guards9 `170 passed`；`check_import_boundaries` 0；ruff 全仓通过；常数目录重生成后 `--check` 通过（`MAX_OBSERVATION_CANDIDATE_COUNT` 并入 `plugin_observation.MAX_CANDIDATE_COUNT`）；`node frontend/scripts/sync-backend-config.mjs --check` 通过。
+- **变异 8/8 抓到**：跳过 region 几何校验（5 红）、MCP 不按声明设 always（2 红）、动作发送前不复核（5 红）、YAML never 被接受（1 红）、region 不进 content_hash（4 红）、换代后不判 stale（1 红）、未发现当坏项（1 红）、坏项只跳过单工具不整服务拒绝（3 红）。脚本 `run_mutations_j16a.py` 在会话 scratchpad，改完按 sha256 复原核对。
+- **未做**：TUI 真链路读屏审批（放片 F）；发布状态投影 `mcp_server_facts` 还没挂到任何面板；`_validated_refs` 的 InputMediaError 原文改结构化码留到复用图片通道的那一片。
+
+复现（工作树根目录）：
+
+```sh
+bash ~/.my-agent/releases/claude-tools/3a-scripts/run_files312.sh $PWD pef \
+  agent_py_agent/tests/test_plugin_observation.py agent_py_agent/tests/test_mcp_observation_binding.py \
+  agent_py_agent/tests/test_plugin_proxy_observation.py agent_py_agent/tests/test_mcp_registration.py \
+  agent_py_agent/tests/test_computer_use_profile.py agent_py_agent/tests/test_decision_action_candidate.py
+```
+
 ## 决策质量基准补齐全部 12 个点位（J12 续）（2026-10-02，分支 `claude/be-bench-more-points`，基于 `b35796a60`）
 
 - **改动**：`decision_quality_adapters.py` 新增 8 个点位的适配函数，`decision_quality/cases/` 新增 8 个用例文件，`results.json` 登记新成绩。

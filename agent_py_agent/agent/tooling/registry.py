@@ -144,8 +144,8 @@ class ToolRegistryParams:
     mcp_servers: dict[str, Any] | None = None
     # 只有宿主显式启用插件时注入规范 owner；不从工作目录或权限墙反推身份，构造不启动插件。
     plugin_owner: OwnerHomeResult | None = None
-    # owner 权威运行库（agent.subagents.runtime_db）的只读引用：插件动作按候选 ID 发送前复核观察新鲜度用；None 时复核一律不通过
-    plugin_runtime_repo: object | None = None
+    # owner 权威运行库（agent.subagents.runtime_db）的只读引用：插件与 MCP 的动作工具按候选 ID 发送前复核观察新鲜度用；None 时复核一律不通过
+    runtime_repo: object | None = None
     # 配置 plugin_process_sandbox：插件业务进程是否套平台沙箱（只写插件数据目录）；默认关，沙箱不可用时插件不接入
     plugin_process_sandbox: bool = False
     # 视觉理解(短板6)：辅助视觉模型配置(VisionModelConfig)。默认 None = 未配视觉模型,

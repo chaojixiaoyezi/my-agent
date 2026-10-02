@@ -1020,6 +1020,10 @@ tool_vector_search_enabled: true
 #   该字段只改变模型工具目录，不授予权限，也不降低 effect/审批。
 # - effect：未知工具默认 dangerous，会进入幂等与审批硬门。只有部署者可用 tool_effects
 #   逐工具显式声明 read_only / mutating / dangerous；不要根据 server 自报信息自动降级。
+# - tool_approvals：逐工具审批模式，只能等于或严于默认 dangerous（dangerous / mutating / always）；写 never 视为配置非法。
+# - tool_observations：逐工具观察声明（和插件 manifest v5 同形）：{tool: {"observation": {"target_kind": ..., "max_candidates": ...}}}
+#   或 {tool: {"observation_ref": {"target_kind": ..., "param": ...}}}；observation 只能挂只读工具，发布前按发现到的工具核对，
+#   对不上整个 server 不发布（结果记在该 server 的发布状态里，不连带别的 server），声明了但没发现的工具只记提醒。
 # - 默认空 = 不连任何 server、不启动任何子进程（零开销）。某 server 连不上只记日志跳过，
 #   不影响其他工具与主流程。
 # 注意：本仓配置用的是精简 YAML 解析器，dict 值必须写成单行 inline（flow）形式，

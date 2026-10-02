@@ -29,12 +29,12 @@ from ...conversation.decision_service import (
     decide,
     decision_outcome_is_current,
 )
-from ...plugin_manifest import _TARGET_KIND
 
 # 形状上限、ID 与 key/role 规则都直接复用宿主铸造观察时的同一份定义，不在本点另立第二份。
 from ...plugin_observation import (
     _CANDIDATE_ID,
     _OBSERVATION_ID,
+    _TARGET_KIND,
     _TOKEN,
     MAX_ACTION_COUNT,
     MAX_CANDIDATE_COUNT,
