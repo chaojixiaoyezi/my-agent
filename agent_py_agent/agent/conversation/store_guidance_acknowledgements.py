@@ -19,6 +19,12 @@ from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_submission import GuidanceSubmissions
 
 
+# LLM: 插话写进会话历史时用的幂等键：project_transcript 写入和收口时查“历史里有没有这条插话”都只用它，格式改了两边一起变。
+# 函数用途: 由插话编号生成它在会话历史里的唯一去重键。
+def transcript_dedupe_key(guidance_id: str) -> str:
+    return f"active-turn-input:{guidance_id}"
+
+
 # LLM: 维护模型确认批次及历史投影；修改须核对确认重放、消息去重和终态恢复测试。
 # 类用途: 维护模型确认批次及历史投影。
 class GuidanceAcknowledgements:
@@ -211,7 +217,7 @@ class GuidanceAcknowledgements:
                         **attribution,
                     },
                 },
-                dedupe_key=f"active-turn-input:{guidance_id}",
+                dedupe_key=transcript_dedupe_key(guidance_id),
             )
         except Exception:
             return False

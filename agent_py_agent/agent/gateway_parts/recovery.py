@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..conversation.turn_resume_notice import TURN_RESUME_LIMIT_NOTICE
+from ..conversation.turn_resume_notice import TURN_RESUME_LIMIT_NOTICE, turn_resume_limit_notice
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .io import (
     GATEWAY_REQUEST_FINGERPRINT_SCHEMA,
@@ -359,10 +359,9 @@ def _recover_committed_terminal_processing(
         conversation_store = _recovery_conversation_store(agent, terminal_payload)
         if conversation_store is not None:
             try:
-                mailbox_summary = conversation_store.guidance.recovery.reject_pending(
-                    request_id,
-                    reject_reserved=True,
-                )
+                mailbox_summary = _settle_turn_guidance(conversation_store, request_id, terminal_response)
+                if not canonical_committed:
+                    _apply_limit_settlement(terminal_response, mailbox_summary)
                 if mailbox_summary.get("errors") and not canonical_committed:
                     terminal_response["input_settlement_errors"] = int(
                         mailbox_summary.get("errors") or 0
@@ -1321,36 +1320,10 @@ def terminalize_gateway_request_file(
             if request_report.load_error is not None or not request_report.payload:
                 raise RuntimeError(f"gateway terminal request is unreadable: {turn_id}")
             terminal_payload = dict(request_report.payload)
-        if conversation_store is not None:
-            try:
-                mailbox_summary = conversation_store.guidance.recovery.reject_pending(
-                    turn_id,
-                    reject_reserved=True,
-                )
-                if (
-                    terminal_response is not None
-                    and path_exists
-                    and mailbox_summary.get("errors")
-                ):
-                    terminal_response["input_settlement_errors"] = int(
-                        mailbox_summary.get("errors") or 0
-                    )
-                    terminal_payload = _terminal_gateway_request_payload(
-                        turn_id,
-                        terminal_payload,
-                        terminal_response,
-                    )
-            except Exception as exc:
-                if terminal_response is not None and path_exists:
-                    terminal_response["input_settlement_error"] = runtime_error_report(
-                        exc,
-                        context="gateway.terminalize.guidance_settlement",
-                    )
-                    terminal_payload = _terminal_gateway_request_payload(
-                        turn_id,
-                        terminal_payload,
-                        terminal_response,
-                    )
+        if conversation_store is not None and _settle_terminal_guidance(
+            conversation_store, turn_id, terminal_response, terminal_response is not None and path_exists,
+        ):
+            terminal_payload = _terminal_gateway_request_payload(turn_id, terminal_payload, terminal_response)
         if terminal_response is not None and path.is_file():
             write_json_file_atomic(path, terminal_payload)
         _finish_gateway_conversation_claim(terminal_payload, turn_id, conversation_store)
@@ -1374,6 +1347,57 @@ def terminalize_gateway_request_file(
         # ingress reconciliation failure remains retryable and must not hide it.
         pass
     return archived
+
+
+# LLM: 只认终态答复的结构化错误码：TURN_RESUME_LIMIT_EXCEEDED 只在启动恢复（提交插话的进程已证明死亡）里产生，所以只有它
+#   允许把“已提交、没有确认批次”的插话也收成终态（GuidanceRecovery.settle_dead_turn）。
+# 函数用途: 判断这次收口是不是续跑上限收口。
+def _limit_closeout(response: object) -> bool:
+    return isinstance(response, dict) and response.get("error_code") == TURN_RESUME_LIMIT_ERROR_CODE
+
+
+# LLM: 插话收口唯一分流：续跑上限收口走 settle_dead_turn（连随进程死掉的已提交插话一起定终态），其余照旧
+#   reject_pending(reject_reserved=True)。terminalize 和已封存热记录的补交都经这里。
+# 函数用途: 按这次收口是不是续跑上限，选对插话的结算方式并返回计数。
+def _settle_turn_guidance(conversation_store: object, turn_id: str, response: object) -> dict:
+    recovery = conversation_store.guidance.recovery
+    if _limit_closeout(response):
+        return recovery.settle_dead_turn(turn_id)
+    return recovery.reject_pending(turn_id, reject_reserved=True)
+
+
+# LLM: 续跑上限收口时把插话结算的结构化计数写进答复（guidance_settlement），并按计数换提示句（turn_resume_limit_notice），
+#   user_error 和 error 同步改，TUI、IM 公开结果和管理员完整结果三处仍是同一句；不是上限收口时不动答复。调用方负责重新封存。
+# 函数用途: 按插话怎么收口，给续跑上限的失败答复配上对应提示和计数，返回答复是否被改动。
+def _apply_limit_settlement(response: dict, summary: dict) -> bool:
+    if not _limit_closeout(response):
+        return False
+    counts = {key: int(summary.get(key) or 0) for key in ("rejected", "released", "consumed", "submitted",
+                                                         "dead_submissions", "recorded_in_transcript", "backup_turns", "errors")}
+    notice = turn_resume_limit_notice(backup_turns=counts["backup_turns"],
+                                      recorded_in_transcript=counts["recorded_in_transcript"])
+    response.update({"user_error": notice, "error": notice, "guidance_settlement": counts})
+    return True
+
+
+# LLM: terminalize 在回合锁内、热记录封存之后调用的插话收口（分流见 _settle_turn_guidance）。mutable（有新答复且热记录还在）时把结算失败、坏账数和上限计数写进答复，调用方据返回值重新封存；
+#   不可改时只结算、吞掉异常（终态归档才是完成权威，收口失败留给入口对账重试）。
+# 函数用途: 回合收尾时结算本回合插话，必要时改写答复，返回答复是否被改动。
+def _settle_terminal_guidance(conversation_store: object, turn_id: str, response: dict | None, mutable: bool) -> bool:
+    try:
+        summary = _settle_turn_guidance(conversation_store, turn_id, response)
+    except Exception as exc:
+        if not mutable:
+            return False
+        response["input_settlement_error"] = runtime_error_report(exc, context="gateway.terminalize.guidance_settlement")
+        return True
+    if not mutable:
+        return False
+    changed = _apply_limit_settlement(response, summary)
+    if summary.get("errors"):
+        response["input_settlement_errors"] = int(summary.get("errors") or 0)
+        changed = True
+    return changed
 
 
 # LLM: request_id is reused across recovery attempts, so terminal commit must compare the

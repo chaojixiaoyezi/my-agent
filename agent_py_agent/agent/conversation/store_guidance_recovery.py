@@ -23,7 +23,8 @@ from .session_messaging import (
     SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
     SESSION_TASK_ORIGIN_KIND,
 )
-from .store_guidance_acknowledgements import GuidanceAcknowledgements
+from .message_scan import find_message_dedupe
+from .store_guidance_acknowledgements import GuidanceAcknowledgements, transcript_dedupe_key
 from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
     GuidanceOnceReceipt,
@@ -173,7 +174,7 @@ class GuidanceRecovery:
     # LLM: GuidanceRecovery：终态与运行循环共用回合锁；先修已提交批次，只结算该回合索引，联测取消与确认竞争。
     #   release_task_body 只由后台片异常结束且任务没被取消时传 True（派活正文退回给同一任务号的重跑），前台终态保持默认。
     #   failure 是这一回合没正常结束的那个异常（前台终态与后台收尾都传；没有异常传 None）：只用来决定这次释放计不计次
-    #   （failure_counts_toward_release_limit），不改变释放与否。
+    #   （failure_counts_toward_release_limit），不改变释放与否。返回计数项见 TURN_END_SUMMARY_KEYS；续跑上限收口改走 settle_dead_turn。
     # 函数用途: 回合结束时原子拒绝尚未消费的补充消息，并返回本回合状态计数。
     def reject_pending(
         self,
@@ -185,20 +186,23 @@ class GuidanceRecovery:
     ) -> dict[str, int]:
         turn_id = str(expected_turn_id or "").strip()
         if not turn_id:
-            return {
-                "rejected": 0,
-                "released": 0,
-                "reserved": 0,
-                "submitted": 0,
-                "consumed": 0,
-                "retired_legacy": 0,
-                "errors": 0,
-            }
+            return dict.fromkeys(TURN_END_SUMMARY_KEYS, 0)
         with self.ledger.turn_guard(turn_id):
             return self._reject_pending_locked(
                 turn_id,
                 TurnEndSettlement(reject_reserved, release_task_body, failure_counts_toward_release_limit(failure)),
             )
+
+    # LLM: GuidanceRecovery：只给续跑上限收口用（Gateway 启动恢复已证明提交插话的进程死亡）。等于 reject_pending(reject_reserved=True)
+    #   再加上：确认批次修复后仍停在 submitted 的插话也收成终态（settle_dead_submission），用户的插话不会悄悄悬着、也不会送两遍。
+    #   副作用同 reject_pending：持回合锁写回执；返回 TURN_END_SUMMARY_KEYS 各项计数。
+    # 函数用途: 续跑上限收口时结算本回合全部插话，连随进程死掉的已提交插话一起定终态。
+    def settle_dead_turn(self, expected_turn_id: str) -> dict[str, int]:
+        turn_id = str(expected_turn_id or "").strip()
+        if not turn_id:
+            return dict.fromkeys(TURN_END_SUMMARY_KEYS, 0)
+        with self.ledger.turn_guard(turn_id):
+            return self._reject_pending_locked(turn_id, TurnEndSettlement(reject_reserved=True, settle_dead_submissions=True))
 
     # LLM: GuidanceRecovery：调用方已证明尝试死亡；提交结果未知始终保留，只有尚未越过模型提交边界的预留可释放。
     # 函数用途: 在请求租约已确认失效后，把尚未开始模型提交的预留消息恢复为可再次认领。
@@ -366,15 +370,7 @@ class GuidanceRecovery:
     # LLM: GuidanceRecovery：调用方持回合锁；先修提交再修确认，内部无幂等消息按送达投影退休，保持原提交顺序。
     # 函数用途: 在已持有回合锁时逐条结算当前回合索引。
     def _reject_pending_locked(self, turn_id: str, settlement: TurnEndSettlement) -> dict[str, int]:
-        summary = {
-            "rejected": 0,
-            "released": 0,
-            "reserved": 0,
-            "submitted": 0,
-            "consumed": 0,
-            "retired_legacy": 0,
-            "errors": 0,
-        }
+        summary = dict.fromkeys(TURN_END_SUMMARY_KEYS, 0)
         summary["errors"] += self.submissions.repair_locked(
             turn_id
         )
@@ -391,14 +387,13 @@ class GuidanceRecovery:
                 summary["errors"] += 1
                 continue
             try:
-                outcome = self._settle_turn_receipt(dedupe_key, turn_id, settlement)
+                outcomes = self._settle_turn_receipt(dedupe_key, turn_id, settlement)
             except Exception:
-                outcome = "errors"
-            if outcome == "released":
+                outcomes = ("errors",)
+            if "released" in outcomes:
                 # 已释放给下一回合：这一回合的索引不再指向它，下一回合认领时会绑到自己名下。
                 unlink_quietly(index_path)
-            if outcome in summary:
-                summary[outcome] += 1
+            _count_outcomes(summary, outcomes)
         # Internal non-idempotent request guidance has no receipt state. The
         # delivered projection is its only durable retirement fact, so close it
         # under the same exact-turn guard instead of letting stop replay it.
@@ -423,24 +418,23 @@ class GuidanceRecovery:
         return summary
 
     # LLM: GuidanceRecovery：调用方持回合锁；这里再持回执锁，只处理绑定在本回合上的回执。pending/已预留（reject_reserved）的
-    #   按 settle_unconsumed_receipt 收尾（会话消息释放；派活正文在 release_task_body 时退回给同一回合号；其余 rejected），
-    #   已提交/已消费原样计数。返回用于汇总计数的结果名："released" 表示已退回 pending（调用方删本回合索引，再认领时补回），
-    #   "errors" 表示回执缺失或绑定对不上。副作用：写回执。
+    #   按 settle_unconsumed_receipt 收尾（会话消息释放；派活正文在 release_task_body 时退回给同一回合号；其余 rejected）。
+    #   已提交的只有 settle_dead_submissions（续跑上限收口：提交它的进程已证明死亡，确认批次已先修复）时才收口，见
+    #   settle_dead_submission；否则和已消费的一样原样计数。返回用于汇总计数的结果名元组（turn_end_labels）："released" 表示
+    #   已退回 pending（调用方删本回合索引，再认领时补回），"errors" 表示回执缺失或绑定对不上。副作用：写回执。
     # 函数用途: 回合收尾时结算本回合索引里的一条补充消息回执。
-    def _settle_turn_receipt(self, dedupe_key: str, turn_id: str, settlement: TurnEndSettlement) -> str:
+    def _settle_turn_receipt(self, dedupe_key: str, turn_id: str, settlement: TurnEndSettlement) -> tuple[str, ...]:
         receipt_path = self.storage.guidance_dedupe_path(dedupe_key)
         with locked_file_transition(receipt_path.with_name(f".{receipt_path.name}.transition")):
             receipt = self.ledger.read_receipt(receipt_path)
             metadata = receipt.entry.metadata if receipt is not None and isinstance(receipt.entry.metadata, dict) else {}
             if receipt is None or str(metadata.get("expected_turn_id") or "").strip() != turn_id:
-                return "errors"
-            # Gateway terminalization holds its outer exact-turn lock. A reserved row is
-            # then proven not to have an atomic submission batch and is safe to settle.
-            if not (receipt.status == "pending" or (settlement.reject_reserved and receipt.status == "reserved")):
-                return receipt.status
-            settled = settle_unconsumed_receipt(receipt, turn_id, settlement, now=time.time())
+                return ("errors",)
+            settled = _turn_end_settled(receipt, turn_id, settlement, self.storage)
+            if settled is None:
+                return (receipt.status,)
             write_json_file_atomic(receipt_path, settled.to_dict())
-        return "released" if settled.status == "pending" else settled.status
+        return turn_end_labels(settled, dead=settlement.settle_dead_submissions and receipt.status == "submitted")
 
     # LLM: GuidanceRecovery：只释放尚未认领的回执；在 migration 记录旧回合，不改参与指纹的 entry，也不释放已提交消息。
     # 函数用途: 回合结束时释放仍未被任何轮次认领的补充消息，使其可被后续轮次接手。
@@ -548,14 +542,92 @@ def _release_or_reject(
                    updated_at=now, migration=migration)
 
 
-# LLM: 回合结束时收尾一条回执要用的三个结构化开关：reject_reserved（持回合锁的终态可以收已预留的回执）、release_task_body
-#   （后台片非取消的失败时派活正文退回给同一任务号）、count_release（这次没消费就结束计不计入释放上限）。只由 reject_pending 构造。
+# LLM: 回合结束时收尾一条回执要用的四个结构化开关：reject_reserved（持回合锁的终态可以收已预留的回执）、release_task_body
+#   （后台片非取消的失败时派活正文退回给同一任务号）、count_release（这次没消费就结束计不计入释放上限）、
+#   settle_dead_submissions（只有续跑上限收口传 True：提交它的进程已证明死亡，已提交未确认的插话也要收成终态）。
+#   只由 reject_pending 构造。
 # 类用途: 一次回合收尾对补充消息回执的处理方式。
 @dataclass(frozen=True)
 class TurnEndSettlement:
     reject_reserved: bool = False
     release_task_body: bool = False
     count_release: bool = False
+    settle_dead_submissions: bool = False
+
+
+# reject_pending 返回的计数项：原有各终态计数，加上续跑上限收口时的 dead_submissions（收口的已提交未确认插话）、
+# recorded_in_transcript（其中历史里已有、记成已消费的）、backup_turns（拒收后会由入口回执排成“备用下一轮”的）。
+TURN_END_SUMMARY_KEYS = ("rejected", "released", "reserved", "submitted", "consumed", "retired_legacy", "errors",
+                         "dead_submissions", "recorded_in_transcript", "backup_turns")
+
+
+# LLM: 只认结构化事实：插话要写进历史（record_in_transcript）、有会话和编号，且会话历史里已有它的幂等键
+#   （transcript_dedupe_key，和确认后写历史用的同一个）。读历史文件只比去重键，不读正文；历史读不出来时抛错，由调用方按坏账处理、
+#   不改回执（宁可留着也不重复送达）。
+# 函数用途: 判断一条插话的内容是不是已经写进了会话历史。
+def _recorded_in_transcript(storage: object, entry: GuidanceEntry) -> bool:
+    metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+    thread_id = str(metadata.get("thread_id") or "").strip()
+    guidance_id = str(entry.guidance_id or "").strip()
+    if metadata.get("record_in_transcript") is not True or not thread_id or not guidance_id:
+        return False
+    path = storage.message_path(thread_id)
+    return path.exists() and find_message_dedupe(path, transcript_dedupe_key(guidance_id)) is not None
+
+
+# LLM: 续跑上限收口（settle_dead_submissions）时对“已提交、确认批次已修复仍没有、提交它的进程已死”的插话：
+#   历史里已有它（recorded）就收成 consumed，migration.settle_reason=recorded_in_transcript，不再起备用下一轮（否则模型看到两遍）；
+#   历史里没有，就和没被取走的一样按 settle_unconsumed_receipt 收尾（TUI/IM 插话拒收 → 入口回执排成备用下一轮）。
+#   两种都在 migration.dead_submission 记下死掉的那次提交（提交编号、认领尝试）。纯函数，不写盘。
+# 函数用途: 给一条随进程死掉的已提交插话定终态：已在历史里就算已消费，不在就按未消费拒收或释放。
+def settle_dead_submission(
+    receipt: GuidanceOnceReceipt, turn_id: str, settlement: TurnEndSettlement, *, recorded: bool,
+) -> GuidanceOnceReceipt:
+    now = time.time()
+    migration = {**receipt.migration,
+                 "dead_submission": {"submission_id": receipt.submission_id, "attempt_id": receipt.attempt_id}}
+    if recorded:
+        return replace(receipt, status="consumed", updated_at=now,
+                       migration={**migration, "settle_reason": "recorded_in_transcript"})
+    return settle_unconsumed_receipt(replace(receipt, migration=migration), turn_id, settlement, now=now)
+
+
+# LLM: 回合收尾对一条回执的处置规则：续跑上限收口时已提交的走 settle_dead_submission（先查历史里有没有它）；pending，以及
+#   reject_reserved 时的 reserved（Gateway 终态持回合锁，证明它没有原子提交批次）走 settle_unconsumed_receipt；其余返回 None，
+#   调用方原样计数。会读会话历史的去重键（_recorded_in_transcript），不写盘。
+# 函数用途: 决定一条回执在回合收尾时要不要改、改成什么。
+def _turn_end_settled(
+    receipt: GuidanceOnceReceipt, turn_id: str, settlement: TurnEndSettlement, storage: object,
+) -> GuidanceOnceReceipt | None:
+    if settlement.settle_dead_submissions and receipt.status == "submitted":
+        return settle_dead_submission(receipt, turn_id, settlement,
+                                      recorded=_recorded_in_transcript(storage, receipt.entry))
+    if receipt.status == "pending" or (settlement.reject_reserved and receipt.status == "reserved"):
+        return settle_unconsumed_receipt(receipt, turn_id, settlement, now=time.time())
+    return None
+
+
+# 函数用途: 把一条回执的收口结果计数累加进 reject_pending 的汇总，只认汇总里已有的计数名。
+def _count_outcomes(summary: dict[str, int], outcomes: tuple[str, ...]) -> None:
+    for outcome in outcomes:
+        if outcome in summary:
+            summary[outcome] += 1
+
+
+# LLM: 计数名只由结构化终态推出：退回 pending 记 released，其余记终态名；随进程死掉的已提交插话另记 dead_submissions，
+#   其中按已在历史记成 consumed 的再记 recorded_in_transcript；拒收且带入口请求号（gateway_input_request_id）的另记 backup_turns，
+#   因为入口对账会把它排成备用下一轮。
+# 函数用途: 把一条回执的收口结果翻成 reject_pending 汇总里的计数名。
+def turn_end_labels(settled: GuidanceOnceReceipt, *, dead: bool) -> tuple[str, ...]:
+    labels = ["released" if settled.status == "pending" else settled.status]
+    if dead:
+        labels.append("dead_submissions")
+        if settled.status == "consumed":
+            labels.append("recorded_in_transcript")
+    metadata = settled.entry.metadata if isinstance(settled.entry.metadata, dict) else {}
+    if settled.status == "rejected" and str(metadata.get("gateway_input_request_id") or "").strip():
+        labels.append("backup_turns")
+    return tuple(labels)
 
 
 # LLM: 回合没消费就结束时这次释放计不计次，唯一判据是唤醒毒丸的错误分类 wake_poison.verdict_for_error（两层同一个权威，
