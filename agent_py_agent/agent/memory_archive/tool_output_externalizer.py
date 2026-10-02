@@ -623,6 +623,7 @@ def _index_metadata_from_record(value: Any) -> dict[str, Any]:
 
 
 # LLM: 耐久工具索引只接受 Registry 已写入的有限执行事实；任意 envelope 私有字段不能借此进入恢复上下文。
+#   宿主停机没启动的调用另带 host_shutdown（白名单见 _safe_host_shutdown），让工具账和模型调用账本能逐字段对账。
 # 函数用途: 校验并复制 handler 是否进入、失败层级和耗时，供文件事实源与 SQLite 账本交叉排障。
 def _safe_tool_execution(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -640,6 +641,26 @@ def _safe_tool_execution(value: Any) -> dict[str, Any]:
     }
     if failure_stage:
         payload["failure_stage"] = failure_stage
+    if shutdown := _safe_host_shutdown(value.get("host_shutdown")):
+        payload["host_shutdown"] = shutdown
+    return payload
+
+
+# 停机关门原因落进耐久索引时只放行这几个单行短文本字段（与 tool_call_archive_record._host_shutdown_facts 同一白名单）。
+_HOST_SHUTDOWN_TEXT_KEYS = ("reason_code", "error_type", "admission_error_code")
+
+
+# LLM: 只认白名单字段的单行短文本，和 round_cancelled=True；别的形状一律丢掉，不让任意字段借此进入恢复上下文。
+# 函数用途: 清洗宿主停机没启动的调用随执行事实带来的关门原因。
+def _safe_host_shutdown(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    payload: dict[str, Any] = {}
+    for key in _HOST_SHUTDOWN_TEXT_KEYS:
+        if text := _single_line_text(value.get(key), max_chars=128):
+            payload[key] = text
+    if payload and value.get("round_cancelled") is True:
+        payload["round_cancelled"] = True
     return payload
 
 

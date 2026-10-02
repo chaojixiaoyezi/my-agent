@@ -533,7 +533,7 @@
           {
             "key": "enable_gateway_restart_tool",
             "label": "enable_gateway_restart_tool（enable gateway restart tool）",
-            "description": "代理自助安排 Gateway 安全重启（默认开启）： - true：本机管理员的主会话代理可用 restart_gateway 工具安排重启。Gateway 先停领新请求、等在跑的回合结束， 再让新的副作用工具停在开跑前、等执行中的工具跑完，然后换一个新进程接班；停在半路的回合由新进程自动续跑， 重启完成后会给发起的会话发一条“重启已完成、不要再次重启”的通知。普通用户和群的代理没有这个工具。 要不要先问你看审批模式：默认确认（ask）会先弹确认；自主工作（auto）和完全放行（full access）不弹确认、直接安排。 安排之后不会立刻换进程：先等在跑的回合和执行中的工具结束（各有上限），空闲了再换。 - false：不注册该工具；需要重启时由管理员在终端执行 my-agent gateway restart 或使用 /restart。",
+            "description": "代理自助安排 Gateway 安全重启（默认开启）： - true：本机管理员的主会话代理可用 restart_gateway 工具安排重启。Gateway 先停领新请求、等在跑的回合结束， 再让新的副作用工具停在开跑前、等执行中的工具跑完，然后换一个新进程接班；停在半路的回合由新进程自动续跑， 重启完成后会给发起的会话发一条“重启已完成、不要再次重启”的通知。普通用户和群的代理没有这个工具。 要不要先问你看审批模式：默认确认（ask）会先弹确认；自主工作（auto）和完全放行（full access）不弹确认、直接安排。 安排之后不会立刻换进程：先等在跑的回合，最多 gateway_restart_turn_wait_seconds 秒，到时没跑完的回合停在下一个 副作用工具前、由新进程续跑；再等执行中的副作用工具跑完，最多 gateway_restart_drain_timeout_seconds 秒，超时就取消 这次重启、不强杀。 - false：不注册该工具；需要重启时由管理员在终端执行 my-agent gateway restart 或使用 /restart。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -3538,7 +3538,7 @@
           {
             "key": "gateway_restart_drain_timeout_seconds",
             "label": "gateway_restart_drain_timeout_seconds（gateway restart drain timeout seconds）",
-            "description": "重启后台服务时最多等正在跑的任务多久，超过就先强制收尾。 长任务多、希望重启更温和时可以调大。",
+            "description": "安全重启第二段最多等执行中的副作用工具跑完多少秒，超时就取消这次重启、恢复正常服务，不强杀任何工具；0 表示不限。 长任务多、希望重启更温和时可以调大。",
             "type": "number",
             "defaultValue": 600,
             "currentValue": 600,

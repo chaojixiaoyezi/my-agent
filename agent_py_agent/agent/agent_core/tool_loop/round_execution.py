@@ -1,6 +1,7 @@
 # LLM: 本模块执行一轮 canonical ToolCall；仅将连续段判定交给窄查询，审批、并发、取消与 provider 顺序记账仍由原链负责。
 #   每个未启动调用前的顺序屏障先读本进程模型调用准入是否已关（宿主停机，contracts.model_call_ledger）：关了就不再启动
-#   任何工具，当前及后续调用记成 HOST_SHUTDOWN_TOOL_NOT_STARTED（I3：停机后才到的迟到响应里的工具不执行）。
+#   任何工具，当前及后续调用记成 HOST_SHUTDOWN_TOOL_NOT_STARTED（I3：停机后才到的迟到响应里的工具不执行）；审批通过之后、
+#   重新执行之前再读一次（等审批期间可能已经关门，9b 复审必须修）。
 # 模块用途: 装配实时调度事实并执行工具轮，隔离线程依赖、输出配对结果，用户拒绝后阻止相同调用重复弹框。
 
 from __future__ import annotations
@@ -313,7 +314,7 @@ def _defer_unstarted_calls_if_needed(
             request,
             calls,
             start_idx=idx,
-            result_factory=partial(_host_shutdown_result, closure=closure),
+            result_factory=partial(_host_shutdown_result, closure=closure, cancelled=_round_cancelled(request)),
             phase="interrupted",
             status="停机中断",
         )
@@ -472,6 +473,7 @@ def _owner_grant_key(request: ToolRoundExecutionRequest, call: ToolCall) -> str:
 
 
 # LLM: 审批 consumer 是 effective_on_chunk 上的宿主能力；无 consumer/unavailable 保留旧 approval_required 终态，绝不擅自批准。
+#   批准之后、重新执行之前读一次本进程准入：等审批期间宿主已停机关门的，不执行、不记批准绑定，配停机结果（I3 复审必须修）。
 # 函数用途: 等待一条审批决定，并在批准时用原 call identity 重新执行同一工具调用。
 def _resolve_tool_approval(
     request: ToolRoundExecutionRequest,
@@ -520,6 +522,10 @@ def _resolve_tool_approval(
     if decision.permission_id != approval_request.permission_id:
         return execution
     if decision.approved:
+        closure = model_call_admission_closure()
+        if closure is not None:  # 等审批期间宿主停机关门：批准了也不再执行
+            result = _host_shutdown_result(original_call, closure=closure, cancelled=_round_cancelled(request))
+            return _synthetic_execution(original_call, result, "HOST_SHUTDOWN_TOOL_NOT_STARTED")
         approved_actions = getattr(request.params, "runtime_approved_actions", None)
         if not isinstance(approved_actions, list):
             return execution
@@ -1008,15 +1014,17 @@ def _interrupted_result(call: ToolCall) -> ToolResult:
 
 # LLM: 宿主停机关门后没启动的调用（I3）：handler 不执行、effect_outcome=not_started、状态按取消屏障同口径记 cancelled；
 #   metadata.host_shutdown 带关门原因（reason_code/error_type 与模型调用账本把在途调用结清成 failed 时用的是同一份
-#   ModelCallAdmissionClosure），准入拒绝的固定码另记 admission_error_code。正文只给模型看，不参与任何判断。
+#   ModelCallAdmissionClosure），准入拒绝的固定码另记 admission_error_code，本轮也已取消时记 round_cancelled=true。
+#   错误码始终是 HOST_SHUTDOWN_TOOL_NOT_STARTED；本轮已取消时给模型的提示改用取消那句（用户 /stop 后 24 小时内续跑时，
+#   历史里的提示不能引导模型重做用户喊停的动作）。正文只给模型看，不参与任何判断。
 # 函数用途: 给停机后没启动的工具调用一条“宿主停机、未执行、无副作用”的结构化结果。
-def _host_shutdown_result(call: ToolCall, *, closure: ModelCallAdmissionClosure) -> ToolResult:
-    payload = json.dumps(
-        {"error": "宿主正在停机，本工具未执行，没有任何副作用。", "hint": "不要再发起新动作；重启后按当前状态重新判断是否还需要。"},
-        ensure_ascii=False,
-    )
+def _host_shutdown_result(call: ToolCall, *, closure: ModelCallAdmissionClosure, cancelled: bool = False) -> ToolResult:
+    hint = "停止派发新动作，保存已有进展后收尾。" if cancelled else "不要再发起新动作；重启后按当前状态重新判断是否还需要。"
+    payload = json.dumps({"error": "宿主正在停机，本工具未执行，没有任何副作用。", "hint": hint}, ensure_ascii=False)
     shutdown = {"reason_code": closure.error_code, "error_type": closure.error_type,
                 "admission_error_code": MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE}
+    if cancelled:
+        shutdown["round_cancelled"] = True
     return ToolResult.failed(
         call,
         payload,

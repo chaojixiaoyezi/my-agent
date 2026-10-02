@@ -2,7 +2,9 @@
 # 工具只写一份重启请求就返回，真正的排空与换进程由 Gateway 服务主循环执行（gateway_parts/restart_service）。
 # 发起方身份只取结构化事实：owner 三元组、会话 thread_id、会话存储根；不接受模型传入的进程号或路径。
 # effect=dangerous：默认确认（ask）模式走统一危险动作审批；自主工作（auto）与完全放行（full access）不弹确认（以
-#   tooling.action_policy._approval_decision 为准）。安排后由 restart_service 先排空再换进程。改动须同步 test_gateway_restart_tool.py。
+#   tooling.action_policy._approval_decision 为准）。安排后由 restart_service 两段排空：先等在跑的回合，最多 turn_wait 秒，
+#   到时没跑完的停在下一个副作用工具前、由新进程续跑；再等执行中的副作用工具跑完，最多 drain_timeout 秒，超时就取消这次
+#   重启、不强杀。改动须同步 test_gateway_restart_tool.py。
 # 模块用途: 让管理员的 my-agent 在排查中发现需要重启时，自己安排一次不会切断回合的 Gateway 安全重启。
 from __future__ import annotations
 

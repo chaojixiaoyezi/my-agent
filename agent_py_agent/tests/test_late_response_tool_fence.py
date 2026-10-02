@@ -26,11 +26,22 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallAdmissionClosedError,
     ModelCallAdmissionClosure,
     close_model_call_admission,
+    model_call_admission_closure,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
-from agent_py_agent.tests.test_tool_round_execution import _round_request, _success
+from agent_py_agent.tests._tool_runtime_harness import (
+    make_test_model_spec,
+    make_test_runtime_policy,
+    runtime_snapshot_for_model_specs,
+)
+from agent_py_agent.tests.test_tool_round_execution import (
+    _ROUND_RUN_ID,
+    _approval_pending,
+    _round_request,
+    _success,
+)
 
 _CLOSURE = ModelCallAdmissionClosure("HostShutdownInterrupted", MODEL_CALL_INTERRUPTED_ERROR_CODE)
 _SHUTDOWN_FACTS = {"reason_code": MODEL_CALL_INTERRUPTED_ERROR_CODE, "error_type": "HostShutdownInterrupted",
@@ -99,6 +110,64 @@ def test_host_shutdown_takes_precedence_over_cancellation():
     )
 
     assert [record.result.error_code for record in records] == ["HOST_SHUTDOWN_TOOL_NOT_STARTED"]
+    result = records[0].result
+    assert json.loads(result.output)["hint"] == "停止派发新动作，保存已有进展后收尾。", "用户喊停过，续跑时不能引导重做"
+    assert result.metadata["host_shutdown"] == {**_SHUTDOWN_FACTS, "round_cancelled": True}
+
+
+class _ClosingApprover:
+    """等审批期间宿主停机关门，然后批准（9b 复审探针 A）。"""
+
+    def __init__(self):
+        self.requests = 0
+
+    def request_permission(self, payload, *, cancellation_token=None):
+        self.requests += 1
+        close_model_call_admission(_CLOSURE)
+        return {"permission_id": payload["permission_id"], "decision": "approved"}
+
+
+def _parallel_reader_snapshot():
+    spec = make_test_model_spec("read_probe", input_schema={
+        "type": "object", "properties": {"slot": {"type": "integer"}}, "required": ["slot"], "additionalProperties": False})
+    return runtime_snapshot_for_model_specs((spec,), run_id=_ROUND_RUN_ID, policies={
+        spec.name: make_test_runtime_policy("read_only", concurrency_mode="parallel_safe", resource_parameters=("slot",))})
+
+
+@pytest.mark.parametrize("segment", ["serial", "parallel"])
+def test_approval_granted_after_closure_does_not_execute(segment):
+    approver = _ClosingApprover()
+    params = SimpleNamespace(tool_context=[], effective_on_chunk=approver, request_id="approval-fence",
+                             cancellation_token=CancellationToken(), runtime_approved_actions=[])
+    calls = [{"tool": "run_command", "command": "printf a"}, {"tool": "run_command", "command": "printf b"}]
+    if segment == "parallel":  # 两条只读调用同一并行段跑完，审批在段后补
+        params.tool_runtime_snapshot = _parallel_reader_snapshot()
+        calls = [{"tool": "read_probe", "slot": 0}, {"tool": "read_probe", "slot": 1}]
+    started = []
+
+    def execute_one(request):
+        started.append(model_call_admission_closure() is not None)
+        return _approval_pending(request)
+
+    records, _ = _run_round(calls, execute_one=execute_one, params=params)
+
+    assert True not in started, "关门之后不能再进工具"
+    assert started == ([False] if segment == "serial" else [False, False])
+    assert [_shape(record) for record in records] == [("HOST_SHUTDOWN_TOOL_NOT_STARTED", "cancelled", False, "not_started")] * 2
+    assert params.runtime_approved_actions == [], "没执行就不记批准绑定"
+    assert approver.requests == (1 if segment == "serial" else 2)
+
+
+def test_persisted_execution_facts_keep_only_whitelisted_shutdown_fields():
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import _compact_tool_execution
+    from agent_py_agent.agent.memory_archive.tool_output_externalizer import _safe_tool_execution
+
+    raw = {"handler_executed": False, "duration_ms": 0, "failure_stage": "runtime_gate",
+           "host_shutdown": {**_SHUTDOWN_FACTS, "round_cancelled": True, "private": "不该落盘"}}
+    expected = {**_SHUTDOWN_FACTS, "round_cancelled": True}
+    assert _compact_tool_execution(raw)["host_shutdown"] == expected
+    assert _safe_tool_execution(raw)["host_shutdown"] == expected
+    assert "host_shutdown" not in _safe_tool_execution({**raw, "host_shutdown": {"private": "x", "round_cancelled": True}})
 
 
 class _LateResponseBackend:
@@ -138,3 +207,7 @@ def test_late_response_after_shutdown_settlement_writes_nothing(tmp_path):
     rows = [json.loads(line) for index in Path(agent.home_paths.root).rglob("work/blobs/tool_outputs/index.jsonl")
             for line in index.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert [(row.get("tool"), row.get("error_code")) for row in rows] == [("write_file", "HOST_SHUTDOWN_TOOL_NOT_STARTED")]
+    # 落盘的停机原因和模型调用账本逐字段对得上（9b 复审建议 2）。
+    assert rows[0]["tool_execution"]["host_shutdown"] == {
+        "reason_code": record.error_code, "error_type": record.error_type, "admission_error_code": "MODEL_CALL_ADMISSION_CLOSED"}
+    assert rows[0]["tool_execution"]["handler_executed"] is False
