@@ -20,6 +20,11 @@ CURATOR_MODEL_GROUP_MAX_COUNT = 8
 # 会话自己的模型在提取/校验阶段确定性失败时，用 owner 默认模型补跑的失败码（输出不是合规 JSON、证据校验不过）。
 # 网络、额度、超时、提交失败都不补跑：那些换模型没用或可能已经写过东西。
 CURATOR_DEFAULT_FALLBACK_CODES = frozenset({"CURATOR_SCHEMA_INVALID"})
+# 会话自己的模型连不上（服务商故障、额度、超时）时不在同一次运行里补跑：一次运行的租约只够一整次提取，超时类失败已经
+# 用掉了它。改成同一组、同一起始游标上连续失败这么多次后，下一次运行这组直接用 owner 默认模型（3a 2026-10-02 生产：
+# 某会话选的模型连续 ProviderTransientError，那组排在最前，整个 owner 的整理都卡住）。2 次足以排除一次抖动。
+CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT = 2
+CURATOR_TRANSIENT_FALLBACK_CODES = frozenset({"CURATOR_MODEL_FAILED", "CURATOR_MODEL_TIMEOUT"})
 
 
 # LLM: 不可变；route 是本次用的那组模型，batch 只含这组会话的消息（工具审计事件只在默认组带上），
@@ -89,6 +94,20 @@ def group_breaker_history(rows: list, identity: tuple[str, str], view: Callable[
     return kept
 
 
+# LLM: 纯函数；previous 是 group_breaker_history 筛过的本组历史（新到旧，会话自己的模型那组身份）。最近
+#   CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT 条全是同一起始游标（投影到本组）上的连接类失败时，返回其中最近一次的失败码；
+#   中间夹一次推进本组游标的成功（含默认模型补跑成功）就不算。只看结构化状态、失败码和游标。
+# 函数用途: 判断这组是否该改用默认模型，返回触发它的失败码；不该时返回空串。
+def transient_fallback_code(cursor_before: dict, previous: list, view: Callable[[dict], object]) -> str:
+    window = previous[:CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT]
+    if len(window) < CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT:
+        return ""
+    if all(row.status == "failed" and row.failure_code in CURATOR_TRANSIENT_FALLBACK_CODES
+           and view(row.cursor_before) == view(cursor_before) for row in window):
+        return str(window[0].failure_code)
+    return ""
+
+
 # LLM: 多组依次运行时给调用方一个结果：计数相加，状态、失败码、run_id、模型取最后一组（失败即停在那组）；
 #   警告依次拼接并加 curator_model_groups:<组数>。只有一组时原样返回。
 # 函数用途: 把一次触发里各组的运行结果汇总成一个。
@@ -109,9 +128,12 @@ def combined_run_result(results: list[CuratorRunResult]) -> CuratorRunResult:
 __all__ = [
     "CURATOR_DEFAULT_FALLBACK_CODES",
     "CURATOR_MODEL_GROUP_MAX_COUNT",
+    "CURATOR_TRANSIENT_FALLBACK_CODES",
+    "CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT",
     "RoutedBatch",
     "combined_run_result",
     "group_breaker_history",
     "group_cursor_view",
     "route_batch",
+    "transient_fallback_code",
 ]

@@ -11,6 +11,9 @@ memory_curator_model_profile 留空时，一批里来自不同会话、不同模
    指定了整理档案 → 不路由；都在该 owner 自己的目录里解析（含管理员共享）。
 7. 指定的整理档案在某个 owner 那里解析不到（3a 2026-10-02 定）→ 该 owner 改用自己的默认模型，
    运行记录带 curator_profile_unavailable_fallback:<原因>；能解析到的 owner 照常用指定档案。
+8. 会话自己的模型连不上（3a 2026-10-02 生产：qwen 那组连续 ProviderTransientError，排在最前卡住整个 owner）→ 同一组同一
+   起始游标连续失败 CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT 次后，下一次运行直接用 owner 默认模型、游标推进，记录带
+   curator_thread_model_failed:<码>:transient；默认模型自己连不上照旧退避；别组夹在中间成功不清零计数。
 """
 from __future__ import annotations
 
@@ -41,10 +44,12 @@ from agent_py_agent.agent.memory_store.curator_models import (
     MemoryCuratorConfig,
 )
 from agent_py_agent.agent.memory_store.curator_routing import (
+    CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT,
     combined_run_result,
     group_breaker_history,
     group_cursor_view,
     route_batch,
+    transient_fallback_code,
 )
 from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunLog
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
@@ -228,6 +233,134 @@ def test_breaker_follows_the_failing_group_even_when_another_group_succeeds_in_b
     assert "curator_replay_breaker_open:CURATOR_SCHEMA_INVALID" in records[-1].warnings, "别组成功不打断本组计数"
     assert service.state_store.load().last_failure_code == CURATOR_REPLAY_BREAKER_OPEN
     assert "curator_thread_model_failed:CURATOR_SCHEMA_INVALID" in records[0].warnings
+
+
+_TRANSIENT = CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT
+
+
+def test_thread_model_that_keeps_failing_transiently_yields_to_the_default(tmp_path):
+    store, thread_a, thread_b, thread_of = _two_threads(tmp_path)
+    default, model_a = _EchoBackend("default", thread_of), _BrokenBackend()
+    service = _service(tmp_path, store, _routing(default, model_a, thread_a))
+
+    for _ in range(2):  # 3a 定 N=2：连续失败两次，第三次运行改用默认模型
+        failed = service.run(reason="admin")
+        assert (failed.status, failed.failure_code, failed.model) == ("failed", "CURATOR_MODEL_FAILED", "model-a")
+    assert default.seen == [] and service.state_store.load().per_thread_cursors == {}
+
+    result = service.run(reason="admin")
+
+    assert (result.status, result.processed_messages) == ("succeeded", 2)
+    assert model_a.calls == _TRANSIENT, "连不上的模型这次不再试"
+    assert default.threads_seen() == [{thread_a}, {thread_b}], "默认模型补跑 A，再正常处理 B"
+    assert set(service.state_store.load().per_thread_cursors) == {thread_a, thread_b}, "游标推进"
+    record = service.run_log.list()[_TRANSIENT]
+    assert (record.status, record.model) == ("succeeded", "model-d"), "运行记录写实际用的默认模型"
+    assert "curator_thread_model_failed:CURATOR_MODEL_FAILED:transient" in record.warnings
+    # 成功推进过本组游标，计数从头算：新消息来了先给会话自己的模型机会。
+    thread_of[_append(store, thread_a, "A 的新消息", 100.0)] = thread_a
+    again = service.run(reason="admin")
+    assert (again.status, again.model) == ("failed", "model-a") and model_a.calls == _TRANSIENT + 1
+
+
+# 函数用途: 能切换成“连不上”的回显后端，记调用次数（默认模型自己也出故障的替身）。
+class _FlakyBackend(_EchoBackend):
+    def __init__(self, name: str, thread_of: dict[str, str]) -> None:
+        super().__init__(name, thread_of)
+        self.down = False
+
+    def generate_structured(self, prompt: str, *, response_schema: dict[str, object]) -> ModelResponse:
+        if self.down:
+            raise RuntimeError("provider unavailable")
+        return super().generate_structured(prompt, response_schema=response_schema)
+
+
+def test_default_model_failing_too_backs_off_and_is_still_used_directly(tmp_path):
+    store, thread_a, _thread_b, thread_of = _two_threads(tmp_path)
+    default, model_a = _FlakyBackend("default", thread_of), _BrokenBackend()
+    service = _service(tmp_path, store, _routing(default, model_a, thread_a))
+    for _ in range(_TRANSIENT):
+        service.run(reason="admin")
+    default.down = True
+
+    failed = service.run(reason="admin")
+
+    assert (failed.status, failed.failure_code, failed.model) == ("failed", "CURATOR_MODEL_FAILED", "model-d"), "记在默认模型名下"
+    assert model_a.calls == _TRANSIENT
+    assert service.state_store.load().last_failure_code == "CURATOR_MODEL_FAILED", "照旧退避，不是熔断"
+    assert "curator_thread_model_failed:CURATOR_MODEL_FAILED:transient" in service.run_log.list()[-1].warnings
+    default.down = False
+    result = service.run(reason="admin")
+    assert result.status == "succeeded" and model_a.calls == _TRANSIENT, "默认模型恢复后直接用它，不回头试本组模型"
+    assert thread_a in service.state_store.load().per_thread_cursors
+
+
+def test_another_groups_success_in_between_does_not_reset_the_transient_count(tmp_path):
+    store, thread_a, thread_b, thread_of = _two_threads(tmp_path)
+    default, model_a = _EchoBackend("default", thread_of), _BrokenBackend()
+    service = _service(tmp_path, store, _routing(default, model_a, thread_a))
+    service.run(reason="admin")
+    # B 先来一条新消息、A 随后也来一条：这一轮 B 先跑并成功，A 再失败。
+    thread_of[_append(store, thread_b, "B 的新消息", 100.0)] = thread_b
+    thread_of[_append(store, thread_a, "A 的新消息", 101.0)] = thread_a
+    service.run(reason="admin")
+    assert [item.status for item in service.run_log.list()] == ["failed", "succeeded", "failed"]
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded" and model_a.calls == 2, "别组成功不清零本组的连续失败"
+    assert thread_a in service.state_store.load().per_thread_cursors
+
+
+def test_unreadable_run_log_keeps_trying_the_thread_model(tmp_path, monkeypatch):
+    store, thread_a, _thread_b, thread_of = _two_threads(tmp_path)
+    default, model_a = _EchoBackend("default", thread_of), _BrokenBackend()
+    service = _service(tmp_path, store, _routing(default, model_a, thread_a))
+    for _ in range(_TRANSIENT):
+        service.run(reason="admin")
+
+    def unreadable(count: int):
+        raise OSError("run log unreadable")
+
+    monkeypatch.setattr(service.run_log, "recent_finished", unreadable)
+    result = service.run(reason="admin")
+    assert (result.status, result.model) == ("failed", "model-a") and default.seen == [], "读不到账按没达到处理"
+    assert model_a.calls == _TRANSIENT + 1, "照常试了会话自己的模型"
+
+
+def test_default_group_failures_are_never_rerouted(tmp_path):
+    store, _thread_a, _thread_b, _thread_of = _two_threads(tmp_path)
+    broken = _BrokenBackend()
+    routing = CuratorModelRouting(CuratorModelRoute("p-default", broken, "prov-d", "model-d", is_default=True))
+    service = _service(tmp_path, store, routing)
+
+    results = [service.run(reason="admin") for _ in range(_TRANSIENT + 1)]
+
+    assert all((item.status, item.failure_code) == ("failed", "CURATOR_MODEL_FAILED") for item in results)
+    assert broken.calls == _TRANSIENT + 1, "默认组没有别的模型可换，每次照常试、照常退避"
+    assert not any(warning.startswith("curator_thread_model_failed") for row in service.run_log.list() for warning in row.warnings)
+
+
+def test_transient_fallback_needs_consecutive_connection_failures_on_the_same_input():
+    from types import SimpleNamespace
+
+    view = group_cursor_view(("ta",), include_audit=False)
+    same = {"per_thread_cursors": {"ta": "m1", "tb": "m5"}, "last_audit_event_id": ""}
+    moved = {"per_thread_cursors": {"ta": "m2", "tb": "m5"}, "last_audit_event_id": ""}
+
+    def failed(code: str, before: dict = same):
+        return SimpleNamespace(status="failed", failure_code=code, cursor_before=before)
+
+    other_b = {"per_thread_cursors": {"ta": "m1", "tb": "m9"}, "last_audit_event_id": ""}
+    assert transient_fallback_code(same, [failed("CURATOR_MODEL_TIMEOUT"), failed("CURATOR_MODEL_FAILED", other_b)],
+                                   view) == "CURATOR_MODEL_TIMEOUT", "超时也算；别的会话游标变了不影响本组"
+    assert transient_fallback_code(same, [failed("CURATOR_MODEL_FAILED")], view) == "", "只失败一次不够"
+    assert transient_fallback_code(same, [failed("CURATOR_MODEL_FAILED"), failed("CURATOR_SCHEMA_INVALID")], view) == "", \
+        "确定性失败有自己的补跑和熔断"
+    assert transient_fallback_code(same, [failed("CURATOR_MODEL_FAILED"), failed("CURATOR_MODEL_FAILED", moved)], view) == "", \
+        "不是同一批输入"
+    success = SimpleNamespace(status="succeeded", failure_code="", cursor_before=same)
+    assert transient_fallback_code(same, [success, failed("CURATOR_MODEL_FAILED"), failed("CURATOR_MODEL_FAILED")], view) == ""
 
 
 # 函数用途: 造一条批内消息输入（纯函数用例用，不落盘）。

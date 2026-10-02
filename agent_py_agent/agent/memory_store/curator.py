@@ -61,10 +61,12 @@ from .curator_models import (
 from .curator_routing import (
     CURATOR_DEFAULT_FALLBACK_CODES,
     CURATOR_MODEL_GROUP_MAX_COUNT,
+    CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT,
     combined_run_result,
     group_breaker_history,
     group_cursor_view,
     route_batch,
+    transient_fallback_code,
 )
 from .curator_run_log import (
     RUN_WARNING_MAX_CHARS,
@@ -647,7 +649,8 @@ class _CuratorExecutionMixin:
 
 
 # LLM: 一次触发的运行编排与按组取模型：run 按会话主代理模型分组依次跑完整运行（_run_once 负责恢复、租约和失败记账），
-#   _extract_for_route 用本组模型提取并在确定性失败时用 owner 默认模型补跑一次。只经 _execute/_commit_failure 等原链
+#   _extract_for_route 用本组模型提取并在确定性失败时用 owner 默认模型补跑一次；本组模型此前连续连不上时直接改用默认模型。
+#   只经 _execute/_commit_failure 等原链
 #   读写账本，不直接碰 Daily/Candidate；改动同步 test_curator_thread_model_routing.py 与 test_memory_curator_v2.py。
 # 类用途: 提供 Curator 一次触发的分组运行和按组选模型的提取。
 class _CuratorRunMixin:
@@ -712,9 +715,13 @@ class _CuratorRunMixin:
     # LLM: 用本组模型提取并校验；会话自己的模型在提取/校验阶段确定性失败（CURATOR_DEFAULT_FALLBACK_CODES）且不是默认组时，
     #   本次运行内用 owner 默认模型补跑一次：此时还没写任何东西，幂等不受影响；成功后运行记录写实际用的默认模型并加
     #   curator_thread_model_failed:<码>，补跑也失败就按这次运行记一次失败（熔断按运行计，不按尝试计）。每组每次最多补跑一次。
+    #   本组模型此前已连续连不上（_transient_fallback 判定）时，这次不再试它，直接用默认模型。
     # 函数用途: 执行一次有界的模型提取与证据校验，必要时用默认模型补跑。
     def _extract_for_route(self, context: _RunContext, batch: CuratorInputBatch):
         route = context.route
+        transient = self._transient_fallback(context, batch)
+        if transient is not None:
+            return transient
         try:
             return self._extract_with(route.get("backend", self.backend), context, batch)
         except Exception as exc:
@@ -726,6 +733,33 @@ class _CuratorRunMixin:
         result = self._extract_with(default.backend, context, batch)
         route.update(provider=default.provider, model=default.model,
                      fallback_warnings=(f"curator_thread_model_failed:{code}",))
+        return result
+
+    # LLM: 只对非默认组：本组历史（group_breaker_history 按会话自己的模型身份筛）最近连续
+    #   CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT 次在同一起始游标上连接类失败时，这次直接用 owner 默认模型提取。运行身份
+    #   先改成默认模型：成功与失败都记在默认模型名下，默认模型自己的瞬时失败照旧退避、确定性失败照旧按它自己的历史熔断；
+    #   本组历史不被它打断，所以默认模型没成功前每次都直接用它。成功与失败记录都带 curator_thread_model_failed:<码>:transient。
+    #   读运行账出错按没达到处理（照常试本组模型）。不是按组隔离的熔断，不改退避口径。
+    # 函数用途: 本组模型此前连续连不上时改用默认模型提取并返回结果；不需要时返回 None。
+    def _transient_fallback(self, context: _RunContext, batch: CuratorInputBatch):
+        route = context.route
+        default = route.get("default")
+        if default is None or route.get("is_default", True) or "threads" not in route:
+            return None
+        try:
+            rows = self.run_log.recent_finished(CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT * CURATOR_MODEL_GROUP_MAX_COUNT)
+        except Exception:
+            return None
+        view = group_cursor_view(tuple(route["threads"]), bool(route.get("include_audit")))
+        history = group_breaker_history(rows, (str(route.get("provider", "")), str(route.get("model", ""))), view)
+        cursor = _cursor_payload(context.state_before.per_thread_cursors, context.state_before.last_processed_audit_event_id)
+        code = transient_fallback_code(cursor, history, view)
+        if not code:
+            return None
+        warning = f"curator_thread_model_failed:{code}:transient"
+        route.update(provider=default.provider, model=default.model, failure_warnings=(warning,))
+        result = self._extract_with(default.backend, context, batch)
+        route["fallback_warnings"] = (warning,)
         return result
 
     # LLM: 提取可能因超时按比例缩批重试，返回的 batch 才是真正喂给模型的输入快照：证据验证、processed 前缀和游标推进
