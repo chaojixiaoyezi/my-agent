@@ -19,6 +19,7 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -334,6 +335,20 @@ class VectorStore:
             )
         scored.sort(key=lambda h: (-h.score, h.id))
         return scored[: max(0, top_k)]
+
+    # LLM: 召回复用入口（S3，用户 10-02 拍板）：带身份且身份可用（档案、协议、模型、端点摘要都对上）才返回，否则空字典；
+    #   不管理身份的通用模式（identity=None）无从核对是不是同一个向量空间，一律不复用。
+    #   只交出向量和“嵌入时用的文本”，能否复用由调用方按文本完全一致裁决，维度再由检索器按本轮 query 长度核一次。只读。
+    # 函数用途: 按 id 取出当前快照里的向量和对应文本，供召回跳过重复嵌入。
+    def stored_vectors(self, ids: Iterable[str]) -> dict[str, tuple[list[float], str]]:
+        wanted = set(ids)
+        with self._lock:
+            self._refresh()
+            if self._identity is None or self._identity_reason():
+                return {}
+            snapshot = {key: self._items[key] for key in wanted if key in self._items}
+        return {key: (list(item["vector"]), str(item.get("text", ""))) for key, item in snapshot.items()
+                if isinstance(item.get("vector"), list)}
 
     # LLM: 先刷新再列 id；保留期与硬删除核对靠它确认向量是否真被清掉，只读。
     # 函数用途: 返回当前快照的全部向量 id。

@@ -792,7 +792,7 @@ def test_w1_primary_write_failure_records_error(tmp_path, monkeypatch) -> None:
     real_replace = _Path.replace
 
     def failing_replace(self, target):
-        if self.name.startswith(TEXT_CACHE_FILE) and self.name.endswith(".tmp"):
+        if TEXT_CACHE_FILE in self.name and self.name.endswith(".tmp"):  # 私有写的临时文件名带前导点
             raise OSError(28, "No space left on device")
         return real_replace(self, target)
 
@@ -814,7 +814,7 @@ def test_w1_write_failure_reaches_jsonl_health(tmp_path, monkeypatch) -> None:
     real_replace = _Path.replace
 
     def failing_replace(self, target):
-        if self.name.startswith(TEXT_CACHE_FILE) and self.name.endswith(".tmp"):
+        if TEXT_CACHE_FILE in self.name and self.name.endswith(".tmp"):  # 私有写的临时文件名带前导点
             raise OSError(28, "No space left on device")
         return real_replace(self, target)
 

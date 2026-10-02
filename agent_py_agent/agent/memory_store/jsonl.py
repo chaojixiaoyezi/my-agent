@@ -687,13 +687,36 @@ class _JsonlMemorySearchMixin:
         return selected, _scoped_retrieval_facts(retriever, len(active), self._semantic_status)
 
     # LLM: 检索侧缓存只是派生索引，读取失败必须静默退化为"没有缓存"（现嵌），结果不变。
+    #   先用权威向量库 memory_vectors.json 里已有的向量（_stored_vectors_for：身份对上、文本完全一致），剩下的才查正文哈希缓存；
+    #   第一次召回因此不再把写入/重建时嵌过的记忆再嵌一遍（S3，用户 10-02 拍板）。
     #   竞态（取缓存之后事实才被删/被替换）统一在回写点用 active 身份复核收口，
     #   见 `_remember_cached_vectors`，此处不做第二套判定（重复判据会变成不可达的冗余防御）。
-    # 函数用途: 按正文哈希取出已缓存的向量，供本轮检索复用、避免重复嵌入。
+    # 函数用途: 取出本轮检索可复用的文档向量（先向量库、后正文哈希缓存），避免重复嵌入。
     def _cached_vectors_for(
         self,
         docs: list[tuple[str, str]],
     ) -> dict[str, list[float]]:
+        reused = self._stored_vectors_for(docs)
+        rest = [(doc_id, text) for doc_id, text in docs if doc_id not in reused]
+        return {**reused, **self._text_cache_vectors_for(rest)}
+
+    # LLM: 只读权威向量库：库不可用、身份对不上或读失败都返回空（等于没有可复用的），不报错、不写盘；只认条目 text 与本轮
+    #   索引文本逐字相同的向量（写入与重建都按 index_text 嵌入并存这段文本，旧条目只要文本不同就不复用）。维度由检索器再核。
+    # 函数用途: 从 memory_vectors.json 取出能直接复用的文档向量。
+    def _stored_vectors_for(self, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
+        if not docs:
+            return {}
+        try:
+            store = self._vector_store()
+            stored = store.stored_vectors(doc_id for doc_id, _text in docs) if store is not None else {}
+        except Exception:
+            return {}
+        texts = dict(docs)
+        return {doc_id: vector for doc_id, (vector, text) in stored.items() if text == texts.get(doc_id)}
+
+    # LLM: 正文哈希缓存（memory_text_vectors.json）只补向量库没有的那部分；读失败等于没有缓存。
+    # 函数用途: 按正文哈希取出已缓存的向量。
+    def _text_cache_vectors_for(self, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
         try:
             # 懒建缓存必须放进 try：构造缓存时会读盘，读错误不能冒出检索路径
             # （模块合同：读失败等价于没有缓存，检索结果不变）。
@@ -1099,8 +1122,12 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
                 return
             # 写侧裁决统一交给 VectorStore.upsert（锁内重读最新快照）：空库由当前身份接管；有向量却没身份、身份不一致、
             # 维度不符或库读不了都拒绝混写，VectorIdentityError 在下方按 reason 记录降级。
-            vector = self._embedder.embed([record.content])[0]
-            store.upsert(_record_vec_id(record), vector, text=record.content, metadata=_record_payload(record))
+            # 嵌入与召回同一段索引文本（正文 + keywords_en），条目 text 存的就是它：召回据此判断能否直接复用（S3）。
+            from ..retrieval.text_vector_cache import index_text
+
+            text = index_text(record.content, record.attributes)
+            vector = self._embedder.embed([text])[0]
+            store.upsert(_record_vec_id(record), vector, text=text, metadata=_record_payload(record))
             self._record_semantic_health("index")
         except Exception as exc:
             self._record_semantic_health("index", exc)
@@ -1280,15 +1307,19 @@ class _JsonlMemoryVectorAdminMixin:
         return {"ok": True, "reason": "", "rebuilt": len(rows), **counts, "vector_count": store.summary()["vector_count"]}
 
     # LLM: 重建的嵌入阶段：一次只嵌一条，便于准确计数；首个失败即停并返回 ("embed", 原因码或异常类型名)，不吞成功。
+    #   与写入、召回同一段索引文本（index_text），条目 text 存这段文本，召回才能直接复用重建好的向量（S3）。
     # 函数用途: 为全部 active 记忆生成重建行，返回 (已成功的行, 失败信息或 None)。
     def _embed_rebuild_rows(self, records: list[MemoryRecord]) -> tuple[list[tuple], tuple[str, str] | None]:
+        from ..retrieval.text_vector_cache import index_text
+
         rows: list[tuple] = []
         for record in records:
+            text = index_text(record.content, record.attributes)
             try:
-                vector = self._embedder.embed([record.content])[0]
+                vector = self._embedder.embed([text])[0]
             except Exception as exc:
                 return rows, ("embed", getattr(exc, "reason", None) or type(exc).__name__)
-            rows.append((_record_vec_id(record), vector, record.content, _record_payload(record)))
+            rows.append((_record_vec_id(record), vector, text, _record_payload(record)))
         return rows, None
 
 
