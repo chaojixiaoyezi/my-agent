@@ -115,7 +115,11 @@ panels、skills、host_api；脚本文本是私有资源，读取不等于执行
 沿既有`TOOL_INVALID_ARGUMENTS`返回`CAPABILITY_RESOURCE_NOT_AVAILABLE`及同代入口`next_read`，
 让原恢复合同选择`repair_tool_arguments`。入口名由包声明决定，建议省略成员路径并带准确摘要和activation；
 须再次显式调用才进入原reader并在成功后pin，错误本身不读取或改引用。原get任务晋升策略仍可先发生。
-未知/未授权包、预期代次不符及声明成员真实缺字节/摘要变化保持原快照错误；取消和中断继续传播。
+未知/未授权包、受限快照里授权代次已变及声明成员真实缺字节/摘要变化保持原快照错误；取消和中断继续传播。
+包已在当前快照解析、只是显式`expected_*`与当前包不符（抄错或沿用旧建议）时，同样归`TOOL_INVALID_ARGUMENTS`：
+回执`error=CAPABILITY_PACKAGE_CONTINUATION_MISMATCH`，`continuation_mismatch`只列字段名，不回显当前摘要/代次，
+也不给同名新一代`next_read`；模型须不带旧字段重新search，再用当前`next_read`从入口重读，旧页码作废。
+宿主读取入口`read_package_page`遇到同样不符仍抛`SKILL_SNAPSHOT_STALE`。（H1，2026-10-01）
 本片参考Free-Code固定`6b25ab68`的FileReadTool结构化缺文件回执、Codex固定`578c1b22`的精确资源身份读取；
 只复用本仓已有参数错误与`package_read_parameters`，不移植参考项目的自动重试或模糊路径猜测。
 

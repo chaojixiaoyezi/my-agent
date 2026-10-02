@@ -192,6 +192,25 @@
   普通危险工具审批仍受原工具策略约束，本轮不另造 IM 确认通道。IM 纯文本不实现 TUI 本地面板动作。
 - **状态**：本地开发验证见 TESTS；未启动或部署 Gateway，真实飞书/QQ 收发尚未验证。
 
+## 能力包版本字段抄错不再报"快照失效"，改为可修参数（H1）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `34e4d874e`，已实现，待集成）
+
+- **来源**：能力包验收 C1 第 1 次真实运行（gpt-6-luna）。模型读 A 包时把 `expected_package_sha256` 抄错（前 36 位对，后面是编的），
+  `skill_search` 回 `SKILL_SNAPSHOT_UNAVAILABLE`（details `SKILL_SNAPSHOT_STALE`），模型看到的恢复建议是"停止使用旧授权，由父代理按当前
+  快照重新授权"。主线程没有父代理，包其实就在当前快照里；模型试 3 次后放弃 A 包，0 集产出。
+- **判断**：`_package_action` 走到版本比对时，包已经由当前（可能受限的）快照解析成功，说明这一代已获授权；真正的授权失效
+  （受限快照里授权的代次已变）在取快照时就由 `restricted` 抛出，走不到这里。所以此处的不符只是模型参数问题（抄错，或沿用旧版本
+  建议），应归参数错误，和 C18 的"未声明成员"同一类。
+- **做法**：
+  - `package_read.continuation_mismatches` 按固定顺序列出与当前包不符的显式版本字段名；宿主读取入口 `validate_package_continuation`
+    改为复用它，仍抛 `SKILL_SNAPSHOT_STALE`，行为不变。
+  - `skill_search` 遇到不符时返回 `TOOL_INVALID_ARGUMENTS`（原恢复合同选 `repair_tool_arguments`），回执带 `error=CAPABILITY_PACKAGE_CONTINUATION_MISMATCH`、
+    `continuation_mismatch`（字段名列表）和提示：旧页码作废，不带这些字段重新 search，再原样用当前 `next_read` 从入口重读。
+- **守住的边界**：
+  - 不回显当前摘要或激活代次，不给同名新一代的 `next_read`；模型必须自己重新检索，"不沿旧建议静默换代"的原合同保留。
+  - 不读正文、不 pin。未知或未授权的包、受限快照代次失效、成员真实缺字节或摘要变化仍走原快照错误。
+  - 没有新增错误码，也不改工具 schema。
+- **验证**：见 TESTS.md 同名节。修复版重跑 C1 的结果记在 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md` 的 C1 节。
+
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 
 - **现象**：主会话（gpt-6.1-sol，ChatGPT 订阅 Responses）的一次派活请求在第 6 轮工具后以 `ProviderResponseError: Responses 服务返回失败事件`
@@ -210,6 +229,10 @@
   - 触发这次修复的那一单，真实原因已无法追溯（当时没有记录）；上线后若再出现，看诊断里的 `provider_error.code`。
   - 观察：gpt-6-luna 实际接受了约 55.9 万输入 token（档案窗口 272000，宿主在估算 244800 时压缩），服务商实际上下文明显更大。
     要不要按服务商实际能力上调窗口（会推迟压缩、单次请求更贵）交用户决定；在那之前保持现状，宁可早压缩。
+  - 2026-10-01 C6 实测（ae，6 次真实调用）：800018、900018 输入 token 通过；922000、922018、950018、1000018 都被服务商以
+    `context_length_exceeded` 拒绝，宿主归为 `ProviderContextWindowError`（`MODEL_CONTEXT_WINDOW_EXCEEDED`）。实际上限在 900018（含）到
+    922000（不含）之间（经产品自己的 Responses 后端发出）。3a 决定按建议改为 900000，由 3a 用正式入口改生产档案；
+    生产另有 300000 的触发封顶，不会一次吃进 80 万。
 - **验证**：见 TESTS.md 同名节。
 
 ## 一次能力包选择在 gpt-6-luna 上失败：严格 schema 关键字 + 失败原因可诊断（2026-10-01，分支 `claude/ae-selection-failure-cause`，基于 main `0ca852195`，已实现，step16x 已上线并经真实 gpt-6-luna 复核）

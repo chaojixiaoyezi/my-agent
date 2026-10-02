@@ -8,6 +8,7 @@
 #   search 显式携带 resource_path 时在快照读取前报参数错，不静默丢条件或改成 get。
 #   错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
 #   get 的未声明成员沿原参数错误与同代入口建议纠正，不误报快照失效；取消、中断和真实读取失败保持原边界。
+#   包已在当前快照解析、仅显式 expected_* 不符时也是参数错误：只列字段名，不给同名新代建议，须重新检索。
 #   正文读取及 pin 共用 package_read；本工具仍沿原 ToolExecutor 准入，宿主加载不伪造工具回执。
 #   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
@@ -31,9 +32,9 @@ from ..tooling.models import (
     ToolRuntimePolicy,
 )
 from .package_read import (
+    continuation_mismatches,
     package_continuation,
     read_package_page,
-    validate_package_continuation,
 )
 from .package_resources import package_resource_reference
 from .package_snapshot import package_read_parameters
@@ -181,8 +182,9 @@ class SkillSearchTool(BaseTool):
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    # LLM: 原受限包与代次核验后，用同一 resolve 判未声明成员并仅给参数纠错；取消/中断传播，真实读取仍共用 reader 和原 pin。
-    # 函数用途: 检索或读取包资源；路径猜错时提供须重新显式调用的同代入口，不自动换路径、读正文或改任务引用。
+    # LLM: 原受限包解析后先比对显式代次，不符只回参数纠错；再用同一 resolve 判未声明成员并仅给参数纠错；
+    #   取消/中断传播，真实读取仍共用 reader 和原 pin。
+    # 函数用途: 检索或读取包资源；路径或版本字段填错时引导重新显式调用，不自动换路径、读正文或改任务引用。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
             return _invalid("包范围只接受 search/get，不能同时传 skill_id")
@@ -194,7 +196,9 @@ class SkillSearchTool(BaseTool):
             package = snapshot.resolve_package(package_id)
             if package is None:
                 raise SkillSnapshotError("CAPABILITY_PACKAGE_NOT_AVAILABLE")
-            validate_package_continuation(package, params)
+            mismatched = continuation_mismatches(package, params)
+            if mismatched:
+                return _continuation_mismatch(mismatched)
             offset = _nonnegative_int(params, "offset", 0)
             config = getattr(self.agent, "config", None) or default_agent_config()
             if action == "search":
@@ -378,6 +382,24 @@ def _invalid(
         payload["selector_mismatch"] = selector_mismatch
     if next_read is not None:
         payload["next_read"] = next_read
+    return ToolHandlerOutcome(
+        "skill_search",
+        False,
+        json.dumps(payload, ensure_ascii=False),
+        error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+# LLM: 只在包已由当前受限快照解析成功后调用，故不是授权失效；回执仅列不符字段名，不回显当前摘要/代次、
+#   不给同名新代 next_read、不读正文或 pin。真实授权失效由 _snapshot_for/restricted 抛出，仍走 SKILL_SNAPSHOT_UNAVAILABLE。
+# 函数用途: 版本字段抄错或沿用旧建议时，返回可修参数的失败，引导模型重新检索当前包并从入口重读。
+def _continuation_mismatch(fields: list[str]) -> ToolHandlerOutcome:
+    payload = {
+        "error": "CAPABILITY_PACKAGE_CONTINUATION_MISMATCH",
+        "continuation_mismatch": fields,
+        "hint": "这些版本字段与当前轮该包的身份不一致，可能抄错或来自旧版本建议；本次没有读取正文。"
+                "旧页码和旧 continuation 作废：不带这些字段用 action=search 重新检索该包，原样使用当前结果中的 next_read 从入口重读。",
+    }
     return ToolHandlerOutcome(
         "skill_search",
         False,

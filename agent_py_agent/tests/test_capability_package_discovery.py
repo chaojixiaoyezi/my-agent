@@ -169,7 +169,8 @@ def test_package_resource_search_and_get_are_explicit_and_paginated(tmp_path, sk
         params = payload["continuation"]
     assert "".join(bodies) == package.read().decode()
     stale = tool.execute({**params, "expected_activation_id": "0" * 64})
-    assert not stale.ok and stale.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+    assert not stale.ok and stale.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert json.loads(stale.output)["continuation_mismatch"] == ["expected_activation_id"]
 
 
 @pytest.mark.parametrize("params", [

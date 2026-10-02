@@ -272,6 +272,35 @@ $PY scripts/check_clean_package.py .
   原 `--confirm` 运输已复用，不自创额外确认通道；普通工具审批运输和 TUI 本地面板不是这组纯文本测试的覆盖。
   没有启动/停止 Gateway、my-agent 命令、联网安装依赖或读取真实会话/记忆正文；线上 CI 未作为验收来源。
 
+## 能力包版本字段抄错改为可修参数（H1）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `34e4d874e`）
+
+- **对应问题**：C1 第 1 次真实运行里 gpt-6-luna 抄错 A 包摘要，`skill_search` 回"快照失效、停止使用旧授权"，模型放弃 A 包。
+- **改动的既有用例**（原来断言快照失效，现在断言参数纠错；"不给同名新一代建议、不读、不 pin"的断言保留）：
+  - `test_capability_package_resource_scope.py` 的 `test_navigation_rejects_changed_generation_without_read_pin_or_disclosure`、
+    `test_undeclared_member_with_old_generation_cannot_suggest_same_named_new_entry`；
+  - `test_capability_package_selector_recovery.py` 的 `test_old_read_suggestion_rejects_reenabled_same_content_before_first_pin`；
+  - `test_capability_package_discovery.py` 的 `test_package_resource_search_and_get_are_explicit_and_paginated`（分页续读带错激活代次）。
+- **新增**（`test_capability_package_resource_scope.py`）：
+  - `test_mistyped_generation_executor_repairs_arguments_then_search_reads_current_entry`：按 C1 真实形态（前 36 位对）经真实 ToolExecutor，
+    回 `TOOL_INVALID_ARGUMENTS`、恢复动作 `repair_tool_arguments`，不含当前摘要和 `next_read`，任务没有 pin；重新 search 后原样用
+    `next_read` 读到入口，才 pin 到原任务；
+  - `test_both_mismatched_fields_are_listed_in_order_without_disclosing_current_identity`：get 和 search 都按固定顺序列出两个字段，不回显当前值；
+  - `test_authorized_generation_change_still_fails_closed_as_snapshot_unavailable`：受限快照里授权代次已变，仍是 `SKILL_SNAPSHOT_UNAVAILABLE`
+    （details `SKILL_SNAPSHOT_STALE`）。
+- 宿主读取入口照旧拒绝旧代次，由原 `test_capability_package_read.py::test_old_generation_is_rejected_without_any_member_read_or_pin` 守住。
+- **变异 9/9 被抓住**：退回快照失效、两个字段都错才算、给同名新一代 `next_read`、不比激活代次、字段顺序反过来、宿主读取不再拒绝、
+  错误码仍报快照不可用、缺字段也算不符、search 跳过比对。
+- **范围**：guards9 加能力包相关 focused 文件，见交付记录；修复版真实重跑见 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md` 的 C1 节。
+
+## gpt-6-luna 实际输入上限探测（C6）（2026-10-01，ae，被测代码 `34e4d874e`）
+
+- 方法：隔离 home，目录副本只含 luna 一个档案（refresh_token 清空、600，用完删除），经产品自己的 Responses 后端发单条用户消息；
+  内容为常见英文词填充（约 1 词 1 token，另有 18 token 固定开销）。限 6 次真实调用，二分查找。
+- 结果（按调用顺序）：1000018 拒、800018 过、900018 过、950018 拒、922018 拒、922000 拒。拒绝都是服务商 `context_length_exceeded`，
+  宿主归 `ProviderContextWindowError`／`MODEL_CONTEXT_WINDOW_EXCEEDED`。这也是"上下文超限"分类第一次在真实服务商上走到
+  （此前只有假连接测试）；超限后的压缩恢复本身这次没有走。
+- 结论：上限在 900018（含）到 922000（不含）之间，建议窗口 900000。证据：`~/.my-agent/decision-evidence/c6-luna-window/`（仓库外）。
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，

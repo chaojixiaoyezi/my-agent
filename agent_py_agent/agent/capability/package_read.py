@@ -32,13 +32,19 @@ def package_continuation(package: CapabilityPackageSnapshot, action: str, offset
             "expected_package_sha256": package.package_sha256, "expected_activation_id": package.activation_id}
 
 
-# LLM: 显式提供的版本字段必须严格相等；不存在的字段保留原首次工具读取语义，不补猜代次。
-# 函数用途: 在读取前拒绝来自旧版本或旧激活的页请求，供检索和共享正文入口复用。
+# LLM: 只比较显式提供的版本字段并按固定顺序返回字段名，不回显期望值；不存在的字段保留原首次读取语义，不补猜代次。
+# 函数用途: 列出与当前包身份不符的版本字段，模型工具据此给参数纠错，宿主读取据此拒绝。
+def continuation_mismatches(package: CapabilityPackageSnapshot, params: Mapping[str, object]) -> list[str]:
+    return [key for key, expected in (("expected_package_sha256", package.package_sha256),
+                                      ("expected_activation_id", package.activation_id))
+            if key in params and params[key] != expected]
+
+
+# LLM: 宿主已选版本与当前包不符时仍是快照失效；模型工具改走 continuation_mismatches 的参数纠错，两边不得混用。
+# 函数用途: 在宿主共享正文入口读取前拒绝来自旧版本或旧激活的页请求。
 def validate_package_continuation(package: CapabilityPackageSnapshot, params: Mapping[str, object]) -> None:
-    for key, expected in (("expected_package_sha256", package.package_sha256),
-                          ("expected_activation_id", package.activation_id)):
-        if key in params and params[key] != expected:
-            raise SkillSnapshotError("SKILL_SNAPSHOT_STALE")
+    if continuation_mismatches(package, params):
+        raise SkillSnapshotError("SKILL_SNAPSHOT_STALE")
 
 
 # LLM: 调用方必须传当前 owner/child 范围的冻结快照；宿主只选 entry_document 并分配总预算，reader 不扩大 snapshot 或创建任务。
@@ -114,4 +120,7 @@ def _check_read_authority(execution_authority_check: Callable[[], None] | None) 
     raise_if_cancelled()
 
 
-__all__ = ["PackagePageChecks", "package_continuation", "read_package_page", "validate_package_continuation"]
+__all__ = [
+    "PackagePageChecks", "continuation_mismatches", "package_continuation", "read_package_page",
+    "validate_package_continuation",
+]

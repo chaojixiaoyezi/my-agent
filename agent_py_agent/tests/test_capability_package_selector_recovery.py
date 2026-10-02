@@ -264,6 +264,7 @@ def test_old_read_suggestion_rejects_reenabled_same_content_before_first_pin(tmp
     assert fresh.package_sha256 == old.package_sha256 and fresh.activation_id != old.activation_id
     pins = _observe_pins(monkeypatch)
     stale = tool.execute(payload["next_read"])
-    assert not stale.ok and stale.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
-    assert "SKILL_SNAPSHOT_STALE" in stale.output and "body" not in json.loads(stale.output)
+    assert not stale.ok and stale.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert json.loads(stale.output)["continuation_mismatch"] == ["expected_activation_id"]
+    assert "body" not in json.loads(stale.output) and fresh.activation_id not in stale.output
     assert pins == []

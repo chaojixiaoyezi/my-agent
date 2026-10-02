@@ -660,6 +660,48 @@ D1／G05 Goal 续跑熔断的过程：
   - 若一定要覆盖，只能换成脚本无法代劳的任务，例如每份都要模型自己理解和改写的长文。这已超出本次批准的范围。
 - D5 建议先补可诊断性：失败时把异常类型或结构化原因记进选择回执或日志，再判断是否和 Responses 后端有关。
 
+## C1／C2 长篇原著改编短剧真实运行（gpt-6-luna，2026-10-01）
+
+结论（第 1 次，被测 `34e4d874e`）：
+- **未命中**：0 集产出，没有压缩。原因是宿主缺陷 H1（模型抄错 A 包摘要，回执却说"快照失效、停止使用旧授权"），不是模型写脚本绕开阅读。
+- H1 已在 `claude/ae-skill-continuation-mismatch` 修复（见 DESIGN_LEDGER 同名节）。修复版用同一需求、同一 prompt 重跑，属于验证修复，结果补在"第 2 次"。
+
+### 任务设计（让脚本做不了）
+- **原文**：《水浒传》七十回本（Project Gutenberg #23863，公版），取前 40 回，每回一份 `inputs/第NN回.json`（`drama_text_source.v1`，
+  段落 id `H{NN}-P{nnn}`），共 885 段、302027 字，另有 `回目清单.json`。
+- **包**：冻结的 A（`drama-text-a`，`98e21e0a…`）和 B（`drama-workflow-b`，`7b9b77c6…`），经产品正式入口安装启用。
+- **要求**：每回改一集，需要理解人物、情节和因果；每集在 `brief.adaptation_note` 里原样引用本回一句关键原文并写明第几回；
+  用 A、B 包的方法、模板和检查工具。
+- **判据**（测试者跑完后只读核对，`verify_c1.py`）：
+  - A 包 `check_delivery.py` 逐集核对；
+  - B 包 `check_continuity.py` 核对整季；
+  - 引文能在该回原文里原样找到（不少于 8 字）；
+  - 写明了回目；
+  - 镜头的 `source_ids` 全部属于本回。
+- **配置**：
+  - 一次选择打开，`max_tool_rounds: 600`，审批 auto，不用 Goal；
+  - 隔离 home、私有 8441、`env -i` 启动；luna 目录副本只含一个档案，refresh_token 清空，权限 600，用完删除；
+  - 止损线：4000 万 token、4 小时、10 个空片。
+
+### 第 1 次结果
+- **选择**：选中 A+B（ENTRY_PARTIAL），任务 pin 正确。
+- **读 A 包**：3 次 `skill_search` 全部失败。
+  - 外层码是 `SKILL_SNAPSHOT_UNAVAILABLE`，details 是 `SKILL_SNAPSHOT_STALE`。
+  - 参数里的 `expected_package_sha256` 前 36 位与真实摘要相同，后面是模型编的。
+  - B 包摘要抄对了，入口和 `methods/workflow.md` 都正常读到。
+- **收尾**：模型照回执的恢复建议"停止使用旧授权，由父代理按当前快照重新授权"放弃了 A 包，232 秒后自己收尾。
+  - 请求 done，15 个模型轮，输入 634585 token，0 集产出；
+  - 没有压缩：上下文估算峰值约 7 万，触发线 244800。
+- **离线复现**：当前快照和受限快照里都有 A，包确实可读。问题只在回执把"参数抄错"说成了"授权失效"。
+
+### 证据
+`~/.my-agent/decision-evidence/c1-novel-luna/`（仓库外）：
+- `prep/`：原文、生成器、核对脚本、stage、watcher；
+- `run1-34e4/`：
+  - `tool-calls.json`，只含工具的结构化字段；
+  - `c1-watch.jsonl`、`stage-report.json`、`prompt.txt`；
+  - 复现脚本。
+
 ## C25空选后能力包对主线程的可见性只读核对与脚本复现（2026-09-28）
 
 针对 [C24](#c24固定9f88的131072自然长任务两代压缩2026-09-28) 的观察①：包选择结果为空之后，已安装并启用的能力包对主线程是否仍可发现、可读取。方法是固定 `9f88e4905` 源码的只读核对、一份本地合同测试和一次 8435 脚本模型端到端；没有产品、测试或配置改动。`origin/main` `60f6f485a` 对 `skill_search_tool.py`、`skill_snapshot.py`、`package_provider.py` 的差异只是读取失败回执带结构化内部原因（`e4a3dba08`），不改下述路径。

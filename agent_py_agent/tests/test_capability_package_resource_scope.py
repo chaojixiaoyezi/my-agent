@@ -91,9 +91,11 @@ def test_navigation_rejects_changed_generation_without_read_pin_or_disclosure(
     changed = replace(package, **{"package_sha256" if field == "expected_package_sha256" else "activation_id": "0" * 64})
     agent.current_skill_snapshot = lambda: replace(snapshot, packages=(changed,))
     outcome = tool.execute(navigation)
-    assert not outcome.ok and outcome.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+    assert not outcome.ok and outcome.error_code == "TOOL_INVALID_ARGUMENTS"
     payload = json.loads(outcome.output)
-    assert "next_search" not in payload and "resource_namespace" not in payload
+    assert payload["error"] == "CAPABILITY_PACKAGE_CONTINUATION_MISMATCH"
+    assert payload["continuation_mismatch"] == [field] and "0" * 64 not in outcome.output
+    assert "next_search" not in payload and "next_read" not in payload and "resource_namespace" not in payload
     assert "matches" not in payload and "body" not in payload and reads == pins == []
 
 
@@ -188,6 +190,68 @@ def test_undeclared_member_executor_recovery_repairs_arguments_then_pins_origina
     assert task.thread_id == thread.thread_id and task.skill_snapshot_refs == (reference,)
 
 
+def test_mistyped_generation_executor_repairs_arguments_then_search_reads_current_entry(tmp_path, monkeypatch):
+    agent, _store, _entries = _agent(tmp_path)
+    thread, params = _unpromoted_turn(agent)
+    package = agent.current_skill_snapshot().resolve_package("story-a")
+    reference = package.to_ref()
+    pins = _observe_pins(monkeypatch)
+    # 真实 C1 形态：摘要前 36 位抄对、其后全错，激活代次正确；包仍在当前快照，不能导向重新授权。
+    real = package.package_sha256
+    typo = real[:36] + "".join("1" if char == "0" else "0" for char in real[36:])
+    arguments = {"action": "get", "package_id": "story-a",
+                 "expected_package_sha256": typo, "expected_activation_id": package.activation_id}
+    original = deepcopy(arguments)
+    failed = _execute(agent, params, arguments, "mistyped-generation")
+    assert not failed.ok and failed.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert failed.recommended_action == "repair_tool_arguments"
+    payload = json.loads(failed.output)
+    assert payload["continuation_mismatch"] == ["expected_package_sha256"]
+    assert "next_read" not in payload and "body" not in payload and real not in failed.output
+    assert arguments == original and pins == []
+    assert all(not task.skill_snapshot_refs for task in agent.conversation_store.tasks.list(thread.thread_id))
+    found = _execute(agent, params, {"action": "search", "query": "story-a"}, "search-current-package")
+    retry = next(row["next_read"] for row in json.loads(found.output)["matches"] if row.get("package_id") == "story-a")
+    assert retry == {"action": "get", "package_id": "story-a",
+                     "expected_package_sha256": real, "expected_activation_id": package.activation_id}
+    read = _execute(agent, params, retry, "read-current-entry")
+    assert read.ok, read.output
+    assert json.loads(read.output)["source_ref"]["resource_path"] == package.entry_document and pins == [reference]
+
+
+def test_both_mismatched_fields_are_listed_in_order_without_disclosing_current_identity(
+    tmp_path, skill_catalog_factory, monkeypatch,
+):
+    reads = []
+    package = package_fixture(reads=reads)
+    _, _, _, tool = discovery_fixture(tmp_path, skill_catalog_factory, [package])
+    pins = _observe_pins(monkeypatch)
+    for action in ("get", "search"):
+        outcome = tool.execute({"action": action, "package_id": package.package_id,
+                                "expected_activation_id": "b" * 64, "expected_package_sha256": "a" * 64})
+        assert not outcome.ok and outcome.error_code == "TOOL_INVALID_ARGUMENTS"
+        payload = json.loads(outcome.output)
+        assert payload["continuation_mismatch"] == ["expected_package_sha256", "expected_activation_id"]
+        assert package.package_sha256 not in outcome.output and package.activation_id not in outcome.output
+    assert reads == pins == []
+
+
+def test_authorized_generation_change_still_fails_closed_as_snapshot_unavailable(
+    tmp_path, skill_catalog_factory, monkeypatch,
+):
+    reads = []
+    old = package_fixture(reads=reads)
+    _, snapshot, agent, tool = discovery_fixture(tmp_path, skill_catalog_factory, [old])
+    current = replace(snapshot, packages=(replace(old, activation_id="0" * 64),))
+    agent.current_skill_snapshot = lambda: current.restricted([old.stable_id], expected_refs=[old.to_ref()])
+    pins = _observe_pins(monkeypatch)
+    outcome = tool.execute({"action": "get", "package_id": old.package_id,
+                            "expected_package_sha256": old.package_sha256, "expected_activation_id": old.activation_id})
+    assert not outcome.ok and outcome.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+    assert json.loads(outcome.output)["details"] == {"error_code": "SKILL_SNAPSHOT_STALE"}
+    assert reads == pins == []
+
+
 @pytest.mark.parametrize("field", ["package_sha256", "activation_id"])
 def test_undeclared_member_with_old_generation_cannot_suggest_same_named_new_entry(
     tmp_path, skill_catalog_factory, monkeypatch, field,
@@ -201,8 +265,11 @@ def test_undeclared_member_with_old_generation_cannot_suggest_same_named_new_ent
                  "expected_package_sha256": old.package_sha256, "expected_activation_id": old.activation_id}
     original = deepcopy(arguments)
     failed = tool.execute(arguments)
-    assert not failed.ok and failed.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
-    assert json.loads(failed.output) == {"error": "SKILL_SNAPSHOT_STALE", "details": {"error_code": "SKILL_SNAPSHOT_STALE"}}
+    assert not failed.ok and failed.error_code == "TOOL_INVALID_ARGUMENTS"
+    payload = json.loads(failed.output)
+    assert set(payload) == {"error", "continuation_mismatch", "hint"}
+    assert payload["error"] == "CAPABILITY_PACKAGE_CONTINUATION_MISMATCH"
+    assert payload["continuation_mismatch"] == [f"expected_{field}"]
     assert arguments == original and reads == pins == []
 
 
