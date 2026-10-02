@@ -2657,7 +2657,7 @@
       "value": 8,
       "unit": "个",
       "category": "上限预算",
-      "description": "与能力观测同口径：一条请求最多保留最近 8 条实验记录（正常每轮只有一次实验调用）。"
+      "description": "超出的旧记录直接丢弃，防止实验账无限增长。"
     },
     {
       "name": "_ADMISSION_WAIT_REFRESH_SECONDS",

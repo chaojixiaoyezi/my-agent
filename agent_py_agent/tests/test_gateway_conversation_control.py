@@ -4041,19 +4041,22 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("endpoint", ["ask", "control"])
-@pytest.mark.parametrize(("command", "kind", "ok", "reason", "error_code"), [
-    ("/not-a-command anything", "unsupported", False, None, None),
-    ("/plugins", "plugin_command", True, None, None),
-    ("/plugins help install", "plugin_command", True, None, None),
-    ("/plugins@", "plugin_command", False, "invalid_plugin_id", "INVALID_COMMAND_ARGUMENTS"),
-    ("/PLUGINS@Demo run", "plugin_command", False, "unknown_plugin", "UNKNOWN_PLUGIN"),
-    ('/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal', "plugin_command", False, "unknown_plugin", "UNKNOWN_PLUGIN"),
-    ('/plugins install "中文 a.whl"', "plugin_command", False, None, "PLUGIN_PERMISSION_DENIED"),
-    ("/plugins install", "plugin_command", False, "missing_argument", "INVALID_COMMAND_ARGUMENTS"),
-    ('/plugins install "未闭合', "plugin_command", False, "unclosed_quote", "INVALID_COMMAND_ARGUMENTS"),
+# C10（2026-10-01）起 IM 回执与 TUI 只共用 ok/message/error_code，细分 reason 只留在 TUI 目录回执里。
+# 本用例关闭按用户分 owner，IM 请求就在本机 local/main 上跑，按 /settings 同一规则算管理员；
+# 所以安装缺失文件走到安装工具的参数拒绝。普通用户被拒由 test_plugins_chat_control.py 覆盖。
+@pytest.mark.parametrize(("command", "kind", "ok", "error_code"), [
+    ("/not-a-command anything", "unsupported", False, None),
+    ("/plugins", "plugins", True, None),
+    ("/plugins help install", "plugins", True, None),
+    ("/plugins@", "plugins", False, "INVALID_COMMAND_ARGUMENTS"),
+    ("/PLUGINS@Demo run", "plugins", False, "UNKNOWN_PLUGIN"),
+    ('/plugins@demo run --path "C:\\new folder\\中文.txt" -- -x | literal', "plugins", False, "UNKNOWN_PLUGIN"),
+    ('/plugins install "中文 a.whl"', "plugins", False, "TOOL_INVALID_ARGUMENTS"),
+    ("/plugins install", "plugins", False, "INVALID_COMMAND_ARGUMENTS"),
+    ('/plugins install "未闭合', "plugins", False, "INVALID_COMMAND_ARGUMENTS"),
 ])
 def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
-    tmp_path, monkeypatch, endpoint, command, kind, ok, reason, error_code,
+    tmp_path, monkeypatch, endpoint, command, kind, ok, error_code,
 ) -> None:
     from agent_py_agent.agent.gateway_parts import http_handlers
 
@@ -4104,13 +4107,17 @@ def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
         assert payload["status"] == "control"
     assert payload["kind"] == kind
     assert payload["ok"] is ok
-    assert payload.get("reason") == reason
     assert payload.get("error_code") == error_code
     assert agent.conversation_store.guidance.pending("request", "req-1") == guidance_before
     assert list(paths.inbox.glob("*.json")) == []
     assert request_path.read_bytes() == before
     assert not interrupted.is_set()
-    control.assert_not_called()
+    # C10（2026-10-01）起 IM 的 /plugins 走持久控制回执（同一消息重送不重复执行），不再在 /ask、/control 里提前短路；
+    # 非插件的未知命令仍不进持久控制。
+    if kind == "plugins":
+        control.assert_called()
+    else:
+        control.assert_not_called()
     model.assert_not_called()
 
 
