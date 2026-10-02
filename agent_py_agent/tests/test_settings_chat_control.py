@@ -222,7 +222,7 @@ def test_loader_metadata_is_hidden_from_lists_and_search_but_show_still_works(mo
 def test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works(monkeypatch, user_config):
     """/model 登录生成的 OAuth 运行引用由模型菜单写入、请勿手填：列表和搜索不出现，show 仍能查看且仍是边界。"""
     registry = parameter_registry()
-    assert MANAGED_ELSEWHERE_KEYS == {"model_auth_ref"} and MANAGED_ELSEWHERE_KEYS <= set(registry)
+    assert {"model_auth_ref"} == MANAGED_ELSEWHERE_KEYS and set(registry) >= MANAGED_ELSEWHERE_KEYS
     assert not MANAGED_ELSEWHERE_KEYS & set(listed_parameters())
     assert not MANAGED_ELSEWHERE_KEYS & {spec.key for spec in search_parameters("model", limit=0)}
     lines = _run(monkeypatch, user_config, "/settings all").message.splitlines()
