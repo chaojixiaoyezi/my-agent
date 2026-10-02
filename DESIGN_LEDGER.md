@@ -207,7 +207,7 @@
   - **交付存在**：缺失或打不开返工 2 次。
   - 开关 `capability_pack_host_verification_enabled` 仓库默认 false。
 - **块 2 已实现**：`capability/pack_verifier_runner.py`。它只从安装 blob 取钉住的原件，在 `AttemptExecutionSandbox` 里跑（断网、整根只读、只写临时目录），只认 `pack_verifier_result.v1`。`AttemptSandboxSpec.network_access=False` 在 macOS 补了 `(deny network*)`，就绪检查会实际试一次断网，失败就不跑。macOS 和 Linux 车道都实测过，车道要加 `NET_ADMIN` 才能真跑断网用例。
-- **块 3 已实现**（分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `60e100dcb`）：
+- **块 3 已实现**（分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`）：
   - 本 run 第一次改工作区前记基线；写工具成功后马上检查，回执附有界摘要；收尾时对本回合新建或改过的交付物再查（shell 写的也算），有错误返工 1 次；
   - 结果、返工次数都记在每 run 一本的核验账本，Compact 和重启后不重置；
   - 回合结束发宿主提示（`source=pack_verification`），并写 `channel_delivery.pack_verifications`；

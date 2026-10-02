@@ -1,6 +1,6 @@
 # Gateway 维护状态
 
-## 能力包宿主核验结论随回合结束发宿主提示（2026-10-02，ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `60e100dcb`，待集成）
+## 能力包宿主核验结论随回合结束发宿主提示（2026-10-02，ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`，待集成）
 
 - 回合正常返回后，`request_pack_verification_notice.queue_pack_verification_notice` 用 `AgentRunResult.pack_verifications`（核验账本的结构化事实）写一条宿主提示：`source=pack_verification`，`code=summary`。
 - 提示排入原 pending_host_notices，和决策实验晋升提示同一批发布与提交；文字只拼结构化事实，模型看不到。
