@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 846,
+  "count": 861,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1100,6 +1100,118 @@
       "description": "一次最多返回几条（schema 上限与执行时截断共用）。"
     },
     {
+      "name": "MAX_FIELD_MATCH_FILE_BYTES",
+      "file": "agent_py_agent/agent/capability/pack_verification_matching.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "字段比对时读取文件的字节上限；更大的文件不解析，按“不匹配”处理。"
+    },
+    {
+      "name": "MAX_SCAN_HASHED_FILE_BYTES",
+      "file": "agent_py_agent/agent/capability/pack_verification_matching.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "快照里计算摘要的单文件字节上限；更大的文件只记大小、sha256 为空，不会被当作可交给检查程序的输入。"
+    },
+    {
+      "name": "MAX_SCAN_MATCHED_FILES_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_matching.py",
+      "value": 512,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "工作区快照最多记录的匹配文件数；超限记 truncated。"
+    },
+    {
+      "name": "MAX_SCAN_VISITED_ENTRIES_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_matching.py",
+      "value": 20000,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "工作区快照最多走访的目录条目数（文件和目录合计），防止在很大的目录树上卡住；超限记 truncated。"
+    },
+    {
+      "name": "MAX_NOTICE_RESULTS_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_report.py",
+      "value": 4,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "宿主提示里最多列出的检查结果条数。"
+    },
+    {
+      "name": "MAX_NOTICE_TEXT_CHARS",
+      "file": "agent_py_agent/agent/capability/pack_verification_report.py",
+      "value": 480,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "宿主提示正文的字符上限（HostNotice 本身上限 500）。"
+    },
+    {
+      "name": "MAX_RUN_FACT_RESULTS_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_report.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "最终事实里最多保留的检查结果条数。"
+    },
+    {
+      "name": "MAX_CLOSEOUT_TARGETS_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_service.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "收尾检查最多核验的目标文件数；超出的记 truncated，不静默当成全查了。"
+    },
+    {
+      "name": "MAX_PACK_VERIFICATION_REWORK_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_service.py",
+      "value": 1,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "收尾检查有错误时最多给几次返工提示（3a 审定：检查程序报错返工 1 次，只有警告不返工）。"
+    },
+    {
+      "name": "MAX_POST_WRITE_TARGETS_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_service.py",
+      "value": 4,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "一次写工具调用最多核验的目标文件数（apply_patch 可能一次改很多文件）。"
+    },
+    {
+      "name": "MAX_REWORK_SAMPLES_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_service.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "返工提示里每个交付物最多列几条错误样例（code + 位置）。"
+    },
+    {
+      "name": "MAX_REWORK_TARGETS_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verification_service.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "返工提示里最多列几个出错的交付物。"
+    },
+    {
+      "name": "MAX_VERIFIER_ERROR_SAMPLES_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verifier_runner.py",
+      "value": 10,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "结果里保留的前几条错误样例（code + 位置）个数，供返工提示定位；摘要只带其中前几条。"
+    },
+    {
+      "name": "MAX_VERIFIER_LOCATION_CHARS",
+      "file": "agent_py_agent/agent/capability/pack_verifier_runner.py",
+      "value": 128,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "错误样例里位置文字的字符上限；位置由检查程序给出，宿主不解释，只截断后转给模型定位。"
+    },
+    {
       "name": "MAX_VERIFIER_MEMBER_BYTES",
       "file": "agent_py_agent/agent/capability/pack_verifier_runner.py",
       "value": 4194304,
@@ -1114,6 +1226,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "检查程序 stdout 的字节上限；超过即判输出无效，防止异常程序把账本撑大。"
+    },
+    {
+      "name": "MAX_VERIFIER_SUMMARY_SAMPLES_COUNT",
+      "file": "agent_py_agent/agent/capability/pack_verifier_runner.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "有界摘要里附带的错误样例条数。"
     },
     {
       "name": "_DEFAULT_TTL_SECONDS",

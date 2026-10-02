@@ -1,6 +1,6 @@
 # Verification：开发推进
 
-## 2026-10-02 能力包宿主核验接进工具执行缝隙（ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3`，基于 `ce2b833a7`，待集成）
+## 2026-10-02 能力包宿主核验接进工具执行缝隙（ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `60e100dcb`，待集成）
 
 - `tool_call_runtime.execute_traced_tool_call` 新增两处调用，都在开关 `capability_pack_host_verification_enabled`（默认 false）打开、本任务钉住了声明检查程序的能力包时才生效：
   - `pre_handler_gate` 放行时，本 run 第一次改工作区的工具执行前记基线；

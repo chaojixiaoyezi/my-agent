@@ -184,7 +184,7 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
-## 能力包 v2 块 3：宿主写完就查、收尾再查、返工 1 次、宿主提示与交付事实（2026-10-02，分支 `claude/ae-capability-packs-v2-b3`，基于块 2 头 `ce2b833a7`）
+## 能力包 v2 块 3：宿主写完就查、收尾再查、返工 1 次、宿主提示与交付事实（2026-10-02，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `60e100dcb`）
 
 - **新增** `agent_py_agent/tests/test_pack_verification_matching.py`（18 项）：
   - glob 语义：`**` 匹配零个或多个整段，`*`、`?` 不跨目录，特殊字符按字面；
