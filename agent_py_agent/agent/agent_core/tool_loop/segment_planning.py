@@ -7,7 +7,8 @@ from collections.abc import Callable
 from ...tooling.concurrency import ToolConcurrencyDescriptor, concurrency_conflicts
 from ...tooling.runtime_contracts import ToolCall
 
-_DEFAULT_MAX_PARALLEL_TOOL_CALLS = 8
+# 默认最大并行工具调用数。
+_DEFAULT_MAX_PARALLEL_TOOL_CALL_COUNT = 8
 
 
 # LLM: 扫描每条候选时先查询 Compact，再查询调度描述；命中屏障、冲突或批上限即停，不能预取后续事实或吞掉异常。
@@ -46,7 +47,7 @@ def resolve_parallel_batch_limit(
     tool_batch_limit: int | None,
 ) -> int:
     if parallel_limit is None or parallel_limit < 0:
-        parallel_limit = _DEFAULT_MAX_PARALLEL_TOOL_CALLS
+        parallel_limit = _DEFAULT_MAX_PARALLEL_TOOL_CALL_COUNT
     if tool_batch_limit is None or tool_batch_limit <= 0:
         tool_batch_limit = 0
     limits = [value for value in (parallel_limit, tool_batch_limit) if value > 0]

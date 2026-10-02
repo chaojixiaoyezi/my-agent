@@ -63,18 +63,18 @@ def test_disabled_with_zero_or_negative_keep() -> None:
 
 
 def test_builder_uses_the_named_constant_for_keep_recent() -> None:
-    # 拼装层已改用具名常量 DEFAULT_MICROCOMPACT_KEEP_RECENT（2026-09-28 参数减量）：
+    # 拼装层已改用具名常量 DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT（2026-09-28 参数减量）：
     # 这里钉住"常量值生效"（5 条结果保留最近 8 条 → 全保留，不回收），
     # 以及"门槛仍是代码常量"这一事实（正文 3000 > 1500，若 keep_recent 更小就会回收）。
     from agent_py_agent.agent.agent_core.tool_context.microcompact import (
-        DEFAULT_MICROCOMPACT_KEEP_RECENT,
+        DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT,
     )
     from agent_py_agent.agent.prompting_parts.builder import _task_and_transcript_section
 
     class _Cfg:
         """配置里已没有 keep_recent；拼装层不再读它。"""
 
-    assert DEFAULT_MICROCOMPACT_KEEP_RECENT >= 5, "常量值变了：本用例假设它 >=5 才会全部保留，请同步调整"
+    assert DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT >= 5, "常量值变了：本用例假设它 >=5 才会全部保留，请同步调整"
     ctx = [_entry(r) for r in range(5)]
     section = _task_and_transcript_section(_Cfg(), "任务", ctx)
     # 保留条数 ≥ 总数 → 一条都不回收
@@ -82,10 +82,10 @@ def test_builder_uses_the_named_constant_for_keep_recent() -> None:
     # 拼装层是从定义模块里取的常量（函数内 import），所以改定义模块才会影响它：
     # 改小常量后必须开始回收 —— 证明拼装层读的确实是这个常量。
     import agent_py_agent.agent.agent_core.tool_context.microcompact as microcompact_mod
-    original = microcompact_mod.DEFAULT_MICROCOMPACT_KEEP_RECENT
+    original = microcompact_mod.DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT
     try:
-        microcompact_mod.DEFAULT_MICROCOMPACT_KEEP_RECENT = 2
+        microcompact_mod.DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT = 2
         section2 = _task_and_transcript_section(_Cfg(), "任务", ctx)
         assert section2.count("microcompacted") == 3, "改成 2 后应回收 3 条"
     finally:
-        microcompact_mod.DEFAULT_MICROCOMPACT_KEEP_RECENT = original
+        microcompact_mod.DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT = original

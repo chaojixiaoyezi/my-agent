@@ -23,7 +23,8 @@ _KIND_EXTENSIONS = {
     "zip": (".zip",),
 }
 _DEFAULT_SEARCH_ROOTS = ("outputs", "artifacts")
-_MAX_CANDIDATES = 128
+# 产物定位最多返回的候选路径数，防目录过大拖慢检索。
+_MAX_ARTIFACT_CANDIDATE_COUNT = 128
 _SAFE_EXTENSION_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}$")
 _EXPLICIT_EXTENSION_KEYS = (
     "preferred_extension",
@@ -92,8 +93,8 @@ def _candidate_paths(item: dict[str, Any], workspace: Path, extensions: tuple[st
     candidates: list[Path] = []
     for root in _search_roots(item):
         root_path = _resolve_output_path(root, workspace)
-        candidates.extend(_candidate_paths_under_root(root_path, extensions, remaining=_MAX_CANDIDATES - len(candidates)))
-        if len(candidates) >= _MAX_CANDIDATES:
+        candidates.extend(_candidate_paths_under_root(root_path, extensions, remaining=_MAX_ARTIFACT_CANDIDATE_COUNT - len(candidates)))
+        if len(candidates) >= _MAX_ARTIFACT_CANDIDATE_COUNT:
             break
     candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
     return candidates

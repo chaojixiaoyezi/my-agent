@@ -124,6 +124,7 @@ from .task_progress_tool import TaskProgressTool as TaskProgressTool
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
+# 派生代理名里的默认层级深度，用于生成可读的系统血缘名字。
 _DEFAULT_DEPTH = 1
 
 

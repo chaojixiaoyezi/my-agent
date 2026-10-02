@@ -18,7 +18,7 @@ from ...common.json_io import (
 
 SCHEMA = "owner_context_calibration.v1"
 # 每个 owner 最多留这么多个分词身份（按最近观测保留），文件永远很小。
-_MAX_ENTRIES = 32
+_MAX_ENTRY_COUNT = 32
 # 本地估算低于这个量的调用不更新比值：问候、表达轮这类小请求的比值受固定开销影响大，会把大上下文的折算带偏。
 MIN_CARRY_RAW_TOKENS = 4096
 
@@ -57,7 +57,7 @@ def record_owner_ratio(agent: object, key: str, raw_tokens: int, provider_tokens
             entries = payload.get("entries") if payload.get("schema") == SCHEMA else None
             kept = {k: v for k, v in (entries or {}).items() if isinstance(k, str) and _valid_entry(v)}
             kept[key] = entry
-            newest = sorted(kept.items(), key=lambda item: float(item[1]["observed_at"]), reverse=True)[:_MAX_ENTRIES]
+            newest = sorted(kept.items(), key=lambda item: float(item[1]["observed_at"]), reverse=True)[:_MAX_ENTRY_COUNT]
             write_json_file_atomic_unlocked(path, {"schema": SCHEMA, "entries": dict(newest)})
     except (OSError, RuntimeError, TypeError, ValueError):
         return False

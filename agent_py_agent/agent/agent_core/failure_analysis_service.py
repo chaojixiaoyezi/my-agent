@@ -67,8 +67,10 @@ class FailureIntrospector:
         return _get_current_timeout(task)
 
 
-_MAX_TIMEOUT = 600.0
-_MAX_RETRY_ATTEMPTS = 3
+# 失败分析单次请求超时上限（秒），超时按失败处理。
+_MAX_TIMEOUT_SECONDS = 600.0
+# 失败分析最大重试次数，超过即放弃，避免无限重试。
+_MAX_RETRY_ATTEMPT_COUNT = 3
 
 
 def _get_current_timeout(task: SubAgentTask) -> float:
@@ -86,7 +88,7 @@ def _suggest_splits(task: SubAgentTask) -> list[str]:
 
 class FailureAnalysisService:
 
-    def __init__(self, max_timeout: float = _MAX_TIMEOUT, max_retry_attempts: int = _MAX_RETRY_ATTEMPTS):
+    def __init__(self, max_timeout: float = _MAX_TIMEOUT_SECONDS, max_retry_attempts: int = _MAX_RETRY_ATTEMPT_COUNT):
         self.max_timeout = max_timeout
         self.max_retry_attempts = max_retry_attempts
 
@@ -240,7 +242,7 @@ class FailureAnalysisService:
 
 
 class SubAgentFailureAnalyzer:
-    def __init__(self, max_timeout: float = _MAX_TIMEOUT, max_retry_attempts: int = _MAX_RETRY_ATTEMPTS):
+    def __init__(self, max_timeout: float = _MAX_TIMEOUT_SECONDS, max_retry_attempts: int = _MAX_RETRY_ATTEMPT_COUNT):
         self._service = FailureAnalysisService(max_timeout, max_retry_attempts)
 
     def analyze(

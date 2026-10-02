@@ -150,7 +150,7 @@ _LOGGER = logging.getLogger(__name__)
 # 5000 等效"不限制",但真失控死循环仍有最后硬顶,不会无限烧时间/成本——这是
 # 取消 60 轮截停(2026-08-07)后的补位兜底:轮数不再拦可救任务,失控仍有终点。
 # 显式配置 max_tool_rounds 或任务属性仍可覆盖(正数=限制,0=不限制)。
-_DEFAULT_MAX_TOOL_ROUNDS = 5000
+_DEFAULT_MAX_TOOL_ROUND_COUNT = 5000
 
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
@@ -231,7 +231,7 @@ class _NativeCompactCommit:
     source_refs: tuple[dict[str, str], ...]
 
 
-# LLM: 工具轮上限只在 AgentConfig.max_tool_rounds（空 = _DEFAULT_MAX_TOOL_ROUNDS）；守卫文件里的副本在有 AgentConfig
+# LLM: 工具轮上限只在 AgentConfig.max_tool_rounds（空 = _DEFAULT_MAX_TOOL_ROUND_COUNT）；守卫文件里的副本在有 AgentConfig
 #   时从来读不到，已删除。任务属性 max_tool_rounds 可单任务覆盖；正数 = 上限，0 = 不限制。只读。
 # 函数用途: 算出本次工具循环最多跑多少个工具轮。
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
@@ -244,11 +244,11 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     # 防失控另有 action 级重复调用门、unknown_command_budget 与 compact 防抖。
     # 显式正数仍可限制,显式 0 不限制,任务属性可单任务覆盖。
     if effective is None:
-        return _DEFAULT_MAX_TOOL_ROUNDS
+        return _DEFAULT_MAX_TOOL_ROUND_COUNT
     try:
         effective = int(effective)
     except (TypeError, ValueError):
-        return _DEFAULT_MAX_TOOL_ROUNDS
+        return _DEFAULT_MAX_TOOL_ROUND_COUNT
     if effective <= 0:
         return 0
     return effective
@@ -1435,7 +1435,7 @@ def _request_tool_loop_model_response(
     first_prompt: str | None = None,
     consumes_task_tool_surface: bool = True,
 ) -> tuple[str, ModelResponse]:
-    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX
+    from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX_COUNT
 
     rebuild = partial(build_tool_loop_prompt, agent, model_params)
     return request_model_response(
@@ -1450,7 +1450,7 @@ def _request_tool_loop_model_response(
         ),
         recover_context=lambda prompt: _ptl_reclaim_oldest(agent, model_params, prompt=prompt),
         # 单轮 PTL 自救重试次数是内部容错参数，用具名常量（2026-09-28 参数减量）。
-        read_overflow_retry_limit=lambda: DEFAULT_PTL_RETRY_MAX,
+        read_overflow_retry_limit=lambda: DEFAULT_PTL_RETRY_MAX_COUNT,
         visible_loaded_tools=model_params.loaded_tool_names if consumes_task_tool_surface else None,
     )
 
@@ -1584,7 +1584,7 @@ def _discard_stale_natural_reply_for_pending_turn_input(agent, params: ToolLoopE
 # LLM: 结构化兜底：同一回合里因"有待处理输入"把最终回复作废的次数有硬上限。正常路径下每次作废都会
 #   把输入注入本回合，下一轮就不再作废；一旦判据出问题（真实链路上 available 与 claim 判定不一致），
 #   这里会无限重来——3.2 秒 88 次模型调用。到上限就停，并留下结构化结束原因，绝不无限循环。
-PENDING_TURN_INPUT_INVALIDATION_LIMIT = 8
+PENDING_TURN_INPUT_INVALIDATION_COUNT = 8
 PENDING_TURN_INPUT_LIMIT_REASON = "pending_turn_input_invalidation_limit"
 
 
@@ -1603,7 +1603,7 @@ def _pending_turn_input_invalidation_exhausted(params: ToolLoopExecuteParams) ->
         return False
     count = int(state.get("_pending_turn_input_invalidations") or 0) + 1
     state["_pending_turn_input_invalidations"] = count
-    return count > PENDING_TURN_INPUT_INVALIDATION_LIMIT
+    return count > PENDING_TURN_INPUT_INVALIDATION_COUNT
 
 
 

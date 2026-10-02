@@ -39,8 +39,9 @@ if TYPE_CHECKING:
 
 LIST_OWNER_SESSIONS_TOOL = "list_owner_sessions"
 # 默认与上限只约束一次返回的条数；0 或负数、非整数、超过上限都按参数错误拒绝，不静默截断成别的值。
-_LIST_SESSIONS_DEFAULT_LIMIT = 20
-_LIST_SESSIONS_MAX_LIMIT = 100
+_LIST_SESSIONS_DEFAULT_COUNT = 20
+# 列出会话最大返回条数，防一次拉取过多。
+_LIST_SESSIONS_MAX_COUNT = 100
 
 
 # LLM: 与 session_messaging_tool_visible / session_task_tool_visible 同源：只看结构化 owner_kind 与开关；
@@ -103,9 +104,9 @@ class ListOwnerSessionsTool(BaseTool):
 # LLM: 只接受 1..上限的整数；bool 不算整数。缺省用默认值。
 # 函数用途: 读取并校验 limit 参数。
 def _requested_limit(params: dict[str, object]) -> int | ToolHandlerOutcome:
-    value = params.get("limit", _LIST_SESSIONS_DEFAULT_LIMIT)
-    if type(value) is not int or not 1 <= value <= _LIST_SESSIONS_MAX_LIMIT:
-        return _failure(f"limit 必须是 1 到 {_LIST_SESSIONS_MAX_LIMIT} 之间的整数。", "TOOL_INVALID_ARGUMENTS")
+    value = params.get("limit", _LIST_SESSIONS_DEFAULT_COUNT)
+    if type(value) is not int or not 1 <= value <= _LIST_SESSIONS_MAX_COUNT:
+        return _failure(f"limit 必须是 1 到 {_LIST_SESSIONS_MAX_COUNT} 之间的整数。", "TOOL_INVALID_ARGUMENTS")
     return value
 
 
@@ -198,8 +199,8 @@ def build_list_owner_sessions_model_spec() -> ToolModelSpec:
         ),
         input_schema={
             "type": "object",
-            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": _LIST_SESSIONS_MAX_LIMIT,
-                                     "description": f"最多返回几条，按最近活动倒序，默认 {_LIST_SESSIONS_DEFAULT_LIMIT}。"}},
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": _LIST_SESSIONS_MAX_COUNT,
+                                     "description": f"最多返回几条，按最近活动倒序，默认 {_LIST_SESSIONS_DEFAULT_COUNT}。"}},
             "additionalProperties": False,
         },
         hints=ToolModelHints(

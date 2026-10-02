@@ -33,6 +33,7 @@ from .tool_loop.recovery import runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
+# 模型摘要存档的最大字符数。
 _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 

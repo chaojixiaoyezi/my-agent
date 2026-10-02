@@ -35,6 +35,7 @@ from .external_material_order import _URL_WITH_QUERY
 _POINT = "delivery_quality"
 _TOOL = "run_command"
 _QUESTION = "review_focus"
+# 决策点提示文字的最大字符数，控制上下文占用。
 _MAX_HINT_CHARS = 512
 _HINT_TAG = "[delivery-review-focus]"
 # 宿主分类值只按短标识校验，不是封闭枚举；形态异常时放弃增强，不猜测含义。

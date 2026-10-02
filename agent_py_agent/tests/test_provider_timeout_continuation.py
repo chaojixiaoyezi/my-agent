@@ -14,7 +14,7 @@
   纯问答轮（零工具执行）被超时救回后，那一枪的正文就是终答，不再被追问一次顶掉。
 - 门槛5 的 fail-closed 重试资格判定一行未放宽：续跑只在「重试确实打出去且拿到了
   响应」之后发生；不具资格/重试再超时的路径照旧抛 ProviderTimeoutError。
-- 有界：至多 1 次，与截断续跑（_TRUNCATED_OUTPUT_RESUME_LIMIT）分开计数、互不吃预算。
+- 有界：至多 1 次，与截断续跑（_TRUNCATED_OUTPUT_RESUME_COUNT）分开计数、互不吃预算。
 - 不重放工具：续跑只追加一条宿主指令并 continue，工具调用账（executed_tools）不变。
 """
 
@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     _PROVIDER_TIMEOUT_RESUME,
-    _PROVIDER_TIMEOUT_RESUME_LIMIT,
+    _PROVIDER_TIMEOUT_RESUME_COUNT,
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
     _no_tool_calls_decision,
@@ -265,7 +265,7 @@ def test_resume_budget_exhausted_closes_with_original_semantics() -> None:
     _agent_obj, response = _generate(backend, params)
 
     counters = ToolLoopRepairCounters(
-        provider_timeout_resume_repairs=_PROVIDER_TIMEOUT_RESUME_LIMIT
+        provider_timeout_resume_repairs=_PROVIDER_TIMEOUT_RESUME_COUNT
     )
     decision = _no_tool_calls_decision(_no_tool_request(params, response, counters))
 

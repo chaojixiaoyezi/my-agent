@@ -79,7 +79,9 @@ from .tool_stream import (
     malformed_tool_protocol_abort_response,
 )
 
+# 工具流轮询间隔秒数。
 _TOOL_STREAM_POLL_SECONDS = 0.05
+# 模型中断后排空等待的秒数。
 _MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
 # 请求前缀诊断开关：只对出站请求算不可逆摘要（backends/cache_diagnostics.py），不修改请求、
 # 不记录正文或密钥。属内部诊断参数，2026-09-28 参数减量从配置降为常量（值不变）。

@@ -7,6 +7,25 @@
 - **做法**：`_internal` 加只接不用的 `capability_path` 关键字参数，和其它子命令同一调度签名；行为不变。
 - **验证**：`test_settings_chat_control.py` 新增经真实调度入口查 `TOOL_PREVIEW_MAX_LINE_COUNT` 的用例；把签名改回去时该用例失败（变异 1 个，抓到）。
 
+## P10 常数整改第七批：agent_core 目录 64 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，基于 `b3195b809`）
+
+- **范围**：`agent_py_agent/agent/agent_core/` 目录（34 个文件）内 64 条目录条目（61 个唯一名字）待整改常数，不碰其它目录。
+- **做法**：A 补上方中文说明 20 个（已有 `_CHARS/_SECONDS/_PERCENT/_TURNS/_BYTES` 等单位后缀，只缺说明）；
+  B 按生成器后缀表改名 40 个（`_LIMIT`→`_COUNT`、`_MAX_TIMEOUT→_MAX_TIMEOUT_SECONDS`、`_REF_TEXT_LIMIT→_REF_TEXT_LIMIT_CHARS`、
+  `DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP→DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS` 等），全仓引用（含 tests、import、`__all__`）
+  词边界一起改，旧名零残留；`_MAX_CANDIDATES→_MAX_ARTIFACT_CANDIDATE_COUNT` 避开 plugin_observation 既有
+  `MAX_CANDIDATE_COUNT` 撞名（守卫 `test_constant_names_unique` 因此通过，`_ALLOWED` 只把 `MAX_INLINE_JSON` 键名随改名
+  更新为 `MAX_INLINE_JSON_CHARS`）；C 无物理单位 4 个（`DYNAMIC_TIMEOUT_SAFETY_MARGIN` 倍数、`_PTL_DROP_FRACTION` 比率、
+  `_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH`/`_DEFAULT_DEPTH` 深度）只补说明、挪入白名单无单位组。数值一律不变。
+- **白名单/目录**：主组 225→164（删 61 个唯一名字）、无单位组 32→36（+4）；目录重建 **802 项** `--check` 一致（800→802 因
+  `_MAX_ARTIFACT_CANDIDATE_COUNT` 与 `DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS` 等新名进入投影）。
+- **验证命令**（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - 目录守卫 `test_constants_catalog.py` + `test_constant_names_unique.py`：**13 passed**；
+  - 引用改名的 16 个测试文件：**217 passed**；guards9 全部：**168 passed**；
+  - `check_import_boundaries.py`：**0 条**；`ruff check agent_py_agent scripts`：**All checks passed**；
+    `check_doc_sync.py`：**PASS**；`check_code_size.py --mode strict`：hard=0 blocked=False（报告已还原）；
+    `git diff --check` 通过；`check_clean_package.py .`：**OK**；`size_diff.sh $PWD`：**新增告警 0**（消失 2）。
+
 ## 配置与账本写回保留权限（2026-10-02，3a，step16z）
 
 - **新增**：`agent_py_agent/tests/test_config_write_permissions.py` 5 项——参数中心 set/reset/revert 后用户配置与账本都还是 0600；

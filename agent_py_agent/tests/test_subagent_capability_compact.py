@@ -29,7 +29,7 @@ from agent_py_agent.tests.test_tool_presentation_projection import (
 @pytest.fixture
 def capability_host(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F811
     agent = _agent(tmp_path, context_tokens=1_000_000)
-    # PTL 重试上限已是读取点旁的具名常量（agent_core.tool_context.ptl_retry.DEFAULT_PTL_RETRY_MAX），
+    # PTL 重试上限已是读取点旁的具名常量（agent_core.tool_context.ptl_retry.DEFAULT_PTL_RETRY_MAX_COUNT），
     # 不再是 AgentConfig 字段，这里不再需要关掉它。
     registry, _, first, second, _ = tool_surface
     catalog, builder = setup_surface(tmp_path / "capabilities", skill_catalog_factory)

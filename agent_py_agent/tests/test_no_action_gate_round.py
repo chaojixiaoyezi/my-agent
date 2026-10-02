@@ -3,14 +3,14 @@ from __future__ import annotations
 """no-action 结构化闸的执行轮集成回归(复核 seq 339 第 2 点)。
 
 评估判 informational(requires_action=False)时模型仍提出 ToolCall,执行层不进
-handler——全部转 TOOL_ACTION_NOT_REQUIRED 拦截结果;连续 _NO_ACTION_GATE_HALT_LIMIT
+handler——全部转 TOOL_ACTION_NOT_REQUIRED 拦截结果;连续 _NO_ACTION_GATE_HALT_COUNT
 轮拦截后设 no_action_gate_halt,由 _tool_step_or_limit 收口轮接管。
 """
 
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
-    _NO_ACTION_GATE_HALT_LIMIT,
+    _NO_ACTION_GATE_HALT_COUNT,
     ToolRoundExecutionRequest,
     execute_tool_round,
 )
@@ -124,7 +124,7 @@ def test_no_action_gate_injects_structured_notice():
 
 def test_no_action_gate_bounded_halt_after_limit():
     params = _gate_params()
-    for rounds in range(1, _NO_ACTION_GATE_HALT_LIMIT):
+    for rounds in range(1, _NO_ACTION_GATE_HALT_COUNT):
         execute_tool_round(
             _gate_request(params, [_gate_call()], lambda _r: None, lambda _r: None, rounds=rounds)
         )
@@ -135,7 +135,7 @@ def test_no_action_gate_bounded_halt_after_limit():
             [_gate_call()],
             lambda _r: None,
             lambda _r: None,
-            rounds=_NO_ACTION_GATE_HALT_LIMIT,
+            rounds=_NO_ACTION_GATE_HALT_COUNT,
         )
     )
     assert getattr(params, "no_action_gate_halt", False) is True, "连续拦截达限设 halt"

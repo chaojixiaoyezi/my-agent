@@ -16,8 +16,10 @@ from pathlib import Path
 _DELIVERABLE_KEYS = ("required_file_refs", "declared_output_refs", "output_files", "output_refs")
 _CHILD_SCOPES = frozenset({"task_local", "control_plane"})
 _STATE_KEY = "deliverable_closeout_repairs"
-_MAX_DELIVERABLE_REPAIRS = 2
-_MISSING_PREVIEW_LIMIT = 5
+# 交付物修复最大次数，超过放弃修复。
+_MAX_DELIVERABLE_REPAIR_COUNT = 2
+# 缺失预览最多列出的条数。
+_MISSING_PREVIEW_COUNT = 5
 
 
 # LLM: 只读取结构化清单；相对路径或无法解析的值按"没有可核对的事实"丢弃，绝不猜。
@@ -79,11 +81,11 @@ def deliverable_closeout_block(params: object) -> str | None:
     if not isinstance(state, dict):
         return None
     attempts = int(state.get(_STATE_KEY) or 0)
-    if attempts >= _MAX_DELIVERABLE_REPAIRS:
+    if attempts >= _MAX_DELIVERABLE_REPAIR_COUNT:
         return None
     state[_STATE_KEY] = attempts + 1
-    preview = "、".join(missing[:_MISSING_PREVIEW_LIMIT])
-    suffix = "" if len(missing) <= _MISSING_PREVIEW_LIMIT else f" 等 {len(missing)} 个"
+    preview = "、".join(missing[:_MISSING_PREVIEW_COUNT])
+    suffix = "" if len(missing) <= _MISSING_PREVIEW_COUNT else f" 等 {len(missing)} 个"
     return (
         "[deliverable-closeout-blocked]\n"
         f"本轮被判定为不能收口：宿主声明的交付物里还有 {len(missing)} 个不在磁盘上：{preview}{suffix}。\n"
@@ -91,7 +93,7 @@ def deliverable_closeout_block(params: object) -> str | None:
         "（大文件用 write_file 覆盖首块 + mode=\"append\" 追加，写完后读回确认），"
         "或者在确实做不到时走结构化上抛（capability_request / 如实标记未完成与原因），"
         "不要用\"即将写入/下一步再做\"的中间汇报收口。\n"
-        f"（本次是第 {attempts + 1}/{_MAX_DELIVERABLE_REPAIRS} 次阻断，超限后会按如实报告收口。）"
+        f"（本次是第 {attempts + 1}/{_MAX_DELIVERABLE_REPAIR_COUNT} 次阻断，超限后会按如实报告收口。）"
     )
 
 

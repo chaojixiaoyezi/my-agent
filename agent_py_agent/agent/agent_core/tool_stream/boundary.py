@@ -42,7 +42,8 @@ from .write_abort import (
 
 _TOOL_START_MARKERS = ("[TOOL_CALL]",)
 _TOOL_END_MARKERS = ("[/TOOL_CALL]",)
-_MAX_UNCLOSED_TOOL_START_MARKERS = 1
+# 未闭合工具开始标记的最大个数，防流解析失配。
+_MAX_UNCLOSED_TOOL_START_MARKER_COUNT = 1
 
 
 class MalformedToolProtocolStreamAbort(RuntimeError):
@@ -210,13 +211,13 @@ def malformed_tool_protocol_stream_abort(text: str) -> MalformedToolProtocolStre
         return MalformedToolProtocolStreamAbort(
             start_marker=_TEXT_OPEN,
             marker_count=len(unclosed),
-            limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
+            limit=_MAX_UNCLOSED_TOOL_START_MARKER_COUNT,
         )
-    if len(unclosed) > _MAX_UNCLOSED_TOOL_START_MARKERS:
+    if len(unclosed) > _MAX_UNCLOSED_TOOL_START_MARKER_COUNT:
         return MalformedToolProtocolStreamAbort(
             start_marker=_TEXT_OPEN,
             marker_count=len(unclosed),
-            limit=_MAX_UNCLOSED_TOOL_START_MARKERS,
+            limit=_MAX_UNCLOSED_TOOL_START_MARKER_COUNT,
         )
     return None
 

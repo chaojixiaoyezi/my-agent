@@ -4,7 +4,7 @@
 - 生成层 ``agent_core/tool_model_generation.py``：门槛5 重试**成功**分支登记结构化事实
   ``live_archive_state["_provider_timeout_resume_turns"][model_turn]``。
 - 裁决层 ``agent_core/tool_loop/response_decision.py``：同一 model turn 上、模型零工具调用时
-  至多放行一次宿主追问（``_PROVIDER_TIMEOUT_RESUME_LIMIT = 1``）。该追问（R1 残留边界后）
+  至多放行一次宿主追问（``_PROVIDER_TIMEOUT_RESUME_COUNT = 1``）。该追问（R1 残留边界后）
   只是**探针**：只回答「还有没有真实工具工作」。探针零工具调用 = 没有工具工作要继续 ->
   两枪已产生的合法答复**按到达顺序无损合成同一次交付**（逐字投影、只加段落边界，不按长度二选一、
   不读正文做语义判定；只有该段自己被截断或正文为空时才不投影，且排除原因结构化入账）；
@@ -37,7 +37,7 @@ from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParam
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     _EMPTY_TEXT_NUDGE,
     _PROVIDER_TIMEOUT_RESUME,
-    _PROVIDER_TIMEOUT_RESUME_LIMIT,
+    _PROVIDER_TIMEOUT_RESUME_COUNT,
     _TRUNCATED_OUTPUT_RESUME,
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
@@ -427,7 +427,7 @@ def test_decision_step_itself_touches_no_tool_ledger(monkeypatch, tmp_path) -> N
         _no_tool_request(
             run.params,
             ModelResponse(text=_PROMISE, backend=run.backend.name),
-            ToolLoopRepairCounters(provider_timeout_resume_repairs=_PROVIDER_TIMEOUT_RESUME_LIMIT),
+            ToolLoopRepairCounters(provider_timeout_resume_repairs=_PROVIDER_TIMEOUT_RESUME_COUNT),
         )
     )
     assert decision.action == "break", "预算用尽时按原语义收口"
@@ -624,7 +624,7 @@ def test_exhausted_provider_budget_hands_over_to_truncated_resume(tmp_path) -> N
     # 同一模型调用既「有超时资格」又「正文被输出上限截断」：先让超时预算用尽。
     truncated = ModelResponse(text="这是被输出上限截断的半句答复", backend="x", truncated=True)
     counters = ToolLoopRepairCounters(
-        provider_timeout_resume_repairs=_PROVIDER_TIMEOUT_RESUME_LIMIT
+        provider_timeout_resume_repairs=_PROVIDER_TIMEOUT_RESUME_COUNT
     )
     decision = _no_tool_calls_decision(_no_tool_request(params, truncated, counters))
 

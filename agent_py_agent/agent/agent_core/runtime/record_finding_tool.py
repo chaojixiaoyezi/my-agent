@@ -30,11 +30,14 @@ from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from ...runtime_context import current_subagent_attempt_id, current_subagent_run_id
 from ...tooling.models import ToolHandlerOutcome
 
+# 认领字段的最大字符数。
 _MAX_CLAIM_CHARS = 2000
-_MAX_REFS = 20
+# 记录发现工具最多携带的引用条数。
+_MAX_REF_COUNT = 20
 # Owner-facing finding wakes may inline one complete ordinary-sized source
 # record.  Larger records remain exact in the durable source ledger and are
 # exposed by source_ref; never cut a record in half for the report prompt.
+# 发现证据内联文本的最大字符数。
 _FINDING_EVIDENCE_INLINE_MAX_CHARS = 12_000
 _WATCH_ID_PATTERN = re.compile(r"^ws-[0-9a-f]{10}$")
 _FINDING_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -137,7 +140,7 @@ def _finding_record_for_context(
 ) -> dict[str, object]:
     refs_value = params.get("evidence_refs")
     refs = refs_value if isinstance(refs_value, list) else ([refs_value] if refs_value else [])
-    evidence_refs = [str(item).strip() for item in refs if str(item or "").strip()][:_MAX_REFS]
+    evidence_refs = [str(item).strip() for item in refs if str(item or "").strip()][:_MAX_REF_COUNT]
     kind = str(params.get("kind") or "finding").strip() or "finding"
     requested_id = str(params.get("finding_id") or "").strip()
     finding_id = requested_id or _default_finding_id(
@@ -411,7 +414,7 @@ def _audit_finding_refs(params: dict[str, object]) -> list[str]:
     refs_value = params.get("evidence_refs")
     raw_refs = refs_value if isinstance(refs_value, list) else ([refs_value] if refs_value else [])
     return list(dict.fromkeys(str(item).strip() for item in raw_refs if str(item or "").strip()))[
-        :_MAX_REFS
+        :_MAX_REF_COUNT
     ]
 
 

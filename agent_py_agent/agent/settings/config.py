@@ -194,7 +194,7 @@ class _ToolConfigFields:
     # Todo 仍开放时，把 exact-id 收尾软提醒放进模型上下文；只提示模型在最终回复前
     # 自主核对，不自动打勾、不阻断最终回复，也不增加隐藏模型调用。
     task_progress_closeout_guidance_enabled: bool = True
-    # 软引导阈值已降为读取点旁的具名常量（_CHANNEL_HINT_THRESHOLD），不再是配置项（2026-09-28 参数减量）。
+    # 软引导阈值已降为读取点旁的具名常量（_CHANNEL_HINT_THRESHOLD_COUNT），不再是配置项（2026-09-28 参数减量）。
     # 单个代理最近 10 分钟最多调用几次工具（窗口固定 600 秒）；空或 0 = 关闭，默认关闭。
     tool_agent_budget_max_calls: int | None = None
     # 单个 run 最近 10 分钟最多读取多少字符的归档正文（窗口固定 600 秒）；0 = 不限制。
@@ -204,7 +204,7 @@ class _ToolConfigFields:
     # 上下文余量不足时立刻外置本条工具输出并要求下一次请求前压缩；关掉则只按 tool_output_externalize_min_chars 外置。
     tool_output_externalize_on_low_headroom: bool = True
     # 工具上下文保留条数与 PTL 自救重试次数已降为读取点旁的具名常量
-    # （DEFAULT_MICROCOMPACT_KEEP_RECENT / DEFAULT_PTL_RETRY_MAX），不再是配置项（2026-09-28 参数减量）。
+    # （DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT / DEFAULT_PTL_RETRY_MAX_COUNT），不再是配置项（2026-09-28 参数减量）。
     tool_read_max_chars: int = 16_000
     # 三种原生文件修改工具反馈有界 JSON 语法观察；不拦分块写入，不决定任务完成。
     enable_file_syntax_diagnostics: bool = False

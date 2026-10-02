@@ -43,7 +43,7 @@ _PROTECTED_TOOL_MARKERS = (
 
 # 空正文 nudge 的有界次数:执行过工具或生成有效思考后，模型空正文无工具调用时,
 # 塞一条提示要求继续;超限后诚实失败(USER_REPLY_UNAVAILABLE),不让坏输出无限烧 token。
-_MAX_EMPTY_TEXT_REPAIRS = 2
+_MAX_EMPTY_TEXT_REPAIR_COUNT = 2
 _EMPTY_TEXT_NUDGE = (
     "[tool-system]\n"
     "上一轮模型响应没有可展示的正文或工具调用。请结合当前请求、已保存思考和已有工具结果继续推进："
@@ -100,7 +100,7 @@ def _inc_provider_timeout_resume(counters: ToolLoopRepairCounters) -> ToolLoopRe
 #   "Resume directly — no apology, no recap … break remaining work into smaller pieces"）：
 #   明确禁止道歉/复述，要求接着断点写，并把剩余工作拆小；不引入任何"关键词判合格"的机器验收。
 # 常量用途: 截断续跑回灌给模型的宿主指令。
-_TRUNCATED_OUTPUT_RESUME_LIMIT = 2
+_TRUNCATED_OUTPUT_RESUME_COUNT = 2
 _TRUNCATED_OUTPUT_RESUME = (
     "[output-limit-resume]\n"
     "上一条回复被供应商输出上限截断了，不能当作完成。请直接从被截断处接着写："
@@ -122,7 +122,7 @@ _TRUNCATED_OUTPUT_RESUME = (
 #   prompt/response/usage 三者的 request/turn 来源结构性同一。
 #   探针带工具调用 = 真实工作继续 -> 走既有工具执行路径，登记被消费但不参与交付投影。
 # 常量用途: 超时探针/续跑回灌给模型的宿主指令（至多一次）。
-_PROVIDER_TIMEOUT_RESUME_LIMIT = 1
+_PROVIDER_TIMEOUT_RESUME_COUNT = 1
 # 交付段落事实（结构性编码，不是正文匹配）：一段正文的来源，以及阻止它进入终答正文的客观原因。
 # 只有这两种原因会排除一段——两者都是该段自己的结构字段（供应商截断标志 / 空正文），
 # 与另一段写了什么、写了多长完全无关；宿主不得再引入任何"哪一段更像终答"的判断。
@@ -613,7 +613,7 @@ def _disabled_tools_response(response, has_protected_marker: bool):
 # LLM: 有工具调用时只处理协议截断、长内容恢复和内部标记清理；不得按读取轮数注入额外工作。
 # 函数用途: 决定本轮真实工具调用是执行、纠偏后重试，还是因客观错误停止。
 # 连续这么多次都给不出合法工具参数，就按原错误结束本轮（成功执行一轮工具后重新计数）。
-_INVALID_ARGUMENT_REPAIR_LIMIT = 3
+_INVALID_ARGUMENT_REPAIR_COUNT = 3
 # 回灌给模型的宿主纠正：只带结构化工具名，不复述模型正文或残缺参数。
 _INVALID_ARGUMENTS_REPAIR = (
     "[tool-arguments-invalid]\n"
@@ -625,7 +625,7 @@ _INVALID_ARGUMENTS_REPAIR = (
 
 # LLM: 后端已把参数不是合法 JSON 对象的整组工具调用隔离为零执行（runtime_status=error、runtime_reason=
 #   MODEL_TOOL_ARGUMENTS_INVALID、runtime_source=model_provider）。参照 Codex（解析失败回给模型而不是结束本轮）：
-#   连续未满 _INVALID_ARGUMENT_REPAIR_LIMIT 次时回灌一条宿主纠正并续跑同一轮，零执行、不修复或执行残缺参数、不读正文；
+#   连续未满 _INVALID_ARGUMENT_REPAIR_COUNT 次时回灌一条宿主纠正并续跑同一轮，零执行、不修复或执行残缺参数、不读正文；
 #   形成可执行调用后计数清零（见 _tool_calls_decision）。达到上限返回 None，沿原无工具分支按原错误结束本轮。
 #   断流、过滤等其它 MODEL_* 错误不在此列。改动同步 test_native_truncated_write_recovery 与 MODEL_TERMINAL_DIAGNOSTICS.md。
 # 函数用途: 模型偶发给出坏工具参数时让它改了重发，而不是让长任务整轮失败。
@@ -635,7 +635,7 @@ def _invalid_tool_arguments_decision(
     response = request.response
     if not _is_invalid_tool_arguments(response):
         return None
-    if request.counters.invalid_arguments_repairs >= _INVALID_ARGUMENT_REPAIR_LIMIT:
+    if request.counters.invalid_arguments_repairs >= _INVALID_ARGUMENT_REPAIR_COUNT:
         return None
     names = _truncated_tool_names_from_response(response)
     shown = "（" + "、".join(names) + "）" if names else ""
@@ -675,7 +675,7 @@ def _tool_calls_decision(
 
 # 同一工具循环累计收到第 3 次已确认的长度截断写响应时停止，最多给 2 次分块纠偏。
 # 坏 JSON、断流或过滤不是长度证据，不能消耗此预算或被改写为长度错误。
-_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT = 3
+_NATIVE_TRUNCATED_WRITE_LOOP_COUNT = 3
 # 长内容工具：被截断后需要"分块写"这类有界恢复，而不是通用格式纠偏。
 _TRUNCATED_LONG_CONTENT_TOOLS = frozenset({"write_file", "apply_patch"})
 
@@ -770,7 +770,7 @@ def _native_truncated_write_decision(
         return None
     # 未完成响应整轮零执行，不会生成工具失败记录；预算只按本工具循环已追加的纠偏次数累计。
     attempts = int(request.counters.truncated_write_repairs) + 1
-    if attempts >= _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT:
+    if attempts >= _NATIVE_TRUNCATED_WRITE_LOOP_COUNT:
         return ToolLoopResponseDecision(
             "break",
             _native_truncated_write_loop_break_response(request.response, attempts),
@@ -869,7 +869,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             satisfy_active_turn_user_reply(request.params)
         elif (
             reply_required
-            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIRS
+            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
         ):
             # This branch is controlled by exact consumed guidance ids. Thinking
             # is intentionally insufficient: users need one ordinary assistant
@@ -890,7 +890,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             and request.probe_rollback is None
             and (list(getattr(request.params, "executed_tools", None) or [])
                  or has_reasoning_content(list(getattr(request.response, "assistant_content_blocks", None) or [])))
-            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIRS
+            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
         ):
             request.params.tool_context.append(_EMPTY_TEXT_NUDGE)
             return ToolLoopResponseDecision(
@@ -915,7 +915,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             #   于是同一策略原地打转——两个子代理各被截断 3/4 次、重启 4/5 个 attempt、耗掉 35 分钟才
             #   碰巧跑完。这里改成轮内续跑：先把断点续写指令回灌，同一个 run 再走一轮；超限才按
             #   unfinished 收口，让上游按既有恢复路径处理。
-            if request.counters.truncated_output_repairs < _TRUNCATED_OUTPUT_RESUME_LIMIT:
+            if request.counters.truncated_output_repairs < _TRUNCATED_OUTPUT_RESUME_COUNT:
                 request.params.tool_context.append(_TRUNCATED_OUTPUT_RESUME)
                 return ToolLoopResponseDecision(
                     "continue", None, [], _inc_truncated_output(request.counters)
@@ -969,7 +969,7 @@ def _provider_timeout_resume_decision(
     if not response_text:
         # 空正文属于既有 empty-text nudge 的预算，两条路径不互相记账。
         return None
-    if request.counters.provider_timeout_resume_repairs >= _PROVIDER_TIMEOUT_RESUME_LIMIT:
+    if request.counters.provider_timeout_resume_repairs >= _PROVIDER_TIMEOUT_RESUME_COUNT:
         # 续跑/探针预算用尽：按原语义收口（承诺当普通 plain final 返回），不进入无限续跑。
         return None
     from ..tool_model_generation import (

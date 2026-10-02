@@ -29,7 +29,7 @@ def test_repeated_success_observation_defaults_and_frozen_overrides():
 
     from agent_py_agent.agent.agent_core.tool_guard.call_guardrail import tool_guardrail_policy
     from agent_py_agent.agent.agent_core.tool_guard.call_guardrail_config import (
-        DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD,
+        DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT,
         repeated_success_hint_threshold,
     )
     from agent_py_agent.agent.contracts.gates.tool_guardrail import ToolGuardrailConfig
@@ -37,7 +37,7 @@ def test_repeated_success_observation_defaults_and_frozen_overrides():
 
     default_policy = runtime_guard_policy()
     assert default_policy.values["repeated_success_hint_threshold"] == 5
-    assert DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD == 5
+    assert DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT == 5
     assert ToolGuardrailConfig().repeated_success_hint_threshold == 5
     params = SimpleNamespace(
         runtime_guard_policy=runtime_guard_policy(overrides={"repeated_success_hint_threshold": 7}),
@@ -114,7 +114,7 @@ def test_tool_rounds_and_agent_budget_ignore_patched_guard_yaml(tmp_path, monkey
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core._tool_loop_service import (
-        _DEFAULT_MAX_TOOL_ROUNDS,
+        _DEFAULT_MAX_TOOL_ROUND_COUNT,
         _effective_max_tool_rounds,
     )
     from agent_py_agent.agent.agent_core.tool_guard.agent_budget import (
@@ -130,7 +130,7 @@ def test_tool_rounds_and_agent_budget_ignore_patched_guard_yaml(tmp_path, monkey
     agent = SimpleNamespace(config=SimpleNamespace())
     params = SimpleNamespace(task_attributes={})
 
-    assert _effective_max_tool_rounds(agent, params) == _DEFAULT_MAX_TOOL_ROUNDS
+    assert _effective_max_tool_rounds(agent, params) == _DEFAULT_MAX_TOOL_ROUND_COUNT
     for index in range(3):
         assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=float(index))) is None
 
@@ -154,7 +154,7 @@ def test_agent_config_blank_tool_rounds_defaults_to_extreme_guard():
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core._tool_loop_service import (
-        _DEFAULT_MAX_TOOL_ROUNDS,
+        _DEFAULT_MAX_TOOL_ROUND_COUNT,
         _effective_max_tool_rounds,
     )
     from agent_py_agent.agent.settings import AgentConfig
@@ -162,8 +162,8 @@ def test_agent_config_blank_tool_rounds_defaults_to_extreme_guard():
     agent = SimpleNamespace(config=AgentConfig(enable_tools=True, memory_path="memory.jsonl"))
     params = SimpleNamespace(task_attributes={})
 
-    assert _DEFAULT_MAX_TOOL_ROUNDS == 5000
-    assert _effective_max_tool_rounds(agent, params) == _DEFAULT_MAX_TOOL_ROUNDS
+    assert _DEFAULT_MAX_TOOL_ROUND_COUNT == 5000
+    assert _effective_max_tool_rounds(agent, params) == _DEFAULT_MAX_TOOL_ROUND_COUNT
     # 显式 0 保留「不限制」逃生。
     agent_explicit_0 = SimpleNamespace(
         config=AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)

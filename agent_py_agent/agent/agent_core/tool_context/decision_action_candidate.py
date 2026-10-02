@@ -48,6 +48,7 @@ from .external_material_order import _URL_WITH_QUERY
 
 _POINT = "action_candidate"
 _QUESTION = "next_candidate"
+# 决策点提示文字的最大字符数，控制上下文占用。
 _MAX_HINT_CHARS = 512
 _HINT_TAG = "[action-candidate]"
 _LOCAL_KEYS = ("activation_id", "target_ref_hash", "generation", "content_hash")

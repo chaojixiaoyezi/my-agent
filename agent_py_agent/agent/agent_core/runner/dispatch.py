@@ -64,7 +64,7 @@ def _runner_active_attempt_id(task: object) -> str:
 
 
 # runner_concurrency 为 auto（或留空）时的并发上限，与单个根会话 8 个子代理槽位一致。
-_DEFAULT_RUNNER_CONCURRENCY = 8
+_DEFAULT_RUNNER_CONCURRENCY_COUNT = 8
 
 # launching→running 是秒级过渡;记录冻在 launching(或 running 而线程宿主已死)超过
 # 这个窗即视为宿主硬死亡残留,不再挡续派。比 supervision 周期(60s)宽,防误判慢启动。
@@ -206,12 +206,12 @@ def _resolve_runner_concurrency(value: object, job_count: int) -> int:
 def _runner_concurrency_setting(value: object) -> int:
     text = "" if value is None or isinstance(value, bool) else str(value).strip().lower()
     if text in {"", "auto"}:
-        return _DEFAULT_RUNNER_CONCURRENCY
+        return _DEFAULT_RUNNER_CONCURRENCY_COUNT
     try:
         parsed = int(text)
     except ValueError:
-        return _DEFAULT_RUNNER_CONCURRENCY
-    return parsed if parsed >= 0 else _DEFAULT_RUNNER_CONCURRENCY
+        return _DEFAULT_RUNNER_CONCURRENCY_COUNT
+    return parsed if parsed >= 0 else _DEFAULT_RUNNER_CONCURRENCY_COUNT
 
 
 def _resolve_runner_start_rate(value: object, job_count: int) -> int:

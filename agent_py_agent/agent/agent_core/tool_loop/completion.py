@@ -27,9 +27,12 @@ from ..runtime.guidance import observed_direct_children, satisfy_active_turn_use
 from ..runtime.task_identity import durable_task_id
 from .natural_user_reply import queue_natural_user_reply
 
+# 等待回复请求文本的最大字符数。
 _MAX_WAIT_REPLY_REQUEST_CHARS = 4000
+# 等待回复引导文案的最大字符数。
 _MAX_WAIT_REPLY_GUIDANCE_CHARS = 1200
-_MAX_WAIT_REPLY_GUIDANCE_ITEMS = 5
+# 等待回复引导最多条数。
+_MAX_WAIT_REPLY_GUIDANCE_ITEM_COUNT = 5
 
 
 # LLM: 只携带完成转换确实消费的模型响应与回合参数；删除旧的创建计数/产物探测字段。
@@ -566,7 +569,7 @@ def _interim_reply_facts(
         facts["operation_verification"] = verification
     guidance = active_turn_user_input_texts(params.active_turn_user_inputs)
     if guidance:
-        selected_guidance = guidance[-_MAX_WAIT_REPLY_GUIDANCE_ITEMS:]
+        selected_guidance = guidance[-_MAX_WAIT_REPLY_GUIDANCE_ITEM_COUNT:]
         facts["current_user_guidance_count"] = len(guidance)
         facts["current_user_guidance"] = [
             _bounded_reply_fact_text(item, _MAX_WAIT_REPLY_GUIDANCE_CHARS)

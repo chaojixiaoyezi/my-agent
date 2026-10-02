@@ -7,9 +7,13 @@ from dataclasses import dataclass
 from ...tooling.output_projection import project_tool_output_body
 from ..runner.ref_fields import _file_refs_from_value, _normalize_file_ref
 
-_DEFAULT_LIMIT = 3
+# 共享上下文默认最多打包的记录条数，控制子代理输入量。
+_DEFAULT_PACK_COUNT = 3
+# 共享上下文里预览文本的最大字符数。
 _DEFAULT_MAX_PREVIEW_CHARS = 600
+# 共享上下文里输出预览的最大字节数。
 _DEFAULT_MAX_OUTPUT_BYTES = 4000
+# 共享上下文里指令字段的最大字符数。
 _DEFAULT_MAX_DIRECTIVE_CHARS = 1600
 _SHARED_CONTEXT_SOURCE_TOOLS = frozenset({
     "read_file",
@@ -92,7 +96,7 @@ def parent_task_directive_packs(
 def parent_shared_context_packs(
     agent: object,
     *,
-    limit: int = _DEFAULT_LIMIT,
+    limit: int = _DEFAULT_PACK_COUNT,
     max_preview_chars: int = _DEFAULT_MAX_PREVIEW_CHARS,
     max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
 ) -> list[dict[str, object]]:
@@ -110,7 +114,7 @@ def parent_shared_context_packs(
 def shared_context_packs_from_archive(
     records: Iterable[object],
     *,
-    limit: int = _DEFAULT_LIMIT,
+    limit: int = _DEFAULT_PACK_COUNT,
     max_preview_chars: int = _DEFAULT_MAX_PREVIEW_CHARS,
     max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
 ) -> list[dict[str, object]]:

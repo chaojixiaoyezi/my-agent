@@ -23,7 +23,8 @@ from .call_guardrail_config import (
 )
 
 _RECORDS_ATTR = "_tool_call_guardrail_records"
-_MAX_RECORDS = 256
+# 调用护栏最多保留的记录条数，防内存膨胀。
+_MAX_RECORD_COUNT = 256
 
 
 def tool_guardrail_records(agent: object) -> tuple[dict[str, object], ...]:
@@ -56,7 +57,7 @@ def record_tool_guard_observation(
     records = record_tool_guardrail_result(
         tool_guardrail_records(agent),
         facts,
-        max_records=_MAX_RECORDS,
+        max_records=_MAX_RECORD_COUNT,
     )
     _set_tool_guardrail_records(agent, records)
     config = ToolGuardrailConfig(**tool_guardrail_policy(runtime_params))
@@ -189,7 +190,7 @@ def _set_tool_guardrail_records(
     agent: object,
     records: tuple[dict[str, object], ...],
 ) -> None:
-    setattr(agent, _RECORDS_ATTR, records[-_MAX_RECORDS:])
+    setattr(agent, _RECORDS_ATTR, records[-_MAX_RECORD_COUNT:])
 
 
 def _failure_class(result: ToolResult) -> str:

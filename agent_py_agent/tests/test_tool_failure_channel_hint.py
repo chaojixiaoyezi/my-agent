@@ -28,18 +28,18 @@ pytestmark = pytest.mark.integration
 def _restore_channel_hint_threshold():
     """软引导阈值现在是模块常量；用例改了它必须在结束前还原，避免污染其它用例。"""
     import agent_py_agent.agent.agent_core.tool_guard.loop_hints as loop_hints
-    original = loop_hints._CHANNEL_HINT_THRESHOLD
+    original = loop_hints._CHANNEL_HINT_THRESHOLD_COUNT
     yield
-    loop_hints._CHANNEL_HINT_THRESHOLD = original
+    loop_hints._CHANNEL_HINT_THRESHOLD_COUNT = original
 
 
-# 软引导阈值已降为代码常量 _CHANNEL_HINT_THRESHOLD（2026-09-28 参数减量）：
+# 软引导阈值已降为代码常量 _CHANNEL_HINT_THRESHOLD_COUNT（2026-09-28 参数减量）：
 # 测试改为钉"常量值 + 按该值触发的行为"，不再依赖已删除的配置项。
 def _request(tmp_path: Path, archive: list, *, threshold: int | None = None) -> SimpleNamespace:
     agent = SimpleNamespace(config=AgentConfig())
     if threshold is not None:
         import agent_py_agent.agent.agent_core.tool_guard.loop_hints as loop_hints
-        loop_hints._CHANNEL_HINT_THRESHOLD = threshold
+        loop_hints._CHANNEL_HINT_THRESHOLD_COUNT = threshold
     params = SimpleNamespace(tool_context=[], archive_tool_calls=archive)
     return SimpleNamespace(agent=agent, params=params, tool_rounds=3)
 

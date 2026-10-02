@@ -18,6 +18,7 @@ _NODE_FIELDS = (
     "not_done_reason", "goal_digest", "last_progress_summary", "blockers",
     "recent_tool_failure", "model", "reasoning_effort",
 )
+# 实时视图单条消息的最大字符数，超长截断以控制渲染开销。
 _LIVE_CHARS = 12000
 
 

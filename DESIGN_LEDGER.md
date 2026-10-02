@@ -6,6 +6,26 @@
   P10 新加的 `_internal` 没接这个参数。约定：`/settings` 子命令处理函数一律接受同一组关键字参数（用不到也要接住），
   新子命令要经 `run_settings_control` 真实调度测一次，不能只直接调处理函数。
 
+## P10 常数整改第七批：agent_core 目录 64 条常数合规（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，基于 `b3195b809`，已实现，待集成）
+
+- **背景**：P10 白名单按模块分批清理。本批接前几批之后，范围是 `agent_py_agent/agent/agent_core/` 目录（34 个文件）
+  的 64 条目录条目（61 个唯一名字），不碰其它目录（其它会话并行处理各自的批）。
+- **做法**：
+  1. **A 补说明 20 个**：已有 `_CHARS/_SECONDS/_PERCENT/_TURNS/_BYTES` 等单位后缀、缺上方中文说明的，在定义上方补一句人话。
+  2. **B 改名 40 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名——数量类 `_LIMIT`→`_COUNT`（`PENDING_TURN_INPUT_INVALIDATION_LIMIT→…_COUNT`、
+     `_ISSUE_LIMIT→_ISSUE_COUNT`、`DEFAULT_HARD_FAILURE_HALT_THRESHOLD→…_THRESHOLD_COUNT`、`_MAX_RECORDS→_MAX_RECORD_COUNT` 等），
+     秒类 `_MAX_TIMEOUT→_MAX_TIMEOUT_SECONDS`，字符类 `_REF_TEXT_LIMIT→_REF_TEXT_LIMIT_CHARS`、`_MAX_INLINE_JSON→_MAX_INLINE_JSON_CHARS`，
+     token 类 `DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP→DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS`（沿用本文件
+     `DEFAULT_COMPACT_TRIGGER_MAX_TOKENS` 风格）；`_MAX_CANDIDATES→_MAX_ARTIFACT_CANDIDATE_COUNT` 避开
+     `agent/plugin_observation.py` 既有 `MAX_CANDIDATE_COUNT`（观察候选 64 vs 产物候选 128，不同义，起具体名）。
+     全仓引用（tests、import、`__all__`、注释）词边界一起改，旧名零残留。
+  3. **C 无物理单位 4 个**：`DYNAMIC_TIMEOUT_SAFETY_MARGIN`（倍数）、`_PTL_DROP_FRACTION`（比率）、
+     `_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH`/`_DEFAULT_DEPTH`（深度）只补说明，挪入白名单无单位组。
+  4. 数值一律不变；`test_constant_names_unique._ALLOWED` 把 `MAX_INLINE_JSON` 键名随改名更新为 `MAX_INLINE_JSON_CHARS`（两个文件的内联 JSON 上限仍是不同点位）。
+- **白名单/目录**：主组 225→164、无单位组 32→36（只减不增）；目录重建 **802 项** `--check` 一致。
+- **验证**：目录守卫 13 passed；引用改名的 16 个测试文件 217 passed；guards9 168 passed；import boundaries 0；
+  ruff/doc_sync/code-size strict/diff --check/clean_package 全过；size_diff 新增告警 0（消失 2）。
+
 ## 配置与账本写回保留权限，参数中心新建文件一律 0600（2026-10-02，3a，step16z，已实现；生产权限已手工收回）
 
 - **来源**：ae 做 P18 时发现，`/settings set` 后隔离环境的 gateway.yaml 从 600 变成 644，新建的 settings-changes.jsonl 也是 644。

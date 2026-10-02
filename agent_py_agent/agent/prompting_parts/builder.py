@@ -667,7 +667,7 @@ def _task_and_transcript_section(
 ) -> str:
     from ..agent_core.runtime.turn_trigger import current_turn_text
     from ..agent_core.tool_context.microcompact import (
-        DEFAULT_MICROCOMPACT_KEEP_RECENT,
+        DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT,
         DEFAULT_MICROCOMPACT_MIN_CHARS,
         microcompact_tool_context,
     )
@@ -678,7 +678,7 @@ def _task_and_transcript_section(
     tools_history = "\n\n".join(
         microcompact_tool_context(
             tool_context,
-            keep_recent=DEFAULT_MICROCOMPACT_KEEP_RECENT,
+            keep_recent=DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT,
             min_chars=DEFAULT_MICROCOMPACT_MIN_CHARS,
         )
     )

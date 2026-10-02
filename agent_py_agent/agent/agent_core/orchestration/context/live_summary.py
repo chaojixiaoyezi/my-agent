@@ -7,8 +7,10 @@ from typing import Any
 _ORCHESTRATION_TOOLS = {
     "create_subagents",
 }
-_MAX_INLINE_JSON = 900
-_MAX_INLINE_TEXT = 500
+# 实时摘要中内联 JSON 的最大字符数，超长改为引用不塞正文。
+_MAX_INLINE_JSON_CHARS = 900
+# 实时摘要中内联文本的最大字符数，超长截断。
+_MAX_INLINE_TEXT_CHARS = 500
 _TOP_LEVEL_ACTION_KEYS = (
     "scope",
     "root_id",
@@ -353,7 +355,7 @@ def _json_object(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _json_inline(value: object, *, limit: int = _MAX_INLINE_JSON) -> str:
+def _json_inline(value: object, *, limit: int = _MAX_INLINE_JSON_CHARS) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     except TypeError:
@@ -361,6 +363,6 @@ def _json_inline(value: object, *, limit: int = _MAX_INLINE_JSON) -> str:
     return _clip(text, limit=limit)
 
 
-def _clip(value: object, *, limit: int = _MAX_INLINE_TEXT) -> str:
+def _clip(value: object, *, limit: int = _MAX_INLINE_TEXT_CHARS) -> str:
     text = str(value or "")
     return text if len(text) <= limit else text[:limit].rstrip() + f"...[truncated {len(text) - limit} chars]"

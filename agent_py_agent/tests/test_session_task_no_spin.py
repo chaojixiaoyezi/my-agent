@@ -19,7 +19,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._tool_loop_service import (
-    PENDING_TURN_INPUT_INVALIDATION_LIMIT,
+    PENDING_TURN_INPUT_INVALIDATION_COUNT,
     _pending_turn_input_invalidation_exhausted,
 )
 from agent_py_agent.agent.agent_core.runtime.guidance import has_pending_request_guidance
@@ -162,19 +162,19 @@ def test_invalidation_counter_stops_after_the_limit() -> None:
 
     results = [
         _pending_turn_input_invalidation_exhausted(params)
-        for _ in range(PENDING_TURN_INPUT_INVALIDATION_LIMIT + 5)
+        for _ in range(PENDING_TURN_INPUT_INVALIDATION_COUNT + 5)
     ]
 
-    assert results[:PENDING_TURN_INPUT_INVALIDATION_LIMIT] == [False] * PENDING_TURN_INPUT_INVALIDATION_LIMIT
-    assert results[PENDING_TURN_INPUT_INVALIDATION_LIMIT] is True
+    assert results[:PENDING_TURN_INPUT_INVALIDATION_COUNT] == [False] * PENDING_TURN_INPUT_INVALIDATION_COUNT
+    assert results[PENDING_TURN_INPUT_INVALIDATION_COUNT] is True
     # 上限后的每一次都为真——循环会立刻停，不会继续试。
-    assert all(results[PENDING_TURN_INPUT_INVALIDATION_LIMIT:])
+    assert all(results[PENDING_TURN_INPUT_INVALIDATION_COUNT:])
 
 
 def test_invalidation_counter_is_per_turn(tmp_path) -> None:
     """计数按回合隔离：新回合不继承上一回合的作废次数。"""
     first = SimpleNamespace(live_archive_state={})
-    for _ in range(PENDING_TURN_INPUT_INVALIDATION_LIMIT + 1):
+    for _ in range(PENDING_TURN_INPUT_INVALIDATION_COUNT + 1):
         _pending_turn_input_invalidation_exhausted(first)
 
     second = SimpleNamespace(live_archive_state={})

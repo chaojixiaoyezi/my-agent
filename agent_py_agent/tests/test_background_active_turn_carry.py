@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core._tool_loop_service import (
-    _DEFAULT_MAX_TOOL_ROUNDS,
+    _DEFAULT_MAX_TOOL_ROUND_COUNT,
     _effective_max_tool_rounds,
 )
 from agent_py_agent.agent.agent_core.orchestration.create_payload import (
@@ -394,8 +394,8 @@ def test_fail_closed_guard_reads_replacements_like_the_creation_boundary(
     (7, 40, 9, 9),
     (0, 40, 42, 42),
     (0, 0, None, 0),
-    (0, None, None, _DEFAULT_MAX_TOOL_ROUNDS),
-    (0, "不是数字", None, _DEFAULT_MAX_TOOL_ROUNDS),
+    (0, None, None, _DEFAULT_MAX_TOOL_ROUND_COUNT),
+    (0, "不是数字", None, _DEFAULT_MAX_TOOL_ROUND_COUNT),
 ])
 def test_wake_slice_rounds_are_a_per_slice_allowance_on_both_budget_branches(tmp_path, case) -> None:
     background_rounds, global_rounds, slice_limit, effective = case

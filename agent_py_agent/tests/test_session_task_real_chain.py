@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.agent_core._tool_loop_service import PENDING_TURN_INPUT_INVALIDATION_LIMIT
+from agent_py_agent.agent.agent_core._tool_loop_service import PENDING_TURN_INPUT_INVALIDATION_COUNT
 from agent_py_agent.agent.agent_core.orchestration.tools import session_task_control
 from agent_py_agent.agent.backends import gateway_helpers, http
 from agent_py_agent.agent.concurrency.interrupt import (
@@ -1132,7 +1132,7 @@ def test_spin_backstop_bounds_an_inconsistent_pending_input_check(tmp_path, monk
     second = chain.task("RC-GOAL-DONE 往返任务二")
     calls = chain.wire.calls_for_task(second.task_id)
     _require(len(calls) > 1, "故障注入没有生效：判据不一致时回合应当被反复作废重来")
-    assert len(calls) <= PENDING_TURN_INPUT_INVALIDATION_LIMIT + 1, f"兜底没有生效：{len(calls)} 次模型调用"
+    assert len(calls) <= PENDING_TURN_INPUT_INVALIDATION_COUNT + 1, f"兜底没有生效：{len(calls)} 次模型调用"
     assert not chain.agent.conversation_store.wakes.pending(limit=0), "兜底收尾后唤醒没有结案"
 
 

@@ -15,7 +15,8 @@ from .._runtime_params import ToolLoopExecuteParams
 from ..native_tool_protocol import native_tool_use_active
 
 _STATE_KEY = "_pending_natural_user_reply"
-_MAX_GENERATION_ATTEMPTS = 2
+# 自然语言回复生成的最大尝试次数。
+_MAX_GENERATION_ATTEMPT_COUNT = 2
 
 
 # LLM: pending state 只保存结构化事实、可丢弃草稿和内部完成信封；不能在这里预写用户句子。
@@ -286,7 +287,7 @@ def retry_natural_user_reply(
     phase["attempts"] = attempts
     if rejection_reason:
         phase["previous_rejection"] = str(rejection_reason)
-    return attempts < _MAX_GENERATION_ATTEMPTS
+    return attempts < _MAX_GENERATION_ATTEMPT_COUNT
 
 
 # LLM: 表达轮只用于等待、派工和前台让出等 interim 状态；普通最终回复直接来自主模型 turn。

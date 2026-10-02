@@ -91,6 +91,14 @@
   `_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER` 倍数、`_WAKE_FACT_DEPTH_LIMIT` 深度、`_CHARS_PER_TOKEN_WINDOW` 换算率）只补说明
   挪入无单位组。数值一律不变；目录重建 800 项 `--check` 一致；白名单 320→225＋无单位组 28→32（只减不增；
   `_MAX_RECORDS` 恢复是回滚 sync 脚本误删，非新增）。
+- **P10 第七批（2026-10-02，ds1，分支 `worker/ds1-p10-batch7`，已实现，待集成）**：整改 `agent_py_agent/agent/agent_core/`
+  目录（34 个文件）范围内 **64 条**（61 个唯一名字）待整改常数：按后缀表改名 40 个（`_LIMIT`→`_COUNT` 如
+  `PENDING_TURN_INPUT_INVALIDATION_LIMIT→…_COUNT`、`_ISSUE_LIMIT→_ISSUE_COUNT`、`DEFAULT_HARD_FAILURE_HALT_THRESHOLD→…_THRESHOLD_COUNT`，
+  `_MAX_TIMEOUT→_MAX_TIMEOUT_SECONDS`、`_REF_TEXT_LIMIT→_REF_TEXT_LIMIT_CHARS`、`DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP→
+  …_TAIL_MAX_TOKENS`；`_MAX_CANDIDATES→_MAX_ARTIFACT_CANDIDATE_COUNT` 避开 plugin_observation 既有 `MAX_CANDIDATE_COUNT` 撞名）；
+  已有单位后缀 20 个只补中文说明；无物理单位 4 个（`DYNAMIC_TIMEOUT_SAFETY_MARGIN` 倍数、`_PTL_DROP_FRACTION` 比率、
+  `_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH`/`_DEFAULT_DEPTH` 深度）只补说明挪入无单位组。数值一律不变；
+  目录重建 802 项 `--check` 一致；白名单 225→164＋无单位组 32→36（只减不增）。
 
 ## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
 

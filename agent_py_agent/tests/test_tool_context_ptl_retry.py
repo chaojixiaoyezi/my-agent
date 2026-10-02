@@ -126,19 +126,19 @@ def test_tool_loop_retries_until_provider_recovers():
 
 
 def test_tool_loop_always_retries_because_the_limit_is_a_named_constant():
-    # PTL 自救重试次数已从配置降为具名常量 DEFAULT_PTL_RETRY_MAX（2026-09-28 参数减量），
+    # PTL 自救重试次数已从配置降为具名常量 DEFAULT_PTL_RETRY_MAX_COUNT（2026-09-28 参数减量），
     # 用户不再能设 0 关闭。这里钉住：读取点拿到的是那个常量，且常量 > 0 时确实会重试。
     import tempfile
     from pathlib import Path
 
     from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
     from agent_py_agent.agent.agent_core._tool_loop_service import next_tool_loop_model_response
-    from agent_py_agent.agent.agent_core.tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX
+    from agent_py_agent.agent.agent_core.tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX_COUNT
     from agent_py_agent.agent.backends.errors import ProviderContextWindowError
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings.config import AgentConfig
 
-    assert DEFAULT_PTL_RETRY_MAX == 3, "常量值变了：本用例按 3 次重试设计，请同步调整"
+    assert DEFAULT_PTL_RETRY_MAX_COUNT == 3, "常量值变了：本用例按 3 次重试设计，请同步调整"
     # 配置里已没有 tool_context_ptl_retry_max 字段（配置侧不能关闭）
     assert not hasattr(AgentConfig(), "tool_context_ptl_retry_max")
 
@@ -186,7 +186,7 @@ def test_tool_loop_always_retries_because_the_limit_is_a_named_constant():
         prompt, response = turn.prompt, turn.response
 
         # 常量上限 3 → 首轮 + 3 次重试，救不回才落到 compact 路径
-        assert _AlwaysOverflowBackend.calls == 1 + DEFAULT_PTL_RETRY_MAX
+        assert _AlwaysOverflowBackend.calls == 1 + DEFAULT_PTL_RETRY_MAX_COUNT
         assert response.runtime_status == "context_overflow"
         # 重试过程中确实回收了旧条目（证明走的不是"原样返回"）
         assert any("ptl-reclaimed" in item for item in params.tool_context)

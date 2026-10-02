@@ -11,7 +11,9 @@ from __future__ import annotations
 
 _TOOL_OUTPUT_MARKER = "[tool-output-record"
 _RECLAIM_ANCHOR_KEYS = ("scoped_call_id", "artifact_ref", "read_artifact_hint")
-DEFAULT_MICROCOMPACT_KEEP_RECENT = 8
+# 微压缩保留的最近记录条数。
+DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT = 8
+# 触发微压缩的最小字符数。
 DEFAULT_MICROCOMPACT_MIN_CHARS = 1500
 _RECLAIM_NOTE = (
     "[tool-output-microcompacted] 旧工具输出正文已回收以省 context；"
@@ -25,7 +27,7 @@ _RECLAIM_NOTE = (
 def microcompact_tool_context(
     tool_context: list[str],
     *,
-    keep_recent: int = DEFAULT_MICROCOMPACT_KEEP_RECENT,
+    keep_recent: int = DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT,
     min_chars: int = DEFAULT_MICROCOMPACT_MIN_CHARS,
 ) -> list[str]:
     if keep_recent <= 0:
@@ -62,7 +64,7 @@ def _reclaim_entry(item: str) -> str:
 
 
 __all__ = [
-    "DEFAULT_MICROCOMPACT_KEEP_RECENT",
+    "DEFAULT_MICROCOMPACT_KEEP_RECENT_COUNT",
     "DEFAULT_MICROCOMPACT_MIN_CHARS",
     "microcompact_tool_context",
 ]

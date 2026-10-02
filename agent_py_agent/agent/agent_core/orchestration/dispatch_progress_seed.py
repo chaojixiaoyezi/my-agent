@@ -40,7 +40,8 @@ from ..runtime.task_identity import (
     progress_ledger_id,
 )
 
-_MAX_BINDING_OPEN_TARGETS = 24
+# 派活进度种子最多同时打开的目标数，防并发目标过多。
+_MAX_BINDING_OPEN_TARGET_COUNT = 24
 
 DISPATCH_SEED_NOTE = (
     "已把派工与 task_progress 结构化关联；有 covers 的子代理沿用原清单项，"
@@ -210,9 +211,9 @@ def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | No
         "schema_version": PLANNED_DISPATCH_CONTRACT_VERSION,
         "ledger_run_id": ledger_run_id,
         "ledger_ref": str(progress_path(root, ledger_run_id)),
-        "plan_target_ids": known_id_list[:_MAX_BINDING_OPEN_TARGETS],
+        "plan_target_ids": known_id_list[:_MAX_BINDING_OPEN_TARGET_COUNT],
         "plan_target_count": len(known_ids),
-        "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGETS],
+        "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGET_COUNT],
         "open_count": len(open_ids),
         "item_count": len(items),
         "binding_mode": "optional_exact",
@@ -649,7 +650,7 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
     payload: dict[str, Any] = {
         "schema_version": "dispatch-coverage-binding.v2",
         "binding_mode": "optional_exact",
-        "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGETS],
+        "open_target_ids": open_ids[:_MAX_BINDING_OPEN_TARGET_COUNT],
         "open_count": len(open_ids),
     }
     if ledger_run_id != run_id:
@@ -657,7 +658,7 @@ def _coverage_binding(agent: object, tasks: list) -> dict[str, Any] | None:
     if bound:
         payload["bound"] = bound
     if unbound_child_run_ids:
-        payload["unbound_child_run_ids"] = unbound_child_run_ids[:_MAX_BINDING_OPEN_TARGETS]
+        payload["unbound_child_run_ids"] = unbound_child_run_ids[:_MAX_BINDING_OPEN_TARGET_COUNT]
     if unknown:
         payload["unknown_covers_ids"] = list(dict.fromkeys(unknown))[:12]
         payload["note"] = COVERS_PARENT_LEDGER_UNKNOWN_NOTE if ledger_run_id != run_id else COVERS_UNKNOWN_NOTE

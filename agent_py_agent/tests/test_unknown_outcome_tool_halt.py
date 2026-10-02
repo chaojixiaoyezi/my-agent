@@ -20,7 +20,7 @@ from __future__ import annotations
      剥掉模型工具调用, runtime_status=unfinished 保持任务活跃不终端。
   L3 no-action 结构化闸(复核 seq 339 补):评估判 informational 时模型仍提出
      ToolCall,执行层不进 handler,全部转 TOOL_ACTION_NOT_REQUIRED 拦截结果
-     (handler_executed=False);连续 _NO_ACTION_GATE_HALT_LIMIT 轮拦截后设
+     (handler_executed=False);连续 _NO_ACTION_GATE_HALT_COUNT 轮拦截后设
      no_action_gate_halt,收口轮等用户明确指示。
 """
 

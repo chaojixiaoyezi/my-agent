@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from ...settings.runtime_guard_config import runtime_guard_bool, runtime_guard_int
 
-DEFAULT_REPEAT_FAIL_THRESHOLD = 10
-DEFAULT_READONLY_NO_PROGRESS_THRESHOLD = 3
-DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD = 5
+# 重复失败判定次数阈值。
+DEFAULT_REPEAT_FAIL_THRESHOLD_COUNT = 10
+# 只读无进展连续次数阈值。
+DEFAULT_READONLY_NO_PROGRESS_THRESHOLD_COUNT = 3
+# 重复成功提示的次数阈值。
+DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT = 5
 # 强返工提示阈值:同工具同类失败连续达该值时要求模型换策略，但默认不结束
 # 当前 turn。15 次既避免偶发构建失败过早触发，也能提醒明显的机械重试。
-DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD = 15
+DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD_COUNT = 15
 # L4 阶梯:真硬门默认关;开启后同类失败达该值强制收口等用户介入。
-DEFAULT_HARD_FAILURE_HALT_THRESHOLD = 15
+DEFAULT_HARD_FAILURE_HALT_THRESHOLD_COUNT = 15
 
 
 # LLM: 独立软提醒阈值由运行门配置管理，0 关闭，不影响失败/只读门或执行权限。
@@ -23,7 +26,7 @@ def repeated_success_hint_threshold(params: object) -> int:
         if parsed >= 0:
             return parsed
     return runtime_guard_int(
-        "repeated_success_hint_threshold", DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD,
+        "repeated_success_hint_threshold", DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT,
         policy=getattr(params, "runtime_guard_policy", None),
     )
 
@@ -36,7 +39,7 @@ def repeat_fail_threshold(params: object) -> int:
             return parsed
     return runtime_guard_int(
         "repeat_fail_threshold",
-        DEFAULT_REPEAT_FAIL_THRESHOLD,
+        DEFAULT_REPEAT_FAIL_THRESHOLD_COUNT,
         policy=getattr(params, "runtime_guard_policy", None),
     )
 
@@ -49,7 +52,7 @@ def readonly_no_progress_threshold(params: object) -> int:
             return parsed
     return runtime_guard_int(
         "readonly_no_progress_threshold",
-        DEFAULT_READONLY_NO_PROGRESS_THRESHOLD,
+        DEFAULT_READONLY_NO_PROGRESS_THRESHOLD_COUNT,
         policy=getattr(params, "runtime_guard_policy", None),
     )
 
@@ -89,7 +92,7 @@ def repeated_failure_halt_threshold(params: object) -> int:
             return parsed
     return runtime_guard_int(
         "repeated_failure_halt_threshold",
-        DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD,
+        DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD_COUNT,
         policy=getattr(params, "runtime_guard_policy", None),
     )
 
@@ -121,7 +124,7 @@ def hard_failure_halt_threshold(params: object) -> int:
             return parsed
     return runtime_guard_int(
         "hard_failure_halt_threshold",
-        DEFAULT_HARD_FAILURE_HALT_THRESHOLD,
+        DEFAULT_HARD_FAILURE_HALT_THRESHOLD_COUNT,
         policy=getattr(params, "runtime_guard_policy", None),
     )
 

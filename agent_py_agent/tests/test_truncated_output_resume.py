@@ -12,7 +12,7 @@ from __future__ import annotations
 import types
 
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-    _TRUNCATED_OUTPUT_RESUME_LIMIT,
+    _TRUNCATED_OUTPUT_RESUME_COUNT,
     ToolLoopRepairCounters,
     _no_tool_calls_decision,
     _NoToolCallsRequest,
@@ -56,7 +56,7 @@ def test_truncated_final_resumes_in_turn() -> None:
 # 函数用途: 验证达到上限后返回 break 并标记 MODEL_RESPONSE_TRUNCATED。
 def test_truncated_final_stops_after_limit() -> None:
     counters = ToolLoopRepairCounters(
-        truncated_output_repairs=_TRUNCATED_OUTPUT_RESUME_LIMIT
+        truncated_output_repairs=_TRUNCATED_OUTPUT_RESUME_COUNT
     )
     request, params = _request(truncated=True, counters=counters)
     decision = _no_tool_calls_decision(request)

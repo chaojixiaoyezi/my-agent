@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from .microcompact import _RECLAIM_ANCHOR_KEYS, _TOOL_OUTPUT_MARKER
 
-DEFAULT_PTL_RETRY_MAX = 3
+# PTL 重试最大次数。
+DEFAULT_PTL_RETRY_MAX_COUNT = 3
+# PTL 预算丢弃比例：超预算时按该比例裁掉尾部内容。
 _PTL_DROP_FRACTION = 0.2
+# PTL 单次最少回收字符数。
 _PTL_MIN_RECLAIM_CHARS = 200
 _PTL_NOTE = (
     "[tool-output-ptl-reclaimed] 上下文超限，本条旧工具输出正文已回收重试；"
@@ -56,4 +59,4 @@ def _force_reclaim_entry(item: str) -> str:
     return head + "\n".join(kept)
 
 
-__all__ = ["DEFAULT_PTL_RETRY_MAX", "reclaim_oldest_tool_results_for_ptl"]
+__all__ = ["DEFAULT_PTL_RETRY_MAX_COUNT", "reclaim_oldest_tool_results_for_ptl"]

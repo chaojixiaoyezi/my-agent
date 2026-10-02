@@ -12,8 +12,8 @@ import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-    _INVALID_ARGUMENT_REPAIR_LIMIT,
-    _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT,
+    _INVALID_ARGUMENT_REPAIR_COUNT,
+    _NATIVE_TRUNCATED_WRITE_LOOP_COUNT,
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
     _inc_protocol,
@@ -150,7 +150,7 @@ def test_invalid_tool_arguments_get_bounded_repairs_then_keep_typed_failure(
 ):
     params = _params()
     counters = ToolLoopRepairCounters()
-    for attempt in range(_INVALID_ARGUMENT_REPAIR_LIMIT + 1):
+    for attempt in range(_INVALID_ARGUMENT_REPAIR_COUNT + 1):
         backend, _requests = _stream_backend(_write_stream_variant(
             partial_json, stop_reason, close_block=close_block, message_stop=message_stop,
         ))
@@ -160,7 +160,7 @@ def test_invalid_tool_arguments_get_bounded_repairs_then_keep_typed_failure(
             agent=_decision_agent(tmp_path), params=params, response=response, counters=counters,
         ))
         assert decision.calls == [] and params.executed_tools == []
-        if attempt < _INVALID_ARGUMENT_REPAIR_LIMIT:
+        if attempt < _INVALID_ARGUMENT_REPAIR_COUNT:
             assert decision.action == "continue" and decision.response is None
             assert decision.counters.invalid_arguments_repairs == attempt + 1
             assert params.tool_context[-1].startswith("[tool-arguments-invalid]")
@@ -169,7 +169,7 @@ def test_invalid_tool_arguments_get_bounded_repairs_then_keep_typed_failure(
         else:
             assert decision.action == "break" and decision.response is response
             assert decision.response.turn_end_reason == "error"
-    assert len(params.tool_context) == _INVALID_ARGUMENT_REPAIR_LIMIT
+    assert len(params.tool_context) == _INVALID_ARGUMENT_REPAIR_COUNT
     assert decision.counters.truncated_write_repairs == 0 and decision.counters.protocol_repairs == 0
 
 
@@ -223,7 +223,7 @@ def test_real_length_stream_preserves_provider_facts_after_two_repairs(tmp_path,
     backend, requests = _stream_backend(_truncated_write_sse_lines())
     params = _params()
     counters = ToolLoopRepairCounters()
-    for attempt in range(_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT):
+    for attempt in range(_NATIVE_TRUNCATED_WRITE_LOOP_COUNT):
         response = backend.generate("写入文件", tools=[{"name": "write_file", "input_schema": {"type": "object"}}])
         assert response.runtime_reason == "MODEL_RESPONSE_TRUNCATED"
         decision = tool_loop_response_decision(ToolLoopResponseDecisionRequest(
@@ -231,7 +231,7 @@ def test_real_length_stream_preserves_provider_facts_after_two_repairs(tmp_path,
         ))
         assert decision.calls == []
         assert params.executed_tools == []
-        if attempt < _NATIVE_TRUNCATED_WRITE_LOOP_LIMIT - 1:
+        if attempt < _NATIVE_TRUNCATED_WRITE_LOOP_COUNT - 1:
             assert decision.action == "continue"
             counters = decision.counters
         else:
@@ -446,7 +446,7 @@ def test_truncated_empty_write_breaks_after_limit(tmp_path: Path):
     agent = _decision_agent(tmp_path)
     params = _params()
     counters = ToolLoopRepairCounters(
-        truncated_write_repairs=_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT - 1
+        truncated_write_repairs=_NATIVE_TRUNCATED_WRITE_LOOP_COUNT - 1
     )
     decision = tool_loop_response_decision(
         ToolLoopResponseDecisionRequest(
@@ -617,7 +617,7 @@ def test_truncated_stream_recovery_breaks_after_limit(tmp_path: Path):
             params=params,
             response=response,
             counters=ToolLoopRepairCounters(
-                truncated_write_repairs=_NATIVE_TRUNCATED_WRITE_LOOP_LIMIT - 1
+                truncated_write_repairs=_NATIVE_TRUNCATED_WRITE_LOOP_COUNT - 1
             ),
         )
     )

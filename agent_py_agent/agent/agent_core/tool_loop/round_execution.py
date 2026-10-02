@@ -47,7 +47,8 @@ from .segment_planning import (
 
 # 无动作闸只由执行轮消费和计数；收口层读取原halt事实，不另设阈值副本。
 _NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
-_NO_ACTION_GATE_HALT_LIMIT = 2
+# 无动作闸门停止的次数阈值。
+_NO_ACTION_GATE_HALT_COUNT = 2
 
 _STATEFUL_ORCHESTRATION_TOOLS = {
     "create_subagents",
@@ -246,7 +247,7 @@ def _no_action_gated_result(call: ToolCall) -> ToolResult:
 
 # LLM: 无动作闸的计数和阈值唯一归执行轮；只读结构化assessment，保留逐调用失败记录、halt时机及零handler执行。
 # 函数用途: informational 轮对模型提出的全部调用做有界结构化拦截——handler 不执行、
-# 每调用一条拦截结果(模型可读),连续 _NO_ACTION_GATE_HALT_LIMIT 轮拦截后设
+# 每调用一条拦截结果(模型可读),连续 _NO_ACTION_GATE_HALT_COUNT 轮拦截后设
 # no_action_gate_halt,由 _tool_step_or_limit 收口轮接管(剥工具调用,等用户明确指示)。
 def _gate_all_calls_for_no_action(
     request: ToolRoundExecutionRequest,
@@ -275,7 +276,7 @@ def _gate_all_calls_for_no_action(
                 model_call=_model_visible_call(request, idx, call),
             )
         )
-    if streak >= _NO_ACTION_GATE_HALT_LIMIT:
+    if streak >= _NO_ACTION_GATE_HALT_COUNT:
         object.__setattr__(request.params, "no_action_gate_halt", True)
     request.params.tool_context.append(
         "[tool-system:no-action-gate]\n"
@@ -987,6 +988,7 @@ def _interrupted_result(call: ToolCall) -> ToolResult:
 #   (几十个中型 read/search 同轮返回)。超预算时从最大段开始截断到安全份额,
 #   截口落在换行处,并注明恢复路径(重新调用工具/读档案)。纯框架层,模型无感。
 _TURN_TOOL_CONTEXT_BUDGET_CHARS = 200_000
+# 回合预算保留字符数，超预算时保底内容长度。
 _TURN_BUDGET_KEEP_CHARS = 20_000
 
 

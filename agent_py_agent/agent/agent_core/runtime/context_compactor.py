@@ -16,9 +16,13 @@ from ..model.context_window import resolve_model_context_window_tokens
 DEFAULT_COMPACT_TRIGGER_PERCENT = 90
 # 触发线绝对上限的默认值：与 AgentConfig/MemorySettings/随包 YAML 的默认一致；0 只在显式配置时表示不封顶。
 DEFAULT_COMPACT_TRIGGER_MAX_TOKENS = 300_000
+# compact 后目标上下文占用百分比，达到即停止压缩。
 DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT = 60
+# compact 保留的最近对话轮数。
 DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS = 4
-DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP = 20_000
+# compact 尾部保留的 token 上限。
+DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS = 20_000
+# compact 尾部占窗口的百分比，决定保留多少最近内容。
 DEFAULT_COMPACT_RECENT_TAIL_PERCENT = 10
 
 
@@ -69,7 +73,7 @@ def runtime_compact_policy(
     trigger_max_tokens = compact_trigger_max_tokens(getattr(config, "memory_compact_auto_trigger_max_tokens", None))
     trigger_tokens = _capped_trigger_tokens(window, percent, trigger_max_tokens)
     recent_tail_tokens = min(
-        DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP,
+        DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS,
         max(
             1,
             int(trigger_tokens * (DEFAULT_COMPACT_RECENT_TAIL_PERCENT / 100.0)),
@@ -204,7 +208,7 @@ __all__ = [
     "DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT",
     "DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS",
     "DEFAULT_COMPACT_RECENT_TAIL_PERCENT",
-    "DEFAULT_COMPACT_RECENT_TAIL_TOKEN_CAP",
+    "DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS",
     "RuntimeCompactPolicy",
     "compact_recovery_target_percent",
     "compact_recovery_target_tokens",

@@ -33,8 +33,9 @@ INPUT_PATH_NOT_VISIBLE_HINT = (
     "请先把需要的文件放进工作区，或直接把内容写进任务。"
 )
 # 回执里单个路径文本的长度上限，以及最多列出的不可见输入条数；超出只计数，不塞进回执。
-_REF_TEXT_LIMIT = 300
-_ISSUE_LIMIT = 20
+_REF_TEXT_LIMIT_CHARS = 300
+# 读作用域回执最多列出的不可见输入问题条数，超出只计数。
+_ISSUE_COUNT = 20
 # 预检中结构化事实取不到时视为无法判定，只放行不拦截；这些是准备链路可能抛出的已知类型。
 _SCOPE_UNAVAILABLE_ERRORS = (OSError, ValueError, TypeError, KeyError, AttributeError)
 
@@ -134,8 +135,8 @@ def _invisible_child_inputs(
         return {}
     return {
         "index": index,
-        "invisible_refs": invisible[:_ISSUE_LIMIT],
-        "omitted_ref_count": max(0, len(invisible) - _ISSUE_LIMIT),
+        "invisible_refs": invisible[:_ISSUE_COUNT],
+        "omitted_ref_count": max(0, len(invisible) - _ISSUE_COUNT),
         "visible_roots": scope.visible_roots(),
     }
 
@@ -147,8 +148,8 @@ def _ref_issue(scope: ChildReadScope, ref: str) -> dict[str, str]:
     if decision.allowed:
         return {}
     return {
-        "ref": ref[:_REF_TEXT_LIMIT],
-        "resolved_path": str(resolved)[:_REF_TEXT_LIMIT],
+        "ref": ref[:_REF_TEXT_LIMIT_CHARS],
+        "resolved_path": str(resolved)[:_REF_TEXT_LIMIT_CHARS],
         "reason_code": decision.code or "PATH_ACCESS_DENIED",
     }
 

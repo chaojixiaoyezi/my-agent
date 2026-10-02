@@ -22,6 +22,7 @@ from ...tooling.output_projection import project_tool_output_body
 from ...tooling.runtime_contracts import ToolCall, ToolResult
 
 _POINT = "external_material_order"
+# 决策点提示文字的最大字符数，控制上下文占用。
 _MAX_HINT_CHARS = 1024
 _URL_WITH_QUERY = re.compile(r"(?:\b[A-Za-z][A-Za-z0-9+.-]*:)?//[^\s<>\"']*\?")
 _RANKS = {"first": 0, "normal": 1, "later": 2}

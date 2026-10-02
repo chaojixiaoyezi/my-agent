@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-_MAX_INLINE_JSON = 1600
+# 实时摘要中内联 JSON 的最大字符数，超长改为引用不塞正文。
+_MAX_INLINE_JSON_CHARS = 1600
 _TOP_LEVEL_KEYS = (
     "action",
     "status",
@@ -124,4 +125,4 @@ def _json_inline(value: object) -> str:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     except TypeError:
         text = repr(value)
-    return text if len(text) <= _MAX_INLINE_JSON else text[:_MAX_INLINE_JSON].rstrip() + "...[truncated]"
+    return text if len(text) <= _MAX_INLINE_JSON_CHARS else text[:_MAX_INLINE_JSON_CHARS].rstrip() + "...[truncated]"
