@@ -54,7 +54,7 @@ def test_defaults_no_model_no_agent_no_credentials_and_no_owner_file(tmp_path):
     result = execute(host, "read", {})
     assert result["ok"] and result["revision"] == {"owner": 0, "thread": 0}
     assert result["effective"]["enabled"] is False
-    assert result["effective"]["timeout_seconds"] == 2
+    assert result["effective"]["timeout_seconds"] == 3
     assert result["effective"]["stage_timeout_seconds"] == 4
     assert result["effective"]["points"]["curator"]["timeout_seconds"] == 4
     assert all(point["mode"] == "off" for point in result["effective"]["points"].values())
@@ -304,7 +304,7 @@ def test_owner_and_thread_isolation_and_payload_cannot_supply_identity(tmp_path)
     host = host_at(tmp_path)
     patch(host, {"timeout_seconds": 8})
     other = host_at(tmp_path, "bob")
-    assert execute(other, "read", {})["effective"]["timeout_seconds"] == 2
+    assert execute(other, "read", {})["effective"]["timeout_seconds"] == 3
     thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
     with pytest.raises(ModelProfileError, match="其他用户"):
         execute(other, "read", {}, thread_id=thread.thread_id)
@@ -403,3 +403,19 @@ def test_invalid_decision_time_in_yaml_is_not_silently_replaced(tmp_path, value)
     path.write_text(f"decision_timeout_seconds: {value}\n")
     with pytest.raises(ModelProfileError):
         load_config(path)
+
+
+def test_foreground_default_is_three_seconds_and_a_user_point_override_is_kept(tmp_path):
+    from agent_py_agent.agent.settings.user_config_capability import packaged_config_path
+
+    # 2026-10-01：前台单次期限默认 2→3 秒；随包 YAML 与 dataclass 必须是同一个值，点位不覆盖时继承它。
+    assert AgentConfig().decision_timeout_seconds == 3.0
+    assert load_config(packaged_config_path()).decision_timeout_seconds == 3.0
+    host = host_at(tmp_path)
+    point = execute(host, "read", {})["effective"]["points"]["model_selection"]
+    assert (point["timeout_seconds"], point["max_request_seconds"]) == (3.0, 3.0)
+    assert point["limiting_field"] == "points.model_selection.timeout_seconds"
+    # 用户给选模型单独设的 5 秒（生产现值）是覆盖层的值，改默认不影响它；其它前台点位跟着新默认走。
+    view = patch(host, {"points.model_selection.timeout_seconds": 5.0, "stage_timeout_seconds": 5.0})
+    assert view["effective"]["points"]["model_selection"]["max_request_seconds"] == 5.0
+    assert view["effective"]["points"]["planning"]["max_request_seconds"] == 3.0

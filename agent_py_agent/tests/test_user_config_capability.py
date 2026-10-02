@@ -107,7 +107,7 @@ def test_original_user_config_decision_actions_share_service_and_cas(tmp_path):
     assert not conflict.ok and conflict.error_code == "STALE_VERSION"
     assert conflict.reported_error_code == "DECISION_SETTINGS_CONFLICT" and conflict.effect_outcome == "not_started"
     reset = tool.execute({"action": "decision_reset", "expected_revision": json.loads(saved.output)["revision"], "fields": ["timeout_seconds"]})
-    assert reset.ok and json.loads(reset.output)["effective"]["timeout_seconds"] == 2
+    assert reset.ok and json.loads(reset.output)["effective"]["timeout_seconds"] == 3
 
 
 def test_decision_tool_uses_current_runner_thread_and_refuses_explicit_identity(tmp_path):

@@ -28,6 +28,26 @@
   `check_doc_sync.py` → DOC_SYNC_PASS；`check_code_size.py --mode strict` → blocked=False（strict_scope_total=2241，CODE_SIZE_REPORT.md 已还原）；
   `git diff --check` 干净；`check_clean_package.py .` 通过。
 
+## Jev 前台默认期限 2→3 秒（J5）与实际版本号落结构化事实（J19）（2026-10-01，分支 `claude/be-jev-deadline-version`，基于 main `34e4d874e`）
+
+- **用例**：
+  - `test_decision_settings.py::test_foreground_default_is_three_seconds_and_a_user_point_override_is_kept`：
+    dataclass 与随包 YAML 默认都是 3 秒；点位不覆盖时继承 3 秒；用户给选模型设的 5 秒覆盖照旧生效，其它前台点位仍是 3 秒。
+  - 原先断言默认 2 秒的 5 处（`test_decision_settings.py` 两处、`test_decision_model_operations.py` 两处、`test_user_config_capability.py` 一处）改成 3 秒。
+  - `test_decision_outcome_log.py` 新增 3 条：
+    - 带供应商响应的行记 `requested_model` / `model_version`，没有响应的行不带；
+    - 汇总的 `model_versions` 按次数降序、最近行只在有版本时带键；
+    - 经真实传输栈和本地假决策服务的一次成功：档案请求 `jev-test`、服务回 `jev-resolved-test`，日志与审计各自分开记。
+- **变异**：6 个全部抓住：不记版本字段、请求名与实际版本对调、计次排序、最近行无条件补键、dataclass 默认回到 2 秒、YAML 默认回到 2 秒。
+- **真实验收**：
+  - 环境：隔离 home、私有端口 8438、真实 Gateway + TUI；目录副本只放 Jev 与 MiniMax 两个 provider，文件 0600，用完删除；主模型 MiniMax-M2.7，只开选模型观察点（5 秒）。
+  - 第 1 条消息：请求 `jev-latest`，结果行记下实际版本 `jev-1.13.0`。
+  - 经产品 `save_model` 编辑把决策档案模型名改成 `jev-1.13.0` 后，第 2 条消息请求 `jev-1.13.0`，返回 `jev-1.13.0`。
+  - 两次都成功（1304 ms、1461 ms）；审计汇总 `model_versions` 两对各 1 次。
+  - Jev 实际 2 次调用，与预计一致。
+  - 证据：`~/.my-agent/decision-evidence/j5-j19-jev-version-30f177c5/`。
+- **门禁**：10 个守卫文件加决策相关 53 个文件，共 63 个文件 1569 passed；import 边界 0 条、ruff、doc_sync、diff --check、code-size strict（与 34e4d874e 逐条比对新增 0）、clean_package 都通过。
+
 ## step16x 集成：Responses 失败分类与一次选择失败原因合并后的用例调整（2026-10-01，3a）
 
 - `test_package_selection_failure.py::test_subscription_responses_failed_event_is_recorded_as_structured_failure` 原按 `0ca852195` 写，

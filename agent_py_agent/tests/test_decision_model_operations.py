@@ -48,7 +48,7 @@ def test_model_operation_settings_share_cas_without_generation_setup(tmp_path, m
         op(host, "decision_patch", payload, thread_id=thread.thread_id)
     reset = op(host, "decision_reset", {"decision": {"scope": "thread", "expected_revision": saved["revision"],
         "fields": ["timeout_seconds"]}}, thread_id=thread.thread_id)
-    assert reset["effective"]["timeout_seconds"] == 2
+    assert reset["effective"]["timeout_seconds"] == 3
     assert host.conversation_store.threads.load(thread.thread_id).model_profile_id == thread.model_profile_id
 
 
@@ -125,7 +125,7 @@ def test_cold_gateway_decision_settings_use_authenticated_owner_without_agent(tm
     assert patcher.reply[0] == 200 and patcher.reply[1]["effective"]["timeout_seconds"] == 3.5
     other = Handler({"operation": "decision_read", "conversation_id": "settings"}, user="bob")
     model_profile_service.handle_client_models(other, server_host)
-    assert other.reply[0] == 200 and other.reply[1]["effective"]["timeout_seconds"] == 2
+    assert other.reply[0] == 200 and other.reply[1]["effective"]["timeout_seconds"] == 3
 
 
 @pytest.mark.parametrize("operation, payload, timeout", [

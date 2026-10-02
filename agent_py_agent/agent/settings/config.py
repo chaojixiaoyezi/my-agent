@@ -280,7 +280,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数）：关闭时既不在结果日志记 skipped（原因码、无正文），
     # 也不累计 decision_reach_counts 的到达/未触发原因计数。
     decision_skip_records_enabled: bool = True
-    decision_timeout_seconds: float = 2.0
+    decision_timeout_seconds: float = 3.0
     decision_stage_timeout_seconds: float = 4.0
     decision_background_timeout_seconds: float = 4.0
     decision_profile_id: str = ""

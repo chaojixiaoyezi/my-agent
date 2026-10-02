@@ -1040,7 +1040,7 @@ decision_observe_sampling_enabled: false
 # 后台等待上限用下面的 decision_background_timeout_seconds。apply（正式使用）、实验和后台点位不受影响。
 # 默认关：决策的行为与时序不变，只是结果日志每行多一个附加字段 blocking。
 decision_observe_nonblocking_enabled: false
-decision_timeout_seconds: 2.0  # 前台单次等待；必须为有限正秒数
+decision_timeout_seconds: 3.0  # 前台单次等待；必须为有限正秒数
 decision_stage_timeout_seconds: 4.0  # 同一阶段累计等待；必须为有限正秒数
 decision_background_timeout_seconds: 4.0  # 后台单次等待；必须为有限正秒数
 # 决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数），一个开关同时管两样，关闭后两样都不记。

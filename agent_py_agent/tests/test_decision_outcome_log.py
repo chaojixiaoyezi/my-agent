@@ -169,3 +169,56 @@ def test_summary_can_be_limited_to_trusted_threads_and_drops_background_rows(tmp
     assert decision_outcome_summary(home, since=0, thread_ids=["thread-a"])["points"] == {"recall": {"success": 1}}
     assert decision_outcome_summary(home, since=0)["points"] == {"recall": {"success": 1, "deadline": 1},
                                                                   "curator": {"success": 1}}
+
+
+def test_rows_with_a_provider_response_record_requested_and_actual_model(tmp_path):
+    from agent_py_agent.agent.backends.decision_protocol import DecisionResponse
+
+    response = DecisionResponse(binding=None, input_digest="digest", requested_model="jev-latest", model="jev-1.13.0",
+                                answers=(), _usage_json=b"{}")
+    success = SimpleNamespace(mode="observe", status="success", reason="", response=response)
+    row = decision_outcome_row(_stage(), "model_selection", success, 0.4)
+    assert (row["requested_model"], row["model_version"]) == ("jev-latest", "jev-1.13.0")
+    # 没有供应商响应的行（超时、冷却、替身）不带这两个键，不补猜。
+    timed_out = SimpleNamespace(mode="observe", status="deadline", reason="provider_failed", response=None)
+    assert {"requested_model", "model_version"}.isdisjoint(decision_outcome_row(_stage(), "recall", timed_out, 2.0))
+
+
+def test_summary_counts_actual_versions_per_requested_alias_and_recent_rows_show_them(tmp_path):
+    path = tmp_path / "outcomes.jsonl"
+    now = time.time()
+    rows = [{"point": "model_selection", "status": "success", "requested_model": "jev-latest", "model_version": "jev-1.13.0"},
+            {"point": "recall", "status": "success", "requested_model": "jev-latest", "model_version": "jev-1.13.0"},
+            {"point": "recall", "status": "success", "requested_model": "jev-latest", "model_version": "jev-1.14.0"},
+            {"point": "planning", "status": "success", "requested_model": "jev-1.13.0", "model_version": "jev-1.13.0"},
+            {"point": "recall", "status": "deadline"},
+            {"point": "recall", "status": "success", "model_version": 7}]
+    path.write_text("".join(json.dumps({"schema": SCHEMA, "created_at": now, **row}) + "\n" for row in rows),
+                    encoding="utf-8")
+
+    summary = decision_outcome_summary(SimpleNamespace(owner_decision_outcomes_jsonl=path), since=now - 60)
+
+    assert summary["model_versions"] == [
+        {"requested_model": "jev-latest", "model_version": "jev-1.13.0", "calls": 2},
+        {"requested_model": "jev-1.13.0", "model_version": "jev-1.13.0", "calls": 1},
+        {"requested_model": "jev-latest", "model_version": "jev-1.14.0", "calls": 1}]
+    assert [row.get("model_version") for row in summary["recent"]] == [
+        "jev-1.13.0", "jev-1.13.0", "jev-1.14.0", "jev-1.13.0", None, None]
+    assert "model_version" not in summary["recent"][4], "旧行、失败行不补这个键"
+    assert decision_outcome_summary(SimpleNamespace(), since=0)["model_versions"] == []
+
+
+def test_a_real_success_through_the_transport_logs_the_version_the_provider_returned(tmp_path, lanes):  # noqa: F811
+    env = configured(tmp_path, lanes)
+    path = tmp_path / "owner-data" / "decision" / "outcomes.jsonl"
+    env.host.home_paths.owner_decision_outcomes_jsonl = path
+
+    assert decide_foreground(env).status == "success"
+
+    row = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+    # 档案请求的是 jev-test，假服务回的实际版本是 jev-resolved-test：两者分开记，审计按对计次。
+    assert (row["requested_model"], row["model_version"]) == ("jev-test", "jev-resolved-test")
+    query = AuditQuery(topic="decision", scope="owner", thread_id="", since=0.0, limit=20)
+    report = _decision_owner_report("alice", env.host, [env.thread.thread_id], query)
+    assert report["points"]["model_versions"] == [
+        {"requested_model": "jev-test", "model_version": "jev-resolved-test", "calls": 1}]

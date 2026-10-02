@@ -4,6 +4,8 @@
 #   transport 链路事实（各次 HTTP 尝试的分段毫秒、超时时所处阶段、发送前本地估算输入；attempts 为空即请求没发出），同样无正文。位置只认 owner 规范路径
 #   owner_decision_outcomes_jsonl，有界保留最近 _MAX_RECORDS 条；写失败只记日志，绝不影响决策本身。审计工具 audit_records 读取汇总，
 #   汇总时把请求根本没发出去的失败类结果单列（not_sent），不计入 Jev 的超时率和失败率。
+#   成功拿到供应商响应的行另带 requested_model（请求时的模型名，如 jev-latest）与 model_version（响应里供应商实际给的
+#   版本号，如 jev-1.13.0）；汇总按（请求名, 实际版本）计次 model_versions，用于发现别名背后的版本变化，不参与任何判定。
 #   新增字段须同步 decision_outcome_row、decision_outcome_summary 与 test_decision_outcome_log.py。
 #   另有 status=skipped 行：可选决策点已到触发点、该点已开启，却被结构化条件挡下（材料含 URL 查询串）时记录，
 #   reason 为宿主原因码；配置 decision_skip_records_enabled 关闭时不写。“没满足触发条件”的原因归 decision_reach_counts 计数。
@@ -19,7 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TypeVar
 
-from ..backends.decision_protocol import DecisionPrivacySkip
+from ..backends.decision_protocol import DecisionPrivacySkip, DecisionResponse
 from ..common.json_io import append_jsonl_capped, read_jsonl_objects_report
 
 SCHEMA = "decision_outcome.v1"
@@ -41,6 +43,8 @@ _LOGGER = logging.getLogger(__name__)
 #   建了调用记录的结果另带 transport（链路事实，见 decision_model_call.decision_transport_facts），调用前就结束的行没有这个键。
 #   blocking 取结果对象的同名字段（缺省为真）：false 表示这次 observe 转到后台执行、调用方没有等待，
 #   这类行的 elapsed_ms 只算后台 worker 开始执行到结束，不含排队。
+#   结果带供应商响应（DecisionResponse）时另记 requested_model 与 model_version：两者都是结构化身份，不是正文；
+#   没有响应的行（超时、冷却、跳过等）不带这两个键，不补猜。
 # 函数用途: 把一次决策结果投影成一行日志。
 def decision_outcome_row(stage: object, point: str, outcome: object, elapsed_seconds: float) -> dict[str, object]:
     row = {
@@ -55,6 +59,10 @@ def decision_outcome_row(stage: object, point: str, outcome: object, elapsed_sec
     transport = getattr(outcome, "transport", None)
     if isinstance(transport, dict):
         row["transport"] = transport
+    response = getattr(outcome, "response", None)
+    if isinstance(response, DecisionResponse):
+        row["requested_model"] = str(response.requested_model)
+        row["model_version"] = str(response.model)
     return row
 
 
@@ -102,13 +110,14 @@ def material_or_skip(agent: object, stage: object, point: str, build: Callable[[
 #   请求根本没发出去的失败类结果（见 _unsent_code）不进 points，单列在 not_sent[点位][原因码]，不计入 Jev 的超时率和失败率；
 #   只改汇总口径，不改日志行本身。
 #   thread_ids 给出时只统计这些会话的行（调用方按可信范围解析，如 current_thread）；后台点位没有会话编号，随之排除。
-#   None 表示 owner 全部（含后台点位）。
-# 函数用途: 为审计工具提供"每个决策点调用了几次、分别是什么结果"。
+#   None 表示 owner 全部（含后台点位）。model_versions 按（请求名, 实际版本）计次，只数带 model_version 的行（旧行没有）。
+# 函数用途: 为审计工具提供"每个决策点调用了几次、分别是什么结果、供应商实际用的是哪个版本"。
 def decision_outcome_summary(home_paths: object, *, since: float,
                              thread_ids: list[str] | None = None) -> dict[str, object]:
     path = getattr(home_paths, "owner_decision_outcomes_jsonl", None)
     if not path:
-        return {"available": False, "points": {}, "not_sent": {}, "recent": [], "unreadable_rows": 0}
+        return {"available": False, "points": {}, "not_sent": {}, "model_versions": [], "recent": [],
+                "unreadable_rows": 0}
     report = read_jsonl_objects_report(Path(path), context="decision_outcome_log.read")
     rows = [row for row in report.records if row.get("schema") == SCHEMA and _created_at(row) >= since
             and (thread_ids is None or str(row.get("thread_id") or "") in thread_ids)]
@@ -120,8 +129,22 @@ def decision_outcome_summary(home_paths: object, *, since: float,
         counts = target.setdefault(str(row.get("point") or ""), {})
         counts[key] = counts.get(key, 0) + 1
     recent = [_recent_row(row) for row in rows[-_RECENT_ROWS:]]
-    return {"available": True, "points": points, "not_sent": unsent, "recent": recent,
-            "unreadable_rows": len(report.load_errors)}
+    return {"available": True, "points": points, "not_sent": unsent, "model_versions": _model_versions(rows),
+            "recent": recent, "unreadable_rows": len(report.load_errors)}
+
+
+# LLM: 只读行里的 requested_model / model_version 两个字符串字段；缺失或不是字符串的行不计（旧行、失败行）。
+#   输出按次数降序、再按名字排序，便于审计一眼看出“请求 jev-latest、实际 jev-1.13.0”这类别名解析。
+# 函数用途: 统计时间窗内供应商实际返回的决策模型版本。
+def _model_versions(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        version, requested = row.get("model_version"), row.get("requested_model")
+        if isinstance(version, str) and version and isinstance(requested, str):
+            counts[(requested, version)] = counts.get((requested, version), 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return [{"requested_model": requested, "model_version": version, "calls": calls}
+            for (requested, version), calls in ordered]
 
 
 # LLM: 只看结构化事实：失败类状态才区分；有 transport 的行按有没有 HTTP 尝试判定，没有 transport 的按宿主原因码判定，
@@ -139,12 +162,14 @@ def _unsent_code(row: dict[str, object]) -> str:
     return (reason or status) if unsent else ""
 
 
-# LLM: 固定字段缺失时给 None（与原先一致）；链路计时只在该行确有 transport 对象时带出，旧行不补键。
+# LLM: 固定字段缺失时给 None（与原先一致）；链路计时与实际模型版本只在该行确有对应字段时带出，旧行不补键。
 # 函数用途: 把一行结果日志压成审计最近行。
 def _recent_row(row: dict[str, object]) -> dict[str, object]:
     recent = {key: row.get(key) for key in _RECENT_FIELDS}
     if isinstance(row.get("transport"), dict):
         recent["transport"] = row["transport"]
+    if isinstance(row.get("model_version"), str):
+        recent["model_version"] = row["model_version"]
     return recent
 
 
