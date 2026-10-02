@@ -9,7 +9,7 @@
   - `test_capability_presentation_observation.py`：观察记录允许 `candidate_projection`，并断言只有计数。
 - **变异**：23 个全部抓到（三个上限调大、边界 `>` 改 `>=`、按字符或 UTF-8 计字节、截后缀、计数不加或字节算错、ref/version 上线、插件工具带全字段或不截、非字符串被截、共用说明逐题重复、整行上线、state 缺共用说明、计数或完整行上线（普通与实验两条路径）、观察记录缺计数、材料不存计数）。
 - **门禁**：相关测试 38 个文件（含全仓扫描守卫与 test_packaging）735 项全过；其余见交付消息。
-- **真实 Jev**：待补（隔离 home，只看 F1 决策点）。
+- **真实 Jev**：真实 Jev 一次（`81f8e169a`，隔离 home、私有端口 8487；目录副本只含生产 Jev 档案 jev-1.13.0 和 MiniMax M2.7；生产 owner Skill 只读副本 + workspace-peek 插件，共 53 题）：`/experiment apply skill_tool 10m 1 60000 数一下当前目录里 notes.txt 一共有多少行`。B=77,982 字节、state 1,237 字节、经验上界 53,583，在标定范围内，预留后结算 charged；Jev 实际计费输入 21,489（上界的 0.40），输出 4,442。截断 description 52 条（11,491 字节）、when_to_use 49 条（11,582 字节）。Jev 选 3 项：workspace-peek 插件（include 概率 0.66，合理）、subagent-read-scope-check（0.56，不对；它的完整说明同样只讲子代理，不是截断造成）、verification-before-completion（0.41，边缘）；其余 50 项 not_needed。晋升评估 keep_observing（insufficient_samples、no_savings：插件被选中，没有可收起的工具）。证据 `~/.my-agent/decision-evidence/f1-jev-candidate-cap-81f8e169a/`。
 
 ## 语义记忆复审必须修 M1 / S1（be 复审 e75cf6061，2026-10-02，分支 `claude/38-semantic-memory-m1`，基于 `3c960c1d9`）
 

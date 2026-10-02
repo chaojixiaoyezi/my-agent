@@ -1,6 +1,6 @@
 # 设计台账
 
-## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（T2 续，75，2026-10-02，分支 `claude/75-jev-candidate-cap`，基于 `claude/3a-step17e` `63050770b`，已实现，待集成）
+## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（T2 续，75，2026-10-02，分支 `claude/75-jev-candidate-cap`，基于 `claude/3a-step17e` `4dd56f627`，已实现，真实 Jev 一次通过，待集成）
 
 - **问题**：生产 skill_tool 候选 53 题（52 个 Skill + 1 个插件组），Jev 请求 129,941 字节，按 `jev_wire_bytes.v1` 上界 79,563 > 57,600，实验路径 `input_bound_out_of_calibration` 拒发，F1 晋升走不下去（step17b 生产记录）。
 - **为什么只截字段不够**：请求体用 `json.dumps` 默认转义，一个汉字 6 字节、按公式 3 个上界 token。每题重复的 question/boundary/criteria 加结构约 1,441 字节，53 题光固定部分上界就是 53,292；只留名字也还有 56,658。
@@ -10,6 +10,7 @@
   - 文字字段按“转义后字节”从前往后截最长前缀，不按内容挑词：name 96（约 16 个汉字）、description 180（约 30 个汉字）、when_to_use 144（约 24 个汉字）；插件组内工具名和说明用同一上限。上限是代码常数（`decision_candidates.py`），注释写标定依据，不加开关（投影规则，不是能力授权）。
   - 截断计数写进能力推荐观察记录 `candidate_projection`（`jev_candidate_projection.v1`：各字段上限、截了几条、截掉多少转义字节），只有计数没有正文；宿主 state 里的完整行和计数都不上线（`_wire_state`）。
 - **标定核验**：最坏情况（53 题、state 撑到 4,096 字节、三段文字全按上限填满汉字）上界 57,204 ≤ 57,600，再加 1 题就拒发；真实 53 题（生产 owner Skill 只读副本）B=77,954、上界 53,569，截了 50 条 description（11,244 字节）和 49 条 when_to_use（11,582 字节）。题数更多或插件工具很多时照旧 `input_bound_out_of_calibration` 拒发，不外推。
+- **真实 Jev**：真实 Jev 一次（`81f8e169a`，隔离 home、私有端口 8487；目录副本只含生产 Jev 档案 jev-1.13.0 和 MiniMax M2.7；生产 owner Skill 只读副本 + workspace-peek 插件，共 53 题）：`/experiment apply skill_tool 10m 1 60000 数一下当前目录里 notes.txt 一共有多少行`。B=77,982 字节、state 1,237 字节、经验上界 53,583，在标定范围内，预留后结算 charged；Jev 实际计费输入 21,489（上界的 0.40），输出 4,442。截断 description 52 条（11,491 字节）、when_to_use 49 条（11,582 字节）。Jev 选 3 项：workspace-peek 插件（include 概率 0.66，合理）、subagent-read-scope-check（0.56，不对；它的完整说明同样只讲子代理，不是截断造成）、verification-before-completion（0.41，边缘）；其余 50 项 not_needed。晋升评估 keep_observing（insufficient_samples、no_savings：插件被选中，没有可收起的工具）。证据 `~/.my-agent/decision-evidence/f1-jev-candidate-cap-81f8e169a/`。
 - **T3 注意**：上界约 5.4 万，`/experiment apply skill_tool … <输入token上限>` 要给到 57,600 以上（例如 60000）；原流程写的 50000 会在预留时被 `input_budget_exhausted` 拒掉。
 - **代价与未做**：Jev 每个 Skill 只看到约 30 + 24 个汉字的说明，选得准不准要看真实样本。criteria 每题约 938 字节（53 题约 2.5 万上界 token）仍逐题重复；改成共享说明或换 UTF-8 编码（要重新标定 v2）留作后续选项，本轮不做。
 - **验证**：见 TESTS.md 同名节。
