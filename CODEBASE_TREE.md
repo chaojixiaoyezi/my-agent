@@ -1048,6 +1048,7 @@ agent_py_agent/
 |   |-- test_process_session_retry_settles_unknown.py # 重试停止按 PID 出生标识结清实例已消失的旧 unknown 记录；首次停止不凭空确认
 |   |-- test_plugin_proxy_observation.py # 插件代理观察路径：结果改写与归档信封、整份拒绝、动作候选 _meta、未知/过期不发送
 |   |-- test_plugin_proxy_revoked_call.py # 插件代理发送前复核激活：撤销固定 TOOL_UNAVAILABLE/not_started 且不发送，激活有效沿原 MCP 链
+|   |-- test_plugin_tool_approval_recheck.py # C12e：真实插件进程+真实激活撤销+真实执行器审批流：批准后/审批前/发送前/下一轮四处复核都不让停用插件收到调用
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
 |   |-- test_plugin_source_errors.py  # 插件来源结构化原因：相对路径按会话工作区解析、不存在/越权/格式无效分别回执

@@ -17,6 +17,24 @@
 - **验证**：`test_subagent_takeover_runtime_closeout.py` 加 1 项（被接替后自停 → 接替口径；普通中断 → 仍记 `InterruptedError`）；
   3 个变异全部被杀。见 TESTS.md 同名节。
 
+## C12e：可执行插件工具的审批前复核与批准后复核（2026-10-02，分支 `claude/38-c12e-plugin-approval-recheck`，基于 `claude/3a-step16z` `ed64438fc`，复核通过，不改产品代码）
+
+- **来源**：G05 恢复边界（09-28）只用内容包验证了“审批等待跨过停用后，本轮不能再用旧代”；可执行插件工具的审批前复核和批准后复核，当时标为另行安排。
+- **机制**（09-24 就已在位，这次补的是真实组件上的核对）：
+  - 执行器的 `_precheck_before_approval`（弹审批前）和批准后复核（claim 之前），都会调用 handler 的 `precheck_availability`。
+  - `PluginProxyTool` 用固定激活引用 `activation_ref.require()` 鲜活读安装表，失效时报 `PLUGIN_ACTIVATION_UNAVAILABLE`。
+  - 免审批调用在 handler 发送前再核对一次（`TOOL_UNAVAILABLE`／`not_started`）。
+  - 新一轮建快照时，`availability()` 已把停用的插件标成不可用。
+- **核对方式**：真实托管 MCP 插件进程，加真实安装表的激活与撤销（`PluginInstallStore.change_activation`），加真实 `ToolExecutor` 审批裁决；插件每收到一次业务调用就记一行。快照在本轮开头冻结（插件仍可用），之后再撤销激活。结果：
+  - 审批等待期间停用、随后迟到批准：在批准后复核处拒绝，`PLUGIN_ACTIVATION_UNAVAILABLE`，handler 没执行。
+  - 同轮内先停用：在审批前复核处拒绝，不弹审批。
+  - 免审批的只读调用：`TOOL_UNAVAILABLE`、`not_started`。
+  - 下一轮：快照本身已标不可用，运行时门直接拒绝。
+  - 以上四种情况，插件进程都没收到调用。插件保持启用时，批准后照常执行一次。
+- **结论**：没有缺陷，不改代码。新增集成测试锁住这四个复核点。
+- **没覆盖**：真实 TUI 审批框加 `/plugins disable` 命令这一段没再跑，它们用的是同一个执行器和同一张安装表；G05 情况 1 已用内容包在 TUI 上跑过迟到批准。
+- **验证**：见 TESTS.md 同名节。
+
 ## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`，已实现，待集成）
 
 - **背景**：P10 白名单按模块分批清理。本批接第一、二批之后，范围是 `agent_py_agent/cli/` 目录（41 个文件）的 100 个待整改常数，

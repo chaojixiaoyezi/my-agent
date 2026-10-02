@@ -27,6 +27,19 @@
 - **红绿**：改前 1 failed、31 passed；改后整文件 32 passed（沙箱外，含宿主安装与确认用例）。
 - **真实验收**：两个插件在隔离环境里的 TUI 与真实模型验收，见 CAPABILITY_PACK_ACCEPTANCE.md 的 C14 节。
 
+## C12e：可执行插件工具的审批前复核与批准后复核（2026-10-02，分支 `claude/38-c12e-plugin-approval-recheck`，基于 `claude/3a-step16z` `ed64438fc`）
+
+- **新增** `test_plugin_tool_approval_recheck.py`（5 项）：真实托管 MCP 插件进程、真实安装表激活与撤销、真实 `ToolExecutor` 审批裁决；插件每收到一次业务调用记一行。
+  - 本轮快照冻结后，审批等待期间停用、再迟到批准：在批准后复核处拒绝（`TOOL_UNAVAILABLE`，报告码 `PLUGIN_ACTIVATION_UNAVAILABLE`），handler 没执行。
+  - 同轮先停用：在审批前复核处拒绝，不弹审批。
+  - 免审批的只读调用：handler 发送前拒绝，`not_started`。
+  - 下一轮：快照已标不可用，运行时门直接拒绝，用不到审批复核。
+  - 插件保持启用时，批准后照常执行一次。
+  - 以上被拒的各种情况，插件进程都没收到调用。
+- **变异**：5 个全部被抓住——审批前复核不看激活、执行器去掉审批前复核、去掉批准后复核、handler 去掉发送前核对、目录可用性不看激活。
+- **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 21 个（含仓库级守卫与 `test_packaging.py`）：294 passed；Ruff、doc sync、
+  strict code-size（与 `ed64438fc` 按身份比新增 0）、`git diff --check`、clean-package 全部通过。
+
 ## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
 
 - **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数
