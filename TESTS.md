@@ -106,7 +106,27 @@ schema 不看开关 → 1；不重验上限/附件根 → 1；不查重复引用
 - guards9 170 passed；import_boundaries findings=0；ruff All checks passed；doc_sync PASS；code-size strict blocked=False（hard=0，报告已还原）；
   size_diff 新增 0（消失 5 为基线既有差异）；常数目录 `--check` 一致（无新增数值常数）；`git diff --check` OK；clean_package 以提交后为准。
 - 环境：`claude-tools/ci-venv-312`，basetemp `/private/tmp/claude-501/pef*`。
-- **真实核对**：MiniMax M3 隔离核对另记本节“真实核对”小节（做完补）。
+- 改了配置字段：`build_constants_catalog.py --check` 一致（无新增数值常数）；`node frontend/scripts/sync-backend-config.mjs` 重新生成
+  `frontend/config/backend-config-catalog.json`（只多 `subagent_input_media_enabled` 一项），`--check` 通过。
+
+**真实核对（MiniMax M3，隔离 home，2026-10-02，证据 `~/.my-agent/decision-evidence/subagent-media-8378ff9a9/`）**：
+- 环境：`env -i` 隔离 HOME/MY_AGENT_HOME，私有 venv 指向本 worktree，不启动 Gateway、不占端口；模型目录副本只拷 MiniMax 官网服务商
+  （`provider-d9607663`）与 M3 档案（`7ec7c1a7`，`input_modalities=[image,text]`），0600，用完整个 home 删除；决策模型关；
+  开关 `subagent_input_media_enabled: true`、工具开、非流式。测试图是脚本生成的 96×96 PNG（左红方块、右蓝圆，289 字节）。
+- 只发一次 prompt（父代理，M3）：“不要自己描述，用 create_subagents 派子代理描述形状和颜色，把 media_ref 填进 input_media_refs”。
+- 结构化事实：
+  - 父代理 3 次请求（1 次工具能力探测 + 2 次业务）：业务请求的用户消息带 1 个 image 块（base64 388 字符）、带 `[INPUT_MEDIA_MANIFEST]`
+    且清单里有该 media_ref，工具列表含 create_subagents；父线程用量账 main 2、probe 1；
+  - `execute_create_subagents_service` 被调用一次，`items[0].input_media_refs == [d0c7616b0df5…]`（顶层无），ok=True；
+    父代理最终回复“已派出。子代理 run_id：subagent-1790962467-103176fa”；
+  - 子代理（M3，线程档案 `7ec7c1a7`）自动经 `subagents-dispatch` 子进程启动，派工日志无 Traceback；29 秒后 DONE；
+    任务属性 `input_media` 只有该 sha；子线程 canonical 行 2 条（user/assistant），`media_archive_facts` 1 块、289 字节、同一 sha；
+    子线程用量账 main 3、probe 1；
+  - 子代理最终回复正确描述“左边红色方块、右边蓝色圆”。观察：M3 先说“没有解码附件的工具”，再说“附件在上下文末尾内联可见”并据此
+    描述——图确实到了模型，只是模型对“附件怎么来”的措辞有点绕，不是产品缺陷；是否在 runner 提示里说明“附件已内联”留给 3a 定。
+- 没做：真实 Gateway/TUI/IM 的 `/attach` → 派工全链（主会话带图走 J11 已验路径，本次从 task_attributes 起）；视频附件；
+  被归档/压缩掉的历史附件引用；孙代理真实派工（组件链已验）。
+
 
 ## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`）
 

@@ -97,7 +97,8 @@
   被 `project_input_media` 按预算归档或被压缩摘要掉的历史附件，模型手里可能没有 `media_ref`（归档占位文字只给名字/路径），
   这与主会话重新添加附件的现状一致，本轮不改占位文字。工具结果里现在没有图片通道（ToolResult 只有文本），J16 截图应复用
   `UserTurn.media` 这条通道。
-- **验证**：见 TESTS.md 同名节；真实 MiniMax M3 隔离核对见同节“真实核对”。
+- **验证**：见 TESTS.md 同名节；真实 MiniMax M3 隔离核对已做一次（父代理按 media_ref 派工、子代理首请求带图并正确描述形状颜色），
+  证据 `~/.my-agent/decision-evidence/subagent-media-8378ff9a9/`。
 
 ## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
 
