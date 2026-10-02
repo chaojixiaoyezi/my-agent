@@ -1,5 +1,12 @@
 # Gateway 维护状态
 
+## 能力包宿主核验结论随回合结束发宿主提示（2026-10-02，ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3`，基于 `ce2b833a7`，待集成）
+
+- 回合正常返回后，`request_pack_verification_notice.queue_pack_verification_notice` 用 `AgentRunResult.pack_verifications`（核验账本的结构化事实）写一条宿主提示：`source=pack_verification`，`code=summary`。
+- 提示排入原 pending_host_notices，和决策实验晋升提示同一批发布与提交；文字只拼结构化事实，模型看不到。
+- `request_history.persist_gateway_assistant_result` 把同一份事实写进 `channel_delivery.pack_verifications`，不进 `_public_channel_delivery`/`_public_result` 白名单。没有核验事实时两处都不出现。
+- 设计见 [CAPABILITY_PACKS_V2](../../design/CAPABILITY_PACKS_V2.md) 3.1 节，测试见 TESTS.md 同名节。
+
 ## GET /status 新增 usage_accounting 段：用量账两项进程内诊断计数（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`，待集成）
 
 - `http_handlers.handle_status` 响应多一段 `usage_accounting`：`unaccounted_probe_attempt_count`（没绑记账范围的工具能力探测次数，

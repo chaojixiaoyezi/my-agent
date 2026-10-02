@@ -1,5 +1,14 @@
 # Verification：开发推进
 
+## 2026-10-02 能力包宿主核验接进工具执行缝隙（ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3`，基于 `ce2b833a7`，待集成）
+
+- `tool_call_runtime.execute_traced_tool_call` 新增两处调用，都在开关 `capability_pack_host_verification_enabled`（默认 false）打开、本任务钉住了声明检查程序的能力包时才生效：
+  - `pre_handler_gate` 放行时，本 run 第一次改工作区的工具执行前记基线；
+  - `_record_passive_verification` 之后，对成功的写工具跑写后核验，把有界摘要并进同一个 `handler_details.pack_verification`。
+- `tool_call_archive_record` 的归档白名单收 `pack_verification`，续跑重渲染回执时还在；`tooling/runtime_facts.py` 输出 `[pack-verification]` 段。
+- 收尾核验接在 `response_decision._no_tool_calls_decision` 的子代理交付闸之后，复用同一个返工通道，返工 1 次。
+- 被动验证账和 `verification_state` 不变。设计见 [CAPABILITY_PACKS_V2](../../design/CAPABILITY_PACKS_V2.md) 3.1 节，测试见 TESTS.md 同名节。
+
 ## 2026-10-02 J10 写入后多个焦点 stale 的交付复核（已实施 2026-10-01，待集成）
 
 - 解决最后验证后又改文件、不再运行命令就漏掉复核提示的问题；只新增原消费者的写入资格，不修改验证生产者或持久 schema。

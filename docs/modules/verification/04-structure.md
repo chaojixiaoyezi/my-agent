@@ -20,6 +20,7 @@
 
 `tool_call_archive_record.py` 从实际 canonical `ToolCall` 向 `ExternalizeToolOutputRequest` 传递 run/attempt/turn；大小输出索引与 carried 恢复保持同一身份。`conversation/compact_tool_identity.py` 的四元引用只表达来源，不提供执行、验收或完成权威。legacy 缺字段保留并标 `uncertain`，不读取自然语言或解析 scoped 字符串来补身份。
 
+`tool_call_runtime` 在 `pre_handler_gate` 放行时调用 `capability.pack_verification_hooks.capture_baseline_before_tool`，在被动验证之后调用 `attach_post_write_verification`，能力包宿主核验摘要进同一个 `handler_details.pack_verification`；`tool_call_archive_record` 白名单收这个键，`runtime_facts` 输出 `[pack-verification]` 段（能力包 v2 块 3，开关默认关）。
 `tooling/runtime_facts.py`接canonical handler_details，输出原verification块和有界process字段；`reducer.py`统一脱敏，`tool_call_archive_record.py`保留同一有界process，`runtime/loop_support.py`恢复后同口径展示。它们不改变执行状态或持久schema。
 
 `tool_context/reducer.py::_inline_result_with_archive_anchor` 只对临时模型副本过滤本次 `kind=tool_output` 且精确匹配归档物理路径的 refs

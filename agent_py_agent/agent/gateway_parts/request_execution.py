@@ -443,6 +443,7 @@ def _execute_gateway_conversation_turn(
     )
     # 实验收尾只在回合正常返回后执行；普通请求零 I/O，停止/失败不补写，任何异常都不改变本轮结果。
     promoted = request_experiment_records.finish_decision_experiment_turn(context, result)
+    # 能力包宿主核验结论（核验账本的结构化事实）和实验晋升提示同一批发布、同一批随最终回复提交。
     promoted += queue_pack_verification_notice(context, conversation, result)
     notices += _publish_gateway_host_notices(context, conversation, notices=promoted)
     return request_history.persist_gateway_assistant_result(context, conversation, result, host_notices=notices)
