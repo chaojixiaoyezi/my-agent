@@ -314,7 +314,8 @@ def test_real_compact_preparation_passes_revalidated_selection_and_model_scope(t
         questions = typesafe_payload(request, backend.model_name)["questions"]
         answers = {}
         for key, question in questions.items():
-            choice = "include" if question["instructions"]["candidate"]["ref"] in selected else "not_needed"
+            # 发给 Jev 的候选不带 ref，按包名（package_id）选。
+            choice = "include" if question["instructions"]["candidate"]["name"] in {ref.removeprefix("capability:") for ref in selected} else "not_needed"
             answers[key] = {"type": "choice", "choice": choice, "confidence": 1.0,
                             "probabilities": {candidate: float(candidate == choice) for candidate in question["criteria"]}}
         return parse_typesafe_response(request, backend.model_name, {"model": "decision-fixture", "answers": answers})

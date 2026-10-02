@@ -1,5 +1,19 @@
 # 设计台账
 
+## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（T2 续，75，2026-10-02，分支 `claude/75-jev-candidate-cap`，基于 `claude/3a-step17e` `63050770b`，已实现，待集成）
+
+- **问题**：生产 skill_tool 候选 53 题（52 个 Skill + 1 个插件组），Jev 请求 129,941 字节，按 `jev_wire_bytes.v1` 上界 79,563 > 57,600，实验路径 `input_bound_out_of_calibration` 拒发，F1 晋升走不下去（step17b 生产记录）。
+- **为什么只截字段不够**：请求体用 `json.dumps` 默认转义，一个汉字 6 字节、按公式 3 个上界 token。每题重复的 question/boundary/criteria 加结构约 1,441 字节，53 题光固定部分上界就是 53,292；只留名字也还有 56,658。
+- **做法（3a 定方案 A，只改发给 Jev 的投影，Skill 原文不动）**：
+  - 候选只带白名单字段 kind/name/description/when_to_use/tools_required，插件组的 tools 只留每个工具的 name/description；ref/version/tool_refs/keywords/category 不上线。答案按题号映射回宿主保留的完整行（`selected_capabilities` 原本就按下标）。
+  - 每题都一样的 question/boundary 两句话挪进 `state.instructions` 只发一次（Jev 每题都看到 state + 本题，语义不变）；插件组的说明和 criteria 仍逐题。
+  - 文字字段按“转义后字节”从前往后截最长前缀，不按内容挑词：name 96（约 16 个汉字）、description 180（约 30 个汉字）、when_to_use 144（约 24 个汉字）；插件组内工具名和说明用同一上限。上限是代码常数（`decision_candidates.py`），注释写标定依据，不加开关（投影规则，不是能力授权）。
+  - 截断计数写进能力推荐观察记录 `candidate_projection`（`jev_candidate_projection.v1`：各字段上限、截了几条、截掉多少转义字节），只有计数没有正文；宿主 state 里的完整行和计数都不上线（`_wire_state`）。
+- **标定核验**：最坏情况（53 题、state 撑到 4,096 字节、三段文字全按上限填满汉字）上界 57,204 ≤ 57,600，再加 1 题就拒发；真实 53 题（生产 owner Skill 只读副本）B=77,954、上界 53,569，截了 50 条 description（11,244 字节）和 49 条 when_to_use（11,582 字节）。题数更多或插件工具很多时照旧 `input_bound_out_of_calibration` 拒发，不外推。
+- **T3 注意**：上界约 5.4 万，`/experiment apply skill_tool … <输入token上限>` 要给到 57,600 以上（例如 60000）；原流程写的 50000 会在预留时被 `input_budget_exhausted` 拒掉。
+- **代价与未做**：Jev 每个 Skill 只看到约 30 + 24 个汉字的说明，选得准不准要看真实样本。criteria 每题约 938 字节（53 题约 2.5 万上界 token）仍逐题重复；改成共享说明或换 UTF-8 编码（要重新标定 v2）留作后续选项，本轮不做。
+- **验证**：见 TESTS.md 同名节。
+
 ## 能力包 v2 块 7：A 包 0.5.0、B 包 0.3.0 的流程、模板、检查器和核验声明（be，2026-10-02，分支 `claude/be-capability-packs-content-b2`，基于 ae 块 2 `ce2b833a7`，已实现，待 ae 审）
 
 - **依据**：冻结重跑逐条归因（`capability-packs-v2-design/attribution.md`）里 K 类 7 次、P 类 2 次，按 ae 的设计（[CAPABILITY_PACKS_V2](docs/design/CAPABILITY_PACKS_V2.md) 第 2 节）补包内容。只改 `examples/capability-packages/` 下两个包，不改宿主。
@@ -33,7 +47,7 @@
 - **收起名单**（按生产 local/main 近 30 天工具调用账，1205 个 run，只读工具名字段；括号里是调用次数/涉及 run 数和估算 token）：user_config（47/10，约 3.8k）、manage_models（65/2，约 1.9k）、update_persona（16/9，约 0.85k）、schedule（80/3，约 0.73k）、admin_controls（0，约 0.46k）、restart_gateway（1/1，约 0.29k）、gateway_status（32/7，约 0.28k）、watch_stream（1/1，本来按 web 类别收起，声明后不再依赖类别配置，并在索引里露出用途）。常用的读写文件、命令、派子代理（create_subagents 218/43）、进度（task_progress 854/204）、记忆（remember）、目标不收起。audit_records（24/4，约 1.1k）第一版收起过，MiniMax M2.7 真实验收里飞书普通用户说“查一下审计记录：我今天的请求有没有报错”时模型没去 tool_search、改读文件（I6，只发一次），改前对照同一句直接调用 audit_records 成功；它是 IM 用户自查“发消息报错/没回复”的入口，只省约 1.1k，所以不收起。
 - **精简说明**（只删逐字重复，字段、类型、枚举、必填不变）：create_subagents 的 items[] 字段与顶层同义的改写成“同顶层 X。”（goal/description/role 本项专属说明，以及 covers 与第 14 条的 input_media_refs 完整说明保留，原文比引用还短的也保留；input_media_refs 只在 subagent_input_media_enabled 打开时出现，关闭时说明里没有它）；remember 批量项的 scope 改成“同顶层 scope。”；user_config 的各接入点 `points.*.profile_id` 改成“同 profile_id”，并删掉工具说明里与参数说明逐字重复的 reason/fields/probe 子句；task_progress 的 items 删掉与工具说明重复的返工句。
 - **盲调兜底**（真实验收 D4 发现后补上）：M2.7 会照目录索引里的名字直接调用收起的工具、不先 tool_search，在没有参数定义时猜参数（audit_records 连错 3 次后改用 search_text 绕开）。现在 `tool_loop/deferred_schema_reload.reload_schema_after_blind_call` 只读结构化事实：开关打开、调用失败、参数出错（`tool_execution.failure_stage=validation`，或错误码的错误合同推荐动作是 `repair_tool_arguments`——工具执行阶段自己判参数无效也算，真实验收 D8 的 update_persona 就是这种）、工具在本快照里且下一次请求本来不会带它的定义，就把它加进 `loaded_tool_names`（与 tool_search 同一个“下一次调用临时可见”机制），并在结果后附一行 `[tool-schema-loaded]` 提示；模型下一步拿着原生完整定义重试。开关关闭时不触发。
-- **F1（第 9 条）上界**：skill_tool 候选是 52 个 Skill（内置 27 + owner 25）+ 1 个插件组 = 53 题；内置工具不在候选里，所以本阶段瘦身不改变 Jev 请求。按 `jev_wire_bytes.v1`（C = ceil(B/2) + 256Q + 1024，上限 57,600）和标定数据（27 题约 65KB，每题约 2.4KB）估算：53 题约 7.8 万 token，仍超上限；按现有每题体积最多约 38 题，或每题文字压到约 1.6KB（约减三分之一）才进标定范围。要回到范围内需缩小参与实验的候选或精简 Skill 说明，属新设计项，交 3a/用户定。
+- **F1（第 9 条）上界**：skill_tool 候选是 52 个 Skill（内置 27 + owner 25）+ 1 个插件组 = 53 题；内置工具不在候选里，所以本阶段瘦身不改变 Jev 请求。按 `jev_wire_bytes.v1`（C = ceil(B/2) + 256Q + 1024，上限 57,600）和标定数据（27 题约 65KB，每题约 2.4KB）估算：53 题约 7.8 万 token，仍超上限；按现有每题体积最多约 38 题，或每题文字压到约 1.6KB（约减三分之一）才进标定范围。要回到范围内需缩小参与实验的候选或精简 Skill 说明，属新设计项，交 3a/用户定。（已定：见本台账“F1 候选投影”一节。）
 
 ## 宿主死在“已预留、未激活”窗口里的子代理，重启后永久卡住（根修，I5 前提探针发现，2026-10-02，分支 `claude/9b-runner-admission`，基于 `claude/3a-step17e` `20125c9d2`，已实现，待集成）
 

@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（75，2026-10-02，分支 `claude/75-jev-candidate-cap`）
+
+- **新增 `test_jev_candidate_projection.py`**（7 项）：白名单字段（工具、Skill、能力包、插件组四种行），完整行不被改写，共用说明不再逐题；三个字段各自按转义字节截最长前缀（恰好等于上限原样保留、多 1 字节就截、ASCII 段后的汉字放不下就停、补充平面字符按 12 字节），截断计数等于截掉的转义字节；插件组内工具说明同样截并记账；非字符串原样通过；最坏情况 53 题（state 4,096 字节、三段文字满额汉字、ref 很长也不上线）经验上界 ≤ 57,600，54 题拒发；真实决策链路上 state 只带一次共用说明、不带完整行和计数，候选不带 ref，上线文字都在上限内。
+- **改了期望的旧用例**（投影变化，不是放宽）：
+  - 假 Jev 按候选 name 选答案（原来按 ref）：`test_decision_capability_http.py`、`test_decision_capability_consumer.py`、`test_decision_capability_provider_grouping.py`、`test_capability_package_recommendations.py`；`selection_questions` 改为同时返回截断计数。
+  - `test_decision_experiment_send_gate.py`：投影后 60 个中文 Skill（62 题）已在标定范围内，越界用例改成把说明拉长到超过上限（截断后每题满额仍越界，证明截断不掩盖过大的目录）；固定用量 12345 高于新的小请求上界，改为 2345；授权发送用例加断言：实验路径发出的 state 同样只带共用说明、不带完整行和计数。
+  - `test_capability_presentation_observation.py`：观察记录允许 `candidate_projection`，并断言只有计数。
+- **变异**：23 个全部抓到（三个上限调大、边界 `>` 改 `>=`、按字符或 UTF-8 计字节、截后缀、计数不加或字节算错、ref/version 上线、插件工具带全字段或不截、非字符串被截、共用说明逐题重复、整行上线、state 缺共用说明、计数或完整行上线（普通与实验两条路径）、观察记录缺计数、材料不存计数）。
+- **门禁**：相关测试 38 个文件（含全仓扫描守卫与 test_packaging）735 项全过；其余见交付消息。
+- **真实 Jev**：待补（隔离 home，只看 F1 决策点）。
+
 ## 语义记忆复审必须修 M1 / S1（be 复审 e75cf6061，2026-10-02，分支 `claude/38-semantic-memory-m1`，基于 `3c960c1d9`）
 
 - `test_embedding_selection.py` 从 33 例增到 42 例：

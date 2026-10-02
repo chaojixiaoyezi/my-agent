@@ -905,6 +905,7 @@ agent_py_agent/
 |   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
 |   |-- test_decision_capability_consumer.py # 原设置/worker/循环接线到实际prompt/schema减量及失效原输入
 |   |-- test_decision_capability_provider_grouping.py # 能力推荐按结构化provider_id按插件出题、选中展开与整体延迟
+|   |-- test_jev_candidate_projection.py # 发给 Jev 的能力候选白名单投影、按转义字节截断与计数、53 题最坏情况落进经验上界
 |   |-- test_decision_capability_http.py # 能力消费者经本地原生HTTP的成功/期限/在途设置变化
 |   |-- test_decision_skill_projection.py # Skill名卡动态投影、原搜索可达及None旧字节等价
 |   |-- test_tool_presentation_projection.py # 工具schema收起、原搜索恢复及真实插件撤销

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 831,
+  "count": 835,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1026,6 +1026,30 @@
       "unit": "个",
       "category": "上限预算",
       "description": "单条消息最多携带的证据引用条数，控制工具结果篇幅。"
+    },
+    {
+      "name": "_JEV_CANDIDATE_DESCRIPTION_MAX_BYTES",
+      "file": "agent_py_agent/agent/capability/decision_candidates.py",
+      "value": 180,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "Jev 候选说明上限 180 字节：约 30 个汉字，插件组内每个工具的说明同用。"
+    },
+    {
+      "name": "_JEV_CANDIDATE_NAME_MAX_BYTES",
+      "file": "agent_py_agent/agent/capability/decision_candidates.py",
+      "value": 96,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "Jev 候选名称上限 96 字节：约 16 个汉字或 96 个英文字符，插件组内工具名同用。"
+    },
+    {
+      "name": "_JEV_CANDIDATE_WHEN_TO_USE_MAX_BYTES",
+      "file": "agent_py_agent/agent/capability/decision_candidates.py",
+      "value": 144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "Jev 候选适用场景上限 144 字节：约 24 个汉字。"
     },
     {
       "name": "_BASELINE_NAME_LIMIT_CHARS",

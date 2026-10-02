@@ -19,7 +19,7 @@ from agent_py_agent.tests.test_gateway_capability_compact import (  # noqa: F401
 
 _ALLOWED = {"schema", "point", "operation_id", "mode", "status", "reason", "adopted", "retain_reason",
             "candidates_revision", "question_count", "shortlist_tool_names", "deferred_tool_names",
-            "selected_skill_count", "required_skill_count"}
+            "selected_skill_count", "required_skill_count", "candidate_projection"}
 
 
 # LLM: 只读取请求记录文件里的观测块；和内存中的 request 对比，确认两边一致。
@@ -43,6 +43,10 @@ def test_gateway_turn_records_one_observation_for_its_one_decision(gateway_surfa
     assert set(entry) <= _ALLOWED and entry["point"] == "skill_tool" and entry["mode"] == "apply"
     assert entry["status"] == "success" and entry["question_count"] >= 1 and entry["candidates_revision"]
     assert "核对来源" not in json.dumps(entry, ensure_ascii=False), "观测不含用户正文"
+    projection = entry["candidate_projection"]
+    assert projection["schema"] == "jev_candidate_projection.v1" and set(projection["truncated"]) == set(projection["caps_bytes"])
+    assert all(set(counts) == {"fields", "bytes"} and all(type(v) is int for v in counts.values())
+               for counts in projection["truncated"].values()), "截断记账只有计数，没有正文"
     if choice is None:
         assert entry["adopted"] is True and entry["retain_reason"] == ""
         assert entry["selected_skill_count"] == 1

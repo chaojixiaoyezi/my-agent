@@ -65,7 +65,7 @@ _PREFIX = "skill_tool_decision:experiment:"
 
 
 # LLM: 复用原 capability_http/surface 夹具；只替换本地服务的 JSON 记录与用量字段，并在服务端 accept 处计数，不替换任何生产边界。
-# 原 60 个中文 Skill 的完整请求约 119KB/62 题，经验上界约 76.7k 超出标定，默认取前 10 个 Skill 留在标定范围内。
+# 默认取前 10 个 Skill 让请求小而快；越界样本见 _full_catalog。
 # 函数用途: 建立普通模式关闭、实验能力开启的本地决策环境，记录收到的原始字节与 TCP 连接次数。
 @pytest.fixture
 def lab(surface, capability_http, monkeypatch):  # noqa: F811
@@ -73,7 +73,7 @@ def lab(surface, capability_http, monkeypatch):  # noqa: F811
     accepted, raw, original_answer = [], [], capability_module.native_answer
     full = surface.catalog.snapshot
     lab = SimpleNamespace(surface=surface, http=capability_http, raw=raw, monkeypatch=monkeypatch,
-                          usage=lambda _raw: 12345, accepts=lambda: accepted.count(port), full_skills=full,
+                          usage=lambda _raw: 2345, accepts=lambda: accepted.count(port), full_skills=full,
                           thread_id=surface.params.task_attributes["agent_thread_id"])
     subset = replace(full, entries=full.entries[:10], fingerprint="experiment-subset")
     surface.host.current_skill_snapshot = lambda: subset
@@ -166,12 +166,16 @@ def _expire(lab, authorization):
     lab.monkeypatch.setattr(decision_experiment, "time", SimpleNamespace(time=lambda: authorization["expires_at"]))
 
 
-# LLM: 原 surface 的 60 个中文 Skill 按最终 wire 字节计算的经验上界超过 57,600，是真实的越界样本。
-# 函数用途: 恢复完整 Skill 目录，让实验请求超出经验上界标定范围。
+# LLM: 原 surface 的 60 个中文 Skill 在候选投影截断后（62 题）已落进标定范围；这里把每个说明和适用场景拉长到超过字段上限，
+#   截断后每题都满额，62 题的经验上界超过 57,600——证明截断不会掩盖过大的目录，照旧 input_bound_out_of_calibration 拒发。
+# 函数用途: 换成说明满额的完整 Skill 目录，让实验请求超出经验上界标定范围。
 def _full_catalog(lab):
+    full = lab.full_skills
+    long = replace(full, fingerprint="experiment-full-long", entries=tuple(
+        replace(entry, description=entry.description * 8, when_to_use=entry.description * 8) for entry in full.entries))
     host = lab.surface.host
-    host.current_skill_snapshot = lambda: lab.full_skills
-    host.skill_snapshot_for_run_scope = lambda _root: lab.full_skills
+    host.current_skill_snapshot = lambda: long
+    host.skill_snapshot_for_run_scope = lambda _root: long
 
 
 _REFUSALS = {
@@ -298,12 +302,14 @@ def test_authorized_send_is_single_bound_request_and_settles_provider_input(lab)
     assert hashlib.sha256(lab.raw[0]).hexdigest() == record.metadata["send_permit"]["body_sha256"]
     bound = _bound_for(lab.raw[0])
     assert record.metadata["input_bound"] == bound.to_record() and bound.kind == "empirical"
-    assert record.input_tokens not in {bound.tokens, 12345} and record.provider_attempt_count == 1
+    sent_state = json.loads(lab.raw[0])["state"]
+    assert sent_state["instructions"] and not {"candidates", "candidate_projection"} & set(sent_state), "实验路径同样只发投影"
+    assert record.input_tokens not in {bound.tokens, 2345} and record.provider_attempt_count == 1
     assert record.metadata["purpose"] == "decision" and record.metadata["decision_operation"] == "experiment_observe"
     snapshot = _snapshot(lab, authorization)
-    assert (snapshot["reserved_http_requests"], snapshot["charged_input_tokens"], snapshot["provider_input_tokens"]) == (1, 12345, 12345)
+    assert (snapshot["reserved_http_requests"], snapshot["charged_input_tokens"], snapshot["provider_input_tokens"]) == (1, 2345, 2345)
     assert snapshot["input_bound_kind"] == "empirical" and snapshot["status"] == "active"
-    assert snapshot["input_bound_ratio"] == round(12345 / bound.tokens, 6)
+    assert snapshot["input_bound_ratio"] == round(2345 / bound.tokens, 6)
     _assert_original(lab, result)
     again = _recommend(lab)
     assert again.finding == _PREFIX + "http_budget_exhausted"

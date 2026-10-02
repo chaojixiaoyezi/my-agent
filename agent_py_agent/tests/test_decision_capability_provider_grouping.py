@@ -49,7 +49,7 @@ def test_grouping_uses_only_structured_provider_id_and_keeps_first_member_positi
     changed = group_provider_candidates([
         {**row, "version": "v-new"} if row["ref"] == "alpha_export" else row for row in rows])
     assert changed[1]["version"] != alpha["version"] and changed[3]["version"] == grouped[3]["version"]
-    questions = selection_questions(grouped)
+    questions, _projection = selection_questions(grouped)
     assert len(questions) == 5
     assert "provider" in questions["candidate_1"]["instructions"]
     assert "provider" not in questions["candidate_0"]["instructions"]
@@ -77,7 +77,7 @@ def plugin_surface(surface):  # noqa: F811
 
 
 # LLM: 只替换原生 provider 调用；逐题答案仍过正式 wire 校验，记录每次发出的题目。
-# 函数用途: 按候选引用回答 include/not_needed，并返回实际发出的题目列表。
+# 函数用途: 按候选名称回答 include/not_needed（发给 Jev 的候选不带 ref），并返回实际发出的题目列表。
 def _provider(monkeypatch, desired: set[str]) -> list[dict]:
     sent = []
 
@@ -86,7 +86,7 @@ def _provider(monkeypatch, desired: set[str]) -> list[dict]:
         sent.append(payload["questions"])
         answers = {}
         for key, question in payload["questions"].items():
-            selected = "include" if question["instructions"]["candidate"]["ref"] in desired else "not_needed"
+            selected = "include" if question["instructions"]["candidate"]["name"] in desired else "not_needed"
             answers[key] = {"type": "choice", "choice": selected, "confidence": 1.0,
                             "probabilities": {option: float(option == selected) for option in question["criteria"]}}
         return parse_typesafe_response(request, backend.model_name,
@@ -97,14 +97,14 @@ def _provider(monkeypatch, desired: set[str]) -> list[dict]:
 
 
 def test_selected_plugin_expands_to_all_tools_and_unselected_plugin_stays_hidden(plugin_surface, monkeypatch):
-    sent = _provider(monkeypatch, {"plugin:alpha", "presentation_optional_a", "workspace:method-001"})
+    sent = _provider(monkeypatch, {"plugin:alpha", "presentation_optional_a", "method-001"})
     result = module.recommend_capabilities(plugin_surface.host, plugin_surface.params, plugin_surface.snapshot,
                                            plugin_surface.contract)
     assert result.finding.endswith("applied"), result.finding
-    refs = [question["instructions"]["candidate"]["ref"] for question in sent[0].values()]
+    names = [question["instructions"]["candidate"]["name"] for question in sent[0].values()]
     # 三个插件工具只出两题（每个插件一题），不再逐工具出题。
-    assert refs.count("plugin:alpha") == refs.count("plugin:beta") == 1
-    assert not any(ref in plugin_surface.plugin_tools["alpha"] | plugin_surface.plugin_tools["beta"] for ref in refs)
+    assert names.count("plugin:alpha") == names.count("plugin:beta") == 1
+    assert not any(name in plugin_surface.plugin_tools["alpha"] | plugin_surface.plugin_tools["beta"] for name in names)
     shortlist = result.tool_snapshot.presentation_shortlist_names
     deferred = result.tool_snapshot.presentation_deferred_names
     assert plugin_surface.plugin_tools["alpha"] <= shortlist

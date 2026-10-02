@@ -26,10 +26,10 @@ from agent_py_agent.tests.test_tool_presentation_projection import search
 # LLM: 回答必须取本次 HTTP 的动态问题和候选编号，不能拿固定协议题替代实际消费者；不执行任何建议。
 # 函数用途: 从收到的合法候选中选择一个工具和一个 Skill，并返回完整原生逐题分布。
 def native_answer(payload):
-    desired = {"presentation_optional_a", "workspace:method-001"}
+    desired = {"presentation_optional_a", "method-001"}
     answers = {}
     for key, question in payload["questions"].items():
-        choice = "include" if question["instructions"]["candidate"]["ref"] in desired else "not_needed"
+        choice = "include" if question["instructions"]["candidate"]["name"] in desired else "not_needed"
         assert choice in question["criteria"]
         answers[key] = {"type": "choice", "choice": choice, "confidence": 1.0,
                         "probabilities": {candidate: float(candidate == choice) for candidate in question["criteria"]}}

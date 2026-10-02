@@ -1,11 +1,32 @@
 # LLM: 能力决策材料只读原授权快照；包只提供公开摘要，私有资源不出题、不计入 Skill，也不预读正文或授予权限。
+#   发给 Jev 的候选是白名单字段、按字段字节上限截短的投影（标定依据见上限常数），完整行只留在宿主。
 # 模块用途: 为一次能力推荐准备可核对的候选和独立适用性题目，并将答案映射回原精确引用。
 from __future__ import annotations
 
 import hashlib
+import json
 
 from ..backends.decision_protocol import DecisionInputError, decision_json
 from ..tooling.models import TOOL_DISCOVERY_ENTRY_NAMES
+
+# 发给 Jev 的候选文字按请求体实际编码（json.dumps 默认转义，一个汉字 6 字节）计字节，按 jev_wire_bytes.v1 倒推：
+#   53 题、state 不超过 4096 字节、每题三段文字都按上限填满汉字时 C = ceil(B/2) + 256×53 + 1024 = 57,204 ≤ 57,600。
+#   题数更多或插件工具很多时仍由经验上界拒发（input_bound_out_of_calibration），不外推。
+# Jev 候选名称上限 96 字节：约 16 个汉字或 96 个英文字符，插件组内工具名同用。
+_JEV_CANDIDATE_NAME_MAX_BYTES = 96
+# Jev 候选说明上限 180 字节：约 30 个汉字，插件组内每个工具的说明同用。
+_JEV_CANDIDATE_DESCRIPTION_MAX_BYTES = 180
+# Jev 候选适用场景上限 144 字节：约 24 个汉字。
+_JEV_CANDIDATE_WHEN_TO_USE_MAX_BYTES = 144
+_WIRE_TEXT_CAPS = {"name": _JEV_CANDIDATE_NAME_MAX_BYTES, "description": _JEV_CANDIDATE_DESCRIPTION_MAX_BYTES,
+                   "when_to_use": _JEV_CANDIDATE_WHEN_TO_USE_MAX_BYTES}
+# 发给 Jev 的候选只带这些字段；ref/version/tool_refs/keywords/category 等宿主身份与摘要不上线，答案按题号映射回完整行。
+_WIRE_CANDIDATE_FIELDS = ("kind", "name", "description", "when_to_use", "tools_required")
+# 每题都相同的判断说明只在 state 里放一次（Jev 每题都看到 state + 本题），题里只留候选和插件说明。
+SELECTION_INSTRUCTIONS = {
+    "question": "这个candidate是否适合协助完成state.query中的任务？分别判断每项能力，多项可以同时适合。",
+    "boundary": "只推荐初始名卡或schema展示，不决定权限，不要求现在执行或读取正文。",
+}
 
 _NON_SELECTIONS = {
     "not_needed": "此候选与用户任务无关，无需初始展示",
@@ -82,22 +103,55 @@ def group_provider_candidates(rows: list[dict]) -> list[dict]:
     return grouped
 
 
-# LLM: Jev每题独立并行，不能用多个选择槽假设互相看见答案；每项候选只评一次，完整材料受原JSON/模型预算约束。
-# 函数用途: 为每个能力生成独立的适用性选择题，不预选候选或要求模型跨题去重。
-def selection_questions(rows: list[dict]) -> dict:
+# LLM: 按字段名查 _WIRE_TEXT_CAPS，只截字符串，按转义后字节从前往后取最长前缀，不按内容挑词；没有上限的字段原样返回。
+#   截了就在 cut[字段名] 上累计条数与截掉的字节（同一转义口径），供观察记录复盘 Jev 在多少信息量下做的选择。
+# 函数用途: 把一段候选文字截到它所在字段的上限内，并记下截了多少。
+def _clipped(field: str, value: object, cut: dict) -> object:
+    cap = _WIRE_TEXT_CAPS.get(field)
+    if cap is None or type(value) is not str:
+        return value
+    kept, used = [], 0
+    for char in value:
+        size = len(json.dumps(char)) - 2
+        if used + size > cap:
+            break
+        kept.append(char)
+        used += size
+    if len(kept) == len(value):
+        return value
+    counts = cut[field]
+    counts["fields"] += 1
+    counts["bytes"] += len(json.dumps(value)) - 2 - used
+    return "".join(kept)
+
+
+# LLM: 只取 _WIRE_CANDIDATE_FIELDS 白名单；插件组的 tools 只留每个工具的 name/description，同样按字段上限截。
+#   完整行仍由宿主保留，用于版本摘要和按题号映射答案；这里的投影只进 Jev 请求，不回写宿主任何状态。
+# 函数用途: 生成一条发给 Jev 的有上限候选投影。
+def _wire_candidate(row: dict, cut: dict) -> dict:
+    wire = {field: _clipped(field, row[field], cut) for field in _WIRE_CANDIDATE_FIELDS if field in row}
+    if row.get("kind") == "provider":
+        wire["tools"] = [{field: _clipped(field, tool[field], cut) for field in ("name", "description") if field in tool}
+                         for tool in row["tools"]]
+    return wire
+
+
+# LLM: Jev每题独立并行，不能用多个选择槽假设互相看见答案；每项候选只评一次。共用判断说明在 SELECTION_INSTRUCTIONS（由调用方
+#   放进 state），每题只带有上限的候选投影；第二个返回值是结构化截断计数（每个有上限字段的截断条数与截掉字节），供观察记录。
+# 函数用途: 为每个能力生成独立的适用性选择题，不预选候选或要求模型跨题去重，并报告投影截了多少。
+def selection_questions(rows: list[dict]) -> tuple[dict, dict]:
     if not rows:
         raise DecisionInputError("能力推荐需要当前授权候选。")
+    cut = {field: {"fields": 0, "bytes": 0} for field in _WIRE_TEXT_CAPS}
     questions = {f"candidate_{index}": {
         "type": "choice", "instructions": {
-            "question": "这个candidate是否适合协助完成state.query中的任务？分别判断每项能力，多项可以同时适合。",
-            "candidate": row,
-            "boundary": "只推荐初始名卡或schema展示，不决定权限，不要求现在执行或读取正文。",
+            "candidate": _wire_candidate(row, cut),
             **({"provider": "kind=provider 表示同一插件提供的全部工具，按插件整体判断；适合时展示它的全部工具。"}
                if row.get("kind") == "provider" else {}),
         }, "criteria": {"include": "这项能力与任务相关，有助于完成任务，建议初始展示", **_NON_SELECTIONS},
     } for index, row in enumerate(rows)}
     decision_json(questions)
-    return questions
+    return questions, {"schema": "jev_candidate_projection.v1", "caps_bytes": dict(_WIRE_TEXT_CAPS), "truncated": cut}
 
 
 # LLM: 按原题候选读取答案，不解析模型文字；任何无效/不确定题保持全集，明确无需能力才允许空短名单。
