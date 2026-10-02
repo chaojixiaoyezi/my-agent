@@ -122,7 +122,8 @@ class SettingsControlContext:
 
 
 # LLM: 按解析器给出的 operation 分派；config 是 Gateway 启动时加载的配置（当前运行值与用户配置路径的来源），
-#   其余外部事实见 SettingsControlContext。改动分派时同步 test_settings_chat_control 与 test_curator_model_profile。
+#   其余外部事实见 SettingsControlContext。改动分派时同步 test_settings_chat_control、test_curator_model_profile
+#   与 test_embedding_model_profile。
 # 函数用途: 对管理员执行 /settings 的一个子命令，返回中文回执。
 def run_settings_control(config: object, command: ConversationControlCommand, *,
                          context: SettingsControlContext | None = None) -> str:
@@ -135,6 +136,8 @@ def run_settings_control(config: object, command: ConversationControlCommand, *,
     _operation, _, argument = command.value.partition(" ")
     if command.operation == "show" and argument.strip() == "memory_curator_model_profile":
         return _show(config, argument.strip()) + _curator_profile_text(config, ctx.home_paths)
+    if command.operation == "show" and argument.strip() == "embedding_model_profile":
+        return _show(config, argument.strip()) + _embedding_profile_text(config, ctx.home_paths)
     if command.operation in _WARNING_VIEWS:
         return handler(config, argument.strip(), capability_config=ctx.capability_config,
                        capability_path=ctx.capability_path)
@@ -146,16 +149,29 @@ def run_settings_control(config: object, command: ConversationControlCommand, *,
 def _curator_profile_text(config: object, home_paths: object) -> str:
     from ..settings.curator_profile import curator_profile_description
 
+    return _profile_text(config, home_paths, "memory_curator_model_profile", curator_profile_description)
+
+
+# LLM: 与 curator 档案展示同一套规则，只是解析函数换成嵌入档案（能力=embedding、空值=只走关键词）。
+# 函数用途: 在设置详情末尾补上嵌入档案的模型名与失效原因。
+def _embedding_profile_text(config: object, home_paths: object) -> str:
+    from ..settings.embedding_profile import embedding_profile_description
+
+    return _profile_text(config, home_paths, "embedding_model_profile", embedding_profile_description)
+
+
+# LLM: 通用档案回执：running 是当前进程值，saved 是用户配置里已保存的值；两者不同才提示重启生效。
+# 函数用途: 按配置键与描述函数生成档案说明文本。
+def _profile_text(config: object, home_paths: object, key: str, describe: object) -> str:
     if home_paths is None:
         return "\n档案模型名：未验证（缺少可信用户目录）。"
     host = SimpleNamespace(config=config, home_paths=home_paths)
-    key = "memory_curator_model_profile"
     running = str(getattr(config, key, "") or "")
     stored = _stored(config).get(key, "") or ""
     saved = "" if stored == [] else str(stored).strip()
-    lines = ["当前运行档案：" + curator_profile_description(host, running)]
+    lines = ["当前运行档案：" + describe(host, running)]
     if running != saved:
-        lines.append("保存的档案（重启后生效）：" + curator_profile_description(host, saved))
+        lines.append("保存的档案（重启后生效）：" + describe(host, saved))
     return "\n" + "\n".join(lines)
 
 

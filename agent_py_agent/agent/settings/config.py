@@ -317,13 +317,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     auto_save_memory: bool = True
     # 记忆语义召回(检索拓宽 #1,默认关=现状纯关键词):开后记忆召回在关键词(FTS5/BM25)外再加一路
     # 语义向量召回,RRF 融合,治"换词就召不回"。向量只存各 owner 自己 home 的本地文件(零外部依赖、
-    # 不碰共享向量库、per-用户隔离)。需配 embedding_model;没配则自动只走关键词(不崩不退化)。
+    # 不碰共享向量库、per-用户隔离)。需配 embedding_model_profile;没配则自动只走关键词(不崩不退化)。
     memory_semantic_recall: bool = False
-    # 嵌入服务:记忆语义召回与工具语义检索共用这一组(2026-09-27 由 memory_embedding_* 改名并吸收 tool_embedding_*,旧键只告警)。
-    embedding_model: str = ""  # embedding 模型名(空=两边都不用语义,只走关键词);embo* 走 MiniMax 原生协议
-    embedding_api_base: str = ""  # embedding 端点 base(缺省沿用 api_base);MiniMax 填 https://api.minimaxi.com/v1
-    embedding_api_key: str = ""  # embedding 独立 key(直配);空→读 _env 或回退聊天 key。让 embedding 能用与聊天不同厂的 key
-    embedding_api_key_env: str = ""  # embedding key 的环境变量名(生产用,免把密钥写进 yaml);空→回退聊天 key
+    # 嵌入服务:记忆语义召回与工具语义检索共用一个模型档案引用(P13,2026-10-02,替代原 4 个平铺键
+    # embedding_model/api_base/api_key/api_key_env,旧键只告警)。档案必须存在、启用且支持 embedding;
+    # 空=两边都不用语义,只走关键词。档案指向服务商凭据与端点,属于安全边界,模型不能改。
+    embedding_model_profile: str = ""  # /model 里 embedding 用途档案的编号;空=不发请求、只走关键词
     memory_archive_level: int = 3
     memory_hook_enabled: bool = True
     memory_rule_routing_mode: str = "soft"

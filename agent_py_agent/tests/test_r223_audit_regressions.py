@@ -280,15 +280,20 @@ def test_shell_capture_drains_both_unbroken_streams_with_bounded_memory(monkeypa
 
 
 def test_memory_embedder_init_failure_is_visible_without_secret(tmp_path, monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent import core
     from agent_py_agent.agent.core import _build_memory_embedder
     from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
-    from agent_py_agent.agent.retrieval import embedding
     from agent_py_agent.agent.settings.config import AgentConfig
-    def broken(**kwargs):
+
+    def broken(agent):
         raise RuntimeError("secret-not-for-logs")
-    monkeypatch.setattr(embedding, "OpenAICompatibleEmbedder", broken)
+
+    monkeypatch.setattr(core, "_embedding_client", broken)
     status = {}
-    assert _build_memory_embedder(AgentConfig(memory_semantic_recall=True, embedding_model="test"), diagnostics=status) is None
+    assert _build_memory_embedder(SimpleNamespace(config=AgentConfig(memory_semantic_recall=True)),
+                                  diagnostics=status) is None
     assert status["error_code"] == "MEMORY_EMBEDDING_INIT_FAILED"
     memory = JsonlMemory(tmp_path / "memory.jsonl", semantic_status=status)
     memory.add("user", "保留正式事实", kind="fact")

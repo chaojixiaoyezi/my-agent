@@ -63,7 +63,7 @@ def test_credential_key_never_echoes_the_value() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", ["api_key", "gateway_auth_token", "feishu_app_secret", "qq_app_secret", "embedding_api_key"]
+    "key", ["api_key", "gateway_auth_token", "feishu_app_secret", "qq_app_secret", "feishu_verification_token"]
 )
 def test_helper_hides_every_credential_key(key: str) -> None:
     from agent_py_agent.agent.settings.services._normalize import describe_raw_value
@@ -169,7 +169,7 @@ def _warnings_about(key: str, warnings: list[str]) -> list[str]:
 def test_credential_string_fields_come_from_the_config_declaration() -> None:
     """名单从 AgentConfig 声明推出；锁住已知凭据字段都在里面，防止推导失效后变成空名单。"""
     assert {
-        "api_key", "embedding_api_key", "gateway_auth_token", "feishu_app_secret",
+        "api_key", "gateway_auth_token", "feishu_app_secret",
         "feishu_verification_token", "feishu_encrypt_key", "qq_app_secret",
     } <= set(_CREDENTIAL_FIELDS)
     assert all(is_credential_key(key) for key in _CREDENTIAL_FIELDS)
@@ -208,23 +208,23 @@ def test_blank_credential_means_default_without_warning(key: str, raw: object) -
 
 
 def test_string_credential_is_kept_verbatim() -> None:
-    normalized, warnings = normalize_agent_config({"embedding_api_key": "sk-plain-value"})
+    normalized, warnings = normalize_agent_config({"feishu_verification_token": "sk-plain-value"})
 
-    assert normalized["embedding_api_key"] == "sk-plain-value"
-    assert not _warnings_about("embedding_api_key", warnings)
+    assert normalized["feishu_verification_token"] == "sk-plain-value"
+    assert not _warnings_about("feishu_verification_token", warnings)
 
 
 def test_loaded_config_falls_back_and_settings_reports_each_wrong_type(monkeypatch, tmp_path) -> None:
     """端到端：真实 load_config 后运行值回落默认值；/settings 总览按条数报告，原值不出现。"""
     secret = "sk-live-DO-NOT-LEAK-abcdef1234567890"
-    raw_yaml = f'embedding_api_key: ["{secret}"]\nfeishu_app_secret: ["{secret}"]\n'
+    raw_yaml = f'feishu_verification_token: ["{secret}"]\nfeishu_app_secret: ["{secret}"]\n'
     config_path = tmp_path / "loaded.yaml"
     config_path.write_text(raw_yaml, encoding="utf-8")
     loaded = load_config(config_path)
-    assert loaded.embedding_api_key == "" and loaded.feishu_app_secret == ""
+    assert loaded.feishu_verification_token == "" and loaded.feishu_app_secret == ""
 
     view = _settings_view(monkeypatch, tmp_path, raw_yaml)
     assert secret not in view
     assert "配置告警 2 条" in view
-    assert "embedding_api_key: expected a string, got 已隐藏" in view
+    assert "feishu_verification_token: expected a string, got 已隐藏" in view
     assert "feishu_app_secret: expected a string, got 已隐藏" in view

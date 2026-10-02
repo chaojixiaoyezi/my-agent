@@ -1,5 +1,16 @@
 # 记忆与上下文维护状态
 
+## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，本地已实现，待集成）
+
+- P13：`embedding_model_profile` 取代 `embedding_model/embedding_api_base/embedding_api_key/embedding_api_key_env` 四个平铺键
+  （旧键仅告警，不留别名）。`core._embedding_client` 按档案的服务商凭据与端点构建，空档案 = 不建客户端、只走关键词；
+  档案失效按结构化 reason 降级，不回退聊天模型。该键是边界项，模型不能改。
+- P14：向量库旁写 `memory_vectors.json.meta.json`（档案编号/服务商/模型名/维度/写入时间）；读取时身份不一致或无元数据，
+  已有向量视为不存在、语义召回退回关键词并给原因码（VECTOR_META_MISSING / VECTOR_IDENTITY_MISMATCH），不静默混用两个向量空间；
+  写侧身份不一致拒绝混写。
+- 重建入口：`memory vectors status`（只读预览数量与身份）+ `memory vectors rebuild --confirmed`（先预览、显式确认才清库重嵌）。
+- 相关测试 26 条（档案解析/空值/身份一致/不一致/重建）+ 3 个变异全部被拦截；详见 TESTS.md。
+
 常数整改第三批（P10，分支 `worker/ds2-p10-batch3`，2026-10-02）：agent/memory_store 23 个待整改常数合规——数量上限类补
 `_COUNT` 后缀改名（如 `_MAX_LIST_ITEMS→_MAX_LIST_ITEMS_COUNT`、`_MAX_ANNOTATED_ITEMS→_MAX_ANNOTATED_ITEMS_COUNT`、
 `_MAX_RELATION_PAIRS→_MAX_RELATION_PAIRS_COUNT`、`_EN_KEYWORD_MAX→_EN_KEYWORD_MAX_COUNT`、`_TIMEOUT_SHRINK_LIMIT→_TIMEOUT_SHRINK_LIMIT_COUNT`、

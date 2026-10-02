@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## 设置服务与嵌入档案（P13，2026-10-02，ds1，待集成）
+
+- `gateway_parts/settings_control_service`：`/settings show embedding_model_profile` 经 `embedding_profile_description`
+  投影编号/模型名/失效原因；`BOUNDARY_KEYS` 收录 `embedding_model_profile`，模型与聊天动作写入被 `PARAMETER_BOUNDARY` 拒绝。
+
 ## 常数整改第三批（P10，2026-10-02，分支 `worker/ds2-p10-batch3`）
 
 gateway_parts 28 个常数合规：`_SCAN_LIMIT→_SCAN_LIMIT_COUNT`、`_CAPABILITY_OBSERVATION_LIMIT→_CAPABILITY_OBSERVATION_LIMIT_COUNT`、

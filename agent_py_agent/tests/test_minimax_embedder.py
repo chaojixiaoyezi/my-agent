@@ -9,8 +9,14 @@ from __future__ import annotations
 
 import json
 import urllib.request
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
 
 from agent_py_agent.agent.retrieval.embedding import EmbeddingError, MiniMaxEmbedder
+from agent_py_agent.agent.settings.config import AgentConfig, load_config
+from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
 
 
 class _FakeResp:
@@ -182,79 +188,45 @@ def test_minimax_network_error_degrades_not_crash(monkeypatch) -> None:
         pass
 
 
-def test_build_memory_embedder_picks_minimax_for_embo_model() -> None:
-    from agent_py_agent.agent.core import _build_memory_embedder
-    from agent_py_agent.agent.settings.config import AgentConfig
+@pytest.fixture
+def host(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    home = SimpleNamespace(root=tmp_path, config_dir=tmp_path / "config", owner_provider="local",
+                           owner_kind="main", owner_id="main")
+    path = tmp_path / "desktop.yaml"
+    path.write_text('agent_name: "minimax-test"\n', encoding="utf-8")
+    config = load_config(path)
+    return SimpleNamespace(home_paths=home, config=config)
 
-    emb = _build_memory_embedder(
-        AgentConfig(
-            memory_semantic_recall=True,
-            embedding_model="embo-01",
-            embedding_api_base="https://api.minimaxi.com/v1",
-            api_key="k",
-        )
-    )
+
+def _add(host, **values):
+    profile_id = str(uuid4())
+    profile = {"model_name": "text-embedding-3-small", "model_backend": "openai_compatible",
+               "api_base": "https://emb.example.test/v1", "api_key": "fake-emb-credential",
+               "model_context_window_tokens": 32768, "capability": "embedding", **values}
+    execute_model_profile_operation(host, "add", {"profile_id": profile_id, "profile": profile})
+    return profile_id
+
+
+def _agent(host, **cfg):
+    return SimpleNamespace(home_paths=host.home_paths, config=AgentConfig(**cfg))
+
+
+def test_build_memory_embedder_picks_minimax_for_embo_model(host) -> None:
+    from agent_py_agent.agent.core import _build_memory_embedder
+
+    profile_id = _add(host, model_name="embo-01", api_base="https://api.minimaxi.com/v1")
+    emb = _build_memory_embedder(_agent(host, memory_semantic_recall=True, embedding_model_profile=profile_id))
     assert isinstance(emb, MiniMaxEmbedder) and emb.dim == 1536  # embo* → MiniMax 适配器,1536 维
 
 
-def test_build_memory_embedder_non_embo_stays_openai_compatible() -> None:
+def test_build_memory_embedder_non_embo_stays_openai_compatible(host) -> None:
     from agent_py_agent.agent.core import _build_memory_embedder
     from agent_py_agent.agent.retrieval.embedding import OpenAICompatibleEmbedder
-    from agent_py_agent.agent.settings.config import AgentConfig
 
-    emb = _build_memory_embedder(
-        AgentConfig(
-            memory_semantic_recall=True,
-            embedding_model="text-embedding-3-small",
-            embedding_api_base="https://api.openai.com/v1",
-            api_key="k",
-        )
-    )
+    profile_id = _add(host, model_name="text-embedding-3-small", api_base="https://api.openai.com/v1")
+    emb = _build_memory_embedder(_agent(host, memory_semantic_recall=True, embedding_model_profile=profile_id))
     assert isinstance(emb, OpenAICompatibleEmbedder)  # 非 embo 仍走 OpenAI 兼容,不误判
-
-
-def test_embedding_key_precedence_direct_over_env_over_chat(monkeypatch) -> None:
-    """embedding 独立 key 解析:直配 > 独立 env > 回退聊天 key(默认零配置沿用聊天 key,不破现状)。"""
-    from agent_py_agent.agent.core import _build_memory_embedder
-    from agent_py_agent.agent.settings.config import AgentConfig
-
-    common = dict(
-        memory_semantic_recall=True,
-        embedding_model="embo-01",
-        embedding_api_base="https://api.minimaxi.com/v1",
-    )
-    monkeypatch.delenv("AGENT_API_KEY", raising=False)  # 隔离真实环境里的 key,断言纯靠配置
-
-    direct = _build_memory_embedder(AgentConfig(**common, embedding_api_key="k-direct", api_key="k-chat"))
-    assert direct._api_key == "k-direct"  # 直配优先
-
-    monkeypatch.setenv("EMB_KEY_X", "k-env")
-    via_env = _build_memory_embedder(
-        AgentConfig(**common, embedding_api_key_env="EMB_KEY_X", api_key="k-chat")
-    )
-    assert via_env._api_key == "k-env"  # 直配空 → 读独立 env 变量
-
-    fallback = _build_memory_embedder(AgentConfig(**common, api_key="k-chat"))
-    assert fallback._api_key == "k-chat"  # 都不配 → 回退聊天 key(向后兼容)
-
-
-def test_embedding_key_env_set_but_missing_falls_back(monkeypatch) -> None:
-    """配了 embedding key 的环境变量名、但该变量不存在 → 优雅回退聊天 key(不会拿到空 key)。"""
-    from agent_py_agent.agent.core import _build_memory_embedder
-    from agent_py_agent.agent.settings.config import AgentConfig
-
-    monkeypatch.delenv("AGENT_API_KEY", raising=False)
-    monkeypatch.delenv("MISSING_EMB_KEY", raising=False)
-    emb = _build_memory_embedder(
-        AgentConfig(
-            memory_semantic_recall=True,
-            embedding_model="embo-01",
-            embedding_api_base="https://api.minimaxi.com/v1",
-            embedding_api_key_env="MISSING_EMB_KEY",
-            api_key="k-chat",
-        )
-    )
-    assert emb._api_key == "k-chat"  # env 名配了但变量缺失 → 回退聊天 key,不静默拿空 key
 
 
 def test_new_embedding_fields_survive_normalize(monkeypatch) -> None:
@@ -266,9 +238,7 @@ def test_new_embedding_fields_survive_normalize(monkeypatch) -> None:
 
     raw = {
         "memory_semantic_recall": True,
-        "embedding_model": "embo-01",
-        "embedding_api_base": "https://api.minimaxi.com/v1",
-        "embedding_api_key_env": "MY_EMB_KEY",
+        "embedding_model_profile": "prof-abc-123",
         "gateway_per_user_owner_scoping": True,
     }
     normalized, _warnings = normalize_agent_config(raw)

@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+## P13：/settings 展示嵌入档案（2026-10-02，ds1，本地已实现，待集成）
+
+- `settings_control_service` 新增 `embedding_model_profile` 的 show 支持：展示档案编号、模型名或失效原因，不含连接凭据；
+  `_curator_profile_text` 泛化为 `_profile_text` 供两个档案共用。
+- 该键在参数中心是 boundary / writable=False，仅可信管理员用户经 `/settings` 可改。
+
 常数整改第三批（P10，分支 `worker/ds2-p10-batch3`，2026-10-02）：agent/gateway_parts 28 个＋agent/core.py 3 个待整改常数合规——
 数量上限类补 `_COUNT` 后缀改名（如 `LOOP_GUARD_LIMIT→LOOP_GUARD_LIMIT_COUNT`、`_RECORD_LIMIT→_RECORD_LIMIT_COUNT`、
 `_BRIEF_MAX→_BRIEF_MAX_CHARS`、`_SHORT_ID→_SHORT_ID_CHARS`），时间/长度类补上方中文说明（数值一律不变，改名引用全仓同步含测试）。

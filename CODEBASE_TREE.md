@@ -636,6 +636,7 @@ agent_py_agent/
 |   |   |-- parameter_changes.py      # 参数中心唯一写入口：按来源写对应文件、按类型写入、正式加载回读核对、修改记录、恢复默认与回滚
 |   |   |-- model_profiles.py           # owner 私有模型配置唯一文件源、脱敏列表及子代理创建时引用
 |   |   |-- curator_profile.py          # 固定 Curator 档案整组解析，失效诊断与设置型号展示，不建第二模型目录
+|   |   |-- embedding_profile.py        # 嵌入档案引用解析（capability=embedding）、失效诊断、向量库身份（P13/P14）
 |   |   |-- decision_probe.py           # 显式原生连接测试，共用后端/worker/账本，不改开关或聊天选择
 |   |   |-- decision_settings.py        # 原 owner/thread 决策覆盖共用读取、字段修改、恢复继承与双版本 CAS
 |   |   |-- decision_settings_schema.py # 决策字段/范围校验及旧会话覆盖迁移，不持有默认值

@@ -239,7 +239,13 @@ def _wire_memory_authorities(
         quota_enforcer=agent.owner_quota,
     )
     semantic_status: dict[str, str] = {}
-    embedder = _build_memory_embedder(config, diagnostics=semantic_status)
+    embedder = _build_memory_embedder(agent, diagnostics=semantic_status)
+    vector_identity: dict[str, object] | None = None
+    if embedder is not None:
+        from .settings.embedding_profile import embedding_identity
+
+        profile_id = str(getattr(config, "embedding_model_profile", "") or "").strip()
+        vector_identity = embedding_identity(agent, profile_id, int(getattr(embedder, "dim", 0) or 0))
     agent.memory = JsonlMemory(
         paths["memory_path"],
         local_store=agent.local_store,
@@ -248,6 +254,7 @@ def _wire_memory_authorities(
         embedder=embedder,
         semantic_status=semantic_status,
         quota_enforcer=agent.owner_quota,
+        vector_identity=vector_identity,
     )
     agent.persona_repository = PersonaRepository.from_home_paths(
         agent.home_paths,
@@ -669,77 +676,82 @@ def _task_matches_audit_run_epoch(task: object, expected: int | None) -> bool:
     return observed == expected
 
 
-# LLM: 嵌入服务 key 链（记忆与工具共用）：embedding_api_key 直配 > embedding_api_key_env 指向的环境变量 > 聊天后端 key
-#   （api_key，再退到 api_key_env 或 AGENT_API_KEY）。只读配置与环境变量，不打印、不记录密钥。
-# 函数用途: 取嵌入端点要用的 key；都没配时沿用聊天 key。
-def _embedding_api_key(config: AgentConfig) -> str:
-    """embedding 端点的 key:独立直配 > 独立 env 变量 > 回退聊天后端 key。
-
-    独立字段让 embedding 用与聊天不同厂的 key(如聊天 MiniMax、embedding 另一家);都不配则零配置
-    沿用聊天 key(同厂/本地无 key 场景)。_env 路径让生产把密钥放环境变量而非 yaml(免明文入库)。
-    """
-    direct = str(getattr(config, "embedding_api_key", "") or "")
-    if direct:
-        return direct
-    env_name = str(getattr(config, "embedding_api_key_env", "") or "")
-    if env_name and os.environ.get(env_name):
-        return os.environ[env_name]
-    return str(getattr(config, "api_key", "") or "") or os.environ.get(
-        str(getattr(config, "api_key_env", "AGENT_API_KEY") or "AGENT_API_KEY"), ""
-    )
-
-
-# LLM: 嵌入服务唯一构建入口：记忆语义召回与工具语义检索共用 embedding_* 一组配置（模型、端点、key 链），
-#   两边的开关由调用方各自判断。模型为空返回 None；只建客户端，不发网络请求。改这里要同步 test_embedding_service。
-# 函数用途: 按 embedding_* 创建嵌入客户端，embo* 走 MiniMax 原生协议，其余走 OpenAI 兼容 /embeddings。
-def _embedding_client(config: AgentConfig):
-    model = str(getattr(config, "embedding_model", "") or "").strip()
-    if not model:
+# LLM: 嵌入服务唯一构建入口：记忆语义召回与工具语义检索共用 embedding_model_profile 一个档案引用。
+#   档案为空返回 None（只走关键词，不发请求）；档案失效抛 ModelNotConfiguredError，由调用方按结构化 reason
+#   降级。只建客户端，不发网络请求。改这里要同步 test_embedding_service 与 test_embedding_model_profile。
+# 函数用途: 按 /model 档案创建嵌入客户端，embo* 走 MiniMax 原生协议，其余走 OpenAI 兼容 /embeddings。
+def _embedding_client(agent: object):
+    config = getattr(agent, "config", None)
+    profile_id = str(getattr(config, "embedding_model_profile", "") or "").strip()
+    if not profile_id:
         return None
     from .retrieval.embedding import MiniMaxEmbedder, OpenAICompatibleEmbedder
+    from .settings.embedding_profile import embedding_model_config
 
-    # embedding 端点常与聊天端点不同(MiniMax 聊天走 /anthropic、embedding 走 /v1);独立配置,缺省沿用主 api_base
-    api_base = str(getattr(config, "embedding_api_base", "") or "") or str(getattr(config, "api_base", "") or "")
+    resolved = embedding_model_config(agent, profile_id)
+    if resolved is None:
+        return None
+    model = str(getattr(resolved, "model_name", "") or "").strip()
+    if not model:
+        raise ValueError("embedding profile resolved without model_name")
+    # 档案自带服务商端点与凭据；端点不再从聊天 api_base 推断，避免跨服务商混用。
+    api_base = str(getattr(resolved, "api_base", "") or "")
+    api_key = str(getattr(resolved, "api_key", "") or "")
     factory = MiniMaxEmbedder if model.startswith("embo") else OpenAICompatibleEmbedder
-    return factory(api_base=api_base, model=model, api_key=_embedding_api_key(config))
+    return factory(api_base=api_base, model=model, api_key=api_key)
 
 
-# LLM: 构建失败仅影响派生向量检索；诊断必须区分未开启、未配置和初始化失败，不记录密钥或异常正文。
+# LLM: 构建失败仅影响派生向量检索；诊断必须区分未开启、未配置、档案失效和初始化失败，不记录密钥或异常正文。
 # 函数用途: 创建可选记忆向量接口，向健康面板报告降级原因，不中断正式记忆读写。
-def _build_memory_embedder(config: AgentConfig, *, diagnostics: dict[str, str] | None = None):
-    """记忆语义召回的 embedder(检索拓宽 #1):默认关 / 没配 embedding 模型 → None(纯关键词,不变)。
+def _build_memory_embedder(agent: object, *, diagnostics: dict[str, str] | None = None):
+    """记忆语义召回的 embedder(检索拓宽 #1):默认关 / 没配 embedding 档案 → None(纯关键词,不变)。
 
-    配了 memory_semantic_recall=true + embedding_model 才建。
+    配了 memory_semantic_recall=true + embedding_model_profile 才建。
     失败保留纯关键词召回，同时发出结构化诊断和不含凭据的警告。
     """
+    config = getattr(agent, "config", None)
     status = diagnostics if diagnostics is not None else {}
     status.update(state="disabled")
     if not getattr(config, "memory_semantic_recall", False):
         return None
+    from .backends.errors import ModelNotConfiguredError
+
     try:
-        embedder = _embedding_client(config)
+        embedder = _embedding_client(agent)
+    except ModelNotConfiguredError as exc:
+        status.update(state="degraded", error_code="MEMORY_EMBEDDING_PROFILE_UNAVAILABLE",
+                      profile_id=exc.profile_id, profile_reason=exc.profile_reason)
+        logging.getLogger(__name__).warning("语义记忆档案不可用（%s）；当前使用关键词召回", exc.profile_reason)
+        return None
     except Exception as exc:
         status.update(state="degraded", error_code="MEMORY_EMBEDDING_INIT_FAILED", error_type=type(exc).__name__)
         logging.getLogger(__name__).warning("语义记忆初始化失败（%s）；当前使用关键词召回", type(exc).__name__)
         return None
     if embedder is None:
         status.update(state="degraded", error_code="MEMORY_EMBEDDING_MODEL_MISSING")
-        logging.getLogger(__name__).warning("语义记忆已开启，但未配置 embedding 模型；当前使用关键词召回")
+        logging.getLogger(__name__).warning("语义记忆已开启，但未配置 embedding 模型档案；当前使用关键词召回")
         return None
     status.clear()
     status.update(state="configured")
     return embedder
 
 
-# LLM: 工具语义检索只守自己的开关 tool_vector_search_enabled，模型、端点与 key 链和记忆共用 _embedding_client；
-#   返回 None 时 VectorToolSearchProvider 把语义通道标为 unconfigured、只走关键词。只建客户端，不发网络请求。
-# 函数用途: 按共享嵌入服务配置创建工具语义检索用的嵌入客户端。
-def _build_tool_embedder(config: AgentConfig):
+# LLM: 工具语义检索只守自己的开关 tool_vector_search_enabled，模型与凭据来自 embedding_model_profile 档案（与记忆共用）；
+#   档案失效也降级 None（只走关键词），不能让语义工具检索把 Gateway 组合拉崩。只建客户端，不发网络请求。
+# 函数用途: 按共享嵌入档案创建工具语义检索用的嵌入客户端。
+def _build_tool_embedder(agent: object):
     """Build the real semantic provider for tool retrieval when explicitly configured."""
 
+    config = getattr(agent, "config", None)
     if not getattr(config, "tool_vector_search_enabled", False):
         return None
-    return _embedding_client(config)
+    from .backends.errors import ModelNotConfiguredError
+
+    try:
+        return _embedding_client(agent)
+    except ModelNotConfiguredError as exc:
+        logging.getLogger(__name__).warning("工具语义检索档案不可用（%s）；只走关键词", exc.profile_reason)
+        return None
 
 
 def _resolve_home_paths(config: AgentConfig):
@@ -939,7 +951,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
                           if config.enable_plugins and config.enable_tools else None),
             plugin_runtime_repo=getattr(getattr(agent, "subagents", None), "runtime_db", None),
             plugin_process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
-            tool_embedder=_build_tool_embedder(config),
+            tool_embedder=_build_tool_embedder(agent),
             operation_store=select_operation_store(agent),
             operation_store_required=True,
             operation_owner_id=str(

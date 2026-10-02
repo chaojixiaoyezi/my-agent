@@ -2729,6 +2729,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
         recovery_hint="embedding 客户端初始化失败（端点或凭据）；当前退回关键词召回，需用户核对 embedding 配置。",
     ),
+    "MEMORY_EMBEDDING_PROFILE_UNAVAILABLE": ErrorContract(
+        code="MEMORY_EMBEDDING_PROFILE_UNAVAILABLE",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="embedding 模型档案不存在、缺能力或已停用；当前退回关键词召回，需管理员在 /model 配置或修正档案后重建向量。",
+    ),
     "TOOL_RATE_LIMIT_IDENTITY_MISSING": ErrorContract(
         code="TOOL_RATE_LIMIT_IDENTITY_MISSING",
         category="tool",

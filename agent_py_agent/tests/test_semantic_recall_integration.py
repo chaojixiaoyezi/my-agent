@@ -11,7 +11,6 @@ from __future__ import annotations
 from agent_py_agent.agent import core
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.request_worker import _resolve_request_agent
-from agent_py_agent.agent.retrieval.embedding import MiniMaxEmbedder
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
 
@@ -34,18 +33,15 @@ def test_simpleagent_no_embedder_by_default(tmp_path) -> None:
     assert _agent(tmp_path).memory._embedder is None  # 默认关 → 纯 BM25,连 embedder 都不建
 
 
-def test_simpleagent_wires_embedder_from_config(tmp_path) -> None:
-    agent = _agent(
-        tmp_path,
-        memory_semantic_recall=True,
-        embedding_model="embo-01",
-        embedding_api_base="https://api.minimaxi.com/v1",
-    )
-    assert isinstance(agent.memory._embedder, MiniMaxEmbedder)  # 配置真的接到 memory 层(生产接线打通,构造不上网)
+def test_simpleagent_wires_embedder_from_config(tmp_path, monkeypatch) -> None:
+    # P13 后嵌入客户端只按档案构建，测试用确定性替身注入；断言的是 config→SimpleAgent→memory 的真实接线。
+    monkeypatch.setattr(core, "_build_memory_embedder", lambda agent, **kwargs: LocalHashingEmbedder(dim=128))
+    agent = _agent(tmp_path, memory_semantic_recall=True)
+    assert isinstance(agent.memory._embedder, LocalHashingEmbedder)  # 配置真的接到 memory 层(生产接线打通,构造不上网)
 
 
 def test_per_user_vector_isolation(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(core, "_build_memory_embedder", lambda config, **kwargs: LocalHashingEmbedder(dim=128))  # 强制本地确定性
+    monkeypatch.setattr(core, "_build_memory_embedder", lambda agent, **kwargs: LocalHashingEmbedder(dim=128))  # 强制本地确定性
     base = _agent(tmp_path, scoping=True)
     alice = _resolve_request_agent(base, _req("alice"))
     bob = _resolve_request_agent(base, _req("bob"))
@@ -60,7 +56,7 @@ def test_per_user_vector_isolation(tmp_path, monkeypatch) -> None:
 
 
 def test_scoping_off_shares_one_vector_store(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(core, "_build_memory_embedder", lambda config, **kwargs: LocalHashingEmbedder(dim=128))
+    monkeypatch.setattr(core, "_build_memory_embedder", lambda agent, **kwargs: LocalHashingEmbedder(dim=128))
     base = _agent(tmp_path, scoping=False)
     a = _resolve_request_agent(base, _req("alice"))
     b = _resolve_request_agent(base, _req("bob"))

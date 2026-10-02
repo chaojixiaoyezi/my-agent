@@ -23,6 +23,8 @@ from .memory_admin_commands import (
     cmd_memory_retention_apply,
     cmd_memory_retention_plan,
     cmd_memory_v2_doctor,
+    cmd_memory_vectors_rebuild,
+    cmd_memory_vectors_status,
 )
 
 _CANDIDATE_STATUS_HELP = (
@@ -54,6 +56,7 @@ def add_memory_admin_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_retention_commands(areas)
     _add_doctor_command(areas)
     _add_migrate_command(areas)
+    _add_vectors_commands(areas)
 
 
 # LLM: Candidate 的所有状态修改必须按精确 candidate_id 进入唯一状态机。
@@ -210,6 +213,27 @@ def _add_migrate_command(areas: argparse._SubParsersAction) -> None:
     parser.add_argument("--apply", action="store_true", help="显式应用迁移；不传时只生成报告")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     parser.set_defaults(func=cmd_memory_migrate)
+
+
+# LLM: 向量重建是管理员显式动作：status 只读预览数量与身份，rebuild 必须先看预览、显式 --confirmed 才清库重嵌。
+# 函数用途: 注册记忆向量库状态预览与重建命令。
+def _add_vectors_commands(areas: argparse._SubParsersAction) -> None:
+    parser = areas.add_parser(
+        "vectors",
+        help="预览或重建记忆向量库（换嵌入模型后语义召回退回关键词时的恢复入口）",
+        description=(
+            "向量库是记忆的派生索引；换模型后旧向量与当前嵌入身份不一致，语义召回自动退回关键词。"
+            "status 只读预览数量与身份；rebuild 清空并全量重嵌，必须 --confirmed 才执行。"
+        ),
+    )
+    actions = parser.add_subparsers(dest="memory_vectors_action", required=True)
+    status = actions.add_parser("status", help="只读预览向量库数量、元数据身份与可重建记忆数")
+    status.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    status.set_defaults(func=cmd_memory_vectors_status)
+    rebuild = actions.add_parser("rebuild", help="清空并全量重嵌记忆向量；先预览再确认")
+    rebuild.add_argument("--confirmed", action="store_true", help="确认执行；不传只输出预览与所需操作")
+    rebuild.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    rebuild.set_defaults(func=cmd_memory_vectors_rebuild)
 
 
 __all__ = ["add_memory_admin_subcommands"]

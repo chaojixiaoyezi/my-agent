@@ -352,6 +352,60 @@ def _doctor_payload(agent: Any, args: Any) -> dict[str, object]:
     }
 
 
+# LLM: status 只读预览：向量数量、元数据身份、原因码与可重建的 active 记忆数，不触发嵌入或清库。
+# 函数用途: 构造记忆向量库状态预览报告。
+def _vectors_status_payload(agent: Any, args: Any) -> dict[str, object]:
+    status = agent.memory.vector_index_status()
+    return {
+        "ok": True,
+        "command": "memory vectors status",
+        "owner_id": str(getattr(agent.home_paths, "owner_id", "") or "local/main"),
+        "vector_count": status["vector_count"],
+        "active_count": status["active_count"],
+        "identity_ok": status["ok"],
+        "identity_reason": status["reason"],
+        "meta": status["meta"],
+    }
+
+
+# LLM: rebuild 必须先预览；未 --confirmed 只回预览并提示，不执行清库重嵌。
+# 函数用途: 构造记忆向量库重建报告（预览或执行）。
+def _vectors_rebuild_payload(agent: Any, args: Any) -> dict[str, object]:
+    preview = agent.memory.vector_index_status()
+    if not bool(getattr(args, "confirmed", False)):
+        return {
+            "ok": True,
+            "command": "memory vectors rebuild",
+            "owner_id": str(getattr(agent.home_paths, "owner_id", "") or "local/main"),
+            "executed": False,
+            "preview": {
+                "vector_count": preview["vector_count"],
+                "active_count": preview["active_count"],
+                "identity_ok": preview["ok"],
+                "identity_reason": preview["reason"],
+            },
+            "message": "未确认：已预览将重建的 active 记忆数；确认执行请加 --confirmed。",
+        }
+    result = agent.memory.rebuild_vectors()
+    return {
+        "ok": bool(result.get("ok")),
+        "command": "memory vectors rebuild",
+        "owner_id": str(getattr(agent.home_paths, "owner_id", "") or "local/main"),
+        "executed": True,
+        "rebuilt": result.get("rebuilt", 0),
+        "vector_count": result.get("vector_count", 0),
+        "reason": result.get("reason", ""),
+    }
+
+
+def cmd_memory_vectors_status(args: Any) -> int:
+    return _run_admin_command(args, _vectors_status_payload)
+
+
+def cmd_memory_vectors_rebuild(args: Any) -> int:
+    return _run_admin_command(args, _vectors_rebuild_payload)
+
+
 # LLM: JSON key 保持机器协议；普通输出增加中文标题，字段逐项中文含义由 --help 和 Memory 文档维护。
 # 函数用途: 输出统一管理命令结果。
 def _print_admin_payload(payload: dict[str, object], *, json_output: bool) -> None:
@@ -378,4 +432,6 @@ __all__ = [
     "cmd_memory_retention_apply",
     "cmd_memory_retention_plan",
     "cmd_memory_v2_doctor",
+    "cmd_memory_vectors_rebuild",
+    "cmd_memory_vectors_status",
 ]

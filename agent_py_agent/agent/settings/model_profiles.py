@@ -382,8 +382,9 @@ def _use_initial_default(result: dict, shared: list[dict], initial: str) -> None
 
 # LLM: provider/model/secret/protocol 仍按原引用整组冻结；可选宿主捕获仅复制本次已读公开选择与决策设置，不另读目录。
 #   捕获记录的是选择引用本身（default 仍记 default）；普通用户的 default 在管理员指定初始模型时解析为该共享引用。
+#   capability 显式声明用途（agentic/embedding/decision），决定档案能力校验，默认 agentic 保持现有消费者行为不变。
 # 函数用途: 新工作片解析选定模型并复用其开关事实；禁用、删除或撤销共享均明确报错，不偷偷换模型。
-def selected_model_config(agent: object, *, profile_id: str | None = None):
+def selected_model_config(agent: object, *, profile_id: str | None = None, capability: str = "agentic"):
     data = read_model_profiles(model_profiles_path(agent.home_paths))
     selected = data["selected"] if profile_id is None else profile_id
     captured = _SELECTED_MODEL_READ.get()
@@ -393,7 +394,7 @@ def selected_model_config(agent: object, *, profile_id: str | None = None):
         selected = _default_for_owner(agent)
         if selected == "default":
             return agent.config
-    row = _resolved_profile(agent, data, selected)
+    row = _resolved_profile(agent, data, selected, capability=capability)
     # 模型档案的窗口必填，写进 model_context_window_tokens 即显式容量；档案带温度就发送，没带沿用部署的 temperature（空 = 不发）。
     config = replace(agent.config, **row, api_key_env="")
     # 输出上限不在这里夹取（后端工厂按 effective_max_output_tokens 统一处理）；max_tokens 仍按模型档案优先级冻结，

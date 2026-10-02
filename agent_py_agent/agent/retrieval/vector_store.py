@@ -11,9 +11,22 @@ import json
 import threading
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_py_agent.agent.retrieval.embedding import cosine
+
+
+# LLM: 向量库身份不匹配不是普通异常：调用方要按结构化 reason 降级（语义召回退回关键词），不能吞成"没结果"。
+# 类用途: 携带 P14 的身份失效原因码（VECTOR_META_MISSING / VECTOR_IDENTITY_MISMATCH）。
+class VectorIdentityError(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# LLM: 元数据 schema 固定；换模型后旧 meta 与当前身份不一致，向量库视为不存在，避免静默混用两个向量空间。
+VECTOR_META_SCHEMA_VERSION = "my-agent.memory-vectors-meta.v1"
 
 
 def _safe_cosine(query_vector: list[float], qlen: int, vec: object) -> float | None:
@@ -46,12 +59,18 @@ class VectorStore:
         vs = VectorStore(home / "memory_vectors.json")
         vs.upsert("mem-1", embedder.embed(["..."])[0], text="...", metadata={...})
         hits = vs.search(query_vec, top_k=5)
+
+    P14: 传入 identity（档案编号/服务商/模型名/维度）时，向量库旁边写 memory_vectors.meta.json，
+    记录生成这批向量的嵌入身份；身份缺失或不一致时调用方必须把已有向量当不存在（退回关键词），
+    不静默混用两个向量空间。identity 为 None 时保持旧行为（不管理元数据）。
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, identity: dict[str, object] | None = None) -> None:
         self._path = Path(path).expanduser()
         self._lock = threading.RLock()  # 同 owner 共享一个 store 时序列化写,保证文件落盘=最新快照
         self._items: dict[str, dict[str, object]] = self._load()
+        self._identity = dict(identity) if identity else None
+        self._meta_path = self._path.with_name(self._path.name + ".meta.json")
 
     def _load(self) -> dict[str, dict[str, object]]:
         try:
@@ -59,6 +78,83 @@ class VectorStore:
         except (OSError, json.JSONDecodeError):
             return {}
         return data if isinstance(data, dict) else {}
+
+    # LLM: 元数据独立于向量文件存读；meta 损坏按"没有元数据"处理（调用方退回关键词），不猜测。
+    # 函数用途: 读取旁边的身份元数据文件，损坏或缺失返回 None。
+    def _load_meta(self) -> dict[str, object] | None:
+        try:
+            data = json.loads(self._meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    # LLM: 首次写入或重建时落盘身份；只写当前 identity 与时间，不含密钥或向量正文。
+    # 函数用途: 按当前身份原子写入元数据文件。
+    def _write_meta(self) -> None:
+        if self._identity is None:
+            return
+        meta = {
+            "schema_version": VECTOR_META_SCHEMA_VERSION,
+            "profile_id": str(self._identity.get("profile_id", "") or ""),
+            "provider": str(self._identity.get("provider", "") or ""),
+            "model_name": str(self._identity.get("model_name", "") or ""),
+            "dim": int(self._identity.get("dim", 0) or 0),
+            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        tmp = self._meta_path.with_name(f"{self._meta_path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self._meta_path)
+
+    # LLM: 一致性只比结构化身份字段：档案编号、模型名、维度必比；服务商两端都非空才比（旧数据无服务商不算冲突）。
+    # 函数用途: 判定当前身份与元数据是否一致，返回 (是否可用, 原因码)；不管理身份时恒可用。
+    def identity_status(self) -> tuple[bool, str]:
+        if self._identity is None:
+            return True, ""
+        meta = self._load_meta()
+        if meta is None:
+            return False, "VECTOR_META_MISSING"
+        expected = {
+            "profile_id": str(self._identity.get("profile_id", "") or ""),
+            "model_name": str(self._identity.get("model_name", "") or ""),
+            "dim": int(self._identity.get("dim", 0) or 0),
+        }
+        for key, value in expected.items():
+            if str(meta.get(key, "") or "") != str(value):
+                return False, "VECTOR_IDENTITY_MISMATCH"
+        provider = str(self._identity.get("provider", "") or "")
+        if provider and str(meta.get("provider", "") or "") != provider:
+            return False, "VECTOR_IDENTITY_MISMATCH"
+        return True, ""
+
+    # LLM: 写入前必须保证身份已就位；meta 缺失且库里有向量=旧文件无元数据，拒绝混写；
+    #   meta 缺失但库为空=首次写入，直接落身份；meta 不一致就抛错，调用方捕获后降级。
+    # 函数用途: 校验并确保元数据与当前身份一致，否则拒绝写入。
+    def _ensure_identity_writable(self) -> None:
+        if self._identity is None:
+            return
+        meta = self._load_meta()
+        if meta is None:
+            if self._items:
+                raise VectorIdentityError("VECTOR_META_MISSING")
+            self._write_meta()
+            return
+        ok, reason = self.identity_status()
+        if not ok:
+            raise VectorIdentityError(reason)
+
+    # LLM: 重建入口专用：清空向量并落新身份；identity 为 None 时只清空不写 meta（旧行为）。
+    # 函数用途: 把向量库重置为空并写入当前身份元数据。
+    def reset(self) -> None:
+        with self._lock:
+            self._items = {}
+            self._flush()
+            if self._identity is not None:
+                self._write_meta()
+
+    # LLM: 只读投影，不触发网络或校验；供预览入口显示当前元数据。
+    # 函数用途: 返回元数据字典或 None。
+    def meta(self) -> dict[str, object] | None:
+        return self._load_meta()
 
     def _flush(self) -> None:
         # 并发健壮(同 owner 共享一个 store 时可能并发写):① 唯一 tmp 名,避免两次 flush 写同一 tmp 互相截断;
@@ -76,12 +172,14 @@ class VectorStore:
         if not id:
             raise ValueError("vector id required")
         with self._lock:  # 写串行:防慢 flush 用旧快照赢得 replace 竞争而丢最新更新
+            self._ensure_identity_writable()
             self._items[id] = {"vector": list(vector), "text": text, "metadata": dict(metadata or {})}
             self._flush()
 
     def upsert_many(self, rows: list[tuple[str, list[float], str, dict[str, object]]]) -> None:
         """批量 upsert(只 flush 一次,省 IO)。rows: [(id, vector, text, metadata), ...]。"""
         with self._lock:
+            self._ensure_identity_writable()
             self._apply_rows(rows)
             self._flush()
 

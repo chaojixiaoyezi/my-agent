@@ -1,5 +1,17 @@
 # Memory Structure
 
+## 嵌入档案与向量身份（P13+P14，2026-10-02，ds1，待集成）
+
+- `settings/embedding_profile.embedding_model_config`：按档案编号解析嵌入连接（capability="embedding"），空值返回 None；
+  失效抛 `ModelNotConfiguredError(profile_id, profile_reason)`；`embedding_identity` 生成向量库元数据身份。
+- `core._embedding_client(agent)`：唯一嵌入客户端入口，服务商凭据与端点全部来自档案；`_build_memory_embedder` / `_build_tool_embedder`
+  只守各自开关，失败降级 None 并给结构化状态。
+- `retrieval/vector_store.VectorStore`：`identity` 参数控制 `memory_vectors.json.meta.json` 的写读；
+  `identity_status()` 判定一致性，`reset()` 供重建清库并落新身份。
+- `memory_store/jsonl.JsonlMemory`：`vector_identity` 传入身份；`vector_index_status()` 预览、`rebuild_vectors()` 全量重嵌；
+  语义召回读侧身份不一致退回关键词。
+- `cli/memory_admin_commands`：`memory vectors status / rebuild --confirmed` 管理入口（先预览再确认）。
+
 ## 常数整改第三批（P10，2026-10-02，分支 `worker/ds2-p10-batch3`）
 
 memory_store 23 个常数合规：`_MAX_CONDITION_CHARS/_MAX_CONTENT_CHARS/_MAX_REF_BYTES/_ITEM_PREVIEW_CHARS/_AUDIT_PREVIEW_CHARS/

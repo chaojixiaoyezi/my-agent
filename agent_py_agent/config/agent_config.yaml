@@ -154,7 +154,7 @@ memory_hot_min_occurrences: 3
 auto_save_memory: true
 # 记忆语义召回（检索拓宽 #1，默认 false=现状纯关键词）：开后记忆召回在关键词外加一路语义向量召回、
 # RRF 融合，治"换词就召不回"。向量只存各 owner 自己 home 本地文件（零依赖、不碰共享向量库、按用户隔离）。
-# 需配嵌入服务 embedding_model（见“嵌入服务”一节，与工具语义检索共用）；没配自动只走关键词，不崩不退化。
+# 需配嵌入服务 embedding_model_profile（见“嵌入服务”一节，与工具语义检索共用）；没配自动只走关键词，不崩不退化。
 memory_semantic_recall: false
 
 # Memory 新架构安全配置（第一版骨架）：
@@ -776,19 +776,14 @@ reasoning_control_auto_probe: true
 model_structured_output: auto
 
 # ===== 嵌入服务（记忆和工具共用）=====
-# 语义检索要先把文字变成向量，这件事由下面配置的“嵌入模型”来做。记忆的语义召回（memory_semantic_recall）
-# 和工具的语义检索（tool_vector_search_enabled）共用这一组设置，两个开关各管各的功能。
+# 语义检索要先把文字变成向量，这件事由下面配置的“嵌入模型档案”来做。记忆的语义召回（memory_semantic_recall）
+# 和工具的语义检索（tool_vector_search_enabled）共用这一个档案引用，两个开关各管各的功能。
 
-# 嵌入模型的名字，例如 text-embedding-3-small；embo 开头的（如 MiniMax 的 embo-01）自动用 MiniMax 自己的格式。
-# 留空就是不用语义检索：记忆和工具都只按关键词找，不发任何嵌入请求。
-# 换成另一个模型后，已经存下的记忆向量不会自动重算，请只在确实需要时再改。
-embedding_model: ""
-# 嵌入服务的接口地址；留空就用聊天模型的 api_base。MiniMax 填 https://api.minimaxi.com/v1。
-embedding_api_base: ""
-# 嵌入服务单独用的 key，嵌入和聊天不是同一家时才需要填；留空就先看 embedding_api_key_env，再沿用聊天的 key。
-embedding_api_key: ""
-# 存放嵌入服务 key 的环境变量名，比把 key 直接写进这个文件更安全；留空就沿用聊天的 key。
-embedding_api_key_env: ""
+# /model 里 embedding 用途的模型档案编号（在 /model 列表查看）。留空就是不用语义检索：记忆和工具都只按关键词找，
+# 不发任何嵌入请求。指定时必须存在、启用且支持 embedding；档案失效明确失败、不回退到聊天模型，语义通道退回关键词。
+# 档案决定把记忆内容发给哪个服务商，属于安全边界：仅用户经 /settings 修改，模型不能改；重启 Gateway 后生效。
+# 换成另一个档案后，已存下的记忆向量不会自动重算，语义召回会退回关键词，可用 /memory vectors rebuild 重新嵌入。
+embedding_model_profile: ""
 
 # Anthropic-compatible 原生多轮工具请求主动缓存：
 # - true：在稳定工具清单、首条任务提示和最新历史块写 cache_control 断点，长任务可增量复用旧前缀。
@@ -974,7 +969,7 @@ tool_catalog_include_examples: false
 
 # 每次注入 prompt 的“工具详细说明”条数已固定为代码常量（agent/core.TOOL_RETRIEVAL_LIMIT，2026-09-28 参数减量）。
 
-# 是否启用真实语义工具检索。向量来自“嵌入服务”一节的 embedding_*（与记忆语义召回共用）；没配 embedding_model 时
+# 是否启用真实语义工具检索。向量来自“嵌入服务”一节的 embedding_model_profile 档案（与记忆语义召回共用）；没配档案时
 # 语义通道明确标为 unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。
 tool_vector_search_enabled: true
 

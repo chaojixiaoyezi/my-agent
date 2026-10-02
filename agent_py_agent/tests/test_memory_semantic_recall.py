@@ -130,15 +130,19 @@ def test_fusion_dedups_record_hit_by_both_channels(tmp_path) -> None:
 
 
 def test_build_memory_embedder_gating(tmp_path) -> None:
+    from types import SimpleNamespace
+
     from agent_py_agent.agent.core import _build_memory_embedder
     from agent_py_agent.agent.settings.config import AgentConfig
 
-    assert _build_memory_embedder(AgentConfig()) is None  # 默认关 → None
-    assert _build_memory_embedder(AgentConfig(memory_semantic_recall=True)) is None  # 开但没配 model → None
-    embedder = _build_memory_embedder(
-        AgentConfig(memory_semantic_recall=True, embedding_model="text-embedding-3-small")
-    )
-    assert embedder is not None  # 开 + 配 model → 建出 embedder
+    def fake_agent(**cfg) -> object:
+        return SimpleNamespace(config=AgentConfig(**cfg))
+
+    assert _build_memory_embedder(fake_agent()) is None  # 默认关 → None
+    assert _build_memory_embedder(fake_agent(memory_semantic_recall=True)) is None  # 开但没配档案 → None
+    status: dict[str, str] = {}
+    assert _build_memory_embedder(fake_agent(memory_semantic_recall=True), diagnostics=status) is None
+    assert status["error_code"] == "MEMORY_EMBEDDING_MODEL_MISSING"  # 开 + 档案为空 → 明确的缺失状态
 
 
 def test_search_scoped_no_embedder_returns_ranked_active_only(tmp_path) -> None:

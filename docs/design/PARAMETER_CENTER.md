@@ -465,8 +465,12 @@
       2026-09-27 核查（只看计数）：本机与测试机在用配置都没设这 10 个键，本次部署无需迁移。
     - 同批清理：`retrieval/embedding.build_embedder(dict)`、`_resolve_api_key` 没有产品调用方，删除；`LocalHashingEmbedder` 只被测试
       当确定性替身，原样搬到 `tests/_hashing_embedder.py`。回归见 `test_embedding_service.py`（此前 `_build_tool_embedder` 没有测试）。
-    - 未落地方向：`/model` 目录已有 `embedding` 用途但没有运行时消费者，长期可改为引用档案（复用服务商凭据，4 个平铺键收成 1 个引用）；
-      向量库记录生成模型、不匹配的向量视为不存在并提供重新嵌入，方案另写。
+    - 已实施（P13+P14，2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，待集成）：`/model` 档案正式成为嵌入运行时消费者——
+      4 个平铺键收成 1 个引用 `embedding_model_profile`（档案编号，必须有 `embedding` 能力；空 = 不建客户端、只走关键词；
+      旧键只告警、不留别名、生产未设无需迁移）。该键是边界项，模型不能改；`/settings show` 展示编号/模型名/失效原因。
+      向量库旁写 `memory_vectors.json.meta.json`（档案编号/服务商/模型名/维度/写入时间），读取时身份不一致或无元数据就把
+      已有向量视为不存在、语义召回退回关键词并给原因码，不静默混用向量空间；管理员经 `memory vectors status` 预览、
+      `memory vectors rebuild --confirmed` 显式确认后清库重嵌（TUI 与 IM 通用）。详见本文件 §6 与 TESTS.md。
 
 - **减量第一批（2026-09-27，分支 `claude/38-delete-dead-config`，已合入 main `8f73a512c`，双机 step13s）**：按分类结论逐项复核后删除 43 个没有产品读取方的配置项
   （只在 `settings/config.py`、随包 YAML、归一化表或字段规格表里出现，或只被孤儿模块/测试/离线验收入口读取）。同批处理：

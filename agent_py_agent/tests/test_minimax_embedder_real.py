@@ -86,19 +86,24 @@ def test_real_medium_batch_aligns() -> None:
     assert len(vecs) == 32 and all(len(v) == 1536 for v in vecs)
 
 
-def test_real_agent_semantic_recall_end_to_end(tmp_path) -> None:
+def test_real_agent_semantic_recall_end_to_end(tmp_path, monkeypatch) -> None:
     """最终生产路径:config→SimpleAgent→memory→MiniMax,通过真实 agent 接口换词召回打通。"""
+    from agent_py_agent.agent import core
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.retrieval.embedding import MiniMaxEmbedder
     from agent_py_agent.agent.settings.config import AgentConfig
 
+    # P13 后嵌入客户端只按档案构建，真机档（RUN_MINIMAX_REAL）下注入真实 MiniMax 客户端，仍走真实生产接线。
+    monkeypatch.setattr(
+        core, "_build_memory_embedder",
+        lambda agent, **kwargs: MiniMaxEmbedder(api_base=_API_BASE, model="embo-01",
+                                                api_key=os.environ["AGENT_API_KEY"]),
+    )
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             memory_semantic_recall=True,
-            embedding_model="embo-01",
-            embedding_api_base=_API_BASE,
             api_key=os.environ["AGENT_API_KEY"],
         ),
         tmp_path,

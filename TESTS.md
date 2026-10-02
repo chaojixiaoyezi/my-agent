@@ -86,6 +86,28 @@
   `size_diff.sh` **新增告警 1 / 消失 3**（新增 1 条 soft 告警是 `test_gateway_conversation_control.py` 的测试函数，
   该文件本轮未改、告警身份由集成分支 7e0fbcec1 集成修正引入，非本批所致，建议 3a 合入后由该提交处理）。
 
+## P13+P14：嵌入档案引用与向量身份（2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，基于 `ed64438fc`）
+
+- **范围**：P13 嵌入连接改引用模型档案（删 4 平铺键、新增边界键 `embedding_model_profile`）；P14 向量库旁写元数据、
+  身份不一致/无元数据退回关键词、管理员重建入口。
+- **测试**：新建 `test_embedding_model_profile.py`（8 条：缺失/无能力/停用/缺凭据等失效 reason、空档案不建客户端、管理员 set/reset、
+  非管理员拒绝、/settings 展示无凭据）、`test_vector_identity.py`（10 条：身份一致写 meta 并召回、不一致/无 meta 退回关键词、
+  写侧拒绝混写、rebuild 重置并落新 meta、CLI status/rebuild 需确认）；改造 `test_embedding_service.py` / `test_minimax_embedder.py` /
+  `test_memory_semantic_recall.py` / `test_r223_audit_regressions.py` / `test_semantic_recall_integration.py` /
+  `test_minimax_embedder_real.py` / `test_parameter_registry.py` / `test_config_warning_no_credential_echo.py`。
+- **验证命令**（工作目录根）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_embedding_model_profile.py agent_py_agent/tests/test_vector_identity.py <相关文件> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1-p13`：**新 3 文件 26 条全过**；迁移相关 13 文件全过，
+    唯一失败 = `test_r223_audit_regressions.py` 的 `test_mcp_write_backpressure_has_deadline` 与 `test_shell_capture_drains_both_unbroken_streams_with_bounded_memory`
+    （Popen 子进程被沙箱拦，基线 ed64438fc worktree 实测同样失败，已移除基线 worktree）。
+  - guards9 10 文件：**167 passed**（含 test_packaging.py）。
+  - `check_import_boundaries.py`：**0 条**；`ruff check agent_py_agent scripts`：**All checks passed**；`check_doc_sync.py`：**PASS**；
+    `check_code_size.py --mode strict`：hard=0 blocked=False（报告已还原）；`git diff --check` 通过；`check_clean_package.py .`：**OK**；
+    `size_diff.sh $PWD`：**新增告警 0**。
+  - **变异 3 个**（scripts 一次性脚本，改后跑对应测试，全被拦截后还原）：①`identity_status` 恒 True → mismatched/missing_meta 测试红；
+    ②注释掉 `_write_meta` → matching 后 meta 不存在红；③`_vectors_rebuild_payload` 去掉 confirmed 检查 → CLI 未确认执行断言红。
+  - frontend 配置目录用 `node frontend/scripts/sync-backend-config.mjs` 重新生成（246 fields）。
+- **未验证**：生产真实嵌入模型请求、运行中的 Gateway、真实 TUI/IM 展示与权限链路（沙箱外由 3a 复核）。
+
 ## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
 
 - **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数

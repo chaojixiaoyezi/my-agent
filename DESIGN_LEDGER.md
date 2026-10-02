@@ -80,6 +80,23 @@
   ruff/doc_sync/code-size strict/diff --check/clean_package 全过；`size_diff.sh` 新增告警 1（`test_gateway_conversation_control.py`
   的测试函数 soft 告警，该文件本轮未改、由集成分支 7e0fbcec1 引入，非本批所致）/消失 3。
 
+## P13+P14：嵌入改引用模型档案、向量库记录生成模型（2026-10-02，ds1，分支 `worker/ds1-p13-embedding-profile`，基于 `ed64438fc`，已实现，待集成）
+
+- **背景**：嵌入连接此前是 4 个平铺键（embedding_model/api_base/api_key/api_key_env），`/model` 目录已有 embedding 能力档案却无运行时消费者；
+  `memory_vectors.json` 不记录生成它的模型，同维度换模型会静默混用两个向量空间。
+- **P13 档案引用**：新键 `embedding_model_profile`（档案编号，必须有 embedding 能力）取代 4 个平铺键；旧键仅告警、不留别名、
+  生产未设无需迁移。`core._embedding_client` 按档案的服务商凭据与端点构建，空档案 = 不建客户端、只走关键词；
+  档案失效（不存在/无能力/停用/缺凭据/目录损坏）按结构化 reason 降级（MEMORY_EMBEDDING_PROFILE_UNAVAILABLE / INIT_FAILED / MODEL_MISSING），
+  不回退聊天模型。该键是边界项（BOUNDARY_KEYS + USER_SETTINGS_BOUNDARY_KEYS），模型与聊天动作不能改；`/settings show` 展示编号/模型名/失效原因。
+- **P14 向量身份**：向量库旁写 `memory_vectors.json.meta.json`（schema my-agent.memory-vectors-meta.v1：档案编号/服务商/模型名/维度/写入时间）；
+  读取侧身份不一致或无元数据 → 已有向量视为不存在、语义召回退回关键词并给原因码（VECTOR_META_MISSING / VECTOR_IDENTITY_MISMATCH），
+  不静默混用；写侧身份不一致拒绝混写（`_ensure_identity_writable`），首次写入（库空）落新 meta。
+- **重建入口**：`memory vectors status`（预览数量/身份/维度）+ `memory vectors rebuild --confirmed`（未确认只预览；确认后清库全量重嵌并落新 meta），
+  TUI 与 IM 同一命令族（cli/memory_admin_parser.py 注册）。
+- **验证**：新测试 26 条全过（test_embedding_model_profile.py 8 案例档案失效 + 空值 + 边界权限 + settings 展示；test_vector_identity.py 10 条身份一致/不一致/
+  无 meta/重建/CLI）；迁移相关 13 个测试文件全过（唯一 2 个失败为沙箱 Popen 环境性失败，基线 ed64438fc 复现同样失败）；guards9 167 passed；
+  import boundaries 0；ruff/doc_sync/code-size strict/diff --check/clean_package 全过；3 个变异全部被测试拦截；size_diff 新增告警 0。
+
 ## P10 常数整改第四批（2026-10-02，ds1，分支 `worker/ds1-p10-batch4`，基于 `35f68d0f8`，已实现，待集成）
 
 - **背景**：P10 白名单按模块分批清理。本批接第一、二批之后，范围是 `agent_py_agent/cli/` 目录（41 个文件）的 100 个待整改常数，
