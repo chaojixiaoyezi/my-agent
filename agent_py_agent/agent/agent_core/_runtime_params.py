@@ -1,5 +1,5 @@
-# LLM: 本模块定义一次run和工具循环的宿主参数；控制状态随replace/续跑传播，能力展示字段不拥有权限或加载状态。
-# 模块用途: 保存模型循环、工具执行、压缩和归档的不可变参数束，避免并发请求共享临时选择。
+# LLM: 本模块定义一次 run 和工具循环参数；replace 保留同轮控制及复核去重，临时建议标记不拥有权限或完成状态。
+# 模块用途: 保存模型循环、执行、压缩和归档参数；每次运行独立保存复核请求标记，核对交付复核重复记录测试。
 
 from __future__ import annotations
 
@@ -53,8 +53,8 @@ class FinalizeContext:
     on_chunk: object = None
 
 
-# LLM: ToolLoopExecuteParams 是工具调用的run级事实源；逻辑turn与当前attempt分别保留，临时Compact视图不替代原审批链。
-# 类用途: 汇总本轮上下文、快照、取消和摘要范围；overflow携带原IR时据此核对逻辑回合，工具账保持完整。
+# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；逻辑 turn/attempt 分别保留；交付复核去重只管临时建议，不控制工具或完成。
+# 类用途: 汇总本轮上下文、快照、取消和摘要范围；交付复核共用一次性请求标记，工具账和审批链保持完整。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
     user_prompt: str
@@ -92,6 +92,8 @@ class ToolLoopExecuteParams:
     tool_rounds: int = 0
     save: bool | None = None
     live_archive_state: dict[str, object] = field(default_factory=dict)
+    # 本轮写入与 run_command 共用的决策请求去重；不持久化、不写归档、不挪用工具执行幂等集合。
+    delivery_review_requested_records: set[str] = field(default_factory=set)
     # 原生 tool_use（native）下与 tool_context 文本链路并存的结构化 IR 历史
     # （AssistantTurn / ToolResult / UserTurn / CompactionSummary）；text 协议下恒为空，
     # 由 message_adapter 翻成厂商原生 messages。详见 agent_core/tool_ir_history.py。

@@ -4040,11 +4040,30 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
     assert agent.conversation_store.guidance.pending("request", "req-1") == []
 
 
+# LLM: 仅启动临时 HTTP 测试夹具，路径/身份和请求与原用例相同；finally 停止夹具，不能作为生产 Gateway 验收。
+# 函数用途: 发一次插件控制请求并读回真实 HTTP 回执，拆平测试函数而不删掉中断、引导或原请求断言。
+def _http_plugin_control_payload(server, endpoint, command) -> dict:
+    server.start()
+    try:
+        body = json.dumps({
+            "kind": "ask", "goal": command, "command": command, "conversation_id": "c-1",
+            "metadata": {"message_id": "command-1", "expected_turn_id": "req-1"},
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/{endpoint}", data=body,
+            headers={"Content-Type": "application/json", "X-User-Id": "u-1", "X-Channel": "feishu"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+    finally:
+        server.stop()
+
+
 @pytest.mark.parametrize("endpoint", ["ask", "control"])
 # C10（2026-10-01）起 IM 回执与 TUI 只共用 ok/message/error_code，细分 reason 只留在 TUI 目录回执里。
 # 本用例关闭按用户分 owner，IM 请求就在本机 local/main 上跑，按 /settings 同一规则算管理员；
 # 所以安装缺失文件走到安装工具的参数拒绝。普通用户被拒由 test_plugins_chat_control.py 覆盖。
-@pytest.mark.parametrize(("command", "kind", "ok", "error_code"), [
+@pytest.mark.parametrize("case", [
     ("/not-a-command anything", "unsupported", False, None),
     ("/plugins", "plugins", True, None),
     ("/plugins help install", "plugins", True, None),
@@ -4055,11 +4074,10 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
     ("/plugins install", "plugins", False, "INVALID_COMMAND_ARGUMENTS"),
     ('/plugins install "未闭合', "plugins", False, "INVALID_COMMAND_ARGUMENTS"),
 ])
-def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
-    tmp_path, monkeypatch, endpoint, command, kind, ok, error_code,
-) -> None:
+def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(tmp_path, monkeypatch, endpoint, case) -> None:
     from agent_py_agent.agent.gateway_parts import http_handlers
 
+    command, kind, ok, error_code = case
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
         tmp_path,
@@ -4087,20 +4105,7 @@ def test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop(
         params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
     )
     with register_interruptible("conversation-request:req-1"), register_interrupt_callback(interrupted.set):
-        server.start()
-        try:
-            body = json.dumps({
-                "kind": "ask", "goal": command, "command": command, "conversation_id": "c-1",
-                "metadata": {"message_id": "command-1", "expected_turn_id": "req-1"},
-            }).encode("utf-8")
-            request = urllib.request.Request(
-                f"http://127.0.0.1:{port}/{endpoint}", data=body,
-                headers={"Content-Type": "application/json", "X-User-Id": "u-1", "X-Channel": "feishu"},
-            )
-            with urllib.request.urlopen(request, timeout=5) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        finally:
-            server.stop()
+        payload = _http_plugin_control_payload(server, endpoint, command)
         assert not is_interrupted()
 
     if endpoint == "ask":

@@ -4,6 +4,11 @@ C7（2026-10-02，sol，`worker/sol-effort-levels`，本地已实施、待集成
 Chat/Messages 沿原 high/max，budget 保留原夹紧，回执说出实际值。组件与三个变异有证据，扩展回归旧失败保留 TESTS。
 真实模型及实际 TUI/IM 未验证；本线没有部署、改生产配置或启停 Gateway，下一步由 3a 集成后核对新档。
 
+J10（2026-10-02，sol2，`worker/sol2-j10-delivery-stale`，本地已实现、待集成）：成功写入使已有验证焦点 stale 时，
+原交付复核消费者会在多个 stale 中可选挑一个；一个 stale 不请 Jev，写入与命令共用本轮逐记录一次，observe 只记账。
+原结果、验证账、Todo、收口和最终回复不改，无完成门或强制续跑。定向 208 项、guards9 168 项及三项变异有本地证据，详见 TESTS。
+真实 Jev/模型采用/交付质量未验证，由 3a 集成后交 be 复测；本线无真实设置、供应商调用或 Gateway 操作。
+
 P12（2026-10-01，sol，`worker/sol-curator-profile`，本地已实现，待集成/部署）：Curator 可引用固定的 agentic 模型档案，
 完整采用其自身连接；空值沿 owner 选择，失效不回退，原未配置失败码/退避与结构化诊断保留。旧 provider/model 键只告警，
 新键仅管理员用户 `/settings` 可写，TUI/IM 共用编号与型号展示。定向 235、守卫 167 项通过，三个变异拦截后恢复回归 99 项通过。

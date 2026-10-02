@@ -1,5 +1,14 @@
 # Verification：开发推进
 
+## 2026-10-02 J10 写入后多个焦点 stale 的交付复核（已实施 2026-10-01，待集成）
+
+- 解决最后验证后又改文件、不再运行命令就漏掉复核提示的问题；只新增原消费者的写入资格，不修改验证生产者或持久 schema。
+- 成功写入的原 `verification_state` 与 canonical/归档配对，`status=stale` 和正整数 `last_verification_id` 匹配同 run/task 较早焦点。
+  总焦点仍为 2—12，单 stale 不请 Jev，多 stale 只选过期焦点；`run_command` 原触发与写入共用本轮逐记录一次。
+- 设置、来源、原参数/权限和绝对期限变化丢弃；子代理和已收口不触发，observe 只记账，不加完成门、收尾触发或强制续跑。
+- 四文件定向 208 项通过，三变异被抓住并原字节恢复；guards9（含 packaging）168 项通过。命令见 [TESTS](../../../TESTS.md)。
+  真实 Jev/模型采用未验证，由 be 在 3a 集成后负责，不能据组件结果宣称交付质量提高。
+
 2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。`verification/project_facts.py` 的常数补齐中文说明并按后缀表改名（如 `_SNAPSHOT_MAX_ENTRIES`→`_SNAPSHOT_MAX_ENTRY_COUNT`、`_MAX_VERIFY_COMMANDS`→`_MAX_VERIFY_COMMAND_COUNT`），数值不变。
 
 ## 2026-09-28 携带记录没读全时一次性编排 fail-closed（分支 `claude/be-wake-fix`，Codex 审查 B）

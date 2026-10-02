@@ -341,7 +341,7 @@ agent_py_agent/
 |   |   |-- tool_loop/model_turn.py     # 绑定模型请求／超限恢复、用量与输入确认，保持原顺序
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
 |   |   |-- tool_context/               # 工具结果上下文：reducer、窗口、microcompact、PTL 单轮重试
-|   |   |   |-- decision_delivery_quality.py # run_command 新验证事件后的可选交付复核焦点提示，只追加宿主事实
+|   |   |   |-- decision_delivery_quality.py # 新验证或成功写入后多个 stale 焦点的可选提示，共用逐记录一次，只追加宿主事实
 |   |   |   |-- decision_action_candidate.py # 插件观察归档后的可选动作候选提示，只选宿主铸的候选、不执行动作
 |   |   |   `-- external_material_order.py # 原已归档页的可选阅读顺序提示，保留正式结果与 refs
 |   |   |-- orchestration/              # 创建、只读状态、消息、取消、授权五个递归直属工具与内部自动启动/恢复引擎；无兄弟 goal 广播，进展事件由宿主写入
@@ -871,6 +871,7 @@ agent_py_agent/
 |   |-- test_external_material_order_integration.py # 原页面生产归档、决策 worker、设置工具与 TUI 接线
 |   |-- test_decision_delivery_quality.py # 交付复核焦点资格、脱敏输入、非选择、来源复核、取消与 text/native 同段提示
 |   |-- test_decision_delivery_quality_integration.py # 真实验证账到 _record_tool_call、原设置默认与 TUI 入口的组合
+|   |-- test_decision_delivery_stale.py # 成功写入 stale、单焦点不请求、共享去重、失效、observe 和归档/worker 离线接线
 |   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、超时只冷却本点而连接故障冷却全部、关闭一起取消
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
@@ -1861,8 +1862,8 @@ docs/
 - `agent_py_agent/agent/memory_store/decision_recall.py`：原召回预算后排序及有界补充查询，消费前复核正式来源，不扩大权限或新增记忆存储。
 - `agent_py_agent/agent/agent_core/tool_context/external_material_order.py`：原工具归档之后仅追加阅读提示，复用决策期限/账本并保留来源权威。
 - `agent_py_agent/tests/test_decision_external_material_order.py`、`test_external_material_order_integration.py`：安全输入、失效、取消、原页面归档链和设置消费的离线证据。
-- `agent_py_agent/agent/agent_core/tool_context/decision_delivery_quality.py`：run_command 新验证事件后按同 run/task 结构化验证焦点可选追加复核提示；外发不含路径/命令/输出，不改结果、归档或验证账。
-- `agent_py_agent/tests/test_decision_delivery_quality.py`、`test_decision_delivery_quality_integration.py`：资格、隐私、非选择、来源复核、取消，以及真实验证账到 text/native 展示接缝的离线证据。
+- `agent_py_agent/agent/agent_core/tool_context/decision_delivery_quality.py`：新验证或成功写入让已有焦点 stale 后，可选追加复核提示；写入只选多个 stale，两种触发共用本轮逐记录一次；外发不含路径/命令/输出，不改结果、归档、验证账或收口。
+- `agent_py_agent/tests/test_decision_delivery_quality.py`、`test_decision_delivery_quality_integration.py`、`test_decision_delivery_stale.py`：资格、隐私、非选择、来源复核、取消、写后触发及去重，以及原验证账到 text/native 展示与假 Jev worker 的离线证据，不代表真实模型采用。
 - `agent_py_agent/agent/agent_core/tool_context/decision_action_candidate.py`：插件只读观察工具的归档带宿主铸造的观察候选时，可选请决策模型选一个下一步先核对的候选并追加软提示；新鲜度只问插件线的 `plugin_observation` 权威，不执行动作、不生成参数。
 - `agent_py_agent/tests/test_decision_action_candidate.py`：资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段提示和设置入口；两项集成用例经真实写入口 `persist_tool_runtime_ledger`（无 `runtime_gate` 的归档）接插件线真实新鲜度权威。
 - `agent_py_agent/agent/capability/decision_candidates.py`、`decision_recommendation.py`：原授权能力候选与单工作片推荐消费者；一次调用、旧建议复核、按需展示，原Registry/Skill快照及搜索执行仍唯一。

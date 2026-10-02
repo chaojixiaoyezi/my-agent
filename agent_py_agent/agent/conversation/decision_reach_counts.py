@@ -1,11 +1,11 @@
 # LLM: 决策点诊断计数属于 conversation 决策服务，是“到达触发点 / 实际调用 / 没调用的宿主原因码”的唯一来源。
 #   每次到达只在进程内按 owner、小时、点位、原因累加，不逐次写盘；有新计数时每个 owner 最多每 _FLUSH_SECONDS 秒持锁
 #   读-加-写合并一次到规范路径 owner_decision_reach_counts_json，保留 _RETAIN_SECONDS；Gateway 正常停止时再把尾巴补写一次。
-#   原因码只来自各点位的结构化判定，不解析自然语言；未登记的码照原样展示，不拒绝。
+#   原因码只来自结构化判定；交付复核的少量 stale/重复记录也沿同一诊断，不解析自然语言或另建账。
 #   开关复用 decision_skip_records_enabled（关闭时不计数也不写盘）。
 #   新增原因码须同步 _LABELS（带数量界限的写进 _limit_labels，数字只读 decision_point_limits）、调用点与
 #   test_decision_reach_counts.py；展示入口是 audit_records 与 decision_read。
-# 模块用途: 让用户看到每个 Jev 点位“最近检查了几次、真正问了几次决策模型、没问的原因是什么”，不再只看到 0 次就以为没接线。
+# 模块用途: 展示各 Jev 点的检查、调用与未调用原因；写入后无需挑选及已请求的记录也讲清原因，同步标签与点位测试。
 """Bounded per-point reach and miss-reason counters for optional decision points."""
 
 from __future__ import annotations
@@ -66,11 +66,13 @@ _LABELS = {
     "bad_material": "要发给决策模型的材料格式不对或太大，为稳妥没有发出去",
     "no_run_context": "当时没有正在进行的任务",
     "record_mismatch": "这条结果和系统存档对不上，为稳妥不做判断",
-    "not_test_command": "这一步不是运行测试的命令",
-    "not_executed": "这条命令没有真正执行完",
-    "not_verification": "这条命令没有留下可用的测试结果记录",
+    "not_test_command": "这一步既不是测试命令，也不是让已有验证过期的文件写入",
+    "not_executed": "这一步没有真正执行完",
+    "not_verification": "这一步没有留下可用的验证记录或过期引用",
     "bad_verification": "这轮的测试结果记录格式不完整，为稳妥不做判断",
     "nothing_to_review": "测试都通过了，之后也没改过文件，没有需要复核的",
+    "few_stale_focuses": "改后未复核的焦点至多一个，不需要决策模型挑选",
+    "already_requested": "这条记录已经请求过复核建议，不再重复请求",
     "not_observation": "这一步没有产生可点选的页面操作（只有浏览器这类插件会产生）",
     "failed_call": "这一步执行失败了",
     "bad_observation": "页面操作清单不完整，为稳妥不做判断",

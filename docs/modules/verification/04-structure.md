@@ -65,7 +65,11 @@ run/task、原权限和配置变化均使建议失效。它只返回覆盖所有
 
 `tool_context.decision_delivery_quality` 是验证事实的只读消费者：`_record_tool_call` 完成原归档后经 `_optional_result_hints`
 读取同 run/task 归档信封里的 `verification_evidence` 与 `verification_state`，不访问验证 SQLite、工具输出或文件。
-每个 (root, kind, scope) 只取最新事件，其后同 root 的 stale 状态记为“其后有修改”；只在 `run_command` 刚产生新事件时评估。
+每个 (root, kind, scope) 只取最新事件，其后同 root 的 stale 状态记为“其后有修改”。J10（2026-10-01 已实施、待集成）
+保留 `run_command` 新事件入口，另消费成功 `write_file/edit_file/apply_patch` 的原状态信封；stale/last_verification_id
+须与 canonical 配对并匹配较早焦点，总焦点仍受 2—12 界限约束，单 stale 不请求，多 stale 只选过期焦点。
+`ToolLoopExecuteParams.delivery_review_requested_records` 保存本轮 call/run/turn/attempt 请求键，两入口共用逐记录一次；
+不写归档或持久账、不改变工具幂等。材料与消费共用 `_review_focuses` 顺序，写入状态/参数/权限只进本地版本复核。
 默认关闭；开启后外发只有脱敏当前请求与焦点别名事实，采用时只把被选焦点的编号/kind/scope/status 追加到 text/native
 共用展示。它不新造验证事件、不把 targeted 说成全量、不改原结果/归档/验证账/收口，不能作为验收或完成判据。
 

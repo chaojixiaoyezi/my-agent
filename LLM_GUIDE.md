@@ -5,6 +5,11 @@ C7（2026-10-02，sol，本地已实施、待集成）：用户智能程度固�
 不要为 Responses 借用 Chat 容量投影或按型号猜支持。三个变异有组件证据，旧 Gateway 控制失败保持在 TESTS；
 真实模型、终端与 IM 客户端未验证，建议由 3a 集成后核 xhigh/ultra 出站值及降档回执。
 
+J10（2026-10-02，sol2，本地实现、待集成）：`delivery_quality` 沿原 `_optional_result_hints` 消费成功写入的 stale/last_verification_id，
+核对同 run/task 较早焦点；只有多个 stale 才选择，保留总焦点 2—12 界限。两入口共用本轮参数集合逐记录一次，
+去重不是工具幂等或完成状态，不持久化；observe 不追加、子代理及已收口不触发、来源/设置/期限变化丢弃。
+定向 208、guards9 168 项与三项变异有离线证据，真实 Jev/采用由 be 集成后复测，不增加完成门或强制续跑，详见 TESTS。
+
 P12（2026-10-01，sol，本地实现、待集成/部署）：Curator 的固定引用只走原模型目录解析与后端工厂，默认空值仍沿 owner 选择。
 `memory_curator_model_profile` 是安全边界，模型 set/reset/revert 不可改；只在可信管理员用户 `/settings` 的同步作用域允许此键，
 actor 标签不是授权。失效保留原未配置失败码、退避及运行账诊断，不回退聊天凭据；旧两覆盖键不保留兼容转换。

@@ -502,11 +502,20 @@ P5-C 规划首片只在当前主代理读取已有多项 Todo 时追加一个 ex
 
 当前状态：已合入 main（`8c6d29c5f`），默认关闭；离线合同、fake 后端组合与变异验证通过，2026-09-25 两个真实 TUI 任务各跑 off/apply，链路成立但没有实际追加提示，不证明交付质量提升（见[真实验收](../tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节）。依据是[只读审计](../tasks/DECISION_MODEL_DELIVERY_QUALITY_AUDIT.md)的最小安全接缝：首片只用验证事件做候选，不用 artifact ref。
 
-要解决的问题：一轮里跑过局部测试、改过文件、又跑全量测试后，主模型可能只盯最新一次结果，漏掉更早的失败或“其后有修改”的旧验证。此点在一次 `run_command` 刚产生新验证事件后，可选地请 Jev 从本轮已有验证焦点里挑一个“交付前最值得先复核”的，宿主把它渲染成一句可忽略的提示。它不是完成评分、验收门或测试命令生成器。
+J10 状态：改后未复核的写入触发已实施（2026-10-01），`worker/sol2-j10-delivery-stale` 于 2026-10-02 本地复核，待集成。
+208 项定向与三个独立变异有离线证据，真实 Jev 与模型采用尚未验证，由 be 集成后复测；不据此宣称交付质量提升。
 
-- **接线**：独立 thread 接入点，AgentConfig/YAML 三字段 `decision_delivery_quality_mode/_timeout_seconds/_profile_id` 默认 off/null/null，原 owner/thread 设置服务、`user_config` 工具和 TUI 菜单（“交付复核焦点”）共用。`_tool_loop_service._record_tool_call` 在原归档、账本写入之后调用 `_optional_result_hints`，依次调用 `external_material_order_hint` 与 `delivery_quality_hint`；两点按工具名互斥，每条记录至多一次决策请求，提示追加到 text/native 共用的同一 `result_rendered`。
-- **触发（全部结构化）**：当前工具是 `run_command`、`handler_executed`，结果带验证事件且与归档信封中的同一事件一致；归档与调用在 tool/id/run/task/scoped_call_id 上一致且以同一对象位于本 run 的 `archive_tool_calls`；主代理（无当前子代理 run）；无重复失败或未知副作用收口标记；`user_prompt` 非空且不超过 1,024 字符。焦点取同 run/task 的 `run_command` 归档（`&&` 串联整体通过时读信封里完整有序的 `verification_evidence_chain`，其末项必须等于 `verification_evidence`，不一致即放弃），每个 (root, kind, scope) 只留最新一条，同一事件编号重复出现即放弃；其后同 root 出现 `verification_state.status=stale` 记为 `edited_after`。只有 2—12 个焦点且至少一个 failed 或 edited_after 才准备材料；非 run_command 与身份不符的记录在扫描归档前即返回。
-- **材料上限**：外发 state 只有经外部材料首片同一 `external_data/default` 脱敏、含 URL 查询串即放弃的当前请求，以及 `focuses: [{candidate: focus_i, project: project_j, kind, scope, status, exit_code, edited_after, order}]`；项目根只以 `project_j` 别名出现，本地路径、原命令、工具输出、改动路径和时间只进本地版本摘要。唯一单选题 `review_focus` 的候选是 `focus_i` 与 `not_needed/no_match/abstain/need_data`，`need_data` 明确“不补读、不跑测试”。
+要解决的问题：主模型可能只盯最新一次验证，漏掉更早失败，或最后一次验证后改文件却不再复核。新验证与成功写入均沿同一展示接缝，可选请 Jev 挑一个已有焦点，宿主渲染可忽略提示；它不是完成评分、验收门、收尾钩子或测试命令生成器。
+
+- **接线**：独立 thread 点，沿用 `delivery_quality` 的 `off/observe/apply`。AgentConfig/YAML 只保留模式（默认 off），期限/档案沿原 owner/thread 决策设置覆盖，不新增配置或别名。
+  `_tool_loop_service._record_tool_call` 完成原归档和账本后，经 `_optional_result_hints` 把同一信封交给原三个消费者；提示只追加到 text/native 共用的 `result_rendered`，不另建通道。
+- **共同资格（全部结构化）**：canonical call/result 与归档在 tool/id/run/task/scoped_call_id 上配对，`handler_executed=True`，归档在本 run 列表里同对象唯一出现；主代理、非空当前请求，无重复失败（含同参失败）或未知副作用收口。其他工具、身份不符与子代理在扫描前放弃，不读输出或模型话术。
+  焦点仍取同 run/task 的 `run_command` 归档，每个 (root, kind, scope) 只留最新事件；`&&` 整体通过时取一致的完整 `verification_evidence_chain`，重复编号或畸形来源放弃；后续同 root 的 stale 状态标 `edited_after`。本轮总焦点沿原 2—12 门槛。
+- **两个触发入口**：`run_command` 须带与归档一致的新 `verification_evidence`，且至少一个焦点 failed 或 edited_after，原候选行为保持。
+  成功 `write_file/edit_file/apply_patch` 须带与归档一致的非空 `verification_state`，其中 `status=stale`、正整数 `last_verification_id` 必须匹配较早同 root 焦点；至多一个 stale 不打开 Jev 阶段，多个 stale 才选且候选不含未修改焦点。
+- **逐记录一次**：两入口在原 `decide` 前共用本轮参数集合，以 call/run/turn/attempt 身份领取一次请求标记；非选择、失败、超时也不重复请求。
+  未到发送边界（例如关闭或隐私拒绝）不消耗标记；无新持久账、无工具执行幂等变更。
+- **材料上限**：外发只有脱敏当前请求（长请求按原 `decision_request_max_chars` 首尾节选并标完整性，0 不截取）和 `focuses: [{candidate: focus_i, project: project_j, kind, scope, status, exit_code, edited_after, order}]`，含 URL 查询串放弃。路径、原命令、工具参数、写入状态/改动路径和时间只进本地版本摘要，工具正文不读取。单选题仍为 `review_focus`，非选择项仍是 `not_needed/no_match/abstain/need_data`，不补读、不跑测试。
 - **采用与回退**：只接受一个无逐题错误的 choice 回答且值为本次宿主生成的 `focus_i`；渲染只含宿主事实，例如“交付前可先复核本轮验证事件 #11（test/targeted，failed，其后有修改）；范围与结果以原事实为准，targeted 不代表全量”，上限 512 字符。选中本次调用自己的事件不追加。`off` 不准备材料、不发请求；`observe` 照常请求并记原账但不追加；非选择、坏答案、超时、错误、冷却、配置或来源变化（采用前在 `decision_outcome_is_current` 之后重比参数与材料版本及同一绝对期限）都只返回空串。ToolResult、归档、验证账、Goal、Todo 与收口从不修改；用户取消与中断照常上抛。
 
 ### P5-C 动作候选 `action_candidate`

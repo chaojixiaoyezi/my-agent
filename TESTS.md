@@ -206,6 +206,63 @@
   - frontend 配置目录用 `node frontend/scripts/sync-backend-config.mjs` 重新生成（246 fields）。
 - **未验证**：生产真实嵌入模型请求、运行中的 Gateway、真实 TUI/IM 展示与权限链路（沙箱外由 3a 复核）。
 
+## J10：成功写入后多个 stale 焦点的交付复核（2026-10-02，sol2，待集成/真实复测）
+
+- **来源与做法**：落实 DESIGN_LEDGER 的“改后未复核”（指定实施标记 2026-10-01）。成功写入只消费原
+  `verification_state.status=stale/last_verification_id`，核对 canonical/归档与同 run/task 较早焦点；总焦点仍 2—12，
+  单 stale 不请 Jev，多个只选 stale。写入与 `run_command` 共用本轮逐记录一次，observe 只记账；不读正文、不加完成门或强制续跑。
+- **新增测试**：`test_decision_delivery_stale.py` 47 项覆盖三种写工具、单 stale、候选排除未修改项目、共享去重、请求失败不重试、
+  畸形/错配事实、子代理/收口、设置/来源/参数/权限/绝对期限失效、取消，以及同一 text/native/IR 展示。真实验证 SQLite、
+  归档、设置/档案、worker/响应解析/调用账保持，供应商 decide 为假后端；夹具命令退出回执不声称实际跑了项目 pytest。
+  `test_decision_reach_counts.py` 补原诊断账里的“无需挑选/已请求”标签，不建旁路。
+- **红灯与还原**：修正夹具构造错误后，原实现 44 项中 21 failed、23 passed，0 errors/skipped。
+  实现后的四文件定向 **208 passed**（142 原合同 + 5 原组合 + 47 J10 + 14 诊断），三个变异原字节还原后再次 **208 passed**；无失败、错误或跳过。
+- **三个独立变异**：每个先还原再进入下一个，不提交变异，输出保留在 `tmp/j10-mutation-*.xml`。
+  1. 把“多个 stale”放宽为“至少一个”：`test_only_one_stale_focus_does_not_open_a_decision_stage` **1 failed**，抓住多余阶段请求。
+  2. 删除 `_claim_review_request` 的集合写入：`test_same_record_never_requests_twice` **4 failed**，命令与三种写入的第二次请求均被抓住。
+  3. 跳过 `_current_sources` 比对：`test_write_advice_is_dropped_when_frozen_facts_change[changed_paths]` **1 failed**，抓住过期提示误采用。
+  产品文件变异前后 SHA-256 均为 `627572af2a6a0e46380b4c34729e86a959364186749db36c74cc44d575455210`。
+- **尺寸收尾**：首次线上差集发现基线 `7e0fbcec1` 自带的 C10 测试函数 soft 告警（不是 J10 新增）。
+  `test_gateway_conversation_control.py` 仅抽出 HTTP 夹具、四参数测试保留全部原断言；该用例 **18 passed**，不修改 C10 产品逻辑。
+  首次 Ruff 的新测试 import 格式已按建议修正；首次 clean-package 的新测试未跟踪项已正常加入暂存，未删除测试。
+- **门禁结果**：guards9 十文件（含 `test_packaging.py`）**168 passed，0 failures/errors/skipped**；import boundaries **findings=0**；
+  Ruff **All checks passed**；strict code-size **strict_scope_total=2239 hard=0 high-risk=1531 soft=708 test_advisory=1242 blocked=False**；
+  `CODE_SIZE_REPORT.md` 已还原、不提交；clean-package **OK**；doc-sync **DOC_SYNC_PASS**；工作区/暂存区 diff-check **通过**。
+  线上差集最终输出如下（消失项不能都归因于 J10，本树已含集成改动）：
+
+  ```text
+  新增告警: 0
+  消失告警: 4
+  ```
+
+复现命令（在工作树根；不并行跑 pytest/code-size；以下是本轮实际文件/节点范围，不跑全仓）：
+
+```bash
+PY=$HOME/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+export PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1
+$PY -m pytest agent_py_agent/tests/test_decision_delivery_quality.py \
+  agent_py_agent/tests/test_decision_delivery_quality_integration.py \
+  agent_py_agent/tests/test_decision_delivery_stale.py \
+  agent_py_agent/tests/test_decision_reach_counts.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2
+$PY -m pytest agent_py_agent/tests/test_gateway_conversation_control.py::test_http_plugin_help_and_errors_do_not_call_model_guidance_or_stop \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2
+$PY -m pytest $(cat "$HOME/.my-agent/releases/claude-tools/3a-scripts/guards9.txt") \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2
+$PY scripts/check_import_boundaries.py
+$PY -m ruff check agent_py_agent scripts
+$PY scripts/check_doc_sync.py
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+$PY scripts/check_clean_package.py .
+bash "$HOME/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh" "$PWD"
+```
+
+**未验证与下一步**：未调用真实 Jev、未修改真实配置、未操作生产 Gateway、未跑全仓；线上 CI 没有作为验收来源。
+本轮无插件宿主/嵌套 Seatbelt 失败或跳过，不把其他轮的环境限制混入 J10 数字。HTTP 仅是隔离测试夹具，非生产渠道验收。
+3a 只读审阅并集成后，由 be 复测真实写后提示、单 stale 零调用、observe 不追加与自然收口不变；不从组件绿灯推断模型采用或交付质量。
+
 ## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
 
 - **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数

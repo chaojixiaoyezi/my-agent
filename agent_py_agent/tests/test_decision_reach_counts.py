@@ -123,6 +123,16 @@ def test_labels_are_plain_language_and_unknown_codes_pass_through():
     assert all(label and not label.isascii() for label in counts._LABELS.values())
 
 
+@pytest.mark.parametrize("reason,word", [("few_stale_focuses", "不需要"), ("already_requested", "不再重复")])
+def test_write_review_skip_reasons_are_explained_without_another_ledger(tmp_path, reason, word):
+    agent = _agent(tmp_path)
+    note_decision_reach(agent, "delivery_quality", reason)
+    row = decision_reach_summary(agent.home_paths, since=0)["points"]["delivery_quality"]
+    assert row["reached"] == 1 and row["called"] == 0
+    assert row["not_called"] == [{"reason": reason, "label": miss_reason_label(reason), "count": 1}]
+    assert word in row["not_called"][0]["label"]
+
+
 def test_diagnostics_mark_uncovered_points_and_enabled_state(tmp_path):
     agent = _agent(tmp_path)
     for reason in ("focus_count", "focus_count", "nothing_to_review", CALLED):

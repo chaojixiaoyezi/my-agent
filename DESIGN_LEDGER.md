@@ -250,6 +250,17 @@
   `runtime_source` 为空；静止来源走 `settle_taken_over_run` 时记的是 `subagent_takeover`／`taken_over`。现在两边同一口径。
 - **证据**：`~/.my-agent/decision-evidence/c12-observations-20261001/c12d/`（仓库外）。
 
+## J10 交付复核焦点覆盖改后未复核（2026-10-01 已实施；2026-10-02 本地复核，待集成/真实验收）
+
+- **解决问题**：最后一次验证后又改文件，若不再运行命令，旧触发点不会提示多个过期焦点的复核顺序。
+- **实现**：沿 `_optional_result_hints` 的原信封接缝消费成功写入的 `verification_state.status=stale` 和正整数
+  `last_verification_id`，核对同 run/task 较早焦点；仍要求本轮 2—12 个焦点，至少两个 stale 才请 Jev 选择，候选只含 stale。
+  `ToolLoopExecuteParams` 的本轮集合与 `run_command` 共用每条记录一次，失败/超时/非选择不重试，不新增持久账。
+- **边界不变**：子代理、重复失败和未知副作用收口不触发；设置、来源、权限/参数及绝对期限变化丢弃建议。
+  默认 off，observe 只记原账，apply 只追加同一 text/native 展示；不读正文、不加完成门或收尾触发、不强制续跑。
+- **本地证据**：四文件定向 208 项通过；三个独立变异分别产生 1/4/1 个预期失败，原字节恢复后 208 项再通过。
+  真实 Jev/模型采用与交付质量未验证，由 be 在 3a 集成后复测；命令及门禁结果见 [TESTS](TESTS.md)。
+
 ## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已实现，待集成）
 
 - **背景**：P10 定案“常数留在读取点、目录只是投影”后，待整改白名单按模块分批清理。本批接第一批之后，
@@ -2696,16 +2707,17 @@ Compact补充片已获协作方归属确认，本地537项及独立审阅通过�
   - **边界**：observe 只记账不改输出；任何失败、冷却或变化都保留原输出，取消与中断上抛。从不确认、拒绝或写提案/Skill，没有模型可调用入口。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-自学习-s2待确认-skill-提案的审核顺序-skill_proposal_review)。
 - **决策实验授权入口、经验输入上界与发送硬门**（2026-09-24，已合入 main `dfa8e498b`；2026-09-25 两次真实授权发送的结算额都等于供应商计费，比例 0.43；结算快照尚未持久化，列入 E2）：用户于 2026-09-24 批准接受**经验（非供应商保证）**的实验输入上界，并要求明确标注为经验值。三部分：① `/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>` 与 `/audit … prepare` 同一任务命令机制，参数冻结进排队请求、模型只见任务正文；主轮发布 run/attempt 后、首个模型调用前在同一精确回合锁内写 `experiment_grant` 回执并调用 E1 授权原语，重放不再授权、Compact 再入与重启分别以身份/账本代次失效；信封升级 v2，必带 `input_bound_policy="empirical:jev_wire_bytes.v1"`，缺者永不发送。② 经验上界 `C = ceil(B/2) + 256×Q + 1024`（B 为最终 wire 字节），只在 skill_tool、Q≤64、state≤4096 字节、C≤57,600 内使用，越界不预留不发送；原账只接受带 `kind=empirical` 标签的上界对象，估算/上界/实际分开记。③ 传输层在最终字节生成后、任何 DNS/连接/遥测前调用单次发送许可，复核绑定、撤销/期限、设置/身份/账本代次/口径与连接代次后在原账锁内消费；拒绝不重试、不触发连接退避。结算：成功按实际扣减，发送前拒绝与未知结果都不退款并关闭预算，无许可的 HTTP 记 `gate_bypassed`。`experiment_enabled` 默认仍关闭，首次真实授权发送尚未进行。合同见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-e1-有界自测授权入口经验输入上界与发送硬门2026-09-24本地实施待审)，交接见 [E1 交接](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第二片experiment-授权入口经验输入上界与发送硬门2026-09-24)。
 - **决策实验对照记录、证据评估与授权内自动晋升（P5-E2/F1）**（2026-09-25，已合入 main `84d873c9b`；拒绝与正向晋升两条路径都已真实验收，见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 17 项两节）：① E2：实验调用经原账结算后，`settle_input_budget` 返回的结算视图（快照＋结算码/调用编号/原估算/声明上界）经实验调用对象带回，挂到 `DecisionOutcome.experiment`；只观察路径据此生成 `decision_experiment_record.v1`（身份 refs、授权/设置/策略/连接版本、基线=点关闭时实际展示的工具名集合、候选=Jev 回答按 apply 同一规则投影的短名单/延迟名单、结算视图），经能力观察出口拆出写进同一请求记录的 `experiment_records`（按原调用编号去重、最多 8 条、盖执行代次，回合关闭/停止时不写）；回合正常收尾才按结构化工具账补写实际调用工具名，非 completed 或工具账不完整记 known=false。没有 token 表、旁路恢复文件或第二本账，普通请求零 I/O。② F1a：只读评估器只读这些条目（按 owner/thread 核对）；可比较样本≥3、窗口（最近 8）内全部 charged、每个可比较样本短名单召回=1.0（快照外工具不计分母）且延迟数>0 时才提出 `points.skill_tool.mode off→apply`，否则 keep_observing 与原因码；阈值是审计规则常量，不设配置。跨请求证据只沿授权回执 v2 的 `previous_request_id` 回读原请求记录（至多 16 条），`user_config decision_read` 在已有授权信封时附只读 `experiment_evaluation`。③ F1b：`/experiment apply skill_tool …` 的信封 operations 为 observe+apply，实验调用仍只观察；回合收尾在 apply 授权内于精确回合锁复读设置，核对授权仍为本请求、active、未到期、revision 与授权时一致、点仍 off，再经原设置 patch 的完整 CAS 写 thread 覆盖；冲突或任何用户后改都跳过不覆盖。回执权威选本请求记录的 `experiment_records.promotion`（与证据同处；信封是纯授权且会被下一次授权整份替换）：先写 promoting 再改设置，已有回执即不再试，崩溃遗留 promoting 表示不确定、不重试不恢复。到期/撤销不回滚已晋升设置，reset 恢复继承；Jev 回答与模型工具都没有授权或晋升路径。合同见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-e2f1-对照记录证据评估与授权内自动晋升2026-09-25本地实施待审)，交接见 [E1 交接第三片](docs/tasks/DECISION_MODEL_EXPERIMENT_E1_HANDOFF.md#第三片e2-对照记录f1-证据评估与授权内自动晋升2026-09-25)。
-- **交付复核焦点真实样本暴露的四个缺口**（2026-09-25；第 2—4 项已在分支 `claude/verification-exit-scope-chains` 实施、待审，第 1 项只写了设计，见下一条；样本见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节）：
-  1. **触发时机**：本点只在新的验证事件上触发，而"最后一次验证之后又改文件、未复核就交付"才是最该提示的场景。方向：在写入工具使已有验证变为 stale、或回合即将收尾时，按结构化的验证状态提示一次；仍只作软提示，不增加强制续跑或完成门。
+- **交付复核焦点真实样本暴露的四个缺口**（2026-09-25；第 2—4 项当时在分支 `claude/verification-exit-scope-chains` 实施、待审；第 1 项的写入触发已由 J10 于 2026-10-01 实施、待集成，见下一条；样本见[真实验收](docs/tasks/DECISION_MODEL_REAL_VALIDATION.md)第 15 节）：
+  1. **触发时机**：原来只在新的验证事件上触发，漏掉"最后一次验证之后又改文件、未复核就交付"。J10 已在成功写入让已有焦点变 stale 时评估一次，仅在多个 stale 焦点间软选复核顺序；不实现回合收尾触发，不增加强制续跑或完成门。
   2. **`&&` 串联的验证命令**：返回码 0 其实证明每条都通过，可以逐条记为 passed；非 0 无法归属，仍不记。
   3. **返回码 126/127**：命令没有执行（找不到命令或不可执行），应记为"未运行"而不是测试失败。
   4. **范围判断**：`pytest tests/` 被记成 targeted。已按主线 owner 的决定改为按参数形状判定：目录或不给路径为 full，文件、`::node` 或筛选开关为 targeted。
-- **设计（未实施）：交付复核焦点在"改后未复核"时触发**（2026-09-25，主线 owner 要求先写设计、下一片再落）：
-  - **问题**：现在只在新的验证事件上触发，而"最后一次验证之后又改文件、然后直接交付"才是最该提示的场景。
+- **已实施（2026-10-01）：交付复核焦点在"改后未复核"时触发**（设计于 2026-09-25；J10 分支 `worker/sol2-j10-delivery-stale`，2026-10-02 本地复核，待集成与 be 真实 Jev 复测）：
+  - **问题**：旧版只在新的验证事件上触发，漏掉"最后一次验证之后又改文件、然后直接交付"；本片补成功写入的原展示钩子。
   - **触发事实来源**：写入工具的结构化 `verification_state`，即其中带 `status=stale` 与 `last_verification_id` 的行。它由 `record_tool_verification` 在成功写入后产生，与现有焦点来自同一份归档信封；不读正文，也不看模型"我已经测过"之类的说法。触发条件：当前写入记录让某个已有焦点变成 stale，且本轮焦点满足现有 2—12 个的门槛。只有一个 stale 焦点时，不需要 Jev 挑选。
   - **与完成门的关系**：宿主没有、也不增加机器完成门。提示仍只追加在当前工具结果之后，可忽略；不强制续跑，不改最终回复，不写 Todo 或收口状态。模型可见的运行事实本来就带 stale 状态，本增强只负责在多个 stale 焦点里挑先复核哪个。
   - **边界**：每条写入记录至多一次请求，并与 run_command 触发点共用"每条记录一次"的约束；子代理、重复失败或未知副作用收口时不触发；设置、来源或期限变化时丢弃建议，与首片一致。
+  - **落实**：当前 canonical `handler_details` 与归档信封的状态必须配对，stale 引用须匹配较早的同 root 焦点；只有多个 stale 才请求且只提供 stale 候选。去重只存本轮参数集合，不参与工具幂等、归档或恢复状态；验证与变异见本台账顶部及 TESTS。
 - **验证账只认一次返回码能证明的单条命令，并放行开头的 cd 前缀**（2026-09-25，已实施：分支 `claude/verification-command-shapes`，已合入 main `e7178a22c`）：真实 TUI 里模型最常写 `cd <项目> && python3 -m pytest …`，原分类把它当链式命令整体拒绝，验证账漏记真实测试，交付复核焦点与交付前核对都看不到；单个管道又没被拆段，`pytest | head` 会按 `head` 的返回码记成 passed。现改为：未加引号的 `|`、`|&`、`&` 一律不算证据；只放行开头一个 `cd <可进入的现有目录> &&` 并以其为 cwd；其余链式写法仍拒绝。详见 [verification 进度](docs/modules/verification/02-progress.md)。
 - **TUI 决策菜单的接入点清单改为取 schema 登记**（2026-09-25，已实施：分支 `claude/decision-tui-points`，已合入 main `171caa21c`）：菜单原先自带一份接入点清单，漏了 `pre_recall`，界面无法设召回前补充查询，且已有该点覆盖时"恢复继承"列表会抛 KeyError。现在清单直接取 `decision_settings_schema.POINTS`（唯一权威），本地只保留中文显示名，缺显示名时显示原键。今后新增接入点只需在 schema 登记，菜单自动出现；各分支若新增接入点，只需补显示名。
 - **交付复核焦点 `delivery_quality`（第 15 项 P5-C 质量提示首片）**（2026-09-24，已实施：本地分支 `claude/decision-delivery-quality`，已合入 main，P1-P5 goal 已随 `313f5dd23` 关闭）：`run_command` 刚产生新验证事件、本轮同 run/task 有 2—12 个验证焦点（每个 project/kind/scope 只留最新一条）且至少一个 failed 或其后有修改时，可选地请 Jev 选一个交付前最值得先复核的焦点，宿主只把该焦点的编号/kind/scope/status/其后修改渲染成一句追加提示（≤512 字符），text/native 共用。外发材料只有脱敏当前请求和焦点别名事实，不含路径、命令或输出；默认 off，observe 只记账不追加，任何非成功、选中本次事件或来源/配置变化都保留原展示；ToolResult、归档、验证账、Goal、Todo 与收口不变，取消照常上抛。接线沿外部材料首片：`_record_tool_call` 的原展示接缝改为 `_optional_result_hints` 依次调用两个按工具名互斥的点。未做真实 Jev/TUI 验收。详见[接入设计](docs/design/DECISION_MODEL_INTEGRATION.md#p5-c-质量提示首片交付复核焦点-delivery_quality)。

@@ -1,7 +1,7 @@
 
 
-# LLM: execute_tool_loop 是主子共用的唯一循环入口；逐 run 参数和局部计数不共享，native IR 与 owner/thread Compact 权威不变。
-# 模块用途: 装配模型采样、工具执行、原Compact和窄收口操作；保持输入账本、取消顺序、原请求归属及持久提交边界。
+# LLM: execute_tool_loop 是主子共用的唯一入口；交付复核只消费原验证/写入信封并改共享展示，native IR、Compact 与收口权威不变。
+# 模块用途: 装配采样、工具和窄收口；可选建议不参与控制，保持输入账、取消和持久提交边界，核对共享展示测试。
 from __future__ import annotations
 
 import json
@@ -2410,9 +2410,9 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         record.params.tool_context.append(_task_local_progress_context(progress))
 
 
-# LLM: 三个可选决策点按结构化触发事实互斥（web_fetch 归档 / run_command 验证事件 / 插件观察信封），每条记录至多一次
-# 决策请求；空串即保留原展示。只追加 text/native 共用的展示后缀，不改结果、归档、账本或 refs；用户取消照常上抛。
-# 函数用途: 返回追加在工具结果展示之后的可选建议（带前导换行），没有建议时返回空串。
+# LLM: 三点沿原归档信封消费结构化事实（web_fetch / run_command 验证或成功写入 stale / 插件观察）；
+# 交付复核写入与命令共用每条记录一次约束。只追加 text/native 共用后缀，不改结果、归档、refs 或收口，取消上抛。
+# 函数用途: 在唯一展示钩子交付原信封及可忽略建议；不加新通道，改动须核对两种协议展示与原事实保持测试。
 def _optional_result_hints(agent, record: ToolCallRecordParams, archive_record: dict[str, object]) -> str:
     from .tool_context.decision_action_candidate import action_candidate_hint
     from .tool_context.decision_delivery_quality import delivery_quality_hint
