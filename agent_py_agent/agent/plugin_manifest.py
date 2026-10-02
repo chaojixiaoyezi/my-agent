@@ -36,11 +36,13 @@ PLUGIN_PACKAGE_SCHEMA_V5 = "plugin_package.v5"
 PLUGIN_PACKAGE_SCHEMA_V6 = "plugin_package.v6"
 PLUGIN_HOST_API_PERMISSIONS = ("read",)
 # 观察候选数量的宿主硬上限；manifest 声明的 max_candidates 不能超过它
-MAX_OBSERVATION_CANDIDATES = 64
+MAX_OBSERVATION_CANDIDATE_COUNT = 64
 _TARGET_KIND = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _OBSERVATION_PARAM = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
-MAX_PLUGIN_SKILLS = 8
+# 单个插件最多可挂载的 skill 数；防止插件注入海量 skill 占用命名空间。
+MAX_PLUGIN_SKILL_COUNT = 8
+# 插件设置项总大小的最大字节数；超出视为清单超限，防止巨型设置拖慢解析。
 PLUGIN_SETTINGS_BYTES = 64 * 1024
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _WHEEL_PATH = re.compile(r"wheels/[A-Za-z0-9_][A-Za-z0-9_.+-]*\.whl\Z")
@@ -80,13 +82,13 @@ class PluginWheel:
 @dataclass(frozen=True)
 class PluginToolObservation:
     target_kind: str
-    max_candidates: int = MAX_OBSERVATION_CANDIDATES
+    max_candidates: int = MAX_OBSERVATION_CANDIDATE_COUNT
 
     # 函数用途: 拒绝形状不合规的目标类型与越界的候选上限。
     def __post_init__(self) -> None:
         if not isinstance(self.target_kind, str) or not _TARGET_KIND.fullmatch(self.target_kind):
             raise ValueError("观察目标类型无效")
-        if type(self.max_candidates) is not int or not 1 <= self.max_candidates <= MAX_OBSERVATION_CANDIDATES:
+        if type(self.max_candidates) is not int or not 1 <= self.max_candidates <= MAX_OBSERVATION_CANDIDATE_COUNT:
             raise ValueError("观察候选上限无效")
 
 
@@ -197,7 +199,7 @@ class PluginManifest:
             if not isinstance(items, tuple) or any(not isinstance(item, kind) for item in items):
                 raise ValueError("包声明必须是不可变集合")
         validate_panels(self.panels)
-        if (not isinstance(self.skills, tuple) or len(self.skills) > MAX_PLUGIN_SKILLS
+        if (not isinstance(self.skills, tuple) or len(self.skills) > MAX_PLUGIN_SKILL_COUNT
                 or len(set(self.skills)) != len(self.skills)
                 or any(not isinstance(name, str) or not _SKILL_NAME.fullmatch(name) for name in self.skills)):
             raise ValueError("随包 Skill 名单无效")
@@ -472,7 +474,7 @@ def _observation_from_payload(value: object) -> PluginToolObservation | None:
         return None
     if not isinstance(value, dict) or not {"target_kind"} <= set(value) or set(value) - {"target_kind", "max_candidates"}:
         raise ValueError("观察声明字段无效")
-    return PluginToolObservation(value["target_kind"], value.get("max_candidates", MAX_OBSERVATION_CANDIDATES))
+    return PluginToolObservation(value["target_kind"], value.get("max_candidates", MAX_OBSERVATION_CANDIDATE_COUNT))
 
 
 # 函数用途: 从 JSON 对象恢复观察引用声明；两个字段都必须出现。

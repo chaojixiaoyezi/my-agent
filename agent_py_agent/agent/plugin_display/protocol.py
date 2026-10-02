@@ -11,11 +11,16 @@ DISPLAY_VERSION = "1"
 DISPLAY_RENDER_METHOD = "my-agent/display.render"
 PANEL_KINDS = ("text", "table", "status")
 PANEL_TOPICS = ("activity", "run_state", "context", "sessions")
-MAX_PANELS_PER_PLUGIN = 2
-MAX_TEXT_LINES = 20
+# 单个插件最多可声明的面板数；防止插件声明海量面板拖垮展示。
+MAX_PANELS_PER_PLUGIN_COUNT = 2
+# 展示文本最多行数；超出截断，防止插件刷屏。
+MAX_TEXT_LINE_COUNT = 20
+# 展示面板单行最大字符数；超长截断，保持面板布局稳定。
 MAX_LINE_CHARS = 200
-MAX_TABLE_ROWS = 20
-MAX_TABLE_COLUMNS = 6
+# 展示表格最多行数；超出截断，保持面板高度可控。
+MAX_TABLE_ROW_COUNT = 20
+# 展示表格最多列数；超出列不展示，防止面板被列撑爆。
+MAX_TABLE_COLUMN_COUNT = 6
 MAX_STATUS_FIELDS = 8
 _PANEL_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
@@ -64,7 +69,7 @@ class PanelDeclaration:
 def validate_panels(panels: tuple[PanelDeclaration, ...]) -> None:
     if not isinstance(panels, tuple) or any(not isinstance(item, PanelDeclaration) for item in panels):
         raise ValueError("面板声明必须是不可变集合")
-    if len(panels) > MAX_PANELS_PER_PLUGIN or len({panel.id for panel in panels}) != len(panels):
+    if len(panels) > MAX_PANELS_PER_PLUGIN_COUNT or len({panel.id for panel in panels}) != len(panels):
         raise ValueError("面板数量超限或编号重复")
 
 
@@ -79,9 +84,9 @@ def normalize_display(kind: str, value: object) -> dict:
         lines = value.get("lines")
         if not isinstance(lines, list):
             raise ValueError("文本面板缺少 lines")
-        truncated = len(lines) > MAX_TEXT_LINES
+        truncated = len(lines) > MAX_TEXT_LINE_COUNT
         clean = []
-        for line in lines[:MAX_TEXT_LINES]:
+        for line in lines[:MAX_TEXT_LINE_COUNT]:
             text, cut = _cell(line)
             truncated = truncated or cut
             clean.append(text)
@@ -90,15 +95,15 @@ def normalize_display(kind: str, value: object) -> dict:
         columns, rows = value.get("columns"), value.get("rows")
         if not isinstance(columns, list) or not isinstance(rows, list) or not columns:
             raise ValueError("表格面板缺少 columns 或 rows")
-        truncated = len(columns) > MAX_TABLE_COLUMNS or len(rows) > MAX_TABLE_ROWS
-        width = min(len(columns), MAX_TABLE_COLUMNS)
+        truncated = len(columns) > MAX_TABLE_COLUMN_COUNT or len(rows) > MAX_TABLE_ROW_COUNT
+        width = min(len(columns), MAX_TABLE_COLUMN_COUNT)
         header = []
         for cell in columns[:width]:
             text, cut = _cell(cell)
             truncated = truncated or cut
             header.append(text)
         body = []
-        for row in rows[:MAX_TABLE_ROWS]:
+        for row in rows[:MAX_TABLE_ROW_COUNT]:
             if not isinstance(row, list):
                 raise ValueError("表格行必须是数组")
             cells = []

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 _SCHEMA_VERSION = 1
+# 证据文件最多接受的天数；超过视为过期证据，恢复时不再采用。
 _MAX_EVIDENCE_AGE_DAYS = 30
 _MAX_EVENTS_PER_TASK_ROOT = 100
 _MAX_TOTAL_UNREFERENCED_EVENTS = 10_000

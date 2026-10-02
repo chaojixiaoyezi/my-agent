@@ -20,15 +20,16 @@ from typing import Any
 
 from .delivery import RuntimeHealthProvider
 
-_DEFAULT_MAX_AGENTS = 64
+# 单 owner 默认最多并行的代理数；防止一个 owner 占满全部线程资源。
+_DEFAULT_MAX_AGENT_COUNT = 64
 
 
 def _resolved_max_agents(value: Any) -> int:
     try:
         resolved = int(value)
     except (TypeError, ValueError):
-        resolved = _DEFAULT_MAX_AGENTS
-    return max(1, resolved if resolved > 0 else _DEFAULT_MAX_AGENTS)
+        resolved = _DEFAULT_MAX_AGENT_COUNT
+    return max(1, resolved if resolved > 0 else _DEFAULT_MAX_AGENT_COUNT)
 
 
 def _config_with_owner(base_config: Any, owner: Any) -> Any:
@@ -119,7 +120,7 @@ class OwnerScopedAgentPool:
         self._workspace_roots = workspace_roots
         # 显式入参 > config owner_agent_pool_max_agents > 兜底常量(千并发调参入口)。
         if max_agents is None:
-            max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENTS)
+            max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENT_COUNT)
         self._max_agents = _resolved_max_agents(max_agents)
         # Runtime health is process-scoped and read-only.  Keep the builder's four positional
         # arguments stable for test doubles while injecting that one shared provider explicitly.
@@ -345,7 +346,7 @@ class ActiveOwnerRegistry:
 
     # LLM: 登记本只保存身份与最近写入时刻；它是唤醒发现的缓存，不持有 Agent 或任务状态。
     # 函数用途: 创建有界的最近活跃身份登记本。
-    def __init__(self, *, max_owners: int = _DEFAULT_MAX_AGENTS) -> None:
+    def __init__(self, *, max_owners: int = _DEFAULT_MAX_AGENT_COUNT) -> None:
         self._max_owners = _resolved_max_agents(max_owners)
         self._hard: OrderedDict[tuple, Any] = OrderedDict()
         self._soft: OrderedDict[tuple, Any] = OrderedDict()
@@ -430,7 +431,7 @@ def shared_active_owner_registry(agent: Any) -> ActiveOwnerRegistry:
         existing = getattr(agent, "_active_owner_registry", None)
         if existing is None:
             config = getattr(agent, "config", None)
-            max_owners = getattr(config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENTS)
+            max_owners = getattr(config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENT_COUNT)
             existing = ActiveOwnerRegistry(max_owners=max_owners)
             agent._active_owner_registry = existing
         return existing

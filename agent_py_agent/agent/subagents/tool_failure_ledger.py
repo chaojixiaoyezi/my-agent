@@ -33,7 +33,7 @@ REPEATED_TOOL_AUTHORIZATION_FAILURE = "REPEATED_TOOL_AUTHORIZATION_FAILURE"
 # 主代理与子代理共用，判定见 agent_core/tool_guard/identical_failure.py。
 REPEATED_IDENTICAL_TOOL_FAILURE = "REPEATED_IDENTICAL_TOOL_FAILURE"
 # 单次 attempt 最多记录的失败条数;超出截断,防止失控循环把 attributes 撑爆。
-_LEDGER_MAX_ENTRIES = 50
+_LEDGER_MAX_ENTRY_COUNT = 50
 # 从工具参数里提取"目标路径"时按序尝试的参数名(write_file 用 path)。
 _PATH_PARAM_KEYS = ("path", "file", "target", "filename")
 _AUTHORIZATION_STAGE = "authorization"
@@ -42,7 +42,7 @@ _GUARDRAIL_SELF_BLOCK_PREFIX = "TOOL_GUARDRAIL_"
 # 父级视图最多回看的 tool_completed 事件条数;只影响本次投影,不删除任何事件。
 _STREAK_EVENT_WINDOW = 200
 # 连续失败段里最多列出的不同工具名/参数名。
-_STREAK_NAME_LIMIT = 8
+_STREAK_NAME_COUNT = 8
 
 
 # LLM: 只装宿主 typed 字段(ok/error_code/failure_stage/handler_executed/参数名);参数值与输出正文不进入。
@@ -78,7 +78,7 @@ def tool_failures_from_archive(archive_tool_calls: list | None) -> list[dict[str
                 "message": _failure_message(record),
             }
         )
-        if len(failures) >= _LEDGER_MAX_ENTRIES:
+        if len(failures) >= _LEDGER_MAX_ENTRY_COUNT:
             break
     return failures
 
@@ -123,7 +123,7 @@ def record_tool_failure_ledger(
         return
     ledger: dict[str, object] = {
         "updated_at": now,
-        "failures": [dict(item) for item in tool_failures[:_LEDGER_MAX_ENTRIES]],
+        "failures": [dict(item) for item in tool_failures[:_LEDGER_MAX_ENTRY_COUNT]],
     }
     if halt:
         ledger["halt"] = dict(halt)
@@ -338,14 +338,14 @@ def _argument_names(parameters: object) -> tuple[str, ...]:
     return tuple(sorted(str(key) for key in parameters if str(key or "").strip()))
 
 
-# LLM: 保持首次出现顺序去重,最多 _STREAK_NAME_LIMIT 个,保证摘要有界。
+# LLM: 保持首次出现顺序去重,最多 _STREAK_NAME_COUNT 个,保证摘要有界。
 # 函数用途: 把工具名或参数名去重并截断成短列表。
 def _unique_limited(values: Iterable[str]) -> list[str]:
     result: list[str] = []
     for value in values:
         if value and value not in result:
             result.append(value)
-        if len(result) >= _STREAK_NAME_LIMIT:
+        if len(result) >= _STREAK_NAME_COUNT:
             break
     return result
 

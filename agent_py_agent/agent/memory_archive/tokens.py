@@ -31,6 +31,7 @@ class TurnTokenUsage:
 
 # 小对象复用公开直接编码入口，避免高频窗口试算积累流式编码器闭包；大对象仍不复制整份JSON。
 _SMALL_JSON_MAX_BYTES = 512 * 1024
+# 小 JSON 判定允许的最大嵌套深度；超过视为大对象，按大对象路径处理（无物理单位）。
 _SMALL_JSON_MAX_DEPTH = 64
 
 

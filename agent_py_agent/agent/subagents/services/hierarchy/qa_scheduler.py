@@ -13,7 +13,8 @@ from .qa_ready_refs import (
 )
 from .write_policy import inherited_extra_write_roots
 
-_QA_SCAN_MAX_NODES = 64
+# QA 调度扫描最多遍历的节点数；防止超大任务树拖慢调度。
+_QA_SCAN_MAX_NODE_COUNT = 64
 
 
 @dataclass(frozen=True)
@@ -121,7 +122,7 @@ def _existing_descendant_qa_roles(manager: Any, parent: SubAgentTask) -> set[str
     queue = [str(item) for item in parent.child_ids if item]
     seen: set[str] = set()
     scanned = 0
-    while queue and scanned < _QA_SCAN_MAX_NODES:
+    while queue and scanned < _QA_SCAN_MAX_NODE_COUNT:
         run_id = queue.pop(0)
         if run_id in seen:
             continue

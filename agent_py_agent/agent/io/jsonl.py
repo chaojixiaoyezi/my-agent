@@ -28,6 +28,7 @@ class _PathLockEntry:
 
 _LOCKS: dict[str, _PathLockEntry] = {}
 _LOCKS_GUARD = threading.Lock()
+# 文件锁表容量水位；达到后清理不再使用的锁条目，防长跑进程锁表无界增长（无物理单位）。
 _LOCKS_CAPACITY_WATERMARK = 512
 
 

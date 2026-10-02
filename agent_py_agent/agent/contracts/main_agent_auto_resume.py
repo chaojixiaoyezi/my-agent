@@ -11,7 +11,8 @@ from ..settings.runtime_guard_config import runtime_guard_int
 from .state_machine import normalize_status
 
 SCHEMA_VERSION = "main-agent-auto-resume-ledger.v1"
-DEFAULT_AUTO_RECOVERY_ATTEMPTS = 3
+# 主代理自动恢复最多尝试的次数；超过后不再自动重试，避免故障循环消耗资源。
+DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT = 3
 
 
 class _RuntimeLike(Protocol):
@@ -113,12 +114,12 @@ def _read_ledger(path: Path) -> dict[str, object]:
 
 
 def _configured_auto_resume_limit() -> int:
-    return runtime_guard_int("main_agent_auto_resume_attempt_limit", DEFAULT_AUTO_RECOVERY_ATTEMPTS)
+    return runtime_guard_int("main_agent_auto_resume_attempt_limit", DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT)
 
 
 __all__ = [
     "AutoResumeDecision",
-    "DEFAULT_AUTO_RECOVERY_ATTEMPTS",
+    "DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT",
     "SCHEMA_VERSION",
     "auto_resume_decision",
     "auto_resume_limit",

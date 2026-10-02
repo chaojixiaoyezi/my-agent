@@ -22,7 +22,8 @@ from .archive_helpers import (
     _list_value,
 )
 
-ARCHIVE_SEARCH_FILE_LIMIT = 30
+# 归档检索最多扫描的文件数；防止跨归档全量扫描拖慢检索。
+ARCHIVE_SEARCH_FILE_COUNT = 30
 
 
 def _archive_files(
@@ -30,7 +31,7 @@ def _archive_files(
     *,
     layer: str,
     date_key: str | None,
-    file_limit: int = ARCHIVE_SEARCH_FILE_LIMIT,
+    file_limit: int = ARCHIVE_SEARCH_FILE_COUNT,
 ) -> list[tuple[str, Path]]:
 
     layers = ["raw", "hook"] if layer == "all" else [layer]
@@ -54,7 +55,7 @@ def _recent_layer_files(
     layer: str,
     directory: Path,
     *,
-    file_limit: int = ARCHIVE_SEARCH_FILE_LIMIT,
+    file_limit: int = ARCHIVE_SEARCH_FILE_COUNT,
 ) -> list[tuple[str, Path]]:
     layer_files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()],

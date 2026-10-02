@@ -24,11 +24,16 @@ from .protocol import (
 
 logger = logging.getLogger(__name__)
 
+# 面板渲染超时秒数；超时按失败处理并回退，防止插件卡死主界面。
 RENDER_TIMEOUT_SECONDS = 3.0
+# 面板闲置多少秒后关闭；释放闲置插件渲染资源。
 IDLE_CLOSE_SECONDS = 120.0
+# 面板渲染失败后的重试退避秒数；失败后按此间隔重试，避免风暴。
 ERROR_BACKOFF_SECONDS = 5.0
-MAX_REQUESTED_PANELS = 8
-MAX_SESSION_ROWS = 20
+# 单次请求最多请求的面板数；防止一次请求拉起所有面板。
+MAX_REQUESTED_PANEL_COUNT = 8
+# 会话列表最多展示的行数；超出截断，保持面板可读。
+MAX_SESSION_ROW_COUNT = 20
 
 
 # LLM: 请求方只能按 (插件, 面板) 选择要看的面板；owner、线程与活动投影由 Gateway 解析后传入，不信任客户端字段。
@@ -98,13 +103,13 @@ class PluginDisplayService:
                   if getattr(row.manifest, "panels", ())}
         to_stop = self._retire(query.owner_key, active, now)
         output: list[dict] = []
-        wanted = {topic for plugin_id, panel_id in query.requested[:MAX_REQUESTED_PANELS]
+        wanted = {topic for plugin_id, panel_id in query.requested[:MAX_REQUESTED_PANEL_COUNT]
                   for panel in getattr(getattr(active.get(plugin_id), "manifest", None), "panels", ())
                   if panel.id == panel_id for topic in panel.topics}
         # 在锁外读取会话列表，避免文件扫描阻塞其他面板查询
         sessions = _session_rows(query.sessions) if "sessions" in wanted else []
         with self._lock:
-            for plugin_id, panel_id in query.requested[:MAX_REQUESTED_PANELS]:
+            for plugin_id, panel_id in query.requested[:MAX_REQUESTED_PANEL_COUNT]:
                 row = active.get(plugin_id)
                 panel = next((item for item in getattr(row.manifest, "panels", ()) if item.id == panel_id), None) if row else None
                 if row is None or panel is None:
@@ -293,7 +298,7 @@ def project_topics(activity: dict, topics: tuple[str, ...], sessions: list[dict]
             "estimated": usage.get("estimated") is True,
         }
     if "sessions" in topics:
-        result["sessions"] = {"items": [dict(row) for row in (sessions or ())[:MAX_SESSION_ROWS]]}
+        result["sessions"] = {"items": [dict(row) for row in (sessions or ())[:MAX_SESSION_ROW_COUNT]]}
     return result
 
 
@@ -313,7 +318,7 @@ def _session_rows(provider: Callable[[], list[dict]] | None) -> list[dict]:
             clean.append({"session_id": row["session_id"][:80], "updated_at": _number(row.get("updated_at")),
                           "created_at": _number(row.get("created_at")), "channel": str(row.get("channel") or "")[:40],
                           "current": row.get("current") is True})
-    return clean[:MAX_SESSION_ROWS]
+    return clean[:MAX_SESSION_ROW_COUNT]
 
 
 _CONTEXT_FIELDS = ("context_window_tokens", "compact_trigger_tokens", "current_tokens", "messages_tokens",

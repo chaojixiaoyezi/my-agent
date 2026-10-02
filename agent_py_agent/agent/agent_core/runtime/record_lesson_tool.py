@@ -19,7 +19,7 @@ from ...subagents.lesson_ledger import (
     APPEND_RECORDED,
     LESSON_FIELD_LIMITS,
     MAX_LESSON_LEDGER_BYTES,
-    MAX_LESSONS_PER_RUN,
+    MAX_LESSONS_PER_RUN_COUNT,
     LessonAppendResult,
     LessonFieldError,
     LessonIdentity,
@@ -45,7 +45,7 @@ _REFUSALS = {
     APPEND_LIMIT_REACHED: (
         "TOOL_GUARDRAIL_DENIED",
         "LESSON_LIMIT_REACHED",
-        f"本 run 已记满 {MAX_LESSONS_PER_RUN} 条经验，本条未记录；不要重试，继续原任务。",
+        f"本 run 已记满 {MAX_LESSONS_PER_RUN_COUNT} 条经验，本条未记录；不要重试，继续原任务。",
     ),
     APPEND_BYTES_EXCEEDED: (
         "TOOL_INVALID_ARGUMENTS",
@@ -146,7 +146,7 @@ def _append_outcome(result: LessonAppendResult, path: Path) -> ToolHandlerOutcom
         "lesson_id": result.lesson_id,
         "ledger_ref": str(path),
         "lesson_count": result.lesson_count,
-        "lesson_limit": MAX_LESSONS_PER_RUN,
+        "lesson_limit": MAX_LESSONS_PER_RUN_COUNT,
         "ledger_bytes": result.ledger_bytes,
         "ledger_byte_limit": MAX_LESSON_LEDGER_BYTES,
     }
@@ -191,7 +191,7 @@ def build_record_lesson_model_spec() -> ToolModelSpec:
         description=(
             "把本次工作中形成的一条【以后同类任务可复用的具体做法】记进本 run 的经验账本（lessons.jsonl）。"
             "可选，不影响任务是否完成；只记可复用做法，不记本任务的事实结论。"
-            f"同样内容重复调用只记一次，每个 run 最多 {MAX_LESSONS_PER_RUN} 条；宿主随结果交回父级并登记为待审核的经验候选。"
+            f"同样内容重复调用只记一次，每个 run 最多 {MAX_LESSONS_PER_RUN_COUNT} 条；宿主随结果交回父级并登记为待审核的经验候选。"
         ),
         input_schema={
             "type": "object",

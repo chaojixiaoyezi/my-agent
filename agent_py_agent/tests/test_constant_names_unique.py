@@ -23,7 +23,6 @@ _ALLOWED = {
     "BODY_MAX_CHARS": "自学习提案正文上限与聊天 /skills 回执的正文展示上限，用途不同",
     "DESCRIPTION_MAX_CHARS": "Skill 索引里的描述上限与自学习提案草稿的描述上限，用途不同",
     "MAX_BODY_BYTES": "网页工具与采集源各自的 HTTP 响应体上限，分属两个子系统，可以独立调整",
-    "MAX_CANDIDATES": "产物定位与插件观察两处各自的候选数上限（决策点的数量界限统一在 decision_point_limits）",
     "MAX_HINT_CHARS": "各决策点提示文字的上限按点位设定；决策点参数统一时一并处理",
     "MAX_INLINE_JSON": "工具动作摘要与编排实时摘要各自的内联 JSON 上限",
     "MAX_OWNERS": "管理员控制工具与审计记录工具各自一次列出的用户数上限",

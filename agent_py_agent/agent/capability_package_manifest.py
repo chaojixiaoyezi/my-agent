@@ -8,6 +8,7 @@ import unicodedata
 from dataclasses import asdict, dataclass
 
 CAPABILITY_PACKAGE_SCHEMA = "plugin_package.v7"
+# 能力包清单最多收录的文件数；超出即判定清单过大（接近常见文件描述符上限 4096）。
 MAX_CAPABILITY_FILES = 4095
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 

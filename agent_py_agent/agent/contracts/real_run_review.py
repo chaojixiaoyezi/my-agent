@@ -195,6 +195,7 @@ class ReviewScanLimits:
 # 参数减量第 1 批（2026-09-27）：real_run_review_max_report_bytes / real_run_review_max_log_bytes 只有离线复盘入口读取，
 # 已从 AgentConfig 删除，改为本模块常量；数值不变。0 表示不读取对应大文件。
 _REVIEW_MAX_REPORT_BYTES = 5_000_000
+# 真实验收审阅单条日志的最大字节数；超长截断，防止超大日志占满审阅载荷。
 _REVIEW_MAX_LOG_BYTES = 1_000_000
 
 

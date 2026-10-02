@@ -11,6 +11,7 @@ _BOUND_KINDS = frozenset({"empirical"})
 _TERMINAL_STATUSES = frozenset({"failed", "finished", "timed_out"})
 # 结算关闭原因只能覆盖仍开放或仅被用户撤销的预算；一份预算同一时刻只有一个待结算调用，不会出现其它状态。
 _CLOSABLE_STATUSES = frozenset({"active", "revoked"})
+# 模型预算用量占比的告警线（0.8=80%）；达到后记告警但不断调用（无物理单位）。
 _RATIO_WARNING = 0.8
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 

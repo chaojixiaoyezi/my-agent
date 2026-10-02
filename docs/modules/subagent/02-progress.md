@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。subagents 目录 10 个文件的常数补齐上方中文说明，缺单位的按生成器后缀表改名（如 `PARENT_CHAIN_LIMIT`→`PARENT_CHAIN_COUNT`、`MAX_LESSONS_PER_RUN`→`MAX_LESSONS_PER_RUN_COUNT`），数值一律不变；待整改白名单 685→600，目录重建后 --check 一致。
+
 2026-09-30（分支 `worker/ds1-takeover-event`）：接替已结束或阻塞的子代理时，追加式事件日志新增专门审计事件 `subagent_takeover_recorded`
 （`services/takeover/record.py` 在落盘核对通过、TAKEOVER.md 写完后追加，复用 `manager.log_local_record` 通道），payload 带
 `source_run_id`／`successor_run_id`／`disposition`（superseded 或 taken_over）／`record_id`／`created_at`；只读投影，不改状态语义，

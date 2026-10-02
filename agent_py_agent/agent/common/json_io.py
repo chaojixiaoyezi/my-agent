@@ -377,7 +377,8 @@ def _unlink_tmp_file(tmp: Path) -> None:
 # 函数用途: 反复读同一个没变过的台账文件时,直接给上次的解析行,不再碰磁盘。
 _TEXT_LINES_CACHE: dict[str, tuple[tuple[int, int], tuple[str, ...]]] = {}
 _TEXT_LINES_CACHE_GUARD = threading.Lock()
-_TEXT_LINES_CACHE_MAX = 64
+# 文本行缓存最多缓存的条目数；超出按 LRU 逐出，防止大目录扫描撑爆内存。
+_TEXT_LINES_CACHE_MAX_COUNT = 64
 
 
 def read_text_lines_cached(path: Path) -> tuple[str, ...]:
@@ -390,7 +391,7 @@ def read_text_lines_cached(path: Path) -> tuple[str, ...]:
             return hit[1]
     lines = read_jsonl_text_lines(path)
     with _TEXT_LINES_CACHE_GUARD:
-        while len(_TEXT_LINES_CACHE) >= _TEXT_LINES_CACHE_MAX:
+        while len(_TEXT_LINES_CACHE) >= _TEXT_LINES_CACHE_MAX_COUNT:
             _TEXT_LINES_CACHE.pop(next(iter(_TEXT_LINES_CACHE)))
         _TEXT_LINES_CACHE[key] = (signature, lines)
     return lines

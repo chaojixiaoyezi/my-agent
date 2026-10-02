@@ -19,6 +19,10 @@
 - 后端在 owner 实例装配时冻结；主配置变更仍需重启 Gateway。自动总结 Skill 继续复用原 Curator 后端，因而也采用此固定档案。
   私有引用只在本人目录有效，跨 owner 须已有共享授权；目录损坏或授权撤销均不读其它私有模型做回退。
 
+## P10 第二批常数整改（2026-10-02，待集成）
+
+memory_archive 与 `cli/memory_archive_commands.py` 的常数改名/补说明：`resume_context.py::ARCHIVE_SEARCH_FILE_COUNT`（归档检索最多扫几个文件）、`RESUME_RECOMMENDED_READ_PATHS_COUNT`（恢复简报最多推荐几条读取路径）；数值不变，目录投影随源码一致。
+
 ## 缓存不可读时的行为（构造宽松、写入严格，2026-09-29）
 
 `TextVectorCache` 对"缓存文件读不了"（权限/EIO/EMFILE，不是"文件不存在"）分两种态度：

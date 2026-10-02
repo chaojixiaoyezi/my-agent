@@ -16,6 +16,7 @@ import time
 # 新鲜阈值下限:心跳间隔默认 5s(session_pool._runner_session_heartbeat_interval),
 # 6 拍容忍 GC/磁盘抖动;interval 更大时按 6×interval 放宽。
 _MIN_FRESH_SECONDS = 45.0
+# 会话新鲜期的最小间隔倍数；间隔不足时按此倍数拉长等待（无物理单位）。
 _FRESH_INTERVAL_MULTIPLIER = 6.0
 
 

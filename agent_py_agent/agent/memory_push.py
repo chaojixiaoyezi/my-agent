@@ -22,7 +22,9 @@ from .prompting_parts.memory_context import memory_context_text
 from .runtime_errors import runtime_error_report
 from .user_space.home_layout import runtime_route_root_and_index
 
+# 目标文本匹配的最大字符数；目标过长只取前段做匹配指纹。
 _GOAL_MAX_CHARS = 80
+# 目标匹配用的最大 ngram 阶数；阶数越高匹配越精确但索引越大（无物理单位）。
 _GOAL_NGRAM_MAX = 24
 _STRUCTURED_SCOPE_FIELDS = (
     "company_id",

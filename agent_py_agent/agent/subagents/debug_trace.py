@@ -16,7 +16,8 @@ from typing import Any
 
 from agent_py_agent.agent.io import append_jsonl
 
-_PREVIEW_LIMIT = 240
+# 调试追踪预览的最大字符数；超长用省略号截断，保持 JSONL 行有界。
+_PREVIEW_LIMIT_CHARS = 240
 
 
 @dataclass(frozen=True)
@@ -202,9 +203,9 @@ def _bounded_level(value: Any) -> int:
 
 def _preview(value: str) -> str:
     compact = " ".join(str(value).split())
-    if len(compact) <= _PREVIEW_LIMIT:
+    if len(compact) <= _PREVIEW_LIMIT_CHARS:
         return compact
-    return compact[: _PREVIEW_LIMIT - 3] + "..."
+    return compact[: _PREVIEW_LIMIT_CHARS - 3] + "..."
 
 
 def _detail_text(value: Any) -> str:

@@ -39,7 +39,7 @@ from agent_py_agent.agent.subagents.lesson_ledger import (
     LEDGER_UNREADABLE,
     LESSON_FIELD_LIMITS,
     MAX_LESSON_LEDGER_BYTES,
-    MAX_LESSONS_PER_RUN,
+    MAX_LESSONS_PER_RUN_COUNT,
     MAX_RUN_STATUSES_PER_RUN,
     LessonFields,
     LessonIdentity,
@@ -270,7 +270,7 @@ def test_identical_call_in_the_same_run_is_recorded_once(tmp_path: Path) -> None
 
 def test_per_run_count_cap_refuses_structurally_and_keeps_retries_idempotent(tmp_path: Path) -> None:
     ctx = _runtime(tmp_path)
-    accepted = [_record(ctx, _lesson(index)) for index in range(MAX_LESSONS_PER_RUN)]
+    accepted = [_record(ctx, _lesson(index)) for index in range(MAX_LESSONS_PER_RUN_COUNT)]
 
     refused = _record(ctx, _lesson(99))
     retry = _record(ctx, _lesson(0))
@@ -285,11 +285,11 @@ def test_per_run_count_cap_refuses_structurally_and_keeps_retries_idempotent(tmp
     )
     assert (payload["status"], payload["lesson_count"], payload["lesson_limit"]) == (
         "limit_reached",
-        MAX_LESSONS_PER_RUN,
-        MAX_LESSONS_PER_RUN,
+        MAX_LESSONS_PER_RUN_COUNT,
+        MAX_LESSONS_PER_RUN_COUNT,
     )
     assert retry.ok and _payload(retry)["status"] == "already_recorded"
-    assert len(_rows(ctx.task.agent_run_lessons_jsonl)) == MAX_LESSONS_PER_RUN
+    assert len(_rows(ctx.task.agent_run_lessons_jsonl)) == MAX_LESSONS_PER_RUN_COUNT
 
 
 def test_per_run_byte_cap_refuses_without_writing(tmp_path: Path) -> None:
@@ -404,8 +404,8 @@ def test_ledger_read_back_caps_entries_and_skips_oversized_files(tmp_path: Path)
     ledger.write_text("x" * (MAX_LESSON_LEDGER_BYTES + 1), encoding="utf-8")
     oversized = read_lesson_ledger(str(ledger), run_id="run-1")
 
-    assert [entry.lesson_id for entry in capped.entries] == [row["id"] for row in rows[:MAX_LESSONS_PER_RUN]]
-    assert capped.rejected == 7 - MAX_LESSONS_PER_RUN
+    assert [entry.lesson_id for entry in capped.entries] == [row["id"] for row in rows[:MAX_LESSONS_PER_RUN_COUNT]]
+    assert capped.rejected == 7 - MAX_LESSONS_PER_RUN_COUNT
     assert (oversized.status, oversized.entries) == (LEDGER_OVERSIZED, ())
 
 
@@ -444,7 +444,7 @@ def test_run_status_is_idempotent_per_run_and_status(tmp_path: Path) -> None:
 def test_run_status_has_own_bound_and_does_not_consume_lesson_limit(tmp_path: Path) -> None:
     ledger = tmp_path / "run-1" / "lessons.jsonl"
     identity = LessonIdentity(run_id="run-1", attempt_id="", task_id="root-1")
-    for index in range(MAX_LESSONS_PER_RUN):
+    for index in range(MAX_LESSONS_PER_RUN_COUNT):
         assert append_lesson_record(
             ledger, lesson_ledger_record(_fields(_lesson(index)), identity, created_at=1.0)
         ).status == "recorded"
@@ -454,7 +454,7 @@ def test_run_status_has_own_bound_and_does_not_consume_lesson_limit(tmp_path: Pa
 
     assert full.status == "limit_reached"
     report = read_lesson_ledger(str(ledger), run_id="run-1")
-    assert len(report.entries) == MAX_LESSONS_PER_RUN
+    assert len(report.entries) == MAX_LESSONS_PER_RUN_COUNT
     assert len(report.run_statuses) == MAX_RUN_STATUSES_PER_RUN
     assert report.rejected == 0
 

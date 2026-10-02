@@ -14,7 +14,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_COMPACT_FAILURE_THRESHOLD = 3
+# 压缩连续失败多少次后触发熔断；阈值内只告警不断流。
+DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT = 3
+# 压缩熔断后的默认冷却秒数；冷却期内不再触发压缩，防止反复失败。
 DEFAULT_COMPACT_COOLDOWN_SECONDS = 300.0
 
 
@@ -49,7 +51,7 @@ def compact_circuit_open(
     state: CompactCircuitState,
     *,
     now: float,
-    threshold: int = DEFAULT_COMPACT_FAILURE_THRESHOLD,
+    threshold: int = DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
     cooldown_seconds: float = DEFAULT_COMPACT_COOLDOWN_SECONDS,
 ) -> bool:
     """连续失败达阈值且仍在冷却期内 → open（跳过 compact）。冷却过后 half-open 放行重试。"""
@@ -71,7 +73,7 @@ def record_compact_outcome(
         new_state = CompactCircuitState(last_status=status, total_failures=state.total_failures)
     else:
         failures = state.consecutive_failures + 1
-        opened = failures >= DEFAULT_COMPACT_FAILURE_THRESHOLD
+        opened = failures >= DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT
         new_state = CompactCircuitState(
             consecutive_failures=failures,
             opened_at=now if opened else state.opened_at,
@@ -118,7 +120,7 @@ def _write_compact_circuit(workspace: Path | str, state: CompactCircuitState) ->
 __all__ = [
     "CompactCircuitState",
     "DEFAULT_COMPACT_COOLDOWN_SECONDS",
-    "DEFAULT_COMPACT_FAILURE_THRESHOLD",
+    "DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT",
     "compact_circuit_blocker_payload",
     "compact_circuit_open",
     "compact_circuit_path",

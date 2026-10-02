@@ -11,8 +11,10 @@ from .context_bundle_contracts import declared_output_refs
 from .models import TaskStatus
 from .tool_failure_ledger import ledger_tool_failure_halt
 
+# 完成回执消息的最大 token 数；超长截断，保持回执载荷有界。
 _COMPLETION_MESSAGE_MAX_TOKENS = 1_000
-_COMPLETION_EVIDENCE_REF_LIMIT = 20
+# 完成回执里最多携带的证据引用条数；防止回执引用列表无限增长。
+_COMPLETION_EVIDENCE_REF_COUNT = 20
 
 
 # LLM: 根父级 wake 与递归父级必须读取同一交接 schema；内容有界且只含当前结果和规范 refs，不授予完成权。
@@ -39,7 +41,7 @@ def completion_handoff_payload(
     else:
         artifact_refs = current_model_ref_list(
             getattr(task, "artifact_refs", []) or [],
-            limit=_COMPLETION_EVIDENCE_REF_LIMIT,
+            limit=_COMPLETION_EVIDENCE_REF_COUNT,
         )
     payload: dict[str, object] = {
         "completion_schema_version": SUBAGENT_COMPLETION_SCHEMA_VERSION,
@@ -48,8 +50,8 @@ def completion_handoff_payload(
             getattr(task, "agent_run_final_report_md", "")
             or getattr(task, "debrief_file", "")
         ),
-        "declared_output_refs": declared_output_refs(task)[:_COMPLETION_EVIDENCE_REF_LIMIT],
-        "artifact_refs": artifact_refs[:_COMPLETION_EVIDENCE_REF_LIMIT],
+        "declared_output_refs": declared_output_refs(task)[:_COMPLETION_EVIDENCE_REF_COUNT],
+        "artifact_refs": artifact_refs[:_COMPLETION_EVIDENCE_REF_COUNT],
     }
     if completion_truncated:
         payload["completion_message_truncated"] = True
@@ -122,4 +124,4 @@ def completion_evidence_refs(
                 refs.append(current_model_ref(item.get("path")))
             else:
                 refs.append(current_model_ref(item))
-    return list(dict.fromkeys(ref for ref in refs if ref))[:_COMPLETION_EVIDENCE_REF_LIMIT]
+    return list(dict.fromkeys(ref for ref in refs if ref))[:_COMPLETION_EVIDENCE_REF_COUNT]

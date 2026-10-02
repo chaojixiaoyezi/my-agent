@@ -144,7 +144,8 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 # 自锁剔除账本在 attributes 里的键名与容量上限(防失控循环撑爆 attributes)。
 LOCKED_FILES_SANITIZED_ATTR = "locked_files_sanitized"
 LOCKED_FILES_CHANGES_ATTR = "locked_files_changes"
-_LOCK_LEDGER_MAX_ENTRIES = 20
+# 文件锁账本最多保留的条目数；防止一次任务锁太多文件导致账本膨胀。
+_LOCK_LEDGER_MAX_ENTRY_COUNT = 20
 
 
 # LLM: 任务完成力底座 P3-1 的客观矛盾门(R5a 实锤:13 子代理 23 次 WRITE_FORBIDDEN,
@@ -203,7 +204,7 @@ def _record_sanitized_locks(task: Any, removed: list[str], now: float) -> None:
             "at": now,
         }
     )
-    attrs[LOCKED_FILES_SANITIZED_ATTR] = entries[-_LOCK_LEDGER_MAX_ENTRIES:]
+    attrs[LOCKED_FILES_SANITIZED_ATTR] = entries[-_LOCK_LEDGER_MAX_ENTRY_COUNT:]
     task.attributes = attrs
 
 
@@ -222,7 +223,7 @@ def record_locked_files_change(task: Any, previous: list[str] | None, now: float
     entries = attrs.get(LOCKED_FILES_CHANGES_ATTR)
     entries = entries if isinstance(entries, list) else []
     entries.append({"added": added[:10], "removed": removed[:10], "at": now})
-    attrs[LOCKED_FILES_CHANGES_ATTR] = entries[-_LOCK_LEDGER_MAX_ENTRIES:]
+    attrs[LOCKED_FILES_CHANGES_ATTR] = entries[-_LOCK_LEDGER_MAX_ENTRY_COUNT:]
     task.attributes = attrs
 
 

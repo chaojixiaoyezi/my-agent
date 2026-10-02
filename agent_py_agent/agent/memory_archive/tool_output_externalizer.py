@@ -44,8 +44,10 @@ TOOL_OUTPUT_RECORD_SCHEMA = RuntimeMemorySchemaOptions("tool_output_archive_reco
 TOOL_OUTPUT_ARTIFACT_SCHEMA = RuntimeMemorySchemaOptions("tool_output_artifact")
 TOOL_OUTPUT_INDEX_SCHEMA = RuntimeMemorySchemaOptions("tool_output_index")
 _TOOL_FAILURE_STAGE_VALUES = frozenset(item.value for item in ToolFailureStage)
+# 外置化时安全参数允许的最大嵌套深度；超过拒绝外置该参数（无物理单位）。
 _SAFE_PARAMETER_MAX_DEPTH = 4
-_SAFE_PARAMETER_MAX_ITEMS = 20
+# 外置化时容器参数最多保留的条目数；防止海量条目撑爆外置载荷。
+_SAFE_PARAMETER_MAX_ITEM_COUNT = 20
 
 
 # LLM: The request carries the executed call's exact run/attempt/turn identity and two parameter
@@ -517,7 +519,7 @@ def _safe_parameters(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     result: dict[str, Any] = {}
-    for key, item in list(value.items())[:_SAFE_PARAMETER_MAX_ITEMS]:
+    for key, item in list(value.items())[:_SAFE_PARAMETER_MAX_ITEM_COUNT]:
         text_key = str(key).strip()
         if not text_key:
             continue
@@ -720,7 +722,7 @@ def _safe_parameter_item(
         return redact_sensitive_value(item, field_name=field_name)
     if isinstance(item, list | tuple):
         values: list[object] = []
-        for entry in list(item)[:_SAFE_PARAMETER_MAX_ITEMS]:
+        for entry in list(item)[:_SAFE_PARAMETER_MAX_ITEM_COUNT]:
             safe_entry = _safe_parameter_item(
                 entry,
                 field_name=field_name,
@@ -731,7 +733,7 @@ def _safe_parameter_item(
         return values
     if isinstance(item, dict):
         values: dict[str, object] = {}
-        for child_key, child_value in list(item.items())[:_SAFE_PARAMETER_MAX_ITEMS]:
+        for child_key, child_value in list(item.items())[:_SAFE_PARAMETER_MAX_ITEM_COUNT]:
             text_key = str(child_key).strip()
             if not text_key:
                 continue

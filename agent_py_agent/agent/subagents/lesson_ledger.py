@@ -28,7 +28,9 @@ LESSON_FIELD_LIMITS: tuple[tuple[str, int], ...] = (
     ("procedure", 1000),
     ("applies_to", 200),
 )
-MAX_LESSONS_PER_RUN = 5
+# 单次 run 最多记录的经验条数；超出返回结构化拒绝，账本每 run 有界。
+MAX_LESSONS_PER_RUN_COUNT = 5
+# 单次 run 教训账本的最大字节数；超限拒绝追加，防失控循环撑爆账本。
 MAX_LESSON_LEDGER_BYTES = 16 * 1024
 
 APPEND_RECORDED = "recorded"
@@ -271,7 +273,7 @@ def _rows_for_append(path: Path) -> tuple[list[dict[str, object]], int]:
 def _append_decision(rows: Sequence[Mapping[str, object]], lesson_id: str, size_after: int) -> str:
     if any(str(row.get("id") or "") == lesson_id for row in rows):
         return APPEND_ALREADY_RECORDED
-    if len(rows) >= MAX_LESSONS_PER_RUN:
+    if len(rows) >= MAX_LESSONS_PER_RUN_COUNT:
         return APPEND_LIMIT_REACHED
     if size_after > MAX_LESSON_LEDGER_BYTES:
         return APPEND_BYTES_EXCEEDED
@@ -288,7 +290,7 @@ def _append_line_no_follow(path: Path, line: bytes) -> None:
 
 
 # LLM: 只读宿主给出的 run 账本路径；缺失/空路径是 absent，符号链接或加锁/读失败是 unreadable，超字节上限整本不采用。
-#   逐行按写入合同复核并去重，最多采用 MAX_LESSONS_PER_RUN 条；run 状态行单独校验进 run_statuses，不占经验条数。
+#   逐行按写入合同复核并去重，最多采用 MAX_LESSONS_PER_RUN_COUNT 条；run 状态行单独校验进 run_statuses，不占经验条数。
 #   任何 OSError 都转成状态，不能打断结果收口。副作用：账本存在时会创建同名锁文件。
 # 函数用途: 读回本 run 已记录的经验与 run 状态，供结果收口合并与生成候选。
 def read_lesson_ledger(ledger_ref: str, *, run_id: str) -> LessonLedgerReport:
@@ -337,7 +339,7 @@ def _valid_entries(
         if row.get("kind") == RUN_STATUS_KIND:
             continue
         entry = _entry_from_row(row, ledger_ref, run_id)
-        if entry is None or entry.lesson_id in seen or len(entries) >= MAX_LESSONS_PER_RUN:
+        if entry is None or entry.lesson_id in seen or len(entries) >= MAX_LESSONS_PER_RUN_COUNT:
             rejected += 1
             continue
         seen.add(entry.lesson_id)
@@ -442,7 +444,7 @@ __all__ = [
     "LESSON_FIELD_LIMITS",
     "LESSON_LEDGER_SOURCE",
     "LESSON_LEDGER_VERSION",
-    "MAX_LESSONS_PER_RUN",
+    "MAX_LESSONS_PER_RUN_COUNT",
     "MAX_LESSON_LEDGER_BYTES",
     "MAX_RUN_STATUSES_PER_RUN",
     "RUN_STATUS_KIND",

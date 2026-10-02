@@ -22,7 +22,8 @@ from .integrity import (
 )
 
 _SCHEMA_VERSION = "subagent_tool_progress.v1"
-_MAX_HEADINGS = 16
+# 会话进度最多展示的标题条数；超出截断，防止进度面板刷屏。
+_MAX_HEADING_COUNT = 16
 # LLM: Progress projection recognizes the same canonical mutation tools as the
 # executor so edit_file activity cannot disappear from durable child progress.
 # 常量用途: 识别会改变工作区的文件工具，用于记录子代理的真实写入进度。
@@ -349,7 +350,7 @@ def _snapshot_payload(
         "tool_index": request.tool_index,
         "latest_written_path": path,
         "written_paths": written_paths,
-        "headings": headings[:_MAX_HEADINGS],
+        "headings": headings[:_MAX_HEADING_COUNT],
         "summary": summary,
         "next_action": next_action,
         "artifact_integrity": integrity,
@@ -368,7 +369,7 @@ def _output_closeout_snapshot(closeout: _CloseoutSnapshotRequest) -> dict[str, A
         "tool_round": request.tool_round,
         "tool_index": request.tool_index,
         "written_paths": closeout.written_paths,
-        "headings": closeout.headings[:_MAX_HEADINGS],
+        "headings": closeout.headings[:_MAX_HEADING_COUNT],
         "latest_tool_progress_ref": str(closeout.refs.latest),
         "tool_progress_ledger_ref": str(closeout.refs.ledger),
         "closeout_written_path": closeout.path,
@@ -409,7 +410,7 @@ def _headings_from_payload(payload: dict[str, object]) -> list[str]:
         heading = line.lstrip("#").strip()
         if heading:
             headings.append(heading)
-    return headings[:_MAX_HEADINGS]
+    return headings[:_MAX_HEADING_COUNT]
 
 
 def _summary(tool: str, path: str, headings: list[str], integrity: dict[str, Any]) -> str:

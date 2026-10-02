@@ -963,12 +963,12 @@ def test_snapshot_ttl_bound_forces_reenumeration(snapshots, monkeypatch, tmp_pat
 
 def test_owner_home_snapshot_cache_is_bounded(snapshots, tmp_path) -> None:
     """条目数上界:多套 providers 根也不会让快照缓存无限增长。"""
-    for index in range(snapshots._SNAPSHOT_MAX_ENTRIES + 2):
+    for index in range(snapshots._SNAPSHOT_MAX_ENTRY_COUNT + 2):
         root = tmp_path / f"owners-{index}"
         _owner_home(root, "feishu", "users", "u0")
         discover_owner_home_page(root, limit=8)
 
-    assert len(snapshots._OWNER_HOME_SNAPSHOTS) <= snapshots._SNAPSHOT_MAX_ENTRIES
+    assert len(snapshots._OWNER_HOME_SNAPSHOTS) <= snapshots._SNAPSHOT_MAX_ENTRY_COUNT
 
 
 def test_single_page_matches_full_enumeration_order(snapshots, monkeypatch, tmp_path) -> None:

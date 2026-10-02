@@ -26,6 +26,14 @@
   `_KEY_LEN→_KEY_LEN_BYTES` 等），全部补上方中文说明；无物理单位常数（倍数/指数/深度 7 个名字）只补说明、挪入白名单单独组
   （reason“无物理单位”）。数值一律不变，改名引用全仓同步（含测试）；白名单 685→575＋7；目录重新生成 799 项 `--check` 一致。
 
+- **P10 第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，已实现，待集成）**：整改 subagents/contracts/plugin_display/
+  memory_archive/retrieval/common/verification/concurrency/llm_scale、attempt/io/local_storage 与 13 个单文件范围内的
+  **103 个**常数：补上方中文说明 32 个；按后缀表改名 53 个（如 `PARENT_CHAIN_LIMIT`→`PARENT_CHAIN_COUNT`、
+  `ARCHIVE_SEARCH_FILE_LIMIT`→`ARCHIVE_SEARCH_FILE_COUNT`、`DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS`→
+  `DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`）；无物理单位 18 个只补说明、在白名单单列一组（深度/维度/比率/倍数/协议值/
+  权限位/小时点/水位/ngram/BM25 参数等，后缀表无合适单位）。数值一律不变；目录重建 800 项 `--check` 一致；
+  白名单 685→600（只减不增）。
+
 ## 2026-10-01 登记表增加来源维度：三份配置纳入参数中心（P17，分支 `worker/ds2-registry-sources`，已实现，待集成）
 
 > 2026-10-01 修订（3a 评审 5a51735c1 后）：capability 写入目标与运行值改走运行时实际读取的路径；runtime_guard 改为只读来源。

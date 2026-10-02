@@ -70,6 +70,7 @@ _STORE_ROOT_PATTERNS = (
 # 策展发现常量:与 config.CuratorConfig(interval_seconds=10_800)/daily_finalize_hour=23 对齐,
 # 发现层不引配置避免循环依赖,只保证「到期」语义一致(真到期,非每天必挂/对话即挂)。
 _CURATOR_INTERVAL_SECONDS = 10_800
+# 每日定稿触发的小时点（24 小时制）；到点把当日 wake 事实收口（无物理单位）。
 _DAILY_FINALIZE_HOUR = 23
 # 策展失败退避窗口:与 curator._run_pending_when_due 的 retry_after 上限(300s)对齐——
 # 失败后的 pending owner 在窗口内不被发现层判活,避免 215 个失败 curator owner 每轮
@@ -83,7 +84,8 @@ OwnerWakeCursor = tuple[str, str, str]
 # 状态:进程重启后缓存为空,首次调用与「无缓存」逐字一致;条目数上界防止路径种类
 # (多租户/多测试目录)把缓存撑大。
 _SNAPSHOT_TTL_SECONDS = 30.0
-_SNAPSHOT_MAX_ENTRIES = 4
+# wake 快照最多保留的条目数；快照只用于本轮判定，多了无意义。
+_SNAPSHOT_MAX_ENTRY_COUNT = 4
 _OWNER_HOME_SNAPSHOTS: OrderedDict[str, _OwnerHomeSnapshot] = OrderedDict()
 _SNAPSHOT_LOCK = threading.Lock()
 
@@ -106,7 +108,8 @@ _SNAPSHOT_LOCK = threading.Lock()
 _FACT_TTL_SECONDS = 600.0
 # 条目上界按"一页 owner 数 × 若干页"取:太小时大 owners 目录会 LRU 抖动(实测 500 owner/页
 # 时 256 条会让后半页每轮重新现读)。条目本身只有摘要与时刻,1024 条约 200KB。
-_FACT_MAX_ENTRIES = 1024
+_FACT_MAX_ENTRY_COUNT = 1024
+# 执行锁被占用时重新探测的间隔秒数；避免忙等锁释放。
 _EXEC_LOCK_REPROBE_SECONDS = 30.0
 # 自适应下限:现读判定比这个还快时不为它维护签名(签名要遍历目录元数据,可能比判定本身贵)。
 # 判定的绝对耗时随机器负载等比变化,而签名与判定的开销比不变,所以固定阈值在这里是稳定的。
@@ -269,7 +272,7 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
     签名在枚举之前计算,因此「枚举期间目录又变了」只会让下次校验失效,不会存下一个比内容
     更新的签名。多线程安全:目录 I/O 在锁外做,只有缓存读写持锁。
     函数用途: 让相邻页(网关在 owner 数 > 页大小时相邻 tick 连跑)共享同一次全量枚举排序;
-    缓存条目按 _SNAPSHOT_MAX_ENTRIES 淘汰,不随路径种类无限增长。
+    缓存条目按 _SNAPSHOT_MAX_ENTRY_COUNT 淘汰,不随路径种类无限增长。
     """
     cache_key = str(providers_root)
     now = time.monotonic()
@@ -298,7 +301,7 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
     with _SNAPSHOT_LOCK:
         _OWNER_HOME_SNAPSHOTS[cache_key] = snapshot
         _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
-        while len(_OWNER_HOME_SNAPSHOTS) > _SNAPSHOT_MAX_ENTRIES:
+        while len(_OWNER_HOME_SNAPSHOTS) > _SNAPSHOT_MAX_ENTRY_COUNT:
             _OWNER_HOME_SNAPSHOTS.popitem(last=False)
     return snapshot
 
@@ -533,7 +536,7 @@ def _store_owner_fact_kind(cache_key: str, entry: _OwnerFactCacheEntry) -> None:
     with _OWNER_FACT_LOCK:
         _OWNER_FACT_CACHE[cache_key] = entry
         _OWNER_FACT_CACHE.move_to_end(cache_key)
-        while len(_OWNER_FACT_CACHE) > _FACT_MAX_ENTRIES:
+        while len(_OWNER_FACT_CACHE) > _FACT_MAX_ENTRY_COUNT:
             _OWNER_FACT_CACHE.popitem(last=False)
 
 

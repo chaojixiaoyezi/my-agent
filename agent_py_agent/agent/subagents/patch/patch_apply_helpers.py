@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 
 _PATCH_TEST_ALLOWED_PREFIXES = {"python", "python3", "pytest"}
+# patch 测试命令的超时秒数；超时即判测试失败，防止测试命令挂死。
 _PATCH_TEST_TIMEOUT_SECONDS = 120
 _PATCH_TEST_BLOCKED_CHARS = {"&", "|", ">", "<", "`"}
 

@@ -31,8 +31,8 @@ from ...plugin_observation import (
     _CANDIDATE_ID,
     _OBSERVATION_ID,
     _TOKEN,
-    MAX_ACTIONS,
-    MAX_CANDIDATES,
+    MAX_ACTION_COUNT,
+    MAX_CANDIDATE_COUNT,
     MAX_LABEL_CHARS,
     OBSERVATION_SCHEMA,
     observation_is_current,
@@ -179,7 +179,7 @@ def _observation(archive: dict) -> dict:
             or type(value.get("observation_id")) is not str or not _OBSERVATION_ID.fullmatch(value["observation_id"])
             or type(value.get("target_kind")) is not str or not _TARGET_KIND.fullmatch(value["target_kind"])
             or any(type(value.get(key)) is not str or not value[key] for key in _LOCAL_KEYS)
-            or type(candidates) is not list or not 0 < len(candidates) <= MAX_CANDIDATES):
+            or type(candidates) is not list or not 0 < len(candidates) <= MAX_CANDIDATE_COUNT):
         raise DecisionInputError("观察记录缺少宿主结构化事实。")
     rows = [_candidate(item) for item in candidates]
     if len({row["candidate_id"] for row in rows}) != len(rows):
@@ -198,7 +198,7 @@ def _candidate(value: object) -> dict:
             or type(value.get("role")) is not str or not _TOKEN.fullmatch(value["role"])
             or type(value.get("label")) is not str or len(value["label"]) > MAX_LABEL_CHARS
             or type(value.get("key")) is not str or not value["key"]
-            or type(actions) is not list or not 0 < len(actions) <= MAX_ACTIONS
+            or type(actions) is not list or not 0 < len(actions) <= MAX_ACTION_COUNT
             or any(type(name) is not str or not name for name in actions)):
         raise DecisionInputError("观察候选缺少宿主结构化事实。")
     return {"candidate_id": value["candidate_id"], "key": value["key"], "role": value["role"],

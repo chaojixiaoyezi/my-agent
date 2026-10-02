@@ -13,7 +13,8 @@ delegation_id 都是框架生成的 opaque identifier：有长度上限、只含
 import re
 from typing import Any
 
-OPAQUE_ID_MAX_LENGTH = 128
+# 不透明 ID 的最大字符数；超长视为非法输入直接拒绝，避免把超长串当身份。
+OPAQUE_ID_MAX_LENGTH_CHARS = 128
 
 # 只允许字母/数字/连字符/下划线打头与组成：一个正则同时排除斜杠、反斜杠、
 # 点段（. / ..）、控制字符、空白与所有路径分隔特征。
@@ -56,7 +57,7 @@ def validate_opaque_id(value: Any, *, kind: str) -> str:
 
     校验规则（3.txt B.2）：
     - 必须是非空字符串；
-    - 长度 ≤ OPAQUE_ID_MAX_LENGTH；
+    - 长度 ≤ OPAQUE_ID_MAX_LENGTH_CHARS；
     - 只含 [A-Za-z0-9_-]（隐含排除 / \\ . .. 空格与控制字符）；
     - 不是绝对路径形态。
     不校验"是否框架生成"——存量数据与测试夹具里存在历史格式，只需保证
@@ -64,8 +65,8 @@ def validate_opaque_id(value: Any, *, kind: str) -> str:
     """
     if not isinstance(value, str) or not value:
         raise OpaqueIdError(kind, "must be a non-empty string")
-    if len(value) > OPAQUE_ID_MAX_LENGTH:
-        raise OpaqueIdError(kind, f"exceeds {OPAQUE_ID_MAX_LENGTH} chars")
+    if len(value) > OPAQUE_ID_MAX_LENGTH_CHARS:
+        raise OpaqueIdError(kind, f"exceeds {OPAQUE_ID_MAX_LENGTH_CHARS} chars")
     if not _OPAQUE_ID_RE.fullmatch(value):
         raise OpaqueIdError(
             kind,
@@ -100,7 +101,7 @@ def _looks_like_absolute_path(value: str) -> bool:
 
 __all__ = [
     "ID_KINDS",
-    "OPAQUE_ID_MAX_LENGTH",
+    "OPAQUE_ID_MAX_LENGTH_CHARS",
     "OpaqueIdError",
     "is_opaque_id",
     "validate_opaque_id",

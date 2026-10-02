@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive.compact_circuit_breaker import (
     DEFAULT_COMPACT_COOLDOWN_SECONDS,
-    DEFAULT_COMPACT_FAILURE_THRESHOLD,
+    DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
 )
 from ..model.context_window import resolve_model_context_window_tokens
 
@@ -90,7 +90,7 @@ def runtime_compact_policy(
         ),
         recent_tail_max_turns=DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS,
         recent_tail_tokens=recent_tail_tokens,
-        failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD,
+        failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
         failure_cooldown_seconds=DEFAULT_COMPACT_COOLDOWN_SECONDS,
         trigger_max_tokens=trigger_max_tokens,
     )

@@ -38,8 +38,9 @@ OPERATIONS = frozenset(
         "view",
     }
 )
+# parent 链最多往上查多少层：防止任务数据损坏成环时死循环，超过即按越权拒绝（fail-closed）。
 #: parent 链查询上限：防数据损坏成环时死循环；环 = 越权拒绝（fail-closed）。
-PARENT_CHAIN_LIMIT = 8
+PARENT_CHAIN_COUNT = 8
 
 
 class AuthorizationError(PermissionError):
@@ -150,7 +151,7 @@ def _authorize_visibility(manager: Any, task: SubAgentTask, request: OperationRe
     if requester_run_id == str(getattr(task, "root_id", "") or ""):
         return
     current_id = str(getattr(task, "parent_id", "") or "").strip()
-    for _ in range(PARENT_CHAIN_LIMIT):
+    for _ in range(PARENT_CHAIN_COUNT):
         if not current_id or current_id == requester_run_id:
             return
         ancestor = _load_ancestor(manager, current_id)
@@ -160,7 +161,7 @@ def _authorize_visibility(manager: Any, task: SubAgentTask, request: OperationRe
             break
         current_id = str(getattr(ancestor, "parent_id", "") or "").strip()
     raise AuthorizationError(
-        f"{request.operation}: 目标不在请求方子树内（parent 链断/超 {PARENT_CHAIN_LIMIT} 层/成环）"
+        f"{request.operation}: 目标不在请求方子树内（parent 链断/超 {PARENT_CHAIN_COUNT} 层/成环）"
     )
 
 

@@ -26,8 +26,10 @@ from .runner_completion_payload import completion_handoff_payload
 # 模块用途: 引用统一完成信封，避免各层父代理各自拼接不同正文。
 DIRECT_CHILD_WAIT_ATTR = "direct_child_wait"
 _WAIT_SCHEMA_VERSION = "direct-child-wait.v1"
-_CONTEXT_CHILD_LIMIT = 12
-_CONTEXT_REQUEST_LIMIT = 3
+# 直接父上下文最多保留的子任务条数；防止上下文列表无限增长。
+_CONTEXT_CHILD_COUNT = 12
+# 直接父上下文最多保留的请求条数；只保留最近的请求，防止上下文膨胀。
+_CONTEXT_REQUEST_COUNT = 3
 
 
 # LLM: This decision is derived only from canonical task ids/statuses and the
@@ -234,7 +236,7 @@ def direct_children_context_payload(manager: Any, parent_run_id: str) -> dict[st
     children.sort(
         key=lambda item: float(getattr(item, "created_at", 0.0) or 0.0)
     )
-    rows = [_direct_child_context_row(item) for item in children[-_CONTEXT_CHILD_LIMIT:]]
+    rows = [_direct_child_context_row(item) for item in children[-_CONTEXT_CHILD_COUNT:]]
     active_ids = [
         str(getattr(item, "id", "") or "")
         for item in children
@@ -386,7 +388,7 @@ def _direct_child_context_row(task: object) -> dict[str, object]:
                 "path_scope": list(getattr(request, "path_scope", []) or [])[:8],
             }
         )
-        if len(requests) >= _CONTEXT_REQUEST_LIMIT:
+        if len(requests) >= _CONTEXT_REQUEST_COUNT:
             break
     handoff = completion_handoff_payload(task)
     return {

@@ -38,7 +38,9 @@ from .plugin_runtime_facts import PluginRuntimeError, resolve_plugin_runtime, wr
 from .user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 from .user_space.owner_resolver import OwnerHomeResult
 
+# 插件可执行文件的权限位（八进制）；可执行脚本用 0o500（无物理单位）。
 _EXECUTABLE_MODE = 0o500
+# 插件数据文件的权限位（八进制）；只读数据文件用 0o400（无物理单位）。
 _DATA_MODE = 0o400
 
 

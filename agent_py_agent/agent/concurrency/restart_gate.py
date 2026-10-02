@@ -14,6 +14,7 @@ from .interrupt import is_interrupted
 _condition = threading.Condition()
 _closed = False
 _executing = 0
+# 重启闸门轮询等待的秒数；重启间隔不足时按这个切片反复探测，避免忙等。
 _WAIT_SLICE_SECONDS = 0.2
 
 

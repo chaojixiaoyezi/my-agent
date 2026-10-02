@@ -1,5 +1,9 @@
 # Verification：结构
 
+## P10 第二批常数整改（2026-10-02，待集成）
+
+`verification/project_facts.py` 的常数改名/补说明：`_SNAPSHOT_MAX_ENTRY_COUNT`（快照缓存条目上限）、`_FACT_MAX_ENTRY_COUNT`、`_MAX_VERIFY_COMMAND_COUNT`（单次验证命令数上限）；数值不变，目录投影随源码一致。
+
 `tool_context/reducer.py::_inline_result_with_archive_anchor`仅对临时模型副本过滤本次`kind=tool_output`且精确匹配归档物理路径的refs及ref内容块。canonical结果和runtime facts仍从原数据读取；普通业务/来源引用保持，原reader返回源分页。外置摘要选择继续接收原结果，避免过滤改变JSON可解析性和选择行为；此片不改执行事实、权限或持久schema。
 
 `tool_call_runtime`继续按原ToolRuntimePolicy判断是否晋升，然后调用`promote_conversation_task_for_run`；该原会话入口承担T锁和权威参数单向同步，宿主选包准备共用同一事务。执行与工具账仍归原ToolExecutor，选包本身不进入工具账。

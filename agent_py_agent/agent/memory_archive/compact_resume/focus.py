@@ -6,7 +6,8 @@ from typing import Any
 
 from ...common.value_parsing import sequence_strings
 
-CAPTURED_ARTIFACT_REF_LIMIT = 8
+# 压缩焦点里最多保留的工件引用条数；防止焦点上下文无限膨胀。
+CAPTURED_ARTIFACT_REF_COUNT = 8
 
 
 def resume_focus_payload(work_state: dict[str, Any], next_actions: list[str]) -> dict[str, Any]:
@@ -42,7 +43,7 @@ def action_first_actions(next_actions: list[str], work_state: dict[str, Any]) ->
 
 def captured_refs_payload(work_state: dict[str, Any]) -> dict[str, Any]:
     artifact_refs = work_state.get("artifact_refs") if isinstance(work_state.get("artifact_refs"), list) else []
-    captured = [artifact_ref_payload(item) for item in artifact_refs[-CAPTURED_ARTIFACT_REF_LIMIT:] if isinstance(item, dict)]
+    captured = [artifact_ref_payload(item) for item in artifact_refs[-CAPTURED_ARTIFACT_REF_COUNT:] if isinstance(item, dict)]
     full_read_coverage = _read_coverage_payload(work_state.get("read_coverage")) or _full_read_coverage_payload(
         artifact_refs
     )
@@ -456,7 +457,7 @@ def _covered_line_prefix_end(ranges: list[tuple[int, int]]) -> int:
 __all__ = [
     "action_first_actions",
     "captured_refs_payload",
-    "CAPTURED_ARTIFACT_REF_LIMIT",
+    "CAPTURED_ARTIFACT_REF_COUNT",
     "full_read_coverage_resume_action",
     "resume_focus_payload",
 ]

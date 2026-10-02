@@ -9,6 +9,8 @@
 - 定向 235 passed、架构守卫 167 passed，三个变异均被拦截，恢复后 99 passed；详见 TESTS。
 - 未验证生产真实模型、运行 Gateway、实际 TUI/IM 展示；下一步由 3a 集成部署并绑定 deepseek-v4-flash 的实际档案，复核真实提炼与渠道显示。
 
+2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。memory_archive 各文件与 `cli/memory_archive_commands.py` 的常数补齐中文说明、缺单位的按生成器后缀表改名（如 `ARCHIVE_SEARCH_FILE_LIMIT`→`ARCHIVE_SEARCH_FILE_COUNT`、`RESUME_RECOMMENDED_READ_PATHS_LIMIT`→`RESUME_RECOMMENDED_READ_PATHS_COUNT`），数值一律不变。
+
 正文哈希向量缓存第四轮修正：构造宽松、写入严格（分支 `my-agent/self-dev-2-vcache`，2026-09-29）：
 - **必须改**：第三轮把 `_load` 改成只有 `FileNotFoundError` 才当空之后，读错误从**构造函数**抛了出去。
   而 4 个懒建缓存的调用点（`_cached_vectors_for`、`_remember_cached_vectors`、`_forget_cached_vectors`、

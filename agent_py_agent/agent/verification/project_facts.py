@@ -64,8 +64,11 @@ _NON_EXECUTING_FLAGS_BY_COMMAND = {
     "make": frozenset({"-n", "--dry-run", "--just-print", "--recon", "-q", "--question", "-t", "--touch",
                        "-i", "--ignore-errors", "-v"}),
 }
+# 项目事实文件的最大字节数；超限视为损坏拒绝读取，防大文件拖慢验证。
 _MAX_FACT_FILE_BYTES = 256 * 1024
-_MAX_VERIFY_COMMANDS = 8
+# 单条验证规则最多允许的验证命令条数；防止规则声明海量命令。
+_MAX_VERIFY_COMMAND_COUNT = 8
+# 验证输出摘要的最大字符数；超长截断，保持验证回执可读。
 _MAX_OUTPUT_SUMMARY_CHARS = 2000
 
 
@@ -238,7 +241,7 @@ def _verify_commands(root: Path) -> list[str]:
             for name in _VERIFY_TARGETS
             if re.search(rf"^{re.escape(name)}\s*:", makefile, re.MULTILINE)
         )
-    return list(dict.fromkeys(verify))[:_MAX_VERIFY_COMMANDS]
+    return list(dict.fromkeys(verify))[:_MAX_VERIFY_COMMAND_COUNT]
 
 
 def _read_small(path: Path) -> str:

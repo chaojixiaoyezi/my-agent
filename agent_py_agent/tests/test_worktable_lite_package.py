@@ -14,7 +14,7 @@ import pytest
 
 from agent_py_agent.agent.plugin_display.protocol import (
     MAX_LINE_CHARS,
-    MAX_TEXT_LINES,
+    MAX_TEXT_LINE_COUNT,
     normalize_display,
 )
 from agent_py_agent.agent.plugin_display.service import PanelQuery, PluginDisplayService
@@ -80,7 +80,7 @@ def render(installed, sessions: list[dict], settings: dict | None = None) -> lis
         # 插件自身的输出仍要通过核心校验且不触发截断
         assert normalize_display("text", {"lines": panel["display"]["lines"]}) == panel["display"]
         lines = panel["display"]["lines"]
-        assert panel["display"]["truncated"] is False and len(lines) <= MAX_TEXT_LINES
+        assert panel["display"]["truncated"] is False and len(lines) <= MAX_TEXT_LINE_COUNT
         assert all(len(line) <= MAX_LINE_CHARS for line in lines)
         assert clients[0].list_tools() == []
     finally:
@@ -137,7 +137,7 @@ def test_max_rows_truncates(installed_worktable):
     # 上限 20 条时会话行让出一行给提示，不被核心截断
     many = [_row(f"s-{index}", now) for index in range(20)]
     lines = render(installed_worktable, many, {"max_rows": 20})
-    assert len(lines) == MAX_TEXT_LINES and lines[-1] == HINT
+    assert len(lines) == MAX_TEXT_LINE_COUNT and lines[-1] == HINT
 
 
 def test_hide_current(installed_worktable):

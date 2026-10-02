@@ -8,6 +8,8 @@ agent/session_lock、agent/user_space、agent/adapter 5 个模块 115 个待整�
 删 TIMEOUT_S（改名后不再重复）、加 REQUEST_TIMEOUT_SECONDS（飞书注册请求超时与推理探测等待上限含义不同）；
 目录重新生成 799 项 `--check` 一致。详见 TESTS.md。
 
+2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。`gateway_parts/request_context.py` 与 `owner_wake_discovery.py` 的常数改名/补说明，如 `DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS`→`DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`（网关轮内子代理完成回执展示上限），数值不变。
+
 `/settings internal <关键词>` 查代码常数（参数中心 P10，分支 `worker/ds1-constants-catalog`，2026-10-01）：
 `settings_control_service._internal` 调 `settings/constants_catalog.search_constants`（只读随包
 `config/constants_catalog.json`，由 `scripts/build_constants_catalog.py` 用 ast 静态扫描生成，799 项/328 文件；

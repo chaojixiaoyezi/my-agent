@@ -77,7 +77,9 @@ def _messages_table(meta: Any) -> Any:
     )
 
 
+# 入队重试的基础退避毫秒数；退避按指数增长，基础值决定首退时间。
 _BASE_BACKOFF_MS = 1000
+# 入队重试的退避毫秒数上限；防止队列堆积时退避无限拉长。
 _MAX_BACKOFF_MS = 300_000  # 退避上限 5 分钟
 # lane advisory 锁的命名空间(int4 classid):与共享 DB 里别的产品的 advisory 锁隔开,绝不串号互锁。
 _LANE_LOCK_NS = 0x6D796167  # "myag"

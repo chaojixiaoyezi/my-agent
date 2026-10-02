@@ -27,7 +27,7 @@ import pytest
 import agent_py_agent.agent.owner_wake_discovery as discovery
 import agent_py_agent.agent.scheduler.repository as repository_module
 from agent_py_agent.agent.owner_wake_discovery import (
-    _FACT_MAX_ENTRIES,
+    _FACT_MAX_ENTRY_COUNT,
     _FACT_TTL_SECONDS,
     _owner_fact_signature,
     _owner_fact_signature_digest,
@@ -1273,11 +1273,11 @@ def test_fact_cache_is_bounded_and_signature_covers_read_paths(fact_cache, tmp_p
     } <= names
     assert any(name.startswith("wake_normal:") for name in names)
 
-    for index in range(_FACT_MAX_ENTRIES + 2):
+    for index in range(_FACT_MAX_ENTRY_COUNT + 2):
         extra = _owner_home(owners, f"u{index:05d}")
         discover_wake_pending_owners(owners)
         del extra
-    assert len(fact_cache._OWNER_FACT_CACHE) <= _FACT_MAX_ENTRIES
+    assert len(fact_cache._OWNER_FACT_CACHE) <= _FACT_MAX_ENTRY_COUNT
 
 
 def test_fact_signature_digest_changes_on_every_relevant_edit(fact_cache, tmp_path) -> None:

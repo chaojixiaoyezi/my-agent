@@ -18,6 +18,28 @@
   code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
   `size_diff.sh` **新增告警 0**（消失 2 条为集成分支其它提交所致）。
 
+## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`）
+
+- **范围**：agent/subagents、contracts、plugin_display、memory_archive、retrieval、common、verification、concurrency、llm_scale、
+  attempt、io、local_storage 目录 + 13 个单文件（owner_wake_discovery/ingress_queue/plugin_manifest/plugin_observation/worker_handler/
+  memory_push/plugin_files_environment/plugin_host_api/startup_recovery/capability_package_manifest/gateway_model_observation/migrations/
+  owner_scoped_pool），共 **103 个**不合规常数（57 个文件）。
+- **做法**：A 补上方中文说明 32 个；B 按生成器后缀表改名 53 个（如 `PARENT_CHAIN_LIMIT`→`PARENT_CHAIN_COUNT`、
+  `ARCHIVE_SEARCH_FILE_LIMIT`→`ARCHIVE_SEARCH_FILE_COUNT`、`RESUME_RECOMMENDED_READ_PATHS_LIMIT`→`RESUME_RECOMMENDED_READ_PATHS_COUNT`、
+  `DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS`→`DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`、`MAX_LESSONS_PER_RUN`→`MAX_LESSONS_PER_RUN_COUNT`、
+  `_SNAPSHOT_MAX_ENTRIES`→`_SNAPSHOT_MAX_ENTRY_COUNT` 等），全仓引用（agent/cli/tests 的 .py，含 `__all__`）一起改，旧名零残留；
+  C 无物理单位 18 个（深度/维度/比率/倍数/协议值/权限位/小时点/水位/ngram/BM25 参数等）只补说明并挪到白名单单独一组注明“无物理单位”。
+  数值一律不变；`compileall` 通过。
+- **白名单/目录**：待整改白名单 685→600（删 A 32 + B 旧名 53；C 18 挪入新组），只减不增；目录重建 800 项，`--check` 一致。
+- **验证**：`test_constants_catalog.py` + `test_constant_names_unique.py` **13 passed**（`_ALLOWED` 同步删除
+  `MAX_CANDIDATE_COUNT` 残留条目——原键实为 MAX_CANDIDATES，改名后重复消失）；26 个相关测试文件全过 + 补跑 5 个引用新名的
+  测试文件（test_memory_bounds/test_plugin_display_service/test_scheduler_scan_costs/test_status_pet_package/
+  test_worktable_lite_package）全过；guards9（10 文件）**167 passed**。
+- **收尾门禁**：check_import_boundaries **0 条**；ruff **All checks passed**；check_doc_sync **PASS**（补 8 个模块文档
+  subagent/memory/gateway/verification 的 02-progress+04-structure，并为 authorization_gate/request_context/memory_archive_commands
+  补同文件中文注释）；code-size strict **hard=0 blocked=False**（报告已还原）；git diff --check 通过；check_clean_package **OK**；
+  `size_diff.sh` **新增告警 0**（消失 2）。
+
 ## 删除死配置 log_analysis_config.yaml，参数中心改三来源（2026-10-01，分支 `worker/ds2-del-log-analysis`，基于 `904b441b4`）
 
 - **删除**：`agent_py_agent/config/log_analysis_config.yaml`（20 键）。依据：P17 修订时核实 log_analysis 产品代码无任何读取点，

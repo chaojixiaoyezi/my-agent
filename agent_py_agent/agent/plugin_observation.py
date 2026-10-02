@@ -24,8 +24,11 @@ OBSERVATION_META_VERSION = "1"
 # 宿主发送前复核的结构化拒绝码
 OBSERVATION_STALE = "OBSERVATION_STALE"
 OBSERVATION_CANDIDATE_UNKNOWN = "OBSERVATION_CANDIDATE_UNKNOWN"
-MAX_CANDIDATES = 64
-MAX_ACTIONS = 8
+# 观察候选列表最多条数；超出截断，保持观察载荷有界。
+MAX_CANDIDATE_COUNT = 64
+# 单次观察最多报告的动作数；防止一次观察携带海量动作。
+MAX_ACTION_COUNT = 8
+# 观察标签的最大字符数；超长截断，防止标签撑爆载荷。
 MAX_LABEL_CHARS = 120
 _OBSERVATION_ID = re.compile(r"obs-[0-9a-f]{24}\Z")
 _CANDIDATE_ID = re.compile(r"cand-[0-9a-f]{16}\Z")
@@ -142,7 +145,7 @@ def parse_observation(payload: object, context: ObservationHostContext) -> Obser
     if not isinstance(generation, str) or not 1 <= len(generation) <= 64 or not _TARGET_TEXT.fullmatch(generation):
         raise ObservationRejected("target_generation")
     rows = payload.get("candidates")
-    limit = max(1, min(int(context.max_candidates), MAX_CANDIDATES))
+    limit = max(1, min(int(context.max_candidates), MAX_CANDIDATE_COUNT))
     if not isinstance(rows, list) or not 1 <= len(rows) <= limit:
         raise ObservationRejected("candidate_count")
     canonical = tuple(_canonical_candidate(row, context) for row in rows)
@@ -172,7 +175,7 @@ def _canonical_candidate(row: object, context: ObservationHostContext) -> dict[s
     if not isinstance(label, str) or not label.strip() or len(label) > MAX_LABEL_CHARS or any(ord(ch) < 32 for ch in label):
         raise ObservationRejected("candidate_label")
     actions = row["actions"]
-    if not isinstance(actions, list) or not 1 <= len(actions) <= MAX_ACTIONS or len(set(actions)) != len(actions):
+    if not isinstance(actions, list) or not 1 <= len(actions) <= MAX_ACTION_COUNT or len(set(actions)) != len(actions):
         raise ObservationRejected("candidate_actions")
     mapped = []
     for action in actions:
@@ -275,7 +278,7 @@ def observation_event_payload_from_envelope(envelope: object, *, task_id: str, o
 
 
 __all__ = [
-    "MAX_ACTIONS", "MAX_CANDIDATES", "MAX_LABEL_CHARS", "OBSERVATION_CANDIDATE_UNKNOWN", "OBSERVATION_ERROR_KEY",
+    "MAX_ACTION_COUNT", "MAX_CANDIDATE_COUNT", "MAX_LABEL_CHARS", "OBSERVATION_CANDIDATE_UNKNOWN", "OBSERVATION_ERROR_KEY",
     "OBSERVATION_KEY", "OBSERVATION_META_EXTENSION", "OBSERVATION_META_VERSION", "OBSERVATION_SCHEMA", "OBSERVATION_STALE",
     "ObservationCandidate", "ObservationHostContext", "ObservationRecord", "ObservationRejected", "current_observation",
     "observation_event_payload_from_envelope", "observation_is_current", "observation_meta", "parse_observation",

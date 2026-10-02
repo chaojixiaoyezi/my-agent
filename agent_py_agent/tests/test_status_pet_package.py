@@ -13,7 +13,7 @@ import pytest
 
 from agent_py_agent.agent.plugin_display.protocol import (
     MAX_LINE_CHARS,
-    MAX_TEXT_LINES,
+    MAX_TEXT_LINE_COUNT,
     normalize_display,
 )
 from agent_py_agent.agent.plugin_display.service import PanelQuery, PluginDisplayService
@@ -84,7 +84,7 @@ def _render_states(installed_pet, settings: dict | None) -> dict:
             display = panel["display"]
             # 插件输出必须原样通过核心校验：不截断、不超限、无控制字符
             assert normalize_display("text", {"lines": display["lines"]}) == display
-            assert display["truncated"] is False and len(display["lines"]) <= min(5, MAX_TEXT_LINES)
+            assert display["truncated"] is False and len(display["lines"]) <= min(5, MAX_TEXT_LINE_COUNT)
             assert all(len(line) <= MAX_LINE_CHARS for line in display["lines"])
             assert all(ord(ch) >= 32 and ord(ch) != 127 for line in display["lines"] for ch in line)
             rendered[state] = display["lines"]

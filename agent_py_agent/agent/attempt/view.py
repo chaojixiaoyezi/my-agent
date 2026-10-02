@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-# FICLONE ioctl（Linux reflink）：_IOW(0x94, 9, int)
+# FICLONE ioctl（Linux reflink）：_IOW(0x94, 9, int)；文件克隆的系统调用号，平台协议值（无物理单位）。
 _FICLONE = 0x40049409
 
 

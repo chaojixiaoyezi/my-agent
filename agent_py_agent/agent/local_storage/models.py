@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# 存储记录预览正文的最大字符数；列表/详情展示时截断，避免整篇内容进展示。
 PREVIEW_CHARS = 12000
 
 

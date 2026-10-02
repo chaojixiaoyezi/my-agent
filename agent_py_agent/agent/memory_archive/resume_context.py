@@ -28,7 +28,7 @@ from .query import (
     local_hit_payload,
     resume_local_query,
 )
-from .query.archive_io import ARCHIVE_SEARCH_FILE_LIMIT
+from .query.archive_io import ARCHIVE_SEARCH_FILE_COUNT
 from .resume_brief import build_resume_brief
 
 _ID_PATTERN = re.compile(r"(subagent-[A-Za-z0-9_.:-]+|gwreq-[A-Za-z0-9_.:-]+|request-[A-Za-z0-9_.:-]+)")
@@ -36,10 +36,12 @@ _ID_PATTERN = re.compile(r"(subagent-[A-Za-z0-9_.:-]+|gwreq-[A-Za-z0-9_.:-]+|req
 # LLM: 恢复线索与归档检索的条数/预览预算，2026-09-28 参数减量 C 组后不再是用户参数；本模块与 memory-archive
 #   CLI 共用这一份定义，改值要一起发版，不要再退回成配置读取。
 # 函数用途: 给出自动恢复最多几条线索、恢复简报推荐几条读取路径、归档扫描与检索的文件上限、正文预览字符数。
-RESUME_AUTO_CONTEXT_LIMIT = 5
-RESUME_RECOMMENDED_READ_PATHS_LIMIT = 20
+RESUME_AUTO_CONTEXT_COUNT = 5
+# 恢复简报最多推荐的读取路径条数；推荐太多失去优先级意义。
+RESUME_RECOMMENDED_READ_PATHS_COUNT = 20
 # 归档扫描总条数上限：0 表示不限（下游按 records[:n] if n > 0 else records 处理）。
-RESUME_ARCHIVE_SCAN_LIMIT = 0
+RESUME_ARCHIVE_SCAN_COUNT = 0
+# 恢复上下文里查询正文预览的最大字符数；预览只用于人读定位。
 QUERY_CONTENT_PREVIEW_CHARS = 500
 
 
@@ -86,7 +88,7 @@ def build_auto_resume_context(
 
 def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
-    limit = RESUME_AUTO_CONTEXT_LIMIT
+    limit = RESUME_AUTO_CONTEXT_COUNT
     records = _collect_resume_archive_records(agent)
     archive_matches, query = _first_archive_matches(records, user_prompt, limit=limit)
     args = _resume_args(query)
@@ -104,7 +106,7 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
             local_hits=local_payloads,
             task_payloads=task_payloads,
             gateway_payloads=gateway_payloads,
-            recommended_read_paths_limit=RESUME_RECOMMENDED_READ_PATHS_LIMIT,
+            recommended_read_paths_limit=RESUME_RECOMMENDED_READ_PATHS_COUNT,
         )
     )
     brief = build_resume_brief(
@@ -126,8 +128,8 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 
 def _collect_resume_archive_records(agent: Any) -> list[dict[str, Any]]:
     roots = _resume_archive_roots(agent)
-    scan_limit = RESUME_ARCHIVE_SCAN_LIMIT
-    file_limit = ARCHIVE_SEARCH_FILE_LIMIT
+    scan_limit = RESUME_ARCHIVE_SCAN_COUNT
+    file_limit = ARCHIVE_SEARCH_FILE_COUNT
     records: list[dict[str, Any]] = []
     seen: set[tuple[str, str, int]] = set()
     for root in roots:

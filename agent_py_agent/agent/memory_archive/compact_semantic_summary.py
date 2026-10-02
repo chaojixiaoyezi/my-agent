@@ -54,9 +54,12 @@ _LOGGER = logging.getLogger(__name__)
 
 # 续跑历史重建的语义摘要首尾保护条数、中段最小长度与输入预算：2026-09-28 参数减量后不再是用户参数，
 # 只在这里定义一处；enabled 仍是用户配置项。
-_DEFAULT_PROTECT_HEAD = 2
-_DEFAULT_PROTECT_TAIL = 6
-_DEFAULT_MIN_MIDDLE = 4
+_DEFAULT_PROTECT_HEAD_COUNT = 2
+# 语义压缩默认保护的最后片段条数；结尾通常承载结论与下一步。
+_DEFAULT_PROTECT_TAIL_COUNT = 6
+# 语义压缩默认至少保留的中间片段条数；太少会丢关键过渡信息。
+_DEFAULT_MIN_MIDDLE_COUNT = 4
+# 语义压缩默认输入的最大字符数；超长截断后再压缩，控制 token 成本。
 _DEFAULT_MAX_INPUT_CHARS = 12_000
 # 机械 fallback 是下轮永久前缀，不应复用摘要输入预算；4K 足以保留任务、约束、
 # 未决项和最新工具引用，同时避免一次无效 provider 摘要把固定前缀重新撑到 12K。
@@ -132,9 +135,9 @@ class SemanticSummaryConfig:
     """从 agent.config 读出的语义摘要开关与参数(缺失/异常一律退默认值)。"""
 
     enabled: bool = True
-    protect_head: int = _DEFAULT_PROTECT_HEAD
-    protect_tail: int = _DEFAULT_PROTECT_TAIL
-    min_middle: int = _DEFAULT_MIN_MIDDLE
+    protect_head: int = _DEFAULT_PROTECT_HEAD_COUNT
+    protect_tail: int = _DEFAULT_PROTECT_TAIL_COUNT
+    min_middle: int = _DEFAULT_MIN_MIDDLE_COUNT
     max_input_chars: int = _DEFAULT_MAX_INPUT_CHARS
 
 
@@ -187,9 +190,9 @@ def semantic_summary_config(agent: object) -> SemanticSummaryConfig:
     config = getattr(agent, "config", None)
     return SemanticSummaryConfig(
         enabled=_bool_field(config, "memory_compact_semantic_summary_enabled", True),
-        protect_head=_DEFAULT_PROTECT_HEAD,
-        protect_tail=_DEFAULT_PROTECT_TAIL,
-        min_middle=_DEFAULT_MIN_MIDDLE,
+        protect_head=_DEFAULT_PROTECT_HEAD_COUNT,
+        protect_tail=_DEFAULT_PROTECT_TAIL_COUNT,
+        min_middle=_DEFAULT_MIN_MIDDLE_COUNT,
         max_input_chars=_DEFAULT_MAX_INPUT_CHARS,
     )
 

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 租户桶字典水位:超过即先回收"已回满令牌"的惰性桶(重建状态完全等价,绝不放宽在途限流),
 # 防长跑进程随历史租户数无界增长(审计 #16)。真·活跃且在限流中的租户是工作集不是泄漏,保留。
-_MAX_TENANTS = 50_000
+_MAX_TENANT_COUNT = 50_000
 
 
 def _now_ms() -> int:
@@ -76,7 +76,7 @@ class TenantRateLimiter:
     """每租户一个独立令牌桶:租户隔离限流。首见租户惰性建桶(共享 rps/burst 配置)。"""
 
     def __init__(
-        self, rps: float, burst: float, *, clock: Callable[[], int] | None = None, max_tenants: int = _MAX_TENANTS
+        self, rps: float, burst: float, *, clock: Callable[[], int] | None = None, max_tenants: int = _MAX_TENANT_COUNT
     ) -> None:
         self._rps = float(rps)
         self._burst = float(burst)

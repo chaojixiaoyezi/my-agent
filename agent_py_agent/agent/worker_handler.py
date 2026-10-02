@@ -45,8 +45,10 @@ from agent_py_agent.agent.tenant_state import TenantRuntimeStateStore
 # 下游真实 agent 调用:Callable[[payload, trace_ctx], int] 返回真实消耗 token 数。None=未接入(默认)。
 Downstream = Callable[[dict, TraceContext], int]
 _DOWNSTREAM: Downstream | None = None
-_DEFAULT_EST = 2000
-_SLOT_TIMEOUT = 30.0
+# 下游未上报时的默认估算 token 数；配额准入用这个估算值做预算判断。
+_DEFAULT_EST_TOKENS = 2000
+# 准入 slot 等待超时秒数；超时按拒绝处理，避免请求无限排队。
+_SLOT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -91,8 +93,8 @@ _ADMISSION = _build_admission()
 _COST_LEDGER = CostLedger()  # 按 run/tenant 累计真实 USD 花费(审计 #19,观测/计费)
 # 被准入挡下的 (tenant, reason),供指标/测试观察。有界环(只留最近 N 条):限流热路径每拒一条 append
 # 一条,用 list 会随拒绝事件无界增长(审计 #16);deque(maxlen) 自动丢最旧,内存恒定。
-_REJECTED_MAX = 1000
-_REJECTED: deque[tuple[str, str]] = deque(maxlen=_REJECTED_MAX)
+_REJECTED_MAX_COUNT = 1000
+_REJECTED: deque[tuple[str, str]] = deque(maxlen=_REJECTED_MAX_COUNT)
 
 
 def _build_runtime_state_store() -> TenantRuntimeStateStore | None:
@@ -145,7 +147,7 @@ def handle(payload: dict) -> None:
         raise ValueError("scale worker 消息缺 tenant，拒绝落入 default 租户")
     tenant = str(payload.get("tenant") or "default")
     ctx = extract(payload) or new_trace()
-    est = int(payload.get("estimated_tokens") or _DEFAULT_EST)
+    est = int(payload.get("estimated_tokens") or _DEFAULT_EST_TOKENS)
     model = str(payload.get("model") or "")
     est_cost = cost_usd(model, est, 0) if model else 0.0  # 无 model 不计 USD(0=不参与 USD 闸)
     verdict = _ADMISSION.precheck(tenant, estimated_tokens=est, estimated_cost_usd=est_cost)
@@ -199,7 +201,7 @@ def _account_cost(payload: dict, tenant: str, est_cost: float, actual_tokens: in
 
 def _run_admitted(payload: dict, ctx: TraceContext, est: int) -> int:
     """占并发槽 + 开计时 span,调下游真实 agent,返回真实消耗 token 数。"""
-    with _ADMISSION.slot(timeout=_SLOT_TIMEOUT):
+    with _ADMISSION.slot(timeout=_SLOT_TIMEOUT_SECONDS):
         with Span("worker.handle", child_context(ctx)):
             return _invoke_downstream(payload, ctx, est)
 

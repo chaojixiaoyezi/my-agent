@@ -16,6 +16,10 @@
   数值不变，引用全仓同步（含测试）；无物理单位常数（倍数/指数/深度）只补说明进白名单单独组。
 - 白名单 685→575＋7；`_ALLOWED` 删 TIMEOUT_S、加 REQUEST_TIMEOUT_SECONDS；`constants_catalog.json` 重新生成 799 项 `--check` 一致。
 
+## P10 第二批常数整改（2026-10-02，待集成）
+
+`gateway_parts/request_context.py::DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT`（原 DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS，子代理完成回执最多展示条数）与 `owner_wake_discovery.py` 的常数改名/补中文说明；数值不变，目录投影随源码一致。
+
 ## 决策实验晋升提示 J6（2026-10-01，本地待集成）
 
 - `request_experiment_promotion.py`：原请求回执仍是唯一幂等权威，新增 promotion_id 和冻结的 evaluation.rule；只返回本次新写入的回执。

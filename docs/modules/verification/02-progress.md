@@ -1,5 +1,7 @@
 # Verification：开发推进
 
+2026-10-02（分支 `worker/ds1-p10-batch2`）：常数整改第二批。`verification/project_facts.py` 的常数补齐中文说明并按后缀表改名（如 `_SNAPSHOT_MAX_ENTRIES`→`_SNAPSHOT_MAX_ENTRY_COUNT`、`_MAX_VERIFY_COMMANDS`→`_MAX_VERIFY_COMMAND_COUNT`），数值不变。
+
 ## 2026-09-28 携带记录没读全时一次性编排 fail-closed（分支 `claude/be-wake-fix`，Codex 审查 B）
 
 生命周期续跑读不到 owner 根或任务索引时，本片 task_attributes 带 `conversation_active_turn_carry_incomplete`。运行时门据此拦下没写 `replacement_for_run_ids` 的 create_subagents，错误码 `TOOL_ONE_SHOT_HISTORY_INCOMPLETE`（已登记恢复提示），不把读不到的前台副作用当成没发生；

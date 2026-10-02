@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# 压缩恢复的读取提示默认最大字符数；提示太长会挤占恢复载荷。
 DEFAULT_HINT_MAX_CHARS = 4000
 
 

@@ -81,6 +81,7 @@ def _bounded_text(value: str, limit: int) -> tuple[str, dict]:
 # 选模型点位两份材料的字符上限（值与原参数一致；参数减量降为读取点旁的内部常量，不再是用户参数）。
 # 只截开头，截断与否仍如实写进 input_completeness。
 MODEL_SELECTION_PROMPT_MAX_CHARS = 4000
+# 选模型摘要的最大字符数；摘要太长会挤占发送载荷。
 MODEL_SELECTION_SUMMARY_MAX_CHARS = 1500
 
 

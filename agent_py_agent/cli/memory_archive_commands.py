@@ -30,9 +30,10 @@ from ..agent.memory_archive.query import (
 )
 from ..agent.memory_archive.resume_brief import build_resume_brief
 from ..agent.memory_archive.resume_context import (
-    ARCHIVE_SEARCH_FILE_LIMIT,
+    # 归档检索最多扫几个文件、恢复简报最多推荐几条读取路径：命令行展示的硬上限，防止一次命令拖出超大结果。
+    ARCHIVE_SEARCH_FILE_COUNT,
     QUERY_CONTENT_PREVIEW_CHARS,
-    RESUME_RECOMMENDED_READ_PATHS_LIMIT,
+    RESUME_RECOMMENDED_READ_PATHS_COUNT,
 )
 from .common import int_arg_or_default, make_agent
 from .memory_archive_rendering import print_archive_list, print_archive_search, print_memory_resume
@@ -61,7 +62,7 @@ def cmd_memory_archive_list(args) -> int:
             date_key=args.date,
             limit=args.limit,
             level=getattr(args, "level", None),
-            file_limit=ARCHIVE_SEARCH_FILE_LIMIT,
+            file_limit=ARCHIVE_SEARCH_FILE_COUNT,
         ),
     )
     payload = {
@@ -89,7 +90,7 @@ def cmd_memory_archive_search(args) -> int:
             layer=args.layer,
             date_key=args.date,
             limit=0,
-            file_limit=ARCHIVE_SEARCH_FILE_LIMIT,
+            file_limit=ARCHIVE_SEARCH_FILE_COUNT,
         ),
     )
     filters = archive_filters_from_args(args)
@@ -125,7 +126,7 @@ def _collect_resume_data(agent, args):
             layer=args.layer,
             date_key=args.date,
             limit=0,
-            file_limit=ARCHIVE_SEARCH_FILE_LIMIT,
+            file_limit=ARCHIVE_SEARCH_FILE_COUNT,
         ),
     )
     filters = archive_filters_from_args(args)
@@ -162,7 +163,7 @@ def cmd_memory_resume(args) -> int:
             local_hits=local_payloads,
             task_payloads=task_payloads,
             gateway_payloads=gateway_payloads,
-            recommended_read_paths_limit=RESUME_RECOMMENDED_READ_PATHS_LIMIT,
+            recommended_read_paths_limit=RESUME_RECOMMENDED_READ_PATHS_COUNT,
         )
     )
     brief = build_resume_brief(

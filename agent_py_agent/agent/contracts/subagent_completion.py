@@ -8,14 +8,17 @@ SUBAGENT_COMPLETION_SCHEMA_VERSION = "subagent-completion.v1"
 CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION = (
     "conversation-subagent-completions.v1"
 )
-DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS = 12
+# 默认在结果里展示的已完成子代理条数；太多会把结果摘要撑长。
+DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT = 12
 # 子代理因同一错误码在授权阶段连续失败而收口时，随完成信封交给直属父级的结构化事实版本。
 TOOL_FAILURE_HALT_SCHEMA_VERSION = "subagent-tool-failure-halt.v1"
 # 收口事实只保留原因码、工具、错误码、阶段、次数和参数名；参数值与输出正文一律不进入事件。
 _TOOL_FAILURE_HALT_TEXT_FIELDS = ("reason_code", "tool", "error_code", "failure_stage")
 _TOOL_FAILURE_HALT_LIST_FIELDS = ("tools", "argument_names")
-_TOOL_FAILURE_HALT_TEXT_LIMIT = 120
-_TOOL_FAILURE_HALT_LIST_LIMIT = 8
+# 工具失败停机详情里单段文本的最大字符数；超长截断，保持回执可读。
+_TOOL_FAILURE_HALT_TEXT_LIMIT_CHARS = 120
+# 工具失败停机详情里最多列出的清单条目数；防止失败原因列表无限增长。
+_TOOL_FAILURE_HALT_LIST_COUNT = 8
 
 
 # LLM: Parent-facing completion context must be derived only from typed observation fields and
@@ -27,7 +30,7 @@ def subagent_completion_context_from_observations(
     *,
     root_task_ids: set[str],
     workspace_task_id: str = "",
-    visible_limit: int = DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+    visible_limit: int = DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
 ) -> tuple[dict[str, object], tuple[str, ...]]:
     selected_roots = {
         str(item).strip() for item in root_task_ids if str(item or "").strip()
@@ -54,7 +57,7 @@ def subagent_completion_context_from_observations(
             key=lambda row: row[0],
         )
     ]
-    limit = max(1, int(visible_limit or DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS))
+    limit = max(1, int(visible_limit or DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT))
     visible = ordered[-limit:]
     if not visible:
         return {}, tuple(issues)
@@ -166,7 +169,7 @@ def completion_tool_failure_halt_facts(value: object) -> dict[str, object]:
         "consecutive_failures": count,
     }
     for key in _TOOL_FAILURE_HALT_TEXT_FIELDS:
-        projected[key] = str(halt.get(key) or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT]
+        projected[key] = str(halt.get(key) or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT_CHARS]
     for key in _TOOL_FAILURE_HALT_LIST_FIELDS:
         projected[key] = _bounded_names(halt.get(key))
     return {"tool_failure_halt": projected}
@@ -177,10 +180,10 @@ def completion_tool_failure_halt_facts(value: object) -> dict[str, object]:
 def _bounded_names(value: object) -> list[str]:
     names: list[str] = []
     for item in value if isinstance(value, list | tuple) else ():
-        name = str(item or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT]
+        name = str(item or "").strip()[:_TOOL_FAILURE_HALT_TEXT_LIMIT_CHARS]
         if name and name not in names:
             names.append(name)
-        if len(names) >= _TOOL_FAILURE_HALT_LIST_LIMIT:
+        if len(names) >= _TOOL_FAILURE_HALT_LIST_COUNT:
             break
     return names
 
@@ -215,7 +218,7 @@ def _nonnegative_int(value: object) -> int:
 
 __all__ = [
     "CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION",
-    "DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS",
+    "DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT",
     "SUBAGENT_COMPLETION_SCHEMA_VERSION",
     "TOOL_FAILURE_HALT_SCHEMA_VERSION",
     "completion_service_window_facts",

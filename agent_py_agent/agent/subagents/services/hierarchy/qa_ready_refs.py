@@ -9,10 +9,11 @@ from typing import Any
 from ...models import TaskStatus, task_has_status
 from ...role_templates import role_template_snapshot_for_task
 
-_READY_SCAN_MAX_NODES = 64
+# 就绪引用扫描最多遍历的节点数；防止超大任务树拖慢扫描。
+_READY_SCAN_MAX_NODE_COUNT = 64
 
 
-def ready_implementation_refs(manager: Any, parent: object, *, max_nodes: int = _READY_SCAN_MAX_NODES) -> list[dict[str, object]]:
+def ready_implementation_refs(manager: Any, parent: object, *, max_nodes: int = _READY_SCAN_MAX_NODE_COUNT) -> list[dict[str, object]]:
     refs: list[dict[str, object]] = []
     queue = [str(item) for item in _list_attr(parent, "child_ids") if str(item or "").strip()]
     seen: set[str] = set()
@@ -33,7 +34,7 @@ def ready_implementation_refs(manager: Any, parent: object, *, max_nodes: int = 
 
 
 def has_ready_implementation_child(manager: Any, parent: object) -> bool:
-    return bool(ready_implementation_refs(manager, parent, max_nodes=_READY_SCAN_MAX_NODES))
+    return bool(ready_implementation_refs(manager, parent, max_nodes=_READY_SCAN_MAX_NODE_COUNT))
 
 
 def flatten_ready_ref_values(ready_refs: list[dict[str, object]], key: str, *, max_refs: int = 20) -> list[str]:

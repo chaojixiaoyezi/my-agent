@@ -9,7 +9,9 @@ from pathlib import Path
 
 from .encoding_detect import decode_bytes
 
-_CHUNK = 64 * 1024
+# 文本编码探测与分页读取的单次读取字节块大小；块太大首屏慢、太小探测不准。
+_CHUNK_BYTES = 64 * 1024
+# 页索引最多记录的分页点数；防止超长文件产生无界索引，超限时退化为顺序读取。
 _MAX_POINTS = 1024
 
 
@@ -24,7 +26,7 @@ def text_file_fingerprint(path: Path) -> tuple[int, ...]:
 # 函数用途: 在有限样本内选文本编码，后续流式读取仍严格校验，绝不用替换字符掩盖错误。
 def _stream_encoding(path: Path) -> str:
     with path.open("rb") as handle:
-        sample = handle.read(_CHUNK)
+        sample = handle.read(_CHUNK_BYTES)
     for marker, codec in ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
                           (codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF16_LE, "utf-16"),
                           (codecs.BOM_UTF16_BE, "utf-16")):
@@ -71,7 +73,7 @@ class TextFileIndex:
         with self.open() as handle:
             handle.seek(cookie)
             while position < offset:
-                part = handle.read(min(_CHUNK, offset - position))
+                part = handle.read(min(_CHUNK_BYTES, offset - position))
                 if not part:
                     break
                 position += len(part)
@@ -97,10 +99,10 @@ def text_file_index(tool, path: Path) -> TextFileIndex:
     if key in cache:
         return cache[key]
     encoding = _stream_encoding(path)
-    stride = max(_CHUNK, (fingerprint[2] + _MAX_POINTS - 2) // (_MAX_POINTS - 1))
+    stride = max(_CHUNK_BYTES, (fingerprint[2] + _MAX_POINTS - 2) // (_MAX_POINTS - 1))
     points, total, line_breaks, last, next_point = [(0, 0)], 0, 0, "", stride
     with path.open("r", encoding=encoding, newline=None) as handle:
-        while part := handle.read(_CHUNK):
+        while part := handle.read(_CHUNK_BYTES):
             total += len(part)
             line_breaks += part.count("\n")
             last = part[-1]

@@ -29,6 +29,7 @@ _thread_wakeups: dict[int, set[threading.Event]] = {}
 # 会话运行时 cancels the turn token immediately, gives cooperative cleanup 100 ms,
 # then aborts the task handle. Transport close hooks are advisory cleanup too:
 # a slow socket close must never make an IM/CLI stop wait for the provider timeout.
+# 优雅中断等待的秒数；慢 socket 关闭不能拖住 IM/CLI 的停止响应（上限保护）。
 _GRACEFUL_INTERRUPT_TIMEOUT_SECONDS = 0.1
 
 

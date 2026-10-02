@@ -37,6 +37,7 @@ def _char_ngrams(run: str) -> list[str]:
 
 # BM25 标准参数(Robertson/Sparck-Jones 经典默认)。
 K1 = 1.2
+# BM25 的 b 参数（文档长度归一化）；Robertson/Sparck-Jones 经典默认（无物理单位）。
 B = 0.75
 # 精确短语命中加成:tokenize 把"部署口令"切成 [部署,署口,口令],三个 bigram 分散命中
 # 不如整串出现可靠——整串在行内出现时给固定加成。

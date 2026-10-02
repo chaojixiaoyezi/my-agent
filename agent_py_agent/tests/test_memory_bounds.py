@@ -120,11 +120,11 @@ def test_rejected_buffer_is_bounded() -> None:
 
     worker_handler.reset_for_test(_reject_all_admission())
     try:
-        n = worker_handler._REJECTED_MAX + 500
+        n = worker_handler._REJECTED_MAX_COUNT + 500
         for i in range(n):
             worker_handler.handle({"tenant": f"t{i}", "estimated_tokens": 10_000})  # 真发被拒消息
         # 拒绝事件远超上限,但缓冲恒定在 maxlen(丢最旧留最近),不无界膨胀
-        assert len(worker_handler._REJECTED) == worker_handler._REJECTED_MAX
+        assert len(worker_handler._REJECTED) == worker_handler._REJECTED_MAX_COUNT
         assert ("t" + str(n - 1), "budget_exceeded") in worker_handler._REJECTED  # 最近的还在
     finally:
         worker_handler.reset_for_test()

@@ -10,7 +10,7 @@ from agent_py_agent.agent.plugin_display import service as display_service
 from agent_py_agent.agent.plugin_display.protocol import (
     DISPLAY_EXTENSION,
     MAX_LINE_CHARS,
-    MAX_TEXT_LINES,
+    MAX_TEXT_LINE_COUNT,
     PanelDeclaration,
     normalize_display,
     validate_panels,
@@ -50,10 +50,10 @@ def test_validate_panels_limits_count_and_duplicate_ids():
 
 
 def test_normalize_display_truncates_and_strips_control_characters():
-    lines = ["\x1b[31mred\x07"] + ["x" * (MAX_LINE_CHARS + 5)] + ["y"] * (MAX_TEXT_LINES + 3)
+    lines = ["\x1b[31mred\x07"] + ["x" * (MAX_LINE_CHARS + 5)] + ["y"] * (MAX_TEXT_LINE_COUNT + 3)
     out = normalize_display("text", {"lines": lines})
     assert out["lines"][0] == "[31mred"
-    assert len(out["lines"]) == MAX_TEXT_LINES and len(out["lines"][1]) == MAX_LINE_CHARS
+    assert len(out["lines"]) == MAX_TEXT_LINE_COUNT and len(out["lines"][1]) == MAX_LINE_CHARS
     assert out["truncated"] is True
     table = normalize_display("table", {"columns": ["a", "b"], "rows": [["1"], ["1", "2", "3"]]})
     assert table["rows"] == [["1", ""], ["1", "2"]] and table["truncated"] is True
@@ -306,9 +306,9 @@ def test_invalid_plugin_output_becomes_error_not_exception(monkeypatch):
 
 def test_requested_panel_count_is_bounded():
     h = _Harness()
-    many = tuple(("pet", "line") for _ in range(display_service.MAX_REQUESTED_PANELS + 5))
+    many = tuple(("pet", "line") for _ in range(display_service.MAX_REQUESTED_PANEL_COUNT + 5))
     out = h.service.panels(PanelQuery(object(), "owner", "thread:t1", {}, many))
-    assert len(out) == display_service.MAX_REQUESTED_PANELS
+    assert len(out) == display_service.MAX_REQUESTED_PANEL_COUNT
 
 
 def test_context_topic_forwards_only_public_numbers():

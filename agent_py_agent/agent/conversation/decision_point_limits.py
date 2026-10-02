@@ -9,7 +9,7 @@ from __future__ import annotations
 # 交付复核：本轮不同验证焦点至少、至多几个（含两端）。
 DELIVERY_FOCUSES_MIN = 2
 DELIVERY_FOCUSES_MAX = 12
-# 可选操作建议：页面观察里至少几个候选；上限是观察格式自己的 plugin_observation.MAX_CANDIDATES。
+# 可选操作建议：页面观察里至少几个候选；上限是观察格式自己的 plugin_observation.MAX_CANDIDATE_COUNT。
 ACTION_CANDIDATES_MIN = 2
 # 阅读顺序：一次抓取至少几个网页才值得排顺序。
 MATERIAL_PAGES_MIN = 2

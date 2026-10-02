@@ -1,5 +1,9 @@
 # Subagent Structure
 
+## P10 第二批常数整改（2026-10-02，待集成）
+
+subagents 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补中文说明：`authorization_gate.py::PARENT_CHAIN_COUNT`（parent 链查询层数上限，原 PARENT_CHAIN_LIMIT）、`lesson_ledger.py::MAX_LESSONS_PER_RUN_COUNT`（单 run 经验条数上限）等 10 个文件；数值不变，随包目录投影与源码保持一致。
+
 ## 代理树投影模型与智能程度（2026-09-30，已实现）
 
 - `subagents/kernel.py::SubagentKernelRun` 新增 `model_profile_id` / `reasoning_effort` 两个冻结值字段，从任务属性 `host_model_profile.v1` / `host_reasoning_effort.v1` 投影（线程未物化时的回退源）。

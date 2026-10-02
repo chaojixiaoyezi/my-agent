@@ -14,9 +14,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 _MAX_SCHEMA_DEPTH = 32
-_MAX_ISSUES = 32
-_MAX_COERCIONS = 64
+# 工具参数校验最多报告的问题条数；超出截断，保持错误回执有界。
+_MAX_ISSUE_COUNT = 32
+# 单次工具参数转换最多执行的强制次数；防止循环转换死循环。
+_MAX_COERCION_COUNT = 64
+# 标量参数转换时允许的最大字符数；超长拒绝，防止把超大文本当标量。
 _MAX_SCALAR_COERCION_CHARS = 1_024
+# 容器类型（列表/字典）参数转换时单值允许的最大字符数；超长拒绝，防止巨型参数。
 _MAX_CONTAINER_COERCION_CHARS = 1_000_000
 _INTEGER_TEXT_RE = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
 _NUMBER_TEXT_RE = re.compile(
@@ -116,7 +120,7 @@ def normalize_tool_input(value: Any, schema: dict[str, Any]) -> ToolInputNormali
         depth=0,
         coercions=coercions,
     )
-    return ToolInputNormalization(normalized, tuple(coercions[:_MAX_COERCIONS]))
+    return ToolInputNormalization(normalized, tuple(coercions[:_MAX_COERCION_COUNT]))
 
 
 # LLM: 校验器实现项目实际使用的有限 JSON Schema 子集；未知 annotation 不获得机器权威。
@@ -131,7 +135,7 @@ def validate_tool_input(value: Any, schema: dict[str, Any]) -> ToolInputValidati
         depth=0,
         issues=issues,
     )
-    return ToolInputValidation(tuple(issues[:_MAX_ISSUES]))
+    return ToolInputValidation(tuple(issues[:_MAX_ISSUE_COUNT]))
 
 
 # LLM: normalization 先解析本地 $ref/组合分支，再按明确类型递归；达到深度上限就保持原值。
@@ -252,7 +256,7 @@ def _coerce_scalar(
         return value
     if not _matches_declared_type(target, schema):
         return value
-    if len(coercions) < _MAX_COERCIONS:
+    if len(coercions) < _MAX_COERCION_COUNT:
         coercions.append(
             ToolInputCoercion(
                 path=path,
@@ -315,7 +319,7 @@ def _validate_node(
     depth: int,
     issues: list[ToolInputIssue],
 ) -> None:
-    if len(issues) >= _MAX_ISSUES:
+    if len(issues) >= _MAX_ISSUE_COUNT:
         return
     if depth > _MAX_SCHEMA_DEPTH:
         issues.append(ToolInputIssue("maxDepth", path, _MAX_SCHEMA_DEPTH, _json_type(value)))
@@ -475,7 +479,7 @@ def _validate_exclusive_arguments(
     if not isinstance(groups, list):
         return
     for group in groups:
-        if len(issues) >= _MAX_ISSUES or not isinstance(group, list):
+        if len(issues) >= _MAX_ISSUE_COUNT or not isinstance(group, list):
             return
         conflicting = [name for name in group if name in value]
         if len(conflicting) < 2:

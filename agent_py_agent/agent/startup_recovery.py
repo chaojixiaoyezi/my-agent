@@ -23,7 +23,9 @@ from .subagents.models import SubAgentBoardOptions, TaskStatus, task_status_in
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
+# 启动恢复判定“近期活跃工作”的时间窗秒数（72 小时）；窗口外的不再尝试恢复。
 _ACTIVE_WORK_RECENT_SECONDS = 72 * 60 * 60
+# 恢复简报里任务目标预览的最大字符数；超长截断，保持简报紧凑。
 _RECENT_TASK_GOAL_PREVIEW_CHARS = 160
 
 

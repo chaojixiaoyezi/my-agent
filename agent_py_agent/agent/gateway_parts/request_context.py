@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..concurrency.interrupt import is_interrupted
 from ..contracts.subagent_completion import (
-    DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+    DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
     subagent_completion_context_from_observations,
 )
 from ..conversation import history_projection
@@ -539,7 +539,8 @@ def _gateway_subagent_completion_context(
         observations,
         root_task_ids=root_task_ids,
         workspace_task_id=workspace_task_id,
-        visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+        # 子代理完成回执最多展示几条：超出部分只保留计数摘要，防止对话上下文被完成列表撑爆。
+        visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
     )
     load_errors.extend(
         runtime_error_report(

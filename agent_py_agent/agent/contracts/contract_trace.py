@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+# 合同追踪最多展开的层数；防环状引用导致递归无限加深（无物理单位）。
 MAX_TRACE_DEPTH = 3
 
 

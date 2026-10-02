@@ -37,6 +37,7 @@ try:
 except ImportError:
     _HAS_SQLALCHEMY = False
 
+# 迁移串行化用的 PG 事务级 advisory lock key（固定常量）；保证多进程迁移互斥（无物理单位）。
 _ADVISORY_LOCK_KEY = 7242319002  # 迁移串行用的 PG 事务级 advisory lock key(固定常量)
 
 

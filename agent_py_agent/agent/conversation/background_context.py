@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..artifacts.registry import latest_artifact_records
 from ..contracts.subagent_completion import (
-    DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+    DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
     subagent_completion_context_from_observations,
 )
 from ..runtime_errors import runtime_error_report
@@ -369,7 +369,7 @@ def _background_subagent_completion_context(
         observations,
         root_task_ids={task_id},
         workspace_task_id=task_id,
-        visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETIONS,
+        visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
     )
     state.load_errors.extend(
         runtime_error_report(

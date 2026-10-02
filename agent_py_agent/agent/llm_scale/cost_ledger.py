@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import threading
 
-_MAX_RUNS = 10000  # run 维度水位:超过逐出最旧(运行级成本是短期观测,不长期留)
+# 成本账本最多保留的 run 维度记录条数；超出逐出最旧（运行级成本是短期观测）。
+_MAX_RUN_COUNT = 10000  # run 维度水位:超过逐出最旧(运行级成本是短期观测,不长期留)
 
 
 class CostLedger:
-    def __init__(self, *, max_runs: int = _MAX_RUNS) -> None:
+    def __init__(self, *, max_runs: int = _MAX_RUN_COUNT) -> None:
         self._tenant_usd: dict[str, float] = {}
         self._run_usd: dict[str, float] = {}
         self._max_runs = max(1, int(max_runs))

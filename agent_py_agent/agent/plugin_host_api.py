@@ -16,7 +16,9 @@ HOST_API_URL_ENV = "MY_AGENT_HOST_API_URL"
 HOST_API_TOKEN_ENV = "MY_AGENT_HOST_API_TOKEN"
 HOST_API_PATH = "/plugin-host/query"
 HOST_API_TOPICS = ("threads", "activity", "plugins", "gateway")
-MAX_THREADS = 20
+# 宿主 API 最多同时报告的线程数；防止宿主状态面板列出全部线程。
+MAX_THREAD_COUNT = 20
+# 宿主 API 标题的最大字符数；超长截断，保持面板标题一行显示。
 _TITLE_CHARS = 60
 
 _LOCK = threading.Lock()
@@ -78,7 +80,7 @@ def _threads(owner_agent) -> list[dict]:
     store = getattr(owner_agent, "conversation_store", None)
     if store is None:
         return []
-    threads, _errors = store.threads.list_report(limit=MAX_THREADS)
+    threads, _errors = store.threads.list_report(limit=MAX_THREAD_COUNT)
     rows = []
     for thread in reversed(threads):
         title = " ".join(str(getattr(thread, "title", "") or "").split())

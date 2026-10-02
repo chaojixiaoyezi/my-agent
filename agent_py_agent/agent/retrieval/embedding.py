@@ -21,8 +21,10 @@ import urllib.error
 import urllib.request
 from typing import Protocol, runtime_checkable
 
+# 默认 embedding 向量维度；未配置模型时按此维度生成占位向量（无物理单位）。
 DEFAULT_EMBED_DIM = 256
-_EMBED_TIMEOUT = 30.0
+# embedding 调用超时秒数；超时按失败处理并回退，不让检索链路卡死。
+_EMBED_TIMEOUT_SECONDS = 30.0
 
 
 @runtime_checkable
@@ -115,7 +117,7 @@ class OpenAICompatibleEmbedder:
         self._model = model
         self._api_key = api_key
         self._dim = int(dim)
-        self._timeout = _EMBED_TIMEOUT
+        self._timeout = _EMBED_TIMEOUT_SECONDS
 
     @property
     def dim(self) -> int:
@@ -166,7 +168,7 @@ class MiniMaxEmbedder:
         self._model = model
         self._api_key = api_key
         self._dim = int(dim)
-        self._timeout = _EMBED_TIMEOUT
+        self._timeout = _EMBED_TIMEOUT_SECONDS
 
     @property
     def dim(self) -> int:

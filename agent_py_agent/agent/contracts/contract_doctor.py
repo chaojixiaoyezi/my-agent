@@ -9,7 +9,8 @@ from .contract_validation_recovery import recovery_for_findings
 
 CURRENT_VERSION = 2
 DEFAULT_KNOWN_VERIFIERS = ("artifact_acceptance", "tool_trace", "approval_gate")
-IMPOSSIBLE_MIN_SIZE = 100_000_000_000
+# 判定“文件大得不可能”的字节下界；超过即视为损坏或伪造，拒绝继续校验。
+IMPOSSIBLE_MIN_SIZE_BYTES = 100_000_000_000
 
 
 @dataclass(frozen=True)
@@ -86,7 +87,7 @@ def _validate_impossible_artifacts(contract: dict[str, Any], findings: list[dict
         min_size = _optional_int(artifact.get("min_size"))
         required_sections = set(_string_tuple(artifact.get("required_sections")))
         forbidden_words = set(_string_tuple(artifact.get("forbidden_words")))
-        if min_size > IMPOSSIBLE_MIN_SIZE or required_sections & forbidden_words:
+        if min_size > IMPOSSIBLE_MIN_SIZE_BYTES or required_sections & forbidden_words:
             findings.append(_finding("CONTRACT_IMPOSSIBLE", {"path": _text(artifact.get("path"))}))
             return
 

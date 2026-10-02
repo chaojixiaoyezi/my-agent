@@ -1,5 +1,25 @@
 # 设计台账
 
+## P10 常数整改第二批（2026-10-02，ds1，分支 `worker/ds1-p10-batch2`，基于 `8172c08c0`，已实现，待集成）
+
+- **背景**：P10 定案“常数留在读取点、目录只是投影”后，待整改白名单按模块分批清理。本批接第一批之后，
+  范围是 subagents/contracts/plugin_display/memory_archive/retrieval/common/verification/concurrency/llm_scale、
+  attempt/io/local_storage 与 13 个单文件（owner_wake_discovery/ingress_queue/plugin_manifest/plugin_observation/
+  worker_handler/memory_push/plugin_files_environment/plugin_host_api/startup_recovery/capability_package_manifest/
+  gateway_model_observation/migrations/owner_scoped_pool），不碰 memory_store、core.py 与 ds2 的
+  ingestion/scheduler/session_lock/user_space/adapter。
+- **做法**：
+  1. **A 补说明 32 个**：定义上方补一句中文说明（管什么、为什么是这个值），按生成器“最近注释行含中文字符”规则合规。
+  2. **B 改名 53 个**：按 `_UNIT_SUFFIXES` 后缀表补单位改名（`_LIMIT`→`_COUNT`、裸秒→`_SECONDS`、裸字节→`_BYTES`、
+     裸字符→`_CHARS`、裸 token→`_TOKENS` 等），全仓引用（agent/cli/tests 的 .py，含 `__all__`）词边界一起改，旧名零残留。
+  3. **C 无物理单位 18 个**：深度/维度/比率/倍数/协议值/权限位/小时点/水位/ngram/BM25 参数等后缀表无合适单位，
+     只补中文说明，在白名单单列一组（reason 注明“无物理单位”）。
+  4. 数值一律不变；`test_constant_names_unique._ALLOWED` 删除随改名消失的 `MAX_CANDIDATE_COUNT` 残留条目
+     （原键实为 MAX_CANDIDATES，改名后重复消除）。
+- **白名单/目录**：待整改白名单 685→600（删 A 32 + B 旧名 53；C 18 挪入新组，只减不增）；目录重建 800 项，`--check` 一致。
+- **验证**：目录守卫 13 passed；26 个相关测试文件 + 5 个引用新名测试文件全过；guards9 167 passed；import boundaries 0；
+  ruff/doc_sync/code-size strict/diff --check/clean_package 全过；size_diff 新增告警 0（消失 2）。
+
 ## J15 自学习收尾四项（2026-10-01，ds1，分支 `worker/ds1-self-learning-tail`，已实现，待集成）
 
 - **背景**：`DECISION_MODEL_FINAL_HANDOFF.md` 剩余风险"自学习"一条的四个收尾项：

@@ -45,6 +45,7 @@ REQUIRED_CONTEXT_BUNDLE_FIELDS = (
 # put a truncated instruction into the model context because a clipped rule can
 # change a verdict.  Larger profiles remain available through the exact read
 # scope already carried by the task.
+# 审计来源内联展示的最大字符数；超长截断，防止把整段来源塞进上下文。
 _AUDIT_SOURCE_PROFILE_INLINE_MAX_CHARS = 12_000
 _HOST_CLOSEOUT_FILENAMES = frozenset(
     {"final_report.md", "output.json", "runner_result.json", "runner_response.md"}
