@@ -243,3 +243,18 @@ def test_network_isolation_unavailable_fails_closed_without_running(tmp_path, mo
         AttemptExecutionSandbox._READINESS_CACHE.clear()
     assert result.status == "not_run" and result.reason_code == "sandbox_unavailable"
 
+
+
+def test_output_contract_requires_schema_and_bounds_summary():
+    from agent_py_agent.agent.capability.pack_verifier_runner import _parsed_result
+
+    base = {"verifier_id": "check", "package_id": "p"}
+    missing_schema = _parsed_result(json.dumps({"valid": True}), dict(base))
+    assert missing_schema.status == "error" and missing_schema.reason_code == "verifier_output_invalid"
+    bad_item = _parsed_result(json.dumps({"schema": "pack_verifier_result.v1", "valid": False,
+                                          "errors": [{"message": "no code"}]}), dict(base))
+    assert bad_item.reason_code == "verifier_output_invalid"
+    many = [{"code": f"e{index}"} for index in range(7)]
+    result = _parsed_result(json.dumps({"schema": "pack_verifier_result.v1", "valid": False, "errors": many}), dict(base))
+    assert result.status == "failed" and len(result.summary()["error_codes"]) == 5
+    assert result.summary()["error_count"] == 7
