@@ -6,7 +6,7 @@
 
 先读本包 `methods/workflow.md`，再读本次原文与明确约束。输入形状见 `resources/example-source.json`，输出形状见 `templates/delivery.json`；已填写的合成示例见 `resources/example-delivery.json`。示例不是用户故事，空模板不是通过样例。
 
-交付为制作方案和 `drama_text_delivery.v3` JSON：当前原文字节摘要、角色、场次、镜头、主动省略及原因、未决事项。资料内 ID 不是宿主任务编号。
+交付为制作方案和 `drama_text_delivery.v3` JSON：当前原文字节摘要、角色、场次、镜头、主动省略及原因、未决事项。0.4.0 起可选写结构化台词 `lines`、原文短句 `source_quotes` 和道具状态 `props`/`prop_states`，写法见 workflow 方法。资料内 ID 不是宿主任务编号。
 
 每镜显式填写 `source_ids`、`adaptations`、`unresolved`：来源只取本场实际采用的段落；新增和未知逐项说明，没有就写空数组。三项不能同时为空，纯创作转场须说明新增。镜头未决项与顶层未决项分开。编号合法不证明支持关系成立，漏标新增仍须实际阅读发现；`covered_passages` 只计场次声明覆盖。新脚本只接受 v3，不猜填旧 v1/v2。
 
@@ -48,4 +48,4 @@ python3 -c 'import hashlib, sys; from pathlib import Path; print(hashlib.sha256(
 python3 scripts/check_delivery.py --source <本任务原文资料.json> --delivery <本任务交付.json>
 ```
 
-路径相对授权物化位置，不能猜安装目录。输出 `drama_text_check.v3`，核对摘要、声明覆盖、依据字段、ID、时长与镜头状态；另对启用的显式人名报告字面覆盖警告。`name_diagnostics` 区分完整扫描、退出、预算未检查及输出裁剪，详见人物方法。它不证明在场、原文支持、持物因果、对白、审美、媒体或用户接受，不生成宿主完成或发布状态。
+路径相对授权物化位置，不能猜安装目录。输出 `drama_text_check.v3`，核对摘要、声明覆盖、依据字段、ID、时长与镜头状态；另对启用的显式人名报告字面覆盖警告。`name_diagnostics` 区分完整扫描、退出、预算未检查及输出裁剪，详见人物方法。0.4.0 起还核对写了的台词说话人、逐字引用和道具状态接续，报告带 `checker` 身份（脚本 sha256）。它不证明在场、原文支持、持物因果、对白质量、审美、媒体或用户接受，不生成宿主完成或发布状态。

@@ -50,6 +50,7 @@
 ```text
 python3 scripts/check_continuity.py --project output/project.json
 python3 scripts/check_continuity.py --project output/project.json --handoff output/handoff.json --input-file F01=inputs/source.json --input-file F02=output/project.json
+python3 scripts/check_continuity.py --project output/project.json --baseline-project inputs/project-before.json
 ```
 
 F01/F02 只是命令示例，必须对应本次交接清单并绑定全部文件；需要静态 HTML 时添加 `--format html`。入口仍是一个独立标准库脚本，不需要另取隐藏辅助文件。
@@ -59,3 +60,18 @@ CLI 报告升级为 `drama_workflow_check.v2`：`checks.project` 与 `checks.han
 记录实际输出、退出码及所检文件版本。发现错误就修订资料后重算相关 SHA、重跑原脚本，不改弱检查器。未执行可以如实交付未验证资料；执行并无结构错误也只说明本脚本覆盖的客观项目，警告、创作与媒体审阅仍单列。
 
 这些是制作资料的方法，不是宿主执行合同。机械检查发现断链应提示修订；创作深度、镜头美感和节奏效果继续由模型/人审阅，不加入通用宿主硬门。
+
+## 和改动前的项目对比（0.2.0）
+
+在已有项目上修改时（比如用户给了原制作资料、要求改一部分），检查时加上 `--baseline-project <改动前的项目文件>`。这个参数也是显式授权，读取方式和上限与 `--input-file` 相同。
+
+- **报告内容**：`checks.baseline` 和 `baseline_metrics` 会按稳定 ID 列出新增、删除、修改的对象（每类最多 100 条，另给省略数），并给出这些提醒：
+  - `dialogue_speaker_changed`：同一节拍换了说话人，或者同场一句一字不差的台词换了人（常见于重新编号时顺手换了人）。
+  - `beat_kind_changed`：节拍的类型变了。
+  - `baseline_object_removed`：原有对象没了。
+- **只是提醒**：这些都是 warning。用户确实要求改的，在交付说明或交接里写明即可；检查器不知道用户说了什么，也不判断改得对不对。
+- **交接文件**：带 `--handoff` 时，同一阶段里输入、输出都是本包项目的，检查器会逐对象比较。
+  - 真实改了但没有任何交接行点到的，报 `change_not_declared_in_handoff`。
+  - 交接声称新增的整对象在输入里原样已有，报 error；声称省略的整对象在输出里原样还在，也报 error。
+  - 根地址 `""` 不算覆盖全部改动。
+- **原检查器身份**：报告带 `checker.script_sha256`，应等于本包 `scripts/check_continuity.py` 资源的摘要。自写或改过的脚本给出的结果，不能说成"原检查器通过"。

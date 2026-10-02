@@ -43,6 +43,7 @@
 python3 scripts/check_continuity.py --project <本任务制作资料.json>
 python3 scripts/check_continuity.py --project <本任务制作资料.json> --format html
 python3 scripts/check_continuity.py --project output/project.json --handoff output/handoff.json --input-file F01=inputs/source.json --input-file F02=output/project.json
+python3 scripts/check_continuity.py --project output/project.json --baseline-project <改动前的项目.json>
 ```
 
 相对脚本路径指经过授权物化的包资源。例中的 F01/F02 必须对应本次 `files[].id`，绑定每一份交接文件；本次 cwd 下的绑定路径须与交接所声明路径一致。脚本只读显式输入、写 stdout，不根据交接或参考图文字自行打开其它路径，不生成图像/视频、不写项目文件。脚本仍为可单独物化运行的一份标准库 Python 文件，无隐藏辅助资源依赖。

@@ -13,6 +13,7 @@
       "text_match_skip_reason": ""
     }
   ],
+  "props": [],
   "scenes": [
     {
       "id": "",
@@ -34,7 +35,13 @@
       "source_ids": [],
       "adaptations": [],
       "unresolved": [],
-      "offscreen_character_ids": []
+      "offscreen_character_ids": [],
+      "lines": [],
+      "source_quotes": [],
+      "prop_states": {
+        "start": [],
+        "end": []
+      }
     }
   ],
   "omitted_passages": [],

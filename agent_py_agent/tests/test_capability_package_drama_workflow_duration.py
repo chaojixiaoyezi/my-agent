@@ -214,5 +214,5 @@ def test_cli_reports_actual_result_without_changing_input(tmp_path, target, exit
 def test_package_declares_new_version_without_adding_an_executor():
     package = EXAMPLES / "drama-workflow-b"
     declaration = json.loads((package / "declaration.json").read_text(encoding="utf-8"))
-    assert declaration["version"] == "0.1.4"
+    assert declaration["version"] == "0.2.0"
     assert not {"entry", "tools", "actions", "skills", "wheels"} & declaration.keys()

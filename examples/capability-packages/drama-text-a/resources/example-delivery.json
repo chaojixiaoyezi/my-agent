@@ -23,6 +23,12 @@
       "text_match_skip_reason": ""
     }
   ],
+  "props": [
+    {
+      "id": "PR01",
+      "name": "旧书"
+    }
+  ],
   "scenes": [
     {
       "id": "S01",
@@ -78,7 +84,35 @@
         "补写店员拾书的动作，衔接后续装袋。"
       ],
       "unresolved": [],
-      "offscreen_character_ids": []
+      "offscreen_character_ids": [],
+      "lines": [
+        {
+          "speaker_id": "C01",
+          "text": "谁把书落在门口了？"
+        }
+      ],
+      "source_quotes": [
+        {
+          "source_id": "P01",
+          "text": "被雨淋湿的旧书"
+        }
+      ],
+      "prop_states": {
+        "start": [
+          {
+            "prop_id": "PR01",
+            "holder_id": null,
+            "state": "淋湿"
+          }
+        ],
+        "end": [
+          {
+            "prop_id": "PR01",
+            "holder_id": "C01",
+            "state": "淋湿"
+          }
+        ]
+      }
     },
     {
       "id": "SH02",
@@ -98,7 +132,31 @@
         "将夹在书页中的便条改为由赶车人指认，属于可视化改编。"
       ],
       "unresolved": [],
-      "offscreen_character_ids": []
+      "offscreen_character_ids": [],
+      "lines": [
+        {
+          "speaker_id": "C02",
+          "text": "书页里夹着写给远方孩子的便条",
+          "verbatim_source_id": "P02"
+        }
+      ],
+      "source_quotes": [],
+      "prop_states": {
+        "start": [
+          {
+            "prop_id": "PR01",
+            "holder_id": "C01",
+            "state": "淋湿"
+          }
+        ],
+        "end": [
+          {
+            "prop_id": "PR01",
+            "holder_id": "C01",
+            "state": "淋湿"
+          }
+        ]
+      }
     },
     {
       "id": "SH03",
@@ -116,7 +174,30 @@
       ],
       "adaptations": [],
       "unresolved": [],
-      "offscreen_character_ids": []
+      "offscreen_character_ids": [],
+      "lines": [],
+      "source_quotes": [
+        {
+          "source_id": "P03",
+          "text": "把书装进防水袋"
+        }
+      ],
+      "prop_states": {
+        "start": [
+          {
+            "prop_id": "PR01",
+            "holder_id": "C01",
+            "state": "淋湿"
+          }
+        ],
+        "end": [
+          {
+            "prop_id": "PR01",
+            "holder_id": "C02",
+            "state": "装进防水袋"
+          }
+        ]
+      }
     }
   ],
   "omitted_passages": [],

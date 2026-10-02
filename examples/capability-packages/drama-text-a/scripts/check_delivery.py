@@ -1,5 +1,7 @@
-# LLM: 能力包 A 的单文件私有资源，核对 v3 声明并给出字面人物诊断；同步 visible-characters 方法及 basis/duration/visibility/examples 测试，不改变宿主状态。
-# 模块用途: 只读原文与交付，核对来源、时长、可见/画外声明；名称出现不证明在场，不替旧版本补字段或声称语义、媒体已验证。
+# LLM: 能力包 A 的单文件私有资源，核对 v3 声明并给出字面人物诊断；可选 lines/source_quotes/props/prop_states 只在出现时检查；
+#   同步 workflow、review-continuity、visible-characters 方法及 basis/duration/visibility/lines/examples 测试，不改变宿主状态。
+# 模块用途: 只读原文与交付，核对来源、时长、可见/画外声明、结构化台词与逐字引用、道具状态接续；名称出现不证明在场，
+#   不替旧版本补字段或声称语义、媒体已验证。
 # 名称算法改写自 drama-skills@0e8929881bb59248618c4f402707c64723adc017 的 creator_markdown_check.py；MIT 声明见 licenses/drama-skills-LICENSE，差异见 PROVENANCE.md。
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ SHOT_TEXT_FIELDS = ("start_state", "action", "end_state")
 ASCII_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 MAX_NAME_SCAN_WORK = 2_000_000
 MAX_NAME_WARNINGS = 100
+PACKAGE_ID = "drama-text-a"
+PACKAGE_VERSION = "0.4.0"
+MIN_QUOTE_CHARS = 2
 
 
 # LLM: 保留唯一 JSON 键，避免重复字段在模型输出与校验器之间产生不同含义。
@@ -319,12 +324,172 @@ def duration_metrics(source: dict, scenes: dict, shots: dict, errors: list[dict]
             "target_delta_seconds": shot_total - target if shot_total is not None and target is not None else None}
 
 
+# LLM: 报告的检查器身份按本文件实际字节计算，不写死摘要；只帮审阅区分原包程序与自写脚本，不是安全控制或执行证明。
+# 函数用途: 给每份报告附上包 ID、版本和脚本 sha256。
+def checker_identity() -> dict:
+    return {"package_id": PACKAGE_ID, "package_version": PACKAGE_VERSION,
+            "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+
+
+# LLM: “逐字”只按原文段落的连续子串判断，不做空白、标点、全半角或 Unicode 归一化；来源必须是本镜已声明的段落。
+# 函数用途: 核对一条被标成原文逐字的文字，不符时报错并列出它逐字出现的其他段落帮助定位。
+def check_quote(source_id: object, text: str, at: str, passages: dict, shot_sources: set[str], errors: list[dict]) -> None:
+    if not isinstance(source_id, str) or source_id not in shot_sources:
+        errors.append({"code": "quote_source_not_in_shot", "path": at})
+        return
+    if len(text) < MIN_QUOTE_CHARS:
+        errors.append({"code": "quote_too_short", "path": at})
+        return
+    passage = passages[source_id].get("text")
+    if not isinstance(passage, str) or text not in passage:
+        found = sorted(key for key, row in passages.items() if isinstance(row.get("text"), str) and text in row["text"])
+        errors.append({"code": "quote_not_verbatim", "path": at, "source_id": source_id,
+                       "text_length": len(text), "found_in_source_ids": found})
+
+
+# LLM: lines 是可选结构化台词；说话人取 cast ID 或 null（旁白/字幕），必须在本镜可见或画外声明里；不评价台词质量或字数。
+# 函数用途: 校验一镜的台词条目并核对标了 verbatim_source_id 的逐字台词，返回合格条目；没有 lines 键返回 None。
+def check_shot_lines(row: dict, identifier: str, context: dict, shot_sources: set[str], errors: list[dict]) -> list[dict] | None:
+    if "lines" not in row:
+        return None
+    values = row["lines"]
+    if not isinstance(values, list):
+        errors.append({"code": "list_required", "path": f"{identifier}.lines"})
+        return []
+    valid = []
+    for position, line in enumerate(values):
+        at = f"{identifier}.lines[{position}]"
+        if not isinstance(line, dict) or not isinstance(line.get("text"), str) or not line["text"].strip():
+            errors.append({"code": "line_text_required", "path": at})
+            continue
+        speaker = line.get("speaker_id")
+        if speaker is not None and (not isinstance(speaker, str) or speaker not in context["cast"]):
+            errors.append({"code": "unknown_line_speaker", "path": f"{at}.speaker_id"})
+            continue
+        if speaker is not None and speaker not in context["declared"][identifier]:
+            errors.append({"code": "line_speaker_undeclared", "path": f"{at}.speaker_id", "character_id": speaker})
+        if "verbatim_source_id" in line:
+            check_quote(line["verbatim_source_id"], line["text"], at, context["passages"], shot_sources, errors)
+        valid.append(line)
+    return valid
+
+
+# LLM: source_quotes 是作者显式声明的原文短句依据，同样只做逐字子串核对；不扫描散文里的引号。
+# 函数用途: 核对一镜的原文引用条目，返回条目数。
+def check_source_quotes(row: dict, identifier: str, passages: dict, shot_sources: set[str], errors: list[dict]) -> int:
+    if "source_quotes" not in row:
+        return 0
+    values = row["source_quotes"]
+    if not isinstance(values, list):
+        errors.append({"code": "list_required", "path": f"{identifier}.source_quotes"})
+        return 0
+    for position, quote in enumerate(values):
+        at = f"{identifier}.source_quotes[{position}]"
+        if not isinstance(quote, dict) or not isinstance(quote.get("text"), str) or not quote["text"].strip():
+            errors.append({"code": "quote_text_required", "path": at})
+            continue
+        check_quote(quote.get("source_id"), quote["text"], at, passages, shot_sources, errors)
+    return len(values)
+
+
+# LLM: 道具状态是作者自定的短标签，只比较标签和持有人，不读正文；持有人必须在本镜声明里，在画外只提醒。
+# 函数用途: 校验一个时刻（start/end）的道具状态列表，返回 道具 ID → (持有人, 标签)。
+def moment_prop_states(entries: object, at: str, shot: dict, context: dict, errors: list[dict], warnings: list[dict]) -> dict:
+    if not isinstance(entries, list):
+        errors.append({"code": "list_required", "path": at})
+        return {}
+    states = {}
+    for position, entry in enumerate(entries):
+        where = f"{at}[{position}]"
+        prop, holder, state = (entry.get(key) for key in ("prop_id", "holder_id", "state")) if isinstance(entry, dict) else (None,) * 3
+        if not isinstance(prop, str) or prop not in context["props"] or prop in states:
+            errors.append({"code": "invalid_or_duplicate_prop_state", "path": where})
+        elif holder is not None and (not isinstance(holder, str) or holder not in context["cast"]):
+            errors.append({"code": "unknown_reference", "path": f"{where}.holder_id"})
+        elif not isinstance(state, str) or not state.strip():
+            errors.append({"code": "prop_state_required", "path": f"{where}.state"})
+        else:
+            if holder is not None and holder not in context["declared"][shot["id"]]:
+                errors.append({"code": "prop_holder_undeclared", "path": f"{where}.holder_id", "character_id": holder})
+            elif holder is not None and holder in shot["offscreen"]:
+                warnings.append({"code": "prop_holder_offscreen", "path": f"{where}.holder_id", "character_id": holder})
+            states[prop] = (holder, state)
+    return states
+
+
+# LLM: 数组顺序即叙事顺序；上一镜终点和下一镜起点都声明了同一道具时，持有人或标签不同且下一镜没写 continuity_break 才提醒。
+# 函数用途: 逐对比较相邻镜头的道具状态，返回比较过的对数。
+def prop_continuity(states: list[tuple[str, dict, dict]], warnings: list[dict]) -> int:
+    pairs = 0
+    for (previous_id, _, previous), (identifier, row, current) in zip(states, states[1:]):
+        declared_break = isinstance(row.get("continuity_break"), str) and row["continuity_break"].strip()
+        for prop in sorted(previous.get("end", {}).keys() & current.get("start", {}).keys()):
+            pairs += 1
+            before, after = previous["end"][prop], current["start"][prop]
+            if before != after and not declared_break:
+                warnings.append({"code": "prop_state_discontinuity", "path": identifier, "prop_id": prop,
+                                 "previous_shot": previous_id, "previous_end": {"holder_id": before[0], "state": before[1]},
+                                 "start": {"holder_id": after[0], "state": after[1]}})
+    return pairs
+
+
+# LLM: 道具表与镜头 prop_states 都是可选的显式声明；continuity_break 只看是否填写，不解析内容。
+# 函数用途: 校验一镜的 prop_states 与 continuity_break，返回该镜的 start/end 状态字典。
+def shot_prop_states(row: dict, identifier: str, context: dict, errors: list[dict], warnings: list[dict]) -> dict:
+    if "continuity_break" in row and not isinstance(row["continuity_break"], str):
+        errors.append({"code": "continuity_break_type", "path": f"{identifier}.continuity_break"})
+    if "prop_states" not in row:
+        return {}
+    value = row["prop_states"]
+    if not isinstance(value, dict) or not set(value) <= {"start", "end"}:
+        errors.append({"code": "prop_states_shape", "path": f"{identifier}.prop_states"})
+        return {}
+    offscreen = row.get("offscreen_character_ids")
+    shot = {"id": identifier, "offscreen": {x for x in offscreen if isinstance(x, str)} if isinstance(offscreen, list) else set()}
+    return {moment: moment_prop_states(value[moment], f"{identifier}.prop_states.{moment}", shot, context, errors, warnings)
+            for moment in ("start", "end") if moment in value}
+
+
+# LLM: 可选扩展字段统一在原结构检查后核对；不出现就不查，并用计数（0）和 dialogue_not_structured 让“没查”可见。
+# 函数用途: 核对台词、逐字引用、道具表与道具状态接续，返回报告 metrics 增量。
+def check_extended_fields(delivery: dict, context: dict, shots: dict, scene_sources: dict,
+                          errors: list[dict], warnings: list[dict]) -> dict:
+    props = index_rows(delivery, "props", errors) if "props" in delivery else {}
+    for identifier, row in props.items():
+        if not isinstance(row.get("name"), str) or not row["name"].strip():
+            errors.append({"code": "prop_name_required", "path": f"{identifier}.name"})
+    context = {**context, "props": props}
+    lines_total, by_speaker, shots_with_lines, structured, quotes, states = 0, {}, 0, False, 0, []
+    for identifier, row in shots.items():
+        scene_id = row.get("scene_id")
+        allowed = scene_sources.get(scene_id, set()) if isinstance(scene_id, str) else set()
+        declared_sources = row.get("source_ids") if isinstance(row.get("source_ids"), list) else []
+        shot_sources = {value for value in declared_sources if isinstance(value, str)} & allowed
+        lines = check_shot_lines(row, identifier, context, shot_sources, errors)
+        if lines is not None:
+            structured = True
+            shots_with_lines += bool(lines)
+            lines_total += len(lines)
+            for line in lines:
+                speaker = line.get("speaker_id") or "_narration"
+                by_speaker[speaker] = by_speaker.get(speaker, 0) + 1
+        quotes += check_source_quotes(row, identifier, context["passages"], shot_sources, errors)
+        states.append((identifier, row, shot_prop_states(row, identifier, context, errors, warnings)))
+    pairs = prop_continuity(states, warnings)
+    if not structured:
+        warnings.append({"code": "dialogue_not_structured"})
+    elif not lines_total:
+        warnings.append({"code": "no_dialogue_lines"})
+    return {"dialogue_lines": lines_total, "dialogue_lines_by_speaker": by_speaker, "shots_with_lines": shots_with_lines,
+            "source_quotes": quotes, "props": len(props), "prop_state_pairs_checked": pairs}
+
+
 # LLM: 本包只核对显式 v3 声明及字面诊断，covered_passages 仍指场次采用；旧 schema 不自动升级，不能据此授予宿主完成状态。
 # 函数用途: 查找来源、人物和时长声明缺项，保留名字、改编和未知警告；创作忠实、在场与接续真实性仍交独立阅读。
 def check_delivery(source: object, delivery: object, source_sha256: str) -> dict:
     errors, warnings = [], []
     if not isinstance(source, dict) or not isinstance(delivery, dict):
-        return {"schema": "drama_text_check.v3", "structure_valid": False,
+        return {"schema": "drama_text_check.v3", "structure_valid": False, "checker": checker_identity(),
                 "errors": [{"code": "object_required", "path": "$"}],
                 "name_diagnostics": unchecked_name_diagnostics("structure_errors")}
     if source.get("schema") != "drama_text_source.v1" or delivery.get("schema") != "drama_text_delivery.v3":
@@ -384,11 +549,14 @@ def check_delivery(source: object, delivery: object, source_sha256: str) -> dict
         warnings.append({"code": "explicit_omissions_need_review", "count": len(omitted)})
     durations = duration_metrics(source, scenes, shots, errors)
     diagnostics = diagnose_names(name_owners, shots, declared, skipped, errors, warnings)
+    extended = check_extended_fields(delivery, {"cast": cast, "declared": declared, "passages": passages}, shots,
+                                     scene_sources, errors, warnings)
     warnings.append({"code": "creative_quality_and_media_not_checked"})
-    return {"schema": "drama_text_check.v3", "structure_valid": not errors, "errors": errors,
-            "warnings": warnings, "name_diagnostics": diagnostics,
+    return {"schema": "drama_text_check.v3", "structure_valid": not errors, "checker": checker_identity(),
+            "errors": errors, "warnings": warnings, "name_diagnostics": diagnostics,
             "metrics": {"passages": len(passages), "covered_passages": len(covered),
-            "omitted_passages": len(omitted), "scenes": len(scenes), "shots": len(shots), **durations}}
+            "omitted_passages": len(omitted), "scenes": len(scenes), "shots": len(shots), **durations, **extended,
+            "source_sha256_actual": source_sha256}}
 
 
 # LLM: 开发组件入口只读两份明确输入并打印 v3 报告，解析失败将名字诊断标为未检查；正式调用沿宿主原物化和执行链。
@@ -403,7 +571,7 @@ def main() -> int:
         delivery, _ = read_document(arguments.delivery)
         result = check_delivery(source, delivery, hashlib.sha256(raw).hexdigest())
     except (OSError, ValueError) as exc:
-        result = {"schema": "drama_text_check.v3", "structure_valid": False,
+        result = {"schema": "drama_text_check.v3", "structure_valid": False, "checker": checker_identity(),
                   "errors": [{"code": "invalid_input", "message": str(exc)}],
                   "name_diagnostics": unchecked_name_diagnostics("invalid_input")}
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))

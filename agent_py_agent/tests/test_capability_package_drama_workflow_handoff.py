@@ -227,7 +227,7 @@ def test_cli_is_standalone_and_reports_separate_check_scopes(material, tmp_path)
     assert run.returncode == 0, run.stderr
     result = json.loads(run.stdout)
     assert result["schema"] == "drama_workflow_check.v2"
-    assert result["checks"] == {"project": "passed", "handoff": "passed"}
+    assert result["checks"] == {"project": "passed", "handoff": "passed", "baseline": "not_requested"}
     assert result["structure_valid"]
     assert {key: path.read_bytes() for key, path in bindings.items()} == before
 
@@ -238,7 +238,7 @@ def test_project_only_cli_marks_handoff_not_requested(material, tmp_path):
                          cwd=tmp_path, capture_output=True, text=True, timeout=10, check=False)
     assert run.returncode == 0
     result = json.loads(run.stdout)
-    assert result["checks"] == {"project": "passed", "handoff": "not_requested"}
+    assert result["checks"] == {"project": "passed", "handoff": "not_requested", "baseline": "not_requested"}
     assert any(item["code"] == "handoff_not_checked" for item in result["warnings"])
 
 
@@ -342,7 +342,7 @@ def test_cli_missing_parent_alias_is_not_reported_as_checked(material, tmp_path)
     run = _run(tmp_path, handoff, changed_bindings, "--project", str(project))
     report = json.loads(run.stdout)
     assert run.returncode == 1
-    assert report["checks"] == {"project": "passed", "handoff": "failed"}
+    assert report["checks"] == {"project": "passed", "handoff": "failed", "baseline": "not_requested"}
     assert "input_not_found" in _codes(report)
 
 

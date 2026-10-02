@@ -16,13 +16,16 @@ import pytest
 PACKAGE = Path(__file__).resolve().parents[2] / "examples/capability-packages/drama-text-a"
 
 
-# LLM: 使用公开 fixture 的独立副本并明确声明新版字段；不迁移或改写磁盘上的旧用户产物。
+# LLM: 使用公开 fixture 的独立副本并明确声明新版字段；0.4.0 的可选台词/引用/道具字段另有专测，这里去掉以免干扰来源与人物用例。
 # 函数用途: 为来源关系反例准备可变的三场合成资料。
 def _delivery() -> dict:
     delivery = json.loads((PACKAGE / "resources/example-delivery.json").read_text(encoding="utf-8"))
     delivery["schema"] = "drama_text_delivery.v3"
+    delivery.pop("props", None)
     scenes = {row["id"]: row for row in delivery["scenes"]}
     for shot in delivery["shots"]:
+        for key in ("lines", "source_quotes", "prop_states"):
+            shot.pop(key, None)
         shot["source_ids"] = copy.deepcopy(scenes[shot["scene_id"]]["source_ids"])
         shot["adaptations"] = []
         shot["unresolved"] = []

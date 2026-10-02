@@ -103,7 +103,7 @@ def test_samples_build_reproducibly_and_expose_only_one_package(package, tmp_pat
     assert "declaration.json" not in members
     assert all(item.executable is False for item in members.values())
     if package == "drama-text-a":
-        assert manifest.version == "0.3.0"
+        assert manifest.version == "0.4.0"
         assert len(members) == 15 and "methods/visible-characters.md" in members
     with ZipFile(first) as archive:
         assert set(archive.namelist()) == {"plugin.json", *members}
@@ -132,7 +132,10 @@ def test_text_sample_checks_complete_source_and_shot_coverage(tmp_path):
     assert report["metrics"] == {"passages": 3, "covered_passages": 3, "omitted_passages": 0,
                                  "scenes": 3, "shots": 3, "scene_seconds": 60.0, "shot_seconds": 60.0,
                                  "scene_shot_seconds": {"S01": 20.0, "S02": 20.0, "S03": 20.0},
-                                 "target_declared": True, "target_seconds": 60.0, "target_delta_seconds": 0.0}
+                                 "target_declared": True, "target_seconds": 60.0, "target_delta_seconds": 0.0,
+                                 "dialogue_lines": 2, "dialogue_lines_by_speaker": {"C01": 1, "C02": 1},
+                                 "shots_with_lines": 2, "source_quotes": 2, "props": 1, "prop_state_pairs_checked": 2,
+                                 "source_sha256_actual": report["metrics"]["source_sha256_actual"]}
     assert {item["code"] for item in report["warnings"]} == {
         "creative_quality_and_media_not_checked", "shot_adaptations_need_review",
     }
@@ -149,6 +152,7 @@ def test_text_template_can_be_filled_into_valid_source_bound_delivery(tmp_path):
         template[key] = [{field: copy.deepcopy(row[field]) for field in shape} for row in example[key]]
     template["source_sha256"] = example["source_sha256"]
     template["brief"] = {field: example["brief"][field] for field in template["brief"]}
+    template["props"] = copy.deepcopy(example["props"])
 
     report = _check_a(tmp_path, template)
 
@@ -237,7 +241,8 @@ def test_workflow_sample_keeps_media_unverified(tmp_path):
     report = json.loads(result.stdout)
     assert result.returncode == 0 and report["structure_valid"]
     assert report["metrics"] == {"episodes": 1, "scenes": 1, "shots": 3, "shot_seconds": 60.0,
-                                 "episode_seconds": {"EP01": 60.0}}
+                                 "episode_seconds": {"EP01": 60.0},
+                                 "project_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     assert sum(item["code"] == "reference_media_not_verified" for item in report["warnings"]) == 2
 
 

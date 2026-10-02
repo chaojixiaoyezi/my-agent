@@ -1,6 +1,6 @@
 {
   "plugin_id": "drama-workflow-b",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "summary": "核对短剧制作资料的连续性与交接",
   "capability": {
     "description": "适用于人物、场景、道具、分集、对白节拍和分镜的结构化工作流与报告；参考图只作计划，媒体未验证。",
