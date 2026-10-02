@@ -11,6 +11,14 @@
 - **本轮验证**：`check_import_boundaries.py` 0 条；与改动相关的测试文件 16 个（含仓库级守卫与 `test_packaging.py`）：247 passed；
   Ruff、doc sync、strict code-size（`size_diff.sh` 新增 0）、`git diff --check`、clean-package 全部通过。
 
+## C14 审查修复：剧本 `refs-characters` 只给 cast 时不再错报通过（2026-10-02，分支 `claude/ae-c14-gates-fix`）
+
+- **新增用例**：`test_shuohao_novel_gates.py::test_script_character_refs_gate_is_skipped_without_outline_even_with_cast`。
+  - 剧本检查只给 cast 时，`refs-characters`、`beats-claimed`、`refs-scenes` 都是 skipped；
+  - `refs-characters.passed` 为 null，`complete=false`，跳过数为 3。
+- **红绿**：改前 1 failed、31 passed；改后整文件 32 passed（沙箱外，含宿主安装与确认用例）。
+- **真实验收**：两个插件在隔离环境里的 TUI 与真实模型验收，见 CAPABILITY_PACK_ACCEPTANCE.md 的 C14 节。
+
 ## 常数整改第三批：memory_store/gateway_parts/core.py 54 个常数合规（2026-10-02，分支 `worker/ds2-p10-batch3`，基于 `fa8666950`）
 
 - **范围**：agent/memory_store（13 文件）、agent/gateway_parts（18 文件）、agent/core.py 的 54 个待整改常数

@@ -39,7 +39,7 @@ function skippedGates(stage, refs) {
   const skipped = new Map();
   if (stage === "art" && !refs.cast) skipped.set("no-names", "未提供 cast");
   if (stage === "script" && !refs.outline) skipped.set("beats-claimed", "未提供 outline");
-  if (stage === "script" && !refs.outline && !refs.cast) skipped.set("refs-characters", "未提供 outline/cast");
+  if (stage === "script" && !refs.outline) skipped.set("refs-characters", "未提供 outline");
   if (stage === "script" && !refs.art) skipped.set("refs-scenes", "未提供 art");
   if (stage === "storyboard" && !refs.recipes) skipped.set("shot-recipe", "未挂载镜头配方库");
   if (stage === "storyboard" && !refs.outline && !refs.cast) skipped.set("prompt-no-names", "未提供 outline/cast");

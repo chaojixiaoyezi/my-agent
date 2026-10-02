@@ -220,6 +220,19 @@ def test_missing_optional_references_are_skipped_not_counted_as_passes(tmp_path)
 
 
 @pytest.mark.skipif(NODE is None, reason="本机没有 node")
+def test_script_character_refs_gate_is_skipped_without_outline_even_with_cast(tmp_path):
+    _declaration()
+    _workspace(tmp_path)
+    script = {"operation": "checkup", "path": "渡口-script.json", "cast": "渡口-cast.json"}
+    value = _value(_rpc(tmp_path, [_call("script_check", script, tmp_path)])[-1])
+    gates = {item["id"]: item for item in value["gates"]}
+    assert {gate_id: gates[gate_id]["status"] for gate_id in ("refs-characters", "beats-claimed", "refs-scenes")} == \
+        dict.fromkeys(("refs-characters", "beats-claimed", "refs-scenes"), "skipped")
+    assert gates["refs-characters"]["passed"] is None and value["complete"] is False
+    assert value["counts"]["skipped"] == 3 and value["counts"]["passed"] == value["counts"]["total"] - 3
+
+
+@pytest.mark.skipif(NODE is None, reason="本机没有 node")
 @pytest.mark.parametrize("stage", STAGES + ("report",))
 def test_pinned_upstream_selftests(tmp_path, stage):
     _declaration()

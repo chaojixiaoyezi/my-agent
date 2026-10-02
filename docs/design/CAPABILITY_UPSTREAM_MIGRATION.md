@@ -41,7 +41,7 @@ A 的 M-A1 + M-A2（sol56），3a 已在沙箱外复验插件测试并合入集�
 
 | 编号 | 内容 | 迁成什么 | 说明 |
 | --- | --- | --- | --- |
-| M-B1 | 五个 CLI 的只读子命令：`validate`、`checkup`（含门报告）、`stats`，以及 characters 的 `validate <cast> <book>` | 插件 `shuohao-novel-gates`，五只读工具 `outline_check`、`art_check`、`script_check`、`storyboard_check`、`cast_check` | 2026-10-01 本地候选已实现，待审/外部复验/集成。`read_only`、74+20 向量与结构化门回执有本地测试；完整宿主/TUI/模型验收未完成，详见下方实施记录 |
+| M-B1 | 五个 CLI 的只读子命令：`validate`、`checkup`（含门报告）、`stats`，以及 characters 的 `validate <cast> <book>` | 插件 `shuohao-novel-gates`，五只读工具 `outline_check`、`art_check`、`script_check`、`storyboard_check`、`cast_check` | 2026-10-01 实现并合入 step16z；2026-10-02 ae 审查（修了 `refs-characters` 错报通过）并完成真实 TUI 安装/确认/调用和一次真实模型自然调用，见[验收记录](../tasks/CAPABILITY_PACK_ACCEPTANCE.md#c14-第一批两个插件的审查与真实验收2026-10-02) |
 | M-B2 | 会写文件的子命令：`chunk`、`seed`、`render`、`assemble --out`、`export`、`merge --apply`，以及 `scripts/report.mjs` | 同一个插件里的写工具 | 第二批，**前置条件**：非 Python 插件目前没有写入上下文的跨语言一致性用例（见[任意语言插件](PLUGIN_ANY_LANGUAGE.md)）。先把 `workspace_write` 检查移植到 Node，并补一致性用例；做不到就只把结果放在工具回执里返回，由模型用 `write_file` 落盘，不给插件另开写路径 |
 | M-B3 | 五个 `selftest.mjs`、`scripts/report-selftest.mjs` | 不进插件包；放进仓库测试 | 随 M-B1 本地候选接入，六份原样自检已在真实 Node 执行；没有 node 时跳过 |
 
@@ -131,7 +131,7 @@ M-A1 + M-A2 当前验收状态（2026-10-01）：
 - 已完成：标准 Python 插件包、10 个同源声明工具、4 个上游检查器与上游 selftest 合同、fixture-only 作业状态机、SDK 0.2.0
   逐次读写上下文、插件私有作业记录、MIT/PROVENANCE、两次构建字节一致和真实 MCP 进程组件测试；
 - 已确认包内不含 `provider_adapters.py`、Remotion 或限用途小说样例，真实供应商请求只返回结构化未配置结果；
-- 未验证：真实 TUI 安装/启用/调用，以及真实模型自然调用；按分工留给 3a/ae 在集成后执行，不能由组件测试替代。
+- 真实验收（2026-10-02，ae，`bf4a253a9`）：隔离环境真实 TUI 安装、启用、调用和一次真实模型自然调用都已通过，见[验收记录](../tasks/CAPABILITY_PACK_ACCEPTANCE.md#c14-第一批两个插件的审查与真实验收2026-10-02)。
 
 ae 负责审查：
 - 许可文件与 PROVENANCE 是否齐全；

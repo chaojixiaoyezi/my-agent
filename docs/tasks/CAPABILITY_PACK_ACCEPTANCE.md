@@ -939,6 +939,87 @@ O1（被接替来源收成 cancelled）按约定等 C4 上线后再测。
   - **整单用时**：N08 关闭时 7.3–8.5 秒，打开时 11.1–14.9 秒（中位 14.8 秒）。也就是说，简单请求多等约 6 秒，整单时间接近翻倍。
   - 关闭选择的 3 次只用来计量，不计业务试次。证据在 `c13-frozen-reruns-28435/trials/N08-t10{1,2,3}/`。
 
+## C14 第一批两个插件的审查与真实验收（2026-10-02）
+
+结论：两个插件都通过。
+- 许可和来源齐全，没带进付费调用代码，读写只走宿主上下文，门日志和作业记录不进工作区。
+- 隔离环境里真实 TUI 的安装、确认、调用，以及真实模型自然调用，都成功。
+- 审查发现一处必须修，已修并补测试（分支 `claude/ae-c14-gates-fix`）：只给 cast、不给 outline 时，剧本的 `refs-characters` 门实际没检查，却被报成通过。
+
+### 被测与环境
+- **被测**：`bf4a253a9`（`claude/3a-step16z`），包含 sol2 的 M-B1 和 sol56 的 M-A1 + M-A2。
+- **包**：由被测源码构建，两次构建按字节相同：
+  - shuohao-novel-gates：152564 字节，sha256 `f838f567…`；
+  - drama-media-shell：86211 字节，sha256 `de6e0b87…`。
+- **隔离**：隔离 home，私有端口 8453，审批 auto，Gateway 的 PATH 里是 Node v25.8.2。
+- **模型**：MiniMax-M2.7，目录副本只含这一家 provider，权限 600，用完即删。
+- **工作区**：
+  - wsg：上游"渡口"的大纲、美术、剧本、分镜、角色样例和原文；
+  - wsm：插件测试里的图像和音乐提示词 JSONL，一个夹具音乐作业，一个付费视频作业。
+
+### 只读审查
+
+| 项 | shuohao-novel-gates | drama-media-shell |
+| --- | --- | --- |
+| 许可与来源 | 包里有 LICENSE、NOTICE 原文、PROVENANCE 和 UPSTREAM.json。25 个上游文件的 sha 全部复算一致，"改动：无"属实。NOTICE 的旧样例路径已在 PROVENANCE 注明。NUL 字节还在，`.gitattributes` 标了 `-text` | wheel 里有 MIT 原文和 PROVENANCE（上游地址、固定提交、10 个文件的 sha、改动说明、未迁清单）。改写过的 9 个文件，本机没有上游原件，sha 没法离线复算 |
+| 付费调用 | 包装层和 5 个上游文件里，没有能走到的网络或子进程能力。唯一的 `fetch` 在上游 HTML 报告模板里，render 没开放；`report.mjs` 不进包 | 没有网络、子进程和凭据读取；不含 provider_adapters、Remotion 和限用途样例。请求真实供应商时返回 `PROVIDER_NOT_CONFIGURED`、`paid_generation_called=false` |
+| 读写路径 | 工作区读取全部经本次 `_meta` 裁决，用 O_NOFOLLOW 打开并复核 dev/ino。包装层没有写操作，实际调用的上游函数都不碰文件系统 | 读只经 workspace_io（SDK 0.2.0 逐次上下文）。写只在 run/collect 一处：经写入上下文、anchor、原子写、读回核验。输出路径限于 `production/` 等目录 |
+| 门日志与作业记录 | 不进 storyboard 的 main，等价于 `--no-log`；stats 只读已有日志 | 作业、确认、运行记录只写插件私有数据目录；回执带 `fixture=true`、`generation_success=false` |
+
+### 真实 TUI 直接调用
+- **安装**：
+  - 包放在 owner home 里时，`/plugins install` 成功。
+  - 第一次把包放在 owner 范围外，返回"读取未获授权"。这是预期的边界，属测试者操作问题。
+- **确认**：
+  - gates 是 interpreter 型。`/plugins enable` 先返回本人确认回执，里面有 Node 路径和摘要、入口脚本、17 个包文件逐个的 sha；输入 `--confirm <码>` 后 phase=active。
+  - media-shell 是标准 Python 包，按现有设计，启用不需要确认码。
+- **调用**：
+  - gates：
+    - outline_check：14 道门全过。
+    - storyboard_check（带 script、outline、art、cast）：17 道门过 16、1 道不过，属业务结果。
+    - 工作区前后逐字节一致，任何地方都没有 `.gates.jsonl`。
+  - media-shell：
+    - image-check：结果 valid。
+    - 夹具音乐作业 prepare → confirm → run → status：写出 `production/cue.wav`（204 字节），回执带 `fixture=true`、`generation_success=false`，并注明"夹具，不是真实生成"。
+    - 付费视频作业 run：返回 `PROVIDER_NOT_CONFIGURED`，没写文件。
+    - 作业记录在 owner 的 `data/plugins/data/drama-media-shell/` 下。
+
+### 真实模型自然调用
+MiniMax-M2.7，两边各只发一次需求，需求里不提插件名。
+- **gates**（wsg，"帮我用质量门把这几份资料过一遍"）：
+  - 模型自己调用了五个门工具。
+  - storyboard_check 第一次没带必填的 script，返回 `TOOL_EXECUTION_FAILED`；模型随即带上 script、outline、art、cast 重调，成功。
+  - 请求 done，25 秒，4 次模型调用。工作区不变，没有门日志。
+- **media-shell**（wsm，"检查图像提示词和配乐规范的引用和结构，先不要生成"）：
+  - 调用了 image_prompt_check 和 music_spec_check，都成功；没有调用生产工具。
+  - 请求 done，9 秒，2 次调用。工作区不变。
+
+### 发现与处理
+- **已修（必须修）**：`src/gates.js` 中剧本的 `refs-characters`。
+  - 上游只在没给 outline 时不检查这道门（`novel-script.mjs:238`）。包装层原来要 outline 和 cast 都没给才标跳过，所以只给 cast 时，会把没检查的门报成通过。
+  - 现在改为只看 outline，并补了用例：改前 1 个失败，改后 32 passed。
+  - 这次的自然调用没走到这个组合。
+- **建议**（未改，交原实现方）：
+  - gates：按数据内容跳过的门仍报通过，例如 cast 里没有名字时的 no-names、大纲没有 props 时的 prop-cap、`shots: []`。可以逐一对齐上游的跳过条件，或者给 shots 加 `minItems`。
+  - media-shell：
+    - `production_collect` 的说明写"从私有缓存重新收集"，实际是重新生成同一份夹具字节；
+    - `production_prepare`、`production_confirm` 声明为 read_only，实际会写插件私有记录，说明里应写出这个副作用；
+    - PROVENANCE 应补注 MP4 夹具是新加的；
+    - wheel 的许可元数据可以写成 `Apache-2.0 AND MIT`；
+    - 确认码由 prepare 直接返回，模型自己就能调 confirm。接真实供应商之前，要改成宿主层面的本人确认。
+  - 体验：
+    - enable 的本人确认回执末尾带"错误码：TOOL_INVALID_ARGUMENTS"，看起来像失败；
+    - 包放在 owner 范围外时只报"读取未获授权"，可以直接说明应该放到哪里。
+
+### 证据
+`~/.my-agent/decision-evidence/c14-plugin-acceptance-bf4a2/`（仓库外）：
+- 构建与包摘要、stage-report；
+- 两次自然调用的需求原文和结构化事实；
+- 工具索引副本、工作区前后快照、安装账本、插件私有作业记录；
+- harness。
+
+已扫过，不含密钥。目录副本已删，tmux 已关，没有遗留进程。
+
 ## C25空选后能力包对主线程的可见性只读核对与脚本复现（2026-09-28）
 
 针对 [C24](#c24固定9f88的131072自然长任务两代压缩2026-09-28) 的观察①：包选择结果为空之后，已安装并启用的能力包对主线程是否仍可发现、可读取。方法是固定 `9f88e4905` 源码的只读核对、一份本地合同测试和一次 8435 脚本模型端到端；没有产品、测试或配置改动。`origin/main` `60f6f485a` 对 `skill_search_tool.py`、`skill_snapshot.py`、`package_provider.py` 的差异只是读取失败回执带结构化内部原因（`e4a3dba08`），不改下述路径。

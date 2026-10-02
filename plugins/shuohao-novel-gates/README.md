@@ -4,8 +4,9 @@
 `plugin_package.v6` Node 插件。只用 Node 标准库，要求 Gateway 的 PATH 中有 Node 18+；
 不安装 npm 依赖、不联网、不调用出图服务，也不写工作区。
 
-状态（2026-10-01）：本地候选已实现，待 ae 审查、3a 沙箱外复验和集成。
-真实 TUI 安装/确认/调用与真实模型自然调用**未验证**，仓库 MCP 测试不代替这些入口。
+状态（2026-10-02）：已合入集成分支。ae 审查后修了一处门判定（只给 cast、不给 outline 时剧本的 `refs-characters`
+不再错报通过），并在隔离环境完成真实 TUI 安装/确认/调用和一次真实模型自然调用，
+见[验收记录](../../docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md#c14-第一批两个插件的审查与真实验收2026-10-02)。
 当前执行环境的 `/bin/ps` 启动拒绝和嵌套 Seatbelt 拒绝分别保留为宿主测试失败和沙箱测试跳过，
 不关闭宿主出生身份校验，也不以普通子进程测试冒充沙箱验证。完整命令和结果见
 [TESTS](../../TESTS.md)。
@@ -55,7 +56,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/build_plugin_files_packa
 包文件由 declaration 的显式清单决定，摘要由构建脚本计算。两次构建按字节相同；
 README、conformance、自检、样例、镜头卡和 report 夹具不进 ZIP。
 
-以下是真实入口复核步骤，**不是本轮已经执行的 TUI 验收**：
+真实入口步骤（2026-10-02 已按此在隔离环境验收；安装包须放在 owner 可读范围内）：
 
 1. 管理员输入 `/plugins install "<构建出的 ZIP 绝对路径>"`，安装后默认停用。
 2. 输入 `/plugins enable shuohao-novel-gates`，读取解释器和包文件的确认回执。
