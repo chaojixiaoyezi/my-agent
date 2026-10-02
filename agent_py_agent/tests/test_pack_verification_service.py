@@ -150,7 +150,7 @@ def test_switch_off_is_inert(env, fake_runner):
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "bad": True})
     result = _tool_result(target)
-    assert attach_post_write_verification(env.agent, env.params, "write_file", result) is result
+    assert attach_post_write_verification(env.agent, env.params, result) is result
     assert closeout_rework_block(env.agent, env.params) == ""
     assert not env.task_root.exists() and fake_runner == []
 
@@ -170,7 +170,7 @@ def test_baseline_is_captured_once_and_only_before_mutating_tools(env):
 def test_post_write_checks_matching_deliverable_and_attaches_bounded_summary(env, fake_runner):
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "bad": True})
-    attached = attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attached = attach_post_write_verification(env.agent, env.params, _tool_result(target))
     [summary] = attached.metadata["handler_details"]["pack_verification"]
     assert summary["status"] == "failed" and summary["error_codes"] == ["placeholder_text"]
     assert summary["warning_codes"] == ["creative_quality_and_media_not_checked"]
@@ -178,13 +178,13 @@ def test_post_write_checks_matching_deliverable_and_attaches_bounded_summary(env
     assert [event["event_type"] for event in env.repo.events] == ["pack_verification_completed"]
     other = _write(env.workspace / "out/notes.json", {"schema": "other"})
     untouched = _tool_result(other)
-    assert attach_post_write_verification(env.agent, env.params, "write_file", untouched) is untouched
+    assert attach_post_write_verification(env.agent, env.params, untouched) is untouched
     outside = _write(env.workspace.parent / "elsewhere.json", {"schema": "delivery.v1"})
-    assert attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(outside)).metadata == \
+    assert attach_post_write_verification(env.agent, env.params, _tool_result(outside)).metadata == \
         _tool_result(outside).metadata
     failed_write = ToolResult("call-2", "write_file", "failed", error_code="X",
                               metadata={"handler_details": {"path": str(target)}})
-    assert attach_post_write_verification(env.agent, env.params, "write_file", failed_write) is failed_write
+    assert attach_post_write_verification(env.agent, env.params, failed_write) is failed_write
     assert len(fake_runner) == 1
 
 
@@ -193,20 +193,20 @@ def test_inputs_are_resolved_by_source_and_must_be_unique(env, fake_runner):
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     handoff = _write(env.workspace / "out/handoff.json", {"schema": "handoff.v1"})
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1"})
-    attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {"--source": source, "--handoff": handoff}, "目标本身不算 --peer"
     peer = _write(env.workspace / "out/peer.json", {"schema": "delivery.v1"})
     _write(target, {"schema": "delivery.v1", "v": 1})
-    attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {"--source": source, "--handoff": handoff, "--peer": peer}
     peer.unlink()
     source.write_text(json.dumps({"schema": "source.v1", "edited": True}))
     _write(target, {"schema": "delivery.v1", "v": 2})
-    attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {"--handoff": handoff}, "被就地改过的输入不算任务开始时的原件"
     _write(env.workspace / "out/handoff2.json", {"schema": "handoff.v1"})
     _write(target, {"schema": "delivery.v1", "v": 3})
-    attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {}, "匹配到两个就不交"
     last = [row for row in env.ledger.records() if row["kind"] == "result"][-1]
     assert last["input_matches"] == {"--source": 0, "--handoff": 2, "--peer": 0}
@@ -256,7 +256,7 @@ def test_facts_and_notice_come_only_from_the_ledger(env, fake_runner):
     assert run_pack_verification_facts(env.agent, env.params) is None
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "bad": True})
-    attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
     facts = run_pack_verification_facts(env.agent, env.params)
     assert facts["schema"] == "pack_verifications.v1" and not facts["closeout_checked"]
     text = pack_verification_notice_text(facts)
@@ -269,7 +269,7 @@ def test_facts_and_notice_come_only_from_the_ledger(env, fake_runner):
 def test_final_facts_follow_the_last_closeout_not_stale_writes(env, fake_runner):
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "bad": True})
-    attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
     target.unlink()
     assert closeout_rework_block(env.agent, env.params) == ""
     facts = run_pack_verification_facts(env.agent, env.params)
@@ -365,7 +365,7 @@ def test_real_sandbox_post_write_and_closeout(env):
         pytest.skip("本机平台沙箱不可用")
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "bad": True})
-    attached = attach_post_write_verification(env.agent, env.params, "write_file", _tool_result(target))
+    attached = attach_post_write_verification(env.agent, env.params, _tool_result(target))
     [summary] = attached.metadata["handler_details"]["pack_verification"]
     assert summary["status"] == "failed", summary
     assert summary["error_samples"] == [{"code": "placeholder_text", "location": "SH01.start_state"}]
@@ -388,7 +388,7 @@ def test_tool_execution_seam_calls_both_hooks(monkeypatch, tmp_path):
     order = []
     hooks = types.SimpleNamespace(
         capture_baseline_before_tool=lambda agent, params, tool: order.append(("baseline", tool)),
-        attach_post_write_verification=lambda agent, params, tool, result: order.append(("post", tool)) or "attached")
+        attach_post_write_verification=lambda agent, params, result: order.append(("post", result)) or "attached")
     monkeypatch.setattr(tool_call_runtime, "_pack_verification_hooks", lambda: hooks)
     monkeypatch.setattr(tool_call_runtime, "guarded_tool_call_result", lambda request: None)
     monkeypatch.setattr(tool_call_runtime, "_record_passive_verification", lambda agent, call, result: result)
@@ -417,5 +417,5 @@ def test_tool_execution_seam_calls_both_hooks(monkeypatch, tmp_path):
     request = types.SimpleNamespace(params=params, tool_rounds=0, idx=0, model_call=None)
     execution = tool_call_runtime.execute_traced_tool_call(
         tool_call_runtime.ToolCallRuntimeRequest(agent=agent, request=request, call=call))
-    assert order == [("baseline", "write_file"), ("handler", "write_file"), ("post", "write_file")]
+    assert order == [("baseline", "write_file"), ("handler", "write_file"), ("post", "raw")]
     assert execution.result == "attached"

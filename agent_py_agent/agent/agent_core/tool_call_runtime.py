@@ -204,7 +204,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     }
     result = _record_passive_verification(runtime_request.agent, execution.call, result)
     result = _pack_verification_hooks().attach_post_write_verification(
-        runtime_request.agent, runtime_request.request.params, execution.call.tool_name, result)
+        runtime_request.agent, runtime_request.request.params, result)
     execution = replace(execution, result=result)
     audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
     if one_shot_keys and _one_shot_result_consumes_key(result):

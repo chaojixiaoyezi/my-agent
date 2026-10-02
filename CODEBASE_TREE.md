@@ -12,6 +12,12 @@
 |-- agent_py_agent/agent/capability_verification_manifest.py # 能力包 v2 可选核验声明：交付物识别、钉住的检查程序、输入策略
 |-- agent_py_agent/agent/capability_verifier_consent.py # 检查程序启用前确认、确认码与写入内容激活的同意摘要
 |-- agent_py_agent/agent/capability/pack_verifier_runner.py # 宿主在唯一沙箱入口里跑钉住的包内检查程序（断网、整根只读），返回结构化检查事实
+|-- agent_py_agent/agent/capability/pack_verification_service.py # 宿主核验主流程：记基线、写完就查、收尾再查、输入解析、返工 1 次
+|-- agent_py_agent/agent/capability/pack_verification_hooks.py # 宿主核验接进工具执行缝隙和收尾通道的钩子（不新增模型工具）
+|-- agent_py_agent/agent/capability/pack_verification_scope.py # 宿主核验生效范围：开关、owner、钉住的带检查程序的包、基线模式
+|-- agent_py_agent/agent/capability/pack_verification_matching.py # 按“路径模式 + 字段匹配”认文件，及有界工作区快照
+|-- agent_py_agent/agent/capability/pack_verification_ledger.py # 每 run 一本的宿主核验账本（基线、结果、收尾、返工，权限 600）
+|-- agent_py_agent/agent/capability/pack_verification_report.py # 从核验账本生成最终交付事实和宿主提示文字
 |-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
 |-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
 |-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数
@@ -475,6 +481,7 @@ agent_py_agent/
 |   |   |-- request_audit_records.py   # 审计只读：窗口内请求记录的决策观察与请求结果（owner_id 优先、会话归属兜底），白名单、有界、不写文件
 |   |   |-- request_experiment_promotion.py # /experiment apply 授权内：证据满足规则时经原设置 CAS 晋升 skill_tool 并写回执
 |   |   |-- request_experiment_notice.py # 新晋升回执生成中文宿主提示，复用原队列、当轮流与 IM final，旧回执不补投
+|   |   |-- request_pack_verification_notice.py # 回合结束时把能力包宿主核验结论排成宿主提示，和当轮提示一起发布
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
 |   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
 |   |   |-- stream_writer.py            # 请求级文本缓冲、typed 流事件和显示投影的有序出口

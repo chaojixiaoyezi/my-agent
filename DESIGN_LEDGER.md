@@ -207,6 +207,11 @@
   - **交付存在**：缺失或打不开返工 2 次。
   - 开关 `capability_pack_host_verification_enabled` 仓库默认 false。
 - **块 2 已实现**：`capability/pack_verifier_runner.py`。它只从安装 blob 取钉住的原件，在 `AttemptExecutionSandbox` 里跑（断网、整根只读、只写临时目录），只认 `pack_verifier_result.v1`。`AttemptSandboxSpec.network_access=False` 在 macOS 补了 `(deny network*)`，就绪检查会实际试一次断网，失败就不跑。macOS 和 Linux 车道都实测过，车道要加 `NET_ADMIN` 才能真跑断网用例。
+- **块 3 已实现**（分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `60e100dcb`）：
+  - 本 run 第一次改工作区前记基线；写工具成功后马上检查，回执附有界摘要；收尾时对本回合新建或改过的交付物再查（shell 写的也算），有错误返工 1 次；
+  - 结果、返工次数都记在每 run 一本的核验账本，Compact 和重启后不重置；
+  - 回合结束发宿主提示（`source=pack_verification`），并写 `channel_delivery.pack_verifications`；
+  - 开关 `capability_pack_host_verification_enabled` 默认 false，是管理员边界项。细节见设计文档 3.1 节。
 - **声明协议调整（块 2 内，ae 定，3a 已审同意：旧 baseline 键直接删、不做兼容；必需输入找不到就不跑、不返工）**：检查程序的 `baseline` 换成 `inputs` 列表（最多 4 条，每条 `{flag, source, path_patterns, field_match?, required}`）。起因是 be 对齐包内容时发现，A 的检查器要另一种 schema 的原文，B 要本回合写出的交接文件，只有一个同交付物基线不够用。来源 `task_input`/`turn_output` 是开放字符串，恰好匹配一个才算找到；必需的找不到就不跑（`verifier_input_unresolved`），非必需的找不到就不传。`valid` 必须等于“errors 为空”，退出码不参与判定。
 - **块 1 已实现**：
   - v7 可选块 `capability.verification`（交付物按路径模式加可选结构化字段识别，格式、运行方式、输入策略都是开放字符串）；

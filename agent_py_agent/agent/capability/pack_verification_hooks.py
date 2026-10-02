@@ -40,9 +40,10 @@ def capture_baseline_before_tool(agent: object, params: object, tool_name: str) 
         return
 
 
-# LLM: 只处理成功的写工具；摘要为空时原样返回结果（不加空键），保持未钉包任务的回执逐字节不变。
+# LLM: 只处理成功的写工具（工具名取结果自己的 tool_name）；摘要为空时原样返回结果（不加空键），保持未钉包任务的回执逐字节不变。
 # 函数用途: 写工具成功后核验写出的交付物，把摘要并进回执信封。
-def attach_post_write_verification(agent: object, params: object, tool_name: str, result: object) -> object:
+def attach_post_write_verification(agent: object, params: object, result: object) -> object:
+    tool_name = str(getattr(result, "tool_name", "") or "")
     if tool_name not in WRITE_TOOL_NAMES or not getattr(result, "ok", False) or not host_verification_enabled(agent):
         return result
     metadata = dict(getattr(result, "metadata", None) or {})
