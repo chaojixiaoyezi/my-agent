@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 主机名变化后 SIGTERM 仍能停网关（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`）
+
+- `test_gateway_host_identity.py`（新增，7 项）：
+  - 启动后现算的身份已变，调用已安装的 SIGTERM handler，主循环 5 秒内以“stop requested”退出，停止请求的目标仍是启动身份；
+  - 只剩主机名时，主机名中途变化，本进程 host_id 不变；
+  - macOS 先取硬件 UUID，machine-id 优先于它，非 macOS 不取；
+  - 在 macOS 上真调 gethostuuid：不起子进程，返回格式正确且两次一致（Linux 跳过）；
+  - 取不到 UUID 时退回主机名，新进程跟着主机名走；
+  - 跨进程：有稳定来源时，主机名变化后对活进程仍判活；只剩主机名时，新进程对旧记录给 None，不判死。
+- `test_gateway_commands.py` 两个信号用例改为传入启动身份（`_record_gateway_signal_stop_request` 的身份参数改为必传）。
+
 ## C5 剩余竞态的确定性交错用例（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`）
 
 - `test_goal_fuse_user_turn_first.py` 新增 2 项（用真实车道闸）：

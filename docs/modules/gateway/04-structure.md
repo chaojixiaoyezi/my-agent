@@ -1874,8 +1874,11 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   长期助手 风格）。用于"同一台机器同一 scope+identity 只有一个活进程持有"的网关身份独占；
   持有进程重复 acquire = 刷新心跳，死进程残留锁自动接管。`daemon_control.py` 是它的
   公共 API 转口。
-- `agent/gateway_parts/daemon_metadata.py`：统一提供 process-domain（machine/hostname + PID namespace）、
-  PID 和 start_time 身份。后台会话 claim 与 gateway PID record 共用，不复制一套存活判定。
+- `agent/gateway_parts/daemon_metadata.py`：统一提供 process-domain（machine-id / macOS 硬件 UUID / 主机名 + PID namespace）、
+  PID 和 start_time 身份。后台会话 claim 与 gateway PID record 共用，不复制一套存活判定。`process_host_id` 一个进程只算一次
+  （`_cached_process_host_id`），macOS 硬件 UUID 走 libc `gethostuuid`（`_macos_platform_uuid`），不起子进程。
+- `cli/gateway_process.py` 的信号处理：`_install_gateway_signal_handlers(paths, process_identity)` 把启动身份交给
+  `_record_gateway_signal_stop_request`，与 `_run_gateway_service_loop` 比对的是同一份身份。
 
 ## 路径
 

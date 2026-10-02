@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+## 主机名变化后 SIGTERM 仍能停网关（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，待集成）
+
+- 信号处理函数改用启动时记下的本代身份，和主循环比对同一份。
+- `process_host_id` 在进程内缓存；macOS 用 libc gethostuuid 取硬件 UUID，取不到才退回主机名。
+- 设计、跨进程表现和一次性过渡见设计台账同名节，测试见 TESTS.md 同名节。
+
 ## C5 剩余竞态：熔断判定与用户回合登记同闸（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待集成）
 
 - “在场”查询和熔断落账之间原来没有互斥。现在 `run_claim.user_input_turn_gate` 持车道闸，读在场和落账一次做完。

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 """Gateway daemon metadata helpers shared by PID, lock, and status modules."""
 
+import ctypes
+import functools
 import hashlib
 import json
 import os
@@ -19,6 +21,11 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows import guard.
     fcntl = None
+
+# Linux/容器的稳定主机身份来源，按顺序取第一份非空内容。
+_MACHINE_ID_PATHS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
+# macOS gethostuuid 的等待上限秒数（timespec.tv_sec）；等不到按“取不到”处理，退回主机名。
+_HOST_UUID_WAIT_SECONDS = 5
 
 
 def _utc_now_iso() -> str:
@@ -55,25 +62,64 @@ def _get_process_start_time(pid: int) -> int | str | None:
 
 # LLM: 后台租约只能在“同一进程域且旧 PID 身份已死”时提前接管；machine-id 还要叠加
 # Linux PID namespace，避免多个 Kubernetes Pod 共享 machine-id 后互相把不可见 PID 误判为已死。
+#   一个进程里只算一次并缓存：pid 记录、信号停止请求、主循环和租约核验拿到的都是同一个值。macOS 没有 machine-id 时
+#   原来退回主机名，换网络后主机名会变（step17a 切换时变成 anonymous），本进程前后身份对不上，SIGTERM 写的停止请求被主循环
+#   一直忽略；现在 macOS 先用硬件 UUID，都取不到才用主机名。跨进程：有稳定来源时主机名变化不影响；只剩主机名时，
+#   主机名变后新起的进程会算出另一个值，process_identity_is_live 对旧记录给 None（无法判断、按 TTL 兜底），不会误判已死。
+#   只读系统事实，结果是摘要，原始 machine-id/UUID 不落盘。改动同步 test_gateway_host_identity.py。
 # 函数用途: 生成当前主机/容器进程域标识，供 PID+start_time 租约身份判定复用。
 def process_host_id() -> str:
-    identity_parts: list[str] = []
-    for path in (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id")):
-        try:
-            value = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if value:
-            identity_parts.append(value)
-            break
-    if not identity_parts:
-        identity_parts.append(socket.gethostname().strip() or "unknown-host")
+    return _cached_process_host_id()
+
+
+# LLM: lru_cache 只缓存本进程这一个值；稳定来源取不到才用主机名，Linux 再叠加 PID namespace。组成方式与改前相同，
+#   所以 Linux 与容器上的取值不变；macOS 从主机名换成硬件 UUID，升级后上一版写的记录按“另一主机”处理（只是等 TTL）。
+# 函数用途: 计算并缓存本进程的主机身份摘要。
+@functools.lru_cache(maxsize=1)
+def _cached_process_host_id() -> str:
+    identity_parts = [_stable_host_source() or socket.gethostname().strip() or "unknown-host"]
     try:
         identity_parts.append(os.readlink("/proc/self/ns/pid"))
     except OSError:
         pass
     raw = "\n".join(identity_parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+# LLM: 稳定来源只有两种：machine-id 文件（Linux/容器），macOS 的硬件 UUID；都没有返回空串，由调用方退回主机名。
+#   platform 只给测试指定平台用，产品调用不传。
+# 函数用途: 取当前主机不随网络变化的身份原文。
+def _stable_host_source(platform: str = sys.platform) -> str:
+    for path in _MACHINE_ID_PATHS:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return _macos_platform_uuid() if platform == "darwin" else ""
+
+
+# LLM: ctypes 版 struct timespec（两个 long），只给 gethostuuid 传等待上限；字段顺序和类型不能改。
+# 类用途: gethostuuid 的等待时长参数。
+class _Timespec(ctypes.Structure):
+    _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
+
+
+# LLM: 用 libc 的 gethostuuid() 取硬件 UUID（与 ioreg 显示的 IOPlatformUUID 是同一个值），不起子进程：首次取身份可能
+#   发生在任何代码路径里，起子进程会撞上调用方或测试对 subprocess 的替换。符号不存在或调用失败都返回空串，不抛异常。
+# 函数用途: 取 macOS 硬件 UUID。
+def _macos_platform_uuid() -> str:
+    try:
+        gethostuuid = ctypes.CDLL(None).gethostuuid
+    except (OSError, AttributeError):
+        return ""
+    gethostuuid.argtypes = [ctypes.c_char_p, ctypes.POINTER(_Timespec)]
+    gethostuuid.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(16)
+    if gethostuuid(buffer, ctypes.byref(_Timespec(_HOST_UUID_WAIT_SECONDS, 0))) != 0:
+        return ""
+    return str(uuid.UUID(bytes=buffer.raw[:16])).upper()
 
 
 # LLM: 进程身份由 host_id+pid+start_time 组成，避免只凭 PID 在复用后误认旧执行者仍存活。

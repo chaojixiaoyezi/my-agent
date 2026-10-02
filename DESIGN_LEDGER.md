@@ -1,5 +1,27 @@
 # 设计台账
 
+## 主机名变化后 SIGTERM 仍能停网关：主机身份进程内缓存 + macOS 硬件 UUID（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，已实现，待集成）
+
+- **现场**（3a，step17a 切换）：macOS 没有 /etc/machine-id，`process_host_id` 退回 `socket.gethostname()`；换网络后主机名变成 anonymous。
+  网关 SIGTERM 处理函数 `_record_gateway_signal_stop_request` 现算 `build_process_identity()`，host_id 和启动时记下的对不上，
+  主循环把停止请求当成发给别的进程的而一直忽略，网关停不下来。当时 3a 用 `write_targeted_gateway_stop_request`（从 pid 记录取 host_id）绕过去。
+- **做法**：
+  1. 信号处理函数用启动时记下的本代身份：`_install_gateway_signal_handlers(paths, process_identity)` 和 `_run_gateway_service_loop`
+     都取 `_gateway_context_process_identity(context)`，是同一份；`_record_gateway_signal_stop_request` 的身份改为必传，不再现算。
+  2. `process_host_id()` 在进程内只算一次（`functools.lru_cache`），pid 记录、信号停止请求、主循环、租约核验拿到同一个值。
+  3. 稳定来源：先 machine-id（Linux/容器，取值与改前相同）；macOS 再取硬件 UUID，用 libc `gethostuuid()`（ctypes），
+     它和 ioreg 显示的 IOPlatformUUID 是同一个值（本机已核对相等）；都取不到才用主机名。结果仍是 sha256 摘要，原始 UUID 不落盘。
+- **为什么不用 ioreg 子进程**：首次取身份可能发生在任何代码路径里，起子进程会撞上调用方或测试对 subprocess 的替换（开发中真的撞到：
+  `test_gateway_start_force_restart` 替换了 Popen，首次取身份时 ioreg 调用直接报错），还可能吃掉测试预设的返回值。gethostuuid 不起进程。
+- **跨进程核验在主机名变化后的表现**：
+  - 有稳定来源（Linux machine-id、macOS 硬件 UUID）：主机名变化不影响，`process_identity_is_live` 照常判断。
+  - 只剩主机名可用时：本进程内前后一致（缓存）；主机名变后新起的进程算出另一个值，对旧记录给 None（无法判断，按 TTL 兜底），
+    不会误判已死。别的进程发停止请求走 pid 记录里的身份，不受影响。
+- **一次性过渡**：macOS 上 host_id 从“主机名摘要”换成“硬件 UUID 摘要”。升级后，上一版进程写的身份记录（租约、唤醒尝试）按“另一主机”处理，
+  只是等 TTL，不会误接管；上一版网关停止仍走 pid 记录，不受影响。Linux 取值不变。
+- **没动的**：`tool_operations`、`managed_operation_store` 里还有三处直接拿 `socket.gethostname()` 判断同一主机。主机名变了它们按“另一主机、
+  租约到期前视为存活”处理，是保守方向，不会误判已死；要统一到 `process_host_id` 会改变落盘的 holder_host 格式，留作后续。
+
 ## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，已实现，待集成）
 
 - **来源**：sol2 只读审查第 1 条。“用户回合在场”的查询只短暂持有登记表锁，之后的 `record_continuation_fuse` 落账不受保护。

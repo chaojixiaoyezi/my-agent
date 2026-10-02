@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 811,
+  "count": 812,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2626,6 +2626,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "单条命令帧最大 4 MiB：足够承载大工具输出，又防止无界消息撑爆内存。"
+    },
+    {
+      "name": "_HOST_UUID_WAIT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/daemon_metadata.py",
+      "value": 5,
+      "unit": "秒",
+      "category": "其它",
+      "description": "macOS gethostuuid 的等待上限秒数（timespec.tv_sec）；等不到按“取不到”处理，退回主机名。"
     },
     {
       "name": "_CANDIDATE_LIMIT_COUNT",

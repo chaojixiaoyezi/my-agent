@@ -694,12 +694,13 @@ def _run_gateway_service_loop(context: GatewayRunContext) -> object:
 
 # LLM: SIGTERM/SIGINT 不得再表现成“Python 正常消失”；handler 只写一份小型结构化停止请求，
 # 让现有 watch stop_file 路径负责退出和 drain。它不猜信号发送者，也不在 handler 里跑重诊断。
+#   停止请求的目标身份用启动时记下的本代身份（与 _run_gateway_service_loop 比对的是同一份），不在 handler 里现算。
 # 函数用途: 安装网关信号处理器并返回原 handler，调用方在退出后必须恢复以免污染测试/嵌入运行。
-def _install_gateway_signal_handlers(paths: GatewayPaths) -> dict[int, object]:
+def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict[str, object]) -> dict[int, object]:
     previous: dict[int, object] = {}
 
     def handler(signum: int, _frame: object) -> None:
-        _record_gateway_signal_stop_request(paths, signum)
+        _record_gateway_signal_stop_request(paths, signum, process_identity)
 
     for signum in (signal.SIGTERM, signal.SIGINT):
         previous[signum] = signal.getsignal(signum)
@@ -716,11 +717,14 @@ def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
 
 # LLM: 快照保留 signal、父进程和 systemd 环境事实；只有属于本代进程的已有停止请求
 # 才追加 observed，上一代遗留文件必须被本次 signal 的精确目标记录替换。
+#   process_identity 必须是主循环比对用的同一份启动身份；现算的身份可能因主机名变化与之不符，停止请求会被一直忽略。
 # 函数用途: 原子写入绑定当前进程代次、可供等待和事后审计共同读取的信号停止请求。
-def _record_gateway_signal_stop_request(paths: GatewayPaths, signum: int) -> dict[str, object]:
+def _record_gateway_signal_stop_request(
+    paths: GatewayPaths, signum: int, process_identity: dict[str, object],
+) -> dict[str, object]:
     observed_at = time.time()
     existing = read_json_file(paths.stop_request) if paths.stop_request.exists() else {}
-    process_identity = build_process_identity()
+    process_identity = dict(process_identity)
     signal_name = signal.Signals(signum).name if signum in signal.Signals.__members__.values() else str(signum)
     snapshot: dict[str, object] = {
         "number": int(signum),
@@ -953,7 +957,7 @@ def cmd_gateway_run(args) -> int:
         GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port)
     )
 
-    previous_signal_handlers = _install_gateway_signal_handlers(paths)
+    previous_signal_handlers = _install_gateway_signal_handlers(paths, _gateway_context_process_identity(run_context))
     exit_code = 0
     termination_status = "failed"
     termination_reason = "gateway run ended before termination was classified"

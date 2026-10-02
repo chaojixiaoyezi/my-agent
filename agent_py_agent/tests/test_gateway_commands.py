@@ -414,6 +414,7 @@ class TestGatewayRunStateHelpers:
     def test_gateway_signal_stop_is_typed_and_keeps_forensics(self, tmp_path: Path):
         import signal
 
+        from agent_py_agent.agent.gateway_parts.daemon_metadata import build_process_identity
         from agent_py_agent.cli.gateway_process import (
             _classify_gateway_service_return,
             _record_gateway_signal_stop_request,
@@ -422,11 +423,13 @@ class TestGatewayRunStateHelpers:
 
         stop_path = tmp_path / "gateway.stop"
         paths = SimpleNamespace(stop_request=stop_path)
-        payload = _record_gateway_signal_stop_request(paths, signal.SIGTERM)
+        identity = build_process_identity()
+        payload = _record_gateway_signal_stop_request(paths, signal.SIGTERM, identity)
         context = GatewayRunContext(
             agent=SimpleNamespace(),
             paths=paths,
             config_path=tmp_path / "config.yaml",
+            process_identity=identity,
         )
 
         termination = _classify_gateway_service_return(context, {"summary": "drained"})
@@ -441,12 +444,14 @@ class TestGatewayRunStateHelpers:
     def test_gateway_signal_does_not_relabel_preexisting_planned_stop(self, tmp_path: Path):
         import signal
 
+        from agent_py_agent.agent.gateway_parts.daemon_metadata import build_process_identity
         from agent_py_agent.cli.gateway_process import _record_gateway_signal_stop_request
 
         stop_path = tmp_path / "gateway.stop"
         stop_path.write_text('{"requested_at":1,"reason":"operator restart"}', encoding="utf-8")
 
-        payload = _record_gateway_signal_stop_request(SimpleNamespace(stop_request=stop_path), signal.SIGTERM)
+        payload = _record_gateway_signal_stop_request(
+            SimpleNamespace(stop_request=stop_path), signal.SIGTERM, build_process_identity())
 
         assert payload["reason"] == "operator restart"
         assert "source" not in payload
