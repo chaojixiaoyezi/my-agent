@@ -30,6 +30,7 @@ from agent_py_agent.agent.runtime_context import (
 from agent_py_agent.agent.tooling.content_transport_policy import FileSourceUnavailableError
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_agent.backends import _TestNativeBackend
+from agent_py_agent.tests.test_capability_package_discovery import discovery_fixture
 from agent_py_agent.tests.test_capability_package_task_refs import _agent, _bind_main_task
 from agent_py_agent.tests.test_decision_skill_projection import build
 
@@ -82,6 +83,37 @@ def test_main_lost_package_keeps_other_package_but_rejects_old_and_current_sourc
         assert "package_id: story-a" not in prompt
         assert "methods/SKILL.md" not in prompt
     assert agent.conversation_store.tasks.load(attrs["conversation_task_id"]).skill_snapshot_refs == pins
+
+
+@pytest.mark.parametrize("mode,code", [("removed", "CAPABILITY_PACKAGE_PIN_UNAVAILABLE"),
+                                      ("reenabled", "CAPABILITY_PACKAGE_PIN_STALE")])
+def test_main_lost_package_tells_model_to_report_instead_of_reauthorizing(tmp_path, mode, code):
+    agent, store, entries = _agent(tmp_path)
+    _bind_main_task(agent)
+    tool = SkillSearchTool(agent)
+    assert tool.execute({"action": "get", "package_id": "story-a"}).ok
+    _invalidate(agent, store, entries[0], mode)
+    # 真实 C3 形态：主任务旧 pin 停用或换代后续读，回执不能再叫模型找父代理重新授权。
+    for arguments in ({"action": "get", "package_id": "story-a", "resource_path": "methods/SKILL.md"},
+                      {"action": "search", "package_id": "story-a", "query": "方法"}):
+        failed = tool.execute(arguments)
+        assert not failed.ok and failed.error_code == "CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE"
+        assert failed.recommended_action == "report_blocker" and "父代理" not in failed.recovery_hint
+        payload = json.loads(failed.output)
+        assert payload["package_id"] == "story-a" and payload["details"] == {"error_code": code}
+        assert "next_read" not in payload and "body" not in payload and "matches" not in payload
+    never_pinned = tool.execute({"action": "get", "package_id": "story-missing"})
+    assert never_pinned.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+    assert json.loads(never_pinned.output)["details"] == {"error_code": "CAPABILITY_PACKAGE_NOT_AVAILABLE"}
+
+
+def test_non_pin_package_diagnostic_keeps_original_unavailable_error(tmp_path, skill_catalog_factory):
+    _, snapshot, agent, tool = discovery_fixture(tmp_path, skill_catalog_factory, [])
+    broken = SkillLoadError("capability:story-x", "CAPABILITY_PACKAGE_INVALID", "安装记录损坏", "capability_package")
+    agent.current_skill_snapshot = lambda: replace(snapshot, errors=(*snapshot.errors, broken))
+    failed = tool.execute({"action": "get", "package_id": "story-x"})
+    assert failed.error_code == "SKILL_SNAPSHOT_UNAVAILABLE"
+    assert json.loads(failed.output)["details"] == {"error_code": "CAPABILITY_PACKAGE_NOT_AVAILABLE"}
 
 
 def test_removed_package_still_allows_real_model_turn_to_close_original_task(tmp_path):

@@ -292,6 +292,29 @@ $PY scripts/check_clean_package.py .
   错误码仍报快照不可用、缺字段也算不符、search 跳过比对。
 - **范围**：guards9 加能力包相关 focused 文件，见交付记录；修复版真实重跑见 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md` 的 C1 节。
 
+## 主任务旧 pin 失效的回执（H3）与能力申请拒绝不再记成结果未知（H4）（2026-10-01，同分支 `claude/ae-skill-continuation-mismatch`）
+
+- **H3**：`test_capability_package_main_scope.py` 新增两项。
+  - `test_main_lost_package_tells_model_to_report_instead_of_reauthorizing`：包被移除或换代两种情况，get 和 search 都回
+    `CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE`；建议动作是 `report_blocker`，提示里没有“父代理”；`details.error_code` 是原 pin 诊断码；
+    回执不带 `next_read`、正文或匹配项。从没 pin 过的包仍回 `SKILL_SNAPSHOT_UNAVAILABLE`／`CAPABILITY_PACKAGE_NOT_AVAILABLE`。
+  - `test_non_pin_package_diagnostic_keeps_original_unavailable_error`：同一个包若只有非 pin 类的诊断，仍走原错误。
+  - 既有用例 `test_capability_package_compact.py::test_main_package_pages_keep_original_task_pin_across_real_compact[before_reprepare]`
+    （压缩前换代后续读下一页）原来断言 `CAPABILITY_PACKAGE_NOT_AVAILABLE`，现在断言新码，并核对 `details.error_code` 为 `CAPABILITY_PACKAGE_PIN_STALE`。
+  - 变异 7/7 被抓住：
+    - 退回原错误；
+    - 不核对诊断属于哪个包；
+    - 接受任何诊断码；
+    - 仍报快照不可用；
+    - 建议动作改成 `request_capability`；
+    - 丢掉 `details`；
+    - 附带同名包的 `next_read`。
+- **H4**：`test_subagent_capability_request_tool.py::test_input_refusal_settles_operation_failed_not_unknown`。
+  - 按 C1 的真实参数形态（只有 problem、needed_capability 等，没有结构化目标），经真实工具执行器和操作账走一遍：
+    回执是 `TOOL_PARAMETER_REQUIRED`，`effect_outcome=not_started`，操作账为 failed、没有 unknown_reason，也没有写申请账。
+  - 改动前同一用例得到 `TOOL_OPERATION_OUTCOME_UNKNOWN`，红灯已确认。
+  - 变异 2/2 被抓住：去掉声明、改成 failed。
+
 ## gpt-6-luna 实际输入上限探测（C6）（2026-10-01，ae，被测代码 `34e4d874e`）
 
 - 方法：隔离 home，目录副本只含 luna 一个档案（refresh_token 清空、600，用完删除），经产品自己的 Responses 后端发单条用户消息；

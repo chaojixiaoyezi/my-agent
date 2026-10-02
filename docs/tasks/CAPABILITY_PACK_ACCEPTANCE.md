@@ -664,9 +664,13 @@ D1／G05 Goal 续跑熔断的过程：
 
 ## C1／C2 长篇原著改编短剧真实运行（gpt-6-luna，2026-10-01）
 
-结论（第 1 次，被测 `34e4d874e`）：
-- **未命中**：0 集产出，没有压缩。原因是宿主缺陷 H1（模型抄错 A 包摘要，回执却说"快照失效、停止使用旧授权"），不是模型写脚本绕开阅读。
-- H1 已在 `claude/ae-skill-continuation-mismatch` 修复（见 DESIGN_LEDGER 同名节）。修复版用同一需求、同一 prompt 重跑，属于验证修复，结果补在"第 2 次"。
+结论：
+- **第 1 次**（被测 `34e4d874e`）：**未命中**。0 集产出，没有压缩。原因是宿主缺陷 H1（模型抄错 A 包摘要，回执却说"快照失效、停止使用旧授权"），不是模型写脚本绕开阅读。
+- **第 2 次**（修复版 `39059a2be`，同一需求、同一 prompt，属于验证修复）：
+  - **C1 命中**：主线程在生产触发线 300000 处自然压缩 1 代；压缩后 get 和 run 原包资源都成功，copy 未命中。
+  - **C2 未命中**：只到第 1 代，累计输入先到了 4000 万止损线，按规矩 /stop。
+  - **H1 在真实链路生效**：模型一次抄错 B 包摘要，拿到可修的参数错误后重新检索，随后正常读到 A、B 两包。
+  - **另发现 H4**：子代理 `capability_request` 参数不全被拒时，操作账记成"结果未知"。已同分支修复。
 
 ### 任务设计（让脚本做不了）
 - **原文**：《水浒传》七十回本（Project Gutenberg #23863，公版），取前 40 回，每回一份 `inputs/第NN回.json`（`drama_text_source.v1`，
@@ -696,9 +700,40 @@ D1／G05 Goal 续跑熔断的过程：
   - 没有压缩：上下文估算峰值约 7 万，触发线 244800。
 - **离线复现**：当前快照和受限快照里都有 A，包确实可读。问题只在回执把"参数抄错"说成了"授权失效"。
 
+### 第 2 次结果（`39059a2be`，2026-10-01）
+
+**配置差异**：
+- 生产 luna 档案窗口已改为 900000。隔离配置显式写 `memory_compact_auto_trigger_max_tokens: 300000`，与 step16y 上线后的生产一致。
+- 生产封顶当时被 reset 成 0，已报 3a 并由 3a 恢复。
+- 其余与第 1 次相同：同一包、同一输入；prompt 的 sha256 前缀 `cdb8c62c`，与第 1 次一致。
+
+| 项 | 结果 | 结构化证据 |
+| --- | --- | --- |
+| 读包（H1 验证） | 通过 | **出错与恢复**：+53 秒时模型带错 B 包摘要 get，拿到 `TOOL_INVALID_ARGUMENTS`（`continuation_mismatch`）；随后公开检索并重新读取，A、B 两包的入口、方法和模板都读到。<br>**累计**：全程 `skill_search` 成功 66 次，参数错误 2 次 |
+| 分工 | 1 个主线程 + 9 个子代理 | **结局**：5 个 DONE，1 个 FAILED，2 个 TAKEN_OVER，1 个 CANCELLED（/stop 时）。<br>**失败**：3 次 `provider_timeout`。<br>**接替**：模型两次用 `replacement_for_run_ids` 接替已失败的子代理，来源 canonical 为 TAKEN_OVER、`takeover_by` 指向接替者。来源运行账保持 failed（来源本来就已是终态 failed），这不是 O1 的 BLOCKED→cancelled 形态 |
+| C1：生产规模自然压缩 | **命中** | **压缩**：主线程 +2193 秒产生第 1 代，302,371 → 73,863，触发线 300000，非强制，线程 `compact_generation=1`。子代理线程没有压缩 |
+| C1：压缩后 get | **通过** | 主线程 +2624～+2654 秒 get B 包 `CAPABILITY.md`、`methods/review.md`、`methods/workflow.md`、`scripts/check_continuity.py`、`templates/project.json`，全部成功 |
+| C1：压缩后 run | **通过** | 主线程 +2594、+2679 秒执行 A 包 `check_delivery.py`，都成功。执行的是压缩前已物化的副本 |
+| C1：压缩后 copy | **未命中** | 压缩后没有新的 `write_file(source_ref)`。全程 14 次 source_ref 复制都在压缩前，其中 4 次子代理写进自己的 run 目录被 `WRITE_FORBIDDEN`，随后改写到 `ws/tmp`。B 包 `check_continuity.py` 压缩后 get 到了，但到 /stop 时还没物化、也没执行 |
+| C2：第 4 代之后 | **未命中** | 只有第 1 代 |
+| 止损 | 按规矩 /stop | **触发**：+2694 秒累计输入 44,175,776 ≥ 4000 万。<br>**前台**：前台请求 +2706 秒已自行以 `USER_REPLY_UNAVAILABLE` 结束（子代理还在跑时主线程给出空回复，与 G01 同形状）。<br>**/stop**：+2726 秒的 /stop 回执 ok，1 个在途子代理 CANCELLED。<br>**收尾**：TaskRun 全部 done，运行全部是终态，没有遗留后台进程 |
+| 用量 | — | **总量**：accounted 输入 48,054,213（其中缓存 26,101,248），输出 153,753，物理调用 411 次，HTTP 重试 93 次。<br>**主线程**：输入 13,978,436，调用 101 次。<br>**辅助**：2 次（选择 + 压缩），输入 310,744 |
+| 是否绕开阅读 | 否 | **读原文**：第 01～40 回都经 `read_file` 读入，共 75 次成功读取。<br>**写入**：`write_file` 18 次、`edit_file` 31 次；另有部分集由模型自写的 build 脚本落盘，脚本只是写入的载体 |
+| 产物（测试者用两包自带检查器只读核对） | 部分 | **交付**：40 集交了 38 集，第 39、40 集没开始。<br>**A 检查**：37/38 结构通过。第 38 集是 /stop 时被取消的子代理正在写的，有 6 个错误。<br>**内容核对**：<br>- 38/38 写明了回目，镜头来源全部属于本回；<br>- 31/38 的改编说明含 ≥8 字的本回原文逐字引文（3、5、8、9、10、35、37 没有）。<br>**未完成**：整季 `project.json` 和 `report.md` 止损前没写 |
+
+**观察 H4（已修，同分支）**：
+- **现象**：子代理第一次 `capability_request` 只写了 problem、needed_capability 等字段，没有结构化目标，被 `TOOL_PARAMETER_REQUIRED` 拒绝。但操作账记成了 `TOOL_OPERATION_OUTCOME_UNKNOWN`。
+- **原因**：拒绝发生在写申请账之前，却没有声明 `effect_outcome`，而这个码又不在执行前确定失败白名单里。离线经真实执行器复现了同样结果。
+
 ### 证据
 `~/.my-agent/decision-evidence/c1-novel-luna/`（仓库外）：
 - `prep/`：原文、生成器、核对脚本、stage、watcher；
+- `run2-39059/`：
+  - `c1-watch.jsonl`、`STOP-REASON.json`；
+  - `verify-outputs.json`、`c1-model-usage.json`；
+  - `tool-calls.jsonl`（只含结构化字段）、`subagents.jsonl`、`c1-tool-shape.txt`；
+  - `stage-report.json`、`config-note.json`、`fault-log.txt`；
+  - 检查器 sha，以及 harness。
 - `run1-34e4/`：
   - `tool-calls.json`，只含工具的结构化字段；
   - `c1-watch.jsonl`、`stage-report.json`、`prompt.txt`；

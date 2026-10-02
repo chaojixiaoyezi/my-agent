@@ -9,6 +9,8 @@
 #   错选择器仍失败，只在当前可见包精确命中时建议重试，不自动读取或晋升。
 #   get 的未声明成员沿原参数错误与同代入口建议纠正，不误报快照失效；取消、中断和真实读取失败保持原边界。
 #   包已在当前快照解析、仅显式 expected_* 不符时也是参数错误：只列字段名，不给同名新代建议，须重新检索。
+#   主任务旧 pin 已停用/换代时按快照里的结构化 pin 诊断回 CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE（告诉用户），
+#   不再套用子代理口径的“由父代理重新授权”；没有 pin 诊断的缺包仍走原快照错误。
 #   正文读取及 pin 共用 package_read；本工具仍沿原 ToolExecutor 准入，宿主加载不伪造工具回执。
 #   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
@@ -39,7 +41,7 @@ from .package_read import (
 from .package_resources import package_resource_reference
 from .package_snapshot import package_read_parameters
 from .router import CapabilityRouter, tokenize
-from .skill_snapshot import SkillSnapshotError
+from .skill_snapshot import PACKAGE_PIN_ERROR_MESSAGES, SkillSnapshotError
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -182,8 +184,8 @@ class SkillSearchTool(BaseTool):
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    # LLM: 原受限包解析后先比对显式代次，不符只回参数纠错；再用同一 resolve 判未声明成员并仅给参数纠错；
-    #   取消/中断传播，真实读取仍共用 reader 和原 pin。
+    # LLM: 解析不到包时先看主任务 pin 诊断（停用/换代则回执让模型告诉用户）；解析到后先比对显式代次，不符只回参数纠错；
+    #   再用同一 resolve 判未声明成员并仅给参数纠错；取消/中断传播，真实读取仍共用 reader 和原 pin。
     # 函数用途: 检索或读取包资源；路径或版本字段填错时引导重新显式调用，不自动换路径、读正文或改任务引用。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
@@ -195,7 +197,7 @@ class SkillSearchTool(BaseTool):
             package_id = str(params["package_id"]).strip()
             package = snapshot.resolve_package(package_id)
             if package is None:
-                raise SkillSnapshotError("CAPABILITY_PACKAGE_NOT_AVAILABLE")
+                return _missing_package(snapshot, package_id)
             mismatched = continuation_mismatches(package, params)
             if mismatched:
                 return _continuation_mismatch(mismatched)
@@ -387,6 +389,27 @@ def _invalid(
         False,
         json.dumps(payload, ensure_ascii=False),
         error_code="TOOL_INVALID_ARGUMENTS",
+    )
+
+
+# LLM: 只在当前快照解析不到 package_id 时调用；仅凭主任务 pin 投影写进快照的结构化诊断（source=capability_package、
+#   path=capability:<id>、码属 PACKAGE_PIN_ERROR_MESSAGES）判定，不读正文、不 pin、不给新代建议；
+#   没有诊断时抛原 CAPABILITY_PACKAGE_NOT_AVAILABLE，由调用方的原快照错误路径处理。
+# 函数用途: 区分“本任务固定的包已停用或换代”（回执让模型告诉用户、别去重新授权）与普通的包不可见。
+def _missing_package(snapshot, package_id: str) -> ToolHandlerOutcome:
+    stable_id = f"capability:{package_id}"
+    code = next((error.code for error in snapshot.errors
+                 if error.source == "capability_package" and error.path == stable_id
+                 and error.code in PACKAGE_PIN_ERROR_MESSAGES), "")
+    if not code:
+        raise SkillSnapshotError("CAPABILITY_PACKAGE_NOT_AVAILABLE")
+    payload = {"error": "CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE", "package_id": package_id,
+               "details": {"error_code": code}, "hint": PACKAGE_PIN_ERROR_MESSAGES[code]}
+    return ToolHandlerOutcome(
+        "skill_search",
+        False,
+        json.dumps(payload, ensure_ascii=False),
+        error_code="CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE",
     )
 
 

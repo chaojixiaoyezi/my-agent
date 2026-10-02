@@ -148,10 +148,12 @@ def test_main_package_pages_keep_original_task_pin_across_real_compact(tmp_path,
         assert page["source_ref"] == first["source_ref"]
     else:
         assert not second.ok and "body" not in json.loads(second.output)
-        expected_error = ("CAPABILITY_PACKAGE_NOT_AVAILABLE" if rotation == "before_reprepare"
+        expected_error = ("CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE" if rotation == "before_reprepare"
                           else "CAPABILITY_RESOURCE_UNAVAILABLE package=story-pages")
         assert json.loads(second.output)["error"] == expected_error
         if rotation == "before_reprepare":
+            # H3：主任务旧 pin 换代后给可执行的“告诉用户”回执，诊断码沿用快照里的 pin 诊断。
+            assert json.loads(second.output)["details"] == {"error_code": "CAPABILITY_PACKAGE_PIN_STALE"}
             for wire, _thread in business[2:]:
                 assert "CAPABILITY_PACKAGE_PIN_STALE" in json.dumps(wire, ensure_ascii=False)
     saved = agent.conversation_store.tasks.load(pins[0].task_id)

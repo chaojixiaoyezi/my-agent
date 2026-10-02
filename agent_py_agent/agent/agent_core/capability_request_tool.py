@@ -381,7 +381,11 @@ def _capability_ok(
     )
 
 
+# LLM: 本工具所有失败回执的唯一出口，都在 record_capability_request 写账之前；固定 effect_outcome=not_started，
+#   让工具操作账落 failed、不进 UNKNOWN 收口。以后若新增写账后的失败，不能复用本函数。
+# 函数用途: 生成带精确错误码的能力申请拒绝回执，模型可按错误码改参数后重新申请。
 def _capability_error(message: str, *, error_code: str) -> ToolHandlerOutcome:
     # A missing classification falls back to UNKNOWN_ERROR and tells the model to
     # give up.  Capability failures are all typed parameter, scope, or lookup facts.
-    return ToolHandlerOutcome(_TOOL_NAME, False, message, error_code=error_code)
+    # 这些拒绝都发生在写申请账之前，声明 not_started，操作账才会落 failed 而不是“结果未知”（C1 实测）。
+    return ToolHandlerOutcome(_TOOL_NAME, False, message, error_code=error_code, effect_outcome="not_started")

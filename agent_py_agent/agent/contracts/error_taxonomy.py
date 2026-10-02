@@ -1077,6 +1077,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="已授权的 Skill 快照缺失、被禁用或内容已变化；停止使用旧授权，由父代理按当前快照重新授权。",
     ),
+    "CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE": ErrorContract(
+        code="CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "本任务固定使用的能力包版本已停用或换代，本任务不能再读取它；不要申请或批准能力授权，"
+            "也不要从磁盘、安装目录或包文件里读取它。把情况告诉用户；需要用当前版本时，请用户在新的请求里重新开始。"
+        ),
+    ),
     "PARENT_TOOL_SNAPSHOT_UNAVAILABLE": ErrorContract(
         code="PARENT_TOOL_SNAPSHOT_UNAVAILABLE",
         category="capability",

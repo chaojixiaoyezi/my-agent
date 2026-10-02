@@ -120,6 +120,9 @@ panels、skills、host_api；脚本文本是私有资源，读取不等于执行
 回执`error=CAPABILITY_PACKAGE_CONTINUATION_MISMATCH`，`continuation_mismatch`只列字段名，不回显当前摘要/代次，
 也不给同名新一代`next_read`；模型须不带旧字段重新search，再用当前`next_read`从入口重读，旧页码作废。
 宿主读取入口`read_package_page`遇到同样不符仍抛`SKILL_SNAPSHOT_STALE`。（H1，2026-10-01）
+主任务旧 pin 已停用或换代时，快照只留结构化 pin 诊断；`skill_search`据此回`CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE`
+（`report_blocker`，`details.error_code`为原诊断码），提示告诉用户或开新请求，不再套用子代理口径的“由父代理重新授权”；
+没有 pin 诊断的缺包仍是原快照错误。（H3，2026-10-01）
 本片参考Free-Code固定`6b25ab68`的FileReadTool结构化缺文件回执、Codex固定`578c1b22`的精确资源身份读取；
 只复用本仓已有参数错误与`package_read_parameters`，不移植参考项目的自动重试或模糊路径猜测。
 

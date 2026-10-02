@@ -194,6 +194,8 @@
 
 ## 能力包版本字段抄错不再报"快照失效"，改为可修参数（H1）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `34e4d874e`，已实现，待集成）
 
+## 能力包版本字段抄错不再报"快照失效"，改为可修参数（H1，同分支含 H3、H4）（2026-10-01，分支 `claude/ae-skill-continuation-mismatch`，基于 main `626b8576c`（初版在 `34e4d874e`），已实现，待集成）
+
 - **来源**：能力包验收 C1 第 1 次真实运行（gpt-6-luna）。模型读 A 包时把 `expected_package_sha256` 抄错（前 36 位对，后面是编的），
   `skill_search` 回 `SKILL_SNAPSHOT_UNAVAILABLE`（details `SKILL_SNAPSHOT_STALE`），模型看到的恢复建议是"停止使用旧授权，由父代理按当前
   快照重新授权"。主线程没有父代理，包其实就在当前快照里；模型试 3 次后放弃 A 包，0 集产出。
@@ -210,6 +212,13 @@
   - 不读正文、不 pin。未知或未授权的包、受限快照代次失效、成员真实缺字节或摘要变化仍走原快照错误。
   - 没有新增错误码，也不改工具 schema。
 - **验证**：见 TESTS.md 同名节。修复版重跑 C1 的结果记在 `docs/tasks/CAPABILITY_PACK_ACCEPTANCE.md` 的 C1 节。
+- **同分支追加 H3（C3 实测，3a 指派）**：
+  - **问题**：主任务固定过的包被停用或换代后，任务快照会把它剔除，并留下结构化诊断（`CAPABILITY_PACKAGE_PIN_STALE`／`_PIN_UNAVAILABLE`）。但 `skill_search` 仍回 `SKILL_SNAPSHOT_UNAVAILABLE`，配的是子代理口径的提示“由父代理重新授权”。主线程没有父代理，模型照提示去调 `resolve_capability_requests`，失败。
+  - **做法**：现在先看有没有这条 pin 诊断。有的话回新登记的 `CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE`（`report_blocker`），提示变成：本任务不能再用这个包，不要申请授权，也不要从磁盘读包；请告诉用户，或在新请求里重来。回执带 `details.error_code`，不给新一代的读取建议，也不读、不 pin。
+  - **不变的部分**：没有 pin 诊断的缺包，以及子代理受限快照失效，仍走原快照错误。
+- **同分支追加 H4（C1 第 2 次实测）**：
+  - **问题**：子代理的 `capability_request` 在写申请账之前，会因参数不全（`TOOL_PARAMETER_REQUIRED`）、root 不可申请（`TOOL_NOT_ALLOWED`）等被拒。这些拒绝没有声明 `effect_outcome`，又不在执行前确定失败白名单里，操作账因此落成 `UNKNOWN`（`TOOL_OPERATION_OUTCOME_UNKNOWN`，reconcile）。这和 D2 是同一类问题。
+  - **做法**：唯一的失败出口 `_capability_error` 固定声明 `effect_outcome=not_started`，操作账改落 failed。
 
 ## Responses 失败事件按服务商错误码分类（2026-10-01，分支 `claude/3a-responses-failed`，基于 main `0ca852195`，已实现，待上线）
 

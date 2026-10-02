@@ -453,3 +453,29 @@ def test_top_level_worker_context_keeps_capability_request(tmp_path):
     context = manager.runner_context.build_execution_context(worker.id)
 
     assert "capability_request" in context.allowed_tools
+
+
+def _request_through_operation_ledger(tmp_path, agent, arguments):
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    execution = execute_canonical_test_call(
+        tmp_path, tools={"capability_request": CapabilityRequestTool(agent)}, tool_name="capability_request",
+        arguments=arguments, operation_store=store, operation_store_required=True, operation_id="op-h4",
+    )
+    return execution.result, store.get_tool_operation(owner_id="test-owner", run_id="test-run", operation_id="op-h4")
+
+
+def test_input_refusal_settles_operation_failed_not_unknown(tmp_path):
+    """C1 真实形态（2026-10-01）：只写 problem/needed_capability 的申请在写账前被拒，操作账必须是 failed，不是结果未知。"""
+    agent, manager, task = _agent_with_current_run(tmp_path)
+    result, record = _request_through_operation_ledger(tmp_path, agent, {
+        "problem": "需要读取更多原文。", "needed_capability": "read_more", "capability_type": "tool",
+        "expected_output": "能继续改编", "tried": ["read_file"], "evidence": ["缺少权限"],
+    })
+
+    assert result.ok is False and result.error_code == "TOOL_PARAMETER_REQUIRED"
+    assert result.effect_outcome == "not_started"
+    assert record.status == "failed" and not record.unknown_reason
+    assert manager.load(task.id).capability_requests == []
