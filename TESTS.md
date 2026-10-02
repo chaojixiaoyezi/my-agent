@@ -91,7 +91,7 @@
 
 ## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`）
 
-- **新增 `test_host_files_access.py`**（展开参数后 104 项，真实沙箱用例按平台跳过，macOS 本机、Linux 在 Docker 车道跑）：
+- **新增 `test_host_files_access.py`**（首轮展开参数后 104 项，二审后 134 项，真实沙箱用例按平台跳过，macOS 本机、Linux 在 Docker 车道跑）：
   - A 类逐项（9b 盘点 + 3a 口径，36 个路径逐个写死）：
     - 策略：每项 `check_write` 都拒 `PATH_HOST_STATE_WRITE_BLOCKED`，读照常；Full Access 和隔离 owner（声明自家根为写根）下 `write_file` 都被拒，文件一个字节不变。
     - 真实沙箱：同样两种模式下，追加、删除、改名三条命令都失败，内容不变。
@@ -124,6 +124,24 @@
   - `test_real_full_access_shell_outside_the_task_tree_cannot_forge_the_records`：真实沙箱里，工作目录和写根都在任务树外的用户项目目录，追加伪造被拒，内容不变；读记录、写项目目录照常。
   - 去掉 registry 这一行的变异会被抓到。
   - 在 ae 分支 ed1cc34c6 上叠本修复后，用真实 registry 投影的参数复跑 ae 那条场景（5 种伪造方式），全部被拒。ae 那条 xfail 用例直接调 ShellTool、绕过了 registry 投影，要改成走 `_tool_params_with_runtime_boundary` 才能体现修复。
+- **二审必须改与建议（9b 复审，3a 最终裁定，2026-10-02，`f21039671` + `dadcc2576`）**：`test_host_files_access.py` 现在 134 项。
+  - 数据根（必须改 1）：
+    - `test_configured_home_wins_over_a_different_env_home`：配置的 home ≠ 环境变量的 home，Full Access 下 `write_file`、写边界、registry 每次调用的策略都按配置的 home 拒写；agent 构造出的每个工具策略（含 Shell）的数据根都是配置的 home；插件写入上下文拒写 `permissions.json`，读取上下文的墙外策略也用配置的 home。
+    - `test_real_chain_full_access_write_reports_the_specific_host_code`：真实链路（SimpleAgent + 假模型，审批模式经宿主操作设成 full-access，配置的 home ≠ 环境变量的 home）里 `write_file` 写 `permissions.json`、owner `config/` 被拒，工具结果和模型下一轮看到的都是 `PATH_HOST_STATE_WRITE_BLOCKED` / `PATH_HOST_CONFIG_WRITE_BLOCKED`；字节不变；项目目录和家目录外照常可写（证明这一轮确实是 Full Access）。
+  - 只读 CLI（必须改 2，锁住现状）：`test_real_sandbox_cli_cannot_start_and_says_so`（Full Access、隔离各一遍）：宿主先用真实 SimpleAgent 建好家目录和本地库，沙箱里跑 `my-agent status` 失败，输出 `error_code=CLI_HOST_STATE_READ_ONLY`，A 类全部字节不变。用例显式钉住本检出的源码（venv 的可编辑安装可能指向别的检出）。Linux 隔离视图看不到仓库源码时跳过这一遍。
+    - `test_cli_guard_only_rewrites_permission_failures_inside_the_sandbox`：只有宿主标记加权限类 errno 或 sqlite CANTOPEN 才改写；没有标记、`ENOENT`、普通异常都原样抛出。
+    - `test_sandboxed_commands_carry_the_host_state_read_only_marker`：沙箱命令带标记，不进沙箱的命令去掉继承来的同名变量。
+  - data/ 拆开（必须改 3）：A 类逐项加 `data/` 下 6 个宿主状态子目录和 `agents/` 里的文件（文件工具和真实命令各一遍）；B 类用例断言 `runs/`、`data/`、`tasks/`，`data/loose.txt` 路径策略放行。
+  - 全部任务的核验记录（建议 1）：
+    - `test_task_record_patterns_cover_every_task_root_layout`：三种任务根布局命中，深度不对、`work/` 下、名字相近、别的 owner、别处的同名拷贝都不命中；owner home 路径里的正则元字符按字面匹配。
+    - `test_seatbelt_pattern_denies_come_after_the_write_root_allow`：正则拒写排在写根放行之后；没有正则时配置里没有 `regex`。
+    - `test_real_seatbelt_protects_every_task_record_without_task_params`（只 macOS）：不带本任务参数时，Full Access 和隔离的命令都改不了别的任务的记录、改名不了它的目录、建不出新的（含 `DATA/Pack_Verification` 大小写变体和 `audits/`），任务目录里其它位置照常可写。
+  - 拒绝码透传（建议 2）：`test_write_boundary_reports_the_specific_host_code`（写边界和 registry 对 4 个宿主码原码上报，B 类禁写根和 normal 模式危险目录仍是 `WRITE_FORBIDDEN`）；`test_host_write_denials_are_terminal_failures_not_unknown`（文件工具写前拒写的两个码归 FAILED，不是 UNKNOWN）。
+  - 聚焦回归（313 个文件：改动模块相关 + guards9 + packaging）：`6413 passed`，1 条旧用例按新口径改期望（见下）。
+  - Mac 全量 12 片（`f21039671`）：26753 passed / 0 failed / 21 skipped / 32 xfailed / 5 xpassed。
+  - Docker Linux 车道（`f21039671`，NET_ADMIN）：12/12 rc=0，26669 passed / 0 failed / 105 skipped / 32 xfailed / 5 xpassed，证据 `~/.my-agent/releases/claude-tools/linux-lane-f21039671/`。`dadcc2576` 只加测试，H3 测试文件另在容器里单跑。
+  - 变异 29 个全部抓到（第一轮 25 个；D5 registry 插件上下文漏传数据根、D6 Shell 漏传数据根（行为上等价，按合同钉住）、G5 正则不锚开头、C5 透传非宿主码，补用例后第二轮抓到）。覆盖：数据根 6 个构造点、data/ 拆分与 agents/、B 类、task_root、正则 5 项、透传 5 项、环境标记 3 项、CLI 守卫 4 项。
+  - ae 块 4 的 strict xfail（`780ff4c40` 叠本修复）：macOS 上 XPASS(strict) 翻红；Linux 上 ae 直接调 ShellTool、不经 registry 的 3 个 Full Access 场景失败（不再从工作目录或写根反推任务，3a 定），改走 registry 投影（`_tool_params_with_runtime_boundary`，写边界带 `task_root`）后 4 个场景（含 xfail 那条）在 Linux 上全过。证据 `~/.my-agent/decision-evidence/host-config-guard-design/second-review-f21039671/`。
 - **改了期望的旧用例**（行为变化，不是放宽）：
   - `test_runtime_gate_ledger.py::test_workspace_only_owner_control_metadata_stays_read_only`：权限文件改由路径策略拒写（`PATH_HOST_STATE_WRITE_BLOCKED`），不再出现在 ledger 的 `forbidden_write_roots` 里；写边界照样拒。
   - `test_shell_sandbox_boundary_facts.py` 两项：写根是 owner 的 `workspace/` 时，里面的 `workspace/runtime` 是宿主托管文件，边界事实把它列进 `read_only`。
