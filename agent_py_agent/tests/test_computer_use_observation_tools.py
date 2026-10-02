@@ -336,3 +336,35 @@ def test_x11_backend_capture_ocr_and_click_use_the_public_library_calls(monkeypa
     assert [(r.text, r.region) for r in regions] == [("提交", (10, 20, 60, 18))]
     backend.click(150, 89)
     assert clicks == [(150, 89)]
+
+
+def test_lowlevel_handler_runs_observations_off_the_event_loop_one_at_a_time(monkeypatch):
+    import threading
+    import time
+
+    types = _fake_types()
+    monkeypatch.setitem(sys.modules, "mcp", SimpleNamespace(types=types))
+    monkeypatch.setitem(sys.modules, "mcp.types", types)
+    depth = {"now": 0, "max": 0, "thread_names": set()}
+
+    class _SlowObserver(_Observer):
+        def observe(self, window=None):
+            depth["now"] += 1
+            depth["max"] = max(depth["max"], depth["now"])
+            depth["thread_names"].add(threading.current_thread().name)
+            time.sleep(0.05)
+            depth["now"] -= 1
+            return super().observe(window)
+
+    async def delegate(request):
+        return "delegated"
+
+    handler = glue.observation_call_handler(delegate, _SlowObserver())
+    request = SimpleNamespace(params=SimpleNamespace(name="observe_window", arguments={}, meta=None))
+
+    async def two_at_once():
+        return await asyncio.gather(handler(request), handler(request))
+
+    results = asyncio.run(two_at_once())
+    assert all(r.root.isError is False for r in results) and depth["max"] == 1, "两次观察串行，不并发写快照环"
+    assert "MainThread" not in depth["thread_names"], "阻塞的采样不在事件循环线程上跑，取消通知才能被处理"

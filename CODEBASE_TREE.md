@@ -1028,6 +1028,8 @@ agent_py_agent/
 |   |-- test_computer_text_input.py     # 文本事件 UTF-16、显式替换与不支持字符零副作用回归
 |   |-- test_screen_observation_core.py # J16 片 B 核心：实例登记与快照环、摘要口径与容差、观察载荷过宿主校验、五项复核放行与各项 stale
 |   |-- test_computer_use_observation_tools.py # J16 片 B 接入：开关并入声明与环境标记、属主范围、工具调用三元组、底层处理器（假 mcp.types）、X11 后端假 Xlib
+|   |-- test_computer_use_xvfb_lane.py   # J16 车道 Xvfb 冒烟（默认跳过）：真适配器观察 → 点击 → 再观察、移动后过期、开关关着只有上游工具
+|   |-- test_computer_use_xvfb_cases.py  # J16 片 C 车道集成（默认跳过）：关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
 |   |-- test_subagent_takeover_hint.py   # 执行器退出后给父级的结构化接替提示：合同形状、开关开关两种回执、各消费方投影、只属一份结果（C4）
 |   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入

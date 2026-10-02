@@ -114,7 +114,8 @@
    - 区域摘要（`screen_region_digest`）：灰度 → 按面积平均缩成 16×8 格 → 量化 16 级；sha 相等走快路径，否则“量化级相差 ≥2 的格子不超过 4 个”算没变。数字都是带单位后缀的模块常数，不做配置项。亮光标缩成格子后整列都会动，可能超过 4 格（已知风险）：片 C 的 Xvfb 集成加带闪动光标的输入框统计误判次数，现在不调容差。
    - 遮挡：X11 用 `_NET_CLIENT_LIST_STACKING`（底→顶）里排在目标之后且可见的窗口，加根窗口下可见的 override-redirect 子窗口（菜单、tooltip），矩形带 `_NET_FRAME_EXTENTS` 边框；`frame.occluded` = 任一上层矩形与窗口相交，整个被盖住 → 错误码 `occluded`；点击点在动作时重新查叠放。跨桌面、未映射、`_NET_WM_STATE_HIDDEN` 一律 `not_viewable`。macOS 同口径留片 E。
    - 已知限制：半透明窗口也算遮挡；异形窗口按外框算；两次采样之间 XID 先消失又复用的情况靠几何和像素复核兜底。
-   - 适配器接入：固定的 MCP SDK 1.13 里 FastMCP 和底层 Server 都不能把 `CallToolResult` 原样返回，而观察合同要求失败结果是 `isError` + `structuredContent.my_agent_observation_error`，所以适配器改成单一运行路径——底层 `Server` 收发 stdio，`tools/list` 与普通 `tools/call` 交给 FastMCP 的公开协程，只有 `observe_window` / `click_candidate` 由 `computer_use_observation_tools` 的接管层按名字处理（读 `_meta` 里的观察上下文、自己编码结果）；不碰 FastMCP 私有属性。两个工具只在宿主写了 `MY_AGENT_COMPUTER_USE_OBSERVATION=1`（主配置 `computer_use_observation_enabled` 为 true 且 Computer Use 已装配）时注册。
+   - 慢 OCR 与取消（片 C）：观察处理器把采样 + OCR 放到工作线程里 `await`（一次只跑一个），事件循环保持可读，宿主 `/stop` 发来的 `notifications/cancelled` 能被底层 Server 处理——宿主停止等待、结果被丢弃，线程里的 OCR 跑完自然结束。车道用例证明取消在 0.16 s 内返回且随后的观察照常。
+  - 适配器接入：固定的 MCP SDK 1.13 里 FastMCP 和底层 Server 都不能把 `CallToolResult` 原样返回，而观察合同要求失败结果是 `isError` + `structuredContent.my_agent_observation_error`，所以适配器改成单一运行路径——底层 `Server` 收发 stdio，`tools/list` 与普通 `tools/call` 交给 FastMCP 的公开协程，只有 `observe_window` / `click_candidate` 由 `computer_use_observation_tools` 的接管层按名字处理（读 `_meta` 里的观察上下文、自己编码结果）；不碰 FastMCP 私有属性。两个工具只在宿主写了 `MY_AGENT_COMPUTER_USE_OBSERVATION=1`（主配置 `computer_use_observation_enabled` 为 true 且 Computer Use 已装配）时注册。
 
 ## 4. 宿主侧：观察三件套抽成通用的
 
@@ -217,8 +218,8 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
    - 自动执行幂等；主模型已动作时宿主不执行。
 3. **Xvfb 集成**（真适配器、真 python-xlib/mss/RapidOCR、真点击）：
    - 观察 → 点击 → 再观察，确认状态行变了；
-   - 移动窗口、关掉再开、改内容后，动作得到 `OBSERVATION_STALE`，测试窗口没收到点击；
-   - `/stop` 能中断慢 OCR。
+   - 移动窗口、关掉再开、改内容后，动作得到 `OBSERVATION_STALE`，测试窗口没收到点击；（片 B/C 已验证）
+   - `/stop` 能中断慢 OCR。（片 C 已验证：取消 0.16 s 返回，适配器不被堵）
 4. **变异**，至少 6 个，都要被抓住：
    - 跳过几何校验；
    - 跳过代次复核；
@@ -241,7 +242,7 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 | --- | --- | --- |
 | A | 观察三件套抽成通用的 `ObservationBinding`；几何扩展校验；核实并补齐 MCP 工具的审批策略声明；插件回归不变 | 3–4 h |
 | B | Linux X11 后端 + `observe_window`、`click_candidate` + 适配器复核 + profile 声明 + `computer_use_observation_enabled` + 属主范围用例 | 6–8 h |
-| C | 车道镜像加 Xvfb、openbox、Tk 测试窗口；集成测试；变异（片 B 已有一版派生镜像与冒烟用例 `test_computer_use_xvfb_lane.py`：Debian 包清单与 pymonctl 要 xrandr 的硬性要求见 computer-use.md 当前边界） | 4–5 h |
+| C | 车道镜像加 Xvfb、openbox、Tk 测试窗口；集成测试；变异（已实施：`test_computer_use_xvfb_cases.py` 覆盖关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计 0.15–0.20；派生镜像 Dockerfile.desktop + xvfb_lane.sh 待 3a 落位；Debian 包清单与 pymonctl 要 xrandr 的硬性要求见 computer-use.md 当前边界） | 4–5 h |
 | D | `action_candidate` 接粗位置；自动执行路径和能力开关；假 Jev 四档 | 5–6 h |
 | E | macOS 后端（Quartz + ScreenCaptureKit + 回退）及单测 | 4–5 h |
 | F | 真实验收（M3 + Jev，Linux 车道）+ 文档、台账、TESTS | 3–4 h |

@@ -29,29 +29,40 @@ pytestmark = pytest.mark.skipif(os.environ.get("MY_AGENT_XVFB_LANE") != "1", rea
 DISPLAY = ":99"
 RUN_SCOPE = {"owner_id": "local/main", "owner_home": "/owner", "run_id": "run-1", "task_id": "task-1", "attempt_id": "attempt-1", "turn_id": "turn-1"}
 
-# 测试窗口：两个大字号按钮和一行状态；点 Submit 改状态并计数；每 100ms 读命令文件（move / quit）。
+# 测试窗口：两个大字号按钮、一个带闪动光标的输入框、一行状态；点 Submit 改状态并计数；每 100ms 读命令文件
+# （move 移动 / relabel 改按钮文字 / reopen 关掉再开一个同样的窗口 / quit）。
 TK_APP = textwrap.dedent(
     """
     import sys, tkinter as tk
     from pathlib import Path
     clicks, commands = Path(sys.argv[1]), Path(sys.argv[2])
-    root = tk.Tk(); root.title("J16 Smoke"); root.geometry("420x260+100+80")
-    status = tk.StringVar(value="status idle")
-    count = {"n": 0}
-    def submit():
-        count["n"] += 1; status.set("status submitted"); clicks.write_text(str(count["n"]))
-    tk.Button(root, text="Submit", font=("DejaVu Sans", 22), width=10, command=submit).pack(pady=12)
-    tk.Button(root, text="Cancel", font=("DejaVu Sans", 22), width=10).pack(pady=12)
-    tk.Label(root, textvariable=status, font=("DejaVu Sans", 18)).pack(pady=12)
-    def poll():
-        if commands.exists():
-            command = commands.read_text().strip(); commands.unlink()
-            if command == "move":
-                root.geometry("+360+300")
-            elif command == "quit":
-                root.destroy(); return
-        root.after(100, poll)
-    root.after(100, poll); root.mainloop()
+    count, state = {"n": 0}, {"reopen": False}
+    def build():
+        root = tk.Tk(); root.title("J16 Smoke"); root.geometry("420x360+100+80")
+        status = tk.StringVar(value="status idle")
+        def submit():
+            count["n"] += 1; status.set("status submitted"); clicks.write_text(str(count["n"]))
+        button = tk.Button(root, text="Submit", font=("DejaVu Sans", 22), width=10, command=submit); button.pack(pady=10)
+        tk.Button(root, text="Cancel", font=("DejaVu Sans", 22), width=10).pack(pady=10)
+        entry = tk.Entry(root, font=("DejaVu Sans", 20), width=12); entry.insert(0, "name"); entry.pack(pady=10)
+        tk.Label(root, textvariable=status, font=("DejaVu Sans", 18)).pack(pady=10)
+        def poll():
+            if commands.exists():
+                command = commands.read_text().strip(); commands.unlink()
+                if command == "move":
+                    root.geometry("+360+300")
+                elif command == "relabel":
+                    button.config(text="Submit!")
+                elif command == "reopen":
+                    state["reopen"] = True; root.destroy(); return
+                elif command == "quit":
+                    root.destroy(); return
+            root.after(100, poll)
+        root.after(100, poll); root.mainloop()
+    while True:
+        state["reopen"] = False; build()
+        if not state["reopen"]:
+            break
     """
 )
 

@@ -288,3 +288,12 @@ def test_a_lookalike_window_cannot_stand_in_for_the_vanished_target():
     with pytest.raises(ObservationError) as info:
         observer.click_candidate(meta)
     assert info.value.code == "stale" and backend.clicks == [], "实例不同就不能点，哪怕长得一模一样"
+
+
+def test_pixel_changes_outside_the_candidate_region_do_not_invalidate_it():
+    backend, observer = _observer()
+    meta = _meta(observer.observe())  # 候选 t1 = Submit
+    changed = dict(DEFAULT_PATCHES)
+    changed[(20, 120, 200, 30)] = (0, 0, 0)  # 状态行那块变了（在候选外框之外）
+    backend.buffers[0x1a] = _buffer(patches=changed)
+    assert observer.click_candidate(meta)["clicked"]["key"] == "t1" and backend.clicks == [(150, 89)], "只比候选区域，不比整窗"

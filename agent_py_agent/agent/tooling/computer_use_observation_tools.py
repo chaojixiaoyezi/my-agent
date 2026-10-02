@@ -7,7 +7,9 @@
 # 注意：本模块故意不用 `from __future__ import annotations`——固定的 MCP 1.13 在 add_tool 时对每个参数注解做 issubclass
 # 检查，字符串注解会直接 TypeError；所以两个声明函数的注解必须是真实类型对象。可选参数写成 `str = ""`（不写 Optional）：
 # FastMCP 会把 Optional 生成 anyOf[string, null]，过不了宿主"候选参数必须是可选的 string"这条声明规则。
+import asyncio
 import json
+import threading
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -84,14 +86,23 @@ def encode_call_result(body: dict, structured: dict | None, is_error: bool) -> A
 
 
 # LLM: 宿主附的 _meta 以 RequestParams.Meta（extra=allow）到达，扩展键在 model_extra 里；没有就按缺上下文处理（由观察核心判定）。
+#   采样 + OCR 是阻塞的慢活，放到工作线程里跑并 await：事件循环保持可读，宿主 /stop 发来的 notifications/cancelled 才能被
+#   底层 Server 处理（取消这次等待、丢弃结果；线程里的 OCR 跑完自然结束）。同一时刻只跑一次观察（锁），快照环不被并发写。
 # 函数用途: 生成底层 tools/call 处理器：观察工具自己处理，其余交给原处理器。
 def observation_call_handler(delegate: Callable[[Any], Any], observer: Any) -> Callable[[Any], Any]:
+    gate = threading.Lock()
+
+    def run(name: str, arguments: dict, meta: object) -> tuple[dict, dict | None, bool]:
+        with gate:
+            return call_observation_tool(observer, name, arguments, meta)
+
     async def handler(request: Any) -> Any:
         params = request.params
         if params.name not in OBSERVATION_TOOL_NAMES:
             return await delegate(request)
         extra = getattr(getattr(params, "meta", None), "model_extra", None) or {}
-        body, structured, is_error = call_observation_tool(observer, params.name, dict(params.arguments or {}), extra.get(OBSERVATION_META_EXTENSION))
+        loop = asyncio.get_running_loop()
+        body, structured, is_error = await loop.run_in_executor(None, run, params.name, dict(params.arguments or {}), extra.get(OBSERVATION_META_EXTENSION))
         return encode_call_result(body, structured, is_error)
 
     return handler
