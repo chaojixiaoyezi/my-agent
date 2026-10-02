@@ -76,7 +76,9 @@ def test_failed_command_carries_allowed_roots_and_a_boundary_hint(tmp_path, monk
     sandbox = outcome.result_envelope["sandbox"]
     assert outcome.ok is False and outcome.error_code == "COMMAND_FAILED"
     assert sandbox["sandbox_active"] is True
-    assert sandbox["allowed_roots"] == {"read_write": [str(paths["workspace"])], "read_only": [str(paths["owner"])]}
+    # H3：工作区里的 workspace/runtime 是宿主托管文件（会话与事件库），落在可写根里，所以列进只读。
+    assert sandbox["allowed_roots"] == {"read_write": [str(paths["workspace"])],
+                                        "read_only": [str(paths["owner"]), str(paths["workspace"] / "runtime")]}
     assert sandbox["boundary_hint"] == {"may_be_sandbox_boundary": True, "suggested_actions": _ACTIONS}
     # 旧字段不变；拒读根（my-agent 数据根）不交给模型。
     assert sandbox["file_scope"] == "owner_workspace_only" and sandbox["host_path_absence_proven"] is False
@@ -204,7 +206,7 @@ def test_real_seatbelt_denial_comes_back_as_boundary_facts(tmp_path):
         assert outcome.ok is False and outcome.result_envelope["process"]["status"] == "exited"
         sandbox = outcome.result_envelope["sandbox"]
         assert sandbox["boundary_hint"]["may_be_sandbox_boundary"] is True
-        assert sandbox["allowed_roots"]["read_only"] == [str(paths["owner"])]
+        assert sandbox["allowed_roots"]["read_only"] == [str(paths["owner"]), str(paths["workspace"] / "runtime")]
         assert "[runtime-sandbox-facts]" in render_tool_runtime_facts(outcome.result_envelope)
     assert "not yours" not in denied.output  # 沙箱本身不放宽
     assert allowed.ok and "mine" in allowed.output

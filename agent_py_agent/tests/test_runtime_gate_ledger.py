@@ -20,6 +20,7 @@ from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
     write_boundary_with_runtime_ledger,
 )
 from agent_py_agent.agent.local_storage import LocalStore, RuntimeGateLedgerRecord
+from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 from agent_py_agent.agent.tooling.action_policy import ActionDecision
 from agent_py_agent.agent.tooling.executor import ToolExecution
 from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
@@ -572,7 +573,10 @@ def test_workspace_only_main_write_boundary_is_whole_owner_home(tmp_path):
     assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
 
 
-def test_workspace_only_owner_control_metadata_stays_read_only(tmp_path):
+def test_workspace_only_owner_control_metadata_stays_read_only(tmp_path, monkeypatch):
+    # H3 A/B（3a 2026-10-02）：权限文件是 A 类“绝对只读”的宿主文件，唯一声明在 path_access_policy（任何模式、不可穿透），
+    # 不再列在 ledger 的 forbidden_write_roots 里（ledger 只留可穿透的任务树根）；写边界照样拒。
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path))
     owner_home = tmp_path / "owners" / "local" / "main"
     permissions = owner_home / "permissions.json"
     owner_home.mkdir(parents=True)
@@ -602,8 +606,10 @@ def test_workspace_only_owner_control_metadata_stays_read_only(tmp_path):
     )
 
     assert boundary["allowed_write_roots"] == [str(owner_home.resolve())]
-    assert str(permissions.resolve()) in boundary["forbidden_write_roots"]
-    assert error is not None and "forbidden_write_roots" in error
+    assert str(permissions.resolve()) not in boundary.get("forbidden_write_roots", [])
+    assert error and "宿主运行状态" in error
+    decision = PathAccessPolicy.from_values(owner_scope_root=owner_home).check_write(permissions)
+    assert (decision.allowed, decision.code) == (False, "PATH_HOST_STATE_WRITE_BLOCKED")
 
 
 def test_local_full_access_main_has_no_workspace_write_allowlist(tmp_path):
