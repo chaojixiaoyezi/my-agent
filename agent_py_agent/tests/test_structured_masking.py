@@ -168,3 +168,30 @@ def test_cli_config_get_masks_structured_values(tmp_path, capsys):
         assert config_cmd.cmd_config_get(Namespace(key=key, config=str(path))) == 0
         output = capsys.readouterr().out
         assert key in output and not _leaks(output)
+
+
+def test_credential_flag_with_two_part_name_value_masks_both_parts():
+    # (a) 凭据类开关后“名字 值”分两项写：两项都遮（名字可能是 Authorization/x-api-key 这类敏感请求头名）
+    masked = masked_structure("args", ["--headers", "Authorization", "Bearer sk-secret-value-123456"])
+    assert masked == ["--headers", "Aut***", "Bea***"]
+    assert masked_structure("args", ["--env", "GITHUB_TOKEN", "ghp_secret_value_1234567890"]) == ["--env", "GIT***", "ghp***"]
+    # 普通开关后一项照常（--timeout 不是凭据类开关，30 不是密钥形态）
+    assert masked_structure("args", ["--timeout", "30"]) == ["--timeout", "30"]
+    # 容器开关后“名字=值”单参数仍走只留名字的旧规则，不误触发两项遮
+    assert masked_structure("args", ["--header", "Authorization: Bearer FAKE-HEADER-1"]) == \
+        ["--header", "Authorization: Be***"]
+
+
+def test_key_like_values_in_plain_name_value_are_masked_without_overhiding():
+    # (b) 不跟开关、名字也不像凭据的“名=值”：值形如密钥（常见 token 前缀 / 长随机串）遮住
+    assert masked_structure("args", ["DB_TOKEN=sk-verysecretvalue1234567890"]) == ["DB_TOKEN=sk-***"]
+    assert masked_structure("args", ["CLIENT_SECRET=abcdefghijklmnopqrstuvwxyz123456"]) == ["CLIENT_SECRET=abc***"]
+    assert masked_structure("args", ["JWT_HANDLE=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"]) == ["JWT_HANDLE=eyJ***"]
+    # 普通值不遮：短值、纯数字、主机名、网址、路径、带空格的句子
+    assert masked_structure("args", ["DB_HOST=localhost", "MAX_CONN=100", "APP_URL=https://example.com",
+                                     "LOG_FILE=/var/log/app.log", "NOTE=hello world plain text"]) == \
+        ["DB_HOST=localhost", "MAX_CONN=100", "APP_URL=https://example.com",
+         "LOG_FILE=/var/log/app.log", "NOTE=hello world plain text"]
+    # 文本参数里的同样处理
+    assert mask_value("agent_name", "DB_TOKEN=sk-verysecretvalue1234567890") == "DB_TOKEN=sk-***"
+    assert mask_value("agent_name", "DB_HOST=localhost") == "DB_HOST=localhost"

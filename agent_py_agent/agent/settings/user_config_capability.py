@@ -189,6 +189,10 @@ def is_credential_key(key: object) -> bool:
 # 不按请求头名或变量名写死名单——名字是开放的，容器的角色才是结构事实。
 _SECRET_CONTAINERS = frozenset({"headers", "header", "env", "environ", "environment"})
 _MASK = "***"
+# 值本身形如密钥的通用格式前缀（跨服务商：OpenAI/Anthropic/GitHub/Slack/JWT/AWS 等令牌都以这些开头）。
+# 只认格式标识，不写死某家服务商；命中即把“名=值”里的值遮住。
+_TOKEN_PREFIXES = ("sk-", "sk_", "ghp_", "gho_", "xoxb-", "xoxp-", "xoxa-", "eyj", "akia", "aiza",
+                   "ya29.", "glpat-", "github_pat_", "hf_", "rpk_", "nvapi-")
 # 列表里一项的“请求头行”或“名字=值”形状：名字由 HTTP token 字符组成，后接 = 或 :（: 后紧跟 // 的是网址，交给网址规则）
 _ENTRY_SHAPE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:=|:(?!//))")
 # 文本里空白分隔的“名字=值”：名字在开头、空白或引号之后（网址查询串里的 ?token= 交给网址规则）；
@@ -242,10 +246,35 @@ def _masked_url(text: str) -> str:
 
 
 # LLM: 名字是凭据时遮住整个值；否则值本身再按自由文本处理——引号括起的值里还可能有 password=…，值也可能是网址。
+#   值自身形如密钥（长随机串、常见 token 前缀）也遮，规则只看结构（长度、字符集、前缀），不写死服务商。
 # 函数用途: 处理文本里的一处“名字=值”。
 def _masked_text_pair(match: re.Match) -> str:
     name, value = match.group(1), match.group(2)
-    return f"{name}={_masked_leaf(value) if is_credential_key(_plain_name(name)) else _masked_text(value)}"
+    if is_credential_key(_plain_name(name)) or _looks_like_secret(value):
+        return f"{name}={_masked_leaf(value)}"
+    return f"{name}={_masked_text(value)}"
+
+
+# LLM: 不跟在开关后面、名字也不像凭据的“名=值”里，值如果是密钥形态也要遮：长随机串（>=24 字符、无空白、
+#   无路径/网址特征、字符集限于字母数字和常见 token 符号、且混用字母与数字或大小写）或常见 token 前缀。
+#   规则只看结构，普通值（主机名、纯数字、路径、网址、带空格句子）不遮。
+# 函数用途: 判断一段“名=值”的值是不是形如密钥，需要整体遮住。
+def _looks_like_secret(text: object) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
+    low = text.lower()
+    if any(low.startswith(prefix) for prefix in _TOKEN_PREFIXES):
+        return True
+    if len(text) < 24 or any(char.isspace() for char in text) or "://" in text:
+        return False
+    if "/" in text or "\\" in text or "@" in text:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9._~+=\-]+", text):
+        return False
+    has_alpha = any(char.isalpha() for char in text)
+    has_digit = any(char.isdigit() for char in text)
+    has_mixed_case = any(char.isupper() for char in text) and any(char.islower() for char in text)
+    return has_alpha and (has_digit or has_mixed_case)
 
 
 # LLM: 顶层文本、映射里的文本和列表项最后都走这里：先按空白拆出“名字=值”，名字是凭据的遮值（libpq 的 password=…），
@@ -318,10 +347,27 @@ def _masked_item(item: object, previous: object) -> object:
     return _masked_argument(item) if by_flag is None else by_flag
 
 
-# LLM: 列表按项脱敏（开关后一项、“名字=值”、自由文本、网址、嵌套映射），保持原来是列表还是元组。
+# LLM: 列表按项脱敏（开关后一项、“名字=值”、自由文本、网址、嵌套映射），保持原来是列表还是元组；
+#   请求头/环境变量容器开关（--headers/--header/--env）后“名字 值”分两项写时两项都遮（名字可能是 Authorization/x-api-key 这类
+#   敏感请求头名）；凭据名开关（--api-key、--pass）仍是单值写法，只遮值，不能把后面的参数误当“值”。
 # 函数用途: 返回脱敏后的列表副本（如 mcp_servers 的 args）。
 def _masked_sequence(items: Sequence) -> list | tuple:
-    masked = [_masked_item(item, items[index - 1] if index else None) for index, item in enumerate(items)]
+    masked: list[object] = []
+    index = 0
+    while index < len(items):
+        item = items[index]
+        previous = items[index - 1] if index else None
+        if (_is_secret_container(previous)
+                and isinstance(item, str) and not item.startswith("-")
+                and not _ENTRY_SHAPE.match(item)
+                and index + 1 < len(items)
+                and not (isinstance(items[index + 1], str) and items[index + 1].startswith("-"))):
+            masked.append(_masked_leaf(item))
+            masked.append(_masked_leaf(items[index + 1]))
+            index += 2
+        else:
+            masked.append(_masked_item(item, previous))
+            index += 1
     return tuple(masked) if isinstance(items, tuple) else masked
 
 
