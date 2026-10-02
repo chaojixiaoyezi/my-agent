@@ -91,7 +91,14 @@
 
 ## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`）
 
-- **新增 `test_host_files_access.py`**（22 项，真实沙箱用例按平台跳过，macOS 本机、Linux 在 Docker 车道跑）：
+- **新增 `test_host_files_access.py`**（展开参数后 104 项，真实沙箱用例按平台跳过，macOS 本机、Linux 在 Docker 车道跑）：
+  - A 类逐项（9b 盘点 + 3a 口径，36 个路径逐个写死）：
+    - 策略：每项 `check_write` 都拒 `PATH_HOST_STATE_WRITE_BLOCKED`，读照常；Full Access 和隔离 owner（声明自家根为写根）下 `write_file` 都被拒，文件一个字节不变。
+    - 真实沙箱：同样两种模式下，追加、删除、改名三条命令都失败，内容不变。
+    - 路径包括：6 个策略文件、审计流水、记忆流水与候选、它们旁边的 `.lock`；`runtime.db` 及三个伴随文件；能力申请、临时授权、Compact、日志、审计、`workspace/runtime` 里的会话与 Gateway 服务状态、Curator 状态与事务、记忆归档、缓存、回收站、`skills/` 和家目录根 `.agents/skills/` 里的 `SKILL.md`。
+  - 仍属于模型的位置照常可写：`artifacts/`、`workspace/` 其余、`tmp/`、`memory.md`、`memory/daily`、家目录根文件，以及前缀相近的 `memory/curatorX`、`skills2`。
+  - B 类：`_attach_owner_control_write_guards` 只挂 `runs/`、`agents/`、`data/`、`tasks/`，只在隔离模式挂，A 类不再重复；旧任务的 `work/` 穿透 `tasks/` 可写，别的任务仍拒。
+  - 宿主记忆工具：真实 `SimpleAgent` 的 `remember` 照常写 `memory/candidates.jsonl`；模型 `write_file` 写同一文件被拒，内容没被改。
   - 路径策略（full 和 normal 各一遍）：
     - 宿主配置：数据根 `config/`（含目录本身、还不存在的文件）、`system/config/`、本机主用户、飞书用户、还没有 `config/` 的用户，写入都拒 `PATH_HOST_CONFIG_WRITE_BLOCKED`，提示含 `user_config` 与 `manage_models`，读照常；工作区里同名的 `config/`、前缀相同的目录照常可写。
     - 宿主运行状态：`runtime.db` 及三个伴随文件（不存在的也拒）、别的 owner 的库、`runs`/`tasks`/`audits` 三种任务根的 `data/pack_verification/`，写拒 `PATH_HOST_STATE_WRITE_BLOCKED`，读照常；任务里别的数据、`runtime.db.bak`、不在规范任务根下的同名目录照常可写。

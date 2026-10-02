@@ -70,7 +70,10 @@ def test_restart_always_asks_even_in_autonomous_or_full_access_mode(tmp_path):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
-    from agent_py_agent.tests._tool_runtime_harness import canonical_test_call, runtime_snapshot_for_tools
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_test_call,
+        runtime_snapshot_for_tools,
+    )
 
     tool = SimpleNamespace(model_spec=RestartGatewayTool.model_spec, runtime_policy=RestartGatewayTool.runtime_policy)
     snapshot = runtime_snapshot_for_tools({"restart_gateway": tool})

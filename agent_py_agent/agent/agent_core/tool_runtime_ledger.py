@@ -523,10 +523,11 @@ def _attach_owner_task_write_scope(
     boundary["allowed_write_roots"] = scoped
 
 
-# LLM: Owner home contains both user files and host-authoritative policy/control files. The main
-# WorkspaceOnly root may be writable, but these exact existing control paths stay read-only and
-# are propagated to both filesystem tools and process sandboxes through one boundary field.
-# 函数用途: 保护当前 owner 的权限、配额和运行账本，防止模型靠改框架元数据给自己提权。
+# LLM: B 类（H3 后的口径，3a 2026-10-02 定）：这里只放 owner 隔离时默认禁写、但可被更具体的本任务工作目录穿透的任务树根
+#   （runs/、agents/、data/、tasks/）。它们走写范围的 forbidden_write_roots，按“命中的最具体条目生效”裁决，文件工具与进程沙箱
+#   共用这一个字段。权限/配额/策略文件、审计流水、runtime.db、Compact、日志等“绝对只读”的宿主文件是 A 类，唯一声明在
+#   path_access_policy（HOST_STATE_* / HOST_CONFIG_*），任何模式都生效、不可穿透，这里不再重复列。改动同步 test_host_files_access.py。
+# 函数用途: 隔离 owner 的任务树根默认禁写（本任务工作目录照常可写），防止模型改别的任务或宿主任务账。
 def _attach_owner_control_write_guards(
     boundary: dict[str, object],
     agent: object,
@@ -537,20 +538,10 @@ def _attach_owner_control_write_guards(
     home = getattr(agent, "home_paths", None)
     protected: list[str] = []
     for name in (
-        "owner_permissions_json",
-        "owner_quota_json",
-        "owner_retention_json",
-        "owner_memory_policy_json",
-        "owner_skill_policy_json",
-        "owner_tool_policy_json",
         "owner_runs_dir",
         "owner_agents_dir",
-        "owner_compact_dir",
         "owner_data_dir",
-        "owner_logs_dir",
-        "owner_capability_requests_dir",
-        "owner_temporary_grants_dir",
-        "owner_audit_log_jsonl",
+        "owner_tasks_dir",
     ):
         path = _resolved_path(getattr(home, name, None))
         if path is not None and str(path) not in protected:

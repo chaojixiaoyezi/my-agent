@@ -61,13 +61,28 @@ HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (("data", "plugins
 HOST_CONFIG_HOME_PARTS: tuple[tuple[str, ...], ...] = (("config",), ("system", "config"))
 HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
 
-# H3 宿主运行状态（3a 2026-10-02 扩项）：owner home 里只由宿主写的权威账本，模型工具与命令只读、按路径拒写（不管存不存在）。
-#   runtime.db 是每个 owner 的权威执行账（runtime_db.schema.RUNTIME_DB_FILENAME，9b 发现隔离 Shell 能写它）；SQLite 库连
-#   -wal/-shm/-journal 伴随文件一起保护，改 -wal 一样能改到账。HOST_STATE_OWNER_PARTS 收其它宿主权威文件或目录（9b 盘点）。
-# 常量用途: 列出 owner home 里对模型工具只读的宿主运行状态文件。
-HOST_STATE_OWNER_PARTS: tuple[tuple[str, ...], ...] = ()
+# H3 宿主运行状态（3a 2026-10-02 扩项，A 类“绝对只读”的唯一声明）：owner home 里只由宿主写的权威账本、控制面和派生数据，模型的
+#   文件工具与命令在任何模式下都只能读、不能写（按路径拒写，不管存不存在；不可被任何允许根穿透）。来源：9b 的家目录盘点
+#   （~/.my-agent/decision-evidence/owner-home-host-files-inventory-a9c2b691f/）与原 tool_runtime_ledger 控制面清单中的绝对项
+#   （已从那里删掉，每条路径只在一处）。可被本任务工作目录穿透的任务树根（runs/、agents/、data/、tasks/）不在这里，见
+#   agent_core.tool_runtime_ledger._attach_owner_control_write_guards（B 类）。宿主自己的写入（记忆工具、Curator、策略服务、
+#   runtime 仓库）在宿主进程里，不经过模型工具，不受影响。
+#   - 文件：权限、配额、保留、记忆、skill、工具策略，审计流水，记忆操作流水与候选；每个文件旁的 .lock 一并保护（抢锁会卡住宿主写入）。
+#   - 目录：能力申请、临时授权、Compact、日志、审计、会话与事件库（workspace/runtime）、Curator 事务、记忆归档、缓存、回收站、
+#     owner 级正式 skill（skills/ 与家目录根的 .agents/skills/；项目工作区里的 skills 不在 owner home 下，不受影响）。
+#   - SQLite 库连 -wal/-shm/-journal 伴随文件一起保护：runtime.db（runtime_db.schema.RUNTIME_DB_FILENAME）。
+# 常量用途: 列出 owner home 里对模型工具只读的宿主运行状态（文件、目录、SQLite 库）。
+HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
+    ("permissions.json",), ("quota.json",), ("retention.json",), ("memory_policy.json",), ("skill_policy.json",),
+    ("tool_policy.json",), ("audit_log.jsonl",), ("memory", "ops.jsonl"), ("memory", "candidates.jsonl"),
+)
+HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
+    ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
+    ("memory", "curator"), ("memory_archive",), ("cache",), ("trash",), ("skills",), (".agents", "skills"),
+)
 HOST_STATE_OWNER_SQLITE: tuple[str, ...] = ("runtime.db",)
 SQLITE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
+HOST_STATE_LOCK_SUFFIX = ".lock"
 
 # H3 任务内的宿主托管位置（ae 能力包块 4）：相对规范任务根的路径片段，模型工具只读。规范任务根与
 #   conversation.workspace_paths.canonical_task_root 一致：owner home 下 runs/<日期>/<键>、tasks/<日期>/<名>、audits/<编号>
@@ -558,15 +573,21 @@ def _host_write_block(resolved: Path, agent_home_root: Path) -> PathAccessDecisi
     return None
 
 
-# 函数用途: owner home 里运行状态的全部路径片段（声明的文件或目录，加每个 SQLite 库及其伴随文件）。
+# 函数用途: owner home 里运行状态的全部路径片段：声明的目录，声明的文件及其 .lock，每个 SQLite 库及其伴随文件。
 def _owner_state_parts() -> tuple[tuple[str, ...], ...]:
+    return (*HOST_STATE_OWNER_DIRS, *_owner_state_file_parts())
+
+
+# 函数用途: owner home 里运行状态的文件片段（不含目录）：声明的文件、它们的 .lock、SQLite 库及伴随文件；硬链接比对只看这些。
+def _owner_state_file_parts() -> tuple[tuple[str, ...], ...]:
+    locks = tuple((*parts[:-1], parts[-1] + HOST_STATE_LOCK_SUFFIX) for parts in HOST_STATE_OWNER_FILES)
     sqlite = tuple((name + suffix,) for name in HOST_STATE_OWNER_SQLITE for suffix in ("", *SQLITE_SIDECAR_SUFFIXES))
-    return (*HOST_STATE_OWNER_PARTS, *sqlite)
+    return (*HOST_STATE_OWNER_FILES, *locks, *sqlite)
 
 
-# LLM: H3 硬链接加固：文件工具自己建不了硬链接，但会顺着已有的硬链接写进去。只在目标是有多个链接的普通文件时才逐个比对
-#   宿主配置目录里的文件和各 owner 的运行状态文件（st_dev + st_ino），平时不扫描；任务里的托管位置不枚举。只读元数据，
-#   列目录出错按没命中处理。
+# LLM: H3 硬链接加固：文件工具自己建不了硬链接，但会顺着已有的硬链接写进去。只在目标是有多个链接的普通文件时才比对：
+#   各配置目录里的文件、各 owner 运行状态里声明的文件（st_dev + st_ino）。运行状态目录（日志、缓存、归档等可能很大）和任务里的
+#   托管位置不枚举，平时不扫描（uv 等工具建的硬链接很常见，扫大目录会拖慢每次写）。只读元数据，出错按没命中处理。
 # 函数用途: 目标和某个宿主托管文件是同一个文件时返回那个文件，否则 None。
 def _hardlinked_host_file(path: Path, agent_home_root: Path) -> Path | None:
     try:
@@ -575,7 +596,10 @@ def _hardlinked_host_file(path: Path, agent_home_root: Path) -> Path | None:
         return None
     if info.st_nlink < 2 or not stat.S_ISREG(info.st_mode):
         return None
-    candidates = (item for root in host_readonly_paths(agent_home_root) for item in _files_at(root))
+    homes = _existing_owner_homes(agent_home_root)
+    roots = (*(agent_home_root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS),
+             *(home.joinpath(*parts) for home in homes for parts in (*HOST_CONFIG_OWNER_PARTS, *_owner_state_file_parts())))
+    candidates = (item for root in roots for item in _files_at(root))
     return next((item for item in candidates if item != path and _same_file(info, item)), None)
 
 
@@ -734,7 +758,9 @@ __all__ = [
     "HOST_CREDENTIAL_HOME_PARTS",
     "HOST_MANAGED_OWNER_STORE_PARTS",
     "HOST_SECRET_DIR_NAME",
-    "HOST_STATE_OWNER_PARTS",
+    "HOST_STATE_LOCK_SUFFIX",
+    "HOST_STATE_OWNER_DIRS",
+    "HOST_STATE_OWNER_FILES",
     "HOST_STATE_OWNER_SQLITE",
     "HOST_STATE_TASK_PARTS",
     "PATH_ACCESS_MODE_FULL",

@@ -18,13 +18,35 @@
 | 类别 | 声明 | 位置 | 文件工具 | 命令（Shell） | 拒写码 |
 | --- | --- | --- | --- | --- | --- |
 | 宿主配置 | `HOST_CONFIG_HOME_PARTS`、`HOST_CONFIG_OWNER_PARTS` | 数据根 `config/`、`system/config/`；每个 owner home 的 `config/` | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_CONFIG_WRITE_BLOCKED` |
-| 宿主运行状态 | `HOST_STATE_OWNER_SQLITE`（连 `SQLITE_SIDECAR_SUFFIXES`）、`HOST_STATE_OWNER_PARTS` | owner home 根的 `runtime.db` 和 `-wal`/`-shm`/`-journal`，不管存不存在；`HOST_STATE_OWNER_PARTS` 收 9b 盘点的其它文件 | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_STATE_WRITE_BLOCKED` |
+| 宿主运行状态 | `HOST_STATE_OWNER_FILES`（连 `.lock`）、`HOST_STATE_OWNER_DIRS`、`HOST_STATE_OWNER_SQLITE`（连 `SQLITE_SIDECAR_SUFFIXES`） | owner home 里，按路径拒写、不管存不存在。文件：`permissions.json`、`quota.json`、`retention.json`、`memory_policy.json`、`skill_policy.json`、`tool_policy.json`、`audit_log.jsonl`、`memory/ops.jsonl`、`memory/candidates.jsonl`，每个旁边的 `.lock`；`runtime.db` 和 `-wal`/`-shm`/`-journal`。目录：`capability_requests/`、`temporary_grants/`、`compact/`、`logs/`、`audit/`、`workspace/runtime/`、`memory/curator/`、`memory_archive/`、`cache/`、`trash/`、`skills/`、家目录根的 `.agents/skills/` | 拒写，读照常 | 拒写，读照常 | `PATH_HOST_STATE_WRITE_BLOCKED` |
 | 任务核验记录 | `TASK_ROOT_LAYOUT` + `HOST_STATE_TASK_PARTS` | 规范任务根（owner home 下 `runs/<日期>/<键>`、`tasks/<日期>/<名>`、`audits/<编号>`）的 `data/pack_verification/` | 拒写，读照常 | 只保护本次命令工作目录和写根所在的任务 | `PATH_HOST_STATE_WRITE_BLOCKED` |
 | 宿主凭据 | `HOST_CREDENTIAL_HOME_PARTS`、`HOST_CONFIG_YAML_SEGMENTS`、`HOST_SECRET_DIR_NAME` | 数据根 `config/` 下的 `admin-password.json`、`shared-model-profiles.json`、`model-profiles/`、名字里有 yaml/yml 段的文件（用户配置及 `desktop.yaml.bak-*` 等备份）；数据根里 owner home 之外任何一层叫 `secrets` 的目录 | 读写都拒 | 拒写，**读照常**（已知边界） | `PATH_HOST_CREDENTIAL_BLOCKED` |
 
 - 用户配置的文件名由部署决定（Gateway `--config`），所以按“数据根 `config/` 下的 YAML 文件”认，不写死 `desktop.yaml`。
 - 凭据只对文件工具连读也拒，这是 3a 定的。命令不拒读，因为模型在 Full Access 下会经 `run_command` 跑 my-agent CLI，CLI 要读 `desktop.yaml` 和模型目录。
 - 被拒时，提示指向 `user_config` / `manage_models`，它们给的是脱敏视图。
+
+### 1.1 A 类与 B 类：每条路径只在一处（3a 定）
+
+- **A 类：宿主托管文件，绝对只读**。上表各项都是 A 类，唯一声明在 `path_access_policy`。
+  - 生效范围：任何模式（含管理员 Full Access）、所有 owner。
+  - 不可被任何允许根穿透。
+  - 文件工具、写边界、插件上下文、Shell 只读覆盖、上级目录改名规则都按它判。
+  - 原 `tool_runtime_ledger._attach_owner_control_write_guards` 清单里的绝对项已搬到这里，从那里删掉：权限、配额、保留、记忆、skill、工具策略文件，审计流水，能力申请，临时授权，Compact，日志。
+- **B 类：owner 写范围里默认禁写、可被本任务工作目录穿透的任务树根**。
+  - 范围：`runs/`、`agents/`、`data/`、`tasks/`。
+  - 留在 `_attach_owner_control_write_guards`，走写范围的 `forbidden_write_roots`，按“命中的最具体条目生效”裁决，只在隔离模式挂。
+  - 举例：本任务的 `work/` 是更具体的允许根，照常可写；别的任务仍禁写。
+  - `tasks/`（9b 第 3 项）放 B 类：旧版任务工作区 `tasks/<日期>/<名>` 恢复时，模型要在它的 `work/` 里写。
+  - `data/` 不搬到 A 类：可能有允许根落在 owner `data/` 下，H2 已经整体隐藏 `data/plugins`。
+- **不保护（3a 口径）**，这些属于模型：
+  - `artifacts/`：经上下文包的 `owner_artifacts_root` 交给模型，是交付区；
+  - `workspace/` 里除 `runtime/` 以外的内容；
+  - `tmp/`；
+  - 记忆正文（`memory.md`、`memory/daily|lessons|routing|long_term`），由记忆工具写；
+  - 用户放在家目录根的文件；
+  - 真实项目工作区里的 `.agent(s)/skills`：不在 owner home 下，用户可以让模型写项目 skill。
+- **宿主自己的写入不受影响**：记忆工具（`remember`）、Curator、策略服务、runtime 仓库、skill 管理都在宿主进程里写，不走模型的文件工具和 Shell。用例钉住：保护打开后 `remember` 照常写候选，模型 `write_file` 写同一文件被拒。
 
 ## 2. 拦截点
 
@@ -88,7 +110,8 @@
 5. **沙箱外早已存在的硬链接**：命令顺着它写挡不住，Seatbelt 只拦新建；文件工具有 inode 比对。
 6. **插件进程**：`plugin_process_sandbox` 关闭时（默认关），插件进程以宿主权限运行，不受这道门约束。插件是管理员确认安装的代码。插件经 SDK 判路径时照样用 `check` / `check_write`。
 7. **用户配置放在数据根以外**（开发时 `--config` 指到仓库里）：不受本门保护，路径策略多处构造拿不到配置路径。
-8. **宿主自己的写入不受影响**：参数中心、`manage_models`、`/model`、OAuth、修改账本、runtime 仓库、能力包核验都在宿主进程里写，不经过模型工具的路径门和沙箱。
+8. **管理员在命令里跑会写宿主状态的 my-agent CLI**：Full Access 下模型经 `run_command` 跑的子命令也在沙箱里，写日志、缓存、runtime.db 等会被拒，这是本项的目的（和隔离模式原来就一样）。读配置、读状态的命令不受影响。
+9. **宿主自己的写入不受影响**：参数中心、`manage_models`、`/model`、OAuth、修改账本、runtime 仓库、能力包核验都在宿主进程里写，不经过模型工具的路径门和沙箱。
 
 ## 4. 会不会误伤现有功能
 
@@ -97,6 +120,7 @@
   - 用户说“帮我直接改一下 desktop.yaml”，以后会被拒，并指向 `user_config`。参数中心没登记的键、注释、备份文件，模型都改不了了，要用户自己改或用 `/settings`。
   - 模型读 `desktop.yaml`、模型目录会被拒，改用脱敏视图。
 - **隔离 owner 的边界事实**：只有落在可写根里的宿主文件才列进 `read_only`，原有回执不变（`test_shell_sandbox_boundary_facts` 照旧通过）。
+- **原 B 清单里的绝对项改由 A 类拦**：隔离模式下写这些文件的拒绝码从笼统的 `WRITE_FORBIDDEN` 变成 `PATH_HOST_STATE_WRITE_BLOCKED`。管理员 Full Access 下这些文件原来能写，现在只读。
 
 ## 5. 顺带决定（3a）
 

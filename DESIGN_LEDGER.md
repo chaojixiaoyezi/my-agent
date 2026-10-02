@@ -65,8 +65,12 @@
 - **做法**：唯一声明在 `path_access_policy`（路径片段，插件 SDK 照样只依赖标准库）。
   - 保护范围分三类：
     - 宿主配置：数据根 `config/`、`system/config/`，各 owner 的 `config/`；
-    - 宿主运行状态：各 owner 根的 `runtime.db` 和 `-wal`/`-shm`/`-journal`，按路径拒写，不管存不存在；
+    - 宿主运行状态（9b 盘点、3a 定口径）：各 owner 的策略文件及 `.lock`、审计流水、`runtime.db` 及伴随文件、`workspace/runtime/`、`audit/`、Curator 事务、记忆流水与候选、记忆归档、缓存、回收站、owner 级正式 skill 等，按路径拒写，不管存不存在；
     - 规范任务根的 `data/pack_verification/`。
+  - **A/B 两类，每条路径只在一处**（3a 定）：
+    - 上面这些是 A 类，绝对只读，唯一声明在 `path_access_policy`。原 `tool_runtime_ledger` 控制面清单里的绝对项已搬过来、从那里删掉。
+    - B 类留在 ledger：`runs/`、`agents/`、`data/`、`tasks/`，只在隔离模式挂，可被本任务工作目录穿透。
+    - 不保护：`artifacts/`、`workspace/` 其余、`tmp/`、记忆正文。
   - 文件工具、写边界、插件写入上下文都走 `check_write`。拒写码是 `PATH_HOST_CONFIG_WRITE_BLOCKED` 和 `PATH_HOST_STATE_WRITE_BLOCKED`，提示指向 `user_config` / `manage_models`。
   - 宿主凭据（管理员密码、模型目录、共享模型档案、数据根 `config/` 里的 YAML 配置及备份、owner home 之外的 `secrets` 目录）对文件工具读写都拒，码是 `PATH_HOST_CREDENTIAL_BLOCKED`。命令只拒写不拒读，因为 my-agent CLI 要读。
   - 命令类工具在 `_sandbox_exec` 里加只读覆盖，任何模式都生效，Full Access 也是。
