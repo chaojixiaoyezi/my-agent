@@ -1,5 +1,14 @@
 # 设计台账
 
+## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，待 be 审）
+
+- **生产事实**（3a，step17f 上线后 local/main 的 curator/runs）：13:58 qwen3.8-flash 那组用 MiniMax-M2.7 补跑成功，带 `curator_thread_model_failed:CURATOR_MODEL_FAILED:transient`，修复生效；13:59 这个会话来了新消息，又先试 qwen3.8-flash，失败。按原规则还要再失败一次才换默认模型。
+- **做法**（be 留的后续项，3a 定）：这组最近一次推进本组游标的运行，如果就是“连不上让给默认”的补跑，下一批的阈值从 2 降到 1（`CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT`）。会话自己的模型每批还有一次机会，失败一次就直接换默认，不再每批白白失败两次；会话模型自己成功推进后，阈值回到 `CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT`=2。
+  - 只读已有运行账：`group_breaker_history` 筛过的本组历史里第一条成功，就是最近一次推进本组游标的运行；看它的警告里有没有 `transient_fallback_warning(<连接类失败码>)`，按全文比对。不加新状态。
+  - 警告码格式只在 `curator_routing.transient_fallback_warning` 一处生成：补跑写记录（`curator._transient_fallback`）和判断阈值用同一个函数。
+  - 确定性失败（坏 JSON）的补跑警告不带 `:transient`，不降阈值；账里看不到成功（太早）按 2 处理。
+- **验证**：见 TESTS.md 同名节。
+
 ## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，待集成）
 
 - **生产事实**（3a，K1 上线后 local/main 的 curator/runs，只看结构化字段）：13:12 某会话选的 qwen3.8-flash 那组 `CURATOR_MODEL_FAILED`，两次 ProviderTransientError，各约 22 秒。
@@ -11,6 +20,7 @@
   - 不改成按组隔离熔断，不改退避口径；默认组自己的失败不受影响（没有别的模型可换）。读运行账出错按没达到处理。
 - **为什么不在失败的那次运行里马上补跑**：一次运行的租约只有一整次提取的预算加 90 秒（`_lease_seconds`）。超时类失败已经把它用掉，再补跑一次会丢租约，提交被拒。下一次运行直接用默认模型，还省掉对一个已知连不上的服务商再烧一轮重试（生产那次约 44 秒）。代价：每批新消息最多先失败 2 次（每次之后退避 30–300 秒）才换到默认模型。
 - 实现：`memory_store/curator_routing.py`（常数与纯函数 `transient_fallback_code`）、`memory_store/curator.py`（`_CuratorRunMixin._transient_fallback`）。测试见 TESTS 同名条目。
+- **后续（已做，75）**：默认补跑推进过本组游标后，下一批只给会话模型 1 次机会，见本台账“记忆整理补跑后续”条目。
 
 ## 被宿主停机打断的回合重启后统一自动续跑，TUI 和 IM 都看得到（I4，第 8 条②，用户选 B，2026-10-02，分支 `claude/38-resume-rule`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，待集成）
 
@@ -376,7 +386,7 @@
   - 会话自己的模型在提取或校验阶段确定性失败（`CURATOR_SCHEMA_INVALID`，比如不擅长严格 JSON）时，本次运行用 owner 默认模型补跑一次（3a 建议）。
     - 这时还没写任何东西，幂等不受影响；成功就照常提交，运行记录写实际用的默认模型，并加 `curator_thread_model_failed:<码>`。
     - 补跑也失败就只记这一次运行失败：熔断按运行计，不按尝试计。
-    - 网络、额度、超时、提交失败都不在同一次运行里补跑。每组每次最多补跑一次。连接类失败连续 2 次后，下一次运行直接用默认模型（见“会话自己的模型连续连不上时让给 owner 默认模型”条目）。
+    - 网络、额度、超时、提交失败都不在同一次运行里补跑。每组每次最多补跑一次。连接类失败连续 2 次后，下一次运行直接用默认模型；上一批就是这样补跑推进的，新一批失败 1 次就换（见“会话自己的模型连续连不上时让给 owner 默认模型”与“记忆整理补跑后续”条目）。
   - 熔断仍是 owner 级（退避和熔断码与以前相同），但“同一输入”的判断改成按组：只看同一模型的历史运行、游标投影到本组会话（默认组再加审计游标）；没推进本组游标的成功不打断计数。所以别的组夹在中间成功，也不会让一直失败的组无限重放。
   - 运行记录与返回结果的 provider/model 写本组实际用的模型；多组时返回汇总结果（计数相加，状态取最后一组），加 `curator_model_groups:<组数>`。
 - **每个 owner 在自己的目录里解析**（3a 要求，step17c 背景：step17b 时全局指定的档案只在 local/main 的目录里，别的 owner 解析成 `profile_not_found`，整理一直不跑，日志 257 条）：

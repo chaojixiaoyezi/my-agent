@@ -24,6 +24,9 @@ CURATOR_DEFAULT_FALLBACK_CODES = frozenset({"CURATOR_SCHEMA_INVALID"})
 # 用掉了它（3a 2026-10-02 生产：某会话选的模型连续 ProviderTransientError，那组排在最前，整个 owner 的整理都卡住）。
 # 同一组同一起始游标上连续连接类失败几次后，下一次运行这组直接用 owner 默认模型：2 次足以排除一次抖动。
 CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT = 2
+# 本组最近一次推进游标的是“连不上让给默认”的补跑时，下一批只给会话自己的模型 1 次机会：失败 1 次就直接换默认，
+# 会话模型仍被定期重试，又不会每批白白失败两次；会话模型自己成功推进后回到上面的 2 次（3a 2026-10-02 生产后续）。
+CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT = 1
 CURATOR_TRANSIENT_FALLBACK_CODES = frozenset({"CURATOR_MODEL_FAILED", "CURATOR_MODEL_TIMEOUT"})
 
 
@@ -94,13 +97,33 @@ def group_breaker_history(rows: list, identity: tuple[str, str], view: Callable[
     return kept
 
 
-# LLM: 纯函数；previous 是 group_breaker_history 筛过的本组历史（新到旧，会话自己的模型那组身份）。最近
-#   CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT 条全是同一起始游标（投影到本组）上的连接类失败时，返回其中最近一次的失败码；
-#   中间夹一次推进本组游标的成功（含默认模型补跑成功）就不算。只看结构化状态、失败码和游标。
+# LLM: 运行记录里“会话模型连不上、这次用默认模型”的结构化警告码，写（curator._transient_fallback）和读
+#   （_transient_fallback_threshold）共用这一处格式，不能各拼各的。
+# 函数用途: 生成连接类失败让给默认模型时写进运行记录的警告码。
+def transient_fallback_warning(code: str) -> str:
+    return f"curator_thread_model_failed:{code}:transient"
+
+
+# LLM: previous 新到旧且只含本组相关行，其中第一条成功就是最近一次推进本组游标的运行。它带“连不上让给默认”的警告码
+#   （按 transient_fallback_warning 全文比对，不解析别的文字）时，阈值降到 CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT；
+#   否则（会话模型自己成功推进、确定性失败的补跑、账里看不到成功）用 CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT。不加新状态。
+# 函数用途: 算这组这一次要在同一输入上连续连不上几次，才改用默认模型。
+def _transient_fallback_threshold(previous: list) -> int:
+    advanced = next((row for row in previous if row.status == "succeeded"), None)
+    fallback = {transient_fallback_warning(code) for code in CURATOR_TRANSIENT_FALLBACK_CODES}
+    if advanced is not None and fallback & set(advanced.warnings):
+        return CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT
+    return CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT
+
+
+# LLM: 纯函数；previous 是 group_breaker_history 筛过的本组历史（新到旧，会话自己的模型那组身份）。最近“阈值”条
+#   （_transient_fallback_threshold：平时 2，上一次推进本组游标的是连不上的默认补跑时 1）全是同一起始游标（投影到本组）上的
+#   连接类失败时，返回其中最近一次的失败码；中间夹一次推进本组游标的成功就不算。只看结构化状态、失败码、警告码和游标。
 # 函数用途: 判断这组是否该改用默认模型，返回触发它的失败码；不该时返回空串。
 def transient_fallback_code(cursor_before: dict, previous: list, view: Callable[[dict], object]) -> str:
-    window = previous[:CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT]
-    if len(window) < CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT:
+    threshold = _transient_fallback_threshold(previous)
+    window = previous[:threshold]
+    if len(window) < threshold:
         return ""
     if all(row.status == "failed" and row.failure_code in CURATOR_TRANSIENT_FALLBACK_CODES
            and view(row.cursor_before) == view(cursor_before) for row in window):
@@ -130,10 +153,12 @@ __all__ = [
     "CURATOR_MODEL_GROUP_MAX_COUNT",
     "CURATOR_TRANSIENT_FALLBACK_CODES",
     "CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT",
+    "CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT",
     "RoutedBatch",
     "combined_run_result",
     "group_breaker_history",
     "group_cursor_view",
     "route_batch",
     "transient_fallback_code",
+    "transient_fallback_warning",
 ]

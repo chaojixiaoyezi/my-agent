@@ -14,6 +14,8 @@ memory_curator_model_profile 留空时，一批里来自不同会话、不同模
 8. 会话自己的模型连不上（3a 2026-10-02 生产：qwen 那组连续 ProviderTransientError，排在最前卡住整个 owner）→ 同一组同一
    起始游标连续失败 CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT 次后，下一次运行直接用 owner 默认模型、游标推进，记录带
    curator_thread_model_failed:<码>:transient；默认模型自己连不上照旧退避；别组夹在中间成功不清零计数。
+9. 上一次推进本组游标的就是这种连不上的默认补跑时（3a 2026-10-02 生产后续），下一批只给会话自己的模型 1 次机会，
+   失败 1 次就直接换默认；会话自己的模型成功推进后，回到连续 2 次。
 """
 from __future__ import annotations
 
@@ -50,6 +52,7 @@ from agent_py_agent.agent.memory_store.curator_routing import (
     group_cursor_view,
     route_batch,
     transient_fallback_code,
+    transient_fallback_warning,
 )
 from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunLog
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
@@ -359,8 +362,72 @@ def test_transient_fallback_needs_consecutive_connection_failures_on_the_same_in
         "确定性失败有自己的补跑和熔断"
     assert transient_fallback_code(same, [failed("CURATOR_MODEL_FAILED"), failed("CURATOR_MODEL_FAILED", moved)], view) == "", \
         "不是同一批输入"
-    success = SimpleNamespace(status="succeeded", failure_code="", cursor_before=same)
+    success = SimpleNamespace(status="succeeded", failure_code="", cursor_before=same, warnings=())
     assert transient_fallback_code(same, [success, failed("CURATOR_MODEL_FAILED"), failed("CURATOR_MODEL_FAILED")], view) == ""
+
+
+def test_one_connection_failure_is_enough_right_after_a_transient_default_fallback():
+    from types import SimpleNamespace
+
+    view = group_cursor_view(("ta",), include_audit=False)
+    after = {"per_thread_cursors": {"ta": "m2"}, "last_audit_event_id": ""}
+    before = {"per_thread_cursors": {"ta": "m1"}, "last_audit_event_id": ""}
+
+    def failed(code: str = "CURATOR_MODEL_FAILED", cursor: dict = after):
+        return SimpleNamespace(status="failed", failure_code=code, cursor_before=cursor, warnings=())
+
+    def advanced(*warnings: str):
+        return SimpleNamespace(status="succeeded", failure_code="", cursor_before=before, warnings=tuple(warnings))
+
+    fallback = advanced("dropped_evidence:x", transient_fallback_warning("CURATOR_MODEL_TIMEOUT"))
+    assert transient_fallback_code(after, [failed(), fallback], view) == "CURATOR_MODEL_FAILED", "补跑推进后只失败 1 次就换"
+    assert transient_fallback_code(after, [fallback], view) == "", "补跑推进后还没失败：先给会话自己的模型一次机会"
+    assert transient_fallback_code(after, [failed(), advanced()], view) == "", "会话模型自己成功推进后要连续 2 次"
+    assert transient_fallback_code(after, [failed(), advanced("curator_thread_model_failed:CURATOR_SCHEMA_INVALID")], view) == "", \
+        "坏 JSON 的补跑不算连不上"
+    assert transient_fallback_code(after, [failed("CURATOR_SCHEMA_INVALID"), fallback], view) == "", "失败得是连接类"
+    assert transient_fallback_code(after, [failed(cursor=before), fallback], view) == "", "不是同一批输入"
+    assert transient_fallback_code(after, [failed(), failed(), advanced()], view) == "CURATOR_MODEL_FAILED"
+
+
+# 函数用途: 可切换“连不上”的回显后端，记总调用次数（会话自己的模型时好时坏的替身）。
+class _SwitchableBackend(_FlakyBackend):
+    def __init__(self, name: str, thread_of: dict[str, str]) -> None:
+        super().__init__(name, thread_of)
+        self.calls = 0
+
+    def generate_structured(self, prompt: str, *, response_schema: dict[str, object]) -> ModelResponse:
+        self.calls += 1
+        return super().generate_structured(prompt, response_schema=response_schema)
+
+
+def test_after_a_transient_fallback_the_thread_model_gets_one_chance_per_new_batch(tmp_path):
+    store, thread_a, _thread_b, thread_of = _two_threads(tmp_path)
+    default, model_a = _EchoBackend("default", thread_of), _SwitchableBackend("model-a", thread_of)
+    model_a.down = True
+    service = _service(tmp_path, store, _routing(default, model_a, thread_a))
+    for _ in range(2):
+        service.run(reason="admin")
+    assert service.run(reason="admin").status == "succeeded" and model_a.calls == 2, "第一次照原规则连续 2 次后才换"
+
+    thread_of[_append(store, thread_a, "A 的新消息 1", 100.0)] = thread_a
+    once = service.run(reason="admin")
+    assert (once.status, once.model, model_a.calls) == ("failed", "model-a", 3), "补跑推进后来新消息：先给会话模型一次机会"
+    again = service.run(reason="admin")
+    assert (again.status, again.model, model_a.calls) == ("succeeded", "model-d", 3), "只失败 1 次就直接换默认"
+    assert transient_fallback_warning("CURATOR_MODEL_FAILED") in service.run_log.list()[-1].warnings
+    assert service.state_store.load().per_thread_cursors[thread_a] != "", "游标推进"
+
+    model_a.down = False
+    thread_of[_append(store, thread_a, "A 的新消息 2", 110.0)] = thread_a
+    recovered = service.run(reason="admin")
+    assert (recovered.status, recovered.model, model_a.calls) == ("succeeded", "model-a", 4), "会话模型恢复，自己推进"
+    model_a.down = True
+    thread_of[_append(store, thread_a, "A 的新消息 3", 120.0)] = thread_a
+    results = [service.run(reason="admin") for _ in range(3)]
+    assert [(item.status, item.model) for item in results] == [
+        ("failed", "model-a"), ("failed", "model-a"), ("succeeded", "model-d")], "恢复后阈值回到连续 2 次"
+    assert model_a.calls == 6
 
 
 # 函数用途: 造一条批内消息输入（纯函数用例用，不落盘）。

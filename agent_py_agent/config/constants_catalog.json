@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 835,
+  "count": 837,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3810,6 +3810,14 @@
       "unit": "个",
       "category": "其它",
       "description": "同一组同一起始游标上连续连接类失败几次后，下一次运行这组直接用 owner 默认模型：2 次足以排除一次抖动。"
+    },
+    {
+      "name": "CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_routing.py",
+      "value": 1,
+      "unit": "个",
+      "category": "其它",
+      "description": "会话模型仍被定期重试，又不会每批白白失败两次；会话模型自己成功推进后回到上面的 2 次（3a 2026-10-02 生产后续）。"
     },
     {
       "name": "RUN_WARNINGS_MAX_COUNT",

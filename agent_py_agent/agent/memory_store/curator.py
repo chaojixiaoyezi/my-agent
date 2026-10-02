@@ -67,6 +67,7 @@ from .curator_routing import (
     group_cursor_view,
     route_batch,
     transient_fallback_code,
+    transient_fallback_warning,
 )
 from .curator_run_log import (
     RUN_WARNING_MAX_CHARS,
@@ -735,8 +736,9 @@ class _CuratorRunMixin:
                      fallback_warnings=(f"curator_thread_model_failed:{code}",))
         return result
 
-    # LLM: 只对非默认组：本组历史（group_breaker_history 按会话自己的模型身份筛）最近连续
-    #   CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT 次在同一起始游标上连接类失败时，这次直接用 owner 默认模型提取。运行身份
+    # LLM: 只对非默认组：本组历史（group_breaker_history 按会话自己的模型身份筛）最近连续“阈值”次在同一起始游标上
+    #   连接类失败时，这次直接用 owner 默认模型提取（阈值平时 CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT；上一次推进本组游标的
+    #   就是这种默认补跑时降到 CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT，见 curator_routing.transient_fallback_code）。运行身份
     #   先改成默认模型：成功与失败都记在默认模型名下，默认模型自己的瞬时失败照旧退避、确定性失败照旧按它自己的历史熔断；
     #   本组历史不被它打断，所以默认模型没成功前每次都直接用它。成功与失败记录都带 curator_thread_model_failed:<码>:transient。
     #   读运行账出错按没达到处理（照常试本组模型）。不是按组隔离的熔断，不改退避口径。
@@ -756,7 +758,7 @@ class _CuratorRunMixin:
         code = transient_fallback_code(cursor, history, view)
         if not code:
             return None
-        warning = f"curator_thread_model_failed:{code}:transient"
+        warning = transient_fallback_warning(code)
         route.update(provider=default.provider, model=default.model, failure_warnings=(warning,))
         result = self._extract_with(default.backend, context, batch)
         route["fallback_warnings"] = (warning,)

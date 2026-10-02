@@ -1,5 +1,9 @@
 # 记忆与上下文维护状态
 
+## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（2026-10-02，分支 `claude/75-curator-fallback-threshold`，已实现，待 be 审）
+
+- 本组最近一次推进游标的是 `:transient` 默认补跑时，下一批阈值从 2 降到 1（`CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT`）；会话模型自己成功推进后回到 2。只读运行账，警告码由 `curator_routing.transient_fallback_warning` 统一生成。详见 DESIGN_LEDGER 同名条目。
+
 ## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（2026-10-02，分支 `claude/be-curator-transient-fallback`，已实现，待集成）
 
 - 非默认组在同一输入上连续 2 次连接类失败（`CURATOR_MODEL_FAILED`、`CURATOR_MODEL_TIMEOUT`）后，下一次运行直接用 owner 默认模型，记 `curator_thread_model_failed:<码>:transient`；默认模型自己的失败照旧退避或熔断，不按组隔离熔断。详见 DESIGN_LEDGER 同名条目。
