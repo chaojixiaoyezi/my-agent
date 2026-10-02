@@ -1394,3 +1394,8 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 `orchestration_tools._params_with_skill_snapshot_refs` 和 `orchestration/tools/capability._resolved_skill_grant`
 只从父级当前快照铸造引用；`hierarchy/context.inherited_hierarchy_attributes` 同时保留后授予引用并按子级权限裁剪。
 `core.skill_snapshot_for_run_scope` 对 child 只读 canonical task 和 grants，包摘要相同但激活已换代也拒绝。
+
+## 子代理界面标签的唯一权威（2026-10-02）
+
+- `subagents/runner_display_projection.py`：`runner_failure_label(status, failure_type)` 给失败类型专属标签（没有时为空、RUNNING 为空），`runner_display_label` 在它之上补按状态的默认标签。
+- 读方：结算时写 `current_step`（`runner_result_state`）、Gateway 名册行 `failure_label` 与终态活动文字（`conversation/agent_activity`）、`/status` 异常细分（经 `agent_activity.subagent_display_label`，网关层不直接导入 subagents）。客户端（TUI、IM）只读这些标量，不另写失败类型映射。

@@ -54,6 +54,10 @@ class ChatControlExecution:
     state: ChatControlState
 
 
+# /status 里“异常”子代理标签细分最多收几条（Gateway 端按计数排好序）。
+_STATUS_LABEL_LIMIT_COUNT = 8
+# 每条界面标签最多多少字符（超出的整条跳过）。
+_STATUS_LABEL_MAX_CHARS = 32
 _IM_ONLY_CONTROL_KINDS = frozenset({"admin", "approve", "deny"})
 _IM_ONLY_CONTROL_MESSAGE = (
     "本机终端已经是管理员；/admin、/approve、/deny 只用于飞书等 IM 私聊，终端里的工具确认请直接在审批面板中选择。"
@@ -314,6 +318,7 @@ def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus
         subagent_running=_nonnegative_int(value.get("subagent_running")),
         subagent_done=_nonnegative_int(value.get("subagent_done")),
         subagent_failed=_nonnegative_int(value.get("subagent_failed")),
+        subagent_other_labels=_label_counts(value.get("subagent_other_labels")),
         model_name=str(value.get("model_name") or ""),
         compact_generation=compact_generation,
         verbose_level=str(value.get("verbose_level") or ""),
@@ -325,6 +330,21 @@ def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus
 # LLM: Numeric control projections reject booleans and malformed strings instead of silently
 # turning them into status authority.
 # 函数用途: 将控制结果中的整数计数安全收口为非负值。
+# LLM: 只接受 Gateway 算好的 [标签, 非负整数] 对；有界复制，畸形项跳过，客户端不重算或另写失败类型映射。
+# 函数用途: 解析 /status 里“异常”子代理按界面标签的细分。
+def _label_counts(value: object) -> tuple[tuple[str, int], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    rows = []
+    for item in value[:_STATUS_LABEL_LIMIT_COUNT]:
+        if not (isinstance(item, (list, tuple)) and len(item) == 2 and isinstance(item[0], str)):
+            continue
+        count = _nonnegative_int(item[1])
+        if 0 < len(item[0]) <= _STATUS_LABEL_MAX_CHARS and count:
+            rows.append((item[0], count))
+    return tuple(rows)
+
+
 def _nonnegative_int(value: object) -> int:
     if isinstance(value, bool):
         return 0

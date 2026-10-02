@@ -120,6 +120,8 @@ class ConversationTaskStatus:
     subagent_running: int = 0
     subagent_done: int = 0
     subagent_failed: int = 0
+    # “异常”子代理按界面标签的细分（宿主停机中断、额度不足、失败等），标签来自 runner_display_projection。
+    subagent_other_labels: tuple[tuple[str, int], ...] = ()
     model_name: str = ""
     compact_generation: int | None = None
     verbose_level: str = ""
@@ -814,7 +816,9 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
         if status.subagent_total:
             execution += (
                 f"；子代理 {status.subagent_total}（运行 {status.subagent_running}，"
-                f"完成 {status.subagent_done}，异常 {status.subagent_failed}）"
+                f"完成 {status.subagent_done}，异常 {status.subagent_failed}"
+                + _subagent_label_breakdown(status.subagent_other_labels)
+                + "）"
             )
         lines.append(f"执行情况：{execution}")
     if status.queued_count:
@@ -847,6 +851,14 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
     if status.quarantined_wakes:
         lines.append(f"已结案的后台唤醒：{status.quarantined_wakes} 条（反复失败、不再自动领取；管理员可用 /wakes 查看）")
     return "\n".join(lines)
+
+
+# LLM: 只拼接 Gateway 已按 runner_display_projection 算好的标签与计数，不读状态码、不另写失败类型映射；没有细分时返回空串，
+#   /status 原文逐字不变。
+# 函数用途: 把“异常”子代理的标签细分拼成“：宿主停机中断 1，失败 1”这样的短语。
+def _subagent_label_breakdown(labels: tuple[tuple[str, int], ...]) -> str:
+    parts = [f"{label} {count}" for label, count in labels if label and count > 0]
+    return "：" + "，".join(parts) if parts else ""
 
 
 # LLM: Durations are deterministic status facts, not model-generated prose.

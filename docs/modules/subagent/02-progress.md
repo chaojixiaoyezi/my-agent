@@ -363,3 +363,8 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
   - Gateway 关门结清后，给本进程在跑的执行器在各自 attempt 上打 `executor.host_shutdown` 记号，个数写进收尾载荷 `host_shutdown_executors`；
   - 重启收尾看到记号，记 `host_shutdown_interrupted`（不自动重跑），有未确认工具效果时仍先核对。
   - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## 子代理被宿主停机打断时界面显示“宿主停机中断”（2026-10-02，分支 `claude/9b-shutdown-label`，基于 step17e `2e5a36af0`）
+
+- `runner_display_projection` 新增 `runner_failure_label`：失败类型专属标签的唯一出口（宿主停机中断、额度不足等），`runner_display_label` 复用它。
+- Gateway 名册行带出 `failure_label`，TUI 名册、子代理页头部与终态活动文字都用它；IM `/status` 的“异常”按同一权威细分。设计见台账同名节，测试与变异见 TESTS.md 同名节。

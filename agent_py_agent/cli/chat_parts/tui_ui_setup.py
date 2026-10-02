@@ -169,6 +169,9 @@ def _make_render_context_factory(
             focused_agent_replaced_by=str(
                 getattr(navigation_snapshot, "active_replaced_by_run_id", "") or ""
             ),
+            focused_agent_failure_label=str(
+                getattr(navigation_snapshot, "active_failure_label", "") or ""
+            ),
             selected_agent_run_id=str(
                 getattr(navigation_snapshot, "selected_run_id", "") or ""
             ),

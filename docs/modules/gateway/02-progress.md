@@ -1013,3 +1013,7 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - Gateway 关门结清后，给本进程在跑的执行器在各自 attempt 上打 `executor.host_shutdown` 记号，个数写进收尾载荷 `host_shutdown_executors`；
   - 重启收尾看到记号，记 `host_shutdown_interrupted`（不自动重跑），有未确认工具效果时仍先核对。
   - 设计见台账同名节，测试与变异见 TESTS.md 同名节。
+
+## /status 的子代理异常按界面标签细分（2026-10-02，分支 `claude/9b-shutdown-label`）
+
+- `control_service._subagent_status` 返回 `_SubagentStatusCounts`（前四项位置不变，多 `other_labels`），异常一类按 `agent_activity.subagent_display_label` 细分；`ConversationTaskStatus.subagent_other_labels` 让 IM 与 TUI 的 `/status` 显示“异常 3：宿主停机中断 2，失败 1”，没有异常时原文不变。

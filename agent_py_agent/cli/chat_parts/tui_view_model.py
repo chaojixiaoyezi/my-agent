@@ -1550,6 +1550,8 @@ _PUBLIC_SUBAGENT_FIELDS = frozenset(
         # 与 runtime 白名单同步：已被接替时的接替者 run_id 与处置。
         "replaced_by_run_id",
         "replaced_by_disposition",
+        # 与 runtime 白名单同步：Gateway 算好的失败类型专属标签（宿主停机中断、额度不足等）。
+        "failure_label",
     }
 )
 

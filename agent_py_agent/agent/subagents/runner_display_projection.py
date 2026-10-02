@@ -37,5 +37,13 @@ def runner_display_label(status: object, failure_type: object) -> str:
     normalized_status = str(status or "").strip().upper()
     if normalized_status == TaskStatus.RUNNING.value:
         return ""
-    detail = _DETAIL_BY_FAILURE.get(str(failure_type or "").strip(), "")
-    return detail or _LABEL_BY_STATUS.get(normalized_status, normalized_status)
+    return runner_failure_label(status, failure_type) or _LABEL_BY_STATUS.get(normalized_status, normalized_status)
+
+
+# LLM: 失败类型专属标签的唯一出口（宿主停机中断、额度不足、等待授权等）；没有专属标签或仍在 RUNNING 时返回空串，
+#   调用方保留自己按状态的默认文字。Gateway 名册行 failure_label、终态活动文字和 /status 分类都读这里，客户端不另写映射。
+# 函数用途: 返回失败类型对应的专属界面标签；没有专属说法时返回空串。
+def runner_failure_label(status: object, failure_type: object) -> str:
+    if str(status or "").strip().upper() == TaskStatus.RUNNING.value:
+        return ""
+    return _DETAIL_BY_FAILURE.get(str(failure_type or "").strip(), "")

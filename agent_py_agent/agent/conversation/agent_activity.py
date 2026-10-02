@@ -16,6 +16,7 @@ from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
 from ..subagents.kernel import replaced_by_view
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+from ..subagents.runner_display_projection import runner_display_label, runner_failure_label
 from ..task_progress import (
     read_task_progress_report,
     task_progress_display_identity,
@@ -1232,6 +1233,8 @@ def _subagent_sort_key(task: object) -> tuple[int, float, str]:
 # LLM: This row exposes one bounded human-facing task description and numeric
 # live context usage, but still omits response, tool output, paths, permissions,
 # and runtime activity prose. Explicit covers ids support display joins only.
+#   failure_label 是失败类型的专属标签（宿主停机中断、额度不足等），由 runner_display_projection 唯一算出；
+#   TUI 与 IM 只读这个标量，不在客户端另写失败类型映射；没有专属标签时为空串。
 # 函数用途: 生成子代理职责和状态；上下文与 Compact 次数使用同一次 thread 读取，避免混代。
 def _subagent_row(
     agent: object,
@@ -1255,6 +1258,7 @@ def _subagent_row(
         "role": _bounded_text(getattr(task, "role", ""), limit=80),
         "status": status,
         "lifecycle_phase": lifecycle_phase,
+        "failure_label": runner_failure_label(status, getattr(task, "failure_type", "")),
         "description": _subagent_description(task),
         "attempts": max(0, _safe_int(getattr(task, "runner_attempts", 0))),
         "context_tokens": context_usage.get("current_tokens", 0),
@@ -1267,6 +1271,13 @@ def _subagent_row(
         "ended_at": max(0.0, _safe_float(getattr(task, "ended_at", 0.0))),
         **_replaced_by_fields(task),
     }
+
+
+# LLM: 网关层（gateway_parts）按分层规则不能直接导入 subagents；这里是它读子代理界面标签的唯一出口，只转调
+#   runner_display_projection.runner_display_label，不另写映射。/status 的异常细分用它。
+# 函数用途: 返回一个子代理任务当前状态的界面标签（宿主停机中断、额度不足、失败等）。
+def subagent_display_label(task: object) -> str:
+    return runner_display_label(getattr(task, "status", ""), getattr(task, "failure_type", ""))
 
 
 # LLM: 名册行只摊平 kernel 的唯一投影 replaced_by_view（接替者 run_id 与处置）成两个标量，TUI 白名单只收标量；
@@ -1290,6 +1301,8 @@ def _subagent_context_state(task: object, store: object | None) -> tuple[int, di
 
 # LLM: Activity text is presentation-only and comes from typed tool/current-step
 # fields with status fallbacks. It cannot decide whether the run is alive or done.
+#   终态或等待处理时，失败类型有专属标签（runner_failure_label：宿主停机中断、额度不足等）就用它，避免一律显示
+#   “执行失败”；排队重跑中的任务可能残留上次的失败类型，不套用。
 # 函数用途: 用一句短话说明当前子代理正在做什么，供详情页 Working 行显示。
 def _subagent_current_activity(
     task: object,
@@ -1309,7 +1322,7 @@ def _subagent_current_activity(
         "TAKEN_OVER": "已被接管",
     }.get(status)
     if terminal_activity:
-        return terminal_activity
+        return runner_failure_label(status, getattr(task, "failure_type", "")) or terminal_activity
     startup_activity = {
         "queued": "等待调度",
         "starting": "正在启动执行器",

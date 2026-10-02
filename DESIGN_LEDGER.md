@@ -1,5 +1,19 @@
 # 设计台账
 
+## 子代理被宿主停机打断时界面显示“宿主停机中断”（ae step17d 冒烟发现，2026-10-02，分支 `claude/9b-shutdown-label`，基于 `claude/3a-step17e` `2e5a36af0`，已实现，待集成）
+
+- **问题**：子代理被宿主停机打断后结构化状态是对的（`failure_type=host_shutdown_interrupted` 或 `model_call_admission_closed`，`current_step="宿主停机中断"`），但用户看到的是"失败"：
+  - TUI 子代理状态条 `tui_block_renderer._subagent_status_display` 只按 status 映射，FAILED/TIMEOUT/CHANNEL_ERROR 一律"失败"（名册行与子代理页头部两处）；
+  - `agent_activity._subagent_current_activity` 的终态文字也只按 status（FAILED→"执行失败"）；
+  - IM 的 `/status` 只给"异常 N"。
+- **做法**（一个概念一个权威位置）：
+  - `subagents/runner_display_projection` 新增 `runner_failure_label(status, failure_type)`：失败类型的专属标签（宿主停机中断、额度不足、等待授权、结果格式异常），没有时为空、RUNNING 为空；`runner_display_label` 复用它。
+  - Gateway 名册行 `_subagent_row` 带出标量 `failure_label`；TUI 三道白名单（runtime、view model、导航）放行，导航快照与渲染上下文带出，渲染缓存键随它变化。
+  - TUI 徽标只在终态与等待处理分支用 `failure_label` 替换文字（图标、颜色仍按状态）；没有专属标签时照旧，其它失败仍是"失败"。TUI 不另写失败类型映射。
+  - 终态活动文字：终态或等待处理时有专属标签就用它；排队重跑中的任务可能残留上次的失败类型，不套用。
+  - IM `/status`：Gateway `_subagent_status` 把"异常"按 `runner_display_label` 细分（`ConversationTaskStatus.subagent_other_labels`），文字成"异常 3：宿主停机中断 2，失败 1"；没有异常时原文逐字不变。TUI 走 Gateway 时有界解析这项细分。
+- **验证**：见 TESTS.md 同名节。
+
 ## 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条，2026-10-02，分支 `claude/ae-capability-packs-v2`，基于 `claude/3a-step17d` `81221a667`，已确认设计、实施中）
 
 - **为什么做**：冻结重跑业务审阅只有 10/27。模型改写检查器后谎报“已验证”、就地改原输入、不交付，宿主都看不见；检查器也漏了占位、编造引用 ID、整理变改写等可以确定性查出的问题。

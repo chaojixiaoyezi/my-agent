@@ -1026,6 +1026,7 @@ agent_py_agent/
 |   |-- test_tui_ansi_snapshot.py       # ANSI offset 重放、样式/背景、Unicode、resize 和坏账 fail-closed 回归
 |   |-- test_tui_agent_navigation.py    # 子代理选中/进入/返回、详情过程、只读终态与 footer 回归
 |   |-- test_tui_superseded_marker.py   # “已被 X 接替”：Gateway 行摊平 kernel replaced_by、名册与子代理页头部标注（含窄屏）、渲染缓存键
+|   |-- test_tui_shutdown_failure_label.py # “宿主停机中断”：权威标签、Gateway 名册 failure_label、TUI 名册/子代理页头部、IM /status 异常细分
 |   |-- test_agent_goals.py            # 单代理单 Goal、主子隔离、版本冲突、停止和同执行轮持续工作回归
 |   |-- test_goal_progress_fuse.py     # Goal 连续无进展熔断的结构化判据、计数重置、用户消息与通知幂等
 |   |-- test_gateway_goal_fuse_reset.py # Gateway 前台用户消息清零 Goal 空片计数（保留暂停原因、写入失败不清），后台续跑片仍 3 片熔断；第 3 片排队的用户消息先处理

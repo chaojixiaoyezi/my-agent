@@ -2432,3 +2432,8 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - 写方：Gateway `control_service._stop_active_task(interrupt_only=True)`（按任务取主执行轮当前代次）与本地 `control_runtime._execute_local_stop`（用 `LocalRunControl` 已发布的精确身份）。只在真的中断到一轮时写；写失败退回旧行为。
 - 读方：发现层 `_filter_by_runtime_authority` → `_user_interrupt_still_resumable`。主执行轮 cancelled 且当前代次有事件、未过 `USER_INTERRUPT_RESUME_SECONDS`（24 小时）时跳过；过期后 `_ledger_heal_reason` 给收口记 `user_interrupt_expired`。
 - 续接走原路：关联一直是 active，`request_context._gateway_workspace_task` 照常选中原任务；新代次开出后事件不再匹配，自然失效。
+
+## /status 子代理计数与异常细分（2026-10-02）
+
+- `_SubagentStatusCounts(total, running, done, other, other_labels)`：前四项与旧四元组同位同义（`_control_record_is_executing` 按下标读），`other_labels` 是异常子代理按界面标签的计数，按数量降序。
+- 标签只经 `conversation.agent_activity.subagent_display_label` 取得（转调 `runner_display_projection`），网关层不直接导入 subagents（import 边界）。渲染在 `conversation/control_commands._subagent_label_breakdown`，TUI 走 Gateway 时由 `control_runtime._label_counts` 有界解析。

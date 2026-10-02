@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from ..concurrency.interrupt import (
     interrupt_by_name,
@@ -75,6 +77,17 @@ _ACTIVE_SUBAGENT_STATUSES = {
     "PAUSED",
 }
 _DONE_SUBAGENT_STATUSES = {"DONE", "CANCELLED"}
+
+
+# LLM: 前四项保持原四元组的位置与含义（_control_record_is_executing 等按下标读）；other_labels 是“异常”那一类按
+#   runner_display_projection 唯一标签分的计数（宿主停机中断、额度不足、失败等），/status 文字与 TUI 共用。
+# 类用途: 当前请求派生子代理的运行、完成、异常计数，以及异常按界面标签的细分。
+class _SubagentStatusCounts(NamedTuple):
+    total: int
+    running: int
+    done: int
+    other: int
+    other_labels: tuple[tuple[str, int], ...] = ()
 
 
 # LLM: Authenticated issuer facts and a once-resolved owner are separate. Durable control receipts
@@ -2592,7 +2605,7 @@ def _gateway_task_status(
     subagents = (
         _subagent_status(owner_agent, [_record_id(active), _record_id(live_request)])
         if active is not None
-        else (0, 0, 0, 0)
+        else _SubagentStatusCounts(0, 0, 0, 0)
     )
     state = "idle"
     if active is not None:
@@ -2617,6 +2630,7 @@ def _gateway_task_status(
         subagent_running=subagents[1],
         subagent_done=subagents[2],
         subagent_failed=subagents[3],
+        subagent_other_labels=subagents.other_labels,
         model_name=_status_model_name(owner_agent, idle=display_selected is None, scope=scope),
         compact_generation=compact_generation,
         verbose_level=verbose_level,
@@ -2895,11 +2909,13 @@ def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[in
 
 
 # LLM: Subagent counts are derived from durable parent/root ids, never from streamed chatter.
-# 函数用途:统计当前主请求派生子代理的运行、完成和异常数量。
-def _subagent_status(agent: object, request_ids: list[str]) -> tuple[int, int, int, int]:
+#   异常细分只用 conversation.agent_activity.subagent_display_label（转调 runner_display_projection，与 TUI 名册同一权威），
+#   不读正文。
+# 函数用途:统计当前主请求派生子代理的运行、完成和异常数量，并把异常按界面标签细分。
+def _subagent_status(agent: object, request_ids: list[str]) -> _SubagentStatusCounts:
     selected_ids = list(dict.fromkeys(item for item in request_ids if item))
     if not selected_ids:
-        return 0, 0, 0, 0
+        return _SubagentStatusCounts(0, 0, 0, 0)
     try:
         request_run_ids = {
             run_id
@@ -2908,12 +2924,20 @@ def _subagent_status(agent: object, request_ids: list[str]) -> tuple[int, int, i
         }
         tasks = agent.subagents.list_runs()
     except Exception:
-        return 0, 0, 0, 0
+        return _SubagentStatusCounts(0, 0, 0, 0)
+    from ..conversation.agent_activity import subagent_display_label
+
     related = [task for task in tasks if str(getattr(task, "id", "") or "") in request_run_ids]
     statuses = [str(getattr(task, "status", "") or "").upper() for task in related]
     running = sum(status in _ACTIVE_SUBAGENT_STATUSES for status in statuses)
     done = sum(status in _DONE_SUBAGENT_STATUSES for status in statuses)
-    return len(related), running, done, max(0, len(related) - running - done)
+    labels = Counter(
+        subagent_display_label(task)
+        for task, status in zip(related, statuses)
+        if status not in _ACTIVE_SUBAGENT_STATUSES and status not in _DONE_SUBAGENT_STATUSES
+    )
+    other_labels = tuple(sorted(labels.items(), key=lambda item: (-item[1], item[0])))
+    return _SubagentStatusCounts(len(related), running, done, max(0, len(related) - running - done), other_labels)
 
 
 # LLM: Progress summarizes typed phase/ok only; display text and raw tool data never drive /status.

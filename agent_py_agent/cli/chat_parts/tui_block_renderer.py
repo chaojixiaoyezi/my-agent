@@ -244,6 +244,8 @@ class TuiRenderContext:
     agent_view_depth: int = 0
     # 当前查看的子代理已被接替时的接替者 run_id；放在末尾保留位置参数兼容性。
     focused_agent_replaced_by: str = ""
+    # 当前查看的子代理的失败类型专属标签（Gateway 算好的 failure_label）；放在末尾保留位置参数兼容性。
+    focused_agent_failure_label: str = ""
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
     # 函数用途: 规范渲染上下文，保证动画索引非负和刷新健康使用布尔标记。
@@ -313,6 +315,7 @@ class TuiRenderContext:
             max(0, int(self.agent_view_depth or 0)),
         )
         object.__setattr__(self, "focused_agent_replaced_by", str(self.focused_agent_replaced_by or "").strip())
+        object.__setattr__(self, "focused_agent_failure_label", str(self.focused_agent_failure_label or "").strip())
 
 
 # LLM: frame provider 必须复用 renderer 的可见上下文规则；Todo 的时钟只在 snapshot.has_active_work 时进入 key。
@@ -396,6 +399,7 @@ def tui_render_context_key(
         context.focused_agent_name,
         context.focused_agent_status,
         context.focused_agent_replaced_by,
+        context.focused_agent_failure_label,
         context.selected_agent_run_id,
         context.expanded_goal_id,
         context.agent_view_depth,
@@ -816,7 +820,7 @@ def _render_background_activity(
         )
     elif focused_terminal:
         terminal_icon, terminal_label, terminal_style = _subagent_status_display(
-            focused_status
+            focused_status, failure_label=context.focused_agent_failure_label,
         )
         terminal_label = _with_replacement_marker(terminal_label, context.focused_agent_replaced_by)
         prefix = (
@@ -1141,6 +1145,7 @@ def _render_subagent_activity_row(
     icon, label, style = _subagent_status_display(
         status,
         lifecycle_phase=lifecycle_phase,
+        failure_label=str(row.get("failure_label") or "").strip(),
     )
     label = _with_replacement_marker(label, row.get("replaced_by_run_id"))
     if lifecycle_phase in {
@@ -1218,11 +1223,14 @@ def _with_replacement_marker(label: str, successor: object) -> str:
 
 # LLM: Status-to-style mapping is a pure display projection of the canonical
 # enum. Unknown values stay neutral and visibly unknown.
+#   failure_label 是 Gateway 用 runner_display_projection 算好的失败类型专属标签，只在终态与等待处理分支替换文字
+#   （图标与颜色仍按状态）；TUI 不另写失败类型映射。
 # 函数用途: 把子代理结构化状态映射为图标、中文标签和颜色。
 def _subagent_status_display(
     status: str,
     *,
     lifecycle_phase: str = "",
+    failure_label: str = "",
 ) -> tuple[str, str, str]:
     phase = str(lifecycle_phase or "").strip().lower()
     if status == "PLANNING" or phase == "queued":
@@ -1238,11 +1246,11 @@ def _subagent_status_display(
     if status == "DONE":
         return "✓", "已完成", "class:tui-subagent-done"
     if status in {"BLOCKED", "PAUSED"}:
-        return "!", "等待处理", "class:tui-subagent-blocked"
+        return "!", failure_label or "等待处理", "class:tui-subagent-blocked"
     if status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
-        return "×", "失败", "class:tui-error"
+        return "×", failure_label or "失败", "class:tui-error"
     if status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}:
-        return "–", "已停止", "class:tui-muted"
+        return "–", failure_label or "已停止", "class:tui-muted"
     return "?", status or "状态未知", "class:tui-muted"
 
 

@@ -557,6 +557,8 @@ _SUBAGENT_ACTIVITY_FIELDS = frozenset(
         # 已被接替时由 Gateway 摊平的 kernel replaced_by 投影（接替者 run_id 与处置）。
         "replaced_by_run_id",
         "replaced_by_disposition",
+        # Gateway 算好的失败类型专属标签（宿主停机中断、额度不足等）。
+        "failure_label",
     }
 )
 _GOAL_ACTIVITY_FIELDS = frozenset(
