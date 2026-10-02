@@ -585,13 +585,13 @@ def _invoke_call(params, *, stage, request, backend, deadline, key, active, expe
         return _failure_outcome(request, exc, active, mode=mode, key=key)
 
 
-# LLM: 开关只读宿主配置 decision_connection_reuse_enabled（缺配置的宿主替身按 dataclass 默认开）；关闭时每次调用新建连接，
+# LLM: 开关只读宿主配置 decision_connection_reuse_enabled（缺配置的宿主替身按 dataclass 默认关）；关闭时每次调用新建连接，
 #   与改动前逐字节相同。池是进程级共享的 DECISION_CONNECTION_POOL，连接身份不含凭据。
 # 函数用途: 按配置决定决策调用是否复用长连接，返回要用的连接池或 None。
 def _decision_connection_pool(agent: object):
     from ..backends.keepalive_transport import DECISION_CONNECTION_POOL
 
-    enabled = getattr(getattr(agent, "config", None), "decision_connection_reuse_enabled", True)
+    enabled = getattr(getattr(agent, "config", None), "decision_connection_reuse_enabled", False)
     return DECISION_CONNECTION_POOL if enabled is True else None
 
 

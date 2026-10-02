@@ -1704,10 +1704,10 @@
           {
             "key": "decision_connection_reuse_enabled",
             "label": "decision_connection_reuse_enabled（decision connection reuse enabled）",
-            "description": "决策调用复用长连接：开着时同一进程里的决策请求复用已经建好的 HTTPS 连接，省掉每次约 0.9 秒的代理隧道与 TLS 握手 （2026-10-01 实测：复用后单次快约 1 秒）。空闲超过 60 秒的连接不再复用；复用连接上发送失败照常算一次失败，不会自动重发。 关掉就回到每次新建连接的老做法。不改请求内容、重试次数或等待期限。",
+            "description": "决策调用复用长连接：打开后同一进程里的决策请求复用已经建好的 HTTPS 连接，省掉每次约 0.9 秒的代理隧道与 TLS 握手 （2026-10-01 实测：复用后单次快约 1 秒）。空闲超过 60 秒的连接不再复用；复用连接上发送失败照常算一次失败，不会自动重发。 默认关（新功能先关，线上验收后再开）：关着就是每次新建连接的老做法。不改请求内容、重试次数或等待期限。",
             "type": "boolean",
-            "defaultValue": true,
-            "currentValue": true,
+            "defaultValue": false,
+            "currentValue": false,
             "category": "basic",
             "categoryLabel": "基础信息",
             "advanced": false,

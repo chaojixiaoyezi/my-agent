@@ -247,8 +247,10 @@ def test_routes_skip_proxies_with_credentials_and_plain_http_through_a_proxy(mon
 
 
 def test_the_decision_service_passes_the_pool_only_when_the_switch_is_on():
-    assert AgentConfig().decision_connection_reuse_enabled is True
-    assert load_config(packaged_config_path()).decision_connection_reuse_enabled is True
+    # 新功能仓库默认关（已定做法第 5 条），线上验收后由集成方打开。
+    assert AgentConfig().decision_connection_reuse_enabled is False
+    assert load_config(packaged_config_path()).decision_connection_reuse_enabled is False
+    assert _decision_connection_pool(SimpleNamespace()) is None, "缺配置的宿主替身与 dataclass 默认一致：不传池"
     on = SimpleNamespace(config=SimpleNamespace(decision_connection_reuse_enabled=True))
     off = SimpleNamespace(config=SimpleNamespace(decision_connection_reuse_enabled=False))
     assert _decision_connection_pool(on) is keepalive_transport.DECISION_CONNECTION_POOL

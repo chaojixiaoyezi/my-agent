@@ -267,7 +267,7 @@ agent/memory/capability 三份配置文件不再各有逐点字段（2026-09-27 
   与 `provider` 桶分开。没发出尝试的调用（准入忙、许可拒绝、配置错误）不计。TUI 统计行口径不变。
 
 连接复用（2026-10-01，B 第 1 步，J1）：决策调用复用已建好的 HTTPS 长连接，省掉每次约 0.9–1.1 秒的代理隧道与 TLS 握手。
-- **开关**：主配置 `decision_connection_reuse_enabled`，默认开；关掉就回到每次新建连接（`Connection: close`），与改动前逐字节相同。
+- **开关**：主配置 `decision_connection_reuse_enabled`，仓库默认关（新功能先关，Mac 线上验收后由集成方打开）；关着就是每次新建连接（`Connection: close`），与改动前逐字节相同。
   决策服务按开关给 Jev 后端传进程级连接池 `DECISION_CONNECTION_POOL`；显式探测（测试连接）不传，测的是完整链路。
 - **实现**（`backends/keepalive_transport.py`）：只有带连接池的严格请求（零重试、禁止重定向、有绝对期限，信封校验强制）才走保活打开；
   代理解析、双超时连接类、中断守卫、发送许可、绝对期限都沿原路径；非 2xx 抛 HTTPError；复用连接上发送失败照常算一次失败，
