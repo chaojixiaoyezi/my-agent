@@ -39,8 +39,27 @@ dev = [
 ]
 # Computer Use 直接复用 MIT 开源执行器；它包含 OCR/ONNX 等较重桌面依赖，
 # 因此作为官方可选运行能力随底座发布，headless Gateway 默认不被强制安装。
+# 注意它会把上游那一整套（含自动执行的 pyautogui 与 222 个传递依赖）带进来；
+# 生产只要屏幕观察、不开自动执行时，用下面的 computer-use-observe，别用这个。
 computer-use = [
   "computer-control-mcp==0.3.13",
+]
+# J16 屏幕观察（macOS AX/ScreenCaptureKit + Linux X11）自己实现采集，不调上游 computer_control_mcp 的任何内部对象，
+# 因此生产不需要那个会带进 222 个包的上游执行器。这里按平台钉死观察链路真正用到的库，让部署能照仓库声明装。
+# 版本来自 3a 在生产运行时的克隆上的实测，以及 Linux 桌面层车道镜像（my-agent-linux-test:py312-desktop）里实际装到的版本。
+# 自动执行的点击（pyautogui）不在本 extra 里：生产保持关闭，要开就用上面的 computer-use。
+computer-use-observe = [
+  "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-ScreenCaptureKit==12.2.2; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices==12.2.2; sys_platform == 'darwin'",
+  "mss==10.2.0; sys_platform == 'darwin'",
+  "rapidocr-onnxruntime==1.2.3; sys_platform == 'darwin'",
+  "pillow==11.3.0; sys_platform == 'darwin'",
+  # Linux：python-xlib 拿窗口与几何、mss 截图、rapidocr 出文字，和车道镜像里的版本一致。
+  "python-xlib==0.33; sys_platform == 'linux'",
+  "mss==10.2.0; sys_platform == 'linux'",
+  "rapidocr-onnxruntime==1.2.3; sys_platform == 'linux'",
+  "pillow==11.3.0; sys_platform == 'linux'",
 ]
 # 飞书/企业微信加密事件回调需要的密码学原语（stdlib 无 AES、密码学不能自建）。
 # `secrets` extra 名为已发布安装接口，暂保兼容；已退休的 SecretStore 不再消费它。

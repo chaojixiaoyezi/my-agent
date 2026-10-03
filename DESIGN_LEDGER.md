@@ -1,5 +1,14 @@
 # 设计台账
 
+## 屏幕观察的 macOS 后端依赖显式钉进新 extra（2026-10-03，cux，worker/computer-use-extra `10094bb11`，3a 复审并入 step17i）
+
+- **起因（3a 定）**：J16 设计稿第 34–37 行本来要求“实施时把用到的这几个写进 computer-use extra，显式钉版本”，但一直没做——`pyproject.toml` 的 `computer-use` extra 只有上游 `computer-control-mcp==0.3.13`，装它会带进 222 个包，生产没法照仓库声明只装观察用到的那几个。
+- **边界（先 grep 清楚）**：新观察后端（`computer_use_macos.py` / `computer_use_x11.py`）**不调上游 `computer_control_mcp` 的任何内部对象**，只用系统与库的公开接口；而上游那 16 个执行工具仍在用（`tooling/computer_use_server.py:16` `from computer_control_mcp import core`，`computer_use_profile.COMPUTER_USE_PACKAGE` 也钉着它）。所以**旧 extra 不删**，另开一个只给观察用的。
+- **改法**：新增 `computer-use-observe` extra，按平台钉死：macOS 六条（pyobjc 的 Quartz / ScreenCaptureKit / ApplicationServices、mss、rapidocr-onnxruntime、pillow），Linux 四条（python-xlib、mss、rapidocr-onnxruntime、pillow），都用 `sys_platform` 标记。macOS 版本来自 3a 在生产运行时克隆上的实测；Linux 版本不照抄文档，而是进桌面层车道镜像 `my-agent-linux-test:py312-desktop` 读实际装到的发行版元数据核对（python_xlib 0.33、mss 10.2.0、rapidocr_onnxruntime 1.2.3、pillow 11.3.0）。**pyautogui 不进观察 extra**：它只给自动执行的点击用，生产保持关。旧 `computer-use` extra 的注释补上两者区别。
+- **文档**：`docs/design/computer-use.md` 顶部加“怎么装（管理员）”：两个 extra 各装什么、何时用哪个，以及**屏幕录制**与**辅助功能**两个系统权限要给“启动 Gateway 的那个终端程序”（权限认进程，换终端要重授权）。
+- **验证**：新增 `test_packaging.py::test_computer_use_observe_extra_pins_platform_dependencies`（解析 TOML，逐条核对名称/版本/平台标记，并要求无 pyautogui）；命令与结果见 TESTS。
+- **未验证**：没有真的在 macOS 上按这个 extra 装一遍并跑通截图/AX；Linux 侧也没有按新 extra（而非上游整包）重建过车道镜像。
+
 ## 能力包 v2 块 6b：写后核验复用已知工作区候选（p6b，2026-10-03，分支 `worker/pack-6b-scan-reuse`，基于 `c47d023b6`，3a 复审并入 step17i）
 
 - **问题**：每次写后 `turn_output` 输入解析都会走访并哈希当前工作区；20 次写后加收尾在 1.9 万文件工作区中触发 22 次整盘扫描。

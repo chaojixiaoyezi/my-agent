@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 屏幕观察依赖钉进 computer-use-observe extra（2026-10-03，cux，worker/computer-use-extra）
+
+- 改了什么：`pyproject.toml` 新增 `computer-use-observe` extra（macOS 6 条 / Linux 4 条，全部用 `sys_platform` 标记并钉死版本）；旧 `computer-use` extra 注释写清两者区别；`docs/design/computer-use.md` 顶部新增安装与系统权限说明。产品代码一行没动。
+- Linux 版本怎么核的：不抄文档，进车道镜像 `my-agent-linux-test:py312-desktop` 读 `site-packages/*.dist-info` —— python_xlib 0.33、mss 10.2.0、rapidocr_onnxruntime 1.2.3、pillow 11.3.0（镜像里 Python 是 3.12）。
+- 测试命令（工作树根，代号 cux）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_packaging.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-cux
+  ```
+- 结果：**16 passed**（含新增的 `test_computer_use_observe_extra_pins_platform_dependencies`）；guards9 清单 **172 passed**；`check_import_boundaries.py` findings=0；ruff `All checks passed`；`check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` 干净；`check_clean_package.py .` OK；strict code-size hard=0 blocked=False；`size_diff.sh` 新增告警 0 / 消失 23。
+- 变异（脚本 `/private/tmp/claude-501/cux_mutate.py`，不进仓库）：①删掉 Linux 的 python-xlib ②去掉 mss 的平台标记 ③把 pillow 钉放宽成 `>=` ④把 pyautogui 塞进观察 extra —— **四个全被杀**，还原后守卫复跑通过。
+- 没验证：没在真实 macOS 上按这个 extra 装一遍并跑截图/AX；没按新 extra 重建 Linux 车道镜像（镜像仍由上游整包带入这些库）；`pip install -e ".[computer-use-observe]"` 未实际执行过解析。
+
 ## J16 macOS 叠放顺序与程序坞遮挡（j16f，2026-10-03，待复审）
 
 - **根因与修法**：V-H 真机记录确认 OptionAll 的顺序不是 z-order，OnScreenOnly 才返回前→后；OptionAll 仍用于保留最小化/别的桌面窗口，适配器据 OnScreenOnly 排好在屏窗口后转成底→顶。另按 `CGWindowLevelForKey(kCGDockWindowLevelKey)` 和 `CGGetActiveDisplayList` / `CGDisplayBounds` 的结构化事实，只有系统 Dock 层级且外框覆盖整块显示器的窗才从 `above_rects` 排除；不读程序名或标题。`observe`、`recheck` 共用同一后端入口。

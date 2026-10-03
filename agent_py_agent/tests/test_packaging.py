@@ -265,3 +265,47 @@ def test_all_full_suite_workflows_install_feature_test_extras() -> None:
     for relative in (".github/workflows/test.yml", ".github/workflows/full-tests.yml"):
         workflow = (project_root / relative).read_text(encoding="utf-8")
         assert expected in workflow, f"{relative} 未安装完整 feature test extras"
+
+
+# LLM: 屏幕观察（J16）在生产只装自己那份依赖，就不能再依赖上游执行器把库带进来；这里把"按平台钉死、一个都不能少"
+#   做成机器判据，防止以后有人删掉 extra 或漏写钉版本，让生产按仓库声明装不上。
+# 函数用途: 校验 computer-use-observe extra 存在，且 darwin / linux 两组依赖的名称与钉死版本与实现所依赖的一致。
+def test_computer_use_observe_extra_pins_platform_dependencies() -> None:
+    """屏幕观察 extra 必须按平台钉死观察链路真正用到的库，且不与上游执行器混在一起。"""
+
+    project_root = Path(__file__).resolve().parents[2]
+    data = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+
+    observe = extras["computer-use-observe"]
+    assert len(observe) == len(set(observe)), "computer-use-observe 有重复条目"
+
+    # 拆成 (包名, 版本钉, 平台标记) 三元组；不带 sys_platform 标记的条目算错误，因为观察依赖是分平台的。
+    parsed: dict[str, dict[str, str]] = {}
+    for entry in observe:
+        requirement, _, marker = entry.partition(";")
+        name, _, version = requirement.partition("==")
+        assert version, f"{entry} 没有钉死版本"
+        marker = marker.strip()
+        assert marker in {"sys_platform == 'darwin'", "sys_platform == 'linux'"}, f"{entry} 的平台标记不合法"
+        parsed.setdefault(marker, {})[name.strip()] = version
+
+    assert set(parsed) == {"sys_platform == 'darwin'", "sys_platform == 'linux'"}
+    assert parsed["sys_platform == 'darwin'"] == {
+        "pyobjc-framework-Quartz": "12.2.2",
+        "pyobjc-framework-ScreenCaptureKit": "12.2.2",
+        "pyobjc-framework-ApplicationServices": "12.2.2",
+        "mss": "10.2.0",
+        "rapidocr-onnxruntime": "1.2.3",
+        "pillow": "11.3.0",
+    }
+    # Linux 版本对齐桌面层车道镜像 my-agent-linux-test:py312-desktop 里实际装到的版本。
+    assert parsed["sys_platform == 'linux'"] == {
+        "python-xlib": "0.33",
+        "mss": "10.2.0",
+        "rapidocr-onnxruntime": "1.2.3",
+        "pillow": "11.3.0",
+    }
+
+    # 自动执行的 pyautogui 属生产关闭的能力，不能被顺手带进观察依赖。
+    assert all("pyautogui" not in entry for entry in observe)

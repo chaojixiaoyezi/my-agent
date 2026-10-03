@@ -1,5 +1,31 @@
 # Computer Use 开源执行器接入
 
+## 怎么装（管理员）
+
+Computer Use 是可选能力，headless Gateway 默认不装。按你要用的部分选一个 extra：
+
+- **只做屏幕观察**（看窗口、截图、读控件树、跑 OCR）：装 `computer-use-observe`。
+  ```bash
+  pip install -e ".[computer-use-observe]"
+  ```
+  它按平台只钉观察链路真正用到的库（macOS：pyobjc 的 Quartz / ScreenCaptureKit / ApplicationServices、mss、rapidocr-onnxruntime、pillow；Linux：python-xlib、mss、rapidocr-onnxruntime、pillow），
+  版本见 `pyproject.toml`。**它不带自动执行的点击**，也不需要上游执行器。
+- **要用上游那 16 个执行工具**（鼠标、键盘、拖拽）：装 `computer-use`。
+  ```bash
+  pip install -e ".[computer-use]"
+  ```
+  它会装上上游执行器 `computer-control-mcp==0.3.13` 及其整套传递依赖（含自动执行的 pyautogui）。两个 extra 可以在同一环境里共存；
+  只想观察就别装这个。
+
+装完还要在系统里给权限，否则 macOS 上的截图和点击会被系统悄悄丢掉：
+
+1. **屏幕录制**：系统设置 → 隐私与安全性 → 屏幕录制，把**启动 Gateway 的那个终端程序**（Terminal / iTerm，或你用的启动器）打勾。
+   没授权时 `observe_window` 返回 `screen_recording_not_permitted`，适配器不会弹授权窗。
+2. **辅助功能**：系统设置 → 隐私与安全性 → 辅助功能，同样把**启动 Gateway 的那个终端程序**打勾。读 macOS 控件树（`ui_tree`）和点击
+   `click_candidate` / `type_into_candidate` 都靠它；没授权时 `click_candidate` 返回 `accessibility_not_permitted`，观察照常成功、只是结果里带 `ui_tree{status, reason}`。
+
+权限是给进程的，所以认的是**拉起 Gateway 的那个程序**，不是 my-agent 自己；换终端或换启动方式后要重新授权。
+
 ## J16 观察候选状态（2026-10-02：设计已记录，实施阻塞）
 
 固定 `computer-control-mcp==0.3.13` 公开工具尚不具备稳定窗口 ID、截图代次和坐标变换的结构化输出；OCR 返回 tuple 文本，
