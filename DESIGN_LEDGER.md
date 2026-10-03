@@ -19,6 +19,9 @@
 - **顺带修日志刷屏**：`core._build_memory_embedder` 每物化一个 owner 的 agent 就打一行“语义记忆档案不可用（profile_not_found）；当前使用关键词召回”，17f 的 start.log 里有三百多行，都是其它 owner 按设计（S4）退回关键词。改成同一进程里同一（owner, 原因）只打一次（`core._first_profile_warning`），结构化诊断 status 照旧每次写。
 - **为什么不进 model_usage / model call ledger**：那里有准入、停机关门、预算、上下文校准等语义，是给对话模型调用的；嵌入不经过这些门，硬塞进去会让关门、预算判断把嵌入也算进去，或者反过来被嵌入的记录污染校准。嵌入只需要“次数和 token 是多少”，所以单独一份只读计数。
 - **测试与证据**：见 TESTS 同名条目；真实核对（隔离 home、embo-01）在 `~/.my-agent/decision-evidence/embedding-usage-facts-s7/`。
+- **后续项**（9b 复审提出，3a 定下一波派给 my-agent 会话，状态：待做；都不是 S7 引入的，S7 只是如实记了下来）：
+  - 空库时不带作用域的 `search` 仍会嵌一次查询并记 semantic，而带作用域的检索空库时记 none、不发嵌入请求。要不要让 `search` 空库时也跳过嵌入。
+  - `MiniMaxEmbedder` 写入和查询都用 `"type": "db"`；embo-01 分 db / query 两种类型，查询用 db 可能影响召回质量（S1 时就有的写法）。
 
 ## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已集成 step17g `7ed9e5c07`；插话终态与提示分句 step17h 已实现、待集成，分支 `claude/38-limit-steer-note`）
 
