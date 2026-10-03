@@ -63,6 +63,38 @@
 - **未验证**：真实供应商断供端到端、TUI/IM 实际显示、后台 claim 真链路（本沙箱不调真实模型），由 9b/3a 在沙箱外复核。
 - 合并进 step17i 时补（9b 终审必须改，只补用例）：`test_budget_reads_runtime_guard_policy_and_defaults` 加 inf → 1800（变异 F2“inf 当不限”被抓到）；新增 `test_budget_code_is_registered_in_the_error_taxonomy`（变异 F7“删掉契约登记”被抓到）。本文件 13 passed。
 
+## J3 observe 后台执行器：设置撤销对整批在途请求的结果码变确定（ds3f，2026-10-03，分支 `worker/ds3-flaky-observe`，基于 `claude/3a-step17h` `db963ea66`，ae 两轮复审通过（582750c18），并入 step17i）
+
+- **现象**：Linux 12 片高负载车道跑 `test_decision_observe_nonblocking.py::test_settings_change_revokes_queued_calls_without_sending` 偶发失败：
+  `[('stale', 'sh…'), (…, 'disabled')] == [('stale', 'settings_changed')] * 2`。Mac 单跑连过 3 次，用例文件最近一次改动是 `b5be542e8`。
+- **复现办法**（不靠碰运气；脚本放在任务目录 `tmp/`，不属于仓库产物）：
+  - `repro2.py <repo> split`：在 `decision_policy.notify_decision_settings_changed` 处理完**第一条**在途请求后 `sleep 1.5s`，模拟通知线程被抢占——抢占窗口内别的线程可以推进第二条请求。修复前稳定复现 `[('stale','settings_changed'), ('stale','disabled')]`，与车道失败一模一样。
+  - `race_min2.py <repo> fixed|legacy`：机制对照。它把通知处理完第一条那一刻的“调用方是否仍持有索引锁”打出来——旧的逐条写法在那一刻锁已可被并发取得，整套写法仍由调用方持有。
+  - `stress.py <repo> 60 10 1`：60 轮，每轮 10 个 CPU spinner 加压；修复前 0 命中，**这说明纯靠负载碰运气复现不了**，窗口必须靠受控抢占才稳定，所以本轮采用“插可控延迟 + 机制对照”，而不是并发刷次数。
+- **根因（产品竞争，不是用例假设错）**：`notify_decision_settings_changed` 原本**逐条**处理在途请求——每条先推进快照、再置 `settings_cancelled`、再取消句柄。处理完第一条之后、第二条被标记之前，后台 worker 完全可能已经取到第二条：
+  - `_NonblockingSend.__call__` 的 `_revoked()` 此时看不到 `settings_cancelled`（返回 None）；
+  - 接着 `_invoke_call` 的 `_stale()` 只读文件层，看到点位已被改成 `off`，返回 `disabled`。
+  于是同一批调用，谁先被处理取决于线程调度：第二条报了 `disabled`。
+- **修法**：把“标记”和“取消”拆成固定顺序，同时把路由比较挪出锁。`notify_decision_settings_changed` 走 `_mark_settings_batch`：锁内只做纯字典合并（`_pending_advances` 收集受影响请求与新旧快照、记下通知代次），锁外逐条比路由（`_routing_changed`），再进锁复核代次后由 `_commit_batch` 在一个锁段里把整批快照推进与 `settings_cancelled` 一次写完，最后到锁外逐个 `handle.cancel()`；原 `_advance_notification` 已删除。比路由期间若有更新的通知插进来（通知代次变了）整批重算，重算超过 `_MAX_MARK_ATTEMPTS` 就按“已改变”整批撤销（宁严勿松），不死循环。不改任何结果码语义，只让“设置改动撤销排队调用”对整批在途请求是原子的。
+  - **为什么路由比较必须在锁外**：`routing_signature` 会走到 `decision_defaults`，可能新建 `AgentConfig`/`CapabilityConfig`/`MemorySettings`，上下文没有能力配置快照时还会读并解析 `capability_config.yaml`（生产 agent 刚启动时快照就是 None）。`_LOCK` 是全进程决策索引锁，登记/注销/撤销检查都拿它；放进锁里会让设置改动那一刻所有在途决策线程都等这些计算和读文件。（ae 复审指出上一稿把路由比较留在了锁内，与本条合同相反。）
+- **新增回归用例**（`test_decision_settings_notifications.py`）：
+  - `test_settings_change_marks_the_whole_batch_before_releasing_the_index_lock`：两条在途请求，探针在“第一轮收集完成”那一刻非阻塞试取 `_LOCK`，断言此刻仍由调用方持锁（即第二条必然一次收集完），且两条 `settings_cancelled`/`handle.cancelled` 全为真。
+  - `test_routing_comparison_never_runs_while_holding_the_index_lock`：ae 探针转正——spy 住 `routing_signature`，断言比路由的每一次调用发生时当前线程都没持有 `_LOCK`。
+  - `test_newer_notification_during_routing_recomputes_the_whole_batch`：比路由期间插入一条 owner 层通知，断言整批重算（路由调用数翻倍）且最终快照含那次提交。
+  - `test_exhausted_recompute_cancels_the_whole_batch`：每次比路由都推进通知代次，重算被 `_MAX_MARK_ATTEMPTS` 挡住（路由调用数不超过 2×上限），整批按“变了”撤销。
+  判据全是结构化字段，不靠 sleep、不靠结果码文字。
+- **变异验证**（`mutate.sh` 逐个跑、跑完还原，三个变异都被抓到）：
+  1. 路由比较挪回锁内（`_collect_batch` 的锁段内就算 `changed`）→ 被 `test_unrelated_point_change_keeps_current_request_and_advances_notification` 抓到（锁内比路由还会自死锁，正是 ae 指出的问题）；
+  2. 再进锁时不查代次直接写 → 被 `test_newer_notification_during_routing_recomputes_the_whole_batch` 抓到；
+  3. 改回逐条写法 → 被 `test_settings_change_marks_the_whole_batch_before_releasing_the_index_lock` 抓到。
+- **跑过的命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds3f`）：
+  - 目标用例在**外加压力**下连跑 40 次全过：`run_test_n.py <repo> <nodeid> 40 8` 在进程内重复调用目标用例 40 轮，同时起 8 个 CPU spinner 制造高负载，结果 `pytest exit=0 rounds=40 load=8`（耗时约 2.2 秒）。这是本轮“原来能复现的条件”下的稳定性证据，N=40。
+  - `test_decision_observe_nonblocking.py` 整文件：33 passed。
+  - 相关回归分三批跑（`gates.sh a|b|c`，脚本在任务 `tmp/`）：a = settings_notifications / settings / settings_scope / settings_reason / observe_nonblocking / observe_sampling → 126 passed；b = decision_service / decision_service_http / decision_background_deadline / gateway_decision_shutdown_cancel → 62 passed；c = decision_skill_tool_settings / outcome_log / cooldown_backoff / cooldown_persistence / user_config_decision_operations / user_config_decision_patch → 113 passed。
+  - 收尾门禁：guards9 清单全过（172 项，`guards9_exit=0`）；`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `hard=0 blocked=False`；`size_diff.sh` → 新增告警 0 / 消失告警 10；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` → exit 0。
+  - 基线对照：在 `db963ea66` 的临时 worktree 上跑这两个测试文件 → 41 passed，确认既有用例在基线上本来就是绿的（我早期版本的新用例一度污染进程级 `_ACTIVE`，已改成用登记时那把注销令牌修好）。
+- **边界**：只改进程内取消通知的顺序，不动设置文件、不改结果码、不动 `_ACTIVE` 索引和句柄合同；真实 Gateway/车道高负载由 3a 复核。
+
 ## 决策结果日志至少保留一周（2026-10-03，luna6，worker/luna6-outcome-retention）
 
 - **用例**：`test_decision_outcome_log.py` 覆盖 7 天内 1100 条加新记录仍全保留、正好 7 天边界保留而边界外下一次写入即清除、超过 20000 行只丢最旧、原子替换失败不改变已有账且不抛到决策链路。

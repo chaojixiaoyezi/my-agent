@@ -28,6 +28,25 @@
 - **待定**：P4（合同允许错误带最多 4 个数字或短标识，A 包出 0.5.1）。等 P1–P3 上线后 A05、A10 重跑的结果出来再定。
 - **之后**：上线后先重跑 A05、A10 各 1 次，报循环次数和 token，按新数据重估块 8 全量；必须在 4,000 万以内才跑。详见 [设计 3.1 节](docs/design/CAPABILITY_PACKS_V2.md) 和 TESTS.md。
 
+## 设置改动撤销整批在途决策调用：结果码变确定（ds3f，2026-10-03，分支 `worker/ds3-flaky-observe`，基于 `claude/3a-step17h` `db963ea66`，ae 两轮复审通过（582750c18），并入 step17i）
+
+- **起因**：Linux 12 片高负载车道偶发失败 `test_decision_observe_nonblocking.py::test_settings_change_revokes_queued_calls_without_sending`，实际 `[('stale','settings_changed'), ('stale','disabled')]`，期望两条都是 `settings_changed`。Mac 单跑连过 3 次。
+- **不确定点有具体名**：`decision_policy.notify_decision_settings_changed` 原实现**逐条**处理在途请求——对每条 active 依次“推进快照 → 置 `settings_cancelled` → `handle.cancel()`”。两条请求之间的那个窗口里，第二条的后台发送线程可以取到它：`decision_service._NonblockingSend.__call__` 的 `_revoked()` 还看不到 `settings_cancelled`（返回 None），接着 `_invoke_call` 的 `_stale()` 只读文件层、看到点位已被改成 `off`，于是把结果码定成 `disabled`。
+- **唯一顺序被冻结在两个来源里**：
+  1. **执行器占着索引锁**——`notify_decision_settings_changed` 在 `_LOCK` 内先把整套受影响请求的快照与 `settings_cancelled` 一次标完，收集待取消句柄，然后才出锁；
+  2. **调用已被 0.2 秒上限判失效**——发送线程若在这一整段之外才拿到请求，`_revoked()` 必然能读到 `settings_cancelled`，结果码只能是 `stale/settings_changed`。
+  两处合起来让“设置改动撤销排队调用”对整批在途请求是原子的：谁先被处理不再由线程调度决定。
+- **改动**（`agent_py_agent/agent/conversation/decision_policy.py`）：
+  - `notify_decision_settings_changed` 走 `_mark_settings_batch`：锁内只做纯字典合并（`_pending_advances` 收集受影响请求与新旧快照、记下 `_action_generation` 通知代次）→ 锁外逐条比路由 → 再进锁复核代次后由 `_commit_batch` 一个锁段写完整批 → 锁外逐个 `handle.cancel()`；
+  - 新增 `_pending_advances(targets, result)`：持锁纯字典合并，承接原 `_advance_notification` 的合并与逆序拒绝逻辑，不改任何请求状态；
+  - 新增 `_commit_batch(batch, changed)`：持锁把整批快照推进与 `settings_cancelled` 一次写完并 `_action_generation += 1`；
+  - 新增 `_routing_changed(active, previous, updated)`：纯比较，异常时仍按“已改变”fail-closed；**必须在锁外调用**；
+  - 新增 `_MAX_MARK_ATTEMPTS = 3`：比路由期间代次变了就整批重算；用尽上限按“变了”整批撤销（宁严勿松），不死循环；
+  - 删除 `_advance_notification`。
+- **ae 复看后修的 1 条（必须改）**：上一稿把路由比较留在了索引锁内，与函数注释和设计稿写的“锁内不读文件、不调路由”相反。`routing_signature` 一路走到 `decision_defaults`，每条受影响请求算两次，每次都新建 `AgentConfig`/`CapabilityConfig`/`MemorySettings`；上下文没有能力配置快照时还会读并解析 `capability_config.yaml`（生产 agent 刚启动时快照就是 None）。`_LOCK` 是全进程决策索引锁（登记/注销/撤销检查都要拿），设置改动那一刻会让所有在途决策线程等这些计算和文件读。现改为“锁内纯合并 → 锁外比路由 → 再进锁复核代次后一次写完整批”，整批原子性保持不变。
+- **没动的边界**：结果码语义、`_ACTIVE` 索引结构、`InterruptHandle` 句柄合同、设置文件层、`cancel_active_decisions_for_shutdown` 的既有顺序，全部保持原样。这次只改“通知处理的原子性”，不改任何产品语义。
+- **验证**：新增回归用例 `test_decision_settings_notifications.py::test_settings_change_marks_the_whole_batch_before_releasing_the_index_lock`（探针在第一条标记完成那一刻非阻塞试探索引锁，断言锁仍在调用方手里 + 两条都被标记）；变异验证：改回逐条写法该用例失败、还原即通过。目标用例在 8 路 CPU 加压下连跑 40 次全过。详见 TESTS.md 同名条目。
+
 ## ChatGPT 订阅（Responses WebSocket）握手超时照 SSE 交回合层退避重试（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基于 `claude/3a-step17h` `7e421024f`，已实现，9b 复审通过，并入 step17h）
 
 - **问题**（be 只读核对生产，2026-10-03）：上一波 8 次整轮失败全是 `PROVIDERTIMEOUTERROR`，都发生在 chatgpt.com 的 Responses WebSocket **握手阶段**（7 次 TLS 握手超时 `_ssl.c: The handshake operation timed out`、1 次升级握手超时 `timed out while waiting for handshake response`），其中 6 次挤在 25 秒内，是一次网络抖动。这些回合已经跑了 13–33 轮工具、50–76 分钟，一次握手超时（生成层立刻重试一次也超时）就整轮失败。证据目录：`~/.my-agent/decision-evidence/model-timeout-ws-handshake-20261003/README.md`（只有结构化事实）。
