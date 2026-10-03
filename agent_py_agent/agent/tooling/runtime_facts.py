@@ -27,13 +27,17 @@ _HOST_SHUTDOWN_TEXT_MAX_CHARS = 128
 
 
 # LLM: 摘要由宿主写进回执（能力包 v2 块 3），条数和码数已夹过界；只有非空列表才出这一段，未钉包任务的回执不变。
+#   “一次改完”只是软提示（块 8 试点：模型每次写入只改一处，同一文件写后检查失败 20 次才过），宿主不据此做任何判断。
 # 函数用途: 生成宿主核验结论段（写工具回执里模型可见的部分）。
 def _pack_verification_section(summaries: object) -> list[str]:
     if not isinstance(summaries, list) or not summaries:
         return []
     return ["[pack-verification]\n"
             "宿主刚用本任务钉住的能力包原版检查程序（沙箱、断网）核验了这次写出的交付物，结论以宿主为准："
-            "status=failed 时按 error_codes 和 error_samples 修正后再写；not_run/error 表示没检查成，原因见 reason_code。"
+            "status=failed 时按 error_codes 和 error_samples 修正后再写，error_samples_truncated=true 表示还有没列出的错误；"
+            "把这次列出的错误在下一次写入里一起改完，多处修改可以一次写整份。"
+            "not_run/error 表示没检查成，原因见 reason_code；reason_code=post_write_feedback_limit 表示这个文件写后连续失败到了上限，"
+            "宿主不再逐次检查，收尾时统一再查一次。"
             "不要复制、改写或自己编写检查程序来代替，也不要把这段内部标签转述给用户。\n"
             + json.dumps({"pack_verification": summaries}, ensure_ascii=False, sort_keys=True)]
 

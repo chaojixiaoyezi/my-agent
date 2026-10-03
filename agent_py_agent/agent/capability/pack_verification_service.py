@@ -6,7 +6,10 @@
 #   块 4 起基线同时记任务的输入原件清单，task_input 只从原件清单找（原件被改过就交副本）。
 #   块 5 起收尾还查必需交付物有没有交（缺或打不开最多返工 2 次）；三段顺序：输入原件 → 交付物存在 → 交付物检查。
 #   只看结构化事实：开关、pins、安装项、路径模式和字段匹配、文件摘要、检查程序的 pack_verifier_result.v1；不读模型文字。
-#   同样内容只跑一次；每个检查前复查当前 run 取消，剩余目标记 cancelled，取消不复用旧质量结果、不返工。
+#   同样的内容（包、检查程序、目标和各输入的摘要都相同）只跑一次，结果和返工次数都记在本 run 的核验账本里。
+#   每个检查前复查当前 run 取消，剩余目标记 cancelled，取消不复用旧质量结果、不返工。
+#   同一个检查对象写后连续失败到 MAX_POST_WRITE_CONSECUTIVE_FAILURES_COUNT 次后，后面的写后检查只记 not_run/post_write_feedback_limit
+#   （复用键留空，收尾不会复用它），交给收尾检查那一次返工。
 #   副作用：读工作区文件、在沙箱里运行包内检查程序、写核验账本和 runtime_events。改动同步 test_pack_verification_service.py。
 # 模块用途: 在写工具之后和回合收尾时，用钉住的原版检查程序核验交付物，并决定是否给模型一次返工提示。
 
@@ -71,8 +74,12 @@ MAX_CLOSEOUT_TARGETS_COUNT = 8
 MAX_PACK_VERIFICATION_REWORK_COUNT = 1
 # 返工提示里最多列几个出错的交付物。
 MAX_REWORK_TARGETS_COUNT = 5
-# 返工提示里每个交付物最多列几条错误样例（code + 位置）。
-MAX_REWORK_SAMPLES_COUNT = 5
+# 返工提示里每个交付物最多列几条错误样例（code + 位置），和检查结果里保存的样例条数一致，一次列全。
+MAX_REWORK_SAMPLES_COUNT = 10
+# 同一个检查对象（包、检查程序、目标）写后检查连续失败到这么多次，就不再逐次跑、不再逐次反馈，交给收尾检查那一次返工；中间通过一次就重新数。
+# 3a 定 6 次：块 8 试点 A05 同一文件写后失败 20 次才过，每次多一轮完整上下文；配合回执列全错误，正常修改用不到这么多次。不做配置项。
+MAX_POST_WRITE_CONSECUTIVE_FAILURES_COUNT = 6
+POST_WRITE_FEEDBACK_LIMIT_REASON = "post_write_feedback_limit"
 
 
 # LLM: 一次核验所需的全部宿主事实；current 是按钉住包的模式现扫的工作区（同一次调用内只扫一次）。
@@ -211,9 +218,31 @@ def _run_scope(agent: object, params: object) -> _RunScope | None:
                      ledger.path.parent, load_task_originals(ledger.path.parent))
 
 
+# LLM: 写后检查先看写后反馈上限（_paused_post_write），到上限的检查对象不跑检查程序；收尾检查照常全跑。
 # 函数用途: 对一个目标文件跑全部适用的检查程序，返回 (复用键, 结果) 列表。
 def _verify_target(scope: _RunScope, path: Path, trigger: str) -> list[tuple[str, PackVerificationResult]]:
-    return [_run_once(scope, pair, path, trigger) for pair in _applicable(scope, path)]
+    pairs = _applicable(scope, path)
+    if trigger != TRIGGER_POST_WRITE:
+        return [_run_once(scope, pair, path, trigger) for pair in pairs]
+    return [_paused_post_write(scope, pair, path) or _run_once(scope, pair, path, trigger) for pair in pairs]
+
+
+# LLM: 连续失败只按同一个 (包, 检查程序, 目标) 的写后结果数（账本 failure_streak），别的目标、收尾结果都不算。到上限时记一条
+#   not_run/post_write_feedback_limit 的结果和事件，复用键留空，收尾算出真实复用键时不会把它当成已检查的结果复用。
+# 函数用途: 写后反馈到了上限就记一条暂停结果并返回 ("", 结果)，没到上限返回 None。
+def _paused_post_write(scope: _RunScope, pair: tuple, path: Path) -> tuple[str, PackVerificationResult] | None:
+    package, verifier = pair
+    manifest, target = package.installation.manifest, workspace_relpath(path, scope.root)
+    streak = scope.ledger.failure_streak(TRIGGER_POST_WRITE, (manifest.plugin_id, verifier.id, target))
+    if streak < MAX_POST_WRITE_CONSECUTIVE_FAILURES_COUNT:
+        return None
+    result = PackVerificationResult(verifier.id, manifest.plugin_id, "not_run", POST_WRITE_FEEDBACK_LIMIT_REASON,
+                                    package_version=manifest.version, package_sha256=package.installation.package_sha256,
+                                    member=verifier.member, runtime=verifier.runtime, target=target)
+    scope.ledger.append({"kind": "result", "trigger": TRIGGER_POST_WRITE, "key": "", "input_matches": {},
+                         "fact": result.to_fact()})
+    _append_event(scope, result, TRIGGER_POST_WRITE)
+    return "", result
 
 
 # LLM: 目标先按包的交付物声明认（路径模式 + 字段匹配），再取 applies_to 指向这些交付物的检查程序。
@@ -302,13 +331,17 @@ def _cache_key(package: PinnedVerificationPackage, verifier: VerifierDeclaration
 
 
 # LLM: 返工提示只列结构化事实（目标、包、检查程序、错误数、错误码和检查程序给的位置），不复述模型的说法，不给修改方案。
+#   样例列全（最多 MAX_REWORK_SAMPLES_COUNT 条），错误总数更多时写明还有几条没列出。
 # 函数用途: 生成一次返工提示。
 def _rework_text(failed: list[PackVerificationResult]) -> str:
     lines = ["宿主用钉住的能力包原版检查程序核验了本回合写出的交付物，下面这些仍有错误："]
     for result in failed[:MAX_REWORK_TARGETS_COUNT]:
-        samples = "；".join(f"{item['code']} @ {item['location'] or '-'}" for item in result.error_samples[:MAX_REWORK_SAMPLES_COUNT])
+        shown = result.error_samples[:MAX_REWORK_SAMPLES_COUNT]
+        total = sum(result.error_counts.values())
+        samples = "；".join(f"{item['code']} @ {item['location'] or '-'}" for item in shown)
+        more = f"（另有 {total - len(shown)} 条没列出）" if shown and total > len(shown) else ""
         lines.append(f"- {result.target}（{result.package_id} {result.package_version} · {result.verifier_id}）："
-                     f"错误 {sum(result.error_counts.values())} 条，例如 {samples or '、'.join(sorted(result.error_counts))}")
+                     f"错误 {total} 条：{samples or '、'.join(sorted(result.error_counts))}{more}")
     lines.append("请按这些错误码和位置修正交付物，再结束本回合。检查结论以宿主为准；不要复制、改写或自己编写检查程序来代替。")
     return "\n".join(lines)
 

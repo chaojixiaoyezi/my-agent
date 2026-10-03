@@ -45,10 +45,8 @@ MAX_VERIFIER_MEMBER_BYTES = 4_194_304
 MAX_VERIFIER_DISTINCT_CODES_COUNT = 64
 # 有界摘要里列出的前几条错误码、警告码个数（写工具回执只附这么多）。
 MAX_VERIFIER_SUMMARY_CODES_COUNT = 5
-# 结果里保留的前几条错误样例（code + 位置）个数，供返工提示定位；摘要只带其中前几条。
+# 结果里保留的前几条错误样例（code + 位置）个数；写工具回执的摘要和返工提示都带全这些条（块 8 试点：只带 3 条时模型看不到后面的错误位置）。
 MAX_VERIFIER_ERROR_SAMPLES_COUNT = 10
-# 有界摘要里附带的错误样例条数。
-MAX_VERIFIER_SUMMARY_SAMPLES_COUNT = 3
 # 错误样例里位置文字的字符上限；位置由检查程序给出，宿主不解释，只截断后转给模型定位。
 MAX_VERIFIER_LOCATION_CHARS = 128
 # 沙箱超时回收后返回的退出码（AttemptExecutionSandbox.run 的 TERM→KILL 约定）。
@@ -110,15 +108,17 @@ class PackVerificationResult:
         values["error_samples"] = tuple(dict(item) for item in values.get("error_samples", ()))
         return cls(**values)
 
-    # LLM: 只给通过/失败、错误与警告总数、前几条错误码和警告码、前几条错误样例；不含 message，供写工具回执附带。
+    # LLM: 只给通过/失败、错误与警告总数、前几条错误码和警告码、结果里保存的全部错误样例（最多 MAX_VERIFIER_ERROR_SAMPLES_COUNT 条）；
+    #   错误总数多于样例条数时 error_samples_truncated=True，让模型知道还有没列出的错误。不含 message，供写工具回执附带。
     # 函数用途: 生成有界的检查摘要。
     def summary(self) -> dict:
+        error_count = sum(self.error_counts.values())
         return {"verifier_id": self.verifier_id, "status": self.status, "reason_code": self.reason_code,
-                "valid": self.valid, "error_count": sum(self.error_counts.values()),
+                "valid": self.valid, "error_count": error_count,
                 "warning_count": sum(self.warning_counts.values()),
                 "error_codes": _top_codes(self.error_counts), "warning_codes": _top_codes(self.warning_counts),
-                "error_samples": [dict(item) for item in self.error_samples[:MAX_VERIFIER_SUMMARY_SAMPLES_COUNT]],
-                "target": self.target}
+                "error_samples": [dict(item) for item in self.error_samples],
+                "error_samples_truncated": error_count > len(self.error_samples), "target": self.target}
 
 
 # 函数用途: 按出现次数取前几个 code（次数相同按名字排）。

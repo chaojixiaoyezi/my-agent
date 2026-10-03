@@ -1,5 +1,21 @@
 # 设计台账
 
+## 能力包写后检查：回执列全错误、一次改完、连续失败到上限只记账（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `claude/3a-step17i` `911116770`，已实现，待 9b 复审）
+
+- **起因**：块 8 试点 A05 同一交付物写后检查失败 20 次才过，单例用了 389 万 token（C13 同例 44 万–62 万）。查结构化事实（`decision-evidence/capability-packs-v2-b8/pilot-ede890374/A05-post-write-analysis.md`）是三件事叠在一起：
+  - 回执只带前 3 条样例、不标截断；
+  - 合同 v1 不带数字；
+  - 模型每次只改一处。
+- **3a 定的修法**（P1–P3，P4 第二步再定）：
+  - P1：写工具回执带检查结果里保存的全部样例（最多 10 条），错误更多时 `error_samples_truncated=true`；返工提示每个目标也列到 10 条，并写明另有几条没列出。
+  - P2：回执文字软提示“把这次列出的错误在下一次写入里一起改完，多处修改可以一次写整份”。只是提示，宿主不据此判断。
+  - P3：同一个检查对象（包、检查程序、目标）写后连续失败 6 次（`pack_verification_service.MAX_POST_WRITE_CONSECUTIVE_FAILURES_COUNT`，模块常数，不做配置项）后：
+    - 后面的写后检查不再跑，只记 `not_run/post_write_feedback_limit`，交给收尾检查那一次返工；
+    - 中间通过一次就清零，收尾检查和别的目标的失败不算；
+    - 暂停记录复用键留空，收尾会照常跑真实检查。
+- **待定**：P4（合同允许错误带最多 4 个数字或短标识，A 包出 0.5.1）。等 P1–P3 上线后 A05、A10 重跑的结果出来再定。
+- **之后**：上线后先重跑 A05、A10 各 1 次，报循环次数和 token，按新数据重估块 8 全量；必须在 4,000 万以内才跑。详见 [设计 3.1 节](docs/design/CAPABILITY_PACKS_V2.md) 和 TESTS.md。
+
 ## ChatGPT 订阅（Responses WebSocket）握手超时照 SSE 交回合层退避重试（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基于 `claude/3a-step17h` `7e421024f`，已实现，待 9b 复审）
 
 - **问题**（be 只读核对生产，2026-10-03）：上一波 8 次整轮失败全是 `PROVIDERTIMEOUTERROR`，都发生在 chatgpt.com 的 Responses WebSocket **握手阶段**（7 次 TLS 握手超时 `_ssl.c: The handshake operation timed out`、1 次升级握手超时 `timed out while waiting for handshake response`），其中 6 次挤在 25 秒内，是一次网络抖动。这些回合已经跑了 13–33 轮工具、50–76 分钟，一次握手超时（生成层立刻重试一次也超时）就整轮失败。证据目录：`~/.my-agent/decision-evidence/model-timeout-ws-handshake-20261003/README.md`（只有结构化事实）。

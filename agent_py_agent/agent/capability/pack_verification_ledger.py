@@ -69,6 +69,18 @@ class PackVerificationLedger:
         return frozenset(path for row in self.records() if row.get("kind") == "written"
                          for path in row.get("paths") or [] if isinstance(path, str))
 
+    # LLM: 只数 trigger 相同、(包 ID, 检查程序 ID, 目标相对路径) 相同的 result 记录：failed 加一，passed 清零，其它状态（not_run、error，
+    #   含写后反馈暂停记录）不加不减。块 8 试点后加，写后检查据此决定还要不要继续给写后反馈。
+    # 函数用途: 返回某个检查对象在某种触发下当前连续失败的次数。
+    def failure_streak(self, trigger: str, identity: tuple[str, str, str]) -> int:
+        streak = 0
+        for row in self.records():
+            fact = row.get("fact") if row.get("kind") == "result" and row.get("trigger") == trigger else None
+            if not isinstance(fact, dict) or (fact.get("package_id"), fact.get("verifier_id"), fact.get("target")) != identity:
+                continue
+            streak = 0 if fact.get("status") == "passed" else streak + (fact.get("status") == "failed")
+        return streak
+
     # LLM: key 由包摘要、检查程序、目标与各输入的路径和摘要组成；同样的内容只跑一次，收尾时直接复用写后结果。
     # 函数用途: 按复用键找本 run 最近一次的检查结果事实。
     def cached_fact(self, key: str) -> dict | None:
