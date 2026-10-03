@@ -384,7 +384,7 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
-## 能力包 v2 块 5：必需交付物缺失或打不开时返工（2026-10-02，分支 `claude/ae-capability-packs-v2-b5h3`，基于块 4 `claude/ae-capability-packs-v2-b4h3` `780ff4c40`）
+## 能力包 v2 块 5：必需交付物缺失或打不开时返工（2026-10-02，原分支 `claude/ae-capability-packs-v2-b5h3`；10-03 与块 4 一起变基到 `claude/ae-capability-packs-v2-b45-17h`，见块 4 节末“变基到 step17h”）
 
 - **新增** `agent_py_agent/tests/test_pack_verification_deliverables.py`（8 项）：
   - 本回合改过工作区、却没写出 required 交付物：收尾返工，最多 2 次；最终事实记 `DELIVERABLE_MISSING`，宿主提示带上这一条；
@@ -404,7 +404,7 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
 - **块 5 补修（同分支第二个提交）**：块 8 准备 harness 时发现，Gateway 的宿主提示只在有检查结果时才发；只有输入原件被就地改、或只有缺交付物的回合，用户在 TUI 和飞书里看不到提示（`channel_delivery` 里有事实）。改为三类事实任一非空就发，提示的 details 加 `inputs_modified_count`、`deliverables_missing_count`。`test_gateway_notice_is_built_from_facts` 补了“只缺交付物”“只改原件”“三类都空不发”三种情况。
 - 先在旧底座 `f87afec4a` 上跑过一遍（变异 12/12、265 个文件 5079 passed、门禁全 rc=0，证据 `capability-packs-v2-b5/on-f87afec4a/`），随块 4 换底座后重跑，数字见上。
 
-## 能力包 v2 块 4：输入原件清单、就地修改判定与返工、核验账本防伪造（2026-10-02，分支 `claude/ae-capability-packs-v2-b4h3`，基于 `claude/3a-step17g-h3-preview` `71578e973`）
+## 能力包 v2 块 4：输入原件清单、就地修改判定与返工、核验账本防伪造（2026-10-02，原分支 `claude/ae-capability-packs-v2-b4h3`；10-03 变基到 `claude/ae-capability-packs-v2-b45-17h`，基于 `claude/3a-step17h` `7e421024f`）
 
 - **底座**：块 4 原先叠在块 3 的 `92a90fa9b` 上（分支 `b4r`），现在挑到 3a 的 h3-preview 上。h3-preview 等于 `43f29df6a` 加上 be 的 H3 九个提交。冲突只有常数目录，已重新生成。
 - **`test_pack_verification_inputs.py`**（9 项）：

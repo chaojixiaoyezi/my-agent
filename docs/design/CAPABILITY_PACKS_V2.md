@@ -82,6 +82,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
     - 9b 复核加固：片段前只要不是词字符、点或连字符就算分隔（`file:///Users/…`、`a;/Users/…`、`at@/Users/…`、`a&/Users/…`、`#/Users/…` 都算；词字符按 Unicode，`交付/tmp/x.json` 这类中文目录名不误伤），另认 `..`（`../../../../Users/…`），判断前先做一次 URL 解码（`%2FUsers%2F…` 也算）。`..` 通过零宽定宽后查作为边界，不消费前段路径，也不依赖 `/..` 在根目录下存在。`out/tmp/x.json`、`docs/Users/x.md`、`./out/d.json`、`out/d.json:12:3`、`https://example.com/a/b` 这类写法原样保留。
     - 防护范围：防的是 `sys.argv`、`__file__`、异常信息这类无意带出的宿主路径。故意编码（两次 %-编码如 `%252FUsers`、插 `%00`、base64、`~user/`、反斜杠写法、`vscode://file/Users` 这类）不在范围内：检查程序存心外传，换什么编码都挡不住，真正的信任边界是“能力包由管理员审过才装”。
     - 代价：JSON Pointer 的首段恰好是本机根目录名（`/home`、`/Users`、`/tmp`）时，整条置成 `<redacted>`，只丢定位、不泄露。
+    - 已知代价（9b 复核）：中文直接贴着宿主路径、中间没有分隔符时不置空，例如“找不到/Users/me/x.json”。这和“`交付/tmp/x.json` 不被误伤”是同一件事的两面，正则区分不了；中文冒号、空格、括号隔开的照样置空，例如“文件不存在：/Users/me/x”。
   - `valid` 必须等于“errors 为空”。自相矛盾、格式不对都记 `verifier_output_invalid`。
   - 退出码不参与判定，只用来识别超时。检查器写出 v1 就退 0；目标坏了给 `valid=false` 加错误码，崩溃没写出 v1 时宿主记 `verifier_output_invalid`。
   - 运行形态：宿主只把这一个成员拷进临时目录、改名后用 `python -I -S` 跑。检查器必须是单文件、只用标准库，不 import 包里其它文件，也不读包里的模板或资源。
@@ -163,12 +164,12 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 - **返工**：提示 1 次。列出原件路径和副本位置，建议用 `cp` 把副本覆盖回原路径（字节要完全一致，手抄做不到），改动另存新文件。
   - 和交付物返工各自计数；同时出现时合成一条提示，原件在前。
   - 之后照常结束，最终事实带 `inputs_modified`、`input_rework_count`，宿主提示写明“任务开始时的输入 X 被就地改了”。
-- **只读保护依赖 be 的 H3**（块 4 已基于 `claude/3a-step17g-h3-preview` `71578e973`，回归用例 `test_pack_verification_protection.py`）：
+- **只读保护依赖 be 的 H3**（块 4、块 5 已变基到 `claude/3a-step17h` `7e421024f`，含 be 的 H3 全部提交；回归用例 `test_pack_verification_protection.py`）：
   - 文件工具和写边界按路径判，所有任务都拒写；
   - Shell 只保护本次命令的工作目录和写根所在任务的 `data/pack_verification/`。Full Access 下别的任务的目录挡不住，这是 H3 写明的已知边界。
   - 9b 的开关前提 (b) 已有用例：主代理和子代理 × 文件工具和真实 Shell、Full Access 和隔离两种模式，追加、覆盖、新建、改写、删除、整个目录改名都写不进，读照常。
   - 账本目录在第一个 Shell 命令之前就已建好（run_command 的运行策略声明会改工作区，执行前先记基线），Linux bwrap 只能只读挂载已存在的路径。
-  - 结构上的缺口（已报 be/3a，用例标了 strict xfail）：Full Access 下，命令的工作目录和写根都在任务树外时，H3 找不到当前任务根，本任务的账本目录不在只读覆盖里。主链任务没有既有写根时，会注入本任务 `work/`、`output/` 作写根，这种形状已挡住，但不是结构保证。
+  - 原先的结构缺口（ae 报，3a 定为必须修，be 已修）：Full Access 下命令的工作目录和写根都在任务树外时，旧版 H3 找不到当前任务根。现在本任务的核验记录只从写边界里宿主写入的结构化 `task_root` 推出，和工作目录、写根无关；macOS 另用一条正则盖住所有任务的核验目录。用例去掉了 strict xfail，Full Access 的 Shell 用例按生产路径经 registry 投影组参数。
 
 ## 5. 交付物存在（块 5，已实现：`capability/pack_verification_deliverables.py`）
 

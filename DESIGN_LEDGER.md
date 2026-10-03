@@ -321,22 +321,22 @@
   - **交付存在**：缺失或打不开返工 2 次。
   - 开关 `capability_pack_host_verification_enabled` 仓库默认 false。
 - **块 2 已实现**：`capability/pack_verifier_runner.py`。它只从安装 blob 取钉住的原件，在 `AttemptExecutionSandbox` 里跑（断网、整根只读、只写临时目录），只认 `pack_verifier_result.v1`。`AttemptSandboxSpec.network_access=False` 在 macOS 补了 `(deny network*)`，就绪检查会实际试一次断网，失败就不跑。macOS 和 Linux 车道都实测过，车道要加 `NET_ADMIN` 才能真跑断网用例。
-- **块 5 已实现**（分支 `claude/ae-capability-packs-v2-b5h3`，基于块 4 头 `780ff4c40`；原分支 `claude/ae-capability-packs-v2-b5` 作废）：
+- **块 5 已实现**（与块 4 同在分支 `claude/ae-capability-packs-v2-b45-17h`，基于 `claude/3a-step17h` `7e421024f`；旧分支 `b5`、`b5h3` 作废）：
   - 只在本回合改过工作区（有块 3 基线）时检查钉住包的必需交付物（3a 定）；
   - 缺了记 `DELIVERABLE_MISSING`，路径匹配但打不开记 `DELIVERABLE_UNREADABLE`，最多返工 2 次；
   - 纯问答和只读审稿回合不触发；不调任何工具、直接在答复里贴内容的回合查不到，写进已知限制。
-- **块 4 已实现**（分支 `claude/ae-capability-packs-v2-b4h3`，基于 `claude/3a-step17g-h3-preview` `71578e973`；原分支 `claude/ae-capability-packs-v2-b4r` 作废）：
+- **块 4 已实现**（分支 `claude/ae-capability-packs-v2-b45-17h`，基于 `claude/3a-step17h` `7e421024f`，含 be 的 H3 全部提交；旧分支 `b4r`、`b4h3` 作废）：
   - 输入原件清单在任务第一次改工作区前记一次，范围是已启用、声明了核验的包的声明模式（3a 同意的偏离：原设计是“首读记”）；
   - 不超过 1 MB 的原件存副本；原件在本回合被改或删就记 `INPUT_MODIFIED_IN_PLACE`，返工 1 次，提示里给出副本位置和 cp 恢复建议；
   - task_input 改为只从原件清单找；
   - 宿主托管文件（账本、清单、副本）统一落在规范任务根的 `data/pack_verification/`，对模型只读靠 be 的 H3。细节见设计文档第 4 节。
-  - 9b 的开关前提 (b) 已有回归用例。另有一个结构性缺口：Full Access 下，命令的工作目录和写根都在任务树外时，账本目录不在只读覆盖里。已报 be/3a，用例标了 strict xfail。
+  - 9b 的开关前提 (b) 已有回归用例。原先的结构性缺口（命令工作目录和写根都在任务树外时账本目录不在只读覆盖里）已由 be 的 H3 修复，用例去掉了 strict xfail。
 - **块 3 已实现**（分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`）：
   - 本 run 第一次改工作区前记基线；写工具成功后马上检查，回执附有界摘要；收尾时对本回合新建或改过的交付物再查（shell 写的也算），有错误返工 1 次；
   - 结果、返工次数都记在每 run 一本的核验账本，Compact 和重启后不重置；
   - 回合结束发宿主提示（`source=pack_verification`），并写 `channel_delivery.pack_verifications`；
   - 开关 `capability_pack_host_verification_enabled` 默认 false，是管理员边界项。细节见设计文档 3.1 节。
-    生产打开这个开关之前必须满足 9b 复审定的两个前提：（a）be 的 H3 已合入，核验账本所在的 `<任务根>/data/pack_verification` 在受保护写路径里；（b）块 4 有回归用例证明主代理和子代理、Shell 和文件工具都写不进 `<任务根>/data/pack_verification`。
+    生产打开这个开关之前必须满足 9b 复审定的两个前提：（a）be 的 H3 已合入，核验账本所在的 `<任务根>/data/pack_verification` 在受保护写路径里；（b）块 4 有回归用例证明主代理和子代理、Shell 和文件工具都写不进 `<任务根>/data/pack_verification`；（c）块 6a 已合入：用户按 /stop 时，正在跑的检查程序会被打断、剩下的不再起（3a 10-03 定，见设计文档块 6 方案）。
 - **声明协议调整（块 2 内，ae 定，3a 已审同意：旧 baseline 键直接删、不做兼容；必需输入找不到就不跑、不返工）**：检查程序的 `baseline` 换成 `inputs` 列表（最多 4 条，每条 `{flag, source, path_patterns, field_match?, required}`）。起因是 be 对齐包内容时发现，A 的检查器要另一种 schema 的原文，B 要本回合写出的交接文件，只有一个同交付物基线不够用。来源 `task_input`/`turn_output` 是开放字符串，恰好匹配一个才算找到；必需的找不到就不跑（`verifier_input_unresolved`），非必需的找不到就不传。`valid` 必须等于“errors 为空”，退出码不参与判定。
 - **块 1 已实现**：
   - v7 可选块 `capability.verification`（交付物按路径模式加可选结构化字段识别，格式、运行方式、输入策略都是开放字符串）；
