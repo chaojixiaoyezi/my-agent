@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.log_redaction import redact_sensitive_value
 from ..common.json_io import append_private_text, write_private_text_file_atomic
+from ..common.log_redaction import redact_sensitive_value
 from ..common.path_segments import safe_path_segment
 from ..common.tool_output_paths import tool_output_root
 from ..settings.defaults import default_agent_config

@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.path_segments import safe_path_segment
 from ..common.json_io import append_private_jsonl_records
+from ..common.path_segments import safe_path_segment
 from ._storage_dates import _date_key
 from .schema import (
     RuntimeMemorySchemaOptions,

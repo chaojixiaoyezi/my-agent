@@ -65,6 +65,18 @@
   4. 去掉 `_handshake_error` 里的用户停止优先判断 → 用例 7 红。
   变异方法是临时改产品文件、跑同一文件后立刻还原（还原后 `git diff` 只含预期改动）。
 
+## 记忆归档目录收紧权限（luna3，2026-10-03，分支 `worker/luna3-archive-private`）
+
+- **新增 `test_memory_archive_permissions.py`**（4 项，POSIX 权限位语义，只在 pytest 临时目录造文件）：
+  - 新写入：`write_compression_snapshot_file` 与 `append_session_token_usage` 写出后文件 0600、直接父目录 0700；
+  - 已有文件：0755 的 `memory_archive/`、`task_progress/`、`task-1/` 与 0644 的 `progress.json` 被收紧为 0700/0600，文件字节不变；两个符号链接（文件与目录）被跳过、不跟随（外部目标保持 0644/0755），`symlink_skipped_count=2`；
+  - 失败计数：注入 `PermissionError` 后 `failed_count=1`、`failure_codes={"permission_denied": 1}`、被拒文件保持原权限、`tightened_count == tightened_files + tightened_directories`；
+  - 维护回执：`run_owner_retention_if_due` 在 `O/data/maintenance.json` 写入 `memory_archive_permissions` 结构化事实（收紧 2：1 文件 + 1 目录），同时文件权限已收紧。
+- **改了旧用例**：`test_memory_archive.py::test_append_raw_event_readback_failure_is_reported` 的 mock 目标从 `append_jsonl` 换成 `append_private_jsonl_records`（写入点改私有追加后的同步；验证意图不变，仍钉 readback 失败会被报告）。
+- **定向回归**：20 个直接相关文件（memory_archive 系列、owner_maintenance、gateway_owner_maintenance、compact_circuit_breaker、tool_output_externalizer、task_workspace、memory_file_permissions、memory_archive_permissions 等）208 项全过。
+- **变异**：4 个全部抓到——m1 快照写回退普通 `write_text`（用例 1 红）；m2 去掉符号链接跳过（用例 2 红：`symlink_skipped_count` 0≠2）；m3 `PermissionError` 不计数（用例 3 红）；m4 维护回执不落盘（用例 4 红）。另有一个等价变异（只把 `is_dir(follow_symlinks=False)` 改成 `is_dir()`）被 `is_symlink()` 早退遮蔽、未改变行为，不计入。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_memory_archive_permissions.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3`
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

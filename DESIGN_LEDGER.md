@@ -56,6 +56,17 @@
 - Embedding 保存后提示用户到「选择模型」→「向量模型」选用，并在重启 Gateway 后生效。未运行真实 TUI/Gateway、未连真实供应商；保存通过只证明本地组件链路，不证明端点可用或重启后实际采用。
 - 用例、三项以上变异和门禁结果以 TESTS.md 本节为准。下一步 3a 独立审 diff 并在集成版本真实复核菜单、用途选择、向量模型列表和重启后的运行状态。
 
+## 记忆归档目录收紧权限：memory_archive 写入私有化 + owner 维护收紧已有文件（luna3，2026-10-03，分支 `worker/luna3-archive-private`，基于 `claude/3a-step17h` `b453f8883`，已实现，待 3a 复审）
+
+- **背景**：S2 把候选、日事件、lesson/HOT、Curator 事务目标与前镜像改成私有原子写，迁移备份也已私有化；S2 台账里记为"单独立项"的 `memory_archive/`（任务/运行事实索引、Compact 快照、任务工作区、外置工具输出）这批会话与任务数据仍是目录 0755、文件 0644。
+- **做法 1（新写入）**：复用 S3 的 `common/json_io.write_private_text_file_atomic_unlocked` 底层，同一文件补薄封装（不另写一套）：自取锁的 `write_private_text_file_atomic`、`write_private_json_file_atomic`，持锁的 `write_private_json_file_atomic_unlocked`，整文件 `write_private_jsonl_records`，追加 `append_private_text` / `append_private_jsonl_records`（新文件出生 0600、已有文件先收紧再追加）。
+  - `memory_archive/` 模块 14 个文件的写入点全部改走私有原子写：`agent_run_workspace`（state/checkpoint/agent.yaml/task.md/summary/timeline/events/artifacts）、`shared_workspace`（blackboard/messages/evidence/index）、`task_workspace`（state/rendering/payloads）、`storage`（hooks 快照与 audit 事件）、`runtime_fact_source`（runtime_facts/<id>/task.json）、`tokens`（会话 token 账）、`compact_circuit_breaker`、`compact_apply`（context/handoff/self-check/ledger）、`tool_output_externalizer`（正文与 index.jsonl）、`artifact/registry`、`daily_ledger`。
+  - 新建的任务工作区与运行时事实目录按 0700；生产里已有的 0644/0755 文件与目录靠"下次写入收紧"覆盖不到的部分见做法 2。
+- **做法 2（已有文件）**：`memory_archive/storage.tighten_memory_archive_permissions` 递归收紧 owner `memory_archive/` 下已有文件到 0600、目录到 0700：只收紧不放松（不比目标宽就不动）、不跟随符号链接（跳过并计数）、chmod 失败按原因码计数继续；返回结构化事实（`tightened_count`/`tightened_files`/`tightened_directories`、`failed_count`、`failure_codes`、`symlink_skipped_count`）。
+  - **挂到现有维护入口**（不另起维护框架）：`user_space/owner_maintenance.run_owner_retention_if_due` 新增一步，回执写 `O/data/maintenance.json` 的 `memory_archive_permissions` 键；Gateway 的 owner-maintenance 循环默认每天跑一次，与正文哈希缓存回收、global_index 压缩同一挂法。
+  - 只改权限不改内容；memory_archive 不存在时返回全零（还没建归档属正常）。
+- **验证**：见 TESTS.md 同名节。
+
 ## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已实现，待集成）
 
 - **起因**：I4 之后，被停机打断的回合重启后都会自动续跑，但启动续跑一直没有次数上限。本身会把进程弄崩的回合，每次重启都会再续一次，形成崩溃循环。3a 定：加上限。

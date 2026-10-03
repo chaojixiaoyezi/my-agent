@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
-from ..common.json_io import append_private_jsonl_records, jsonl_lines, write_private_json_file_atomic
+from ..common.json_io import (
+    append_private_jsonl_records,
+    jsonl_lines,
+    write_private_json_file_atomic,
+)
 
 """JSONL storage primitives for memory hook snapshots and raw archive events.
 

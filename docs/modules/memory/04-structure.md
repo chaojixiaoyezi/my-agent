@@ -7,6 +7,13 @@
 - 该文件不改变 `common.json_io.append_jsonl_capped` 的通用“最近 N 条”语义；任何读取方和 `recent` 20 行投影都不变。
 - 写入异常由原入口捕获并记录 warning，仍不影响可选决策结果；无新配置，单测/变异见 [TESTS](../../../TESTS.md) 同名节。
 
+## 记忆归档目录的私有权限（luna3，2026-10-03，分支 `worker/luna3-archive-private`，已实现，待 3a 复审）
+
+- `common/json_io` 新增私有写封装（同一底层 `write_private_text_file_atomic_unlocked`）：自取锁的 `write_private_text_file_atomic` / `write_private_json_file_atomic`、持锁的 `write_private_json_file_atomic_unlocked`、整文件 `write_private_jsonl_records`、追加 `append_private_text` / `append_private_jsonl_records`（新文件出生 0600、已有文件先收紧）。
+- `memory_archive/` 写入点全部改私有：`agent_run_workspace`、`shared_workspace`、`task_workspace`、`storage`（hooks 快照与 audit 事件）、`runtime_fact_source`、`tokens`、`compact_circuit_breaker`、`compact_apply`、`tool_output_externalizer`、`artifact/registry`、`daily_ledger`。
+- `memory_archive/storage.tighten_memory_archive_permissions`：递归收紧已有文件 0600/目录 0700；只收紧不放松、不跟随符号链接（跳过计数）、失败按原因码计数；返回 `tightened_count/files/directories`、`failed_count`、`failure_codes`、`symlink_skipped_count`。
+- `user_space/owner_maintenance`：`run_owner_retention_if_due` 里挂一步收紧，回执写 `maintenance.json` 的 `memory_archive_permissions` 键；memory_archive 不存在返回全零。
+
 ## 主模型只读检索工具 `memory_search`（J9，2026-10-02，分支 `claude/ae-j9-memory-tool`，默认关，待集成）
 
 - `capability/memory_search_tool.MemorySearchTool`：

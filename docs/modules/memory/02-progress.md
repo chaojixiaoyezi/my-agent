@@ -11,6 +11,10 @@
 - 沿原 JSONL 路径锁和原子替换；公共 `append_jsonl_capped` 不变，写失败仍只记日志、不影响决策。
 - Audit 汇总与近期 20 行展示保持原样；`decision_reach_counts` 原有 7 天留存不变。验证见 [TESTS](../../../TESTS.md) 同名节。
 
+## 记忆归档目录收紧权限：memory_archive 写入私有化 + owner 维护收紧已有文件（2026-10-03，分支 `worker/luna3-archive-private`，已实现，待 3a 复审）
+
+- S2 的后续项"`memory_archive/` 那批会话与任务数据的收紧"落地：14 个文件的写入点改走 `common/json_io` 私有原子写（文件 0600、目录 0700）；`storage.tighten_memory_archive_permissions` 递归收紧已有文件（只收紧不放松、不跟随符号链接），挂进 owner 维护（Gateway 每天一次），回执写 `O/data/maintenance.json` 的 `memory_archive_permissions`。详见 DESIGN_LEDGER 同名条目。
+
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（2026-10-02，分支 `claude/75-curator-fallback-threshold`，已实现，待 be 审）
 
 - 本组最近一次推进游标的是 `:transient` 默认补跑时，下一批阈值从 2 降到 1（`CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT`）；会话模型自己成功推进后回到 2。只读运行账，警告码由 `curator_routing.transient_fallback_warning` 统一生成。详见 DESIGN_LEDGER 同名条目。
