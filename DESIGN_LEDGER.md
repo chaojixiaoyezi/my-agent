@@ -1,5 +1,14 @@
 # 设计台账
 
+## G3 插件命令降级回归（g3r，2026-10-03，分支 `worker/g3-tui-regression`，基于 step17i 头 `99a1558a9`）
+
+- **状态：待复审**（挡 17i 上线的回归修复；改动只在测试侧与 guards 清单，产品代码未动）。
+- **现象**：12 片 Linux 车道抓到 G3 并入后的回归——`test_tui_input.py::test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop` 的 20 个 `use_gateway=True` 变体、以及 `test_tui_plugin_directory_pipe.py` 的 `[manual]`/`[after_command]` 全失败，断言拿到的是"无法读取当前插件目录"。二分确认由 G3（`2adfd8518`）引入。
+- **根因（一行说清）**：G3 把共用传输 `post_gateway_json` 的签名从 `(port, owner, path, payload, *, timeout)` 改成 `(agent, path, payload, *, timeout)`，并同步更新了 `test_plugin_command_client.py` 的 mock，但漏掉了 `test_tui_input.py:97` 和 `test_tui_plugin_directory_pipe.py:31` 里仍是旧签名的 mock。旧 mock 接不到新调用 → 抛 `TypeError` → 被 `plugin_command_client._request` 的 `except Exception` 兜成 `plugin_catalog_unavailable()`，于是显示"无法读取当前插件目录"。**产品降级口径本身是对的**（`client_credentials.headers()` 开关关时记一次 warning 并返回空头继续发送）；坏的是测试替身没跟上签名。
+- **修法**：不再 mock 传输层函数，改成起一个本机假 Gateway（`agent_py_agent/tests/_gateway_stub.py`，`ThreadingHTTPServer` 监听 127.0.0.1 随机端口，走真实 HTTP、真实 `post_gateway_json`、真实凭据分流），测试只提供响应器。这样这两条用例从此覆盖"无凭据 + 开关关 → 照常发送"的真实路径（隔离 home 下没有凭据文件，`headers()` 自然降级）。
+- **新增用例**：`test_plugin_submit_degrades_without_local_credential_when_switch_off` 显式钉住"开关关 + 凭据文件不存在时 /plugins 提交照常派发、不带 `X-Gateway-Token`、只记一次 warning"。
+- **未改**：`client_credentials.py`、`plugin_command_client.py`、`chat_client_context.py` 等产品代码与 G3 逻辑一行未动；没有为了让测试变绿而放宽断言（断言反而更强：Gateway 变体现在要求"请求必须真实到达假 Gateway"）。
+
 ## B 包 0.3.1：交接唯一性、字段名收紧与拆分指引（pb31，2026-10-03，分支 `worker/pack-b-031`，基于 step17i `0ae0efe5e`；待复审，复审后重跑 B 类 9 例）
 
 - **起因**：能力包 v2 块 8 冻结重跑的独立业务审阅：①交接文件被写成两份（交付件与 `tmp/` 模板副本），宿主“恰好一份”的匹配不成立，交接没进标准检查链（B08-t202）；②动作节拍写成单数 `character_id`，检查器只报提醒、不触发返工（B08-t203）；③“角色、道具和镜头参考各写各的”拆分要求没落实（B10-t202）；④核对报告把产物里已有的引用写成缺失、还建议补一个已经存在的条目，且与同一报告的表格自相矛盾（B05-t203）。

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.application import create_app_session
@@ -10,10 +11,10 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from agent_py_agent.agent.plugin_command_catalog import PluginCommandCatalog
-from agent_py_agent.agent.plugin_command_service import execute_plugin_command
-from agent_py_agent.cli.chat_parts import plugin_command_client, plugin_command_stream, rendering
+from agent_py_agent.cli.chat_parts import rendering
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
+from agent_py_agent.tests._gateway_stub import plugin_command_responder
 from agent_py_agent.tests.test_plugin_command_catalog import _plugin
 from agent_py_agent.tests.test_tui_decision_menu import wait_app
 from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
@@ -21,32 +22,17 @@ from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
 
 @pytest.mark.parametrize("restore", ["manual", "after_command"])
 def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
-    tmp_path, monkeypatch, restore
+    tmp_path, monkeypatch, gateway_stub_factory, restore
 ):
     initial = PluginCommandCatalog("scope", plugins=(_plugin(),))
     current = initial
-    requests = []
-    event_thread = threading.get_ident()
 
-    def transport(port, owner, path, payload, **kwargs):
-        assert threading.get_ident() != event_thread
-        requests.append(payload)
-        return 200, (
-            {"ok": True, "catalog": current.to_payload()}
-            if payload["operation"] == "catalog"
-            else execute_plugin_command(
-                current, payload["command"], revision=payload["catalog_revision"]
-            )
-        )
+    # G3 回归：mock 下移到本机假 Gateway，让真实 HTTP 传输与凭据分流参与目录和命令派发。
+    def respond(path, headers, payload):
+        assert path == "/client/plugins"
+        return plugin_command_responder(lambda: current)(path, headers, payload)
 
-    def command_stream(port, owner, payload, interaction):
-        assert payload["plugin_request_id"] == interaction.request_id
-        assert interaction.gateway_paths is not None
-        assert not interaction.cancellation_token.cancelled
-        return transport(port, owner, "/client/plugins", payload)[1]
-
-    monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
-    monkeypatch.setattr(plugin_command_stream, "post_plugin_command_stream", command_stream)
+    stub = gateway_stub_factory(respond)
     monkeypatch.setattr(rendering, "_TUI_OUTPUT_SINK", None)
 
     async def scenario():
@@ -57,6 +43,10 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
             with create_app_session(input=pipe, output=DummyOutput()):
                 params = replace(_app_params(tmp_path, runtime), use_gateway=True)
                 params.paths.root = tmp_path / "gateway"
+                params.paths.processing = tmp_path / "gateway" / "processing"
+                # 真实传输要连本机假 Gateway；隔离凭据根，避免读取真实宿主凭据。
+                params.agent.config.gateway_port = stub.port
+                params.agent.home_paths = SimpleNamespace(root=tmp_path / "host-data")
                 app = make_tui_app(params)
                 run_task = asyncio.create_task(app.run_async())
                 try:
@@ -67,12 +57,12 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
                     pipe.send_text("/plugins@s")
                     await wait_app(app, lambda: buffer.text == "/plugins@s" and buffer.complete_state is None,
                                    "输入到达且边打边补全不留候选")
-                    assert requests == []
+                    assert stub.requests == []
                     pipe.send_bytes(b"\t")
                     # Tab 先同步建一个空的 complete_state，再到线程里拉目录；候选真的出现才说明目录请求已发出。
                     await wait_app(app, lambda: bool(getattr(buffer.complete_state, "completions", ())),
                                    "Tab 拉取目录后出现候选")
-                    assert len(requests) == 1 and requests[0]["operation"] == "catalog"
+                    assert len(stub.requests) == 1 and stub.requests[0].payload["operation"] == "catalog"
                     assert buffer.text == "/plugins@s" and params.jobs.empty()
                     pipe.send_bytes(b"\t")
                     await wait_app(app, lambda: buffer.text == "/plugins@sample ", "接受候选并补空格")
@@ -104,10 +94,10 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
                     assert binding.revision == initial.revision
                     pipe.send_text("read '中文 文件'")
                     pipe.send_bytes(b"\r")
-                    await wait_app(app, lambda: bool(requests)
-                                   and str(requests[-1].get("command", "")).startswith("/plugins@sample read"),
+                    await wait_app(app, lambda: bool(stub.requests)
+                                   and str(stub.requests[-1].payload.get("command", "")).startswith("/plugins@sample read"),
                                    "命令按原 revision 提交")
-                    command = requests[-1]
+                    command = stub.requests[-1].payload
                     assert command["command"] == "/plugins@sample read '中文 文件'"
                     assert command["catalog_revision"] == initial.revision != current.revision
                     assert buffer.text == "" and params.jobs.empty()

@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import time
+from dataclasses import dataclass, replace
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -37,6 +38,7 @@ from agent_py_agent.cli.chat_parts.tui_keybindings import _normalize_bracketed_p
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_transcript import TuiTranscriptModeState
 from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
+from agent_py_agent.tests._gateway_stub import plugin_command_responder
 
 
 def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monkeypatch) -> None:
@@ -59,52 +61,45 @@ def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monk
     scan.assert_not_called()
 
 
-@pytest.mark.parametrize("use_gateway", [False, True])
-@pytest.mark.parametrize("mode", ["idle", "foreground", "background", "child"])
-@pytest.mark.parametrize(("raw", "message"), [
-    ('/plugins@Demo run --path "中文 a" -- -x | literal', "当前目录没有"),
-    ("/plugins help install", "用法：/plugins install <source>"),
-    ("/plugins help configure", "用法：/plugins configure"),
-    ("/plugins list --bad", "未声明的选项"),
-    ('/plugins install "未闭合', "引号尚未闭合"),
-])
-def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
-    tmp_path, monkeypatch, use_gateway, mode, raw, message,
-) -> None:
+# LLM: G3 回归用例共用同一次 TUI 提交装配；把 setup 收成一个不可变载荷，避免每个用例重复十几行、
+#   也避免测试函数参数超过 4 个。改动提交路径或假 Gateway 协议时同步检查这里。
+# 用途: 保存一次“插件提交”测试所需的输入框、参数、事件、假 Gateway 和输出收集器。
+@dataclass(frozen=True)
+class _PluginSubmitSetup:
+    event: object
+    params: object
+    runtime: object
+    input_area: object
+    output: list
+    blocked: object
+    stub: object
+    background_before: bool
+
+
+# LLM: setup 的宿主输入收成一个不可变载体，避免 helper 参数超过 4 个；模式/开关随用例参数变化。
+# 用途: 保存一次插件提交测试的临时目录、补丁器、假 Gateway、运行模式和网关开关。
+@dataclass(frozen=True)
+class _PluginSubmitHost:
+    tmp_path: object
+    monkeypatch: object
+    stub: object
+    mode: str = "idle"
+    use_gateway: bool = True
+
+
+# LLM: 只装配冻结对象与假 Gateway，不提交、不读真实配置；凭据根隔离在 tmp_path，避免读到宿主凭据。
+# 用途: 为插件提交用例准备输入框、params、假 Gateway 与输出收集器。
+def _plugin_submit_setup(host: _PluginSubmitHost, text: str) -> _PluginSubmitSetup:
     from agent_py_agent.agent.conversation.store import ConversationStore
-    from agent_py_agent.agent.plugin_command_service import (
-        execute_plugin_command,
-        read_plugin_catalog,
-    )
     from agent_py_agent.agent.settings.config import AgentConfig
     from agent_py_agent.agent.user_space.home_layout import home_paths
-    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
-    from agent_py_agent.cli.chat_parts import (
-        control_runtime,
-        plugin_command_client,
-        plugin_command_stream,
-        tui,
-    )
+    from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+    from agent_py_agent.cli.chat_parts import control_runtime, tui
 
-    snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
-
-    def transport(port, owner, path, payload, *, timeout):
-        assert path == "/client/plugins" and owner == OwnerIdentity.local_main()
-        result = ({"ok": True, "catalog": snapshot.to_payload()} if payload["operation"] == "catalog"
-                  else execute_plugin_command(snapshot, payload["command"], revision=payload["catalog_revision"]))
-        return 200, result
-
-    monkeypatch.setattr(plugin_command_client, "post_gateway_json", transport)
-
-    def stream_transport(port, owner, payload, interaction):
-        assert interaction.request_id == payload["plugin_request_id"]
-        assert interaction.cancellation_token.cancelled is False
-        return transport(port, owner, "/client/plugins", payload, timeout=3)[1]
-
-    monkeypatch.setattr(plugin_command_stream, "post_plugin_command_stream", stream_transport)
-
+    tmp_path, monkeypatch, stub, mode, use_gateway = (host.tmp_path, host.monkeypatch, host.stub,
+                                                      host.mode, host.use_gateway)
     input_area = TextArea(multiline=True)
-    input_area.text = raw
+    input_area.text = text
     output: list[str] = []
     blocked = MagicMock(side_effect=AssertionError("命令错误不能进入执行或普通输入"))
     monkeypatch.setattr(tui, "_cprint", output.append)
@@ -122,13 +117,15 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     background_before = runtime.has_active_background_task()
     paths = home_paths(tmp_path)
     owner = resolve_owner_home(tmp_path)
-    agent = SimpleNamespace(config=AgentConfig(), home_paths=paths,
+    agent = SimpleNamespace(config=replace(AgentConfig(), gateway_port=stub.port), home_paths=paths,
                             conversation_store=ConversationStore(owner.home_dir / "conversations", initialize=False),
                             effective_workspace_root=tmp_path)
     params = SimpleNamespace(media_importing=False,
         input_area=input_area, interaction_state=TuiInteractionState(), tui_runtime=runtime,
         agent=agent, args=SimpleNamespace(memory_limit=5), runtime_inject=[], prompt_files=[],
-        use_gateway=use_gateway, paths=SimpleNamespace(root=tmp_path), state_lock=threading.Lock(),
+        use_gateway=use_gateway,
+        paths=SimpleNamespace(root=tmp_path, processing=tmp_path / "gateway" / "processing"),
+        state_lock=threading.Lock(),
         is_running_ref=[mode == "foreground"], pending_jobs_ref=[0], running_prompt_ref=["正在核对"],
         running_request_id_ref=["goal-task-1" if mode == "background" else "req-1"],
         running_started_at_ref=[0.0], shutting_down_ref=[False], stop_event=threading.Event(),
@@ -136,20 +133,88 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
         control_operation_reconciler=SimpleNamespace(enqueue=blocked),
         exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
         escape_armed_at_ref=[0.0], escape_armed_text_ref=[""],
-        local_run_ref=[None],
-    )
+        local_run_ref=[None])
     event = SimpleNamespace(app=SimpleNamespace(exit=blocked, invalidate=lambda: None, create_background_task=asyncio.run))
+    return _PluginSubmitSetup(event, params, runtime, input_area, output, blocked, stub, background_before)
 
-    tui_keybindings._submit_input_area(event, params)
 
-    assert len(output) == 1 and message in output[0]
-    blocked.assert_not_called()
-    assert not params.stop_event.is_set() and params.pending_jobs_ref == [0]
-    assert params.local_run_ref == [None]
-    assert params.is_running_ref == [mode == "foreground"]
-    assert runtime.has_active_background_task() == background_before == (mode == "background")
-    assert runtime.store.snapshot().queued_inputs == ()
-    assert input_area.text == ""
+@pytest.mark.parametrize("use_gateway", [False, True])
+@pytest.mark.parametrize("mode", ["idle", "foreground", "background", "child"])
+@pytest.mark.parametrize("raw_message", [
+    ('/plugins@Demo run --path "中文 a" -- -x | literal', "当前目录没有"),
+    ("/plugins help install", "用法：/plugins install <source>"),
+    ("/plugins help configure", "用法：/plugins configure"),
+    ("/plugins list --bad", "未声明的选项"),
+    ('/plugins install "未闭合', "引号尚未闭合"),
+])
+def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
+    tmp_path, monkeypatch, gateway_stub_factory, use_gateway, mode, raw_message,
+) -> None:
+    raw, message = raw_message
+    from agent_py_agent.agent.plugin_command_service import read_plugin_catalog
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
+
+    # G3 回归：mock 下移到本机假 Gateway，让真实 HTTP 传输与凭据分流（无凭据 + 开关关照常发送）参与派发。
+    def respond(path, headers, payload):
+        assert path == "/client/plugins"
+        assert headers.get("X-User-Id") == "local-agent" and headers.get("X-Channel") == "chat"
+        if payload and payload.get("interactive"):
+            assert payload["plugin_request_id"]
+        return plugin_command_responder(lambda: snapshot)(path, headers, payload)
+
+    stub = gateway_stub_factory(respond)
+    setup = _plugin_submit_setup(_PluginSubmitHost(tmp_path, monkeypatch, stub, mode, use_gateway), raw)
+
+    tui_keybindings._submit_input_area(setup.event, setup.params)
+
+    assert len(setup.output) == 1 and message in setup.output[0]
+    if use_gateway:
+        assert stub.requests, "Gateway 提交必须真实到达假 Gateway"
+    else:
+        assert not stub.requests
+    setup.blocked.assert_not_called()
+    assert not setup.params.stop_event.is_set() and setup.params.pending_jobs_ref == [0]
+    assert setup.params.local_run_ref == [None]
+    assert setup.params.is_running_ref == [mode == "foreground"]
+    assert setup.runtime.has_active_background_task() == setup.background_before == (mode == "background")
+    assert setup.runtime.store.snapshot().queued_inputs == ()
+    assert setup.input_area.text == ""
+
+
+def test_plugin_submit_degrades_without_local_credential_when_switch_off(
+    tmp_path, monkeypatch, gateway_stub_factory, caplog,
+) -> None:
+    """G3 回归：开关关（默认）且本机凭据不存在时，/plugins 提交照常走真实派发、不带令牌、记一次 warning。"""
+    import logging
+
+    from agent_py_agent.agent.gateway_parts import client_credentials
+    from agent_py_agent.agent.plugin_command_service import read_plugin_catalog
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
+
+    def respond(path, headers, payload):
+        assert path == "/client/plugins"
+        return plugin_command_responder(lambda: snapshot)(path, headers, payload)
+
+    stub = gateway_stub_factory(respond)
+    setup = _plugin_submit_setup(_PluginSubmitHost(tmp_path, monkeypatch, stub), "/plugins help install")
+    # warning 去重是进程级状态；本用例先清掉本原因，保证“只记一次”的断言真实。
+    with client_credentials._CREDENTIAL_WARNINGS_LOCK:
+        client_credentials._WARNED_CREDENTIAL_REASONS.discard("LOCAL_CLIENT_CREDENTIAL_MISSING")
+    caplog.set_level(logging.WARNING, logger="agent_py_agent.agent.gateway_parts.client_credentials")
+
+    tui_keybindings._submit_input_area(setup.event, setup.params)
+
+    assert len(setup.output) == 1 and "用法：/plugins install <source>" in setup.output[0]
+    assert stub.requests, "降级后请求必须照常到达假 Gateway"
+    assert all(item.headers.get_all("X-Gateway-Token") is None for item in stub.requests)
+    assert len([item for item in caplog.records if "凭据不可用" in item.message]) == 1
+    setup.blocked.assert_not_called()
+    assert not setup.params.stop_event.is_set() and setup.params.pending_jobs_ref == [0]
+    assert setup.input_area.text == ""
 
 
 def _job(request_id: str, text: str) -> ChatJob:

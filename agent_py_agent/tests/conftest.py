@@ -50,6 +50,38 @@ def gateway_client_credential(_isolate_my_agent_home):
     return ensure_local_client_credential(home_paths().root)
 
 
+# LLM: G3 插件命令回归：插件提交测试要连本机假 Gateway（真实 HTTP + 凭据分流），不能再 mock 传输函数。
+# 函数用途: 按用例提供的响应器起假 Gateway；用例结束统一回收，避免监听线程泄漏。
+@pytest.fixture
+def gateway_stub_factory():
+    from agent_py_agent.tests._gateway_stub import GatewayStub
+
+    stubs = []
+
+    def make(responder):
+        stub = GatewayStub(responder).start()
+        stubs.append(stub)
+        return stub
+
+    yield make
+    for stub in stubs:
+        stub.stop()
+
+
+# LLM: G3 回归用例的 Variant 参数（网关开关/模式/输入/期望文案）收进一个 fixture，避免测试函数参数超限；
+#   fixture 直接读本次 parametrize 的请求参数，不改变参数化语义。
+# 函数用途: 把一个变体的四元参数打包给用例，替代 7 个函数参数。
+@pytest.fixture
+def plugin_submit_variant(request):
+    from types import SimpleNamespace
+
+    params = request.node.callspec.params
+    return SimpleNamespace(
+        use_gateway=params["use_gateway"], mode=params["mode"],
+        raw=params["raw_message"][0], message=params["raw_message"][1],
+    )
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## G3 插件命令降级回归（g3r，2026-10-03，分支 `worker/g3-tui-regression`，基于 `99a1558a9`）
+
+- 改了什么：`test_tui_input.py` 与 `test_tui_plugin_directory_pipe.py` 不再 mock `post_gateway_json` / `post_plugin_command_stream`，改为起本机假 Gateway（新增 `agent_py_agent/tests/_gateway_stub.py` + conftest 的 `gateway_stub_factory`），真实走 HTTP 与 G3 凭据分流；新增用例 `test_plugin_submit_degrades_without_local_credential_when_switch_off`。产品代码零改动。
+- 测试命令（工作树根，代号 g3r）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_tui_input.py agent_py_agent/tests/test_tui_plugin_directory_pipe.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g3r
+  ```
+  结果：**120 passed**（改前这两条用例有 22 个子项失败）。
+- 相关回归：`test_gateway_client_credentials.py`、`test_plugin_command_client.py`、`test_plugin_command_catalog.py`、`test_chat_client_context.py` → **112 passed**。
+- 作者当时把这 4 个文件追加进了 guards9 清单，扩展后跑出 368 passed。3a 已把 guards9 恢复成 10 个架构守卫文件：这 4 个是 G3 的定向用例，在会话沙箱里跑不了（要插件宿主和 PTY），放进共用守卫会让每个会话都看到假失败。挑入 17i 时由 3a 在沙箱外跑。
+- 变异：把 `client_credentials.headers()` 的"开关关降级"改回无条件拒绝 → **23 failed**（20 个 Gateway 变体 + 新用例 + pipe 2 个），已还原。
+- 门禁：ruff / import-boundaries(0) / doc_sync / strict code-size(blocked=False) / size_diff(**新增 0**，消失 27) / diff --check / clean_package 全过。
+
 ## B 包 0.3.1 补边界用例与重合扫查（pb31t，2026-10-03，分支 `worker/pack-b-031-tests`，基于 `8525d24e6`）
 
 - **改动**：只补用例与文档，检查程序 `examples/capability-packages/drama-workflow-b/scripts/check_continuity.py` **逐字节未改**（`git status` 对该文件为空可证）。在 `test_capability_package_drama_workflow_v031.py` 按 ds3 原用例写法补两条边界（用例数 6→8）：

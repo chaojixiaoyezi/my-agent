@@ -1073,6 +1073,7 @@ agent_py_agent/
 |   |-- _fake_macos_ax.py         # 测试共用的假 ApplicationServices：记录读写，绝不弹授权框、不执行 AX 动作
 |   |-- test_screen_capture_guard.py # 真实屏幕防线自检：macOS / X11 真实库入口一调就失败且吞不掉（绊线兜底）；递归扫描“开观察 + 拉子进程”的文件必须带车道标记
 |   |-- _screen_capture_guard.py # 测试侧真实屏幕防线：RealScreenAccessForbidden 与车道标记扫描规则
+|   |-- _gateway_stub.py          # G3 插件命令回归：本机假 Gateway（随机端口、真实 HTTP），让 TUI 提交用例覆盖真实传输与凭据降级
 |   |-- test_subagent_activity_diagnostics.py # 阶段提醒、慢流不误杀、执行代与消息去重回归
 |   |-- test_subagent_takeover_hint.py   # 执行器退出后给父级的结构化接替提示：合同形状、开关开关两种回执、各消费方投影、只属一份结果（C4）
 |   |-- test_r223_audit_regressions.py   # 外部审计的编码、版本、并发、MCP、输出、网络和恢复故障注入
