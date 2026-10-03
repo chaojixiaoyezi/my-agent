@@ -1,5 +1,38 @@
 # 测试与发布验收
 
+## 只看 mtime 的缓存（mtc，2026-10-03，分支 `worker/mtime-cache-fix`，基于 `c47d023b6`，待 3a 复审）
+
+- **改动**：新增 `agent/common/cache_freshness.py`（指纹 + 2 秒窗口的唯一实现），`common/json_io.read_text_lines_cached`、`gateway_parts/response_renderer` 两个 when-ready 入口改用五元指纹，窗口内读到的内容不入缓存；`subagents/services/persistence` 改引用同一判断，行为不变。
+- **新用例**（`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，工作树根执行）：
+  - `agent_py_agent/tests/test_common_cache_freshness.py`：指纹覆盖 dev/ino/size/mtime/ctime（真做一次同 mtime 原子替换）、窗口判断方向与边界。
+  - `agent_py_agent/tests/test_gateway_response_file_poll_cache.py`：两个 when-ready 入口各三条——同 mtime 同大小只换 inode 必须失效；窗口内即使指纹相同也重读、且文件真变了要读到新代；稳定文件靠计数桩断言第二次只 stat 不读文件（不靠计时）。终态入口用带 `schema_version`/`id` 的 canonical 信封载荷。
+  - `agent_py_agent/tests/test_common_safe_id_and_paths.py` 扩两条：窗口内读到的行不入缓存（打桩窗口判断为“不可信”，断言两次都碰磁盘、缓存里没有该键）；同 mtime 同大小的原子替换必须换指纹并读到新内容。
+  - `agent_py_agent/tests/test_gateway_client.py` 扩一条：既有 `read_gateway_response_file_when_ready` 入口的同 mtime 原子替换必须重读（这条专门用来抓“只修一处”的变异）。原有那条去重用例把文件 mtime 设到窗口外，保持原断言语义。
+- **命令**：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_common_cache_freshness.py \
+    agent_py_agent/tests/test_common_safe_id_and_paths.py \
+    agent_py_agent/tests/test_gateway_response_file_poll_cache.py \
+    agent_py_agent/tests/test_gateway_client.py \
+    agent_py_agent/tests/test_subagent_listruns_cache.py \
+    agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py \
+    agent_py_agent/tests/test_constants_catalog.py \
+    agent_py_agent/tests/test_constant_names_unique.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mtc
+  ```
+  结果：**100 passed**，退出码 0（先红后绿：新用例在实现前失败，见下条变异口径）。
+- **变异**（`mutate_mtc.py`，备份-还原不用 git checkout）：5 个全部被杀。
+  1. 指纹去掉 ino → 被 `test_stat_signature_covers_dev_ino_size_mtime_ctime` 等杀；
+  2. 窗口判断 `>=` 写反成 `<` → 被 helper/轮询/子代理多条用例杀；
+  3. 窗口内也入缓存（json_io 去掉不入缓存分支）→ 被 `test_read_text_lines_cached_skips_cache_for_recent_mtime` 杀；
+  4. 只修 json_io、response_renderer 退回 `(mtime,size)` → 被 `test_gateway_response_poll_state_reloads_same_mtime_atomic_replace` 杀（这版第一次跑时该变异曾存活，补用例后复跑被杀）；
+  5. 子代理持久层退回“窗口内也命中旧缓存” → 被 `test_list_runs_reloads_recent_mtime_but_reuses_old_cache` 杀。
+- **常数目录**：`scripts/build_constants_catalog.py` 重新生成（891 项，新增 `CACHE_TRUST_AGE_SECONDS`）；`test_constants_catalog.py`、`test_constant_names_unique.py` 通过。
+- **静态门禁**：`ruff check agent_py_agent scripts` → `All checks passed`（首次 4 个 I001 导入排序，`--fix` 后复跑通过）；`check_import_boundaries.py`、`check_doc_sync.py`、strict code-size、`check_clean_package.py`、`git diff --check`、guards9 结果见交接报告与提交信息。
+- **未验证**：真实 Gateway/TUI/飞书轮询语义（组件级用例只能证明接口层）、Linux 车道（本机为 macOS）、全仓 pytest（由 3a 车道跑）。
+
 ## G3 返工：凭据读不到时按 gateway_require_local_credential 降级或拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 
 - 来源：3a 的 G3 返工工单与 GATEWAY_LOCAL_TRUST 1.4/1.5。开关关（默认 false）＝照常发送但不带 `X-Gateway-Token`、只记一次原因码 warning；开关开＝发请求前拒绝、零请求。非空 `gateway_auth_token` 优先、direct 不读凭据不变。

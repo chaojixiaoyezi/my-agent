@@ -806,50 +806,88 @@ def test_chat_gateway_poll_reports_bad_canonical_terminal_json(tmp_path):
 
 
 def test_gateway_response_poll_state_reads_only_when_file_changes(tmp_path):
+    response_path = tmp_path / "response.json"
+    state = _gateway_response_poll_state()
+
+    assert _response_poll_once(response_path, state) == {}, "文件还不存在时不读"
+
+    _write_response_file(response_path, {"ok": True, "response": "first"})
+    assert _response_poll_once(response_path, state)["response"] == "first"
+    assert _response_poll_once(response_path, state) == {}, "指纹没变时只 stat 不读"
+
+    _write_response_file(response_path, {"ok": True, "response": "second", "extra": "changed"})
+    assert _response_poll_once(response_path, state)["response"] == "second"
+
+
+# 函数用途: 把响应文件 mtime 拨到粗窗口之外，让“指纹没变就跳过”的断言不受 2 秒保护窗影响。
+def _set_response_file_old(path) -> None:
+    import os
+
+    old_ns = time.time_ns() - 3_000_000_000
+    os.utime(path, ns=(old_ns, old_ns))
+
+
+# 函数用途: 写一份响应文件并置为窗口外，模拟一次已经稳定下来的响应投影。
+def _write_response_file(path, payload: dict) -> None:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _set_response_file_old(path)
+
+
+# 函数用途: 建一个响应轮询去重状态，供本文件的两条轮询用例复用。
+def _gateway_response_poll_state():
+    from agent_py_agent.agent.gateway_parts.response_renderer import GatewayResponsePollState
+
+    return GatewayResponsePollState()
+
+
+# 函数用途: 调一次“变了才读”的响应文件入口，统一 context 便于断言。
+def _response_poll_once(response_path, state) -> dict:
+    from agent_py_agent.agent.gateway_parts.response_renderer import (
+        read_gateway_response_file_when_ready,
+    )
+
+    return read_gateway_response_file_when_ready(
+        response_path,
+        state=state,
+        context="gateway.test.response.read",
+    )
+
+
+def test_gateway_response_poll_state_reloads_same_mtime_atomic_replace(tmp_path):
+    """同一 mtime、同一大小、只换 inode：既有响应文件入口也必须重读（只修一处的变异会被本条抓住）。"""
+    import os
+
     from agent_py_agent.agent.gateway_parts.response_renderer import (
         GatewayResponsePollState,
         read_gateway_response_file_when_ready,
     )
 
     response_path = tmp_path / "response.json"
+    # 两代载荷必须等长：本用例要求“同 mtime、同大小、只换 inode”。
+    response_path.write_text(json.dumps({"ok": True, "response": "first!"}), encoding="utf-8")
+    old_ns = time.time_ns() - 3_000_000_000
+    os.utime(response_path, ns=(old_ns, old_ns))
+    before = response_path.stat()
+
     state = GatewayResponsePollState()
+    assert read_gateway_response_file_when_ready(
+        response_path, state=state, context="gateway.test.response.read"
+    )["response"] == "first!"
+    assert read_gateway_response_file_when_ready(
+        response_path, state=state, context="gateway.test.response.read"
+    ) == {}
 
-    assert (
-        read_gateway_response_file_when_ready(
-            response_path,
-            state=state,
-            context="gateway.test.response.read",
-        )
-        == {}
-    )
+    replacement = tmp_path / "response.json.tmp"
+    replacement.write_text(json.dumps({"ok": True, "response": "second"}), encoding="utf-8")
+    os.replace(replacement, response_path)
+    os.utime(response_path, ns=(old_ns, old_ns))
+    after = response_path.stat()
+    assert after.st_mtime_ns == before.st_mtime_ns and after.st_size == before.st_size
+    assert after.st_ino != before.st_ino
 
-    response_path.write_text(json.dumps({"ok": True, "response": "first"}), encoding="utf-8")
-    assert (
-        read_gateway_response_file_when_ready(
-            response_path,
-            state=state,
-            context="gateway.test.response.read",
-        )["response"]
-        == "first"
-    )
-    assert (
-        read_gateway_response_file_when_ready(
-            response_path,
-            state=state,
-            context="gateway.test.response.read",
-        )
-        == {}
-    )
-
-    response_path.write_text(json.dumps({"ok": True, "response": "second", "extra": "changed"}), encoding="utf-8")
-    assert (
-        read_gateway_response_file_when_ready(
-            response_path,
-            state=state,
-            context="gateway.test.response.read",
-        )["response"]
-        == "second"
-    )
+    assert read_gateway_response_file_when_ready(
+        response_path, state=state, context="gateway.test.response.read"
+    )["response"] == "second", "只换 inode 的原子替换必须让轮询去重失效"
 
 
 def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path):

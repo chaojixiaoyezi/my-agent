@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-10-03（mtc，3a 挑入）：子代理解析缓存的指纹与 2 秒窗口阈值改为引用 `common/cache_freshness` 的共享实现；命中与“窗口内读到的不入缓存”行为不变（luna6 口径）。
+
 2026-10-03（luna6i，ae 二次复看补强，`worker/luna6-idem-flake`）：修正规则为 mtime 窗口内的 cache miss 只返回当前 canonical 读取结果、不入缓存并清掉同 run 旧项，2 秒窗口外才保存；增加同指纹写入新状态后跨窗重读的 ABA 正式探针。缓存时钟由 persistence service `_now()` 隔离，DONE 复用测试不再清空缓存；缓存命中类夹具 mtime 调到窗口外。具体先红后绿和门禁回执见 TESTS.md 顶部。
 
 2026-10-03（luna6i，分支 `worker/luna6-idem-flake`，ae 复审通过，并入 step17i）：解决子代理列表缓存只看 `task.json` 的 `st_mtime_ns`，导致同 mtime 的原子替换未使缓存失效、items 复用保存可将 RUNNING 旧快照写回 PLANNING 的竞争。缓存改核对 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`；受控同 mtime 回归先红后绿，定向和 guards9 已跑过，完整命令及边界见 TESTS.md 顶部。

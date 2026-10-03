@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from ....common.cache_freshness import CACHE_TRUST_AGE_SECONDS, cache_stat_signature
 from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
 from ....common.opaque_id import validate_opaque_id
 from ....common.value_parsing import sequence_strings
@@ -181,8 +182,9 @@ def _list_runs_for_root_report(
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
 
-    # 粗 mtime 保护窗口与 GatewayInboxScanGate 同为 2 秒；本地声明避免让领域持久层反向依赖 Gateway。
-    _RUN_CACHE_COARSE_MTIME_GUARD_SECONDS = 2.0
+    # LLM: 粗 mtime 保护窗口与指纹判定的唯一实现在 common/cache_freshness；本类不再自带第二套阈值。
+    # 类用途: 管理子代理任务的持久化与列表读取；缓存规则改变时同步检查 list_runs 和 create_subagents 的状态复用测试。
+    _RUN_CACHE_COARSE_MTIME_GUARD_SECONDS = CACHE_TRUST_AGE_SECONDS
 
     # LLM: The persistence service owns one process-local parsed-state cache. Every list/read
     # projection may share it, but callers always receive deep copies and canonical files remain
@@ -339,13 +341,7 @@ class SubAgentPersistenceService:
     def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
         with self._run_cache_lock:
             stat = task_file.stat()
-            signature = (
-                stat.st_dev,
-                stat.st_ino,
-                stat.st_size,
-                stat.st_mtime_ns,
-                stat.st_ctime_ns,
-            )
+            signature = cache_stat_signature(stat)
             cached = self._run_cache.get(run_id)
             if cached is not None and cached[0] == signature:
                 return copy.deepcopy(cached[1])

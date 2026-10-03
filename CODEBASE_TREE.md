@@ -712,6 +712,7 @@ agent_py_agent/
 |   |   |-- model_connections.py        # 按连接一次加多个模型（add_models）：连接去重、重复跳过、整批落盘
 |   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
+|   |   |-- cache_freshness.py          # 文件代次指纹与粗 mtime 窗口判断的唯一实现，供 json_io/响应轮询/子代理缓存共用
 |   |   |-- cancellation.py             # UI、Gateway 和工具共用的唯一进程内取消令牌与上下文绑定
 |   |   |-- directory_lock.py           # 原后台与安装 Store 共用的永久目录系统锁，不降级为仅线程互斥
 |   |   |-- nofollow_fs.py              # 受信根内的文本/二进制读写及锁文件打开，拒绝链接路径

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 894,
+  "count": 895,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1762,6 +1762,14 @@
       "unit": "秒",
       "category": "超时",
       "description": "检查程序单次运行的超时上限；包声明的超时不能超过它。"
+    },
+    {
+      "name": "CACHE_TRUST_AGE_SECONDS",
+      "file": "agent_py_agent/agent/common/cache_freshness.py",
+      "value": 2.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "可能发生原子替换（inode 复用、时间戳同片）。窗口内读到的结果只返回、不放进缓存。"
     },
     {
       "name": "_TEXT_LINES_CACHE_MAX_COUNT",

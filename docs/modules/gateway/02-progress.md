@@ -1,5 +1,16 @@
 # Gateway 维护状态
 
+## 响应文件与终态归档的轮询去重改用文件代次指纹（mtc，2026-10-03，分支 `worker/mtime-cache-fix`，待 3a 复审）
+
+- 起因：`response_renderer` 两个 when-ready 入口（`read_gateway_response_file_when_ready`、`read_gateway_terminal_response_file_when_ready`）
+  的 `GatewayResponsePollState.stat_signature` 只看 `(mtime_ns, size)`，同时间片的原子替换会被当成“没变”而漏读一次；
+  与子代理 `task.json` 事故同一类根因。
+- 改动：签名改为 `common/cache_freshness.cache_stat_signature` 的五元指纹 `(dev, ino, size, mtime_ns, ctime_ns)`；
+  即使指纹相同，mtime 距现在不足 `CACHE_TRUST_AGE_SECONDS`（2 秒）也一律重读（窗口内重复读取是幂等覆盖，
+  CLI/chat 轮询循环拿到同样的终态只会再收口一次同样的结果，不会重复展示或重复收口）。
+- 已知边界：窗口内对同一代文件会多读一次（代价是一次文件读取），换来确定性；窗口外行为与原来一致。
+- 测试与变异见 `TESTS.md` 顶部同名节；真实 Gateway/TUI/飞书轮询未验证。
+
 ## G3 返工：凭据读不到时按 G2b 开关降级，不再提前拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 
 - 起因：现在是 G2a 阶段，服务端只计数、不拦；客户端在凭据读不到时发 HTTP 前就拒绝，等于提前做了 G2b。新 TUI 连上还没生成凭据的旧 Gateway（部署窗口）、或凭据权限被人改过时，TUI/飞书适配器/插件命令会全断。

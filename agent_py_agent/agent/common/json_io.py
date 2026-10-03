@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from ..runtime_errors import runtime_error_report
+from . import cache_freshness
+from .cache_freshness import cache_stat_signature
 
 try:
     import fcntl
@@ -550,28 +552,31 @@ def _unlink_tmp_file(tmp: Path) -> None:
         pass
 
 
-# LLM: mtime+size 守门的整文件行缓存(批4 性能小修,gateway inbox mtime 门
-#   同一手法)。契约:①签名 (st_mtime_ns, st_size) 任一变化即重读——本仓写
-#   路径全是 append/原子 replace,size 必变,双保险;②缓存值是 tuple[str]
-#   不可变行,跨调用方共享零污染;③FileNotFoundError/OSError 与 read_text
-#   同语义上抛,调用方既有异常处理形态不变;④容量上限 FIFO 逐出,防长跑进程
-#   缓存无界膨胀。高频轮询的 jsonl 台账(协作收件箱/产物注册表)读路径用它。
-# 函数用途: 反复读同一个没变过的台账文件时,直接给上次的解析行,不再碰磁盘。
-_TEXT_LINES_CACHE: dict[str, tuple[tuple[int, int], tuple[str, ...]]] = {}
+# LLM: 文件代次指纹守门的整文件行缓存(批4 性能小修;指纹与粗窗口判断共用 common/cache_freshness)。
+#   契约:①指纹是 (dev, ino, size, mtime_ns, ctime_ns)——原子替换必然换 inode,只比 mtime+size 会在
+#   同一时间片漏掉整代替换;②缓存值是 tuple[str] 不可变行,跨调用方共享零污染;③mtime 距现在不足
+#   _CACHE_TRUST_AGE_SECONDS 时只返回本次读到的行、不写缓存,窗口内先读后写的 ABA 不会被缓存住;
+#   ④容量上限 FIFO 逐出,防长跑进程缓存无界膨胀。高频轮询的 jsonl 台账(协作收件箱/产物注册表)读路径用它。
+_TEXT_LINES_CACHE: dict[str, tuple[tuple[int, int, int, int, int], tuple[str, ...]]] = {}
 _TEXT_LINES_CACHE_GUARD = threading.Lock()
 # 文本行缓存最多缓存的条目数；超出按 LRU 逐出，防止大目录扫描撑爆内存。
 _TEXT_LINES_CACHE_MAX_COUNT = 64
 
 
+# LLM: 只在文件代次指纹未变时命中；近期写入（窗口内）读到的行不入缓存，下一次调用必然重读。
+#   读取失败与 read_text 同语义上抛，不吞异常、不改返回类型；改动须同步 test_common_safe_id_and_paths。
+# 函数用途: 读一个 JSONL 文件的记录列表，文件没换代时走进程内缓存；文件刚写过时不缓存本次结果。
 def read_text_lines_cached(path: Path) -> tuple[str, ...]:
     stat = path.stat()
-    signature = (stat.st_mtime_ns, stat.st_size)
+    signature = cache_stat_signature(stat)
     key = str(path)
     with _TEXT_LINES_CACHE_GUARD:
         hit = _TEXT_LINES_CACHE.get(key)
         if hit is not None and hit[0] == signature:
             return hit[1]
     lines = read_jsonl_text_lines(path)
+    if not cache_freshness.cache_entry_trustworthy(stat.st_mtime_ns):
+        return lines
     with _TEXT_LINES_CACHE_GUARD:
         while len(_TEXT_LINES_CACHE) >= _TEXT_LINES_CACHE_MAX_COUNT:
             _TEXT_LINES_CACHE.pop(next(iter(_TEXT_LINES_CACHE)))

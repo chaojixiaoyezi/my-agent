@@ -1,5 +1,6 @@
 # Gateway Structure
 
+- （mtc，2026-10-03）`response_renderer` 的两个“文件就绪才读”入口（未处理响应投影、唯一终态归档）改用 `common/cache_freshness` 的五元指纹，并且 mtime 在 2 秒窗口内时不信任上次签名、总是重读；调用方都是“读到就退出”的等待循环，重读幂等。
 ## G3 返工：凭据降级与 G2b 开关（2026-10-03，g3f，待复审）
 
 - `gateway_parts/client_credentials.py`：新增 `GatewayClientCredentials.require_local_credential`（从同一份 AgentConfig 的 `gateway_require_local_credential` 取，默认 False）与 `_warn_credential_degraded`（模块级去重集合 + 锁，同一原因只记一次）。配置 token 非空仍优先且不读文件；本机凭据失败时开关关返回 `{}`、开关开抛 G1 原因码。

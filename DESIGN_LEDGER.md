@@ -1,5 +1,14 @@
 # 设计台账
 
+## 只看 mtime 的缓存（mtc，2026-10-03，分支 `worker/mtime-cache-fix`，基于 step17i 头 `c47d023b6`；ds5 初审两条必须改由 3a 挑入时修：子代理按 luna6 口径、补模块文档；并入 step17i）
+
+- **起因**：子代理 `task.json` 的原子替换事故（同 mtime 时间片里 RUNNING 被旧缓存写回 PLANNING）修完后，ae 的复审清单还列出另外两处“只看 mtime”的读缓存：`common/json_io.read_text_lines_cached`（签名 `(mtime_ns, size)`）、`gateway_parts/response_renderer` 的两个“变了才读”入口（`read_gateway_response_file_when_ready` 与 `read_gateway_terminal_response_file_when_ready`，签名 `(mtime_ns, size)`）。
+- **改法（与子代理同一口径）**：抽出一份共享实现 `agent/common/cache_freshness.py`——指纹 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`（原子替换必然换 inode）+ 常数 `CACHE_TRUST_AGE_SECONDS = 2.0` 的“够老才可信”判断；**mtime 距今不足 2 秒时读到的内容照常返回，但不放进缓存**（窗口内先读后写的 ABA 不会被缓存住）。三处消费方（json_io、response_renderer、subagents persistence）都引用同一判断，`GatewayInboxScanGate` 的 2 秒口径保持不变但没有改动它。
+- **子代理侧**：`SubAgentPersistenceService._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS` 改为引用 `CACHE_TRUST_AGE_SECONDS`，判断改成共享函数，行为与 `c47d023b6` 一致（阈值与方向都没变）。
+- **行为影响（需要集成者知道）**：`json_io` 行缓存命中的前提从“append 会变 size”变成“代次指纹相同且文件已离开窗口”，纯追加场景的首次命中会比以前晚最多 2 秒；response_renderer 两个入口在窗口内会对同一代文件重复读取一次（调用方是幂等覆盖，不会重复展示或重复收口）。
+- **证据**：三个新测试文件（共享 helper、response 轮询去重、json_io 扩用例）；5 个变异全部被杀（含“只修 json_io、response_renderer 退回 mtime+size”这一跨点变异）；命令与结果见 `TESTS.md` 顶部同名节，变异。
+- **未验证**：真实 Gateway/TUI/飞书轮询、Linux 车道（本机只在 macOS 跑）。全仓 pytest 由 3a 的车道跑。
+
 ## G3 本机客户端附带凭据：返工为「读不到即降级，只在 G2b 开关打开时拒绝」（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 
 - **起因（3a 定）**：现在是 G2a 阶段，服务端只计数、不拦。客户端在凭据缺失/权限不对/内容损坏时于发 HTTP 前就拒绝，等于提前做了 G2b 的事——新运行时的 TUI 连上还没生成凭据的旧 Gateway（部署窗口里会遇到），或凭据文件权限被人改过，TUI、飞书适配器、插件命令就全断了。

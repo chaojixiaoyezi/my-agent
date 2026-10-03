@@ -33,12 +33,22 @@ def test_normalize_path_expands_vars_user_and_resolves(tmp_path: Path, monkeypat
     assert home is not None and str(home).startswith(str(Path.home()))
 
 
+def _make_lines_cache_stable(path: Path) -> None:
+    """把文件 mtime 拨到粗窗口之外，确保后续读取走缓存路径而不是每次重读。"""
+    import os
+    import time
+
+    old_ns = time.time_ns() - 3_000_000_000
+    os.utime(path, ns=(old_ns, old_ns))
+
+
 def test_read_text_lines_cached_serves_unchanged_and_invalidates(tmp_path):
     """批4 性能小修钉子:同签名命中缓存(同一 tuple 对象);文件变化即失效。"""
     from agent_py_agent.agent.common.json_io import read_text_lines_cached
 
     ledger = tmp_path / "ledger.jsonl"
     ledger.write_text('{"a":1}\n{"b":2}\n', encoding="utf-8")
+    _make_lines_cache_stable(ledger)
     first = read_text_lines_cached(ledger)
     second = read_text_lines_cached(ledger)
     assert first == ('{"a":1}', '{"b":2}')
@@ -53,6 +63,69 @@ def test_read_text_lines_cached_serves_unchanged_and_invalidates(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         read_text_lines_cached(tmp_path / "missing.jsonl")
+
+
+def test_read_text_lines_cached_skips_cache_for_recent_mtime(tmp_path, monkeypatch):
+    """窗口内（mtime 距今不足 2 秒）读到的内容不入缓存：下次再读必须重读磁盘。"""
+    import os
+
+    from agent_py_agent.agent.common import cache_freshness, json_io
+
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text('{"a":1}\n', encoding="utf-8")
+    old_ns = cache_freshness.time.time_ns() - 3_000_000_000
+    os.utime(ledger, ns=(old_ns, old_ns))
+
+    reads = []
+    real_read = json_io.read_jsonl_text_lines
+
+    def counted_read(path):
+        reads.append(str(path))
+        return real_read(path)
+
+    monkeypatch.setattr(json_io, "read_jsonl_text_lines", counted_read)
+    # 显式按“文件此刻在保护窗口内”判定，不依赖这台机器的时钟与文件落盘时刻的差值。
+    monkeypatch.setattr(cache_freshness, "cache_entry_trustworthy", lambda _mtime_ns: False)
+
+    # 窗口内（窗口保护打开）读到的内容照常返回，但不进缓存。
+    assert json_io.read_text_lines_cached(ledger) == ('{"a":1}',)
+    assert str(ledger) not in json_io._TEXT_LINES_CACHE, "窗口内读到的内容不许进缓存"
+    assert json_io.read_text_lines_cached(ledger) == ('{"a":1}',)
+    assert reads == [str(ledger), str(ledger)], "窗口内两次调用都必须碰磁盘"
+
+    # 关掉窗口保护（等价于文件已老）后再读：这次读到的内容进缓存，下一次命中不再碰磁盘。
+    monkeypatch.setattr(cache_freshness, "cache_entry_trustworthy", lambda _mtime_ns: True)
+    assert json_io.read_text_lines_cached(ledger) == ('{"a":1}',)
+    assert json_io.read_text_lines_cached(ledger) == ('{"a":1}',)
+    assert reads == [str(ledger), str(ledger), str(ledger)], "第三次入缓存后第四次应命中"
+
+
+def test_read_text_lines_cached_invalidates_on_same_mtime_atomic_replace(tmp_path, monkeypatch):
+    """同一 mtime、同一大小、只换 inode 的原子替换必须让行缓存失效。"""
+    import os
+
+    from agent_py_agent.agent.common import cache_freshness, json_io
+
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text('{"gen":1}\n', encoding="utf-8")
+    old_ns = cache_freshness.time.time_ns() - 3_000_000_000
+    os.utime(ledger, ns=(old_ns, old_ns))
+    monkeypatch.setattr(cache_freshness, "cache_entry_trustworthy", lambda _mtime_ns: True)
+
+    first = json_io.read_text_lines_cached(ledger)
+    first_signature = json_io._TEXT_LINES_CACHE[str(ledger)][0]
+    assert first == ('{"gen":1}',)
+
+    replacement = tmp_path / "ledger.jsonl.tmp"
+    replacement.write_text('{"gen":2}\n', encoding="utf-8")
+    os.replace(replacement, ledger)
+    os.utime(ledger, ns=(old_ns, old_ns))
+    assert ledger.stat().st_mtime_ns == old_ns
+    assert ledger.stat().st_size == len('{"gen":2}\n'), "本用例要求与上一代大小相同"
+
+    second = json_io.read_text_lines_cached(ledger)
+    assert json_io._TEXT_LINES_CACHE[str(ledger)][0] != first_signature, "同 mtime 的原子替换必须换指纹"
+    assert second == ('{"gen":2}',), "旧缓存不能把上一代内容留下来"
 
 
 def test_model_endpoint_env_exported_for_subprocesses(tmp_path, monkeypatch):

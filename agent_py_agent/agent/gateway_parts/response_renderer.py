@@ -4,6 +4,11 @@ Human status lines show cumulative context pressure when available, while JSON
 mode preserves the raw fields. Client polling also lives here so chat/TUI/gateway
 ask share one response-file load-error path and one stat-based "read only when
 changed" check.
+
+Stat-based change detection compares the full file identity
+(dev/inode/size/mtime/ctime) and distrusts any file whose mtime is inside the
+coarse 2-second trust window: a same-tick atomic replace must never be mistaken
+for "unchanged" (see ``common/cache_freshness``).
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .io import (
     GatewayJsonReadReport,
@@ -24,9 +30,12 @@ from .paths import GatewayPaths
 from .request_errors import gateway_client_error_message, gateway_response_load_error_response
 
 
+# LLM: 轮询去重的唯一状态：stat_signature 是上次已读回的完整文件代次指纹，
+#   类型为 cache_freshness.cache_stat_signature 的五元组；None 表示这个文件还没读过。
+# 类用途: 保存客户端轮询一个响应/终态文件时“上次读到哪一代”的事实，供去重判断使用。
 @dataclass
 class GatewayResponsePollState:
-    stat_signature: tuple[int, int] | None = None
+    stat_signature: tuple[int, int, int, int, int] | None = None
 
 
 def project_gateway_stream_chunk(payload: dict[str, Any]) -> tuple[str, bool]:
@@ -155,6 +164,9 @@ def read_gateway_response_file(
     return report.payload
 
 
+# LLM: 去重判定 = 完整文件代次指纹相同且这一代已离开粗 mtime 信任窗口。窗口内一律重读并当“变了”返回，
+#   否则同时间片的原子替换会被漏掉；调用方（CLI 轮询循环）对同内容重复只做覆盖，不会重复展示。
+# 函数用途: 未处理的响应文件刚建好或刚换过时读回结构化响应，其余情况返回空字典表示“这轮不用读”。
 def read_gateway_response_file_when_ready(
     response_path,
     *,
@@ -170,8 +182,8 @@ def read_gateway_response_file_when_ready(
     except OSError:
         return read_gateway_response_file(path, request_id=request_id, context=context)
 
-    signature = (int(stat.st_mtime_ns), int(stat.st_size))
-    if state.stat_signature == signature:
+    signature = cache_stat_signature(stat)
+    if state.stat_signature == signature and cache_entry_trustworthy(stat.st_mtime_ns):
         return {}
     state.stat_signature = signature
     return read_gateway_response_file(path, request_id=request_id, context=context)
@@ -248,8 +260,9 @@ def read_gateway_terminal_response_file(
 
 
 # LLM: Stat caching is only an IO optimization; a changed canonical terminal file is still fully
-# schema/identity validated before the caller can observe completion.
-# 函数用途: 只在唯一终态归档新建或变化时读取完整答复。
+# schema/identity validated before the caller can observe completion. Same identity is only trusted
+# once the file left the coarse mtime window, so a same-tick atomic replace is re-read.
+# 函数用途: 只在唯一终态归档新建或真的换过代时读取完整答复；窗口内重复读取作为幂等覆盖，不重复收口。
 def read_gateway_terminal_response_file_when_ready(
     terminal_path: Path,
     *,
@@ -268,8 +281,8 @@ def read_gateway_terminal_response_file_when_ready(
             request_id=request_id,
             context=context,
         )
-    signature = (int(stat.st_mtime_ns), int(stat.st_size))
-    if state.stat_signature == signature:
+    signature = cache_stat_signature(stat)
+    if state.stat_signature == signature and cache_entry_trustworthy(stat.st_mtime_ns):
         return {}
     state.stat_signature = signature
     return read_gateway_terminal_response_file(
