@@ -272,3 +272,113 @@ def test_embedding_usage_is_saved_like_manage_models_one_step_add(tmp_path, monk
         }
 
     asyncio.run(scenario())
+
+
+def test_nonempty_catalog_can_manually_add_embedding_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(network, "get_json", lambda _request: {"data": [
+        {"id": "listed-chat", "context_length": 204800}]})
+
+    async def scenario():
+        async with running_add(tmp_path) as (app, pipe, host, flow, _runtime):
+            await choose_type(app, pipe, 0, purpose_downs=1)
+            await wait_dialog_ready(app, "新增模型 · 填写连接", "连接表单")
+            pipe.send_text(f"https://api.example.test/v1\t{SECRET}\t\r")
+            await wait_dialog_ready(app, "选择要添加的模型（可多选）", "非空模型勾选框")
+            assert "列表里没有的模型可以手动填写" in visible(app)
+            assert "手动填写模型名" in visible(app)
+            pipe.send_bytes(b"\x1b[B \t\r")  # 只选列表末尾的手动入口
+            await wait_dialog_ready(app, "新增模型 · 手动填写", "非空列表的手动表单")
+            assert "列表里没有的模型，可以在这里手动填写" in visible(app)
+            assert "没拿到模型列表" not in visible(app)
+            pipe.send_text("embo-01\t\x01\x0b8192\t\r")
+            await wait_app(app, lambda: flow.done() or "新增模型 · 填写连接" in visible(app), "手动选择后的保存或返回")
+            assert flow.done(), "手动填写已结束但未进入原保存流程"
+            result = flow.result()
+
+        assert "已添加 1 个模型：embo-01" in result
+        data = saved(host)
+        row = next(row for row in data["profiles"].values() if row["model_name"] == "embo-01")
+        provider = data["providers"][row["provider_id"]]
+        assert row["capability"] == "embedding"
+        assert provider["capabilities"] == ["embedding"]
+        from agent_py_agent.agent.settings.embedding_selection import embedding_choices
+
+        assert [choice["model_name"] for choice in embedding_choices(host)["choices"]] == ["embo-01"]
+
+    asyncio.run(scenario())
+
+
+def test_nonempty_catalog_can_add_checked_and_manual_models_together(tmp_path, monkeypatch):
+    monkeypatch.setattr(network, "get_json", lambda _request: {"data": [
+        {"id": "listed-embed", "context_length": 16384}, {"id": "listed-other", "context_length": 32768}]})
+
+    async def scenario():
+        async with running_add(tmp_path) as (app, pipe, host, flow, _runtime):
+            await choose_type(app, pipe, 0, purpose_downs=1)
+            await wait_dialog_ready(app, "新增模型 · 填写连接", "连接表单")
+            pipe.send_text(f"https://api.example.test/v1\t{SECRET}\t\r")
+            await wait_dialog_ready(app, "选择要添加的模型（可多选）", "混合选择勾选框")
+            assert "手动填写模型名" in visible(app)
+            pipe.send_bytes(b" \x1b[B\x1b[B \t\r")  # 勾选首个目录模型和最后的手动入口
+            await wait_dialog_ready(app, "新增模型 · 手动填写", "混合选择的手动表单")
+            pipe.send_text("extra-embed\t\x01\x0b8192\t\r")
+            await wait_app(app, lambda: flow.done() or "新增模型 · 填写连接" in visible(app), "混合选择后的保存或返回")
+            assert flow.done(), "手动补填已结束但未与勾选模型一起进入原保存流程"
+            result = flow.result()
+
+        assert "已添加 2 个模型" in result
+        data = saved(host)
+        rows = {row["model_name"]: row for row in data["profiles"].values()}
+        assert set(rows) == {"listed-embed", "extra-embed"}
+        assert all(row["capability"] == "embedding" for row in rows.values())
+        provider_ids = {row["provider_id"] for row in rows.values()}
+        assert len(provider_ids) == 1
+        assert data["providers"][next(iter(provider_ids))]["capabilities"] == ["embedding"]
+
+    asyncio.run(scenario())
+
+
+def test_cancel_manual_entry_keeps_checked_catalog_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(network, "get_json", lambda _request: {"data": [
+        {"id": "keep-this-model", "context_length": 16384}, {"id": "other-model", "context_length": 32768}]})
+
+    async def scenario():
+        async with running_add(tmp_path) as (app, pipe, host, flow, _runtime):
+            await choose_type(app, pipe, 0)
+            await wait_dialog_ready(app, "新增模型 · 填写连接", "连接表单")
+            pipe.send_text(f"https://api.example.test/v1\t{SECRET}\t\r")
+            await wait_dialog_ready(app, "选择要添加的模型（可多选）", "混合选择勾选框")
+            pipe.send_bytes(b" \x1b[B\x1b[B \t\r")  # 先勾目录模型，再选手动入口
+            await wait_dialog_ready(app, "新增模型 · 手动填写", "手动补填表单")
+            assert "列表里没有的模型，可以在这里手动填写" in visible(app)
+            pipe.send_bytes(b"\x1b")  # 取消手动补填，但保留已勾的目录模型
+            await wait_app(app, lambda: flow.done() or "新增模型 · 填写连接" in visible(app), "取消后的原保存或返回")
+            assert flow.done(), "取消手动补填不应丢弃已勾选的模型"
+            result = flow.result()
+
+        assert "已添加 1 个模型：keep-this-model" in result
+        rows = list(saved(host)["profiles"].values())
+        assert [row["model_name"] for row in rows] == ["keep-this-model"]
+        assert rows[0]["capability"] == "agentic"
+
+    asyncio.run(scenario())
+
+
+def test_empty_catalog_still_opens_manual_form_directly(tmp_path, monkeypatch):
+    monkeypatch.setattr(network, "get_json", lambda _request: {"data": []})
+
+    async def scenario():
+        async with running_add(tmp_path) as (app, pipe, host, flow, _runtime):
+            await choose_type(app, pipe, 0, purpose_downs=1)
+            await wait_dialog_ready(app, "新增模型 · 填写连接", "连接表单")
+            pipe.send_text(f"https://api.example.test/v1\t{SECRET}\t\r")
+            await wait_dialog_ready(app, "新增模型 · 手动填写", "空目录直接手动表单")
+            assert "没拿到模型列表：接口没有列出模型。" in visible(app)
+            pipe.send_text("embo-01\t\x01\x0b8192\t\r")
+            result = await asyncio.wait_for(flow, 3)
+
+        assert "已添加 1 个模型：embo-01" in result
+        row = next(iter(saved(host)["profiles"].values()))
+        assert row["model_name"] == "embo-01" and row["capability"] == "embedding"
+
+    asyncio.run(scenario())

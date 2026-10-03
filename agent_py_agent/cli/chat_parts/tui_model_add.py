@@ -1,8 +1,9 @@
 # LLM: /model「新增模型」唯一入口：先选 5 类之一；OpenAI Chat 再选用途（默认 agentic，也可 embedding），登录账号走
 #   tui_model_auth.add_account；其余仍填连接（地址 + 密钥，请求头/会话头在「高级」里），经 discover 拉列表（不落盘）→ 勾选
-#   → add_models 一次保存。embedding 用途作为结构化 capability 送同一个目录写入入口；对话请求保持原参数不变。
-#   密钥只在掩码控件里短暂保留，关闭时清空；不调用模型、不切换会话模型。改动须同步 test_tui_model_add 与
-#   docs/design/MODEL_OAUTH.md。
+#   → add_models 一次保存。非空目录时显式提供通用手动入口，可混选；空目录仍直接进入手动表单。embedding 用途作为结构化
+#   capability 送同一个目录写入入口；对话请求保持原参数不变。
+#   密钥只在掩码控件里短暂保留，关闭时清空；不调用模型、不切换会话模型。新增流程同步 test_tui_model_add、test_tui_manage_models 与
+#   docs/design/TUI_MODEL_PROFILES.md；登录分支仍遵守 docs/design/MODEL_OAUTH.md。
 # 模块用途: /model →「新增模型」：OpenAI Chat / Anthropic / OpenAI Responses / 登录账号 / Jev 决策五类，一次加多个模型。
 from __future__ import annotations
 
@@ -120,12 +121,18 @@ class _ConnectionForm:
         return {"model_backend": self.backend, "api_base": address, "api_key": self.key.text.strip(),
                 "custom_headers": headers, "session_header": self.session_header.text.strip(), "display_name": name}
 
-    # LLM: 目录读取与保存各一次请求；保存沿唯一 add_models 写入口且整批原子提交。embedding 显式传 capability；agentic 参数保持旧形状。
-    # 函数用途: 拉模型列表让用户勾选（拉不到就手动填），再一次保存，按所选用途提示下一步。
+    # LLM: 目录读取与保存各一次请求；非空列表允许勾选模型并由回调补填，保存仍沿唯一 add_models 写入口且整批原子提交。
+    #   空列表/失败保留直接手动表单；embedding 显式传 capability，agentic 参数保持旧形状。
+    # 函数用途: 拉模型列表供勾选和可选手动补充（拉不到则直接手动填），随后一次保存并按用途提示下一步。
     async def _pick_and_save(self, connection: dict) -> str:
         catalog = await _request(self.app, self.agent, self.session, "discover", {"connection": connection})
         rows = catalog.get("models") if catalog.get("ok") else None
-        picked = await (choose_models(self.app, rows, "选择要添加的模型（可多选）") if rows else self._manual(catalog))
+        if rows:
+            picked = await choose_models(
+                self.app, rows, "选择要添加的模型（可多选）",
+                manual_entry=lambda: self._manual(catalog, from_nonempty_catalog=True))
+        else:
+            picked = await self._manual(catalog)
         if not picked:
             return ""
         payload = {"connection": connection, "models": with_ids(picked)}
@@ -137,13 +144,15 @@ class _ConnectionForm:
             return ""
         return added_text(result, picked, embedding=self.capability == "embedding")
 
-    # LLM: 只展示服务端已脱敏的 message / provider_message；手动填写的名称与上下文由服务端 validate_model 校验。
-    # 函数用途: 拉不到模型列表时说明原因，并让用户手动填一个模型名和上下文；返回要添加的行或 None。
-    async def _manual(self, catalog: dict) -> list[dict] | None:
+    # LLM: 入口来源由调用方传结构化标志，非空目录补填不能伪称目录读取失败；错误详情仍只显示服务端已脱敏文本。
+    #   手动模型名与上下文由服务端 validate_model 校验；取消返回 None，不写入目录。
+    # 函数用途: 为目录缺项或读取失败提供手动填写表单，并按真实入口提示用户。
+    async def _manual(self, catalog: dict, *, from_nonempty_catalog: bool = False) -> list[dict] | None:
         reason = str(catalog.get("message") or "接口没有列出模型。") if not catalog.get("ok") else "接口没有列出模型。"
         detail = str(catalog.get("provider_message") or "")
         name, window = TextArea(height=1, multiline=False), TextArea(text="128000", height=1, multiline=False)
-        body = HSplit([Label(f"没拿到模型列表：{reason}" + (f"\n服务商说明：{detail}" if detail else "")),
+        heading = "列表里没有的模型，可以在这里手动填写" if from_nonempty_catalog else f"没拿到模型列表：{reason}"
+        body = HSplit([Label(heading + (f"\n服务商说明：{detail}" if detail else "")),
                        Label("可以手动填写模型名称（区分大小写）"), name, Label("上下文窗口（总 tokens）"), window])
         if not await _dialog(self.app, "新增模型 · 手动填写", body, (("添加", True), ("返回修改", None)), focus=name):
             return None

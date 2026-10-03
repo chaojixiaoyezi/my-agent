@@ -22,6 +22,14 @@
 - **修复**：缓存签名改为 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`。原子替换的 inode/ctime 变化可在 mtime 不变时使缓存失效；线程锁、深拷贝、列表排序及公开派工合同不变。无新增配置。
 - **验证**：受控固定 mtime 的高层回归先在旧写法下失败（`RUNNING` 被覆盖为 `PLANNING`），改后通过；DONE 排除测试改为集合/结构化身份判断，同时仍断言 DONE child 绝不进入 auto_start。定向测试、guards9 与静态门禁见 `TESTS.md` 顶部同名节。
 
+## 新增模型目录非空时可手动补填（luna4m，2026-10-03，分支 `worker/luna4-manual-entry`，起因 9b 的 17h 冒烟第 5 项；ae 两轮复审通过，并入 step17i）
+
+- **问题**：服务商目录返回非空时，只能勾选目录项；目录缺少用户实际需要的型号，就无法从「新增模型」添加。
+- **做法**：共享 `choose_models` 接受默认关闭的异步手动表单回调。仅新建连接流程显式传入 `_manual(catalog, from_nonempty_catalog=True)`；非空列表末尾增加手动填写项，用户可只手填或和目录模型一起勾选，结果仍由原 `add_models` 一次保存。
+- 目录为空或读取失败继续直接打开既有手动表单；订阅账号和已有连接的勾选流程不传回调，因此不显示手动项、不改变行为。
+- ae 复审补：手动表单通过结构化 `from_nonempty_catalog` 区分入口；非空目录提示“列表里没有的模型，可以在这里手动填写”，空/失败仍显示原“没拿到模型列表”提示。取消手动表单只放弃补填，不丢弃此前勾选的目录模型。
+- **验证**：假目录下真实 prompt_toolkit TUI 覆盖「非空列表手填 Embedding」「勾列表项并补手填」「空列表直接手填」；订阅和已有连接回归断言无手动入口。最终门禁与变异见 TESTS.md 本节。未调用真实服务或 Gateway。
+
 ## 能力包写后检查：回执列全错误、一次改完、连续失败到上限只记账（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `claude/3a-step17i` `911116770`，已实现，9b 复审通过（含两条必须改 96fd11f2f），并入 step17i）
 
 - **起因**：块 8 试点 A05 同一交付物写后检查失败 20 次才过，单例用了 389 万 token（C13 同例 44 万–62 万）。查结构化事实（`decision-evidence/capability-packs-v2-b8/pilot-ede890374/A05-post-write-analysis.md`）是三件事叠在一起：

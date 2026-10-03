@@ -8,7 +8,7 @@ from prompt_toolkit.output import DummyOutput
 from agent_py_agent.cli.chat_parts import tui_subscription_models
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
-from agent_py_agent.tests.test_tui_decision_menu import wait_app, wait_dialog_ready
+from agent_py_agent.tests.test_tui_decision_menu import visible, wait_app, wait_dialog_ready
 from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
 
 CATALOG = [
@@ -51,6 +51,7 @@ def run_picker(tmp_path, keys):
                     app, params.agent, "pick-models", "account"))
                 if keys:
                     await wait_dialog_ready(app, None, "模型勾选框出现")
+                    assert "手动填写模型名" not in visible(app)
                     for chunk in keys:
                         pipe.send_bytes(chunk)
                         await asyncio.sleep(0.05)

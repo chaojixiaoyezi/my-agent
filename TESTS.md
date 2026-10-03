@@ -31,10 +31,50 @@
 - **guards9**（含 `test_packaging.py` 的 10 个文件）在产品修复后退出码 0，pytest 输出到 100%，无失败。产品设计和验证记录已同步到 DESIGN_LEDGER.md、docs/modules/subagent/04-structure.md 与 TESTS.md。
 - **静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；strict code-size → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；生成的 `CODE_SIZE_REPORT.md` 已还原；`git diff --check` 退出码 0、无输出；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` 实际输出：
+
+## 新增模型目录非空时手动补填（luna4m，2026-10-03，分支 `worker/luna4-manual-entry`）
+
+- **红灯**：产品代码未改前，用下方三文件命令跑新增用例，只有两个「非空目录手动入口」断言失败；实际界面有目录勾选框，但没有“手动填写模型名”选项。空列表、订阅和已有连接回归未失败。
+- **用例**：`test_tui_model_add.py` 用假的模型列表和真实 prompt_toolkit UI 验证非空列表只选手动并存成 embedding，且通过 `embedding_choices` 出现在向量模型列表；另验证列表模型与手填模型同批保存、空列表直接进入手动表单。`test_tui_subscription_models.py` 和 `test_tui_manage_models.py` 验证未传手动回调的订阅/已有连接路径仍不出现该选项。整个验证未联网或调用真实模型服务。
+- **聚焦命令**（工作树根，按用户指定 Python 和隔离 basetemp）：
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_tui_model_add.py agent_py_agent/tests/test_tui_subscription_models.py agent_py_agent/tests/test_tui_manage_models.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna4m
+  ```
+  实现后及两项变异恢复后重跑：退出码 0，输出到达 100%，无失败。
+- **变异**（各改一处，验证后恢复）：①删除选择列表中的手动项，单手填用例在“手动填写模型名”断言失败；②保留手动表单但丢弃回调返回的模型行，同一用例在 `flow.done()` 断言失败，证明手填结果未进入保存流程会被抓到。
+- **其它调用方合同**：`choose_models` 默认 `manual_entry=None`，提示与候选列表保持原样；只有新增连接调用方显式开启。目录读取失败仍由原有用例覆盖直接手填；本节不测试真实 Gateway / MiniMax。
+- **架构守卫**（工作树根，按同一隔离参数）：
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  GUARD_TESTS=$(awk 'NF && $1 !~ /^#/' ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt)
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $GUARD_TESTS -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna4m
+  ```
+  结果：guards9 所列全部测试到达 100%，退出码 0，无失败。
+- **静态门禁**：`$PY scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`$PY -m ruff check agent_py_agent scripts` → `All checks passed!`；`$PY scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`，随后已执行 `git checkout -- CODE_SIZE_REPORT.md`；`git diff --check` 退出码 0；`$PY scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 实际输出：
   ```text
   新增告警: 0
   消失告警: 9
   ```
+
+
+- 不跑全仓 pytest；未启动 Gateway、未读真实会话/密钥、未连接真实 MiniMax；实际终端可用性由 9b 集成版复核。
+
+### ae 复审补片（2026-10-03）
+
+- **新增回归**：非空目录进入手动表单时只显示“列表里没有的模型，可以在这里手动填写”，不再显示“没拿到模型列表”；空目录仍断言旧提示。另在真实 prompt_toolkit 流程先勾目录模型、再打开手动表单并按 Esc 取消，断言该目录模型仍经原 `add_models` 流程保存。
+- **聚焦命令**（指定 Python、隔离 basetemp；六个 TUI 模型测试文件）：
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_tui_model_add.py agent_py_agent/tests/test_tui_subscription_models.py agent_py_agent/tests/test_tui_manage_models.py agent_py_agent/tests/test_tui_model_menu.py agent_py_agent/tests/test_tui_pick_models_keys.py agent_py_agent/tests/test_tui_decision_menu.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna4m
+  ```
+  复审改动后的最终运行：六个文件退出码 0，输出到达 100%，无失败。
+- **先红后绿与变异**：产品改动前非空手动表单用例因旧错误提示失败；实现来源参数后通过。分别移除调用处 `from_nonempty_catalog=True`、让表单忽略该参数，提示用例均失败；把“手动表单取消”变异为整批返回 `None`，取消保留用例在保存断言失败。三项变异均已还原。
+- **本轮架构守卫**：`guards9.txt` 所列测试全部执行到 100%，退出码 0，无失败。
+- **本轮静态门禁**：导入边界 `IMPORT_BOUNDARIES findings=0`；Ruff `All checks passed!`；文档同步 `DOC_SYNC_PASS`；严格代码尺寸 `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`，随后已还原 `CODE_SIZE_REPORT.md`；`git diff --check` 退出码 0；clean-package `OK: . 未发现发布阻塞项`。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 输出 `新增告警: 0`、`消失告警: 9`。
+- 未跑全仓 pytest；测试使用假目录，不调用真实模型服务，也未启动 Gateway。
 
 ## 能力包写后检查反馈修正 P1–P3（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `911116770`）
 

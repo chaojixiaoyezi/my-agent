@@ -1,10 +1,12 @@
 # LLM: 模型只从 Gateway discover（服务商目录或订阅目录）来，勾选后经唯一 add_models 入口一次保存（全成或全不写）；
 #   订阅账号接口固定 openai_responses、上下文用目录值；目录没写上下文的模型用勾选框里填的统一值，不按模型名猜。
+#   新增模型路径可显式给勾选器提供手动表单回调；未给回调的订阅和已有连接调用方不显示该入口。
 #   已添加的同名模型不再列出（订阅账号），或由 add_models 跳过（新连接）。不调用模型、不切换当前会话模型。
-#   改动须同步 test_tui_subscription_models、test_tui_model_add 与 docs/design/MODEL_OAUTH.md。
+#   改动须同步 test_tui_subscription_models、test_tui_model_add、test_tui_manage_models 与 TUI 模型流程文档。
 # 模块用途: 列出可用模型让用户勾选（可多选）后一次添加；登录 ChatGPT 订阅后和「新增模型」拉到列表后都用这里的勾选框。
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
 from prompt_toolkit.layout import HSplit
@@ -16,6 +18,7 @@ _SWITCH_HINT = "在 /model →「选择模型」→「对话模型」里切换�
 _EMBEDDING_HINT = "去‘选择模型’→‘向量模型’里选用；重启 Gateway 后生效"
 _LATER_HINT = "以后可在 /model →「管理已有模型」→ 这个账号 →「添加模型」里添加。"
 _MIN_WINDOW, _MAX_WINDOW = 4096, 2**31 - 1
+_MANUAL_ENTRY_KEY = object()
 
 
 # LLM: 目录读取失败只给可重试提示；已添加判断按同一服务商下的模型名，不按显示文字。
@@ -37,22 +40,38 @@ async def pick_subscription_models(app, agent, session: str, provider_id: str) -
     return added_text(result, picked)
 
 
-# LLM: 勾选值是模型名，显示文字只给人看；返回勾中的行（上下文缺失的行换成用户填的统一值），取消返回 None。
-#   上下文只在列表里有缺失时才显示输入框；数值合法性最终由服务端 validate_model 判定。
-# 函数用途: 弹出"上下键移动、空格勾选"的多选框，返回要添加的模型行。
-async def choose_models(app, rows: list[dict], title: str) -> list[dict] | None:
-    box = CheckboxList([(row["model_name"], _label(row)) for row in rows])
+# LLM: 勾选值是模型名、显示文字只给人看；可选手动回调只在调用方显式提供时入列，返回的模型与勾选结果合并。
+#   回调取消只放弃手动补填、不丢弃已勾选模型；无可保存项返回 None；上下文仍由 validate_model 作权威校验。
+# 函数用途: 弹出多选框；需要时允许用户从同一界面补填目录没有的模型，再把两类结果交回原保存流程。
+async def choose_models(
+    app,
+    rows: list[dict],
+    title: str,
+    *,
+    manual_entry: Callable[[], Awaitable[list[dict] | None]] | None = None,
+) -> list[dict] | None:
+    items: list[tuple[object, str]] = [(row["model_name"], _label(row)) for row in rows]
+    if manual_entry is not None:
+        items.append((_MANUAL_ENTRY_KEY, "手动填写模型名（列表里没有的模型）"))
+    box = CheckboxList(items)
     window = TextArea(text="128000", height=1, multiline=False)
-    parts = [Label("上下键移动，空格勾选；选好后按 Tab 到「添加」再回车。"), box]
+    hint = "上下键移动，空格勾选；选好后按 Tab 到「添加」再回车。"
+    if manual_entry is not None:
+        hint = "列表里没有的模型可以手动填写；" + hint
+    parts = [Label(hint), box]
     if not all(_window_known(row) for row in rows):
         parts += [Label("列表没写上下文窗口的模型按这个值保存（总 tokens，之后可在「管理已有模型」里逐个改）："), window]
     picked = await _dialog(app, title, HSplit(parts), (("添加", lambda: list(box.current_values)), ("返回", None)), focus=box)
     if not picked:
         return None
-    return [{"model_name": row["model_name"], "display_name": row.get("display_name") or row["model_name"],
-             "model_context_window_tokens": row["model_context_window_tokens"] if _window_known(row) else window.text.strip(),
-             **({"reasoning_levels": row["reasoning_levels"]} if row.get("reasoning_levels") else {})}
-            for row in rows if row["model_name"] in picked]
+    selected = set(picked)
+    models = [{"model_name": row["model_name"], "display_name": row.get("display_name") or row["model_name"],
+               "model_context_window_tokens": row["model_context_window_tokens"] if _window_known(row) else window.text.strip(),
+               **({"reasoning_levels": row["reasoning_levels"]} if row.get("reasoning_levels") else {})}
+              for row in rows if row["model_name"] in selected]
+    if manual_entry is not None and _MANUAL_ENTRY_KEY in selected:
+        models.extend(await manual_entry() or [])
+    return models or None
 
 
 # LLM: 每个模型配一个新 UUID，重试时由 add_models 按同名同接口跳过，不会重复添加；目录声明的思考档位原样带上。

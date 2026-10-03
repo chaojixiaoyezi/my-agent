@@ -84,6 +84,7 @@ def test_add_more_models_from_a_saved_connection(tmp_path, monkeypatch):
             await wait_dialog_ready(app, "新增模型 · 选择接口", "接口选择（默认取已有模型的接口）")
             pipe.send_bytes(b"\r")
             await wait_dialog_ready(app, "选择要添加的模型（可多选）", "勾选框")
+            assert "手动填写模型名" not in visible(app)
             pipe.send_bytes(b" \x1b[B ")  # 两个都勾；m-one 已有，服务端跳过
             await asyncio.sleep(0.1)
             pipe.send_bytes(b"\t\r")
