@@ -22,6 +22,9 @@ class ExternalWriteTargetRequest:
     params: dict[str, object]
 
 
+# LLM: 子代理创建前的写目标预检（编排层）：只用路径策略的 check 判危险目录、宿主托管位置，不是实际写入的关口（实际写入仍由
+#   写边界和工具硬门裁决）。数据根取 agent 的 home_paths.root（H3 二审：数据根只有一个来源，不退回环境变量）。只读路径事实。
+# 函数用途: 子代理要写的目标落在危险目录或宿主托管位置时，返回给模型的拒绝说明；没问题返回空串。
 def external_write_target_error(request: ExternalWriteTargetRequest) -> str:
     if not WRITE_SUBAGENT_TOOLS.intersection({str(item or "") for item in request.allowed_tools or []}):
         return ""
@@ -30,7 +33,10 @@ def external_write_target_error(request: ExternalWriteTargetRequest) -> str:
         return ""
     roots = _workspace_roots(request.agent)
     workspace_root = roots[0] if roots else Path.cwd().resolve(strict=False)
-    path_policy = PathAccessPolicy.from_config(getattr(request.agent, "config", None))
+    path_policy = PathAccessPolicy.from_config(
+        getattr(request.agent, "config", None),
+        agent_home_root=getattr(getattr(request.agent, "home_paths", None), "root", None),
+    )
     for target in targets:
         path = _target_path(target, workspace_root)
         if path is None:

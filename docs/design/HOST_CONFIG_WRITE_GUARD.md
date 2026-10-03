@@ -94,7 +94,13 @@
   - **隔离 owner**：只盖本 owner 的 `config/`、运行状态文件。数据根的配置在 owner 墙外。
   - **Full Access**：盖数据根的 `config/`、`system/config/`，加全部 owner 的。
 - 本任务的 `data/pack_verification/` 只来自写边界里宿主写的结构化 `task_root`（3a 定，不从工作目录或写根反推）：`registry_invoke` 经 `task_host_state_paths` 放进 `__sandbox_protected_write_paths`，两个平台都生效。命令在任务树外（用户项目目录）跑、写根也不含本任务时照样只读。回执 `sandbox.task_records` 写明 `protected` 或 `no_task_root`。
-- **全部任务的核验记录（macOS）**：`shell.host_readonly_patterns_for` → `path_access_policy.host_readonly_patterns`，按同一份任务布局（`TASK_ROOT_LAYOUT` × `HOST_STATE_TASK_PARTS`）给每个 owner home 生成一条 POSIX 正则，例如 `^<owner>/((runs|tasks)/[^/]+/[^/]+|audits/[^/]+)/(data/pack_verification)(/|$)`。
+- **全部任务的核验记录（macOS）**：`shell.host_readonly_patterns_for` → `path_access_policy.host_readonly_patterns`，按同一份任务布局（`TASK_ROOT_LAYOUT` × `HOST_STATE_TASK_PARTS`）给每个 owner home 生成一组 POSIX 正则：
+  - 核验记录本身及其下内容：`^<owner>/((runs|tasks)/[^/]+/[^/]+|audits/[^/]+)/(data/pack_verification)(/|$)`；
+  - 布局各级目录本身（不含其下内容）：`^<owner>/runs(/[^/]+)?(/[^/]+)?$`、`^<owner>/tasks(/[^/]+)?(/[^/]+)?$`、`^<owner>/audits(/[^/]+)?$`；
+  - 任务根到记录之间的目录本身：`^<owner>/(<任务根布局>)/data$`。
+  - 为什么要后两类（9b 三审实测）：只有第一类时，命令能把别的任务的 `data/`、日期目录、整个 `runs/` 或 `audits/` 改名，写进记录再改回来，伪造它的核验记录（7 种手法）。后两类只拦这些目录自己的改名、删除、新建、chmod，里面的普通读写照常。
+  - 可选层级必须写成显式的 `(/[^/]+)?` 分组：Seatbelt 不认 `{m,n}` 区间，会静默失效（9b 实测）。用例断言生成的正则里没有 `{`。
+  - 副作用：模型的命令不能自己新建任务根、不能在没有 `data` 的任务里建 `data`，也不能改名或删除任务目录本身。这些本来就是宿主的事。
   - owner 集合与只读覆盖相同；owner home 先解析符号链接，再按字面转义正则元字符。
   - 沙箱规格字段 `protected_write_patterns`，Seatbelt 写成 `(deny file-write* (regex "..."))`，排在写根放行之后。
   - 别的任务的、还没建出来的都盖住；本机实测改写、新建、改名 `pack_verification` 本身、`RUNS/`、`DATA/Pack_Verification` 等大小写变体都拦住（Seatbelt 在不区分大小写的卷上按不区分大小写匹配）。
@@ -129,7 +135,8 @@
    - `runtime.db-wal`、`-shm`、`-journal` 只在宿主开着库时存在。在 Full Access，或声明了自家根为写根的隔离 owner 下，命令可以抢先建出它们。这一条留作已知边界：在 bwrap 里占位会在真实 owner home 里建文件，owner home 只读挂载时还会让沙箱起不来。
    - macOS 没有这个问题。
 4. **别的任务的核验记录**：文件工具按路径判，所有任务都拒写。命令这边：
-   - macOS：一条 Seatbelt 正则盖住 owner 下全部任务的 `data/pack_verification/`，伪造、新建都不行。但命令能把别的任务的 `data/` 或日期目录整个改名挪走，记录跟着走、不再在规范位置（伪造不了，但能挪走）。这条记为已知边界（3a 定）。
+   - macOS：一组 Seatbelt 正则盖住 owner 下全部任务的 `data/pack_verification/`，以及布局各级目录和 `data` 目录本身。伪造、新建、整个挪走都不行（9b 三审列的 10 种手法全拦）。
+   - 更正：上一版写过“伪造不了，但能挪走”，这句不对。只盖记录本身时，命令能把上级目录改名、写进记录再改回来完成伪造（9b 三审实测），现已按上面的修法堵上。
    - Linux：只保护本任务（写边界的 `task_root`）；Full Access 下别的任务的记录命令挡不住（已知边界，ae 接受）。
 5. **沙箱外早已存在的硬链接**：命令顺着它写挡不住，Seatbelt 只拦新建；文件工具有 inode 比对。
 6. **插件进程**：`plugin_process_sandbox` 关闭时（默认关），插件进程以宿主权限运行，不受这道门约束。插件是管理员确认安装的代码。插件经 SDK 判路径时照样用 `check` / `check_write`。
@@ -177,5 +184,5 @@
 | 必须改 2：只读 CLI | 这次不修 CLI，写清现状并用例锁住 | 第 3 节第 8 条；真实沙箱用例（Full Access、隔离各一遍）锁住“失败、给结构化码、A 类字节不变”；顺手项结构化错误码已做；只读启动记台账待做 |
 | 必须改 3：data/ | 先裁“6 个子目录进 A、`data/` 留 B”，随后改为 owner 根的 `data/` 整体归 A（开放世界，不靠清单），B 类只剩 `runs/`、`tasks/` | 1.1 节；已知子目录逐项用例；`data/` 下新建一个原本没有的子目录，两种模式下文件工具和 Shell 都写不进，宿主维护照常写 `data/maintenance.json` |
 | 必须改 4：task_root 锚点 | 只用写边界的 `task_root`，不从工作目录反推 | 2.2 节 |
-| 建议 1：全部任务的核验记录 | macOS 一条 Seatbelt 正则；Linux 只保护本任务，记已知边界 | 2.2 节、第 3 节第 4 条 |
+| 建议 1：全部任务的核验记录 | macOS 用 Seatbelt 正则；Linux 只保护本任务，记已知边界。9b 三审补：布局各级目录和 `data` 目录本身也拒写，堵住“改名上级目录再写回” | 2.2 节、第 3 节第 4 条；真实 Seatbelt 用例覆盖 10 种手法 |
 | 建议 2：拒绝码透传 | 写边界把具体码传出去 | 2.1 节；真实链路用例 |

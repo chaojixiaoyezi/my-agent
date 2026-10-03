@@ -85,7 +85,8 @@
 - **补洞（ae 块 4 发现，2026-10-02）**：
   - 问题：Full Access 下命令在任务树外跑、写根又不含本任务时，本任务的核验记录没进只读覆盖。
   - 修法：`registry_invoke` 改从写边界的结构化 `task_root` 推出本任务的宿主托管位置，交给命令沙箱，不再依赖工作目录在哪。
-  - 二审建议：macOS 再加一条 Seatbelt 正则，盖住 owner 下全部任务的 `data/pack_verification/`（别的任务的、还没建的都算）；Linux 只保护本任务。
+  - 二审建议：macOS 再加 Seatbelt 正则，盖住 owner 下全部任务的 `data/pack_verification/`（别的任务的、还没建的都算）；Linux 只保护本任务。
+  - 三审补（9b 实测“改名别的任务的 `data/`、写入、再改回”能伪造记录）：布局各级目录（`runs`、`runs/<日期>`、`runs/<日期>/<键>`、`tasks` 同理、`audits/<编号>`）和任务根下的 `data` 目录本身也按正则拒写，只拦它们自己的改名、删除、新建；可选层级写成显式分组，Seatbelt 不认 `{m,n}`。副作用：模型的命令不能自己新建或改名任务根。
 - **模型在命令里跑 my-agent CLI 会失败**（二审实测，3a 最终裁定这次不修 CLI）：CLI 每条命令都要构造完整的 SimpleAgent，启动时要写 `workspace/runtime` 下的本地库，沙箱里写不了。Full Access 下 `status` 等只读命令从 rc=0 变成 rc=1；隔离 owner 原来就这样。请模型改用内置工具。起不来时 CLI 输出结构化错误 `CLI_HOST_STATE_READ_ONLY`：沙箱给命令设 `MY_AGENT_HOST_STATE_READ_ONLY=1`，CLI 只看这个标记和异常的 errno / sqlite 错误码，不解析报错文字。
 - **后续项**：
   - 只读子命令走只读启动：本地库用 `mode=ro` 打开，或推迟到真要写时再建，让 `status`、`memory-list` 这类命令在沙箱里能跑（**待做**，3a 2026-10-02 定）。
@@ -93,7 +94,7 @@
   - Windows 上命令不进沙箱；
   - 命令能读凭据；
   - Linux 上还不存在的路径挡不住（休眠 owner 的 `config/`，宿主没开库时的 SQLite 伴随文件）；
-  - Linux 上命令只保护本任务的核验记录；macOS 上别的任务的记录伪造不了，但命令能把它所在的 `data/` 或日期目录整个改名挪走；
+  - Linux 上命令只保护本任务的核验记录；
   - 沙箱外早已存在的硬链接；
   - 插件沙箱关闭时的插件进程；
   - 用户配置放在数据根以外时不受保护。

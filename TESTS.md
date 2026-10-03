@@ -133,9 +133,9 @@
     - `test_sandboxed_commands_carry_the_host_state_read_only_marker`：沙箱命令带标记，不进沙箱的命令去掉继承来的同名变量。
   - data/（必须改 3，3a 随后改裁为整体归 A）：A 类逐项加 `data/` 下已知宿主状态和 `agents/` 里的文件（文件工具和真实命令各一遍）；`test_any_new_subdir_under_owner_data_is_read_only_but_host_writes_go_on`（Full Access、隔离各一遍）：`data/` 下新建原本没有的子目录和 `data/loose.txt`，文件工具拒 `PATH_HOST_STATE_WRITE_BLOCKED`，真实 Shell `mkdir -p … && printf …` 失败、目录建不出来，家目录别处照常可写；宿主 `run_owner_retention_if_due` 照常写 `data/maintenance.json`。B 类用例断言只剩 `runs/`、`tasks/`。
   - 全部任务的核验记录（建议 1）：
-    - `test_task_record_patterns_cover_every_task_root_layout`：三种任务根布局命中，深度不对、`work/` 下、名字相近、别的 owner、别处的同名拷贝都不命中；owner home 路径里的正则元字符按字面匹配。
+    - `test_task_record_patterns_cover_every_task_root_layout`：三种任务根布局的记录命中，布局各级目录和 `data` 目录本身也命中（三审）；深度不对、`work/` 下、名字相近、别的 owner、别处的同名拷贝都不命中；正则里没有 `{m,n}` 区间；owner home 路径里的正则元字符按字面匹配。
     - `test_seatbelt_pattern_denies_come_after_the_write_root_allow`：正则拒写排在写根放行之后；没有正则时配置里没有 `regex`。
-    - `test_real_seatbelt_protects_every_task_record_without_task_params`（只 macOS）：不带本任务参数时，Full Access 和隔离的命令都改不了别的任务的记录、改名不了它的目录、建不出新的（含 `DATA/Pack_Verification` 大小写变体和 `audits/`），任务目录里其它位置照常可写。
+    - `test_real_seatbelt_protects_every_task_record_without_task_params`（只 macOS）：不带本任务参数时，Full Access 和隔离的命令都改不了别的任务的记录、建不出新的（含 `DATA/Pack_Verification` 大小写变体和 `audits/`）；9b 三审列的“改名上级目录 → 写记录 → 改回”10 种手法（`data`、`DATA`、日期目录挪深一层、任务根挪深一层、任务根改名、整个 `runs/`、`tasks/` 和 `audits/` 下的 `data`、整个 `audits/`、直接追加）全部失败，记录一个字节不变；任务 `data/` 下别的文件、`work/` 下新建子目录和改名文件、家目录根文件照常可写；副作用：命令新建任务根失败。
   - 拒绝码透传（建议 2）：`test_write_boundary_reports_the_specific_host_code`（写边界和 registry 对 4 个宿主码原码上报，B 类禁写根和 normal 模式危险目录仍是 `WRITE_FORBIDDEN`）；`test_host_write_denials_are_terminal_failures_not_unknown`（文件工具写前拒写的两个码归 FAILED，不是 UNKNOWN）。
   - 聚焦回归（313 个文件：改动模块相关 + guards9 + packaging）：`6413 passed`，1 条旧用例按新口径改期望（见下）。
   - Mac 全量 12 片（`f21039671`）：26753 passed / 0 failed / 21 skipped / 32 xfailed / 5 xpassed。

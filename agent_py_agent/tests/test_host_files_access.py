@@ -893,6 +893,15 @@ def test_every_tool_policy_and_plugin_context_use_the_host_data_root(tmp_path, m
     context = _invocation_context(request)
     assert context.workspace_write_context.check(owner / "permissions.json").code == STATE_CODE
     assert context.workspace_read_context.external_policy.agent_home_root == configured
+    # 子代理创建前的写目标预检（编排层，9b 三审建议）也按宿主数据根认出宿主凭据。
+    from agent_py_agent.agent.agent_core.orchestration.write_guard import (
+        ExternalWriteTargetRequest,
+        external_write_target_error,
+    )
+
+    precheck = ExternalWriteTargetRequest(agent=agent, allowed_tools=["write_file"],
+                                          params={"extra_write_roots": [str(configured / "config" / "desktop.yaml")]})
+    assert external_write_target_error(precheck)
 
 
 # ---------------------------------------------------------------- 真实链路
@@ -1014,31 +1023,41 @@ def test_write_boundary_reports_the_specific_host_code(tmp_path, monkeypatch):
 
 
 def test_task_record_patterns_cover_every_task_root_layout(tmp_path):
-    """一条正则盖住 owner home 下全部规范任务根的核验记录（runs/<日期>/<键>、tasks/<日期>/<名>、audits/<编号>），别的位置不误伤；
-    owner home 路径里的正则元字符按字面匹配。owner 集合与 host_readonly_paths 相同。"""
+    """一组正则盖住 owner home 下全部规范任务根的核验记录（runs/<日期>/<键>、tasks/<日期>/<名>、audits/<编号>），以及布局各级
+    目录本身和任务根下的 data 目录本身（9b 三审：只盖记录时能靠改名上级目录伪造）；目录里的其它内容不误伤；owner home 路径里的
+    正则元字符按字面匹配。owner 集合与 host_readonly_paths 相同。"""
     import re
 
     from agent_py_agent.agent.path_access_policy import host_readonly_patterns
 
     home = _home(tmp_path)
     root, main = home["root"], home["main"]
-    assert len(host_readonly_patterns(root)) == 3, "Full Access：全部已有 owner"
-    (pattern,) = host_readonly_patterns(root, main)
-    hit = ("runs/2026-10-02/k2/data/pack_verification", "runs/2026-10-02/k2/data/pack_verification/r.jsonl",
-           "tasks/2026-09-01/old/data/pack_verification/x.json", "audits/a-1/data/pack_verification")
-    miss = ("runs/2026-10-02/k2/data/other.json", "runs/2026-10-02/data/pack_verification",
-            "runs/2026-10-02/k2/work/data/pack_verification", "runs/2026-10-02/k2/data/pack_verification2",
-            "audits/a-1/b/data/pack_verification")
-    assert all(re.search(pattern, str(main / rel)) for rel in hit)
-    assert not any(re.search(pattern, str(main / rel)) for rel in miss)
-    assert not re.search(pattern, str(home["feishu"] / hit[0])), "隔离：只本 owner"
-    assert not re.search(pattern, str(tmp_path / "mirror") + str(main / hit[0])), "从路径开头匹配：别处的同名拷贝不误伤"
+    patterns = host_readonly_patterns(root, main)
+    assert len(host_readonly_patterns(root)) == 3 * len(patterns), "Full Access：全部已有 owner，每个一组"
+    assert not any("{" in pattern for pattern in patterns), "Seatbelt 不认 {m,n} 区间，可选层级只能写成显式分组"
+
+    def hits(path: Path | str) -> bool:
+        return any(re.search(pattern, str(path)) for pattern in patterns)
+
+    records = ("runs/2026-10-02/k2/data/pack_verification", "runs/2026-10-02/k2/data/pack_verification/r.jsonl",
+               "tasks/2026-09-01/old/data/pack_verification/x.json", "audits/a-1/data/pack_verification")
+    layout = ("runs", "runs/2026-10-02", "runs/2026-10-02/k2", "tasks", "tasks/2026-09-01/old", "audits", "audits/a-1",
+              "runs/2026-10-02/k2/data", "tasks/2026-09-01/old/data", "audits/a-1/data")
+    miss = ("runs/2026-10-02/k2/data/other.json", "runs/2026-10-02/data/pack_verification", "runs/2026-10-02/k2/work",
+            "runs/2026-10-02/k2/work/data/pack_verification", "runs/2026-10-02/k2/work/data", "runs/a/b/c",
+            "runs/2026-10-02/k2/data/pack_verification2", "runs/2026-10-02/k2/data2", "audits/a-1/b",
+            "audits/a-1/b/data/pack_verification", "runs2", "notes.txt")
+    assert all(hits(main / rel) for rel in (*records, *layout))
+    assert not [rel for rel in miss if hits(main / rel)]
+    assert not hits(home["feishu"] / records[0]), "隔离：只本 owner"
+    assert not hits(str(tmp_path / "mirror") + str(main / records[0])), "从路径开头匹配：别处的同名拷贝不误伤"
 
     odd = (tmp_path / "my.agent+(x)").resolve()
     (odd_main := odd / "owners" / "local" / "main").mkdir(parents=True)
-    (odd_pattern,) = host_readonly_patterns(odd, odd_main)
-    assert re.search(odd_pattern, str(odd_main / hit[0]))
-    assert not re.search(odd_pattern, str(tmp_path / "myXagent+(x)" / "owners" / "local" / "main" / hit[0]))
+    odd_patterns = host_readonly_patterns(odd, odd_main)
+    assert any(re.search(pattern, str(odd_main / records[0])) for pattern in odd_patterns)
+    twin = tmp_path / "myXagent+(x)" / "owners" / "local" / "main"
+    assert not any(re.search(pattern, str(twin / rel)) for pattern in odd_patterns for rel in (*records, *layout))
 
 
 def test_seatbelt_pattern_denies_come_after_the_write_root_allow(tmp_path):
@@ -1063,26 +1082,59 @@ def _quoted_regex(pattern: str) -> str:
 @pytest.mark.skipif(not IS_MACOS, reason="正则规则只有 macOS Seatbelt 能表达；Linux 只保护本任务（registry 按 task_root 给，已知边界）")
 def test_real_seatbelt_protects_every_task_record_without_task_params(tmp_path):
     """不带本任务的 task_root 参数时，Full Access 与隔离的命令照样改不了别的任务的核验记录，也建不出新的（含大小写变体）；
-    任务目录里其它位置照常可写。"""
+    9b 三审列的“改名上级目录 → 写记录 → 改回”各种手法（data、DATA、日期目录挪深一层、任务根挪深一层、整个 runs/、tasks/ 和
+    audits/ 下的 data、整个 audits/）都失败，记录一个字节不变。任务目录里其它位置照常可写；副作用：命令不能自己新建任务根。"""
+    import shlex
+
     if not _sandbox_ready():
         pytest.skip("平台沙箱不可用")
     home = _home(tmp_path)
     main = home["main"]
-    other = main / "runs" / "2026-10-02" / "k2" / "data" / "pack_verification" / "r.jsonl"
-    before = other.read_bytes()
+    k2 = main / "runs" / "2026-10-02" / "k2"
+    records = [_put(main / rel / "data" / "pack_verification" / "r.jsonl", "HOSTREC\n")
+               for rel in ("tasks/2026-10-01/t1", "audits/a1")]
+    records.append(k2 / "data" / "pack_verification" / "r.jsonl")
+    before = {path: path.read_bytes() for path in records}
+    q = {name: shlex.quote(str(path)) for name, path in {
+        "k2": k2, "runs": main / "runs", "date": main / "runs" / "2026-10-02", "t1": main / "tasks" / "2026-10-01" / "t1",
+        "audits": main / "audits", "a1": main / "audits" / "a1"}.items()}
+
+    def forge(moved: str, back: str, record: str, prepare: str = "") -> str:
+        return f"{prepare}mv {back} {moved} && printf FORGED >> {record} && mv {moved} {back}"
+
+    attacks = {
+        "rename_data": forge(f"{q['k2']}/data.x", f"{q['k2']}/data", f"{q['k2']}/data.x/pack_verification/r.jsonl"),
+        "rename_data_upper": f"mv {q['k2']}/DATA {q['k2']}/data.y && printf FORGED >> {q['k2']}/data.y/pack_verification/r.jsonl",
+        "nest_date_dir": forge(f"{q['runs']}/X/2026-10-02", q["date"], f"{q['runs']}/X/2026-10-02/k2/data/pack_verification/r.jsonl",
+                               f"mkdir -p {q['runs']}/X && "),
+        "nest_task_root": forge(f"{q['date']}/Y/k2", q["k2"], f"{q['date']}/Y/k2/data/pack_verification/r.jsonl",
+                                f"mkdir -p {q['date']}/Y && "),
+        "rename_task_root": forge(f"{q['k2']}.x", q["k2"], f"{q['k2']}.x/data/pack_verification/r.jsonl"),
+        "rename_runs": forge(f"{q['runs']}.x", q["runs"], f"{q['runs']}.x/2026-10-02/k2/data/pack_verification/r.jsonl"),
+        "tasks_rename_data": forge(f"{q['t1']}/d.x", f"{q['t1']}/data", f"{q['t1']}/d.x/pack_verification/r.jsonl"),
+        "audits_rename_data": forge(f"{q['a1']}/d.x", f"{q['a1']}/data", f"{q['a1']}/d.x/pack_verification/r.jsonl"),
+        "rename_audits": forge(f"{q['audits']}.x", q["audits"], f"{q['audits']}.x/a1/data/pack_verification/r.jsonl"),
+        "append_record": f"printf FORGED >> {shlex.quote(str(records[-1]))}",
+    }
     for scoped, extra in ((False, {}), (True, {"__sandbox_write_roots": [str(main)]})):
         shell = _shell(home, scoped=scoped)
 
         def run(command: str, shell=shell, extra=extra):
             return shell.execute({"command": command, "working_dir": str(main), **extra})
 
-        assert not run(f"printf x >> {other}").ok, scoped
-        assert not run(f"mv {other.parent} {other.parent}.moved").ok, scoped
+        for name, command in attacks.items():
+            assert not run(command).ok, (scoped, name)
+            assert {path: path.read_bytes() for path in records} == before, (scoped, name)
         for fresh in ("runs/2026-10-03/k9/data/pack_verification", "tasks/2026-10-03/t9/DATA/Pack_Verification",
-                      "audits/a-9/data/pack_verification"):
+                      "audits/a-9/data/pack_verification", "runs/2026-10-09/k9/work"):
             assert not run(f"mkdir -p {main / fresh}").ok and not (main / fresh).exists(), (scoped, fresh)
-        assert run(f"printf ok > {main / 'runs' / '2026-10-02' / 'k2' / 'data' / 'notes.json'}").ok, scoped
-    assert other.read_bytes() == before
+        work = k2 / "work"
+        legit = (f"printf ok > {q['k2']}/data/notes.json", f"mkdir -p {shlex.quote(str(work / 'sub' / 'deep'))}",
+                 f"printf ok > {shlex.quote(str(work / 'tmp.txt'))} && mv {shlex.quote(str(work / 'tmp.txt'))} "
+                 f"{shlex.quote(str(work / 'tmp2.txt'))}",
+                 f"printf ok > {shlex.quote(str(main / 'notes.txt'))}")
+        assert [command for command in legit if not run(command).ok] == [], scoped
+    assert all(path.exists() for path in (k2, main / "runs", main / "audits" / "a1" / "data"))
 
 
 def test_sandboxed_commands_carry_the_host_state_read_only_marker(monkeypatch):

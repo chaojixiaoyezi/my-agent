@@ -169,13 +169,15 @@ class PathAccessPolicy:
     owner_scope_root: Path | None = None
     agent_home_root: Path | None = None
 
-    # LLM: 配置读取只在构造处发生；配置切换应重建策略，不原地改变已在执行的调用。
+    # LLM: 配置读取只在构造处发生；配置切换应重建策略，不原地改变已在执行的调用。agent_home_root 同 from_values：拿得到宿主解析出
+    #   的数据根（home_paths.root）就传进来，不传才退回环境变量。
     # 函数用途: 从当前配置创建冻结路径策略。
     @classmethod
-    def from_config(cls, config: object | None) -> PathAccessPolicy:
+    def from_config(cls, config: object | None, *, agent_home_root: object = None) -> PathAccessPolicy:
         return cls.from_values(
             mode=getattr(config, "path_access_mode", DEFAULT_PATH_ACCESS_MODE),
             dangerous_roots=getattr(config, "path_dangerous_roots", DEFAULT_DANGEROUS_PATH_ROOTS),
+            agent_home_root=agent_home_root,
         )
 
     # LLM: 当前用户 home 过滤与数据根豁免必须由宿主计算一次；直接恢复协议字段不得再次应用此环境归一化。
@@ -597,17 +599,32 @@ def task_host_state_paths(task_root: Path) -> tuple[Path, ...]:
     return tuple(task_root.joinpath(*parts) for parts in HOST_STATE_TASK_PARTS)
 
 
-# LLM: 同一份任务布局（TASK_ROOT_LAYOUT × HOST_STATE_TASK_PARTS）的正则投影，给 macOS Seatbelt 用一条规则盖住 owner home 下
-#   全部规范任务根里的宿主托管位置：别的任务的、还没建出来的都算，不逐个列路径（9b 二审建议，3a 定）。owner 集合与
-#   host_readonly_paths 相同（隔离只本 owner，Full Access 全部已有 owner）。POSIX ERE，owner home 先解析符号链接再按字面转义；
-#   Seatbelt 在不区分大小写的卷上按不区分大小写匹配（本机实测 RUNS/、DATA/、Pack_Verification 变体都拦住）。Linux bwrap 只能
-#   挂已存在的路径，不用它：Linux 只保护本任务（registry 按 task_root 给的路径），已知边界。改布局时同步 test_host_files_access.py。
-# 函数用途: 生成匹配 owner home 下所有任务核验记录路径的正则（每个 owner 一条）。
+# LLM: 同一份任务布局（TASK_ROOT_LAYOUT × HOST_STATE_TASK_PARTS）的正则投影，给 macOS Seatbelt 盖住 owner home 下全部规范任务根
+#   里的宿主托管位置：别的任务的、还没建出来的都算，不逐个列路径（9b 二审建议，3a 定）。owner 集合与 host_readonly_paths 相同
+#   （隔离只本 owner，Full Access 全部已有 owner）。POSIX ERE，owner home 先解析符号链接再按字面转义；Seatbelt 在不区分大小写的
+#   卷上按不区分大小写匹配（本机实测 RUNS/、DATA/、Pack_Verification 变体都拦住）。Linux bwrap 只能挂已存在的路径，不用它：Linux
+#   只保护本任务（registry 按 task_root 给的路径），已知边界。改布局时同步 test_host_files_access.py。
+# 函数用途: 生成 owner home 下所有任务核验记录及其布局目录的拒写正则（每个 owner 一组）。
 def host_readonly_patterns(agent_home_root: Path, owner_home: Path | None = None) -> tuple[str, ...]:
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
+    return tuple(pattern for home in homes for pattern in _task_record_patterns(_ere_literal(str(home.resolve(strict=False)))))
+
+
+# LLM: 三类正则，前缀都是已转义的 owner home：
+#   1. 核验记录本身及其下内容；
+#   2. 布局各级目录本身（runs、runs/<日期>、runs/<日期>/<键>、audits、audits/<编号> 等，不含其下内容）；
+#   3. 任务根到记录之间的目录本身（data）。
+#   2、3 只拦这些目录自己的改名、删除、新建、chmod，里面的普通读写照常。9b 三审实测：只有第 1 类时，命令能把别的任务的 data/、
+#   日期目录、整个 runs/ 或 audits/ 改名，写进记录再改回来，伪造它的核验记录（7 种绕过）；加上 2、3 后全拦。副作用：模型的命令
+#   不能自己新建任务根、不能在没有 data 的任务里建 data，这本来就是宿主的事。可选层级必须写成显式的 (/[^/]+)? 分组：Seatbelt
+#   不认 {m,n} 区间，会静默失效（9b 实测）。
+# 函数用途: 给一个 owner home 生成核验记录、布局目录和中间目录三类拒写正则。
+def _task_record_patterns(home: str) -> list[str]:
     roots = "|".join(_ere_literal(name) + "/[^/]+" * depth for name, depth in TASK_ROOT_LAYOUT)
     parts = "|".join("/".join(_ere_literal(part) for part in item) for item in HOST_STATE_TASK_PARTS)
-    return tuple(f"^{_ere_literal(str(home.resolve(strict=False)))}/({roots})/({parts})(/|$)" for home in homes)
+    layout = [f"^{home}/{_ere_literal(name)}" + "(/[^/]+)?" * depth + "$" for name, depth in TASK_ROOT_LAYOUT]
+    between = ["/".join(_ere_literal(part) for part in item[:size]) for item in HOST_STATE_TASK_PARTS for size in range(1, len(item))]
+    return [f"^{home}/({roots})/({parts})(/|$)", *layout, *(f"^{home}/({roots})/{prefix}$" for prefix in dict.fromkeys(between))]
 
 
 # 函数用途: 把一段文字转成 POSIX ERE 里的字面匹配（给正则元字符加反斜杠）。
