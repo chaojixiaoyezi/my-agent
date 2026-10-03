@@ -3,6 +3,7 @@
 ## 嵌入用量与召回方式的进程内计数（S7，2026-10-02，分支 `claude/be-embedding-usage-facts`，已实现，待集成）
 
 - 嵌入客户端按用途（写入、召回、重建、工具检索）计请求、条数、失败和供应商回报的 token；scoped 检索计 semantic/keyword/none。不落盘，不进 model call ledger。详见 DESIGN_LEDGER 同名条目。
+- 2026-10-03 embo-01 真实对账后补：不带作用域的 `search`（Gateway 与 IM 的 `/memory`、`agent.recall`）也每次记一次召回方式（分支 `claude/be-s7-recall-mode`），原先只计嵌入、不计方式，用户看到“召回 2 次、召回方式 0 次”。
 
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（2026-10-02，分支 `claude/75-curator-fallback-threshold`，已实现，待 be 审）
 
