@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from ..common.json_io import jsonl_lines
+from ..contracts.model_call_ledger import model_call_inflight_snapshot
 
 """Endpoint handlers used by the gateway HTTP server.
 
@@ -161,6 +162,8 @@ def _usage_accounting_diagnostics() -> dict[str, Any]:
     }
 
 
+# LLM: /status 新增的进程级在途数字只读本进程唯一模型调用账本注册表，不投影 owner、模型、请求身份或正文。
+# 函数用途: 汇总公开 Gateway 状态与不含身份信息的运行计数，不读取模型会话正文。
 def handle_status(handler, server) -> None:
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
@@ -174,6 +177,9 @@ def handle_status(handler, server) -> None:
         "requests": counts,
         "runtime_prefix": str(state.get("runtime_prefix") or ""),
     }
+    in_flight_count, oldest_in_flight_age = model_call_inflight_snapshot()
+    response["in_flight_model_call_count"] = in_flight_count
+    response["oldest_in_flight_model_call_age_seconds"] = round(oldest_in_flight_age, 3)
     # 派发线程存活与最近一次 tick 直接读进程内账本（不经磁盘）：有 pending 却没人派发时一眼能看出派发已死或卡住。
     response.update(loop_health.snapshot())
     # 用量账两项进程内诊断计数同样直接读内存：没绑记账范围的探测次数、用量账里读到的未知用途键。

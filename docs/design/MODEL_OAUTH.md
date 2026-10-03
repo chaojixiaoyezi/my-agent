@@ -100,6 +100,14 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
   值集合 `TIMEOUT_WAIT_PHASES` 与 `TIMEOUT_STAGES` 分开、独立封闭，异常构造与账本写入两侧都 fail-closed。
   `timeout_stage` 的封闭集合、回合层放行规则和修法 A 的行为一字未改；账本只多一列，`phase` 绝不回写 `stage`。
 
+### 回合放弃时的 Responses 传输回收（2026-10-03）
+
+- `tool_model_generation._wait_for_generation_result` 的 `wall_clock` 分支现在先按原合同结束模型调用账本，再对准确 provider worker 置取消标记并按已有 1 秒 drain 上限等待；不改一次性 wall-clock 重试或回合自动续跑规则。
+- SSE 读流复用 `_GatewayResponseGuard.abort` shutdown 当前 socket；Responses WebSocket 的 `response.create` 发送复用本请求首事件预算，计时器到期直接 `close_socket()` 唤醒同步 `sendall`。用户停止、超时或异常直接 abort；只在收到终态事件后走既有 `close_timeout=5` 正常握手。
+- 首事件与首事件后的滚动空闲沿用 SSE/WS 原期限与分类；在途调用结束后由原账本终态自然退出 `/status` 数字统计。`/status` 新增在途数和最老年龄，来自原账本只读快照，不返回模型名、请求/回合编号或正文。
+- 连接/握手阶段使用既有 `connect_timeout` / `open_timeout`，SSE 响应头/首事件与 WS 首事件使用原首读预算，流内按 `request.timeout` 滚动；WebSocket 正常 close 最多 5 秒。标准库同步系统 DNS `getaddrinfo` 本身不能被 socket timeout 或取消回调强制终止，是已知边界；本地测试没有模拟系统解析器永久卡住。
+- 只在随机 loopback 假 WS/SSE 与临时目录验证；没有连接真实模型、启动 Gateway 或验证真实客户端。具体等待点表与测试命令见 `DESIGN_LEDGER.md` 顶部及 `TESTS.md` 本条。
+
 ### 订阅接口的流式输出（2026-09-30 热修）
 
 - 订阅接口的 `response.completed` 不回带 `output`（实测为 `[]`），函数调用和正文条目只在流里逐条的 `response.output_item.done` 给出。

@@ -1,5 +1,24 @@
 # 测试与发布验收
 
+## 回合失败后收回在途模型调用（luna3a，2026-10-03，待初审/9b 终审）
+
+- **现象**：9b 只读结构化证据显示，两次 `openai_responses` 主调用分别在回合以 `PROVIDERTIMEOUTERROR` 结束后仍停在网络读取，首 token 均未见、各经历 4 次 provider 尝试；直到 Gateway 停机才记成 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，耗时约 12,000 秒。没有 token 花费，但线程、连接和在途账本未及时释放。
+- **根因**：`tool_model_generation._wait_for_generation_result` 的 `wall_clock` 分支只 abandon 调用账本，未把取消信号传给底层 worker；SSE/WS 连接虽然已有读取期限，但 WebSocket 的普通 `sendall` 没有独立期限，异常退出还会走可等待对端的关闭握手。
+- **修法**：wall-clock 超时/停止时先放弃调用并中断精确 worker，最多按既有 `_MODEL_INTERRUPT_DRAIN_SECONDS=1.0` drain，再由上层捕获超时、按原合同结清账本（luna2 初审核对的实际顺序）；SSE 复用当前 response guard 关闭 socket，WebSocket 取消/异常直接 `close_socket()`，正常终态才用既有 5 秒 `close_timeout`。WebSocket `response.create` 发送加本请求首事件预算，超时关当前 socket并沿原 `first_event` 错误分类；重试次数、修法 A 的握手超时归类均不变。`/status` 直接从原准入注册表账本计算 `in_flight_model_call_count` 与 `oldest_in_flight_model_call_age_seconds`，只返回数字，不建立第二状态源。
+- **新用例**（`test_tool_model_generation.py`）：真实随机 loopback WS/SSE 假服务分别覆盖 WS/SSE 首事件静默、WS/SSE 首事件后流空闲、SSE wall-clock 放弃以及 WS wall-clock 放弃；所有结束场景断言 worker 退出、账本终态和在途计数清零。阻塞 WS send 与不回应 close 握手的替身分别锁定发送期限和即时 socket abort。`test_probe_tool_capability_metering.py` 固定无在途为 `(0, 0)`、一条活动调用年龄递增、finish 后回零，并确认公开字段不含模型名。
+- **TDD**：新加的 WS send deadline 与取消不等关闭握手用例在修复前均失败（2 failed）；修复后这两个定向用例及真实 WS wall-clock 用例通过。已有 wall-clock stage 测试的固定 `sleep(0.5)` 替身不能响应新取消信号，按其真实契约改成响应线程中断的 fake，并增加 worker 已退出断言，保留原 `<0.5s` 上界。
+- **四个变异**（逐项运行后恢复原文件）：删除 WS 首事件期限，假服务调用在期限内结束断言失败；放弃时不发取消信号，底层线程退出上界断言失败；屏蔽 timeout 账本结算，账本终态断言失败；反转 `/status` 年龄方向，期望 5 秒却得到 0 秒，年龄断言失败。四项均被抓到；相关源文件恢复后重新核对 SHA-256。
+- **定向回归命令**（工作树根目录，指定 CI Python；退出码 0，所有文件执行到 100%，无失败）：
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_responses_websocket.py agent_py_agent/tests/test_responses_failure.py agent_py_agent/tests/test_probe_tool_capability_metering.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_provider_transient_auto_resume.py agent_py_agent/tests/test_timeout_gate5_retry.py agent_py_agent/tests/test_timeout_gate2_stages.py agent_py_agent/tests/test_stream_timeout_contract.py agent_py_agent/tests/test_provider_timeout_acceptance.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3a
+  ```
+- **限制**：SSE/WS 连接打开期间的系统 DNS `getaddrinfo` 是标准库同步系统解析，socket timeout 和传输取消回调不能中止正在执行的 OS resolver；若 resolver 永久挂住，不能保证 worker 在 1 秒 drain 窗口退出。真实 Gateway、生产模型、真实网络和系统 DNS 挂死均未验证；此轮没有新增配置或常数。
+- **架构守卫**：读取 `~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt` 中清单（含 `test_packaging.py`）并以规定 CI Python 运行，退出码 0，输出到达 100%，无失败。
+- **静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` → 退出码 0、无差异空白错误。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0`、`消失告警: 9`。strict code-size 后已执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
+- **常数目录**：本次没有新增常数，无需重新生成目录或单独跑 `test_constants_catalog.py`。
+
 ## 能力包：交付物未匹配的提示修正（pdm，2026-10-03，分支 `worker/pack-deliverable-unmatched`）
 
 - **新用例** `agent_py_agent/tests/test_pack_verification_deliverables.py::test_unmatched_deliverable_name_reports_pattern_and_recovers_after_rename`：A10 形状（交付物内容含正确 schema、文件名 `delivery.v3` 不匹配 `out/**`）。

@@ -1116,8 +1116,9 @@ def _generate_through_wall_guard(
         return _wait_for_generation_result(request, state, results, worker, timeout)
 
 
-# LLM: Poll the guard result at short safe points so an outer task stop wins over a late model result and drains the provider thread for a bounded interval.
-# 函数用途: 等待模型线程返回；收到用户停止时先收回子线程的连接，再以中断结束当前轮。
+# LLM: Poll the guard result at short safe points so an outer stop or wall-clock timeout fences late results,
+#   signals the provider thread to close its transport, and waits only the existing bounded drain interval.
+# 函数用途: 等待模型线程返回；停止或墙钟到期时中断并短暂排空底层连接，避免调用线程被丢下。
 def _wait_for_generation_result(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
@@ -1136,6 +1137,8 @@ def _wait_for_generation_result(
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0 and not transport_owns_timeout:
             _abandon_call(state)
+            _interrupt_generation_worker(worker)
+            worker.join(timeout=_MODEL_INTERRUPT_DRAIN_SECONDS)
             raise ProviderTimeoutError(
                 f"模型接口请求超时: request_timeout={timeout:g}s",
                 stage="wall_clock",

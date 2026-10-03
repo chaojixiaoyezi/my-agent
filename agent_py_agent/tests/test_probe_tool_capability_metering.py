@@ -287,3 +287,63 @@ def test_status_endpoint_projects_usage_accounting_counters(monkeypatch, tmp_pat
     finally:
         reset_unaccounted_probe_attempt_count()
         reset_unknown_purpose_key_counts()
+
+
+# LLM: Exercise the real status projector with only temporary state paths; the public model-call fields stay numeric.
+# 函数用途: 通过假 HTTP handler 读取临时 Gateway 状态响应。
+def _status_payload_for_test(paths):
+    from agent_py_agent.agent.gateway_parts.http_handlers import handle_status
+
+    sent: list[tuple[int, dict]] = []
+    handler = SimpleNamespace(_send_json=lambda status, body: sent.append((status, body)))
+    handle_status(handler, SimpleNamespace(paths=paths))
+    assert sent[0][0] == 200
+    return sent[0][1]
+
+
+def test_status_projects_numeric_inflight_model_call_count_and_age(tmp_path):
+    from agent_py_agent.agent.contracts.model_call_ledger import (
+        ModelCallFinishParams,
+        ModelCallLedger,
+        ModelCallLedgerContext,
+        ModelCallStartedParams,
+    )
+    from agent_py_agent.tests.test_gateway_admission_wait import _paths
+
+    clock = [100.0]
+    ledger = ModelCallLedger(context=ModelCallLedgerContext(now=lambda: clock[0]))
+    paths = _paths(tmp_path)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.state.write_text(
+        json.dumps({"status": "running", "pid": os.getpid(), "started_at": time.time()}), encoding="utf-8"
+    )
+
+    idle = _status_payload_for_test(paths)
+    assert idle["in_flight_model_call_count"] == 0
+    assert idle["oldest_in_flight_model_call_age_seconds"] == 0.0
+
+    ledger.started(
+        ModelCallStartedParams(
+            call_id="private-call-id",
+            backend="private-backend",
+            model="private-model",
+            input_tokens=10,
+            request_id="private-request-id",
+        )
+    )
+    clock[0] = 105.0
+    waiting = _status_payload_for_test(paths)
+    assert waiting["in_flight_model_call_count"] == 1
+    assert waiting["oldest_in_flight_model_call_age_seconds"] == 5.0
+    assert isinstance(waiting["in_flight_model_call_count"], int)
+    assert isinstance(waiting["oldest_in_flight_model_call_age_seconds"], float)
+
+    clock[0] = 108.0
+    assert _status_payload_for_test(paths)["oldest_in_flight_model_call_age_seconds"] == 8.0
+    ledger.finished(ModelCallFinishParams(call_id="private-call-id", output_tokens=0))
+    settled = _status_payload_for_test(paths)
+    assert settled["in_flight_model_call_count"] == 0
+    assert settled["oldest_in_flight_model_call_age_seconds"] == 0.0
+    assert "private-model" not in str(
+        {key: settled[key] for key in ("in_flight_model_call_count", "oldest_in_flight_model_call_age_seconds")}
+    )

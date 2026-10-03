@@ -51,6 +51,11 @@ class FakeConnection:
     def close(self):
         self.closed = True
 
+    # LLM: Model the immediate abort primitive used by the real websockets connection during cancellation.
+    # 函数用途: 让假连接覆盖不等待关闭握手的 socket 收回路径。
+    def close_socket(self):
+        self.closed = True
+
 
 def completed_events(text="完整回复"):
     message = {"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": text}]}

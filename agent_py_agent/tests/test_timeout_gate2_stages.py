@@ -335,11 +335,31 @@ def test_sse_keepalive_without_data_raises_stream_idle(
     assert 0.8 <= idle_elapsed < 3.0
 
 
+# LLM: Model a backend blocked in generation that can only leave when the guard delivers its thread-scoped interrupt.
+# 类用途: 为 wall_clock stage 验收提供可取消的阻塞替身，并暴露 worker 供测试确认已退出。
 class _BlockingBackend:
     name = "blocking-test-backend"
 
+    # LLM: The timeout test reads the exact worker instance after the guard returns to prove that cancellation drained it.
+    # 函数用途: 初始化可被验收的 worker 观察槽。
+    def __init__(self) -> None:
+        self.worker_thread = None
+
+    # LLM: Wait until transport cancellation wakes the registered callback; do not return a late synthetic success.
+    # 函数用途: 模拟请求超时后能响应取消的 provider worker。
     def generate(self, prompt: str, on_chunk=None, **_kwargs) -> ModelResponse:
-        time.sleep(0.5)  # 挂起 > request_timeout -> 墙钟守卫掐断
+        from agent_py_agent.agent.concurrency.interrupt import (
+            is_interrupted,
+            register_interrupt_callback,
+        )
+
+        del prompt, on_chunk
+        self.worker_thread = threading.current_thread()
+        wake = threading.Event()
+        with register_interrupt_callback(wake.set):
+            wake.wait(timeout=0.5)
+            if is_interrupted():
+                raise InterruptedError("测试后端已收到 wall_clock 取消")
         return ModelResponse(text="late response", backend=self.name)
 
 
@@ -370,8 +390,9 @@ def _tool_loop_params() -> ToolLoopExecuteParams:
 
 def test_wall_clock_guard_raises_wall_clock_stage() -> None:
     """非 stream 后端 + generate 挂起: 墙钟守卫线程超时 -> stage=wall_clock。"""
+    backend = _BlockingBackend()
     agent = SimpleNamespace(
-        backend=_BlockingBackend(),
+        backend=backend,
         config=SimpleNamespace(request_timeout=0.05),
         _current_subagent_run_id="",
     )
@@ -386,6 +407,7 @@ def test_wall_clock_guard_raises_wall_clock_stage() -> None:
             )
         )
     assert err.value.stage == "wall_clock"
+    assert backend.worker_thread is not None and not backend.worker_thread.is_alive()
     assert time.monotonic() - started < 0.5
 
 

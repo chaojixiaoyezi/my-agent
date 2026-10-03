@@ -2,7 +2,8 @@
 #   prefer_websockets）。同一个 GatewayRequest（地址、认证头、请求体）改用 wss 发送 {"type": "response.create", ...}，
 #   逐条产出与 SSE data 相同的 JSON 事件文本，交给 responses_wire.collect_response，不另建解析或状态。
 #   09-30 实测：普通 SSE 长输出在服务端中途卡住、约 60 秒后被关（gpt-6-luna 4/4），同一请求走 WebSocket 2/2 完整。
-#   超时语义与 SSE 相同：首个事件单独预算，之后按 request.timeout 滚动空闲；/stop 立即关连接并抛 InterruptedError；
+#   超时语义与 SSE 相同：发送/首个事件各有首包预算，之后按 request.timeout 滚动空闲；/stop 直接关 socket，
+#   不等对端关闭握手，再抛 InterruptedError；
 #   握手失败沿 HTTP 同一分类（_runtime_http_error / _runtime_network_error）并按同一有限次数重试；握手阶段的超时
 #   （TLS/升级握手，response.create 还没发出）照 SSE 归 first_event，交给回合层退避重试，不落 provider_declared；
 #   回复完成前断开抛可恢复的 ProviderTransientError（文本带阶段、连接后秒数和关闭码，供排查），交给上层模型重试。
@@ -18,6 +19,7 @@ import json
 import time
 import urllib.error
 from collections.abc import Iterator
+from threading import Event, Timer
 
 from .errors import ProviderTransientError
 from .gateway_helpers import (
@@ -63,20 +65,25 @@ def websocket_url(url: str) -> str:
     return url
 
 
-# LLM: 生成器：打开连接、发 response.create、逐条产出事件文本；调用方 close() 或异常都会关连接。
+# LLM: 生成器：打开连接、限时发 response.create、逐条产出事件；取消直接关 socket，正常收尾用有限 close_timeout。
 #   请求体沿用 payload（含 stream=true），只加 type 字段；发送许可不支持时拒绝，不发任何字节。
-# 函数用途: 通过 WebSocket 发一次 Responses 请求，逐条返回服务端事件（JSON 文本）。
+# 函数用途: 通过 WebSocket 限时发送 Responses 请求，逐条返回服务端事件（JSON 文本）。
 def iter_responses_websocket(request: GatewayRequest) -> Iterator[str]:
     if request.send_permit is not None:
         raise ValueError("WebSocket 传输不支持实验发送许可，未发送请求。")
     remaining_deadline_seconds(request.deadline)
     connection = _open_connection(request)
+    completed = False
     try:
-        with _provider_interrupt_callback(connection.close):
-            connection.send(json.dumps({"type": "response.create", **request.payload}, ensure_ascii=False))
+        with _provider_interrupt_callback(connection.close_socket):
+            _send_create_message(connection, request)
             yield from _events(connection, request)
+            completed = True
     finally:
-        connection.close()
+        if completed:
+            connection.close()
+        else:
+            connection.close_socket()
 
 
 # LLM: 握手失败按 HTTP 同一套可重试状态和网络错误判断；每次尝试都发布 started / failed / response_opened 观察事件，
@@ -116,6 +123,37 @@ def _connect(request: GatewayRequest):
     return connect(websocket_url(request.url), additional_headers=headers, user_agent_header=user_agent,
                    open_timeout=max(1.0, float(request.connect_timeout or 10.0)), max_size=_MAX_MESSAGE_BYTES,
                    ping_interval=None, ping_timeout=None, close_timeout=5)
+
+
+# LLM: `websockets.sync.Connection.send` 会对普通发送执行 socket.sendall，close_timeout 只约束关闭握手；
+#   计时器到期先关当前 socket 唤醒发送线程，超时仍归原 first_event 合同，不新增重试分类。
+# 函数用途: 为 response.create 的网络写入复用当前请求首包预算，避免连接建立后卡在发送阶段。
+def _send_create_message(connection, request: GatewayRequest) -> None:
+    message = json.dumps({"type": "response.create", **request.payload}, ensure_ascii=False)
+    timed_out = Event()
+    timer = Timer(_stream_first_event_timeout(request), _expire_websocket_send, args=(connection, timed_out))
+    timer.daemon = True
+    timer.start()
+    try:
+        connection.send(message)
+    except Exception as exc:
+        if timed_out.is_set():
+            raise _stream_timeout_error(request, "first_event") from exc
+        raise
+    finally:
+        timer.cancel()
+    if timed_out.is_set():
+        raise _stream_timeout_error(request, "first_event")
+
+
+# LLM: 只触碰当前发送连接；置位后用库提供的 close_socket 直接 shutdown/close，避免拿协议锁等待对端回应。
+# 函数用途: 首包发送预算耗尽时关掉当前 WebSocket，唤醒阻塞的 sendall。
+def _expire_websocket_send(connection, timed_out: Event) -> None:
+    timed_out.set()
+    try:
+        connection.close_socket()
+    except Exception:
+        return
 
 
 # LLM: 首条事件用首包预算，之后每条有效消息把期限滚动到 request.timeout；每秒醒一次检查停止。

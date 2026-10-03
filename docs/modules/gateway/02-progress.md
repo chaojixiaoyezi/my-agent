@@ -1,5 +1,14 @@
 # Gateway 维护状态
 
+## 回合失败后收回在途模型调用（luna3a，2026-10-03，待初审/9b 终审）
+
+- **已完成**：wall-clock 失败时 abandon 原账本后通知精确 worker 中断，并按既有 1 秒窗口 drain；SSE/Responses WebSocket 取消直接关闭本次 socket，WebSocket 请求发送另有首事件预算；`/status` 由既有模型账本投影在途调用数和最老年龄两个数字。
+- **解决的问题**：回合已向用户失败返回，但底层模型线程仍等网络数据、账本卡在 started/first_token 的状态；现在各传输读取超时后收口调用记录，回合放弃时主动取消底层连接。
+- **下一步**：由另一 my-agent 会话初审、9b 终审；系统 DNS `getaddrinfo` 的 OS 级可取消性请复审方保留为边界。
+- **已跑测试**：11 个直接相关文件执行至 100%、退出码 0；guards9 清单（含 `test_packaging.py`）至 100%、退出码 0。具体命令见仓库根目录 `TESTS.md` 同名节。
+- **未跑测试**：按请求不跑全仓 pytest；未启动 Gateway、连接真实模型或真实网络。
+- **风险**：同步系统 DNS 解析没有本请求级取消句柄；若解析器本身永久阻塞，不能保证模型 worker 在 1 秒 drain 内退出。
+
 ## owner 维护新增 memory_archive 权限收紧（luna3，2026-10-03，分支 `worker/luna3-archive-private`，已实现，待 9b 复审）
 
 - Gateway 的 owner-maintenance 循环（`cli/gateway_loops._GatewayOwnerMaintenanceController`，默认每 60 秒检查、按 owner 的 `retention.json` 区间到期，默认每天一次）在跑 retention 的同时多做一步：

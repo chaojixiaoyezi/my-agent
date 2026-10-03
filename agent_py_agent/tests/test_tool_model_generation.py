@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
@@ -99,6 +102,9 @@ class _InterruptibleBlockingBackend:
     def __init__(self) -> None:
         self.entered = threading.Event()
         self.closed = threading.Event()
+        self.worker_thread: threading.Thread | None = None
+        self.worker_threads: list[threading.Thread] = []
+        self.closed_events: list[threading.Event] = []
 
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         from agent_py_agent.agent.concurrency.interrupt import (
@@ -107,12 +113,158 @@ class _InterruptibleBlockingBackend:
         )
 
         del prompt, on_chunk
-        with register_interrupt_callback(self.closed.set):
+        worker = threading.current_thread()
+        closed = threading.Event()
+        self.worker_thread = worker
+        self.worker_threads.append(worker)
+        self.closed = closed
+        self.closed_events.append(closed)
+        with register_interrupt_callback(closed.set):
             self.entered.set()
-            self.closed.wait(timeout=5)
+            closed.wait(timeout=5)
             if is_interrupted():
                 raise InterruptedError("模型传输已关闭")
         return ModelResponse(text="late response", backend=self.name)
+
+
+class _LocalResponseTransportBackend:
+    name = "local-response-transport-test-backend"
+    model_name = "synthetic-model"
+
+    def __init__(self, request_factory, *, owns_stream_timeout: bool):
+        self._request_factory = request_factory
+        self.stream_enabled = owns_stream_timeout
+        self.stream_timeout_is_idle = owns_stream_timeout
+        self.worker_threads: list[threading.Thread] = []
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        del prompt, on_chunk
+        self.worker_threads.append(threading.current_thread())
+        request = self._request_factory()
+        if request.url.startswith(("ws://", "wss://")):
+            from agent_py_agent.agent.backends.responses_websocket import iter_responses_websocket
+
+            lines = iter_responses_websocket(request)
+        else:
+            from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+
+            lines = post_stream_iter(request)
+        try:
+            list(lines)
+        finally:
+            lines.close()
+        return ModelResponse(text="", backend=self.name)
+
+
+def _fake_response_request(api_base: str, timeout: float):
+    from agent_py_agent.agent.backends.gateway_helpers import GatewayRequest
+
+    return GatewayRequest(
+        api_base=api_base,
+        api_key="synthetic-test-token",
+        path="/responses",
+        payload={"model": "synthetic-model", "input": [], "stream": True},
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+        timeout=timeout,
+        connect_timeout=0.5,
+        first_event_timeout=timeout,
+        max_retries=0,
+    )
+
+
+@contextmanager
+def _fake_sse_service(tmp_path, *, send_first_event: bool):
+    request_seen = threading.Event()
+    release_handlers = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            body_size = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(body_size)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if send_first_event:
+                self.wfile.write(b'data: {"type":"response.output_text.delta","delta":"x"}\n\n')
+                self.wfile.flush()
+            request_seen.set()
+            release_handlers.wait(timeout=10.0)
+
+        def log_message(self, format, *args):
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    port = int(server.server_address[1])
+    (tmp_path / "fake-sse-port.txt").write_text(str(port), encoding="utf-8")
+    try:
+        yield f"http://127.0.0.1:{port}", request_seen
+    finally:
+        release_handlers.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2.0)
+
+
+# LLM: The fake handler consumes only its local test connection and exits on close/release without contacting a provider.
+# 函数用途: 接收假 Responses 请求，可选发送一个首事件，然后等待测试释放。
+def _serve_fake_websocket_connection(connection, request_seen, release_handler, send_first_event):
+    try:
+        connection.recv(timeout=2.0)
+    except Exception:
+        return
+    request_seen.set()
+    if send_first_event:
+        try:
+            connection.send('{"type":"response.output_text.delta","delta":"x"}')
+        except Exception:
+            return
+    while not release_handler.is_set():
+        try:
+            connection.recv(timeout=0.05)
+        except TimeoutError:
+            continue
+        except Exception:
+            return
+
+
+# LLM: Bind a randomized loopback websocket listener to a tempfile record and always release its handler on exit.
+# 函数用途: 构造无需真实供应商、随机端口的 Responses WebSocket 服务。
+@contextmanager
+def _fake_websocket_service(tmp_path, *, send_first_event: bool = False):
+    from websockets.sync.server import serve
+
+    request_seen = threading.Event()
+    release_handler = threading.Event()
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = int(listener.getsockname()[1])
+    # LLM: Bind this server instance's synchronization events to its handler; it cannot reach another test's sockets.
+    # 函数用途: 把本例的释放标记交给本地假服务连接处理器。
+    def handler(connection):
+        return _serve_fake_websocket_connection(connection, request_seen, release_handler, send_first_event)
+
+    server = serve(handler, sock=listener, open_timeout=1.0, close_timeout=1.0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    (tmp_path / "fake-websocket-port.txt").write_text(str(port), encoding="utf-8")
+    try:
+        yield f"ws://127.0.0.1:{port}", request_seen
+    finally:
+        release_handler.set()
+        server.shutdown()
+        server_thread.join(timeout=2.0)
+        listener.close()
 
 
 class _StreamingLongWriteBackend:
@@ -387,7 +539,7 @@ def test_provider_boundary_commits_guidance_batch_before_backend_io(tmp_path) ->
 
 
 def test_model_generate_enforces_request_timeout_when_backend_blocks():
-    backend = _BlockingBackend()
+    backend = _InterruptibleBlockingBackend()
     agent = SimpleNamespace(
         backend=backend,
         config=SimpleNamespace(request_timeout=0.01),
@@ -406,7 +558,431 @@ def test_model_generate_enforces_request_timeout_when_backend_blocks():
         )
 
     assert backend.entered.is_set()
+    assert backend.closed.is_set()
+    assert backend.worker_threads and all(not worker.is_alive() for worker in backend.worker_threads)
     assert time.monotonic() - started < 0.06
+
+
+# LLM: Capture a real model generation exception/result from its caller thread without duplicating test-specific branches.
+# 函数用途: 在本地传输测试里并行启动模型调用并保存终态。
+def _capture_model_call(outcome, agent, prompt):
+    try:
+        outcome["response"] = generate_model_response(
+            ModelGenerateParams(
+                agent=agent,
+                params=_tool_loop_params(),
+                prompt=prompt,
+                tool_rounds=0,
+            )
+        )
+    except BaseException as exc:
+        outcome["error"] = exc
+
+
+# LLM: Cleanup only the test's own exact provider workers if a deliberately removed deadline leaves the caller blocked.
+# 函数用途: 变异测试或失败时中断并回收本地假服务调用线程。
+def _interrupt_model_caller(caller, backend) -> None:
+    if not caller.is_alive():
+        return
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+
+    for worker in backend.worker_threads:
+        if worker.ident is not None:
+            set_interrupt(True, worker.ident)
+    caller.join(timeout=2.0)
+
+
+# LLM: Assert one failed transport call reached the expected ledger terminal and disappeared from the public in-flight projection.
+# 函数用途: 共用单次本地超时测试的线程、账本及 /status 收尾断言。
+def _assert_single_transport_timeout(agent, backend, expected_stage) -> None:
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_inflight_snapshot
+
+    assert len(backend.worker_threads) == 1
+    assert not backend.worker_threads[0].is_alive()
+    record = model_call_ledger(agent).records()[0]
+    assert record.status == "timed_out" and record.timeout_stage == expected_stage
+    assert model_call_inflight_snapshot() == (0, 0.0)
+
+
+# LLM: Verify both existing wall-clock attempts closed through the original ledger with no new identity source.
+# 函数用途: 核对回合放弃后两条模型调用都已按 wall_clock 超时收口。
+def _assert_wall_clock_ledger(agent) -> None:
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+
+    records = model_call_ledger(agent).records()
+    assert len(records) == 2
+    assert all(record.status == "timed_out" for record in records)
+    assert all(record.timeout_stage == "wall_clock" for record in records)
+
+
+def test_wall_clock_timeout_interrupts_provider_worker_and_closes_ledger():
+    backend = _InterruptibleBlockingBackend()
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=0.05),
+        _current_subagent_run_id="",
+    )
+    started = time.monotonic()
+    error = None
+    response = None
+    try:
+        response = generate_model_response(
+            ModelGenerateParams(
+                agent=agent,
+                params=_tool_loop_params(),
+                prompt="hello",
+                tool_rounds=0,
+            )
+        )
+    except BaseException as exc:
+        error = exc
+
+    try:
+        assert isinstance(error, ProviderTimeoutError), (
+            f"unexpected result={response!r}, error={error!r}, elapsed={time.monotonic() - started:.3f}, "
+            f"closed={backend.closed.is_set()}, worker={backend.worker_thread!r}"
+        )
+        assert error.stage == "wall_clock"
+        assert backend.entered.wait(timeout=0.5)
+        assert len(backend.worker_threads) == len(backend.closed_events) == 2
+        assert all(event.is_set() for event in backend.closed_events)
+        for worker in backend.worker_threads:
+            worker.join(timeout=0.5)
+            assert not worker.is_alive()
+        _assert_wall_clock_ledger(agent)
+    finally:
+        for event in backend.closed_events:
+            event.set()
+        for worker in backend.worker_threads:
+            worker.join(timeout=1.0)
+
+
+def test_websocket_first_event_timeout_closes_call_and_ledger(tmp_path):
+    with _fake_websocket_service(tmp_path) as (api_base, request_seen):
+        backend = _LocalResponseTransportBackend(
+            lambda: _fake_response_request(api_base, timeout=1.0),
+            owns_stream_timeout=True,
+        )
+        agent = SimpleNamespace(
+            backend=backend,
+            config=SimpleNamespace(request_timeout=10.0),
+            _current_subagent_run_id="",
+        )
+        started = time.monotonic()
+        outcome: dict[str, object] = {}
+        caller = threading.Thread(
+            target=_capture_model_call,
+            args=(outcome, agent, "ws first event fixture"),
+            daemon=True,
+        )
+        caller.start()
+        completed_before_cleanup = False
+        try:
+            assert request_seen.wait(timeout=2.0)
+            caller.join(timeout=3.0)
+            completed_before_cleanup = not caller.is_alive()
+        finally:
+            _interrupt_model_caller(caller, backend)
+
+        assert completed_before_cleanup  # 若首事件期限被删，先取消清理再将该变异判红
+        assert not caller.is_alive()
+        caught = outcome.get("error")
+        assert isinstance(caught, ProviderTimeoutError)
+        assert caught.stage == "first_event"
+        assert time.monotonic() - started < 7.0  # 包含已有 WebSocket close_timeout 上限
+        _assert_single_transport_timeout(agent, backend, "first_event")
+
+
+# LLM: Drive a real local WebSocket through one valid event and then silence to verify the rolling idle deadline.
+# 函数用途: 确认首事件后 WebSocket 空闲超时会退出线程并结清调用账本。
+def test_websocket_stream_idle_timeout_after_first_event_closes_call_and_ledger(tmp_path):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_inflight_snapshot
+
+    with _fake_websocket_service(tmp_path, send_first_event=True) as (api_base, request_seen):
+        backend = _LocalResponseTransportBackend(
+            lambda: _fake_response_request(api_base, timeout=1.0),
+            owns_stream_timeout=True,
+        )
+        agent = SimpleNamespace(
+            backend=backend,
+            config=SimpleNamespace(request_timeout=10.0),
+            _current_subagent_run_id="",
+        )
+        with pytest.raises(ProviderTimeoutError) as caught:
+            generate_model_response(
+                ModelGenerateParams(
+                    agent=agent,
+                    params=_tool_loop_params(),
+                    prompt="websocket idle fixture",
+                    tool_rounds=0,
+                )
+            )
+
+        assert caught.value.stage == "stream_idle"
+        assert request_seen.wait(timeout=0.5)
+        assert len(backend.worker_threads) == 1
+        assert not backend.worker_threads[0].is_alive()
+        record = model_call_ledger(agent).records()[0]
+        assert record.status == "timed_out" and record.timeout_stage == "stream_idle"
+        assert model_call_inflight_snapshot() == (0, 0.0)
+
+
+def test_sse_first_event_timeout_closes_call_and_ledger(tmp_path):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_inflight_snapshot
+
+    with _fake_sse_service(tmp_path, send_first_event=False) as (api_base, request_seen):
+        backend = _LocalResponseTransportBackend(
+            lambda: _fake_response_request(api_base, timeout=1.0),
+            owns_stream_timeout=True,
+        )
+        agent = SimpleNamespace(
+            backend=backend,
+            config=SimpleNamespace(request_timeout=10.0),
+            _current_subagent_run_id="",
+        )
+        with pytest.raises(ProviderTimeoutError) as caught:
+            generate_model_response(
+                ModelGenerateParams(
+                    agent=agent,
+                    params=_tool_loop_params(),
+                    prompt="sse first event fixture",
+                    tool_rounds=0,
+                )
+            )
+
+        assert caught.value.stage == "first_event"
+        assert request_seen.wait(timeout=0.5)
+        assert len(backend.worker_threads) == 1
+        assert not backend.worker_threads[0].is_alive()
+        record = model_call_ledger(agent).records()[0]
+        assert record.status == "timed_out" and record.timeout_stage == "first_event"
+        assert model_call_inflight_snapshot() == (0, 0.0)
+
+
+def test_sse_stream_idle_timeout_after_first_event_closes_call_and_ledger(tmp_path):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_inflight_snapshot
+
+    with _fake_sse_service(tmp_path, send_first_event=True) as (api_base, request_seen):
+        backend = _LocalResponseTransportBackend(
+            lambda: _fake_response_request(api_base, timeout=1.0),
+            owns_stream_timeout=True,
+        )
+        agent = SimpleNamespace(
+            backend=backend,
+            config=SimpleNamespace(request_timeout=10.0),
+            _current_subagent_run_id="",
+        )
+        with pytest.raises(ProviderTimeoutError) as caught:
+            generate_model_response(
+                ModelGenerateParams(
+                    agent=agent,
+                    params=_tool_loop_params(),
+                    prompt="sse idle fixture",
+                    tool_rounds=0,
+                )
+            )
+
+        assert caught.value.stage == "stream_idle"
+        assert request_seen.wait(timeout=0.5)
+        assert len(backend.worker_threads) == 1
+        assert not backend.worker_threads[0].is_alive()
+        record = model_call_ledger(agent).records()[0]
+        assert record.status == "timed_out" and record.timeout_stage == "stream_idle"
+        assert model_call_inflight_snapshot() == (0, 0.0)
+
+
+def test_wall_clock_abandonment_closes_real_sse_workers_before_return(tmp_path):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_inflight_snapshot
+
+    with _fake_sse_service(tmp_path, send_first_event=False) as (api_base, request_seen):
+        backend = _LocalResponseTransportBackend(
+            lambda: _fake_response_request(api_base, timeout=5.0),
+            owns_stream_timeout=False,
+        )
+        agent = SimpleNamespace(
+            backend=backend,
+            config=SimpleNamespace(request_timeout=0.05),
+            _current_subagent_run_id="",
+        )
+        started = time.monotonic()
+        with pytest.raises(ProviderTimeoutError) as caught:
+            generate_model_response(
+                ModelGenerateParams(
+                    agent=agent,
+                    params=_tool_loop_params(),
+                    prompt="abandoned sse fixture",
+                    tool_rounds=0,
+                )
+            )
+
+        assert caught.value.stage == "wall_clock"
+        assert request_seen.wait(timeout=0.5)
+        assert time.monotonic() - started < 2.0
+        assert len(backend.worker_threads) == 2  # 保持既有至多一次的 wall_clock 超时重试
+        assert all(not worker.is_alive() for worker in backend.worker_threads)
+        records = model_call_ledger(agent).records()
+        assert len(records) == 2
+        assert all(record.status == "timed_out" for record in records)
+        assert all(record.timeout_stage == "wall_clock" for record in records)
+        assert model_call_inflight_snapshot() == (0, 0.0)
+
+
+# LLM: Exercise the real Responses WebSocket transport while the turn wall-clock guard abandons its worker;
+#   this catches a graceful close handshake that outlives the caller's bounded drain interval.
+# 函数用途: 确认回合超时后 WebSocket 读线程在短上界内退出且调用账本已结清。
+def test_wall_clock_abandonment_closes_real_websocket_workers_before_return(tmp_path):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_inflight_snapshot
+
+    with _fake_websocket_service(tmp_path) as (api_base, request_seen):
+        backend = _LocalResponseTransportBackend(
+            lambda: _fake_response_request(api_base, timeout=5.0),
+            owns_stream_timeout=False,
+        )
+        agent = SimpleNamespace(
+            backend=backend,
+            config=SimpleNamespace(request_timeout=0.05),
+            _current_subagent_run_id="",
+        )
+        started = time.monotonic()
+        with pytest.raises(ProviderTimeoutError) as caught:
+            generate_model_response(
+                ModelGenerateParams(
+                    agent=agent,
+                    params=_tool_loop_params(),
+                    prompt="abandoned websocket fixture",
+                    tool_rounds=0,
+                )
+            )
+
+        elapsed = time.monotonic() - started
+        assert caught.value.stage == "wall_clock"
+        assert request_seen.wait(timeout=0.5)
+        assert elapsed < 2.0
+        assert len(backend.worker_threads) == 2
+        assert all(not worker.is_alive() for worker in backend.worker_threads)
+        records = model_call_ledger(agent).records()
+        assert len(records) == 2
+        assert all(record.status == "timed_out" for record in records)
+        assert all(record.timeout_stage == "wall_clock" for record in records)
+        assert model_call_inflight_snapshot() == (0, 0.0)
+
+
+# LLM: A transport fake blocks the outbound protocol send until its socket is closed, proving the send phase owns a deadline.
+# 函数用途: 防止 WebSocket 请求帧发送在连接建立后无限阻塞。
+def test_websocket_request_send_has_a_deadline(monkeypatch):
+    from agent_py_agent.agent.backends import responses_websocket as websocket_backend
+
+    send_entered = threading.Event()
+    socket_closed = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def send(message):
+        del message
+        send_entered.set()
+        socket_closed.wait(timeout=5.0)
+        raise OSError("test socket closed during send")
+
+    def close_socket():
+        socket_closed.set()
+
+    connection = SimpleNamespace(send=send, close_socket=close_socket, close=close_socket)
+    monkeypatch.setattr(websocket_backend, "_open_connection", lambda request: connection)
+    request = _fake_response_request("ws://fake.invalid", timeout=0.05)
+
+    def call_transport():
+        try:
+            list(websocket_backend.iter_responses_websocket(request))
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=call_transport, daemon=True)
+    started = time.monotonic()
+    worker.start()
+    try:
+        assert send_entered.wait(timeout=0.5)
+        worker.join(timeout=2.0)
+
+        assert not worker.is_alive()
+        assert time.monotonic() - started < 2.0
+        error = outcome.get("error")
+        assert isinstance(error, ProviderTimeoutError)
+        assert error.stage == "first_event"
+        assert socket_closed.is_set()
+    finally:
+        socket_closed.set()
+        worker.join(timeout=2.0)
+
+
+# LLM: Model a peer that stalls send/read and never acknowledges a graceful close, so direct abort is observable.
+# 函数用途: 创建一个需要测试主动关闭的假 WebSocket 连接。
+def _make_stalled_websocket_connection():
+    receive_wakeup = threading.Event()
+    close_release = threading.Event()
+    send_entered = threading.Event()
+
+    def send(message):
+        del message
+        send_entered.set()
+
+    def recv(timeout):
+        if receive_wakeup.wait(timeout):
+            return "{}"
+        raise TimeoutError
+
+    def close():
+        close_release.wait(timeout=5.0)
+
+    def close_socket():
+        receive_wakeup.set()
+        close_release.set()
+
+    connection = SimpleNamespace(send=send, recv=recv, close=close, close_socket=close_socket)
+    return connection, send_entered
+
+
+# LLM: Consume one synthetic Responses stream in its own worker and preserve its thrown error for assertions.
+# 函数用途: 收集假 WebSocket 的中断结果。
+def _consume_websocket_transport(outcome, websocket_backend, request):
+    try:
+        list(websocket_backend.iter_responses_websocket(request))
+    except BaseException as exc:
+        outcome["error"] = exc
+
+
+# LLM: Simulate a peer that never acknowledges a graceful close; cancellation must use the immediate transport abort path.
+# 函数用途: 验证用户停止不会被 WebSocket 关闭握手拖住。
+def test_websocket_interrupt_aborts_without_waiting_for_close_handshake(monkeypatch):
+    from agent_py_agent.agent.backends import responses_websocket as websocket_backend
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+
+    connection, send_entered = _make_stalled_websocket_connection()
+    outcome: dict[str, object] = {}
+    monkeypatch.setattr(websocket_backend, "_open_connection", lambda request: connection)
+    request = _fake_response_request("ws://fake.invalid", timeout=5.0)
+    worker = threading.Thread(
+        target=_consume_websocket_transport,
+        args=(outcome, websocket_backend, request),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert send_entered.wait(timeout=0.5)
+        started = time.monotonic()
+        set_interrupt(True, worker.ident)
+        worker.join(timeout=1.5)
+        elapsed = time.monotonic() - started
+        assert not worker.is_alive()
+        assert elapsed < 1.5
+        assert isinstance(outcome.get("error"), InterruptedError)
+    finally:
+        connection.close_socket()
+        worker.join(timeout=2.0)
 
 
 def test_stream_transport_idle_timeout_is_not_reapplied_as_total_wall_timeout():

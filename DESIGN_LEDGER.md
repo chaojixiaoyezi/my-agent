@@ -1,5 +1,28 @@
 # 设计台账
 
+## 模型回合放弃时回收在途调用（luna3a，2026-10-03，分支 `worker/luna3-abandoned-calls`，提交 `a250c3936`，luna2 初审通过，DNS 与握手两处边界 3a 接受，并入 step17i）
+
+- **现象与根因**：9b 的结构化只读证据显示，回合已报 `PROVIDERTIMEOUTERROR` 后，Responses 模型 worker 仍留在无首包的网络读取里；墙钟守卫此前只放弃账本句柄，没有把取消传给 worker/传输层。
+- **修法**：墙钟超时先放弃这次调用，对精确 worker 置中断并按既有 1 秒排空窗口 join，再由上层捕获超时、收口原调用账（luna2 初审核对的实际顺序；排空窗口里 /status 仍可能把它算作在途）；SSE 关闭当前 response/socket，WebSocket 取消/异常直接 shutdown 当前 socket，正常终态才走 `close_timeout=5` 的关闭握手。WebSocket `response.create` 发送单独复用请求首事件预算，到期关 socket；错误仍沿既有 `first_event` 分类与重试规则。
+- **后续项**（luna2 初审）：补一条“WebSocket 发送卡住时收到取消”的用例，区分直接关 socket 和正常关闭握手。
+- **公开状态**：`GET /status` 增加 `in_flight_model_call_count` 与 `oldest_in_flight_model_call_age_seconds`，只从原模型调用账本只读计算，仅投影数字，不加第二状态源或模型/请求/回合身份。
+- **等待点与取消事实**：
+
+  | 等待点 | 当前期限 | 回合放弃后的结束方式 |
+  | --- | --- | --- |
+  | 系统 DNS `getaddrinfo` | **无本请求级可取消期限**；标准库同步解析不受 socket connect timeout 控制 | 若卡在系统解析器，取消回调尚无可关闭 socket，不能保证短时退出；这是明确的系统边界/剩余风险，不把它说成已解决。 |
+  | SSE TCP/TLS 连接 | `_bounded_connect_timeout` 从 `connect_timeout` 与首读预算取较小值；TLS 复用同一连接预算 | 连接对象已绑定时 open guard shutdown/close socket；DNS 解析期间仍受上一行限制。 |
+  | SSE POST 请求体发送 | 已连接 socket 用 `_request_initial_read_timeout(request)`（由现有首读/`request.timeout` 预算推出） | open guard shutdown/close 当前连接，唤醒阻塞写入。 |
+  | SSE 响应头 | `_request_initial_read_timeout(request)` 设置 HTTP socket read timeout | open guard 关闭已登记连接；等待 DNS 时仍受 DNS 行边界限制。 |
+  | SSE 首个事件 | `_stream_first_event_timeout(request)` 驱动 watchdog 和 read timeout | watchdog/中断 guard 关闭当前 socket，读取退出后原账本正常终态化。 |
+  | WebSocket TCP/TLS/升级握手 | `open_timeout=max(1s, connect_timeout 或 10s)`，是一次打开操作的总预算，不在升级时重置 | 握手中未暴露可关闭连接句柄，取消后最迟依赖 open timeout 返回；连接打开后中断回调可直接 close socket。 |
+  | WebSocket `response.create` 发送 | `_stream_first_event_timeout(request)`；独立 Timer 到期关闭当前 socket | 中断回调 `close_socket()` 唤醒 `sendall`，发送期限到期也直接 shutdown/close。 |
+  | WebSocket 首事件与流内空闲 | 首事件用首读预算；每条有效消息后用 `max(1s, request.timeout)` 滚动期限，recv 最多每秒检查取消 | recv 超时抛原阶段超时；放弃/停止直接 close socket，不等待服务端关闭握手。 |
+  | SSE 流内空闲 | 首条有效 data 后按 `request.timeout` 滚动 watchdog/socket read timeout | watchdog或中断 guard shutdown/close 当前响应；不等待无上限的 `readline()`。 |
+  | 正常关闭/错误清理 | WebSocket 正常终态关闭握手 `close_timeout=5s`；SSE response close 为本地清理 | 正常关闭有上限；错误、取消和超时直接中止 WebSocket socket，避免关闭握手延迟线程退出。 |
+
+- **验证边界**：本地随机端口假 WS/SSE 测试覆盖首事件、首事件后空闲、阻塞发送、wall-clock 放弃和账本结清；真实 Gateway、生产模型及 OS DNS 挂死未验证。没有新增配置或常数。
+
 ## 能力包：交付物未匹配（pdm，2026-10-03，分支 `worker/pack-deliverable-unmatched`，基于 `claude/3a-step17i` `c47d023b6`，3a 复审，并入 step17i）
 
 - **起因**：B8 重试点 A10-t102（`decision-evidence/capability-packs-v2-b8/repilot-c47d023b6/`）：模型把交付物写成 `drama_text_delivery.v3`——内容是含正确 schema 的 json，只是文件名不匹配包的路径模式 `**/*.json`。宿主核验一个目标都没查（`closeout.target_count=0`）、包内检查程序一次没跑，返工提示还说“本回合没有写出”——把“换了文件名”误报成“没写”，模型重复收尾 2 次也不改名，回合照常结束。

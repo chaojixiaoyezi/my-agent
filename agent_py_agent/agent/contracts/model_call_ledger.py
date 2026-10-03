@@ -1028,6 +1028,31 @@ def close_model_call_admission(closure: ModelCallAdmissionClosure) -> tuple[Mode
     return tuple(record for ledger in ledgers for record in _fail_open_calls(ledger, closure))
 
 
+# LLM: 只读聚合本进程已登记的原模型账本；快照后再逐账本取锁，保持与关门的锁序，不保存副本状态。
+#   对外仅返回调用数与最大年龄，绝不投影模型、请求、run 或提示词身份；时间使用各账本同源单调时钟。
+# 函数用途: 为公开 /status 提供当前在途模型调用数和最老调用年龄，不暴露调用明细。
+def model_call_inflight_snapshot() -> tuple[int, float]:
+    registry = _ADMISSION_REGISTRY
+    with registry.lock:
+        ledgers = tuple(registry.ledgers)
+    count = 0
+    oldest_age = 0.0
+    for ledger in ledgers:
+        ledger_count, ledger_oldest_age = _ledger_inflight_snapshot(ledger)
+        count += ledger_count
+        oldest_age = max(oldest_age, ledger_oldest_age)
+    return count, oldest_age
+
+
+# LLM: 只从单个原账本中过滤活动状态并计算最大年龄；不复制记录或保留第二份状态。
+# 函数用途: 汇总一本账本内仍在途的调用数和最老年龄。
+def _ledger_inflight_snapshot(ledger: ModelCallLedger) -> tuple[int, float]:
+    now = float(ledger.context.now())
+    active = tuple(record for record in ledger.records() if record.status in {"started", "first_token"})
+    oldest_age = max((max(0.0, now - float(record.started_at)) for record in active), default=0.0)
+    return len(active), oldest_age
+
+
 # LLM: 调用方（决策入口、子代理失败分类、运行错误报告）认“停机准入拒绝”的唯一判定：只沿显式 __cause__（raise ... from）
 #   往里找 ModelCallAdmissionClosedError，不沿 __context__、不读异常文本；有环防护。找不到返回 None。
 # 函数用途: 从异常及其显式原因链里找出停机准入拒绝，供调用方按“宿主停机”而不是普通失败收尾。

@@ -1,5 +1,12 @@
 # Gateway Structure
 
+## 模型调用在途状态与 /status 投影（luna3a，2026-10-03）
+
+- `gateway_parts/http_handlers.handle_status` 直接调用 `contracts.model_call_ledger.model_call_inflight_snapshot()`；该函数快照进程原有准入注册表里的账本，只统计 `started` / `first_token`，按账本同源单调时钟计算最老年龄。
+- 响应只增加 `in_flight_model_call_count` 和 `oldest_in_flight_model_call_age_seconds` 两个数值字段；不投影模型名、请求号、run/thread 身份或正文，不新建计数器/持久状态。
+- 调用结算由原账本终态字段自然移出在途统计；墙钟守卫仍在 `tool_model_generation` 负责 abandon 与 timeout，具体传输取消由 SSE response guard、Responses WebSocket `close_socket()` 作用于当前连接。
+- 传输等待边界、DNS 解析的 OS 级限制和本地假服务验证范围见 `DESIGN_LEDGER.md` 顶部及 `docs/design/MODEL_OAUTH.md`。
+
 ## 续跑上限收口时的插话结算（step17h，分支 `claude/38-limit-steer-note`，9b 复审补本节）
 
 - 插话收口只有一个分流点：`gateway_parts/recovery._settle_turn_guidance`。terminalize 经 `_settle_terminal_guidance`，
