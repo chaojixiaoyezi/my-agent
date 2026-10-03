@@ -26,14 +26,20 @@ from agent_py_agent.agent.gateway_parts.local_client_token import (
     LocalClientCredentialError,
     ensure_local_client_credential,
     load_local_client_credential,
+    local_client_credential_path,
 )
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.plugin_sandbox import plugin_sandbox_spec
 from agent_py_agent.agent.tooling.shell import _subprocess_text_env
+from agent_py_agent.agent.user_space.home_layout import home_paths
 
 
 def _credential_path(root):
-    return root / "secrets" / "gateway-local-client-token"
+    return local_client_credential_path(root)
+
+
+def _agent(root):
+    return SimpleNamespace(home_paths=home_paths(root))
 
 
 def test_missing_creates_private_credential_and_restart_reuses(tmp_path, monkeypatch):
@@ -126,7 +132,7 @@ def test_start_hook_uses_canonical_root_and_restart_does_not_delete(tmp_path, mo
     from agent_py_agent.agent.gateway_parts.http_handlers import handle_status
 
     root = tmp_path / "data-root"
-    agent = SimpleNamespace(home_paths=SimpleNamespace(root=root))
+    agent = _agent(root)
     paths = gateway_paths_from_root(tmp_path / "separate-queue")
     class Listener:
         server_address = ("127.0.0.1", 0)
@@ -142,6 +148,12 @@ def test_start_hook_uses_canonical_root_and_restart_does_not_delete(tmp_path, mo
     server.start()
     try:
         assert _credential_path(root).is_file()
+        spec = plugin_sandbox_spec(
+            cwd=agent.home_paths.owner_home_dir,
+            data_dir=agent.home_paths.owner_home_dir / "plugin-data",
+            owner_home=agent.home_paths.owner_home_dir,
+        )
+        assert _credential_path(root) in spec.hidden_paths
         token = load_local_client_credential(root)
         responses = []
         handler = SimpleNamespace(_send_json=lambda status, body: responses.append((status, body)))
@@ -185,7 +197,7 @@ def test_unavailable_credential_still_starts_and_reports_reason(tmp_path, damage
     else:
         path.parent.chmod(0o755)
     before = (path.read_bytes(), path.stat().st_mtime_ns)
-    agent = SimpleNamespace(home_paths=SimpleNamespace(root=root))
+    agent = _agent(root)
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=agent))
     server.start()
@@ -201,8 +213,8 @@ def test_unavailable_credential_still_starts_and_reports_reason(tmp_path, damage
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
-def test_missing_home_paths_reports_no_data_root_and_keeps_counting(tmp_path, monkeypatch):
-    # 假 Agent 没有 home_paths：不回退真实默认 home，记 no_data_root 照常启动；回环请求照常计数。
+def test_agent_contract_violation_reports_structured_reason_and_keeps_counting(tmp_path, monkeypatch):
+    # 真 Agent 必须有 home_paths；坏合同不能伪装成普通的数据根降级。
     monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result",
                         lambda handler: handler._send_json(200, {"ok": True}))
     middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
@@ -210,8 +222,29 @@ def test_missing_home_paths_reports_no_data_root_and_keeps_counting(tmp_path, mo
                                params=GatewayHTTPServerParams(agent=SimpleNamespace(), auth_middleware=middleware))
     server.start()
     try:
-        assert server.local_credential_status == "unavailable:no_data_root"
+        assert server.local_credential_status == "unavailable:agent_contract"
         assert middleware.has_gateway_credential({}) is False
+        port = server.server.server_address[1]
+        assert _get(port, "/status")[1]["local_credential"] == "unavailable:agent_contract"
+        assert _get(port, "/result/fixture-request")[0] == 200
+        facts = _get(port, "/status")[1]["uncredentialed_loopback_by_endpoint"]
+        assert facts.get("/result/*", {}).get("count") == 1
+    finally:
+        server.stop()
+
+
+def test_agent_none_has_no_data_root_and_never_creates_credentials(tmp_path, monkeypatch):
+    # 没有 Agent 就没有受信 home_paths 根，即使队列路径看似生产布局也不据此写凭据。
+    monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result",
+                        lambda handler: handler._send_json(200, {"ok": True}))
+    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+    root = tmp_path / "data-root"
+    gateway_root = root / "owners" / "local" / "main" / "workspace" / "runtime" / "services" / "gateway"
+    server = GatewayHTTPServer(0, gateway_paths_from_root(gateway_root),
+                               params=GatewayHTTPServerParams(agent=None, auth_middleware=middleware))
+    server.start()
+    try:
+        assert server.local_credential_status == "unavailable:no_data_root"
         port = server.server.server_address[1]
         assert _get(port, "/status")[1]["local_credential"] == "unavailable:no_data_root"
         assert _get(port, "/result/fixture-request")[0] == 200
@@ -219,3 +252,22 @@ def test_missing_home_paths_reports_no_data_root_and_keeps_counting(tmp_path, mo
         assert facts.get("/result/*", {}).get("count") == 1
     finally:
         server.stop()
+    assert not list(root.rglob("gateway-local-client-token"))
+
+
+def test_ensure_rejects_secrets_directory_symlink_without_writing(tmp_path):
+    root = tmp_path / "data-root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    (root / "secrets").symlink_to(outside, target_is_directory=True)
+
+    caught = None
+    try:
+        ensure_local_client_credential(root)
+    except LocalClientCredentialError as exc:
+        caught = exc
+
+    assert list(outside.iterdir()) == []
+    assert caught is not None
+    assert caught.reason_code == "LOCAL_CLIENT_CREDENTIAL_INVALID"

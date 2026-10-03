@@ -1,5 +1,12 @@
 # 设计台账
 
+## Gateway G1 加固（g1h，2026-10-03，worker/g1-hardening，已并入 step17i：luna4 初审提出的 3 条由 luna4 修复，3a 沙箱外 20 个相关文件 432 passed，作者沙箱里 test_plugin_sandbox 和 test_directory_lock_wait 的 5 个失败在沙箱外都过；9b 核对这 3 处）
+
+- 真 Agent 的凭据数据根从 `home_paths.owner_home_dir` 经 `agent_home_root_for_owner` 推导，并校验等于 `home_paths.root`；非空 Agent 缺失/不符合同属性时报 `unavailable:agent_contract`，不把合同破坏伪装成正常无根降级。
+- `agent=None` 没有可信 `home_paths`，记 `unavailable:no_data_root`，G2a 仍启动和观察回环请求，但不从队列目录猜根、不创建凭据文件。有效 owner 布局下凭据路径与插件沙箱 H2 隐藏路径同源。
+- 生成前用 no-follow 目录锁、读取与原子写逐级守住数据根下的 `secrets/`；目录/文件符号链接拒绝为结构化 invalid，父目录权限不合规则拒绝而非静默修复。
+- G2a 语义不变：本机凭据准备失败只投影原因码、匿名回环照常放行并计数；G2b 服务端强制不在本次范围。测试、变异及门禁结果见 TESTS。
+
 ## IM 加模型补用例：接口列表外的模型名（2026-10-03，imadd，worker/im-model-add-test，已并入 step17i（3a 复审））
 
 - 背景：17i 双入口核对（entries）缺口 1——TUI 手动填写允许加服务商接口列表里没有的模型名（`test_tui_model_add.py` 覆盖），IM 侧（`manage_models` 工具）缺对应用例；将来若有人给 IM 也加“只许选列表里的”限制不会被抓到。

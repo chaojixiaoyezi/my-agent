@@ -16,6 +16,7 @@ from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts import display_archive_service
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
 from agent_py_agent.agent.gateway_parts.display_archive_service import read_gateway_display_page
+from agent_py_agent.agent.user_space.home_layout import home_paths
 
 
 # LLM: Helpers construct real owner-scoped canonical stores only under pytest temporary roots.
@@ -26,7 +27,7 @@ def _owner(root, *, session="session", user="user"):
         "canonical_user_id": user, "channel": "chat",
         "channel_conversation_id": session, "channel_user_id": user,
     })
-    return SimpleNamespace(conversation_store=store), thread
+    return SimpleNamespace(conversation_store=store, home_paths=home_paths(root / "agent-home")), thread
 
 
 def test_pages_reconstruct_all_long_unicode_rows_and_keep_snapshots(tmp_path):

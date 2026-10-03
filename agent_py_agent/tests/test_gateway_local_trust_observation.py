@@ -21,6 +21,7 @@ from agent_py_agent.agent.gateway_parts.local_client_token import (
     load_local_client_credential,
 )
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+from agent_py_agent.agent.user_space.home_layout import home_paths
 
 
 def _request(port, method, path, headers=None):
@@ -44,7 +45,10 @@ def listener(tmp_path, monkeypatch):
     middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True),
                                 auth_token=ensure_local_client_credential(tmp_path / "configured-token-fixture"))
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "gateway"),
-                               params=GatewayHTTPServerParams(auth_middleware=middleware))
+                               params=GatewayHTTPServerParams(
+                                   agent=SimpleNamespace(home_paths=home_paths(tmp_path)),
+                                   auth_middleware=middleware,
+                               ))
     server.start()
     try:
         yield server, server.server.server_address[1], tmp_path

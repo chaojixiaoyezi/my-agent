@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## Gateway G1 加固（2026-10-03，g1h，worker/g1-hardening，待 9b 核对）
+
+- Agent 凭据根由 `agent_home_root_for_owner(home_paths.owner_home_dir)` 推导，并与 `home_paths.root` 核对；缺少 Agent 合同报 `unavailable:agent_contract`。`agent=None` 报 `unavailable:no_data_root`，不从队列路径回退或创建凭据。
+- G1 锁、目录检查、读取与原子写复用 no-follow 文件系统原语；目录符号链接在生成/权限操作前拒绝，链接目标不落锁文件或凭据。测试假 Agent 使用规范 `home_paths(...)`。
+- 直接相关 15 个测试文件（G1/G2a/G3、Gateway 状态与 HTTP、鉴权、插件 Host API、路径 I/O）退出 0、运行到 100%；完整命令：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_local_client_token.py agent_py_agent/tests/test_gateway_local_trust_observation.py agent_py_agent/tests/test_gateway_client_credentials.py agent_py_agent/tests/test_gateway_auth_hardening.py agent_py_agent/tests/test_gateway_identity_trust.py agent_py_agent/tests/test_auth.py agent_py_agent/tests/test_gateway_status_runtime_errors.py agent_py_agent/tests/test_gateway_runtime_status_errors.py agent_py_agent/tests/test_gateway_http_runtime_errors.py agent_py_agent/tests/test_gateway_commands.py agent_py_agent/tests/test_gateway_status_tool.py agent_py_agent/tests/test_plugin_host_api.py agent_py_agent/tests/test_display_archive.py agent_py_agent/tests/test_gateway_client_service.py agent_py_agent/tests/test_nofollow_binary_io.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g1h-related2
+  ```
+- guards9（含 `test_packaging.py`）从 `~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt` 读取清单执行，退出 0、到达 100%。
+- 三个单点变异均被相应用例抓到且已逐一还原：缺属性静默降级成 `no_data_root`；`agent=None` 回退 `paths.root.parent`（状态误成 `ok`）；no-follow 目录打开跟随符号链接（目标中实见 `.lock` 与凭据文件）。
+- 一次扩展回归还执行了 `test_plugin_sandbox.py` 与 `test_directory_lock_wait.py`：插件沙箱文件有 4 项在启用阶段观察到 `state=failed`，包括 `process_sandbox=False` 的测试；目录锁等待文件有 1 项失败并返回 `managed background launcher identity unavailable`。这些输出未确认根因或是否与本改动/宿主限制有关，不计为通过，也未修改或删除对应测试。
+- 静态门禁：Ruff `All checks passed!`；import boundaries `findings=0`；doc sync `DOC_SYNC_PASS`；strict code-size 退出 0（`strict_scope_total=2214 hard=0 high-risk=1514 soft=700 test_advisory=1237 blocked=False`），生成的 `CODE_SIZE_REPORT.md` 已恢复；size_diff `新增告警: 0 / 消失告警: 23`；clean-package `OK: . 未发现发布阻塞项`；`git diff --check` 与 staged diff-check 退出 0。
+
 ## IM 侧加模型补用例：接口列表外的模型名（2026-10-03，imadd，worker/im-model-add-test，待复审）
 
 - 来源：17i 双入口核对（entries）缺口 1——TUI 手动填写允许加接口列表里没有的模型名，IM 侧没有对应用例；将来若有人给 IM（manage_models）也加“只许选列表里的”限制，不会被抓到。

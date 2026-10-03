@@ -19,8 +19,8 @@
 
 ## G1+G2a 宿主凭据与同源路由观察（2026-10-03，sol1g，待初审/9b 终审）
 
-- gateway_parts/local_client_token.py 是路径、生成与读取的唯一权威；common/json_io 的共用锁和私有原子写确保只有一个生成者，读取不修改。
-- GatewayHTTPServer.start → _prepare_local_credential → ensure_local_client_credential；生产数据根来自 agent.home_paths.root，不随队列/执行cwd移动。无Agent的独立HTTP传输以显式队列父根为数据根，不回退用户默认home。
+- gateway_parts/local_client_token.py 是凭据路径、生成与读取的唯一权威；common/directory_lock 与 common/nofollow_fs 提供 no-follow 锁、逐层读取和原子写，目录/文件符号链接拒绝，权限错误不静默修复。
+- GatewayHTTPServer.start → _prepare_local_credential → ensure_local_client_credential；真实 Agent 的 owner_home_dir 经 agent_home_root_for_owner 推导，并与 home_paths.root 校验，不随队列/执行 cwd 移动。缺少 Agent 合同记 agent_contract；agent=None 记 no_data_root、照常启动但不创建凭据，不从队列路径回退。
 - plugin_sandbox_spec 从可信 owner 路径反推数据根，登记凭据文件和 secrets 父目录；Linux目录空覆盖/macOS拒读写都由原H2实现。Full Access 和关闭插件沙箱的边界见 GATEWAY_LOCAL_TRUST。
 - `_prepare_local_credential` 把严读凭据绑定到 `AuthMiddleware`，与原配置凭据常量时间比较，不进入模型环境、命令参数或状态对象。
 - `http_routes.GATEWAY_HTTP_ROUTES` 同时决定 GET/POST 的处理器及观察模板/档位；`GatewayHTTPHandler._dispatch_route` 在原业务处理前观察一次，原处理器内部的权限判定不变。守卫用随机端口遍历全部路由的真实分发，不维护另一份计数白名单。

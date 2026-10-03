@@ -10,10 +10,17 @@ import secrets
 import stat
 from pathlib import Path
 
-from ..common.json_io import locked_json_path, write_private_text_file_atomic_unlocked
+from ..common.directory_lock import locked_private_directory
+from ..common.nofollow_fs import (
+    NoFollowPathError,
+    open_directory_beneath,
+    open_readonly_file_beneath,
+    write_text_atomic_beneath,
+)
 from ..path_access_policy import HOST_SECRET_DIR_NAME
 
 LOCAL_CLIENT_CREDENTIAL_FILE_NAME = "gateway-local-client-token"
+_LOCAL_CLIENT_CREDENTIAL_PARTS = (HOST_SECRET_DIR_NAME, LOCAL_CLIENT_CREDENTIAL_FILE_NAME)
 # 随机凭据的熵字节数，token_urlsafe 编码后供宿主请求头使用。
 LOCAL_CLIENT_CREDENTIAL_ENTROPY_BYTES = 32
 # 32 字节无填充 URL-safe base64 的固定字符数；拒绝空串、损坏或非协议内容。
@@ -36,7 +43,7 @@ class LocalClientCredentialError(RuntimeError):
 # LLM: 仅拼接明确的数据根，不读环境或猜 owner；插件 H2 与启动钩子必须使用同一路径。
 # 函数用途: 返回本机客户端凭据的规范路径。
 def local_client_credential_path(data_root: str | Path) -> Path:
-    return Path(data_root) / HOST_SECRET_DIR_NAME / LOCAL_CLIENT_CREDENTIAL_FILE_NAME
+    return Path(data_root).joinpath(*_LOCAL_CLIENT_CREDENTIAL_PARTS)
 
 
 # LLM: 属主与权限都须匹配；不替客户端修权限，失败不得静默降级成无凭据。
@@ -56,17 +63,24 @@ def _credential_io_error(exc: OSError) -> LocalClientCredentialError:
     return LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_UNREADABLE")
 
 
-# LLM: 不跟凭据/直接父目录的符号链接；限额读取后只接受固定格式，坏内容不能进入异常链。
-# 函数用途: 从私有普通文件读取并验证随机凭据。
-def _read_credential(path: Path) -> str:
-    info = path.lstat()
-    parent = path.parent.lstat()
-    if not stat.S_ISREG(info.st_mode) or not stat.S_ISDIR(parent.st_mode):
-        raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_INVALID")
-    _check_private_stat(parent, 0o700)
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
-        _check_private_stat(os.fstat(handle.fileno()), 0o600)
-        raw = handle.read(LOCAL_CLIENT_CREDENTIAL_READ_BYTES + 1)
+# LLM: 数据根以下每一级目录与凭据叶子都经 no-follow dirfd 原语读取；所有权/权限和格式仍是 G1 合同。
+# 函数用途: 从私有普通文件读取并验证随机凭据，不允许路径中的目录或文件符号链接。
+def _read_credential(data_root: str | Path) -> str:
+    try:
+        directory = open_directory_beneath(data_root, _LOCAL_CLIENT_CREDENTIAL_PARTS[:-1])
+    except NoFollowPathError:
+        raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_INVALID") from None
+    try:
+        _check_private_stat(os.fstat(directory), 0o700)
+        try:
+            descriptor = open_readonly_file_beneath(data_root, _LOCAL_CLIENT_CREDENTIAL_PARTS)
+        except NoFollowPathError:
+            raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_INVALID") from None
+        with os.fdopen(descriptor, "rb") as handle:
+            _check_private_stat(os.fstat(handle.fileno()), 0o600)
+            raw = handle.read(LOCAL_CLIENT_CREDENTIAL_READ_BYTES + 1)
+    finally:
+        os.close(directory)
     token = raw.removesuffix(b"\n").decode("ascii", errors="replace")
     if not re.fullmatch(r"[A-Za-z0-9_-]{" + str(LOCAL_CLIENT_CREDENTIAL_ENCODED_CHARS) + "}", token):
         raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_INVALID")
@@ -77,31 +91,54 @@ def _read_credential(path: Path) -> str:
 # 函数用途: 从明确的数据根读取本机客户端凭据。
 def load_local_client_credential(data_root: str | Path) -> str:
     try:
-        return _read_credential(local_client_credential_path(data_root))
+        return _read_credential(data_root)
+    except NoFollowPathError:
+        raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_INVALID") from None
     except OSError as exc:
         raise _credential_io_error(exc) from None
 
 
-# LLM: 只由宿主启动调用；锁覆盖存在检查与生成，跨线程/进程不覆盖赢家。坏文件/权限错误保留原件并拒绝启动。
-#   写入和目录收紧只复用 json_io，不自写 chmod；落盘后严读保证私有写的尽力收紧不被误当成成功。
+# LLM: This read-only preflight runs before the shared lock primitive, whose contract tightens the directory it opens.
+# 函数用途: 在任何凭据锁、目录权限调整或写入之前，确认已有 secrets 目录未被链接且权限已经合规。
+def _check_existing_secret_directory(data_root: str | Path) -> None:
+    try:
+        descriptor = open_directory_beneath(data_root, _LOCAL_CLIENT_CREDENTIAL_PARTS[:-1])
+    except FileNotFoundError:
+        return
+    except NoFollowPathError:
+        raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_INVALID") from None
+    try:
+        _check_private_stat(os.fstat(descriptor), 0o700)
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 只由宿主启动调用；固定 secrets 目录锁与所有文件操作都经 no-follow 原语，坏文件/权限错误保留原件并拒绝启动。
+#   目录检查、收紧和原子写入不能沿路径跟随链接；落盘后严读，不能把失败的私有写误当成功。
 # 函数用途: 确保本机客户端凭据存在并返回其值。
 def ensure_local_client_credential(data_root: str | Path) -> str:
-    path = local_client_credential_path(data_root)
     try:
-        with locked_json_path(path):
-            return _ensure_credential_locked(data_root, path)
+        _check_existing_secret_directory(data_root)
+        with locked_private_directory(
+            Path(data_root),
+            lock_name=LOCAL_CLIENT_CREDENTIAL_FILE_NAME + ".lock",
+            relative_parts=(_LOCAL_CLIENT_CREDENTIAL_PARTS[0],),
+        ):
+            return _ensure_credential_locked(data_root)
+    except NoFollowPathError:
+        raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_INVALID") from None
     except OSError as exc:
         raise _credential_io_error(exc) from None
 
 
-# LLM: 调用方持共用不可重入锁；仅 missing 可生成，其它错误不能造成轮换。不得设置环境变量或调用日志。
+# LLM: 调用方持受信目录锁；仅 missing 可生成，其它错误不能造成轮换。写入在 data_root 下逐层 no-follow 原子提交。
 # 函数用途: 在原临界区内复用已有凭据，或私有原子写入新凭据。
-def _ensure_credential_locked(data_root: str | Path, path: Path) -> str:
+def _ensure_credential_locked(data_root: str | Path) -> str:
     try:
         return load_local_client_credential(data_root)
     except LocalClientCredentialError as exc:
         if exc.reason_code != "LOCAL_CLIENT_CREDENTIAL_MISSING":
             raise
     token = secrets.token_urlsafe(LOCAL_CLIENT_CREDENTIAL_ENTROPY_BYTES)
-    write_private_text_file_atomic_unlocked(path, token + "\n")
+    write_text_atomic_beneath(data_root, _LOCAL_CLIENT_CREDENTIAL_PARTS, token + "\n")
     return load_local_client_credential(data_root)

@@ -37,6 +37,9 @@
   - **轮换**：不做自动轮换。需要换时（例如怀疑泄露）由宿主显式删文件再重启，下次启动重新生成；这是运维动作，不进自动路径。
 - **放哪**：数据根 `secrets/` 下一个文件，`0600`、父目录 `0700`，和 `admin-password.json` 同一套权限写法（`user_space/admin_password.py:172-175`）。选 `secrets/` 是因为 H3 已经把“数据根里 owner home 之外任何一层叫 `secrets` 的目录”整个当凭据目录：文件工具连读都拒（`path_access_policy.py` 的 `HOST_SECRET_DIR_NAME`），模型命令在隔离 owner 下也看不到数据根（H2 的 `private_read_roots`）。
   - 已知边界：Full Access（本机管理员、无 owner 墙）下模型命令能读数据根，凭据文件在这一档不是秘密；该档靠第 (1) 层端口拒绝兜底。文档和用例都写明，不夸大凭据在 Full Access 下的作用。
+- G1 加固（g1h）：Gateway 只用 `home_paths.owner_home_dir` 经共享 `agent_home_root_for_owner` 推导数据根，并校验它与 `home_paths.root` 一致；插件沙箱沿同一 helper 得到相同数据根。非空 Agent 缺少或不符合同属性时报结构化 `unavailable:agent_contract`。
+- 没有 Agent 时没有可信 home 根，G2a 记 `unavailable:no_data_root`、照常启动和观察回环流量，但不从 Gateway 队列路径反推或创建凭据；标准 owner 布局里的凭据文件只落在数据根 `secrets/`，并与 H2 隐藏路径一致。
+- 从已验证数据根到 `secrets/` 的目录链、锁文件和凭据文件均经 no-follow 原语；目录或叶子符号链接拒绝并返回 `LOCAL_CLIENT_CREDENTIAL_INVALID`，在任何凭据生成/目录 chmod 前拒绝，不触及链接目标。既有目录权限错误继续拒绝，不静默修复。
 - **谁生成、谁读**：Gateway 宿主进程启动时确保文件存在（缺则生成）；本机客户端用一个稳定的宿主侧读取函数 `load_local_client_credential(data_root)` 读它（见 1.3）。不随停机删除（持久化）。
 - **凭据等同宿主身份，按 admin-password 同级对待**（9b）：持有方可声明任意 `X-User-Id`/`X-Channel`，无头即管理员。所以：
   - 不进日志；不放进环境变量或命令行参数（环境会被模型命令和插件子进程继承，命令行参数 `ps` 就能看到）；不出现在 `/status`。

@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+## G1 加固（2026-10-03，g1h，worker/g1-hardening，待 9b 核对）
+
+- 真实 `home_paths` 合同作为凭据根来源；路径只经 `agent_home_root_for_owner` 从 owner home 推导并与 `home_paths.root` 核对。缺失属性是 `agent_contract`，没有 Agent 则 `no_data_root`，不会从队列目录写入。
+- G1 写锁、目录校验、读与原子写复用 no-follow 文件系统原语；目录符号链接在生成、锁文件写入或 chmod 前拒绝，既有权限错误不自动修复。验证命令与未覆盖边界见 TESTS.md 同名节。
+
 ## 宿主侧抓取工具屏蔽本机 Gateway（G6，2026-10-03，luna1g6，`worker/luna1-g6-fetch-port`，ae 复审修正中，待复审/9b 终审）
 
 - `tooling.web` 每跳读取 G4 的 `gateway_bound_ports()`，并合并正数 `gateway_port` 配置后备；端口 0 或无端口事实时 G6 不适用，端口无法读取/不合法时只拒确认的本机目标。

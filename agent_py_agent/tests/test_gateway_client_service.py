@@ -18,6 +18,7 @@ from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServerParams,
 )
 from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+from agent_py_agent.agent.user_space.home_layout import home_paths
 
 
 def _free_port() -> int:
@@ -195,7 +196,7 @@ def test_gateway_http_routes_client_memory_and_history(monkeypatch, tmp_path) ->
     server = GatewayHTTPServer(
         port,
         _paths(tmp_path),
-        params=GatewayHTTPServerParams(agent=object()),
+        params=GatewayHTTPServerParams(agent=SimpleNamespace(home_paths=home_paths(tmp_path / "agent-home"))),
     )
     server.start()
     try:

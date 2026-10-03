@@ -50,6 +50,7 @@ from .http_handlers import (
 from .io import update_json_file_atomic
 from .local_client_token import LocalClientCredentialError, ensure_local_client_credential
 from .http_routes import GATEWAY_HTTP_ROUTES as GATEWAY_HTTP_ROUTES, match_gateway_http_route
+from ..path_access_policy import agent_home_root_for_owner
 
 if TYPE_CHECKING:
     from ..agent.core import SimpleAgent
@@ -354,29 +355,39 @@ class GatewayHTTPServer:
 
         register_gateway_bound_port(bound_port)
 
-    # LLM: 数据根优先取 Agent 的 canonical home_paths.root（getattr 兼容不带该属性的假 Agent）；独立 HTTP 传输
-    #   无 Agent 时按队列父根布局。G2a 阶段凭据准备失败只降级为结构化状态，不拦启动；凭据不进入状态或 env。
+    # LLM: 数据根只从真实 Agent.home_paths.owner_home_dir 经共享 canonical 推导取得；缺失属性是合同错误，None Agent 不授权队列路径写凭据。
+    #   G2a 阶段准备失败只降级为结构化状态、不拦启动；凭据不进入状态或 env。
     # 函数用途: 准备持久本机客户端凭据，失败时记录不可用状态。
     def _prepare_local_credential(self) -> None:
-        root = self._local_credential_data_root()
-        if root is None:
-            self._apply_local_credential("", "unavailable:no_data_root")
-            return
         try:
+            root = self._local_credential_data_root()
+            if root is None:
+                self._apply_local_credential("", "unavailable:no_data_root")
+                return
             credential = ensure_local_client_credential(root)
         except LocalClientCredentialError as exc:
             self._apply_local_credential("", f"unavailable:{exc.reason_code}")
             return
         self._apply_local_credential(credential, "ok")
 
-    # LLM: home_paths 缺失时记 no_data_root，不回退真实默认 home；独立传输无 Agent 仍按队列父根，测试与生产同一取法。
-    # 函数用途: 解析凭据应写入的数据根，无法安全确定时返回 None。
+    # LLM: Agent.home_paths 是 SimpleAgent 必有合同；其 owner_home_dir 经插件沙箱同一 helper 推根，并校验 root 投影一致。
+    #   agent=None 表示没有 canonical home 权威，不能从队列位置推测写入目标。
+    # 函数用途: 从可信 Agent 的真实 home 路径解析凭据数据根，合同错误抛原因码，缺少 Agent 根时返回 None。
     def _local_credential_data_root(self) -> Path | None:
         if self.agent is None:
-            return self.paths.root.parent
-        home_paths = getattr(self.agent, "home_paths", None)
-        root = getattr(home_paths, "root", None)
-        return root if root is not None else None
+            return None
+        try:
+            home_paths = self.agent.home_paths
+            owner_home = Path(home_paths.owner_home_dir)
+            declared_root = Path(home_paths.root).expanduser().resolve()
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            raise LocalClientCredentialError("agent_contract") from None
+        data_root = agent_home_root_for_owner(owner_home)
+        if data_root is None:
+            return None
+        if declared_root != data_root:
+            raise LocalClientCredentialError("agent_contract")
+        return data_root
 
     # LLM: 凭据值、公开状态与中间件绑定必须同步更新；失败时清空绑定，避免上一轮或坏文件残留可用凭据的错觉。
     # 函数用途: 写入凭据与状态，并同步给鉴权中间件。
