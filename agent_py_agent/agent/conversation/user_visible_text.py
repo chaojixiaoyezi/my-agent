@@ -83,11 +83,12 @@ _LINE_LEADING_MARKER_RE = re.compile(
 
 # LLM: 方括号工具块只在【行首开标签 + 成对闭标签】时算协议；缺闭标签的旧写法会把正文里单独
 #   提到的一个开标签当成块首、把后面整段吞掉（本轮误判同类）。开闭标签同在一行或跨行都算。
+#   闭标签后的换行只向前看、不吃掉：块前块后的段落之间保留原来的空行，与旧投影的排版一致。
 # 常量用途: 匹配以行首工具调用/结果开标签开始、到成对闭标签为止的整段。
 _BRACKET_TOOL_BLOCK_RE = re.compile(
     r"(?m)^[ \t]*\[TOOL_(?:CALL|RESULT)\][^\r\n]*?"
     r".*?"
-    r"\[/TOOL_(?:CALL|RESULT)\][ \t]*(?:\r?\n|\Z)",
+    r"\[/TOOL_(?:CALL|RESULT)\][ \t]*(?=\r?\n|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 _FENCED_TOOL_BLOCK_RE = re.compile(
