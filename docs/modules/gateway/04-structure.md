@@ -2494,3 +2494,9 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 ## 工具默认收起声明（2026-10-02）
 
 - 持久提醒工具 `schedule`（`agent/scheduler/tool.py`）带 `default_deferred=True` 与 `deferred_summary`；是否真的收起由 ToolRegistry 按 `tool_default_deferral_enabled` 统一决定（`tooling/registry._declared_deferred_names`），调度器本身不感知。
+
+## G4 本机 Gateway 端口拒绝（2026-10-03）
+
+- 进程内注册表 `attempt.sandbox` 的 `register_gateway_bound_port` / `unregister_gateway_bound_port` / `gateway_bound_ports`：Gateway `http_service.start/stop` 登记与注销实际绑定端口；模型命令在 Gateway 进程内执行，所以 `tooling/shell._sandbox_exec` 读得到。
+- `AttemptSandboxSpec.deny_gateway_ports` 只由模型命令沙箱填写；macOS 由 `_gateway_port_denies` 生成 `*:<port>` 出站拒绝、排在 `_spec_rules` 最后。插件进程沙箱不填（它要连 `/plugin-host/query`）。
+- 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则；同机其它 Gateway 实例不在第 (1) 层范围（靠第 (2) 层）。

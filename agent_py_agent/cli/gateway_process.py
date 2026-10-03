@@ -433,6 +433,14 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         args=(context, stop_event),
         daemon=True,
     )
+    # G4：启动恢复会把中断的回合重新入队并立即续跑，请求线程/后台线程在 HTTP 绑定前就能起模型命令。
+    # 所以先按配置端口预登记，模型命令沙箱从一开始就带端口拒绝；绑定后 http_server.start() 再登记实际端口（同值幂等），
+    # 绑定失败时注销预登记（在 _start_gateway_http 里）。http_port=0（不开 HTTP）时没有 Gateway 端口可拒，不预登记。
+    from ..agent.attempt.sandbox import register_gateway_bound_port
+
+    http_port = request.http_port
+    if http_port > 0:
+        register_gateway_bound_port(http_port)
     request_thread = threading.Thread(
         target=_gateway_request_loop,
         args=(context, paths, stop_event),
@@ -445,16 +453,8 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         daemon=True,
     )
     background_thread.start()
-    http_server: GatewayHTTPServer | None = None
-    http_port = request.http_port
     pid = os.getpid()
-    if http_port > 0:
-        http_params = GatewayHTTPServerParams(
-            auth_middleware=_build_gateway_auth_middleware(agent.config),
-            bind_host=getattr(agent.config, "gateway_bind_host", "127.0.0.1"),
-            agent=agent,
-        )
-        http_server = start_http_server(http_port, paths, params=http_params)
+    http_server = _start_gateway_http(agent, paths, http_port)
     # 就绪信号只能在这里之后发：heartbeat 一旦写了 "running"，父进程 start
     # 就认定网关就绪。若在 HTTP bind 之前启动 heartbeat 线程，绑定失败崩溃时
     # start 会对一个已死的网关谎报成功（旧时序：heartbeat 先写 running，再 bind）。
@@ -469,6 +469,26 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         flush=True,
     )
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
+
+
+# LLM: G4：绑定失败时注销 _cmd_gateway_run_threads 预登记的端口（否则漏给同进程后续的模型命令沙箱）；
+#   http_port=0（不开 HTTP）返回 None。调用方已在起线程前预登记了配置端口，这里只负责绑定与失败回滚。有副作用：绑定监听套接字。
+# 函数用途: 按配置端口启动 Gateway HTTP 服务，绑定失败时回滚端口预登记。
+def _start_gateway_http(agent, paths, http_port: int) -> GatewayHTTPServer | None:
+    if http_port <= 0:
+        return None
+    http_params = GatewayHTTPServerParams(
+        auth_middleware=_build_gateway_auth_middleware(agent.config),
+        bind_host=getattr(agent.config, "gateway_bind_host", "127.0.0.1"),
+        agent=agent,
+    )
+    try:
+        return start_http_server(http_port, paths, params=http_params)
+    except BaseException:
+        from ..agent.attempt.sandbox import unregister_gateway_bound_port
+
+        unregister_gateway_bound_port(http_port)
+        raise
 
 
 # LLM: 只负责收三条循环并报告仍存活的线程名；未启动线程（ident 为 None）跳过 join，每条最多等 2 秒。

@@ -178,6 +178,10 @@ def handle_status(handler, server) -> None:
     response.update(loop_health.snapshot())
     # 用量账两项进程内诊断计数同样直接读内存：没绑记账范围的探测次数、用量账里读到的未知用途键。
     response["usage_accounting"] = _usage_accounting_diagnostics()
+    # G4/G5：模型命令沙箱对本机 Gateway 端口的隔离事实（applied / unavailable:<原因> / not_applicable），与沙箱对象同一来源。
+    from ..attempt.sandbox import gateway_bound_ports, gateway_isolation_status
+
+    response["gateway_isolation"] = gateway_isolation_status(gateway_bound_ports())
     # 适配器是否真活着按 adapter.pid 的进程存活判定，状态文件只作补充；事实读取失败不影响 /status 本身。
     try:
         response.update(adapter_process_facts(server.paths))

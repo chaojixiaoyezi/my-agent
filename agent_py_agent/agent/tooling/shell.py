@@ -675,7 +675,7 @@ def _sandbox_exec(
     protected_persona_root 只形成更精确的只读覆盖；它不会把已解除 owner 墙的
     Full Access 降回 WorkspaceOnly。H3：宿主托管文件（配置、运行状态、本任务核验记录）总是并进只读覆盖（任何模式）。
     """
-    from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
+    from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, gateway_bound_ports
     from .sandbox import strict_posix_shell_argv
 
     owner_text = str(owner_home or "").strip()
@@ -719,6 +719,9 @@ def _sandbox_exec(
         ) if owner_text else (),
         hidden_paths=_host_managed_hidden_paths(owner_text, persona_text),
         protected_write_patterns=host_readonly_patterns_for(owner_text, persona_text),
+        # G4：拒绝模型命令连本机 Gateway 的实际绑定端口（回环）。端口由 Gateway 启动时登记在进程内注册表；
+        # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
+        deny_gateway_ports=gateway_bound_ports(),
     )
     sandbox = AttemptExecutionSandbox(spec)
     # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，

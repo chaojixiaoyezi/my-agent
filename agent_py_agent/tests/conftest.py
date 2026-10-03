@@ -203,6 +203,26 @@ def _isolate_model_call_admission(monkeypatch):
 
     monkeypatch.setattr(model_call_ledger, "_ADMISSION_REGISTRY", model_call_ledger._ModelCallAdmissionRegistry())
 
+
+@pytest.fixture(autouse=True)
+def _isolate_gateway_bound_ports():
+    """每条用例前后保存并复原本机 Gateway 端口注册表（G4）。
+
+    注册表（attempt/sandbox._LOCAL_GATEWAY_PORTS）是进程级集合：哪条用例起了 Gateway 却没走到 stop（比如中途失败），
+    它登记的端口会漏给同一 pytest 进程后面的用例，构造模型命令沙箱时多出端口拒绝规则，用例结果就会依赖运行顺序。
+    """
+    from agent_py_agent.agent.attempt import sandbox
+
+    with sandbox._LOCAL_GATEWAY_PORTS_LOCK:
+        saved = set(sandbox._LOCAL_GATEWAY_PORTS)
+    try:
+        yield
+    finally:
+        with sandbox._LOCAL_GATEWAY_PORTS_LOCK:
+            sandbox._LOCAL_GATEWAY_PORTS.clear()
+            sandbox._LOCAL_GATEWAY_PORTS.update(saved)
+
+
 def _loopback_no_proxy(current: str) -> str:
     values = [item.strip() for item in str(current or "").split(",") if item.strip()]
     for item in ("127.0.0.1", "localhost", "::1"):

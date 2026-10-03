@@ -1102,3 +1102,24 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - 入口层 `input_delivery_service.settle_gateway_inputs_for_turn`：入口对账后逐条分流。可重放的经 `steer_closeout_replay.queue_steer_replay`（同一个 `load_or_prepare_gateway_input_locked` + `queue_gateway_input_locked` 入口，请求号按插话身份哈希推出）排成备用下一轮；重放不了的给会话留宿主提示“你刚才补充的话没有被处理，请重新发送。”（`STEER_CLOSEOUT_UNAVAILABLE_NOTICE`）。新增计数 `steer_replay_queued` / `steer_replay_unavailable`，续跑上限收口一并写进 `guidance_settlement`。
   - 顺带修 `host_notices_from` 只认字典、不认 `HostNotice` 的渲染缺陷（取走的提示会整条消失）。
   - 设计见台账同名节“插话怎么办”，测试与变异见 TESTS.md 同名节。
+
+## G4：模型命令沙箱按端口拒绝连本机 Gateway（Gateway 本机信任第 (1) 层，2026-10-03，分支 `claude/be-g4-port-deny`，基于 step17i `3a81e6c4b`）
+
+- **起因**：Gateway 把回环来源一律当可信、无头即本机管理员，而模型命令沙箱默认联网不区分回环（见设计台账与 `docs/design/GATEWAY_LOCAL_TRUST.md`）。第 (1) 层纵深：让模型命令连不到本机 Gateway 端口。
+- **改动**：
+  - `http_service.start()` 登记实际绑定端口（`server_address[1]`，不是配置值）到进程内注册表 `attempt.sandbox.register_gateway_bound_port`；`stop()` 注销。
+  - 模型命令沙箱（`tooling/shell._sandbox_exec`）构造 `AttemptSandboxSpec(deny_gateway_ports=gateway_bound_ports())`；macOS Seatbelt 规则 `(deny network-outbound (remote tcp "*:<port>"))`。用 `*:` 而不是 `localhost:`——否则沙箱用 IPv6 连 `::ffff:127.0.0.1` 能绕过、Gateway 认成 127.0.0.1 即管理员（ae 实测、be 复核）。
+  - 端口拒绝只对模型命令沙箱置位，不进插件/Shell 共用的 `_network_rules`；插件沙箱网络由 M 线 B7 管。`full_access` 档也拒（这一档只剩第 (1) 层）。
+  - Linux（bwrap）此项为 G5（Landlock 启动器）落地，本块不含。
+- 设计见 `docs/design/GATEWAY_LOCAL_TRUST.md` 第 2.1、2.3、3 节；测试与变异见 TESTS.md 同名节。
+
+### G4 补（ae 复审，2026-10-03）
+
+- **启动顺序预登记**：`cli/gateway_process._cmd_gateway_run_threads` 在起请求/后台线程之前先按配置端口 `register_gateway_bound_port`（启动恢复会立即续跑、这两条线程在 HTTP 绑定前就能起模型命令）；绑定后 `http_server.start()` 再登记实际端口（同值幂等），绑定失败注销预登记。`conftest` 加 autouse 夹具每用例前后复原 `_LOCAL_GATEWAY_PORTS`。
+- **结构化事实 `gateway_isolation`**：`AttemptExecutionSandbox.gateway_isolation_fact()`——macOS 登记端口即 `applied`；Linux 在 G5 落地前恒 `unavailable:landlock_not_implemented`（如实标注，命令照跑、靠第 (2) 层兜底）。供 /status 等机器读取。
+
+### G4 再补（ae 复看，2026-10-03）
+
+- **isolation 事实单一来源**：新增模块级 `attempt.sandbox.gateway_isolation_status(ports, system=None)`——`not_applicable`（没登记端口）/`applied`（macOS）/`unavailable:landlock_not_implemented`（Linux，G5 前）/`unavailable:unsupported_platform`。沙箱对象 `gateway_isolation_fact()` 和 `/status` 都调它，一个事实一处定义。`/status` 新增字段 `gateway_isolation`。G5 落地后由就绪探针改 Linux 的值。
+- **绑定失败回滚补用例**：`_start_gateway_http` 绑定失败注销预登记端口，补 `test_start_gateway_http_unregisters_port_on_bind_failure`，变异“删掉注销”被抓。
+- `CODE_SIZE_REPORT.md` 不进提交（跑完 code-size 后 `git checkout -- CODE_SIZE_REPORT.md`）。

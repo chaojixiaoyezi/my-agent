@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,11 @@ class AttemptSandboxSpec:
     # H3：按正则拒写的宿主托管位置（path_access_policy.host_readonly_patterns：所有任务的核验记录），只有 macOS Seatbelt 能表达；
     # Linux bwrap 只能挂已存在的路径，忽略这一项（只保护 protected_write_paths 里的本任务记录，已知边界）。
     protected_write_patterns: tuple[str, ...] = ()
+    # G4（Gateway 本机信任，第 (1) 层）：模型命令沙箱要拒绝连本机 Gateway 的实际绑定端口（回环）。macOS 规则写
+    # `(deny network-outbound (remote tcp "*:<port>"))`——必须用 `*:` 而不是 `localhost:`，否则沙箱里用 IPv6 连
+    # `::ffff:127.0.0.1` 能绕过且 Gateway 认成 127.0.0.1（ae 实测、be 复核）。只由模型 shell 的 _sandbox_exec 填写；
+    # 插件进程沙箱不填（它要连 /plugin-host/query，网络由 M 线 B7 管）。端口取运行中 Gateway 实际绑定值，不写死配置。
+    deny_gateway_ports: tuple[int, ...] = ()
 
 
 # LLM: 只负责平台规则和就绪门；同步 run 的取消及回收交给 process_run，不新增无沙箱旁路，联测 attempt 与 verifier。
@@ -256,7 +262,15 @@ class AttemptExecutionSandbox:
             network_access=self.spec.network_access,
             read_only_root=self.spec.read_only_root, hidden_paths=self.spec.hidden_paths,
         )
+        # G4：Linux 的端口拒绝在 G5（Landlock 启动器）落地；这里不施加，隔离事实由 gateway_isolation_status 统一给出
+        # （Linux 在 G5 前恒 unavailable:landlock_not_implemented，命令照跑、靠第 (2) 层兜底）。
         return [*build_bwrap_argv(spec), "--", *command_argv]
+
+    # LLM: 本沙箱这次对 Gateway 端口隔离的结构化事实，唯一来源是模块级 gateway_isolation_status（见其注释）：
+    #   按“平台 + 本 spec 登记的端口”算，保证和 /status 同一口径。build_argv 之后或之前读都一致（不依赖副作用）。
+    # 函数用途: 返回本沙箱这次对 Gateway 端口隔离的结构化事实。
+    def gateway_isolation_fact(self) -> str:
+        return gateway_isolation_status(self.spec.deny_gateway_ports)
 
     # LLM: macOS argv must be built from the same explicit write roots and protected overlays as
     # Linux; never infer write permission from attempt_view/cwd when the boundary is explicit.
@@ -440,12 +454,14 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
     return SandboxReadiness(True, "SANDBOX_READY", "沙箱可用且能切断网络")
 
 
-# LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、上级目录写拒绝、隐藏路径、断网；隐藏路径排在读放行之后，
-#   断网必须最后（Seatbelt 后写覆盖先写）。上级目录规则只拒写，不影响前面的读规则。
+# LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、上级目录写拒绝、隐藏路径、断网、Gateway 端口拒绝；
+#   隐藏路径排在读放行之后，断网与端口拒绝排最后（Seatbelt 后写覆盖先写；两条 deny 先后不影响结果）。上级目录规则只拒写，
+#   不影响前面的读规则。G4 的端口拒绝只在 deny_gateway_ports 非空时出现，空时逐字节不变。
 # 函数用途: 汇总按 spec 生成的 macOS 附加规则。
 def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
     return [*_private_read_rules(spec), *_ancestor_write_denies(spec), *_pattern_write_denies(spec.protected_write_patterns),
-            *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access)]
+            *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access),
+            *_gateway_port_denies(spec.deny_gateway_ports)]
 
 
 # LLM: 正则拒写（H3）：模式是 POSIX ERE，按 JSON 字符串写进规则（本机实测 SBPL 的 regex 认普通字符串）。只拒写，排在写根放行
@@ -479,6 +495,74 @@ def _network_rules(network_access: bool) -> list[str]:
     return [] if network_access else ["(deny network*)"]
 
 
+# LLM: G4（Gateway 本机信任第 (1) 层）：按端口拒绝连本机 Gateway。必须用 `*:<port>` 而不是 `localhost:<port>`——
+#   后者挡不住沙箱里用 IPv6 连 `::ffff:127.0.0.1`（IPv4 映射地址），而 Gateway 只绑 IPv4、会把它认成 127.0.0.1 即本机管理员
+#   （ae 实测、be 复核，证据 gateway-local-trust-20261003/mapped_v4_verify.py）。两条 deny 的先后不影响结果（都拒）；
+#   端口为空（本进程没有运行中的 Gateway）时返回空列表，配置逐字节不变。改动同步 test_attempt_sandbox.py。
+# 函数用途: 为每个 Gateway 绑定端口生成 macOS 的出站拒绝规则。
+def _gateway_port_denies(ports: tuple[int, ...]) -> list[str]:
+    return [f'(deny network-outbound (remote tcp "*:{port}"))' for port in dict.fromkeys(ports)]
+
+
+# LLM: G4：进程内登记运行中 Gateway 的实际绑定端口（server_address 的端口），供模型命令沙箱按端口拒绝。
+#   由 Gateway 启动时登记、停机时注销（gateway_parts.http_service）；模型命令在 Gateway 进程内执行，所以读得到。
+#   不是运行 Gateway 的进程（CLI run、测试）注册表为空，不加端口规则——“同机其它 Gateway”不在第 (1) 层范围，靠第 (2) 层。
+_LOCAL_GATEWAY_PORTS: set[int] = set()
+_LOCAL_GATEWAY_PORTS_LOCK = threading.Lock()
+
+
+# LLM: 端口必须是真正的 int（来自 server_address[1]）且为正；float/str/None/bool 一律不收——不做 int() 强转，
+#   否则 1.5 会被当成 1。取不到合法端口时不登记（不等于要拒所有端口）。
+# 函数用途: 把一个对象规整成合法端口号，非法返回 None。
+def _coerce_port(port: object) -> int | None:
+    if not isinstance(port, int) or isinstance(port, bool) or port <= 0:
+        return None
+    return port
+
+
+# LLM: 幂等登记一个 Gateway 绑定端口。有副作用：改进程级注册表。
+# 函数用途: Gateway 绑定成功后登记它的实际端口，供模型命令沙箱拒绝。
+def register_gateway_bound_port(port: object) -> None:
+    value = _coerce_port(port)
+    if value is None:
+        return
+    with _LOCAL_GATEWAY_PORTS_LOCK:
+        _LOCAL_GATEWAY_PORTS.add(value)
+
+
+# LLM: 幂等注销；端口不在表里或非法时静默返回。有副作用：改进程级注册表。
+# 函数用途: Gateway 停机时注销它的端口。
+def unregister_gateway_bound_port(port: object) -> None:
+    value = _coerce_port(port)
+    if value is None:
+        return
+    with _LOCAL_GATEWAY_PORTS_LOCK:
+        _LOCAL_GATEWAY_PORTS.discard(value)
+
+
+# LLM: 读当前进程内已登记的 Gateway 端口快照（排序，稳定）；模型命令沙箱构造时调用。
+# 函数用途: 返回本进程运行中 Gateway 的全部绑定端口。
+def gateway_bound_ports() -> tuple[int, ...]:
+    with _LOCAL_GATEWAY_PORTS_LOCK:
+        return tuple(sorted(_LOCAL_GATEWAY_PORTS))
+
+
+# LLM: G4/G5：Gateway 端口隔离的唯一事实来源，供沙箱对象（按本 spec 端口）和 /status（按进程登记端口）同口径调用——
+#   一个事实只有一处定义。no_ports→not_applicable（没登记端口、无从隔离）；macOS→applied（Seatbelt 恒可表达）；
+#   Linux→unavailable:landlock_not_implemented（G4；G5 落地后由 landlock_net_readiness 换成真实探测结果）；其它平台→
+#   unavailable:unsupported_platform。只读结构化入参，不施加任何隔离。
+# 函数用途: 按平台与登记端口给出 Gateway 端口隔离的结构化事实。
+def gateway_isolation_status(ports: tuple[int, ...], *, system: str | None = None) -> str:
+    if not ports:
+        return "not_applicable"
+    resolved = system or platform.system()
+    if resolved == "Darwin":
+        return "applied"
+    if resolved == "Linux":
+        return "unavailable:landlock_not_implemented"
+    return "unavailable:unsupported_platform"
+
+
 # LLM: Seatbelt needs explicit deny rules for host control metadata because broader owner-home
 # write grants are allowed. Directories use subpath+literal; files use literal.
 #   还不存在的路径也写规则（literal+subpath，H3）：Seatbelt 按路径匹配，不需要目标存在，这样命令也建不出它（本机实测）。
@@ -508,4 +592,8 @@ __all__ = [
     "AttemptExecutionSandbox",
     "SandboxUnavailableError",
     "sandbox_hides_host_paths",
+    "register_gateway_bound_port",
+    "unregister_gateway_bound_port",
+    "gateway_bound_ports",
+    "gateway_isolation_status",
 ]

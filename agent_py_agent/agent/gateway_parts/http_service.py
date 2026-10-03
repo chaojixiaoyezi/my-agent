@@ -410,7 +410,13 @@ class GatewayHTTPServer:
         # 插件宿主只读 API 只在本服务运行时可用，地址固定为回环
         from ..plugin_host_api import set_host_api_base
 
-        set_host_api_base(f"http://127.0.0.1:{self.server.server_address[1]}")
+        bound_port = self.server.server_address[1]
+        set_host_api_base(f"http://127.0.0.1:{bound_port}")
+        # G4（Gateway 本机信任第 (1) 层）：登记实际绑定端口，模型命令沙箱据此按端口拒绝回环连接。
+        # 用实际绑定端口而非配置值，覆盖 --port 覆写和测试随机端口。
+        from ..attempt.sandbox import register_gateway_bound_port
+
+        register_gateway_bound_port(bound_port)
 
     def _serve(self) -> None:
         if self.server is None:
@@ -447,6 +453,11 @@ class GatewayHTTPServer:
         from ..plugin_host_api import set_host_api_base
 
         set_host_api_base(None)
+        # G4：停机时注销本服务登记的 Gateway 端口（在 server_close 前取端口）。
+        if self.server:
+            from ..attempt.sandbox import unregister_gateway_bound_port
+
+            unregister_gateway_bound_port(self.server.server_address[1])
         if self.server:
             self.server.shutdown()
             self.server.server_close()

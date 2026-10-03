@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## G4：模型命令沙箱按端口拒绝连本机 Gateway（be，2026-10-03，分支 `claude/be-g4-port-deny`，基于 step17i `3a81e6c4b`）
+
+- **新用例** `agent_py_agent/tests/test_gateway_port_deny.py`（17 条，macOS 真 Seatbelt）：
+  - 注册表：登记/注销幂等、快照有序；坏端口（0、负、None、str、float 1.5、bool）一律不收。
+  - profile：`_gateway_port_denies` 用 `*:<port>` 不是 `localhost:`；空端口时规则逐字节不变；`_spec_rules` 只在有端口时加出站拒绝；断网档仍 `(deny network*)`。
+  - `_sandbox_exec` 构造模型命令沙箱时带上注册表里的端口（profile 文本断言）。
+  - 真 Seatbelt：无规则时 `::ffff:127.0.0.1` 连得上只绑 IPv4 的监听、服务端认成 `127.0.0.1`（证明必须用 `*:`）；有规则时 `127.0.0.1`/`::1`/`::ffff:127.0.0.1`/`::ffff:7f00:1`/`0.0.0.0`/局域网地址都被拒(EPERM)、服务端看不到对端；其它端口通、沙箱内自起监听通；`full_access` 档也拒。
+  - Gateway `http_service.start` 登记实际绑定端口、`stop` 注销。
+- **变异**（scratch `g4/mutate.py`，不随包发布；跑前先提交，用 `git checkout` 还原）：
+  - 用 `localhost:` 替 `*:`（IPv4 映射绕过）→ 被 `::ffff:127.0.0.1` 用例杀；
+  - `_gateway_port_denies` 永远返回空 / `_spec_rules` 丢掉它 → 被 block 用例杀；
+  - `_coerce_port` 改回 `int()` 强转（1.5→1）→ 被坏端口用例杀；
+  - `_sandbox_exec` 不透传端口 → 被 profile 断言杀；
+  - Gateway 启动不登记 → 被启停用例杀。
+- 跑法：`PYTHONPATH=<worktree> ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_gateway_port_deny.py -q`（macOS，沙箱外）。
+
 ## 能力包写后检查反馈修正 P1–P3（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `911116770`）
 
 - **新用例** `test_pack_verification_post_write_feedback.py`（7 条，复用块 3 夹具，替身检查程序）：
@@ -12499,3 +12515,9 @@ CAP06用原session恢复已完成的REOPEN02，仅原生发送一次`/compact`�
 历史估算77,141→14,061，生成连贯目标／文件／进度／约束摘要，原机械回退记录保留。
 原七文件、task完成状态和pins保持，业务工具操作12→12；旧原始消息和checkpoint前缀保留、无资源锁。
 没有额外供应商抓包，也未触发新版失败诊断分支；不据此宣称全部协议实测、缓存命中不变、方法续用或旧失败原因已知。
+
+### G4 补（ae 复审必改 + 应改，2026-10-03）
+
+- `test_gateway_port_deny.py` 增：请求循环启动时配置端口已预登记（起线程前登记）；macOS 登记端口 → `gateway_isolation_fact()=="applied"`、无端口 → `""`；Linux（monkeypatch 平台）→ `unavailable:landlock_not_implemented`。
+- `conftest._isolate_gateway_bound_ports`（autouse）每用例前后保存/复原端口注册表。
+- 变异新增：起线程前不预登记（M7）、macOS 不置 applied（M8）→ 均被抓。

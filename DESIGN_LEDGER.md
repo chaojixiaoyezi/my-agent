@@ -2,6 +2,8 @@
 
 ## Gateway 本机来源信任收紧（be，2026-10-03，分支 `claude/be-gateway-local-trust`，基于 `claude/3a-step17h` `a602d6ad6`，9b、ae 评审通过，3a 2026-10-03 定稿，实施中，并入 step17i）
 
+- **实施进度**：G4（macOS 端口拒绝）在 `claude/be-g4-port-deny`（基于 step17i `3a81e6c4b`，头 `c4113baa8`，ae 两轮复审通过，并入 step17i）实现——进程内绑定端口注册表（Gateway 启停登记/注销实际 `server_address` 端口）、`AttemptSandboxSpec.deny_gateway_ports` 只对模型命令沙箱置位、macOS Seatbelt `(deny network-outbound (remote tcp "*:<port>"))`、`full_access` 也拒、插件沙箱不填。真 Seatbelt 17 条用例 + 6 变异（见 TESTS 同名节）。G5（Linux Landlock 启动器）接续；G1/G2a/G6 由 my-agent 会话做。ae 复审 G4。
+
 - **缺口**：Gateway 判“可信”只看对端是不是回环（`auth/middleware.py:66`），不带身份头的回环请求直接当本机管理员（`:82`）；模型命令沙箱默认联网、不区分回环（`attempt/sandbox.py:67`）。两者叠加，模型发本机 HTTP 请求就落在“本机管理员”一侧。文件通道（审批决定、请求队列）已被 H3 挡住，缺口全在 HTTP。
 - **方向**（3a 定，两层都要）：(1) 模型命令沙箱按端口连不到 Gateway；(2) 特权入口只认宿主持有、模型读不到的凭据。
 - **修复**：
