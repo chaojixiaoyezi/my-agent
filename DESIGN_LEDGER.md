@@ -41,7 +41,7 @@
   - 新增 `_pending_advances(targets, result)`：持锁纯字典合并，承接原 `_advance_notification` 的合并与逆序拒绝逻辑，不改任何请求状态；
   - 新增 `_commit_batch(batch, changed)`：持锁把整批快照推进与 `settings_cancelled` 一次写完并 `_action_generation += 1`；
   - 新增 `_routing_changed(active, previous, updated)`：纯比较，异常时仍按“已改变”fail-closed；**必须在锁外调用**；
-  - 新增 `_MAX_MARK_ATTEMPTS = 3`：比路由期间代次变了就整批重算；用尽上限按“变了”整批撤销（宁严勿松），不死循环；
+  - 新增 `_MAX_MARK_ATTEMPTS_COUNT = 3`：比路由期间代次变了就整批重算；用尽上限按“变了”整批撤销（宁严勿松），不死循环；
   - 删除 `_advance_notification`。
 - **ae 复看后修的 1 条（必须改）**：上一稿把路由比较留在了索引锁内，与函数注释和设计稿写的“锁内不读文件、不调路由”相反。`routing_signature` 一路走到 `decision_defaults`，每条受影响请求算两次，每次都新建 `AgentConfig`/`CapabilityConfig`/`MemorySettings`；上下文没有能力配置快照时还会读并解析 `capability_config.yaml`（生产 agent 刚启动时快照就是 None）。`_LOCK` 是全进程决策索引锁（登记/注销/撤销检查都要拿），设置改动那一刻会让所有在途决策线程等这些计算和文件读。现改为“锁内纯合并 → 锁外比路由 → 再进锁复核代次后一次写完整批”，整批原子性保持不变。
 - **没动的边界**：结果码语义、`_ACTIVE` 索引结构、`InterruptHandle` 句柄合同、设置文件层、`cancel_active_decisions_for_shutdown` 的既有顺序，全部保持原样。这次只改“通知处理的原子性”，不改任何产品语义。

@@ -41,7 +41,7 @@ _ACTIVE: dict[str, ActiveDecision] = {}
 # 设置通知的提交代次：每处理完一次通知就 +1。整套标记在锁外比路由，回来后靠它判断期间有没有更新的通知插进来。
 _action_generation = 0
 # 整套标记的重算上限：并发通知持续插入时不能无限重算，超过就按“已改变”整批撤销（宁严勿松）。
-_MAX_MARK_ATTEMPTS = 3
+_MAX_MARK_ATTEMPTS_COUNT = 3
 # 宿主进程开始收尾后置位且不复位：此后不再登记新的在途决策，进程随后退出。
 _HOST_SHUTDOWN = False
 
@@ -347,7 +347,7 @@ def notify_decision_settings_changed(context: object, result: dict) -> None:
 # 函数用途: 在不把路由计算带进索引锁的前提下，一次标完整批受影响的在途请求。
 def _mark_settings_batch(owner: str, scope: str, thread_id: str, result: dict) -> tuple[ActiveDecision, ...]:
     batch: tuple[tuple[ActiveDecision, dict, dict], ...] = ()
-    for _attempt in range(_MAX_MARK_ATTEMPTS):
+    for _attempt in range(_MAX_MARK_ATTEMPTS_COUNT):
         batch, generation = _collect_batch(owner, scope, thread_id, result)
         if not batch:
             return ()

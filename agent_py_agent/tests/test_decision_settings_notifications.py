@@ -298,6 +298,6 @@ def test_exhausted_recompute_cancels_the_whole_batch(tmp_path):
     finally:
         policy.routing_signature = real
         policy.unregister_active(token, row)
-    assert len(rounds) <= 2 * policy._MAX_MARK_ATTEMPTS, "重算必须被上限挡住，不能死循环"
+    assert len(rounds) <= 2 * policy._MAX_MARK_ATTEMPTS_COUNT, "重算必须被上限挡住，不能死循环"
     assert row.settings_cancelled, "重算用尽必须按‘变了’整批撤销"
     assert row.handle.cancelled

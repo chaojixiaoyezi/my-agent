@@ -75,13 +75,13 @@
   - `_NonblockingSend.__call__` 的 `_revoked()` 此时看不到 `settings_cancelled`（返回 None）；
   - 接着 `_invoke_call` 的 `_stale()` 只读文件层，看到点位已被改成 `off`，返回 `disabled`。
   于是同一批调用，谁先被处理取决于线程调度：第二条报了 `disabled`。
-- **修法**：把“标记”和“取消”拆成固定顺序，同时把路由比较挪出锁。`notify_decision_settings_changed` 走 `_mark_settings_batch`：锁内只做纯字典合并（`_pending_advances` 收集受影响请求与新旧快照、记下通知代次），锁外逐条比路由（`_routing_changed`），再进锁复核代次后由 `_commit_batch` 在一个锁段里把整批快照推进与 `settings_cancelled` 一次写完，最后到锁外逐个 `handle.cancel()`；原 `_advance_notification` 已删除。比路由期间若有更新的通知插进来（通知代次变了）整批重算，重算超过 `_MAX_MARK_ATTEMPTS` 就按“已改变”整批撤销（宁严勿松），不死循环。不改任何结果码语义，只让“设置改动撤销排队调用”对整批在途请求是原子的。
+- **修法**：把“标记”和“取消”拆成固定顺序，同时把路由比较挪出锁。`notify_decision_settings_changed` 走 `_mark_settings_batch`：锁内只做纯字典合并（`_pending_advances` 收集受影响请求与新旧快照、记下通知代次），锁外逐条比路由（`_routing_changed`），再进锁复核代次后由 `_commit_batch` 在一个锁段里把整批快照推进与 `settings_cancelled` 一次写完，最后到锁外逐个 `handle.cancel()`；原 `_advance_notification` 已删除。比路由期间若有更新的通知插进来（通知代次变了）整批重算，重算超过 `_MAX_MARK_ATTEMPTS_COUNT` 就按“已改变”整批撤销（宁严勿松），不死循环。不改任何结果码语义，只让“设置改动撤销排队调用”对整批在途请求是原子的。
   - **为什么路由比较必须在锁外**：`routing_signature` 会走到 `decision_defaults`，可能新建 `AgentConfig`/`CapabilityConfig`/`MemorySettings`，上下文没有能力配置快照时还会读并解析 `capability_config.yaml`（生产 agent 刚启动时快照就是 None）。`_LOCK` 是全进程决策索引锁，登记/注销/撤销检查都拿它；放进锁里会让设置改动那一刻所有在途决策线程都等这些计算和读文件。（ae 复审指出上一稿把路由比较留在了锁内，与本条合同相反。）
 - **新增回归用例**（`test_decision_settings_notifications.py`）：
   - `test_settings_change_marks_the_whole_batch_before_releasing_the_index_lock`：两条在途请求，探针在“第一轮收集完成”那一刻非阻塞试取 `_LOCK`，断言此刻仍由调用方持锁（即第二条必然一次收集完），且两条 `settings_cancelled`/`handle.cancelled` 全为真。
   - `test_routing_comparison_never_runs_while_holding_the_index_lock`：ae 探针转正——spy 住 `routing_signature`，断言比路由的每一次调用发生时当前线程都没持有 `_LOCK`。
   - `test_newer_notification_during_routing_recomputes_the_whole_batch`：比路由期间插入一条 owner 层通知，断言整批重算（路由调用数翻倍）且最终快照含那次提交。
-  - `test_exhausted_recompute_cancels_the_whole_batch`：每次比路由都推进通知代次，重算被 `_MAX_MARK_ATTEMPTS` 挡住（路由调用数不超过 2×上限），整批按“变了”撤销。
+  - `test_exhausted_recompute_cancels_the_whole_batch`：每次比路由都推进通知代次，重算被 `_MAX_MARK_ATTEMPTS_COUNT` 挡住（路由调用数不超过 2×上限），整批按“变了”撤销。
   判据全是结构化字段，不靠 sleep、不靠结果码文字。
 - **变异验证**（`mutate.sh` 逐个跑、跑完还原，三个变异都被抓到）：
   1. 路由比较挪回锁内（`_collect_batch` 的锁段内就算 `changed`）→ 被 `test_unrelated_point_change_keeps_current_request_and_advances_notification` 抓到（锁内比路由还会自死锁，正是 ae 指出的问题）；

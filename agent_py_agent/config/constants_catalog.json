@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 887,
+  "count": 888,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2426,6 +2426,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "决策模型单连接最多记 512 次失败：防失败计数无限累积。"
+    },
+    {
+      "name": "_MAX_MARK_ATTEMPTS_COUNT",
+      "file": "agent_py_agent/agent/conversation/decision_policy.py",
+      "value": 3,
+      "unit": "个",
+      "category": "重试",
+      "description": "整套标记的重算上限：并发通知持续插入时不能无限重算，超过就按“已改变”整批撤销（宁严勿松）。"
     },
     {
       "name": "_FLUSH_SECONDS",
