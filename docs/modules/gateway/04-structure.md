@@ -23,6 +23,25 @@
 - 该步不改变维护状态旧口径（`status`/`last_success_at`/`apply_outcome` 等键含义不变，只加键）；抛异常时回执里带 `error`，维护照常写状态。
 - 调用链：`cli/gateway_loops._GatewayOwnerMaintenanceController.tick` → `run_owner_retention_if_due` → `memory_archive.storage`。
 
+## 没有入口回执的插话在收口时的两级出口（step17i，2026-10-03，分支 `worker/ds2-steer-noreceipt`）
+
+- 上面那条“拒收后由入口回执排成备用下一轮”只对有 `gateway_input_request_id` 的插话成立；`/steer` 控制命令且 scope 里没带
+  入口请求号的插话（IM 多是这种）原来收口后既没有下一轮也没有说明，内容会丢。现在两级处理，两条收口（
+  `recovery` 的 terminalize 与已封存热记录补交）都经 `input_delivery_service.settle_gateway_inputs_for_turn`，所以同一个分流同时覆盖。
+- 挑选待办只按回执级结构化字段：`conversation/store_guidance_recovery.closeout_replay_pending`
+  （`status=rejected` + `migration.closeout_replay=pending` + 绑定本回合 + 没有入口请求号）。
+  `GuidanceRecovery.closeout_replay_receipts` 列出、`mark_closeout_replay` 落终值（`replay_queued` / `replay_unavailable`）。
+- 可重放（`gateway_parts/steer_closeout_replay.py`）：`steer_replay_input` 从 `entry.metadata` 取会话/渠道/会话 ID/用户身份与回执
+  去重键，`SteerReplayInput.identity()` 按插话身份推出稳定的 `steer-replay-<hash>` 请求号，
+  `queue_steer_replay` 经同一个 `load_or_prepare_gateway_input_locked` + `queue_gateway_input_locked` 排进入口队列；重放请求
+  不绑旧回合（去掉 `expected_turn_id` / `gateway_input_request_id`）。同一插话重放两次只排一条。
+- 重放不了：`notice_steer_closeout` 给该会话排一条宿主提示（`source=gateway_steer_closeout`、
+  `code=steer_closeout_unavailable`，正文 `conversation/turn_resume_notice.STEER_CLOSEOUT_UNAVAILABLE_NOTICE`），
+  TUI 灰行与 IM【提示】都从 `conversation/host_notices` 渲染。
+- 计数：`settle_gateway_inputs_for_turn` 的 `steer_replay_queued` / `steer_replay_unavailable`；续跑上限收口由
+  `_apply_limit_settlement` 一并写进答复 `guidance_settlement`。
+- 回归：`test_steer_closeout_replay.py`（含 `host_notices_from` 认 `HostNotice` 的渲染回归）。
+
 ## 管理员判定统一入口（P14 第 6 条，2026-10-02，待集成）
 
 - `gateway_parts/settings_control_service._is_admin` → `user_space/owner_access.is_complete_local_admin_owner`。

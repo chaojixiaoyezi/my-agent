@@ -1372,8 +1372,11 @@ def _settle_turn_guidance(conversation_store: object, turn_id: str, response: ob
 def _apply_limit_settlement(response: dict, summary: dict) -> bool:
     if not _limit_closeout(response):
         return False
+    # steer_replay_queued / steer_replay_unavailable 是没有入口回执的插话在收口时的两级结局计数：
+    #   前者已排成备用下一轮（内容不丢），后者已给用户“请重新发送”的宿主提示。写进答复供 TUI/IM 与测试核对。
     counts = {key: int(summary.get(key) or 0) for key in ("rejected", "released", "consumed", "submitted",
-                                                         "dead_submissions", "recorded_in_transcript", "backup_turns", "errors")}
+                                                         "dead_submissions", "recorded_in_transcript", "backup_turns", "errors",
+                                                         "steer_replay_queued", "steer_replay_unavailable")}
     notice = turn_resume_limit_notice(backup_turns=counts["backup_turns"],
                                       recorded_in_transcript=counts["recorded_in_transcript"])
     response.update({"user_error": notice, "error": notice, "guidance_settlement": counts})

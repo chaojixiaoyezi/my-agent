@@ -52,6 +52,25 @@
 - **整合时补的**（3a 定）：取消时输入原件/交付物两段不记返工；事实为空的判断加上“被取消”；宿主提示的触发键加上 `cancelled`；9b 的宽限期轮询。每处一条用例、一个变异。
 - **边界**：不改包声明、同意、沙箱权限，开关仍默认关。实际 TUI/IM `/stop`、生产和块 8 冻结重跑没验证。详见 [设计 3.2 节](docs/design/CAPABILITY_PACKS_V2.md) 和 TESTS.md。
 
+## 没有入口回执的插话，收口时内容不能丢（3a 10-03 定，ds2steer 实现，分支 `worker/ds2-steer-noreceipt`，基于 `claude/3a-step17h` `a602d6ad6`，已实现；be 复审必改 1 已补（d6cf11ea8），be 复核通过，并入 step17i）
+
+- **起因**（9b 复审 38 那批时发现的老问题，不是那批引入的）：38 的收口保证的是“有入口回执（`gateway_input_request_id`，例如 TUI 输入）的插话不丢”——收口拒收后入口对账会把它排成备用下一轮。没有入口回执的插话（`/steer` 控制命令且 scope 里没带入口请求号，IM 多是这种）收口时被拒收、也不起备用下一轮，内容就丢了；普通回合结束时同理。
+- **两级处理**（3a 定的方向，只按结构化事实判断，不读正文）：
+  - 拿得到可重放的结构化输入（回执/scope 里有会话、渠道、会话 ID、用户身份、插话去重键）→ 经**同一个**结构化入口排成“备用下一轮”，不另写一条路，内容只出现一次。
+  - 拿不到可重放的输入 → 不排轮次，给该会话一条宿主提示：**“你刚才补充的话没有被处理，请重新发送。”**，带结构化原因码；TUI 灰行与 IM【提示】都看得到。
+- **做法**：
+  - 会话层（`conversation/store_guidance_recovery.py`）：`settle_unconsumed_receipt` 的兜底拒收分支（没有 `gateway_input_request_id` 的那条）在回执的 `migration.closeout_replay` 打 `pending`；`closeout_replay_receipts(turn_id)` 按这个标记列出本轮“内容还没着落”的插话，`mark_closeout_replay(dedupe_key, outcome)` 落终值（`replay_queued` / `replay_unavailable`），同一回合收口重跑不会重复排队或重复提示。只写回执级字段，`entry.metadata` 一个字不动（参与正文指纹）。
+  - 入口层（`gateway_parts/input_delivery_service.py` 的 `settle_gateway_inputs_for_turn`）：入口对账跑完后，对这批回执逐条分流。可重放的用 `gateway_parts/steer_closeout_replay.py` 组装成一条 Gateway 排队请求：请求号由插话身份哈希推出（`steer-replay-<hash>`），经 `load_or_prepare_gateway_input_locked` + `queue_gateway_input_locked` 写回执、物化 inbox——和入口对账排备用下一轮是同一条路。重放请求不绑旧回合（去掉 `expected_turn_id`）。
+  - 计数器：`settle_gateway_inputs_for_turn` 新增 `steer_replay_queued` / `steer_replay_unavailable`；续跑上限收口把它们一起写进答复的 `guidance_settlement`。
+  - 判定只看结构化字段：回执级 `closeout_replay=pending`、`entry.metadata` 里的会话身份、以及回执自己的去重键；缺会话（无处提示）、缺去重键（排不出幂等请求）都算重放不了。不解析正文，不为单个渠道写专项分支。
+  - 覆盖两种收口：续跑上限收口（`settle_dead_turn`）与普通回合结束（`reject_pending(reject_reserved=True)`）都经同一个 `settle_gateway_inputs_for_turn`，所以两级分流对两条路同时生效。
+- **顺带修一个渲染缺陷**（本批新用例暴露）：`host_notices_from` 只认字典，不认 `HostNotice`；而 `take_host_notices` 返回的正是 `HostNotice`。于是“取走提示再渲染”（IM 与 TUI 的真实出口都是这样取的）会把提示整条丢掉，用户看不到、也不报错。已改成两种都认。
+- **本轮补修（be 复审 2026-10-03，必改 1）——崩溃窗口里会双份**：`queue_steer_replay` 原来返回 enqueue 的 `created`（“这次有没有新建入口项”）。在“enqueue 已经成功、`mark_closeout_replay` 还没落盘就非计划重启（I4 续跑）”的窗口里，重跑收口时插话回执仍是 `pending`，会再处理一遍：重放本身幂等、队列里仍只有一条，但第二遍把这条**已排队**的插话误判成排不上，记 `steer_replay_unavailable=1` 并给用户发“请重新发送”——用户一重发就是双份。
+  - 改法：按**回执终态**判断，只读结构化的 `state`。`load_or_prepare` 返回的 `updated` 回执里 `state == "queued"` 才算“内容已在队列里”，成功；`state == "consumed"` 时 `queue_gateway_input_locked` 根本不排队、原样返回，正好被排除。
+  - 由此明确 `steer_replay_queued` 的语义是**“内容现在已在队列里”**（不再等于“这次新排了几条”），同一请求第二次命中记 1；`unavailable` 与重发提示只在真的排不上时出现。
+  - 用例：幂等用例补 be 探针的两条断言（重跑后 `unavailable == 0`、无重发提示）；新增 consumed 状态算“不在队列”的用例。
+- **验证**：见 TESTS.md 同名节（上一轮 6 个变异 + 本轮 3 个，全部被拦截）。
+
 ## 嵌入用量与召回方式看得到（S7，be 实现、75 接手收尾，2026-10-02，分支 `claude/75-embedding-usage-facts`（接 `claude/be-embedding-usage-facts`），基于 `claude/3a-step17h` `afb15947b`，已实现，9b 复审通过，并入 step17h）
 
 - **起因**（3a 查生产）：
@@ -148,6 +167,11 @@
     - `GuidanceRecovery.settle_dead_turn`（续跑上限收口专用，等于 `reject_pending(reject_reserved=True)` 再加上已提交插话的定终态）、`settle_dead_submission`、`turn_end_labels`；汇总计数新增 `dead_submissions` / `recorded_in_transcript` / `backup_turns`。
     - Gateway 两处收口（terminalize，以及“上限答复已封存、插话还没结算时进程又挂了”的启动补交）都经 `_settle_turn_guidance` 分流。
     - 上限收口时，计数写进答复 `guidance_settlement`，提示句同步写进 `user_error` 和 `error`；封存过的答复只在归档前改。terminalize 内联的插话收口抽成助手，函数反而变短。
+  - **没有入口回执的插话**（9b 10-03 复审发现的老问题；3a 定、ds2steer 实现，分支 `worker/ds2-steer-noreceipt`，待 9b 复审）：上面那条“拒收后由入口回执排成备用下一轮”只对有 `gateway_input_request_id` 的插话成立。`/steer` 控制命令且 scope 里没带入口请求号（IM 多是这种）的插话，收口时被拒收又没有下一轮，内容就丢了。现在按两级处理，判据只看结构化字段（回执级 `migration.closeout_replay` 标记、`entry.metadata` 里的会话身份、回执去重键），不读正文：
+    - 有可重放的结构化输入 → 用同一条结构化入口（`load_or_prepare_gateway_input_locked` + `queue_gateway_input_locked`）排成“备用下一轮”，请求号由插话身份推出（`steer-replay-<hash>`，同一插话重放两次只排一条）；计数 `steer_replay_queued`。
+    - 拿不到可重放的输入 → 不排轮次，给该会话一条宿主提示“你刚才补充的话没有被处理，请重新发送。”（`STEER_CLOSEOUT_UNAVAILABLE_NOTICE`，来源 `gateway_steer_closeout`、原因码 `steer_closeout_unavailable`），TUI 灰行与 IM【提示】共用；计数 `steer_replay_unavailable`。
+    - 两种收口（续跑上限收口、普通回合结束还没取走的插话）都经同一个 `settle_gateway_inputs_for_turn`，所以两级分流对两条路同时生效；有入口回执的旧路径行为不变。
+    - 顺带修：`host_notices_from` 原来只认字典、不认 `HostNotice`，而 `take_host_notices` 返回的正是对象，导致取走的提示在渲染时整条消失；现已两种都认。
   - 已知边界：答复已经归档之后才发生的结算失败，提示不会再改（终态归档是完成权威）；入口对账失败照旧留给周期对账重试。
 - **已知边界 / 后续项**（I4 留下的，这次没动）：
   - 仍没有“打断太久就不续”的时间上限；

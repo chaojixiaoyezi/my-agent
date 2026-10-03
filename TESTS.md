@@ -236,6 +236,28 @@ sol1 的三个提交挑到块 4/5 之上；以上 sol1、ds2b6a 的数字是在 
   - `test_sandbox_already_cancelled_skips_readiness_probe`：已取消时 `run()` 不做沙箱就绪探测。抓“去掉 run() 开头的取消检查”。
   - 变异脚本加这三个后共 10 个，全被拦截。补杀分支取回半截输出不在 6a 范围（3a 定）。
 
+## 没有入口回执的插话收口不丢内容（ds2steer，2026-10-03，分支 `worker/ds2-steer-noreceipt`，基于 `a602d6ad6`）
+
+- **来源**：9b 复审 38 的“续跑上限收口时插话都有终态”时发现的老问题——`/steer` 控制命令且 scope 里没带 `gateway_input_request_id`（IM 多是这种）的插话，收口时被拒收又没有下一轮，内容会丢；普通回合结束时同理。3a 定两级方向，本片实现。
+- **新增 `test_steer_closeout_replay.py`（7 例）**，用真实的 guidance 回执、入口回执与 `settle_gateway_inputs_for_turn`：
+  - 可重放（回执里有会话/渠道/会话 ID/用户身份/去重键）→ 计数 `steer_replay_queued=1`、回执转 `rejected`、inbox 里落一条 `steer-replay-*` 请求（正文同一段补充内容、`thread_id`/`channel`/`conversation_id` 来自回执、不带旧回合 `expected_turn_id`），内容只出现一次。
+  - 收口跑两遍 → 第二遍不再排（回执终值 `replay_queued`），队列里仍只有一条。
+  - 请求号由插话身份推出、稳定：把回执标记按“又被拒收一次”重置后重跑收口，入口命中同一个请求号，不新排（这条专门锁幂等键，变异 5 靠它变红）。
+  - 重放不了（缺会话身份 / 缺去重键）→ 不排轮次、计数 `steer_replay_unavailable=1`。
+  - 会话定位得到但重放不了 → 该会话收到一条宿主提示：来源 `gateway_steer_closeout`、原因码 `steer_closeout_unavailable`、正文原句“你刚才补充的话没有被处理，请重新发送。”；按编号取走后再渲染出 `【提示】…` 行（TUI 灰行与 IM 提示共用同一张表）。
+  - 有入口回执的旧路径不变 → 上限收口仍由入口对账排队、`backup_turns=1`，该插话回执上没有 `closeout_replay` 标记。
+  - 渲染回归：`take_host_notices` 返回 `HostNotice`，`host_notices_from` 必须认得，否则取走的提示在 IM/TUI 文案里整条消失（实现里已修 `host_notices.py`）。
+- **本轮补修（be 复审 2026-10-03，必改 1）**：`queue_steer_replay` 原来返回 enqueue 的 `created`（“这次有没有新建入口项”）。在“enqueue 已成功、`mark_closeout_replay` 还没落盘就非计划重启、重跑收口”的窗口里，第二遍命中已存在的请求、`created=False`，被误判成“排不了”，于是记 `steer_replay_unavailable=1` 并发“请重新发送”——插话其实已在下一轮，用户一重发就是双份。改成按**回执终态**判断：只看 `queue_gateway_input_locked` 返回的 `updated.state == "queued"`（`consumed` 时它不排队、原样返回，正好被排除）。
+  - **`steer_replay_queued` 语义随之明确为“内容现在已在队列里”**：同一个请求第二次命中时该计数是 1（第一版是 0，那是“这次新排了几条”）。`unavailable` 与提示仍然只在真的排不上时出现。
+  - 用例：幂等用例补上 be 探针的两条断言（重跑后 `steer_replay_unavailable == 0`、该会话没有重发提示）；新增 `test_consumed_replay_receipt_counts_as_not_queued`（入口回执已是 `consumed` 时不算已在队列：queued=0、unavailable=1）。
+- **变异**（脚本不随包发布，跑在仓库外；逐条打坏源码跑本文件 + `test_turn_resume_limit_steer.py`，跑完按字节还原）：
+  - 本轮 3 个：**按 `created` 判断（就是本次修的根因）** / 排队失败也当成功 / `consumed` 也被当成已在队列 —— **3 个全部被拦截**，原字节还原 True。
+  - 上一轮 6 个（可重放分支不排队 / 不可重放也当已重放 / 提示原因码丢失 / 拒收时不打等收口重放标记 / 重放请求号不去重 / 取走的提示对象不被渲染），同样全部被拦截。
+  - 脚本从 `agent_py_agent/tests/_ds2steer_mutation_check.py` 删除（它会 subprocess 调 pytest，不是用例，不该随包发布）。
+- **运行（通过）**：`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python; PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_steer_closeout_replay.py agent_py_agent/tests/test_host_notices.py agent_py_agent/tests/test_turn_resume_limit_steer.py agent_py_agent/tests/test_turn_resume_limit.py agent_py_agent/tests/test_shutdown_turn_resume.py agent_py_agent/tests/test_steer_delivery_recovery.py agent_py_agent/tests/test_guidance_receipt_digest_compat.py agent_py_agent/tests/test_adapter_manager.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds2steer` → 退出码 0，102 passed。
+- **be 探针（只读复核）**：把 `~/.my-agent/decision-evidence/steer-noreceipt-review-20261003/test_steer_rerun_probe.py` 临时拷进测试目录跑，崩溃窗口那条 `test_rerun_after_crash_before_mark_does_not_send_spurious_resend_notice` 已由失败转为通过（`steer_replay_unavailable == 0` 且无重发提示）；跑完已删除临时副本。探针里另有一条沿用旧语义的断言（`second["steer_replay_queued"] == 0`）按上面说明不改。
+- **未验证**：真实 TUI/IM 端到端（/steer 打到收口中途、用户看到灰行/【提示】）本片没做，留给 be 复核与集成后的冒烟。
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

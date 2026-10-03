@@ -62,10 +62,12 @@ def _clean(value: object, limit: int) -> str:
 
 
 # LLM: 读旧记录或外部载荷时宽容解析：缺编号、来源或正文的条目直接丢弃，不补造。只读。
-# 函数用途: 把一组字典解析成提示，坏条目跳过。
+#   传进来的常常是持久化字典，但 take_host_notices 返回的本来就是 HostNotice（真实回复出口就是这样取的），
+#   所以两种都要认：只认字典会让取走的提示在渲染时被整条丢掉（文案写不出去却也不报错）。
+# 函数用途: 把一组提示（字典或 HostNotice）解析成提示，坏条目跳过。
 def host_notices_from(values: object) -> tuple[HostNotice, ...]:
     rows = values if isinstance(values, (list, tuple)) else ()
-    notices = (_notice_from(row) for row in rows if isinstance(row, Mapping))
+    notices = (row if isinstance(row, HostNotice) else _notice_from(row) for row in rows if isinstance(row, (Mapping, HostNotice)))
     return tuple(notice for notice in notices if notice is not None)
 
 

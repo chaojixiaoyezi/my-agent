@@ -426,3 +426,20 @@ def _validate_guidance_once_receipt(
     }
     if not state_fields_valid.get(receipt.status, False):
         raise DataCorruptionError("conversation guidance receipt state fields are invalid")
+    # 回执级迁移标记只认已知值：Gateway 收口先给"内容没着落"的插话打 closeout_replay=pending，再回标终值
+    # （replay_queued 已排备用下一轮 / replay_unavailable 重放不了、已提示用户）。未知值一律当损坏，
+    # 否则收口既不会重放也不会提示，内容会悄悄丢。
+    if "closeout_replay" in receipt.migration and not _closeout_replay_value_is_known(receipt):
+        raise DataCorruptionError("conversation guidance receipt closeout replay marker is invalid")
+
+
+# LLM: 标记只允许出现在还没着落的 rejected 回执上，且值只能是收口会写的三个之一；pending 是 Gateway 收口的待办，
+#   两个终值是收口处理完的回标。其它状态带这个标记说明回执被别的路径改写后没清干净，按损坏处理。
+# 函数用途: 判断回执上的收口重放标记是不是合法值。
+def _closeout_replay_value_is_known(receipt: GuidanceOnceReceipt) -> bool:
+    value = str(receipt.migration.get("closeout_replay") or "").strip()
+    return value in _CLOSEOUT_REPLAY_VALUES and receipt.status in {"rejected", "consumed"}
+
+
+# 收口重放标记的合法取值：pending 等 Gateway 收口处理，replay_queued 已排成备用下一轮，replay_unavailable 重放不了。
+_CLOSEOUT_REPLAY_VALUES = ("pending", "replay_queued", "replay_unavailable")

@@ -493,6 +493,7 @@ agent_py_agent/
 |   |   |-- request_experiment_promotion.py # /experiment apply 授权内：证据满足规则时经原设置 CAS 晋升 skill_tool 并写回执
 |   |   |-- request_experiment_notice.py # 新晋升回执生成中文宿主提示，复用原队列、当轮流与 IM final，旧回执不补投
 |   |   |-- request_pack_verification_notice.py # 回合结束时把能力包宿主核验结论排成宿主提示，和当轮提示一起发布
+|   |   |-- steer_closeout_replay.py  # 收口时给没有入口回执的插话定两级出口：可重放就排备用下一轮，否则排“请重新发送”宿主提示
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
 |   |   |-- request_prompt.py           # 已准备会话投影的模型输入渲染与历史种子
 |   |   |-- stream_writer.py            # 请求级文本缓冲、typed 流事件和显示投影的有序出口

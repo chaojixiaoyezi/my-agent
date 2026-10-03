@@ -13,6 +13,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..conversation.store_guidance_recovery import (
+    CLOSEOUT_REPLAY_QUEUED,
+    CLOSEOUT_REPLAY_UNAVAILABLE,
+)
 from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError, runtime_error_report
 from .io import (
@@ -22,6 +26,12 @@ from .io import (
     write_json_file_atomic,
 )
 from .paths import GatewayPaths
+from .steer_closeout_replay import (
+    SteerReplayQueue,
+    notice_steer_closeout,
+    queue_steer_replay,
+    steer_replay_input,
+)
 
 _INPUT_RECEIPT_SCHEMA = "gateway_input_receipt.v2"
 _INPUT_RECEIPT_STATES = {
@@ -286,6 +296,9 @@ def settle_gateway_inputs_for_turn(
     conversation_store: object | None,
 ) -> dict[str, int]:
     summary = {"consumed": 0, "queued": 0, "terminal_unknown": 0, "errors": 0}
+    # 没有入口请求号的插话在收口时的两级结局计数：steer_replay_queued 已排成备用下一轮、steer_replay_unavailable 已提示重发。
+    summary["steer_replay_queued"] = 0
+    summary["steer_replay_unavailable"] = 0
     if conversation_store is None:
         return summary
     try:
@@ -312,7 +325,109 @@ def settle_gateway_inputs_for_turn(
             # cannot stop the request's canonical terminal response from being
             # archived and published.
             summary["errors"] += 1
+    _settle_steer_closeout(paths, conversation_store, str(target_turn_id or "").strip(), summary)
     return summary
+
+
+# LLM: 没有入口请求号的插话（/steer 控制命令，IM 多是这种）在收口时被拒收，入口对账管不到它们，内容会丢
+#   （9b 2026-10-03 复审发现，不是本机制引入的）。这里补两级：能从回执里拿到可重放的结构化输入就排成
+#   “备用下一轮”，拿不到就给该会话留一条“请重新发送”的宿主提示；两条出口（TUI 灰行、IM【提示】）共用提示表。
+#   判据只看回执级标记和 scope 结构化字段，不读正文。逐条包异常：一条插话处理不了不能让整段收口失败。
+# 函数用途: 给本轮被收口拒收、又没有入口回执的插话定结局：排备用下一轮，或提示用户重发。
+def _settle_steer_closeout(
+    paths: GatewayPaths,
+    conversation_store: object,
+    turn_id: str,
+    summary: dict[str, int],
+) -> None:
+    if not turn_id:
+        return
+    for receipt in _closeout_replay_receipts(conversation_store, turn_id):
+        try:
+            _settle_one_steer_closeout(paths, conversation_store, receipt, summary)
+        except Exception:
+            summary["errors"] += 1
+
+
+# LLM: 可重放的判据是“回执里有会话身份与正文”之外还拿得到排队请求：原插话回执的 entry 就是排队请求的正文来源，
+#   Gateway 用同一条结构化入口（load_or_prepare + queue）把它排出去，请求号由插话身份推出，重放两次只排一轮。
+# 函数用途: 处理一条等收口的插话：排备用下一轮或留提示，并回标已处理。
+def _settle_one_steer_closeout(
+    paths: GatewayPaths,
+    conversation_store: object,
+    receipt: object,
+    summary: dict[str, int],
+) -> None:
+    replay = steer_replay_input(receipt)
+    queued = False
+    if replay is not None:
+        request_id, digest = replay.identity()
+        payload = _replay_request_payload(receipt, request_id, digest)
+        queued = queue_steer_replay(paths, payload, replay, _steer_replay_queue())
+    outcome = CLOSEOUT_REPLAY_QUEUED if queued else CLOSEOUT_REPLAY_UNAVAILABLE
+    if queued:
+        summary["steer_replay_queued"] = summary.get("steer_replay_queued", 0) + 1
+    else:
+        thread_id = replay.thread_id if replay is not None else _receipt_thread_id(receipt)
+        notice_steer_closeout(conversation_store, thread_id)
+        summary["steer_replay_unavailable"] = summary.get("steer_replay_unavailable", 0) + 1
+    conversation_store.guidance.recovery.mark_closeout_replay(
+        str(getattr(receipt, "dedupe_key", "") or "").strip(),
+        outcome,
+    )
+
+
+# LLM: 重放要用的入口能力就在本模块里，但重放模块不能反向 import 本模块（会成环），所以在调用点组装一次；
+#   三个函数都是模块级纯引用，构造便宜且幂等。
+# 函数用途: 组装插话收口重放需要的入口排队能力。
+def _steer_replay_queue() -> SteerReplayQueue:
+    return SteerReplayQueue(
+        prepare=load_or_prepare_gateway_input_locked,
+        enqueue=queue_gateway_input_locked,
+        transition=gateway_input_transition,
+    )
+
+
+# LLM: 插入回执的 entry 就是一整份“排队请求”的结构化投影（目标、正文、发送者、投递方式、元数据），
+#   所以重放不需要另写正文，只把它转成 Gateway 请求形状。入口只认服务端写的身份：请求号必须落在 id 上，
+#   客户端指纹也必须写进 metadata.client_input_digest（就是 identity() 算出的那个），否则回执校验不通过。
+#   只属于旧回合的派生字段（expected_turn_id、gateway_input_request_id）要去掉：重放请求是新的一轮，不绑旧回合。
+# 函数用途: 把插话回执的 entry 转成可重放的 Gateway 排队请求。
+def _replay_request_payload(receipt: object, request_id: str, digest: str) -> dict[str, Any]:
+    entry = getattr(receipt, "entry", None)
+    metadata = getattr(entry, "metadata", None)
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    metadata.pop("expected_turn_id", None)
+    metadata.pop("gateway_input_request_id", None)
+    metadata["client_input_digest"] = digest
+    return {
+        "id": request_id,
+        "request_id": request_id,
+        "kind": "steer_closeout_replay",
+        "goal": str(getattr(entry, "message", "") or ""),
+        "user_id": str(getattr(entry, "sender", "") or ""),
+        "metadata": metadata,
+    }
+
+
+# LLM: 提示要有地方送：优先用会话身份里可重放的 thread_id；重放不了的回执常常连着 thread_id 也没有，
+#   这时只能留空，调用方按“没有会话就不发提示”处理，绝不猜一个会话。
+# 函数用途: 从回执里取这条插话所属的会话编号。
+def _receipt_thread_id(receipt: object) -> str:
+    entry = getattr(receipt, "entry", None)
+    metadata = getattr(entry, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(metadata.get("thread_id") or "").strip()
+
+
+# LLM: 会话层的读取只按回执级标记挑（closeout_replay=pending），这里再包一层异常保护：
+#   会话存储读不出来时按“这一轮没有可处理的插话”继续，不影响入口对账结果。
+# 函数用途: 读出本轮被收口拒收、还没定结局的插话回执。
+def _closeout_replay_receipts(conversation_store: object, turn_id: str) -> list[object]:
+    try:
+        return list(conversation_store.guidance.recovery.closeout_replay_receipts(turn_id))
+    except Exception:
+        return []
 
 
 # LLM: 插话持久操作经 guidance 领域组件； Guidance discovery and correlation have one implementation for initial HTTP routing and

@@ -436,6 +436,53 @@ class GuidanceRecovery:
             write_json_file_atomic(receipt_path, settled.to_dict())
         return turn_end_labels(settled, dead=settlement.settle_dead_submissions and receipt.status == "submitted")
 
+    # LLM: GuidanceRecovery：本回合索引里被收口拒收、又没有入口请求号的插话（migration.closeout_replay=="pending"）就是
+    #   “内容还没着落”的那些。Gateway 收口要先按结构化字段决定给它们排备用下一轮还是发提示，再逐条回标终值，避免同一轮
+    #   回合重跑时重复排队。只读回执级字段，不读正文，也不写盘（回标走 mark_closeout_replay）。
+    # 函数用途: 列出本回合被收口拒收、还没定下有没有接续的插话回执。
+    def closeout_replay_receipts(self, turn_id: str) -> list[GuidanceOnceReceipt]:
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return []
+        bucket = self.storage.guidance_turn_index_dir / hashlib.sha256(
+            normalized.encode("utf-8")
+        ).hexdigest()
+        if not bucket.is_dir():
+            return []
+        paths = sorted(bucket.glob("*.json"))
+        with self.ledger.turn_guard(normalized):
+            receipts = (self._read_closeout_replay_receipt(path, normalized) for path in paths)
+            return [receipt for receipt in receipts if receipt is not None]
+
+    # LLM: GuidanceRecovery：调用方持回合锁；给一条“等收口重放”的回执落终值（replay_queued 已排成备用下一轮 /
+    #   replay_unavailable 重放不了、已给用户提示），防止同一轮收口重跑时重复排队或重复提示。回执已经不是 pending 标记
+    #   （比如被别的路径改过）就不动它。
+    # 函数用途: 把一条“等收口重放”的回执标记成收口已经处理过。
+    def mark_closeout_replay(self, dedupe_key: str, outcome: str) -> None:
+        if not dedupe_key or not outcome:
+            return
+        receipt_path = self.storage.guidance_dedupe_path(dedupe_key)
+        with locked_file_transition(receipt_path.with_name(f".{receipt_path.name}.transition")):
+            receipt = self.ledger.read_receipt(receipt_path)
+            if receipt is None or receipt.migration.get("closeout_replay") != CLOSEOUT_REPLAY_PENDING:
+                return
+            migration = {**dict(receipt.migration), "closeout_replay": outcome}
+            write_json_file_atomic(receipt_path, replace(receipt, migration=migration).to_dict())
+
+    # LLM: GuidanceRecovery：调用方持回合锁；按“回执级”结构化字段判定，坏回执和绑定对不上的一律跳过，不影响本回合收口。
+    # 函数用途: 读出一条仍等收口重放的插话回执，其余情况返回 None。
+    def _read_closeout_replay_receipt(self, index_path: Path, turn_id: str) -> GuidanceOnceReceipt | None:
+        report = read_json_file_report(index_path, context="conversation.guidance_turn_index.read")
+        dedupe_key = str(report.payload.get("dedupe_key") or "").strip()
+        if report.load_error is not None or not dedupe_key:
+            return None
+        receipt_path = self.storage.guidance_dedupe_path(dedupe_key)
+        with locked_file_transition(receipt_path.with_name(f".{receipt_path.name}.transition")):
+            receipt = self.ledger.read_receipt(receipt_path)
+        if receipt is None or not closeout_replay_pending(receipt, turn_id):
+            return None
+        return receipt
+
     # LLM: GuidanceRecovery：只释放尚未认领的回执；在 migration 记录旧回合，不改参与指纹的 entry，也不释放已提交消息。
     # 函数用途: 回合结束时释放仍未被任何轮次认领的补充消息，使其可被后续轮次接手。
     def release_unclaimed(self, turn_id: str) -> int:
@@ -515,7 +562,44 @@ def settle_unconsumed_receipt(
         return _release_or_reject(receipt, settlement, now=now, authorized_turn_id=turn_id)
     if origin_kind == SESSION_TASK_ORIGIN_KIND and settlement.release_task_body:
         return _release_or_reject(receipt, settlement, now=now, authorized_turn_id="")
-    return replace(receipt, status="rejected", submission_id="", updated_at=now)
+    return replace(
+        receipt,
+        status="rejected",
+        submission_id="",
+        updated_at=now,
+        migration=_mark_closeout_replay(dict(receipt.migration), metadata),
+    )
+
+
+# LLM: 回合收尾拒收、且回执没有入口请求号（gateway_input_request_id）时，在回执自己的 migration 记下
+#   "等收口重放"（closeout_replay=pending）：Gateway 收口（settle_gateway_inputs_for_turn）会读这个结构化标记，
+#   给可重放的插话经同一个入口回执排成下一轮、给重放不了的留宿主提示；有入口回执的插话不走这条（入口对账本来
+#   就会把它排成下一轮）。只写回执级字段，entry.metadata 一个字不动（参与正文指纹）。纯函数，不写盘。
+# 函数用途: 给没有入口回执的被拒插话记一条"等收口重放"的迁移标记。
+def _mark_closeout_replay(migration: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    if str(metadata.get("gateway_input_request_id") or "").strip():
+        return migration
+    return {**migration, "closeout_replay": "pending"}
+
+
+# 回执级迁移标记：这条插话被收口拒收、内容还没着落，等 Gateway 收口决定是排备用下一轮还是给用户提示。
+CLOSEOUT_REPLAY_KEY = "closeout_replay"
+CLOSEOUT_REPLAY_PENDING = "pending"
+CLOSEOUT_REPLAY_QUEUED = "replay_queued"
+CLOSEOUT_REPLAY_UNAVAILABLE = "replay_unavailable"
+
+
+# LLM: Gateway 收口用它挑出“还没着落”的插话：只认回执级结构化字段——rejected 终态、绑定在本回合、被收口时打了
+#   closeout_replay=pending、且没有入口请求号（有请求号的插话由入口对账排成备用下一轮，不走这条）。不读正文。
+# 函数用途: 判断一条回执是不是被收口拒收、还等接续的插话。
+def closeout_replay_pending(receipt: GuidanceOnceReceipt, turn_id: str) -> bool:
+    if receipt.status != "rejected" or receipt.migration.get(CLOSEOUT_REPLAY_KEY) != CLOSEOUT_REPLAY_PENDING:
+        return False
+    metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
+    expected = str(metadata.get("expected_turn_id") or "").strip()
+    if expected != str(turn_id or "").strip() or not expected:
+        return False
+    return not str(metadata.get("gateway_input_request_id") or "").strip()
 
 
 # LLM: settle_unconsumed_receipt 的释放分支：只有 settlement.count_release 时才计次（migration.release_count 加一），计次的失败在

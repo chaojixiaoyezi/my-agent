@@ -1080,3 +1080,12 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - `recovery._settle_turn_guidance`：续跑上限收口改走 `GuidanceRecovery.settle_dead_turn`，没写进历史的死提交拒收、起备用下一轮，已写进历史的记成已消费。
   - `_apply_limit_settlement`：按结算计数换提示句、写 `guidance_settlement`。terminalize 和已封存热记录的补交两处共用。
   - 设计见台账同名节“插话怎么办”，测试与变异见 TESTS.md 同名节。
+
+## 没有入口回执的插话收口不丢内容（step17h，2026-10-03，分支 `worker/ds2-steer-noreceipt`，基于 `a602d6ad6`）
+
+- **起因**：上面那条“拒收后由入口回执排成备用下一轮”只对有 `gateway_input_request_id` 的插话成立。`/steer` 控制命令且 scope 里没带入口请求号（IM 多是这种）的插话，收口时被拒收、也不起备用下一轮，内容就丢了（9b 复审发现的老问题，不是 38 那批引入的）；普通回合结束时同理。
+- **改动**：
+  - 会话层 `store_guidance_recovery`：没有入口请求号的插话被收口拒收时，在回执 `migration.closeout_replay` 打 `pending`；新增 `closeout_replay_receipts` / `mark_closeout_replay` 读待办、落终值（`replay_queued` / `replay_unavailable`），收口重跑不重复排队。
+  - 入口层 `input_delivery_service.settle_gateway_inputs_for_turn`：入口对账后逐条分流。可重放的经 `steer_closeout_replay.queue_steer_replay`（同一个 `load_or_prepare_gateway_input_locked` + `queue_gateway_input_locked` 入口，请求号按插话身份哈希推出）排成备用下一轮；重放不了的给会话留宿主提示“你刚才补充的话没有被处理，请重新发送。”（`STEER_CLOSEOUT_UNAVAILABLE_NOTICE`）。新增计数 `steer_replay_queued` / `steer_replay_unavailable`，续跑上限收口一并写进 `guidance_settlement`。
+  - 顺带修 `host_notices_from` 只认字典、不认 `HostNotice` 的渲染缺陷（取走的提示会整条消失）。
+  - 设计见台账同名节“插话怎么办”，测试与变异见 TESTS.md 同名节。
