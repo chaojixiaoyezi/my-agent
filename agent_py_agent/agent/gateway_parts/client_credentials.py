@@ -1,6 +1,6 @@
 # LLM: G3 宿主客户端的凭据选择；本机凭据只经 G1 load 读取，配置 token 优先且只发一个头，不创建或修复凭据。
 #   凭据读不到时按 G2b 开关 gateway_require_local_credential 分流：开关关（默认，G2a 阶段）降级为不带凭据继续发送，
-#   只记一次结构化 warning；开关开才维持原行为——在网络请求前抛 G1 原因码。客户端与 Gateway 读同一份配置。
+#   只记一次结构化 warning；开关开才维持原行为——在网络请求前抛 G1 原因码。目前只有客户端读这个开关，服务端强制属于 G2b（未落地）。
 # 模块用途: 给 TUI、CLI 和 IM 的现有身份头入口提供同一凭据；读取失败按 G2b 开关决定降级或拒绝。
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def credential_error_message(exc: LocalClientCredentialError) -> str:
 
 
 # LLM: 数据根优先沿原 Agent.home_paths.root，不能拿工作目录、队列根或 owner home 当全局 secrets 根；轻量替身用原配置解析器。
-#   G2b 开关从同一份 AgentConfig 读取，缺省 False（G2a 阶段不强制），客户端与 Gateway 口径一致。
+#   G2b 开关从 AgentConfig 读取，缺省 False（G2a 阶段不强制）；目前只有客户端读它，服务端强制等 G2b 落地。
 # 函数用途: 取得当前宿主客户端的凭据来源，不在构造阶段读秘密或发请求。
 def gateway_client_credentials(agent: object) -> GatewayClientCredentials:
     config = getattr(agent, "config", None)

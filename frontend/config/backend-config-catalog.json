@@ -3663,7 +3663,7 @@
           {
             "key": "gateway_require_local_credential",
             "label": "gateway_require_local_credential（gateway require local credential）",
-            "description": "本机凭据强制开关（G2b 上线闸，默认 false；强制阶段稳定后会连同旧分支一起删除）。 - false（默认，G2a 计数阶段）：本机客户端读不到凭据（文件缺失 / 权限不对 / 内容损坏）时， 降级为不带 X-Gateway-Token 继续发送，由 Gateway 按“无凭据来源”计数；客户端只记一次结构化 warning。 - true（强制阶段）：本机客户端读不到凭据时直接拒绝请求（零请求、带原因码），用于部署窗口外的强约束。 客户端和 Gateway 读同一份配置，所以两边口径一致。",
+            "description": "本机凭据强制开关（G2b 上线闸，默认 false；强制阶段稳定后会连同旧分支一起删除）。 - false（默认，G2a 计数阶段）：本机客户端读不到凭据（文件缺失 / 权限不对 / 内容损坏）时， 降级为不带 X-Gateway-Token 继续发送，由 Gateway 按“无凭据来源”计数；客户端只记一次结构化 warning。 - true（强制阶段）：本机客户端读不到凭据时直接拒绝请求（零请求、带原因码），用于部署窗口外的强约束。 注意：目前只有本机客户端读这个开关。Gateway 服务端的强制（不带凭据的本机请求降为匿名、凭据不可用拒绝启动） 属于 G2b，落地前打开它不会让服务端拒绝任何请求。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
