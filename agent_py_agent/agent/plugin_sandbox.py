@@ -1,5 +1,6 @@
 # LLM: 插件进程 OS 沙箱试点（配置 plugin_process_sandbox，默认关）：复用唯一的 AttemptExecutionSandbox 网关
 #   （Linux bwrap 整根只读形态 / macOS Seatbelt），读范围与宿主相同，写只落在该插件自己的数据目录；网络不变。
+#   G1 本机客户端凭据与 secrets 目录任何档都登记 H2 隐藏；开关关时插件与宿主同信任域，读得到凭据，不声称隔离。
 #   沙箱不可用时由调用方在启动前结构化拒绝（sandbox_unavailable），绝不退回无沙箱启动。
 #   改动须同步 plugin_runtime、plugin_enable_tool、plugin_management、tooling/sandbox 与 test_plugin_sandbox。
 # 模块用途: 给插件启动命令套上平台沙箱，并提供启动前的沙箱就绪检查。
@@ -9,17 +10,21 @@ from __future__ import annotations
 from pathlib import Path
 
 from .attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, SandboxUnavailableError
+from .gateway_parts.local_client_token import local_client_credential_path
+from .path_access_policy import agent_home_root_for_owner
 
 # 插件数据目录下给沙箱内进程用的临时目录名；TMPDIR 指向它，保证临时文件也落在唯一可写处
 SANDBOX_TMP_DIRECTORY = ".tmp"
 
 
-# LLM: 规格只由宿主事实推出：cwd 是插件环境目录（只读），唯一写根是插件数据目录；不接受包声明的路径。
+# LLM: 规格只由宿主路径事实推出，不接受包路径；G1 隐藏凭据文件与父目录（Linux H2 只覆盖目录），沙箱关时同信任域。
 # 函数用途: 为一个插件进程生成沙箱规格。
 def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path) -> AttemptSandboxSpec:
+    credential = local_client_credential_path(agent_home_root_for_owner(owner_home) or owner_home)
     return AttemptSandboxSpec(
         attempt_view=cwd, staging_root=data_dir, shared_workspace=owner_home, owner_home=owner_home,
         extra_write_roots=(data_dir,), implicit_attempt_write_roots=False, read_only_root=True,
+        hidden_paths=(credential, credential.parent),
     )
 
 

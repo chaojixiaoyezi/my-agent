@@ -1,5 +1,14 @@
 # Gateway Structure
 
+## G1+G2a 宿主凭据与同源路由观察（2026-10-03，sol1g，待初审/9b 终审）
+
+- gateway_parts/local_client_token.py 是路径、生成与读取的唯一权威；common/json_io 的共用锁和私有原子写确保只有一个生成者，读取不修改。
+- GatewayHTTPServer.start → _prepare_local_credential → ensure_local_client_credential；生产数据根来自 agent.home_paths.root，不随队列/执行cwd移动。无Agent的独立HTTP传输以显式队列父根为数据根，不回退用户默认home。
+- plugin_sandbox_spec 从可信 owner 路径反推数据根，登记凭据文件和 secrets 父目录；Linux目录空覆盖/macOS拒读写都由原H2实现。Full Access 和关闭插件沙箱的边界见 GATEWAY_LOCAL_TRUST。
+- `_prepare_local_credential` 把严读凭据绑定到 `AuthMiddleware`，与原配置凭据常量时间比较，不进入模型环境、命令参数或状态对象。
+- `http_routes.GATEWAY_HTTP_ROUTES` 同时决定 GET/POST 的处理器及观察模板/档位；`GatewayHTTPHandler._dispatch_route` 在原业务处理前观察一次，原处理器内部的权限判定不变。守卫用随机端口遍历全部路由的真实分发，不维护另一份计数白名单。
+- `AuthMiddleware.observe_loopback_request` 仅计未携合法凭据的真实回环 credential/admin 请求；线程锁保护计数和只读快照，`http_handlers.handle_status` 仅投影模板/count/last_at。无中间件和未知peer旧行为保持，不做G2b强制。
+
 ## 模型调用在途状态与 /status 投影（luna3a，2026-10-03）
 
 - `gateway_parts/http_handlers.handle_status` 直接调用 `contracts.model_call_ledger.model_call_inflight_snapshot()`；该函数快照进程原有准入注册表里的账本，只统计 `started` / `first_token`，按账本同源单调时钟计算最老年龄。

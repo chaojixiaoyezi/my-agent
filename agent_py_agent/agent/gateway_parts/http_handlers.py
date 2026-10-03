@@ -162,8 +162,9 @@ def _usage_accounting_diagnostics() -> dict[str, Any]:
     }
 
 
-# LLM: /status 新增的进程级在途数字只读本进程唯一模型调用账本注册表，不投影 owner、模型、请求身份或正文。
-# 函数用途: 汇总公开 Gateway 状态与不含身份信息的运行计数，不读取模型会话正文。
+# LLM: status 公开，只投影宿主白名单字段：本进程模型调用账本的在途数字、G4/G5 隔离事实、凭据状态码、无凭据回环计数的模板/count/last_at；
+#   不投影 owner、模型、请求身份或正文，不遍历或序列化鉴权对象和凭据内容。
+# 函数用途: 汇总公开 Gateway 状态、在途模型调用数、本机凭据状态和本次启动以来的无凭据回环计数，不含请求编号或身份。
 def handle_status(handler, server) -> None:
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
@@ -188,6 +189,10 @@ def handle_status(handler, server) -> None:
     from ..attempt.sandbox import gateway_bound_ports, gateway_isolation_status
 
     response["gateway_isolation"] = gateway_isolation_status(gateway_bound_ports())
+    middleware = getattr(server, "auth_middleware", None)
+    response["uncredentialed_loopback_by_endpoint"] = middleware.uncredentialed_loopback_snapshot() if middleware else {}
+    # G2a 凭据状态：只给 ok / unavailable:<原因码>，不给路径、内容或异常文字。
+    response["local_credential"] = getattr(server, "local_credential_status", "unavailable:not_prepared")
     # 适配器是否真活着按 adapter.pid 的进程存活判定，状态文件只作补充；事实读取失败不影响 /status 本身。
     try:
         response.update(adapter_process_facts(server.paths))

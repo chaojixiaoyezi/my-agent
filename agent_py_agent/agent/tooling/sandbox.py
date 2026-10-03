@@ -140,7 +140,7 @@ class SandboxSpec:
     # 整根只读形态：读范围与宿主相同，只有 write_roots 可写（插件进程沙箱试点用）；
     # 默认 False 时两种既有形态的 argv 逐字节不变。
     read_only_root: bool = False
-    # H2：对模型命令隐藏的宿主托管存储目录，最后盖一层只读空 tmpfs（整根 bind 与 owner 形态都生效，整根只读的插件形态不用）。
+    # H2：最后以只读空 tmpfs 隐藏宿主目录；模型命令隐藏托管存储，G1 整根只读插件形态隐藏宿主凭据 secrets 目录。
     hidden_paths: tuple[Path, ...] = ()
 
 

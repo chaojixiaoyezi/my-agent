@@ -1,5 +1,13 @@
 # Gateway 维护状态
 
+## G1+G2a 本机凭据与旧客户端观察（2026-10-03，sol1g，已实现，待初审/9b 终审）
+
+- 数据根 secrets/ 下凭据缺失才生成；私有原子写后严读，已有损坏/权限不对就报结构化错误，不轮换。load_local_client_credential(data_root) 是宿主客户端统一读取接口。
+- HTTP启动先用 canonical home_paths.root 准备凭据，再绑定监听；不进环境、日志或状态。插件沙箱 H2 同时隐藏凭据文件与 secrets 目录，开关关时插件与宿主同信任域。
+- G2a 已实现：两种 Gateway 凭据按原身份处理且不计数；无凭据回环仍按原规则放行，只在 credential/admin 档按实际路由模板累计。公开 `/status`、`/metrics` 与插件令牌 `/plugin-host/query` 不计。
+- `/status.uncredentialed_loopback_by_endpoint` 是本次进程启动以来的模板 → `{count,last_at}`，不含请求编号或身份；无中间件档保持原单机行为。观察账不持久化，不能仅凭重启后的空账判客户端迁移完成。
+- tmp_path 与随机端口组件验证、五项独立变异见 TESTS；真实客户端和平台隔离未验。G3由集成者另派，G2b强制/端口拒绝尚未实施，不能称安全缺口已闭合。
+
 ## 回合失败后收回在途模型调用（luna3a，2026-10-03，待初审/9b 终审）
 
 - **已完成**：wall-clock 失败时 abandon 原账本后通知精确 worker 中断，并按既有 1 秒窗口 drain；SSE/Responses WebSocket 取消直接关闭本次 socket，WebSocket 请求发送另有首事件预算；`/status` 由既有模型账本投影在途调用数和最老年龄两个数字。

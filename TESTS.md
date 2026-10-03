@@ -1,5 +1,68 @@
 # 测试与发布验收
 
+## Gateway G1+G2a 返工：凭据准备降级 + 空凭据防线（2026-10-03，ds1g，worker/sol1-g1-g2a，提交 db1334395，待 9b 复核）
+
+- 新用例 5 条：`test_gateway_local_client_token.py` 加坏文件/文件权限/目录权限三场景（照常启动、`/status` 报 `unavailable:<原因码>`、坏文件与坏权限不被覆盖、重启仍降级）与假 Agent 无 home_paths（记 `no_data_root`、回环请求照常计数）；`test_gateway_local_trust_observation.py` 加空凭据/空头不匹配（钉住 9b 变异 G1，此前存活）。
+- 定向 30 项（退出0）：上面两文件 28 + 两条原回归用例（test_display_archive、test_gateway_client_service）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_local_client_token.py agent_py_agent/tests/test_gateway_local_trust_observation.py agent_py_agent/tests/test_display_archive.py::test_http_route_reads_page_without_model_or_prompt_submission agent_py_agent/tests/test_gateway_client_service.py::test_gateway_http_routes_client_memory_and_history -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1g
+  ```
+- 改动直接相关 8 文件（auth_hardening、gateway_http、gateway_http_runtime_errors、dispatcher_resilience、probe_tool_capability_metering、identity_trust、host_guard、foreground_transcript）：**73 passed / 1 skipped**。
+- 9b 的 63 文件清单全跑（收集 1235 用例 = 9b 的 1230 + 本次新增 5）：**18 failed / 2 skipped / 4 xpassed，其余 1211 passed**。18 个失败全部是嵌套 Seatbelt/真沙箱类（`sandbox-exec` 退出码 71、宿主安装），在**改动前基线 c035c3337 上抽样复现同样失败**（plugin_sandbox、host_command_stream、conversation_control 三个代表），属沙箱环境限制、非本次改动引入；9b 在允许这些操作的环境跑同一清单为 2 failed（即本次修复的两条回归）。失败文件：test_gateway_chat_conversation_context、test_gateway_conversation_control、test_host_command_stream、test_plugin_sandbox、test_shuohao_novel_gates、test_tool_call_guardrail_runtime。
+- guards9：**174 passed**。
+- 变异 7 个全部 KILLED、原字节还原（脚本在仓库外 `/private/tmp/claude-501/m-ds1g-mut/`）：sol1 原 5 个 + 9b 的 G1（空密钥匹配空头）+ 新增“凭据读不到时拒绝启动”。
+- 门禁：import boundaries findings=0；ruff All checks passed；strict code-size hard=0 blocked=False；size_diff 新增告警 0 / 消失告警 11；git diff --check 通过；clean-package OK。
+
+## Gateway G1+G2a 迁移观察与独立变异（2026-10-03，sol1g，worker/sol1-g1-g2a，已实现，待初审/9b终审）
+
+- G1 功能提交 `cbb80b4360c168e50473d9371a73b497b6bf3c9d`。G2a 红测为 **8 failed / 0 errors / 0 skipped**：缺失 status 字段、本机凭据不能用于身份判定、没有实际分发同源表；没有用 ImportError 代替行为红测。
+- 新 `test_gateway_local_trust_observation.py`：随机端口、tmp_path、假业务处理器；无凭据回环身份照旧且模板加1、两种凭据身份照旧且不计、公开/插件档豁免（有效 activation token 单独请求也通）、有界公开 schema、并发无丢计数、未知 peer/无中间件旧行为、全部26条路由真实 GET/POST 分发守卫。没有连接真实 Gateway 或使用生产凭据。
+- 七文件定向命令（退出0，`tmp/sol1g-focused-final.xml`：**95 passed / 0 failed / 0 errors / 0 skipped**；各批次不相加）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY scripts/build_constants_catalog.py
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_local_client_token.py agent_py_agent/tests/test_gateway_local_trust_observation.py agent_py_agent/tests/test_gateway_auth_hardening.py agent_py_agent/tests/test_gateway_identity_trust.py agent_py_agent/tests/test_auth.py agent_py_agent/tests/test_plugin_host_api.py agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1g --junitxml=tmp/sol1g-focused-final.xml
+  ```
+  G2a 后常数目录重生成仍为888项，与 G1 一致。
+- 相邻 HTTP 回归（退出0，`tmp/sol1g-http-regression.xml`：**24 passed / 0 failed / 0 errors / 1 skipped**）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_http.py::TestGatewayHTTPHandler agent_py_agent/tests/test_gateway_http.py::TestGatewayHTTPIntegration agent_py_agent/tests/test_gateway_http_runtime_errors.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1g --junitxml=tmp/sol1g-http-regression.xml
+  ```
+  `test_stop_endpoint` 原测试捕获 HTTP 409 后调用 skip；假服务没有 Gateway 进程身份，现有 `handle_stop` 返回 `gateway process identity unavailable`。该处理器与原分支一致，本轮未修改停止逻辑、未删/放宽测试，也不把 skip 计为通过。完整生产停止链未验证。
+- 五项变异每次只改一处，预期断言失败后 finally 原字节还原，再复跑同一目标；`tmp/sol1g-local-trust-mutations.py` 顺序调用固定 Python 和上面相同 pytest flags（证据为忽略目录 `tmp/sol1g-local-trust-mutations.json` 与各项 txt/xml，不随功能提交）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY tmp/sol1g-local-trust-mutations.py
+  ```
+  | 变异 | 原测试观察点 | 变异结果 | 原字节还原后 |
+  | --- | --- | --- | --- |
+  | 每次重生成凭据 | missing_creates_private_credential_and_restart_reuses | 1 failed（不得轮换） | 1 passed |
+  | 用原始路径作键 | uncredentialed_loopback_keeps_identity_and_counts_template | 1 failed（出现请求/会话编号键） | 1 passed |
+  | 公开路由也计数 | public_and_plugin_token_routes_are_not_counted | 1 failed（status/metrics污染） | 1 passed |
+  | 带凭据也计数 | credentialed_identity_is_honored_even_remote_and_not_counted | 2 failed（local/configured均污染） | 2 passed |
+  | 凭据进环境变量 | credential_never_enters_model_environment | 1 failed / 1 passed（管理员环境失败；owner过滤仍生效） | 2 passed |
+  五批均无 error/skip，变异 pytest 退出1，还原后退出0，未提交变异。
+- G2a guards9 全十文件（含 packaging，`tmp/sol1g-g2a-guards.xml`）**172 passed / 0 failed / 0 errors / 0 skipped**，退出0：
+  ```bash
+  GUARD_TESTS=$(awk 'NF && $1 !~ /^#/' ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt)
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $GUARD_TESTS -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1g --junitxml=tmp/sol1g-g2a-guards.xml
+  ```
+- 已执行 `$PY scripts/check_import_boundaries.py` → findings=0；`$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2224、hard=0、high-risk=1520、soft=704、test_advisory=1241、blocked=False。按要求 `git checkout -- CODE_SIZE_REPORT.md` 恢复生成报告。`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 实测：**新增告警: 0；消失告警: 11**。
+- 最终文档/发布检查：`$PY scripts/check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check` 和 `git diff --cached --check` 退出0；`$PY scripts/check_clean_package.py .` 初次因两个新增文件尚未暂存返回 UNTRACKED_FILE，显式 git add 后重跑为 `OK: . 未发现发布阻塞项`（退出0），未绕过检查。
+- 边界：G2a 只观察，不强制；回环无凭据仍有旧信任，unknown peer兼容仍保留。G2b/G3/G4/G5/G6未做，未跑全仓/真实Gateway/真实模型/客户端、未跑嵌套 Seatbelt/bwrap。H2只验证隐藏路径声明，真实插件进程隔离未验证；Full Access 与关插件沙箱同信任域边界不变。设计要求引用的 `PLUGIN_EVENT_HOOKS.md` 在本树不存在（按文件名查无命中），没有新建空设计文件代替它，由集成者在 M 线文档存在的组合版本补8.1引用。
+
+## Gateway 本机客户端凭据 G1（2026-10-03，sol1g，worker/sol1-g1-g2a，待初审/9b 终审）
+
+- 新 test_gateway_local_client_token.py：缺则生成/重启复用、0600/0700、并发准备、三类安全读取失败、符号链接拒绝、插件 H2 文件与目录声明、模型环境不含凭据、启动根与日志/status 不泄露。全部用 tmp_path；启动钩子用假监听器，相邻 HTTP 回归用随机端口，不连真实 Gateway。
+- 占位接口红测14项失败（其中4条坏文件准备遇到缺文件，改为独立私有坏文件夹具）；聚焦运行命令和证据：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY scripts/build_constants_catalog.py
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_local_client_token.py agent_py_agent/tests/test_gateway_auth_hardening.py agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1g --junitxml=tmp/sol1g-g1-focused.xml
+  ```
+  退出0，JUnit **33 passed / 0 failed / 0 skipped**；常数目录888项。G1 guards9全部十文件（含packaging）退出0；import boundaries=0、ruff通过、strict size hard=0 blocked=False、size_diff新增0/消失9、doc-sync与staged diff-check及clean-package通过，报告已恢复。五项变异与G2a最终门禁随后单列，批次不相加。
+- H2声明不代表真实 Seatbelt/bwrap 已验证；Full Access 模型可读数据根，插件沙箱关闭时与宿主同信任域。G3客户端附凭据、G2b强制及真实产品验收尚未做。
+
 ## 回合失败后收回在途模型调用（luna3a，2026-10-03，待初审/9b 终审）
 
 - **现象**：9b 只读结构化证据显示，两次 `openai_responses` 主调用分别在回合以 `PROVIDERTIMEOUTERROR` 结束后仍停在网络读取，首 token 均未见、各经历 4 次 provider 尝试；直到 Gateway 停机才记成 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，耗时约 12,000 秒。没有 token 花费，但线程、连接和在途账本未及时释放。

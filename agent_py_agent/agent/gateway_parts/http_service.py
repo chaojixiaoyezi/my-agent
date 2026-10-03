@@ -1,4 +1,5 @@
-
+# LLM: HTTP传输沿唯一结构化分发表，观察复用同一路由模板；启动先确保/绑定持久凭据，秘密不进状态、日志或环境。
+# 模块用途: 提供有界 Gateway HTTP 监听器与宿主客户端入口。
 from __future__ import annotations
 
 """HTTP service for gateway using a bounded standard-library HTTP server.
@@ -13,6 +14,7 @@ GET /result/<id>、GET /progress/<id>、GET /status、POST /stop、POST /client/
 # ruff: noqa: I001
 
 import errno
+import importlib
 import itertools
 import json
 import os
@@ -20,6 +22,7 @@ import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..runtime_errors import runtime_error_report
@@ -31,7 +34,6 @@ from .http_handlers import (
     handle_client_notices,
     handle_client_memory,
     handle_client_agent_guidance,
-    handle_client_goal,
     handle_client_agent_permission,
     handle_client_agent_stop,
     handle_client_agent_view,
@@ -46,6 +48,8 @@ from .http_handlers import (
     handle_stop,
 )
 from .io import update_json_file_atomic
+from .local_client_token import LocalClientCredentialError, ensure_local_client_credential
+from .http_routes import GATEWAY_HTTP_ROUTES as GATEWAY_HTTP_ROUTES, match_gateway_http_route
 
 if TYPE_CHECKING:
     from ..agent.core import SimpleAgent
@@ -106,6 +110,8 @@ def _generate_request_id() -> str:
     return f"req_{int(time.time() * 1000)}_{os.getpid()}_{next(_REQUEST_ID_COUNTER)}"
 
 
+# LLM: 分发表同时决定处理器和观察模板；原业务授权不变，无中间件档不观察，不含G2b强制。
+# 类用途: 接收HTTP请求并交给原业务入口，顺带观察需迁移的旧客户端。
 class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
@@ -151,106 +157,32 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         return json.loads(body.decode("utf-8", "replace"))
 
+    # LLM: GET/POST共用实际分发表，未知路径404，公开/插件档不计迁移流量。
+    # 函数用途: 沿结构化分发表分发只读HTTP请求。
     def do_GET(self) -> None:
-        self._inject_auth_middleware()
-        if self.path == "/status":
-            self._handle_status()
-            return
-        if self.path.startswith("/result/"):
-            self._handle_result()
-            return
-        if self.path.startswith("/input-status/"):
-            self._handle_input_status()
-            return
-        if self.path.startswith("/control-status/"):
-            self._handle_control_status()
-            return
-        if self.path.startswith("/progress/"):
-            # `/progress` 只读 typed event，并在 handler 内复用 `/result` 的 owner 权限事实。
-            self._handle_progress()
-            return
-        if self.path.startswith("/sessions/") and self.path.endswith("/channels"):
-            self._handle_session_channels()
-            return
-        if self.path == "/admin/summary":
-            self._handle_admin_summary()
-            return
-        if self.path == "/metrics":
-            self._handle_metrics()
-            return
-        self._send_json(404, {"error": "not found"})
+        self._dispatch_route("GET")
 
-    # LLM: 各控制、插件目录和显示入口复用认证中间件；插件声明不进任务队列，权限与 owner 仍由服务端核验。
-    # 函数用途: 将 HTTP POST 分发到对应服务，原文页也必须校验用户和会话，不从正文推断权限。
+    # LLM: 只改变组织与观察，原业务授权/owner/副作用仍在各处理器；不新增G2b强制。
+    # 函数用途: 分发HTTP写入口并只观察旧客户端流量。
     def do_POST(self) -> None:
+        self._dispatch_route("POST")
+
+    # LLM: 同一个route既决定处理器又提供有界观察键，每请求只观察一次；惰性导入保留旧服务加载时机。
+    # 函数用途: 匹配实际路由，记录无凭据回环观察并调用原处理入口。
+    def _dispatch_route(self, method: str) -> None:
         self._inject_auth_middleware()
-        if self.path == "/ask":
-            self._handle_ask()
+        route = match_gateway_http_route(method, self.path)
+        if route is None:
+            self._send_json(404, {"error": "not found"})
             return
-        if self.path == "/control":
-            self._handle_control()
+        middleware = getattr(self, "_auth_middleware", None)
+        if middleware is not None:
+            middleware.observe_loopback_request(self, route)
+        if route.handler_module:
+            module = importlib.import_module(route.handler_module, __package__)
+            getattr(module, route.handler_name)(self, _server_instance)
             return
-        if self.path == "/client/memory":
-            self._handle_client_memory()
-            return
-        if self.path == "/client/models":
-            from .model_profile_service import handle_client_models
-
-            handle_client_models(self, _server_instance)
-            return
-        if self.path == "/client/plugins":
-            from .plugin_command_service import handle_client_plugins
-
-            handle_client_plugins(self, _server_instance)
-            return
-        if self.path == "/plugin-host/query":
-            from ..plugin_host_api import handle_plugin_host_query
-
-            handle_plugin_host_query(self, _server_instance)
-            return
-        if self.path == "/client/plugin-panels":
-            from .plugin_panels_http import handle_client_plugin_panels
-
-            handle_client_plugin_panels(self, _server_instance)
-            return
-        if self.path == "/client/permissions":
-            from .approval_mode_service import handle_client_approval_mode
-
-            handle_client_approval_mode(self, _server_instance)
-            return
-        if self.path == "/client/history":
-            self._handle_client_history()
-            return
-        if self.path == "/client/display-page":
-            from .display_archive_service import handle_client_display_page
-
-            handle_client_display_page(self, _server_instance)
-            return
-        if self.path == "/client/notices":
-            self._handle_client_notices()
-            return
-        if self.path == "/client/agent-view":
-            self._handle_client_agent_view()
-            return
-        if self.path == "/client/goal":
-            handle_client_goal(self, _server_instance)
-            return
-        if self.path == "/client/agent-guidance":
-            self._handle_client_agent_guidance()
-            return
-        if self.path == "/client/agent-permission":
-            self._handle_client_agent_permission()
-            return
-        if self.path == "/client/agent-stop":
-            self._handle_client_agent_stop()
-            return
-        if self.path == "/stop":
-            self._handle_stop()
-            return
-        if self.path.startswith("/sessions/") and self.path.endswith("/bind"):
-            self._handle_session_bind()
-            return
-        self._send_json(404, {"error": "not found"})
+        getattr(self, route.handler_name)()
 
     def _handle_status(self) -> None:
         handle_status(self, _server_instance)
@@ -378,6 +310,9 @@ class GatewayHTTPServer:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
+        # G2a 阶段凭据不可用只降级为状态、不拦启动；状态串只给 ok / unavailable:原因码，不给路径或内容。
+        self.local_credential_status = "unavailable:not_prepared"
+        self._local_client_credential = ""
         # 插件展示服务与共用插件通道池都由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
         self.plugin_display = None
         self.plugin_channel_pool = None
@@ -390,11 +325,11 @@ class GatewayHTTPServer:
                 "请置 auth_enabled=True,或把 gateway_bind_host 设回 127.0.0.1。"
             )
 
-    # LLM: start() is the only socket construction point and must instantiate the Gateway-specific
-    # concurrent server so every caller receives the same backlog and shutdown semantics.
-    # 函数用途: 通过网络暴露检查后启动唯一 Gateway HTTP 服务线程。
+    # LLM: 唯一监听启动点，暴露检查先于 bind/全局指针；G2a 阶段凭据准备失败降级为状态不拦启动（G2b 才 fail-closed），停机不删凭据。
+    # 函数用途: 检查暴露边界、准备本机凭据状态后启动 HTTP 服务线程。
     def start(self) -> None:
         self._guard_network_exposure()  # fail-closed 必须先于任何全局副作用(拒绝时不污染 _server_instance)
+        self._prepare_local_credential()
         global _server_instance
         _server_instance = self
         self.last_error_report = None
@@ -418,6 +353,38 @@ class GatewayHTTPServer:
         from ..attempt.sandbox import register_gateway_bound_port
 
         register_gateway_bound_port(bound_port)
+
+    # LLM: 数据根优先取 Agent 的 canonical home_paths.root（getattr 兼容不带该属性的假 Agent）；独立 HTTP 传输
+    #   无 Agent 时按队列父根布局。G2a 阶段凭据准备失败只降级为结构化状态，不拦启动；凭据不进入状态或 env。
+    # 函数用途: 准备持久本机客户端凭据，失败时记录不可用状态。
+    def _prepare_local_credential(self) -> None:
+        root = self._local_credential_data_root()
+        if root is None:
+            self._apply_local_credential("", "unavailable:no_data_root")
+            return
+        try:
+            credential = ensure_local_client_credential(root)
+        except LocalClientCredentialError as exc:
+            self._apply_local_credential("", f"unavailable:{exc.reason_code}")
+            return
+        self._apply_local_credential(credential, "ok")
+
+    # LLM: home_paths 缺失时记 no_data_root，不回退真实默认 home；独立传输无 Agent 仍按队列父根，测试与生产同一取法。
+    # 函数用途: 解析凭据应写入的数据根，无法安全确定时返回 None。
+    def _local_credential_data_root(self) -> Path | None:
+        if self.agent is None:
+            return self.paths.root.parent
+        home_paths = getattr(self.agent, "home_paths", None)
+        root = getattr(home_paths, "root", None)
+        return root if root is not None else None
+
+    # LLM: 凭据值、公开状态与中间件绑定必须同步更新；失败时清空绑定，避免上一轮或坏文件残留可用凭据的错觉。
+    # 函数用途: 写入凭据与状态，并同步给鉴权中间件。
+    def _apply_local_credential(self, credential: str, status: str) -> None:
+        self._local_client_credential = credential
+        self.local_credential_status = status
+        if self.auth_middleware is not None:
+            self.auth_middleware.set_local_client_credential(credential)
 
     def _serve(self) -> None:
         if self.server is None:

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 892,
+  "count": 894,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3026,6 +3026,22 @@
       "unit": "秒",
       "category": "其它",
       "description": "请求租约按它刷新（processing 超时更短时按超时的 1/3），cli/gateway_loops 的心跳文件循环与后台主循环节奏从这里 import。"
+    },
+    {
+      "name": "LOCAL_CLIENT_CREDENTIAL_ENTROPY_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/local_client_token.py",
+      "value": 32,
+      "unit": "字节",
+      "category": "其它",
+      "description": "随机凭据的熵字节数，token_urlsafe 编码后供宿主请求头使用。"
+    },
+    {
+      "name": "LOCAL_CLIENT_CREDENTIAL_READ_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/local_client_token.py",
+      "value": 128,
+      "unit": "字节",
+      "category": "其它",
+      "description": "读取凭据文件的最大字节数；避免损坏的大文件拖累宿主启动。"
     },
     {
       "name": "_APPROVAL_POLL_SECONDS",

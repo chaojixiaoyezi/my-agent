@@ -1,5 +1,15 @@
 # 设计台账
 
+## Gateway 本机客户端凭据与迁移观察 G1+G2a（2026-10-03，sol1g + ds1g 返工，worker/sol1-g1-g2a，已实现，待 9b 复核）
+
+- 解决部署重启导致客户端凭据失效及凭据进入插件读范围的风险；凭据缺失才用 token_urlsafe(32) 生成，私有原子写落数据根 secrets/（0700、文件0600），停机不删，重启复用。
+- 稳定宿主接口 load_local_client_credential(data_root) 严格校验属主、权限、普通文件和固定编码；缺失、权限、损坏分别有原因码，不返回空串、不打印底层路径/内容。
+- 生产启动根只读 Agent 的 home_paths.root；凭据内容只保存在宿主内存，不进日志/env/argv；/status 只投影 `local_credential` 状态码（ok / unavailable:<原因码>），不含路径与内容。插件沙箱登记文件与目录（Linux H2只覆盖目录）；关闭沙箱的插件与宿主同信任域，Full Access 下不声称文件保密。
+- G1 已独立提交 `cbb80b4360c168e50473d9371a73b497b6bf3c9d`（返工 `db1334395`），可供 G3 接续。G2a 识别本机/配置两种凭据，保留无凭据回环和未知 peer 的原身份规则，只观察、不拦截。
+- ds1g 返工（9b 终审 2 条必须改 + 3a 采纳建议 3，提交 `db1334395`）：①凭据准备失败（坏文件/权限/无数据根）不再拦启动，降级为 /status 的 `local_credential` 状态码，Gateway 照常启动、回环请求照常计数、不轮换不覆盖坏文件；G2b 强制时改 fail-closed。②补用例钉住“空密钥不匹配空请求头”（9b 变异 G1 此前存活）。③增量：非回环来源出示本机凭据现在也算可信（符合 G2 定义，非“逐字节一样”）。
+- `http_routes.py` 是 26 条实际分发的唯一结构化表；只计 credential/admin 两档，public/plugin_token 不计。`/status` 的 `uncredentialed_loopback_by_endpoint` 只含模板 → `{count,last_at}`，进程内加锁、不存请求编号/身份/凭据，重启清零。
+- G2b/G3/G4/G5/G6 不在本片；G2a 并未关闭“无凭据回环仍是管理员”的过渡缺口。临时数据/随机端口组件验证不代替真实客户端或平台隔离。详见 GATEWAY_LOCAL_TRUST 与 TESTS。
+
 ## 模型回合放弃时回收在途调用（luna3a，2026-10-03，分支 `worker/luna3-abandoned-calls`，提交 `a250c3936`，luna2 初审通过，DNS 与握手两处边界 3a 接受，并入 step17i）
 
 - **现象与根因**：9b 的结构化只读证据显示，回合已报 `PROVIDERTIMEOUTERROR` 后，Responses 模型 worker 仍留在无首包的网络读取里；墙钟守卫此前只放弃账本句柄，没有把取消传给 worker/传输层。

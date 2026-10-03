@@ -490,6 +490,8 @@ agent_py_agent/
 |   |   |-- owner_recovery.py           # /recover owner：空 thread 历史 unknown 只读投影、集合确认码、批量共享 CAS 与幂等回执
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |   |-- local_client_token.py       # G1：本机客户端持久凭据，缺则私有生成、宿主严格读取，不进模型环境
+|   |   |-- http_routes.py              # G2a：实际HTTP分发和观察唯一同源，路由模板及四档属性
 |   |   |-- plugin_command_service.py  # TUI HTTP 与 IM 会话共用插件服务、可信 owner 目录和管理员授权
 |   |   |-- plugin_panels_http.py      # /client/plugin-panels：作用域解析、只读活动投影与展示服务调用
 |   |   |-- command_stream_protocol.py # 命令有界消息、规范 owner 握手与原审批路径
@@ -1570,6 +1572,8 @@ docs/
 - `agent_py_agent/agent/user_space/operation_grants.py`：owner 级"长期允许某类操作"的唯一权威（tool_policy.json 的 operation_grants），审批面板选 approved_owner 后写入，自主模式据此放行。
 - `agent_py_agent/agent/gateway_parts/background_sessions.py`：Gateway 停机收尾只读列出 owner 后台会话权威目录里仍未终态的受管进程（含监听范围事实），供停机事件与 status 投影；不停止、不改记录。
 - `agent_py_agent/agent/gateway_parts/loop_health.py`：Gateway 派发线程健康的唯一事实源（进程内、不做 IO）——起止、每次 tick 起止与派发数、从 tick 逃逸的异常、循环错误打印本身失败的次数；`dispatcher_alive` 由登记/退出记录加线程仍在 `threading.enumerate()` 判定。心跳与 `/status` 只扁平并入 `snapshot()`，不另算存活。
+- `agent_py_agent/agent/gateway_parts/local_client_token.py`：持久本机客户端凭据的宿主接口，缺则私有原子生成、严读有原因码，停机不删；插件 H2 与启动钩子同一路径。
+- `agent_py_agent/tests/test_gateway_local_client_token.py`：临时凭据生命周期/权限/坏文件、H2声明、环境与日志/status不泄露、启动根和重启复用。
 - `agent_py_agent/cli/gateway_loop_backoff.py`：`LoopErrorBackoff`，派发循环与后台主循环共用的"连续出错退避 + 打印限流"小工具：只算节奏不记账不打印，成功一次清零；防止 tick 持续出错时每 0.2 秒一条错误日志把刚腾出的磁盘再写满。
 - `agent_py_agent/tests/test_host_files_access.py`：H3 合同：宿主托管文件（`path_access_policy` 的 `HOST_CONFIG_*`、`HOST_STATE_*`、`HOST_CREDENTIAL_*`）对模型的文件工具与 Shell 只读（凭据对文件工具连读也拒），9b 盘点的每一项都有文件工具和真实沙箱用例；B 类任务树根留在 `tool_runtime_ledger`；宿主记忆工具照常写。
 - `agent_py_agent/cli/host_state_guard.py`：H3：模型在命令沙箱里跑 my-agent CLI 起不来时（每条命令都要构造完整 SimpleAgent、写本地库，而宿主状态只读），只按宿主设的 `MY_AGENT_HOST_STATE_READ_ONLY` 标记和异常的 errno / sqlite 错误码把它换成一行 `error_code=CLI_HOST_STATE_READ_ONLY`；沙箱外行为不变。

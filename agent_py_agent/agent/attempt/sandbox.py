@@ -87,7 +87,7 @@ class AttemptSandboxSpec:
     # macOS 由 Seatbelt 读拒绝实现。full_access 不生效。
     private_read_roots: tuple[Path, ...] = ()
     # H2：对模型命令完全隐藏的宿主托管存储目录（插件安装库、包库），任何模式都生效（含 full_access）：Linux 盖一层只读空
-    # tmpfs，macOS 在规则最后拒读写。只由模型 shell 的 _sandbox_exec 填写；插件进程沙箱不填，插件仍能读自己的环境目录。
+    # tmpfs，macOS 在规则最后拒读写。模型 shell 隐藏托管存储；G1 插件沙箱只隐藏宿主客户端凭据及 secrets 目录，不隐藏自身环境。
     hidden_paths: tuple[Path, ...] = ()
     # H3：按正则拒写的宿主托管位置（path_access_policy.host_readonly_patterns：所有任务的核验记录），只有 macOS Seatbelt 能表达；
     # Linux bwrap 只能挂已存在的路径，忽略这一项（只保护 protected_write_paths 里的本任务记录，已知边界）。

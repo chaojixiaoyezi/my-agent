@@ -1,4 +1,6 @@
 
+# LLM: G2a保持回环/未知来源旧信任，仅加本机凭据识别与路由观察，不实施G2b强制；计数不存用户、请求头或凭据。
+# 模块用途: 从请求提取可信身份，并观察未迁移的旧本机客户端。
 """HTTP 请求鉴权中间件 — 从请求中提取身份并进行权限检查。
 
 AuthMiddleware 用于 gateway HTTP 服务,对每个请求按"来源可信度"提取身份:
@@ -16,6 +18,8 @@ from __future__ import annotations
 
 import hmac
 import logging
+import threading
+import time
 from typing import Any
 
 from .manager import AuthManager
@@ -52,6 +56,8 @@ def _handler_peer_ip(handler) -> str | None:
     return None
 
 
+# LLM: 身份判定与观察分离；G2a不改变无凭据回环权限，秘密只留内存，不输出。
+# 类用途: 为Gateway提供身份鉴权和迁移阶段的有界观察。
 class AuthMiddleware:
     """Gateway HTTP 请求鉴权中间件。"""
 
@@ -59,16 +65,54 @@ class AuthMiddleware:
     HEADER_CHANNEL = "X-Channel"
     HEADER_TOKEN = "X-Gateway-Token"
 
+    # LLM: 本机凭据由启动钩子绑定；构造不读文件、不导出环境，观察账仅存进程内。
+    # 函数用途: 初始化原鉴权服务和旧客户端观察账。
     def __init__(self, auth_manager: AuthManager, auth_token: str = "") -> None:
         self.auth_manager = auth_manager
         self.auth_token = auth_token  # 暴露部署的局部信任 token(空=只靠回环 peer 信任)
+        self._local_client_credential = ""
+        self._observation_lock = threading.Lock()
+        self._uncredentialed_loopback_by_endpoint: dict[str, dict[str, int | float]] = {}
 
+    # LLM: 仅宿主启动绑定严读凭据，不写盘/日志/env，不替模型提供读取入口。
+    # 函数用途: 让鉴权入口识别本机客户端持久凭据。
+    def set_local_client_credential(self, credential: str) -> None:
+        self._local_client_credential = credential
+
+    # LLM: 冲突头沿原拒绝规则；常量时间比较两种凭据，空配置不接受空头。
+    # 函数用途: 检查请求是否已携带本机或配置的Gateway凭据。
+    def has_gateway_credential(self, headers: dict[str, str]) -> bool:
+        token = _header_value(headers, self.HEADER_TOKEN).encode("utf-8")
+        return any(secret and hmac.compare_digest(token, secret.encode("utf-8"))
+                   for secret in (self._local_client_credential, self.auth_token))
+
+    # LLM: handler/route来自真实分发，每HTTP请求只记一次；只计credential/admin、真实回环、未凭据，未知peer不计。
+    # 函数用途: 记录旧客户端请求，不拦截、不改变身份，不存原路径或请求头。
+    def observe_loopback_request(self, handler, route) -> None:
+        if route.access_tier not in {"credential", "admin"}:
+            return
+        peer_ip = _handler_peer_ip(handler)
+        if peer_ip is None or not _is_loopback_peer(peer_ip) or self.has_gateway_credential(dict(handler.headers)):
+            return
+        endpoint = route.template
+        with self._observation_lock:
+            previous = self._uncredentialed_loopback_by_endpoint.get(endpoint, {})
+            self._uncredentialed_loopback_by_endpoint[endpoint] = {"count": int(previous.get("count", 0)) + 1,
+                                                                  "last_at": time.time()}
+
+    # LLM: 锁内复制仅模板/count/last_at，不暴露凭据；进程重启从空开始，不是持久累计请求账。
+    # 函数用途: 返回公开status可使用的旧客户端计数快照。
+    def uncredentialed_loopback_snapshot(self) -> dict[str, dict[str, int | float]]:
+        with self._observation_lock:
+            return {key: dict(value) for key, value in self._uncredentialed_loopback_by_endpoint.items()}
+
+    # LLM: G2a保留回环/未知来源旧分支，其它peer持两种宿主凭据之一才可信，不提前强制。
+    # 函数用途: 判定请求来源在当前迁移档是否可信。
     def _peer_trusted(self, peer_ip: str | None, headers: dict[str, str]) -> bool:
         """来源是否可信:回环本机(或来源未知)可信;否则须携带合法 X-Gateway-Token。"""
         if peer_ip is None or _is_loopback_peer(peer_ip):
             return True
-        token = _header_value(headers, self.HEADER_TOKEN)
-        return bool(self.auth_token) and hmac.compare_digest(token, self.auth_token)
+        return self.has_gateway_credential(headers)
 
     def extract_identity(self, headers: dict[str, str], peer_ip: str | None = None) -> tuple[str, str]:
         """提取 (user_id, channel)。不可信来源 → 匿名 USER(不认 header,绝不 admin)。"""
