@@ -76,6 +76,7 @@
   - 修复 `4026d9639`（分支 `claude/be-s7-recall-mode`）：`search` 每次检索也记一次方式（口径同 HybridRetriever）。同样流程重跑，召回方式 semantic 2、最近一次 semantic，全部对上。
   - 新增 2 项：`test_unscoped_recall_counts_one_retrieval_mode_per_call`（两次 `agent.recall` 记 2 次 semantic、和召回请求数一致；端点失败记 keyword/`embedding_failed`）、`test_unscoped_recall_without_semantic_counts_keyword_with_reason`（没开语义召回记 keyword 带原因、不发嵌入请求）。`test_embedding_usage.py` 现在 13 项。
   - 变异 4 个全部抓到：没有嵌入端时不记方式、`_fuse_semantic` 不记方式、一律记 semantic、失败不给原因码。
+  - `96679b1f8` 把降级原因放进新的 `_semantic_records_report`，`_semantic_records` 照旧只返回记录（已有用例比较 `len()`，改成元组会让断言悄悄失效）；行为不变，4 个变异复跑仍全部抓到。相关回归（嵌入、召回、向量库、工具检索、`/model` 服务、Gateway 记忆命令，加 guards9、packaging、常数目录）140 个文件 2501 passed、15 skipped；严格门禁全过，code-size 对 `c1d686a19` 新增 0。
   - 证据 `~/.my-agent/decision-evidence/embedding-usage-facts-s7/`（README、两轮旁听记录和回执、测试方脚本；隔离根含密钥副本，已删）。
 
 ## 同一回合因非计划重启最多自动续跑 3 次（I4 续，2026-10-02，分支 `claude/38-resume-limit`，基于 `72ddc2b5c`）
