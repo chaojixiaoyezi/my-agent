@@ -2,6 +2,9 @@
 
 2026-10-03（luna6i，分支 `worker/luna6-idem-flake`，ae 复审通过，并入 step17i）：解决子代理列表缓存只看 `task.json` 的 `st_mtime_ns`，导致同 mtime 的原子替换未使缓存失效、items 复用保存可将 RUNNING 旧快照写回 PLANNING 的竞争。缓存改核对 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`；受控同 mtime 回归先红后绿，定向和 guards9 已跑过，完整命令及边界见 TESTS.md 顶部。
 
+2026-10-03（luna6i，ae 复审补强，`worker/luna6-idem-flake`）：同文件指纹的 mtime 距当前不足 2 秒时绕过解析缓存重读，2 秒外仍复用；两项幂等派发测试用真实启动桩固定状态，并集合精确检查 DONE/RUNNING 排除、PLANNING 全部派发。阈值与 Gateway 粗 mtime 保护同为 2 秒，不新增配置或跨层依赖；定向 13 个测试文件已过，静态门禁和提交结果见 TESTS.md 顶部。
+
+
 2026-10-02（第 14 条，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`，本地已实现、待集成，默认关）：派子代理时可以把父会话的
 图片/视频按结构化引用交给子代理。capability 开关 `subagent_input_media_enabled`（`config/capability_config.yaml`，运行时经
 `capability_config_for_agent` 读，管理员 `/settings` 可开关；首版误放主配置，已挪）打开后：带附件的回合在当前回合 IR 末尾多一条宿主事实

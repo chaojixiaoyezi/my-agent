@@ -16,6 +16,13 @@
 - **评审并入**（2026-10-03）：ae 第 (1) 层 4 条（Seatbelt 用 `*:<port>` 挡 IPv4 映射、Landlock 实测挂法、unavailable 两种、覆盖范围与三类挡不住路径），9b 第 (2) 层 3 条必须改（插件令牌单列一档、“非唯一防线”三分法 + 文件队列第二入口 + 插件同信任域、计数/判据细节）+ 4 条建议（凭据同宿主身份不入日志env、web_fetch/watch_stream 排除 Gateway 端口、LOCAL_CREDENTIAL_REQUIRED、Landlock 车道实跑）。26 条路由档位清单见 ENDPOINT_TIERS.md。新头在复审后更新。
 - **证据**：`~/.my-agent/decision-evidence/gateway-local-trust-20261003/`（Seatbelt 端口拒绝探针，随机端口假服务，没碰生产 8420）。详见 `docs/design/GATEWAY_LOCAL_TRUST.md`。
 
+## 子代理缓存复审加固：粗 mtime 窗口与稳定派发断言（2026-10-03，luna6i，`worker/luna6-idem-flake` `44580b8a5`，ae 复审通过，并入 step17i；“窗口内读到的结果不入缓存”这条应改另做）
+
+- **状态**：对 ae 针对 `9264b0bf5` 的两条建议已实现，保留原提交历史；定向 13 个相关测试文件和静态门禁已通过，本轮以新增提交交付，ae 复审通过。
+- **缓存边界**：即使文件指纹相同，`task.json` 的 mtime 距现在不足 2 秒时也不信解析缓存并重读；2 秒外继续复用。阈值与 `request_worker.GatewayInboxScanGate` 的粗 mtime 窗口同口径，在持久层类内保留常数，避免领域层反向依赖 Gateway。
+- **派发回归**：原有两个幂等复用用例都把真实后台启动替换为结构化回执桩；一个验证 3 个 `PLANNING` 全部派发，另一个验证 `DONE` 与 `RUNNING` 均排除、`PLANNING` 必须派发。
+- **变异证据**：近期 mtime 回归在把保护阈值置 0（等效移除保护）时失败；将缓存签名退化为仅 mtime、并把文件设在 2 秒保护窗外时，`RUNNING` 回滚回归也失败；状态回归在把 `RUNNING` 加入 `DISPATCHABLE_STATES` 时失败。临时变异均已还原。
+
 ## 子代理任务缓存按文件代次失效（2026-10-03，luna6i，分支 `worker/luna6-idem-flake`，基于 `claude/3a-step17i` `b78b42265`，ae 复审通过，并入 step17i；两条应改另做）
 
 - **问题**：`SubAgentPersistenceService` 原先仅用 `task.json.st_mtime_ns` 命中解析缓存。文件原子替换在时间戳精度较低的文件系统上可能沿用同一 mtime；items 幂等复用随后把缓存中的完整任务快照再次保存，普通 `RUNNING` 状态与旧 `PLANNING` 快照处于同一 runner attempt 时，不受终态保护或 attempt-generation fence 保护，可能把 canonical `RUNNING` 写回 `PLANNING` 并再次放入 auto_start。

@@ -16,6 +16,53 @@
   - Gateway 启动不登记 → 被启停用例杀。
 - 跑法：`PYTHONPATH=<worktree> ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_gateway_port_deny.py -q`（macOS，沙箱外）。
 
+## ae 复审补强：近期 mtime 绕过缓存与稳定派发断言（2026-10-03，luna6i）
+
+- **改动**：即使文件签名相同，`task.json` 的 mtime 距当前不足 2 秒也重读 canonical 状态；超过窗口仍复用缓存。`SubAgentPersistenceService` 内部常数采用与 `GatewayInboxScanGate._COARSE_MTIME_GUARD_SECONDS` 相同的 2 秒口径，不新增配置，也不建立 subagents→Gateway 依赖。
+- **缓存回归**：`test_subagent_listruns_cache.py::test_list_runs_reloads_recent_mtime_but_reuses_old_cache` 固定当前时刻，验证 mtime 年龄 1 秒时触发 `load`、3 秒时命中缓存。保护实现前先运行，按预期失败：`load_calls=[]`，期望 `[run_id]`；实现后通过。
+- **派发回归**：幂等测试文件里两个用例均把真实 `_start_background_dispatch` 替换成接受回执桩。一个明确检查三个 `PLANNING` child 全部进入 auto_start；另一个先断言状态集合为 `DONE/RUNNING/PLANNING`，再精确断言只有 `PLANNING` child 进入 auto_start，且 DONE、RUNNING 均不在集合中。
+- **变异**：将缓存保护阈值改为 `0.0`（等效移除新鲜 mtime 保护）时，缓存回归失败并显示未调用 `load`；将缓存签名退化为仅 mtime、且令同 mtime 文件年龄超过 2 秒保护窗时，RUNNING 回归失败并观察到 canonical 状态回滚为 `PLANNING`；将 `RUNNING` 加入 `DISPATCHABLE_STATES` 时，混合状态派发回归失败并观察到 RUNNING run_id 进入回执。三处临时变异均已还原。
+- **相关测试**：本轮定向执行以下 13 个文件，退出码 0、输出到 100%：
+  `test_orchestration_create_subagents_idempotency.py`、`test_orchestration_create_subagents_items.py`、`test_orchestration_create_subagents_tool.py`、`test_orchestration_create_subagents_tool_workspace.py`、`test_subagent_listruns_cache.py`、`test_subagent_manager_core.py`、`test_subagent_persistence_service.py`、`test_subagent_machine_fact_contracts.py`、`test_subagent_reserved_start_restart_pickup.py`、`test_direct_parent_lifecycle.py`、`test_subagent_done_supersede.py`、`test_subagent_recovery_orchestrator.py`、`test_agent_tree_three_layer_status.py`。
+- **命令**（工作树根目录执行）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py \
+    agent_py_agent/tests/test_orchestration_create_subagents_items.py \
+    agent_py_agent/tests/test_orchestration_create_subagents_tool.py \
+    agent_py_agent/tests/test_orchestration_create_subagents_tool_workspace.py \
+    agent_py_agent/tests/test_subagent_listruns_cache.py \
+    agent_py_agent/tests/test_subagent_manager_core.py \
+    agent_py_agent/tests/test_subagent_persistence_service.py \
+    agent_py_agent/tests/test_subagent_machine_fact_contracts.py \
+    agent_py_agent/tests/test_subagent_reserved_start_restart_pickup.py \
+    agent_py_agent/tests/test_direct_parent_lifecycle.py \
+    agent_py_agent/tests/test_subagent_done_supersede.py \
+    agent_py_agent/tests/test_subagent_recovery_orchestrator.py \
+    agent_py_agent/tests/test_agent_tree_three_layer_status.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna6i
+  ```
+- **guards9**：执行指定清单内 10 个测试文件（含 `test_packaging.py`），退出码 0，输出到 100%。
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_architecture_guardrails.py \
+    agent_py_agent/tests/test_config_field_readers.py \
+    agent_py_agent/tests/test_constant_names_unique.py \
+    agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+    agent_py_agent/tests/test_parameter_registry.py \
+    agent_py_agent/tests/test_recovery_actions.py \
+    agent_py_agent/tests/test_recovery_code_policy.py \
+    agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+    agent_py_agent/tests/test_subagent_config_inheritance.py \
+    agent_py_agent/tests/test_packaging.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna6i
+  ```
+- **静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed`（首次检查发现测试里的 C420，改用 `dict.fromkeys` 后复跑通过）；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；strict code-size → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`。随后执行 `git checkout -- CODE_SIZE_REPORT.md` 还原生成报告。
+- **交付检查**：`git diff --check` 退出码 0、无空白错误；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`size_diff.sh` 输出 `新增告警: 0`、`消失告警: 9`。
+- **尚未运行**：全仓 pytest 和 Linux 车道复跑留给集成者；本轮只跑上述定向测试与 guards9。
+
 ## 子代理幂等复用 auto_start 偶发失败调查（2026-10-03，luna6i）
 
 - **车道现象**：step17i 的 shard-0 在 `test_orchestration_create_subagents_idempotency.py::test_reused_done_children_are_excluded_from_dispatch_contract` 第 72 行，`auto_start.run_ids` 与 `first.created_run_ids[1:]` 不同；车道原输出只给断言差异和同秒 ID，没有保存失败时每个 child 的 canonical 状态，故不凭 ID 倒推其状态。

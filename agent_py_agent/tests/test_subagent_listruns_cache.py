@@ -28,6 +28,32 @@ def test_list_runs_cache_reuses_and_counts_stable(tmp_path: Path) -> None:
     assert {t.id for t in r1} == {t.id for t in r2}
 
 
+def test_list_runs_reloads_recent_mtime_but_reuses_old_cache(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.subagents.services.persistence import service as persistence_service
+
+    agent = _agent(tmp_path)
+    run_id = agent.subagents.create_run(goal="近期文件重读", agent_name="worker").id
+    task_file = agent.subagents.workspace / run_id / "task.json"
+    agent.subagents.list_runs()  # 先建立与磁盘指纹相同的缓存项。
+    mtime_seconds = task_file.stat().st_mtime_ns / 1_000_000_000
+
+    load_calls = []
+    original_load = agent.subagents.persistence.load
+
+    def counted_load(selected_run_id: str):
+        load_calls.append(selected_run_id)
+        return original_load(selected_run_id)
+
+    monkeypatch.setattr(agent.subagents.persistence, "load", counted_load)
+    monkeypatch.setattr(persistence_service.time, "time", lambda: mtime_seconds + 1.0)
+    assert [task.id for task in agent.subagents.list_runs()] == [run_id]
+    assert load_calls == [run_id]
+
+    monkeypatch.setattr(persistence_service.time, "time", lambda: mtime_seconds + 3.0)
+    assert [task.id for task in agent.subagents.list_runs()] == [run_id]
+    assert load_calls == [run_id]
+
+
 def test_list_runs_returns_independent_copies(tmp_path: Path) -> None:
     """改 list_runs 返回的对象不污染缓存——下次拿到的仍是磁盘真值。"""
     agent = _agent(tmp_path)

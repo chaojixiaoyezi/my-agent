@@ -1,5 +1,5 @@
-# LLM: canonical 状态始终先于投影；session 窄写在同一原锁内核对终态和准确 attempt，不能以旧快照覆盖新轮。
-# 模块用途: 持久保存子代理任务及派生视图，并为心跳提供受条件约束的轻量写入。
+# LLM: canonical 状态始终先于投影；解析缓存须同时按文件指纹失效，并在粗 mtime 窗口内重读，不能以旧快照覆盖新轮。
+# 模块用途: 持久保存子代理任务及派生视图，并让近期文件绕过缓存以保护低精度文件系统上的状态新鲜度。
 """Persistence service for SubAgentManager task records.
 
 Saves are split into two phases. The canonical task-local state is written first
@@ -170,8 +170,13 @@ def _list_runs_for_root_report(
     return SubAgentListRunsReport(runs=canonical, load_errors=load_errors)
 
 
+# LLM: canonical task 文件是子代理状态权威；缓存仅作读取优化，mtime 粗粒度窗口内必须重读，所有返回仍是深拷贝。
+# 类用途: 管理子代理任务的持久化与列表读取；缓存规则改变时同步检查 list_runs 和 create_subagents 的状态复用测试。
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
+
+    # 粗 mtime 保护窗口与 GatewayInboxScanGate 同为 2 秒；本地声明避免让领域持久层反向依赖 Gateway。
+    _RUN_CACHE_COARSE_MTIME_GUARD_SECONDS = 2.0
 
     # LLM: The persistence service owns one process-local parsed-state cache. Every list/read
     # projection may share it, but callers always receive deep copies and canonical files remain
@@ -180,7 +185,8 @@ class SubAgentPersistenceService:
     def __init__(self, manager: Any):
         self.manager = manager
         # task.json 文件指纹未变时复用解析对象，避免每轮 dispatch 全量重读+重解析。
-        # 仅用 mtime 会在低精度文件系统的同一时间片漏掉原子替换，故同时核对 inode、大小和 ctime。
+        # 近期 mtime 仍强制重读，以防多代替换后 inode 重用且时间戳同片；旧文件继续享有缓存收益。
+        # 其余情况同时核对 inode、大小和 ctime，避免只看 mtime 漏掉原子替换。
         # 命中后仍只 stat；返回 deepcopy 副本，调用方修改不会污染缓存对象。
         self._run_cache: dict[str, tuple[tuple[int, int, int, int, int], SubAgentTask]] = {}
         self._run_cache_lock = threading.RLock()
@@ -321,8 +327,9 @@ class SubAgentPersistenceService:
         return _list_runs_for_root_report(self, root_task_id)
 
     # LLM: Cache access is serialized because ThreadingHTTPServer may render several TUI/Web
-    # projections concurrently. File identity/size/mtime/ctime invalidate parsed objects even
-    # when a filesystem reuses one coarse mtime tick; deep copies keep cached state private.
+    # projections concurrently. File identity/size/mtime/ctime invalidate parsed objects; even
+    # an unchanged signature is not trusted while mtime is inside the coarse 2-second window.
+    # Deep copies keep cached state private and canonical files authoritative.
     # 函数用途: 线程安全地复用未变化的子代理解析结果，并给调用方返回独立副本。
     def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
         with self._run_cache_lock:
@@ -335,8 +342,13 @@ class SubAgentPersistenceService:
                 stat.st_ctime_ns,
             )
             cached = self._run_cache.get(run_id)
-            if cached is None or cached[0] != signature:
-                self._run_cache[run_id] = (signature, self.load(run_id))
+            if (
+                cached is not None
+                and cached[0] == signature
+                and time.time() - stat.st_mtime_ns / 1e9 >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS
+            ):
+                return copy.deepcopy(cached[1])
+            self._run_cache[run_id] = (signature, self.load(run_id))
             return copy.deepcopy(self._run_cache[run_id][1])
 
     # LLM: Eviction shares the cache lock with exact-id reads so a concurrent full scan cannot
