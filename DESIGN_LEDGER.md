@@ -2,7 +2,10 @@
 
 ## Gateway 本机来源信任收紧（be，2026-10-03，分支 `claude/be-gateway-local-trust`，基于 `claude/3a-step17h` `a602d6ad6`，9b、ae 评审通过，3a 2026-10-03 定稿，实施中，并入 step17i）
 
-- **实施进度**：G4（macOS 端口拒绝）在 `claude/be-g4-port-deny`（基于 step17i `3a81e6c4b`，头 `c4113baa8`，ae 两轮复审通过，并入 step17i）实现——进程内绑定端口注册表（Gateway 启停登记/注销实际 `server_address` 端口）、`AttemptSandboxSpec.deny_gateway_ports` 只对模型命令沙箱置位、macOS Seatbelt `(deny network-outbound (remote tcp "*:<port>"))`、`full_access` 也拒、插件沙箱不填。真 Seatbelt 17 条用例 + 6 变异（见 TESTS 同名节）。G5（Linux Landlock 启动器）接续；G1/G2a/G6 由 my-agent 会话做。ae 复审 G4。
+- **实施进度**：G4（macOS 端口拒绝）在 `claude/be-g4-port-deny`（基于 step17i `3a81e6c4b`，头 `c4113baa8`，ae 两轮复审通过，并入 step17i）实现——进程内绑定端口注册表（Gateway 启停登记/注销实际 `server_address` 端口）、`AttemptSandboxSpec.deny_gateway_ports` 只对模型命令沙箱置位、macOS Seatbelt `(deny network-outbound (remote tcp "*:<port>"))`、`full_access` 也拒、插件沙箱不填。真 Seatbelt 17 条用例 + 6 变异（见 TESTS 同名节）。ae 复审 G4（必改预登记 + 应改 isolation→/status，已补）。
+  isolation 事实单一来源 `gateway_isolation_status`，`/status` 加 `gateway_isolation` 字段。
+- **G5（Linux Landlock 启动器）**在 `claude/be-g5-landlock`（基于 G4 头 `c4113baa8`，加固 `0b10b074b`，ae 两轮复审通过，并入 step17i）实现：自包含启动器 `attempt/landlock_launcher.py`（exec bwrap 前声明 CONNECT_TCP ruleset、给被拒端口外的 65535 个端口加允许规则、`no_new_privs`、`restrict_self`，再 `os.execv(bwrap)`；系统调用号按架构查表、未知架构不支持；任何施加失败 fail-closed 非零退出不 exec）；就绪探针 `landlock_net_readiness`（架构、ABI≥4、bwrap 非 setuid 逐项探，非 Linux 返回 NOT_LINUX）；`_linux_argv` 就绪时用启动器包 bwrap argv、不就绪不包并如实报 unavailable；`gateway_isolation_status` 的 Linux 分支改为按就绪探测给 applied/unavailable:<原因>。单元用例（平台无关）+ Linux 车道真跑（被拒 EACCES、IPv4 映射也拒、其它端口通、穿透 bwrap 子进程、unavailable 分支）。G1/G2a/G6 由 my-agent 会话做。ae 复审 G5。
+  - 已知边界（ae 复审）：施加失败的结构化标记写在 stderr，模型的命令能伪造；目前只用作这条工具结果的 error_code，没有宿主行为依赖它。以后要让它驱动宿主动作，得换成模型写不到的通道（例如 O_CLOEXEC 错误管道）。只有同步 shell 路径把 97 映射成 GATEWAY_ISOLATION_APPLY_FAILED，PTY 和后台命令显示的是普通的 96、97 退出码。
 
 - **缺口**：Gateway 判“可信”只看对端是不是回环（`auth/middleware.py:66`），不带身份头的回环请求直接当本机管理员（`:82`）；模型命令沙箱默认联网、不区分回环（`attempt/sandbox.py:67`）。两者叠加，模型发本机 HTTP 请求就落在“本机管理员”一侧。文件通道（审批决定、请求队列）已被 H3 挡住，缺口全在 HTTP。
 - **方向**（3a 定，两层都要）：(1) 模型命令沙箱按端口连不到 Gateway；(2) 特权入口只认宿主持有、模型读不到的凭据。

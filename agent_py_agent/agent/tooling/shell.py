@@ -1858,10 +1858,15 @@ def _run_shell_process_text(
         if not cleanup_confirmed:
             output += _cleanup_warning_text(result.returncode, termination)
         stderr = str(getattr(result, "stderr", "") or "")
+        # G5：模型命令沙箱的 Landlock 启动器 fail-closed（Gateway 端口隔离没施加上、命令没跑）要能被机器识别，
+        # 不和命令自己的非零退出码混淆。启动器退出码 + stderr 首行结构化标记映射成宿主错误码。
+        from ..attempt.landlock_launcher import APPLY_FAILED_ERROR_CODE, is_apply_failed
+
+        isolation_error = APPLY_FAILED_ERROR_CODE if is_apply_failed(int(result.returncode), stderr) else ""
         return (
             output,
-            command_succeeded,
-            "" if command_succeeded else "COMMAND_FAILED",
+            command_succeeded and not isolation_error,
+            isolation_error or ("" if command_succeeded else "COMMAND_FAILED"),
             {
                 "status": "exited",
                 "return_code": int(result.returncode),

@@ -26,6 +26,7 @@ import os
 import platform
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ from ..tooling.sandbox import (
     find_bwrap,
     probe_sandbox,
 )
+from . import landlock_launcher
 from .process_run import run_sandbox_process
 
 
@@ -262,15 +264,29 @@ class AttemptExecutionSandbox:
             network_access=self.spec.network_access,
             read_only_root=self.spec.read_only_root, hidden_paths=self.spec.hidden_paths,
         )
-        # G4：Linux 的端口拒绝在 G5（Landlock 启动器）落地；这里不施加，隔离事实由 gateway_isolation_status 统一给出
-        # （Linux 在 G5 前恒 unavailable:landlock_not_implemented，命令照跑、靠第 (2) 层兜底）。
-        return [*build_bwrap_argv(spec), "--", *command_argv]
+        return self._wrap_with_landlock([*build_bwrap_argv(spec), "--", *command_argv])
+
+    # LLM: G5：登记了 Gateway 端口且 Landlock 就绪时，用启动器把 bwrap argv 包一层（exec bwrap 前按端口拒绝）。包不包只看
+    #   landlock_net_readiness——它和 gateway_isolation_fact 读同一个探测，所以“包了”必然 applied、“没包”必然 unavailable:<原因>，
+    #   不会出现“报了 applied 其实没挡”。环境没能力时不包、命令照跑（如实报 unavailable、靠第 (2) 层兜底）；施加失败的 fail-closed
+    #   在启动器里（exec 前失败即非零退出、不 exec）。没登记端口时原样返回，Linux 既有 argv 逐字节不变。
+    # 函数用途: Linux 下按就绪情况给 bwrap argv 套 Landlock 端口拒绝启动器。
+    def _wrap_with_landlock(self, bwrap_argv: list[str]) -> list[str]:
+        ports = self.spec.deny_gateway_ports
+        if not ports:
+            return bwrap_argv
+        ready, _reason = landlock_net_readiness(self.spec.bwrap_path)
+        if not ready:
+            return bwrap_argv
+        deny = ",".join(str(port) for port in dict.fromkeys(ports))
+        # -I 隔离模式跑启动器：忽略 PYTHONPATH/用户 site，避免 Gateway 的 PYTHONPATH 或脚本目录遮住 ctypes/os（ae 复审）。
+        return [sys.executable, "-I", str(_LANDLOCK_LAUNCHER), "--deny", deny, "--", *bwrap_argv]
 
     # LLM: 本沙箱这次对 Gateway 端口隔离的结构化事实，唯一来源是模块级 gateway_isolation_status（见其注释）：
-    #   按“平台 + 本 spec 登记的端口”算，保证和 /status 同一口径。build_argv 之后或之前读都一致（不依赖副作用）。
+    #   按“平台 + 本 spec 登记的端口 + Landlock 就绪”算，和 /status、_wrap_with_landlock 的包裹决定同一个探测。不依赖副作用。
     # 函数用途: 返回本沙箱这次对 Gateway 端口隔离的结构化事实。
     def gateway_isolation_fact(self) -> str:
-        return gateway_isolation_status(self.spec.deny_gateway_ports)
+        return gateway_isolation_status(self.spec.deny_gateway_ports, bwrap_path=self.spec.bwrap_path)
 
     # LLM: macOS argv must be built from the same explicit write roots and protected overlays as
     # Linux; never infer write permission from attempt_view/cwd when the boundary is explicit.
@@ -547,19 +563,58 @@ def gateway_bound_ports() -> tuple[int, ...]:
         return tuple(sorted(_LOCAL_GATEWAY_PORTS))
 
 
+# G5：Landlock 端口拒绝启动器脚本路径（本包内自包含脚本，exec bwrap 前施加 Landlock）。
+_LANDLOCK_LAUNCHER = Path(__file__).with_name("landlock_launcher.py")
+
+
+# LLM: G5：判断本机 Linux 环境能不能用 Landlock 按端口拒绝（不施加、不限制本进程，只查询——在 Gateway 进程里调是安全的）。
+#   逐项探 ae 列的前提：架构认识、内核 ABI≥4（网络规则需要 v4）、bwrap 不是 setuid（no_new_privs 下 setuid 位失效、bwrap 起不来）。
+#   非 Linux 返回 NOT_LINUX。返回 (是否就绪, 原因码)：不就绪时原因码进 gateway_isolation 的 unavailable:<原因>，命令照跑、靠第 (2) 层兜底。
+#   userns 等 bwrap 自身前提由既有 bwrap 就绪探测覆盖，这里不重复。
+# 函数用途: 探测 Linux Landlock 网络端口拒绝是否可用，返回 (ready, reason_code)。
+def landlock_net_readiness(bwrap_path: str | None = None) -> tuple[bool, str]:
+    if platform.system() != "Linux":
+        return False, "NOT_LINUX"
+    nums = landlock_launcher.syscall_numbers()
+    if nums is None:
+        return False, "LANDLOCK_UNKNOWN_ARCH"
+    import ctypes
+
+    if landlock_launcher.landlock_abi(ctypes.CDLL(None, use_errno=True), nums) < 4:
+        return False, "LANDLOCK_NET_UNSUPPORTED"
+    if _bwrap_is_setuid(bwrap_path):
+        return False, "BWRAP_SETUID"
+    return True, "LANDLOCK_READY"
+
+
+# LLM: bwrap 带 setuid 位时，no_new_privs（启动器施加 Landlock 必设）会让 setuid 失效，无非特权 userns 的机器上 bwrap 起不来。
+#   路径取不到（缺 bwrap）时返回 False——缺 bwrap 由既有沙箱就绪探测拦，不在本判定里重复报。只读文件元数据。
+# 函数用途: 判断 bwrap 可执行文件是否带 setuid 位。
+def _bwrap_is_setuid(bwrap_path: str | None) -> bool:
+    path = bwrap_path or find_bwrap()
+    if not path:
+        return False
+    try:
+        return bool(os.stat(path).st_mode & stat.S_ISUID)
+    except OSError:
+        return False
+
+
 # LLM: G4/G5：Gateway 端口隔离的唯一事实来源，供沙箱对象（按本 spec 端口）和 /status（按进程登记端口）同口径调用——
 #   一个事实只有一处定义。no_ports→not_applicable（没登记端口、无从隔离）；macOS→applied（Seatbelt 恒可表达）；
-#   Linux→unavailable:landlock_not_implemented（G4；G5 落地后由 landlock_net_readiness 换成真实探测结果）；其它平台→
-#   unavailable:unsupported_platform。只读结构化入参，不施加任何隔离。
+#   Linux→按 landlock_net_readiness 真实探测：就绪 applied，否则 unavailable:<原因码>；其它平台→unavailable:unsupported_platform。
+#   bwrap_path 透传给 Linux 的 setuid 探测（/status 不传，内部用 find_bwrap）。只读结构化入参与系统探测，不施加任何隔离。
 # 函数用途: 按平台与登记端口给出 Gateway 端口隔离的结构化事实。
-def gateway_isolation_status(ports: tuple[int, ...], *, system: str | None = None) -> str:
+def gateway_isolation_status(ports: tuple[int, ...], *, system: str | None = None,
+                            bwrap_path: str | None = None) -> str:
     if not ports:
         return "not_applicable"
     resolved = system or platform.system()
     if resolved == "Darwin":
         return "applied"
     if resolved == "Linux":
-        return "unavailable:landlock_not_implemented"
+        ready, reason = landlock_net_readiness(bwrap_path)
+        return "applied" if ready else f"unavailable:{reason}"
     return "unavailable:unsupported_platform"
 
 
@@ -596,4 +651,5 @@ __all__ = [
     "unregister_gateway_bound_port",
     "gateway_bound_ports",
     "gateway_isolation_status",
+    "landlock_net_readiness",
 ]

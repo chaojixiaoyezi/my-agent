@@ -275,13 +275,16 @@ def test_gateway_start_registers_and_stop_unregisters_bound_port(tmp_path):
 # ----------------------------------------------- gateway_isolation 结构化事实（唯一来源）
 
 
-def test_isolation_status_three_values_by_platform():
+def test_isolation_status_three_values_by_platform(monkeypatch):
     from agent_py_agent.agent.attempt.sandbox import gateway_isolation_status
 
     assert gateway_isolation_status(()) == "not_applicable"
     assert gateway_isolation_status((8420,), system="Darwin") == "applied"
-    assert gateway_isolation_status((8420,), system="Linux") == "unavailable:landlock_not_implemented"
     assert gateway_isolation_status((8420,), system="SunOS") == "unavailable:unsupported_platform"
+    # G5：Linux 的值由 landlock_net_readiness 决定（就绪 applied，否则 unavailable:<原因>）。
+    monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox.landlock_net_readiness",
+                        lambda _p: (False, "LANDLOCK_NET_UNSUPPORTED"))
+    assert gateway_isolation_status((8420,), system="Linux") == "unavailable:LANDLOCK_NET_UNSUPPORTED"
 
 
 def test_sandbox_fact_delegates_to_status(tmp_path):
@@ -310,10 +313,12 @@ def test_status_endpoint_reports_gateway_isolation(tmp_path, monkeypatch):
     monkeypatch.setattr(hh, "gateway_request_counts", lambda *a, **k: {})
     monkeypatch.setattr(hh, "_usage_accounting_diagnostics", lambda: {})
     monkeypatch.setattr(hh, "adapter_process_facts", lambda *a, **k: {})
+    # G5：Linux 分支会查 landlock_net_readiness，固定成不就绪以得到确定值。
+    monkeypatch.setattr(sb, "landlock_net_readiness", lambda _p=None: (False, "LANDLOCK_NET_UNSUPPORTED"))
 
     for ports, system, expected in [((), "Linux", "not_applicable"),
                                     ((8420,), "Darwin", "applied"),
-                                    ((8420,), "Linux", "unavailable:landlock_not_implemented")]:
+                                    ((8420,), "Linux", "unavailable:LANDLOCK_NET_UNSUPPORTED")]:
         monkeypatch.setattr(sb, "gateway_bound_ports", lambda p=ports: p)
         monkeypatch.setattr(sb, "platform", type("Pl", (), {"system": staticmethod(lambda s=system: s)}))
         hh.handle_status(_Handler(), server)

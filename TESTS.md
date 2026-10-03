@@ -12684,3 +12684,17 @@ CAP06用原session恢复已完成的REOPEN02，仅原生发送一次`/compact`�
 - `test_gateway_port_deny.py` 增：请求循环启动时配置端口已预登记（起线程前登记）；macOS 登记端口 → `gateway_isolation_fact()=="applied"`、无端口 → `""`；Linux（monkeypatch 平台）→ `unavailable:landlock_not_implemented`。
 - `conftest._isolate_gateway_bound_ports`（autouse）每用例前后保存/复原端口注册表。
 - 变异新增：起线程前不预登记（M7）、macOS 不置 applied（M8）→ 均被抓。
+
+## G5：Linux Landlock 端口拒绝启动器（be，2026-10-03，分支 `claude/be-g5-landlock`，基于 G4 头 `c4113baa8`）
+
+- **新用例** `agent_py_agent/tests/test_landlock_launcher.py`：
+  - 平台无关（任意平台）：系统调用号查表（x86_64/aarch64 有、未知架构 None）；启动器 argv 解析（`--deny p1,p2 -- cmd`，格式/非数字/缺命令判错）；`main` fail-closed——施加失败（LandlockApplyError）/环境不具备（LandlockUnavailable）/坏 argv 都不 `execv`，成功才 `execv`；`_wrap_with_landlock` 就绪时包启动器、不就绪返回原 argv、无端口原样返回；`gateway_isolation_status` 的 Linux 分支跟就绪探测走；非 Linux 的 readiness 返回 NOT_LINUX。
+  - 仅 Linux（车道真跑，`claude-tools/linux-test/linux_test.sh`）：就绪探测在车道为 ready；经启动器施加 Landlock 后子进程连被拒端口 EACCES、连其它端口通、IPv4 映射也被拒；限制穿透到 bwrap 子进程。
+  - 安全：真施加（restrict_self）只在子进程里（经启动器），绝不在 pytest 进程里调；只连本进程起的随机端口临时监听。
+- **变异**（scratch `g5/mutate.py`，不随包）：localhost 规则不 blocks 映射地址属 G4；G5 关键变异：启动器施加失败不 fail-closed（照 exec）、就绪探测 ABI 判据放宽、`_wrap` 不就绪也包。车道上跑。
+
+### G5 补（ae 复审应改三条，2026-10-03）
+
+- 启动器用 `python -I` 跑（隔离 PYTHONPATH/用户 site，不被遮 ctypes/os）：`test_wrap_with_landlock_wraps_when_ready` 断言 argv 含 `-I`。
+- 施加失败用专门退出码 `APPLY_FAILED_EXIT_CODE`(97) + stderr 首行结构化标记（含 `GATEWAY_ISOLATION_APPLY_FAILED`），参数不对用 `BAD_ARGV_EXIT_CODE`(96)；`is_apply_failed` 识别；shell 工具把它映射成宿主错误码 `GATEWAY_ISOLATION_APPLY_FAILED`（`test_shell_maps_launcher_apply_failure_to_host_error_code`，普通非零仍是 COMMAND_FAILED）。
+- `parse_launcher_argv` 从严：空 `--deny`、越界端口（不在 0–65535）、`--deny` 后多于一个参数都按参数不对，不 exec。

@@ -9,6 +9,7 @@
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
 |-- agent_py_agent/agent/attempt/process_run.py # 沙箱同步命令通用取消/超时：临时回调、TERM→宽限→KILL 整组回收及管道释放
+|-- agent_py_agent/agent/attempt/landlock_launcher.py # G5：Linux Landlock 端口拒绝启动器（exec bwrap 前按端口拒绝连本机 Gateway；自包含、fail-closed）
 |-- agent_py_agent/tests/test_pack_verification_cancellation.py # 块 6a：预取消零启动、真实父子组回收、取消入账和不返工，保留平台外复跑
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
 |-- agent_py_agent/agent/capability_verification_manifest.py # 能力包 v2 可选核验声明：交付物识别、钉住的检查程序、输入策略
