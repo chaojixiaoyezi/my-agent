@@ -1,5 +1,16 @@
 # 设计台账
 
+## Gateway 本机来源信任收紧（be，2026-10-03，分支 `claude/be-gateway-local-trust`，基于 `claude/3a-step17h` `a602d6ad6`，9b、ae 评审通过，3a 2026-10-03 定稿，实施中，并入 step17i）
+
+- **缺口**：Gateway 判“可信”只看对端是不是回环（`auth/middleware.py:66`），不带身份头的回环请求直接当本机管理员（`:82`）；模型命令沙箱默认联网、不区分回环（`attempt/sandbox.py:67`）。两者叠加，模型发本机 HTTP 请求就落在“本机管理员”一侧。文件通道（审批决定、请求队列）已被 H3 挡住，缺口全在 HTTP。
+- **方向**（3a 定，两层都要）：(1) 模型命令沙箱按端口连不到 Gateway；(2) 特权入口只认宿主持有、模型读不到的凭据。
+- **修复**：
+  - 第 (2) 层（权威）：Gateway 持久化一份本机客户端凭据（`secrets.token_urlsafe(32)`，缺则生成、不随停机删，避免部署即失效）落 `secrets/` 0600；本机客户端经稳定函数 `load_local_client_credential(data_root)` 读取；可信=带这份凭据或原有 `gateway_auth_token`。**分两步上线**：第一版只发凭据+客户端附带（不强制），`/status` 按端点计“不带凭据回环请求”；计数归零、旧客户端重启后，第二版由开关 `gateway_require_local_credential`（默认 false，退场时删）打开强制，不带凭据的回环降匿名。网页端浏览器读不到文件，凭据由宿主服务端注入（留给接入时设计）；插件宿主 API 的 per-activation 令牌不受影响。`/status`、`/metrics` 公开白名单；无鉴权档、Full Access（模型能读数据根）写明为已知边界。
+  - 第 (1) 层（纵深）：macOS Seatbelt 按端口拒绝连 Gateway（已实测：被拒端口 v4/v6 EPERM、其它端口与自测监听照常）；Linux 用 Landlock TCP 连接规则，先在车道实测，内核不支持时结构化报 unavailable、绝不退回放行。与凭据无关，可独立先上。
+- **实施**：G1 凭据（缺则生成、持久、读取函数、进插件 H2 隐藏路径、不进日志/env/cmdline/status）→ G3 客户端附凭据 → G2a 第一版计数不强制（计数键用路由模板、只计要凭据/要管理员两档、插件令牌路由不计）→ G2b 开关强制（降匿名、去掉 peer_ip is None 旁路、`LOCAL_CREDENTIAL_REQUIRED` 提示重启）；G4 macOS（`*:<port>`、只置位模型命令沙箱 spec 字段不进共用 _network_rules）、G5 Linux（Landlock CONNECT_TCP 白名单、启动器 exec 前上、unavailable 分两种）、G6 宿主抓取工具对 Gateway 端口单独拒绝，三块独立先上。
+- **评审并入**（2026-10-03）：ae 第 (1) 层 4 条（Seatbelt 用 `*:<port>` 挡 IPv4 映射、Landlock 实测挂法、unavailable 两种、覆盖范围与三类挡不住路径），9b 第 (2) 层 3 条必须改（插件令牌单列一档、“非唯一防线”三分法 + 文件队列第二入口 + 插件同信任域、计数/判据细节）+ 4 条建议（凭据同宿主身份不入日志env、web_fetch/watch_stream 排除 Gateway 端口、LOCAL_CREDENTIAL_REQUIRED、Landlock 车道实跑）。26 条路由档位清单见 ENDPOINT_TIERS.md。新头在复审后更新。
+- **证据**：`~/.my-agent/decision-evidence/gateway-local-trust-20261003/`（Seatbelt 端口拒绝探针，随机端口假服务，没碰生产 8420）。详见 `docs/design/GATEWAY_LOCAL_TRUST.md`。
+
 ## 能力包写后检查：回执列全错误、一次改完、连续失败到上限只记账（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `claude/3a-step17i` `911116770`，已实现，9b 复审通过（含两条必须改 96fd11f2f），并入 step17i）
 
 - **起因**：块 8 试点 A05 同一交付物写后检查失败 20 次才过，单例用了 389 万 token（C13 同例 44 万–62 万）。查结构化事实（`decision-evidence/capability-packs-v2-b8/pilot-ede890374/A05-post-write-analysis.md`）是三件事叠在一起：
