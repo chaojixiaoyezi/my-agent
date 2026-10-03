@@ -946,6 +946,35 @@ def _make_stalled_websocket_connection():
     return connection, send_entered
 
 
+# LLM: Model a peer that blocks the outbound protocol send and never acknowledges a graceful close; only a direct
+#   socket abort can wake the blocked sender, so a graceful-close cancel would stay parked past the drain window.
+# 函数用途: 创建发送阶段阻塞、且不回应关闭握手的假 WebSocket 连接，分别记录直接关 socket 与关闭握手两条路径。
+def _make_send_stalled_websocket_connection():
+    send_entered = threading.Event()
+    send_release = threading.Event()
+    socket_closed_directly = threading.Event()
+    close_handshake_called = threading.Event()
+    close_release = threading.Event()
+
+    def send(message):
+        del message
+        send_entered.set()
+        send_release.wait(timeout=5.0)
+        raise OSError("test socket closed during send")
+
+    def close():
+        close_handshake_called.set()
+        close_release.wait(timeout=5.0)
+
+    def close_socket():
+        socket_closed_directly.set()
+        send_release.set()
+        close_release.set()
+
+    connection = SimpleNamespace(send=send, close=close, close_socket=close_socket)
+    return connection, send_entered, socket_closed_directly, close_handshake_called
+
+
 # LLM: Consume one synthetic Responses stream in its own worker and preserve its thrown error for assertions.
 # 函数用途: 收集假 WebSocket 的中断结果。
 def _consume_websocket_transport(outcome, websocket_backend, request):
@@ -983,6 +1012,72 @@ def test_websocket_interrupt_aborts_without_waiting_for_close_handshake(monkeypa
     finally:
         connection.close_socket()
         worker.join(timeout=2.0)
+
+
+# LLM: Start one model call whose WebSocket transport is the stalled-send fake, so a test can cancel a blocked sender.
+# 函数用途: 在本地传输后端上启动一次卡在发送阶段的模型调用，返回线程与账本观察入口。
+def _start_blocked_websocket_send_call(monkeypatch, connection):
+    from agent_py_agent.agent.backends import responses_websocket as websocket_backend
+
+    monkeypatch.setattr(websocket_backend, "_open_connection", lambda request: connection)
+    backend = _LocalResponseTransportBackend(
+        lambda: _fake_response_request("ws://fake.invalid", timeout=5.0),
+        owns_stream_timeout=True,
+    )
+    agent = SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(request_timeout=10.0),
+        _current_subagent_run_id="",
+    )
+    outcome: dict[str, object] = {}
+    caller = threading.Thread(
+        target=_capture_model_call,
+        args=(outcome, agent, "blocked websocket send fixture"),
+        daemon=True,
+    )
+    caller.start()
+    return agent, backend, outcome, caller
+
+
+# LLM: A cancel that lands while the outbound send is blocked must abort the socket directly; a graceful close
+#   would wait for a peer handshake that never comes and leave the worker parked in sendall past the drain window.
+# 函数用途: 验证发送阶段收到取消时直接关 socket（不走关闭握手），worker 在排空窗口内退出且调用账本结清。
+def test_websocket_cancel_during_blocked_send_aborts_socket_and_closes_ledger(monkeypatch):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.agent_core.tool_model_generation import _MODEL_INTERRUPT_DRAIN_SECONDS
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_inflight_snapshot
+
+    connection, send_entered, socket_closed_directly, close_handshake_called = (
+        _make_send_stalled_websocket_connection()
+    )
+    agent, backend, outcome, caller = _start_blocked_websocket_send_call(monkeypatch, connection)
+    try:
+        assert send_entered.wait(timeout=0.5)
+        started = time.monotonic()
+        set_interrupt(True, caller.ident)
+        caller.join(timeout=2.0)
+        elapsed = time.monotonic() - started
+
+        assert not caller.is_alive()
+        error = outcome.get("error")
+        # 取消先关 socket：阻塞中的 sendall 以 socket 错误结束；若主循环先看到中断旗则得到 InterruptedError。
+        assert isinstance(error, OSError), f"unexpected error={error!r}"
+        assert elapsed < _MODEL_INTERRUPT_DRAIN_SECONDS + 0.5
+        assert socket_closed_directly.is_set()
+        assert not close_handshake_called.is_set()
+        assert len(backend.worker_threads) == 1
+        backend.worker_threads[0].join(timeout=1.0)
+        assert not backend.worker_threads[0].is_alive()
+        records = model_call_ledger(agent).records()
+        assert len(records) == 1
+        assert records[0].status == "failed"
+        assert records[0].error_type == type(error).__name__
+        assert model_call_inflight_snapshot() == (0, 0.0)
+    finally:
+        connection.close_socket()
+        set_interrupt(False, caller.ident)
+        caller.join(timeout=2.0)
 
 
 def test_stream_transport_idle_timeout_is_not_reapplied_as_total_wall_timeout():

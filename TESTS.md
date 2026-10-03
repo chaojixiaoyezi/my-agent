@@ -129,6 +129,7 @@
 - **静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` → 退出码 0、无差异空白错误。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0`、`消失告警: 9`。strict code-size 后已执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
 - **常数目录**：本次没有新增常数，无需重新生成目录或单独跑 `test_constants_catalog.py`。
+- **初审补强用例（wsc）**：`test_websocket_cancel_during_blocked_send_aborts_socket_and_closes_ledger`（`test_tool_model_generation.py`）——发送（sendall）阻塞期间收到取消必须走 `close_socket()` 直接中断：断言直接关 socket 被调用、关闭握手未被调用、worker 在 1 秒排空窗口内退出、账本终态 `failed` 且在途计数归零。变异（取消回调 `connection.close_socket` → `connection.close`）被该用例杀死（rc=1，失败点 `socket_closed_directly` 未置位）；产品文件还原后 sha256 与改前一致。定向回归 `test_tool_model_generation.py`+`test_responses_websocket.py` **52 passed**；guards9 **172 passed**；size_diff `新增告警: 0`、消失告警 16。
 
 ## 能力包：交付物未匹配的提示修正（pdm，2026-10-03，分支 `worker/pack-deliverable-unmatched`）
 
