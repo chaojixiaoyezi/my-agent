@@ -74,7 +74,7 @@ _LABELS = {
     "nothing_to_review": "测试都通过了，之后也没改过文件，没有需要复核的",
     "few_stale_focuses": "改后未复核的焦点至多一个，不需要决策模型挑选",
     "already_requested": "这条记录已经请求过复核建议，不再重复请求",
-    "not_observation": "这一步没有产生可点选的页面操作（只有浏览器这类插件会产生）",
+    "not_observation": "这一步没有产生可点选的操作清单（只有屏幕观察工具、声明了观察能力的插件或 MCP 工具会产生）",
     "failed_call": "这一步执行失败了",
     "bad_observation": "页面操作清单不完整，为稳妥不做判断",
     "no_available_action": "候选操作需要的工具这一轮用不了",
