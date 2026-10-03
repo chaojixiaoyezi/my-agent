@@ -5,6 +5,12 @@
 - 嵌入客户端按用途（写入、召回、重建、工具检索）计请求、条数、失败和供应商回报的 token；scoped 检索计 semantic/keyword/none。不落盘，不进 model call ledger。详见 DESIGN_LEDGER 同名条目。
 - 2026-10-03 embo-01 真实对账后补：不带作用域的 `search`（Gateway 与 IM 的 `/memory`、`agent.recall`）也每次记一次召回方式（分支 `claude/be-s7-recall-mode`），原先只计嵌入、不计方式，用户看到“召回 2 次、召回方式 0 次”。
 
+## 决策结果日志七天留存（2026-10-03，luna6，本地已实现，待 3a 复审）
+
+- `conversation/decision_outcome_log` 写入时依 `created_at` 保留最近 7 天；20000 行只作防失控硬上限，超限按时间丢最旧。
+- 沿原 JSONL 路径锁和原子替换；公共 `append_jsonl_capped` 不变，写失败仍只记日志、不影响决策。
+- Audit 汇总与近期 20 行展示保持原样；`decision_reach_counts` 原有 7 天留存不变。验证见 [TESTS](../../../TESTS.md) 同名节。
+
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（2026-10-02，分支 `claude/75-curator-fallback-threshold`，已实现，待 be 审）
 
 - 本组最近一次推进游标的是 `:transient` 默认补跑时，下一批阈值从 2 降到 1（`CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT`）；会话模型自己成功推进后回到 2。只读运行账，警告码由 `curator_routing.transient_fallback_warning` 统一生成。详见 DESIGN_LEDGER 同名条目。

@@ -6,6 +6,7 @@
 #   汇总时把请求根本没发出去的失败类结果单列（not_sent），不计入 Jev 的超时率和失败率。
 #   成功拿到供应商响应的行另带 requested_model（请求时的模型名，如 jev-latest）与 model_version（响应里供应商实际给的
 #   版本号，如 jev-1.13.0）；汇总按（请求名, 实际版本）计次 model_versions，用于发现别名背后的版本变化，不参与任何判定。
+#   日志写入时按 created_at 保留最近 7 天，并以 20000 行作硬上限；过期或硬上限裁剪不改变读取汇总及近期 20 行展示。
 #   新增字段须同步 decision_outcome_row、decision_outcome_summary 与 test_decision_outcome_log.py。
 #   另有 status=skipped 行：可选决策点已到触发点、该点已开启，却被结构化条件挡下（材料含 URL 查询串）时记录，
 #   reason 为宿主原因码；配置 decision_skip_records_enabled 关闭时不写。“没满足触发条件”的原因归 decision_reach_counts 计数。
@@ -14,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -22,7 +24,11 @@ from types import SimpleNamespace
 from typing import TypeVar
 
 from ..backends.decision_protocol import DecisionPrivacySkip, DecisionResponse
-from ..common.json_io import append_jsonl_capped, read_jsonl_objects_report
+from ..common.json_io import (
+    locked_json_path,
+    read_jsonl_objects_report,
+    write_text_file_atomic_unlocked,
+)
 
 SCHEMA = "decision_outcome.v1"
 SKIPPED_STATUS = "skipped"
@@ -42,8 +48,10 @@ DROP_IDENTITY_CHANGED = "identity_changed"
 # 采用前复核自己抛异常（不是判定不通过）时的兜底码：宁可标成复核失败，也不能把它当成通过。
 DROP_REVIEW_FAILED = "review_failed"
 _T = TypeVar("_T")
-# 决策结果日志最多保留 1000 条记录：超限轮转。
-_MAX_RECORDS_COUNT = 1000
+# 决策结果日志按 created_at 保留最近 7 天（秒），与 decision_reach_counts._RETAIN_SECONDS 对齐，覆盖一周观察周期。
+_OUTCOME_RETAIN_SECONDS = 7 * 86400
+# 决策结果日志的硬上限为 20000 条：约为当前 1000 条/3.7 天速率下周数据的十倍余量，异常高频才裁最旧记录。
+_MAX_RECORDS_COUNT = 20_000
 # 决策结果日志近期展示 20 行。
 _RECENT_ROWS_COUNT = 20
 _RECENT_FIELDS = ("created_at", "point", "scope", "mode", "status", "result_category", "reason", "elapsed_ms", "blocking")
@@ -163,17 +171,33 @@ def result_category_label(category: object) -> str:
     return text
 
 
-# LLM: 路径只认宿主 home_paths 的规范字段；没有该字段（旧替身或无 owner 的宿主）就不记录。I/O 失败吞掉并记日志，
-#   因为这是观察记录，不能让可选决策因写盘失败而改变结果。
+# LLM: 路径只认宿主 home_paths 的规范字段；没有该字段（旧替身或无 owner 的宿主）就不记录。用该路径的 per-path 锁串行读改写，
+#   再通过原子替换提交，按时间留存 7 天并以硬上限兜底。I/O 失败吞掉并记日志，因为观察记录不能改变决策结果。
 # 函数用途: 把一行决策结果追加进 owner 的有界结果日志（写文件副作用，首次写入时创建目录）。
 def append_decision_outcome(agent: object, row: dict[str, object]) -> None:
     path = getattr(getattr(agent, "home_paths", None), "owner_decision_outcomes_jsonl", None)
     if not path:
         return
     try:
-        append_jsonl_capped(Path(path), row, max_records=_MAX_RECORDS_COUNT)
+        _append_outcome_with_retention(Path(path), row)
     except (OSError, ValueError, TypeError):
         _LOGGER.warning("决策结果日志写入失败：point=%s status=%s", row.get("point"), row.get("status"))
+
+
+# LLM: 仅用于决策结果日志；持有同一 JSONL 路径锁完成读、时间裁剪、硬上限裁剪与原子替换，
+#   不改变公共 append_jsonl_capped 的最近 N 条合同。无有效 created_at 的旧行按 _created_at=0 视为过期。
+# 函数用途: 追加一条决策结果，同时保留七天内记录并限制日志最大行数（写文件副作用）。
+def _append_outcome_with_retention(path: Path, row: dict[str, object]) -> None:
+    with locked_json_path(path):
+        rows = read_jsonl_objects_report(path, context="decision_outcome_log.write").records
+        rows.append(row)
+        cutoff = time.time() - _OUTCOME_RETAIN_SECONDS
+        rows = [item for item in rows if _created_at(item) >= cutoff]
+        rows.sort(key=_created_at)
+        if len(rows) > _MAX_RECORDS_COUNT:
+            rows = rows[-_MAX_RECORDS_COUNT:]
+        content = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in rows)
+        write_text_file_atomic_unlocked(path, content)
 
 
 # LLM: 只在可选决策点已到触发点时调用；阶段有错或该点未开启时不写（这类原因由 decision_reach_counts 计数）。reason 只能是
@@ -306,11 +330,13 @@ def _recent_row(row: dict[str, object]) -> dict[str, object]:
     return recent
 
 
+# LLM: 写入裁剪和读取汇总共用 created_at 的唯一解析规则；缺失、非法或超出浮点范围时视作 0，
+#   因而不进入正时间窗口，也不会在排序时因旧坏值破坏决策日志写入。
 # 函数用途: 读取一行的记录时间，缺失或格式不对按 0 处理（落在任何窗口之外）。
 def _created_at(row: dict[str, object]) -> float:
     try:
         return float(row.get("created_at") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
 
 

@@ -35,6 +35,57 @@ def _stage():
     return SimpleNamespace(scope="thread", thread_id="thread-1", run_id="run-1", task_id="task-1", experiment=False)
 
 
+def test_outcome_retention_keeps_more_than_1000_recent_rows(tmp_path):
+    path = tmp_path / "outcomes.jsonl"
+    now = time.time()
+    prior = [{"schema": SCHEMA, "created_at": now - age, "marker": age}
+             for age in range(1100, 0, -1)]
+    path.write_text("".join(json.dumps(row) + "\n" for row in prior), encoding="utf-8")
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=path))
+
+    append_decision_outcome(agent, {"schema": SCHEMA, "created_at": now, "marker": "new"})
+
+    saved = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(saved) == 1101
+    assert saved[0]["marker"] == 1100
+    assert saved[-1]["marker"] == "new"
+
+
+def test_outcome_retention_discards_rows_older_than_seven_days(tmp_path, monkeypatch):
+    path = tmp_path / "outcomes.jsonl"
+    now = time.time()
+    cutoff = now - 7 * 86400
+    monkeypatch.setattr(decision_outcome_log.time, "time", lambda: now)
+    prior = [{"schema": SCHEMA, "created_at": cutoff - 1, "marker": "expired"},
+             {"schema": SCHEMA, "created_at": cutoff, "marker": "boundary"},
+             {"schema": SCHEMA, "created_at": cutoff + 1, "marker": "recent"}]
+    path.write_text("".join(json.dumps(row) + "\n" for row in prior), encoding="utf-8")
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=path))
+
+    append_decision_outcome(agent, {"schema": SCHEMA, "created_at": now, "marker": "new"})
+
+    saved = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [row["marker"] for row in saved] == ["boundary", "recent", "new"]
+
+
+def test_outcome_retention_hard_cap_discards_oldest_recent_row(tmp_path, monkeypatch):
+    path = tmp_path / "outcomes.jsonl"
+    now = time.time()
+    monkeypatch.setattr(decision_outcome_log.time, "time", lambda: now)
+    hard_cap = 20_000
+    prior = [{"schema": SCHEMA, "created_at": now - hard_cap + index, "marker": index}
+             for index in range(hard_cap)]
+    path.write_text("".join(json.dumps(row) + "\n" for row in prior), encoding="utf-8")
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=path))
+
+    append_decision_outcome(agent, {"schema": SCHEMA, "created_at": now, "marker": "new"})
+
+    saved = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(saved) == hard_cap
+    assert saved[0]["marker"] == 1
+    assert saved[-1]["marker"] == "new"
+
+
 def test_row_keeps_only_structured_facts():
     row = decision_outcome_row(_stage(), "recall", _outcome("deadline", "provider_failed"), 1.2345)
 
@@ -153,8 +204,10 @@ def test_result_category_records_host_drops_with_the_existing_reason_code(tmp_pa
     def broken(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(decision_outcome_log, "append_jsonl_capped", broken)
+    original = path.read_text(encoding="utf-8")
+    monkeypatch.setattr(decision_outcome_log, "write_text_file_atomic_unlocked", broken)
     assert record_decision_dropped(agent, _stage(), outcome, "deadline") is None
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_summary_counts_result_categories_and_marks_old_rows_unrecorded(tmp_path):
@@ -284,7 +337,7 @@ def test_row_write_failure_never_changes_the_decision_result(tmp_path, monkeypat
     def broken(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(decision_outcome_log, "append_jsonl_capped", broken)
+    monkeypatch.setattr(decision_outcome_log, "write_text_file_atomic_unlocked", broken)
     agent = SimpleNamespace(home_paths=SimpleNamespace(owner_decision_outcomes_jsonl=tmp_path / "outcomes.jsonl"))
     # 写盘失败只记日志：调用返回 None、不抛异常，调用方原有决策结果不变。
     assert append_decision_outcome(agent, decision_outcome_row(_stage(), "recall", _outcome(), 0)) is None

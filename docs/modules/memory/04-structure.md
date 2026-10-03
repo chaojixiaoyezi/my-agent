@@ -1,5 +1,12 @@
 # Memory Structure
 
+## 决策结果日志留存合同（2026-10-03，luna6，本地已实现，待集成）
+
+- 唯一写入入口仍是 `conversation/decision_outcome_log.append_decision_outcome`；路径仍取 owner 规范路径。
+- 专用写入器在同一 `locked_json_path` 临界区内读取、按 `created_at` 去掉早于七天的记录、按时间排序并以 `write_text_file_atomic_unlocked` 替换；超过 20000 行只留最新时间的 20000 行。
+- 该文件不改变 `common.json_io.append_jsonl_capped` 的通用“最近 N 条”语义；任何读取方和 `recent` 20 行投影都不变。
+- 写入异常由原入口捕获并记录 warning，仍不影响可选决策结果；无新配置，单测/变异见 [TESTS](../../../TESTS.md) 同名节。
+
 ## 主模型只读检索工具 `memory_search`（J9，2026-10-02，分支 `claude/ae-j9-memory-tool`，默认关，待集成）
 
 - `capability/memory_search_tool.MemorySearchTool`：

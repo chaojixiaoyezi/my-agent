@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## 决策结果日志至少保留一周（2026-10-03，luna6，worker/luna6-outcome-retention）
+
+- **用例**：`test_decision_outcome_log.py` 覆盖 7 天内 1100 条加新记录仍全保留、正好 7 天边界保留而边界外下一次写入即清除、超过 20000 行只丢最旧、原子替换失败不改变已有账且不抛到决策链路。
+- **TDD 证据**：产品改动前运行三条 `outcome_retention` 用例，按原 1000 行策略得到 3 failed（1101→1000、过期行残留、硬上限样本只剩 1000）；实现后同三条通过。
+  三项变异均被对应测试抓住并已还原：留存时长改成 1 天导致 7 天边界行被删；关闭日期裁剪导致过期行残留；硬上限切片少留 1 行导致实际 19999 行。
+- **聚焦及常数验证**（退出码均为 0）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_decision_outcome_log.py agent_py_agent/tests/test_decision_selection_cadence.py agent_py_agent/tests/test_decision_audit_controls.py agent_py_agent/tests/test_decision_reach_counts.py agent_py_agent/tests/test_constants_catalog.py -q --tb=short -ra -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna6
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY scripts/build_constants_catalog.py --check
+  ```
+- 第一次定向红测按旧合同真实失败三项；重置所有变异后，上述五个测试文件全部通过。常数目录已由 `scripts/build_constants_catalog.py` 重建，`--check` 为 876 项一致。
+- **guards9**：使用该脚本 `guards9.txt` 所列的十个测试文件（含 `test_packaging.py`），按相同 Python/PYTHONPATH/隔离 basetemp 运行；pytest 退出码 0，全部到达 100%。
+- **静态门禁**：`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → All checks passed；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `hard=0 blocked=False`；`git diff --check` 通过；`check_clean_package.py .` → OK。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → 新增告警 0、消失告警 7。code-size 后已执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
+- **合同/边界**：无配置项；公共 `append_jsonl_capped` 默认语义未改；Audit 汇总和 recent 20 行不变，真实 Gateway/owner 未验证。
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

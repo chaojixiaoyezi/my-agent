@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 882,
+  "count": 883,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2238,10 +2238,18 @@
     {
       "name": "_MAX_RECORDS_COUNT",
       "file": "agent_py_agent/agent/conversation/decision_outcome_log.py",
-      "value": 1000,
+      "value": 20000,
       "unit": "个",
       "category": "上限预算",
-      "description": "决策结果日志最多保留 1000 条记录：超限轮转。"
+      "description": "决策结果日志的硬上限为 20000 条：约为当前 1000 条/3.7 天速率下周数据的十倍余量，异常高频才裁最旧记录。"
+    },
+    {
+      "name": "_OUTCOME_RETAIN_SECONDS",
+      "file": "agent_py_agent/agent/conversation/decision_outcome_log.py",
+      "value": 604800,
+      "unit": "秒",
+      "category": "其它",
+      "description": "决策结果日志按 created_at 保留最近 7 天（秒），与 decision_reach_counts._RETAIN_SECONDS 对齐，覆盖一周观察周期。"
     },
     {
       "name": "_RECENT_ROWS_COUNT",
