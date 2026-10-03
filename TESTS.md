@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 修法 B 收口提示结构化（rfs，2026-10-03，分支 `worker/retry-final-sink`，初审补齐 `worker/rfs-followups`，基于 step17i `9490cdf90`，待 3a 复跑后挑入）
+
+- **新增**：`test_provider_retry_final_sink.py`（7 项）：到上限时 typed sink 收到带 `params={"final": True, "error_code": ...}` 的收口事件、不再收到文本；sink 抛异常/返回 False/旧签名不认参数包三种情况回退原文本（逐字不变）；Gateway 流收口事件结构化字段齐全、文案等于已登记用户文案、TUI 投影显示同一句；普通重试事件字段集合精确不变；后台正文（IM）与 TUI 同一句收口文案。
+- **命令与结果**：相关 7 文件 `129 passed`；guards9 `172 passed`；import boundaries 0 条；ruff All checks passed；doc_sync 通过；strict code-size `blocked=False`；size_diff **新增 0**（消失 19）；`git diff --check` 通过；clean-package 通过。
+- **变异**（内存级、逐个新进程）：`final-still-waits`（收口仍发「N 秒后重连」）1 failed；`sink-exception-no-fallback`（异常不退回）1 failed；`im-tui-mismatch`（IM 另写文案）1 failed。
+- **未验证**：真实 TUI 状态行与飞书卡片渲染、真实 Gateway 请求未跑（沙箱限制），由 3a 沙箱外复核。
+- **初审补齐（rfsf）**：
+  - **新增/升级用例**：`test_conversation_agent_activity.py` 补 `test_background_main_activity_sink_shows_registered_final_retry_status_text`（状态行等于登记短句常量）；`test_gateway_main_activity.py` 补 `test_foreground_retry_final_event_shows_registered_status_text`；`test_gateway_foreground_transcript.py` 补 `test_foreground_transcript_forwards_final_retry_params_to_transcript`（final/error_code 转发到下游正文）；`test_provider_retry_final_sink.py` 两条回退文本断言升级为完整字符串逐字 `==`，新增 ast 守卫 `test_every_provider_retry_implementation_declares_params_explicitly`（扫产品代码全部 `write_provider_retry` 实现方：必须显式声明 `params`、不得 `**kwargs`）。
+  - **命令与结果**：相关 10 文件 `201 passed, 1 skipped`（既有环境跳过：`test_subagent_debug_trace.py` 旧 final closeout 用例）；guards9 `310 passed`（清单中 `test_gateway_client_credentials.py` 属 step17i 上 G3、本分支不存在，未跑）；import boundaries 0 条；ruff All checks passed；doc_sync 通过；strict code-size `blocked=False`（strict_scope_total=2216 hard=0 high-risk=1514 soft=702 test_advisory=1241）；size_diff **新增 0**（消失 19；首跑曾新增 1 个 nesting high-risk，把扫描 helper 拆成两个推导式函数后归零）；`git diff --check` 通过；clean-package 通过。
+  - **变异**（逐个新进程、跑完 cp 还原并核对 sha256）：`agent-activity-ignore-final` → 新用例 1 failed；`main-activity-ignore-final` → 新用例 1 failed；`foreground-drop-final`（不转发 params）→ 新用例 1 failed；`kwargs-swallow`（`stream_writer.write_provider_retry` 签名加 `**kwargs`）→ 守卫 1 failed。
+
 ## G3 插件命令降级回归（g3r，2026-10-03，分支 `worker/g3-tui-regression`，基于 `99a1558a9`）
 
 - 改了什么：`test_tui_input.py` 与 `test_tui_plugin_directory_pipe.py` 不再 mock `post_gateway_json` / `post_plugin_command_stream`，改为起本机假 Gateway（新增 `agent_py_agent/tests/_gateway_stub.py` + conftest 的 `gateway_stub_factory`），真实走 HTTP 与 G3 凭据分流；新增用例 `test_plugin_submit_degrades_without_local_credential_when_switch_off`。产品代码零改动。

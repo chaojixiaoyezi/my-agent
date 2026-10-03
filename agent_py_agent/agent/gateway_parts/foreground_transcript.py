@@ -79,8 +79,7 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
             self._clear_tool_input_progress()
             return
         if kind == "runtime_progress" and isinstance(event.get("retry"), dict):
-            retry = event["retry"]
-            self.write_provider_retry(attempt=int(retry.get("attempt") or 1), total=int(retry.get("total") or 1), delay_seconds=float(retry.get("wait_seconds") or 0))
+            self.write_provider_retry(**_retry_forward_params(event["retry"]))
             return
         if kind == "conversation_compacted":
             generation = max(0, int(event.get("compact_generation") or 0))
@@ -177,3 +176,17 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
                 super().finish()
                 self._event("transcript_stream_closed", "interrupted", f"{self.request_id}:stream", {})
             self._closed = True
+
+
+# LLM: chunk 里的 retry 载荷按结构化字段转成下游 sink 参数；final 收口把 final/error_code 打包进
+#   params，普通重试不传该参数，保持与只认旧五字段的老 sink 兼容。判断只看字段，不解析文案。
+# 函数用途: 把 Gateway 流的重试事件转成 BackgroundTranscriptSink 的调用参数。
+def _retry_forward_params(retry: dict) -> dict:
+    forwarded: dict[str, object] = {
+        "attempt": int(retry.get("attempt") or 1),
+        "total": int(retry.get("total") or 1),
+        "delay_seconds": float(retry.get("wait_seconds") or 0),
+    }
+    if retry.get("final") is True:
+        forwarded["params"] = {"final": True, "error_code": str(retry.get("error_code") or "")}
+    return forwarded

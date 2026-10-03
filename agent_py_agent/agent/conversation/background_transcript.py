@@ -172,6 +172,21 @@ class _ThinkingDeltaBatcher:
         return batch
 
 
+# LLM: 重试通知文案只按结构化字段选择：params.final 为真时用 request_errors 已登记的收口用户文案，
+#   否则显示等待秒数；关键字参数让调用点自说明；函数内延迟 import，避免 conversation 与 gateway_parts
+#   的模块级循环。
+# 函数用途: 生成后台正文里一条模型重试提示的文本。
+def _retry_notice_text(*, attempt: int, total: int, delay_seconds: float, params: dict | None) -> str:
+    if isinstance(params, dict) and params.get("final") is True:
+        from ..gateway_parts.request_errors import gateway_client_error_message
+
+        return gateway_client_error_message(params.get("error_code"))
+    return (
+        f"模型重连 {max(1, int(attempt))}/{max(1, int(total))}，"
+        f"等待 {max(0.0, float(delay_seconds)):.1f}s"
+    )
+
+
 # LLM: 主/子后台回调复用前台公开 block 词表与唯一审批桥；展示事件不修改业务生命周期，审批独立核对原调用身份。
 # 类用途: 持久化后台思考、工具结果和 diff，并把主/子具体工具审批接到同一用户队列。
 class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSinkMixin):
@@ -363,14 +378,16 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
 
     # LLM: Retry display contains typed counters only and first clears any
     # incomplete provider-parameter row. Raw exception, endpoint, credential,
-    # and provider response never enter this public event.
-    # 函数用途: 追加一条灰色模型重连提示。
+    # and provider response never enter this public event. params 是可选收口参数包
+    # （{"final": True, "error_code": ...}），文案选择在 _retry_notice_text 里，按字段不按文案。
+    # 函数用途: 追加一条灰色模型重连提示；到上限时追加收口提示。
     def write_provider_retry(
         self,
         *,
         attempt: int,
         total: int,
         delay_seconds: float,
+        params: dict | None = None,
     ) -> None:
         self._clear_tool_input_progress()
         self._retry_index += 1
@@ -379,10 +396,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             "completed",
             f"{self.request_id}:retry:{self._retry_index}",
             {
-                "text": (
-                    f"模型重连 {max(1, int(attempt))}/{max(1, int(total))}，"
-                    f"等待 {max(0.0, float(delay_seconds)):.1f}s"
-                ),
+                "text": _retry_notice_text(attempt=attempt, total=total, delay_seconds=delay_seconds, params=params),
                 "severity": "info",
             },
         )

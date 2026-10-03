@@ -132,6 +132,11 @@ def gateway_client_error_message(error_code: object) -> str:
     return "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。"
 
 
+# LLM: PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED 的状态行短句与上面 gateway_client_error_message 里
+#   同一码的长文案同源登记；状态行（前台/后台 main 活动行）只允许引用这个常量，不许在显示层另写一套。
+PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT = "已到自动重试总时长上限，已停止重试"
+
+
 # LLM: 只投影宿主 typed provider error 或空正文截断；显式完成优先，不解析正文/思考、不修改结果或启动重试。
 # 函数用途: 防止模型有半句正文就掩盖坏工具参数等错误；保留本轮真实技术终态，不否认已有工作。
 def gateway_model_response_error_projection(result: object) -> dict:

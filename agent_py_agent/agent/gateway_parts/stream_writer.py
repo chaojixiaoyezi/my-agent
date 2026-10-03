@@ -342,7 +342,8 @@ class BufferedChunkStreamWriter:
         return True
 
     # LLM: provider retry 只向显式 rich 客户端公开有界结构化进度；原始异常和 endpoint 不得进入公开 chunk。
-    # 函数用途: 在传输层或模型回合退避期间立即显示重连次数和等待秒数。
+    #   params 是可选收口参数包（{"final": True, "error_code": ...}），原样交给 provider_retry_event 投影。
+    # 函数用途: 在传输层或模型回合退避期间立即显示重连次数和等待秒数；到上限时显示收口提示。
     def write_provider_retry(
         self,
         *,
@@ -351,11 +352,13 @@ class BufferedChunkStreamWriter:
         total: int,
         delay_seconds: float,
         error_type: str,
+        params: dict | None = None,
     ) -> bool:
         if not self.rich_transcript:
             return False
         payload = provider_retry_event(scope=scope, attempt=attempt, total=total,
-                                       delay_seconds=delay_seconds, error_type=error_type)
+                                       delay_seconds=delay_seconds, error_type=error_type,
+                                       params=params)
         self.flush()
         self._reset_tool_input_progress()
         self._write_event(payload)

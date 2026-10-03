@@ -175,11 +175,14 @@ def _wait_before_retry(on_chunk: Callable[[str], object] | None, notice: _RetryN
 
 
 # LLM: 支持 typed retry sink 时只发送结构化序号/等待值；旧 callback 继续接收兼容文本且不参与重试裁决。
-#   收口提示（final）不走 typed sink：sink 的文案固定是「N 秒后自动重连」，表达不了「不再重试」，
-#   硬塞会显示误导信息；收口提示直接走文本回调，让用户看到本轮已停止的真实结果。
+#   收口提示（final）也先走 typed sink，并加 final/error_code 结构化字段，富客户端据此显示
+#   「已停止重试」；不认识的旧 sink 会因未知参数抛 TypeError、或抛异常/返回 False，
+#   本模块吞掉后照旧退回文本回调，绝不因显示层故障改变重试裁决。
 # 函数用途: 在模型回合级退避开始前把重连进度交给当前客户端显示；到总时长上限时改发收口提示。
 def _emit_retry_notice(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:
     if not callable(on_chunk):
+        return
+    if _publish_typed_retry_notice(on_chunk, notice):
         return
     if notice.final:
         on_chunk(
@@ -190,8 +193,6 @@ def _emit_retry_notice(on_chunk: Callable[[str], object] | None, notice: _RetryN
         )
         return
     delay = _format_delay(notice.delay)
-    if _publish_typed_retry_notice(on_chunk, notice):
-        return
     on_chunk(
         "\n"
         f"[provider_transient_auto_resume attempt={notice.attempt}/{notice.total}; wait_seconds={delay}]\n"
@@ -201,7 +202,11 @@ def _emit_retry_notice(on_chunk: Callable[[str], object] | None, notice: _RetryN
 
 
 # LLM: typed sink 是可选显示能力，异常或明确拒绝时退回既有 callback；绝不能让 UI 通知破坏真实重试。
-# 函数用途: 尝试向富客户端发布一次模型回合级重连事件。
+#   收口事件（final）额外携带 final=True 与 error_code 两个结构化字段；普通重试一个字段都不加，
+#   保持旧客户端与既有精确断言兼容。判断只看结构化字段，不解析文案。
+#   协议约定：实现方必须显式声明自己支持的 params 参数（新增字段都走 params），不得用 **kwargs
+#   静默收下却不处理——那样收口提示既不显示也不回退，用户无感；回归守卫见 test_provider_retry_final_sink.py。
+# 函数用途: 尝试向富客户端发布一次模型回合级重连或收口事件。
 def _publish_typed_retry_notice(
     on_chunk: Callable[[str], object],
     notice: _RetryNotice,
@@ -209,16 +214,21 @@ def _publish_typed_retry_notice(
     sink = getattr(on_chunk, "write_provider_retry", None)
     if not callable(sink):
         return False
+    payload: dict[str, object] = {
+        "scope": "model_turn",
+        "attempt": notice.attempt,
+        "total": notice.total,
+        "delay_seconds": notice.delay,
+        "error_type": type(notice.error).__name__,
+    }
+    if notice.final:
+        # 收口事实打包成一个结构化参数（final + error_code），显示层只读字段、不解析文案。
+        payload["params"] = {
+            "final": True,
+            "error_code": PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED,
+        }
     try:
-        return bool(
-            sink(
-                scope="model_turn",
-                attempt=notice.attempt,
-                total=notice.total,
-                delay_seconds=notice.delay,
-                error_type=type(notice.error).__name__,
-            )
-        )
+        return bool(sink(**payload))
     except Exception:
         return False
 

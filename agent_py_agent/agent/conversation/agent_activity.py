@@ -167,7 +167,8 @@ class BackgroundMainActivitySink:
 
     # LLM: Retry display uses typed attempt/delay facts only and returns True so
     # provider code does not fall back to leaking an exception string as prose.
-    # 函数用途: 显示后台主代理的模型连接重试进度。
+    # params 是可选收口参数包（{"final": True, "error_code": ...}）：状态行与后台正文一起切换成停止提示。
+    # 函数用途: 显示后台主代理的模型连接重试进度；到上限时显示收口状态。
     def write_provider_retry(
         self,
         *,
@@ -176,17 +177,27 @@ class BackgroundMainActivitySink:
         total: int,
         delay_seconds: float,
         error_type: str,
+        params: dict | None = None,
     ) -> bool:
         del scope, error_type
         self._transcript.write_provider_retry(
             attempt=attempt,
             total=total,
             delay_seconds=delay_seconds,
+            params=params,
         )
-        self._publish(
-            "retrying",
-            f"模型重连 {max(1, int(attempt))}/{max(1, int(total))}，等待 {max(0.0, float(delay_seconds)):.1f}s",
-        )
+        if isinstance(params, dict) and params.get("final") is True:
+            # 状态行短句统一登记在 request_errors；函数内延迟 import 避免 conversation 与 gateway_parts 的模块级循环。
+            from ..gateway_parts.request_errors import (
+                PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT,
+            )
+
+            self._publish("retrying", PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT)
+        else:
+            self._publish(
+                "retrying",
+                f"模型重连 {max(1, int(attempt))}/{max(1, int(total))}，等待 {max(0.0, float(delay_seconds)):.1f}s",
+            )
         return True
 
     # LLM: Native IR compaction is forwarded as public numeric transcript data;

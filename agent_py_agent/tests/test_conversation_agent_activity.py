@@ -1165,3 +1165,30 @@ def test_task_progress_projection_applies_limit_after_hiding_child_seeds(
     assert len(activity.task_progress_items) == 128
     assert activity.task_progress_items[0]["id"] == "todo-0"
     assert activity.task_progress_items[-1]["id"] == "todo-127"
+
+
+def test_background_main_activity_sink_shows_registered_final_retry_status_text() -> None:
+    """收口状态行必须引用 request_errors 登记的短句常量，不能各自硬编码。"""
+    from agent_py_agent.agent.conversation.agent_activity import (
+        BackgroundMainActivitySink,
+        background_main_activity,
+    )
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT,
+    )
+
+    agent = SimpleNamespace()
+    sink = BackgroundMainActivitySink(agent, thread_id="thread-retry", task_id="task-retry")
+    accepted = sink.write_provider_retry(
+        scope="model_turn",
+        attempt=2,
+        total=2,
+        delay_seconds=25.0,
+        error_type="ProviderTimeoutError",
+        params={"final": True, "error_code": "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED"},
+    )
+
+    assert accepted is True
+    activity = background_main_activity(agent, "thread-retry", {"task-retry"})
+    assert activity["phase"] == "retrying"
+    assert activity["activity"] == PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT

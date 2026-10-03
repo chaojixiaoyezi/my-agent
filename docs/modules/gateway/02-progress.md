@@ -1221,3 +1221,13 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **返工（3a 复审）**：`seq` 定为按（owner, 插件激活）各自计数、换代从 1 重新开始；新槽（中途启用）水位对齐到「当前最新一条之前」，`dropped_before` 只算槽建立之后被合并的条数；两条真线程池用例改门闩 + submit 计数同步。
 - **返工 2（9b 复审后）**：调度粒度从「每 owner 一个投递循环」改成「每（owner, 激活）一个发送任务」（`_inflight` 标记、线程池 4 个、与面板服务同档）——一个插件挂住只占自己的线程，不再拖同 owner 或其它 owner 的插件；`publish_plugin_event` 补 `except Exception` 兜底（首次取用要新建 hub/池，任何异常都不许抛回主流程）；删掉锁内恒真的版本比较死代码；hub 每轮顺手对自管连接调 `close_idle`；`MAX_BATCH_EVENTS` 改为直接引用 `MAX_PLUGIN_EVENT_COUNT`；hub 的池调用改用独立 `pool_clock`（默认 monotonic、与池同基准）——原先 acquire 传墙钟，会让面板侧空闲关闭失效、hub 侧误关面板刚用过的连接。调度改动后类 span 超 near-soft 上限，把发送/收尾/记账与池维护拆成模块级函数（拆平 `815151369`，纯结构重构、行为不变）。
 - **验证**：事件中心用例 32 项通过（合并与丢弃计数、批量、单在途、慢插件、停用与换代、跨 owner、握手门、订阅过滤、退避分级、计数接口、Gateway 组装；含 seq 按插件/按 owner 计数与换代重置、中途启用 dropped=0、兄弟/跨 owner 不被挂住插件拖累、回收不摘别人的连接、停用回收自己的连接、空闲关闭按池时钟）；15 个变异全部被杀死；命令与结果见 [TESTS](../../../TESTS.md) 顶部「B3 事件中心」小节。
+
+## 修法 B 收口提示走结构化通道（rfs，2026-10-03，分支 `worker/retry-final-sink`，基于 step17i `9490cdf90`，待复审）
+
+- **起因**：修法 B 到总时长上限的收口提示只走文本回调，富客户端（TUI 状态行、飞书卡片）看不到结构化的「已停止重试」，只能在正文里读到一段文字。
+- **改动**：
+  - `provider_transient_auto_resume._publish_typed_retry_notice`：收口事件先走 typed sink，额外携带收口参数包 `params={"final": True, "error_code": PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED}`；老 sink 未知参数抛 TypeError、或抛异常/返回 False 时照旧退回文本回调，文本逐字不变；普通重试一个字段都不加。
+  - `stream_events.provider_retry_event`：收口事件在 `retry` 载荷带 `final/error_code`，`text` 复用 `request_errors.gateway_client_error_message` 已登记用户文案；`stream_writer.write_provider_retry` 原样透传。
+  - `background_transcript`（`_retry_notice_text`）、`agent_activity`、`foreground_transcript`（`_retry_forward_params`）、`main_activity`（`_retry_activity`）按结构化字段显示收口信息，不再显示「N 秒后重连」。
+- **边界**：判断只看结构化字段，不解析文案；文案单一来源（request_errors 已登记）；未跑真实 TUI/飞书渲染与真实 Gateway 请求。测试与变异见 [TESTS](../../../TESTS.md) 顶部「修法 B 收口提示结构化」小节。
+- **初审补齐（rfsf，分支 `worker/rfs-followups`）**：状态行收口短句统一登记 `request_errors.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT`（`agent_activity`/`main_activity` 引用，不再各自硬编码）；补 3 条用例（agent_activity 状态行、main_activity 状态行、foreground 转发）把初审 3 个存活变异全部转红；回退文本断言升级为完整字符串逐字 `==`；新增 ast 守卫用例（扫产品代码所有 `write_provider_retry` 实现方，必须显式声明 `params`、不得用 `**kwargs` 静默收下），协议约定写进发布方注释；命令与结果见 TESTS.md「修法 B 收口提示结构化」小节。

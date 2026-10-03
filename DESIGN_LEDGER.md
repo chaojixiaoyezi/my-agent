@@ -1,8 +1,16 @@
 # 设计台账
 
+## 修法 B 收口提示走结构化通道（rfs，2026-10-03，分支 `worker/retry-final-sink`，初审补齐 `worker/rfs-followups`，基于 step17i `9490cdf90`，已并入 step17i：ds6 初审、ds6 补齐、3a 复审并沙箱外复跑）
+
+- **起因**：修法 B 到总时长上限的收口提示此前只走文本回调（`_emit_retry_notice` 的 final 分支），富客户端（TUI 状态行、飞书卡片）只能看到一段文字，看不到结构化的「已停止重试」。
+- **做了什么**：收口提示改为先走 typed sink（`write_provider_retry` 新增可选收口参数包 `params={"final": True, "error_code": PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED}`），sink 不认识参数包（旧签名 TypeError）、抛异常或返回 False 时照旧退回原文本回调；`provider_retry_event` 的收口事件在 `retry` 载荷带 `final/error_code`，文案复用 `request_errors.gateway_client_error_message` 已登记的用户文案；`BufferedChunkStreamWriter`（TUI 流）、`BackgroundTranscriptSink`（后台正文/IM）、`AgentActivity`、`GatewayForegroundTranscriptSink`、`GatewayMainActivitySink` 按结构化字段显示收口信息，不再显示「N 秒后重连」；普通重试事件一个字段都不加，保持旧客户端兼容。
+- **边界**：判断只看结构化字段，不解析文案；收口文案单一来源（request_errors 已登记）；文本回退逐字不变；未改配置、未启停 Gateway、未做真实 TUI/飞书验收。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「修法 B 收口提示结构化」小节；3 个定点变异全部被检出；size_diff 新增 0。
+- **初审补齐（rfsf）**：状态行收口短句统一登记为 `request_errors.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT`，`AgentActivity`/`GatewayMainActivitySink` 改为引用该常量、不再各自硬编码；补 3 条用例（agent_activity 状态行、main_activity 状态行、foreground 转发）把初审 3 个存活变异全部转红；回退文本断言升级为完整字符串逐字 `==`；新增 ast 守卫用例——扫产品代码所有 `write_provider_retry` 实现方，必须显式声明 `params`、不得用 `**kwargs` 静默收下（协议约定写进 `provider_transient_auto_resume._publish_typed_retry_notice` 注释），`**kwargs` 变异被守卫抓住。
+
 ## G3 插件命令降级回归（g3r，2026-10-03，分支 `worker/g3-tui-regression`，基于 step17i 头 `99a1558a9`）
 
-- **状态：待复审**（挡 17i 上线的回归修复；改动只在测试侧与 guards 清单，产品代码未动）。
+- **状态：已并入 step17i（3a 复审）**。改动只在测试侧，产品代码未动；作者追加进 guards9 的 4 个文件已由 3a 移出（它们是 G3 定向用例，会话沙箱里跑不了）。
 - **现象**：12 片 Linux 车道抓到 G3 并入后的回归——`test_tui_input.py::test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop` 的 20 个 `use_gateway=True` 变体、以及 `test_tui_plugin_directory_pipe.py` 的 `[manual]`/`[after_command]` 全失败，断言拿到的是"无法读取当前插件目录"。二分确认由 G3（`2adfd8518`）引入。
 - **根因（一行说清）**：G3 把共用传输 `post_gateway_json` 的签名从 `(port, owner, path, payload, *, timeout)` 改成 `(agent, path, payload, *, timeout)`，并同步更新了 `test_plugin_command_client.py` 的 mock，但漏掉了 `test_tui_input.py:97` 和 `test_tui_plugin_directory_pipe.py:31` 里仍是旧签名的 mock。旧 mock 接不到新调用 → 抛 `TypeError` → 被 `plugin_command_client._request` 的 `except Exception` 兜成 `plugin_catalog_unavailable()`，于是显示"无法读取当前插件目录"。**产品降级口径本身是对的**（`client_credentials.headers()` 开关关时记一次 warning 并返回空头继续发送）；坏的是测试替身没跟上签名。
 - **修法**：不再 mock 传输层函数，改成起一个本机假 Gateway（`agent_py_agent/tests/_gateway_stub.py`，`ThreadingHTTPServer` 监听 127.0.0.1 随机端口，走真实 HTTP、真实 `post_gateway_json`、真实凭据分流），测试只提供响应器。这样这两条用例从此覆盖"无凭据 + 开关关 → 照常发送"的真实路径（隔离 home 下没有凭据文件，`headers()` 自然降级）。

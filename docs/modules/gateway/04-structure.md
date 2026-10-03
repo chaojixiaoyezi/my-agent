@@ -2547,3 +2547,10 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - 进程内注册表 `attempt.sandbox` 的 `register_gateway_bound_port` / `unregister_gateway_bound_port` / `gateway_bound_ports`：Gateway `http_service.start/stop` 登记与注销实际绑定端口；模型命令在 Gateway 进程内执行，所以 `tooling/shell._sandbox_exec` 读得到。
 - `AttemptSandboxSpec.deny_gateway_ports` 只由模型命令沙箱填写；macOS 由 `_gateway_port_denies` 生成 `*:<port>` 出站拒绝、排在 `_spec_rules` 最后。插件进程沙箱不填（它要连 `/plugin-host/query`）。
 - 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则；同机其它 Gateway 实例不在第 (1) 层范围（靠第 (2) 层）。
+
+## 修法 B 收口提示的结构化通道（2026-10-03，rfs）
+
+- 重试进度事件 `provider_retry_event` 的 `retry` 载荷新增可选 `final/error_code`：`final=True` 表示「已到总时长上限、本轮不再重试」，`text` 用 `request_errors.gateway_client_error_message` 的已登记用户文案；普通重试载荷字段不变。
+- typed sink 协议（`write_provider_retry`）新增可选收口参数包 `params={"final": True, "error_code": ...}`：正常重试不传（老 sink 照常工作），收口时传；不认识的旧签名会因未知参数抛 TypeError，由 `provider_transient_auto_resume` 吞掉并退回文本回调。
+- 消费方：TUI 读 chunk 的 `runtime_progress.text`（`tui_runtime._publish_runtime_progress`）；前台转录 `GatewayForegroundTranscriptSink._consume_event` 把 `retry` 转给 `BackgroundTranscriptSink.write_provider_retry`；`GatewayMainActivitySink.__call__` 的状态行按 `retry.final` 显示收口文案。
+- 初审补齐（rfsf）：状态行收口短句统一登记 `request_errors.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT`（`AgentActivity`/`GatewayMainActivitySink` 引用）；ast 守卫用例（`tests/test_provider_retry_final_sink.py`）扫产品代码所有 `write_provider_retry` 实现方，必须显式声明 `params`、不得用 `**kwargs` 静默收下；协议约定写在 `provider_transient_auto_resume._publish_typed_retry_notice` 注释。

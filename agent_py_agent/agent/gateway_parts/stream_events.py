@@ -102,7 +102,10 @@ def thinking_event(
 
 
 # LLM: provider retry 只向显式 rich 客户端公开有界结构化进度；原始异常和 endpoint 不得进入公开 chunk。
-# 函数用途: 在传输层或模型回合退避期间立即显示重连次数和等待秒数。
+#   params 是可选收口参数包：{"final": True, "error_code": ...} 表示「已到总时长上限、本轮不再重试」，
+#   retry 载荷额外带 final/error_code 两个字段，文案复用 request_errors 已登记的用户文案；
+#   普通重试不传 params，载荷一个字段都不加，保持旧客户端字节兼容。判断只看结构化字段，不解析文案。
+# 函数用途: 在传输层或模型回合退避期间立即显示重连次数和等待秒数；到上限时显示收口提示。
 def provider_retry_event(
     *,
     scope: str,
@@ -110,26 +113,37 @@ def provider_retry_event(
     total: int,
     delay_seconds: float,
     error_type: str,
+    params: dict | None = None,
 ) -> dict[str, object]:
     retry_scope = "transport" if scope == "transport" else "model_turn"
     retry_attempt = max(1, int(attempt or 1))
     retry_total = max(retry_attempt, int(total or retry_attempt))
     wait_seconds = max(0.0, round(float(delay_seconds or 0.0), 1))
     layer = "连接" if retry_scope == "transport" else "模型回合"
-    return {
-        "kind": "runtime_progress",
-        "text": (
+    retry: dict[str, object] = {
+        "scope": retry_scope,
+        "attempt": retry_attempt,
+        "total": retry_total,
+        "wait_seconds": wait_seconds,
+        "error_type": str(error_type or ""),
+    }
+    if isinstance(params, dict) and params.get("final") is True:
+        from .request_errors import gateway_client_error_message
+
+        error_code = str(params.get("error_code") or "")
+        retry["final"] = True
+        retry["error_code"] = error_code
+        text = gateway_client_error_message(error_code)
+    else:
+        text = (
             f"模型服务暂时不可用，{wait_seconds:g} 秒后自动重连"
             f"（{layer} {retry_attempt}/{retry_total}）"
-        ),
+        )
+    return {
+        "kind": "runtime_progress",
+        "text": text,
         "verbose_level": "full",
-        "retry": {
-            "scope": retry_scope,
-            "attempt": retry_attempt,
-            "total": retry_total,
-            "wait_seconds": wait_seconds,
-            "error_type": str(error_type or ""),
-        },
+        "retry": retry,
     }
 
 

@@ -8,6 +8,7 @@ import time
 from uuid import uuid4
 
 from ..conversation.agent_activity import MainActivitySource, publish_main_activity
+from .request_errors import PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT
 
 
 # LLM: 一个实例只属于一次已获会话车道的请求；绑定冲突时不发布，不猜另一个 task/thread。
@@ -63,7 +64,7 @@ class GatewayMainActivitySink:
             self._publish("tool", f"{'已完成' if terminal else '正在使用'} {tool}")
             return
         if kind == "runtime_progress" and isinstance(event.get("retry"), dict):
-            self._publish("retrying", "正在重连模型服务")
+            self._publish("retrying", _retry_activity(event["retry"]))
             return
         if kind in {"context_window_compacted", "conversation_compacted"}:
             self._publish("running", "继续当前任务")
@@ -97,3 +98,12 @@ class GatewayMainActivitySink:
             self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self.projection_id),
             phase=phase, activity=activity, context_usage=context_usage, begin=begin,
         )
+
+
+# LLM: 状态行文案只按结构化 retry 字段选择：final 收口显示已停止重试，普通重试显示重连中；不解析文案。
+#   收口短句引用 request_errors 的登记常量（与长文案同源），显示层不另写一套。
+# 函数用途: 为 main 状态行生成模型重连或收口的活动文案。
+def _retry_activity(retry: dict) -> str:
+    if retry.get("final") is True:
+        return PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT
+    return "正在重连模型服务"

@@ -266,3 +266,35 @@ def test_notices_negotiate_live_stream_separately_from_committed_messages(tmp_pa
     assert old["event_cursor"] == new["event_cursor"] > 0
     assert old["event_stream_id"] == new["event_stream_id"]
     assert any(row["request_id"] == background.request_id for row in old["transcript_events"])
+
+
+def test_foreground_transcript_forwards_final_retry_params_to_transcript() -> None:
+    """前台收口事件必须把 final/error_code 转给下游显示，不能只转发普通重连字段。"""
+    from agent_py_agent.agent.gateway_parts.foreground_transcript import (
+        GatewayForegroundTranscriptSink,
+    )
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_error_message
+
+    agent = SimpleNamespace()
+    foreground = GatewayForegroundTranscriptSink(
+        agent, thread_id="thread-retry", request_id="gwreq-retry", request={}, task_id="task-retry",
+    )
+    foreground({
+        "kind": "runtime_progress",
+        "retry": {
+            "scope": "model_turn",
+            "attempt": 2,
+            "total": 2,
+            "wait_seconds": 25.0,
+            "error_type": "ProviderTimeoutError",
+            "final": True,
+            "error_code": "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
+        },
+    })
+
+    events = read_background_transcript_events(agent, thread_id="thread-retry", after=0)["events"]
+    final_rows = [row for row in events if row["kind"] == "system_message"]
+    assert final_rows and final_rows[-1]["payload"]["text"] == gateway_client_error_message(
+        "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED"
+    )
+    assert "等待" not in final_rows[-1]["payload"]["text"]

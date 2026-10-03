@@ -124,3 +124,30 @@ def test_malformed_approval_does_not_create_a_wait():
     for permission in ({}, {"permission_id": []}, {"permission_id": ""}, None):
         sink({"kind": "permission_requested", "permission": permission})
     assert background_main_activity(agent, "thread-a", {"task-a"})["phase"] == "running"
+
+
+def test_foreground_retry_final_event_shows_registered_status_text() -> None:
+    """收口状态行必须引用 request_errors 登记的短句常量，不能各自硬编码。"""
+    from agent_py_agent.agent.gateway_parts.main_activity import GatewayMainActivitySink
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT,
+    )
+
+    agent = SimpleNamespace()
+    sink = GatewayMainActivitySink(agent, thread_id="thread-a", request_id="req-a", request={}, task_id="task-a")
+    sink({
+        "kind": "runtime_progress",
+        "retry": {
+            "scope": "model_turn",
+            "attempt": 2,
+            "total": 2,
+            "wait_seconds": 25.0,
+            "error_type": "ProviderTimeoutError",
+            "final": True,
+            "error_code": "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
+        },
+    })
+
+    row = background_main_activity(agent, "thread-a", {"task-a"})
+    assert row["phase"] == "retrying"
+    assert row["activity"] == PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT
