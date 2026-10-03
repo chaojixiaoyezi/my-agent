@@ -1,5 +1,14 @@
 # 设计台账
 
+## 台账标题状态校正（lhc，2026-10-03，基于 step17i 头 `0ae0efe5e`，并入 step17d–17h 的段落共 42 条，纯文档，3a 复审并入 step17i）
+
+- **做什么**：逐条核实本文档里标题还写着「待集成」「待上线」「待 be 审」「实施中」这类旧状态的段落，确认其实是否已经并入 step17c–17i；确认并入的，只把标题末尾的状态措辞改成真实的「并入 step17x」，正文、段落顺序、数量都不动。
+- **怎么判**：只靠 git 事实。分支头用 `merge-base --is-ancestor` 判是否 HEAD 祖先；换了 sha 的挑入提交按提交信息里的 `cherry picked from commit` 映射（HEAD 上共 342 条映射），仍拿不准的再用 `git cherry`（补丁等价）复核。没有 git 线索、或 `git cherry` 显示补丁仍未并入的，标题保持原样并列入交接报告。
+- **结果**：改动 42 条。并入 step17h 1 条、step17g 1 条、step17f 3 条、step17e 10 条、step17d 27 条。
+- **保留原样（核实不了或确实未并入，共 6 条）**：`claude/be-capability-packs-content-b2`（分支已不存在、相关提交均不在 HEAD）、`claude/be-bench-more-points`、`claude/38-p14-embedding-fixes`、`worker/sol2-c14-mb1`（以上四条按挑入映射核查，相关提交没有任何挑入记录）、以及 2 条只有日期没有提交号、无法给出 git 依据的旧段（Compact 校准两段）。
+- **本就不该动的 3 条**：`claude/be-gateway-local-trust`（标题写「实施中，并入 step17i」，已注明并入）、`claude/be-m1-design`（设计稿，剩余 6 个文档提交未挑入，标题「待拆块派活」属实）、`worker/luna5-pack-guide`（标题「已完成，ae 已复审，并入 step17h」，状态本就准确）。
+- **判断口径的坑（留给后来人）**：`git cherry` 单独看会误判——挑入后若又经过返工修订，补丁就不再等价、会显示 `+`（`worker/sol56-c8c9-recover`、`worker/sol2-anthropic-budget` 都是这样），但提交信息里的 `cherry picked from commit` 映射是权威的。本轮的并入判断以映射为准，`git cherry` 只作辅助。
+- **验证**：`scripts/check_doc_sync.py` 通过（`DOC_SYNC_PASS`）、`git diff --check` 干净。纯文档改动，未跑代码测试；未改任何代码。
 ## 屏幕观察的 macOS 后端依赖显式钉进新 extra（2026-10-03，cux，worker/computer-use-extra `10094bb11`，3a 复审并入 step17i）
 
 - **起因（3a 定）**：J16 设计稿第 34–37 行本来要求“实施时把用到的这几个写进 computer-use extra，显式钉版本”，但一直没做——`pyproject.toml` 的 `computer-use` extra 只有上游 `computer-control-mcp==0.3.13`，装它会带进 222 个包，生产没法照仓库声明只装观察用到的那几个。
@@ -467,7 +476,7 @@
   - 停机那一刻仍不会立刻提示“将会续跑”。
 - **验证**：见 TESTS.md 同名节。
 
-## 能力包说明补“宿主核验”一节（文档，luna5，2026-10-03，分支 `worker/luna5-pack-guide`，基于 ae 能力包块 5 头 `58300131c`，已完成，ae 已复审）
+## 能力包说明补“宿主核验”一节（文档，luna5，2026-10-03，分支 `worker/luna5-pack-guide`，基于 ae 能力包块 5 头 `58300131c`，已完成，ae 已复审，并入 step17h）
 
 - **做什么**：`docs/guides/CAPABILITY_PACK_GUIDE.md` 新增“六、宿主核验”一节（原六、七顺延为七、八），面向用户用中文大白话讲清：
   - 宿主核验是什么：任务固定住的能力包带检查程序时，宿主在写工具写出交付物后马上跑一遍（写完就查）、回合结束前再查一遍（收尾再查），结论以宿主为准，不靠模型自述；
@@ -478,7 +487,7 @@
 - **依据**：`capability/pack_verification_service.py`、`pack_verification_report.py`、`pack_verification_inputs.py`、`pack_verification_deliverables.py`、`gateway_parts/request_pack_verification_notice.py`、`docs/design/CAPABILITY_PACKS_V2.md`（文案与常数逐条对照代码）。
 - **验证**：`scripts/check_doc_sync.py` 与 `git diff --check` 通过；本轮只改文档，未改代码、未跑代码测试。
 
-## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，待 be 审）
+## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，并入 step17g）
 
 - **生产事实**（3a，step17f 上线后 local/main 的 curator/runs）：13:58 qwen3.8-flash 那组用 MiniMax-M2.7 补跑成功，带 `curator_thread_model_failed:CURATOR_MODEL_FAILED:transient`，修复生效；13:59 这个会话来了新消息，又先试 qwen3.8-flash，失败。按原规则还要再失败一次才换默认模型。
 - **做法**（be 留的后续项，3a 定）：这组最近一次推进本组游标的运行，如果就是“连不上让给默认”的补跑，下一批的阈值从 2 降到 1（`CURATOR_TRANSIENT_REPEAT_FALLBACK_FAILURE_COUNT`）。会话自己的模型每批还有一次机会，失败一次就直接换默认，不再每批白白失败两次；会话模型自己成功推进后，阈值回到 `CURATOR_TRANSIENT_FALLBACK_FAILURE_COUNT`=2。
@@ -536,7 +545,7 @@
   - 用户配置放在数据根以外时不受保护。
 - 详细设计见 [HOST_CONFIG_WRITE_GUARD](docs/design/HOST_CONFIG_WRITE_GUARD.md)；测试见 TESTS 同名条目。
 
-## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，待集成）
+## 记忆整理：会话自己的模型连续连不上时让给 owner 默认模型（be，2026-10-02，分支 `claude/be-curator-transient-fallback`，基于 `claude/3a-step17f` `f6b63ab35`，已实现，并入 step17f）
 
 - **生产事实**（3a，K1 上线后 local/main 的 curator/runs，只看结构化字段）：13:12 某会话选的 qwen3.8-flash 那组 `CURATOR_MODEL_FAILED`，两次 ProviderTransientError，各约 22 秒。
 - **风险**：原来只有 `CURATOR_SCHEMA_INVALID` 会用默认模型补跑。如果某会话的模型持续连不上（额度、服务商故障），含最早待处理消息的那组一直排第一、一直失败；瞬时失败不计熔断、只退避，这个 owner 的整理就长期卡在这组，别的会话也整理不了。
@@ -580,7 +589,7 @@
   - 停机那一刻 TUI/IM 不会立刻提示“将会续跑”：TUI 看到的是 Gateway 断开 / 正在安全重启，提示在续跑开始（TUI）和续跑完成（IM）时出现。
 - **验证**：见 TESTS.md 同名节。
 
-## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（T2 续，75，2026-10-02，分支 `claude/75-jev-candidate-cap`，基于 `claude/3a-step17e` `4dd56f627`，已实现，真实 Jev 一次通过，待集成）
+## F1 候选投影：发给 Jev 的能力候选按字段字节上限截短（T2 续，75，2026-10-02，分支 `claude/75-jev-candidate-cap`，基于 `claude/3a-step17e` `4dd56f627`，已实现，真实 Jev 一次通过，并入 step17f）
 
 - **问题**：生产 skill_tool 候选 53 题（52 个 Skill + 1 个插件组），Jev 请求 129,941 字节，按 `jev_wire_bytes.v1` 上界 79,563 > 57,600，实验路径 `input_bound_out_of_calibration` 拒发，F1 晋升走不下去（step17b 生产记录）。
 - **为什么只截字段不够**：请求体用 `json.dumps` 默认转义，一个汉字 6 字节、按公式 3 个上界 token。每题重复的 question/boundary/criteria 加结构约 1,441 字节，53 题光固定部分上界就是 53,292；只留名字也还有 56,658。
@@ -620,7 +629,7 @@
     - 非字符串、跨行（含 Unicode 换行符）的丢掉，超长的截断；
     - round_cancelled 只认布尔 True。
 
-## 记忆正文的其它文件也按私有原子写（S2，75，2026-10-02，分支 `claude/75-memory-private-writes`，基于 `claude/3a-step17e` `4dd56f627`，已实现，待集成）
+## 记忆正文的其它文件也按私有原子写（S2，75，2026-10-02，分支 `claude/75-memory-private-writes`，基于 `claude/3a-step17e` `4dd56f627`，已实现，并入 step17f）
 
 - **问题**：38 的 S3 只把记忆本体和向量文件改成私有写；候选、日事件、lesson/HOT、Curator 事务备份这些也装着记忆正文，仍是普通原子写：新文件按 umask（一般 0644），替换时还把旧文件的 0644 抄回去。
 - **做法**：复用 S3 的 `common/json_io.write_private_text_file_atomic_unlocked`（临时文件一建出来就是 0600，替换时不抄回旧权限，直接父目录 0700），不另写一份写法：
@@ -659,7 +668,7 @@
 - **交接摘要过期**（ae 的建议，采纳）：带基线时交接 files 里没有一条摘要等于本次项目实际字节，B 报 `handoff_target_not_matched` 提醒，告诉模型是交接摘要过期，而不是让它只看到一串 `baseline_*_changed` 去猜。
 - **验证**：见 TESTS.md 同名节。
 
-## 工具瘦身第一阶段：工具自己声明“默认收起” + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `claude/3a-step17e` `60f909b12`（原基于 `c6f28b150`），已实现，待集成；开关默认关，真实验收后由 3a 在生产打开）
+## 工具瘦身第一阶段：工具自己声明“默认收起” + 精简重复说明（T1，2026-10-02，分支 `claude/75-tool-default-defer`，基于 `claude/3a-step17e` `60f909b12`（原基于 `c6f28b150`），已实现，并入 step17e；开关默认关，真实验收后由 3a 在生产打开）
 
 - **问题**：生产前台回合每轮把全部基础工具的原生 Schema 发给模型。实际发出的工具是 `model_visible_specs` 那一份（类别收起已生效，web 类的 watch_stream/web_fetch/web_search 本来就不发）；其中约 40 个工具占首轮约 3.65 万 token 的八成。一批又大又少用的工具每轮都在交钱。
 - **做法**（不改名、不合并、不改任何工具行为）：
@@ -673,7 +682,7 @@
 - **盲调兜底**（真实验收 D4 发现后补上）：M2.7 会照目录索引里的名字直接调用收起的工具、不先 tool_search，在没有参数定义时猜参数（audit_records 连错 3 次后改用 search_text 绕开）。现在 `tool_loop/deferred_schema_reload.reload_schema_after_blind_call` 只读结构化事实：开关打开、调用失败、参数出错（`tool_execution.failure_stage=validation`，或错误码的错误合同推荐动作是 `repair_tool_arguments`——工具执行阶段自己判参数无效也算，真实验收 D8 的 update_persona 就是这种）、工具在本快照里且下一次请求本来不会带它的定义，就把它加进 `loaded_tool_names`（与 tool_search 同一个“下一次调用临时可见”机制），并在结果后附一行 `[tool-schema-loaded]` 提示；模型下一步拿着原生完整定义重试。开关关闭时不触发。
 - **F1（第 9 条）上界**：skill_tool 候选是 52 个 Skill（内置 27 + owner 25）+ 1 个插件组 = 53 题；内置工具不在候选里，所以本阶段瘦身不改变 Jev 请求。按 `jev_wire_bytes.v1`（C = ceil(B/2) + 256Q + 1024，上限 57,600）和标定数据（27 题约 65KB，每题约 2.4KB）估算：53 题约 7.8 万 token，仍超上限；按现有每题体积最多约 38 题，或每题文字压到约 1.6KB（约减三分之一）才进标定范围。要回到范围内需缩小参与实验的候选或精简 Skill 说明，属新设计项，交 3a/用户定。（已定：见本台账“F1 候选投影”一节。）
 
-## 宿主死在“已预留、未激活”窗口里的子代理，重启后永久卡住（根修，I5 前提探针发现，2026-10-02，分支 `claude/9b-runner-admission`，基于 `claude/3a-step17e` `20125c9d2`，已实现，待集成）
+## 宿主死在“已预留、未激活”窗口里的子代理，重启后永久卡住（根修，I5 前提探针发现，2026-10-02，分支 `claude/9b-runner-admission`，基于 `claude/3a-step17e` `20125c9d2`，已实现，并入 step17e）
 
 - **现象**（9b 探针，证据 `~/.my-agent/decision-evidence/i5-restart-pickup-probe-20261002/`）：派工已经预留执行轮、写下后台启动记录，进程在派工线程收尾前就没了（kill -9、停机时正落在这个窗口；进程内线程没有 pid，或 local/main 派工子进程的 pid 已死），启动记录冻在 launching/running。重启后：
   - 派工候选判定已按过期放行（没有 pid 的过 180 秒；pid 已死的立刻）；
@@ -688,7 +697,7 @@
   - 计数：自动启动回执拆成“真派出去的”和“复用现存启动的”（`capability_auto_sweep._split_auto_start_result`）。监督摘要 `orphans_revived` 只算前者，复用另记 `orphan_launches_reused`；定向续派 `auto_start_orphan_run` 同样给 `started` / `launch_reused`。Gateway 监督日志仍只按 `orphans_revived` 触发。
 - **验证**：见 TESTS.md“已预留未启动的子代理”节。
 
-## Runner 启动边界统一读准入关门（I5，2026-10-02，分支 `claude/9b-runner-admission`，基于 `20125c9d2`，已实现，待集成）
+## Runner 启动边界统一读准入关门（I5，2026-10-02，分支 `claude/9b-runner-admission`，基于 `20125c9d2`，已实现，并入 step17e）
 
 - **问题**：宿主停机关闭本进程模型调用准入后，已经排进批次的 runner 仍会激活执行轮，第一次模型调用被拒，写成 FAILED/model_call_admission_closed、白占尝试次数。75 复审 5a56714dc 建议在 `gate._counted_worker` 读关门事实；9b 核实发现只有一个任务的批次（单个孤儿复活、单个子代理自启，最常见）和 `runner_concurrency=1` 走 `_run_sequential_batch` → `run_single_runner`，不经过 `_counted_worker`。
 - **做法**：检查点放在两条批次路的公共入口 `agent_core/runner/worker._run_subagent_worker`（`_admission_closed_refusal`）：
@@ -699,7 +708,7 @@
   - **local/main 的派工子进程**：它有自己的准入表，Gateway 关门不影响它，它也不随 Gateway 退出；这里对它没有影响，行为保持不变。
 - **验证**：见 TESTS.md 同一节。没有做 sdkit 故障注入的真实 kill -9 演练（3a 列为加分项）。
 
-## 语义记忆复审必须修：manage_models 不能把当前向量模型挪到别的主机（M1），自配只比对启动时的默认对话模型（S1）（be 复审 e75cf6061，2026-10-02，分支 `claude/38-semantic-memory-m1`，基于 `claude/3a-step17e` `3c960c1d9`，已实现，待集成）
+## 语义记忆复审必须修：manage_models 不能把当前向量模型挪到别的主机（M1），自配只比对启动时的默认对话模型（S1）（be 复审 e75cf6061，2026-10-02，分支 `claude/38-semantic-memory-m1`，基于 `claude/3a-step17e` `3c960c1d9`，已实现，并入 step17e）
 
 - **M1（必须修）**：同主机 `set_embedding` 之后，同一个 manage_models 能用 `save_provider(editing)` 改那个服务商的地址，或用 `save_model` 把档案挪到别的服务商；两步都不审批、也不再核对主机。重启后嵌入客户端就用新地址，提问和要现嵌的记忆正文都发到新主机。
   - 做法（3a 定做法 a）：manage_models 的目录写入，只要会改变当前向量档案（用户配置里的保存值、进程里的运行值都算）解析出的端点主机，就不写，回 `needs_user_choice` / `EMBEDDING_HOST_DIFFERS`，请用户去 /model 自己处理。“改变”包括改地址、挪服务商、删掉、从无到有（先在菜单里删了，再让模型用同一个编号在别处建）。
@@ -711,7 +720,7 @@
 - **S2（记成后续项，这轮不做）**：候选、日事件、经验、整理事务备份这些文件也装着记忆正文，还是普通写入（没有 0600 / 0700）。要不要统一走私有写，后续定。（已做：见本台账“记忆正文的其它文件也按私有原子写（S2）”一节。）
 - **验证**：be 的原样探针在本分支上，M1、S1 两条“绕过成立”的断言都失败了（save_provider 回 `EMBEDDING_HOST_DIFFERS`、嵌入地址没变；换默认后 set_embedding 回 `EMBEDDING_HOST_DIFFERS`）；用例与变异见 TESTS.md 同名节。
 
-## 子代理被宿主停机打断时界面显示“宿主停机中断”（ae step17d 冒烟发现，2026-10-02，分支 `claude/9b-shutdown-label`，基于 `claude/3a-step17e` `2e5a36af0`，已实现，待集成）
+## 子代理被宿主停机打断时界面显示“宿主停机中断”（ae step17d 冒烟发现，2026-10-02，分支 `claude/9b-shutdown-label`，基于 `claude/3a-step17e` `2e5a36af0`，已实现，并入 step17e）
 
 - **问题**：子代理被宿主停机打断后结构化状态是对的（`failure_type=host_shutdown_interrupted` 或 `model_call_admission_closed`，`current_step="宿主停机中断"`），但用户看到的是"失败"：
   - TUI 子代理状态条 `tui_block_renderer._subagent_status_display` 只按 status 映射，FAILED/TIMEOUT/CHANNEL_ERROR 一律"失败"（名册行与子代理页头部两处）；
@@ -725,7 +734,7 @@
   - IM `/status`：Gateway `_subagent_status` 把"异常"按 `runner_display_label` 细分（`ConversationTaskStatus.subagent_other_labels`），文字成"异常 3：宿主停机中断 2，失败 1"；没有异常时原文逐字不变。TUI 走 Gateway 时有界解析这项细分。
 - **验证**：见 TESTS.md 同名节。
 
-## 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条，2026-10-02，块 1 已进 `claude/3a-step17e`，块 2 分支 `claude/ae-capability-packs-v2-b2` 基于 `2e5a36af0`，已确认设计、实施中）
+## 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条，2026-10-02，块 1 已进 `claude/3a-step17e`，块 2 分支 `claude/ae-capability-packs-v2-b2` 基于 `2e5a36af0`，已确认设计、已实现，并入 step17e）
 
 - **为什么做**：冻结重跑业务审阅只有 10/27。模型改写检查器后谎报“已验证”、就地改原输入、不交付，宿主都看不见；检查器也漏了占位、编造引用 ID、整理变改写等可以确定性查出的问题。
 - **设计**见 [CAPABILITY_PACKS_V2](docs/design/CAPABILITY_PACKS_V2.md)，三样通用机制都由包的结构化声明触发：
@@ -757,7 +766,7 @@
   - 测试见 TESTS.md 同名节。
 - **分工**：宿主线（块 1–6）ae；包内容 A 0.5.0、B 0.3.0（块 7）be，ae 审；重跑和独立审阅（块 8）ae。验收按 C16：某个包冻结重跑 9/9 才装进生产。
 
-## 隔离模式的 Shell 碰到沙箱边界时让模型知道并换个做法（第 16 条，用户 10-02 拍板，2026-10-02，分支 `claude/9b-sandbox-boundary-facts`，基于 `claude/3a-step16z` `3c7565bf2`，已实现，待集成）
+## 隔离模式的 Shell 碰到沙箱边界时让模型知道并换个做法（第 16 条，用户 10-02 拍板，2026-10-02，分支 `claude/9b-sandbox-boundary-facts`，基于 `claude/3a-step16z` `3c7565bf2`，已实现，并入 step17e）
 
 - **问题**：owner 隔离（普通 IM 用户都是这个模式，本机管理员偶尔也是）的 Shell 跑在系统沙箱里。macOS 上递归扫描等操作碰到被拒读的目录会报 EPERM 中途退出（祖先目录元数据已放行，见下方"第一步的回归与热修复"），模型只看到命令失败，不知道是沙箱边界，常见反应是换个写法原样重试。
 - **做法**（只用结构化事实，不解析 stderr，不放宽沙箱）：
@@ -771,7 +780,7 @@
 - **下一步怎么走**：主代理直接告诉用户需要什么访问权限（用户可经 `/permissions` 等宿主入口决定）；子代理用已有的 `capability_request` 申请；或把范围缩到允许目录。安全边界不变。
 - **验证**：见 TESTS.md 同名节。真实 MiniMax-M2.7 验收（TUI 本机管理员 + 假飞书私聊普通用户经真实 Gateway，证据 `~/.my-agent/decision-evidence/sandbox-boundary-facts-bbd6bef1e/`）：两边越界的 `du` 都在沙箱里非零退出，模型看到的工具结果带着边界事实；TUI 随后换了一条命令成功，IM 没有再原样重试 Shell 而是收尾答复。另记一条发现："统计 .md 文件"这类需求模型优先用专用文件工具（由文件工具自己的 owner 墙管），不走 Shell，本条功能不触发。
 
-## 语义记忆整包：/model 向量模型入口、my-agent 同主机自配、向量文件私有写、第一次召回不重嵌（S1–S5，用户 10-02 拍板，2026-10-02，分支 `claude/38-semantic-memory`，基于 `claude/3a-step17d` `3c7565bf2`，已实现，待集成）
+## 语义记忆整包：/model 向量模型入口、my-agent 同主机自配、向量文件私有写、第一次召回不重嵌（S1–S5，用户 10-02 拍板，2026-10-02，分支 `claude/38-semantic-memory`，基于 `claude/3a-step17d` `3c7565bf2`，已实现，并入 step17e）
 
 - **背景**：用户拍板生产要开语义召回（MiniMax embo-01；真正打开是 S6，由 3a 发版时做）。原来只有管理员在 `/settings` 里填档案编号，模型改不了；向量文件按 644 写；第一次召回会把已存的记忆全部重嵌一遍。
 - **查清的事实（S4）**：`embedding_model_profile` 和 `memory_semantic_recall` 是**全局配置**。owner 池建作用域 agent 时只换 owner 三字段（`owner_scoped_pool._config_with_owner`），其余原样继承 Gateway 配置。
@@ -807,7 +816,7 @@
   - TUI「新增模型」只按接口推出用途（聊天接口一律 agentic），加嵌入模型要再改连接（勾 Embedding）和模型（用途 Embedding）两处；manage_models `add` 带 `capability=embedding` 可以一步加好。要不要在「新增模型」里直接给用途选项，待定。
 - **验证**：见 TESTS.md 同名节。
 
-## 记忆整理：同一条消息里同主题、不同内容各存一条（用户拍板第 6 条，2026-10-02，分支 `claude/be-curator-content-identity`，基于 `claude/3a-step16z` `5e972003e`，已实现，待集成）
+## 记忆整理：同一条消息里同主题、不同内容各存一条（用户拍板第 6 条，2026-10-02，分支 `claude/be-curator-content-identity`，基于 `claude/3a-step16z` `5e972003e`，已实现，并入 step17d）
 
 - **问题**（J13 复测登记，见下方 J13 条目里的“待定”）：用户说“我对花生过敏，也对芒果过敏。”，模型给出两条候选，主题键都是 `health.allergy`。宿主的观察身份不含内容，两条算出同一个观察键；芒果那条在候选库合并时按观察键找到花生那条，被当成同一次观察的改写并进去，候选库只剩“花生”。
 - **是哪一步合的**：不是模型输出合的，是写入时合的。
@@ -827,7 +836,7 @@
   - 证据：`~/.my-agent/decision-evidence/j13-curator-retest/content-identity-20261002/`。
 - **验证**：见 TESTS.md 同名节。
 
-## Esc／/interrupt 中断后过一会儿再发消息仍接着原任务：账本自愈认出"用户中断"（第 7 条，用户 10-02 选 A，2026-10-02，分支 `claude/9b-interrupt-resume`，基于 `claude/3a-step16z` `5a56714dc`，已实现，待集成）
+## Esc／/interrupt 中断后过一会儿再发消息仍接着原任务：账本自愈认出"用户中断"（第 7 条，用户 10-02 选 A，2026-10-02，分支 `claude/9b-interrupt-resume`，基于 `claude/3a-step16z` `5a56714dc`，已实现，并入 step17d）
 
 - **问题**（38 在 C12 观察里报告，见下方 C12a/C12b 条目的待定项）：
   - TUI 里 Esc 与 `/interrupt` 同一入口，只中断本轮，任务关联保持 active。
@@ -853,7 +862,7 @@
 - **影响**：被中断任务在窗口内保持 active、TaskRun 保持打开，期间不会被自动续跑（运行库权威终态照旧排除驱动）。窗口内用户发的下一条消息，无论内容，都接着原任务目录，与原先"中断后马上发消息"的行为一致。
 - **验证**：见 TESTS.md 同名节。真实 MiniMax 链路未跑（组件 + 真实 Gateway ask 加脚本化假模型已覆盖），可在集成验收时补一轮。
 
-## 自然停机带走的子代理重启后按“宿主停机中断”收尾（step17c 停机预演观察 1，2026-10-02，分支 `claude/38-shutdown-label-v2`，基于 `claude/3a-step16z` `5a56714dc`，已实现，待集成）
+## 自然停机带走的子代理重启后按“宿主停机中断”收尾（step17c 停机预演观察 1，2026-10-02，分支 `claude/38-shutdown-label-v2`，基于 `claude/3a-step16z` `5a56714dc`，已实现，并入 step17d）
 
 - **问题**（ae 观察 1）：自然停机时，网关进程里的子代理是守护线程，随进程消失，碰不到关门后的拒绝。重启后宿主把它收尾成 `runner_error`（“执行器已退出但没有返回结果”），用户看不出原因是停机。
 - **为什么不用网关停机事件判定**：3a 举的例子是 `gateway_model_calls_interrupted` 事件和账上的中断码，但都不好用。
@@ -875,7 +884,7 @@
     - Audit 来源例外：和 `model_call_admission_closed` 同属 `HOST_SHUTDOWN_FAILURE_TYPES`，结果归并改回 PENDING 时保留原因，重启后接续。
 - **验证**：见 TESTS.md 同名节。
 
-## 第 14 条：派子代理时把图片一起传过去——按 media_ref 结构化引用，走现有附件/媒体管线（2026-10-02，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`，已实现，待集成；默认关）
+## 第 14 条：派子代理时把图片一起传过去——按 media_ref 结构化引用，走现有附件/媒体管线（2026-10-02，ef，分支 `claude/ef-subagent-media`，基于 `claude/3a-step16z` `5e972003e`，已实现，并入 step17e；默认关）
 
 - **问题**：J11 让主会话带图时按模态自动选模，但父代理用 `create_subagents` 派活没有入口把本轮图片交给子代理，子代理带图的真实链路没有入口。
 - **做法**（开关 `subagent_input_media_enabled` 住在 capability 配置 `config/capability_config.yaml` + `capability/config.py`，
@@ -915,7 +924,7 @@
   并加进 `USER_SETTINGS_BOUNDARY_KEYS`。行为不变；真实 M3 核对是在挪位置之前做的，当时开关在主配置，判断逻辑相同。
 - **3a 集成补**：ef 的 M3 真实核对里，子代理先说“没有解码附件的工具”才去看图。清单在标记行后加一句软提示“这些附件已作为本轮消息里的图片/视频直接给你，可以直接看，不需要工具读取或解码。”（只是提示，不参与任何判断）。
 
-## 记忆整理跟着消息来源会话的主代理模型走（用户拍板第 2 条细化，2026-10-02，分支 `claude/be-curator-thread-model`，基于 `claude/3a-step16z` `5a56714dc`，已实现，待集成）
+## 记忆整理跟着消息来源会话的主代理模型走（用户拍板第 2 条细化，2026-10-02，分支 `claude/be-curator-thread-model`，基于 `claude/3a-step16z` `5a56714dc`，已实现，并入 step17e）
 
 - **用户原话**：“那不能按主代理的走吗？我可能开 5-10 个 tui，普通用户就 1 个飞书或者别的 IM。”
 - **之前**：`memory_curator_model_profile` 留空时，整批都用 owner 当前选中的模型，后端在建 agent 时一次性建好。
@@ -951,7 +960,7 @@
 - **文档**：`agent_config.yaml` 与 `AgentConfig` 里这个键的注释（留空的含义、指定档案解析不到时的退回都变了）、MODEL_GUIDE 常见疑问、CODEBASE_TREE。
 - **验证**：见 TESTS.md 同名节。
 
-## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
+## 唤醒回合用量行带上模型身份：增量行按“本行调用”记后端与模型（ae step17c 冒烟观察，2026-10-02，分支 `claude/9b-wake-usage-models`，基于 `claude/3a-step16z` `c6f28b150`，已实现，并入 step17d）
 
 - **问题**：step17c 冒烟基本链路（`decision-evidence/step17c-shutdown-rehearsal-38d7c8615/`）里，父代理被子代理完成唤醒的那一轮，
   用量行 `source=background_main_agent` 的 `models` 与 `purpose_breakdown.main.models` 是空列表，物理调用却是 1 次、输入 40,570 token。不是回归。
@@ -989,7 +998,7 @@
   - 工具瘦身第一阶段：由工具规格声明“默认收起”，tool_search 按需加载；精简说明。不改名、不合并、不改行为，带开关，仓库默认关。合并类改动留第二阶段。
 - **待用户定**：Esc 中断后自愈收成 cancelled、停机边角四项、F1 重试、能力包后续、包内检查宿主证实、付费出图确认码、J16。解释见 3a 最终报告。
 
-## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
+## 探测计入用量账的四处小尾巴：未知用途键计数、/status 诊断出口、真实形状两行用例、取证脚本去写死行号（2026-10-02，ef，分支 `claude/ef-probe-usage-tails`，基于 `claude/3a-step16z` `c6f28b150`，已实现，并入 step17d）
 
 - **来源**：3a 派活。ds2 两轮加固（C7 计量修正、三件小加固、M1 修正）be 审过之后剩下四处可选尾巴，都不需要用户拍板。
 - **① 未知用途键留结构化计数（`conversation/store_usage.py`）**：开放世界读法照旧——“值是对象”的未知用途键放行并当新桶求和，不改回报错。
@@ -1024,7 +1033,7 @@
   - **S2 tests 目录按相对包根判断**：`_production_source_files` 原按绝对路径 `path.parts` 排除 `tests`，仓库检出在名叫 tests 的上级目录下会把
     全部文件排除、扫描结果变空；改为看相对包目录（`agent`/`cli`）的路径段。
 
-## 停机后不再从两条自动入口续派子代理：Audit 来源归并续派、嵌套子代理收尾唤醒父级（sol2/75 复审 38d7c8615 的必须修，2026-10-02，分支 `claude/38-audit-redispatch`，基于 `claude/3a-step16z` `c6f28b150`，已实现，待集成）
+## 停机后不再从两条自动入口续派子代理：Audit 来源归并续派、嵌套子代理收尾唤醒父级（sol2/75 复审 38d7c8615 的必须修，2026-10-02，分支 `claude/38-audit-redispatch`，基于 `claude/3a-step16z` `c6f28b150`，已实现，并入 step17d）
 
 - **问题**：
   - **sol2**：Audit 来源仍有工作时，结果归并把 `FAILED/model_call_admission_closed` 改成 PENDING。随后 session 收尾的 `_continue_pending_run_after_session → auto_start_orphan_run → auto_start_tasks` 在停机进程里续派，绕过了“停机后不自动重跑”。新 attempt 第一次调用又被拒，尝试次数 +1。
@@ -1049,7 +1058,7 @@
   - 唤醒毒丸：中间穿插停机，不清零已有的真实失败。
 - **验证**：见 TESTS.md 同名节。
 
-## 停机准入拒绝的调用方收尾：决策、子代理、运行错误报告、唤醒毒丸按“宿主停机”处理（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `claude/3a-step16z` `00bcf7d45`，已实现，待集成）
+## 停机准入拒绝的调用方收尾：决策、子代理、运行错误报告、唤醒毒丸按“宿主停机”处理（sol2 复审 J17 栅栏，2026-10-02，分支 `claude/38-fence-callers`，基于 `claude/3a-step16z` `00bcf7d45`，已实现，并入 step17d）
 
 - **问题**：sol2 复审 J17 栅栏（`bc639caa7`）后确认：没有锁倒置，窗口确实拦住了。但三个调用方不认识新的准入拒绝 `ModelCallAdmissionClosedError`，把正常停机说成了别的错误。
   - **决策入口**（必须修）：ActiveDecision 已登记、进模型账本前关门，`started_retained()` 被拒，`_failure_outcome` 兜底成 `error/enhancement_failed`；`active.shutdown_cancelled` 已置位却没用上。sol2 实测 active_decisions_cancelled=[1]、backend_decide_calls=0、cooldown_entries=0。
@@ -1076,7 +1085,7 @@
   - “已登记、未发出的调用在发送层硬门”仍是待办。
 - **验证**：见 TESTS.md 同名节。
 
-## J17 必须修：Gateway 停机准入栅栏——结清之后不再接新的模型调用（2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 `claude/3a-step16z` `7b21f38b9`，已集成 `bc639caa7`，待上线 step17c）
+## J17 必须修：Gateway 停机准入栅栏——结清之后不再接新的模型调用（2026-10-02，分支 `claude/38-j17-shutdown-fence`，基于 `claude/3a-step16z` `7b21f38b9`，已集成 `bc639caa7`，并入 step17d）
 
 - **问题**（sol2 只读审查）：停机结清只拿一次账本快照，再逐本把在途调用记 failed，没有同时关掉新调用的准入。
   - Gateway 对三条循环各等 2 秒，排空不完整也照样结清；之后还活着的 worker 能在已结清的账本上登记新的 started。
@@ -1109,13 +1118,13 @@
   - local/main 子进程 runner 不在本进程，各自收口；kill -9、断电仍靠启动对账。
 - **验证**：见 TESTS.md 同名节。
 
-## C4 接替提示开关进管理员 /settings 白名单（2026-10-02，3a，集成分支 `claude/3a-step16z`，已实现，待上线（step17b））
+## C4 接替提示开关进管理员 /settings 白名单（2026-10-02，3a，集成分支 `claude/3a-step16z`，已实现，并入 step17d）
 
 - **问题**：`subagent_takeover_hint_enabled` 在 capability 配置里，按 P17 规则默认是安全边界（会改变父级模型看到的内容，模型不能改），但没进 `USER_SETTINGS_BOUNDARY_KEYS`，结果管理员 `/settings set` 也被 `PARAMETER_BOUNDARY` 拒绝，只剩手改文件一条路；已定做法 5 要求“生产打开并给关闭命令”，做不到。部署前用参数中心预演时发现。
 - **做法**：加进 `user_config_capability.USER_SETTINGS_BOUNDARY_KEYS`，与 `enable_memory_search_tool` 同类：模型工具仍拒绝，已认证管理员 `/settings` 的短生命周期写作用域可以开关，写进运行时实际读取的 `<owner home>/config/capability_config.yaml`（不存在时新建 600），重启 Gateway 生效。随包 `capability_config.yaml` 注释补一句修改途径。
 - **验证**：`test_subagent_takeover_hint.py::test_switch_is_a_boundary_only_the_admin_settings_command_can_flip`（模型被拒且不建文件；管理员作用域开/关、回读一致、文件 0600）；变异“从白名单删掉该键”被拦下后还原。
 
-## 交付复核焦点题面写明“全部通过且没改动时选 not_needed”（delivery_quality 压线核查）（2026-10-02，分支 `claude/be-delivery-criteria`，基于 `claude/3a-step16z` `d8474300f`，已实现，待集成）
+## 交付复核焦点题面写明“全部通过且没改动时选 not_needed”（delivery_quality 压线核查）（2026-10-02，分支 `claude/be-delivery-criteria`，基于 `claude/3a-step16z` `d8474300f`，已实现，并入 step17d）
 
 - **问题**：J12 续基准里 delivery_quality 16/20，刚好压线（阈值 0.8）。
   - 错的 4 题全是“全部通过且之后没改动”的两个用例（dq-03、dq-09），两遍都选了最新焦点 focus_2，而不是 not_needed/no_match。
@@ -1133,7 +1142,7 @@
 - **开关**：点位仍默认关闭，生产是否打开由集成方定。
 - **验证**：见 TESTS.md 同名节。
 
-## 外部材料阅读优先级逐页题的候选措辞修正（照 J12b）（2026-10-02，分支 `claude/be-material-criteria`，基于 `claude/3a-step16z` `b5be542e8`，已实现，待集成）
+## 外部材料阅读优先级逐页题的候选措辞修正（照 J12b）（2026-10-02，分支 `claude/be-material-criteria`，基于 `claude/3a-step16z` `b5be542e8`，已实现，并入 step17d）
 
 - **问题**：
   - J12 续基准里 external_material_order 只有 22/36（0.61，阈值 0.8）。14 道错题全是无关页答 `not_needed`/`no_match`，而不是 `later`。
@@ -1153,7 +1162,7 @@
 - **开关**：点位仍默认关闭，生产是否打开由集成方定。
 - **验证**：见 TESTS.md 同名节。
 
-## C7 计量与说法修正：探测计入用量账 + 自动检测成本上界（2026-10-02，分支 `worker/ds2-effort-probe-metering`，基于 `claude/3a-step16z` `b5be542e8`，已实现，待集成）
+## C7 计量与说法修正：探测计入用量账 + 自动检测成本上界（2026-10-02，分支 `worker/ds2-effort-probe-metering`，基于 `claude/3a-step16z` `b5be542e8`，已实现，并入 step17d）
 
 - **问题**：①每个模型第一次被用时宿主先发一次 `probe_tool_capability`（工具能力探测，按模型缓存），该调用不进
   `model_usage`，用量账不完整；②`/effort` 自动检测回执写“约需 1～5 分钟、会额外消耗少量 token”，实测 MiniMax-M2.7
@@ -1203,7 +1212,7 @@
 - **上线说明（回滚兼容）**：修好后，没用过探测的线程写出的行不再含 `probe:tool_capability` 键，回滚到 17a 照常能读；
   用过探测的线程行里带探测桶，17a 的 `summary()` 严格读法仍会报错（生产链路没有调用方）。
 
-## 选模型两个点位的仓库默认期限定为 5 秒（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）（2026-10-02，分支 `claude/be-selection-timeout-default`，基于 `claude/3a-step16z` `a44f2ad62`，已实现，待集成）
+## 选模型两个点位的仓库默认期限定为 5 秒（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）（2026-10-02，分支 `claude/be-selection-timeout-default`，基于 `claude/3a-step16z` `a44f2ad62`，已实现，并入 step17d）
 
 - **背景**：J5 把前台通用期限默认改成 3 秒，但选模型（`model_selection`、`subagent_model`）在冷连接下 Jev 实测约 3.2 秒，按 3 秒会超时、保留原模型。
   生产已经用覆盖层对齐（通用 3 秒、这两个点位 5 秒、阶段 5 秒、后台 15 秒，revision 9）；这次把同样的做法写进仓库默认，新装的用户也是这样。
@@ -1218,7 +1227,7 @@
 - **生产**：覆盖层已经是这些值，这次改动在生产上没有效果。
 - **验证**：见 TESTS.md 同名节。
 
-## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `claude/3a-step16z` `ee3bd09f7`，已实现，待集成）
+## 模型采用标记 `send_intent_uncertain` 的含义：故意不结清，审计附说明（2026-10-02，分支 `claude/ae-adoption-settle`，基于 `claude/3a-step16z` `ee3bd09f7`，已实现，并入 step17d）
 
 - **问题**：J11 真实复核时发现，主会话自动采用后，请求记录里的选模型标记停在 `send_intent_uncertain`，请求 done 后也不变，看记录的人容易误读成“发送状态没确认”。
 - **复核结论：这是故意不结清**，所以不改状态机。依据：
@@ -1236,7 +1245,7 @@
   - TUI 和 IM 没有直接展示这个标记的界面，用户都是经审计工具的回答看到它，所以说明加在审计投影上。
 - **验证**：见 TESTS.md 同名节。
 
-## 模型调用账不再裁掉进行中的调用（生产缺陷：sol 会话压缩 COMPACT_KEYERROR，2026-10-02，分支 `claude/38-compact-keyerror`，基于 `claude/3a-step16z` `df6033475`，已实现，待集成）
+## 模型调用账不再裁掉进行中的调用（生产缺陷：sol 会话压缩 COMPACT_KEYERROR，2026-10-02，分支 `claude/38-compact-keyerror`，基于 `claude/3a-step16z` `df6033475`，已实现，并入 step17d）
 
 - **现场**：step17a 上 sol 会话（thread-de866e7291f846db，gpt-6.1-sol）的压缩在 04:32:22 开始，约 11 分钟后失败，
   失败码 COMPACT_KEYERROR。账上这次的压缩辅助调用是“完成 1、首字 1”：第二次调用既没完成也没失败。
@@ -1261,7 +1270,7 @@
 - **结构**：判定和计数放在模块级函数 `_is_live_open_call` / `_live_open_scope_keys` / `_count_stale_open_trimmed`，
   `ModelCallLedger` 类回到 350 行硬线以内，告警身份与底版相同。
 
-## 工具操作持有者的同主机判定统一到 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`，已实现，待集成）
+## 工具操作持有者的同主机判定统一到 process_host_id（2026-10-02，分支 `claude/38-host-compare`，基于 `claude/3a-step16z` `a8586712e`，已实现，并入 step17d）
 
 - **背景**：网关 host_id 修复后，`tool_operations` 和 `managed_operation_store` 里还有三处直接拿 `socket.gethostname()` 判同主机：
   - 工具操作租约 `_operation_holder_is_live`；
@@ -1295,7 +1304,7 @@
 - **明确不动的**：与集成分支无关的其它工作流记录；引入提交在 `de222698b` 之外的条目（C14 2c、P14 修复、C5 车道闸、J9、
   主机名修复、IM 路径说明、J16 观察候选、插件来源越权回执等）。
 
-## 主机名变化后 SIGTERM 仍能停网关：主机身份进程内缓存 + macOS 硬件 UUID（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，待上线（下一版），未随 step17a 上线）
+## 主机名变化后 SIGTERM 仍能停网关：主机身份进程内缓存 + macOS 硬件 UUID（2026-10-02，分支 `claude/38-host-id`，基于 `claude/3a-step16z` `a52ac109c`，已实现，并入 step17d）
 
 - **现场**（3a，step17a 切换）：macOS 没有 /etc/machine-id，`process_host_id` 退回 `socket.gethostname()`；换网络后主机名变成 anonymous。
   网关 SIGTERM 处理函数 `_record_gateway_signal_stop_request` 现算 `build_process_identity()`，host_id 和启动时记下的对不上，
@@ -1317,7 +1326,7 @@
 - **没动的**：`tool_operations`、`managed_operation_store` 里还有三处直接拿 `socket.gethostname()` 判断同一主机。主机名变了它们按“另一主机、
   租约到期前视为存活”处理，是保守方向，不会误判已死；要统一到 `process_host_id` 会改变落盘的 holder_host 格式，留作后续。
 
-## C5 登记组件探针固化（2026-10-02，分支 `worker/ds2-run-claim-probe-tests`，基于 `claude/3a-step16z` `78fc5c209`，待上线（下一版），未随 step17a 上线）
+## C5 登记组件探针固化（2026-10-02，分支 `worker/ds2-run-claim-probe-tests`，基于 `claude/3a-step16z` `78fc5c209`，已实现，并入 step17d）
 
 - **来源**：sol2 只读审查 C5 的“建议修”（`gwreq-1790933078` 报告），要求把审查时临时使用的登记组件探针固化为仓库测试。
 - **做法**：只新增测试文件 `agent_py_agent/tests/test_run_claim_probe_paths.py`，不改任何产品语义；测试按 C5 修复后（车道闸）的实现写。
@@ -1327,7 +1336,7 @@
 - **已知边界**：“登记要过车道闸”只影响互斥时序、不改可观察状态，黑盒测试无法区分（实测删掉 `gate.lock` 后本文件仍全绿）；
   这条留给 C5 自己的确定性交错用例守。登记键的“线程为空返回空串”分支当前无用例覆盖。详见 TESTS.md。
 
-## 管理员判定收拢：插件管理与 user_config 工具改用统一函数（2026-10-02，分支 `claude/38-admin-fold`，基于 `claude/3a-step16z` `6980e5f41`，已实现，待集成）
+## 管理员判定收拢：插件管理与 user_config 工具改用统一函数（2026-10-02，分支 `claude/38-admin-fold`，基于 `claude/3a-step16z` `6980e5f41`，已实现，并入 step17d）
 
 - **背景**：P14 新增了 `owner_access.is_complete_local_admin_owner`（三项身份都是非空字符串，且是本机 local/main），/settings 的 `_is_admin` 和记忆向量重建已经改用它。
   另外两处仍是内联写法：插件管理（IM 路径，`plugin_command_service._scope_management`）和 user_config 工具的本机配置动作（`user_config_tool._is_main_owner`）。
@@ -1340,7 +1349,7 @@
     结果 provider 为纯空白、kind 为 main 的身份会被认作管理员；/settings 一直不认。收拢后两边都不认，方向是变严格。
   - user_config 原本就去空白，没有变化。
 
-## 决策账补结构化“结果类别”，分清选中 / 非选择 / 被丢弃（J10 复测观察）（2026-10-02，分支 `worker/ds1-decision-outcome-category`，基于 `claude/3a-step16z` `78fc5c209`，已实现，已集成，待上线（step17b））
+## 决策账补结构化“结果类别”，分清选中 / 非选择 / 被丢弃（J10 复测观察）（2026-10-02，分支 `worker/ds1-decision-outcome-category`，基于 `claude/3a-step16z` `78fc5c209`，已实现，并入 step17d）
 
 - **来源**：ae 做 J10 真实复测时的观察。决策结果日志只记 mode、status，Jev 调用成功之后看不出它是选中了某个候选，还是给了 `not_needed`/`need_data`/`abstain`
   这类非选择；也看不出宿主有没有因为来源、设置、期限变化把建议丢掉。于是“没出提示”到底是 Jev 没选、还是选了被丢，只能靠猜。
@@ -1398,7 +1407,7 @@
   - S4（统计语义）：同一次调用在类别统计里记两行（主行 selected + 补充行 dropped），“选中了 N 次”包含后来被丢弃的；被丢弃是选中的子集（M1 修好后成立），补充行仍不进 `points`/`not_sent`/`model_versions`。
 - **集成补漏（3a，step17b）**：审计 `scope=current_thread` 时 `points` 按会话过滤，但点位诊断按 owner 统计（`diagnostics_scope=owner`）；类别计数改由 `audit_records_tool._owner_point_categories` 另读一份 owner 范围，与检查/调用次数同口径。`test_decision_transport_timing` 的 recent 行形状断言补上 `result_category`、`result_category_label` 两个展示字段。
 
-## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
+## C5 剩余竞态：熔断判定与用户回合登记在同一把车道闸里（2026-10-02，分支 `claude/38-c5-fuse-race`，基于 `claude/3a-step16z` `4c624ecd4`，已实现，并入 step17d）
 
 - **来源**：sol2 只读审查第 1 条。“用户回合在场”的查询只短暂持有登记表锁，之后的 `record_continuation_fuse` 落账不受保护。
   查询返回“不在场”之后、暂停真正落盘之前，进来的用户回合照样会被熔断抢先暂停。sol2 用屏障复现到 paused/3；用户消息写入后变成 paused/0，暂停仍在。
@@ -1418,7 +1427,7 @@
 - **没做**：sol2 的“建议修”（把领取失败、执行抛错、收尾抛错、心跳启动失败、双等待者、跨会话与 owner 隔离等登记探针固化成测试）这次没做；
   第 2 条 Anthropic 小上限预算区间属于既有缺陷，不在本轮范围。
 
-## IM 出口脱敏了宿主绝对路径时，整条消息末尾统一附一次说明（C14 复核 2c 后续）（2026-10-02，分支 `claude/be-im-path-note`，基于 `claude/3a-step16z` `4c624ecd4`，待上线（下一版），未随 step17a 上线）
+## IM 出口脱敏了宿主绝对路径时，整条消息末尾统一附一次说明（C14 复核 2c 后续）（2026-10-02，分支 `claude/be-im-path-note`，基于 `claude/3a-step16z` `4c624ecd4`，已实现，并入 step17d）
 
 - **问题**：飞书等对外通道按规则把宿主绝对路径缩成最后一段，插件越界提示就成了“请把插件包放到 main 下再试”，用户不知道这是被脱敏过的路径。
 - **做法**（集成方定 (a)：脱敏规则不开例外，做成通用做法）：
@@ -1480,7 +1489,7 @@
 - **点位默认值一律不变**（全部 off）。哪个点位改成默认打开，由集成方按成绩、阈值和真实收益决定；`test_decision_quality_bench.py` 仍强制“默认打开必须有当前有效且达标的成绩”。
 - **验证**：见 TESTS.md 同名节。
 
-## Anthropic 小输出上限的空预算区间（2026-10-02，sol2，`worker/sol2-anthropic-budget`，基于 `b35796a60`，已实施，待集成/真实入口核对）
+## Anthropic 小输出上限的空预算区间（2026-10-02，sol2，`worker/sol2-anthropic-budget`，基于 `b35796a60`，已实施，并入 step17d/真实入口核对）
 
 - **解决问题**：合法小窗口会经工厂派生出 max_tokens=1024，旧夹紧把预算强行抬到 1024，等于输出上限；这是 C7 之前已有的边界缺陷。
 - **合同**：预算区间为 `[1024, max_tokens-1024]`。区间为空时不发送 thinking，不抬高输出上限，也不把“未发送”说成服务商已经关闭思考。
@@ -1489,7 +1498,7 @@
 - **验证**：先红后绿、工厂边界 1024/2047/2048/2049、真实组包/投影的流式和非流式替身、控制服务与参数中心回执、正常大上限及三个独立变异；结果和门禁见 TESTS.md。没有新配置，未做真实供应商验收或 Gateway 操作；早期夹具遗漏的假地址外部传输尝试保留在 TESTS.md。
 - 详细合同见 [智能程度第 10 节](docs/design/REASONING_EFFORT.md#10-anthropic-小输出上限的预算边界2026-10-02)。真实供应商及实际 TUI/IM 客户端未验证，由 3a 集成后复核。
 
-## C8/C9：/recover 按编号处置与管理员 owner 历史恢复入口（2026-10-02，分支 `worker/sol56-c8c9-recover`，基于 `claude/3a-step16z` `b35796a60`，审查返工 `1e1ed1040`、尾补 `cee06c42c`，已实现，已集成，待上线（step17b））
+## C8/C9：/recover 按编号处置与管理员 owner 历史恢复入口（2026-10-02，分支 `worker/sol56-c8c9-recover`，基于 `claude/3a-step16z` `b35796a60`，审查返工 `1e1ed1040`、尾补 `cee06c42c`，已实现，并入 step17d）
 
 - **C8 指定编号**：`/recover <处置> <编号>` 的编号只接受 `common/opaque_id.py` 规则；写入口在同一个 `BEGIN IMMEDIATE`
   事务里重新定位编号并复核 thread、未关闭 TaskRun、current attempt 仍为 unknown，再复用主链唯一 unknown→recovered CAS。
@@ -1510,7 +1519,7 @@
 - **复审尾补**：纯空白 thread 与空 thread 一样在事务前拒绝；部分成功批次同码重放以“该确认已处理过”开头，复用原计数且不新增事件。
 - **验证状态**：临时 runtime.db 的三份聚焦测试 30 项通过；原五个、返工三个与尾补两个变异均被捕获并还原。真实运行中 Gateway、TUI 和飞书未在本分支启动或验证，待集成后复核。
 
-## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
+## 插件来源越权时，回执给用户看的说明写明允许放包的目录（C14 复核 2c）（2026-10-02，分支 `claude/be-plugin-source-root`，基于 `claude/3a-step16z` `25882221f`，已实现，并入 step17d）
 
 - **问题**：插件包放在当前 owner 范围外时，允许的根目录只拼在给模型看的异常文字里；用户在 TUI 和 IM 看到的仍是通用的“插件、来源文件或配置无效，或读取未获授权。”。
 - **做法**：
@@ -1520,7 +1529,7 @@
   - 没有 owner 根时（不是按用户隔离的部署），说明改为提示放到当前会话工作区或显式授权的目录。说明不回显用户给的越权路径。
 - **验证**：见 TESTS.md 同名节。
 
-## J9：主模型的只读长期记忆检索工具 `memory_search`（P5-A 缺口 2）（2026-10-02，分支 `claude/ae-j9-memory-tool`，基于 `claude/3a-step16z` `25882221f`，待上线（下一版），未随 step17a 上线）
+## J9：主模型的只读长期记忆检索工具 `memory_search`（P5-A 缺口 2）（2026-10-02，分支 `claude/ae-j9-memory-tool`，基于 `claude/3a-step16z` `25882221f`，已实现，并入 step17d）
 
 - **缺口**：自动召回漏掉的事实，主模型自己查不到（`remember list` 整表列出、不过滤不截断；`session_search` 查的是会话历史）。
 - **做法**：新增只读工具 `memory_search`，参数为 `query`、`limit`（1–10，默认 5）、可选 `kind`，返回条目编号、类型、范围、更新时间和前 300 字摘录。
@@ -2794,7 +2803,7 @@
   服务商声明继续开放，用户界面按本次明确合同显示八档，不动态透传未知原始值。组件验收记录日期 2026-10-02，
   尚未集成/部署，真实核对留给 3a。详见 [智能程度](docs/design/REASONING_EFFORT.md) 第 9 节和 TESTS。
 
-## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30 第一阶段已合入；2026-10-02 C8/C9 已实施，待集成）
+## /recover 能看到并处置本会话子代理留下的未知执行轮（2026-09-30 第一阶段已合入；2026-10-02 C8/C9 已实施，并入 step17d）
 
 - **现象**（ae 真实模型验收 O1）：子代理 runner 在写操作 handler 返回后被 SIGKILL，attempt 与 agent_run 停在 unknown，write_file 停在
   EXECUTING；父级用替补接替（来源 TAKEN_OVER），主代理 done。TaskRun 因 unknown 子代理按树规则一直不关，而 `/recover` 只看
