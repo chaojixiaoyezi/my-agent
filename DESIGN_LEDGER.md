@@ -17,7 +17,7 @@
 - **待定**：P4（合同允许错误带最多 4 个数字或短标识，A 包出 0.5.1）。等 P1–P3 上线后 A05、A10 重跑的结果出来再定。
 - **之后**：上线后先重跑 A05、A10 各 1 次，报循环次数和 token，按新数据重估块 8 全量；必须在 4,000 万以内才跑。详见 [设计 3.1 节](docs/design/CAPABILITY_PACKS_V2.md) 和 TESTS.md。
 
-## ChatGPT 订阅（Responses WebSocket）握手超时照 SSE 交回合层退避重试（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基于 `claude/3a-step17h` `7e421024f`，已实现，待 9b 复审）
+## ChatGPT 订阅（Responses WebSocket）握手超时照 SSE 交回合层退避重试（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基于 `claude/3a-step17h` `7e421024f`，已实现，9b 复审通过，并入 step17h）
 
 - **问题**（be 只读核对生产，2026-10-03）：上一波 8 次整轮失败全是 `PROVIDERTIMEOUTERROR`，都发生在 chatgpt.com 的 Responses WebSocket **握手阶段**（7 次 TLS 握手超时 `_ssl.c: The handshake operation timed out`、1 次升级握手超时 `timed out while waiting for handshake response`），其中 6 次挤在 25 秒内，是一次网络抖动。这些回合已经跑了 13–33 轮工具、50–76 分钟，一次握手超时（生成层立刻重试一次也超时）就整轮失败。证据目录：`~/.my-agent/decision-evidence/model-timeout-ws-handshake-20261003/README.md`（只有结构化事实）。
 - **根因**：SSE 路径把连接阶段的超时归成 `first_event`（`gateway_helpers` 的 `if _is_timeout_exception(exc): raise _stream_timeout_error(request, "first_event")`），所以回合层 `provider_transient_auto_resume` 会按 10/25/45/100/180 秒退避重试；WebSocket 路径少了这一步，握手超时走 `_runtime_network_error` 落成 `stage=provider_declared`，而这个 stage 恰恰是回合层明确不放行的（非流式请求里它包含“请求已发出后读超时”，重放会让服务商可能已处理的请求被重发）。
@@ -41,7 +41,7 @@
 - **整合时补的**（3a 定）：取消时输入原件/交付物两段不记返工；事实为空的判断加上“被取消”；宿主提示的触发键加上 `cancelled`；9b 的宽限期轮询。每处一条用例、一个变异。
 - **边界**：不改包声明、同意、沙箱权限，开关仍默认关。实际 TUI/IM `/stop`、生产和块 8 冻结重跑没验证。详见 [设计 3.2 节](docs/design/CAPABILITY_PACKS_V2.md) 和 TESTS.md。
 
-## 嵌入用量与召回方式看得到（S7，be 实现、75 接手收尾，2026-10-02，分支 `claude/75-embedding-usage-facts`（接 `claude/be-embedding-usage-facts`），基于 `claude/3a-step17h` `afb15947b`，已实现，待 9b 复审）
+## 嵌入用量与召回方式看得到（S7，be 实现、75 接手收尾，2026-10-02，分支 `claude/75-embedding-usage-facts`（接 `claude/be-embedding-usage-facts`），基于 `claude/3a-step17h` `afb15947b`，已实现，9b 复审通过，并入 step17h）
 
 - **起因**（3a 查生产）：
   - 写入时嵌入在工作：embo-01、1536 维，向量 24 → 25。
@@ -66,8 +66,6 @@
   - 身份复核：`embedding_identity` 仍只取 profile_id、protocol、endpoint_digest、model_name，不含请求类型；本机桩服务下，切换类型前后身份相同，旧身份仍可打开并检索已有向量，不触发身份失配或重建。
   - 定向回归、3 项变异和门禁见 TESTS.md 同名后续记录；没有对 Gateway、真实用户或外部 MiniMax 服务做本轮验收。
 
-## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已集成 step17g `7ed9e5c07`；插话终态与提示分句 step17h 已实现、待集成，分支 `claude/38-limit-steer-note`）
-
 ## 决策结果日志至少保留一周（luna6，2026-10-03，3a 复审通过，并入 step17h）
 
 - **解决问题**：原决策结果账只有 1000 行上限，生产增长约每 3.7 天就会覆盖一周观察统计所需的前半段结果。
@@ -86,7 +84,7 @@
 - Embedding 保存后提示用户到「选择模型」→「向量模型」选用，并在重启 Gateway 后生效。未运行真实 TUI/Gateway、未连真实供应商；保存通过只证明本地组件链路，不证明端点可用或重启后实际采用。
 - 用例、三项以上变异和门禁结果以 TESTS.md 本节为准。下一步 3a 独立审 diff 并在集成版本真实复核菜单、用途选择、向量模型列表和重启后的运行状态。
 
-## 记忆归档目录收紧权限：memory_archive 写入私有化 + owner 维护收紧已有文件（luna3，2026-10-03，分支 `worker/luna3-archive-private`，基于 `claude/3a-step17h` `b453f8883`，已实现，待 3a 复审）
+## 记忆归档目录收紧权限：memory_archive 写入私有化 + owner 维护收紧已有文件（luna3，2026-10-03，分支 `worker/luna3-archive-private`，基于 `claude/3a-step17h` `b453f8883`，已实现，3a 复审、9b 补审通过，并入 step17h）
 
 - **背景**：S2 把候选、日事件、lesson/HOT、Curator 事务目标与前镜像改成私有原子写，迁移备份也已私有化；S2 台账里记为"单独立项"的 `memory_archive/`（任务/运行事实索引、Compact 快照、任务工作区、外置工具输出）这批会话与任务数据仍是目录 0755、文件 0644。
 - **做法 1（新写入）**：复用 S3 的 `common/json_io.write_private_text_file_atomic_unlocked` 底层，同一文件补薄封装（不另写一套）：自取锁的 `write_private_text_file_atomic`、`write_private_json_file_atomic`，持锁的 `write_private_json_file_atomic_unlocked`，整文件 `write_private_jsonl_records`，追加 `append_private_text` / `append_private_jsonl_records`（新文件出生 0600、已有文件先收紧再追加）。
@@ -97,7 +95,7 @@
   - 只改权限不改内容；memory_archive 不存在时返回全零（还没建归档属正常）。
 - **验证**：见 TESTS.md 同名节。
 
-## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已实现，待集成）
+## 同一回合因非计划重启最多自动续跑 3 次，用完停止续跑、提示用户发“继续”（I4 续，3a 定，2026-10-02，分支 `claude/38-resume-limit`，基于 `claude/3a-step17g` `72ddc2b5c`，已集成 step17g `7ed9e5c07`；插话终态与提示分句并入 step17h，分支 `claude/38-limit-steer-note`）
 
 - **起因**：I4 之后，被停机打断的回合重启后都会自动续跑，但启动续跑一直没有次数上限。本身会把进程弄崩的回合，每次重启都会再续一次，形成崩溃循环。3a 定：加上限。
 - **规则**：
@@ -171,7 +169,7 @@
 - **裁决**：不在模型沙箱里支持 CLI 只读启动，保持 H3 的拒写与结构化错误 `CLI_HOST_STATE_READ_ONLY`，提示改用内置工具。甲方案“宿主保持长连接”将引入新的连接/sidecar 生命周期不变量，不为这件事实施；与“模型沙箱碰不到宿主状态”的安全方向一致。
 - **工具覆盖及明确缺口**：逐命令核实的内置工具名称、能力边界和探针证据见 [CLI_READONLY_STARTUP 现状与裁定](docs/design/CLI_READONLY_STARTUP.md)。本次无产品逻辑改动；同步源内注释和测试说明；原稿 S5–S10 及相关副作用因结论为不做而未核。
 
-## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，二审必须改已修完，待 9b 复核）
+## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，9b 三审通过，并入 step17h）
 
 - **起因**：
   - 管理员的文件工具和命令能直接写 `~/.my-agent/config/`，绕过参数中心的 `BOUNDARY_KEYS`、修改账本和 `manage_models` 的 M1 检查。
