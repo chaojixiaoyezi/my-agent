@@ -566,6 +566,23 @@
 - **本轮静态门禁**：导入边界 `IMPORT_BOUNDARIES findings=0`；Ruff `All checks passed!`；文档同步 `DOC_SYNC_PASS`；严格代码尺寸 `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`，随后已还原 `CODE_SIZE_REPORT.md`；`git diff --check` 退出码 0；clean-package `OK: . 未发现发布阻塞项`。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 输出 `新增告警: 0`、`消失告警: 9`。
 - 未跑全仓 pytest；测试使用假目录，不调用真实模型服务，也未启动 Gateway。
+## Gateway 本机来源信任 G6 ae 复审修正（2026-10-03，worker/luna1-g6-fetch-port，ds4 初审通过，待 3a 挑入）
+
+- **聚焦回归（最终产品代码修正后）**：`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python; PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_network_safety_gate.py agent_py_agent/tests/test_web_fetch_ssrf.py agent_py_agent/tests/test_tooling_web_fetch.py agent_py_agent/tests/test_ingestion_watch_tool.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna1g6-size-fix`，退出码 0。
+- `test_tooling_web_fetch.py` 穿过 registry 副本建立及热注入路径，分别验证私网主机 allowlist 与私网解析授权能抵达闸门；`test_web_fetch_ssrf.py` 覆盖 Gateway 回环/映射/未指定地址拦截、重定向再检查、端口 0/无端口不影响公网、非法端口仅拒本机地址、G4 注册端口与配置端口合并、bind 成功/EADDRNOTAVAIL/其他错误及无缓存；`test_network_safety_gate.py` 覆盖 M7（本机事实未知时匹配端口拒绝、其它端口放行）。HTTP 测试限各自随机端口假服务。
+- **ae 25 文件最终矩阵**：在缓存/批量 helper 拆出后的当前产品代码上再次运行，退出码 1；失败仍集中在 `test_tool_gateway_contract.py` 的 run_command 结果、`test_gateway_port_deny.py` 子进程空 stdout/JSON 解析、`test_process_unknown_reason_codes.py` 的未确认终止或 launcher identity unavailable。完整文件集与失败细节见上文；命令使用 `--basetemp=/private/tmp/claude-501/m-luna1g6-review25-final`。ds4 在基线 `b6ede99e0` 上对照同样 3 个测试文件时也观察到子进程 stdout 为空并触发 `JSONDecodeError`，确认这些本机矩阵失败属于当前沙箱环境；3a 在沙箱外运行 ae 的 25 文件清单全部通过。
+- **六项变异收尾重跑（缓存/批量 helper 拆分之后）**：统一使用指定 CI Python 与 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <nodeid> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna1g6-mutN`；六条都真实退出码 **1**，符合“被测试抓到”标准：
+  1. 暂时跳过 G6 端口检查：`test_network_safety_gate.py::test_private_opt_in_cannot_reach_gateway_port_on_local_addresses`，退出码 1（六个本机地址断言失败）。
+  2. 只匹配字符串 `127.0.0.1`：`test_network_safety_gate.py::test_ipv4_mapped_loopback_address_is_recognized_without_probe`，退出码 1（IPv4-mapped 被判为未知）。
+  3. Gateway 端口固定为 `1`：`test_web_fetch_ssrf.py::test_gateway_local_targets_are_blocked_even_when_private_is_allowed`，退出码 1（随机端口假服务被访问，断言拒绝失败）。
+  4. M7：无法确认本机地址时放行：`test_network_safety_gate.py::test_missing_local_address_fact_only_blocks_gateway_port`，退出码 1（匹配端口没有结构化拒绝）。
+  5. 端口为 0/无端口仍拒公网：`test_web_fetch_ssrf.py::test_public_target_allowed_when_gateway_port_is_absent_or_disabled`，退出码 1（两个参数案例都得到拒绝）。
+  6. web_fetch 不读取调用副本热注入授权：`test_tooling_web_fetch.py::test_registry_private_host_grant_reaches_web_fetch_gate` 与 `test_tooling_web_fetch.py::test_registry_private_resolution_grant_reaches_web_fetch_gate`，退出码 1（两个授权用例均被私网闸拒绝）。
+- 六项变异各自立即还原；对 `network_safety.py` 与 `web_fetch_tools.py` 执行 `git diff --exit-code -- <file>` 均退出码 0，确认与 WIP 提交一致。随机端口用例仅连接测试自行绑定的假服务；其余变异测试使用 fake resolver，不访问外网或 8420。
+- **架构守卫**：`guards9.txt` 的 10 个测试文件（含 `test_packaging.py`）退出码 0；在最终代码上重跑。
+- **最终静态门禁**：import boundaries `findings=0`；Ruff `All checks passed!`；`DOC_SYNC_PASS`；strict code-size `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；`git diff --check` 退出码 0；clean-package `OK: . 未发现发布阻塞项`。strict code-size 后已恢复 `CODE_SIZE_REPORT.md`。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 最终输出 `新增告警: 0`、`消失告警: 18`。第一次出现 `web_fetch_tools.WebFetchTool` 新高危告警后，将批量执行与缓存逻辑移到模块级 helper 并重跑，告警归零。
+- **安全边界**：本轮没有启动/停止 Gateway、没有连 `8420`、没有外网请求、没有读真实凭据或用户会话正文。没有验证真实 Gateway/IM 链路；插件宿主启用与沙箱子进程路径受当前命令沙箱限制，需由 3a 在沙箱外复核。
 
 ## 能力包写后检查反馈修正 P1–P3（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `911116770`）
 

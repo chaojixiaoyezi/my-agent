@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..common.cancellation import cancellation_requested
+from ..contracts.gates.network_safety import GatewayEndpointConfig, NetworkSafetySettings
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -46,6 +47,8 @@ from .web_http_helpers import (
 )
 
 
+# LLM: 注册时保存工具依赖和配置后备；每次解析时从当前工具副本读取热注入的私网授权。
+# 类用途: 汇总 web_fetch 的超时、缓存、响应和 Gateway 配置后备，不冻结逐调用授权或保存凭据。
 @dataclass(frozen=True)
 class WebRuntimeDeps:
     max_chars: int
@@ -59,6 +62,7 @@ class WebRuntimeDeps:
     cache_ttl_seconds: int = 900
     allowed_private_hosts: tuple[str, ...] = ()
     allow_private_resolution: bool | None = None
+    gateway_endpoint_config: GatewayEndpointConfig = GatewayEndpointConfig()
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,8 @@ class CachedFetch:
 class WebFetchTool(BaseTool):
     """Fetch URL content, extract several URLs, or call a simple HTTP API."""
 
+    # LLM: 不冻结 registry 每次调用注入的网络授权；保留 Gateway 配置后备供每一跳重取运行端口。
+    # 函数用途: 保存稳定运行依赖与配置后备，网络授权在真正检查时再读取。
     def __init__(self, deps: WebRuntimeDeps):
         self.max_chars = deps.max_chars
         self.timeout = deps.timeout
@@ -82,6 +88,7 @@ class WebFetchTool(BaseTool):
         self.cache_ttl_seconds = max(0, int(deps.cache_ttl_seconds))
         self.allowed_private_hosts = tuple(deps.allowed_private_hosts)
         self.allow_private_resolution = deps.allow_private_resolution
+        self.gateway_endpoint_config = deps.gateway_endpoint_config
         self._cache: OrderedDict[tuple[str, str], CachedFetch] = OrderedDict()
         self._cache_lock = threading.Lock()
         self.model_spec = _web_fetch_model_spec()
@@ -114,43 +121,16 @@ class WebFetchTool(BaseTool):
             max_chars = self.response_preview_chars(params, self.max_chars)
             mode = str(params.get("mode", params.get("format", "auto")) or "auto").strip().lower()
             if mode == "extract" or params.get("urls") is not None:
-                return self._execute_extract(params, max_chars)
+                return _execute_extract(self, params, max_chars)
             request = self._request_parts(params, mode, max_chars)
         except ValueError as exc:
             return ToolHandlerOutcome("web_fetch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         # 网络安全门已下沉到 _resolve_pin(逐跳:初始 URL + 每个重定向都校验+pin)。不再单独 pre-check——
         # 否则一次 execute 内 pre-check 与 resolve_pin 二次解析,对 DNS 翻转的判定会不一致。
-        return self._execute_single_request(request, max_chars)
+        return _execute_single_request(self, request, max_chars)
 
-    def _execute_single_request(self, request: _WebFetchRequest, max_chars: int) -> ToolHandlerOutcome:
-        cache_key = request.method == "GET" and not request.headers and request.body_text is None
-        cached = self._cache_get(request.url, request.fmt) if cache_key and not request.refresh else None
-        cache_hit = cached is not None
-        response = cached or self._fetch_raw_request(request)
-        if isinstance(response, ToolHandlerOutcome):
-            return response
-        if cache_key and not cache_hit:
-            self._cache_put(request.url, request.fmt, response)
-        result = format_fetch_result(
-            FetchFormatRequest(
-                tool="web_fetch",
-                artifact_root=self.artifact_root,
-                url=request.url,
-                response=response,
-                fmt=request.fmt,
-                max_chars=max_chars,
-                cache_hit=cache_hit,
-            )
-        )
-        attach_http_advisory(result, HttpRequestParts(
-            url=request.url,
-            method=request.method,
-            headers=request.headers,
-            body_text=request.body_text,
-            max_chars=max_chars,
-        ))
-        return result
-
+    # LLM: 每个 URL（含每个重定向目标）必须重新解析、应用当前 Gateway 端点事实，再 pin 通过检查的地址。
+    # 函数用途: 解析 URL 并读取工具副本当前授权，逐跳检查后返回固定 IP 或结构化拒绝。
     def _resolve_pin(self, url: str) -> PinResult:
         """解析一次主机 → 用这"固定 IP 列表"过网关(避免与连接层二次解析的 TOCTOU)→ 返回校验过的 IP 来 pin。
 
@@ -162,11 +142,20 @@ class WebFetchTool(BaseTool):
         except Exception:
             resolved = ()
         err = self.network_safety_error(
-            "web_fetch", url, lambda _h: resolved, self.allowed_private_hosts, self.allow_private_resolution
+            "web_fetch", url, lambda _h: resolved, self._network_safety_settings()
         )
         if err is not None:
             return PinResult(None, err)
         return PinResult(resolved[0] if resolved else None, None)
+
+    # LLM: registry 会在每次调用前把授权注入到工具副本属性；检查前必须从这些当前属性重建设置。
+    # 函数用途: 生成这一跳使用的私网授权快照，不复用构造时的旧授权。
+    def _network_safety_settings(self) -> NetworkSafetySettings:
+        return NetworkSafetySettings(
+            allowed_private_hosts=tuple(self.allowed_private_hosts or ()),
+            allow_private_resolution=self.allow_private_resolution,
+            gateway_endpoint=self.gateway_endpoint_config,
+        )
 
     def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolHandlerOutcome:
         return fetch_raw_response(
@@ -200,83 +189,6 @@ class WebFetchTool(BaseTool):
             refresh=bool(params.get("refresh", False)),
         )
 
-    # LLM: 批量参数逐页等价执行；预检 URL 数量，整个批次共享时间/下载预算，取消保留部分事实。
-    # 函数用途: 抽取最多 16 页，转发已接受的 method/headers/body，不再悄悄改成匿名 GET。
-    def _execute_extract(self, params: dict[str, Any], max_chars: int) -> ToolHandlerOutcome:
-        urls = normalize_url_list(params.get("urls", params.get("url")), self.normalize_url)
-        if len(urls) > 16:
-            raise ValueError("批量抓取每次最多 16 个 URL，请分批读取")
-        parts = self._request_parts({**params, "url": urls[0]}, "auto", max_chars)
-        pages: list[dict[str, Any]] = []
-        failures: list[dict[str, str | None]] = []
-        deadline, remaining_bytes = time.monotonic() + self.timeout, 8 * 1024 * 1024
-        remaining_urls = []
-        for url in urls:
-            if cancellation_requested() or time.monotonic() >= deadline or remaining_bytes <= 0:
-                remaining_urls = urls[urls.index(url):]
-                break
-            response = fetch_raw_response(
-                FetchRawRequest(
-                    tool="web_fetch",
-                    url=url,
-                    method=parts.method,
-                    headers={"User-Agent": "MyAgent-WebFetch/1.0", **parts.headers},
-                    data=None if parts.body_text is None else parts.body_text.encode("utf-8"),
-                    timeout=max(0.01, deadline - time.monotonic()),
-                    max_bytes=min(1_000_000, remaining_bytes),
-                ),
-                format_http_error=self.format_http_error,
-                resolve_pin=self._resolve_pin,
-            )
-            if isinstance(response, ToolHandlerOutcome):
-                failures.append({"url": url, "error_code": response.error_code, "error": response.output})
-                continue
-            remaining_bytes -= len(response.body)
-            pages.append(page_payload_from_response(self.artifact_root, url, response, max_chars))
-        payload = {"pages": pages, "failures": failures, "mode": "extract",
-                   "complete": not failures and not remaining_urls, "remaining_urls": remaining_urls,
-                   "stop_reason": "cancelled" if cancellation_requested() else "budget" if remaining_urls else ""}
-        return ToolHandlerOutcome(
-            "web_fetch",
-            bool(pages),
-            json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            result_envelope=payload,
-        )
-
-    # LLM: 过期缓存必须移除；锁只包缓存操作，不能包网络请求。
-    # 函数用途: 获取并提升最近使用顺序，定期清除不再有效的正文。
-    def _cache_get(self, url: str, fmt: str) -> RawResponseParts | None:
-        if self.cache_ttl_seconds <= 0:
-            return None
-        with self._cache_lock:
-            self._expire_cache()
-            item = self._cache.get((url, fmt))
-            if item is None:
-                return None
-            self._cache.move_to_end((url, fmt))
-            return item.response
-
-    # LLM: 每工具缓存最多 64 项及 8 MiB 正文；超容量淘汰 LRU，不保存无界过期数据。
-    # 函数用途: 缓存一份读取结果，不同鉴权请求仍不会进入公共无凭据缓存。
-    def _cache_put(self, url: str, fmt: str, response: RawResponseParts) -> None:
-        if self.cache_ttl_seconds <= 0:
-            return
-        with self._cache_lock:
-            self._expire_cache()
-            self._cache[(url, fmt)] = CachedFetch(time.time() + self.cache_ttl_seconds, response)
-            self._cache.move_to_end((url, fmt))
-            while len(self._cache) > 64 or sum(len(item.response.body) for item in self._cache.values()) > 8 * 1024 * 1024:
-                self._cache.popitem(last=False)
-
-    # LLM: 调用方必须持有缓存锁；过期策略只影响性能，不改变归档事实。
-    # 函数用途: 删除所有过期缓存项，释放正文内存。
-    def _expire_cache(self) -> None:
-        now = time.time()
-        for key in list(self._cache):
-            if self._cache[key].expires_at <= now:
-                del self._cache[key]
-
-
 @dataclass(frozen=True)
 class _WebFetchRequest:
     url: str
@@ -286,6 +198,131 @@ class _WebFetchRequest:
     fmt: str
     max_chars: int
     refresh: bool = False
+
+
+# LLM: 缓存命中与单页下载副作用分离，锁只包有界内存操作，不能覆盖网络请求。
+# 函数用途: 处理单个 URL 的缓存读取、HTTP 抓取、格式化和请求回执。
+def _execute_single_request(
+    tool: WebFetchTool,
+    request: _WebFetchRequest,
+    max_chars: int,
+) -> ToolHandlerOutcome:
+    cache_key = request.method == "GET" and not request.headers and request.body_text is None
+    cached = _cache_get(tool, request.url, request.fmt) if cache_key and not request.refresh else None
+    cache_hit = cached is not None
+    response = cached or tool._fetch_raw_request(request)
+    if isinstance(response, ToolHandlerOutcome):
+        return response
+    if cache_key and not cache_hit:
+        _cache_put(tool, request.url, request.fmt, response)
+    result = format_fetch_result(
+        FetchFormatRequest(
+            tool="web_fetch",
+            artifact_root=tool.artifact_root,
+            url=request.url,
+            response=response,
+            fmt=request.fmt,
+            max_chars=max_chars,
+            cache_hit=cache_hit,
+        )
+    )
+    attach_http_advisory(result, HttpRequestParts(
+        url=request.url,
+        method=request.method,
+        headers=request.headers,
+        body_text=request.body_text,
+        max_chars=max_chars,
+    ))
+    return result
+
+
+# LLM: 批量读取沿单页相同的逐跳网络闸；共享截止时间与字节预算，停止时明确列出未完成 URL。
+# 函数用途: 抽取最多 16 页，保留被接受的方法/请求头/请求体与每页失败事实。
+def _execute_extract(
+    tool: WebFetchTool,
+    params: dict[str, Any],
+    max_chars: int,
+) -> ToolHandlerOutcome:
+    urls = normalize_url_list(params.get("urls", params.get("url")), tool.normalize_url)
+    if len(urls) > 16:
+        raise ValueError("批量抓取每次最多 16 个 URL，请分批读取")
+    parts = tool._request_parts({**params, "url": urls[0]}, "auto", max_chars)
+    pages: list[dict[str, Any]] = []
+    failures: list[dict[str, str | None]] = []
+    deadline, remaining_bytes = time.monotonic() + tool.timeout, 8 * 1024 * 1024
+    remaining_urls = []
+    for url in urls:
+        if cancellation_requested() or time.monotonic() >= deadline or remaining_bytes <= 0:
+            remaining_urls = urls[urls.index(url):]
+            break
+        response = fetch_raw_response(
+            FetchRawRequest(
+                tool="web_fetch",
+                url=url,
+                method=parts.method,
+                headers={"User-Agent": "MyAgent-WebFetch/1.0", **parts.headers},
+                data=None if parts.body_text is None else parts.body_text.encode("utf-8"),
+                timeout=max(0.01, deadline - time.monotonic()),
+                max_bytes=min(1_000_000, remaining_bytes),
+            ),
+            format_http_error=tool.format_http_error,
+            resolve_pin=tool._resolve_pin,
+        )
+        if isinstance(response, ToolHandlerOutcome):
+            failures.append({"url": url, "error_code": response.error_code, "error": response.output})
+            continue
+        remaining_bytes -= len(response.body)
+        pages.append(page_payload_from_response(tool.artifact_root, url, response, max_chars))
+    payload = {"pages": pages, "failures": failures, "mode": "extract",
+               "complete": not failures and not remaining_urls, "remaining_urls": remaining_urls,
+               "stop_reason": "cancelled" if cancellation_requested() else "budget" if remaining_urls else ""}
+    return ToolHandlerOutcome(
+        "web_fetch",
+        bool(pages),
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        result_envelope=payload,
+    )
+
+
+# LLM: 过期缓存必须先清理；锁只覆盖内存字典访问，避免多个请求串行等待网络。
+# 函数用途: 获取最近使用的缓存响应，并在使用时按 TTL 删除过期项。
+def _cache_get(tool: WebFetchTool, url: str, fmt: str) -> RawResponseParts | None:
+    if tool.cache_ttl_seconds <= 0:
+        return None
+    with tool._cache_lock:
+        _expire_cache(tool)
+        item = tool._cache.get((url, fmt))
+        if item is None:
+            return None
+        tool._cache.move_to_end((url, fmt))
+        return item.response
+
+
+# LLM: 每工具缓存最多 64 项与 8 MiB 正文，缓存只优化已授权 GET，不改变请求权限。
+# 函数用途: 保存响应并按 LRU 淘汰超期或超容量内容。
+def _cache_put(
+    tool: WebFetchTool,
+    url: str,
+    fmt: str,
+    response: RawResponseParts,
+) -> None:
+    if tool.cache_ttl_seconds <= 0:
+        return
+    with tool._cache_lock:
+        _expire_cache(tool)
+        tool._cache[(url, fmt)] = CachedFetch(time.time() + tool.cache_ttl_seconds, response)
+        tool._cache.move_to_end((url, fmt))
+        while len(tool._cache) > 64 or sum(len(item.response.body) for item in tool._cache.values()) > 8 * 1024 * 1024:
+            tool._cache.popitem(last=False)
+
+
+# LLM: 调用方必须已获取缓存锁；此函数不操作文件或网络，只删除 TTL 到期的内存条目。
+# 函数用途: 清除过期缓存，避免缓存正文无限期留在工具实例中。
+def _expire_cache(tool: WebFetchTool) -> None:
+    now = time.time()
+    for key in list(tool._cache):
+        if tool._cache[key].expires_at <= now:
+            del tool._cache[key]
 
 
 def _web_fetch_model_spec() -> ToolModelSpec:

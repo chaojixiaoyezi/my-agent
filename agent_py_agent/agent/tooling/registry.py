@@ -160,6 +160,7 @@ class ToolRegistryParams:
     operation_store_required: bool = True
     operation_owner_id: str = ""
     approval_mode_reader: Callable[[], str] | None = None
+    gateway_port: int | None = None
 
 
 # LLM: list_tools 只能描述调用它的请求快照，不能退回进程级注册表或猜测 owner 类型。

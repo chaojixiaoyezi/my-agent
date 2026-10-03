@@ -1049,6 +1049,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             max_matches=config.tool_search_max_matches,
             web_max_chars=config.tool_web_max_chars,
             http_timeout=config.tool_http_timeout,
+            gateway_port=config.gateway_port,
             catalog_limit=TOOL_CATALOG_LIMIT_COUNT,
             catalog_mode=config.tool_catalog_mode,
             catalog_categories=config.tool_catalog_categories,

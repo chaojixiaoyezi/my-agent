@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+## 宿主侧抓取工具屏蔽本机 Gateway（G6，2026-10-03，luna1g6，`worker/luna1-g6-fetch-port`，ae 复审修正中，待复审/9b 终审）
+
+- `tooling.web` 每跳读取 G4 的 `gateway_bound_ports()`，并合并正数 `gateway_port` 配置后备；端口 0 或无端口事实时 G6 不适用，端口无法读取/不合法时只拒确认的本机目标。
+- 目标端口命中后用无缓存 UDP bind 分类解析 IP；成功表示本机，`EADDRNOTAVAIL` 表示非本机，其他错误为无法确认并拒绝。`web_fetch` 在每跳从调用副本当前属性重建私网授权，DNS pin 与重定向复查不变；不附本机凭据。
+- G6 是宿主抓取层保护，不与 G4/G5 OS sandbox 的 `gateway_isolation` 状态关联；在 G4/G5 unavailable 时它不阻止模型从 `run_command` 连接 Gateway。详见 `TESTS.md` 的本轮结果与限制。
+
 ## 响应文件与终态归档的轮询去重改用文件代次指纹（mtc，2026-10-03，分支 `worker/mtime-cache-fix`，待 3a 复审）
 
 - 起因：`response_renderer` 两个 when-ready 入口（`read_gateway_response_file_when_ready`、`read_gateway_terminal_response_file_when_ready`）

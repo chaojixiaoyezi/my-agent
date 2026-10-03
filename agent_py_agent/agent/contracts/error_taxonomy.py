@@ -1781,6 +1781,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "走 capability_request(capability_type=network) 授权通路;否则换公网来源。"
         ),
     ),
+    "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED": ErrorContract(
+        code="NETWORK_GATEWAY_LOCAL_PORT_BLOCKED",
+        category="network",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主侧抓取工具禁止访问本机 Gateway 端口；私网放行不适用于该端口，请改用 Gateway 之外的来源。",
+    ),
+    "NETWORK_GATEWAY_PORT_UNAVAILABLE": ErrorContract(
+        code="NETWORK_GATEWAY_PORT_UNAVAILABLE",
+        category="network",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="无法取得本机 Gateway 实际或配置端口，已拒绝本机网络目标；不能通过改写主机名或地址映射重试。",
+    ),
+    "NETWORK_GATEWAY_LOCAL_ADDRESS_UNAVAILABLE": ErrorContract(
+        code="NETWORK_GATEWAY_LOCAL_ADDRESS_UNAVAILABLE",
+        category="network",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="无法确认目标地址是否属于本机，已拒绝 Gateway 同端口请求；请改用 Gateway 之外的来源。",
+    ),
     "NETWORK_DNS_REBINDING_BLOCKED": ErrorContract(
         code="NETWORK_DNS_REBINDING_BLOCKED",
         category="network",

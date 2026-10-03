@@ -1,3 +1,5 @@
+# LLM: watch_stream 的来源 HTTP 必须沿 web_fetch 同一安全闸逐跳解析并 pin，Gateway 端点配置只作后备。
+# 模块用途: 提供可持续盯守的数据流工具，网络策略不得读取不存在的测试专用配置字段。
 """watch_stream 工具:高吞吐数据流的盯守摄取入口(open/pull/status/close/list)。
 
 pull 是长轮询:块内持续「拉流→喂引擎」直到出现候选或等待额度用完——游标始终追平
@@ -18,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..contracts.gates.network_safety import GatewayEndpointConfig, NetworkSafetySettings
 from ..tooling.models import (
     BaseTool,
     ToolAvailability,
@@ -493,7 +496,7 @@ class WatchStreamTool(BaseTool):
     ) -> PinResult:
         # LLM: Redirects must pass this same network gate; never reuse an unvalidated DNS result.
         # 函数用途: 解析并校验一个来源 URL，返回可固定连接的 IP。
-        return _resolve_watch_pin(url, hosts, allow_resolution)
+        return _resolve_watch_pin(self, url, hosts, allow_resolution)
 
     def _owner_home(self) -> Path | None:
         raw = str(
@@ -740,7 +743,27 @@ def _fetch_json_pinned(
 # LLM: Resolve once, validate the entire resolved set, and pin the accepted IP; every redirect
 # repeats this helper so DNS changes cannot bypass the network boundary.
 # 函数用途: 解析来源地址并通过 web_fetch 同款网络安全闸，返回可固定连接的 IP。
+# LLM: 每次抓取都从可信 AgentConfig 取配置后备，允许集合和访问开关仍由本次调用的结构化授权事实给出。
+# 函数用途: 为 watch_stream 构造统一网络闸设置，不从 URL 文本或工具提示推断 Gateway 身份。
+def _watch_network_safety_settings(
+    tool: WatchStreamTool,
+    hosts: tuple[str, ...],
+    allow_resolution: bool | None,
+) -> NetworkSafetySettings:
+    config = getattr(tool.agent, "config", None)
+    return NetworkSafetySettings(
+        allowed_private_hosts=hosts,
+        allow_private_resolution=allow_resolution,
+        gateway_endpoint=GatewayEndpointConfig(
+            configured_port=getattr(config, "gateway_port", None),
+        ),
+    )
+
+
+# LLM: 初始 URL 与每次重定向都读取工具当前的网络策略和 Gateway 端点，不复用未经校验的 host 文本。
+# 函数用途: 解析一个 watch 来源目标，过统一闸门后返回固定 IP 或结构化错误。
 def _resolve_watch_pin(
+    tool: WatchStreamTool,
     url: str,
     hosts: tuple[str, ...],
     allow_resolution: bool | None,
@@ -755,8 +778,7 @@ def _resolve_watch_pin(
         _TOOL_NAME,
         url,
         lambda _host: resolved,
-        hosts,
-        allow_resolution,
+        _watch_network_safety_settings(tool, hosts, allow_resolution),
     )
     if error is not None:
         return PinResult(None, error)
@@ -1248,6 +1270,8 @@ def _normalize_open_source(
     return url, (mode if mode in {"poll", "adapter"} else ""), request_facts, adapter_facts
 
 
+# LLM: 纯解析先确定真实 HTTP URL，再使用相同逐跳网络合同；拒绝发生在持久 watch 状态提交之前。
+# 函数用途: 校验 open 来源，既检查网络范围，也避免安全拒绝留下半开 watch。
 def _resolve_open_source(
     tool: WatchStreamTool, params: dict[str, Any]
 ) -> tuple[str, str, dict[str, Any], dict[str, str]] | ToolHandlerOutcome:
@@ -1270,8 +1294,11 @@ def _resolve_open_source(
         _TOOL_NAME,
         url,
         _default_network_resolver,
-        tool.allowed_private_hosts,
-        tool.allow_private_resolution,
+        _watch_network_safety_settings(
+            tool,
+            tuple(tool.allowed_private_hosts),
+            tool.allow_private_resolution,
+        ),
     )
     if gate_error is not None:
         return gate_error

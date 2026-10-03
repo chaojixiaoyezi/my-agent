@@ -20,6 +20,7 @@
 - 拒绝 localhost、metadata host、link-local、私网、保留地址和明显的私网 DNS 解析。
 - 允许通过结构化配置显式放行普通私网解析，适配代理、VPN、测试网。
 - metadata/link-local 是底线，即使开启私网解析也不放行。
+- G6：宿主侧 `web_fetch` / `watch_stream` 对解析到本机的 Gateway 端口额外拒绝，不受私网 allowlist 影响；端口统一取 G4 `gateway_bound_ports()` 并合并正数配置后备，命中后对解析 IP 用无缓存 UDP bind 判本机。端口 0/无端口时不适用，端口事实异常时只拒本机或无法确认的目标，公网继续；`web_fetch` 从每次工具副本的当前属性重建私网授权，重定向每跳重验且不附本机凭据。G6 不关联 `gateway_isolation`：G4/G5 unavailable 时模型仍可能通过 `run_command` 连 Gateway。
 
 这不是交付质量门，也不是“必须先怎样”的流程门。网络 provider 失败、网页 404、搜索无结果都应该返回结构化错误，让模型换关键词、换来源或说明阻塞，而不是直接判整个任务失败。
 

@@ -1,5 +1,7 @@
 # Gateway Structure
 
+- G6 网络出口：`tooling/web.py` 将 G4 `gateway_bound_ports()` 进程注册表与正数 `gateway_port` 配置后备结构化传入 `contracts/gates/network_safety.py`；命中端口后用逐目标、无缓存 UDP bind 判本机，`web_fetch`/`watch_stream` 每个重定向跳沿固定 IP 重验，不能附本机客户端凭据。G6 与 G4/G5 `gateway_isolation` 状态无关；OS 沙箱不可用时，`run_command` 仍可能访问 Gateway。
+
 - （mtc，2026-10-03）`response_renderer` 的两个“文件就绪才读”入口（未处理响应投影、唯一终态归档）改用 `common/cache_freshness` 的五元指纹，并且 mtime 在 2 秒窗口内时不信任上次签名、总是重读；调用方都是“读到就退出”的等待循环，重读幂等。
 ## G3 返工：凭据降级与 G2b 开关（2026-10-03，g3f，待复审）
 

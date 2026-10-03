@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +17,7 @@ from agent.ingestion.watch_tool import WatchStreamTool
 from agent.tooling.runtime_contracts import ProviderToolCapability, ToolProtocolSnapshot
 
 from agent_py_agent.agent.ingestion import watch_state as canonical_ws
+from agent_py_agent.agent.ingestion.source_http import SourceHttpRequest
 from agent_py_agent.agent.ingestion.watch_tool import (
     WatchStreamTool as CanonicalWatchStreamTool,
 )
@@ -69,7 +72,10 @@ def owner_home(tmp_path, monkeypatch, inline_watch_open):
 
 
 def _tool(owner_home: Path, source: _FakeSource) -> WatchStreamTool:
-    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"))
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
+        config=_gateway_test_config(),
+    )
     tool = WatchStreamTool(agent)
     tool.allow_private_resolution = True
     tool._fetch_json = source.handle  # 注入内存源(网络闸另测)
@@ -78,7 +84,8 @@ def _tool(owner_home: Path, source: _FakeSource) -> WatchStreamTool:
 
 def _canonical_tool(owner_home: Path, source: _FakeSource) -> CanonicalWatchStreamTool:
     agent = SimpleNamespace(
-        home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test")
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
+        config=_gateway_test_config(),
     )
     tool = CanonicalWatchStreamTool(agent)
     tool.allow_private_resolution = True
@@ -89,6 +96,59 @@ def _canonical_tool(owner_home: Path, source: _FakeSource) -> CanonicalWatchStre
 def _payload(result) -> dict:
     assert result.ok, result.output
     return json.loads(result.output)
+
+
+def _gateway_test_config() -> SimpleNamespace:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    return SimpleNamespace(
+        gateway_port=port,
+    )
+
+
+# Test-only local responder; its listener always binds an OS-selected loopback port.
+class _FakeFetchHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        self.server.hits += 1
+        self.server.headers_seen.append(dict(self.headers))
+        body = b'{"items": [], "next_cursor": 0}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _FakeRedirectHandler(_FakeFetchHandler):
+    def do_GET(self) -> None:
+        self.server.hits += 1
+        self.server.headers_seen.append(dict(self.headers))
+        self.send_response(302)
+        self.send_header(
+            "Location",
+            f"http://127.0.0.1:{self.server.redirect_port}/page",
+        )
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def _start_fake_fetch_server(redirect: bool = False) -> ThreadingHTTPServer:
+    handler = _FakeRedirectHandler if redirect else _FakeFetchHandler
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.hits = 0
+    server.headers_seen = []
+    server.redirect_port = 0
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _stop_fake_fetch_server(server: ThreadingHTTPServer) -> None:
+    server.shutdown()
+    server.server_close()
 
 
 def test_watch_stream_requires_explicit_action(owner_home) -> None:
@@ -279,6 +339,7 @@ def _named_audit_tool(
         "conversation_task_id": audit_id,
     }
     agent = SimpleNamespace(
+        config=_gateway_test_config(),
         home_paths=SimpleNamespace(
             owner_home_dir=str(owner_home),
             owner_id="u-test",
@@ -1292,6 +1353,82 @@ def test_private_host_blocked_without_grant(owner_home):
     result = tool.execute({"action": "open", "url": "http://192.168.77.10:8901/pull?since=<next>&limit=<limit>"})
     assert not result.ok
     assert result.error_code in {"NETWORK_PRIVATE_HOST_BLOCKED", "NETWORK_PRIVATE_IP_BLOCKED"}
+
+
+@pytest.mark.parametrize(
+    "host",
+    ("127.0.0.1", "localhost", "[::1]", "[::ffff:127.0.0.1]", "0.0.0.0"),
+)
+def test_watch_stream_cannot_open_gateway_port_when_private_access_is_enabled(
+    owner_home, host: str
+) -> None:
+    server = _start_fake_fetch_server()
+    try:
+        port = server.server_address[1]
+        config = SimpleNamespace(
+            gateway_port=port,
+                )
+        agent = SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
+            config=config,
+        )
+        tool = WatchStreamTool(agent)
+        tool.allow_private_resolution = True
+
+        result = tool.execute(
+            {"action": "open", "mode": "poll", "url": f"http://{host}:{port}/page"}
+        )
+
+        assert result.ok is False
+        assert result.error_code == "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED"
+        assert "不能访问本机 Gateway" in result.output
+        assert server.hits == 0
+        assert ws.list_states(owner_home) == []
+    finally:
+        _stop_fake_fetch_server(server)
+
+
+def test_watch_stream_redirect_is_rechecked_and_request_has_no_gateway_token(owner_home) -> None:
+    source = _start_fake_fetch_server(redirect=True)
+    gateway = _start_fake_fetch_server()
+    source.redirect_port = gateway.server_address[1]
+    config = SimpleNamespace(
+        gateway_port=gateway.server_address[1],
+    )
+    tool = WatchStreamTool(
+        SimpleNamespace(
+            home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="u-test"),
+            config=config,
+        )
+    )
+    tool.allow_private_resolution = True
+    request = SourceHttpRequest(
+        f"http://127.0.0.1:{source.server_address[1]}/redirect", "GET", {}, None
+    )
+    try:
+        ok, _payload_value, code = tool._fetch_json(request)
+        assert ok is False
+        assert code == "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED"
+        assert source.hits == 1
+        assert gateway.hits == 0
+    finally:
+        _stop_fake_fetch_server(source)
+        _stop_fake_fetch_server(gateway)
+
+    ordinary = _start_fake_fetch_server()
+    tool.allow_private_resolution = True
+    tool.agent.config = _gateway_test_config()
+    request = SourceHttpRequest(
+        f"http://127.0.0.1:{ordinary.server_address[1]}/page", "GET", {}, None
+    )
+    try:
+        ok, _payload_value, code = tool._fetch_json(request)
+        assert ok is True, code
+        header_names = {name.casefold() for name in ordinary.headers_seen[-1]}
+        assert "x-gateway-token" not in header_names
+        assert "authorization" not in header_names
+    finally:
+        _stop_fake_fetch_server(ordinary)
 
 
 def test_private_host_allowed_with_injected_grant(owner_home):

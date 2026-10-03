@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..contracts.gates.network_safety import GatewayEndpointConfig
 from ._filesystem_edit import EditFileTool
 from ._filesystem_find import FindFilesTool
 from ._filesystem_list import ListFilesTool
@@ -102,9 +103,19 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     registry.register(EditFileTool(registry.workspace_root, workspace_roots, access_options))
 
 
+# LLM: 抓取工具用 G4 的进程级绑定端口注册表，并补充配置正端口覆盖 TUI/跨进程部署。
+# 函数用途: 注册网络工具并传入配置端口；实际绑定端口在每跳检查时从统一注册表读取。
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
-    registry.register(WebFetchTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
+    registry.register(
+        WebFetchTool(
+            max_chars=params.web_max_chars,
+            timeout=params.http_timeout,
+            gateway_endpoint_config=GatewayEndpointConfig(
+                configured_port=getattr(params, "gateway_port", None),
+            ),
+        )
+    )
     shell_tool = ShellTool(
         registry.workspace_root,
         options=ShellToolOptions(

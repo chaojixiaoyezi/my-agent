@@ -136,7 +136,7 @@
 | G3 | **已实现 + 返工完成（worker/sol1-g3-clients，g3f，待复审）**：仓库内 TUI/CLI、IM、插件普通与交互运输、开发 HTTP 脚本在原身份头附唯一凭据；仓库外工具留给 3a。**返工**：凭据读不到时按 `gateway_require_local_credential` 分流——开关关（默认，G2a）降级为不带凭据继续发送并只记一次原因码 warning，开关开（G2b）才在发请求前拒绝 | 新 `gateway_parts/client_credentials.py`、`cli/gateway_client_headers.py`；`cli/chat_client_context.py`、`agent/adapter/manager.py`、`cli/adapter.py`、`cli/chat_parts/*`、五类 HTTP 验收脚本、`settings/config.py` 与 `agent_config.yaml`（开关）；`cli/gateway_client.py` 是文件队列，不改 | 三类原因 × 开关关降级（不带头照发 + warning 只记一次）/ 开关开拒绝（零请求 + 原因码）× TUI/CLI/IM；保留成功附凭据、配置 token 优先唯一、direct 不变；变异与命令见 TESTS | 9b |
 | G2a | **已实现（worker/sol1-g1-g2a；ff9d0db5d0b024489b5521b735e53e1619cbb116 + ds1g 返工 db1334395，待 9b 复核；不强制）**：本机/配置凭据沿原身份；无凭据回环照旧放行，`/status` 按实际路由模板观察；公开/插件令牌档均不计；**返工：空密钥不匹配空请求头（补用例）、凭据不可用时回环请求照常计数** | `auth/middleware.py`、新 `http_routes.py` 唯一分发表、`http_service.py`、`http_handlers.py`；插件令牌实现未改 | 随机端口真实分发26条路由；身份不变、两种凭据不计、模板有界与线程安全、公开/插件豁免、无鉴权不变；**空凭据/空头与凭据不可用场景**；原五变异 + 返工七项（含 9b 的 G1）全部抓到并原字节还原 | 另一my-agent会话初审、9b终审 |
 | G2b | **第二版（强制）**：开关 `gateway_require_local_credential` 打开后，不带凭据回环降匿名；`/plugin-host/query` 接受有效 host-API 令牌当可信；**到 G2b 强制时，凭据不可用（坏文件/权限/无数据根）要改成拒绝启动（fail-closed）** | `auth/middleware.py`、`settings/config.py`（开关默认 false）、`agent_config.yaml`、`plugin_host_api.py` | 开关开：不带凭据回环=匿名 USER、不认身份头、非管理员；**插件进程只带 host-API 令牌、不带客户端凭据，`/plugin-host/query` 仍通**；开关关：行为同 G2a；无中间件档行为不变 | be、9b |
-| G6 | 宿主侧抓取工具（`web_fetch`、`watch_stream`）对 Gateway 端口单独拒绝（不受私网放行影响；这些请求永不带凭据） | `contracts/gates/network_safety.py`；读实际绑定端口 | `MY_AGENT_ALLOW_PRIVATE_URLS=1` / `allowed_private_hosts` 放开私网后，`web_fetch`/`watch_stream` 连 Gateway 端口仍被拒；连其它私网主机不受影响 | be、ae |
+| G6 | 宿主侧抓取工具（`web_fetch`、`watch_stream`）对 Gateway 本机端口独立拒绝；私网授权不能绕过 | `contracts/gates/network_safety.py` 使用 G4 的 `gateway_bound_ports()` 并合并正数配置端口；每个命中端口的解析 IP 以无缓存 UDP bind 判本机 | 端口 0/缺失时不适用；端口非法或不可读时仅拒本机目标；bind 成功判本机、`EADDRNOTAVAIL` 判非本机、其它错误 fail-closed；每跳 DNS/重定向复查，私网授权仍可访问其它目标，授权在 registry clone 注入后生效 | luna1g6 已并入 step17i（ae 首审 2 条必须改已修，ds4 再审通过，3a 沙箱外复跑）；分支 `worker/luna1-g6-fetch-port`，WIP 提交 `d0f4f8b0e7a979a130fbd9247f9adeeb46e4ffb0` |
 | G4 | macOS 端口拒绝（`*:<port>`，用实际绑定端口；`full_access` 也加） | `attempt/sandbox.py`（`_network_rules` 旁加 `*:<port>` 拒绝）、从 `server_address` 读端口 | 真沙箱：`127.0.0.1`/`::1`/`::ffff:127.0.0.1`/`::ffff:7f00:1`/`0.0.0.0`/局域网地址都被拒、断言服务端认出的对端；其它端口通、自测监听通；断网档不变；`full_access=True` 也拒 | be、ae |
 | G5 | Linux 端口拒绝（Landlock CONNECT_TCP，启动器 exec 前上规则） | 新启动器 + `tooling/sandbox.py`、沙箱就绪探针（三前提逐项探） | Linux 车道：支持时被拒（含 IPv4 映射）、其它端口通、传进 bwrap 子进程；ABI<4/未启用/setuid → 命令照跑且事实 unavailable；restrict_self 失败 → fail-closed 不执行 | ae |
 
@@ -166,8 +166,9 @@
   - 文件队列入口（第二入口）对模型命令由 H3 的 `workspace/runtime` 写保护挡住；同一用户的宿主进程能写它，属于上面“防不住”的范围，写进边界。
 - **插件沙箱关着时插件与宿主同信任域**（9b）：插件进程沙箱默认关。关着时插件就是“同一用户、没进沙箱的进程”，读得到凭据。所以 G1 要把凭据路径加进插件沙箱的 H2 隐藏路径（任何档都生效，打开沙箱时才有意义），并在 `PLUGIN_EVENT_HOOKS.md` 8.1 节加一句引用，供 `call_origin=host_command` 定档用。
 - **第 (1) 层挡不住、靠第 (2) 层的三类路径**（ae 实测/点明）：
-  - **宿主侧抓取工具**（`web_fetch`、`watch_stream`）：在 Gateway 进程里发请求、不经沙箱，且永不带凭据。默认网络安全闸拒回环，但 `MY_AGENT_ALLOW_PRIVATE_URLS=1` 或 `allowed_private_hosts` 放开私网后，模型能让宿主自己去连 Gateway 端口，对端是回环、G2b 前即管理员。→ G6：安全闸对 Gateway 端口单独拒绝，不受私网放行影响。
-  - **沙箱外的本机转发器**：SSH 隧道、socat、本地代理——只要把连接转到回环就绕过端口规则。这台机器的 7890 代理实测没转（`seatbelt_proxy_hop_report.json`），但不是保证。只能靠第 (2) 层。
+  - **宿主侧抓取工具**（`web_fetch`、`watch_stream`）：在 Gateway 进程里发请求、不经沙箱，且永不带凭据。默认网络安全闸拒回环，但 `MY_AGENT_ALLOW_PRIVATE_URLS=1` 或 `allowed_private_hosts` 放开私网后，模型能让宿主自己去连 Gateway 端口，对端是回环、G2b 前即管理员。→ G6：安全闸对 Gateway 端口单独拒绝，不受私网放行影响；端口来源复用 G4 注册表。
+  - **G4/G5 unavailable 的边界**（ae/3a）：操作系统沙箱不可用时，模型仍可能通过 `run_command` 连 Gateway；G6 只保护宿主侧 `web_fetch`、`watch_stream`，不替代 G4/G5。
+  - **G6 不等于 isolation 状态**：G6 是工具内纯 Python 检查，无 OS sandbox `applied/unavailable` 状态，不与 `gateway_isolation` 或 `/status` 事实绑定；G4 注册表只作为实际 Gateway 端口来源。
   - **同机其它 Gateway 实例**：端口规则只知道“自己这个 Gateway”的端口；测试车道 Gateway 里的模型命令能连到生产 8420。可选做法：从结构化的本机 Gateway 实例登记表读出全部端口一起拒；不做就靠第 (2) 层——所以 G2b 不能拖。
 - **IPv4 映射地址**：Seatbelt 规则必须用 `*:<port>`（不是 `localhost:<port>`），否则 `::ffff:127.0.0.1` 能绕过且服务端认成 `127.0.0.1`（2.1，ae 实测 + be 复核）。Landlock 按端口不看地址，天然覆盖。
 - **`*:<port>` 的代价**：沙箱内也连不了外部主机的同号端口；Gateway 端口影响很小，接受。

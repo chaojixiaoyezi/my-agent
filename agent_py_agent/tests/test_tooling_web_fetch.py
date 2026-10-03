@@ -3,8 +3,24 @@ from __future__ import annotations
 
 import gzip
 import json
+import socket
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from agent_py_agent.agent.contracts.gates.network_safety import GatewayEndpointConfig
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tooling.registry_invoke import (
+    RegistryToolInvokeRequest,
+    _execute_with_temporary_tool_context,
+    _request_local_tool_for_invocation,
+)
+
+
+def _test_gateway_endpoint() -> GatewayEndpointConfig:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    return GatewayEndpointConfig(configured_port=port)
 
 
 def _private_resolver(_host: str) -> tuple[str, ...]:
@@ -35,7 +51,7 @@ class TestWebFetchTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = (MagicMock(), mock_response)
 
-        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver, cache_ttl_seconds=900)
+        tool = WebFetchTool(max_chars=10000, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=_public_resolver, cache_ttl_seconds=900)
         first = tool.execute({"url": "https://example.com/page", "format": "markdown"})
         second = tool.execute({"url": "https://example.com/page", "format": "markdown"})
 
@@ -61,7 +77,7 @@ class TestWebFetchTool:
         mock_response.read.return_value = gzip.compress(html)
         mock_urlopen.return_value = (MagicMock(), mock_response)
 
-        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver, artifact_root=tmp_path)
+        tool = WebFetchTool(max_chars=10000, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=_public_resolver, artifact_root=tmp_path)
         result = tool.execute({"url": "https://example.com/compressed", "format": "markdown"})
 
         assert result.ok is True
@@ -79,7 +95,7 @@ class TestWebFetchTool:
         mock_response.read.return_value = b"not-a-gzip-stream"
         mock_urlopen.return_value = (MagicMock(), mock_response)
 
-        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver, artifact_root=tmp_path)
+        tool = WebFetchTool(max_chars=10000, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=_public_resolver, artifact_root=tmp_path)
         result = tool.execute({"url": "https://example.com/corrupt"})
 
         assert result.ok is False
@@ -112,7 +128,7 @@ class TestWebFetchTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = (MagicMock(), mock_response)
 
-        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver, artifact_root=tmp_path)
+        tool = WebFetchTool(max_chars=10000, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=_public_resolver, artifact_root=tmp_path)
         result = tool.execute({"url": "https://example.com/file.pdf"})
 
         assert result.ok is True
@@ -126,7 +142,7 @@ class TestWebFetchTool:
         """web_fetch 也必须走统一网络安全边界，不能只保护旧 web_fetch。"""
         from agent_py_agent.agent.tooling.web import WebFetchTool
 
-        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_private_resolver, artifact_root=tmp_path)
+        tool = WebFetchTool(max_chars=10000, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=_private_resolver, artifact_root=tmp_path)
         result = tool.execute({"url": "https://public.example.test/report"})
 
         assert result.ok is False
@@ -149,7 +165,7 @@ class TestWebFetchTool:
             responses.append(mock_response)
         mock_urlopen.side_effect = [(MagicMock(), _r) for _r in responses]
 
-        tool = WebFetchTool(max_chars=120, timeout=10, resolver=_public_resolver, artifact_root=tmp_path)
+        tool = WebFetchTool(max_chars=120, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=_public_resolver, artifact_root=tmp_path)
         result = tool.execute({"urls": ["https://example.com/one", "https://example.com/two"], "mode": "extract"})
 
         assert result.ok is True
@@ -174,7 +190,7 @@ class TestWebFetchTool:
         def resolver(host: str) -> tuple[str, ...]:
             return ("127.0.0.1",) if host.startswith("blocked") else ("8.8.8.8",)
 
-        tool = WebFetchTool(max_chars=120, timeout=10, resolver=resolver, artifact_root=tmp_path)
+        tool = WebFetchTool(max_chars=120, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=resolver, artifact_root=tmp_path)
         result = tool.execute({"urls": ["https://blocked.example.test", "https://ok.example.test"], "mode": "extract"})
 
         assert result.ok is True
@@ -195,7 +211,7 @@ class TestWebFetchTool:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = (MagicMock(), mock_response)
 
-        tool = WebFetchTool(max_chars=10000, timeout=10, resolver=_public_resolver, artifact_root=tmp_path)
+        tool = WebFetchTool(max_chars=10000, timeout=10, gateway_endpoint_config=_test_gateway_endpoint(), resolver=_public_resolver, artifact_root=tmp_path)
         result = tool.execute({
             "url": "https://api.example.com/items",
             "method": "POST",
@@ -208,3 +224,69 @@ class TestWebFetchTool:
         assert "status=201" in result.output
         assert result.result_envelope["http_effect"] == "mutating"
         assert "idempotency_key" in result.result_envelope["advisories"]
+
+
+# LLM: 复现 registry 给本次工具副本注入网络授权的真实路径；不能直接改工具初始字段来假装验证授权传播。
+# 函数用途: 构造仅用于本文件注册表授权回归的最小参数集合。
+def _registry_for_network_grant(root: Path) -> ToolRegistry:
+    return ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=root,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+            shell_tool_output_max_chars=80,
+        )
+    )
+
+
+# LLM: 必须穿过与宿主同一套副本创建和临时上下文注入，才能锁住私网授权在 web_fetch 检查时仍然生效。
+# 函数用途: 从授权边界准备本地副本，并在注入期间调用真实 web_fetch 解析闸。
+def _resolve_scoped_web_fetch_pin(root: Path, url: str, write_boundary: dict[str, object]):
+    registry = _registry_for_network_grant(root)
+    request = RegistryToolInvokeRequest(
+        tool_name="web_fetch",
+        arguments={},
+        tools=registry.tools,
+        workspace_root=root,
+        workspace_roots=[root],
+        allowed_tools=None,
+        write_boundary=write_boundary,
+    )
+    scoped = _request_local_tool_for_invocation(
+        registry.tools["web_fetch"], request=request, workspace_roots=[root]
+    )
+    scoped.resolver = lambda _host: ("10.0.0.7",)
+    return _execute_with_temporary_tool_context(
+        scoped,
+        workspace_roots=[root],
+        allowed_private_hosts=tuple(write_boundary.get("allowed_private_hosts") or ()),
+        allow_private_resolution=write_boundary.get("allow_private_resolution"),
+        callback=lambda: scoped._resolve_pin(url),
+    )
+
+
+def test_registry_private_host_grant_reaches_web_fetch_gate(tmp_path: Path) -> None:
+    pin = _resolve_scoped_web_fetch_pin(
+        tmp_path,
+        "http://10.0.0.7/data",
+        {"allowed_private_hosts": ["10.0.0.7"]},
+    )
+
+    assert pin.error is None
+
+
+def test_registry_private_resolution_grant_reaches_web_fetch_gate(tmp_path: Path) -> None:
+    pin = _resolve_scoped_web_fetch_pin(
+        tmp_path,
+        "http://intranet.example/data",
+        {"allow_private_resolution": True},
+    )
+
+    assert pin.error is None

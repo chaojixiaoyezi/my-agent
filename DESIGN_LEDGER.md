@@ -1,5 +1,12 @@
 # 设计台账
 
+## Gateway 宿主抓取工具隔离（G6，2026-10-03，worker/luna1-g6-fetch-port，已并入 step17i：ae 首审 2 条必须改已修，ds4 再审通过、10 个变异全抓到；25 文件矩阵的沙箱失败经 ds4 在基线复现、属环境，3a 沙箱外全过）
+
+- 私网授权按每次工具调用克隆后的当前属性重新构造，并在每个 URL/重定向跳重新检查；web_fetch 不再把初始私网策略冻结到构造时。
+- 受保护端口统一来自 G4 的 `gateway_bound_ports()` 并合并正数 `gateway_port` 配置（覆盖 TUI/跨进程情况）。端口为 0 或没有端口事实时 G6 不适用；端口非法/读取失败时只拒确认的本机地址，公网继续；检查端口命中时对解析 IP 做无缓存 UDP bind 探测：成功=本机、`EADDRNOTAVAIL`=非本机、其它错误=无法确认并拒。
+- 本机判断不调用 `getaddrinfo(gethostname())`，也不缓存接口快照；回环、IPv4-mapped、未指定地址仍按地址属性判断。每跳 DNS 固定已检查 IP，重定向逐跳重查；不附本机客户端凭据。
+- G6 与 G4/G5 的 `gateway_isolation` 状态无关联：G4/G5 不可用的平台上，模型仍可能通过 `run_command` 连 Gateway；G6 只保护宿主侧 `web_fetch` 和 `watch_stream`。二者只共享 Gateway 端口来源注册表。所有 HTTP 测试限自身随机端口假服务，未启动 Gateway、未碰 8420、无外网。实际环境链路待 3a 复核。
+
 ## 修法 B 收口提示走结构化通道（rfs，2026-10-03，分支 `worker/retry-final-sink`，初审补齐 `worker/rfs-followups`，基于 step17i `9490cdf90`，已并入 step17i：ds6 初审、ds6 补齐、3a 复审并沙箱外复跑）
 
 - **起因**：修法 B 到总时长上限的收口提示此前只走文本回调（`_emit_retry_notice` 的 final 分支），富客户端（TUI 状态行、飞书卡片）只能看到一段文字，看不到结构化的「已停止重试」。
