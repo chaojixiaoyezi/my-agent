@@ -210,5 +210,9 @@ def test_moved_window_makes_the_candidate_stale_and_unknown_alias_is_structured(
     lane.evidence["stale_after_move"] = {"reported_error_code": stale.reported_error_code, "effect_outcome": stale.effect_outcome,
                                          "clicked": lane.desktop.clicks.exists()}
     unknown = _call(lane, "mcp__computer_use__observe_window", {"window": "win:nope:1"}, "op-3")
-    assert not unknown.ok and json.loads(unknown.output)["structuredContent"]["my_agent_observation_error"] == {"code": "window_not_found"}
+    assert not unknown.ok
+    error = json.loads(unknown.output)["structuredContent"]["my_agent_observation_error"]
+    # J16 片 F 起 window_not_found 会带可见窗口清单（windows）和是否截断（truncated）两个结构化补充，这里只钉住码和补充键的范围。
+    assert error["code"] == "window_not_found" and set(error) <= {"code", "windows", "truncated"}, error
+    assert isinstance(error.get("windows", []), list) and isinstance(error.get("truncated", False), bool), error
     lane.evidence["unknown_alias"] = json.loads(unknown.output)["structuredContent"]
