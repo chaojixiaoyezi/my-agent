@@ -143,6 +143,13 @@
   - 最终头 `9e8dd00b6`（之后只加测试、把 `validate_write_boundary` 里一处调用折成两行回到 59 行、拆分数据根用例）：引用写边界的 108 个文件（含 H3、guards9）Mac 2841 passed，Docker Linux 2839 passed、2 skipped（正则只 macOS；隔离视图看不到源码），0 失败；严格门禁全过，code-size 告警身份对确切基线 `8a832d4e1` 新增 0。
   - 变异 29 个全部抓到（第一轮 25 个；D5 registry 插件上下文漏传数据根、D6 Shell 漏传数据根（行为上等价，按合同钉住）、G5 正则不锚开头、C5 透传非宿主码，补用例后第二轮抓到；折行重构后 D3、D5、D6、C1、C5 第三轮复核仍抓到）。覆盖：数据根 6 个构造点、data/ 拆分与 agents/、B 类、task_root、正则 5 项、透传 5 项、环境标记 3 项、CLI 守卫 4 项。
   - ae 块 4 的 strict xfail（`780ff4c40` 叠本修复）：macOS 上 XPASS(strict) 翻红；Linux 上 ae 直接调 ShellTool、不经 registry 的 3 个 Full Access 场景失败（不再从工作目录或写根反推任务，3a 定），改走 registry 投影（`_tool_params_with_runtime_boundary`，写边界带 `task_root`）后 4 个场景（含 xfail 那条）在 Linux 上全过。证据 `~/.my-agent/decision-evidence/host-config-guard-design/second-review-f21039671/`。
+- **三审修复（9b 复审 f7353d5d4，3a 定，2026-10-03，`d160a2c6d`、`a1124b7b3`、`a3b26d6af`）**：`test_host_files_access.py` 现在 145 项。
+  - owner 根的 `data/` 整体归 A（d160a2c6d）：见上面 data/ 条目；变异 W1（data 不在 A 类）、W2（data 回 B 类）、W3（退回只列子目录的封闭清单）都被抓到，W3 由“以后才有的子目录”那条抓到。
+  - 布局目录也拒写（a1124b7b3）：正则单测和真实 Seatbelt 用例见上面“全部任务的核验记录”；子代理创建前写目标预检在 `test_every_tool_policy_and_plugin_context_use_the_host_data_root` 里断言按配置的 home 认出宿主凭据。变异 Y1–Y5（去掉布局目录规则、去掉 data 目录规则、改成 `{0,2}` 区间、布局正则不锚结尾、预检漏传数据根）5/5 抓到。
+  - 门禁（a3b26d6af）全过，code-size 对确切基线 `8a832d4e1` 新增 0。
+  - Mac 全量 12 片（a3b26d6af，机器负载约 78 时跑）：26762 passed，2 条失败（`test_plugin_deactivation` 停用清理、`test_runner_session_pool` 心跳，时间敏感），负载降下后两文件重跑 3 次都是 16 passed。
+  - Docker Linux 车道（a3b26d6af）：26679 passed，1 条 Hypothesis 健康检查（输入生成慢）失败，容器里单独重跑该文件和 H3 文件 183 passed；d160a2c6d 的车道 12/12 全绿。
+  - 证据 `~/.my-agent/decision-evidence/host-config-guard-design/third-review-a3b26d6af/`。
 - **改了期望的旧用例**（行为变化，不是放宽）：
   - `test_runtime_gate_ledger.py::test_workspace_only_owner_control_metadata_stays_read_only`：权限文件改由路径策略拒写（`PATH_HOST_STATE_WRITE_BLOCKED`），不再出现在 ledger 的 `forbidden_write_roots` 里；写边界照样拒。
   - `test_shell_sandbox_boundary_facts.py` 两项：写根是 owner 的 `workspace/` 时，里面的 `workspace/runtime` 是宿主托管文件，边界事实把它列进 `read_only`。
