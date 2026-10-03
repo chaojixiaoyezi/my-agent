@@ -167,6 +167,7 @@ class ScreenObserver:
         return bool(self.backend.ui_candidates_supported)
 
     # LLM: 不切焦点、不激活、不动鼠标；window 为空取最前的普通可见窗口，给了只接受本进程发过的 win:<boot>:<n> 别名。
+    #   遮挡事实只从 backend.above_rects 取：后端负责按系统结构排除不代表遮挡的背景面，核心统一判完全覆盖与部分 occluded。
     #   候选 = 控件树（后端 ui_scan，读不全或读不到只降级、不失败，结果顶层带 ui_tree{status, reason}）+ OCR，合并去重见
     #   screen_ui_candidates。没有候选时结果里不带 my_agent_observation（不凭空造候选），但快照照样记。
     # 函数用途: 采样一个窗口并返回给模型的结果（含观察载荷）。
@@ -196,7 +197,7 @@ class ScreenObserver:
         return result
 
     # LLM: 只读复核：按 _meta 找快照与候选（not_found），再重新采样逐项核对（任一项不符 → stale）；不点击。最后一项按候选来源分：
-    #   OCR 候选比区域像素摘要；控件候选不比像素（输入框里光标会闪），改比后端重新读的结构化事实（控件没了也是 stale）。
+    #   点击点遮挡检查复用 observe 的 backend.above_rects，平台过滤规则只在后端一处维护；OCR 候选比区域像素摘要，控件候选不比像素（输入框里光标会闪），改比后端重新读的结构化事实（控件没了也是 stale）。
     # 函数用途: 判定一个候选此刻是否仍可点，返回快照、候选与全局点击点。
     def recheck(self, meta: object) -> tuple[WindowSnapshot, CandidateSnapshot, tuple[int, int]]:
         ref, generation, key = _meta_fields(meta)

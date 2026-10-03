@@ -38,13 +38,15 @@ PATCH = (20, 10, 40, 12)  # 表单里“提交”按钮的位置（窗口内的�
 SCK_DOMAIN = "com.apple.ScreenCaptureKit.SCStreamErrorDomain"
 
 
-# 类用途: 假 Quartz：列窗口（前→后）、显示器与显示模式、权限预检、CGImage 读取；常量与真实 pyobjc 同名。
+# 类用途: 假 Quartz：OptionAll 故意轮转乱序，OnScreenOnly 才给真实前→后；还提供显示器、权限、CGImage 假接口。
 class _Quartz:
     kCGWindowListOptionAll = 0
+    kCGWindowListOptionOnScreenOnly = 1 << 0
     kCGWindowListOptionOnScreenAboveWindow = 1 << 1
     kCGWindowListOptionOnScreenBelowWindow = 1 << 2
     kCGWindowListExcludeDesktopElements = 1 << 4
     kCGNullWindowID = 0
+    kCGDockWindowLevelKey = "kCGDockWindowLevelKey"
     kCGWindowNumber, kCGWindowOwnerPID, kCGWindowName = "kCGWindowNumber", "kCGWindowOwnerPID", "kCGWindowName"
     kCGWindowLayer, kCGWindowAlpha = "kCGWindowLayer", "kCGWindowAlpha"
     kCGWindowBounds, kCGWindowIsOnscreen = "kCGWindowBounds", "kCGWindowIsOnscreen"
@@ -56,6 +58,8 @@ class _Quartz:
         # 显示器编号 → (全局点矩形, 像素宽, 点宽)：主屏 Retina；副屏在主屏左边，原点为负，缩放 1
         self.displays = {1: ((0, 0, 1512, 982), 3024, 1512), 2: ((-1920, 0, 1920, 1080), 1920, 1920)}
         self.list_calls = []
+        self.level_keys = []
+        self.display_list_calls = []
 
     def CGPreflightScreenCaptureAccess(self):
         return self.permitted
@@ -65,12 +69,34 @@ class _Quartz:
 
     def CGWindowListCopyWindowInfo(self, option, relative):
         self.list_calls.append((option, relative))
-        if option == self.kCGWindowListOptionAll | self.kCGWindowListExcludeDesktopElements and relative == self.kCGNullWindowID:
-            return [dict(row) for row in self.windows]
+        all_option = self.kCGWindowListOptionAll | self.kCGWindowListExcludeDesktopElements
+        screen_option = self.kCGWindowListOptionOnScreenOnly | self.kCGWindowListExcludeDesktopElements
+        if option == all_option and relative == self.kCGNullWindowID:
+            rows = self.windows
+            return [dict(row) for row in rows[2::3] + rows[1::3] + rows[::3]]
+        if option == screen_option and relative == self.kCGNullWindowID:
+            return [dict(row) for row in self.windows if row.get(self.kCGWindowIsOnscreen)]
         index = [row[self.kCGWindowNumber] for row in self.windows].index(relative)
         rows = {self.kCGWindowListOptionOnScreenAboveWindow: self.windows[:index],
                 self.kCGWindowListOptionOnScreenBelowWindow: self.windows[index + 1:]}[option]
         return [dict(row) for row in rows if row.get(self.kCGWindowIsOnscreen)]
+
+    def CGWindowLevelForKey(self, key):
+        self.level_keys.append(key)
+        return 20
+
+    def CGGetActiveDisplayList(self, max_displays, active_displays, display_count):
+        self.display_list_calls.append(max_displays)
+        displays = tuple(self.displays)
+        if max_displays <= 0:
+            return 0, None, len(displays)
+        return 0, displays[:max_displays], min(max_displays, len(displays))
+
+    def CGDisplayBounds(self, display):
+        x, y, width, height = self.displays[display][0]
+        origin = SimpleNamespace(x=x, y=y)
+        size = SimpleNamespace(width=width, height=height)
+        return SimpleNamespace(origin=origin, size=size)
 
     def CGGetDisplaysWithPoint(self, point, max_count, displays, count):
         hits = [key for key, (rect, _px, _pt) in self.displays.items()
@@ -227,6 +253,22 @@ def _setup(*, kit="default", version=(15, 1), trusted=True):
 # 列窗口与可见性
 # ---------------------------------------------------------------------------
 
+def test_observe_uses_on_screen_front_to_back_order_not_option_all_order():
+    observer, quartz, _kit, _grabs, _clicks = _setup()
+    quartz.windows = [
+        _row(MENUBAR, (0, 0, 1512, 25), layer=24, name="Menubar"),
+        _row(BACKDROP, (200, 200, 160, 100), name="最前普通窗口"),
+        _row(FORM, FORM_RECT, name="后方窗口"),
+    ]
+
+    result = observer.observe()
+
+    all_options = quartz.kCGWindowListOptionAll | quartz.kCGWindowListExcludeDesktopElements
+    onscreen_options = quartz.kCGWindowListOptionOnScreenOnly | quartz.kCGWindowListExcludeDesktopElements
+    assert result["title"] == "最前普通窗口"
+    assert quartz.list_calls[:2] == [(all_options, quartz.kCGNullWindowID), (onscreen_options, quartz.kCGNullWindowID)]
+
+
 def test_permission_is_checked_before_listing_windows_and_never_prompts():
     observer, quartz, _kit, grabs, _clicks = _setup()
     quartz.permitted = False
@@ -242,7 +284,7 @@ def test_listing_is_bottom_to_top_with_identity_layer_and_visibility_facts():
     quartz.windows.append(_row(203, (5000, 5000, 80, 80), name="不在任何显示器上"))
     quartz.windows.append(_row(204, (-1800, 100, 400, 300), pid=777, name="副屏"))
     windows = MacBackend(MacFrameworks(quartz, _Kit(), lambda: None, lambda x, y: None, (15, 1), FakeAx(), lambda text: None)).list_windows()
-    assert [w.native_id for w in windows] == [(204, 777), (203, 500), (202, 500), (BACKDROP, 500), (FORM, 500), (MENUBAR, 500), (201, 500)], "前→后翻成底→顶"
+    assert [w.native_id for w in windows] == [(204, 777), (203, 500), (BACKDROP, 500), (FORM, 500), (MENUBAR, 500), (201, 500), (202, 500)], "在屏窗口按前后顺序转成底→顶，未排序的最小化窗口放在末尾"
     facts = {w.native_id[0]: (w.normal, w.viewable, w.geometry.scale, w.geometry.origin) for w in windows}
     assert facts[MENUBAR][0] is False and facts[FORM][0] is True, "layer==0 才算普通窗口"
     assert facts[FORM][1:] == (True, (2.0, 2.0), (100, 200)), "主屏 Retina"
@@ -264,6 +306,51 @@ def test_minimized_or_transparent_targets_are_not_viewable_and_keep_their_identi
     assert transparent.value.code == "not_viewable"
     quartz.update(FORM, kCGWindowAlpha=1.0)
     assert observer.observe(alias)["window"] == alias, "OptionAll 让窗口一直在列表里，实例身份不断"
+
+
+# ---------------------------------------------------------------------------
+# 主路径、多显示器、遮挡
+# ---------------------------------------------------------------------------
+
+def test_fullscreen_dock_layer_overlay_is_ignored_by_observe_and_recheck():
+    observer, quartz, _kit, _grabs, clicks = _setup()
+    quartz.windows.insert(0, _row(205, (0, 0, 1512, 982), layer=20, name="无标题系统窗口"))
+
+    result = observer.observe()
+
+    assert result["frame"]["occluded"] is False
+    observer.click_candidate(_meta(result))
+    assert clicks == [(140, 216)], "复核也应使用过滤 Dock 全屏层后的同一遮挡事实"
+    assert quartz.level_keys == [quartz.kCGDockWindowLevelKey, quartz.kCGDockWindowLevelKey]
+
+
+def test_fullscreen_normal_application_window_still_occludes_target():
+    observer, quartz, _kit, _grabs, _clicks = _setup()
+    alias = observer.observe()["window"]
+    quartz.windows.insert(0, _row(205, (0, 0, 1512, 982), layer=0, name="无标题应用"))
+
+    with pytest.raises(ObservationError) as covered:
+        observer.observe(alias)
+
+    assert covered.value.code == "occluded"
+
+
+def test_floating_level_100_window_remains_a_partial_occluder():
+    observer, quartz, _kit, _grabs, _clicks = _setup()
+    quartz.windows.insert(0, _row(205, (140, 210, 20, 20), layer=100, name="无标题浮窗"))
+
+    result = observer.observe()
+
+    assert result["frame"]["occluded"] is True
+
+
+def test_partial_dock_layer_strip_remains_a_partial_occluder():
+    observer, quartz, _kit, _grabs, _clicks = _setup()
+    quartz.windows.insert(0, _row(205, (0, 190, 1512, 40), layer=20, name="无标题条带"))
+
+    result = observer.observe()
+
+    assert result["frame"]["occluded"] is True
 
 
 # ---------------------------------------------------------------------------

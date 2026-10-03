@@ -1,9 +1,9 @@
 # LLM: J16 片 E 的 macOS 真后端：只用 pyobjc（pywinctl 在 macOS 上带入）、mss、pyautogui 的公开接口，给
 #   screen_observation.ScreenObserver 提供"窗口列表（底→顶）、上层矩形、窗口截图、OCR 文字区域、点击"五个事实，判定全在核心。
-#   - 列窗口：CGWindowListCopyWindowInfo(OptionAll | ExcludeDesktopElements)，前→后翻成底→顶；身份 (kCGWindowNumber, owner PID)；
-#     layer==0 才算普通窗口；IsOnscreen 且 alpha>0、面积为正、中心落在某块显示器上才算可见。最小化 / 别的桌面 / 应用被隐藏
-#     公开接口分不清，一律"不可见"（与 X11 的 not_viewable 同口径）。
-#   - 遮挡：CGWindowListCopyWindowInfo(OnScreenAboveWindow, 目标窗口号)，系统给的"压在它前面的所有在屏窗口"（跨层级），去 alpha=0。
+#   - 列窗口：OptionAll 保留最小化 / 别的桌面窗口和实例身份；叠放仅按 OnScreenOnly 的前→后顺序，转成底→顶，未在其中的项放末尾。
+#     身份是 (kCGWindowNumber, owner PID)；layer==0 才算普通窗口。可见性仍按 IsOnscreen、alpha 和显示器中心判定。
+#   - 遮挡：OnScreenAboveWindow 返回压在目标前面的矩形；仅当系统 Dock 层级且外框覆盖整个活动显示器时排除，不按程序名判断。
+#     其它层级以及只覆盖屏幕一部分的 Dock 窗口仍是遮挡事实；observe / recheck 共用此入口。
 #   - 权限：list_windows 先 CGPreflightScreenCaptureAccess()（只查不弹窗），没授权 → screen_recording_not_permitted，放在找窗口之前，
 #     免得标题拿不到被误报 window_not_found。绝不调 CGRequestScreenCaptureAccess。
 #   - 截图：主路径 ScreenCaptureKit 单窗口截图（macOS 14+，有 SCScreenshotManager），回调各带超时，超时后晚到的结果丢掉；
@@ -37,6 +37,7 @@ from .screen_observation import (
     ScreenCapture,
     TextRegion,
     WindowInfo,
+    rect_contains,
 )
 from .screen_observation_store import UiFacts, WindowGeometry
 from .screen_ocr import RapidOcrReader
@@ -96,24 +97,37 @@ class MacBackend:
         self._frameworks = frameworks
         self._ocr = RapidOcrReader()
 
-    # LLM: 先做屏幕录制权限预检（没授权直接失败，不找窗口）；OptionAll 让最小化、在别的桌面的窗口也留在列表里，实例身份不断。
+    # LLM: 权限预检后用 OptionAll 保留所有窗口身份；它的枚举顺序不可信，必须另查 OnScreenOnly 并按前→后结果整理。
+    #   输出契约仍为底→顶；OnScreenOnly 未列到的最小化 / 其它桌面窗口保留在末尾，不参与当前可见目标排序。
     # 函数用途: 列出窗口（叠放底→顶）及其当下事实。
     def list_windows(self) -> list[WindowInfo]:
         quartz = self._fw().quartz
         if not quartz.CGPreflightScreenCaptureAccess():
             raise ObservationError("screen_recording_not_permitted", "没有屏幕录制权限：请在系统设置的隐私与安全性里允许屏幕录制")
-        rows = quartz.CGWindowListCopyWindowInfo(quartz.kCGWindowListOptionAll | quartz.kCGWindowListExcludeDesktopElements,
-                                                 quartz.kCGNullWindowID) or []
-        windows = [info for info in (_window_info(quartz, row) for row in rows) if info is not None]
-        return list(reversed(windows))
+        all_options = quartz.kCGWindowListOptionAll | quartz.kCGWindowListExcludeDesktopElements
+        screen_options = quartz.kCGWindowListOptionOnScreenOnly | quartz.kCGWindowListExcludeDesktopElements
+        all_rows = quartz.CGWindowListCopyWindowInfo(all_options, quartz.kCGNullWindowID) or []
+        screen_rows = quartz.CGWindowListCopyWindowInfo(screen_options, quartz.kCGNullWindowID) or []
+        stack_order = {
+            int(row[quartz.kCGWindowNumber]): index
+            for index, row in enumerate(screen_rows)
+            if row.get(quartz.kCGWindowNumber) is not None
+        }
+        windows = [info for info in (_window_info(quartz, row) for row in all_rows) if info is not None]
+        windows.sort(key=lambda info: (info.native_id[0] not in stack_order, -stack_order.get(info.native_id[0], 0)))
+        return windows
 
-    # 函数用途: 压在 native_id 前面的在屏窗口矩形（全局点，含标题栏、不含阴影），去掉 alpha=0 的和目标自己。
+    # LLM: OnScreenAboveWindow 是 observe / recheck 共用的上层事实源；只排除系统 Dock 层级且外框覆盖某整块显示器的窗，不能按名字判断。
+    #   半透明窗口、浮窗、菜单及覆盖范围不完整的 Dock 仍返回，交核心按外框判断完全遮挡和 occluded。
+    # 函数用途: 压在 native_id 前面的在屏窗口矩形（全局点，含标题栏、不含阴影），去掉 alpha=0 与 Dock 全屏背景窗。
     def above_rects(self, native_id: object) -> list[tuple[int, int, int, int]]:
         quartz = self._fw().quartz
         number = native_id[0]
         rows = quartz.CGWindowListCopyWindowInfo(quartz.kCGWindowListOptionOnScreenAboveWindow, number) or []
+        ignored_dock_numbers = _full_display_dock_window_numbers(quartz, rows)
         return [rect for rect, row in ((_bounds_rect(quartz, row), row) for row in rows)
-                if rect is not None and row.get(quartz.kCGWindowNumber) != number and _alpha(quartz, row) > 0]
+                if rect is not None and row.get(quartz.kCGWindowNumber) != number and _alpha(quartz, row) > 0
+                and row.get(quartz.kCGWindowNumber) not in ignored_dock_numbers]
 
     # LLM: 主路径不可用或回调超时 / 失败才退回区域截图，并带原因；ObservationError（权限、窗口不可分享）原样抛给核心。
     # 函数用途: 截一张窗口图，返回像素与采样事实。
@@ -315,6 +329,58 @@ def _bounds_rect(quartz: Any, row: Any) -> tuple[int, int, int, int] | None:
 # 函数用途: 一行窗口信息的透明度（缺省按 0，即看不见）。
 def _alpha(quartz: Any, row: Any) -> float:
     return float(row.get(quartz.kCGWindowAlpha) or 0)
+
+
+# LLM: 只忽略系统报告的 Dock 层级且外框完整覆盖至少一块活动显示器的行；无层级或屏幕几何事实时一律保留为遮挡候选。
+# 函数用途: 找出覆盖整块显示器的系统 Dock 背景窗口号，不读程序名或标题。
+def _full_display_dock_window_numbers(quartz: Any, rows: list[Any]) -> set[object]:
+    if not rows:
+        return set()
+    dock_level = quartz.CGWindowLevelForKey(quartz.kCGDockWindowLevelKey)
+    dock_rows = [row for row in rows if int(row.get(quartz.kCGWindowLayer) or 0) == dock_level]
+    if not dock_rows:
+        return set()
+    display_bounds = _active_display_bounds(quartz)
+    if not display_bounds:
+        return set()
+    return {
+        row[quartz.kCGWindowNumber]
+        for row in dock_rows
+        if row.get(quartz.kCGWindowNumber) is not None
+        and (rect := _bounds_rect(quartz, row)) is not None
+        and any(rect_contains(rect, display) for display in display_bounds)
+    }
+
+
+# LLM: 两阶段读取活动显示器 ID，失败或结果不完整时返回空集，让调用方保守保留遮挡，不猜系统窗口身份。
+# 函数用途: 读取当前活动显示器的全局点外框，供判断窗口是否盖住整块显示器。
+def _active_display_bounds(quartz: Any) -> list[tuple[int, int, int, int]]:
+    try:
+        error, _displays, display_count = quartz.CGGetActiveDisplayList(0, None, None)
+        if error or not display_count:
+            return []
+        error, displays, display_count = quartz.CGGetActiveDisplayList(int(display_count), None, None)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return []
+    if error or not displays:
+        return []
+    return [
+        rect for display in displays[:int(display_count)]
+        if (rect := _display_bounds_rect(quartz, display)) is not None
+    ]
+
+
+# LLM: CGDisplayBounds 使用全局点 CGRect；坏几何不可用于安全排除遮挡，必须由 active display 汇总忽略。
+# 函数用途: 把一个 CoreGraphics 显示器外框规范化为正面积的整数全局矩形。
+def _display_bounds_rect(quartz: Any, display: object) -> tuple[int, int, int, int] | None:
+    try:
+        bounds = quartz.CGDisplayBounds(display)
+        origin, size = bounds.origin, bounds.size
+        x, y = round(float(origin.x)), round(float(origin.y))
+        width, height = round(float(size.width)), round(float(size.height))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    return (x, y, width, height) if width > 0 and height > 0 else None
 
 
 # 函数用途: 某个全局点所在显示器的缩放（像素宽 ÷ 点宽）；点不在任何显示器上返回 None。

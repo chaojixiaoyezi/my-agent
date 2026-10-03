@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## J16 macOS 叠放顺序与程序坞遮挡（j16f，2026-10-03，待复审）
+
+- **根因与修法**：V-H 真机记录确认 OptionAll 的顺序不是 z-order，OnScreenOnly 才返回前→后；OptionAll 仍用于保留最小化/别的桌面窗口，适配器据 OnScreenOnly 排好在屏窗口后转成底→顶。另按 `CGWindowLevelForKey(kCGDockWindowLevelKey)` 和 `CGGetActiveDisplayList` / `CGDisplayBounds` 的结构化事实，只有系统 Dock 层级且外框覆盖整块显示器的窗才从 `above_rects` 排除；不读程序名或标题。`observe`、`recheck` 共用同一后端入口。
+- **假 Quartz 回归**：`test_observe_uses_on_screen_front_to_back_order_not_option_all_order` 令 OptionAll 轮转乱序、OnScreenOnly 保持真实前→后，并断言无指定窗口选中真正最前普通窗；列表回归仍保留最小化窗口。`test_fullscreen_dock_layer_overlay_is_ignored_by_observe_and_recheck` 断言 Dock 全屏层 `occluded=false`，且 `click_candidate` 的 recheck 通过。另三例断言 layer 0 全屏应用仍报 `occluded`、layer 100 小浮窗与部分 Dock 条只记部分遮挡。
+- **先红 / 变异**：旧实现的订单回归选到后方窗口，Dock 全屏让 observe 报 `occluded`。四个临时变异都被对应回归捕获：回到 OptionAll 顺序、仅按 Dock 层过滤不看外框、忽略 Dock 层级、只在 observe 过滤而 recheck 不过滤；全部恢复。
+- **定向测试命令**（工作树根目录，假 Quartz，不接真实屏幕）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_computer_use_macos.py agent_py_agent/tests/test_computer_use_macos_ax.py agent_py_agent/tests/test_screen_observation_core.py agent_py_agent/tests/test_screen_ui_candidates.py agent_py_agent/tests/test_screen_capture_guard.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-j16f
+  ```
+- **定向结果**：上述 5 个文件退出码 0、输出到 100%。
+- **guards9 命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-j16f`。
+- **guards9**：10 个文件（含 `test_packaging.py`）退出码 0、输出到 100%。
+- **静态门禁**：Import boundaries `findings=0`；Ruff `All checks passed!`；doc-sync `DOC_SYNC_PASS`；strict code-size `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`，随后还原 `CODE_SIZE_REPORT.md`；`git diff --check` 退出码 0；clean-package `OK: . 未发现发布阻塞项`；`size_diff.sh` 新增告警 0、消失告警 16。
+- **未验证**：没有在本轮访问真实 macOS 桌面，也未跑全仓 pytest 或 Linux lane；V-H 修复后的真机复核由 3a 执行。
+
 ## 只看 mtime 的缓存（mtc，2026-10-03，分支 `worker/mtime-cache-fix`，基于 `c47d023b6`，待 3a 复审）
 
 - **改动**：新增 `agent/common/cache_freshness.py`（指纹 + 2 秒窗口的唯一实现），`common/json_io.read_text_lines_cached`、`gateway_parts/response_renderer` 两个 when-ready 入口改用五元指纹，窗口内读到的内容不入缓存；`subagents/services/persistence` 改引用同一判断，行为不变。

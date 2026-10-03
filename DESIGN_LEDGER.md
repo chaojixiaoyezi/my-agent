@@ -1,5 +1,11 @@
 # 设计台账
 
+## J16 macOS 叠放顺序与程序坞遮挡（j16f，2026-10-03，3a 代码复审并入 step17i；真机复核待屏幕解锁时做，过了才在生产打开 observe）
+
+- **状态**：待复审，真机复核由 3a 做。
+- **真机事实与修法**：V-H 证明 OptionAll 不代表叠放次序、OnScreenOnly 才按前→后返回；默认目标排序改为用 OnScreenOnly 事实，OptionAll 仍保留全部实例。程序坞存在 layer=Dock、alpha=1 且外框覆盖整显示器的背景窗；遮挡侧只在系统 Dock 层级与整屏几何同时匹配时排除，其他层级及非全屏 Dock 仍参与遮挡。`observe` / `recheck` 复用后端 `above_rects`。
+- **范围**：只改 macOS 观察适配器、对应假 Quartz 回归和第 3.2 节第 5 条；未访问真实屏幕，真实复核留给 3a。
+
 ## 只看 mtime 的缓存（mtc，2026-10-03，分支 `worker/mtime-cache-fix`，基于 step17i 头 `c47d023b6`；ds5 初审两条必须改由 3a 挑入时修：子代理按 luna6 口径、补模块文档；并入 step17i）
 
 - **起因**：子代理 `task.json` 的原子替换事故（同 mtime 时间片里 RUNNING 被旧缓存写回 PLANNING）修完后，ae 的复审清单还列出另外两处“只看 mtime”的读缓存：`common/json_io.read_text_lines_cached`（签名 `(mtime_ns, size)`）、`gateway_parts/response_renderer` 的两个“变了才读”入口（`read_gateway_response_file_when_ready` 与 `read_gateway_terminal_response_file_when_ready`，签名 `(mtime_ns, size)`）。
