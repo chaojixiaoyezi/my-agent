@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...common.json_io import locked_json_path, write_json_file_atomic_unlocked
+from ...common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
 from ...common.path_segments import safe_path_segment
 from ..agent_run_workspace import (
     AgentRunWorkspacePaths,
@@ -229,7 +229,7 @@ def ensure_subagent_task_workspace(
     # shared path lock across the read, monotonic merge and atomic replace.
     with locked_json_path(paths.state_json):
         previous_state = read_json_object(paths.state_json)
-        write_json_file_atomic_unlocked(
+        write_private_json_file_atomic_unlocked(
             paths.state_json,
             next_task_state(
                 TaskStateMergeRequest(task_id, run_id, inputs.task, now, previous_state)
@@ -400,7 +400,7 @@ def _ensure_directories(paths: TaskWorkspacePaths) -> None:
         paths.agents_dir,
         paths.agent_adapter_dir,
     ]:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
 __all__ = [

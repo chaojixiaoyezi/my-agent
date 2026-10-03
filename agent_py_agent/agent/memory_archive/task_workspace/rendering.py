@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ...common.json_io import write_private_text_file_atomic
+
 
 @dataclass(frozen=True)
 class WriteTaskYamlRequest:
@@ -42,7 +44,7 @@ def write_task_yaml(request: WriteTaskYamlRequest) -> None:
         "objective: |-\n"
         f"{_indent_block(goal or '待填写')}\n"
     )
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
 def write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
@@ -58,7 +60,7 @@ def write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
         "## Latest\n\n"
         f"{latest}\n"
     )
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
 def write_parent_summary_placeholder(path: Path, task_id: str, child_run_id: str) -> None:
@@ -73,7 +75,7 @@ def write_parent_summary_placeholder(path: Path, task_id: str, child_run_id: str
         "## Latest\n\n"
         f"子代理 {child_run_id} 已登记，等待父任务汇总。\n"
     )
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
 def blackboard_content(task_id: str) -> str:

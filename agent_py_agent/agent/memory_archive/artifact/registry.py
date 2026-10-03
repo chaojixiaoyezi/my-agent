@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ...common.json_io import write_jsonl_records
+from ...common.json_io import write_private_jsonl_records
 from ...common.path_segments import safe_path_segment
 
 
@@ -249,7 +249,7 @@ def _is_under_allowed_root(path: Path, allowed_roots: tuple[Path, ...]) -> bool:
 
 
 def _write_manifest(path: Path, records: list[dict[str, object]]) -> None:
-    write_jsonl_records(path, records)
+    write_private_jsonl_records(path, records)
 
 
 def _sha256_file(path: Path) -> str:

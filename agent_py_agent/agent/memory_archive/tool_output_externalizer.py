@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.log_redaction import redact_sensitive_value
+from ..common.json_io import append_private_text, write_private_text_file_atomic
 from ..common.path_segments import safe_path_segment
 from ..common.tool_output_paths import tool_output_root
 from ..settings.defaults import default_agent_config
@@ -269,8 +270,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "created_at": created_at,
         "content": output,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     _append_index(path, payload)
     return path
 
@@ -306,8 +306,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "created_at": payload["created_at"],
     }
     index_path = path.parent / "index.jsonl"
-    with index_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    append_private_text(index_path, json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 # LLM: Small outputs retain exact attempt/turn and dual parameters in the original append-only
@@ -349,9 +348,7 @@ def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[
         "created_at": created_at,
     }
     index_path = tool_output_root(request.root) / "index.jsonl"
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    with index_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    append_private_text(index_path, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 # LLM: New complete identities distinguish equal bodies from different attempts/turns at the

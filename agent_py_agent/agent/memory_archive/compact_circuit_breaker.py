@@ -14,6 +14,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.json_io import write_private_text_file_atomic
+
 # 压缩连续失败多少次后触发熔断；阈值内只告警不断流。
 DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT = 3
 # 压缩熔断后的默认冷却秒数；冷却期内不再触发压缩，防止反复失败。
@@ -100,8 +102,9 @@ def compact_circuit_blocker_payload(state: CompactCircuitState) -> dict[str, obj
 def _write_compact_circuit(workspace: Path | str, state: CompactCircuitState) -> None:
     path = compact_circuit_path(workspace)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        # LLM: 熔断状态属运行数据，落盘走私有原子写（0600/0700）；写失败仍只吞掉，不打断主链路。
+        write_private_text_file_atomic(
+            path,
             json.dumps(
                 {
                     "consecutive_failures": state.consecutive_failures,
@@ -111,7 +114,6 @@ def _write_compact_circuit(workspace: Path | str, state: CompactCircuitState) ->
                 },
                 ensure_ascii=False,
             ),
-            encoding="utf-8",
         )
     except OSError:
         pass  # 熔断状态写失败不应打断主链路

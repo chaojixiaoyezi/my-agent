@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from ..common.json_io import jsonl_lines
+from ..common.json_io import append_private_jsonl_records, jsonl_lines, write_private_json_file_atomic
 
 """JSONL storage primitives for memory hook snapshots and raw archive events.
 
@@ -11,11 +11,12 @@ from ..common.json_io import jsonl_lines
 """
 
 import json
+import os
+import stat
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..io import append_jsonl
 from ._storage_dates import (
     _coerce_retention_days,
     _coerce_today,
@@ -94,7 +95,7 @@ def append_snapshot(root: str | Path, snapshot: CompressionSnapshot) -> Path:
 
     path = snapshot_path_for(root, snapshot.created_at)
     payload = snapshot.to_dict()
-    append_jsonl(path, payload, sort_keys=True)
+    append_private_jsonl_records(path, [payload], sort_keys=True)
     _verify_record_exists(path, key="snapshot_id", value=snapshot.snapshot_id, expected=payload)
     return path
 
@@ -102,9 +103,8 @@ def append_snapshot(root: str | Path, snapshot: CompressionSnapshot) -> Path:
 def write_compression_snapshot_file(root: str | Path, snapshot: CompressionSnapshot) -> Path:
 
     path = compression_snapshot_file_for(root, snapshot)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = snapshot.to_dict()
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    write_private_json_file_atomic(path, payload, sort_keys=True)
     _verify_json_file_payload(path, expected=payload)
     return path
 
@@ -113,7 +113,7 @@ def append_raw_event(root: str | Path, event: RawMemoryEvent) -> Path:
 
     path = raw_event_path_for(root, event.created_at)
     payload = filter_raw_event_for_level(event.to_dict(), event.archive_level)
-    append_jsonl(path, payload, sort_keys=True)
+    append_private_jsonl_records(path, [payload], sort_keys=True)
     _verify_record_exists(path, key="event_id", value=event.event_id, expected=payload)
     return path
 
@@ -179,3 +179,69 @@ def enforce_retention(root: str | Path, retention_days: Any, today: date | str |
         deleted.append(path)
 
     return deleted
+
+
+# LLM: 只收紧不放松：宽于 0700/0600（group/other 任一位）才 chmod；符号链接既不收紧也不进入目标；
+#   chmod 失败按稳定原因码计数并继续，绝不抛给调用方。返回结构化事实：收紧数（文件/目录分开）、
+#   失败数与原因码计数、跳过的符号链接数；调用方（owner 维护）原样写进维护状态。
+# 函数用途: 把 owner memory_archive 目录树里已有文件的权限收紧到 0600、目录收紧到 0700（只改权限，不改内容）。
+def tighten_memory_archive_permissions(archive: str | Path) -> dict[str, Any]:
+    root = Path(archive)
+    result: dict[str, Any] = {
+        "tightened_count": 0,
+        "tightened_files": 0,
+        "tightened_directories": 0,
+        "failed_count": 0,
+        "failure_codes": {},
+        "symlink_skipped_count": 0,
+    }
+    if root.is_symlink() or not root.is_dir():
+        return result
+    _tighten_tree(root, result)
+    return result
+
+
+# LLM: 先收紧当前目录，再逐项处理子项；scandir 的 follow_symlinks=False 保证不进入符号链接目录、
+#   也不 chmod 链接目标。计数与失败码都写进同一个 result，调用方不需要第二份账。
+# 函数用途: 递归收紧一个目录树的权限（副作用：chmod 目录与文件、累加 result 计数）。
+def _tighten_tree(directory: Path, result: dict[str, Any]) -> None:
+    _tighten_entry(directory, result, is_directory=True)
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.is_symlink():
+            result["symlink_skipped_count"] += 1
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            _tighten_tree(Path(entry.path), result)
+            continue
+        if entry.is_file(follow_symlinks=False):
+            _tighten_entry(Path(entry.path), result, is_directory=False)
+
+
+# LLM: 目标权限目录 0700、文件 0600；已经不比目标宽就不动（不放松更严的既有权限）。成功才计入
+#   tightened_*；PermissionError 与其它 OSError 分开记原因码，单点失败不影响后续条目。
+# 函数用途: 按目标权限收紧单个路径，成功或失败都记进 result。
+def _tighten_entry(path: Path, result: dict[str, Any], *, is_directory: bool) -> None:
+    try:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077 == 0:
+            return
+        os.chmod(path, 0o700 if is_directory else 0o600)
+    except PermissionError:
+        _record_tighten_failure(result, "permission_denied")
+        return
+    except OSError:
+        _record_tighten_failure(result, "os_error")
+        return
+    result["tightened_count"] += 1
+    result["tightened_directories" if is_directory else "tightened_files"] += 1
+
+
+# LLM: failure_codes 是原因码到条数的映射，稳定可断言；计数只在这里累加。
+# 函数用途: 给一次收紧失败记账（失败总数 + 原因码条数）。
+def _record_tighten_failure(result: dict[str, Any], code: str) -> None:
+    result["failed_count"] += 1
+    codes = result["failure_codes"]
+    codes[code] = int(codes.get(code, 0)) + 1

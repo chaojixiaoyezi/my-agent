@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...common.json_io import append_jsonl_records, jsonl_lines, read_json_object
+from ...common.json_io import append_private_jsonl_records, jsonl_lines, read_json_object
 
 
 def state_payload(task_id: str, run_id: str, task: Any, now: float) -> dict[str, object]:
@@ -48,7 +48,7 @@ def timeline_event(task: Any, now: float, previous_state: dict[str, object]) -> 
 def append_timeline(path: Path, payload: dict[str, object]) -> None:
     if _last_event_signature(path) == _event_signature(payload):
         return
-    append_jsonl_records(path, [payload])
+    append_private_jsonl_records(path, [payload])
 
 
 def _last_event_signature(path: Path) -> tuple[object, ...] | None:

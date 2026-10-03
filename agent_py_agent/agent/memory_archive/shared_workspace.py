@@ -15,11 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
-    append_jsonl_records,
+    append_private_jsonl_records,
     jsonl_lines,
     read_jsonl_objects,
-    write_json_object,
-    write_jsonl_records,
+    write_private_json_file_atomic,
+    write_private_jsonl_records,
+    write_private_text_file_atomic,
 )
 from ..common.path_segments import safe_path_segment
 
@@ -167,7 +168,7 @@ def _write_evidence_packets(index_dir: Path, index_path: Path, task: Any, now: f
         packet_id = str(payload.get("id") or f"evidence-{safe_path_segment(run_id, default='item', replacement='_')}-{index}")
         payload.update({"version": 1, "id": packet_id, "task_id": task_id, "run_id": run_id})
         packet_path = index_dir / f"{safe_path_segment(packet_id, default='item', replacement='_')}.json"
-        write_json_object(packet_path, payload, sort_keys=False)
+        write_private_json_file_atomic(packet_path, payload, sort_keys=False)
         records.append(_evidence_index_record(payload, packet_path, now))
     return _merge_jsonl_by_id(index_path, records)
 
@@ -229,7 +230,7 @@ def _summary(task: Any) -> str:
 def _append_message(path: Path, payload: dict[str, object]) -> None:
     if _last_message_signature(path) == _message_signature(payload):
         return
-    append_jsonl_records(path, [payload])
+    append_private_jsonl_records(path, [payload])
 
 
 def _last_message_signature(path: Path) -> tuple[object, ...] | None:
@@ -271,7 +272,7 @@ def _merge_jsonl_by_id(path: Path, records: list[dict[str, object]]) -> list[dic
     positions = {str(item.get("id") or ""): index for index, item in enumerate(merged) if item.get("id")}
     for record in records:
         _merge_record_by_id(merged, positions, record)
-    write_jsonl_records(path, merged)
+    write_private_jsonl_records(path, merged)
     return merged
 
 
@@ -290,8 +291,7 @@ def _merge_record_by_id(
 
 
 def _write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
 def _utc_iso(value: float) -> str:

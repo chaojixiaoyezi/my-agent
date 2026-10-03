@@ -99,6 +99,9 @@ def run_owner_retention_if_due(
         # global_index 四份只追加索引在这里按 key 内部压缩（纯投影，不读权威源）。
         # 单份失败不中断维护；成功与"试了但失败"分开汇总进维护状态，便于观察是否真的压过。
         compacted, compact_failed = _compact_global_indexes(home, now=current)
+        # memory_archive 的已有文件靠 S2/S3 的"下次写入收紧"覆盖不到，挂进这里在 owner 维护
+        # （默认每天一次）里收口；只收紧不放松、不跟随符号链接，结果原样写进维护状态。
+        permissions = _tighten_archive_permissions(home)
         previous = read_json_object_report(
             state_path,
             context="owner_maintenance.state",
@@ -116,6 +119,8 @@ def run_owner_retention_if_due(
             "indexes_compacted": compacted,
             # "试了但失败"（io_error / identity_changed）单列，免得跟"没到期"混成一片。
             "indexes_compact_failed": compact_failed,
+            # 归档目录树已有文件的收紧回执：收紧数（文件/目录分开）、失败数与原因码、跳过符号链接数。
+            "memory_archive_permissions": permissions,
         }
         write_json_file_atomic_unlocked(state_path, payload)
         return OwnerMaintenanceResult(
@@ -190,6 +195,18 @@ def _compact_global_indexes(
             continue
         failed.append(entry)
     return compacted, failed
+
+
+# LLM: 收紧动作本身不做 IO 之外的判断；memory_archive 不存在时返回全零（还没建归档属正常）。
+#   导入或整体失败只记 error 字符串，维护状态照写，绝不让归档收紧拖垮 retention 主流程。
+# 函数用途: 收紧本 owner memory_archive 目录树的权限，返回可直接写进维护状态的结构化事实。
+def _tighten_archive_permissions(home: MyAgentHomePaths) -> dict[str, Any]:
+    try:
+        from ..memory_archive.storage import tighten_memory_archive_permissions
+
+        return tighten_memory_archive_permissions(Path(home.owner_home_dir) / "memory_archive")
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 # LLM: 这些原因表示"这次根本没动手"，不能算失败，否则维护状态天天报假失败。

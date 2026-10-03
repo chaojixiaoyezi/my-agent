@@ -112,11 +112,14 @@ def test_append_raw_event_writes_archive_fields():
 
 
 def test_append_raw_event_readback_failure_is_reported(monkeypatch, tmp_path):
-    def append_incomplete_record(path: Path, payload: dict, **kwargs) -> None:
+    def append_incomplete_record(path: Path, records: list, **kwargs) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"event_id": payload["event_id"]}, ensure_ascii=False) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps({"event_id": records[0]["event_id"]}, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
 
-    monkeypatch.setattr(archive_storage, "append_jsonl", append_incomplete_record)
+    # 写入点已改走私有追加（S2 同款）；mock 目标随实现同步，验证的仍是 readback 失败会被报告。
+    monkeypatch.setattr(archive_storage, "append_private_jsonl_records", append_incomplete_record)
 
     with pytest.raises(archive_storage.MemoryArchiveError, match="readback payload mismatch"):
         archive_storage.append_raw_event(tmp_path, _demo_raw_event())

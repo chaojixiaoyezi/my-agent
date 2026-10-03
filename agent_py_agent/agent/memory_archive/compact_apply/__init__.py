@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from ...common.json_io import jsonl_lines
+from ...common.json_io import append_private_text, jsonl_lines, write_private_text_file_atomic
 
 """non-destructive memory compact apply records.
 
@@ -632,19 +632,15 @@ def _positive_int(value: Any) -> int:
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    append_private_text(path, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
 def _bullet_lines(items: list[str]) -> str:

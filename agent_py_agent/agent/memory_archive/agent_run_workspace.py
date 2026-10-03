@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
-    append_jsonl_records,
+    append_private_jsonl_records,
     jsonl_lines,
-    write_json_object,
-    write_jsonl_records,
+    write_private_json_file_atomic,
+    write_private_jsonl_records,
+    write_private_text_file_atomic,
 )
 
 
@@ -73,16 +74,16 @@ def ensure_agent_run_workspace(
     paths = agent_run_workspace_paths(inputs.root)
     _ensure_directories(paths)
     _write_agent_yaml_if_missing(paths.agent_yaml, inputs.task, inputs.task_id, inputs.now)
-    write_json_object(paths.state_json, _state_payload(inputs.task, inputs.task_id, inputs.now), sort_keys=False)
+    write_private_json_file_atomic(paths.state_json, _state_payload(inputs.task, inputs.task_id, inputs.now), sort_keys=False)
     _write_markdown(paths.task_md, _task_markdown(inputs.task, inputs.task_id))
-    write_json_object(paths.checkpoint_json, _checkpoint_payload(inputs.task, inputs.task_id, inputs.now), sort_keys=False)
+    write_private_json_file_atomic(paths.checkpoint_json, _checkpoint_payload(inputs.task, inputs.task_id, inputs.now), sort_keys=False)
     _write_markdown(paths.summary_md, _summary_markdown(inputs.task, inputs.task_id))
     _write_final_report(paths.final_report_md, inputs.task, inputs.task_id)
     _write_findings(paths.findings_jsonl, inputs.task, inputs.now)
     event = _timeline_event(inputs.task, inputs.task_id, inputs.now)
     _append_timeline(paths.timeline_jsonl, event)
     _append_timeline(paths.events_jsonl, event)
-    write_jsonl_records(paths.artifacts_jsonl, agent_run_artifact_records(paths, inputs.task, inputs.task_id, inputs.now))
+    write_private_jsonl_records(paths.artifacts_jsonl, agent_run_artifact_records(paths, inputs.task, inputs.task_id, inputs.now))
     return paths
 
 
@@ -140,7 +141,7 @@ def _ensure_directories(paths: AgentRunWorkspacePaths) -> None:
         paths.artifacts_dir / "tool_outputs",
         paths.artifacts_dir / "reports",
     ]:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
 def agent_run_artifact_records(
@@ -250,7 +251,7 @@ def _write_agent_yaml_if_missing(path: Path, task: Any, task_id: str, now: float
         "visibility: task-local\n"
         "memory_scope: run_workspace\n"
     )
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
 def _task_markdown(task: Any, task_id: str) -> str:
@@ -311,13 +312,13 @@ def _write_findings(path: Path, task: Any, now: float) -> None:
 
 
 def _write_markdown(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
 def _append_timeline(path: Path, payload: dict[str, object]) -> None:
     if _last_event_signature(path) == _event_signature(payload):
         return
-    append_jsonl_records(path, [payload])
+    append_private_jsonl_records(path, [payload])
 
 
 def _last_event_signature(path: Path) -> tuple[object, ...] | None:

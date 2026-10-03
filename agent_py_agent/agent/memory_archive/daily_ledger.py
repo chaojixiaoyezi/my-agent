@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.path_segments import safe_path_segment
-from ..io import append_jsonl
+from ..common.json_io import append_private_jsonl_records
 from ._storage_dates import _date_key
 from .schema import (
     RuntimeMemorySchemaOptions,
@@ -77,7 +77,7 @@ def append_subagent_task_event(
     )
     path = daily_events_path_for(inputs.root, inputs.now)
     payload = _event_payload(inputs.task, inputs.workspace_refs, inputs.now)
-    append_jsonl(path, payload, sort_keys=True)
+    append_private_jsonl_records(path, [payload], sort_keys=True)
     return DailyLedgerAppendResult(events_jsonl=path, event_id=str(payload["event_id"]))
 
 

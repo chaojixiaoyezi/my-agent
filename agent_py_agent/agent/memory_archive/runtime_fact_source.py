@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import write_private_text_file_atomic
 from ..common.safe_id import safe_id
 from ..common.value_parsing import dedupe_strings
 from ..run_intent import build_run_intent, run_intent_payload
@@ -69,7 +70,7 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     if not request.request_id:
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.request_id)
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = _runtime_fact_payload(request)
     _write_json_atomic(root / "task.json", payload)
     return str(root)
@@ -112,7 +113,7 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
     if not request.fact_id:
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.fact_id)
-    root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = _approved_fact_payload(request, _read_json_dict(root / "task.json"))
     _write_json_atomic(root / "task.json", payload)
     return str(root)
@@ -191,9 +192,9 @@ def _phase_from_status(status: str) -> str:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    tmp = path.with_name(f".{path.name}.{time.time_ns()}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    # LLM: 运行时事实含会话正文，落盘一律走私有原子写（0600/0700）；输出字节与原实现一致（无尾换行）。
+    # 函数用途: 以仅本人可读写的权限原子替换一个 JSON 文件（写文件、可能 chmod 目录）。
+    write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 def _utc_timestamp() -> str:

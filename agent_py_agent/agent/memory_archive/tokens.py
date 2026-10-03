@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import write_private_text_file_atomic
+
 
 @dataclass(frozen=True)
 class TurnTokenUsage:
@@ -107,7 +109,8 @@ def append_session_token_usage(
         "cumulative_tokens": cumulative,
         "turns": turns,
     }
-    path.write_text(json.dumps(written, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    # LLM: 会话 token 账本属会话数据，落盘走私有原子写（0600/0700）；输出字节与原实现一致（无尾换行）。
+    write_private_text_file_atomic(path, json.dumps(written, ensure_ascii=False, indent=2, sort_keys=True))
     return {
         "path": str(path),
         "session_id": str(usage.session_id),

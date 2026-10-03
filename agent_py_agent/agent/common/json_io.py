@@ -312,6 +312,79 @@ def _ensure_private_dir(directory: Path) -> None:
         return
 
 
+# LLM: 不持锁的调用方用这个入口；锁协议与 write_text_file_atomic 相同（per-path 线程锁 + fcntl），
+#   落盘复用 unlocked 私有写。记忆归档这类含会话/任务正文的文件禁止再直接 write_text。
+# 函数用途: 以仅本人可读写的权限原子替换一个文本文件（自取锁；写文件、可能 chmod 目录）。
+def write_private_text_file_atomic(path: Path, content: str) -> None:
+    with _locked_json_path(path):
+        write_private_text_file_atomic_unlocked(path, content)
+
+
+# LLM: 输出与 write_json_file_atomic 逐字节一致（indent=2、可选 sort_keys、尾换行），只是权限走私有；
+#   已持锁的调用方用 unlocked 版本，避免不可重入的 per-path 锁自死锁。
+# 函数用途: 以仅本人可读写的权限原子替换一个 JSON 文件（自取锁）。
+def write_private_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+    with _locked_json_path(path):
+        write_private_json_file_atomic_unlocked(path, payload, sort_keys=sort_keys)
+
+
+# LLM: 与 write_json_file_atomic_unlocked 同格式；调用方须已持有 locked_json_path(path)。
+# 函数用途: 持锁场景下以仅本人可读写的权限原子替换一个 JSON 文件。
+def write_private_json_file_atomic_unlocked(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+    write_private_text_file_atomic_unlocked(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n",
+    )
+
+
+# LLM: JSONL 整文件替换与 write_jsonl_records 同格式（每行一条、ensure_ascii=False、可选 sort_keys、尾换行）。
+# 函数用途: 以仅本人可读写的权限原子替换一个 JSONL 文件（自取锁）。
+def write_private_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_keys: bool = True) -> None:
+    content = "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) for record in records)
+    write_private_text_file_atomic(path, (content + "\n") if content else "")
+
+
+# LLM: 追加无法原子替换整文件；这里只保证私有：目录 0700、新文件出生 0600、已有文件先收紧再追加，
+#   锁沿用 locked_json_path（与 append_jsonl_records 同一协议）。调用方负责序列化格式。
+# 函数用途: 以仅本人可读写的权限向文本文件追加内容（写文件、可能 chmod 文件与目录）。
+def append_private_text(path: Path, content: str) -> None:
+    _ensure_private_dir(path.parent)
+    with _locked_json_path(path):
+        _ensure_private_file(path)
+        _tighten_private_file(path)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(content)
+
+
+# LLM: 与 append_jsonl_records 同格式（每行一条、可选 sort_keys、批内一次写入），权限走私有 append。
+# 函数用途: 以仅本人可读写的权限并发安全地追加一批 JSONL 记录（空批不操作）。
+def append_private_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_keys: bool = True) -> None:
+    if not records:
+        return
+    blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
+    append_private_text(path, blob)
+
+
+# LLM: 出生即 0600（os.open 的 mode 不靠 umask 保证）；并发下目标已存在时直接返回，由收紧步骤处理权限。
+# 函数用途: 确保私有追加的目标文件存在，新建时权限为 0600。
+def _ensure_private_file(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    os.close(descriptor)
+
+
+# LLM: 只收紧不放松：比 0600 宽（group/other 任一位）才 chmod；失败只放弃收紧，不抛给调用方。
+# 函数用途: 把已存在文件的权限收紧到仅本人可读写。
+def _tighten_private_file(path: Path) -> None:
+    try:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            os.chmod(path, 0o600)
+    except OSError:
+        return
+
+
 def _path_lock(path: Path) -> _PathLock:
     key = str(path.resolve())
     with _JSON_FILE_LOCKS_GUARD:
