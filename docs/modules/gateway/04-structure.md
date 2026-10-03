@@ -1,5 +1,20 @@
 # Gateway Structure
 
+## 续跑上限收口时的插话结算（step17h，分支 `claude/38-limit-steer-note`，9b 复审补本节）
+
+- 插话收口只有一个分流点：`gateway_parts/recovery._settle_turn_guidance`。terminalize 经 `_settle_terminal_guidance`，
+  已封存热记录的启动补交也经它。
+  - 答复错误码是 `TURN_RESUME_LIMIT_EXCEEDED`（`_limit_closeout`）时，走 `conversation/store_guidance_recovery.GuidanceRecovery.settle_dead_turn`；
+  - 其余收口照旧 `reject_pending(reject_reserved=True)`。
+- `settle_dead_turn` 等于 `reject_pending(reject_reserved=True)`，再把确认批次修复后仍是 submitted 的插话交给 `settle_dead_submission` 定终态：
+  - 历史里已有它的去重键（`store_guidance_acknowledgements.transcript_dedupe_key`）：记成 consumed；
+  - 没有：按未消费拒收或释放。
+  - 两种都在 `migration.dead_submission` 记下死掉的那次提交。
+- 计数名只由 `turn_end_labels` 从结构化终态推出（`dead_submissions` / `recorded_in_transcript` / `backup_turns`，见
+  `TURN_END_SUMMARY_KEYS`）。`_apply_limit_settlement` 把它们写进答复的 `guidance_settlement`，并按
+  `conversation/turn_resume_notice.turn_resume_limit_notice` 选提示句，同步写进 `user_error` 和 `error`。
+- 回归：`test_turn_resume_limit_steer.py`。
+
 ## 管理员判定统一入口（P14 第 6 条，2026-10-02，待集成）
 
 - `gateway_parts/settings_control_service._is_admin` → `user_space/owner_access.is_complete_local_admin_owner`。

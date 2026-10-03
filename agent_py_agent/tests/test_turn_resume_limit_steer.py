@@ -35,7 +35,12 @@ from agent_py_agent.agent.gateway_parts.recovery import (
     recover_gateway_processing_requests_report,
 )
 from agent_py_agent.tests.test_shutdown_turn_resume import _echo_agent, _gateway, _processing
-from agent_py_agent.tests.test_turn_resume_limit import _REQUEST, _marker, _restart, _terminal_response
+from agent_py_agent.tests.test_turn_resume_limit import (
+    _REQUEST,
+    _marker,
+    _restart,
+    _terminal_response,
+)
 
 _STEER = "另外把 todo.txt 的行数也告诉我。"
 
@@ -120,8 +125,53 @@ def test_steer_already_in_history_is_settled_once_without_a_second_delivery(tmp_
     assert _settlement(response) == {"dead_submissions": 1, "recorded_in_transcript": 1, "backup_turns": 0}
     receipt = agent.conversation_store.guidance.receipt("steer-r")
     assert (receipt.status, receipt.migration.get("settle_reason")) == ("consumed", "recorded_in_transcript")
+    assert receipt.migration.get("dead_submission") == {"submission_id": "model-call:gen4", "attempt_id": "attempt-gen4"}
     assert read_gateway_input_receipt(paths, input_id).state == "consumed"
     assert not (paths.inbox / f"{input_id}.json").exists(), "已在历史里，不再起备用下一轮，模型不会看到两遍"
+
+
+def test_reserved_steer_at_the_limit_is_rejected_into_a_backup_turn(tmp_path, monkeypatch):
+    """最后一代已认领（reserved）、还没送进模型调用就随进程死掉的插话：上限收口时同样拒收、起备用下一轮，不悬在 reserved。"""
+    agent = _echo_agent(tmp_path)
+    paths = _gateway(agent)
+    monkeypatch.setattr(daemon_metadata, "process_identity_is_live", lambda _identity: False)
+    entry, input_id, _thread = _steer(agent, paths, "steer-v")
+    assert agent.conversation_store.guidance.claim_for_turn(entry, expected_turn_id=_REQUEST, attempt_id="attempt-gen4")
+    assert agent.conversation_store.guidance.receipt("steer-v").status == "reserved"
+    _processing(paths, _REQUEST, active_turn_recovery=_marker(MAX_UNPLANNED_RESUME_COUNT))
+
+    assert _restart(paths, agent) == ({"requeued": 0, "failed": 1}, [])
+
+    response = _terminal_response(paths)
+    assert response["user_error"] == TURN_RESUME_LIMIT_BACKUP_NOTICE
+    assert _settlement(response) == {"dead_submissions": 0, "recorded_in_transcript": 0, "backup_turns": 1}
+    assert agent.conversation_store.guidance.receipt("steer-v").status == "rejected"
+    assert read_gateway_input_receipt(paths, input_id).state == "queued"
+
+
+def test_steer_without_an_input_receipt_does_not_promise_a_backup_turn(tmp_path, monkeypatch):
+    """没有入口回执的插话（元数据里没有 gateway_input_request_id）拒收后没有备用下一轮可排：计数不记 backup_turns，提示也不说
+    “会作为新的一轮马上处理”。"""
+    agent = _echo_agent(tmp_path)
+    paths = _gateway(agent)
+    monkeypatch.setattr(daemon_metadata, "process_identity_is_live", lambda _identity: False)
+    store = agent.conversation_store
+    owner = agent.home_paths.owner_id
+    thread_id = store.threads.get_or_create({"canonical_user_id": owner}).thread_id
+    store.guidance.append_once({
+        "message": _STEER, "sender": owner, "target_type": "request", "target_id": _REQUEST, "priority": "high",
+        "delivery": "current_request",
+        "metadata": {"kind": "active_turn_user_input", "record_in_transcript": True, "expected_turn_id": _REQUEST,
+                     "channel_message_id": "steer-w", "thread_id": thread_id},
+    }, dedupe_key="steer-w")
+    _processing(paths, _REQUEST, active_turn_recovery=_marker(MAX_UNPLANNED_RESUME_COUNT))
+
+    assert _restart(paths, agent) == ({"requeued": 0, "failed": 1}, [])
+
+    response = _terminal_response(paths)
+    assert response["guidance_settlement"]["rejected"] == 1
+    assert _settlement(response)["backup_turns"] == 0
+    assert response["user_error"] != TURN_RESUME_LIMIT_BACKUP_NOTICE
 
 
 def test_crash_after_sealing_the_limit_still_settles_the_steer_and_fixes_the_notice(tmp_path, monkeypatch):

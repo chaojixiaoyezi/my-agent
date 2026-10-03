@@ -16,6 +16,7 @@ from ..gateway_parts.io import (
     write_json_file_atomic,
 )
 from ..runtime_errors import DataCorruptionError
+from .message_scan import find_message_dedupe
 from .models import GuidanceEntry, normalize_guidance_target_type
 from .session_messaging import (
     SESSION_MESSAGE_ORIGIN_KIND,
@@ -23,7 +24,6 @@ from .session_messaging import (
     SESSION_MESSAGE_RELEASE_LIMIT_REACHED,
     SESSION_TASK_ORIGIN_KIND,
 )
-from .message_scan import find_message_dedupe
 from .store_guidance_acknowledgements import GuidanceAcknowledgements, transcript_dedupe_key
 from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
