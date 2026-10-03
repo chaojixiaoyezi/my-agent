@@ -453,10 +453,23 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
     - 段名收 `;`、任意字符算分隔、不做 URL 解码。
 - **车道修正**（step17g 候选 Linux 车道发现，只改用例）：
   - 现象：车道容器把证据目录挂在 `/out`，`../out/d.json` 的首段 `/out` 在容器里真实存在，于是被整条置空。产品行为符合设计（只丢定位、不泄露），问题在用例依赖了宿主根目录下有哪些目录。
-  - 改法：三个脱敏单测改用夹具 `fixed_root_dirs`，只替换脱敏模块自己引用的 `os`，根目录判定固定为 Users、home、root、tmp、var、private、..，泄露写法的根段取 `/Users`。`..` 保留，是因为 `/..` 在任何 POSIX 系统上都存在，`../../Users` 这类写法正是靠它命中。普通写法另加 `../repo/a.py`。
+  - 改法：三个脱敏单测改用夹具 `fixed_root_dirs`，只替换脱敏模块自己引用的 `os`，根目录判定固定为 Users、home、root、tmp、var、private、..，泄露写法的根段取 `/Users`。另有后续用例从固定集合移除 `..`，确保 traversal 判定不依赖 `/..` 存在。普通写法另加 `../repo/a.py`。
   - 核对：
     - 在车道镜像里挂 `/out` 单跑这个文件：修前 1 failed（与车道一致），修后 48 passed；
     - 故意把 out 加进固定组，`../out/d.json` 就失败，证明夹具在起作用。
+- **残留判定不依赖 `/..`（2026-10-03，分支 `worker/luna1-redact`，ae 复审通过，并入 step17h）**：
+  - 根段匹配里的 `..` 改成零宽定宽 lookbehind，避免 `finditer` 消耗前面的 `..` 路径片段；是否为宿主路径仍只看候选片段首段名是否为本机根目录。
+  - 新用例把 `fixed_root_dirs` 的固定名移除 `..`，验证 `../../../../Users/...` 与 `file:///Users/...` 仍脱敏，`../out/d.json`、`docs/Users/x.md`、`/shots/0/title` 仍保留；旧 9b 泄露和普通写法组保持。
+  - 测试先红：旧代码返回 `../../../../Users/me/x` 而非 `<redacted>`；修复后 `test_pack_verification_service.py` 定向文件通过，pytest 摘要含 2 个 skip（原因未从本次输出核定）。
+  - 三项变异均被抓住：删除 lookbehind 分支、恢复消费型 `..` 分隔符都使新 traversal 用例失败；跳过 URL 解码则使 `%2FUsers%2F...` 与 `%7E%2F...` 变体失败。临时变异已全部还原。
+  - **定向验证**：`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python; PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_pack_verification_service.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna1` 返回 0，无失败；输出有 2 个 skip（该摘要未展开 skip 原因）。
+  - **架构守卫**：`guards9.txt` 所列 10 个测试文件（含 `test_packaging.py`）按同一 pytest 参数运行，返回 0。
+  - **静态门禁**：import boundaries `findings=0`；Ruff `All checks passed!`；`check_doc_sync.py` 为 `DOC_SYNC_PASS`；strict code-size 为 `blocked=False`（hard=0）；`git diff --check` 返回 0；clean-package 为 `OK: . 未发现发布阻塞项`。
+  - **size diff 原始输出**：
+    ```text
+    新增告警: 0
+    消失告警: 7
+    ```
 - **相关回归**：50 个文件，第二个提交后 898 passed，10 skipped（第一个提交时 890 passed）。包括：
   - pack 系列、verification 声明、attempt_sandbox；
   - 43 个扫描守卫；

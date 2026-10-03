@@ -4,7 +4,8 @@
 #   本次临时目录换成 <verifier>，宿主解释器换成 <python>），长的先换；换完仍含宿主路径的整条置成 <redacted>。
 #   “仍含宿主路径”只看结构化事实：以 ~/、盘符或 /<段> 开头的片段，且 /<段> 在本机根目录下真实存在（JSON Pointer 如 /shots/0
 #   的首段在本机不存在，不误伤）。9b 复核补的变形：片段前只要不是词字符、点或连字符就算分隔（反向写法，file:///Users、
-#   a;/Users、a&/Users、#/Users 都算；词字符按 Unicode，中文目录名不误伤），另认 ..（../../Users）；判断前先做一次 URL 解码
+#   a;/Users、a&/Users、#/Users 都算；词字符按 Unicode，中文目录名不误伤）；`..` 通过零宽定宽后查匹配，避免逐段扫描时
+#   消耗路径内容并依赖 `/..` 恰好存在（../../Users）；判断前先做一次 URL 解码
 #   （%2FUsers%2F）。故意编码（两次 %-编码、%00、base64、~user/ 等）不在防护范围：信任边界是“能力包由管理员审过才装”，
 #   这里防的是 sys.argv、__file__、异常信息这类无意带出的路径。代价：JSON Pointer 首段恰好是本机根目录名（/home、/Users、/tmp）时整条置成
 #   <redacted>，只丢定位、不泄露。只改 location，不改 code、计数和状态。改动同步 test_pack_verification_service.py。
@@ -20,8 +21,8 @@ from pathlib import Path
 from urllib.parse import unquote
 
 REDACTED_LOCATION = "<redacted>"
-# location 里可能的宿主路径片段：前面是开头、任何不是词字符/点/连字符的字符，或 ..；后面是 ~/、盘符或 /<首段>。
-_HOST_PATH_TOKEN = re.compile(r"(?:^|[^\w.\-]|\.\.)(~[/\\]|[A-Za-z]:[\\/]|/([^/\s\"'|<>()\[\],;]+))")
+# location 里可能的宿主路径片段：`..` 用零宽后查，避免扫描 /.. 时吃掉下一段前的边界；路径内容只匹配 ~/、盘符或 /<首段>。
+_HOST_PATH_TOKEN = re.compile(r"(?:^|[^\w.\-]|(?<=\.\.))(~[/\\]|[A-Za-z]:[\\/]|/([^/\s\"'|<>()\[\],;]+))")
 
 
 # LLM: 只在有错误样例时才计算替换表；target / inputs 的相对形式沿用运行器入账口径（工作区外的只留文件名）。
