@@ -71,6 +71,17 @@
   - 停机那一刻仍不会立刻提示“将会续跑”。
 - **验证**：见 TESTS.md 同名节。
 
+## 能力包说明补“宿主核验”一节（文档，luna5，2026-10-03，分支 `worker/luna5-pack-guide`，基于 ae 能力包块 5 头 `58300131c`，已完成，待 ae 复审）
+
+- **做什么**：`docs/guides/CAPABILITY_PACK_GUIDE.md` 新增“六、宿主核验”一节（原六、七顺延为七、八），面向用户用中文大白话讲清：
+  - 宿主核验是什么：任务固定住的能力包带检查程序时，宿主在写工具写出交付物后马上跑一遍（写完就查）、回合结束前再查一遍（收尾再查），结论以宿主为准，不靠模型自述；
+  - 开关 `capability_pack_host_verification_enabled`：默认关、在能力配置里、只能管理员经 `/settings` 或配置文件改、改后重启 Gateway 生效；打开前要满足的三个前提（核验账本受宿主只读保护、主/子代理写不进账本、`/stop` 能打断检查程序），现状均为“开发中”；
+  - 用户会看到什么：TUI 灰色系统行、IM 以 `【提示】` 前缀放在回复正文前；三类事实（检查结果、输入原件被就地改、必需交付物缺失或打不开）各配代码里的真实文案；
+  - 返工：检查不过最多 1 次、输入原件被改最多 1 次、缺交付物最多 2 次；三类各自计次、同时出现合成一条；只要审阅不要交付物时在答复里说明；
+  - 已知限制：不调工具的回合查不到、检查程序只在沙箱断网跑、location 脱敏的代价（JSON Pointer 首段是本机根目录名时整条置空）。
+- **依据**：`capability/pack_verification_service.py`、`pack_verification_report.py`、`pack_verification_inputs.py`、`pack_verification_deliverables.py`、`gateway_parts/request_pack_verification_notice.py`、`docs/design/CAPABILITY_PACKS_V2.md`（文案与常数逐条对照代码）。
+- **验证**：`scripts/check_doc_sync.py` 与 `git diff --check` 通过；本轮只改文档，未改代码、未跑代码测试。
+
 ## 记忆整理补跑后续：默认补跑推进过的组，下一批会话模型只试 1 次（75，2026-10-02，分支 `claude/75-curator-fallback-threshold`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，待 be 审）
 
 - **生产事实**（3a，step17f 上线后 local/main 的 curator/runs）：13:58 qwen3.8-flash 那组用 MiniMax-M2.7 补跑成功，带 `curator_thread_model_failed:CURATOR_MODEL_FAILED:transient`，修复生效；13:59 这个会话来了新消息，又先试 qwen3.8-flash，失败。按原规则还要再失败一次才换默认模型。
