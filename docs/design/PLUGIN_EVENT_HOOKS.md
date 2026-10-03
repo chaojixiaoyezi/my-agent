@@ -91,11 +91,12 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 ```
 
 校验规则（`PluginManifest.__post_init__`，照 `PanelDeclaration` 的严格写法）：
-- `events`：0–6 项，`type` 取第 6 节的固定 6 种之一、不重复；`content` 只能是 `none`（默认）或 `text`，`text` 只允许用在 `prompt_submitted` 和 `tool_call_started`。
+- `events`：0–6 项，`type` 取第 6 节的固定 6 种之一、不重复；`content` 只能是 `none`（默认）或 `text`。**3a 2026-10-03 裁定**：`text` 只允许用在 `prompt_submitted`，`tool_call_started` 只能是 `none`；工具参数只从精确工具的 `tool_gates.arguments: "full"` 提供，不新增 `events[].tools`。
 - `tool_gates`：0–4 项；`id` 小写字母数字连字符 1–32 位、包内唯一；`tools` 是宿主工具名的精确列表（0–16 项，不支持通配）；`effects` 只能取 `mutating`、`dangerous`（表示“所有这类效果的工具”）；`tools` 和 `effects` 至少一个非空；`arguments` 只能是 `none` 或 `full`。
 - `arguments: "full"` 时 `tools` 必须非空、`effects` 必须为空（ae 评审）：按效果收紧覆盖的工具太多（含别的插件的工具、`write_file` 的内容），用户在确认码里读不出这么大的范围，所以按效果收紧只能拿 `args_hash`。
 - `permissions.network`：布尔，默认 false。
 - `events` 和 `tool_gates` 都为空的 v8 包无效（`invalid_manifest`），没订阅就该用 v6。
+- **3a 2026-10-03 裁定**：v8 的非空 `events` 或 `tool_gates` 算作贡献，工具、面板、事件、收紧四者至少一项非空；允许只订阅事件或只声明收紧门，不用硬塞工具或面板。上述“必须有订阅”门继续保留；v1–v7 原规则完全不变，v6 没有工具也没有面板仍被拒。
 - 第一期 `host_api` 不能和 `events` / `tool_gates` 同时声明（`events_with_host_api_unsupported`）：宿主 API 走本机回环，和第 10 节的断网冲突，留到第二期再定。
 - 清单不认识的工具名不在装包时拒绝（工具会随别的插件、版本变化），在 `/plugins info` 里标“当前不存在”。
 - 旧版本（v1–v7）序列化逐字节不变（沿用 `plugin_manifest.py` 的既有约定）。
@@ -148,7 +149,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | `prompt_submitted` | `request_id`、`chars`、`has_attachments` | 提示文字，截到 4000 字 | Gateway `handle_ask` 写队列成功后 |
 | `turn_started` | `request_id`、`model_name`（不含服务商和密钥） | 无 | `_handle_gateway_request` 开始执行时 |
 | `turn_ended` | `request_id`、`status`（done / failed / stopped / interrupted）、`duration_ms`、`tool_calls`、`error_code` | 无 | 同上，收口时 |
-| `tool_call_started` | `call_id`、`tool`、`effect`、`args_hash` | 工具参数（只对声明里精确列出的工具；去掉 `__` 键、统一脱敏后截到 4000 字，同第 5 节） | 执行器放行之后、真正执行之前 |
+| `tool_call_started` | `call_id`、`tool`、`effect`、`args_hash` | 无（3a 2026-10-03 裁定；参数只走精确工具的 `tool_gates.arguments: "full"`，见第 5 节） | 执行器放行之后、真正执行之前 |
 | `tool_call_finished` | `call_id`、`tool`、`ok`、`error_code`、`failure_stage`、`duration_ms`、`handler_executed` | 无（第一期不给输出） | 执行器拿到结果之后 |
 | `command_executed` | `command`（只给命令名，如 `/model`）、`operation_id`、`state`（ok / failed） | 无 | Gateway 控制命令回执落定后 |
 
@@ -261,6 +262,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 
 - **第一期只对本机管理员（local/main）开放**（ae 建议，3a 定 D9）：别的 owner 启用 v8 插件直接拒绝，结构化原因码 `plugin_events_owner_not_allowed`；别的 owner 的事件一律不投、调用一律不问。理由：多用户 Gateway 里管理员给别的 owner 装事件插件就能读到那个用户的提示词，这是隐私边界；要放开得单独设计、由被观察的用户自己决定。口径和 J16 的属主范围一样。
 - **总开关** `plugin_events_enabled` 默认 false。关着时 v8 包可以安装，但启用被拒（`plugin_events_disabled`，提示去 `/settings` 打开）；已启用的 v8 插件在开关关掉后，事件不投、收紧不问（相当于停用这两项能力），`/plugins info` 显示原因。
+- **B1 过渡关闭门（ae 复审、3a 2026-10-03 要求）**：B7 尚未落地时一律按总开关关闭处理；`PluginEnableTool` 对 `manifest.permissions` 非空的包在索取确认码之前返回 `plugin_events_disabled`、`not_started/not_committed`，不解析运行时、不生成候选计划、不准备环境或提交激活；即使带正确码也拒绝，安装仍允许。B7 必须同时替换这道拒绝与构造期计划排除，接入实际开关、local/main 和强制沙箱判定，不能只删除关闭门后让 v8 走无隔离的 v6 链。
 - **强制沙箱**：v8 插件不管 `plugin_process_sandbox` 开没开，都进插件进程沙箱；本机沙箱不可用就启用失败（`sandbox_unavailable`），不退回无沙箱。
 - **断网**：沙箱规格 `network_access=False`（Linux `--unshare-net`，macOS 最后一条 `(deny network*)`，两边都有现成实现和自检）。声明了 `permissions.network: true` 的才放开，并在确认码事实里列出。MCP 走标准输入输出，断网不影响宿主和插件之间的通信。
 - **收窄读**：拒读整个 my-agent 数据根，只放行插件自己的包目录、数据目录和运行环境，宿主配置、会话、记忆都读不到；事件里给什么，插件才知道什么。macOS 用现有的私有读拒绝（`private_read_roots`）加放行即可；Linux 的插件沙箱现在是“整根只读、读范围与宿主相同”，要先隐藏数据根再把插件自己的目录挂回去，具体挂法在 B7 里实测后定（风险项）。macOS 上必须沿用 `attempt/sandbox._private_read_rules` / `_ancestor_metadata_rules`：Seatbelt 对数据根按 subpath 拒读时，会连同放行目录的每一级上级目录的 lstat 一起拒掉，而插件包目录正好嵌在被拒读的数据根里（`data/plugins` 下），Python、node 的 realpath 和 venv 会报 EPERM 起不来（09-26 生产出过，step12s 热修）。两个平台都要有真进程用例，布局必须是“放行目录嵌在拒读根里”：真实解释器（Python、node）启动、realpath、读自己的包和数据目录都成功，读会话和记忆失败；不能只用 cat、printf。
@@ -292,13 +294,13 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 
 | 块 | 做什么 | 主要改的文件 | 关键用例 | 依赖 |
 | --- | --- | --- | --- | --- |
-| B1 清单 v8 | `events` / `tool_gates` / `permissions` 字段、校验、序列化；构建脚本出 v8；确认码事实加四项，写成人能看懂的话（如“能看到这些工具的完整参数：…”） | `plugin_manifest.py`、`plugin_runtime_facts.py`、`plugin_enable_tool.py`、`scripts/build_plugin_files_package.py` | 每条校验规则正反例（含 `arguments: full` 配 `effects` 被拒）；v1–v7 序列化逐字节不变；改订阅确认码就变；v8 + `host_api` 被拒 | 无 |
+| B1 清单 v8（已实施：`worker/m1-b1`，原提交 `20a930cd2`，裁定提交 `ad6007106`；ae 意见修订 `d6e9daccb`，ae 复审通过，并入 step17i） | `events` / `tool_gates` / `permissions` 字段、校验、序列化；构建脚本出 v8；确认码事实加四项，写成人能看懂的话（如“能看到这些工具的完整参数：…”仅指 full 收紧门） | `plugin_manifest.py`、`plugin_runtime_facts.py`、`plugin_enable_tool.py`、`scripts/build_plugin_files_package.py` | 每条校验规则正反例（含工具开始 text 被拒、v8 只订阅合法、`arguments: full` 配 `effects` 被拒）；v1–v7 序列化逐字节不变；改订阅确认码就变；v8 + `host_api` 被拒；v8 安装允许但正确码也按关闭拒绝，未开始/未提交，v6 原确认链保持 | 无 |
 | B2 共用插件通道 | 把面板服务的连接、代次复核、单在途、空闲关闭抽成 `PluginChannelPool`，面板改用它；启动计入超时 | 新 `plugin_display/channel.py`（或 `plugin_channel/`）、`plugin_display/service.py` | 面板原有用例全部不改照过；启动超过超时记超时、后台继续启动；代次失效丢结果 | 无 |
 | B3 事件中心 | `PluginEventHub`：按 owner 分区、按类型只留最新、`dropped_before`、单在途、退避、撤销、计数；`my-agent/events` 握手；`events.observe` | 新 `plugin_events/hub.py`、`plugin_events/protocol.py`，Gateway 组装处 | 假插件：合并与丢弃计数准确；慢插件不拖主线程；停用后不再收到；跨 owner 不串；握手没声明不投 | B1、B2 |
-| B4 事件点 | 6 类事件的投影与接线；正文只在声明且同意时给；参数投影去 `__` 键并统一脱敏 | `gateway_parts/http_handlers.py`（提示）、`gateway_parts/request_execution.py`（回合）、`tooling/executor.py`（工具）、`gateway_parts/control_operation_service.py`（命令） | 每类事件字段齐全；默认不含正文（带标记正文反证）；带标记的凭据和 `__` 内部键反证；被拒的调用不发工具事件；`actor` 三种取值 | B3 |
+| B4 事件点 | 6 类事件的投影与接线；只有提示事件声明且同意时给提示正文，观察事件不带工具参数（3a 2026-10-03 裁定）；提示投影统一脱敏 | `gateway_parts/http_handlers.py`（提示）、`gateway_parts/request_execution.py`（回合）、`tooling/executor.py`（工具）、`gateway_parts/control_operation_service.py`（命令） | 每类事件字段齐全；默认不含正文（带标记正文反证）；工具观察不含参数；带标记的凭据和 `__` 内部键反证；被拒的调用不发工具事件；`actor` 三种取值 | B3 |
 | B5 收紧钩子 | `PluginToolGate`、合并规则（同严按插件 ID 排序）、超时按确认、代次撤销与新实例重问、重跑只对同一次调用不重问；`call_origin`；审批前缀、去掉会话/长期选项、单一 `plugin_gate_required` 判定绕开缓存/授权/自主；`PLUGIN_GATE_*` 错误码登记 | `tooling/executor.py`、新 `plugin_events/tool_gate.py`、`agent_core/tool_loop/round_execution.py`、`contracts/tool_approval.py`、`gateway_parts/stream_approval.py`、`user_space/approval_mode.py`、`contracts/error_taxonomy.py`、`plugin_management.py` 与 `runtime_db/host_command_execution.py`（设 `call_origin=host_command`） | 第 8.2 表 7 种组合；自主模式、会话缓存、长期授权、决策模型自动执行下仍弹框；I4 续跑回合重新征询；超时 → 确认；两个并行调用撞上同一慢插件，排队那条超时按确认；插件回复多带字段（如 `arguments`）被忽略、参数不变；征询中停用 → 不算、换新实例 → 问新实例；批准后同一调用重跑不再问，之后同参数新调用、不同参数照样问；不可交互 → 不执行、错误码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`、账本记 `final_status`；收紧插件一律 deny 时用户仍能 `/plugins disable`、模型工具表里没有插件管理工具；模型发起的调用在工具参数里塞 `"call_origin": "host_command"` 或 `__call_origin` 照样被收紧（来源只读宿主设在 `ToolExecutorRequest` 上的字段，不从参数读；ae 补，配变异“执行器从参数读来源”）；拒绝时模型看到 `PLUGIN_GATE_DENIED` 且不是“结果未知” | B1、B2；H3 已合入 |
 | B6 账本与展示 | `plugin_gate.decided` 写入与查询；`/plugins info` 四段（含“无法审批”计数）；IM 同文 | `runtime_db/repository.py`（查询方法）、`plugin_commands.py`、`plugin_management.py` | 每种 outcome 一条且字段齐全；不写消息原文；TUI 与 IM 输出相同；最近 10 条按时间倒序；“无法审批”单独计数 | B5 |
-| B7 安全底座 | v8 强制沙箱、断网、收窄读（Linux 挂法先实测，macOS 沿用 `_ancestor_metadata_rules`）；开关关时拒绝启用；沙箱不可用时失败；只 local/main 能启用；两个配置项进管理员边界项 | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`settings/config.py`、`settings/user_config_capability.py`、`config/agent_config.yaml` | 真实沙箱（macOS / Linux 车道）真进程，布局为“放行目录嵌在拒读根里”：Python、node 解释器启动和 realpath 成功，读得到自己的包和数据目录、读不到会话和记忆；`network: false` 连外网和本机回环都被拒；`network: true` 能连 Gateway 端口但读不到令牌、调不了要令牌的接口，不要令牌的接口列清单；开关关 → `plugin_events_disabled`；模型经 `user_config` 改两个配置被拒（`PARAMETER_BOUNDARY`）；非 local/main 启用被拒（`plugin_events_owner_not_allowed`） | B1；H3 已合入 |
+| B7 安全底座 | 将 B1 暂时拒绝与构造期 v8 计划排除换成真正总开关、local/main 和强制沙箱判定，不能只删关闭门；v8 强制沙箱、断网、收窄读（Linux 挂法先实测，macOS 沿用 `_ancestor_metadata_rules`）；开关关时拒绝启用；沙箱不可用时失败；两个配置项进管理员边界项 | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`settings/config.py`、`settings/user_config_capability.py`、`config/agent_config.yaml` | 真实沙箱（macOS / Linux 车道）真进程，布局为“放行目录嵌在拒读根里”：Python、node 解释器启动和 realpath 成功，读得到自己的包和数据目录、读不到会话和记忆；`network: false` 连外网和本机回环都被拒；`network: true` 能连 Gateway 端口但读不到令牌、调不了要令牌的接口，不要令牌的接口列清单；开关关 → `plugin_events_disabled`；模型经 `user_config` 改两个配置被拒（`PARAMETER_BOUNDARY`）；非 local/main 启用被拒（`plugin_events_owner_not_allowed`） | B1；H3 已合入 |
 | B8 样例与验收 | 样例 A：观察全部 6 类事件并在面板显示计数；样例 B：`run_command` 含 `rm -rf` 时要求确认、对 `delete_file` 直接拒绝；Python 和 Node 各一份 | `plugins/event-watch/`、`plugins/rm-guard/`、`plugins/rm-guard-node/` | 假模型真进程：TUI 与 IM 都看到“插件 X 要求确认 / 拒绝”；真实验收见第 14 节 | B3–B7 |
 | B9 写插件的技能（M5） | 内置“写 my-agent 插件”技能和模板（Python、Node 各一个）；安装启用仍只能由用户输确认码 | `agent_py_agent/skills/builtin/…`、`plugins/sdk` 模板 | 技能产出的包能通过 v8 校验和构建；模型不能自行启用 | B1 |
 
@@ -315,15 +317,18 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | D1 | v1–v5 Python 轮子包能不能订阅 | 不能；用 v6 解释器入口打包，过确认码 |
 | D2 | 不可交互场合插件要求确认怎么办 | 照现有规则“无法审批、不执行”；TUI 和 IM 看得到“插件 X 要求确认，但这里无法审批，所以没执行”，码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE` |
 | D3 | 钩子超时默认值 | 2000 ms，可配 200–10000，管理员边界项，模型不能改 |
-| D4 | 正文给不给、给多少 | 只给提示文字和工具参数，各截 4000 字，要声明且确认码同意；参数只对精确列出的工具、去内部键、统一脱敏；第一期不给工具输出 |
+| D4 | 正文给不给、给多少 | 3a 2026-10-03 裁定：观察正文只允许 `prompt_submitted` 的提示文字，截 4000 字，要声明且确认码同意；`tool_call_started` 只能 none。工具参数只通过 `tool_gates.arguments: "full"` 对精确列出的工具给，确认码列明工具，去内部键、统一脱敏后截 4000 字；第一期不给工具输出 |
 | D5 | `host_api` 能否和事件同时用 | 第一期不能 |
 | D6 | 观察计数要不要落盘 | 不落盘；决定落 `runtime_events` |
 | D7 | 本地直连 TUI 的提示、回合、命令事件 | 第一期只有工具两类 |
 | D8 | 收紧钩子能不能看子代理的调用 | 能，`actor` 分 `main` / `subagent` / `decision` |
 | D9 | 第一期开放范围 | 只 local/main；别的 owner 启用直接拒绝，码 `plugin_events_owner_not_allowed` |
 
+**订阅贡献补充决定（3a 2026-10-03 裁定）**：v8 非空 `events` 或 `tool_gates` 算贡献，允许没有工具和面板的观察插件或 rm-guard；v1–v7 不改，v8 四项全空仍由“必须声明订阅”门拒绝。
+
 ## 16. 已知边界
 
+- **观察事件不带工具参数（第二期再议）**（3a 2026-10-03 裁定）：第 6 节原要求只向精确列出的工具给正文，但 `events` 没有工具列表；第一期验收不要求观察参数，也不新增 `events[].tools`。需要参数的插件只能用精确工具的 full 收紧门；第二期有真实需求再扩展观察格式。
 - 插件进程能拿到它订阅的事实和（同意过的）正文，这些数据在插件那里怎么用，宿主管不到；断网和收窄读是为了让它带不出去、也读不到更多。
 - 收紧钩子增加的是延迟：每个命中的调用最多多等 `plugin_tool_gate_timeout_ms`。只订阅需要的工具，不订阅读工具，影响很小。
 - 观察事件会合并丢弃（只留最新），插件不能把它当完整审计日志；需要完整记录的应读宿主账本（第二期可开放只读查询）。
@@ -333,6 +338,8 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 - **账本可信依赖 H3**（9b 评审）：第 9 节的 `runtime_events` 和审批决定文件（`workspace/runtime/services/gateway` 下）不被模型篡改，是靠 H3“宿主运行状态对模型只读”保证的。所以 M 线 B5–B8 排在 H3 合入之后。
 
 ## 17. 评审记录
+
+- **ae 的 B1 复审（3a 2026-10-03 转述，修订已由 ae 复审通过）**：常数目录重新生成并同时过 `--check` 与测试；B7 前 v8 启用按总开关关闭拒绝；探针和分支增量不保存本机路径。ae 沙箱外核对 `test_plugin_any_language.py`：基线 `274cedb1e` 和 B1 头 `bf520e911` 均 **35 passed**，六失败来自 my-agent 命令沙箱环境；旧版字节兼容和原四变异已独立确认，本线不重复调查、不冒充亲自沙箱外验证。
 
 - **ae（2026-10-03）**：总体同意（只看、只收紧；面板通道共用；收紧决定进 `runtime_events`；v8 强制沙箱）。必须改 5 条已改：
   1. 工具参数投影去 `__` 内部键、走统一脱敏（第 5、6 节）；
@@ -359,7 +366,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 
 | 块 | 分支 | 可开工条件 | 复审 |
 | --- | --- | --- | --- |
-| B1 清单 v8 | `worker/m1-b1-manifest-v8` | 现在 | be |
+| B1 清单 v8 | `worker/m1-b1`（已实施，原提交 `20a930cd2`，裁定提交 `ad6007106`，追加 ae 意见修订） | 已并入 step17i | ae（原提交、裁定和本轮修订一并复审） |
 | B2 共用插件通道 | `worker/m1-b2-plugin-channel`（3a 已派） | 现在 | be、9b |
 | B3 事件中心 | `worker/m1-b3-event-hub` | B1、B2 合入 | 9b |
 | B4 事件点 | `worker/m1-b4-event-points` | B3 合入 | be |

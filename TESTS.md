@@ -393,6 +393,126 @@ sol1 的三个提交挑到块 4/5 之上；以上 sol1、ds2b6a 的数字是在 
 - **be 探针（只读复核）**：把 `~/.my-agent/decision-evidence/steer-noreceipt-review-20261003/test_steer_rerun_probe.py` 临时拷进测试目录跑，崩溃窗口那条 `test_rerun_after_crash_before_mark_does_not_send_spurious_resend_notice` 已由失败转为通过（`steer_replay_unavailable == 0` 且无重发提示）；跑完已删除临时副本。探针里另有一条沿用旧语义的断言（`second["steer_replay_queued"] == 0`）按上面说明不改。
 - **未验证**：真实 TUI/IM 端到端（/steer 打到收口中途、用户看到灰行/【提示】）本片没做，留给 be 复核与集成后的冒烟。
 
+## M1 B1 ae 复审修订：常数目录、B7 前禁止 v8 启用、可移植探针（2026-10-03，m1b1，`worker/m1-b1`，`ad6007106` 之后追加 `d6e9daccb`，ae 复审通过，并入 step17i）
+
+- **来源/做法**：3a 转交 ae 的三项必须改。三个声明上限补中文用途和设计理由，原生成器重建目录，不改白名单或生成规则；B7 前 `permissions` 非空包在确认前返回 `plugin_events_disabled`、`not_started/not_committed`，构造不解析运行时、不生成环境计划，安装仍允许。B7 须替换暂时拒绝和计划排除，接入真正总开关、local/main 与强制沙箱。
+- **新增/改写测试**：真实临时 owner 的安装、原管理命令和直接启用工具联测：空码/正确码 × network false/true × 旧沙箱开关 false/true 八组合全部拒绝；确认函数、环境准备和 MCP 启动不能触发，安装 JSON 逐字节不变、安装快照不变且没有环境目录。旧订阅确认码也按关闭拒绝。v6 两组件例保持无确认码要求确认、正确码进入原 `_enable`；启用端使用替身，不当作真进程验收。
+- **红转绿**：常数守卫先 **2 failed、9 passed in 5.12s**（目录 875/源码 877、缺中文说明），补说明并生成后 `--check` **877 项一致**，测试 **11 passed in 5.48s**。关闭门的有效红测 **9 failed、116 passed in 1.39s**，最小实现后 **125 passed in 1.35s**。测试初稿把通用 `Popen` 禁止扩到了宿主只读进程身份探针，后聚焦插件环境准备和 MCP 启动，不删业务断言。
+- **本轮变异**：逐个新进程，仅改内存函数、原退出 1 保留；`v8-enable-guard` 去掉拒绝门初次 **9 failed、116 deselected in 1.07s**，最终测试整理后仍 **9 failed、116 deselected in 0.86s**（无警告）。常数守卫反证：`catalog-protocol` 去掉协议排除 → **3 failed、8 passed in 5.71s**；`catalog-unit` 单位清空 → **4 failed、7 passed in 6.26s**；`catalog-description` 中文说明清空 → **3 failed、8 passed in 4.99s**。原四变异由 ae 已确认，本轮不重复调查。
+- **可移植性**：探针不传固定 basetemp，交给 pytest 临时目录；历史文档命令仅将现场临时根写作 `$B1_TEST_TMP`（按 3a 的现场规则指定），不保存本机私人路径。旧交接文档仅清理三个命令中的路径，未扩写历史交接，未新增交接文档。
+- **沙箱外证据来源**：3a 转述 ae 独立复核，基线 `274cedb1e` 与 B1 头 `bf520e911` 的 `test_plugin_any_language.py` 均 **35 passed**，六失败来自 my-agent 命令沙箱环境。本线不冒充亲自沙箱外执行，保留本轮同文件失败，不删、放宽或跳过。
+- **当前版本收尾测试**：v8 独立合同 **125 passed in 1.29s**；五文件 **281 passed、6 failed in 2.60s**（仅上述原六失败，退出 1 保留）；完整 guards9 含 packaging **172 passed in 32.19s**。三次常数变异后正常新进程 **11 passed in 6.16s**，独立 `--check` **877 项一致**。没有把不同范围相加声称全仓通过。
+- **静态门禁/尺寸**：import boundaries **0 条**；Ruff `All checks passed!`；doc-sync `DOC_SYNC_PASS`；strict `strict_scope_total=2228 hard=0 high-risk=1523 soft=705 test_advisory=1241 blocked=False`；diff-check 退出 0；clean-package `OK: . 未发现发布阻塞项`。首轮 size_diff 新增 1 个测试参数数告警，改为三参数场景 tuple、保留八组合后 **新增告警: 0；消失告警: 7**。迭代器的 pytest 弃用警告改用 tuple 消除，没有屏蔽警告或改断言；最终合同无警告。报告恢复、baseline 未改，“消失 7”是对线上基准的比较，不归功本补丁。
+- **路径/保护文件**：实际 grep 扫描相对 `274cedb1e` 的累计净 diff 增行，本机私人路径 **0 命中**；旧提交按要求不改写。STATUS/ROADMAP/COMPLETED、尺寸 baseline 和旧字节夹具与本轮父提交不变。不运行全仓 pytest、不操作 Gateway、不新增交接文档。
+
+命令均在工作树根，用指定 Python；`B1_TEST_TMP` 由现场规则指定，探针用 pytest 自建隔离临时目录。同树逐个执行 pytest/code-size：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+export PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1
+$PY scripts/build_constants_catalog.py
+$PY scripts/build_constants_catalog.py --check
+$PY -m pytest agent_py_agent/tests/test_plugin_manifest_v8.py -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+$PY -m pytest agent_py_agent/tests/test_plugin_manifest_v8.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_plugin_any_language.py agent_py_agent/tests/test_plugin_catalog_digest_stability.py agent_py_agent/tests/test_capability_package.py -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+$PY -m pytest agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+$PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+$PY agent_py_agent/tests/fixtures/plugin_manifest_v8_mutation_probe.py <上述变异名>
+$PY scripts/check_import_boundaries.py
+$PY -m ruff check agent_py_agent scripts
+$PY scripts/check_doc_sync.py
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
+git diff --check
+$PY scripts/check_clean_package.py .
+```
+
+真实 v8 进程、B7 两平台隔离/断网/跨 owner、TUI/飞书和 Linux 全量 **未验证**；本轮证明安装可保存而启用被关住，不证明 B7 的安全承诺已兑现。
+
+## M1 B1 两条裁定追加：观察不带工具参数、v8 订阅可独立贡献（2026-10-03，m1b1，`worker/m1-b1`，原提交 `20a930cd2` / `bf520e911` 之后新增提交 `ad6007106`，ae 复审通过，并入 step17i）
+
+- **来源/做法**：3a 2026-10-03 两条裁定。观察 text 只允许 `prompt_submitted`，工具开始只能 none；参数只走精确工具的 full 收紧门，确认预览不再承诺观察工具参数。只有显式 v8 将非空事件或收紧门算贡献，旧版本与空 v8 订阅门保留。
+- **新增/改写测试**：工具开始 text 改成带 `invalid_manifest` 的反例，覆盖直接声明、Manifest、ZIP 和坏包不发布；旧式工具 text 事实也不能在观察预览中承诺参数。纯事件/纯收紧包（无工具、面板、动作）都能序列化、ZIP 复读及真实静态构建；v6 无工具/面板仍以原原因拒绝；v8 四项全空仍由必须声明订阅的门拒绝；七版固定字节夹具未改。
+- **红转绿**：仅改测试时 **8 failed、107 passed in 0.85s**，失败落在两裁定、确认投影和真实构建，不是导入错误。最小实现后 **115 passed in 0.84s**。v6 拒绝/四空订阅等已有规则本来就绿，不声称每个兼容断言都曾红。
+- **本轮回归**：五文件 **271 passed、6 failed in 1.98s**，退出 1；仍是下方原 B1 记录中的六个 `test_plugin_any_language.py` 启用失败，没有改、删、放宽或跳过。**后续 ae 沙箱外基线 `274cedb1e` 和 B1 头 `bf520e911` 均 35 passed，失败来自 my-agent 命令沙箱环境（3a 转述，本线未亲自外部复验）**。guards9 完整十文件（含 packaging）**172 passed in 39.92s**。
+
+实际命令均在工作树根，指定 Python 与禁字节码设置；同树不并发两个 pytest/code-size，不跑全仓：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_manifest_v8.py -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_manifest_v8.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_plugin_any_language.py agent_py_agent/tests/test_plugin_catalog_digest_stability.py agent_py_agent/tests/test_capability_package.py -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+```
+
+**六个真实变异**：探针在分支 `worker/m1-b1`（`d6e9daccb`）的 `agent_py_agent/tests/fixtures/plugin_manifest_v8_mutation_probe.py`，不随包发布、挑进 step17i 时没带，复跑时临时取出到原位置、跑完删除；原四个重跑，新增两个。逐个新进程，只改函数内存代码；下列命令都真实退出 1，是测试抓到故意破坏，不包装为命令成功。
+
+| 变异名 | 故意破坏 | 本轮实际结果 |
+| --- | --- | --- |
+| `tool-start-text`（新增） | 重新允许工具开始观察 text | 3 failed、7 passed、105 deselected，0.74s |
+| `v8-contribution`（新增） | v8 订阅不再算贡献 | 4 failed、111 deselected，0.70s；纯事件/纯收紧的读包与构建均抓到 |
+| `full-effects` | full 放开 effects | 1 failed、42 passed、72 deselected，0.66s |
+| `network-bool` | 去掉真布尔检查 | 3 failed、40 passed、72 deselected，0.68s |
+| `host-api` | 去掉互斥门 | 1 failed、114 deselected，0.63s |
+| `confirmation-network` | network 确认事实固定 false | 1 failed、5 passed、109 deselected，0.66s |
+
+复现：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY agent_py_agent/tests/fixtures/plugin_manifest_v8_mutation_probe.py <变异名>`，逐个执行，不并发。
+
+- **本轮真实 CLI 静态入口**：合成声明/禁止执行的程序在忽略的 `tmp/m1b1-rulings-cli/`；实际分别执行 `$PY scripts/build_plugin_files_package.py --declaration tmp/m1b1-rulings-cli/<events-only或gates-only>.json --files-root tmp/m1b1-rulings-cli/files --output tmp/m1b1-rulings-cli/<同名>.zip`，两次退出 0。真实读包器读回两包均 v8、tools=0、panels=0，分别 events=1/gates=0 与 events=0/gates=1；同源确认预览断言提示正文/精确 full 工具范围通过。首个读回探针误用快照字段出现 AttributeError；读取真实合同后改用 archive_bytes 的摘要及 inspect_plugin_files 重跑通过，未改产品掩盖错误。未启用或执行插件、不提交合成包。
+- **已跑静态门禁**：import boundaries 0 条；Ruff `All checks passed!`；strict code-size `strict_scope_total=2228 hard=0 high-risk=1523 soft=705 test_advisory=1241 blocked=False`；报告已恢复、baseline 未改。size_diff 原样输出：`新增告警: 0`、`消失告警: 7`，后者是相对线上尺寸基准的比较，不归功本补丁。
+- **收尾实际结果**：`$PY scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`git diff --check` 退出 0；`$PY scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。六变异后正常新进程合同再次 **115 passed in 0.84s**。本轮保护文件/旧字节夹具与 `bf520e911` 的 diff 为空，仓库只修改既有文件。
+
+静态检查实际命令（同一指定 Python，执行时同样设 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`）：
+
+```bash
+$PY scripts/check_import_boundaries.py
+$PY -m ruff check agent_py_agent scripts
+$PY scripts/check_doc_sync.py
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
+git diff --check
+$PY scripts/check_clean_package.py .
+```
+- **范围/未验证**：没有新增配置、启用门或执行钩子；B7 local/main、开关及真沙箱仍未由 B1 实施。真实 v8 进程启用、TUI/飞书、两平台隔离和跨 owner 准入未验证；全量留 3a Linux 车道。旧交接文档、STATUS、ROADMAP、COMPLETED 不改，未新增交接文档、未部署/操作 Gateway。
+
+## M1 B1：插件清单 v8、订阅确认码与构建（2026-10-03，m1b1，`worker/m1-b1`，基于 `274cedb1e`，功能提交 `20a930cd2`，历史实施记录；ae 复审通过，并入 step17i）
+
+- **来源/做法**：严格按 `PLUGIN_EVENT_HOOKS` 第 4/5/10/13/15/18 节；只有 v8 文件入口可声明 `events/tool_gates/permissions`，复用原启用确认链。D9 属主门、总开关和实际沙箱归 B7，未在 B1 提前实施。
+- **新增 `test_plugin_manifest_v8.py`**：每条静态规则的正反/上限用例，六事件与正文默认、唯一性、gate 编号/精确工具/效果/full 范围、真布尔网络、空订阅、未知键、不可变对象、旧包夹带新字段、`host_api` 结构化冲突经 ZIP 读包器保持。
+- **兼容与确认**：固定设计基线采样的 `fixtures/plugin_manifest_v1_v7.json` 不在测试中重建，七版本序列化逐字节一致；同一包摘要下分别改事件、正文、工具、参数范围、效果和网络都改变确认码；中文预览完整参数/断网/强制沙箱要求；原 `PluginEnableTool` 确认路径组件拒绝旧码，`not_started/not_committed` 且不进入启用。该组件不是真进程启用验证。
+- **构建**：真实构建函数产生 v8 ZIP、同输入包字节一致、同读包器复验；禁止 `Popen` 的反证保证未执行插件，非法包不发布且不静默降级。
+- **CLI 入口冒烟**：在本树 `tmp/m1b1-v8-cli/` 准备合成声明和禁止执行的随包程序，实际跑 `$PY scripts/build_plugin_files_package.py --declaration tmp/m1b1-v8-cli/declaration.json --files-root tmp/m1b1-v8-cli/files --output tmp/m1b1-v8-cli/cli-v8.zip`，退出 0；再用真实 `inspect_plugin_package` 读回并断言 v8、prompt_submitted、cli-guard 和 network=False。产物只在忽略的 tmp，不提交；未执行或启用插件。
+- **红转绿**：旧实现合法 v8 被拒、`host_api` 指定码不保留；实现后独立合同 **106 passed in 1.90s**。
+
+所有命令在本工作树根运行，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；没有联网安装、Gateway 操作或全仓 pytest。
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_manifest_v8.py -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_manifest_v8.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_plugin_any_language.py agent_py_agent/tests/test_plugin_catalog_digest_stability.py agent_py_agent/tests/test_capability_package.py -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp="$B1_TEST_TMP" -o addopts=''
+```
+
+- 五文件历史回归：**262 passed、6 failed in 2.50s**，原结构化失败为 `plugin_endpoint_failed`。后续 **ae 沙箱外基线 `274cedb1e` 和 B1 头 `bf520e911` 都是 35 passed，失败来自 my-agent 命令沙箱环境**（3a 转述，本线未亲自沙箱外复验）。
+- 当时用 `git archive 274cedb1e68b31ab2ae083087a67ecbefab73084` 在本树 `tmp/m1b1-baseline/` 展开，沙箱内同文件 **29 passed、同六项 failed in 1.19s**；此历史环境观察由上述沙箱外复核说明原因，不再列为待定位。没有换分支、改别的工作树、删除/放宽/跳过失败测试。
+- guards9 十文件（含 `test_packaging.py`）：**172 passed in 40.98s**。
+
+**四个变异**（每个单独新进程，仅替换函数 `__code__`，从未写回产品；退出 1 是测试抓到，不伪装命令成功）：
+
+| 变异 | 杀死的合同 | 真正结果 |
+| --- | --- | --- |
+| `full-effects` | 允许 full 同时按 effects 收紧 | 1 failed、42 passed、63 deselected |
+| `network-bool` | 去掉网络真布尔检查 | 3 failed、40 passed、63 deselected |
+| `host-api` | 去掉 v8/host_api 互斥 | 1 failed、105 deselected |
+| `confirmation-network` | 确认事实 network 固定 false | 1 failed、5 passed、100 deselected |
+
+可复现探针：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY agent_py_agent/tests/fixtures/plugin_manifest_v8_mutation_probe.py <变异名>`。四个选择逐个运行，不并发；原始运行用等效 `tmp/m1b1_mutation_probe.py`。恢复新进程合同 106 全通过。
+
+- 已执行静态门禁：`$PY scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`$PY -m ruff check agent_py_agent scripts` → `All checks passed!`；strict code-size → `hard=0 blocked=False`，报告已 `git checkout -- CODE_SIZE_REPORT.md` 恢复；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → 新增告警 0、消失告警 7（对线上基准的比较，不归功 B1）。
+- 文档/包装收尾：`$PY scripts/check_doc_sync.py`（含 staged）→ `DOC_SYNC_PASS`；`git diff --check` 退出 0；`$PY scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
+- 入库变异探针四项已再执行，捕获结果与上表一致；收尾正常新进程 **106 passed in 0.77s**，完整 guards9 **172 passed in 33.17s**，导入边界仍 0 条。没有把变异退出 1 包装成功，也没有改产品来运行变异。
+- **未验证**：真实 v8 插件进程启用、TUI/飞书、Linux/Mac 真沙箱和跨 owner 启用门；全量由 3a Linux 车道执行。`sandbox=required` 是确认需求而非隔离已生效。当前待 ae 一并复审；B7 前启用关闭门见本文件顶部，本段保留原交付测试事实。
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

@@ -18,6 +18,7 @@ from pathlib import Path
 from .common.nofollow_fs import read_bytes_beneath
 from .common.strict_json import load_strict_json
 from .plugin_entry import host_platform_tag, platform_supported
+from .plugin_events.confirmation import event_confirmation_facts, event_confirmation_lines
 
 RUNTIME_PIN_FILE = "runtime.json"
 _PIN_SCHEMA = "plugin_runtime_pin.v1"
@@ -172,10 +173,11 @@ def runtime_problem(owner, installation) -> str:
     return ""
 
 
-# LLM: 回执只列宿主解析出的结构化事实与随包文件元数据；确认码由这些事实生成，任一变化（包、平台、解释器）都会作废旧码。
-# 函数用途: 生成"需要用户确认"回执的详细内容。
+# LLM: 旧事实保持原字节；v8 额外绑定订阅、收紧、网络与强制沙箱需求，改订阅也作废旧码，不读取私有配置。
+# 函数用途: 生成启用前确认事实，确认范围不是实际进程或沙箱验收证明。
 def confirmation_details(manifest, package_sha256: str, facts: PluginRuntimeFacts, files) -> dict:
     return {
+        **event_confirmation_facts(manifest),
         "plugin_id": manifest.plugin_id, "version": manifest.version, "package_sha256": package_sha256,
         "entry": manifest.entry.to_payload(), "platform": facts.platform, "declared_platforms": list(manifest.platforms),
         "files": [{"path": item.declaration.path, "sha256": item.declaration.sha256, "size": len(item.content),
@@ -192,8 +194,8 @@ def confirmation_code(details: dict) -> str:
     return hashlib.sha256(json.dumps(details, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
 
 
-# LLM: 只把确认回执里的结构化事实排成中文文本给人看，不参与任何机器判断；文件多时只列前 20 个并注明总数。
-# 函数用途: 生成 TUI 里展示的"启用前请确认"说明，末行给出带确认码的命令。
+# LLM: 只展示结构化确认事实，不据文本授权；v8 明示正文/参数/网络/强制沙箱，旧文案与文件截断不变。
+# 函数用途: 生成 TUI/IM 共用的启用前说明，末行给出绑定当前事实的确认命令。
 def confirmation_message(confirmation: dict) -> str:
     entry = confirmation.get("entry") or {}
     lines = ["启用前需要你确认：这个插件会以你本人的权限在本机运行下面的程序。",
@@ -216,4 +218,5 @@ def confirmation_message(confirmation: dict) -> str:
     if len(files) > 20:
         lines.append(f"  …… 另有 {len(files) - 20} 个文件")
     lines.append(f"确认无误后输入：/plugins enable {confirmation.get('plugin_id')} --confirm {confirmation.get('confirm_code')}")
+    lines[-1:-1] = event_confirmation_lines(confirmation)
     return "\n".join(lines)

@@ -42,6 +42,14 @@
   `_apply_limit_settlement` 一并写进答复 `guidance_settlement`。
 - 回归：`test_steer_closeout_replay.py`（含 `host_notices_from` 认 `HostNotice` 的渲染回归）。
 
+## M1 B1：静态订阅声明边界（2026-10-03，待集成）
+
+- `plugin_events/declarations` 是 v8 不可变声明与严格校验的唯一位置；`plugin_manifest` 仅按显式新协议接入，不读取 owner 或宿主设置。
+- 3a 2026-10-03 裁定落实在原声明域：观察 text 仅提示提交；工具参数留给精确 full 收紧门。v8 的非空订阅算贡献，允许没有工具/面板；旧协议不放宽。
+- `plugin_events/confirmation` 将同一声明投影为四项确认事实和中文范围；`plugin_runtime_facts` 并入原确认码。`PluginEnableTool` 在确认前对 `permissions` 非空包按关闭拒绝，构造不生成 v8 计划；v1–v7 保持原确认/CAS 路径，安装链不变。
+- 构建器沿同一读包器验证后排他发布，旧 v1–v7 字节保持；该域没有通道、事件中心或执行器钩子。
+- `sandbox=required` 表示强制要求，非运行状态。B7 须同时替换 B1 暂时拒绝与构造期计划排除，接入真正开关、local/main、强制沙箱、断网与收窄读；B1 不伪装这些门已落地。
+
 ## 管理员判定统一入口（P14 第 6 条，2026-10-02，待集成）
 
 - `gateway_parts/settings_control_service._is_admin` → `user_space/owner_access.is_complete_local_admin_owner`。

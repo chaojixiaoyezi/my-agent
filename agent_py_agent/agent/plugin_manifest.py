@@ -1,5 +1,6 @@
 # LLM: 包描述是未授权的静态声明；不接受宿主身份、配置值或启用事实，命令和工具 schema 必须沿现有合同。
-# 模块用途: 校验 Python、非 Python 与 v7 纯内容能力包，提供无需导入插件的帮助信息及不可变包元数据。
+#   v8 沿 v6 文件入口且可只贡献订阅；联测旧 v1–v7 固定字节、贡献门和启用确认码，不在此授予权限。
+# 模块用途: 校验 Python、非 Python、纯内容能力包及 v8 订阅，提供不导入插件的帮助及不可变元数据。
 
 from __future__ import annotations
 
@@ -19,6 +20,13 @@ from .command_declarations import command_action_from_payload, declaration_list
 from .plugin_commands import PluginCommandSpec
 from .plugin_display.protocol import PanelDeclaration, validate_panels
 from .plugin_entry import PluginEntry, PluginFile, validate_entry_files
+from .plugin_events.declarations import (
+    PluginEventDeclaration,
+    PluginEventPermissions,
+    PluginToolGateDeclaration,
+    subscriptions_from_payload,
+    validate_subscriptions,
+)
 from .plugin_observation import (
     MAX_CANDIDATE_COUNT,
     PluginToolObservation,
@@ -40,6 +48,8 @@ PLUGIN_PACKAGE_SCHEMA_V5 = "plugin_package.v5"
 # v6 是非 Python 插件：用结构化 entry（随包可执行文件 / 系统解释器加随包脚本）与 files、platforms 取代 Python 模块和 wheel；
 # 面板/Skill/宿主 API/观察字段照旧可选。Python 包继续用 v1–v5，读写字节不变
 PLUGIN_PACKAGE_SCHEMA_V6 = "plugin_package.v6"
+# v8 只在 v6 文件入口上新增事件/收紧/权限；没有订阅的包仍用 v6，不改变旧版本输出字节。
+PLUGIN_PACKAGE_SCHEMA_V8 = "plugin_package.v8"
 PLUGIN_HOST_API_PERMISSIONS = ("read",)
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 # 单个插件最多可挂载的 skill 数；防止插件注入海量 skill 占用命名空间。
@@ -117,8 +127,8 @@ def _validate_observation_declaration(tool: PluginToolDeclaration, canonical: ob
     validate_observation_declaration(tool.observation, tool.observation_ref, effect=tool.requested_effect, input_schema=canonical)
 
 
-# LLM: 这是包的不可变内容，不保存安装状态、owner 或激活代次；先校验声明再允许安装服务持久保存。
-# 类用途: 汇集入口、依赖、命令、工具和设置 schema，帮助可直接从这里生成。
+# LLM: 这是包的不可变内容，不保存安装状态、owner 或激活代次；v8 权限对象显式区分新协议，旧包保持 None。
+# 类用途: 汇集入口、依赖、命令、工具、订阅与设置，先验证声明再交给安装服务。
 @dataclass(frozen=True)
 class PluginManifest:
     plugin_id: str
@@ -141,10 +151,12 @@ class PluginManifest:
     files: tuple[PluginFile | CapabilityFile, ...] = ()
     platforms: tuple[str, ...] = ()
     capability: CapabilityDeclaration | None = None
+    events: tuple[PluginEventDeclaration, ...] = ()
+    tool_gates: tuple[PluginToolGateDeclaration, ...] = ()
+    permissions: PluginEventPermissions | None = None
 
-    # LLM: 直接构造与 JSON 读取共用约束；只开放工具动作和指向本包面板的展示动作，不接受包指定管理操作。
-    #   纯内容包没有入口或公开工具；旧可执行协议仍要求工具或面板，不能借新协议放宽旧声明。
-    # 函数用途: 在包进入候选安装前拒绝重复身份、缺失入口及动作指向未声明的工具或面板。
+    # LLM: 直接构造与 JSON 同源；只有显式 v8 将非空订阅计贡献，旧协议原规则不变，host_api 仍与订阅互斥。
+    # 函数用途: 安装前验证入口与贡献，允许纯订阅的 v8，但不授执行权或放宽旧包贡献门。
     def __post_init__(self) -> None:
         _text(self.version)
         _text(self.summary)
@@ -170,9 +182,12 @@ class PluginManifest:
         if (not isinstance(self.host_api, tuple) or len(set(self.host_api)) != len(self.host_api)
                 or any(item not in PLUGIN_HOST_API_PERMISSIONS for item in self.host_api)):
             raise ValueError("宿主 API 权限名单无效")
+        _validate_event_declarations(self)
         tool_names = {tool.name for tool in self.tools}
         panel_ids = {panel.id for panel in self.panels}
-        if len(tool_names) != len(self.tools) or not (tool_names or panel_ids or self.is_content_only):
+        # 版本门已验证，只有显式 v8 能把订阅算贡献；旧包连原拒绝文案也保持不变。
+        v8_contributes = self.permissions is not None and bool(self.events or self.tool_gates)
+        if len(tool_names) != len(self.tools) or not (tool_names or panel_ids or self.is_content_only or v8_contributes):
             raise ValueError("工具重名，或既没有工具也没有面板")
         _validate_observation_pairs(self.tools)
         for action in self.actions:
@@ -258,17 +273,21 @@ class PluginManifest:
             for tool in self.tools
         ]
 
-    # LLM: v6 字段全部显式输出（面板、Skill、宿主 API 可为空列表），不与 v1–v5 的逐级升版规则混用。
-    # 函数用途: 生成非 Python 包的静态包描述。
+    # LLM: v6 的字段和字节保持不变；只有显式 v8 权限对象才加入订阅，沿同一入口/文件协议序列化。
+    # 函数用途: 生成非 Python 包及事件插件的静态描述，不混入启用或沙箱运行状态。
     def _v6_payload(self) -> dict:
         return json.loads(_json({
-            "schema_version": PLUGIN_PACKAGE_SCHEMA_V6, "plugin_id": self.plugin_id, "version": self.version,
+            "schema_version": PLUGIN_PACKAGE_SCHEMA_V8 if self.permissions is not None else PLUGIN_PACKAGE_SCHEMA_V6,
+            "plugin_id": self.plugin_id, "version": self.version,
             "summary": self.summary, "entry": self.entry.to_payload(),
             "files": [asdict(item) for item in self.files], "platforms": list(self.platforms),
             "actions": [asdict(action) for action in self.actions], "default_action": self.default_action,
             "tools": self._tool_payloads(), "settings_schema": self.settings_schema,
             "panels": [panel.to_payload() for panel in self.panels], "skills": list(self.skills),
             "host_api": list(self.host_api),
+            **({"events": [event.to_payload() for event in self.events],
+                "tool_gates": [gate.to_payload() for gate in self.tool_gates],
+                "permissions": self.permissions.to_payload()} if self.permissions is not None else {}),
         }))
 
     # LLM: 输出只包含协议声明，不含私有运行字段；JSON 形态由命令 dataclass 和原 schema 投影产生。
@@ -309,8 +328,8 @@ class PluginManifest:
             )
         )
 
-    # LLM: 严格字段和有限 UTF-8 JSON 阻断包伪造宿主状态或夹带不可传输文本；不创建目录、不导入实现。
-    # 函数用途: 从 JSON 对象恢复经过公共合同验证的包描述。
+    # LLM: 严格版本字段阻断旧包夹带 v8 声明；保留已分类的安全冲突原因，其余错误统一脱敏，不执行插件。
+    # 函数用途: 从 JSON 恢复经过合同验证的包，旧 v1–v7 的读取路径保持不变。
     @classmethod
     def from_payload(cls, payload: object) -> PluginManifest:
         try:
@@ -318,7 +337,7 @@ class PluginManifest:
             version = payload.get("schema_version") if isinstance(payload, dict) else None
             if version == CAPABILITY_PACKAGE_SCHEMA:
                 return cls._from_content(payload)
-            if version == PLUGIN_PACKAGE_SCHEMA_V6:
+            if version in (PLUGIN_PACKAGE_SCHEMA_V6, PLUGIN_PACKAGE_SCHEMA_V8):
                 return cls._from_v6(payload)
             if version not in _SCHEMA_FIELDS:
                 raise ValueError("包协议版本无效")
@@ -350,6 +369,8 @@ class PluginManifest:
                 skills=skills,
                 host_api=host_api,
             )
+        except PluginPackageError:
+            raise
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
             raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc
 
@@ -367,26 +388,29 @@ class PluginManifest:
                    files=tuple(CapabilityFile(**_fields(item, "path sha256 executable"))
                                for item in declaration_list(row["files"])))
 
-    # LLM: v6 字段集合固定（面板、Skill、宿主 API 可为空列表）；Python 入口字段在 v6 里不存在，构造时置空。
-    # 函数用途: 从 v6 JSON 恢复非 Python 包描述，错误由 from_payload 统一转为包描述无效。
+    # LLM: v6/v8 共用固定文件入口字段；v8 的三项新增声明显式必填，不向旧协议注入默认字段。
+    # 函数用途: 恢复非 Python 包，并只在 v8 读取订阅与权限；错误由公共入口脱敏。
     @classmethod
     def _from_v6(cls, payload: dict) -> PluginManifest:
-        row = _fields(payload, _V6_FIELDS)
+        is_v8 = payload["schema_version"] == PLUGIN_PACKAGE_SCHEMA_V8
+        row = _fields(payload, _V8_FIELDS if is_v8 else _V6_FIELDS)
         panels, skills, host_api = _extension_fields(PLUGIN_PACKAGE_SCHEMA_V6, row)
         files = tuple(PluginFile(**_fields(item, "path sha256 executable")) for item in declaration_list(row["files"]))
         return cls(
             plugin_id=row["plugin_id"], version=row["version"], summary=row["summary"],
             entry_module="", entry_wheel="", wheels=(),
             actions=tuple(command_action_from_payload(item) for item in declaration_list(row["actions"])),
-            default_action=row["default_action"], tools=_tools_from_payload(row["tools"], PLUGIN_PACKAGE_SCHEMA_V6),
+            default_action=row["default_action"], tools=_tools_from_payload(row["tools"], row["schema_version"]),
             settings_schema_json=_json(row["settings_schema"]), panels=panels, skills=skills, host_api=host_api,
             entry=PluginEntry.from_payload(row["entry"]), files=files,
             platforms=tuple(declaration_list(row["platforms"])),
+            **(subscriptions_from_payload(row) if is_v8 else {}),
         )
 
 
 _V6_FIELDS = ("schema_version plugin_id version summary entry files platforms actions default_action tools "
               "settings_schema panels skills host_api")
+_V8_FIELDS = _V6_FIELDS + " events tool_gates permissions"
 _BASE_FIELDS = "schema_version plugin_id version summary entry_module entry_wheel wheels actions default_action tools settings_schema"
 # 各协议版本在基础字段之外必须出现的字段；每个新版本声明的新能力不能为空（否则应使用更低版本）
 _SCHEMA_FIELDS = {
@@ -400,15 +424,30 @@ _TOOL_REQUIRED_FIELDS = frozenset({"name", "description", "input_schema", "reque
 _TOOL_V5_OPTIONAL_FIELDS = frozenset({"observation", "observation_ref"})
 
 
-# LLM: 工具项字段严格：v1–v4 只允许四个基础字段；v5 另允许两个可选观察字段。未知键不能静默丢弃。
-# 函数用途: 按协议版本检查一个工具声明项的字段集合。
+# LLM: v8 沿 v6 支持 v5 观察字段，旧 v1–v4 不放宽；未知字段不能静默丢弃。
+# 函数用途: 按显式版本检查一个工具声明项的字段集合。
 def _tool_fields(value: object, version: str) -> dict:
-    optional = (_TOOL_V5_OPTIONAL_FIELDS if version in {PLUGIN_PACKAGE_SCHEMA_V5, PLUGIN_PACKAGE_SCHEMA_V6}
+    optional = (_TOOL_V5_OPTIONAL_FIELDS if version in {PLUGIN_PACKAGE_SCHEMA_V5, PLUGIN_PACKAGE_SCHEMA_V6, PLUGIN_PACKAGE_SCHEMA_V8}
                 else frozenset())
     if (not isinstance(value, dict) or not set(value) >= _TOOL_REQUIRED_FIELDS
             or set(value) - _TOOL_REQUIRED_FIELDS - optional):
         raise ValueError("包描述字段不完整或存在未知字段")
     return value
+
+
+# LLM: 包层唯一 v8 分类门：权限对象必须显式、必须是文件入口且有订阅；host_api 冲突以设计指定码返回。
+# 函数用途: 防止直接构造、轮子包或内容包绕过 v8 订阅约束，不读取 owner 或运行状态。
+def _validate_event_declarations(manifest: PluginManifest) -> None:
+    validate_subscriptions(manifest.events, manifest.tool_gates)
+    if manifest.permissions is None:
+        if manifest.events or manifest.tool_gates:
+            raise ValueError("事件订阅必须声明 v8 权限")
+        return
+    if (not isinstance(manifest.permissions, PluginEventPermissions) or manifest.entry is None
+            or manifest.is_content_only or not (manifest.events or manifest.tool_gates)):
+        raise ValueError("v8 必须使用文件入口并声明订阅")
+    if manifest.host_api:
+        raise PluginPackageError("events_with_host_api_unsupported", "第一期事件插件不能同时声明宿主 API。")
 
 
 # LLM: 工具项在各版本共用同一构造；观察字段是否允许由 _tool_fields 按版本裁决。

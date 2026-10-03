@@ -1,5 +1,5 @@
-# LLM: 启用复用原 HostCommand/ToolExecutor 和安装表；只有新计划声明候选资源，联测重复启用和缺失拒绝，不建立第二套账。
-# 模块用途: 验证隔离环境及工具目录后发布贡献；非 Python 插件先给用户看确认回执、凭确认码才继续；已启用版本保持原代，不创建空资源声明或新候选，私有值不进回执。
+# LLM: 启用复用原 HostCommand/ToolExecutor 和安装表；B7 未落地时 v8 在确认前拒绝、不给候选资源，联测关闭门和旧版启用，不建立第二套账。
+# 模块用途: 验证隔离环境及工具目录后发布贡献；v8 暂不可启用，旧版非 Python 插件仍凭确认码继续；私有值不进回执。
 
 from __future__ import annotations
 
@@ -43,18 +43,18 @@ from .tooling.models import (
 )
 
 
-# LLM: owner/binding/installation 由宿主冻结；构造只为新激活声明计划，无计划路径不得创建资源，保持原幂等链。
-# 类用途: 接入明确管理员启用，对已启用版本保持不变，对准备失败继续拒绝使用。
+# LLM: owner/binding/installation 由宿主冻结；关闭的 v8 不解析运行时或生成计划，旧版保持原幂等/CAS 链。
+# 类用途: 接入明确管理员启用，B7 安全底座未就绪时先阻止 v8 运行，对旧版准备失败继续拒绝。
 class PluginEnableTool(BaseTool):
-    # LLM: never 仅免管理动作重复询问；只有未激活版本生成计划及资源声明，无计划分支只核对原激活或返回拒绝。
+    # LLM: never 仅免管理动作重复询问；只有未激活的旧版生成计划及资源声明，v8 暂无候选与运行时读取。
     #   process_sandbox 来自管理上下文的配置 plugin_process_sandbox，决定候选进程是否套平台沙箱。
-    # 函数用途: 可执行包在领取前声明环境；内容包、已启用或缺失插件均不构造虚假资源域。
+    # 函数用途: 可启用的旧版包在领取前声明环境；关闭的 v8、内容包、已启用或缺失插件均不构造资源域。
     def __init__(self, owner, repository, binding, installation, catalog_revision, *, process_sandbox: bool = False):
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
         self.process_sandbox = process_sandbox
         self._verifier_consent = ""
-        pending = (installation is not None and installation.activation is None
+        pending = (installation is not None and installation.manifest.permissions is None and installation.activation is None
                    and not installation.manifest.is_content_only)
         self.runtime, self.runtime_error = _runtime_facts(installation) if pending else (None, "")
         self.plan = (plan_plugin_environment(installation, binding.request.operation_id,
@@ -72,13 +72,16 @@ class PluginEnableTool(BaseTool):
                              if self.plan else ResourceScopePolicy("none")),
         )
 
-    # LLM: 原请求重放由执行器完成；失败保留原准备事实与资源，不换 operation 或重建候选来掩盖未知结果。
-    # 函数用途: 处理版本/缺失拒绝、非 Python 插件的用户确认和完整启用，将实际提交状态交回原工具账。
+    # LLM: 原请求重放由执行器完成；v8 按总开关关闭在确认前返回 not_started/not_committed，旧版失败保持原事实。
+    # 函数用途: 先拒绝未具安全底座的订阅包，再处理旧版确认与启用，将实际提交状态交回原工具账。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         if params["catalog_revision"] != self.catalog_revision:
             return self._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
         if self.installation is None or self.installation.manifest.plugin_id != params["plugin"]:
             return self._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
+        if self.installation.manifest.permissions is not None:
+            # B7 落地时换成真正的总开关、local/main 与强制沙箱判定；此前按关闭处理，不能凭确认码兑现空安全承诺。
+            return self._failure("plugin_events_disabled", "TOOL_EXECUTION_FAILED", "not_started")
         if self.runtime_error:
             return self._failure(self.runtime_error, "TOOL_EXECUTION_FAILED", "not_started")
         if self.plan is not None and plugin_sandbox_problem(self.process_sandbox, self.owner.home_dir):

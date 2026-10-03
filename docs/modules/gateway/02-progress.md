@@ -22,6 +22,13 @@
   次数耗尽时 `runtime_errors` 的"会自动退避重试"文案同样不准，属原有行为不在本次范围。
 - 测试与变异结果见 TESTS.md"修法 B 返工"。
 
+## M1 B1：订阅静态合同与确认码（2026-10-03，本地已实施、待集成）
+
+- Gateway 原插件管理入口仍消费 `PluginManifest` 和原启用确认链；v8 四项订阅/权限事实加入确认码，不新增控制命令或启动 Gateway。
+- 除声明、构建和权限预览，B1 按 ae 意见补过渡关闭门：v8 安装允许，启用在确认前返回 `plugin_events_disabled`、`not_started/not_committed`；不创建环境计划。B7 须替换该拒绝与计划排除，接入真正开关、local/main、强制沙箱。事件投递/握手归 B2/B3，事件点归 B4，不能把 B1 当完整事件能力。
+- 3a 2026-10-03 两条裁定已追加实施、交 ae 复审：观察正文仅提示文字；工具参数只经精确 full 收紧门；v8 非空订阅可独立贡献，旧版本规则不变。
+- ae 意见修订的合同 125 项、常数目录 11 项及 --check 877 项一致已有本轮证据；新增关闭门变异被抓到。ae 沙箱外基线 `274cedb1e` 与 B1 头 `bf520e911` 的旧启用文件均 35 passed，六失败来自 my-agent 命令沙箱环境（3a 转述，本线未亲自外部复验）。本轮收尾及真实 TUI/IM 未验边界见 TESTS。
+
 ## /plugins list 末尾加 MCP 服务段（J16 片 F，2026-10-02，ef，分支 `claude/ef-j16-slice-f`，基于 `claude/3a-step17h` `afb15947b`，待集成）
 
 - `plugin_command_service._scope_management` 组装管理服务时多做一步：`resolve_loaded_gateway_scope_agent` 被动查找已加载的 owner 实例，

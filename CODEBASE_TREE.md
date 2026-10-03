@@ -296,7 +296,11 @@ agent_py_agent/
 |   |-- plugin_command_catalog.py      # 可验证的不可变目录快照、JSON 合同及内容版本
 |   |-- plugin_command_service.py      # 宿主作用域目录与旧版本拒绝，不拥有安装和执行权
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
-|   |-- plugin_manifest.py             # 静态包描述、不可变 schema 与默认停用的命令投影；v2 面板、v3 Skill、v4 宿主 API、v5 观察/观察引用声明
+|   |-- plugin_manifest.py             # 静态包描述与不可变 schema：v2 面板、v3 Skill、v4 宿主 API、v5 观察，v8 文件入口订阅；旧字节保持
+|   |-- plugin_events/                 # M1 插件事件域；B1 只有静态声明和确认，不代表已授权或已隔离
+|   |   |-- __init__.py                # 事件域命名空间，不在导入时启动服务
+|   |   |-- declarations.py            # v8 事件、工具收紧门、网络权限的不可变声明与严格校验
+|   |   `-- confirmation.py            # 同源四项确认事实和中文正文/参数/网络/强制沙箱需求预览
 |   |-- plugin_observation.py          # 观察候选宿主合同（插件与 MCP 共用）：声明类型与配对规则、载荷整份校验（含几何 frame/region）、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
 |   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
@@ -332,7 +336,7 @@ agent_py_agent/
 |   |-- plugin_update.py               # 版本更新纯计划：同 ID 新包替换已停用安装，install+可选 configure 两步回执保留配置
 |   |-- plugin_update_tool.py          # 模型不可见的更新管理工具：读新包、按当前版本 CAS 提交替换，回执带配置是否保留
 |   |-- plugin_configure_tool.py       # 经原执行器读取和验证私有配置，结果不含配置值
-|   |-- plugin_enable_tool.py          # 原操作内准备环境、核对目录并确认候选退出后发布
+|   |-- plugin_enable_tool.py          # B7 前确认之前拒绝 v8；旧版原操作内准备、核对目录、候选退出后发布
 |   |-- plugin_disable_tool.py         # 原宿主链中的隐藏停用工具，区分撤销与资源清理结果
 |   |-- plugin_remove_tool.py          # 原宿主链中先停用释放再卸载，保留产物及确定/未知提交事实
 |   |-- plugin_sources.py              # 安装包与配置共用的有界授权文件读取
@@ -1108,6 +1112,8 @@ agent_py_agent/
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
 |   |-- test_plugin_observation.py     # 插件观察候选宿主合同：形状码、ID 稳定、投影、事件序新鲜度、动作候选复核
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查；v5 观察声明往返与非法声明
+|   |-- test_plugin_manifest_v8.py     # M1 B1：严格静态声明、旧 v1–v7 字节、订阅确认、构建与原确认组件
+|   |-- fixtures/plugin_manifest_v1_v7.json # 固定设计基线的七版本序列化字节，不在测试中重建
 |   |-- test_plugin_any_language.py    # v6 非 Python 插件：包描述、可复现打包、确认回执、解包准备、解释器固定与真实 MCP 启停
 |   |-- test_plugin_any_language_samples.py # 跨语言读取检查一致性用例（Python 参考 + Node 移植）与 hello-node/hello-go 宿主链路
 |   |-- test_shuohao_novel_gates.py     # C14 M-B1：五阶段真实 Node MCP、74+20 读取向量、原样许可/NUL、自检、无写入与宿主链（环境失败保留）
@@ -1234,7 +1240,7 @@ scripts/
 |-- build_constants_catalog.py              # 模块级数值常数只读目录生成器（ast 静态扫描，不 import 产品代码；--check 校验）
 |-- build_plugin_api.py                # 固定共用源码原字节投影，标准构建零运行依赖 SDK wheel
 |-- build_plugin_package.py            # 构建自有 Python 插件；wheel 与外层 ZIP 都固定归档元数据并经原包/依赖校验
-|-- build_plugin_files_package.py      # 构建非 Python（任意语言）插件的 v6 安装包：生成摘要、固定时间戳、宿主读包器复核
+|-- build_plugin_files_package.py      # 构建任意语言插件 v6/v8：显式新声明升 v8、生成摘要、固定时间戳、同读包器复核后发布
 |-- plugin_build.py                    # 开发构建后端调用、wheel 元数据读取与独占产物写入
 |-- bench/                             # GW-03/慢模型配对基准：锁内解析成本、owner 事实缓存各路径（配对交替，比值只在组内）；决策模型中文质量基准
 |   |-- decision_quality_bench.py      # 决策质量基准运行器：离线核对、真实打分、阈值比对、登记成绩、“点位默认打开”前提检查
@@ -1613,6 +1619,9 @@ docs/
 - `agent_py_agent/agent/plugin_command_catalog.py`：冻结及校验完整管理/插件声明，内容摘要绑定 owner 视图、版本和激活引用；不提供权限凭证。
 - `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
+- `agent_py_agent/agent/plugin_events/declarations.py` 与 `confirmation.py`：v8 订阅与网络需求的唯一不可变声明及同源确认投影；不含通道、投递、钩子或实际沙箱，不改变旧包确认。
+- `agent_py_agent/tests/test_plugin_manifest_v8.py`：B1 静态规则、旧字节、同摘要确认和构建，含真实临时安装、原命令 v8 拒绝及 v6 确认路径兼容；`tests/fixtures/plugin_manifest_v1_v7.json` 固定基线字节，变异探针仅进程内变异、不改产品文件。
+- `docs/tasks/M1_B1_HANDOFF.md`：B1 分支交接、真实验证/失败/未验边界与四个变异复现方法。
 - `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。
 - `agent_py_agent/agent/plugin_environment.py`、`plugin_environment_plan.py` 与 `plugin_environment_process.py`：计划先进入原 operation，准备沿原 owner 配额与 ProcessSessionStore；只返回准备事实，不发布激活或重建进程账。
 - `agent_py_agent/agent/plugin_entry.py`、`plugin_runtime_facts.py` 与 `plugin_files_environment.py`：v6 非 Python 插件的声明、本机运行事实与解包准备；启用前生成用户确认回执，解释器按真实路径与摘要固定、每次启动复核，全程不执行随包文件或解释器（启动插件进程除外）。
@@ -1630,7 +1639,7 @@ docs/
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v4 显式保留和激活归属，旧 v2/v3 原版本恢复边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，列表／详情投影当前安装快照，查询只读原请求。
-- `agent_py_agent/agent/plugin_enable_tool.py`：在原管理操作中准备环境、完整验证候选目录，确认退出后才发布同代 active。
+- `agent_py_agent/agent/plugin_enable_tool.py`：B7 前在确认码之前以 `plugin_events_disabled` 拒绝 v8，不解析运行时/生成计划；旧版仍沿原操作准备、完整验证候选目录并在确认退出后发布同代 active。
 - `agent_py_agent/agent/plugin_runtime.py` 与 `tooling/plugin_registration.py`：固定激活的 MCP 适配和新运行组合；原客户端共享连接，权限视图单独生成目录，不新建激活缓存权威。
 - `agent_py_agent/tests/test_mcp_operation_outcomes.py`：通过原执行器和临时 RuntimeDB 区分完整失败回执与未知结果，核对重放及逻辑资源释放。
 - `agent_py_agent/agent/workspace_read_context.py` 与 `tooling/workspace_read_scope.py`：纯读取协议和宿主组装分开，插件复用唯一 `path_access_policy.py` 裁决；范围为空明确拒绝，不从隔离进程环境补权限。

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 888,
+  "count": 890,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4386,6 +4386,22 @@
       "unit": "个文件",
       "category": "上限预算",
       "description": "与包读取器默认成员上限（128，含 plugin.json）一致，避免描述合法而读包必然超限"
+    },
+    {
+      "name": "MAX_PLUGIN_GATE_TOOL_COUNT",
+      "file": "agent_py_agent/agent/plugin_events/declarations.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每条收紧门最多列十六个精确工具名，按第一期设计限制声明及确认预览的体积。"
+    },
+    {
+      "name": "MAX_PLUGIN_TOOL_GATE_COUNT",
+      "file": "agent_py_agent/agent/plugin_events/declarations.py",
+      "value": 4,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每包最多四条收紧门，按第一期设计限制一次工具调用需要合并的插件规则量。"
     },
     {
       "name": "_DATA_MODE",

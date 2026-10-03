@@ -251,12 +251,14 @@ def read_zip_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo, limit: in
     return content
 
 
-# LLM: manifest 沿公共严格 JSON 入口读取；描述和权威记录保持同一传输约束，不能以重名字段覆盖身份。
-# 函数用途: 通过公共严格 JSON 读取器转换不可变描述，并统一报告损坏内容。
+# LLM: manifest 沿公共严格 JSON 入口读取；已分类的包错误原样保留，避免把 v8 宿主 API 冲突洗成通用错误。
+# 函数用途: 恢复不可变描述并脱敏损坏 JSON，保留设计规定的结构化拒绝原因。
 def _read_manifest(content: bytes) -> PluginManifest:
     try:
         payload = load_strict_json(content)
         return PluginManifest.from_payload(payload)
+    except PluginPackageError:
+        raise
     except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
         raise PluginPackageError("invalid_manifest", "插件包描述无效。") from exc
 
