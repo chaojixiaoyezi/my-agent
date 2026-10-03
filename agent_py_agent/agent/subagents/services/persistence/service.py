@@ -179,10 +179,10 @@ class SubAgentPersistenceService:
     # 函数用途: 初始化子代理持久化服务及线程安全的解析缓存，供 Gateway 并发状态查询复用。
     def __init__(self, manager: Any):
         self.manager = manager
-        # mtime 缓存:子代理 task.json 未变时复用已解析对象,避免每轮 dispatch 全量重读+重解析。
-        # 大量历史 DONE 子代理累积时(实测 600 个全量 745ms)命中后只 stat。返回 deepcopy 副本,
-        # 调用方改了也不污染缓存(无需逐一审 33 处调用方是否只读)。
-        self._run_cache: dict[str, tuple[int, SubAgentTask]] = {}
+        # task.json 文件指纹未变时复用解析对象，避免每轮 dispatch 全量重读+重解析。
+        # 仅用 mtime 会在低精度文件系统的同一时间片漏掉原子替换，故同时核对 inode、大小和 ctime。
+        # 命中后仍只 stat；返回 deepcopy 副本，调用方修改不会污染缓存对象。
+        self._run_cache: dict[str, tuple[tuple[int, int, int, int, int], SubAgentTask]] = {}
         self._run_cache_lock = threading.RLock()
 
     @property
@@ -255,9 +255,9 @@ class SubAgentPersistenceService:
     def list_runs_report(self) -> SubAgentListRunsReport:
         """Scan task records and preserve per-record load failures.
 
-        mtime 缓存:task.json 未变(mtime 相同)就复用上次解析的对象、只 stat 不重读重解析。
-        大量历史 DONE 子代理累积时(实测 600 个全量 read+parse 745ms),命中后降到 stat(17ms)+
-        deepcopy(82ms)。返回 deepcopy 副本,保证缓存对象不被任何调用方修改污染。
+        文件指纹(dev/inode/size/mtime/ctime)未变就复用解析对象、只 stat 不重读重解析，
+        原子替换即使复用低精度 mtime 也会因 inode/ctime 变化失效。返回 deepcopy 副本，
+        保证缓存对象不被任何调用方修改污染。
         """
 
         runs: list[SubAgentTask] = []
@@ -321,15 +321,22 @@ class SubAgentPersistenceService:
         return _list_runs_for_root_report(self, root_task_id)
 
     # LLM: Cache access is serialized because ThreadingHTTPServer may render several TUI/Web
-    # projections concurrently. Nanosecond mtimes invalidate parsed objects; deep copies preserve
-    # the existing rule that callers cannot mutate shared cached state.
+    # projections concurrently. File identity/size/mtime/ctime invalidate parsed objects even
+    # when a filesystem reuses one coarse mtime tick; deep copies keep cached state private.
     # 函数用途: 线程安全地复用未变化的子代理解析结果，并给调用方返回独立副本。
     def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
         with self._run_cache_lock:
-            mtime_ns = task_file.stat().st_mtime_ns
+            stat = task_file.stat()
+            signature = (
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
+            )
             cached = self._run_cache.get(run_id)
-            if cached is None or cached[0] != mtime_ns:
-                self._run_cache[run_id] = (mtime_ns, self.load(run_id))
+            if cached is None or cached[0] != signature:
+                self._run_cache[run_id] = (signature, self.load(run_id))
             return copy.deepcopy(self._run_cache[run_id][1])
 
     # LLM: Eviction shares the cache lock with exact-id reads so a concurrent full scan cannot
@@ -430,7 +437,7 @@ class SubAgentPersistenceService:
             if not canonical_ref:
                 raise FileNotFoundError(f"canonical subagent state missing for runner session: {run_id}")
             write_json_file_atomic(Path(canonical_ref), payload)
-            # list_runs 的缓存签名来自 locator mtime；只刷新这个轻量 locator，
+            # list_runs 的文件指纹来自 locator；只刷新这个轻量文件，
             # 让列表入口及时看到新 heartbeat，不重建其余派生投影。
             locator = read_json_object_report(locator_path).payload
             if locator:

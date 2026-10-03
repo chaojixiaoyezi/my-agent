@@ -16,6 +16,12 @@
 - **评审并入**（2026-10-03）：ae 第 (1) 层 4 条（Seatbelt 用 `*:<port>` 挡 IPv4 映射、Landlock 实测挂法、unavailable 两种、覆盖范围与三类挡不住路径），9b 第 (2) 层 3 条必须改（插件令牌单列一档、“非唯一防线”三分法 + 文件队列第二入口 + 插件同信任域、计数/判据细节）+ 4 条建议（凭据同宿主身份不入日志env、web_fetch/watch_stream 排除 Gateway 端口、LOCAL_CREDENTIAL_REQUIRED、Landlock 车道实跑）。26 条路由档位清单见 ENDPOINT_TIERS.md。新头在复审后更新。
 - **证据**：`~/.my-agent/decision-evidence/gateway-local-trust-20261003/`（Seatbelt 端口拒绝探针，随机端口假服务，没碰生产 8420）。详见 `docs/design/GATEWAY_LOCAL_TRUST.md`。
 
+## 子代理任务缓存按文件代次失效（2026-10-03，luna6i，分支 `worker/luna6-idem-flake`，基于 `claude/3a-step17i` `b78b42265`，ae 复审通过，并入 step17i；两条应改另做）
+
+- **问题**：`SubAgentPersistenceService` 原先仅用 `task.json.st_mtime_ns` 命中解析缓存。文件原子替换在时间戳精度较低的文件系统上可能沿用同一 mtime；items 幂等复用随后把缓存中的完整任务快照再次保存，普通 `RUNNING` 状态与旧 `PLANNING` 快照处于同一 runner attempt 时，不受终态保护或 attempt-generation fence 保护，可能把 canonical `RUNNING` 写回 `PLANNING` 并再次放入 auto_start。
+- **修复**：缓存签名改为 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`。原子替换的 inode/ctime 变化可在 mtime 不变时使缓存失效；线程锁、深拷贝、列表排序及公开派工合同不变。无新增配置。
+- **验证**：受控固定 mtime 的高层回归先在旧写法下失败（`RUNNING` 被覆盖为 `PLANNING`），改后通过；DONE 排除测试改为集合/结构化身份判断，同时仍断言 DONE child 绝不进入 auto_start。定向测试、guards9 与静态门禁见 `TESTS.md` 顶部同名节。
+
 ## 能力包写后检查：回执列全错误、一次改完、连续失败到上限只记账（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `claude/3a-step17i` `911116770`，已实现，9b 复审通过（含两条必须改 96fd11f2f），并入 step17i）
 
 - **起因**：块 8 试点 A05 同一交付物写后检查失败 20 次才过，单例用了 389 万 token（C13 同例 44 万–62 万）。查结构化事实（`decision-evidence/capability-packs-v2-b8/pilot-ede890374/A05-post-write-analysis.md`）是三件事叠在一起：

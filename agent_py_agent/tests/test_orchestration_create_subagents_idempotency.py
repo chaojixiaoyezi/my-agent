@@ -67,10 +67,54 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path):
         tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
     )
 
-    assert second["reused_run_ids"] == first["created_run_ids"]
+    first_run_ids = set(first["created_run_ids"])
+    assert set(second["reused_run_ids"]) == first_run_ids
     assert second["pending_start_run_ids"] == [], second["auto_start"]
-    assert second["auto_start"]["run_ids"] == first["created_run_ids"][1:]
+    auto_start_run_ids = set(second["auto_start"]["run_ids"])
+    # 已接纳的兄弟可能在两次工具调用之间进入 RUNNING；复用时只要求 DONE 子代理不重启，
+    # 不要求所有非 DONE 兄弟都重新出现在自动启动回执中，也不约束其列表顺序。
+    assert done.id not in auto_start_run_ids
+    assert auto_start_run_ids <= first_run_ids - {done.id}
     assert second["next_action"]["action"] == "continue_independent_work"
+
+
+def test_reused_running_child_survives_same_mtime_cache_invalidation(tmp_path, monkeypatch):
+    import os
+
+    from agent_py_agent.agent.agent_core.orchestration.background import dispatch
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    def _accept_without_worker(agent, run_ids, *, expected_attempt_ids=None):
+        accepted = list(run_ids)
+        return {"status": "started", "run_ids": accepted, "started_run_ids": accepted}
+
+    monkeypatch.setattr(dispatch, "_start_background_dispatch", _accept_without_worker)
+    agent = _workspace_agent(tmp_path)
+    tool = CreateSubagentsTool(agent)
+    first = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+    )
+    agent.subagents.list_runs()  # 预热解析缓存，模拟刚创建的同一批任务仍在工作中。
+
+    running_id = first["created_run_ids"][1]
+    task_path = agent.subagents.workspace / running_id / "task.json"
+    cached_stat = task_path.stat()
+    running = agent.subagents.load(running_id)
+    running.status = "RUNNING"
+    agent.subagents.save(running)
+    saved_stat = task_path.stat()
+    os.utime(task_path, ns=(saved_stat.st_atime_ns, cached_stat.st_mtime_ns))
+
+    assert task_path.stat().st_mtime_ns == cached_stat.st_mtime_ns
+    assert task_path.stat().st_ino != cached_stat.st_ino
+    assert agent.subagents.load(running_id).status == "RUNNING"
+
+    second = json.loads(
+        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+    )
+
+    assert agent.subagents.load(running_id).status == "RUNNING"
+    assert running_id not in second["auto_start"]["run_ids"]
 
 
 def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):

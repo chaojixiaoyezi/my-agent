@@ -1,5 +1,11 @@
 # Subagent Structure
 
+## 子代理任务列表缓存与文件指纹（2026-10-03）
+
+- `SubAgentPersistenceService._cached_run_copy` 的进程内缓存指纹为 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`；mtime 单字段在低精度文件系统的同一时间片可能漏掉 `task.json` 原子替换，返回旧状态对象。
+- 缓存命中仍返回深拷贝，canonical task 文件仍是权威。items 复用会保存整份任务快照，所以失效判断必须发现同 mtime 的文件代次变化，避免把 RUNNING 快照回滚成旧 PLANNING 并再次进入 auto_start。
+- 受控回归与先红后绿证据见 [TESTS.md](../../../TESTS.md) 顶部“子代理幂等复用 auto_start 偶发失败调查”。
+
 ## P10 第二批常数整改（2026-10-02，待集成）
 
 subagents 目录内缺单位/缺说明的常数统一按生成器后缀表改名并补中文说明：`authorization_gate.py::PARENT_CHAIN_COUNT`（parent 链查询层数上限，原 PARENT_CHAIN_LIMIT）、`lesson_ledger.py::MAX_LESSONS_PER_RUN_COUNT`（单 run 经验条数上限）等 10 个文件；数值不变，随包目录投影与源码保持一致。

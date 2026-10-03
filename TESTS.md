@@ -16,6 +16,26 @@
   - Gateway 启动不登记 → 被启停用例杀。
 - 跑法：`PYTHONPATH=<worktree> ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_gateway_port_deny.py -q`（macOS，沙箱外）。
 
+## 子代理幂等复用 auto_start 偶发失败调查（2026-10-03，luna6i）
+
+- **车道现象**：step17i 的 shard-0 在 `test_orchestration_create_subagents_idempotency.py::test_reused_done_children_are_excluded_from_dispatch_contract` 第 72 行，`auto_start.run_ids` 与 `first.created_run_ids[1:]` 不同；车道原输出只给断言差异和同秒 ID，没有保存失败时每个 child 的 canonical 状态，故不凭 ID 倒推其状态。
+- **根因（受控验证）**：`SubAgentPersistenceService` 原缓存只比较 `task.json.st_mtime_ns`。原子替换若保留同一时间戳，列表仍返回旧 `PLANNING`；items 复用随后保存完整旧任务，runner_attempts 未变时并发 runner 状态合并不会恢复普通 `RUNNING`，于是 canonical 可从 `RUNNING` 被写回 `PLANNING`，并再次进入 `auto_start`。用固定 mtime + 原子替换稳定复现了这条产品竞态；lane 输出没有状态快照，因此不能确认其差异正是这一条路径，但已有根因本身可复现。
+- **排序与 DONE 边界**：列表按 `updated_at or created_at` 排序，复用按结构化幂等合同逐项匹配；秒级 run_id 前缀不参与状态裁决。DONE 有额外 canonical 终态保护，但它不覆盖非终态 RUNNING 的旧缓存回写。
+- **修正**：缓存签名改为 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`，即使 mtime 不变，原子替换也因文件代次/ctime 变化而失效。DONE 测试改成集合比较，并直接断言 DONE child 不会再次自动启动，不假设其它 sibling 的回执顺序或运行状态。
+- **聚焦回归**（固定 Python，工作树根执行）执行了以下 8 个文件：`test_orchestration_create_subagents_idempotency.py`、`test_orchestration_create_subagents_items.py`、`test_orchestration_create_subagents_tool.py`、`test_subagent_listruns_cache.py`、`test_subagent_manager_core.py`、`test_subagent_machine_fact_contracts.py`、`test_subagent_reserved_start_restart_pickup.py`、`test_direct_parent_lifecycle.py`。命令退出码 0，pytest 输出到 100%，无失败：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_orchestration_create_subagents_idempotency.py agent_py_agent/tests/test_orchestration_create_subagents_items.py agent_py_agent/tests/test_orchestration_create_subagents_tool.py agent_py_agent/tests/test_subagent_listruns_cache.py agent_py_agent/tests/test_subagent_manager_core.py agent_py_agent/tests/test_subagent_machine_fact_contracts.py agent_py_agent/tests/test_subagent_reserved_start_restart_pickup.py agent_py_agent/tests/test_direct_parent_lifecycle.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna6i
+  ```
+- **TDD / 旧写法变异**：新增 `test_reused_running_child_survives_same_mtime_cache_invalidation` 在 mtime-only 旧缓存下先失败，精确观察到 canonical `PLANNING` 而期望 `RUNNING`；采用文件指纹后，同一用例与 `test_subagent_listruns_cache.py` 的 8 项增量回归通过。复用 DONE 的测试仍断言 DONE id 不在 auto_start。
+- **guards9**（含 `test_packaging.py` 的 10 个文件）在产品修复后退出码 0，pytest 输出到 100%，无失败。产品设计和验证记录已同步到 DESIGN_LEDGER.md、docs/modules/subagent/04-structure.md 与 TESTS.md。
+- **静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；strict code-size → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；生成的 `CODE_SIZE_REPORT.md` 已还原；`git diff --check` 退出码 0、无输出；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` 实际输出：
+  ```text
+  新增告警: 0
+  消失告警: 9
+  ```
+
 ## 能力包写后检查反馈修正 P1–P3（块 8 试点后，ae，2026-10-03，分支 `claude/ae-pack-feedback`，基于 `911116770`）
 
 - **新用例** `test_pack_verification_post_write_feedback.py`（7 条，复用块 3 夹具，替身检查程序）：
