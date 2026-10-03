@@ -1,4 +1,4 @@
-# LLM: 按结构化响应决定工具/有界续跑/结束；写恢复只认 provider 长度终态，保留其它 typed 错误。
+# LLM: 按结构化响应决定工具/续跑/结束；本 run 取消优先于交付、核验及截断返工，保留其它 typed 原因。
 # 模块用途: 统一模型轮裁决和修复预算，保存真实响应原因与无工具续跑历史，不从正文推断完成。
 from __future__ import annotations
 
@@ -846,9 +846,12 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
     return {"tool": call.tool_name, "call_id": call.call_id, **call.arguments}
 
 
-# LLM: 仅思考也沿原空正文预算续跑；不是公开回复或完成证据，超预算仍走原终态。
-# 函数用途: 处理零工具响应，保留用户插话、错误和已有交付行为，不解析思考内容。
+# LLM: 取消前后都复查本 run 令牌；核验取消后不得被交付或截断修复复活。仅思考仍沿原空正文预算，不解析思考内容。
+# 函数用途: 裁决零工具响应，取消时写核验事实并沿原取消终态收口，其余保留既有有界续跑。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
+    if _pack_closeout_cancelled(request):
+        _pack_verification_closeout(request)
+        return _cancelled_closeout_decision(request)
     if _is_runtime_status_response(request.response):
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
     unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
@@ -906,6 +909,8 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # 交付清单(required_file_refs/output_refs…)，主代理用户会话永不生效，且有界放行。
         # 真机证据: 子代理声明了要写 core_*.go，收工时一个都不存在却报完成。
         deliverable_block = deliverable_closeout_block(request.params) or _pack_verification_closeout(request)
+        if _pack_closeout_cancelled(request):
+            return _cancelled_closeout_decision(request)
         if deliverable_block:
             request.params.tool_context.append(deliverable_block)
             return ToolLoopResponseDecision("continue", None, [], request.counters)
@@ -950,6 +955,27 @@ def _pack_verification_closeout(request: _NoToolCallsRequest) -> str:
     from ...capability.pack_verification_hooks import closeout_rework_block
 
     return closeout_rework_block(request.agent, request.params)
+
+
+# LLM: executor 外只读 params 本 run 令牌，直接调用没有参数令牌时读已绑定上下文；不查询全局 stop 或其它 run。
+# 函数用途: 在收尾修复边界复查本回合是否已被取消。
+def _pack_closeout_cancelled(request: _NoToolCallsRequest) -> bool:
+    from ...common.cancellation import (
+        bind_cancellation_token,
+        cancellation_requested,
+        current_cancellation_token,
+    )
+
+    with bind_cancellation_token(getattr(request.params, "cancellation_token", None) or current_cancellation_token()):
+        return cancellation_requested()
+
+
+# LLM: 复用主循环原取消响应，不能回交模型“完成了”的正文或追加修复；不创建第二套取消状态。
+# 函数用途: 把收尾期间的取消交回既有 conversation_control 终态。
+def _cancelled_closeout_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
+    from .._tool_loop_service import _interrupted_conversation_response
+
+    return ToolLoopResponseDecision("break", _interrupted_conversation_response(request.agent), [], request.counters)
 
 
 # LLM: 触发完全结构化，两条判据都在 provider_timeout_resume_eligible 里：

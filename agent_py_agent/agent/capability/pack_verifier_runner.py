@@ -4,7 +4,8 @@
 #   结果只认 stdout 的 pack_verifier_result.v1 结构化字段（valid、errors/warnings 的 code），不解释 message，不读模型自述；
 #   valid 必须与“errors 为空”一致，退出码不参与判定（只用来识别超时）。
 #   关联输入由调用方按包声明解析好再传入，这里只按声明顺序传声明过的参数名；必需输入缺失就不跑，记 verifier_input_unresolved。
-#   本模块不决定返工或展示，调用方（块 3）按 PackVerificationResult 入账、生成有界摘要。改动同步 test_pack_verifier_runner.py。
+#   取消优先于新执行，正在运行的 ToolCancelled 记 cancelled/verifier_cancelled，不解析半截输出；返工/展示由调用方决定。
+#   改动同步 test_pack_verifier_runner.py 和 test_pack_verification_cancellation.py。
 # 模块用途: 在沙箱里运行能力包声明的检查程序，返回可入账的结构化检查事实。
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from ..capability_verification_manifest import (
     VerifierInput,
 )
 from ..capability_verifier_consent import verifier_consent_matches
+from ..common.cancellation import ToolCancelled, cancellation_requested
 from ..plugin_content_activation import PluginContentActivation
 from ..plugin_install_store import PluginInstallStore
 from ..plugin_installation import PluginInstallationError
@@ -66,7 +68,7 @@ class PackVerifierRequest:
     inputs: tuple[tuple[str, Path], ...] = ()
 
 
-# LLM: 事实字段是入账的唯一来源；status 只有 passed/failed/not_run/error 四种，reason_code 说明 not_run/error 的结构化原因。
+# LLM: 事实字段是入账唯一来源；status 包含 passed/failed/not_run/error/cancelled，取消不属于质量错误，不得触发返工。
 #   计数按 code 聚合且有上限，不保存 message；error_samples 只留前几条错误的 code 和截断后的 location（宿主不解释，只转给模型定位）。
 #   inputs 每项记参数名、来源、是否必需、相对路径和 sha256（没找到时为空）。
 # 类用途: 保存一次宿主检查的结构化结果，并给出入账事实和有界摘要两种投影。
@@ -124,9 +126,11 @@ def _top_codes(counts: dict[str, int]) -> list[str]:
     return sorted(counts, key=lambda code: (-counts[code], code))[:MAX_VERIFIER_SUMMARY_CODES_COUNT]
 
 
-# LLM: 任何一步不满足都返回结构化 not_run/error，不抛异常给调用方，不退回无沙箱执行，也不改用工作区副本。
-# 函数用途: 按请求核对同意、取钉住原件、在沙箱里运行并解析检查结果。
+# LLM: 已取消零执行；运行中共用 ToolCancelled 转 cancelled/verifier_cancelled；不把半截 stdout 当检查结论，不退回无沙箱。
+# 函数用途: 按宿主请求核对同意与原件、运行检查并记录正常/失败/取消事实。
 def run_pack_verifier(request: PackVerifierRequest) -> PackVerificationResult:
+    if cancellation_requested():
+        return cancelled_pack_verifier(request)
     entry = request.installation
     manifest = entry.manifest
     base = {"verifier_id": request.verifier_id, "package_id": manifest.plugin_id,
@@ -150,10 +154,26 @@ def run_pack_verifier(request: PackVerifierRequest) -> PackVerificationResult:
     except (PluginInstallationError, PluginPackageError, ValueError):
         return PackVerificationResult(**base, status="error", reason_code="verifier_member_mismatch")
     base.update(member_sha256=hashlib.sha256(member_bytes).hexdigest(), target_sha256=_file_sha256(request.target))
-    outcome = _sandboxed_run(request, verifier, member_bytes)
+    started = time.monotonic()
+    try:
+        outcome = _sandboxed_run(request, verifier, member_bytes)
+    except ToolCancelled:
+        return PackVerificationResult(**base, status="cancelled", reason_code="verifier_cancelled",
+                                      duration_ms=int((time.monotonic() - started) * 1000))
     result = _run_result(outcome, verifier, base)
     # location 是检查程序写的任意文字，转给模型前把宿主路径脱敏（9b 复审 F4）
     return redact_error_samples(result, request, outcome[2]) if outcome is not None else result
+
+
+# LLM: 用已声明的包/检查程序和目标身份写未运行的取消事实，不读 blob、不建临时目录、不做沙箱探测。
+# 函数用途: 为取消后剩余目标生成 cancelled 账本结果，和运行中取消共用原因码。
+def cancelled_pack_verifier(request: PackVerifierRequest) -> PackVerificationResult:
+    entry = request.installation
+    verifier = _declared_verifier(entry.manifest, request.verifier_id)
+    return PackVerificationResult(request.verifier_id, entry.manifest.plugin_id, "cancelled", "verifier_cancelled",
+                                  package_version=entry.manifest.version, package_sha256=entry.package_sha256,
+                                  member=getattr(verifier, "member", ""), runtime=getattr(verifier, "runtime", ""),
+                                  target=_relative(request.target, request.workspace_root))
 
 
 # LLM: 只有已激活的内容代次、且同意摘要覆盖当前声明，才允许宿主运行包内代码；运行方式不认识的不跑（开放世界：不拒绝安装）。

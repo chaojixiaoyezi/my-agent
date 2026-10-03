@@ -13,6 +13,17 @@
   - 握手中用户停止仍优先返回 `InterruptedError`。
 - **验证**：新增 9 个用例（`tests/test_responses_websocket.py`），覆盖握手超时归 first_event + send 为 0、回合层退避后完成并带重试进度、生成层 `_retry_once_after_timeout` 返回 None、连接后静默超时 stage 不变、非超时分类不变、用户停止优先；相关 7 个测试文件 95 项全过；4 个变异（仍归 provider_declared / 归 stream_idle / 非超时也归 first_event / 去掉用户停止优先）全部被测出。详见 TESTS.md 同名条目。
 
+## 能力包 v2 块 6a：`/stop` 打断宿主核验（2026-10-03，sol1 实现，ae 整合，分支 `claude/ae-b6a-17h`，基于 `claude/3a-step17h` `ede890374`，已实现，9b 复核通过（沙箱侧 + 补充用例 dbccc1d14），并入 step17i）
+
+- **起因**：写后钩子和收尾的同步核验不看本 run 的取消信号，用户 `/stop` 后还要等所有检查程序跑完（最长各 120 秒）。
+- **做法**：
+  - 每次检查前看取消；已取消不再起新程序，剩余目标逐项记 `cancelled`（原因码 `verifier_cancelled`），取消结果不当缓存复用。
+  - 正在跑的检查程序经新的 `attempt/process_run.py` 整组回收：TERM→宽限→KILL，宽限期内每 0.05 秒看组是否已退出，退了立即返回。
+  - 被取消的回合，收尾的输入原件、交付物、检查结果三段都只记事实、不返工；最终事实和宿主提示写明“被取消”，只剩“被取消”这一样时也照发。
+  - 组信号被拒、回收后管道不 EOF 两种情况沿用改造前的合同（不抛异常，补杀组长，超时仍返回 143）。
+- **整合时补的**（3a 定）：取消时输入原件/交付物两段不记返工；事实为空的判断加上“被取消”；宿主提示的触发键加上 `cancelled`；9b 的宽限期轮询。每处一条用例、一个变异。
+- **边界**：不改包声明、同意、沙箱权限，开关仍默认关。实际 TUI/IM `/stop`、生产和块 8 冻结重跑没验证。详见 [设计 3.2 节](docs/design/CAPABILITY_PACKS_V2.md) 和 TESTS.md。
+
 ## 嵌入用量与召回方式看得到（S7，be 实现、75 接手收尾，2026-10-02，分支 `claude/75-embedding-usage-facts`（接 `claude/be-embedding-usage-facts`），基于 `claude/3a-step17h` `afb15947b`，已实现，待 9b 复审）
 
 - **起因**（3a 查生产）：

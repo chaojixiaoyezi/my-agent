@@ -1,7 +1,7 @@
 # LLM: 能力包 v2 块 3 的对外事实：从本 run 的核验账本生成 AgentRunResult.pack_verifications（→ channel_delivery.pack_verifications），
 #   以及回合结束时宿主撰写的 HostNotice（source=pack_verification）。结论只来自账本里的检查程序结果，模型自述不算事实。
 #   收尾检查跑过时只报最后一次收尾检查覆盖的结果（即交付时的内容状态）；没跑过（回合没正常收尾）就报每个目标最后一次写后结果，
-#   并在通知里说明。条数和文字都有上限。改动同步 test_pack_verification_service.py 与 gateway 的提示/交付投影。
+#   取消由账本 status/closeout.cancelled 表达，通知必须明确“被取消”，不能当检查通过。条数和文字有上限，联测 cancellation。
 # 模块用途: 把宿主核验结果整理成最终交付事实和给用户看的一句话通知。
 
 from __future__ import annotations
@@ -20,9 +20,10 @@ MAX_NOTICE_RESULTS_COUNT = 4
 MAX_NOTICE_TEXT_CHARS = 480
 
 
-# LLM: 没有任何检查结果、没有被就地改的输入原件、也没有缺的交付物时返回 None（未钉包、开关关着或本回合没改工作区），
-#   对外事实保持不出现这个键。inputs_modified 取最后一次收尾的输入原件检查（块 4），deliverables_missing 取最后一次交付存在检查（块 5）。
-# 函数用途: 从核验账本生成本 run 的结构化核验事实。
+# LLM: 检查结果、被就地改的输入原件、缺的交付物、本回合被取消（块 6a）四样都没有时返回 None（未钉包、开关关着或本回合没改工作区），
+#   对外事实保持不出现这个键。inputs_modified 取最后一次收尾的输入原件检查（块 4），deliverables_missing 取最后一次交付存在检查（块 5）；
+#   取消只读账本里的 closeout.cancelled 和结果的 status（不依赖已经解绑的令牌），零目标的已取消收尾也如实保留。
+# 函数用途: 从核验账本生成本 run 的结构化核验与取消事实，不把没跑完的检查当成通过。
 def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | None:
     records = ledger.records() if ledger is not None else []
     results = [row for row in records if row.get("kind") == "result" and isinstance(row.get("fact"), dict)]
@@ -30,9 +31,10 @@ def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | Non
     inputs_modified = [dict(item) for item in input_checks[-1]["items"]] if input_checks else []
     deliverable_checks = [row for row in records if row.get("kind") == "deliverable_check" and isinstance(row.get("items"), list)]
     deliverables_missing = [dict(item) for item in deliverable_checks[-1]["items"]] if deliverable_checks else []
-    if not results and not inputs_modified and not deliverables_missing:
-        return None
     closeouts = [row for row in records if row.get("kind") == "closeout"]
+    cancelled = bool(closeouts and closeouts[-1].get("cancelled"))
+    if not results and not inputs_modified and not deliverables_missing and not cancelled:
+        return None
     keys = set(closeouts[-1].get("keys") or []) if closeouts else None
     latest: dict[tuple, dict] = {}
     for row in results:
@@ -42,6 +44,7 @@ def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | Non
                 **fact, "trigger": row.get("trigger", ""), "input_matches": dict(row.get("input_matches") or {})}
     baseline = next((row for row in records if row.get("kind") == "baseline"), {})
     return {"schema": PACK_VERIFICATIONS_SCHEMA, "closeout_checked": bool(closeouts),
+            "cancelled": cancelled or any(item.get("status") == "cancelled" for item in latest.values()),
             "closeout_truncated": bool(closeouts and closeouts[-1].get("truncated")),
             "current_truncated": bool(closeouts and closeouts[-1].get("current_truncated")),
             "uncertain_targets": list(closeouts[-1].get("uncertain_targets") or []) if closeouts else [],
@@ -66,12 +69,13 @@ def run_pack_verification_facts(agent: object, context: object) -> dict | None:
 
 
 # LLM: 文字只拼结构化事实：包 ID 和版本、检查程序成员、目标相对路径、有效与否、错误/警告条数、前几个错误码或原因码。
-#   HostNotice 会把换行合并成空格，所以各条直接首尾相接（每条以句号结尾）。
-# 函数用途: 生成给用户看的宿主核验提示正文。
+#   取消提示放在开头，不能被条数/字符上限截没；HostNotice 单行拼接，任何正文自述不决定取消。
+# 函数用途: 生成宿主核验通知，明确说明被取消与没有正常收尾的边界。
 def pack_verification_notice_text(facts: dict) -> str:
-    lines = [f"宿主检查：任务开始时的输入 {item.get('path')} 被就地改了"
-             f"（{'原件副本已保存' if item.get('copy_path') else '没有原件副本'}）。"
-             for item in facts.get("inputs_modified", [])[:MAX_NOTICE_RESULTS_COUNT]]
+    lines = ["本回合核验被取消，未完成的检查不作为有效结论。"] if facts.get("cancelled") else []
+    lines += [f"宿主检查：任务开始时的输入 {item.get('path')} 被就地改了"
+              f"（{'原件副本已保存' if item.get('copy_path') else '没有原件副本'}）。"
+              for item in facts.get("inputs_modified", [])[:MAX_NOTICE_RESULTS_COUNT]]
     lines += [f"宿主检查：{item.get('package_id')} 要求的交付物 {item.get('deliverable_id')} "
               f"{'写出了但打不开' if item.get('code') == 'DELIVERABLE_UNREADABLE' else '本回合没有写出'}。"
               for item in facts.get("deliverables_missing", [])[:MAX_NOTICE_RESULTS_COUNT]]
@@ -82,11 +86,14 @@ def pack_verification_notice_text(facts: dict) -> str:
     return text if len(text) <= MAX_NOTICE_TEXT_CHARS else text[: MAX_NOTICE_TEXT_CHARS - 1] + "…"
 
 
-# 函数用途: 生成一条检查结果的提示行。
+# LLM: 单条取消是结构化 status，不读 reason/message 文本；与通过、质量失败明确分开。
+# 函数用途: 生成一条核验事实的中文说明，取消不伪装成未支持或正常检查。
 def _notice_line(item: dict) -> str:
     head = f"宿主检查（{item.get('package_id')} {item.get('package_version')}，原版 {item.get('member')}）：{item.get('target')}"
     errors = sum((item.get("error_counts") or {}).values())
     warnings = sum((item.get("warning_counts") or {}).values())
+    if item.get("status") == "cancelled":
+        return f"{head} 检查被取消。"
     if item.get("status") == "passed":
         return f"{head} 有效，警告 {warnings} 条。"
     if item.get("status") == "failed":

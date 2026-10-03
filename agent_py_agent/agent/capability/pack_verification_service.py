@@ -6,7 +6,7 @@
 #   块 4 起基线同时记任务的输入原件清单，task_input 只从原件清单找（原件被改过就交副本）。
 #   块 5 起收尾还查必需交付物有没有交（缺或打不开最多返工 2 次）；三段顺序：输入原件 → 交付物存在 → 交付物检查。
 #   只看结构化事实：开关、pins、安装项、路径模式和字段匹配、文件摘要、检查程序的 pack_verifier_result.v1；不读模型文字。
-#   同样的内容（包、检查程序、目标和各输入的摘要都相同）只跑一次，结果和返工次数都记在本 run 的核验账本里。
+#   同样内容只跑一次；每个检查前复查当前 run 取消，剩余目标记 cancelled，取消不复用旧质量结果、不返工。
 #   副作用：读工作区文件、在沙箱里运行包内检查程序、写核验账本和 runtime_events。改动同步 test_pack_verification_service.py。
 # 模块用途: 在写工具之后和回合收尾时，用钉住的原版检查程序核验交付物，并决定是否给模型一次返工提示。
 
@@ -20,6 +20,7 @@ from functools import cached_property
 from pathlib import Path
 
 from ..capability_verification_manifest import VerifierDeclaration
+from ..common.cancellation import cancellation_requested
 from .pack_verification_deliverables import (
     MAX_DELIVERABLE_REWORK_COUNT,
     deliverable_rework_text,
@@ -50,7 +51,12 @@ from .pack_verification_scope import (
     verification_declarations,
     verification_owner,
 )
-from .pack_verifier_runner import PackVerificationResult, PackVerifierRequest, run_pack_verifier
+from .pack_verifier_runner import (
+    PackVerificationResult,
+    PackVerifierRequest,
+    cancelled_pack_verifier,
+    run_pack_verifier,
+)
 
 TRIGGER_POST_WRITE = "post_write"
 TRIGGER_CLOSEOUT = "closeout"
@@ -128,7 +134,8 @@ def verify_written_files(agent: object, params: object, paths: list[Path]) -> li
 
 # LLM: 没有基线说明本回合没改过工作区，什么都不查（块 5 的触发条件也就是它）。输入原件检查在前（它的返工提示要模型先恢复原件），
 #   交付物存在其次，交付物检查最后；三段各自记账、各自计返工次数，同时需要返工时合成一条提示。
-# 函数用途: 收尾时检查输入原件和本回合改过的交付物，必要时返回一次返工提示。
+#   块 6a：取消期间三段照样记事实（剩余检查目标记 cancelled、closeout.cancelled），但被取消的回合哪一段都不记返工、不出提示。
+# 函数用途: 收尾时检查输入原件和本回合改过的交付物，必要时返回一次返工提示（被取消时不返工）。
 def pack_verification_closeout_block(agent: object, params: object) -> str:
     scope = _run_scope(agent, params)
     if scope is None or scope.baseline is None:
@@ -143,7 +150,7 @@ def pack_verification_closeout_block(agent: object, params: object) -> str:
 def _input_section(scope: _RunScope) -> str:
     items = modified_originals(scope.originals, scope.baseline, (scope.root, scope.pack_root, preserving_packages(scope.packages)))
     scope.ledger.append({"kind": "input_check", "items": items})
-    if not items or scope.ledger.count("input_rework") >= MAX_INPUT_REWORK_COUNT:
+    if cancellation_requested() or not items or scope.ledger.count("input_rework") >= MAX_INPUT_REWORK_COUNT:
         return ""
     if not scope.ledger.append({"kind": "input_rework", "paths": [item["path"] for item in items]}):
         return ""
@@ -156,7 +163,7 @@ def _input_section(scope: _RunScope) -> str:
 def _deliverable_section(scope: _RunScope) -> str:
     items = missing_deliverables(scope.packages, _changed_paths(scope), scope.root)
     scope.ledger.append({"kind": "deliverable_check", "items": items})
-    if not items or scope.ledger.count("deliverable_rework") >= MAX_DELIVERABLE_REWORK_COUNT:
+    if cancellation_requested() or not items or scope.ledger.count("deliverable_rework") >= MAX_DELIVERABLE_REWORK_COUNT:
         return ""
     if not scope.ledger.append({"kind": "deliverable_rework", "deliverables": [item["deliverable_id"] for item in items]}):
         return ""
@@ -176,9 +183,9 @@ def _verification_section(scope: _RunScope) -> str:
     scope.ledger.append({"kind": "closeout", "keys": [key for key, _ in checked],
                          "target_count": len(targets), "truncated": len(targets) > MAX_CLOSEOUT_TARGETS_COUNT,
                          "uncertain_targets": sorted(rel for rel in uncertain if scope.root / rel in targets),
-                         "current_truncated": scope.current.truncated})
+                         "current_truncated": scope.current.truncated, "cancelled": cancellation_requested()})
     failed = [result for _, result in checked if result.status == "failed" and result.target not in uncertain]
-    if not failed or scope.ledger.count("rework") >= MAX_PACK_VERIFICATION_REWORK_COUNT:
+    if cancellation_requested() or not failed or scope.ledger.count("rework") >= MAX_PACK_VERIFICATION_REWORK_COUNT:
         return ""
     if not scope.ledger.append({"kind": "rework", "keys": [key for key, result in checked if result in failed]}):
         return ""
@@ -222,16 +229,20 @@ def _applicable(scope: _RunScope, path: Path) -> list[tuple[PinnedVerificationPa
     return pairs
 
 
-# LLM: 复用键相同说明包、检查程序、目标和各输入的内容都没变，直接复用本 run 已有结果，不重跑包内程序。
-# 函数用途: 跑一次检查程序（或复用已有结果），入账并写运行事件。
+# LLM: 每次执行前看本 run 取消；已取消不进运行器、逐目标写取消事实。cancelled 不是完成的检查，显式恢复后不能复用。
+# 函数用途: 跑一次检查或复用有效结果，取消则仅记账和事件，不启动新程序。
 def _run_once(scope: _RunScope, pair: tuple, target: Path, trigger: str) -> tuple[str, PackVerificationResult]:
     package, verifier = pair
     inputs, matches = _resolve_inputs(scope, verifier, target)
     key = _cache_key(package, verifier, target, inputs)
     cached = scope.ledger.cached_fact(key)
-    if cached is not None:
+    request = PackVerifierRequest(scope.owner, package.installation, verifier.id, target, scope.root, inputs)
+    if cancellation_requested():
+        result = cancelled_pack_verifier(request)
+    elif cached is not None and cached.get("status") != "cancelled":
         return key, PackVerificationResult.from_fact(cached)
-    result = run_pack_verifier(PackVerifierRequest(scope.owner, package.installation, verifier.id, target, scope.root, inputs))
+    else:
+        result = run_pack_verifier(request)
     scope.ledger.append({"kind": "result", "trigger": trigger, "key": key, "input_matches": matches,
                          "fact": result.to_fact()})
     _append_event(scope, result, trigger)

@@ -1,5 +1,13 @@
 # Verification：开发推进
 
+## 2026-10-03 能力包 v2 块 6a：核验取消（sol1 实现，ae 整合到 step17h，分支 `claude/ae-b6a-17h`，9b 复核通过，并入 step17i）
+
+- executor 外的写后/收尾钩子重新绑定 params 本 run 令牌；每检查前看取消，未运行目标逐项入账 cancelled，不复用取消结果。
+- `response_decision` 取消优先于交付/核验/截断返工；宿主事实和通知明确“被取消”，成功写入状态保持。
+- 沙箱同步等待经 `attempt/process_run.py` 的临时回调整组回收；四变异被拦截且还原。
+- 整合时补：取消时输入原件/交付物两段不返工、只剩“被取消”也出事实和宿主提示、宽限期内轮询进程组。
+- macOS 真实 Seatbelt 用例在非嵌套环境通过；实际 TUI/IM `/stop` 未验证。详见 TESTS.md 和 [设计](../../design/CAPABILITY_PACKS_V2.md)。
+
 ## 2026-10-02 J16 片 D：归档与工具账记发起者（ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` `72ddc2b5c`，待集成）
 
 - `tool_call_archive_record` 的归档多两个典型字段：`actor`（`model` 或 `decision`，取自 `ToolCallRecordParams.actor`，默认 `model`）与 `decision_ref`

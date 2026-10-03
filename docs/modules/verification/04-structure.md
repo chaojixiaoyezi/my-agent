@@ -1,5 +1,11 @@
 # Verification：结构
 
+## 能力包 v2 块 6a 取消边界（2026-10-03，已实现，9b 复核通过（沙箱侧 + 补充用例 dbccc1d14），并入 step17i）
+
+`pack_verification_hooks` 在 executor 外绑定当前 run 令牌；`pack_verification_service._run_once` 的取消优先于缓存，未运行检查直接记 cancelled。
+`pack_verifier_runner` 把共用 `ToolCancelled` 映射到 verifier_cancelled；`attempt/sandbox.run` 委托新 `attempt/process_run.py`，后者只管本次新会话的进程组回收，不读取包业务或改变沙箱权限。
+`pack_verification_report` 从原账本取取消事实（只剩“被取消”时也出事实），`gateway_parts/request_pack_verification_notice` 据此发宿主提示；`response_decision` 在返工边界交回原取消终态；没有第二套账本或新模型工具。真实平台外复跑边界见 TESTS.md。
+
 ## P10 第二批常数整改（2026-10-02，待集成）
 
 `verification/project_facts.py` 的常数改名/补说明：`_SNAPSHOT_MAX_ENTRY_COUNT`（快照缓存条目上限）、`_FACT_MAX_ENTRY_COUNT`、`_MAX_VERIFY_COMMAND_COUNT`（单次验证命令数上限）；数值不变，目录投影随源码一致。

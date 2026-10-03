@@ -24,7 +24,7 @@
 
 ## 能力包宿主核验结论随回合结束发宿主提示（2026-10-02，ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`，待集成）
 
-- 回合正常返回后，`request_pack_verification_notice.queue_pack_verification_notice` 用 `AgentRunResult.pack_verifications`（核验账本的结构化事实）写一条宿主提示：`source=pack_verification`，`code=summary`。检查结果、被就地改的输入原件、缺的必需交付物三类事实任一非空就发（能力包块 4/5 起，只有后两类的回合也发），details 带三类计数。
+- 回合正常返回后，`request_pack_verification_notice.queue_pack_verification_notice` 用 `AgentRunResult.pack_verifications`（核验账本的结构化事实）写一条宿主提示：`source=pack_verification`，`code=summary`。检查结果、被就地改的输入原件、缺的必需交付物、本回合核验被取消四类事实任一为真就发（能力包块 4/5 起，只有后两类的回合也发；块 6a 起，只剩“被取消”的回合也发），details 带三类计数。
 - 提示排入原 pending_host_notices，和决策实验晋升提示同一批发布与提交；文字只拼结构化事实，模型看不到。
 - `request_history.persist_gateway_assistant_result` 把同一份事实写进 `channel_delivery.pack_verifications`，不进 `_public_channel_delivery`/`_public_result` 白名单。没有核验事实时两处都不出现。
 - 设计见 [CAPABILITY_PACKS_V2](../../design/CAPABILITY_PACKS_V2.md) 3.1 节，测试见 TESTS.md 同名节。

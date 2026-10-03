@@ -83,6 +83,140 @@
 - **变异**：4 个全部抓到——m1 快照写回退普通 `write_text`（用例 1 红）；m2 去掉符号链接跳过（用例 2 红：`symlink_skipped_count` 0≠2）；m3 `PermissionError` 不计数（用例 3 红）；m4 维护回执不落盘（用例 4 红）。另有一个等价变异（只把 `is_dir(follow_symlinks=False)` 改成 `is_dir()`）被 `is_symlink()` 早退遮蔽、未改变行为，不计入。
 - **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_memory_archive_permissions.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3`
 
+## 能力包 v2 块 6a：宿主核验响应 /stop（2026-10-03，sol1 实现，ae 整合到 `claude/3a-step17h` `ede890374` 之上，分支 `claude/ae-b6a-17h`，9b 复核通过，并入 step17i）
+
+### 来源与做法
+
+3a 根据 ae 的只读调研派工：写后钩子和 `_no_tool_calls_decision` 同步核验不消费本 run 取消信号。该背景中的 3 个程序 6.11 秒来自派工材料，不是本轮实测。
+
+- 写后/收尾钩子显式绑定 params 本 run 令牌；每个检查前看取消。已取消不进运行器，剩余适用目标逐项记 `cancelled/verifier_cancelled`；取消优先于缓存，取消结果不当有效检查复用。
+- 同步沙箱 run 共用 `attempt/process_run.py`：新会话固定组号、临时回调、TERM→宽限→KILL 整组回收；轮询 external_check，退出撤销回调、reap 组长并释放输出管道。
+- 取消回合不返工，零工具决策走原取消终态，宿主事实和通知写明“被取消”；已成功写入不翻转。没有新增配置或沙箱 fallback。
+
+### 实际测试与边界（批次重叠，不把数字相加）
+
+- 新取消文件首次红测：**11 failed / 1 passed**，复现预取消仍运行、取消后返工、运行中不回收及错误入账。
+- 最终四文件定向：**82 passed / 1 failed / 12 skipped**（JUnit `tmp/sol1-b6a-focused-final.xml`，95 项）。新文件共 16 项，其中普通真实进程组和其它取消合同均通过，唯一失败是 platform。
+- 四项变异原字节还原后，仅新取消文件的非 platform 回归：**15 passed**（`tmp/sol1-b6a-restored.xml`）。这是还原复查，不表示 platform 已通过；最终四文件批次也实际包含 platform，没有删、跳过或放宽其断言。
+- `guards9.txt` 全部十文件（含 packaging）：**172 passed**，无失败/跳过（`tmp/sol1-b6a-guards-final.xml`）。
+- 普通进程组用例真实启动父子两个 Python 进程（都忽略 TERM），ready 记录精确 PID/组号；取消后子进程 heartbeat 停止，观察到对同一组的 TERM/KILL，回调清空。测试仅清理自己创建的组，不用 ps、不结束既有进程。
+- **真实 Seatbelt 未验证**：platform 的 readiness 通过后，实际启动返回 **rc 71**、stderr=`sandbox-exec: sandbox_apply: Operation not permitted`，ready 和 heartbeat 均未创建，未执行到取消观察点。保留真实失败，**需 3a 在沙箱外复跑真实 Seatbelt/bwrap 进程组取消**。
+- 较早的六文件扩展批次还跑了 `test_attempt_sandbox.py`、`test_shell_stdin.py`，除新 platform 外有五处旧用例失败：`test_macos_view_write_allowed` 明确 rc 71；`test_macos_private_read_root_hides_other_owners_and_config` 读断言失败；`test_registry_built_shell_cannot_read_other_owners_or_config_on_macos` 超时；`test_batch_shell_never_consumes_host_stdin[False-foreground]` 与 `[True-foreground]` 超时。未做干净基线对比，后三处超时及读失败不据此归因于沙箱，也不宣布是既有缺陷。该批不是全绿；需 3a 外部复核，不改这些测试。
+- 实际 TUI/IM `/stop`、真实 Gateway、Linux bwrap、完整 v2 冻结业务重跑与生产部署均**未验证**。没有启停 Gateway、调用真实模型、读真实会话/凭据或安装依赖。
+
+### 可复现命令（工作树根、固定解释器、不并发 pytest/code-size）
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_pack_verification_cancellation.py \
+  agent_py_agent/tests/test_pack_verification_service.py \
+  agent_py_agent/tests/test_pack_verifier_runner.py \
+  agent_py_agent/tests/test_response_decision_native_tool_use.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1 \
+  --junitxml=tmp/sol1-b6a-focused-final.xml
+
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_architecture_guardrails.py \
+  agent_py_agent/tests/test_config_field_readers.py \
+  agent_py_agent/tests/test_constant_names_unique.py \
+  agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+  agent_py_agent/tests/test_parameter_registry.py \
+  agent_py_agent/tests/test_recovery_actions.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+  agent_py_agent/tests/test_subagent_config_inheritance.py \
+  agent_py_agent/tests/test_packaging.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1 \
+  --junitxml=tmp/sol1-b6a-guards-final.xml
+```
+
+扩展六文件批次的相同命令，文件清单是上述四文件加 `agent_py_agent/tests/test_attempt_sandbox.py`、`agent_py_agent/tests/test_shell_stdin.py`；返回 1，失败范围已列出。没有运行无文件清单的全仓 pytest。
+
+### 四项独立变异与原字节还原
+
+每次只改一处行为、顺序执行指定取消测试、捕获真实失败，再在 finally 原字节还原。脚本/逐项 stdout/XML 在本树忽略的 `tmp/sol1-b6a-mutations.py`、`tmp/sol1-b6a-mutation-{1..4}.{txt,xml}`；结构化回执为 `tmp/sol1-b6a-mutations.json`。这些不是随包产品资源；下面的结果记录随文档提交。
+
+| 变异 | 实际捕获结果 | 还原 |
+| --- | --- | --- |
+| M1 `_run_once` 不看取消信号 | 写后/收尾两个用例失败；运行器调用从 0 变为 3；pytest rc 1 | 服务文件 SHA256 前后相同 |
+| M2 `killpg` 改为只 `kill` 组长 | 父进程退出但子进程 heartbeat 从 4 继续到 16，子进程停止断言失败；pytest rc 1；测试 finally 精确回收自建组 | 进程执行文件 SHA256 前后相同 |
+| M3 返工守卫不检查取消 | `test_cancel_during_closeout_does_not_rework_prior_failure_and_skips_rest` 因返回返工提示而失败；pytest rc 1 | 服务文件 SHA256 前后相同 |
+| M4 账本把取消状态改成 passed | `test_cancelled_fact_and_notice_survive_ledger_reload` 的账本 status 断言失败；pytest rc 1 | 服务文件 SHA256 前后相同 |
+
+还原摘要（提交产品字节也已核对一致）：
+
+- `pack_verification_service.py`：`3f754a6ab0fc7b61d53596290777322b4a525c20ac909a540c48a961ab95efdd`。
+- `attempt/process_run.py`：`63a8877930ab69e638a2283c6a2d9c2968e82c2486b63e53b0059a59ca96ca92`。
+- 原字节还原后的非 platform 15 项回归已执行通过；没有带变异代码提交。
+
+### 门禁
+
+当前产品版本实际执行并通过：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_import_boundaries.py
+PYTHONDONTWRITEBYTECODE=1 $PY -m ruff check agent_py_agent scripts
+PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
+PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_doc_sync.py --base b453f88831ab3c902daa8fd61e4eb91707956771
+git diff --check b453f88831ab3c902daa8fd61e4eb91707956771 HEAD
+PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_clean_package.py .
+```
+
+- import：`IMPORT_BOUNDARIES findings=0`；ruff：`All checks passed!`。
+- strict size：`hard=0`、`blocked=False`；执行后恢复 `CODE_SIZE_REPORT.md`，不提交生成物。
+- size_diff 实际输出：
+
+```text
+新增告警: 0
+消失告警: 7
+```
+
+- 文档门禁按原基点检查实现提交区间：`DOC_SYNC_PASS`；`git diff --check` 返回 0。
+- 干净打包初跑因两个新增产品/测试文件尚未跟踪而失败；WIP 提交跟踪后复查：`OK: . 未发现发布阻塞项`。不把初跑失败抹掉。
+- 续作只补文档且产品/输入/观察点未变时复用上述结果，不把新文档提交当成真实渠道验收。ae 复审包事实/缓存/返工，9b 复审进程组回收与竞态；3a 沙箱外复跑后再决定集成和部署。
+
+### 接手复核（ds2b6a，2026-10-03）
+
+WIP `4469c3c36` 之后由 ds2b6a 接手：**产品代码未改**，补完文档与门禁复核；以下均为接手后实际执行。
+
+- 四文件同清单复跑：**82 passed / 1 failed / 12 skipped**（95 项），与 sol1 的 JUnit 一致；唯一失败仍是 platform（rc 71，嵌套 Seatbelt 被拒）。
+- 四项变异由接手者独立重跑：M1 抓到 2 项、M2 抓到 `[plain]`、M3 抓到 closeout、M4 抓到 3 项；每次只改一处、跑完立即原字节还原（`git diff` 干净）。
+- `guards9.txt` 十文件复跑：**172 passed**。
+- 静态门禁：`IMPORT_BOUNDARIES findings=0`；ruff `All checks passed!`；`DOC_SYNC_PASS`；strict size `hard=0`、`blocked=False`；`git diff --check` 通过；`check_clean_package` `OK: . 未发现发布阻塞项`。
+- `size_diff.sh`：**新增告警 0，消失告警 7**。
+- 仍未验证：真实 Seatbelt/bwrap（需 3a 沙箱外复跑）、实际 TUI/IM `/stop`、Linux bwrap、生产与完整 v2 冻结重跑。
+
+### ae 整合（2026-10-03，基于 `ede890374`）
+
+sol1 的三个提交挑到块 4/5 之上；以上 sol1、ds2b6a 的数字是在 `b453f8883` 上跑的，下面是整合后重跑的。
+
+- **解冲突**：收尾三段（输入原件、交付物、检查结果）都接上取消；sol1 测试里的旧账本接口 `rework_count()` 换成块 4/5 的 `count("rework")`。
+- **补的三处**（3a 定，每处一条用例、一个变异）：
+  - 取消时输入原件、交付物两段不记返工：`test_cancelled_closeout_records_inputs_and_deliverables_without_rework`；
+  - 只剩“被取消”时最终事实照样出：`test_cancelled_closeout_alone_is_still_reported`；
+  - 宿主提示的触发键加 `cancelled`：`test_cancelled_only_facts_still_queue_a_notice`。
+- **9b 的复核点**：
+  - 宽限期内轮询进程组：`test_cancel_returns_as_soon_as_the_group_exits_on_term`（宽限 2 秒，命令收到 TERM 就退出，`cancel()` 必须 0.3 秒内返回）；
+  - 组信号被拒和回收后管道不 EOF 恢复改造前的合同：`test_denied_group_signal_keeps_the_timeout_contract`（`os.killpg` 全部抛 PermissionError，超时仍返回 143，组长被补杀、心跳停）。
+  - 恢复吞 PermissionError 不只是沿用旧合同：macOS 实测组里只剩没 reap 的僵尸组长时 `killpg`（含信号 0）返回 EPERM。sol1 版本把它往外抛，命令恰好自己退出时取消或超时就会变成 PermissionError；变异“不吞 PermissionError”首先就被现成的 `test_sandbox_external_check_only_cancellation_is_polled` 抓到，正是撞上了这种情况。
+- **变异**（`scratchpad/b6a/mutate.py`，每次只改一处、跑完原字节还原）：七个全被拦截，各自被上面对应的用例抓到——输入原件段、交付物段去掉取消判断，事实为空判断去掉“被取消”，提示触发键去掉 `cancelled`，宽限期改回睡满，`_signal_group` 不吞 PermissionError，回收后不补杀组长。
+- **取消测试文件**：21 passed，其中 `platform` 用例（真实 macOS Seatbelt）在 ae 本机非嵌套环境**通过**，即 sol1 记录的“需 3a 沙箱外复跑”在 macOS 上已完成。
+- **Linux bwrap（Docker 车道）发现并修了 sol1 用例的一个问题**：
+  - bwrap 有 PID 命名空间，命令自己写下的进程号是命名空间里的编号（实测 parent=2、group=1），宿主侧真正的组号是 Popen 的 pid。旧用例拿命名空间编号去比，失败；更危险的是收尾清理拿它去 `killpg`，等于对宿主上的进程组 1 发 KILL（这次在容器里，没伤到宿主）。
+  - 改成比较和清理都只用宿主侧组号（`_command_process(spawned).pid`）。
+  - 同时确认：bwrap 下 TERM 打掉外层 bwrap 后，内核把整个命名空间回收，忽略 TERM 的父子进程也一起没了（心跳停），组在宽限期内就退出，所以不用再发 KILL；没有 PID 命名空间时（plain、macOS Seatbelt）仍要求 TERM 后补 KILL。
+- **回归**（`scratchpad/gates-b6a/list.txt`，317 个文件，块 4/5 那份清单加上取消、Shell、进程会话、工具循环相关文件，去掉会起虚拟桌面的 xvfb 用例）：6877 passed、12 skipped、4 xfailed、4 xpassed。4 个 xpassed 是 `test_tool_unresolved_runtime_issue_guard.py` 里非严格的存量 xfail（EXEC-31b），在基线 `ede890374` 上同样 xpassed，与本片无关。
+- **Linux 车道**（取消、attempt 沙箱、Shell stdin、运行器、块 3–5 共 9 个文件）：291 passed、9 skipped（都是只在 macOS 跑的 Seatbelt 用例），`platform` 用例在真实 bwrap 下通过。
+- **9b 沙箱侧复核后补的三条用例**（3a 定，钉住 9b 变异里存活的 M5、M1、M3）：
+  - `test_late_cancellation_callback_after_close_is_a_noop`：截获登记的取消回调，命令正常返回、句柄关闭后再调一次，断言一次 `killpg` 都没有（信号 0 也没有）。抓“close 不置关闭标志”。
+  - `test_terminate_group_reaps_a_leader_that_exits_on_term_without_a_waiter`：不起等待线程，直接调 `_terminate_group`。`killpg` 的信号 0 按 Linux 语义模拟（组长没被 reap 前组算“在”）；macOS 上僵尸组长返回 EPERM 会掩盖问题，所以显式模拟。断言宽限期里 reap 了组长、不到 1 秒返回、没发 KILL。抓“宽限期轮询里去掉 poll()”。
+  - `test_sandbox_already_cancelled_skips_readiness_probe`：已取消时 `run()` 不做沙箱就绪探测。抓“去掉 run() 开头的取消检查”。
+  - 变异脚本加这三个后共 10 个，全被拦截。补杀分支取回半截输出不在 6a 范围（3a 定）。
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

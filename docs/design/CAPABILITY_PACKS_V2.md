@@ -1,6 +1,6 @@
 # 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条）
 
-- **状态：已确认设计、实施中**（2026-10-02，3a 审定）。块 1、2、3 已实现，块 7 已复审通过，见第 7 节进度表。块 2 内把检查程序的 `baseline` 推广成 `inputs`（见第 2 节），由 ae 定、待 3a 审。
+- **状态：已确认设计、实施中**（2026-10-03）。块 1–5 已实现；块 6a（`/stop` 打断宿主核验）sol1 实现、ae 整合到块 4/5 之上，9b 复核通过，并入 step17i；块 7 已复审通过，见第 3.2 节和第 7 节。块 2 内把检查程序的 `baseline` 推广成 `inputs`（见第 2 节），由 ae 定、待 3a 审。
 - **依据**：用户第 10 条（“包要好好做，我很看重能力包”）和第 11 条（宿主证实包检查真跑过）。
 - **底子**：`c13-frozen-reruns-28435`，业务审阅 10/27（A 包 1/9、B 包 1/9、不该用包的 8/9）。17 次失败的逐条归因在证据目录 `capability-packs-v2-design/attribution.md`：
   - 宿主机制 5 次；
@@ -94,7 +94,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 目标和基线：相对路径和 sha256；
   - 运行结果：rc、`valid`、各 code 计数、耗时；
   - 关联输入：每条的参数名、来源、是否必需、相对路径和 sha256（没找到时为空）；
-  - 原因码：`verifier_timeout`、`verifier_output_invalid`、`sandbox_unavailable`、`verifier_member_mismatch`、`verifier_consent_missing`、`unsupported_runtime`、`verifier_input_unresolved`。
+  - 原因码：`verifier_timeout`、`verifier_cancelled`、`verifier_output_invalid`、`sandbox_unavailable`、`verifier_member_mismatch`、`verifier_consent_missing`、`unsupported_runtime`、`verifier_input_unresolved`。
   - 写进运行事件和 `channel_delivery.pack_verifications`。
 - **质量走返工，不前置硬拦**：收尾检查有错误时，返工提示 1 次；返工后仍有错误，照常结束并带收尾说明；只有警告不返工。
 - **结论来源**：最终的检查结论由宿主用 `HostNotice`（`source=pack_verification`）给出，模型自述不算事实。
@@ -143,9 +143,20 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 回合正常返回后，Gateway 用这些事实写一条 `HostNotice`（`source=pack_verification`，`code=summary`），排入原提示队列，和当轮其它提示一起发布。检查结果、被就地改的输入原件、缺的必需交付物三类事实有任一项就发（块 4/5 起，只有后两类、没有检查结果的回合也发）。
   - 收尾跑过时，只报最后一次收尾检查覆盖的结果，也就是交付时的内容状态。
   - 没跑过收尾（工具轮次上限、失败、中断）时，报每个目标最后一次写入时的结果，并注明“没有正常收尾”。
-- **已知限制**：
-  - 检查程序运行期间不响应 `/stop`（运行器拿不到取消信号），只受声明的超时约束，最长 120 秒；块 6 评估是否接入取消；
-  - 回合没正常收尾时不做收尾检查。
+### 3.2 块 6a：取消宿主核验（2026-10-03，sol1 实现，ae 整合到块 4/5 之上，9b 复核通过，并入 step17i）
+
+- **来源**：3a 根据 ae 的同步核验调研派工；本片不改变包声明、同意、沙箱权限和默认关闭开关。
+- **启动前**：写后/收尾钩子在 executor 令牌范围之外，显式绑定本 run 的 `params.cancellation_token`；每次检查前读 `cancellation_requested()`。已取消不进运行器、不启动新程序，剩余适用目标逐项写 `status=cancelled`、`reason_code=verifier_cancelled`。
+- **运行中**：`AttemptExecutionSandbox.run` 复用新 `attempt/process_run.py` 的通用回收，给本次独立会话登记临时取消回调，按固定组号 TERM→宽限→KILL。
+  - 宽限期内每 0.05 秒探测一次组是否已全部退出（9b 复核要求），收到 TERM 就退出的命令不会让 `/stop` 等满宽限期；组里还有忽略 TERM 的后代时才等满宽限再 KILL，不是只杀组长。
+  - 无回调的 external_check 按 0.1 秒观察片检查；退出撤销回调、reap 组长并释放捕获输出管道。不查询其它任务或宿主进程表。
+  - 组信号被拒（PermissionError）和回收后管道迟迟不 EOF 沿用改造前的合同：不抛给调用方，补杀组长、有界 reap，超时仍返回 143。
+- **事实/返工**：运行器把共用 `ToolCancelled` 映射成 cancelled/verifier_cancelled；取消优先于超时、缓存质量结果和返工，取消结果不能当有效检查复用。
+  - 收尾三段（输入原件、交付物、检查结果）被取消时照样记事实，但哪一段都不记返工、不出返工提示；`closeout` 记 `cancelled`。
+  - `_no_tool_calls_decision` 复用既有 conversation_control 取消终态，不翻转已成功写工具的成败。
+  - 最终事实在“检查结果、被改的输入原件、缺的交付物、被取消”四样都没有时才不出现；宿主提示同样四样任一为真就发，开头写明“被取消”。
+- **证据**：命令和结果见 TESTS.md“能力包 v2 块 6a”。macOS 真实 Seatbelt 和 Linux 真实 bwrap（Docker 车道）的进程组取消用例都通过；bwrap 下 TERM 打掉外层后内核回收整个 PID 命名空间，不需要再发 KILL。
+- **已知边界**：目标扫描和检查上限不变（收尾最多 8 个，超出仍标 truncated）；回合未到收尾入口（例如工具轮次上限）仍不做收尾检查。实际 TUI/IM `/stop`、生产部署及 v2 冻结业务重跑未验证；块 6 的其它工作不因本片而完成。
 
 ## 4. 输入保护（块 4，已实现）
 
@@ -216,5 +227,6 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 | 4 | 输入原件清单、原件副本、收尾比对、返工；宿主托管文件统一落到规范任务根（只读保护依赖 be 的 H3） | 已实现（`capability/pack_verification_originals.py`、`pack_verification_inputs.py`，`test_pack_verification_inputs.py`） |
 | 5 | 交付存在和返工（只在本回合改过工作区时查） | 已实现（`capability/pack_verification_deliverables.py`，`test_pack_verification_deliverables.py`） |
 | 6 | 变异、门禁、文档收口 | 待做 |
+| 6a | `/stop` 打断宿主核验：取消后不再起新检查、正在跑的整组回收、剩余目标逐项记 cancelled、被取消的回合不返工 | 已实现（sol1 实现，ae 整合到块 4/5 之上并补三处取消事实、宽限期轮询：`attempt/process_run.py`，`test_pack_verification_cancellation.py`），9b 复核通过，并入 step17i |
 | 7 | A 0.5.0、B 0.3.0（be） | 复审通过（`claude/be-capability-packs-content-b2` 5bf9bb61d） |
 | 8 | 重跑和独立审阅 | 待做 |

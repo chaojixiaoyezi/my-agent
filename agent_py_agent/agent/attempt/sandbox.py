@@ -1,5 +1,5 @@
-# LLM: attempt 沙箱负责平台执行边界；同步 run 不继承宿主 stdin，PTY 仍由调用方经 build_argv 构造独立终端。
-# 模块用途: 为不同平台构造执行隔离并回收超时进程，普通批处理不会意外等待或消费 Gateway 的输入。
+# LLM: attempt 沙箱负责平台执行边界；同步 run 复用 process_run 的取消/超时组回收且不继承 stdin，PTY 仍由 build_argv 构造独立终端。
+# 模块用途: 为不同平台构造执行隔离，批处理等待可被本 run 取消，不消费 Gateway 输入、不绕过隔离。
 """AttemptExecutionSandbox（3.txt E.4-E.8）：attempt 级平台执行网关。
 
 - Linux：bwrap/namespace（复用 agent.tooling.sandbox 的挂载构造与自检）。
@@ -29,11 +29,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.cancellation import raise_if_cancelled
 from ..tooling.sandbox import (
     SandboxReadiness,
     SandboxSpec,
@@ -42,6 +42,7 @@ from ..tooling.sandbox import (
     find_bwrap,
     probe_sandbox,
 )
+from .process_run import run_sandbox_process
 
 
 class SandboxUnavailableError(SandboxUnavailable):
@@ -90,6 +91,8 @@ class AttemptSandboxSpec:
     protected_write_patterns: tuple[str, ...] = ()
 
 
+# LLM: 只负责平台规则和就绪门；同步 run 的取消及回收交给 process_run，不新增无沙箱旁路，联测 attempt 与 verifier。
+# 类用途: 为本次命令构建 Linux/macOS 沙箱，并把同步等待接到共用的可取消进程执行器。
 class AttemptExecutionSandbox:
     """跨平台 attempt 沙箱。按宿主平台选择 Linux bwrap 或 macOS Seatbelt。
 
@@ -276,8 +279,8 @@ class AttemptExecutionSandbox:
         ), *_spec_rules(self.spec)])
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
-    # LLM: 同步批处理无 stdin 注入协议，必须返回 EOF；不改变 build_argv、显式 PTY 通道和超时回收契约。
-    # 函数用途: 在沙箱里执行非交互命令并等待退出，隔开宿主终端输入，超时仍回收完整进程组。
+    # LLM: 就绪与 argv 仍走唯一平台边界；启动前复查取消，等待和 TERM→宽限→KILL 共用 process_run，不改显式 PTY 通道。
+    # 函数用途: 执行非交互沙箱命令并响应本 run 的取消；已取消不启动，运行中取消回收完整组后抛 ToolCancelled。
     def run(
         self,
         command_argv: list[str],
@@ -286,50 +289,11 @@ class AttemptExecutionSandbox:
         grace_seconds: float = 2.0,
         capture_output: bool = True,
     ) -> subprocess.CompletedProcess:
-        """在沙箱内执行命令。超时 → TERM → 宽限 → KILL 回收整进程组（E.11：
-        TERM→宽限→KILL 只用于回收；沙箱保证即使孙进程脱组也只能写 staging）。"""
+        """超时返回原 143；取消抛共用 ToolCancelled。脱组后代的写边界仍由平台沙箱保护。"""
+        raise_if_cancelled()
         self.require_ready()
         argv = self.build_argv(command_argv)
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE if capture_output else None,
-            stderr=subprocess.PIPE if capture_output else None,
-            text=capture_output,
-            start_new_session=True,  # 独立进程组，回收时整组 TERM/KILL
-        )
-        try:
-            out, err = proc.communicate(timeout=timeout)
-            return subprocess.CompletedProcess(argv, proc.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            # TERM → 宽限 → KILL（E.11 回收，不向共享目录写任何东西）。
-            self._terminate_group(proc, grace_seconds=grace_seconds)
-            try:
-                out, err = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                out, err = proc.communicate()
-            return subprocess.CompletedProcess(
-                argv, 143, out, f"timeout after TERM->grace({grace_seconds}s)->KILL"
-            )
-
-    @staticmethod
-    def _terminate_group(proc: subprocess.Popen, *, grace_seconds: float) -> None:
-        import signal
-
-        try:
-            group = os.getpgid(proc.pid)
-        except (ProcessLookupError, PermissionError):
-            return
-        try:
-            os.killpg(group, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            return
-        time.sleep(max(0.0, grace_seconds))
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        return run_sandbox_process(argv, timeout, grace_seconds, capture_output)
 
     # ------------------------------------------------------ macOS SBPL 构造
     # LLM: The profile is a pure projection of structured sandbox facts. Full Access omits the

@@ -3,7 +3,7 @@
 #   - 模型不再调工具准备收尾时跑收尾核验，有错误时给出一次返工提示（closeout_rework_block，由 response_decision 调）；
 #   - 写工具成功后，从回执的宿主字段（path/target_path/output_path/artifact_ref/artifact_refs，都是绝对路径）取写出的文件，
 #     跑写后核验，把有界摘要列表并进同一个 handler_details 信封的 pack_verification 键（归档白名单和回执渲染都读它）。
-#   开关关着、没有钉住包时零开销返回原结果；核验内部异常只吞已知的读写错误，不改变工具本身的成败。
+#   executor 外的写后/收尾核验显式绑定 params.cancellation_token（本 run），取消只影响核验、不改写工具成败。
 #   改动同步 test_pack_verification_service.py 与 tooling/runtime_facts、tool_call_archive_record 的 pack_verification 键。
 # 模块用途: 把宿主核验挂到工具执行前后，而不新增任何模型可调用的工具。
 
@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+from ..common.cancellation import bind_cancellation_token, current_cancellation_token
 from ..plugin_installation import PluginInstallationError
 from ..tooling.write_boundary import WRITE_TOOL_NAMES
 from .pack_verification_scope import host_verification_enabled
@@ -40,8 +41,8 @@ def capture_baseline_before_tool(agent: object, params: object, tool_name: str) 
         return
 
 
-# LLM: 只处理成功的写工具（工具名取结果自己的 tool_name）；摘要为空时原样返回结果（不加空键），保持未钉包任务的回执逐字节不变。
-# 函数用途: 写工具成功后核验写出的交付物，把摘要并进回执信封。
+# LLM: 写后位于 executor 令牌范围外，必须用本 run 参数重新绑定；未传参数令牌的直接调用保持原上下文，取消摘要不翻转写入事实。
+# 函数用途: 写工具成功后可取消地核验交付物，把有界摘要并进原回执。
 def attach_post_write_verification(agent: object, params: object, result: object) -> object:
     tool_name = str(getattr(result, "tool_name", "") or "")
     if tool_name not in WRITE_TOOL_NAMES or not getattr(result, "ok", False) or not host_verification_enabled(agent):
@@ -49,7 +50,8 @@ def attach_post_write_verification(agent: object, params: object, result: object
     metadata = dict(getattr(result, "metadata", None) or {})
     details = dict(metadata.get("handler_details") or {})
     try:
-        summaries = verify_written_files(agent, params, written_paths(details))
+        with bind_cancellation_token(getattr(params, "cancellation_token", None) or current_cancellation_token()):
+            summaries = verify_written_files(agent, params, written_paths(details))
     except _HOOK_ERRORS:
         return result
     if not summaries:
@@ -59,13 +61,14 @@ def attach_post_write_verification(agent: object, params: object, result: object
     return replace(result, metadata=metadata)
 
 
-# LLM: 收尾核验的异常只吞已知读写错误（当作没核验、不返工），不改变收尾本身；开关关着时零开销返回空串。
-# 函数用途: 收尾前跑宿主核验，返回返工提示或空串。
+# LLM: 收尾不在工具 executor 范围内，须显式绑定当前 run 取消；已取消仍逐目标记账，不给返工提示，开关关保持零 I/O。
+# 函数用途: 可取消地跑宿主收尾核验，仅未取消的质量失败返回返工提示。
 def closeout_rework_block(agent: object, params: object) -> str:
     if not host_verification_enabled(agent):
         return ""
     try:
-        return pack_verification_closeout_block(agent, params)
+        with bind_cancellation_token(getattr(params, "cancellation_token", None) or current_cancellation_token()):
+            return pack_verification_closeout_block(agent, params)
     except _HOOK_ERRORS:
         return ""
 

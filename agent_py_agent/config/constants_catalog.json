@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 883,
+  "count": 886,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -762,6 +762,30 @@
       "unit": "个",
       "category": "上限预算",
       "description": "未闭合工具开始标记的最大个数，防流解析失配。"
+    },
+    {
+      "name": "_CANCELLATION_POLL_SECONDS",
+      "file": "agent_py_agent/agent/attempt/process_run.py",
+      "value": 0.1,
+      "unit": "秒",
+      "category": "其它",
+      "description": "取消可能仅来自外部结构化检查（没有 token.cancel 回调），每 0.1 秒复核，不能等到整个命令超时。"
+    },
+    {
+      "name": "_GROUP_EXIT_POLL_SECONDS",
+      "file": "agent_py_agent/agent/attempt/process_run.py",
+      "value": 0.05,
+      "unit": "秒",
+      "category": "其它",
+      "description": "TERM 后的宽限期里每 0.05 秒看一次组是否已全部退出；退了就不再等满宽限（取消回调在 /stop 线程里同步执行）。"
+    },
+    {
+      "name": "_PIPE_DRAIN_SECONDS",
+      "file": "agent_py_agent/agent/attempt/process_run.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "回收后仅有界排空管道；脱组进程仍持有描述符时，不无限等 EOF。"
     },
     {
       "name": "_FICLONE",
