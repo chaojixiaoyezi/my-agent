@@ -1,5 +1,6 @@
-# LLM: /model「新增模型」唯一入口：先选 5 类之一；登录账号走 tui_model_auth.add_account；其余填连接（地址 + 密钥，
-#   请求头/会话头在「高级」里），经 discover 拉列表（不落盘）→ 勾选 → add_models 一次保存；拉不到列表时可手动填模型名。
+# LLM: /model「新增模型」唯一入口：先选 5 类之一；OpenAI Chat 再选用途（默认 agentic，也可 embedding），登录账号走
+#   tui_model_auth.add_account；其余仍填连接（地址 + 密钥，请求头/会话头在「高级」里），经 discover 拉列表（不落盘）→ 勾选
+#   → add_models 一次保存。embedding 用途作为结构化 capability 送同一个目录写入入口；对话请求保持原参数不变。
 #   密钥只在掩码控件里短暂保留，关闭时清空；不调用模型、不切换会话模型。改动须同步 test_tui_model_add 与
 #   docs/design/MODEL_OAUTH.md。
 # 模块用途: /model →「新增模型」：OpenAI Chat / Anthropic / OpenAI Responses / 登录账号 / Jev 决策五类，一次加多个模型。
@@ -20,6 +21,7 @@ _TYPES = [
     ("auth", "登录账号（ChatGPT Plus / Pro 订阅、通用 OAuth）"),
     ("typesafe_decision", "Jev 决策模型（只给建议，不用于聊天）"),
 ]
+_OPENAI_CAPABILITIES = [("agentic", "对话（默认）"), ("embedding", "Embedding（向量模型）")]
 # 内置模板只填公开地址和会话头名称，密钥仍由用户填写；会话头的值由 my-agent 按会话生成，不复制别处的会话号。
 _OPENCODE_GO = {"display_name": "OpenCode Go", "api_base": "https://opencode.ai/zen/go/v1", "session_header": "x-opencode-session"}
 
@@ -43,8 +45,11 @@ async def add_models(app, agent, session: str) -> str:
 #   地址、请求头名称等权威校验在服务端 connection_provider。按钮值都是结构化动作，不解析标签。
 # 类用途: 「新增模型」里填写连接（地址、密钥，高级里的请求头和会话头）并完成拉列表、勾选、保存。
 class _ConnectionForm:
+    # LLM: form 持有一次新增流程状态；backend 决定是否展示用途选择，默认 capability 与旧连接流程相同。
+    # 函数用途: 初始化新增连接表单和控件；只有 OpenAI Chat 支持在此流程里显式改为 Embedding。
     def __init__(self, app, agent, session: str, backend: str):
         self.app, self.agent, self.session, self.backend = app, agent, session, backend
+        self.capability = "agentic"
         self.address = TextArea(height=1, multiline=False)
         self.key = TextArea(height=1, multiline=False, password=True)
         self.headers = TextArea(height=3, multiline=True)
@@ -58,14 +63,21 @@ class _ConnectionForm:
             Label('自定义请求头（JSON 对象，可空），如 {"HTTP-Referer": "https://example.com"}'), self.headers,
             Label("会话头名称（可空；值由 my-agent 按会话自动生成，如 OpenCode 的 x-opencode-session）"), self.session_header])
 
-    # LLM: 循环直到保存成功或用户返回；finally 清空密钥和请求头，异常也不留在内存控件里。
-    # 函数用途: 显示连接表单并处理按钮，返回保存结果文字（返回/取消为空串）。
+    # LLM: 只为 OpenAI Chat 加用途选择，首项是原 agentic 行为；Esc 不保存。循环直到保存成功或用户返回，finally 清空密钥和请求头。
+    # 函数用途: 先选对话或向量用途，再显示连接表单并处理按钮；取消返回空串。
     async def run(self) -> str:
         actions = [("拉取模型列表", "fetch")]
         if self.backend != "typesafe_decision":
             actions.append(("OpenCode Go 模板", "template"))
         actions += [("高级", "advanced"), ("返回", None)]
         try:
+            if self.backend == "openai_compatible":
+                choices = RadioList(_OPENAI_CAPABILITIES, select_on_focus=True)
+                self.capability = await _dialog(
+                    self.app, "新增模型 · 选择用途", choices,
+                    (("下一步", lambda: choices.current_value), ("返回", None)), focus=choices)
+                if self.capability is None:
+                    return ""
             while True:
                 action = await _dialog(self.app, "新增模型 · 填写连接", self.form, tuple(actions), focus=self.address)
                 if action is None:
@@ -108,20 +120,22 @@ class _ConnectionForm:
         return {"model_backend": self.backend, "api_base": address, "api_key": self.key.text.strip(),
                 "custom_headers": headers, "session_header": self.session_header.text.strip(), "display_name": name}
 
-    # LLM: 目录读取与保存各一次请求；保存失败整批不写，提示留在表单上可改后重试（模型编号每次新生成，重复由服务端跳过）。
-    # 函数用途: 拉模型列表让用户勾选（拉不到就手动填），再一次保存，成功返回结果文字。
+    # LLM: 目录读取与保存各一次请求；保存沿唯一 add_models 写入口且整批原子提交。embedding 显式传 capability；agentic 参数保持旧形状。
+    # 函数用途: 拉模型列表让用户勾选（拉不到就手动填），再一次保存，按所选用途提示下一步。
     async def _pick_and_save(self, connection: dict) -> str:
         catalog = await _request(self.app, self.agent, self.session, "discover", {"connection": connection})
         rows = catalog.get("models") if catalog.get("ok") else None
         picked = await (choose_models(self.app, rows, "选择要添加的模型（可多选）") if rows else self._manual(catalog))
         if not picked:
             return ""
-        result = await _request(self.app, self.agent, self.session, "add_models",
-                                {"connection": connection, "models": with_ids(picked)})
+        payload = {"connection": connection, "models": with_ids(picked)}
+        if self.capability == "embedding":
+            payload["capability"] = "embedding"
+        result = await _request(self.app, self.agent, self.session, "add_models", payload)
         if not result.get("ok"):
             self.notice.text = added_text(result, picked)
             return ""
-        return added_text(result, picked)
+        return added_text(result, picked, embedding=self.capability == "embedding")
 
     # LLM: 只展示服务端已脱敏的 message / provider_message；手动填写的名称与上下文由服务端 validate_model 校验。
     # 函数用途: 拉不到模型列表时说明原因，并让用户手动填一个模型名和上下文；返回要添加的行或 None。

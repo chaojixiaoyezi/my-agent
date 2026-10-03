@@ -59,12 +59,14 @@
 - **新增模型**：填接口地址和密钥（请求头 JSON、会话头名称在「高级」；「OpenCode Go 模板」一键填公开地址和会话头名称）→
   「拉取模型列表」经 `discover` 带未保存的 `connection` 读一次目录（不落盘，报错按这个连接的密钥脱敏）→ 勾选（可多选；
   目录没写上下文的模型用勾选框里填的统一值，不按模型名猜）→ `add_models` 一次保存。拉不到列表时说明原因并可手动填一个模型名。
+  OpenAI Chat 在填连接前多一步「用途」选择：`agentic`（对话，默认）或 `embedding`；默认项保持原流程的 payload 与存储语义，Embedding 把结构化 `capability` 随 `add_models` 一起送入同一配置服务。
+  `model_connections.add_connection_models` 将这个用途同时写入模型档案和服务商能力，保存仍走 `execute_model_profile_operation` 的锁内原子入口；服务商复用时合并能力，取消不写。其它接口类型及登录账号流程不展示此选项。
   登录账号直接走登录流程，ChatGPT 订阅不再让用户填编号和地址，登录成功后同一个勾选框。
 - **`add_models`**（`agent/settings/model_connections.py`）：锁内一次落盘，全成或全不写，一次最多 200 个。来源二选一：
   `connection`（地址、密钥、自定义头、会话头四项逐字相同的 API Key 服务商直接复用，不再逐模型复制凭据；否则新建
   `provider-<uuid4>`，展示名缺省取地址主机名）或 `provider_id` + `model_backend`（已有服务商/登录账号）。同一服务商下同名
   同接口的模型跳过，回执 `added_models` 只列实际新增的；模型编号由客户端生成，重试幂等；编号被占且内容不同明确报错。
-  用途只由接口推出：决策接口配 decision，其余配 agentic，并补到服务商用途上。
+  默认用途由接口推出：决策接口配 decision，其余配 agentic；TUI 可显式传 `capability=embedding`，模型档案与服务商能力同次保存为 embedding。
 - **模型表单**：常用的名称、上下文、启用在表单上，接口类型、用途、温度、top_p、排队预算、用途标签、输入模态、思考控制、
   结构化输出进「高级」页（控件一次建好，不打开高级也整组提交原值）；原记录已有接口类型时不再先弹接口选择。
   连接表单同样把会话头、自定义头、清空选项和用途放进「高级」。

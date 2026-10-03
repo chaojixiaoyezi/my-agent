@@ -55,19 +55,32 @@ def saved(host):
     return read_model_profiles(model_profiles_path(host.home_paths))
 
 
-async def choose_type(app, pipe, downs):
+async def choose_type(app, pipe, downs, purpose_downs=0):
     await wait_dialog_ready(app, "新增模型 · 选择类型", "类型列表")
     pipe.send_bytes(b"\x1b[B" * downs + b"\r")
+    if downs == 0:
+        await wait_dialog_ready(app, "新增模型 · 选择用途", "用途列表")
+        assert "对话（默认）" in visible(app) and "Embedding" in visible(app)
+        pipe.send_bytes(b"\x1b[B" * purpose_downs + b"\r")
 
 
 def test_catalog_failure_offers_manual_entry_and_saves_one_model(tmp_path, monkeypatch):
     class Failure(RuntimeError):
         details = {"provider_error": {"error": {"message": f"no model list for {SECRET}"}}}
 
+    add_payloads = []
+    original_request = tui_model_add._request
+
+    async def record_add_payload(*args, **kwargs):
+        if args[3] == "add_models":
+            add_payloads.append(args[4])
+        return await original_request(*args, **kwargs)
+
     def failing(request):
         raise Failure()
 
     monkeypatch.setattr(network, "get_json", failing)
+    monkeypatch.setattr(tui_model_add, "_request", record_add_payload)
 
     async def scenario():
         async with running_add(tmp_path) as (app, pipe, host, flow, runtime):
@@ -83,6 +96,9 @@ def test_catalog_failure_offers_manual_entry_and_saves_one_model(tmp_path, monke
             row = next(iter(data["profiles"].values()))
             assert (row["model_name"], row["model_context_window_tokens"], row["model_backend"]) == (
                 "deepseek-v4-flash", 1000000, "openai_compatible")
+            assert row["capability"] == "agentic"
+            assert data["providers"][row["provider_id"]]["capabilities"] == ["agentic"]
+            assert len(add_payloads) == 1 and set(add_payloads[0]) == {"connection", "models"}
             assert data["providers"][row["provider_id"]]["api_key"] == SECRET
             assert all(SECRET not in path.read_text() for path in tmp_path.rglob("input_history"))
             assert all(SECRET not in block.text for block in runtime.store.snapshot().stable_blocks)
@@ -215,3 +231,44 @@ def test_connection_form_clears_the_key_when_it_closes(monkeypatch):
     monkeypatch.setattr(tui_model_add, "_dialog", close)
     assert asyncio.run(form.run()) == ""
     assert form.key.text == "" and form.headers.text == ""
+
+
+def test_embedding_usage_is_saved_like_manage_models_one_step_add(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability.model_profile_tool import ManageModelsTool
+    from agent_py_agent.tests.test_model_profiles import Host
+
+    monkeypatch.setattr(network, "get_json", lambda request: {"data": [{"id": "embed-v1", "context_length": 8192}]})
+
+    async def scenario():
+        async with running_add(tmp_path) as (app, pipe, host, flow, _runtime):
+            await choose_type(app, pipe, 0, purpose_downs=1)
+            await wait_dialog_ready(app, "新增模型 · 填写连接", "连接表单")
+            pipe.send_text(f"https://api.example.test/v1\t{SECRET}\t\r")
+            await wait_dialog_ready(app, "选择要添加的模型（可多选）", "勾选框")
+            pipe.send_bytes(b" \t\r")
+            result = await asyncio.wait_for(flow, 3)
+            assert result == "已添加 1 个模型：embed-v1。去‘选择模型’→‘向量模型’里选用；重启 Gateway 后生效"
+
+        tui_data = saved(host)
+        tui_row = next(iter(tui_data["profiles"].values()))
+        tui_provider = tui_data["providers"][tui_row["provider_id"]]
+
+        quick_host = Host(tmp_path / "manage-config")
+        quick = ManageModelsTool(quick_host).execute({"action": "add", "profile": {
+            "model_name": "embed-v1", "model_backend": "openai_compatible",
+            "api_base": "https://api.example.test/v1", "api_key": SECRET,
+            "model_context_window_tokens": 8192, "capability": "embedding",
+        }})
+        assert quick.ok
+        quick_data = read_model_profiles(model_profiles_path(quick_host.home_paths))
+        quick_row = next(iter(quick_data["profiles"].values()))
+        quick_provider = quick_data["providers"][quick_row["provider_id"]]
+        assert {key: value for key, value in tui_row.items() if key != "provider_id"} == {
+            key: value for key, value in quick_row.items() if key != "provider_id"
+        }
+        assert tui_provider["capabilities"] == quick_provider["capabilities"] == ["embedding"]
+        assert {key: value for key, value in tui_provider.items() if key != "display_name"} == {
+            key: value for key, value in quick_provider.items() if key != "display_name"
+        }
+
+    asyncio.run(scenario())

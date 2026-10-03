@@ -13,6 +13,7 @@ from prompt_toolkit.widgets import CheckboxList, Label, TextArea
 from .tui_model_menu import _dialog, _request, _request_data
 
 _SWITCH_HINT = "在 /model →「选择模型」→「对话模型」里切换。"
+_EMBEDDING_HINT = "去‘选择模型’→‘向量模型’里选用；重启 Gateway 后生效"
 _LATER_HINT = "以后可在 /model →「管理已有模型」→ 这个账号 →「添加模型」里添加。"
 _MIN_WINDOW, _MAX_WINDOW = 4096, 2**31 - 1
 
@@ -62,9 +63,9 @@ def with_ids(rows: list[dict]) -> list[dict]:
              **({"reasoning_levels": row["reasoning_levels"]} if row.get("reasoning_levels") else {})} for row in rows]
 
 
-# LLM: 只按回执的 ok 与 added_models 字段组织文字；失败时整批都没写入（add_models 同次落盘）。
-# 函数用途: 把一次批量添加的结果写成给用户看的一句话。
-def added_text(result: dict, picked: list[dict]) -> str:
+# LLM: 只按回执的 ok 与 added_models 字段组织文字；失败时整批都没写入（add_models 同次落盘），embedding 成功提示用向量入口。
+# 函数用途: 把一次批量添加的结果写成给用户看的一句话，并按用途给出后续入口。
+def added_text(result: dict, picked: list[dict], *, embedding: bool = False) -> str:
     if not result.get("ok"):
         return f"没有添加：{result.get('message') or '保存结果未知，请重新打开列表确认。'}"
     added = set(result.get("added_models") or [])
@@ -73,7 +74,7 @@ def added_text(result: dict, picked: list[dict]) -> str:
     text = f"已添加 {len(names)} 个模型：{'、'.join(names)}。" if names else "这些模型之前都已添加过。"
     if names and skipped:
         text += f"另有 {skipped} 个之前已添加，未重复添加。"
-    return text + _SWITCH_HINT
+    return text + (_EMBEDDING_HINT if embedding else _SWITCH_HINT)
 
 
 # LLM: 上下文合法范围与 validate_model 一致；0 或缺失表示服务商没写，不能当作真实容量。

@@ -1835,9 +1835,9 @@ my-agent subagent-run <run_id> --execute
 
 ## TUI `/model`
 
-在 TUI 输入 `/model`，顶层五项：新增模型、选择模型（对话模型 / 决策模型）、管理已有模型、连接测试、默认模型与共享。
-「新增模型」先选类型（OpenAI Chat、Anthropic、OpenAI Responses、登录账号、Jev 决策），再填接口地址和密钥（请求头、会话头在
-「高级」，OpenCode Go 有一键模板），点「拉取模型列表」后勾选要用的模型（可多选）一次保存；拉不到列表时可手动填模型名。
+在 TUI 输入 `/model`，顶层五项：新增模型、选择模型（对话模型 / 决策模型 / 向量模型）、管理已有模型、连接测试、默认模型与共享。
+「新增模型」先选类型（OpenAI Chat、Anthropic、OpenAI Responses、登录账号、Jev 决策）；OpenAI Chat 再选用途「对话（默认）」或「Embedding」。
+之后填接口地址和密钥（请求头、会话头在「高级」，OpenCode Go 有一键模板），点「拉取模型列表」后勾选要用的模型（可多选）一次保存；拉不到列表时可手动填模型名。选择「Embedding」时，服务商能力和模型用途同次保存，回执提示到「选择模型」→「向量模型」选用并重启 Gateway。
 「登录账号」里 ChatGPT 订阅会直接打开浏览器登录（SSH 等环境退回设备码），登录回来同样勾选模型；通用登录可填写 Client ID、
 设备码/令牌端点、Scope、Audience 与 Client Secret，必须由服务商支持设备码流程。不自动选型号，不借用其他应用的登录。
 取消登录与退出账号分开，OAuth 账号不跨用户共享。详见 [模型账号登录](docs/design/MODEL_OAUTH.md)。

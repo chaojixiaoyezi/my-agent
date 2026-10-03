@@ -17,6 +17,27 @@
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → 新增告警 0、消失告警 7。code-size 后已执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
 - **合同/边界**：无配置项；公共 `append_jsonl_capped` 默认语义未改；Audit 汇总和 recent 20 行不变，真实 Gateway/owner 未验证。
 
+## TUI 新增模型直接选择 Embedding 用途（luna4，2026-10-03，本地完成、待 3a 复审）
+
+- OpenAI Chat 的 TUI「新增模型」新增用途选择：默认对话保留既有请求行为；选择 Embedding 时把用途随模型一并交给原子 `add_models`，仍由 `execute_model_profile_operation` 唯一写入入口保存，模型档案与服务商能力一致。成功后显示“去‘选择模型’→‘向量模型’里选用；重启 Gateway 后生效”。
+- `test_tui_model_add.py` 覆盖默认行为、Embedding 保存结果与 `manage_models` 一步添加的字段对照：模型字段除随机 provider_id 外一致，服务商配置除 provider display_name 外一致（该名由交互路径分别取连接主机名/模型名）；用途字段与 provider capabilities 均为 embedding。`test_model_connections.py` 覆盖复用服务商时合并能力；`test_tui_subscription_models.py` 覆盖提示文案。
+- **变异**：3 项均被测试拦截并已撤销：移除 TUI 的 Embedding capability 传参、让保存层忽略显式用途、把 Embedding 成功提示改回对话提示。恢复代码后聚焦回归再次通过。
+- **聚焦回归**（工作树根）：
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_tui_model_add.py agent_py_agent/tests/test_model_connections.py agent_py_agent/tests/test_tui_subscription_models.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna4
+  ```
+  结果：退出码 0，20 个测试点通过。
+- **架构守卫**（工作树根）：
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  GUARD_TESTS=$(awk 'NF && $1 !~ /^#/' ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt)
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $GUARD_TESTS -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna4
+  ```
+  结果：guards9 所列测试全部执行完成，退出码 0、输出到达 100%，无失败。
+- **门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；Ruff 首次发现 `model_connections.py` 的 I001 导入格式问题，修正后 `$PY -m ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2228 hard=0 high-risk=1523 soft=705 test_advisory=1241 blocked=False`，随后按要求还原 `CODE_SIZE_REPORT.md`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。`size_diff.sh` 实际输出：`新增告警: 0`、`消失告警: 7`。
+- 尚未验证真实 TUI/Gateway、供应商连接、重启后向量模型采用及实际向量请求；以上仅证明当前源代码的单元/本地组件链路。`git diff --check` 在最终文档变更后退出码 0；本地提交号见交接报告。
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

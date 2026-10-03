@@ -47,6 +47,19 @@ def test_one_connection_adds_several_models_and_reuses_the_same_connection(tmp_p
     assert SECRET not in json.dumps(first) + json.dumps(again)
 
 
+def test_embedding_usage_is_added_to_a_reused_provider_and_profile(tmp_path):
+    host = Host(tmp_path)
+    add_models(host, {"connection": connection(), "models": models("chat-model")})
+    provider_id = next(iter(read_model_profiles(model_profiles_path(host.home_paths))["providers"]))
+    result = add_models(host, {"connection": connection(), "capability": "embedding", "models": models("embed-model")})
+    assert result["added_models"] == ["embed-model"]
+    data = read_model_profiles(model_profiles_path(host.home_paths))
+    assert len(data["providers"]) == 1
+    assert data["providers"][provider_id]["capabilities"] == ["agentic", "embedding"]
+    row = next(row for row in data["profiles"].values() if row["model_name"] == "embed-model")
+    assert row["provider_id"] == provider_id and row["capability"] == "embedding"
+
+
 def test_a_different_key_or_header_is_a_different_connection(tmp_path):
     host = Host(tmp_path)
     add_models(host, {"connection": connection(), "models": models("m-a")})
