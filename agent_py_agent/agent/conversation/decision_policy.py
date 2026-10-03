@@ -343,7 +343,8 @@ def notify_decision_settings_changed(context: object, result: dict) -> None:
 
 # LLM: 整套标记的固定顺序：锁内收集快照与通知代次 → 锁外逐条比路由 → 再进锁复核代次后一次写完整批。
 #   比路由期间若有更新的通知插进来（代次变了），整批重算；重算超过上限就按“已改变”整批撤销（宁严勿松），
-#   绝不死循环。返回真正需要取消句柄的请求，没被影响的请求在锁内就已去掉。
+#   绝不死循环。返回真正需要取消句柄的请求：复核通过时直接用 _commit_batch 的返回，不在锁外重读标记；
+#   没被影响的请求在锁内就已去掉。
 # 函数用途: 在不把路由计算带进索引锁的前提下，一次标完整批受影响的在途请求。
 def _mark_settings_batch(owner: str, scope: str, thread_id: str, result: dict) -> tuple[ActiveDecision, ...]:
     batch: tuple[tuple[ActiveDecision, dict, dict], ...] = ()
@@ -351,29 +352,26 @@ def _mark_settings_batch(owner: str, scope: str, thread_id: str, result: dict) -
         batch, generation = _collect_batch(owner, scope, thread_id, result)
         if not batch:
             return ()
-        if _try_commit_collected(batch, generation):
-            return _batched_cancels(batch)
+        cancels = _try_commit_collected(batch, generation)
+        if cancels is not None:
+            return cancels
     # 重算用尽只说明并发通知太密：宁可把没复核到的请求也按“变了”整批撤销，也不留下可能受影响的在途请求。
     with _LOCK:
         return _commit_batch(batch, batch)
 
 
-# LLM: 调用方不持锁；比路由必须在锁外。复核通过（代次和快照都还是收集时那份）就本轮提交并返回 True；
-#   否则返回 False，交给调用方整批重算。
-# 函数用途: 对已收集好的一批做锁外路由比较，通过则在锁内一次提交。
-def _try_commit_collected(batch: tuple[tuple[ActiveDecision, dict, dict], ...], generation: int) -> bool:
+# LLM: 调用方不持锁；比路由必须在锁外。复核通过（代次和快照都还是收集时那份）就本轮提交，
+#   并把 _commit_batch 标记出的撤销请求直接带出去；不通过返回 None，交给调用方整批重算，绝不用旧结论写盘。
+# 函数用途: 对已收集好的一批做锁外路由比较，通过则在锁内一次提交并返回需要取消句柄的请求。
+def _try_commit_collected(
+    batch: tuple[tuple[ActiveDecision, dict, dict], ...],
+    generation: int,
+) -> tuple[ActiveDecision, ...] | None:
     changed = tuple(item for item in batch if _routing_changed(item[0], item[1], item[2]))
     with _LOCK:
         if not _batch_still_current(batch, generation):
-            return False
-        _commit_batch(batch, changed)
-        return True
-
-
-# LLM: 调用方持 _LOCK；这套标记已经原地把 settings_cancelled 写好了，这里只按标记挑出要取消句柄的请求。
-# 函数用途: 返回本批里被标成设置撤销的在途请求。
-def _batched_cancels(batch: tuple[tuple[ActiveDecision, dict, dict], ...]) -> tuple[ActiveDecision, ...]:
-    return tuple(active for active, _previous, _updated in batch if active.settings_cancelled)
+            return None
+        return _commit_batch(batch, changed)
 
 
 # LLM: 调用方不持锁；自己在锁内收集，出锁时把当时的通知代次一并带出，供比完路由后复核。

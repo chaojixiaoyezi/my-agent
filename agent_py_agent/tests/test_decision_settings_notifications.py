@@ -301,3 +301,34 @@ def test_exhausted_recompute_cancels_the_whole_batch(tmp_path):
     assert len(rounds) <= 2 * policy._MAX_MARK_ATTEMPTS_COUNT, "重算必须被上限挡住，不能死循环"
     assert row.settings_cancelled, "重算用尽必须按‘变了’整批撤销"
     assert row.handle.cancelled
+
+
+# LLM: 复核通过的返回值必须直接来自 _commit_batch——本批里真正被标成设置撤销的那些，而不是整个 batch。
+#   用两条不同接入点的在途请求钉住：通知只改 recall 的路由，另一条只推进快照、不该被返回去取消。
+# 函数用途: 钉住“返回的就是本批被标成撤销的那些”。
+def test_marked_batch_returns_exactly_the_revoked_rows(tmp_path):
+    host = host_at(tmp_path)
+    thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
+    thread_id = thread.thread_id
+    patch(host, {"enabled": True, "points.recall.mode": "observe", "points.model_selection.mode": "observe"})
+    view = settings(host, "read", {}, thread_id=thread_id)
+    rows = {name: policy.ActiveDecision(policy.decision_owner_ref(host), thread_id, name, InterruptHandle(), host, view)
+            for name in ("recall", "model_selection")}
+    tokens = {name: uuid.uuid4().hex for name in rows}
+    for name, row in rows.items():
+        assert policy.register_active(tokens[name], row)
+    overrides = {"owner": {**view["overrides"]["owner"], "points.recall.mode": "off"},
+                 "thread": dict(view["overrides"]["thread"])}
+    try:
+        returned = policy._mark_settings_batch(
+            policy.decision_owner_ref(host), "owner", thread_id,
+            {"scope": "owner", "thread_id": thread_id,
+             "revision": {"owner": view["revision"]["owner"] + 1, "thread": view["revision"]["thread"]},
+             "overrides": overrides})
+    finally:
+        for name, row in rows.items():
+            policy.unregister_active(tokens[name], row)
+    assert returned == (rows["recall"],), "返回值必须恰是本批被标成撤销的那些"
+    assert rows["recall"].settings_cancelled is True
+    assert rows["model_selection"].settings_cancelled is False
+    assert not rows["model_selection"].handle.cancelled

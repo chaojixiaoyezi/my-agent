@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## 两件小后续（sfu，2026-10-03，分支 `worker/ds3-small-followups`，基于 `claude/3a-step17i` `2c5b8ed34`）
+
+- **决策设置撤销批次**（`decision_policy.py`，提交 `e0354302e`）：
+  - 新用例 `test_decision_settings_notifications.py::test_marked_batch_returns_exactly_the_revoked_rows`：两条不同接入点的在途请求（recall / model_selection），owner 层通知只改 recall 的路由；断言 `_mark_settings_batch` 返回的恰是 `(recall_row,)`，recall 被标 `settings_cancelled`，model_selection 未标且句柄未被取消。
+  - 相关回归 10 个文件（设置通知、设置、设置作用域/原因、观察竞争、服务、冷却、skill/tool 设置、模型操作、子代理）**273 项全过**。
+  - 变异（临时替换后写回原文，均还原）：返回整批 → 被 `test_unrelated_point_change_keeps_current_request_and_advances_notification` 抓到；复核失败时也返回结果 → 被 `test_newer_notification_during_routing_recomputes_the_whole_batch` 抓到。
+- **上下文快照符号链接缺目录用例**（`test_main_context_bundle_contract.py`，不改产品代码）：
+  - 新用例 `test_context_bundle_with_symlinked_archive_root_creates_missing_date_directory`：归档根是符号链接、当天日期目录还不存在；探针钉住“目录链准备阶段已建好目录”，随后断言四个快照文件 0600、链接目标（moved-archive / snapshots / context_bundles）权限保持 0o755、恰一条 `private_directory_symlink_skipped` 警告（path="."）。
+  - 变异：删掉 `_skip_private_directory_chain` 里的 `target.mkdir(parents=True, exist_ok=True)` → 被新用例抓到（失败点“目录链准备阶段必须已建好当天日期目录”）。
+- **命令**（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <相关文件> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sfu
+  ```
+- **门禁**：guards9 清单 10 个文件（含 `test_packaging.py`）退出码 0、到 100%；`check_import_boundaries.py` → `findings=0`；Ruff → `All checks passed!`；doc-sync → `DOC_SYNC_PASS`；strict code-size → `hard=0 blocked=False`；`size_diff.sh` 新增告警 0 / 消失告警 16；`git diff --check` 干净；clean-package `OK`。
+- **未运行**：全仓 pytest 与 Linux 车道留给集成者。
+
 ## B3 事件中心：观察投递（m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`，待 9b 复审）
 
 - **起因**：M 线第一期 B3（设计稿第 7 节）：按 owner 分区把宿主事件合并投给「已启用 + 清单订阅 + 握手声明 `my-agent/events`」的插件；投递走 B2 共用通道；事件点接线在 B4，本块只提供 publish 入口与组装。

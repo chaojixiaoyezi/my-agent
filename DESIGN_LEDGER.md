@@ -1,5 +1,11 @@
 # 设计台账
 
+## 两件小后续（sfu，2026-10-03，分支 `worker/ds3-small-followups`，基于 `claude/3a-step17i` `2c5b8ed34`；3a 复审，并入 step17i）
+
+- **决策设置撤销批次直接用提交的返回**（`agent_py_agent/agent/conversation/decision_policy.py`，提交 `e0354302e`）：`_try_commit_collected` 复核通过时把 `_commit_batch` 标记出的撤销请求直接带出来（`tuple | None`），不通过返回 `None` 交给调用方整批重算；`_mark_settings_batch` 的复核通过路径与重算用尽路径都直接用 `_commit_batch` 的返回，不再出锁后重读 `settings_cancelled`。删除 `_batched_cancels`（原注释写“调用方持 `_LOCK`”但调用点已出锁，合同与用法对不上）。行为不变：取消哪些句柄、顺序、结果码都与改前一致；新增用例钉住“返回的就是本批被标成撤销的那些”。
+- **上下文快照补“符号链接 + 当天目录不存在”用例**（`agent_py_agent/tests/test_main_context_bundle_contract.py`，不改产品代码）：归档根是符号链接、当天日期目录还不存在时，目录链准备阶段就要建好目录、首写成功（文件 0600）、链接目标权限不变、记一条 `private_directory_symlink_skipped` 警告；删掉 `_skip_private_directory_chain` 里 `target.mkdir` 的变异会被该用例抓到。
+- 详见 TESTS.md 同名小节。
+
 ## B3 事件中心：观察投递（M 线第一期，m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`，9b 两轮复审、ds2 初审通过，并入 step17i）
 
 - **起因**：设计稿 [插件事件与收紧钩子](docs/design/PLUGIN_EVENT_HOOKS.md) 第 7 节：宿主事件按 owner 分区合并投给「已启用 + 清单订阅 + 握手声明 `my-agent/events`」的插件；投递走 B2 共用通道；事件点接线在 B4，本块只提供 publish 入口与组装。

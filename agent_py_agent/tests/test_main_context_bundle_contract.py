@@ -35,6 +35,7 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
 )
+from agent_py_agent.agent.user_space import context_bundle as context_bundle_module
 from agent_py_agent.agent.user_space.context_bundle import (
     MainContextBundleRequest,
     _rewrite_bundle_files,
@@ -271,6 +272,49 @@ def test_context_bundle_with_symlinked_date_parent_keeps_target_modes_and_warns(
     assert (_mode(target), _mode(base)) == (0o755, 0o755)
     assert link.is_symlink()
     _assert_private_directory_symlink_warning(caplog, "snapshots/context_bundles")
+
+
+@_POSIX_ONLY
+def test_context_bundle_with_symlinked_archive_root_creates_missing_date_directory(
+    tmp_path: Path, caplog, monkeypatch
+) -> None:
+    """每天第一次写快照：归档根是符号链接、当天日期目录还不存在，目录链准备阶段就要把它建好。"""
+    request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
+    archive = Path(home_paths.owner_home_dir) / "memory_archive"
+    moved_archive = tmp_path / "moved-archive"
+    archive.rename(moved_archive)
+    snapshots = moved_archive / "snapshots"
+    context_bundles = snapshots / "context_bundles"
+    context_bundles.mkdir(parents=True)
+    for directory in (moved_archive, snapshots, context_bundles):
+        os.chmod(directory, 0o755)
+    base = context_bundles / date.today().isoformat()
+    assert not base.exists()  # 当天日期目录还不存在
+    os.symlink(moved_archive, archive, target_is_directory=True)
+
+    observed = []
+    real_write = context_bundle_module._write_bundle_files
+
+    def probe(request_, bundle_, directory_result_):
+        # 目录链准备阶段就必须建好当天目录；删掉 _skip_private_directory_chain 里的 mkdir 会在这里失败。
+        observed.append(Path(directory_result_.directory).is_dir())
+        return real_write(request_, bundle_, directory_result_)
+
+    monkeypatch.setattr(context_bundle_module, "_write_bundle_files", probe)
+    with caplog.at_level(logging.WARNING):
+        result = build_main_context_bundle(replace(request, save=True))
+
+    files = (
+        Path(result.json_path),
+        Path(result.markdown_path),
+        Path(result.json_path).parent / "latest_context_bundle.json",
+        Path(result.json_path).parent / "latest_context_bundle.md",
+    )
+    assert observed == [True], "目录链准备阶段必须已建好当天日期目录"
+    assert all(path.is_file() for path in files)
+    assert {_mode(path) for path in files} == {0o600}
+    assert {_mode(path) for path in (moved_archive, snapshots, context_bundles)} == {0o755}
+    _assert_private_directory_symlink_warning(caplog, ".")
 
 
 def _assert_private_directory_symlink_warning(caplog, expected_path: str) -> None:
