@@ -162,7 +162,7 @@
   - `96679b1f8` 把降级原因放进新的 `_semantic_records_report`，`_semantic_records` 照旧只返回记录（已有用例比较 `len()`，改成元组会让断言悄悄失效）；行为不变，4 个变异复跑仍全部抓到。相关回归（嵌入、召回、向量库、工具检索、`/model` 服务、Gateway 记忆命令，加 guards9、packaging、常数目录）140 个文件 2501 passed、15 skipped；严格门禁全过，code-size 对 `c1d686a19` 新增 0。
   - 证据 `~/.my-agent/decision-evidence/embedding-usage-facts-s7/`（README、两轮旁听记录和回执、测试方脚本；隔离根含密钥副本，已删）。
 
-- **2026-10-03 后续（9b 提出，分支 `worker/luna1-s7-followups`）**：
+- **2026-10-03 后续（9b 提出，分支 `worker/luna1-s7-followups`，提交 `c8da199c8b35e9d7162797c3bf6da567b68c9960`）**：
   - 不带作用域的 `search()` 先检查 active JSONL；真正空库记召回方式 `none`，不发查询嵌入，请求计数保持 0。检查真实 active 记忆而非关键词候选，避免把“词面没命中但语义可能命中”误判为空库。
   - MiniMax 请求体类型由结构化输入角色决定：查询用 `query`；记忆写入、重建、候选文档及工具说明用 `db`。工具检索用途计数仍为 `tool_retrieval`；OpenAI 兼容请求体不增加 `type`。
   - `embedding_identity` 仍只含 `profile_id`、`protocol`、`endpoint_digest`、`model_name`；本机桩服务确认请求类型切换前后身份相同，使用旧身份打开已有向量库仍 `identity_status == (True, "")` 且保留原向量。

@@ -14,7 +14,7 @@
 - `memory_archive/storage.tighten_memory_archive_permissions`：递归收紧已有文件 0600/目录 0700；只收紧不放松、不跟随符号链接（跳过计数）、失败按原因码计数；返回 `tightened_count/files/directories`、`failed_count`、`failure_codes`、`symlink_skipped_count`。
 - `user_space/owner_maintenance`：`run_owner_retention_if_due` 里挂一步收紧，回执写 `maintenance.json` 的 `memory_archive_permissions` 键；memory_archive 不存在返回全零。
 
-## S7 两条后续（2026-10-03，分支 `worker/luna1-s7-followups`）
+## S7 两条后续（2026-10-03，分支 `worker/luna1-s7-followups`，提交 `c8da199c8b35e9d7162797c3bf6da567b68c9960`）
 
 - `JsonlMemory.search` 在 active JSONL 为空时直接记录一次 `none` 并返回，不请求查询嵌入；非空时仍保留语义搜索机会，不能只按关键词候选是否为空早退。
 - MiniMax 的 `type` 通过 `embedding_usage` 的结构化用途/输入角色确定：召回 query 为 `query`，持久文档及重建为 `db`；HybridRetriever 和工具检索分别标明查询与候选文档。OpenAI 兼容请求体不变。
