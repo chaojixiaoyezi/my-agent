@@ -71,6 +71,23 @@
   - 用例：幂等用例补 be 探针的两条断言（重跑后 `unavailable == 0`、无重发提示）；新增 consumed 状态算“不在队列”的用例。
 - **验证**：见 TESTS.md 同名节（上一轮 6 个变异 + 本轮 3 个，全部被拦截）。
 
+## 模型回合瞬时错误重试加总时长上限（修法 B，ds1b，2026-10-03，分支 `worker/ds1-turn-retry-cap`，提交 `65464a201`、返工 `f3ad77e4e`，基于 `claude/3a-step17h` `880aee17b`，已实现，9b 终审通过（两条补用例由 3a 合并时加），并入 step17i）
+
+- **起因**（be 调查结论）：现在有三层重试——传输层（HTTP 408/429/5xx，等 2/5/15 秒最多 3 次）、生成层（超时后立刻再试一次）、回合层（`provider_transient_auto_resume` 按 10/25/45/100/180 秒退避、最多 5 次，界面显示 1/5…5/5，只放行 `first_event` 与 `stream_idle` 两种超时）。回合层没有总时长上限：最坏是 6 次 × 300 秒再加等待，约 36–39 分钟。
+- **做了什么**：新增运行护栏配置项 `provider_transient_auto_resume_total_budget_seconds`（默认 1800 秒，`0` 表示不限）。计时从**这一次逻辑模型调用的第一次尝试**算起，尝试本身耗时、退避等待与它的抖动都算进去；再退避一次就会超过上限时不再重试，抛 `ProviderTransientError` 并带结构化码 `PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED`（原异常留在 `__cause__`），文案写明"已到总时长上限"。
+- **只读结构化事实**：预算判断只看时刻（`time.monotonic`）与尝试次数，不读任何报错文字；上层按 `error_code` 识别。
+- **不碰的边界**：`provider_declared` 的放行规则不变（那是修法 A 的事），`responses_websocket` 一行未改；`/stop` 照旧最优先（中断检查在预算判断之前，退避等待里的中断也直接上抛）。
+- **配置落点**：加在 `runtime_guard_config.yaml`（该文件是运行护栏的权威来源，进程重启生效，用户不可通过聊天写入），**不进** `agent_config.yaml`/`AgentConfig`；参数中心登记表按同一 YAML 自动收录（该来源键数 22 → 23），常数目录重新生成（883 → 884 项）。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「模型回合重试总时长上限」小节；6 个定点变异全部被检出。
+- **返工（第二轮，ds1b，2026-10-03，提交 `f3ad77e4e`；依据 9b 真实链路预审与初审）**：
+  - **到上限不再换异常类型**（9b 必须改 2）：改为给触发判断的**原异常**就地补 `error_code` 与 `retry_budget_seconds` 后原样重新抛出（上面"抛 `ProviderTransientError`、原异常留在 `__cause__`"的旧写法作废）。
+    背景：修法 B 主要针对 `ProviderTimeoutError`（first_event/stream_idle），它本来不是 transient；换类型会让后台 claim 被释放、唤醒后重跑，子代理失败类型从 `PROVIDER_TIMEOUT` 变 `TRANSIENT_ERROR`，Goal 的 `usage_limited` 判定也会失真。改后这些分路与"跑满阶梯"完全同口径。
+  - **到上限发可见收口提示**（9b 必须改 1 + 初审）：经 `_emit_retry_notice`（final）发一条"已到自动重试的总时长上限、本轮不再重试"；用户可见文案在 `gateway_parts/request_errors.gateway_client_error_message` 与 `agent/runtime_errors._provider_supply_template` 按结构化码登记（不再说"系统会自动退避重试"），`contracts/error_taxonomy` 登记同一码。
+  - **配置解析口径对齐**（9b 建议）：坏值、NaN、负数都回落默认 1800 秒，只有显式 0 表示不限（原实现负数按不限、与注释不符）。
+  - **中断检查**：补用例钉住"退避等待正常返回后中断必须阻止下一次尝试"；复跑发现单删"等待后检查"或"循环后检查"都是等价变异（循环开头/等待后/循环后三处互为兜底），用"三处全删"的组合实验证明用例会红。
+  - **已知边界**（3a 裁定）：子代理重派上限（`provider_transient_redispatch_limit`，默认 8）不因本上限收缩，最坏耗时≈重派上限×总时长上限，另立一项；次数耗尽时 `runtime_errors` 的"会自动退避重试"文案同样不准，属原有行为不在本次范围。
+  - **验证与变异**：见 TESTS.md「修法 B 返工」；10 个定点变异 8 个被检出，2 个等价变异附组合实验证据。
+
 ## 嵌入用量与召回方式看得到（S7，be 实现、75 接手收尾，2026-10-02，分支 `claude/75-embedding-usage-facts`（接 `claude/be-embedding-usage-facts`），基于 `claude/3a-step17h` `afb15947b`，已实现，9b 复审通过，并入 step17h）
 
 - **起因**（3a 查生产）：

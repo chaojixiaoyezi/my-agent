@@ -155,6 +155,16 @@ background_max_tool_calls_per_round: 4  # 每个后台执行批次最多多少�
 #   配成 [] 表示不做自动续跑，直接把 provider_transient 报告给用户/父代理。
 provider_transient_auto_resume_delays_seconds: [10, 25, 45, 100, 180]
 
+# provider_transient_auto_resume_total_budget_seconds:
+#   上面那张等待表的“总时长上限”秒数：从这一次逻辑模型调用的第一次尝试算起，
+#   把每次请求耗时和退避等待都算进去；再重试一次就会超过上限时，不再重试，
+#   原样抛出触发判断的原异常并补结构化错误码 PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED
+#   与 retry_budget_seconds（异常类型不变，上层收尾与跑满阶梯同口径），同时发一条
+#   “已到总时长上限、本轮不再重试”的进度提示。默认 1800（30 分钟）；配 0 表示不限
+#   （只受上面的次数阶梯约束，最坏约 36—39 分钟）；坏值、NaN、负数都回落默认值。
+#   用户停止（/stop）始终优先于本上限。
+provider_transient_auto_resume_total_budget_seconds: 1800
+
 # provider_supply_backoff_base_seconds / provider_supply_backoff_max_seconds:
 #   typed 临时供应故障(限流/超载等)超过上面短链后，网关后台消费循环
 #   (唤醒/观察/盯守判读)按会话做的第二层长退避：第 n 次连续失败等

@@ -2209,6 +2209,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="模型接口超时来自 typed provider error；退避后继续当前未完成部分，不要把它当成任务成功或业务失败。",
     ),
+    "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED": ErrorContract(
+        code="PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint=(
+            "模型接口持续不可用，本轮自动重试已到总时长上限并停止；稍后重试或改用其它模型，"
+            "不要把它当成任务成功或业务失败。"
+        ),
+    ),
     "MODEL_CALL_ABANDONED_BEFORE_SEND": ErrorContract(
         code="MODEL_CALL_ABANDONED_BEFORE_SEND",
         category="model",

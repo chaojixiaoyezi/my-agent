@@ -49,6 +49,8 @@ class SystemCommandRoutingError(RuntimeError):
 # COMPACT_VISION_SUMMARY_FAILED 同样先于前缀匹配：随图摘要本次失败，同代次下一次压缩自动改走归档引用，文案说明不必换模型。
 # ACTIVE_TURN_OUTCOME_UNCERTAIN 与 RUN_RECOVERY_REQUIRED 都是执行结果未确认的人工恢复点：文案只指向 /recover，重试不会自行解除。
 # PROVIDER_REQUEST_SHAPE_INVALID 是出站协议合同在发送前查出的结构违规，请求没有发出；文案不说"服务拒绝"，只请用户反馈诊断。
+# PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED 是回合层自动重试到总时长上限的收口码：文案说明本轮已停止、
+#   可稍后重试或换模型，不写"系统会自动重试"（那时已不会再有自动重试）。
 # 函数用途: 区分尚未配置、压缩、截断、持久化、请求拒绝与发送前结构检查失败，不把未知 400 归咎密钥或建议不安全重放。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
@@ -95,6 +97,10 @@ def gateway_client_error_message(error_code: object) -> str:
             "模型工具能力检查未通过，当前任务尚未开始。请检查模型是否支持原生工具调用。"
         ),
         "PROVIDER_QUOTA_EXHAUSTED": "模型服务当前没有可用额度，请补充额度或切换可用配置后重试。",
+        "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED": (
+            "模型接口持续不可用，已到本轮自动重试的总时长上限，本轮已停止；"
+            "可以稍后重试，或改用其它模型。"
+        ),
         "PROVIDERTRANSIENTERROR": "模型服务暂时不可用，系统已停止本轮请求，请稍后重试。",
         "PROVIDERTIMEOUTERROR": "模型服务响应超时，系统已停止本轮请求，请稍后重试。",
         "PROVIDERCONNECTIONERROR": "无法连接模型服务，请检查网络、代理和接口地址后重试。",

@@ -9,6 +9,19 @@
   归档目录不存在时全零；导入或整体失败只写 `error` 字符串，不影响 retention 主流程与维护状态写入。
 - 详见 DESIGN_LEDGER「记忆归档目录收紧权限」与 docs/modules/memory。
 
+## 模型回合重试总时长上限（修法 B）返工：到上限保留原异常类型（ds1b，2026-10-03，分支 `worker/ds1-turn-retry-cap`，基于 `claude/3a-step17h` `880aee17b`，9b 终审通过，并入 step17i）
+
+- 到上限不再新建 `ProviderTransientError`：给触发判断的原异常就地补 `error_code=PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED`
+  与 `retry_budget_seconds` 后原样重新抛出。后台 claim 结算、子代理失败类型、Goal 的 `usage_limited` 判定与"跑满阶梯"完全同口径
+  （返工前到上限会被当成 transient 释放 claim、唤醒后重跑，子代理失败类型也从 PROVIDER_TIMEOUT 变成 TRANSIENT_ERROR）。
+- 收口时经 `_emit_retry_notice`（final）发一条"已到自动重试的总时长上限、本轮不再重试"的进度提示；用户可见文案在
+  `gateway_parts/request_errors.gateway_client_error_message` 与 `agent/runtime_errors._provider_supply_template` 按结构化码登记，
+  不再说"系统会自动退避重试"；`contracts/error_taxonomy` 登记同一码。
+- 配置解析与注释对齐：坏值、NaN、负数都回落默认 1800 秒，只有 0 表示不限。
+- 已知边界（3a 裁定）：子代理重派上限（`provider_transient_redispatch_limit`，默认 8）不因本上限收缩，最坏耗时≈重派上限×总时长上限，另立一项处理；
+  次数耗尽时 `runtime_errors` 的"会自动退避重试"文案同样不准，属原有行为不在本次范围。
+- 测试与变异结果见 TESTS.md"修法 B 返工"。
+
 ## /plugins list 末尾加 MCP 服务段（J16 片 F，2026-10-02，ef，分支 `claude/ef-j16-slice-f`，基于 `claude/3a-step17h` `afb15947b`，待集成）
 
 - `plugin_command_service._scope_management` 组装管理服务时多做一步：`resolve_loaded_gateway_scope_agent` 被动查找已加载的 owner 实例，

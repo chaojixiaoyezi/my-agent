@@ -12,7 +12,9 @@ from agent_py_agent.agent.backends.errors import (
     ProviderConnectionError,
     ProviderQuotaExhaustedError,
     ProviderRequestRejectedError,
+    ProviderTimeoutError,
     ProviderTransientError,
+    ProviderUsageLimitError,
 )
 from agent_py_agent.agent.settings.model_profiles import ModelProfileError
 from agent_py_agent.cli import gateway_lane_retry
@@ -148,6 +150,56 @@ def test_goal_configuration_failure_preserves_original_wake(tmp_path, error, exp
     if expected == "active":
         assert released == [claim]
         assert store.tasks.load(goal.task_id).status == "active"
+
+
+@pytest.mark.parametrize("error,expect_release,expected_status", [
+    (ProviderTimeoutError("模型接口等待首个流式事件超时", stage="first_event"), False, "blocked"),
+    (ProviderUsageLimitError("HTTP 429: usage limit"), True, "usage_limited"),
+])
+def test_budget_exceeded_errors_keep_steady_state_closeout(tmp_path, error, expect_release, expected_status):
+    """到总时长上限后的原异常在后台 claim 结算上与跑满阶梯同口径：
+
+    到上限不再换异常类型（只加 error_code/retry_budget_seconds），分路只看类型——
+    ProviderTimeoutError 照旧按 failed 结算 claim（不释放重跑）、Goal 记 blocked；
+    ProviderUsageLimitError 照旧按可重跑释放 claim、Goal 记 usage_limited。
+    """
+    from agent_py_agent.agent.agent_core.provider_transient_auto_resume import (
+        PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED,
+    )
+    from agent_py_agent.agent.conversation import FakeDeliveryService
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundMainAgentRuntime,
+        BackgroundMainAgentScheduler,
+        _handle_nonquota_wake_error,
+    )
+    from agent_py_agent.tests.test_conversation_goal_tools import _goal_agent
+
+    error.error_code = PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED
+    error.retry_budget_seconds = 1800.0
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    store = agent.conversation_store
+    signal = store.wakes.raise_signal({
+        "thread_id": thread.thread_id, "root_task_id": goal.task_id,
+        "reason": "thread_goal_continue", "metadata": {"goal_id": goal.goal_id},
+    })
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    released, finished = [], []
+    scheduler.scheduler_service = SimpleNamespace(
+        release=lambda claim, **kw: released.append(claim),
+        finish=lambda claim, **kw: finished.append(kw) or object(),
+    )
+    claim = object()
+    _handle_nonquota_wake_error(
+        scheduler, signal, lifecycle_reason="thread_goal_continue", claim=claim, error=error,
+    )
+
+    if expect_release:
+        assert released == [claim] and finished == [], "429 的既有口径：按可重跑释放 claim"
+    else:
+        assert released == [] and finished and finished[0]["status"] == "failed", "超时的既有口径：按 failed 结算"
+    assert store.goals.load(thread.thread_id).status == expected_status
 
 
 ENVIRONMENT_FAULTS = [

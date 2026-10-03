@@ -2,6 +2,8 @@
 # 模块用途: 在可恢复网络故障中等待并重试当前模型调用，保留中断和既有次数预算，不重放工具副作用。
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -19,6 +21,10 @@ from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_da
 _T = TypeVar("_T")
 
 DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS = (10.0, 25.0, 45.0, 100.0, 180.0)
+# 一整个模型调用的自动重试总时长上限；0 表示不限（只受上面的次数阶梯约束）。
+DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS = 1800.0
+# 到总时长上限时的结构化错误码；上层按码识别，不读报错文字。
+PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED = "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED"
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,8 @@ class _RetryNotice:
     total: int
     delay: float
     error: BaseException
+    # 到总时长上限的收口提示：不再有下一次等待，文案与普通重试进度不同。
+    final: bool = False
 
 
 def provider_transient_retry_delays(policy: RuntimeGuardPolicy | None = None) -> tuple[float, ...]:
@@ -49,6 +57,24 @@ def _parsed_delays(value: list | tuple) -> tuple[float, ...]:
     return tuple(parsed)
 
 
+# LLM: 只读运行护栏配置里的总时长上限；坏值、NaN、负数都回落默认 1800 秒，只有显式 0 表示不限
+#   （负数静默关掉护栏比回落默认更危险，注释与行为按此对齐）。缺键也回落默认。
+#   计时只看结构化事实（时刻与尝试次数），不读任何报错文字。
+# 函数用途: 返回本次逻辑模型调用的自动重试总时长上限（秒），0 表示不限。
+def provider_transient_total_budget_seconds(policy: RuntimeGuardPolicy | None = None) -> float:
+    value = runtime_guard_data(policy=policy).get(
+        "provider_transient_auto_resume_total_budget_seconds",
+        DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS,
+    )
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS
+    if not math.isfinite(parsed) or parsed < 0:  # NaN/inf/负数：按坏值回落默认，防止静默关掉护栏
+        return DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS
+    return parsed
+
+
 def run_with_provider_transient_auto_resume(
     operation: Callable[[], _T],
     *,
@@ -57,6 +83,9 @@ def run_with_provider_transient_auto_resume(
     retry_guard: Callable[[], bool] | None = None,
 ) -> _T:
     delays = provider_transient_retry_delays(policy)
+    # 预算从第一次尝试开始计时：尝试耗时、退避等待和它的抖动都算在里面。
+    budget = provider_transient_total_budget_seconds(policy)
+    started_at = time.monotonic()
     for attempt, delay in enumerate(delays, start=1):
         _raise_if_interrupted()
         try:
@@ -68,14 +97,39 @@ def run_with_provider_transient_auto_resume(
             if callable(retry_guard) and not retry_guard():
                 raise
             # 配置阶梯+随机抖动(批3):多实例同撞限流时错峰重试,防共振雪崩。
-            _wait_before_retry(
-                on_chunk, _RetryNotice(attempt, len(delays), apply_retry_jitter(delay), exc)
-            )
+            wait = apply_retry_jitter(delay)
+            # 再等这一次就会超预算时不再重试：先发收口提示（与重试进度同一 on_chunk 通道），
+            # 给原异常补结构化事实后原样重新抛出——不换类型，上层收尾与跑满阶梯完全同口径。
+            if _budget_exhausted(budget, started_at, wait):
+                _emit_retry_notice(on_chunk, _RetryNotice(attempt, len(delays), wait, exc, final=True))
+                _mark_budget_exceeded(exc, budget)
+                raise
+            _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), wait, exc))
             _raise_if_interrupted()
     _raise_if_interrupted()
     if callable(retry_guard) and not retry_guard():
         raise RuntimeError("provider retry blocked by durable request state")
     return operation()
+
+
+# LLM: 只有带上限（>0）才判断；判断用“已用 + 下一次等待”，即再试一次必定越界就停。
+#   不预判下一次尝试本身的耗时（无法预知），到那时由下一个循环的等待判断收口。
+# 函数用途: 判断再一次退避重试是否会超过总时长上限。
+def _budget_exhausted(budget: float, started_at: float, wait: float) -> bool:
+    if budget <= 0:
+        return False
+    return (time.monotonic() - started_at) + wait > budget
+
+
+# LLM: 到总时长上限不换异常类型：给触发本次判断的异常就地补两个结构化事实
+#   （error_code / retry_budget_seconds），随后由调用方裸 raise 原样重新抛出。后台 claim 结算、
+#   子代理失败类型、Goal 的 usage_limited 判定都按异常类型分路，保持类型才能让「到上限」与
+#   「跑满阶梯」对上层完全同口径；能进入本循环的异常不带 error_code（带码的 recoverable
+#   直接上抛），不会覆盖已有的码。
+# 函数用途: 给触发上限的异常补上结构化事实（就地修改，不新建异常、不改消息）。
+def _mark_budget_exceeded(exc: Exception, budget: float) -> None:
+    exc.error_code = PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED
+    exc.retry_budget_seconds = budget
 
 
 # LLM: 重试/退避循环必须检查任务中断(2026-08-14 真机, gateway 后台接管轮挂起):
@@ -121,9 +175,19 @@ def _wait_before_retry(on_chunk: Callable[[str], object] | None, notice: _RetryN
 
 
 # LLM: 支持 typed retry sink 时只发送结构化序号/等待值；旧 callback 继续接收兼容文本且不参与重试裁决。
-# 函数用途: 在模型回合级退避开始前，把重连进度交给当前客户端显示。
+#   收口提示（final）不走 typed sink：sink 的文案固定是「N 秒后自动重连」，表达不了「不再重试」，
+#   硬塞会显示误导信息；收口提示直接走文本回调，让用户看到本轮已停止的真实结果。
+# 函数用途: 在模型回合级退避开始前把重连进度交给当前客户端显示；到总时长上限时改发收口提示。
 def _emit_retry_notice(on_chunk: Callable[[str], object] | None, notice: _RetryNotice) -> None:
     if not callable(on_chunk):
+        return
+    if notice.final:
+        on_chunk(
+            "\n"
+            f"[provider_transient_auto_resume attempt={notice.attempt}/{notice.total}; budget_exhausted]\n"
+            f"模型接口持续不可用，已到自动重试的总时长上限，本轮不再重试。\n"
+            f"error={notice.error}\n"
+        )
         return
     delay = _format_delay(notice.delay)
     if _publish_typed_retry_notice(on_chunk, notice):
@@ -165,6 +229,9 @@ def _format_delay(value: float) -> str:
 
 __all__ = [
     "DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS",
+    "DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS",
+    "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
     "provider_transient_retry_delays",
+    "provider_transient_total_budget_seconds",
     "run_with_provider_transient_auto_resume",
 ]

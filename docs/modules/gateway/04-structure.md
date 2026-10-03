@@ -737,6 +737,13 @@ PROVIDER_REQUEST_SHAPE_INVALID 是出站协议合同在发送前查出的消息�
 `runtime_error_report` 在配置父类之前归类 typed 请求拒绝；`provider_error_http_status` 只读合法整数属性，
 供分类与 `gateway_provider_error_projection` 共用。私有 response body/details/headers 不进入公开错误提示。
 `provider_transient_auto_resume` 对配置/拒绝先上抛，不能经正文 capacity/timeout 扩大重试范围。
+该模块另有总时长上限 `provider_transient_auto_resume_total_budget_seconds`（默认 1800 秒，0 不限；坏值/NaN/负数回落默认；
+见 `DESIGN_LEDGER` 与 `test_provider_transient_retry_budget.py`）：从本次逻辑模型调用的第一次尝试起算，含尝试耗时与退避等待；
+再退避一次就会越界时不再重试，先经 `_emit_retry_notice`（final）发一条"已到总时长上限、本轮不再重试"的进度提示，
+再给触发判断的原异常就地补 `error_code=PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED` 与 `retry_budget_seconds` 后原样抛出
+（异常类型不变，后台 claim 结算、子代理失败类型、Goal 判定与跑满阶梯同口径）；只看时刻与尝试次数，不读报错文字；
+`/stop` 的中断检查仍先于预算判断。用户可见文案在 `gateway_client_error_message` 与 `runtime_errors._provider_supply_template`
+按结构化码登记，不再说"会自动退避重试"。
 
 ## R228 快照写入与摘要请求边界
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 886,
+  "count": 887,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -346,6 +346,14 @@
       "unit": "",
       "category": "其它",
       "description": "派生代理名里的默认层级深度，用于生成可读的系统血缘名字。"
+    },
+    {
+      "name": "DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/provider_transient_auto_resume.py",
+      "value": 1800.0,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "一整个模型调用的自动重试总时长上限；0 表示不限（只受上面的次数阶梯约束）。"
     },
     {
       "name": "_DEFAULT_RUNNER_CONCURRENCY_COUNT",

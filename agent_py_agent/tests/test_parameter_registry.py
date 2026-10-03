@@ -145,7 +145,7 @@ def test_applied_value_uses_the_single_output_cap_formula():
 
 def test_registry_covers_every_config_field_with_yaml_descriptions():
     registry = parameter_registry()
-    # P17：登记表覆盖三份配置；主配置部分仍必须与 AgentConfig 字段一一对应（capability 31 / runtime_guard 22
+    # P17：登记表覆盖三份配置；主配置部分仍必须与 AgentConfig 字段一一对应（capability 31 / runtime_guard 23
     # 由各自来源测试锁定），防止登记表悄悄丢字段。
     assert {key for key, spec in registry.items() if spec.source == "agent"} == {item.name for item in fields(AgentConfig)}
     assert "64K" in registry["max_tokens"].description
@@ -169,7 +169,8 @@ def test_extra_sources_are_registered_with_yaml_descriptions():
         "tool_circuit_failure_threshold", "tool_circuit_backoff_seconds", "tool_rate_max_records",
         "unknown_command_allowlist", "unknown_command_window_seconds", "unknown_command_max_calls",
         "background_max_tool_rounds", "background_max_tool_calls_per_round",
-        "provider_transient_auto_resume_delays_seconds", "provider_supply_backoff_base_seconds",
+        "provider_transient_auto_resume_delays_seconds", "provider_transient_auto_resume_total_budget_seconds",
+        "provider_supply_backoff_base_seconds",
         "provider_supply_backoff_max_seconds", "provider_transient_redispatch_limit",
         "main_agent_auto_resume_attempt_limit",
     }

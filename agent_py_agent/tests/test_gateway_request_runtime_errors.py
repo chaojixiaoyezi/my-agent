@@ -157,6 +157,39 @@ def test_model_failure_keeps_typed_terminal_and_native_history(tmp_path, monkeyp
     assert terminal["terminal_response"]["error_code"] == reason
 
 
+def test_retry_budget_exceeded_projection_surfaces_the_cap(tmp_path, monkeypatch):
+    """到总时长上限的失败投影：error_code 是结构化新码，user_error 写明已到上限、本轮已停止。"""
+    from agent_py_agent.agent.agent_core.provider_transient_auto_resume import (
+        PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED,
+    )
+    from agent_py_agent.agent.backends import ProviderTimeoutError
+
+    agent, paths = _make_agent(tmp_path)
+    request_id = "gw-budget-exceeded"
+    request_path = paths.processing / f"{request_id}.json"
+    request_path.write_text(json.dumps({
+        "id": request_id, "kind": "ask", "status": "processing", "turn_phase": "open", "prompt": "继续这个长任务",
+        "execution_attempt_id": "claimed-budget-attempt",
+        "conversation": {"channel": "chat", "channel_conversation_id": "budget-session",
+                         "channel_user_id": "local-agent", "canonical_user_id": "local-agent"},
+    }), encoding="utf-8")
+
+    def run(*_args, **_kwargs):
+        exc = ProviderTimeoutError("模型接口等待首个流式事件超时", stage="first_event")
+        exc.error_code = PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED
+        exc.retry_budget_seconds = 1800.0
+        raise exc
+
+    monkeypatch.setattr(agent, "run", run)
+    response = _handle_gateway_request(agent, request_path)
+
+    assert response["ok"] is False and response["status"] == "failed"
+    assert response["error_code"] == PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED
+    assert "已到" in response["user_error"] and "总时长上限" in response["user_error"]
+    assert "本轮已停止" in response["user_error"]
+    assert "任务处理失败" not in response["user_error"]
+
+
 def test_provider_error_projection_only_reads_typed_fields():
     from agent_py_agent.agent.gateway_parts.request_errors import (
         gateway_model_response_error_projection,

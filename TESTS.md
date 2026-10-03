@@ -19,6 +19,50 @@
   - P2：去掉软提示；
   - P3：上限差一、通过不清零、不分目标、收尾失败也算、收尾也暂停、暂停记录带真实复用键。
 
+## 模型回合重试总时长上限（修法 B，ds1b，2026-10-03，分支 `worker/ds1-turn-retry-cap`，提交 `65464a201`，基于 `claude/3a-step17h` `880aee17b`）
+
+- **改动**：`agent_py_agent/agent/agent_core/provider_transient_auto_resume.py` 加总时长上限——从本次逻辑模型调用的第一次尝试起算，含尝试耗时与退避等待（含抖动）；再退避一次就会越界时不再重试，抛 `ProviderTransientError` 并带 `error_code=PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED`，原异常留在 `__cause__`；文案写明“已到总时长上限”。配置项 `provider_transient_auto_resume_total_budget_seconds`（默认 1800 秒、`0` 不限）加在 `agent_py_agent/config/runtime_guard_config.yaml`（中文注释）。
+- **新增 `test_provider_transient_retry_budget.py`（7 项，全部用假时钟，不真睡）**：
+  - 上限内照常按阶梯重试并成功，且断言累计等待时间经过假时钟（证明计时含退避）。
+  - 再退避一次就超限时收口：结构化码、`retry_budget_seconds`、文案含“已到总时长上限”、`__cause__` 仍是原错误；只等了一次。
+  - 预算也吃尝试本身耗时：第一次尝试耗 25 秒时，10 秒退避已越界，一次退避都不发生。
+  - `0` 表示不限：走完整条阶梯，累计 80 秒等待也不收口。
+  - `/stop` 优先：预算已很紧时中断仍在第一次尝试前消费标记；退避等待里的中断直接上抛。
+  - 配置读取：缺键回落 1800，坏值回落默认，负数与 `0` 按不限。
+- **入口级回归（走 SimpleAgent 真链路）**：`test_provider_transient_auto_resume.py` 原有 20 项不改照过。
+- **登记表与目录**：参数中心按同一 YAML 自动收录新键（`test_parameter_registry.py` 的 runtime_guard 键清单 22 → 23，注释同步）；常数目录重新生成（883 → 884 项，`--check` 一致）。前端配置目录只同步 `agent_config` / `capability_config`，不含 runtime_guard，无需重建。
+- **变异（6 个，全部被检出，源码哈希还原一致）**：不做预算判断、预算判断漏掉等待、漏掉尝试耗时、`0` 被当成上限、错误码丢失、中断让位预算。
+- **验证命令**（在分支工作目录根运行；`<代号>`=ds1b）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_provider_transient_retry_budget.py \
+    agent_py_agent/tests/test_provider_transient_auto_resume.py \
+    agent_py_agent/tests/test_parameter_registry.py \
+    agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider \
+    --basetemp=/private/tmp/claude-501/m-ds1b
+  ```
+
+- **未验证**：真实供应商长时间断供下的端到端表现、真实 TUI/IM 的“已到总时长上限”展示、子代理与后台链路的实际收口（本沙箱不调真实模型），由 3a 在沙箱外复核。
+
+### 修法 B 返工（第二轮，ds1b，2026-10-03，提交 `f3ad77e4e`）
+
+- **改动**：到上限改为给原异常就地补 `error_code=PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED` 与 `retry_budget_seconds` 后原样重新抛出（异常类型与 stage 不变）；收口前经 `_emit_retry_notice`（final）发一条“已到自动重试的总时长上限、本轮不再重试”；`gateway_client_error_message`、`runtime_errors._provider_supply_template`、`error_taxonomy` 按结构化码登记文案；配置解析改为坏值/NaN/负数都回落默认 1800 秒。
+- **新增/改写用例**（`test_provider_transient_retry_budget.py` 7 → 12 项，全部假时钟）：
+  - 到上限抛的是**同一个对象**（`is` 断言），类型与 stage 不变，带新码与上限秒数；
+  - `ProviderUsageLimitError` 撞上限同样保类型保码；
+  - 收口提示恰好一条、且写在异常抛出之前（记录 `on_chunk` 与执行顺序）；
+  - 退避等待正常返回但等待期间置中断：不发起下一次尝试、抛中断；
+  - `runtime_error_report` 对带码异常换文案、分类与可恢复性不变，不带码的供应错误文案逐字不变；
+  - 子代理失败类型 `_subagent_run_failure_type` 在到上限后仍是 `provider_timeout`（与跑满阶梯同口径）。
+- **后台 claim 结算同口径**（`test_gateway_lane_retry.py` 新增参数化用例）：带码 `ProviderTimeoutError` → `finish(status="failed")` 且 Goal `blocked`（不 release）；带码 `ProviderUsageLimitError` → `release` 且 Goal `usage_limited`。
+- **失败投影 user_error**（`test_gateway_request_runtime_errors.py` 新增）：从 `_handle_gateway_request` 失败投影断言 `error_code` 是新码、`user_error` 写明“已到……总时长上限”“本轮已停止”，且不是通用“任务处理失败”。
+- **变异（10 个，源码原字节还原）**：M1 删预算判断、M2 漏等待、M3 `0` 当上限、M4 错误码丢失、M6 预算每轮重置、M7 到上限新建异常对象、M8 漏尝试耗时、M9 删循环开头中断检查 → **8 个 KILLED**；M5 删等待后检查、M10 删循环后检查 → **SURVIVED，等价变异**（三处检查互为兜底，任何单删都无行为差异；组合实验“三处全删”时 `test_interrupt_mark_set_during_wait_stops_before_next_attempt` 与 `test_stop_takes_priority_over_budget` 变红，证明语义边界被锁住）。
+- **门禁**：guards9 全过；`IMPORT_BOUNDARIES findings=0`；ruff All checks passed；`DOC_SYNC_PASS`；strict code-size hard=0；size_diff 新增告警 0（`f3ad77e4e`）；`git diff --check` 通过；clean-package OK。
+- **未验证**：真实供应商断供端到端、TUI/IM 实际显示、后台 claim 真链路（本沙箱不调真实模型），由 9b/3a 在沙箱外复核。
+- 合并进 step17i 时补（9b 终审必须改，只补用例）：`test_budget_reads_runtime_guard_policy_and_defaults` 加 inf → 1800（变异 F2“inf 当不限”被抓到）；新增 `test_budget_code_is_registered_in_the_error_taxonomy`（变异 F7“删掉契约登记”被抓到）。本文件 13 passed。
+
 ## 决策结果日志至少保留一周（2026-10-03，luna6，worker/luna6-outcome-retention）
 
 - **用例**：`test_decision_outcome_log.py` 覆盖 7 天内 1100 条加新记录仍全保留、正好 7 天边界保留而边界外下一次写入即清除、超过 20000 行只丢最旧、原子替换失败不改变已有账且不抛到决策链路。

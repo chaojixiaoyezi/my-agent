@@ -329,7 +329,20 @@ def _template(
 # 回来。此前它既不是 RecoverableRuntimeError 也不是 OSError,掉进 programmer_bug 兜底被判
 # recoverable=False → 后台循环当致命错放弃,额度恢复也无人续跑(真机实锤)。判据只用异常
 # 类型(backends/errors 的 typed 家族),不做任何文本匹配。
+# 唯一例外是"回合层自动重试已到总时长上限"(结构化 error_code 判定,不读文本):那种情况不会
+# 再有自动退避重试,文案不能再说"系统会自动退避重试";分类与 recoverable 不变。
 def _provider_supply_template(exc: BaseException) -> RuntimeErrorTemplate:
+    from .agent_core.provider_transient_auto_resume import (
+        PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED,
+    )
+
+    if getattr(exc, "error_code", "") == PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED:
+        return _template(
+            _provider_category(exc),
+            "模型接口持续不可用，已到本轮自动重试的总时长上限；系统已停止自动重试，"
+            "不要把它当成任务失败、任务完成或没有数据。",
+            "model-provider outage reached the total retry time budget; automatic retries stopped",
+        )
     return _template(
         _provider_category(exc),
         "模型接口临时不可用（限流/断供/超时）；这是外部供应临时故障，系统会自动退避重试，"
