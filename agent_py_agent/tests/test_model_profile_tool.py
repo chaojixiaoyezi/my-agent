@@ -227,3 +227,84 @@ def test_new_catalog_actions_validate_before_writing(tmp_path):
     assert tool_effect_for_runtime_policy(policy, {"action": "add_models"}) == "mutating"
     assert tool_effect_for_runtime_policy(policy, {"action": "set_initial"}) == "mutating"
     assert not model_profiles_path(host.home_paths).exists()
+
+
+# 函数用途: 锁住 IM 侧「加个模型」不依赖服务商接口列表——用户给什么模型名就加什么（TUI 手动填写同一口径）。
+def test_add_accepts_a_model_name_missing_from_the_provider_catalog(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import model_provider_network as network
+
+    catalog_calls = []
+
+    def catalog(request):
+        catalog_calls.append(request)
+        return {"data": [{"id": "listed-only"}]}
+
+    monkeypatch.setattr(network, "get_json", catalog)
+    host = _host(tmp_path)
+    tool = ManageModelsTool(host)
+    outcome, body = _run(tool, action="add", profile={
+        "model_name": "not-in-catalog-v9", "model_backend": "openai_compatible",
+        "api_base": "https://api.example.test/v1", "api_key": SECRET,
+        "model_context_window_tokens": 131072,
+    })
+    assert outcome.ok and body["ok"] is True and body["action"] == "add"
+    assert catalog_calls == [], "add 不拉服务商接口列表，更不能拿它做准入"
+    profile_id = body["profile_id"]
+    listed = next(item for item in body["profiles"] if item["id"] == profile_id)
+    assert listed["model_name"] == "not-in-catalog-v9"
+    assert listed["provider_name"] == "not-in-catalog-v9" and listed["auth_mode"] == "api_key"
+    assert listed["has_key"] is True and listed["available"] is True and listed["available_for"] == ["agentic"]
+    data = read_model_profiles(model_profiles_path(host.home_paths))
+    saved = data["profiles"][profile_id]
+    assert (saved["model_name"], saved["model_backend"], saved["model_context_window_tokens"]) == (
+        "not-in-catalog-v9", "openai_compatible", 131072)
+    assert saved["capability"] == "agentic" and saved["enabled"] is True
+    provider = data["providers"][saved["provider_id"]]
+    assert provider["api_base"] == "https://api.example.test/v1" and provider["capabilities"] == ["agentic"]
+    assert provider["api_key"] == SECRET
+    outcome, body = _run(tool, action="list")
+    assert outcome.ok and SECRET not in outcome.output
+    assert any(item["id"] == profile_id and item["model_name"] == "not-in-catalog-v9" for item in body["profiles"])
+    assert catalog_calls == []
+
+
+# 函数用途: 锁住 TUI 手动填写保存走的 add_models 同样接受接口列表外的模型名，字段与 add 路径一致。
+def test_add_models_accepts_a_model_name_missing_from_the_provider_catalog(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import model_provider_network as network
+
+    catalog_calls = []
+
+    def catalog(request):
+        catalog_calls.append(request)
+        return {"data": [{"id": "listed-only"}]}
+
+    monkeypatch.setattr(network, "get_json", catalog)
+    host = _host(tmp_path)
+    tool = ManageModelsTool(host)
+    outcome, body = _run(tool, action="add_models", connection=CONNECTION,
+                         models=[{"model_name": "not-in-catalog-v9b", "model_context_window_tokens": 64000}])
+    assert outcome.ok and body["added_models"] == ["not-in-catalog-v9b"] and "hint" in body
+    assert catalog_calls == []
+    outcome, _ = _run(tool, action="add", profile={
+        "model_name": "not-in-catalog-v9c", "model_backend": "openai_compatible",
+        "api_base": "https://api.example.test/v1", "api_key": SECRET,
+        "model_context_window_tokens": 64000,
+    })
+    assert outcome.ok
+    data = read_model_profiles(model_profiles_path(host.home_paths))
+    rows = {row["model_name"]: row for row in data["profiles"].values()}
+    batch_row, flat_row = rows["not-in-catalog-v9b"], rows["not-in-catalog-v9c"]
+    # add_models（TUI 手动填写，tui_model_add.py:141）与 add（IM）两条路径的存储字段一致；provider 编号按实现各自生成。
+    assert {key for key in batch_row if key != "provider_id"} == {key for key in flat_row if key != "provider_id"}
+    assert batch_row["capability"] == flat_row["capability"] == "agentic"
+    assert batch_row["model_context_window_tokens"] == flat_row["model_context_window_tokens"] == 64000
+    batch_provider = data["providers"][batch_row["provider_id"]]
+    flat_provider = data["providers"][flat_row["provider_id"]]
+    assert {key for key in batch_provider if key != "display_name"} == {key for key in flat_provider if key != "display_name"}
+    assert batch_provider["api_base"] == flat_provider["api_base"] == "https://api.example.test/v1"
+    assert batch_provider["capabilities"] == flat_provider["capabilities"] == ["agentic"]
+    outcome, body = _run(tool, action="list")
+    assert outcome.ok
+    names = [item["model_name"] for item in body["profiles"]]
+    assert "not-in-catalog-v9b" in names and "not-in-catalog-v9c" in names
+    assert catalog_calls == []

@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## IM 侧加模型补用例：接口列表外的模型名（2026-10-03，imadd，worker/im-model-add-test，待复审）
+
+- 来源：17i 双入口核对（entries）缺口 1——TUI 手动填写允许加接口列表里没有的模型名，IM 侧没有对应用例；将来若有人给 IM（manage_models）也加“只许选列表里的”限制，不会被抓到。
+- 改动：只加用例，不动产品代码。`agent_py_agent/tests/test_model_profile_tool.py` 新增两条（走 `ManageModelsTool` 真实入口，即 IM 里用户说“加个模型”时模型调的工具）：
+  - `test_add_accepts_a_model_name_missing_from_the_provider_catalog`：`action="add"` 加一个接口列表里没有的模型名，成功落盘、list 可见；断言全程未拉取服务商接口列表（`get_json` 零调用），字段按结构化值断言（model_name/provider_name/auth_mode/has_key/available/available_for、provider 的 api_base/capabilities）。
+  - `test_add_models_accepts_a_model_name_missing_from_the_provider_catalog`：TUI 手动填写保存走的 `add_models`（`tui_model_add.py:141`）同样接受列表外名字，回执 `added_models` 有它；与 `add` 路径产出的存储行字段集一致（除 provider 编号）、provider 行一致（除 display_name）。
+- 命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_model_profile_tool.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-imadd
+  ```
+  结果：**15 passed**（13 原有 + 2 新增）。
+- 变异 2 个（驱动脚本 `/private/tmp/claude-501/imadd/mutate_imadd.py`，按原字节备份还原，未用 git stash/checkout）：
+  - M1 给 `add` 前加“拉接口列表、名字不在列表里就拒”：新用例 1、2 都被抓到（2 failed）。
+  - M2 给 `add_models` 前加同一限制：新用例 2 被抓到，用例 1 不受影响（1 passed / 1 failed）。
+  - 还原后重跑 15 passed；`git diff` 只含测试文件，产品代码零残留。
+
 ## 回复正文误判内部标记、从下标处截断（2026-10-03，vtm，worker/visible-text-markers，已实现，待复审）
 
 - 来源：3a 工单「回复里的代码只要带方括号下标写法，回复就从那里开始被截掉」。现场证据是 mtcr 那份初审报告两次都在同一行代码处被截断，投递状态 `internal_protocol_removed`。
