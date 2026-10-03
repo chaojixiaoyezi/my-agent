@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 890,
+  "count": 892,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4402,6 +4402,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "每包最多四条收紧门，按第一期设计限制一次工具调用需要合并的插件规则量。"
+    },
+    {
+      "name": "MAX_PROMPT_CONTENT_CHARS",
+      "file": "agent_py_agent/agent/plugin_events/protocol.py",
+      "value": 4000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "提示正文截断长度（设计 D4：4000 字）；名字带 PROMPT 是为了和别的模块的同名概念区分开。"
+    },
+    {
+      "name": "MAX_REF_CHARS",
+      "file": "agent_py_agent/agent/plugin_events/protocol.py",
+      "value": 120,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "自由文本引用字段（渠道名、会话哈希）的长度上界，防止调用方把大段正文塞进公共字段。"
     },
     {
       "name": "_DATA_MODE",

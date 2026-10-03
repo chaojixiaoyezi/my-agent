@@ -1167,3 +1167,15 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **isolation 事实单一来源**：新增模块级 `attempt.sandbox.gateway_isolation_status(ports, system=None)`——`not_applicable`（没登记端口）/`applied`（macOS）/`unavailable:landlock_not_implemented`（Linux，G5 前）/`unavailable:unsupported_platform`。沙箱对象 `gateway_isolation_fact()` 和 `/status` 都调它，一个事实一处定义。`/status` 新增字段 `gateway_isolation`。G5 落地后由就绪探针改 Linux 的值。
 - **绑定失败回滚补用例**：`_start_gateway_http` 绑定失败注销预登记端口，补 `test_start_gateway_http_unregisters_port_on_bind_failure`，变异“删掉注销”被抓。
 - `CODE_SIZE_REPORT.md` 不进提交（跑完 code-size 后 `git checkout -- CODE_SIZE_REPORT.md`）。
+
+## 插件事件中心 B3：观察投递（M 线第一期，m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`）
+
+- **起因**：设计稿 [插件事件与收紧钩子](../../design/PLUGIN_EVENT_HOOKS.md) 第 7 节：把宿主事件合并投给「已启用 + 清单订阅 + 握手声明」的插件，投递走 B2 的共用通道；事件点接线在 B4，本块只提供 publish 入口与组装。
+- **改动**：
+  - 新 `plugin_events/protocol.py`：事件公共字段（`event_id`/`type`/`seq`/`occurred_at`/`dropped_before`/`channel`/`thread_ref`/`actor`）、`my-agent/events` 握手能力门、payload 组装与输入归一化；正文只在该插件声明 `content: "text"` 时保留。
+  - 新 `plugin_events/hub.py`：`PluginEventHub` 按 owner 分区；每个插件按事件类型只留最新（`dropped_before` 只算槽建立之后被合并的条数，中途启用从当前最新一条开始收、第一条为 0）；一批最多 6 条、一次 `my-agent/events.observe`；每个（owner, 激活）同时只有一个发送任务（单在途，返工 2 起）；发送前 `acquire` 刷新使用时间、发送前后由通道复核代次；回收只摘「自己 acquire 过、且不在有效集合里」的激活（先取 `current_seq` 时间界再读表）；计数（`delivered`/`coalesced`/`failed`/`unavailable`/`last_error_code`/`last_delivered_at`）只在内存，不写盘。
+  - `gateway_parts/plugin_panels_http.py`：`plugin_event_hub(server)` 懒建唯一 hub 挂 server（与面板服务共用同一个池，不建第二个池）；`publish_plugin_event(server, owner, event)` 是事件点统一入口（停机等拿不到 hub 时丢弃、永不抛）；`close_plugin_channel` 停机时一并关闭 hub。
+- **边界**：publish 只加锁更新待发并调度后台线程池，永不阻塞、永不抛异常；退避沿用通道的分级（连接级故障退避整条连接、请求级错误只算这一次）；B4 未接、v7/v8 启用门未开（B7 前），本块用假插件与测试替身验证。
+- **返工（3a 复审）**：`seq` 定为按（owner, 插件激活）各自计数、换代从 1 重新开始；新槽（中途启用）水位对齐到「当前最新一条之前」，`dropped_before` 只算槽建立之后被合并的条数；两条真线程池用例改门闩 + submit 计数同步。
+- **返工 2（9b 复审后）**：调度粒度从「每 owner 一个投递循环」改成「每（owner, 激活）一个发送任务」（`_inflight` 标记、线程池 4 个、与面板服务同档）——一个插件挂住只占自己的线程，不再拖同 owner 或其它 owner 的插件；`publish_plugin_event` 补 `except Exception` 兜底（首次取用要新建 hub/池，任何异常都不许抛回主流程）；删掉锁内恒真的版本比较死代码；hub 每轮顺手对自管连接调 `close_idle`；`MAX_BATCH_EVENTS` 改为直接引用 `MAX_PLUGIN_EVENT_COUNT`；hub 的池调用改用独立 `pool_clock`（默认 monotonic、与池同基准）——原先 acquire 传墙钟，会让面板侧空闲关闭失效、hub 侧误关面板刚用过的连接。调度改动后类 span 超 near-soft 上限，把发送/收尾/记账与池维护拆成模块级函数（拆平 `815151369`，纯结构重构、行为不变）。
+- **验证**：事件中心用例 32 项通过（合并与丢弃计数、批量、单在途、慢插件、停用与换代、跨 owner、握手门、订阅过滤、退避分级、计数接口、Gateway 组装；含 seq 按插件/按 owner 计数与换代重置、中途启用 dropped=0、兄弟/跨 owner 不被挂住插件拖累、回收不摘别人的连接、停用回收自己的连接、空闲关闭按池时钟）；15 个变异全部被杀死；命令与结果见 [TESTS](../../../TESTS.md) 顶部「B3 事件中心」小节。

@@ -3,10 +3,13 @@
 # 模块用途: 把 TUI 打开的插件面板请求交给进程内唯一的展示服务，返回已校验的面板内容。
 from __future__ import annotations
 
+import logging
 import threading
 from functools import partial
 
 from ..plugin_channel import PluginChannelRevoked
+
+logger = logging.getLogger(__name__)
 
 _SERVICE_LOCK = threading.Lock()
 
@@ -29,16 +32,21 @@ def mark_plugin_channel_closed(server) -> None:
 # LLM: 停机是终态，也是幂等的：置标记与摘掉服务/池引用必须在同一把锁内做完，否则锁外关池的瞬间
 #   还在跑的工作线程又能取到旧引用或新建一个。真正的 close 放到锁外做——它会 stop 插件进程，
 #   可能阻塞，不能占着 _SERVICE_LOCK（那时新的取池请求会被标记挡住，不会漏）。
-# 函数用途: 关闭本 server 的插件展示服务与共用池，并标记通道已关闭（可重复调用）。
+#   事件中心与展示服务一起摘掉：两者共用同一个池，停机后都不允许再被取到。
+# 函数用途: 关闭本 server 的插件展示服务、事件中心与共用池，并标记通道已关闭（可重复调用）。
 def close_plugin_channel(server) -> None:
     with _SERVICE_LOCK:
         mark_plugin_channel_closed(server)
         service = getattr(server, "plugin_display", None)
         server.plugin_display = None
+        hub = getattr(server, "plugin_event_hub", None)
+        server.plugin_event_hub = None
         pool = getattr(server, "plugin_channel_pool", None)
         server.plugin_channel_pool = None
     if service is not None:
         service.close()
+    if hub is not None:
+        hub.close()
     if pool is not None:
         pool.close()
 
@@ -112,6 +120,41 @@ def plugin_display_service(server):
 def plugin_channel_pool(server, process_sandbox: bool | None = None):
     with _SERVICE_LOCK:
         return _locked_shared_pool(server, process_sandbox)
+
+
+# LLM: 事件中心与面板服务共用 server 上的唯一池（不建第二个池）；hub 只在第一次取用时创建，
+#   之后原样返回。停机后拒绝新建：停机排空阶段的事件点发布按丢弃处理，不重试、不拉起进程。
+# 函数用途: 取得（必要时创建）本 Gateway 进程的插件事件中心。
+def plugin_event_hub(server):
+    from ..plugin_events.hub import EventHubWiring, PluginEventHub
+
+    with _SERVICE_LOCK:
+        if _channel_closed(server):
+            raise PluginChannelRevoked("插件通道已随 Gateway 停机关闭")
+        hub = getattr(server, "plugin_event_hub", None)
+        if hub is None:
+            sandbox = bool(getattr(getattr(server.agent, "config", None), "plugin_process_sandbox", False))
+            # 直接复用取/建逻辑，不能再取 _SERVICE_LOCK（本函数已持有，非可重入锁会死锁）
+            pool = _locked_shared_pool(server, sandbox)
+            server.plugin_channel_pool = pool
+            hub = PluginEventHub(wiring=EventHubWiring(pool=pool))
+            server.plugin_event_hub = hub
+        return hub
+
+
+# LLM: 事件点的统一入口：拿不到 hub（停机、未初始化）就丢弃这条事件，绝不把异常抛回主流程；
+#   第一次取用要新建 hub 和池（导入、读配置、构造对象），这里任何异常都不能漏出去——
+#   B4 在主流程的事件点直接调本函数。拿到 hub 之后 hub.publish 本身也保证不抛。
+# 函数用途: 向本 Gateway 的事件中心发布一条观察事件（永不抛异常）。
+def publish_plugin_event(server, owner, event) -> None:
+    try:
+        hub = plugin_event_hub(server)
+    except PluginChannelRevoked:
+        return
+    except Exception:  # noqa: BLE001 取用失败不能把异常抛回主流程的事件点
+        logger.warning("插件事件中心取用失败，已丢弃事件", exc_info=True)
+        return
+    hub.publish(owner, event)
 
 
 # LLM: 只在 _SERVICE_LOCK 内调用；已存在的池原样返回，不存在才按沙箱开关新建并挂上 server。

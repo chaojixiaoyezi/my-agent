@@ -1,5 +1,15 @@
 # 设计台账
 
+## B3 事件中心：观察投递（M 线第一期，m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`，9b 两轮复审、ds2 初审通过，并入 step17i）
+
+- **起因**：设计稿 [插件事件与收紧钩子](docs/design/PLUGIN_EVENT_HOOKS.md) 第 7 节：宿主事件按 owner 分区合并投给「已启用 + 清单订阅 + 握手声明 `my-agent/events`」的插件；投递走 B2 共用通道；事件点接线在 B4，本块只提供 publish 入口与组装。
+- **做了什么**：新 `agent/plugin_events/protocol.py`（事件公共字段、`my-agent/events` 握手门、payload 组装与输入归一化）与 `agent/plugin_events/hub.py`（`PluginEventHub`）；`gateway_parts/plugin_panels_http.py` 加 `plugin_event_hub(server)`（懒建唯一 hub、与面板服务共用同一个池）与 `publish_plugin_event(server, owner, event)`（事件点统一入口），停机由 `close_plugin_channel` 一并关闭 hub。
+- **投递语义**：只留最新（`dropped_before` = 槽建立后发布计数差）、一批最多 6 条一次 `events.observe`、每个（owner, 激活）同时只有一个发送任务（单在途；返工 2 起，此前按 owner）；publish 只加锁更新待发并调度后台线程池，永不阻塞、永不抛；退避分级沿用通道（连接级故障退避整条连接、请求级错误只算这一次）；回收只摘自己 acquire 过的失效激活（先取 `current_seq` 时间界再读表，不碰面板服务的连接）；计数只在内存，`hub.stats(owner_key)` 供 B6 展示。
+- **边界**：B4 未接（本块无事件点）；v8 启用门未开（B7 前），全部用假插件与测试替身验证；不含收紧钩子（B5）。
+- **返工（3a 复审后）**：`seq` 语义定为按（owner, 插件激活）各自计数、换代从 1 重新开始（此前实现按（owner, 插件）计数、换代保留序号）；新槽（中途启用）的水位对齐到「当前最新一条之前」，`dropped_before` 只算槽建立之后被合并的条数（此前从零水位起算，会把启用前的发布算进去）。补双插件/双 owner/换代 seq 与中途启用 dropped=0 用例；两条真线程池用例改门闩 + submit 计数同步，不靠 sleep 窗口。变异 10 个（原 8 + seq 全局、零水位）全部杀死。
+- **返工 2（9b 复审后）**：调度粒度从「每 owner 一个投递循环」改成「每（owner, 激活）一个发送任务」（`_inflight` 标记、线程池 4 个、与面板服务同档），一个插件挂住只占自己的线程；`publish_plugin_event` 补 `except Exception` 兜底；删锁内恒真版本比较死代码；hub 每轮对自管连接调 `close_idle`；`MAX_BATCH_EVENTS` 直接引用 `MAX_PLUGIN_EVENT_COUNT`；hub 池调用改用独立 `pool_clock`（原先 acquire 传墙钟，会让面板侧空闲关闭失效、hub 侧误关面板刚用过的连接）。补 H1/H9 用例与挂住插件隔离、空闲关闭、池时钟、publish 兜底用例。调度改动后类 span 237 超 near-soft，把发送/收尾/记账与池维护拆成模块级函数（`815151369`，纯结构重构、行为不变），15 个变异同步锚点后全部重跑。
+- **验证与变异**：事件中心 32 项用例通过；15 个变异全部被杀死；命令与结果见 [TESTS](TESTS.md) 顶部「B3 事件中心」小节。
+
 ## memory_archive/context_bundles 快照私有写（luna2cb，2026-10-03，并入 step17i）
 
 - **问题**：上下文包快照含会话上下文；此前首次写入、latest 副本和合同字段重写走 `Path.write_text`，新文件/目录可能成为 0644/0755。

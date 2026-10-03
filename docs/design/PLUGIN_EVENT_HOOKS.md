@@ -142,7 +142,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 
 ## 6. 事件目录 v1
 
-公共字段：`event_id`、`type`、`seq`（每个插件单调递增）、`occurred_at`、`dropped_before`（这类事件自上次送达后被合并掉几条）、`channel`（`tui` / `feishu` / …）、`thread_ref`（会话编号的哈希，不是原编号）、`actor`（`main`、`subagent` 或 `decision`；`decision` 是决策模型的宿主自动执行，J16 片 D 也走同一个执行器）。**默认不含任何正文、路径、参数或输出。**
+公共字段：`event_id`、`type`、`seq`（按「owner × 插件激活」各自计数、从 1 开始单调递增；换代重装后从 1 重新开始——插件从序号里看不出没订阅的类型或别的 owner 发生过什么）、`occurred_at`、`dropped_before`（这个插件的槽建立之后、同类事件被合并掉没送达的条数：中途启用从当前最新一条开始收、第一条为 0；换代丢旧待发后同样从 0 起算）、`channel`（`tui` / `feishu` / …）、`thread_ref`（会话编号的哈希，不是原编号）、`actor`（`main`、`subagent` 或 `decision`；`decision` 是决策模型的宿主自动执行，J16 片 D 也走同一个执行器）。**默认不含任何正文、路径、参数或输出。**
 
 | 事件 | 结构化事实（facts） | 可选正文（声明 `content: "text"` 且确认码同意） | 事件点 |
 | --- | --- | --- | --- |
@@ -161,8 +161,8 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 
 照面板服务的做法，并把它的连接管理抽成两边共用的通道（块 B2），不再写第二套：
 - **通道**：每个（owner, 激活代次）一条 MCP 连接，事件和面板共用。事件中心要连接时用 `gateway_parts/plugin_panels_http.plugin_channel_pool(server)` 取那个挂在 server 上的唯一池（B2 复审返工加的入口），不要自己 new；池由 Gateway 在停止时关闭。
-- **只留最新**：每个插件按事件类型各留一份待发（新的覆盖旧的），被覆盖的条数计入下一条的 `dropped_before`。一次请求把所有类型的待发打成一批（最多 6 条）。
-- **单在途**：每个插件同时只有一个 `events.observe` 请求；在途时新事件只进待发。
+- **只留最新**：每个插件按事件类型各留一份待发（新的覆盖旧的），被覆盖的条数计入下一条的 `dropped_before`（只算这个插件的槽建立之后被合并的；中途启用从当前最新一条开始收，第一条为 0）。一次请求把所有类型的待发打成一批（最多 6 条）。
+- **单在途**：每个（owner, 激活）同时只有一个 `events.observe` 请求；在途时新事件只进待发。发送任务按（owner, 激活）独立调度、线程池 4 个——一个插件挂住只占自己的线程，不拖同 owner 或其它 owner 的插件；挂住的插件数到达线程数仍是全局上界（与面板服务同款边界）。
 - **有界**：请求超时 3 秒；出错退避 5 秒；空闲 120 秒关连接。连接启动也计入超时：启动超过 3 秒就把这批记为“超时”，连接在后台继续启动（补上面板服务的同一个缺口）。
 - **撤销**：每次发送前后复核激活代次；代次失效就丢掉待发、关连接。停用即撤销，不会有“停用后还收到事件”。
 - **不影响主流程**：事件点只做“把事实放进待发表”（加锁、拷贝几个字段），发送在宿主后台线程池里做；插件慢、挂、崩，主流程都感觉不到。
@@ -296,7 +296,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | --- | --- | --- | --- | --- |
 | B1 清单 v8（已实施：`worker/m1-b1`，原提交 `20a930cd2`，裁定提交 `ad6007106`；ae 意见修订 `d6e9daccb`，ae 复审通过，并入 step17i） | `events` / `tool_gates` / `permissions` 字段、校验、序列化；构建脚本出 v8；确认码事实加四项，写成人能看懂的话（如“能看到这些工具的完整参数：…”仅指 full 收紧门） | `plugin_manifest.py`、`plugin_runtime_facts.py`、`plugin_enable_tool.py`、`scripts/build_plugin_files_package.py` | 每条校验规则正反例（含工具开始 text 被拒、v8 只订阅合法、`arguments: full` 配 `effects` 被拒）；v1–v7 序列化逐字节不变；改订阅确认码就变；v8 + `host_api` 被拒；v8 安装允许但正确码也按关闭拒绝，未开始/未提交，v6 原确认链保持 | 无 |
 | B2 共用插件通道（已实施：`worker/ds1-b2-channel`，ds1 `e62593fc6`，ds4b2 复审返工至 `7b21bfe12`；be、ae、9b 复审通过，并入 step17i；实施与返工记录见第 19–21 节） | 把面板服务的连接、代次复核、单在途、空闲关闭抽成 `PluginChannelPool`，面板改用它；启动计入超时 | 新 `plugin_display/channel.py`（或 `plugin_channel/`）、`plugin_display/service.py` | 面板原有用例全部不改照过；启动超过超时记超时、后台继续启动；代次失效丢结果 | 无 |
-| B3 事件中心 | `PluginEventHub`：按 owner 分区、按类型只留最新、`dropped_before`、单在途、退避、撤销、计数；`my-agent/events` 握手；`events.observe` | 新 `plugin_events/hub.py`、`plugin_events/protocol.py`，Gateway 组装处 | 假插件：合并与丢弃计数准确；慢插件不拖主线程；停用后不再收到；跨 owner 不串；握手没声明不投 | B1、B2 |
+| B3 事件中心（已实施：`worker/m1-b3-event-hub`，m1b3，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`；9b 复审待做） | `PluginEventHub`：按 owner 分区、按类型只留最新、`dropped_before`、单在途、退避、撤销、计数；`my-agent/events` 握手；`events.observe` | 新 `plugin_events/hub.py`、`plugin_events/protocol.py`，Gateway 组装处 | 假插件：合并与丢弃计数准确；慢插件不拖主线程；停用后不再收到；跨 owner 不串；握手没声明不投 | B1、B2 |
 | B4 事件点 | 6 类事件的投影与接线；只有提示事件声明且同意时给提示正文，观察事件不带工具参数（3a 2026-10-03 裁定）；提示投影统一脱敏 | `gateway_parts/http_handlers.py`（提示）、`gateway_parts/request_execution.py`（回合）、`tooling/executor.py`（工具）、`gateway_parts/control_operation_service.py`（命令） | 每类事件字段齐全；默认不含正文（带标记正文反证）；工具观察不含参数；带标记的凭据和 `__` 内部键反证；被拒的调用不发工具事件；`actor` 三种取值 | B3 |
 | B5 收紧钩子 | `PluginToolGate`、合并规则（同严按插件 ID 排序）、超时按确认、代次撤销与新实例重问、重跑只对同一次调用不重问；`call_origin`；审批前缀、去掉会话/长期选项、单一 `plugin_gate_required` 判定绕开缓存/授权/自主；`PLUGIN_GATE_*` 错误码登记 | `tooling/executor.py`、新 `plugin_events/tool_gate.py`、`agent_core/tool_loop/round_execution.py`、`contracts/tool_approval.py`、`gateway_parts/stream_approval.py`、`user_space/approval_mode.py`、`contracts/error_taxonomy.py`、`plugin_management.py` 与 `runtime_db/host_command_execution.py`（设 `call_origin=host_command`） | 第 8.2 表 7 种组合；自主模式、会话缓存、长期授权、决策模型自动执行下仍弹框；I4 续跑回合重新征询；超时 → 确认；两个并行调用撞上同一慢插件，排队那条超时按确认；插件回复多带字段（如 `arguments`）被忽略、参数不变；征询中停用 → 不算、换新实例 → 问新实例；批准后同一调用重跑不再问，之后同参数新调用、不同参数照样问；不可交互 → 不执行、错误码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`、账本记 `final_status`；收紧插件一律 deny 时用户仍能 `/plugins disable`、模型工具表里没有插件管理工具；模型发起的调用在工具参数里塞 `"call_origin": "host_command"` 或 `__call_origin` 照样被收紧（来源只读宿主设在 `ToolExecutorRequest` 上的字段，不从参数读；ae 补，配变异“执行器从参数读来源”）；拒绝时模型看到 `PLUGIN_GATE_DENIED` 且不是“结果未知” | B1、B2；H3 已合入 |
 | B6 账本与展示 | `plugin_gate.decided` 写入与查询；`/plugins info` 四段（含“无法审批”计数）；IM 同文 | `runtime_db/repository.py`（查询方法）、`plugin_commands.py`、`plugin_management.py` | 每种 outcome 一条且字段齐全；不写消息原文；TUI 与 IM 输出相同；最近 10 条按时间倒序；“无法审批”单独计数 | B5 |
@@ -332,6 +332,8 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 - 插件进程能拿到它订阅的事实和（同意过的）正文，这些数据在插件那里怎么用，宿主管不到；断网和收窄读是为了让它带不出去、也读不到更多。
 - 收紧钩子增加的是延迟：每个命中的调用最多多等 `plugin_tool_gate_timeout_ms`。只订阅需要的工具，不订阅读工具，影响很小。
 - 观察事件会合并丢弃（只留最新），插件不能把它当完整审计日志；需要完整记录的应读宿主账本（第二期可开放只读查询）。
+- **发送任务的线程数是全局上界**：每个（owner, 激活）一个在途任务、线程池 4 个（与面板服务同档）；挂住的插件数到达 4 个时，后面的发送任务要排队，仍会互相影响。这是面板服务已有的同类边界。
+- **hub 不看 `plugin_events_enabled`**（给 B4、B7 的接线提示）：开关关掉时 hub 仍会读安装表（每次发布触发一轮）。B4 在事件点应先看开关再调 `publish_plugin_event`；B7 的「开关关闭就不能启用」保证不会真的投递，但读表的开销省不掉。
 - Windows 上宿主命令不进沙箱，插件进程沙箱同样不可用，v8 插件在 Windows 上启用失败。
 - **收紧钩子是护栏，不是安全边界**（9b 评审）：插件拒了 `delete_file`，模型还能用 `run_command rm` 达到同样效果。插件作者要按 `effects` 订阅才能盖住同类操作；宿主的安全边界仍是 H2、H3、审批策略和沙箱。
 - **宿主命令来源的可信度**（9b 复核，3a 待定）：用户命令免收紧，前提是 Gateway 能确认调用方是用户本人；本机来源信任与模型沙箱可联网之间的冲突，由 3a 定方向（比如收紧本机来源信任条件，或让模型沙箱连不到 Gateway）。
@@ -368,7 +370,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | --- | --- | --- | --- |
 | B1 清单 v8 | `worker/m1-b1`（已实施，原提交 `20a930cd2`，裁定提交 `ad6007106`，追加 ae 意见修订） | 已并入 step17i | ae（原提交、裁定和本轮修订一并复审） |
 | B2 共用插件通道 | `worker/ds1-b2-channel`（已实施，头 `7b21bfe12`） | 已并入 step17i | be、ae、9b |
-| B3 事件中心 | `worker/m1-b3-event-hub` | B1、B2 合入 | 9b |
+| B3 事件中心 | `worker/m1-b3-event-hub`（已实施，头 `815151369`，待 9b 复审） | 已合入（B1、B2） | 9b |
 | B4 事件点 | `worker/m1-b4-event-points` | B3 合入 | be |
 | B5 收紧钩子 | `worker/m1-b5-tool-gate` | B1、B2、H3 合入 | be、ae |
 | B6 账本与展示 | `worker/m1-b6-ledger-display` | B5 合入 | 9b |

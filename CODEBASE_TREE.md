@@ -301,10 +301,12 @@ agent_py_agent/
 |   |-- plugin_channel/                # 插件共用通道（M 线 B2）：面板与事件共用的连接管理
 |   |   |-- __init__.py                # 只导出通道池与异常，不反向依赖面板或事件模块
 |   |   `-- pool.py                    # 每个（owner, 激活代次）一条 MCP 连接：单在途、代次复核、启动计时超时、退避、空闲关闭
-|   |-- plugin_events/                 # M1 插件事件域；B1 只有静态声明和确认，不代表已授权或已隔离
+|   |-- plugin_events/                 # M1 插件事件域：B1 静态声明与确认、B3 观察投递（protocol/hub）
 |   |   |-- __init__.py                # 事件域命名空间，不在导入时启动服务
 |   |   |-- declarations.py            # v8 事件、工具收紧门、网络权限的不可变声明与严格校验
-|   |   `-- confirmation.py            # 同源四项确认事实和中文正文/参数/网络/强制沙箱需求预览
+|   |   |-- confirmation.py            # 同源四项确认事实和中文正文/参数/网络/强制沙箱需求预览
+|   |   |-- protocol.py                # 事件公共字段、握手能力门与线上 payload 组装，纯协议无 IO
+|   |   `-- hub.py                     # 事件中心：按 owner 分区、只留最新、单在途、回收与计数；投递走 plugin_channel
 |   |-- plugin_observation.py          # 观察候选宿主合同（插件与 MCP 共用）：声明类型与配对规则、载荷整份校验（含几何 frame/region）、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
 |   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
@@ -1624,6 +1626,7 @@ docs/
 - `agent_py_agent/agent/command_declarations.py`：命令 JSON 的唯一读取器，包和宿主目录共用，旧目录私有 decoder 已删除。
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
 - `agent_py_agent/agent/plugin_events/declarations.py` 与 `confirmation.py`：v8 订阅与网络需求的唯一不可变声明及同源确认投影；不含通道、投递、钩子或实际沙箱，不改变旧包确认。
+- `agent_py_agent/agent/plugin_events/protocol.py` 与 `hub.py`（M 线 B3）：观察事件的公共字段与握手能力门；事件中心按 owner 分区、按类型只留最新（`dropped_before`）、单在途、发送前后由共用通道复核代次，连接回收只碰自己 acquire 过的激活；publish 永不阻塞、永不抛异常，投递与计数都在后台，不写盘。
 - `agent_py_agent/tests/test_plugin_manifest_v8.py`：B1 静态规则、旧字节、同摘要确认和构建，含真实临时安装、原命令 v8 拒绝及 v6 确认路径兼容；`tests/fixtures/plugin_manifest_v1_v7.json` 固定基线字节，变异探针仅进程内变异、不改产品文件。
 - `docs/tasks/M1_B1_HANDOFF.md`：B1 分支交接、真实验证/失败/未验边界与四个变异复现方法。
 - `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。

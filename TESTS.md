@@ -1,5 +1,34 @@
 # 测试与发布验收
 
+## B3 事件中心：观察投递（m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`，待 9b 复审）
+
+- **起因**：M 线第一期 B3（设计稿第 7 节）：按 owner 分区把宿主事件合并投给「已启用 + 清单订阅 + 握手声明 `my-agent/events`」的插件；投递走 B2 共用通道；事件点接线在 B4，本块只提供 publish 入口与组装。
+- **实现**：新 `agent_py_agent/agent/plugin_events/protocol.py`（公共字段/握手门/payload 组装）、`hub.py`（`PluginEventHub`）；`gateway_parts/plugin_panels_http.py` 加 `plugin_event_hub(server)`、`publish_plugin_event(server, owner, event)`，`close_plugin_channel` 停机时关闭 hub。
+- **关键语义**：只留最新（`dropped_before` = 槽建立后发布计数差）、一批最多 6 条、每个（owner, 激活）单在途、publish 永不阻塞/永不抛、发送前 `acquire` 刷新使用时间、发送前后由通道复核代次、回收只摘自己 acquire 过的失效激活（读表前取时间界）、计数只在内存。
+- **返工（3a 复审）**：`seq` 定为按（owner, 插件激活）各自计数、换代从 1 重新开始；新槽（中途启用）水位对齐到「当前最新一条之前」，`dropped_before` 只算槽建立之后被合并的条数；两条真线程池用例改门闩 + submit 计数同步（不再 sleep 窗口）。
+- **返工 2（9b 复审后）**：发送任务与 `_inflight` 从按 owner 改为按（owner, 激活）独立调度、线程池 4 个（与面板服务同档），一个插件挂住只占自己的线程；`publish_plugin_event` 补 `except Exception` 兜底；删锁内恒真的版本比较死代码；hub 每轮对自管连接调 `close_idle`；`MAX_BATCH_EVENTS` 直接引用 `MAX_PLUGIN_EVENT_COUNT`；hub 池调用改用独立 `pool_clock`（与池同基准 monotonic，原先传墙钟会让面板侧空闲关闭失效）。
+  拆平（`815151369`）：调度改动后 `PluginEventHub` 类 span 237 超 near-soft 上限 200，把发送/收尾/记账与池维护拆成模块级函数（首参 hub）、`_bump` 收回类里，纯结构重构、行为不变；15 个变异同步锚点后全部重跑。
+- **新增用例 32 项**（`agent_py_agent/tests/test_plugin_event_hub.py`，假插件 + 真池 + 受控/真线程池）：
+  - 合并与丢弃计数（槽建立后 5 条同类 → 1 条、`dropped_before=4`）、多类型一批、seq 递增；
+  - seq 按插件/按 owner 各自计数、换代后从 1 重新开始；中途启用第一条 dropped=0、启用前 100 条不算；
+  - 单在途（在途发布不重复调度、回执后再发）、慢插件不拖 publish（耗时上界）；挂住插件不拖同 owner 兄弟、不拖其它 owner；
+  - 停用不投、换代不追旧账、撤销不计失败；跨 owner 不串；握手没声明 → unavailable；未订阅类型不投；正文按声明过滤；
+  - 回收只摘自己管的连接：别人的新连接、别人的过期连接都不动（H1）；停用后 hub 回收自己的连接（H9）；每轮空闲关闭、按池时钟而不是墙钟；
+  - 超时/启动失败退避整条连接、请求级错误不退避；计数六字段齐全；坏输入丢弃；`publish_plugin_event` 新建 hub 抛异常不抛回主流程；
+  - Gateway 组装：单例 hub + 与面板共用同一个池、停机后拒绝新建、`publish_plugin_event` 停机后丢弃。
+- **验证命令与结果**（工作目录根；`<代号>`=m1b3）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_hub.py agent_py_agent/tests/test_plugin_channel_lifecycle.py agent_py_agent/tests/test_plugin_channel_pool.py agent_py_agent/tests/test_plugin_display_service.py agent_py_agent/tests/test_gateway_plugin_panels.py agent_py_agent/tests/test_constants_catalog.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_plugin_manifest_v8.py -q \
+    --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-m1b3
+  # → 243 项通过、0 失败（事件中心 32 + 相关回归 7 文件 211）；
+  # 变异 /private/tmp/claude-501/ds4b2/mutate_b3.py → V1–V8 + M9/M10 + H1/H9/M11/M12/M13 全杀 15/15
+  ```
+
+- **静态门禁**（拆平后复跑）：guards9 172 passed、import boundaries 0、ruff 通过、doc_sync PASS、code-size strict hard=0（strict_scope_total=2219）、size_diff 新增 0（消失 16）、`git diff --check` 干净、clean package OK。
+- **未验证 / 环境限制**：真实插件进程、真实事件点（B4）与真实 TUI/IM 未接未验；v8 启用门未开（B7 前），全部用假插件与测试替身；`test_plugin_sandbox.py` 等宿主类用例在沙箱内失败由 3a/9b 沙箱外复核。
+
 ## ae 二次复看补强：窗口内读取只返回、不缓存（2026-10-03，luna6i）
 
 - **规则修正**：cache miss 时先读取 canonical task；mtime 年龄不足 2 秒的结果只返回给调用方，并移除该 run 的旧缓存项，不入缓存；窗口外读取才保存。已有且签名相同的缓存项仍可直接命中，因为新鲜窗口内读到的数据从未成为缓存来源。

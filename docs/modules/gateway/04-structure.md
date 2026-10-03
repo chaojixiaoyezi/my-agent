@@ -42,6 +42,13 @@
   `_apply_limit_settlement` 一并写进答复 `guidance_settlement`。
 - 回归：`test_steer_closeout_replay.py`（含 `host_notices_from` 认 `HostNotice` 的渲染回归）。
 
+## M1 B3：插件事件中心（2026-10-03，分支 `worker/m1-b3-event-hub`，待 9b 复审）
+
+- `plugin_events/protocol` 固定观察事件的公共字段与 `my-agent/events` 握手能力门（`MAX_BATCH_EVENTS` 直接引用清单的订阅类型上限）；`plugin_events/hub` 的 `PluginEventHub` 按 owner 分区、按事件类型只留最新（`dropped_before` 只算槽建立之后被合并的条数；`seq` 按（owner, 插件激活）各自计数、换代从 1 重新开始）、一批最多 6 条一次 `events.observe`、每个（owner, 激活）同时只有一个发送任务（单在途；线程池 4 个、与面板服务同档，一个插件挂住不拖别的插件）；publish 永不阻塞、永不抛异常，投递在后台线程池；hub 每轮顺手对自管连接做空闲关闭；发送/收尾/记账与池维护拆成模块级函数（首参 hub，`815151369` 拆平、行为不变），类保留发布/调度/收集/生命周期核心。
+- 投递走 B2 的 `plugin_channel.PluginChannelPool`：每次发送前 `acquire` 刷新使用时间（用与池同基准的 `pool_clock`，默认 monotonic）、发送前后由通道复核激活代次；退避分级（连接级故障退避整条连接、请求级错误只算这一次）由通道裁决；事件中心只回收自己 acquire 过的失效连接（`RetireScope.managed` + 读表前取 `current_seq` 时间界），不碰面板服务的连接；空闲关闭每轮顺手跑一次。
+- `gateway_parts/plugin_panels_http`：`plugin_event_hub(server)` 懒建唯一 hub 挂 server、与面板服务共用同一个池（不建第二个池）；`publish_plugin_event` 是事件点统一入口（拿不到 hub 即丢弃；取用阶段任何异常也兜底记 warning，绝不抛回主流程）；`close_plugin_channel` 停机时一并关闭 hub。事件点接线在 B4，本块不含。
+- 计数（`delivered`/`coalesced`/`failed`/`unavailable`/`last_error_code`/`last_delivered_at`）只在内存，`hub.stats(owner_key)` 供 B6 展示；回归 `test_plugin_event_hub.py`（32 项 + 15 变异）。
+
 ## M1 B1：静态订阅声明边界（2026-10-03，待集成）
 
 - `plugin_events/declarations` 是 v8 不可变声明与严格校验的唯一位置；`plugin_manifest` 仅按显式新协议接入，不读取 owner 或宿主设置。
