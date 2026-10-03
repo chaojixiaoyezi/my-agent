@@ -530,7 +530,7 @@ class _JsonlMemorySearchMixin:
     #   零命中也算做成），给 _fuse_semantic 记召回方式用，口径同 HybridRetriever：嵌入失败 embedding_failed，身份不符用身份原因码。
     # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果和降级原因，失败保留可观察降级状态。
     @counted_as("memory_recall")
-    def _semantic_records(self, query: str, top_k: int) -> tuple[list[MemoryRecord], str]:
+    def _semantic_records_report(self, query: str, top_k: int) -> tuple[list[MemoryRecord], str]:
         from ..retrieval.vector_store import VectorIdentityError
 
         try:
@@ -560,6 +560,11 @@ class _JsonlMemorySearchMixin:
             if current is not None and current.content == record.content:
                 records.append(current)
         return records, ""
+
+    # LLM: 只要记录、不关心降级原因的调用方用它（契约同 _semantic_records_report 的第一个返回值）。
+    # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果。
+    def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
+        return self._semantic_records_report(query, top_k)[0]
 
     # LLM: 搜索结果最终必须回到 active JSONL，并按确定性规则去重排序。不带作用域的检索（Gateway 与 IM 的 /memory、agent.recall）
     #   也按“每次检索记一次”计入召回方式（S7）：没有嵌入端记 keyword 和不可用原因，有嵌入端由 _fuse_semantic 记。
@@ -795,7 +800,7 @@ class _JsonlMemorySearchMixin:
     # 函数用途: 合并关键词与语义召回顺序，并记下这次召回走的方式。
     def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int) -> list[MemoryRecord]:
         """关键词召回 + 语义召回 RRF 融合(检索拓宽 #1)。语义为空则退回纯关键词(不崩不退化)。"""
-        semantic, fallback_reason = self._semantic_records(query, top_k)
+        semantic, fallback_reason = self._semantic_records_report(query, top_k)
         EMBEDDING_USAGE.record_retrieval("keyword" if fallback_reason else "semantic", fallback_reason)
         if not semantic:
             return keyword_records[:top_k]
