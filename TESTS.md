@@ -10,7 +10,10 @@
     - 收尾照常跑真实检查并给那一次返工；
     - 中间通过一次就重新数；
     - 别的目标、收尾检查的失败不算。
-- **变异**（`scratchpad/fb/mutate.py`，每次只改一处、跑完原字节还原）：11 个全被拦截。
+- **9b 复审后补**（3a 定的两条必须改）：
+  - `test_without_closeout_the_last_real_failure_survives_the_pause`：失败到上限、再写一次、不收尾，最终事实里仍是最后一次真实的 failed 和错误计数，提示里没有暂停原因码。产品改动：`pack_verification_facts` 没收尾时跳过复用键为空的暂停行。
+  - `test_error_and_not_run_results_do_not_count_toward_the_streak`：中间插入检查程序超时（error）和沙箱不可用（not_run），连续失败次数不变，凑够 6 次真实失败才暂停。
+- **变异**（`scratchpad/fb/mutate.py`，每次只改一处、跑完原字节还原）：13 个全被拦截。原 11 个之外，新增的两个是 9b 的 X1（not_run、error 也算失败）和“没收尾时暂停行照样进最终事实”。
   - P1：摘要改回 3 条、截断判断改成 `>=`、返工样例改回 5、去掉“另有几条”；
   - P2：去掉软提示；
   - P3：上限差一、通过不清零、不分目标、收尾失败也算、收尾也暂停、暂停记录带真实复用键。

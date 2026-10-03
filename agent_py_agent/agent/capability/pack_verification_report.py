@@ -23,6 +23,8 @@ MAX_NOTICE_TEXT_CHARS = 480
 # LLM: 检查结果、被就地改的输入原件、缺的交付物、本回合被取消（块 6a）四样都没有时返回 None（未钉包、开关关着或本回合没改工作区），
 #   对外事实保持不出现这个键。inputs_modified 取最后一次收尾的输入原件检查（块 4），deliverables_missing 取最后一次交付存在检查（块 5）；
 #   取消只读账本里的 closeout.cancelled 和结果的 status（不依赖已经解绑的令牌），零目标的已取消收尾也如实保留。
+#   没有收尾时每个目标取最后一次真实检查：写后反馈暂停行（复用键为空，见 service._paused_post_write）不算检查结果，
+#   不能盖掉前面的真实失败（9b 复审 P1–P3 必须改 1）。
 # 函数用途: 从核验账本生成本 run 的结构化核验与取消事实，不把没跑完的检查当成通过。
 def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | None:
     records = ledger.records() if ledger is not None else []
@@ -39,7 +41,7 @@ def pack_verification_facts(ledger: PackVerificationLedger | None) -> dict | Non
     latest: dict[tuple, dict] = {}
     for row in results:
         fact = row["fact"]
-        if keys is None or row.get("key") in keys:
+        if (row.get("key") in keys) if keys is not None else bool(row.get("key")):
             latest[(fact.get("package_id"), fact.get("verifier_id"), fact.get("target"))] = {
                 **fact, "trigger": row.get("trigger", ""), "input_matches": dict(row.get("input_matches") or {})}
     baseline = next((row for row in records if row.get("kind") == "baseline"), {})

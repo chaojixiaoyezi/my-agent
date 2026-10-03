@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_py_agent.agent.capability import pack_verification_service as service
@@ -16,6 +18,10 @@ from agent_py_agent.agent.capability.pack_verification_hooks import (
     attach_post_write_verification,
     capture_baseline_before_tool,
     closeout_rework_block,
+)
+from agent_py_agent.agent.capability.pack_verification_report import (
+    pack_verification_notice_text,
+    run_pack_verification_facts,
 )
 from agent_py_agent.agent.capability.pack_verifier_runner import (
     MAX_VERIFIER_ERROR_SAMPLES_COUNT,
@@ -124,3 +130,49 @@ def test_closeout_failures_do_not_count_toward_the_post_write_limit(env, monkeyp
     _write_bad(env, "shell")  # 不经写工具写的（像 Shell），只有收尾才查到
     assert "placeholder_text" in closeout_rework_block(env.agent, env.params)
     assert _post_write(env, _write_bad(env, LIMIT))["status"] == "failed", "收尾检查的失败不算写后连续失败"
+
+
+# 9b 复审 P1–P3 必须改 1：没有正常收尾（取消、轮数用完、进程崩溃）时，暂停行不能盖掉前面的真实失败。
+def test_without_closeout_the_last_real_failure_survives_the_pause(env, monkeypatch):
+    install_fake_runner(monkeypatch)
+    for version in range(LIMIT):
+        _post_write(env, _write_bad(env, version))
+    assert _post_write(env, _write_bad(env, LIMIT))["reason_code"] == "post_write_feedback_limit"
+    facts = run_pack_verification_facts(env.agent, env.params)
+    [result] = facts["results"]
+    assert facts["closeout_checked"] is False
+    assert result["status"] == "failed" and result["error_counts"] == {"placeholder_text": 1}, "不能被暂停行盖成 not_run"
+    assert "post_write_feedback_limit" not in pack_verification_notice_text(facts)
+
+
+# 函数用途: 替身检查程序：按交付物里的 outcome 字段给 failed / error / not_run，供“哪些状态算连续失败”的用例用。
+def _install_outcome_runner(monkeypatch):
+    calls = []
+
+    def run(request):
+        calls.append(request)
+        outcome = json.loads(request.target.read_text()).get("outcome", "failed")
+        target = request.target.relative_to(request.workspace_root).as_posix()
+        common = {"package_version": request.installation.manifest.version, "member": "scripts/check.py", "target": target}
+        if outcome == "failed":
+            return PackVerificationResult(request.verifier_id, request.installation.manifest.plugin_id, "failed", valid=False,
+                                          error_counts={"placeholder_text": 1}, **common)
+        reason = "verifier_timeout" if outcome == "error" else "sandbox_unavailable"
+        return PackVerificationResult(request.verifier_id, request.installation.manifest.plugin_id, outcome, reason, **common)
+
+    monkeypatch.setattr(service, "run_pack_verifier", run)
+    return calls
+
+
+# 9b 复审 P1–P3 必须改 2：检查程序超时（error）、沙箱不可用（not_run）是环境问题，不算模型写错，不计入连续失败。
+def test_error_and_not_run_results_do_not_count_toward_the_streak(env, monkeypatch):
+    calls = _install_outcome_runner(monkeypatch)
+    sequence = ["failed"] * (LIMIT - 1) + ["error", "not_run", "error"]
+    for index, outcome in enumerate(sequence):
+        path = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "outcome": outcome, "v": index})
+        assert _post_write(env, path)["status"] == outcome
+    last = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "outcome": "failed", "v": "last"})
+    assert _post_write(env, last)["status"] == "failed", "超时和沙箱不可用不能凑进连续失败次数"
+    paused = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "outcome": "failed", "v": "paused"})
+    assert _post_write(env, paused)["reason_code"] == "post_write_feedback_limit", "凑够 6 次真实失败才暂停"
+    assert len(calls) == len(sequence) + 1
