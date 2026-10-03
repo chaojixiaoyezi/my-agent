@@ -12,7 +12,7 @@
   - 嵌入按用途计：记忆写入、召回、重建、工具检索；没标注的归 other，不猜。每种用途记请求次数、文本条数、失败次数、供应商回报的 token，以及没回报 token 的请求数（不估算）。
   - 计数只有一处：两个嵌入客户端的 `embed` 都经 `count_embedding_request`，它们的 `_request` 返回供应商回报的 token（OpenAI 兼容取 `usage.total_tokens`，没有时取 `prompt_tokens`；MiniMax 取顶层 `total_tokens`）。
   - 用途在操作入口用 `counted_as` 标注：JsonlMemory 的写入（`_index_vector`）、召回（`_search_scoped`、`_semantic_records`）、重建（`_embed_rebuild_rows`），以及工具语义检索（`VectorToolSearchProvider._semantic_search`）。
-  - 召回方式计数 semantic/keyword/none，留最近一次的 mode 和 fallback_reason，由 `_scoped_retrieval_facts` 记（每次 scoped 检索恰好一次：自动召回、memory_search、决策补充召回）。旧的 `search()` 只计嵌入，不计方式。
+  - 召回方式计数 semantic/keyword/none，留最近一次的 mode 和 fallback_reason，每次检索记一次：scoped 检索（自动召回、memory_search、决策补充召回）由 `_scoped_retrieval_facts` 记；不带作用域的 `search()`（Gateway 与 IM 的 `/memory`、`agent.recall`）由 `search` / `_fuse_semantic` 按同一口径记（嵌入失败 `embedding_failed`，没有嵌入端 keyword 加不可用原因）。原先写的“`search()` 只计嵌入、不计方式”在 embo-01 真实对账里表现为“召回请求 2 次、召回方式 0 次”，用户看到的两行对不上，be 2026-10-03 改为也计（待 9b、3a 确认）。
   - 展示：管理员发 `/model vector`（TUI 与 IM 同一个 Gateway 入口）时多几行“本次 Gateway 启动以来”，只有数字和原因码。
     - 计数是全进程的，含其他用户，所以普通用户看不到这几行。
     - `my-agent memory vectors status` 是另起的进程，计数为空，那里不加。

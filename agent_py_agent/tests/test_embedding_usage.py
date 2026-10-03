@@ -206,6 +206,38 @@ def test_retrieval_modes_keyword_and_none_with_reason(tmp_path, monkeypatch, stu
     assert (retrieval["keyword"], retrieval["last_mode"], retrieval["last_fallback_reason"]) == (1, "keyword", "embedding_failed")
 
 
+def test_unscoped_recall_counts_one_retrieval_mode_per_call(tmp_path, monkeypatch, stub):
+    """Gateway 与 IM 的 /memory 搜索走 agent.recall → JsonlMemory.search（不带作用域）。真实对账（embo-01）发现这条路径的召回
+    嵌入有计数、召回方式没有（召回 2 次请求对着召回方式 0 次）；现在每次检索记一次方式，和召回请求一一对上。"""
+    agent = _agent(tmp_path, monkeypatch, stub)
+    agent.memory.add("user", f"项目代号青柠的发布窗口是每周四 {MARKER}")
+    agent.recall("青柠 发布窗口", 3)
+    agent.recall("每周四发布的是哪个项目", 3)
+
+    usage = EMBEDDING_USAGE.snapshot()
+    assert usage["embedding"]["memory_recall"]["requests"] == 2
+    assert (usage["retrieval"]["semantic"], usage["retrieval"]["keyword"], usage["retrieval"]["none"]) == (2, 0, 0)
+
+    _Stub.mode = "fail"
+    agent.recall("青柠", 3)
+    retrieval = EMBEDDING_USAGE.snapshot()["retrieval"]
+    assert (retrieval["keyword"], retrieval["last_mode"], retrieval["last_fallback_reason"]) == (1, "keyword", "embedding_failed")
+
+
+def test_unscoped_recall_without_semantic_counts_keyword_with_reason(tmp_path, stub):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path / "work")
+    agent.memory.add("user", "团建定在下周五")
+    agent.recall("团建", 3)
+
+    retrieval = EMBEDDING_USAGE.snapshot()["retrieval"]
+    assert (retrieval["keyword"], retrieval["semantic"], retrieval["last_mode"]) == (1, 0, "keyword")
+    assert retrieval["last_fallback_reason"], "没有嵌入端时带上结构化原因（同 scoped 检索的口径）"
+    assert _Stub.calls == [], "没有语义召回时一次嵌入请求都不发"
+
+
 def test_tool_semantic_search_counts_as_tool_retrieval(stub):
     from agent_py_agent.agent.tooling.models import ToolModelSpec, VectorToolSearchProvider
 

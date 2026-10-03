@@ -683,7 +683,7 @@ retention 扫描根与深度不再写死在本模块：`retention_scan._recovery
   - `EMBEDDING_USAGE` 是进程级计数。
   - `count_embedding_request` 是两个嵌入客户端唯一的计数点。
   - `counted_as` / `embedding_purpose` 按操作标用途。
-- JsonlMemory 的标注位置：`_index_vector` 记忆写入，`_search_scoped`、`_semantic_records` 召回，`_embed_rebuild_rows` 重建。`_scoped_retrieval_facts` 每次 scoped 检索记一次召回方式。
+- JsonlMemory 的标注位置：`_index_vector` 记忆写入，`_search_scoped`、`_semantic_records` 召回，`_embed_rebuild_rows` 重建。`_scoped_retrieval_facts` 每次 scoped 检索记一次召回方式；不带作用域的 `search` 在自己的路径上记一次（没有嵌入端在 `search`，有嵌入端在 `_fuse_semantic`，`_semantic_records` 返回这次语义臂的降级原因），两条路径互不重复。
 
 ## 召回后排序逐条题的候选说明（2026-10-02）
 

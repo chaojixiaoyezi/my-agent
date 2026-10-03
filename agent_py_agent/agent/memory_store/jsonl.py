@@ -526,26 +526,27 @@ class _JsonlMemorySearchMixin:
     #   身份不一致、没有身份、维度不符或库读不了时，把已有向量当作不存在（退回关键词），不静默混用两个向量空间。
     #   前置 identity_status 只为省一次付费嵌入；真正的裁决在 search 里对同一份快照再做一次（P14 第 3 条）。
     #   检索成功会清掉 identity/search 两类旧错误（别的进程重建后本进程自动恢复）。
-    #   嵌入请求按“召回”计入进程用量（S7，embedding_usage）。
-    # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果，失败保留可观察降级状态。
+    #   嵌入请求按“召回”计入进程用量（S7，embedding_usage）。第二个返回值是这一次语义臂的降级原因（空串表示语义检索做成了，
+    #   零命中也算做成），给 _fuse_semantic 记召回方式用，口径同 HybridRetriever：嵌入失败 embedding_failed，身份不符用身份原因码。
+    # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果和降级原因，失败保留可观察降级状态。
     @counted_as("memory_recall")
-    def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
+    def _semantic_records(self, query: str, top_k: int) -> tuple[list[MemoryRecord], str]:
         from ..retrieval.vector_store import VectorIdentityError
 
         try:
             store = self._vector_store()
             if store is None:
-                return []
+                return [], "embedder_unavailable"
             ok, reason = store.identity_status()
             if not ok:
                 raise VectorIdentityError(reason)
             hits = store.search(self._embedder.embed([query])[0], top_k=top_k)
         except VectorIdentityError as exc:
             self._record_semantic_health("identity", exc)
-            return []
+            return [], str(getattr(exc, "reason", "") or "vector_identity_mismatch")
         except Exception as exc:
             self._record_semantic_health("search", exc)
-            return []
+            return [], "embedding_failed"
         self._record_semantic_health("identity")
         self._record_semantic_health("search")
         active = {record.entry_id: record for record in self.all()}
@@ -558,9 +559,10 @@ class _JsonlMemorySearchMixin:
             current = active.get(record.entry_id)
             if current is not None and current.content == record.content:
                 records.append(current)
-        return records
+        return records, ""
 
-    # LLM: 搜索结果最终必须回到 active JSONL，并按确定性规则去重排序。
+    # LLM: 搜索结果最终必须回到 active JSONL，并按确定性规则去重排序。不带作用域的检索（Gateway 与 IM 的 /memory、agent.recall）
+    #   也按“每次检索记一次”计入召回方式（S7）：没有嵌入端记 keyword 和不可用原因，有嵌入端由 _fuse_semantic 记。
     # 函数用途: 返回不含陈旧索引正文的长期记忆召回结果。
     def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
         """搜索记忆，优先使用 LocalStore 索引，再读取 JSONL 正式源。
@@ -579,6 +581,7 @@ class _JsonlMemorySearchMixin:
         records, _load_errors = self.search_report(query, top_k=candidate_limit)
         if self._embedder is None:
             selected = _rerank_memory_records(records, query, top_k)
+            EMBEDDING_USAGE.record_retrieval("keyword", _semantic_unavailable_reason(self._semantic_status))
         else:
             fused = self._fuse_semantic(query, records, candidate_limit)
             selected = _select_diverse_memory_records(fused, top_k)
@@ -787,11 +790,13 @@ class _JsonlMemorySearchMixin:
 
         return [index_text(record.content, record.attributes) for record in records if record.content]
 
-    # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。
-    # 函数用途: 合并关键词与语义召回顺序。
+    # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。副作用：按语义臂这一次的结果记一次召回方式
+    #   （S7：做成了记 semantic，降级记 keyword 和原因码），只被不带作用域的 search 调用。
+    # 函数用途: 合并关键词与语义召回顺序，并记下这次召回走的方式。
     def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int) -> list[MemoryRecord]:
         """关键词召回 + 语义召回 RRF 融合(检索拓宽 #1)。语义为空则退回纯关键词(不崩不退化)。"""
-        semantic = self._semantic_records(query, top_k)
+        semantic, fallback_reason = self._semantic_records(query, top_k)
+        EMBEDDING_USAGE.record_retrieval("keyword" if fallback_reason else "semantic", fallback_reason)
         if not semantic:
             return keyword_records[:top_k]
         from ..retrieval.lexical import reciprocal_rank_fusion
@@ -1000,7 +1005,8 @@ class _JsonlMemoryLifecycleMixin:
 # LLM: 投影：没有检索器（top_k<=0 或范围内没有条目）时 mode=none；semantic_recall 是存储层状态副本，
 #   含档案不可用等原因码，不含正文和凭据。放在模块级是为了不撑大检索 mixin。
 #   没有嵌入端时，fallback_reason 按存储层结构化诊断写明为什么没有（见 _semantic_unavailable_reason）。
-#   每次 scoped 检索恰好调用一次，所以也是召回方式进程计数（S7，EMBEDDING_USAGE.record_retrieval）的唯一记录点。
+#   每次 scoped 检索恰好调用一次，所以是 scoped 检索的召回方式进程计数点（S7，EMBEDDING_USAGE.record_retrieval）；不带作用域的
+#   search 另在自己的路径上记一次（search / _fuse_semantic），两条路径互不重复。
 # 函数用途: 把一次 scoped 检索的方式、降级原因和范围条目数整理成结构化事实，并记一次召回方式计数。
 def _scoped_retrieval_facts(
     retriever: object | None, scoped_entries: int, semantic_status: dict[str, str]

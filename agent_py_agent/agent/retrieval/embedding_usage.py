@@ -1,8 +1,8 @@
 # LLM: S7（3a 2026-10-02）：嵌入调用与记忆召回方式的进程内计数，只为展示（/model vector 的“本次启动以来”几行），不写盘、
 #   不加开关、不改请求，也不进 model call ledger（那里的准入、停机关门、预算、校准语义与嵌入无关，别牵连）。计数只有一处：
 #   两个嵌入客户端的 embed 都经 count_embedding_request；用途按正在执行的操作标注（embedding_purpose 上下文：记忆写入、召回、
-#   重建、工具检索），没标注的记为 other，不猜。token 只记供应商回报的数，没回报的请求单独计数，不估算。召回方式由
-#   memory_store.jsonl._scoped_retrieval_facts 每次检索记一次。只有数字和原因码，不含正文。改动同步 test_embedding_usage.py。
+#   重建、工具检索），没标注的记为 other，不猜。token 只记供应商回报的数，没回报的请求单独计数，不估算。召回方式每次检索记一次：
+#   scoped 检索在 memory_store.jsonl._scoped_retrieval_facts，不带作用域的 search 在 search / _fuse_semantic。只有数字和原因码，不含正文。改动同步 test_embedding_usage.py。
 # 模块用途: 统计本进程嵌入请求的次数、条数、失败和供应商回报的 token，以及记忆召回走语义、关键词还是没检索。
 from __future__ import annotations
 
