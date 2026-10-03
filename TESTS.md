@@ -70,6 +70,14 @@
   空批也计、MiniMax 丢 token、OpenAI 丢 `prompt_tokens` 兜底（补用例后抓到）、写入 / 重建 / 工具检索不标注、召回方式不记、
   不留最近原因码、普通用户也显示、日志不去重、去重不分 owner、去重连诊断也跳过。
 
+- **embo-01 真实对账（be，2026-10-03）**：隔离 home、env -i、只转 MiniMax 官网服务商和 embo-01，Gateway 经测试方旁听启动器独立记下每次真实嵌入请求；TUI 里 /remember 1 条、/memory 2 次，没调聊天模型。
+  - 旁听：3 次请求，写入 32 token，两次召回 8、16 token（MiniMax 顶层 `total_tokens`）。
+  - `c1d686a19` 上 `/model vector`：写入 1 次 1 条 32、召回 2 次 2 条 24，嵌入数字逐项对上；但召回方式 semantic 0、keyword 0、none 0，对不上：/memory 走不带作用域的 `JsonlMemory.search`，原设计只在 scoped 检索记方式。
+  - 修复 `4026d9639`（分支 `claude/be-s7-recall-mode`）：`search` 每次检索也记一次方式（口径同 HybridRetriever）。同样流程重跑，召回方式 semantic 2、最近一次 semantic，全部对上。
+  - 新增 2 项：`test_unscoped_recall_counts_one_retrieval_mode_per_call`（两次 `agent.recall` 记 2 次 semantic、和召回请求数一致；端点失败记 keyword/`embedding_failed`）、`test_unscoped_recall_without_semantic_counts_keyword_with_reason`（没开语义召回记 keyword 带原因、不发嵌入请求）。`test_embedding_usage.py` 现在 13 项。
+  - 变异 4 个全部抓到：没有嵌入端时不记方式、`_fuse_semantic` 不记方式、一律记 semantic、失败不给原因码。
+  - 证据 `~/.my-agent/decision-evidence/embedding-usage-facts-s7/`（README、两轮旁听记录和回执、测试方脚本；隔离根含密钥副本，已删）。
+
 ## 同一回合因非计划重启最多自动续跑 3 次（I4 续，2026-10-02，分支 `claude/38-resume-limit`，基于 `72ddc2b5c`）
 
 - 新增 `test_turn_resume_limit.py`（9 例）：
