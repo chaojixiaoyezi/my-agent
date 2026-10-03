@@ -1,5 +1,33 @@
 # 测试与发布验收
 
+## 回复正文误判内部标记、从下标处截断（2026-10-03，vtm，worker/visible-text-markers，已实现，待复审）
+
+- 来源：3a 工单「回复里的代码只要带方括号下标写法，回复就从那里开始被截掉」。现场证据是 mtcr 那份初审报告两次都在同一行代码处被截断，投递状态 `internal_protocol_removed`。
+- 改动：`agent_py_agent/agent/conversation/user_visible_text.py` 的行首标记判定拆成前缀类 / 完整方括号标签 / XML 三张精确清单（前缀类必须在行首、完整方括号标签必须独占本行、XML 按行首前缀认），方括号工具块正则补上“成对闭标签”要求，缺闭标签不再吞掉后文。判定只读结构化文本形状，标签名精确匹配，不解析自然语言、不按名字猜。
+- 新增 `agent_py_agent/tests/test_user_visible_text_markers.py`。覆盖：方括号下标写法（字典按下标取值、列表按索引取元素等）在行内代码、围栏代码块、普通文字三种位置都原样送达，且 `projection_status` 不是 `internal_protocol_removed`、`contains_internal_protocol` 为假；每种真实内部标记各一条反例仍被剥掉；正文里单独提一次工具调用标签（不成对、不独占行）不再吞掉后文；本轮被截断原文的回归。命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_user_visible_text_markers.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-vtm
+  ```
+  结果：**55 passed**（含参数化各点）。
+- 相关回归（回复投影、跨通道、交付契约、飞书适配器）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_user_visible_text_markers.py agent_py_agent/tests/test_cross_channel.py agent_py_agent/tests/test_cli_delivery_contracts.py agent_py_agent/tests/test_delivery_contract_doctor.py agent_py_agent/tests/test_adapter_feishu.py -q --tb=line -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-vtm
+  ```
+  结果：**112 passed**（另跑 test_memory_hardening.py、test_memory_recall_v2.py、test_runtime_context_pressure.py 全绿，几个文件合计 157 passed）。
+- 变异 5 个，每个只改产品一处，均被真实用例抓到（驱动脚本 `tmp/vtm_mutate.py`，不入库；每次按备份原字节还原，禁 git stash/checkout）：
+  ① 退回整段子串匹配（去掉行首锚）；② 不要求行首；③ 完整方括号标签不再要求独占整行；④ 方括号块缺闭标签也吞到结尾；⑤ 前缀类标记退回任意位置子串匹配。全部 killed。
+- guards9 十文件（含 test_packaging）：**366 项、22 failed、0 errors、0 skipped**。22 条失败全在两个 TUI 插件文件（`test_tui_input.py` 8 条 + `test_tui_plugin_directory_pipe.py` 2 条，参数化展开 22 点），已在**独立基线 worktree（提交 `631fbb608`）实测同样 22 条失败**（tests=119 failures=22），与本改动无关；3a 定这是 **17i 里已知的 G3 回归，ds10 在修**（不是沙箱环境原因，初版归因已按 3a 更正）。未删改、未跳过、未伪造。补：ds10 修好后的基线重跑 guards9 已 **172 项全过、0 失败**。
+
+### 补丁（2026-10-03 晚，3a 复审后）
+
+- **必须改**：行首标记正则漏了 `re.IGNORECASE`，只认小写，而旧实现先 casefold、大小写都认。后果是模型输出被截断时留下的**全大写**工具调用开标签、以及大写/混写的运行标签开头的行，会原样送给用户。已给行首标记正则补 `re.IGNORECASE`（结构判定不变），并把标记表里那几条专门列的大写条目删掉、统一成一个口径。
+- 新用例（字面量全部拼接构造）：① 大写工具调用开标签独占一行、无闭标签 → 被剥；② 大写/混写运行标签在行首（`RUN_` / `Run_` / `ruN_`）→ 被剥；③ 大写标记在行中间 → 不剥。
+- 变异 M6「去掉 IGNORECASE」被抓住；单独复验确认是本次新加的 ①② 三条用例把 M6 杀死（4 个参数点全红），不是靠旧用例。
+- 重跑：新测试文件 **56 passed**；相关回归 5 文件 **116 passed**；guards9 **172 passed / 0 failed**；import boundaries=0、ruff 全过、DOC_SYNC_PASS、diff check 干净、clean-package OK、strict code-size 退出 0；size_diff **新增告警 0 / 消失 23**。
+- 静态门禁：import boundaries=0、ruff 全范围通过（修了测试文件一处 import 排序）、DOC_SYNC_PASS、`git diff --check` 干净、clean-package OK；strict code-size 退出 0（strict_scope_total=2214、hard=0、blocked=False，报告已 `git checkout` 还原不提交）；size_diff **新增告警 0 / 消失告警 23**。
+- 未验证：真实 TUI、真实飞书通道的端到端投递未跑（规则禁止连真实 Gateway/渠道）；净化器只在出口 `project_user_reply` / `_plain_user_reply_projection` 生效这一点靠既有用例与代码结构确认，未在真实渠道观察。
+
 ## 修法 B 收口提示结构化（rfs，2026-10-03，分支 `worker/retry-final-sink`，初审补齐 `worker/rfs-followups`，基于 step17i `9490cdf90`，待 3a 复跑后挑入）
 
 - **新增**：`test_provider_retry_final_sink.py`（7 项）：到上限时 typed sink 收到带 `params={"final": True, "error_code": ...}` 的收口事件、不再收到文本；sink 抛异常/返回 False/旧签名不认参数包三种情况回退原文本（逐字不变）；Gateway 流收口事件结构化字段齐全、文案等于已登记用户文案、TUI 投影显示同一句；普通重试事件字段集合精确不变；后台正文（IM）与 TUI 同一句收口文案。

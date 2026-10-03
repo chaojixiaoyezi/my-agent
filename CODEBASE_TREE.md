@@ -1237,6 +1237,7 @@ agent_py_agent/
 |   |-- test_memory_retention_v2.py    # 保留期、legal hold、终态保护、重验证与 hard delete
 |   |-- test_memory_admin_cli_v2.py    # 统一 Memory 管理命令复用正式服务
 |   |-- test_tool_input_completion_provenance.py # 有限补参、来源账目、伪造拒绝和旧旁路删除回归
+|   |-- test_user_visible_text_markers.py # 回复正文净化：方括号下标（行内代码/代码块/普通文字）不被误判成内部标记，真标记仍剥掉
 |   |-- test_tool_input_schema.py      # 强类型纠正、嵌套/组合/边界规则与显式 Schema fail-closed
 |   |-- test_process_sessions.py       # 后台命令有界等待、进程树停止与 owner/TUI 会话隔离回归
 |   |-- test_process_unknown_reason_codes.py # 后台进程/终端会话结果未知时带出具体原因码，工具操作账 unknown_reason 可归因

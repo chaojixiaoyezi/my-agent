@@ -1738,7 +1738,9 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   旧数据兼容。
 - `agent/conversation/user_visible_text.py`：所有用户出口共用的内部协议净化器，覆盖 bracket tool block、
   XML function/tool envelope、模型以工具名直接降级成 XML 标签以及截断尾块；不得由各 IM adapter 另建
-  deny list。
+  deny list。判定只按结构认、标签名精确匹配：前缀类标记必须在行首，完整方括号标签必须独占本行，
+  方括号工具块必须行首开标签加成对闭标签；正文里的方括号下标（含行内代码、代码块位置的字典取值、
+  列表索引）一律当正文放行，缺闭标签的开标签不再吞掉后文（2026-10-03 vtm 修误判截断）。
 - `agent/gateway_parts/request_execution.py`：执行单个 request，并读取/写回同一 conversation 的
   累计消息历史；复用 runtime compact policy/token estimator/backend 在 owner+thread 内自动 compact，
   raw transcript 保留，thread summary/message+byte cursor/generation/checkpoint pointer 是唯一 live compact
