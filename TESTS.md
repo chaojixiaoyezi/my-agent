@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 能力包块 6c 收口（p6c，2026-10-03，分支 `worker/pack-6c-wrapup`，基于 step17i `c47d023b6`）
+
+- **改动**：用户说明 `docs/guides/CAPABILITY_PACK_GUIDE.md` 补“反复改不对时，写后检查会怎么节流”（P1–P3 的用户视角）并把“打开前的三个前提”更新为三条已完成（`/stop` 打断由块 6a 并入 step17i）；设计稿 `docs/design/CAPABILITY_PACKS_V2.md` 状态行与第 7 节进度表更新；脱敏已知边界补 6c 核实结论；新增锁定用例 `test_redact_location_word_glued_paths_stay_a_known_cost`（`test_pack_verification_service.py`）。**产品代码未改**（脱敏判定为不能安全修，维持 9b 取舍）。
+- **脱敏核实（探针实测真实模块）**：`找不到/Users/me/x.json`、`notfound/Users/me/x.json` 保持原样（已知代价）；`/Users/me/x.json`、`找不到 /Users/me/x.json`、`文件不存在：/Users/me/x` 置空；`交付/tmp/x.json`、`out/tmp/x.json` 保持。候选 lookbehind 变体实验：等价零宽改写行为不变；把中文也算分隔会同时置空 `交付/tmp/x.json`、`交付/Users/x.json`——不能安全区分。
+- **变异（2 个，`git checkout` 还原并核对 sha256 `aca6f9c5…`）**：
+  - 边界放宽（`[^\w.\-]` → `[^A-Za-z0-9_.\-]`）→ **2 failed**：新用例（`找不到/Users…` 被置空）+ `test_redact_location_keeps_ordinary_locations[交付/tmp/x.json]`（误伤）；
+  - 去掉行首分支（`(?:^|[^\w.\-]…)` → `(?:[^\w.\-]…)`）→ **6 failed**：新用例（正常路径不再置空）+ 5 个现有用例。
+- **相关回归**（工作树根，指定 Python、隔离 basetemp）：
+  - `test_pack_verification_service.py`：**48 passed、2 skipped**；
+  - `test_pack_verification_matching.py`、`test_pack_verification_inputs.py`、`test_pack_verification_deliverables.py`、`test_pack_verification_post_write_feedback.py`：**46 passed**；
+  - `test_pack_verifier_runner.py`：**9 passed、10 skipped**（真沙箱用例按平台自动跳过）；
+  - `test_pack_verification_cancellation.py`：**23 passed、1 failed**——`test_running_cancellation_reclaims_entire_process_group[platform]` 在本机因不允许嵌套沙箱（`sandbox-exec: sandbox_apply: Operation not permitted`）失败，需 3a 沙箱外复跑；
+  - `test_pack_verification_protection.py`：非真 shell 部分 **6 passed**；真 shell 用例（`test_real_shell_cannot_forge_the_ledger`、`test_full_access_shell_outside_the_task_tree_cannot_forge_the_ledger`）在嵌套沙箱下失败并挂起（600 秒超时被终止），需 3a 沙箱外复跑；文件内已无 xfail（H3 修复时 `6141d332b` 去掉）。
+- **guards9**（10 个文件，含 `test_packaging.py`）：**172 passed**（34.25s）。
+- **静态门禁**：`check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；strict code-size → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`（已还原 `CODE_SIZE_REPORT.md`）；`git diff --check` 无输出；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
+- **尺寸差分**：`size_diff.sh` → `新增告警: 0`、`消失告警: 16`。
+- **未验证**：真实 TUI/飞书提示、生产部署、v2 冻结业务重跑（块 8 在跑）；真 Seatbelt/bwrap 用例与插件宿主类测试留 3a 沙箱外复核。
+
 ## 两件小后续（sfu，2026-10-03，分支 `worker/ds3-small-followups`，基于 `claude/3a-step17i` `2c5b8ed34`）
 
 - **决策设置撤销批次**（`decision_policy.py`，提交 `e0354302e`）：

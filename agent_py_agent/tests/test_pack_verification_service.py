@@ -566,6 +566,24 @@ def test_redact_location_detects_traversal_without_dotdot_root():
         assert redact_location(location, []) == location
 
 
+# LLM: 9b 复核记录的已知代价（6c 核实维持，见设计稿“已知代价”一节）：词字符（Unicode，含中文）直接贴着宿主路径、
+#   中间没有分隔符时不置空。把边界放宽到中文能修好这个漏检，但会同时把“中文目录名的相对路径”（交付/tmp/x.json）
+#   误伤成 <redacted>——两者正则区分不了，是同一取舍的两面；等价的 lookbehind 改写不改变行为。锁定现状，
+#   改动必须同步设计稿的已知边界说明和本用例。
+# 函数用途: 锁定脱敏对“词字符直接贴路径”的已知行为：中文、英文保持原样；正常绝对路径和中文加分隔符照常置空。
+@pytest.mark.usefixtures("fixed_root_dirs")
+def test_redact_location_word_glued_paths_stay_a_known_cost():
+    from agent_py_agent.agent.capability.pack_verifier_redaction import redact_location
+
+    # 中文叙述直接贴宿主路径：已知代价，会被漏检（放宽边界则会误伤 交付/tmp/x.json）
+    assert redact_location(f"找不到{_HOST_ROOT}/me/x.json", []) == f"找不到{_HOST_ROOT}/me/x.json"
+    # 英文词字符同理（与 out/tmp、docs/Users 这类相对路径不误伤共用同一机制）
+    assert redact_location(f"notfound{_HOST_ROOT}/me/x.json", []) == f"notfound{_HOST_ROOT}/me/x.json"
+    # 对照：正常绝对路径照常置空；中文用分隔符（冒号/空格）隔开也照常置空
+    assert redact_location(f"{_HOST_ROOT}/me/x.json", []) == "<redacted>"
+    assert redact_location(f"找不到：{_HOST_ROOT}/me/x", []) == "<redacted>"
+
+
 def test_truncated_baseline_only_reworks_files_proven_written_this_run(env, fake_runner, monkeypatch):
     from agent_py_agent.agent.capability import pack_verification_matching as matching
 

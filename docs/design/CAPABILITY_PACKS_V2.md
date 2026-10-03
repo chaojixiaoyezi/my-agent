@@ -1,6 +1,6 @@
 # 能力包 v2：宿主核验交付物、保护输入原件、要求交付（第 10 条选 A + 第 11 条）
 
-- **状态：已确认设计、实施中**（2026-10-03）。块 1–5 已实现；块 6a（`/stop` 打断宿主核验）sol1 实现、ae 整合到块 4/5 之上，9b 复核通过，并入 step17i；块 7 已复审通过，见第 3.2 节和第 7 节。块 2 内把检查程序的 `baseline` 推广成 `inputs`（见第 2 节），由 ae 定、待 3a 审。
+- **状态：已确认设计、实施中**（2026-10-03）。块 1–5、7 已上线（main）；块 6a（`/stop` 打断宿主核验）和 P1–P3（写后检查反馈修正）已并入 step17i；块 6b（写后检查复用工作区扫描）在做，6c（文档与尾巴）由 `worker/pack-6c-wrapup` 收口；块 8 全量重跑进行中。块 2 内把检查程序的 `baseline` 推广成 `inputs`（见第 2 节），由 ae 定、待 3a 审。进度见第 7 节。
 - **依据**：用户第 10 条（“包要好好做，我很看重能力包”）和第 11 条（宿主证实包检查真跑过）。
 - **底子**：`c13-frozen-reruns-28435`，业务审阅 10/27（A 包 1/9、B 包 1/9、不该用包的 8/9）。17 次失败的逐条归因在证据目录 `capability-packs-v2-design/attribution.md`：
   - 宿主机制 5 次；
@@ -82,7 +82,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
     - 9b 复核加固：片段前只要不是词字符、点或连字符就算分隔（`file:///Users/…`、`a;/Users/…`、`at@/Users/…`、`a&/Users/…`、`#/Users/…` 都算；词字符按 Unicode，`交付/tmp/x.json` 这类中文目录名不误伤），另认 `..`（`../../../../Users/…`），判断前先做一次 URL 解码（`%2FUsers%2F…` 也算）。`..` 通过零宽定宽后查作为边界，不消费前段路径，也不依赖 `/..` 在根目录下存在。`out/tmp/x.json`、`docs/Users/x.md`、`./out/d.json`、`out/d.json:12:3`、`https://example.com/a/b` 这类写法原样保留。
     - 防护范围：防的是 `sys.argv`、`__file__`、异常信息这类无意带出的宿主路径。故意编码（两次 %-编码如 `%252FUsers`、插 `%00`、base64、`~user/`、反斜杠写法、`vscode://file/Users` 这类）不在范围内：检查程序存心外传，换什么编码都挡不住，真正的信任边界是“能力包由管理员审过才装”。
     - 代价：JSON Pointer 的首段恰好是本机根目录名（`/home`、`/Users`、`/tmp`）时，整条置成 `<redacted>`，只丢定位、不泄露。
-    - 已知代价（9b 复核）：中文直接贴着宿主路径、中间没有分隔符时不置空，例如“找不到/Users/me/x.json”。这和“`交付/tmp/x.json` 不被误伤”是同一件事的两面，正则区分不了；中文冒号、空格、括号隔开的照样置空，例如“文件不存在：/Users/me/x”。
+    - 已知代价（9b 复核，6c 核实维持）：中文直接贴着宿主路径、中间没有分隔符时不置空，例如“找不到/Users/me/x.json”。这和“`交付/tmp/x.json` 不被误伤”是同一件事的两面，正则区分不了；中文冒号、空格、括号隔开的照样置空，例如“文件不存在：/Users/me/x”。6c 实测补充：等价的 lookbehind 改写（零宽反向断言）不改变行为；任何能修好这个漏检的边界放宽（把中文也算分隔）都会把“中文目录名相对路径”（`交付/tmp/x.json`、`交付/Users/x.json`）误伤成 `<redacted>`——属于取舍变更而不是安全修复，维持现状；现状由 `test_redact_location_word_glued_paths_stay_a_known_cost` 锁定。
   - `valid` 必须等于“errors 为空”。自相矛盾、格式不对都记 `verifier_output_invalid`。
   - 退出码不参与判定，只用来识别超时。检查器写出 v1 就退 0；目标坏了给 `valid=false` 加错误码，崩溃没写出 v1 时宿主记 `verifier_output_invalid`。
   - 运行形态：宿主只把这一个成员拷进临时目录、改名后用 `python -I -S` 跑。检查器必须是单文件、只用标准库，不 import 包里其它文件，也不读包里的模板或资源。
@@ -225,12 +225,15 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 
 | 块 | 内容 | 状态 |
 | --- | --- | --- |
-| 1 | `verification` 声明与安装校验；启用前执行确认；同意摘要写入内容激活 | 已实现（`test_capability_verification_declaration.py`） |
-| 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测）；`baseline` 推广成 `inputs` | 已实现（`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
-| 3 | 写完就查、收尾检查、返工、`HostNotice` 和 `channel_delivery` 事实、开关 | 已实现（`capability/pack_verification_*.py`，`test_pack_verification_service.py`、`test_pack_verification_matching.py`） |
-| 4 | 输入原件清单、原件副本、收尾比对、返工；宿主托管文件统一落到规范任务根（只读保护依赖 be 的 H3） | 已实现（`capability/pack_verification_originals.py`、`pack_verification_inputs.py`，`test_pack_verification_inputs.py`） |
-| 5 | 交付存在和返工（只在本回合改过工作区时查） | 已实现（`capability/pack_verification_deliverables.py`，`test_pack_verification_deliverables.py`） |
-| 6 | 变异、门禁、文档收口 | 待做 |
-| 6a | `/stop` 打断宿主核验：取消后不再起新检查、正在跑的整组回收、剩余目标逐项记 cancelled、被取消的回合不返工 | 已实现（sol1 实现，ae 整合到块 4/5 之上并补三处取消事实、宽限期轮询：`attempt/process_run.py`，`test_pack_verification_cancellation.py`），9b 复核通过，并入 step17i |
-| 7 | A 0.5.0、B 0.3.0（be） | 复审通过（`claude/be-capability-packs-content-b2` 5bf9bb61d） |
-| 8 | 重跑和独立审阅 | 待做 |
+| 1 | `verification` 声明与安装校验；启用前执行确认；同意摘要写入内容激活 | 已上线（main；`test_capability_verification_declaration.py`） |
+| 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测）；`baseline` 推广成 `inputs` | 已上线（main；`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
+| 3 | 写完就查、收尾检查、返工、`HostNotice` 和 `channel_delivery` 事实、开关 | 已上线（main；`capability/pack_verification_*.py`，`test_pack_verification_service.py`、`test_pack_verification_matching.py`） |
+| 4 | 输入原件清单、原件副本、收尾比对、返工；宿主托管文件统一落到规范任务根（只读保护依赖 be 的 H3） | 已上线（main；`capability/pack_verification_originals.py`、`pack_verification_inputs.py`，`test_pack_verification_inputs.py`） |
+| 5 | 交付存在和返工（只在本回合改过工作区时查） | 已上线（main；`capability/pack_verification_deliverables.py`，`test_pack_verification_deliverables.py`） |
+| 6 | 变异、门禁、文档收口 | 6a 已并入 step17i；6b 在做；6c 由 `worker/pack-6c-wrapup` 收口 |
+| 6a | `/stop` 打断宿主核验：取消后不再起新检查、正在跑的整组回收、剩余目标逐项记 cancelled、被取消的回合不返工 | 已并入 step17i（sol1 实现，ae 整合到块 4/5 之上并补三处取消事实、宽限期轮询：`attempt/process_run.py`，`test_pack_verification_cancellation.py`），9b 复核通过 |
+| 6b | 写后检查复用工作区扫描（基线 + written 记录 + 候选文件现状，不再整盘重扫） | 在做 |
+| 6c | 收口：用户说明与设计稿更新、脱敏边界核实、块 4 遗留 xfail 核查 | 本分支 `worker/pack-6c-wrapup`（待复审） |
+| 7 | A 0.5.0、B 0.3.0（be） | 已上线（main） |
+| 8 | 重跑和独立审阅 | 全量重跑进行中 |
+| P1–P3 | 写后检查反馈修正（回执列全错误、软提示一次改完、连续失败 6 次暂停写后检查） | 已并入 step17i |

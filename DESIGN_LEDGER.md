@@ -1,5 +1,13 @@
 # 设计台账
 
+## 能力包块 6c 收口（p6c，2026-10-03，分支 `worker/pack-6c-wrapup`，基于 step17i `c47d023b6`，3a 复审，并入 step17i）
+
+- **范围**：能力包 v2 的收口片——用户说明（`docs/guides/CAPABILITY_PACK_GUIDE.md`）补“反复改不对时，写后检查会怎么节流”（错误一次列全、连续失败 6 次暂停写后检查，P1–P3 的用户视角），并把“打开前的三个前提”更新为三条都已完成（第三条 `/stop` 打断已由块 6a 并入 step17i）；设计稿 `docs/design/CAPABILITY_PACKS_V2.md` 的状态行与第 7 节进度表更新到当前（块 1–5、7 已上线 main；6a、P1–P3 在 step17i；6b 在做；6c 本分支；块 8 全量重跑进行中）。
+- **脱敏已知边界核实（9b 的中文贴路径，3a 记的后续项）**：探针实测维持现状——“找不到/Users/me/x.json”这类词字符直接贴路径不置空；等价的 lookbehind 改写不改变行为；任何能修好这个漏检的边界放宽（中文也算分隔）都会把“中文目录名相对路径”（`交付/tmp/x.json`、`交付/Users/x.json`）误伤成 `<redacted>`，两者在正则层面同构、区分不了。判定为取舍变更而不是安全修复，维持 9b 复核的取舍；设计稿补记 6c 核实结论，新用例 `test_redact_location_word_glued_paths_stay_a_known_cost` 锁定现状（改动必须同步用例与设计稿）。
+- **块 4 遗留 strict xfail 核查**：无遗留。`test_full_access_shell_outside_the_task_tree_cannot_forge_the_ledger` 的 strict xfail 已在 `6141d332b`（随 H3 修复）去掉，`_recorded` 已按数据根新传法调整；当前 `test_pack_verification_protection.py`、`test_host_files_access.py` 都没有 xfail。
+- **验证**：见 TESTS.md“能力包块 6c 收口”一节（两个变异均被拦截：边界放宽、去掉行首分支）。
+- **未验证**：真实 TUI/飞书提示、生产部署、v2 冻结业务重跑（块 8 在跑）；沙箱内无法复验真实 Seatbelt/bwrap 用例与插件宿主类测试，留集成者沙箱外复核。
+
 ## 两件小后续（sfu，2026-10-03，分支 `worker/ds3-small-followups`，基于 `claude/3a-step17i` `2c5b8ed34`；3a 复审，并入 step17i）
 
 - **决策设置撤销批次直接用提交的返回**（`agent_py_agent/agent/conversation/decision_policy.py`，提交 `e0354302e`）：`_try_commit_collected` 复核通过时把 `_commit_batch` 标记出的撤销请求直接带出来（`tuple | None`），不通过返回 `None` 交给调用方整批重算；`_mark_settings_batch` 的复核通过路径与重算用尽路径都直接用 `_commit_batch` 的返回，不再出锁后重读 `settings_cancelled`。删除 `_batched_cancels`（原注释写“调用方持 `_LOCK`”但调用点已出锁，合同与用法对不上）。行为不变：取消哪些句柄、顺序、结果码都与改前一致；新增用例钉住“返回的就是本批被标成撤销的那些”。
