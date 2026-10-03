@@ -1849,7 +1849,9 @@ def test_closeout_wake_receipt_half_write_does_not_duplicate(
     original_replace = json_io._replace_with_retry
     injected = False
 
-    def fail_receipt_once(source, destination):
+    # 替身必须接受并透传 _replace_with_retry 的新关键字（如私有写的 keep_mode=False），
+    # 否则 task.yaml 改走私有原子写后这里会 TypeError。
+    def fail_receipt_once(source, destination, **kwargs):
         nonlocal injected
         # v2 先冻结 prepared，再发布配对；只在发布完成标记替换时注入同一半写事实。
         payload = _json.loads(source.read_text(encoding="utf-8")) if destination == receipt_path else {}
@@ -1861,7 +1863,7 @@ def test_closeout_wake_receipt_half_write_does_not_duplicate(
                 signal = store.wakes.pending()[0]
                 assert store.wakes.mark_handled(signal.wake_signal_id) is not None
             raise OSError("injected wake receipt replacement failure")
-        return original_replace(source, destination)
+        return original_replace(source, destination, **kwargs)
 
     monkeypatch.setattr(json_io, "_replace_with_retry", fail_receipt_once)
     manager.runner_result.record_runner_result(params)

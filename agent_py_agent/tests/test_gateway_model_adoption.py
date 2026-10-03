@@ -409,13 +409,14 @@ def test_atomic_write_failure_does_not_guess_submission_or_duplicate_http(tmp_pa
     original_require = fixture.agent.conversation_store.threads.require
     writes = []
 
-    def fail_write(tmp, path):
+    # 同 fail_receipt_once：替身要接受并透传 _replace_with_retry 的关键字（keep_mode 等）。
+    def fail_write(tmp, path, **kwargs):
         if path == thread_path and model_adoption.MODEL_ADOPTION_KEY in tmp.read_text(encoding="utf-8") and not writes:
             writes.append(path)
             if phase != "before_replace":
-                original_write(tmp, path)
+                original_write(tmp, path, **kwargs)
             raise OSError("injected atomic persistence failure")
-        return original_write(tmp, path)
+        return original_write(tmp, path, **kwargs)
 
     def require(thread_id):
         host = _HOST.get()

@@ -61,7 +61,11 @@ def sync_shared_workspace(
     task_workspace_root: Path | None = None,
     now: float | None = None,
 ) -> SharedWorkspaceResult:
-    """Write compact task-local shared facts for one subagent save."""
+    """Write compact task-local shared facts for one subagent save.
+
+    黑板、消息、findings、证据包与索引都带兄弟子代理的正文，落盘走私有原子写/私有追加
+    （文件 0600、目录 0700）。
+    """
 
     inputs = _coerce_sync_request(
         request,
@@ -158,6 +162,8 @@ def _finding_records(task: Any, now: float) -> list[dict[str, object]]:
 
 
 def _write_evidence_packets(index_dir: Path, index_path: Path, task: Any, now: float) -> list[dict[str, object]]:
+    # LLM: 证据包正文装子代理结论，用私有原子写（0600/0700）；索引合并后整文件私有原子替换。
+    # 函数用途: 物化本次证据包文件并返回合并后的证据索引（写文件、可能 chmod 目录）。
     records: list[dict[str, object]] = []
     task_id = str(getattr(task, "root_id", "") or getattr(task, "id", "task"))
     run_id = str(getattr(task, "id", "") or task_id)
@@ -228,6 +234,8 @@ def _summary(task: Any) -> str:
 
 
 def _append_message(path: Path, payload: dict[str, object]) -> None:
+    # LLM: 协作消息带摘要正文，走私有追加（0600/0700）；只在签名变化时追加。
+    # 函数用途: 把一条协作消息追加进共享消息账本（写文件、可能 chmod 目录与文件）。
     if _last_message_signature(path) == _message_signature(payload):
         return
     append_private_jsonl_records(path, [payload])
@@ -268,6 +276,8 @@ def _message_signature(payload: dict[str, object]) -> tuple[object, ...]:
 
 
 def _merge_jsonl_by_id(path: Path, records: list[dict[str, object]]) -> list[dict[str, object]]:
+    # LLM: findings/证据索引整文件重写，走私有原子写（0600/0700）；按 id 合并语义不变。
+    # 函数用途: 按 id 合并写回 JSONL 账本并返回合并结果（写文件、可能 chmod 目录）。
     merged = read_jsonl_objects(path)
     positions = {str(item.get("id") or ""): index for index, item in enumerate(merged) if item.get("id")}
     for record in records:
@@ -291,6 +301,8 @@ def _merge_record_by_id(
 
 
 def _write_text(path: Path, content: str) -> None:
+    # LLM: 黑板是 Markdown 正文，改走私有原子写（0600/0700）；调用方不必先建父目录。
+    # 函数用途: 以仅本人可读写的权限原子替换一个文本文件（写文件、可能 chmod 目录）。
     write_private_text_file_atomic(path, content)
 
 

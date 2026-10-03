@@ -46,6 +46,8 @@ def timeline_event(task: Any, now: float, previous_state: dict[str, object]) -> 
 
 
 def append_timeline(path: Path, payload: dict[str, object]) -> None:
+    # LLM: 时间线带任务状态与摘要，改走私有追加（0600/0700）；同事件签名不重复追加。
+    # 函数用途: 把一条任务工作区时间线事件追加到账本（写文件、可能 chmod 目录与文件）。
     if _last_event_signature(path) == _event_signature(payload):
         return
     append_private_jsonl_records(path, [payload])

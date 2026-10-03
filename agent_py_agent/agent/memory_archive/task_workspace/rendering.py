@@ -26,7 +26,10 @@ class WriteTaskYamlRequest:
 
 
 def write_task_yaml(request: WriteTaskYamlRequest) -> None:
-    """Write the current task workspace identity file."""
+    """Write the current task workspace identity file.
+
+    身份文件里带任务目标原文，落盘走私有原子写（0600/0700）。
+    """
 
     path = request.path
     task = request.task
@@ -48,7 +51,10 @@ def write_task_yaml(request: WriteTaskYamlRequest) -> None:
 
 
 def write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
-    """Write the current task summary view."""
+    """Write the current task summary view.
+
+    摘要带任务正文，落盘走私有原子写（0600/0700）。
+    """
 
     latest = str(getattr(task, "latest_summary", "")) or "暂无"
     content = (
@@ -64,7 +70,10 @@ def write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
 
 
 def write_parent_summary_placeholder(path: Path, task_id: str, child_run_id: str) -> None:
-    """Create a parent task summary without copying child-only status text."""
+    """Create a parent task summary without copying child-only status text.
+
+    摘要占位文件同样带任务标识，落盘走私有原子写（0600/0700）。
+    """
 
     content = (
         "# Current Summary\n\n"

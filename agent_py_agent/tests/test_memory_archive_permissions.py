@@ -151,3 +151,69 @@ def test_owner_maintenance_persists_archive_permission_receipt(tmp_path, monkeyp
         "symlink_skipped_count": 0,
     }
     assert _mode(payload) == 0o600
+
+
+def test_stricter_permissions_are_left_untouched(tmp_path):
+    archive = tmp_path / "owner" / "memory_archive"
+    nested = archive / "task_progress"
+    nested.mkdir(parents=True)
+    stricter_file = nested / "secret.json"
+    stricter_file.write_text("更严格的权限不应被放宽", encoding="utf-8")
+    os.chmod(stricter_file, 0o400)
+    os.chmod(nested, 0o700)
+    os.chmod(archive, 0o700)
+
+    result = tighten_memory_archive_permissions(archive)
+
+    # 只收紧不放松：比目标更严的 0400 文件保持不动，也不计入收紧数。
+    assert _mode(stricter_file) == 0o400
+    assert result == {
+        "tightened_count": 0,
+        "tightened_files": 0,
+        "tightened_directories": 0,
+        "failed_count": 0,
+        "failure_codes": {},
+        "symlink_skipped_count": 0,
+    }
+
+
+def test_owner_maintenance_reports_archive_tighten_error(tmp_path, monkeypatch):
+    import agent_py_agent.agent.memory_archive.storage as storage
+
+    archive = tmp_path / "owner" / "memory_archive"
+    archive.mkdir(parents=True)
+    retention = SimpleNamespace(
+        applied=True,
+        legal_hold=False,
+        load_errors=[],
+        actions=[],
+        isolated_errors=[],
+        to_dict=lambda: {},
+    )
+    home = SimpleNamespace(owner_home_dir=archive.parent, memory_archive_dir=archive)
+    monkeypatch.setattr(owner_maintenance, "owner_maintenance_due", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(owner_maintenance, "apply_owner_retention", lambda *_args, **_kwargs: retention)
+    monkeypatch.setattr(owner_maintenance, "_outcome_fields", lambda *_args: {
+        "status": "success",
+        "apply_outcome": "applied",
+        "isolated_error_count": 0,
+        "failed_action_count": 0,
+        "last_success_at": 1.0,
+        "last_applied_at": 1.0,
+        "action_count": 0,
+    })
+    monkeypatch.setattr(owner_maintenance, "_reclaim_text_vector_cache_orphans", lambda *_args: (0, ""))
+    monkeypatch.setattr(owner_maintenance, "_compact_global_indexes", lambda *_args, **_kwargs: ([], []))
+
+    def raising_tighten(*_args, **_kwargs):
+        raise OSError("injected archive tighten failure")
+
+    monkeypatch.setattr(storage, "tighten_memory_archive_permissions", raising_tighten)
+
+    result = owner_maintenance.run_owner_retention_if_due(home, now=1.0)
+
+    # 收紧失败不能拖垮维护：状态照写，回执里带结构化 error 说明。
+    assert result.ran is True
+    state = json.loads((archive.parent / "data" / "maintenance.json").read_text(encoding="utf-8"))
+    assert state["memory_archive_permissions"] == {"error": "OSError: injected archive tighten failure"}
+    assert state["status"] == "success"

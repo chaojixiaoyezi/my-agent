@@ -249,6 +249,8 @@ def _is_under_allowed_root(path: Path, allowed_roots: tuple[Path, ...]) -> bool:
 
 
 def _write_manifest(path: Path, records: list[dict[str, object]]) -> None:
+    # LLM: 清单属会话与任务数据，落盘走私有原子写（0600/0700）；输出格式与 write_jsonl_records 一致。
+    # 函数用途: 以仅本人可读写的权限原子替换产物清单 JSONL（写文件、可能 chmod 目录）。
     write_private_jsonl_records(path, records)
 
 

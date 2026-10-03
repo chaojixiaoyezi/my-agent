@@ -203,6 +203,8 @@ def _task_workspace_path_inputs(workspace: str | Path, task: Any) -> _TaskWorksp
 
 
 # LLM: 原唯一物化入口沿共享路径计算后写目录、任务与子运行状态、共享账本、产物索引和日账；不能为创建前估算调用。
+#   状态文件（work/state.json）带任务目标与摘要，落盘走私有原子写（0600/0700），
+#   新建目录按 0700；读-改-写仍持同一把 locked_json_path 锁，合并语义不变。
 # 函数用途: 保存子代理对应的工作区和运行引用，保留父任务状态的锁内合并及原写入顺序。
 def ensure_subagent_task_workspace(
     request: EnsureSubagentTaskWorkspaceRequest | str | Path | None = None,

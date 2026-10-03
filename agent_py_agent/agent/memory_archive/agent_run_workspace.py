@@ -68,7 +68,13 @@ def ensure_agent_run_workspace(
     task_id: str | None = None,
     now: float | None = None,
 ) -> AgentRunWorkspacePaths:
-    """Create/update the Phase 1 agent-run workspace skeleton for a subagent task."""
+    """Create/update the Phase 1 agent-run workspace skeleton for a subagent task.
+
+    LLM: 唯一物化入口：写目录、任务与子运行状态、共享账本、产物索引和日账；不能为创建前估算调用。
+      这些文件都带子代理正文（目标、摘要、最终报告），落盘一律走私有原子写（文件 0600、目录 0700），
+      增量账本走私有追加；原子替换由 json_io 的私有写封装完成，替换时不抄回旧权限。
+    函数用途: 保存子代理对应的工作区和运行引用，保留父任务状态的锁内合并及原写入顺序。
+    """
 
     inputs = _coerce_ensure_request(request, task, root=root, task_id=task_id, now=now)
     paths = agent_run_workspace_paths(inputs.root)

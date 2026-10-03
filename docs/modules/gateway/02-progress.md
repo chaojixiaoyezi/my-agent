@@ -1,5 +1,14 @@
 # Gateway 维护状态
 
+## owner 维护新增 memory_archive 权限收紧（luna3，2026-10-03，分支 `worker/luna3-archive-private`，已实现，待 9b 复审）
+
+- Gateway 的 owner-maintenance 循环（`cli/gateway_loops._GatewayOwnerMaintenanceController`，默认每 60 秒检查、按 owner 的 `retention.json` 区间到期，默认每天一次）在跑 retention 的同时多做一步：
+  `user_space/owner_maintenance.run_owner_retention_if_due` 调 `memory_archive.storage.tighten_memory_archive_permissions`，
+  把该 owner `memory_archive/` 下已有文件收紧到 0600、目录收紧到 0700（只收紧不放松、不跟随符号链接、失败按原因码计数）。
+- 回执写进 `O/data/maintenance.json` 的 `memory_archive_permissions` 键（`tightened_count/files/directories`、`failed_count`、`failure_codes`、`symlink_skipped_count`）；
+  归档目录不存在时全零；导入或整体失败只写 `error` 字符串，不影响 retention 主流程与维护状态写入。
+- 详见 DESIGN_LEDGER「记忆归档目录收紧权限」与 docs/modules/memory。
+
 ## /plugins list 末尾加 MCP 服务段（J16 片 F，2026-10-02，ef，分支 `claude/ef-j16-slice-f`，基于 `claude/3a-step17h` `afb15947b`，待集成）
 
 - `plugin_command_service._scope_management` 组装管理服务时多做一步：`resolve_loaded_gateway_scope_agent` 被动查找已加载的 owner 实例，

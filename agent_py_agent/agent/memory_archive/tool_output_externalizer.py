@@ -270,6 +270,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "created_at": created_at,
         "content": output,
     }
+    # LLM: 外置正文装原始工具输出（可能含会话内容），落盘走私有原子写（0600/0700）；字节格式不变。
     write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     _append_index(path, payload)
     return path
@@ -277,7 +278,8 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
 
 # LLM: The append-only index is the cross-process recovery source; preserve artifact identity and
 # model parameters independently from execution parameters without copying raw output content.
-# 函数用途: 为外置输出追加携带原始 attempt/turn 身份的轻量索引行。
+#   索引行带参数摘要，改走私有追加（0600/0700）。
+# 函数用途: 为外置输出追加携带原始 attempt/turn 身份的轻量索引行（写文件、可能 chmod 目录与文件）。
 def _append_index(path: Path, payload: dict[str, Any]) -> None:
     record = {
         "version": TOOL_OUTPUT_INDEX_SCHEMA.version,
@@ -311,7 +313,8 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
 
 # LLM: Small outputs retain exact attempt/turn and dual parameters in the original append-only
 # index even though no artifact body is written; never derive identity from later runtime state.
-# 函数用途: 为无需外置正文的小工具调用追加带真实身份的轻量索引行。
+#   同一索引文件同样私有追加（0600/0700）。
+# 函数用途: 为无需外置正文的小工具调用追加带真实身份的轻量索引行（写文件、可能 chmod 目录与文件）。
 def _append_tool_call_index(request: ExternalizeToolOutputRequest, record: dict[str, Any], digest: str) -> None:
     created_at = str(record.get("created_at") or datetime.now(tz=timezone.utc).isoformat())
     payload = {

@@ -65,7 +65,13 @@
   4. 去掉 `_handshake_error` 里的用户停止优先判断 → 用例 7 红。
   变异方法是临时改产品文件、跑同一文件后立刻还原（还原后 `git diff` 只含预期改动）。
 
-## 记忆归档目录收紧权限（luna3，2026-10-03，分支 `worker/luna3-archive-private`）
+## 记忆归档目录收紧权限（luna3，2026-10-03，分支 `worker/luna3-archive-private`；含 9b 复审应修）
+
+- **9b 复审应修（第二次提交）**：
+  - 用例回归：`test_dispatch_liveness_and_revive.py::fail_receipt_once` 与 `test_gateway_model_adoption.py::fail_write` 两个 `_replace_with_retry` 替身改成 `(source, destination, **kwargs)` 并透传关键字（私有写会传 `keep_mode=False`）；两条 half-write 用例与整个 adoption 文件 42 项通过。
+  - doc_sync：`owner_maintenance.py` 归 gateway 模块，补 `docs/modules/gateway/02-progress.md` 与 `04-structure.md`；9 个文件的实现改动补上同文件双层注释（写“落盘走私有原子写（0600/0700）”及副作用）。`check_doc_sync.py --base b453f8883` 从 10 条失败变 PASS。
+  - 两条存活变异补用例：`test_stricter_permissions_are_left_untouched`（更严的 0400 文件保持不动、收紧数 0）钉住 D1；`test_owner_maintenance_reports_archive_tighten_error`（收紧抛 OSError 时维护照常写状态、回执带 `error`、`status=success`）钉住 D3。重跑 9b 的 D1/D3 变异脚本，两条现在都被抓住。
+  - 本轮定向回归里 `test_dispatch_liveness_and_revive.py::test_supervision_kills_fully_stalled_source_worker_host` 失败（`running_reclaimed` 0≠2）；在干净基线 worktree `b453f8883`（本分支的基点）上复跑同样失败，**与本次改动无关**，属沙箱内 `subprocess` 子进程存活探测受限；未改动该用例，留给 3a 在沙箱外复核。
 
 - **新增 `test_memory_archive_permissions.py`**（4 项，POSIX 权限位语义，只在 pytest 临时目录造文件）：
   - 新写入：`write_compression_snapshot_file` 与 `append_session_token_usage` 写出后文件 0600、直接父目录 0700；

@@ -66,7 +66,10 @@ def append_subagent_task_event(
     workspace_refs: DailyLedgerWorkspaceRefs | None = None,
     now: float | None = None,
 ) -> DailyLedgerAppendResult:
-    """Append a compact subagent task/run event to the daily ledger."""
+    """Append a compact subagent task/run event to the daily ledger.
+
+    落盘走私有追加（文件 0600、目录 0700），因为日账里带任务目标与摘要原文。
+    """
 
     inputs = _coerce_append_request(
         request,

@@ -15,6 +15,14 @@
   `conversation/turn_resume_notice.turn_resume_limit_notice` 选提示句，同步写进 `user_error` 和 `error`。
 - 回归：`test_turn_resume_limit_steer.py`。
 
+## owner 维护里的 memory_archive 权限收紧（luna3，2026-10-03，待 9b 复审）
+
+- `user_space/owner_maintenance.run_owner_retention_if_due` 在 retention 与两项缓存/索引整理之后新增一步：
+  `_tighten_archive_permissions(home)` 调 `memory_archive.storage.tighten_memory_archive_permissions`，
+  只读 owner 自己 home 下的 `memory_archive/`；结果作为 `memory_archive_permissions` 写进维护状态文件。
+- 该步不改变维护状态旧口径（`status`/`last_success_at`/`apply_outcome` 等键含义不变，只加键）；抛异常时回执里带 `error`，维护照常写状态。
+- 调用链：`cli/gateway_loops._GatewayOwnerMaintenanceController.tick` → `run_owner_retention_if_due` → `memory_archive.storage`。
+
 ## 管理员判定统一入口（P14 第 6 条，2026-10-02，待集成）
 
 - `gateway_parts/settings_control_service._is_admin` → `user_space/owner_access.is_complete_local_admin_owner`。

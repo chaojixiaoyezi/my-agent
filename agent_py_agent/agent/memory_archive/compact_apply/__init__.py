@@ -632,14 +632,20 @@ def _positive_int(value: Any) -> int:
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    # LLM: apply/global 账本行带压缩上下文引用，改走私有追加（0600/0700）；锁与写入格式不变。
+    # 函数用途: 以仅本人可读写的权限向 JSONL 账本追加一条记录（写文件、可能 chmod 目录与文件）。
     append_private_text(path, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    # LLM: self-check/metadata 等 JSON 带压缩正文，改走私有原子写（0600/0700）；缩进与尾换行保持原样。
+    # 函数用途: 以仅本人可读写的权限原子替换一个 JSON 文件（写文件、可能 chmod 目录）。
     write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _write_text(path: Path, content: str) -> None:
+    # LLM: context/handoff Markdown 带压缩正文，改走私有原子写（0600/0700）。
+    # 函数用途: 以仅本人可读写的权限原子替换一个文本文件（写文件、可能 chmod 目录）。
     write_private_text_file_atomic(path, content)
 
 
