@@ -1772,6 +1772,13 @@
 - **两配置项**：`plugin_events_enabled`（默认 false）、`plugin_tool_gate_timeout_ms`（默认 2000，范围 200–10000，range 在 B5 消费处收口）；都进 `USER_SETTINGS_BOUNDARY_KEYS`，模型经 `user_config` 改被拒（PARAMETER_BOUNDARY），只有用户 /settings 能改。
 - **已知边界**：Linux `--unshare-net` 在 Docker LinuxKit 车道建回环会失败（内核限制，真实主机不受影响），所以车道上断网只在 argv 上断言、不真连；收窄读在车道用 `network:true` 真进程验。证据 `~/.my-agent/decision-evidence/b7-prep-20261003/`（挂法实测）与 B7 真进程用例。
 - **验收**：真进程两平台（macOS 真 Seatbelt、Linux 车道真 bwrap），布局为“放行目录嵌在拒读根里”，真实 Python 启动 + realpath + 读自己的包/数据、读不到会话/记忆/secrets。详见 TESTS 同名节。
+## 老格式插件权限（opp，2026-10-03，分支 `worker/plugin-legacy-permissions`，基于 step17i `c47d023b6`；状态：方案待 3a 定）
+
+- **本轮仅方案**：逐项盘点 `plugins/` 的 17 个样例、SDK 构建/入口模板及 v1–v7 能力，给出读/写/网络/host_api 的源码或清单依据、逐样例最小授权和兼容破坏点。没有改产品代码、配置或真实安装表，没有运行插件、连接 Gateway、做真实 TUI/飞书验收。
+- **建议方向**：可执行 v1–v6 新启用默认复用 M/B7 的藏家读墙与进程沙箱，基础只放行自身包/数据/必要解释器依赖/系统资源；额外项目读写、运行依赖及网络由管理员预览并按确认码授权，不改旧清单字节。v7 内容和可选检查器仍走原独立合同，v8 不受旧默认开关影响。
+- **兼容迁移**：推荐仅升级前已启用的固定激活保留原有效策略，列表显示“权限待收紧，重新启用时会按新规则确认”；新装、停用后启用、更新/重装、新项目或权限变更按新规则。不能把“缺新字段”当永久兼容资格，也不能直接翻旧 `plugin_process_sandbox` 开关。拟一个默认 true 的管理员边界项 `plugin_legacy_permissions_enforced`，模型不可改；本轮未新增配置。
+- **待裁定风险**：回环监听/CDP/host_api 同样需要网络通路；网络布尔 true 是全部网络，不是“仅宿主 API”。浏览器/tesseract 的家目录依赖需有限额外读根，桌面 IPC/沙箱外默认应用不能靠读写联网三项保证。持久进程只能承诺固定授根的激活级 OS 隔离，不把逐次 `_meta` 当恶意代码隔离；旧兼容窗口与 Gateway 强制凭据链仍是明确边界。v7 可选检查器当前虽强制断网/临时写，读规格仍为整根只读，建议当次 target/关联输入读墙另切片，不能从“老格式权限”总目标漏掉。
+- **验证与下一步**：本轮四个指定清单/摘要/读写上下文合同测试文件退出码 0；尺寸差集“新增告警 0、消失告警 16”（基点对线上清单，不是本轮消除告警）。新授权/迁移/OS 沙箱及真实渠道均未验证，待 3a 裁定兼容集合、网络宽度、外部依赖/桌面处理及配置语义后另派实现。逐项证据、渠道文案和后续必测见 [老格式插件权限方案](docs/design/PLUGIN_LEGACY_PERMISSIONS.md)。
 
 ## Gateway 本机来源信任收紧（be，2026-10-03，分支 `claude/be-gateway-local-trust`，基于 `claude/3a-step17h` `a602d6ad6`，9b、ae 评审通过，3a 2026-10-03 定稿，实施中，并入 step17i）
 
