@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from pathlib import Path
@@ -18,46 +19,68 @@ def _agent(tmp_path: Path) -> SimpleAgent:
     return SimpleAgent(AgentConfig(enable_tools=False, memory_path="m.jsonl"), tmp_path)
 
 
+def _age_task_file(agent: SimpleAgent, run_id: str, age_seconds: int = 10) -> None:
+    task_file = agent.subagents.workspace / run_id / "task.json"
+    task_stat = task_file.stat()
+    old_mtime_ns = time.time_ns() - age_seconds * 1_000_000_000
+    os.utime(task_file, ns=(task_stat.st_atime_ns, old_mtime_ns))
+
+
 def test_list_runs_cache_reuses_and_counts_stable(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     for i in range(3):
-        agent.subagents.create_run(goal=f"t{i}", agent_name=f"a{i}")
+        run_id = agent.subagents.create_run(goal=f"t{i}", agent_name=f"a{i}").id
+        _age_task_file(agent, run_id)
     r1 = agent.subagents.list_runs()
     r2 = agent.subagents.list_runs()  # 第二次走缓存
     assert len(r1) == 3 and len(r2) == 3
     assert {t.id for t in r1} == {t.id for t in r2}
 
 
-def test_list_runs_reloads_recent_mtime_but_reuses_old_cache(tmp_path: Path, monkeypatch) -> None:
+def test_recent_window_read_is_not_cached_aba_probe(tmp_path: Path, monkeypatch) -> None:
     from agent_py_agent.agent.subagents.services.persistence import service as persistence_service
 
     agent = _agent(tmp_path)
-    run_id = agent.subagents.create_run(goal="近期文件重读", agent_name="worker").id
+    run_id = agent.subagents.create_run(goal="窗口内不缓存", agent_name="worker").id
     task_file = agent.subagents.workspace / run_id / "task.json"
-    agent.subagents.list_runs()  # 先建立与磁盘指纹相同的缓存项。
-    mtime_seconds = task_file.stat().st_mtime_ns / 1_000_000_000
+    first_stat = task_file.stat()
+    mtime_seconds = first_stat.st_mtime_ns / 1_000_000_000
 
-    load_calls = []
-    original_load = agent.subagents.persistence.load
+    with monkeypatch.context() as clock:
+        clock.setattr(persistence_service, "_now", lambda: mtime_seconds + 1.0)
+        first_read = next(task for task in agent.subagents.list_runs() if task.id == run_id)
+    cached_in_window = run_id in agent.subagents.persistence._run_cache
+    assert first_read.status == "PLANNING"
 
-    def counted_load(selected_run_id: str):
-        load_calls.append(selected_run_id)
-        return original_load(selected_run_id)
+    running = agent.subagents.load(run_id)
+    running.status = "RUNNING"
+    agent.subagents.save(running)
+    saved_stat = task_file.stat()
+    assert saved_stat.st_ino != first_stat.st_ino
+    assert agent.subagents.load(run_id).status == "RUNNING"
 
-    monkeypatch.setattr(agent.subagents.persistence, "load", counted_load)
-    monkeypatch.setattr(persistence_service.time, "time", lambda: mtime_seconds + 1.0)
-    assert [task.id for task in agent.subagents.list_runs()] == [run_id]
-    assert load_calls == [run_id]
+    path_type = type(task_file)
+    real_stat = path_type.stat
 
-    monkeypatch.setattr(persistence_service.time, "time", lambda: mtime_seconds + 3.0)
-    assert [task.id for task in agent.subagents.list_runs()] == [run_id]
-    assert load_calls == [run_id]
+    def frozen_first_generation_stat(path, *args, **kwargs):
+        if path == task_file:
+            return first_stat
+        return real_stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as clock:
+        clock.setattr(path_type, "stat", frozen_first_generation_stat)
+        clock.setattr(persistence_service, "_now", lambda: mtime_seconds + 3.0)
+        after_window = next(task for task in agent.subagents.list_runs() if task.id == run_id)
+
+    assert after_window.status == "RUNNING"
+    assert cached_in_window is False
 
 
 def test_list_runs_returns_independent_copies(tmp_path: Path) -> None:
     """改 list_runs 返回的对象不污染缓存——下次拿到的仍是磁盘真值。"""
     agent = _agent(tmp_path)
-    agent.subagents.create_run(goal="t", agent_name="a")
+    run_id = agent.subagents.create_run(goal="t", agent_name="a").id
+    _age_task_file(agent, run_id)
     r1 = agent.subagents.list_runs()
     r1[0].status = "MUTATED"  # 改返回的副本
     r2 = agent.subagents.list_runs()
@@ -65,15 +88,19 @@ def test_list_runs_returns_independent_copies(tmp_path: Path) -> None:
 
 
 def test_list_runs_reloads_on_mtime_change(tmp_path: Path) -> None:
-    """子代理被 save(mtime 变)后,list_runs 重读拿到新值,不返回缓存旧值。"""
+    """子代理被 save(mtime 变)后，窗口外的缓存读取应识别新指纹并重读。"""
     agent = _agent(tmp_path)
-    rid = agent.subagents.create_run(goal="t", agent_name="a").id
-    agent.subagents.list_runs()  # 预热缓存
-    task = agent.subagents.load(rid)
+    run_id = agent.subagents.create_run(goal="t", agent_name="a").id
+    task_file = agent.subagents.workspace / run_id / "task.json"
+    _age_task_file(agent, run_id, age_seconds=10)
+    cached_mtime_ns = task_file.stat().st_mtime_ns
+    agent.subagents.list_runs()  # 在粗 mtime 窗口外建立旧缓存。
+    task = agent.subagents.load(run_id)
     task.status = "RUNNING"
     agent.subagents.save(task)
-    time.sleep(0.02)  # 确保 mtime 变化可感知
-    reloaded = next(t for t in agent.subagents.list_runs() if t.id == rid)
+    _age_task_file(agent, run_id, age_seconds=5)
+    assert task_file.stat().st_mtime_ns != cached_mtime_ns
+    reloaded = next(item for item in agent.subagents.list_runs() if item.id == run_id)
     assert reloaded.status == "RUNNING"
 
 
@@ -81,7 +108,8 @@ def test_list_runs_evicts_deleted_run_from_cache(tmp_path: Path) -> None:
     """子代理从磁盘消失后,缓存项被清理,list_runs 不再返回它。"""
     agent = _agent(tmp_path)
     rid = agent.subagents.create_run(goal="t", agent_name="a").id
-    agent.subagents.list_runs()  # 缓存它
+    _age_task_file(agent, rid)
+    agent.subagents.list_runs()  # 窗口外才应进入缓存。
     assert rid in agent.subagents.persistence._run_cache
     shutil.rmtree(agent.subagents.persistence.workspace / rid)
     assert agent.subagents.list_runs() == []
@@ -93,6 +121,8 @@ def test_list_runs_by_ids_reads_only_selected_canonical_runs(tmp_path: Path) -> 
     agent = _agent(tmp_path)
     selected = agent.subagents.create_run(goal="selected", agent_name="selected").id
     ignored = agent.subagents.create_run(goal="ignored", agent_name="ignored").id
+    _age_task_file(agent, selected)
+    _age_task_file(agent, ignored)
 
     report = agent.subagents.list_runs_by_ids_report([selected, selected])
 
@@ -130,6 +160,8 @@ def test_list_runs_for_root_uses_index_then_exact_canonical_reads(
     ignored.depth = 1
     agent.subagents.save(ignored)
     agent.subagents.persistence._run_cache.clear()
+    _age_task_file(agent, selected.id)
+    _age_task_file(agent, ignored.id)
 
     def fail_full_scan():
         raise AssertionError("managed root lookup must not scan every run")

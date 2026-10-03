@@ -24,11 +24,12 @@
 - **评审并入**（2026-10-03）：ae 第 (1) 层 4 条（Seatbelt 用 `*:<port>` 挡 IPv4 映射、Landlock 实测挂法、unavailable 两种、覆盖范围与三类挡不住路径），9b 第 (2) 层 3 条必须改（插件令牌单列一档、“非唯一防线”三分法 + 文件队列第二入口 + 插件同信任域、计数/判据细节）+ 4 条建议（凭据同宿主身份不入日志env、web_fetch/watch_stream 排除 Gateway 端口、LOCAL_CREDENTIAL_REQUIRED、Landlock 车道实跑）。26 条路由档位清单见 ENDPOINT_TIERS.md。新头在复审后更新。
 - **证据**：`~/.my-agent/decision-evidence/gateway-local-trust-20261003/`（Seatbelt 端口拒绝探针，随机端口假服务，没碰生产 8420）。详见 `docs/design/GATEWAY_LOCAL_TRUST.md`。
 
-## 子代理缓存复审加固：粗 mtime 窗口与稳定派发断言（2026-10-03，luna6i，`worker/luna6-idem-flake` `44580b8a5`，ae 复审通过，并入 step17i；“窗口内读到的结果不入缓存”这条应改另做）
+## 子代理缓存复审加固：粗 mtime 窗口与稳定派发断言（2026-10-03，luna6i，`worker/luna6-idem-flake` `44580b8a5`、`7c8a00bcc`，ae 复审通过、补强由 3a 复审，并入 step17i）
 
-- **状态**：对 ae 针对 `9264b0bf5` 的两条建议已实现，保留原提交历史；定向 13 个相关测试文件和静态门禁已通过，本轮以新增提交交付，ae 复审通过。
-- **缓存边界**：即使文件指纹相同，`task.json` 的 mtime 距现在不足 2 秒时也不信解析缓存并重读；2 秒外继续复用。阈值与 `request_worker.GatewayInboxScanGate` 的粗 mtime 窗口同口径，在持久层类内保留常数，避免领域层反向依赖 Gateway。
-- **派发回归**：原有两个幂等复用用例都把真实后台启动替换为结构化回执桩；一个验证 3 个 `PLANNING` 全部派发，另一个验证 `DONE` 与 `RUNNING` 均排除、`PLANNING` 必须派发。
+- **状态**：对 ae 针对 `9264b0bf5` 的建议已分两轮实现；本轮修正窗口语义、固定 ABA 探针并保留原提交历史，完成后交 ae 复看。
+- **缓存边界**：签名一致且已缓存的旧条目可直接复用；缓存 miss 时若 mtime 年龄不足 2 秒，canonical 读取只返回给调用方并移除该 run 的旧条目，不写入缓存；只有 mtime 离开窗口后才存解析结果，避免窗口内读到的旧状态跨窗口成为 ABA 旧缓存。
+- **派发回归**：两个幂等复用用例以回执桩固定状态；一个验证 3 个 `PLANNING` 全部派发，另一个验证 `DONE` 与 `RUNNING` 均排除、`PLANNING` 必须派发。
+- **本轮补强**：模块级 `_now()` 只控制缓存时效判断，测试不再修改进程全局 `time.time`；正式 ABA 探针验证窗口内读后保存 `RUNNING`、伪造相同旧文件指纹并拨过窗口，最终仍读到 `RUNNING`。缓存验证夹具使用窗口外 mtime。
 - **变异证据**：近期 mtime 回归在把保护阈值置 0（等效移除保护）时失败；将缓存签名退化为仅 mtime、并把文件设在 2 秒保护窗外时，`RUNNING` 回滚回归也失败；状态回归在把 `RUNNING` 加入 `DISPATCHABLE_STATES` 时失败。临时变异均已还原。
 
 ## 子代理任务缓存按文件代次失效（2026-10-03，luna6i，分支 `worker/luna6-idem-flake`，基于 `claude/3a-step17i` `b78b42265`，ae 复审通过，并入 step17i；两条应改另做）

@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## ae 二次复看补强：窗口内读取只返回、不缓存（2026-10-03，luna6i）
+
+- **规则修正**：cache miss 时先读取 canonical task；mtime 年龄不足 2 秒的结果只返回给调用方，并移除该 run 的旧缓存项，不入缓存；窗口外读取才保存。已有且签名相同的缓存项仍可直接命中，因为新鲜窗口内读到的数据从未成为缓存来源。
+- **正式 ABA 探针**：`test_recent_window_read_is_not_cached_aba_probe` 在窗口内先读到 `PLANNING`，再将 canonical 状态写成 `RUNNING`；随后把 `Path.stat()` 返回值固定为第一代文件指纹、把缓存时钟拨到窗口外，要求列表读回 `RUNNING`。写状态前后真实 inode 不同，测试桩只对读取路径呈现相同指纹。
+- **先红后绿 / 变异**：旧逻辑先红，窗口外读到 `PLANNING` 而期望 `RUNNING`；将实现变异为窗口内仍写缓存后再次失败。恢复 no-store 规则后探针通过。
+- **时钟隔离与夹具**：缓存时效只调用 persistence service 的模块级 `_now()`，测试只 patch 该函数，不再 patch 共享的 `time.time` 模块。稳定命中、副本、mtime 变化、删除清理和 exact-id/root 缓存断言的夹具都把文件 mtime 调到 2 秒窗口之外；DONE 幂等用例去掉多余的 `_run_cache.clear()`，保留真实缓存路径。
+- **定向测试**：重跑下方“ae 复审补强”节列出的 13 个相关测试文件（含 ABA 探针与 DONE 缓存路径），退出码 0、输出到 100%。先红与窗口内仍入缓存变异都观察到旧 `PLANNING`，还原后通过。
+- **guards9**：清单中的 10 个测试文件（含 `test_packaging.py`）退出码 0，输出到 100%。
+- **静态门禁**：Import boundaries `findings=0`；Ruff `All checks passed!`；doc-sync `DOC_SYNC_PASS`；strict code-size `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`，随后还原 `CODE_SIZE_REPORT.md`；`git diff --check` 退出码 0；clean-package `OK: . 未发现发布阻塞项`；`size_diff.sh` 新增告警 0、消失告警 9。
+- **未运行**：全仓 pytest 与 Linux lane 留给集成者；本轮只跑 13 个相关文件及 guards9。
+
 ## context_bundle 快照私有权限（2026-10-03，luna2cb，worker/luna2-context-bundle，本地并入 step17i）
 
 - **范围**：主快照 JSON/Markdown 与 latest 副本写入后为 0600；snapshots、context_bundles、日期目录逐级为 0700；旧 0644 latest 和 0755 日期目录重写后收紧。用例只用 `tmp_path`，Windows 按既有 POSIX 权限用例方式跳过。

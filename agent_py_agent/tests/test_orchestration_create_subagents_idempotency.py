@@ -86,7 +86,6 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path, monk
     assert {
         run_id: agent.subagents.load(run_id).status for run_id in first["created_run_ids"]
     } == {done_id: "DONE", running_id: "RUNNING", planning_id: "PLANNING"}
-    agent.subagents.persistence._run_cache.clear()
     second = json.loads(
         tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
     )

@@ -1,5 +1,5 @@
-# LLM: canonical 状态始终先于投影；解析缓存须同时按文件指纹失效，并在粗 mtime 窗口内重读，不能以旧快照覆盖新轮。
-# 模块用途: 持久保存子代理任务及派生视图，并让近期文件绕过缓存以保护低精度文件系统上的状态新鲜度。
+# LLM: canonical 状态始终先于投影；缓存窗口内的读取只可返回当前 canonical 结果，不能入缓存，以免同时间片的旧代跨窗口复用。
+# 模块用途: 持久保存子代理任务及派生视图，并在缓存建立前确认文件时间戳已经离开粗粒度风险窗口。
 """Persistence service for SubAgentManager task records.
 
 Saves are split into two phases. The canonical task-local state is written first
@@ -79,6 +79,12 @@ from .model_normalizers import (
 from .projections import sync_derived_projections
 
 _HIGH_RISK_FAILURE_TYPES = {"tool_output_context_overflow", "context_overflow", "blackbox_output_overflow"}
+
+
+# LLM: 缓存时效比较统一经过此局部时钟入口；不得替代持久化生命周期时间，测试只应打桩这里而非全局 time 模块。
+# 函数用途: 返回解析缓存新鲜度判断所用的当前秒数，隔离测试时钟对其它时间调用的影响。
+def _now() -> float:
+    return time.time()
 
 
 @dataclass(frozen=True)
@@ -327,10 +333,9 @@ class SubAgentPersistenceService:
         return _list_runs_for_root_report(self, root_task_id)
 
     # LLM: Cache access is serialized because ThreadingHTTPServer may render several TUI/Web
-    # projections concurrently. File identity/size/mtime/ctime invalidate parsed objects; even
-    # an unchanged signature is not trusted while mtime is inside the coarse 2-second window.
-    # Deep copies keep cached state private and canonical files authoritative.
-    # 函数用途: 线程安全地复用未变化的子代理解析结果，并给调用方返回独立副本。
+    # projections concurrently. Matching entries are safe to reuse because only reads older than
+    # the coarse window are cached; fresh misses must return without storing their parsed snapshot.
+    # 函数用途: 线程安全地复用已离开风险时间片的解析结果；近期读取只返回 canonical 新值，不让它跨窗口变成旧缓存。
     def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
         with self._run_cache_lock:
             stat = task_file.stat()
@@ -342,14 +347,15 @@ class SubAgentPersistenceService:
                 stat.st_ctime_ns,
             )
             cached = self._run_cache.get(run_id)
-            if (
-                cached is not None
-                and cached[0] == signature
-                and time.time() - stat.st_mtime_ns / 1e9 >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS
-            ):
+            if cached is not None and cached[0] == signature:
                 return copy.deepcopy(cached[1])
-            self._run_cache[run_id] = (signature, self.load(run_id))
-            return copy.deepcopy(self._run_cache[run_id][1])
+            task = self.load(run_id)
+            mtime_age_seconds = _now() - stat.st_mtime_ns / 1e9
+            if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                self._run_cache[run_id] = (signature, task)
+            else:
+                self._run_cache.pop(run_id, None)
+            return copy.deepcopy(task)
 
     # LLM: Eviction shares the cache lock with exact-id reads so a concurrent full scan cannot
     # remove an entry between lookup and deepcopy. It affects only the volatile parse cache.

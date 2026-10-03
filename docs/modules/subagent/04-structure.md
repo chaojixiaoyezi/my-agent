@@ -3,9 +3,9 @@
 ## 子代理任务列表缓存与文件指纹（2026-10-03）
 
 - `SubAgentPersistenceService._cached_run_copy` 的进程内缓存指纹为 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`；mtime 单字段在低精度文件系统的同一时间片可能漏掉 `task.json` 原子替换，返回旧状态对象。
-- 即使指纹相同，mtime 年龄不足 `_RUN_CACHE_COARSE_MTIME_GUARD_SECONDS`（2 秒）也绕过缓存并重读 canonical 文件；窗口外仍复用。该类常数与 `GatewayInboxScanGate` 同口径，但留在持久层，避免 subagents 对 Gateway 的反向依赖。
-- 缓存命中仍返回深拷贝，canonical task 文件仍是权威。items 复用会保存整份任务快照，所以失效判断必须发现同 mtime 的文件代次变化并保护近期写入，避免把 RUNNING 快照回滚成旧 PLANNING 并再次进入 auto_start。
-- 两个幂等派发测试以接受回执桩固定真实 child 状态，用精确集合验证 DONE/RUNNING 排除及 PLANNING 全部派发；近期/过期 mtime 的先红后绿及变异证据见 [TESTS.md](../../../TESTS.md) 顶部“ae 复审补强”。
+- 只有缓存 miss 时才看 mtime 年龄：窗口内先读 canonical task、仅返回深拷贝并清除该 run 的缓存项，不保存此快照；mtime 年龄达到 2 秒后才入缓存。这样同一粗时间片中的旧快照不会在窗口结束后被信任。
+- 命中已缓存的相同签名仍直接返回深拷贝，因为这些条目只能来自窗口外读取。时效比较经模块级 `_now()`，测试可以局部固定缓存时钟而不改变进程级 `time.time`。
+- items 复用会保存整份任务快照；ABA 探针在窗口内读、写入 `RUNNING`、再把 `Path.stat` 呈现为旧指纹并拨到窗口外，确认结果仍是 `RUNNING`。缓存夹具显式调旧文件 mtime；完整测试及变异见 [TESTS.md](../../../TESTS.md) 顶部“ae 二次复看补强”。
 
 ## P10 第二批常数整改（2026-10-02，待集成）
 

@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-10-03（luna6i，ae 二次复看补强，`worker/luna6-idem-flake`）：修正规则为 mtime 窗口内的 cache miss 只返回当前 canonical 读取结果、不入缓存并清掉同 run 旧项，2 秒窗口外才保存；增加同指纹写入新状态后跨窗重读的 ABA 正式探针。缓存时钟由 persistence service `_now()` 隔离，DONE 复用测试不再清空缓存；缓存命中类夹具 mtime 调到窗口外。具体先红后绿和门禁回执见 TESTS.md 顶部。
+
 2026-10-03（luna6i，分支 `worker/luna6-idem-flake`，ae 复审通过，并入 step17i）：解决子代理列表缓存只看 `task.json` 的 `st_mtime_ns`，导致同 mtime 的原子替换未使缓存失效、items 复用保存可将 RUNNING 旧快照写回 PLANNING 的竞争。缓存改核对 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`；受控同 mtime 回归先红后绿，定向和 guards9 已跑过，完整命令及边界见 TESTS.md 顶部。
 
 2026-10-03（luna6i，ae 复审补强，`worker/luna6-idem-flake`）：同文件指纹的 mtime 距当前不足 2 秒时绕过解析缓存重读，2 秒外仍复用；两项幂等派发测试用真实启动桩固定状态，并集合精确检查 DONE/RUNNING 排除、PLANNING 全部派发。阈值与 Gateway 粗 mtime 保护同为 2 秒，不新增配置或跨层依赖；定向 13 个测试文件已过，静态门禁和提交结果见 TESTS.md 顶部。
