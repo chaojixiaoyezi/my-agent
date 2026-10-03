@@ -31,6 +31,7 @@
 | [GATEWAY_LOCAL_TRUST.md](GATEWAY_LOCAL_TRUST.md) | Gateway 本机来源信任 / 模型命令沙箱 | 3a 定稿（2026-10-03），实施中 | 回环来源不再自带信任、特权入口认宿主持有的客户端凭据、模型命令沙箱按端口连不到 Gateway（macOS 已实测、Linux 待实测） |
 | [MAINTAINABILITY_AND_JEV_REVIEW.md](MAINTAINABILITY_AND_JEV_REVIEW.md) | 模块可维护性 / Computer Use / Jev | 评估完成，方案待实施 | 热点源码及参考证据、渐进重构顺序、桌面能力现状；Jev 新接入方向见决策模型计划 |
 | [DECISION_MODEL_INTEGRATION.md](DECISION_MODEL_INTEGRATION.md) | 可选决策模型 / Jev | P1—P5 实施中，P1-A 已本地验收 | 原模型配置复用、短期限与失败隔离、逐点开关、记忆/派工/能力推荐、缓存和并行开发验收 |
+| [PLUGIN_EVENT_HOOKS.md](PLUGIN_EVENT_HOOKS.md) | 插件事件订阅 / 工具调用收紧钩子（M 线第一期） | 设计稿，待 ae、9b 评审，3a 定 | 6 类只读事件、清单 v8、单在途只留最新、收紧钩子只回照原样/确认/拒绝且只能更严、强制沙箱断网、确认码覆盖订阅、拆块 B1–B9 |
 | [PLUGIN_DISPLAY.md](PLUGIN_DISPLAY.md) | 插件面板 / 只读订阅 | 第 9 步已发布，真实 TUI 已验 | 声明式面板、公开主题投影、单在途与撤销、TUI 只渲染核心校验结果 |
 | [PLUGIN_WORKSPACE_WRITE.md](PLUGIN_WORKSPACE_WRITE.md) | 插件写入 / 工作区写入上下文 | 第 10 步本地已实施 | 协商扩展且声明写效果才下发、与内置写工具同一裁决且只可能更严 |
 | [PLUGIN_HOST_API.md](PLUGIN_HOST_API.md) | 插件宿主只读 API | 第 10 步本地已实施 | 界面型插件读取活动、线程、插件列表；按激活发令牌，只读、回环 |

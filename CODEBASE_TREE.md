@@ -157,6 +157,7 @@
     |-- J16_SCREEN_OBSERVATION.md        # J16 屏幕识别设计（已确认、未实施）：自家适配器结构化窗口观察、两层复核、自动执行默认关
     |-- PLUGIN_ANY_LANGUAGE.md           # 任意语言插件（v6）：随包可执行文件/系统解释器、启用前用户确认、解释器固定与跨语言读取检查用例
     |-- PLUGIN_PROCESS_SANDBOX.md        # 插件进程 OS 沙箱试点：开关语义、失败拒绝、已知限制与验证
+    |-- PLUGIN_EVENT_HOOKS.md            # M 线第一期设计稿：插件只读事件订阅与只收紧的工具调用钩子、清单 v8、安全底座、拆块
     |-- WORKSPACE_PEEK.md                # 首个自有只读插件的预览、分页、安全打开与构建边界
     |-- PLUGIN_ACTIVATION.md             # 唯一安装表的激活 CAS、撤销、显式迁移及待接线资源边界
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
