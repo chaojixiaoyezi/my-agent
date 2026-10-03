@@ -178,6 +178,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 - **返工**：提示 1 次。列出原件路径和副本位置，建议用 `cp` 把副本覆盖回原路径（字节要完全一致，手抄做不到），改动另存新文件。
   - 和交付物返工各自计数；同时出现时合成一条提示，原件在前。
   - 之后照常结束，最终事实带 `inputs_modified`、`input_rework_count`，宿主提示写明“任务开始时的输入 X 被就地改了”。
+  - 返工后模型已按原件恢复时（最后一次收尾查到原样），最终的 `inputs_modified` 为空，宿主提示不再提“被改”：提示只说交付时还要用户处理什么，过程记在 `input_rework_count` 里（3a 2026-10-03 定，刻意如此；17h 冒烟第 4 项实测：模型照提示 cp 还原，sha256 与开始时逐字节一致）。
 - **只读保护依赖 be 的 H3**（块 4、块 5 已变基到 `claude/3a-step17h` `7e421024f`，含 be 的 H3 全部提交；回归用例 `test_pack_verification_protection.py`）：
   - 文件工具和写边界按路径判，所有任务都拒写；
   - Shell 只保护本次命令的工作目录和写根所在任务的 `data/pack_verification/`。Full Access 下别的任务的目录挡不住，这是 H3 写明的已知边界。
