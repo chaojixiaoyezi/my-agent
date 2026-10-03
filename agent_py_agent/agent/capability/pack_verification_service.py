@@ -229,8 +229,11 @@ def _verify_target(scope: _RunScope, path: Path, trigger: str) -> list[tuple[str
 
 # LLM: 连续失败只按同一个 (包, 检查程序, 目标) 的写后结果数（账本 failure_streak），别的目标、收尾结果都不算。到上限时记一条
 #   not_run/post_write_feedback_limit 的结果和事件，复用键留空，收尾算出真实复用键时不会把它当成已检查的结果复用。
-# 函数用途: 写后反馈到了上限就记一条暂停结果并返回 ("", 结果)，没到上限返回 None。
+#   取消优先（块 6a 合同）：本 run 已取消时不记暂停，交给 _run_once 记 cancelled，避免同时到上限时被记成暂停行。
+# 函数用途: 写后反馈到了上限就记一条暂停结果并返回 ("", 结果)，没到上限或本 run 已取消返回 None。
 def _paused_post_write(scope: _RunScope, pair: tuple, path: Path) -> tuple[str, PackVerificationResult] | None:
+    if cancellation_requested():
+        return None
     package, verifier = pair
     manifest, target = package.installation.manifest, workspace_relpath(path, scope.root)
     streak = scope.ledger.failure_streak(TRIGGER_POST_WRITE, (manifest.plugin_id, verifier.id, target))

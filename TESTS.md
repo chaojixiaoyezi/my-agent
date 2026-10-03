@@ -10,6 +10,7 @@
     - 收尾照常跑真实检查并给那一次返工；
     - 中间通过一次就重新数；
     - 别的目标、收尾检查的失败不算。
+  - 和块 6a 合并时补（step17i，3a）：`test_cancelled_run_at_the_limit_records_cancelled_not_the_pause`——连续失败到上限后本 run 被取消，再写一次记 `cancelled/verifier_cancelled`（带真实复用键）、不跑检查程序、不记暂停行。变异“去掉 `_paused_post_write` 开头的取消判断”使该用例失败（1 failed, 9 passed），还原后 10 passed。
 - **9b 复审后补**（3a 定的两条必须改）：
   - `test_without_closeout_the_last_real_failure_survives_the_pause`：失败到上限、再写一次、不收尾，最终事实里仍是最后一次真实的 failed 和错误计数，提示里没有暂停原因码。产品改动：`pack_verification_facts` 没收尾时跳过复用键为空的暂停行。
   - `test_error_and_not_run_results_do_not_count_toward_the_streak`：中间插入检查程序超时（error）和沙箱不可用（not_run），连续失败次数不变，凑够 6 次真实失败才暂停。

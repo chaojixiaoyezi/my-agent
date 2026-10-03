@@ -126,6 +126,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 回执 `handler_details.pack_verification` 附有界摘要：状态、错误数和警告数、前 5 个错误码和警告码、检查结果里保存的全部错误样例（最多 10 条），错误比样例多时 `error_samples_truncated=true`（块 8 试点后改，原来只带前 3 条）；
   - 模型在 `[pack-verification]` 段看到这份摘要，归档白名单也收这个键，续跑重渲染时还在。这段文字软提示“把这次列出的错误在下一次写入里一起改完”，宿主不据此做任何判断。
   - 写后反馈上限（块 8 试点后加）：同一个检查对象（包、检查程序、目标）写后检查连续失败 6 次（`MAX_POST_WRITE_CONSECUTIVE_FAILURES_COUNT`）后，后面的写后检查不再跑，只记一条 `not_run`、原因码 `post_write_feedback_limit`（复用键留空，收尾不会复用它），交给收尾检查那一次返工。中间通过一次就重新数；收尾检查的失败、别的目标的失败都不算。
+    本 run 已取消时取消优先：不记暂停行，记 `cancelled/verifier_cancelled`（块 6a 合同）。
   - 起因：块 8 试点 A05 同一文件写后失败 20 次才通过——回执只带前 3 条样例、合同不带数字、模型每次只改一处，每次都多一轮完整上下文（`decision-evidence/capability-packs-v2-b8/pilot-ede890374/A05-post-write-analysis.md`）。
 - **收尾再查**：
   - 挂在 `_no_tool_calls_decision`，子代理交付闸之后，复用同一个返工通道；

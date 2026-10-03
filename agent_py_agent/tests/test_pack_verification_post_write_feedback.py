@@ -27,6 +27,7 @@ from agent_py_agent.agent.capability.pack_verifier_runner import (
     MAX_VERIFIER_ERROR_SAMPLES_COUNT,
     PackVerificationResult,
 )
+from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.tooling.runtime_facts import render_tool_runtime_facts
 from agent_py_agent.tests.test_pack_verification_service import (
     _tool_result,
@@ -143,6 +144,21 @@ def test_without_closeout_the_last_real_failure_survives_the_pause(env, monkeypa
     assert facts["closeout_checked"] is False
     assert result["status"] == "failed" and result["error_counts"] == {"placeholder_text": 1}, "不能被暂停行盖成 not_run"
     assert "post_write_feedback_limit" not in pack_verification_notice_text(facts)
+
+
+# 块 6a 与 P1–P3 合并时补（9b 提醒）：取消优先于写后反馈暂停。本 run 已取消、这个目标又刚好到上限时记 cancelled，不记暂停行。
+def test_cancelled_run_at_the_limit_records_cancelled_not_the_pause(env, monkeypatch):
+    calls = install_fake_runner(monkeypatch)
+    for version in range(LIMIT):
+        _post_write(env, _write_bad(env, version))
+    token = CancellationToken()
+    env.params.cancellation_token = token
+    token.cancel()
+    _post_write(env, _write_bad(env, LIMIT))
+    last = [row for row in env.ledger.records() if row["kind"] == "result"][-1]
+    assert (last["fact"]["status"], last["fact"]["reason_code"]) == ("cancelled", "verifier_cancelled")
+    assert last["key"] != "", "取消结果带真实复用键，不是暂停行"
+    assert len(calls) == LIMIT, "已取消不启动检查程序"
 
 
 # 函数用途: 替身检查程序：按交付物里的 outcome 字段给 failed / error / not_run，供“哪些状态算连续失败”的用例用。
