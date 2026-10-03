@@ -241,7 +241,7 @@ def test_numeric_knobs_with_pointer_like_names_are_free_and_shown_in_full(key):
 
 
 def test_new_credential_spellings_hit_no_registered_parameter():
-    # is_credential_key 同时决定边界分类：补写法后核对，登记表里脱敏的仍只有这 8 个真凭据，没有误伤普通参数
+    # is_credential_key 同时决定边界分类：补写法与开关键例外后核对，登记表里脱敏的仍只有这些真凭据，没有误伤普通参数
     assert {key for key, spec in parameter_registry().items() if spec.masked} == set(_CREDENTIALS)
 
 
@@ -261,6 +261,9 @@ def test_credential_names_match_whole_trailing_segments_only():
                                                   "aws_secret_access_key", "basic_auth", "auth", "pass"))
     assert not any(is_credential_key(key) for key in ("auth_enabled", "access_mode", "path_access_mode", "oauth", "bypass",
                                                       "compass", "model_auth_ref", "aws_access_key_id", "pwd_hint"))
+    # 开关式键（值是 true/false）不算凭据：不脱敏（用户要能看到开关状态），但仍是安全边界（credential 记号），模型不能改。
+    assert not is_credential_key("gateway_require_local_credential")
+    assert classify_safety("gateway_require_local_credential", "bool") == SAFETY_BOUNDARY
     # 凭据名即使是数字类型也仍是边界（不因“数字不指向任何东西”被放开）
     assert classify_safety("bot_token", "int") == SAFETY_BOUNDARY and classify_safety("bot_token_limit", "int") != SAFETY_BOUNDARY
 

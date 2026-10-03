@@ -552,6 +552,13 @@ gateway_bind_host: "127.0.0.1"
 # 非空时,非回环来源的请求必须携带匹配的 X-Gateway-Token 头才被信任(否则降为匿名 USER、绝不 admin)。
 gateway_auth_token: ""
 
+# 本机凭据强制开关（G2b 上线闸，默认 false；强制阶段稳定后会连同旧分支一起删除）。
+# - false（默认，G2a 计数阶段）：本机客户端读不到凭据（文件缺失 / 权限不对 / 内容损坏）时，
+#   降级为不带 X-Gateway-Token 继续发送，由 Gateway 按“无凭据来源”计数；客户端只记一次结构化 warning。
+# - true（强制阶段）：本机客户端读不到凭据时直接拒绝请求（零请求、带原因码），用于部署窗口外的强约束。
+# 客户端和 Gateway 读同一份配置，所以两边口径一致。
+gateway_require_local_credential: false
+
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
 # 留空时固定落在 owner workspace/runtime/services/adapters/file；相对覆盖同样以 owner workspace 解析。

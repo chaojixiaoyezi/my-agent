@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# LLM: 原故障验收脚本 Gateway HTTP 头附 G3 凭据，读取失败不发送；代理健康检查不属于控制面。
+# 模块用途: 在明确授权环境验证 R1-02，凭据只在请求进程中使用。
 """R1-02 韧性闸: 模型流中途断恢复(经本地 CONNECT 隧道代理注入)。
 
 此脚本仅用于显式授权的故障注入验收。
@@ -38,6 +40,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from agent_py_agent.cli.gateway_client_headers import gateway_script_headers
+
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"}
 _RUNNING_STATUSES = {"EXECUTING", "STARTED", "PENDING"}
 _OK_RESULT_STATUSES = {"done", "finished", "ok", "error", "stopped", "interrupted"}
@@ -62,6 +66,8 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# LLM: 在原身份头位置附 G3 凭据；已有部署 token 保留，读取失败在网络 try 前明确拒绝。
+# 函数用途: 提交和查询原验收 Gateway，不添加秘密参数或日志。
 def _http(method: str, url: str, payload: dict | None = None,
           headers: dict | None = None) -> dict:
     data = None
@@ -72,6 +78,9 @@ def _http(method: str, url: str, payload: dict | None = None,
         req.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
+    if not req.has_header("X-gateway-token"):
+        for key, value in gateway_script_headers().items():
+            req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode("utf-8", errors="replace")
@@ -97,6 +106,16 @@ def _http(method: str, url: str, payload: dict | None = None,
         return {"http_status": exc.code, "raw": body, "error": body[:200]}
     except (urllib.error.URLError, OSError) as exc:
         return {"http_status": 0, "error": f"connection_error: {exc}"}
+
+
+# LLM: 代理健康不是 Gateway 控制面，绝不使用或读取 Gateway 凭据；此只读探针和提交运输分开。
+# 函数用途: 读取验收代理健康，不把宿主 token 发送到另一服务。
+def _proxy_health(url: str) -> dict:
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            return {**json.loads(response.read().decode("utf-8")), "http_status": response.status}
+    except (urllib.error.URLError, OSError, ValueError):
+        return {"http_status": 0}
 
 
 def _ask(gateway: str, goal: str, *, user_id: str, channel: str,
@@ -274,6 +293,8 @@ def _find_marker(root: Path, name: str) -> str | None:
     return None
 
 
+# LLM: 原验收流程显式授权后运行；代理健康不带 Gateway 凭据，Gateway 提交仍走唯一 G3 身份头。
+# 函数用途: 执行 R1-02 原故障注入验收并写结构化报告，不输出秘密。
 def _main() -> int:
     args = _parse_args()
     out_root = Path(args.output_root)
@@ -300,7 +321,7 @@ def _main() -> int:
     observations: dict = {}
 
     # 0. 前置: 代理健康
-    health = _http("GET", args.proxy_health)
+    health = _proxy_health(args.proxy_health)
     case["proxy_health"] = health
     if health.get("http_status") != 200:
         findings.append(f"proxy_unhealthy:{health}")

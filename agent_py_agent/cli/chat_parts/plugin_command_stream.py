@@ -1,4 +1,4 @@
-# LLM: 薄客户端只消费有界消息并写原审批桥，不初始化 Agent/执行器；路径来自当前 TUI 连接，HTTP 正文不能提供路径。
+# LLM: 薄客户端沿原身份头带 G3 凭据消费消息；读取失败按 G2b 开关降级或拒绝，路径来自可信本地连接而非 HTTP 正文。
 # 模块用途: 让长插件命令持续显示审批，同时在断连后保留原编号供查询。
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import urllib.request
 
 from ...agent.common.cancellation import CancellationToken
 from ...agent.contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
+from ...agent.gateway_parts.client_credentials import gateway_client_credentials
 from ...agent.gateway_parts.command_stream_protocol import (
     COMMAND_STREAM_MAX_BYTES,
     COMMAND_STREAM_MEDIA_TYPE,
@@ -17,6 +18,7 @@ from ...agent.gateway_parts.command_stream_protocol import (
     command_stream_owner,
 )
 from ...agent.gateway_parts.permission_bridge import write_gateway_permission_decision
+from ...agent.user_space.owner_resolver import owner_identity_from_config
 from ..chat_client_context import _gateway_headers, _with_client_identity
 from .command_interaction import CommandInteraction
 
@@ -63,16 +65,19 @@ class _PermissionConsumer:
             self.worker.join(1.0)
 
 
-# LLM: 地址固定原 loopback Gateway，身份沿原 header/body builder；传输失败由外层保留原编号，不重放命令。
+# LLM: 地址及身份取原宿主，G3 凭据在原 header builder 添加且先于 urlopen；开关开时取不到明确拒绝，开关关时降级，不重放命令。
 # 函数用途: 持续读取单次命令消息，返回原最终回执，期间把审批交给当前 TUI。
-def post_plugin_command_stream(port: int, owner, payload: dict, interaction: CommandInteraction) -> dict:
+def post_plugin_command_stream(agent: object, payload: dict, interaction: CommandInteraction) -> dict:
     if interaction.gateway_paths is None:
         raise ValueError("交互命令缺少本地 Gateway 连接路径")
+    port = int(agent.config.gateway_port)
+    owner = getattr(agent, "owner_identity", None) or owner_identity_from_config(agent.config)
     consumer = _PermissionConsumer(interaction)
     body = _with_client_identity(owner, {**payload, "interactive": True})
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/client/plugins", data=json.dumps(body).encode(),
-        headers=_gateway_headers(owner, json_body=True, conversation_id=payload["conversation_id"]), method="POST",
+        headers=_gateway_headers(owner, json_body=True, conversation_id=payload["conversation_id"],
+                                 credentials=gateway_client_credentials(agent)), method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=10.0) as response:

@@ -1,5 +1,19 @@
 # Gateway 维护状态
 
+## G3 返工：凭据读不到时按 G2b 开关降级，不再提前拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
+
+- 起因：现在是 G2a 阶段，服务端只计数、不拦；客户端在凭据读不到时发 HTTP 前就拒绝，等于提前做了 G2b。新 TUI 连上还没生成凭据的旧 Gateway（部署窗口）、或凭据权限被人改过时，TUI/飞书适配器/插件命令会全断。
+- 改法：`client_credentials.GatewayClientCredentials.headers()` 读凭据失败时按新开关 `gateway_require_local_credential`（默认 false）分流——开关关（G2a）返回空头照常发送（服务端计“无凭据”），并记一条只带 G1 原因码的结构化 warning，同一原因同一进程只记一次；开关开才维持原行为，在网络请求前抛 G1 原因码、零请求。非空 `gateway_auth_token` 优先、direct 不读凭据这两条不变。
+- 客户端与 Gateway 读同一份 `AgentConfig`，口径一致；开关是 G2b 上线闸，强制阶段稳定后连同旧分支一起退场。
+- 测试：三类原因 × 开关关降级/开关开拒绝 × TUI/CLI/IM 全绿，另含 warning 去重、IM durable 两态、插件三运输、Goal 编辑器；见 TESTS.md 同名节。真实 Gateway、真实渠道与旧客户端迁移未验证。
+
+## G3 本机客户端附凭据（2026-10-03，sol1c，worker/sol1-g3-clients，已实现，待 9b 终审）
+
+- TUI/CLI 的原 GET/POST、控制/控制对账、插件目录/面板/交互命令流，以及 IM 的 ask/四条对账，在现有身份头入口加唯一 X-Gateway-Token。凭据只经 G1 load_local_client_credential 取，不生成、不修文件权限。
+- gateway_auth_token 非空时沿配置部署合同只发该值，不先读本机凭据。缺失/权限/损坏拒绝且带 G1 原因码与安全处置提示；插件/Goal 不混成未知执行，IM durable 未发送故障只回复一次，不重放 POST。
+- 仓库五类 HTTP 验收脚本也接原身份头；公开 metrics 和 R1-02 代理健康不读/不带凭据。文件队列客户端、本地 direct、浏览器、仓库外工具不改。
+- 临时数据根、随机端口假服务和四项逐次变异有验证；真实 TUI、IM 平台和生产迁移未验证。G2a/G2b 不在本分支，凭据还不强制；详见 TESTS 与 GATEWAY_LOCAL_TRUST。
+
 ## G1+G2a 本机凭据与旧客户端观察（2026-10-03，sol1g，已实现，待初审/9b 终审）
 
 - 数据根 secrets/ 下凭据缺失才生成；私有原子写后严读，已有损坏/权限不对就报结构化错误，不轮换。load_local_client_credential(data_root) 是宿主客户端统一读取接口。

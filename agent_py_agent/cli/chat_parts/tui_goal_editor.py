@@ -1,4 +1,4 @@
-# LLM: Goal drafts live only in the TUI modal until explicit save; authenticated backend owns CAS, identity and lifecycle.
+# LLM: Goal 草稿只在明确保存后提交，身份沿原 Gateway 运输；G3 凭据失败按 G2b 开关降级或保留原因码与草稿，不混成未知。
 # 模块用途: 主子代理共用目标编辑器，保存确认、版本冲突和放弃退出不阻塞聊天绘制或模型流。
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Float, HSplit
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import Button, Dialog, Label, TextArea
+
+from ...agent.gateway_parts.local_client_token import LocalClientCredentialError
 
 
 # LLM: Client revision is an optimistic precondition, not an authority token. Token/time updates must not change it.
@@ -29,7 +31,7 @@ class GoalDraft:
                 "objective": text, "expected_revision": self.revision}
 
 
-# LLM: IO runs off the UI loop; HTTP control errors use the public error field, while local errors use message. Preserve codes and never expose raw exceptions.
+# LLM: IO 不阻塞 UI；开关打开时 G3 凭据拒绝在广义 RuntimeError 前处理，保留 G1 原因码且不请求；开关关时降级发送，网络未知仍保留草稿。
 # 函数用途: 读取或保存当前代理目标，统一远端与本地错误文案，让版本冲突和权限拒绝能明确展示。
 def _request_goal(agent, session_id: str, payload: dict) -> dict:
     body = {"user_id": "local-agent", "channel": "chat", "conversation_id": session_id, **payload}
@@ -46,6 +48,8 @@ def _request_goal(agent, session_id: str, payload: dict) -> dict:
             return execute_agent_goal_control(agent, scope=SimpleNamespace(**body), payload=payload)
         except AgentControlError as exc:
             return {"ok": False, "error_code": exc.error_code, "message": exc.message}
+    except LocalClientCredentialError as exc:
+        return {"ok": False, "error_code": exc.reason_code, "message": str(exc)}
     except (OSError, RuntimeError, ValueError):
         return {"ok": False, "message": "暂时无法确认目标状态；保留草稿，请稍后重试。"}
 

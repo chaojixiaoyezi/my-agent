@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# LLM: 故障注入只在显式授权验收时运行；原 Gateway HTTP 头附 G3 凭据，失败先拒绝，不记录 token。
+# 模块用途: 保留原 R1 验收方式并让本机提交、对账带同一宿主凭据。
 """R1-01 韧性闸: 工具执行中 kill -9 gateway(硬崩溃注入, systemd 拉起)。
 
 判据(R1-01, 与维护记录分工约定):
@@ -29,6 +31,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from agent_py_agent.cli.gateway_client_headers import gateway_script_headers
+
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"}
 _RUNNING_STATUSES = {"EXECUTING", "STARTED", "PENDING"}
 _OK_RESULT_STATUSES = {"done", "finished", "ok", "error", "stopped", "interrupted"}
@@ -50,6 +54,8 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# LLM: 原身份头与 G3 头在同一 Request 构造；已提供部署 token 时不再读文件，也不重复同名头。
+# 函数用途: 发送验收请求并返回原结构化状态，凭据失败不进入网络重试。
 def _http(method: str, url: str, payload: dict | None = None, headers: dict | None = None) -> dict:
     data = None
     if payload is not None:
@@ -59,6 +65,9 @@ def _http(method: str, url: str, payload: dict | None = None, headers: dict | No
         req.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
+    if not req.has_header("X-gateway-token"):
+        for key, value in gateway_script_headers().items():
+            req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode("utf-8", errors="replace")

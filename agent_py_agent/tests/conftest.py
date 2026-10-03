@@ -41,6 +41,15 @@ _DESKTOP_GUARD: DesktopOpenGuard | None = None
 _FINISHED_DESKTOP_GUARD: DesktopOpenGuard | None = None
 
 
+@pytest.fixture
+def gateway_client_credential(_isolate_my_agent_home):
+    """旧 HTTP 行为测试显式模拟 Gateway 已完成 G1 初始化；不影响缺凭据的拒绝测试。"""
+    from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+
+    return ensure_local_client_credential(home_paths().root)
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

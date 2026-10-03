@@ -1,5 +1,53 @@
 # 测试与发布验收
 
+## G3 返工：凭据读不到时按 gateway_require_local_credential 降级或拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
+
+- 来源：3a 的 G3 返工工单与 GATEWAY_LOCAL_TRUST 1.4/1.5。开关关（默认 false）＝照常发送但不带 `X-Gateway-Token`、只记一次原因码 warning；开关开＝发请求前拒绝、零请求。非空 `gateway_auth_token` 优先、direct 不读凭据不变。
+- `agent_py_agent/gateway_parts/client_credentials.py` 的 `headers()` 分流 + `_warn_credential_degraded`（模块级去重集合 + 锁）。新开关同时进 `AgentConfig`（默认 False）与 `config/agent_config.yaml`（中文注释）；`user_config_capability._CREDENTIAL_SWITCH_KEYS` 把它排除在凭据脱敏之外（回显要能看到 true/false），分类仍是安全边界。
+- 测试：`agent_py_agent/tests/test_gateway_client_credentials.py` 重写并扩到 **56 项，全部通过**。覆盖：三类原因（MISSING/PERMISSIONS/INVALID）× 开关关降级（TUI/CLI/IM 各发两次请求、全部无令牌头、warning 只记一次且带 reason_code）× 开关开拒绝（零请求 + G1 原因码）；插件三运输、IM durable 两态、Goal 编辑器两态、adapter 启动两态、warning 按原因分别记；原“附上凭据/配置 token 优先/四条对账/direct/脚本头/代理健康/不泄漏”用例全部保留。命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_client_credentials.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g3f
+  ```
+- 相关回归 10 文件 244 项：**235 passed / 9 failed / 0 skipped**（JUnit tmp/g3f-related.xml）；9 failed 全在 3a 已确认的沙箱环境失败清单内（test_chat_control_runtime 1 条前台 shell 中断 + test_host_command_stream 8 条插件宿主 enable 夹具 `outcome_unknown`），本环境照旧失败，未删改、未伪造。同命令：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_client_credentials.py agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_chat_control_runtime.py agent_py_agent/tests/test_plugin_command_client.py agent_py_agent/tests/test_host_command_stream.py agent_py_agent/tests/test_adapter_manager.py agent_py_agent/tests/test_adapter_ingress.py agent_py_agent/tests/test_admin_identity_clients.py agent_py_agent/tests/test_adapter_state_write_resilience.py agent_py_agent/tests/test_gateway_local_client_token.py -q --tb=no -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g3f --junitxml=tmp/g3f-related.xml
+  ```
+- 配置/参数守卫：test_config_field_readers、test_constants_catalog、test_parameter_registry、test_config_defaults_parity、test_config_warning_no_credential_echo 共 166 passed。guards9 十文件（含 test_packaging）**172 passed / 0 failed / 0 skipped**。
+- 四个独立变异，每个只改产品一处，均被真实用例抓到：① 开关关时也拒绝（`if True`）→ 降级类 5+ 失败；② 开关开时也放行（`if False`）→ 开关开拒绝类 4+ 失败；③ warning 每次都记（去掉去重）→ `degrades_and_warns_once` ×3 + `adapter_startup_degrades_when_switch_off`；④ 降级时返回空 `X-Gateway-Token` 头 → 降级类“无令牌头”断言失败。每次按备份原字节恢复，sha256 与 clean（`ca932750b29b…`）一致，重跑 56 passed；测试文件调整后对 ①② 再复验一次仍被抓。记录 tmp/g3f-mutations/summary.md。
+- 静态门禁：import boundaries=0、ruff 全范围通过、DOC_SYNC_PASS、`git diff --check` 干净、clean-package OK；strict code-size 退出 0（strict_scope_total=2223、hard=0、blocked=False，报告已 `git checkout` 还原不提交）；size_diff **新增告警 0 / 消失告警 14**（首轮 2 条参数过多已用 `_ControlOptions` 数据类与 `credential_environment` fixture 拆平）。
+- 未验证：真实 Gateway、真实 TUI/飞书渠道、部署窗口里旧客户端到新 Gateway 的真实降级、`/status` 计数归零均未做；G2b 的服务端强制半边不属于本片。
+
+## G3 本机客户端附凭据（2026-10-03，sol1c，worker/sol1-g3-clients，已实现，待 9b 终审）
+
+- 来源：3a 的 G3 任务与 GATEWAY_LOCAL_TRUST 1.3/1.4/3/4。原身份头加入 G1 文件凭据；部署 token 优先且唯一；缺失/权限/损坏拒绝，direct 不读凭据。新增 test_gateway_client_credentials.py 的 **39 项全部通过**：三类客户端真实 HTTP 头、三类失败零请求、配置 token、四条 IM 对账、插件目录/面板/NDJSON 流、durable 拒绝收口、Goal 原因码、脚本请求头与代理健康不带凭据、日志/env/argv/异常不泄漏。
+- TDD 首次 22 项：20 failed、2 passed；首绿22项。扩展聚焦8文件156 passed。最终12文件按原失败断言执行，没有删除、跳过、放宽平台失败测试：**261 passed、9 failed、0 skipped、0 errors**，退出1；JUnit tmp/sol1c-final-related.xml。命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_client_credentials.py agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_chat_control_runtime.py agent_py_agent/tests/test_plugin_command_client.py agent_py_agent/tests/test_host_command_stream.py agent_py_agent/tests/test_adapter_manager.py agent_py_agent/tests/test_adapter_ingress.py agent_py_agent/tests/test_admin_identity_clients.py agent_py_agent/tests/test_adapter_state_write_resilience.py agent_py_agent/tests/test_gateway_local_client_token.py agent_py_agent/tests/test_agent_goals.py agent_py_agent/tests/test_gateway_adapter.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1c --junitxml=tmp/sol1c-final-related.xml
+  ```
+- 9条失败保留：test_chat_control_runtime 的前台 shell 中断测试未到达 started；test_host_command_stream 的8条在 enabled_plugin 的 enable 夹具失败（outcome_unknown，不是 succeeded），未执行到新的流入口。以本树临时原字节备份/恢复，把已改产品与旧测试还原为 G1 HEAD cbb80b436 后，以下两条同样失败（2 failed；tmp/sol1c-g1-baseline-failures.xml），随后逐文件字节核对恢复 G3。仅证明这两条基线失败，其余同夹具失败没有逐条跑基线；底层原因未进一步确认，不按超时推断隔离原因。留给3a沙箱外复核，不绕过 /bin/ps/嵌套Seatbelt限制。
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_chat_control_runtime.py::test_local_interrupt_stops_foreground_shell_without_resource_reclaim agent_py_agent/tests/test_host_command_stream.py::test_noninteractive_request_returns_without_waiting_for_a_missing_consumer -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1c --junitxml=tmp/sol1c-g1-baseline-failures.xml
+  ```
+- 四项真实独立变异：TUI漏头、读取失败静默继续、凭据写日志、配置token分支额外写同名本机token头（假服务实见两个值）。每次只改一处产品位置，对应单条真实行为测试 **1 failed/0 errors**；原字节恢复并复跑同条 **1 passed**。记录 tmp/sol1c-mutant-1..4.xml、sol1c-restored-1..4.xml、sol1c-mutations.json；运行命令 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY tmp/sol1c-mutate.py` 退出0。临时变异驱动/输出不提交。
+- guards9全部十文件（含packaging），JUnit tmp/sol1c-guards9.xml：**172 passed/0 failed/0 skipped**，退出0；未跑全仓 pytest。实际命令：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1c --junitxml=tmp/sol1c-guards9.xml
+  ```
+- 最终静态门禁：import boundaries=0、ruff全范围通过、DOC_SYNC_PASS；strict-size退出0（strict_scope_total=2223，hard=0，high-risk=1519，soft=704，test_advisory=1237，blocked=False）；size_diff退出0，完整输出“新增告警: 0 / 消失告警: 14”；git diff --check与clean-package退出0。code-size生成报告已还原，报告和baseline均不在G3提交。clean-package最初报3个新源码未跟踪和2个后台测试临时登记文件；源码入索引，并在宿主确认guards9已退出0、无活动后台命令后把临时登记原样保存到tmp/sol1c-background-jobs、清理空锁，重跑原入口通过，测试日志未删。代码提交a1c617fec；完整回归仍有9条失败，本地严格验收整体**未全绿**，以WIP交付。静态命令：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_import_boundaries.py
+  $PY -m ruff check agent_py_agent scripts
+  $PY scripts/check_doc_sync.py
+  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+  git checkout -- CODE_SIZE_REPORT.md
+  bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
+  git diff --check
+  $PY scripts/check_clean_package.py .
+  ```
+- 只使用tmp_path与自起随机回环假服务；没有连接8420、运行my-agent、读真实凭据/会话正文、停止既有进程、联网安装、推送或部署。仓库脚本只验证HTTP函数，不运行真实压测/故障注入；send_ask脚本仅代码接线，未执行真实提交。真实产品TUI、IM平台和生产迁移、模型环境的真实端到端观测未验证；G1模型环境隔离测试与G3进程环境/argv断言只属隔离组件证据。
+
 ## Gateway G1+G2a 返工：凭据准备降级 + 空凭据防线（2026-10-03，ds1g，worker/sol1-g1-g2a，提交 db1334395，待 9b 复核）
 
 - 新用例 5 条：`test_gateway_local_client_token.py` 加坏文件/文件权限/目录权限三场景（照常启动、`/status` 报 `unavailable:<原因码>`、坏文件与坏权限不被覆盖、重启仍降级）与假 Agent 无 home_paths（记 `no_data_root`、回环请求照常计数）；`test_gateway_local_trust_observation.py` 加空凭据/空头不匹配（钉住 9b 变异 G1，此前存活）。

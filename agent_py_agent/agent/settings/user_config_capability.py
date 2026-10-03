@@ -194,12 +194,18 @@ _CREDENTIAL_SUFFIXES = (
     "pass", "passwd", "pwd", "private_key", "secret_key", "access_key", "auth",
 )
 
+# 名字带凭据词、但值本身是开关（true/false）而不是凭据的键：回显/告警脱敏会把开关状态遮成 ***，用户看不到它开没开。
+# require 在名字里是动词还是形容词无法从键名可靠区分（required_password 仍是密码），所以按完整键名逐键确认，不用模式猜。
+_CREDENTIAL_SWITCH_KEYS = frozenset({"gateway_require_local_credential"})
+
 
 # LLM: 参数中心登记表、聊天 /settings、user_config 与命令行 config-get 共用这一条凭据判定，不再各自维护名单；
-#   键名等于凭据名或以 `_凭据名` 结尾才算（完整片段，不按子串）。改规则须同步 test_parameter_registry 的脱敏用例。
+#   键名等于凭据名或以 `_凭据名` 结尾才算（完整片段，不按子串）；已知的开关式键先排除。改规则须同步 test_parameter_registry 的脱敏用例。
 # 函数用途: 判断一个配置键是不是凭据（回显、记账都必须脱敏，也永远是安全边界）。
 def is_credential_key(key: object) -> bool:
     text = str(key or "")
+    if text in _CREDENTIAL_SWITCH_KEYS:
+        return False
     return any(text == name or text.endswith("_" + name) for name in _CREDENTIAL_SUFFIXES)
 
 

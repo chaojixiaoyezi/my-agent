@@ -23,6 +23,7 @@ from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
 )
+from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.home_layout import home_paths
@@ -57,6 +58,7 @@ def plugin_host(tmp_path, monkeypatch, *, owner=None):
     paths = gateway_paths_from_root(tmp_path / "shared-gateway")
     base = SimpleNamespace(config=AgentConfig(auth_enabled=False, path_access_mode="full", gateway_per_user_owner_scoping=False),
                            home_paths=home_paths(service.context.owner.root))
+    ensure_local_client_credential(base.home_paths.root)
     monkeypatch.setattr(command_stream, "_HEARTBEAT_SECONDS", 0.05)
     monkeypatch.setattr(http_service, "_server_instance", None)
     server = GatewayHTTPServer(0, paths, params=GatewayHTTPServerParams(agent=base))
@@ -262,12 +264,11 @@ def test_invalid_interactive_body_cannot_supply_a_path_or_start_execution(tmp_pa
     from agent_py_agent.cli.chat_client_context import post_gateway_json
 
     with plugin_host(tmp_path, monkeypatch) as (client, _paths, source, command):
-        port = client.agent.config.gateway_port
         for change in ({"interactive": "true"}, {"plugin_request_id": "../wrong"}):
             body = {"operation": "command", "command": command, "interactive": True,
                     "plugin_request_id": "original", "conversation_id": "transport-session",
                     "chunk_path": str(tmp_path / "injected"), **change}
-            status, result = post_gateway_json(port, OwnerIdentity.local_main(), "/client/plugins", body, timeout=3)
+            status, result = post_gateway_json(client.agent, "/client/plugins", body, timeout=3)
             assert status == 400 and result["ok"] is False
         assert not source.with_suffix(".calls").exists()
         assert not (tmp_path / "injected").exists()

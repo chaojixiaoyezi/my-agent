@@ -37,7 +37,9 @@ def test_gateway_mode_uses_original_owner_transport_for_both_client_kinds(monkey
     snapshot = PluginCommandCatalog("host-scope")
     calls = []
 
-    def transport(port, owner, path, payload, *, timeout):
+    def transport(host_agent, path, payload, *, timeout):
+        port = host_agent.config.gateway_port
+        owner = getattr(host_agent, "owner_identity", None) or plugin_command_client.owner_identity_from_config(host_agent.config)
         calls.append(payload)
         assert port == 9876 and path == "/client/plugins" and timeout == 3.0
         assert owner == OwnerIdentity.provider_user("local", "alice")
@@ -127,7 +129,7 @@ def test_old_selection_is_not_rebound_to_fresh_catalog_or_automatically_replayed
     old, current = PluginCommandCatalog("old-scope"), PluginCommandCatalog("current-scope")
     calls = []
 
-    def transport(port, owner, path, payload, **kwargs):
+    def transport(agent, path, payload, **kwargs):
         calls.append(payload)
         return 200, execute_plugin_command(
             current, payload["command"], revision=payload["catalog_revision"]
@@ -161,7 +163,7 @@ def test_gateway_or_catalog_failure_never_falls_back_or_submits_command(monkeypa
 def test_submission_timeout_keeps_original_id_without_retry_and_status_skips_catalog(monkeypatch):
     calls = []
 
-    def timeout(_port, _owner, _path, body, **kwargs):
+    def timeout(_agent, _path, body, **kwargs):
         calls.append(body)
         raise TimeoutError("private transport detail")
 
@@ -179,7 +181,7 @@ def test_submission_timeout_keeps_original_id_without_retry_and_status_skips_cat
 
 @pytest.mark.parametrize("catalog", [None, {"revision": "bad"}])
 def test_catalog_refresh_failure_does_not_erase_known_install_result(monkeypatch, catalog):
-    def transport(_port, _owner, _path, body, **kwargs):
+    def transport(_agent, _path, body, **kwargs):
         return 200, {"ok": True, "kind": "plugin_command", "state": "succeeded", "message": "已完成",
                      "request_id": body["plugin_request_id"], "catalog": catalog}
 

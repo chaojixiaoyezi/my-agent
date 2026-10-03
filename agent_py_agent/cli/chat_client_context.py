@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from ..agent.gateway_parts.client_credentials import (
+    GatewayClientCredentials,
+    gateway_client_credentials,
+)
 from ..agent.gateway_parts.request_client import (
     GatewayAskExecutionOptions,
     gateway_request_workspace_payload,
@@ -34,12 +38,15 @@ from .workspace_resolution import (
     validate_requested_workspace_roots,
 )
 
-# LLM: Gateway chat clients need config, owner-scoped paths, and UI metadata—not a model backend,
+# LLM: Gateway HTTP 在原身份头加 G3 唯一凭据，读取失败按 G2b 开关分流——开关关（默认）降级不带凭据发送并记一次
+#   warning，开关开才抛 G1 码；凭据不写日志、环境或可见状态。
+# Gateway chat clients need config, owner-scoped paths, and UI metadata—not a model backend,
 # tool registry, scheduler, memory curator, or subagent runtime. Every operation stays on an
 # explicit Gateway HTTP/file contract; this process must never promote itself to SimpleAgent.
 # 后台易失游标必须携带服务端流身份；canonical 消息位置与模型上下文独立于重连。
 # 模块用途: 为 Gateway TUI 构造始终轻量的客户端；聊天、记忆、历史和生命周期都交给已经
 # 运行的 Gateway，不在终端进程重复初始化完整智能体。
+# G3 的秘密只在现有身份头构造时读取；开关开时失败在网络前抛 G1 原因码，开关关时降级为不带凭据传输（G2a 计数）。
 
 
 # LLM: Transport delivery is deliberately tri-state. UNKNOWN is never false/rejected because the
@@ -85,13 +92,15 @@ def _gateway_request_identity(owner_identity: OwnerIdentity) -> dict[str, str]:
     return identity
 
 
-# LLM: HTTP authentication and body audit fields consume the exact same typed projection.
-# 函数用途: 生成当前用户访问本机单 Gateway 时统一使用的请求头。
+# LLM: 身份与正文沿同一投影；凭据在此唯一身份头入口附加，配置 token 优先；读取失败时开关开不发请求、
+#   开关关降级省略凭据头。
+# 函数用途: 生成当前用户访问本机 Gateway 的身份、会话和唯一凭据头，不写日志或环境。
 def _gateway_headers(
     owner_identity: OwnerIdentity,
     *,
     json_body: bool = False,
     conversation_id: str = "",
+    credentials: GatewayClientCredentials,
 ) -> dict[str, str]:
     identity = _gateway_request_identity(owner_identity)
     headers = {
@@ -110,6 +119,7 @@ def _gateway_headers(
         headers["X-Conversation-Id"] = selected_conversation
     if json_body:
         headers["Content-Type"] = "application/json"
+    headers.update(credentials.headers())
     return headers
 
 
@@ -136,9 +146,9 @@ def _with_client_identity(
     return normalized
 
 
-# LLM: The structured marker is consumed only by client-side adapters. Missing attributes remain
-# AttributeError so an accidental server-only call cannot silently allocate a second runtime.
-# 类用途: 保存聊天界面所需配置和路径，并通过显式 Gateway 请求完成客户端操作。
+# LLM: 薄客户端标记不授权服务端操作；HTTP 沿原身份入口带宿主凭据，读取失败按 G2b 开关降级或拒绝，
+#   不初始化第二份 Agent。
+# 类用途: 保存界面配置和路径，通过带凭据的原 Gateway 请求完成操作；秘密不进入可见状态。
 class GatewayChatClientAgent:
     gateway_client_only = True
 
@@ -482,10 +492,9 @@ class GatewayChatClientAgent:
         )
         return _active_turn_input_result(status, body)
 
-    # LLM: This is the sole HTTP reader for lightweight client status contracts. Callers that
-    # query a conversation-scoped receipt must pass that exact conversation id as authentication;
-    # transport errors remain typed UNKNOWN at the caller.
-    # 函数用途: 从本机 Gateway 读取 JSON 状态，并可携带精确会话身份完成权限校验。
+    # LLM: GET 沿同一身份/凭据入口；精确会话权限保持，凭据失败在运输 try 之前处理（开关开抛出、开关关降级），
+    #   不能被归成 UNKNOWN。
+    # 函数用途: 带宿主凭据查询 Gateway 状态；仅真正的网络失败保留原未知语义。
     def get_gateway_json(
         self,
         path: str,
@@ -501,6 +510,7 @@ class GatewayChatClientAgent:
             headers=_gateway_headers(
                 self.owner_identity,
                 conversation_id=conversation_id,
+                credentials=gateway_client_credentials(self),
             ),
         )
         try:
@@ -512,8 +522,8 @@ class GatewayChatClientAgent:
         except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
             return 0, {}
         return status, body if isinstance(body, dict) else {}
-    # LLM: 薄客户端和 plain Gateway 使用同一传输实现；身份来自构造时的 owner，故障不回退到本地 Agent。
-    # 函数用途: 用当前客户端身份发送一次 JSON 请求，并返回 HTTP 状态和对象响应。
+    # LLM: 薄客户端与 plain 共用原写传输；数据根和配置 token 从当前宿主取，凭据失败按 G2b 开关降级或拒绝。
+    # 函数用途: 用当前身份和唯一凭据发送 JSON，真正的网络不确定仍按原合同返回。
     def post_gateway_json(
         self,
         path: str,
@@ -521,21 +531,24 @@ class GatewayChatClientAgent:
         *,
         timeout: float,
     ) -> tuple[int, dict[str, object]]:
-        return post_gateway_json(int(getattr(self.config, "gateway_port", 0) or 0), self.owner_identity, path, payload, timeout=timeout)
+        return post_gateway_json(self, path, payload, timeout=timeout)
 
 
-# LLM: 这是薄/完整客户端共用的 Gateway JSON 写传输；始终覆盖正文身份，不从命令参数推断身份，不自动重试请求。
-# 函数用途: 在现有本机 Gateway 地址发送已绑定 owner 的请求，传输故障只返回不可确认结果。
+# LLM: 薄/完整客户端共用原 JSON 写传输；身份沿显式 owner/原配置解析器，凭据在 try 前读取，不自动重试；
+#   开关关时凭据不可用降级为不带凭据继续发送，开关开时异常只带原因码和处置提示。
+# 函数用途: 在原 Gateway 地址带身份和单个 token 发送请求。
 def post_gateway_json(
-    port: int, owner_identity: OwnerIdentity, path: str, payload: dict[str, object], *, timeout: float,
+    agent: object, path: str, payload: dict[str, object], *, timeout: float,
 ) -> tuple[int, dict[str, object]]:
+    port = int(getattr(agent.config, "gateway_port", 0) or 0)
     if port <= 0:
         return 0, {}
+    owner_identity = getattr(agent, "owner_identity", None) or owner_identity_from_config(agent.config)
     normalized_payload = _with_client_identity(owner_identity, payload)
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"),
-        headers=_gateway_headers(owner_identity, json_body=True),
+        headers=_gateway_headers(owner_identity, json_body=True, credentials=gateway_client_credentials(agent)),
     )
     try:
         with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:

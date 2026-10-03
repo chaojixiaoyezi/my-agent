@@ -1,6 +1,7 @@
 # LLM: Gateway 沿持久回执控制；direct 沿 worker 句柄绑定真实执行身份，interrupt 与资源停止分离。
 # 插件正常由独立 PluginCommandClient 消费；进入共享控制时保留原文，不能降成停止任务。
 # 模块用途: 将终端控制交给共享协议，保留会话身份、目录、可重试消息编号及不同控制的边界。
+# G3：Gateway 请求在原身份头入口附凭据；读取失败按 G2b 开关——开关开返回明确未发送的原因码，开关关降级不带凭据；direct 不读取凭据。
 from __future__ import annotations
 
 """CLI adapter for the shared ordinary-conversation control protocol.
@@ -28,6 +29,8 @@ from ...agent.conversation.control_commands import (
     render_verbose_control,
 )
 from ...agent.conversation.models import new_id
+from ...agent.gateway_parts.client_credentials import gateway_client_credentials
+from ...agent.gateway_parts.local_client_token import LocalClientCredentialError
 
 # 参数减量第 3 批 B 组（2026-09-27）：Gateway 控制命令（/status、/stop 等）的 HTTP 等待上限，不再是配置项
 # gateway_service_command_timeout_seconds；手动 /compact 另按供应商 request_timeout + 30 秒放宽（见 _gateway_control_timeout）。
@@ -73,10 +76,8 @@ def im_only_control_result(command: ConversationControlCommand) -> ConversationC
     return ConversationControlResult(command.kind, False, _IM_ONLY_CONTROL_MESSAGE, error_code="ADMIN_IDENTITY_SCOPE_INVALID")
 
 
-# LLM: CLI dispatch preserves the shared command contract while swapping only its runtime backend;
-# an optional manual-Compact target is transport metadata and never parsed from command prose.
-# IM 专用的管理员命令在一切传输之前本地拒绝，Gateway 与本地两种后端都不会收到它们。
-# 函数用途:按本地或 Gateway 模式执行控制命令，并可携带精确 Compact 停止目标。
+# LLM: 原控制合同和 IM 专用命令拒绝不变；Gateway 凭据失败按 G2b 开关降级或拒绝，direct 完全不读本机凭据。
+# 函数用途: 按原模式执行控制，Gateway 的本机凭据错误携原因码和处置提示，不静默发送或重试。
 def execute_chat_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
@@ -90,7 +91,7 @@ def execute_chat_control(
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
     if execution.use_gateway:
-        return _execute_gateway_control(
+        return _credentialed_gateway_control(
             execution,
             command,
             message_id=message_id,
@@ -99,7 +100,18 @@ def execute_chat_control(
     return _execute_local_control(execution, command)
 
 
+# LLM: 开关打开时凭据异常在原控制重试之外收口；保持 G1 原因码，结构化 rejected 表示本次零请求，而非运输 UNKNOWN。
+# 函数用途: 把本机凭据失败转换为终端可显示、可读取原因码的控制结果。
+def _credentialed_gateway_control(execution, command, *, message_id: str, target_control_message_id: str):
+    try:
+        return _execute_gateway_control(execution, command, message_id=message_id, target_control_message_id=target_control_message_id)
+    except LocalClientCredentialError as exc:
+        return ConversationControlResult(command.kind, False, str(exc), error_code=exc.reason_code,
+                                         delivery_status="rejected", control_state="rejected")
+
+
 # LLM: 控制请求通过同一客户端写入；目录只投影一次，重试必须保持身份、目录与精确 Compact 目标不变。
+# G3 完整 Agent 分支在原身份头内附凭据；读取在 urlopen 的网络异常捕获之前：开关开时失败由外层返回未发送，开关关时降级。
 # 函数用途:向本机 Gateway 提交即时控制，保证多用户身份和精确停止目标不在传输层漂移。
 def _execute_gateway_control(
     execution: ChatControlExecution,
@@ -158,6 +170,7 @@ def _execute_gateway_control(
                     "Content-Type": "application/json",
                     "X-User-Id": "local-agent",
                     "X-Channel": "chat",
+                    **gateway_client_credentials(execution.agent).headers(),
                 },
             )
             try:
@@ -182,6 +195,7 @@ def _execute_gateway_control(
 
 # LLM: Polling a stable control operation is read-only and authenticates both owner and exact
 # conversation. An operation id locates a receipt but never substitutes for either scope fact.
+# G3 在原身份/会话头处追加唯一凭据；开关开时读取失败不创建 HTTP 请求，开关关时降级发送。
 # 函数用途: 按 Gateway 返回的 operation_id、当前 TUI 身份和精确会话查询最终状态。
 def request_gateway_control_status(
     execution: ChatControlExecution,
@@ -221,6 +235,7 @@ def request_gateway_control_status(
                 "X-User-Id": "local-agent",
                 "X-Channel": "chat",
                 "X-Conversation-Id": execution.state.session_id or "default",
+                **gateway_client_credentials(execution.agent).headers(),
             },
         )
         try:

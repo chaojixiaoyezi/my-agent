@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("gateway_client_credential")
+
 from agent_py_agent.agent.concurrency.interrupt import (
     interrupt_by_name,
     is_interrupted,

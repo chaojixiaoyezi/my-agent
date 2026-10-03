@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# LLM: 原显式授权 harness 的 ask/result/control 运输共用 G3 头；没有凭据不发送，不记录 token。
+# 模块用途: 经正式 HTTP 入口验证通道账本；此脚本仅在明确授权的验收环境运行。
 """第⑤组: CLI+飞书真实入口 × 工具边界/审计矩阵 harness(通道 E2E)。
 
 通过 测试机 常驻 gateway 的真实 HTTP 入口驱动(POST /ask = CLI/通道消息的
@@ -44,6 +46,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from agent_py_agent.cli.gateway_client_headers import gateway_script_headers
+
 # 终态集合(与 runtime_db/schema.py ToolOperation 状态机对齐)
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"}
 # 拒绝/失败类状态(不伪装成功)
@@ -75,6 +79,8 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# LLM: 沿原身份头附唯一 G3 凭据；调用方已有配置 token 就不读本机文件，失败在网络 try 前终止。
+# 函数用途: 向验收 Gateway 发送原请求并保留结构化回执，不输出秘密。
 def _http(method: str, url: str, payload: dict | None = None, headers: dict | None = None) -> dict:
     """调用 gateway HTTP 接口, 返回 JSON dict。"""
     data = None
@@ -85,6 +91,9 @@ def _http(method: str, url: str, payload: dict | None = None, headers: dict | No
         req.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
+    if not req.has_header("X-gateway-token"):
+        for key, value in gateway_script_headers().items():
+            req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             body = resp.read().decode("utf-8", errors="replace")

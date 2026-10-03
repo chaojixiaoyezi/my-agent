@@ -473,6 +473,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 网关局部信任 token(暴露部署用):非空时,非回环来源须带匹配的 X-Gateway-Token 才被信任,
     # 否则降为匿名 USER。默认空=只靠回环 peer 信任(适配器/CLI 走 127.0.0.1)。
     gateway_auth_token: str = ""
+    # G2b 上线闸(默认 false,强制阶段稳定后退场删除):true 时本机客户端读不到凭据(缺失/权限错/内容损坏)
+    # 直接拒绝请求(零请求、带原因码);false 时降级为不带凭据继续发送,由 Gateway 按 G2a 计数。
+    # 客户端与 Gateway 读同一份配置,两边口径一致。
+    gateway_require_local_credential: bool = False
     gateway_ready_timeout_seconds: int = 3
     # 安全重启第一段：停领新请求后，等本进程在跑回合结束的上限秒数；超时后关闭工具关口，停在工具前的回合由接班进程续跑。
     gateway_restart_turn_wait_seconds: int = 300

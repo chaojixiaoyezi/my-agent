@@ -78,6 +78,9 @@ class _FakeManager:
         self.start_error = start_error
         self.stopped = 0
 
+    def configure_gateway_client(self, agent) -> None:
+        assert agent.config.gateway_port == 1
+
     def start_all(self) -> None:
         if self.start_error is not None:
             raise self.start_error
@@ -123,6 +126,7 @@ def test_periodic_state_write_failure_does_not_kill_loop_and_recovers(tmp_path, 
 
 def _run_foreground_with(monkeypatch, gpaths, manager: _FakeManager) -> None:
     monkeypatch.setattr(adapter, "ChannelManager", lambda **kwargs: manager)
+    monkeypatch.setattr("agent_py_agent.agent.adapter.manager.configure_gateway_client", lambda manager, agent: manager.configure_gateway_client(agent))
     monkeypatch.setattr(adapter, "_register_requested_adapters", lambda manager, channel, agent: None)
     agent = SimpleNamespace(config=SimpleNamespace(gateway_port=1))
     adapter._run_adapter_foreground(agent, SimpleNamespace(channel="feishu"), gpaths)

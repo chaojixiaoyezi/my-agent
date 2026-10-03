@@ -1,3 +1,5 @@
+# LLM: 显式验收脚本只经原 ask/result 请求头附 G3 凭据，读取失败立即终止，不把 token 写入输出或参数。
+# 模块用途: 提交人工指定的验收输入并只读查询原结果；不能无凭据继续。
 """B项验收辅助:POST /ask 灌真实消息到网关并轮询完成。
 
 用法: python3 send_ask.py <prompt文件> [X-User-Id] [X-Channel] [--wait]
@@ -8,6 +10,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+from agent_py_agent.cli.gateway_client_headers import gateway_script_headers
 
 args = [a for a in sys.argv[1:] if a != "--wait"]
 wait = "--wait" in sys.argv
@@ -22,6 +26,7 @@ headers = {"Content-Type": "application/json"}
 if user_id:
     headers["X-User-Id"] = user_id
     headers["X-Channel"] = channel
+headers.update(gateway_script_headers())
 
 req = urllib.request.Request(
     "http://127.0.0.1:8420/ask",
@@ -38,7 +43,8 @@ if not wait or not request_id:
 for attempt in range(90):
     time.sleep(10)
     try:
-        r = urllib.request.urlopen(f"http://127.0.0.1:8420/result/{request_id}", timeout=10)
+        req = urllib.request.Request(f"http://127.0.0.1:8420/result/{request_id}", headers=headers)
+        r = urllib.request.urlopen(req, timeout=10)
         body = json.loads(r.read().decode("utf-8", "replace"))
         status = body.get("status") or body.get("final_status") or "?"
         out = (body.get("output") or body.get("response") or body.get("text") or "")

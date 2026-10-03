@@ -11,6 +11,7 @@
 |-- agent_py_agent/agent/attempt/process_run.py # 沙箱同步命令通用取消/超时：临时回调、TERM→宽限→KILL 整组回收及管道释放
 |-- agent_py_agent/agent/attempt/landlock_launcher.py # G5：Linux Landlock 端口拒绝启动器（exec bwrap 前按端口拒绝连本机 Gateway；自包含、fail-closed）
 |-- agent_py_agent/tests/test_pack_verification_cancellation.py # 块 6a：预取消零启动、真实父子组回收、取消入账和不返工，保留平台外复跑
+|-- agent_py_agent/tests/test_gateway_client_credentials.py # G3：随机端口假服务验证三类客户端、插件流、故障拒绝、单token与不泄漏
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
 |-- agent_py_agent/agent/capability_verification_manifest.py # 能力包 v2 可选核验声明：交付物识别、钉住的检查程序、输入策略
 |-- agent_py_agent/agent/capability_verifier_consent.py # 检查程序启用前确认、确认码与写入内容激活的同意摘要
@@ -216,6 +217,7 @@ agent_py_agent/
 |-- cli/                                # 命令行、chat/TUI、gateway 管理、诊断维护命令
 |   |-- chat.py                         # 本地 chat 入口
 |   |-- chat_client_context.py          # 轻量 Gateway TUI 客户端、活动输入三态与 input-status 查询
+|   |-- gateway_client_headers.py       # 仓库HTTP验收脚本复用原部署配置与G3凭据，不增传输入口
 |   |-- scenario.py                     # 隔离诊断场景注册、命令参数来源及 suite 调度
 |   |-- scenario_cases/                 # 各类诊断场景及其专用替身
 |   |   |-- runner_retry_case.py        # runner 重试场景，保留现有收口断言及其失败证据
@@ -491,6 +493,7 @@ agent_py_agent/
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
 |   |   |-- local_client_token.py       # G1：本机客户端持久凭据，缺则私有生成、宿主严格读取，不进模型环境
+|   |   |-- client_credentials.py       # G3：原请求头共用凭据选择，配置token优先；读不到时按 gateway_require_local_credential 降级或拒绝
 |   |   |-- http_routes.py              # G2a：实际HTTP分发和观察唯一同源，路由模板及四档属性
 |   |   |-- plugin_command_service.py  # TUI HTTP 与 IM 会话共用插件服务、可信 owner 目录和管理员授权
 |   |   |-- plugin_panels_http.py      # /client/plugin-panels：作用域解析、只读活动投影与展示服务调用
@@ -1573,6 +1576,9 @@ docs/
 - `agent_py_agent/agent/gateway_parts/background_sessions.py`：Gateway 停机收尾只读列出 owner 后台会话权威目录里仍未终态的受管进程（含监听范围事实），供停机事件与 status 投影；不停止、不改记录。
 - `agent_py_agent/agent/gateway_parts/loop_health.py`：Gateway 派发线程健康的唯一事实源（进程内、不做 IO）——起止、每次 tick 起止与派发数、从 tick 逃逸的异常、循环错误打印本身失败的次数；`dispatcher_alive` 由登记/退出记录加线程仍在 `threading.enumerate()` 判定。心跳与 `/status` 只扁平并入 `snapshot()`，不另算存活。
 - `agent_py_agent/agent/gateway_parts/local_client_token.py`：持久本机客户端凭据的宿主接口，缺则私有原子生成、严读有原因码，停机不删；插件 H2 与启动钩子同一路径。
+- `agent_py_agent/agent/gateway_parts/client_credentials.py`：G3宿主请求头的唯一凭据选择；配置token优先，只读G1接口；失败时按 `gateway_require_local_credential` 分流——开关关（默认）不带凭据继续发送并只记一次原因码warning，开关开在HTTP前拒绝；不生成、不修权限、不输出秘密。
+- `agent_py_agent/cli/gateway_client_headers.py`：没有Agent的仓库验收脚本复用原配置解析，不从argv或环境取凭据值，不新建HTTP通道。
+- `agent_py_agent/tests/test_gateway_client_credentials.py`：tmp_path凭据与随机端口假Gateway验证原运输头、插件流、开关关降级（不带凭据照发+warning一次）、开关开结构化拒绝、IM两态收口及泄漏防线。
 - `agent_py_agent/tests/test_gateway_local_client_token.py`：临时凭据生命周期/权限/坏文件、H2声明、环境与日志/status不泄露、启动根和重启复用。
 - `agent_py_agent/cli/gateway_loop_backoff.py`：`LoopErrorBackoff`，派发循环与后台主循环共用的"连续出错退避 + 打印限流"小工具：只算节奏不记账不打印，成功一次清零；防止 tick 持续出错时每 0.2 秒一条错误日志把刚腾出的磁盘再写满。
 - `agent_py_agent/tests/test_host_files_access.py`：H3 合同：宿主托管文件（`path_access_policy` 的 `HOST_CONFIG_*`、`HOST_STATE_*`、`HOST_CREDENTIAL_*`）对模型的文件工具与 Shell 只读（凭据对文件工具连读也拒），9b 盘点的每一项都有文件工具和真实沙箱用例；B 类任务树根留在 `tool_runtime_ledger`；宿主记忆工具照常写。

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# LLM: 原显式压测脚本 POST /ask 使用自身配置的 G3 凭据；公开 metrics 探针不读秘密，失败不发送任务。
+# 模块用途: 保留原独立验收环境的压力驱动，为原提交身份头附唯一 token。
 """网关并发压测驱动(T4 并发公平层量化,纯标准库,复用 GET /metrics 探针)。
 
 用法(先准备一份指向独立 my_agent_home 的 config;别用真实用户家目录):
@@ -33,6 +35,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from agent_py_agent.cli.gateway_client_headers import gateway_script_headers
 
 _WATCHED_SERIES = (
     "agent_gateway_requests_enqueued_total",
@@ -88,12 +92,14 @@ def _http_get(url: str, timeout: float = 5.0) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-def _post_ask(base: str, user: str, goal: str) -> tuple[int, str]:
+# LLM: 配置来自原 --config 而非新增 token 参数；凭据读取在网络 try 前，不能混入瞬时错误后继续发送。
+# 函数用途: 带宿主凭据发送原压测输入，不记录 token。
+def _post_ask(base: str, user: str, goal: str, config_path=None) -> tuple[int, str]:
     body = json.dumps({"kind": "ask", "goal": goal}).encode("utf-8")
     request = urllib.request.Request(
         f"{base}/ask",
         data=body,
-        headers={"Content-Type": "application/json", "X-User-Id": user, "X-Channel": "feishu"},
+        headers={"Content-Type": "application/json", "X-User-Id": user, "X-Channel": "feishu", **gateway_script_headers(config_path)},
         method="POST",
     )
     try:
@@ -263,11 +269,13 @@ def _start_sampler(base: str, interval: float, samples: list, stop: threading.Ev
     return thread
 
 
+# LLM: 并发度与入站正文不变，每个任务沿原配置选择凭据，失败由 future 明确传播而不是静默略过。
+# 函数用途: 并行提交原压测任务并汇总 HTTP 状态，不传 token 参数。
 def _blast(base: str, args) -> dict[int, int]:
     statuses: dict[int, int] = {}
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = [
-            pool.submit(_post_ask, base, f"u-press-{i % args.users:03d}", args.goal)
+            pool.submit(_post_ask, base, f"u-press-{i % args.users:03d}", args.goal, args.config)
             for i in range(args.requests)
         ]
         for future in futures:

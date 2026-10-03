@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("gateway_client_credential")
+
 from agent_py_agent.agent.adapter.delivery import (
     GatewayReplyDeliveryStore,
     GatewayReplyDeliveryWorker,

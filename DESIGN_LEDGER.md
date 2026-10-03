@@ -1,5 +1,21 @@
 # 设计台账
 
+## G3 本机客户端附带凭据：返工为「读不到即降级，只在 G2b 开关打开时拒绝」（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
+
+- **起因（3a 定）**：现在是 G2a 阶段，服务端只计数、不拦。客户端在凭据缺失/权限不对/内容损坏时于发 HTTP 前就拒绝，等于提前做了 G2b 的事——新运行时的 TUI 连上还没生成凭据的旧 Gateway（部署窗口里会遇到），或凭据文件权限被人改过，TUI、飞书适配器、插件命令就全断了。
+- **改法**：凭据读不到时客户端照常发请求，只是不带 `X-Gateway-Token`，由服务端按 G2a 计入“无凭据”；客户端记一条只带 G1 原因码的结构化 warning（不含凭据内容与路径），同一原因同一进程只记一次，不刷屏。只有配置项 `gateway_require_local_credential` 为 true（G2b 的开关，默认 false）时，才按原写法在发请求前拒绝、零请求并给原因码。客户端和 Gateway 读同一份配置，两边口径一致。非空 `gateway_auth_token` 优先且不读本机凭据、direct 模式不读凭据，两条不变。
+- **实现**：`gateway_parts/client_credentials.py` 的 `GatewayClientCredentials.headers()` 按 `require_local_credential` 分流，新增 `_warn_credential_degraded`（模块级去重集合 + 锁）；开关进 `settings/config.py` 与 `config/agent_config.yaml`（默认 false，注释写明退场计划）；`user_config_capability._CREDENTIAL_SWITCH_KEYS` 把它排除在凭据脱敏之外（回显要能看到 true/false），它仍是安全边界项、模型不能改。所有原身份头调用点接口不变，只改注释。
+- **验证**：三类原因 × 开关关降级（请求照发、无令牌头、warning 只记一次）/ 开关开拒绝（零请求 + 原因码）× TUI/CLI/IM 全绿；原有“附上凭据”用例全部保留。变异与命令见 TESTS。
+- **未验证**：真实 Gateway、真实 TUI/飞书渠道、旧客户端迁移与 `/status` 计数归零仍未做；G2b 强制的服务端半边仍归 G2b 那一块。
+
+## G3 本机客户端附带凭据（2026-10-03，sol1c，worker/sol1-g3-clients，已实现，待 9b 终审）
+
+- 代码提交 a1c617fec（WIP）；新增39项和guards9均通过，相关回归保留9条失败，不能当完整端到端验收通过。两条已在G1基线复现失败，其余尚待3a复核；命令与真实结果见 TESTS。
+- 在原身份头位置复用 G1 load_local_client_credential；TUI/CLI、插件普通与交互运输、IM ask/四个对账入口、仓库 HTTP 验收脚本统一附 X-Gateway-Token。文件队列与 direct 不改，不增加 HTTP 旁路。
+- 配置 gateway_auth_token 优先且唯一，不先读本机文件；G1 原因码保持，失败在 HTTP 前明确拒绝并给安全处置提示。IM durable 未发送故障交原 worker 收口，不循环重试；插件/Goal 不把未发送说成执行未知。
+- 凭据仅宿主进程内使用，不进日志、env、argv、异常、状态、持久队列或模型上下文。公开探针和其它服务（代理健康）不带 Gateway 凭据。
+- 本分支只基于 G1，不含 G2a；不做服务端强制、浏览器或仓库外工具。真实渠道、生产旧客户端重启与计数观察、平台隔离未验证，仍由集成者确认后再启 G2b。测试/变异/边界见 TESTS 与 [设计稿](docs/design/GATEWAY_LOCAL_TRUST.md)。
+
 ## Gateway 本机客户端凭据与迁移观察 G1+G2a（2026-10-03，sol1g + ds1g 返工，worker/sol1-g1-g2a，已实现，待 9b 复核）
 
 - 解决部署重启导致客户端凭据失效及凭据进入插件读范围的风险；凭据缺失才用 token_urlsafe(32) 生成，私有原子写落数据根 secrets/（0700、文件0600），停机不删，重启复用。

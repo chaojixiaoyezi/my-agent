@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("gateway_client_credential")
+
 
 def _config_with_access_mode(tmp_path, access_mode: str) -> str:
     path = tmp_path / f"agent-{access_mode}.yaml"

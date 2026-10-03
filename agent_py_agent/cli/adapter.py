@@ -1,4 +1,6 @@
-
+# LLM: 适配器生命周期复用原 Agent 数据根，启动通道前核对 G3 凭据；开关开且凭据不可读时拒绝启动，开关关时记一次降级 warning 后继续。
+# 秘密只留宿主请求头，不能传给 daemon、日志或状态。
+# 模块用途: 运行文件和 IM 适配器，凭据不可用时按 G2b 开关降级或拒绝启动无凭据的 Gateway 客户端。
 from __future__ import annotations
 
 """CLI entrypoints for file and channel adapters.
@@ -249,12 +251,17 @@ def _ensure_service_logging() -> None:
     logging.getLogger("agent_py_agent").setLevel(logging.INFO)
 
 
+# LLM: 先核对 Gateway 客户端凭据，再起通道/PID/状态；配置 token 优先；开关开且凭据失败时不启动无凭据客户端。
+# 函数用途: 在原适配器生命周期入口绑定宿主凭据并运行通道服务，不把秘密传给子进程或状态。
 def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     _ensure_service_logging()
     manager = ChannelManager(
         gateway_port=agent.config.gateway_port,
         delivery_state_dir=Path(gpaths.root) / "channel-delivery",
     )
+    from ..agent.adapter.manager import configure_gateway_client
+
+    configure_gateway_client(manager, agent)
     _register_requested_adapters(manager, options.channel, agent)
     globals()["_adapter_manager"] = manager
 

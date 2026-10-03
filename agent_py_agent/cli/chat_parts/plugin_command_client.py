@@ -1,12 +1,13 @@
-# LLM: 客户端只持会话范围的声明缓存，不拥有安装、权限或执行状态；Gateway 模式失败不能降级为本地目录。
+# LLM: 客户端只持声明缓存；Gateway 原身份头共用 G3 凭据，读取失败按 G2b 开关降级或拒绝，不降级本地或混成未知执行。
 # 模块用途: 为 plain 与 TUI 共用目录和管理提交，保留原 revision 与请求编号，断连后查询原结果。
 
 from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
+from ...agent.gateway_parts.local_client_token import LocalClientCredentialError
 from ...agent.plugin_command_catalog import PluginCommandCatalog
 from ...agent.plugin_command_service import (
     plugin_catalog_unavailable,
@@ -18,7 +19,48 @@ from ..chat_client_context import post_gateway_json
 from .command_interaction import CommandInteraction
 
 
-# LLM: 每个实例固定一个宿主连接与会话；序号只仲裁异步展示回写，不是目录版本或持久安装代次。
+# LLM: 只传递一次命令的显式输入，不持执行状态、凭据或路径，避免增加方法的零散参数。
+# 类用途: 固定读取或提交需要的命令文本、版本和交互引用。
+@dataclass(frozen=True)
+class _PluginRequest:
+    operation: str
+    text: str = ""
+    revision: str = ""
+    interaction: CommandInteraction | None = None
+
+
+# LLM: Gateway 目录、命令和流继续走原运输，身份头共用 G3，不重试或降级；工作目录仍由原权限规则决定。
+# 函数用途: 在原请求正文上附工作目录，选择普通或交互传输，不保存秘密。
+def _request_gateway_plugins(agent, payload: dict, interaction: CommandInteraction | None) -> dict:
+    from .gateway_client import _gateway_submit_workspace
+
+    value = _gateway_submit_workspace(agent, workspace_root=None, workspace_roots=None)
+    if value.get("cwd"):
+        payload["workspace"] = value
+    if interaction is not None and payload["operation"] == "command":
+        from .plugin_command_stream import post_plugin_command_stream
+
+        return post_plugin_command_stream(agent, payload, interaction)
+    status, result = post_gateway_json(agent, "/client/plugins", payload, timeout=3.0)
+    if status != 200:
+        raise ValueError("目录请求未成功")
+    return result
+
+
+# LLM: 响应只认公共布尔合同，坏目录不能成为缓存；命令已经执行的结果不因目录失效被抹去。
+# 函数用途: 验证并提取目录，目录读取失败抛错，命令回执缺目录时保留原结果。
+def _plugin_response_snapshot(operation: str, result: dict) -> PluginCommandCatalog | None:
+    if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+        raise ValueError("插件响应无效")
+    try:
+        return PluginCommandCatalog.from_payload(result["catalog"])
+    except (KeyError, TypeError, ValueError):
+        if operation == "catalog":
+            raise
+        return None
+
+
+# LLM: 每个实例固定一个宿主连接与会话，G3 只接原运输头；序号仲裁展示回写，不拥有执行或凭据状态。
 # 类用途: 保存一个聊天客户端最近看到的插件声明，并按用户操作读取或提交。
 class PluginCommandClient:
     # LLM: 构造不进行网络、磁盘或插件加载；use_gateway 来自 CLI 模式，不能由 agent 是否薄客户端推断。
@@ -51,10 +93,10 @@ class PluginCommandClient:
         with self._lock:
             return self._snapshot if self._snapshot_binding == self._binding() else None
 
-    # LLM: 每次提交冻结原身份及可选交互引用；Gateway 失败不能降级 direct，交互编号在 TUI Enter 时已固定。
+    # LLM: 每次提交冻结原身份及交互编号；开关开时 G3 凭据失败明确未发送，开关关时降级发送；网络断连才保留未知状态，不降级 direct。
     # 函数用途: 读取目录或提交命令，交互模式持续接收审批，失败保留原编号和未知结果。
-    def _request(self, operation: str, *, text: str = "", revision: str = "",
-                 interaction: CommandInteraction | None = None) -> dict:
+    def _request(self, request: _PluginRequest) -> dict:
+        operation, text, revision, interaction = request.operation, request.text, request.revision, request.interaction
         request_id = (interaction.request_id if interaction is not None else uuid.uuid4().hex) if operation == "command" else ""
         binding = None
         with self._lock:
@@ -68,19 +110,7 @@ class PluginCommandClient:
             if use_gateway:
                 payload = {"operation": operation, "conversation_id": conversation_id,
                            "command": text, "catalog_revision": revision, "plugin_request_id": request_id}
-                from .gateway_client import _gateway_submit_workspace
-
-                value = _gateway_submit_workspace(self.agent, workspace_root=None, workspace_roots=None)
-                if value.get("cwd"):
-                    payload["workspace"] = value
-                if interaction is not None and operation == "command":
-                    from .plugin_command_stream import post_plugin_command_stream
-
-                    result = post_plugin_command_stream(port, owner, payload, interaction)
-                else:
-                    status, result = post_gateway_json(port, owner, "/client/plugins", payload, timeout=3.0)
-                    if status != 200:
-                        raise ValueError("目录请求未成功")
+                result = _request_gateway_plugins(self.agent, payload, interaction)
             else:
                 manager = self._direct_manager(owner, conversation_id)
                 result = (
@@ -92,16 +122,13 @@ class PluginCommandClient:
                         cancellation_token=interaction.cancellation_token if interaction else None,
                     )
                 )
-            if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
-                raise ValueError("插件响应无效")
-            try:
-                snapshot = PluginCommandCatalog.from_payload(result["catalog"])
-            except (KeyError, TypeError, ValueError):
-                if operation == "catalog":
-                    raise
-                snapshot = None
+            snapshot = _plugin_response_snapshot(operation, result)
             if binding != self._binding():
                 raise ValueError("请求期间客户端作用域变化")
+        except LocalClientCredentialError as exc:
+            snapshot = None
+            result = {"ok": False, "state": "rejected", "error_code": exc.reason_code,
+                      "message": str(exc), "request_id": request_id}
         except Exception:  # noqa: BLE001 不重试命令、不改本地执行，不从传输错误猜未发生
             snapshot = None
             result = plugin_command_unknown(request_id) if request_id else plugin_catalog_unavailable()
@@ -129,9 +156,9 @@ class PluginCommandClient:
     # LLM: 仅显式 Tab/命令调用此入口；乱序旧响应不覆盖新快照，无轮询或自动重试。
     # 函数用途: 从宿主更新一次用于帮助与补全的目录。
     def refresh(self) -> dict:
-        return self._request("catalog")
+        return self._request(_PluginRequest("catalog"))
 
-    # LLM: 面板只经 Gateway 的展示服务取得，身份沿同一客户端绑定；direct 模式不在本进程启动插件，明确返回不可用。
+    # LLM: 面板经原 Gateway 运输带 G3 凭据；开关开时读取失败返回原因码且零请求，开关关时降级发送；direct 不读凭据或启动插件。
     #   传输失败返回空结果由调用方退避，不重试、不改写面板可见性。
     # 函数用途: 查询当前会话打开的插件面板内容。
     def panels(self, requested: tuple[tuple[str, str], ...]) -> dict:
@@ -142,7 +169,10 @@ class PluginCommandClient:
                  "error": "插件面板需要连接 Gateway"} for plugin_id, panel_id in requested]}
         payload = {"conversation_id": conversation_id,
                    "panels": [{"plugin_id": plugin_id, "panel_id": panel_id} for plugin_id, panel_id in requested]}
-        status, body = post_gateway_json(port, owner, "/client/plugin-panels", payload, timeout=2.0)
+        try:
+            status, body = post_gateway_json(self.agent, "/client/plugin-panels", payload, timeout=2.0)
+        except LocalClientCredentialError as exc:
+            return {"ok": False, "error_code": exc.reason_code, "message": str(exc)}
         return body if status == 200 and isinstance(body.get("panels"), list) else {}
 
     # LLM: 原 revision 与交互编号保持不变；刷新只读目录，失败不重放、不静默替换旧版本或审批消费者。
@@ -154,7 +184,7 @@ class PluginCommandClient:
         try:
             parsed = parse_plugin_command(text)
             if parsed is not None and parsed.action and parsed.action.name == "status" and not parsed.help_requested:
-                result = self._request("command", text=text, revision=revision, interaction=interaction)
+                result = self._request(_PluginRequest("command", text, revision, interaction))
                 if result.get("state") == "outcome_unknown":
                     return plugin_command_unknown(parsed.arguments.values["request"])
                 return result
@@ -168,4 +198,4 @@ class PluginCommandClient:
             snapshot = self.snapshot()
             if snapshot is None:
                 return plugin_catalog_unavailable()
-        return self._request("command", text=text, revision=revision or snapshot.revision, interaction=interaction)
+        return self._request(_PluginRequest("command", text, revision or snapshot.revision, interaction))

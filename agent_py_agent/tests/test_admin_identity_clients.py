@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("gateway_client_credential")
+
 from agent_py_agent.agent.adapter.manager import ChannelManager, GatewayAskSubmission
 from agent_py_agent.agent.adapter.protocol import IncomingMessage
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control

@@ -1,5 +1,6 @@
-
-
+# LLM: 通道仍沿原 durable worker，G3 凭据只在原 HTTP 身份头附加；读取失败按 G2b 开关处理——开关关（默认）
+#   降级为不带凭据继续发送，开关开才拒绝。秘密不进记录、日志或模型。
+# 模块用途: 管理 IM 提交和对账；本机凭据不可用时按开关降级或安全拒绝，敏感命令一次性提交不落盘。
 from __future__ import annotations
 
 """LLM: ChannelManager persists authenticated adapter ingress before any Gateway or provider IO.
@@ -8,6 +9,7 @@ it is never persisted and is submitted once directly.
 
 模块用途: 注册外部通道，并把入站消息交给可恢复的单线程投递状态机处理；可能带管理员密码的命令不落盘、直接提交一次。
 """
+# G3：提交和四条对账入口都在原身份头处加同一个宿主凭据；凭据不进入持久入站/回复记录。
 
 import json
 import logging
@@ -21,6 +23,9 @@ from typing import Any
 from ..command_catalog import sensitive_command_name
 from ..conversation.host_notices import with_host_notice_lines
 from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
+from ..gateway_parts.client_credentials import GatewayClientCredentials, gateway_client_credentials
+from ..gateway_parts.local_client_token import LocalClientCredentialError
+from ..user_space.home_layout import home_paths
 from .base import BaseChannelAdapter
 from .delivery import (
     GatewayControlReceiptResult,
@@ -268,14 +273,16 @@ def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
     return payload
 
 
-# LLM: Adapter identity headers are sourced only from the trusted incoming message structure.
-# 函数用途：为普通请求和控制请求生成同一组 Gateway 身份头。
-def _gateway_identity_headers(msg: IncomingMessage) -> dict[str, str]:
+# LLM: 身份只取可信入站结构，凭据只取宿主 G1/配置；凭据失败时开关开抛 G1 原因码、开关关降级省略头
+#   （由 G2a 计数兜底）。不能落盘秘密，也不静默改写身份头。
+# 函数用途: 为普通和控制提交生成原身份头及唯一的 Gateway token。
+def _gateway_identity_headers(msg: IncomingMessage, credentials: GatewayClientCredentials) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if msg.user_id:
         headers["X-User-Id"] = str(msg.user_id)
     if msg.channel:
         headers["X-Channel"] = str(msg.channel)
+    headers.update(credentials.headers())
     return headers
 
 
@@ -366,8 +373,7 @@ def _control_submission_needs_watcher(submission: GatewayAskSubmission) -> bool:
     }
 
 
-# LLM: This collaborator adapts ChannelManager IO primitives to the durable ingress worker's four
-# stage callbacks; it never owns state or starts a second execution path.
+# LLM: 只适配原 durable worker 四阶段，G3 凭据故障返回结构化拒绝以收口，不重试未发送的 POST 或新建状态机。
 # 类用途: 把媒体、Gateway、控制回复和 watcher 移交组装成入站 worker 可调用的阶段动作。
 class _ChannelIngressCoordinator:
     def __init__(self, manager: ChannelManager) -> None:
@@ -384,28 +390,33 @@ class _ChannelIngressCoordinator:
         self._manager._maybe_download_media(msg, retry_on_error=True)
         return _gateway_ask_payload(msg)
 
-    # LLM: POST uses content recovered from the persisted prepared payload. If the response is lost,
-    # the ingress row remains payload_ready and retries the same stable provider message body.
-    # 函数用途: 向 Gateway 提交已持久化的精确请求体，并返回可落盘的结构化回执。
+    # LLM: 原持久正文提交合同不变；G3 凭据失败落安全拒绝码而非网络重试，秘密不进持久行。
+    # 函数用途: 提交精确正文；本机凭据失败交给原 worker 收口并回复用户，不重试 POST。
     def submit_payload(
         self,
         record: GatewayIngressRecord,
     ) -> dict[str, object]:
         if not isinstance(record.gateway_payload, dict):
             raise ValueError("gateway ingress payload is missing")
-        submission = self._manager._submit_gateway_payload(
-            record.gateway_payload,
-            _gateway_ingress_message(record, prepared_content=True),
-        )
+        try:
+            submission = self._manager._submit_gateway_payload(
+                record.gateway_payload,
+                _gateway_ingress_message(record, prepared_content=True),
+            )
+        except LocalClientCredentialError as exc:
+            return {"ok": False, "kind": "credential_error", "error_code": exc.reason_code, "message": str(exc)}
         return asdict(submission)
 
-    # LLM: Control delivery and placeholder creation happen outside ingress store locks. Ordinary
-    # messages validate structured disposition before any provider placeholder side effect.
-    # 函数用途: 处理 Gateway 回执；控制命令直接收口，普通消息创建占位后等待 watcher 移交。
+    # LLM: 原提交回执保留；本机凭据失败用结构化 kind 收口，不创建回复 watcher、不重放；只发安全原因。
+    # 函数用途: 处理原回执或本机拒绝；只对已经发送的普通消息创建占位和 watcher。
     def advance_submission(
         self,
         record: GatewayIngressRecord,
     ) -> GatewayIngressAdvance:
+        if isinstance(record.submission, dict) and record.submission.get("kind") == "credential_error":
+            if not self._manager._send_gateway_reply(_gateway_ingress_message(record), record.ingress_id, record.submission["message"]):
+                raise RuntimeError("gateway credential error delivery was not accepted")
+            return GatewayIngressAdvance("completed")
         submission = _gateway_ingress_submission(record)
         msg = _gateway_ingress_message(record)
         request_id = submission.request_id
@@ -504,16 +515,41 @@ class _ChannelIngressCoordinator:
             )
 
 
-# LLM: This client is the only read-only HTTP projection for adapter reply reconciliation. It
-# preserves owner headers and returns WAIT for missing or transient server state.
-# 类用途: 查询 Gateway 的进度、输入三态和最终结果，不负责提交新任务或发送通道消息。
+# LLM: 启动前用原 Agent 数据根与部署 token 同次绑定提交及对账；开关开且凭据不可读时拒绝启动，
+#   开关关时记一次降级 warning 后继续启动。
+# 函数用途: 为适配器原运输设置唯一宿主凭据来源，不写日志、环境或状态文件。
+def configure_gateway_client(manager: ChannelManager, agent: object) -> None:
+    credentials = gateway_client_credentials(agent)
+    credentials.headers()
+    manager._reply_poll_client.credentials = credentials
+
+
+# LLM: 敏感提交不落盘、不重试；G2b 开关打开时凭据拒绝只返回安全原因，网络错误只记类型，不把密码或 token 带入日志。
+# 函数用途: 执行一次敏感控制提交，给原通道投递返回安全文案和编号。
+def _sensitive_gateway_submission(manager: ChannelManager, msg: IncomingMessage) -> tuple[str, str]:
+    reply_id = f"control-{msg.message_id}"
+    try:
+        submission = manager._submit_gateway_ask(msg)
+        return submission.operation_id or reply_id, submission.message or "系统命令没有返回结果。"
+    except LocalClientCredentialError as exc:
+        return reply_id, str(exc)
+    except Exception as exc:
+        logger.warning("敏感命令提交失败 channel=%s error_type=%s", msg.channel, type(exc).__name__)
+        return reply_id, _SENSITIVE_COMMAND_UNAVAILABLE
+
+
+# LLM: IM 对账仍只有原只读 HTTP 入口；各原身份头附同一宿主凭据。读取失败不被吞成网络 WAIT：
+#   开关开抛 G1 原因码，开关关降级为不带凭据（由 G2a 计数兜底）。
+# 类用途: 带凭据查询进度、输入、控制及结果；不提交新任务，不持久化秘密。
 class _GatewayReplyPollClient:
+    # LLM: 构造仅选路径，不读秘密；CLI 在启动前以原 Agent 数据根和配置 token 替换来源。
+    # 函数用途: 绑定原 Gateway 端口和进程内凭据来源，不发请求。
     def __init__(self, gateway_port: int) -> None:
         self._gateway_port = int(gateway_port)
+        self.credentials = GatewayClientCredentials(home_paths().root)
 
-    # LLM: Progress polling reads events after the durable cursor and returns the next typed cursor;
-    # rendering never changes delivery identity.
-    # 函数用途: 拉取并渲染一批新的 Gateway 进度事件。
+    # LLM: 原游标/身份保持，凭据在运输 try 之前读取；开关开时凭据异常不混成远端瞬时错误，开关关时降级发送。
+    # 函数用途: 带宿主凭据拉取并渲染 Gateway 进度，不写秘密。
     def poll_progress(self, pending: PendingGatewayReply) -> tuple[list[str], int]:
         import urllib.error
         import urllib.request
@@ -523,6 +559,7 @@ class _GatewayReplyPollClient:
             f"?since={pending.progress_cursor}"
         )
         headers = {"X-User-Id": pending.user_id, "X-Channel": pending.channel}
+        headers.update(self.credentials.headers())
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
@@ -541,9 +578,9 @@ class _GatewayReplyPollClient:
         ]
         return messages, max(pending.progress_cursor, int(body.get("next") or 0))
 
-    # LLM: This GET is a read-only reconciliation of the stable ingress id. HTTP errors bubble to
-    # the worker and therefore remain WAIT instead of becoming a user-visible terminal failure.
-    # 函数用途: 查询普通消息当前是等待活动回合、已消费、需排队还是终态未知。
+    # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，
+    #   开关关时降级为不带凭据；远端瞬时状态仍等待。
+    # 函数用途: 带凭据查询普通消息投递状态，不重复提交。
     def poll_input_receipt(self, pending: PendingGatewayReply) -> str:
         import urllib.error
         import urllib.parse
@@ -553,7 +590,7 @@ class _GatewayReplyPollClient:
         url = f"http://127.0.0.1:{self._gateway_port}/input-status/{request_id}"
         req = urllib.request.Request(
             url,
-            headers={"X-User-Id": pending.user_id, "X-Channel": pending.channel},
+            headers={"X-User-Id": pending.user_id, "X-Channel": pending.channel, **self.credentials.headers()},
         )
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
@@ -575,9 +612,9 @@ class _GatewayReplyPollClient:
             raise ValueError("gateway input status response has invalid input_state")
         return state
 
-    # LLM: Control reconciliation addresses the operation id but authenticates with the complete
-    # persisted issuer scope before verifying receipt aliases and the target turn.
-    # 函数用途: 携带通道、用户、会话和群聊身份查询控制回执，让 unknown 投递可跨重启安全对账。
+    # LLM: 控制仍按 operation ID 和完整签发范围对账；凭据在同一身份头入口添加，不改别名/目标核对合同。
+    #   开关开时读取失败不发请求，开关关时降级发送。
+    # 函数用途: 带宿主凭据及原通道/会话/群聊身份读取控制回执。
     def poll_control_receipt(
         self,
         pending: PendingGatewayReply,
@@ -595,6 +632,7 @@ class _GatewayReplyPollClient:
             "X-Channel-Chat-Type": pending.channel_chat_type,
             "X-Channel-Chat-Id": pending.channel_chat_id,
         }
+        headers.update(self.credentials.headers())
         req = urllib.request.Request(
             url,
             headers=headers,
@@ -640,9 +678,9 @@ class _GatewayReplyPollClient:
                 "gateway_control_status_config_invalid_state"
             ) from exc
 
-    # LLM: Result polling never turns transient transport failure or HTTP 5xx into final user text;
-    # only a structured 200 result/error is terminal for the current watcher.
-    # 函数用途: 查询一次最终结果；未完成或瞬时服务错误返回 None 继续等待。
+    # LLM: 凭据读取在广义运输异常捕获之外：开关开时失败明确抛原因码，开关关时降级为不带凭据；
+    #   真正的网络/5xx 仍沿原等待语义。
+    # 函数用途: 带宿主凭据查最终结果，秘密不进回复或日志，未完成继续等待。
     def poll_response(
         self,
         pending: PendingGatewayReply,
@@ -651,12 +689,12 @@ class _GatewayReplyPollClient:
         import urllib.error
         import urllib.request
 
+        url = f"http://127.0.0.1:{self._gateway_port}/result/{pending.request_id}"
+        req = urllib.request.Request(
+            url,
+            headers={"X-User-Id": pending.user_id, "X-Channel": pending.channel, **self.credentials.headers()},
+        )
         try:
-            url = f"http://127.0.0.1:{self._gateway_port}/result/{pending.request_id}"
-            req = urllib.request.Request(
-                url,
-                headers={"X-User-Id": pending.user_id, "X-Channel": pending.channel},
-            )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
             if resp.status == 200 and body.get("ok"):
@@ -686,9 +724,8 @@ def _reply_text_with_host_notices(body: dict) -> object:
     return with_host_notice_lines(content, delivery.get("host_notices")) if isinstance(content, str) else content
 
 
-# LLM: Manager is the composition root for adapters and the single durable ingress/reply worker;
-# new channel IO must be injected into that state machine rather than run in callback threads.
-# 类用途: 管理通道生命周期，并把外部消息可靠地提交、对账和回送给原用户。
+# LLM: IM 仍沿唯一入站/回复 worker；G3 凭据只在运输头使用，配置来源从 CLI Agent 绑定，不落到记录或模型上下文。
+# 类用途: 管理通道并以宿主凭据提交和对账；原用户身份和持久投递状态不变。
 class ChannelManager:
     """管理所有已注册的通道适配器，提供统一的启停和消息路由接口。"""
 
@@ -904,18 +941,10 @@ class ChannelManager:
         ).start()
         return True
 
-    # LLM: 只 POST 一次原 /ask 载荷（Gateway 在任何持久化之前脱敏并在模型之前拦截）；Gateway 不可达或返回错误时
-    #   只回复“服务暂时不可用”，不落盘、不重试。日志只记异常类型，不记正文。
-    # 函数用途: 直接提交一条敏感命令，并把 Gateway 返回的控制结果回复给原私聊。
+    # LLM: 敏感命令只提交一次；本机凭据失败给安全原因码和宿主处置提示，网络错误仍用固定不可用文案；不记录密码/秘密。
+    # 函数用途: 直接提交敏感控制并回复原私聊，凭据失败不请求、不持久化、不重试。
     def _deliver_sensitive_command(self, msg: IncomingMessage) -> None:
-        reply_id = f"control-{msg.message_id}"
-        try:
-            submission = self._submit_gateway_ask(msg)
-            text = submission.message or "系统命令没有返回结果。"
-            reply_id = submission.operation_id or reply_id
-        except Exception as exc:
-            logger.warning("敏感命令提交失败 channel=%s error_type=%s", msg.channel, type(exc).__name__)
-            text = _SENSITIVE_COMMAND_UNAVAILABLE
+        reply_id, text = _sensitive_gateway_submission(self, msg)
         try:
             self._send_gateway_reply(msg, reply_id, text)
         except Exception as exc:
@@ -972,9 +1001,8 @@ class ChannelManager:
     def _submit_gateway_ask(self, msg: IncomingMessage) -> GatewayAskSubmission:
         return self._submit_gateway_payload(_gateway_ask_payload(msg), msg)
 
-    # LLM: Durable ingress passes the exact gateway_payload already persisted before POST; this
-    # method must never rebuild or enrich it from mutable message content.
-    # 函数用途: 原样发送已持久化的 Gateway 请求体，并解析结构化输入去向回执。
+    # LLM: 原持久正文不变；凭据仅在原身份头附加，失败按 G2b 开关降级或拒绝；不把秘密写入入站/回复记录或日志。
+    # 函数用途: 带宿主凭据原样提交 Gateway 正文，再解析原结构化回执。
     def _submit_gateway_payload(
         self,
         payload: dict[str, object],
@@ -982,12 +1010,11 @@ class ChannelManager:
     ) -> GatewayAskSubmission:
         import urllib.request
 
-        # 转发真实渠道身份(走 127.0.0.1 回环=网关可信来源):渠道用户拿到自己的身份/USER 角色,
-        # 不再因"缺头"被当本机终端 admin(审计 #2:渠道用户全跑成 admin)。
+        # 渠道身份保持不变；迁移期虽仍信任回环，客户端已经按后续强制合同带宿主凭据。
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.gateway_port}/ask",
             data=json.dumps(payload).encode("utf-8"),
-            headers=_gateway_identity_headers(msg),
+            headers=_gateway_identity_headers(msg, self._reply_poll_client.credentials),
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8", "replace"))

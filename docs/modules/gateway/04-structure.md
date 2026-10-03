@@ -1,5 +1,19 @@
 # Gateway Structure
 
+## G3 返工：凭据降级与 G2b 开关（2026-10-03，g3f，待复审）
+
+- `gateway_parts/client_credentials.py`：新增 `GatewayClientCredentials.require_local_credential`（从同一份 AgentConfig 的 `gateway_require_local_credential` 取，默认 False）与 `_warn_credential_degraded`（模块级去重集合 + 锁，同一原因只记一次）。配置 token 非空仍优先且不读文件；本机凭据失败时开关关返回 `{}`、开关开抛 G1 原因码。
+- 所有原身份头调用点（chat_client_context、control_runtime、plugin_command_client/stream、tui_goal_editor、adapter.manager、cli/adapter、gateway_client_headers）不改接口，语义随上面的分流变化；注释已同步。
+- `settings/config.py` 与 `config/agent_config.yaml` 加开关默认 false；`user_config_capability._CREDENTIAL_SWITCH_KEYS` 把该开关排除在“凭据脱敏”之外（回显要能看到 true/false），它仍是安全边界项。
+
+## G3 CLI / IM 客户端运输（2026-10-03，sol1c，待 9b 终审）
+
+- gateway_parts/client_credentials.py 的 GatewayClientCredentials.headers：原 Agent.home_paths.root 为数据根，轻量脚本走 configured_home_root；配置 token 优先，否则只调用 G1 load。错误保留 reason_code/error_code，文案不含路径/内容/秘密。
+- CLI/TUI：chat_client_context._gateway_headers 是 GET/POST 与 plugin_command_stream 共用的原身份头构造点；post_gateway_json 接宿主对象以取同一配置和根，不新增 HTTP 运输。control_runtime 原 /control 与 /control-status 头同样加凭据；tui_goal_editor 保留本机拒绝原因码。
+- IM：cli/adapter 在启动通道前调用 adapter.manager.configure_gateway_client，提交与 _GatewayReplyPollClient 的 progress/input-status/control-status/result 同源。凭据从不进入 durable ingress/reply；已登记但未发送时故障交原 worker 明确拒绝并安全回复，不重放 POST。
+- scripts 的 send_ask、gateway_pressure、run_channel_e2e_group、run_r1_gate、run_r1_02_gate 在原身份头处用 cli/gateway_client_headers 复用部署配置。metrics 公开探针与代理健康不附秘密；故障注入、真实压测和生产端口未执行。
+- cli/gateway_client 与 chat_parts/gateway_client 的 submit_gateway_ask 是文件队列，不是 HTTP，保持原 H3 合同；direct 不读凭据。G2a/G2b、网页与仓库外工具未改，Full Access/同系统用户/关插件沙箱边界见设计第4节。
+
 ## G1+G2a 宿主凭据与同源路由观察（2026-10-03，sol1g，待初审/9b 终审）
 
 - gateway_parts/local_client_token.py 是路径、生成与读取的唯一权威；common/json_io 的共用锁和私有原子写确保只有一个生成者，读取不修改。
