@@ -1,5 +1,13 @@
 # 设计台账
 
+## memory_archive/context_bundles 快照私有写（luna2cb，2026-10-03，并入 step17i）
+
+- **问题**：上下文包快照含会话上下文；此前首次写入、latest 副本和合同字段重写走 `Path.write_text`，新文件/目录可能成为 0644/0755。
+- **修复**：三处统一使用 `common/json_io.write_private_text_file_atomic`；新增锚定 memory_archive 根、逐级 0700 创建/收紧 snapshots、context_bundles、日期目录的 helper，不 chmod memory_archive 根及其父目录。旧路径、文件名、JSON/Markdown 字节格式、返回值和调用顺序不变。
+- **验证**：临时目录的 0600/0700、旧 latest 收紧、重写与字节稳定性、三项变异及所有门禁见 TESTS.md 同名节；未读取真实 owner home。
+- **9b 复审补正**：memory_archive 根或其下任一级遇到符号链接时，跳过链接所在级及下级目录 chmod，以结构化 warning 记录 `reason_code=private_directory_symlink_skipped`；四个快照/latest 文件仍用私有原子写为 0600，回合不因链接抛错。
+- **目录锚点**：build_main_context_bundle 的保存入口只准备一次目录链；显式携带 archive root、目标目录与是否跳过权限收紧的结果供首次写入、latest 刷新及合同字段重写复用，不再按 `parents[]` 反推。复审后的红绿、C1–C6 与门禁回执见 TESTS.md 同名节。
+
 ## Gateway 本机来源信任收紧（be，2026-10-03，分支 `claude/be-gateway-local-trust`，基于 `claude/3a-step17h` `a602d6ad6`，9b、ae 评审通过，3a 2026-10-03 定稿，实施中，并入 step17i）
 
 - **实施进度**：G4（macOS 端口拒绝）在 `claude/be-g4-port-deny`（基于 step17i `3a81e6c4b`，头 `c4113baa8`，ae 两轮复审通过，并入 step17i）实现——进程内绑定端口注册表（Gateway 启停登记/注销实际 `server_address` 端口）、`AttemptSandboxSpec.deny_gateway_ports` 只对模型命令沙箱置位、macOS Seatbelt `(deny network-outbound (remote tcp "*:<port>"))`、`full_access` 也拒、插件沙箱不填。真 Seatbelt 17 条用例 + 6 变异（见 TESTS 同名节）。ae 复审 G4（必改预登记 + 应改 isolation→/status，已补）。

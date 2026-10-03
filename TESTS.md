@@ -1,5 +1,55 @@
 # 测试与发布验收
 
+## context_bundle 快照私有权限（2026-10-03，luna2cb，worker/luna2-context-bundle，本地并入 step17i）
+
+- **范围**：主快照 JSON/Markdown 与 latest 副本写入后为 0600；snapshots、context_bundles、日期目录逐级为 0700；旧 0644 latest 和 0755 日期目录重写后收紧。用例只用 `tmp_path`，Windows 按既有 POSIX 权限用例方式跳过。
+- **字节/行为**：分别核对 JSON 序列化和 Markdown 渲染的 UTF-8 字节与改动前格式一致，并核对文件名、返回路径、latest 内容一致。
+- **TDD**：首次有一条测试夹具因未预建临时 owner 的 memory_archive 根目录而触发 FileNotFoundError；修正夹具后，用旧写法的有效红测为 3 failed（观察到 0666/0644 文件权限）。实现后定向测试退出码 0，所有用例到达 100%。
+- **变异**：三项分别运行且均被抓住后还原：把主 JSON 写入改回 `Path.write_text`（首写权限断言失败）；跳过 `context_bundles` 中间目录的私有化（目录断言失败，出现 0777）；latest 改回 `Path.write_text`（旧 latest 仍为 0644）。
+- **聚焦命令**：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_main_context_bundle_contract.py agent_py_agent/tests/test_memory_archive_permissions.py agent_py_agent/tests/test_memory_file_permissions.py -q --tb=short -ra -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna2cb
+  ```
+- **guards9**：按 `~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt` 十个测试文件运行（含 `test_packaging.py`），退出码 0，达到 100%。命令：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py -q --tb=short -ra -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna2cb
+  ```
+- **静态门禁**：`check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` 退出码 0。
+- **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 输出 `新增告警: 0`、`消失告警: 9`。code-size 后执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
+
+
+### 9b 复审补正（2026-10-03）
+
+- **符号链接红绿**：修复前，`build_main_context_bundle(save=True)` 的 archive 根链接与 `snapshots/context_bundles` 链接两条 tmp_path 用例都以 `OSError` 失败；修复后两条退出码 0。断言四个 JSON/Markdown 与 latest 文件均为 0600、链接目标目录模式不变、非链接祖先仍按 0700 收紧，并且每次构建只记录一条带 `reason_code=private_directory_symlink_skipped` 的结构化 warning。
+- **目录链/锚点**：写入入口只调用一次逐级准备；结果携带显式 archive root 和目标目录，latest/合同字段重写复用，不再由 `base.parents[n]` 推算。链接所在级及其后代只创建缺少的目录、不 chmod；文件仍经私有原子写。
+- **C1–C6（逐项变异、逐项测试、每项后还原）**：
+  | 变异 | 单项 pytest 选择器 | 结果与捕获断言 |
+  |---|---|---|
+  | C1：把 memory_archive 根目录也 chmod | `context_bundle_first_write_is_private_and_byte_stable` | KILLED；根目录 0755→0700，根权限不变断言失败 |
+  | C2：移除根/子目录符号链接跳过 | `context_bundle_with_symlinked_archive_root or context_bundle_with_symlinked_date_parent` | KILLED；链接目标目录模式改变且 warning 缺失 |
+  | C3：latest JSON 改回普通 `write_text` | `context_bundle_write_tightens_legacy_latest_copies_and_date_directory` | KILLED；旧 latest 保留 0644 |
+  | C4：写入入口跳过唯一一次目录链准备 | `context_bundle_first_write_is_private_and_byte_stable` | KILLED；中间目录为 0777 而非 0700 |
+  | C5：JSON 额外追加 LF | `context_bundle_initial_writer_preserves_exact_bytes_before_rewrite` | KILLED；直接检查 `_write_bundle_files` 首写，捕获多出的 LF |
+  | C6：把目录锚点改成 memory_archive 的父目录 | `context_bundle_first_write_is_private_and_byte_stable` | KILLED；memory_archive 根目录被改为 0700 |
+- **C5 测试调整说明**：最初在完整 build 路径只变异首写时，后续合同字段重写会覆盖该差异，旧的端到端字节断言因此存活。为守住三个写入口的合同，新增 `test_context_bundle_initial_writer_preserves_exact_bytes_before_rewrite`，直接检查首写和 latest 的逐字节结果；同一首写追加 LF 变异复跑后被抓到。最终实现无变异残留。
+- **红绿与聚焦命令**：修复前两条符号链接用例失败；修复后新增用例及原三个测试文件最终运行退出码 0、输出到达 100%。每项 mutation 使用以下命令并以各自选择器单独运行：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_main_context_bundle_contract.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna2cb -k '<表中选择器>'
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_main_context_bundle_contract.py agent_py_agent/tests/test_memory_archive_permissions.py agent_py_agent/tests/test_memory_file_permissions.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna2cb
+  ```
+- **最终定向回归**：同节聚焦命令运行原三个测试文件（含两个新增 symlink 用例及首写字节用例），退出码 0、输出到达 100%。
+- **最终 guards9**：按上方 guards9 命令运行清单中的十个文件（含 `test_packaging.py`），退出码 0、输出到达 100%。
+- **本轮静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` → 退出码 0。
+- **尺寸差分原始输出**：
+  ```text
+  新增告警: 0
+  消失告警: 9
+  ```
+  strict code-size 后执行了 `git checkout -- CODE_SIZE_REPORT.md`；生成报告不提交。完整代码-size 值、尺寸差分输出均为实际运行结果。
+
 ## G4：模型命令沙箱按端口拒绝连本机 Gateway（be，2026-10-03，分支 `claude/be-g4-port-deny`，基于 step17i `3a81e6c4b`）
 
 - **新用例** `agent_py_agent/tests/test_gateway_port_deny.py`（17 条，macOS 真 Seatbelt）：

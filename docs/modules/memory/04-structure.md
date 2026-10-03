@@ -13,6 +13,8 @@
 - `memory_archive/` 写入点全部改私有：`agent_run_workspace`、`shared_workspace`、`task_workspace`、`storage`（hooks 快照与 audit 事件）、`runtime_fact_source`、`tokens`、`compact_circuit_breaker`、`compact_apply`、`tool_output_externalizer`、`artifact/registry`、`daily_ledger`。
 - `memory_archive/storage.tighten_memory_archive_permissions`：递归收紧已有文件 0600/目录 0700；只收紧不放松、不跟随符号链接（跳过计数）、失败按原因码计数；返回 `tightened_count/files/directories`、`failed_count`、`failure_codes`、`symlink_skipped_count`。
 - `user_space/owner_maintenance`：`run_owner_retention_if_due` 里挂一步收紧，回执写 `maintenance.json` 的 `memory_archive_permissions` 键；memory_archive 不存在返回全零。
+- `context_bundles` 回合快照同样私有：JSON/Markdown 与 latest 副本为 0600，snapshots、context_bundles、日期目录逐级为 0700。
+- memory_archive 根或子目录是符号链接时，跳过该层及后代目录的权限收紧并记 `reason_code=private_directory_symlink_skipped` warning；快照与 latest 仍以私有原子写保为 0600，链接目标目录权限不变。
 
 ## S7 两条后续（2026-10-03，分支 `worker/luna1-s7-followups`，提交 `c8da199c8b35e9d7162797c3bf6da567b68c9960`）
 

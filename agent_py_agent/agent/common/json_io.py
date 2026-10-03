@@ -43,6 +43,16 @@ _JSON_FILE_LOCKS: weakref.WeakValueDictionary[str, _PathLock] = weakref.WeakValu
 _JSON_FILE_LOCKS_GUARD = threading.Lock()
 
 
+# LLM: 保存显式归档根锚点和符号链接警告；同一回合的快照写入共用此结果，避免重复遍历目录链。
+# 类用途: 保存私有目录链的锚点、目标、收紧状态与结构化警告，避免后续写入再次遍历目录。
+@dataclass(frozen=True)
+class PrivateDirectoryChainResult:
+    root: Path
+    directory: Path
+    directories_private: bool
+    warning: dict[str, object] | None = None
+
+
 @dataclass(frozen=True)
 class JsonObjectReadReport:
     payload: dict[str, Any]
@@ -283,13 +293,17 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
         _unlink_tmp_file(tmp)
 
 
-# LLM: 记忆本体、归档、向量库、正文缓存，以及候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像这类带记忆原文或可反推内容的文件专用：临时文件一出生就是 0600
-#   （os.open 带 0o600，再显式 chmod，不受 umask 影响），替换后的目标自然是 0600；已有 644 的文件下次写入即被收紧。
-#   父目录按 0700 新建并收紧（只动直接父目录；收紧失败不挡写入，文件本身仍是 0600）。调用方须已持有 locked_json_path。
-#   改动同步 test_memory_file_permissions 与 test_semantic_memory_storage。
-# 函数用途: 以“仅本人可读写”的权限原子替换一个文本文件（写文件、可能 chmod 父目录）。
-def write_private_text_file_atomic_unlocked(path: Path, content: str) -> None:
-    _ensure_private_dir(path.parent)
+# LLM: 默认只收紧直接父目录；若调用方已完成目录链准备或要保留符号链接目标权限，可关闭该步，临时文件仍出生即 0600。
+#   调用方必须保证父目录存在，并已决定是否允许对它 chmod；路径锁仍由调用方持有。
+# 函数用途: 在既有锁内以 0600 临时文件原子替换正文，可按目录链结果跳过父目录 chmod。
+def write_private_text_file_atomic_unlocked(
+    path: Path,
+    content: str,
+    *,
+    ensure_parent_private: bool = True,
+) -> None:
+    if ensure_parent_private:
+        _ensure_private_dir(path.parent)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -312,12 +326,60 @@ def _ensure_private_dir(directory: Path) -> None:
         return
 
 
-# LLM: 不持锁的调用方用这个入口；锁协议与 write_text_file_atomic 相同（per-path 线程锁 + fcntl），
-#   落盘复用 unlocked 私有写。记忆归档这类含会话/任务正文的文件禁止再直接 write_text。
-# 函数用途: 以仅本人可读写的权限原子替换一个文本文件（自取锁；写文件、可能 chmod 目录）。
-def write_private_text_file_atomic(path: Path, content: str) -> None:
+# LLM: 仅在 memory_archive 锚点下逐级创建/收紧目录；发现符号链接时保留目标权限并返回结构化原因码，调用方仍可私有写文件。
+# 函数用途: 准备私有目录链；符号链接及其下级目录不收紧，但确保快照目录存在。
+def ensure_private_directory_chain(
+    root: Path,
+    directory: Path,
+) -> PrivateDirectoryChainResult:
+    anchor = Path(os.path.abspath(root))
+    target = Path(os.path.abspath(directory))
+    try:
+        relative = target.relative_to(anchor)
+    except ValueError as exc:
+        raise ValueError("private directory must be below its anchor") from exc
+    if anchor.is_symlink():
+        return _skip_private_directory_chain(anchor, target, anchor)
+    current = anchor
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            return _skip_private_directory_chain(anchor, target, current)
+        _ensure_private_dir(current)
+    return PrivateDirectoryChainResult(anchor, target, True)
+
+
+# LLM: 符号链接可能指向搬迁后的归档；缺失下级目录按默认掩码创建，但绝不对链接或目标执行 chmod。
+# 函数用途: 遇到符号链接时保留该级及后代目录的权限，返回单条结构化警告供快照写入者记录。
+def _skip_private_directory_chain(
+    anchor: Path,
+    target: Path,
+    symlink_path: Path,
+) -> PrivateDirectoryChainResult:
+    target.mkdir(parents=True, exist_ok=True)
+    warning = {
+        "reason_code": "private_directory_symlink_skipped",
+        "severity": "warning",
+        "path": symlink_path.relative_to(anchor).as_posix(),
+        "message": "检测到目录符号链接，跳过该级及下级目录权限收紧。",
+    }
+    return PrivateDirectoryChainResult(anchor, target, False, warning)
+
+
+# LLM: 使用与 write_text_file_atomic 相同的 per-path 线程锁 + fcntl；父目录收紧可由显式参数关闭，防止链接目标被 chmod。
+# 函数用途: 自取锁，以 0600 文件原子替换文本；仅在 ensure_parent_private 为真时收紧直接父目录。
+def write_private_text_file_atomic(
+    path: Path,
+    content: str,
+    *,
+    ensure_parent_private: bool = True,
+) -> None:
     with _locked_json_path(path):
-        write_private_text_file_atomic_unlocked(path, content)
+        write_private_text_file_atomic_unlocked(
+            path,
+            content,
+            ensure_parent_private=ensure_parent_private,
+        )
 
 
 # LLM: 输出与 write_json_file_atomic 逐字节一致（indent=2、可选 sort_keys、尾换行），只是权限走私有；

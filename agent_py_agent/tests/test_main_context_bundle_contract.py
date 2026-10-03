@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import stat
+from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.agent_core.runtime.loop_support import build_runtime_main_context_bundle
+from agent_py_agent.agent.common.json_io import (
+    PrivateDirectoryChainResult,
+    ensure_private_directory_chain,
+)
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
     RawMemoryEvent,
@@ -26,18 +37,251 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
 )
 from agent_py_agent.agent.user_space.context_bundle import (
     MainContextBundleRequest,
+    _rewrite_bundle_files,
+    _write_bundle_files,
     build_main_context_bundle,
 )
 from agent_py_agent.agent.user_space.context_bundle_artifacts import (
     MainContextBundleArtifactUpdateRequest,
     update_main_context_bundle_artifacts,
 )
+from agent_py_agent.agent.user_space.context_bundle_rendering import render_markdown_bundle
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests._tool_runtime_harness import (
     make_test_model_spec,
     runtime_snapshot_for_model_specs,
 )
+
+_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX 权限位语义")
+
+
+@pytest.fixture
+def open_umask():
+    previous = os.umask(0)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _private_context_bundle_inputs(tmp_path: Path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    home_paths = ensure_my_agent_home(tmp_path / "home")
+    (Path(home_paths.owner_home_dir) / "memory_archive").mkdir(mode=0o755)
+    request = MainContextBundleRequest(
+        root=root,
+        home_paths=home_paths,
+        user_prompt="包含会话上下文的私有快照",
+        request_id="bundle-private",
+        run_id="run-private",
+        task_id="task-private",
+        save=False,
+        created_at="2026-10-03T12:00:00+00:00",
+    )
+    result = build_main_context_bundle(request)
+    return request, result.bundle or {}, home_paths
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def _expected_json_bytes(bundle: dict[str, object]) -> bytes:
+    return json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+
+
+@_POSIX_ONLY
+def test_context_bundle_initial_writer_preserves_exact_bytes_before_rewrite(
+    tmp_path: Path, open_umask
+) -> None:
+    request, bundle, home_paths = _private_context_bundle_inputs(tmp_path)
+    archive = Path(home_paths.owner_home_dir) / "memory_archive"
+    base = archive / "snapshots" / "context_bundles" / date.today().isoformat()
+    directory_result = ensure_private_directory_chain(archive, base)
+    json_path, markdown_path = _write_bundle_files(request, bundle, directory_result)
+    latest_json = base / "latest_context_bundle.json"
+    latest_markdown = base / "latest_context_bundle.md"
+    expected_json = _expected_json_bytes(bundle)
+    expected_markdown = render_markdown_bundle(bundle, json_path=str(json_path)).encode("utf-8")
+
+    assert json_path.read_bytes() == expected_json
+    assert markdown_path.read_bytes() == expected_markdown
+    assert latest_json.read_bytes() == expected_json
+    assert latest_markdown.read_bytes() == expected_markdown
+
+
+@_POSIX_ONLY
+def test_context_bundle_first_write_is_private_and_byte_stable(tmp_path: Path, open_umask) -> None:
+    request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
+    archive = Path(home_paths.owner_home_dir) / "memory_archive"
+    archive_mode = _mode(archive)
+    owner_home_mode = _mode(archive.parent)
+
+    result = build_main_context_bundle(replace(request, save=True))
+    bundle = result.bundle or {}
+    json_path = Path(result.json_path)
+    markdown_path = Path(result.markdown_path)
+    base = json_path.parent
+    snapshots = archive / "snapshots"
+    context_bundles = snapshots / "context_bundles"
+    latest_json = base / "latest_context_bundle.json"
+    latest_markdown = base / "latest_context_bundle.md"
+    expected_json = _expected_json_bytes(bundle)
+    expected_markdown = render_markdown_bundle(bundle, json_path=str(json_path)).encode("utf-8")
+
+    assert json_path.name == "bundle-private.json"
+    assert markdown_path.name == "bundle-private.md"
+    assert {_mode(path) for path in (json_path, markdown_path, latest_json, latest_markdown)} == {0o600}
+    assert {_mode(path) for path in (snapshots, context_bundles, base)} == {0o700}
+    assert _mode(archive) == archive_mode
+    assert _mode(archive.parent) == owner_home_mode
+    assert json_path.read_bytes() == expected_json
+    assert markdown_path.read_bytes() == expected_markdown
+    assert latest_json.read_bytes() == expected_json
+    assert latest_markdown.read_bytes() == expected_markdown
+
+
+@_POSIX_ONLY
+def test_context_bundle_rewrite_tightens_files_and_preserves_exact_output(tmp_path: Path) -> None:
+    request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
+    archive = Path(home_paths.owner_home_dir) / "memory_archive"
+    result = build_main_context_bundle(replace(request, save=True))
+    bundle = result.bundle or {}
+    json_path = Path(result.json_path)
+    markdown_path = Path(result.markdown_path)
+    base = json_path.parent
+    snapshots = archive / "snapshots"
+    context_bundles = snapshots / "context_bundles"
+    latest_json = base / "latest_context_bundle.json"
+    latest_markdown = base / "latest_context_bundle.md"
+    for path in (json_path, markdown_path, latest_json, latest_markdown):
+        os.chmod(path, 0o644)
+
+    rewritten = json.loads(json.dumps(bundle, ensure_ascii=False))
+    rewritten["tooling"]["runtime_injection_count_before_bundle"] += 1
+    directory_result = PrivateDirectoryChainResult(archive, base, True, None)
+    _rewrite_bundle_files(json_path, markdown_path, rewritten, directory_result)
+    expected_json = _expected_json_bytes(rewritten)
+    expected_markdown = render_markdown_bundle(rewritten, json_path=str(json_path)).encode("utf-8")
+
+    assert {_mode(path) for path in (json_path, markdown_path, latest_json, latest_markdown)} == {0o600}
+    assert {_mode(path) for path in (snapshots, context_bundles, base)} == {0o700}
+    assert json_path.read_bytes() == expected_json
+    assert markdown_path.read_bytes() == expected_markdown
+    assert latest_json.read_bytes() == expected_json
+    assert latest_markdown.read_bytes() == expected_markdown
+
+
+@_POSIX_ONLY
+def test_context_bundle_write_tightens_legacy_latest_copies_and_date_directory(tmp_path: Path) -> None:
+    request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
+    archive = Path(home_paths.owner_home_dir) / "memory_archive"
+    snapshots = archive / "snapshots"
+    context_bundles = snapshots / "context_bundles"
+    base = context_bundles / date.today().isoformat()
+    base.mkdir(parents=True)
+    os.chmod(snapshots, 0o700)
+    os.chmod(context_bundles, 0o700)
+    os.chmod(base, 0o755)
+    latest_json = base / "latest_context_bundle.json"
+    latest_markdown = base / "latest_context_bundle.md"
+    for path in (latest_json, latest_markdown):
+        path.write_text("stale legacy copy", encoding="utf-8")
+        os.chmod(path, 0o644)
+
+    result = build_main_context_bundle(replace(request, save=True))
+    json_path = Path(result.json_path)
+    markdown_path = Path(result.markdown_path)
+
+    assert json_path.parent == base
+    assert markdown_path.parent == base
+    assert {_mode(path) for path in (json_path, markdown_path, latest_json, latest_markdown)} == {0o600}
+    assert {_mode(path) for path in (snapshots, context_bundles, base)} == {0o700}
+    assert latest_json.read_bytes() == json_path.read_bytes()
+    assert latest_markdown.read_bytes() == markdown_path.read_bytes()
+
+
+@_POSIX_ONLY
+def test_context_bundle_with_symlinked_archive_root_writes_private_files_and_warns(
+    tmp_path: Path, caplog
+) -> None:
+    request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
+    archive = Path(home_paths.owner_home_dir) / "memory_archive"
+    moved_archive = tmp_path / "moved-archive"
+    archive.rename(moved_archive)
+    snapshots = moved_archive / "snapshots"
+    context_bundles = snapshots / "context_bundles"
+    base = context_bundles / date.today().isoformat()
+    base.mkdir(parents=True)
+    for directory in (moved_archive, snapshots, context_bundles, base):
+        os.chmod(directory, 0o755)
+    before_modes = {_mode(path) for path in (moved_archive, snapshots, context_bundles, base)}
+    os.symlink(moved_archive, archive, target_is_directory=True)
+
+    with caplog.at_level(logging.WARNING):
+        result = build_main_context_bundle(replace(request, save=True))
+
+    files = (
+        Path(result.json_path),
+        Path(result.markdown_path),
+        Path(result.json_path).parent / "latest_context_bundle.json",
+        Path(result.json_path).parent / "latest_context_bundle.md",
+    )
+    assert all(path.is_file() for path in files)
+    assert {_mode(path) for path in files} == {0o600}
+    assert {_mode(path) for path in (moved_archive, snapshots, context_bundles, base)} == before_modes
+    assert archive.is_symlink()
+    _assert_private_directory_symlink_warning(caplog, ".")
+
+
+@_POSIX_ONLY
+def test_context_bundle_with_symlinked_date_parent_keeps_target_modes_and_warns(
+    tmp_path: Path, caplog
+) -> None:
+    request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
+    archive = Path(home_paths.owner_home_dir) / "memory_archive"
+    snapshots = archive / "snapshots"
+    snapshots.mkdir(mode=0o755)
+    target = tmp_path / "moved-context-bundles"
+    target.mkdir(mode=0o755)
+    base = target / date.today().isoformat()
+    base.mkdir(mode=0o755)
+    os.chmod(archive, 0o755)
+    os.chmod(snapshots, 0o755)
+    os.chmod(target, 0o755)
+    os.chmod(base, 0o755)
+    link = snapshots / "context_bundles"
+    os.symlink(target, link, target_is_directory=True)
+
+    with caplog.at_level(logging.WARNING):
+        result = build_main_context_bundle(replace(request, save=True))
+
+    files = (
+        Path(result.json_path),
+        Path(result.markdown_path),
+        Path(result.json_path).parent / "latest_context_bundle.json",
+        Path(result.json_path).parent / "latest_context_bundle.md",
+    )
+    assert all(path.is_file() for path in files)
+    assert {_mode(path) for path in files} == {0o600}
+    assert _mode(archive) == 0o755
+    assert _mode(snapshots) == 0o700
+    assert (_mode(target), _mode(base)) == (0o755, 0o755)
+    assert link.is_symlink()
+    _assert_private_directory_symlink_warning(caplog, "snapshots/context_bundles")
+
+
+def _assert_private_directory_symlink_warning(caplog, expected_path: str) -> None:
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "reason_code", "") == "private_directory_symlink_skipped"
+    ]
+    assert len(records) == 1
+    assert records[0].structured_warning["severity"] == "warning"
+    assert records[0].structured_warning["path"] == expected_path
 
 
 def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path: Path) -> None:
