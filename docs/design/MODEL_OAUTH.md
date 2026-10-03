@@ -88,6 +88,13 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
 - **依赖**：直接使用 `websockets`（BSD-3-Clause）。它原已随 `lark-oapi`（飞书长连接）安装，现在 pyproject 显式声明。
   收益是与服务商推荐的传输一致、长回复不断线；替代方案（标准库自写 RFC 6455 客户端）要自己处理握手、掩码、分片、ping 和代理 CONNECT，
   代码量与风险更大，不采用。
+- **握手超时交回合层退避（2026-10-03）**：生产上出现过 8 次整轮失败，全是 chatgpt.com 的握手超时（TLS 握手 `_ssl.c` 超时、升级握手
+  `timed out while waiting for handshake response`），其中 6 次挤在 25 秒内，是一次网络抖动；这些回合已经跑了十几到三十几轮工具，
+  一次握手超时就整轮失败。原因是对照路径不一致：SSE 把连接阶段超时归 `first_event`，回合层会退避重试；WebSocket 少了这一步，
+  落成 `provider_declared`，而回合层明确不放行这个 stage（它也可能表示“请求已发出后读超时”，重放会让服务商可能已处理的请求被重发）。
+  现在 `_handshake_error` 里无状态码的失败先判超时，是超时就归 `first_event`，复用 `gateway_helpers._is_timeout_exception`；
+  握手阶段连接还没打开、`response.create` 还没发出，所以不存在重放已发出的采样请求。`_is_transient_network_error`（所有 HTTP 共用）、
+  回合层放行集合、连接打开后的 first_event / stream_idle 分类、非超时握手失败分类、握手中用户停止优先，都保持不变。
 
 ### 订阅接口的流式输出（2026-09-30 热修）
 

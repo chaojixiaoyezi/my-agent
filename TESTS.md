@@ -38,6 +38,33 @@
 - **门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；Ruff 首次发现 `model_connections.py` 的 I001 导入格式问题，修正后 `$PY -m ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2228 hard=0 high-risk=1523 soft=705 test_advisory=1241 blocked=False`，随后按要求还原 `CODE_SIZE_REPORT.md`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。`size_diff.sh` 实际输出：`新增告警: 0`、`消失告警: 7`。
 - 尚未验证真实 TUI/Gateway、供应商连接、重启后向量模型采用及实际向量请求；以上仅证明当前源代码的单元/本地组件链路。`git diff --check` 在最终文档变更后退出码 0；本地提交号见交接报告。
 
+## ChatGPT 订阅 WebSocket 握手超时交回合层退避（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基线 `7e421024f`）
+
+- **改了什么**：`backends/responses_websocket._handshake_error` 里，无状态码的握手失败先判超时，是超时就归 `_stream_timeout_error(request, "first_event")`（复用 `gateway_helpers._is_timeout_exception`）。这样 chatgpt.com 的 Responses WebSocket 握手超时（TLS / 升级握手）走 SSE 同一条分类，回合层 `provider_transient_auto_resume` 会按 10/25/45/100/180 秒退避重试，不再整轮失败。`_is_transient_network_error`、回合层放行集合、连接打开后的分类、非超时握手失败分类、用户停止优先，都保持不变。
+- **先做的事实核对（防止“猜异常类型”）**：
+  - 本机实测 TLS 握手超时抛 `TimeoutError('_ssl.c:993: The handshake operation timed out')`（`isinstance(exc, TimeoutError)` 为真，MRO 是 TimeoutError→OSError）；
+  - 本机 websockets 15.0.1 源码里，TCP/TLS/HTTP 代理握手超时 `raise TimeoutError(...)`，升级握手超时 `raise TimeoutError("timed out while waiting for handshake response")`。
+  - 两者都被 `_is_timeout_exception` 覆盖，所以不需要在 websocket 模块里另写类型判断。
+- **新增 9 个用例**（`agent_py_agent/tests/test_responses_websocket.py`，全用假连接、不联网）：
+  1. `test_handshake_timeout_is_a_first_event_stream_timeout_and_never_sends`：握手超时归 `first_event`；那次尝试没有任何 `send`。
+  2. `test_handshake_timeout_sends_nothing_when_no_retry_is_allowed`：`max_retries=0` 时直接上抛，错误正文是“模型接口等待首个流式事件超时”，全程只有建连尝试。
+  3. `test_handshake_timeout_round_ends_before_any_request_is_sent`：握手超时这一轮不会进入发送阶段（send 次数 0）。
+  4. `test_handshake_timeout_round_is_retried_by_the_turn_auto_resume`：按真实链路串起来——传输层第一次握手超时、第二次成功，交给回合层 `run_with_provider_transient_auto_resume` 后回合完成，只等一次（2.0 秒），并记一次 `attempt=1`、`error_type=ProviderTimeoutError` 的重试进度；这是本任务的核心行为证据。
+  5. `test_handshake_timeout_is_left_for_the_turn_layer_by_generation`：生成层 `_retry_once_after_timeout` 对 `stage=first_event` 返回 `None`（交给回合层，不在生成层立刻多打一枪）。
+  6. `test_handshake_non_timeout_failures_keep_their_classification`：带 503 走 HTTP 分类（`ProviderTransientError`）、连接被拒走网络分类、其它 `OSError` 保持不是 `ProviderTimeoutError`。
+  7. `test_handshake_user_stop_wins_over_timeout`：握手中用户停止仍是 `InterruptedError`，只连一次、不重试。
+  8. `test_post_open_silence_keeps_its_original_stages`：连接打开、`response.create` 之后的静默超时仍是 `first_event` / `stream_idle`。
+  9. 同文件既有用例覆盖握手成功、中途断开、发送许可拒绝等原行为，本次全部保持通过。
+- **跑过的命令与结果**（Python 用 `~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，cwd 是工作树根）：
+  - `PYTHONPATH=$PWD … -m pytest agent_py_agent/tests/test_responses_websocket.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-wsto` → **17 passed**。
+  - 相关 7 个文件（`test_responses_websocket.py`、`test_provider_transient_auto_resume.py`、`test_provider_error_classifier.py`、`test_timeout_gate5_retry.py`、`test_stream_timeout_contract.py`、`test_timeout_gate2_stages.py`、`test_provider_timeout_acceptance.py`）→ **95 passed**。
+- **变异（4 个，都被测出）**：
+  1. 去掉超时分支、仍归 `provider_declared` → 用例 1/2/3/4 全红。
+  2. 归成 `_stream_timeout_error(request, "stream_idle")` → 用例 1/2/3 红。
+  3. 无状态码失败一律归 `first_event`（非超时也归） → 用例 6 红。
+  4. 去掉 `_handshake_error` 里的用户停止优先判断 → 用例 7 红。
+  变异方法是临时改产品文件、跑同一文件后立刻还原（还原后 `git diff` 只含预期改动）。
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

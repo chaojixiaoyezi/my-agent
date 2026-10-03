@@ -3,8 +3,10 @@
 #   逐条产出与 SSE data 相同的 JSON 事件文本，交给 responses_wire.collect_response，不另建解析或状态。
 #   09-30 实测：普通 SSE 长输出在服务端中途卡住、约 60 秒后被关（gpt-6-luna 4/4），同一请求走 WebSocket 2/2 完整。
 #   超时语义与 SSE 相同：首个事件单独预算，之后按 request.timeout 滚动空闲；/stop 立即关连接并抛 InterruptedError；
-#   握手失败沿 HTTP 同一分类（_runtime_http_error / _runtime_network_error）并按同一有限次数重试；回复完成前断开抛可恢复的
-#   ProviderTransientError（文本带阶段、连接后秒数和关闭码，供排查），交给上层模型重试。实验发送许可不支持（拒绝发送）。
+#   握手失败沿 HTTP 同一分类（_runtime_http_error / _runtime_network_error）并按同一有限次数重试；握手阶段的超时
+#   （TLS/升级握手，response.create 还没发出）照 SSE 归 first_event，交给回合层退避重试，不落 provider_declared；
+#   回复完成前断开抛可恢复的 ProviderTransientError（文本带阶段、连接后秒数和关闭码，供排查），交给上层模型重试。
+#   实验发送许可不支持（拒绝发送）。
 #   与官方 Codex 一致不主动发心跳 ping，只自动回应服务端 ping（09-30 审计：49 次里 2 次在 23–24 秒中途断开，紧跟客户端
 #   第 20 秒的 ping）。改动须同步 test_responses_websocket。
 # 模块用途: 让 ChatGPT 订阅模型的长回复（含 Compact 摘要）不再中途断线。
@@ -24,6 +26,7 @@ from .gateway_helpers import (
     GatewayRequest,
     _dump_provider_rejection,
     _emit_provider_attempt,
+    _is_timeout_exception,
     _network_retry_delay_seconds,
     _provider_interrupt_callback,
     _provider_is_interrupted,
@@ -187,13 +190,16 @@ def _handshake_retry(exc: BaseException, request: GatewayRequest, attempt: int, 
 
 
 # LLM: 带状态码的握手失败转成 urllib HTTPError 交给 _runtime_http_error，额度/上下文/拒绝/临时故障与 HTTP 传输同一分类；
-#   其余异常交给 _runtime_network_error。用户停止优先。
+#   无状态码的失败里，超时（TLS 握手 / 升级握手，response.create 还没发出）照 SSE 归 first_event，交给回合层退避重试，
+#   避免 provider_declared 被生成层立刻重试一次、再超时整轮失败；其余交给 _runtime_network_error。用户停止优先。
 # 函数用途: 把握手失败换成产品统一的服务商错误。
 def _handshake_error(exc: BaseException, request: GatewayRequest) -> BaseException:
     if _provider_is_interrupted():
         return InterruptedError(_STOPPED_MESSAGE)
     response = getattr(exc, "response", None)
     if not _status_code(exc) or response is None:
+        if _is_timeout_exception(exc):
+            return _stream_timeout_error(request, "first_event")
         return _runtime_network_error(exc, request)
     headers = email.message.Message()
     for name, value in response.headers.raw_items():

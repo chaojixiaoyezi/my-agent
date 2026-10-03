@@ -1,5 +1,18 @@
 # 设计台账
 
+## ChatGPT 订阅（Responses WebSocket）握手超时照 SSE 交回合层退避重试（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基于 `claude/3a-step17h` `7e421024f`，已实现，待 9b 复审）
+
+- **问题**（be 只读核对生产，2026-10-03）：上一波 8 次整轮失败全是 `PROVIDERTIMEOUTERROR`，都发生在 chatgpt.com 的 Responses WebSocket **握手阶段**（7 次 TLS 握手超时 `_ssl.c: The handshake operation timed out`、1 次升级握手超时 `timed out while waiting for handshake response`），其中 6 次挤在 25 秒内，是一次网络抖动。这些回合已经跑了 13–33 轮工具、50–76 分钟，一次握手超时（生成层立刻重试一次也超时）就整轮失败。证据目录：`~/.my-agent/decision-evidence/model-timeout-ws-handshake-20261003/README.md`（只有结构化事实）。
+- **根因**：SSE 路径把连接阶段的超时归成 `first_event`（`gateway_helpers` 的 `if _is_timeout_exception(exc): raise _stream_timeout_error(request, "first_event")`），所以回合层 `provider_transient_auto_resume` 会按 10/25/45/100/180 秒退避重试；WebSocket 路径少了这一步，握手超时走 `_runtime_network_error` 落成 `stage=provider_declared`，而这个 stage 恰恰是回合层明确不放行的（非流式请求里它包含“请求已发出后读超时”，重放会让服务商可能已处理的请求被重发）。
+- **修法**（只动握手一段）：`backends/responses_websocket._handshake_error` 里，无状态码的失败先判超时——是超时就返回 `gateway_helpers._stream_timeout_error(request, "first_event")`，复用现成的 `_is_timeout_exception`，不另写判断。握手阶段连接还没打开、`response.create` 还没发出，所以归 first_event 不会重放任何已发出的采样请求（新用例用假连接钉住 send 次数）。
+- **不改的边界**（守住现有合同）：
+  - `gateway_helpers._is_transient_network_error`（所有 HTTP 请求共用）不动——超时仍然不是它眼里的“瞬时错误”，所以传输层自己的握手重试次数不变，重试交给回合层；
+  - 回合层 `_raise_unless_provider_transient` 的放行集合不动（**不放行 provider_declared**）；
+  - 连接打开、`response.create` 发出之后的超时分类不动（first_event / stream_idle 照原样）；
+  - 握手的非超时失败分类不动（带状态码走 `_runtime_http_error`，连接被拒等走 `_runtime_network_error`）；
+  - 握手中用户停止仍优先返回 `InterruptedError`。
+- **验证**：新增 9 个用例（`tests/test_responses_websocket.py`），覆盖握手超时归 first_event + send 为 0、回合层退避后完成并带重试进度、生成层 `_retry_once_after_timeout` 返回 None、连接后静默超时 stage 不变、非超时分类不变、用户停止优先；相关 7 个测试文件 95 项全过；4 个变异（仍归 provider_declared / 归 stream_idle / 非超时也归 first_event / 去掉用户停止优先）全部被测出。详见 TESTS.md 同名条目。
+
 ## 嵌入用量与召回方式看得到（S7，be 实现、75 接手收尾，2026-10-02，分支 `claude/75-embedding-usage-facts`（接 `claude/be-embedding-usage-facts`），基于 `claude/3a-step17h` `afb15947b`，已实现，待 9b 复审）
 
 - **起因**（3a 查生产）：
