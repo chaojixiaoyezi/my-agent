@@ -1,6 +1,8 @@
 # LLM: 能力包 B 的独立单文件检查器；只按显式 CLI 文件授权核对结构、时长、handoff.v2 及可选基线差异，不启动模型/资源或写宿主状态；同步包方法及组件测试。
 #   0.3.0 加缺表/缺外键、编造参考 ID、动作节拍缺角色、出镜人物缺参考，以及“与基线不同且 handoff 没列”的节拍/对应关系/schema/时长
 #   改动和“handoff 声称改了其实没改”；--host-json 输出宿主核验结果，宿主模式下交接文件按摘要和宿主给的文件对应，不读别的路径。
+#   0.3.1 把动作节拍写成单数 character_id（非空字符串）从 beat_character_missing 提醒升级为 beat_character_id_singular 错误；
+#   完全没写角色字段的纯环境动作仍是提醒，对白节拍的单数 character_id 不受影响。
 # 模块用途: 只读制作资料、明确绑定的交接文件和可选基线项目，用同次字节核对摘要、对象地址与逐 ID 差异，向 stdout 输出分项结果或已转义的静态报告。
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ MAX_JSON_DEPTH = 64
 MAX_POINTER_CHARS = 2048
 MAX_POINTER_PARTS = 64
 PACKAGE_ID = "drama-workflow-b"
-PACKAGE_VERSION = "0.3.0"
+PACKAGE_VERSION = "0.3.1"
 PROJECT_TABLES = ("episodes", "characters", "locations", "props", "scenes", "shots", "references")
 MAX_DIFF_ITEMS = 100
 HOST_RESULT_SCHEMA = "pack_verifier_result.v1"
@@ -234,14 +236,18 @@ def check_episode_seconds(catalog: dict, errors: list[dict], warnings: list[dict
     return totals
 
 
-# LLM: 动作节拍用 character_ids 写出参与的角色（只能是本场角色）；没写或写空只提醒 beat_character_missing（纯环境动作可以没有角色），
-#   写了却不是本场角色是 error。对白节拍仍用 character_id。
+# LLM: 动作节拍用 character_ids 写出参与的角色（只能是本场角色）；完全没写角色字段只提醒 beat_character_missing（纯环境动作可以没有角色），
+#   写成单数 character_id（非空字符串）是明确的字段名错误，0.3.1 起报 beat_character_id_singular；写了却不是本场角色是 error。对白节拍仍用 character_id。
 # 函数用途: 核对一个动作节拍的角色列表。
 def action_beat_characters(beat: dict, beat_id: str, scene_characters: set[str], errors: list[dict],
                            warnings: list[dict]) -> None:
     values = beat.get("character_ids")
+    singular = beat.get("character_id")
     if values is None or values == []:
-        warnings.append({"code": "beat_character_missing", "path": beat_id})
+        if isinstance(singular, str) and singular:
+            errors.append({"code": "beat_character_id_singular", "path": f"{beat_id}.character_id"})
+        else:
+            warnings.append({"code": "beat_character_missing", "path": beat_id})
     elif not isinstance(values, list) or not all(isinstance(value, str) and value in scene_characters for value in values):
         errors.append({"code": "unknown_reference", "path": f"{beat_id}.character_ids"})
 

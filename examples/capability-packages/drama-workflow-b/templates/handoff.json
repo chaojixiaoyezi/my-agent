@@ -9,7 +9,7 @@
       "scope": "<这一阶段做了什么>",
       "input_file_ids": [""],
       "output_file_ids": [""],
-      "review_notes": "<复核了什么、还有什么没核>"
+      "review_notes": "<复核了什么、还有什么没核；本文件整个工作区只保留这一份，不要另存副本>"
     }
   ],
   "object_mappings": [

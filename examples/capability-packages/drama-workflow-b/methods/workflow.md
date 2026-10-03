@@ -16,9 +16,71 @@
 
 没有参考条目时用 `references=[]` 和镜头 `reference_ids=[]`。确有参考制作计划但没有媒体时建立 `state=planned` 的条目；只有已有输入资料时才声明 `provided`，且仍需独立核对媒体。参考条目 ID、角色/道具 ID、来源段落 ID 是不同关系，不能互相代填。
 
+### 分开整理时（角色、道具、镜头参考各写各的）
+
+用户要求把角色、道具和镜头参考分开整理时：
+
+- **各表独立**：人物进 `characters`、道具进 `props`、镜头参考进 `references` 与各镜头的 `reference_ids`，各自维护、不互相代填；不要用文字描述或来源段落 ID 顶替参考条目。
+- **每个镜头都要有人物参考**：镜头引用的节拍里出现的说话人和动作角色，这一镜的 `reference_ids` 里要有对应的人物参考条目；项目里有人物参考计划时，缺一条就报 `shot_character_reference_missing` 提醒。
+- **缺的单独列出**：还没有的参考和素材在 `unresolved_differences` 或交付说明的缺项清单里逐条写明（缺什么、下一步谁补），不留下空引用、空 ID 或 null 占位；写进清单前先回产物逐项复核，确认真的没有——已存在的条目不能写成缺项，表格与结论必须一致。
+
 ## 阶段与跨包交接
 
-在本次工作区填写 `templates/handoff.json` 的副本，使用明确升级的 `drama_workflow_handoff.v2`。v1 的自由字段不会被猜成 v2 地址；旧文件保留原结果，需要按新合同显式重新编写。列表按实际数量增减；没有映射、省略、新增或未决差异时用空列表，不留下空占位行。
+在本次工作区写出**一份** `drama_workflow_handoff.v2` 交接文件（建议 `output/handoff.json`）。v1 的自由字段不会被猜成 v2 地址；旧文件保留原结果，需要按新合同显式重新编写。列表按实际数量增减；没有映射、省略、新增或未决差异时用空列表，不留下空占位行。
+
+### 交接文件清单（写在哪、叫什么、怎么绑进标准链）
+
+1. **只保留一份**：整个工作区里只能有一份 `schema` 为 `drama_workflow_handoff.v2` 的 JSON 文件。不要把模板另存到 `tmp/`、不要把草稿写到第二个位置、不要在交付后再留同名副本。宿主按“本回合写出的、字段匹配的交接文件恰好一份”自动找它；出现两份（或零份）时交接不会进入标准检查链，基线对比会把所有改动当成“没列出”。
+2. **写在交付物旁边**：放在本次工作区内、与交付物同目录最稳（例如 `output/handoff.json`）；不要在包安装目录或工作区外写。
+3. **六个键都写上**：`files`、`stages`、`object_mappings`、`omissions`、`additions`、`unresolved_differences`；没有内容的用 `[]`。
+4. **摘要来自真实字节**：`files[].sha256` 用该文件读取时的完整 64 位小写 SHA-256；资料改动后重新计算，再更新交接。
+5. **手动检查时显式绑定**：自己运行检查器时传 `--handoff output/handoff.json`，并对 `files` 里每个 ID 传一个 `--input-file FILE_ID=PATH`；绑定路径与 `files[].path` 按同一 cwd 比较。
+6. **交给宿主自动核验**：宿主开启包检查时，写出交付物和交接后，工具回执里会附宿主用本包原版检查程序得出的结论（`pack_verification`）；按它修订，不要复制、改写或自写检查程序。
+
+完整示例（公开合成故事《最后一班夜车》，假设把 `inputs/project.json` 整理成 `output/project.json`；示例里的路径、摘要和文字都要换成本次任务的真实值，摘要不能照抄）：
+
+```json
+{
+  "schema": "drama_workflow_handoff.v2",
+  "files": [
+    {"id": "F01", "path": "inputs/project.json", "sha256": "<F01 文件真实字节的 64 位小写 sha256>"},
+    {"id": "F02", "path": "output/project.json", "sha256": "<F02 文件真实字节的 64 位小写 sha256>"}
+  ],
+  "stages": [
+    {
+      "id": "S01",
+      "scope": "整理《最后一班夜车》的动作节拍角色和镜头人物参考",
+      "input_file_ids": ["F01"],
+      "output_file_ids": ["F02"],
+      "review_notes": "已用同版本检查器自检；参考图仍未制作"
+    }
+  ],
+  "object_mappings": [
+    {
+      "stage_id": "S01",
+      "source": {"file_id": "F01", "pointer": "/scenes/0/beats/0", "object_id": "B01"},
+      "target": {"file_id": "F02", "pointer": "/scenes/0/beats/0", "object_id": "B01"},
+      "reason": "缺角色归属 → 补 character_ids: [\"C01\"]：站务员拦车动作"
+    }
+  ],
+  "omissions": [],
+  "additions": [
+    {
+      "stage_id": "S01",
+      "target": {"file_id": "F02", "pointer": "/shots/2/reference_ids/0"},
+      "reason": "SH03 出镜的乘客没有人物参考 → 新增 REF-C02"
+    }
+  ],
+  "unresolved_differences": [
+    {
+      "stage_id": "S01",
+      "refs": [{"file_id": "F02", "pointer": "/references/1", "object_id": "REF-C02"}],
+      "difference": "参考图尚未制作（state=planned）",
+      "next_step": "拍摄前由美术补充乘客造型图"
+    }
+  ]
+}
+```
 
 - `files`：为每份实际输入和阶段产物分配唯一资料 ID，写可定位的工作区文件路径与完整 64 位 `sha256`。摘要须来自该文件读取时的真实字节，不能用 `file_version`、包摘要或重新序列化 JSON 的摘要代替；资料修改后重新计算并保留本次交接对应版本。这里是业务文件路径，不是包内资源路径。
 - `stages`：记录唯一阶段 ID、`scope`、实际消费的 `input_file_ids`、实际产出的非空 `output_file_ids` 和 `review_notes`；文件 ID 指向 `files`，列表不重复。没有文件输入的原创阶段可用空输入列表，没有实际产物就不把计划列为已产出。填写这些字段不证明实际执行。
@@ -61,10 +123,10 @@ CLI 报告升级为 `drama_workflow_check.v2`：`checks.project` 与 `checks.han
 
 这些是制作资料的方法，不是宿主执行合同。机械检查发现断链应提示修订；创作深度、镜头美感和节奏效果继续由模型/人审阅，不加入通用宿主硬门。
 
-## 0.3.0 新增写法和检查
+## 0.3.0 起新增写法和检查
 
 - **表和外键齐全**：七张表缺了哪张报 `missing_table`；场次缺 `episode_id`/`location_id`、镜头缺 `scene_id`、参考缺 `subject_id` 这几个键报 `missing_foreign_key`。键在但值不对，仍是原来的 `unknown_reference` 等错误。
-- **动作节拍写角色**：动作节拍加 `character_ids`，列出参与动作的本场角色。没写或写空报 `beat_character_missing` 提醒（纯环境动作可以没有角色）；写了不是本场角色报错。
+- **动作节拍写角色（字段名 `character_ids`，列表）**：动作节拍的角色写进 `character_ids` 列表，列出参与动作的本场角色；对白节拍仍用单数 `character_id`。完全没写角色字段报 `beat_character_missing` 提醒（纯环境动作可以没有角色）；写成单数 `character_id`（非空）报 `beat_character_id_singular` 错误（0.3.1 起，会触发返工）；写了不是本场角色报错。
 - **出镜人物要有参考**：项目里有人物参考时，一个镜头引用的节拍里出现的角色（说话人和动作角色），这一镜的 `reference_ids` 里要有他的人物参考，否则报 `shot_character_reference_missing` 提醒。项目完全没有人物参考计划时不提醒。
 - **不编造参考 ID**：检查器从本项目 `references` 的 ID 推出写法（如 `REF-`），在整份项目和交接的所有文字里找这种写法的 ID，表里没有就报 `unknown_reference_mention` 错误。
 - **改动前后对比更严**：带 `--baseline-project` 时，下面这些改动没在交接里列出就是错误，`checks.baseline` 记 `failed`：

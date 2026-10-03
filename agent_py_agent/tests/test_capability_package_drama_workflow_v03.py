@@ -76,7 +76,7 @@ BASELINE = ("--project", "p.json", "--baseline-project", "b.json")
 def test_example_is_clean_under_all_new_checks(tmp_path):
     report = _run(tmp_path, {"p.json": _project(), "b.json": _project()}, *BASELINE)
     assert report["structure_valid"], report["errors"]
-    assert report["checker"]["package_version"] == "0.3.0"
+    assert report["checker"]["package_version"] == "0.3.1"
     new = {"missing_table", "missing_foreign_key", "unknown_reference_mention", "beat_character_missing",
            "shot_character_reference_missing", "baseline_relation_changed", "baseline_beat_changed",
            "baseline_schema_or_duration_changed", "handoff_claim_without_change"}

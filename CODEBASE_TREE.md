@@ -1526,6 +1526,7 @@ docs/
 - `agent_py_agent/tests/test_capability_package_drama_text_visibility.py`：以公开合成资料通过原 CLI 验证代称/退出、可见/画外、歧义与长短词、原位置及预算/裁剪计数；不修改真实产物。
 - `agent_py_agent/tests/test_capability_package_drama_text_v05.py`：A 包 0.5.0（能力包 v2 块 7）的 7 项新检查各一个正例一个反例，以及 `--host-json` 只输出 `pack_verifier_result.v1` 结构化字段、写出即退 0；不读真实产物。
 - `agent_py_agent/tests/test_capability_package_drama_workflow_v03.py`：B 包 0.3.0（能力包 v2 块 7）的新检查各一个正例一个反例；带基线时未在交接列出的改动报错、列出的放行（宿主按摘要对应和 `--input-file` 两种模式）；`--host-json` 只输出 v1 结构化字段。
+- `agent_py_agent/tests/test_capability_package_drama_workflow_v031.py`：B 包 0.3.1（能力包 v2 块 8 归因）的动作节拍字段名收紧——缺 `character_ids` 且写了非空单数 `character_id` 报 `beat_character_id_singular` 错误；纯缺失、空值和对白字段保持原语义；只读公开合成项目。
 - `agent_py_agent/tests/test_capability_package_drama_text_lines.py`：A 包 0.4.0 可选字段——台词结构与说话人声明、逐字引用只按子串（不归一化）、道具持有人/相邻状态接续与 `continuity_break`、报告 `checker` 身份与声明版本一致。
 - `agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py`：B 包 0.2.0——`--baseline-project` 的换说话人（含重编号）、节拍类型改变、对象删除提醒，交接覆盖真实改动（根地址不算）、虚假新增/省略报错、检查器身份与项目摘要。
 - `examples/capability-packages/drama-text-a/methods/visible-characters.md`：A0.3.0 人物依据回填的私有方法与v3诊断合同；只说明字面覆盖，不生成宿主完成状态。

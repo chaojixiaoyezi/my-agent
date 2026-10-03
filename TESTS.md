@@ -1,5 +1,50 @@
 # 测试与发布验收
 
+## B 包 0.3.1 补边界用例与重合扫查（pb31t，2026-10-03，分支 `worker/pack-b-031-tests`，基于 `8525d24e6`）
+
+- **改动**：只补用例与文档，检查程序 `examples/capability-packages/drama-workflow-b/scripts/check_continuity.py` **逐字节未改**（`git status` 对该文件为空可证）。在 `test_capability_package_drama_workflow_v031.py` 按 ds3 原用例写法补两条边界（用例数 6→8）：
+  - `test_singular_leftover_alongside_non_empty_list_is_not_the_new_error`：动作节拍 `character_ids=["C01"]`（合法非空）同时残留非空 `character_id` → **不报** `beat_character_id_singular`，也不报 `beat_character_missing`；
+  - `test_non_string_singular_value_keeps_the_original_warning`：`character_id=7`（非字符串）且缺 `character_ids` → **不报**新错误，仍是原来的 `beat_character_missing` 提醒，`structure_valid=true`。
+- **变异重跑**（脚本 `/private/tmp/claude-501/pb31t_mutate.py` 与 `pb31t_guard.py`，不进仓库；每个变异只改一处、跑完立刻用备份还原，脚本退出时兜底再还原一次）：
+  - 基线（未变异）：8 条全过。
+  - **M1 只要有 character_id 就报错**（`if isinstance(singular, str) and singular:` → `if singular:`）：**被杀**，失败用例 `test_non_string_singular_value_keeps_the_original_warning`。
+  - **M7 非字符串值也报错**（→ `if singular and not isinstance(singular, list):`）：**被杀**，失败用例同上（新用例同时守住这两处）。
+  - 另加**M8 列表非空时也报单数错**（把条件扩成 `values is None or values == [] or (isinstance(singular, str) and singular)`）：**被杀**，失败用例 `test_singular_leftover_alongside_non_empty_list_is_not_the_new_error`——证明第一处边界也有用例在守，不是装饰。
+  - 每个变异跑完还原后复跑：8 条全过，`git status` 对检查程序为空。
+- **重合扫查**（B 包全部 12 个文件 × 9 个 B 类试次的 `case.prompt_zh` + 各输入文件，脚本 `/private/tmp/claude-501/pb31t_overlap_check.py`）：
+  - 6 字阈值：**3 处命中，去重后 1 种** —— `declaration.json` 里的「短剧制作资料」，命中 3 个试次。这正是 ds2 已报、3a 已裁定为**领域通用词、不算泄露**的那一处。
+  - 5 字阈值：同样只有这一处（去重后 1 种），**没有新增命中**。
+  - 检测器自证有效：往 `CAPABILITY.md` 临时塞一句试次原文，6 字阈值立刻从 1 种变 2 种（多出 12 字的「交一套九十秒短剧制作资料」），随后已还原。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pb31t`）：
+  - B 包相关 8 个测试文件 → **256 passed**；
+  - guards9 清单 → 清单 14 个文件，其中 `test_gateway_client_credentials.py` 在本分支不存在（属 G3 那条线），实跑 13 个 → **313 passed**；
+  - `check_import_boundaries.py` findings=0；ruff `All checks passed`；`check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` 干净；`check_clean_package.py .` OK；strict code-size hard=0 blocked=False；`size_diff.sh` 新增告警 0 / 消失 16。
+- **没验证**：没有重跑 B 类 9 例（集成者的事）；重合扫查是只读报告，**没有据此改包**；`test_gateway_client_credentials.py` 未跑（本分支无此文件）。
+
+## B 包 0.3.1（pb31，2026-10-03，分支 `worker/pack-b-031`，基于 step17i `0ae0efe5e`；待复审，复审后重跑 B 类 9 例）
+
+- **改动**：见 DESIGN_LEDGER 同名小节。核心行为变化：动作节拍“缺 `character_ids` 且写了非空单数 `character_id`”从 `beat_character_missing` 提醒升级为 `beat_character_id_singular` 错误（`examples/capability-packages/drama-workflow-b/scripts/check_continuity.py`）。另按 B05 归因补核对方法第 9 条（`methods/review.md`：写“缺什么”前先回产物逐项复核、表格与结论必须一致），`CAPABILITY.md`、`methods/workflow.md`、`PROVENANCE.md` 同步。
+- **新用例**（`agent_py_agent/tests/test_capability_package_drama_workflow_v031.py`，6 条，均用公开合成项目）：
+  - 单数 `character_id` + 无 `character_ids` → `beat_character_id_singular` 错误、无 `beat_character_missing` 提醒；
+  - `character_ids=[]` + 单数非空 → 同样报错；
+  - 完全没写角色字段 → 仍只 `beat_character_missing` 提醒、`structure_valid=true`；
+  - `character_id=""`（空串）→ 不触发新错误、仍只提醒；
+  - 干净示例无新错误且 `checker.package_version=="0.3.1"`。
+  - 核对方法守卫：`review.md` 必须要求“缺什么”先回产物逐项复核、表格与结论必须一致（防规则被误删）。
+- **更新期望**：`test_capability_package_b_template.py`（`manifest.version=="0.3.1"`）、`test_capability_package_drama_workflow_duration.py`（`declaration["version"]=="0.3.1"`）、`test_capability_package_drama_workflow_v03.py`（`package_version=="0.3.1"`）。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pb31`）：
+  - `$PY -m pytest agent_py_agent/tests/test_capability_package_drama_workflow_v031.py agent_py_agent/tests/test_capability_package_drama_workflow_v03.py agent_py_agent/tests/test_capability_package_b_template.py agent_py_agent/tests/test_capability_package_drama_workflow_duration.py -q` → **95 passed**；
+  - `$PY -m pytest agent_py_agent/tests/test_capability_package_examples.py agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py agent_py_agent/tests/test_capability_package_host_mode_robustness.py agent_py_agent/tests/test_capability_package_verification_blocks.py agent_py_agent/tests/test_capability_verification_declaration.py -q` → **193 passed**。
+- **变异**（`/private/tmp/claude-501/pb31-mutate/mutate_v031.py`，4 个全部被抓到并还原，`restored_ok: True`）：
+  - M1 单数回退成只提醒 → `test_singular_character_id_with_empty_list_is_an_error` 等期望报错的用例失败；
+  - M2 空单数也报错 → `test_empty_singular_value_does_not_trigger_the_new_error` 失败；
+  - M3 纯缺失也报错 → `test_empty_singular_value_does_not_trigger_the_new_error` 失败；
+  - M4 错误路径不带 `.character_id` → `test_singular_character_id_with_empty_list_is_an_error` 失败。
+- **打包校验**：`scripts/build_capability_package.py` 构建 → `schema_version=plugin_package.v7`、`package_kind=capability`、`version=0.3.1`、11 files、`executable_members=[]`、zip 12 个成员（含 `plugin.json`）。
+- **guards9**（10 个文件，含 `test_packaging.py`）→ **172 passed**。
+- **静态门禁**：`check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；ruff → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；strict code-size → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`（已还原 `CODE_SIZE_REPORT.md`）；`git diff --check` 无输出；`size_diff.sh` → 新增告警 0、消失告警 16；`check_clean_package.py .` 提交前对未跟踪的新测试文件报 1 项 `UNTRACKED_FILE`（预期，随本提交入库），提交后复跑结果见交接报告。
+- **未验证**：真实宿主链（TUI/IM）与 B 类 9 例重跑留给集成者；本分支不重跑冻结用例。
+
 ## A 包 0.5.1 复审返工：举例去掉冻结用例原文（2026-10-03，pa51，worker/pack-a-051）
 
 - 改了什么：`methods/workflow.md` 结局保留一节的举例换成通用说法（不再出现用例里的"翻到朝外的一面"）；`PROVENANCE.md` 修订表只写问题类别；`methods/workflow.md` 交付命名一句改成直说"扩展名必须是 `.json`"；`CAPABILITY.md` 交付规则拆成两条。产品代码一行未动。
