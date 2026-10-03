@@ -67,7 +67,7 @@ NEW_CODES = {"placeholder_text", "embedded_quote_not_verbatim", "embedded_quote_
 def test_example_passes_without_any_new_finding(tmp_path):
     report, code = _run(tmp_path, _delivery())
     assert report["structure_valid"] and code == 0, report["errors"]
-    assert report["checker"]["package_version"] == "0.5.0"
+    assert report["checker"]["package_version"] == "0.5.1"
     assert not NEW_CODES & {item["code"] for item in report["errors"] + report["warnings"]}
 
 

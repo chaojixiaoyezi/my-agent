@@ -1,5 +1,37 @@
 # 测试与发布验收
 
+## A 包 0.5.1 复审返工：举例去掉冻结用例原文（2026-10-03，pa51，worker/pack-a-051）
+
+- 改了什么：`methods/workflow.md` 结局保留一节的举例换成通用说法（不再出现用例里的"翻到朝外的一面"）；`PROVENANCE.md` 修订表只写问题类别；`methods/workflow.md` 交付命名一句改成直说"扩展名必须是 `.json`"；`CAPABILITY.md` 交付规则拆成两条。产品代码一行未动。
+- 重合核对（自写脚本 `/private/tmp/claude-501/pa51_overlap_check.py`，不进仓库）：把包内所有文件与 9 个 A 类试次的 `case.prompt_zh` + `inputs/story-source.json` 做连续汉字比对。
+  - 修复前：`methods/workflow.md`、`PROVENANCE.md` 各命中 7 字重合（`翻到朝外的一面`）。
+  - 修复后：6 字阈值 **0 处**；加严到 5 字仍 **0 处**。
+  - 检测器变异自查：把原句塞回去立刻变红（9 处），还原后复绿——证明这项核对真的在查，不是恒绿。
+- 结果：能力包相关 **504 passed**；guards9 清单 172 passed；`check_import_boundaries.py` findings=0；ruff `All checks passed`；`check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` 干净；`check_clean_package.py .` OK；strict code-size hard=0 blocked=False；`size_diff.sh` 新增告警 0 / 消失 16。
+- 没验证：包版本仍是 0.5.1（本次只改文字，不升版本）；没有用块 8 的工具重跑 A 类 9 例；重合核对是"防泄露"自查，没有进仓库做常驻守卫。
+
+## A 包 drama-text-a 0.5.1（pa51，2026-10-03，分支 `worker/pack-a-051`，基于 `0ae0efe5e`）
+
+- **改动**：按 A 类 9 例独立业务审阅的四类不合格改包内指引、方法、模板、示例——交付文件名固定 `output/drama_text_delivery.json`（扩展名必须 `.json`）；新增创作必逐条写进本镜 `adaptations`（给正反例）；结局的动作/朝向/状态默认原样保留、只改表达不改事实；`cast[].text_names` 与非空退出理由互斥（给不冲突例子）。版本升 0.5.1，`scripts/check_delivery.py` 只随版本改 `PACKAGE_VERSION` 常量，检查逻辑未动。
+- **命令**（工作树根执行；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_capability_package_examples.py \
+    agent_py_agent/tests/test_capability_package_drama_text_v05.py \
+    agent_py_agent/tests/test_capability_package_drama_text_lines.py \
+    agent_py_agent/tests/test_capability_package_drama_text_basis.py \
+    agent_py_agent/tests/test_capability_package_drama_text_duration.py \
+    agent_py_agent/tests/test_capability_package_drama_text_visibility.py \
+    agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py \
+    agent_py_agent/tests/test_capability_package.py \
+    agent_py_agent/tests/test_capability_verification_declaration.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-pa51
+  ```
+  结果：**327 passed**，退出码 0（改动前同集合 283 项基线同样全过）。打包用例会现算每个成员 sha256 并核对 ZIP 内字节，版本断言随 0.5.1 更新。
+- **版本断言更新**：`test_capability_package_examples.py` 的 `manifest.version == "0.5.1"`、`test_capability_package_drama_text_v05.py` 的 `checker.package_version == "0.5.1"`。两条都是包声明版本的预期回显，不是放宽断言。
+- **未验证**：包内指引是否真的让模型做对，要在块 8 的工具重跑 A 类 9 例后才算数——本轮只证明能装、能过 v7 声明校验、检查程序按包版本回显。第 2 条（漏标新增创作）没有确定性检查兜底，只加了指引。
+- **guards9 与静态门禁**：见同轮交接记录（guards9 清单 + `check_import_boundaries.py` + `ruff` + `check_doc_sync.py` + strict code-size + `git diff --check` + `check_clean_package.py` + `size_diff.sh`）。
+
 ## 屏幕观察依赖钉进 computer-use-observe extra（2026-10-03，cux，worker/computer-use-extra）
 
 - 改了什么：`pyproject.toml` 新增 `computer-use-observe` extra（macOS 6 条 / Linux 4 条，全部用 `sys_platform` 标记并钉死版本）；旧 `computer-use` extra 注释写清两者区别；`docs/design/computer-use.md` 顶部新增安装与系统权限说明。产品代码一行没动。

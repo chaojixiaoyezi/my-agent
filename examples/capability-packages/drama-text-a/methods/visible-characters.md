@@ -16,6 +16,8 @@
 
 如果名字与常用词撞名，或只有单字名且没有实际使用的更具体称呼，可以写 `text_names: []`，同时提供非空 `text_match_skip_reason`。这是明确退出该人物的字面诊断，会列入警告；理由只供阅读，不解析为机器状态。启用名称匹配时不能同时保留非空退出理由；不能靠退出代替如实填写可见人物。
 
+两种写法只能选一种：非空 `text_names` 配空退出理由，**或者**空 `text_names` 配非空退出理由。同时给非空数组和非空理由会报 `conflicting_text_match_declaration`（结构错误，交付无效）。人物在正文里被逐字提到、但这一镜不出场时，用前一种写法，再把他列进该镜 `offscreen_character_ids`，不要用退出理由回避。
+
 每镜必须提供 `visible_character_ids` 和 `offscreen_character_ids`，即使为空。两表各自不重复、互不重叠。可见角色仍限本场 `character_ids`；画外角色可引用整个 cast。画外以整镜为范围，不是“此刻暂未入画”。这些声明的真假仍需作者/审者判断。
 
 新版只接受 `drama_text_source.v1` + `drama_text_delivery.v3`，返回 `drama_text_check.v3`。旧 v1/v2 不自动升级。作者若迁移旧作品，应对实际成稿明确填写新字段；旧检查器与旧结果仍属于原版本。

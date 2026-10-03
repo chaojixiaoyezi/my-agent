@@ -24,7 +24,7 @@ ASCII_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX
 MAX_NAME_SCAN_WORK = 2_000_000
 MAX_NAME_WARNINGS = 100
 PACKAGE_ID = "drama-text-a"
-PACKAGE_VERSION = "0.5.0"
+PACKAGE_VERSION = "0.5.1"
 MIN_QUOTE_CHARS = 2
 # 单镜秒数低于它只提醒（shot_too_short），可用 --min-shot-seconds 改；单位：秒。
 MIN_SHOT_SECONDS_DEFAULT = 2.0

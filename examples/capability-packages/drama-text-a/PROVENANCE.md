@@ -136,3 +136,18 @@
 **和上游的差异**：仍然只认作者写成结构化字段的内容。内嵌引文只查 `embedded_quotes` 里声明的片段，不扫描台词里的引号；道具和人物只按字面名字匹配；`origin` 只看写没写。
 
 **不覆盖的范围**：把原文已有的事实说成改编、改了结局或因果、上下镜语义矛盾、动作能不能在给定秒数内完成——这些仍要靠方法和独立阅读。根据这些失败改动之后，原冻结用例再跑一次只能算“已见回归”，不是新的保留集。
+
+## 0.5.1 修订范围（A 包冻结重跑 9 例的业务审阅）
+
+固定来源和检查程序不变（`scripts/check_delivery.py` 本次逐字节不改，报告仍是 `drama_text_check.v3`），资料仍是 `drama_text_delivery.v3`。这次只改包内的指引和模板，修的是"模型读得到却没照着做"的四类问题，全部来自 A 类 9 例冻结重跑的独立业务审阅：
+
+| 改哪一条 | 来自哪次失败 | 包里落地 |
+| --- | --- | --- |
+| 交付文件必须带 `.json` 后缀，固定叫 `output/drama_text_delivery.json` | A08-t201、A10-t202（写成 `drama_text_delivery.v3`，宿主没认出交付物） | `CAPABILITY.md` 交付段、`methods/workflow.md`「交付文件命名」 |
+| 原文没有的动作、台词、道具状态逐条写进本镜 `adaptations`，给正反例 | A08-t203（有新增创作，`shots[].adaptations` 全空） | `methods/workflow.md`「新增创作逐条标注」、`CAPABILITY.md` 交付规则 |
+| 结局的动作/朝向/状态默认原样保留，只改表达不改事实；确实要删改必须写进删改说明且不动结局关键事实 | A10-t201（改写了结局里的一个方向类关键动作） | `methods/workflow.md`「结局关键事实原样保留」 |
+| `cast[].text_names` 与非空退出理由互斥，给不冲突例子 | A10-t202（`conflicting_text_match_declaration`，角色声明自相矛盾） | `methods/workflow.md`「cast 的 text_names 声明」、`methods/visible-characters.md`、`templates/delivery.json` |
+
+这些是通用写法要求，不针对某段具体原文或某个用例；包里的方法对任何剧本一视同仁，也没有抄入任何私有判据或冻结用例正文。`declaration.json`、`CAPABILITY.md` 的版本说明与自身声明同步升到 0.5.1；包内文件的哈希清单由构建脚本在打包时按实际字节现算，仓库里不另存静态清单。
+
+**不覆盖的范围**：第 2 条（漏标新增）目前完全靠作者自觉——检查程序只看 `adaptations` 的形状，不会读取正文发现"这段动作原文里没有"。是否要为它加一条确定性检查，方案见交接报告，本次不动 `scripts/`。

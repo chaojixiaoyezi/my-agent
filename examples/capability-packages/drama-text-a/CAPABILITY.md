@@ -6,15 +6,16 @@
 
 先读本包 `methods/workflow.md`，再读本次原文与明确约束。输入形状见 `resources/example-source.json`，输出形状见 `templates/delivery.json`；已填写的合成示例见 `resources/example-delivery.json`。示例不是用户故事，空模板不是通过样例。
 
-交付为制作方案和 `drama_text_delivery.v3` JSON：当前原文字节摘要、角色、场次、镜头、主动省略及原因、未决事项。0.4.0 起可选写结构化台词 `lines`、原文短句 `source_quotes` 和道具状态 `props`/`prop_states`；0.5.0 起改编条目可带 `original_quote`，台词可带 `embedded_quotes`，道具可带 `origin`。写法见 workflow 方法。资料内 ID 不是宿主任务编号。
+交付为制作方案和 `drama_text_delivery.v3` JSON：当前原文字节摘要、角色、场次、镜头、主动省略及原因、未决事项。**交付文件固定叫 `output/drama_text_delivery.json`**（扩展名必须是 `.json`，正文里的 `"schema"` 仍是 `drama_text_delivery.v3`）：宿主按 `.json` 路径模式认交付物，名字写成没有扩展名的 `drama_text_delivery.v3` 之类会认不出来。0.4.0 起可选写结构化台词 `lines`、原文短句 `source_quotes` 和道具状态 `props`/`prop_states`；0.5.0 起改编条目可带 `original_quote`，台词可带 `embedded_quotes`，道具可带 `origin`。写法见 workflow 方法。资料内 ID 不是宿主任务编号。
 
-## 交付规则（0.5.0）
+## 交付规则（0.5.1）
 
 - **引文逐字**：标成原文的文字（逐字台词、`source_quotes`、`embedded_quotes`、改编条目的 `original_quote`）必须和原文一字不差。
-- **原文已有的不算改编**：原文已经写了的事实，不能标成改编或新增；真正新增的内容必须逐项写进本镜 `adaptations`。
-- **不改原意**：不改结局，不改因果。
+- **原文已有的不算改编**：原文已经写了的事实，不能标成改编或新增。
+- **新增的必须逐条标注**：凡原文没写、由你补出来的内容——动作、台词、道具状态或道具交接——都要写进本镜 `adaptations`，一条一件；不能因为"看起来是顺带补的"就留空数组。
+- **不改原意**：不改结局，不改因果；结局里的动作、朝向、状态默认原样保留。
 - **不用占位**：场次摘要、镜头起止状态和动作、台词、道具状态都写实际内容，不用 `{}`、`[]`、TODO 或模板里 `<…>` 的提示文字。
-- **另存新文件**：交付写成新文件，不覆盖输入的原文；最终答复写出交付物路径。
+- **另存新文件**：交付写成 `output/drama_text_delivery.json`，不覆盖输入的原文；最终答复写出这个路径。
 - **检查结论以宿主为准**：宿主开启了包检查时，写交付物后，写工具回执里会附宿主用本包原版检查程序得出的结论（`pack_verification`），收尾时宿主还会再查一次。不要复制、改写或自己写检查程序来代替；你口头说“已验证”不算数。
 
 每镜显式填写 `source_ids`、`adaptations`、`unresolved`：来源只取本场实际采用的段落；新增和未知逐项说明，没有就写空数组。三项不能同时为空，纯创作转场须说明新增。镜头未决项与顶层未决项分开。编号合法不证明支持关系成立，漏标新增仍须实际阅读发现；`covered_passages` 只计场次声明覆盖。新脚本只接受 v3，不猜填旧 v1/v2。

@@ -9,8 +9,8 @@
     {
       "id": "",
       "name": "",
-      "text_names": [],
-      "text_match_skip_reason": ""
+      "text_names": ["<正文里逐字用到的名字；要退出字面匹配就留空的 [] ，并把下面理由写成非空>"],
+      "text_match_skip_reason": "<只在 text_names 为空时写的退出理由；用了名字就留空。两者不能同时非空>"
     }
   ],
   "props": [
