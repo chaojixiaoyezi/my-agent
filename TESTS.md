@@ -162,6 +162,16 @@
   - `96679b1f8` 把降级原因放进新的 `_semantic_records_report`，`_semantic_records` 照旧只返回记录（已有用例比较 `len()`，改成元组会让断言悄悄失效）；行为不变，4 个变异复跑仍全部抓到。相关回归（嵌入、召回、向量库、工具检索、`/model` 服务、Gateway 记忆命令，加 guards9、packaging、常数目录）140 个文件 2501 passed、15 skipped；严格门禁全过，code-size 对 `c1d686a19` 新增 0。
   - 证据 `~/.my-agent/decision-evidence/embedding-usage-facts-s7/`（README、两轮旁听记录和回执、测试方脚本；隔离根含密钥副本，已删）。
 
+- **2026-10-03 后续（9b 提出，分支 `worker/luna1-s7-followups`）**：
+  - 不带作用域的 `search()` 先检查 active JSONL；真正空库记召回方式 `none`，不发查询嵌入，请求计数保持 0。检查真实 active 记忆而非关键词候选，避免把“词面没命中但语义可能命中”误判为空库。
+  - MiniMax 请求体类型由结构化输入角色决定：查询用 `query`；记忆写入、重建、候选文档及工具说明用 `db`。工具检索用途计数仍为 `tool_retrieval`；OpenAI 兼容请求体不增加 `type`。
+  - `embedding_identity` 仍只含 `profile_id`、`protocol`、`endpoint_digest`、`model_name`；本机桩服务确认请求类型切换前后身份相同，使用旧身份打开已有向量库仍 `identity_status == (True, "")` 且保留原向量。
+  - `test_embedding_usage.py` 新增空库用例及 MiniMax 本机 HTTP 请求体回归，覆盖写入/db、召回/query、重建/db、HybridRetriever 的 query 与文档/db、工具检索文档/db 与 query/query。实现前空库回归实际失败（发出 1 次召回请求）；修复后定向测试通过。
+  - 变异 3 项均被抓住并还原：取消空库早退导致空库召回请求数从 0 变 1；让默认输入类型始终为 db 导致 recall 的 query 断言失败；把 HybridRetriever 候选文档标为 query 导致桩收到 `[query, query]` 而非 `[query, db]`。
+  - 定向组合：`test_embedding_usage.py`、`test_embedding_service.py`、`test_vector_identity.py`、`test_memory_vector_cache.py`、`test_retrieval.py`、`test_tooling_base.py`、`test_memory_store_jsonl.py`；按指定 Python 与 `-q --tb=short -p no:cacheprovider` 执行，退出码 0。额外 guards9 和静态门禁结果见本节收尾记录。
+  - guards9 清单 10 个测试文件（含 `test_packaging.py`）退出码 0；import boundaries `findings=0`；Ruff `All checks passed!`；doc sync `DOC_SYNC_PASS`；strict code-size `hard=0`、`blocked=False`；`git diff --check` 退出码 0；clean-package `OK: . 未发现发布阻塞项`。
+  - `size_diff.sh` 原始输出：`新增告警: 0`、`消失告警: 9`。
+
 ## 同一回合因非计划重启最多自动续跑 3 次（I4 续，2026-10-02，分支 `claude/38-resume-limit`，基于 `72ddc2b5c`）
 
 - 新增 `test_turn_resume_limit.py`（9 例）：

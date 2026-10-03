@@ -12,8 +12,12 @@ from agent_py_agent.agent.retrieval.embedding import (
     cosine,
     mean_center,
 )
+from agent_py_agent.agent.retrieval.embedding_usage import embedding_input_type
 from agent_py_agent.agent.retrieval.lexical import rank as bm25_rank
 from agent_py_agent.agent.retrieval.lexical import reciprocal_rank_fusion
+
+# LLM: 混合召回必须保持 query 与候选文档的结构化输入角色分离；改嵌入调用时同步核对向量缓存与 S7 计数。
+# 模块用途: 组合 BM25 与向量排序，并在端点失败时保持关键词降级。
 
 
 class HybridRetriever:
@@ -87,7 +91,8 @@ class HybridRetriever:
         cache = cached_vectors or {}
         self.last_fresh_doc_vectors = {}
         try:
-            query_vec = self._embedder.embed([query])[0]
+            with embedding_input_type("query"):
+                query_vec = self._embedder.embed([query])[0]
         except (EmbeddingError, IndexError):
             return None  # 端点抖动 → 降级纯 BM25
         # 缓存里确有该 id、值是向量、且长度与本轮 query 一致，才算命中；键缺失、值非法或
@@ -105,7 +110,8 @@ class HybridRetriever:
                 for doc_id in ids
             ]
             if missing_positions:
-                fresh = self._embedder.embed([texts[i] for i in missing_positions])
+                with embedding_input_type("db"):
+                    fresh = self._embedder.embed([texts[i] for i in missing_positions])
                 if len(fresh) != len(missing_positions):
                     return None
                 for slot, vec in zip(missing_positions, fresh):

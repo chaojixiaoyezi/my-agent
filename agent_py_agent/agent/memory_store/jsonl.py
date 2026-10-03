@@ -22,7 +22,7 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.text_norm import fold_key, nfc
-from ..retrieval.embedding_usage import EMBEDDING_USAGE, counted_as
+from ..retrieval.embedding_usage import EMBEDDING_USAGE, counted_as, embedding_input_type
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
 
 
@@ -540,7 +540,9 @@ class _JsonlMemorySearchMixin:
             ok, reason = store.identity_status()
             if not ok:
                 raise VectorIdentityError(reason)
-            hits = store.search(self._embedder.embed([query])[0], top_k=top_k)
+            with embedding_input_type("query"):
+                query_vector = self._embedder.embed([query])[0]
+            hits = store.search(query_vector, top_k=top_k)
         except VectorIdentityError as exc:
             self._record_semantic_health("identity", exc)
             return [], str(getattr(exc, "reason", "") or "vector_identity_mismatch")
@@ -567,7 +569,7 @@ class _JsonlMemorySearchMixin:
         return self._semantic_records_report(query, top_k)[0]
 
     # LLM: 搜索结果最终必须回到 active JSONL，并按确定性规则去重排序。不带作用域的检索（Gateway 与 IM 的 /memory、agent.recall）
-    #   也按“每次检索记一次”计入召回方式（S7）：没有嵌入端记 keyword 和不可用原因，有嵌入端由 _fuse_semantic 记。
+    #   空库记 none 且不发查询嵌入；非空库按“每次检索记一次”计入 S7 召回方式。
     # 函数用途: 返回不含陈旧索引正文的长期记忆召回结果。
     def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
         """搜索记忆，优先使用 LocalStore 索引，再读取 JSONL 正式源。
@@ -584,6 +586,9 @@ class _JsonlMemorySearchMixin:
 
         candidate_limit = max(top_k * 4, top_k + 8)
         records, _load_errors = self.search_report(query, top_k=candidate_limit)
+        if not records and not self.all():
+            EMBEDDING_USAGE.record_retrieval("none", "")
+            return []
         if self._embedder is None:
             selected = _rerank_memory_records(records, query, top_k)
             EMBEDDING_USAGE.record_retrieval("keyword", _semantic_unavailable_reason(self._semantic_status))

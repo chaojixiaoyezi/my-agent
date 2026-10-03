@@ -68,10 +68,12 @@ def _stub_payload(body: dict, mode: str) -> dict[str, object]:
 class _Stub(BaseHTTPRequestHandler):
     mode = "usage"
     calls: list[int] = []
+    bodies: list[dict] = []
 
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         _Stub.calls.append(len(body.get("input") or body.get("texts") or []))
+        _Stub.bodies.append(body)
         if _Stub.mode == "fail":
             self.send_response(500)
             self.end_headers()
@@ -91,7 +93,7 @@ class _Stub(BaseHTTPRequestHandler):
 def stub(monkeypatch):
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
-    _Stub.mode, _Stub.calls = "usage", []
+    _Stub.mode, _Stub.calls, _Stub.bodies = "usage", [], []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     EMBEDDING_USAGE.reset()
@@ -120,6 +122,8 @@ def test_each_purpose_counts_requests_texts_failures_and_reported_tokens(stub):
     assert _row("memory_recall") == {"requests": 1, "texts": 1, "failures": 0, "tokens": 5, "tokens_unreported_requests": 0}
     assert _row("other")["requests"] == 1, "没标注用途的归 other，不猜"
     assert _Stub.calls == [2, 1, 1]
+    assert "type" not in _Stub.bodies[0] and _Stub.bodies[1]["type"] == "query"
+    assert "type" not in _Stub.bodies[2], "OpenAI 兼容请求体不增加 MiniMax 专有字段"
 
 
 def test_unreported_tokens_are_not_estimated(stub):
@@ -182,6 +186,18 @@ def _agent(tmp_path, monkeypatch, api_base: str):
                                    embedding_model_profile="stub-profile"), tmp_path / "work")
 
 
+# 函数用途: 使用真实 SimpleAgent 记忆链路和本机 MiniMax 协议桩，核对结构化用途到请求体的映射。
+def _minimax_agent(tmp_path, monkeypatch, api_base: str):
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    monkeypatch.setattr(core, "_build_memory_embedder",
+                        lambda agent, **kwargs: MiniMaxEmbedder(api_base=api_base, model="embo-01", api_key="k"))
+    return SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), memory_semantic_recall=True,
+                                   embedding_model_profile="stub-profile"), tmp_path / "work")
+
+
 def test_real_memory_write_recall_and_rebuild_are_counted_by_purpose(tmp_path, monkeypatch, stub):
     agent = _agent(tmp_path, monkeypatch, stub)
 
@@ -228,6 +244,57 @@ def test_unscoped_recall_counts_one_retrieval_mode_per_call(tmp_path, monkeypatc
     agent.recall("青柠", 3)
     retrieval = EMBEDDING_USAGE.snapshot()["retrieval"]
     assert (retrieval["keyword"], retrieval["last_mode"], retrieval["last_fallback_reason"]) == (1, "keyword", "embedding_failed")
+
+
+def test_unscoped_recall_on_empty_memory_skips_embedding_and_counts_none(tmp_path, monkeypatch, stub):
+    agent = _agent(tmp_path, monkeypatch, stub)
+
+    assert agent.memory.all() == []
+    assert agent.recall("查找尚不存在的记忆", 3) == []
+
+    usage = EMBEDDING_USAGE.snapshot()
+    assert usage["embedding"]["memory_recall"]["requests"] == 0
+    assert usage["retrieval"]["none"] == 1
+    assert usage["retrieval"]["last_mode"] == "none"
+    assert _Stub.calls == [], "空库不应把查询发到嵌入端"
+
+
+def test_minimax_uses_structured_retrieval_type_and_keeps_vector_identity(tmp_path, monkeypatch, stub):
+    from agent_py_agent.agent.retrieval.embedding_usage import embedding_purpose
+    from agent_py_agent.agent.retrieval.hybrid import HybridRetriever
+    from agent_py_agent.agent.retrieval.vector_store import VectorStore
+    from agent_py_agent.agent.settings.embedding_profile import embedding_identity
+    from agent_py_agent.agent.tooling.models import ToolModelSpec, VectorToolSearchProvider
+
+    agent = _minimax_agent(tmp_path, monkeypatch, stub)
+    embedder = agent.memory._embedder
+    identity_before = embedding_identity("stub-profile", embedder)
+    assert identity_before is not None
+
+    agent.memory.add("user", "客户要求本季度完成支付迁移")
+    agent.recall("付款模块什么时候搬完", 3)
+    agent.memory.rebuild_vectors()
+
+    assert [body["type"] for body in _Stub.bodies] == ["db", "query", "db"]
+
+    with embedding_purpose("memory_recall"):
+        HybridRetriever(embedder).rank("查找文档", [("doc-1", "候选文档")])
+    assert [body["type"] for body in _Stub.bodies[-2:]] == ["query", "db"]
+
+    provider = VectorToolSearchProvider(enabled=True, embedder=embedder)
+    specs = [ToolModelSpec(name="lookup", description="find a record", input_schema={"type": "object"})]
+    provider.search("find a record", specs, limit=1)
+    assert [body["type"] for body in _Stub.bodies[-2:]] == ["db", "query"]
+    assert _row("tool_retrieval")["requests"] == 2, "细分请求类型不改变 S7 的工具检索计数用途"
+
+    identity_after = embedding_identity("stub-profile", embedder)
+    assert identity_after == identity_before, "请求类型不属于 embedding_identity"
+
+    vector_path = tmp_path / "existing-vectors.json"
+    VectorStore(vector_path, identity=identity_before).upsert("existing", [1.0, 0.0], text="stored")
+    reopened = VectorStore(vector_path, identity=identity_after)
+    assert reopened.identity_status() == (True, ""), "旧空间身份仍匹配，不应要求重建"
+    assert len(reopened) == 1
 
 
 def test_unscoped_recall_without_semantic_counts_keyword_with_reason(tmp_path, stub):

@@ -16,7 +16,7 @@ from typing import Any
 
 from ..contracts.error_taxonomy import error_contract
 from ..retrieval.embedding import EmbeddingProvider, cosine
-from ..retrieval.embedding_usage import counted_as
+from ..retrieval.embedding_usage import counted_as, embedding_input_type
 from ..workspace_read_context import WorkspaceReadContext
 from ..workspace_write_context import WorkspaceWriteContext
 
@@ -1336,7 +1336,8 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
         documents: tuple[str, ...],
     ) -> list[ToolSearchHit]:
         self._ensure_document_vectors(documents)
-        query_vectors = self.embedder.embed([query])
+        with embedding_input_type("query"):
+            query_vectors = self.embedder.embed([query])
         if len(query_vectors) != 1:
             raise ValueError("tool query embedding count mismatch")
         return _semantic_tool_hits(
@@ -1346,10 +1347,13 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
             min_score=self.min_score,
         )
 
+    # LLM: 工具说明是候选文档而非用户查询；MiniMax 需按 db 编码，S7 的外层 tool_retrieval 计数仍保持不变。
+    # 函数用途: 当工具说明集合变化时，按文档用途刷新其内存向量。
     def _ensure_document_vectors(self, documents: tuple[str, ...]) -> None:
         if documents == self._document_key:
             return
-        vectors = self.embedder.embed(list(documents))
+        with embedding_input_type("db"):
+            vectors = self.embedder.embed(list(documents))
         if len(vectors) != len(documents):
             raise ValueError(
                 f"tool document embedding count mismatch expected={len(documents)} got={len(vectors)}"

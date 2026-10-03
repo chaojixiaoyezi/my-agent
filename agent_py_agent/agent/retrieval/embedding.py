@@ -21,7 +21,10 @@ import urllib.error
 import urllib.request
 from typing import Protocol, runtime_checkable
 
-from .embedding_usage import count_embedding_request, reported_tokens
+from .embedding_usage import count_embedding_request, current_embedding_input_type, reported_tokens
+
+# LLM: 本模块维护 OpenAI 兼容与 MiniMax 原生协议；请求输入类型只由结构化调用上下文决定，identity 字段与协议身份不可改。
+# 模块用途: 把文本批量编码为语义向量，并将端点失败统一转成可降级异常。
 
 # 默认 embedding 向量维度；未配置模型时按此维度生成占位向量（无物理单位）。
 DEFAULT_EMBED_DIM = 256
@@ -175,6 +178,8 @@ class OpenAICompatibleEmbedder:
         return vectors, tokens if tokens is not None else reported_tokens(usage.get("prompt_tokens"))
 
 
+# LLM: MiniMax 的 type 由嵌入调用的结构化输入用途决定；只改变请求参数，不改变 protocol/model/api_base 身份字段。
+# 类用途: 通过 MiniMax 原生接口生成向量，存储文档与重建使用 db，查询输入使用 query。
 class MiniMaxEmbedder:
     """MiniMax 原生 ``/embeddings`` 端点的语义 embedder(国际站 ``api.minimaxi.com/v1``)。
 
@@ -182,7 +187,7 @@ class MiniMaxEmbedder:
     ``input``),响应是 ``{vectors:[[...]], base_resp:{status_code}}``(不是 OpenAI 的
     ``data[].embedding``)。故单独适配,同 ``EmbeddingProvider`` 协议、可直接替换。零外部库(stdlib
     ``urllib`` 自建)。失败/``status_code`` 非 0 抛 ``EmbeddingError``,调用方降级 BM25,绝不让检索崩。
-    ``type`` 固定 ``"db"``(存储语义);查询侧 MiniMax 推荐 ``"query"``,留作后续按 kind 细分的优化。
+    ``type`` 按结构化输入用途选择 ``"db"`` 或 ``"query"``；不会按文本内容猜测，也不参与向量身份。
     embo-01 维度 1536。真机已验:Bearer key 直连、无需 GroupId(国际站比国内站简单)。
     """
 
@@ -218,9 +223,10 @@ class MiniMaxEmbedder:
         return count_embedding_request(texts, self._request)
 
     # LLM: token 只取响应顶层 total_tokens（MiniMax 原生协议的字段），没有就是 None（未回报），不估算。
+    #   type 按调用上下文的结构化输入用途写入请求体；身份只用固定协议、档案、端点摘要和模型名。
     # 函数用途: 发一次 MiniMax /embeddings 请求，返回 (向量, 供应商回报的 token)。
     def _request(self, texts: list[str]) -> tuple[list[list[float]], int | None]:
-        body = json.dumps({"model": self._model, "texts": list(texts), "type": "db"}).encode("utf-8")
+        body = json.dumps({"model": self._model, "texts": list(texts), "type": current_embedding_input_type()}).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"

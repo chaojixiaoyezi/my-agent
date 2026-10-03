@@ -19,6 +19,8 @@ EMBEDDING_PURPOSES: tuple[str, ...] = ("memory_write", "memory_recall", "memory_
 RETRIEVAL_MODES: tuple[str, ...] = ("semantic", "keyword", "none")
 
 _PURPOSE: ContextVar[str] = ContextVar("embedding_purpose", default="other")
+_INPUT_TYPE: ContextVar[str] = ContextVar("embedding_input_type", default="")
+_QUERY_PURPOSES = frozenset({"memory_recall", "tool_retrieval"})
 
 
 # LLM: 计数器是进程级单例 EMBEDDING_USAGE；线程安全（Gateway 多 owner 并发）。snapshot 返回副本，调用方改了不影响计数。
@@ -87,6 +89,28 @@ def embedding_purpose(purpose: str) -> Iterator[None]:
         _PURPOSE.reset(token)
 
 
+# LLM: 为一次嵌入请求显式标注输入角色；只影响支持该字段的原生协议，不改变 S7 的计数用途。
+# 函数用途: 临时指定当前批次按 db 文档或 query 查询编码，退出后恢复外层标记。
+@contextmanager
+def embedding_input_type(input_type: str) -> Iterator[None]:
+    if input_type not in {"db", "query"}:
+        raise ValueError("embedding input type must be db or query")
+    token = _INPUT_TYPE.set(input_type)
+    try:
+        yield
+    finally:
+        _INPUT_TYPE.reset(token)
+
+
+# LLM: 原生 MiniMax 读取本结构化用途，不扫描输入文字；精确输入角色优先，检索用途默认 query，其余用途默认 db。
+# 函数用途: 为 MiniMax 请求体选出结构化的 db/query 类型。
+def current_embedding_input_type() -> str:
+    explicit = _INPUT_TYPE.get()
+    if explicit:
+        return explicit
+    return "query" if _PURPOSE.get() in _QUERY_PURPOSES else "db"
+
+
 # LLM: 方法级的用途标注（装饰器形式的 embedding_purpose），给记忆写入/召回/重建与工具语义检索的操作入口用；返回值原样。
 # 函数用途: 把一个方法里发出的嵌入请求都标成某个用途。
 def counted_as(purpose: str) -> Callable[[Callable], Callable]:
@@ -132,6 +156,8 @@ __all__ = [
     "EmbeddingUsage",
     "count_embedding_request",
     "counted_as",
+    "current_embedding_input_type",
+    "embedding_input_type",
     "embedding_purpose",
     "reported_tokens",
 ]
