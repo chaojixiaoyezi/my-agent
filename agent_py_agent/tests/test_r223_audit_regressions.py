@@ -376,11 +376,11 @@ def test_web_cache_eviction_and_expiry_release_bodies(tmp_path, monkeypatch):
     now = [1000.0]
     monkeypatch.setattr(web_fetch_tools.time, "time", lambda: now[0])
     for i in range(80):
-        tool._cache_put(str(i), "text", RawResponseParts(200, {}, b"hello", str(i)))
+        web_fetch_tools._cache_put(tool, str(i), "text", RawResponseParts(200, {}, b"hello", str(i)))
     assert len(tool._cache) == 64
-    assert tool._cache_get("0", "text") is None
+    assert web_fetch_tools._cache_get(tool, "0", "text") is None
     now[0] += tool.cache_ttl_seconds + 1
-    assert tool._cache_get("79", "text") is None
+    assert web_fetch_tools._cache_get(tool, "79", "text") is None
     assert not tool._cache
 
 
