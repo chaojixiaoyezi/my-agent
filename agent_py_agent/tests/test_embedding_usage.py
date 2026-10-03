@@ -46,6 +46,24 @@ def _vector(text: str) -> list[float]:
     return [float(byte) + 1.0 for byte in digest[:8]]
 
 
+# 函数用途: 按请求协议和桩模式拼响应：MiniMax 原生（请求带 texts）或 OpenAI 兼容（请求带 input）；mode 为 usage 时回报 token，
+#   prompt_only 时 OpenAI 兼容只回报 prompt_tokens，其它模式不回报。
+def _stub_payload(body: dict, mode: str) -> dict[str, object]:
+    texts = body.get("input") or body.get("texts") or []
+    vectors = [_vector(text) for text in texts]
+    if "texts" in body:
+        payload: dict[str, object] = {"vectors": vectors, "base_resp": {"status_code": 0}}
+        if mode == "usage":
+            payload["total_tokens"] = 5 * len(texts)
+        return payload
+    payload = {"data": [{"embedding": vector} for vector in vectors]}
+    if mode == "usage":
+        payload["usage"] = {"prompt_tokens": 7 * len(texts), "total_tokens": 7 * len(texts)}
+    elif mode == "prompt_only":
+        payload["usage"] = {"prompt_tokens": 3 * len(texts)}
+    return payload
+
+
 # 函数用途: 本机嵌入桩服务：OpenAI 兼容与 MiniMax 原生两种协议；mode 控制回报 token、不回报或报 500。
 class _Stub(BaseHTTPRequestHandler):
     mode = "usage"
@@ -53,24 +71,12 @@ class _Stub(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        texts = body.get("input") or body.get("texts") or []
-        _Stub.calls.append(len(texts))
+        _Stub.calls.append(len(body.get("input") or body.get("texts") or []))
         if _Stub.mode == "fail":
             self.send_response(500)
             self.end_headers()
             return
-        vectors = [_vector(text) for text in texts]
-        if "texts" in body:
-            payload: dict[str, object] = {"vectors": vectors, "base_resp": {"status_code": 0}}
-            if _Stub.mode == "usage":
-                payload["total_tokens"] = 5 * len(texts)
-        else:
-            payload = {"data": [{"embedding": vector} for vector in vectors]}
-            if _Stub.mode == "usage":
-                payload["usage"] = {"prompt_tokens": 7 * len(texts), "total_tokens": 7 * len(texts)}
-            elif _Stub.mode == "prompt_only":
-                payload["usage"] = {"prompt_tokens": 3 * len(texts)}
-        raw = json.dumps(payload).encode()
+        raw = json.dumps(_stub_payload(body, _Stub.mode)).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
