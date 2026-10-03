@@ -6,7 +6,41 @@ from __future__ import annotations
 import threading
 from functools import partial
 
+from ..plugin_channel import PluginChannelRevoked
+
 _SERVICE_LOCK = threading.Lock()
+
+
+# LLM: 停机是终态：server_close() 不等正在跑的 HTTP 工作线程，晚到的面板请求或事件中心取池
+#   会在停机后重新建出一个打开的新池，它拉起的插件进程之后再也没人关。所以 stop 必须在
+#   _SERVICE_LOCK 内先置这个标记，之后一切取池/取服务都拒绝新建。
+# 函数用途: 判断该 server 的插件通道是否已随 Gateway 停机关闭。
+def _channel_closed(server) -> bool:
+    return bool(getattr(server, "plugin_channel_closed", False))
+
+
+# LLM: 只由 Gateway stop 调用；必须在 _SERVICE_LOCK 内调用，保证与取池/取服务互斥，
+#   不会出现"检查时还没关、关的时候又建了一个"的交错。
+# 函数用途: 标记该 server 的插件通道已关闭（调用方已持 _SERVICE_LOCK）。
+def mark_plugin_channel_closed(server) -> None:
+    server.plugin_channel_closed = True
+
+
+# LLM: 停机是终态，也是幂等的：置标记与摘掉服务/池引用必须在同一把锁内做完，否则锁外关池的瞬间
+#   还在跑的工作线程又能取到旧引用或新建一个。真正的 close 放到锁外做——它会 stop 插件进程，
+#   可能阻塞，不能占着 _SERVICE_LOCK（那时新的取池请求会被标记挡住，不会漏）。
+# 函数用途: 关闭本 server 的插件展示服务与共用池，并标记通道已关闭（可重复调用）。
+def close_plugin_channel(server) -> None:
+    with _SERVICE_LOCK:
+        mark_plugin_channel_closed(server)
+        service = getattr(server, "plugin_display", None)
+        server.plugin_display = None
+        pool = getattr(server, "plugin_channel_pool", None)
+        server.plugin_channel_pool = None
+    if service is not None:
+        service.close()
+    if pool is not None:
+        pool.close()
 
 
 # LLM: 请求体只接受 conversation_id 与 panels=[{plugin_id, panel_id}]；数量上限由服务裁决，类型错误直接 400。
@@ -38,24 +72,65 @@ def handle_client_plugin_panels(handler, server) -> None:
     except Exception:  # noqa: BLE001 作用域解析失败不能泄露路径，也不能影响核心接口
         handler._send_json(200, {"ok": False, "panels": [], "error": "owner scope unavailable"})
         return
-    service = plugin_display_service(server)
-    panels = service.panels(PanelQuery(owner, str(owner.home_dir), thread_key, activity, requested, sessions))
+    try:
+        service = plugin_display_service(server)
+        panels = service.panels(PanelQuery(owner, str(owner.home_dir), thread_key, activity, requested, sessions))
+    except PluginChannelRevoked:
+        # 停机后晚到的面板请求：不新建池、不起进程，按关闭返回空面板而不是 500
+        handler._send_json(200, {"ok": False, "panels": [], "error": "插件通道已关闭"})
+        return
     handler._send_json(200, {"ok": True, "panels": panels})
 
 
-# LLM: 服务挂在唯一 HTTP server 上，首次请求时创建；Gateway 停止时由 server.stop 关闭。
+# LLM: 池挂在唯一 HTTP server 上，面板服务和以后的事件中心共用同一条（owner, 激活代次）连接；
+#   服务由 Gateway 在停止时统一关闭，stop 负责关池（池由这里创建，生命周期归 server）。
+#   本函数只在 _SERVICE_LOCK 之外被调用，内部自己拿锁，避免与 plugin_display_service 重入同一把锁。
+#   停机后（server 上已置关闭标记）拒绝新建：那时还在跑的工作线程不能悄悄再建一个没人关的池。
 # 函数用途: 取得（必要时创建）本 Gateway 进程的插件展示服务。
 def plugin_display_service(server):
-    from ..plugin_display.service import PluginDisplayService, plugin_display_client
+    from ..plugin_display.service import DisplayWiring, PluginDisplayService
 
     with _SERVICE_LOCK:
+        if _channel_closed(server):
+            raise PluginChannelRevoked("插件通道已随 Gateway 停机关闭")
         service = getattr(server, "plugin_display", None)
         if service is None:
             # 面板连接与业务连接同一沙箱开关（配置 plugin_process_sandbox）
             sandbox = bool(getattr(getattr(server.agent, "config", None), "plugin_process_sandbox", False))
-            service = PluginDisplayService(client_factory=partial(plugin_display_client, process_sandbox=sandbox))
+            # 直接复用取/建逻辑，不能再取 _SERVICE_LOCK（本函数已持有，非可重入锁会死锁）
+            pool = _locked_shared_pool(server, sandbox)
+            server.plugin_channel_pool = pool
+            service = PluginDisplayService(wiring=DisplayWiring(pool=pool))
             server.plugin_display = service
         return service
+
+
+# LLM: 一个 Gateway 进程只建一个池；面板服务和事件中心都从这里取，不能再各建一个。
+#   池一旦建好就固定创建客户端用的沙箱开关，避免同一进程里出现两种插件进程形态。
+#   停机后拒绝新建（同 plugin_display_service）：以后事件中心在停机排空时取池也会走到这里。
+# 函数用途: 取得（必要时创建）挂在 server 上的共用插件通道池。
+def plugin_channel_pool(server, process_sandbox: bool | None = None):
+    with _SERVICE_LOCK:
+        return _locked_shared_pool(server, process_sandbox)
+
+
+# LLM: 只在 _SERVICE_LOCK 内调用；已存在的池原样返回，不存在才按沙箱开关新建并挂上 server。
+#   已关闭的 server 一律拒绝：池是进程级共享资源，停机后再建一个就没人在关它了。
+# 函数用途: 取或建 server 上的唯一池（调用方已持锁）。
+def _locked_shared_pool(server, process_sandbox: bool | None):
+    from ..plugin_channel import PluginChannelPool
+    from ..plugin_display.service import plugin_display_client
+
+    if _channel_closed(server):
+        raise PluginChannelRevoked("插件通道已随 Gateway 停机关闭")
+    pool = getattr(server, "plugin_channel_pool", None)
+    if pool is None:
+        if process_sandbox is None:
+            config = getattr(getattr(server, "agent", None), "config", None)
+            process_sandbox = bool(getattr(config, "plugin_process_sandbox", False))
+        pool = PluginChannelPool(client_factory=partial(plugin_display_client, process_sandbox=process_sandbox))
+        server.plugin_channel_pool = pool
+    return pool
 
 
 # LLM: 只校验形状，不校验插件是否存在；存在性由服务按安装表裁决并返回 unavailable。

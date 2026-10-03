@@ -11,7 +11,11 @@ from zipfile import ZipFile
 import pytest
 
 from agent_py_agent.agent.plugin_display.protocol import MAX_STATUS_FIELDS, normalize_display
-from agent_py_agent.agent.plugin_display.service import PanelQuery, PluginDisplayService
+from agent_py_agent.agent.plugin_display.service import (
+    DisplayWiring,
+    PanelQuery,
+    PluginDisplayService,
+)
 from agent_py_agent.agent.plugin_manifest import PLUGIN_PACKAGE_SCHEMA_V2
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.agent.tooling.mcp_client import MCPStdioClient
@@ -67,8 +71,8 @@ def test_real_process_renders_unknown_and_known(installed_inspector):
         return client
 
     executor = _ManualExecutor()
-    service = PluginDisplayService(installations=lambda _owner: (installation,), client_factory=factory,
-                                   executor=executor)
+    service = PluginDisplayService(wiring=DisplayWiring(
+        installations=lambda _owner: (installation,), client_factory=factory, executor=executor))
 
     def render(activity: dict) -> dict:
         query = PanelQuery(object(), "owner", "thread:t", activity, (("context-inspector", "context"),))

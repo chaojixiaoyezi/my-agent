@@ -4292,6 +4292,30 @@
       "description": "(多租户/多测试目录)把缓存撑大。"
     },
     {
+      "name": "ERROR_BACKOFF_SECONDS",
+      "file": "agent_py_agent/agent/plugin_channel/pool.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "请求失败后的重试退避秒数；沿用面板服务原值，避免故障插件被风暴重试。"
+    },
+    {
+      "name": "IDLE_CLOSE_SECONDS",
+      "file": "agent_py_agent/agent/plugin_channel/pool.py",
+      "value": 120.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "连接闲置多少秒后关闭；沿用面板服务原值，释放闲置插件资源。"
+    },
+    {
+      "name": "REQUEST_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/plugin_channel/pool.py",
+      "value": 3.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "单个请求（含连接启动）的总超时秒数；沿用面板服务原值，超时按失败处理并回退。"
+    },
+    {
       "name": "MAX_LINE_CHARS",
       "file": "agent_py_agent/agent/plugin_display/protocol.py",
       "value": 200,
@@ -4332,22 +4356,6 @@
       "description": "展示文本最多行数；超出截断，防止插件刷屏。"
     },
     {
-      "name": "ERROR_BACKOFF_SECONDS",
-      "file": "agent_py_agent/agent/plugin_display/service.py",
-      "value": 5.0,
-      "unit": "秒",
-      "category": "其它",
-      "description": "面板渲染失败后的重试退避秒数；失败后按此间隔重试，避免风暴。"
-    },
-    {
-      "name": "IDLE_CLOSE_SECONDS",
-      "file": "agent_py_agent/agent/plugin_display/service.py",
-      "value": 120.0,
-      "unit": "秒",
-      "category": "其它",
-      "description": "面板闲置多少秒后关闭；释放闲置插件渲染资源。"
-    },
-    {
       "name": "MAX_REQUESTED_PANEL_COUNT",
       "file": "agent_py_agent/agent/plugin_display/service.py",
       "value": 8,
@@ -4362,14 +4370,6 @@
       "unit": "个",
       "category": "上限预算",
       "description": "会话列表最多展示的行数；超出截断，保持面板可读。"
-    },
-    {
-      "name": "RENDER_TIMEOUT_SECONDS",
-      "file": "agent_py_agent/agent/plugin_display/service.py",
-      "value": 3.0,
-      "unit": "秒",
-      "category": "超时",
-      "description": "面板渲染超时秒数；超时按失败处理并回退，防止插件卡死主界面。"
     },
     {
       "name": "MAX_ENTRY_ARG_COUNT",

@@ -17,7 +17,11 @@ from agent_py_agent.agent.plugin_display.protocol import (
     MAX_TEXT_LINE_COUNT,
     normalize_display,
 )
-from agent_py_agent.agent.plugin_display.service import PanelQuery, PluginDisplayService
+from agent_py_agent.agent.plugin_display.service import (
+    DisplayWiring,
+    PanelQuery,
+    PluginDisplayService,
+)
 from agent_py_agent.agent.plugin_manifest import canonical_plugin_settings
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.agent.tooling.mcp_client import MCPStdioClient
@@ -68,8 +72,8 @@ def render(installed, sessions: list[dict], settings: dict | None = None) -> lis
         return client
 
     executor = _ManualExecutor()
-    service = PluginDisplayService(installations=lambda _owner: (installation,), client_factory=factory,
-                                   executor=executor)
+    service = PluginDisplayService(wiring=DisplayWiring(
+        installations=lambda _owner: (installation,), client_factory=factory, executor=executor))
     query = PanelQuery(object(), "owner", "thread:t", {}, (("worktable-lite", "sessions"),),
                        sessions=lambda: sessions)
     try:

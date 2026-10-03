@@ -573,6 +573,181 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $(cat ~/.my-agent/releas
 - 入库变异探针四项已再执行，捕获结果与上表一致；收尾正常新进程 **106 passed in 0.77s**，完整 guards9 **172 passed in 33.17s**，导入边界仍 0 条。没有把变异退出 1 包装成功，也没有改产品来运行变异。
 - **未验证**：真实 v8 插件进程启用、TUI/飞书、Linux/Mac 真沙箱和跨 owner 启用门；全量由 3a Linux 车道执行。`sandbox=required` 是确认需求而非隔离已生效。当前待 ae 一并复审；B7 前启用关闭门见本文件顶部，本段保留原交付测试事实。
 
+## B2 五轮返工：只补用例——4 个窗口钉死 + 2 条防线用例（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `24cf10edb`，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：9b 复核第 4 轮（`24cf10edb`）判定产品代码全部改对、沙箱外实测通过，但 4 条用例没测到各自的窗口。本轮**只改测试文件、不动产品代码**。
+- **改动的 4 条用例**（`test_plugin_channel_pool.py` / `test_plugin_display_service.py`）：
+  1. **MU4**：`test_before_send_gets_revoked_not_none_when_connection_already_detached` 原来先停用再发请求，在 `_ensure_started` 就抛撤销、走不到 `before_send` 前面的窗口。改成包一层 `_ensure_started`：拿到传输、返回给调用方**之前**摘除连接，断言抛 `PluginChannelRevoked` 且 `before_send` 未被调用。
+  2. **MU7**：`test_retire_stale_scans_under_pool_lock` 原来只断言"进过一次锁"（摘除那步照样进锁，扫描挪到锁外也过）。改成把连接表换成 dict 子类，在 `__iter__`/`keys`/`items` 每次遍历时记录池锁是否持有，断言全部持有。
+  3. **N1**（转正 9b 探针 5）：新增 `test_panels_takes_watermark_before_reading_install_table`，走真实 `panels()` 入口，读表回调里模拟并发的另一个面板查询为新启用的 X 建槽与连接；断言这条连接被保留（把"取时间界"挪到读表之后就会被摘）。
+  4. **N3**：新增 `test_retire_leaves_other_consumers_connection_untouched`，建一条面板服务没有槽、已过期、建在时间界之前的连接，跑 `_retire`，断言它还在（回收不看"自己管"就会被摘）。
+- **附带发现并补的 2 条**（同一批只补用例）：第 4 轮引入 `RetireScope.managed` 后，ae-N1（有效集合只算有面板的）与 ae-N2（读表失败当空集合）两个老变异变成"只靠 scope 第二道防线也能过"的等价存活——行为仍正确，但 valid 计算这一层失去了用例保护。补：
+  5. `test_unreadable_install_table_keeps_services_own_connections`：读表失败时面板服务**自己管过的**连接也不能被摘；
+  6. `test_panel_less_enabled_activation_keeps_managed_connection`：收紧成无面板但仍启用的激活（面板服务管过它）必须留在有效集合里，连接不被误摘。
+  这两条补完后 ae-N1、ae-N2 重新被杀死。
+- **验证命令与结果**（工作目录根；`<代号>`=ds4b2）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_channel_pool.py \
+    agent_py_agent/tests/test_plugin_display_service.py agent_py_agent/tests/test_gateway_plugin_panels.py \
+    agent_py_agent/tests/test_plugin_channel_lifecycle.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds4b2
+  # → 73 passed
+  # 变异：/private/tmp/claude-501/ds4b2/mutate4.py（老 23 个，其中 P4 即 9b 的 MU4；再加 9b 的 MU7/N1/N3）
+  # → 26/26 全部"杀死"
+  ```
+
+- **静态门禁**：guards9 172 passed、import boundaries 0、ruff 通过、doc_sync PASS、code-size strict hard=0、size_diff 新增 0（消失 12）、`git diff --check` 干净、clean package OK。
+- **未验证 / 环境限制**：9b 探针 4（真子进程压力测试）沙箱内跑不了，9b 已在沙箱外跑过；`test_plugin_sandbox.py` 等插件宿主类用例在沙箱内失败，按任务书第 8 条由 3a/9b 在沙箱外复核。
+
+## B2 四轮返工：停机后拒绝新建、回收要有过期证据、在途摘除按撤销（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `5aec88524`，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：9b 并发复审（`~/.my-agent/decision-evidence/review-b2-concurrency-5aec88524/`）判定锁序无环、真子进程压力下不漏关，但 B3/B5 接上同一个池后会出现 3 条真问题，外加 1 条只补用例。
+- **改动**：
+  1. **停机后拒绝新建池**（必须改 1）：`server_close()` 不等还在跑的工作线程，stop 之后晚到的面板请求或事件中心取池会再建一个打开的新池，拉起的插件进程之后没人关。修法：`plugin_panels_http` 新增 `close_plugin_channel(server)`，在 `_SERVICE_LOCK` 内先置 `server.plugin_channel_closed` 标记、再摘掉服务和池引用，最后在锁外真正 close（close 会 stop 插件进程，可能阻塞，不能占锁）；`plugin_display_service` 与 `_locked_shared_pool` 见到标记就抛 `PluginChannelRevoked`；面板入口捕获它并按"通道已关闭"回空面板，不是 500。`GatewayHTTPServer.stop()` 改为调用它（幂等）。
+  2. **回收要有正面过期证据**（必须改 2）：`owner_keys` 快照之后别的调用方为一个刚启用的激活建了连接，它不在本轮 valid 里也不是本服务管的，却会被 `retire_stale` 摘掉。修法：池加单调递增创建序号（`ChannelConnection.created_seq` / `current_seq()`），新增 `RetireScope(managed, created_before)`；`retire_stale(owner, valid, scope)` 只在"归自己管 **且** 建在 `created_before` 之前 **且** 不在 valid 里"时摘。面板服务在读有效集合**之前**取时间界，不再用快照算 keep。
+  3. **在途摘除按撤销**（必须改 3）：请求进行中连接被停用/关闭时，传输层先报 `MCP_CONNECTION_CLOSED`，`request()` 原来按连接级故障标退避并原样抛出。B5 会把"插件已停用"当成"连接坏了"按需要确认处理，多弹一次审批框（9b 压力测试里出现 171 次）。修法：`request()` 的通用 except 里先 `holds()`；连接已不在表里就抛 `PluginChannelRevoked`（`from exc`）且不标退避。
+  4. **补 `_current_client` 用例**（必须改 4，只补用例）：MU4 变异存活——代码已对（锁内取客户端并核对连接还在表里），但没有用例保护。
+  5. **补 `retire_stale` 锁内扫描用例**（建议，MU7 存活）与**池合同注释写明客户端 stop 必须幂等**（停用撞启动会 stop 两次，正是第二次兜住漏关）。
+- **新增/转正用例 6 条**：
+  - `test_gateway_plugin_panels.py::test_late_panel_request_after_stop_cannot_rebuild_an_open_pool`（9b 探针 1 转正）：stop 后已有池已关、两个入口都抛撤销、没有再建出新池；
+  - `test_plugin_display_service.py::test_retire_keeps_connection_created_after_valid_snapshot`（9b 探针 2 转正）：时间界之后建的连接不被摘，时间界之前失效的照常回收；
+  - `test_plugin_channel_pool.py::test_inflight_retire_is_reported_as_revoked_not_connection_closed`（9b 探针 3 转正）：在途摘除拿到撤销、连接不标退避；
+  - `test_plugin_channel_pool.py::test_before_send_gets_revoked_not_none_when_connection_already_detached`（MU4）；
+  - `test_plugin_channel_pool.py::test_retire_stale_scans_under_pool_lock`（MU7）；
+  - `test_plugin_channel_pool.py` 里 9b 探针 4 的压力测试在沙箱内不起真子进程，**未转正**（见下）。
+- **验证结果**（工作目录根，`<代号>`=ds4b2）：
+
+  | 项目 | 结果 |
+  | --- | --- |
+  | 相关 4 个测试文件 | **69 passed** |
+  | 变异（be 10 + 前几轮 8 + 本轮 5 = **23**） | **23/23 全部"杀死"**（含"停机不置关闭标记""按快照回收""请求中摘除不转撤销""MU4""MU7"） |
+  | guards9 / import boundaries / ruff / doc_sync / code-size strict | 见交接报告 |
+  | size_diff | 新增告警 0 |
+
+- **未验证 / 环境限制**：9b 探针 4（真子进程压力测试）需要起真实子进程，沙箱内跑不了，9b 已在沙箱外跑过（649 客户端、关闭后 0 个活子进程）；`test_plugin_sandbox.py` 等插件宿主/沙箱子进程类用例在沙箱内同样失败，按任务书第 8 条由 3a/9b 在沙箱外复核。
+
+## B2 三轮返工：错误码用例对齐 + 池连接快照（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `b4e5a1e12`，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：ae 复看 `b4e5a1e12`，上一轮三条都改到了，但新引入 2 条。证据目录 `~/.my-agent/decision-evidence/m1-b2-rereview-20261003/README.md` 末尾。
+- **改动**：
+  1. `test_mcp_client.py::test_call_unknown_tool_surfaces_protocol_error` → 改名 `..._surfaces_remote_error`，期望改成 `MCP_REMOTE_ERROR`。上一轮把远端错误回复改成独立码，这个 integration 用例没在跑的 4 个文件里，漏了。
+  2. `plugin_channel/pool.py` 新增 `owner_keys(owner_key)`：在池锁内返回该 owner 连接键的**不可变元组快照**；`plugin_display/service.py::_retire` 两处遍历（算 keep 的集合推导、逐个 `close_idle`）都改用它，不再锁外遍历 `self._pool.connections` 活字典。后台渲染撤销或以后 B3 建/删连接会在迭代中途改字典，抛 `RuntimeError: dictionary changed size during iteration`。
+- **新增用例 2 条**：
+  - `test_plugin_channel_pool.py::test_owner_keys_snapshot_survives_concurrent_removal`：快照必须是 `tuple`，取完快照后并发删除不影响遍历，重取能看到删除结果；
+  - `test_plugin_display_service.py::test_service_retire_tolerates_concurrent_connection_removal`：`_retire` 遍历期间让另一个调用方删连接，面板查询不抛错，且池交出的是不可变快照。
+- **验证命令与结果**（工作目录根；`<代号>`=ds4b2）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  # 相关 4 个文件
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_channel_pool.py \
+    agent_py_agent/tests/test_plugin_channel_lifecycle.py agent_py_agent/tests/test_plugin_display_service.py \
+    agent_py_agent/tests/test_gateway_plugin_panels.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds4b2
+  # → 64 passed
+  # test_mcp_client.py（两种方式都要跑，确保 integration 标记的用例真的跑到）
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_mcp_client.py -q -p no:cacheprovider
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_mcp_client.py -o addopts= -q -p no:cacheprovider
+  # → 35 passed / 1 failed（见下）
+  ```
+
+- **变异（18 个，全部被杀死）**：脚本 `/private/tmp/claude-501/ds4b2/mutate2.py`，be 的 10 个 + 本轮累计 8 个（N1/N2/N3/N4/N5/N6 继承上一轮语义，本轮新增 N7「`owner_keys` 交出活字典」、N8「服务改回直接遍历池活字典」）。
+- **静态门禁**：见下方「B2 二轮返工」同款清单（import boundaries 0、ruff 通过、doc_sync PASS、code-size strict hard=0、size_diff 新增 0、diff --check 干净、clean package OK）。
+- **未验证 / 环境限制**：`test_mcp_client.py::test_client_reconnects_same_binding_after_stdio_server_dies` 在本沙箱失败（`MCP_CLEANUP_UNKNOWN`：`process.kill()` 后的进程清理确认需要沙箱不具备的能力）。**已实测与本次改动无关**：把 `unwrap_jsonrpc` 的错误码临时改回基线值 `MCP_PROTOCOL_ERROR` 后该用例仍以同一原因失败；本沙箱插件宿主/沙箱子进程类用例同样失败，按任务书第 8 条由 3a 在沙箱外复核。
+
+## B2 二轮返工：共用池的召回范围、退避分级、锁内取客户端（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `fcb638182`，be、ae、9b 复审通过，并入 step17i）
+
+- **改动**：`plugin_display/service.py` 的 `panels`/`_retire` 把交给共用池的保留集合改成"这个 owner 全部已启用的激活 ∪ 池里不归面板服务管的连接"（不只带面板的插件、也不碰别人建的连接），安装表读不到（`None`）时不做任何回收；`plugin_channel/pool.py` 新增 `_is_connection_failure` 只给连接级故障退避、新增 `PluginChannelStartFailed`（启动失败按连接级）、新增 `_current_client`（锁内取客户端并复核，摘除按撤销）；`tooling/mcp_protocol.unwrap_jsonrpc` 的远端错误改用独立码 `MCP_REMOTE_ERROR`（并登记进 `mcp_registration._ERROR_CODE_MAP`）；`plugin_panels_http` 删掉 `_new_pool` 转发。
+- **ae 的 2 个探针转正为仓库用例**（`~/.my-agent/decision-evidence/m1-b2-rereview-20261003/test_b2_shared_pool_probe.py`，在修复前的头上两条都失败），落在 `test_plugin_display_service.py` 末尾：
+  - `test_panel_query_keeps_other_consumers_connection_for_enabled_plugin`：启用但没有面板的插件（只带事件的 v8 插件）连接不被面板查询摘掉、进程不被停；
+  - `test_unreadable_install_table_does_not_tear_down_shared_connections`：安装表读一次失败，不把这个 owner 在共用池里的连接全停掉。
+- **新增 `test_plugin_channel_pool.py` 用例 5 项**：
+  - 请求级错误（`MCP_REMOTE_ERROR`）不退避整条连接，同连接的后续请求照常成功；
+  - `before_send` 校验拒绝（`ValueError`）不退避；
+  - 超时仍退避整条连接（下一次请求撞 `PluginChannelBackoff`）；
+  - 启动失败仍退避整条连接（抛 `PluginChannelStartFailed` 后下一次撞退避）；
+  - `before_send` 拿到的客户端在连接被摘除时按撤销处理，绝不是 `None`。
+- **验证命令与结果**（在工作目录根运行；`<代号>`=ds4b2）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_channel_pool.py \
+    agent_py_agent/tests/test_plugin_channel_lifecycle.py agent_py_agent/tests/test_plugin_display_service.py \
+    agent_py_agent/tests/test_gateway_plugin_panels.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds4b2
+  # → 62 passed（含 ae 探针转正的 2 条）
+  # ae 的探针原样文件
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    ~/.my-agent/decision-evidence/m1-b2-rereview-20261003/test_b2_shared_pool_probe.py -q -p no:cacheprovider
+  # → 2 passed
+  ```
+
+- **变异（be 的 10 个 + 本轮 6 个 = 16 个，全部被杀死）**：脚本 `/private/tmp/claude-501/ds4b2/mutate2.py`（be 的 10 个沿用原锚点，M4 按新实现换成"连接级判定恒真"），逐个改 `pool.py`/`service.py` 再 `git checkout` 还原：
+  - M1–M10：全部"杀死"；
+  - N1 有效集合只算有面板的插件、N2 读表失败当空集合、N3 启动失败不退避、N4 锁外取 client 不复核、N5 撤销时把 None 交给 before_send、N6 回收不看是不是自己管的：全部"杀死"。
+- **静态门禁**：`check_import_boundaries.py` → findings=0；`ruff check` → All checks passed；`check_doc_sync.py` → DOC_SYNC_PASS；guards9（10 个文件）→ 172 passed；`git diff --check` 干净。
+- **未验证 / 环境限制**：`test_plugin_sandbox.py` 里 4 个需要真启插件进程的用例在本沙箱失败（`plugin_enable`/沙箱子进程/`/bin/ps`），与本次改动无关，按任务书第 8 条由 3a 在沙箱外复核；真实插件进程端到端、真实 TUI/IM 面板、B3 真实事件投递未验证。
+
+## B2 复审返工：关闭竞态、共用池注入、退避按连接（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `af3dd299b`，be、ae、9b 复审通过，并入 step17i）
+
+- **改动**：`plugin_channel/pool.py` 加池关闭终态标记、发布传输前核对连接仍在表里（不在就停掉刚启动的客户端并按撤销）、`_require_current` 对已回收客户端按撤销处理、`close` 走 `_detach`；`plugin_display/service.py` 接受注入的池、只在自建池时 close 关它；`plugin_panels_http` 新增 `plugin_channel_pool(server)` 建唯一共用池并注入服务；`http_service.GatewayHTTPServer` 记 `plugin_channel_pool` 并在 `stop()` 关它。
+- **be 的 4 个探针原样文件全过**（`~/.my-agent/decision-evidence/m1-b2-review-20261003/test_b2_lifecycle_probe.py`，在修复前的 B2 头上 4 个全失败）：`4 passed in 0.16s`。
+- **这些探针已转正为仓库用例** `agent_py_agent/tests/test_plugin_channel_lifecycle.py`（4 项，同样的观察方式：假客户端记录 `start_begin`/`start_end`/`stop`，看"启动完成之后有没有再 stop"）。
+- **新增 `test_plugin_channel_pool.py` 用例 11 项**（原 7 项保留）：
+  - 停用撞后台启动、关闭撞后台启动：启动完成的客户端必须被停、传输不能发布；
+  - 池关闭后旧连接请求与 `acquire` 都按撤销拒绝，且不拉起新客户端；
+  - 请求在途时连接被摘除 → `PluginChannelRevoked`（不是 `AttributeError`），且结果不返回；
+  - M1 发送前复核：已撤销的连接一个请求都不发（`client.sent` 不增长）并关连接；
+  - M5 回收分 owner：A 的 `retire_stale` 不动 B 的连接，B 之后照常请求；
+  - M6 空闲关闭看"启动中"：启动返回前连接必须保留客户端（不置空、不停）；
+  - M7 空闲关闭看"在途"：请求在途时不停客户端；
+  - M8 启动等待计入超时预算：阻塞启动的请求在 2 秒内按超时返回；
+  - M9 排队等待计入预算：被前一个请求堵住的请求在 2 秒内按排队超时返回。
+- **新增 `test_gateway_plugin_panels.py` 用例 3 项**：同一 server 上图 `plugin_channel_pool` 与 `plugin_display_service` 拿到同一个池、面板服务 close 不关共用池、自建池的服务 close 会关池；`test_plugin_sandbox.py::test_config_reaches_model_registry_and_panel_clients`（True/False 两参数）改成对池上的工厂断言（`pool._client_factory.keywords == {"process_sandbox": sandbox}`），保留"沙箱配置真的生效"这层意思。
+- **验证命令与结果**（在工作目录根运行；`<代号>`=ds4b2）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  # 4 个探针原样文件
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest /private/tmp/claude-501/ds4b2/probe/test_b2_lifecycle_probe.py -q -p no:cacheprovider
+  # → 4 passed in 0.16s
+  # 相关用例
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_channel_pool.py \
+    agent_py_agent/tests/test_plugin_channel_lifecycle.py agent_py_agent/tests/test_plugin_display_service.py \
+    agent_py_agent/tests/test_gateway_plugin_panels.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds4b2
+  # → 55 passed
+  # 常数目录
+  $PY scripts/build_constants_catalog.py && $PY scripts/build_constants_catalog.py --check
+  # → 已生成（875 项）；与源码一致
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_constants_catalog.py -q -p no:cacheprovider
+  # → 11 passed
+  ```
+
+- **变异（be 的 10 个，全部被杀死）**：用 `~/.my-agent/decision-evidence/m1-b2-review-20261003/mutate.py` 的副本（额外把新用例文件加进目标列表），逐个改 `pool.py` 再还原；结果 M1–M10 全部"杀死"。
+  - 关键一次修正：M6 最初存活，有两层原因。①原用例观察点在"客户端还没创建"的窗口，抢读 `h.clients[0]` 会随机 `IndexError`（已改为手工构造状态，不再后台竞态）；②更本质的是：走 `pool.request()` 时请求锁 `request_lock` 一直被持有，`close_idle` 的 `request_lock.locked()` 成了冗余防线，把被删掉的 `starting` 判断掩盖住了。改成**不经 request()、手工构造**连接（挂好客户端、`starting=True`、`last_used` 已过期），让 `starting` 判断成为唯一防线，M6 即被杀死。这条也说明：并发保护的冗余分支会让变异"等价存活"，用例必须精确指向被删的那一条判断。
+- **静态门禁**：`check_import_boundaries.py` → findings=0；`ruff check` → All checks passed；`check_doc_sync.py` → DOC_SYNC_PASS；guards9（10 个文件）→ 172 passed；`git diff --check` 干净。
+- **未验证 / 环境限制**：`test_plugin_sandbox.py` 里 4 个需要真启插件进程的用例在本沙箱失败（`plugin_enable`/沙箱子进程/`/bin/ps`），与本次改动无关，按任务书第 8 条由 3a 在沙箱外复核；真实插件进程端到端、真实 TUI/IM 面板未验证。
+
+## B2 共用插件通道（ds1，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `claude/be-m1-design` `8b6344045`）
+
+- **改动**：新增 `agent_py_agent/agent/plugin_channel/pool.py`（`PluginChannelPool`：每个（owner, 激活代次）一条 MCP 连接、单在途、发送前后复核代次、启动计入超时、出错退避、空闲关闭），`plugin_display/service.py` 改用它；常数取值不变。
+- **面板原有用例一行未改**：`test_plugin_display_service.py` 21 passed（外加 1 项新的服务侧撤销用例 `test_revoked_connection_is_dropped_from_pool_after_failed_drain`，22 passed）；真实插件包用例 22 passed（`test_activity_line_package.py`、`test_status_pet_package.py`、`test_context_inspector_package.py`、`test_worktable_lite_package.py`，这些会用假插件进程/假连接，不在本沙箱起真插件进程）。
+- **新增 `test_plugin_channel_pool.py`（7 项，全部用假客户端与假传输）**：
+  - 启动超时：`start` 阻塞时请求按超时返回，客户端没有被停止（后台继续启动），放行后下一次请求直接复用同一条连接（只启动一次、只建一个客户端）。
+  - 代次失效丢结果：调用前失效和发送后失效两种都在返回结果之前抛撤销、关连接、把连接移出池。
+  - 单在途：第一个请求在途时第二个请求只能排队，两个并发线程观测到的并发发送峰值为 1。
+  - 空闲关闭：`close_idle` 到期后关闭客户端并保留连接条目，下一次请求重建客户端（新客户端只启动一次）。
+  - 出错退避：失败后立即重试报退避，退避到期后恢复正常。
+  - 回收：`retire_stale` 移出并关闭连接。
+- **变异（5 个，全部被检出，源码哈希还原一致）**：不复核代次、允许多在途、启动不计超时、空闲不关、撤销不关连接。
+- **验证命令**（在分支工作目录根运行；`<代号>`=ds1）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_display_service.py agent_py_agent/tests/test_plugin_channel_pool.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1
+  ```
+
+- **未验证**：真实插件进程端到端、真实 TUI/IM 面板、宿主插件启用链（沙箱内不起真插件、不能启动 /bin/ps），由 3a 在沙箱外复核。
+
 ## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
 
 - **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：

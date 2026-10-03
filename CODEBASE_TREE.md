@@ -298,6 +298,9 @@ agent_py_agent/
 |   |-- plugin_command_service.py      # 宿主作用域目录与旧版本拒绝，不拥有安装和执行权
 |   |-- plugin_completion.py           # 用公共词法和绑定事实生成只编辑输入的候选
 |   |-- plugin_manifest.py             # 静态包描述与不可变 schema：v2 面板、v3 Skill、v4 宿主 API、v5 观察，v8 文件入口订阅；旧字节保持
+|   |-- plugin_channel/                # 插件共用通道（M 线 B2）：面板与事件共用的连接管理
+|   |   |-- __init__.py                # 只导出通道池与异常，不反向依赖面板或事件模块
+|   |   `-- pool.py                    # 每个（owner, 激活代次）一条 MCP 连接：单在途、代次复核、启动计时超时、退避、空闲关闭
 |   |-- plugin_events/                 # M1 插件事件域；B1 只有静态声明和确认，不代表已授权或已隔离
 |   |   |-- __init__.py                # 事件域命名空间，不在导入时启动服务
 |   |   |-- declarations.py            # v8 事件、工具收紧门、网络权限的不可变声明与严格校验
@@ -305,7 +308,7 @@ agent_py_agent/
 |   |-- plugin_observation.py          # 观察候选宿主合同（插件与 MCP 共用）：声明类型与配对规则、载荷整份校验（含几何 frame/region）、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
 |   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
-|   |   `-- service.py                 # Gateway 进程内展示服务：固定代次连接、单在途、撤销与空闲回收
+|   |   `-- service.py                 # Gateway 进程内展示服务：面板待发合并、结果缓存与退避；连接与在途走 plugin_channel
 |   |-- plugin_package.py              # 有界 ZIP 读取、成员与摘要核对，不安装或导入插件
 |   |-- plugin_entry.py                # v6 非 Python 入口、随包文件与平台声明的形状校验及本机平台标记
 |   |-- plugin_wheels.py               # wheel 标准元数据、RECORD、平台与本地依赖闭包预检

@@ -378,8 +378,9 @@ class GatewayHTTPServer:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
-        # 插件展示服务由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
+        # 插件展示服务与共用插件通道池都由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
         self.plugin_display = None
+        self.plugin_channel_pool = None
 
     def _guard_network_exposure(self) -> None:
         """fail-closed:绑非 loopback(暴露到网络)却没接鉴权中间件时拒绝启动,杜绝未认证远程入口。"""
@@ -451,6 +452,7 @@ class GatewayHTTPServer:
     def stop(self, timeout: float = 5.0) -> None:
         global _server_instance
         from ..plugin_host_api import set_host_api_base
+        from .plugin_panels_http import close_plugin_channel
 
         set_host_api_base(None)
         # G4：停机时注销本服务登记的 Gateway 端口（在 server_close 前取端口）。
@@ -465,9 +467,10 @@ class GatewayHTTPServer:
         if self._thread:
             self._thread.join(timeout=timeout)
             self._thread = None
-        if self.plugin_display is not None:
-            self.plugin_display.close()
-            self.plugin_display = None
+        # server_close() 不等还在跑的工作线程：停机后晚到的面板请求或事件中心取池会重新建一个
+        # 没人关的池。close_plugin_channel 在 _SERVICE_LOCK 内先置"已关闭"标记再摘引用，
+        # 之后的取池/取服务一律被拒。
+        close_plugin_channel(self)
         _server_instance = None
 
 

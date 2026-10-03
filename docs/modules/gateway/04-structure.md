@@ -240,6 +240,7 @@ Gateway Compact的原visible范围规则现编译成逐行selector，公共messa
 
 `agent/command_catalog.py` 提供核心名称、别名、会话尾部语法及保留命名空间的唯一声明。
 插件宿主只读 API 经 `plugin_host_api.py` 处理 `/plugin-host/query`；插件面板经 `plugin_panels_http.py` 进入 `plugin_display/service.py`，只读活动投影和按需的会话列表、不写状态；面板连接与业务连接共用配置 `plugin_process_sandbox` 的插件进程沙箱开关（见 PLUGIN_PROCESS_SANDBOX）；
+面板与以后的事件中心共用同一个插件通道池（`agent/plugin_channel/pool.py`，B2）：池由 `plugin_panels_http.plugin_channel_pool` 惰性建在唯一 HTTP server 上、固定创建客户端的沙箱开关，`GatewayHTTPServer.stop` 负责关池；面板服务只持有注入进来的池，close 不会关掉共用池。四轮返工后：停机是终态（`close_plugin_channel` 在 `_SERVICE_LOCK` 内置标记并摘引用，之后两个入口一律抛 `PluginChannelRevoked`，不会再建出没人关的池）；回收要有正面过期证据（`retire_stale(owner, valid, scope)` 的 `RetireScope(managed, created_before)` 只摘自己管的、且建在时间界之前的连接）；在途请求撞上停用/关闭按 `PluginChannelRevoked` 抛且不标退避；交给池的有效激活集合是 owner 全部已启用的激活（不只带面板的插件），安装表读不到时一条都不回收；`before_send` 用的客户端在池锁内取并复核；退避分级——连接级故障按连接退避，请求级错误仍按面板退避（远端错误码 `MCP_REMOTE_ERROR`、启动失败 `PluginChannelStartFailed`）；调用方每次请求前必须先 `acquire` 刷新使用时间再 `request`，遍历连接表用 `pool.owner_keys` 快照；
 HTTP ask/control 在原鉴权之后先经 `plugin_command_service.py` 读取可信 owner 目录并核对输入版本，其余控制继续经原会话解析器；
 `request_client.py` 在分配请求编号前拒绝普通队列中的系统命令，
 `request_execution.py` 在追加用户历史和调用模型前再次校验旧队列。三处沿原入口顺序，不增加队列或控制类型。

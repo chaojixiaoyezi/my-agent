@@ -262,13 +262,15 @@ def test_handshake_discover_and_call_end_to_end():
         client.stop()
 
 
-def test_call_unknown_tool_surfaces_protocol_error():
+def test_call_unknown_tool_surfaces_remote_error():
     client = MCPStdioClient(_config(_ECHO_SERVER))
     try:
         client.start()
         with pytest.raises(MCPError) as exc_info:
             client.call_tool("does_not_exist", {})
-        assert exc_info.value.code == "MCP_PROTOCOL_ERROR"
+        # 服务端对这个请求回了 JSON-RPC 错误：这是请求级失败（连接还是好的），
+        # 用独立的 MCP_REMOTE_ERROR，好让调用方不退避整条共用连接。
+        assert exc_info.value.code == "MCP_REMOTE_ERROR"
     finally:
         client.stop()
 

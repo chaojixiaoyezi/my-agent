@@ -203,6 +203,73 @@
 - **边界**：D9 的 local/main 启用门、真正总开关和强制沙箱仍属 B7；B7 落地时须一起替换暂时拒绝与构造期计划排除，接入真实准入判定，不能只删关闭门。`sandbox=required` 不是隔离已生效的证据。
 - **下一步**：ae 对原提交、两裁定和本轮修订一并复审，3a 挑选集成；B2 可并行，B3/B7/B9 按设计依赖接入。v8 在 B7 前只能安装、不能启用，整期 M1 不因此记完成。
 
+## B2 五轮返工：只补用例——4 个窗口钉死 + 2 条防线用例（M 线第一期，ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `24cf10edb` 之后，基于 `8b6344045`，已实施，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：9b 复核第 4 轮（`24cf10edb`）判定产品代码全部改对（停机终态、先取时间界再读表、真子进程压力 627 个客户端关闭后 0 残留、错误全为撤销），只差 4 条用例没测到各自的窗口。本轮**只改测试文件、不动产品代码**。
+- **4 条用例分别钉住**：
+  1. MU4：`before_send` 之前连接被摘除的窗口（包 `_ensure_started`，返回传输前摘除；断言撤销且 `before_send` 未被调用）；
+  2. MU7：`retire_stale` 的扫描必须在池锁内（dict 子类在每次遍历时断言池锁持有）；
+  3. N1：时间界必须在读安装表**之前**取（走真实 `panels()` 入口，读表期间别的查询为新启用激活建的连接必须被保留）；
+  4. N3：回收必须看"自己管"（面板服务没有槽的别人连接，即使过期也不碰）。
+- **附带补的 2 条**：第 4 轮引入 `RetireScope.managed` 后，ae-N1（有效集合只算有面板的）与 ae-N2（读表失败当空集合）两个老变异变成等价存活（scope 第二道防线兜住，行为仍正确，但 valid 计算这层失去保护）。补两条用例把这一层重新钉住：读表失败时自己管过的连接也不能摘；收紧成无面板但仍启用的激活必须留在有效集合里。补完后两个变异重新被杀死。
+- **验证与变异**：相关 4 个文件 73 passed；26 个变异（老 23 个，其中 P4 即 9b 的 MU4；再加 9b 的 MU7/N1/N3）全部被杀死；命令与结果见 [TESTS](TESTS.md) 顶部「B2 五轮返工」小节。
+
+## B2 四轮返工：停机终态、回收的过期证据、在途摘除按撤销（M 线第一期，ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `5aec88524` 之后，基于 `8b6344045`，已实施，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：9b 并发复审（`~/.my-agent/decision-evidence/review-b2-concurrency-5aec88524/`）判定锁序无环、649 个真子进程压力下关闭后 0 个活进程，但 B3/B5 接上同一个池后会出现 3 条真问题。
+- **根因与修法（每条）**：
+  1. **停机后还能再建出一个没人关的池**。根因：`server_close()` 不等还在跑的工作线程，`stop()` 又把 `plugin_display`/`plugin_channel_pool` 置空且没拿 `_SERVICE_LOCK`；晚到的面板请求或事件中心取池于是重新建一个新池，它拉起的插件进程之后再也没人收。修法：新增 `close_plugin_channel(server)`，在 `_SERVICE_LOCK` 内先置关闭标记、再摘掉服务与池引用，锁外真正 close（close 会 stop 插件进程，可能阻塞，不能占锁）；`plugin_display_service` 与 `_locked_shared_pool` 见到标记抛 `PluginChannelRevoked`；面板入口转成"通道已关闭"的空面板响应；`GatewayHTTPServer.stop()` 调用它（幂等）。
+  2. **回收缺少正面过期证据**。根因：面板服务拿 `owner_keys` 快照算 keep，再交给 `retire_stale` 在池锁内重扫；快照之后别的调用方为一个刚启用的激活建的连接既不在快照里、也不在本轮 valid 里，于是被误摘（B3 丢一次事件，B5 多弹一次审批框）。修法：池加单调递增的创建序号（`created_seq` / `current_seq()`）与 `RetireScope(managed, created_before)`；`retire_stale` 只在"归自己管 **且** 建在时间界之前 **且** 不在 valid 里"时摘；服务在读有效集合之前取界。用序号而不是墙钟，只表达结构化的先后。
+  3. **在途请求撞上停用会报"连接断开"并标退避**。根因：摘除时 stop 客户端，进行中的 `transport.request` 先抛 `MCP_CONNECTION_CLOSED`，`request()` 按连接级故障标退避并原样抛给调用方。对 B5 意味着"插件已停用"被当成"连接坏了"，按需要确认处理。修法：`request()` 的通用 except 先 `holds()`；连接已不在表里就抛 `PluginChannelRevoked`（`from exc`）且不标退避。
+  4. **两份合同注释补齐**：客户端 `stop` 必须幂等（停用撞后台启动会 stop 两次，第二次才兜住漏关）；遍历连接表一律走 `pool.owner_keys` 快照。
+- **不改的边界**：连接身份、退避分级（连接级按连接、请求级按面板）、池的唯一所有权、沙箱开关取值都不变；`retire_stale` 不带 scope 时保持旧语义（供非共享场景与既有测试使用）。
+- **验证与变异**：9b 的 3 条探针转正为仓库用例（第 4 条真子进程压力测试在沙箱外由 9b 跑）；23 个变异（be 10 + 前几轮 8 + 本轮 5）全部被杀死，其中 MU4（`_current_client` 不核对连接在表里）与 MU7（`retire_stale` 扫描移出池锁）正是 9b 报的存活项；命令与结果见 [TESTS](TESTS.md) 顶部「B2 四轮返工」小节。
+
+## B2 三轮返工：错误码用例对齐与池连接快照（M 线第一期，ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `b4e5a1e12` 之后，基于 `8b6344045`，已实施，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：ae 复看 `b4e5a1e12` 认定上一轮三条都改到了，但新引入 2 条。
+- **根因与修法（每条）**：
+  1. **改了错误码但漏改一个用例**。根因：上一轮把远端 JSON-RPC 错误回复从 `MCP_PROTOCOL_ERROR` 改成独立的 `MCP_REMOTE_ERROR`，`test_mcp_client.py::test_call_unknown_tool_surfaces_protocol_error`（标了 integration）不在当时跑的 4 个文件里，仍按旧码断言。修法：期望改成 `MCP_REMOTE_ERROR`，用例改名 `..._surfaces_remote_error`；该文件用默认参数与 `-o addopts=` 两种方式各跑一遍，确认 integration 用例真的执行到。
+  2. **`_retire` 在池锁外遍历池的活字典**。根因：算保留集合时写 `{key[1] for key in self._pool.connections ...}`、末尾又写 `for key in list(self._pool.connections)`，两处都没拿池锁；集合推导在字节码层逐项迭代，期间后台渲染遇到撤销会 `_revoke`、以后 B3 也会建/删连接，撞上就抛 `RuntimeError: dictionary changed size during iteration`，面板请求直接失败。修法：池新增 `owner_keys(owner_key)`，在池锁内返回该 owner 连接键的不可变元组快照；`_retire` 两处遍历都改用它（回收后再取一次新快照）。
+- **不改的边界**：回收语义与上一轮一致（保留集合 = 启用快照 ∪ 不在本服务槽表里的连接；`None` 时完全不回收）；退避分级、连接身份、池所有权都不变。
+- **验证与变异**：18 个变异（be 的 10 + 本轮累计 8）全部被杀死，其中 N7「`owner_keys` 交出活字典」、N8「服务改回直接遍历池活字典」是本轮新增；命令与结果见 [TESTS](TESTS.md) 顶部「B2 三轮返工」小节。
+
+## B2 二轮返工：共用池的召回范围与退避分级（M 线第一期，ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `fcb638182` 之后，基于 `8b6344045`，已实施，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：ae 复审 B2 返工（`fcb638182`）判定 be 的 6 条都修到了，但共用池真正要被第二个调用方（B3 事件、B5 收紧钩子）用起来还差两处，另有三条小修。证据目录 `~/.my-agent/decision-evidence/m1-b2-rereview-20261003/`：两条共用池探针在头上都失败。
+- **根因与修法（每条）**：
+  1. **面板服务会摘掉共用池里别的调用方的连接**。根因：`panels` 算"还有效的激活"时只收有面板的插件，再对**共用池**调 `retire_stale`——同一 owner 下已启用但没有面板的插件（只带事件的 v8 插件）每次有人看面板就被摘掉、进程被停；安装表读一次失败（返回空）更会把整个 owner 的连接全摘掉。修法：交给池的**保留集合**改成"这个 owner 全部已启用的激活 ∪ 池里不归面板服务管的连接（别人建的）"，所以面板查询只回收自己管过、且已失效的激活；安装表读不到时返回 `None`，`_retire` 收到 `None` 就一条都不回收。撤销本来就有请求前后代次复核兜底，不靠这一步。
+  2. **退避把请求级错误也当成连接级**。根因：`request()` 对撤销与退避以外的所有异常都 `_mark_backoff`，包括面板能力检查拒绝和插件对单个请求回的 JSON-RPC 错误；一个面板渲染出错会让同一条连接上的事件投递与收紧征询也停 5 秒（收紧征询拿不到回答按"要求确认"处理，用户莫名多弹审批框）。修法：新增 `_is_connection_failure(exc)`，只在超时（`PluginChannelTimeout`）、`OSError` 家族、或错误码在 `_CONNECTION_FAILURE_CODES` 里时退避整条连接；请求级失败抛给调用方，由面板服务按面板 `retry_after` 自己退避。为让判定只看结构化字段：远端错误回复改用独立码 `MCP_REMOTE_ERROR`（原先与本地帧错误共用 `MCP_PROTOCOL_ERROR`，无法区分），连接启动失败统一包成新的 `PluginChannelStartFailed`。
+  3. **`_exchange` 在锁外读 `connection.client` 传给 `before_send`**。根因：并发摘除时会把 `None` 交出去，面板能力检查据此把该槽误标成"插件未声明展示能力"。修法：新增 `_current_client(connection)`，在池锁内取一次并核对"连接仍是表中当前对象且 client 非空"，不成立抛撤销。
+  4. **`request` 不更新 `last_used`**（使用约定，非缺陷）。修法：把"每次请求前必须先 `acquire` 刷新使用时间，再 `request`"写进池的类注释与 `acquire` 注释，并在设计稿第 21 节（原 B2 分支里的第 19 节，并入时顺延编号）写明 B3 的四步使用顺序。
+  5. **`_new_pool` 只是转发**。修法：删掉，调用方直接调 `_locked_shared_pool`。
+- **行为变化一处（修正上一轮的表述）**：退避不是整体"按连接"，而是**分级**——连接级故障按连接退避（同插件其它面板一起等 5 秒），请求级错误仍按面板退避（面板 A 出错不影响面板 B，也不影响以后接上来的事件与征询）。
+- **不改的边界**：连接身份不变（每个 (owner, 激活代次) 一条连接、单在途、3 秒请求超时、5 秒退避、120 秒空闲关闭）；池的唯一所有权仍在 `plugin_panels_http`；沙箱开关取值与语义不变。
+- **验证与变异**：ae 的 2 个探针原样文件全过并转正为仓库用例；be 的 10 个变异连同本轮 6 个新变异共 16 个全部被杀死；命令与结果见 [TESTS](TESTS.md) 顶部「B2 二轮返工」小节。
+
+## B2 复审返工：共用通道的关闭竞态与注入式共用池（M 线第一期，ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `af3dd299b` 之后，基于 `8b6344045`，已实施，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：be 复审 B2（`e62593fc6`、`af3dd299b`）判定不能挑，必须改 6 条。证据目录 `~/.my-agent/decision-evidence/m1-b2-review-20261003/`：4 个竞态探针在 B2 头上全部失败，10 个变异只杀死 4 个。
+- **根因与修法（每条）**：
+  1. **停用/关闭撞上后台启动会漏关插件进程**。根因：`_publish_transport` 只看 `connection.client is client`，连接被 `retire_stale`/`close` 摘除后仍会把传输发布上去，刚启动的客户端没人 `stop()`。修法：发布时在池锁内核对"连接仍是表里当前对象且客户端未换"，不是就返回 False；启动线程拿到 False 就在锁外停掉刚启动的客户端，并按撤销交给等待者。
+  2. **池关闭后旧连接上的请求还会拉起新客户端**。根因：`close()` 只是清表，`acquire`/`_ensure_started` 不看池状态，旧连接对象仍能触发一轮新启动。修法：池加 `_closed` 终态标记，`acquire` 与 `_ensure_started` 见到它、或连接已不在表里，一律抛 `PluginChannelRevoked`。
+  3. **`close` 不像 `retire_stale` 那样摘除并置空**。修法：`close()` 走 `_detach`，逐条摘除并清空 `client`/`transport`（同时置 `_closed`）。
+  4. **请求在途时连接被摘除，复核抛 AttributeError**。根因：`_require_current` 对已被回收（client 为 None）的连接取 `activation_ref` 直接崩。修法：客户端为空或没有 `activation_ref` 时按撤销处理，抛 `PluginChannelRevoked`。
+  5. **共用一个池**：面板服务改成接受注入的池；`plugin_panels_http` 建唯一一个池挂在 server 上（`plugin_channel_pool`），事件中心以后从这里取；`GatewayHTTPServer.stop` 负责关池，面板服务 close 只关自建的池。
+  6. **行为变化一处**：退避从"按面板各记一份"变成**分级**——连接级故障按连接退避（同一个插件的其它面板一起等 5 秒），请求级错误仍按面板退避；详见本文件顶部「B2 二轮返工」。
+- **不改的边界**：连接身份不变（每个 (owner, 激活代次) 一条连接、单在途、3 秒请求超时、5 秒退避、120 秒空闲关闭）；面板专属的待发合并、结果缓存、面板错误文案都留在展示服务里；沙箱开关的取值与语义不变（只是改成建池时固定一次）。
+- **验证与变异**：be 的 4 个探针原样文件全过（已另存为 `test_plugin_channel_lifecycle.py` 防止回归），10 个变异全部被杀死；命令与结果见 [TESTS](TESTS.md) 顶部「B2 复审返工」小节。
+
+## 插件共用通道 B2：面板与事件共用的连接管理（M 线第一期，ds1，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `e62593fc6`，基于 `claude/be-m1-design` `8b6344045`，已实施，be、ae、9b 复审通过，并入 step17i）
+
+- **起因**：M1 设计稿（[插件事件与收紧钩子](docs/design/PLUGIN_EVENT_HOOKS.md)）第 13 节拆块 B2：面板服务已有“每个（owner, 激活代次）一条连接、单在途、代次复核、空闲关闭”，事件中心要复用同一套，不能写第二遍；同时补上面板服务的缺口——连接启动不受渲染超时约束。
+- **做了什么**：新增 `agent_py_agent/agent/plugin_channel/`（`pool.py` 与包入口），把连接与在途管理抽成 `PluginChannelPool`；`plugin_display/service.py` 改为持有它，面板专属逻辑（待发合并、结果缓存、退避重试）留在展示服务里。常数（请求 3 秒、退避 5 秒、空闲 120 秒）取值不变。
+- **为什么独立成包而不是 `plugin_display/channel.py`**：B3 事件中心、B5 收紧钩子都要用，放展示包下会让事件线反向依赖展示包；独立包保持 `plugin_display` → `plugin_channel` 单向依赖。
+- **补的缺口**：连接启动放进后台线程，等待只到本次请求的超时预算；启动超过超时就按超时返回，后台继续启动，下一次请求复用同一条连接。
+- **给 B3 的接口**：`acquire` / `request(ChannelCall)` / `retire_stale` / `close_idle` / `close`，以及 `PluginChannelTimeout`、`PluginChannelRevoked`、`PluginChannelBackoff` 三个异常；通道不含任何展示或事件专属概念。
+- **边界**：本轮是纯抽取重构，外部行为不变；面板原有用例一行未改照过。真实插件进程、真实 TUI/IM、宿主启用链未验证（沙箱内不起真插件），由 3a 在沙箱外复核。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「B2 共用插件通道」小节。
+
 ## 插件事件订阅与只收紧的工具调用钩子（M 线第一期 M1，be，2026-10-03，分支 `claude/be-m1-design`，基于 `claude/3a-step17h` `b453f8883`，设计稿，ae、9b 评审已吸收，3a 已定 D1–D9，待拆块派活）
 
 - **起因**：goal 2026-10-03 第四节对标 Claude Code Mods。my-agent 插件“装、管、跑”都有了，缺“插进宿主流程”：插件看不到宿主事件，也不能在工具调用前把关。第一期只做“只看、只收紧”。

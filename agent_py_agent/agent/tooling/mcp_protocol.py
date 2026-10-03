@@ -133,13 +133,15 @@ class MCPInbox:
 
 
 # LLM: result/error 判别已在消息入口验证；这里保留远端协议错误而不是返回空成功。
+#   远端"对这一个请求回了错误"与本地帧/格式错误不同：它说明连接是活的，只是这次调用失败，
+#   所以用单独的 MCP_REMOTE_ERROR 码，让上层能把它当请求级失败、不退避整条连接。
 # 函数用途: 取出响应结果，或把远端 JSON-RPC 错误转换为已脱敏异常。
 def unwrap_jsonrpc(server_name: str, payload: dict[str, Any], method: str) -> Any:
     err = payload.get("error")
     if err is None:
         return payload.get("result")
     detail = f"{err.get('message') or '未知 JSON-RPC 错误'}（code={err.get('code')}）" if isinstance(err, dict) else str(err)
-    raise MCPError(f"MCP server '{server_name}' {method} 返回错误：{detail}", code="MCP_PROTOCOL_ERROR")
+    raise MCPError(f"MCP server '{server_name}' {method} 返回错误：{detail}", code="MCP_REMOTE_ERROR")
 
 
 # LLM: 诊断归属于单条连接，段长与段数均有上限；不得把旧连接 stderr 携带到新连接。

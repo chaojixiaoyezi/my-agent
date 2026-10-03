@@ -160,7 +160,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 ## 7. 观察的投递语义（M2）
 
 照面板服务的做法，并把它的连接管理抽成两边共用的通道（块 B2），不再写第二套：
-- **通道**：每个（owner, 激活代次）一条 MCP 连接，事件和面板共用。
+- **通道**：每个（owner, 激活代次）一条 MCP 连接，事件和面板共用。事件中心要连接时用 `gateway_parts/plugin_panels_http.plugin_channel_pool(server)` 取那个挂在 server 上的唯一池（B2 复审返工加的入口），不要自己 new；池由 Gateway 在停止时关闭。
 - **只留最新**：每个插件按事件类型各留一份待发（新的覆盖旧的），被覆盖的条数计入下一条的 `dropped_before`。一次请求把所有类型的待发打成一批（最多 6 条）。
 - **单在途**：每个插件同时只有一个 `events.observe` 请求；在途时新事件只进待发。
 - **有界**：请求超时 3 秒；出错退避 5 秒；空闲 120 秒关连接。连接启动也计入超时：启动超过 3 秒就把这批记为“超时”，连接在后台继续启动（补上面板服务的同一个缺口）。
@@ -295,7 +295,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | 块 | 做什么 | 主要改的文件 | 关键用例 | 依赖 |
 | --- | --- | --- | --- | --- |
 | B1 清单 v8（已实施：`worker/m1-b1`，原提交 `20a930cd2`，裁定提交 `ad6007106`；ae 意见修订 `d6e9daccb`，ae 复审通过，并入 step17i） | `events` / `tool_gates` / `permissions` 字段、校验、序列化；构建脚本出 v8；确认码事实加四项，写成人能看懂的话（如“能看到这些工具的完整参数：…”仅指 full 收紧门） | `plugin_manifest.py`、`plugin_runtime_facts.py`、`plugin_enable_tool.py`、`scripts/build_plugin_files_package.py` | 每条校验规则正反例（含工具开始 text 被拒、v8 只订阅合法、`arguments: full` 配 `effects` 被拒）；v1–v7 序列化逐字节不变；改订阅确认码就变；v8 + `host_api` 被拒；v8 安装允许但正确码也按关闭拒绝，未开始/未提交，v6 原确认链保持 | 无 |
-| B2 共用插件通道 | 把面板服务的连接、代次复核、单在途、空闲关闭抽成 `PluginChannelPool`，面板改用它；启动计入超时 | 新 `plugin_display/channel.py`（或 `plugin_channel/`）、`plugin_display/service.py` | 面板原有用例全部不改照过；启动超过超时记超时、后台继续启动；代次失效丢结果 | 无 |
+| B2 共用插件通道（已实施：`worker/ds1-b2-channel`，ds1 `e62593fc6`，ds4b2 复审返工至 `7b21bfe12`；be、ae、9b 复审通过，并入 step17i；实施与返工记录见第 19–21 节） | 把面板服务的连接、代次复核、单在途、空闲关闭抽成 `PluginChannelPool`，面板改用它；启动计入超时 | 新 `plugin_display/channel.py`（或 `plugin_channel/`）、`plugin_display/service.py` | 面板原有用例全部不改照过；启动超过超时记超时、后台继续启动；代次失效丢结果 | 无 |
 | B3 事件中心 | `PluginEventHub`：按 owner 分区、按类型只留最新、`dropped_before`、单在途、退避、撤销、计数；`my-agent/events` 握手；`events.observe` | 新 `plugin_events/hub.py`、`plugin_events/protocol.py`，Gateway 组装处 | 假插件：合并与丢弃计数准确；慢插件不拖主线程；停用后不再收到；跨 owner 不串；握手没声明不投 | B1、B2 |
 | B4 事件点 | 6 类事件的投影与接线；只有提示事件声明且同意时给提示正文，观察事件不带工具参数（3a 2026-10-03 裁定）；提示投影统一脱敏 | `gateway_parts/http_handlers.py`（提示）、`gateway_parts/request_execution.py`（回合）、`tooling/executor.py`（工具）、`gateway_parts/control_operation_service.py`（命令） | 每类事件字段齐全；默认不含正文（带标记正文反证）；工具观察不含参数；带标记的凭据和 `__` 内部键反证；被拒的调用不发工具事件；`actor` 三种取值 | B3 |
 | B5 收紧钩子 | `PluginToolGate`、合并规则（同严按插件 ID 排序）、超时按确认、代次撤销与新实例重问、重跑只对同一次调用不重问；`call_origin`；审批前缀、去掉会话/长期选项、单一 `plugin_gate_required` 判定绕开缓存/授权/自主；`PLUGIN_GATE_*` 错误码登记 | `tooling/executor.py`、新 `plugin_events/tool_gate.py`、`agent_core/tool_loop/round_execution.py`、`contracts/tool_approval.py`、`gateway_parts/stream_approval.py`、`user_space/approval_mode.py`、`contracts/error_taxonomy.py`、`plugin_management.py` 与 `runtime_db/host_command_execution.py`（设 `call_origin=host_command`） | 第 8.2 表 7 种组合；自主模式、会话缓存、长期授权、决策模型自动执行下仍弹框；I4 续跑回合重新征询；超时 → 确认；两个并行调用撞上同一慢插件，排队那条超时按确认；插件回复多带字段（如 `arguments`）被忽略、参数不变；征询中停用 → 不算、换新实例 → 问新实例；批准后同一调用重跑不再问，之后同参数新调用、不同参数照样问；不可交互 → 不执行、错误码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`、账本记 `final_status`；收紧插件一律 deny 时用户仍能 `/plugins disable`、模型工具表里没有插件管理工具；模型发起的调用在工具参数里塞 `"call_origin": "host_command"` 或 `__call_origin` 照样被收紧（来源只读宿主设在 `ToolExecutorRequest` 上的字段，不从参数读；ae 补，配变异“执行器从参数读来源”）；拒绝时模型看到 `PLUGIN_GATE_DENIED` 且不是“结果未知” | B1、B2；H3 已合入 |
@@ -367,7 +367,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | 块 | 分支 | 可开工条件 | 复审 |
 | --- | --- | --- | --- |
 | B1 清单 v8 | `worker/m1-b1`（已实施，原提交 `20a930cd2`，裁定提交 `ad6007106`，追加 ae 意见修订） | 已并入 step17i | ae（原提交、裁定和本轮修订一并复审） |
-| B2 共用插件通道 | `worker/m1-b2-plugin-channel`（3a 已派） | 现在 | be、9b |
+| B2 共用插件通道 | `worker/ds1-b2-channel`（已实施，头 `7b21bfe12`） | 已并入 step17i | be、ae、9b |
 | B3 事件中心 | `worker/m1-b3-event-hub` | B1、B2 合入 | 9b |
 | B4 事件点 | `worker/m1-b4-event-points` | B3 合入 | be |
 | B5 收紧钩子 | `worker/m1-b5-tool-gate` | B1、B2、H3 合入 | be、ae |
@@ -375,3 +375,56 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | B7 安全底座 | `worker/m1-b7-sandbox` | B1、H3 合入 | 9b、ae |
 | B8 样例与验收 | `worker/m1-b8-samples` | B3–B7 合入 | be（真实验收 be 做，TUI 和飞书各一遍） |
 | B9 写插件的技能 | `worker/m1-b9-plugin-skill` | B1 合入 | be |
+
+## 19. B2 实施记录（ds1，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `e62593fc6`；复审返工见第 20 节）
+
+- **选了哪个目录**：用 `plugin_channel/` 包（不是 `plugin_display/channel.py`）。理由：B3 事件中心、B5 收紧钩子都要用它，放在 `plugin_display/` 下会让事件线反向依赖展示包；独立包保持单向依赖（`plugin_display` → `plugin_channel`，通道不依赖任何调用方），也方便后面按 `plugin_channel` 做导入边界检查。
+- **文件**：新增 `agent_py_agent/agent/plugin_channel/{__init__.py,pool.py}`，新增 `agent_py_agent/tests/test_plugin_channel_pool.py`；`plugin_display/service.py` 改为持有 `PluginChannelPool`；常数（3 秒请求超时、5 秒退避、120 秒空闲）取值不变，改为在通道里定义、面板用别名引用。
+- **对外接口（B3 复用）**：`PluginChannelPool(client_factory, clock)`；`acquire(owner_key, installation, now)` 取或建连接；`request(connection, ChannelCall(owner, method, params, timeout, before_send))` 一次完整请求（含启动）；`retire_stale`、`close_idle`、`close` 管回收；异常 `PluginChannelTimeout` / `PluginChannelRevoked` / `PluginChannelBackoff` 分别表示超时、代次失效、退避期内。面板专属的待发合并、结果缓存、退避重试都留在 `plugin_display/service.py`。
+- **补的缺口**：连接启动在后台线程里做，等待只到本次超时预算；超时就按超时返回，后台继续启动，下一次请求复用同一条连接（不再被 30 秒 MCP 连接超时挡住 3 秒的渲染预算）。
+- **验证**：面板原用例 21 项一行未改全过（另加 1 项服务侧撤销用例，共 22 项）；4 个真实插件包用例 22 项通过；新增池用例 7 项；5 个定点变异（不复核代次、允许多在途、启动不计超时、空闲不关、撤销不关连接）全部被检出，源码哈希还原一致。真实插件进程、真实 TUI/IM 与宿主启用链未验证（本沙箱不起真插件）。
+
+## 20. B2 复审返工（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，接 `af3dd299b` 之后）
+
+be 复审（`~/.my-agent/decision-evidence/m1-b2-review-20261003/`）判定不能挑：4 个竞态探针全失败、10 个变异只杀死 4 个。返工内容：
+
+- **关闭竞态（探针 1–4）**：`_publish_transport` 改成在池锁内核对"连接仍在表里且客户端未换"，失败就返回 False；`_start_worker` 拿到 False 在锁外停掉刚启动的客户端并按撤销返回。池加 `_closed` 终态标记，`acquire` 与 `_ensure_started` 见到它、或连接不在表里，一律抛 `PluginChannelRevoked`。`close()` 像 `retire_stale` 一样逐条 `_detach`（置空 client/transport）。`_require_current` 对已回收（client 为 None）或无 `activation_ref` 的连接按撤销处理，不再抛 `AttributeError`。
+- **共用池（第 4 条）**：`plugin_panels_http.plugin_channel_pool(server)` 建进程内唯一池挂在 server 上（创建服务走锁内不重入的内部函数，避免自死锁），池注入 `PluginDisplayService`；`GatewayHTTPServer` 在 `stop()` 关池，面板服务 close 只关自建的池。**给 B3 的入口**：事件中心要连接时用 `plugin_panels_http.plugin_channel_pool(server)` 取同一个池，不要自己 new。
+- **退避语义变化**：退避状态本来就存在连接上，但返工把"共用一个池"落到实处后，同一插件的两个面板真的共用一条连接，所以一个面板遇到**连接级**故障会让该插件的其它面板一起等 5 秒（请求级错误不在此列，见第 21 节）。
+- **验证**：4 个探针原样文件全过并转正为 `tests/test_plugin_channel_lifecycle.py`；10 个变异全部被杀死；相关 4 个用例文件 55 项通过；guards9 172 项通过；详见 TESTS.md 顶部「B2 复审返工」小节。
+
+
+## 21. B2 二轮返工（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，接 `fcb638182` 之后）
+
+ae 复审（`~/.my-agent/decision-evidence/m1-b2-rereview-20261003/`）判定 B2 要真正被第二个调用方（B3 事件、B5 收紧钩子）用起来，还差两处，另有三条小修：
+
+- **面板服务不再摘别人管的连接**：`PluginDisplayService.panels` 交给共用池的"有效激活集合"改成**这个 owner 全部已启用的激活**（不再只有带面板的插件）；安装表读不到时返回 `None`，`_retire` 收到 `None` 就**一条连接都不回收**（不清缓存、不 `retire_stale`、不 `close_idle`）。以前这两种情况都会把共用池里事件中心的连接摘掉、进程停掉。
+- **退避只针对连接级故障**：`PluginChannelPool.request` 只在异常属于连接级时才给整条连接退避；判定走 `_is_connection_failure(exc)`，只看结构化类型（`PluginChannelTimeout`、`OSError` 家族）与错误码（`_CONNECTION_FAILURE_CODES`），不读错误文字。为此：
+  - 远端对单个请求回的 JSON-RPC 错误改用**独立的** `MCP_REMOTE_ERROR` 码（`mcp_protocol.unwrap_jsonrpc`，原先是 `MCP_PROTOCOL_ERROR`，与本地帧错误混在一起没法区分）；该码已在 `mcp_registration._ERROR_CODE_MAP` 登记。
+  - 连接启动失败统一包成 `PluginChannelStartFailed`（新异常类，连接级），让退避判定不必猜原始异常类别。
+  - 请求级失败（`MCP_REMOTE_ERROR`、调用方 `before_send` 校验拒绝）只算这一次请求失败，抛给调用方，由面板服务按面板 `retry_after` 自己退避。
+- **`_exchange` 锁内取客户端**：新增 `_current_client(connection)`，在池锁内取一次 client 并核对"连接仍是表中当前对象且 client 非空"，不成立抛 `PluginChannelRevoked`；`before_send` 改用它的返回值。以前在锁外读 `connection.client`，并发摘除会传 None，让面板把"连接被回收"误判成"插件未声明展示能力"。
+- **`last_used` 使用约定（B3 必读）**：`request()` **不刷新** `last_used`，空闲回收只认 `acquire`。所以 **B3 每次请求前必须按这个顺序用**：
+  1. `pool = plugin_panels_http.plugin_channel_pool(server)` —— 取进程内唯一的共用池，不要自己 new；
+  2. `conn = pool.acquire(owner_key, installation, now)` —— 取/建连接，**同时刷新使用时间**；
+  3. `pool.request(conn, ChannelCall(owner, method, params, timeout=...))` —— 发请求；
+  4. 停用/换代由池自己按撤销处理；空闲回收由 Gateway 的既有轮询调 `close_idle`。
+  直接用旧连接对象反复 `request`（跳过 `acquire`）会让连接被空闲关闭提前判成长期未用。
+- **回收责任划分（B3 必读）**：面板服务只回收**自己管的**失效连接（靠它自己的展示槽表判断"这条连接是我建的"），
+  别人建的连接它一律不碰。所以 **B3 建的连接，B3 必须自己回收自己的失效连接**（激活停用/换代时调池的
+  `retire_stale`，或让请求前后的代次复核把失效连接按撤销关掉），**不能指望面板服务替它回收**——
+  面板服务看不到、也不该猜别人的连接归属。等 B3 有了真实需求，再考虑在池上加结构化的调用方标记。
+- **取快照，不要遍历池的活字典**：需要遍历某个 owner 的连接键时用 `pool.owner_keys(owner_key)`，
+  它在池锁内返回不可变元组；直接遍历 `pool.connections` 会撞上并发撤销/新建抛
+  `RuntimeError: dictionary changed size during iteration`。
+- **停机后池拒绝新建（B3 必读）**：`GatewayHTTPServer.stop()` 会在 `_SERVICE_LOCK` 内给 server 置
+  "插件通道已关闭"标记，之后 `plugin_channel_pool(server)` 与 `plugin_display_service(server)` 一律抛
+  `PluginChannelRevoked`，不会再建出一个没人关的池。`server_close()` 不等还在跑的工作线程，
+  所以 B3 在停机排空阶段取池会撞到这个标记——这是预期行为，按撤销处理并停止投递即可，不要重试。
+- **回收要有正面过期证据（B3 必读）**：池的 `retire_stale(owner_key, valid_ids, scope)` 带回一个
+  `RetireScope`：`managed` 是本调用方管的激活、`created_before` 是读有效集合那一刻的池内创建序号。
+  只有"归自己管 **且** 建在这个时间界之前 **且** 不在 valid 里"的连接才会被摘。B3 回收自己的连接时
+  也照这个来（先 `pool.current_seq()` 取界，再读自己的有效集合），否则会摘掉别的调用方刚为新启用
+  激活建的连接。
+- **删掉 `_new_pool` 转发**：`plugin_panels_http` 里只保留 `plugin_channel_pool(server)`（对外、自己拿锁）与 `_locked_shared_pool(server, ...)`（持锁内部用），服务创建处直接调后者。
+- **验证**：ae 两条探针原样文件全过并转正为仓库用例；be 的 10 个变异连同本轮新增的 8 个共 18 个全部被杀死（含"`owner_keys` 交出活字典""服务改回直接遍历池活字典"）；详见 TESTS.md 顶部「B2 三轮返工」小节。

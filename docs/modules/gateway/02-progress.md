@@ -29,6 +29,43 @@
 - 3a 2026-10-03 两条裁定已追加实施、交 ae 复审：观察正文仅提示文字；工具参数只经精确 full 收紧门；v8 非空订阅可独立贡献，旧版本规则不变。
 - ae 意见修订的合同 125 项、常数目录 11 项及 --check 877 项一致已有本轮证据；新增关闭门变异被抓到。ae 沙箱外基线 `274cedb1e` 与 B1 头 `bf520e911` 的旧启用文件均 35 passed，六失败来自 my-agent 命令沙箱环境（3a 转述，本线未亲自外部复验）。本轮收尾及真实 TUI/IM 未验边界见 TESTS。
 
+## B2 四轮返工：停机终态、回收的过期证据、在途摘除按撤销（9b 并发复审，ds4b2，2026-10-03，基于 `5aec88524`）
+
+- 停机是终态：`plugin_panels_http.close_plugin_channel(server)` 在 `_SERVICE_LOCK` 内先置
+  `server.plugin_channel_closed` 标记、再摘掉 `plugin_display`/`plugin_channel_pool` 引用，锁外才真正 close；
+  之后的 `plugin_display_service`/`plugin_channel_pool` 一律抛 `PluginChannelRevoked`，不会再建出没人关的池。
+  `GatewayHTTPServer.stop()` 改为调用它（幂等）。面板入口把撤销转成"通道已关闭"的空面板，不是 500。
+- 回收要有正面过期证据：池加单调递增创建序号（`current_seq()`），`retire_stale(owner, valid, scope)` 的
+  `RetireScope(managed, created_before)` 只在"归自己管、建在时间界之前、且不在 valid 里"时摘；
+  面板服务在读有效集合之前取时间界。这样别的调用方为刚启用激活新建的连接不会被误摘。
+- 在途请求撞上停用/关闭：`request()` 的通用 except 先 `holds()`，连接已不在表里就抛 `PluginChannelRevoked`
+  且不标退避，避免 B5 把"插件已停用"当成"连接坏了"多弹审批。
+- 合同注释补：客户端 `stop` 必须幂等（停用撞后台启动会 stop 两次）。
+
+## B2 二轮返工：共用池召回范围与退避分级（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `fcb638182`，be、ae、9b 复审通过，并入 step17i）
+
+- 面板服务交给共用池的"有效激活集合"改成**这个 owner 全部已启用的激活**（原先只有带面板的插件），
+  所以同一 owner 下已启用但没有面板的插件（只带事件的 v8 插件）连接不会再被面板查询摘掉、进程不会被停。
+- 安装表读不到时（`_enabled_installations` 返回 `None`）**一条连接都不回收**：不再当成"没有启用插件"去
+  `retire_stale`/`close_idle`，避免读表失败把整个 owner 在共用池里的连接全停掉。
+- 退避改成分级：只有连接级故障（启动失败、超时、连接断开）才退避整条连接；请求级错误
+  （插件对单个请求回的 JSON-RPC 错误、`before_send` 校验拒绝）只算这一次请求失败，由面板服务按面板退避。
+  为此远端错误回复改用独立码 `MCP_REMOTE_ERROR`，连接启动失败统一包成 `PluginChannelStartFailed`。
+- `before_send` 拿到的客户端改在池锁内取并复核，连接被并发摘除时按撤销处理，不再把 `None` 交出去。
+- `_new_pool` 转发函数删掉，服务创建处直接调 `_locked_shared_pool`。
+
+## B2 复审返工：共用通道的关闭竞态、注入式共用池、退避改为按连接（ds4b2，2026-10-03，分支 `worker/ds1-b2-channel`，基于 `af3dd299b`，be、ae、9b 复审通过，并入 step17i）
+
+- `plugin_panels_http` 新增 `plugin_channel_pool(server)`：一个 Gateway 进程只建一个 `PluginChannelPool`，建在唯一 HTTP server 上，
+  面板服务和以后的事件中心都从这里取；`plugin_display_service` 改成把池注入 `PluginDisplayService`，不再自己 new 一个。
+  两个函数用了同一把 `_SERVICE_LOCK`，所以创建服务的路径改成在锁内调用不重入锁的内部函数（否则自死锁）。
+- `GatewayHTTPServer` 多了 `plugin_channel_pool` 字段，`stop()` 里在关掉展示服务之后关池；池的创建和关闭都归 Gateway，
+  面板服务 close 只清自己的待发槽与结果缓存。
+- 池的身份不变：共用池仍然按 (owner, 激活代次) 一条连接、单在途、3 秒请求超时、5 秒退避、120 秒空闲关闭；
+  沙箱开关在建池时固定成 `plugin_display_client(process_sandbox=…)`，同一进程不会出现两种插件进程形态。
+- 行为变化一处（表述已在二轮返工修正为**分级**）：连接级故障按连接退避，请求级错误仍按面板退避。
+- 细节与验证见 `docs/design/PLUGIN_DISPLAY.md` 的「退避分工」和 TESTS.md 顶部「B2 复审返工」小节。
+
 ## /plugins list 末尾加 MCP 服务段（J16 片 F，2026-10-02，ef，分支 `claude/ef-j16-slice-f`，基于 `claude/3a-step17h` `afb15947b`，待集成）
 
 - `plugin_command_service._scope_management` 组装管理服务时多做一步：`resolve_loaded_gateway_scope_agent` 被动查找已加载的 owner 实例，

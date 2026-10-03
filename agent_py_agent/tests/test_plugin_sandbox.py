@@ -232,9 +232,13 @@ def test_config_reaches_model_registry_and_panel_clients(tmp_path, monkeypatch, 
     server = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(plugin_process_sandbox=sandbox)))
     service = plugin_panels_http.plugin_display_service(server)
     try:
-        assert service._client_factory.keywords == {"process_sandbox": sandbox}
+        # 沙箱配置要真的落到共用的通道池上：池建客户端时带上 process_sandbox，面板服务用的是同一个池
+        pool = plugin_panels_http.plugin_channel_pool(server)
+        assert service._pool is pool
+        assert pool._client_factory.keywords == {"process_sandbox": sandbox}
     finally:
         service.close()
+        pool.close()
 
 
 @pytest.mark.parametrize("setting", ["true", "false"])

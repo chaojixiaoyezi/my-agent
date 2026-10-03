@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.conversation.agent_activity import _MAIN_ACTIVITY_LIVE_PHASES
+from agent_py_agent.agent.plugin_channel import ChannelCall, PluginChannelPool
 from agent_py_agent.agent.plugin_display import service as display_service
 from agent_py_agent.agent.plugin_display.protocol import (
     DISPLAY_EXTENSION,
@@ -18,6 +19,7 @@ from agent_py_agent.agent.plugin_display.protocol import (
 from agent_py_agent.agent.plugin_display.service import (
     ERROR_BACKOFF_SECONDS,
     IDLE_CLOSE_SECONDS,
+    DisplayWiring,
     PanelQuery,
     PluginDisplayService,
     project_topics,
@@ -203,9 +205,9 @@ class _Harness:
         self.plugins = []
         self.executor = _ManualExecutor()
         self.capable = capable
-        self.service = PluginDisplayService(installations=lambda _owner: tuple(self.rows),
-                                            client_factory=self._factory, clock=lambda: self.now,
-                                            executor=self.executor)
+        self.service = PluginDisplayService(wiring=DisplayWiring(
+            installations=lambda _owner: tuple(self.rows), client_factory=self._factory,
+            clock=lambda: self.now, executor=self.executor))
 
     def _factory(self, _owner, installation):
         plugin = _FakePlugin(installation, capable=self.capable)
@@ -258,6 +260,18 @@ def test_disabled_plugin_is_retired_on_next_query():
     result = h.query()
     assert result[0]["state"] == "unavailable" and h.plugins[0].stopped == 1
     assert h.service._results == {} and h.service._connections == {}
+
+
+def test_revoked_connection_is_dropped_from_pool_after_failed_drain():
+    """通道抛出撤销时，展示服务必须丢掉该连接的结果缓存与待发槽，不能写回任何结果。"""
+    h = _Harness()
+    h.query()
+    h.executor.run_all()
+    h.plugins[0].revoked = True
+    h.query("waiting_permission")
+    h.executor.run_all()
+    assert h.service._connections == {} and h.service._results == {} and h.service._slots == {}
+    assert h.plugins[0].stopped == 1
 
 
 def test_plugin_without_display_capability_is_unavailable():
@@ -346,3 +360,173 @@ def test_sessions_topic_is_lazy_and_whitelisted():
         raise OSError("disk")
 
     assert _session_rows(broken) == []
+
+
+# LLM: 共用池里不只有面板：同一 owner 下已启用、但没有面板的插件（只带事件的 v8 插件）的连接
+#   归事件中心管，面板服务的回收绝不能顺手摘掉它；安装表读不到时也不能当成"没有启用插件"去回收。
+#   下面两条由 ae 复审探针 test_b2_shared_pool_probe.py 转正（原样场景，2026-10-03）。
+def _event_only_installation():
+    return SimpleNamespace(manifest=SimpleNamespace(plugin_id="watch", panels=()),
+                           activation=SimpleNamespace(activation_id="act-watch"), enabled=True)
+
+
+# LLM: 造一个"面板服务和事件中心共用同一个池"的现场：池由外部注入，事件中心先在上面建好 watch 连接。
+# 函数用途: 返回（共用池, 面板服务, 已建好的插件客户端列表）。
+def _shared_pool_setup(rows_provider):
+    plugins = []
+
+    def factory(_owner, installation):
+        plugin = _FakePlugin(installation)
+        plugins.append(plugin)
+        return plugin
+
+    pool = PluginChannelPool(client_factory=factory, clock=lambda: 100.0)
+    service = PluginDisplayService(wiring=DisplayWiring(installations=rows_provider, clock=lambda: 100.0,
+                                                        executor=_ManualExecutor(), pool=pool))
+    watch = _event_only_installation()
+    # 另一个调用方（事件中心）在共用池上建好 watch 的连接并发出一次请求
+    connection = pool.acquire("owner", watch, 100.0)
+    pool.request(connection, ChannelCall(owner=object(), method="my-agent/events.observe",
+                                         params={"topics": {"run_state": {"state": "x"}}}))
+    return pool, service, plugins
+
+
+def test_panel_query_keeps_other_consumers_connection_for_enabled_plugin():
+    pet, watch = _installation(), _event_only_installation()
+    pool, service, plugins = _shared_pool_setup(lambda _owner: (pet, watch))
+    service.panels(PanelQuery(object(), "owner", "thread:t1", {}, (("pet", "line"),)))
+    assert ("owner", "act-watch") in pool.connections, "启用中的 watch 连接被面板查询摘掉了"
+    assert plugins[0].stopped == 0, "启用中的 watch 插件进程被面板查询停掉了"
+
+
+def test_unreadable_install_table_does_not_tear_down_shared_connections():
+    pool, service, plugins = _shared_pool_setup(lambda _owner: None)  # 安装表临时读不到（_enabled_installations 返回 None）
+    service.panels(PanelQuery(object(), "owner", "thread:t1", {}, (("pet", "line"),)))
+    assert ("owner", "act-watch") in pool.connections and plugins[0].stopped == 0, \
+        "安装表读一次失败，就把这个 owner 在共用池里的所有连接都停了"
+
+
+# LLM: 面板服务在锁外回收时要遍历池的连接表；池必须给加锁快照，不能把活字典交出去，
+#   否则后台渲染的撤销或以后 B3 的建/删连接会在遍历中途改字典，抛
+#   RuntimeError: dictionary changed size during iteration，让面板请求直接失败。
+#   这条用例让"取快照"和删除交错，并用不可变类型断言钉住快照语义。
+def test_service_retire_tolerates_concurrent_connection_removal():
+    h = _Harness()
+    h.query()
+    h.executor.run_all()
+
+    pool = h.service._pool
+    real_owner_keys = pool.owner_keys
+    seen = []
+
+    def owner_keys_then_remove(owner_key):
+        keys = real_owner_keys(owner_key)
+        seen.append(keys)
+        # 另一个调用方（后台渲染或事件中心）此刻删掉一条连接
+        pool.retire_stale(owner_key, set())
+        return keys
+
+    pool.owner_keys = owner_keys_then_remove
+    result = h.query()  # 不应抛 RuntimeError
+    assert result[0]["state"] in {"loading", "refreshing", "ready", "error", "unavailable"}
+    assert seen and isinstance(seen[0], tuple), "池必须返回不可变快照，不能交出活字典"
+
+
+# LLM: 转正 9b 探针 2（回收窗口）。面板服务读到"当前有效激活"之后，别的调用方（以后的事件中心）
+#   为一个刚启用的激活建了连接；这个激活不在本轮 valid 里、也不该被本轮回收摘掉——
+#   回收必须有正面过期证据（自己管过 + 建在本轮时间界之前），不能只凭一份可能过时的 valid。
+def test_retire_keeps_connection_created_after_valid_snapshot():
+    pet = _installation("act-pet")
+    fresh = _installation("act-fresh")
+    pool = PluginChannelPool(client_factory=lambda _o, inst: _FakePlugin(inst), clock=lambda: 100.0)
+    service = PluginDisplayService(wiring=DisplayWiring(installations=lambda _owner: (pet,),
+                                                        clock=lambda: 100.0,
+                                                        executor=_ManualExecutor(), pool=pool))
+    # 两个激活都在面板服务管过之后失效（valid 里都没有），但时间界卡在它们中间
+    pool.acquire("owner", pet, 100.0)
+    service._slot(("owner", "act-pet"))
+    service._slot(("owner", "act-fresh"))
+    seq_before_fresh = pool.current_seq()
+    pool.acquire("owner", fresh, 100.0)  # 时间界之后才建出来的连接
+
+    service._retire("owner", {"act-gone"}, 100.0, seq_before_fresh)
+
+    assert ("owner", "act-fresh") in pool.connections, "时间界之后建的连接被误摘"
+    assert ("owner", "act-pet") not in pool.connections, "时间界之前就失效的连接没有被回收"
+    pool.close()
+
+
+# LLM: 转正 9b 探针 5（时间界必须在读安装表之前取）。上一条直接调 _retire、时间界是外部传入的，
+#   盖不住"取水位的语句在 panels() 里的位置"。这条走真实 panels() 入口：读表回调里模拟并发的
+#   另一个面板查询——它拿到的是新表，为刚启用的 X 建了展示槽和池连接；本轮读到的是旧表（没有 X），
+#   X 不在 valid 里。正确顺序下 X 的创建序号晚于时间界，本轮回收不能碰它；把取时间界的语句挪到
+#   读表之后，X 就会被当成"时间界之前的失效连接"误摘。
+def test_panels_takes_watermark_before_reading_install_table():
+    pool = PluginChannelPool(client_factory=lambda _o, inst: _FakePlugin(inst), clock=lambda: 100.0)
+    holder: dict = {}
+
+    def stale_table_read(_owner):
+        # 读表期间：并发的另一个面板查询（拿到的是新表）为刚启用的 X 建了展示槽与连接
+        with holder["service"]._lock:
+            holder["service"]._slot(("owner", "act-x"))
+        pool.acquire("owner", _installation("act-x"), 100.0)
+        return ()  # 本轮读到的是 X 启用之前的旧表
+
+    service = PluginDisplayService(wiring=DisplayWiring(installations=stale_table_read, clock=lambda: 100.0,
+                                                        executor=_ManualExecutor(), pool=pool))
+    holder["service"] = service
+    service.panels(PanelQuery(object(), "owner", "thread:t1", {}, ()))
+
+    assert ("owner", "act-x") in pool.connections, "读表期间别的查询为新启用插件建的连接被本轮回收摘掉了"
+    pool.close()
+    service.close()
+
+
+# LLM: 转正 9b 的 N3 覆盖：回收范围必须看"自己管"。别人的连接（面板服务从来没有过它的展示槽）
+#   即使已失效、且建在时间界之前，面板服务也不能摘——那是事件中心（以后 B3）的连接，由它们自己回收。
+def test_retire_leaves_other_consumers_connection_untouched():
+    other = _installation("act-other")
+    pool = PluginChannelPool(client_factory=lambda _o, inst: _FakePlugin(inst), clock=lambda: 100.0)
+    service = PluginDisplayService(wiring=DisplayWiring(installations=lambda _owner: (), clock=lambda: 100.0,
+                                                        executor=_ManualExecutor(), pool=pool))
+    pool.acquire("owner", other, 100.0)  # 别人建的连接：面板服务没有这个激活的展示槽
+    seq_before = pool.current_seq()
+    service._retire("owner", set(), 100.0, seq_before)
+
+    assert ("owner", "act-other") in pool.connections, "面板服务摘掉了别人的连接（这个激活没有它的展示槽）"
+    pool.close()
+
+
+# LLM: 读表失败（None）时不能当成"没有启用插件"去回收——包括面板服务自己管过的连接。
+#   交给池的有效集合只在读表成功时才有意义；读表失败这一轮必须一条都不摘，等下一轮读表成功再收。
+def test_unreadable_install_table_keeps_services_own_connections():
+    pet = _installation("act-pet")
+    pool = PluginChannelPool(client_factory=lambda _o, inst: _FakePlugin(inst), clock=lambda: 100.0)
+    service = PluginDisplayService(wiring=DisplayWiring(installations=lambda _owner: None, clock=lambda: 100.0,
+                                                        executor=_ManualExecutor(), pool=pool))
+    pool.acquire("owner", pet, 100.0)
+    service._slot(("owner", "act-pet"))  # 面板服务管过的连接（此前查询建过）
+    service.panels(PanelQuery(object(), "owner", "thread:t1", {}, ()))
+
+    assert ("owner", "act-pet") in pool.connections, "读表失败被当成空集合，面板服务自己的连接被摘了"
+    pool.close()
+    service.close()
+
+
+# LLM: 插件收紧成无面板（同一激活）但仍在启用列表里时，交给池的有效集合必须包含它——
+#   否则面板服务自己管过的连接会被当成"失效激活"摘掉。active（有面板）和 valid（已启用）
+#   是两回事：前者只决定显示什么，后者决定回收保护谁。
+def test_panel_less_enabled_activation_keeps_managed_connection():
+    tightened = SimpleNamespace(manifest=SimpleNamespace(plugin_id="pet", panels=()),
+                                activation=SimpleNamespace(activation_id="act-pet"), enabled=True)
+    pool = PluginChannelPool(client_factory=lambda _o, inst: _FakePlugin(inst), clock=lambda: 100.0)
+    service = PluginDisplayService(wiring=DisplayWiring(installations=lambda _owner: (tightened,),
+                                                        clock=lambda: 100.0,
+                                                        executor=_ManualExecutor(), pool=pool))
+    pool.acquire("owner", tightened, 100.0)
+    service._slot(("owner", "act-pet"))  # 面板服务管过它（收紧前有面板）
+    service.panels(PanelQuery(object(), "owner", "thread:t1", {}, ()))
+
+    assert ("owner", "act-pet") in pool.connections, "已启用但无面板的激活被当成失效，连接被误摘"
+    pool.close()
+    service.close()
