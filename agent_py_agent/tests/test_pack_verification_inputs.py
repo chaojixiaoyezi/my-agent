@@ -169,6 +169,18 @@ def test_input_and_deliverable_problems_are_combined_in_one_prompt(env, fake_run
     assert ledger.count("input_rework") == 1 and ledger.count("rework") == 1
 
 
+def test_facts_report_modified_inputs_even_without_results_or_missing_deliverables(tmp_path):
+    from agent_py_agent.agent.capability.pack_verification_report import pack_verification_facts
+
+    ledger = PackVerificationLedger(tmp_path / "run-1.jsonl")
+    ledger.append({"kind": "input_check", "items": [{"path": "in/source.json", "copy_path": "x"}]})
+    ledger.append({"kind": "deliverable_check", "items": []})
+    facts = pack_verification_facts(ledger)
+    assert facts is not None and [item["path"] for item in facts["inputs_modified"]] == ["in/source.json"], (
+        "只有输入原件被改（没有检查结果、也不缺交付物）时，最终事实也要报出来")
+    assert facts["results"] == [] and facts["deliverables_missing"] == []
+
+
 def test_storage_resolves_the_canonical_task_root(env, monkeypatch):
     child_workspace = env.task_root / "work" / "agents" / "child-run"
     monkeypatch.setattr("agent_py_agent.agent.agent_core.run_task_workspace_writer.current_run_task_workspace_root",

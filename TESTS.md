@@ -430,6 +430,25 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - strict code-size：按确切基线比告警身份，新增 0。首轮多出 1 条（测试辅助函数 `_run` 有 5 个参数），把工作目录和写根合成一个参数后消掉；
   - `git diff --check 71578e973..HEAD`、clean_package。
 
+### 块 4、块 5 变基到 step17h（2026-10-03，分支 `claude/ae-capability-packs-v2-b45-17h`，基于 `claude/3a-step17h` `7e421024f`）
+
+- **提交**（共 7 个）：
+  - 块 4：本体、防伪造用例、Full Access 的 Shell 用例改走 registry 投影并去掉 strict xfail；
+  - 块 5：本体、宿主提示补修；
+  - 文档：9b 中文贴路径的已知代价、开关前提 (c)、H3 缺口已修；
+  - 补用例：只有输入原件被改时，最终事实也照报。
+  - 冲突只有常数目录，已重新生成（882 项）。
+- **H3 缺口已修**：be 的 H3 改成只认写边界里的结构化 task_root，“任务树外”那条用例去掉 strict xfail 后正常通过。Full Access 的 3 个角色和“任务树外”这条都按生产路径经 `registry_invoke._tool_params_with_runtime_boundary` 组沙箱参数。
+- **变异 38/38 全部被抓住**：
+  - 块 4、块 5、块 5 补修三份清单共 38 个。其中 35 个原样能套上；另外 3 个原来的锚点已被后续代码改掉，按新代码改写后重跑：段落顺序（三段）、事实漏掉输入、registry 不给任务核验记录。
+  - 改写后的“事实漏掉输入”（C14b）第一次没被抓住：原用例里输入原件被改时，总有检查结果或缺交付物，触发不了这个分支。补了 `test_facts_report_modified_inputs_even_without_results_or_missing_deliverables`，之后被抓住。
+- **相关回归**：267 个文件，5267 passed，12 skipped，4 xfailed（块 4 的 strict xfail 已去掉）。
+- **门禁**逐项 rc=0（基线 `7e421024f`）：
+  - import boundaries、ruff、`doc_sync --base 7e421024f`、常数目录 `--check`（882 项）、前端配置目录 `--check`；
+  - strict code-size：按确切基线比，新增 0；
+  - `git diff --check`、clean_package。
+- **Linux 车道**（`my-agent-linux-test:py312`，bwrap）：protection、host_files_access、inputs、service、deliverables 共 222 passed，2 个按设计跳过（macOS 专用的正则规则、隔离视图看不到仓库源码）。
+
 ## 能力包 v2 块 3：宿主写完就查、收尾再查、返工 1 次、宿主提示与交付事实（2026-10-02，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`）
 
 - **新增** `agent_py_agent/tests/test_pack_verification_matching.py`（18 项）：
