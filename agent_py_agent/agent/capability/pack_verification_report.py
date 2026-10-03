@@ -79,13 +79,23 @@ def pack_verification_notice_text(facts: dict) -> str:
               f"（{'原件副本已保存' if item.get('copy_path') else '没有原件副本'}）。"
               for item in facts.get("inputs_modified", [])[:MAX_NOTICE_RESULTS_COUNT]]
     lines += [f"宿主检查：{item.get('package_id')} 要求的交付物 {item.get('deliverable_id')} "
-              f"{'写出了但打不开' if item.get('code') == 'DELIVERABLE_UNREADABLE' else '本回合没有写出'}。"
+              f"{_missing_deliverable_text(item)}。"
               for item in facts.get("deliverables_missing", [])[:MAX_NOTICE_RESULTS_COUNT]]
     lines += [_notice_line(item) for item in facts.get("results", [])[:MAX_NOTICE_RESULTS_COUNT]]
     if not facts.get("closeout_checked"):
         lines.append("本回合没有正常收尾，上面是写入时的检查结果。")
     text = "".join(lines)
     return text if len(text) <= MAX_NOTICE_TEXT_CHARS else text[: MAX_NOTICE_TEXT_CHARS - 1] + "…"
+
+
+# LLM: 缺交付物的一句话结论：打不开照旧；没匹配到的把声明的路径模式写出来——B8 重试点 A10 实测，
+#   只说「本回合没有写出」会把「换了文件名」误报成「没写」，测试方也分不清两种情形。
+# 函数用途: 生成一条缺交付物说明的结论短语。
+def _missing_deliverable_text(item: dict) -> str:
+    if item.get("code") == "DELIVERABLE_UNREADABLE":
+        return "写出了但打不开"
+    patterns = "、".join(item.get("path_patterns") or [])
+    return f"没找到符合 {patterns} 的文件" if patterns else "没找到符合声明路径模式的文件"
 
 
 # LLM: 单条取消是结构化 status，不读 reason/message 文本；与通过、质量失败明确分开。

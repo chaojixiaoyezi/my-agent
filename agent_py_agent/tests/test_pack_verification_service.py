@@ -289,7 +289,7 @@ def test_final_facts_follow_the_last_closeout_not_stale_writes(env, fake_runner)
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "bad": True})
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
     target.unlink()
-    assert "本回合没有写出" in closeout_rework_block(env.agent, env.params), "交付物被删就是没交（块 5）"
+    assert "没找到符合该模式的交付物" in closeout_rework_block(env.agent, env.params), "交付物被删就是没交（块 5）"
     facts = run_pack_verification_facts(env.agent, env.params)
     assert facts["closeout_checked"] and facts["results"] == [], "被删掉的文件不再报写入时的结论"
     assert [item["code"] for item in facts["deliverables_missing"]] == ["DELIVERABLE_MISSING"]
@@ -349,7 +349,7 @@ def test_gateway_notice_is_built_from_facts(monkeypatch):
                                                        "deliverable_id": "delivery", "path_patterns": ["out/*.json"], "paths": []}],
                "closeout_checked": True, "rework_count": 0, "deliverable_rework_count": 2}
     [notice] = notice_module.queue_pack_verification_notice(context, conversation, types.SimpleNamespace(pack_verifications=missing))
-    assert "交付物 delivery 本回合没有写出" in notice.text and dict(notice.details)["deliverables_missing_count"] == "1"
+    assert "交付物 delivery 没找到符合 out/*.json 的文件" in notice.text and dict(notice.details)["deliverables_missing_count"] == "1"
     modified = {"results": [], "inputs_modified": [{"path": "in/source.json", "copy": "x"}], "input_rework_count": 1}
     [notice] = notice_module.queue_pack_verification_notice(context, conversation, types.SimpleNamespace(pack_verifications=modified))
     assert dict(notice.details)["inputs_modified_count"] == "1" and "in/source.json" in notice.text

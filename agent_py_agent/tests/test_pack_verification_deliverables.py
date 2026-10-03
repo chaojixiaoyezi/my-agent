@@ -49,12 +49,12 @@ def test_missing_deliverable_reworks_at_most_twice(env, fake_runner):
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     _write(env.workspace / "notes.txt", "draft")
     first = closeout_rework_block(env.agent, env.params)
-    assert "story-content 的 delivery" in first and "本回合没有写出" in first and "只要审阅" in first
-    assert "本回合没有写出" in closeout_rework_block(env.agent, env.params)
+    assert "story-content 的 delivery" in first and "没找到符合该模式的交付物" in first and "只要审阅" in first
+    assert "没找到符合该模式的交付物" in closeout_rework_block(env.agent, env.params)
     assert closeout_rework_block(env.agent, env.params) == "", "缺交付物最多返工 2 次"
     facts = run_pack_verification_facts(env.agent, env.params)
     assert facts["deliverable_rework_count"] == 2 and facts["deliverables_missing"][0]["code"] == DELIVERABLE_MISSING
-    assert "story-content 要求的交付物 delivery 本回合没有写出" in pack_verification_notice_text(facts)
+    assert "story-content 要求的交付物 delivery 没找到符合 out/** 的文件" in pack_verification_notice_text(facts)
 
 
 def test_turn_without_workspace_changes_is_not_checked(env, fake_runner):
@@ -62,6 +62,28 @@ def test_turn_without_workspace_changes_is_not_checked(env, fake_runner):
     capture_baseline_before_tool(env.agent, env.params, "read_file")
     assert closeout_rework_block(env.agent, env.params) == ""
     assert run_pack_verification_facts(env.agent, env.params) is None
+
+
+# LLM: A10-t102 形状（B8 重试点）：模型把交付物写成 delivery.v3——内容是含正确 schema 的 json，只是文件名
+#   不匹配包的路径模式 out/**。修复前基线实测：交付物判 MISSING、提示说「本回合没有写出」（误导，文件其实写了）、
+#   检查程序一个目标都不查（target_count=0、rework_count=0）；修复后提示带路径模式和改名指引，改名后通过。
+# 函数用途: 复现「交付物文件名不匹配路径模式」的收尾行为（修复后断言）。
+def test_unmatched_deliverable_name_reports_pattern_and_recovers_after_rename(env, fake_runner):
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+    _write(env.workspace / "delivery.v3", {"schema": "delivery.v1"})
+    text = closeout_rework_block(env.agent, env.params)
+    assert "没找到符合该模式的交付物" in text and "out/**" in text
+    assert "如果交付物用了别的文件名，请按包的约定命名" in text
+    facts = run_pack_verification_facts(env.agent, env.params)
+    [closeout] = [row for row in env.ledger.records() if row["kind"] == "closeout"]
+    assert closeout["target_count"] == 0 and facts["rework_count"] == 0, "不匹配模式的文件不进检查目标"
+    assert [item["code"] for item in facts["deliverables_missing"]] == [DELIVERABLE_MISSING]
+    assert facts["deliverable_rework_count"] == 1 and fake_runner == []
+    _write(env.workspace / "out/delivery.json", {"schema": "delivery.v1"})
+    assert closeout_rework_block(env.agent, env.params) == "", "按包的约定命名后收尾通过"
+    facts = run_pack_verification_facts(env.agent, env.params)
+    assert facts["deliverables_missing"] == [] and len(fake_runner) == 1
+    assert [item["status"] for item in facts["results"]] == ["passed"]
 
 
 def test_unreadable_versus_other_schema(env, fake_runner):
@@ -85,7 +107,7 @@ def test_delivered_file_clears_the_check_and_uncertain_old_files_do_not_count(en
     monkeypatch.setattr(matching, "MAX_SCAN_MATCHED_FILES_COUNT", 2)
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     monkeypatch.setattr(matching, "MAX_SCAN_MATCHED_FILES_COUNT", 512)
-    assert "本回合没有写出" in closeout_rework_block(env.agent, env.params), "漏扫的老文件不算本回合交付"
+    assert "没找到符合该模式的交付物" in closeout_rework_block(env.agent, env.params), "漏扫的老文件不算本回合交付"
     _write(env.workspace / "out/new.json", {"schema": "delivery.v1"})
     env.params.run_id = "run-2"
     capture_baseline_before_tool(env.agent, env.params, "write_file")

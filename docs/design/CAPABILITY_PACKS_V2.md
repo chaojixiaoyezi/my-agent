@@ -193,10 +193,11 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - **已知限制**：模型一个工具都不调、直接在答复里贴内容的回合查不到；审阅时一眼能看出来，冻结用例里也没出现过。
 - **判定**：只看本回合确定新建或改过的文件。基线截断时状态“不确定”的老文件不算交付证据。
   - 声明了 `required` 的交付物，路径加字段都匹配上的文件一个都没有：如果有路径匹配、但按声明格式打不开的（json 解析不了），记 `DELIVERABLE_UNREADABLE` 并列出这些文件；否则记 `DELIVERABLE_MISSING`。
+  - 文件名不匹配声明的路径模式的文件（例如交付物声明 `**/*.json`、模型把文件写成 `drama_text_delivery.v3`）不算交付、也不会成为检查目标；提示里如实写“没找到符合该模式的交付物”，提醒按包的约定命名（B8 重试点 A10 修，2026-10-03）。
   - 路径匹配、能打开、但字段不匹配的文件，不算这个交付物。
   - 都是客观事实，事实里带包 ID、交付物编号、路径模式和字段要求。
 - **返工**：沿用子代理交付闸的上限，最多 2 次，先记账再发，记账失败就不返工；之后照常结束，宿主提示写明。
-  - 提示末尾写“如果用户这次只要审阅、不要交付物，在答复里说明即可”。
+  - 提示里写清“没找到符合该模式的交付物；如果交付物用了别的文件名，请按包的约定命名”；末尾写“如果用户这次只要审阅、不要交付物，在答复里说明即可”。
   - 收尾三段的顺序：输入原件 → 交付物存在 → 交付物检查，同时出现就合成一条提示，三段各自计返工次数。
 - **最终事实**：`deliverables_missing`（最后一次收尾的检查结果）、`deliverable_rework_count`。
 - **只审不交付的任务**（ae 定，块 7 复审时）：两个包的交付物保持 `required`。B05-t5 那次没交付就是靠这条兜住的；按“任务意图”区分要读懂用户的话，铁律不允许。有了上面的触发条件，只读审稿回合本来就不会触发。
@@ -229,7 +230,7 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
 | 2 | 检查程序运行器（复用 `AttemptExecutionSandbox`，补通用断网选项与断网就绪探测）；`baseline` 推广成 `inputs` | 已上线（main；`capability/pack_verifier_runner.py`，`test_pack_verifier_runner.py`，macOS 与 Linux 车道实测） |
 | 3 | 写完就查、收尾检查、返工、`HostNotice` 和 `channel_delivery` 事实、开关 | 已上线（main；`capability/pack_verification_*.py`，`test_pack_verification_service.py`、`test_pack_verification_matching.py`） |
 | 4 | 输入原件清单、原件副本、收尾比对、返工；宿主托管文件统一落到规范任务根（只读保护依赖 be 的 H3） | 已上线（main；`capability/pack_verification_originals.py`、`pack_verification_inputs.py`，`test_pack_verification_inputs.py`） |
-| 5 | 交付存在和返工（只在本回合改过工作区时查） | 已上线（main；`capability/pack_verification_deliverables.py`，`test_pack_verification_deliverables.py`） |
+| 5 | 交付存在和返工（只在本回合改过工作区时查） | 已上线（main；`capability/pack_verification_deliverables.py`，`test_pack_verification_deliverables.py`）；未匹配提示修于 `worker/pack-deliverable-unmatched`，并入 step17i |
 | 6 | 变异、门禁、文档收口 | 6a 已并入 step17i；6b 在做；6c 由 `worker/pack-6c-wrapup` 收口 |
 | 6a | `/stop` 打断宿主核验：取消后不再起新检查、正在跑的整组回收、剩余目标逐项记 cancelled、被取消的回合不返工 | 已并入 step17i（sol1 实现，ae 整合到块 4/5 之上并补三处取消事实、宽限期轮询：`attempt/process_run.py`，`test_pack_verification_cancellation.py`），9b 复核通过 |
 | 6b | 写后检查复用工作区扫描（基线 + written 记录 + 候选文件现状，不再整盘重扫） | 在做 |

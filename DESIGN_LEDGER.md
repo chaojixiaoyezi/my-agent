@@ -1,5 +1,12 @@
 # 设计台账
 
+## 能力包：交付物未匹配（pdm，2026-10-03，分支 `worker/pack-deliverable-unmatched`，基于 `claude/3a-step17i` `c47d023b6`，3a 复审，并入 step17i）
+
+- **起因**：B8 重试点 A10-t102（`decision-evidence/capability-packs-v2-b8/repilot-c47d023b6/`）：模型把交付物写成 `drama_text_delivery.v3`——内容是含正确 schema 的 json，只是文件名不匹配包的路径模式 `**/*.json`。宿主核验一个目标都没查（`closeout.target_count=0`）、包内检查程序一次没跑，返工提示还说“本回合没有写出”——把“换了文件名”误报成“没写”，模型重复收尾 2 次也不改名，回合照常结束。
+- **根因**：`scan_workspace` 只记路径匹配任一包模式的文件，`_changed_paths` 从它算“本回合改过什么”——不匹配模式的文件在宿主眼里完全不存在：既不算交付、也进不了检查目标，最终事实里只有 `DELIVERABLE_MISSING`。
+- **修法**（3a 定：不做前置硬拦、不改检查程序、不改包内容）：判定和 `DELIVERABLE_MISSING` 原因码不变，把两处提示改准确——返工提示说“没找到符合该模式的交付物；如果交付物用了别的文件名，请按包的约定命名”，宿主通知说“没找到符合 <路径模式> 的文件”；返工上限沿用 2 次，只读回合照旧不查。
+- **验证**：新增 A10 形状用例（未匹配被准确报出、改名后通过、检查程序跑起来）；相关 7 个 `test_pack_verification_*` 文件与 guards9 全过；6 个变异全杀（不看基线、返工超上限、提示不带路径模式、提示不带改名指引、不记结构化事实、正常交付也返工）。命令与结果见 `TESTS.md`。
+
 ## 能力包块 6c 收口（p6c，2026-10-03，分支 `worker/pack-6c-wrapup`，基于 step17i `c47d023b6`，3a 复审，并入 step17i）
 
 - **范围**：能力包 v2 的收口片——用户说明（`docs/guides/CAPABILITY_PACK_GUIDE.md`）补“反复改不对时，写后检查会怎么节流”（错误一次列全、连续失败 6 次暂停写后检查，P1–P3 的用户视角），并把“打开前的三个前提”更新为三条都已完成（第三条 `/stop` 打断已由块 6a 并入 step17i）；设计稿 `docs/design/CAPABILITY_PACKS_V2.md` 的状态行与第 7 节进度表更新到当前（块 1–5、7 已上线 main；6a、P1–P3 在 step17i；6b 在做；6c 本分支；块 8 全量重跑进行中）。

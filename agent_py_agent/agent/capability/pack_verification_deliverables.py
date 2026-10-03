@@ -3,6 +3,8 @@
 #   触发条件（3a 定）：只在本回合改过工作区时才查（调用方保证有块 3 基线），纯问答和只读审稿的回合不触发；一个工具都不调、
 #   直接在答复里贴内容的回合查不到，是已知限制。判定：有匹配（路径 + 字段）的文件就算交了；只有路径匹配、但按声明格式打不开的
 #   记 DELIVERABLE_UNREADABLE；一个都没有记 DELIVERABLE_MISSING。路径匹配、能打开、字段不匹配的文件不是这个交付物。
+#   提示只说结构化事实：缺的时候说「没找到符合该模式的交付物」并提醒按包的约定命名——B8 重试点 A10 实测，
+#   只说「本回合没有写出」会把「换了文件名」误报成「没写」，模型重复收尾也不改名。
 #   改动同步 test_pack_verification_deliverables.py 与 docs/design/CAPABILITY_PACKS_V2.md 第 5 节。
 # 模块用途: 找出本回合该交却没交（或交了打不开）的交付物，并生成返工提示。
 
@@ -46,7 +48,9 @@ def _deliverable_issue(deliverable: object, changed: list[str], root: Path, mani
     return [fact]
 
 
-# LLM: 只列结构化事实（包、交付物编号、路径模式和字段要求、打不开的文件），不替模型决定写什么；末尾说明只审不交付时怎么办。
+# LLM: 只列结构化事实（包、交付物编号、路径模式和字段要求、打不开的文件），不替模型决定写什么；缺的时候如实说
+#   「没找到符合该模式的交付物」并提醒按包的约定命名（B8 重试点 A10：只说「没有写出」会把「换了文件名」误报成
+#   「没写」）；末尾说明只审不交付时怎么办。
 # 函数用途: 生成一次缺交付物的返工提示。
 def deliverable_rework_text(items: list[dict]) -> str:
     lines = ["宿主发现本回合改过工作区，但钉住的能力包要求的交付物还没交："]
@@ -58,6 +62,7 @@ def deliverable_rework_text(items: list[dict]) -> str:
         if item["code"] == DELIVERABLE_UNREADABLE:
             lines.append(f"- {item['package_id']} 的 {item['deliverable_id']}（{need}）：{'、'.join(item['paths'])} 打不开或解析不了。")
         else:
-            lines.append(f"- {item['package_id']} 的 {item['deliverable_id']}（{need}）：本回合没有写出。")
+            lines.append(f"- {item['package_id']} 的 {item['deliverable_id']}（{need}）：没找到符合该模式的交付物；"
+                         f"如果交付物用了别的文件名，请按包的约定命名。")
     lines.append("请把交付物写成工作区里的文件，并在答复里写明路径。如果用户这次只要审阅、不要交付物，在答复里说明即可。")
     return "\n".join(lines)

@@ -185,7 +185,7 @@ python3 scripts/build_capability_package.py \
    - 有问题：`宿主检查（report-workbench-a 1.0.0，原版 scripts/check_report.py）：output/weekly.json 无效，错误 2 条（MISSING_SECTION、BAD_DATE），警告 1 条。`
    - 没查成：`宿主检查（report-workbench-a 1.0.0，原版 scripts/check_report.py）：output/weekly.json 未检查（verifier_timeout）。`
 2. **输入原件被就地改了**（只对声明要保留原件的包）：`宿主检查：任务开始时的输入 data/source.csv 被就地改了（原件副本已保存）。`；没留到副本时，括号里是"没有原件副本"。
-3. **必需交付物缺失或打不开**：`宿主检查：report-workbench-a 要求的交付物 weekly_report 本回合没有写出。`；写了但打不开时，末尾是"写出了但打不开"。
+3. **必需交付物缺失或打不开**：`宿主检查：report-workbench-a 要求的交付物 weekly_report 没找到符合 output/** 的文件。`；写了但打不开时，末尾是"写出了但打不开"。换了文件名（不匹配包声明的路径模式）也归在这条里，提示会写明要求的模式，模型照它改名后重新收尾即可。
 
 如果这一轮没有正常收尾（比如被中断），提示末尾会加一句：`本回合没有正常收尾，上面是写入时的检查结果。`
 

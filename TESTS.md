@@ -1,5 +1,27 @@
 # 测试与发布验收
 
+## 能力包：交付物未匹配的提示修正（pdm，2026-10-03，分支 `worker/pack-deliverable-unmatched`）
+
+- **新用例** `agent_py_agent/tests/test_pack_verification_deliverables.py::test_unmatched_deliverable_name_reports_pattern_and_recovers_after_rename`：A10 形状（交付物内容含正确 schema、文件名 `delivery.v3` 不匹配 `out/**`）。
+  - 修复前基线（先跑通并留证）：提示“本回合没有写出”、`closeout.target_count=0`、`rework_count=0`、检查程序 0 次调用。
+  - 修复后断言：提示含“没找到符合该模式的交付物”“out/**”“如果交付物用了别的文件名，请按包的约定命名”；`deliverables_missing` 记 `DELIVERABLE_MISSING`；模拟改名到 `out/delivery.json` 后收尾通过、检查程序真跑并 `passed`。
+- **改断言**：`test_missing_deliverable_reworks_at_most_twice`、`test_delivered_file_clears_the_check_and_uncertain_old_files_do_not_count`、`test_final_facts_follow_the_last_closeout_not_stale_writes`（service）、`test_gateway_notice_is_built_from_facts`（notice 文案）同步新文案。
+- **变异**（`/private/tmp/claude-501/pdm/mutate_pdm.py`，6 个全杀）：
+  - M1 不看基线（`closeout_block` 去掉 `scope.baseline is None`）→ 被“没改过工作区的回合不查”用例杀；
+  - M2 返工超过上限（去掉 `deliverable_rework` 计数上限）→ 被“最多返工 2 次”用例杀；
+  - M3 提示不带路径模式（`need` 改成“路径符合声明的模式”）→ 被 A10 用例杀；
+  - M4 提示不带改名指引 → 被 A10 用例杀；
+  - M5 不记 `deliverable_check` → 被 A10 用例杀（facts 里没有缺失事实）；
+  - M6 正常交付也返工（去掉 `not items`）→ 被“交付物交了就不返工”用例杀。
+- **命令与结果**（工作树根执行；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_pack_verification_deliverables.py agent_py_agent/tests/test_pack_verification_service.py -q` → 61 passed、2 skipped；
+  - 同上跑 `test_pack_verification_matching.py test_pack_verification_inputs.py` → 28 passed；
+  - 同上跑 `test_pack_verification_post_write_feedback.py test_pack_verification_cancellation.py` → 36 passed、1 failed（`test_running_cancellation_reclaims_entire_process_group[platform]`：`sandbox-exec: Operation not permitted`，沙箱内跑不了真 Seatbelt，需 3a 沙箱外复跑）；
+  - 同上跑 `test_pack_verification_protection.py -k "not shell"` → 5 passed；真实 Shell 用例在沙箱内挂起/失败，需沙箱外复跑；
+  - guards9（10 个文件）→ 172 passed。
+- **静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；strict code-size → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`（跑完已 `git checkout -- CODE_SIZE_REPORT.md` 还原生成报告）；`size_diff.sh` → `新增告警: 0`、`消失告警: 16`；`git diff --check` 退出码 0、无输出；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
+- **尚未运行**：全仓 pytest 和 Linux 车道复跑留给集成者；本机只跑上述定向测试与 guards9。
+
 ## 能力包块 6c 收口（p6c，2026-10-03，分支 `worker/pack-6c-wrapup`，基于 step17i `c47d023b6`）
 
 - **改动**：用户说明 `docs/guides/CAPABILITY_PACK_GUIDE.md` 补“反复改不对时，写后检查会怎么节流”（P1–P3 的用户视角）并把“打开前的三个前提”更新为三条已完成（`/stop` 打断由块 6a 并入 step17i）；设计稿 `docs/design/CAPABILITY_PACKS_V2.md` 状态行与第 7 节进度表更新；脱敏已知边界补 6c 核实结论；新增锁定用例 `test_redact_location_word_glued_paths_stay_a_known_cost`（`test_pack_verification_service.py`）。**产品代码未改**（脱敏判定为不能安全修，维持 9b 取舍）。
