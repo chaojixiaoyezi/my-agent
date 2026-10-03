@@ -8,6 +8,13 @@
 - 整合时补：取消时输入原件/交付物两段不返工、只剩“被取消”也出事实和宿主提示、宽限期内轮询进程组。
 - macOS 真实 Seatbelt 用例在非嵌套环境通过；实际 TUI/IM `/stop` 未验证。详见 TESTS.md 和 [设计](../../design/CAPABILITY_PACKS_V2.md)。
 
+## 2026-10-03 能力包 v2 块 6b：写后复用工作区候选扫描（p6b，本地实现，待复审）
+
+- 写后 `turn_output` 只从本 run `written` 记录的去重路径集合重查当前状态，再与基线摘要比较，不再每次扫描工作区。
+- 原 `task_input` 唯一性解析、检查缓存键及结果账本字段保持；当前写回执需先落账才可进入该次候选 scope。
+- 收尾继续走 `scan_workspace` 完整扫描，因此未登记 Shell 文件仍在收尾检查；候选限额、排序和大文件摘要上限见设计 3.3 节。
+- 写后计数、等价、Shell 收尾与五项变异见 TESTS.md“能力包 v2 块 6b”；本机沙箱相关失败/超时保持原样，待集成线外部复核。
+
 ## 2026-10-02 J16 片 D：归档与工具账记发起者（ef，分支 `claude/ef-j16-slice-d`，基于 `claude/3a-step17g` `72ddc2b5c`，待集成）
 
 - `tool_call_archive_record` 的归档多两个典型字段：`actor`（`model` 或 `decision`，取自 `ToolCallRecordParams.actor`，默认 `model`）与 `decision_ref`

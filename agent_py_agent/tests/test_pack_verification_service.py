@@ -207,10 +207,12 @@ def test_inputs_are_resolved_by_source_and_must_be_unique(env, fake_runner):
     source = _write(env.workspace / "in/source.json", {"schema": "source.v1"})
     capture_baseline_before_tool(env.agent, env.params, "write_file")
     handoff = _write(env.workspace / "out/handoff.json", {"schema": "handoff.v1"})
+    attach_post_write_verification(env.agent, env.params, _tool_result(handoff))
     target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1"})
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {"--source": source, "--handoff": handoff}, "目标本身不算 --peer"
     peer = _write(env.workspace / "out/peer.json", {"schema": "delivery.v1"})
+    attach_post_write_verification(env.agent, env.params, _tool_result(peer))
     _write(target, {"schema": "delivery.v1", "v": 1})
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {"--source": source, "--handoff": handoff, "--peer": peer}
@@ -222,12 +224,95 @@ def test_inputs_are_resolved_by_source_and_must_be_unique(env, fake_runner):
     copy = dict(fake_runner[-1].inputs)["--source"]
     assert copy.parent == env.task_root / "data/pack_verification/originals", "被就地改过的输入交任务开始时的原件副本"
     assert copy.read_bytes() == original and dict(fake_runner[-1].inputs)["--handoff"] == handoff
-    _write(env.workspace / "out/handoff2.json", {"schema": "handoff.v1"})
+    handoff2 = _write(env.workspace / "out/handoff2.json", {"schema": "handoff.v1"})
+    attach_post_write_verification(env.agent, env.params, _tool_result(handoff2))
     _write(target, {"schema": "delivery.v1", "v": 3})
     attach_post_write_verification(env.agent, env.params, _tool_result(target))
     assert dict(fake_runner[-1].inputs) == {"--source": copy}, "匹配到两个就不交"
     last = [row for row in env.ledger.records() if row["kind"] == "result"][-1]
     assert last["input_matches"] == {"--source": 1, "--handoff": 2, "--peer": 0}
+
+
+def test_twenty_post_write_checks_scan_only_at_baseline_and_closeout(env, fake_runner, monkeypatch):
+    scan_calls = []
+    scan_workspace = pack_verification_service.scan_workspace
+
+    def counted_scan(root, patterns):
+        scan_calls.append(tuple(patterns))
+        return scan_workspace(root, patterns)
+
+    monkeypatch.setattr(pack_verification_service, "scan_workspace", counted_scan)
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+    assert len(scan_calls) == 1, "第一次写工作区的基线扫描只做一次"
+
+    target = env.workspace / "out/d.json"
+    for index in range(20):
+        _write(target, {"schema": "delivery.v1", "version": index})
+        attach_post_write_verification(env.agent, env.params, _tool_result(target))
+
+    assert len(scan_calls) == 1, "20 次写后检查应复用基线和 written 候选，不重扫工作区"
+    assert len(fake_runner) == 20
+    closeout = closeout_rework_block(env.agent, env.params)
+    assert len(scan_calls) == 2, "收尾仍须完整扫描一次"
+    assert closeout == ""
+
+
+def test_unregistered_shell_turn_output_is_only_visible_at_closeout(env, fake_runner):
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+    shell_handoff = _write(env.workspace / "out/shell-handoff.json", {"schema": "handoff.v1"})
+    target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1"})
+
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
+    post_write = [row for row in env.ledger.records() if row.get("kind") == "result"][-1]
+    assert post_write["trigger"] == "post_write"
+    assert post_write["input_matches"]["--handoff"] == 0
+    assert "--handoff" not in dict(fake_runner[-1].inputs), "Shell 未登记文件不进入写后候选"
+
+    assert closeout_rework_block(env.agent, env.params) == ""
+    closeout = [row for row in env.ledger.records() if row.get("kind") == "result"][-1]
+    assert closeout["trigger"] == "closeout"
+    assert closeout["input_matches"]["--handoff"] == 1
+    assert dict(fake_runner[-1].inputs)["--handoff"] == shell_handoff
+
+
+def test_registered_turn_output_matches_full_scan_decision_and_ledger(env, fake_runner, monkeypatch):
+    _write(env.workspace / "in/source.json", {"schema": "source.v1"})
+    changed = _write(env.workspace / "out/changed-handoff.json", {"schema": "handoff.v1"})
+    deleted = _write(env.workspace / "out/deleted-handoff.json", {"schema": "handoff.v1"})
+    capture_baseline_before_tool(env.agent, env.params, "write_file")
+
+    _write(changed, {"schema": "other.v1"})
+    attach_post_write_verification(env.agent, env.params, _tool_result(changed))
+    deleted.unlink()
+    new_handoff = _write(env.workspace / "out/new-handoff.json", {"schema": "handoff.v1"})
+    attach_post_write_verification(env.agent, env.params, _tool_result(new_handoff))
+    target = _write(env.workspace / "out/d.json", {"schema": "delivery.v1"})
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
+    new_record = [row for row in env.ledger.records() if row.get("kind") == "result"][-1]
+
+    scope = pack_verification_service._run_scope(env.agent, env.params)
+    assert scope is not None
+    old_changed = pack_verification_service._changed_paths(scope, scope.current)
+    reused_changed = pack_verification_service._changed_paths(scope, scope.known_current)
+    assert reused_changed == old_changed == [
+        "out/changed-handoff.json", "out/d.json", "out/new-handoff.json"]
+    assert "out/deleted-handoff.json" not in reused_changed
+    assert new_record["input_matches"] == {"--source": 1, "--handoff": 1, "--peer": 0}
+    assert dict(fake_runner[-1].inputs)["--handoff"] == new_handoff
+
+    def full_scan_candidates(run_scope, source, trigger):
+        if source == pack_verification_service.INPUT_SOURCE_TASK_INPUT:
+            return pack_verification_service.task_input_candidates(
+                run_scope.originals, run_scope.pack_root, run_scope.root)
+        if source == pack_verification_service.INPUT_SOURCE_TURN_OUTPUT:
+            return [(relpath, run_scope.root / relpath)
+                    for relpath in pack_verification_service._changed_paths(run_scope, run_scope.current)]
+        return []
+
+    monkeypatch.setattr(pack_verification_service, "_candidates", full_scan_candidates)
+    attach_post_write_verification(env.agent, env.params, _tool_result(target))
+    full_scan_record = [row for row in env.ledger.records() if row.get("kind") == "result"][-1]
+    assert full_scan_record == new_record, "登记写入场景的候选、判定、复用键和账本事实与旧全量算法一致"
 
 
 def test_closeout_checks_shell_written_files_reworks_once_and_reuses_results(env, fake_runner):

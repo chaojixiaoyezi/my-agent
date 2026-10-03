@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -160,6 +161,43 @@ def scan_workspace(root: Path, patterns: tuple[str, ...]) -> WorkspaceScan:
                                                                            (root, patterns), files):
             return WorkspaceScan(files, truncated=True)
     return WorkspaceScan(files)
+
+
+# LLM: 只枚举本 run 的 written 路径，不重读全部基线文件或遍历工作区；基线摘要由调用方用于筛出变化。
+#   当前状态沿用路径/普通文件/大小/匹配数上限；不跟随符号链接或越出工作区。收尾必须调用 scan_workspace。
+# 函数用途: 只复查已知候选路径的当前状态，避免每次写后检查都遍历整个工作区。
+def scan_workspace_candidates(root: Path, written: Iterable[str], patterns: tuple[str, ...]) -> WorkspaceScan:
+    paths = sorted({path for path in written if isinstance(path, str)}, key=_walk_order_key)
+    truncated = len(paths) > MAX_SCAN_VISITED_ENTRIES_COUNT
+    files: dict[str, FileState] = {}
+    for relpath in paths[:MAX_SCAN_VISITED_ENTRIES_COUNT]:
+        path = _candidate_path(root, relpath)
+        if path is None or not any(path_matches(pattern, relpath) for pattern in patterns):
+            continue
+        state = file_state(path)
+        if state is None:
+            continue
+        if len(files) >= MAX_SCAN_MATCHED_FILES_COUNT:
+            return WorkspaceScan(files, truncated=True)
+        files[relpath] = state
+    return WorkspaceScan(files, truncated=truncated)
+
+
+# LLM: 与 scan_workspace 的排序规则对齐，按父目录段再按文件名排序；这里不访问文件系统。
+# 函数用途: 按 os.walk 的稳定顺序排列已知路径，让候选上限优先保留旧扫描先访问的目录与文件。
+def _walk_order_key(relpath: str) -> tuple[tuple[str, ...], str]:
+    parts = relpath.split("/")
+    return tuple(parts[:-1]), parts[-1]
+
+
+# LLM: written 是宿主账本事实但仍要防损坏路径；resolve 后地址必须与账本相同，不能跟随符号链接改址。
+# 函数用途: 校验账本路径仍是工作区内的相同普通相对地址，避免符号链接替换后读到其它位置。
+def _candidate_path(root: Path, relpath: str) -> Path | None:
+    parts = relpath.split("/")
+    if not relpath or any(part in {"", ".", ".."} for part in parts):
+        return None
+    path = root.joinpath(*parts)
+    return path if workspace_relpath(path, root) == relpath else None
 
 
 # 函数用途: 记下一个目录里路径匹配的文件；匹配文件数超限时返回 False。

@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
 
@@ -43,6 +43,7 @@ from .pack_verification_matching import (
     file_matches,
     file_state,
     scan_workspace,
+    scan_workspace_candidates,
     workspace_relpath,
 )
 from .pack_verification_originals import OriginalFile, load_task_originals
@@ -97,14 +98,29 @@ class _RunScope:
     pack_root: Path | None = None
     originals: dict[str, OriginalFile] | None = None
 
-    # 函数用途: 按钉住包声明的全部模式扫一次当前工作区。
+    # LLM: 当前候选模式只来自本回合钉住的包；closeout 的 current 与 post-write 的 known_current 共用它。
+    # 函数用途: 按钉住包声明汇总当前核验需要认的路径模式。
     @cached_property
-    def current(self) -> WorkspaceScan:
+    def patterns(self) -> tuple[str, ...]:
         patterns: list[str] = []
         for package in self.packages:
             for declaration in verification_declarations(package.verification):
                 patterns.extend(pattern for pattern in declaration.path_patterns if pattern not in patterns)
-        return scan_workspace(self.root, tuple(patterns))
+        return tuple(patterns)
+
+    # LLM: 只供收尾使用完整当前快照；写后输入走 known_current，避免重新遍历工作区。
+    # 函数用途: 按钉住包声明的全部模式扫一次当前工作区。
+    @cached_property
+    def current(self) -> WorkspaceScan:
+        return scan_workspace(self.root, self.patterns)
+
+    # LLM: 写后只重查本 run 写工具已登记路径；_changed_paths 再与 baseline 摘要比较，未登记内容留给 closeout。
+    # 函数用途: 缓存一次写后 turn_output 候选状态，多个输入声明共用，不遍历工作区。
+    @cached_property
+    def known_current(self) -> WorkspaceScan:
+        if self.baseline is None:
+            return WorkspaceScan()
+        return scan_workspace_candidates(self.root, self.written, self.patterns)
 
 
 # LLM: 只在开关打开、有可信 owner、有本 run 账本时才扫；已有基线就不再扫（基线是本 run 第一次改动前的状态）。
@@ -132,9 +148,9 @@ def verify_written_files(agent: object, params: object, paths: list[Path]) -> li
     if scope is None:
         return []
     written = [relpath for relpath in (workspace_relpath(path, scope.root) for path in paths) if relpath is not None]
-    if written:
+    if written and scope.ledger.append({"kind": "written", "paths": written}):
         # 写工具回执是“本回合写过它”的结构化证据；基线截断时靠它区分新写的文件和漏扫的老文件
-        scope.ledger.append({"kind": "written", "paths": written})
+        scope = replace(scope, written=scope.written | frozenset(written))
     checked = [item for path in paths[:MAX_POST_WRITE_TARGETS_COUNT] for item in _verify_target(scope, path, TRIGGER_POST_WRITE)]
     return [result.summary() for _, result in checked]
 
@@ -265,7 +281,7 @@ def _applicable(scope: _RunScope, path: Path) -> list[tuple[PinnedVerificationPa
 # 函数用途: 跑一次检查或复用有效结果，取消则仅记账和事件，不启动新程序。
 def _run_once(scope: _RunScope, pair: tuple, target: Path, trigger: str) -> tuple[str, PackVerificationResult]:
     package, verifier = pair
-    inputs, matches = _resolve_inputs(scope, verifier, target)
+    inputs, matches = _resolve_inputs(scope, verifier, target, trigger)
     key = _cache_key(package, verifier, target, inputs)
     cached = scope.ledger.cached_fact(key)
     request = PackVerifierRequest(scope.owner, package.installation, verifier.id, target, scope.root, inputs)
@@ -281,14 +297,15 @@ def _run_once(scope: _RunScope, pair: tuple, target: Path, trigger: str) -> tupl
     return key, result
 
 
-# LLM: 每条声明的输入按来源找候选：task_input = 任务原件清单里的文件（原样就交工作区文件，被改过就交副本）；turn_output = 本回合
-#   新建或改过的文件；都排除 target 本身，再按路径模式和字段匹配过滤，恰好一个才交给检查程序。不认识的来源没有候选。
+# LLM: task_input 只来自原件清单；turn_output 写后只复查本 run 的 written 路径并与基线摘要比较，收尾继续用完整扫描。
+#   都排除 target 本身，再按路径模式和字段匹配过滤，恰好一个才交给检查程序。不认识的来源没有候选。
 # 函数用途: 为一个检查程序解析关联输入，返回 ((参数名, 路径)…) 和每个参数名的匹配个数。
-def _resolve_inputs(scope: _RunScope, verifier: VerifierDeclaration, target: Path) -> tuple[tuple, dict[str, int]]:
+def _resolve_inputs(scope: _RunScope, verifier: VerifierDeclaration, target: Path,
+                    trigger: str) -> tuple[tuple, dict[str, int]]:
     target_relpath = workspace_relpath(target, scope.root)
     resolved, matches = [], {}
     for item in verifier.inputs:
-        found = [path for relpath, path in _candidates(scope, item.source)
+        found = [path for relpath, path in _candidates(scope, item.source, trigger)
                  if relpath != target_relpath and file_matches(item, relpath, path)]
         matches[item.flag] = len(found)
         if len(found) == 1:
@@ -296,22 +313,25 @@ def _resolve_inputs(scope: _RunScope, verifier: VerifierDeclaration, target: Pat
     return tuple(resolved), matches
 
 
+# LLM: 写后 turn_output 仅重查 written 记录中的候选路径；基线比较由 _changed_paths 完成，收尾 turn_output 使用完整 current 快照以包含未登记 Shell 写入。
 # 函数用途: 按来源列出候选 (工作区相对路径, 交给检查程序的路径)，排好序。
-def _candidates(scope: _RunScope, source: str) -> list[tuple[str, Path]]:
+def _candidates(scope: _RunScope, source: str, trigger: str) -> list[tuple[str, Path]]:
     if source == INPUT_SOURCE_TASK_INPUT:
         return task_input_candidates(scope.originals, scope.pack_root, scope.root)
     if source == INPUT_SOURCE_TURN_OUTPUT and scope.baseline is not None:
-        return [(relpath, scope.root / relpath) for relpath in _changed_paths(scope)]
+        current = scope.current if trigger == TRIGGER_CLOSEOUT else scope.known_current
+        return [(relpath, scope.root / relpath) for relpath in _changed_paths(scope, current)]
     return []
 
 
 # LLM: 和基线比内容变了的文件；不在基线里的文件，只有基线没截断、或写工具回执证明本回合写过它时才算（太大没算摘要的不算）。
 # 函数用途: 列出确定是本回合新建或内容变了的文件。
-def _changed_paths(scope: _RunScope) -> list[str]:
+def _changed_paths(scope: _RunScope, current: WorkspaceScan | None = None) -> list[str]:
     baseline = scope.baseline
     known = baseline.files if baseline is not None else {}
     truncated = baseline is not None and baseline.truncated
-    return sorted(relpath for relpath, state in scope.current.files.items()
+    snapshot = current if current is not None else scope.current
+    return sorted(relpath for relpath, state in snapshot.files.items()
                   if state.sha256 and known.get(relpath) != state
                   and (relpath in known or not truncated or relpath in scope.written))
 

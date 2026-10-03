@@ -14,6 +14,7 @@ from agent_py_agent.agent.capability.pack_verification_matching import (
     file_matches,
     path_matches,
     scan_workspace,
+    scan_workspace_candidates,
     workspace_relpath,
 )
 from agent_py_agent.agent.capability_verification_manifest import DeliverableFieldMatch
@@ -91,6 +92,73 @@ def test_scan_limits_mark_truncated(tmp_path, monkeypatch):
     monkeypatch.setattr(matching, "MAX_SCAN_HASHED_FILE_BYTES", 1)
     big = scan_workspace(tmp_path, ("0.json",)).files["0.json"]
     assert big.sha256 == "" and big.size == 2, "太大的文件只记大小，不算摘要"
+
+
+def test_candidate_scan_reuses_baseline_and_written_paths_with_current_state(tmp_path):
+    baseline_file = tmp_path / "baseline.json"
+    changed_file = tmp_path / "changed.json"
+    deleted_file = tmp_path / "deleted.json"
+    baseline_file.write_text('{"v": 1}')
+    changed_file.write_text('{"v": 1}')
+    deleted_file.write_text('{"v": 1}')
+    baseline = scan_workspace(tmp_path, ("*.json",))
+
+    changed_file.write_text('{"v": 2}')
+    deleted_file.unlink()
+    (tmp_path / "new.json").write_text('{"v": 3}')
+    (tmp_path / "shell.json").write_text('{"v": 4}')
+    current = scan_workspace_candidates(
+        tmp_path, ("changed.json", "deleted.json", "new.json", "new.json"), ("*.json",))
+
+    assert list(current.files) == ["changed.json", "new.json"]
+    assert current.files["changed.json"].sha256 != baseline.files["changed.json"].sha256
+    assert current.files["new.json"].size == len('{"v": 3}')
+    assert {"baseline.json", "deleted.json", "shell.json"}.isdisjoint(current.files)
+
+    # 与旧全量当前快照比较：写工具登记的新建/修改结果相同；未登记 Shell 新文件是本次优化的有意排除。
+    old_current = scan_workspace(tmp_path, ("*.json",))
+    old_changed = {path for path, state in old_current.files.items()
+                   if state.sha256 and baseline.files.get(path) != state}
+    new_changed = {path for path, state in current.files.items()
+                   if state.sha256 and baseline.files.get(path) != state}
+    assert old_changed - {"shell.json"} == new_changed == {"changed.json", "new.json"}
+
+
+def test_candidate_scan_deduplicates_written_records_before_hashing(tmp_path, monkeypatch):
+    path = tmp_path / "same.json"
+    path.write_text("{}")
+    original = matching.file_state
+    hashed = []
+
+    def capture(candidate):
+        hashed.append(candidate)
+        return original(candidate)
+
+    monkeypatch.setattr(matching, "file_state", capture)
+    scan = scan_workspace_candidates(tmp_path, ("same.json", "same.json"), ("*.json",))
+    assert list(scan.files) == ["same.json"]
+    assert hashed == [path], "重复 written 行不得重复读取同一个候选文件"
+
+
+def test_candidate_scan_preserves_matched_file_cutoff_and_order(tmp_path, monkeypatch):
+    for index in range(5):
+        (tmp_path / f"{index}.json").write_text("{}")
+    monkeypatch.setattr(matching, "MAX_SCAN_MATCHED_FILES_COUNT", 2)
+    expected = scan_workspace(tmp_path, ("*.json",))
+    candidates = scan_workspace_candidates(
+        tmp_path, tuple(f"{index}.json" for index in range(5)), ("*.json",))
+    assert list(candidates.files) == list(expected.files) == ["0.json", "1.json"]
+    assert candidates.truncated is expected.truncated is True
+
+
+def test_candidate_scan_limits_known_paths_and_marks_truncation(tmp_path, monkeypatch):
+    for index in range(5):
+        (tmp_path / f"{index}.json").write_text("{}")
+    monkeypatch.setattr(matching, "MAX_SCAN_VISITED_ENTRIES_COUNT", 2)
+    scan = scan_workspace_candidates(
+        tmp_path, tuple(f"{index}.json" for index in range(5)), ("*.json",))
+    assert list(scan.files) == ["0.json", "1.json"]
+    assert scan.truncated
 
 
 def test_workspace_relpath_rejects_outside_paths(tmp_path):

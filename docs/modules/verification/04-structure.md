@@ -29,6 +29,8 @@
 `tool_call_runtime` 在 `pre_handler_gate` 放行时调用 `capability.pack_verification_hooks.capture_baseline_before_tool`，在被动验证之后调用 `attach_post_write_verification`，能力包宿主核验摘要进同一个 `handler_details.pack_verification`；`tool_call_archive_record` 白名单收这个键，`runtime_facts` 输出 `[pack-verification]` 段（能力包 v2 块 3，开关默认关）。
 `tooling/runtime_facts.py`接canonical handler_details，输出原verification块和有界process字段；`reducer.py`统一脱敏，`tool_call_archive_record.py`保留同一有界process，`runtime/loop_support.py`恢复后同口径展示。它们不改变执行状态或持久schema。
 
+能力包 6b 的候选接缝位于 `pack_verification_service._RunScope`：`patterns` 冻结当前 pins 的声明模式；写后 `known_current` 调用 `pack_verification_matching.scan_workspace_candidates`，只重查 ledger 的 written 路径当前状态；closeout 仍用 `current -> scan_workspace` 走完整工作区。`verify_written_files` 在 written 行成功落账后把当次路径并入临时 scope，所以重复写入去重且新写候选立即可见；未登记的 Shell 新文件不会混进写后输入。两条路径最后共用原 `_changed_paths`、字段匹配和输入/结果 ledger 合同，不建立第二份扫描状态。
+
 `tool_context/reducer.py::_inline_result_with_archive_anchor` 只对临时模型副本过滤本次 `kind=tool_output` 且精确匹配归档物理路径的 refs
 及 ref 内容块（移植自 Codex b496e1a0c，2026-09-27）：模型只看到一个逻辑续读锚点，不再同时看到物理路径。canonical 结果与 runtime facts
 仍读原数据，普通业务/来源引用保持，read_artifact 返回源分页；外置摘要选择继续接收原结果，不改执行事实、权限或持久 schema。

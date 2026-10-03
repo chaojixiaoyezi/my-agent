@@ -671,6 +671,73 @@
 - **变异**：4 个全部抓到——m1 快照写回退普通 `write_text`（用例 1 红）；m2 去掉符号链接跳过（用例 2 红：`symlink_skipped_count` 0≠2）；m3 `PermissionError` 不计数（用例 3 红）；m4 维护回执不落盘（用例 4 红）。另有一个等价变异（只把 `is_dir(follow_symlinks=False)` 改成 `is_dir()`）被 `is_symlink()` 早退遮蔽、未改变行为，不计入。
 - **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_memory_archive_permissions.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3`
 
+## 能力包 v2 块 6b：写后复用工作区候选扫描（2026-10-03，p6b，分支 `worker/pack-6b-scan-reuse`，基于 `c47d023b6`，待复审）
+
+### 改动与回归
+
+- 写后 `turn_output` 只从本 run `written` 记录生成去重路径候选，再与基线摘要比较；只对这些候选检查当前存在性、大小和 SHA-256，没有目录遍历。task_input、字段匹配、target 排除、恰好唯一才传参、`input_matches` 和结果账本形状保持。当前写入路径先成功落 `written` 账，再加入本次 scope。
+- 收尾 `current` 仍执行一次完整 `scan_workspace`，Shell 新写且没有写工具 `written` 记录的文件不进入写后解析，但收尾能发现并作为 turn_output 输入；完整等价 oracle 比较新写、修改、删除路径的 changed 候选、匹配结果和整条 result ledger row。
+- 计数用例做 20 次写后检查加 1 次 closeout：完整工作区扫描精确为基线 1 次 + 收尾 1 次；未使用计时断言。候选按稳定目录/文件顺序处理，保留 20,000 路径、512 个当前匹配普通文件、16 MB 哈希上限；重复 written 行只读取一次。
+- 旧实现上的两项先行红测都按需求失败：20 次写后扫描观测 21 而非 1；未登记 Shell handoff 在写后被误算为 1 个输入。实现后同一用例转绿。
+
+### 变异
+
+| 变异 | 捕获用例与实际结果 | 状态 |
+| --- | --- | --- |
+| 写后继续全盘扫描 | `test_twenty_post_write_checks_scan_only_at_baseline_and_closeout`：观测到 21 次而期望 1，pytest 失败 | 已捕获并恢复 |
+| 收尾不做完整扫描 | `test_unregistered_shell_turn_output_is_only_visible_at_closeout`：收尾报缺少交付物，未找到 Shell 写出的 handoff | 已捕获并恢复 |
+| 候选不读当前存在状态 | `test_candidate_scan_reuses_baseline_and_written_paths_with_current_state`：已删除 `deleted.json` 仍留在候选快照 | 已捕获并恢复 |
+| written 记录不去重 | `test_candidate_scan_deduplicates_written_records_before_hashing`：同一路径被 hash 两次 | 已捕获并恢复 |
+| 512 匹配上限 off-by-one | `test_candidate_scan_preserves_matched_file_cutoff_and_order`：期望 2 个候选、变异产出 3 个 | 已捕获并恢复 |
+
+### 测试命令与环境边界
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_pack_verification_*.py \
+  agent_py_agent/tests/test_pack_verifier_runner.py \
+  agent_py_agent/tests/test_capability_package_verification_blocks.py \
+  agent_py_agent/tests/test_capability_verification_declaration.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-p6b \
+  -k 'not platform and not test_real_shell_cannot_forge_the_ledger and not test_full_access_shell_outside_the_task_tree_cannot_forge_the_ledger'
+```
+
+- 上述选择的回归退出码 0、执行到 100%；三个直接修改测试文件（matching/service/inputs）单独复跑也退出码 0、执行到 100%。pytest 按默认输出策略未显示项目数汇总。
+- 未过滤的能力包回归已尝试，但不能记为全通过：`test_pack_verification_cancellation.py` 单文件为 23 passed / 1 failed；唯一 `[platform]` 用例未进入进程，真实结果 `returncode=71`、`sandbox-exec: sandbox_apply: Operation not permitted`。它需要沙箱外复跑。
+- `test_pack_verification_protection.py` 中 6 个非真实 Shell 案例已过；真实 Shell 账本保护第一例失败，下一例等到 300 秒被测试命令超时终止，输出没有给出可归因错误。无明确原因，不把它归因于沙箱；真实 Shell 测试保留原样，交 3a 在沙箱外复核。
+- 两个未过滤的更大批次也没有结束：混合 pack/能力包 glob 批次在 600 秒超时、停在 7%；pack-only 批次在 600 秒超时、停在 45%，只有部分失败标记、无最终测试名或汇总。没有把这些输出当作通过，也不推测未显示的失败原因；进程树由超时回收且无未清理子进程。
+
+### 架构守卫与本地静态门禁
+
+**guards9 命令**（十个文件，含 `test_packaging.py`）：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_architecture_guardrails.py \
+  agent_py_agent/tests/test_config_field_readers.py \
+  agent_py_agent/tests/test_constant_names_unique.py \
+  agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+  agent_py_agent/tests/test_parameter_registry.py \
+  agent_py_agent/tests/test_recovery_actions.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+  agent_py_agent/tests/test_subagent_config_inheritance.py \
+  agent_py_agent/tests/test_packaging.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-p6b
+```
+
+结果：退出码 0，执行到 100%。静态门禁逐项结果：
+
+- `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`。
+- `PYTHONDONTWRITEBYTECODE=1 $PY -m ruff check agent_py_agent scripts`：`All checks passed!`。
+- `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_doc_sync.py`：`DOC_SYNC_PASS`。
+- `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：`strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；执行后 `git checkout -- CODE_SIZE_REPORT.md` 已还原生成报告。
+- `git diff --check`：退出码 0。
+- `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_clean_package.py .`：`OK: . 未发现发布阻塞项`。
+- `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：输出 `新增告警: 0`、`消失告警: 16`。
+
 ## 能力包 v2 块 6a：宿主核验响应 /stop（2026-10-03，sol1 实现，ae 整合到 `claude/3a-step17h` `ede890374` 之上，分支 `claude/ae-b6a-17h`，9b 复核通过，并入 step17i）
 
 ### 来源与做法
