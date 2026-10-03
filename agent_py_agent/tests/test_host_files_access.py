@@ -1079,22 +1079,15 @@ def _quoted_regex(pattern: str) -> str:
     return json.dumps(pattern)
 
 
-@pytest.mark.skipif(not IS_MACOS, reason="正则规则只有 macOS Seatbelt 能表达；Linux 只保护本任务（registry 按 task_root 给，已知边界）")
-def test_real_seatbelt_protects_every_task_record_without_task_params(tmp_path):
-    """不带本任务的 task_root 参数时，Full Access 与隔离的命令照样改不了别的任务的核验记录，也建不出新的（含大小写变体）；
-    9b 三审列的“改名上级目录 → 写记录 → 改回”各种手法（data、DATA、日期目录挪深一层、任务根挪深一层、整个 runs/、tasks/ 和
-    audits/ 下的 data、整个 audits/）都失败，记录一个字节不变。任务目录里其它位置照常可写；副作用：命令不能自己新建任务根。"""
+# 函数用途: 9b 三审列的“改名上级目录 → 写记录 → 改回”各种手法（data、DATA、日期目录挪深一层、任务根挪深一层、任务根改名、
+#   整个 runs/、tasks/ 和 audits/ 下的 data、整个 audits/、直接追加）。先在 tasks/、audits/ 下各建一份记录，返回记录文件和命令表。
+def _layout_bypass_attacks(main: Path) -> tuple[list[Path], dict[str, str]]:
     import shlex
 
-    if not _sandbox_ready():
-        pytest.skip("平台沙箱不可用")
-    home = _home(tmp_path)
-    main = home["main"]
     k2 = main / "runs" / "2026-10-02" / "k2"
     records = [_put(main / rel / "data" / "pack_verification" / "r.jsonl", "HOSTREC\n")
                for rel in ("tasks/2026-10-01/t1", "audits/a1")]
     records.append(k2 / "data" / "pack_verification" / "r.jsonl")
-    before = {path: path.read_bytes() for path in records}
     q = {name: shlex.quote(str(path)) for name, path in {
         "k2": k2, "runs": main / "runs", "date": main / "runs" / "2026-10-02", "t1": main / "tasks" / "2026-10-01" / "t1",
         "audits": main / "audits", "a1": main / "audits" / "a1"}.items()}
@@ -1102,7 +1095,7 @@ def test_real_seatbelt_protects_every_task_record_without_task_params(tmp_path):
     def forge(moved: str, back: str, record: str, prepare: str = "") -> str:
         return f"{prepare}mv {back} {moved} && printf FORGED >> {record} && mv {moved} {back}"
 
-    attacks = {
+    return records, {
         "rename_data": forge(f"{q['k2']}/data.x", f"{q['k2']}/data", f"{q['k2']}/data.x/pack_verification/r.jsonl"),
         "rename_data_upper": f"mv {q['k2']}/DATA {q['k2']}/data.y && printf FORGED >> {q['k2']}/data.y/pack_verification/r.jsonl",
         "nest_date_dir": forge(f"{q['runs']}/X/2026-10-02", q["date"], f"{q['runs']}/X/2026-10-02/k2/data/pack_verification/r.jsonl",
@@ -1116,6 +1109,27 @@ def test_real_seatbelt_protects_every_task_record_without_task_params(tmp_path):
         "rename_audits": forge(f"{q['audits']}.x", q["audits"], f"{q['audits']}.x/a1/data/pack_verification/r.jsonl"),
         "append_record": f"printf FORGED >> {shlex.quote(str(records[-1]))}",
     }
+
+
+@pytest.mark.skipif(not IS_MACOS, reason="正则规则只有 macOS Seatbelt 能表达；Linux 只保护本任务（registry 按 task_root 给，已知边界）")
+def test_real_seatbelt_protects_every_task_record_without_task_params(tmp_path):
+    """不带本任务的 task_root 参数时，Full Access 与隔离的命令照样改不了别的任务的核验记录，也建不出新的（含大小写变体）；
+    9b 三审列的“改名上级目录 → 写记录 → 改回”各种手法都失败，记录一个字节不变。任务目录里其它位置照常可写；副作用：命令不能
+    自己新建任务根。"""
+    import shlex
+
+    if not _sandbox_ready():
+        pytest.skip("平台沙箱不可用")
+    home = _home(tmp_path)
+    main = home["main"]
+    records, attacks = _layout_bypass_attacks(main)
+    before = {path: path.read_bytes() for path in records}
+    work = main / "runs" / "2026-10-02" / "k2" / "work"
+    legit = (f"printf ok > {shlex.quote(str(work.parent / 'data' / 'notes.json'))}",
+             f"mkdir -p {shlex.quote(str(work / 'sub' / 'deep'))}",
+             f"printf ok > {shlex.quote(str(work / 'tmp.txt'))} && mv {shlex.quote(str(work / 'tmp.txt'))} "
+             f"{shlex.quote(str(work / 'tmp2.txt'))}",
+             f"printf ok > {shlex.quote(str(main / 'notes.txt'))}")
     for scoped, extra in ((False, {}), (True, {"__sandbox_write_roots": [str(main)]})):
         shell = _shell(home, scoped=scoped)
 
@@ -1128,13 +1142,8 @@ def test_real_seatbelt_protects_every_task_record_without_task_params(tmp_path):
         for fresh in ("runs/2026-10-03/k9/data/pack_verification", "tasks/2026-10-03/t9/DATA/Pack_Verification",
                       "audits/a-9/data/pack_verification", "runs/2026-10-09/k9/work"):
             assert not run(f"mkdir -p {main / fresh}").ok and not (main / fresh).exists(), (scoped, fresh)
-        work = k2 / "work"
-        legit = (f"printf ok > {q['k2']}/data/notes.json", f"mkdir -p {shlex.quote(str(work / 'sub' / 'deep'))}",
-                 f"printf ok > {shlex.quote(str(work / 'tmp.txt'))} && mv {shlex.quote(str(work / 'tmp.txt'))} "
-                 f"{shlex.quote(str(work / 'tmp2.txt'))}",
-                 f"printf ok > {shlex.quote(str(main / 'notes.txt'))}")
         assert [command for command in legit if not run(command).ok] == [], scoped
-    assert all(path.exists() for path in (k2, main / "runs", main / "audits" / "a1" / "data"))
+    assert all(path.exists() for path in (work.parent, main / "runs", main / "audits" / "a1" / "data"))
 
 
 def test_sandboxed_commands_carry_the_host_state_read_only_marker(monkeypatch):
