@@ -1124,6 +1124,7 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
   别名解析不看可见性（not_viewable）；清单顶在前、清洗过、dock 不列、18 个窗口截到 16 条 `truncated: true`、清单里的标题原样抄回能选中；真实标题以 `win:` 开头的只能用别名。
   `test_computer_use_observation_tools.py` 加 1 项：错误的 details（windows/truncated）进 structuredContent 与正文、不能覆盖 code、工具说明写了接受什么。
   变异 8/8 抓到：标题子串匹配、忽略大小写、多命中挑第一个、清单不截断不清洗、拿原始标题比、不可见窗口也参与、清单不进 structuredContent、observe 结果标题不用展示形态
+  - ae 复审补用例（分支 `claude/ae-j16-slice-f-f4`，叠在 e3fdbca24 上）：`test_ambiguous_lists_only_the_windows_that_matched`——三个可见窗口里两个同名，window_ambiguous 的清单只列这两个，不列别的可见窗口。补之前，“清单列出全部可见窗口”这个变异（F4）抓不到；补之后抓得到。
   （脚本 `run_mutations_j16f.py` 在证据目录 harness/）。补跑（证据 `run3/`）：第一轮那句提到标题的 prompt 只跑 apply 一档——`observe_window(window="J16 Smoke")`
   第一次就命中（审批 ask → 批准 → ok，4 个候选），失败码序列为空；Jev 2 次（1.24 s / 1.23 s）选中，模型 click_candidate 点中 Submit，再按别名观察确认 `status submitted`；
   M3 4 次 / 11.2 万输入 token，Tk 1 次点击，耗时 14.3 s。

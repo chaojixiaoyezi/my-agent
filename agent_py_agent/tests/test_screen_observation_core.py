@@ -457,6 +457,17 @@ def test_same_displayed_title_is_ambiguous_and_lists_both_aliases():
     assert _not_found(observer, "A" * 70).code == "window_not_found", "原始长标题不是匹配键"
 
 
+def test_ambiguous_lists_only_the_windows_that_matched():
+    backend, observer = _observer()
+    backend.windows = [_window(0x1a, "重名"), _window(0x2b, "别的窗口"), _window(0x3c, "重名")]
+    backend.buffers.update({0x2b: _buffer(), 0x3c: _buffer()})
+    error = _not_found(observer, "重名")
+    assert error.code == "window_ambiguous"
+    rows = error.details["windows"]
+    assert [row["title"] for row in rows] == ["重名", "重名"], "清单只列命中的同名窗口，不列别的可见窗口"
+    assert len({row["alias"] for row in rows}) == 2 and error.details["truncated"] is False
+
+
 def test_invisible_same_title_windows_never_match_and_are_not_listed():
     backend, observer = _observer()
     backend.windows = [_window(0x2b, "表单 窗口", hidden=True), backend.windows[0], replace(_window(0x3c, "表单 窗口"), desktop=1)]
