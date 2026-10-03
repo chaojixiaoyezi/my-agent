@@ -1,4 +1,4 @@
-# LLM: 唯一安装表严格解码 v3；旧 v1/v2 仅按原停用协议显式迁移，来源随下一次真实提交保存，不在查询时写入。
+# LLM: 唯一安装表严格解码 v4；仅显式旧 v3 的已启用激活迁移一次性兼容，查询不写盘，下一次事务保存来源。
 # 模块用途: 保留安装、配置和激活的同一权威及明确迁移来源，拒绝丢字段降级。
 
 from __future__ import annotations
@@ -11,11 +11,12 @@ from dataclasses import asdict, dataclass
 from .common.strict_json import load_strict_json
 from .plugin_installation import PluginInstallation, PluginInstallationError
 
-INSTALLATION_SCHEMA = "plugin_installations.v3"
+INSTALLATION_SCHEMA = "plugin_installations.v4"
 # 插件安装状态文件上限 16 MiB：防损坏/恶意状态文件撑爆内存。
 INSTALLATION_STATE_LIMIT_BYTES = 16 * 1024 * 1024
 _V1 = "plugin_installations.v1"
 _V2 = "plugin_installations.v2"
+_V3 = "plugin_installations.v3"
 
 
 # LLM: migration_json 是原文件来源事实，不是另一个状态表；记录内有配置，默认 repr 不可用于日志。
@@ -26,7 +27,7 @@ class PluginInstallationState:
     migration_json: str = "null"
 
 
-# LLM: 旧协议严格检查原字段再映射，保留前次迁移来源；v3 缺字段不能借旧路径补默认值。
+# LLM: 旧协议严格按版本迁移；v4 缺权限字段直接拒绝，不根据字段缺失补兼容；旧有效字节仅查询时不改盘。
 # 函数用途: 恢复 owner 的私有记录，损坏或跨用户状态不覆盖。
 def decode_installation_state(content: bytes | None, owner) -> PluginInstallationState:
     if content is None:
@@ -36,7 +37,7 @@ def decode_installation_state(content: bytes | None, owner) -> PluginInstallatio
         raise ValueError("安装表协议无效")
     version = payload.get("schema_version")
     fields = {"schema_version", "owner", "installations"}
-    if version in {INSTALLATION_SCHEMA, _V2}:
+    if version in {INSTALLATION_SCHEMA, _V2, _V3}:
         fields.add("migration")
     elif version != _V1:
         raise ValueError("安装表协议无效")
@@ -53,6 +54,11 @@ def decode_installation_state(content: bytes | None, owner) -> PluginInstallatio
             if previous is not None and previous["from_schema"] != _V1:
                 raise ValueError("旧安装迁移来源无效")
             migration["previous"] = previous
+    elif version == _V3:
+        rows = tuple(_migrate_v3_record(row) for row in payload["installations"])
+        _validate_migration(payload["migration"])
+        migration = {"from_schema": _V3, "source_sha256": hashlib.sha256(content).hexdigest(),
+                     "previous": payload["migration"]}
     else:
         rows = tuple(PluginInstallation.from_payload(row) for row in payload["installations"])
         migration = payload["migration"]
@@ -89,11 +95,11 @@ def _migrate_record(value: object, version: str) -> PluginInstallation:
         **{key: value[key] for key in ("manifest", "package_sha256", "revision")},
         "settings_json": value["settings_json"] if version == _V2 else None,
         "settings_revision": value["settings_revision"] if version == _V2 else 0,
-        "last_commit": receipt, "activation": None,
+        "last_commit": receipt, "activation": None, "legacy_permission_grant": None,
     })
 
 
-# LLM: 来源摘要只证明读取字节；v2 的 previous 只能是合法 v1 来源，不能无限递归或悄悄丢弃旧迁移。
+# LLM: v3 来源保存原字节摘要与至多旧两代链；迁移结构按版本递减，不无限递归、不接受 v4 缺字段旁路。
 # 函数用途: 校验唯一表中至多两代的完整迁移链。
 def _validate_migration(value: object) -> None:
     if value is None:
@@ -109,7 +115,27 @@ def _validate_migration(value: object) -> None:
         if previous is None or isinstance(previous, dict) and previous.get("from_schema") == _V1:
             _validate_migration(previous)
             return
+    if value["from_schema"] == _V3 and set(value) == {"from_schema", "source_sha256", "previous"}:
+        previous = value["previous"]
+        if previous is None or isinstance(previous, dict) and previous.get("from_schema") in {_V1, _V2}:
+            _validate_migration(previous)
+            return
     raise ValueError("安装迁移记录无效")
+
+
+# LLM: 只接受严格旧字段和原进程激活字节；新权限不能伪装成旧来源获得 grandfather。
+# 函数用途: 迁移完整 v3 记录，仅旧 active 老格式进程得到一次性兼容。
+def _migrate_v3_record(value: object) -> PluginInstallation:
+    from .plugin_permissions.state import migrate_v3_entry
+
+    old_fields = {"manifest", "package_sha256", "revision", "last_commit", "settings_json", "settings_revision", "activation"}
+    if not isinstance(value, dict) or set(value) != old_fields:
+        raise ValueError("旧 v3 安装记录字段无效")
+    activation = value["activation"]
+    if isinstance(activation, dict) and "permission_grant" in activation:
+        raise ValueError("旧 v3 激活不能携带新授权")
+    entry = PluginInstallation.from_payload({**value, "legacy_permission_grant": None})
+    return migrate_v3_entry(entry)
 
 
 # LLM: 私有配置只在此 owner 表编码，完整文件大小在提交前检查；不能将返回文本用于公开目录或结果。

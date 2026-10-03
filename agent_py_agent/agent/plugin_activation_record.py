@@ -6,21 +6,23 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 
+from .common.strict_json import load_strict_json
 from .plugin_content_activation import CONTENT_ACTIVATION_SCHEMA, PluginContentActivation
 from .plugin_environment_plan import PluginEnvironmentPlan
 
 
-# LLM: 同一 plan 决定唯一代次；revoked 只证明执行权关闭，资源清理必须另查原资源账，不得据此删除环境。
+# LLM: 同一 plan 决定唯一代次，权限写进原激活且不随配置热变；旧 None 保留原字节，撤销不证明资源退出。
 # 类用途: 保存一个插件版本的激活身份和发布状态，让不同进程复核同一安装事实。
 @dataclass(frozen=True)
 class PluginActivation:
     plan: PluginEnvironmentPlan
     phase: str
     catalog_sha256: str = ""
+    permission_json: str | None = field(default=None, repr=False)
 
-    # LLM: 状态只用当前结构化枚举；准备没有目录证明，发布必须有完整目录摘要，撤销保留原目录身份。
+    # LLM: 状态按有限枚举，授权按固定计划；准备/授权事实都不是 OS 隔离或目录验收证明。
     # 函数用途: 拒绝错误计划、状态和不完整的发布记录。
     def __post_init__(self) -> None:
         if not isinstance(self.plan, PluginEnvironmentPlan) or self.phase not in {"preparing", "active", "revoked"}:
@@ -30,6 +32,9 @@ class PluginActivation:
                 or (self.phase == "preparing" and self.catalog_sha256)
                 or (self.phase == "active" and not self.catalog_sha256)):
             raise ValueError("插件激活目录摘要无效")
+        from .plugin_permissions.records import validate_activation_permission
+
+        validate_activation_permission(self)
 
     # LLM: 代次只由原计划计算，不随 phase 改变；它不是授权，调用仍须读当前权威并登记原资源。
     # 函数用途: 为同次准备、发布、撤销和旧快照生成稳定身份。
@@ -43,23 +48,29 @@ class PluginActivation:
     def content_sha256(self) -> str:
         return hashlib.sha256(json.dumps(self.to_payload(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
-    # LLM: 安装表只存相对环境身份和版本；不接受新的个人路径、配置值、进程 PID 或客户端自行指定的 owner。
+    # LLM: 原字段在权限 None 时字节保持；完整授权路径只存私有安装表，不直接输出到模型或普通公开目录。
     # 函数用途: 生成可以在唯一安装表中原子保存的完整激活对象。
     def to_payload(self) -> dict:
-        return {"plan": asdict(self.plan), "phase": self.phase, "catalog_sha256": self.catalog_sha256}
+        value = {"plan": asdict(self.plan), "phase": self.phase, "catalog_sha256": self.catalog_sha256}
+        if self.permission_json is not None:
+            value["permission_grant"] = load_strict_json(self.permission_json)
+        return value
 
-    # LLM: 显式内容版本交内容合同；无版本记录只按原进程字段读取，未知协议不能丢字段改写成旧格式。
+    # LLM: 内容仍走原合同；新进程授权字段严格验证，旧字段无权限时保持原摘要，不能缺字段补兼容。
     # 函数用途: 从持久记录恢复一个不可变激活对象。
     @classmethod
     def from_payload(cls, value: object) -> PluginActivation | PluginContentActivation:
         if isinstance(value, dict) and value.get("schema_version") == CONTENT_ACTIVATION_SCHEMA:
             return PluginContentActivation.from_payload(value)
-        if not isinstance(value, dict) or set(value) != {"plan", "phase", "catalog_sha256"}:
+        old = {"plan", "phase", "catalog_sha256"}
+        if not isinstance(value, dict) or set(value) not in (old, old | {"permission_grant"}):
             raise ValueError("插件激活字段无效")
         plan = value["plan"]
         if not isinstance(plan, dict) or set(plan) != {field.name for field in fields(PluginEnvironmentPlan)}:
             raise ValueError("插件激活计划字段无效")
-        return cls(PluginEnvironmentPlan(**plan), value["phase"], value["catalog_sha256"])
+        permission_json = (json.dumps(value["permission_grant"], ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":"), allow_nan=False) if "permission_grant" in value else None)
+        return cls(PluginEnvironmentPlan(**plan), value["phase"], value["catalog_sha256"], permission_json)
 
 
 # LLM: 摘要只描述静态完整工具清单，不能证明服务实际返回了这些工具；发布方仍必须比对同一候选 MCP 目录。

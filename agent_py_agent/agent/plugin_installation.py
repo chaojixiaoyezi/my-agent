@@ -1,4 +1,4 @@
-# LLM: 安装事实描述包、私有配置、激活与最后提交，不复制 OperationStore 的运行/租约/UNKNOWN 状态机。
+# LLM: 安装事实描述包、配置、激活与旧权限一次性迁移；授权仍在同表，不复制运行/租约/UNKNOWN 状态机。
 # 模块用途: 定义唯一安装记录和提交回执；配置/激活迁移独立计算，读写及系统锁由 Store 负责。
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class PluginCommitReceipt:
             raise ValueError("安装回执输入摘要不匹配")
 
 
-# LLM: v3 配置与激活仍在唯一安装表，enabled/activation_id 只投影该记录；配置值不得进入公开投影。
+# LLM: v4 授权与兼容迁移仍在唯一安装表，缺授权不是豁免；配置与完整授权路径不进入普通目录投影。
 # 类用途: 保存静态描述、私有配置、激活、版本和最后提交，不扫描目录猜测有效安装。
 @dataclass(frozen=True)
 class PluginInstallation:
@@ -96,8 +96,9 @@ class PluginInstallation:
     settings_json: str | None = field(default=None, repr=False)
     settings_revision: int = 0
     activation: PluginActivation | PluginContentActivation | None = None
+    legacy_permission_json: str | None = field(default=None, repr=False)
 
-    # LLM: 最后回执与包、版本、配置及激活匹配；私有配置读回须通过原 schema，损坏不能降级为空值。
+    # LLM: 最后回执与包/版本/激活匹配；兼容标记须绑定准确旧代，损坏不能补猜授权或配置。
     # 函数用途: 校验完整安装事实，不从包自述生成宿主激活状态。
     def __post_init__(self) -> None:
         if not isinstance(self.manifest, PluginManifest) or not isinstance(
@@ -130,6 +131,9 @@ class PluginInstallation:
             ):
                 raise ValueError("配置与提交回执不一致")
         self._validate_activation()
+        from .plugin_permissions.state import validate_legacy_permission
+
+        validate_legacy_permission(self)
 
     # LLM: 激活绑定原包/配置/安装版本；内容变体无进程准备阶段，release 的资源要求由 Store 按显式类型裁决。
     # 函数用途: 拒绝拼接不同版本或缺少阶段回执的激活，允许已确认清理后的再次准备。
@@ -183,7 +187,7 @@ class PluginInstallation:
                  receipt.package_sha256, receipt.after_revision)
         return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
 
-    # LLM: 本投影含私有配置，只可写入 owner 私有安装表；不能复用作工具结果、命令目录或用户消息。
+    # LLM: 完整权限和配置仅写 owner 私有表；旧调用方的 None 授权不改变包声明字节。
     # 函数用途: 为同一次原子替换生成完整安装、配置与激活记录。
     def to_payload(self) -> dict:
         return {
@@ -194,9 +198,10 @@ class PluginInstallation:
             "settings_json": self.settings_json,
             "settings_revision": self.settings_revision,
             "activation": self.activation.to_payload() if self.activation is not None else None,
+            "legacy_permission_grant": load_strict_json(self.legacy_permission_json) if self.legacy_permission_json else None,
         }
 
-    # LLM: 严格字段集合防止忽略未来生命周期协议；不能补默认值使旧 binary 覆盖新记录。
+    # LLM: v4 严格字段集合；v1–v3 只能经显式版本迁移补 None，不允许新记录凭缺字段取得兼容。
     # 函数用途: 从持久 JSON 读取一条完整安装事实。
     @classmethod
     def from_payload(cls, value: object) -> PluginInstallation:
@@ -208,6 +213,7 @@ class PluginInstallation:
             "settings_json",
             "settings_revision",
             "activation",
+            "legacy_permission_grant",
         }:
             raise ValueError("安装记录字段无效")
         if not isinstance(value["last_commit"], dict) or set(value["last_commit"]) != {
@@ -223,6 +229,9 @@ class PluginInstallation:
             settings_json=value["settings_json"],
             settings_revision=value["settings_revision"],
             activation=PluginActivation.from_payload(value["activation"]) if value["activation"] is not None else None,
+            legacy_permission_json=(json.dumps(value["legacy_permission_grant"], ensure_ascii=False, sort_keys=True,
+                                               separators=(",", ":"), allow_nan=False)
+                                    if value["legacy_permission_grant"] is not None else None),
         )
 
 

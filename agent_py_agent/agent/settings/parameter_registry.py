@@ -65,6 +65,8 @@ _BOUNDARY_NAMES = frozenset({
     "pty_session_idle_timeout_minutes",
     # B7：M 线事件插件总开关是安全边界，只能用户经 /settings 改；显式列名，不靠键名记号猜。
     "plugin_events_enabled",
+    # 老插件权限：老格式新授权默认收紧也是安全边界，只能用户经 /settings 改。
+    "plugin_legacy_sandbox_default",
 })
 # 常用参数：/settings 默认只列这些，user_config 的搜索结果也标出来，方便先推荐。这是封闭的产品决策名单（2026-09-27 配置分类
 # 的 common 层：99% 的用户只会碰到它们），不是开放世界的类型识别；其余参数仍可用 /settings all、search、show 查到和修改。

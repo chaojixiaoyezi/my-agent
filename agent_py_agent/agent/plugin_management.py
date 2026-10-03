@@ -35,6 +35,7 @@ from .plugin_invocation import (
     execute_plugin_invocation,
     plugin_invocation_context,
 )
+from .plugin_permissions.display import permission_listing, permission_summary
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
@@ -70,7 +71,7 @@ _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGU
                      "update": PLUGIN_UPDATE_TOOL}
 
 
-# LLM: 所有字段来自宿主，布尔授权不是客户端参数；ThreadStore 是原会话权威，目录投影不能提供执行身份。
+# LLM: 身份与新默认只来自宿主；展示不改变既有权限代次，原线程是权威，不信正文自称管理员。
 # 类用途: 给插件命令传必要身份、权限和存储依赖，业务调用不借用管理员资格或聊天审批缓存。
 @dataclass(frozen=True)
 class PluginManagementContext:
@@ -103,9 +104,10 @@ class PluginManagementContext:
     # 插件事件中心（B3，只读统计入口 stats(owner_key)）；Gateway 路径注入进程内唯一 hub，TUI 直连没有 hub 时为 None，
     # 展示层按“暂无记录”降级，绝不为了展示创建 hub 或触发投递。
     event_hub: object | None = None
+    legacy_sandbox_default: bool = True
 
 
-# LLM: 冷入口与完整代理共用 owner 权限和审批配置；管理/业务分别受工具禁用约束，查询仍绑定原身份。
+# LLM: 冷/热入口共用宿主新默认及原权限；新默认只用于后续授权，不据此降级当前固定代次。
 # 函数用途: 从当前私有配置和原线程路径组装命令依赖，不创建 owner、线程或完整 Agent。
 def plugin_management_context(
     owner: OwnerHomeResult, home: object, config: object, threads: object, *,
@@ -149,6 +151,7 @@ def plugin_management_context(
                                    approval_mode=approval_mode,
                                    process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
                                    plugin_events_enabled=bool(getattr(config, "plugin_events_enabled", False)),
+                                   legacy_sandbox_default=bool(getattr(config, "plugin_legacy_sandbox_default", True)),
                                    events_owner_allowed=is_complete_local_admin_owner(home))
 
 
@@ -186,7 +189,7 @@ class PluginManagement:
                                              enabled=row.enabled, activation_id=row.activation_id)
                                      for row in entries))
 
-    # LLM: 已接受请求先读原账，不先读来源或新插件；详情只从同次安装快照和声明生成使用卡，审批仍由宿主绑定。
+    # LLM: 原请求先查原账，权限文字取同次安装快照；TUI/飞书同源，普通身份不显示管理员授根。
     # 函数用途: 分派明确的管理或业务命令，不进入聊天；详情说明不启动插件，业务批准只恢复同一原调用。
     def command(self, text: str, *, revision: str, request_id: str,
                 request_permission: Callable | None = None,
@@ -214,10 +217,8 @@ class PluginManagement:
         if not revision or revision != catalog.revision:
             return execute_plugin_command(catalog, text, revision=revision)
         if parsed.action.name == "list":
-            entries = [item for item in catalog.plugins if not values.get("enabled") or item.enabled]
-            plugins_text = "\n".join(
-                f"{item.plugin_id} {item.package_version}（{'启用' if item.enabled else '停用'}）  {item.summary}"
-                for item in entries) or "当前没有符合条件的已安装插件。"
+            listed = [item for item in entries if not values.get("enabled") or item.enabled]
+            plugins_text = permission_listing(listed, self.context.is_admin, self.context.legacy_sandbox_default) or "当前没有符合条件的已安装插件。"
             # MCP 服务段（J16 片 F）：TUI 直连与 Gateway/IM 都经这里，事实只来自已加载实例的注册表
             return self._reply({"ok": True, "message": plugins_text + "\n\n" + render_mcp_server_section(self.context.live_registry)})
         if parsed.action.name == "info":
@@ -226,7 +227,10 @@ class PluginManagement:
             if plugin is None or entry is None:
                 return self._reply({"ok": False, "message": "未找到该插件。"})
             message = (render_plugin_use_card(plugin, entry.manifest.settings_schema)
-                       + "\n\n" + render_plugin_event_details(self._event_details(entry)))
+                       + "\n\n" + render_plugin_event_details(self._event_details(entry))
+                       + "\n\n" + permission_summary(
+                           entry, admin=self.context.is_admin,
+                           sandbox_default=self.context.legacy_sandbox_default))
             return self._reply({"ok": True, "message": message})
         return execute_plugin_command(catalog, text, revision=revision)
 

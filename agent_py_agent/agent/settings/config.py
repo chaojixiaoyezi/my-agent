@@ -172,7 +172,8 @@ class _HomeProviderConfigFields:
     week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
 
-# LLM: 工具、插件和 B5 征询预算默认归此组；超时同步 YAML/范围/显式参数边界并由执行入口消费，不用展示配置代替权限。
+# LLM: 工具、插件与 B5 征询预算默认归此组；超时同步 YAML/范围/显式参数边界并由执行入口消费，不用展示配置代替权限。
+#   老格式新授权默认收紧，开关不能降级已收紧激活；老格式边界与 v8 事件开关同处登记，联测 YAML 与参数边界。
 # 类用途: 保存工具行为与可选诊断的默认值，构造本身不加载插件或执行工具。
 @dataclass
 class _ToolConfigFields:
@@ -186,6 +187,8 @@ class _ToolConfigFields:
     # M 线事件插件总开关（B7）：默认关。关着时 v8 事件/收紧插件可以安装但不能启用（plugin_events_disabled，提示去 /settings）；
     # 已启用的在关掉后事件不投、收紧不问。开了才允许启用 v8、投事件、问收紧钩子。属管理员边界项，模型经 user_config 改会被拒。
     plugin_events_enabled: bool = False
+    # 老格式新授权默认收紧；管理员关闭只影响以后授权且仍需宽权限确认，不降级已收紧的固定激活。
+    plugin_legacy_sandbox_default: bool = True
     max_tool_rounds: int | None = None
     # 一次最多同时执行几个工具（原 max_tool_calls_per_round 已并入）：空 = 8，正数 = 上限，0 = 不限制；
     # 任务属性 max_parallel_tool_calls 可单任务覆盖，后台工作片另有 max_tool_calls_per_round 任务属性封顶。

@@ -69,6 +69,11 @@
 |-- agent_py_agent/agent/capability/pack_verification_inputs.py # 输入保护：task_input 候选、就地修改判定与返工提示
 |-- agent_py_agent/agent/capability/pack_verification_deliverables.py # 交付存在：本回合改过工作区时查必需交付物缺失或打不开，返工提示
 |-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
+|-- agent_py_agent/agent/plugin_permissions/ # 老格式 R/W/N/E 静态授权、路径身份、原激活记录与一次性兼容、同源文字、B7 构造器接缝（WIP，非 OS 规则）
+|-- agent_py_agent/tests/test_plugin_legacy_permissions.py # 授权形状/有限根/确认变化/开关不降级/B7 接缝合同
+|-- agent_py_agent/tests/test_plugin_legacy_config.py # 默认与参数边界、认证 settings 作用域
+|-- agent_py_agent/tests/test_plugin_legacy_state.py # 显式 v3→v4 一次性兼容、无缺字段旁路、撤销结束豁免
+|-- agent_py_agent/tests/test_plugin_legacy_records.py # 新授权随原激活摘要持久化、同代不可变、同源文字和普通身份不泄路径
 |-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
 |-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数
 |-- agent_py_agent/agent/capability/package_provider.py # 从原安装表发现并复核内容包

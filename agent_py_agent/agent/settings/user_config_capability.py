@@ -160,6 +160,7 @@ BOUNDARY_KEYS: dict[str, str] = {
     "path_access_mode": "决定路径访问模式（normal/full），属于安全边界",
     "path_dangerous_roots": "决定危险目录清单，属于安全边界",
     "shell_sandbox_hide_user_home": "决定 Shell 沙箱能否读用户家目录，属于安全边界",
+    "plugin_legacy_sandbox_default": "决定老插件以后授权的收紧默认；仅管理员/settings可改，模型不能改或降级固定激活",
     "api_key": "供应商凭据，不能由模型改写",
     "api_key_env": "供应商凭据来源，不能由模型改写",
     "memory_curator_model_profile": "决定把记忆内容发给哪个服务商；仅用户经 /settings 修改，模型不能改",
@@ -190,7 +191,9 @@ USER_SETTINGS_BOUNDARY_KEYS = frozenset(
      "computer_use_observation_enabled", "plugin_events_enabled",
      # B5：收紧征询的等待预算。它登记成边界是为了防模型放大预算（模型 set/reset/revert 一律拒），
      # 但管理员本就该能调：调大只会多等，超时仍收紧成 ask，不会变松。
-     "plugin_tool_gate_timeout_ms"})
+     # 老插件权限：老格式新授权默认收紧是安全边界，模型不能改或降级已收紧的固定激活。
+     "plugin_tool_gate_timeout_ms",
+     "plugin_legacy_sandbox_default"})
 
 # 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据。
 # 常见缩写与组合（DB_PASS、MYSQL_PWD、SSH_PRIVATE_KEY、AWS_SECRET_ACCESS_KEY、BASIC_AUTH）同样按完整末尾片段认；

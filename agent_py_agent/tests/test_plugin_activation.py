@@ -67,7 +67,7 @@ def test_prepare_publish_revoke_share_one_authority_and_old_snapshot_stays_revok
         with pytest.raises(PluginInstallationError, match="不可用"):
             store.require_activation(published.manifest.plugin_id, published.activation_id, phases=phases)
     payload = json.loads((store.root / "installations.json").read_text())
-    assert payload["schema_version"] == "plugin_installations.v3"
+    assert payload["schema_version"] == "plugin_installations.v4"
     assert "enabled" not in payload["installations"][0] and "activation_id" not in payload["installations"][0]
     assert str(tmp_path) not in json.dumps(payload)
 
@@ -241,7 +241,7 @@ def test_v2_config_migration_is_explicit_and_keeps_prior_source(tmp_path, previo
     payload = json.loads(path.read_text())
     payload.update(schema_version="plugin_installations.v2", migration=previous)
     for row in payload["installations"]:
-        del row["activation"], row["last_commit"]["activation_sha256"]
+        del row["activation"], row["last_commit"]["activation_sha256"], row["legacy_permission_grant"]
         row.update(enabled=False, activation_id="")
     path.write_text(json.dumps(payload))
     before = path.read_bytes(), path.stat().st_mtime_ns
@@ -251,7 +251,7 @@ def test_v2_config_migration_is_explicit_and_keeps_prior_source(tmp_path, previo
                                  entry.revision, entry.settings_revision, "a" * 64)
     result = store.change_activation(PluginActivationRequest("enable-a", entry.revision, PluginActivation(plan, "preparing")))
     saved = json.loads(path.read_text())
-    assert saved["schema_version"] == "plugin_installations.v3"
+    assert saved["schema_version"] == "plugin_installations.v4"
     assert saved["migration"] == {"from_schema": "plugin_installations.v2",
                                   "source_sha256": hashlib.sha256(before[0]).hexdigest(), "previous": previous}
     assert result.installation.settings_json == entry.settings_json

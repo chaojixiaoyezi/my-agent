@@ -54,7 +54,7 @@ class PluginActivationRequest:
                                    self.expected_revision, activation_sha256=self.activation.content_sha256)
 
 
-# LLM: 调用方持有原安装锁；内容变体独立验证直接发布，进程保持同计划准备/发布，旧代均不能修改新代。
+# LLM: 持原安装锁，原计划/回执不变；撤销同时结束一次性旧权限，不能仅改展示后留下可执行豁免。
 # 函数用途: 纯计算一个激活提交或已有提交的重放，不启动服务或修改文件。
 def prepare_activation(request: PluginActivationRequest, entries: tuple[PluginInstallation, ...]) -> PluginMutationResult:
     if isinstance(request.activation, PluginContentActivation):
@@ -89,11 +89,12 @@ def prepare_activation(request: PluginActivationRequest, entries: tuple[PluginIn
         existing.revision, existing.revision + 1, request.action,
         activation_sha256=request.activation.content_sha256,
     )
-    updated = replace(existing, revision=receipt.after_revision, last_commit=receipt, activation=request.activation)
+    updated = replace(existing, revision=receipt.after_revision, last_commit=receipt, activation=request.activation,
+                      legacy_permission_json=None if request.action == "revoke" else existing.legacy_permission_json)
     return PluginMutationResult(updated, request.action, "committed", receipt)
 
 
-# LLM: 配置在预留前按原 schema 验证；发布只接受同一准备，撤销只保留原目录事实，不提供清理成功或自动恢复入口。
+# LLM: 配置与权限固定在准备代次；发布/撤销不能换授权，全球开关变化不降级原激活，退出仍由资源账证明。
 # 函数用途: 守住准备、发布、撤销的顺序和不可逆边界。
 def _validate_transition(request: PluginActivationRequest, existing: PluginInstallation) -> None:
     target, current = request.activation, existing.activation
@@ -109,6 +110,8 @@ def _validate_transition(request: PluginActivationRequest, existing: PluginInsta
         return
     if current is None or current.plan != target.plan:
         raise PluginInstallationError("activation_binding_conflict", "当前激活与请求代次不同。")
+    if current.permission_json != target.permission_json:
+        raise PluginInstallationError("activation_binding_conflict", "同一代次不能更换授权。")
     if target.phase == "active":
         if current.phase != "preparing":
             raise PluginInstallationError("activation_revoked", "原准备已结束或撤销，不能发布。")

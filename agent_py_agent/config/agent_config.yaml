@@ -847,6 +847,11 @@ plugin_tool_gate_timeout_ms: 2000
 #   这是安全边界项：只能你本人在 /settings 改，模型用设置工具改会被拒。修改后重启 Gateway 生效。
 plugin_events_enabled: false
 
+# 老格式插件的后续启用默认按新权限规则确认；B7 未接入时收紧启用不会退回无沙箱。
+# 仅管理员可改。关闭只影响以后授权，仍须显式确认系统用户宽权限；不会降级已收紧的激活，也不影响 v8。
+# 保存后重启 Gateway 加载；这不是已经实施 OS 隔离的证明。旧 plugin_process_sandbox 不承担此新默认。
+plugin_legacy_sandbox_default: true
+
 # 是否启用流式模型响应；关闭后走一次性响应路径，便于排查模型接口问题。
 stream_enabled: true
 

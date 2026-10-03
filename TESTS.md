@@ -3351,6 +3351,19 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - 静态门禁：import boundaries=0、ruff 全范围通过、DOC_SYNC_PASS、`git diff --check` 干净、clean-package 通过、strict code-size 退出 0（strict_scope_total=2214、hard=0、blocked=False，报告已 `git checkout` 还原不提交）；size_diff **新增告警 0 / 消失告警 23**。
 - 已知环境失败（未删改、未伪造）：`test_host_command_stream.py` 8 项在 `enabled_plugin` 的 `plugin_enable` 夹具失败（`outcome_unknown`，插件宿主启用类，工作规则第 8 条的沙箱限制），与本次改动无关，交 3a 沙箱外复核。
 - 未验证：真实 Gateway/TUI/IM、生产旧客户端迁移与 `/status` 计数归零、真实插件进程、跨平台；未启动 Gateway、未连真实网络。
+## 老格式插件权限第一段（opp，2026-10-03，WIP）
+
+- 来源：3a 第 6.1 节五项裁定；仅静态 R/W/N/E、原安装/激活持久合同、配置边界与同源文字，不运行真实插件/网关/沙箱。
+- 聚焦命令（指定 Python，工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_legacy_permissions.py agent_py_agent/tests/test_plugin_legacy_config.py agent_py_agent/tests/test_plugin_legacy_state.py agent_py_agent/tests/test_plugin_legacy_records.py agent_py_agent/tests/test_plugin_activation.py agent_py_agent/tests/test_plugin_catalog_digest_stability.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp --junitxml=tmp/opp-contracts.xml
+  ```
+  退出 0，执行至 100%，无失败/跳过。曾有三条旧版本断言/夹具失败，已明确升级目标 v4；v2 夹具去除新字段以保持严格旧形状，没有放宽解码或删除断言。
+- guards9 清单十文件，沿相同 Python/PYTHONPATH/pytest 参数执行，退出 0 至 100%，包含 test_packaging.py；没有跑全仓 pytest。
+- 六处单变异：默认网络偷开、已有 restricted 被默认关闭降级、旧 active 不迁移、旧兼容换绑代次、新授权换绑代次、B7 请求丢网络。每项实际行为断言红（exit 1，非 ImportError），原字节恢复后同目标绿（exit 0）；真实输出与 SHA 记录 `tmp/opp-mutations.json`，临时证据不随提交。
+- 已执行 import boundaries（findings=0）、全产品/scripts ruff（通过）、strict code-size（blocked=False），CODE_SIZE_REPORT 已还原。size_diff 原输出“新增告警: 0 / 消失告警: 23”；差集不是本段消掉 23 条告警。
+- 尚未完成启用确认运输/重新启用撤旧代、完整迁移转换、B7 OS 接线、真实管理渠道、非作者初审和9b终审；不得把合同全绿称端到端权限已收紧。doc sync、clean package 和最终暂存 diff 在提交前单独检查，交接报实际结果。
 
 ## G3 返工：凭据读不到时按 gateway_require_local_credential 降级或拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 
