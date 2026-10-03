@@ -49,6 +49,16 @@
 - **没动的边界**：结果码语义、`_ACTIVE` 索引结构、`InterruptHandle` 句柄合同、设置文件层、`cancel_active_decisions_for_shutdown` 的既有顺序，全部保持原样。这次只改“通知处理的原子性”，不改任何产品语义。
 - **验证**：新增回归用例 `test_decision_settings_notifications.py::test_settings_change_marks_the_whole_batch_before_releasing_the_index_lock`（探针在第一条标记完成那一刻非阻塞试探索引锁，断言锁仍在调用方手里 + 两条都被标记）；变异验证：改回逐条写法该用例失败、还原即通过。目标用例在 8 路 CPU 加压下连跑 40 次全过。详见 TESTS.md 同名条目。
 
+## 握手超时加只用于诊断的等待位置 timeout_wait_phase（ds2p，2026-10-03，分支 `worker/ds2-timeout-phase`，基于 `claude/3a-step17h` `db963ea66`，ds1 初审、luna5 返工（29f5d19c2），9b 终审通过，并入 step17i）
+
+- **问题**（9b 复审修法 A 时的建议）：修法 A 把握手超时归成 `first_event` 才能被回合层退避重试，代价是账本里 `timeout_stage` 都记 `first_event`——be 这次诊断是靠这个字段才认出「是握手阶段超时」，之后统计就分不清「握手没连上」和「连上了但首个事件超时」。
+- **修法**：超时异常与账本各多一列**只用于诊断**的 `timeout_wait_phase`；WebSocket 握手超时标 `handshake`，其余路径留空串（不猜“已连接”，空串=调用方没标注）。`backends/responses_websocket._handshake_error` 仍显式要求 `stage="first_event"`，只多传一个 `wait_phase`；`gateway_helpers._stream_timeout_error` 多收一个默认空串的参数。
+- **不改的边界**：`TIMEOUT_STAGES` 封闭集合不动、回合层放行规则不动、修法 A 的 `first_event` 分类不动（新用例逐条钉住；stage 集合里仍然没有 `handshake`）。新增的 `TIMEOUT_WAIT_PHASES = {"", "handshake"}` 是**独立**封闭集合，异常构造（`ProviderTimeoutError`）与账本写入（`ModelCallLedger.timeout`）两侧都 fail-closed；诊断值绝不回写 `stage`，也不参与任何退避/放行判定。
+- **命名**：决策观测投影里已有 `transport["timeout_phase"]` 表示 HTTP 传输阶段（`transport_timing.TRANSPORT_PHASES`），本字段因此取名 `timeout_wait_phase`，避免两个概念撞名。
+- **落点**：异常 `ProviderTimeoutError.wait_phase` → 生成层 `_record_provider_timeout`（`getattr(exc, "wait_phase", "")`）→ `record_model_call_timeout` → 账本记录 `timeout_wait_phase` 与 `to_dict`；决策路径 `decision_model_call._record_error` 同步透传。续跑事实表 `_provider_timeout_resume_turns` 也顺手记一份位置，**不参与** `provider_timeout_resume_eligible` 的放行判定。
+- **来源**：`timeout_wait_phase` 直读传参，不做任何推断；历史记录与未标注路径保持空串，读取端不得用空串回推“已连接”。
+- **本轮 9b 初审修正**（luna5p，2026-10-03；状态仍为待 9b 复审）：修正决策统计测试的超时落账新签名，移除未调用 helper；让变异验证脚本使用当前解释器和系统临时目录，补入初审 V1–V4；增加决策错误落账的 `wait_phase` 回归用例，并同步测试计数与复跑记录。
+
 ## ChatGPT 订阅（Responses WebSocket）握手超时照 SSE 交回合层退避重试（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基于 `claude/3a-step17h` `7e421024f`，已实现，9b 复审通过，并入 step17h）
 
 - **问题**（be 只读核对生产，2026-10-03）：上一波 8 次整轮失败全是 `PROVIDERTIMEOUTERROR`，都发生在 chatgpt.com 的 Responses WebSocket **握手阶段**（7 次 TLS 握手超时 `_ssl.c: The handshake operation timed out`、1 次升级握手超时 `timed out while waiting for handshake response`），其中 6 次挤在 25 秒内，是一次网络抖动。这些回合已经跑了 13–33 轮工具、50–76 分钟，一次握手超时（生成层立刻重试一次也超时）就整轮失败。证据目录：`~/.my-agent/decision-evidence/model-timeout-ws-handshake-20261003/README.md`（只有结构化事实）。

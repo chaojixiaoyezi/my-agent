@@ -50,6 +50,7 @@ from agent_py_agent.agent.agent_core.model.call_monitor import (  # noqa: E402
     estimate_first_token_timeout,
 )
 from agent_py_agent.agent.agent_core.model.call_runtime import (  # noqa: E402
+    ModelCallTimeoutFacts,
     effective_model_request_timeout_seconds,
     record_model_call_failed,
     record_model_call_timeout,
@@ -409,8 +410,8 @@ def _scenario_ledger_evidence() -> dict[str, object]:
         )
     )
     record_model_call_timeout(
-        ledger=ledger_idle, call_id="idle-cut",
-        timeout_seconds=600.0, timeout_stage="provider_wall",
+        ledger_idle,
+        ModelCallTimeoutFacts(call_id="idle-cut", timeout_seconds=600.0, timeout_stage="provider_wall"),
     )
     idle_record = ledger_idle.records()[0].to_dict()
 

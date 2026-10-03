@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core.model.call_runtime import (
+    ModelCallTimeoutFacts,
     model_call_summary,
     record_model_call_finished,
     record_model_call_timeout,
@@ -63,7 +64,10 @@ def _decision_calls(*, finished: int, timed_out: int, input_tokens: int = 5000) 
         if index < finished:
             record_model_call_finished(ledger, call_id, SimpleNamespace(usage={"input_tokens": input_tokens}))
         else:
-            record_model_call_timeout(ledger=ledger, call_id=call_id, timeout_seconds=2.0, timeout_stage="wall_clock")
+            record_model_call_timeout(
+                ledger,
+                ModelCallTimeoutFacts(call_id=call_id, timeout_seconds=2.0, timeout_stage="wall_clock"),
+            )
     return model_call_summary(SimpleNamespace(_model_call_ledger=ledger), request_id="req", run_id="run")
 
 

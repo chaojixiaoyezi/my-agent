@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from ..contracts.model_call_ledger import TIMEOUT_STAGES
+from ..contracts.model_call_ledger import TIMEOUT_STAGES, TIMEOUT_WAIT_PHASES
 
 
 class ProviderRecoverableError(RuntimeError):
@@ -106,6 +106,10 @@ class ProviderTimeoutError(ProviderRecoverableError):
     ``wall_clock``（本进程墙钟守卫线程超时）、``provider_declared``（provider
     网络层声明的 connect/read 超时）。旧调用不传时保持 ``provider_wall``
     （历史语义兼容读取，读取端按 wall_clock 族处理）。
+
+    ``wait_phase`` 是只用于诊断的补充事实：同一个 ``first_event`` 可能来自真·首事件等待
+    （连接已打开），也可能来自 WebSocket 握手（连接还没打开）。回归规则、退避集合和
+    重试语义只看 ``stage``，绝不看 ``wait_phase``；它只进调用账本供事后统计区分两者。
     """
 
     # 门槛2 终审补证(seq1613b): stage 合同封闭——合法值集合三值 + legacy
@@ -114,15 +118,26 @@ class ProviderTimeoutError(ProviderRecoverableError):
     # 终审边界②(seq1622-2): 集合引用账本层单一事实源 TIMEOUT_STAGES, 异常
     # 生产入口与账本写入入口共用同一合同, 不再各自维护。
     _KNOWN_STAGES = TIMEOUT_STAGES
+    # 诊断等待位置同样封闭（引用账本层单一事实源 TIMEOUT_WAIT_PHASES）：空串=调用方没标注，
+    # handshake=握手未完成；未知值构造即抛 ValueError，防止新路径把没登记的位置写进账本。
+    _KNOWN_WAIT_PHASES = TIMEOUT_WAIT_PHASES
 
-    def __init__(self, message: str, *, stage: str = "provider_wall"):
+    def __init__(self, message: str, *, stage: str = "provider_wall", wait_phase: str = ""):
         if stage not in self._KNOWN_STAGES:
             raise ValueError(
                 f"未知 ProviderTimeoutError stage: {stage!r} "
                 f"(合法: first_event/stream_idle/wall_clock/provider_declared/provider_wall)"
             )
+        if wait_phase not in self._KNOWN_WAIT_PHASES:
+            raise ValueError(
+                f"未知 ProviderTimeoutError wait_phase: {wait_phase!r} "
+                f"(合法: '' / handshake)"
+            )
         super().__init__(message)
         self.stage = stage
+        # 只读诊断字段：默认空串表示“这次超时没有更细的连接位置可标注”，
+        # 与“确实是已连接后等待”区分开，读取端不要用空串回推。
+        self.wait_phase = wait_phase
 
 
 class ProviderTransientError(ProviderRecoverableError):

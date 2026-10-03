@@ -29,6 +29,13 @@ from .model_call_budget import (
 TIMEOUT_STAGES = frozenset(
     {"first_event", "stream_idle", "wall_clock", "provider_declared", "provider_wall"}
 )
+# LLM: 超时"等待位置"的封闭集合（诊断用），与 TIMEOUT_STAGES 分开、且不参与任何放行/退避判定：
+#   stage 回答"这次超时算哪一类"（决定重试语义），wait_phase 回答"超时卡在连接的哪一侧"（只供事后统计）。
+#   handshake = WebSocket/TLS 握手还没完成、连接没打开。修法 A 把握手超时归成 first_event 才能被
+#   回合层重试，代价是账本里两种超时不可区分，wait_phase 只补回这个区分，绝不回写 stage；
+#   空串 = 调用方没有更细的位置可标注（历史记录与其余路径，读取端不要用空串回推"已连接"）。
+#   值集合保持最小，将来要细分（如显式区分"已连接后等首事件"）再扩展。改动联测 test_responses_websocket。
+TIMEOUT_WAIT_PHASES = frozenset({"", "handshake"})
 _TERMINAL_STATUSES = frozenset({"failed", "finished", "timed_out"})
 # 没拿到供应商用量就结束的终态；已发起过 HTTP 尝试时，其本地估算输入单独记在 estimated.unfinished_*。
 _UNFINISHED_STATUSES = frozenset({"failed", "timed_out"})
@@ -111,6 +118,8 @@ class ModelCallTimeoutParams:
     # 门槛2(终审补证 seq1613c): 最后活动到超时的静默时长; None=缺失/未计算,
     # 数值(含 0.0)=真实计算——「缺失/回退」与「真实零静默」结构化可辨识。
     idle_silence_seconds: float | None = None
+    # 只用于诊断的等待位置（TIMEOUT_WAIT_PHASES 之一，空串=调用方没标注）；不参与任何放行/退避/重试判定。
+    timeout_wait_phase: str = ""
 
 
 @dataclass(frozen=True)
@@ -169,6 +178,8 @@ class ModelCallRecord:
     output_tokens_seen: int = 0
     timeout_seconds: float | None = None
     timeout_stage: str = ""
+    # 字段用途: 超时那一刻的连接侧位置（TIMEOUT_WAIT_PHASES 之一，只用于诊断）；handshake=握手未完成，空串=未标注。
+    timeout_wait_phase: str = ""
     # 字段用途: 超时那一刻最后一次 HTTP 尝试正处在的传输阶段（transport_timing.TRANSPORT_PHASES 之一），未计时为空串。
     timeout_transport_phase: str = ""
     # 门槛2: 调用点算出的掐断时刻墙钟经过(now - started_at), 与 total_latency_seconds
@@ -217,6 +228,7 @@ class ModelCallRecord:
             "output_tokens_seen": self.output_tokens_seen,
             "timeout_seconds": self.timeout_seconds,
             "timeout_stage": self.timeout_stage,
+            "timeout_wait_phase": self.timeout_wait_phase,
             "timeout_transport_phase": self.timeout_transport_phase,
             "elapsed_seconds": self.elapsed_seconds,
             "idle_silence_seconds": self.idle_silence_seconds,
@@ -755,6 +767,13 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                 f"未知 timeout_stage: {params.timeout_stage!r} "
                 f"(合法: {sorted(TIMEOUT_STAGES)})"
             )
+        # 诊断 wait_phase 同样 fail-closed（与 ProviderTimeoutError 构造入口共用 TIMEOUT_WAIT_PHASES）：
+        # wait_phase 不参与任何判定，但必须拦住未登记值，防止旁路调用污染统计口径。
+        if params.timeout_wait_phase not in TIMEOUT_WAIT_PHASES:
+            raise ValueError(
+                f"未知 timeout_wait_phase: {params.timeout_wait_phase!r} "
+                f"(合法: {sorted(TIMEOUT_WAIT_PHASES)})"
+            )
         with self._lock:
             record = self._require_record(params.call_id)
             if record.status in _TERMINAL_STATUSES:
@@ -767,6 +786,7 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                 last_activity_at=now,
                 timeout_seconds=max(0.0, float(params.timeout_seconds)),
                 timeout_stage=params.timeout_stage,
+                timeout_wait_phase=params.timeout_wait_phase,
                 timeout_transport_phase=_last_transport_phase(record),
                 elapsed_seconds=max(0.0, float(params.elapsed_seconds)),
                 idle_silence_seconds=(

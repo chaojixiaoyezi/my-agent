@@ -26,9 +26,7 @@ from ..tooling.content_transport_policy import MAX_INLINE_WRITE_CONTENT_CHARS
 from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
-    effective_model_request_timeout_seconds as _effective_model_request_timeout_seconds,
-)
-from .model.call_runtime import (
+    ModelCallTimeoutFacts,
     model_call_ledger,
     observed_chunk_filter,
     record_model_call_failed,
@@ -36,6 +34,9 @@ from .model.call_runtime import (
     record_model_call_timeout,
     record_model_provider_attempt,
     start_model_call_record,
+)
+from .model.call_runtime import (
+    effective_model_request_timeout_seconds as _effective_model_request_timeout_seconds,
 )
 from .model.context_pressure import (
     context_pressure_response,
@@ -265,6 +266,9 @@ def _record_provider_timeout_resume_eligibility(
     turns[sequence] = {
         "reason": _RESUMABLE_PROVIDER_FAILURE_TIMEOUT,
         "timeout_stage": str(getattr(exc, "stage", "") or "provider_wall"),
+        # 诊断位置随手一起留住，便于事后从事实表直接看出这次救回是握手超时还是首事件超时；
+        # 读取方（provider_timeout_resume_eligible）只看 reason 与工具事实，这个键不参与放行判定。
+        "timeout_wait_phase": str(getattr(exc, "wait_phase", "") or ""),
         "tool_rounds": int(getattr(request, "tool_rounds", 0) or 0),
     }
 
@@ -989,17 +993,22 @@ def _model_chunk_callback(on_chunk: object):
 
 def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
     record_model_call_timeout(
-        ledger=record.ledger,
-        call_id=record.call_id,
-        timeout_seconds=_effective_model_request_timeout_seconds(
-            record.request.agent,
-            record.first_token_timeout_seconds,
+        record.ledger,
+        ModelCallTimeoutFacts(
+            call_id=record.call_id,
+            timeout_seconds=_effective_model_request_timeout_seconds(
+                record.request.agent,
+                record.first_token_timeout_seconds,
+            ),
+            # 门槛2: stage 由异常携带（stream_idle/wall_clock/provider_declared），
+            # getattr 兜底 provider_wall 兼容历史异常对象（门槛2 前无 stage 字段）。
+            timeout_stage=str(getattr(record.exc, "stage", "") or "provider_wall"),
+            # 诊断位置同理由异常携带（timeout_wait_phase=handshake 标出「握手没连上」）；
+            # getattr 兜底空串，兼容历史上还没有这个字段的异常对象。不参与任何判定。
+            timeout_wait_phase=str(getattr(record.exc, "wait_phase", "") or ""),
+            elapsed_seconds=_provider_timeout_elapsed(record.ledger, record.call_id),
+            idle_silence_seconds=_provider_timeout_idle_silence(record.ledger, record.call_id),
         ),
-        # 门槛2: stage 由异常携带（stream_idle/wall_clock/provider_declared），
-        # getattr 兜底 provider_wall 兼容历史异常对象（门槛2 前无 stage 字段）。
-        timeout_stage=str(getattr(record.exc, "stage", "") or "provider_wall"),
-        elapsed_seconds=_provider_timeout_elapsed(record.ledger, record.call_id),
-        idle_silence_seconds=_provider_timeout_idle_silence(record.ledger, record.call_id),
     )
     _trace_model_failure(record.request, record.exc)
     publish_model_metrics(record.request.agent, record.request.params, pending=False)

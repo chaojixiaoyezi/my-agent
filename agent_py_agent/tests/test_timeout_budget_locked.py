@@ -36,6 +36,7 @@ from agent_py_agent.agent.agent_core.model.call_monitor import (
     estimate_first_token_timeout,
 )
 from agent_py_agent.agent.agent_core.model.call_runtime import (
+    ModelCallTimeoutFacts,
     effective_model_request_timeout_seconds,
     first_token_timeout_options,
     record_model_call_failed,
@@ -360,7 +361,8 @@ def test_idle_timeout_recorded_as_provider_wall() -> None:
         )
     )
     record_model_call_timeout(
-        ledger=ledger, call_id="c1", timeout_seconds=600.0, timeout_stage="provider_wall"
+        ledger,
+        ModelCallTimeoutFacts(call_id="c1", timeout_seconds=600.0, timeout_stage="provider_wall"),
     )
     record = ledger.records()[0]
     assert record.status == "timed_out"
@@ -386,9 +388,11 @@ def test_failed_branch_timeout_has_no_stage() -> None:
 
 
 def test_timeout_params_elapsed_evidence_field_locked() -> None:
-    """ModelCallTimeoutParams 只带 5 字段: elapsed_seconds/idle_silence_seconds
+    """ModelCallTimeoutParams 只带 6 字段: elapsed_seconds/idle_silence_seconds
     是仅有的证据字段, 无原始时间戳。idle_silence 默认 None=缺失/未计算,
-    数值(含 0.0)=真实计算——「缺失/回退」与「真实零静默」可辨识(seq1613c)。"""
+    数值(含 0.0)=真实计算——「缺失/回退」与「真实零静默」可辨识(seq1613c)。
+    timeout_wait_phase 是后加的纯诊断字段（ds2p）: 默认空串, 取值只可能是
+    TIMEOUT_WAIT_PHASES 的成员, 不参与任何判定, 所以层形状一起锁定。"""
     fields = set(ModelCallTimeoutParams.__dataclass_fields__.keys())
     assert fields == {
         "call_id",
@@ -396,30 +400,30 @@ def test_timeout_params_elapsed_evidence_field_locked() -> None:
         "timeout_stage",
         "elapsed_seconds",
         "idle_silence_seconds",
+        "timeout_wait_phase",
     }
     assert ModelCallTimeoutParams.__dataclass_fields__["elapsed_seconds"].default == 0.0
     assert (
         ModelCallTimeoutParams.__dataclass_fields__["idle_silence_seconds"].default
         is None
     )
+    assert ModelCallTimeoutParams.__dataclass_fields__["timeout_wait_phase"].default == ""
 
 
 def test_timeout_recording_exposes_elapsed_but_not_timestamps() -> None:
-    """参数层只暴露 elapsed_seconds/idle_silence_seconds(墙钟经过/静默时长),
+    """落账入口只收 (ledger, facts) 两个位置参数；facts 里只有 elapsed_seconds/
+    idle_silence_seconds(墙钟经过/静默时长) 与 timeout_wait_phase(诊断位置)，
     不暴露 started_at 等原始时间戳。"""
     import inspect
 
     from agent_py_agent.agent.agent_core.model import call_runtime
 
     signature = inspect.signature(call_runtime.record_model_call_timeout)
-    assert set(signature.parameters.keys()) == {
-        "ledger",
-        "call_id",
-        "timeout_seconds",
-        "timeout_stage",
-        "elapsed_seconds",
-        "idle_silence_seconds",
-    }
+    assert list(signature.parameters.keys()) == ["ledger", "facts"]
+    facts = call_runtime.ModelCallTimeoutFacts(call_id="c", timeout_seconds=1.0, timeout_stage="first_event")
+    assert facts.elapsed_seconds == 0.0 and facts.idle_silence_seconds is None
+    assert facts.timeout_wait_phase == ""
+    assert "started_at" not in set(vars(facts))
 
 
 def test_json_roundtrip_of_locked_evidence(tmp_path: Path) -> None:

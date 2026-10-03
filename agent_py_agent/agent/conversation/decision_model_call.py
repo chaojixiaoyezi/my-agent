@@ -13,6 +13,7 @@ from functools import partial
 
 from ..agent_core.model import llm_metrics
 from ..agent_core.model.call_runtime import (
+    ModelCallTimeoutFacts,
     model_call_ledger,
     record_model_call_finished,
     record_model_call_timeout,
@@ -287,8 +288,12 @@ def _record_error(
 ) -> None:
     if isinstance(exc, (BoundedCallTimeoutError, ProviderTimeoutError)):
         stage = exc.stage if isinstance(exc, ProviderTimeoutError) and exc.stage in TIMEOUT_STAGES else "wall_clock"
-        record_model_call_timeout(ledger=ledger, call_id=call_id, timeout_seconds=max(0.0, deadline - started_at),
-                                  timeout_stage=stage, elapsed_seconds=max(0.0, time.monotonic() - started_at))
+        # wait_phase 只作诊断补充：非 ProviderTimeoutError（BoundedCallTimeoutError）没有这个属性，
+        # getattr 兜底空串；它不参与上面的 stage 选择，也不影响任何放行判定。
+        wait_phase = str(getattr(exc, "wait_phase", "") or "")
+        record_model_call_timeout(ledger, ModelCallTimeoutFacts(
+            call_id=call_id, timeout_seconds=max(0.0, deadline - started_at), timeout_stage=stage,
+            timeout_wait_phase=wait_phase, elapsed_seconds=max(0.0, time.monotonic() - started_at)))
         return
     ledger.failed(ModelCallFailureParams(call_id, type(exc).__name__, _error_code(exc)))
 

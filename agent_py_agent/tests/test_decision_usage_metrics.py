@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core.model.call_runtime import (
+    ModelCallTimeoutFacts,
     model_call_summary,
     record_model_call_failed,
     record_model_call_finished,
@@ -36,8 +37,10 @@ def decision(agent, params, *, call_id="decision-1", usage=None, outcome="finish
         ledger.provider_attempt(ModelCallProviderAttemptParams(call_id, f"http-{call_id}", "started"))
     response = SimpleNamespace(usage={} if usage is None else usage)
     settle = {
-        "timed_out": lambda: record_model_call_timeout(ledger=ledger, call_id=call_id, timeout_seconds=2.0,
-                                                       timeout_stage="wall_clock"),
+        "timed_out": lambda: record_model_call_timeout(
+            ledger,
+            ModelCallTimeoutFacts(call_id=call_id, timeout_seconds=2.0, timeout_stage="wall_clock"),
+        ),
         "failed": lambda: record_model_call_failed(ledger, call_id, ConnectionError("refused")),
         "finished": lambda: record_model_call_finished(ledger, call_id, response),
     }.get(outcome)

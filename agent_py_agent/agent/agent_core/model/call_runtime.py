@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from ...contracts.model_call_ledger import (
@@ -269,32 +270,38 @@ def record_model_provider_attempt(
     )
 
 
-def record_model_call_timeout(
-    *,
-    ledger: ModelCallLedger,
-    call_id: str,
-    timeout_seconds: float,
-    timeout_stage: str,
-    elapsed_seconds: float = 0.0,
-    idle_silence_seconds: float | None = None,
-) -> None:
-    """落超时账。``elapsed_seconds`` 是掐断时刻的真实墙钟经过
-    （调用方从 record.started_at 计算；门槛2 前证据链断在调用点，
-    参数层不暴露 elapsed）。``idle_silence_seconds`` 是最后活动到超时的
-    静默时长（调用方从 record.last_activity_at 计算，只记秒数不混
-    token 延迟）；None=缺失/未计算，数值(含 0.0)=真实计算——「缺失/回退」
-    与「真实零静默」可辨识(seq1613c)。"""
+# LLM: 超时落账的参数组；收成一个冻结小数据类是为了让调用点按名字传结构化事实、
+#   不再逐个堆关键字参数（同文件其它记录函数也走同一种「参数数据类」写法）。
+# 类用途: 承载一次超时落账需要的全部结构化事实（含只用于诊断的等待位置）。
+@dataclass(frozen=True)
+class ModelCallTimeoutFacts:
+    call_id: str
+    timeout_seconds: float
+    timeout_stage: str
+    # 门槛2: 掐断时刻的真实墙钟经过（调用方从 record.started_at 计算）。
+    elapsed_seconds: float = 0.0
+    # 门槛2(终审补证 seq1613c): 最后活动到超时的静默时长; None=缺失/未计算，
+    # 数值(含 0.0)=真实计算——「缺失/回退」与「真实零静默」可辨识。
+    idle_silence_seconds: float | None = None
+    # 只用于诊断的连接位置（TIMEOUT_WAIT_PHASES 之一）；不参与任何放行/退避判定。
+    timeout_wait_phase: str = ""
+
+
+def record_model_call_timeout(ledger: ModelCallLedger, facts: ModelCallTimeoutFacts) -> None:
+    """落超时账。``facts.timeout_wait_phase`` 只承载诊断用的连接位置（默认空串），
+    不参与任何放行/退避判定，只透传给账本；其余字段语义见 ``ModelCallTimeoutFacts``。"""
     ledger.timeout(
         ModelCallTimeoutParams(
-            call_id=call_id,
-            timeout_seconds=timeout_seconds,
-            timeout_stage=timeout_stage,
-            elapsed_seconds=max(0.0, float(elapsed_seconds)),
+            call_id=facts.call_id,
+            timeout_seconds=facts.timeout_seconds,
+            timeout_stage=facts.timeout_stage,
+            elapsed_seconds=max(0.0, float(facts.elapsed_seconds)),
             idle_silence_seconds=(
-                max(0.0, float(idle_silence_seconds))
-                if idle_silence_seconds is not None
+                max(0.0, float(facts.idle_silence_seconds))
+                if facts.idle_silence_seconds is not None
                 else None
             ),
+            timeout_wait_phase=facts.timeout_wait_phase,
         )
     )
 
@@ -519,5 +526,6 @@ __all__ = [
     "record_model_call_finished",
     "record_model_provider_attempt",
     "record_model_call_timeout",
+    "ModelCallTimeoutFacts",
     "start_model_call_record",
 ]

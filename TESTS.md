@@ -111,6 +111,49 @@
   - 基线对照：在 `db963ea66` 的临时 worktree 上跑这两个测试文件 → 41 passed，确认既有用例在基线上本来就是绿的（我早期版本的新用例一度污染进程级 `_ACTIVE`，已改成用登记时那把注销令牌修好）。
 - **边界**：只改进程内取消通知的顺序，不动设置文件、不改结果码、不动 `_ACTIVE` 索引和句柄合同；真实 Gateway/车道高负载由 3a 复核。
 
+## 握手超时的诊断字段 timeout_wait_phase（2026-10-03，ds2p，worker/ds2-timeout-phase）
+
+- **用例**：`agent_py_agent/tests/test_timeout_wait_phase.py` 当前 13 项，单文件 **13 passed、0 xfailed**：握手超时 `stage=="first_event"` 且 `wait_phase=="handshake"`；连接打开后的首事件超时与流空闲超时都 `stage` 不变、`wait_phase` 为空串；默认参数不破坏历史读取；异常构造与账本写入对未登记 `wait_phase` 都 fail-closed；`wait_phase` 集合独立封闭且 `stage` 集合里没有 `handshake`；账本记录与 `to_dict` 都读得到 `timeout_wait_phase`；生成层和决策层两条落账路径都通过真实生产函数写入账本，验证诊断字段不会在中间丢失。
+- **既有合同同步**：`test_timeout_budget_locked.py` 的两个「形状锁定」用例（`ModelCallTimeoutParams` 字段白名单、落账入口参数形状）按新字段与新的 `ModelCallTimeoutFacts` 参数组更新；这是登记本合同的一部分，不是放松断言。
+- **尺寸拆平**：`record_model_call_timeout` 原本 7 个关键字参数会被 size_diff 记一条新告警，遂把 6 个结构化事实收成冻结数据类 `ModelCallTimeoutFacts`（调用点改为按名字传字段），新增告警回到 0。
+- **变异**：变异脚本（分支里的 `agent_py_agent/tests/_ds2p_mutation_check.py`，用启动它的 `sys.executable` 和系统临时目录）不随包发布，挑进 step17i 时没带；需要复跑时从分支 `worker/ds2-timeout-phase` 的 `29f5d19c2` 取出到仓库外运行。原 O1–O4 与初审 V1–V4 共 **8/8 KILLED**，所有源文件按原字节还原 True；初审 V3 原先存活，本轮新增决策路径回归用例后已被抓到。
+
+  ```bash
+  : "${PY:?请先把 PY 设置为本项目 CI Python 解释器}"
+  # 脚本按自己所在位置找仓库根，需临时放回 tests/，跑完删掉（不提交）
+  git show 29f5d19c2:agent_py_agent/tests/_ds2p_mutation_check.py > agent_py_agent/tests/_ds2p_mutation_check.py
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" agent_py_agent/tests/_ds2p_mutation_check.py
+  rm agent_py_agent/tests/_ds2p_mutation_check.py
+  ```
+  原 O1–O4 分别覆盖握手未标注、握手误作 stage、生成层丢弃位置、账本写入丢字段；初审 V1–V4 覆盖构造 fail-closed、`to_dict` 导出、决策路径透传和握手分支透传。
+- **聚焦验证**：原 12 文件聚焦集加 `agent_py_agent/tests/test_decision_stats_display.py`，共 13 个文件；退出码 0，输出到 100%，无失败；有一条既有 XPASS（`test_timeout_budget_locked.py::test_native_protocol_unified_counts_ir`）。
+
+  ```bash
+  : "${PY:?请先把 PY 设置为本项目 CI Python 解释器}"
+  PYTEST_BASE=$(mktemp -d "${TMPDIR:-/tmp}/timeout-wait-phase.XXXXXX")
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_timeout_wait_phase.py agent_py_agent/tests/test_responses_websocket.py agent_py_agent/tests/test_timeout_budget_locked.py agent_py_agent/tests/test_timeout_gate2_stages.py agent_py_agent/tests/test_timeout_gate5_retry.py agent_py_agent/tests/test_stream_timeout_contract.py agent_py_agent/tests/test_decision_transport_timing.py agent_py_agent/tests/test_decision_usage_metrics.py agent_py_agent/tests/test_decision_audit_controls.py agent_py_agent/tests/test_provider_timeout_resume_narrowing.py agent_py_agent/tests/test_provider_timeout_acceptance.py agent_py_agent/tests/test_provider_timeout_continuation.py agent_py_agent/tests/test_decision_stats_display.py -q -ra --tb=short -p no:cacheprovider --basetemp="$PYTEST_BASE"
+  ```
+- **架构守卫与门禁结果**：guards9 清单测试退出码 0、输出到 100%；导入边界 `findings=0`；Ruff `All checks passed!`；doc-sync `DOC_SYNC_PASS`；严格 code-size `strict_scope_total=2225 hard=0 high-risk=1520 soft=705 test_advisory=1241 blocked=False`；clean-package `OK: . 未发现发布阻塞项`；`git diff --check` 退出码 0；`size_diff.sh` 新增告警 0、消失告警 10。code-size 生成的报告已还原，未纳入提交。
+- **守卫和静态门禁复跑命令**（由调用环境提供项目 CI Python、guards9 文件和 size-diff 脚本路径，仓库不记录个人路径）：
+  ```bash
+  : "${PY:?请设置项目 CI Python 解释器}"
+  : "${GUARDS9:?请设置 guards9.txt 路径}"
+  : "${SIZE_DIFF:?请设置 size_diff.sh 路径}"
+  GUARD_TESTS=$(awk 'NF && $1 !~ /^#/' "$GUARDS9")
+  PYTEST_BASE=$(mktemp -d "${TMPDIR:-/tmp}/timeout-wait-phase-guards.XXXXXX")
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest $GUARD_TESTS -q --tb=short -p no:cacheprovider --basetemp="$PYTEST_BASE"
+  "$PY" scripts/check_import_boundaries.py
+  "$PY" -m ruff check agent_py_agent scripts
+  "$PY" scripts/check_doc_sync.py
+  "$PY" scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+  git checkout -- CODE_SIZE_REPORT.md
+  "$PY" scripts/check_clean_package.py .
+  bash "$SIZE_DIFF" "$PWD"
+  git diff --check
+  ```
+- **未验证**：真实 chatgpt.com 上的握手超时（需要真实网络抖动）不在本片范围；本片只证明异常链路与账本字段，不证明线上统计口径已经被使用。
+
+
 ## 决策结果日志至少保留一周（2026-10-03，luna6，worker/luna6-outcome-retention）
 
 - **用例**：`test_decision_outcome_log.py` 覆盖 7 天内 1100 条加新记录仍全保留、正好 7 天边界保留而边界外下一次写入即清除、超过 20000 行只丢最旧、原子替换失败不改变已有账且不抛到决策链路。

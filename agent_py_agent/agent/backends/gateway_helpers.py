@@ -477,17 +477,21 @@ class _StreamIdleWatchdog:
 
 
 # LLM: Convert watchdog/parser phase into the closed timeout-stage vocabulary used by the model-call ledger.
-# 函数用途: 为首事件和流空闲生成一致的结构化超时异常与用户可读诊断。
-def _stream_timeout_error(request: GatewayRequest, stage: str) -> ProviderTimeoutError:
+#   第三个参数只承载诊断用的等待位置（TIMEOUT_WAIT_PHASES），绝不参与 stage 选择：
+#   握手超时仍由调用方显式要求 stage="first_event"（修法 A 的回归规则），这里只额外标注 "handshake"。
+# 函数用途: 为首事件、流空闲和握手超时生成一致的结构化超时异常与用户可读诊断。
+def _stream_timeout_error(request: GatewayRequest, stage: str, wait_phase: str = "") -> ProviderTimeoutError:
     if stage == "first_event":
         return ProviderTimeoutError(
             "模型接口等待首个流式事件超时: "
             f"first_event_timeout={_stream_first_event_timeout(request):g}s url={request.url}",
             stage="first_event",
+            wait_phase=wait_phase,
         )
     return ProviderTimeoutError(
         f"模型接口流式响应空闲超时: request_timeout={request.timeout}s url={request.url}",
         stage="stream_idle",
+        wait_phase=wait_phase,
     )
 
 

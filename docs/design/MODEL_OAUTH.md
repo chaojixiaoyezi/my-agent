@@ -95,6 +95,10 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
   现在 `_handshake_error` 里无状态码的失败先判超时，是超时就归 `first_event`，复用 `gateway_helpers._is_timeout_exception`；
   握手阶段连接还没打开、`response.create` 还没发出，所以不存在重放已发出的采样请求。`_is_transient_network_error`（所有 HTTP 共用）、
   回合层放行集合、连接打开后的 first_event / stream_idle 分类、非超时握手失败分类、握手中用户停止优先，都保持不变。
+- **握手超时的诊断字段（ds2p，2026-10-03）**：归成 `first_event` 的代价是账本里“握手没连上”和“连上了但首个事件超时”不可区分（be 这次
+  诊断就是靠 `timeout_stage` 才认出握手）。补一个**只用于诊断**的 `timeout_wait_phase`：握手超时标 `handshake`，其余路径留空串；
+  值集合 `TIMEOUT_WAIT_PHASES` 与 `TIMEOUT_STAGES` 分开、独立封闭，异常构造与账本写入两侧都 fail-closed。
+  `timeout_stage` 的封闭集合、回合层放行规则和修法 A 的行为一字未改；账本只多一列，`phase` 绝不回写 `stage`。
 
 ### 订阅接口的流式输出（2026-09-30 热修）
 

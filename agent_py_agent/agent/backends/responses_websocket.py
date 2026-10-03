@@ -192,6 +192,8 @@ def _handshake_retry(exc: BaseException, request: GatewayRequest, attempt: int, 
 # LLM: 带状态码的握手失败转成 urllib HTTPError 交给 _runtime_http_error，额度/上下文/拒绝/临时故障与 HTTP 传输同一分类；
 #   无状态码的失败里，超时（TLS 握手 / 升级握手，response.create 还没发出）照 SSE 归 first_event，交给回合层退避重试，
 #   避免 provider_declared 被生成层立刻重试一次、再超时整轮失败；其余交给 _runtime_network_error。用户停止优先。
+#   这里显式标注 wait_phase="handshake"：stage 仍按修法 A 保持 first_event（回归规则不变），
+#   只让账本事后能把「握手没连上」和「连上了但首个事件超时」分开统计。
 # 函数用途: 把握手失败换成产品统一的服务商错误。
 def _handshake_error(exc: BaseException, request: GatewayRequest) -> BaseException:
     if _provider_is_interrupted():
@@ -199,7 +201,7 @@ def _handshake_error(exc: BaseException, request: GatewayRequest) -> BaseExcepti
     response = getattr(exc, "response", None)
     if not _status_code(exc) or response is None:
         if _is_timeout_exception(exc):
-            return _stream_timeout_error(request, "first_event")
+            return _stream_timeout_error(request, "first_event", wait_phase="handshake")
         return _runtime_network_error(exc, request)
     headers = email.message.Message()
     for name, value in response.headers.raw_items():

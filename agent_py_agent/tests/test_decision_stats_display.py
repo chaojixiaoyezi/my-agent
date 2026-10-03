@@ -24,6 +24,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.model.call_runtime import (
+    ModelCallTimeoutFacts,
     model_call_summary,
     record_model_call_finished,
     record_model_call_timeout,
@@ -177,7 +178,10 @@ def _ledger_calls(*, finished: int, sent: int, unsent: int, purpose: str = "deci
             continue
         if index < finished + sent:
             ledger.provider_attempt(ModelCallProviderAttemptParams(call_id, f"http-{index}", "started"))
-        record_model_call_timeout(ledger=ledger, call_id=call_id, timeout_seconds=1.0, timeout_stage="wall_clock")
+        record_model_call_timeout(
+            ledger,
+            ModelCallTimeoutFacts(call_id=call_id, timeout_seconds=1.0, timeout_stage="wall_clock"),
+        )
     return model_call_summary(SimpleNamespace(_model_call_ledger=ledger), request_id="req", run_id="run")
 
 
