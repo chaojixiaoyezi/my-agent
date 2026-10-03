@@ -148,6 +148,12 @@
   - 确定性失败（坏 JSON）的补跑警告不带 `:transient`，不降阈值；账里看不到成功（太早）按 2 处理。
 - **验证**：见 TESTS.md 同名节。
 
+## 只读 CLI 的只读启动（CLI_READONLY_STARTUP，sol3，2026-10-03，分支 `worker/sol3-cli-ro`，基于 H3 `d160a2c6d`，**设计中，未实施**）
+
+- **问题**：H3 把宿主运行状态设为对模型只读后，管理员 Full Access 下模型在命令里跑 `status`、`home-status`、`subagents`、`memory-list`、`local-store-status`、`timeline`、`task-workspace-list`、`runtime-stale-attempts` 全部失败（rc=1，`CLI_HOST_STATE_READ_ONLY`）。原因：每条命令都要 `make_agent` 构造完整 `SimpleAgent`，启动链要写 `workspace/runtime` 下的本地库（`local_store/local.db`，A 类）。
+- **方案（设计稿）**：只读命令走只读启动。命令注册处用结构化声明（`set_defaults(..., cli_readonly=True)`）标记，不靠命令名猜；`LocalStore` 以 `mode=ro` 打开、建表/迁移/维护推迟到真要写时；Gateway 在跑（WAL/`-shm` 在）直读、不在跑且有 WAL 残留时报结构化错误不读旧数据；store 版本对不上报 `CLI_STORE_MIGRATION_REQUIRED`/`CLI_STORE_VERSION_AHEAD`，不在只读路径迁移。`subagents`（write_board）和 `runtime-stale-attempts --settle` 是命令本身要写，按设计文档 2.7 单独处理。
+- **状态**：设计中，未实施。只提交设计文档（`docs/design/CLI_READONLY_STARTUP.md`），无产品代码改动。5 块实施拆分共估 5 人日，复审 be。
+
 ## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，二审必须改已修完，待 9b 复核）
 
 - **起因**：
