@@ -1211,7 +1211,7 @@ def _host_state_bytes(root: Path, owner: Path) -> dict[Path, bytes]:
 def test_real_sandbox_cli_cannot_start_and_says_so(tmp_path, monkeypatch, scoped):
     """锁住现状（3a 最终裁定）：模型在命令里跑 my-agent CLI 会失败——每条命令都要构造完整 SimpleAgent，启动时要写 workspace/runtime
     下的本地库，而宿主状态在沙箱里只读（隔离 owner 原来就这样）。失败给结构化码 CLI_HOST_STATE_READ_ONLY，A 类字节不变。
-    只读子命令走只读启动是台账里的待做项。"""
+    只读子命令走只读启动已由 3a 于 2026-10-03 定乙不做（见 docs/design/CLI_READONLY_STARTUP.md）。"""
     import agent_py_agent
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig

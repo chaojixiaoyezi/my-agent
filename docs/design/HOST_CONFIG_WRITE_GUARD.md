@@ -145,9 +145,9 @@
    - 现象：Full Access 下 `status`、`home-status`、`subagents`、`memory-list`、`local-store-status`、`timeline`、`task-workspace-list`、`runtime-stale-attempts` 等只读命令，基线 rc=0，H3 后 rc=1。
    - 原因：CLI 每条命令都要构造完整的 `SimpleAgent`，启动时要写 `workspace/runtime` 下的本地库（`local_store/local.db`，A 类），沙箱里写不了。
    - 隔离 owner 原来就这样：基线和 H3 头上都起不来，数据根的 `config/` 在 owner 墙外读不到。
-   - 请模型改用内置工具（记忆、模型、设置、任务都有对应工具）。
+   - 请模型改用已有内置工具；各命令实际覆盖范围与明确缺口见 [CLI_READONLY_STARTUP 现状与裁定](CLI_READONLY_STARTUP.md)。
    - 起不来时 CLI 输出一行结构化错误 `error_code=CLI_HOST_STATE_READ_ONLY path=<被拒的路径>`，退出码 1，不再抛 `sqlite3.OperationalError` 堆栈。判断只看宿主设的环境标记和异常的 errno（EPERM/EACCES/EROFS）或 sqlite 错误码（PERM/READONLY/CANTOPEN），不解析报错文字（`cli/host_state_guard`）；沙箱外的 CLI 行为不变。Python 3.10 的 sqlite 异常没有错误码字段，照旧抛出。
-   - 后续项（台账，待做）：只读子命令走只读启动，本地库用 `mode=ro` 打开或推迟到真要写时再建。
+   - 后续项（台账）：只读子命令走只读启动**不做**（3a 2026-10-03 定乙）；探针证据与理由见 [CLI_READONLY_STARTUP](CLI_READONLY_STARTUP.md)。
 9. **宿主自己的写入不受影响**：参数中心、`manage_models`、`/model`、OAuth、修改账本、runtime 仓库、能力包核验都在宿主进程里写，不经过模型工具的路径门和沙箱。
 
 ## 4. 会不会误伤现有功能
@@ -181,7 +181,7 @@
 | 项 | 裁定 | 修法 |
 | --- | --- | --- |
 | 必须改 1：数据根 | 路径策略和宿主用同一个解析结果 | `from_values(agent_home_root=...)` 结构化传入，构造处见 2.1 节；用例：配置的 home ≠ 环境变量的 home，Full Access 下 `write_file` 写 A 类被拒（单元和真实链路各一条） |
-| 必须改 2：只读 CLI | 这次不修 CLI，写清现状并用例锁住 | 第 3 节第 8 条；真实沙箱用例（Full Access、隔离各一遍）锁住“失败、给结构化码、A 类字节不变”；顺手项结构化错误码已做；只读启动记台账待做 |
+| 必须改 2：只读 CLI | 这次不修 CLI，写清现状并用例锁住 | 第 3 节第 8 条；真实沙箱用例（Full Access、隔离各一遍）锁住“失败、给结构化码、A 类字节不变”；顺手项结构化错误码已做；只读启动不做，见 [CLI_READONLY_STARTUP](CLI_READONLY_STARTUP.md) |
 | 必须改 3：data/ | 先裁“6 个子目录进 A、`data/` 留 B”，随后改为 owner 根的 `data/` 整体归 A（开放世界，不靠清单），B 类只剩 `runs/`、`tasks/` | 1.1 节；已知子目录逐项用例；`data/` 下新建一个原本没有的子目录，两种模式下文件工具和 Shell 都写不进，宿主维护照常写 `data/maintenance.json` |
 | 必须改 4：task_root 锚点 | 只用写边界的 `task_root`，不从工作目录反推 | 2.2 节 |
 | 建议 1：全部任务的核验记录 | macOS 用 Seatbelt 正则；Linux 只保护本任务，记已知边界。9b 三审补：布局各级目录和 `data` 目录本身也拒写，堵住“改名上级目录再写回” | 2.2 节、第 3 节第 4 条；真实 Seatbelt 用例覆盖 10 种手法 |

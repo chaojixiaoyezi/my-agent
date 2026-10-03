@@ -148,11 +148,11 @@
   - 确定性失败（坏 JSON）的补跑警告不带 `:transient`，不降阈值；账里看不到成功（太早）按 2 处理。
 - **验证**：见 TESTS.md 同名节。
 
-## 只读 CLI 的只读启动（CLI_READONLY_STARTUP，sol3，2026-10-03，分支 `worker/sol3-cli-ro`，基于 H3 `d160a2c6d`，**设计中，未实施**）
+## 只读 CLI 的只读启动（CLI_READONLY_STARTUP，sol3，2026-10-03，分支 `worker/sol3-cli-ro`，基于 H3 `d160a2c6d`，**结论：不做（3a 10-03 定乙）**，be 复审通过，并入 step17i）
 
-- **问题**：H3 把宿主运行状态设为对模型只读后，管理员 Full Access 下模型在命令里跑 `status`、`home-status`、`subagents`、`memory-list`、`local-store-status`、`timeline`、`task-workspace-list`、`runtime-stale-attempts` 全部失败（rc=1，`CLI_HOST_STATE_READ_ONLY`）。原因：每条命令都要 `make_agent` 构造完整 `SimpleAgent`，启动链要写 `workspace/runtime` 下的本地库（`local_store/local.db`，A 类）。
-- **方案（设计稿）**：只读命令走只读启动。命令注册处用结构化声明（`set_defaults(..., cli_readonly=True)`）标记，不靠命令名猜；`LocalStore` 以 `mode=ro` 打开、建表/迁移/维护推迟到真要写时；Gateway 在跑（WAL/`-shm` 在）直读、不在跑且有 WAL 残留时报结构化错误不读旧数据；store 版本对不上报 `CLI_STORE_MIGRATION_REQUIRED`/`CLI_STORE_VERSION_AHEAD`，不在只读路径迁移。`subagents`（write_board）和 `runtime-stale-attempts --settle` 是命令本身要写，按设计文档 2.7 单独处理。
-- **状态**：设计中，未实施。只提交设计文档（`docs/design/CLI_READONLY_STARTUP.md`），无产品代码改动。5 块实施拆分共估 5 人日，复审 be。
+- **现状**：八条查询命令都会先构造完整 `SimpleAgent`。S2 的 home/种子初始化与 S3 的 owner 登记都只补缺失项；在既有 home 上不写。第一个必然命中的硬写点是 `LocalStore._init_schema`。be 的 SQLite WAL/真实仓储探针证实：最后一个连接正常关闭后只剩主库，沙箱拒写目录里的 `mode=ro` 返回 `SQLITE_CANTOPEN`；仓储没有长连接，即使 Gateway 空闲也会落入该状态。
+- **裁决**：不在模型沙箱里支持 CLI 只读启动，保持 H3 的拒写与结构化错误 `CLI_HOST_STATE_READ_ONLY`，提示改用内置工具。甲方案“宿主保持长连接”将引入新的连接/sidecar 生命周期不变量，不为这件事实施；与“模型沙箱碰不到宿主状态”的安全方向一致。
+- **工具覆盖及明确缺口**：逐命令核实的内置工具名称、能力边界和探针证据见 [CLI_READONLY_STARTUP 现状与裁定](docs/design/CLI_READONLY_STARTUP.md)。本次无产品逻辑改动；同步源内注释和测试说明；原稿 S5–S10 及相关副作用因结论为不做而未核。
 
 ## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`，基于 `claude/3a-step17g` `8a832d4e1`，已实现，二审必须改已修完，待 9b 复核）
 
@@ -186,7 +186,7 @@
   - 三审补（9b 实测“改名别的任务的 `data/`、写入、再改回”能伪造记录）：布局各级目录（`runs`、`runs/<日期>`、`runs/<日期>/<键>`、`tasks` 同理、`audits/<编号>`）和任务根下的 `data` 目录本身也按正则拒写，只拦它们自己的改名、删除、新建；可选层级写成显式分组，Seatbelt 不认 `{m,n}`。副作用：模型的命令不能自己新建或改名任务根。
 - **模型在命令里跑 my-agent CLI 会失败**（二审实测，3a 最终裁定这次不修 CLI）：CLI 每条命令都要构造完整的 SimpleAgent，启动时要写 `workspace/runtime` 下的本地库，沙箱里写不了。Full Access 下 `status` 等只读命令从 rc=0 变成 rc=1；隔离 owner 原来就这样。请模型改用内置工具。起不来时 CLI 输出结构化错误 `CLI_HOST_STATE_READ_ONLY`：沙箱给命令设 `MY_AGENT_HOST_STATE_READ_ONLY=1`，CLI 只看这个标记和异常的 errno / sqlite 错误码，不解析报错文字。
 - **后续项**：
-  - 只读子命令走只读启动：本地库用 `mode=ro` 打开，或推迟到真要写时再建，让 `status`、`memory-list` 这类命令在沙箱里能跑（**待做**，3a 2026-10-02 定）。
+  - 只读子命令走只读启动：**不做（3a 2026-10-03 定乙；探针证据、替代工具与缺口见 [CLI_READONLY_STARTUP](docs/design/CLI_READONLY_STARTUP.md)）**。
 - **已知边界**：
   - Windows 上命令不进沙箱；
   - 命令能读凭据；

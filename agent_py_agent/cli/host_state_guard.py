@@ -4,7 +4,7 @@ from __future__ import annotations
 #   构造完整 SimpleAgent、启动时写 workspace/runtime 下的本地库，所以起不来（Full Access 和隔离 owner 都这样）。这里只把这种失败
 #   换成一行结构化错误：判断只读结构化事实——宿主给沙箱命令设的环境标记（path_access_policy.HOST_STATE_READ_ONLY_ENV，由
 #   tooling/shell._subprocess_text_env 设）加异常的 errno / sqlite 错误码，不解析报错文字；其它异常原样抛出，沙箱外的 CLI 行为不变。
-#   只读子命令走只读启动（库用 mode=ro 打开）是台账里的待做项，不在这里做。改动同步 test_host_files_access.py 的真实沙箱用例。
+#   只读子命令走只读启动已由 3a 于 2026-10-03 定乙不做，见 docs/design/CLI_READONLY_STARTUP.md；本模块只映射 H3 沙箱中的宿主状态权限失败。
 # 模块用途: 让 my-agent CLI 在模型命令沙箱里因宿主状态只读起不来时，输出结构化错误码而不是 sqlite/权限异常堆栈。
 import errno
 import os

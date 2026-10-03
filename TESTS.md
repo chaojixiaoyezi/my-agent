@@ -350,6 +350,12 @@ sol1 的三个提交挑到块 4/5 之上；以上 sol1、ds2b6a 的数字是在 
 - **变异**：8 个全部抓到（新阈值改 2、从不降阈值、取最早而不是最近一次推进、任何补跑警告都算、不看状态取第一条、窗口仍按 2 取、警告码去掉 `:transient`、写记录不用共用的警告码函数）。
 - **门禁**：相关测试 74 个文件（所有涉及 curator 的测试、常数目录、全仓扫描守卫与 test_packaging）1412 项全过；严格门禁见交付消息。
 
+## CLI_READONLY_STARTUP 复审定乙（文档，2026-10-03）
+
+- **结论**：不在模型沙箱支持 CLI 只读启动；探针依据、八条命令现状和内置工具覆盖/缺口见 `docs/design/CLI_READONLY_STARTUP.md`。
+- **范围**：只改文档、源内注释和测试说明，没有产品逻辑/行为变更；未运行 pytest 或产品行为测试。
+- **验证**：`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python; "$PY" scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`git diff --check` → 退出码 0，无输出。
+
 ## 宿主托管文件对模型只读（H3，be，2026-10-02，分支 `claude/be-host-config-guard`）
 
 - **新增 `test_host_files_access.py`**（首轮展开参数后 104 项，二审后 134 项，真实沙箱用例按平台跳过，macOS 本机、Linux 在 Docker 车道跑）：

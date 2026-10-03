@@ -1454,7 +1454,7 @@ docs/
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
 |-- design/HOST_CONFIG_WRITE_GUARD.md # 宿主托管文件（配置、运行状态、任务核验记录）对模型只读、凭据对文件工具不可读（H3）的拦截层与已知边界
-|-- design/CLI_READONLY_STARTUP.md # 只读 CLI 的只读启动设计稿：8 条只读命令的启动写入点清单、mode=ro 方案、实施拆分与边界（未实施）
+|-- design/CLI_READONLY_STARTUP.md # 只读 CLI 现状与裁定：3a 定乙不在沙箱支持只读启动，保留 H3 错误并列出内置工具覆盖与缺口
 |-- design/TUI_DESIGN.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
 |-- design/TUI_BEHAVIOR_CHECKLIST.md # 启动、消息、输入、权限、生命周期和命令映射逐项证据账
 |-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录
