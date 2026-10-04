@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-"""Hierarchy service for child scheduling and recovery reports."""
+"""Hierarchy service for child scheduling and recovery reports.
+
+领导恢复计划/应用报告落盘走 write_private_text_file_atomic（pw2）：0600 文件、0700 目录。
+"""
 
 import json
 from dataclasses import asdict
 
+from ....common.json_io import write_private_text_file_atomic
 from ...debug_trace_reports import trace_hierarchy_recovery_result
 from ...models import SubAgentLeadershipRecoveryApplyOptions, SubAgentLeadershipRecoveryPlanOptions
 from ..leadership_recovery import (
@@ -60,13 +64,13 @@ class SubAgentHierarchyService:
     ) -> LeadershipRecoveryPlanReport:
         report = self.plan_leadership_recovery(params=params)
         workspace = self.manager.workspace
-        (workspace / "subagent_leadership_recovery_plan.json").write_text(
+        write_private_text_file_atomic(
+            workspace / "subagent_leadership_recovery_plan.json",
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
-        (workspace / "SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md").write_text(
+        write_private_text_file_atomic(
+            workspace / "SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md",
             render_leadership_recovery_plan(report),
-            encoding="utf-8",
         )
         return report
 
@@ -84,13 +88,13 @@ class SubAgentHierarchyService:
     ) -> LeadershipRecoveryApplyReport:
         report = self.apply_leadership_recovery(params=params)
         workspace = self.manager.workspace
-        (workspace / "subagent_leadership_recovery_apply_report.json").write_text(
+        write_private_text_file_atomic(
+            workspace / "subagent_leadership_recovery_apply_report.json",
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
-        (workspace / "SUBAGENT_LEADERSHIP_RECOVERY_APPLY.md").write_text(
+        write_private_text_file_atomic(
+            workspace / "SUBAGENT_LEADERSHIP_RECOVERY_APPLY.md",
             render_leadership_recovery_apply(report),
-            encoding="utf-8",
         )
         return report
 

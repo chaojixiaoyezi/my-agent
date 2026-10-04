@@ -8,12 +8,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from ..common.json_io import (
+    append_private_jsonl_records,
     locked_json_path,
-    write_json_file_atomic,
-    write_json_file_atomic_unlocked,
+    write_private_json_file_atomic,
+    write_private_json_file_atomic_unlocked,
+    write_private_text_file_atomic,
 )
 from ..contracts.state_machine import REGISTERED_STATES, VERIFICATION_STATES
-from ..io import append_jsonl
 from .home_layout import task_workspace_path
 from .task_title import (
     collapse_dashes,
@@ -174,6 +175,7 @@ def remove_unmodified_run_workspace(
 
 # LLM: 这是 standalone 主运行工作区的唯一终态写入口；只接受结构化运行结果和精确
 # request/run/task 身份，不解析模型正文，也不扫描 output/ 猜“是否完成”。
+#   终态 state 与 timeline 走私有写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
 # 函数用途: 在一次顶层运行真正返回时原子结束 state.json，并给 timeline 留一条可审计终态。
 def finish_run_workspace(request: FinishRunWorkspaceRequest) -> RunWorkspacePaths | None:
     status = str(request.status or "").strip().upper()
@@ -205,17 +207,19 @@ def finish_run_workspace(request: FinishRunWorkspaceRequest) -> RunWorkspacePath
         ):
             return paths
         updated = _finished_state_payload(current, request, terminal)
-        write_json_file_atomic_unlocked(paths.state_json, updated)
+        write_private_json_file_atomic_unlocked(paths.state_json, updated)
         changed = True
     if changed:
-        append_jsonl(
+        append_private_jsonl_records(
             paths.timeline_jsonl,
-            _finish_timeline_payload(
-                request,
-                terminal.status,
-                terminal.verification,
-                terminal.finished_at,
-            ),
+            [
+                _finish_timeline_payload(
+                    request,
+                    terminal.status,
+                    terminal.verification,
+                    terminal.finished_at,
+                )
+            ],
             sort_keys=True,
         )
     return paths
@@ -245,6 +249,8 @@ def _finished_state_payload(
     return updated
 
 
+# LLM: 运行工作区各目录缺失按 0700 新建（pdp）；task.yaml 与 work/ 投影走私有写（0600/0700）。
+# 函数用途: 建好一个运行工作区的目录骨架并写入任务与状态文件。
 def activate_run_workspace(
     root: str | Path,
     request: EnsureRunWorkspaceRequest,
@@ -272,9 +278,10 @@ def activate_run_workspace(
         paths.artifacts_dir,
         paths.summaries_dir,
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     _write_task_yaml(paths.task_yaml, request)
-    write_json_file_atomic(
+    # work/ 下的运行投影走私有写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    write_private_json_file_atomic(
         paths.workspace_json,
         _workspace_identity_payload(request, paths),
     )
@@ -284,7 +291,7 @@ def activate_run_workspace(
     _activate_artifact_manifest(paths.artifact_manifest_json, request)
     _activate_task_state(paths.state_json, request)
     if not same_activation:
-        append_jsonl(paths.timeline_jsonl, _timeline_payload(request), sort_keys=True)
+        append_private_jsonl_records(paths.timeline_jsonl, [_timeline_payload(request)], sort_keys=True)
     return paths
 
 
@@ -316,8 +323,11 @@ def _run_workspace_paths_for_root(root: Path) -> RunWorkspacePaths:
     )
 
 
+# LLM: task.yaml 走私有写（0600/0700）；YAML 序列化与旧实现逐字节一致。
+# 函数用途: 把运行工作区请求写成 task.yaml。
 def _write_task_yaml(path: Path, request: EnsureRunWorkspaceRequest) -> None:
     # task_id 是机器身份，task_title 才是人类标题；两者不能再互相兜底。
+    # 身份文件含 owner/来源等运行数据，走私有原子写（0600/0700）；文本逐字节不变。
     task_id = str(request.task_id or request.run_id or request.request_id or "").strip()
     text = (
         f'task_id: "{_yaml_escape(task_id)}"\n'
@@ -328,7 +338,7 @@ def _write_task_yaml(path: Path, request: EnsureRunWorkspaceRequest) -> None:
         f'owner_home: "{_yaml_escape(request.owner_home)}"\n'
         f'source: "{_yaml_escape(request.source)}"\n'
     )
-    path.write_text(text, encoding="utf-8")
+    write_private_text_file_atomic(path, text)
 
 
 def _workspace_identity_payload(request: EnsureRunWorkspaceRequest, paths: RunWorkspacePaths) -> dict[str, object]:
@@ -593,17 +603,22 @@ def _yaml_escape(value: object) -> str:
     return str(value or "").replace('"', '\\"')
 
 
+# LLM: 种子文件走私有写（0600/0700）；内容与旧实现逐字节一致。
+# 函数用途: 写一个种子文件（不存在时创建）。
 def _write_seed_file(path: Path, content: str) -> None:
     if not path.exists():
-        path.write_text(content, encoding="utf-8")
+        # 任务协作种子文件属宿主运行数据：私有原子写（0600/0700）；内容逐字节不变。
+        write_private_text_file_atomic(path, content)
 
 
+# LLM: 任务状态 JSON 走私有写（0600/0700）；结构不变。
+# 函数用途: 写入运行工作区的任务状态文件。
 def _activate_task_state(path: Path, request: EnsureRunWorkspaceRequest) -> None:
     """Keep the single workspace projection aligned with its current execution."""
 
     incoming = _task_state_payload(request)
     if not path.exists():
-        write_json_file_atomic(path, incoming)
+        write_private_json_file_atomic(path, incoming)
         return
     current = _read_json_object(path)
     if not current:
@@ -630,17 +645,19 @@ def _activate_task_state(path: Path, request: EnsureRunWorkspaceRequest) -> None
                 "updated_at": incoming["updated_at"],
             }
         )
-        write_json_file_atomic(path, current)
+        write_private_json_file_atomic(path, current)
         return
-    write_json_file_atomic(path, incoming)
+    write_private_json_file_atomic(path, incoming)
 
 
+# LLM: 产物清单 JSON 走私有写（0600/0700）；结构不变。
+# 函数用途: 写入运行工作区的产物清单文件。
 def _activate_artifact_manifest(path: Path, request: EnsureRunWorkspaceRequest) -> None:
     """Move workspace-level artifact metadata to the current execution identity."""
 
     incoming = _artifact_manifest_payload(request)
     if not path.exists():
-        write_json_file_atomic(path, incoming)
+        write_private_json_file_atomic(path, incoming)
         return
     current = _read_json_object(path)
     if not current:
@@ -648,7 +665,7 @@ def _activate_artifact_manifest(path: Path, request: EnsureRunWorkspaceRequest) 
     if _same_run_activation(current, request):
         return
     incoming["artifacts"] = list(current.get("artifacts") or [])
-    write_json_file_atomic(path, incoming)
+    write_private_json_file_atomic(path, incoming)
 
 
 __all__ = [

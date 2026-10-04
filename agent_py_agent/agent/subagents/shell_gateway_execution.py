@@ -4,7 +4,10 @@
 # 模块用途: 执行受控命令并留存限额输出、超时回执和审计证据，不让多个代理共享终端输入。
 from __future__ import annotations
 
-"""Execution helpers for controlled subagent shell gateway."""
+"""Execution helpers for controlled subagent shell gateway.
+
+审计 JSONL 落盘走 append_private_text（pw2）：0600 文件、0700 目录；命令产物仍按原路径写。
+"""
 
 import json
 import os
@@ -15,6 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..common.cancellation import cancellation_requested
+from ..common.json_io import append_private_text
 from ..tooling.process_registry import terminate_process_tree
 from .shell_gateway import (
     ShellGatewayDecision,
@@ -191,12 +195,14 @@ def _write_output(path: Path, data: bytes) -> str:
     return str(path)
 
 
+# LLM: 审计 JSONL 是宿主运行数据：目录缺失按 0700 新建（pdp），文件走私有追加（0600）；argv 从记录里剔除，
+#   格式与旧实现逐字节一致。
+# 函数用途: 把一次 shell 网关执行的审计记录追加进 output_dir 下的审计账并返回路径。
 def _write_audit(output_dir: Path, result: ShellGatewayExecutionResult) -> str:
     audit_path = output_dir / "shell_gateway_audit.jsonl"
     record = asdict(result)
     record["decision"].pop("argv", None)
-    with audit_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    append_private_text(audit_path, json.dumps(record, ensure_ascii=False) + "\n")
     return str(audit_path)
 
 

@@ -7,12 +7,12 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from ..common.json_io import append_private_jsonl_records
 from ..gateway_parts.io import (
     locked_file_transition,
     read_json_file_report,
     write_json_file_atomic,
 )
-from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .models import GuidanceEntry, MessageLogEntry, normalize_guidance_target_type
 from .session_messaging import (
@@ -116,12 +116,13 @@ class GuidanceStore:
         )
 
     # LLM: GuidanceStore：内部无幂等入队会追加 JSONL；有稳定入口身份的外部消息必须调用 append_once，联测 Gateway 入口。
+    #   落盘走私有追加（0600/0700），已有 0644 队列下次写入即收紧；内容逐字节不变。
     # 函数用途: 追加一条不带重试语义的内部补充消息。
     def append(self, request: dict[str, Any]) -> GuidanceEntry:
         entry = _guidance_entry_from_request(request)
-        append_jsonl(
+        append_private_jsonl_records(
             self.storage.guidance_path(entry.target_type, entry.target_id),
-            entry.to_dict(),
+            [entry.to_dict()],
             sort_keys=True,
         )
         return entry

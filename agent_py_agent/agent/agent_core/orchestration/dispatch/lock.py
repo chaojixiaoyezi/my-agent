@@ -13,6 +13,20 @@ import uuid
 from pathlib import Path
 from typing import TextIO
 
+from ....common.nofollow_fs import open_private_lock_beneath_tightened
+
+
+# LLM: 调用方给的是完整锁路径，私有原语按“受信根 + 相对段”打开；这里先向上找到已存在的最近父目录，
+#   把缺失的段并入相对路径，让每一级缺失目录仍统一经 no-follow 原语按 0700 创建（原来 mkdir 默认 0755）。
+# 函数用途: 打开派工锁描述符，缺失目录按 0700 创建，已存在锁顺带收紧到 0600。
+def _open_dispatch_lock_descriptor(path: Path) -> int:
+    path = Path(os.path.abspath(path))
+    anchor, parts = path.parent, (path.name,)
+    while not anchor.exists() and not anchor.is_symlink():
+        parts = (anchor.name, *parts)
+        anchor = anchor.parent
+    return open_private_lock_beneath_tightened(anchor, parts)
+
 
 # LLM: Non-blocking acquisition keeps supervision ticks cheap. POSIX uses flock like 会话运行时's
 # reservation locks; Windows locks the first byte with msvcrt and seeds that byte if necessary.
@@ -87,10 +101,12 @@ class _DispatchWatchLock:
 
     # LLM: Open/create the stable inode, acquire the kernel lock, then publish metadata. Failure to
     # acquire is ordinary contention and must not inspect/delete stale JSON or bypass a live owner.
+    #   锁文件走与宿主状态同一套私有原语：文件 0600、缺失目录按 0700 新建、已存在目录一律不动、
+    #   不跟随符号链接；原来 os.open+mkdir 会把父目录落成 0755、对已存在文件不 re-chmod，
+    #   存量 0644 锁一直把 pid 元数据暴露给同机他用户。元数据照旧写在同一个 fd 上（os.fdopen），权限仍是 0600。
     # 函数用途: 非阻塞抢锁；成功后写持有者信息，失败就抛出可由监督器识别的占用异常。
     def __enter__(self) -> _DispatchWatchLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        descriptor = _open_dispatch_lock_descriptor(self.path)
         handle = os.fdopen(descriptor, "r+", encoding="utf-8")
         if not _try_advisory_lock(handle):
             handle.close()

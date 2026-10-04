@@ -5,6 +5,8 @@ from __future__ import annotations
 The owner store is the only job authority.  A run reservation snapshots the
 prompt/thread/Skill references before any model or tool side effect, matching
 the durable pre-admission pattern used by 通道运行时 and 长期助手.
+
+历史账本落盘走 append_private_jsonl_records（pw2）：目录 0700、文件 0600、存量宽权限下次写入收紧。
 """
 
 import hashlib
@@ -24,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
-    append_jsonl_records,
+    append_private_jsonl_records,
     locked_json_path,
     read_json_object_report,
     read_jsonl_objects_report,
@@ -879,7 +881,8 @@ class _SchedulerStoreSupport:
         # failure is harmless because execution always revalidates store.json.
         self._sync_due_index_unlocked(store)
         if history_rows:
-            append_jsonl_records(self.history_path, history_rows)
+            # 历史账本是宿主数据：私有追加（0600 文件、0700 目录），内容逐字节不变（pw2）。
+            append_private_jsonl_records(self.history_path, history_rows)
         write_json_file_atomic_unlocked(self.store_path, store)
 
     def _sync_due_index_unlocked(self, store: dict[str, Any]) -> None:
@@ -1149,7 +1152,8 @@ class SchedulerRepository(
             max_bytes=0,
         )
         self.due_index = due_index
-        self.root.mkdir(parents=True, exist_ok=True)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
 # LLM: One parsed ``waiting_runs`` result bound to the exact store.json bytes it was parsed from.

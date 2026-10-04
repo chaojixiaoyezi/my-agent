@@ -196,31 +196,43 @@ def unsupported_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
     )
 
 
+# LLM: 动作日志走私有写（0600/0700）；JSONL 行格式不变。
+# 函数用途: 把一条动作应用记录追加进 JSONL 日志并补齐 Markdown 头。
 def append_action_apply_log(manager: Any, record: ActionApplyRecord) -> None:
-    from ....io import append_jsonl
+    from ....common.json_io import (
+        append_private_jsonl_records,
+        append_private_text,
+        write_private_text_file_atomic,
+    )
 
     jsonl = manager.workspace / "subagent_action_apply_log.jsonl"
-    append_jsonl(jsonl, asdict(record))
+    # 动作应用账属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(jsonl, [asdict(record)], sort_keys=False)
 
     markdown = manager.workspace / "ACTION_APPLY_LOG.md"
     if not markdown.exists():
-        markdown.write_text("# ACTION APPLY LOG\n\n", encoding="utf-8")
-    with markdown.open("a", encoding="utf-8") as handle:
-        status = "OK" if record.ok else "FAIL"
-        handle.write(
-            f"- [{status}] {record.id} run={record.run_id} action={record.action} "
-            f"applied={record.applied} message={record.message}\n"
-        )
+        write_private_text_file_atomic(markdown, "# ACTION APPLY LOG\n\n")
+    status = "OK" if record.ok else "FAIL"
+    append_private_text(
+        markdown,
+        f"- [{status}] {record.id} run={record.run_id} action={record.action} "
+        f"applied={record.applied} message={record.message}\n",
+    )
     manager.indexing.index_action_apply(record)
 
 
+# LLM: work log 是宿主运行数据：目录缺失按 0700 新建（pdp），文件私有写（0600）；已有内容只追加。
+# 函数用途: 向子代理任务的 WORK_LOG 追加一行带时间戳的进展。
 def append_task_work_log(manager: Any, task: SubAgentTask, message: str) -> None:
+    from ....common.json_io import append_private_text, write_private_text_file_atomic
+
     path = Path(task.work_log_file)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not path.exists():
-        path.write_text("# WORK_LOG\n\n", encoding="utf-8")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+        # 子代理工作日志属宿主运行数据：私有写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+        write_private_text_file_atomic(path, "# WORK_LOG\n\n")
+    append_private_text(path, f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
     manager.indexing.log_local_record(
         params=LocalRecordParams(
             source_type="subagent_work_log",

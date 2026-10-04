@@ -2,6 +2,22 @@
 
 2026-10-03（mtc，3a 挑入）：子代理解析缓存的指纹与 2 秒窗口阈值改为引用 `common/cache_freshness` 的共享实现；命中与“窗口内读到的不入缓存”行为不变（luna6 口径）。
 
+## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）
+
+- 子代理宿主数据的私有写改口径（3a 裁定，与锁收私 ds8 同口径）：缺失目录按 0700 新建、已存在的目录一律不改。
+- 跟着改的建目录点：`subagents/debug_trace`（debug details 目录）、`subagents/execution/report`（测试执行报告目录）、`subagents/manager_work_orders`（任务各目录）、`subagents/services/actions/records`（work log 目录）、`subagents/task_trash`（回收站目录）——统一 `mkdir(..., mode=0o700)`。
+- `subagents/shell_gateway_execution` 的 artifact 目录（用户可见）保持不变：私有审计写只新增 0600 文件，不再收紧它。
+- 顺带修复：pw2 引入的 `subagents/execution/report` 导入点数错误（`....common` → `...common`），该模块此前无法导入、CLI 构建解析器会崩；已在基线 `3a42f457d` 复核确认是既有失败。
+
+## 子代理工作区文件私有写入第二批（pw2，2026-10-03，分支 `worker/private-writes-batch2`，待复审）
+
+- 子代理工作区里剩下的整份报告/任务文件写点全部改走 `common/json_io` 私有原语（文件 0600、目录 0700、存量宽权限下次写入收紧，内容逐字节不变）：
+  `patch/patch_service`（补丁复审 Markdown、`output.json`）、`patch/patch_apply_task`（`output.json`）、`execution/report`（测试执行报告 JSON/MD）、
+  `services/hierarchy/service`（领导恢复计划/应用报告 JSON/MD）、`result_processors`（runner 提示词/回复/结果 JSON）、`probe`（通道探针证据文件）、
+  `task_trash`（回收站清单）、`manager_work_orders`（接管文件，经 `utils` 模板）、`shell_gateway_execution`（审计 JSONL）、`runner_context_bundle_files`（上下文快照 JSON/MD）。
+- `patch_file_ops` 写的是用户补丁的目标文件，按口径**不动**。
+- 用例 `tests/test_private_writes_batch2.py`（C 组 5 条）：umask 0o022 下新建 0600/0700、预置宽权限目录写一次收紧、与公开版本内容一致；两个退回跟随 umask 的变异均被拦截。验证命令见 [TESTS](../../../TESTS.md)。
+
 2026-10-03（luna6i，ae 二次复看补强，`worker/luna6-idem-flake`）：修正规则为 mtime 窗口内的 cache miss 只返回当前 canonical 读取结果、不入缓存并清掉同 run 旧项，2 秒窗口外才保存；增加同指纹写入新状态后跨窗重读的 ABA 正式探针。缓存时钟由 persistence service `_now()` 隔离，DONE 复用测试不再清空缓存；缓存命中类夹具 mtime 调到窗口外。具体先红后绿和门禁回执见 TESTS.md 顶部。
 
 2026-10-03（luna6i，分支 `worker/luna6-idem-flake`，ae 复审通过，并入 step17i）：解决子代理列表缓存只看 `task.json` 的 `st_mtime_ns`，导致同 mtime 的原子替换未使缓存失效、items 复用保存可将 RUNNING 旧快照写回 PLANNING 的竞争。缓存改核对 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`；受控同 mtime 回归先红后绿，定向和 guards9 已跑过，完整命令及边界见 TESTS.md 顶部。

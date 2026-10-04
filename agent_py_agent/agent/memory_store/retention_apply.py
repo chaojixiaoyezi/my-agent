@@ -12,10 +12,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import read_json_object_report, write_json_file_atomic
+from ..common.json_io import (
+    append_private_jsonl_records,
+    read_json_object_report,
+    write_private_json_file_atomic,
+)
 from ..conversation.models import ConversationThread
 from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
-from ..io import append_jsonl
 from .candidates import CandidateService
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
@@ -334,8 +337,9 @@ def _trash_conversation(
                 if target.exists():
                     source.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(target), str(source))
-            write_json_file_atomic(bindings_path, bindings)
-            write_json_file_atomic(latest_path, latest)
+            # 回滚写回同样走私有原子写（0600/0700），存量宽权限索引下次写入即收紧；内容逐字节不变。
+            write_private_json_file_atomic(bindings_path, bindings)
+            write_private_json_file_atomic(latest_path, latest)
             shutil.rmtree(destination, ignore_errors=True)
             raise
     return replace(action, status="trashed")
@@ -423,7 +427,8 @@ def _write_tombstone(
     now: datetime,
     status: str,
 ) -> None:
-    write_json_file_atomic(
+    # 回收墓碑属宿主运行数据：私有原子写（0600/0700）；内容逐字节不变。
+    write_private_json_file_atomic(
         destination / "tombstone.json",
         {
             "schema_version": "my-agent.memory-retention-tombstone.v2",
@@ -449,9 +454,10 @@ def _append_retention_audit(
     report: MemoryRetentionReport,
     now: datetime,
 ) -> None:
-    append_jsonl(
+    # owner 审计账属宿主运行数据：私有追加（0600/0700），存量宽权限账本下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(
         Path(home.owner_audit_log_jsonl),
-        {
+        [{
             "schema_version": "owner-audit.v1",
             "event_type": "owner_retention_applied",
             "owner_id": str(getattr(home, "owner_id", "") or ""),
@@ -464,7 +470,7 @@ def _append_retention_audit(
             "isolated_error_count": len(report.isolated_errors),
             "isolated_error_codes": _error_code_counts(report.isolated_errors),
             "updated_at": now.isoformat(),
-        },
+        }],
         sort_keys=True,
     )
 

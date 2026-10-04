@@ -1,5 +1,16 @@
 # Subagent Structure
 
+## 私有写只动自己建的东西（pdp，2026-10-03）
+
+- `common/json_io._ensure_private_dir` 只对缺失目录按 0700 新建、已存在的目录一律不动；子代理侧私有写（debug_trace / execution.report / manager_work_orders / actions.records / task_trash）的建目录点同步 `mkdir(..., mode=0o700)`。
+- 用户可见的 artifact/命令产物目录不被收紧；详见 `02-progress.md` 同名节。
+
+## 子代理工作区文件私有写入（pw2，2026-10-03）
+
+- 子代理 task/run 工作区里的宿主状态文件（工单模板、runner 结果、测试执行报告、补丁复审报告、领导恢复报告、回收站清单、shell 网关审计、上下文快照）统一走私有写：
+  目录 0700、文件 0600；`utils._write_if_missing` / `_write_json_if_missing` 的"文件已存在不碰"语义保持不变（只对新建收紧）。
+- 用户交付物与补丁目标文件（`patch_file_ops`）仍走原路径；本批只改宿主自己写的运行数据。
+
 ## 子代理任务列表缓存与文件指纹（2026-10-03）
 
 - `SubAgentPersistenceService._cached_run_copy` 的进程内缓存指纹为 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)`；mtime 单字段在低精度文件系统的同一时间片可能漏掉 `task.json` 原子替换，返回旧状态对象。

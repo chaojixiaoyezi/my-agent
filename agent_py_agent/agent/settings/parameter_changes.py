@@ -17,7 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from ..common.json_io import append_jsonl_capped, locked_json_path, read_jsonl_objects_report
+from ..common.json_io import (
+    append_private_jsonl_capped,
+    locked_json_path,
+    read_jsonl_objects_report,
+)
 from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
 from .parameter_registry import (
     SOURCE_AGENT,
@@ -260,8 +264,7 @@ def _append_record(ledger: Path, key: str, row: _ChangeRow, masked: bool) -> dic
         "previous": previous, "value": value,
     }
     entry.update({name: item for name, item in (("target", row.target), ("reverts", row.reverts)) if item})
-    _ensure_private_file(ledger)
-    append_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORD_COUNT)
+    append_private_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORD_COUNT)
     return entry
 
 
@@ -317,17 +320,6 @@ def _create_config_file(path: Path) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write("# 由参数中心创建（只含被改的键，其余按随包默认）\n")
-
-
-# LLM: 修改账本和配置放在同一目录，记录里有脱敏前后的键名与原因；首次创建时以 0600 建空文件，
-#   之后 append_jsonl_capped 的原子重写会保留这个权限（json_io._keep_target_mode）。已存在时不改。
-# 函数用途: 确保账本文件存在且新建时只有本人可读写。副作用：可能新建空文件。
-def _ensure_private_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    except FileExistsError:
-        return
 
 
 # LLM: 文件原本不存在时恢复 = 删除新建文件，避免留下半截配置；原本存在则原样写回。

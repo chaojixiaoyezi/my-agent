@@ -8,10 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import write_json_file_atomic_unlocked
+from ..common.json_io import (
+    append_private_jsonl_records,
+    write_private_json_file_atomic,
+    write_private_json_file_atomic_unlocked,
+)
 from ..common.opaque_id import validate_opaque_id
-from ..gateway_parts.io import locked_file_transition, write_json_file_atomic
-from ..io.jsonl import append_jsonl
+from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
 from .models import ObservationEvent, WakeSignal
 from .store_io import read_jsonl_report
@@ -170,15 +173,17 @@ def _install(storage: ConversationStorage, path: Path, record: dict[str, Any]) -
     observation, frozen = _frozen_pair(record, record["thread_id"], record["dedupe_key"])
     installed = _installed_signal(storage, frozen)
     if installed is None:
-        write_json_file_atomic(storage.wake_signal_path(frozen), frozen.to_dict())
+        # 唤醒信号属宿主运行数据：私有原子写（0600/0700），存量宽权限信号下次写入即收紧；内容逐字节不变。
+        write_private_json_file_atomic(storage.wake_signal_path(frozen), frozen.to_dict())
         installed = frozen
     if observation is not None:
         existing = _find_observation(storage, frozen.thread_id, observation.observation_id)
         if existing is None:
-            append_jsonl(storage.observation_path(frozen.thread_id), observation.to_dict(), sort_keys=True)
+            # 私有追加：0600/0700，存量宽权限观察账本下次写入即收紧；内容逐字节不变。
+            append_private_jsonl_records(storage.observation_path(frozen.thread_id), [observation.to_dict()], sort_keys=True)
         elif existing.to_dict() != observation.to_dict():
             raise DataCorruptionError("wake publication observation conflicts with frozen content")
-    write_json_file_atomic_unlocked(path, {**record, "phase": "published"})
+    write_private_json_file_atomic_unlocked(path, {**record, "phase": "published"})
     return observation, installed
 
 
@@ -193,7 +198,7 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
         record = _read_record(path)
         if record is not None and record.get("schema_version") == _LEGACY_SCHEMA:
             record = _migrate_legacy(storage, record, signal, paired=observation is not None, retain_handled=retain_handled)
-            write_json_file_atomic_unlocked(path, record)
+            write_private_json_file_atomic_unlocked(path, record)
         if record is not None:
             previous_observation, frozen = _frozen_pair(record, signal.thread_id, signal.dedupe_key)
             if record["retain_handled"] != retain_handled or (previous_observation is None) != (observation is None):
@@ -211,7 +216,7 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
         if migration is not None:
             record["migration"] = migration
         _frozen_pair(record, signal.thread_id, signal.dedupe_key)
-        write_json_file_atomic_unlocked(path, record)
+        write_private_json_file_atomic_unlocked(path, record)
         return _install(storage, path, record)
 
 

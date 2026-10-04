@@ -6,6 +6,7 @@ import hashlib
 import time
 from pathlib import Path
 
+from ..common.json_io import append_private_jsonl_records
 from ..gateway_parts.io import (
     locked_file_transition,
     read_json_file,
@@ -13,7 +14,6 @@ from ..gateway_parts.io import (
     update_json_file_atomic,
     write_json_file_atomic,
 )
-from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError
 from .models import GuidanceEntry
 from .store_guidance_records import (
@@ -149,11 +149,12 @@ class GuidanceLedger:
                 )
 
     # LLM: GuidanceLedger：队列行不可变；相同编号内容冲突报错，恢复改绑仅容许宿主回合字段变化，联测崩溃重放。
+    #   落盘走私有追加（0600/0700），已有 0644 队列下次写入即收紧；内容逐字节不变。
     # 函数用途: 确保回执对应的 guidance 队列行存在且只存在一次。
     def ensure_queue_entry(self, entry: GuidanceEntry) -> None:
         path = self.storage.guidance_path(entry.target_type, entry.target_id)
         if not path.exists():
-            append_jsonl(path, entry.to_dict(), sort_keys=True)
+            append_private_jsonl_records(path, [entry.to_dict()], sort_keys=True)
             return
         report = read_jsonl_report(path, context="conversation.guidance_once.queue")
         if report.load_errors:
@@ -173,7 +174,7 @@ class GuidanceLedger:
                     f"conversation guidance id has conflicting rows: {entry.guidance_id}"
                 )
             return
-        append_jsonl(path, entry.to_dict(), sort_keys=True)
+        append_private_jsonl_records(path, [entry.to_dict()], sort_keys=True)
 
     # LLM: GuidanceLedger：原子更新原送达索引；这是内部无幂等消息的退休事实，不能替代幂等回执的消费确认。
     # 函数用途: 原子更新非幂等内部消息的送达投影，并供确认批次修复使用。

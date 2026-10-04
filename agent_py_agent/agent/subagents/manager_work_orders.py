@@ -1,12 +1,16 @@
 
 from __future__ import annotations
 
-"""Work-order path, file, and validation helpers for SubAgentManager."""
+"""Work-order path, file, and validation helpers for SubAgentManager.
+
+工单模板与接管文件落盘走私有原语（pw2）：0600 文件、0700 目录。
+"""
 
 import time
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import write_private_text_file_atomic
 from ..common.opaque_id import validate_opaque_id
 from .models import SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .policies import _default_forbidden_write_roots
@@ -93,7 +97,8 @@ def ensure_work_order_files(task: SubAgentTask) -> None:
         task.logs_dir,
         task.scratch_dir,
     ]:
-        Path(directory).mkdir(parents=True, exist_ok=True)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
 
     _write_if_missing(Path(task.status_file), _status_content(task))
     _write_if_missing(Path(task.work_log_file), _WORK_LOG_TMPL.format(
@@ -133,7 +138,7 @@ def write_takeover_file(task: SubAgentTask, record: TakeoverRecord) -> None:
         "- 接管后，原子代理不得继续写 locked_files 中的文件。\n"
         "- 后续写入必须由 final_owner 或接管者统一收口。\n"
     )
-    Path(task.takeover_file).write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(Path(task.takeover_file), content)
 
 
 def validate_work_order(manager: Any, run_id: str) -> WorkOrderValidation:

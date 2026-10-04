@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
-    append_jsonl_records,
+    append_private_jsonl_records,
     locked_json_path,
     read_jsonl_objects_report,
     write_text_file_atomic,
@@ -414,7 +414,7 @@ def _mutate_persona_document(
     if request.action not in {"add", "replace", "remove", "rollback"}:
         raise ValueError(f"unsupported persona action: {request.action}")
     path = repository.path_for(request.target)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked_json_path(path):
         if path.exists() and (path.is_symlink() or not path.is_file()):
             raise PersonaSecurityError("persona target must be a regular file")
@@ -446,7 +446,7 @@ def _mutate_persona_batch_document(
         if operation.action not in {"add", "replace", "remove"}:
             raise ValueError("persona batch supports add/replace/remove only")
     path = repository.path_for(request.target)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked_json_path(path):
         if path.exists() and (path.is_symlink() or not path.is_file()):
             raise PersonaSecurityError("persona target must be a regular file")
@@ -747,7 +747,7 @@ def _commit_persona_mutation(
         )
         records.append(prepared.record)
         write_text_file_atomic_unlocked(path, prepared.next_text)
-        append_jsonl_records(repository.versions_path, records)
+        append_private_jsonl_records(repository.versions_path, records)
     except Exception:
         if document_existed:
             write_text_file_atomic_unlocked(path, prepared.previous)

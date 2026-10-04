@@ -15,11 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
+    append_private_jsonl_records,
     locked_json_path,
     read_jsonl_objects_report,
-    write_text_file_atomic_unlocked,
+    write_private_text_file_atomic_unlocked,
 )
-from ..io import append_jsonl
 from .home_layout import MyAgentHomePaths
 from .owner_resolver import OwnerHomeResult
 
@@ -215,6 +215,8 @@ def _agent_payload(ref: AgentIndexRef) -> dict[str, Any]:
 # LLM: This process-local fingerprint cache is bounded and excludes timestamps.
 # The file append happens while holding the cache lock so concurrent identical
 # updates cannot race into duplicate rows; failures never poison the cache.
+#   索引文件本身带任务/代理/运行标识与标题，必须与锁同口径私有：走 append_private_jsonl_records
+#   （文件 0600、目录 0700、已有 0644 下次追加即收紧），不再用跟随 umask 的 append_jsonl。
 # 函数用途: 只有索引里的实际字段发生变化时才追加一行，并限制去重缓存自身的大小。
 def _append_changed_index_record(
     path: Path,
@@ -228,7 +230,7 @@ def _append_changed_index_record(
         if _INDEX_WRITE_CACHE.get(cache_key) == fingerprint:
             _INDEX_WRITE_CACHE.move_to_end(cache_key)
             return False
-        append_jsonl(path, payload, sort_keys=True)
+        append_private_jsonl_records(path, [payload], sort_keys=True)
         _remember_index_fingerprint(cache_key, fingerprint)
     return True
 
@@ -274,7 +276,7 @@ def replace_home_index_snapshots(
                 for record in records
             )
             with locked_json_path(path):
-                write_text_file_atomic_unlocked(path, content)
+                write_private_text_file_atomic_unlocked(path, content)
             _forget_index_path(path)
             for record in records:
                 _remember_index_fingerprint(

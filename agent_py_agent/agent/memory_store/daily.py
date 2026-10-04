@@ -102,7 +102,8 @@ class DailyMemoryStoreCorruptError(RuntimeError):
 # LLM: 每日文件是 append 语义的当前账本，但实现必须在同一锁内完整校验、去重、原子替换。
 # 类用途: 管理 owner 的 memory/daily/YYYY-MM-DD.jsonl。
 class DailyMemoryStore:
-    # LLM: 构造器只绑定 owner daily 根和 quota，不扫描或自动转换 legacy mirror。
+    # LLM: 构造器只绑定 owner daily 根和 quota，不扫描或自动转换 legacy mirror；缺失目录按 0700 新建
+    #   （pdp 2026-10-03：与私有写同口径，只动自己建的东西；已存在的目录一律不动）。
     # 函数用途: 初始化当前 owner 的 Daily v2 仓库。
     def __init__(
         self,
@@ -111,7 +112,7 @@ class DailyMemoryStore:
         quota_enforcer: OwnerQuotaEnforcer | None = None,
     ) -> None:
         self.daily_dir = Path(daily_dir)
-        self.daily_dir.mkdir(parents=True, exist_ok=True)
+        self.daily_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.quota_enforcer = quota_enforcer
 
     # LLM: 相同 event_id 重放必须返回既有记录；相同 ID 不同内容必须 fail closed。

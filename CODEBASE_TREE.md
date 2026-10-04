@@ -76,6 +76,14 @@
 |-- agent_py_agent/tests/test_semantic_memory_storage.py # 向量文件 600/目录 700（替换后仍是）、第一次召回复用 memory_vectors.json 不重嵌
 |-- agent_py_agent/tests/test_memory_file_permissions.py # 候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像替换后 600/目录 700（S2）；迁移备份私有复制
 |-- agent_py_agent/tests/test_memory_archive_permissions.py # memory_archive 写入 600/目录 700、已有文件收紧（不跟随符号链接）、失败计数与 owner 维护回执
+|-- agent_py_agent/tests/test_private_lock_permissions.py # 三套锁写法统一私有：json/jsonl/派工锁 600、父目录 700、存量 644 自愈、符号链接被拒、blocking=False 不变
+|-- agent_py_agent/tests/test_global_index_permissions.py # global_index 数据文件与目录私有：新建 600/700、预置 644 下次追加收紧且内容逐字节不变
+|-- agent_py_agent/tests/test_private_writes_conversation.py # 会话/用量宿主数据私有写入：0600/0700、存量收紧、内容逐字节不变
+|-- agent_py_agent/tests/test_private_writes_audit_events.py # 审计/事件/Gateway 历史私有写入与第四处锁写法：0600/700、存量锁自愈
+|-- agent_py_agent/tests/test_private_writes_collaboration.py # 协作账与 run workspace 私有写入：0600/0700、存量收紧、内容不变
+|-- agent_py_agent/tests/test_private_writes_subagents.py # 子代理账与工作日志私有写入：0600/0700、存量收紧、内容不变
+|-- agent_py_agent/tests/test_private_writes_memory.py # retention 审计私有写入：0600/0700、存量收紧、内容不变
+|-- agent_py_agent/tests/test_private_writes_batch2.py # 第二批私有写入（pw2）：append 家族、gateway_parts/io 写函数、subagents 工作区文件
 |-- agent_py_agent/tests/test_capability_selection_state.py # 原TaskLink严格标记、损坏隔离和CAS
 |-- agent_py_agent/tests/test_capability_selection_scope.py # 默认关闭、主子权限和配置资格
 |-- agent_py_agent/tests/test_capability_config_missing_defaults.py # 缺配置文件给默认实例且不缓存、坏文件仍 None、决策默认值读 capability 文件

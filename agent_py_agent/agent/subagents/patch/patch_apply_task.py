@@ -5,6 +5,7 @@ from __future__ import annotations
 
 这里处理单个任务里的 patch 规范化、边界检查、执行和回滚，PatchApplyService 只保留批量门面。
 审计字段由 patch_apply_audit 统一构造，避免执行流程和报告证据互相分叉。
+output.json 落盘走 write_private_text_file_atomic（pw2）：0600 文件、0700 目录。
 """
 
 import json
@@ -13,7 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_py_agent.agent.common.json_io import read_json_object_report
+from agent_py_agent.agent.common.json_io import (
+    read_json_object_report,
+    write_private_text_file_atomic,
+)
 from agent_py_agent.agent.subagents.parsing import _dict_list
 from agent_py_agent.agent.subagents.patch.patch_apply_audit import (
     PatchApplyRecordPayload,
@@ -228,9 +232,10 @@ def _execute_apply_if_ready(ctx: _ApplyIfReadyContext):
 def _write_successful_apply_output(task, params: ApplyPatchTaskParams, prepared) -> None:
     _carry_existing_load_errors(params.output, task.output_json)
     params.output["patches"] = [spec["patch_ref"] for spec in prepared.patch_specs]
-    Path(task.output_json).write_text(
+    # output.json 是子代理工作区宿主状态：私有写（0600 文件、0700 目录），格式逐字节不变（pw2）。
+    write_private_text_file_atomic(
+        Path(task.output_json),
         json.dumps(params.output, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
 
 
@@ -346,9 +351,9 @@ def _write_patch_apply_success(params: PatchApplyParams, applied_count: int, tes
     if read_report.load_error is not None:
         _append_load_error(output, read_report.load_error)
     output["patches"] = params.review_status_updates
-    Path(params.task.output_json).write_text(
+    write_private_text_file_atomic(
+        Path(params.task.output_json),
         json.dumps(output, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
     params.manager.actions._append_task_work_log(
         params.task,

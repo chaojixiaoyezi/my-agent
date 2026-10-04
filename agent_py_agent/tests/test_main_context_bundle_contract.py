@@ -176,7 +176,7 @@ def test_context_bundle_rewrite_tightens_files_and_preserves_exact_output(tmp_pa
 
 
 @_POSIX_ONLY
-def test_context_bundle_write_tightens_legacy_latest_copies_and_date_directory(tmp_path: Path) -> None:
+def test_context_bundle_write_tightens_legacy_latest_copies_and_keeps_date_directory_mode(tmp_path: Path) -> None:
     request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
     archive = Path(home_paths.owner_home_dir) / "memory_archive"
     snapshots = archive / "snapshots"
@@ -199,7 +199,9 @@ def test_context_bundle_write_tightens_legacy_latest_copies_and_date_directory(t
     assert json_path.parent == base
     assert markdown_path.parent == base
     assert {_mode(path) for path in (json_path, markdown_path, latest_json, latest_markdown)} == {0o600}
-    assert {_mode(path) for path in (snapshots, context_bundles, base)} == {0o700}
+    assert {_mode(path) for path in (snapshots, context_bundles)} == {0o700}
+    # pdp 2026-10-03：base 是已存在的 0755 目录，私有写不再收紧它（只动自己建的东西）。
+    assert _mode(base) == 0o755
     assert latest_json.read_bytes() == json_path.read_bytes()
     assert latest_markdown.read_bytes() == markdown_path.read_bytes()
 
@@ -268,7 +270,8 @@ def test_context_bundle_with_symlinked_date_parent_keeps_target_modes_and_warns(
     assert all(path.is_file() for path in files)
     assert {_mode(path) for path in files} == {0o600}
     assert _mode(archive) == 0o755
-    assert _mode(snapshots) == 0o700
+    # pdp 2026-10-03：已存在的 snapshots 目录权限不动（旧行为是收紧到 0700）。
+    assert _mode(snapshots) == 0o755
     assert (_mode(target), _mode(base)) == (0o755, 0o755)
     assert link.is_symlink()
     _assert_private_directory_symlink_warning(caplog, "snapshots/context_bundles")

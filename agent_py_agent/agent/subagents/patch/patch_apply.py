@@ -12,8 +12,12 @@ import json
 import time
 from dataclasses import dataclass, replace
 
-from agent_py_agent.agent.common.json_io import read_json_object_report
-from agent_py_agent.agent.io import append_jsonl
+from agent_py_agent.agent.common.json_io import (
+    append_private_jsonl_records,
+    append_private_text,
+    read_json_object_report,
+    write_private_text_file_atomic,
+)
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord, PatchApplyReport
 from agent_py_agent.agent.subagents.services.indexing.records import (
     DataclassRecordIndexParams,
@@ -107,6 +111,8 @@ class PatchApplyService:
             records=records,
         )
 
+    # LLM: 应用报告 JSON/Markdown 走私有写（0600/0700）；报告内容与旧格式逐字节一致。
+    # 函数用途: 写出一份补丁应用报告的 JSON 与 Markdown。
     def write_apply_report(
         self,
         run_ids=None,
@@ -129,9 +135,10 @@ class PatchApplyService:
         )
         report = self.apply_patches(run_ids, options=opts)
         _write_patch_apply_report_json(self.manager, report)
-        (self.manager.workspace / "SUBAGENT_PATCH_APPLY.md").write_text(
+        # 补丁应用报告属宿主运行数据：私有原子写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+        write_private_text_file_atomic(
+            self.manager.workspace / "SUBAGENT_PATCH_APPLY.md",
             render_patch_apply_markdown(report),
-            encoding="utf-8",
         )
         self._write_apply_records(report, apply=opts.apply)
         self.manager.indexing.index_report(
@@ -282,6 +289,8 @@ def _patch_apply_summary(records: list[PatchApplyRecord]) -> dict[str, int]:
     return summary
 
 
+# LLM: 报告 JSON 走私有写（0600/0700）；不改变序列化格式。
+# 函数用途: 把补丁应用报告写成 JSON 文件。
 def _write_patch_apply_report_json(manager, report: PatchApplyReport) -> None:
     payload = {
         "generated_at": report.generated_at,
@@ -289,12 +298,15 @@ def _write_patch_apply_report_json(manager, report: PatchApplyReport) -> None:
         "summary": report.summary,
         "records": [patch_apply_record_to_dict(r) for r in report.records],
     }
-    (manager.workspace / "subagent_patch_apply_report.json").write_text(
+    # 补丁应用报告属宿主运行数据：私有原子写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    write_private_text_file_atomic(
+        manager.workspace / "subagent_patch_apply_report.json",
         json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
 
 
+# LLM: 记录 Markdown 走私有写（0600/0700）；内容与旧实现逐字节一致。
+# 函数用途: 把一条补丁应用记录写成 Markdown 文件。
 def _write_patch_apply_record_file(record: PatchApplyRecord, manager) -> None:
     try:
         task = manager.load(record.run_id)
@@ -302,23 +314,26 @@ def _write_patch_apply_record_file(record: PatchApplyRecord, manager) -> None:
         return
     record_json = task.reports_dir_path / "patch_apply.json"
     record_md = task.task_dir_path / "PATCH_APPLY.md"
-    record_json.write_text(
+    write_private_text_file_atomic(
+        record_json,
         json.dumps(patch_apply_record_to_dict(record), ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
-    record_md.write_text(render_patch_apply_record_markdown(record), encoding="utf-8")
+    write_private_text_file_atomic(record_md, render_patch_apply_record_markdown(record))
 
 
+# LLM: 日志追加走私有写（0600/0700）；JSONL 行格式不变。
+# 函数用途: 把一条补丁应用记录追加进 JSONL 日志并补齐 Markdown 头。
 def _append_patch_apply_log(record: PatchApplyRecord, manager) -> None:
     jsonl = manager.workspace / "subagent_patch_apply_log.jsonl"
-    append_jsonl(jsonl, patch_apply_record_to_dict(record))
+    # 补丁应用账属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(jsonl, [patch_apply_record_to_dict(record)], sort_keys=False)
 
     markdown = manager.workspace / "PATCH_APPLY_LOG.md"
     if not markdown.exists():
-        markdown.write_text("# PATCH APPLY LOG\n\n", encoding="utf-8")
-    with markdown.open("a", encoding="utf-8") as handle:
-        status = "OK" if record.ok else "FAIL"
-        handle.write(
-            f"- [{status}] {record.id} run={record.run_id} decision={record.decision} "
-            f"rollback={record.rollback_performed} message={record.message}\n"
-        )
+        write_private_text_file_atomic(markdown, "# PATCH APPLY LOG\n\n")
+    status = "OK" if record.ok else "FAIL"
+    append_private_text(
+        markdown,
+        f"- [{status}] {record.id} run={record.run_id} decision={record.decision} "
+        f"rollback={record.rollback_performed} message={record.message}\n",
+    )

@@ -175,8 +175,9 @@ class TestAtomicWrites:
         from agent_py_agent.agent.subagents import result_processors
 
         calls: list[str] = []
-        real_text = result_processors.write_text_file_atomic
-        real_json = result_processors.write_json_file_atomic
+        # pdp 2026-10-03：pw2 把这两个原语改成了私有版（write_private_*），打桩目标跟着改，验证的语义不变。
+        real_text = result_processors.write_private_text_file_atomic
+        real_json = result_processors.write_private_json_file_atomic_no_newline
 
         def _spy_text(path, content):
             calls.append(("text", str(path)))
@@ -186,8 +187,8 @@ class TestAtomicWrites:
             calls.append(("json", str(path)))
             return real_json(path, payload, sort_keys=sort_keys)
 
-        monkeypatch.setattr(result_processors, "write_text_file_atomic", _spy_text)
-        monkeypatch.setattr(result_processors, "write_json_file_atomic", _spy_json)
+        monkeypatch.setattr(result_processors, "write_private_text_file_atomic", _spy_text)
+        monkeypatch.setattr(result_processors, "write_private_json_file_atomic_no_newline", _spy_json)
 
         task = MagicMock()
         task.runner_prompt_file = str(tmp_path / "prompt.txt")

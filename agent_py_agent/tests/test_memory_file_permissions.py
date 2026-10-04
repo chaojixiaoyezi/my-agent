@@ -1,8 +1,9 @@
 """装记忆正文的其它文件也按私有原子写（S2，be 复审语义记忆的后续项）：候选、日事件、lesson/INDEX/HOT、Curator 事务目标与前镜像，
 以及一次性迁移的备份副本（私有复制，保留原字节和修改时间）。
 
-钉的是“替换之后”的权限：先放 0644 的旧文件、0755 的目录，下一次写入后必须是 0600 / 0700；umask 放到 0 也一样
-（临时文件一出生就是 0600，替换时不抄回旧权限）。生产里已有的旧文件靠下次写入收紧，不做批量 chmod。
+钉的是“替换之后”的权限：先放 0644 的旧文件、0755 的目录，下一次写入后文件必须是 0600、目录权限一律不动
+（pdp 2026-10-03：私有写只动自己建的东西）；umask 放到 0 也一样（临时文件一出生就是 0600，替换时不抄回旧权限）。
+生产里已有的旧文件靠下次写入收紧，不做批量 chmod。
 全部用临时目录和测试替身，不调真实模型。
 """
 from __future__ import annotations
@@ -80,7 +81,7 @@ def test_candidates_are_tightened_on_the_next_write(tmp_path, open_umask):
     _loosen(service.path)
     service.observe(_observation("团建定在周五下午", "work:teambuilding"))
 
-    assert (_mode(service.path), _mode(service.path.parent)) == (0o600, 0o700), "下一次写入（原子替换）后必须收紧"
+    assert (_mode(service.path), _mode(service.path.parent)) == (0o600, 0o755), "文件被收紧；已存在的目录权限不动"
     assert len(service.list()) == 2
 
 
@@ -94,7 +95,7 @@ def test_daily_shard_is_tightened_on_the_next_write(tmp_path, open_umask):
     _loosen(shard)
     store.append(_daily_event("用户想要干净的目录", 5))
 
-    assert (_mode(shard), _mode(shard.parent)) == (0o600, 0o700)
+    assert (_mode(shard), _mode(shard.parent)) == (0o600, 0o755), "文件被收紧；已存在的目录权限不动"
     assert len(store.list(day="2026-05-13")) == 2
 
 
@@ -111,7 +112,7 @@ def test_lesson_file_is_private_and_routing_index_is_tightened_on_rebuild(tmp_pa
     _loosen(index)
     repository.rebuild_routing_index()
 
-    assert (_mode(index), _mode(index.parent)) == (0o600, 0o700), "索引带正文摘录，重建后必须收紧"
+    assert (_mode(index), _mode(index.parent)) == (0o600, 0o755), "索引文件被收紧；已存在的目录权限不动"
 
 
 @_POSIX_ONLY
@@ -121,13 +122,13 @@ def test_hot_rules_are_tightened_on_promote_and_on_demotion_rewrite(tmp_path, op
     path.write_text(_render_hot([_hot(_NOW, index=1, rule_len=60)]), encoding="utf-8")
     _loosen(path)
     repository.promote(_hot_candidate(content="提交前必须跑一次全量测试。"), lesson=_lesson())
-    assert (_mode(path), _mode(path.parent)) == (0o600, 0o700), "晋升写入后必须收紧"
+    assert (_mode(path), _mode(path.parent)) == (0o600, 0o755), "HOT 文件被收紧；已存在的目录权限不动"
 
     path.write_text(_render_hot(_hot_pile()), encoding="utf-8")
     _loosen(path)
     assert repository.demote_cold_rules(), "超预算才会走降级重写"
 
-    assert (_mode(path), _mode(path.parent)) == (0o600, 0o700), "降级重写后必须收紧"
+    assert (_mode(path), _mode(path.parent)) == (0o600, 0o755), "HOT 文件被收紧；已存在的目录权限不动"
 
 
 @_POSIX_ONLY

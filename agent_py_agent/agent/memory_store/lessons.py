@@ -82,8 +82,10 @@ class LessonRepository:
     def __init__(self, lessons_dir: str | Path, routing_index_path: str | Path) -> None:
         self.lessons_dir = Path(lessons_dir)
         self.routing_index_path = Path(routing_index_path)
-        self.lessons_dir.mkdir(parents=True, exist_ok=True)
-        self.routing_index_path.parent.mkdir(parents=True, exist_ok=True)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        self.lessons_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        self.routing_index_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # LLM: lesson 晋升要求审核、证据和跨任务/运行/日期重复；confidence 不能替代这些闸。lesson 文件按私有原子写落盘。
     # 函数用途: 幂等创建一个正式 lesson（仅本人可读写）并重建 routing index。
@@ -181,7 +183,8 @@ class HotRuleRepository:
     # 函数用途: 初始化当前 owner 的高频短规则仓库。
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # LLM: HOT 需要 approved hot candidate、默认三次观察和至少两个独立任务/运行/日期证据。
     # 函数用途: 将一个短规则绑定到正式 lesson 并幂等写入 HOT。

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..io.jsonl import append_jsonl
+from ..common.json_io import append_private_jsonl_records
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from .compact_tool_identity import compact_tool_refs
 from .message_replay import message_rows_iterator
@@ -136,7 +136,8 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
     if not raw_root:
         raise OSError("owner compact directory is unavailable")
     row["checkpoint_id"] = scoped_compact_checkpoint_id(row)
-    append_jsonl(Path(raw_root) / "conversations" / f"{row['thread_id']}.jsonl", row, sort_keys=True)
+    # 私有追加：0600/0700，存量宽权限 checkpoint 账本下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(Path(raw_root) / "conversations" / f"{row['thread_id']}.jsonl", [row], sort_keys=True)
     return row["checkpoint_id"]
 
 

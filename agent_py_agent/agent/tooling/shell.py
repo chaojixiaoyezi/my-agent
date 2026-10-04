@@ -31,7 +31,7 @@ from agent_py_agent.agent.artifacts.shell_protection import (
     shell_artifact_protection_note,
     snapshot_ready_artifacts,
 )
-from agent_py_agent.agent.common.json_io import append_jsonl_capped
+from agent_py_agent.agent.common.json_io import append_private_jsonl_capped
 from agent_py_agent.agent.concurrency.interrupt import is_interrupted
 from agent_py_agent.agent.contracts.gates.command_policy import (
     analyze_command,
@@ -822,7 +822,7 @@ def _record_background_job(
         "process_pid": max(0, int(process_pid or 0)),
     }
     try:
-        append_jsonl_capped(
+        append_private_jsonl_capped(
             jobs_dir / "registry.jsonl", record, max_records=_MAX_BACKGROUND_JOB_RECORD_COUNT
         )
     except OSError:
@@ -1276,7 +1276,7 @@ class ShellTool(BaseTool):
                                             self.protected_persona_root, *sandbox_roots,
                                             private_roots=self.host_private_roots)
             jobs_dir = self.workspace_root / ".background_jobs"
-            jobs_dir.mkdir(parents=True, exist_ok=True)
+            jobs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
             log_path.touch(exist_ok=False)
             request = BackgroundLaunchRequest(

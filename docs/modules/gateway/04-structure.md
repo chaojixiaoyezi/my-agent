@@ -3,6 +3,17 @@
 - G6 网络出口：`tooling/web.py` 将 G4 `gateway_bound_ports()` 进程注册表与正数 `gateway_port` 配置后备结构化传入 `contracts/gates/network_safety.py`；命中端口后用逐目标、无缓存 UDP bind 判本机，`web_fetch`/`watch_stream` 每个重定向跳沿固定 IP 重验，不能附本机客户端凭据。G6 与 G4/G5 `gateway_isolation` 状态无关；OS 沙箱不可用时，`run_command` 仍可能访问 Gateway。
 
 - （mtc，2026-10-03）`response_renderer` 的两个“文件就绪才读”入口（未处理响应投影、唯一终态归档）改用 `common/cache_freshness` 的五元指纹，并且 mtime 在 2 秒窗口内时不信任上次签名、总是重读；调用方都是“读到就退出”的等待循环，重读幂等。
+
+## 私有写只动自己建的东西（pdp，2026-10-03）
+
+- `common/json_io._ensure_private_dir`：缺失目录按 0700 新建、已存在的目录一律不动；`gateway_parts/io.write_json_file` 与 `scheduler/repository` 的建目录点同步 `mkdir(..., mode=0o700)`。
+- 已存在的 Gateway 数据目录（含配置指向的用户路径）不再被任何私有写收紧；详见 `02-progress.md` 同名节。
+
+## Gateway JSON 写入口的私有权限（pw2，2026-10-03）
+
+- `gateway_parts/io.write_json_file_atomic` / `update_json_file_atomic` / `write_gateway_request` 现在委托给 `common/json_io` 的私有原子写原语；原函数签名、锁协议与序列化格式不变，只有落盘权限收紧到 0600/0700。
+- 队列文件、状态文件、会话/任务存储都属宿主数据；`locked_file_transition` 等锁路径此前已私有，本次补齐数据文件一侧。
+
 ## G3 返工：凭据降级与 G2b 开关（2026-10-03，g3f，待复审）
 
 - `gateway_parts/client_credentials.py`：新增 `GatewayClientCredentials.require_local_credential`（从同一份 AgentConfig 的 `gateway_require_local_credential` 取，默认 False）与 `_warn_credential_degraded`（模块级去重集合 + 锁，同一原因只记一次）。配置 token 非空仍优先且不读文件；本机凭据失败时开关关返回 `{}`、开关开抛 G1 原因码。
@@ -2018,6 +2029,10 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   PID 和 start_time 身份。后台会话 claim 与 gateway PID record 共用，不复制一套存活判定。`process_host_id` 一个进程只算一次
   （`_cached_process_host_id`），macOS 硬件 UUID 走 libc `gethostuuid`（`_macos_platform_uuid`），不起子进程。
   工具操作持有者的同主机判定（`local_storage/tool_operations.tool_operation_host_id`，`runtime_db/managed_operation_store` 共用）也用它。
+  写文件走 `_write_json_file`（temp + `os.replace` 原子替换）并在同目录 sidecar `.wlock` 上加 flock 串行化；
+  该 sidecar 与其余锁同口径私有（文件 0600、缺失目录按 0700 新建、已存在的目录一律不动（lkp 2026-10-03 修正）、不跟随符号链接，已存在 0644 下次加锁即收紧），
+  由 `_open_private_wlock_descriptor` 经 `common/nofollow_fs.open_private_lock_beneath_tightened` 打开后只在 fd 上 flock。
+  写锁后缀刻意用 `.wlock` 而非 `.lock`：`scoped_locks` 的 `release_all_scoped_locks` 用 `glob("*.lock")` 扫描锁目录。
 - `cli/gateway_process.py` 的信号处理：`_install_gateway_signal_handlers(paths, process_identity)` 把启动身份交给
   `_record_gateway_signal_stop_request`，与 `_run_gateway_service_loop` 比对的是同一份身份。
 

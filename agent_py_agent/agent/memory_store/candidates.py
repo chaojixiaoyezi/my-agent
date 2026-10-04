@@ -66,7 +66,8 @@ class CandidateService:
         quota_enforcer: OwnerQuotaEnforcer | None = None,
     ) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.quota_enforcer = quota_enforcer
 
     # LLM: 重放同一 observation key 只更新时间和 refs，不增加 occurrence_count。

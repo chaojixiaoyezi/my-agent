@@ -1,13 +1,18 @@
 
 from __future__ import annotations
 
-"""Task-local trash manager for subagent workspaces."""
+"""Task-local trash manager for subagent workspaces.
+
+回收站清单落盘走 append_private_text（pw2）：0600 文件、0700 目录。
+"""
 
 import json
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from ..common.json_io import append_private_text
 
 
 @dataclass(frozen=True)
@@ -33,7 +38,8 @@ class TaskTrashMoveResult:
 def ensure_task_trash(task_dir: str | Path, trash_dir: str | Path = "") -> Path:
     task = Path(task_dir).expanduser().resolve()
     trash = _resolve_trash_dir(task, trash_dir)
-    trash.mkdir(parents=True, exist_ok=True)
+    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+    trash.mkdir(parents=True, exist_ok=True, mode=0o700)
     manifest = trash / "manifest.jsonl"
     manifest.touch(exist_ok=True)
     return trash
@@ -104,12 +110,13 @@ def _unique_destination(trash: Path, source: Path) -> Path:
     return destination
 
 
+# LLM: 回收站清单是宿主运行数据：私有追加（0600/0700）；记录里补 actor_run_id 与 created_at，格式不变。
+# 函数用途: 把一次移入回收站的结果追加进 manifest.jsonl。
 def _append_manifest(manifest: Path, result: TaskTrashMoveResult, actor_run_id: str) -> None:
     record = asdict(result)
     record["actor_run_id"] = actor_run_id
     record["created_at"] = time.time()
-    with manifest.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    append_private_text(manifest, json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

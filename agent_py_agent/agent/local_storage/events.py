@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any
 
-from ..io import append_jsonl
+from ..common.json_io import append_private_jsonl_records
 from .models import LocalStoreEvent, LocalTimelineItem
 
 
@@ -74,6 +74,8 @@ class LocalStoreEventMixin:
             conn.commit()
         return event
 
+    # LLM: 事件先落 SQLite、再私有追加 JSONL（0600/0700）；两条通道用同一 event 构造，JSONL 失败不静默。
+    # 函数用途: 在给定连接内登记一条事件并追加进事件流水文件。
     def _record_event(
         self,
         conn: sqlite3.Connection,
@@ -96,15 +98,16 @@ class LocalStoreEventMixin:
             """,
             (event.event_id, event.event_type, event.record_id, payload_json, event.created_at),
         )
-        append_jsonl(
+        # 私有追加：0600/0700，存量宽权限事件流水下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(
             self.events_path,
-            {
+            [{
                 "event_id": event.event_id,
                 "event_type": event.event_type,
                 "record_id": event.record_id,
                 "payload": event.payload,
                 "created_at": event.created_at,
-            },
+            }],
             sort_keys=True,
         )
         return event

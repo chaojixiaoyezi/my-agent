@@ -8,11 +8,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import append_private_jsonl_records
 from ..gateway_parts.io import (
     read_json_file,
     update_json_file_atomic,
 )
-from ..io.jsonl import append_jsonl
 from ..runtime_errors import runtime_error_report
 from .models import (
     ConversationThread,
@@ -151,7 +151,8 @@ class ObservationStore:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         event, current = observation_from_request(thread.thread_id, request)
-        append_jsonl(self.storage.observation_path(thread_id), event.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限观察账本下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self.storage.observation_path(thread_id), [event.to_dict()], sort_keys=True)
         self._update_thread_atomic(
             thread.thread_id,
             lambda latest: replace(

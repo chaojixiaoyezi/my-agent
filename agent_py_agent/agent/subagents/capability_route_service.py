@@ -9,7 +9,11 @@ import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
-from ..io import append_jsonl
+from ..common.json_io import (
+    append_private_jsonl_records,
+    append_private_text,
+    write_private_text_file_atomic,
+)
 from .capability_scope import (
     CapabilityPathScopeDecision,
     escalation_chain,
@@ -472,6 +476,8 @@ def build_capability_route_report(
     )
 
 
+# LLM: 路由报告 JSON/Markdown/JSONL 全部走私有写（0600/0700）；报告是宿主运行数据，不给同机他用户看。
+# 函数用途: 写出能力路由报告的三份文件（JSON、日志账、Markdown 摘要）。
 def write_capability_route_report_files(
     manager,
     report: CapabilityRouteReport,
@@ -479,13 +485,14 @@ def write_capability_route_report_files(
     apply: bool,
 ) -> None:
     """Persist route report artifacts and applied-route audit records."""
-    (manager.workspace / "subagent_capability_route_report.json").write_text(
+    # 路由报告属宿主运行数据：私有原子写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    write_private_text_file_atomic(
+        manager.workspace / "subagent_capability_route_report.json",
         json.dumps(asdict(report), ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
-    (manager.workspace / "SUBAGENT_CAPABILITY_ROUTE.md").write_text(
+    write_private_text_file_atomic(
+        manager.workspace / "SUBAGENT_CAPABILITY_ROUTE.md",
         render_capability_route_markdown(report),
-        encoding="utf-8",
     )
     manager.indexing.index_report(
         IndexReportParams(
@@ -501,16 +508,19 @@ def write_capability_route_report_files(
             _append_capability_route_log(manager, record)
 
 
+# LLM: 追加走私有写（0600/0700）；日志格式与旧实现逐字节一致。
+# 函数用途: 把一条能力路由记录追加进 JSONL 日志并补齐 Markdown 头。
 def _append_capability_route_log(manager, record: CapabilityRouteRecord) -> None:
     jsonl = manager.workspace / "subagent_capability_route_log.jsonl"
-    append_jsonl(jsonl, asdict(record))
+    # 子代理路由账属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(jsonl, [asdict(record)], sort_keys=False)
     markdown = manager.workspace / "CAPABILITY_ROUTE_LOG.md"
     if not markdown.exists():
-        markdown.write_text("# CAPABILITY ROUTE LOG\n\n", encoding="utf-8")
-    with markdown.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"- [{record.status}] {record.id} run={record.run_id} request={record.request_id} "
-            f"skills={','.join(record.granted_skills) or 'none'} "
-            f"tools={','.join(record.granted_tools) or 'none'} message={record.message}\n"
-        )
+        write_private_text_file_atomic(markdown, "# CAPABILITY ROUTE LOG\n\n")
+    append_private_text(
+        markdown,
+        f"- [{record.status}] {record.id} run={record.run_id} request={record.request_id} "
+        f"skills={','.join(record.granted_skills) or 'none'} "
+        f"tools={','.join(record.granted_tools) or 'none'} message={record.message}\n",
+    )
     manager.indexing.index_capability_route(record)

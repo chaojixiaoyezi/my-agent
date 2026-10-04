@@ -13,7 +13,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from agent_py_agent.agent.io import append_jsonl
+from agent_py_agent.agent.common.json_io import (
+    append_private_jsonl_records,
+    append_private_text,
+    write_private_text_file_atomic,
+)
 
 from ...reports import (
     DispatchRecord,
@@ -73,6 +77,8 @@ class SubAgentDispatchService:
             records=records,
         )
 
+    # LLM: 派工报告走私有写（0600/0700）；格式不变。
+    # 函数用途: 写出一份派工报告的 JSON 与 Markdown。
     def write_dispatch_report(
         self,
         report: DispatchReport,
@@ -81,13 +87,14 @@ class SubAgentDispatchService:
     ) -> DispatchReport:
         from ...rendering import render_dispatch_markdown
 
-        (self.manager.workspace / "subagent_dispatch_report.json").write_text(
+        # 派工报告属宿主运行数据：私有原子写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+        write_private_text_file_atomic(
+            self.manager.workspace / "subagent_dispatch_report.json",
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
-        (self.manager.workspace / "SUBAGENT_DISPATCH.md").write_text(
+        write_private_text_file_atomic(
+            self.manager.workspace / "SUBAGENT_DISPATCH.md",
             render_dispatch_markdown(report),
-            encoding="utf-8",
         )
         if append_log:
             for record in report.records:
@@ -139,16 +146,19 @@ class SubAgentDispatchService:
             records=records,
         )
 
+    # LLM: 观察报告走私有写（0600/0700）；格式不变。
+    # 函数用途: 写出一份派工观察报告的 JSON 与 Markdown。
     def write_dispatch_watch_report(self, report: DispatchWatchReport) -> DispatchWatchReport:
         from ...rendering import render_dispatch_watch_markdown
 
-        (self.manager.workspace / "subagent_dispatch_watch_report.json").write_text(
+        # 守望报告同属宿主运行数据：私有原子写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+        write_private_text_file_atomic(
+            self.manager.workspace / "subagent_dispatch_watch_report.json",
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
-        (self.manager.workspace / "SUBAGENT_DISPATCH_WATCH.md").write_text(
+        write_private_text_file_atomic(
+            self.manager.workspace / "SUBAGENT_DISPATCH_WATCH.md",
             render_dispatch_watch_markdown(report),
-            encoding="utf-8",
         )
         self.manager.indexing.index_report(
             IndexReportParams(
@@ -159,6 +169,8 @@ class SubAgentDispatchService:
         )
         return _trace_written_dispatch_watch_report(self.manager, report)
 
+    # LLM: 心跳 JSON 走私有写（0600/0700）；格式不变。
+    # 函数用途: 写出一份派工观察心跳 JSON。
     def write_dispatch_watch_heartbeat(
         self,
         *,
@@ -181,7 +193,7 @@ class SubAgentDispatchService:
             "message": params.message,
             "updated_at": time.time(),
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
         return path
 
     def append_dispatch_watch_log(self, record: DispatchWatchRecord) -> None:
@@ -236,20 +248,23 @@ def _dispatch_summary(records: list[DispatchRecord]) -> dict[str, int]:
     return summary
 
 
+# LLM: 日志追加走私有写（0600/0700）；JSONL 行格式不变。
+# 函数用途: 把一条派工记录追加进 JSONL 日志并补齐 Markdown 头。
 def _append_dispatch_log(record: DispatchRecord, workspace: Path) -> None:
     jsonl = workspace / "subagent_dispatch_log.jsonl"
-    append_jsonl(jsonl, asdict(record))
+    # 派工账属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(jsonl, [asdict(record)], sort_keys=False)
 
     markdown = workspace / "DISPATCH_LOG.md"
     if not markdown.exists():
-        markdown.write_text("# DISPATCH LOG\n\n", encoding="utf-8")
-    with markdown.open("a", encoding="utf-8") as handle:
-        status = "OK" if record.ok else "FAIL"
-        run = record.run_id or "global"
-        handle.write(
-            f"- [{status}] {record.id} step={record.step} action={record.action} "
-            f"run={run} applied={record.applied} message={record.message}\n"
-        )
+        write_private_text_file_atomic(markdown, "# DISPATCH LOG\n\n")
+    status = "OK" if record.ok else "FAIL"
+    run = record.run_id or "global"
+    append_private_text(
+        markdown,
+        f"- [{status}] {record.id} step={record.step} action={record.action} "
+        f"run={run} applied={record.applied} message={record.message}\n",
+    )
 
 
 def _make_dispatch_watch_record(manager: Any, params: DispatchWatchRecordParams) -> DispatchWatchRecord:
@@ -280,19 +295,22 @@ def _dispatch_watch_summary(records: list[DispatchWatchRecord]) -> dict[str, int
     return summary
 
 
+# LLM: 日志追加走私有写（0600/0700）；JSONL 行格式不变。
+# 函数用途: 把一条派工观察记录追加进 JSONL 日志并补齐 Markdown 头。
 def _append_dispatch_watch_log(record: DispatchWatchRecord, workspace: Path, manager: Any) -> None:
     jsonl = workspace / "subagent_dispatch_watch_log.jsonl"
-    append_jsonl(jsonl, asdict(record))
+    # 守望账同属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(jsonl, [asdict(record)], sort_keys=False)
 
     markdown = workspace / "DISPATCH_WATCH_LOG.md"
     if not markdown.exists():
-        markdown.write_text("# DISPATCH WATCH LOG\n\n", encoding="utf-8")
-    with markdown.open("a", encoding="utf-8") as handle:
-        status = "OK" if record.ok else "FAIL"
-        handle.write(
-            f"- [{status}] {record.id} cycle={record.cycle} "
-            f"records={record.dispatch_record_count} message={record.message}\n"
-        )
+        write_private_text_file_atomic(markdown, "# DISPATCH WATCH LOG\n\n")
+    status = "OK" if record.ok else "FAIL"
+    append_private_text(
+        markdown,
+        f"- [{status}] {record.id} cycle={record.cycle} "
+        f"records={record.dispatch_record_count} message={record.message}\n",
+    )
     manager.indexing.index_dispatch_watch_record(record)
 
 

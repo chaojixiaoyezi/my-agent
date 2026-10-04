@@ -229,11 +229,185 @@
 
 ## G3 本机客户端附带凭据：返工为「读不到即降级，只在 G2b 开关打开时拒绝」（2026-10-03，g3f，worker/sol1-g3-clients，已并入 step17i（2adfd8518；9b 集成终审通过））
 
-- **起因（3a 定）**：现在是 G2a 阶段，服务端只计数、不拦。客户端在凭据缺失/权限不对/内容损坏时于发 HTTP 前就拒绝，等于提前做了 G2b 的事——新运行时的 TUI 连上还没生成凭据的旧 Gateway（部署窗口里会遇到），或凭据文件权限被人改过，TUI、飞书适配器、插件命令就全断了。
-- **改法**：凭据读不到时客户端照常发请求，只是不带 `X-Gateway-Token`，由服务端按 G2a 计入“无凭据”；客户端记一条只带 G1 原因码的结构化 warning（不含凭据内容与路径），同一原因同一进程只记一次，不刷屏。只有配置项 `gateway_require_local_credential` 为 true（G2b 的开关，默认 false；9b 终审：目前只有客户端读它，服务端强制等 G2b 落地）时，才按原写法在发请求前拒绝、零请求并给原因码。服务端强制在 G2b 落地前不生效，落地后两边口径一致。非空 `gateway_auth_token` 优先且不读本机凭据、direct 模式不读凭据，两条不变。
-- **实现**：`gateway_parts/client_credentials.py` 的 `GatewayClientCredentials.headers()` 按 `require_local_credential` 分流，新增 `_warn_credential_degraded`（模块级去重集合 + 锁）；开关进 `settings/config.py` 与 `config/agent_config.yaml`（默认 false，注释写明退场计划）；`user_config_capability._CREDENTIAL_SWITCH_KEYS` 把它排除在凭据脱敏之外（回显要能看到 true/false），它仍是安全边界项、模型不能改。所有原身份头调用点接口不变，只改注释。
-- **验证**：三类原因 × 开关关降级（请求照发、无令牌头、warning 只记一次）/ 开关开拒绝（零请求 + 原因码）× TUI/CLI/IM 全绿；原有“附上凭据”用例全部保留。变异与命令见 TESTS。
-- **未验证**：真实 Gateway、真实 TUI/飞书渠道、旧客户端迁移与 `/status` 计数归零仍未做；G2b 强制的服务端半边仍归 G2b 那一块。
+## 私有写/私有锁的符号链接锚点：允许跟随一次（pdp 后续，2026-10-04，分支 `worker/private-dirs-policy`，ds4 初审、3a 裁定已落实，已并入 step17j，待 9b 安全终审）
+
+- **背景**：ds4 初审小问题——「最近的已存在祖先本身是符号链接、下面要新建子目录」时私有写直接抛 NoFollowPathError；用户的项目目录很可能就是符号链接（指到外置盘），`tooling/shell.py` 在工作区下建 `.background_jobs` 会失败，后台任务起不来。生产 owner home 里也确实有目录链接。
+- **3a 裁定（与「只动自己建的东西」一致）**：最近的已存在祖先可以**跟随一次**（它是已存在的目录，权限照旧一位不动），从它的真实目录往下新建缺失的各段；新建段不跟随符号链接、按 0700 建。私有锁 `open_private_lock_beneath` 同一口径（两边一个规则）。
+- **实现**：`nofollow_fs.resolve_existing_symlink_anchor`（共享辅助）：锚点是符号链接 → `os.path.realpath` 解析到真实目录；目标不是目录（断链/指向文件）抛 NoFollowPathError；非链接原样返回。`json_io._ensure_private_dir` 与 `open_private_lock_beneath` 都过它；新建段仍逐段 no-follow（段内链接一律拒绝）。
+- **用例**：`test_private_dirs_policy.py` 三条——工作区根链接 → `.background_jobs` 在链接目标里 0700 建好、链接与目标权限不动；祖先位置是断链/指向文件的链接 → 拒绝（原语层 parts 段已存在链接也拒绝）；私有锁在链接锚点下把锁文件建到真实目录 0600。
+- **验证**：见 TESTS.md 同名节（3 个失败文件 56 passed、29 相关文件 323 passed、guards9 172 passed、门禁全过、变异 2 KILLED + 1 等价存活说明）。
+
+
+## 私有写也只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，ds4 初审，已并入 step17j，待 9b 安全终审）
+
+- **背景**：pw2 初审（pw2r）检查 4 发现口径冲突——私有写会顺带把直接父目录收紧到 0700（`_ensure_private_dir` 对已存在目录 chmod），而锁收私（lkp/ds8）已定为「只动自己建的东西」；同一次写入里锁不动、写却动。3a 裁定两处统一。
+- **3a 裁定**：
+  1. 自己新建的目录按 0700 建、新建文件 0600；文件本身仍做 fchmod 自愈（这条保留）。
+  2. **已经存在的目录，不管是谁的、权限多宽，一律不改权限**。理由：文件 0600 已经挡住内容；调用方可能把目录指到用户能看到的地方（如 `shell_gateway_execution` 的 artifact_dir、可配置的 audit_log_path）；与锁口径一致。
+  3. 存量宿主目录的收紧归 owner 维护那一处负责，不在每次写入时做（本次不改维护侧，记后续项）。
+- **改了什么**：
+  - `common/json_io._ensure_private_dir`：删除对已存在目录的 stat+chmod；缺失目录改走锁同款「已存在最近祖先 + 缺失段」手法，经 `open_directory_beneath(create=True)` 逐段按 0700 新建（no-follow、不跟随符号链接）；已存在（含符号链接）直接返回一位不动。
+  - 「先普通 mkdir 再私有写」的建目录点全部改 `mkdir(..., mode=0o700)`（只影响缺失目录的新建权限）。
+  - **目录表（缺失时新建权限；已存在的一律不动）**：
+
+    | 目录 | 谁先建 | 改前 | 改后 |
+    | --- | --- | --- | --- |
+    | memory/daily | DailyMemoryStore.__init__ 普通 mkdir（靠首次 append 收紧） | 0755 | 0700 |
+    | memory/candidates、lessons、routing、memory-hot | 各仓库 __init__ 普通 mkdir | 0755 | 0700 |
+    | memory/curator/transactions（含每 run 子目录） | CuratorCommitter 普通 mkdir | 0755 | 0700 |
+    | .background_jobs | shell 普通 mkdir | 0755 | 0700 |
+    | 审计根（audit_log_path） | AuditLogger 普通 mkdir | 0755 | 0700 |
+    | collaboration cases/requests/evidence/participants/decisions | store 普通 mkdir | 0755 | 0700 |
+    | Gateway 队列/状态目录（write_json_file 先建时） | gateway io 普通 mkdir | 0755 | 0700 |
+    | scheduler 根 | SchedulerRepository 普通 mkdir | 0755 | 0700 |
+    | owner home 身份/生命周期/运行工作区目录 | 各模块普通 mkdir | 0755 | 0700 |
+    | jsonl 账本目录（append_line_locked） | io/jsonl 普通 mkdir | 0755 | 0700 |
+    | local store 根/files/events 目录 | schema 普通 mkdir | 0755 | 0700 |
+    | conversations 各托管目录（threads/messages/observations/...） | ConversationStorage.ensure_dirs 普通 mkdir | 0755 | 0700 |
+    | subagent 任务各目录、debug details、trash、测试报告 | 各模块普通 mkdir | 0755 | 0700 |
+    | **已存在的目录（任何来源，含用户目录）** | —— | 被收紧 0700 | **一位不动** |
+
+- **用例**：新增 `tests/test_private_dirs_policy.py`（10 条）；旧断言按新口径逐条改（batch2 7 处、memory_file_permissions 5 处、global_index 1 处、context_bundle 2 处、private_lock 1 处、conversation 1 处——见 TESTS.md）。
+- **顺带修复**：pw2 引入的 `subagents/execution/report.py` 导入点数错误（`....common` 应为 `...common`），该模块此前无法导入、CLI 构建解析器会崩；已在基线 `3a42f457d` 复核确认为既有失败。
+- **第一批（ds9）函数注释补齐**：39 个改动函数补 `# LLM:` + `# 函数用途:` 双层注释（audit / collaboration / gateway / local_storage / subagents / user_space 共 15 个文件）。
+- **已知边界**：inbox 的 `.lock` 文件会随请求累积（pw2 遗留），清理留给 owner 维护后续项；本次不改。
+- **验证**：见 TESTS.md 同名节。
+
+
+## 宿主数据私有写入第二批（pw2，2026-10-03，分支 `worker/private-writes-batch2`，基于 pwf 头 `9bd2fc318`，已实现，ds3 初审，已并入 step17j，待 9b 安全终审）
+
+- **背景**：pwf 把 ds9 清单里能明确判定的宿主数据写入点收成了私有原语，并把三类拿不准的列出来交 3a 定。3a 裁定三类**全部要收**：①`append_jsonl_records` / `append_jsonl_capped` 家族剩余调用点；②`gateway_parts/io` 的通用 JSON 写函数；③subagents 里剩余的整份报告 / 任务文件 `write_text`。
+- **口径**（与第一批相同）：新文件 0600、新目录 0700、已有宽权限文件下次写入收紧；**内容逐字节不变、调用方接口不变**；用户工作区里的文件（模型交付物、`output/`、用户项目文件）不动。
+- **新增私有原语**（`common/json_io.py`，均为已有公开原语的权限私有版，格式逐字节一致）：
+  - `append_private_jsonl_capped`（有界追加；对应 `append_jsonl_capped`）
+  - `write_private_json_file_atomic_no_newline[_unlocked]`（不带尾换行；对应 Gateway 原实现）
+  - `write_private_json_object`（带尾换行；对应 `write_json_object`）
+- **A 组：append 家族 7 个调用点**
+
+| 位置 | 数据 | 处理 |
+| --- | --- | --- |
+| capability/persona_repository.py:750 | persona 版本账本 `versions.jsonl` | `append_private_jsonl_records` |
+| scheduler/repository.py:882 | 调度器历史账本 | `append_private_jsonl_records` |
+| agent_core/run_task_workspace_writer.py:201 | 任务 `work/timeline.jsonl` | `append_private_jsonl_records` |
+| settings/parameter_changes.py:264 | 参数修改账本 `settings-changes.jsonl` | `append_private_jsonl_capped`（并删掉自建 0600 空文件的 `_ensure_private_file`，私有 capped 新建即 0600） |
+| tooling/shell.py:825 | `.background_jobs/registry.jsonl` | `append_private_jsonl_capped` |
+| capability/skill_learning_store.py:270 | skill learning `ledger.jsonl` | `append_private_jsonl_capped` |
+| memory_store/operations.py:47、:78 | 记忆操作审计 `ops.jsonl`、硬删除墓碑 | `append_private_jsonl_capped` |
+
+- **B 组：`gateway_parts/io.py` 三个通用写函数**
+  - `write_json_file_atomic`、`update_json_file_atomic`、`write_gateway_request` 改走私有原子写；原签名、锁协议、序列化格式（`indent=2`、`sort_keys=True`、无尾换行）不变。
+  - **调用方核对（AST 扫描，共 42 个模块从 `gateway_parts.io` 导入这三个函数）**：`collaboration/store`、`conversation/{goal_progress_fuse,session_pair_rate,session_tasks,store_audits,store_claims,store_goals,store_guidance,store_guidance_acknowledgements,store_guidance_ledger,store_guidance_recovery,store_guidance_submission,store_observations,store_progress,store_tasks,store_threads,store_wake_attempts,store_wakes}`、`gateway_parts/{control_operation_service,control_service,http_handlers,http_service,input_delivery_service,lease_service,permission_bridge,queue_service,recovery,request_binding,request_client,request_experiment,request_experiment_records,request_worker,restart_service}`、`memory_store/retention_apply`、`owner_wake_discovery`、`scale_downstream`、`cli/{adapter,gateway_process,gateway_restart_handover,chat_parts/tui_control_delivery,chat_parts/tui_input_delivery}`。
+  - **这些写的是 Gateway 根下的宿主运行数据**：请求队列（inbox/processing/done/failed/responses）、会话与任务存储、控制面/租约/实验记录状态、adapter 状态（`adapter_state.json`）、停启请求（`stop_request`）、重启交接状态、TUI 投递状态。读写方（TUI、适配器、派活工具、后台服务）都在同一系统用户下，收紧到 0600 不影响它们。
+- **C 组：subagents 9 个文件的写点**
+
+| 文件 | 数据 | 处理 |
+| --- | --- | --- |
+| patch/patch_service.py:178,227 | 补丁复审 Markdown、`output.json` | `write_private_text_file_atomic` |
+| patch/patch_apply_task.py:231,349 | `output.json` | `write_private_text_file_atomic` |
+| execution/report.py:104,108 | 测试执行报告 JSON/MD | `write_private_text_file_atomic` |
+| result_processors.py:166,168,169,170,201 | runner 提示词/回复/结果 JSON、DEBRIEF 头 | `write_private_text_file_atomic` / `write_private_json_file_atomic_no_newline` |
+| probe.py:118 | 通道探针证据文件 | `write_private_text_file_atomic` |
+| manager_work_orders.py:136 | 接管文件 | `write_private_text_file_atomic` |
+| services/hierarchy/service.py:63,67,87,91 | 领导恢复计划/应用报告 JSON/MD | `write_private_text_file_atomic` |
+| task_trash.py:111 | 回收站清单 | `append_private_text` |
+| shell_gateway_execution.py:190,198 | 审计 JSONL（另 `write_bytes` 输出产物不动） | `append_private_text` |
+| runner_context_bundle_files.py:39,43,58,59 | 上下文快照 JSON/MD | `write_private_json_object` / `write_private_text_file_atomic` |
+| utils.py:56,64 | 工单模板文本/JSON（`_write_if_missing`、`_write_json_if_missing`） | `write_private_text_file_atomic` / `write_private_json_object` |
+
+- **不动**：`patch/patch_file_ops.py` 写的是**用户补丁的目标文件**，按口径不改；`shell_gateway_execution._write_output` 写的是命令产物（可能落用户目录），不改。
+- **语义保持的细节**：`_write_if_missing` / `_write_json_if_missing` 的"文件已存在就不碰"语义不变（因此已存在的宽权限文件不会被这两个函数收紧，只有新建走私有）；`update_json_file_atomic` 的读-改-写仍在一把锁内完成。
+- **验证**：新增 `tests/test_private_writes_batch2.py`（18 条，A/B/C 三组）；7 个变异（A 组 2 个、B 组 3 个、C 组 2 个，均为"退回跟随 umask 的公开写法"）全部被抓；相关回归与门禁结果见 TESTS.md。
+
+## 私有锁只动自己建的东西（lkp，2026-10-03，同一分支 `worker/ds3-lock-private`，基于 `459354e1b`，已实现，已并入 step17j，待 9b 安全终审）
+
+- **背景**：锁收私与 step17i 上下文快照口径相撞。快照的私有写入要拿 json_io 的锁，而 `open_private_lock_beneath` 会把锁所在的、**已经存在**的目录 `fchmod(0o700)`；快照的口径是「归档目录是符号链接时，链接所在级和下级目录的权限不动」，于是链接目标里的日期目录被从 0755 改成 0700，两条符号链接用例失败（3a 沙箱外实测）。
+- **3a 裁定（私有锁只动自己建的东西）**：
+  1. 自己新建的目录用 0700 建（no-follow 原语的 `mkdir(mode=0o700)` 保证，不受 umask 放宽）；
+  2. 锁文件本身 0600，拿到锁后对锁文件 `fchmod` 自愈（这条不变）；
+  3. **已经存在的目录，不管是谁的，一律不改权限**。理由：别人抢锁要先能打开锁文件，锁文件 0600 就已经挡住了；目录权限不是防线。这样与上下文快照、owner 维护的符号链接口径一致。
+- **改了什么**：`common/nofollow_fs.open_private_lock_beneath` 删除对父目录的 `os.fchmod(parent_fd, 0o700)`（锁文件 0600 自愈与 no-follow 校验不变）；四个调用方（json_io / jsonl / dispatch / daemon_metadata）的注释与 gateway 模块文档同步；`test_private_lock_permissions.py` 按新口径改用例并补 2 条（10 → 12 项）。
+- **用例变化**：
+  - 新建场景保持「锁 0600、新建目录 0700」（json_io / dispatch / daemon）；
+  - jsonl 场景：目录由 `append_line_locked` 先按 umask 建（0755），锁不再替调用方收紧，断言改为「目录 0755 不动」；
+  - 两处存量用例：预置 0644 锁 / 0755 目录，获取后锁收紧到 0600、**目录保持 0755 不动**；
+  - 新增 `test_lock_beneath_symlinked_ancestor_keeps_existing_dir_modes`：已存在的、经符号链接进入的目录里拿锁（step17i 等价场景），目录权限不变、锁文件 0600、符号链接不被替换；
+  - 新增 `test_primitive_leaves_existing_dir_mode_untouched`：原语级，已存在的 0750 目录里拿锁，目录一位不动。
+- **变异（4 个，全部被抓到，跑完原字节还原 sha256 一致）**：
+  1. **对已存在目录 chmod**（把 `fchmod(parent_fd, 0o700)` 加回去；替换原「父目录不收紧」变异）→ **5 条失败**；
+  2. 新建锁不传权限（0o600 → 0o222）→ 8 条失败；
+  3. 不做 fchmod 自愈 → 2 条失败；
+  4. 锁叶子符号链接跟随（放行 S_ISLNK + 去 O_NOFOLLOW + 去打开后身份复核）→ 2 条失败。
+- **验证**：17 文件 222 passed / 1 failed（唯一失败为沙箱环境限制，基线同样失败）；guards9 172 passed；静态门禁全过。详见 TESTS.md「私有锁只动自己建的东西」。
+- **未验证**：与 step17i 合跑的两条符号链接用例由 3a 沙箱外验证；真实快照链路与真实 Gateway 未跑。
+
+## 宿主数据私有写入后续（pwf，2026-10-03，分支 `worker/private-writes-followup`，基于 ds3 头 `199879045`，已实现，已并入 step17j，待 9b 安全终审）
+
+- **背景**：ds3 锁收私后，仍有一批宿主运行数据走跟随 umask 的 `append_jsonl` / `write_text` / `write_json_file_atomic`（新建 0644 文件、0755 目录）。本次把写宿主数据的地方统一收成私有原语：新文件 0600、新目录 0700、已有宽权限文件下次写入时收紧；只改写入方式，调用方接口与内容逐字节不变（`sort_keys` 语义原样保留，例如审计账仍不排序键）。
+- **逐个核对表**（写什么数据 / 目录 / 父目录改前状态，按代码事实；本轮不读真实 owner home，未做 lstat 复核）：
+
+| 位置 | 数据 | 目录 | 改前父目录 | 处理 |
+| --- | --- | --- | --- | --- |
+| conversation/store_usage.py | 每会话模型用量 JSONL | 会话用量目录（Store 注入） | 0755（mkdir 跟随 umask） | 改私有追加 |
+| conversation/agent_transcript.py | 子代理展示事件 JSONL（含压缩重写） | `<conversation root>/agent_transcript_events/` | 0755 | 改私有追加 + 私有原子写 |
+| conversation/store_guidance.py、store_guidance_ledger.py | 插话队列与回执投影 JSONL | guidance 目录 | 0755 | 改私有追加 |
+| conversation/store_messages.py、store_observations.py、store_wakes.py、store_wake_publication.py、compact_checkpoint.py | 消息账 / 观察账 / 唤醒信号 / 发布回执 / checkpoint（ds3 清单未列，同属会话宿主数据） | conversation root 下 | 0755 | 一并改私有 |
+| audit/logger.py | 审计账 `audit-*.jsonl`、旁路错误账 | `<audit_log_path>` | 0755 | 改私有追加 |
+| local_storage/events.py | events.jsonl | LocalStore root | 0755 | 改私有追加 |
+| gateway_parts/io.py | 请求历史 `gateway_requests.jsonl`；history transition 锁 | gateway root | 0755 | 改私有追加/原子写；**补第四处锁写法** |
+| collaboration/store.py | 参与者 / 证据 / 裁决 / 请求 JSONL | `<collab root>/{participants,evidence,decisions,requests}/` | 0755 | 改私有追加 |
+| user_space/identity_store.py | provider 身份索引、canonical 档案、关联账、canonical 记忆 note | owner home 下 | 0755 | 改私有追加 / 原子写 |
+| user_space/owner_lifecycle.py | owner_status.json、owner 审计账 | owner home 根 | 0755 | 改私有 |
+| user_space/run_workspace.py | work/task.yaml、run_workspace.json、state.json、timeline.jsonl、协作种子 | `<owner_home>/tasks/.../work/` | 0755 | 改私有（`output/` 交付物目录与模型写入的用户文件不动） |
+| memory_store/retention_apply.py | owner 审计、tombstone、回滚写回 | owner trash/retention 等 | 0755 | 改私有 |
+| memory_archive/compact_apply | ledger/context/handoff 等 | apply workspace | 已是私有（此前批次） | 无需改（ds3 清单该项已过时） |
+| subagents/dispatch、capability、patch、debug_trace、recovery、actions、parent_planner | 派工 / 守望 / 路由 / 补丁 / 审阅 / 恢复 / 动作 / 父规划账与 `.md` 展示日志、调试明细、任务工作日志 | 子代理 workspace / 任务目录 | 0755 | 改私有 |
+
+- **第四处锁写法（ds3 遗漏）**：`gateway_parts/io.py` 自己的 `_open_lock_handle` 原来 `lock_path.open("a+") + mkdir` 跟随 umask（0644 锁 / 0755 目录）。本次按 ds3 同一手法改经 `open_private_lock_beneath_tightened`（0600、父目录 0700、存量 0644 打开时收紧），flock / Windows byte-lock / `blocking` 语义不变。
+- **边界**：只动列出的宿主数据写入点；模型写的交付物、用户项目文件、`output/` 目录权限照旧；不改 Windows 回退分支；不做全盘扫描、不碰第三方包锁。
+- **未改（列给 3a 定，同类但不在本次清单）**：
+  - `append_jsonl_records`（批量追加）调用点：`agent_core/run_task_workspace_writer.py`、`capability/persona_repository.py`、`capability/skill_learning_store.py`、`scheduler/repository.py`、`settings/parameter_changes.py`、`tooling/shell.py`、`memory_store/operations.py`。
+  - `gateway_parts/io.py` 的通用 `write_json_file_atomic` / `update_json_file_atomic` / `write_gateway_request`（请求队列 JSON 与大量调用方；改它等于全模块口径变更，本次未动）。
+  - subagents 里剩余的整份报告 / 任务文件 `write_text`（patch_service、patch_apply_task、execution/report、hierarchy/service、result_processors、probe、task_trash、manager_work_orders、shell_gateway_execution 等）；`patch_file_ops` 写的是用户补丁目标文件，按规则不动。
+- **验证**：新增 5 个测试文件（umask 0o022 断言 0600/0700、存量收紧、内容逐字节不变）；每组 1 个变异（退回 `append_jsonl`）全部被抓到；相关回归、guards9 与静态门禁结果见 TESTS.md。
+
+## 写锁 sidecar（.wlock）同批收私（lkf，2026-10-03，同一分支 `worker/ds3-lock-private`，基于 `199879045`，已实现，已并入 step17j，待 9b 安全终审）
+
+- **起因**：ds1（lockr）初审了 ds3 的锁收私交付，结论「必须改 1 + 小问题 4」。3a 采纳后把范围收缩：初审的必须改 1 是 `gateway_parts/io.py` 自带的 `_locked_file_path`/`_open_lock_handle`（仍是 `mkdir` + `open("a+")`，0644 且会静默跟随符号链接），但**那处已由 ds9 在 `worker/private-writes-followup` `17dc9781b` 修改，本分支不再碰 io.py 的锁，3a 合并时用 ds9 的版本**；本轮只收本分支归属的同类旧写法。
+- **本轮的必须改**：`gateway_parts/daemon_metadata._flocked_sidecar` 的 `.wlock` 原来用 `lock_path.open("a+")`（初审实测 0644）。现经 `_open_private_wlock_descriptor` → `common/nofollow_fs.open_private_lock_beneath_tightened` 拿 fd：文件 0600、缺失目录按 0700 新建、已存在的目录一律不动（lkp 2026-10-03 修正，见顶部条目）、符号链接/硬链接锁抛 `NoFollowPathError`、存量 0644 下次加锁即自愈；只 flock 不写内容，阻塞语义与 Windows 降级告警不变。`.wlock` 后缀刻意避开 `scoped_locks` 的 `glob("*.lock")` 扫描，不改。
+- **锁路径父目录核对（逐个核对，结论：都在宿主自己的目录里，没有用户工作区目录）**：
+  | 锁 | 路径来源 | 父目录口径 |
+  |---|---|---|
+  | `gateway.pid.wlock` / `gateway_state.json.wlock` / `gateway_stop.request.wlock` | `GatewayPaths.root`（当前 owner 的 service runtime：`workspace/runtime/services/gateway/`） | 宿主运行目录，收紧 0700 可接受 |
+  | scoped lock 的 `*.lock.wlock` | `XDG_STATE_HOME/my-agent/locks`（`scoped_locks._get_lock_dir`） | 机器级状态目录，同上 |
+  | `_write_json_file` 的临时文件与原子替换 | 与上述目标同目录 | 不变 |
+  这套 helper 只服务 PID 记录 / 运行时状态 / scoped lock 心跳 / 停止请求，路径全部由宿主构造，没有一处跟着用户任务目录走。
+- **非阻塞语义**：`try_gateway_turn_transition` 走 `try_locked_file_transition`（线程锁 `acquire(blocking=False)` + `_try_flock_exclusive`），与阻塞入口是两套实现；本轮补 3 条用例钉住「被占用时立即返回 False、空闲时 True、释放后可再取」，并用变异（改成阻塞入口）验证——该变异会让用例永久挂住（120 秒超时），正说明这条用例真的守着非阻塞语义。
+- **已知边界（本轮写入，来自初审风险 2/3）**：
+  - 「向上找最近已存在父目录」会**穿过更高层符号链接**：直接父目录是符号链接会拒绝，但祖父级是符号链接时锁会建到链接指向的真实目录，不报错。lkp 2026-10-03 已补用例钉住这条路径的权限行为（经符号链接进入的已存在目录权限不变），见顶部条目。
+  - `open_private_lock_beneath_tightened` 的 `fchmod` 失败被 `except OSError: pass` 吞掉：宁可「收紧失败不拦业务」是有意的，但「自愈没生效」运行时不可观测，没有埋点或 `/status` 口径；要看最终收敛效果得另加只读计数。
+- **验证**：新增 6 条用例（wlock 三项 + 非阻塞三项）；变异 4 个全部被抓到；直接相关 26 文件 329 passed / 4 xfailed，guards9 172 passed，静态门禁全过。详见 TESTS.md「写锁 sidecar（.wlock）同批收私」。
+
+## 三套锁写法统一成私有（ds3l，2026-10-03，分支 `worker/ds3-lock-private`，基于 `claude/3a-step17i` `b6ede99e0`，已实现，ds1 初审，已并入 step17j，待 9b 安全终审）
+
+- **问题**（be 2026-10-03 只读评估）：本仓库建锁文件有三套写法，权限口径不统一。
+  - A（对）`open_private_lock_beneath`：文件 0600、缺失目录按 0700 新建、O_NOFOLLOW/O_EXCL、空内容。
+  - B（错）`common/json_io._locked_file_path`（`locked_json_path` 全部调用方）与 `io/jsonl._locked_text_file`（`append_jsonl`/`append_line_locked`）：用 `Path.open("a+")` + `mkdir()` 不显式给 mode，按 umask 落成 **0644 文件 / 0755 目录**。
+  - C（没补齐）`_DispatchWatchLock`：新建给 0600，但父目录 `mkdir` 成 0755、不防符号链接、对已存在文件不 re-chmod，还把 `{token, pid, created_at}` 写进锁文件，pid 会随权限外泄。
+  - 真实 home 实测：本项目空锁 **2158 个 0644**、仅 247 个 0600。同机他用户能 `open(O_RDONLY)` 后 `flock(LOCK_EX)`（flock 不要求写权限）卡住宿主对权威状态的写入。
+- **修法**：
+  - `nofollow_fs` 新增 `open_private_lock_beneath_tightened`：在 `open_private_lock_beneath` 之上，打开后**无条件把已存在锁收紧到 0600**（只收紧不放松、chmod 失败只放弃收紧）。自愈存量 0644 锁，不做全盘扫描、不碰第三方包锁。
+  - B 两处与 C 都改成经该原语拿 fd 再 flock / 写元数据；调用方接口不变，`blocking=False`（同一 OS 锁的 LOCK_NB）与进程内线程锁层保留。
+  - 绝对路径先拆成“已存在的最近父目录 + 其余段”（同 `directory_lock._existing_anchor` 手法），让缺失目录仍统一经 no-follow 原语按 0700 创建；**已存在的目录一律不改权限**（lkp 2026-10-03 修正，与上下文快照的符号链接口径一致）。
+- **行为变化（需明确）**：锁叶子是符号链接/非单链接普通文件时，现在按 A 的既有口径抛 `NoFollowPathError`（原来 B 会静默跟随、C 会跟随）。这是加固，但会让“锁被换成符号链接”的畸形存量在**每一轮**都失败，而不是悄悄跟着写。锁与数据写入不同，故保留 fail-closed 而不是照 context_bundle 那次的“跳过收紧、记警告、照常工作”。
+- **边界**：只动这三处已知锁路径；不碰 Windows msvcrt 回退分支的既有行为；`global_index/*.jsonl`、`memory/daily/*.jsonl` 的数据与目录权限是提交 2。
+- **验证**：新增 `tests/test_private_lock_permissions.py`（8 项，umask 固定 0o022）；4 个变异全部被抓到。**lkp 修正后**为 12 项、变异重跑（含「对已存在目录 chmod」）全部被抓到，见顶部条目；详见 TESTS.md 同名条目。
+
+## global_index 数据文件和目录收私（ds3l，2026-10-03，同一分支，已实现，已并入 step17j，待 9b 安全终审）
+
+- **问题**：be 顺带发现 `global_index/*.jsonl` 的**数据文件**（不只是锁）是 0644、目录 0755。它的追加还在走跟随 umask 的 `append_jsonl`。
+- **改法**：`user_space/home_indexes.py` 的追加改走 `append_private_jsonl_records`，整份重建改走 `write_private_text_file_atomic_unlocked`；文件 0600、目录 0700、已有 0644 下次写入即收紧，内容逐字节不变。
+- **对 be 观察的一处修正**：be 同批提到的 `memory/daily` **目录**经复核不成立——daily 分片本来就走 `write_private_text_file_atomic_unlocked`，其 `_ensure_private_dir` 已把 daily 目录收紧到 0700；已在干净基线 `b6ede99e0` 上实测确认（构造 store 并 append 后目录就是 0700）。故本次**不改 daily**，也没有对应用例。真正 0755 的是 daily 的 `.lock` 旁目录，已由提交 1 覆盖。
+- **边界**：只改 global_index 一处，不扩到别的目录。**其它同类未修**（见交接报告）由 3a 定是否另开。
 
 ## G3 本机客户端附带凭据（2026-10-03，sol1c，worker/sol1-g3-clients，已并入 step17i（2adfd8518；9b 集成终审通过））
 

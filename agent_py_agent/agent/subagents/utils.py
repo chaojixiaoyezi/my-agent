@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-from ..common.json_io import write_json_object
+from ..common.json_io import write_private_json_object, write_private_text_file_atomic
 from .models import SubAgentTask
 
 
@@ -47,18 +47,17 @@ def _apply_missing_paths(task: SubAgentTask, paths: dict[str, object]) -> None:
             setattr(task, key, value)
 
 
+# LLM: 这些缺省文件都是子代理工作区里的宿主状态（工单模板），不是用户交付物；
+#   按私有权限写（目录 0700、文件出生 0600），已有宽权限文件下次写入收紧。
+# 函数用途: 只在文件不存在时写入，避免覆盖子代理已产出的内容（仅本人可读写）。
 def _write_if_missing(path: Path, content: str) -> None:
-    """只在文件不存在时写入，避免覆盖子代理已产出的内容。"""
-
     if path.exists():
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    write_private_text_file_atomic(path, content)
 
 
+# 函数用途: 只在 JSON 文件不存在时写入默认结构（仅本人可读写）。
 def _write_json_if_missing(path: Path, payload: dict[str, object]) -> None:
-    """只在 JSON 文件不存在时写入默认结构。"""
-
     if path.exists():
         return
-    write_json_object(path, payload, sort_keys=False)
+    write_private_json_object(path, payload, sort_keys=False)

@@ -132,6 +132,66 @@ class TestWriteJsonFileAtomic:
                 gateway_io._try_flock_exclusive(handle)
 
 
+class TestTryGatewayTurnTransition:
+    """非阻塞回合转换锁：锁被占用时立即返回 False，绝不等待。"""
+
+    @pytest.fixture
+    def paths(self, tmp_path: Path):
+        from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+
+        return GatewayPaths(
+            root=tmp_path / "gateway",
+            pid=tmp_path / "gateway" / "gateway.pid",
+            adapter_pid=tmp_path / "gateway" / "adapter.pid",
+            state=tmp_path / "gateway" / "gateway_state.json",
+            heartbeat=tmp_path / "gateway" / "gateway_heartbeat.json",
+            stop_request=tmp_path / "gateway" / "gateway_stop.request",
+            log=tmp_path / "gateway" / "gateway.log",
+            inbox=tmp_path / "gateway" / "requests" / "pending",
+            processing=tmp_path / "gateway" / "requests" / "processing",
+            done=tmp_path / "gateway" / "requests" / "done",
+            failed=tmp_path / "gateway" / "requests" / "failed",
+            responses=tmp_path / "gateway" / "responses",
+            history=tmp_path / "gateway" / "gateway_requests.jsonl",
+        )
+
+    def test_returns_false_immediately_while_held(self, paths):
+        """另一个持有者占着锁时立即返回 False，不阻塞等待。"""
+        import time
+
+        from agent_py_agent.agent.gateway_parts.io import (
+            gateway_turn_transition,
+            try_gateway_turn_transition,
+        )
+
+        with gateway_turn_transition(paths, "req-held"):
+            started = time.monotonic()
+            with try_gateway_turn_transition(paths, "req-held") as acquired:
+                elapsed = time.monotonic() - started
+
+        assert acquired is False, "锁被别人拿着时必须报告未取得"
+        assert elapsed < 1.0, "非阻塞探测不得等待持有者释放"
+
+    def test_returns_true_when_lock_is_free(self, paths):
+        """锁空着时非阻塞探测照常取得，并与阻塞入口共用同一条锁路径。"""
+        from agent_py_agent.agent.gateway_parts.io import try_gateway_turn_transition
+
+        with try_gateway_turn_transition(paths, "req-free") as acquired:
+            assert acquired is True
+
+    def test_acquires_again_after_holder_releases(self, paths):
+        """持有者退出后同一个探测能重新取得，失败结果不改变锁文件位置。"""
+        from agent_py_agent.agent.gateway_parts.io import (
+            gateway_turn_transition,
+            try_gateway_turn_transition,
+        )
+
+        with gateway_turn_transition(paths, "req-released"):
+            pass
+        with try_gateway_turn_transition(paths, "req-released") as acquired:
+            assert acquired is True
+
+
 class TestReadJsonFile:
     """测试 read_json_file() 函数。"""
 

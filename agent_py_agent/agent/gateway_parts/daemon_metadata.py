@@ -17,6 +17,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..common.nofollow_fs import open_private_lock_beneath_tightened
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows import guard.
@@ -206,27 +208,50 @@ def _write_json_file(path: Path, payload: dict) -> None:
             _unlink_quiet(tmp)
 
 
+# LLM: 串行化 sidecar 与其余锁同口径私有：文件 0600、缺失目录按 0700 新建、已存在的目录一律不动、
+#   不跟随符号链接（锁叶子是符号链接或硬链接时抛 NoFollowPathError，不再静默跟随）。原来用
+#   lock_path.open("a+") 会按 umask 落成 0644；调用方是 _write_json_file（PID 记录 / 运行时状态 /
+#   scoped lock 心跳）与 daemon_control 的停止请求清理，路径都落在宿主自己的运行目录与
+#   XDG_STATE_HOME/my-agent/locks，新建目录 0700 不碰用户工作区。
+# 函数用途: 用私有写锁描述符串行化一个 sidecar 文件的并发读者与写者，退出时释放并关闭。
 @contextmanager
 def _flocked_sidecar(path: Path):
     # 串行化 sidecar 后缀【刻意】用 .wlock 而非 .lock:scoped_locks 锁目录里
     # release_all_scoped_locks 用 glob("*.lock") 扫描,若写锁 sidecar 也叫 .lock
     # 会被误当成一把"空锁记录"扫到(虽因 load_error 判定不会误删,但污染目录)。
     lock_path = path.with_name(path.name + ".wlock")
-    with lock_path.open("a+", encoding="utf-8") as lock_handle:
-        _flock(lock_handle, exclusive=True)
+    descriptor = _open_private_wlock_descriptor(lock_path)
+    try:
+        _flock_descriptor(descriptor, exclusive=True)
         try:
             yield
         finally:
-            _flock(lock_handle, exclusive=False)
+            _flock_descriptor(descriptor, exclusive=False)
+    finally:
+        os.close(descriptor)
 
 
-def _flock(handle, *, exclusive: bool) -> None:
+# LLM: 写锁 sidecar 的路径由调用方给出（宿主运行目录 / XDG 状态目录），这里按“已存在的最近父目录 +
+#   其余段”交给 no-follow 原语，缺失目录按 0700 创建、已存在的目录一律不动。
+# 函数用途: 打开一个私有写锁描述符，顺带把已存在的宽权限 wlock 收紧到 0600。
+def _open_private_wlock_descriptor(lock_path: Path) -> int:
+    lock_path = Path(os.path.abspath(lock_path))
+    anchor, parts = lock_path.parent, (lock_path.name,)
+    while not anchor.exists() and not anchor.is_symlink():
+        parts = (anchor.name, *parts)
+        anchor = anchor.parent
+    return open_private_lock_beneath_tightened(anchor, parts)
+
+
+# LLM: 不支持 OS 锁的平台沿原告警策略；支持时加锁与解锁共用同一个 fd 上的 flock，阻塞语义不变。
+# 函数用途: 在一个写锁描述符上加/解排他 flock。
+def _flock_descriptor(descriptor: int, *, exclusive: bool) -> None:
     if fcntl is None:
         if exclusive:
             from ..common.file_lock_support import warn_file_lock_unavailable_once
             warn_file_lock_unavailable_once()
         return
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_UN)
+    fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_UN)
 
 
 def _unlink_quiet(tmp: Path) -> None:

@@ -77,7 +77,8 @@ def test_memory_body_and_vector_snapshot_are_tightened_on_the_next_write(tmp_pat
     os.chmod(long_term, 0o755)  # 生产现状：老文件 644、目录 755
     memory.add("user", "团建活动定在周五下午")
 
-    assert (_mode(body), _mode(vectors), _mode(long_term)) == (0o600, 0o600, 0o700), "下一次写入（原子替换）后必须收紧"
+    # pdp 2026-10-03：文件被收紧；已存在的目录权限一律不动（预置的 0755 保持 0755）。
+    assert (_mode(body), _mode(vectors), _mode(long_term)) == (0o600, 0o600, 0o755), "下一次写入（原子替换）后文件必须收紧"
     assert not [path.name for path in long_term.iterdir() if path.name.endswith(".tmp")], "不留临时文件"
 
 
@@ -92,9 +93,22 @@ def test_text_vector_cache_is_private_after_replace(tmp_path, open_umask):
     os.chmod(path.parent, 0o755)
     cache.put({"fingerprint:hash-2": [0.3, 0.4]})
 
-    assert (_mode(path), _mode(path.parent)) == (0o600, 0o700)
+    # pdp 2026-10-03：文件被收紧；已存在的目录权限一律不动（预置的 0755 保持 0755）。
+    assert (_mode(path), _mode(path.parent)) == (0o600, 0o755)
     assert sorted(TextVectorCache(path).get(["fingerprint:hash-1", "fingerprint:hash-2"])) == [
         "fingerprint:hash-1", "fingerprint:hash-2"]
+
+
+@_POSIX_ONLY
+def test_stores_create_private_directories_when_missing(tmp_path, open_umask):
+    """pdp 2026-10-03：目录是存储自己新建的时候，权限是 0700（只有已存在的目录才不动）。"""
+    body = tmp_path / "m1" / "long_term" / "memory.jsonl"
+    JsonlMemory(body, embedder=LocalHashingEmbedder(dim=64), vector_identity=_IDENTITY).add("user", "缺目录时新建")
+    assert _mode(body.parent) == 0o700
+
+    cache_path = tmp_path / "m2" / "long_term" / "memory_text_vectors.json"
+    TextVectorCache(cache_path).put({"fingerprint:hash-1": [0.1, 0.2]})
+    assert _mode(cache_path.parent) == 0o700
 
 
 def test_first_recall_reuses_vectors_written_under_the_same_identity_and_text(tmp_path):

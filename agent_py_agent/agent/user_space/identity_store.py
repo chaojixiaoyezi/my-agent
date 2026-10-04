@@ -6,9 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import jsonl_lines, read_jsonl_objects_report
+from ..common.json_io import (
+    append_private_jsonl_records,
+    jsonl_lines,
+    read_jsonl_objects_report,
+    write_private_text_file_atomic,
+)
 from ..common.path_segments import safe_path_segment
-from ..io import append_jsonl
 from .home_layout import MyAgentHomePaths
 
 if TYPE_CHECKING:
@@ -127,9 +131,12 @@ class CanonicalMemoryNoteRequest:
     source_owner_id: str
 
 
+# LLM: 身份链接账本走私有写（0600/0700）；owner 内与 home 级两处账本同口径。
+# 函数用途: 把一条第三方身份链接写进两级账本。
 def link_provider_identity(home: MyAgentHomePaths, record: ProviderIdentityRecord) -> Path:
     path = _provider_index_path(home, record.provider)
-    append_jsonl(path, record.to_dict(home.root), sort_keys=True)
+    # 私有追加：0600/0700，存量宽权限身份索引下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(path, [record.to_dict(home.root)], sort_keys=True)
     return path
 
 
@@ -153,10 +160,12 @@ def lookup_provider_identity_report(
     return ProviderIdentityLookupReport(latest, report.load_errors)
 
 
+# LLM: 规范用户档案目录缺失按 0700 新建（pdp）；档案 JSON 走私有写（0600），已存在不覆盖。
+# 函数用途: 确保某个规范用户 ID 的 profile.json 存在并返回路径。
 def ensure_canonical_user_profile(home: MyAgentHomePaths, canonical_user_id: str, *, display_name: str = "") -> Path:
     canonical_id = safe_path_segment(canonical_user_id)
     profile = home.canonical_users_dir / canonical_id / "profile.json"
-    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not profile.exists():
         payload = {
             "schema_version": "canonical-user.v1",
@@ -165,10 +174,13 @@ def ensure_canonical_user_profile(home: MyAgentHomePaths, canonical_user_id: str
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
         }
-        profile.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # 私有原子写：0600/0700，存量宽权限档案下次写入即收紧；序列化内容逐字节不变。
+        write_private_text_file_atomic(profile, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return profile
 
 
+# LLM: 规范身份链接走私有写（0600/0700）；JSONL 行格式不变。
+# 函数用途: 把一条规范身份链接追加进身份账本。
 def link_canonical_identity(home: MyAgentHomePaths, request: CanonicalIdentityLinkRequest) -> CanonicalIdentityLink:
     canonical_id = safe_path_segment(request.canonical_user_id)
     ensure_canonical_user_profile(home, canonical_id)
@@ -180,8 +192,9 @@ def link_canonical_identity(home: MyAgentHomePaths, request: CanonicalIdentityLi
         status=request.status,
         path=_canonical_links_path(home, canonical_id),
     )
-    append_jsonl(link.path, link.to_dict(), sort_keys=True)
-    append_jsonl(home.linked_identities_jsonl, link.to_dict(), sort_keys=True)
+    # 私有追加：0600/0700，存量宽权限关联账下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(link.path, [link.to_dict()], sort_keys=True)
+    append_private_jsonl_records(home.linked_identities_jsonl, [link.to_dict()], sort_keys=True)
     return link
 
 
@@ -203,6 +216,8 @@ def canonical_memory_note_path(home: MyAgentHomePaths, canonical_user_id: str) -
     return home.canonical_users_dir / safe_path_segment(canonical_user_id) / "memory" / "long_term" / "notes.jsonl"
 
 
+# LLM: 记忆注记走私有写（0600/0700）；JSONL 行格式不变。
+# 函数用途: 为规范用户写一条记忆注记。
 def write_canonical_memory_note(home: MyAgentHomePaths, request: CanonicalMemoryNoteRequest) -> CanonicalMemoryNote:
     canonical_id = safe_path_segment(request.canonical_user_id)
     ensure_canonical_user_profile(home, canonical_id)
@@ -215,7 +230,8 @@ def write_canonical_memory_note(home: MyAgentHomePaths, request: CanonicalMemory
         "source_owner_id": str(request.source_owner_id or ""),
         "created_at": _now_iso(),
     }
-    append_jsonl(path, payload, sort_keys=True)
+    # 私有追加：0600/0700，存量宽权限 canonical 记忆账下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(path, [payload], sort_keys=True)
     return CanonicalMemoryNote(
         canonical_user_id=canonical_id,
         kind=str(payload["kind"]),

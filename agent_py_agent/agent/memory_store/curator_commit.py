@@ -102,7 +102,8 @@ class CuratorBatchCommitter:
         self.run_log = run_log
         self.memory_root = _memory_root(candidate_service, daily_store, state_store, run_log)
         self.transactions_dir = self.state.path.parent / "transactions"
-        self.transactions_dir.mkdir(parents=True, exist_ok=True)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        self.transactions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # LLM: All target content is computed and quota-checked before the first canonical replace;
     # an exception restores every preimage while locks are still held.
@@ -246,7 +247,8 @@ class CuratorBatchCommitter:
         directory = self.transactions_dir / _safe_run_name(request.run_record.run_id)
         if directory.exists():
             raise CuratorCommitRecoveryError("curator transaction already exists")
-        directory.mkdir(parents=True, exist_ok=False)
+        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+        directory.mkdir(parents=True, exist_ok=False, mode=0o700)
         targets: list[dict[str, object]] = []
         for index, path in enumerate(changes):
             _assert_target(path, self.memory_root)

@@ -14,9 +14,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import locked_json_path
+from ..common.json_io import append_private_jsonl_records, locked_json_path
 from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
-from ..io.jsonl import append_jsonl
 from ..runtime_errors import runtime_error_report
 from .coverage import case_response_coverage
 from .identity import agent_identity_keys, request_update_targets
@@ -84,7 +83,7 @@ class CollaborationBaseStore:
             self.participants_dir,
             self.decisions_dir,
         ):
-            path.mkdir(parents=True, exist_ok=True)
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def _write_case(self, case: CollaborationCase) -> None:
         write_json_file_atomic(self._case_path(case.case_id), case.to_dict())
@@ -120,6 +119,8 @@ class CollaborationBaseStore:
 # ---------------------------------------------------------------------------
 
 class CollaborationEvidenceStore(CollaborationBaseStore):
+    # LLM: 参与人账本按 case 追加，落盘走私有追加（0600/0700）；case 各目录由构造器按 0700 建（pdp）。
+    # 函数用途: 登记一名参与人并返回归一化后的记录。
     def add_participant(self, request: dict) -> CaseParticipant:
         participant = CaseParticipant(
             case_id=str(request.get("case_id") or ""),
@@ -130,9 +131,12 @@ class CollaborationEvidenceStore(CollaborationBaseStore):
             joined_at=current_time(request.get("now")),
             metadata=request.get("metadata") or {},
         )
-        append_jsonl(self._participants_path(participant.case_id), participant.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self._participants_path(participant.case_id), [participant.to_dict()], sort_keys=True)
         return participant
 
+    # LLM: 证据包追加写私有账本（0600/0700）；内容与旧格式逐字节一致，只改权限口径。
+    # 函数用途: 提交一份证据包并落进该 case 的证据账。
     def submit_evidence(self, request: dict) -> EvidencePacket:
         case_id = str(request.get("case_id") or "")
         self.load_case(case_id)
@@ -155,7 +159,8 @@ class CollaborationEvidenceStore(CollaborationBaseStore):
             created_at=current_time(request.get("now")),
             metadata=request.get("metadata") or {},
         )
-        append_jsonl(self._evidence_path(case_id), evidence.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self._evidence_path(case_id), [evidence.to_dict()], sort_keys=True)
         return evidence
 
     def case_evidence(self, case_id: str) -> list[EvidencePacket]:
@@ -174,8 +179,11 @@ class CollaborationEvidenceStore(CollaborationBaseStore):
         report = read_jsonl_report(self._participants_path(case_id), context="collaboration.participants.read")
         return [CaseParticipant.from_dict(row) for row in report.rows], report.load_errors
 
+    # LLM: 裁决记录追加写私有账本（0600/0700）；只记录结构化字段，不解析自然语言。
+    # 函数用途: 把一条 case 裁决追加进裁决账。
     def append_decision(self, decision: CaseDecision) -> CaseDecision:
-        append_jsonl(self._decisions_path(decision.case_id), decision.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self._decisions_path(decision.case_id), [decision.to_dict()], sort_keys=True)
         return decision
 
     def case_decisions(self, case_id: str) -> list[CaseDecision]:
@@ -423,6 +431,8 @@ class _RequestTargetResolution:
 
 
 class CollaborationRequestStore(CollaborationCaseStore):
+    # LLM: 协作请求追加写私有账本（0600/0700）；状态更新仍由按 case 的更新锁串行。
+    # 函数用途: 发起一条协作请求并登记进请求账。
     def request_collaboration(self, request_data: dict) -> CollaborationRequest:
         case_id = str(request_data.get("case_id") or "")
         case = self.load_case(case_id)
@@ -457,7 +467,8 @@ class CollaborationRequestStore(CollaborationCaseStore):
             updated_at=current,
             metadata=metadata,
         )
-        append_jsonl(self._requests_path(case_id), request.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self._requests_path(case_id), [request.to_dict()], sort_keys=True)
         self._add_request_participants(case_id, request, current)
         return request
 
@@ -539,7 +550,8 @@ class CollaborationRequestStatusStore(CollaborationRequestStore):
             "metadata": request_data.get("metadata") or {},
         }
         updated = self._updated_request_snapshot(request, status_text, kwargs)
-        append_jsonl(self._requests_path(case_id), updated.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self._requests_path(case_id), [updated.to_dict()], sort_keys=True)
         self._add_rerouted_participants(case_id, request, updated, kwargs)
         self._append_request_status_decision(case_id, updated, kwargs)
         return updated

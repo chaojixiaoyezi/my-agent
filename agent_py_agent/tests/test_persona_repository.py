@@ -363,7 +363,7 @@ def test_first_persona_commit_failure_restores_document_and_removes_snapshots(
     def fail_append(*_args: object, **_kwargs: object) -> None:
         raise OSError("simulated version-ledger failure")
 
-    monkeypatch.setattr(repository_module, "append_jsonl_records", fail_append)
+    monkeypatch.setattr(repository_module, "append_private_jsonl_records", fail_append)
     with pytest.raises(OSError, match="simulated version-ledger failure"):
         _mutate(repository, "user", "add", content="回答偏好:先给结论", confirmed=True)
 

@@ -1,5 +1,22 @@
 # Memory Structure
 
+## 私有写只动自己建的东西（pdp，2026-10-03）
+
+- `common/json_io._ensure_private_dir`：缺失目录按 0700 新建（no-follow 逐段），已存在的目录一律不动；`write_private_*` / `append_private_*` 全部继承这一口径。
+- 记忆侧建目录点（candidates / lessons / routing / HOT / curator transactions / daily）统一 `mkdir(..., mode=0o700)`，只影响缺失目录的新建权限；已存在目录保持原样。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
+## 记忆操作审计账本私有写入（pw2，2026-10-03）
+
+- `memory_store/operations` 的 `ops.jsonl` 改走 `append_private_jsonl_capped`（目录 0700、文件 0600、存量宽权限下次写入收紧）；写入格式与有界保留行为不变。
+- 其余记忆写入路径（记忆本体、归档、daily、global_index）此前批次已私有，本批只补这一处审计账本。
+
+## global_index 数据与目录私有（ds3l，2026-10-03，分支 `worker/ds3-lock-private`，已实现，待 be 复审）
+
+- `user_space/home_indexes`：索引追加改走 `append_private_jsonl_records`，整份重建改走 `write_private_text_file_atomic_unlocked`（原为跟随 umask 的 `append_jsonl` / `write_text_file_atomic_unlocked`）；`global_index/*.jsonl` 文件 0600、目录 0700。
+- `memory_store/daily` **不改**：分片走 `write_private_text_file_atomic_unlocked`，其 `_ensure_private_dir` 已把 daily 目录收紧到 0700（基线实测确认）。be 说的 daily 目录 0755 实为它的 `.lock` 旁目录，已由同批锁权限统一覆盖。
+- 只收紧不放松、不做全盘扫描、不跟随符号链接；内容逐字节不变（只在尾部追加）。
+
 ## 决策结果日志留存合同（2026-10-03，luna6，本地已实现，待集成）
 
 - 唯一写入入口仍是 `conversation/decision_outcome_log.append_decision_outcome`；路径仍取 owner 规范路径。

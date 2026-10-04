@@ -13,10 +13,9 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from ..common.json_io import write_text_file_atomic
+from ..common.json_io import append_private_jsonl_records, write_private_text_file_atomic
 from ..common.opaque_id import validate_opaque_id
 from ..gateway_parts.io import locked_file_transition
-from ..io.jsonl import append_jsonl
 from .background_transcript import (
     BACKGROUND_TRANSCRIPT_EVENT_KINDS,
     BACKGROUND_TRANSCRIPT_EVENT_PHASES,
@@ -59,6 +58,7 @@ def begin_agent_transcript_turn(
 # LLM: Append accepts the same frozen public event vocabulary as the main
 # background ring, allocates one monotonically increasing file cursor under a
 # cross-process transition lock, and never mutates agent lifecycle state.
+# 落盘走私有追加（0600/0700），已有宽权限展示流下次写入即收紧；内容逐字节不变。
 # 函数用途: 并发安全地追加一条子代理公开展示事件，并返回该 run 的新游标。
 def append_agent_transcript_event(
     agent: object,
@@ -93,9 +93,9 @@ def append_agent_transcript_event(
         )
         last_seq = _safe_int(prior.rows[-1].get("seq")) if prior.rows else 0
         seq = last_seq + 1
-        append_jsonl(
+        append_private_jsonl_records(
             path,
-            {
+            [{
                 "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
                 "seq": seq,
                 "thread_id": str(thread_id or "").strip(),
@@ -105,7 +105,7 @@ def append_agent_transcript_event(
                 "phase": event_phase,
                 "block_id": block_key,
                 "payload": copy.deepcopy(dict(payload or {})),
-            },
+            }],
             sort_keys=True,
         )
         if path.stat().st_size > AGENT_TRANSCRIPT_MAX_BYTES:
@@ -190,6 +190,7 @@ def _compact_agent_transcript_file(path: Path) -> None:
 
 # LLM: The caller already owns the transition lock. Atomic replacement keeps
 # readers from observing a partial JSONL file.
+#   重写同样走私有原子写（0600/0700），存量宽权限展示流在此收紧。
 # 函数用途: 保留展示文件尾部的合法对象并原子覆盖旧文件。
 def _compact_agent_transcript_file_locked(path: Path) -> None:
     if not path.exists():
@@ -204,7 +205,7 @@ def _compact_agent_transcript_file_locked(path: Path) -> None:
         for row in report.rows
         if isinstance(row, dict)
     )
-    write_text_file_atomic(path, content)
+    write_private_text_file_atomic(path, content)
 
 
 # LLM: Validation is an exact schema/identity check; display prose never

@@ -6,8 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import JsonObjectReadReport, read_json_object_report
-from ..io import append_jsonl
+from ..common.json_io import (
+    JsonObjectReadReport,
+    append_private_jsonl_records,
+    read_json_object_report,
+    write_private_text_file_atomic,
+)
 from .owner_resolver import OwnerHomeResult
 
 
@@ -53,6 +57,8 @@ def read_owner_lifecycle_report(owner: OwnerHomeResult) -> OwnerLifecycleReport:
     )
 
 
+# LLM: 状态文件目录缺失按 0700 新建（pdp）；状态 JSON 与审计账都走私有写（0600/0700），内容逐字节不变。
+# 函数用途: 更新 owner 生命周期状态并追加一条审计记录。
 def update_owner_lifecycle(owner: OwnerHomeResult, *, status: str, reason: str = "") -> OwnerLifecycleState:
     path = _lifecycle_path(owner)
     previous = read_owner_lifecycle(owner)
@@ -66,11 +72,13 @@ def update_owner_lifecycle(owner: OwnerHomeResult, *, status: str, reason: str =
         "previous_status": previous.status,
         "updated_at": _now_iso(),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    append_jsonl(
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # 私有原子写：0600/0700，存量宽权限状态文件下次写入即收紧；序列化内容逐字节不变。
+    write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    # 私有追加：0600/0700，存量宽权限 owner 审计账下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(
         owner.home_dir / "audit_log.jsonl",
-        {
+        [{
             "schema_version": "owner-audit-event.v1",
             "event_type": "owner_lifecycle_updated",
             "owner_id": owner.owner_id,
@@ -78,7 +86,7 @@ def update_owner_lifecycle(owner: OwnerHomeResult, *, status: str, reason: str =
             "to_status": payload["status"],
             "reason": payload["reason"],
             "updated_at": payload["updated_at"],
-        },
+        }],
         sort_keys=True,
     )
     return read_owner_lifecycle(owner)

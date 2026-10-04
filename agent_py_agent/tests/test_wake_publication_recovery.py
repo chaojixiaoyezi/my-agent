@@ -49,9 +49,9 @@ def _signal_ids(store):
 @pytest.mark.parametrize("consume", [False, True])
 def test_pair_recovers_fixed_payload_at_every_file_boundary(tmp_path, monkeypatch, stage, consume):
     store, observation, wake = _fixture(tmp_path)
-    original_receipt = publication.write_json_file_atomic_unlocked
-    original_signal = publication.write_json_file_atomic
-    original_observation = publication.append_jsonl
+    original_receipt = publication.write_private_json_file_atomic_unlocked
+    original_signal = publication.write_private_json_file_atomic
+    original_observation = publication.append_private_jsonl_records
     injected = False
 
     def fail_at(point):
@@ -74,14 +74,14 @@ def test_pair_recovers_fixed_payload_at_every_file_boundary(tmp_path, monkeypatc
         original_signal(path, payload)
         fail_at("wake_after")
 
-    def observation_write(path, payload, **kwargs):
+    def observation_write(path, records, **kwargs):
         fail_at("observation_before")
-        original_observation(path, payload, **kwargs)
+        original_observation(path, records, **kwargs)
         fail_at("observation_after")
 
-    monkeypatch.setattr(publication, "write_json_file_atomic_unlocked", receipt_write)
-    monkeypatch.setattr(publication, "write_json_file_atomic", signal_write)
-    monkeypatch.setattr(publication, "append_jsonl", observation_write)
+    monkeypatch.setattr(publication, "write_private_json_file_atomic_unlocked", receipt_write)
+    monkeypatch.setattr(publication, "write_private_json_file_atomic", signal_write)
+    monkeypatch.setattr(publication, "append_private_jsonl_records", observation_write)
     with pytest.raises(OSError, match="injected"):
         store.wakes.append_observation(observation, wake)
     assert injected
@@ -141,7 +141,7 @@ def test_goal_can_continue_after_previous_fixed_key_wake_is_handled(tmp_path):
 def test_retain_handled_is_decided_under_same_lock_during_concurrent_publish(tmp_path, monkeypatch):
     store, observation, wake = _fixture(tmp_path)
     installed, release = Event(), Event()
-    original = publication.write_json_file_atomic_unlocked
+    original = publication.write_private_json_file_atomic_unlocked
 
     def hold_completion(path, payload):
         if payload["phase"] == "published" and not installed.is_set():
@@ -149,7 +149,7 @@ def test_retain_handled_is_decided_under_same_lock_during_concurrent_publish(tmp
             assert release.wait(5)
         return original(path, payload)
 
-    monkeypatch.setattr(publication, "write_json_file_atomic_unlocked", hold_completion)
+    monkeypatch.setattr(publication, "write_private_json_file_atomic_unlocked", hold_completion)
     another = ConversationStore(store.storage.root)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(store.wakes.append_observation, observation, wake)
@@ -245,7 +245,7 @@ def test_v1_incomplete_observation_is_not_rebuilt_from_new_request(tmp_path):
 @pytest.mark.parametrize("consume", [False, True])
 def test_signal_only_half_install_replays_original_generation(tmp_path, monkeypatch, consume):
     store, _, wake = _fixture(tmp_path, retain_handled=False)
-    original = publication.write_json_file_atomic_unlocked
+    original = publication.write_private_json_file_atomic_unlocked
     injected = False
 
     def fail_completion(path, payload):
@@ -257,7 +257,7 @@ def test_signal_only_half_install_replays_original_generation(tmp_path, monkeypa
             raise OSError("injected incomplete signal publication")
         return original(path, payload)
 
-    monkeypatch.setattr(publication, "write_json_file_atomic_unlocked", fail_completion)
+    monkeypatch.setattr(publication, "write_private_json_file_atomic_unlocked", fail_completion)
     with pytest.raises(OSError):
         store.wakes.raise_signal({**wake, "summary": "原信号"})
     replay = store.wakes.raise_signal({**wake, "summary": "重试不覆盖"})

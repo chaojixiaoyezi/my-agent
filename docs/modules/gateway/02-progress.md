@@ -22,6 +22,44 @@
 - 已知边界：窗口内对同一代文件会多读一次（代价是一次文件读取），换来确定性；窗口外行为与原来一致。
 - 测试与变异见 `TESTS.md` 顶部同名节；真实 Gateway/TUI/飞书轮询未验证。
 
+## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）
+
+- `common/json_io._ensure_private_dir` 改口径（3a 裁定，与锁收私 ds8 同口径）：缺失目录按 0700 新建（no-follow 逐段），已存在的目录一律不改权限。
+- `gateway_parts/io.write_json_file`、`scheduler/repository` 的建目录点改 `mkdir(..., mode=0o700)`；Gateway 队列目录（inbox/responses/history 等）此前由普通 mkdir 先建、靠私有写收紧，现在建出来即 0700；已存在的目录（含用户指定路径）不再被收紧。
+- 已知边界：inbox 的 `.lock` 文件会随请求累积，本次不改，清理留给 owner 维护后续项。
+
+## Gateway 队列与通用 JSON 写入口私有写入（pw2，2026-10-03，分支 `worker/private-writes-batch2`，待复审）
+
+- `gateway_parts/io` 的三个通用写函数 `write_json_file_atomic` / `update_json_file_atomic` / `write_gateway_request` 改走私有原子写（目录 0700、文件 0600、存量宽权限下次写入收紧），内容逐字节不变（新增不带尾换行的私有原语以保持原格式）。
+- 42 个调用方已逐个核对，写的是 Gateway 根下的宿主运行数据：请求队列（inbox/processing/done/failed/responses）、会话与任务存储、控制面/租约/实验记录状态、adapter 状态、停启请求与交接状态。读写方（TUI、适配器、派活工具、后台服务）都是同一个系统用户，收紧到 0600 不影响它们。
+- 调度器历史账本 `scheduler/repository` 与任务 `timeline.jsonl` 同批改私有追加。用例与变异见 [TESTS](../../../TESTS.md)。
+
+## 写锁 sidecar（.wlock）同批收私 + 初审三条小问题（lkf，2026-10-03，分支 `worker/ds3-lock-private`，基于 `199879045`，已实现，待 9b 安全终审）
+
+- **背景**：ds1（lockr）对 ds3 的锁收私交付做初审，结论「必须改 1 + 小问题 4」。3a 采纳后范围收缩：
+  `gateway_parts/io.py` 的 `_locked_file_path`/`_open_lock_handle` 由 **ds9 的 `worker/private-writes-followup` `17dc9781b`** 负责，
+  本分支不再动 io.py 的锁，3a 合并时用 ds9 的版本；本轮只收本分支归属的另一处旧写法。
+- **本轮的必须改**：`gateway_parts/daemon_metadata._flocked_sidecar` 的写锁 `.wlock` 原来用 `lock_path.open("a+")`，
+  按 umask 落成 0644（初审实测；父目录若是 Gateway 运行目录 0700 尚可，父目录一宽即可被同机他用户抢 flock）。
+  现改经 `_open_private_wlock_descriptor` → `common/nofollow_fs.open_private_lock_beneath_tightened` 拿 fd：
+  文件 0600、缺失目录按 0700 新建、已存在的目录一律不动（lkp 2026-10-03 修正，见 DESIGN_LEDGER 顶部）、
+  锁叶子是符号链接或非单链接普通文件时抛 `NoFollowPathError`（不再静默跟随）、
+  已存在的 0644 wlock 下次加锁即自愈收紧；只 flock 不写内容。阻塞加锁语义与 Windows 降级告警保持不变。
+- **非阻塞语义用例**：`try_gateway_turn_transition` 走 `try_locked_file_transition`（线程锁 `acquire(blocking=False)` +
+  `_try_flock_exclusive`），与阻塞入口 `gateway_turn_transition` 是两套实现。补 3 条用例钉住：锁被占用时立即返回 False、
+  空闲时取得 True、持有者释放后可再次取得（`tests/test_gateway_io.py::TestTryGatewayTurnTransition`）。
+- **初审三条小问题**：①TESTS.md 提交 2 的变异计数改准（实际是有 1 个被抓住，原来写成「2 个」又把第 2 个标「不适用」）；
+  ②`memory/daily` 措辞改成「首次写入前有短暂的 0755 窗口，写入后是 0700」（现状：`DailyMemoryStore.__init__` 的 mkdir 按 umask，
+  第一次 append 时 `_ensure_private_dir` 才收紧）；③两条已知边界写进台账（见下）。
+- **已知边界（初审风险 2、3，3a 要求写进台账）**：
+  - 锁路径的「向上找最近已存在父目录」会**穿过更高层的符号链接**：`_open_private_lock_descriptor` 系列先把绝对路径拆成
+    「最近已存在的父目录 + 其余段」再交给 no-follow 原语，所以直接父目录是符号链接会被拒绝，但更高层（祖父级）是符号链接时
+    锁会被建到那个链接指向的真实目录里，而不是报错。lkp 2026-10-03 已补用例钉住这条路径的权限行为（经符号链接进入的已存在目录权限不变），改这里的人要知道。
+  - `open_private_lock_beneath_tightened` 的 `fchmod` 失败被 `except OSError: pass` 吞掉：设计上是「不让收紧失败拦住拿锁」，
+    但因此「自愈没生效」在运行时完全不可观测——存量锁有没有真的收敛、下一次启动是否仍是 0644，没有任何埋点或 `/status` 口径能回答。
+    只看最终收敛效果时需要另加只读计数。
+- 测试与变异结果见 TESTS.md「三套锁写法统一成私有」一节的补充段。
+
 ## G3 返工：凭据读不到时按 G2b 开关降级，不再提前拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 
 - 起因：现在是 G2a 阶段，服务端只计数、不拦；客户端在凭据读不到时发 HTTP 前就拒绝，等于提前做了 G2b。新 TUI 连上还没生成凭据的旧 Gateway（部署窗口）、或凭据权限被人改过时，TUI/飞书适配器/插件命令会全断。

@@ -91,23 +91,30 @@ class ParentPlannerBuilder:
 class ParentPlannerLogAppender:
     """Write global parent planner audit log."""
 
+    # LLM: 父规划器日志走私有写（0600/0700）；JSONL 行格式不变。
+    # 函数用途: 把一条父规划器记录追加进日志并补齐 Markdown 头。
     @staticmethod
     def append(record, workspace, manager) -> None:
         """Write global parent planner audit log entry."""
         from dataclasses import asdict
 
-        from agent_py_agent.agent.io import append_jsonl
+        from agent_py_agent.agent.common.json_io import (
+            append_private_jsonl_records,
+            append_private_text,
+            write_private_text_file_atomic,
+        )
 
         jsonl = workspace / "parent_planner_log.jsonl"
-        append_jsonl(jsonl, asdict(record))
+        # 父规划账属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(jsonl, [asdict(record)], sort_keys=False)
 
         markdown = workspace / "PARENT_PLANNER_LOG.md"
         if not markdown.exists():
-            markdown.write_text("# PARENT PLANNER LOG\n\n", encoding="utf-8")
-        with markdown.open("a", encoding="utf-8") as handle:
-            status = "OK" if record.ok else "FAIL"
-            handle.write(
-                f"- [{status}] {record.id} decision={record.decision} "
-                f"triggered={record.triggered} message={record.message}\n"
-            )
+            write_private_text_file_atomic(markdown, "# PARENT PLANNER LOG\n\n")
+        status = "OK" if record.ok else "FAIL"
+        append_private_text(
+            markdown,
+            f"- [{status}] {record.id} decision={record.decision} "
+            f"triggered={record.triggered} message={record.message}\n",
+        )
         manager.indexing.index_parent_planner_record(record)

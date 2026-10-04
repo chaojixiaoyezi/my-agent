@@ -1,5 +1,23 @@
 # 记忆与上下文维护状态
 
+## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）
+
+- `common/json_io._ensure_private_dir` 改口径（3a 裁定，与锁收私 ds8 同口径）：缺失目录按 0700 新建（沿用 no-follow 原语逐段创建、不跟随符号链接），**已存在的目录一律不改权限**；不再对已存在目录 chmod。文件本身仍出生 0600、存量宽权限下次写入收紧。
+- 记忆侧建目录点跟着改成 0700 建：`memory_store/candidates`（候选仓库）、`memory_store/lessons`（lesson 目录 + routing 目录 + HOT 目录）、`memory_store/curator_commit`（事务目录与每个 run 的事务子目录）、`memory_store/daily`（daily 分片目录，原为普通 mkdir 靠首次写入收紧）。
+- 可配置路径边界：目录被指到已存在的用户目录时，写入只新增 0600 文件、目录与兄弟文件一位不动；存量宿主目录的收紧归 owner 维护负责，不在每次写入时做。
+- 用例与变异见 [TESTS](../../../TESTS.md) 的 pdp 节。
+
+## 记忆操作审计账本私有写入（pw2，2026-10-03，分支 `worker/private-writes-batch2`，待复审）
+
+- `memory_store/operations` 的 `ops.jsonl`（无正文的形式变更审计与硬删除墓碑）从 `append_jsonl_capped` 改走 `append_private_jsonl_capped`：目录 0700、新文件 0600、已有宽权限文件下次写入收紧；有界保留语义与写入格式逐字节不变。
+- 用例与变异见 [TESTS](../../../TESTS.md) 的 pw2 节。
+
+## daily 目录权限复核：本来就已是 0700（ds3l，2026-10-03，分支 `worker/ds3-lock-private`）
+
+- be 2026-10-03 只读评估提到 `memory/daily/` 目录是 0755；复核**不成立**：daily 分片走 `common/json_io.write_private_text_file_atomic_unlocked`，其 `_ensure_private_dir` 会把目录收紧到 0700。已在干净基线 `b6ede99e0` 上构造 `DailyMemoryStore` 并 append 后实测目录为 **0o700**。
+- 故本次**不改** daily，也没有对应用例。真正 0755 的是 daily 的 `.lock` 旁目录，已由同批锁权限统一覆盖（见 DESIGN_LEDGER 同名条目）。
+- 同批把 `global_index/*.jsonl` 的数据文件与目录收私，只收紧不放松、不做全盘扫描。
+
 ## 嵌入用量与召回方式的进程内计数（S7，2026-10-02，分支 `claude/be-embedding-usage-facts`，已实现，待集成）
 
 - 嵌入客户端按用途（写入、召回、重建、工具检索）计请求、条数、失败和供应商回报的 token；scoped 检索计 semantic/keyword/none。不落盘，不进 model call ledger。详见 DESIGN_LEDGER 同名条目。

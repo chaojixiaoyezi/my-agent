@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..io import append_jsonl
+from ..common.json_io import append_private_jsonl_records
 from ..runtime_errors import runtime_error_report
 from .paths import resolve_audit_paths
 from .records import (
@@ -71,7 +70,7 @@ class AuditLogger:
         self._audit_root = paths.root
         self._audit_file = paths.log_file
         if self.enabled:
-            self._audit_root.mkdir(parents=True, exist_ok=True)
+            self._audit_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def _generate_entry_id(self) -> str:
         """生成条目 ID:秒级戳(可读/可排序)+ UUID4(122 位,无碰撞)。
@@ -112,12 +111,15 @@ class AuditLogger:
             user_agent=log_params.user_agent,
         )
 
+    # LLM: 审计账唯一落盘口：append_private_jsonl_records 在同一把线程锁 + fcntl 锁内追加，文件 0600、
+    #   目录缺失才按 0700 新建（pdp 2026-10-03）；格式与旧裸写逐字节一致（ensure_ascii=False、不排序键、一行一条）。
+    # 函数用途: 把一条审计条目以仅本人可读写权限追加进审计账文件。
     def _write_to_file(self, entry: AuditEntry) -> None:
         # H5:裸 open("a")+write 无锁,两线程/进程并发 log 会行内交错出半行 JSON。
-        # 改走 io.jsonl.append_jsonl(threading.Lock + fcntl.flock LOCK_EX 双层),
-        # 每条记录作为完整一行落盘。格式不变:ensure_ascii=False、不排序键、一行一条
-        # (append_jsonl 默认 sort_keys=False),与原 json.dumps(...) 完全一致。
-        append_jsonl(self._audit_file, entry.to_dict())
+        # 改走私有追加(threading.Lock + fcntl.flock LOCK_EX 双层不变),文件 0600、父目录 0700,
+        # 已有宽权限审计文件下次写入即收紧。格式不变:ensure_ascii=False、不排序键、一行一条
+        # (append_private_jsonl_records 默认 sort_keys=False),与原 json.dumps(...) 完全一致。
+        append_private_jsonl_records(self._audit_file, [entry.to_dict()], sort_keys=False)
 
     def _write_to_local_store(self, entry: AuditEntry) -> None:
         try:
@@ -140,14 +142,16 @@ class AuditLogger:
         except Exception as exc:
             self._write_audit_side_effect_error(entry, exc)
 
+    # LLM: 审计写本地库失败不能反过来打断主流程：旁路错误同样按私有追加落进审计根，OSError 直接放弃。
+    # 函数用途: 把审计旁路失败的运行时报告写进 audit_side_effect_errors.jsonl。
     def _write_audit_side_effect_error(self, entry: AuditEntry, exc: BaseException) -> None:
         report = runtime_error_report(exc, context="audit.local_store.record_event")
         report["entry_id"] = entry.entry_id
         report["action"] = entry.action
         side_effect_path = self._audit_root / "audit_side_effect_errors.jsonl"
         try:
-            with side_effect_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(report, ensure_ascii=False) + "\n")
+            # 旁路错误同样写宿主审计目录：私有追加（0600/0700），内容与原 json.dumps(...)+\n 逐字节一致。
+            append_private_jsonl_records(side_effect_path, [report], sort_keys=False)
         except OSError:
             return
 

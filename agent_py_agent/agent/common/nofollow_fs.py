@@ -217,15 +217,34 @@ def write_bytes_atomic_beneath(
         os.close(parent_fd)
 
 
+# LLM: 私有写/私有锁共用的锚点规则（pdp 2026-10-04，3a 裁定）：最近的已存在祖先本身是符号链接时
+#   （用户工作区/项目目录常指到外置盘），允许跟随一次到它的真实目录，再从那里往下新建缺失段——
+#   它已存在，权限照旧一位不动；新建段仍逐段 no-follow（段内再出现符号链接一律拒绝）。
+#   目标不是目录（断链、指向文件）时保持 fail-closed，不让私有写落到不可预期的位置。
+# 函数用途: 把“最近已存在的符号链接锚点”解析成真实目录；非链接原样返回，目标不可用抛 NoFollowPathError。
+def resolve_existing_symlink_anchor(anchor: str | Path) -> Path:
+    anchor_path = Path(anchor)
+    if not anchor_path.is_symlink():
+        return anchor_path
+    resolved = Path(os.path.realpath(anchor_path))
+    if not resolved.is_dir():
+        raise NoFollowPathError("managed symlink anchor target is not a directory")
+    return resolved
+
+
 # LLM: 永久锁仅允许单链接普通文件；先排他创建，已存在再打开，避免并发非排他创建的歧义；调用方关闭 fd。
+#   锁只动自己新建的东西：缺失目录经 no-follow 原语按 0700 建（mkdir 的 mode 不受 umask 放宽），锁文件 0600；
+#   已存在的目录——不管是宿主其它模块建的还是 owner 维护的符号链接布局——一律不改权限。同机他用户抢锁要先能
+#   打开 0600 的锁文件，目录权限不是防线；收紧已存在目录会破坏上下文快照“链接所在级和下级目录不动”的口径。
+#   锚点本身是符号链接时允许跟随一次（见 resolve_existing_symlink_anchor，与私有写同一规则）。
 # 函数用途: 安全创建私有锁目录并打开不截断的锁文件，避免目录预检后再次按路径跟随链接。
 def open_private_lock_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> int:
     _validate_relative_parts(relative_parts)
+    root = resolve_existing_symlink_anchor(root)
     if not _supports_dir_fd():
         return _open_private_lock_portable(root, relative_parts)
     parent_fd = open_directory_beneath(root, relative_parts[:-1], create=True)
     try:
-        os.fchmod(parent_fd, 0o700)
         try:
             return _openat_file(
                 parent_fd, relative_parts[-1], os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
@@ -234,6 +253,21 @@ def open_private_lock_beneath(root: str | Path, relative_parts: tuple[str, ...])
             return _openat_file(parent_fd, relative_parts[-1], os.O_RDWR, 0o600)
     finally:
         os.close(parent_fd)
+
+
+# LLM: 存量锁可能是在本修复之前按 umask 建的 0644；打开分支不重建 inode，故必须显式收紧，
+#   否则那批世界可读的锁会一直留着。fchmod 只要求属主、不要求持锁，对正被别人 flock 的锁也安全。
+#   只收紧不放松（已比 0600 更严就不动），chmod 失败只放弃收紧，不让拿锁失败。只动锁文件本身；
+#   目录权限由 open_private_lock_beneath 负责（新建 0700、已存在的目录一律不动）。
+# 函数用途: 打开一把私有锁并把已存在锁文件的权限收紧到仅本人可读写，返回可 flock 的描述符。
+def open_private_lock_beneath_tightened(root: str | Path, relative_parts: tuple[str, ...]) -> int:
+    descriptor = open_private_lock_beneath(root, relative_parts)
+    try:
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
+            os.fchmod(descriptor, 0o600)
+    except OSError:
+        pass
+    return descriptor
 
 
 # LLM: 缺少 dir_fd 时仍检查父链、锁叶子与打开后身份；无法承诺 POSIX 的目录替换竞态强度。
@@ -579,6 +613,7 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
 __all__ = [
     "NoFollowPathError",
     "append_text_beneath",
+    "resolve_existing_symlink_anchor",
     "open_private_lock_beneath",
     "list_names_beneath",
     "open_directory_beneath",

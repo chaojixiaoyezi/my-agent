@@ -590,6 +590,166 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **静态门禁**：`ruff check agent_py_agent scripts` → `All checks passed`（首次 4 个 I001 导入排序，`--fix` 后复跑通过）；`check_import_boundaries.py`、`check_doc_sync.py`、strict code-size、`check_clean_package.py`、`git diff --check`、guards9 结果见交接报告与提交信息。
 - **未验证**：真实 Gateway/TUI/飞书轮询语义（组件级用例只能证明接口层）、Linux 车道（本机为 macOS）、全仓 pytest（由 3a 车道跑）。
 
+## 私有写/私有锁符号链接锚点跟随一次（pdp 后续，2026-10-04，待复审）
+
+- **改了什么**：新增 `nofollow_fs.resolve_existing_symlink_anchor`；`json_io._ensure_private_dir` 与 `open_private_lock_beneath` 在「最近已存在祖先」是符号链接时解析到真实目录再建缺失段；断链/指向文件保持拒绝。另修 `test_gateway_model_adoption` 的故障注入点（pw2 后挪到 `common.json_io._replace_with_retry`）与 ds4 点名的两个函数注释。
+- **新增用例**（`test_private_dirs_policy.py`，共 13 条）：
+  1. `test_private_dir_beneath_symlinked_workspace_root_creates_target_children`：link→real，写 `link/.background_jobs/registry.jsonl` → `real/.background_jobs` 0700、real 保持 0755、链接不被替换、文件 0600；
+  2. `test_private_dir_rejects_symlink_segment_with_unusable_target`：祖先位置断链/指向文件的链接 → 拒绝；原语层从真实目录建缺失段时 parts 段已存在链接 → 拒绝；
+  3. `test_private_lock_beneath_symlinked_anchor_creates_lock_in_target`：`locked_json_path(link/state.json)` → 锁文件在真实目录里 0600 建、目录权限不动。
+- **fix1**：`test_gateway_model_adoption.py::test_atomic_write_failure_does_not_guess_submission_or_duplicate_http` 故障注入点从 `gateway_parts.io._replace_with_retry` 挪到 `common.json_io._replace_with_retry`（真实链路：`write_json_file_atomic` → `write_private_json_file_atomic_no_newline` → common `_replace_with_retry`）；三种 phase 真触发，产品行为不变（before_replace 不采纳、after_replace/readback_unknown 抛错且不重复 HTTP）。
+- **ds4 必须改**：`shell_gateway_execution._write_audit`、`task_trash._append_manifest` 补 `# LLM:`/`# 函数用途:`。
+- **命令与结果**（`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pdp*`）：
+  - 3 个失败文件（gateway_model_adoption + silent_swallow_stage2 + semantic_memory_storage）→ **56 passed**；
+  - 29 个相关文件（原集合 + private_dirs_policy）→ **323 passed**；
+  - guards9（10 文件）→ **172 passed**；
+  - `check_import_boundaries.py` → findings=0；`ruff` → All checks passed；`check_doc_sync.py --base 199879045` 与 `--base 3a42f457d` → 均 DOC_SYNC_PASS；strict code-size → `hard=0 blocked=False`（报告已还原）；`git diff --check` 干净。
+- **变异（3 个，2 KILLED + 1 等价存活）**：
+  1. 锚点不解析（`resolve_existing_symlink_anchor` 直接返回原路径）→ **KILLED**（符号链接工作区用例失败）；
+  2. 锁不解析锚点（`open_private_lock_beneath` 去掉 resolve 调用）→ **KILLED**（锁用例失败）；
+  3. 断链检查去掉（`is_dir` 守卫移除）→ **SURVIVED**（等价防线：下层 `_open_verified_root` 的 lstat 仍对不存在的解析目标抛 FileNotFoundError，拒绝行为不变，仅错误来源不同）。
+- **未验证**：真实 owner home 的符号链接布局、真实 Gateway 链路。
+
+
+## 私有写也只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）
+
+- **改了什么**：`_ensure_private_dir` 对已存在目录不再 chmod、缺失目录经 no-follow 原语按 0700 新建；26 处「先普通 mkdir 再私有写」的建目录点改 `mkdir(..., mode=0o700)`；第一批（ds9）39 个改动函数补双层注释；subagent/memory/gateway 三模块文档同步；顺带修复 pw2 的 `execution/report.py` 导入点数（基线复核为既有失败）。
+- **新增用例**：`tests/test_private_dirs_policy.py`（10 条）
+  - `_ensure_private_dir`：缺失 0700（含中间目录）、已存在 0755 不动、符号链接不跟随；
+  - 可配置路径：audit_log_path 单文件形态在 0755 用户目录（目录/兄弟文件不动、审计文件 0600）、审计根缺失 0700、LocalStore events 在 0755 目录（files 子目录 0700）；
+  - 建目录点：memory 四个仓库、scheduler、task_trash、gateway io。
+- **旧断言改动（逐条）**：
+  - `test_private_writes_batch2.py` 7 处：「已存在 0755 目录被收紧到 0700」→「目录保持 0755、文件 0600」（capped append / gateway json / update json / request enqueue / 工单模板 / task_trash / shell 审计）；
+  - `test_memory_file_permissions.py` 5 处：`_loosen` 后目录断言 0700 → 0755（candidates / daily / lessons 索引 / HOT 晋升与降级）；
+  - `test_global_index_permissions.py` 1 处：目录 0700 → 0755；
+  - `test_main_context_bundle_contract.py` 2 处：base/snapshots 目录 0700 → 0755；
+  - `test_private_lock_permissions.py` 1 处：append_line_locked 建的目录 0755 → 0700（本批把它改成了 0700 建）；
+  - `test_private_writes_conversation.py` 1 处：测试预置目录 0700 → 0755。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pdp*`）：
+  - `test_private_dirs_policy.py` → **10 passed**；
+  - 29 个相关文件（private_writes × 6、private_lock、nofollow × 2、context_bundle × 5、file_io × 2、jsonl、gateway_io、daily、global_index × 2、memory_file、memory_store × 3、wake_publication）→ **320 passed**；
+  - **基线复核**（`git worktree add --detach /private/tmp/claude-501/pdp-base 3a42f457d`）：batch2 + memory_file + global_index + private_lock 共 **38 passed**；`test_context_bundle_latest_cli_reports_observability_payload` 在基线上同样失败（report.py 导入错误，既有）；另两条 context_bundle 用例基线通过（本批按新口径改断言）。
+  - **guards9**（10 文件）→ **172 passed**；
+  - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；
+  - `check_doc_sync.py --base 199879045` 与 `--base 3a42f457d` → 均 **DOC_SYNC_PASS**；
+  - `check_code_size.py --mode strict` → `hard=0 blocked=False`（`CODE_SIZE_REPORT.md` 已还原不提交）；`git diff --check` → 干净；
+  - `check_clean_package.py .` → `OK: 未发现发布阻塞项`；`size_diff.sh $PWD` → 新增告警 0 / 消失告警 24（提交 `4cba1b91b` 后跑）。
+- **变异（6 个，全部 KILLED，跑完按原字节还原 sha256 一致）**：
+  1. `_ensure_private_dir` 新建改宽权限（mode=0o777）→ 用例 1 失败；
+  2. `_ensure_private_dir` 对已存在目录 chmod → 用例 2 失败；
+  3. daily 建目录退回 umask → 建目录点用例失败；
+  4. jsonl `append_line_locked` 退回 umask → 锁权限用例失败；
+  5. candidates 建目录退回 umask → memory 权限用例失败；
+  6. task_trash 建目录退回 umask → 建目录点用例失败。
+- **未验证**：真实 home 权限、真实 Gateway/CLI 链路、owner 维护侧的存量收紧（明确不在本批范围）。
+
+
+## 宿主数据私有写入第二批（pw2，2026-10-03，分支 `worker/private-writes-batch2`，基于 pwf 头 `9bd2fc318`，已实现，待复审）
+
+- **改了什么**：pwf 列给 3a 定的三类（append 家族剩余调用点、`gateway_parts/io` 三个通用 JSON 写函数、subagents 剩余整份写）全部改走私有原语；新文件 0600、新目录 0700、已有宽权限文件下次写入收紧，内容与调用方接口逐字节不变。新增三个私有原语：`append_private_jsonl_capped`、`write_private_json_file_atomic_no_newline[_unlocked]`、`write_private_json_object`。逐处核对表与 42 个调用方核对见 DESIGN_LEDGER 同名条目。
+- **提交**：`d4cb0cdb7` A 组（append 家族 7 点）、`3a7cfd60e` B 组（`gateway_parts/io` 三函数）、`bca523459` C 组（subagents 9 文件）。
+- **新增用例**：`tests/test_private_writes_batch2.py`（18 条，A/B/C 三组）
+  - A 组 9 条：`append_private_jsonl_capped` / `append_private_jsonl_records` 新建 0600/0700、预置 0644/0755 写一次收紧、有界语义、与公开版本内容逐字节一致；三个真实调用点（`shell._record_background_job`、参数中心账本、persona 版本账本）。
+  - B 组 4 条：`write_json_file_atomic` / `update_json_file_atomic` / `write_gateway_request` 新建 0600/0700、存量收紧、内容与 JSON 序列化逐字节一致。
+  - C 组 5 条：`utils` 工单模板、`task_trash` 清单、`shell_gateway_execution` 审计、以及"文件已存在就不碰"的语义保持。
+  - 命令：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_private_writes_batch2.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-pw2` → **18 passed**。
+- **相关回归（同一命令）**：`test_private_writes_batch2.py`、`test_private_writes_subagents.py`、`test_persona_repository.py`、`test_scheduler_repository.py`、`test_config_write_permissions.py`、`test_jsonl_capped_append.py`、`test_skill_learning.py`、`test_run_task_workspace_writer.py` → **116 passed**。B 组另跑 `test_gateway_io / test_gateway_client / test_gateway_adapter / test_gateway_http / test_conversation_store / test_gateway_control_operation / test_gateway_client_service` → **273 passed + 1 skipped**。C 组另跑 `test_result_processors_class / test_offline_subagent_contract / test_e2e_subagent_workflow`（41 passed）与 `test_dispatch_loop / test_dispatch_mixin / test_dispatch_lock / test_orchestration_create_subagents_items / test_orchestration_dispatch_refs / test_subagent_hierarchy_scheduler / test_audit_dispatch / test_e2e_dispatch_flow`（115 passed）。
+- **变异（每组 2 个，均为"退回跟随 umask 的公开写法"，跑完按原字节还原并核对 sha256）**：
+  - A：M1 `append_private_jsonl_capped` → `_atomic_write_text_unlocked`、M2 `append_private_jsonl_records` → `append_jsonl_records` → **均 KILLED**。
+  - B：M3 `write_json_file_atomic` → 公开 `mkdir+write_text`、M4 `update_json_file_atomic` → 公开 tmp+replace、M5 `write_gateway_request` → 公开 tmp+replace → **均 KILLED**。
+  - C：M6 `utils._write_if_missing` → 公开 `mkdir+write_text`、M7 `task_trash` 清单 → 公开 `open('a')` → **均 KILLED**。
+  - 变异脚本在仓库外的 `/private/tmp`；`git status` 交付时干净。
+- **收尾门禁**：guards9（10 文件）→ **172 passed**；`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`（首跑 4 处 import 折行，已修）；`check_doc_sync.py --base 9bd2fc318` → **DOC_SYNC_PASS**（首跑缺 subagent/memory/gateway 三份模块文档，已补 02-progress 与 04-structure 各一条）；`check_code_size.py --mode strict` → `hard=0 blocked=False`（`CODE_SIZE_REPORT.md` 已还原不提交）；`git diff --check` → 干净；`size_diff.sh $PWD` → **新增告警 0 / 消失告警 17**；`check_clean_package.py .` → `OK: 未发现发布阻塞项`。
+- **环境限制**：本机未跑全仓 pytest（按规则只跑直接相关文件与 guards9）；真实 Gateway、TUI、IM 与真实 home 权限未验证。
+
+## 私有锁只动自己建的东西（lkp，2026-10-03，同一分支，基于 `459354e1b`，已实现，待 3a 合并验证）
+
+- **背景与裁定**：锁收私与 step17i 上下文快照的符号链接口径相撞——`open_private_lock_beneath` 会把**已经存在**的锁目录 `fchmod(0o700)`，而快照要求「归档目录是符号链接时，链接所在级和下级目录的权限不动」，链接目标里的日期目录被从 0755 改成 0700，两条符号链接用例失败（3a 沙箱外实测）。3a 裁定「私有锁只动自己建的东西」：新建目录 0700、锁文件 0600 自愈、**已存在目录一律不改权限**（理由：抢锁先要能打开 0600 的锁文件，目录权限不是防线）。详见 DESIGN_LEDGER 顶部条目。
+- **改了什么**：`common/nofollow_fs.open_private_lock_beneath` 删除 `os.fchmod(parent_fd, 0o700)`；`test_private_lock_permissions.py` 按新口径改用例、补 2 条（10 → 12 项）；json_io / jsonl / dispatch / daemon_metadata 注释与 gateway 模块文档同步。
+- **用例**：
+  1. jsonl 场景：锁 0600；目录由 `append_line_locked` 按 umask 建（0755），锁不再替调用方收紧；
+  2. 两处存量用例：预置 0644/0755，锁收紧到 0600、目录保持 0755 不动；
+  3. 新增 `test_lock_beneath_symlinked_ancestor_keeps_existing_dir_modes`（step17i 等价：经符号链接进入的已存在目录权限不变、锁 0600、链接不被替换）；
+  4. 新增 `test_primitive_leaves_existing_dir_mode_untouched`（原语级：0750 目录一位不动）。
+- **变异（4 个，全部被抓到，跑完原字节还原 sha256 一致）**：
+  1. **对已存在目录 chmod**（把 `fchmod(parent_fd, 0o700)` 加回去）→ 5 条失败；
+  2. 新建锁不传权限（0o222）→ 8 条失败；
+  3. 不做 fchmod 自愈 → 2 条失败；
+  4. 锁叶子符号链接跟随 → 2 条失败。
+- **跑过的命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-lkp*`）：
+  - 17 文件（锁/私有权限/nofollow/jsonl/派工锁/daemon/gateway_io）→ **222 passed / 1 failed**；唯一失败 `test_directory_lock_wait.py::test_store_recovery_and_commit_are_not_interrupted_after_lock_admission` 报 `managed background launcher identity unavailable`，已在干净基线 `459354e1b`（临时 worktree）不改代码复跑，**基线同样失败**，属沙箱环境限制，与本改动无关。
+  - **guards9** → **172 passed**。
+  - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；`git diff --check` → 干净；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`size_diff.sh` → **新增告警 0 / 消失告警 16**。
+- **未验证**：与 step17i 合跑的两条符号链接用例由 3a 沙箱外验证；真实快照链路与真实 Gateway 未跑。
+
+## 宿主数据私有写入后续（pwf，2026-10-03，分支 `worker/private-writes-followup`，基于 ds3 头 `199879045`，已实现，待复审）
+
+- **改了什么**：ds3 清单里仍跟随 umask 的宿主数据写入统一改走私有原语（`append_private_jsonl_records` / `append_private_text` / `write_private_text_file_atomic` / `write_private_json_file_atomic(_unlocked)`）：新文件 0600、新目录 0700、已有宽权限文件下次写入即收紧；调用方接口与序列化内容逐字节不变（`sort_keys` 语义原样保留，例如审计账仍不排序键）。另补 `gateway_parts/io._open_lock_handle` 这第四处锁写法（ds3 遗漏）。逐处核对表、边界与未改清单见 DESIGN_LEDGER 同名条目。
+- **提交**：`80488a043` 会话与用量、`17dc9781b` 审计与事件、`c87cd9396` 协作与身份/工作区、`5b2b9a919` 子代理（`9cb5a03fe` 补一处）、`1b2803e16` 记忆 retention。
+- **新增用例（5 个文件，umask 固定 0o022，全部 tmp_path）**：
+  - `test_private_writes_conversation.py`：transcript 追加/压缩重写、唤醒观察账 —— 新建 0600/0700、预置 0644 写一次收紧、内容逐字节保留。
+  - `test_private_writes_audit_events.py`：审计账、LocalStore events、Gateway 历史 + transition 锁自愈。
+  - `test_private_writes_collaboration.py`：协作参与者账、run workspace timeline/state/task.yaml/协作种子。
+  - `test_private_writes_subagents.py`：debug_trace、子代理任务工作日志。
+  - `test_private_writes_memory.py`：retention 审计。
+  - 命令：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <上面 5 文件> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-pwf` → **11 passed**。
+- **相关回归（同一命令）**：`test_agent_transcript`、`test_conversation_wake_events`、`test_wake_publication_recovery`、`test_audit`、`test_audit_class`、`test_audit_redaction`、`test_local_store`、`test_local_store_basics`、`test_gateway_readiness_generation`、`test_collaboration_concurrency`、`test_collaboration_control_plane_coordinator`、`test_home_identity_store`、`test_subagent_task_workspace_state`、`test_subagent_debug_trace`、`test_agent/test_subagent_action_and_route`、`test_agent/test_dispatch_capability_followup`、`test_dispatch_mixin`、`test_owner_maintenance`、`test_gateway_owner_retention` → **全部通过（含 1 项既有 skip）**。
+- **变异（每组 1 个，退回 `append_jsonl` 跟随 umask 的写法；跑完已用备份还原）**：conversation / audit / collaboration / subagents / memory 五组各被对应用例抓到（rc=1）；还原后 rc=0。
+- **收尾门禁**：guards9（10 文件）→ **172 passed**；`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `hard=0 blocked=False`（`CODE_SIZE_REPORT.md` 已还原不提交）；`git diff --check` → 干净；`size_diff.sh` → **新增告警 0 / 消失告警 16**（首跑曾因测试 helper 参数超 4 个新增 1 条，已拆平）；`check_clean_package.py .` → `OK: 未发现发布阻塞项`。
+- **环境限制**：本机未跑全仓 pytest（按规则只跑直接相关文件与 guards9）；真实 Gateway、TUI、IM 与真实 home 权限未验证。
+
+## 写锁 sidecar（.wlock）同批收私（lkf，2026-10-03，同一分支，基于 `199879045`，已实现，待 9b 安全终审）
+
+- **改了什么**：`gateway_parts/daemon_metadata._flocked_sidecar` 的 `.wlock` 从 `lock_path.open("a+")`（按 umask 落成 0644）改成经 `_open_private_wlock_descriptor` → `nofollow_fs.open_private_lock_beneath_tightened` 拿 fd：文件 0600、缺失目录按 0700 新建、已存在的目录一律不动（lkp 2026-10-03 修正，见顶部条目）、符号链接/硬链接锁抛 `NoFollowPathError`、存量 0644 自愈收紧，只在 fd 上 flock。`_flock` 改名 `_flock_descriptor`（改收 fd 而非文件对象），阻塞语义与 Windows 降级告警不变。
+- **范围说明**：`gateway_parts/io.py` 的 `_locked_file_path`/`_open_lock_handle`（初审必须改 1 的另一半）由 **ds9 的 `worker/private-writes-followup` `17dc9781b`** 负责，本分支未改，3a 合并时用 ds9 的版本。
+- **新增用例**：
+  - `test_private_lock_permissions.py`（8 → 11 项）新增 3 项：`.wlock` 的锁私有（新建目录 0700）；预置 0644 的 wlock 下次加锁收紧到 0600（lkp 修正后：已存在的 0755 目录不动）；wlock 是符号链接时抛 `OSError` 且不跟随改写目标。
+  - `test_gateway_io.py` 新增 `TestTryGatewayTurnTransition` 3 项：**锁被别人拿着时立即返回 False 且耗时 < 1 秒**（钉非阻塞语义）、空闲时取得 True、持有者释放后可再次取得。
+- **变异（4 个，全部被抓到，跑完原字节还原 sha256 一致）**：
+  1. daemon `.wlock` 退回 `open("a+")` → 3 条失败；
+  2. daemon 不自愈存量 wlock（换成 `open_private_lock_beneath`）→ 1 条失败；
+  3. daemon 跟随符号链接（改走 `_open_private_lock_portable`）→ 1 条失败；
+  4. `try_gateway_turn_transition` 改成阻塞入口 → **用例永久挂住（120 秒超时）**，即非阻塞语义被破坏的可观察证据。
+- **补充说明（重要）**：变异 4 第一次跑时因为会挂住，整批脚本被 SIGTERM 打断、io.py 的变异没走到还原步骤；已用 `git checkout -- agent_py_agent/agent/gateway_parts/io.py` 手工还原并核对（`git status` 确认该文件干净）。后续单跑 M4 时改成独立超时保护，复现同样结论且正常还原。
+- **跑过的命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-lkf*`）：
+  - 直接相关 26 文件（初审 11 文件 + `test_gateway_io` + daemon/scoped/adapter_daemon/transcript/guidance/usage/retention/host_identity 等）→ **329 passed, 4 xfailed**。
+  - **guards9** → **172 passed**。
+  - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；`git diff --check` → 干净；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
+- **未验证**：真实 Gateway 运行中 `.wlock` 的收敛效果（沙箱不连真实 Gateway）；非 dir_fd 平台的 `_open_private_lock_portable` 分支行为。
+
+## 三套锁写法统一成私有（ds3l，2026-10-03，分支 `worker/ds3-lock-private`，基于 `claude/3a-step17i` `b6ede99e0`，已实现，待 be 复审）
+
+- **改了什么**：`common/json_io._locked_file_path`、`io/jsonl._locked_text_file`、`_DispatchWatchLock` 都改经新原语 `nofollow_fs.open_private_lock_beneath_tightened`（文件 0600、缺失目录按 0700 新建、已存在目录一律不动（lkp 修正）、不跟随符号链接，打开时把已存在锁收紧到 0600）。调用方接口、`blocking=False` 语义、进程内线程锁层不变。
+- **新增用例**：`agent_py_agent/tests/test_private_lock_permissions.py`（8 项，umask 固定 0o022，全部 pytest tmp_path）：
+  1. `locked_json_path` 的锁 0600、新建的父目录 0700、内容为空；
+  2. `append_line_locked` 的锁私有；目录由调用方按 umask 建（lkp 修正后锁不再替它收紧）；
+  3. `_DispatchWatchLock` 的锁与新建父目录都私有；
+  4. 预置 0644 文件 / 0755 目录（三种锁各一份），获取后锁收紧到 0600、目录保持 0755 不动（lkp 修正）；
+  5. 锁叶子是符号链接时抛 `OSError`，且不跟随改写目标；
+  6. `_DispatchWatchLock` 写的 `token/pid` 元数据照旧能读回，权限仍 0600；
+  7. `blocking=False` 在竞争时立即失败、锁空出后成功。
+- **变异（4 个，全部被抓到，跑完已还原）**：
+  1. B 新建不传权限（`0o600` → `0o222`）→ 4 条用例失败；
+  2. C 父目录不收紧（去掉 `fchmod(0o700)`）→ 2 条失败（lkp 修正后该变异由「对已存在目录 chmod」替代：新口径下目录本就不收紧，见顶部条目）；
+  3. 不做 fchmod 自愈 → 自愈用例失败；
+  4. 跟随符号链接（改走 portable 分支）→ 2 条失败。
+- **跑过的命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds3l`）：
+  - `test_private_lock_permissions/test_dispatch_lock/test_session_lock/test_nofollow_binary_io/test_nofollow_tree/test_memory_file_permissions/test_config_write_permissions/test_distributed_lock/test_jsonl_capped_append/test_subagent_lock_lifecycle` → **93 passed**。
+  - `check_import_boundaries.py` → `findings=0`；`ruff` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`git diff --check` → 干净；`check_code_size.py --mode strict` → `hard=0 blocked=False`；`size_diff.sh` → 新增告警 0 / 消失告警 16；`check_clean_package.py .` → 通过（提交前唯一阻塞项是新测试文件未纳入版本控制，提交后消失）。
+- **环境限制（未处理）**：`test_directory_lock_wait.py::test_store_recovery_and_commit_are_not_interrupted_after_lock_admission` 报 `managed background launcher identity unavailable`。已在干净基线 `b6ede99e0` 上不改代码复跑：**基线同样失败**，属沙箱读不到进程 birth token 的环境限制，与本改动无关，未处理、未删测试。
+- **符号链接口径**：锁叶子是符号链接/非单链接普通文件时按 A 的既有口径抛 `NoFollowPathError`（加固）。`locked_json_path` 的调用方目前没有任何一处把锁做成符号链接，故不会让现有调用方每轮失败；极少数畸形存量锁上会显式报错而不是静默跟随。
+
+## global_index 数据文件和目录收私（ds3l，2026-10-03，同一分支，已实现，待 be 复审）
+
+- **改了什么**：`user_space/home_indexes.py` 的索引追加改走 `append_private_jsonl_records`、整份重建改走 `write_private_text_file_atomic_unlocked`（原为跟随 umask 的 `append_jsonl` / `write_text_file_atomic_unlocked`）。只改这一处，内容逐字节不变。
+- **对 be 观察的一处修正（措辞已收紧，3a 要求）**：be 说 `memory/daily` 目录是 0755，静态复核不成立——daily 分片走 `write_private_text_file_atomic_unlocked`，其 `_ensure_private_dir` 会把目录收紧到 0700。**但必须补上时序**：`DailyMemoryStore.__init__`（`daily.py:114`）的裸 `mkdir(parents=True, exist_ok=True)` 不给 mode，所以**首次写入前目录确实按 umask 落成 0755**，第一次 append 时才收紧到 0700。初审在临时目录用真实 `DailyMemoryStore` 独立实测：init 后 **0o755** → append 后 **0o700**、分片 0o600、分片 `.lock` 0o600。故「本次不改 daily」的结论不变，但「daily 目录本来就是 0700」只对稳定态成立，不是从出生就是。长期保持 0755 的是 daily 的 `.lock` 旁目录，已由提交 1 覆盖。
+- **新增用例**：`agent_py_agent/tests/test_global_index_permissions.py`（2 项，umask 固定 0o022）：
+  1. global_index 新建追加 → 文件 0600、目录 0700；
+  2. 预置 0644/0755 的 global_index 文件 → 下次追加收紧，且已有内容逐字节不变（只在尾部追加）。
+- **变异（提交 2 实际只有 1 个被抓住；计数已更正）**：追加退回 `append_jsonl` → 2 条用例失败。原文写「2 个，全部被抓到」又把第 2 条标「不适用」，实际提交 2 只做了 1 个变异，daily 那条不成立（daily 本次未改，见上）。初审复跑时把 `common/json_io._tighten_private_file` 改成 no-op（等价于「存量数据文件不收紧」）也被这条用例抓住，可作为提交 2 的第 2 个有效变异补记。
+- **跑过的命令**：`test_global_index_permissions` + `test_private_lock_permissions` + `test_memory_file_permissions` + `test_memory_store_jsonl{, _class}` + `test_store_scan_indexes` + `test_jsonl_capped_append` + `test_home_index_*.py`。
+- **其它同类未修（列给 3a 定，不在本次范围）**：仍走跟随 umask 的 `append_jsonl` 的还有——`collaboration/store.py`（参与者/证据/裁决/请求）、`user_space/identity_store.py`、`user_space/run_workspace.py`、`user_space/owner_lifecycle.py`、`conversation/store_usage.py`、`conversation/agent_transcript.py`、`conversation/store_guidance.py`、`gateway_parts/io.py`、`audit/logger.py`、`local_storage/events.py`、`memory_store/retention_apply.py`、`memory_archive/compact_apply`、`subagents/**`（dispatch/capability/patch/debug_trace/recovery）。这些目录大多父目录已是 0700，且不在 be 本次点名范围。
+
 ## G3 返工：凭据读不到时按 gateway_require_local_credential 降级或拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 
 - 来源：3a 的 G3 返工工单与 GATEWAY_LOCAL_TRUST 1.4/1.5。开关关（默认 false）＝照常发送但不带 `X-Gateway-Token`、只记一次原因码 warning；开关开＝发请求前拒绝、零请求。非空 `gateway_auth_token` 优先、direct 不读凭据不变。

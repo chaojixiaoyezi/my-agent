@@ -11,7 +11,7 @@ import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..common.json_io import append_jsonl_records
+from ..common.json_io import append_private_jsonl_records
 from ..conversation.authority import (
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
@@ -198,7 +198,7 @@ def _publish_sandbox_tmp_outputs(root: Path, run_id: str) -> list[str]:
             except OSError:
                 continue
         if published:
-            append_jsonl_records(
+            append_private_jsonl_records(
                 work_dir / "timeline.jsonl",
                 [
                     {

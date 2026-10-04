@@ -1,7 +1,10 @@
 
 from __future__ import annotations
 
-"""Persistence helpers for test execution reports."""
+"""Persistence helpers for test execution reports.
+
+报告 JSON/MD 落盘走 write_private_text_file_atomic（pw2）：0600 文件、0700 目录。
+"""
 
 import json
 from dataclasses import dataclass, field
@@ -9,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
+from ...common.json_io import write_private_text_file_atomic
 from .records import TestExecutionRecord
 
 
@@ -93,7 +97,8 @@ def write_test_execution_report(
     """Persist test execution records as JSON and Markdown."""
 
     root = Path(output_dir)
-    root.mkdir(parents=True, exist_ok=True)
+    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     opts = options or TestExecutionReportOptions()
     report = _build_report(
         records,
@@ -101,11 +106,12 @@ def write_test_execution_report(
         json_path=root / "test_execution.json",
         markdown_path=root / "test_execution.md",
     )
-    report.json_path.write_text(
+    # 测试执行报告是子代理工作区里的宿主状态文件，按私有权限写（目录 0700、文件出生 0600）。
+    write_private_text_file_atomic(
+        report.json_path,
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
-    report.markdown_path.write_text(render_test_execution_markdown(report), encoding="utf-8")
+    write_private_text_file_atomic(report.markdown_path, render_test_execution_markdown(report))
     return report
 
 

@@ -398,14 +398,14 @@ def test_conservative_budget_rejects_utf8_even_when_old_estimator_underreads(mon
 
 @pytest.mark.parametrize("phase", ["before_replace", "after_replace", "readback_unknown"])
 def test_atomic_write_failure_does_not_guess_submission_or_duplicate_http(tmp_path, monkeypatch, phase):
+    from agent_py_agent.agent.common import json_io as common_json_io
     from agent_py_agent.agent.conversation.store import ConversationStore
-    from agent_py_agent.agent.gateway_parts import io as json_io
 
     fixture = actual_request(tmp_path)
     install_backend(monkeypatch, fixture)
     business, _ = fake_http(monkeypatch, fixture)
     thread_path = fixture.agent.conversation_store.storage.thread_path(fixture.thread_id)
-    original_write = json_io._replace_with_retry
+    original_write = common_json_io._replace_with_retry
     original_require = fixture.agent.conversation_store.threads.require
     writes = []
 
@@ -424,7 +424,10 @@ def test_atomic_write_failure_does_not_guess_submission_or_duplicate_http(tmp_pa
             raise OSError("injected unreadable commit")
         return original_require(thread_id)
 
-    monkeypatch.setattr(json_io, "_replace_with_retry", fail_write)
+    # pdp 2026-10-03：pw2 之后 thread 写入走 common.json_io 的私有原子写
+    #   （gateway_parts.io.write_json_file_atomic → write_private_json_file_atomic_no_newline
+    #   → common 的 _replace_with_retry），故障注入点跟着挪到真实函数上。
+    monkeypatch.setattr(common_json_io, "_replace_with_retry", fail_write)
     monkeypatch.setattr(fixture.agent.conversation_store.threads, "require", require)
     if phase == "before_replace":
         request_execution._run_gateway_ask(fixture.context)

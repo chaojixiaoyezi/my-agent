@@ -37,7 +37,7 @@ class LocalStoreMaintenanceMixin:
             conn.execute("DELETE FROM records")
             conn.commit()
         if reset_events_file:
-            self.events_path.parent.mkdir(parents=True, exist_ok=True)
+            self.events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.events_path.write_text("", encoding="utf-8")
         if remove_content_files:
             self._remove_content_files()

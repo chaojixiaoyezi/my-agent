@@ -18,6 +18,11 @@ from typing import Any
 from ..runtime_errors import runtime_error_report
 from . import cache_freshness
 from .cache_freshness import cache_stat_signature
+from .nofollow_fs import (
+    open_directory_beneath,
+    open_private_lock_beneath_tightened,
+    resolve_existing_symlink_anchor,
+)
 
 try:
     import fcntl
@@ -317,15 +322,23 @@ def write_private_text_file_atomic_unlocked(
         _unlink_tmp_file(tmp)
 
 
-# LLM: 新建按 0700；已存在且宽于 0700 时收紧。属主不是本进程等原因 chmod 失败只放弃收紧，不让写入失败。
-# 函数用途: 确保私有文件所在目录存在且只有本人可进入（可能新建目录或 chmod）。
+# LLM: 私有写只动自己新建的东西（pdp 2026-10-03，3a 裁定，与锁收私 ds8 同口径）：缺失目录按 0700 新建、
+#   逐段不跟随符号链接；已存在的目录——不管是谁建的、权限多宽——一律不改。文件 0600 已经挡住内容；
+#   调用方可能把目录指到用户可见的位置（如 shell_gateway_execution 的 artifact_dir），收紧会误伤；
+#   存量宿主目录的收紧归 owner 维护负责，不在每次写入时做。复用锁的“已存在最近祖先 + 缺失段”手法，
+#   让缺失目录统一经 no-follow 原语创建（mkdir 的 mode 不受 umask 放宽）。
+#   最近已存在的祖先本身是符号链接时允许跟随一次（pdp 2026-10-04：用户工作区常指到外置盘），
+#   到它的真实目录再往下建；目标不是目录（断链/指向文件）保持拒绝，新建段仍逐段 no-follow。
+# 函数用途: 确保私有文件所在目录存在；缺失则按 0700 新建，已存在（含符号链接）则完全不动。
 def _ensure_private_dir(directory: Path) -> None:
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        if stat.S_IMODE(directory.stat().st_mode) != 0o700:
-            os.chmod(directory, 0o700)
-    except OSError:
+    target = Path(os.path.abspath(directory))
+    anchor, parts = target, ()
+    while not anchor.exists() and not anchor.is_symlink():
+        parts = (anchor.name, *parts)
+        anchor = anchor.parent
+    if not parts:
         return
+    os.close(open_directory_beneath(resolve_existing_symlink_anchor(anchor), parts, create=True))
 
 
 # LLM: 仅在 memory_archive 锚点下逐级创建/收紧目录；发现符号链接时保留目标权限并返回结构化原因码，调用方仍可私有写文件。
@@ -401,6 +414,41 @@ def write_private_json_file_atomic_unlocked(path: Path, payload: object, *, sort
     )
 
 
+# LLM: 少数既有入口（Gateway 队列文件）原来不带尾换行；要把它们改成私有写又不改内容，
+#   就需要一个不带尾换行的私有变体。缩进、sort_keys 与调用方原实现一致。
+# 函数用途: 以仅本人可读写的权限原子替换一个 JSON 文件，且不加尾换行（自取锁）。
+def write_private_json_file_atomic_no_newline(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+    with _locked_json_path(path):
+        write_private_json_file_atomic_no_newline_unlocked(path, payload, sort_keys=sort_keys)
+
+
+# LLM: 同 write_private_json_file_atomic_no_newline；调用方须已持有 locked_json_path(path)。
+# 函数用途: 持锁场景下以仅本人可读写的权限原子替换一个 JSON 文件，不加尾换行。
+def write_private_json_file_atomic_no_newline_unlocked(
+    path: Path, payload: object, *, sort_keys: bool = True
+) -> None:
+    _ensure_private_dir(path.parent)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.chmod(tmp, 0o600)
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys))
+        _replace_with_retry(tmp, path, keep_mode=False)
+    finally:
+        _unlink_tmp_file(tmp)
+
+
+# LLM: 与 write_json_object 同格式（indent=2、可选 sort_keys、尾换行、父目录自动创建），权限走私有：
+#   子代理工单模板等宿主状态文件原本走 write_json_object，改用这里后行为不变、权限收紧。
+# 函数用途: 以仅本人可读写的权限写一个 JSON 对象文件（父目录自动创建，带尾换行）。
+def write_private_json_object(path: Path, payload: dict[str, object], *, sort_keys: bool = True) -> None:
+    write_private_text_file_atomic(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n",
+    )
+
+
 # LLM: JSONL 整文件替换与 write_jsonl_records 同格式（每行一条、ensure_ascii=False、可选 sort_keys、尾换行）。
 # 函数用途: 以仅本人可读写的权限原子替换一个 JSONL 文件（自取锁）。
 def write_private_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_keys: bool = True) -> None:
@@ -427,6 +475,22 @@ def append_private_jsonl_records(path: Path, records: list[dict[str, object]], *
         return
     blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
     append_private_text(path, blob)
+
+
+# LLM: 有界 append 的私有版：与 append_jsonl_capped 同一锁协议与读-改-写语义（只留最近 max_records 条、
+#   坏行跳过、max_records<=0 退化为不裁剪整文件重写），权限走私有——目录 0700、新文件出生 0600、
+#   已有宽权限文件在整文件重写时被收紧（write_private_text_file_atomic_unlocked 不抄回旧权限）。
+#   写入格式与 append_jsonl_capped 逐字节一致（ensure_ascii=False、无 sort_keys、每行尾换行）。
+# 函数用途: 以仅本人可读写的权限有界追加一条 JSONL 记录（只保留最近 max_records 条）。
+def append_private_jsonl_capped(path: Path, record: dict[str, object], *, max_records: int) -> None:
+    _ensure_private_dir(path.parent)
+    with _locked_json_path(path):
+        records = read_jsonl_objects_report(path).records
+        records.append(record)
+        if max_records > 0:
+            records = records[-max_records:]
+        content = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records)
+        write_private_text_file_atomic_unlocked(path, content)
 
 
 # LLM: 出生即 0600（os.open 的 mode 不靠 umask 保证）；并发下目标已存在时直接返回，由收紧步骤处理权限。
@@ -487,18 +551,36 @@ def _locked_json_path(path: Path, *, blocking: bool = True):
         handle.lock.release()
 
 
-# LLM: 锁文件路径和创建方式保持原协议；非阻塞只使用同一 OS 锁的 LOCK_NB，不跳过跨进程互斥。
+# LLM: 锁文件必须与数据文件同口径私有：文件 0600、不跟随符号链接，缺失目录按 0700 新建、已存在的目录
+#   一律不动（lkp 2026-10-03 修正，与上下文快照的符号链接口径一致）；原来用 Path.open("a+")+mkdir
+#   会按 umask 落成 0644/0755，同机他用户能打开并 flock(LOCK_EX) 卡住宿主写入（be 2026-10-03 实测 2158 个 0644）。
+#   改成经 open_private_lock_beneath 拿 fd 再 flock；只 flock、不写内容；保留 blocking=False（同一 OS 锁的 LOCK_NB）
+#   与进程内线程锁层。已存在的 0644 锁在打开时无条件收紧到 0600（自愈存量），只做在我们已知的锁路径上。
 # 函数用途: 在原同名锁文件上获取排他权，忙碌或异常时关闭文件句柄。
 @contextmanager
 def _locked_file_path(path: Path, *, blocking: bool = True):
     lock_path = path.with_name(path.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        _flock_exclusive(handle, blocking=blocking)
+    descriptor = _open_private_lock_descriptor(lock_path)
+    try:
+        _flock_descriptor(descriptor, blocking=blocking)
         try:
             yield
         finally:
-            _flock_unlock(handle)
+            _funlock_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 调用方给的是完整锁路径；原语按受信根 + 相对段打开，这里把绝对路径拆成“已存在的最近父目录 + 其余段”，
+#   与 directory_lock._existing_anchor 同一手法，让缺失目录仍统一经 no-follow 原语创建（0700；已存在的目录一律不动）。
+# 函数用途: 打开一个私有锁文件描述符，顺带把已存在的宽权限锁收紧到 0600。
+def _open_private_lock_descriptor(lock_path: Path) -> int:
+    lock_path = Path(os.path.abspath(lock_path))
+    anchor, parts = lock_path.parent, (lock_path.name,)
+    while not anchor.exists() and not anchor.is_symlink():
+        parts = (anchor.name, *parts)
+        anchor = anchor.parent
+    return open_private_lock_beneath_tightened(anchor, parts)
 
 
 # LLM: 不支持 OS 锁的平台沿原告警策略；支持时两种等待模式使用同一 flock，默认行为不变。
@@ -514,6 +596,23 @@ def _flock_exclusive(handle, *, blocking: bool = True) -> None:
 def _flock_unlock(handle) -> None:
     if fcntl is not None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+# LLM: 与 _flock_exclusive 同一 OS 锁，只是作用于裸描述符（私有锁原语给的是 fd，不是文件对象）。
+# 函数用途: 在锁文件描述符上取排他锁，可选择立即报告竞争。
+def _flock_descriptor(descriptor: int, *, blocking: bool = True) -> None:
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    else:
+        from .file_lock_support import warn_file_lock_unavailable_once
+        warn_file_lock_unavailable_once()
+
+
+# LLM: 并发 + 非阻塞模式下阻塞取锁会把调用方的“立即返回”语义变成挂起，故只在非阻塞失败时抛原竞争错误。
+# 函数用途: 释放锁文件描述符上的排他锁。
+def _funlock_descriptor(descriptor: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 # LLM: 所有原子写（JSON、JSONL 账本、文本）都经这里替换；替换前先让临时文件带上目标原来的权限位，

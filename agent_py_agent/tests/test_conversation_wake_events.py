@@ -81,15 +81,15 @@ def test_combined_observation_wake_publishes_wake_first_and_links_both_sides(
 ) -> None:
     store = ConversationStore(tmp_path / "conversations")
     thread = _thread(store)
-    original_append = conversation_store_module.append_jsonl
+    original_append = conversation_store_module.append_private_jsonl_records
     pending_seen_before_observation = []
 
-    def checked_append(path, payload, *, sort_keys=False):
+    def checked_append(path, records, *, sort_keys=False):
         if "observations" in str(path):
             pending_seen_before_observation.extend(store.wakes.pending())
-        return original_append(path, payload, sort_keys=sort_keys)
+        return original_append(path, records, sort_keys=sort_keys)
 
-    monkeypatch.setattr(wake_publication, "append_jsonl", checked_append)
+    monkeypatch.setattr(wake_publication, "append_private_jsonl_records", checked_append)
     observation, signal = store.wakes.append_observation(
         {
             "thread_id": thread.thread_id,

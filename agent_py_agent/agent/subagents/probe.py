@@ -6,12 +6,14 @@ from __future__ import annotations
 Human version:
 这些函数只负责检查通道现场，比如 JSON 文件能不能读、目录能不能写。
 它们不决定任务状态怎么流转，只产出 probe check。
+探针证据文件落盘走 write_private_text_file_atomic（pw2）：0600 文件、0700 目录。
 """
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.json_io import write_private_text_file_atomic
 from .models import ChannelProbeCheck
 
 
@@ -115,9 +117,10 @@ def _probe_writable_dir(
     try:
         if not directory.exists():
             raise FileNotFoundError(f"目录不存在: {directory}")
-        probe_file.write_text(
+        # 探针证据文件是宿主数据：私有写（0600 文件、0700 目录），内容逐字节不变（pw2）。
+        write_private_text_file_atomic(
+            probe_file,
             f"channel probe ok at {created_at}\n",
-            encoding="utf-8",
         )
     except Exception as exc:
         return _probe_fail(

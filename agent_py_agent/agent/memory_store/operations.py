@@ -3,13 +3,14 @@ from __future__ import annotations
 """Owner-local, content-free memory operation audit helpers."""
 
 # LLM: ops.jsonl only records content-free formal mutations; candidates belong exclusively to CandidateService.
+#   落盘走 append_private_jsonl_capped（pw2）：目录 0700、文件 0600、存量宽权限下次写入收紧。
 # 模块用途: 记录长期记忆新增、替换、删除的编号、哈希、范围、来源和结果，不保存正文。
 
 import hashlib
 import time
 from pathlib import Path
 
-from ..common.json_io import append_jsonl_capped
+from ..common.json_io import append_private_jsonl_capped
 from ..common.text_norm import fold_key
 
 _MAX_OPERATION_EVENTS = 4096
@@ -44,7 +45,7 @@ def append_memory_operation_events(
         attributes = getattr(record, "attributes", None)
         attributes = attributes if isinstance(attributes, dict) else {}
         content = str(getattr(record, "content", "") or "")
-        append_jsonl_capped(
+        append_private_jsonl_capped(
             target,
             {
                 "schema": "my-agent.memory-operation.v1",
@@ -75,7 +76,7 @@ def append_memory_purge_event(
 ) -> None:
     if path is None:
         return
-    append_jsonl_capped(
+    append_private_jsonl_capped(
         Path(path),
         {
             "schema": "my-agent.memory-operation.v1",

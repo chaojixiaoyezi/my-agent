@@ -14,7 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agent_py_agent.agent.io import append_jsonl
+from agent_py_agent.agent.common.json_io import (
+    append_private_jsonl_records,
+    write_private_text_file_atomic,
+)
 
 # 调试追踪预览的最大字符数；超长用省略号截断，保持 JSONL 行有界。
 _PREVIEW_LIMIT_CHARS = 240
@@ -53,6 +56,8 @@ class SubAgentHierarchyTraceRequest:
     result: Any
 
 
+# LLM: 调试轨迹是宿主运行数据，落盘走私有写（0600/0700）；trace 级别不够时直接返回空串，不建文件。
+# 函数用途: 按调试级别把一条子代理轨迹写进 trace 账并返回路径。
 def write_subagent_debug_trace(request: SubAgentDebugTraceRequest) -> Path | None:
     configured_level = _configured_trace_level(request.manager)
     event_level = _bounded_level(request.level)
@@ -60,7 +65,8 @@ def write_subagent_debug_trace(request: SubAgentDebugTraceRequest) -> Path | Non
         return None
     record = _build_trace_record(request, event_level)
     trace_file = Path(request.manager.workspace) / "debug_traces" / "subagent_trace.jsonl"
-    append_jsonl(trace_file, record, sort_keys=True)
+    # 子代理调试账属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    append_private_jsonl_records(trace_file, [record], sort_keys=True)
     return trace_file
 
 
@@ -72,17 +78,21 @@ def preview_debug_trace_text(value: Any) -> str:
     return _preview(_detail_text(value))
 
 
+# LLM: 详情目录缺失按 0700 新建（pdp 2026-10-03），详情文件私有写（0600）；级别不够直接返回空串。
+# 函数用途: 把一条子代理调试详情写进 details/<run> 目录并返回路径。
 def write_subagent_debug_detail(request: SubAgentDebugDetailRequest) -> str:
     if configured_subagent_debug_trace_level(request.manager) < 5:
         return ""
     run_id = str(getattr(request.task, "id", "") or "unknown")
     detail_dir = Path(request.manager.workspace) / "debug_traces" / "details" / _safe_name(run_id)
-    detail_dir.mkdir(parents=True, exist_ok=True)
+    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+    detail_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     detail_file = (
         detail_dir
         / f"{int(time.time() * 1000)}-{_safe_name(request.event_type)}-{_safe_name(request.label)}.txt"
     )
-    detail_file.write_text(_detail_text(request.value), encoding="utf-8")
+    # 调试明细同属宿主运行数据：私有原子写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+    write_private_text_file_atomic(detail_file, _detail_text(request.value))
     return str(detail_file)
 
 

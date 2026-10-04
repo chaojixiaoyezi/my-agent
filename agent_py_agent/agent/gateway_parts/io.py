@@ -21,8 +21,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..common.json_io import jsonl_lines, write_text_file_atomic
-from ..io import append_jsonl
+from ..common.json_io import (
+    append_private_jsonl_records,
+    jsonl_lines,
+    write_private_json_file_atomic_no_newline,
+    write_private_json_file_atomic_no_newline_unlocked,
+    write_private_text_file_atomic,
+)
+from ..common.nofollow_fs import open_private_lock_beneath_tightened
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .paths import GatewayPaths
 
@@ -132,22 +138,20 @@ def _path_lock(path: Path) -> threading.Lock:
 
 def write_json_file(path: Path, payload: dict) -> None:
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+# LLM: 队列文件（请求/响应/状态）都是宿主自己的运行数据，一律按私有权限落盘：目录 0700、文件出生 0600、
+#   已有宽权限文件下次写入即收紧。读写方（TUI、适配器、派活工具、后台服务）都是同一个系统用户，
+#   收紧到 0600 不影响它们；内容格式与原来逐字节一致（indent=2、sort_keys、无尾换行）。
+# 函数用途: 原子替换一个 Gateway 队列 JSON 文件（仅本人可读写）。
 def write_json_file_atomic(path: Path, payload: dict) -> None:
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    with _locked_json_path(path):
-        try:
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-            _replace_with_retry(tmp, path)
-        finally:
-            _unlink_tmp_file(tmp)
+    write_private_json_file_atomic_no_newline(path, payload, sort_keys=True)
 
 
+# 函数用途: 尽力删除临时文件；删除失败不影响已经完成或即将重试的替换。
 def _unlink_tmp_file(tmp: Path) -> None:
     try:
         tmp.unlink()
@@ -201,26 +205,22 @@ def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> di
 
 # LLM: require_existing closes move/update races for queue records while preserving the
 # create-or-update behavior used by conversation and collaboration state files.
-# 函数用途：在单个文件锁内读改写 JSON，并可要求目标必须仍然存在。
+#   读-改-写整段在同一把锁内完成，落盘走私有原子写（目录 0700、文件 0600、存量宽权限下次写入收紧）。
+# 函数用途：在单个文件锁内读改写 JSON，并可要求目标必须仍然存在（仅本人可读写）。
+# 函数用途: 在 per-path 锁内读改写一个 JSON 文件，落盘走私有原语（0600/0700）。
 def update_json_file_atomic(
     path: Path,
     updater: Callable[[dict], dict],
     *,
     require_existing: bool = False,
 ) -> dict:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     with _locked_json_path(path):
-        try:
-            if require_existing and not path.is_file():
-                raise FileNotFoundError(path)
-            current = _read_json_dict_unlocked(path)
-            updated = _updated_json_dict(updater, current)
-            tmp.write_text(json.dumps(updated, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-            _replace_with_retry(tmp, path)
-            return updated
-        finally:
-            _unlink_tmp_file(tmp)
+        if require_existing and not path.is_file():
+            raise FileNotFoundError(path)
+        current = _read_json_dict_unlocked(path)
+        updated = _updated_json_dict(updater, current)
+        write_private_json_file_atomic_no_newline_unlocked(path, updated, sort_keys=True)
+        return updated
 
 
 def _read_json_dict_unlocked(path: Path) -> dict:
@@ -314,6 +314,8 @@ def try_gateway_turn_transition(paths: GatewayPaths, request_id: str):
         yield acquired
 
 
+# LLM: 锁与数据文件同口径私有（0600/0700）；缺失目录经 no-follow 原语按 0700 建、已存在一律不动（lkp/pdp）；保留 blocking=False 非阻塞语义。
+# 函数用途: 在 <path>.lock 上取排他锁，包裹调用方的临界区。
 @contextmanager
 def _locked_file_path(path: Path):
     with _open_lock_handle(path) as handle:
@@ -324,10 +326,27 @@ def _locked_file_path(path: Path):
             _flock_unlock(handle)
 
 
+# LLM: 锁文件与数据文件同口径私有（文件 0600、父目录 0700、不跟随符号链接）：原来 lock_path.open("a+")+mkdir
+#   会按 umask 落成 0644/0755，同机他用户可打开并 flock 卡住宿主写入（ds3 统一锁写法时漏掉的第四处）。
+#   经 open_private_lock_beneath_tightened 拿 fd（已存在宽权限锁打开时收紧到 0600），再包回文本句柄；
+#   flock / Windows byte-lock / close 的既有用法不变。
+# 函数用途: 打开一个私有锁文件句柄，顺带把已存在的宽权限锁收紧到 0600。
 def _open_lock_handle(path: Path):
     lock_path = path.with_name(path.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    return lock_path.open("a+", encoding="utf-8")
+    descriptor = _open_private_lock_descriptor(lock_path)
+    return os.fdopen(descriptor, "a+", encoding="utf-8")
+
+
+# LLM: 调用方给的是完整锁路径；原语按受信根 + 相对段打开，这里把绝对路径拆成“已存在的最近父目录 + 其余段”，
+#   与 json_io / directory_lock 同一手法，让缺失目录仍统一经 no-follow 原语按 0700 创建。
+# 函数用途: 打开一个私有锁文件描述符。
+def _open_private_lock_descriptor(lock_path: Path) -> int:
+    lock_path = Path(os.path.abspath(lock_path))
+    anchor, parts = lock_path.parent, (lock_path.name,)
+    while not anchor.exists() and not anchor.is_symlink():
+        parts = (anchor.name, *parts)
+        anchor = anchor.parent
+    return open_private_lock_beneath_tightened(anchor, parts)
 
 
 # LLM: POSIX flock and Windows byte-range locking implement the same blocking cross-process
@@ -525,14 +544,13 @@ def gateway_queue_ages(paths: GatewayPaths) -> dict[str, float]:
     }
 
 
+# LLM: 请求队列文件也是宿主数据；tmp 与目标都按私有权限落盘（目录 0700、文件出生 0600、
+#   已有宽权限文件下次入队即收紧）。读取方（TUI、适配器、派活工具、后台服务）都是同一个系统用户。
+# 函数用途: 把一个 Gateway 请求写进 inbox 队列并返回目标路径（仅本人可读写）。
 def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
-
     request_id = str(payload["id"])
-    paths.inbox.mkdir(parents=True, exist_ok=True)
     target = paths.inbox / f"{request_id}.json"
-    tmp = paths.inbox / f".{request_id}.tmp"
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
+    write_private_json_file_atomic_no_newline(target, payload, sort_keys=True)
     from ..observability.concurrency_metrics import gateway_request_enqueued
 
     gateway_request_enqueued()  # §6-A 进队计数(与 claimed 对比:排队饿死 vs 认领后卡首轮一眼可分)
@@ -590,6 +608,7 @@ def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
 # LLM: History is a rebuildable projection keyed by canonical request id. One global transition
 # lock plus an mtime-invalidated in-process index makes normal appends O(1) after one file scan;
 # conflicting/duplicate rows are atomically replaced by the canonical payload.
+#   落盘走私有追加/原子重写（0600/0700），存量宽权限历史下次写入即收紧；内容逐字节不变。
 # 函数用途: 按请求 ID 最多保留一条准确历史记录，并返回本次是否实际写入或修复。
 def append_gateway_history_once(paths: GatewayPaths, payload: dict) -> bool:
     request_id = str(payload.get("id") or payload.get("request_id") or "").strip()
@@ -608,7 +627,7 @@ def append_gateway_history_once(paths: GatewayPaths, payload: dict) -> bool:
             return False
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         if existing is None:
-            append_jsonl(paths.history, payload, sort_keys=True)
+            append_private_jsonl_records(paths.history, [payload], sort_keys=True)
             retained = [*lines, serialized]
         else:
             retained: list[str] = []
@@ -626,7 +645,7 @@ def append_gateway_history_once(paths: GatewayPaths, payload: dict) -> bool:
                 if row_id != request_id:
                     retained.append(line)
             retained.append(serialized)
-            write_text_file_atomic(paths.history, "\n".join(retained) + "\n")
+            write_private_text_file_atomic(paths.history, "\n".join(retained) + "\n")
         index[request_id] = _GatewayHistoryIndexEntry(dict(payload))
         _store_gateway_history_cache(paths.history, retained, index)
     return True

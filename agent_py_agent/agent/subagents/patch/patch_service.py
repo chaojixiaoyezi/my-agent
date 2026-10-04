@@ -3,6 +3,7 @@
 
 Human version:
 这个模块处理 patch 审核的工作流决策，不涉及实际文件写入。
+复审报告与 output.json 落盘走 write_private_text_file_atomic（pw2）：0600 文件、0700 目录。
 """
 
 from __future__ import annotations
@@ -12,7 +13,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent_py_agent.agent.common.json_io import read_json_object_report
+from agent_py_agent.agent.common.json_io import (
+    read_json_object_report,
+    write_private_text_file_atomic,
+)
 
 from ..reports import PatchReviewRecord, PatchReviewReport
 from ..services.indexing.records import IndexReportParams
@@ -175,8 +179,9 @@ class PatchReviewService:
         )
         report = self.review_patches(run_ids, options=opts)
         write_patch_review_report_json(self.manager, report)
-        (self.manager.workspace / "SUBAGENT_PATCH_REVIEW.md").write_text(
-            render_patch_review_markdown(report), encoding="utf-8",
+        write_private_text_file_atomic(
+            self.manager.workspace / "SUBAGENT_PATCH_REVIEW.md",
+            render_patch_review_markdown(report),
         )
         for record in report.records:
             write_patch_review_record_files(self.manager, record)
@@ -224,9 +229,10 @@ class PatchReviewService:
             output["patches"] = reviewed_patches
             import json
 
-            Path(task.output_json).write_text(
+            # 复审版 output.json 也是子代理工作区宿主状态：私有写（pw2）。
+            write_private_text_file_atomic(
+                Path(task.output_json),
                 json.dumps(output, ensure_ascii=False, indent=2),
-                encoding="utf-8",
             )
             self.manager.actions._append_task_work_log(
                 task,

@@ -10,10 +10,10 @@ from itertools import takewhile
 from pathlib import Path
 from typing import Any, TypeVar
 
+from ..common.json_io import append_private_jsonl_records
 from ..gateway_parts.io import (
     locked_file_transition,
 )
-from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .display_checkpoint import (
     DISPLAY_CHECKPOINT_ROLE,
@@ -250,7 +250,8 @@ class MessageStore:
             created_at=now(request.get("now")),
             metadata=request.get("metadata") or {},
         )
-        append_jsonl(self.storage.message_path(thread_id), entry.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限消息账本下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self.storage.message_path(thread_id), [entry.to_dict()], sort_keys=True)
         self._update_thread_atomic(
             thread.thread_id,
             lambda latest: replace(
@@ -274,7 +275,8 @@ class MessageStore:
         )
         if display_checkpoint_event(entry) is None:
             raise ValueError("invalid canonical display checkpoint")
-        append_jsonl(self.storage.message_path(thread.thread_id), entry.to_dict(), sort_keys=True)
+        # 私有追加：0600/0700，存量宽权限消息账本下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(self.storage.message_path(thread.thread_id), [entry.to_dict()], sort_keys=True)
         return entry
 
     # LLM: 原幂等锁内逐行核对完整历史、dedupe_key与内容；命中不跳过后续坏行，内存随最大行而非历史总量增长。

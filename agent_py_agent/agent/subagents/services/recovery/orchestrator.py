@@ -5,7 +5,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ....io import append_jsonl
+from ....common.json_io import append_private_jsonl_records
 from ....runtime_errors import runtime_error_report
 from ...models import SUBAGENT_FAILURE_STATUSES, task_status_in
 from ..takeover.run import TakeoverRunRequest
@@ -267,6 +267,8 @@ def _runtime_load_error(exc: BaseException, context: str, *, run_id: str = "") -
     return payload
 
 
+# LLM: 恢复编排账本走私有写（0600/0700）；JSONL 行格式不变。
+# 函数用途: 把一条恢复编排报告追加进 JSONL 账本。
 def _append_ledger(manager: Any, report: RecoveryOrchestrationReport) -> None:
     path = manager.workspace / "subagent_recovery_ledger.jsonl"
     for index, step in enumerate(report.steps, start=1):
@@ -278,7 +280,8 @@ def _append_ledger(manager: Any, report: RecoveryOrchestrationReport) -> None:
             "step_index": index,
             **asdict(step),
         }
-        append_jsonl(path, payload, sort_keys=True)
+        # 恢复账属宿主运行数据：私有追加（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
+        append_private_jsonl_records(path, [payload], sort_keys=True)
 
 
 def _strategy_snapshot(strategy: SubagentRecoveryStrategy) -> dict[str, object]:

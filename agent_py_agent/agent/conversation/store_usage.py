@@ -11,8 +11,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import append_private_jsonl_records
 from ..gateway_parts.io import locked_file_transition
-from ..io.jsonl import append_jsonl
 from ..runtime_errors import DataCorruptionError
 from .models import ConversationThread, ThreadModelUsageEvent
 from .store_io import jsonl_error, now, read_jsonl_report, safe_file_stem
@@ -170,6 +170,7 @@ class ModelUsageStore:
     # LLM: This is the one durable per-thread usage append. The event id is a
     # host-generated idempotency key; conflicting reuse fails closed instead of
     # silently changing historical cost facts.
+    #   落盘走私有追加（0600/0700），已有 0644 账本下次写入即收紧；内容逐字节不变。
     # 函数用途: 将一次已结束模型轮的精确用量幂等追加到所属会话。
     def append_once(self, request: dict[str, Any]) -> ThreadModelUsageEvent:
         event = _thread_model_usage_event(request)
@@ -194,10 +195,11 @@ class ModelUsageStore:
                         f"model usage event id reused with different input: {event.event_id}"
                     )
                 return existing
-            append_jsonl(path, event.to_dict(), sort_keys=True)
+            append_private_jsonl_records(path, [event.to_dict()], sort_keys=True)
             return event
 
     # LLM: 累计快照只保存同范围单调增量；缺省事件 ID 由范围和摘要生成，显式旧 ID 仍严格核对冲突。
+    #   落盘走私有追加（0600/0700），已有 0644 账本下次写入即收紧；内容逐字节不变。
     # 函数用途: 幂等保存用量及迟到 HTTP 事实，同物理调用数也能补记新快照而不重复计费。
     def append_snapshot_once(
         self,
@@ -245,7 +247,7 @@ class ModelUsageStore:
                 "snapshot_digest": snapshot_digest,
             }
             event = _thread_model_usage_event({**request, "model_calls": delta})
-            append_jsonl(path, event.to_dict(), sort_keys=True)
+            append_private_jsonl_records(path, [event.to_dict()], sort_keys=True)
             return event
 
     # LLM: A corrupt row remains an explicit load error; consumers must never

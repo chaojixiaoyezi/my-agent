@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from ..common.json_io import write_json_file_atomic, write_text_file_atomic
+from ..common.json_io import write_private_json_object, write_private_text_file_atomic
 from .context_bundle import (
     ContextBundleV1,
     ContextGateReport,
@@ -36,11 +36,11 @@ def write_context_bundle_files(context: SubAgentExecutionContext) -> None:
     # 原子写(temp+replace,同短板4):上下文 bundle"半写即损坏",崩溃中断不能留
     # 半截 JSON/Markdown,否则子代理读到坏 bundle。原子原语自带 parent mkdir。
     bundle_json = Path(context.context_bundle_json)
-    write_json_file_atomic(bundle_json, payload, sort_keys=False)
+    write_private_json_object(bundle_json, payload, sort_keys=False)
     bundle = build_context_bundle_from_payload(bundle_payload)
     gate = context_gate_report_from_payload(gate_payload)
     bundle_file = Path(context.context_bundle_file)
-    write_text_file_atomic(bundle_file, render_context_bundle_markdown(bundle, gate))
+    write_private_text_file_atomic(bundle_file, render_context_bundle_markdown(bundle, gate))
     _mirror_context_bundle_to_run_workspace(context)
 
 
@@ -54,9 +54,9 @@ def _mirror_context_bundle_to_run_workspace(context: SubAgentExecutionContext) -
     target_dir = Path(run_workspace)
     json_target = target_dir / "context_bundle.json"
     md_target = target_dir / "CONTEXT_BUNDLE.md"
-    # 镜像到 run workspace 同样原子写(原语自带 parent mkdir),避免半写坏文件。
-    write_text_file_atomic(json_target, Path(context.context_bundle_json).read_text(encoding="utf-8"))
-    write_text_file_atomic(md_target, Path(context.context_bundle_file).read_text(encoding="utf-8"))
+    # 镜像到 run workspace 同样私有原子写(原语自带 parent mkdir),避免半写坏文件。
+    write_private_text_file_atomic(json_target, Path(context.context_bundle_json).read_text(encoding="utf-8"))
+    write_private_text_file_atomic(md_target, Path(context.context_bundle_file).read_text(encoding="utf-8"))
 
 
 def build_context_bundle_from_payload(payload: object):

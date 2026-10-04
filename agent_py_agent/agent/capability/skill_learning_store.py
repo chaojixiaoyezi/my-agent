@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..common.json_io import (
-    append_jsonl_capped,
+    append_private_jsonl_capped,
     locked_json_path,
     read_json_object_report,
     read_jsonl_objects_report,
@@ -267,7 +267,7 @@ class SkillLearningStore:
     # LLM: 有界追加（保留最近 MAX_LEDGER_EVENTS 条），自带 per-path 锁，调用方不需要持 state_lock。
     # 函数用途: 往账本追加一条事件。
     def append_event(self, event: SkillLearningEvent) -> None:
-        append_jsonl_capped(self.ledger_path, event.to_record(), max_records=MAX_LEDGER_EVENTS)
+        append_private_jsonl_capped(self.ledger_path, event.to_record(), max_records=MAX_LEDGER_EVENTS)
 
     # LLM: 坏行由 read_jsonl_objects_report 跳过；name 为空时返回全部事件的最后 limit 条。
     # 函数用途: 读取某个 Skill（或全部）的最近事件。

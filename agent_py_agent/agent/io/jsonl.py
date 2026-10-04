@@ -4,11 +4,14 @@ from __future__ import annotations
 """Small locked file helpers for append-only local ledgers."""
 
 import json
+import os
 import threading
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, TextIO
+
+from ..common.nofollow_fs import open_private_lock_beneath_tightened
 
 try:
     import fcntl
@@ -52,7 +55,8 @@ def append_line_locked(path: str | Path, line: str) -> None:
     rows when local workers run concurrently."""
 
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    # 目录缺失时按 0700 新建（pdp 2026-10-03：与私有写/锁同口径，只动自己建的东西；已存在一律不动）。
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _locked_text_file(target) as handle:
         handle.write(line.rstrip("\n") + "\n")
         handle.flush()
@@ -60,21 +64,39 @@ def append_line_locked(path: str | Path, line: str) -> None:
 
 @contextmanager
 def _locked_text_file(path: Path) -> Iterator[TextIO]:
-    """Open an append target after taking both thread and OS file locks."""
+    """Open an append target after taking both thread and OS file locks.
+
+    锁文件与数据文件同口径私有：经 open_private_lock_beneath 拿 fd（文件 0600、缺失目录按 0700 新建、
+    已存在的目录一律不动、不跟随符号链接），只 flock、不写内容；原来的 Path.open("a+")+mkdir 会按 umask
+    落成 0644/0755，同机他用户能打开并 flock 抢锁卡住写入。已存在的 0644 锁在打开时收紧到 0600。"""
 
     resolved = str(path.resolve())
     entry = _acquire_lock_entry(resolved)
     try:
         with entry.lock, ExitStack() as stack:
             lock_path = path.with_name(path.name + ".lock")
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_handle = stack.enter_context(lock_path.open("a+", encoding="utf-8"))
-            _lock_os_file(lock_handle)
-            stack.callback(_unlock_os_file, lock_handle)
+            descriptor = _open_lock_descriptor(lock_path)
+            stack.callback(os.close, descriptor)
+            _lock_os_descriptor(descriptor)
+            stack.callback(_unlock_os_descriptor, descriptor)
             target = stack.enter_context(path.open("a", encoding="utf-8"))
             yield target
     finally:
         _release_lock_entry(resolved, entry)
+
+
+def _open_lock_descriptor(lock_path: Path) -> int:
+    """Open one private lock descriptor, tightening an existing world-readable lock to 0600.
+
+    把绝对锁路径拆成“已存在的最近父目录 + 其余段”，让缺失目录仍统一经 no-follow 原语创建（0700；
+    已存在的目录一律不动）。"""
+
+    lock_path = Path(os.path.abspath(lock_path))
+    anchor, parts = lock_path.parent, (lock_path.name,)
+    while not anchor.exists() and not anchor.is_symlink():
+        parts = (anchor.name, *parts)
+        anchor = anchor.parent
+    return open_private_lock_beneath_tightened(anchor, parts)
 
 
 def _acquire_lock_entry(resolved: str) -> _PathLockEntry:
@@ -100,6 +122,21 @@ def _lock_os_file(handle: TextIO) -> None:
     else:
         from ..common.file_lock_support import warn_file_lock_unavailable_once
         warn_file_lock_unavailable_once()
+
+
+def _lock_os_descriptor(descriptor: int) -> None:
+    """Take the same OS exclusive lock as _lock_os_file, on the raw descriptor the private lock returns."""
+
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    else:
+        from ..common.file_lock_support import warn_file_lock_unavailable_once
+        warn_file_lock_unavailable_once()
+
+
+def _unlock_os_descriptor(descriptor: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 def _unlock_os_file(handle: TextIO) -> None:

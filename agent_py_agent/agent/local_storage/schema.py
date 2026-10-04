@@ -199,9 +199,9 @@ _TOOL_OPERATIONS_SQL = (
 class LocalStoreSchemaMixin:
 
     def _init_schema(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.files_dir.mkdir(parents=True, exist_ok=True)
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.files_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # FTS schema 升级(unicode61 -> trigram)需要 DROP+重建索引,重建后必须用
         # records 正文回填。回填走 maintenance.rebuild_fts(读内容文件),那在 schema
         # 事务外做,这里只记一个待回填标记。

@@ -78,7 +78,8 @@ class ConversationStorage:
     # 函数用途: 在可写 Store 初始化时准备原有目录，失败直接暴露给调用方。
     def ensure_dirs(self) -> None:
         for path in self.managed_dirs():
-            path.mkdir(parents=True, exist_ok=True)
+            # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # LLM: 目录集合是初始化唯一来源，不引入按任务命名的新数据目录。
     # 函数用途: 列出本会话存储管理的固定目录，供初始化和维护核对。
