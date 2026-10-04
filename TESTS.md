@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## B9 用例临时目录清理容忍访达 .DS_Store（dsst，2026-10-04，分支 `worker/b9-test-dsstore`）
+
+- **来源**：3a 在 17j 上跑该文件时偶发 `OSError: [Errno 66] Directory not empty: .../tmp/b9-m1b9-xxxx/release-source/agent_py_agent`——夹具把临时目录建在工作树 `tmp/` 下，清理时撞上访达写入 `.DS_Store`。
+- **改动**：只动 `agent_py_agent/tests/test_write_my_agent_plugin_skill.py` 的夹具与清理（`_rmtree_tolerating_finder_metadata` + 抽出的 `_isolated_author_workspace` 上下文管理器）；**模板用例一行未动**，方便 ds6 在 `worker/truncation-stricter` 上改模板用例后合并。
+- **命令（工作树根）**：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_write_my_agent_plugin_skill.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-dsst
+  ```
+  结果：**36 passed, 2 skipped**（skip = 本机 pytest 进程无 Node 解释器、B5 的 `tool_gate.py` 未合入本分支，均为设计内跳过）。
+- **新增两条用例**：
+  - `test_cleanup_tolerates_finder_metadata_but_not_real_failures`：打桩 `shutil.rmtree` 让首轮抛 `Errno 66`，目录里只剩 `.DS_Store` 时必须重试成功（并断言确实重试了一次）；现场还有普通文件时必须把错误抛出来（`pytest.raises(OSError)`）。
+  - `test_author_workspace_leaves_no_temp_directory_behind`：走真实夹具生命周期，退出后断言临时目录不存在、`tmp/` 下没有 `b9-m1b9-*` 残留。
+- **变异**（按原字节备份还原，未用 git stash/checkout）：把 `_rmtree_tolerating_finder_metadata` 的 `.DS_Store` 重试路径删掉、退回裸 `shutil.rmtree` → 新用例失败并报 `OSError: [Errno 66] Directory not empty: .../with_metadata`（正是线上现象）。还原后 36 passed。
+- **.gitignore 核查**：`tmp/` **已在** `.gitignore:77`；`git check-ignore -v tmp/` 与 `git check-ignore -v tmp/.DS_Store` 均命中。未新增规则。`check_clean_package.py .` 通过（`tmp/` 不在其 `RUNTIME_ROOTS`，`.DS_Store` 在其 `DIRTY_NAMES`）。
+
 ## 脚本凭据头不得写死字面量（hdrg，2026-10-04，worker/header-literal-guard）
 
 - **来源**：ds10 初审 flc 守卫时指出判据太宽——只看逻辑行里有没有 `x-gateway-token` 字样，写死字面量也能过。

@@ -1,5 +1,15 @@
 # 设计台账
 
+## B9 用例临时目录清理容忍访达 .DS_Store（dsst，2026-10-04，分支 `worker/b9-test-dsstore`，基于 17j 头 `1d394a308`；3a 复审通过，已并入 step17j）
+
+- **起因**：3a 在 17j 上跑 `test_write_my_agent_plugin_skill.py` 时偶发 `OSError: [Errno 66] Directory not empty: .../tmp/b9-m1b9-xxxx/release-source/agent_py_agent`——`author_workspace` 把临时目录建在工作树 `tmp/` 下（沙箱只能写工作树，wheel/pip 临时文件也得放这儿），清理时正好撞上访达往目录里写 `.DS_Store`，`rmtree` 报非空。单独重跑就过，但只要有人在访达里浏览，门禁就可能随机变红。
+- **改动（只动这一个测试文件的夹具与清理，模板用例未动，方便 ds6 在 `worker/truncation-stricter` 上改模板用例后合并）**：
+  - 新增 `_rmtree_tolerating_finder_metadata(path)`：先正常 `rmtree`；失败且现场只剩 `.DS_Store`/`.AppleDouble`/`.LSOverride` 时删掉这些再重试一次；其它情况把原始错误抛出。**没有用 `ignore_errors=True`**，真错误不会被吞掉。
+  - 夹具本体抽成 `_isolated_author_workspace(monkeypatch)` 上下文管理器，`author_workspace` 夹具保留原名只做转发；这样用例能直接验"用完是否留下临时目录"，不用跟 pytest 内部结构较劲。
+- **.gitignore 结论（任务第 2 条）**：**`tmp/` 已经在忽略名单里**（`.gitignore:77`），`git check-ignore -v tmp/` 命中、`git check-ignore -v tmp/.DS_Store` 也命中。3a 说的"不在忽略名单"是命令写法差异造成的误判（不带尾斜杠、目录又不存在的 `git check-ignore tmp` 不命中）。**无需新增忽略规则**。`check_clean_package.py` 不受影响：它按 Git tracked/untracked 事实与名称模式判定，`tmp/` 不在它的 `RUNTIME_ROOTS` 里，`.DS_Store` 本来就在它的 `DIRTY_NAMES` 里。
+- **验证**：本文件 36 passed / 2 skipped（Node 解释器缺失与 B5 文件缺失，均为设计内跳过）；变异（去掉 `.DS_Store` 重试路径）→ 新用例以 `Errno 66 Directory not empty` 变红，还原后复绿。跑完确认 `tmp/` 下无 `b9-m1b9-*` 残留；访达写在 `tmp/` 根的 `.DS_Store` 不属于夹具清理范围（且已被忽略）。命令与结果见 TESTS。
+- **未验证**：真实访达竞态只能在用户机器上自然发生；本地用打桩 `rmtree` 首轮抛 Errno 66 的方式模拟，没有在真开着访达浏览的机器上复现过原始偶发失败。
+
 ## 脚本凭据头不得写死字面量（hdrg，2026-10-04，分支 `worker/header-literal-guard`，基于 17j 头 `cb16433d7`；3a 复审通过，已并入 step17j）
 
 - **起因**：ds10 初审 flc 守卫（`test_scripts_gateway_http_calls_carry_credentials`）时指出判据太宽——只看逻辑行里有没有出现过 `x-gateway-token` 字样，所以 `-H 'X-Gateway-Token: 固定串'` 这种写死字面量也能过。flc 脚本本身是对的（用 `$GW_AUTH_HEADER`），但同类写法出现在别的脚本里守卫会假绿，G2b 打开后变成真故障（每个部署发同一个编死的假串，请求全被当匿名）。

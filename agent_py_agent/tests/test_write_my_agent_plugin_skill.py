@@ -2,6 +2,7 @@
 # 模块用途: 验证双语言作者模板的事件与收紧协议，保留用户确认边界和旧构建器字节对照。
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -29,19 +30,104 @@ from scripts.plugin_build import build_wheel
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "agent_py_agent/skills/builtin/plugins/write-my-agent-plugin"
+# macOS 访达会在用户浏览过的目录里留 .DS_Store；清理临时目录时它可能刚被写进去，
+# 于是 rmtree 撞上"目录非空"（Errno 66）。只对这一类已知噪声重试，其它错误照旧抛出。
+FINDER_METADATA_NAMES = frozenset({".DS_Store", ".AppleDouble", ".LSOverride"})
+
+
+# LLM: 临时目录在访达可达的工作树 tmp/ 下，清理必须对"删除瞬间被访达写入 .DS_Store"这种已知竞态免疫，
+#   但不能整体 ignore_errors——真错误（权限、占用、其它文件）要被报出来，否则门禁会在无声中退化成假绿。
+# 函数用途: 删除临时目录；首轮失败且现场只剩访达元数据时清掉它们再试一次，其它错误原样抛出。
+def _rmtree_tolerating_finder_metadata(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+        return
+    except OSError as first_error:
+        leftovers = [item for item in path.rglob("*") if item.name in FINDER_METADATA_NAMES]
+        if not leftovers:
+            raise first_error
+    for item in leftovers:
+        item.unlink(missing_ok=True)
+    shutil.rmtree(path)
 
 
 # LLM: pytest basetemp 按车道规则保留；本组业务样本、wheel 和 pip 临时目录全部放工作树 tmp，结束自动清理。
-# 函数用途: 隔离模板构建副本，避免修改随包原件或在工作树外生成插件产物。
-@pytest.fixture
-def author_workspace(monkeypatch):
+#   夹具本体抽成普通上下文管理器，用例才能直接验“用完是否留下临时目录”；夹具只是它的一层包装。
+# 函数用途: 给出隔离的临时工作目录，退出时用容忍访达元数据的清理删除它。
+@contextlib.contextmanager
+def _isolated_author_workspace(monkeypatch):
     scratch = ROOT / "tmp"
     scratch.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="b9-m1b9-", dir=scratch) as directory:
+    directory = tempfile.mkdtemp(prefix="b9-m1b9-", dir=scratch)
+    try:
         root = Path(directory)
         monkeypatch.setattr(tempfile, "tempdir", str(root))
         monkeypatch.setenv("TMPDIR", str(root))
         yield root
+    finally:
+        _rmtree_tolerating_finder_metadata(Path(directory))
+
+
+# LLM: 夹具只做一次转发，保持既有 author_workspace 名字不变，避免影响本文件其它用例。
+# 函数用途: 给测试提供隔离的插件构建工作目录。
+@pytest.fixture
+def author_workspace(monkeypatch):
+    with _isolated_author_workspace(monkeypatch) as root:
+        yield root
+
+
+# LLM: 这条用例模拟访达竞态：rmtree 首轮失败后目录里只剩 .DS_Store 时必须能清干净，
+#   而现场还有普通文件时（不是访达噪声造成的非空）必须把原始错误抛出来——不能为了兼容 .DS_Store 吞掉真错误。
+# 函数用途: 验证夹具清理对访达元数据容忍、对其它错误不宽容。
+def test_cleanup_tolerates_finder_metadata_but_not_real_failures(tmp_path, monkeypatch):
+    blocked = tmp_path / "with_metadata"
+    blocked.mkdir()
+    (blocked / "release-source").mkdir()
+    (blocked / ".DS_Store").write_bytes(b"\x00\x01")
+    first_attempt = {"count": 0}
+    real_rmtree = shutil.rmtree
+
+    # 模拟"删除过程中访达刚写进 .DS_Store"：首轮先抛 Errno 66，让重试路径拿到真实的现场。
+    def flaky_rmtree(target, *args, **kwargs):
+        first_attempt["count"] += 1
+        if first_attempt["count"] == 1:
+            raise OSError(66, "Directory not empty", str(target))
+        return real_rmtree(target, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", flaky_rmtree)
+    _rmtree_tolerating_finder_metadata(blocked)
+    assert not blocked.exists(), "只剩 .DS_Store 时应当能清干净"
+    assert first_attempt["count"] == 2, "首轮失败后应当重试一次"
+
+    occupied = tmp_path / "with_real_content"
+    occupied.mkdir()
+    (occupied / "release-source").mkdir()
+    (occupied / "release-source" / "leftover.py").write_text("x = 1\n", encoding="utf-8")
+    (occupied / ".DS_Store").write_bytes(b"\x00\x01")
+    always_fails = {"count": 0}
+
+    def failing_rmtree(target, *args, **kwargs):
+        always_fails["count"] += 1
+        raise OSError(66, "Directory not empty", str(target))
+
+    monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+    with pytest.raises(OSError):
+        _rmtree_tolerating_finder_metadata(occupied)
+    assert always_fails["count"] == 1 or always_fails["count"] == 2, "真失败时要抛出，不能被吞掉"
+
+
+# LLM: 夹具把临时目录建在工作树 tmp/ 下（沙箱只能写工作树），所以"跑完不留临时子目录"是它的验收点；
+#   这里直接走真实夹具生命周期，确认退出后 tmp/ 下没有 b9-m1b9-* 残留（访达自己的 .DS_Store 不算，且已被 git 忽略）。
+# 函数用途: 验证 author_workspace 用完即净，不把临时目录留在工作树。
+def test_author_workspace_leaves_no_temp_directory_behind():
+    scratch = ROOT / "tmp"
+    with pytest.MonkeyPatch.context() as patch:
+        with _isolated_author_workspace(patch) as root:
+            assert root.is_dir(), "应当给出可用的临时目录"
+    assert not root.exists(), "夹具退出后临时目录不应残留"
+    assert not list(scratch.glob("b9-m1b9-*")), "tmp/ 下不应留下 b9-m1b9-* 临时目录"
 
 
 # LLM: 复用产品 CLI，不替换构建后端或读包器；失败要带完整 stderr/stdout，不洗成成功。
