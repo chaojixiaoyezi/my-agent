@@ -134,9 +134,10 @@
 - **改法**：宿主侧 `computer_use_mcp_servers` 新增 `observe_only` 结构化档位（`core.py` 由两个开关派生），只看档用单独一份声明表（一眼可读档位边界）；服务环境写 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY=1`。适配器侧 `computer_use_server.py` 把上游 import 全部收进 `_load_upstream()`，只在完整档调用；`build_adapter_server` 按标记与档位只注册 `observe_window`。没有 try/except ImportError 兜底——完整档缺依赖照旧明确失败。
 - **跨调用点一致**：`computer_use_mcp_servers` / `with_computer_use_observation` 在仓库里只有 `core.py` 一处生产调用点（`/tools` 展示与工具目录都从同一 registry 派生），档位在这一处定死。
 - **验证**：见 TESTS「屏幕观察只看档（vho）」；5 个变异（只看档泄漏点击工具、适配器忽略只看档、宿主丢弃只看档、标记写反、上游 import 回到模块顶层）全部被用例杀死。
-- **未验证**：真机适配器子进程与真观察（macOS 后端）由 3a 在沙箱外跑；本工作树在沙箱里只做了装配级与导入级验证（含真子进程的导入拦截探针）。
 - **vho 补丁（2026-10-04，同一分支）**：3a 真机实测暴露两处沙箱测不到的问题。① `computer-use-observe` 清单漏了 MCP 的 Python SDK——适配器顶层 import 它，生产原来靠上游 `computer-control-mcp` 带进来，本 extra 没装，只看档直接 `ModuleNotFoundError`；两个平台各补 `mcp==1.13.0`（与上游钉的同一版）。② 宿主/适配器接缝断掉：只看档宿主只写只看标记（`with_computer_use_observation` 见它早返回，不再写观察标记），适配器却只认观察标记，于是 `tools/list` 是空的；改由 `observation_tools_enabled` 认两个标记中任意一个（只看标记本身即意味着要装载观察工具），注册范围仍由档位收窄。补两条守卫：扫只看档路径的第三方 import 核对 extra 清单（含未登记包的反向检查），以及**不手写环境变量**的接缝用例（拿宿主产出 env 直接喂适配器）。
 - **vho 补丁二（2026-10-04，锁屏）**：3a 真机在锁屏状态调 observe_window，拿到的是 `OCCLUDED`（"窗口被上层窗口完全盖住"）——结论没错但对模型和用户说明不清。macOS 后端现在在列窗口之前先查锁屏（`CGSSessionScreenIsLocked`，以及活动显示器数为 0），命中返回 `screen_locked`，消息"屏幕已锁定，解锁后再观察"；检查只读、不弹窗，查不到按"无法确认"继续原流程（不因查不到锁屏而拒绝观察）。位置在屏幕录制权限预检之后、列窗之前。Linux X11 无此概念，行为不变。错误码在设计稿码表与 `screen_observation.py` 模块头登记（观察码是开放集合，宿主只提升 stale / not_found）。
+- **vho 补丁三（2026-10-04，执行面 fail-closed；ds2 初审通过，变异 5/5，已并入 step17j）**：ds3 初审通过，但提了一条生产前要做的纵深建议——"只看不点"原来只在目录层成立（`tools/list` 一个工具 + 宿主只转发目录里的工具）；接管层 `call_observation_tool` / `observation_call_handler` 不看档位，绕开目录直接点名 `click_candidate` / `type_into_candidate` 会真的执行 observer 的点击、输入（ds3 只读探针 P2 实测 `is_error=False`）。现在执行层按同一个结构化环境标记 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY` 收窄：只看档下除 `observe_window` 外的工具名一律返回结构化错误 `tool_not_available_in_observe_only`，不调用 observer 的任何方法。档位在装配处读一次并透传（`build_adapter_server` → `install_observation_handler` → `observation_call_handler`），不新增来源、不按工具名或调用方身份猜。4 个变异（删执行层检查、检查永不触发、handler 不传档位、目录层忽略只看档）全部被用例杀死。
+- **本补丁的验证边界**：同前几轮——沙箱里只做装配级与接管层单元验证（`test_computer_use_observe_only.py` 12 条 + J16 全组 202 passed / 7 skipped）；真机适配器子进程与真观察仍由 3a 在沙箱外跑。
 
 ## B9 用例临时目录清理容忍访达 .DS_Store（dsst，2026-10-04，分支 `worker/b9-test-dsstore`，基于 17j 头 `1d394a308`；3a 复审通过，已并入 step17j）
 

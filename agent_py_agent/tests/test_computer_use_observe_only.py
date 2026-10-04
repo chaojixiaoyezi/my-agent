@@ -138,9 +138,11 @@ class _LowServer:
         return decorate
 
 
-# 函数用途: 把假的 mcp 模块装进 sys.modules，让适配器装配在无 mcp 依赖的测试环境里可跑。
+# 函数用途: 把假的 mcp 模块装进 sys.modules，让适配器装配与结果编码在无 mcp 依赖的测试环境里可跑。
 def _install_fake_mcp(monkeypatch):
-    types = SimpleNamespace(CallToolRequest=object())
+    from agent_py_agent.tests.test_computer_use_observation_tools import _fake_types
+
+    types = _fake_types()
     monkeypatch.setitem(sys.modules, "mcp", SimpleNamespace(types=types))
     monkeypatch.setitem(sys.modules, "mcp.types", types)
     monkeypatch.setitem(sys.modules, "mcp.server", SimpleNamespace())
@@ -229,3 +231,85 @@ def test_adapter_module_has_no_toplevel_upstream_import():
     offenders = [name for name in _toplevel_import_names(module.read_text(encoding="utf-8"))
                  if name.split(".")[0] in ("pyautogui", "computer_control_mcp")]
     assert not offenders, f"只看档不得在模块顶层 import 上游：{offenders}"
+
+
+# 类用途: 只看档执行面用例的假 observer：记录点击/输入次数，任何一次都算"点到了"。
+class _CountingObserver:
+    supports_ui_candidates = True
+
+    def __init__(self):
+        self.clicks, self.types, self.observes = 0, 0, 0
+
+    def observe(self, window=None):
+        self.observes += 1
+        return {"window": "win:b:1", "generation": "b-1-1", "candidate_count": 0}
+
+    def click_candidate(self, meta, *, cancelled=None):
+        self.clicks += 1
+        return {"clicked": {"key": "k"}, "point": [1, 2]}
+
+    def type_into_candidate(self, meta, text, clear_existing=False, *, cancelled=None):
+        self.types += 1
+        return {"typed": {"key": "k"}, "characters": len(text or ""), "clear_existing": clear_existing, "application_verified": False}
+
+
+# LLM: 目录层（tools/list 只列 observe_window）是"目录收窄"，这里测的是执行层的 fail-closed：即便有人绕开目录、
+#   直接点名 click_candidate / type_into_candidate，接管层也必须拒绝，且不碰 observer 的点击/输入方法。
+# 函数用途: 用宿主只看档 env 装配出的真实接管层，直接点名调用被收窄的工具。
+def _observe_only_handler(monkeypatch):
+    _install_fake_mcp(monkeypatch)
+    env = _servers(enabled=False, observation=True)[COMPUTER_USE_MCP_SERVER_NAME]["env"]
+    observer = _CountingObserver()
+    fastmcp = _FakeServer()
+    low = _with_blocked_upstream(lambda: glue.build_adapter_server(fastmcp, env, lambda: observer))
+    return low.request_handlers[sys.modules["mcp.types"].CallToolRequest], observer, fastmcp
+
+
+def test_observe_only_rejects_direct_calls_outside_the_listed_tool(monkeypatch):
+    handler, observer, fastmcp = _observe_only_handler(monkeypatch)
+    assert fastmcp.added == ["observe_window"], "只看档目录只有一个工具"
+    for name, arguments in (("click_candidate", {"candidate_id": "cand-x"}),
+                            ("type_into_candidate", {"text": "hi", "candidate_id": "cand-x"})):
+        result = asyncio_run(handler(SimpleNamespace(params=SimpleNamespace(name=name, arguments=arguments, meta=None))))
+        assert result.root.isError is True
+        assert result.root.structuredContent == {"my_agent_observation_error": {"code": "tool_not_available_in_observe_only"}}
+    assert (observer.clicks, observer.types) == (0, 0), "只看档下点击/输入一次都不能真的发生"
+    ok = asyncio_run(handler(SimpleNamespace(params=SimpleNamespace(name="observe_window", arguments={}, meta=None))))
+    assert ok.root.isError is False and observer.observes == 1, "observe_window 照常可用"
+
+
+def test_full_tier_direct_calls_still_execute(monkeypatch):
+    _install_fake_mcp(monkeypatch)
+    observer = _CountingObserver()
+    fastmcp = _FakeServer()
+    env = {OBSERVATION_ENV_FLAG: "1"}
+    low = glue.build_adapter_server(fastmcp, env, lambda: observer)
+    handler = low.request_handlers[sys.modules["mcp.types"].CallToolRequest]
+    result = asyncio_run(handler(SimpleNamespace(params=SimpleNamespace(
+        name="click_candidate", arguments={"candidate_id": "cand-x"},
+        meta=SimpleNamespace(model_extra={})))))
+    assert result.root.isError is False and observer.clicks == 1, "完整档行为不变"
+
+
+# 函数用途: 跑一个协程（保持测试不引入额外依赖）。
+def asyncio_run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+# LLM: 执行层的档位判定必须来自同一个结构化标记（上下文里的 observe_only），而不是按工具名或调用方身份猜。
+# 函数用途: 直接核对接管层 API 的观察档参数语义。
+def test_call_observation_tool_observe_only_flag_blocks_everything_but_observe_window():
+    observer = _CountingObserver()
+    tier = glue.CallContext(observe_only=True)
+    for name in ("click_candidate", "type_into_candidate"):
+        body, structured, is_error = glue.call_observation_tool(observer, name, {"candidate_id": "x", "text": "t"}, tier)
+        assert (is_error, body["code"]) == (True, "OBSERVATION_TOOL_NOT_AVAILABLE_IN_OBSERVE_ONLY")
+        assert structured == {"my_agent_observation_error": {"code": "tool_not_available_in_observe_only"}}
+    assert (observer.clicks, observer.types) == (0, 0)
+    body, structured, is_error = glue.call_observation_tool(observer, "observe_window", {}, tier)
+    assert is_error is False and observer.observes == 1
+    full = glue.CallContext(observe_only=False)
+    assert glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, full)[2] is False
+    assert observer.clicks == 1, "完整档不受影响"

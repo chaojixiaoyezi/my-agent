@@ -293,6 +293,8 @@ YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步�
 - **档位标记（vho 补丁）**：完整档写 `MY_AGENT_COMPUTER_USE_OBSERVATION=1`，只看档只写 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY=1`（宿主在只看档不写观察标记）；适配器"要不要装载观察工具"认这两个标记中任意一个，注册范围再按档位收窄。真机曾因只认后者而交出空目录。
 - **锁屏（vho 补丁，2026-10-04）**：macOS 后端在列窗口之前先查锁屏（`CGSSessionCopyCurrentDictionary()` 的 `CGSSessionScreenIsLocked`，以及 `CGGetActiveDisplayList` 的活动显示器数为 0），命中返回 `screen_locked`（消息"屏幕已锁定，解锁后再观察"）。顺序在屏幕录制权限预检之后、列窗之前：锁屏时所有窗口都被盖住，先给这条比让模型看到 `occluded` 更准确。两条查询都只读、不弹授权框；查不到（键缺失 / 抛错）按"无法确认"继续原流程，不因查不到锁屏而拒绝观察。Linux X11 后端没有对应概念，行为不变。
 
+- **只要看、不点：执行层也收窄（vho 补丁三，2026-10-04）**：目录层（`tools/list` 只有一个 `observe_window`）已经能挡住正常调用，但那是"宿主只转发目录里的工具"这一层保证；执行层原来对工具名不做档位判断，绕开目录直接点名 `click_candidate` / `type_into_candidate` 仍会真的点到 observer 的点击/输入方法（ds3 只读探针 P2 实测 `is_error=False`）。现在 `call_observation_tool(..., observe_only=True)` 先判档位：只看档下除 `observe_window` 之外的任何工具名一律返回结构化错误 `tool_not_available_in_observe_only`，不调用 observer 的任何方法。档位仍只来自同一个结构化环境标记 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY`（`build_adapter_server` 读一次，透传给 `install_observation_handler` → `observation_call_handler`），不新增来源、不按工具名或调用方身份猜。
+
 **测试**：全程不碰用户真实屏幕。开发和验收在 Linux 车道容器里，用 Xvfb、openbox 和专门的 Tk 测试窗口：两个文字相近的按钮、一个输入框、一个点击后会变的状态行。真实 macOS 桌面最多做一次只读截图核对，需用户同意，由 3a 安排。
 
 1. **合同单测**（假后端）：

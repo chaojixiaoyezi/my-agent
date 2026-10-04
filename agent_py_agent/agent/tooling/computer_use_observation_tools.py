@@ -21,15 +21,19 @@ from .computer_use_profile import OBSERVATION_ENV_FLAG, OBSERVE_ONLY_ENV_FLAG
 from .screen_observation import ObservationError
 
 OBSERVATION_TOOL_NAMES = ("observe_window", "click_candidate", "type_into_candidate")
+# LLM: 只看档下唯一允许执行的工具名；集中成常量，避免"档位判定"和"目录注册"两处各写一份字面量后走偏。
+OBSERVE_ONLY_TOOL_NAME = "observe_window"
 
 
-# LLM: 一次调用的宿主侧事实：_meta 里的观察上下文与"宿主已取消"的判定；cancelled 由接管层按协程取消设置，观察核心在拿到锁后、
-#   复核完真正点击前各看一次，已取消就零副作用返回。
+# LLM: 一次调用的宿主侧事实：_meta 里的观察上下文、"宿主已取消"的判定、以及本次进程的档位。cancelled 由接管层按协程取消设置，
+#   观察核心在拿到锁后、复核完真正点击前各看一次，已取消就零副作用返回；observe_only 是结构化档位（不是从工具名或调用方猜的），
+#   摆在上下文里让执行面在同一处拿到"这次允许做什么"，也避免执行函数参数膨胀。
 # 类用途: 观察工具调用的上下文（不是模型参数）。
 @dataclass(frozen=True)
 class CallContext:
     meta: object = None
     cancelled: Callable[[], bool] = lambda: False
+    observe_only: bool = False
 
 
 # LLM: 两个标记都是"要装载观察工具"的同源事实：完整档写观察标记，只看档只写只看标记（宿主在只看档不写观察标记）。
@@ -90,10 +94,15 @@ def register_observation_tools(server: Any, *, with_typing: bool, observe_only: 
 # LLM: 返回 (正文, structuredContent, isError)。观察载荷只进 structuredContent、正文不重复（和 browser-lite 一致）；失败正文带
 #   OBSERVATION_<CODE> 与中文说明，structuredContent 带 {my_agent_observation_error: {code, ...details}}（window_not_found /
 #   window_ambiguous 的 details 是可见窗口清单 windows 与 truncated），宿主据此提升 stale / not_found，其它码原样给模型。
+#   只看档在执行面 fail-closed：context.observe_only 为真时除 observe_window 之外的任何工具名都直接返回结构化错误，不碰 observer
+#   的任何方法——tools/list 只列 observe_window 是目录层的收窄，这一层是执行层的兜底，绕开目录直接点名调用也点不动。
 # 函数用途: 执行一个观察工具调用并给出可编码的三元组；context 为 None 表示没有宿主上下文（也不会被取消）。
 def call_observation_tool(observer: Any, name: str, arguments: Mapping[str, Any], context: CallContext | None) -> tuple[dict, dict | None, bool]:
     context = context or CallContext()
     try:
+        if context.observe_only and name != OBSERVE_ONLY_TOOL_NAME:
+            raise ObservationError("tool_not_available_in_observe_only",
+                                   f"只看档只提供 {OBSERVE_ONLY_TOOL_NAME}，{name} 不会执行")
         if context.cancelled():
             raise ObservationError("cancelled", "宿主已取消，未执行")
         body, structured = _BRANCHES[name](observer, arguments, context)
@@ -153,8 +162,11 @@ def encode_call_result(body: dict, structured: dict | None, is_error: bool) -> A
 #   底层 Server 处理（取消这次等待、丢弃结果；线程里的 OCR 跑完自然结束）。同一时刻只跑一次观察（锁），快照环不被并发写。
 #   协程被取消时置位本次调用的 cancelled 事件：排在锁后面的调用拿到锁先看它，已取消就不碰 observer；点击在复核完、真正点之前再看
 #   一次——用户按了停止之后屏幕上不会多点一下。注意有锁：取消后的下一次观察要排在被丢弃的那次 OCR 之后，不被堵的是事件循环。
-# 函数用途: 生成底层 tools/call 处理器：观察工具自己处理，其余交给原处理器。
-def observation_call_handler(delegate: Callable[[Any], Any], observer: Any) -> Callable[[Any], Any]:
+#   只看档由环境标记在装配处定死（observe_only 参数），执行面据此拒绝 observe_window 之外的任何工具名：目录层只列一个工具，
+#   执行层再兜一道，绕开目录直接点名也不会点到 observer 的点击/输入。
+# 函数用途: 生成底层 tools/call 处理器：观察工具自己处理，其余交给原处理器；只看档下非 observe_window 一律结构化拒绝。
+def observation_call_handler(delegate: Callable[[Any], Any], observer: Any, *,
+                             observe_only: bool = False) -> Callable[[Any], Any]:
     gate = threading.Lock()
 
     def run(name: str, arguments: dict, context: CallContext) -> tuple[dict, dict | None, bool]:
@@ -167,7 +179,7 @@ def observation_call_handler(delegate: Callable[[Any], Any], observer: Any) -> C
             return await delegate(request)
         extra = getattr(getattr(params, "meta", None), "model_extra", None) or {}
         cancelled = threading.Event()
-        context = CallContext(meta=extra.get(OBSERVATION_META_EXTENSION), cancelled=cancelled.is_set)
+        context = CallContext(meta=extra.get(OBSERVATION_META_EXTENSION), cancelled=cancelled.is_set, observe_only=observe_only)
         try:
             body, structured, is_error = await asyncio.get_running_loop().run_in_executor(None, run, params.name, dict(params.arguments or {}), context)
         except asyncio.CancelledError:
@@ -179,17 +191,21 @@ def observation_call_handler(delegate: Callable[[Any], Any], observer: Any) -> C
 
 
 # 函数用途: 把观察接管层装到底层 Server 的 tools/call 处理器上（原处理器成为 delegate）。
-def install_observation_handler(low_server: Any, observer: Any) -> None:
+# LLM: 只看档标记在这里同样定死执行面（observe_only 透传到接管层），这样档位只有一个来源：装配处的环境标记。
+# 函数用途: 把观察接管层装到底层 Server 的 tools/call 处理器上（原处理器成为 delegate）。
+def install_observation_handler(low_server: Any, observer: Any, *, observe_only: bool = False) -> None:
     from mcp import types
 
     delegate = low_server.request_handlers[types.CallToolRequest]
-    low_server.request_handlers[types.CallToolRequest] = observation_call_handler(delegate, observer)
+    low_server.request_handlers[types.CallToolRequest] = observation_call_handler(
+        delegate, observer, observe_only=observe_only)
 
 
 # LLM: 适配器进程的唯一装配入口（stdio 收发留在 computer_use_server.serve）：底层 Server 的 list_tools / call_tool 直接绑 FastMCP
 #   的公开协程；观察标记为 "1" 时才调用 observer_factory（构造不碰屏幕）、按档位与后端能力注册观察工具并装接管层。标记关着时
 #   tools/list 与只有上游工具时逐字节一致，tools/call 处理器就是原 delegate——"关时工具目录不变"靠这里保证。
-#   只看档下 FastMCP 里既没有上游工具也没有点击工具（上游由 serve 决定不装载），注册完 observe_window 就够。
+#   只看档下 FastMCP 里既没有上游工具也没有点击工具（上游由 serve 决定不装载），注册完 observe_window 就够；同一个档位判定
+#   也交给接管层，执行面只放行 observe_window，目录被绕开时同样拒绝。
 # 函数用途: 按环境标记装配底层 Server。
 def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_factory: Callable[[], Any]) -> Any:
     from mcp.server.lowlevel import Server
@@ -199,14 +215,15 @@ def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_fact
     low.call_tool(validate_input=False)(fastmcp.call_tool)
     if observation_tools_enabled(environ):
         observer = observer_factory()
-        register_observation_tools(fastmcp, with_typing=observer.supports_ui_candidates,
-                                   observe_only=observe_only_enabled(environ))
-        install_observation_handler(low, observer)
+        observe_only = observe_only_enabled(environ)
+        register_observation_tools(fastmcp, with_typing=observer.supports_ui_candidates, observe_only=observe_only)
+        install_observation_handler(low, observer, observe_only=observe_only)
     return low
 
 
 __all__ = [
-    "OBSERVATION_TOOL_NAMES", "CallContext", "build_adapter_server", "call_observation_tool", "click_candidate", "encode_call_result",
+    "OBSERVATION_TOOL_NAMES", "OBSERVE_ONLY_TOOL_NAME", "CallContext", "build_adapter_server", "call_observation_tool", "click_candidate",
+    "encode_call_result",
     "install_observation_handler",
     "observation_call_handler", "observation_tools_enabled", "observe_only_enabled", "observe_window", "register_observation_tools",
     "type_into_candidate",

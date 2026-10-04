@@ -177,6 +177,29 @@
 - 子进程探针（本机可跑，`/private/tmp/claude-501/m-vho/probe_subprocess.py`）：真子进程 + meta path finder 拦住 `pyautogui`/`computer_control_mcp` 后，装配出的工具恰好 `['observe_window']`，且两个上游模块都没进 `sys.modules`。
 - 未验证：真适配器子进程（真 `mcp` 包 + 真桌面后端）与真观察由 3a 在沙箱外跑；沙箱里没装 `mcp` 包，端到端子进程用例按车道约定跳过。
 
+### vho 补丁三：只看档执行面 fail-closed（2026-10-04）
+
+- 改了什么：接管层 `call_observation_tool` 新增关键词参数 `observe_only`，只看档下除 `observe_window` 之外的任何工具名先抛结构化 `tool_not_available_in_observe_only`，不调用 observer 的任何方法；`observation_call_handler` / `install_observation_handler` 同一参数透传，`build_adapter_server` 用 `observe_only_enabled(environ)` 读一次档位同时决定"注册哪些"和"执行面放行哪些"。新增常量 `OBSERVE_ONLY_TOOL_NAME`（目录注册与执行面共用一个工具名事实）。
+- 尺寸拆法：第一版把 `observe_only` 做成 `call_observation_tool` 的第 5 个参数，size_diff 报出 1 条新增 high-risk 参数告警；改成放进已有的 `CallContext`（本来就是"一次调用的宿主侧事实"），执行函数保持 4 参数，告警回到 0。
+- 用例（`agent_py_agent/tests/test_computer_use_observe_only.py` 新增 3 条）：① 只看档下用宿主产出的 env 装配出真实接管层，直接点名 `click_candidate` / `type_into_candidate` → `isError=True` 且 `structuredContent == {"my_agent_observation_error": {"code": "tool_not_available_in_observe_only"}}`，替身点击/输入计数为 0，`observe_window` 照常可用；② 完整档同样的直接点名仍然执行（计数 1）；③ 直接核对 `call_observation_tool` 在 `CallContext(observe_only=True)` 下的拒绝与在 `observe_only=False` 下的放行。
+- 命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_computer_use_observe_only.py \
+    agent_py_agent/tests/test_computer_use_observation_tools.py \
+    agent_py_agent/tests/test_computer_use_profile.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-vho
+  ```
+  结果：**32 passed**（只看档文件 12 条，含新增 3 条）。
+- J16 全组（11 个文件，含 `test_computer_use_macos*`、Xvfb 车道、`test_screen_observation_core`、`test_plugin_observation`、`test_screen_capture_guard` 等）：**202 passed, 7 skipped**（跳过的是需要真桌面/车道容器的用例）。
+- 变异（脚本 `tasks/2026-10-04/vho-observe-only/mutations4.py`，逐个跑完按 sha256 还原，基线 28 passed）：
+  1. 删掉执行层的只看档检查 → 杀（2 failed）
+  2. 检查条件加 `and False`（永不触发）→ 杀（2 failed）
+  3. handler 不把档位传给执行面 → 杀（1 failed）
+  4. 目录注册忽略只看档（多注册点击工具）→ 杀（3 failed）
+- 未验证：真机适配器子进程与真观察仍由 3a 在沙箱外跑；本补丁只做了装配级与接管层单元验证。
+
 ### vho 补丁：依赖清单补 `mcp` + 只看档接缝修复（2026-10-04）
 
 3a 真机实测（全新环境只装 `computer-use-observe` 清单里的包）抓到两处：
