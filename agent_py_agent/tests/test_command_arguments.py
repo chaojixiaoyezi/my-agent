@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 
 import pytest
-from hypothesis import given
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from agent_py_agent.agent.command_arguments import (
@@ -31,6 +31,9 @@ def test_literal_argument_grammar(raw, expected):
         assert tuple(item.value for item in lex_command_arguments(raw[token.start:token.end])) == (token.value,)
 
 
+# 这里测的是引号往返，不是生成速度：任意 Unicode 文本的生成在负载高的 Linux 车道上会触发 too_slow 健康检查（17j 628afe4bb 车道），
+# 只关这一项健康检查，样本数和断言不变。
+@settings(suppress_health_check=[HealthCheck.too_slow])
 @given(st.lists(st.text(alphabet=st.characters(blacklist_categories=("Cs",)), max_size=45), max_size=8))
 def test_completion_quoting_roundtrips_literal_values(values):
     source = " ".join(shlex.quote(value) for value in values)
