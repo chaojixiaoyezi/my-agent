@@ -1,5 +1,46 @@
 # 测试与发布验收
 
+## 带前缀凭据键名打码（rkey + rkey2，2026-10-04，worker/redaction-var-refs-v2；9b 复跑 9 样本、回溯计时、误伤反例都通过，已并入 step17j）
+
+- **rkey2：修 ReDoS（同一分支接着 `6a5440cf9`）**。键名前缀的嵌套量词 `(?:[A-Za-z0-9_.]*[_-])*` 改成
+  单量词 `[A-Za-z0-9_.-]{1,128}` + 回调判定；新增 5 条用例（4 条性能 + 1 条词表纯字面量）。
+  - **性能用例**：两万字符下划线行、`a_` 重复 1.5 万次、5 万字符蛇形键名、两万连字符行，各条必须
+    < 0.1 秒（单调时钟，实测 0.7–1.9 ms）。
+  - **命令**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+    `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction_variable_refs.py -q --tb=short -p no:cacheprovider` → **56 passed**。
+  - **复跑 9b 的三样**：
+    ① 回溯计时探针（9b 原脚本 `redos_probe.py`）→ **全部 0.0000s**（修复前 21 字符 0.1520s、29 字符 37.6682s）；
+    ② 9 样本探针（9b `probe_rdv.py`）→ 与 rdv2 基线逐样本一致，**唯一差异是 `DB_PASSWORD=$ecretPassw0rd`
+       由"未打码"变成"正确打码"**（rdv2 基线因键名匹配不到而漏打，rkey2 修好；这是修正不是回归）；
+    ③ 误伤反例（`max_tokens`、`token_count`、`password_hint`、`tokens`、`secretary`、`my_password_hint`）→ 全部保留原文。
+  - **变异**：把前缀改回嵌套量词 → 性能用例**被超时兜底抓到**（pytest 90 秒超时、独立探针 60 秒超时；
+    不让它跑几个小时）。已按原字节还原。
+  - **全文件复查**：`log_redaction.py` 13 条正则逐条在长输入上实测，最长 0.4 ms，**没有第二处嵌套量词**。
+  - **门禁**：`test_log_redaction*.py` + `test_audit_redaction.py` + `test_im_path_redaction_note.py` +
+    `test_parameter_registry.py` → **217 passed**；guards9（11 文件）→ **184 passed**；ruff / import boundaries=0 /
+    DOC_SYNC_PASS / `git diff --check` 干净 / strict code-size hard=0 / size_diff 新增 0 / clean-package OK。
+
+- **改了什么**：`_SECRET_ASSIGNMENT_RE` 的键名从 `\b凭据词\b` 改成"完整末尾片段"——键名等于凭据词，或以 `_凭据词` / `-凭据词` 结尾（前缀允许多段 `[_]`/`[-]` 连接），与 `settings/user_config_capability.is_credential_key` 同口径、不按子串。
+- **9 样本对照表**（只标"保留/打码"，不写值本身；`redact_sensitive_text` 直调）：
+
+  | 样本 | 默认模式 | 源码模式 |
+  | --- | --- | --- |
+  | Gateway 头：纯变量引用（大写下划线） | 保留 | 保留 |
+  | Gateway 头：花括号变量引用 | 保留 | 保留 |
+  | Gateway 头：全小写 `$` 开头真值 | **打码** | 保留 |
+  | Gateway 头：混合大小写 `$` 开头真值 | **打码** | 保留 |
+  | 赋值：`DB_PASSWORD=`（下划线前缀键） | **打码** | 保留 |
+  | 赋值：`api_token=`（小写下划线前缀键） | **打码** | 保留 |
+  | 赋值：`MY_SECRET:`（冒号分隔前缀键） | **打码** | 保留 |
+  | 赋值：`max_tokens=4096`（普通计数键） | 保留 | 保留 |
+  | 赋值：带前缀键名 + 全大写纯引用 | 保留 | 保留 |
+
+  说明：源码模式整段跳过赋值规则与变量引用判定之外的部分本来如此（`redact_sensitive_text` 里 `if not code_file` 才跑赋值/JSON 规则），本次改动不影响它；"全小写/混合 `$` 开头真值"两行是 rdv2 的收紧结果。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds4`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction_variable_refs.py -q --tb=short -p no:cacheprovider` → **51 passed**
+  - 全部 `test_log_redaction*.py` + `test_audit_redaction.py` + `test_im_path_redaction_note.py` → **129 passed**
+- **变异 2 个**：m1 去掉末尾片段匹配（退回裸键名）→ **KILLED**（4 条带前缀用例变红）；m2 把片段匹配放宽成子串匹配 → **KILLED**（`max_tokens`、`tokens`、`password_hint`、`secretary` 被误打码）。
+
 ## M 线真实验收手册改到能用（rb2，2026-10-04，分支 `worker/m1-acceptance-runbook-v2`）
 
 - **来源**：luna3 的手册（`4ffb9c69f`）经 `git diff ea574ce26 4ffb9c69f | git apply -3` 引入；luna4 初审"必须改"四条由 rb2 落实。**本分支只改文档，没跑任何一步真实验收。**

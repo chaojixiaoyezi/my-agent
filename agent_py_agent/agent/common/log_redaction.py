@@ -59,10 +59,48 @@ _SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}({_URL_VALUE})"
 # 日志不按源码标点分段：逗号、引号或括号可能就是真凭证的一部分，宁可隐藏尾部标点也不能泄漏尾段。
 _LOG_SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}([^&#\s]+)")
 _AUTHORIZATION_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)([^\s,;]+)")
+# 键名按"完整末尾片段"认，与 settings/user_config_capability.is_credential_key 同口径：键名等于凭据词，
+# 或以 `_凭据词`/`-凭据词` 结尾才算，不按子串匹配。原来键名前是 \b，而 `_` 是单词字符，\b 断不开，
+# 于是 DB_PASSWORD=hunter22、api_token=abcd1234、MY_SECRET: xyz12345 这些带前缀的键名基线里就不打码。
+# 反例必须挡住：max_tokens（复数 token 不以它结尾）、token_count、password_hint 都不能被误打码。
+# 两份词表各管一处、不共用：common/ 不能反向依赖 settings/（import boundaries 会拦），且这里还要认
+# `-` 连接的写法（命令行/HTTP 头风格），settings 那份只管下划线参数键。
+_CREDENTIAL_KEY_NAMES = (
+    r"access_key|access-token|access_token|api-key|api_key|apikey|app_secret|client_secret|credential|"
+    r"encrypt_key|id_token|master_key|password|passwd|private_key|pwd|refresh_token|secret|signature|"
+    r"tenant_access_token|ticket|token|verification_token|x-amz-credential|x-amz-signature"
+)
+# 凭据键名判定与 settings/user_config_capability.is_credential_key 同口径：键名等于凭据词，或以
+# `_凭据词`/`-凭据词` 结尾才算。这里另加一层小写归一（settings 那份按原样比），并把点也当分隔符
+# （`x.y.token` 这种写法在日志里会被点分开，但键名可能整段带点）。
+# 注意词表必须是**纯字面量**：早期版本把正则里的 `api_?key` 直接 split("|") 当集合用，集合里就多了
+# `api_?key` 而没有 `api_key`，导致 `api_key = ...` 被判成"不是凭据键"而放过（已修，见下面断言）。
+# 两份词表各管一处、不共用：common/ 不能反向依赖 settings/（import boundaries 会拦）。
+# 常量用途: 凭据词集合，供 _is_credential_key_name 做等于/后缀判定。
+_CREDENTIAL_KEY_NAME_SET = frozenset(_CREDENTIAL_KEY_NAMES.split("|"))
+# LLM: 词表不含正则元字符的自检——它同时被正则拼装和集合判定使用，混进 `?` 这类符号会让集合判定
+#   静默失效（api_?key 与 api_key 不相等），是"功能悄悄变松"而不是报错。这行在 import 时拦住。
+assert not any(character in name for name in _CREDENTIAL_KEY_NAME_SET for character in "?*+[](){}|\\"), (
+    "凭据词表必须是纯字面量：它同时用于正则拼装与集合判定"
+)
+
+
+# 函数用途: 判断一个键名是不是凭据键——等于凭据词，或以 _ / - / 点连接后以凭据词结尾。
+def _is_credential_key_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(lowered == word or lowered.endswith(("_" + word, "-" + word, "." + word))
+               for word in _CREDENTIAL_KEY_NAME_SET)
+
+
+# LLM: 只用一个不嵌套的字符类整段取出键名，再在回调里判定——键名前缀原来是 (?:[A-Za-z0-9_.]*[_-])*，
+#   嵌套量词且下划线既能被内层也能被外层吃，匹配失败时回溯指数增长（9b 实测 21 个下划线 0.15 秒、
+#   29 个 37.7 秒，再长就是小时级；打码函数要处理每段工具输出和每一行日志，Markdown 分隔线、
+#   ASCII 表格、日志横线这类长串下划线就能卡住回合与 Gateway 线程）。改成单量词后整体线性。
+#   代价是正则不再自己筛掉非凭据键，多调用一次 _is_credential_key_name；这不改变判定口径。
+# 常量用途: 匹配"键名[:=]值"，键名与值都由回调按完整末尾片段决定是否打码。
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b(?:access_key|access_token|api_?key|app_secret|client_secret|master_key|"
-    r"password|passwd|private_key|pwd|refresh_token|secret|tenant_access_token|ticket|token|"
-    r"verification_token)\b\s*[:=]\s*)([\"']?)([^\s,;&\"']{4,})(\2)"
+    r"(?i)(^|[^\w.-])([A-Za-z0-9_.-]{1,128})(\s*[:=]\s*)([\"']?)"
+    r"([^\s,;&\"']{4,})(\4)"
 )
 _SECRET_JSON_FIELD_RE = re.compile(
     r"(?i)([\"'](?:access_key|access_token|api_?key|app_secret|authorization|client_secret|"
@@ -118,6 +156,18 @@ def _mask_secret_value(value: str, marker: str) -> str:
     return value if _PURE_VARIABLE_REFERENCE_RE.fullmatch(_strip_wrapping_quote(value)) else marker
 
 
+# LLM: 键名判定从正则搬进回调，是为了让正则保持单量词、不回溯（见 _SECRET_ASSIGNMENT_RE 注释）。
+#   分组固定为 1=前导、2=键名、3=分隔符、4=引号、5=值、6=同 4 的闭引号；键名不是凭据键就整段原样返回，
+#   不做任何改写——误伤反例（max_tokens、token_count、password_hint、secretary）走的就是这条分支。
+# 函数用途: 判一条"键名[:=]值"要不要打码；要打就把值遮住，不要就原样返回。
+def _redact_assignment(match: re.Match[str], marker: str, labels_only: bool) -> str:
+    if not _is_credential_key_name(match.group(2)):
+        return match.group(0)
+    if labels_only:
+        return marker
+    return match.group(1) + match.group(2) + match.group(3) + match.group(4) + _mask_secret_value(match.group(5), marker) + match.group(6)
+
+
 # LLM: 调用方决定是否为源码；插值内字面量和实际 URL 凭证仍须遮蔽，已知密钥扫描始终执行。
 # 函数用途: 返回脱敏副本，不写文件；保持源码结构和日志安全边界各自生效。
 def redact_sensitive_text(
@@ -166,13 +216,7 @@ def redact_sensitive_text(
             text,
         )
         text = _SECRET_ASSIGNMENT_RE.sub(
-            lambda match: (
-                redacted_marker
-                if redact_assignment_labels
-                else match.group(1) + match.group(2) + _mask_secret_value(match.group(3), redacted_marker) + match.group(4)
-            ),
-            text,
-        )
+            lambda match: _redact_assignment(match, redacted_marker, redact_assignment_labels), text)
     password_pattern = _URL_PASSWORD_RE if code_file else _LOG_URL_PASSWORD_RE
     text = password_pattern.sub(
         lambda match: match.group(1) + _redact_url_value(match.group(2), code_file, redacted_marker) + match.group(3),

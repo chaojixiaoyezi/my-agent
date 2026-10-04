@@ -1,5 +1,27 @@
 # 设计台账
 
+## 带前缀凭据键名打码（rkey + rkey2，2026-10-04，worker/redaction-var-refs-v2；9b 复跑 9 样本、回溯计时、误伤反例都通过，已并入 step17j）
+
+- **rkey2：修 ReDoS（2026-10-04，同一分支接着 `6a5440cf9`）**。9b 复核发现 rkey 的键名前缀
+  `(?:[A-Za-z0-9_.]*[_-])*` 是嵌套量词，下划线既能被内层吃也能被外层吃，匹配失败时回溯指数增长：
+  21 个下划线 0.15 秒、29 个 37.7 秒（对照 rdv2 一万个下划线 0.0003 秒）。打码函数要处理每一段工具输出、
+  每一行日志、技能落盘和错误消息，Markdown 分隔线 / ASCII 表格 / 日志横线这类长串下划线就能卡住回合与
+  Gateway 线程。改法：正则只用一个不嵌套的 `[A-Za-z0-9_.-]{1,128}` 整段取键名，判定搬进替换回调
+  （`_is_credential_key_name`，口径与 `is_credential_key` 一致；不是凭据键就原样返回整段）。**不用**原子组
+  或占有量词（项目最低 Python 3.10，那两个要 3.11）。修复后 9b 的回溯探针全部 0.0000s。
+- **rkey2 顺带修掉一个漏打码**：判定搬进回调后词表同时用于正则拼装与集合判定，而原词表里的 `api_?key`
+  是正则语法，`split("|")` 成集合后 `api_key` 根本不在里面 → `api_key = ...` 一度被判"不是凭据键"放过
+  （9b 的 9 样本里 `DB_PASSWORD=$ecretPassw0rd` 也从"未打码"变成"正确打码"）。词表改成纯字面量
+  （补 `api-key`、`api_key`、`apikey` 等写法）并在 import 时断言不含正则元字符，另加用例钉住。
+- **全文件复查**：`log_redaction.py` 13 条正则逐条在长输入上实测，最长 0.4ms，**没有第二处嵌套量词**。
+
+- **缺口**：`_SECRET_ASSIGNMENT_RE` 的键名前原来是 `\b`，而 `_` 是单词字符，`\b` 断不开，于是 `DB_PASSWORD=hunter22`、`api_token=abcd1234`、`MY_SECRET: xyz12345` 这类**带前缀的键名在基线里就不打码**，值原样进日志与模型上下文。
+- **改法**：键名改成按**完整末尾片段**认，与 `settings/user_config_capability.is_credential_key` 同口径——键名等于凭据词，或以 `_凭据词` / `-凭据词` 结尾才算，**不按子串**。前缀允许由多段 `[_]`/`[-]` 连接（`X-Gateway-Token`、`AWS_SECRET_ACCESS_KEY` 都要认）。
+- **反例必须挡住**：`max_tokens=4096`（复数 token 不以 token 结尾）、`token_count=12`（token 在开头）、`password_hint=x`、`tokens=4096`、`secretary=...` 一律不误伤。
+- **词表不共用**：`common/` 不能反向依赖 `settings/`（`check_import_boundaries` 会拦），且这里还要认 `-` 连接的写法（命令行/HTTP 头风格），settings 那份只管下划线参数键。两份各管一处，代码注释里写明。
+- **其它路径不变**：源码模式（`code_file=True`）本来就在调用处整段跳过赋值规则，行为不变；纯变量引用豁免照旧——`DB_PASSWORD=$DB_PASSWORD`（全大写）仍保留原文。
+- **验证**：`test_log_redaction_variable_refs.py` 51 passed；全部 `test_log_redaction*` + 审计/IM 脱敏 129 passed；变异 m1（去掉末尾片段匹配）与 m2（放宽成子串匹配，`max_tokens` 被误打码）都被抓到。见 TESTS。
+
 ## M 线真实验收手册改到能用（rb2，2026-10-04，待复审）
 
 - **来源**：luna3 的手册（`worker/m1-acceptance-runbook` 的 `4ffb9c69f`）经 `git diff ea574ce26 4ffb9c69f | git apply -3` 引入本分支；luna4 初审结论"必须改"四条由 rb2 落实。

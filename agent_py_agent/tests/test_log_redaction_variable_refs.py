@@ -7,6 +7,8 @@
 # 模块用途: 钉住纯变量引用保留口径（只认全大写）、其余写法照旧打码，以及真实密钥没有任何新路径泄漏。
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from agent_py_agent.agent.common.log_redaction import (
@@ -257,3 +259,97 @@ def test_one_wrapping_quote_is_still_enough_for_a_pure_reference() -> None:
 
     assert _mask_secret_value(D + 'TOKEN"', MARKER) == D + 'TOKEN"'
     assert _mask_secret_value('"' + D + 'TOKEN"', MARKER) == '"' + D + 'TOKEN"'
+# LLM: rkey——键名按"完整末尾片段"认，不是子串，也不是原来那个断不开下划线的 \b。基线里
+#   DB_PASSWORD=hunter22、api_token=abcd1234、MY_SECRET: xyz12345 因为 \b 撞上下划线而根本没打码，
+#   凭据就原样进了日志和模型上下文；这里钉住这三类带前缀的键名必须打码。
+# 函数用途: 断言带下划线/连字符前缀的凭据键名会被打码。
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DB_PASSWORD=" + "hunter22",         # 下划线前缀 + 大写下划线键名
+        "api_token=" + "abcd1234",           # 小写下划线前缀
+        "MY_SECRET: " + "xyz12345",          # 冒号分隔、无引号
+        "my-secret=" + "abcd1234",           # 连字符前缀（HTTP 头/命令行风格）
+        "AWS_SECRET_ACCESS_KEY=" + "abcd1234",
+    ],
+)
+def test_prefixed_credential_key_names_are_redacted(text: str) -> None:
+    safe = redact_sensitive_text(text)
+    assert MARKER in safe, text
+    assert "hunter22" not in safe and "abcd1234" not in safe and "xyz12345" not in safe, text
+
+
+# LLM: 同一条改动的反面：按末尾完整片段认，就不能把只在中间出现凭据词的普通参数误打码——
+#   max_tokens 的 token 是复数（不以 token 结尾）、token_count 的 token 在开头、password_hint 的
+#   password 也不在结尾。这些被误打码会让 /settings 回显和记账看不清正常数值。
+# 函数用途: 断言普通参数名不被末尾片段规则误伤。
+@pytest.mark.parametrize(
+    "text",
+    ["max_tokens=4096", "token_count=12", "password_hint=x1234", "tokens=4096",
+     "secretary=abcd1234", "my_password_hint=x1234"],
+)
+def test_ordinary_keys_are_not_mistaken_for_credentials(text: str) -> None:
+    safe = redact_sensitive_text(text)
+    assert MARKER not in safe, text
+    assert safe == text
+
+
+# LLM: 源码模式本来就在调用处整段跳过赋值规则（见 redact_sensitive_text 的 `if not code_file`），
+#   这次改键名匹配不该影响它：同样的 DB_PASSWORD=... 在 code_file=True 下照旧不打码（源码示例不能被毁）。
+# 函数用途: 断言源码模式下赋值规则仍被跳过，键名匹配的改动不改变这一行为。
+def test_source_mode_still_skips_the_assignment_rule() -> None:
+    text = "DB_PASSWORD=" + "hunter22"
+    assert MARKER not in redact_sensitive_text(text, code_file=True)
+    assert MARKER in redact_sensitive_text(text, code_file=False)
+
+
+# LLM: 新键名规则不能顺手掐掉纯变量引用豁免：DB_PASSWORD=$DB_PASSWORD 整段仍是纯引用（全大写），
+#   要保留原文，否则复审又会把"取了同名环境变量"读成"写死了占位符"。
+# 函数用途: 断言带前缀键名 + 全大写纯引用仍然保留。
+def test_prefixed_key_with_pure_reference_is_kept() -> None:
+    text = "DB_PASSWORD=" + D + "DB_PASSWORD"
+    assert redact_sensitive_text(text) == text
+    assert MARKER not in redact_sensitive_text(text)
+
+
+# LLM: rkey 的键名前缀曾经写成 (?:[A-Za-z0-9_.]*[_-])*——嵌套量词，下划线既能被内层也能被外层吃，
+#   匹配失败时回溯指数增长（9b 实测 21 个下划线 0.15 秒、29 个 37.7 秒）。打码函数要处理每一段工具
+#   输出、每一行日志，Markdown 分隔线、ASCII 表格、日志横线这类长串下划线就能卡住回合和 Gateway 线程。
+#   这里用"上万字符的同类输入"把线性复杂度钉住：超时阈值取得很宽（0.1 秒，实测都在毫秒级），
+#   目的是抓"又变成指数级"这种量级差异，不是抓 CI 抖动。计时用单调时钟。
+# 函数用途: 用长下划线/连字符/蛇形输入验证打码耗时是线性的，不因输入变长而爆炸。
+_PERF_BUDGET_SECONDS = 0.1
+_PERF_INPUTS = (
+    ("下划线长行", "_" * 20000 + "!"),
+    ("a_ 重复", "a_" * 15000 + "!"),
+    ("长 snake_case 键名（无 =）", "x" + "_part" * 10000),
+    ("连字符长行", "-" * 20000),
+)
+
+
+@pytest.mark.parametrize(("label", "text"), _PERF_INPUTS)
+def test_long_underscore_inputs_stay_linear(label: str, text: str) -> None:
+    started = time.perf_counter()
+    redact_sensitive_text(text)
+    elapsed = time.perf_counter() - started
+    assert elapsed < _PERF_BUDGET_SECONDS, f"{label} 打码耗时 {elapsed:.3f}s，超过 {_PERF_BUDGET_SECONDS}s（回退成嵌套量词了吗？）"
+
+
+# LLM: rkey2 修 ReDoS 时把键名判定搬进回调，词表同一份字符串既拼正则又做集合判定，
+#   于是 `api_?key` 这种带正则符号的写法会让集合里根本没有 `api_key`（`api_?key` != `api_key`），
+#   功能悄悄变松——`api_key = ...` 不再被打码。这条钉住词表是纯字面量，并逐词验证判定可用。
+# 函数用途: 断言凭据词表不含正则元字符，且每个词都能被 _is_credential_key_name 认出来。
+def test_credential_word_list_is_literal_and_matchable() -> None:
+    from agent_py_agent.agent.common import log_redaction as redaction
+
+    words = redaction._CREDENTIAL_KEY_NAME_SET
+    assert words, "词表不能为空"
+    for word in words:
+        assert not any(character in word for character in "?*+[](){}|\\"), f"词表混进正则元字符: {word}"
+        assert redaction._is_credential_key_name(word)
+        assert redaction._is_credential_key_name("DB_" + word.upper())
+    # 全小写归一：settings 那份按原样比，这里必须大小写都认。
+    for name in ("api_key", "API_KEY", "Api_Key", "x-api-key"):
+        assert redaction._is_credential_key_name(name), name
+    for name in ("max_tokens", "token_count", "password_hint", "secretary", "tokens"):
+        assert not redaction._is_credential_key_name(name), name
