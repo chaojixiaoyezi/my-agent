@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 from dataclasses import asdict, replace
+from pathlib import Path
 
+from .attempt.sandbox import SandboxUnavailableError
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
 from .plugin_activation_ref import PluginActivationRef
@@ -16,7 +18,15 @@ from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
 from .plugin_runtime_facts import verified_runtime_command
-from .plugin_sandbox import SANDBOX_TMP_DIRECTORY, sandboxed_plugin_argv
+from .plugin_sandbox import (
+    SANDBOX_TMP_DIRECTORY,
+    PluginInterpreterPaths,
+    PluginV8Sandbox,
+    plugin_sandbox_problem,
+    plugin_sandbox_spec,
+    plugin_v8_sandbox_options,
+    sandboxed_plugin_argv,
+)
 from .tooling.input_schema import canonicalize_tool_input_schema
 from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
 from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
@@ -175,6 +185,26 @@ def plugin_data_dir(owner, plugin_id: str):
     return owner.plugins_dir / "data" / plugin_id
 
 
+# LLM: v8 权限、解释器及沙箱能力来自固定安装快照；任何不完整规格都在启动前拒绝，不能退回普通沙箱。
+# 函数用途: 为插件连接构造 v8 沙箱规格，旧版插件返回 None 以保留原平台沙箱行为。
+def _plugin_v8_sandbox(owner, installation: PluginInstallation, command: str) -> PluginV8Sandbox | None:
+    permissions = installation.manifest.permissions
+    if permissions is None:
+        return None
+    entry = installation.manifest.entry
+    interpreter = None
+    if entry is not None and entry.kind == "interpreter":
+        interpreter = PluginInterpreterPaths(entry.interpreter, Path(command), Path(command))
+    v8, problem = plugin_v8_sandbox_options(
+        owner.home_dir, network=bool(permissions.network), interpreter=interpreter)
+    if problem:
+        raise SandboxUnavailableError(f"SANDBOX_UNAVAILABLE: {problem}")
+    problem = plugin_sandbox_problem(True, owner.home_dir, sandbox_policy=v8)
+    if problem:
+        raise SandboxUnavailableError(f"SANDBOX_UNAVAILABLE: {problem}")
+    return v8
+
+
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。
 # 类用途: 保存插件连接和同连接已验工具，供共享权限视图分别生成目录。
 class PluginMCPClient(MCPStdioClient):
@@ -182,6 +212,7 @@ class PluginMCPClient(MCPStdioClient):
 #   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
 #   声明了 host_api=["read"] 的包另获宿主只读 API 地址与令牌（有副作用：登记令牌）。
 #   process_sandbox=True（配置 plugin_process_sandbox）时启动命令套进平台沙箱，只可写数据目录，TMPDIR 指向其中的 .tmp；
+#   v8 无视该开关强制沙箱、按清单断网、隐藏 Gateway 家目录，只放行插件目录与安装前缀；
 #   沙箱不可用时这里抛 SandboxUnavailable，调用方应先用 plugin_sandbox_problem 结构化拒绝。
     # 函数用途: 将已准备的插件环境（Python 或 v6 随包文件）接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
     def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None,
@@ -200,11 +231,16 @@ class PluginMCPClient(MCPStdioClient):
         data_dir = plugin_data_dir(owner, installation.manifest.plugin_id)
         descriptor = open_directory_beneath(owner.root, data_dir.relative_to(owner.root).parts, create=True)
         os.close(descriptor)
+        # B7：v8 事件插件（声明了 permissions）无条件强制进沙箱——不管调用方传的 process_sandbox 开没开；
+        # 按声明断网、隐藏 Gateway 整个家目录，只放行插件环境/数据目录与解释器安装前缀。
+        v8_permissions = installation.manifest.permissions
         sandbox_env = {}
-        if process_sandbox:
+        if process_sandbox or v8_permissions is not None:
             os.close(open_directory_beneath(owner.root, (*data_dir.relative_to(owner.root).parts, SANDBOX_TMP_DIRECTORY),
                                             create=True))
-            command, *args = sandboxed_plugin_argv([command, *args], cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir)
+            v8 = _plugin_v8_sandbox(owner, installation, command)
+            spec = plugin_sandbox_spec(cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir, sandbox_policy=v8)
+            command, *args = sandboxed_plugin_argv([command, *args], spec)
             sandbox_env = {"TMPDIR": str(data_dir / SANDBOX_TMP_DIRECTORY)}
         settings = canonical_plugin_settings(load_strict_json(installation.settings_json or "{}"),
                                              installation.manifest.settings_schema)

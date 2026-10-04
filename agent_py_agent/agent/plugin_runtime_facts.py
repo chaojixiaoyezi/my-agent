@@ -148,7 +148,9 @@ _REASON_MESSAGES = {
     "interpreter_pin_invalid": "插件解释器的定位记录与启用时不符，为安全起见没有启动；请先停用该插件，再重新启用并确认。",
     "platform_changed": "插件环境不是为本机平台准备的，没有启动；请先停用该插件，再重新启用并确认。",
     "sandbox_unavailable": "已开启插件进程沙箱（plugin_process_sandbox），但本机沙箱不可用（Linux 需要可用的 bubblewrap，"
-                           "macOS 需要 sandbox-exec），为安全起见没有启动插件。",
+                                "macOS 需要 sandbox-exec），为安全起见没有启动插件。",
+    "gateway_port_isolation_unavailable": "Linux 目前不能按端口隔离 Gateway；这个联网插件没有启用。请改为 network:false，或等 G5 端口隔离就绪。",
+    "interpreter_inside_hidden_root": "插件解释器位于 my-agent 数据目录内，沙箱会隐藏它；为安全起见没有启用插件。",
 }
 
 

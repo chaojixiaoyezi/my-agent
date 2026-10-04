@@ -1964,6 +1964,38 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   消失告警: 9
   ```
   strict code-size 后执行了 `git checkout -- CODE_SIZE_REPORT.md`；生成报告不提交。完整代码-size 值、尺寸差分输出均为实际运行结果。
+## M 线 B7 f841 阶段验证记录（b7f，2026-10-04；仅适用于 `f84182b5d`）
+
+- **继承的 3a 沙箱外结果**：`test_plugin_sandbox_v8.py`、`test_plugin_sandbox.py`、`test_attempt_sandbox.py` 报告 46 passed、12 skipped、1 failed。唯一失败 `test_python_installation_prefix_inside_hidden_home_runs` 是临时 venv 前缀缺少 `lib/libpython3.12.dylib` 及 `otool -L` 所列依赖，并非沙箱拒读；Node 真 Seatbelt 用例由 3a 报告通过。这是旧提交结果，不代表本轮修改已验证。
+- **本轮夹具修复**：macOS 测试按 `otool -L` 枚举 venv 解释器依赖，把可从当前 Python 安装定位的 `@rpath` / loader 库链接进临时前缀；Linux 不调用 `otool`。独立夹具冒烟在当前 macOS CI Python 上实际链接 `libpython3.12.dylib` 成功，但未启动 Seatbelt。
+- **新增拒绝用例**：`test_v8_enable_fails_closed_when_hidden_root_cannot_be_derived` 断言生产启用回执为结构化 `sandbox_unavailable` 且无激活/环境副作用；`test_linux_argv_fails_closed_when_private_read_root_missing` 直接断言 Linux argv 构造在隐藏根缺失时抛出 fail-closed 错误；两条定向用例 **2 passed**。
+- **相关测试**：`test_plugin_manifest_v8.py` 全文件通过；`test_plugin_management.py` **27 passed**；`test_plugin_sandbox.py` 的 v8 强制沙箱/网络拒绝选择 **3 passed**，无真实平台沙箱的其余选择 **9 passed**。该文件另一轮非真实沙箱选择中有 **2 failed**：`test_client_wraps_launch_and_points_tmpdir_into_data_dir` 的 MCP 启动报 `managed background launcher identity unavailable`（宿主进程启动指纹未取得，底层原因未确认）；`test_unavailable_sandbox_refuses_enable_and_explicit_calls` 在 relaxed 重启用断言失败，未单独捕获其底层原因。不能据此归因于沙箱或权限拒绝。
+- **v8 沙箱单测**：`test_plugin_sandbox_v8.py` 排除三个真实 Seatbelt 进程用例后的选择退出码 0（10 passed、3 skipped）；这不是家目录隔离的真进程证明。`test_constants_catalog.py` **11 passed**。guards9 清单中的 10 个文件（含 `test_packaging.py`）退出码 0。
+- **门禁与配置同步**：import boundaries 输出 `IMPORT_BOUNDARIES findings=0`；Ruff `All checks passed!`；doc sync `DOC_SYNC_PASS`；strict code-size `strict_scope_total=2224, hard=0, blocked=False`（报告已还原）；`git diff --check` 通过。`size_diff.sh` 最终输出新增告警 0、消失告警 11；`check_clean_package.py .` 输出 `OK: . 未发现发布阻塞项`。前端配置目录同步及 `--check` 均通过（258 fields），字面检索确认已无 `plugin_tool_gate_timeout_ms`。
+- **未验证 / 交接**：改动后的 `test_python_installation_prefix_inside_hidden_home_runs` 真 Seatbelt 行为未在本机运行，交 3a 沙箱外复跑；Node 真 Seatbelt 通过是 3a 对旧提交的结果。Linux K8/完整 Linux lane 未由当前 macOS 环境验证。本轮未重跑 K4/K8/K9/K10 变异。
+
+## M 线 B7 移植 17j（b7r，2026-10-04；移植提交 `b6f6fc992`；已并入 step17j，9b 终审待做）
+
+- **合并与配置目录**：从基点 `2ad257314` 将 `git diff add244a92 f84182b5d` 用 `git apply -3` 应用到新线；五个三方冲突均已解析并保留两边文档/逻辑。运行 `node frontend/scripts/sync-backend-config.mjs` → `Wrote ... with 259 fields`；`node frontend/scripts/sync-backend-config.mjs --check` → `Config catalog is in sync (259 fields)`。
+- **B7 定向集合**：按指定 CI Python 跑 13 个相关文件（sandbox、enable、management、manifest、attempt、事件展示、命令客户端、参数元数据/边界、常数目录、Shuohao gates），退出码 **1**。观察到 `test_macos_v8_narrows_read_and_enforces_network[True]`、`test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home` 的子进程错误均为 `sandbox-exec: sandbox_apply: Operation not permitted`；真实隔离未验证。`test_unavailable_sandbox_refuses_enable_and_explicit_calls` 的 relaxed 启用失败及 Shuohao 宿主启用用例失败尚未定位，不据此归因。旧 enable/attempt/legacy sandbox 失败还在下条基线对照记录。
+- **基线核对**：在临时 detached worktree `2ad257314a784b4430695f4d7d108944ec1da78d` 对同一组 9 个旧 attempt/enable/legacy sandbox 测试选择器复跑，命令退出码 1。输出明确列出 `test_macos_view_write_allowed`（`sandbox_apply: Operation not permitted`）、旧 enable 用例（`outcome_unknown`）和清理记录用例（`StopIteration`）等失败；其中旧用例在给定移植基线上已失败。其它失败的底层原因未确认，不推断为沙箱或本轮代码问题。B7 新增的真 Seatbelt 与 network 策略仍需 b7r 版本外部验证。
+- **可运行聚焦回归**：常数目录、`test_parameter_metadata.py`、`test_parameter_registry.py`、`test_user_config_capability.py` 命令退出码 0；K4/K8/K9/K10/家目录根变异的聚焦基线命令退出码 0，其中 K8 Linux-only 用例在 Darwin 跳过。
+- **变异结果**：K4（v8 不再强制进程沙箱）、K9（owner 恒允许）、K10（总开关恒开）、家目录根收窄（读基底改回 owner home）都被各自聚焦测试杀死。K8 attempt 私有根合并变异因 Linux-only 测试在 Darwin 跳过而**未验证**；需 3a 在 b7r Linux lane 复跑。所有已实际写入的变异文件均从 `/private/tmp` 备份恢复，SHA-256 一致。
+- **macOS 端口验收**：`test_macos_v8_narrows_read_and_enforces_network` 以真实 Seatbelt 子进程检查普通端口可达、G4 登记的 Gateway 端口不可达；当前环境只观察到 `sandbox_apply: Operation not permitted`，不是端口拒绝结果，需在沙箱外运行当前 b7r 提交。
+- **guards9 与门禁**：guards9 清单 10 个文件（含 `test_packaging.py`）退出 0、到达 100%；import boundaries `findings=0`；Ruff `All checks passed!`；doc sync `DOC_SYNC_PASS`；strict code-size `strict_scope_total=2207, hard=0, high-risk=1509, soft=698, test_advisory=1234, blocked=False`，其后已执行 `git checkout -- CODE_SIZE_REPORT.md`；clean-package `OK: . 未发现发布阻塞项`；`size_diff.sh` 输出 `新增告警: 0`、`消失告警: 35`。
+- **外部证据与审阅**：3a 对 `f84182b5d` 的 macOS 20 文件 469 passed、12 skipped、0 failed，以及 Linux 12 分片零失败/K8 未跳过，均是旧提交结果，不替代 b7r。ds2 只读核对认为五处尺寸拆平行为等价，供 9b 抽查；本地变异为独立证据，不把尺寸等价外推成整条安全链通过。
+- **交叉复核重点**：检查 G1 credential `hidden_paths` 与 v8 家目录隐藏是否在两平台同时保持；当前 b7r 的真 Seatbelt Gateway 端口用例及 Linux K8/车道由 3a/9b 在沙箱外复跑。
+
+## M 线 B7 返工（b7fix，2026-10-04；基于 17j 提交 `1da20daac`；已并入 step17j：3a 沙箱外 B7 14 个文件 355 passed / 13 skipped（均为仅 Linux bwrap 用例），Linux 车道待跑）
+
+- **ds10 搬运记录补充（针对 b7r，不外推为本轮测试）**：`frontend/config/backend-config-catalog.json` 是按 17j 的 `agent_config.yaml` 重新生成，不是从原版直接搬来；相对 17j 基线的 diff 有 143 行，主要是 `order` 的整体位移。
+- **ds10 基线失败记录（针对 b7r）**：`test_plugin_sandbox.py` 四条、`test_attempt_sandbox.py` 三条、`test_shuohao_novel_gates.py` 一条，共 8 条，在沙箱里因不允许嵌套 Seatbelt 而失败；基线 `2ad257314` 上同一名单也失败。3a 另报告沙箱外 237 个相关文件没有 B7 引入的失败。这些是 b7r 对照材料，不代表 b7fix 当前版本的回归结果。
+- **本轮实现**：Linux 收窄读挂载保留宿主核验的 alias 与 realpath 两条路径；新增 `PluginRestrictedSandbox` 与 `plugin_restricted_sandbox_spec`，v8 与老插件受限策略通过同一工厂生成 `AttemptSandboxSpec`。文件型程序根按单文件 + strict realpath 处理，不放宽到父目录；候选预检、业务连接、面板连接复用同一规格入口。
+- **本轮聚焦用例**：Linux argv alias/realpath 用例按 CI Python 先失败后通过；受限策略规格用例先因入口缺失失败，新增实现后通过；v8 客户端全局沙箱开关关闭时仍包装用例通过。Linux 真解释器 alias 启动并读包用例已添加，但本机 Darwin 不执行；受限策略真进程读/写/断网用例已添加，本机 Seatbelt 不能嵌套，尚无真隔离结果。
+- **变异**：K4（v8 强制沙箱）、K8（Linux hidden root 合并）、K9（owner 恒允许）、K10（总开关恒开）均被聚焦测试杀死；每个变异均从 `/private/tmp` 备份恢复并通过 SHA-256 相等核对。K8 的本机证据是 argv 构造测试，不替代 Linux 真 bwrap lane。
+- **本机聚焦运行**：新加的 5 项选择为 **3 passed、2 skipped**。跳过的是 Darwin 上 Linux-only alias 真进程，以及受限策略进程用例（真实网络隔离自检返回 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`）；两项均没有取得目标隔离结果。
+- **当前 17 文件相关集合**：指定 CI Python 命令退出码 **1**。`test_plugin_sandbox.py` 4 条、`test_attempt_sandbox.py` 3 条、`test_shuohao_novel_gates.py` 1 条与 ds10 记录的基线失败名单一致；原因按 ds10 的沙箱内不能嵌套 Seatbelt 记录，且 3a 报告沙箱外 237 个相关文件无 B7 引入失败（这些仅是 b7r 证据）。此外，当前本机还观察到 `test_plugin_sandbox_v8.py` 的 3 个真实 Seatbelt 场景报 `sandbox_apply: Operation not permitted`，以及 `test_plugin_enable.py` / `test_plugin_any_language.py` 的启用断言失败和 `StopIteration`；这些额外失败底层原因未确认，不归因于权限拒绝或 B7 修复，也没有声称为基线失败。
+- **门禁状态**：提交前当前版本的 Ruff 为 `All checks passed!`、import boundaries `findings=0`、doc sync `DOC_SYNC_PASS`、`git diff --check` 退出 0；最后一次 `size_diff.sh` 为 **新增 0、消失 35**。guards9 11 文件此前曾退出 0，strict code-size 此前为 `strict_scope_total=2209, hard=0, blocked=False`，clean-package 此前为 `OK`，但这三项未在最后 helper 拆分后重跑；因此需在接手后补验。3a 还需在 Linux lane 真跑 alias 解释器及受限策略，9b/3a 需沙箱外复核真 Seatbelt；本段是 WIP，不代表 B7 安全验收完成。
 
 ## G4：模型命令沙箱按端口拒绝连本机 Gateway（be，2026-10-03，分支 `claude/be-g4-port-deny`，基于 step17i `3a81e6c4b`）
 
@@ -15029,3 +15061,27 @@ CAP06用原session恢复已完成的REOPEN02，仅原生发送一次`/compact`�
 - 启动器用 `python -I` 跑（隔离 PYTHONPATH/用户 site，不被遮 ctypes/os）：`test_wrap_with_landlock_wraps_when_ready` 断言 argv 含 `-I`。
 - 施加失败用专门退出码 `APPLY_FAILED_EXIT_CODE`(97) + stderr 首行结构化标记（含 `GATEWAY_ISOLATION_APPLY_FAILED`），参数不对用 `BAD_ARGV_EXIT_CODE`(96)；`is_apply_failed` 识别；shell 工具把它映射成宿主错误码 `GATEWAY_ISOLATION_APPLY_FAILED`（`test_shell_maps_launcher_apply_failure_to_host_error_code`，普通非零仍是 COMMAND_FAILED）。
 - `parse_launcher_argv` 从严：空 `--deny`、越界端口（不在 0–65535）、`--deny` 后多于一个参数都按参数不对，不 exec。
+## M 线 B7 插件安全底座（be，2026-10-03，分支 `claude/be-m1-b7`，基于 B1 `add244a92`）
+
+- **策略门**（`test_plugin_manifest_v8.py`，改写 B1 两道过渡门的用例、新增 owner/开关用例）：
+  - 总开关关 → `plugin_events_disabled`、真实安装一字节不动（旧确认码也不兑现）；
+  - 开关开 + 非 local/main → `plugin_events_owner_not_allowed`，索取确认码之前就拒；
+  - 开关开 + 本机管理员 → 越过关闭门进入确认/启用，且 `process_sandbox` 恒 True（v8 强制沙箱）；
+  - v6 旧版确认路径不受影响。
+- **安全底座**（`test_plugin_sandbox_v8.py`，真进程，布局“放行目录嵌在拒读根里”）：
+  - 单元：v8 spec 读基底是插件环境（不是 owner home/数据根）、`private_read_roots=(数据根,)`、`network_access` 按声明；非 v8 spec 逐字节不变。
+  - macOS 真 Seatbelt（network 两档）：真实 Python 启动、realpath 成立、读自己的环境 READ_OK、写数据目录 OK、读会话/secrets DENIED；`network:false` 连回环失败、`network:true` 连得上。
+  - Linux 真 bwrap（车道，network:true）：收窄读同上（读会话/secrets DENIED）。
+  - Linux `network:false`：`--unshare-net` 在 LinuxKit 车道建回环失败（内核限制，真机不受影响），所以断网只在 argv 上断言用 `--unshare-net` + tmpfs 盖数据根 + 挂回环境/数据目录，不在车道真连。
+- **变异**（scratch `b7/mutate.py` + 车道两条，不随包）：macOS 5 个（启用门忽略开关/owner、v8 不强制沙箱、读基底用 owner_home 泄漏、网络不按声明）全杀；Linux 车道 2 个（`_read_only_root_argv` 不 tmpfs 盖、不挂回工作目录）全杀。
+- **两配置项**：进 `USER_SETTINGS_BOUNDARY_KEYS`，`test_parameter_registry`、`test_user_config_capability` 覆盖登记与模型改被拒。
+
+## M1 B7 前一阶段记录（b7f，2026-10-03；历史记录，不代表当前 17j 验收）
+
+- **本轮改动范围**：移除 B7 未消费的 `plugin_tool_gate_timeout_ms` 配置；增加 v8 沙箱网络自检、Gateway 端口策略、解释器前缀校验和整家目录收窄读；确认码增加用户可读的读范围；补充沙箱/owner/开关/确认事实用例与 §10/§16 设计说明。
+- **已运行的定向测试**：
+  - `test_plugin_sandbox_v8.py` 曾在实现前运行，按预期因缺少新合同字段、缺失隐藏根未失败关闭等而红；这只是 TDD 红测，不算验收。
+  - 随后运行 `test_plugin_sandbox_v8.py`、`test_plugin_sandbox.py`、`test_plugin_management.py`、`test_plugin_manifest_v8.py`、`test_parameter_metadata.py` 的聚焦集，退出码 1；该次运行包含尚未整理完的用例/接线问题。之后修正了部分测试与接线，但用户要求先提交，未再重跑整组。
+  - 最近单项 `test_plugin_sandbox.py::test_client_wraps_launch_and_points_tmpdir_into_data_dir` 仍失败，启用回执的结构化原因是 `plugin_endpoint_failed`；根因未定位，不能算通过。
+- **未验证**：K4/K8/K9/K10 与返工变异未运行；`test_parameter_metadata` 变更后单项未复核；guards9、Ruff、import boundaries、doc-sync、strict code-size、clean-package、size_diff 均未运行；无全套绿证据。
+- **沙箱边界**：macOS `network:false` 真 Seatbelt 自检观察到 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`；`network:true` 真进程探针没有输出 JSON，根因未确证。按任务约束交 9b 在沙箱外复核；Linux bwrap/网络命名空间与真实 Gateway 链路未在本会话验证。

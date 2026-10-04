@@ -109,18 +109,22 @@ def test_read_only_root_layout_keeps_reads_and_binds_only_write_roots(tmp_path):
 def test_client_wraps_launch_and_points_tmpdir_into_data_dir(tmp_path, monkeypatch):
     service = _enabled_writer(tmp_path, process_sandbox=False)
     owner, entry = service.context.owner, service.installations.snapshot()[0]
-    calls = []
+    specs = []
     monkeypatch.setattr(plugin_runtime, "sandboxed_plugin_argv",
-                        lambda argv, **kwargs: calls.append(kwargs) or ["fake-sandbox", "--", *argv])
+                        lambda argv, spec: specs.append(spec) or ["fake-sandbox", "--", *argv])
     plain = PluginMCPClient(owner, entry)
-    assert Path(plain.config.command).name == "server.py" and "TMPDIR" not in plain.config.env and not calls
+    assert Path(plain.config.command).name == "server.py" and "TMPDIR" not in plain.config.env and not specs
     wrapped = PluginMCPClient(owner, entry, process_sandbox=True)
     data_dir = plugin_data_dir(owner, PLUGIN_ID)
     assert wrapped.config.command == "fake-sandbox" and wrapped.config.args[1] == plain.config.command
     assert wrapped.config.args[2:] == plain.config.args and wrapped.config.cwd == plain.config.cwd
     assert wrapped.config.env["TMPDIR"] == str(data_dir / SANDBOX_TMP_DIRECTORY)
     assert (data_dir / SANDBOX_TMP_DIRECTORY).is_dir()
-    assert calls == [{"cwd": Path(plain.config.cwd), "data_dir": data_dir, "owner_home": owner.home_dir}]
+    # 非 v8 插件：读基底是 owner home、无收窄读、不断网，行为与原来一致。
+    spec = specs[0]
+    assert len(specs) == 1 and spec.attempt_view == Path(plain.config.cwd) and spec.staging_root == data_dir
+    assert spec.owner_home == owner.home_dir and spec.shared_workspace == owner.home_dir
+    assert spec.private_read_roots == () and spec.read_only_root
 
 
 def test_unavailable_sandbox_refuses_enable_and_explicit_calls(tmp_path, monkeypatch):
@@ -255,3 +259,95 @@ def test_config_reaches_real_management_context(tmp_path, setting):
     context = plugin_management_context(owner, home, load_config(config_path), service.context.threads,
                                         actor_id="tester", channel="chat", conversation_id="session", is_admin=True)
     assert context.process_sandbox is (setting == "true")
+
+
+def _installed_v8(tmp_path, *, network: bool):
+    from agent_py_agent.tests.test_plugin_manifest_v8 import _bundle as v8_bundle
+    from agent_py_agent.tests.test_plugin_manifest_v8 import _v8
+
+    service, _ = manager(tmp_path, process_sandbox=False, plugin_events_enabled=True, events_owner_allowed=True)
+    source = tmp_path / "event-plugin.zip"
+    source.write_bytes(v8_bundle(_v8(permissions={"network": network})))
+    result = service.command(f'/plugins install "{source}"', revision=service.catalog().revision,
+                             request_id="install-v8")
+    assert result["state"] == "succeeded", result
+    return service
+
+
+def _stub_v8_candidate(monkeypatch, specs):
+    monkeypatch.setattr(plugin_enable_tool, "plugin_sandbox_problem", lambda *args, **kwargs: "")
+    monkeypatch.setattr(plugin_runtime, "plugin_sandbox_problem", lambda *args, **kwargs: "")
+    monkeypatch.setattr(plugin_runtime, "sandboxed_plugin_argv",
+                        lambda argv, spec: specs.append(spec) or ["fake-sandbox", *argv])
+    monkeypatch.setattr(PluginMCPClient, "start", lambda _self: object())
+    monkeypatch.setattr(PluginMCPClient, "discover_tools", lambda _self, _transport: ())
+    monkeypatch.setattr(PluginMCPClient, "stop", lambda _self: SimpleNamespace(
+        confirmed=True, record={"session_id": "test-candidate"}, terminations=[]))
+
+
+def test_v8_client_is_sandboxed_even_when_global_switch_is_off(tmp_path, monkeypatch):
+    service = _installed_v8(tmp_path, network=False)
+    specs = []
+    _stub_v8_candidate(monkeypatch, specs)
+    first = _enable(service, "enable-v8")
+    assert first["details"]["reason"] == "confirmation_required", first
+    code = first["details"]["confirmation"]["confirm_code"]
+    enabled = _enable(service, "confirm-v8", code)
+    assert enabled["state"] == "succeeded", enabled
+
+    entry = service.installations.snapshot()[0]
+    client = PluginMCPClient(service.context.owner, entry, process_sandbox=False)
+    assert client.config.command == "fake-sandbox"
+    assert len(specs) == 2
+    for spec in specs:
+        assert spec.network_access is False
+        assert spec.private_read_roots == (Path.home().resolve(strict=True),)
+        assert spec.owner_home == Path(client.config.cwd)
+        assert spec.read_only_root is True
+
+
+def test_v8_enable_and_explicit_call_report_network_isolation_unavailable(tmp_path, monkeypatch):
+    from agent_py_agent.agent.attempt.sandbox import SandboxUnavailableError
+
+    service = _installed_v8(tmp_path, network=False)
+
+    def no_network_namespace(self):
+        if self.spec.network_access is False:
+            raise SandboxUnavailableError("network isolation unavailable")
+
+    monkeypatch.setattr("agent_py_agent.agent.plugin_sandbox.AttemptExecutionSandbox.require_ready",
+                        no_network_namespace)
+    refused = _enable(service, "unavailable-v8")
+    assert refused["details"]["reason"] == "sandbox_unavailable", refused
+    assert service.installations.snapshot()[0].activation is None
+
+    monkeypatch.setattr("agent_py_agent.agent.plugin_sandbox.AttemptExecutionSandbox.require_ready",
+                        lambda _self: None)
+    specs = []
+    _stub_v8_candidate(monkeypatch, specs)
+    first = _enable(service, "enable-v8")
+    code = first["details"]["confirmation"]["confirm_code"]
+    enabled = _enable(service, "confirm-v8", code)
+    assert enabled["state"] == "succeeded", enabled
+
+    monkeypatch.setattr("agent_py_agent.agent.plugin_sandbox.AttemptExecutionSandbox.require_ready",
+                        no_network_namespace)
+    source = tmp_path / "input.txt"
+    source.write_text("x")
+    call = service.command(f'/plugins@{PLUGIN_ID} read "{source}"', revision=service.catalog().revision,
+                           request_id="call-v8")
+    assert call["state"] == "rejected" and call["error_code"] == "PLUGIN_RUNTIME_UNAVAILABLE", call
+    assert call["details"] == {"reason": "sandbox_unavailable"}
+
+
+def test_linux_v8_network_plugin_enable_is_rejected_with_registered_code(tmp_path, monkeypatch):
+    from agent_py_agent.agent import plugin_sandbox
+    from agent_py_agent.agent.attempt.sandbox import SandboxUnavailableError
+
+    service = _installed_v8(tmp_path, network=True)
+    monkeypatch.setattr(plugin_sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(plugin_sandbox.AttemptExecutionSandbox, "require_ready", lambda _self: None)
+    refused = _enable(service, "linux-network-v8")
+    assert refused["details"]["reason"] == "gateway_port_isolation_unavailable", refused
+    assert refused["error_code"] == "PLUGIN_GATEWAY_PORT_ISOLATION_UNAVAILABLE", refused
+    assert service.installations.snapshot()[0].activation is None

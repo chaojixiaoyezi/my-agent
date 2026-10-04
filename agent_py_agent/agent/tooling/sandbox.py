@@ -137,9 +137,11 @@ class SandboxSpec:
     # into a network namespace with no host interface instead of growing a
     # second sandbox implementation.
     network_access: bool = True
-    # 整根只读形态：读范围与宿主相同，只有 write_roots 可写（插件进程沙箱试点用）；
+    # 整根只读形态：根文件系统先只读挂载，hidden_paths 可再覆盖隐藏区域并只重挂授权读根；write_roots 单独可写。
     # 默认 False 时两种既有形态的 argv 逐字节不变。
     read_only_root: bool = False
+    # B7：收窄读形态下保留宿主已核验的符号链接别名与真实目标两条挂载路径。
+    preserve_public_read_root_aliases: bool = False
     # H2：最后以只读空 tmpfs 隐藏宿主目录；模型命令隐藏托管存储，G1 整根只读插件形态隐藏宿主凭据 secrets 目录。
     hidden_paths: tuple[Path, ...] = ()
 
@@ -217,7 +219,9 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         if Path(ro).exists():
             argv += ["--ro-bind", ro, ro]
     write_roots = _normalized_write_roots(spec.write_roots)
-    read_roots = _normalized_read_roots(spec.public_ro_roots)
+    read_roots = _normalized_read_roots(
+        spec.public_ro_roots, spec.preserve_public_read_root_aliases
+    )
     # 会话运行时 的 split filesystem policy 同样先给进程可读根，再只对明确 writable roots
     # 开写权限。顺序不能反：read root 可以是 write root 的父目录。
     for root in read_roots:
@@ -274,12 +278,32 @@ def _read_only_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:
         "--share-net" if spec.network_access else "--unshare-net", "--new-session",
         "--ro-bind", "/", "/", "--dev", "/dev", *_proc_mount_args(),
     ]
+    _append_hidden_root_remounts(argv, spec)
     for root in _normalized_write_roots(spec.write_roots):
         if root.exists():
             argv += ["--bind", str(root), str(root)]
     _append_readonly_mounts(argv, spec.read_only_paths)
     argv += ["--chdir", str(spec.workspace)]
     return argv
+
+
+# LLM: B7 收窄读：private_read_roots 由调用方并入 hidden_paths（v8 隐藏 Gateway 用户家目录），先 tmpfs 覆盖，再只读挂回工作目录与
+#   显式授权根，并在写根阶段按原权限挂回；隐藏根内未授权项目仍不可见。保留原路径别名开关可让符号链接入口与 realpath 都被挂回。
+#   没有 hidden_paths 时什么都不加，既有整根只读 argv 逐字节不变。
+# 函数用途: 整根只读形态下把隐藏根 tmpfs 覆盖并挂回工作目录与授权读根。
+def _append_hidden_root_remounts(argv: list[str], spec: SandboxSpec) -> None:
+    hidden = _normalized_read_roots(spec.hidden_paths)
+    if not hidden:
+        return
+    for root in hidden:
+        if root.is_dir():
+            argv += ["--tmpfs", str(root)]
+    reexpose = (spec.workspace, *_normalized_read_roots(
+        spec.public_ro_roots, spec.preserve_public_read_root_aliases
+    ))
+    for path in reexpose:
+        if path.exists():
+            argv += ["--ro-bind", str(path), str(path)]
 
 
 def _normalized_write_roots(raw_roots: tuple[Path, ...] | None) -> tuple[Path, ...]:
@@ -299,7 +323,34 @@ def _normalized_write_roots(raw_roots: tuple[Path, ...] | None) -> tuple[Path, .
     return tuple(roots)
 
 
-def _normalized_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
+def _normalized_read_roots(
+    raw_roots: tuple[Path, ...], preserve_aliases: bool = False
+) -> tuple[Path, ...]:
+    # LLM: 标准 shell 读根按 realpath 合并；插件收窄读会显式保留宿主已核验的 symlink 别名与真实目标，
+    #   因为隐藏家目录后，单挂目标路径不会恢复原来位于家目录内的入口。
+    # 函数用途: 规范只读挂载根并按需保留符号链接别名映射。
+    if preserve_aliases:
+        return _preserved_read_roots(raw_roots)
+    return _canonical_read_roots(raw_roots)
+
+
+# LLM: alias 与目标属于不同的挂载路径；按字面路径去重，避免 realpath 包含关系把别名折叠掉。
+# 函数用途: 保留每个只读根的原始入口和规范化目标。
+def _preserved_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for raw in raw_roots:
+        try:
+            original = Path(raw).expanduser().absolute()
+            resolved = original.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        roots = list(dict.fromkeys((*roots, original, resolved)))
+    return tuple(roots)
+
+
+# LLM: 非收窄读调用沿用 realpath 祖先合并，保持已有 bwrap shell 挂载集合不变。
+# 函数用途: 合并普通只读根中的重复路径与子根。
+def _canonical_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
     roots: list[Path] = []
     for raw in raw_roots:
         try:

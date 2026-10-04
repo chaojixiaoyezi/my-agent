@@ -61,6 +61,8 @@ _BOUNDARY_NAMES = frozenset({
     "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
     "cli_audit_cleanup_days", "plugin_tool_gate_timeout_ms",
+    # B7：M 线事件插件总开关是安全边界，只能用户经 /settings 改；显式列名，不靠键名记号猜。
+    "plugin_events_enabled",
 })
 # 常用参数：/settings 默认只列这些，user_config 的搜索结果也标出来，方便先推荐。这是封闭的产品决策名单（2026-09-27 配置分类
 # 的 common 层：99% 的用户只会碰到它们），不是开放世界的类型识别；其余参数仍可用 /settings all、search、show 查到和修改。

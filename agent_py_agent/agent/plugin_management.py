@@ -27,7 +27,7 @@ from .plugin_commands import (
 )
 from .plugin_configure_tool import PLUGIN_CONFIGURE_TOOL, PluginConfigureTool
 from .plugin_disable_tool import PLUGIN_DISABLE_TOOL, PluginDisableTool
-from .plugin_enable_tool import PLUGIN_ENABLE_TOOL, PluginEnableTool
+from .plugin_enable_tool import PLUGIN_ENABLE_TOOL, PluginEnablePolicy, PluginEnableTool
 from .plugin_install_store import PluginInstallStore
 from .plugin_install_tool import PLUGIN_INSTALL_TOOL, PluginInstallTool
 from .plugin_invocation import (
@@ -38,8 +38,19 @@ from .plugin_invocation import (
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
-from .plugin_runtime_facts import confirmation_message, runtime_problem, runtime_reason_message
-from .plugin_sandbox import plugin_sandbox_problem
+from .plugin_runtime_facts import (
+    PluginRuntimeError,
+    confirmation_message,
+    runtime_problem,
+    runtime_reason_message,
+    verified_runtime_command,
+)
+from .plugin_sandbox import (
+    PLUGIN_GATEWAY_PORT_ISOLATION_ERROR_CODE,
+    PluginInterpreterPaths,
+    plugin_sandbox_problem,
+    plugin_v8_sandbox_options,
+)
 from .plugin_sources import source_unauthorized_message
 from .plugin_update import PLUGIN_UPDATE_TOOL
 from .plugin_update_tool import PluginUpdateTool
@@ -82,6 +93,10 @@ class PluginManagementContext:
     approval_mode: str = "ask"
     # 配置 plugin_process_sandbox：插件进程是否套平台沙箱（启用验收与显式调用都按它启动）
     process_sandbox: bool = False
+    # 配置 plugin_events_enabled：M 线事件插件总开关（B7）。关着时 v8 可以安装、不能启用。
+    plugin_events_enabled: bool = False
+    # 当前 owner 是否是身份完整的本机管理员（local/main）。v8 事件插件第一期只对本机管理员开放。
+    events_owner_allowed: bool = False
     # 当前 owner 已加载实例的工具注册表（只读，给 /plugins list 的 MCP 段投影运行与发布事实）；冷入口/未加载为 None，
     # 绝不为了这一段去初始化实例。
     live_registry: object | None = None
@@ -97,7 +112,10 @@ def plugin_management_context(
     actor_id: str, channel: str, conversation_id: str, is_admin: bool,
 ) -> PluginManagementContext:
     from .user_space.approval_mode import permission_config, read_approval_mode
-    from .user_space.owner_access import resolve_owner_scope_and_access
+    from .user_space.owner_access import (
+        is_complete_local_admin_owner,
+        resolve_owner_scope_and_access,
+    )
     from .user_space.owner_policy import resolve_effective_owner_policy
 
     policy = resolve_effective_owner_policy(home)
@@ -129,7 +147,9 @@ def plugin_management_context(
                                    allowed and PLUGIN_REMOVE_TOOL not in policy.disabled_tools,
                                    business_allowed=allowed, disabled_tools=frozenset(policy.disabled_tools),
                                    approval_mode=approval_mode,
-                                   process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)))
+                                   process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
+                                   plugin_events_enabled=bool(getattr(config, "plugin_events_enabled", False)),
+                                   events_owner_allowed=is_complete_local_admin_owner(home))
 
 
 # LLM: owner 只有原安装 Store/runtime.db；实例不建后台任务或业务历史，结果投影须保留 finalization_pending。
@@ -272,13 +292,59 @@ class PluginManagement:
         if not self.context.business_allowed or name in self.context.disabled_tools:
             return {"ok": False, "state": "rejected", "error_code": "TOOL_DISABLED"}
         entry = next(row for row in entries if row.manifest.plugin_id == parsed.plugin.plugin_id)
-        problem = (runtime_problem(self.context.owner, entry)
-                   or plugin_sandbox_problem(self.context.process_sandbox, self.context.owner.home_dir))
+        problem = self._business_sandbox_problem(entry)
         if problem:
             # 非 Python 插件的解释器/平台已不是用户确认时的样子：不建运行、不启动进程，结构化说明原因
-            return {"ok": False, "state": "rejected", "error_code": "PLUGIN_RUNTIME_UNAVAILABLE", "details": {"reason": problem}}
+            error_code = (PLUGIN_GATEWAY_PORT_ISOLATION_ERROR_CODE if problem == "gateway_port_isolation_unavailable"
+                          else "PLUGIN_RUNTIME_UNAVAILABLE")
+            return {"ok": False, "state": "rejected", "error_code": error_code, "details": {"reason": problem}}
         arguments = json.loads(json.dumps(dict(parsed.arguments.values), ensure_ascii=False, allow_nan=False))
         return PluginInvocation(entry, name, arguments)
+
+    # LLM: 业务沙箱按安装清单构造，不沿用用户确认前的猜测；任何解释器或网络隔离缺口都在起进程前返回原因。
+    # 函数用途: 为当前固定安装版本核对运行时、v8 权限与平台沙箱能力。
+    def _business_sandbox_problem(self, entry) -> str:
+        is_v8 = entry.manifest.permissions is not None
+        if is_v8:
+            interpreter, problem = self._business_v8_interpreter(entry)
+        else:
+            interpreter = None
+            problem = runtime_problem(self.context.owner, entry)
+        if problem:
+            return problem
+        v8_sandbox = None
+        if is_v8:
+            v8_sandbox, problem = plugin_v8_sandbox_options(
+                self.context.owner.home_dir,
+                network=bool(entry.manifest.permissions.network),
+                interpreter=interpreter,
+            )
+            if problem:
+                return problem
+        sandbox_enabled = self.context.process_sandbox or is_v8
+        if v8_sandbox is None:
+            return plugin_sandbox_problem(sandbox_enabled, self.context.owner.home_dir)
+        return plugin_sandbox_problem(sandbox_enabled, self.context.owner.home_dir, sandbox_policy=v8_sandbox)
+
+    # LLM: 仅 v8 的解释器入口需绑定已激活环境和指纹；其他入口仍走通用运行时检查，不执行插件代码。
+    # 函数用途: 从可信激活记录取解释器命令或返回不可用原因。
+    def _business_v8_interpreter(self, entry) -> tuple[PluginInterpreterPaths | None, str]:
+        manifest_entry = entry.manifest.entry
+        if manifest_entry is None or manifest_entry.kind != "interpreter":
+            return None, runtime_problem(self.context.owner, entry)
+        activation = entry.activation
+        if activation is None:
+            return None, "sandbox_unavailable"
+        environment = self.context.owner.plugins_dir / "environments" / activation.plan.environment_ref
+        try:
+            command = verified_runtime_command(
+                self.context.owner.root, environment, manifest_entry.kind,
+                activation.plan.interpreter_fingerprint,
+            )
+        except PluginRuntimeError as exc:
+            return None, exc.reason
+        interpreter = PluginInterpreterPaths(manifest_entry.interpreter, Path(command), Path(command))
+        return interpreter, ""
 
     # LLM: 认证和开关先于新写入，旧请求先读账；交互和取消仅属于当前提交，不能把旧动作重放到新激活。
     # 函数用途: 按已见目录版本提交管理请求，将当前连接取消信号传给原执行器。
@@ -395,8 +461,10 @@ class PluginManagement:
             return PluginConfigureTool(self.installations, context.path_policy, context.workspace,
                                        binding.request.operation_id, existing, catalog_revision)
         if tool_name == PLUGIN_ENABLE_TOOL:
-            return PluginEnableTool(context.owner, repo, binding, existing, catalog_revision,
-                                    process_sandbox=context.process_sandbox)
+            policy = PluginEnablePolicy(process_sandbox=context.process_sandbox,
+                                        events_enabled=context.plugin_events_enabled,
+                                        events_owner_allowed=context.events_owner_allowed)
+            return PluginEnableTool(context.owner, repo, binding, existing, catalog_revision, policy=policy)
         if tool_name == PLUGIN_REMOVE_TOOL:
             return PluginRemoveTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)
         return PluginDisableTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)

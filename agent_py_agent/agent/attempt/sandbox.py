@@ -80,7 +80,8 @@ class AttemptSandboxSpec:
     # Standalone attempt views are writable by definition. Production shell sets False whenever
     # an explicit write-boundary list exists, so a read-only cwd never becomes an implicit RW root.
     implicit_attempt_write_roots: bool = True
-    # 整根只读形态（插件进程试点）：Linux 读范围与宿主相同、只写显式写根；macOS 非 full 形态本来就是读放行、写只落写根。
+    # 整根只读形态：Linux 根文件系统只读，private_read_roots 可 tmpfs 隐藏并按 public_read_roots / extra_write_roots 重挂授权范围；
+    # macOS 仍由 Seatbelt 读拒绝规则表达同一合同，写权限只落显式写根。
     read_only_root: bool = False
     # owner 隔离形态下要拒读的宿主根：总有 my-agent 家目录根（其它 owner、配置与密钥、发布记录），开关打开时对非本机管理员
     # 再加用户家目录。拒读后仍放行本 owner home、attempt view、staging、授权读根和写根。Linux bwrap 本来就不挂载这些路径；
@@ -241,9 +242,13 @@ class AttemptExecutionSandbox:
         )
 
     # LLM: extra_write_roots 来自当前工具的结构化 allowed_write_roots，首项是 canonical
-    # task work 临时根；必须先于 attempt_view，避免 build_bwrap_argv 把项目 cwd 当 /tmp 后端。
+    # task work 临时根；v8 隐藏根必须仍存在才能挂 tmpfs，缺失要失败关闭；写根顺序保持原合同。
     # 函数用途: 为 Linux 组装 bwrap 参数，并让任务临时区与当前项目目录分离。
     def _linux_argv(self, command_argv: list[str]) -> list[str]:
+        if self.spec.read_only_root and any(
+            not Path(root).is_dir() for root in self.spec.private_read_roots
+        ):
+            raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: PRIVATE_READ_ROOT_MISSING")
         implicit_roots = (
             (self.spec.attempt_view, self.spec.staging_root)
             if self.spec.implicit_attempt_write_roots
@@ -262,7 +267,13 @@ class AttemptExecutionSandbox:
             read_only_paths=self.spec.protected_write_paths,
             full_access=self.spec.full_access,
             network_access=self.spec.network_access,
-            read_only_root=self.spec.read_only_root, hidden_paths=self.spec.hidden_paths,
+            read_only_root=self.spec.read_only_root,
+            preserve_public_read_root_aliases=self.spec.read_only_root,
+            # B7：整根只读形态下，private_read_roots（v8/受限策略的隐藏根）并进 hidden_paths，由 _read_only_root_argv
+            # tmpfs 盖住再把工作目录/写根挂回去；H2 的 hidden_paths（插件库）照旧。owner 隔离形态的 private_read_roots
+            # 仍走 bwrap 不挂载语义，不受影响（那条路径不读 hidden_paths 的收窄逻辑）。
+            hidden_paths=((*self.spec.private_read_roots, *self.spec.hidden_paths)
+                          if self.spec.read_only_root else self.spec.hidden_paths),
         )
         return self._wrap_with_landlock([*build_bwrap_argv(spec), "--", *command_argv])
 
@@ -393,6 +404,7 @@ def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
 
 
 # LLM: Seatbelt 规则“后写覆盖先写”（本机实测 2026-09-26：先拒绝根再放行子目录，子目录可读；顺序颠倒则子目录也被拒）。
+#   公开解释器根可能有 symlink 别名；拒读范围按真实路径裁决，但显式授权的原路径和 realpath 都必须放行。
 #   所以先写全部拒读根（my-agent 根，开关打开时还有用户家目录），再逐个放行本 owner 的可见范围，最后放行上层目录的元数据；
 #   与 Linux 挂载视图对齐。只动 file-read*，写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
 # 函数用途: 生成 owner 隔离形态下宿主私有目录的读拒绝与放行规则；Full Access 或没有拒读根时返回空列表。
@@ -403,6 +415,7 @@ def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
     visible = {Path(path).resolve(strict=False) for path in (
         spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
         *spec.public_read_roots, *spec.extra_write_roots)}
+    visible.update(Path(path).expanduser().absolute() for path in spec.public_read_roots)
     allowed = sorted(json.dumps(str(path)) for path in visible)
     return [*(f"(deny file-read* (subpath {json.dumps(str(root))}))" for root in hidden),
             *(f"(allow file-read* (subpath {path}))" for path in allowed),

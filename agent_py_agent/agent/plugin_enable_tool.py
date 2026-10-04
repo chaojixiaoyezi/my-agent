@@ -1,9 +1,11 @@
-# LLM: 启用复用原 HostCommand/ToolExecutor 和安装表；B7 未落地时 v8 在确认前拒绝、不给候选资源，联测关闭门和旧版启用，不建立第二套账。
-# 模块用途: 验证隔离环境及工具目录后发布贡献；v8 暂不可启用，旧版非 Python 插件仍凭确认码继续；私有值不进回执。
+# LLM: 启用沿用原 HostCommand/ToolExecutor 与安装表；v8 仅在总开关、owner 和共用进程沙箱就绪后继续，拒绝须先于环境副作用。
+# 模块用途: 在固定安装快照上安全准备并发布插件，旧版确认流程不变且私有值不进入回执。
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+import shutil
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 
 from .capability_verifier_consent import (
     verifier_confirmation_code,
@@ -28,7 +30,13 @@ from .plugin_runtime_facts import (
     confirmation_details,
     resolve_plugin_runtime,
 )
-from .plugin_sandbox import plugin_sandbox_problem
+from .plugin_sandbox import (
+    PLUGIN_GATEWAY_PORT_ISOLATION_ERROR_CODE,
+    PluginInterpreterPaths,
+    PluginV8Sandbox,
+    plugin_sandbox_problem,
+    plugin_v8_sandbox_options,
+)
 from .tooling.background_process_launch import BackgroundLaunchError
 from .tooling.mcp_client import MCPError
 from .tooling.models import (
@@ -43,18 +51,35 @@ from .tooling.models import (
 )
 
 
-# LLM: owner/binding/installation 由宿主冻结；关闭的 v8 不解析运行时或生成计划，旧版保持原幂等/CAS 链。
-# 类用途: 接入明确管理员启用，B7 安全底座未就绪时先阻止 v8 运行，对旧版准备失败继续拒绝。
+# LLM: owner/binding/installation 由宿主冻结；v8 的强制沙箱、开关与本机 owner 门均在确认和准备副作用前检查。
+# 类用途: 接入明确管理员启用，安全策略未就绪就结构化拒绝，不让插件环境留在 preparing。
+# LLM: B7 启用策略：process_sandbox 来自配置 plugin_process_sandbox；events_enabled 是 M 线总开关；
+#   events_owner_allowed 是当前 owner 是否本机管理员。三项都是宿主裁决的结构化事实，打包传给启用工具，避免参数过多。
+# 类用途: 承载一次插件启用的安全策略判定输入。
+@dataclass(frozen=True)
+class PluginEnablePolicy:
+    process_sandbox: bool = False
+    events_enabled: bool = False
+    events_owner_allowed: bool = False
+
+
+# LLM: 管理候选只消费宿主固定安装快照和结构化策略；启用预检与运行时复用 plugin_sandbox_spec，不另建平台规则。
+# 类用途: 校验启用门、沙箱与确认码后执行唯一的插件激活流程。
 class PluginEnableTool(BaseTool):
-    # LLM: never 仅免管理动作重复询问；只有未激活的旧版生成计划及资源声明，v8 暂无候选与运行时读取。
-    #   process_sandbox 来自管理上下文的配置 plugin_process_sandbox，决定候选进程是否套平台沙箱。
+    # LLM: never 仅免管理动作重复询问；只有未激活的旧版生成计划及资源声明。policy 带来 B7 的沙箱/总开关/owner 判定。
     # 函数用途: 可启用的旧版包在领取前声明环境；关闭的 v8、内容包、已启用或缺失插件均不构造资源域。
-    def __init__(self, owner, repository, binding, installation, catalog_revision, *, process_sandbox: bool = False):
+    def __init__(self, owner, repository, binding, installation, catalog_revision,
+                 *, policy: PluginEnablePolicy | None = None):
+        policy = policy or PluginEnablePolicy()
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
-        self.process_sandbox = process_sandbox
+        self.events_enabled, self.events_owner_allowed = policy.events_enabled, policy.events_owner_allowed
+        # v8 事件/收紧插件（permissions 非空）强制进沙箱，不管全局 plugin_process_sandbox 开没开（B7 安全底座）。
+        self._is_v8 = installation is not None and installation.manifest.permissions is not None
+        self.process_sandbox = policy.process_sandbox or self._is_v8
         self._verifier_consent = ""
-        pending = (installation is not None and installation.manifest.permissions is None and installation.activation is None
+        # v8 与旧版可执行插件一样要构造运行计划（它们都有 entry、不是内容包）；v8 的隔离在 PluginMCPClient 按清单强制套上。
+        pending = (installation is not None and installation.activation is None
                    and not installation.manifest.is_content_only)
         self.runtime, self.runtime_error = _runtime_facts(installation) if pending else (None, "")
         self.plan = (plan_plugin_environment(installation, binding.request.operation_id,
@@ -75,18 +100,9 @@ class PluginEnableTool(BaseTool):
     # LLM: 原请求重放由执行器完成；v8 按总开关关闭在确认前返回 not_started/not_committed，旧版失败保持原事实。
     # 函数用途: 先拒绝未具安全底座的订阅包，再处理旧版确认与启用，将实际提交状态交回原工具账。
     def execute(self, params: dict) -> ToolHandlerOutcome:
-        if params["catalog_revision"] != self.catalog_revision:
-            return self._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
-        if self.installation is None or self.installation.manifest.plugin_id != params["plugin"]:
-            return self._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
-        if self.installation.manifest.permissions is not None:
-            # B7 落地时换成真正的总开关、local/main 与强制沙箱判定；此前按关闭处理，不能凭确认码兑现空安全承诺。
-            return self._failure("plugin_events_disabled", "TOOL_EXECUTION_FAILED", "not_started")
-        if self.runtime_error:
-            return self._failure(self.runtime_error, "TOOL_EXECUTION_FAILED", "not_started")
-        if self.plan is not None and plugin_sandbox_problem(self.process_sandbox, self.owner.home_dir):
-            # 沙箱开关已开但本机沙箱不可用：在准备环境、启动候选之前拒绝，不退回无沙箱
-            return self._failure("sandbox_unavailable", "TOOL_EXECUTION_FAILED", "not_started")
+        failure = self._preflight_failure(params)
+        if failure is not None:
+            return failure
         if self.runtime is not None:
             confirmation = self._confirmation()
             if params.get("confirm") != confirmation["confirm_code"]:
@@ -113,6 +129,42 @@ class PluginEnableTool(BaseTool):
             return self._failure("activation_unconfirmed", "TOOL_EXECUTION_FAILED", "unknown", "unknown")
         return ToolHandlerOutcome(PLUGIN_ENABLE_TOOL, True, "包版本已启用，新任务将读取该代贡献。",
                                   result_envelope={PLUGIN_ENABLE_TOOL: result})
+
+    # LLM: 启用前只检查固定快照、宿主策略和本机沙箱能力；拒绝结果不准备环境，也不改变激活状态。
+    # 函数用途: 把启用前置检查集中起来，保证安全拒绝都发生在确认与副作用之前。
+    def _preflight_failure(self, params: dict) -> ToolHandlerOutcome | None:
+        if params["catalog_revision"] != self.catalog_revision:
+            return self._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
+        if self.installation is None or self.installation.manifest.plugin_id != params["plugin"]:
+            return self._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
+        if self._is_v8 and not self.events_enabled:
+            return self._failure("plugin_events_disabled", "TOOL_EXECUTION_FAILED", "not_started")
+        if self._is_v8 and not self.events_owner_allowed:
+            return self._failure("plugin_events_owner_not_allowed", "TOOL_EXECUTION_FAILED", "not_started")
+        if self.runtime_error:
+            return self._failure(self.runtime_error, "TOOL_EXECUTION_FAILED", "not_started")
+        problem = self._sandbox_problem()
+        if problem:
+            return self._failure(problem, _sandbox_error_code(problem), "not_started")
+        return None
+
+    # LLM: 沙箱检查使用 v8 清单中的网络、解释器和隐藏根规格；不能因规格推导失败而退回普通沙箱。
+    # 函数用途: 在启用准备开始前确认当前插件所需的进程沙箱可用。
+    def _sandbox_problem(self) -> str:
+        if self.plan is None:
+            return ""
+        v8_sandbox = None
+        if self._is_v8:
+            v8_sandbox, problem = plugin_v8_sandbox_options(
+                self.owner.home_dir,
+                network=bool(self.installation.manifest.permissions.network),
+                interpreter=_v8_interpreter_paths(self.installation.manifest, self.runtime),
+            )
+            if problem:
+                return problem
+        if v8_sandbox is None:
+            return plugin_sandbox_problem(self.process_sandbox, self.owner.home_dir)
+        return plugin_sandbox_problem(self.process_sandbox, self.owner.home_dir, sandbox_policy=v8_sandbox)
 
     # LLM: 激活 CAS、环境副作用、握手目录和退出确认按序发生；候选只作验收，新运行通过原 Registry 按同代创建业务连接。
     # 函数用途: 在固定版本上完成启用；确认候选退出后才发布，不让冷管理入口留下临时服务。
@@ -201,6 +253,24 @@ def _runtime_facts(installation) -> tuple[PluginRuntimeFacts | None, str]:
         return resolve_plugin_runtime(installation.manifest), ""
     except PluginRuntimeError as exc:
         return None, exc.reason
+
+
+# LLM: Python/Node 解释器路径来自启用时解析并固定的 runtime，exec 别名与真实目标一起交给收窄读校验。
+# 函数用途: 为 v8 运行时整理宿主已确认的解释器路径；无外部解释器的随包可执行入口返回 None。
+def _v8_interpreter_paths(manifest, runtime: PluginRuntimeFacts | None) -> PluginInterpreterPaths | None:
+    entry = manifest.entry
+    if entry is None or entry.kind != "interpreter" or runtime is None or runtime.kind != "interpreter":
+        return None
+    candidate = shutil.which(runtime.interpreter_name) or runtime.interpreter_path
+    return PluginInterpreterPaths(runtime.interpreter_name, Path(candidate), Path(runtime.interpreter_path))
+
+
+# LLM: 只有 Linux network:true 的端口边界缺口使用专用 taxonomy code；其余启用拒绝保持原工具失败合同。
+# 函数用途: 把沙箱拒绝原因映射成稳定的启用错误码。
+def _sandbox_error_code(reason: str) -> str:
+    if reason == "gateway_port_isolation_unavailable":
+        return PLUGIN_GATEWAY_PORT_ISOLATION_ERROR_CODE
+    return "TOOL_EXECUTION_FAILED"
 
 
 # LLM: 启用前确认预览：结构化 state 供回执层识别，专用错误码不是参数错误；v6 程序确认与能力包检查程序确认共用。

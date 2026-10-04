@@ -242,6 +242,22 @@ def test_unavailable_platform_fails_closed(tmp_path, monkeypatch):
         sandbox.run(["echo", "pwn"], timeout=5)
 
 
+# LLM: Linux 隐藏根必须存在才能由 bwrap tmpfs 覆盖；直接覆盖 argv 构造入口，避免平台工具可用性影响 fail-closed 断言。
+# 函数用途: 确认 v8 私有根缺失时 Linux argv 构造立即拒绝而非漏挂。
+def test_linux_argv_fails_closed_when_private_read_root_missing(tmp_path):
+    spec = AttemptSandboxSpec(
+        attempt_view=tmp_path,
+        staging_root=tmp_path,
+        shared_workspace=tmp_path,
+        owner_home=tmp_path,
+        read_only_root=True,
+        private_read_roots=(tmp_path / "hidden-home-missing",),
+    )
+    sandbox = AttemptExecutionSandbox(spec)
+    with pytest.raises(SandboxUnavailableError, match="PRIVATE_READ_ROOT_MISSING"):
+        sandbox._linux_argv(["true"])
+
+
 # ---------------------------------------------------------------- G6 生产接线
 
 
@@ -399,6 +415,44 @@ def test_linux_full_access_with_persona_binds_host_and_ro_overlays_persona(tmp_p
     }
     assert ("/", "/") in bind_pairs
     assert (str(persona / "SOUL.md"), str(persona / "SOUL.md")) in ro_pairs
+
+
+def test_linux_readonly_root_keeps_symlink_alias_and_realpath_in_argv(tmp_path):
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    hidden = tmp_path / "home"
+    real = tmp_path / "python-prefix"
+    workspace = tmp_path / "plugin-files"
+    data_dir = tmp_path / "plugin-data"
+    for path in (hidden, real, workspace, data_dir):
+        path.mkdir()
+    alias = hidden / "python-prefix"
+    alias.symlink_to(real, target_is_directory=True)
+    sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
+        attempt_view=workspace,
+        staging_root=data_dir,
+        shared_workspace=workspace,
+        owner_home=workspace,
+        extra_write_roots=(data_dir,),
+        public_read_roots=(alias, real),
+        private_read_roots=(hidden,),
+        implicit_attempt_write_roots=False,
+        read_only_root=True,
+        bwrap_path="/fake/bwrap",
+    ))
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+
+    argv = sandbox.build_argv(["true"])
+
+    ro_pairs = {
+        (argv[index + 1], argv[index + 2])
+        for index, item in enumerate(argv)
+        if item == "--ro-bind"
+    }
+    assert argv[argv.index("--tmpfs") + 1] == str(hidden)
+    assert (str(alias), str(alias)) in ro_pairs
+    assert (str(real), str(real)) in ro_pairs
 
 
 def test_linux_explicit_write_roots_do_not_make_readonly_cwd_writable(tmp_path):

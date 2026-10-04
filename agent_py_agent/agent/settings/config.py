@@ -183,6 +183,9 @@ class _ToolConfigFields:
     plugin_process_sandbox: bool = False
     # B5 收紧征询的单次总预算，包含排队/启动/换代；用户可配 200–10000 毫秒，模型不能修改。
     plugin_tool_gate_timeout_ms: int = 2000
+    # M 线事件插件总开关（B7）：默认关。关着时 v8 事件/收紧插件可以安装但不能启用（plugin_events_disabled，提示去 /settings）；
+    # 已启用的在关掉后事件不投、收紧不问。开了才允许启用 v8、投事件、问收紧钩子。属管理员边界项，模型经 user_config 改会被拒。
+    plugin_events_enabled: bool = False
     max_tool_rounds: int | None = None
     # 一次最多同时执行几个工具（原 max_tool_calls_per_round 已并入）：空 = 8，正数 = 上限，0 = 不限制；
     # 任务属性 max_parallel_tool_calls 可单任务覆盖，后台工作片另有 max_tool_calls_per_round 任务属性封顶。

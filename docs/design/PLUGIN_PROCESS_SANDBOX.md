@@ -62,3 +62,11 @@
   --bind <插件数据目录> …` 包着（Node 为固定的 `/opt/…/node` 真实路径）；三个插件停用后 bwrap 与插件进程全部退出。
 - 写边界（数据目录可写、工作区与插件环境写不进）由两平台的真实沙箱组件测试覆盖，验收里没有再用写工作区的插件演示。
 - 证据在仓库外的验收目录；两台机器的隔离 home、venv 与模型目录副本已删除。
+
+## v8 事件插件强制沙箱并断网（B7，2026-10-03）
+
+- v8 事件/收紧插件（清单 `permissions` 非空）不管 `plugin_process_sandbox` 开没开，都强制进本沙箱；本机沙箱不可用时启用失败（`sandbox_unavailable`），不退回无沙箱。
+- 网络：`network:false` 时 Linux `--unshare-net`、macOS `(deny network*)`；macOS `network:true` 仍由 G4 实际绑定端口表拒绝 Gateway 端口。Linux 在 v8 插件沙箱接入 G5 Landlock `CONNECT_TCP` 端口拒绝前，以 `gateway_port_isolation_unavailable` 拒绝 `network:true`，接入并验证端口边界后才可放开。MCP 的宿主通信仍走标准输入输出。
+- 收窄读：隐藏 Gateway 用户整个家目录；在其中只放行插件自己的环境、自己的数据目录及宿主核验的解释器前缀。数据根、会话、记忆、secrets、`.ssh` 等其它家目录内容均不可见。macOS 用 `private_read_roots` 拒读 + `_ancestor_metadata_rules`；Linux 整根只读形态先 tmpfs 覆盖隐藏根，再将授权根挂回。
+- 共用受限策略入口：`plugin_restricted_sandbox_spec(*, cwd, data_dir, owner_home, policy: PluginRestrictedSandbox) -> AttemptSandboxSpec`；`plugin_sandbox_spec(..., sandbox_policy=...)` 将 v8 与老插件受限策略路由到同一构造器。`policy` 由宿主提供有限 `read_roots`、`write_roots`、`execute_roots`、`network` 和 `hidden_read_root`，候选预检、业务连接及面板连接只复用规格，不复制 Seatbelt/bwrap 规则。根路径必须是仍存在的普通目录或文件；目录根只开放该目录，文件型程序根只开放原文件和 strict realpath，不扩大到父目录；读/执行根或写根若覆盖隐藏根则失败关闭。`execute_roots` 表示宿主核验的启动程序可见根，不替代更广义的子进程 `execve` 策略。
+- 详见 DESIGN_LEDGER 的 B7 条目与 `PLUGIN_EVENT_HOOKS.md` 第 10、16 节。

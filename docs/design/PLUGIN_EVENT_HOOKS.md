@@ -275,10 +275,12 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 - **第一期只对本机管理员（local/main）开放**（ae 建议，3a 定 D9）：别的 owner 启用 v8 插件直接拒绝，结构化原因码 `plugin_events_owner_not_allowed`；别的 owner 的事件一律不投、调用一律不问。理由：多用户 Gateway 里管理员给别的 owner 装事件插件就能读到那个用户的提示词，这是隐私边界；要放开得单独设计、由被观察的用户自己决定。口径和 J16 的属主范围一样。
 - **总开关** `plugin_events_enabled` 默认 false。关着时 v8 包可以安装，但启用被拒（`plugin_events_disabled`，提示去 `/settings` 打开）；已启用的 v8 插件在开关关掉后，事件不投、收紧不问（相当于停用这两项能力），`/plugins info` 显示原因。
 - **B1 过渡关闭门（ae 复审、3a 2026-10-03 要求）**：B7 尚未落地时一律按总开关关闭处理；`PluginEnableTool` 对 `manifest.permissions` 非空的包在索取确认码之前返回 `plugin_events_disabled`、`not_started/not_committed`，不解析运行时、不生成候选计划、不准备环境或提交激活；即使带正确码也拒绝，安装仍允许。B7 必须同时替换这道拒绝与构造期计划排除，接入实际开关、local/main 和强制沙箱判定，不能只删除关闭门后让 v8 走无隔离的 v6 链。
-- **强制沙箱**：v8 插件不管 `plugin_process_sandbox` 开没开，都进插件进程沙箱；本机沙箱不可用就启用失败（`sandbox_unavailable`），不退回无沙箱。
-- **断网**：沙箱规格 `network_access=False`（Linux `--unshare-net`，macOS 最后一条 `(deny network*)`，两边都有现成实现和自检）。声明了 `permissions.network: true` 的才放开，并在确认码事实里列出。MCP 走标准输入输出，断网不影响宿主和插件之间的通信。
-- **收窄读**：拒读整个 my-agent 数据根，只放行插件自己的包目录、数据目录和运行环境，宿主配置、会话、记忆都读不到；事件里给什么，插件才知道什么。macOS 用现有的私有读拒绝（`private_read_roots`）加放行即可；Linux 的插件沙箱现在是“整根只读、读范围与宿主相同”，要先隐藏数据根再把插件自己的目录挂回去，具体挂法在 B7 里实测后定（风险项）。macOS 上必须沿用 `attempt/sandbox._private_read_rules` / `_ancestor_metadata_rules`：Seatbelt 对数据根按 subpath 拒读时，会连同放行目录的每一级上级目录的 lstat 一起拒掉，而插件包目录正好嵌在被拒读的数据根里（`data/plugins` 下），Python、node 的 realpath 和 venv 会报 EPERM 起不来（09-26 生产出过，step12s 热修）。两个平台都要有真进程用例，布局必须是“放行目录嵌在拒读根里”：真实解释器（Python、node）启动、realpath、读自己的包和数据目录都成功，读会话和记忆失败；不能只用 cat、printf。
-- **网络用例**（9b 评审）：`network: false` 的插件连本机回环也被拒（macOS `deny network*`、Linux `--unshare-net`），用例钉住；`network: true` 的插件能连上本机 Gateway 端口，但读不到令牌（收窄读），调不了要令牌的接口；不要令牌的接口（已知本机 `/status`）返回什么，B7 先列清单并断言不含正文。
+- **强制沙箱**：v8 插件不管 `plugin_process_sandbox` 开没开，都进插件进程沙箱；本机沙箱或所需网络隔离不可用就启用失败（`sandbox_unavailable`），不进入 `preparing`、不退回无沙箱。
+- **断网与 Gateway 端口**：`network:false` 用 Linux `--unshare-net` 或 macOS `(deny network*)` 完全断网，宿主与插件仍通过 MCP 标准输入输出通信。macOS 的 `network:true` 保留普通网络连接，但 v8 规格从 G4 登记表带入 `deny_gateway_ports`：实际绑定的 Gateway 端口始终被拒，非 Gateway 端口不受此规则影响。Linux 在 G5 端口拦截实现前无法按端口拒绝，因此 `network:true` 的 v8 插件在启用阶段以结构化原因 `gateway_port_isolation_unavailable` 拒绝；`network:false` 继续受支持并保持断网。
+- **收窄读**：所有 v8 插件（无论 `network` 是 true 还是 false）都拒读运行 Gateway 用户的整个家目录，只放行插件自己的环境目录、插件数据目录，以及启用时由解释器真实路径推出的安装前缀。Python 同时放行 `sys.prefix`、`sys.base_prefix` 报告的原路径及各自 realpath，不能因 symlink 规范化丢掉家目录中的别名；Node 放行可执行文件 realpath 往上两级的安装目录。安装前缀必须是已存在目录且不能位于 my-agent 数据根中；解释器路径或 realpath 落在数据根内时以 `interpreter_inside_hidden_root` 拒绝；隐藏根或前缀推不出来/不存在时按 `sandbox_unavailable` fail-closed。会话、记忆、配置、`.ssh`、云凭据及家目录其它内容读不到；工具结果仍会进入模型上下文，所以 `network:false` 也不等于这些结果不会进入对话。
+- **目录可见性与平台实现**：系统目录（如 `/etc`、`/usr`、`/Library`）在家目录外，仍可读。macOS 沿用 `attempt/sandbox._private_read_rules` / `_ancestor_metadata_rules`：拒读家目录后，对插件环境、数据目录、解释器前缀的上级只按 literal 放行元数据，保证严格 realpath 不因 lstat 报 EPERM 失败。Linux 用 tmpfs 覆盖整个家目录，再只读挂回插件环境和解释器前缀、读写挂回插件数据目录；隐藏根必须存在，否则拒绝，不悄悄漏挂。
+- **共用受限规格**：`plugin_restricted_sandbox_spec(*, cwd, data_dir, owner_home, policy: PluginRestrictedSandbox) -> AttemptSandboxSpec` 是旧插件权限接入点；`PluginRestrictedSandbox` 由宿主核验的 `read_roots`、`write_roots`、`execute_roots`、`network`、`hidden_read_root` 构成。`plugin_sandbox_spec(..., sandbox_policy=...)` 把 v8 和显式受限策略统一投影到它；候选预检经 `plugin_sandbox_problem` 走同一工厂，业务连接由 `PluginMCPClient` 走该工厂，面板复用该客户端。路径须严格存在且为普通文件/目录；目录根开放该目录，文件型程序根开放原文件和 strict realpath，不顺带开放父目录；若任何授权根覆盖隐藏根，规格构造失败关闭。数据目录是宿主固定的基础写根，策略额外写根逐项叠加；网络规则和 G4/G5 边界仍由统一 `AttemptExecutionSandbox` 实现，调用方不得另写 Seatbelt/bwrap 规则。`execute_roots` 指定宿主核验的启动程序可见根，不构成禁止系统目录中其它子进程 `execve` 的独立 allowlist。
+- **网络用例**（9b 评审）：`network:false` 的插件连本机回环也被拒（macOS `deny network*`、Linux `--unshare-net`）；macOS `network:true` 必须能连普通回环端口、连不上登记的 Gateway 端口。Linux `network:true` 目前在启用阶段拒绝，待 G5 端口隔离落地后再放开。
 - **确认码覆盖订阅**：`confirmation_details` 在 v8 时加四项事实：`events`（类型和正文范围）、`tool_gates`（工具、效果、参数范围）、`network`、`sandbox`（固定为强制）。改了订阅就是换了确认码，必须重新确认。
 - **H2 / H3 不受影响**：插件进程自己的文件访问仍受沙箱只读覆盖；插件拿到的事件和参数只是数据，不带任何宿主能力。
 
@@ -287,11 +289,13 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `plugin_events_enabled` | `false` | M 线总开关：开了才允许启用 v8 插件、才投事件和问收紧钩子 |
-| `plugin_tool_gate_timeout_ms` | `2000` | 一次工具调用等插件回答的总时间（含连接启动），超时按“要求确认”处理；范围 200–10000 |
+`plugin_events_enabled` 是 B7 唯一新增配置；`plugin_tool_gate_timeout_ms` 属于 B5，待真实消费点落实时再加回，不能提前作为无读取方配置。
 
 观察的 3 秒超时、5 秒退避、120 秒空闲沿用面板服务的常数，不新加配置。两项都按 AGENTS.md 同步 `agent_config.yaml`（中文注释）、`AgentConfig`、参数中心登记和测试。
 
 两项都属于管理员参数边界：模型经设置工具（`user_config`）改会被拒（`PARAMETER_BOUNDARY`），只有用户本人用 `/settings` 能改。**3a 2026-10-03 新裁定**：超时配置从 B7 移属 B5，实际登记在 `settings/parameter_registry._BOUNDARY_NAMES`；这是整数，`classify_safety` 跳过 plugin 目标词，必须显式登记才能防止模型放大预算。B5 同步 YAML 中文说明、AgentConfig 默认值和规范化范围，征询真实读取该值，覆盖 metadata 与模型 user_config 拒绝。`plugin_events_enabled` 仍由 B7 实施，总开关/local-main/强制沙箱及 B1 关闭门不由 B5 改动。
+
+`plugin_events_enabled` 进管理员边界项 `USER_SETTINGS_BOUNDARY_KEYS`（`settings/user_config_capability.py`）：模型经设置工具（`user_config`）改会被拒（`PARAMETER_BOUNDARY`），只有用户本人用 `/settings` 能改。否则模型调一次设置工具把开关关掉，收紧钩子就全失效。B7 用例锁定这项边界。
 
 ## 12. 对其它文档的改动
 
@@ -314,7 +318,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | B8 样例与验收（样例已实施：m1b8，`worker/m1-b8-samples`，基于 `claude/3a-step17i` `c47d023b6`；删除门改拦 `apply_patch` 删除段：b8dg，2026-10-03；真实验收待 B3–B7 合入后另派） | 样例 A：观察全部 6 类事件并在面板显示计数；样例 B：`run_command` 含 `rm -rf` 时要求确认、对 `apply_patch` 补丁里的删除文件段（`*** Delete File: `）直接拒绝；Python 和 Node 各一份 | `plugins/event-watch/`、`plugins/rm-guard/`、`plugins/rm-guard-node/` | 假模型真进程：TUI 与 IM 都看到“插件 X 要求确认 / 拒绝”；真实验收见第 14 节 | B3–B7 |
 | B9 写插件的技能（M5；已实现（`worker/sol2-m5`，`de395322e`），待 be 复审） | 内置“写 my-agent 插件”技能、作者合同和 v8 文件模板（Python、Node 各一个）；安装启用仍只能由用户输确认码 | `agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/`、`test_write_my_agent_plugin_skill.py` | 两语言 v8 ZIP 真构建/读回/包内 stdio；只订阅合法、模型管理入口不可见；四类双语言变异全部抓到；旧新构建器字节回归保留。B7 生产启用与隔离未验证，门禁例外见 TESTS | B1 `add244a92` |
 | B5 收紧钩子（分段实施：第 1 段 `9cf60731d`，第 2 段补审至 `6ec0fc7f3`，第 3 段主/子及隔离 I4 已提交 `471b7b4fc`（父 `57f465dca`）；第4段来源头 `ff5d761d9`；第1–4段由b5r三方迁到 `worker/m1-b5-on17j`（基线 `ebe621d87`），B4真实handler事件和B5宿主decide后收紧两边保留；历史b5r联合697项678通过、13失败、5准备错误（真正17j基线相同）、1账本strict xfail；b5s5已将ds2第5段 `ff5d761d9..d517a8b7b` 三方叠到b5r交付 `65f47f2c6`，修真实review与canonical信封两接缝，组合三项转正、最终27显式文件563通过（含11文件guards187项）；无交互混合门保真实deny、不误计无法审批，未代称历史18项失败已通过；整体WIP，3a先叠sol2/b4g再挑本线，完整非作者交叉初审、9b终审、3a外部复跑仍待做） | `PluginToolGate`、合并规则（同严按插件 ID 排序）、超时按确认、代次撤销与新实例重问、重跑只对同一次调用不重问；`call_origin`；审批前缀、去掉会话/长期选项、单一 `plugin_gate_required` 判定绕开缓存/授权/自主；`PLUGIN_GATE_*` 错误码登记 | `tooling/executor.py`、新 `plugin_events/tool_gate.py`、`agent_core/tool_loop/round_execution.py`、`contracts/tool_approval.py`、`gateway_parts/stream_approval.py`、`gateway_parts/permission_bridge.py`（`wait_for_gateway_permission_decision` 必须共同守门）、`conversation/agent_tool_approval.py`（request 和 wait 都守门）、`user_space/approval_mode.py`、`contracts/error_taxonomy.py`、`plugin_management.py` 与 `plugin_invocation.py`（两处显式设 `call_origin=host_command`）；`tooling/registry.py` 保持默认 `model`；`runtime_db/host_command_execution.py` 仅联测调用方来源经 replace 保留，不在那里授予豁免 | 第 8.2 表 7 种组合；Gateway 与子代理/后台主代理两条路在已有同操作会话缓存、长期授权、自主等待轮询下仍弹插件确认，不写入会话/长期授权；决策模型自动执行同样受收紧；`plugin_gate_ref` 字符串往返、附加前后的旧 `permission_id` 不变；auto 下宿主 allow 仍转强制 ask，并由收紧门自行核对已批准引用；I4 续跑回合重新征询；超时 → 确认；两个并行调用撞上同一慢插件，排队那条超时按确认；插件回复多带字段（如 `arguments`）被忽略、参数不变；征询中停用 → 不算、换新实例 → 问新实例；批准后同一调用重跑不再问，之后同参数新调用、不同参数照样问；不可交互 → 不执行、错误码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`、账本记 `final_status`；收紧插件一律 deny 时用户仍能 `/plugins disable`、模型工具表里没有插件管理工具；模型发起的调用在工具参数里塞 `"call_origin": "host_command"` 或 `__call_origin` 照样被收紧（来源只读宿主设在 `ToolExecutorRequest` 上的字段，不从参数读；ae 补，配变异“执行器从参数读来源”）；拒绝时模型看到 `PLUGIN_GATE_DENIED` 且不是“结果未知” | B1、B2；H3 已合入 |
-| B7 安全底座 | 将 B1 暂时拒绝与构造期 v8 计划排除换成真正总开关、local/main 和强制沙箱判定，不能只删关闭门；v8 强制沙箱、断网、收窄读（Linux 挂法先实测，macOS 沿用 `_ancestor_metadata_rules`）；开关关时拒绝启用；沙箱不可用时失败；总开关进管理员边界项（超时配置已移属 B5） | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`settings/config.py`、`settings/user_config_capability.py`、`config/agent_config.yaml` | 真实沙箱（macOS / Linux 车道）真进程，布局为“放行目录嵌在拒读根里”：Python、node 解释器启动和 realpath 成功，读得到自己的包和数据目录、读不到会话和记忆；`network: false` 连外网和本机回环都被拒；`network: true` 能连 Gateway 端口但读不到令牌、调不了要令牌的接口，不要令牌的接口列清单；开关关 → `plugin_events_disabled`；模型经 `user_config` 改总开关被拒（超时边界由 B5 联测）（`PARAMETER_BOUNDARY`）；非 local/main 启用被拒（`plugin_events_owner_not_allowed`） | B1；H3 已合入 |
+| B7 安全底座 | 将 B1 暂时拒绝与构造期 v8 计划排除换成真正总开关、local/main 和强制沙箱判定；v8 强制沙箱、断网、隐藏 Gateway 家目录并只放行插件目录/解释器前缀；macOS 拒绝 Gateway 绑定端口，Linux 在插件沙箱接入 G5 Landlock 端口拒绝前拒绝 `network:true`；启用拒绝必须在 `preparing` 前完成。B7 只登记 `plugin_events_enabled` | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`plugin_management.py`、`attempt/sandbox.py`、`contracts/error_taxonomy.py`、配置登记文件 | 真进程生产布局：Python、Node chdir/严格 realpath 与插件目录/数据目录读写成功；`.ssh`、其它家目录文件、别的插件数据、会话和配置读不到；Linux 列目录只见挂载骨架；macOS `network:true` 可连普通端口但不能连实际 Gateway 绑定端口；Linux `network:true` 启用以结构化错误码拒绝、`network:false` 仍按真实断网自检；沙箱或隐藏根不可用时启用不留激活；总开关与 local/main 反例及 `user_config` 边界有端到端用例 | B1；H3 已合入 |
 
 ## 14. 验收（goal 第四节）
 
@@ -341,8 +345,10 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 ## 16. 已知边界
 
 - **观察事件不带工具参数（第二期再议）**（3a 2026-10-03 裁定）：第 6 节原要求只向精确列出的工具给正文，但 `events` 没有工具列表；第一期验收不要求观察参数，也不新增 `events[].tools`。需要参数的插件只能用精确工具的 full 收紧门；第二期有真实需求再扩展观察格式。
-- 插件进程能拿到它订阅的事实和（同意过的）正文，这些数据在插件那里怎么用，宿主管不到；断网和收窄读是为了让它带不出去、也读不到更多。
-- 收紧钩子增加的是延迟：每个命中的调用最多多等 `plugin_tool_gate_timeout_ms`。只订阅需要的工具，不订阅读工具，影响很小。
+- **家目录读边界**（b7f，2026-10-03）：所有 v8 插件都隐藏 Gateway 用户整个家目录，只放行插件自己的目录和解释器安装前缀；系统目录（`/etc`、`/usr`、`/Library` 等）仍可读。插件进程能拿到它订阅的事实和（同意过的）正文，这些数据在插件那里怎么用，宿主管不到；工具结果也会进入模型上下文，因此 `network:false` 不能阻止工具结果中的内容进入对话。
+- **Gateway 端口边界**（b7f/b7r，2026-10-04）：macOS v8 `network:true` 复用 G4 的实际绑定端口表，拒绝连接 Gateway 端口但允许其它网络端口；Linux v8 `network:true` 继续在启用阶段以结构化原因 `gateway_port_isolation_unavailable` 拒绝。原因是 G5 Landlock `CONNECT_TCP` 端口拒绝尚未接入 v8 插件进程沙箱；待接入后先在 Linux 车道验证目标端口被拒、其它端口仍可达，再考虑放开。`network:false` 不受影响。未来 v8 若允许声明 `host_api`，必须同时要求 `network:true` 或单独放行到其回环端口。
+- **开关关闭后的投递/征询**：已启用插件在 `plugin_events_enabled` 关闭后不投事件、不问收紧，由 B4/B5 落实；B7 只负责启用门和沙箱，不在本块实现事件中心或收紧钩子行为。
+- 收紧钩子的超时配置应由 B5 的真实消费点一并登记；B7 不增加未被读取的 `plugin_tool_gate_timeout_ms`。
 - 观察事件会合并丢弃（只留最新），插件不能把它当完整审计日志；需要完整记录的应读宿主账本（第二期可开放只读查询）。
 - **发送任务的线程数是全局上界**：每个（owner, 激活）一个在途任务、线程池 4 个（与面板服务同档）；挂住的插件数到达 4 个时，后面的发送任务要排队，仍会互相影响。这是面板服务已有的同类边界。
 - **hub 不看 `plugin_events_enabled`**（给 B4、B7 的接线提示）：开关关掉时 hub 仍会读安装表（每次发布触发一轮）。B4 在事件点应先看开关再调 `publish_plugin_event`；B7 的「开关关闭就不能启用」保证不会真的投递，但读表的开销省不掉。

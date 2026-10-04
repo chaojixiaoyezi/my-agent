@@ -275,6 +275,7 @@ def test_confirmation_contains_all_four_v8_facts_but_keeps_v6_unchanged():
     assert details["tool_gates"] == [{"id": "guard-rm", "tools": ["run_command"], "effects": [], "arguments": "full"}]
     assert details["network"] is False
     assert details["sandbox"] == "required"
+    assert details["read_scope"] == "插件只能读它自己的目录、解释器所在目录和系统目录，读不到你家目录里的其它文件"
     assert not {"events", "tool_gates", "network", "sandbox"} & _confirmation(legacy_payload(6)).keys()
 
 
@@ -301,6 +302,7 @@ def test_confirmation_preview_explains_full_arguments_network_and_required_sandb
     assert "prompt_submitted" in message and "提示文字" in message
     assert "能看到这些工具的完整参数：run_command" in message
     assert "允许联网" in message and "强制" in message and "沙箱" in message
+    assert "插件只能读它自己的目录、解释器所在目录和系统目录，读不到你家目录里的其它文件" in message
     assert message.endswith(f"/plugins enable sample-any --confirm {details['confirm_code']}")
 
 
@@ -386,6 +388,8 @@ def test_v8_disabled_rejects_code_from_previous_subscriptions(monkeypatch):
     tool.installation = SimpleNamespace(manifest=current_package.manifest)
     tool.runtime = PluginRuntimeFacts("executable", "test-platform")
     tool.runtime_error, tool.plan, tool.catalog_revision = "", None, "fixed-revision"
+    # B7：v8 事件插件；总开关关着（events_enabled=False）→ 启用被拒，旧确认码更不可能兑现。
+    tool._is_v8, tool.events_enabled, tool.events_owner_allowed = True, False, True
     store = SimpleNamespace(package_bytes=lambda installation: current_bytes)
     monkeypatch.setattr(enable, "PluginInstallStore", lambda owner: store)
     monkeypatch.setattr(tool, "_enable", lambda: pytest.fail("旧确认码不得执行启用"))
@@ -423,19 +427,86 @@ def test_v8_disabled_before_confirmation_keeps_real_installation_unchanged(tmp_p
     monkeypatch.setattr(enable.PluginEnableTool, "_enable", lambda self: calls.append("enable") or {})
     monkeypatch.setattr(enable.PluginEnableTool, "_confirmation", lambda self: pytest.fail("必须在索取确认码之前拒绝"))
     binding = SimpleNamespace(request=SimpleNamespace(operation_id="enable-v8"))
-    tool = enable.PluginEnableTool(owner, object(), binding, entry, "fixed", process_sandbox=sandbox)
+    # events_enabled 默认 False（总开关关）→ v8 启用在索取确认码之前就被拒，真实安装一字节不动。
+    tool = enable.PluginEnableTool(owner, object(), binding, entry, "fixed", policy=enable.PluginEnablePolicy(process_sandbox=sandbox))
     outcome = tool.execute({"plugin": entry.manifest.plugin_id, "catalog_revision": "fixed", "confirm": code})
     assert outcome.ok is False and outcome.error_code == "TOOL_EXECUTION_FAILED"
     assert outcome.effect_outcome == "not_started"
     assert outcome.result_envelope[enable.PLUGIN_ENABLE_TOOL] == {
         "reason": "plugin_events_disabled", "commit_state": "not_committed",
     }
-    assert tool.plan is None and tool.runtime is None
+    # B7：v8 现在和旧版可执行插件一样会先构造运行计划（纯内存，不写盘），隔离在 PluginMCPClient 强制套上；
+    # 关闭门改为执行期按总开关判定，所以不再断言“构造期不建计划”，只断言拒绝后真实安装未变。
     result = _enable(service, "enable-v8", code)
     assert result["state"] == "failed" and result["details"] == outcome.result_envelope[enable.PLUGIN_ENABLE_TOOL]
     assert not calls
     assert service.installations.snapshot() == (entry,)
     assert (owner.plugins_dir / "installations.json").read_bytes() == original
+    assert not (owner.plugins_dir / "environments").exists()
+
+
+def test_v8_enable_requires_local_main_owner(tmp_path, monkeypatch):
+    """B7：总开关开着，但当前 owner 不是本机管理员（local/main）→ plugin_events_owner_not_allowed，索取确认码之前就拒。"""
+    from agent_py_agent.agent import plugin_enable_tool as enable
+
+    declaration = _declaration(events=[{"type": "prompt_submitted"}], tool_gates=[], permissions={"network": False})
+    service = _installed(tmp_path, declaration, {"bin/server.py": _PROGRAM})
+    owner, entry = service.context.owner, service.installations.snapshot()[0]
+    monkeypatch.setattr(enable.PluginEnableTool, "_enable", lambda self: pytest.fail("owner 不允许时不能启用"))
+    monkeypatch.setattr(enable.PluginEnableTool, "_confirmation", lambda self: pytest.fail("必须在索取确认码之前拒绝"))
+    binding = SimpleNamespace(request=SimpleNamespace(operation_id="enable-v8-owner"))
+    tool = enable.PluginEnableTool(owner, object(), binding, entry, "fixed",
+                                   policy=enable.PluginEnablePolicy(events_enabled=True, events_owner_allowed=False))
+    outcome = tool.execute({"plugin": entry.manifest.plugin_id, "catalog_revision": "fixed", "confirm": ""})
+    assert outcome.ok is False and outcome.error_code == "TOOL_EXECUTION_FAILED"
+    assert outcome.result_envelope[enable.PLUGIN_ENABLE_TOOL]["reason"] == "plugin_events_owner_not_allowed"
+
+
+def test_v8_enable_passes_gate_when_switch_on_and_owner_allowed(tmp_path, monkeypatch):
+    """B7：总开关开 + 本机管理员 → 越过关闭门（v8 强制沙箱由 process_sandbox 恒 True 落实），进入确认/启用。"""
+    from agent_py_agent.agent import plugin_enable_tool as enable
+
+    monkeypatch.setattr(enable, "plugin_sandbox_problem", lambda *args, **kwargs: "")
+    declaration = _declaration(events=[{"type": "prompt_submitted"}], tool_gates=[], permissions={"network": False})
+    service = _installed(tmp_path, declaration, {"bin/server.py": _PROGRAM})
+    owner, entry = service.context.owner, service.installations.snapshot()[0]
+    reached = []
+    monkeypatch.setattr(enable.PluginEnableTool, "_enable", lambda self: reached.append(self.process_sandbox) or {"enabled": True})
+    binding = SimpleNamespace(request=SimpleNamespace(operation_id="enable-v8-ok"))
+    tool = enable.PluginEnableTool(owner, object(), binding, entry, "fixed",
+                                   policy=enable.PluginEnablePolicy(events_enabled=True, events_owner_allowed=True))
+    # v8 强制沙箱：不管全局 plugin_process_sandbox 开没开，这里都应为 True。
+    assert tool._is_v8 and tool.process_sandbox is True
+    confirmation = tool._confirmation()
+    tool.execute({"plugin": entry.manifest.plugin_id, "catalog_revision": "fixed",
+                  "confirm": confirmation["confirm_code"]})
+    assert reached == [True], "越过关闭门后应进入启用，且强制沙箱"
+
+
+def test_v8_enable_fails_closed_when_hidden_root_cannot_be_derived(tmp_path, monkeypatch):
+    from agent_py_agent.agent import plugin_enable_tool as enable
+    from agent_py_agent.agent import plugin_sandbox
+
+    declaration = _declaration(events=[{"type": "prompt_submitted"}], tool_gates=[], permissions={"network": False})
+    service = _installed(tmp_path, declaration, {"bin/server.py": _PROGRAM})
+    owner, entry = service.context.owner, service.installations.snapshot()[0]
+    binding = SimpleNamespace(request=SimpleNamespace(operation_id="enable-v8-hidden-root"))
+    tool = enable.PluginEnableTool(
+        owner, object(), binding, entry, "fixed",
+        policy=enable.PluginEnablePolicy(events_enabled=True, events_owner_allowed=True),
+    )
+    monkeypatch.setattr(plugin_sandbox.Path, "home", lambda: None)
+    monkeypatch.setattr(enable.PluginEnableTool, "_confirmation", lambda self: pytest.fail("安全自检失败前不得索取确认"))
+    monkeypatch.setattr(enable.PluginEnableTool, "_enable", lambda self: pytest.fail("隐藏根缺失时不得准备环境"))
+
+    outcome = tool.execute({"plugin": entry.manifest.plugin_id, "catalog_revision": "fixed", "confirm": ""})
+
+    assert outcome.ok is False and outcome.error_code == "TOOL_EXECUTION_FAILED"
+    assert outcome.effect_outcome == "not_started"
+    assert outcome.result_envelope[enable.PLUGIN_ENABLE_TOOL] == {
+        "reason": "sandbox_unavailable", "commit_state": "not_committed",
+    }
+    assert service.installations.snapshot() == (entry,)
     assert not (owner.plugins_dir / "environments").exists()
 
 
@@ -449,6 +520,7 @@ def test_v6_original_confirmation_path_is_not_disabled(monkeypatch, confirmed):
     tool.owner, tool.installation = object(), SimpleNamespace(manifest=manifest, activation=None)
     tool.runtime = PluginRuntimeFacts("executable", "test-platform")
     tool.runtime_error, tool.plan, tool.catalog_revision = "", None, "fixed"
+    tool._is_v8, tool.events_enabled, tool.events_owner_allowed = False, False, False  # v6 旧版不走 v8 门
     monkeypatch.setattr(enable, "PluginInstallStore", lambda owner: SimpleNamespace(package_bytes=lambda entry: package_bytes))
     calls = []
     monkeypatch.setattr(tool, "_enable", lambda: calls.append("enable") or {"enabled": True})

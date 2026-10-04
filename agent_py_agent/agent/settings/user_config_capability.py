@@ -187,7 +187,7 @@ USER_SETTINGS_BOUNDARY_KEYS = frozenset(
     {"memory_curator_model_profile", "embedding_model_profile", "enable_capability_package_selection",
      "enable_memory_search_tool", "subagent_takeover_hint_enabled", "subagent_input_media_enabled",
      "capability_pack_host_verification_enabled", "action_candidate_auto_execute_enabled",
-     "computer_use_observation_enabled"})
+     "computer_use_observation_enabled", "plugin_events_enabled"})
 
 # 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据。
 # 常见缩写与组合（DB_PASS、MYSQL_PWD、SSH_PRIVATE_KEY、AWS_SECRET_ACCESS_KEY、BASIC_AUTH）同样按完整末尾片段认；

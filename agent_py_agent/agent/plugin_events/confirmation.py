@@ -11,7 +11,8 @@ def event_confirmation_facts(manifest) -> dict:
         return {}
     return {"events": [event.to_payload() for event in manifest.events],
             "tool_gates": [gate.to_payload() for gate in manifest.tool_gates],
-            "network": manifest.permissions.network, "sandbox": "required"}
+            "network": manifest.permissions.network, "sandbox": "required",
+            "read_scope": "插件只能读它自己的目录、解释器所在目录和系统目录，读不到你家目录里的其它文件"}
 
 
 # LLM: 仅展示结构化事实，不参与授权；旧包文案保持，强制要求不能冒充运行证据。
@@ -20,10 +21,14 @@ def event_confirmation_lines(confirmation: dict) -> list[str]:
     if "events" not in confirmation:
         return []
     events = "、".join(event_description(event) for event in confirmation["events"]) or "无"
-    return ["订阅事件：" + events,
-            *[gate_description(gate) for gate in confirmation["tool_gates"]],
-            "网络权限：" + ("允许联网" if confirmation["network"] else "禁止联网（含本机回环）"),
-            "沙箱要求：强制使用插件进程沙箱；不可用时不得启用。"]
+    lines = ["订阅事件：" + events,
+             *[gate_description(gate) for gate in confirmation["tool_gates"]],
+             "网络权限：" + ("允许联网" if confirmation["network"] else "禁止联网（含本机回环）"),
+             "沙箱要求：强制使用插件进程沙箱；不可用时不得启用。"]
+    read_scope = confirmation.get("read_scope")
+    if read_scope:
+        lines.append(read_scope)
+    return lines
 
 
 # LLM: 第一期只有提示观察允许 text；非提示即使收到旧式 text 事实也不展示参数承诺，不影响授权或确认码事实。

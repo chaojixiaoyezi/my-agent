@@ -12,7 +12,11 @@ import zipfile
 import pytest
 
 from agent_py_agent.agent.plugin_runtime import plugin_tool_name
-from agent_py_agent.agent.plugin_sandbox import plugin_sandbox_problem, sandboxed_plugin_argv
+from agent_py_agent.agent.plugin_sandbox import (
+    plugin_sandbox_problem,
+    plugin_sandbox_spec,
+    sandboxed_plugin_argv,
+)
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
 from agent_py_agent.tests.test_plugin_any_language_samples import (
     VECTORS,
@@ -296,14 +300,15 @@ def test_report_sibling_cli_subprocess_runs_in_real_plugin_sandbox(tmp_path):
     shutil.copytree(PROJECT / "upstream", tree, dirs_exist_ok=True)
     data.mkdir()
     output = data / "report.html"
-    probe = sandboxed_plugin_argv([NODE, "-e", "process.exit(0)"], cwd=tree, data_dir=data, owner_home=tmp_path)
+    probe = sandboxed_plugin_argv([NODE, "-e", "process.exit(0)"],
+                                  plugin_sandbox_spec(cwd=tree, data_dir=data, owner_home=tmp_path))
     observed = subprocess.run(probe, cwd=tree, text=True, capture_output=True, timeout=60)
     if observed.returncode == 71 and "sandbox_apply: Operation not permitted" in observed.stderr:
         pytest.skip("系统明确拒绝应用 Seatbelt（exit 71）；report 子进程尚未执行，保留未验证")
     assert observed.returncode == 0, observed.stdout + observed.stderr
     argv = sandboxed_plugin_argv([NODE, str(tree / "scripts/report.mjs"), "--art",
                                  str(tree / "skills/novel-art/examples/渡口-art.json"), "--out", str(output)],
-                                cwd=tree, data_dir=data, owner_home=tmp_path)
+                                plugin_sandbox_spec(cwd=tree, data_dir=data, owner_home=tmp_path))
     environment = {**os.environ, "TMPDIR": str(data / ".tmp"), "MY_AGENT_PLUGIN_DATA_DIR": str(data)}
     result = subprocess.run(argv, cwd=tree, env=environment, text=True, capture_output=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr

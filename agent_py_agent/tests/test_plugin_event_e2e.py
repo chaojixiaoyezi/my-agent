@@ -136,8 +136,7 @@ def _prepare_case(agent, monkeypatch, case):
 @pytest.mark.parametrize('case', ['normal', 'type_invalid', 'policy_denied', 'user_denied'])
 def test_six_events_reach_handshake_plugin_on_real_gateway_turn(gateway, monkeypatch, case):
     agent, paths, server, _observed = gateway
-    # B7 的声明开关尚未合入本支；类属性使生产配置副本也保留测试启用，不替换执行链。
-    monkeypatch.setattr(type(agent.config), 'plugin_events_enabled', True, raising=False)
+    # 总开关由 gateway 夹具在配置实例上打开（B7 起是正式配置字段）。
     tool, recorded, client_events = _prepare_case(agent, monkeypatch, case)
     harness = _Harness(rows=[_installation(event_types=tuple(_FIELDS))])
     server.plugin_event_hub = harness.hub
@@ -227,9 +226,9 @@ def _observe_http_worker(monkeypatch):
 @pytest.fixture
 def http_gateway(tmp_path, monkeypatch):
     baseline_threads = set(threading.enumerate())
-    monkeypatch.setattr(AgentConfig, 'plugin_events_enabled', True, raising=False)
+    # B7 起 plugin_events_enabled 是正式配置字段，类属性会被实例默认值 False 盖住；按真实配置入口打开总开关。
     agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'),
-                        gateway_per_user_owner_scoping=True), tmp_path)
+                        gateway_per_user_owner_scoping=True, plugin_events_enabled=True), tmp_path)
     paths = gateway_paths(agent)
     request_worker.ensure_gateway_folders(paths)
     harness = _Harness(rows=[_installation(event_types=('prompt_submitted', 'turn_started', 'turn_ended'))])

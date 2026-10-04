@@ -16,7 +16,11 @@ from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.user_space.home_layout import home_paths
-from agent_py_agent.agent.user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+from agent_py_agent.agent.user_space.owner_resolver import (
+    OwnerIdentity,
+    home_paths_with_owner,
+    resolve_owner_home,
+)
 from agent_py_agent.tests.test_plugin_package import _bundle
 
 
@@ -119,6 +123,45 @@ def test_config_disable_reaches_real_management_context(tmp_path, setting):
     result = disabled.command(f'/plugins install "{source}"', revision=disabled.catalog().revision, request_id="a")
     assert result["error_code"] == "PLUGIN_DISABLED"
     assert not owner.home_dir.exists()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_plugin_management_context_tracks_event_switch(tmp_path, enabled):
+    service, _ = manager(tmp_path)
+    owner = service.context.owner
+    home = home_paths_with_owner(home_paths(tmp_path / "home"), owner)
+    config = AgentConfig(plugin_events_enabled=enabled)
+    context = plugin_management_context(owner, home, config, service.context.threads,
+        actor_id="tester", channel="chat", conversation_id="session", is_admin=True)
+    assert context.plugin_events_enabled is enabled
+
+
+def test_provider_user_context_refuses_v8_enable_end_to_end(tmp_path):
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.tests.test_plugin_manifest_v8 import _bundle as v8_bundle
+    from agent_py_agent.tests.test_plugin_manifest_v8 import _v8
+
+    owner = resolve_owner_home(tmp_path / "home", OwnerIdentity.provider_user("feishu", "user-a"))
+    owner.home_dir.mkdir(parents=True, exist_ok=True)
+    threads = ConversationStore(owner.home_dir / "conversations", initialize=False).threads
+    home = home_paths_with_owner(home_paths(tmp_path / "home"), owner)
+    config = AgentConfig(plugin_events_enabled=True)
+    context = plugin_management_context(owner, home, config, threads,
+        actor_id="user-a", channel="feishu", conversation_id="session", is_admin=True)
+    assert context.plugin_events_enabled is True
+    assert context.events_owner_allowed is False
+
+    service = PluginManagement(context)
+    package = owner.home_dir / "event-plugin.zip"
+    package.write_bytes(v8_bundle(_v8()))
+    installed = service.command(f'/plugins install "{package}"', revision=service.catalog().revision,
+                                request_id="install-v8")
+    assert installed["state"] == "succeeded", installed
+    refused = service.command("/plugins enable sample-any", revision=service.catalog().revision,
+                              request_id="enable-v8")
+    assert refused["state"] == "failed", refused
+    assert refused["details"]["reason"] == "plugin_events_owner_not_allowed", refused
+    assert service.installations.snapshot()[0].activation is None
 
 
 @pytest.mark.parametrize("source_kind", ["missing", "symlink", "outside", "invalid", "unsupported"])

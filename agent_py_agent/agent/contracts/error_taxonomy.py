@@ -413,6 +413,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="原插件已停用或激活失效；不要重试同一调用，换可执行工具或申请能力，是否重新启用由用户决定。",
     ),
+    "PLUGIN_GATEWAY_PORT_ISOLATION_UNAVAILABLE": ErrorContract(
+        code="PLUGIN_GATEWAY_PORT_ISOLATION_UNAVAILABLE", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="Linux 插件沙箱尚不能按端口阻断 Gateway；关闭插件网络权限，或等 G5 端口隔离就绪后再启用。",
+    ),
     "PLUGIN_CONFIRMATION_REQUIRED": ErrorContract(
         code="PLUGIN_CONFIRMATION_REQUIRED", category="state", retryable=True,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
