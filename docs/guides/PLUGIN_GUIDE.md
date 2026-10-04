@@ -158,7 +158,7 @@ v8 插件的启用还多一道身份门：**只有本机管理员（身份是 `l
 ### 怎么打开只看档
 
 1. 保持 `computer_use_enabled: false`（默认就是关）。
-2. 把 `computer_use_observation_enabled` 改成 `true`——**在 TUI 或飞书里发** `/settings set computer_use_observation_enabled true`（两边同一句）。**obsset 合入后生效**：在这之前，这个参数不在用户可写白名单里，连管理员发这条命令也会被拒（`PARAMETER_BOUNDARY`）；obsset 合入后，管理员可以改、模型不能改。`computer_use_enabled`（总开关）**仍然不能用聊天命令改**，要在配置文件里改。改完**要不要重启才生效，以 obsset 的结论为准**（3a 挑入时补）。见[给维护者的核对位置](#给维护者的核对位置)。
+2. 把 `computer_use_observation_enabled` 改成 `true`——**在 TUI 或飞书里发** `/settings set computer_use_observation_enabled true`（两边同一句）。**obsset 合入后生效**：在这之前，这个参数不在用户可写白名单里，连管理员发这条命令也会被拒（`PARAMETER_BOUNDARY`）；obsset 合入后，管理员可以改、模型不能改。`computer_use_enabled`（总开关）**仍然不能用聊天命令改**，要在配置文件里改。**改完要发 `/restart` 才生效**：配置在 Gateway 启动时读取，回执里会写明“重启后生效”（effect_when=restart_gateway）。见[给维护者的核对位置](#给维护者的核对位置)。
 3. 装观察需要的依赖：`pip install 'my-agent[computer-use-observe]'`（只看档专用的依赖清单，含 MCP 协议包 mcp，不含点击用的 pyautogui 和上游执行器；不要装 `computer-use`，那是完整档，会带进点击和键盘能力）。
 
 **只看档不需要装上游执行器**（不装 `pyautogui` 也能跑），而且那个适配器进程**根本不会加载**上游的鼠标键盘依赖——所以它没有能力去点你的屏幕。

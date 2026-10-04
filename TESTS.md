@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## 17j 验收手册修 rm 场景、冷启动耗时与两处前提（rb6，2026-10-04，分支 `worker/17j-runbook-6`，基于 17j 头 `f8858179c`）
+
+- 来源：sol2 写 B5 联合测试时发现 rm-guard 场景走不到插件（证据 `~/.my-agent/decision-evidence/review-b5-17j/jb5-wip-sol2.md:29`）；ds10 的 b5b7x 建议补冷启动耗时；7.1 要与设计稿对齐；A4 有 obsset 前置。**本分支只改手册，没跑任何一步真实验收。**
+- **只读核对（宿主删除类命令前置规则，实测）**：跑 `evaluate_command_policy` / `analyze_command`（不执行命令）得到——
+  - 裸 `rm -rf <路径>`、`rmdir <路径>`、`unlink <文件>` → 全部 `allowed=False`、finding `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`，`classification=dangerous`；
+  - `sh -c "rm -rf <路径>"`、`bash -c "…"`、`env sh -c "…"`、`cd … && sh -c "…"` → `allowed=True`、无 finding、`classification=unknown`；同一字符串喂给 `plugins/rm-guard/src/server.py::deletes_tree` 返回 `True`（插件仍判 `RM_RF`）；
+  - `find … -delete` → `read_only`、`python3 -c "…"` → `mutating`，均放行。
+  - 代码依据：`agent_py_agent/agent/contracts/gates/command_policy.py:11`（`_MANAGED_DELETE_EXECUTABLES`）、`:368-375`（受保护目标）、`:423-433`（删除硬拒）、`:513-514`（危险可执行文件集合）；`agent_py_agent/agent/tooling/shell.py:1079-1089` 命中即返回 `COMMAND_POLICY_BLOCKED`；`agent_py_agent/agent/tooling/action_policy.py:141-143` 在审批前走 `_path_url_command_decision`。
+- **手册改动**（`docs/design/PLUGIN_EVENT_HOOKS_ACCEPTANCE.md`）：
+  1. 新增 **§4.1「这次拦截是宿主拦的还是插件拦的」**：宿主删除类前置规则表 + 三条判据（账本有没有 `plugin_gate.decided` 行 / 原因码来自哪一侧 / handler 是否执行，其中前两条才具区分力）。
+  2. §5 联合冒烟 rm 行、§6.2、§7.1 的触发命令由裸 `rm -rf` 改为 `sh -c "rm -rf <目标>"`，并写明为何；§5 表后补"跑之前先做形状自检"的只读预检命令。
+  3. §6.2 增补**首次征询冷启动耗时**步骤：从 `plugin_gate.decided` 行的 `latency_ms` 读耗时，与 `plugin_tool_gate_timeout_ms`（默认 2000）对比，给出 sqlite 只读查询；字段名已用 `git show d517a8b7b` 核实（`plugin_events/tool_gate.py:60-64` 的 `GateReview.latency_ms`，`plugin_events/decision_ledger.py` 的 15 字段白名单含它）；**待核实**：该字段是否覆盖插件进程首次 `initialize` 握手，未实测。
+  4. §7.1 补上设计稿依据（PLUGIN_EVENT_HOOKS 第 10 节总开关："事件不投、收紧不问"）、措辞核对，并加一条"**本节依赖 B5 × B7 接线提交（待派）**"——接线落地前"收紧不问"那一项记「未执行/待接线」。
+  5. 附录 **A.7.1**：A4 只看档在 17j 上做不了（`computer_use_observation_enabled` 在 `parameter_registry.py:56-57` 的 `_BOUNDARY_NAMES`，不在 `user_config_capability.py:184-187` 的 `USER_SETTINGS_BOUNDARY_KEYS`，`/settings set` 会按 `parameter_changes.py:172-176` 返回 `PARAMETER_BOUNDARY`），要等 ds3 的 obsset；重启语义写「以 obsset 结论为准」占位。
+  6. §8 通过矩阵：TUI/飞书行改成 `sh -c` 形状并补"用裸 `rm -rf` 触发而宿主先拒"的不通过写法；新增一行"**宿主删除硬拒对照**"负例。
+- **门禁结果**（工作树根，本分支只改文档）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD $PY scripts/check_doc_sync.py --base f8858179c    # DOC_SYNC_PASS
+  git diff --check                                                   # 干净
+  ```
+- **未验证**：手册是操作指引，本轮没有执行任何一步真实验收；§6.2 冷启动耗时字段是否覆盖首次握手标「待核实」；§7.1 "收紧不问"依赖尚未落地的 B5×B7 接线提交；A4 依赖尚未合入的 obsset。
+
 ## 只看档加进管理员 /settings 白名单（obsset，2026-10-04，分支 `worker/obs-user-setting`，3a 初审、9b 终审通过，已并入 step17j）
 
 - 背景：3a 实测 17j 头在管理员 `/settings` 作用域 `set computer_use_observation_enabled true` 返回 `PARAMETER_BOUNDARY`。
