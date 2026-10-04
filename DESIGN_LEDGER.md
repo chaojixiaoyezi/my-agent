@@ -1,5 +1,14 @@
 # 设计台账
 
+## 活动回合插话不重复发 prompt_submitted 的回归用例（st2，2026-10-04，分支 `worker/17j-small-tests-2`，基于 17j 头 `f9a6f6c6e`；3a 复审，已并入 step17j）
+
+- **起因**：luna6 复审 B4 owner 修复时提出——活动回合里成功插话（`/ask` 返回 `active_turn_input`）不能发布 `prompt_submitted`。实现靠 `gateway_parts/http_handlers.py::_handle_idempotent_ordinary_ask` 的"只有 `created and receipt.state == 'queued'` 才调 `prompt_queued`"，但没有专门用例钉住；ds8 试过两条路都造不出活动回合。
+- **做法**：**只加测试，不动产品代码**。复用仓库现成写法——`test_plugin_event_gateway.py` 的 `gateway` fixture（真 `handle_ask` + 观察 `publish_plugin_event`）与 `test_steer_delivery_recovery.py` 的真实 Gateway 客户端思路；活动回合按 `control_service._active_request` 的结构化判据构造（`processing` 里恰好一条同渠道/会话/用户、`turn_phase=open`、未被 detach 的请求）。
+- **用例**：新增 `test_plugin_event_gateway.py::test_active_turn_steer_does_not_publish_a_second_prompt_submitted`——首条经真实 `handle_ask` 排队（1 次 `prompt_submitted`）→ 搬进 `processing` 标 `turn_phase=open` → 再经 `handle_ask` 插话；断言插话回执 `disposition == "active_turn_input"`、`status != "queued"`、`target_turn_id` 指向原回合、未另开排队请求，且事件流里 `prompt_submitted` 恰好一次。
+- **验证**：`test_plugin_event_gateway.py` + `test_plugin_event_e2e.py` **20 passed**；guards9 **187 passed**；ruff / boundaries=0 / doc_sync PASS / strict code-size `hard=0 blocked=False` / `git diff --check` / clean_package 全过；size_diff **新增 0**。变异 2 个都被杀（`if created` → 新用例红；无条件发 → 新用例 + 既有重放用例红）。
+- **未验证**：真实 TUI/IM 与真实运行回合中的插话由 3a 在真实验收里核对；本用例覆盖"活动回合记录存在时插话不再发 `prompt_submitted`"这一层。
+
+
 ## B9 的测试期望跟上新技能（b9fix，2026-10-04，worker/b9-seed-fix；ds4 初审可以挑入，已并入 step17j）
 
 - **起因**：B9 新增内置技能 `plugins/write-my-agent-plugin`（按 Skill 设计带 `references/`、`templates/`），17j 上两条老断言过时，7 条用例从合入点起失败：`test_skill_tree_and_recall` 写死 `len(snapshot.entries) == 27`（实际 28），`test_builtin_seed` 断言 `shared/builtin` 下除 `SKILL.md` 外没有任何文件（实际多了该技能的 6 个附属文件）。

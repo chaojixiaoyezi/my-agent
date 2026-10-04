@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## 活动回合插话不重复发布 prompt_submitted（st2，2026-10-04，分支 `worker/17j-small-tests-2`，基于 17j 头 `f9a6f6c6e`）
+
+- 来源：luna6 复审 B4 owner 修复时提出——活动回合里成功插话（`/ask` 返回 `active_turn_input`）时不得发布 `prompt_submitted`；现在靠 `gateway_parts/http_handlers.py` 的"只有 `created and receipt.state == 'queued'` 才调 `prompt_queued`"保证，缺专门回归用例。ds8 试过两条路都没造出活动回合（echo 假后端不调 generate；只把请求停进 processing 不够，因为 `steer_active_conversation_if_running` 要真实活动回合记录）。
+- 找到的现成写法：`test_steer_delivery_recovery.py` 的 `_gateway_agent` / `_free_port` / `_TuiSteerBackend`（真 `generate` 里插话，经真实 Gateway 客户端）；`test_plugin_event_gateway.py` 的 `gateway` fixture（真 `handle_ask` + `publish_plugin_event` 观察）；`test_plugin_event_e2e.py` 的 `_wait_for`（单调时钟期限 + 结构化谓词）与 `_assert_http_events`。活动回合的结构化判据来自 `control_service._active_request`：`processing` 里恰好一条同渠道/会话/用户、`turn_phase=open`、未被 detach 的请求。
+- 只加测试，不改产品代码。新增用例 `test_plugin_event_gateway.py::test_active_turn_steer_does_not_publish_a_second_prompt_submitted`：走真实 `handle_ask` 提交首条请求（发 1 次 `prompt_submitted`）→ 把该请求搬进 `processing` 并标 `turn_phase=open`（与真实 worker 认领后的形状一致）→ 再经 `handle_ask` 插话。断言：插话回执 `disposition == "active_turn_input"`、`status != "queued"`、`target_turn_id` 指向原回合、未在 `inbox` 里另开排队请求；事件流里 `prompt_submitted` **恰好一次**，且指向原回合 `request_id`。
+- 命令（工作树根，代号 st2）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_e2e.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-st2
+  ```
+  结果：**20 passed**（`test_plugin_event_gateway.py` 13 条，含新增 1 条）。
+- guards9（11 个文件）：**187 passed**。
+- 首轮观察到的真实回执是 `delivery_unknown`（不是 `active_pending`）——因为测试里没有真实运行的回合在消费插话；`disposition` 才是"命中了活动回合"的结构化判据，断言据此写成，不写死具体状态。
+- 变异（脚本 `tasks/2026-10-04/st2-prompt-submitted-steer/mutations.py`，逐个跑完按 sha256 还原，基线 13 passed）：
+  1. 把条件改成 `if created`（插话也发 `prompt_queued`）→ 杀（1 failed，正是新用例）
+  2. 无条件发（连重放也发）→ 杀（2 failed：新增用例 + 既有 `test_prompt_only_after_queue_commit_and_no_replay[True]`）
+- 未验证：真实 TUI/IM 端到端与真实运行回合中的插话仍由 3a 在真实验收里核对；本用例只覆盖到"活动回合记录存在时，插话不再发布 `prompt_submitted`"这一层。
+
+
 ## 17j 补两条小用例：断链锚点 + 插话不发 prompt_submitted（st1，2026-10-04；第 1 条 3a 复审后并入 step17j，第 2 条由 ds10 的 st2 用现成写法补上）
 
 - **来源**：①pbfixr 初审的 M2 缺口（`split_existing_anchor` 遇断链符号链接祖先没有用例）；②luna6 复审 B4 owner 修复时提的"活动回合里成功插话不应发布 `prompt_submitted`，现只靠 `http_handlers.py` 的 `if created and receipt.state == 'queued'` 保证，无专门回归"。
