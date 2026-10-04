@@ -1,5 +1,61 @@
 # 测试与发布验收
 
+## G2b 拒绝路径的结构化类别判据（g2bfix2b，2026-10-04，分支 `worker/g2b-denial-client-fix`，基于 `3e698eb88`；9b 终审通过，已并入 step17j）
+
+- 3a 挑入时按 9b 必须改修 `/ask` 读两次响应体：`test_ask_submission_auth_denial_becomes_credential_error` 断言改为“本机凭据无效或缺失”，`test_ask_submission_401_without_code_uses_generic_denial_code` 补通用文案对照；新增 `test_progress_cursor_commit_failure_once_still_delivers_final`（9b 探针转正）。
+- 3a 变异 2 个都被抓住：M1 文案退回再读一次响应体 → /ask 用例红；M2 `_quarantine_aware` 不兜普通异常 → 新用例红。按备份还原，sha 一致。8 个相关文件 328 passed。
+
+- **来源**：g2bfix2r 初审（`~/.my-agent/...`，结论"必须改"）实测——带码 404（`/input-status`、`/result` 在 G2b 下"没带凭据"的形态）在 delivery 层仍**静默**：`_AUTH_DENIAL_REASON = r"_auth_http_(?:401|403)\b"` 只认 401/403，404 类隔离虽然被 manager 归成 `auth`，但 delivery 的正则不匹配、不发可见回复。初审还把该正则放宽成认所有 `_auth_http_<code>` 做变异，**285 个用例全绿**——证明当时没有任何用例区分 404 的静默与可见。
+- **改法**：auth 判据从"原因字符串正则"改成**结构化类别字段**。
+  - `manager.py` 新增 `_gateway_poll_quarantine_category(status_code, denial_code)`：401/403 → `auth`；带 `LOCAL_CREDENTIAL_REQUIRED` 的 404 → `auth`；其余 → `config`。类别由 `_gateway_poll_quarantine_reason` 同一处生成，四个轮询入口把 `category` 一起传给 `GatewayReplyQuarantineError`。
+  - `delivery.py`：`GatewayReplyQuarantineError.__init__(reason, denial_code="", category="")`；`_terminalize_quarantine` 只比较 `category == QUARANTINE_CATEGORY_AUTH`。**删除** `_AUTH_DENIAL_REASON` 正则、只被它用的 `re` import，以及零调用者的 `is_auth_denial` 派生属性和 `reason_code()` 方法（判据只留一处，避免下次又改在死代码上）。
+  - `_quarantine_aware(step, record, step_name)` 增加 `step_name`：异常日志恢复分阶段（`gateway progress poll failed` / `gateway response poll failed`），不再统一成 `gateway reply poll failed`。
+  - `_deliver_available_progress` 上加注释说明：经 `_quarantine_aware` 包裹后，`commit_claim` 抛错会变成"记 warning + release_claim 重试"（g2bfix2 之前该函数没有 `except Exception`，异常会向上冒泡）——**这是有意的**：进度是展示用、重试成本低，释放认领比中断整个回送 worker 安全。
+- **新增/改写用例**（`agent_py_agent/tests/test_adapter_manager.py`）：
+  - `test_auth_quarantine_sends_visible_failure_reply` 改成参数化，5 组：`result/403` 带码、`input_status/403` 带码、`progress/401` 无码、**`input_status/404` 带码**、**`result/404` 带码**；每组断言 `deliver` 被调用一次、文案含"重启"、只在带码时含"本机凭据无效或缺失"、不含原因码字面、清占位 `["typing-1"]`、终态 `quarantined` 且 `reason` 与生成值一致。
+  - 新增 `test_plain_404_quarantine_stays_silent`（参数化 `input_status`/`result`）：不带码 404 的类别断言为 `config`，`deliver.assert_not_called()`、清占位、写 quarantined 终态——保持改前的静默语义。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_adapter_manager.py agent_py_agent/tests/test_adapter_ingress.py \
+    agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_tui_input.py \
+    agent_py_agent/tests/test_gateway_client_credentials.py agent_py_agent/tests/test_gateway_local_trust_enforcement.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g2bfix2b   # 290 passed
+  ```
+- **变异 2 个（指定的两个，都改在真正生效的位点，逐个 sha256 还原）**：
+  - V1 把 `_terminalize_quarantine` 的 `category == "auth"` 退回"只认 401/403 的字符串判据" → **KILLED**，红的正是新增的 `[input_status-404-...]`、`[result-404-...]` 两组。
+  - V2 把 `_gateway_poll_quarantine_category` 改成恒 `auth`（不带码 404 也当 auth）→ **KILLED**，红的是 `test_plain_404_quarantine_stays_silent[input_status]`、`[result]` 与一条既有 config 用例。
+  - 过程记录：首轮 V1 我打在 `is_auth_denial` 属性上存活——查清该属性已无调用者（判据在 `_terminalize_quarantine` 里），随即把它删掉并把变异改到生效位点，才得到上面的 KILLED。这条正好印证"判据只留一处"的必要性。
+- **未验证**：真实飞书/TUI 端到端与真实 Gateway 的 403/404 响应（沙箱限制），交 9b/3a 在沙箱外复核；9b 会单独验一次带码 404 的可见回复。
+
+## G2b 拒绝路径的客户端收口（g2bfix2，2026-10-04，分支 `worker/g2b-denial-client`，基于 17j 头 `35b1647e8`）
+
+- 来源：ds5 只读分析指出 G2b 打开后客户端三条路（飞书轮询静默丢、飞书 `/ask` 无限重试、TUI 无限重排）与 G3 口径不一致。服务端由 ds5 的 g2bfix1（`0d838e585`）给 403/404 带结构化 `LOCAL_CREDENTIAL_REQUIRED`；本条做客户端这一半。
+- 改了什么：`adapter/delivery.py` 的 `GatewayReplyQuarantineError` 带 `denial_code`，新增 `_terminalize_quarantine` 让 auth 类隔离先发可见原因再写终态；`adapter/manager.py` 的轮询入口把 401/403/带码 404 带进隔离并按 auth 归类，`/ask` 提交把 401/403 转成 `LocalClientCredentialError`（复用 G3 收口）；`cli/chat_client_context.py` 的 `ActiveTurnInputResult` 增 `reason_code`、401/403 与带码 404 解码为 REJECTED；`tui_input_delivery.py` + `tui_actions.py` 新增 `on_auth_rejected` 收终态并提示重启。
+- 命令（工作树根，代号 ds10）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_adapter_manager.py agent_py_agent/tests/test_adapter_ingress.py \
+    agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_tui_input.py \
+    agent_py_agent/tests/test_gateway_client_credentials.py \
+    agent_py_agent/tests/test_gateway_local_trust_enforcement.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g2bfix2
+  ```
+  结果：**285 passed**。
+- guards9（11 个文件）：**187 passed**。
+- 变异（脚本 `tasks/2026-10-04/g2bfix2-denial-client/mutations.py`，逐个跑完按 sha256 还原，基线 199 passed）：8 个全部被杀死——
+  1. 把 401/403 放回等待集合 → 1 failed
+  2. 去掉用户可见回复 → 2 failed
+  3. `/ask` 的 401/403 继续重试 → 2 failed
+  4. TUI 退回 UNKNOWN → 3 failed
+  5. TUI 鉴权拒绝不转终态 → 1 failed
+  6. 带码 404 退回"继续等待" → 2 failed
+  7. 带码 404 归成 config 类（静默）→ 1 failed
+  8. TUI 不认带码 404 → 1 failed
+- 既有语义保持：`test_typed_reply_quarantine_clears_placeholder_without_user_message` 的"隔离不发用户消息"仍在（场景改为 config 类隔离）；`test_reply_poll_auth_or_config_error_is_typed_quarantine` 的 401/400 类型化隔离不变。
+- 未验证：真实飞书/TUI 端到端、真实 Gateway 403/404 响应由 3a 在沙箱外复核。
+
 ## DeepSeek 跨轮思考分区非作者复核（cachecmp，2026-10-04，WIP：完整宿主重放另线核对）
 
 - 非作者复核3a的 `a2f7aca08286570bcacf3c60893cdb2edfc4f7dd`，本树 cherry-pick 为 `34810dc5f82d37f342f2b46b4bb2aa39a5a8dc8e`；顶部文档冲突保留本树历史后追加3a原文。没有自行再改支持规则；产品 `openai_chat.py` 与原提交字节相同。原提交完整 `test_backends_openai_native_tool_use.py` **40 passed / 0 failed / 0 errors / 0 skipped**，`tmp/cachecmp/a2f-review.xml`。此前错误的“仅检查工具assistant”方案已撤回，不作为修复交付。

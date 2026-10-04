@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+## G2b 拒绝路径的客户端收口（g2bfix2 + g2bfix2b，2026-10-04；9b 终审通过，已并入 step17j）
+
+- 强制档下 401/403 是确定性鉴权拒绝，客户端不再按暂时性错误处理：飞书轮询把 auth 类隔离转成一条用户可见的失败回复再写 quarantined 终态（其它隔离保持静默），`/ask` 提交把 401/403 收口成 G3 同款 credential_error 而不是无上限退避；TUI 插话按 REJECTED 处理并提示重启，持久 outbox 条目收终态、重启后不重发。
+- 判据只用状态码与结构化 `error_code`（g2bfix1 约定 `LOCAL_CREDENTIAL_REQUIRED`）；5xx/429 等暂时性错误照旧退避重试。
+
 ## G2b 读路径补最后一处：归档读不出的 403 也带缺凭据码（g2bfix1c，2026-10-04，worker/g2b-denial-server-fix2）
 
 - g2bfix1br 初审全面 grep 时查出：`_send_archived_terminal_result` 的 `load_error` 分支（归档文件存在但读不出）仍是裸 `_send_json(status, body)`，与已修的三处同在降匿名读路径上。

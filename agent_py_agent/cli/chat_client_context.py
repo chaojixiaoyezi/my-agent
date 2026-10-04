@@ -72,6 +72,17 @@ class ActiveTurnInputResult:
     delivery: ActiveTurnInputDelivery
     request_id: str = ""
     disposition: str = ""
+    # LLM: 只承载服务端返回的结构化原因码（如 LOCAL_CREDENTIAL_REQUIRED）；UI 按它挑提示文案，不解析 message。
+    reason_code: str = ""
+
+
+# LLM: G2b 拒绝的结构化判据只有响应体里的 error_code 字段；缺失或类型不对时留空，由 UI 用通用鉴权文案兜底。
+# 函数用途: 从 Gateway 拒绝响应体里取机器可读原因码。
+def _gateway_denial_reason_code(body: object) -> str:
+    if not isinstance(body, dict):
+        return ""
+    raw = body.get("error_code")
+    return str(raw).strip() if isinstance(raw, str) else ""
 
 
 # LLM: Identity projection is a pure transport helper shared by HTTP headers and JSON bodies.
@@ -573,6 +584,16 @@ def _active_turn_input_result(
         return ActiveTurnInputResult(
             ActiveTurnInputDelivery.CONFLICT,
             request_id=str(body.get("request_id") or "").strip(),
+        )
+    # LLM: G2b 拒绝路径：401/403 是确定性的鉴权拒绝；/input-status 与 /result 在"没带凭据"时回
+    #   404 并带结构化 LOCAL_CREDENTIAL_REQUIRED（真"记录不存在"的 404 不带码）。两种都是重启即可，
+    #   重试不会变好，按 REJECTED 收口并带原因码，不能在 TUI 侧退化成 UNKNOWN 无限重排。
+    #   判据只用状态码和 error_code 字段，不解析文案。
+    reason_code = _gateway_denial_reason_code(body)
+    if status in {401, 403} or (status == 404 and reason_code):
+        return ActiveTurnInputResult(
+            ActiveTurnInputDelivery.REJECTED,
+            reason_code=reason_code,
         )
     if status not in {200, 202}:
         return ActiveTurnInputResult(ActiveTurnInputDelivery.UNKNOWN)

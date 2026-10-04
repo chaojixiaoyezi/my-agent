@@ -32,12 +32,13 @@ LOCAL_CLIENT_CREDENTIAL_READ_BYTES = 128
 # LLM: 读取失败必须有结构化原因，禁止把凭据内容放进异常。
 # 类用途: 表示宿主凭据无法安全读取。
 class LocalClientCredentialError(RuntimeError):
-    # LLM: 原因码是机器合同；异常文字不能包含凭据、底层异常或私人路径。
+    # LLM: 原因码是机器合同；异常文字不能包含凭据、底层异常或私人路径。G2b 拒绝路径（401/403）复用本异常
+    #   把"服务端拒绝"收敛成一次终态，允许调用方给一句面向用户的中文原因；message 只放这类固定文案。
     # 函数用途: 构造仅含原因码的宿主凭据读取错误。
-    def __init__(self, reason_code: str) -> None:
+    def __init__(self, reason_code: str, message: str = "") -> None:
         self.reason_code = reason_code
         self.error_code = reason_code
-        super().__init__(f"本机客户端凭据无法安全读取（{reason_code}）")
+        super().__init__(str(message or "").strip() or f"本机客户端凭据无法安全读取（{reason_code}）")
 
 
 # LLM: 仅拼接明确的数据根，不读环境或猜 owner；插件 H2 与启动钩子必须使用同一路径。

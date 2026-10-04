@@ -30,13 +30,32 @@ _PENDING_WATCH_KINDS = frozenset(
 _CONTROL_RECEIPT_STATES = frozenset(
     {"prepared", "executing", "completed", "terminal_unknown"}
 )
+# LLM: 隔离类别是结构化字段：manager 在生成隔离时按 HTTP 状态码 + 服务端 error_code 判定，delivery 只读它，
+#   不再拿原因字符串做正则匹配（AGENTS.md：机器判断只用结构化事实）。`auth` 才给用户可见回复。
+QUARANTINE_CATEGORY_AUTH = "auth"
+QUARANTINE_CATEGORY_CONFIG = "config"
+
+
+# LLM: 用户可见文案按结构化原因码二选一；不解析服务端 message，也不把内部 reason 串露出给用户。
+# 函数用途: 给鉴权拒绝生成一句中文的、告诉用户怎么办的提示。
+def _gateway_denial_text(denial_code: str) -> str:
+    if str(denial_code or "").strip() == "LOCAL_CREDENTIAL_REQUIRED":
+        return "Gateway 拒绝了这个请求：本机凭据无效或缺失。请重启 my-agent 让它重新读取凭据。"
+    return "Gateway 拒绝了这个请求（鉴权失败）。请重启 my-agent；若仍失败，检查本机凭据。"
 
 
 # LLM: Auth/config failures are typed transport quarantine signals, never user-visible reply text.
 # 类用途: 通知回送 worker 持久隔离无法继续对账的 Gateway watcher。
 class GatewayReplyQuarantineError(RuntimeError):
-    def __init__(self, reason: str) -> None:
+    # LLM: category 只承载结构化类别（auth/config，见 QUARANTINE_CATEGORY_*）；denial_code 只承载服务端
+    #   结构化 error_code（g2bfix1 约定的 LOCAL_CREDENTIAL_REQUIRED）。两者都缺省，缺省时按非 auth 处理。
+    #   "要不要给用户回一句"由 delivery 的 _terminalize_quarantine 直接读 self.category 判定，
+    #   这里不再提供字符串匹配的派生属性（AGENTS.md：机器判断只用结构化事实，且不留双份判据）。
+    # 函数用途: 记录一次隔离的类别、原因与服务端原因码。
+    def __init__(self, reason: str, denial_code: str = "", category: str = "") -> None:
         self.reason = str(reason or "gateway_reply_quarantine")
+        self.denial_code = str(denial_code or "").strip()
+        self.category = str(category or "").strip().lower()
         super().__init__(self.reason)
 
 
@@ -648,10 +667,99 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
         return self.root / "sent" / f"{_record_key(stable_id)}.json"
 
 
+# LLM: 隔离收口与"无正文终态"是所有回送状态机共用的能力（input / control / 普通回复三条路都调）；
+#   单独成一个 mixin，既让每类能力的尺寸可审计，也避免把 receipt 状态机和隔离语义堆进同一个类。
+# 类用途: 提供"清理占位并写终态"、"按结构化类别收口隔离"和"包装可能抛隔离的步骤"三个共用方法。
+class _GatewayQuarantineTerminalizeMixin:
+    # LLM: A no-reply terminal state clears the transient provider placeholder first, then writes a
+    # same-epoch unknown/discarded/quarantined receipt. Cleanup failure keeps the row retryable.
+    # 函数用途: 清理占位并把无需发送正文的 watcher 收成持久终态。
+    def _terminalize_without_reply(
+        self,
+        record: PendingGatewayReply,
+        *,
+        disposition: str,
+        reason: str,
+    ) -> bool:
+        try:
+            if self._discard_input_receipt is not None:
+                self._discard_input_receipt(record)
+        except Exception as exc:
+            _LOGGER.warning(
+                "gateway terminal placeholder cleanup failed request_id=%s error=%s",
+                record.request_id,
+                exc,
+            )
+            self.store.defer_claimed(
+                record,
+                owner=self._claim_owner,
+                epoch=record.claim_epoch,
+            )
+            return False
+        return self.store.mark_terminal_claimed(
+            record,
+            owner=self._claim_owner,
+            epoch=record.claim_epoch,
+            disposition=disposition,
+            reason=reason,
+        )
+
+    # LLM: 隔离的统一收口：auth 类（构造时按状态码 + error_code 定的结构化类别，见 QUARANTINE_CATEGORY_*）
+    #   先给用户一句可见原因，再写终态；其它隔离保持静默（清占位 + 写 quarantined），两种语义同时成立，
+    #   互不覆盖。发不出去也不改变终态结果。判据只读 category 字段，不做原因字符串匹配。
+    # 函数用途: 收口一条隔离记录，鉴权拒绝额外回用户一条失败原因。
+    def _terminalize_quarantine(
+        self,
+        record: PendingGatewayReply,
+        *,
+        reason: str,
+        denial_code: str = "",
+        category: str = "",
+    ) -> bool:
+        if str(category or "").strip().lower() == QUARANTINE_CATEGORY_AUTH:
+            try:
+                self._deliver_response(record, _gateway_denial_text(denial_code))
+            except Exception as exc:
+                _LOGGER.warning(
+                    "gateway auth denial reply failed request_id=%s error=%s",
+                    record.request_id,
+                    exc,
+                )
+        return self._terminalize_without_reply(
+            record,
+            disposition="quarantined",
+            reason=reason,
+        )
+
+    # LLM: 把"可能抛隔离的步骤"包一层：隔离一律收成终态（auth 类额外回用户一句），调用方按
+    #   返回的 quarantined 决定是否继续；step_name 只用于日志分阶段，不做业务判断。
+    # 函数用途: 执行一个可能抛隔离的步骤，返回 (结果, 是否已收口)；非隔离异常释放认领供稍后重试。
+    def _quarantine_aware(self, step, record: PendingGatewayReply, step_name: str):
+        try:
+            return step(record), False
+        except GatewayReplyQuarantineError as exc:
+            self._terminalize_quarantine(
+                record,
+                reason=exc.reason,
+                denial_code=exc.denial_code,
+                category=exc.category,
+            )
+            return None, True
+        except Exception as exc:  # noqa: BLE001 普通运输失败保持原有"释放认领、稍后重试"语义
+            _LOGGER.warning(
+                "gateway %s poll failed request_id=%s error=%s",
+                step_name,
+                record.request_id,
+                exc,
+            )
+            self.store.release_claim(record, owner=self._claim_owner, epoch=record.claim_epoch)
+            return None, True
+
+
 # LLM: Receipt reconciliation is a typed worker capability shared by the one concrete loop. This
 # mixin does not own a thread, store, or callback registry and therefore creates no parallel path.
-# 类用途: 集中处理 input/control receipt 与无正文终态，缩短主 worker 同时保留唯一执行循环。
-class _GatewayReplyReceiptWorkerMixin:
+# 类用途: 集中处理 input receipt 状态机与无正文终态，缩短主 worker 同时保留唯一执行循环。
+class _GatewayReplyReceiptWorkerMixin(_GatewayQuarantineTerminalizeMixin):
     # LLM: Input receipt polling is typed: pending waits, queued switches watcher, consumed retires,
     # and terminal_unknown becomes a durable unknown receipt after placeholder cleanup.
     # 函数用途: 对账普通消息的稳定输入回执，并把每个终态收进持久回执。
@@ -670,10 +778,11 @@ class _GatewayReplyReceiptWorkerMixin:
         try:
             state = str(self._poll_input_receipt(record) or "").strip().lower()
         except GatewayReplyQuarantineError as exc:
-            self._terminalize_without_reply(
+            self._terminalize_quarantine(
                 record,
-                disposition="quarantined",
                 reason=exc.reason,
+                denial_code=exc.denial_code,
+                category=exc.category,
             )
             return 0
         except Exception as exc:
@@ -744,44 +853,14 @@ class _GatewayReplyReceiptWorkerMixin:
         )
         return 0
 
-    # LLM: A no-reply terminal state clears the transient provider placeholder first, then writes a
-    # same-epoch unknown/discarded/quarantined receipt. Cleanup failure keeps the row retryable.
-    # 函数用途: 清理占位并把无需发送正文的 watcher 收成持久终态。
-    def _terminalize_without_reply(
-        self,
-        record: PendingGatewayReply,
-        *,
-        disposition: str,
-        reason: str,
-    ) -> bool:
-        try:
-            if self._discard_input_receipt is not None:
-                self._discard_input_receipt(record)
-        except Exception as exc:
-            _LOGGER.warning(
-                "gateway terminal placeholder cleanup failed request_id=%s error=%s",
-                record.request_id,
-                exc,
-            )
-            self.store.defer_claimed(
-                record,
-                owner=self._claim_owner,
-                epoch=record.claim_epoch,
-            )
-            return False
-        return self.store.mark_terminal_claimed(
-            record,
-            owner=self._claim_owner,
-            epoch=record.claim_epoch,
-            disposition=disposition,
-            reason=reason,
-        )
+    # LLM: 无正文终态、隔离收口与"可能抛隔离的步骤"包装统一放在 _GatewayQuarantineTerminalizeMixin
+    #   （见下方该类）；本 mixin 只保留 input receipt 的对账状态机，避免单一 mixin 越过尺寸阈值。
 
 
 # LLM: Control receipt reconciliation is separated from input receipt transitions only to keep
 # each capability auditable; both remain methods of the single concrete delivery worker loop.
 # 类用途: 集中处理控制操作轮询、目标绑定和明确终态投递，不创建线程或第二份状态源。
-class _GatewayControlReceiptWorkerMixin:
+class _GatewayControlReceiptWorkerMixin(_GatewayQuarantineTerminalizeMixin):
     # LLM: Unknown control delivery is reconciled only through its independent operation receipt.
     # Prepared/executing/unknown remain WAIT; only completed accepted/rejected may reach provider IO.
     # 函数用途: 轮询 `/btw` 等控制操作的稳定回执，并在明确终态后更新原占位消息。
@@ -800,10 +879,11 @@ class _GatewayControlReceiptWorkerMixin:
         try:
             result = self._poll_control_receipt(record)
         except GatewayReplyQuarantineError as exc:
-            self._terminalize_without_reply(
+            self._terminalize_quarantine(
                 record,
-                disposition="quarantined",
                 reason=exc.reason,
+                denial_code=exc.denial_code,
+                category=exc.category,
             )
             return 0
         except Exception as exc:
@@ -1047,42 +1127,10 @@ class GatewayReplyDeliveryWorker(
             return self._process_input_receipt(claimed)
         if claimed.watch_kind == "control_receipt":
             return self._process_control_receipt(claimed)
-        try:
-            progressed = self._deliver_available_progress(claimed)
-        except GatewayReplyQuarantineError as exc:
-            self._terminalize_without_reply(
-                claimed,
-                disposition="quarantined",
-                reason=exc.reason,
-            )
+        polled = self._poll_progress_then_response(claimed)
+        if polled is None:
             return 0
-        if progressed is None:
-            return 0
-        claimed = progressed
-        try:
-            response = self._poll_response(claimed)
-        except GatewayReplyQuarantineError as exc:
-            self._terminalize_without_reply(
-                claimed,
-                disposition="quarantined",
-                reason=exc.reason,
-            )
-            return 0
-        except Exception as exc:
-            _LOGGER.warning("gateway reply poll failed request_id=%s error=%s", claimed.request_id, exc)
-            self.store.release_claim(
-                claimed,
-                owner=self._claim_owner,
-                epoch=claimed.claim_epoch,
-            )
-            return 0
-        if response is None:
-            self.store.release_claim(
-                claimed,
-                owner=self._claim_owner,
-                epoch=claimed.claim_epoch,
-            )
-            return 0
+        claimed, response = polled
         if self.store.was_sent(claimed.stable_id):
             return 0
         try:
@@ -1099,6 +1147,35 @@ class GatewayReplyDeliveryWorker(
             return 0
         return 1 if self._record_sent(claimed) else 0
 
+    # LLM: 先把进度快照送达并推进游标，再取最终回复；任一步隔离已收口或归还认领时返回 None，
+    #   调用方直接结束本次处理，不进入投递。
+    # 函数用途: 依次跑 progress 与 response 两步轮询，返回 (记录, 最终正文) 或 None。
+    def _poll_progress_then_response(
+        self, claimed: PendingGatewayReply
+    ) -> tuple[PendingGatewayReply, str] | None:
+        progressed, quarantined = self._quarantine_aware(
+            self._deliver_available_progress, claimed, "progress"
+        )
+        if quarantined or progressed is None:
+            return None
+        response, quarantined = self._quarantine_aware(self._poll_response, progressed, "response")
+        if quarantined:
+            return None
+        if response is None:
+            self.store.release_claim(
+                progressed,
+                owner=self._claim_owner,
+                epoch=progressed.claim_epoch,
+            )
+            return None
+        return progressed, response
+
+    # LLM: 本函数自身的 poll/deliver 失败都已就地降级（返回 record / sent=False），不改调用方语义。
+    #   但调用方是经 _quarantine_aware 包裹的：commit_claim（进度游标落盘）或其它未捕获异常会被它兜住，
+    #   记 warning 并 release_claim 供稍后重试——这是有意的（进度是展示用，重试成本低；释放认领比让异常
+    #   冒泡中断整个回送 worker 更安全）。该捕获面比 g2bfix2 之前的"只有 _poll_response 一处 except"更宽，
+    #   回归见 TESTS.md 的 g2bfix2b 段。
+    # 函数用途: 轮询并投递一次进度快照，推进本地进度游标。
     def _deliver_available_progress(
         self,
         record: PendingGatewayReply,

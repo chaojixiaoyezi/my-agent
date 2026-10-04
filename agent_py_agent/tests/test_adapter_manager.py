@@ -1313,7 +1313,7 @@ class TestChannelManagerDurableDelivery:
             store,
             poll_response=MagicMock(
                 side_effect=GatewayReplyQuarantineError(
-                    "gateway_result_auth_http_401"
+                    "gateway_result_config_http_400"
                 )
             ),
             deliver_response=deliver,
@@ -1332,7 +1332,102 @@ class TestChannelManagerDurableDelivery:
         receipt = store.terminal_receipt("stable-input-1")
         assert receipt is not None
         assert receipt["disposition"] == "quarantined"
-        assert receipt["reason"] == "gateway_result_auth_http_401"
+        assert receipt["reason"] == "gateway_result_config_http_400"
+
+    # LLM: G2b 拒绝路径：auth 类隔离（401/403、以及 /input-status 与 /result 的无凭据 404）与其它隔离
+    #   语义不同——必须给用户一句可见原因，否则 G2b 打开后用户会一句话都收不到。判据是构造时按状态码 +
+    #   error_code 定的结构化 category，不做原因字符串匹配；这里按端点逐个覆盖。
+    # 函数用途: 断言各类鉴权隔离都会给用户一条失败回复，同时照常清占位并写 quarantined 终态。
+    @pytest.mark.parametrize(
+        ("endpoint", "status_code", "denial_code"),
+        [
+            # /result 403 带码：G2b 拒绝的常见形态
+            ("result", 403, "LOCAL_CREDENTIAL_REQUIRED"),
+            # /input-status 403 带码：同上，换端点
+            ("input_status", 403, "LOCAL_CREDENTIAL_REQUIRED"),
+            # 401 不带码：没有结构化原因码时仍要回用户一句（走通用鉴权文案）
+            ("progress", 401, ""),
+            # /input-status 与 /result 在"没带凭据"时回 404 且带码——这两个才是 G2b 下真正会遇到的形态，
+            # 必须逐个钉住，否则它们会静默丢消息（本轮修的就是这条）。
+            ("input_status", 404, "LOCAL_CREDENTIAL_REQUIRED"),
+            ("result", 404, "LOCAL_CREDENTIAL_REQUIRED"),
+        ],
+    )
+    def test_auth_quarantine_sends_visible_failure_reply(
+        self, endpoint: str, status_code: int, denial_code: str
+    ) -> None:
+        from agent_py_agent.agent.adapter.manager import (
+            _gateway_poll_quarantine_category,
+            _gateway_poll_quarantine_reason,
+        )
+
+        reason = _gateway_poll_quarantine_reason(endpoint, status_code, denial_code)
+        category = _gateway_poll_quarantine_category(status_code, denial_code)
+        store = GatewayReplyDeliveryStore(None)
+        cleared: list[str] = []
+        deliver = MagicMock(return_value=True)
+        worker = GatewayReplyDeliveryWorker(
+            store,
+            poll_response=MagicMock(
+                side_effect=GatewayReplyQuarantineError(reason, denial_code, category)
+            ),
+            deliver_response=deliver,
+            receipt_callbacks=GatewayReplyReceiptCallbacks(
+                clear_placeholder=lambda record: cleared.append(
+                    record.progress_handle
+                )
+            ),
+        )
+        worker.enqueue(self._pending(watch_kind="request_result"))
+
+        assert worker.run_once() == 0
+        deliver.assert_called_once()
+        record, text = deliver.call_args[0]
+        assert record.request_id == "stable-input-1"
+        assert "重启" in text
+        assert ("本机凭据无效或缺失" in text) is (denial_code == "LOCAL_CREDENTIAL_REQUIRED")
+        assert "LOCAL_CREDENTIAL_REQUIRED" not in text
+        assert cleared == ["typing-1"]
+        receipt = store.terminal_receipt("stable-input-1")
+        assert receipt is not None and receipt["disposition"] == "quarantined"
+        assert receipt["reason"] == reason
+
+    # LLM: 对照：不带码的 404 是"记录还没出现"这类 config 类隔离，不能当 auth——否则会在正常等待路径上
+    #   给用户发一条假的鉴权失败提示。类别由 manager 的结构化判定给出，这里断言静默语义与改前一致。
+    # 函数用途: 断言不带码 404 保持静默隔离（不发用户消息、清占位、写终态）。
+    @pytest.mark.parametrize("endpoint", ["input_status", "result"])
+    def test_plain_404_quarantine_stays_silent(self, endpoint: str) -> None:
+        from agent_py_agent.agent.adapter.manager import (
+            _gateway_poll_quarantine_category,
+            _gateway_poll_quarantine_reason,
+        )
+
+        reason = _gateway_poll_quarantine_reason(endpoint, 404, "")
+        category = _gateway_poll_quarantine_category(404, "")
+        assert category == "config"
+        store = GatewayReplyDeliveryStore(None)
+        cleared: list[str] = []
+        deliver = MagicMock(return_value=True)
+        worker = GatewayReplyDeliveryWorker(
+            store,
+            poll_response=MagicMock(
+                side_effect=GatewayReplyQuarantineError(reason, "", category)
+            ),
+            deliver_response=deliver,
+            receipt_callbacks=GatewayReplyReceiptCallbacks(
+                clear_placeholder=lambda record: cleared.append(
+                    record.progress_handle
+                )
+            ),
+        )
+        worker.enqueue(self._pending(watch_kind="request_result"))
+
+        assert worker.run_once() == 0
+        deliver.assert_not_called()
+        assert cleared == ["typing-1"]
+        receipt = store.terminal_receipt("stable-input-1")
+        assert receipt is not None and receipt["disposition"] == "quarantined"
+        assert receipt["reason"] == reason
 
     def test_input_status_poll_uses_stable_id_and_trusted_owner(self) -> None:
         manager = ChannelManager(gateway_port=8420)
@@ -1414,3 +1509,48 @@ class TestChannelManagerDurableDelivery:
             ("ou_late", "崩溃点前平台已接收的回复")
         ]
         assert second._reply_delivery.store.pending() == []
+
+
+# LLM: G2b 拒绝路径：/input-status 与 /result 在"没带凭据"时回 404 并带 LOCAL_CREDENTIAL_REQUIRED。
+#   那个 404 不是"记录还没出现"，继续等待会永远等下去；带码必须按拒绝处理。真 404（不带码）照旧等待。
+# 函数用途: 断言带本机凭据码的 404 不再被当成可等待状态。
+def test_poll_http_wait_treats_credential_404_as_denial() -> None:
+    from agent_py_agent.agent.adapter.manager import _gateway_poll_http_wait
+
+    assert _gateway_poll_http_wait(404, "LOCAL_CREDENTIAL_REQUIRED") is False
+    assert _gateway_poll_http_wait(404) is True
+    assert _gateway_poll_http_wait(404, "") is True
+    assert _gateway_poll_http_wait(404, "SOMETHING_ELSE") is True
+
+
+# LLM: 端到端一点：/result 轮询拿到带码的 404 时，轮询入口把它翻成隔离异常（带同码），
+#   而不是返回 None 继续等待——后者会让老客户端永远等下去。
+# 函数用途: 断言带码 404 在真实轮询入口上变成带码隔离。
+def test_result_poll_credential_404_becomes_typed_quarantine(tmp_path) -> None:
+    from io import BytesIO
+
+    from agent_py_agent.agent.adapter.delivery import GatewayReplyQuarantineError
+    from agent_py_agent.agent.adapter.manager import ChannelManager
+
+    manager = ChannelManager(gateway_port=18420)
+    record = PendingGatewayReply(
+        request_id="stable-input-404",
+        channel="feishu",
+        user_id="ou-1",
+        message_id="om-1",
+        conversation_id="oc-1",
+        progress_handle="typing-1",
+        created_at=10.0,
+    )
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:18420/result/stable-input-404",
+        404,
+        "not found",
+        hdrs=None,
+        fp=BytesIO(b'{"error": "not_found", "error_code": "LOCAL_CREDENTIAL_REQUIRED"}'),
+    )
+    with patch("urllib.request.urlopen", side_effect=error):
+        with pytest.raises(GatewayReplyQuarantineError) as caught:
+            manager._poll_gateway_once(record, interval=0.0)
+    assert caught.value.reason == "gateway_result_auth_http_404"
+    assert caught.value.denial_code == "LOCAL_CREDENTIAL_REQUIRED"

@@ -9,6 +9,7 @@ import stat
 import threading
 import urllib.error
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,7 @@ from agent_py_agent.agent.adapter.manager import (
     _gateway_ask_payload,
 )
 from agent_py_agent.agent.adapter.protocol import IncomingMessage
+from agent_py_agent.agent.gateway_parts.local_client_token import LocalClientCredentialError
 from agent_py_agent.tests.test_adapter_manager import DummyAdapter
 
 
@@ -506,3 +508,88 @@ def test_transient_result_http_error_remains_wait_and_is_not_user_visible(
 
     with patch("urllib.request.urlopen", side_effect=error):
         assert manager._poll_gateway_once(pending, interval=0.0) is None
+
+
+# LLM: G2b 拒绝路径：/ask 收到 401/403 是确定性鉴权拒绝，重试不会变好。按 G3 凭据拒绝同一口径收口成
+#   credential_error（由 ingress 交给用户一句可见原因），不再落进无上限退避重试。判据只看状态码与结构化 error_code。
+# 函数用途: 断言 /ask 提交收到 403 时转成 credential_error 并带结构化原因码。
+def test_ask_submission_auth_denial_becomes_credential_error(tmp_path: Path) -> None:
+    manager = ChannelManager(delivery_state_dir=tmp_path / "delivery")
+    body = b'{"error": "forbidden", "error_code": "LOCAL_CREDENTIAL_REQUIRED"}'
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:8420/ask", 403, "forbidden", hdrs=None, fp=BytesIO(body)
+    )
+    with patch("urllib.request.urlopen", side_effect=error):
+        with pytest.raises(LocalClientCredentialError) as caught:
+            manager._submit_gateway_payload({"goal": "x"}, _message())
+    assert caught.value.reason_code == "LOCAL_CREDENTIAL_REQUIRED"
+    # 必须是带码的专用文案，不能是通用鉴权文案（通用版也含“本机凭据”“重启”，旧断言抓不住读两次响应体的回归）。
+    assert "本机凭据无效或缺失" in str(caught.value) and "重启" in str(caught.value)
+
+
+# LLM: 只有 auth 类拒绝才收口；5xx/429 仍然是暂时性错误，必须继续上抛交给原退避重试，不能被吞成终态。
+# 函数用途: 断言 /ask 提交收到 503 时原样上抛 HTTPError。
+def test_ask_submission_transient_error_still_raises(tmp_path: Path) -> None:
+    manager = ChannelManager(delivery_state_dir=tmp_path / "delivery")
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:8420/ask", 503, "unavailable", hdrs=None, fp=None
+    )
+    with patch("urllib.request.urlopen", side_effect=error):
+        with pytest.raises(urllib.error.HTTPError):
+            manager._submit_gateway_payload({"goal": "x"}, _message())
+
+
+# LLM: 401 同样属于 auth 类；没有 error_code 时退回通用鉴权码，但仍然是终态而不是重试。
+# 函数用途: 断言 /ask 提交收到无 error_code 的 401 时也收口成 credential_error。
+def test_ask_submission_401_without_code_uses_generic_denial_code(tmp_path: Path) -> None:
+    manager = ChannelManager(delivery_state_dir=tmp_path / "delivery")
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:8420/ask", 401, "unauthorized", hdrs=None, fp=None
+    )
+    with patch("urllib.request.urlopen", side_effect=error):
+        with pytest.raises(LocalClientCredentialError) as caught:
+            manager._submit_gateway_payload({"goal": "x"}, _message())
+    assert caught.value.reason_code == "GATEWAY_AUTH_DENIED"
+    assert "鉴权失败" in str(caught.value) and "本机凭据无效或缺失" not in str(caught.value)
+
+
+# LLM: g2bfix2b 起 _deliver_available_progress 经 _quarantine_aware 包裹：进度已发出后游标落盘（commit_claim）
+#   失败一次，只记 warning 并释放认领，不能让异常逃出 run_once（底版会逃出，生产投递线程直接退出、最终回复不送达）。
+#   代价是同一条进度最多重发一次。由 9b 终审探针转正；去掉该捕获面时本用例必须红。
+# 函数用途: 断言进度游标落盘失败一次时，最终回复照常送达一次、run_once 不抛、进度最多重复一次。
+def test_progress_cursor_commit_failure_once_still_delivers_final(tmp_path: Path) -> None:
+    store = GatewayReplyDeliveryStore(tmp_path / "delivery")
+    progress_sent: list[str] = []
+    final_sent: list[str] = []
+
+    def poll_progress(record):
+        return (["进度A"], 1) if record.progress_cursor < 1 else ([], record.progress_cursor)
+
+    worker = GatewayReplyDeliveryWorker(
+        store,
+        poll_response=lambda _record: "最终回复",
+        deliver_response=lambda record, text: final_sent.append(text) is None,
+        poll_progress=poll_progress,
+        deliver_progress=lambda record, text: progress_sent.append(text) is None,
+    )
+    original_commit = store.commit_claim
+    state = {"failed": False}
+
+    def flaky_commit(expected, replacement, **claim):
+        if not claim.get("release", True) and replacement.progress_cursor == 1 and not state["failed"]:
+            state["failed"] = True
+            raise OSError("cursor persist failed once")
+        return original_commit(expected, replacement, **claim)
+
+    store.commit_claim = flaky_commit
+    worker.enqueue(PendingGatewayReply(
+        request_id="req-commit-once", channel="feishu", user_id="ou-1",
+        message_id="om-commit-once", conversation_id="oc-1", progress_handle="typing-1",
+    ))
+    for _ in range(3):
+        worker.run_once()
+
+    assert state["failed"] is True
+    assert final_sent == ["最终回复"]
+    assert 1 <= len(progress_sent) <= 2 and set(progress_sent) == {"进度A"}
+    assert store.pending() == []

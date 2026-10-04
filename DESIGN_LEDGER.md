@@ -1,5 +1,24 @@
 # 设计台账
 
+## G2b 拒绝路径的结构化类别判据（g2bfix2b，2026-10-04，分支 `worker/g2b-denial-client-fix`，基于 `3e698eb88`；9b 终审通过，已并入 step17j）
+
+- **9b 终审必须改（3a 挑入时修）**：飞书 `/ask` 被拒时 `_submit_gateway_payload` 调了两次 `_gateway_http_error_code(exc)`，响应体只能读一次，第二次读空，用户看到通用文案而不是“本机凭据无效或缺失”。改为先读一次存下原因码，码和文案共用；用例断言改为专用文案，并补“无码 401 走通用文案”的对照。9b 的进度游标落盘探针转正为 `test_progress_cursor_commit_failure_once_still_delivers_final`，钉住 g2bfix2b 新捕获面（底版异常会逃出 run_once）。
+- **9b 建议、未在本次处理**：TUI 不带码的 401/403 走 on_rejected 并把同一条消息重排（应加结构化鉴权拒绝标志分流）；投递 worker `_run` 无兜底，意外异常会让线程静默退出；`/progress` 对不存在 id 带有效凭据也回无码 403。三条另开小任务，不挡 G2b。
+
+- **起因**：g2bfix2 的 auth 可见回复判据是**原因字符串正则**（`_AUTH_DENIAL_REASON = r"_auth_http_(?:401|403)\b"`），漏掉了 `/input-status`、`/result` 的**带码 404**——这两个端点在 G2b 下正是靠 404 报"没带凭据"，结果仍会静默丢消息（g2bfix2r 初审实测：`gateway_result_auth_http_404` → 用户可见回复 False，且当时无任何用例区分 404 的静默与可见）。
+- **改法（AGENTS.md：机器判断只用结构化事实）**：`GatewayReplyQuarantineError` 增加**类别字段 `category`**，由 `manager._gateway_poll_quarantine_category(status_code, denial_code)` 判定一次——401/403 一律 `auth`；404 只有带 `LOCAL_CREDENTIAL_REQUIRED` 才算 `auth`，真"记录不存在"仍是 `config`。`delivery._terminalize_quarantine` 只读这个字段决定"是否给用户一句可见原因"，不再做任何原因字符串匹配（`_AUTH_DENIAL_REASON` 正则与只供展示的 `is_auth_denial` 派生属性一并删除，判据只留一处）。原因串仍由同一函数生成，保证类别与原因同源。
+- **顺带收口**：`_quarantine_aware` 的异常日志恢复分阶段文案（`gateway progress poll failed` / `gateway response poll failed`）；`_deliver_available_progress` 经该 helper 包裹后新增的捕获面（`commit_claim` 抛错 → release_claim 重试）在有意的位置写明注释并记入 TESTS。
+- **验证**：见 TESTS「G2b 拒绝路径的结构化类别判据」；指定变异两个都杀（去掉 category 判断退回字符串只认 401/403 → 带码 404 用例红；不带码 404 也当 auth → 对照用例红）。
+- **未验证**：真实飞书/TUI 端到端与真实 Gateway 的 403/404 响应仍由 9b/3a 在沙箱外复核；本工作树覆盖到解码层、轮询入口、ingress 提交与 outbox 状态机。
+
+## G2b 拒绝路径的客户端收口（g2bfix2，2026-10-04，分支 `worker/g2b-denial-client`，基于 17j 头 `35b1647e8`；初审 g2bfix2r 判"必须改"1 条，已由 g2bfix2b 修复）
+
+- **起因**：G2b 强制打开后，客户端收到 401/403 的处理与 G3"凭据读不到"不一致——飞书轮询把 401/403 当不可恢复隔离、只写终态不发正文（用户一句话都收不到）；飞书 `/ask` 提交的 401/403 落进无上限退避重试；TUI 插话把 403 当 UNKNOWN 一直退避重排。ds5 只读分析（`~/.my-agent/decision-evidence/g2b-adapter-denial/g2bad-ds5.md`）逐条坐实。
+- **服务端约定**（g2bfix1，`0d838e585`）：强制档 + 回环 + 没带凭据时响应体带 `error_code=LOCAL_CREDENTIAL_REQUIRED`（挂闸端点 403、`/progress` 403、`/input-status` 与 `/result` **404**）；回环带错或过期凭据同样带码，远程不可信来源、来源未知不带（9b 终审口径，3a 挑入时更正）。
+- **改法**：① 飞书轮询——auth 类隔离（401/403，或带该码的 404）先给用户一条可见失败原因再写 quarantined 终态，其它隔离保持静默；② `/ask` 提交——401/403 收口成 G3 同款 `credential_error`，不再无上限重试；③ TUI——401/403 与带码 404 按 REJECTED 处理并提示重启，持久 outbox 条目收终态、重启后不重发。判断只用状态码 + `error_code` 字段。
+- **验证**：见 TESTS「G2b 拒绝路径的客户端收口」；变异 8 个全杀（401/403 放回重试、去掉可见回复、/ask 继续重试、TUI 退回 UNKNOWN、鉴权拒绝不转终态、带码 404 退回等待、带码 404 归 config 类、TUI 不认带码 404）。
+- **未验证**：真实飞书/TUI 端到端与真实 Gateway 拒绝由 3a 在沙箱外复核；本工作树只覆盖到解码层、轮询入口、ingress 提交与 outbox 状态机。
+
 ## DeepSeek 跨轮思考分区复核（cachecmp，2026-10-04，worker/cache-prefix；规则复核通过；本段测试与文档已并入 step17j，其余排查 WIP）
 
 - **来源与变更归属**：按3a最新官网实测，只查最终出站最后一条 `user` 后的所有 `assistant`，纯文本同样必须有非空思考。非作者复核 `a2f7aca08`，本树 cherry-pick 为 `34810dc5f`；产品文件逐字节相同，本线没有再改 `_thinking_mode_supported`，新增离线载荷合同与记录。此前只查工具 assistant 的未提交方案已撤回，不是交付实现。

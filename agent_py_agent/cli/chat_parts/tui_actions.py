@@ -684,6 +684,22 @@ def _ensure_active_input_reconciler(
         runtime.cancel_active_turn_input(entry.message_id)
         runtime.set_notice("Message identity conflict · please send again", duration_seconds=3.0)
 
+    # LLM: G2b 鉴权拒绝是确定性的：重排、重发都不会成功。这里不再把消息排到下一轮，只撤下等待项并
+    #   按结构化原因码提示用户怎么办；持久条目由 reconciler 的 _finish 收成终态，重启后不再重发。
+    # 函数用途: 提示本机凭据被 Gateway 拒绝，并告知重启客户端。
+    def on_auth_rejected(entry, reason_code: str) -> None:
+        runtime.cancel_active_turn_input(entry.message_id)
+        if reason_code == "LOCAL_CREDENTIAL_REQUIRED":
+            runtime.set_notice(
+                "Gateway 拒绝了这个请求：本机凭据无效或缺失。请重启客户端让它重新读取凭据。",
+                duration_seconds=5.0,
+            )
+        else:
+            runtime.set_notice(
+                "Gateway 拒绝了这个请求（鉴权失败）。请重启客户端；若仍失败，检查本机凭据。",
+                duration_seconds=5.0,
+            )
+
     # LLM: Server terminal_unknown is final but not a rejection: resending or queueing could deliver twice.
     # Only the local pending row is removed and one history line records the unconfirmed outcome.
     # 函数用途: 停止等待这条补充消息，并在历史里标明它最终未获模型确认、不会自动重发。
@@ -705,6 +721,7 @@ def _ensure_active_input_reconciler(
         on_accepted=on_accepted,
         on_queued=on_queued,
         on_rejected=on_rejected,
+        on_auth_rejected=on_auth_rejected,
         on_conflict=on_conflict,
         on_unconfirmed=on_unconfirmed,
         on_error=on_error,

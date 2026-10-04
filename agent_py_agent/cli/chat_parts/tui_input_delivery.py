@@ -107,6 +107,7 @@ class TuiActiveInputReconciler:
         on_accepted: Callable[[TuiActiveInputOutboxEntry], None],
         on_queued: Callable[[TuiActiveInputOutboxEntry, str], None],
         on_rejected: Callable[[TuiActiveInputOutboxEntry], None],
+        on_auth_rejected: Callable[[TuiActiveInputOutboxEntry, str], None],
         on_conflict: Callable[[TuiActiveInputOutboxEntry], None],
         on_unconfirmed: Callable[[TuiActiveInputOutboxEntry], None],
         on_error: Callable[[BaseException], None],
@@ -120,6 +121,7 @@ class TuiActiveInputReconciler:
         self.on_accepted = on_accepted
         self.on_queued = on_queued
         self.on_rejected = on_rejected
+        self.on_auth_rejected = on_auth_rejected
         self.on_conflict = on_conflict
         self.on_unconfirmed = on_unconfirmed
         self.on_error = on_error
@@ -218,7 +220,12 @@ class TuiActiveInputReconciler:
             ):
                 return
         elif result.delivery is ActiveTurnInputDelivery.REJECTED:
-            if self._finish(entry.message_id, lambda: self.on_rejected(entry)):
+            # LLM: G2b 鉴权拒绝（带结构化原因码）与普通的"回合已结束、改排队"不是一回事：前者重发也不会成功，
+            #   必须直接收敛成终态并让用户看到原因，不能走排下一轮那条路。判据只用结构化 reason_code。
+            if result.reason_code:
+                if self._finish(entry.message_id, lambda: self.on_auth_rejected(entry, result.reason_code)):
+                    return
+            elif self._finish(entry.message_id, lambda: self.on_rejected(entry)):
                 return
         elif result.delivery is ActiveTurnInputDelivery.CONFLICT:
             if self._finish(entry.message_id, lambda: self.on_conflict(entry)):

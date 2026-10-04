@@ -2179,3 +2179,69 @@ def test_large_tmux_selection_uses_stdin_instead_of_argv(monkeypatch) -> None:
     assert tui_clipboard._load_tmux_clipboard_buffer(text)
     assert calls[0][0] == ["tmux", "load-buffer", "-"]
     assert calls[0][1]["input"] == text
+
+
+# LLM: G2b 拒绝路径：鉴权拒绝（带结构化原因码）是确定性的，必须把持久 outbox 条目收成终态，
+#   重启后不再重发；普通 rejected 仍走原来"排下一轮"的语义。这层判据只用结构化 reason_code。
+# 函数用途: 造一个只做显式对账、不启动后台线程的 TUI outbox reconciler。
+def _auth_rejecting_reconciler(path, auth_calls, rejected_calls):
+    from agent_py_agent.cli.chat_client_context import (
+        ActiveTurnInputDelivery,
+        ActiveTurnInputResult,
+    )
+    from agent_py_agent.cli.chat_parts.tui_input_delivery import TuiActiveInputReconciler
+
+    def status(_request_id):
+        return ActiveTurnInputResult(
+            ActiveTurnInputDelivery.REJECTED,
+            reason_code="LOCAL_CREDENTIAL_REQUIRED",
+        )
+
+    reconciler = TuiActiveInputReconciler(
+        path=path,
+        submit=lambda entry: status(entry.request_id),
+        status=status,
+        on_restore=lambda entry: None,
+        on_accepted=lambda entry: None,
+        on_queued=lambda entry, request_id: None,
+        on_rejected=lambda entry: rejected_calls.append(entry),
+        on_auth_rejected=lambda entry, code: auth_calls.append((entry, code)),
+        on_conflict=lambda entry: None,
+        on_unconfirmed=lambda entry: None,
+        on_error=lambda exc: None,
+        stop_event=threading.Event(),
+        initial_delay=0.01,
+        maximum_delay=0.02,
+    )
+    reconciler.stop_event.set()  # 只做显式对账，不拉起后台线程
+    return reconciler
+
+
+# 函数用途: 断言鉴权拒绝的 outbox 条目被收成终态且重启后不再重发。
+def test_auth_rejected_outbox_entry_is_final_and_not_resent(tmp_path):
+    from agent_py_agent.cli.chat_parts.tui_input_delivery import TuiActiveInputOutboxEntry
+
+    outbox = tmp_path / "outbox.json"
+    auth_calls: list[tuple] = []
+    rejected_calls: list[tuple] = []
+
+    entry = TuiActiveInputOutboxEntry(
+        message_id="steer-auth-1",
+        expected_turn_id="gwreq-active-1",
+        text="这条会被鉴权拒绝",
+        display_text="这条会被鉴权拒绝",
+        request_id="gwreq-msg-auth-1",
+    )
+    reconciler = _auth_rejecting_reconciler(outbox, auth_calls, rejected_calls)
+    reconciler.enqueue(entry)
+    reconciler._reconcile_one(entry)
+
+    # 鉴权拒绝走专用回调，不走"排下一轮"的普通 rejected。
+    assert [code for _entry, code in auth_calls] == ["LOCAL_CREDENTIAL_REQUIRED"]
+    assert rejected_calls == []
+    # 持久条目已删掉：重启后不会再有条目可重发。
+    assert reconciler._read_entries() == {}
+
+    restarted = _auth_rejecting_reconciler(outbox, auth_calls, rejected_calls)
+    assert restarted._read_entries() == {}
+    assert len(auth_calls) == 1

@@ -663,3 +663,130 @@ def test_input_status_terminal_unknown_is_a_final_unconfirmed_result(monkeypatch
     # 服务端回执已终态未知：不是拒绝（不重发），但不会再变，客户端停止对账；仍在途的继续按未知对账。
     assert (final.delivery, final.request_id) == (ActiveTurnInputDelivery.UNCONFIRMED, "gwreq-msg-1")
     assert pending.delivery is ActiveTurnInputDelivery.UNKNOWN
+
+
+# LLM: G2b 拒绝路径：401/403 是确定性鉴权拒绝。客户端必须按 REJECTED 收口（带结构化原因码），
+#   不能退化成 UNKNOWN 无限重排。这里用真实 HTTPError 走解码层，判据只看状态码与 error_code 字段。
+# 函数用途: 断言插话收到 403 + LOCAL_CREDENTIAL_REQUIRED 时是 REJECTED 并带原因码。
+def test_active_turn_input_403_is_rejected_with_reason_code(monkeypatch, tmp_path) -> None:
+    import urllib.error
+    from io import BytesIO
+
+    from agent_py_agent.cli.chat_client_context import (
+        ActiveTurnInputDelivery,
+        GatewayChatClientAgent,
+    )
+
+    def fail_urlopen(_request, timeout):
+        del timeout
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:18420/ask",
+            403,
+            "forbidden",
+            hdrs=None,
+            fp=BytesIO(b'{"error": "forbidden", "error_code": "LOCAL_CREDENTIAL_REQUIRED"}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+    client = GatewayChatClientAgent(
+        SimpleNamespace(),
+        SimpleNamespace(gateway_port=18420),
+        tmp_path,
+        [tmp_path],
+        SimpleNamespace(),
+    )
+
+    result = client.request_active_turn_input(
+        "sess-steer",
+        message="这条应该被明确拒绝",
+        message_id="steer-client-403",
+        expected_turn_id="gwreq-active-403",
+    )
+    assert result.delivery is ActiveTurnInputDelivery.REJECTED
+    assert result.reason_code == "LOCAL_CREDENTIAL_REQUIRED"
+
+
+# LLM: 没有结构化 error_code 的 401 仍然是 auth 类：按 REJECTED 收口，原因码留空由 UI 用通用文案兜底。
+# 函数用途: 断言 401 无原因码时也判 REJECTED。
+def test_active_turn_input_401_without_code_is_rejected(monkeypatch, tmp_path) -> None:
+    import urllib.error
+
+    from agent_py_agent.cli.chat_client_context import (
+        ActiveTurnInputDelivery,
+        GatewayChatClientAgent,
+    )
+
+    def fail_urlopen(_request, timeout):
+        del timeout
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:18420/ask", 401, "unauthorized", hdrs=None, fp=None
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+    client = GatewayChatClientAgent(
+        SimpleNamespace(),
+        SimpleNamespace(gateway_port=18420),
+        tmp_path,
+        [tmp_path],
+        SimpleNamespace(),
+    )
+
+    result = client.request_active_turn_input(
+        "sess-steer",
+        message="401 也要明确拒绝",
+        message_id="steer-client-401",
+        expected_turn_id="gwreq-active-401",
+    )
+    assert result.delivery is ActiveTurnInputDelivery.REJECTED
+    assert result.reason_code == ""
+
+
+# LLM: G2b 拒绝路径：/input-status 与 /result 在"没带凭据"时回 404 并带 LOCAL_CREDENTIAL_REQUIRED。
+#   客户端必须认这个带码 404 是拒绝（重启即可），而不是 UNKNOWN 无限重排；真 404（不带码）仍按未知重试。
+# 函数用途: 断言带码 404 判 REJECTED、不带码 404 仍判 UNKNOWN。
+def test_active_turn_input_credential_404_is_rejected_but_plain_404_is_not(monkeypatch, tmp_path) -> None:
+    import urllib.error
+    from io import BytesIO
+
+    from agent_py_agent.cli.chat_client_context import (
+        ActiveTurnInputDelivery,
+        GatewayChatClientAgent,
+    )
+
+    def make_client():
+        return GatewayChatClientAgent(
+            SimpleNamespace(),
+            SimpleNamespace(gateway_port=18420),
+            tmp_path,
+            [tmp_path],
+            SimpleNamespace(),
+        )
+
+    def denial(_request, timeout):
+        del timeout
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:18420/input-status/gwreq-msg-404",
+            404,
+            "not found",
+            hdrs=None,
+            fp=BytesIO(b'{"error": "not_found", "error_code": "LOCAL_CREDENTIAL_REQUIRED"}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", denial)
+    result = make_client().request_active_turn_input_status("gwreq-msg-404")
+    assert result.delivery is ActiveTurnInputDelivery.REJECTED
+    assert result.reason_code == "LOCAL_CREDENTIAL_REQUIRED"
+
+    def plain_404(_request, timeout):
+        del timeout
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:18420/input-status/gwreq-msg-missing",
+            404,
+            "not found",
+            hdrs=None,
+            fp=BytesIO(b'{"error": "not_found"}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", plain_404)
+    result = make_client().request_active_turn_input_status("gwreq-msg-missing")
+    assert result.delivery is ActiveTurnInputDelivery.UNKNOWN

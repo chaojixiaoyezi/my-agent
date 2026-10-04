@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## G2b 拒绝路径的客户端收口（g2bfix2 + g2bfix2b，2026-10-04；9b 终审通过，已并入 step17j）
+
+- `adapter/delivery.py`：`GatewayReplyQuarantineError` 带 `denial_code`，`_terminalize_quarantine` 对 auth 类隔离（g2bfix2b 起只读结构化 `category` 字段，manager 按状态码与 `error_code` 生成）先发可见原因再写终态；`adapter/manager.py` 轮询入口把 403 响应体的 `error_code` 带进隔离，`/ask` 提交把 401/403 转成 `LocalClientCredentialError`（复用 G3 收口）。
+- `cli/chat_client_context.py`：`ActiveTurnInputResult` 增 `reason_code`，401/403 解码为 REJECTED；`cli/chat_parts/tui_input_delivery.py` + `tui_actions.py` 新增 `on_auth_rejected` 收终态并提示重启。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
 - b4gs（2026-10-04）：`plugin_events.points.warn_event_assembly_failure` 是唯一装配诊断入口，只接宿主固定原因码，以进程内集合与锁去重；logging 不持集合锁，日志异常隔离。Gateway 各入口仅在确认开关严格 True 后调用；不读取配置值、正文、安装表或第二份业务状态，关闭仍短路。
 
 ## B5第5段组合装配（b5s5，2026-10-04，整体WIP）

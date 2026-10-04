@@ -326,18 +326,69 @@ def _gateway_submission_watch_kind(submission: GatewayAskSubmission) -> str:
 
 # LLM: HTTP status classification is transport policy. Missing/rate-limited/server states wait;
 # every other HTTP contract/auth failure is quarantined and never rendered as assistant text.
-# 函数用途: 判断 Gateway 轮询错误是否属于可安全继续等待的瞬时状态。
-def _gateway_poll_http_wait(status_code: int) -> bool:
+#   G2b 例外：/input-status 与 /result 在"没带凭据"时回 404 且带结构化 LOCAL_CREDENTIAL_REQUIRED；
+#   那个 404 不是"记录还没出现"，继续等待会永远等下去，所以带码时必须按拒绝处理。
+# 函数用途: 判断 Gateway 轮询错误是否属于可安全继续等待的瞬时状态；带本机凭据码的 404 不算等待。
+def _gateway_poll_http_wait(status_code: int, error_code: str = "") -> bool:
     code = int(status_code)
+    if code == 404 and str(error_code or "").strip() == "LOCAL_CREDENTIAL_REQUIRED":
+        return False
     return code in {404, 408, 425, 429} or 500 <= code < 600
 
 
-# LLM: Quarantine reasons are structured diagnostics and contain no provider response body.
-# 函数用途: 为不可恢复的轮询 HTTP 状态生成稳定隔离原因。
-def _gateway_poll_quarantine_reason(endpoint: str, status_code: int) -> str:
+# LLM: 隔离类别是结构化字段，由本函数按 HTTP 状态码 + 服务端 error_code 判定一次；下游（delivery）只读类别，
+#   不再拿原因字符串做正则匹配。401/403 一律 auth；404 只有带本机凭据码才算 auth（真"记录不存在"仍 config）。
+# 函数用途: 给一次不可恢复的轮询 HTTP 状态判定隔离类别（auth / config）。
+def _gateway_poll_quarantine_category(status_code: int, denial_code: str = "") -> str:
     code = int(status_code)
-    category = "auth" if code in {401, 403} else "config"
+    if code in {401, 403}:
+        return "auth"
+    if str(denial_code or "").strip() == "LOCAL_CREDENTIAL_REQUIRED":
+        return "auth"
+    return "config"
+
+
+# LLM: Quarantine reasons are structured diagnostics and contain no provider response body。
+#   类别与原因串一起生成，保证两者同源；原因串只用于诊断与展示，不再被当作判据。
+# 函数用途: 为不可恢复的轮询 HTTP 状态生成稳定隔离原因。
+def _gateway_poll_quarantine_reason(endpoint: str, status_code: int, denial_code: str = "") -> str:
+    code = int(status_code)
+    category = _gateway_poll_quarantine_category(code, denial_code)
     return f"gateway_{endpoint}_{category}_http_{code}"
+
+
+# LLM: G2b 拒绝路径：401/403 的响应体会带结构化 error_code（g2bfix1 约定 LOCAL_CREDENTIAL_REQUIRED），
+#   只有读取结构化字段、且只在鉴权拒绝这一格，才把它带进隔离异常；读不出就留空，由下游退回通用码。
+# 函数用途: 从 HTTPError 响应体里取服务端原因码，只认单层 JSON 的字符串字段。
+def _gateway_http_error_code(exc: object) -> str:
+    code = int(getattr(exc, "code", 0) or 0)
+    if code not in {401, 403, 404}:
+        return ""
+    try:
+        payload = json.loads(exc.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 读不出响应体不是拒绝路径的失败，退回通用码即可
+        return ""
+    raw = payload.get("error_code") if isinstance(payload, dict) else None
+    return str(raw).strip() if isinstance(raw, str) else ""
+
+
+# LLM: /ask 的 401/403 收口成 G3 同款 credential_error。HTTPError 响应体只能读一次，所以原因码只读一次，
+#   原因码和用户文案共用这一份（9b 终审：读两次时第二次读空，文案退成通用版）。调用方负责 `raise ... from exc`。
+# 函数用途: 把 Gateway 对 /ask 的鉴权拒绝转成带结构化原因码和中文提示的 LocalClientCredentialError。
+def _ask_auth_denial_error(exc: object) -> LocalClientCredentialError:
+    denial_code = _gateway_http_error_code(exc)
+    return LocalClientCredentialError(
+        denial_code or "GATEWAY_AUTH_DENIED",
+        _gateway_denial_user_message(denial_code),
+    )
+
+
+# LLM: 给用户的中文提示按结构化原因码二选一；不解析服务端 message，也不把内部 reason 串露出给用户。
+# 函数用途: 把 Gateway 鉴权拒绝原因码转成一句告诉用户怎么办的中文提示。
+def _gateway_denial_user_message(denial_code: str) -> str:
+    if str(denial_code or "").strip() == "LOCAL_CREDENTIAL_REQUIRED":
+        return "Gateway 拒绝了这个请求：本机凭据无效或缺失。请重启 my-agent 让它重新读取凭据。"
+    return "Gateway 拒绝了这个请求（鉴权失败）。请重启 my-agent；若仍失败，检查本机凭据。"
 
 
 # LLM: A control watcher is anchored by the independent operation receipt. The target turn remains
@@ -565,10 +616,13 @@ class _GatewayReplyPollClient:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
-            if _gateway_poll_http_wait(exc.code):
+            denial_code = _gateway_http_error_code(exc)
+            if _gateway_poll_http_wait(exc.code, denial_code):
                 return [], pending.progress_cursor
             raise GatewayReplyQuarantineError(
-                _gateway_poll_quarantine_reason("progress", exc.code)
+                _gateway_poll_quarantine_reason("progress", exc.code, denial_code),
+                denial_code,
+                _gateway_poll_quarantine_category(exc.code, denial_code),
             ) from exc
         events = body.get("events") if isinstance(body, dict) else []
         messages = [
@@ -596,10 +650,13 @@ class _GatewayReplyPollClient:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
-            if _gateway_poll_http_wait(exc.code):
+            denial_code = _gateway_http_error_code(exc)
+            if _gateway_poll_http_wait(exc.code, denial_code):
                 return "pending"
             raise GatewayReplyQuarantineError(
-                _gateway_poll_quarantine_reason("input_status", exc.code)
+                _gateway_poll_quarantine_reason("input_status", exc.code, denial_code),
+                denial_code,
+                _gateway_poll_quarantine_category(exc.code, denial_code),
             ) from exc
         state = str(body.get("input_state") or "").strip().lower()
         if state not in {
@@ -641,10 +698,13 @@ class _GatewayReplyPollClient:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
-            if _gateway_poll_http_wait(exc.code):
+            denial_code = _gateway_http_error_code(exc)
+            if _gateway_poll_http_wait(exc.code, denial_code):
                 return None
             raise GatewayReplyQuarantineError(
-                _gateway_poll_quarantine_reason("control_status", exc.code)
+                _gateway_poll_quarantine_reason("control_status", exc.code, denial_code),
+                denial_code,
+                _gateway_poll_quarantine_category(exc.code, denial_code),
             ) from exc
         if not isinstance(body, dict):
             raise GatewayReplyQuarantineError(
@@ -704,11 +764,14 @@ class _GatewayReplyPollClient:
             time.sleep(interval)
             return None
         except urllib.error.HTTPError as exc:
-            if _gateway_poll_http_wait(exc.code):
+            denial_code = _gateway_http_error_code(exc)
+            if _gateway_poll_http_wait(exc.code, denial_code):
                 time.sleep(interval)
                 return None
             raise GatewayReplyQuarantineError(
-                _gateway_poll_quarantine_reason("result", exc.code)
+                _gateway_poll_quarantine_reason("result", exc.code, denial_code),
+                denial_code,
+                _gateway_poll_quarantine_category(exc.code, denial_code),
             ) from exc
         except Exception:
             time.sleep(interval)
@@ -1016,8 +1079,16 @@ class ChannelManager:
             data=json.dumps(payload).encode("utf-8"),
             headers=_gateway_identity_headers(msg, self._reply_poll_client.credentials),
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8", "replace"))
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            # LLM: G2b 拒绝路径：401/403 是确定性鉴权拒绝，重试不会变好；按 G3 凭据拒绝同一口径收口成
+            #   credential_error，由原 ingress 收尾给用户一句可见原因，不再无上限退避重发。判据只看状态码
+            #   与结构化 error_code，其它状态（5xx/429 等）照旧上抛交给退避重试。
+            if int(getattr(exc, "code", 0) or 0) in {401, 403}:
+                raise _ask_auth_denial_error(exc) from exc
+            raise
         request_id = str(result.get("request_id") or "").strip()
         status = str(result.get("status") or "queued").strip().lower()
         if not request_id and status != "control":
