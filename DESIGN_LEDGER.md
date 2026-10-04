@@ -1,5 +1,15 @@
 # 设计台账
 
+## 插件使用说明改成"合入后目标状态"（guidefix，2026-10-04，分支 `worker/17j-plugin-guide`，基于 `eca1d3dd8`；只改文档；已并入 step17j，连同 guide17j，3a 核对差异）
+
+- **这份说明描述什么**：`docs/guides/PLUGIN_GUIDE.md` 写的是 **B5（工具把关）、B7（插件总开关与隔离底座）、obsset（观察开关进用户可写白名单）** 三件事**合入后**的目标状态，不是 17j 现状。各段落的生效条件在文中逐条标明：第四节（工具把关）标注"B5 合入后生效"，第六节（总开关与隔离底座）标注"B7 合入后生效"，第七节第 2 步（怎么打开只看档）标注"obsset 合入后生效；要不要重启以 obsset 结论为准（3a 挑入时补）"，第十二节列清哪些还没生效。
+- **本次改了什么**（ds6 初审小问题 + 3a 指定）：
+  - 第八节的旧文本写"打开后旧客户端会拿到结构化错误码 `LOCAL_CREDENTIAL_REQUIRED`"——该码**代码里不存在**，只出现在设计稿 `docs/design/GATEWAY_LOCAL_TRUST.md` 的待办里（实测 grep 只在设计稿命中）。改成按代码事实写：G2b 打开后不带凭据的本机请求降为匿名（`auth/middleware.py` 的 `extract_identity`），本机凭据自身的问题码是 `LOCAL_CLIENT_CREDENTIAL_*` 系列（例：`LOCAL_CLIENT_CREDENTIAL_MISSING`、`_PERMISSIONS`、`_INVALID`，均在 `gateway_parts/local_client_token.py`，且 `tests/test_gateway_local_trust_enforcement.py` 有断言）。
+  - 正文里的仓库内部路径、函数名、代码行号收进文末新增的「给维护者的核对位置」小节；正文只留用户能用的事实。
+  - 第七节第 2 步原来只写"改成 true"，没说怎么改；3a 实测 17j 头：管理员发 `/settings set computer_use_observation_enabled true` 会被拒（`PARAMETER_BOUNDARY`，不在用户可写白名单）。按 obsset 合入后的样子改写成"TUI 和飞书都发 `/settings set computer_use_observation_enabled true`"，并标明 obsset 合入后生效、`computer_use_enabled` 仍不能用聊天命令改、是否重启以 obsset 结论为准。
+  - 第 111 行原写"登记在 `_BOUNDARY_NAMES`"，核对 B7 分支：该键在 `parameter_registry._BOUNDARY_NAMES` 和 `settings/user_config_capability.py` 的 `USER_SETTINGS_BOUNDARY_KEYS` 两处都登记，已按代码补全；并点明 B7 合入前该参数不存在、`/settings` 回 `PARAMETER_UNKNOWN`。
+- **未验证**：只改文档，没跑产品代码测试；手册本身不是运行证据。
+
 ## M1 B4 全入口观察装配故障隔离（b4g，2026-10-04，基于 `2ad257314`；ds2 初审可以挑入，已并入 step17j）
 
 - **来源与边界**：3a 的 17j 定向回归指出工具观察直接读取缺失 config，使 handler 未启动；补充 HTTP 提示入口同类故障。只隔离可选观察配置、路由和上下文装配，原权限/写边界、唯一执行器、核验与业务异常不吞掉。
