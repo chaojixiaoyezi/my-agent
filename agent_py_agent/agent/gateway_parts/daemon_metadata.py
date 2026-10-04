@@ -17,7 +17,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..common.nofollow_fs import open_private_lock_beneath_tightened, split_existing_anchor
+from ..common.nofollow_fs import (
+    ensure_private_dir,
+    open_private_lock_beneath_tightened,
+    split_existing_anchor,
+)
 
 try:
     import fcntl
@@ -190,6 +194,12 @@ def _read_json_file(path: Path) -> dict | None:
         return None
 
 
+# LLM: gateway_parts 的宿主私有 JSON 原子写（PID 记录 / 运行时状态 / 停止请求 / scoped lock 心跳刷新）。
+#   临时文件按 0600 排他新建再 os.replace，替换后的正式文件就是 0600，不随 umask 变成 0644
+#   （sclk2 后 9b 复核：首次抢锁 0600，同进程再抢走这里刷新就变回 0644）；缺失的上级目录按 0700 新建、
+#   已存在的不动（与 pbfix 的 ensure_private_dir 同口径）。已在 _flocked_sidecar 锁内，不再套 json_io 的锁。
+#   改动要同步 test_scoped_lock_private_permissions.py 的刷新用例。
+# 函数用途: 原子地写一份宿主私有 JSON 记录，读取方只会看到完整的旧记录或新记录，文件权限保持 0600。
 def _write_json_file(path: Path, payload: dict) -> None:
     # H8:原 path.write_text 非原子,写一半崩溃/磁盘满会留半截 JSON。daemon_metadata
     # 写的是 PID 记录 / status / scoped-lock 心跳——半截锁文件会被
@@ -197,15 +207,24 @@ def _write_json_file(path: Path, payload: dict) -> None:
     # 遇 load_error 直接拒绝接管,gateway 身份永久卡死。改 temp+os.replace 原子落盘:
     # 读取方要么看到旧的完整记录、要么看到新的完整记录,绝无半截。同名 sidecar 上加
     # fcntl.flock(LOCK_EX) 串行化并发写,与 io/jsonl.py、common/json_io.py 同一手法。
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(path.parent)
     content = json.dumps(payload)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     with _flocked_sidecar(path):
         try:
-            tmp.write_text(content, encoding="utf-8")
+            _write_private_tmp(tmp, content)
             _replace_with_retry(tmp, path)
         finally:
             _unlink_quiet(tmp)
+
+
+# LLM: 临时文件用 O_CREAT|O_EXCL 按 0600 新建（名字带 uuid，已存在就是异常情况，直接抛错而不是覆盖或跟随链接）；
+#   只给 _write_json_file 用，调用方负责替换和清理。
+# 函数用途: 新建一个只有属主可读写的临时文件并写入内容。
+def _write_private_tmp(tmp: Path, content: str) -> None:
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
 
 
 # LLM: 串行化 sidecar 与其余锁同口径私有：文件 0600、缺失目录按 0700 新建、已存在的目录一律不动、

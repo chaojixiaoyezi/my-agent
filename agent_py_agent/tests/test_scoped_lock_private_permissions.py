@@ -132,3 +132,44 @@ def test_portable_branch_keeps_exclusive_semantics_and_private_modes(tmp_path, m
     anchor, parts = nofollow_fs.split_existing_anchor(lock_path.parent)
     descriptor = nofollow_fs.open_private_lock_beneath(anchor, (*parts, lock_path.name))
     os.close(descriptor)
+
+
+# 函数用途: 同一进程再次抢同一把锁会走刷新分支（daemon_metadata._write_json_file 重写记录），刷新后仍是 0600。
+def test_scoped_lock_refresh_keeps_lock_file_private(tmp_lock_dir, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import scoped_locks
+
+    # sclk3（9b 复核 sclk2）：刷新原来用 tmp.write_text 再替换，新文件按 umask 落成 0644；
+    # 心跳会定期刷新，所以抢到锁几秒后就变回世界可读。
+    monkeypatch.setattr(scoped_locks, "_get_lock_dir", lambda: tmp_lock_dir)
+    previous = os.umask(0o022)
+    try:
+        first, _ = scoped_locks.acquire_scoped_lock("refresh-scope", "refresh-identity")
+        second, _ = scoped_locks.acquire_scoped_lock("refresh-scope", "refresh-identity")
+    finally:
+        os.umask(previous)
+
+    assert (first, second) == (True, True)
+    lock_path = tmp_lock_dir / f"refresh-scope-{scoped_locks._scope_hash('refresh-identity')}.lock"
+    assert os.stat(lock_path).st_mode & 0o777 == 0o600, "刷新后的锁文件必须仍是 0600"
+
+
+# 函数用途: PID 记录、运行时状态等宿主私有 JSON 写出来是 0600，缺的上级目录 0700，已存在的目录不动，不留临时文件。
+def test_private_json_write_creates_private_file_and_missing_dirs(tmp_path):
+    from agent_py_agent.agent.gateway_parts import daemon_metadata
+
+    existing = tmp_path / "runtime"
+    existing.mkdir()
+    os.chmod(existing, 0o750)
+    target = existing / "gateway" / "status" / "status.json"
+    previous = os.umask(0o022)
+    try:
+        daemon_metadata._write_json_file(target, {"state": "running"})
+        daemon_metadata._write_json_file(target, {"state": "stopped"})
+    finally:
+        os.umask(previous)
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"state": "stopped"}
+    assert os.stat(target).st_mode & 0o777 == 0o600
+    assert (os.stat(target.parent).st_mode & 0o777, os.stat(target.parent.parent).st_mode & 0o777) == (0o700, 0o700)
+    assert os.stat(existing).st_mode & 0o777 == 0o750, "已存在的目录权限不能被改"
+    assert not [p for p in target.parent.iterdir() if p.name.endswith(".tmp")], "不能留下临时文件"

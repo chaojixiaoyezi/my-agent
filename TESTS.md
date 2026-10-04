@@ -1,6 +1,12 @@
 # 测试与发布验收
 
-## 打码变量引用收口（rdv2，2026-10-04，worker/redaction-var-refs-v2，基于 rdv `a5143365b`，待复审）
+## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3，待 9b 复核）
+
+- **命令**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_scoped_lock_private_permissions.py -q -p no:cacheprovider` → **9 passed**（新增 2 条：刷新后仍 0600；直接写记录的文件与目录权限）。
+- **变异**：`_write_json_file` 临时文件退回 `tmp.write_text` → 刷新用例红（rc=1）；上级目录退回裸 `mkdir` → 目录权限用例红（rc=1）；还原后 sha256 与改动版一致。
+- 相关测试与守卫清单结果见 3a 挑入 17j 时的记录。
+
+## 打码变量引用收口（rdv2，2026-10-04，worker/redaction-var-refs-v2，基于 rdv `a5143365b`；9b 复跑通过，已并入 step17j）
 
 - **改了什么**：`agent/common/log_redaction.py` 的 `_PURE_VARIABLE_REFERENCE_RE` 从 `[A-Za-z_][A-Za-z0-9_]*` 收紧为**全大写环境变量写法** `[A-Z_][A-Z0-9_]*`（`$NAME` / `${NAME}` 两种）；大小写混合、全小写一律打码。用例补：混合/全小写样本必须打码、全大写 `$` 开头字面量（`$ADMIN123`）作为**已知边界**钉住、引用+字面量直喂 `_mask_secret_value`、以及 `\Z`/fullmatch 两层锚的结构断言。
 - **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds4`）：

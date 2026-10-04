@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04）
+
+- `gateway_parts/daemon_metadata._write_json_file`（PID 记录 / 运行时状态 / 停止请求 / scoped lock 心跳刷新）临时文件按 0600 排他新建再替换，上级目录改 `ensure_private_dir`；修 9b 复核 sclk2 时发现的“刷新后锁文件变回 0644”。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 
 - `gateway_parts/io.write_json_file`、`scheduler/repository` 的建目录点改 `nofollow_fs.ensure_private_dir`（缺失段逐级 0700、已存在一律不动）。

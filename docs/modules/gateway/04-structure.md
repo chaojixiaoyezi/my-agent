@@ -2060,6 +2060,7 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
   （`_cached_process_host_id`），macOS 硬件 UUID 走 libc `gethostuuid`（`_macos_platform_uuid`），不起子进程。
   工具操作持有者的同主机判定（`local_storage/tool_operations.tool_operation_host_id`，`runtime_db/managed_operation_store` 共用）也用它。
   写文件走 `_write_json_file`（temp + `os.replace` 原子替换）并在同目录 sidecar `.wlock` 上加 flock 串行化；
+  临时文件由 `_write_private_tmp` 按 0600 排他新建，替换后的正式文件也是 0600，上级目录走 `ensure_private_dir`（缺失 0700、已存在不动；sclk3 2026-10-04，修“锁心跳刷新后变回 0644”）；
   该 sidecar 与其余锁同口径私有（文件 0600、缺失目录按 0700 新建、已存在的目录一律不动（lkp 2026-10-03 修正）、不跟随符号链接，已存在 0644 下次加锁即收紧），
   由 `_open_private_wlock_descriptor` 经 `common/nofollow_fs.open_private_lock_beneath_tightened` 打开后只在 fd 上 flock。
   写锁后缀刻意用 `.wlock` 而非 `.lock`：`scoped_locks` 的 `release_all_scoped_locks` 用 `glob("*.lock")` 扫描锁目录。

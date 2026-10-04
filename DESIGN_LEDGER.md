@@ -1,5 +1,11 @@
 # 设计台账
 
+## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3，基于 17j `a67c5df3b`，3a 实现，待 9b 复核）
+
+- **背景**：9b 复核 sclk2 时发现，同一进程再次抢同一把 scoped lock 会走刷新分支，`daemon_metadata._write_json_file` 用 `tmp.write_text` 再 `os.replace`，新文件按 umask 落成 0644；心跳定期刷新，所以抢到锁几秒后锁文件就变回世界可读。只泄露 pid 和元数据，别人卡不住锁，但 sclk 这一包的目标就是锁文件收私。
+- **改动**：临时文件改用 `os.open(O_CREAT|O_EXCL|O_WRONLY, 0o600)` 新建再替换（新增 `_write_private_tmp`），替换后的正式文件就是 0600；上级目录从裸 `mkdir(parents=True, exist_ok=True)` 改成 `nofollow_fs.ensure_private_dir`（缺失各级 0700，已存在的不动）。仍在 `_flocked_sidecar` 锁内，不再套 json_io 的锁。同一函数也写 PID 记录、运行时状态、停止请求，一起收私。
+- **用例与变异**：`test_scoped_lock_private_permissions.py` 加两条（连续抢锁两次仍 0600；直接写记录 0600、缺失目录 0700、已存在目录不动、不留临时文件）。变异 2/2 被杀：临时文件退回 `write_text`、建目录退回裸 `mkdir`。
+
 ## 打码变量引用收口（rdv2，2026-10-04，worker/redaction-var-refs-v2，基于 rdv `a5143365b`；9b 复跑 9 样本探针通过，已并入 step17j）
 
 - **背景**：rdv 让整段值恰好是纯变量引用（`$NAME` / `${NAME}`）时保留原文，免得复审把 `$GW_TOKEN` 看成 `<redacted>` 而误判脚本没带凭据。9b 终审查出必须改的一条：变量名原来收 `[A-Za-z_][A-Za-z0-9_]*`，于是 `$Summer2024`、`$uper_Secret_1`、`$abcDEF123xyz` 这类**以 `$` 开头、后面只有字母数字下划线**的真密码也被当变量引用放过了（4 个样本：YAML `password: "$Summer2024"`、Python `api_key = '$uper_Secret_1'`、`Authorization: Bearer $abcDEF123xyz`、`token=$ADMIN123`）。
