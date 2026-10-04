@@ -1,6 +1,6 @@
 # LLM: v8 收紧样例：只按结构化 gate_id / 工具名 / command、patch 字段裁决；绝不执行命令、不改参数、不放宽宿主。
 #   回复只有 allow_as_is / ask / deny 三种，原因码大写；参数缺失宁严按 ask，不认识的组合不 allow。
-#   宿主截断标记 arguments_truncated 为 true 时看不全参数，直接 ask；false 或缺失（旧宿主）照旧判。
+#   宿主截断标记 arguments_truncated 为 true 时只能更严：片段已 deny 保持，其余升到 ask；false 或缺失照旧。
 # 模块用途: 演示 run_command 的 rm 组合收紧与 apply_patch 删除文件段直接拒绝，真实隔离与合并由宿主 B5/B7 施加。
 
 from __future__ import annotations
@@ -58,16 +58,27 @@ def review_delete_gate(call: dict) -> dict:
 
 
 # LLM: 裁决只依据清单声明的门与结构化调用事实；不认识的组合一律 deny 或 ask，绝不 allow。
-#   参数缺失时看不到完整命令，按"要求确认"处理（宁严勿松）。
-#   截断标记为 true 时先于具体门判定直接 ask，不按看到的片段判（防截断处误 allow 或误 deny）。
+#   截断只能更严：先按看到的片段正常判，再看宿主截断标记——片段已 deny 保持 deny（原原因码）；
+#   片段本来就 ask 时保留它自己的原因码、消息补半句"参数还被截断了"；只有片段可放行才升到
+#   ask + ARGUMENTS_TRUNCATED；标记必须是布尔 true 才生效（1、"true" 等真值按没截断处理）。
 # 函数用途: 处理一次收紧征询，返回三种裁决之一。
 def review_gate(params: dict) -> dict:
     gate = next((item for item in DECLARATION["tool_gates"] if item.get("id") == params.get("gate_id")), None)
     call = params.get("call") if isinstance(params.get("call"), dict) else {}
+    decision = review_visible(call, gate)
+    if call.get("arguments_truncated") is not True or decision["verdict"] == "deny":
+        return decision
+    if decision["verdict"] == "ask":
+        message = decision.get("message", "")
+        return {**decision, "message": f"{message}；参数还被截断了" if message else "参数还被截断了"}
+    return {"verdict": "ask", "reason_code": "ARGUMENTS_TRUNCATED", "message": "参数太长被截断，看不全，先确认一次"}
+
+
+# LLM: 只看得到的片段做原判定：门不匹配一律 deny，参数缺失宁严按 ask；截断合并由 review_gate 统一处理。
+# 函数用途: 按门类型对看到的调用片段给出 allow_as_is / ask / deny 三种裁决之一。
+def review_visible(call: dict, gate: dict | None) -> dict:
     if gate is None or call.get("tool") not in gate["tools"]:
         return {"verdict": "deny", "reason_code": "OUT_OF_SCOPE"}
-    if call.get("arguments_truncated") is True:
-        return {"verdict": "ask", "reason_code": "ARGUMENTS_TRUNCATED", "message": "参数太长被截断，看不全，先确认一次"}
     if gate["id"] == "guard-delete":
         return review_delete_gate(call)
     arguments = call.get("arguments")

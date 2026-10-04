@@ -1,5 +1,13 @@
 # 设计台账
 
+## 插件门截断只能更严（trs，2026-10-04，3a 裁定；分支 `worker/truncation-stricter`，基于 17j 集成头 `1d394a308`；含 trs2 原因码口径和真值判断，luna2 复审中，已并入 step17j）
+
+- **起因**：b8tr 的“截断就直接 ask”把看得到片段里已有的拒绝也降成了确认——补丁删除段（本应 `deny`）被截断标记一冲就变 `ask`，判定被放松。3a 新裁定：截断只能更严，不能更松。
+- **规则**：最终结论 = 按看得到的片段正常判出的结论，与 `ask` 两者中更严的那个（`deny` > `ask` > `allow_as_is`）。片段已 `deny` → 保持 `deny`（原原因码）；片段本来就 `ask` → **保留原原因码**、消息补半句“参数还被截断了”（3a 补充裁定：用户看到“看到了什么”比“被截断”更有用）；只有片段可放行才升到 `ask` + `ARGUMENTS_TRUNCATED`；字段缺失、`false` 或 `1`/`"true"` 这类真值（只认布尔 `true`）→ 完全照旧。
+- **改动（4 处）**：两个 rm-guard 样例（Python、Node）与 B9 写插件技能的两个模板都改成“先判后并”——`review_visible`/`reviewVisible` 只看片段做原判定，`review_gate`/`reviewGate` 统一做截断合并；`references/author-contract.md` 的推荐做法改成“截断只能更严”。
+- **用例与变异**：B8 截断表 5 组（含“截断+删除段→deny 保持”“截断+rm-rf→保留 RM_RF”“1/`"true"` 按没截断”）；B9 加对应帧。变异 8 个全红：原因码变异（截断一律 `ARGUMENTS_TRUNCATED`）4 处、真值变异（放宽成普通真值判断）4 处；另实测“精确退回旧结构”在模板上行为等价（模板暂无参数级 deny），如实记录。详见 TESTS.md。
+- **未验证**：真实宿主截断链路与真实 TUI/IM 审批展示未跑；模板下“退回旧结构”的差异要等作者加了 deny 判定才会显现。
+
 ## 历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，基于 rco 头 `d97bb2687`；已实现，ds2 初审可以交终审，已并入 step17j）
 
 - **做什么**：把 rco 修好主链路之前已经停在 created 的历史悬挂记录（attempt 已结束、run/task_run 未收口）做**一次性结构化迁移**补收口——不是永久兜底清扫：迁移记录写 runtime.db 的 metadata（key=`run_closeout_backfill.v1`，含迁移 ID/执行时间/分类计数），处理完成后同一库重复调用是空操作；处理本身幂等（已补的 run 不再满足候选条件），中途崩溃后重跑只补剩余。

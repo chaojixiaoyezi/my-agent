@@ -3,7 +3,7 @@
 - 三个包用仓库构建脚本打成 v8 并过读包校验（B1 规则）；
 - event-watch：握手能力位、6 类事件计数、dropped_before 计入、只读面板幂等；
 - rm-guard / rm-guard-node：rm 组合写法回 ask + RM_RF，普通命令 allow_as_is，apply_patch 补丁里的删除文件段回 deny + DELETE_FILE_BLOCKED；
-- 截断标记（b8tr）：arguments_truncated 为 true 时两个门直接回 ask + ARGUMENTS_TRUNCATED，false 或缺失（旧宿主）照旧；
+- 截断只能更严（b8tr/trs）：arguments_truncated 为布尔 true 时才生效——片段已 deny 保持 deny（原原因码），片段本来就 ask 保留原原因码（消息补"参数还被截断了"），只有可放行才升到 ask + ARGUMENTS_TRUNCATED；false、缺失（旧宿主）或 1/"true" 这类真值照旧；
 - 本机没有 node 时 Node 用例跳过；全部写入在 tmp_path，不启动产品 TUI、模型或 Gateway。
 """
 
@@ -57,16 +57,23 @@ _DELETE_PATCH_CASES = (
     ("*** Begin Patch\r*** Delete File: obsolete.txt\r*** End Patch\r", "deny", "DELETE_FILE_BLOCKED"),
     ("*** Begin Patch\n*** Delete File: \n*** End Patch\n", "ask", "ARGUMENTS_UNAVAILABLE"),
 )
-# b8tr：截断标记场景——两个门 × 看到的片段"无害/危险"各一；每行同时验证字段缺失、显式 false 照旧与 true 转 ask。
+# b8tr/trs：截断只能更严——先按看到的片段判（plain），再看截断标记：片段已 deny 保持 deny（原原因码）；
+# 片段本来就 ask 保留原原因码、消息补半句"参数还被截断了"；只有片段可放行才升到 ask + ARGUMENTS_TRUNCATED；
+# 字段缺失、显式 false、以及 1/"true" 这类真值都完全照旧（plain，标记只认布尔 true）。
 _TRUNCATION_CASES = (
-    ("guard-rm", "run_command", {"command": "ls -la"}, "allow_as_is", "NO_MATCH"),
-    ("guard-rm", "run_command", {"command": "rm -rf build"}, "ask", "RM_RF"),
+    ("guard-rm", "run_command", {"command": "ls -la"},
+     ("allow_as_is", "NO_MATCH"), ("ask", "ARGUMENTS_TRUNCATED")),
+    ("guard-rm", "run_command", {"command": "rm -rf build"},
+     ("ask", "RM_RF"), ("ask", "RM_RF")),
     ("guard-delete", "apply_patch", {"patch": "*** Begin Patch\n*** Update File: notes.txt\n-old\n+new\n*** End Patch\n"},
-     "allow_as_is", "NO_MATCH"),
+     ("allow_as_is", "NO_MATCH"), ("ask", "ARGUMENTS_TRUNCATED")),
     ("guard-delete", "apply_patch", {"patch": "*** Begin Patch\n*** Delete File: obsolete.txt\n*** End Patch\n"},
-     "deny", "DELETE_FILE_BLOCKED"),
+     ("deny", "DELETE_FILE_BLOCKED"), ("deny", "DELETE_FILE_BLOCKED")),
+    ("guard-rm", "write_file", {"path": "x"},
+     ("deny", "OUT_OF_SCOPE"), ("deny", "OUT_OF_SCOPE")),
 )
 _TRUNCATED_MESSAGE = "参数太长被截断，看不全，先确认一次"
+_TRUNCATED_NOTE = "；参数还被截断了"
 
 
 # LLM: 最小假宿主：一行一帧 JSON-RPC，只做协议对话，不模拟宿主审批、合并或沙箱；stdout 同步读一行。
@@ -139,8 +146,9 @@ def _rows(table: dict) -> dict:
     return {row[0]: tuple(row[1:]) for row in table["rows"]}
 
 
-# 函数用途: 构造一条收紧征询；arguments 为 None 时不带参数，arguments_truncated 为 None 时不带截断标记（模拟旧宿主）。
-def _review_params(gate_id: str, tool: str, arguments: dict | None, *, arguments_truncated: bool | None = None) -> dict:
+# 函数用途: 构造一条收紧征询；arguments 为 None 时不带参数，arguments_truncated 为 None 时不带截断标记（模拟旧宿主）；
+#   arguments_truncated 收 object 以便测试 1、"true" 这类真值（实现必须只认布尔 true）。
+def _review_params(gate_id: str, tool: str, arguments: dict | None, *, arguments_truncated: object | None = None) -> dict:
     call = {"call_id": "call-1", "tool": tool, "effect": "dangerous", "actor": "main",
             "interactive": True, "args_hash": "hash-1"}
     if arguments is not None:
@@ -188,19 +196,37 @@ def _assert_review_behavior(host: _FakeHost) -> None:
     _assert_truncation_behavior(host)
 
 
-# 函数用途: 断言宿主截断标记场景——true 时不看片段直接 ask，false 或缺失（旧宿主）走原判定。
+# 函数用途: 断言截断只能更严——片段已 deny 保持、ask 保留原原因码、可放行才升 ask；false/缺失/非布尔真值走原判定。
 def _assert_truncation_behavior(host: _FakeHost) -> None:
-    for gate_id, tool, payload, verdict, reason in _TRUNCATION_CASES:
+    for gate_id, tool, payload, plain, truncated in _TRUNCATION_CASES:
         missing = host.call("my-agent/tool-gate.review", _review_params(gate_id, tool, payload))["result"]
-        assert (missing["verdict"], missing["reason_code"]) == (verdict, reason), payload
+        assert (missing["verdict"], missing["reason_code"]) == plain, payload
         explicit_false = host.call("my-agent/tool-gate.review",
                                    _review_params(gate_id, tool, payload, arguments_truncated=False))["result"]
-        assert (explicit_false["verdict"], explicit_false["reason_code"]) == (verdict, reason), payload
-        truncated = host.call("my-agent/tool-gate.review",
-                              _review_params(gate_id, tool, payload, arguments_truncated=True))["result"]
-        assert (truncated["verdict"], truncated["reason_code"]) == ("ask", "ARGUMENTS_TRUNCATED"), payload
-        assert truncated["message"] == _TRUNCATED_MESSAGE, payload
-        _assert_reply_shape(truncated)
+        assert (explicit_false["verdict"], explicit_false["reason_code"]) == plain, payload
+        flagged = host.call("my-agent/tool-gate.review",
+                            _review_params(gate_id, tool, payload, arguments_truncated=True))["result"]
+        assert (flagged["verdict"], flagged["reason_code"]) == truncated, payload
+        _assert_reply_shape(flagged)
+        _assert_truncation_message(flagged, truncated, payload)
+        _assert_non_boolean_flags(host, (gate_id, tool, payload, plain))
+
+
+# 函数用途: 断言截断时消息——可放行升 ask 用统一文案；保留原原因码的 ask 以"参数还被截断了"收尾。
+def _assert_truncation_message(flagged: dict, truncated: tuple, payload: dict) -> None:
+    if truncated == ("ask", "ARGUMENTS_TRUNCATED"):
+        assert flagged["message"] == _TRUNCATED_MESSAGE, payload
+    elif truncated[0] == "ask":
+        assert flagged["message"].endswith(_TRUNCATED_NOTE), payload
+
+
+# 函数用途: 断言 1、"true" 这类非布尔真值不被当成截断标记，照原判定走（标记只认布尔 true）。
+def _assert_non_boolean_flags(host: _FakeHost, case: tuple) -> None:
+    gate_id, tool, payload, plain = case[:4]
+    for odd in (1, "true"):
+        odd_reply = host.call("my-agent/tool-gate.review",
+                              _review_params(gate_id, tool, payload, arguments_truncated=odd))["result"]
+        assert (odd_reply["verdict"], odd_reply["reason_code"]) == plain, (payload, odd)
 
 
 def test_three_samples_build_and_pass_v8_validation(tmp_path):

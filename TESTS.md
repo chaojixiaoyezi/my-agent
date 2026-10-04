@@ -125,6 +125,27 @@
   - M2 在真实脚本 `scripts/feishu_limit/d3_quota_selfheal.sh` 第 220 行把 `${GW_AUTH_HEADER[@]+"${GW_AUTH_HEADER[@]}"}` 换成 `-H 'X-Gateway-Token: <redacted>'` → 守卫失败并精确报出 `scripts/feishu_limit/d3_quota_selfheal.sh:218 curl 指向本机 Gateway 但凭据头的值写死成了字面量…`。还原后 `bash -n` 通过、`git diff --stat scripts/feishu_limit/` 无输出。
 - **顺带修复**：`_credential_variables` 原先收集同行全部 `$VAR`，会把 `$GW/ask` 的 `GW` 当凭据变量而放行写死值；M2 证明修复有效（旧实现下这个变异不会红）。
 
+## 插件门截断只能更严（trs，2026-10-04，分支 `worker/truncation-stricter`，基于 17j 集成头 `1d394a308`）
+
+- **改动**：4 处"先判后并"——`plugins/rm-guard`、`plugins/rm-guard-node` 与 B9 技能的两个模板：`review_visible`/`reviewVisible` 只看片段做原判定（门不匹配 deny、参数缺失 ask、rm-rf/删除段判定），`review_gate`/`reviewGate` 统一做截断合并（片段已 deny 保持原原因码；片段本来就 ask 保留原原因码、消息补"；参数还被截断了"；只有可放行才升 `ask` + `ARGUMENTS_TRUNCATED`；字段缺失/`false`/`1`/`"true"` 照旧）；`references/author-contract.md` 推荐做法改为"截断只能更严"。
+- **用例**：
+  - B8（`test_plugin_m1_b8_samples.py`）：`_TRUNCATION_CASES` 5 组——rm 无害 / 只改补丁 → 截断时 `ask` + `ARGUMENTS_TRUNCATED`；**rm -rf → `ask` + `RM_RF`（保留原原因码，消息带"；参数还被截断了"）**；删除段补丁 → `deny` + `DELETE_FILE_BLOCKED`（保持）；门不匹配 → `deny` + `OUT_OF_SCOPE`（保持）；每组断言字段缺失、显式 `false`、以及 `1`/`"true"`（非布尔真值）都走原判定。
+  - B9（`test_write_my_agent_plugin_skill.py`）：`_hook_requests` 含"截断+rm-rf→`ask`+`RM_RF`+note"（`replies[14]`）、"截断+无害→`ask`+`ARGUMENTS_TRUNCATED`"（`replies[16]`）、"截断+门不匹配→`deny`"（`replies[17]`）、"`1`/`"true"`+无害→`allow_as_is`"（`replies[18]`、`[19]`）等帧；合同一致性用例加 `"截断只能更严"` 断言。
+- **命令与结果**（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_m1_b8_samples.py agent_py_agent/tests/test_write_my_agent_plugin_skill.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-trs -o addopts=""
+  ```
+  → **38 passed, 2 skipped**（2 skip 为 B4/B5 未合入的条件跳过）。
+- **相关回归**（7 文件：B8 样例、B9 技能、`test_plugin_any_language_samples.py`、`test_plugin_any_language.py`、`test_plugin_manifest_v8.py`、`test_plugin_package.py`、`test_plugin_api_build.py`）：**8 failed, 301 passed, 2 skipped**；8 个失败全部是"带确认码启用"的 `plugin_enable` 端点建立失败。已在基线 `1d394a308`（`git worktree add --detach` 临时工作树，用完 remove）复跑同一组：**8 failed, 301 passed, 2 skipped，失败清单逐条一致**——既有环境限制，不是本轮引入；交 3a 沙箱外复核。
+- **变异**（cp 备份原字节还原、sha256 校验一致；共 8 个全部被抓 + 1 组补充实测）：
+  - 主变异"截断无条件降级"（去掉"片段已 deny 保持"）4 处全红：样例由"截断+删除段"用例、模板由"截断+门不匹配"用例。
+  - **原因码变异"截断一律 `ARGUMENTS_TRUNCATED`"**（3a 补充裁定后新增）4 处全红：样例由"截断+rm-rf→`RM_RF`"条（`ARGUMENTS_TRUNCATED` ≠ `RM_RF`）、模板由 `replies[14]` 红。
+  - **真值变异"放宽成普通真值判断"**（luna6 初审发现的两个存活项）4 处全红：`1` 被误当截断（无害输入从 `allow_as_is` 变 `ask`）。
+  - 补充实测：模板的"精确退回旧结构"（门检查后直接 ask）在 Python/Node 模板上**存活**——模板判定集下两种结构行为等价（模板暂无参数级 deny 场景），如实记录，等作者加 deny 判定后该差异才会显现。
+- **门禁**：guards9（10 文件）**175 passed**；`check_import_boundaries` findings=0；ruff 通过；`check_doc_sync` **DOC_SYNC_PASS**；strict code-size `strict_scope_total=2209 hard=0 high-risk=1510 soft=699 test_advisory=1234 blocked=False`（报告已还原）；size_diff **新增告警 0**、消失 33；`git diff --check` 干净；clean-package OK。
+- **未验证**：真实宿主截断链路（需 B5 并入）与真实 TUI/IM 审批展示未跑；模板下"退回旧结构"的差异未在模板上显现（见变异节）。
+
 ## B8 样例处理截断标记（b8tr，2026-10-04，分支 `worker/b8-delete-gate`，基于 B8 头 `9461868c6`）
 
 - **改动**：两个 rm-guard 样例的 `review_gate` 在 gate 命中后先看 `call.arguments_truncated`（B5 的截断标记，sol3 `57f465dca`）：精确为 true 时直接回 `ask` + `ARGUMENTS_TRUNCATED`（消息"参数太长被截断，看不全，先确认一次"），不再按看到的片段判；false 或缺失（旧宿主）照旧。Python、Node 逐条对齐。
@@ -139,6 +160,7 @@
 - **变异**（2 个，全部 KILLED，cp 备份原字节还原、sha256 校验一致）：Python 去掉截断分支 → `1 failed`（`ls -la` + true 得到 `allow_as_is`，期望 `ask`）；Node 去掉截断分支 → `1 failed`（同断言）。还原后 sha256：`9bf6d6b1…`（Python）、`8af18d78…`（Node）。
 - **门禁**：guards9（10 文件）**172 passed**；`check_import_boundaries` findings=0；ruff 通过；`check_doc_sync` **DOC_SYNC_PASS**；strict code-size `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`（报告已还原）；size_diff **新增告警 0**、消失 16；`git diff --check` 干净；clean-package OK。
 - **未验证**：真实宿主截断链路（需 B5 并入后的宿主侧）与真实 TUI/IM 审批展示未跑；本样例只按第 8 节协议直连测试。
+- **后续修订（trs，2026-10-04）**："直接 ask"会放松看得到片段里已有的拒绝，已改成"截断只能更严"（见顶部 trs 小节）。
 
 ## B8 删除门改拦 apply_patch（b8dg，2026-10-03，分支 `worker/b8-delete-gate`，基于 B8 头 `a0ec1b0dd`）
 

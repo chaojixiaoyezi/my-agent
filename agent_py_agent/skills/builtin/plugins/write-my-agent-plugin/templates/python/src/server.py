@@ -70,17 +70,28 @@ def handle(request: object) -> dict | None:
     return rpc_error(identifier, -32601, "不支持此方法。")
 
 
-# LLM: 仅检查清单精确工具范围内的结构化 command；参数缺失或截断时按 ask，不改参数、不执行命令、不放宽宿主。
-#   宿主只在 arguments: full 时给 arguments_truncated，所以看到 true 就说明收到的 command 不完整；
-#   此时按命令内容做任何判断都可能被填充参数绕过，必须先确认而不是放行。
+# LLM: 仅检查清单精确工具范围内的结构化 command；截断只能更严——先按看到的片段判：片段已 deny 保持；
+#   片段本来就 ask 时保留它自己的原因码、消息补半句"参数还被截断了"；只有片段可放行才升到
+#   ask + ARGUMENTS_TRUNCATED（宿主只在 arguments: full 时给标记，且必须是布尔 true）；参数缺失宁严按 ask。
+#   绝不改参数、不执行命令、不放宽宿主。
 # 函数用途: 演示 rm -rf 字面模式要求确认；这不是完整 shell 分析器，不能替代宿主审批和沙箱。
 def review_gate(params: dict) -> dict:
     gate = next((item for item in DECLARATION["tool_gates"] if item["id"] == params.get("gate_id")), None)
     call = params.get("call") if isinstance(params.get("call"), dict) else {}
+    decision = review_visible(call, gate)
+    if call.get("arguments_truncated") is not True or decision["verdict"] == "deny":
+        return decision
+    if decision["verdict"] == "ask":
+        message = decision.get("message", "")
+        return {**decision, "message": f"{message}；参数还被截断了" if message else "参数还被截断了"}
+    return {"verdict": "ask", "reason_code": "ARGUMENTS_TRUNCATED", "message": "参数被截断，看不全命令内容，先确认一次"}
+
+
+# LLM: 只看得到的片段做原判定：门不匹配一律 deny，参数缺失宁严按 ask；截断合并由 review_gate 统一处理。
+# 函数用途: 对看到的调用片段给出 allow_as_is / ask / deny 三种裁决之一。
+def review_visible(call: dict, gate: dict | None) -> dict:
     if gate is None or call.get("tool") not in gate["tools"]:
         return {"verdict": "deny", "reason_code": "OUT_OF_SCOPE"}
-    if call.get("arguments_truncated") is True:
-        return {"verdict": "ask", "reason_code": "ARGUMENTS_TRUNCATED", "message": "参数被截断，看不全命令内容，先确认一次"}
     arguments = call.get("arguments")
     if not isinstance(arguments, dict) or not isinstance(arguments.get("command"), str):
         return {"verdict": "ask", "reason_code": "ARGUMENTS_UNAVAILABLE"}

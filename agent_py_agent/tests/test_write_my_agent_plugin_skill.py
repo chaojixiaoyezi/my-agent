@@ -235,7 +235,7 @@ def test_author_contract_event_table_matches_event_point_projection():
 # LLM: 截断标记是 B5 宿主给的结构化事实，文档和模板都得用同一个字段名，写错了门就永远看不到截断；
 #   B5 的 tool_gate.py 尚未合入本分支时不能凭缺失判失败（那是分支差异不是错），因此先按文件存在与否跳过，
 #   合入 B5 后同一用例会自动开始严格比对。
-# 函数用途: 校验文档写的字段名与 B5 实现同源，并确认两个模板都按它早返回 ask。
+# 函数用途: 校验文档写的字段名与 B5 实现同源，并确认合同与两个模板都按"截断只能更严"处理。
 def test_author_contract_truncation_field_matches_tool_gate_implementation():
     gate_path = ROOT / "agent_py_agent/agent/plugin_events/tool_gate.py"
     if not gate_path.exists():
@@ -247,6 +247,7 @@ def test_author_contract_truncation_field_matches_tool_gate_implementation():
     contract = (SKILL / "references/author-contract.md").read_text(encoding="utf-8")
     assert "`call.arguments_truncated`" in contract, "作者合同缺截断字段的读法"
     assert "ARGUMENTS_TRUNCATED" in contract, "作者合同缺推荐原因码"
+    assert "截断只能更严" in contract, "作者合同缺'截断只能更严'的推荐做法"
 
     for language, path in (("python", "templates/python/src/server.py"), ("node", "templates/node/src/server.js")):
         template = (SKILL / path).read_text(encoding="utf-8")
@@ -316,7 +317,7 @@ def test_templates_execute_packaged_stdio(built_template, author_workspace):
             pytest.skip("本机无 Node；v8 打包/清单仍由独立测试覆盖")
         command = [node, str(unpacked / "src/server.js")]
     replies = [json.loads(line) for line in _run(command, author_workspace, _requests() + _hook_requests()).splitlines()]
-    assert [reply["id"] for reply in replies] == [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    assert [reply["id"] for reply in replies] == [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     assert replies[0]["result"]["protocolVersion"] == "2024-11-05"
     assert replies[0]["result"]["capabilities"]["experimental"] == {
         "my-agent/events": {"versions": ["1"]}, "my-agent/tool-gate": {"versions": ["1"]}}
@@ -332,13 +333,19 @@ def test_templates_execute_packaged_stdio(built_template, author_workspace):
     assert replies[11]["result"] == {"verdict": "allow_as_is", "reason_code": "NO_MATCH"}
     assert replies[12]["result"] == {"verdict": "deny", "reason_code": "OUT_OF_SCOPE"}
     assert replies[13]["result"] == {"verdict": "ask", "reason_code": "ARGUMENTS_UNAVAILABLE"}
-    assert replies[14]["result"] == {"verdict": "ask", "reason_code": "ARGUMENTS_TRUNCATED",
-                                     "message": "参数被截断，看不全命令内容，先确认一次"}
+    assert replies[14]["result"] == {"verdict": "ask", "reason_code": "RM_RF",
+                                     "message": "要删除整个目录，先确认一次；参数还被截断了"}
     assert replies[15]["result"] == {"verdict": "ask", "reason_code": "RM_RF", "message": "要删除整个目录，先确认一次"}
+    assert replies[16]["result"] == {"verdict": "ask", "reason_code": "ARGUMENTS_TRUNCATED",
+                                     "message": "参数被截断，看不全命令内容，先确认一次"}
+    assert replies[17]["result"] == {"verdict": "deny", "reason_code": "OUT_OF_SCOPE"}
+    assert replies[18]["result"] == {"verdict": "allow_as_is", "reason_code": "NO_MATCH"}
+    assert replies[19]["result"] == {"verdict": "allow_as_is", "reason_code": "NO_MATCH"}
 
 
 # LLM: 只发送合成提示/结构化事实与精确工具参数；危险命令只是 JSON 数据，绝不执行。
-# 函数用途: 对最终包验证观察空回执、三种合法裁决及参数缺失时宁严勿松。
+# 函数用途: 对最终包验证观察空回执、三种合法裁决、参数缺失宁严，以及截断只能更严
+#   （deny 保持、ask 保留原原因码、可放行才升 ask；1/"true" 这类真值按没截断处理）。
 def _hook_requests():
     call = {"call_id": "synthetic-call", "tool": "run_command", "effect": "dangerous", "actor": "main",
             "interactive": True, "args_hash": "synthetic-hash"}
@@ -356,6 +363,14 @@ def _hook_requests():
             "call": {**call, "arguments_truncated": True, "arguments": {"command": "rm -rf " + "x" * 4000}}}},
         {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
             "call": {**call, "arguments_truncated": False, "arguments": {"command": "rm -rf build"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments_truncated": True, "arguments": {"command": "printf safe"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "unknown",
+            "call": {**call, "arguments_truncated": True, "arguments": {"command": "rm -rf build"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments_truncated": 1, "arguments": {"command": "printf safe"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments_truncated": "true", "arguments": {"command": "printf safe"}}}},
     ]
     return "".join(json.dumps({"jsonrpc": "2.0", "id": index + 10, **frame}) + "\n"
                    for index, frame in enumerate(frames))

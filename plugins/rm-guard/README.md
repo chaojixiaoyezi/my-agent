@@ -5,7 +5,7 @@
 - `run_command`（`arguments: "full"`）：命令里出现 **rm 加 -r 和 -f** 的组合时回 `ask`（原因码 `RM_RF`，消息"要删除整个目录，先确认一次"）；
   其它命令回 `allow_as_is`；
 - `apply_patch`（`arguments: "full"`）：补丁里出现 `*** Delete File: ` 删除段时回 `deny`（原因码 `DELETE_FILE_BLOCKED`）；只改不删的补丁回 `allow_as_is`；
-- **参数被宿主截断时**（请求里 `arguments_truncated: true`，宿主发现参数副本超预算）：不再按看到的片段判，直接回 `ask`（原因码 `ARGUMENTS_TRUNCATED`，消息"参数太长被截断，看不全，先确认一次"）；`false` 或没有这个字段（旧宿主）时照旧；
+- **参数被宿主截断时**（请求里 `arguments_truncated: true`，宿主发现参数副本超预算）：截断只能更严——先按看到的片段判：片段已看到删除段仍回 `deny`（原原因码）；片段本来就回 `ask` 的（如 `rm -rf`）保留原原因码、消息补半句"参数还被截断了"；只有片段可放行时才升到 `ask` + `ARGUMENTS_TRUNCATED`；`false`、没有这个字段（旧宿主）或 `1`/`"true"` 这类真值（只认布尔 true）时照旧；
 - 其它工具不订阅；不联网（`permissions.network: false`）。
 
 判定只看结构化字段（工具名、参数里的 `command` 与 `patch` 字符串），不按自然语言猜。命中的写法包括：

@@ -62,17 +62,27 @@ function handle(request) {
   return { jsonrpc: "2.0", id: request.id, result };
 }
 
-// LLM: 只核清单中的精确工具和结构化 command；参数缺失或截断时按 ask，绝不改参数或执行命令。
-//   宿主只在 arguments: full 时给 arguments_truncated，true 说明 command 不完整，
-//   按残片做判断会被填充参数绕过，必须先确认再放行。
+// LLM: 只核清单中的精确工具和结构化 command；截断只能更严——先按看到的片段判：片段已 deny 保持；
+//   片段本来就 ask 时保留它自己的原因码、消息补半句"参数还被截断了"；只有片段可放行才升到
+//   ask + ARGUMENTS_TRUNCATED（宿主只在 arguments: full 时给标记，且必须是布尔 true）；参数缺失宁严按 ask。
+//   绝不改参数、不执行命令、不放宽宿主。
 // 函数用途: 演示 rm -rf 字面模式加确认；不是完整 shell 分析器，不替代宿主审批与沙箱。
 function reviewGate(params) {
   const gate = declaration.tool_gates.find(item => item.id === params.gate_id);
   const call = params.call && typeof params.call === "object" ? params.call : {};
-  if (!gate || !gate.tools.includes(call.tool)) return { verdict: "deny", reason_code: "OUT_OF_SCOPE" };
-  if (call.arguments_truncated === true) {
-    return { verdict: "ask", reason_code: "ARGUMENTS_TRUNCATED", message: "参数被截断，看不全命令内容，先确认一次" };
+  const decision = reviewVisible(call, gate);
+  if (call.arguments_truncated !== true || decision.verdict === "deny") return decision;
+  if (decision.verdict === "ask") {
+    const message = decision.message ? `${decision.message}；参数还被截断了` : "参数还被截断了";
+    return { ...decision, message };
   }
+  return { verdict: "ask", reason_code: "ARGUMENTS_TRUNCATED", message: "参数被截断，看不全命令内容，先确认一次" };
+}
+
+// LLM: 只看得到的片段做原判定：门不匹配一律 deny，参数缺失宁严按 ask；截断合并由 reviewGate 统一处理。
+// 函数用途: 对看到的调用片段给出 allow_as_is / ask / deny 三种裁决之一。
+function reviewVisible(call, gate) {
+  if (!gate || !gate.tools.includes(call.tool)) return { verdict: "deny", reason_code: "OUT_OF_SCOPE" };
   const args = call.arguments;
   if (!args || typeof args !== "object" || Array.isArray(args) || typeof args.command !== "string") {
     return { verdict: "ask", reason_code: "ARGUMENTS_UNAVAILABLE" };
