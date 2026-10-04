@@ -7,6 +7,7 @@
 - **改法二（保住原意）**：原断言想防的是"复制完留中间态"。改成调 `_assert_builtin_mirror_is_complete`，三层核对：① 除 `SKILL.md` 外的文件只能落在某个技能目录的 `references/`、`templates/`、`scripts/` 子树里（允许再往下分层，如 `templates/python/src/`）；② 每个镜像文件都在源里存在且逐字节一致，源里的文件也都要被镜像（不漏拷）；③ 没有隐藏文件，也没有 `.tmp`/`.part`/`.swp`/`.bak` 这类临时或半截文件。
 - **验证**：`test_builtin_seed.py` + `test_skill_tree_and_recall.py` 23 passed；加 `test_write_my_agent_plugin_skill.py` 共 62 passed（1 skipped，与本改动无关的既有跳过）；guards9 176 passed；静态门禁全过。变异 3 个全被抓：数量源换回写死 27（6 条路由用例红）、镜像里多一个临时文件（seed 用例红）、镜像文件与源不一致（seed 用例红）。命令与结果见 TESTS。
 - **未验证**：没有改产品代码，所以没有真实链路要复核；沙箱外行为与沙箱内一致（纯文件系统断言）。
+- **补（同一分支 `be6ae1f8f`）**：`test_write_my_agent_plugin_skill.py` 里还有 2 条用例从 Git 历史读"基线字节"（旧 Python 模板、旧构建脚本），在只拉一个提交的车道容器/CI 里会报 `fatal: Not a valid object name`，从源码包装的环境更是没有 git。把这两份字节**原样存成测试夹具** `agent_py_agent/tests/fixtures/b9_legacy_git_bytes/`（来源提交与逐文件 sha256 写在同目录 README），用例改读夹具、不再调用 git。构建脚本夹具带 `.txt` 后缀，避免被代码尺寸扫描当成在运源码。另加一条校验：本地对象库有这两个提交时逐字节核对夹具与 git 对象，没有时**只跳过这一条校验**、不跳过原用例。三种环境实测：完整历史通过、无历史对象的 shallow clone 通过（只跳过来源校验）、完全没有 git 也通过。详见 TESTS。
 
 ## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3，基于 17j `a67c5df3b`，3a 实现；9b 复跑通过，已并入 step17j）
 

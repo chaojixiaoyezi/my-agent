@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -30,6 +31,17 @@ from scripts.plugin_build import build_wheel
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "agent_py_agent/skills/builtin/plugins/write-my-agent-plugin"
+# LLM: 历史 Git 字节的只读夹具。车道容器只拉一个提交、源码包环境根本没有 git 时，本地对象库
+#   不一定有那两个提交；把字节存成夹具后这些用例不再依赖 git，来源提交与 sha256 见同目录 README。
+# 常量用途: 指向夹具里旧 Python 模板与旧构建脚本的位置。
+_LEGACY_FIXTURES = ROOT / "agent_py_agent/tests/fixtures/b9_legacy_git_bytes"
+_LEGACY_PYTHON_TEMPLATE = _LEGACY_FIXTURES / "legacy_python_template"
+# 末尾 .txt 是刻意的：夹具是"历史字节"而不是产品源码，避免被代码尺寸扫描当成在运代码。
+# 用例只读它的字节再 compile/exec，扩展名不影响语义。
+_LEGACY_BUILD_SCRIPT = _LEGACY_FIXTURES / "legacy_build_script/build_plugin_package.py.txt"
+# 夹具的来源提交，校验用例用它去对象库里取原始字节作对照。
+_LEGACY_TEMPLATE_COMMIT = "35f445792"
+_LEGACY_BUILD_SCRIPT_COMMIT = "b453f8883"
 # macOS 访达会在用户浏览过的目录里留 .DS_Store；清理临时目录时它可能刚被写进去，
 # 于是 rmtree 撞上"目录非空"（Errno 66）。只对这一类已知噪声重试，其它错误照旧抛出。
 FINDER_METADATA_NAMES = frozenset({".DS_Store", ".AppleDouble", ".LSOverride"})
@@ -490,15 +502,57 @@ def test_python_builder_preserves_project_license(author_workspace):
             assert wheel.read(member) == (project / name).read_bytes()
 
 
-# LLM: 保留旧 wheel 构建器的许可回归；输入锁在原 M5 提交，只读 Git 字节，绝不让 v8 混入 wheel 路径。
-# 函数用途: 在工作区准备历史 Python 工程以继续测试原来已覆盖的 LICENSE/NOTICE 保留行为。
+# LLM: provenance.json 记的来源提交与 sha256 必须和磁盘上的夹具字节对得上，否则"来源可复核"就是空话；
+#   这条不依赖 git，在只有夹具副本的环境（车道/CI）里也能跑，正好补上"对象库里没有提交时无法自证"的空档。
+# 函数用途: 按 provenance.json 逐条核对夹具文件的 sha256。
+def test_legacy_fixture_provenance_matches_bytes():
+    provenance = json.loads((_LEGACY_FIXTURES / "provenance.json").read_text(encoding="utf-8"))
+    checked = 0
+    for source in provenance["sources"].values():
+        for entry in source["files"]:
+            actual = hashlib.sha256((_LEGACY_FIXTURES / entry["fixture"]).read_bytes()).hexdigest()
+            assert actual == entry["sha256"], f"夹具字节与 provenance.json 不一致: {entry['fixture']}"
+            checked += 1
+    assert checked >= 5, "provenance.json 记录的夹具条数异常"
+
+
+# LLM: 夹具是历史字节的副本，会随时间漂移（有人手改、或换了来源）。本地对象库确实有那两个提交时，
+#   逐字节核对夹具与 git 对象；没有时只跳过这一条校验，不跳过依赖夹具的两条原用例。
+# 函数用途: 能用 git 就核对夹具字节来源，不能就跳过这一条校验并说明原因。
+def test_legacy_fixture_matches_git_object_when_available():
+    def object_available(revision: str) -> bool:
+        probe = subprocess.run(["git", "cat-file", "-e", revision], cwd=ROOT, capture_output=True)
+        return probe.returncode == 0
+
+    if not object_available(_LEGACY_TEMPLATE_COMMIT) or not object_available(_LEGACY_BUILD_SCRIPT_COMMIT):
+        pytest.skip(f"本地对象库没有 {_LEGACY_TEMPLATE_COMMIT} / {_LEGACY_BUILD_SCRIPT_COMMIT}，跳过夹具来源校验")
+
+    template_prefix = SKILL.relative_to(ROOT).as_posix() + "/templates/python/"
+    listed = subprocess.check_output(
+        ["git", "ls-tree", "-r", "--name-only", _LEGACY_TEMPLATE_COMMIT, "--", template_prefix], cwd=ROOT
+    )
+    for name in listed.decode().splitlines():
+        fixture = _LEGACY_PYTHON_TEMPLATE / name.removeprefix(template_prefix)
+        original = subprocess.check_output(["git", "show", f"{_LEGACY_TEMPLATE_COMMIT}:{name}"], cwd=ROOT)
+        assert fixture.read_bytes() == original, f"夹具与 {_LEGACY_TEMPLATE_COMMIT} 不一致: {name}"
+
+    script_original = subprocess.check_output(
+        ["git", "show", f"{_LEGACY_BUILD_SCRIPT_COMMIT}:scripts/build_plugin_package.py"], cwd=ROOT
+    )
+    assert _LEGACY_BUILD_SCRIPT.read_bytes() == script_original, "构建脚本夹具与来源提交不一致"
+
+
+# LLM: 保留旧 wheel 构建器的许可回归；输入基线是"历史 Git 字节"，已按原字节存成夹具
+#   （见 fixtures/b9_legacy_git_bytes/README.md），这样车道容器只拉一个提交、或源码包环境根本没有
+#   git 时也能跑，不再报 "Not a valid object name"。绝不让 v8 混入 wheel 路径。
+# 函数用途: 把夹具里的历史 Python 工程原样铺进工作区，继续测 LICENSE/NOTICE 保留行为。
 def _legacy_python_project(project: Path) -> None:
-    prefix = SKILL.relative_to(ROOT).as_posix() + "/templates/python/"
-    names = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", "35f445792", "--", prefix], cwd=ROOT)
-    for name in names.decode().splitlines():
-        target = project / name.removeprefix(prefix)
+    for source in _LEGACY_PYTHON_TEMPLATE.rglob("*"):
+        if not source.is_file():
+            continue
+        target = project / source.relative_to(_LEGACY_PYTHON_TEMPLATE)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(subprocess.check_output(["git", "show", "35f445792:" + name], cwd=ROOT))
+        target.write_bytes(source.read_bytes())
 
 
 # LLM: 构建输入仅来自 Git 纳管的当前源码字节，不读取未纳管运行目录；构建副本、pip 临时文件都在测试工作区。
@@ -536,10 +590,11 @@ def test_production_wheel_keeps_all_author_assets(author_workspace):
         assert all(archive.read(path.relative_to(ROOT).as_posix()) == path.read_bytes() for path in originals)
 
 
-# LLM: 只从固定开工提交读取原构建器，在同一工作树源码/解释器/依赖下比较最终包字节；不改分支或还原产品文件。
+# LLM: 只从夹具读取原构建器（来源提交 b453f8883，字节见夹具 README），在同一工作树源码/解释器/
+#   依赖下比较最终包字节；不改分支或还原产品文件，也不再依赖本地对象库有那个提交。
 # 函数用途: 加载原构建函数作为对照，不启动插件、不安装或修改宿主状态。
 def _baseline_builder():
-    source = subprocess.check_output(["git", "show", "b453f8883:scripts/build_plugin_package.py"], cwd=ROOT)
+    source = _LEGACY_BUILD_SCRIPT.read_bytes()
     namespace = {"__file__": str(ROOT / "scripts/build_plugin_package.py"), "__name__": "m5_baseline_builder"}
     exec(compile(source, namespace["__file__"], "exec"), namespace)
     return namespace["build_plugin_package"]

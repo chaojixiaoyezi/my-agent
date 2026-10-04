@@ -107,6 +107,10 @@ for shared setup and `monkeypatch` for environment variables.
 **Naming:** `test_<what>_<when>_<expected>()`.  Example:
 `test_dispatch_loop_when_no_tasks_returns_empty()`.
 
+**Directory-shape assertions / 目录结构断言**：写"某文件必须在某个目录下"时用**祖先链**
+（`relative.parents` 里含目标目录名），不要只比对直接父目录 —— 真实布局常有中间层
+（如 `templates/python/src/…`），只看直接父目录会把合规布局误判成违规。
+
 **Assertions** -- use specific assertions:
 
 ```python

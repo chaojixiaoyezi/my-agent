@@ -16,6 +16,23 @@
 - 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、strict code-size `hard=0`、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失告警 39**。
 - 未验证：未改产品代码，无真实链路需要复核。
 
+### 补（同一分支 `be6ae1f8f`）：两条用例的历史 Git 字节存成夹具
+
+- 来源：Linux 车道里 `test_write_my_agent_plugin_skill.py` 有 2 条失败，报 `fatal: Not a valid object name 35f445792` / `b453f8883`——容器仓库没有这两个历史提交的对象；GitHub CI 默认只拉一个提交同理；源码包环境根本没有 git。
+- 改动：`test_python_builder_preserves_project_license`（经 `_legacy_python_project`）与 `test_existing_packages_match_baseline_bytes`（经 `_baseline_builder`）改读夹具 `agent_py_agent/tests/fixtures/b9_legacy_git_bytes/`（来源提交与逐文件 sha256 见该目录 README），不再调用 `git show`/`git ls-tree`。构建脚本夹具带 `.txt` 后缀，避免被代码尺寸扫描当成在运源码（夹具是历史字节，用例只读字节再 compile/exec）。
+- 新增校验 `test_legacy_fixture_matches_git_object_when_available`：本地对象库有这两个提交时逐字节核对夹具与 git 对象；没有时只跳过这一条校验，不跳过那两条原用例。
+- **两种环境实测**（都用同一个 commit `be6ae1f8f`）：
+  | 环境 | 两条原用例 | 来源校验 |
+  | --- | --- | --- |
+  | 完整历史（本工作树） | 通过 | 通过（逐字节一致） |
+  | 无历史对象（`git clone --depth 1`，复现车道报错） | **通过** | 跳过并写明原因 |
+  | 完全没有 git（PATH 摘掉 git，只跑两条原用例） | **通过**（rc=0） | 不涉及 |
+- 变异 3 个（驱动脚本 `/private/tmp/b9fix_fixture_mutate.py`，按备份原字节还原）：①夹具构建脚本改一个字节 → 来源校验红；②夹具模板 `declaration.json` 改坏 → 许可用例 + 来源校验红；③基线构建器改回 `git show` → 本机（有历史）仍通过，只有无历史环境才会红（已在 shallow clone 里单独验证）。前两个 KILLED。
+- 来源记录：`agent_py_agent/tests/fixtures/b9_legacy_git_bytes/provenance.json` 记下两个来源提交、每个夹具的源路径与 sha256；新增 `test_legacy_fixture_provenance_matches_bytes` **不依赖 git**，在只有夹具副本的环境也能核出"json 与字节对不上"。
+- 发布包边界：`package_boundary_policy.forbidden_distribution_member` 对夹具路径（含 `.txt` 与 `provenance.json`）全部返回 `True`，与既有夹具 `plugin_manifest_v1_v7.json` 处理一致；`test_packaging.py` 通过。
+- 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、`git diff --check` 干净、clean-package OK、strict code-size `hard=0`；size_diff **新增告警 0 / 消失告警 39**（首轮夹具用 `.py` 时曾新增 2 条，改成 `.txt` 后归零）。
+- **既有失败（不是本片引入）**：guards9 里 `test_constants_catalog.py::test_catalog_matches_source` 报"常数目录 895 项、源码扫描 897 项"。用基线 `2fb2eb718` 另开 worktree 单独复跑，**同样失败、同样 895/897**，与本次改动无关；本片未触碰常数目录。
+
 ## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3；9b 复跑通过，已并入 step17j）
 
 - **命令**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_scoped_lock_private_permissions.py -q -p no:cacheprovider` → **9 passed**（新增 2 条：刷新后仍 0600；直接写记录的文件与目录权限）。

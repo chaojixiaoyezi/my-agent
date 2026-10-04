@@ -1,0 +1,45 @@
+{
+  "schema": "legacy_git_byte_fixtures.v1",
+  "//说明": "这两个夹具是历史 Git 字节的只读存档，用来让测试不再依赖本地对象库里有旧提交。车道容器/CI 只拉一个提交时拿不到这些对象，从源码包装的环境连 git 都没有，用例会直接报 Not a valid object name。夹具是原始字节，逐字节对照，未做任何改写。",
+  "//复核": "本地对象库有对应提交时，test_legacy_fixture_matches_git_object_when_available 会逐字节核对；没有时只跳过那一条校验，不跳过依赖夹具的用例。",
+  "sources": {
+    "35f445792": {
+      "//用途": "旧 Python 模板（test_python_builder_preserves_project_license 的输入基线）",
+      "source_prefix": "agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/templates/python/",
+      "files": [
+        {
+          "fixture": "legacy_python_template/pyproject.toml",
+          "source_path": "pyproject.toml",
+          "sha256": "6893535a87072b1e92faf3c96bb31331a283e5ed9ae877265bc7dcf955c49edf"
+        },
+        {
+          "fixture": "legacy_python_template/src/plugin_template/__init__.py",
+          "source_path": "src/plugin_template/__init__.py",
+          "sha256": "40e4437d7d8a3eaca503a5da6c509842a0881f696dbb34bb94676282534f9c2f"
+        },
+        {
+          "fixture": "legacy_python_template/src/plugin_template/__main__.py",
+          "source_path": "src/plugin_template/__main__.py",
+          "sha256": "b3a0f6b766cc11490da40744420efc6b05fdd1e6536bcf4196386f3811dae6c9"
+        },
+        {
+          "fixture": "legacy_python_template/src/plugin_template/declaration.json",
+          "source_path": "src/plugin_template/declaration.json",
+          "sha256": "00a375d364a19b771e0f46ecabae2a5466a7ea6a2ec248f00f085370f79c06f7"
+        }
+      ]
+    },
+    "b453f8883": {
+      "//用途": "旧插件构建脚本（test_existing_packages_match_baseline_bytes 的对照构建器）",
+      "source_prefix": "",
+      "files": [
+        {
+          "fixture": "legacy_build_script/build_plugin_package.py.txt",
+          "source_path": "scripts/build_plugin_package.py",
+          "sha256": "c72e793f38739aeafe95c269c564aa6d3e369c599d462422aed59a13f47f2b49",
+          "//为什么带 txt": "这是历史字节不是产品源码；带 .py 后缀会被 scripts/check_code_size.py 当成在运代码扫描，size_diff 会新增告警。用例只读字节再 compile/exec，扩展名不影响语义。"
+        }
+      ]
+    }
+  }
+}
