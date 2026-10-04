@@ -36,8 +36,8 @@ _LOGGER = logging.getLogger(__name__)
 #:   生产与开发环境都没有库执行过 v1（3a 在 21 个 owner 的只读副本上预览确认），
 #:   v1 也尚未并入任何部署分支；升 v2 只会留下"v1 键在但规则已变"的歧义与无对象的历史处理。
 RUN_CLOSEOUT_BACKFILL_KEY = "run_closeout_backfill.v1"
-#: 补收口宽限下限（秒）：只处理尝试结束超过该时长的记录，避免和刚结束、正在收口的回合抢。
-#: 维护循环默认每天跑一次，6 小时足以让任何真实收口/续跑/重试先完成，又远小于"隔夜悬挂"。
+# 维护循环默认每天跑一次，6 小时足以让任何真实收口/续跑/重试先完成，又远小于"隔夜悬挂"。
+# 补收口宽限下限（秒）：只处理尝试结束超过该时长的记录，避免和刚结束、正在收口的回合抢。
 RUN_CLOSEOUT_BACKFILL_GRACE_SECONDS = 6 * 3600
 #: 每条补收口的审计事件类型（结构化字段，不写正文）。
 RUN_CLOSEOUT_BACKFILLED_EVENT = "run_closeout.backfilled"

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 895,
+  "count": 897,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1314,6 +1314,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "结果里保留的前几条错误样例（code + 位置）个数；写工具回执的摘要和返工提示都带全这些条（块 8 试点：只带 3 条时模型看不到后面的错误位置）。"
+    },
+    {
+      "name": "MAX_VERIFIER_HINT_CHARS",
+      "file": "agent_py_agent/agent/capability/pack_verifier_runner.py",
+      "value": 200,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "错误样例里修改提示（hint）的字符上限（3a 2026-10-04 统一合同）：超了截到上限-1 加省略号，总长不超上限。"
     },
     {
       "name": "MAX_VERIFIER_LOCATION_CHARS",
@@ -4594,6 +4602,14 @@
       "unit": "个",
       "category": "重试",
       "description": ": K.6：投递重试上限，超限进 dead-letter（完整证据保留，可人工重放）。"
+    },
+    {
+      "name": "RUN_CLOSEOUT_BACKFILL_GRACE_SECONDS",
+      "file": "agent_py_agent/agent/runtime_db/run_closeout_backfill.py",
+      "value": 21600,
+      "unit": "秒",
+      "category": "其它",
+      "description": "补收口宽限下限（秒）：只处理尝试结束超过该时长的记录，避免和刚结束、正在收口的回合抢。"
     },
     {
       "name": "USER_INTERRUPT_RESUME_SECONDS",
