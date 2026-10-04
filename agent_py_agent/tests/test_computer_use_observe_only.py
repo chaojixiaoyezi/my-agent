@@ -313,3 +313,86 @@ def test_call_observation_tool_observe_only_flag_blocks_everything_but_observe_w
     full = glue.CallContext(observe_only=False)
     assert glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, full)[2] is False
     assert observer.clicks == 1, "完整档不受影响"
+
+
+# LLM: 上线清单要求“生产打开只看档”能用 /settings 设。这个键是安全边界（模型不可写、登记表 writable=False），
+#   放进 USER_SETTINGS_BOUNDARY_KEYS 后只有已认证管理员的 /settings 写作用域能改；正式档 computer_use_enabled
+#   刻意不进白名单（它能点击、能输入，交出上游执行面），继续只能手改配置文件。
+# 函数用途: 建一份临时用户配置与写路径（只看档的写入目标）。
+def _settings_paths(tmp_path):
+    from agent_py_agent.agent.settings.parameter_changes import WritePaths
+
+    user_config = tmp_path / "desktop.yaml"
+    user_config.write_text("", encoding="utf-8")
+    return WritePaths(user_path=user_config), user_config
+
+
+# 函数用途: 核对两个键的登记事实与白名单归属（观察在、正式档不在）。
+def test_observe_only_key_is_boundary_but_full_tier_is_not_in_the_whitelist():
+    from agent_py_agent.agent.settings.parameter_registry import parameter_registry
+    from agent_py_agent.agent.settings.user_config_capability import USER_SETTINGS_BOUNDARY_KEYS
+
+    observe_key, full_key = "computer_use_observation_enabled", "computer_use_enabled"
+    assert observe_key in USER_SETTINGS_BOUNDARY_KEYS and full_key not in USER_SETTINGS_BOUNDARY_KEYS
+    registry = parameter_registry()
+    # 这两个键住在主配置（agent 来源），写入目标是用户配置文件；登记表默认 False、模型不可写。
+    assert registry[observe_key].source == "agent" and registry[observe_key].writable is False
+    assert registry[observe_key].default is False
+    assert registry[full_key].writable is False
+
+
+# 函数用途: 用真实写入口核对只看档可被管理员 /settings 开关、状态可读回、生效时机是重启。
+def test_observe_only_switch_is_admin_settings_writable(tmp_path):
+    # ruff 的 isort 规则按模块名排序：config < parameter_changes < parameter_registry < user_config_capability。
+    from agent_py_agent.agent.settings.config import load_config
+    from agent_py_agent.agent.settings.parameter_changes import (
+        ChangeOrigin,
+        reset_parameter,
+        set_parameter,
+        user_settings_write_scope,
+    )
+
+    key = "computer_use_observation_enabled"
+    paths, user_config = _settings_paths(tmp_path)
+    with user_settings_write_scope():
+        opened = set_parameter(key, True, paths=paths, origin=ChangeOrigin("chat"))
+        assert opened["ok"] is True, opened
+        assert opened["effect_when"] == "restart_gateway" and "/restart" in opened["effect_text"]
+    assert "computer_use_observation_enabled: true" in user_config.read_text(encoding="utf-8")
+    assert load_config(str(user_config)).computer_use_observation_enabled is True
+    with user_settings_write_scope():
+        assert set_parameter(key, False, paths=paths, origin=ChangeOrigin("chat"))["ok"] is True
+        assert load_config(str(user_config)).computer_use_observation_enabled is False
+        assert reset_parameter(key, paths=paths, origin=ChangeOrigin("chat"))["ok"] is True
+    assert "computer_use_observation_enabled" not in user_config.read_text(encoding="utf-8")
+
+
+# 函数用途: 模型来源的 set / reset / revert 三条都按边界拒绝、文件不变；正式档管理员也拒。
+def test_model_writes_are_refused_and_full_tier_stays_boundary(tmp_path):
+    from agent_py_agent.agent.settings.parameter_changes import (
+        ChangeOrigin,
+        reset_parameter,
+        revert_change,
+        set_parameter,
+        user_settings_write_scope,
+    )
+
+    key, full_key = "computer_use_observation_enabled", "computer_use_enabled"
+    paths, user_config = _settings_paths(tmp_path)
+    # revert 先按编号找记录、再判边界（revert_change → _writable_spec），所以要拿一条真实记录编号来测。
+    with user_settings_write_scope():
+        recorded = set_parameter(key, True, paths=paths, origin=ChangeOrigin("chat"))
+    assert recorded["ok"] is True, recorded
+    before = user_config.read_bytes()
+    model = ChangeOrigin("model")
+    refused = [
+        set_parameter(key, False, paths=paths, origin=model),
+        reset_parameter(key, paths=paths, origin=model),
+        revert_change(str(recorded["change_id"])[:8], paths=paths, origin=model),
+    ]
+    assert [item["code"] for item in refused] == ["PARAMETER_BOUNDARY"] * 3, refused
+    assert all(item["ok"] is False for item in refused)
+    assert user_config.read_bytes() == before, "被拒的模型写入不能改动任何文件"
+    with user_settings_write_scope():
+        denied = set_parameter(full_key, True, paths=paths, origin=ChangeOrigin("chat"))
+    assert denied["ok"] is False and denied["code"] == "PARAMETER_BOUNDARY", denied

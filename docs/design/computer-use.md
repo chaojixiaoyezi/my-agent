@@ -58,6 +58,23 @@ Computer Use 是可选能力，headless Gateway 默认不装。按你要用的�
   宿主可按 Jev 的选择以 `actor=decision` 自动调用一次只凭候选编号的动作（这里就是 `click_candidate`），走和模型调用完全一样的审批、两层复核、归档；
   `type_into_candidate` 这类要文字的动作永远不自动执行。规则与账目见设计稿第 7 节“片 D 实施定稿”。
 
+**只看档怎么打开、什么时候生效（obsset，2026-10-04）**：
+- **谁能改**：`computer_use_observation_enabled` 在 `parameter_registry._BOUNDARY_NAMES` 里（登记表 `writable=False`、默认 `false`），
+  所以模型改不了；它同时进了 `settings/user_config_capability.USER_SETTINGS_BOUNDARY_KEYS`，已认证管理员的 `/settings` 写作用域可以开、可以关
+  （`parameter_changes._writable_spec` 的 `user_allowed` 分支：`_USER_SETTINGS_WRITE` 作用域 + 键在白名单）。上线清单与验收手册 A4 的“用 /settings 设”就指这条。
+  **正式档 `computer_use_enabled` 刻意不在白名单**：它会交出上游的鼠标、键盘、截图全套执行面，继续只能手改配置文件（`/settings set computer_use_enabled true` 仍返回 `PARAMETER_BOUNDARY`）。
+  模型来源的 `set` / `reset` / `revert` 三条路径即使键在白名单里也一律按边界拒绝，由 `_USER_SETTINGS_WRITE` 上下文变量区分调用方。
+- **写在哪**：这个键的来源是 `agent`（不是 capability），写入目标是用户配置文件（`WritePaths.user_path`，即 `MY_AGENT_CONFIG` 指向的那份），不是 owner 的 `config/capability_config.yaml`；文件不存在时以 0600 新建。
+- **什么时候生效**：`restart_gateway`。读点在 `core.py:_build_tool_registry`（`observation_enabled = config.computer_use_observation_enabled`，随后交给 `with_computer_use_observation` 决定是否并入观察工具），
+  调用点在同一模块 `SimpleAgent.__init__`（`self.tools = _build_tool_registry(self, config)`）——**每建一个 agent 都会重新装配一次**，但 `config` 是进程启动时加载的那份 `AgentConfig`，
+  写盘不会热加载进正在跑的 Gateway 进程。所以：改完发 `/restart`（或让 my-agent 安全重启 Gateway）后新进程才按新值装配；不重启时当前进程仍按启动值走。
+  这个时机不用新加机制——回执里已经带结构化说明：`parameter_changes.set_parameter` 返回的 `effect_when="restart_gateway"`、`effect_text` 里就有“保存后需要重启 Gateway 才生效……发 /restart”，
+  `/settings show` 也会在用户配置值与运行值不同时标注“已改成 X，发 /restart 后生效”。
+- **入口只有一个**：TUI 与飞书等 IM 的 `/settings` 都走 Gateway 控制通道的同一个入口——TUI 侧 `cli/chat_parts/control_runtime.py` 把 `/settings …` 原样发到 Gateway，
+  宿主侧 `gateway_parts/control_service.py` 调 `gateway_parts/settings_control_service.execute_settings_control`，身份授权（完整可信身份 + 本机 local/main）与写作用域都在那里判定，行为一致。
+  用例：`agent_py_agent/tests/test_computer_use_observe_only.py` 的 `test_observe_only_key_is_boundary_but_full_tier_is_not_in_the_whitelist`、
+  `test_observe_only_switch_is_admin_settings_writable`、`test_model_writes_are_refused_and_full_tier_stays_boundary`。
+
 **待观察项（片 D 记，片 F 真实验收时复核）**：
 - 闪动光标误判过期：片 C 三次 20 轮“观察 → 点击”分别 3 / 20、4 / 20、8 / 20（0.15 / 0.20 / 0.40），方差不小，正式桌面层镜像那次最高。按 ae 定的只记录，
   暂不调区域摘要容差（`DIGEST_*` 常数）；片 F 真实验收再跑三次，若仍有 ≥ 0.4 的轮次，再议把输入框光标所在格排除或放宽容差。

@@ -1,5 +1,32 @@
 # 测试与发布验收
 
+## 只看档加进管理员 /settings 白名单（obsset，2026-10-04，分支 `worker/obs-user-setting`，3a 初审、9b 终审通过，已并入 step17j）
+
+- 背景：3a 实测 17j 头在管理员 `/settings` 作用域 `set computer_use_observation_enabled true` 返回 `PARAMETER_BOUNDARY`。
+- 改动：`agent_py_agent/agent/settings/user_config_capability.py` 的 `USER_SETTINGS_BOUNDARY_KEYS` 加入 `computer_use_observation_enabled`（注释写明 `computer_use_enabled` 刻意不收）；文档与配置注释见台账。
+- 用例（`agent_py_agent/tests/test_computer_use_observe_only.py`，按代码尺寸规则拆成三条，函数体都短于 soft 上限）：
+  - `test_observe_only_key_is_boundary_but_full_tier_is_not_in_the_whitelist`：白名单与登记表断言（该键在、正式档不在、两者 `writable=False`、来源 `agent`）；
+  - `test_observe_only_switch_is_admin_settings_writable`：管理员写作用域 `set true` → ok、写进用户配置文件、`load_config` 读回 true、`effect_when="restart_gateway"`；`set false` → ok 且读回 false；`reset` → ok 且覆盖行被删；
+  - `test_model_writes_are_refused_and_full_tier_stays_boundary`：模型来源 `set`/`reset`/`revert` 三条 → 都是 `PARAMETER_BOUNDARY`，文件字节不变；管理员作用域 `set computer_use_enabled true` → 仍 `PARAMETER_BOUNDARY`。
+
+命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`PYTHONPATH=$PWD`）：
+
+```text
+$PY -m pytest agent_py_agent/tests/test_computer_use_observe_only.py -q                                                          → 13 passed
+$PY -m pytest test_parameter_changes.py test_user_config_capability.py test_parameter_registry.py \
+   test_computer_use_observe_only.py test_computer_use_observation_tools.py test_settings_chat_control.py -q                      → 171 passed
+node frontend/scripts/sync-backend-config.mjs && node frontend/scripts/sync-backend-config.mjs --check                            → 258 fields，Config catalog is in sync
+```
+
+变异（每次只改一处，跑完按字节还原，sha256 一致 `d53fb0a70572ba11dca5e0a63bba1c071fb5ca32ad79a75cc6bb5b1d9fba5f53`）：
+
+| 变异 | 结果 |
+| --- | --- |
+| M1 从白名单删掉 `computer_use_observation_enabled` | KILLED（新用例） |
+| M2 把 `computer_use_enabled` 也加进白名单 | KILLED（新用例） |
+
+未验证：真机 `/restart` 后新进程装配只看档工具的端到端路径（工作规则禁止启动 Gateway）；发送方向是代码位置核对 + 单测，不是真机量测。
+
 ## b5s5：第5段叠上、组合用例转正、六条初审小项（2026-10-04，worker/m1-b5-on17j，已并入 step17j，9b 终审待做）
 
 - 来源：接本树b5r交付 `65f47f2c6`，三方应用源 `ff5d761d9..d517a8b7b`（ds2的 `0e1a9550b` / `d517a8b7b`）；executor保B4事件上下文及第5段专键，文档保17j历史后补当前事实，常数目录产品脚本重生899项。本树迁移/行为提交为 `f86e9b141bd7a8509964d591a9b458b1679807e4`，源提交号不替代本地交付号；随后SHA补记仅改TESTS/DESIGN_LEDGER，产品与验证输入不变。

@@ -180,11 +180,14 @@ BOUNDARY_KEYS: dict[str, str] = {
 #   收的是“会改变模型看到的内容、要用户显式开关”的功能开关：subagent_takeover_hint_enabled（C4 接替提示，
 #   capability 配置）、subagent_input_media_enabled（第 14 条子代理带图，capability 配置）、action_candidate_auto_execute_enabled
 #   （J16 宿主自动点击，capability 配置）与 enable_memory_search_tool 同类，管理员要能用 /settings 打开和关闭，不能只剩手改文件一条路。
+#   computer_use_observation_enabled（J16 屏幕观察“只看档”，capability 配置）同属这一类：它只交出只读的 observe_window，
+#   不改上游执行权威；正式档 computer_use_enabled（能点击、能输入，交出上游鼠标键盘）**刻意不收**，继续只能手改配置文件。
 # 常量用途: 列出用户设置命令可以修改、模型工具始终不能修改的边界参数。
 USER_SETTINGS_BOUNDARY_KEYS = frozenset(
     {"memory_curator_model_profile", "embedding_model_profile", "enable_capability_package_selection",
      "enable_memory_search_tool", "subagent_takeover_hint_enabled", "subagent_input_media_enabled",
-     "capability_pack_host_verification_enabled", "action_candidate_auto_execute_enabled"})
+     "capability_pack_host_verification_enabled", "action_candidate_auto_execute_enabled",
+     "computer_use_observation_enabled"})
 
 # 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据。
 # 常见缩写与组合（DB_PASS、MYSQL_PWD、SSH_PRIVATE_KEY、AWS_SECRET_ACCESS_KEY、BASIC_AUTH）同样按完整末尾片段认；

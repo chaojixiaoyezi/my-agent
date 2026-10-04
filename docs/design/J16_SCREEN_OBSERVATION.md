@@ -266,12 +266,13 @@
 
 | 配置 | 位置 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `computer_use_enabled` | 主配置（已有） | false | 总开关，不变 |
-| `computer_use_observation_enabled` | 主配置（新增） | false | 是否注册新工具；关时工具目录不变 |
+| `computer_use_enabled` | 主配置（已有） | false | 总开关，不变。**只能手改配置文件**：它交出上游鼠标/键盘/截图全套执行面，不在 `/settings` 用户白名单里 |
+| `computer_use_observation_enabled` | 主配置（新增） | false | 是否注册新工具；关时工具目录不变。**管理员可用 `/settings` 改，模型不能改**（`USER_SETTINGS_BOUNDARY_KEYS`）；改完发 `/restart` 生效 |
 | `points.action_candidate.mode` | 决策设置（已有） | off | 生产建议 observe |
 | `action_candidate_auto_execute_enabled` | 能力配置（新增，管理员边界） | false | 第 7 节 |
 
-YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步更新。
+YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步更新。`computer_use_observation_enabled` 的生效时机是**重启 Gateway**（读点 `core.py:_build_tool_registry`，装配点在 `SimpleAgent.__init__`，配置是进程启动时加载的），
+回执里已带结构化说明（`effect_when="restart_gateway"`、`/settings show` 标注“发 /restart 后生效”）；TUI 与飞书的 `/settings` 走同一个 Gateway 入口（`settings_control_service.execute_settings_control`）。细节见 [computer-use.md](computer-use.md) 的“只看档怎么打开、什么时候生效”。
 
 ### 8.1 只看档（vho，2026-10-04）
 

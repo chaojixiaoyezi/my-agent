@@ -1,5 +1,16 @@
 # 设计台账
 
+## 只看档加进管理员 /settings 白名单（obsset，2026-10-04，分支 `worker/obs-user-setting`，基于 17j 头 `35b1647e8`；3a 初审、9b 终审通过，已并入 step17j）
+
+- **来源**：用户拍板 17j 上线后在生产打开屏幕观察的“只看档”（`computer_use_observation_enabled=true`），完整档 `computer_use_enabled` 保持关；上线清单与验收手册 A4 都写“用 /settings 设”。3a 在隔离环境实测 17j 头：管理员 `/settings` 作用域里 `set computer_use_observation_enabled true` 返回 **PARAMETER_BOUNDARY**——该键在 `parameter_registry._BOUNDARY_NAMES` 里，但不在 `settings/user_config_capability.USER_SETTINGS_BOUNDARY_KEYS` 白名单里。
+- **改法**：把 `computer_use_observation_enabled` 加进 `USER_SETTINGS_BOUNDARY_KEYS`（`user_config_capability.py`）。白名单只放宽“已认证管理员 /settings 写作用域”这一条路径；模型来源的 `set`/`reset`/`revert` 仍按边界拒绝（由 `_USER_SETTINGS_WRITE` 上下文变量区分调用方，未改判定逻辑）。**`computer_use_enabled` 刻意不加**：它会交出上游鼠标/键盘/截图全套执行面，继续只能手改配置文件。
+- **写入位置**：该键登记来源是 `agent`（不是 capability），写在用户配置文件（`WritePaths.user_path`），不是 owner 的 `capability_config.yaml`；文件不存在时以 0600 新建。
+- **生效时机**：`restart_gateway`。读点在 `core.py:_build_tool_registry`（`observation_enabled = config.computer_use_observation_enabled`），装配点在同模块 `SimpleAgent.__init__`；`config` 是进程启动时加载的，写盘不热加载，所以要 `/restart`。**不新加机制**：`set_parameter` 回执已带 `effect_when="restart_gateway"` 与“保存后需要重启 Gateway 才生效……发 /restart”的 `effect_text`，`/settings show` 也在运行值与保存值不同时标注“发 /restart 后生效”。
+- **入口**：TUI 与飞书等 IM 走同一个 Gateway 入口——TUI 侧 `cli/chat_parts/control_runtime.py` 把 `/settings …` 原样发给 Gateway，宿主侧 `gateway_parts/control_service.py` 调 `gateway_parts/settings_control_service.execute_settings_control`（身份授权与写作用域都在那里）。没有为飞书新加入口。
+- **文档**：`docs/design/computer-use.md` 新增“只看档怎么打开、什么时候生效”；`docs/design/J16_SCREEN_OBSERVATION.md` 第 8 节配置表写明两个开关各自的开关方式与生效时机；`agent_py_agent/config/agent_config.yaml` 中文注释同步并重新生成前端参数目录。
+- **验证**：见 `TESTS.md`“只看档加进管理员 /settings 白名单（obsset）”小节。
+- **未验证**：真机 `/restart` 后新进程按新值装配观察工具这条端到端路径没在沙箱里跑（不启动 Gateway 是工作规则）；发送方向只有单测与代码位置核对。
+
 ## B5 第5段叠到17j、组合转正与六条小项（b5s5，2026-10-04，worker/m1-b5-on17j，已并入 step17j，9b 终审待做）
 
 - **来源**：在b5r交付 `65f47f2c6a45ee13f35318c7837993fcccf58581` 上三方应用 `git diff ff5d761d9 d517a8b7b | git apply -3 --index`；源第5段两个提交 `0e1a9550b` / `d517a8b7b` 属 `worker/m1-b5-seg5-on-s3`，不是本次迁移SHA。本轮迁移/行为提交为 `f86e9b141bd7a8509964d591a9b458b1679807e4`（2026-10-04 10:52 PDT，中文WIP提交，20文件+1012/-39）；本次补记只改文档，不改变已验证产品。

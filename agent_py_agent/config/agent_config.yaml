@@ -1065,6 +1065,9 @@ computer_use_enabled: false
 # - 只开总开关：上游工具全交出，没有观察工具。
 # - 任何档位都必须同时满足结构化 local/main 与 Full Access；普通 owner 看不到、按名字调也会被拒。
 # - 片 B 只有 Linux X11 后端（需要 DISPLAY 与窗口管理器）；macOS 后端在片 E。
+# - 开关方式：本项是安全边界（模型不能改），但已认证管理员可用 /settings set computer_use_observation_enabled true 打开、
+#   set false 关闭；改完要重启 Gateway（发 /restart）才生效——配置在进程启动时加载，装配点在 SimpleAgent 初始化。
+#   上面的总开关 computer_use_enabled 不在此列，只能手改本文件（它会交出鼠标/键盘/截图全套执行面）。
 computer_use_observation_enabled: false
 
 

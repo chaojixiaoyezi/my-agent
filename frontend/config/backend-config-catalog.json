@@ -1507,7 +1507,7 @@
           {
             "key": "computer_use_observation_enabled",
             "label": "computer_use_observation_enabled（computer use observation enabled）",
-            "description": "J16 屏幕观察（片 B 起）：在同一个 Computer Use 适配器里再注册 observe_window（只读采样一个窗口：不切焦点、 不激活、不动鼠标，给出稳定窗口身份、截图代次、几何和 OCR 文字候选，审批策略 always，每次都问本人）。 两个开关的组合决定档位（四种，显式语义，不是缺依赖时的兜底）： - 都关（默认）：没有 Computer Use 适配器，工具目录不变。 - 只看档（总开关关 + 观察开）：同一个服务只交出 observe_window，不交出点击/输入候选，也不交出任何上游桌面工具； 该适配器进程不加载上游执行器依赖（只装了观察用依赖也能跑），每次观察照样走 always 审批问本人。 - 完整档（都开）：上游工具全交出，另加 observe_window 与点击/输入候选工具。 - 只开总开关：上游工具全交出，没有观察工具。 - 任何档位都必须同时满足结构化 local/main 与 Full Access；普通 owner 看不到、按名字调也会被拒。 - 片 B 只有 Linux X11 后端（需要 DISPLAY 与窗口管理器）；macOS 后端在片 E。",
+            "description": "J16 屏幕观察（片 B 起）：在同一个 Computer Use 适配器里再注册 observe_window（只读采样一个窗口：不切焦点、 不激活、不动鼠标，给出稳定窗口身份、截图代次、几何和 OCR 文字候选，审批策略 always，每次都问本人）。 两个开关的组合决定档位（四种，显式语义，不是缺依赖时的兜底）： - 都关（默认）：没有 Computer Use 适配器，工具目录不变。 - 只看档（总开关关 + 观察开）：同一个服务只交出 observe_window，不交出点击/输入候选，也不交出任何上游桌面工具； 该适配器进程不加载上游执行器依赖（只装了观察用依赖也能跑），每次观察照样走 always 审批问本人。 - 完整档（都开）：上游工具全交出，另加 observe_window 与点击/输入候选工具。 - 只开总开关：上游工具全交出，没有观察工具。 - 任何档位都必须同时满足结构化 local/main 与 Full Access；普通 owner 看不到、按名字调也会被拒。 - 片 B 只有 Linux X11 后端（需要 DISPLAY 与窗口管理器）；macOS 后端在片 E。 - 开关方式：本项是安全边界（模型不能改），但已认证管理员可用 /settings set computer_use_observation_enabled true 打开、 set false 关闭；改完要重启 Gateway（发 /restart）才生效——配置在进程启动时加载，装配点在 SimpleAgent 初始化。 上面的总开关 computer_use_enabled 不在此列，只能手改本文件（它会交出鼠标/键盘/截图全套执行面）。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
