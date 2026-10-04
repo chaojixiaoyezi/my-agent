@@ -1,5 +1,12 @@
 # 设计台账
 
+## feishu_limit 脚本补本机凭据（flc，2026-10-03，分支 `worker/feishu-limit-creds`，基于 step17i 头 `de87ff62a`；ds10 初审通过（其“请求头写死成占位符”一条经 3a 核原文为工具输出打码误判），已并入 step17j）
+
+- **起因**：G2b 前置盘点（credinv）发现 `scripts/feishu_limit/` 四个脚本的 11 处 curl（`/ask`、`/result`）不带本机客户端凭据；G2b 打开后回环不再自带信任，这些脚本会被降匿名。
+- **改动**：四个脚本统一经产品入口 `gateway_script_headers()`（`cli/gateway_client_headers.py`）取一次凭据放进 `GW_TOKEN`，用条件化数组 `GW_AUTH_HEADER` 逐处注入（`${GW_AUTH_HEADER[@]+"${GW_AUTH_HEADER[@]}"}`，bash 3.2/4.x 空数组兼容）；降级口径与 G3 客户端一致——开关关且凭据不可用照常发并提示一句，开关开则停下说明；token 只进变量，不回显、不落盘。新增常驻守卫 `test_architecture_guardrails.py::test_scripts_gateway_http_calls_carry_credentials`：扫 `scripts/` 下全部 .sh/.py，指向本机 Gateway（127.0.0.1/localhost + 8420 或地址变量）的 curl/urllib 调用必须带凭据头或访问公开路由（/status、/metrics），按结构扫描、不写死文件名；附合成样本自检。
+- **验证**：见 TESTS「feishu_limit 脚本补本机凭据（flc）」小节；变异（删 d2 一处凭据头）被守卫抓到并原字节还原。
+- **未验证**：脚本真实运行（需真实 Gateway）未跑，由 3a 在测试机复核；守卫只扫仓库根 `scripts/`，`agent_py_agent/scripts/` 不在扫描范围。
+
 ## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、**初审 M1 已修（b6f）**、**确认门回归已修（b6f）**，基于 B3 返工后的头 `0a3064078`，已实施，**已并入 step17j（3a 沙箱外复跑 491 passed）；查询与展示完成，写账待 B5 第 5 段**）
 
 - **起因**：设计稿 [插件事件与收紧钩子](docs/design/PLUGIN_EVENT_HOOKS.md) 第 9 节（账本与展示）与第 13 节 B6 行。B6 原依赖 B5（收紧钩子）写入 `plugin_gate.decided`；本轮先做不依赖 B5 的部分：查询、观察计数读取与 `/plugins info` 四段展示，B5 合入后接上写入方。

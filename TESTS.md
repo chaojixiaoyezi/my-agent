@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## feishu_limit 脚本补本机凭据 + scripts 守卫（2026-10-03，flc，worker/feishu-limit-creds，待复审）
+
+- 来源：凭据盘点（credinv）第 3 条——`scripts/feishu_limit/` 四个脚本 11 处 curl 调 Gateway 不带 `X-Gateway-Token`，G2b 打开后会变成匿名/被拒，且 G2a 计数永远归不了零。
+- 改动：
+  - 四个脚本（`d1_concurrent_users.sh`、`d2_reconnect.sh`、`d3_quota_selfheal.sh`、`d4_large_payload.sh`）在开头用一次 `python3 -c` 调 `agent_py_agent.cli.gateway_client_headers.gateway_script_headers()` 取头，存进 `GW_AUTH_HEADER` 数组，后续 curl 用 `"${GW_AUTH_HEADER[@]}"`（无凭据时数组为空，`"${arr[@]}"` 展开零参数，不破坏 curl 命令）。脚本不自读凭据文件、不打印凭据。
+  - 取不到凭据时按 G3 降级口径：开关关着照常发并提示一句，开关开着（`gateway_require_local_credential=true`）打印原因码后 `exit 1` 停下。判定只读结构化字段（`config.gateway_require_local_credential`），不解析提示文案。
+  - 新增常驻守卫 `agent_py_agent/tests/test_architecture_guardrails.py::test_scripts_gateway_http_calls_carry_credentials`：按结构扫 `scripts/` 全部 `.sh`/`.py`，识别指向本机 Gateway 端口的 curl/urllib（端口取自默认值 + `agent_config.yaml` 的 `gateway_port`），要么带 `X-Gateway-Token`，要么访问的是公开白名单路由（`/status`、`/metrics`），否则失败并列出 `文件:行`。不写死文件名。
+- 命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-flc
+  for f in scripts/feishu_limit/*.sh; do bash -n "$f"; done
+  ```
+  结果：守卫文件全过（含新增用例）；四个脚本 `bash -n` 全部 OK。
+- 守卫变异：在 `d3_quota_selfheal.sh` 的 `/ask` curl 上删掉 `"${GW_AUTH_HEADER[@]}"`，守卫立即失败并列出 `scripts/feishu_limit/d3_quota_selfheal.sh:行号`；还原后重跑通过（按原字节备份还原，未用 git stash/checkout）。
+- 收尾门禁（工作树根，全部通过）：guards9 清单 **175 passed**；`check_import_boundaries.py` findings=0；`ruff check agent_py_agent scripts` All checks passed；`check_doc_sync.py` DOC_SYNC_PASS；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` blocked=False（跑后 `git checkout -- CODE_SIZE_REPORT.md`）；`git diff --check` 干净；`check_clean_package.py .` OK。
+- 未验证：四个脚本要真实 Gateway 才能跑，本轮没跑（按分工由 3a 在沙箱外复核）；脚本的实际 HTTP 行为未实测，只验证了语法与守卫。
+
 ## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，基于 B3 返工后的头 `0a3064078`，已实施，待复审；**查询与展示完成，写账待 B5**）
 
 ### B6 二次修复：确认门回归（b6f，2026-10-03）

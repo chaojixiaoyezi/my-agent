@@ -86,6 +86,7 @@
   - Gateway 在 `/status` 里加一个结构化计数 `uncredentialed_loopback_by_endpoint`：不带凭据的回环请求有多少。**计数键用路由模板**（`/result/*`、`/sessions/*/bind`），不用原始路径——否则请求编号会进公开的 `/status`、键也没有上界。schema：路由模板 → {计数, 最近一次时间}。只计数、不拦截。
   - **计数范围**：只计“要凭据”和“要管理员”两档；公开路由（`/status`、`/metrics`）不计；插件令牌路由（`/plugin-host/query`）带有效 host-API 令牌的不计（否则永远归不了零）。
   - 观察到计数归零、并确认在跑的旧客户端都重启过（都带上凭据了），再上第二版。
+  - **上线前补充（flc，2026-10-03）**：`scripts/feishu_limit/` 四个脚本的 11 处 curl 已补本机客户端凭据（复用 `gateway_script_headers()`）；`scripts/` 下指向本机 Gateway 的调用有常驻守卫（`test_architecture_guardrails.py::test_scripts_gateway_http_calls_carry_credentials`）。
 - **第二版：打开 G2 强制**。不带凭据的回环请求降匿名；同时去掉 `_peer_trusted` 的 `peer_ip is None` 旁路（见 1.2）。
 - 第 (1) 层（G4、G5 端口拒绝）是纵深防护、和客户端凭据无关，可以独立先上，不受这个两步约束。
 

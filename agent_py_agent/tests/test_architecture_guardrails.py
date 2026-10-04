@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -503,3 +504,225 @@ def test_governance_docs_exist() -> None:
     ]
     missing = [name for name in required_docs if not (REPO_ROOT / name).exists()]
     assert not missing, f"Missing governance docs: {missing}"
+
+
+# ---- scripts/ 本机 Gateway 凭据守卫（G2b 前置，flc）----
+# LLM: scripts/ 下指向本机 Gateway 的 HTTP 调用（curl/urllib）必须带本机客户端凭据头
+#   （X-Gateway-Token，或经 gateway_script_headers/gateway_client_credentials 取得的凭据变量），
+#   或访问公开只读路由（/status、/metrics）；G2b 打开后回环不再自带信任，缺凭据的脚本会被降匿名。
+#   按 URL 目标结构判定，不写死文件名；只覆盖能静态看出指向 Gateway 的调用（字面量地址，或
+#   文件内被赋值为 Gateway 地址的变量），参数化 URL 的调用不在覆盖内。
+
+GATEWAY_HOST_MARKERS = ("127.0.0.1", "localhost")
+GATEWAY_PORT_TEXT = "8420"
+GATEWAY_TARGET_RE = re.compile(r"(?:127\.0\.0\.1|localhost):(?:8420\b|\$\{?GATEWAY_PORT\}?)")
+GATEWAY_PUBLIC_ROUTE_RE = re.compile(r"/(?:status|metrics)(?![\w-])")
+GATEWAY_CREDENTIAL_MARKERS = ("x-gateway-token", "gateway_script_headers", "gateway_client_credentials")
+SCRIPT_SUFFIXES = (".sh", ".py")
+PYTHON_HTTP_CALL_NAMES = frozenset(
+    {"urlopen", "urllib.request.urlopen", "urllib.request.Request", "Request"})
+
+
+def _gateway_script_files() -> list[Path]:
+    """scripts/ 下全部 .sh/.py 验收脚本（按目录结构扫描，不写死具体文件名）。"""
+
+    root = REPO_ROOT / "scripts"
+    if not root.is_dir():
+        return []
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix in SCRIPT_SUFFIXES and "__pycache__" not in path.parts
+    )
+
+
+def _gateway_address_variables(lines: list[str]) -> set[str]:
+    """收集被简单赋值为“回环地址 + Gateway 端口”的变量名（shell/python 通用形态）。"""
+
+    names: set[str] = set()
+    for line in lines:
+        match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$", line)
+        if match is None:
+            continue
+        value = match.group(2)
+        if any(marker in value for marker in GATEWAY_HOST_MARKERS) and (
+            GATEWAY_PORT_TEXT in value or "GATEWAY_PORT" in value or "gateway_port" in value
+        ):
+            names.add(match.group(1))
+    return names
+
+
+def _credential_variables(lines: list[str]) -> set[str]:
+    """收集与 X-Gateway-Token 同行的 shell 变量名（$VAR 引用或 VAR=/VAR+=( 赋值）。"""
+
+    names: set[str] = set()
+    for line in lines:
+        if "x-gateway-token" not in line.lower():
+            continue
+        names.update(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", line))
+        names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\+?=\(", line))
+    return names
+
+
+def _references_shell_variable(text: str, names: set[str]) -> bool:
+    """shell 文本是否引用了集合里的任一变量（$VAR / ${VAR} 形态）。"""
+
+    return any(re.search(r"\$\{?" + re.escape(name) + r"\}?", text) for name in names)
+
+
+def _references_python_name(text: str, names: set[str]) -> bool:
+    """Python 文本是否引用了集合里的任一名字（裸标识符形态）。"""
+
+    return any(re.search(r"\b" + re.escape(name) + r"\b", text) for name in names)
+
+
+def _text_carries_credential_marker(text: str) -> bool:
+    """文本里是否出现凭据头名或产品凭据入口（大小写不敏感）。"""
+
+    lowered = text.lower()
+    return any(marker in lowered for marker in GATEWAY_CREDENTIAL_MARKERS)
+
+
+def _shell_logical_lines(text: str) -> list[tuple[int, str]]:
+    """把反斜杠续行合并成逻辑行，保留起始行号（报错要指到调用开始的那一行）。"""
+
+    merged: list[tuple[int, str]] = []
+    buffer = ""
+    start = 0
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.rstrip()
+        if not buffer:
+            start = number
+        if line.endswith("\\"):
+            buffer += line[:-1] + " "
+            continue
+        buffer += line
+        merged.append((start, buffer))
+        buffer = ""
+    if buffer:
+        merged.append((start, buffer))
+    return merged
+
+
+def _shell_text_offenders(text: str, rel: str) -> list[str]:
+    """返回 shell 文本里缺凭据的本机 Gateway curl 调用（文件:行 + 说明）。"""
+
+    lines = text.splitlines()
+    gateway_vars = _gateway_address_variables(lines)
+    credential_vars = _credential_variables(lines)
+    offenders: list[str] = []
+    for start, logical in _shell_logical_lines(text):
+        stripped = logical.strip()
+        if not stripped or stripped.startswith("#") or "curl" not in logical:
+            continue
+        targets = bool(GATEWAY_TARGET_RE.search(logical)) or _references_shell_variable(
+            logical, gateway_vars)
+        if not targets or GATEWAY_PUBLIC_ROUTE_RE.search(logical):
+            continue
+        if _text_carries_credential_marker(logical) or _references_shell_variable(logical, credential_vars):
+            continue
+        offenders.append(
+            f"{rel}:{start} curl 指向本机 Gateway 但未带凭据头（X-Gateway-Token/凭据变量），且非公开路由")
+    return offenders
+
+
+def _dotted_call_name(node: ast.expr) -> str:
+    """拼出调用表达式的点分名字（如 urllib.request.urlopen）。"""
+
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _enclosing_scope_text(source: str, lineno: int, ranges: list[tuple[int, int]]) -> str:
+    """返回调用点所属函数的源码段；模块级调用返回整个文件（脚本型代码凭据常与调用分离）。"""
+
+    enclosing = [item for item in ranges if item[0] <= lineno <= item[1]]
+    if not enclosing:
+        return source
+    start, end = min(enclosing, key=lambda item: item[1] - item[0])
+    return "\n".join(source.splitlines()[start - 1:end])
+
+
+def _python_text_offenders(source: str, rel: str) -> list[str]:
+    """返回 Python 文本里缺凭据的本机 Gateway urllib 调用（文件:行 + 说明）。"""
+
+    try:
+        tree = ast.parse(source, filename=rel)
+    except SyntaxError:
+        return []
+    gateway_vars = _gateway_address_variables(source.splitlines())
+    ranges = [
+        (node.lineno, node.end_lineno or node.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _dotted_call_name(node.func)
+        if call_name not in PYTHON_HTTP_CALL_NAMES:
+            continue
+        segment = ast.get_source_segment(source, node) or ""
+        targets = bool(GATEWAY_TARGET_RE.search(segment)) or _references_python_name(
+            segment, gateway_vars)
+        if not targets or GATEWAY_PUBLIC_ROUTE_RE.search(segment):
+            continue
+        if _text_carries_credential_marker(_enclosing_scope_text(source, node.lineno, ranges)):
+            continue
+        offenders.append(
+            f"{rel}:{node.lineno} {call_name} 指向本机 Gateway 但未带凭据"
+            "（gateway_script_headers/X-Gateway-Token），且非公开路由")
+    return offenders
+
+
+def _gateway_script_credential_offenders() -> list[str]:
+    """扫描 scripts/ 下全部脚本，返回未带凭据的本机 Gateway 调用。"""
+
+    offenders: list[str] = []
+    for path in _gateway_script_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".sh":
+            offenders.extend(_shell_text_offenders(text, rel))
+        else:
+            offenders.extend(_python_text_offenders(text, rel))
+    return offenders
+
+
+def test_scripts_gateway_http_calls_carry_credentials() -> None:
+    """scripts/ 下指向本机 Gateway 的 curl/urllib 调用必须带凭据头或访问公开路由。"""
+
+    offenders = _gateway_script_credential_offenders()
+    assert not offenders, "scripts/ 下存在未带本机凭据的 Gateway 调用：\n" + "\n".join(offenders)
+
+
+def test_gateway_script_credential_rule_self_check() -> None:
+    """守卫规则合成样本自检：违规形态必须被标记，合规与公开路由必须通过。"""
+
+    assert _gateway_address_variables(['GW="http://127.0.0.1:8420"']) == {"GW"}
+    assert _shell_text_offenders('GW="http://127.0.0.1:8420"\ncurl -s "$GW/ask"\n', "sample.sh")
+    assert not _shell_text_offenders(
+        'GW="http://127.0.0.1:8420"\nGW_AUTH_HEADER=(-H "X-Gateway-Token: $T")\n'
+        'curl -s "$GW/ask" ${GW_AUTH_HEADER[@]+"${GW_AUTH_HEADER[@]}"}\n',
+        "sample.sh",
+    )
+    assert not _shell_text_offenders('GW="http://127.0.0.1:8420"\ncurl -s "$GW/status"\n', "sample.sh")
+    assert _python_text_offenders(
+        'import urllib.request\n'
+        'def go():\n'
+        '    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n',
+        "sample.py",
+    )
+    assert not _python_text_offenders(
+        'from agent_py_agent.cli.gateway_client_headers import gateway_script_headers\n'
+        'def go():\n'
+        '    gateway_script_headers()\n'
+        '    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n',
+        "sample.py",
+    )
