@@ -1,5 +1,32 @@
 # 测试与发布验收
 
+## M1 B4 直接隔离与一次性装配诊断（b4gs，2026-10-04，`worker/b4g-small`，基线 `33d903aab`；已实施，待非作者复审）
+
+- **来源与做法**：按 3a/ds2 建议直接调 `gateway_event_context`，构造器抛错仍返回 None，四调用方不参与；新增 warning 正例先在未改产品时因记录/尝试为零失败。启用后异常仅固定 `event`/`reason_code`，同进程同原因锁保护去重；关闭或无法确认开关时不诊断、不读后续字段。日志 sink 故障、并发去重、不附异常正文/配置值/路径/traceback 都有断言。原 owner、权限、执行器和核验链不变。
+- **首轮直接回归**：指定 Python，在树根执行两个改动直接文件，`-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-b4gs`：**54 passed in 4.89s**。收尾再补 `test_enabled_tool_gateway_import_fault_warns_and_returns_none`，修前 **1 failed in 2.66s**（真实导入故障触发，warning 为零）；调整为严格 True 后先准备共享诊断再导入 Gateway，修后纳入下列当前版本完整定向回归。
+- **最终定向范围**：实际 `pytest.main` 按 glob 列出六份 plugin_event 文件、读取 guards9.txt 核对十一份，再加 managed_gate，去重后十八个显式文件；同入口复现：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugin_event_display.py agent_py_agent/tests/test_plugin_event_e2e.py \
+    agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_hub.py \
+    agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_runtime.py \
+    agent_py_agent/tests/test_tool_operation_managed_gate.py \
+    agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py \
+    agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+    agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py \
+    agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+    agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py \
+    agent_py_agent/tests/test_constants_catalog.py \
+    -q --tb=short -rs -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-b4gs
+  ```
+  **349 passed in 63.07s，exit 0，无 skip/xfail**。这是补齐导入故障后的当前版本；此前同范围 348 passed 属于上一阶段，不冒充最终版本。包含变异之后的原源码回归；不跑全仓 pytest。
+- **源码副本变异**：六个独立指定 Python 进程 AST compile/exec 单函数副本，各自 pytest 都为 **1 failed、exit 1、无 collection error**：M2 去 gateway_event_context 自身 try；warning 函数静默返回；首次资格恒 True（不去重）；忽略关闭开关；warning 去掉日志异常保护；warning 添加 exc_info（泄漏异常正文）。合计 **6/6 被抓到**，源文件 SHA256 前后一致，未写磁盘或另开工作树。
+  M2 复现：解析 `gateway_parts/event_points.py` 的 `gateway_event_context` AST，将其 `Try` 节点替换为 `Try.body`，用原模块 globals compile/exec；只运行 `test_plugin_event_gateway.py::test_gateway_context_assembly_failure_is_isolated_without_callers`。其余变异对应 `test_gateway_context_failure_warns_once_only_when_enabled[True/False]` 或 `test_gateway_warning_sink_failure_cannot_escape`；32 次/8 线程的真实 logger 去重断言在正常回归中通过。
+- **当前版本门禁**：`$PY scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`；`$PY -m ruff check agent_py_agent scripts`：`All checks passed!`；`$PY scripts/check_doc_sync.py`：`DOC_SYNC_PASS`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：`strict_scope_total=2204 hard=0 high-risk=1507 soft=697 test_advisory=1234 blocked=False`；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"`：**新增告警 0、消失告警 39**；`git diff --check` 干净；`$PY scripts/check_clean_package.py .`：`OK: . 未发现发布阻塞项`。常数目录守卫（897 项）在十一份 guards9 内通过；生成 `CODE_SIZE_REPORT.md` 已还原 HEAD，不提交。仅新增/修改既有函数和测试，未新增重要文件或配置项。
+- **未验证**：本机隔离 home/echo/HTTP 与真实 Registry/Executor/计数 handler 只证明该入口。本轮未验证生产 Gateway、真实模型/TUI/IM、B7 实际安装启用/OS 沙箱/断网、text 确认许可链，也未重跑 3a 的 Linux 全范围；不引用旧 b4g 门禁冒充本切片。
+
 ## B5×B7 跨件：收紧征询遇上插件进程慢/起不来（b5x，2026-10-04，分支 `worker/b5x`，基于 17j 头 `1e1aadb80`）
 
 - 来源：b5b7x 只读交叉审查里列的三条跨件缝隙（B5 的加固门与 B7 的沙箱底座一直分开审）。本次只做其中**不依赖 B7 接线**的三条：冷启动撞预算、运行中沙箱起不来、进程被杀后的下一次征询；"总开关关掉就不再征询"要等 B7 挑入后接线时一起做。

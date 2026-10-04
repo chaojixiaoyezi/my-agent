@@ -14,7 +14,7 @@ from agent_py_agent.agent.agent_core.tool_call_runtime import (
 )
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
-from agent_py_agent.tests.test_plugin_event_gateway import gateway
+from agent_py_agent.tests.test_plugin_event_gateway import event_warning_log, gateway
 from agent_py_agent.tests.test_tool_operation_managed_gate import (
     _direct_register_chain,
     _gate_call,
@@ -28,7 +28,7 @@ from agent_py_agent.tests.test_tool_operation_managed_gate import (
 from agent_py_agent.tests.test_tool_runtime_scope import _register_run
 from agent_py_agent.tests.test_tool_runtime_unification import _CountingTool, _snapshot
 
-_FIXTURES = (gateway,)
+_FIXTURES = (gateway, event_warning_log)
 
 
 def _params(agent, tool, *, kind='main'):
@@ -152,7 +152,7 @@ def test_optional_event_config_fault_never_aborts_real_tool(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize('fault', ['routing_read', 'assembler'])
-def test_optional_event_assembly_fault_never_aborts_real_tool(gateway, monkeypatch, fault):
+def test_optional_event_assembly_fault_never_aborts_real_tool(gateway, monkeypatch, event_warning_log, fault):
     from agent_py_agent.agent.gateway_parts import event_points
 
     class Routing(dict):
@@ -179,8 +179,13 @@ def test_optional_event_assembly_fault_never_aborts_real_tool(gateway, monkeypat
     assert tool.executions == 1
     assert events == []
 
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert len(records) == 1
+    assert records[0].event == 'plugin_events.assembly_failed'
+    assert records[0].reason_code == 'PLUGIN_EVENT_TOOL_CONTEXT_FAILED'
 
-def test_event_switch_off_never_reads_optional_routing_or_assembler(monkeypatch):
+
+def test_event_switch_off_never_reads_optional_routing_or_assembler(monkeypatch, event_warning_log):
     from agent_py_agent.agent.agent_core.tool_call_runtime import _tool_event_context
 
     class Request:
@@ -190,6 +195,26 @@ def test_event_switch_off_never_reads_optional_routing_or_assembler(monkeypatch)
 
     agent = SimpleNamespace(config=SimpleNamespace(plugin_events_enabled=False))
     assert _tool_event_context(SimpleNamespace(agent=agent, request=Request()), object()) is None
+    assert not any(r.name.endswith('plugin_events.points') for r in event_warning_log.records)
+
+
+def test_enabled_tool_gateway_import_fault_warns_and_returns_none(monkeypatch, event_warning_log):
+    import builtins
+
+    from agent_py_agent.agent.agent_core import tool_call_runtime
+
+    original, attempts = builtins.__import__, []
+    def fail_gateway_import(name, *args, **kwargs):
+        if name == 'gateway_parts.event_points':
+            attempts.append(True)
+            raise ImportError('private import failure marker')
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', fail_gateway_import)
+    request = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(plugin_events_enabled=True)))
+    assert tool_call_runtime._tool_event_context(request, object()) is None
+    assert attempts == [True]
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert len(records) == 1 and records[0].reason_code == 'PLUGIN_EVENT_TOOL_CONTEXT_FAILED'
 
 
 def test_registry_optional_event_context_read_failure_does_not_abort_real_handler(gateway):

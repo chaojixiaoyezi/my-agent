@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from types import SimpleNamespace
 
@@ -177,7 +179,8 @@ def test_disabled_gateway_context_does_not_assemble(gateway, monkeypatch):
 
 
 @pytest.mark.parametrize('enabled', [False, True])
-def test_prompt_owner_resolution_failure_is_closed_and_disabled_does_not_resolve(gateway, monkeypatch, enabled):
+def test_prompt_owner_resolution_failure_is_closed_and_disabled_does_not_resolve(
+        gateway, monkeypatch, event_warning_log, enabled):
     from agent_py_agent.agent.gateway_parts import event_points, request_worker
 
     agent, _paths, server, events = gateway
@@ -190,6 +193,10 @@ def test_prompt_owner_resolution_failure_is_closed_and_disabled_does_not_resolve
     event_points.prompt_queued(server, {'id': 'unknown-owner', 'prompt': 'private-marker'})
     assert calls == ([True] if enabled else [])
     assert events == []
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert len(records) == int(enabled)
+    if enabled:
+        assert records[0].reason_code == 'PLUGIN_EVENT_PROMPT_OWNER_UNAVAILABLE'
 
 
 # LLM: 活动回合里成功插话的回执是 active_pending，不是 created 的排队；_handle_idempotent_ordinary_ask 只在
@@ -321,3 +328,124 @@ def test_gateway_event_entries_bad_routing_never_escapes(gateway, monkeypatch, e
              'ended': partial(event_points.turn_ended, context, broken, 1)}
     assert calls[entry]() is None
     assert events == []
+
+
+# LLM: 去重状态只替换本 pytest 进程的诊断集合，不改开关、业务或 logger 行为；关闭仍必须零装配。
+# 函数用途: 隔离进程级 warning 首次资格，保留真实 logging 记录供结构化断言。
+@pytest.fixture
+def event_warning_log(monkeypatch, caplog):
+    from agent_py_agent.agent.plugin_events import points
+
+    monkeypatch.setattr(points, '_WARNED_PLUGIN_EVENT_ASSEMBLY_REASONS', set(), raising=False)
+    caplog.set_level(logging.WARNING, logger=points.__name__)
+    return caplog
+
+
+# LLM: 故障发生在 EventPointContext 构造本身，异常正文故意放私密标记；所有外层调用方兜底都不参与。
+# 函数用途: 为直接隔离、去重与不泄漏断言提供可复现的装配异常。
+def _fail_event_context(*_args, **_kwargs):
+    raise RuntimeError('private-prompt-marker private-config-marker /private/source-marker')
+
+
+def test_gateway_context_assembly_failure_is_isolated_without_callers(gateway, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, server, events = gateway
+    monkeypatch.setattr(event_points, 'EventPointContext', _fail_event_context)
+    assert event_points.gateway_event_context(agent, {}, server=server) is None
+    assert events == []
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_gateway_context_failure_warns_once_only_when_enabled(gateway, monkeypatch, event_warning_log, enabled):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, server, events = gateway
+    agent.config.plugin_events_enabled = enabled
+    agent.config.model_name = 'private-config-marker'
+    calls = []
+    def fail(*args):
+        calls.append(True)
+        return _fail_event_context(*args)
+    monkeypatch.setattr(event_points, 'EventPointContext', fail)
+    for _ in range(2):
+        assert event_points.gateway_event_context(agent, {}, server=server) is None
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert calls == ([True, True] if enabled else [])
+    assert events == [] and len(records) == int(enabled)
+    if enabled:
+        record = records[0]
+        assert record.levelno == logging.WARNING
+        assert record.event == 'plugin_events.assembly_failed'
+        assert record.reason_code == 'PLUGIN_EVENT_GATEWAY_CONTEXT_FAILED'
+        assert record.exc_info is None and record.stack_info is None
+        assert not any(marker in str(record.__dict__) for marker in (
+            'private-prompt-marker', 'private-config-marker', '/private/source-marker'))
+
+
+@pytest.mark.parametrize('entry', ['prompt', 'turn', 'command', 'ended'])
+def test_gateway_entry_field_failure_warns_once(gateway, monkeypatch, event_warning_log, entry):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, server, events = gateway
+    monkeypatch.setattr(event_points, '_prompt_has_base_owner', lambda *_: True)
+    context = event_points.gateway_event_context(agent, {}, server=server)
+    broken = _BrokenEventFields()
+    calls = {'prompt': partial(event_points.prompt_queued, server, broken),
+             'turn': partial(event_points.turn_started, agent, broken),
+             'command': partial(event_points.command_completed, agent, broken),
+             'ended': partial(event_points.turn_ended, context, broken, 1)}
+    for _ in range(2):
+        assert calls[entry]() is None
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    reasons = {'prompt': 'PLUGIN_EVENT_PROMPT_ASSEMBLY_FAILED', 'turn': 'PLUGIN_EVENT_TURN_START_ASSEMBLY_FAILED',
+               'command': 'PLUGIN_EVENT_COMMAND_ASSEMBLY_FAILED', 'ended': 'PLUGIN_EVENT_TURN_END_ASSEMBLY_FAILED'}
+    assert events == [] and len(records) == 1
+    assert records[0].reason_code == reasons[entry]
+    assert records[0].event == 'plugin_events.assembly_failed'
+
+
+def test_gateway_disabled_entries_do_not_warn_or_read_fields(gateway, event_warning_log):
+    from agent_py_agent.agent.gateway_parts import event_points
+    from agent_py_agent.agent.plugin_events.points import EventPointContext
+
+    agent, _paths, server, events = gateway
+    agent.config.plugin_events_enabled = False
+    reads, source = [], _BrokenEventFields()
+    context = EventPointContext(agent.config, lambda e: events.append(e))
+    assert event_points.gateway_event_context(agent, _UnreadableEventFields(reads), server=server) is None
+    assert event_points.prompt_queued(server, source) is None
+    assert event_points.turn_started(agent, source) is None
+    assert event_points.command_completed(agent, source) is None
+    assert event_points.turn_ended(context, source, 1) is None
+    assert reads == [] and events == []
+    assert not any(r.name.endswith('plugin_events.points') for r in event_warning_log.records)
+
+
+def test_gateway_context_warning_is_thread_safe(gateway, monkeypatch, event_warning_log):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, server, events = gateway
+    monkeypatch.setattr(event_points, 'EventPointContext', _fail_event_context)
+    call = partial(event_points.gateway_event_context, agent, {}, server=server)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: call(), range(32)))
+    assert results == [None] * 32 and events == []
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert len(records) == 1 and records[0].reason_code == 'PLUGIN_EVENT_GATEWAY_CONTEXT_FAILED'
+
+
+def test_gateway_warning_sink_failure_cannot_escape(gateway, monkeypatch, event_warning_log):
+    from agent_py_agent.agent.gateway_parts import event_points
+    from agent_py_agent.agent.plugin_events import points
+
+    agent, _paths, server, events = gateway
+    monkeypatch.setattr(event_points, 'EventPointContext', _fail_event_context)
+    attempts = []
+    def unavailable(*_args, **_kwargs):
+        attempts.append(True)
+        raise RuntimeError('logging sink unavailable')
+    monkeypatch.setattr(logging.getLogger(points.__name__), 'warning', unavailable)
+    for _ in range(2):
+        assert event_points.gateway_event_context(agent, {}, server=server) is None
+    assert attempts == [True] and events == [] and event_warning_log.records == []

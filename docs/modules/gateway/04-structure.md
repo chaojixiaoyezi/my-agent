@@ -1,5 +1,7 @@
 # Gateway Structure
 
+- b4gs（2026-10-04）：`plugin_events.points.warn_event_assembly_failure` 是唯一装配诊断入口，只接宿主固定原因码，以进程内集合与锁去重；logging 不持集合锁，日志异常隔离。Gateway 各入口仅在确认开关严格 True 后调用；不读取配置值、正文、安装表或第二份业务状态，关闭仍短路。
+
 ## B5第5段组合装配（b5s5，2026-10-04，整体WIP）
 
 审批仍走原StreamApproval/AgentToolApprovalSinkMixin、canonical claim/child attempt；本轮只加独立换轮/停止与I4引用断言。Registry→唯一Executor→原archive_tool_call_record→persist_tool_runtime_ledger写门决定，B6原info消费者只读同一owner库；没有替代展示/路由或第二批准源。sol2事件装配点保持17j，真实宿主启用与客户端未验。

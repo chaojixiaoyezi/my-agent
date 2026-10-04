@@ -1,5 +1,11 @@
 # 设计台账
 
+## M1 B4 直接隔离与一次性装配诊断（b4gs，2026-10-04，基于 `33d903aab`；已实施，待非作者复审）
+
+- **来源**：3a 转 ds2 两条建议；直接调用 `gateway_event_context` 注入构造异常，不让四个调用方的兜底掩盖 M2 变异。
+- **诊断**：确认 `plugin_events_enabled is True` 后的 Gateway/提示 owner/提示字段/回合/命令/工具上下文异常，统一记 `event=plugin_events.assembly_failed` 与固定 `reason_code`。同一进程同原因锁保护去重，日志 sink 抛错也不反噬业务；无配置、开关未知或关闭仍静默，不读后续事件字段，合法归属过滤不告警。只写诊断，不增加状态源、执行路径、配置项或插件访问。
+- **证据与边界**：首轮两个直接文件 **54 passed**；再补启用后 Gateway 局部导入故障的有效红→绿，先准备共享诊断再导入装配入口。当前全部六份 `test_plugin_event*.py`、managed_gate 与十一份 guards9（含 packaging/constants_catalog）共十八文件 **349 passed**；M2、缺 warning、缺去重、关闭不静默、日志异常穿透、异常正文泄漏六个源码副本变异 **6/6 被抓到**，磁盘字节未改。门禁、复现和未验生产范围见 TESTS；不把本机隔离回归扩大为生产 Gateway/TUI/IM 或 B7 验收。
+
 ## B5×B7 跨件用例：收紧征询遇上慢/起不来的插件（b5x，2026-10-04，分支 `worker/b5x`，基于 17j 头 `1e1aadb80`；待复审）
 
 - **起因**：b5b7x 只读交叉审查提出 B5 的加固门与 B7 的沙箱底座缺少合起来的用例。本次做其中不依赖 B7 接线的三条。

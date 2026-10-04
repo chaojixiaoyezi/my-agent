@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
-from ..plugin_events.points import EventPointContext, emit_event
+from ..plugin_events.points import EventPointContext, emit_event, warn_event_assembly_failure
 
 
 # LLM: 复用宿主已冻结的路径，提供 B3 安装读取与连接需要的两个字段；这里不解析或检查文件系统。
@@ -27,13 +27,15 @@ def _enabled_event_config(agent):
         return None
 
 
-# LLM: server 是唯一 HTTP 宿主；开关在路由/路径装配前检查，所有观察装配异常返回 None，不改 worker 的 owner 或权限链。
+# LLM: server 是唯一 HTTP 宿主；开关在路由/路径装配前检查，启用后的异常仅一次固定原因诊断并返回 None，不改 owner/权限链。
 # 函数用途: 从内存宿主事实构造发布上下文，关闭、缺失或装配失败时零发布、零磁盘读取。
 def gateway_event_context(agent, routing: dict, *, server=None) -> EventPointContext | None:
+    enabled = False
     try:
         config = _enabled_event_config(agent)
         if config is None:
             return None
+        enabled = True
         from . import http_service, plugin_panels_http
 
         server = server if server is not None else http_service._server_instance
@@ -44,10 +46,12 @@ def gateway_event_context(agent, routing: dict, *, server=None) -> EventPointCon
                                  str(routing.get('channel') or ''), str(routing.get('thread_id') or ''),
                                  str(routing.get('actor') or 'main'))
     except Exception:  # noqa: BLE001 观察装配故障不能中止入队或模型执行
+        if enabled:
+            warn_event_assembly_failure('PLUGIN_EVENT_GATEWAY_CONTEXT_FAILED')
         return None
 
 
-# LLM: 复用请求 worker 的唯一结构化 owner 解析（含管理员绑定），不创建 scoped Agent；解析失败按未知处理。
+# LLM: 复用请求 worker 的唯一结构化 owner 解析；解析异常按未知处理，只在确认启用时记固定原因，不记录身份或错误正文。
 # 函数用途: 确认提示属于基础 owner，防止 local/tui 的其它用户被错投到主用户插件。
 def _prompt_has_base_owner(agent, request: dict) -> bool:
     try:
@@ -56,16 +60,20 @@ def _prompt_has_base_owner(agent, request: dict) -> bool:
 
         return _resolve_request_owner_identity(agent, request) == owner_identity_from_config(agent.config)
     except Exception:  # noqa: BLE001 无法证明归属时不发观察，入队和 worker 仍沿原权限链处理
+        if _enabled_event_config(agent) is not None:
+            warn_event_assembly_failure('PLUGIN_EVENT_PROMPT_OWNER_UNAVAILABLE')
         return False
 
 
-# LLM: 安全检查开关先于 owner/路由读取；复用 worker 唯一 owner 解析，整个观察装配异常隔离，不影响已成功入队事实。
+# LLM: 开关先于 owner/路由读取；观察装配异常隔离，确认启用后只记一次固定原因，不影响已成功入队事实。
 # 函数用途: 首次排队后仅向基础 owner 发提示观察；缺配置、字段或装配故障不发，关闭不读取请求。
 def prompt_queued(server, request: dict) -> None:
+    enabled = False
     try:
         agent = server.agent
         if _enabled_event_config(agent) is None:
             return
+        enabled = True
         if not _prompt_has_base_owner(agent, request):
             return
         metadata = request.get('metadata') or {}
@@ -79,31 +87,39 @@ def prompt_queued(server, request: dict) -> None:
             'prompt': request.get('prompt') or request.get('goal') or '',
             'has_attachments': bool(request.get('input_media'))})
     except Exception:  # noqa: BLE001 提示观察不能改变 HTTP 入队结果
+        if enabled:
+            warn_event_assembly_failure('PLUGIN_EVENT_PROMPT_ASSEMBLY_FAILED')
         return
 
 
-# LLM: 控制回执由唯一执行服务冻结 owner；关闭零回执读取，观察字段/装配异常不改变已持久提交的控制结果。
+# LLM: 控制回执由唯一执行服务冻结 owner；关闭零回执读取，启用后字段/装配异常仅一次固定原因日志，不改变控制结果。
 # 函数用途: 将新 completed 回执减量为命令名和状态；缺上下文不发，不带参数或错误正文。
 def command_completed(agent, receipt) -> None:
+    enabled = False
     try:
         if _enabled_event_config(agent) is None:
             return
+        enabled = True
         context = gateway_event_context(agent, {'channel': receipt.channel, 'thread_id': receipt.conversation_id})
         if context is None:
             return
         emit_event(context, 'command_executed', {'command': '/' + receipt.command_kind,
             'operation_id': receipt.operation_id, 'state': 'ok' if receipt.result.get('ok') is True else 'failed'})
     except Exception:  # noqa: BLE001 命令观察不能改变已落定的业务回执
+        if enabled:
+            warn_event_assembly_failure('PLUGIN_EVENT_COMMAND_ASSEMBLY_FAILED')
         return
 
 
-# LLM: 开关先于请求字段读取；只取已解析通道/会话和模型名，观察装配失败返回 None，不影响真实请求执行。
+# LLM: 开关先于请求字段读取；装配异常返回 None，启用后的固定原因诊断不包含通道/会话/模型或错误正文。
 # 函数用途: 请求真正开始前发最小回合观察；缺失或关闭时不读路由，不带服务商或密钥。
 def turn_started(agent, request: dict) -> EventPointContext | None:
+    enabled = False
     try:
         config = _enabled_event_config(agent)
         if config is None:
             return None
+        enabled = True
         conversation = request.get('conversation') or {}
         metadata = request.get('metadata') or {}
         context = gateway_event_context(agent, {'channel': conversation.get('channel') or metadata.get('channel') or '',
@@ -114,19 +130,25 @@ def turn_started(agent, request: dict) -> EventPointContext | None:
             'model_name': getattr(config, 'model_name', '')})
         return context
     except Exception:  # noqa: BLE001 回合观察装配失败不能阻止模型执行
+        if enabled:
+            warn_event_assembly_failure('PLUGIN_EVENT_TURN_START_ASSEMBLY_FAILED')
         return None
 
 
-# LLM: 缺上下文/关闭先返回，零响应读取；四状态只取终态/重启标记，观察字段故障不能翻转真实回合终态。
+# LLM: 缺上下文/关闭先返回，零响应读取；启用后的字段故障仅一次固定原因诊断，不能翻转真实回合终态。
 # 函数用途: 回合收口时发布最小终态，保留失败和中断事实；观察不可用则不发。
 def turn_ended(context, response: dict, duration_ms: float) -> None:
+    enabled = False
     try:
         if _enabled_event_config(context) is None:
             return
+        enabled = True
         status = 'interrupted' if response.get('restart_resume') else str(response.get('status') or 'failed')
         emit_event(context, 'turn_ended', {'request_id': response.get('id') or '',
             'status': status if status in {'done', 'failed', 'stopped', 'interrupted'} else 'failed',
             'duration_ms': duration_ms, 'tool_calls': response.get('tool_calls', 0),
             'error_code': response.get('error_code') or ''})
     except Exception:  # noqa: BLE001 回合收口观察故障不能反噬业务终态
+        if enabled:
+            warn_event_assembly_failure('PLUGIN_EVENT_TURN_END_ASSEMBLY_FAILED')
         return

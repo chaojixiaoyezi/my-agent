@@ -213,14 +213,18 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     return execution
 
 
-# LLM: 可选观察装配独立隔离异常；缺配置、读取或装配故障均返回 None，不影响唯一工具执行链。关闭先返回，零路由读取/导入/发布。
+# LLM: 可选观察装配独立隔离；关闭零路由读取/导入/发布。启用后先备诊断再导入 Gateway，导入/装配故障均仅固定原因。
 # 只读宿主不可变 actor 与 RunScope，沿 Gateway 唯一发布口装配；同步检查 Registry 接缝与 test_plugin_event_runtime。
-# 函数用途: 安全传递主、子代理与决策工具观察身份；观察不可用时不发事件，工具仍按原权限合同执行。
+# 函数用途: 安全传递工具观察身份，启用却装配失败时提示一次；观察不可用不改变原工具权限和执行。
 def _tool_event_context(runtime_request: ToolCallRuntimeRequest, scope):
+    warn = None
     try:
         agent = runtime_request.agent
         if getattr(getattr(agent, "config", None), "plugin_events_enabled", False) is not True:
             return None
+        from ..plugin_events.points import warn_event_assembly_failure
+
+        warn = warn_event_assembly_failure
         from ..gateway_parts.event_points import gateway_event_context
 
         request = runtime_request.request
@@ -231,6 +235,8 @@ def _tool_event_context(runtime_request: ToolCallRuntimeRequest, scope):
         return gateway_event_context(agent, {"actor": actor, "thread_id": scope.session_id,
             "channel": attrs.get("plugin_event_channel") or "local"})
     except Exception:  # noqa: BLE001 只隔离可选观察，权限、核验与 handler 异常不在此范围
+        if warn is not None:
+            warn('PLUGIN_EVENT_TOOL_CONTEXT_FAILED')
         return None
 
 

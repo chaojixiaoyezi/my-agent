@@ -1,14 +1,20 @@
-# LLM: B4 事件点只投影白名单标量并调用注入的 B3 发布口；不读安装表、不访问文件、不等待插件。
-# 模块用途: 统一六类观察事件的数据减量、会话哈希、提示脱敏和关闭/异常短路。
+# LLM: B4 事件点只投影白名单标量并调用注入的 B3 发布口；装配诊断仅固定原因码、进程内去重，不读安装表或等待插件。
+# 模块用途: 统一六类观察事件的减量与短路，以及启用后装配失败的一次性安全日志。
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..common.log_redaction import redact_sensitive_value
 from .protocol import EVENT_ACTOR_KINDS, MAX_PROMPT_CONTENT_CHARS, EventFact
+
+logger = logging.getLogger(__name__)
+_WARNED_PLUGIN_EVENT_ASSEMBLY_REASONS: set[str] = set()
+_PLUGIN_EVENT_ASSEMBLY_WARNINGS_LOCK = threading.Lock()
 
 # 事件目录 v1 的精确标量集合；额外输入（参数、输出、路径）永远不复制。
 _EVENT_FACT_FIELDS = {
@@ -19,6 +25,29 @@ _EVENT_FACT_FIELDS = {
     "tool_call_finished": ("call_id", "tool", "ok", "error_code", "failure_stage", "duration_ms", "handler_executed"),
     "command_executed": ("command", "operation_id", "state"),
 }
+
+
+# LLM: 原因由各宿主入口固定给出；锁只保护首次资格，不持锁调用 logging，也不存 owner、配置或异常对象。
+# 函数用途: 同一进程同一装配原因只认领一次，避免多线程故障刷屏。
+def _claim_event_assembly_warning(reason_code: str) -> bool:
+    with _PLUGIN_EVENT_ASSEMBLY_WARNINGS_LOCK:
+        if reason_code in _WARNED_PLUGIN_EVENT_ASSEMBLY_REASONS:
+            return False
+        _WARNED_PLUGIN_EVENT_ASSEMBLY_REASONS.add(reason_code)
+    return True
+
+
+# LLM: 调用方必须已经确认开关严格 True；只传固定宿主原因码，不传配置、正文、路径、异常或 traceback。
+# 诊断失败仍只丢这次日志，不能穿透 B4 隔离或业务链；资格先认领，因此坏日志 sink 也不会被重复调用。
+# 函数用途: 记录一次结构化装配 warning，让开启却未生效与关闭静默可区分。
+def warn_event_assembly_failure(reason_code: str) -> None:
+    try:
+        if not _claim_event_assembly_warning(reason_code):
+            return
+        logger.warning('插件事件观察已开启，但本次装配失败（reason_code=%s）；仅跳过观察，不影响业务。',
+                       reason_code, extra={'event': 'plugin_events.assembly_failed', 'reason_code': reason_code})
+    except Exception:  # noqa: BLE001 诊断本身不能反噬工具或 Gateway 业务
+        return
 
 
 # LLM: 身份、配置和发布回调只由宿主构造；正文与工具参数不能改变这些字段。
