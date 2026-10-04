@@ -1,5 +1,23 @@
 # Gateway 维护状态
 
+## G2b 读路径补最后一处：归档读不出的 403 也带缺凭据码（g2bfix1c，2026-10-04，worker/g2b-denial-server-fix2）
+
+- g2bfix1br 初审全面 grep 时查出：`_send_archived_terminal_result` 的 `load_error` 分支（归档文件存在但读不出）仍是裸 `_send_json(status, body)`，与已修的三处同在降匿名读路径上。
+- 本次一处改动：`handler._send_json(status, body)` → `handler._send_json(status, _denial_body(handler, body))`。状态码、`error`、`request_id` 与管理员侧 500 + `result_load_error` 全不变——该格普通用户恒走 403，加码分支不可能命中管理员。
+- 用例 21 → 23；变异 1 个（退回裸 `_send_json`）被抓。详见 TESTS.md 同名节。
+
+## G2b 读路径补齐：/result 自判 403 也带缺凭据码（g2bfix1b，2026-10-04，worker/g2b-denial-server-fix）
+
+- g2bfix1r 初审发现：`/result` 自己判的两处 403（队列记录损坏、队列记录属于别人）和归档终态那处 403 仍是手写裸 403，没走 `_denial_body`——同一条降匿名读路径上 `/progress` 带码、`/result` 不带，客户端仍分不清"没带凭据"和"真越权"。本次把这三处改成 `_denial_body(handler, {...})`。
+- 状态码、`error`、`request_id` 全部不变，只在"强制档 + 回环 + 没带凭据"这一格追加 `error_code`。`/control-status` 的 403 保持裸返回（它前置已挂 `require_trusted_source`，没带凭据到不了那一支）。
+- 用例 16 → 21；三个变异全红（两处 pending 403 退回裸、归档 403 退回裸、`_denial_body` 去掉判据）。详见 TESTS.md 同名节。
+
+## G2b 本机凭据缺失的结构化拒绝码（g2bfix1，2026-10-04，worker/g2b-denial-server，待初审）
+
+- 强制打开 `gateway_require_local_credential` 后，"回环 + 没带凭据"这一格的拒绝体加 `error_code: LOCAL_CREDENTIAL_REQUIRED`（状态码与既有 error/message 不变）。理由是 G2b 上线时客户端要能区分"本机客户端没换代码/没带凭据"（重启即可）和"远程来源真的越权"——只看 403 分不出来。
+- 两类入口都覆盖：挂 `require_trusted_source` 的端点由中间件补码；`/progress`、`/input-status`、`/result` 三个不挂该闸、改为降匿名后由端点自判 403/404 的读端点，经共享 `_denial_body` 补码。判定只读结构化事实（强制档位、对端 IP、凭据比对结果），不解析路径或文案。
+- 回环带错或过期凭据同样带这个码；远程不可信来源、来源未知不带；开关关着（迁移档）行为完全不变。
+
 ## B4 直接隔离与一次性诊断（b4gs，2026-10-04，待非作者复审）
 
 - 直接上下文构造故障回归杀掉 ds2 存活的 M2；启用后的装配异常统一固定原因 warning，进程级锁+集合去重，不带配置值、正文或 traceback。关闭/未知开关静默，合法归属过滤不告警，坏日志 sink 不改变业务。

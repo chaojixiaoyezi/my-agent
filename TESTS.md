@@ -1,5 +1,60 @@
 # 测试与发布验收
 
+## G2b 读路径补最后一处：归档读不出的 403 也带缺凭据码（g2bfix1c，2026-10-04，worker/g2b-denial-server-fix2；基于 g2bfix1b 头 e8c4b6d2d）
+
+- 来源：g2bfix1br 初审在全面 grep 时查出——`_send_archived_terminal_result` 的 `load_error` 分支（归档文件存在但读不出）也是裸 `_send_json(status, body)`；它在同一条"降匿名读路径"上，普通用户拿 403 却仍不带码。已实测：匿名请求一个结构损坏的归档 → 403 无码；包上 `_denial_body` 后 → 403 带 `LOCAL_CREDENTIAL_REQUIRED`。
+- 改动（只 `agent/gateway_parts/http_handlers.py` 一处）：`handler._send_json(status, body)` → `handler._send_json(status, _denial_body(handler, body))`，并把 `_denial_body` 的 LLM 注释补成"这三个端点每一处自判拒绝（含归档读不出）都必须走本函数"。管理员侧不受影响：该格普通用户恒走 403，管理员走 500 + `result_load_error`。
+- 新增用例（`agent_py_agent/tests/test_gateway_local_credential_required_code.py`，21 → **23**）：
+  - `test_result_broken_archive_carries_code_without_credential`：匿名 → 403 + 码（且不带 `result_load_error`）；带凭据 → 500 + `result_load_error` 且不带码。
+  - `test_result_broken_archive_has_no_code_when_switch_off`：开关关着 → 回环是可信来源，走管理员诊断视图（**500**，不是 403），不带码。构造要点：迁移档下回环不降匿名，所以这条不是 403；与强制档的差异正是"是否降匿名"。
+- 变异（1 个）：把这一处退回裸 `_send_json(status, body)` → `test_result_broken_archive_carries_code_without_credential` 变红；原字节还原、sha256 与工作区一致。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；`--basetemp=/private/tmp/claude-501/m-g2bfix1c`）：
+  - `agent_py_agent/tests/test_gateway_local_credential_required_code.py` → **23 passed**（改前 21）。
+  - 加 `test_gateway_local_trust_enforcement.py`、`..._observation.py`、`test_gateway_auth_hardening.py`、`test_auth.py`、`test_auth_class.py`、`test_gateway_local_client_token.py` → **143 passed**。
+  - guards9 清单全绿；ruff 全过、`check_doc_sync.py --base e8c4b6d2d` DOC_SYNC_PASS、`git diff --check` 干净、clean-package OK、strict code-size blocked=False、`size_diff.sh` 新增告警 0。
+- 未验证：真实 Gateway 端到端（沙箱内不起 Gateway）；客户端消费仍归 ds10。
+
+## G2b 读路径补齐：/result 自判 403 也带缺凭据码（g2bfix1b，2026-10-04，worker/g2b-denial-server-fix；基于 g2bfix1 头 0d838e585）
+
+- 来源：g2bfix1r 初审查出 `_send_pending_state` 的两个 403（记录损坏、记录属于别人）与 `_send_archived_terminal_result` 的 403 仍是手写裸 403，没走 `_denial_body`；同一条"降匿名读路径"上 `/progress` 带码、`/result` 不带，客户端在"记录坏掉/是别人的"时仍只能靠状态码猜。3a 采纳为必须改。
+- 改动（只 `agent/gateway_parts/http_handlers.py` 三处 `_send_json(403, ...)`）：
+  - `_send_archived_terminal_result` 的 `_can_read_payload` 失败分支（原 349 行）；
+  - `_send_pending_state` 的记录损坏分支与记录属于别人分支（原 480/483 行）。
+  三处都改成 `_denial_body(handler, {...})`，与 `/progress` 的 403（385 行）同一处理。`_denial_body` 的 LLM 注释补一句"这三处必须走本函数，别再手写裸 403"。状态码、`error`、`request_id` 全部不变，只在"强制档 + 回环 + 没带凭据"这一格追加 `error_code`。
+- 新增用例（`agent_py_agent/tests/test_gateway_local_credential_required_code.py`，16 → **21**）：
+  - `test_result_self_judged_forbidden_branches_carry_code[other_owner|corrupt]`：无凭据 403 带码；带凭据放行（不再带码、状态码不再是 403）。
+  - `test_result_self_judged_forbidden_branches_have_no_code_when_switch_off[other_owner|corrupt]`：开关关着不带码。
+  - `test_result_archived_terminal_owned_by_someone_else_carries_code`：直达 `_send_archived_terminal_result` 的 `_can_read_payload` 失败分支。
+  - 构造要点（写进用例注释）：`/result` 命中 inbox/processing 记录时，降匿名身份是 `anonymous`，记录里 `user_id` 写别的值才落到"不是本人"这一支；直达归档分支要造一份**结构自洽**的归档（`schema_version=gateway_terminal_request.v1`、`id` 与文件名一致、`terminal_response` 非空且其 `id` 相同），否则会先落到 `load_error` 分支（返回 `terminal result unavailable`），测不到要补的那一处。
+- 变异（3 个，各自把对应处退回裸 403 / 放宽判据，跑完原字节还原、sha256 与工作区一致）：
+  1. `_send_pending_state` 两处退回裸 403 → `other_owner`、`corrupt` 两条变红（2 failed）。
+  2. 归档终态那处退回裸 403 → 归档用例变红（1 failed）。
+  3. `_denial_body` 去掉判据（任何拒绝都加码）→ 开关关两条读端点用例 + 开关关挂闸用例变红（3 failed）。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；`--basetemp=/private/tmp/claude-501/m-ds6-g2bfix1b`）：
+  - `agent_py_agent/tests/test_gateway_local_credential_required_code.py` → **21 passed**（改前 16）。
+  - 加 `test_gateway_local_trust_enforcement.py`、`..._observation.py`、`test_gateway_auth_hardening.py`、`test_auth.py`、`test_auth_class.py`、`test_gateway_local_client_token.py` → **140 passed**。
+  - guards9 清单全绿；`check_import_boundaries.py` 0 条、ruff 全过、`check_doc_sync.py` DOC_SYNC_PASS、strict code-size `hard=0`、`git diff --check` 干净、clean-package OK、`size_diff.sh` 新增告警 0。
+- 未验证：真实 Gateway 端到端（规则禁止在沙箱里起 Gateway），全部结论来自真实 handler + 随机端口的 pytest；客户端（飞书适配器/TUI）如何消费这个码仍归 ds10。
+
+## G2b 本机凭据缺失码（g2bfix1，2026-10-04，worker/g2b-denial-server；基于 17j 头 35b1647e8；9b 终审通过，已并入 step17j）
+
+- 来源：g2bad 只读分析指出 G2b 打开后客户端无法区分"没带凭据"与"真越权"，设计稿 1.2 节（9b 建议）的 `LOCAL_CREDENTIAL_REQUIRED` 一直没落地。
+- **第 1 条坐实的三个自判端点**（真实 HTTP handler + 随机端口，`--basetemp` 不撞车；端口断言 != 8420）：强制档 + 无凭据下 `/progress/{id}` → **403**、`/input-status/{id}` → **404**、`/result/{id}` → **404**；带凭据后 `/progress` → 200，另两个仍是干净的 404（记录确实不存在）。这三个端点不挂 `require_trusted_source`。
+- 改动：`agent/auth/middleware.py`（模块级 `LOCAL_CREDENTIAL_REQUIRED` + `AuthMiddleware.needs_local_credential` + `require_trusted_source` 补码）、`agent/gateway_parts/http_handlers.py`（`_denial_body` + 三处 403/404 接线）。不改状态码与既有 error/message。
+- 新用例 `agent_py_agent/tests/test_gateway_local_credential_required_code.py`（16 点）：判定单元层 5 组参数化（回环/带对凭据/带错凭据/远程/来源未知）+ 开关关；挂闸入口 `/ask`、`/control`、`/client/notices`；三个自判读端点；开关关着不带码；远程被拒不带码。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_local_credential_required_code.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g2bfix1
+  ```
+- 结果：**16 passed**。
+- 相关回归：`test_gateway_local_trust_enforcement.py` + `test_gateway_local_trust_observation.py` + `test_gateway_auth_hardening.py` + `test_auth.py` + `test_auth_class.py` **97 passed**；再跑 `test_gateway_control_operation.py` + `test_gateway_bounded_http_server.py` + `test_gateway_client_credentials.py` + `test_gateway_adapter.py` + `test_gateway_commands.py` **144 passed**。
+- guards9：全绿。
+- 变异 3 个（驱动脚本 `/private/tmp/g2bfix1_mutate.py`，按备份原字节还原，还原后 sha256 与工作区一致）：
+  ① 去掉 `require_trusted_source` 的 error_code → 单元参数化 2 条 + 挂闸入口 3 条变红；
+  ② 去掉回环判断（远程也带码）→ 判定单元 + 远程参数化 + `test_remote_peer_denial_never_carries_code` 变红；
+  ③ 开关关着也返回码 → 开关关两条用例变红。**三个全部被抓**。
+- 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、`git diff --check` 干净。
+
 ## M1 B4 直接隔离与一次性装配诊断（b4gs，2026-10-04，`worker/b4g-small`，基线 `33d903aab`；已实施，待非作者复审）
 
 - **来源与做法**：按 3a/ds2 建议直接调 `gateway_event_context`，构造器抛错仍返回 None，四调用方不参与；新增 warning 正例先在未改产品时因记录/尝试为零失败。启用后异常仅固定 `event`/`reason_code`，同进程同原因锁保护去重；关闭或无法确认开关时不诊断、不读后续字段。日志 sink 故障、并发去重、不附异常正文/配置值/路径/traceback 都有断言。原 owner、权限、执行器和核验链不变。

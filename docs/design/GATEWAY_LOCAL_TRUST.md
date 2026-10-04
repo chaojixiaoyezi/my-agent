@@ -54,6 +54,11 @@
 - **不带凭据的回环请求**：强制打开后降为匿名 USER，和现在对待“不可信远程来源”一样（`extract_identity` 已有这条分支，`:74`），不认身份头、绝不给管理员；强制打开前只计数、不拦（第一版）。
 - **去掉“取不到对端地址就当可信”这一支**（9b）：`_peer_trusted` 现在 `peer_ip is None` 也返回可信。G2b 强制时一起去掉——生产 handler 都有 `client_address`，只有测试替身没有，留着等于一条按“来源未知”放行的旁路。
 - **G2b 后旧客户端的错误码**（9b 建议）：要凭据的路由对降匿名/被拒的旧客户端返回结构化码 `LOCAL_CREDENTIAL_REQUIRED`，TUI 和适配器据此提示“请重启客户端”，不让人对着 403 或匿名行为摸不着头脑。
+  - **已实现（g2bfix1，2026-10-04）**：响应体格式为 `{"error": "forbidden", "message": "...", "error_code": "LOCAL_CREDENTIAL_REQUIRED"}`，HTTP 状态码保持 403，`error`/`message` 两个既有字段原样保留，只在末尾追加 `error_code`。
+  - 判定只在“强制档 + 回环来源 + 没有有效凭据”这一格成立：回环没带凭据、带了错的或过期的凭据都带这个码（处置同为重启本机客户端换新凭据，两者回的一样，不多出判别信号）；远程不可信来源、来源未知、开关关着（迁移档）都不带这个码。
+  - 覆盖两类入口：① 挂 `require_trusted_source` 的端点（`/ask`、`/control`、`/client/notices`、插件面板与控制等）由 `AuthMiddleware.needs_local_credential` 判定后补码；② `/progress`、`/input-status`、`/result` 三个不挂该闸、先把身份降匿名再由端点自己判 403/404 的读端点，经共享 `_denial_body` 补码——否则客户端无法区分“没带凭据”与“这条记录真的不存在”。
+  - ② 这一类里，端点自己判的每一处拒绝都走 `_denial_body`：`/progress` 的读权限拒绝，`/input-status` 的读权限拒绝，`/result` 的读权限拒绝、队列记录损坏、队列记录属于别人、归档终态属于别人（最后三处由 g2bfix1b 补齐）、**归档读不出（g2bfix1c 补齐；管理员那一侧仍是 500 + 诊断，不受影响）**（`/control-status` 的 403 不在此列——它前置已挂 `require_trusted_source`，没带凭据的请求到不了该分支）。
+  - 判定只读结构化事实（开关档位、对端 IP、凭据比对结果），不解析路径、正文或 message。
 - **公开只读端点保持公开**：`/status`、`/metrics` 维持无需凭据（它们本来就只读、无副作用，监控要用）。这是显式白名单，不是“回环豁免”。
 - **插件令牌档**：`/plugin-host/query` 单列为“插件令牌”档，第一道关换成“`X-Plugin-Host-Token` 有效”，不看回环、不要客户端凭据（见 1.3、3.1 第 13 条）。
 - **没有中间件时**（`auth_enabled=false`）现在默认管理员（`:129`）。保持：此时 `_guard_network_exposure` 已强制只能绑回环（`http_service.py:384`），是单机无鉴权档，属于用户显式关掉鉴权的选择；文档写明这一档不受本设计保护。

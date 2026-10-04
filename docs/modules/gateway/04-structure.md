@@ -38,6 +38,9 @@
 ## G2b 服务端强制（2026-10-03，g2b，待 9b 终审）
 
 - `agent/auth/middleware.py`：`AuthMiddleware` 新增 `require_local_credential` 参数；`_peer_trusted` 分档——强制档只认 `has_gateway_credential`（回环不带信任、`peer_ip=None` 不放行），迁移档保持 G2a 旧分支；`observe_loopback_request` 只按路由模板计数。
+  - g2bfix1：新增模块级 `LOCAL_CREDENTIAL_REQUIRED` 与 `AuthMiddleware.needs_local_credential(peer_ip, headers)`（只读开关档位、对端 IP、凭据比对结果，回答"这一格拒绝该不该带结构化码"）；`require_trusted_source` 在该格给 403 响应体补 `error_code`，状态码与 error/message 不变。
+  - g2bfix1b：`http_handlers` 里 `/result` 自判的三处 403（`_send_archived_terminal_result` 的 `_can_read_payload` 失败、`_send_pending_state` 的记录损坏与记录属于别人）统一改走共享 `_denial_body`，与 `/progress` 的 403 同口径；这三处是该共享判定的唯一合法出口，新增同类分支时不得再手写裸 403。
+  - g2bfix1c：`_send_archived_terminal_result` 的 `load_error` 分支（归档读不出）同样改走 `_denial_body`——它在同一条降匿名读路径上，普通用户 403 必须带码；管理员侧 500 + `result_load_error` 不受影响（加码只在普通用户那个 403 格成立）。至此 `/result` 自判的每一处拒绝都与 `/progress` 同口径。
 - `agent/gateway_parts/http_service.py`：`GatewayHTTPServerParams` 新增 `require_local_credential`；新增 `GatewayLocalCredentialRequired(RuntimeError)`（带 reason_code）；`_degrade_or_refuse` 在开关开且凭据不可用时拒绝启动，开关关走原降级。
 - `cli/gateway_process.py`：`_build_gateway_auth_middleware` 与 `_start_gateway_http` 从同一份 AgentConfig 读开关传入。
 - `agent/plugin_host_api.py`：`handle_plugin_host_query` 先验插件令牌，有效即放行，令牌无效才回落 `require_trusted_source`。

@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 # 回环对端:本机可信来源(适配器/CLI 走 127.0.0.1 调网关)。
 _LOOPBACK_PEERS = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
 
+# LLM: G2b 后旧客户端的可判别拒绝码（设计稿 1.2，9b 建议）：强制档下回环请求没带有效凭据时，
+#   它和"远程不可信来源"一样被拒，但两者的处置完全不同——前者只需重启客户端补上凭据，
+#   后者是真的越权。只靠 403 分不出来，所以给这一格一个结构化码，客户端据此提示"请重启客户端"，
+#   不解析 message。
+# 字段用途: 强制档下"回环来源但没带本机凭据"的机器可读错误码。
+LOCAL_CREDENTIAL_REQUIRED = "LOCAL_CREDENTIAL_REQUIRED"
+
 
 def _is_loopback_peer(peer_ip: str) -> bool:
     ip = (peer_ip or "").strip().lower().strip("[]")
@@ -120,6 +127,19 @@ class AuthMiddleware:
         if peer_ip is None or _is_loopback_peer(peer_ip):
             return True
         return self.has_gateway_credential(headers)
+
+    # LLM: 只回答"这一格拒绝该不该带 LOCAL_CREDENTIAL_REQUIRED"，不改变任何允许/拒绝结果：
+    #   必须同时满足三件事——强制档开着、来源是回环本机、且没有有效凭据。没带凭据和带了错或过期凭据的回环
+    #   都算“没有有效凭据”，同样带码（处置都是重启客户端，且两者回的一样，不多出判别信号）；远程不可信来源、
+    #   来源未知不带码（远程重启也补不上本机凭据，来源未知证明不了是本机），各按既有形态返回。
+    #   判定只看结构化事实（开关档位、对端 IP、凭据比对结果），不解析任何文案。
+    # 函数用途: 判断一次来源拒绝是否属于"回环 + 强制档 + 没有有效凭据（没带，或带了错的/过期的）"这一格。
+    def needs_local_credential(self, peer_ip: str | None, headers: dict[str, str]) -> bool:
+        if not self._require_local_credential:
+            return False
+        if peer_ip is None or not _is_loopback_peer(peer_ip):
+            return False
+        return not self.has_gateway_credential(headers)
 
     def extract_identity(self, headers: dict[str, str], peer_ip: str | None = None) -> tuple[str, str]:
         """提取 (user_id, channel)。不可信来源 → 匿名 USER(不认 header,绝不 admin)。"""
@@ -213,12 +233,21 @@ def require_trusted_source(handler) -> bool:
 
     与 require_admin 区别:提交自己的任务是普通已认证用户行为(渠道用户应能 ask),只挡不可信来源,
     不按角色挡;停网关/跨用户等才走 require_admin。返回 True=已拒绝(发了 403),False=放行。
+
+    G2b（g2bfix1）：强制档下"回环 + 没带凭据"这一格额外带 error_code=LOCAL_CREDENTIAL_REQUIRED，
+    让客户端能区分"本机客户端还没换代码/没带凭据"（重启即可）和真的越权来源。状态码与既有
+    error/message 保持不变，远程不可信来源不带这个码。
     """
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return False
     headers = {key: handler.headers.get(key, "") for key in handler.headers.keys()}
-    if mw.check_trusted(headers, _handler_peer_ip(handler)):
+    peer_ip = _handler_peer_ip(handler)
+    if mw.check_trusted(headers, peer_ip):
         return False
-    handler._send_json(403, {"error": "forbidden", "message": "untrusted source:不可信来源不可提交任务"})
+    body = {"error": "forbidden", "message": "untrusted source:不可信来源不可提交任务"}
+    # 只读结构化事实决定要不要加码；不允许从 message 或请求正文反推。
+    if mw.needs_local_credential(peer_ip, headers):
+        body["error_code"] = LOCAL_CREDENTIAL_REQUIRED
+    handler._send_json(403, body)
     return True

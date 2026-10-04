@@ -1,5 +1,32 @@
 # 设计台账
 
+## G2b 读路径补最后一处：归档读不出的 403 也带缺凭据码（g2bfix1c，2026-10-04，worker/g2b-denial-server-fix2，基于 g2bfix1b 头 `e8c4b6d2d`；9b 终审通过，已并入 step17j）
+
+- **来源**：g2bfix1br 初审做全面 grep 时查出——`_send_archived_terminal_result` 的 `load_error` 分支（归档文件存在但读不出）仍是裸 `_send_json(status, body)`。它与已修的三处同在"三个读端点降匿名后自行拒绝"这条路径上，普通用户拿 403 却不带码，客户端在"归档坏掉"时仍只能靠状态码猜。
+- **改动**：`agent/gateway_parts/http_handlers.py` 一处——`handler._send_json(status, body)` → `handler._send_json(status, _denial_body(handler, body))`；`_denial_body` 的 LLM 注释同步补成"这三个端点每一处自判拒绝（含归档读不出）都必须走本函数"。状态码、`error`、`request_id` 与管理员侧 500 + `result_load_error` 全都不变。
+- **为什么不影响管理员侧**：`_denial_body` 只在"强制档 + 回环 + 没带凭据"为真，而这一格普通用户（`_all_user_access` 为假）恒走 403，管理员走 500，加码分支不可能命中管理员。
+- **覆盖**：新用例 2 条（23 passed）；变异 1 个（退回裸 `_send_json`）被抓。详见 TESTS.md 同名节。
+- **未验证**：真实 Gateway 端到端（沙箱内不起 Gateway）；客户端消费仍归 ds10。
+
+## G2b 读路径补齐：/result 自判 403 也带缺凭据码（g2bfix1b，2026-10-04，worker/g2b-denial-server-fix，基于 g2bfix1 头 `0d838e585`；9b 终审通过，已并入 step17j）
+
+- **来源**：g2bfix1r 初审结论"必须改"——`_send_pending_state` 的两个 403（记录损坏、记录属于别人）与 `_send_archived_terminal_result` 的 403 仍是手写裸 403，没走 `_denial_body`。它们和 `/progress` 的 403 同在"三个自判读端点降匿名后自行拒绝"这条路径上，导致同一端点"记录不存在"带码、"记录坏掉/是别人的"不带码，客户端仍只能靠状态码猜（正是本次修复要解决的事）。
+- **改动**：`agent/gateway_parts/http_handlers.py` 三处 `handler._send_json(403, {...})` 改为 `handler._send_json(403, _denial_body(handler, {...}))`——`_send_archived_terminal_result` 的 `_can_read_payload` 失败分支、`_send_pending_state` 的损坏分支与非本人分支。**不改任何拒绝语义**：状态码、`error`、`request_id` 原样保留，只在"强制档 + 回环 + 没带凭据"这一格追加 `error_code`。`_denial_body` 的 LLM 注释补写"这三处必须走本函数"的约束。
+- **不改的一处**：`handle_control_status` 的 `_can_read_control_operation` 失败 403 保持裸返回——该端点前置已挂 `require_trusted_source`，没带凭据的请求到不了这一支（已核对实现）。
+- **覆盖**：新用例 5 条（21 passed）；三个变异全红（两处 pending 403 退回裸、归档 403 退回裸、`_denial_body` 去掉判据）。详见 TESTS.md 同名节。
+- **未验证**：真实 Gateway 端到端（沙箱内不起 Gateway）；客户端消费归 ds10。
+
+## G2b 本机凭据缺失的结构化拒绝码（g2bfix1，2026-10-04，worker/g2b-denial-server，基于 17j 头 `35b1647e8`；9b 终审通过，已并入 step17j；终审更正“回环带错或过期凭据同样带码”的注释与文档措辞）
+
+- **来源**：只读分析 g2bad 指出——G2b（`gateway_require_local_credential`）打开后，回环请求没带凭据被拒时只回 `403 {"error":"forbidden","message":"untrusted source:..."}`，客户端光看状态码分不清"本机客户端没换代码/没带凭据"（重启即可）和"远程来源真的越权"。设计稿 `docs/design/GATEWAY_LOCAL_TRUST.md` 1.2 节（9b 建议）原计划就要这个结构化码，一直没有落地。
+- **先坐实三个自判端点**（3a 要求，用真实 HTTP handler + 随机端口实测，写入用例）：强制档 + 无凭据时，`/progress/{id}` 返回 **403**、`/input-status/{id}` 与 `/result/{id}` 返回 **404**（记录不存在时先于身份判定返回）。这三个端点**不挂** `require_trusted_source`，是先把身份降为匿名、再由端点自己按 `_can_read_*` 拒绝——所以它们和挂闸端点是两条不同路径，要分别处理。
+- **实施**：
+  - `agent/auth/middleware.py`：新增模块级 `LOCAL_CREDENTIAL_REQUIRED = "LOCAL_CREDENTIAL_REQUIRED"`；新增 `AuthMiddleware.needs_local_credential(peer_ip, headers)`——只有"强制档 + 回环来源 + 没带有效凭据"这一格返回 True。`require_trusted_source` 在该格给 403 响应体补 `error_code`，**状态码与既有 error/message 原样保留**，只追加字段。
+  - `agent/gateway_parts/http_handlers.py`：新增共享 `_denial_body(handler, body)`，按同一判据给响应体补码；接到 `/progress` 的 403、`/input-status` 的 404 与 403、`/result` 的 404 上。
+- **不改拒绝语义**：允许/拒绝结果、状态码、既有 error/message 全部不变，只多一个可选字段。回环带错或过期凭据同样带码（9b 终审更正：代码与用例本来如此，处置同为重启客户端）；远程不可信来源、来源未知、开关关着（迁移档）不带这个码。
+- **判定只读结构化事实**：开关档位、对端 IP、凭据常量时间比对结果；不解析路径、正文或 message（g2bad 里强调的纪律）。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「G2b 本机凭据缺失码（g2bfix1）」小节。覆盖挂闸三个入口（`/ask`、`/control`、`/client/notices`）+ 三个自判读端点 + 开关关着不变 + 远程不带码。3 个变异全被抓：① 去掉中间件的 error_code；② 去掉回环判断让远程也带码；③ 开关关着也返回码。
+
 ## M1 B4 直接隔离与一次性装配诊断（b4gs，2026-10-04，基于 `33d903aab`；已实施，待非作者复审）
 
 - **来源**：3a 转 ds2 两条建议；直接调用 `gateway_event_context` 注入构造异常，不让四个调用方的兜底掩盖 M2 变异。

@@ -23,7 +23,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from ..auth.middleware import _handler_peer_ip, require_admin_handler, require_trusted_source
+from ..auth.middleware import (
+    LOCAL_CREDENTIAL_REQUIRED,
+    _handler_peer_ip,
+    require_admin_handler,
+    require_trusted_source,
+)
 from ..backends.http import unaccounted_probe_attempt_count
 from ..conversation.agent_activity import (
     ConversationAgentActivity,
@@ -114,6 +119,28 @@ def _request_identity(handler) -> tuple[str, Any]:
     peer_ip = _handler_peer_ip(handler)
     user_id, _ = mw.extract_identity(dict(handler.headers), peer_ip)
     return user_id, mw.get_permission(dict(handler.headers), peer_ip)
+
+
+# LLM: /result、/input-status、/progress 三个读端点不挂 require_trusted_source，它们先把身份降为匿名，
+#   再由各自的 _can_read_* 判 403，或在记录不存在时先判 404。降级后这两种拒绝对客户端长得和
+#   "真的越权"或"这条记录不存在"一模一样。本函数只补一个机器可读的区分码：当中间件报告这是
+#   "强制档 + 回环 + 没带凭据"时，把 LOCAL_CREDENTIAL_REQUIRED 加进响应体；判定只读结构化事实
+#   （mw.needs_local_credential），不解析路径、正文或文案，也不改变任何状态码。
+#   这三个端点自己判的每一处拒绝都必须经本函数返回，别再手写裸 403：handle_progress 的读权限拒绝、
+#   handle_input_status 的读权限拒绝、_send_archived_terminal_result 的归档读不出与读权限拒绝、
+#   _send_pending_state 的损坏与非本人两个分支——否则同一条降级路径上会出现"有的 403 带码、有的
+#   不带"，客户端又只能靠状态码猜。管理员侧（500/200）不受影响：本函数只在"强制档 + 回环 +
+#   没带凭据"这一格为真，而那一格普通用户恒走 403。
+# 函数用途: 给降级拒绝或记录缺失的响应体按需补上本机凭据缺失码。
+def _denial_body(handler, body: dict[str, Any]) -> dict[str, Any]:
+    mw = getattr(handler, "_auth_middleware", None)
+    checker = getattr(mw, "needs_local_credential", None)
+    if not callable(checker):
+        return body
+    headers = dict(getattr(handler, "headers", {}) or {})
+    if checker(_handler_peer_ip(handler), headers):
+        return {**body, "error_code": LOCAL_CREDENTIAL_REQUIRED}
+    return body
 
 
 def _request_channel(handler) -> tuple[str, str]:
@@ -265,7 +292,7 @@ def handle_result(handler, server) -> None:
         repair_response_projection=True,
     ):
         return
-    handler._send_json(404, {"error": "not found", "request_id": request_id})
+    handler._send_json(404, _denial_body(handler, {"error": "not found", "request_id": request_id}))
 
 
 # LLM: Input delivery status is authorized from the stored authenticated prepared request, not
@@ -288,11 +315,11 @@ def handle_input_status(handler, server) -> None:
         )
         return
     if receipt is None:
-        handler._send_json(404, {"error": "not found", "request_id": request_id})
+        handler._send_json(404, _denial_body(handler, {"error": "not found", "request_id": request_id}))
         return
     user_id, permission = _request_identity(handler)
     if not _can_read_payload(receipt.prepared_request, user_id, permission):
-        handler._send_json(403, {"error": "forbidden", "request_id": request_id})
+        handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": request_id}))
         return
     handler._send_json(200, gateway_input_status_payload(receipt))
 
@@ -317,14 +344,17 @@ def _send_archived_terminal_result(
     )
     payload = terminal_report.payload
     if terminal_report.load_error is not None:
+        # 归档读不出时同样在"降匿名读路径"上：普通用户拿 403、管理员拿 500 + 诊断。403 那一侧
+        # 必须与同一端点其它拒绝同口径带码，否则客户端在"归档坏掉"时又只能靠状态码猜；
+        # _denial_body 只在"强制档 + 回环 + 没带凭据"为真，而那一格普通用户恒走 403，管理员侧不受影响。
         status = 500 if _all_user_access(access) else 403
         body = {"error": "terminal result unavailable", "request_id": access.request_id}
         if _all_user_access(access):
             body["result_load_error"] = terminal_report.load_error
-        handler._send_json(status, body)
+        handler._send_json(status, _denial_body(handler, body))
         return True
     if not _can_read_payload(payload, access.user_id, access.permission):
-        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
+        handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": access.request_id}))
         return True
     terminal_response = payload.get("terminal_response")
     if not isinstance(terminal_response, dict) or not terminal_response:
@@ -360,7 +390,7 @@ def handle_progress(handler, server) -> None:
     user_id, permission = _request_identity(handler)
     access = _ResultAccessContext(request_id, user_id, permission)
     if not _can_read_finished_request(server.paths, access):
-        handler._send_json(403, {"error": "forbidden", "request_id": request_id})
+        handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": request_id}))
         return
     raw_since = parse_qs(parsed.query).get("since", ["0"])[0]
     try:
@@ -455,10 +485,10 @@ def _send_pending_state(handler, folder, status: str, access: _ResultAccessConte
     if request_load_error and not _all_user_access(access):
         # 请求记录损坏时无法证明 owner；普通用户必须 fail-closed，不能顺带拿到
         # load report 中的服务器路径。管理员仍保留完整诊断视图。
-        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
+        handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": access.request_id}))
         return True
     if payload and not _can_read_payload(payload, access.user_id, access.permission):
-        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
+        handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": access.request_id}))
         return True
     response = {"status": status, "request_id": access.request_id}
     if request_load_error:
