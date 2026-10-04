@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## 脚本凭据头不得写死字面量（hdrg，2026-10-04，worker/header-literal-guard）
+
+- **来源**：ds10 初审 flc 守卫时指出判据太宽——只看逻辑行里有没有 `x-gateway-token` 字样，写死字面量也能过。
+- **改动**：只动 `agent_py_agent/tests/test_architecture_guardrails.py`（守卫与自检样本），产品脚本与产品代码零改动。
+- **命令（工作树根）**：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-hdrg
+  ```
+  结果：**12 passed**（含 `test_scripts_gateway_http_calls_carry_credentials` 全仓扫描与 `test_gateway_script_credential_rule_self_check` 合成样本）。
+- **新自检样本**：写死 `<redacted>` / 写死普通串 `abc123`（shell）与写死 `{"X-Gateway-Token": "abc123"}`（Python）必须红；`$VAR`、`${VAR}`、数组展开 `"${ARR[@]}"`、`gateway_script_headers()`、`gateway_client_credentials()` 必须放行。
+- **变异两处**（按原字节备份还原，未用 git stash/checkout）：
+  - M1 把判据退回"有字样就算"（shell 改回 `_text_carries_credential_marker`、Python 改回同一函数）→ 自检样本 `写死普通字符串的凭据头必须被标记` 立即失败。还原后 12 passed。
+  - M2 在真实脚本 `scripts/feishu_limit/d3_quota_selfheal.sh` 第 220 行把 `${GW_AUTH_HEADER[@]+"${GW_AUTH_HEADER[@]}"}` 换成 `-H 'X-Gateway-Token: <redacted>'` → 守卫失败并精确报出 `scripts/feishu_limit/d3_quota_selfheal.sh:218 curl 指向本机 Gateway 但凭据头的值写死成了字面量…`。还原后 `bash -n` 通过、`git diff --stat scripts/feishu_limit/` 无输出。
+- **顺带修复**：`_credential_variables` 原先收集同行全部 `$VAR`，会把 `$GW/ask` 的 `GW` 当凭据变量而放行写死值；M2 证明修复有效（旧实现下这个变异不会红）。
+
 ## B8 样例处理截断标记（b8tr，2026-10-04，分支 `worker/b8-delete-gate`，基于 B8 头 `9461868c6`）
 
 - **改动**：两个 rm-guard 样例的 `review_gate` 在 gate 命中后先看 `call.arguments_truncated`（B5 的截断标记，sol3 `57f465dca`）：精确为 true 时直接回 `ask` + `ARGUMENTS_TRUNCATED`（消息"参数太长被截断，看不全，先确认一次"），不再按看到的片段判；false 或缺失（旧宿主）照旧。Python、Node 逐条对齐。

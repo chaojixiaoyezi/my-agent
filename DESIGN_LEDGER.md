@@ -1,5 +1,16 @@
 # 设计台账
 
+## 脚本凭据头不得写死字面量（hdrg，2026-10-04，分支 `worker/header-literal-guard`，基于 17j 头 `cb16433d7`；3a 复审通过，已并入 step17j）
+
+- **起因**：ds10 初审 flc 守卫（`test_scripts_gateway_http_calls_carry_credentials`）时指出判据太宽——只看逻辑行里有没有出现过 `x-gateway-token` 字样，所以 `-H 'X-Gateway-Token: 固定串'` 这种写死字面量也能过。flc 脚本本身是对的（用 `$GW_AUTH_HEADER`），但同类写法出现在别的脚本里守卫会假绿，G2b 打开后变成真故障（每个部署发同一个编死的假串，请求全被当匿名）。
+- **改动（只动守卫与自检样本，产品脚本与产品代码一行未动）**：判据升级成"凭据头的**值**必须来自变量引用或产品入口"：
+  - shell：`SHELL_CREDENTIAL_HEADER_RE` 取 `X-Gateway-Token:` 之后的取值，必须以 `$` 开头（`$VAR`/`${VAR}`）或含数组展开 `@]` 才算变量，纯字面量判违规；违规消息区分"值写死"与"根本没带头"。
+  - Python：`_python_calls_credential_entry` 用 AST 判该调用所在作用域里**真的调用了** `gateway_script_headers()`/`gateway_client_credentials()`，不再是把名字写进字符串或注释就算。
+  - **顺带修掉一个原有漏洞**：`_credential_variables` 原先"行里有 `x-gateway-token` 就收集行内全部 `$VAR`"，会把同行 `$GW/ask` 里的 `GW` 也当凭据变量，写死字面量靠它混过判据；现在只认**取值位置**引用的变量。
+- **自检样本**（`test_gateway_script_credential_rule_self_check`）两侧都补：写死 `<redacted>`、写死普通串、写死 `abc123`（shell 与 Python 各一条）必须红；`$VAR`、`${VAR}`、数组展开、`gateway_script_headers()`、`gateway_client_credentials()` 必须放行。
+- **验证**：守卫文件 12 passed（含新样本）；全仓 `scripts/` 扫描无误报；变异两处——①判据退回"有字样就算"→ 写死样本变红；②在真实脚本 `d3_quota_selfheal.sh` 里把数组展开换成写死值 → 守卫精确报出 `:218 ... 写死成了字面量`。还原后复绿，`bash -n` 通过，`git diff --stat scripts/feishu_limit/` 无输出（脚本零残留）。命令与结果见 TESTS。
+- **未验证**：静态判据只覆盖到"变量引用"这一层；更绕的间接写法（变量里存整条 header 再展开）当前 `scripts/` 下没有，未设计对应判据。
+
 ## B8 样例处理截断标记（b8tr，2026-10-04，分支 `worker/b8-delete-gate`，基于 B8 头 `9461868c6`；已并入 step17j；3a 新裁定“截断只能更严、不放松已看到的拒绝”待返工）
 
 - **起因**：B5 给收紧请求加了截断标记（sol3 `57f465dca`）：声明 `arguments: "full"` 的门，参数超出 4000 字预算时请求的 call 带 `arguments_truncated: true`，未截断为 `false`，`arguments: "none"` 时没有这个字段。样例插件此前只看得到的片段判——截断时可能误 allow（漏看危险部分）或误判。

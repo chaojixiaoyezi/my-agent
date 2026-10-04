@@ -518,6 +518,11 @@ GATEWAY_PORT_TEXT = "8420"
 GATEWAY_TARGET_RE = re.compile(r"(?:127\.0\.0\.1|localhost):(?:8420\b|\$\{?GATEWAY_PORT\}?)")
 GATEWAY_PUBLIC_ROUTE_RE = re.compile(r"/(?:status|metrics)(?![\w-])")
 GATEWAY_CREDENTIAL_MARKERS = ("x-gateway-token", "gateway_script_headers", "gateway_client_credentials")
+# LLM: 凭据头的值必须来自变量引用（$VAR/${VAR}/"${ARR[@]}"）或产品入口调用；写死字面量会让脚本"S 看着带了头"、
+#   实际每个部署发同一个编死的假串，G2b 一开就变成匿名请求。所以只认结构：冒号后必须以 $ 开头才算变量。
+SHELL_CREDENTIAL_HEADER_RE = re.compile(
+    r"x-gateway-token\s*:\s*(?P<value>[^'\"\s]*)", re.IGNORECASE)
+PYTHON_CREDENTIAL_CALL_NAMES = frozenset({"gateway_script_headers", "gateway_client_credentials"})
 SCRIPT_SUFFIXES = (".sh", ".py")
 PYTHON_HTTP_CALL_NAMES = frozenset(
     {"urlopen", "urllib.request.urlopen", "urllib.request.Request", "Request"})
@@ -553,13 +558,19 @@ def _gateway_address_variables(lines: list[str]) -> set[str]:
 
 
 def _credential_variables(lines: list[str]) -> set[str]:
-    """收集与 X-Gateway-Token 同行的 shell 变量名（$VAR 引用或 VAR=/VAR+=( 赋值）。"""
+    """收集“出现在 X-Gateway-Token 取值位置”的 shell 变量名（$VAR 引用或 VAR=/VAR+=( 赋值）。
+
+    只认头值本身引用的变量，不认同一行里出现的其它变量：否则 `curl -H "X-Gateway-Token: 固定串" "$GW/ask"`
+    会因为行内有 `$GW` 被误判成“带了凭据变量”，写死的字面量也就混过去了。
+    """
 
     names: set[str] = set()
     for line in lines:
         if "x-gateway-token" not in line.lower():
             continue
-        names.update(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", line))
+        for match in SHELL_CREDENTIAL_HEADER_RE.finditer(line):
+            names.update(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", match.group("value")))
+        # 数组/变量赋值形态：VAR=(-H "X-Gateway-Token: $T") 或 VAR+=(...) 也算凭据来源。
         names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\+?=\(", line))
     return names
 
@@ -581,6 +592,32 @@ def _text_carries_credential_marker(text: str) -> bool:
 
     lowered = text.lower()
     return any(marker in lowered for marker in GATEWAY_CREDENTIAL_MARKERS)
+
+
+def _shell_credential_header_is_variable(logical: str) -> bool:
+    """shell 逻辑行里的 X-Gateway-Token 取值是否来自变量引用（否则是写死字面量）。"""
+
+    found = False
+    for match in SHELL_CREDENTIAL_HEADER_RE.finditer(logical):
+        found = True
+        value = match.group("value")
+        # 取值必须是变量引用（$VAR / ${VAR} / "${ARR[@]}"）或数组展开；纯字面量一律算写死。
+        if not value.startswith("$") and "@]" not in value:
+            return False
+    return found
+
+
+def _python_calls_credential_entry(source: str) -> bool:
+    """Python 源码里是否真的调用了产品凭据入口（按 AST 调用形态，不看字符串字面量）。"""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, ast.Call) and _dotted_call_name(node.func).split(".")[-1] in PYTHON_CREDENTIAL_CALL_NAMES
+        for node in ast.walk(tree)
+    )
 
 
 def _shell_logical_lines(text: str) -> list[tuple[int, str]]:
@@ -619,10 +656,11 @@ def _shell_text_offenders(text: str, rel: str) -> list[str]:
             logical, gateway_vars)
         if not targets or GATEWAY_PUBLIC_ROUTE_RE.search(logical):
             continue
-        if _text_carries_credential_marker(logical) or _references_shell_variable(logical, credential_vars):
+        if _references_shell_variable(logical, credential_vars) or _shell_credential_header_is_variable(logical):
             continue
-        offenders.append(
-            f"{rel}:{start} curl 指向本机 Gateway 但未带凭据头（X-Gateway-Token/凭据变量），且非公开路由")
+        detail = ("凭据头的值写死成了字面量（必须来自 $VAR/${VAR}/数组展开或产品入口）"
+                  if _text_carries_credential_marker(logical) else "未带凭据头（X-Gateway-Token/凭据变量）")
+        offenders.append(f"{rel}:{start} curl 指向本机 Gateway 但{detail}，且非公开路由")
     return offenders
 
 
@@ -673,11 +711,12 @@ def _python_text_offenders(source: str, rel: str) -> list[str]:
             segment, gateway_vars)
         if not targets or GATEWAY_PUBLIC_ROUTE_RE.search(segment):
             continue
-        if _text_carries_credential_marker(_enclosing_scope_text(source, node.lineno, ranges)):
+        scope = _enclosing_scope_text(source, node.lineno, ranges)
+        if _python_calls_credential_entry(scope):
             continue
-        offenders.append(
-            f"{rel}:{node.lineno} {call_name} 指向本机 Gateway 但未带凭据"
-            "（gateway_script_headers/X-Gateway-Token），且非公开路由")
+        detail = ("凭据头的值写死成了字面量（必须来自 gateway_script_headers()/gateway_client_credentials() 或变量）"
+                  if _text_carries_credential_marker(scope) else "未带凭据（gateway_script_headers/X-Gateway-Token）")
+        offenders.append(f"{rel}:{node.lineno} {call_name} 指向本机 Gateway 但{detail}，且非公开路由")
     return offenders
 
 
@@ -702,27 +741,35 @@ def test_scripts_gateway_http_calls_carry_credentials() -> None:
     assert not offenders, "scripts/ 下存在未带本机凭据的 Gateway 调用：\n" + "\n".join(offenders)
 
 
+# LLM: 自检样本按“期望是否违规”成对列出，新增形态只往表里加一行；表驱动让断言保持一层，也便于看清哪一侧变红。
+#   约定：True = 必须被标红（违规），False = 必须放行。
+GATEWAY_SCRIPT_SELF_CHECK_SAMPLES = (
+    ('GW="http://127.0.0.1:8420"\ncurl -s "$GW/ask"\n', "sample.sh", True),
+    ('GW="http://127.0.0.1:8420"\nGW_AUTH_HEADER=(-H "X-Gateway-Token: $T")\n'
+     'curl -s "$GW/ask" ${GW_AUTH_HEADER[@]+"${GW_AUTH_HEADER[@]}"}\n', "sample.sh", False),
+    # 写死字面量必须红：守卫只看“值是不是来自变量/产品入口”，不看行里有没有出现过头名。
+    ('GW="http://127.0.0.1:8420"\ncurl -s -H "X-Gateway-Token: abc123" "$GW/ask"\n', "sample.sh", True),
+    ('GW="http://127.0.0.1:8420"\ncurl -s -H "X-Gateway-Token: <redacted>" "$GW/ask"\n', "sample.sh", True),
+    # 变量形态都放行：$VAR、${VAR}。
+    ('GW="http://127.0.0.1:8420"\nTOKEN=x\ncurl -s -H "X-Gateway-Token: $TOKEN" "$GW/ask"\n', "sample.sh", False),
+    ('GW="http://127.0.0.1:8420"\nTOKEN=x\ncurl -s -H "X-Gateway-Token: ${TOKEN}" "$GW/ask"\n', "sample.sh", False),
+    ('GW="http://127.0.0.1:8420"\ncurl -s "$GW/status"\n', "sample.sh", False),
+    ('import urllib.request\ndef go():\n    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n', "sample.py", True),
+    ('import urllib.request\ndef go():\n    headers = {"X-Gateway-Token": "abc123"}\n'
+     '    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n', "sample.py", True),
+    ('from agent_py_agent.cli.gateway_client_headers import gateway_script_headers\ndef go():\n'
+     '    gateway_script_headers()\n    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n', "sample.py", False),
+    ('import urllib.request\n'
+     'from agent_py_agent.agent.gateway_parts.client_credentials import gateway_client_credentials\n'
+     'def go(agent):\n    gateway_client_credentials(agent).headers()\n'
+     '    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n', "sample.py", False),
+)
+
+
 def test_gateway_script_credential_rule_self_check() -> None:
     """守卫规则合成样本自检：违规形态必须被标记，合规与公开路由必须通过。"""
 
     assert _gateway_address_variables(['GW="http://127.0.0.1:8420"']) == {"GW"}
-    assert _shell_text_offenders('GW="http://127.0.0.1:8420"\ncurl -s "$GW/ask"\n', "sample.sh")
-    assert not _shell_text_offenders(
-        'GW="http://127.0.0.1:8420"\nGW_AUTH_HEADER=(-H "X-Gateway-Token: $T")\n'
-        'curl -s "$GW/ask" ${GW_AUTH_HEADER[@]+"${GW_AUTH_HEADER[@]}"}\n',
-        "sample.sh",
-    )
-    assert not _shell_text_offenders('GW="http://127.0.0.1:8420"\ncurl -s "$GW/status"\n', "sample.sh")
-    assert _python_text_offenders(
-        'import urllib.request\n'
-        'def go():\n'
-        '    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n',
-        "sample.py",
-    )
-    assert not _python_text_offenders(
-        'from agent_py_agent.cli.gateway_client_headers import gateway_script_headers\n'
-        'def go():\n'
-        '    gateway_script_headers()\n'
-        '    urllib.request.urlopen("http://127.0.0.1:8420/ask")\n',
-        "sample.py",
-    )
+    wrong = [sample for sample, name, flagged in GATEWAY_SCRIPT_SELF_CHECK_SAMPLES
+             if bool(_shell_text_offenders(sample, name) or _python_text_offenders(sample, name)) is not flagged]
+    assert not wrong, "自检样本判定与期望不符：" + repr(wrong[0][:60])
