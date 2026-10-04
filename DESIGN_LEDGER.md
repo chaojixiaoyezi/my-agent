@@ -256,6 +256,12 @@
 
 ## G3 本机客户端附带凭据：返工为「读不到即降级，只在 G2b 开关打开时拒绝」（2026-10-03，g3f，worker/sol1-g3-clients，已并入 step17i（2adfd8518；9b 集成终审通过））
 
+- **起因（3a 定）**：现在是 G2a 阶段，服务端只计数、不拦。客户端在凭据缺失/权限不对/内容损坏时于发 HTTP 前就拒绝，等于提前做了 G2b 的事——新运行时的 TUI 连上还没生成凭据的旧 Gateway（部署窗口里会遇到），或凭据文件权限被人改过，TUI、飞书适配器、插件命令就全断了。
+- **改法**：凭据读不到时客户端照常发请求，只是不带 `X-Gateway-Token`，由服务端按 G2a 计入“无凭据”；客户端记一条只带 G1 原因码的结构化 warning（不含凭据内容与路径），同一原因同一进程只记一次，不刷屏。只有配置项 `gateway_require_local_credential` 为 true（G2b 的开关，默认 false；9b 终审：目前只有客户端读它，服务端强制等 G2b 落地）时，才按原写法在发请求前拒绝、零请求并给原因码。服务端强制在 G2b 落地前不生效，落地后两边口径一致。非空 `gateway_auth_token` 优先且不读本机凭据、direct 模式不读凭据，两条不变。
+- **实现**：`gateway_parts/client_credentials.py` 的 `GatewayClientCredentials.headers()` 按 `require_local_credential` 分流，新增 `_warn_credential_degraded`（模块级去重集合 + 锁）；开关进 `settings/config.py` 与 `config/agent_config.yaml`（默认 false，注释写明退场计划）；`user_config_capability._CREDENTIAL_SWITCH_KEYS` 把它排除在凭据脱敏之外（回显要能看到 true/false），它仍是安全边界项、模型不能改。所有原身份头调用点接口不变，只改注释。
+- **验证**：三类原因 × 开关关降级（请求照发、无令牌头、warning 只记一次）/ 开关开拒绝（零请求 + 原因码）× TUI/CLI/IM 全绿；原有“附上凭据”用例全部保留。变异与命令见 TESTS。
+- **未验证**：真实 Gateway、真实 TUI/飞书渠道、旧客户端迁移与 `/status` 计数归零仍未做；G2b 强制的服务端半边仍归 G2b 那一块。
+
 ## 私有写/私有锁的符号链接锚点：允许跟随一次（pdp 后续，2026-10-04，分支 `worker/private-dirs-policy`，ds4 初审、3a 裁定已落实，已并入 step17j，待 9b 安全终审）
 
 - **背景**：ds4 初审小问题——「最近的已存在祖先本身是符号链接、下面要新建子目录」时私有写直接抛 NoFollowPathError；用户的项目目录很可能就是符号链接（指到外置盘），`tooling/shell.py` 在工作区下建 `.background_jobs` 会失败，后台任务起不来。生产 owner home 里也确实有目录链接。
