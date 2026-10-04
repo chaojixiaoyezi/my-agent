@@ -1,5 +1,29 @@
 # 设计台账
 
+## B8 样例处理截断标记（b8tr，2026-10-04，分支 `worker/b8-delete-gate`，基于 B8 头 `9461868c6`；已并入 step17j；3a 新裁定“截断只能更严、不放松已看到的拒绝”待返工）
+
+- **起因**：B5 给收紧请求加了截断标记（sol3 `57f465dca`）：声明 `arguments: "full"` 的门，参数超出 4000 字预算时请求的 call 带 `arguments_truncated: true`，未截断为 `false`，`arguments: "none"` 时没有这个字段。样例插件此前只看得到的片段判——截断时可能误 allow（漏看危险部分）或误判。
+- **改动**：两个 rm-guard 样例（Python、Node）的两个门在 gate 命中后先看 `call.arguments_truncated`：精确为 true 时不再按看到的片段判，直接回 `ask`（原因码 `ARGUMENTS_TRUNCATED`，消息"参数太长被截断，看不全，先确认一次"）；`false` 或字段缺失（旧宿主）照旧。判定仍只读结构化字段。
+- **用例与变异**：共享用例表加 4 组输入（两个门 × 看到的片段"无害/危险"各一），每组同时断言字段缺失、显式 false 照旧与 true 转 ask；Python、Node 各跑一遍。两个实现各自去掉截断检查的变异都被新用例抓到，原字节还原校验通过。
+- **未验证**：真实宿主截断链路（需 B5 并入后的宿主侧）与真实 TUI/IM 审批展示未跑；本样例只按第 8 节协议直连测试。命令与结果见 TESTS.md。
+
+## B8 删除门改拦 apply_patch（b8dg，2026-10-03，3a 裁定；分支 `worker/b8-delete-gate`，基于 B8 头 `a0ec1b0dd`；已并入 step17j）
+
+- **起因**：b8align 对接核对发现宿主没有 `delete_file` 工具（宿主工具全集里没有它，`git log --all -S 'name="delete_file"'` 也搜不到历史），两个 rm-guard 样例的 `guard-delete` 门在真实宿主永不命中；模型删文件走 `apply_patch` 的 `*** Delete File: ` 段或 `run_command`。3a 裁定选 A：门改拦 `apply_patch`。
+- **做法**：`guard-delete` 的 `tools` 从 `["delete_file"]` 改成 `["apply_patch"]`、`arguments` 从 `none` 改成 `full`（要读补丁文本）；判定只认行首严格是 `*** Delete File: `（冒号后一个空格）的删除段头，与宿主 `_filesystem_patch.py` 的解析同款（先归一换行再按行切分，不做子串匹配，正文行里的同样字样不算）；有带路径的删除段回 `deny` + `DELETE_FILE_BLOCKED`，只改不删的补丁回 `allow_as_is`，补丁字段缺失/非字符串/空路径按 `ARGUMENTS_UNAVAILABLE` 回 `ask`。Python 和 Node 两版行为逐条一致；旧 `delete_file` 声明删掉不留兼容。
+- **用例**：`_DELETE_PATCH_CASES` 9 条（删除段、Update/Add、多段含删除、加号行/上下文行字样不算删除、CRLF 与 `\r` 归一、空路径）＋补丁字段缺失/无 patch/非字符串 3 条 ＋ 旧 `delete_file` 工具名回 `OUT_OF_SCOPE`；清单断言改 `apply_patch` + `full`。
+- **变异**：5 个全部被抓到（Python/Node 删除段判定漏掉、Python/Node deny 写 allow_as_is、门工具名写回 `delete_file`），原字节还原校验通过。
+- **设计稿同步**：`docs/design/PLUGIN_EVENT_HOOKS.md` 第 4 节示例、第 13 节 B8 行、第 14 节验收步骤、第 16 节风险句全部改按 `apply_patch`；第 5 节 observe 示例补上 `channel`/`thread_ref`/`actor` 三个公共字段（与第 6 节、B3 实现对齐）。
+- **边界**：本分支不含 B3–B7，真实验收（TUI、飞书）待合入后另派；沙箱里启用链失败与基线 `a0ec1b0dd` 一致（既有环境限制）。
+
+## M1 B8 样例（m1b8，2026-10-03，分支 `worker/m1-b8-samples`，基于 `claude/3a-step17i` `c47d023b6`；初审通过、3a 沙箱外 275 passed，已并入 step17j，真实验收待 B3–B7 合入）
+
+- **做了什么**：三个 v8 样例插件。`plugins/event-watch/`（Python）订阅全部 6 类事件（只读结构化事实、不要正文），在只读 table 面板显示每类"收到"与"合并丢弃"（`dropped_before` 累计）；`plugins/rm-guard/`（Python）与 `plugins/rm-guard-node/`（Node）在 `run_command` 出现 rm 加 -r 和 -f 的组合（`-rf`、`-fr`、`-r -f`、`--recursive --force` 等）时回 `ask`（`RM_RF`），`delete_file` 直接回 `deny`（`DELETE_FILE_BLOCKED`），其它命令 `allow_as_is`。三个包都过 v8 校验与构建脚本。
+- **用例**：`agent_py_agent/tests/test_plugin_m1_b8_samples.py`——假宿主按第 5 节协议直接和插件进程对话（不经 Gateway）：三个包构建与 v8 校验；event-watch 握手位、6 类计数、`dropped_before`、面板只读（幂等、不吐正文）；两个收紧样例的 rm 写法、普通命令、delete_file、回复格式与向前兼容；Node 用例无 node 时跳过。
+- **变异**：7 个全部被抓到（Python/Node 漏 `-fr`、`ask` 写 `allow_as_is`、`delete_file` 不拒、计数不加 `dropped_before`、面板带出正文、未知类型计错）。
+- **初审补强（b8t，2026-10-03，只改测试）**：采纳 b8r 初审两条补强——①共享用例表补 `rm -Rf` 大写变体（Python/Node 同时覆盖）；②三个样例握手断言改精确集合比较（多声明未实现的能力位也会被抓到）。两条各一个提交；对应变异复跑均被抓（见 TESTS.md）。
+- **边界**：本分支不含 B3–B7，**真实验收（TUI、飞书各一遍）待 B3–B7 合入后另派**；启用链在命令沙箱里因 `plugin_endpoint_failed` 失败（已知环境限制，交 3a 沙箱外复核）。详见 TESTS.md 同名小节。
+
 ## B9 模板处理截断标记（b9tr，2026-10-04，分支 `worker/b9-facts-table`，基于 B9 头 `10c40256f`；已并入 step17j，luna6 复审中）
 
 - **起因**：B5（sol3 的 `57f465dca`）给收紧请求加了截断标记——声明 `arguments: full` 的门，参数超出 4000 字预算时宿主在请求的 `call` 里带 `arguments_truncated: true`，完整是 `false`，`arguments: none` 的门没有这个字段（`plugin_events/tool_gate.py` 的 `PluginToolGate.request_payload`）。B9 的两个作者模板此前不看这个字段，会拿被截断的残片做判断并放行，形成绕过面。

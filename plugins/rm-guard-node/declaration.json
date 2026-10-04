@@ -1,0 +1,21 @@
+{
+  "plugin_id": "rm-guard-node",
+  "version": "1.0.0",
+  "summary": "收紧样例（Node）：run_command 出现 rm 加 -r 和 -f 时要求确认，apply_patch 补丁删除文件段一律拒绝",
+  "entry": {"kind": "interpreter", "interpreter": "node", "command": "src/server.js", "args": []},
+  "files": [
+    {"path": "declaration.json", "executable": false},
+    {"path": "src/server.js", "executable": false}
+  ],
+  "platforms": ["any"],
+  "events": [],
+  "tool_gates": [
+    {"id": "guard-rm", "tools": ["run_command"], "effects": [], "arguments": "full"},
+    {"id": "guard-delete", "tools": ["apply_patch"], "effects": [], "arguments": "full"}
+  ],
+  "permissions": {"network": false},
+  "default_action": "",
+  "actions": [],
+  "tools": [],
+  "settings_schema": {"type": "object", "properties": {}, "additionalProperties": false}
+}

@@ -1,5 +1,56 @@
 # 测试与发布验收
 
+## B8 样例处理截断标记（b8tr，2026-10-04，分支 `worker/b8-delete-gate`，基于 B8 头 `9461868c6`）
+
+- **改动**：两个 rm-guard 样例的 `review_gate` 在 gate 命中后先看 `call.arguments_truncated`（B5 的截断标记，sol3 `57f465dca`）：精确为 true 时直接回 `ask` + `ARGUMENTS_TRUNCATED`（消息"参数太长被截断，看不全，先确认一次"），不再按看到的片段判；false 或缺失（旧宿主）照旧。Python、Node 逐条对齐。
+- **用例**（`agent_py_agent/tests/test_plugin_m1_b8_samples.py`）：共享表 `_TRUNCATION_CASES` 4 组（guard-rm × {无害 `ls -la`、危险 `rm -rf build`}、guard-delete × {只改补丁、含删除段补丁}），每组断言字段缺失与显式 false 走原裁决、true 转 `ask` + `ARGUMENTS_TRUNCATED` 且消息逐字；`_review_params` 增加可选截断标记（None 不带字段，模拟旧宿主）。
+- **命令与结果**（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_m1_b8_samples.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b8tr -o addopts=""
+  ```
+  → **4 passed**。
+- **相关回归**（6 文件：B8 样例 + `test_plugin_any_language_samples.py`、`test_plugin_any_language.py`、`test_plugin_manifest_v8.py`、`test_plugin_package.py`、`test_plugin_api_build.py`）：**8 failed, 267 passed**；8 个失败全部是"带确认码启用"的 `plugin_enable` 端点建立失败。已在基线 `9461868c6`（`git worktree add --detach` 临时工作树，用完 remove）复跑同一组：**8 failed, 267 passed，失败清单逐条一致**——既有环境限制，不是本轮引入；交 3a 沙箱外复核。
+- **变异**（2 个，全部 KILLED，cp 备份原字节还原、sha256 校验一致）：Python 去掉截断分支 → `1 failed`（`ls -la` + true 得到 `allow_as_is`，期望 `ask`）；Node 去掉截断分支 → `1 failed`（同断言）。还原后 sha256：`9bf6d6b1…`（Python）、`8af18d78…`（Node）。
+- **门禁**：guards9（10 文件）**172 passed**；`check_import_boundaries` findings=0；ruff 通过；`check_doc_sync` **DOC_SYNC_PASS**；strict code-size `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`（报告已还原）；size_diff **新增告警 0**、消失 16；`git diff --check` 干净；clean-package OK。
+- **未验证**：真实宿主截断链路（需 B5 并入后的宿主侧）与真实 TUI/IM 审批展示未跑；本样例只按第 8 节协议直连测试。
+
+## B8 删除门改拦 apply_patch（b8dg，2026-10-03，分支 `worker/b8-delete-gate`，基于 B8 头 `a0ec1b0dd`）
+
+- **改动**：两个 rm-guard 样例的 `guard-delete` 门从 `delete_file`（宿主没有这个工具）改成 `apply_patch` 的补丁删除段检测；`arguments: "full"`。用例与设计稿同步（见 DESIGN_LEDGER 同名段）。
+- **用例**（`agent_py_agent/tests/test_plugin_m1_b8_samples.py`，4 条测试内扩充）：`_DELETE_PATCH_CASES` 9 条输入（删除段 deny、Update/Add 补丁 allow_as_is、多段含删除 deny、加号行与上下文行字样不算删除、CRLF 与 `\r` 归一 deny、空路径 ask）；补丁字段缺失/无 `patch`/非字符串回 `ask` + `ARGUMENTS_UNAVAILABLE`；旧 `delete_file` 工具名回 `deny` + `OUT_OF_SCOPE`；清单断言改 `apply_patch` + `full`。
+- **命令与结果**（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_m1_b8_samples.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b8dg
+  ```
+  → **4 passed**。
+- **相关回归**（6 文件：B8 样例 + `test_plugin_any_language_samples.py`、`test_plugin_any_language.py`、`test_plugin_manifest_v8.py`、`test_plugin_package.py`、`test_plugin_api_build.py`）：**8 failed、其余全过**。8 个失败全部是"带确认码启用"的 `plugin_enable` 端点建立失败（`plugin_endpoint_failed`），与基线 `a0ec1b0dd`（`git worktree add --detach` 临时工作树复核）的失败集合完全一致，不是本轮引入；交 3a 沙箱外复核。
+- **变异**（5 个，全部 KILLED，原字节还原校验通过）：Python/Node 删除段判定漏掉；Python/Node deny 写成 allow_as_is；门工具名写回 `delete_file`。
+- **门禁**：guards9（10 文件）**172 passed**；`check_import_boundaries` findings=0；ruff 通过；`check_doc_sync --base a0ec1b0dd` **DOC_SYNC_PASS**；strict code-size `hard=0 blocked=False`（报告已还原）；`git diff --check` 干净；clean-package OK；size_diff **新增告警 0**、消失 16。
+- **未验证**：真实 TUI / 飞书路径（设计稿第 14 节真实验收）待 B3–B7 合入后另派。
+
+## M1 B8 样例插件（m1b8，2026-10-03，分支 `worker/m1-b8-samples`，基于 `claude/3a-step17i` `c47d023b6`）
+
+- **新用例** `agent_py_agent/tests/test_plugin_m1_b8_samples.py`（4 条，假宿主按第 5 节协议直接和插件进程对话，不经 Gateway；全部写入在 tmp_path）：
+  - `test_three_samples_build_and_pass_v8_validation`：三个样例用 `scripts/build_plugin_files_package.py` 构建并过 v8 读包校验；event-watch 六类事件全 `content: "none"`、面板 `watch`；两个收紧样例 `guard-rm`（`run_command`，`arguments: "full"`）与 `guard-delete`（`delete_file`，`arguments: "none"`），`permissions.network` 为 false。
+  - `test_event_watch_counts_all_six_event_types_and_dropped`：握手声明 `my-agent/events` 与 `my-agent/display`；两批事件（6 类、重复类型、未知类型、多余字段、坏 `dropped_before`）后计数与 `dropped_before` 累计逐格断言；面板只含 `columns`/`rows`、正文不出现、渲染幂等且不改计数；通知（无 id）不应答。
+  - `test_rm_guard_reviews_rm_combinations_and_delete` / `test_rm_guard_node_matches_python_behavior`：`rm -rf`、`rm -fr`、`rm -r -f`、`rm --recursive --force`、`sudo rm -rf` 回 `ask`+`RM_RF`；`ls -la`、`rm 单文件`、`rm -f 单文件`、`grep -rf` 回 `allow_as_is`；`delete_file` 回 `deny`+`DELETE_FILE_BLOCKED`；参数缺失按 `ask`（`ARGUMENTS_UNAVAILABLE`）；越界工具 `deny`（`OUT_OF_SCOPE`）；多余字段忽略；回复格式（三种结果、原因码 `[A-Z0-9_]{1,40}`、消息 ≤80 无控制字符）逐条断言；无 node 环境跳过。
+- **变异**（7 个，全部被抓到，临时替换后写回原文）：Python/Node 漏掉 `-fr`（`recursive` 判定改成 `startswith`）；`ask` 写成 `allow_as_is`；`delete_file` 不拒；计数不加 `dropped_before`；面板带出正文（输出多带字段）；未知类型计错（归到第一类）。
+- **初审补强（b8t，2026-10-03，只改测试，两条各一个提交）**：
+  - 用例表补 `rm -Rf build`（大写 R）：Python 与 Node 共用同一组输入、同时覆盖；断言 `ask` + `RM_RF`。
+  - 三个样例（event-watch / rm-guard / rm-guard-node）的握手断言改为 `set(experimental) == {...}` 精确比较能力位集合。
+  - 变异复跑（临时替换后原字节还原）：Python 去掉 `lower()`、Node 去掉 `toLowerCase()` → 各被 `rm -Rf` 用例抓到（KILLED）；rm-guard 多声明 `my-agent/events` 位 → 被集合断言抓到（KILLED）。
+  - 命令与结果（工作树根）：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_m1_b8_samples.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b8t` → **4 passed**；guards9 172 passed；`check_import_boundaries` findings=0、ruff 通过、`check_doc_sync --base c47d023b6` PASS、strict code-size hard=0、size_diff 新增 0（消失 16）、`git diff --check` 干净、clean-package OK。
+- **后续修订（b8dg，2026-10-03）**：`guard-delete` 门从 `delete_file`（宿主没有这个工具）改成 `apply_patch` 的删除段检测（`arguments: "full"`）；上面用例描述里与 `delete_file` 有关的断言以顶部 b8dg 小节为准。
+- **命令**（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_m1_b8_samples.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-m1b8
+  ```
+- **相关回归**：上述新文件 + `test_plugin_any_language_samples.py`、`test_plugin_any_language.py`、`test_plugin_manifest_v8.py`、`test_plugin_package.py`、`test_plugin_api_build.py` 共 252 项：**244 passed、8 failed**。8 个失败全部发生在"带确认码启用"的端点建立步骤（`plugin_endpoint_failed`），与本线已知的 my-agent 命令沙箱限制一致（B1 评审同族记录），交 3a 沙箱外复核；本轮未改产品代码。
+- **未验证**：真实 TUI / 飞书路径（设计稿第 14 节真实验收）待 B3–B7 合入后另派；本分支内启用链在沙箱里跑不通。
+
 ## B9 模板处理参数截断标记（b9tr，2026-10-04，分支 `worker/b9-facts-table`）
 
 - **来源**：B5（sol3 `57f465dca`）给收紧请求加 `arguments_truncated`；B9 两个作者模板此前不看该字段，会拿被截断的残片放行。

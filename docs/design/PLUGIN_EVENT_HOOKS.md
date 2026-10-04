@@ -84,11 +84,13 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
   ],
   "tool_gates": [
     {"id": "guard-rm", "tools": ["run_command"], "effects": [], "arguments": "full"},
-    {"id": "no-delete", "tools": ["delete_file"], "effects": [], "arguments": "none"}
+    {"id": "guard-delete", "tools": ["apply_patch"], "effects": [], "arguments": "full"}
   ],
   "permissions": {"network": false}
 }
 ```
+
+示例里的 `guard-delete` 看的是 `apply_patch` 的补丁文本：宿主没有 `delete_file` 工具，模型删文件走补丁里的 `*** Delete File: ` 段或 `run_command`（3a 2026-10-03 裁定）。
 
 校验规则（`PluginManifest.__post_init__`，照 `PanelDeclaration` 的严格写法）：
 - `events`：0–6 项，`type` 取第 6 节的固定 6 种之一、不重复；`content` 只能是 `none`（默认）或 `text`。**3a 2026-10-03 裁定**：`text` 只允许用在 `prompt_submitted`，`tool_call_started` 只能是 `none`；工具参数只从精确工具的 `tool_gates.arguments: "full"` 提供，不新增 `events[].tools`。
@@ -116,7 +118,8 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 ```json
 {"events": [
   {"event_id": "ev-…", "type": "tool_call_finished", "seq": 812, "occurred_at": 1759480000.12,
-   "dropped_before": 3, "facts": {"tool": "run_command", "ok": false, "error_code": "COMMAND_FAILED", "...": "..."}}
+   "dropped_before": 3, "channel": "tui", "thread_ref": "thread-…", "actor": "main",
+   "facts": {"tool": "run_command", "ok": false, "error_code": "COMMAND_FAILED", "...": "..."}}
 ]}
 ```
 
@@ -302,13 +305,13 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | B6 账本与展示 | `plugin_gate.decided` 写入与查询；`/plugins info` 四段（含“无法审批”计数）；IM 同文 | `runtime_db/repository.py`（查询方法）、`plugin_commands.py`、`plugin_management.py` | 每种 outcome 一条且字段齐全；不写消息原文；TUI 与 IM 输出相同；最近 10 条按时间倒序；“无法审批”单独计数 | B5 |
 | B6 账本与展示（查询与展示半，已实施：`worker/m1-b6-ledger-display`，m1b6，提交 `d9f158e8d`、文档补丁 `e80db5918`，基于 B3 返工头 `0a3064078`；写账半待 B5 合入） | 不依赖 B5 的部分：`plugin_gate_decisions`（最近 N 条、默认 10、`seq` 倒序、字段白名单，`message` 不外泄）、`plugin_gate_unavailable_count`（累计，不设窗口）、`/plugins info` 四段（订阅/收紧/网络沙箱/最近决定+计数）、观察计数读 B3 `hub.stats`（缺 hub 或读失败写“暂无记录”）、hub 经 `plugin_command_service → control_service → control_operation_service → http_handlers` 全链透传 | `runtime_db/repository.py`、`plugin_commands.py`、`plugin_management.py`、`plugin_events/confirmation.py`、`gateway_parts/{plugin_command_service,control_service,control_operation_service,http_handlers}.py` | 见 `tests/test_plugin_event_display.py` 12 项与 6 个变异；测试库直插第 9 节字段代 B5 写入 | B5（仅写账半） |
 | B7 安全底座 | 将 B1 暂时拒绝与构造期 v8 计划排除换成真正总开关、local/main 和强制沙箱判定，不能只删关闭门；v8 强制沙箱、断网、收窄读（Linux 挂法先实测，macOS 沿用 `_ancestor_metadata_rules`）；开关关时拒绝启用；沙箱不可用时失败；两个配置项进管理员边界项 | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`settings/config.py`、`settings/user_config_capability.py`、`config/agent_config.yaml` | 真实沙箱（macOS / Linux 车道）真进程，布局为“放行目录嵌在拒读根里”：Python、node 解释器启动和 realpath 成功，读得到自己的包和数据目录、读不到会话和记忆；`network: false` 连外网和本机回环都被拒；`network: true` 能连 Gateway 端口但读不到令牌、调不了要令牌的接口，不要令牌的接口列清单；开关关 → `plugin_events_disabled`；模型经 `user_config` 改两个配置被拒（`PARAMETER_BOUNDARY`）；非 local/main 启用被拒（`plugin_events_owner_not_allowed`） | B1；H3 已合入 |
-| B8 样例与验收 | 样例 A：观察全部 6 类事件并在面板显示计数；样例 B：`run_command` 含 `rm -rf` 时要求确认、对 `delete_file` 直接拒绝；Python 和 Node 各一份 | `plugins/event-watch/`、`plugins/rm-guard/`、`plugins/rm-guard-node/` | 假模型真进程：TUI 与 IM 都看到“插件 X 要求确认 / 拒绝”；真实验收见第 14 节 | B3–B7 |
+| B8 样例与验收（样例已实施：m1b8，`worker/m1-b8-samples`，基于 `claude/3a-step17i` `c47d023b6`；删除门改拦 `apply_patch` 删除段：b8dg，2026-10-03；真实验收待 B3–B7 合入后另派） | 样例 A：观察全部 6 类事件并在面板显示计数；样例 B：`run_command` 含 `rm -rf` 时要求确认、对 `apply_patch` 补丁里的删除文件段（`*** Delete File: `）直接拒绝；Python 和 Node 各一份 | `plugins/event-watch/`、`plugins/rm-guard/`、`plugins/rm-guard-node/` | 假模型真进程：TUI 与 IM 都看到“插件 X 要求确认 / 拒绝”；真实验收见第 14 节 | B3–B7 |
 | B9 写插件的技能（M5；已实现（`worker/sol2-m5`，`de395322e`），待 be 复审） | 内置“写 my-agent 插件”技能、作者合同和 v8 文件模板（Python、Node 各一个）；安装启用仍只能由用户输确认码 | `agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/`、`test_write_my_agent_plugin_skill.py` | 两语言 v8 ZIP 真构建/读回/包内 stdio；只订阅合法、模型管理入口不可见；四类双语言变异全部抓到；旧新构建器字节回归保留。B7 生产启用与隔离未验证，门禁例外见 TESTS | B1 `add244a92` |
 
 ## 14. 验收（goal 第四节）
 
 - 假模型真进程：B8 两个样例在 TUI、IM 两条路径各跑一遍。
-- 真实验收：隔离 home、MiniMax M2.7，TUI 和飞书各一遍：让模型删目录时弹出“[插件 rm-guard 要求确认：RM_RF …]”，选拒绝后模型收到 `APPROVAL_REJECTED`；调 `delete_file` 时直接收到 `PLUGIN_GATE_DENIED`；`/plugins info` 能看到最近决定和观察计数。
+- 真实验收：隔离 home、MiniMax M2.7，TUI 和飞书各一遍：让模型删目录时弹出“[插件 rm-guard 要求确认：RM_RF …]”，选拒绝后模型收到 `APPROVAL_REJECTED`；让模型用补丁删一个文件（`apply_patch` 的 `*** Delete File: ` 段）时直接收到 `PLUGIN_GATE_DENIED`；`/plugins info` 能看到最近决定和观察计数。
 - 全量 + Linux 车道全绿；每块变异全部抓到。
 
 ## 15. 决定点（3a 2026-10-03 已定）
@@ -336,7 +339,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 - **发送任务的线程数是全局上界**：每个（owner, 激活）一个在途任务、线程池 4 个（与面板服务同档）；挂住的插件数到达 4 个时，后面的发送任务要排队，仍会互相影响。这是面板服务已有的同类边界。
 - **hub 不看 `plugin_events_enabled`**（给 B4、B7 的接线提示）：开关关掉时 hub 仍会读安装表（每次发布触发一轮）。B4 在事件点应先看开关再调 `publish_plugin_event`；B7 的「开关关闭就不能启用」保证不会真的投递，但读表的开销省不掉。
 - Windows 上宿主命令不进沙箱，插件进程沙箱同样不可用，v8 插件在 Windows 上启用失败。
-- **收紧钩子是护栏，不是安全边界**（9b 评审）：插件拒了 `delete_file`，模型还能用 `run_command rm` 达到同样效果。插件作者要按 `effects` 订阅才能盖住同类操作；宿主的安全边界仍是 H2、H3、审批策略和沙箱。
+- **收紧钩子是护栏，不是安全边界**（9b 评审）：插件拒了补丁里的删除段，模型还能用 `run_command rm` 达到同样效果。插件作者要按 `effects` 订阅才能盖住同类操作；宿主的安全边界仍是 H2、H3、审批策略和沙箱。
 - **宿主命令来源的可信度**（9b 复核，3a 待定）：用户命令免收紧，前提是 Gateway 能确认调用方是用户本人；本机来源信任与模型沙箱可联网之间的冲突，由 3a 定方向（比如收紧本机来源信任条件，或让模型沙箱连不到 Gateway）。
 - **账本可信依赖 H3**（9b 评审）：第 9 节的 `runtime_events` 和审批决定文件（`workspace/runtime/services/gateway` 下）不被模型篡改，是靠 H3“宿主运行状态对模型只读”保证的。所以 M 线 B5–B8 排在 H3 合入之后。
 

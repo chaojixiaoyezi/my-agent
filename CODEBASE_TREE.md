@@ -1471,6 +1471,21 @@ plugins/
 |   `-- src/
 |       |-- server.js                  # stdio MCP 服务：握手声明读取扩展、工具分派、打开后复核的有界读取
 |       `-- workspace_read.js          # 工作区读取上下文的 Node 移植：逐段解析链接、owner/凭据/危险目录裁决
+|-- event-watch/                       # M1 B8 事件观察样例（v8）：订阅全部 6 类事件，只读 table 面板显示收到与合并丢弃计数
+|   |-- README.md                      # 构建、确认启用与计数说明
+|   |-- declaration.json               # 6 类事件（content none）、watch 面板与默认断网的唯一声明
+|   `-- src/
+|       `-- server.py                  # stdio MCP 服务：握手声明事件与展示能力，只回观察回执与只读计数表
+|-- rm-guard/                          # M1 B8 工具收紧样例（v8，Python）：rm 加 -r 和 -f 要求确认、delete_file 直接拒绝
+|   |-- README.md                      # 构建、确认启用与命中写法说明
+|   |-- declaration.json               # guard-rm（run_command，full 参数）与 guard-delete（delete_file）收紧门声明
+|   `-- src/
+|       `-- server.py                  # stdio MCP 服务：握手声明收紧能力，只按结构化 command 裁决
+|-- rm-guard-node/                     # M1 B8 工具收紧样例（v8，Node）：与 rm-guard 行为一致的 Node.js 实现
+|   |-- README.md                      # 构建、确认启用与跨语言一致性说明
+|   |-- declaration.json               # 与 rm-guard 相同的两个收紧门声明
+|   `-- src/
+|       `-- server.js                  # stdio MCP 服务：与 Python 版逐条对齐的裁决逻辑
 |-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
 |   |-- README.md                      # 离线构建、命令示例与当前验收边界
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -1635,6 +1650,7 @@ docs/
 - `plugins/harness-console/`：首个界面型插件（宿主只读 API 样本），网页与桌面窗口共用一个只绑回环的服务，宿主令牌只留在插件服务端；`agent_py_agent/tests/test_harness_console_package.py` 为其实际包、假宿主 API 与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/web-board/`：网页界面型插件，插件进程内只绑回环的只读网页，按 serve 时冻结的读取上下文和 no-follow 读取限定目录；`agent_py_agent/tests/test_web_board_package.py` 为其实际包与 MCP 进程、真实 HTTP 访问的组件验收。
 - `plugins/hello-node/`、`plugins/hello-go/` 与 `scripts/build_plugin_files_package.py`：任意语言插件（包描述 v6）的两种启动机制样例及打包脚本；`plugins/sdk/conformance/workspace_read_check.json` 是非 Python 插件移植读取检查时必须跑通的一致性用例，`agent_py_agent/tests/test_plugin_any_language_samples.py` 为其组件验收。
+- `plugins/event-watch/`、`plugins/rm-guard/`、`plugins/rm-guard-node/`：M1 v8 事件订阅与工具收紧样例（B8）——event-watch 观察全部 6 类事件并在只读 table 面板显示收到与合并丢弃计数；rm-guard / rm-guard-node 在 `run_command` 出现 rm 加 -r 和 -f 时回 `ask`（`RM_RF`）、`delete_file` 回 `deny`（`DELETE_FILE_BLOCKED`）；`agent_py_agent/tests/test_plugin_m1_b8_samples.py` 为假宿主直连插件进程的组件验收。
 - `plugins/shuohao-novel-gates/`：固定 B 的五阶段只读门插件，安装/调用仍沿既有宿主链；同源声明、来源清单和字节保留由 `agent_py_agent/tests/test_shuohao_novel_gates.py` 核对。`agent_py_agent/tests/fixtures/shuohao_skills/` 只用于原样上游自检，不随插件 ZIP 分发；本机环境失败与真实入口未验证边界见 TESTS。
 - `agent_py_agent/tests/test_plugin_api_build.py`、`agent_py_agent/tests/test_workspace_peek_package.py`：实际标准包、独立环境和原 MCP/宿主管理链的开发验证，不代替真实 TUI。
 

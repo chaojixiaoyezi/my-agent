@@ -1,0 +1,37 @@
+{
+  "plugin_id": "event-watch",
+  "version": "1.0.0",
+  "summary": "观察全部 6 类宿主事件，在只读面板里显示每类收到的条数与合并丢弃数",
+  "entry": {"kind": "interpreter", "interpreter": "python3", "command": "src/server.py", "args": []},
+  "files": [
+    {"path": "declaration.json", "executable": false},
+    {"path": "src/server.py", "executable": false}
+  ],
+  "platforms": ["any"],
+  "events": [
+    {"type": "prompt_submitted", "content": "none"},
+    {"type": "turn_started", "content": "none"},
+    {"type": "turn_ended", "content": "none"},
+    {"type": "tool_call_started", "content": "none"},
+    {"type": "tool_call_finished", "content": "none"},
+    {"type": "command_executed", "content": "none"}
+  ],
+  "tool_gates": [],
+  "permissions": {"network": false},
+  "default_action": "show",
+  "actions": [
+    {
+      "name": "show",
+      "summary": "打开或关闭事件计数面板",
+      "arguments": [],
+      "kind": "display",
+      "target": "watch",
+      "available": true
+    }
+  ],
+  "panels": [
+    {"id": "watch", "title": "事件观察计数", "kind": "table", "topics": ["run_state"]}
+  ],
+  "tools": [],
+  "settings_schema": {"type": "object", "properties": {}, "additionalProperties": false}
+}
