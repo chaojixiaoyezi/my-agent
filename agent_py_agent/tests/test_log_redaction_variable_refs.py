@@ -7,7 +7,9 @@
 # 模块用途: 钉住纯变量引用保留口径（只认全大写）、其余写法照旧打码，以及真实密钥没有任何新路径泄漏。
 from __future__ import annotations
 
+import signal
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -329,10 +331,44 @@ _PERF_INPUTS = (
 
 @pytest.mark.parametrize(("label", "text"), _PERF_INPUTS)
 def test_long_underscore_inputs_stay_linear(label: str, text: str) -> None:
-    started = time.perf_counter()
-    redact_sensitive_text(text)
-    elapsed = time.perf_counter() - started
-    assert elapsed < _PERF_BUDGET_SECONDS, f"{label} 打码耗时 {elapsed:.3f}s，超过 {_PERF_BUDGET_SECONDS}s（回退成嵌套量词了吗？）"
+    _assert_redacts_within_budget(label, text)
+
+
+@contextmanager
+def _hard_time_limit(seconds: int):
+    """给单个用例套一个墙钟兜底。
+
+    LLM: 性能用例的断点是 0.1 秒，但如果改动真把复杂度变回指数级，光跑完这次调用就要几十分钟到小时级，
+       计时断言永远等不到，整个测试进程会挂死。这里用 SIGALRM 在同一个进程里硬中断，抛出超时错误让
+       用例直接变红——是"抓变异"的兜底，不是常规路径。平台不支持 SIGALRM（非 Unix）时降级为不设限，
+       计时断言仍单独成立。
+    """
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _on_timeout(signum, frame):  # noqa: ANN001 - 信号回调签名固定
+        raise TimeoutError(f"打码超过 {seconds} 秒仍未返回（复杂度退化了吗？）")
+
+    previous = signal.signal(signal.SIGALRM, _on_timeout)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+# LLM: 统一的"打码必须在线性时间内返回"断言：先套墙钟兜底（防变异跑成小时级），再用单调时钟量实际耗时。
+#   阈值 0.1 秒相对实测的毫秒级留了上百倍余量，只抓量级差异（比如回退成嵌套量词），不抓 CI 抖动。
+# 函数用途: 断言一段输入的打码耗时在预算内，超时或超预算都让用例变红。
+def _assert_redacts_within_budget(label: str, text: str, budget: float = _PERF_BUDGET_SECONDS) -> float:
+    with _hard_time_limit(10):
+        started = time.perf_counter()
+        redact_sensitive_text(text)
+        elapsed = time.perf_counter() - started
+    assert elapsed < budget, f"{label} 打码耗时 {elapsed:.3f}s，超过 {budget}s（复杂度退化了吗？）"
+    return elapsed
 
 
 # LLM: rkey2 修 ReDoS 时把键名判定搬进回调，词表同一份字符串既拼正则又做集合判定，
@@ -353,3 +389,82 @@ def test_credential_word_list_is_literal_and_matchable() -> None:
         assert redaction._is_credential_key_name(name), name
     for name in ("max_tokens", "token_count", "password_hint", "secretary", "tokens"):
         assert not redaction._is_credential_key_name(name), name
+
+
+# LLM: rkey3：JSON 字段规则原来按精确字段名枚举，`{"db_password": ...}`、`{"api-token": ...}`、
+#   `{"AWS_SECRET_ACCESS_KEY": ...}` 这类带前缀的 JSON 键一律不打码，而文本赋值规则（rkey/rkey2）
+#   已经按"完整末尾片段"认了同一批键名——同一个值写在 YAML 里会被打码、包成 JSON 就漏出去。
+#   现在两处共用同一个 _is_credential_key_name：正则只取整段带引号键名（单量词、不嵌套），
+#   判定搬到回调里；不是凭据键就整段原样返回。
+# 函数用途: 断言带前缀的 JSON 键名会被打码，形状与文本赋值规则一致。
+@pytest.mark.parametrize(
+    "key",
+    [
+        "db_password",           # 下划线前缀
+        "api-token",             # 连字符前缀
+        "AWS_SECRET_ACCESS_KEY", # 大写下划线多段前缀
+        "password",              # 正好是凭据词
+    ],
+)
+def test_json_prefixed_credential_keys_are_redacted(key: str) -> None:
+    text = '{"' + key + '": "' + "hunter22" + '"}'
+    safe = redact_sensitive_text(text)
+    assert "hunter22" not in safe, (key, safe)
+    assert MARKER in safe
+
+
+# LLM: 与上一条配对的反例：键名里出现凭据词但并不是凭据键（前缀/后缀把它变成另一个词），
+#   JSON 规则不能跟着放宽成子串匹配，否则 max_tokens、token_count、password_hint 这类普通字段
+#   会被打码，配置和模型输出被无辜涂掉。
+# 函数用途: 断言含凭据词的普通 JSON 键名不会被误伤。
+@pytest.mark.parametrize("key", ["max_tokens", "token_count", "password_hint", "note"])
+def test_json_non_credential_keys_are_kept(key: str) -> None:
+    text = '{"' + key + '": "keep-me-please"}'
+    safe = redact_sensitive_text(text)
+    assert safe == text, (key, safe)
+    assert MARKER not in safe
+
+
+# LLM: 键名判定搬进回调后仍要保留 rdv2 的纯变量豁免：值是整段全大写变量引用时保留原文，
+#   否则复审又会把 `{"db_password": "$DB_PASSWORD"}` 读成写死的占位符。
+# 函数用途: 断言 JSON 形态下纯变量引用值（含花括号写法）保留原文。
+def test_json_value_that_is_a_pure_variable_reference_is_kept() -> None:
+    for value in (D + "DB_PASSWORD", D + "{DB_PASSWORD}"):
+        text = '{"db_password": "' + value + '"}'
+        assert redact_sensitive_text(text) == text, text
+        assert MARKER not in redact_sensitive_text(text)
+
+
+# LLM: 源码模式在调用处整段跳过 JSON 与赋值规则（见 redact_sensitive_text 的 `if not code_file`）。
+#   rkey3 把 JSON 规则换成回调写法，不能顺手把这道跳过也改掉——源码里的示例一旦被涂掉就没法读。
+# 函数用途: 断言源码模式仍然跳过 JSON 字段规则，默认模式照旧打码。
+def test_source_mode_still_skips_the_json_field_rule() -> None:
+    text = '{"db_password": "' + "hunter22" + '"}'
+    assert MARKER not in redact_sensitive_text(text, code_file=True)
+    assert MARKER in redact_sensitive_text(text, code_file=False)
+
+
+# LLM: 9b 建议、3a 采纳：键名去掉 128 字符上限。加上限时"200 字符前缀 + -password="这类凭据键
+#   匹配不到，值原样漏出，相对 rdv2 是回归；上限对性能也没必要——键名是单个量词、前面又要求
+#   非键名字符，回溯是线性的。这里把两处规则（文本赋值 + JSON 字段）的超长键名都钉住。
+# 函数用途: 断言超长前缀的凭据键仍被打码，且耗时在线性范围内。
+def test_over_long_credential_key_names_are_still_redacted() -> None:
+    long_prefix = "a" * 20000
+    text = long_prefix + "_password=" + "Sup3rSecret"
+    _assert_redacts_within_budget("超长文本键名", text)
+    assert "Sup3rSecret" not in redact_sensitive_text(text)
+
+    json_text = '{"' + long_prefix + '-password": "' + "Sup3rSecret" + '"}'
+    _assert_redacts_within_budget("超长 JSON 键名", json_text)
+    assert "Sup3rSecret" not in redact_sensitive_text(json_text)
+
+
+# LLM: 长 JSON 是打码函数在真实日志里会遇到的形状（一行里塞着超长键名和超长值）。JSON 规则换了写法，
+#   这里确认它没有引入回溯：超长键名、超长值各自上万字符，都必须在预算内返回。
+# 函数用途: 断言一行超长 JSON 的打码耗时在线性范围内。
+def test_long_json_line_redacts_within_budget() -> None:
+    long_key = "k" * 20000
+    long_value = "v" * 20000
+    _assert_redacts_within_budget("超长 JSON 行", '{"' + long_key + '": "' + long_value + '"}')
+    nested_quotes = '{"a": "' + '"x' * 10000 + '"}'
+    _assert_redacts_within_budget("多引号 JSON 行", nested_quotes)

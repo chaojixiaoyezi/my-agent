@@ -89,7 +89,38 @@
   本次只补覆盖与文档，不修改产品或测试；先前当前版本的 B4 回归、去保护变异、guards9 和静态门禁证据保持适用，不重复冒充 Linux/沙箱外复验。
 - **未验证**：生产 Gateway/真实模型/TUI/IM、B7 插件安装启用与沙箱断网、text 确认许可链未验证；原 393 文件外部范围本轮未重跑，不能把本轮定向范围扩大到全部。
 
-## 带前缀凭据键名打码（rkey + rkey2，2026-10-04，worker/redaction-var-refs-v2；9b 复跑 9 样本、回溯计时、误伤反例都通过，已并入 step17j）
+## 带前缀凭据键名打码（rkey + rkey2 + rkey3，2026-10-04，worker/redaction-var-refs-v2；9b 三次复跑都通过，已并入 step17j）
+
+- **rkey3：JSON 键名同口径 + 去掉键名长度上限（同一分支接着 `1d89a87a3`）**。
+  - **改了什么**：`_SECRET_JSON_FIELD_RE` 从精确字段名枚举改成"字符串键名整体取出、回调按完整末尾片段判"，
+    与文本赋值规则共用同一个 `_is_credential_key_name`；新增回调 `_redact_json_field`（非凭据键整段原样返回）。
+    同时**去掉文本赋值规则与 JSON 键名规则的 128 字符上限**（9b 建议、3a 采纳）。
+  - **新增用例 6 类 12 条**：带前缀 JSON 键打码（`db_password` / `api-token` / `AWS_SECRET_ACCESS_KEY` / `password`）；
+    JSON 反例不误伤（`max_tokens` / `token_count` / `password_hint` / `note`）；JSON 值纯全大写变量引用保留
+    （含 `${...}`）；源码模式仍跳过 JSON 规则；超长键名（文本 2 万字符前缀 + `_password=`、JSON 2 万字符前缀
+    + `-password`）仍打码且在线性时间内；长 JSON 一行（2 万字符键名 + 2 万字符值、上万嵌套引号）线性返回。
+  - **性能用例加了 SIGALRM 墙钟兜底（10 秒硬中断）**：性能断点是 0.1 秒，真退化成指数级时光跑一次要小时级，
+    计时断言永远等不到、测试进程会挂死；兜底让用例直接变红。非 Unix 平台降级为不设限，计时断言仍单独成立。
+  - **4 条原有性能用例去掉上限后重测**（单调时钟，3 次取最快）：
+    | 输入 | 长度 | 实测 |
+    | --- | --- | --- |
+    | 下划线长行 | 20001 | 0.0010s |
+    | `a_` 重复 | 30001 | 0.0015s |
+    | 长 snake_case 键名（无 `=`） | 50001 | 0.0027s |
+    | 连字符长行 | 20000 | 0.0010s |
+    | 超长 JSON 行（新增） | 40008 | 0.0020s |
+    | 多引号 JSON 行（新增） | 20009 | 0.0016s |
+  - **变异 2 个，全 KILLED**（脚本 `/private/tmp/claude-501/rkey3/mutate.py`，跑完按原字节还原并 `diff` 校验）：
+    ① 去掉回调里的凭据键判断（JSON 一律打码）→ `test_json_non_credential_keys_are_kept` 的
+    `token_count` / `password_hint` / `note` 三条变红；② 键名放宽成子串匹配 → 同用例的
+    `max_tokens` / `token_count` / `password_hint` 变红。
+  - **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds4`）：
+    - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction_variable_refs.py -q --tb=short -p no:cacheprovider` → **68 passed**
+    - `test_log_redaction.py` + `test_log_redaction_variable_refs.py` + `test_audit_redaction.py` +
+      `test_im_path_redaction_note.py` + `test_parameter_registry.py` → **233 passed**
+    - guards9（11 文件）→ **184 passed**
+    - ruff（首次抓到导入顺序，已修）/ `check_import_boundaries.py` findings=0 / `DOC_SYNC_PASS` /
+      `git diff --check` 干净 / strict code-size hard=0 / size_diff **新增 0 / 消失 31** / clean-package OK
 
 - **rkey2：修 ReDoS（同一分支接着 `6a5440cf9`）**。键名前缀的嵌套量词 `(?:[A-Za-z0-9_.]*[_-])*` 改成
   单量词 `[A-Za-z0-9_.-]{1,128}` + 回调判定；新增 5 条用例（4 条性能 + 1 条词表纯字面量）。

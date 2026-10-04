@@ -97,16 +97,20 @@ def _is_credential_key_name(name: str) -> bool:
 #   29 个 37.7 秒，再长就是小时级；打码函数要处理每段工具输出和每一行日志，Markdown 分隔线、
 #   ASCII 表格、日志横线这类长串下划线就能卡住回合与 Gateway 线程）。改成单量词后整体线性。
 #   代价是正则不再自己筛掉非凭据键，多调用一次 _is_credential_key_name；这不改变判定口径。
+#   键名不设长度上限（9b 建议、3a 采纳）：单个量词 + 前面要求非键名字符，回溯是线性的，加上限反而
+#   让超长前缀的凭据键（200 字符前缀 + `-password=`）漏打码，相对 rdv2 是回归。
 # 常量用途: 匹配"键名[:=]值"，键名与值都由回调按完整末尾片段决定是否打码。
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(^|[^\w.-])([A-Za-z0-9_.-]{1,128})(\s*[:=]\s*)([\"']?)"
+    r"(?i)(^|[^\w.-])([A-Za-z0-9_.-]+)(\s*[:=]\s*)([\"']?)"
     r"([^\s,;&\"']{4,})(\4)"
 )
+# LLM: 与文本赋值规则（_SECRET_ASSIGNMENT_RE）同口径：正则只用不嵌套的单量词取出整段带引号键名，
+#   是不是凭据键交给回调里的 _is_credential_key_name 判（同一份词表、同一套末尾片段规则）。
+#   原来这里是精确字段名枚举，`{"db_password": ...}`、`{"api-token": ...}` 这类带前缀的 JSON 键
+#   一律不打码，与文本规则口径不一致（9b 建议 2 记账的那处差异）。
+# 常量用途: 匹配"带引号键名: 带引号值"，键名由回调按完整末尾片段决定是否打码。
 _SECRET_JSON_FIELD_RE = re.compile(
-    r"(?i)([\"'](?:access_key|access_token|api_?key|app_secret|authorization|client_secret|"
-    r"credential|id_token|master_key|password|passwd|private_key|pwd|refresh_token|secret|signature|"
-    r"tenant_access_token|ticket|token|verification_token)[\"']\s*:\s*)"
-    r"([\"'])([^\"'\r\n]{1,})(\2)"
+    r"(?i)([\"'])([A-Za-z0-9_.-]+)(\1\s*:\s*)([\"'])([^\"'\r\n]{1,})(\4)"
 )
 _URL_PASSWORD_RE = re.compile(
     rf'(\b[A-Za-z][A-Za-z0-9+.-]*://(?:{_SOURCE_URL_SLOT}|{_NOT_SOURCE_URL_SLOT}[^:/?\#\s\"\'`@])+:)'
@@ -168,6 +172,20 @@ def _redact_assignment(match: re.Match[str], marker: str, labels_only: bool) -> 
     return match.group(1) + match.group(2) + match.group(3) + match.group(4) + _mask_secret_value(match.group(5), marker) + match.group(6)
 
 
+# LLM: JSON 字段规则与文本赋值规则同口径：正则只取整段带引号键名，凭据判定交给同一个
+#   _is_credential_key_name。分组为 1=键名开引号、2=键名、3=引号+冒号、4=值开引号、5=值、6=闭引号。
+#   非凭据键原样返回（`{"max_tokens": 4096}` 这类不能被误伤）；值仍是纯全大写变量引用时，
+#   _mask_secret_value 会照 rdv2 的口径保留原文。
+# 函数用途: 判一条 "键": "值" 要不要打码；要打就把值遮住，不要就原样返回。
+def _redact_json_field(match: re.Match[str], marker: str, labels_only: bool) -> str:
+    if not _is_credential_key_name(match.group(2)):
+        return match.group(0)
+    if labels_only:
+        return marker
+    return (match.group(1) + match.group(2) + match.group(3) + match.group(4)
+            + _mask_secret_value(match.group(5), marker) + match.group(6))
+
+
 # LLM: 调用方决定是否为源码；插值内字面量和实际 URL 凭证仍须遮蔽，已知密钥扫描始终执行。
 # 函数用途: 返回脱敏副本，不写文件；保持源码结构和日志安全边界各自生效。
 def redact_sensitive_text(
@@ -208,13 +226,7 @@ def redact_sensitive_text(
     )
     if not code_file:
         text = _SECRET_JSON_FIELD_RE.sub(
-            lambda match: (
-                redacted_marker
-                if redact_assignment_labels
-                else match.group(1) + match.group(2) + _mask_secret_value(match.group(3), redacted_marker) + match.group(4)
-            ),
-            text,
-        )
+            lambda match: _redact_json_field(match, redacted_marker, redact_assignment_labels), text)
         text = _SECRET_ASSIGNMENT_RE.sub(
             lambda match: _redact_assignment(match, redacted_marker, redact_assignment_labels), text)
     password_pattern = _URL_PASSWORD_RE if code_file else _LOG_URL_PASSWORD_RE
