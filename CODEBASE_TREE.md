@@ -1105,6 +1105,7 @@ agent_py_agent/
 |   |-- test_computer_text_input.py     # 文本事件 UTF-16、显式替换与不支持字符零副作用回归
 |   |-- test_screen_observation_core.py # J16 片 B 核心：实例登记与快照环、摘要口径与容差、观察载荷过宿主校验、五项复核放行与各项 stale
 |   |-- test_computer_use_observation_tools.py # J16 片 B 接入：开关并入声明与环境标记、属主范围、工具调用三元组、底层处理器（假 mcp.types）、X11 后端假 Xlib
+|   |-- test_computer_use_observe_only.py # J16 只看档（vho）：四档位装配、只看档只交出 observe_window、上游导入被拦时仍可装配、适配器顶层无上游 import
 |   |-- test_computer_use_xvfb_lane.py   # J16 车道 Xvfb 冒烟（默认跳过）：真适配器观察 → 点击 → 再观察、移动后过期、开关关着只有上游工具
 |   |-- test_computer_use_xvfb_cases.py  # J16 片 C 车道集成（默认跳过）：关掉再开、改内容、/stop 中断慢 OCR、闪动光标误判统计
 |   |-- test_computer_use_macos.py # J16 片 E：假 Quartz/ScreenCaptureKit/mss 上的列窗、可见、遮挡、多显示器缩放、回退原因、权限与晚到回调

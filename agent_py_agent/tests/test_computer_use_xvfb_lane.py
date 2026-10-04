@@ -18,6 +18,7 @@ import pytest
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import persist_tool_runtime_ledger
 from agent_py_agent.agent.plugin_observation import OBSERVATION_KEY, OBSERVATION_STALE
 from agent_py_agent.agent.tooling.computer_use_profile import (
+    ComputerUseTier,
     computer_use_mcp_servers,
     with_computer_use_observation,
 )
@@ -145,7 +146,7 @@ def lane(desktop, tmp_path):
     repo = _Repo()
     registry = _Registry(repo)
     servers = with_computer_use_observation(
-        computer_use_mcp_servers({}, enabled=True, is_local_admin=True, access_mode="full-access", environ=desktop.env, python_executable=sys.executable),
+        computer_use_mcp_servers({}, ComputerUseTier(enabled=True, is_local_admin=True, access_mode="full-access", environ=desktop.env, python_executable=sys.executable)),
         enabled=True)
     clients = register_mcp_servers(registry, servers)
     registry._mcp_clients = clients
@@ -187,7 +188,7 @@ def test_observe_click_and_reobserve_on_a_real_xvfb_desktop(lane):
 
 def test_switch_off_publishes_only_the_upstream_tools_on_the_real_adapter(desktop):
     registry = _Registry(_Repo())
-    servers = computer_use_mcp_servers({}, enabled=True, is_local_admin=True, access_mode="full-access", environ=desktop.env, python_executable=sys.executable)
+    servers = computer_use_mcp_servers({}, ComputerUseTier(enabled=True, is_local_admin=True, access_mode="full-access", environ=desktop.env, python_executable=sys.executable))
     clients = register_mcp_servers(registry, with_computer_use_observation(servers, enabled=False))
     try:
         assert clients[0].publication.status == "published", str(clients[0].publication)

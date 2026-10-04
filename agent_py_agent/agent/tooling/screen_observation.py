@@ -12,7 +12,7 @@
 #   非整数比时 scale 往上调到"点数 × scale ≥ 像素数"，宿主按 size × scale 校验贴边候选才不会误拒。
 #   错误码集合开放（宿主只提升 stale / not_found，其它原样透传）：window_not_found | window_ambiguous | not_viewable | capture_failed |
 #   ocr_failed | occluded | not_found | stale | missing_context | invalid_arguments | cancelled | screen_recording_not_permitted |
-#   accessibility_not_permitted | focus_not_acquired | clear_unsupported | clear_failed | type_failed；后端主动抛的 ObservationError 原样透传。
+#   screen_locked | accessibility_not_permitted | focus_not_acquired | clear_unsupported | clear_failed | type_failed；后端主动抛的 ObservationError 原样透传。
 #   window 参数三种解析（空 / win: 别名 / 展示标题精确唯一匹配）与 not_found/ambiguous 携带的可见窗口清单见 _target（片 F，ae 定规则）。
 # 模块用途: "看一眼窗口、给出可点的候选、点之前再确认一遍没变"的全部判断逻辑，可在没有桌面的机器上用假后端完整测试。
 from __future__ import annotations

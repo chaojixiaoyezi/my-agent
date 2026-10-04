@@ -1,5 +1,16 @@
 # 设计台账
 
+## 屏幕观察只看档（vho，2026-10-04，分支 `worker/vh-observe-only`，基于生产版 `d05a0d075`；3a 真机实测通过（全新环境按清单安装、只交 observe_window、解锁时真实观察 44 个候选），待交叉复审与 9b 终审，已并入 step17j）
+
+- **起因**：生产按计划只装了观察要用的依赖（pyobjc 三件套、mss、rapidocr、pillow），没装 pyautogui 与 computer-control-mcp。3a 真机核对发现：按生产开关组合起适配器，`computer_use_server.py` 顶层 `import pyautogui` 直接失败，适配器退出，一个工具都交不出来——观察核心本身没问题。
+- **档位（3a 定，显式不是兜底）**：`computer_use_enabled=false` + `computer_use_observation_enabled=true` 定义为"只看档"：同一个服务只交出 `observe_window`，审批照旧 always 每次都问本人；不交出 `click_candidate` / `type_into_candidate`，不交出任何上游工具；适配器进程不 import pyautogui / computer_control_mcp。其它三种组合行为不变。
+- **改法**：宿主侧 `computer_use_mcp_servers` 新增 `observe_only` 结构化档位（`core.py` 由两个开关派生），只看档用单独一份声明表（一眼可读档位边界）；服务环境写 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY=1`。适配器侧 `computer_use_server.py` 把上游 import 全部收进 `_load_upstream()`，只在完整档调用；`build_adapter_server` 按标记与档位只注册 `observe_window`。没有 try/except ImportError 兜底——完整档缺依赖照旧明确失败。
+- **跨调用点一致**：`computer_use_mcp_servers` / `with_computer_use_observation` 在仓库里只有 `core.py` 一处生产调用点（`/tools` 展示与工具目录都从同一 registry 派生），档位在这一处定死。
+- **验证**：见 TESTS「屏幕观察只看档（vho）」；5 个变异（只看档泄漏点击工具、适配器忽略只看档、宿主丢弃只看档、标记写反、上游 import 回到模块顶层）全部被用例杀死。
+- **未验证**：真机适配器子进程与真观察（macOS 后端）由 3a 在沙箱外跑；本工作树在沙箱里只做了装配级与导入级验证（含真子进程的导入拦截探针）。
+- **vho 补丁（2026-10-04，同一分支）**：3a 真机实测暴露两处沙箱测不到的问题。① `computer-use-observe` 清单漏了 MCP 的 Python SDK——适配器顶层 import 它，生产原来靠上游 `computer-control-mcp` 带进来，本 extra 没装，只看档直接 `ModuleNotFoundError`；两个平台各补 `mcp==1.13.0`（与上游钉的同一版）。② 宿主/适配器接缝断掉：只看档宿主只写只看标记（`with_computer_use_observation` 见它早返回，不再写观察标记），适配器却只认观察标记，于是 `tools/list` 是空的；改由 `observation_tools_enabled` 认两个标记中任意一个（只看标记本身即意味着要装载观察工具），注册范围仍由档位收窄。补两条守卫：扫只看档路径的第三方 import 核对 extra 清单（含未登记包的反向检查），以及**不手写环境变量**的接缝用例（拿宿主产出 env 直接喂适配器）。
+- **vho 补丁二（2026-10-04，锁屏）**：3a 真机在锁屏状态调 observe_window，拿到的是 `OCCLUDED`（"窗口被上层窗口完全盖住"）——结论没错但对模型和用户说明不清。macOS 后端现在在列窗口之前先查锁屏（`CGSSessionScreenIsLocked`，以及活动显示器数为 0），命中返回 `screen_locked`，消息"屏幕已锁定，解锁后再观察"；检查只读、不弹窗，查不到按"无法确认"继续原流程（不因查不到锁屏而拒绝观察）。位置在屏幕录制权限预检之后、列窗之前。Linux X11 无此概念，行为不变。错误码在设计稿码表与 `screen_observation.py` 模块头登记（观察码是开放集合，宿主只提升 stale / not_found）。
+
 ## B9 用例临时目录清理容忍访达 .DS_Store（dsst，2026-10-04，分支 `worker/b9-test-dsstore`，基于 17j 头 `1d394a308`；3a 复审通过，已并入 step17j）
 
 - **起因**：3a 在 17j 上跑 `test_write_my_agent_plugin_skill.py` 时偶发 `OSError: [Errno 66] Directory not empty: .../tmp/b9-m1b9-xxxx/release-source/agent_py_agent`——`author_workspace` 把临时目录建在工作树 `tmp/` 下（沙箱只能写工作树，wheel/pip 临时文件也得放这儿），清理时正好撞上访达往目录里写 `.DS_Store`，`rmtree` 报非空。单独重跑就过，但只要有人在访达里浏览，门禁就可能随机变红。

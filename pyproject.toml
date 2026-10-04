@@ -48,7 +48,12 @@ computer-use = [
 # 因此生产不需要那个会带进 222 个包的上游执行器。这里按平台钉死观察链路真正用到的库，让部署能照仓库声明装。
 # 版本来自 3a 在生产运行时的克隆上的实测，以及 Linux 桌面层车道镜像（my-agent-linux-test:py312-desktop）里实际装到的版本。
 # 自动执行的点击（pyautogui）不在本 extra 里：生产保持关闭，要开就用上面的 computer-use。
+# MCP 的 Python SDK 必须在清单里：适配器就是靠它收发 stdio（computer_use_server.py 顶层 import
+# mcp.server.fastmcp / mcp.server.stdio），只看档也离不开；它本身不带点击能力（点击来自 pyautogui 与
+# computer-control-mcp，两个都不在本 extra 里）。版本跟上游 computer-control-mcp==0.3.13 钉的同一版，
+# 避免生产与开发两套 SDK 行为分叉。
 computer-use-observe = [
+  "mcp==1.13.0; sys_platform == 'darwin'",
   "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
   "pyobjc-framework-ScreenCaptureKit==12.2.2; sys_platform == 'darwin'",
   "pyobjc-framework-ApplicationServices==12.2.2; sys_platform == 'darwin'",
@@ -57,6 +62,7 @@ computer-use-observe = [
   "pillow==11.3.0; sys_platform == 'darwin'",
   # Linux：python-xlib 拿窗口与几何、mss 截图、rapidocr 出文字，和车道镜像里的版本一致。
   "python-xlib==0.33; sys_platform == 'linux'",
+  "mcp==1.13.0; sys_platform == 'linux'",
   "mss==10.2.0; sys_platform == 'linux'",
   "rapidocr-onnxruntime==1.2.3; sys_platform == 'linux'",
   "pillow==11.3.0; sys_platform == 'linux'",

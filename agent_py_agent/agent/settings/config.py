@@ -255,7 +255,8 @@ class _ToolConfigFields:
     # 管理员同时显式 full-access 时才注入；普通 owner 和 WorkspaceOnly 一律不可见。
     computer_use_enabled: bool = False
     # J16 屏幕观察：在 Computer Use 适配器里再注册 observe_window / click_candidate（只读采样 + 候选点击，审批策略
-    # always / dangerous）。默认关：工具目录不变；开了也仍受 computer_use_enabled、local/main 与 Full Access 三重约束。
+    # always）。档位由本项与 computer_use_enabled 组合决定：总开关关 + 本项开 = 只看档（只交出 observe_window，
+    # 适配器不加载上游执行器依赖）；两者都开 = 完整档。任何档位仍受 local/main 与 Full Access 约束。
     computer_use_observation_enabled: bool = False
 
 

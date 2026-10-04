@@ -1471,7 +1471,7 @@
           {
             "key": "computer_use_enabled",
             "label": "computer_use_enabled（computer use enabled）",
-            "description": "Computer Use：直接复用 MIT 开源的 computer-control-mcp 执行鼠标、键盘、窗口、截图和 OCR， my-agent 只通过现有 MCP/Tool Gateway 做薄适配，不重复实现桌面自动化引擎。 - 安装：pip install 'my-agent[computer-use]'；当前执行器的 OCR 依赖支持 Python 3.10-3.13。 - 默认 false：headless Gateway 不启动图形子进程，也不承担 OCR/ONNX 依赖。 - 只有结构化 local/main 管理员 + access_mode=full-access 才会注册；远程/普通 owner 即使改配置也不可见。 - 截图/OCR 和所有输入动作按 dangerous 审批；窗口枚举/屏幕尺寸/等待只读，移动鼠标/激活窗口按 mutating。 - Linux 复用 Gateway 当前 DISPLAY/WAYLAND/XAUTHORITY 会话；没有可用桌面会明确表现为工具不可用。",
+            "description": "Computer Use：直接复用 MIT 开源的 computer-control-mcp 执行鼠标、键盘、窗口、截图和 OCR， my-agent 只通过现有 MCP/Tool Gateway 做薄适配，不重复实现桌面自动化引擎。 - 安装：pip install 'my-agent[computer-use]'；当前执行器的 OCR 依赖支持 Python 3.10-3.13。 - 默认 false：headless Gateway 不启动图形子进程，也不承担 OCR/ONNX 依赖。 - 只有结构化 local/main 管理员 + access_mode=full-access 才会注册；远程/普通 owner 即使改配置也不可见。 - 截图/OCR 和所有输入动作按 dangerous 审批；窗口枚举/屏幕尺寸/等待只读，移动鼠标/激活窗口按 mutating。 - Linux 复用 Gateway 当前 DISPLAY/WAYLAND/XAUTHORITY 会话；没有可用桌面会明确表现为工具不可用。 总开关：true 才交出上游的鼠标、键盘、截图等全部桌面工具。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -1488,7 +1488,7 @@
           {
             "key": "computer_use_observation_enabled",
             "label": "computer_use_observation_enabled（computer use observation enabled）",
-            "description": "J16 屏幕观察（片 B 起）：在同一个 Computer Use 适配器里再注册两个工具——observe_window（只读采样一个窗口：不切焦点、 不激活、不动鼠标，给出稳定窗口身份、截图代次、几何和 OCR 文字候选，审批策略 always，每次都问本人）和 click_candidate （按候选点一下，dangerous；点之前适配器按当时快照逐项复核：实例、可见、几何、遮挡、区域像素，任一项变了就不点）。 - 默认 false：工具目录不变，适配器不装载 X11/OCR 观察后端。 - 开了也必须同时满足 computer_use_enabled、结构化 local/main 与 Full Access；普通 owner 看不到、按名字调也会被拒。 - 片 B 只有 Linux X11 后端（需要 DISPLAY 与窗口管理器）；macOS 后端在片 E。",
+            "description": "J16 屏幕观察（片 B 起）：在同一个 Computer Use 适配器里再注册 observe_window（只读采样一个窗口：不切焦点、 不激活、不动鼠标，给出稳定窗口身份、截图代次、几何和 OCR 文字候选，审批策略 always，每次都问本人）。 两个开关的组合决定档位（四种，显式语义，不是缺依赖时的兜底）： - 都关（默认）：没有 Computer Use 适配器，工具目录不变。 - 只看档（总开关关 + 观察开）：同一个服务只交出 observe_window，不交出点击/输入候选，也不交出任何上游桌面工具； 该适配器进程不加载上游执行器依赖（只装了观察用依赖也能跑），每次观察照样走 always 审批问本人。 - 完整档（都开）：上游工具全交出，另加 observe_window 与点击/输入候选工具。 - 只开总开关：上游工具全交出，没有观察工具。 - 任何档位都必须同时满足结构化 local/main 与 Full Access；普通 owner 看不到、按名字调也会被拒。 - 片 B 只有 Linux X11 后端（需要 DISPLAY 与窗口管理器）；macOS 后端在片 E。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,

@@ -135,7 +135,11 @@ from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
 from .tooling.admin_controls_tool import AdminControlsTool
 from .tooling.audit_records_tool import AuditRecordsTool
-from .tooling.computer_use_profile import computer_use_mcp_servers, with_computer_use_observation
+from .tooling.computer_use_profile import (
+    ComputerUseTier,
+    computer_use_mcp_servers,
+    with_computer_use_observation,
+)
 from .tooling.gateway_restart_tool import RestartGatewayTool
 from .tooling.gateway_status import GatewayStatusTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
@@ -1004,14 +1008,20 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
     effective_path_access_mode = (
         "full" if access_mode == "full-access" and not owner_scope_root else config.path_access_mode
     )
+    computer_use_enabled = bool(getattr(config, "computer_use_enabled", False))
+    observation_enabled = bool(getattr(config, "computer_use_observation_enabled", False))
     mcp_servers = with_computer_use_observation(
         computer_use_mcp_servers(
             getattr(config, "mcp_servers", {}),
-            enabled=bool(getattr(config, "computer_use_enabled", False)),
-            is_local_admin=is_local_admin_owner(agent.home_paths),
-            access_mode=access_mode,
+            ComputerUseTier(
+                enabled=computer_use_enabled,
+                is_local_admin=is_local_admin_owner(agent.home_paths),
+                access_mode=access_mode,
+                # 只看档：总开关关、只开观察时仍装配同一个服务，但只交出 observe_window，不 import 上游执行器。
+                observe_only=not computer_use_enabled and observation_enabled,
+            ),
         ),
-        enabled=bool(getattr(config, "computer_use_observation_enabled", False)),
+        enabled=observation_enabled,
     )
     source_resolver = None
     source_ref_schema = None

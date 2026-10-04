@@ -91,7 +91,7 @@
   - 片 B 起：RapidOCR 公开调用 `RapidOCR()(image)` 的文字区域。`role` 固定为 `ocr_text`，`actions` 只有 `click_candidate`；label 去控制字符，截到 120 字，只作外部数据（external_data）。
   - 片 G 起：无障碍树里的控件（见第 6 节），role 取自系统的结构化角色，可编辑控件才有 `type_into_candidate`。控件和 OCR 合并去重后，
     key 带来源前缀 `ax:<n>` / `ocr:<n>`（片 B 的 `t<n>` 改成 `ocr:<n>`，按留下的 OCR 区域连续编号），先控件后 OCR，合计不超过 64。
-- **失败**：MCP `isError` 加 `structuredContent.my_agent_observation_error{code}`，code 取 `window_not_found | not_viewable | capture_failed | ocr_failed | occluded | cancelled | screen_recording_not_permitted | accessibility_not_permitted | focus_not_acquired | clear_unsupported | clear_failed | type_failed`（片 C：宿主已取消；片 E：macOS 没有屏幕录制权限、点击前没有辅助功能权限；片 G：输入相关，见第 6 节）等。点击之后才发生的失败（输入时拿不到焦点、全选失败、点完被取消、打字中途失败）在错误对象里另带 `clicked: true`，如实说明“已点击、未输入”。码集合是开放的：宿主只把 `stale` / `not_found` 提升为宿主错误码，其它码原样透传，新增码不用改宿主。没有候选时不凭空造候选。
+- **失败**：MCP `isError` 加 `structuredContent.my_agent_observation_error{code}`，code 取 `window_not_found | not_viewable | capture_failed | ocr_failed | occluded | cancelled | screen_recording_not_permitted | screen_locked | accessibility_not_permitted | focus_not_acquired | clear_unsupported | clear_failed | type_failed`（片 C：宿主已取消；片 E：macOS 没有屏幕录制权限、点击前没有辅助功能权限；vho：macOS 屏幕已锁定；片 G：输入相关，见第 6 节）等。点击之后才发生的失败（输入时拿不到焦点、全选失败、点完被取消、打字中途失败）在错误对象里另带 `clicked: true`，如实说明“已点击、未输入”。码集合是开放的：宿主只把 `stale` / `not_found` 提升为宿主错误码，其它码原样透传，新增码不用改宿主。没有候选时不凭空造候选。
 - **采样方式回退**：主路径拿不到、退回别的采样方式时，结果顶层（与 `window`、`generation` 并列）带 `capture_fallback{reason}`；不进 `frame`（宿主的 frame 只认固定键，多一个键整份拒绝），也不进观察载荷。
 - **控件树不完整**（片 G）：读到上限被截断，或一个控件都读不到（没授权、绑定缺失、窗口对不上、超时、出错），结果顶层带 `ui_tree{status, reason}`（status 取 `truncated` / `unavailable`，reason 是开放的短原因码），只在不完整时出现，放法同 `capture_fallback`；读不到时 OCR 候选照出，观察不失败。
 
@@ -272,6 +272,26 @@
 | `action_candidate_auto_execute_enabled` | 能力配置（新增，管理员边界） | false | 第 7 节 |
 
 YAML 中文注释、dataclass 默认值、参数中心和设置白名单同步更新。
+
+### 8.1 只看档（vho，2026-10-04）
+
+两个开关的组合决定四个显式档位（不是缺依赖时自动降级；档位只由结构化开关与权限决定）：
+
+| 档位 | `computer_use_enabled` | `computer_use_observation_enabled` | 交出什么 |
+| --- | --- | --- | --- |
+| 都关（默认） | false | false | 没有 Computer Use 适配器 |
+| **只看档** | **false** | **true** | 同一个服务，只交出 `observe_window`；审批 always，每次都问本人 |
+| 完整档 | true | true | 上游全部工具 + `observe_window` + 点击/输入候选工具 |
+| 只开总开关 | true | false | 上游全部工具，没有观察工具 |
+
+- 背景：生产按计划只装了观察要用的依赖（pyobjc 三件套、mss、rapidocr、pillow），没装 `pyautogui` 与 `computer-control-mcp`。原适配器顶层 `import pyautogui`，开观察就会整体失败，一个工具都交不出来。
+- 只看档下：宿主在服务环境里写 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY=1`，声明表只含 `observe_window`；适配器读到这个标记就不装载上游、不注册上游工具，`tools/list` 恰好只有 `observe_window`。上游 import 全部收进 `_load_upstream()`，只在完整档调用。
+- 不交出 `click_candidate` / `type_into_candidate`：只看档的点击/输入无意义（上游依赖不在），也不给"只看"以外的动作面。这两项只在完整档注册。
+- 仍然是一个服务、一条 stdio 运行路径，权限照旧（结构化 local/main + Full Access）。
+- 覆盖点：宿主装配（`core.py` 计算档位 → `computer_use_mcp_servers(observe_only=...)` → `with_computer_use_observation` 不覆盖只看档）、适配器装配（`build_adapter_server` 按标记只注册 observe_window）、模块顶层无上游 import（AST 用例钉住）。
+- **依赖（vho 补丁，2026-10-04）**：`computer-use-observe` 必须包含 MCP 的 Python SDK（`mcp==1.13.0`）——适配器靠它收发 stdio，只看档也离不开；生产原来是从上游 `computer-control-mcp` 间接带进来的，本 extra 不装上游就必须自己声明。它不带点击能力（点击来自 pyautogui 与 computer-control-mcp，都不在本 extra 里）。守护：`test_packaging.py` 扫只看档路径各模块的第三方 import 逐个核对清单。
+- **档位标记（vho 补丁）**：完整档写 `MY_AGENT_COMPUTER_USE_OBSERVATION=1`，只看档只写 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY=1`（宿主在只看档不写观察标记）；适配器"要不要装载观察工具"认这两个标记中任意一个，注册范围再按档位收窄。真机曾因只认后者而交出空目录。
+- **锁屏（vho 补丁，2026-10-04）**：macOS 后端在列窗口之前先查锁屏（`CGSSessionCopyCurrentDictionary()` 的 `CGSSessionScreenIsLocked`，以及 `CGGetActiveDisplayList` 的活动显示器数为 0），命中返回 `screen_locked`（消息"屏幕已锁定，解锁后再观察"）。顺序在屏幕录制权限预检之后、列窗之前：锁屏时所有窗口都被盖住，先给这条比让模型看到 `occluded` 更准确。两条查询都只读、不弹授权框；查不到（键缺失 / 抛错）按"无法确认"继续原流程，不因查不到锁屏而拒绝观察。Linux X11 后端没有对应概念，行为不变。
 
 **测试**：全程不碰用户真实屏幕。开发和验收在 Linux 车道容器里，用 Xvfb、openbox 和专门的 Tk 测试窗口：两个文字相近的按钮、一个输入框、一个点击后会变的状态行。真实 macOS 桌面最多做一次只读截图核对，需用户同意，由 3a 安排。
 

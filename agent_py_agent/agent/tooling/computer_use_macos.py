@@ -88,6 +88,22 @@ def _optional_module(name: str) -> Any | None:
         return None
 
 
+# LLM: 锁屏事实来自两个只读系统查询：CGSSessionCopyCurrentDictionary() 的 CGSSessionScreenIsLocked，以及活动显示器数
+#   （锁屏时活动显示器为 0，等同于不可观察）。两条都只读、不弹授权框，失败（键缺失、返回类型不对、查询抛错）
+#   一律按"无法确认"继续原流程——查不到锁屏不该把观察挡掉。仅 macOS 有这个概念，Linux X11 后端不动。
+#   显示器数用 CGGetActiveDisplayList(0, None, count) 查总数：max=0 只写计数不填缓冲；返回的第三个值才是总数。
+# 函数用途: 屏幕已锁定（或没有活动显示器）时抛 screen_locked，否则正常返回。
+def _raise_if_screen_locked(quartz: Any) -> None:
+    try:
+        session = quartz.CGSessionCopyCurrentDictionary()
+        locked = bool((session or {}).get("CGSSessionScreenIsLocked"))
+        no_active_display = int(quartz.CGGetActiveDisplayList(0, None, None)[2] or 0) == 0
+    except Exception:  # noqa: BLE001 查不到锁屏状态属于"无法确认"，不阻断观察
+        return
+    if locked or no_active_display:
+        raise ObservationError("screen_locked", "屏幕已锁定，解锁后再观察")
+
+
 # LLM: 每个方法都重新读系统事实，不缓存窗口状态（复核要新鲜事实）；frameworks 为 None 时第一次用才加载真实框架。
 # 类用途: 观察核心的 macOS 后端。
 class MacBackend:
@@ -99,11 +115,14 @@ class MacBackend:
 
     # LLM: 权限预检后用 OptionAll 保留所有窗口身份；它的枚举顺序不可信，必须另查 OnScreenOnly 并按前→后结果整理。
     #   输出契约仍为底→顶；OnScreenOnly 未列到的最小化 / 其它桌面窗口保留在末尾，不参与当前可见目标排序。
+    #   锁屏检查放在权限之后、列窗之前：锁屏时所有窗口都被系统盖住，这时候列窗只会得到 occluded 之类的次级结论，
+    #   对模型和用户都没说明白；先给 screen_locked 更准确。检查是只读的（不弹窗），查不到就当"无法确认"继续原流程。
     # 函数用途: 列出窗口（叠放底→顶）及其当下事实。
     def list_windows(self) -> list[WindowInfo]:
         quartz = self._fw().quartz
         if not quartz.CGPreflightScreenCaptureAccess():
             raise ObservationError("screen_recording_not_permitted", "没有屏幕录制权限：请在系统设置的隐私与安全性里允许屏幕录制")
+        _raise_if_screen_locked(quartz)
         all_options = quartz.kCGWindowListOptionAll | quartz.kCGWindowListExcludeDesktopElements
         screen_options = quartz.kCGWindowListOptionOnScreenOnly | quartz.kCGWindowListExcludeDesktopElements
         all_rows = quartz.CGWindowListCopyWindowInfo(all_options, quartz.kCGNullWindowID) or []

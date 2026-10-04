@@ -19,6 +19,7 @@ from agent_py_agent.agent.tooling import computer_use_observation_tools as glue
 from agent_py_agent.agent.tooling.computer_use_profile import (
     COMPUTER_USE_MCP_SERVER_NAME,
     OBSERVATION_ENV_FLAG,
+    ComputerUseTier,
     computer_use_mcp_servers,
     with_computer_use_observation,
 )
@@ -36,8 +37,9 @@ TYPE_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}, "can
 
 
 def _profile(enabled=True, observation=True, admin=True, access="full-access"):
-    servers = computer_use_mcp_servers({"other": {"command": "x"}}, enabled=enabled, is_local_admin=admin, access_mode=access,
-                                       environ={"DISPLAY": ":99"}, python_executable="/py")
+    servers = computer_use_mcp_servers({"other": {"command": "x"}}, ComputerUseTier(
+        enabled=enabled, is_local_admin=admin, access_mode=access,
+        environ={"DISPLAY": ":99"}, python_executable="/py"))
     return with_computer_use_observation(servers, enabled=observation)
 
 

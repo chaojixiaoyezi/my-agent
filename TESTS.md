@@ -1,5 +1,52 @@
 # 测试与发布验收
 
+## 屏幕观察只看档（vho，2026-10-04，分支 `worker/vh-observe-only`，基于 `d05a0d075`）
+
+- 改了什么：`computer_use_mcp_servers` 新增结构化档位参数 `observe_only`（只看档用单独一份声明表，只含 `observe_window`），`core.py` 由两个开关派生档位；适配器把上游 import 收进 `_load_upstream()` 只在完整档调用，`build_adapter_server` 按标记与档位只注册 `observe_window`；新增 `OBSERVE_ONLY_ENV_FLAG`。`agent_config.yaml` 与 `AgentConfig` 注释改写为四档语义并同步前端配置目录。
+- 命令（工作树根，代号 vho）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_computer_use_observe_only.py \
+    agent_py_agent/tests/test_computer_use_observation_tools.py \
+    agent_py_agent/tests/test_computer_use_profile.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-vho
+  ```
+  结果：**28 passed**（含新增 8 条只看档用例）。
+- J16 全组（`test_computer_use_*`、`test_screen_observation_core`、`test_screen_ui_candidates`、`test_plugin_observation`、`test_screen_capture_guard` 等 11 个文件）：**194 passed, 7 skipped**（跳过的是 Xvfb 车道与 macOS 真机用例，需要真桌面/车道容器）。
+- 前端配置同步：`node frontend/scripts/sync-backend-config.mjs` → 258 字段；`--check` 通过。
+- 变异（脚本 `tasks/2026-10-04/vho-observe-only/mutations.py`，逐个跑完按 sha256 还原）：
+  1. 只看档泄漏点击工具 → 杀（1 failed）
+  2. 适配器忽略只看档 → 杀（1 failed）
+  3. 宿主丢弃只看档组合 → 杀（1 failed）
+  4. 标记写反（只看档写成完整档标记）→ 杀（1 failed）
+  5. 上游 import 回到模块顶层 → 杀（1 failed，由 AST 守卫用例抓）
+- 子进程探针（本机可跑，`/private/tmp/claude-501/m-vho/probe_subprocess.py`）：真子进程 + meta path finder 拦住 `pyautogui`/`computer_control_mcp` 后，装配出的工具恰好 `['observe_window']`，且两个上游模块都没进 `sys.modules`。
+- 未验证：真适配器子进程（真 `mcp` 包 + 真桌面后端）与真观察由 3a 在沙箱外跑；沙箱里没装 `mcp` 包，端到端子进程用例按车道约定跳过。
+
+### vho 补丁：依赖清单补 `mcp` + 只看档接缝修复（2026-10-04）
+
+3a 真机实测（全新环境只装 `computer-use-observe` 清单里的包）抓到两处：
+
+1. **清单漏依赖**：适配器顶层 `from mcp.server.fastmcp import FastMCP`，而生产原来靠上游 `computer-control-mcp` 带进 `mcp==1.13.0`；本 extra 没装它，适配器直接 `ModuleNotFoundError`。已给两个平台各加 `"mcp==1.13.0; sys_platform == '...'"`（注释写清原因）。
+2. **宿主/适配器接缝断掉**：只看档宿主只写 `MY_AGENT_COMPUTER_USE_OBSERVE_ONLY=1`（`with_computer_use_observation` 见只看标记就早返回，不再写观察标记），而适配器只认 `MY_AGENT_COMPUTER_USE_OBSERVATION`，于是 `tools/list` 返回 `[]`。已让 `observation_tools_enabled` 认两个标记中任意一个（只看标记本身就意味着要装载观察工具），注册范围仍由档位收窄。
+
+- 新增用例：
+  - `test_packaging.py::test_observe_only_adapter_dependencies_are_all_declared_in_the_observe_extra`：扫只看档路径各模块（含函数体内延迟 import，排除只在完整档调用的 `_load_upstream` 等）收集第三方包，断言都在 extra 里；未登记的第三方包会要求补映射表（防止静默漏检）。
+  - `test_computer_use_observe_only.py::test_host_produced_env_feeds_the_adapter_and_yields_only_observe_window`：**接缝用例**——直接拿 `computer_use_mcp_servers` 产出 env 喂 `build_adapter_server`，断言注册结果恰好 `['observe_window']`（不手写环境变量）。
+- 命令与结果：`pytest test_computer_use_observe_only.py test_packaging.py` → **26 passed**。
+- 变异（`tasks/2026-10-04/vho-observe-only/mutations2.py`）：从清单删 `mcp` → 杀（1 failed）；适配器不认只看标记 → 杀（2 failed，含接缝用例）；只看档误注册点击工具 → 杀（2 failed，含接缝用例）。
+
+### vho 补丁二：锁屏识别（2026-10-04）
+
+3a 真机在锁屏状态调 observe_window，拿到 `OCCLUDED`（"窗口被上层窗口完全盖住"）——结论没错但说明不清。
+
+- 改动：macOS 后端 `list_windows` 在屏幕录制权限预检之后、列窗之前加 `_raise_if_screen_locked`（新函数）：读 `CGSessionCopyCurrentDictionary()` 的 `CGSSessionScreenIsLocked`，以及 `CGGetActiveDisplayList(0, None, None)` 的活动显示器数；命中任一 → `ObservationError("screen_locked", "屏幕已锁定，解锁后再观察")`。两条查询都只读、不弹授权框；查询抛错或键缺失一律按"无法确认"继续（**不因查不到锁屏而拒绝观察**）。Linux X11 后端未改。
+- 错误码登记：`screen_observation.py` 模块头码表 + J16 设计稿 3.1 失败段码表（观察码是开放集合，宿主只提升 stale / not_found，其余原样透传）。
+- 用例（`test_computer_use_macos.py`）：① 锁屏 → `screen_locked`，且 `list_calls == []`、`grabs == []`（没列窗口、没截图）；② 活动显示器数为 0 → 同样 `screen_locked`；③ 锁屏查询抛错 → 照常观察；④ 未锁屏 → 照常观察。
+- 命令与结果：`pytest test_computer_use_macos.py` → **29 passed**。
+- 变异（`tasks/2026-10-04/vho-observe-only/mutations3.py`）：去掉锁屏检查 → 杀（2 failed，含锁定用例）；忽略活动显示器数 → 杀（1 failed）；查询失败时也拒绝（fail-closed）→ 杀（1 failed，用例②要求"无法确认"继续）。
+
 ## B9 用例临时目录清理容忍访达 .DS_Store（dsst，2026-10-04，分支 `worker/b9-test-dsstore`）
 
 - **来源**：3a 在 17j 上跑该文件时偶发 `OSError: [Errno 66] Directory not empty: .../tmp/b9-m1b9-xxxx/release-source/agent_py_agent`——夹具把临时目录建在工作树 `tmp/` 下，清理时撞上访达写入 `.DS_Store`。

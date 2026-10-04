@@ -7,6 +7,7 @@ from pathlib import Path
 from agent_py_agent.agent.settings.config import AgentConfig, load_config, normalize_agent_config
 from agent_py_agent.agent.tooling.computer_use_profile import (
     COMPUTER_USE_MCP_SERVER_NAME,
+    ComputerUseTier,
     computer_use_mcp_servers,
 )
 
@@ -19,9 +20,7 @@ def test_computer_use_is_disabled_by_default_and_reserved_name_cannot_bypass() -
 
     servers = computer_use_mcp_servers(
         configured,
-        enabled=False,
-        is_local_admin=True,
-        access_mode="full-access",
+        ComputerUseTier(enabled=False, is_local_admin=True, access_mode="full-access"),
     )
 
     assert servers == {"normal": {"command": "normal-server"}}
@@ -36,9 +35,7 @@ def test_computer_use_requires_both_local_admin_and_full_access() -> None:
     ):
         servers = computer_use_mcp_servers(
             {},
-            enabled=True,
-            is_local_admin=is_local_admin,
-            access_mode=access_mode,
+            ComputerUseTier(enabled=True, is_local_admin=is_local_admin, access_mode=access_mode),
         )
         assert COMPUTER_USE_MCP_SERVER_NAME not in servers
 
@@ -46,15 +43,17 @@ def test_computer_use_requires_both_local_admin_and_full_access() -> None:
 def test_authorized_profile_uses_current_python_gui_session_and_safe_effects() -> None:
     servers = computer_use_mcp_servers(
         {"normal": {"command": "normal-server"}},
-        enabled=True,
-        is_local_admin=True,
-        access_mode="full-access",
-        environ={
-            "DISPLAY": ":99",
-            "WAYLAND_DISPLAY": "wayland-1",
-            "API_KEY": "must-not-leak",
-        },
-        python_executable="/runtime/python",
+        ComputerUseTier(
+            enabled=True,
+            is_local_admin=True,
+            access_mode="full-access",
+            environ={
+                "DISPLAY": ":99",
+                "WAYLAND_DISPLAY": "wayland-1",
+                "API_KEY": "must-not-leak",
+            },
+            python_executable="/runtime/python",
+        ),
     )
 
     profile = servers[COMPUTER_USE_MCP_SERVER_NAME]

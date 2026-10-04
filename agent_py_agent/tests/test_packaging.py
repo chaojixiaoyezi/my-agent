@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -292,6 +294,7 @@ def test_computer_use_observe_extra_pins_platform_dependencies() -> None:
 
     assert set(parsed) == {"sys_platform == 'darwin'", "sys_platform == 'linux'"}
     assert parsed["sys_platform == 'darwin'"] == {
+        "mcp": "1.13.0",
         "pyobjc-framework-Quartz": "12.2.2",
         "pyobjc-framework-ScreenCaptureKit": "12.2.2",
         "pyobjc-framework-ApplicationServices": "12.2.2",
@@ -301,6 +304,7 @@ def test_computer_use_observe_extra_pins_platform_dependencies() -> None:
     }
     # Linux 版本对齐桌面层车道镜像 my-agent-linux-test:py312-desktop 里实际装到的版本。
     assert parsed["sys_platform == 'linux'"] == {
+        "mcp": "1.13.0",
         "python-xlib": "0.33",
         "mss": "10.2.0",
         "rapidocr-onnxruntime": "1.2.3",
@@ -309,3 +313,88 @@ def test_computer_use_observe_extra_pins_platform_dependencies() -> None:
 
     # 自动执行的 pyautogui 属生产关闭的能力，不能被顺手带进观察依赖。
     assert all("pyautogui" not in entry for entry in observe)
+
+
+# LLM: 上面那条硬编码清单只能防"有人删条目"，防不了"实现新引了第三方库但忘了写清单"——真机上
+#   computer_use_server 顶层 import mcp 就是这么漏的（原来靠上游 computer-control-mcp 带进来，生产没装）。
+#   这里改成扫代码：解析只看档会加载的模块，收集它们顶层与只看档分支里出现的第三方顶层包，断言每一个都在
+#   computer-use-observe 里（或属于 my-agent 自身与标准库）。加依赖忘改清单，这条会直接红。
+#   只看档路径 = computer_use_server（适配器入口）+ computer_use_observation_tools + computer_use_backends
+#   及两个真后端；完整档才用的 computer_text_input 与 pyautogui 不算在内。
+OBSERVE_ONLY_ADAPTER_MODULES = (
+    "agent_py_agent/agent/tooling/computer_use_server.py",
+    "agent_py_agent/agent/tooling/computer_use_observation_tools.py",
+    "agent_py_agent/agent/tooling/computer_use_backends.py",
+    "agent_py_agent/agent/tooling/computer_use_macos.py",
+    "agent_py_agent/agent/tooling/computer_use_macos_ax.py",
+    "agent_py_agent/agent/tooling/computer_use_x11.py",
+)
+# 只看档会走到的第三方 import 名 → 清单里的分布名（首段不同时在这里映射）。
+_IMPORT_TO_REQUIREMENT = {
+    "mcp": "mcp",
+    "objc": "pyobjc-framework-Quartz",
+    "Quartz": "pyobjc-framework-Quartz",
+    "ScreenCaptureKit": "pyobjc-framework-ScreenCaptureKit",
+    "ApplicationServices": "pyobjc-framework-ApplicationServices",
+    "mss": "mss",
+    "rapidocr_onnxruntime": "rapidocr-onnxruntime",
+    "PIL": "pillow",
+    "Xlib": "python-xlib",
+    "numpy": "rapidocr-onnxruntime",
+}
+
+
+# 函数用途: 列出哪些节点属于"只在完整档调用"的函数体内的 import 语句。
+def _full_tier_import_nodes(tree: ast.AST, function_names: tuple[str, ...]) -> set[int]:
+    bodies = [node for node in ast.walk(tree)
+              if isinstance(node, ast.FunctionDef) and node.name in function_names]
+    return {id(child) for body in bodies for child in ast.walk(body)}
+
+
+# 函数用途: 单个 AST 节点 import 的顶层模块名；不是 import 语句就返回空集合。
+def _node_modules(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Import):
+        return {alias.name.split(".")[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        return {node.module.split(".")[0]}
+    return set()
+
+
+# 函数用途: 取一段源码里 import 的顶层模块名；full_tier_functions 里的函数（只在完整档调用）不算。
+def _imported_toplevel_modules(source: str, *, full_tier_functions: tuple[str, ...] = ()) -> set[str]:
+    tree = ast.parse(source)
+    skipped = _full_tier_import_nodes(tree, full_tier_functions)
+    nodes = [node for node in ast.walk(tree) if id(node) not in skipped]
+    return set().union(*(_node_modules(node) for node in nodes))
+
+
+# 函数用途: 断言只看档路径用到的第三方包都写在 computer-use-observe extra 里。
+def test_observe_only_adapter_dependencies_are_all_declared_in_the_observe_extra() -> None:
+    """扫代码收集只看档的第三方依赖，逐个核对在 extra 里；新引库忘改清单会在这里红。"""
+
+    project_root = Path(__file__).resolve().parents[2]
+    data = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = {
+        entry.partition(";")[0].partition("==")[0].strip()
+        for entry in data["project"]["optional-dependencies"]["computer-use-observe"]
+    }
+
+    imported: set[str] = set()
+    for relative in OBSERVE_ONLY_ADAPTER_MODULES:
+        imported |= _imported_toplevel_modules(
+            (project_root / relative).read_text(encoding="utf-8"),
+            # 这些函数只在完整档被调用，里面的 pyautogui / computer_control_mcp 不算只看档依赖。
+            full_tier_functions=("_load_upstream", "register_upstream_tools", "_register_local_inputs"),
+        )
+    third_party = {name for name in imported if name in _IMPORT_TO_REQUIREMENT}
+    missing = sorted(_IMPORT_TO_REQUIREMENT[name] for name in third_party if _IMPORT_TO_REQUIREMENT[name] not in declared)
+    assert not missing, f"只看档用到但 computer-use-observe 没声明的第三方包：{missing}"
+    # 反向也要有人管：适配器真实用到的第三方必须能在映射表里找到，否则新库会被静默漏检。
+    unmapped = sorted(name for name in imported
+                       if name not in _IMPORT_TO_REQUIREMENT and _looks_third_party(name))
+    assert not unmapped, f"只看档新引了未登记的第三方包，请补 _IMPORT_TO_REQUIREMENT：{unmapped}"
+
+
+# 函数用途: 判断一个顶层 import 名是否像第三方包（排除 my-agent 自身包、标准库与相对导入）。
+def _looks_third_party(name: str) -> bool:
+    return name not in sys.stdlib_module_names and name != "agent_py_agent"

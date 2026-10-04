@@ -53,6 +53,9 @@ class _Quartz:
 
     def __init__(self):
         self.permitted = True
+        self.session_locked = False
+        self.session_error: Exception | None = None
+        self.active_display_override: int | None = None
         self.windows = [_row(MENUBAR, (0, 0, 1512, 25), layer=24, name="Menubar"), _row(FORM, FORM_RECT),
                         _row(BACKDROP, (50, 150, 400, 300), name="背景")]
         # 显示器编号 → (全局点矩形, 像素宽, 点宽)：主屏 Retina；副屏在主屏左边，原点为负，缩放 1
@@ -63,6 +66,12 @@ class _Quartz:
 
     def CGPreflightScreenCaptureAccess(self):
         return self.permitted
+
+    # 锁屏查询（只读）：默认不锁；用例可改 session_locked 模拟锁屏，或把 session_error 设为异常模拟查询失败。
+    def CGSessionCopyCurrentDictionary(self):
+        if self.session_error is not None:
+            raise self.session_error
+        return {"CGSSessionScreenIsLocked": self.session_locked}
 
     def CGRequestScreenCaptureAccess(self):
         raise AssertionError("后端绝不能触发屏幕录制授权弹窗")
@@ -87,6 +96,9 @@ class _Quartz:
 
     def CGGetActiveDisplayList(self, max_displays, active_displays, display_count):
         self.display_list_calls.append(max_displays)
+        if self.active_display_override is not None:
+            # 锁屏时系统报告的活动显示器数为 0；用例用这个钩子模拟。
+            return 0, None, self.active_display_override
         displays = tuple(self.displays)
         if max_displays <= 0:
             return 0, None, len(displays)
@@ -275,6 +287,44 @@ def test_permission_is_checked_before_listing_windows_and_never_prompts():
     with pytest.raises(ObservationError) as denied:
         observer.observe()
     assert denied.value.code == "screen_recording_not_permitted" and quartz.list_calls == [] and grabs == [], "没授权就不列窗口、不截图"
+
+
+# LLM: 锁屏时所有窗口都被系统盖住，先报 screen_locked 比让模型看到 occluded 更清楚；检查是只读的，必须在列窗与截图之前。
+# 函数用途: 锁屏时观察失败并给 screen_locked，且不列窗口、不截图、不做 OCR。
+def test_locked_screen_reports_screen_locked_before_listing_or_capture():
+    observer, quartz, _kit, grabs, _clicks = _setup()
+    quartz.session_locked = True
+    with pytest.raises(ObservationError) as locked:
+        observer.observe()
+    assert locked.value.code == "screen_locked" and "解锁" in str(locked.value)
+    assert quartz.list_calls == [] and grabs == [], "锁屏不该列窗口或截图"
+
+
+# LLM: 查询本身拿不到事实（键缺失 / 抛错）时按"无法确认"继续，不能因为查不到锁屏就把观察挡掉。
+# 函数用途: 锁屏查询失败时照常观察。
+def test_unavailable_lock_query_falls_through_to_normal_observation():
+    observer, quartz, _kit, _grabs, _clicks = _setup()
+    quartz.session_error = RuntimeError("CGSessionCopyCurrentDictionary 不可用")
+    payload = observer.observe()
+    assert payload["window"] and payload["generation"], "查不到锁屏照常观察"
+
+
+# 函数用途: 未锁屏时照常观察（锁屏检查不能误伤正常路径）。
+def test_unlocked_screen_observes_normally():
+    observer, quartz, _kit, _grabs, _clicks = _setup()
+    quartz.session_locked = False
+    payload = observer.observe()
+    assert payload["window"] and payload["generation"]
+
+
+# LLM: 锁屏位没写、但系统已没有活动显示器（锁屏的另一种表现）同样不可观察；这条独立于锁屏位，两个事实都要守。
+# 函数用途: 活动显示器数为 0 时也报 screen_locked。
+def test_no_active_display_reports_screen_locked():
+    observer, quartz, _kit, grabs, _clicks = _setup()
+    quartz.active_display_override = 0
+    with pytest.raises(ObservationError) as locked:
+        observer.observe()
+    assert locked.value.code == "screen_locked" and quartz.list_calls == [] and grabs == []
 
 
 def test_listing_is_bottom_to_top_with_identity_layer_and_visibility_facts():

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..plugin_observation import OBSERVATION_ERROR_KEY, OBSERVATION_META_EXTENSION
-from .computer_use_profile import OBSERVATION_ENV_FLAG
+from .computer_use_profile import OBSERVATION_ENV_FLAG, OBSERVE_ONLY_ENV_FLAG
 from .screen_observation import ObservationError
 
 OBSERVATION_TOOL_NAMES = ("observe_window", "click_candidate", "type_into_candidate")
@@ -32,9 +32,20 @@ class CallContext:
     cancelled: Callable[[], bool] = lambda: False
 
 
-# 函数用途: 适配器子进程是否应装载屏幕观察工具（宿主按主配置开关写入环境标记）。
+# LLM: 两个标记都是"要装载观察工具"的同源事实：完整档写观察标记，只看档只写只看标记（宿主在只看档不写观察标记）。
+#   只看标记本身就意味着要注册观察工具，所以这里认任意一个；否则适配器会一个工具都不注册（真机实测过的接缝）。
+#   注册范围仍由 register_observation_tools 按档位收窄（只看档只出 observe_window）。
+# 函数用途: 适配器子进程是否应装载屏幕观察工具（完整档或只看档任一标记为 "1"）。
 def observation_tools_enabled(environ: Mapping[str, str]) -> bool:
-    return str(environ.get(OBSERVATION_ENV_FLAG) or "") == "1"
+    return any(str(environ.get(flag) or "") == "1"
+               for flag in (OBSERVATION_ENV_FLAG, OBSERVE_ONLY_ENV_FLAG))
+
+
+# LLM: 只看档标记由宿主在"总开关关、只开观察"时写入；适配器据此不装载上游执行器，也不注册上游工具。
+#   这是显式档位判定（结构化标记），不是导入失败后的兜底。
+# 函数用途: 判定本次适配器进程是否为只看档。
+def observe_only_enabled(environ: Mapping[str, str]) -> bool:
+    return str(environ.get(OBSERVE_ONLY_ENV_FLAG) or "") == "1"
 
 
 # LLM: 只提供 tools/list 的签名与说明；真正执行在 observation_call_handler。
@@ -64,9 +75,13 @@ def type_into_candidate(text: str, candidate_id: str = "", clear_existing: bool 
     raise RuntimeError("type_into_candidate 必须由适配器的观察接管层执行")
 
 
-# 函数用途: 把观察工具的声明注册进 FastMCP（只为 tools/list）；with_typing 为真（后端能给控件候选）才注册 type_into_candidate。
-def register_observation_tools(server: Any, *, with_typing: bool) -> None:
+# LLM: 只看档（observe_only）只注册 observe_window——不交出 click_candidate / type_into_candidate，也没有上游工具；
+#   这是档位决定的目录，不是按依赖可用性挑工具。
+# 函数用途: 把观察工具的声明注册进 FastMCP（只为 tools/list）；只看档只注册 observe_window，with_typing 才注册 type_into_candidate。
+def register_observation_tools(server: Any, *, with_typing: bool, observe_only: bool = False) -> None:
     server.add_tool(observe_window, name="observe_window", description=(observe_window.__doc__ or "").strip())
+    if observe_only:
+        return
     server.add_tool(click_candidate, name="click_candidate", description=(click_candidate.__doc__ or "").strip())
     if with_typing:
         server.add_tool(type_into_candidate, name="type_into_candidate", description=(type_into_candidate.__doc__ or "").strip())
@@ -172,8 +187,9 @@ def install_observation_handler(low_server: Any, observer: Any) -> None:
 
 
 # LLM: 适配器进程的唯一装配入口（stdio 收发留在 computer_use_server.serve）：底层 Server 的 list_tools / call_tool 直接绑 FastMCP
-#   的公开协程；只有环境标记为 "1" 时才调用 observer_factory（构造不碰屏幕）、按它声明的能力注册观察工具并装接管层。标记关着时 tools/list
-#   与只有上游工具时逐字节一致，tools/call 处理器就是原 delegate——"关时工具目录不变"靠这里保证。
+#   的公开协程；观察标记为 "1" 时才调用 observer_factory（构造不碰屏幕）、按档位与后端能力注册观察工具并装接管层。标记关着时
+#   tools/list 与只有上游工具时逐字节一致，tools/call 处理器就是原 delegate——"关时工具目录不变"靠这里保证。
+#   只看档下 FastMCP 里既没有上游工具也没有点击工具（上游由 serve 决定不装载），注册完 observe_window 就够。
 # 函数用途: 按环境标记装配底层 Server。
 def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_factory: Callable[[], Any]) -> Any:
     from mcp.server.lowlevel import Server
@@ -183,7 +199,8 @@ def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_fact
     low.call_tool(validate_input=False)(fastmcp.call_tool)
     if observation_tools_enabled(environ):
         observer = observer_factory()
-        register_observation_tools(fastmcp, with_typing=observer.supports_ui_candidates)
+        register_observation_tools(fastmcp, with_typing=observer.supports_ui_candidates,
+                                   observe_only=observe_only_enabled(environ))
         install_observation_handler(low, observer)
     return low
 
@@ -191,5 +208,6 @@ def build_adapter_server(fastmcp: Any, environ: Mapping[str, str], observer_fact
 __all__ = [
     "OBSERVATION_TOOL_NAMES", "CallContext", "build_adapter_server", "call_observation_tool", "click_candidate", "encode_call_result",
     "install_observation_handler",
-    "observation_call_handler", "observation_tools_enabled", "observe_window", "register_observation_tools", "type_into_candidate",
+    "observation_call_handler", "observation_tools_enabled", "observe_only_enabled", "observe_window", "register_observation_tools",
+    "type_into_candidate",
 ]
