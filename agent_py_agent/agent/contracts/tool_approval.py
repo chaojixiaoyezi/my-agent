@@ -1,12 +1,12 @@
-# LLM: 本模块定义工具审批等待链的结构化请求与决定；自然语言标题/说明只用于展示，授权只认精确 binding 和 decision 枚举。
-# 模块用途: 为工具执行器、Gateway 桥和本地 TUI 提供同一份审批身份、选项及批准绑定。
+# LLM: 本模块定义审批身份与单一插件强制判定；plugin_gate_ref 只收紧，展示文案不授权，四审批入口须同源联测。
+# 模块用途: 为执行器、Gateway 和后台代理提供同一份审批合同，防止缓存或自主模式替插件确认放行。
 
 from __future__ import annotations
 
 import hashlib
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -204,6 +204,22 @@ class ToolApprovalDecision:
         )
 
 
+# LLM: 等待选项是宿主结构化输入，不来自工具参数；默认 None 由各等待入口采用原常量，不增加第二配置源。
+# 类用途: 将轮询与自主提供者成组传递，减少参数并拒绝任意关键字服务接口。
+@dataclass(frozen=True)
+class ToolApprovalWaitOptions:
+    poll_seconds: float | None = None
+    discovery_seconds: float | None = None
+    consumer_lease_seconds: float | None = None
+    mode_decision_provider: Callable[[ToolApprovalRequest], ToolApprovalDecision | None] | None = None
+
+
+# LLM: 只读宿主附加的 plugin_gate_ref；未知非空引用也强制询问，解析与精确批准在执行器，合同层不反向导入插件实现。
+# 函数用途: 为两请求入口、两等待入口和自主提供者统一判断是否禁止自动批准。
+def plugin_gate_required(request: ToolApprovalRequest) -> bool:
+    return bool(request.binding.get("plugin_gate_ref"))
+
+
 # LLM: permission_id 只从 canonical ToolCall 身份哈希产生；description 是已脱敏展示摘要，不参与 id 或授权绑定。
 # 函数用途: 为工具轮中的一条待审批调用生成通用 Yes/No 请求。
 # LLM: grant_key（可选）来自工具 runtime policy 的 owner_grant_parameters 声明：写进 binding 并追加 approved_owner 选项，
@@ -339,5 +355,7 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalDecisionValue",
     "ToolApprovalRequest",
+    "ToolApprovalWaitOptions",
     "build_tool_approval_request",
+    "plugin_gate_required",
 ]

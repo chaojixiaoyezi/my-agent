@@ -43,6 +43,14 @@
 |-- agent_py_agent/tests/test_pack_verification_cancellation.py # 块 6a：预取消零启动、真实父子组回收、取消入账和不返工，保留平台外复跑
 |-- agent_py_agent/tests/test_gateway_client_credentials.py # G3：随机端口假服务验证三类客户端、插件流、故障拒绝、单token与不泄漏
 |-- agent_py_agent/tests/test_gateway_local_trust_enforcement.py # G2b：强制档回环无凭据匿名、启动 fail-closed、插件令牌豁免、未知对端不可信、TUI 预检与五项变异
+|-- agent_py_agent/tests/test_plugin_tool_gate_logic.py # B5 第一段七组合、严格回复、安全参数投影与稳定最严合并；未替代执行链验收
+|-- agent_py_agent/tests/test_plugin_tool_gate_execution.py # B5 执行器/共用池、预算和引用到Gateway审批隔离联测；不启用真实插件
+|-- agent_py_agent/tests/test_plugin_gate_approval.py # B5 消费端四审批入口与自主提供者反绕过；隔离标记请求，不代替完整执行链
+|-- agent_py_agent/tests/test_plugin_gate_consumers.py # B5真实隔离主/子消费者与I4恢复重问，旧子审批不可跨attempt；不启停真实Gateway
+|-- agent_py_agent/tests/test_plugin_gate_reapproval.py # B5六身份精确批准重跑、主子实际批准/再问/拒绝及鲜活换代，不读真实owner
+|-- agent_py_agent/tests/test_plugin_gate_event_combination.py # 17j B5/B4/B8组合：拒绝零handler/零工具事件，原归档/唯一写账→真实临时库→B6 info；三项转正
+|-- agent_py_agent/tests/test_plugin_tool_gate_decision_ledger.py # B5决定字段/全部review/批准排除/单门多门与canonical信封组件反证
+|-- agent_py_agent/tests/fixtures/plugin_tool_gate_mutation_probe.py # B5 第一段五个真实内存变异，保留 pytest 退出码，不写产品源码
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
 |-- agent_py_agent/agent/capability_verification_manifest.py # 能力包 v2 可选核验声明：交付物识别、钉住的检查程序、输入策略
 |-- agent_py_agent/agent/capability_verifier_consent.py # 检查程序启用前确认、确认码与写入内容激活的同意摘要
@@ -349,7 +357,10 @@ agent_py_agent/
 |   |   |-- confirmation.py            # 同源四项确认事实和中文正文/参数/网络/强制沙箱需求预览
 |   |   |-- protocol.py                # 事件公共字段、握手能力门与线上 payload 组装，纯协议无 IO
 |   |   |-- hub.py                     # 事件中心：按 owner 分区、只留最新、单在途、回收与计数；投递走 plugin_channel
-|   |   `-- points.py                  # B4 事件白名单投影、提示脱敏、会话哈希与开关/异常短路；不读安装表
+|   |   |-- points.py                  # B4 事件白名单投影、提示脱敏、会话哈希与开关/异常短路；不读安装表
+|   |   |-- tool_gate.py               # B5 纯收紧合同：精确匹配、安全请求投影、严格回复和稳定最严合并
+|   |   |-- decision_ledger.py         # B5决定白名单与原runtime_events唯一写入；读canonical信封，排除虚构门/正文
+|   |   `-- tool_gate_review.py        # B5共用池总预算/握手/安装追新，精确批准跳门仍复读，不另建池或批准账
 |   |-- plugin_observation.py          # 观察候选宿主合同（插件与 MCP 共用）：声明类型与配对规则、载荷整份校验（含几何 frame/region）、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
 |   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
@@ -627,7 +638,7 @@ agent_py_agent/
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
 |   |   |-- agent_control.py           # owner 树内代理详情、运行中 guidance 与精确停止的通道中立控制面
 |   |   |-- agent_tool_approval.py     # main/child exact ToolApprovalRequest 的唯一耐久记录、consumer 租约与决定等待
-|   |   |-- tool_approval_scope.py     # 从 canonical 任务、线程和 claim 读取审批归属，隔离主代理换轮
+|   |   |-- tool_approval_scope.py     # 从canonical任务/线程/main claim/child attempt读取审批归属，隔离恢复换轮
 |   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与共用工具审批 sink
 |   |   |-- background_history.py     # 后台完整展示块快照，随 canonical final 保存并用于恢复重基
 |   |   |-- display_checkpoint.py     # canonical逐块公开过程校验/写入、恢复未知占位与显示去重
@@ -803,6 +814,7 @@ agent_py_agent/
 |   |   |-- action_policy.py          # 副作用前唯一 allow/ask/deny 聚合决策
 |   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
 |   |   |-- event_observation.py      # B4 单次工具真实 handler 观察状态；拒绝/重放不发，重试只发一对
+|   |   |-- plugin_gate_policy.py     # B5宿主收紧、原批准源精确引用、同源确认/拒绝/无人审批回执，不改参数或授予新批准
 |   |   |-- runtime_boundary.py       # task 相对路径归一与精确读边界检查
 |   |   |-- workspace_read_scope.py   # 沿原 exact 与墙外授权生成本次 cwd 内的读取上界
 |   |   |-- workspace_write_scope.py  # 按原写入边界解析生成本次写入范围，无范围时只允许 cwd
@@ -1565,6 +1577,9 @@ docs/
 
 ### 关键文件说明
 
+- `plugin_events/tool_gate_review.py`：共用 B2 池、共享单次预算、握手和安装快照追新；不创建第二池或批准账。
+- `tooling/plugin_gate_policy.py`：将插件纯协议事实接到唯一执行器，来源只取宿主请求，模型参数不能获得豁免。
+
 - `docs/guides/MODEL_GUIDE.md`：给用户的模型管理使用说明，覆盖新增（含 ChatGPT 订阅登录勾选）、切换与默认、`/effort` 智能程度、删除、管理员共享与初始模型、派子代理选模与 `manage_models` 对话式管理。
 - `docs/guides/FEISHU_QUICK_CHECK.md`：给用户本人在真实飞书上 5 分钟内做完的手测清单，每项写明发什么、看到什么算通过、出问题提供什么；与 C11 自动化验收互补，不挡收口。
 - `docs/guides/CAPABILITY_PACK_GUIDE.md`：给用户的能力包使用说明，覆盖装/启用/停用/更新/回退/卸载（TUI、IM 的 `/plugins`，管理仅管理员）、按任务发现与使用、版本固定、派子代理授权、自制包与安全边界。
@@ -1706,6 +1721,10 @@ docs/
 - `agent_py_agent/agent/plugin_events/protocol.py` 与 `hub.py`（M 线 B3）：观察事件的公共字段与握手能力门；事件中心按 owner 分区、按类型只留最新（`dropped_before`）、单在途、发送前后由共用通道复核代次，连接回收只碰自己 acquire 过的激活；publish 永不阻塞、永不抛异常，投递与计数都在后台，不写盘。
 - `agent_py_agent/agent/plugin_events/points.py` 与 `agent_py_agent/agent/gateway_parts/event_points.py`（M 线 B4）：事件点投影与 Gateway 装配。投影只按白名单给字段、默认不带正文（只有 `prompt_submitted` 在授权信封里带 content）、提示字段先脱敏再截断、会话标识只留哈希；开关关闭时既不投影也不发布，投影或发布抛异常不外泄；Gateway 侧按提示/回合/控制回执装配最小事件，关闭时零安装表读取。
 - `agent_py_agent/tests/test_plugin_event_points.py` 与 `test_plugin_event_display.py`：B4 投影与 B6 账本展示的组件验收——前者钉字段白名单、脱敏截断、授权信封、关闭短路与真实 handler 前后成对；后者直接插入临时 owner 的 `runtime.db` 行，钉 `plugin_gate.decided` 只读查询、观察计数、`/plugins info` 四段与 TUI/HTTP/IM 同文渲染、跨 owner 隔离，不启动插件进程或 Gateway。
+- `agent_py_agent/agent/plugin_events/tool_gate.py`：B5纯收紧协议与稳定合并，身份仍读原ToolCall，不授予执行权；第1–5段已在17j迁移树接入，待3a集成和9b终审，非生产验收。
+- `agent_py_agent/agent/plugin_events/decision_ledger.py`：决定15字段白名单、canonical信封提取及唯一runtime事件写入；无message/参数，不建批准账，新增调用点前必须先加幂等键。
+- `agent_py_agent/tests/test_plugin_gate_event_combination.py`：真实rm-guard/handler/归档/唯一写账/临时RuntimeRepository/B6 info组合三项转正；假激活/传输不代宿主启用与沙箱验收。
+- `agent_py_agent/tests/test_plugin_tool_gate_logic.py` 与 `tests/fixtures/plugin_tool_gate_mutation_probe.py`：B5 第一段七组合/协议/投影边界和五个内存变异，未冒充后续全链路覆盖。
 - `agent_py_agent/tests/test_plugin_manifest_v8.py`：B1 静态规则、旧字节、同摘要确认和构建，含真实临时安装、原命令 v8 拒绝及 v6 确认路径兼容；`tests/fixtures/plugin_manifest_v1_v7.json` 固定基线字节，变异探针仅进程内变异、不改产品文件。
 - `docs/tasks/M1_B1_HANDOFF.md`：B1 分支交接、真实验证/失败/未验边界与四个变异复现方法。
 - `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。

@@ -157,6 +157,14 @@ def publish_plugin_event(server, owner, event) -> None:
     hub.publish(owner, event)
 
 
+# LLM: 组合根/工具执行不持有第二个 server 或连接池；只解析 HTTP 服务已存在的唯一实例，停机仍沿原终态。
+# 函数用途: 为 B5 提供当前 Gateway 共用池；不经 Gateway 的场合返回无通道，匹配插件宁严要求确认。
+def current_plugin_channel_pool():
+    from .http_service import _server_instance
+
+    return plugin_channel_pool(_server_instance) if _server_instance is not None else None
+
+
 # LLM: 只在 _SERVICE_LOCK 内调用；已存在的池原样返回，不存在才按沙箱开关新建并挂上 server。
 #   已关闭的 server 一律拒绝：池是进程级共享资源，停机后再建一个就没人在关它了。
 # 函数用途: 取或建 server 上的唯一池（调用方已持锁）。

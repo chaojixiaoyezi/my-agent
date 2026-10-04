@@ -1,5 +1,5 @@
-# LLM: 审批模式只存于既有 owner tool_policy.json；只有认证用户控制入口可改，不接受模型参数或自然语言授权。
-# 模块用途: 保存用户默认确认、自主工作或管理员 Full Access 选择；禁用工具、SOUL 确认和用户身份不变。
+# LLM: 审批模式只存既有 owner 策略；插件引用统一守门，自动或长期授权不能代替本人确认，身份边界不变。
+# 模块用途: 保存用户审批模式并为普通请求提供续跑，插件确认始终等待用户。
 
 from __future__ import annotations
 
@@ -12,7 +12,11 @@ from ..common.json_io import (
     read_json_object_report,
     write_json_file_atomic_unlocked,
 )
-from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
+from ..contracts.tool_approval import (
+    ToolApprovalDecision,
+    ToolApprovalRequest,
+    plugin_gate_required,
+)
 from .operation_grants import owner_operation_granted
 from .owner_policy_seed_payloads import default_tool_policy_payload
 
@@ -81,11 +85,13 @@ def permission_config(config: object, home: object, *, inherited: bool = False):
     return replace(config, access_mode=access, path_access_mode=path_mode)
 
 
-# LLM: 等待中的请求已通过硬门，模式改变只为原 request 产生精确批准；执行器会重新校验边界，always 仍须本人确认。
+# LLM: 守门永远是第一句，统一判定后才读长期授权/自主模式；插件直接返回None，always仍须本人确认。
 #   带 binding.grant_key 的请求（工具声明的可长期授权操作，如后台服务开放局域网）不走自主模式放行：只有 owner 策略里
 #   已记录该键才批准，否则返回 None 等用户本人在面板上决定；这样自主模式也不会悄悄放开这类边界。
-# 函数用途: 用户在 F4 菜单开启自主后，主/子代理当前审批可原地续跑，不必逐个点允许；长期授权过的操作类别也直接放行。
+# 函数用途: 为普通主/子审批提供模式续跑；插件当次确认不能由控制面的自动批准代替。
 def autonomous_tool_decision(agent: object, request: ToolApprovalRequest) -> ToolApprovalDecision | None:
+    if plugin_gate_required(request):
+        return None
     try:
         tools = getattr(getattr(agent, "tools", None), "tools", {})
         tool = tools.get(request.tool_name)

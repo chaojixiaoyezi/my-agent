@@ -995,7 +995,7 @@ TOOL_DETAIL_MAX_CHARS = 4000
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
-# LLM: ToolRegistry 唯一装配入口；owner、来源合同和语法反馈开关取可信配置，执行仍取受限快照；联查文件诊断配置测试。
+# LLM: ToolRegistry 唯一装配入口；B5 提供方、owner 与来源合同由宿主装配，真实征询仍复用 Gateway 唯一 B2 池。
 # 函数用途: 按身份和工作区组合工具、来源声明及可选文件反馈，主代理与同进程子代理共用权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
@@ -1097,8 +1097,25 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
                 getattr(agent.home_paths, "owner_id", "") or "local/main"
             ),
             approval_mode_reader=partial(read_approval_mode, agent.home_paths),
+            plugin_gate_reviewer=_build_plugin_gate_reviewer(agent, config),
         )
     )
+
+
+# LLM: 组合根注入规范 owner 与 config，池提供方只取 Gateway 已有池；构造不读安装表、不起进程或监听器。
+# 函数用途: 给主代理和同进程子代理的工具表接入 B5 共用池征询。
+def _build_plugin_gate_reviewer(agent: SimpleAgent, config: AgentConfig):
+    from .gateway_parts.plugin_panels_http import current_plugin_channel_pool
+    from .plugin_events.tool_gate_review import (
+        GateWiring,
+        PluginGateReviewer,
+        enabled_gate_installations,
+    )
+
+    if not config.enable_plugins or not config.enable_tools:
+        return None
+    owner = resolve_owner_home(agent.home_paths.root, owner_identity_from_config(config))
+    return PluginGateReviewer(GateWiring(owner, config, current_plugin_channel_pool, enabled_gate_installations)).review
 
 
 # LLM: manifest 的 owner 类型来自已解析 home identity，不从消息、prompt 或路径字符串猜测。

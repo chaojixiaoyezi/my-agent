@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-# LLM: 默认值须与随包 YAML 一致；语法诊断和各决策点默认关闭，覆盖由原 owner/thread 保存，建议不改变权限或终态。
+# LLM: 默认值须与随包 YAML 一致；B5 超时同时登记规范化范围/参数边界并由征询消费，覆盖仍由原 owner/thread 保存。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 """智能体配置加载工具。
 
@@ -172,7 +172,7 @@ class _HomeProviderConfigFields:
     week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
 
-# LLM: 工具、语法观察和显式插件管理默认归此组；开关同步 YAML、规范化和执行入口，不能用展示配置代替权限。
+# LLM: 工具、插件和 B5 征询预算默认归此组；超时同步 YAML/范围/显式参数边界并由执行入口消费，不用展示配置代替权限。
 # 类用途: 保存工具行为与可选诊断的默认值，构造本身不加载插件或执行工具。
 @dataclass
 class _ToolConfigFields:
@@ -181,6 +181,8 @@ class _ToolConfigFields:
     enable_plugins: bool = True
     # 插件进程 OS 沙箱试点：开启后插件进程只可写自己的数据目录（读范围与网络不变）；沙箱不可用则不启动插件。
     plugin_process_sandbox: bool = False
+    # B5 收紧征询的单次总预算，包含排队/启动/换代；用户可配 200–10000 毫秒，模型不能修改。
+    plugin_tool_gate_timeout_ms: int = 2000
     max_tool_rounds: int | None = None
     # 一次最多同时执行几个工具（原 max_tool_calls_per_round 已并入）：空 = 8，正数 = 上限，0 = 不限制；
     # 任务属性 max_parallel_tool_calls 可单任务覆盖，后台工作片另有 max_tool_calls_per_round 任务属性封顶。

@@ -1,5 +1,17 @@
 # LLM_GUIDE
 
+M1 B5第5段叠到17j（2026-10-04，b5s5，`worker/m1-b5-on17j`，接b5r `65f47f2c6`，本地已实施、整体WIP待复审）：
+三方应用源 `ff5d761d9..d517a8b7b`，保B4真实handler事件；所有实际review生成决定、排除精确批准跳门，原归档信封→唯一runtime ledger写入→B6展示已经组合转正，不手插账本。
+六条初审小项已落实，I4逐字段比门引用与参数哈希但保新调用身份；外五/内四身份与写边界安全退化已注释。最终版本27文件563通过，完整11文件guards187；指定六+三及新增六变异有效。无交互混合门已有deny时账本保留deny、不误计无法审批，详见TESTS。
+`_tool_event_context`/prompt装配仍保持17j，b4g由3a先挑；真实宿主启用/沙箱、TUI/IM/Gateway、Linux全量和9b安全终审未验证，不部署。本段覆盖下方“第5待叠”的旧状态，旧段只记原时点。
+
+M1 B5 搬到17j（2026-10-04，b5r，`worker/m1-b5-on17j`，基线 `ebe621d87`，迁移已实施、整体WIP）：
+第1–4段来源为 `git diff b6ede99e0 ff5d761d9`，三方应用后手合执行器、注册表、Gateway共用池和文档；常数目录产品脚本重生899项。
+B5保持宿主decide后、原审批前收紧；B4只观察真正开始的handler。registry保留17j唯一动态审批读取，sol2两处agent.config读取不代修。
+rm-guard拒绝删除零执行/零工具事件，允许更新执行并发成对事件；账本实读strict xfail等第5段，不手插行。
+联合697项中678通过、13失败、5准备错误、1 strict xfail；18项在真正17j基线相同失败，宿主启动/启用未验成。命令与限制见TESTS。
+ds2第5段迁移线为 `worker/m1-b5-seg5-on-s3`，3a后叠；不等它、不改B7、不部署，不以隔离传输替身冒充真实Gateway/TUI/IM验收。下方历史段保留原时点。
+
 M1 B9（原 M5，2026-10-03，m1b9，`worker/sol2-m5`，已实现，待 be 复审）：用户想做 my-agent 插件时读取
 内置 `write-my-agent-plugin` 正文，再按需读模板与参考。工具/面板 v6 已有；两语言模板采用 B1 的 v8 文件入口，
 正文只允许 prompt_submitted，full 收紧只列精确工具名且 effects 为空，network 默认 false。握手双能力位、观察空回执，
@@ -7,6 +19,44 @@ M1 B9（原 M5，2026-10-03，m1b9，`worker/sol2-m5`，已实现，待 be 复�
 强制沙箱、默认断网和收窄读是 B7 的前置合同，不是本模板 stdio 已验证的保障。模型只交包，不安装、启用、取码或代填。
 v8 用源码文件构建器，旧 v1–v5 wheel 才走 wheel 构建器；只构建受信授权源码，中间文件留工作区，缺入口如实报告。
 当前测试及未验边界见 TESTS；宿主安装启用、隔离与真实客户端由 3a 后续复核。
+M1 B5 第4段（2026-10-04，m1b5，接第3段提交471b7b4fc，整体WIP）：
+精确批准只读宿主write_boundary.approved_actions，四调用字段加当前插件/version/activation/gate均匹配才跳门；auto不依赖host approval_applied。主/子真实隔离消费者批准一次后，新身份再问，等待中换代的ask/deny不能贴已应用批准。
+GateCall.approved_gate_refs为宿主复制引用，GateReview.approval_applied=True是无协议请求的批准跳门投影，ds2账本不得把它当征询；tighten_plugin_decision与PluginToolGate.merge参数未变。十四相关+完整十守卫539通过，六本段变异有效；第5由ds2做，完整安全复审、B7及实际TUI/IM/Gateway验收仍未完成。下方为历史时点。
+
+M1 B5 第3段主/子与 I4（2026-10-04，m1b5，接57f465dca，本地隔离验证、整体WIP）：
+真实执行器/B2池→原轮审批→canonical主claim/child attempt→notices/所属用户决定已覆盖四自动批准情形；子审批冻结execution_attempt_id，恢复换轮的旧记录无效，不另建批准源。
+I4用真实请求处理/重排入口与假供应商、停机故障注入验证重新征询；489项含当前完整十守卫通过，不等同真重启/TUI/IM。
+第4精确批准重跑仍待做，当前批准后可能重新ask；第5账本由3a改派ds2独立树并行。本线不做第5，不改B7，不部署WIP。下方记录保留原时点。
+
+M1 B5 第3段执行端（2026-10-03，m1b5，接c70c895a6，部署窗口WIP）：
+稳定JSON引用附原binding，不改旧ID；前缀同源清洗，仅本次/拒绝；Gateway固定选项，五点先守门。拒绝/无人审批码登记permission不可重试；full带arguments_truncated，样例另派。
+隔离Gateway链及十一相关文件+完整十守卫首次468通过；第3段真实主子/I4未验，第4精确重跑/第5账本未做，不可上线。3a外部228通过已解除原启用失败待办，历史原时点记录保留；部署窗口先停本轮。
+
+M1 B5 第 3 段（2026-10-03，m1b5，接 `6ec0fc7f3`，消费端部分接线、整体 WIP）：
+四审批入口与自主提供者先用合同层单一 plugin_gate_required；插件请求不复用/写入会话或长期批准，两个等待入口独立防自动模式绕过。
+执行端尚未附加引用，审批前缀、I4、无人审批回执、第 4–5 段仍未做，不把隔离标记请求单测当完整链验收。
+外部 guards9 曾有十四文件导致本树缺一个新文件、收集失败；收尾清单已回到十文件且无缺失，完整复跑 172 项通过。此前失败保留，不改其他分支或真实 owner。
+
+M1 B5 ds10 修正（2026-10-03，接 `3771f67ca`，第 2 段组件已修、整体 WIP）：
+非 ok 构造统一宁严 ask，revoked 合并剔除；直接 GateReply 与解码共用八十字单行清洗，审批前缀不得另写清洗。
+第 3 段须点名并守住 Gateway permission_bridge 等待轮询、主/子请求与等待、自主提供者，不能只改两处请求入口。
+24 条有效业务红测修后组件三文件 129 通过；第 3–5 段未实施，原启用准备 13 失败仍待 3a 外部核实，不能上线。
+
+M1 B5 第 2 段（2026-10-03，m1b5，`worker/m1-b5-tool-gate`，接合同头 `b531c5fab`，组件已实施、整体 WIP）：
+宿主 decide 后接共用池征询，registry 默认 model，两真实宿主构造显式 host_command；只消费宿主字段，不采用参数来源。
+排队/启动/回答/追新共享总预算，握手与失败宁严 ask；池关闭不等于停用，撤销以安装快照校准。
+超时配置从 B7 移属 B5，默认 2000、范围 200–10000，显式参数边界，模型 user_config 拒绝并保留 PARAMETER_BOUNDARY。
+当前组件 105 项和完整 guards9 172 项通过；第 3–5 段审批防自动批准、精确重跑和账本仍未接线，不能视作完整 B5。
+后续非作者会话交叉初审、9b 安全终审、3a 沙箱外复验；下列旧阶段记录保留原时点，不覆盖本段进展。
+
+M1 B5 备审补充（2026-10-03，3a 转述 ae，合同已纳入，代码待第 2–4 段）：审批不能只改 Gateway，`conversation/agent_tool_approval.py` 的子/后台入口也须在缓存、长期授权前共用 `plugin_gate_required`，等待自主轮询同样守门；批准不写会话/长期授权。
+宿主来源只在 `plugin_management`、`plugin_invocation` 的真实构造点显式设置，registry 与 foundation 自检默认 model；`plugin_gate_ref` 是 JSON 字符串，算好旧 `permission_id` 后附加，收紧门自行读原 `approved_actions` 精确核对。详见 M1 设计第 8/13 节与 TESTS 待实施矩阵，不将文档修订当链路已实现。
+
+M1 B5（2026-10-03，m1b5，`worker/m1-b5-tool-gate`，功能提交 `9cf60731d`，第 1 段已实现，整体 WIP，待 be、ae 复审）：
+`plugin_events/tool_gate.py` 仅提供纯匹配、严格协议/安全投影和只能更严的稳定合并，原 `ToolCall` 与安装表仍是权威；63 项组件合同及五个内存变异已有证据。
+第 2–5 段的共用池、来源、执行/审批、防自动批准、精确重跑与账本尚未接线，不能视作生产收紧已生效。
+full 投影保持合法 JSON 对象、总量限 4000 字符；先去全部内部键再统一脱敏，消息去换行/控制符并限 80 字符。
+继续时按 M1 设计第 8/9/13/21 节与本轮 TESTS 续做，不改 B7 前 v8 拒绝门，不自己建第二连接池，不读真实 owner 或碰生产 Gateway。
 
 M1 B1（2026-10-03，m1b1，`worker/m1-b1`，两条裁定与 ae 意见已实施，ae 复审通过，并入 step17i）：v8 只扩 v6 文件入口的静态声明，
 事件/收紧/网络/强制沙箱要求进入原启用确认码；旧 v1–v7 固定序列化字节不变，不另开 Python 轮子订阅路径。

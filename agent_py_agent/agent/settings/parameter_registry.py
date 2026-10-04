@@ -2,7 +2,7 @@
 #   说明只取随包 agent_config.yaml：该键正上方的连续注释优先，没有再取该键的行尾注释（与加载器同一引号规则），不在代码里再写一份；
 #   说明为空的字段只允许留在 test_parameter_registry 的基线名单里。安全等级按显式名单与键名记号结构化判定（指向类记号只对
 #   非数字参数生效，凭据按键名最后的完整片段认、与回显脱敏同一条规则），
-#   TUNABLE_KEYS 可显式放行（如飞书凭据），BOUNDARY_KEYS 对模型永远拒绝；用户专属 /settings 授权不改变此表的 writable。
+#   TUNABLE_KEYS 可显式放行（如飞书凭据），BOUNDARY_KEYS 对模型永远拒绝；整数收紧超时须显式登记，/settings 授权不改变 writable。
 #   分类只用于展示，未知前缀归“其它”，
 #   不参与任何放行判断。只读，不写文件、不调模型。改动须同步 parameter_changes.py、tooling/user_config_tool.py、
 #   gateway_parts/settings_control_service.py 与 test_parameter_registry.py。运行时还会按规则派生的参数（配置值不等于
@@ -53,13 +53,14 @@ _TARGET_TOKENS = frozenset({
 })
 # 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、写入保护、特权动作频率、审计记录保留期
 # （cli_audit_cleanup_days 缩短会提前删掉审计证据）或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
+# 收紧超时是整数，不会命中 plugin 指向记号；显式登记才能防止模型自行放大征询预算。
 _BOUNDARY_NAMES = frozenset({
     "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
     "user_id", "system_prompt",
     "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "gateway_restart_cooldown_seconds",
     "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
-    "cli_audit_cleanup_days",
+    "cli_audit_cleanup_days", "plugin_tool_gate_timeout_ms",
 })
 # 常用参数：/settings 默认只列这些，user_config 的搜索结果也标出来，方便先推荐。这是封闭的产品决策名单（2026-09-27 配置分类
 # 的 common 层：99% 的用户只会碰到它们），不是开放世界的类型识别；其余参数仍可用 /settings all、search、show 查到和修改。

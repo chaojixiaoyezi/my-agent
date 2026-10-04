@@ -83,7 +83,7 @@ class CatalogRenderConfig:
     declared_deferred_names: frozenset[str] = frozenset()
 
 
-# LLM: ToolRegistry 单一装配配置；审批、来源合同和语法反馈开关由 core 绑定，不从模型参数推导；联测 owner/worker 和文件反馈。
+# LLM: ToolRegistry 单一装配配置；B5 提供方、审批与来源由 core 绑定，权限视图共用，不从模型参数推导或另建通道。
 # 类用途: 汇总工作区、权限、工具上限和可选文件诊断，构造时不读取包或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
@@ -161,6 +161,8 @@ class ToolRegistryParams:
     operation_owner_id: str = ""
     approval_mode_reader: Callable[[], str] | None = None
     gateway_port: int | None = None
+    # B5 征询提供方来自组合根，权限视图共用它；模型不能传入提供方或改变来源。
+    plugin_gate_reviewer: Callable | None = None
 
 
 # LLM: list_tools 只能描述调用它的请求快照，不能退回进程级注册表或猜测 owner 类型。
@@ -402,7 +404,7 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
 # 类用途: 组合工具实现与原权限快照，在同一发现链中呈现本工作片可忽略的工具短名单。
 class ToolRegistry:
-    # LLM: 保存唯一构造配置供工作片派生权限视图；普通 MCP 保持初始连接，插件只在新运行准备时启动，视图共用客户端与关闭标记。
+    # LLM: 保存唯一构造配置与宿主 B5 提供方，权限视图共用共用池接线；不从模型参数赋予来源或另建连接。
     # 函数用途: 初始化一个 owner 的工具表、检索和审批读取器，运行时按同一注册表完成授权与调用。
     def __init__(
         self,
@@ -439,6 +441,7 @@ class ToolRegistry:
         self.operation_store_required = params.operation_store_required
         self.operation_owner_id = str(params.operation_owner_id or "local/main").strip()
         self.approval_mode_reader = params.approval_mode_reader
+        self.plugin_gate_reviewer = params.plugin_gate_reviewer
         self.retrieval_limit = params.retrieval_limit
         self.retriever = build_tool_retriever(params)
         register_base_tools(self, params)
@@ -745,7 +748,7 @@ class ToolRegistry:
         )
 
     # LLM: Every gate and handler in one invocation must receive the same host-authored effective
-    # cwd/root set. 审批模式在工具边界读取 owner 唯一策略；事件只接宿主结构化上下文，读取错误不得放行，也不能由模型参数覆盖。
+    # cwd/root set. 审批模式沿 owner 唯一策略，读失败不放行；事件身份与 B5 提供方只取宿主字段，来源保持默认 model。
     # 函数用途: 在本轮统一工作目录和授权根下执行工具，并返回可审计的标准执行结果。
     def execute_tool(
         self,
@@ -789,6 +792,7 @@ class ToolRegistry:
                 pre_handler_gate=pre_handler_gate,
                 output_archiver=output_archiver,
                 event_context=_host_event_context(trusted_run_context),
+                plugin_gate_reviewer=self.plugin_gate_reviewer,
             )
         )
 

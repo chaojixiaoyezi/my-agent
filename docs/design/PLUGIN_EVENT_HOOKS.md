@@ -180,14 +180,17 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 - 宿主决定是 `allow` 或 `ask`：问所有“收紧了这个工具”的插件（工具名精确命中，或工具效果命中 `effects`）。没有插件命中时，一行代码都不多走。
 - 子代理和决策模型自动执行的工具调用走同一个执行器，同样受收紧，`actor` 分别是 `subagent`、`decision`。
 - **只收紧模型发起的调用，用户自己发的宿主命令永远不受收紧**（ae、9b 评审）：
-  - 事实：用户的 `/plugins` 管理命令（`plugin_management._prepare`）和 `/plugins@` 插件命令（`runtime_db/host_command_execution`）也经过同一个 `ToolExecutor`，只是工具对模型不可见。所以“绕开”不能靠“不走执行器”，要靠结构化来源。
-  - 做法：`ToolExecutorRequest` 新增 `call_origin`，取值 `model`（主代理、子代理、决策模型自动执行）或 `host_command`（用户发的宿主命令）。上面两条宿主命令路径显式设成 `host_command`；没设的一律按 `model`（宁严勿松，新路径忘了设只会多问，不会漏问）。收紧钩子只对 `model` 生效。
+  - 事实（3a 2026-10-03 补充，m1b5 静态核对）：用户的 `/plugins` 管理命令在 `plugin_management._prepare` 构造请求，`/plugins@` 插件命令在 `plugin_invocation._prepare_invocation` 构造请求；两者都经过同一个 `ToolExecutor`，只是工具对模型不可见。所以“绕开”不能靠“不走执行器”，要靠结构化来源。
+  - 做法：`ToolExecutorRequest` 新增 `call_origin`，取值 `model`（主代理、子代理、决策模型自动执行）或 `host_command`（用户发的宿主命令）。只在上述两个宿主命令构造点显式设 `host_command`；`tooling/registry.py` 的日常模型构造点走默认 `model`。没设的一律按 `model`（宁严勿松，新路径忘了设只会多问，不会漏问）；工具参数里的 `call_origin`、`__call_origin` 无权改变来源。收紧钩子只对 `model` 生效。
+  - 构造点盘点：日常业务有上述三个构造点；全仓静态 AST 另有 `contracts/main_agent_foundation_contract_cases.py` 的合同自检构造，它保留默认 `model`，不是宿主命令豁免入口。`runtime_db/host_command_execution.py` 接收调用方的 `prepare` 结果并经 `dataclasses.replace` 补操作账与执行上下文，不是 `/plugins@` 的请求构造点，也不能仅凭进入这个模块就升级来源为 `host_command`。
   - `/settings`、`/approve`、`/deny` 是 Gateway 控制命令，不经执行器，本来就不受影响。
   - **前提（9b 复核）**：`call_origin=host_command` 免收紧的可信度，依赖 Gateway 确认“这条请求确实来自用户本人的通道”。Gateway 现有的本机来源信任规则和“模型命令沙箱默认能联网”之间有冲突（早已存在，同样影响 H3、审批和 owner 墙的前提），列为 3a 待定项。定下来之前 B5 按现状验收。
   - 插件管理工具对模型保持不可见（现状 `ToolExposure(model_visible=False)`），模型停用、卸载不了收紧它的插件。
   - 用例：收紧插件对所有危险工具一律 `deny` 时，用户在 TUI 和 IM 里仍能用 `/plugins disable` 停掉它；模型可见工具表里没有任何插件管理工具。
 
 ### 8.2 合并规则（只能更严）
+
+**full 参数投影完整性（3a 2026-10-03 裁定；17j截断只能更严补充）**：声明 `arguments: "full"` 的请求在 `call` 同时带 `arguments_truncated` 布尔值；脱敏、去内部键后的紧凑 JSON 超出4000字符预算则为 `true`，未截则为 `false`。`arguments: "none"` 不带该字段。只认布尔 `true`，插件应把可见片段结论与 `ask` 合并取更严：已有 `deny` 不降为 `ask`，已有 `ask` 保留原原因码，只将可见 `allow_as_is` 升为 `ask`；不能把不可见尾部当不存在放行。标记不修改原参数或哈希，不塞进工具参数对象。B8样例/B9模板保留17j实现，B5只迁宿主与本设计。
 
 | 宿主 | 插件里最严的 | 结果 |
 | --- | --- | --- |
@@ -209,31 +212,37 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
   - 停用或卸载 → 它的回答作废，**不算它的要求**（停用即撤销）；
   - 换成了新的激活实例（升级、重新启用）且新实例仍收紧这个工具 → 在剩余预算里问新实例，预算不够按 `ask`（9b 评审），不能就此回到宿主决定把它放过去。
 - 每个插件同时一个在途征询；排队等待也算在预算里。
+- **ds10 初审、3a 采纳**：全部故障与撤销经唯一 `failure_review` 构造，GateReview 构造处保证非 ok 的回复一律 ask、对应固定原因码；revoked 仍由合并剔除。非法解码、超时、错误、不可用及代次校准都不能手工拼 allow_as_is，merge 不负责补救不一致的 outcome/verdict。
 
 ### 8.4 审批：写明是哪个插件，并且不能被自动批准
 
 插件要求确认时，执行器把要求放进结果的结构化元数据 `plugin_requirements`：`[{plugin_id, version, gate_id, reason_code, message}]`。`_resolve_tool_approval` 据此：
-- 审批描述前加“[插件 <插件名> 要求确认：<原因码> <消息>]”，TUI 审批框和 IM 那行“代理请求：…”都看得到（IM 摘要取描述前 200 字，前缀放最前）；
-- `binding` 里加 `plugin_gate_ref`（这次要求的结构化摘要：插件编号、激活编号、gate、原因码，加这一次调用的 `operation_id`、`call_id`、幂等键、参数哈希），`permission_id` 照旧在加之前算好；
+- 审批描述前加“[插件 <插件名> 要求确认：<原因码> <消息>]”，TUI 审批框和 IM 那行“代理请求：…”都看得到（IM 摘要取描述前 200 字，前缀放最前）；消息必须与 decode_reply、直接 GateReply 共用 `clean_gate_message`，80 字、去控制/双向控制和 Unicode 换行，直接构造 review 不能绕过（ds10 初审、3a 采纳）；
+- `binding` 里加 `plugin_gate_ref`（这次要求的结构化摘要：插件编号、激活编号、gate、原因码，加这一次调用的 `operation_id`、`call_id`、幂等键、参数哈希）。`binding` 是 `dict[str, str]`，构造和 `from_mapping` 都会把值转成字符串，所以引用必须先编码成稳定的 JSON 字符串，不能直接塞 dict/list 或把 Python 字符串表示当 JSON；经 `to_dict` / `from_mapping` 往返后仍能解码并核对同一身份。`permission_id` 先按旧算法算好（保留现有 `grant_key` 的处理与哈希顺序），再附加 `plugin_gate_ref`，不能改变旧审批 ID；
 - 选项只给“允许这一次”和“拒绝”，去掉“本会话都允许”和“以后都允许”（照 `host_command_approval` 去掉选项的做法）。
 
 ### 8.5 绕开四种自动批准
 
 判断“这次审批带插件要求”只读结构化字段 `plugin_gate_ref`，由同一个函数（`plugin_gate_required(request)`）给出；下面每个自动批准入口都先调它，不各写一份判断（9b 评审）。带 `plugin_gate_ref` 的审批请求：
-- 自主模式（auto）也弹框：`ActionPolicy` 层不能把它当普通 `ask` 跳过，执行器在合并后直接产出“强制确认”；
-- `StreamApproval` 不查会话缓存、不查长期授权，也不把这次批准写进会话缓存；
-- 等待期间自主模式提供者（`autonomous_tool_decision`）不对它给决定；
+- 自主模式（auto）也弹框：`ActionPolicy._approval_decision` 对非 `always` 工具在 auto 分支先返回放行，宿主精确批准核对并不一定执行；执行器必须把宿主 `allow` 与插件 `ask` 合并成“强制确认”，不能依赖宿主先产出 `ask`；
+- **两条审批入口都要守门**（3a 2026-10-03 补充）：Gateway 的 `StreamApproval.request` 与子代理/后台主代理的 `conversation/agent_tool_approval.AgentToolApprovalSinkMixin.request_permission` 都必须在查会话缓存、长期授权之前先调同一个 `plugin_gate_required(request)`。带引用时不查 Gateway 缓存或 `_approved_session_keys`，不调用长期授权放行，也不把本次批准写入会话缓存或 owner 长期授权；只改 Gateway 不算完成；
+- 等待期间自主模式提供者（`autonomous_tool_decision`）也先调这个共同判定，不对插件确认给决定；**四处入口都守门**：两处 request，加 `gateway_parts/permission_bridge.wait_for_gateway_permission_decision` 和 `conversation/agent_tool_approval.wait_for_agent_tool_approval` 的等待轮询。两条等待路必须在共同 `plugin_gate_required` 之后才允许模式提供者放行，即使传入自定义提供者也不能绕过；补 Gateway 等待切自主的反证和独立移除该守门的变异（ds10 初审、3a 采纳）；不通过各自复制字段判断制造第二份合同；
 - 不可交互的场合（后台任务、定时任务、非管理员 IM、没有审批通道的子代理）照现有规则返回“无法审批”，工具不执行（宁严勿松）。插件能从 `call.interactive` 看到这一点，可以自己选 `deny` 而不是 `ask`。
 - 这种“被插件挡住、又没人能批”要看得见（ae 评审，3a 定 D2）：TUI 和 IM 都显示“插件 X 要求确认，但这里无法审批，所以没执行”，工具结果错误码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`（带插件名和插件给的原因码）；后台任务的失败原因带同样的事实；`/plugins info` 的最近决定里单独计“无法审批”的次数。
 - 决策模型自动执行（J16 片 D，`action_candidate_auto_execute_enabled`）的调用同样经收紧钩子（`actor=decision`），插件要求的确认不被它的自动执行跳过（9b 评审）。
 - Gateway 重启后续跑（I4）：挂着的插件确认不能丢、也不能当成已批准；续跑回合里同一调用要重新征询插件（9b 评审）。
+  - 第3段隔离补验（2026-10-04，worker/m1-b5-tool-gate，接57f465dca）：真实请求处理/重排、假供应商/插件传输、停机故障注入和宿主重建验证重新征询并等新的决定；不当作实际重启/TUI/IM验收。主审批沿原claim，子审批在原scope/行冻结canonical execution_attempt_id，旧挂起/决定不可跨恢复轮；原schema/路径不变，不新增批准账。
+- 双入口反证：隔离测试先保存同作用域、同工具/参数的旧会话批准（例如 `rm -rf build`），再提供假的已激活收紧插件；Gateway 与子代理/后台主代理入口都必须发布插件确认并等待本次用户决定，不能因旧缓存直接执行。两条路还各覆盖 owner 长期授权命中、等待时切到自主模式、不写回会话/长期授权；B7 前不用真实 v8 启用。
 
 ### 8.6 批准后重跑
 
 用户批准后同一调用重跑（现有机制）。重跑时：
 - 对 `plugin_gate_ref` 已被批准的插件，**不再问**（防止插件每次都要确认、永远跑不下去）；仍检查该插件还在启用，停用了就不算它的要求。
 - 跳过的条件是 `plugin_gate_ref` 和**这一次**调用的精确身份完全一致：`operation_id`、`call_id`、幂等键、`args_hash`，加插件激活编号和 `gate_id`（ae、9b 评审）。不能只按“这个插件批准过”或“插件 + 参数哈希”就跳过，否则同一个 run 里模型过一会儿再发一条一模一样的 `rm -rf`，会继承上一次的批准。用例：批准后同一调用重跑不再问；之后再发的同参数新调用、不同参数的调用都要重新问。
+- **批准数据源**（3a 2026-10-03 补充）：收紧门自己读取宿主 `write_boundary.approved_actions` 里已批准记录的 `plugin_gate_ref`，解码后按上述全部身份核对；不能只依赖 `ActionPolicy` 的 `approval_applied`，因为自主模式或宿主不要求确认时它不会经过宿主的已批准核对。模型回执不能授予批准权，仍沿原用户审批记录，不新增批准账本。补“auto 下宿主 allow → 插件强制 ask → 用户本次批准 → 精确重跑跳门”的完整测试。
 - 其它插件照常问（比如批准期间新启用的插件）。
+- 第4段本地实施（2026-10-04，`worker/m1-b5-tool-gate`，接第3段 `471b7b4fc`）：只读原宿主批准行，外层必须 `APPROVED`、有 `approval_id` 且工具/run/operation/幂等键/参数哈希匹配；内层逐字段核对上述六身份，另核插件 ID 和包版本。共用池原 review 循环每轮复读安装，版本或激活变动时重新征询，不将未获得 allow 的重跑贴成已应用批准；拒绝回执保留原错误码并带同源清洗的插件/原因前缀。
+- 第4/5段联接约定：`tighten_plugin_decision(request, call, host)` 与 `PluginToolGate.merge(host_status, reviews)` 签名不变。`GateCall` 尾字段 `approved_gate_refs` 默认空 tuple；`GateReview` 尾字段 `approval_applied` 默认 False，True 是宿主精确批准跳门、没有协议征询的投影，ds2 的第5段不能虚构对应 `plugin_gate.decided`。`b5s5` 已接原归档信封与唯一决定writer，全部真实review每门一条（排除已批准跳门），不可交互的ask记录 `final_status=PLUGIN_GATE_APPROVAL_UNAVAILABLE`；组合从真实临时库读到B6 info。主/子链路仍仅在隔离宿主与假传输下验证，真实 TUI/IM/Gateway 未验证。
 
 ### 8.7 拒绝时模型看到什么
 
@@ -282,7 +291,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 
 观察的 3 秒超时、5 秒退避、120 秒空闲沿用面板服务的常数，不新加配置。两项都按 AGENTS.md 同步 `agent_config.yaml`（中文注释）、`AgentConfig`、参数中心登记和测试。
 
-两项都进管理员边界项 `USER_SETTINGS_BOUNDARY_KEYS`（`settings/user_config_capability.py`，ae、9b 评审，3a 定）：模型经设置工具（`user_config`）改会被拒（`PARAMETER_BOUNDARY`），只有用户本人用 `/settings` 能改，和宿主核验开关同一组。否则模型调一次设置工具把开关关掉，收紧钩子就全失效。B7 加用例。
+两项都属于管理员参数边界：模型经设置工具（`user_config`）改会被拒（`PARAMETER_BOUNDARY`），只有用户本人用 `/settings` 能改。**3a 2026-10-03 新裁定**：超时配置从 B7 移属 B5，实际登记在 `settings/parameter_registry._BOUNDARY_NAMES`；这是整数，`classify_safety` 跳过 plugin 目标词，必须显式登记才能防止模型放大预算。B5 同步 YAML 中文说明、AgentConfig 默认值和规范化范围，征询真实读取该值，覆盖 metadata 与模型 user_config 拒绝。`plugin_events_enabled` 仍由 B7 实施，总开关/local-main/强制沙箱及 B1 关闭门不由 B5 改动。
 
 ## 12. 对其它文档的改动
 
@@ -301,12 +310,11 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | B2 共用插件通道（已实施：`worker/ds1-b2-channel`，ds1 `e62593fc6`，ds4b2 复审返工至 `7b21bfe12`；be、ae、9b 复审通过，并入 step17i；实施与返工记录见第 19–21 节） | 把面板服务的连接、代次复核、单在途、空闲关闭抽成 `PluginChannelPool`，面板改用它；启动计入超时 | 新 `plugin_display/channel.py`（或 `plugin_channel/`）、`plugin_display/service.py` | 面板原有用例全部不改照过；启动超过超时记超时、后台继续启动；代次失效丢结果 | 无 |
 | B3 事件中心（已实施：`worker/m1-b3-event-hub`，m1b3，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`；9b 复审待做） | `PluginEventHub`：按 owner 分区、按类型只留最新、`dropped_before`、单在途、退避、撤销、计数；`my-agent/events` 握手；`events.observe` | 新 `plugin_events/hub.py`、`plugin_events/protocol.py`，Gateway 组装处 | 假插件：合并与丢弃计数准确；慢插件不拖主线程；停用后不再收到；跨 owner 不串；握手没声明不投 | B1、B2 |
 | B4 事件点（m1b4，已实施，待复审） | 6 类事件的投影与接线；只有提示事件声明且同意时给提示正文，观察事件不带工具参数（3a 2026-10-03 裁定）；提示投影统一脱敏；提示 owner 复用请求 worker 的结构化解析，不按频道猜归属 | `gateway_parts/http_handlers.py`（提示）、`gateway_parts/request_execution.py`（回合）、`tooling/executor.py`（工具）、`gateway_parts/control_operation_service.py`（命令） | 每类事件字段齐全；默认不含正文（带标记正文反证）；工具观察不含参数；带标记的凭据和 `__` 内部键反证；被拒的调用不发工具事件；`actor` 三种取值；随机回环 HTTP 服务→真实 worker 认领三事件顺序及 local/tui 跨 owner 不发提示 | B3 |
-| B5 收紧钩子 | `PluginToolGate`、合并规则（同严按插件 ID 排序）、超时按确认、代次撤销与新实例重问、重跑只对同一次调用不重问；`call_origin`；审批前缀、去掉会话/长期选项、单一 `plugin_gate_required` 判定绕开缓存/授权/自主；`PLUGIN_GATE_*` 错误码登记 | `tooling/executor.py`、新 `plugin_events/tool_gate.py`、`agent_core/tool_loop/round_execution.py`、`contracts/tool_approval.py`、`gateway_parts/stream_approval.py`、`user_space/approval_mode.py`、`contracts/error_taxonomy.py`、`plugin_management.py` 与 `runtime_db/host_command_execution.py`（设 `call_origin=host_command`） | 第 8.2 表 7 种组合；自主模式、会话缓存、长期授权、决策模型自动执行下仍弹框；I4 续跑回合重新征询；超时 → 确认；两个并行调用撞上同一慢插件，排队那条超时按确认；插件回复多带字段（如 `arguments`）被忽略、参数不变；征询中停用 → 不算、换新实例 → 问新实例；批准后同一调用重跑不再问，之后同参数新调用、不同参数照样问；不可交互 → 不执行、错误码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`、账本记 `final_status`；收紧插件一律 deny 时用户仍能 `/plugins disable`、模型工具表里没有插件管理工具；模型发起的调用在工具参数里塞 `"call_origin": "host_command"` 或 `__call_origin` 照样被收紧（来源只读宿主设在 `ToolExecutorRequest` 上的字段，不从参数读；ae 补，配变异“执行器从参数读来源”）；拒绝时模型看到 `PLUGIN_GATE_DENIED` 且不是“结果未知” | B1、B2；H3 已合入 |
-| B6 账本与展示 | `plugin_gate.decided` 写入与查询；`/plugins info` 四段（含“无法审批”计数）；IM 同文 | `runtime_db/repository.py`（查询方法）、`plugin_commands.py`、`plugin_management.py` | 每种 outcome 一条且字段齐全；不写消息原文；TUI 与 IM 输出相同；最近 10 条按时间倒序；“无法审批”单独计数 | B5 |
 | B6 账本与展示（查询与展示半，已实施：`worker/m1-b6-ledger-display`，m1b6，提交 `d9f158e8d`、文档补丁 `e80db5918`，基于 B3 返工头 `0a3064078`；写账半待 B5 合入） | 不依赖 B5 的部分：`plugin_gate_decisions`（最近 N 条、默认 10、`seq` 倒序、字段白名单，`message` 不外泄）、`plugin_gate_unavailable_count`（累计，不设窗口）、`/plugins info` 四段（订阅/收紧/网络沙箱/最近决定+计数）、观察计数读 B3 `hub.stats`（缺 hub 或读失败写“暂无记录”）、hub 经 `plugin_command_service → control_service → control_operation_service → http_handlers` 全链透传 | `runtime_db/repository.py`、`plugin_commands.py`、`plugin_management.py`、`plugin_events/confirmation.py`、`gateway_parts/{plugin_command_service,control_service,control_operation_service,http_handlers}.py` | 见 `tests/test_plugin_event_display.py` 12 项与 6 个变异；测试库直插第 9 节字段代 B5 写入 | B5（仅写账半） |
-| B7 安全底座 | 将 B1 暂时拒绝与构造期 v8 计划排除换成真正总开关、local/main 和强制沙箱判定，不能只删关闭门；v8 强制沙箱、断网、收窄读（Linux 挂法先实测，macOS 沿用 `_ancestor_metadata_rules`）；开关关时拒绝启用；沙箱不可用时失败；两个配置项进管理员边界项 | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`settings/config.py`、`settings/user_config_capability.py`、`config/agent_config.yaml` | 真实沙箱（macOS / Linux 车道）真进程，布局为“放行目录嵌在拒读根里”：Python、node 解释器启动和 realpath 成功，读得到自己的包和数据目录、读不到会话和记忆；`network: false` 连外网和本机回环都被拒；`network: true` 能连 Gateway 端口但读不到令牌、调不了要令牌的接口，不要令牌的接口列清单；开关关 → `plugin_events_disabled`；模型经 `user_config` 改两个配置被拒（`PARAMETER_BOUNDARY`）；非 local/main 启用被拒（`plugin_events_owner_not_allowed`） | B1；H3 已合入 |
 | B8 样例与验收（样例已实施：m1b8，`worker/m1-b8-samples`，基于 `claude/3a-step17i` `c47d023b6`；删除门改拦 `apply_patch` 删除段：b8dg，2026-10-03；真实验收待 B3–B7 合入后另派） | 样例 A：观察全部 6 类事件并在面板显示计数；样例 B：`run_command` 含 `rm -rf` 时要求确认、对 `apply_patch` 补丁里的删除文件段（`*** Delete File: `）直接拒绝；Python 和 Node 各一份 | `plugins/event-watch/`、`plugins/rm-guard/`、`plugins/rm-guard-node/` | 假模型真进程：TUI 与 IM 都看到“插件 X 要求确认 / 拒绝”；真实验收见第 14 节 | B3–B7 |
 | B9 写插件的技能（M5；已实现（`worker/sol2-m5`，`de395322e`），待 be 复审） | 内置“写 my-agent 插件”技能、作者合同和 v8 文件模板（Python、Node 各一个）；安装启用仍只能由用户输确认码 | `agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/`、`test_write_my_agent_plugin_skill.py` | 两语言 v8 ZIP 真构建/读回/包内 stdio；只订阅合法、模型管理入口不可见；四类双语言变异全部抓到；旧新构建器字节回归保留。B7 生产启用与隔离未验证，门禁例外见 TESTS | B1 `add244a92` |
+| B5 收紧钩子（分段实施：第 1 段 `9cf60731d`，第 2 段补审至 `6ec0fc7f3`，第 3 段主/子及隔离 I4 已提交 `471b7b4fc`（父 `57f465dca`）；第4段来源头 `ff5d761d9`；第1–4段由b5r三方迁到 `worker/m1-b5-on17j`（基线 `ebe621d87`），B4真实handler事件和B5宿主decide后收紧两边保留；历史b5r联合697项678通过、13失败、5准备错误（真正17j基线相同）、1账本strict xfail；b5s5已将ds2第5段 `ff5d761d9..d517a8b7b` 三方叠到b5r交付 `65f47f2c6`，修真实review与canonical信封两接缝，组合三项转正、最终27显式文件563通过（含11文件guards187项）；无交互混合门保真实deny、不误计无法审批，未代称历史18项失败已通过；整体WIP，3a先叠sol2/b4g再挑本线，完整非作者交叉初审、9b终审、3a外部复跑仍待做） | `PluginToolGate`、合并规则（同严按插件 ID 排序）、超时按确认、代次撤销与新实例重问、重跑只对同一次调用不重问；`call_origin`；审批前缀、去掉会话/长期选项、单一 `plugin_gate_required` 判定绕开缓存/授权/自主；`PLUGIN_GATE_*` 错误码登记 | `tooling/executor.py`、新 `plugin_events/tool_gate.py`、`agent_core/tool_loop/round_execution.py`、`contracts/tool_approval.py`、`gateway_parts/stream_approval.py`、`gateway_parts/permission_bridge.py`（`wait_for_gateway_permission_decision` 必须共同守门）、`conversation/agent_tool_approval.py`（request 和 wait 都守门）、`user_space/approval_mode.py`、`contracts/error_taxonomy.py`、`plugin_management.py` 与 `plugin_invocation.py`（两处显式设 `call_origin=host_command`）；`tooling/registry.py` 保持默认 `model`；`runtime_db/host_command_execution.py` 仅联测调用方来源经 replace 保留，不在那里授予豁免 | 第 8.2 表 7 种组合；Gateway 与子代理/后台主代理两条路在已有同操作会话缓存、长期授权、自主等待轮询下仍弹插件确认，不写入会话/长期授权；决策模型自动执行同样受收紧；`plugin_gate_ref` 字符串往返、附加前后的旧 `permission_id` 不变；auto 下宿主 allow 仍转强制 ask，并由收紧门自行核对已批准引用；I4 续跑回合重新征询；超时 → 确认；两个并行调用撞上同一慢插件，排队那条超时按确认；插件回复多带字段（如 `arguments`）被忽略、参数不变；征询中停用 → 不算、换新实例 → 问新实例；批准后同一调用重跑不再问，之后同参数新调用、不同参数照样问；不可交互 → 不执行、错误码 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`、账本记 `final_status`；收紧插件一律 deny 时用户仍能 `/plugins disable`、模型工具表里没有插件管理工具；模型发起的调用在工具参数里塞 `"call_origin": "host_command"` 或 `__call_origin` 照样被收紧（来源只读宿主设在 `ToolExecutorRequest` 上的字段，不从参数读；ae 补，配变异“执行器从参数读来源”）；拒绝时模型看到 `PLUGIN_GATE_DENIED` 且不是“结果未知” | B1、B2；H3 已合入 |
+| B7 安全底座 | 将 B1 暂时拒绝与构造期 v8 计划排除换成真正总开关、local/main 和强制沙箱判定，不能只删关闭门；v8 强制沙箱、断网、收窄读（Linux 挂法先实测，macOS 沿用 `_ancestor_metadata_rules`）；开关关时拒绝启用；沙箱不可用时失败；总开关进管理员边界项（超时配置已移属 B5） | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`settings/config.py`、`settings/user_config_capability.py`、`config/agent_config.yaml` | 真实沙箱（macOS / Linux 车道）真进程，布局为“放行目录嵌在拒读根里”：Python、node 解释器启动和 realpath 成功，读得到自己的包和数据目录、读不到会话和记忆；`network: false` 连外网和本机回环都被拒；`network: true` 能连 Gateway 端口但读不到令牌、调不了要令牌的接口，不要令牌的接口列清单；开关关 → `plugin_events_disabled`；模型经 `user_config` 改总开关被拒（超时边界由 B5 联测）（`PARAMETER_BOUNDARY`）；非 local/main 启用被拒（`plugin_events_owner_not_allowed`） | B1；H3 已合入 |
 
 ## 14. 验收（goal 第四节）
 
@@ -345,6 +353,8 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 
 ## 17. 评审记录
 
+- **3a 转述 ae 备审补充（2026-10-03，m1b5 已静态核对并纳入合同，代码仍待第 2–4 段）**：补 `AgentToolApprovalSinkMixin.request_permission` 的会话缓存、长期授权、等待自主轮询三条路，与 Gateway 共用 `plugin_gate_required`（8.5）；`/plugins@` 来源改在 `plugin_invocation` 的真实构造点设置（8.1/13）；审批引用用 JSON 字符串、旧 permission 算法不变（8.4），收紧门自行读原 `approved_actions` 做精确重跑（8.6）。这是合同修订，不是安全复审通过或链路已验证。
+
 - **ae 的 B1 复审（3a 2026-10-03 转述，修订已由 ae 复审通过）**：常数目录重新生成并同时过 `--check` 与测试；B7 前 v8 启用按总开关关闭拒绝；探针和分支增量不保存本机路径。ae 沙箱外核对 `test_plugin_any_language.py`：基线 `274cedb1e` 和 B1 头 `bf520e911` 均 **35 passed**，六失败来自 my-agent 命令沙箱环境；旧版字节兼容和原四变异已独立确认，本线不重复调查、不冒充亲自沙箱外验证。
 
 - **ae（2026-10-03）**：总体同意（只看、只收紧；面板通道共用；收紧决定进 `runtime_events`；v8 强制沙箱）。必须改 5 条已改：
@@ -376,8 +386,8 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | B2 共用插件通道 | `worker/ds1-b2-channel`（已实施，头 `7b21bfe12`） | 已并入 step17i | be、ae、9b |
 | B3 事件中心 | `worker/m1-b3-event-hub`（已实施，头 `815151369`，待 9b 复审） | 已合入（B1、B2） | 9b |
 | B4 事件点（m1b4，已实施，待复审） | `worker/m1-b4-event-points` | 已变基至 `0ae0efe5e`（含 B3 最终版）；Gateway 与三来源装配、拒绝组合已实施；luna6 完整初审的 HTTP 覆盖与 owner 错投尾补见 TESTS | luna6 初审尾补待复审，3a 把关 |
-| B5 收紧钩子 | `worker/m1-b5-tool-gate` | B1、B2、H3 合入 | be、ae |
-| B6 账本与展示 | `worker/m1-b6-ledger-display`（查询与展示半已实施，头 `d9f158e8d`、文档补丁 `e80db5918`，基于 B3 返工头 `0a3064078`；写账半等 B5 合入后接） | B5 合入（写账半）；查询与展示半已先行实施 | 9b |
+| B6 账本与展示 | `worker/m1-b6-ledger-display`（查询与展示半已实施，头 `d9f158e8d`、文档补丁 `e80db5918`，基于 B3 返工头 `0a3064078`；写账半b5s5已沿原归档接入迁移树，待3a集成） | 查询与展示半已先行实施；b5s5组合真写临时库与info已验，生产全链仍待B5/B7集成验收 | 9b |
+| B5 收紧钩子（b5r第1–4段迁移、b5s5第5段叠入与六项补强已实施，整体WIP待集成） | `worker/m1-b5-on17j`，真正17j基线 `ebe621d87`；前四段来源 `b6ede99e0..ff5d761d9`，第五段来源 `ff5d761d9..d517a8b7b` | B1、B2、H3已合入；B4真实handler观察/B6展示/B8样例保留；组合三项转正，原归档/唯一writer/真实临时库/B6 info链已验，批准跳门不记决定 | 3a先叠sol2/b4g再挑本线 → 完整非作者交叉初审/9b安全终审 → 3a沙箱外复跑；历史18项启动/启用失败未重跑，不记通过 |
 | B7 安全底座 | `worker/m1-b7-sandbox` | B1、H3 合入 | 9b、ae |
 | B8 样例与验收 | `worker/m1-b8-samples` | B3–B7 合入 | be（真实验收 be 做，TUI 和飞书各一遍） |
 | B9 写插件的技能 | `worker/sol2-m5`（已实现（`worker/sol2-m5`，`de395322e`）） | 已变基到 B1 合入头 `add244a92`；独立包/stdio 已验，生产启用仍由 B7 接线 | be（待复审；clean-package 运行产物例外见 TESTS） |

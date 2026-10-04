@@ -1,4 +1,4 @@
-# LLM: 显式业务命令组合原 HostCommand/MCP/ToolExecutor；本次连接释放归原执行区间，联测拒绝、重复与收尾，不换绑版本。
+# LLM: 显式业务命令组合原 HostCommand/MCP/ToolExecutor；可信来源仅在本模块构造点设置，仍守原版本、审批与资源释放。
 # 模块用途: 将插件动作接到普通工具执行链，在原运行收口前关闭本次连接，业务与清理结果分别保留。
 
 from __future__ import annotations
@@ -31,6 +31,14 @@ class PluginInvocation:
     arguments: dict
 
 
+# LLM: 固定工具与原取消信号由宿主 prepare 配对，不从插件参数获取；只整理构造入参，不另建执行身份。
+# 类用途: 将本次工具和取消上下文成组传入唯一执行器构造函数。
+@dataclass(frozen=True)
+class _InvocationRuntime:
+    tool: object
+    cancellation_token: CancellationToken
+
+
 # LLM: 摘要不保存私有路径或命令正文；目录版本绑定安装/激活/schema，权限变化不能借原请求号扩大执行。
 # 函数用途: 把宿主选择单独绑定到原请求，避免将管理字段塞入插件实际参数。
 def plugin_invocation_context(context: PluginManagementContext, text: str, revision: str) -> str:
@@ -43,7 +51,7 @@ def plugin_invocation_context(context: PluginManagementContext, text: str, revis
     return tool_arguments_hash(values).removeprefix("sha256:")
 
 
-# LLM: select/释放仅归原 pending 获得者；释放调用返回前不发布运行终态，清理未知独立保留，重放不启动或清理服务。
+# LLM: select/释放仅归原 pending 获得者；prepare 成组传递固定工具/取消信号并设置宿主来源，不从参数豁免审批或换绑。
 # 函数用途: 等待原审批并调用固定工具，在同一执行区间释放连接，分别返回业务及清理结果。
 def execute_plugin_invocation(
     context: PluginManagementContext, repo: RuntimeRepository, request: HostCommandRequest,
@@ -54,7 +62,7 @@ def execute_plugin_invocation(
     cleanup = None
     token = cancellation_token or CancellationToken()
     with ExitStack() as callbacks:
-        # LLM: 原执行身份已经领取；先核对完整选择和参数再启动连接，实际发送仍经过原执行权与激活门。
+        # LLM: 原执行身份已经领取；先核对选择和参数再启动连接，工具与取消信号成组传递，实际发送仍经过原执行权与激活门。
         # 函数用途: 为唯一执行器构造本请求的固定 MCP 代理和权限快照。
         def prepare(binding: HostCommandBinding) -> ToolExecutorRequest:
             nonlocal client
@@ -71,7 +79,7 @@ def execute_plugin_invocation(
                 tools = client.discover_tools(transport)
                 client.publish_discovered_tools(transport, tools)
             tool = next(tool for tool in tools if tool.model_spec.name == request.command_name)
-            return _prepare_invocation(context, binding, selected.arguments, tool, token)
+            return _prepare_invocation(context, binding, selected.arguments, _InvocationRuntime(tool, token))
 
         # LLM: 原宿主执行作用域调用一次；清理未知留在原资源账，不篡改已持久化的业务结果。
         # 函数用途: 在 executor 退出前关闭本次连接，并保存独立清理回执。
@@ -87,10 +95,11 @@ def execute_plugin_invocation(
     return {**result, "connection_cleanup": cleanup} if cleanup is not None else result
 
 
-# LLM: 工具只降低模型展示要求，危险效果/原 schema/资源声明不变；审批模式仅取可信 owner 配置。
+# LLM: 用户插件命令在此实际构造点设 host_command，不从参数取来源；危险效果/原 schema/资源与审批不变。
 # 函数用途: 将已验证的同连接工具、实际参数、运行身份和取消信号接到原执行器。
 def _prepare_invocation(context: PluginManagementContext, binding: HostCommandBinding,
-                        arguments: dict, tool, token: CancellationToken) -> ToolExecutorRequest:
+                        arguments: dict, invocation: _InvocationRuntime) -> ToolExecutorRequest:
+    tool, token = invocation.tool, invocation.cancellation_token
     request = binding.request
     runtime = ToolRuntime(tool.model_spec, tool.runtime_policy, tool, exposure=ToolExposure(model_visible=False),
                           availability=tool.availability())
@@ -105,4 +114,5 @@ def _prepare_invocation(context: PluginManagementContext, binding: HostCommandBi
         owner_scope_root=str(policy.owner_scope_root or ""), operation_owner_id=context.owner.owner_id,
         approval_mode=context.approval_mode, cancellation_token=token,
         write_boundary={"canonical_owner_home_root": str(context.owner.home_dir)},
+        call_origin="host_command",
     )

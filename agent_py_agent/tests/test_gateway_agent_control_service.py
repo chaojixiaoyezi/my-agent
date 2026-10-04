@@ -1283,6 +1283,8 @@ def test_owner_tui_decision_resumes_exact_child_approval(tmp_path, parent_projec
 
 
 def test_child_approval_without_interactive_consumer_fails_closed(tmp_path) -> None:
+    from agent_py_agent.agent.contracts.tool_approval import ToolApprovalWaitOptions
+
     agent, _scope, child = _bound_agent_tree(tmp_path)
     request = _child_approval_request(child.id, "attempt-no-consumer")
     handle = publish_agent_tool_approval(
@@ -1294,9 +1296,7 @@ def test_child_approval_without_interactive_consumer_fails_closed(tmp_path) -> N
 
     decision = wait_for_agent_tool_approval(
         handle,
-        poll_seconds=0.01,
-        discovery_seconds=0.01,
-        consumer_lease_seconds=0.01,
+        options=ToolApprovalWaitOptions(poll_seconds=0.01, discovery_seconds=0.01, consumer_lease_seconds=0.01),
     )
 
     assert decision.decision == "unavailable"

@@ -18,6 +18,7 @@ from ..memory_archive import (
     estimate_tokens,
     externalize_tool_output_record,
 )
+from ..plugin_events.decision_ledger import PLUGIN_GATE_DECISION_EVIDENCE_KEY
 from ..settings.defaults import default_config_int
 from ..tooling.executor import ToolOutputProjection
 from ..tooling.models import ToolHandlerOutcome, output_policy_for_outcome
@@ -631,11 +632,15 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
 
 
 # LLM: 只保留恢复所需结构字段（含 && 串联通过时的 verification_evidence_chain）；process复用模型有界投影，
-#   禁止复制原PID/实例明细、参数值或任意私有envelope。
+#   插件决定仅从executor宿主metadata专键进入tool_result_envelope，writer读取同一路径；禁止复制任意metadata或正文。
 # 函数用途: 保留核验、清理及恢复必要事实，让下一工作片按同一口径读取，不修改执行状态。
 def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = _result_details(result)
-    if not envelope:
+    # B5 第 5 段：插件门决定由 executor 写在 ToolResult 的 metadata 顶层（不在 handler_details 里）；
+    # 只有这一个键走 metadata 顶层，其余仍只从 handler_details 白名单读，避免任意 metadata 越过归档白名单。
+    metadata = getattr(result, "metadata", None)
+    gate_decisions = metadata.get(PLUGIN_GATE_DECISION_EVIDENCE_KEY) if isinstance(metadata, dict) else None
+    if not envelope and not gate_decisions:
         return {}
     keys = (
         "artifact_ref",
@@ -663,8 +668,13 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         "observation_action",
         # 能力包宿主核验的有界摘要：pack_verification_service 已按条数和码数夹过界，恢复/续跑重渲染回执时要读它
         "pack_verification",
+        # B5 第 5 段：插件门决定的结构化事实；persist_tool_runtime_ledger 据它写 plugin_gate.decided，
+        # 只含设计第 9 节的字段（无 message、无工具参数），B6 按同一白名单读取。
+        PLUGIN_GATE_DECISION_EVIDENCE_KEY,
     )
     compact = {key: envelope[key] for key in keys if key in envelope}
+    if gate_decisions:
+        compact[PLUGIN_GATE_DECISION_EVIDENCE_KEY] = list(gate_decisions)
     if process := project_process_runtime_facts(envelope.get("process")):
         compact["process"] = process
     artifact_integrity = _compact_artifact_integrity(envelope.get("artifact_integrity"))

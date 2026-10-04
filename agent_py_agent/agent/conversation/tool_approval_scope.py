@@ -1,4 +1,4 @@
-# LLM: 审批归属只读 owner 的任务、线程及执行租约；子代理权威记录优先于父会话展示关联，main 仍以精确 claim 隔离换轮。
+# LLM: 审批归属只读 owner 的任务、线程及执行租约；child 冻结 canonical attempt，main 冻结 claim，恢复换轮不得继承旧确认。
 # 模块用途: 为发布、展示和决定审批提供同一身份校验，不创建状态、授予权限或读取模型正文。
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 from .models import THREAD_TASK_LINK_ACTIVE_STATUS
 
 
-# LLM: 该值只是 canonical 状态的即时投影；不能缓存后充当长期授权，决定写回前必须重新读取。
+# LLM: 即时投影冻结 child 执行轮/main claim；决定前复读相等才有效，不创建批准源，联测 I4 与主子换轮。
 # 类用途: 描述一条审批所属的代理、会话、主任务及当前执行租约。
 @dataclass(frozen=True)
 class ToolApprovalScope:
@@ -21,9 +21,10 @@ class ToolApprovalScope:
     agent_name: str = field(compare=False)
     active: bool = field(compare=False)
     claim_id: str = ""
+    execution_attempt_id: str = ""
 
 
-# LLM: 子代理可关联在父会话任务列表中，该投影不拥有执行身份；先读 canonical subagent，再判定 main claim。
+# LLM: 子代理先读 canonical run 及活动 attempt；父会话关联不授予身份，旧 pending/decided 不可跨恢复代次。
 # 仅权威子代理记录不存在时读取主任务关联，坏账及孤立子线程仍失败；同步核对创建生命周期与主子孙审批回归。
 # 函数用途: 只读解析审批的真实执行者，避免把挂在父会话里的孩子误当主代理而丢失审批。
 def tool_approval_scope(agent: object, run_id: str) -> ToolApprovalScope:
@@ -44,6 +45,7 @@ def tool_approval_scope(agent: object, run_id: str) -> ToolApprovalScope:
             agent_kind="subagent",
             agent_name=str(getattr(task, "name", "") or task.role or selected)[:96],
             active=not task_status_in(str(task.status or ""), SUBAGENT_ENDED_STATUSES),
+            execution_attempt_id=str(task.runner_active_attempt_id or ""),
         )
     link, error = store.tasks.load_report(selected)
     if error is not None:

@@ -1,5 +1,13 @@
 # Gateway Structure
 
+## B5第5段组合装配（b5s5，2026-10-04，整体WIP）
+
+审批仍走原StreamApproval/AgentToolApprovalSinkMixin、canonical claim/child attempt；本轮只加独立换轮/停止与I4引用断言。Registry→唯一Executor→原archive_tool_call_record→persist_tool_runtime_ledger写门决定，B6原info消费者只读同一owner库；没有替代展示/路由或第二批准源。sol2事件装配点保持17j，真实宿主启用与客户端未验。
+
+## B5/B4共用执行接缝（b5r，2026-10-04，迁到17j、整体WIP）
+
+`plugin_panels_http.current_plugin_channel_pool` 只读原HTTP服务实例，复用原 `plugin_channel_pool`，不建第二server/pool；原B3 hub发布仍保留。`core`把单一reviewer交Registry，宿主显式管理构造独立标记host_command，其余默认model。审批请求只在原binding/ID后附插件引用；原拒绝、无人审批与精确重跑同源消费。事件仍由唯一handler入口发；第5段写账另叠，真实客户端未验。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 
 - `gateway_parts/io.write_json_file`、`scheduler/repository` 的建目录点改 `nofollow_fs.ensure_private_dir`（缺失段逐级 0700、已存在一律不动）。
@@ -76,6 +84,35 @@
 - `tooling/event_observation` 在唯一执行器真实 handler 开始/结果收口观察；本次开始位区分重放，参数准备失败不发，内部重试只发一对。
 - `gateway_parts/event_points` 已将提示首次成功排队、请求执行/收口、新控制 completed 回执接到 B3 发布口；关闭先返回，只用宿主已冻结路径，不读安装表。幂等重放/活动插话不重复发提示；控制重放不重复发观察。
 - `agent_core/tool_call_runtime` 复用已冻结 RunScope 装配主/子身份；`ToolCallExecuteParams.actor` 由宿主自动执行与审批重入传决策身份，Registry 严格接类型正确的事件对象，不从工具参数选身份。三来源入口和六事件正常回合的握手假插件链已验证，拒绝组合仍有一个假模型断言失败。多用户入队尚无冻结 owner 时保守不发布提示；正文清单与真实确认码组合未验，不可声称完整 B4 或生产启用。
+## M1 B5 第4段批准源（2026-10-04，接471b7b4fc，整体WIP）
+
+- 原轮保持request/approved_binding/execute_one链；tooling从write_boundary.approved_actions复制引用，plugin_events纯合同核六身份，共用池原review循环复读安装。没有第二审批账、缓存或恢复入口。
+- GateCall尾字段approved_gate_refs默认空，GateReview尾字段approval_applied默认False；True仅为宿主批准跳门投影、无协议征询，ds2记账时排除。tighten_plugin_decision(request,call,host)和PluginToolGate.merge(host_status,reviews)参数未变。
+- 原轮拒绝复用同源插件前缀；重跑未获allow不贴AppliedToolApproval，保留原停机/取消/用户拒绝顺序。完整B5及上线验收仍未完成。
+
+## M1 B5 第3段恢复身份（2026-10-04，本地隔离验证、整体WIP）
+
+- conversation/tool_approval_scope 从canonical child.runner_active_attempt_id投影execution_attempt_id；agent_tool_approval原pending行冻结它，原schema、路径不改。展示/用户决定/等待重新核对，跨轮旧行不能批准，main仍冻结claim。
+- test_plugin_gate_consumers覆盖执行器/B2池→原轮审批→真实store/notices/所属用户决定；I4复用Gateway原请求恢复链，不新建恢复器。
+- 本轮不改plugin_gate_policy/tool_gate合并函数签名，便于ds2基于57f465dca接第5账本。第4六身份精确重跑另段继续；不是已上线。
+
+## M1 B5 第3段执行端（2026-10-03，WIP）
+
+- tooling/plugin_gate_policy生成JSON引用和同源前缀，agent_core原轮审批在旧ID生成后附加；不建第二审批源。
+- StreamApprovalRequestOptions包装交互/provider/token，writer与command_stream迁移原参数，五点plugin_gate_required先守门；无consumer/unavailable返回独立权限码。
+- 精确批准重跑/runtime_events未做，真实消费者/I4未验。
+
+## M1 B5 第 3 段消费端合同（2026-10-03，部分接线、整体 WIP）
+
+- `contracts/tool_approval.plugin_gate_required` 是插件强制确认的唯一判定，`ToolApprovalWaitOptions` 是固定的宿主等待选项，不接收任意关键字服务接口。
+- `StreamApproval.request` 与 `AgentToolApprovalSinkMixin.request_permission` 先守门再查旧授权；Gateway 与主/子后台的两个等待入口在调用任何自主提供者前独立守门。
+- `user_space.approval_mode.autonomous_tool_decision` 同源拒绝插件自动批准；执行端引用附加、前缀和账本尚未接线，不能作为完整链验收。
+
+## M1 B5 第 2 段：征询装配（2026-10-03，整体 WIP）
+
+- `core._build_plugin_gate_reviewer` → `plugin_events/tool_gate_review.PluginGateReviewer`：只装配规范 owner、真实超时配置、安装快照读取器和共用池提供方。
+- `gateway_parts/plugin_panels_http.current_plugin_channel_pool` → 原 `plugin_channel_pool(server)`：只复用当前 server 的唯一池，构造时不启动插件。
+- `tooling/executor` 的宿主 decide 后调用 `tooling/plugin_gate_policy.tighten_plugin_decision`；只收紧 status/证据，不改原参数、沙箱或资源。后续审批/精确批准/账本归 B5 第 3–5 段，未实施。
 
 ## 续跑上限收口时的插话结算（step17h，分支 `claude/38-limit-steer-note`，9b 复审补本节）
 

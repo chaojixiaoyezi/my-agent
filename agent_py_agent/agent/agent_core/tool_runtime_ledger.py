@@ -29,7 +29,7 @@ from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_rec
 
 # LLM: 每一次工具调用完成都要进权威 runtime_events（有无 runtime_gate 都记）：插件观察新鲜度等只按这条事件流判序，
 #   只读工具（没有审批门）以前在这里被提前 return 掉，导致事件流缺整类调用。legacy 门账本仍只在有 runtime_gate 时写。
-#   两处写入都 best-effort，不能让工具循环崩溃。
+#   门决定只在此顺序追加一次，读取同一归档envelope；以后新增决定写入调用点前必须先加入幂等键。
 # 函数用途: 把一次已归档的工具调用记进 legacy 门账本（有门时）与权威事件流（总是）。
 def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]) -> None:
     store = getattr(agent, "local_store", None)
@@ -39,6 +39,39 @@ def persist_tool_runtime_ledger(agent: object, archive_record: dict[str, object]
     # A.3：工具完成事件写入权威 runtime_events（agent_events 可从中重建），
     # 与 legacy 台账并行 —— 权威事件流是审计/重建的单一事实源。
     _append_runtime_event(agent, archive_record)
+    # B5 第 5 段：一次调用命中几个插件门就写几条 plugin_gate.decided（设计第 9 节），挂在同一 attempt/run 上。
+    _append_plugin_gate_decisions(agent, archive_record)
+
+
+# LLM: 只有本次调用真的命中插件门（executor 在 ActionDecision.evidence 里放了决定条目）才写；无门时一条不写，
+#   不伪造空事件。每门一条、字段由 decision_ledger 收紧到设计第 9 节白名单；写失败不打断工具循环。
+# 函数用途: 把本次调用的插件门决定逐条追加进 owner 权威 runtime_events。
+def _append_plugin_gate_decisions(agent: object, archive_record: dict[str, object]) -> None:
+    from ..plugin_events.decision_ledger import (
+        GateEventTarget,
+        append_plugin_gate_decision,
+        plugin_gate_decisions_from_archive,
+    )
+
+    decisions = plugin_gate_decisions_from_archive(archive_record)
+    if not decisions:
+        return
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None or not hasattr(repo, "append_event"):
+        return
+    run_id = _text(archive_record.get("run_id"))
+    try:
+        agent_run_row = repo.agent_run_for_run_id(run_id)
+    except (sqlite3.Error, OSError):
+        return
+    if agent_run_row is None:
+        return
+    attempt_id = _text(archive_record.get("attempt_id"))
+    agent_run_id = str(agent_run_row["agent_run_id"])
+    task_run_id = str(agent_run_row["task_run_id"] or "")
+    target = GateEventTarget(repo, attempt_id, agent_run_id, task_run_id)
+    for payload in decisions:
+        append_plugin_gate_decision(target, payload)
 
 
 # LLM: 载荷只取 archive 记录里的宿主 typed 字段（工具、ok、错误码、失败阶段、handler 是否执行、状态、发起者 actor 与

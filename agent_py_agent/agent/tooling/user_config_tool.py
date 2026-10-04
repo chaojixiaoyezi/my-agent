@@ -517,13 +517,15 @@ def _capability_path(agent: object) -> object | None:
         return None
 
 
-# 函数用途: 把参数中心的回执转成工具结果；边界拒绝与只读来源拒绝都报权限错误，其余拒绝报参数错误。
+# LLM: 保留原通用权限/参数大类，同时将参数中心精确结构化码写进 reported_error_code，不能只剩自然语言说明。
+# 函数用途: 把参数中心回执投影成工具结果，让模型明确看到 PARAMETER_BOUNDARY 等原拒绝事实。
 def _outcome(report: dict[str, object]) -> ToolHandlerOutcome:
     if report.get("ok"):
         return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=True, default=str))
     code = ("TOOL_PERMISSION_DENIED" if report.get("code") in {"PARAMETER_BOUNDARY", "PARAMETER_SOURCE_READ_ONLY"}
             else "TOOL_INVALID_ARGUMENTS")
-    return ToolHandlerOutcome("user_config", False, str(report.get("error") or "配置修改被拒绝"), error_code=code)
+    return ToolHandlerOutcome("user_config", False, str(report.get("error") or "配置修改被拒绝"), error_code=code,
+                              reported_error_code=str(report.get("code") or code))
 
 
 __all__ = ["UserConfigTool"]

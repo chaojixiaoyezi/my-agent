@@ -1,14 +1,19 @@
-# LLM: 本模块是 Gateway 工具审批的跨进程文件桥；路径由 chunk/request identity 哈希推导，读取后仍需核验完整 request binding。
-# 模块用途: 让 TUI 把审批决定原子写回正在等待的 Gateway 工具调用，并支持取消令牌中止等待。
+# LLM: Gateway 审批桥保持原文件与精确 binding；插件引用先统一判定，等待自主提供者不能替用户确认，联测取消和改模式。
+# 模块用途: 接收精确用户决定并支持取消，避免等待期间自动批准插件确认。
 
 from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 
-from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
+from ..contracts.tool_approval import (
+    ToolApprovalDecision,
+    ToolApprovalRequest,
+    ToolApprovalWaitOptions,
+    plugin_gate_required,
+)
 from .io import read_json_file_report, write_json_file_atomic
 
 # 审批轮询间隔 0.05 秒：及时看到用户批复，轮询成本可忽略。
@@ -49,17 +54,20 @@ def write_gateway_permission_decision(
     return target
 
 
-# LLM: 等待只认精确决定或宿主绑定的用户模式提供者；取消和已写入的用户决定优先，模式不改变原调用参数。
-# 函数用途: 等待审批或自主模式切换；取消立即返回，不需要重启当前任务。
+# LLM: 解析请求后守门永远是第一句，先于任何自主provider；取消和精确用户决定优先，不能依赖提供者自律。
+# 函数用途: 等待用户批准或取消；普通请求允许自主续跑，插件请求禁止等待轮询自动批准。
 def wait_for_gateway_permission_decision(
     chunk_path: Path,
     request_value: ToolApprovalRequest | Mapping[str, object],
     *,
     cancellation_token: object | None = None,
-    poll_seconds: float = _APPROVAL_POLL_SECONDS,
-    mode_decision_provider: Callable[[ToolApprovalRequest], ToolApprovalDecision | None] | None = None,
+    options: ToolApprovalWaitOptions | None = None,
 ) -> ToolApprovalDecision:
     request = _approval_request(request_value)
+    forced = plugin_gate_required(request)
+    options = options or ToolApprovalWaitOptions()
+    poll_seconds = options.poll_seconds if options.poll_seconds is not None else _APPROVAL_POLL_SECONDS
+    mode_decision_provider = options.mode_decision_provider
     target = gateway_permission_decision_path(chunk_path, request)
     interval = max(0.01, float(poll_seconds or _APPROVAL_POLL_SECONDS))
     while True:
@@ -72,7 +80,7 @@ def wait_for_gateway_permission_decision(
             decision = _verified_gateway_decision(request, report.payload)
             _remove_consumed_decision(target)
             return decision
-        if mode_decision_provider is not None:
+        if not forced and mode_decision_provider is not None:
             decision = mode_decision_provider(request)
             if decision is not None:
                 return decision

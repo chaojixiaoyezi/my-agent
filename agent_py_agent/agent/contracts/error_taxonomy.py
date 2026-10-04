@@ -10,6 +10,7 @@
 #   一次选包失败不重放已领取的辅助调用；定时任务绑定失效必须核对原任务记录，不能补造旧任务继续采样。
 #   入站附件无效是确定的用户输入失败：不能去掉附件改发纯文字，也不能原样重放，只能请用户重新添加。
 #   IM 管理员密码错误与失败锁定共用一个码，不暴露差别；没有待决审批时不得重复批准或替用户重试密码。
+# LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -207,6 +208,16 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
         recovery_hint="写入被禁止；改写到 allowed_write_roots，或上报需要授权。",
+    ),
+    "PLUGIN_GATE_DENIED": ErrorContract(
+        code="PLUGIN_GATE_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="插件收紧门拒绝了本次调用，工具没有执行；按原因码换用安全方案，不原样重试或停用插件绕过。",
+    ),
+    "PLUGIN_GATE_APPROVAL_UNAVAILABLE": ErrorContract(
+        code="PLUGIN_GATE_APPROVAL_UNAVAILABLE", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="插件要求本人确认，但当前通道无法审批，工具没有执行；请在支持审批的通道由本人重新确认。",
     ),
     "APPROVAL_REQUIRED": ErrorContract(
         code="APPROVAL_REQUIRED",

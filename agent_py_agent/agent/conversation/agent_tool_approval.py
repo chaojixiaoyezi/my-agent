@@ -1,5 +1,5 @@
-# LLM: 主/子后台调用共用原耐久审批账本；main 额外绑定精确 claim，旧路径/schema 保持，展示文案不能授权。
-# 模块用途: 把具体工具审批交给所属用户界面；批准、拒绝、取消和失联都回到原调用，不另建审批状态源。
+# LLM: 主/子后台共用原审批账；插件引用先统一判定并禁用缓存/长期/自主批准，main claim 和原 schema 保持。
+# 模块用途: 将当次插件确认交给用户，批准、拒绝、取消和失联仍回原调用，不另建状态源。
 
 from __future__ import annotations
 
@@ -16,7 +16,12 @@ from ..common.json_io import (
     write_json_file_atomic,
 )
 from ..common.opaque_id import validate_opaque_id
-from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
+from ..contracts.tool_approval import (
+    ToolApprovalDecision,
+    ToolApprovalRequest,
+    ToolApprovalWaitOptions,
+    plugin_gate_required,
+)
 from .tool_approval_scope import (
     ToolApprovalScope,
     tool_approval_scope,
@@ -53,8 +58,8 @@ class AgentToolApprovalSinkMixin:
     thread_id: str
     task_id: str
 
-    # LLM: 先冻结归属再查同作用域缓存；挂起期间租约变化、取消和权限拒绝不能由自主模式覆盖。
-    # 函数用途: 上送精确主/子审批，等待原调用的用户决定或同 owner 显式权限模式变化。
+    # LLM: 解析请求后守门永远是第一句，先于缓存/授权/provider；归属、租约和取消仍优先，等待端独立守门。
+    # 函数用途: 上送精确主/子审批，不因原会话或 owner 授权跳过当次插件确认。
     def request_permission(
         self,
         request_value: Mapping[str, object],
@@ -65,10 +70,11 @@ class AgentToolApprovalSinkMixin:
             from ..user_space.approval_mode import autonomous_tool_decision
 
             request = ToolApprovalRequest.from_mapping(request_value)
+            forced = plugin_gate_required(request)
             if _cancelled(cancellation_token):
                 return ToolApprovalDecision(request.permission_id, "cancelled").to_dict()
             scope = _request_scope(self.agent, self.task_id, self.thread_id, request)
-            session_key = f"{scope.run_id}:{scope.claim_id}:{_approval_session_key(request)}"
+            session_key = "" if forced else f"{scope.run_id}:{scope.claim_id}:{_approval_session_key(request)}"
             approved_keys = getattr(self, "_approved_session_keys", set())
             if session_key and session_key in approved_keys:
                 return ToolApprovalDecision(
@@ -80,7 +86,7 @@ class AgentToolApprovalSinkMixin:
                 record_owner_operation_grant,
             )
 
-            grant_key = str(request.binding.get("grant_key") or "").strip()
+            grant_key = "" if forced else str(request.binding.get("grant_key") or "").strip()
             if grant_key and owner_operation_granted(getattr(self.agent, "home_paths", None), grant_key):
                 # 用户已对这类操作长期允许：不再发布审批，直接以 approved 放行本次精确调用。
                 return ToolApprovalDecision(request.permission_id, "approved").to_dict()
@@ -93,7 +99,7 @@ class AgentToolApprovalSinkMixin:
             decision = wait_for_agent_tool_approval(
                 handle,
                 cancellation_token=cancellation_token,
-                mode_decision_provider=partial(autonomous_tool_decision, self.agent),
+                options=ToolApprovalWaitOptions(mode_decision_provider=partial(autonomous_tool_decision, self.agent)),
             )
             if decision.decision == "approved_session" and session_key:
                 approved_keys = set(approved_keys)
@@ -137,17 +143,20 @@ def publish_agent_tool_approval(
     )
 
 
-# LLM: 取消优先，执行归属失效先于任何批准；无交互 consumer 关闭式失败，不让后台永久等待或自行放行。
-# 函数用途: 等待精确决定或同 owner 模式变化，同时收口取消、换轮与接收方离线。
+# LLM: 守门永远是第一句，先于任何自主provider；取消与归属失效优先，原固定选项和无consumer关闭式失败保持。
+# 函数用途: 等待主/子原调用的用户决定，同时阻止插件确认被自主轮询批准。
 def wait_for_agent_tool_approval(
     handle: AgentToolApprovalHandle,
     *,
     cancellation_token: object | None = None,
-    poll_seconds: float = AGENT_TOOL_APPROVAL_POLL_SECONDS,
-    discovery_seconds: float = AGENT_TOOL_APPROVAL_DISCOVERY_SECONDS,
-    consumer_lease_seconds: float = AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS,
-    mode_decision_provider: Callable[[ToolApprovalRequest], ToolApprovalDecision | None] | None = None,
+    options: ToolApprovalWaitOptions | None = None,
 ) -> ToolApprovalDecision:
+    forced = plugin_gate_required(handle.request)
+    options = options or ToolApprovalWaitOptions()
+    poll_seconds = options.poll_seconds if options.poll_seconds is not None else AGENT_TOOL_APPROVAL_POLL_SECONDS
+    discovery_seconds = options.discovery_seconds if options.discovery_seconds is not None else AGENT_TOOL_APPROVAL_DISCOVERY_SECONDS
+    consumer_lease_seconds = options.consumer_lease_seconds if options.consumer_lease_seconds is not None else AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS
+    mode_decision_provider = options.mode_decision_provider
     interval = max(0.01, float(poll_seconds or AGENT_TOOL_APPROVAL_POLL_SECONDS))
     while True:
         if _cancelled(cancellation_token):
@@ -163,7 +172,7 @@ def wait_for_agent_tool_approval(
         if decision is not None:
             _remove_exact_record(handle)
             return decision
-        if mode_decision_provider is not None:
+        if not forced and mode_decision_provider is not None:
             decision = mode_decision_provider(handle.request)
             if decision is not None:
                 _remove_exact_record(handle)
@@ -293,7 +302,7 @@ def _request_scope(agent: object, run_id: str, thread_id: str, request: ToolAppr
     return scope
 
 
-# LLM: 记录只复制已脱敏合同与 canonical 身份；main 额外冻结 claim，原 child schema/路径及字段含义保持。
+# LLM: 原审批记录冻结 main claim/child canonical attempt；旧 schema/路径保留，额外执行身份不构成批准，联测恢复换轮。
 # 函数用途: 构造一条尚未决定的审批记录。
 def _pending_payload(
     scope: ToolApprovalScope,
@@ -309,6 +318,7 @@ def _pending_payload(
         "request": request.to_dict(),
         "created_at": created_at,
         **({"claim_id": scope.claim_id} if scope.claim_id else {}),
+        **({"execution_attempt_id": scope.execution_attempt_id} if scope.execution_attempt_id else {}),
     }
 
 
@@ -340,7 +350,7 @@ def _public_pending_record(
     }
 
 
-# LLM: 记录比较要求 schema/root/run/request 及 main claim 全部一致；单独相同 permission ID 不构成授权。
+# LLM: schema/root/run/request/main claim/child attempt 全相等；缺失活动轮身份的旧记录失败关闭，不能靠同 permission ID 批准。
 # 函数用途: 核验等待记录是否精确对应原调用及原执行租约。
 def _record_matches(
     payload: object,
@@ -360,6 +370,7 @@ def _record_matches(
         and str(payload.get("run_id") or "") == scope.run_id
         and str(payload.get("thread_id") or "") == scope.thread_id
         and str(payload.get("claim_id") or "") == scope.claim_id
+        and str(payload.get("execution_attempt_id") or "") == scope.execution_attempt_id
         and stored == request
     )
 

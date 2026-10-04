@@ -1,4 +1,4 @@
-# LLM: 模型与显式宿主管理共用本执行状态机；可见性选项仅来自宿主，错误读结构化裁决，不扩大权限或自动修写参数。
+# LLM: 模型与显式宿主管理共用状态机；B5 来源/征询由宿主注入，decide 后只收紧，不扩大权限或自动修写参数。
 # 模块用途: 统一工具校验、授权、执行和结果记录，区分未执行、已执行与副作用未知。
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ _LOGGER = logging.getLogger(__name__)
 
 from ..common.cancellation import CancellationToken
 from ..local_storage import ToolOperationRecord
+from ..plugin_events.decision_ledger import PLUGIN_GATE_DECISION_EVIDENCE_KEY
 from ..plugin_events.points import EventPointContext
 from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
@@ -78,7 +79,7 @@ class ToolExecution:
     states: tuple[str, ...]
 
 
-# LLM: 模型参数与宿主配置分离；审批、模型可见性及事件身份由可信调用方设置，不能从 ToolCall 参数提权或伪造 actor。
+# LLM: 模型参数与宿主配置分离；审批、事件身份、调用来源和征询回调只由可信调用方设置，来源默认 model，不能从 ToolCall 参数提权。
 # 类用途: 汇总本次调用、权限、账本和取消上下文，供唯一执行器使用。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
@@ -104,6 +105,9 @@ class ToolExecutorRequest:
     require_model_visibility: bool = True
     event_context: EventPointContext | None = None
     on_handler_started: Callable[[], None] | None = None
+    # 来源与征询提供方仅由宿主注入；模型参数没有任何来源控制权。
+    call_origin: str = "model"
+    plugin_gate_reviewer: Callable | None = None
 
 
 # LLM: 同一授权裁决、输入来源和计时沿执行和前置失败出口共用；成组传递避免另建授权或多参数接口。
@@ -116,13 +120,15 @@ class _AuthorizedExecutionProgress:
     decision: ActionDecision
 
 
-# LLM: 所有宿主和模型工具共用同一授权状态机，观察只跟随真实 handler，不改变执行裁决。
-# 类用途: 统一工具准入、实际执行和结果收口，未执行调用不伪造观察事件。
+# LLM: 唯一 handler 入口；B5 在宿主 decide 后、原审批前收紧，B4 观察只跟随真实 handler，原资源和操作账顺序不得被旁路。
+# 类用途: 用同一状态机执行或前置拒绝工具，插件不接管执行，未执行调用不伪造工具观察事件。
 class ToolExecutor:
+    # LLM: 构造不启动通道或执行工具；策略缺省仍沿原 ActionPolicy，征询来自每次可信请求而非模型参数。
+    # 函数用途: 保存宿主策略，等待实际调用沿唯一执行链核对。
     def __init__(self, policy: ActionPolicy | None = None) -> None:
         self.policy = policy or ActionPolicy()
 
-    # LLM: 宿主显式管理只可解除模型暴露检查，其余快照、参数、权限、取消及原操作持久门均沿同一顺序；前置拒绝不触发观察。
+    # LLM: 宿主显式管理只可解除模型暴露检查；B5 收紧挂在 decide 后、原审批前，来源只取可信请求；前置拒绝不触发 B4 观察。
     # 函数用途: 校验一次工具请求并执行或返回前置拒绝，副作用始终通过原操作协调器登记。
     def execute(self, request: ToolExecutorRequest) -> ToolExecution:
         started_at = time.monotonic()
@@ -194,6 +200,9 @@ class ToolExecutor:
                 require_model_visibility=request.require_model_visibility,
             )
         )
+        from .plugin_gate_policy import tighten_plugin_decision
+
+        decision = tighten_plugin_decision(request, call, decision)
         if decision.status == "ask":
             decision = _precheck_before_approval(runtime, decision)
         states.extend(("validated", "authorized"))
@@ -413,6 +422,8 @@ def _trusted_context(request: ToolExecutorRequest) -> dict[str, Any]:
     }
 
 
+# LLM: 拒绝/待审批只归一宿主裁决结果，不调用handler；门决定专键来自ActionDecision供原归档写账。
+# 函数用途: 生成执行前失败或待审批的标准结果，保留原因码与宿主证据。
 def _decision_result(
     call: ToolCall,
     decision: ActionDecision,
@@ -423,7 +434,8 @@ def _decision_result(
     code = decision.reason_codes[0] if decision.reason_codes else "RUNTIME_GATE_DENIED"
     stage = str(decision.evidence.get("failure_stage") or "authorization")
     status = "approval_required" if decision.status == "ask" else "failed"
-    metadata: dict[str, object] = {"action_decision": decision.to_dict(), "input_sources": _source_dicts(input_sources)}
+    metadata: dict[str, object] = {"action_decision": decision.to_dict(), "input_sources": _source_dicts(input_sources),
+                                   "plugin_gate_decisions": decision.evidence.get(PLUGIN_GATE_DECISION_EVIDENCE_KEY) or []}
     # 复核给出的具体原因码只进 reported_error_code；error_code 仍是分类表里的通用码，恢复逻辑不会遇到未登记码。
     reported = str(decision.evidence.get("reported_error_code") or "").strip().upper()
     if reported:
@@ -873,6 +885,8 @@ def _project_output(
     return ToolOutputProjection(tuple(blocks), refs, metadata)
 
 
+# LLM: handler执行后沿原输出/操作事实归一结果；门决定只取宿主evidence覆盖同名metadata，不信handler授权字段。
+# 函数用途: 将真实handler结果与宿主决定组装成可归档的标准工具结果。
 def _canonical_result(
     call: ToolCall,
     runtime: ToolRuntime,
@@ -892,6 +906,7 @@ def _canonical_result(
         "input_sources": _source_dicts(input_sources),
         "reported_error_code": outcome.reported_error_code,
         "handler_details": dict(outcome.result_envelope or {}),
+        "plugin_gate_decisions": decision.evidence.get(PLUGIN_GATE_DECISION_EVIDENCE_KEY) or [],
     }
     projection_error = str(projection.metadata.get("projection_error_code") or "")
     if projection_error:

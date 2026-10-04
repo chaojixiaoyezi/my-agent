@@ -16,7 +16,7 @@ from .command_stream_protocol import (
     command_approval_path,
 )
 from .paths import GatewayPaths
-from .stream_approval import StreamApproval
+from .stream_approval import StreamApproval, StreamApprovalRequestOptions
 
 # 命令流心跳间隔 1 秒：让对端及时感知连接存活。
 _HEARTBEAT_SECONDS = 1.0
@@ -81,10 +81,10 @@ def serve_command_stream(handler, paths: GatewayPaths, owner: OwnerIdentity, req
 
     approval = StreamApproval(chunk_path, publish_approval, lambda: None)
 
-    # LLM: 原执行器传来的取消令牌继续传给文件桥；不启用会话批准缓存或模式旁路。
+    # LLM: 原执行器取消令牌通过固定选项传给文件桥；不启用会话批准缓存或模式旁路。
     # 函数用途: 在原执行区间等待本次用户决定。
     def request_permission(value: dict, *, cancellation_token=None) -> dict:
-        return approval.request(value, interactive=True, cancellation_token=cancellation_token)
+        return approval.request(value, options=StreamApprovalRequestOptions(True, cancellation_token=cancellation_token))
 
     heartbeat = threading.Thread(target=stream.heartbeat, name="host-command-heartbeat", daemon=True)
     try:

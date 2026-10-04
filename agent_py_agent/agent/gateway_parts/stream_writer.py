@@ -16,7 +16,7 @@ from ..conversation.channels import (
 from ..conversation.compact_progress import normalize_conversation_compact_progress
 from ..conversation.tool_input_progress import public_tool_input_progress
 from .approval_session import ToolApprovalSessionCache
-from .stream_approval import StreamApproval
+from .stream_approval import StreamApproval, StreamApprovalRequestOptions
 from .stream_events import (
     active_turn_input_event,
     provider_retry_event,
@@ -400,7 +400,7 @@ class BufferedChunkStreamWriter:
     def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
         return self._write_rich_projection("conversation_compaction_progress", "compact_progress", value, normalize_conversation_compact_progress)
 
-    # LLM: 精确请求先发布后等待；用户从菜单切自主可原地续跑，模式提供者由 owner 控制面绑定，不接受模型参数。
+    # LLM: 固定审批选项来自owner控制面；插件强制确认先守门，普通请求可随自主切换续跑，不接受模型参数。
     # 函数用途: 向客户端发布审批并等待决定或自主模式切换；取消保持优先。
     def request_permission(
         self,
@@ -409,9 +409,8 @@ class BufferedChunkStreamWriter:
         cancellation_token: object | None = None,
     ) -> dict[str, object]:
         return self._approval.request(
-            request_value, interactive=self.interactive_approvals,
-            mode_decision_provider=self.approval_mode_decision_provider,
-            cancellation_token=cancellation_token,
+            request_value, options=StreamApprovalRequestOptions(
+                self.interactive_approvals, self.approval_mode_decision_provider, cancellation_token),
         )
 
     # LLM: compact boundary 只能由 canonical conversation generation 前进触发；它是显示事件，不复制摘要正文或建立第二会话状态。

@@ -1,5 +1,17 @@
 # Verification：开发推进
 
+## B5第5段真实归档接缝与组合转正（b5s5，2026-10-04，已实施、整体WIP）
+
+- 源第5段写账正例以ask及人工顶层archive为主，组合转正实读空行暴露deny不生成条目、writer路径与真实归档信封不一致；已有效业务红→修真实生产接缝→绿，不手插决定、不改回xfail。
+- metadata专键仍受白名单控制，归档只落tool_result_envelope，writer读同一路径。所有真实review都留决定，批准跳门排除；只有原persist入口写，每门一条，新增调用点前先加幂等键。
+- 最终27文件563通过、完整11文件guards187，三个组合全绿；无交互混合门的真实deny不误记无法审批，有独立红绿用例。指定六+三及六新增变异当前版本都重跑，均为业务失败且0error/0skip。原归档/被动核验次序不变，真实宿主启用/沙箱与TUI/IM未验。命令与准确范围见TESTS；下方历史缺项由本节更新。
+
+## B5/B4/B8在17j组合（b5r，2026-10-04，已补用例、整体WIP）
+
+- 新 `test_plugin_gate_event_combination` 沿真实样例协议/注册表/执行器：删除段deny，handler零执行、工具事件零发布；更新正对照真写文件并发started/finished。传输与激活替身不冒充真实启用或沙箱。
+- `/plugins info` 实读决定的第三项严格xfail，`--runxfail`单独实测失败在 `len(rows)==1`（实读为空），确实等待第5段，不是setup/import红；不得用直插账本行代接线。
+- 联合697项：678通过、13失败、5错误、1严格xfail，完整10文件guards176通过；失败集合在真正17j `ebe621d87` 两文件复跑完全相同。命令与未验边界见TESTS，本轮未动原核验/归档/能力包事实顺序。
+
 ## B4 工具观察故障不阻断核验链（b4g，2026-10-04，待复审）
 
 - `_tool_event_context` 与 Registry 观察转交失败降为 None，真实工具仍走原唯一执行器、被动核验和能力包钩子；正常 main/subagent/decision 两事件不变。
@@ -20,6 +32,15 @@
 - `tool_call_runtime` 的原准备、权限与写后核验链不变；事件上下文只使用已经冻结的 RunScope，交 Registry/唯一执行器，不额外查任务库或读工具参数。
 - 决策自动执行与审批重入保留宿主 actor；主/子/决策真实入口测试通过。完整 guards9 与定向范围 555 项通过，六事件正常组合另已通过，拒绝组合断言仍失败，不能写全绿。
 - 原被动核验、能力包写前基线/写后检查与审计保持原顺序；没有新增核验开关或扩大失败吞并范围。
+## 2026-10-04 M1 B5 第3/4段（m1b5，整体WIP）
+
+- 第3段471b7b4fc补真实隔离主/子与I4，第4段原write_boundary批准引用精确重跑；原轮只在重跑裁决allow时贴AppliedToolApproval，等待换代后的ask/deny不能贴。未改被动核验/能力包账本或归档顺序。
+- 当前十四相关+完整十守卫539通过，六第4段有效变异；第5交ds2，完整安全复审/真实宿主TUI/IM验收未做，不可上线。下方保留旧时点。
+
+## 2026-10-03 M1 B5 执行缝隙（m1b5，部署窗口WIP）
+
+- tool_call_runtime仅向原ToolExecutor补宿主审批消费者存在的interactive事实，不从模型参数读；未改被动核验/能力包账本、晋升与归档顺序。
+- 插件引用和无人审批回执归tooling，轮编排仍用原审批链。真实主子消费者/I4与第4–5段未完成，不作完整验收。
 
 ## 2026-10-03 能力包 v2 块 6a：核验取消（sol1 实现，ae 整合到 step17h，分支 `claude/ae-b6a-17h`，9b 复核通过，并入 step17i）
 
@@ -43,6 +64,12 @@
 - `tool_runtime_ledger` 的 `tool_completed` 事件载荷同样带 `actor`、`decision_ref`，动作调用另带 `observation_action`（含 task_id）；没记发起者的旧归档按
   `model` 处理。J16 自动执行的幂等判定只读这条事件流，不读正文。
 - 被动验证账和 `verification_state` 不变。规则见 [J16 设计稿第 7 节](../../design/J16_SCREEN_OBSERVATION.md)，测试见 TESTS.md“J16 片 D”。
+
+## 2026-10-04 B5 第 5 段插件门决定账本（b5s5，分支 `worker/m1-b5-seg5`，基于 `57f465dca`，待复审）
+
+- `tool_call_archive_record._compact_result_envelope` 的白名单多收一个键 `plugin_gate_decisions`：B5 第 5 段每次收紧征询的决定事实（设计第 9 节 15 字段，无 message 原文、无工具参数），由执行器从 `ActionDecision.evidence` 带进 `ToolResult.metadata` 顶层。
+- 该键是白名单里唯一从 metadata 顶层（而非 `handler_details`）读取的例外，其余字段的白名单约束不变；`tool_runtime_ledger.persist_tool_runtime_ledger` 据它逐条写 `runtime_events` 的 `plugin_gate.decided`（无条目时一条不写）。
+- 字段集合、outcome 收紧与展示口径见 [插件事件设计稿第 9 节](../../design/PLUGIN_EVENT_HOOKS.md)；测试见 TESTS.md“B5 第 5 段”。
 
 ## 2026-10-02 能力包宿主核验接进工具执行缝隙（ae，能力包 v2 块 3，分支 `claude/ae-capability-packs-v2-b3-17f`，基于 `claude/3a-step17f` `f6b63ab35`，待集成）
 

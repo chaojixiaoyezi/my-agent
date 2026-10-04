@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.contracts.tool_approval import ToolApprovalWaitOptions
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.settings.model_scope import selected_model_scope
 from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
@@ -159,7 +160,7 @@ def test_pending_child_resumes_by_owner_mode_without_waiting_for_parent(tmp_path
     assert autonomous_tool_decision(agent, request) is None
     execute_approval_mode_operation(agent.home_paths, "set", "auto")
     decision = wait_for_agent_tool_approval(
-        handle, discovery_seconds=0, mode_decision_provider=partial(autonomous_tool_decision, agent))
+        handle, options=ToolApprovalWaitOptions(discovery_seconds=0, mode_decision_provider=partial(autonomous_tool_decision, agent)))
     assert decision.permission_id == request.permission_id and decision.decision == "approved"
     assert not handle.path.exists()
 
@@ -176,10 +177,10 @@ def test_pending_main_mode_resume_preserves_deny_and_cancel_priority(tmp_path):
     path = tmp_path / "chunks.jsonl"
     def provider(req):
         return ToolApprovalDecision(req.permission_id, "approved")
-    assert wait_for_gateway_permission_decision(path, request, mode_decision_provider=provider).decision == "approved"
+    assert wait_for_gateway_permission_decision(path, request, options=ToolApprovalWaitOptions(mode_decision_provider=provider)).decision == "approved"
     write_gateway_permission_decision(path, request, ToolApprovalDecision(request.permission_id, "denied"))
-    assert wait_for_gateway_permission_decision(path, request, mode_decision_provider=provider).decision == "denied"
-    result = wait_for_gateway_permission_decision(path, request, mode_decision_provider=provider,
+    assert wait_for_gateway_permission_decision(path, request, options=ToolApprovalWaitOptions(mode_decision_provider=provider)).decision == "denied"
+    result = wait_for_gateway_permission_decision(path, request, options=ToolApprovalWaitOptions(mode_decision_provider=provider),
                                                  cancellation_token=SimpleNamespace(cancelled=True))
     assert result.decision == "cancelled"
 

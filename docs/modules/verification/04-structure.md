@@ -2,6 +2,15 @@
 
 - b4g（2026-10-04）：`tool_call_runtime._tool_event_context` 仅隔离配置/路由/事件装配；`tooling.registry._host_event_context` 只隔离严格类型观察转交。异常边界不覆盖权限、write_boundary、Executor、真实 handler 或原核验链，配置不可读不能据此放宽授权。
 
+## B5第5段决定唯一写入链（b5s5，2026-10-04，整体WIP）
+
+`plugin_gate_policy`从全部review（不只ask requirements）投影决定，排除approval_applied；`executor`附原ToolResult metadata专键；`tool_call_archive_record._compact_result_envelope`只将这个宿主专键放进canonical `tool_result_envelope`；`decision_ledger.plugin_gate_decisions_from_archive`只读该信封；原`persist_tool_runtime_ledger`唯一调用点逐门追加。B6从相同owner的runtime_events读，不另建账。组合使用原archive builder与真实临时RuntimeRepository，不直接append_event；激活/传输仍为替身，不充当生产启用/沙箱验收。
+
+## 17j B5拒绝与B4 handler事件（b5r，2026-10-04，整体WIP）
+
+`tooling/executor` 先原宿主decide、再B5收紧、再原审批；`ToolExecutorRequest` 同时承载B4 `event_context/on_handler_started` 和B5 `call_origin/plugin_gate_reviewer`。Registry复用17j唯一动态审批读取。工具观察仍只从真实handler起点发，拒绝不发started/finished；`tool_call_runtime` 仅追加宿主interactive。新组合用例以真实apply_patch正反对照核对，无第二执行或验证链。`_tool_event_context`及prompt装配直接读agent.config保持17j，等sol2修复另叠；第5账本真实读取用strict xfail保留缺项。
+
+
 ## M1 B4 真实 HTTP 认领证据（m1b4，2026-10-04）
 
 `test_plugin_event_e2e` 新增回环 HTTP 组合保留真实 AuthMiddleware、请求 worker 扫描/claim、owner 解析、Agent 回合和 canonical terminal。认领探针仅记录真实 attempt/lease_epoch；不手动搬 inbox、不写假终态。提示归属复用 worker 解析，关闭零解析、解析未知零提示；原唯一执行器/被动核验链未变，真实生产边界见 TESTS。
@@ -14,6 +23,13 @@
 
 `agent_core/tool_call_runtime.execute_traced_tool_call` 先沿原权限链得到 RunScope，再以宿主不可变执行请求的 actor 形成类型化观察上下文。Registry 只转交 EventPointContext，既有唯一执行器在真实 handler 开始及 canonical 结果收口时发布；原被动核验、写后核验与审计调用仍在原位置。
 观察不从工具参数取身份、不重复读取库、不产生第二条工具执行或验证路径。隔离三来源测试已验证；假插件六事件正常回合已验证，拒绝组合与正式非作者初审仍未完成，具体失败和命令见 TESTS.md。
+## M1 B5 第4段批准事实投影（2026-10-04，整体WIP）
+
+原round_execution接原用户决定后仍用同一execute_one；_with_applied_approval_fact先查新的结构化ActionDecision是否allow，再投影批准，不从话术/反馈或旧批准推导新门已应用。主/子换代反证已在真实隔离消费者执行；被动核验/能力包事实源不变，第5与真实验收另派，不能上线。
+
+## M1 B5 执行上下文（2026-10-03，WIP）
+
+tool_call_runtime由effective_on_chunk的宿主request_permission能力给原执行器传interactive，不新增核验事实源或权限豁免；被动核验与写前/写后核验入口不变。插件只收紧裁决，当前精确批准重跑/决定账本未实施，真实消费者/I4未验。
 
 ## 能力包 v2 块 6a 取消边界（2026-10-03，已实现，9b 复核通过（沙箱侧 + 补充用例 dbccc1d14），并入 step17i）
 
@@ -177,6 +193,8 @@ Compact 不建立第二套验证链。live tool-context 与 archive 共用一个
    与 `decision_ref`：谁发起了这次调用是宿主结构化事实，决策发起的调用不进原生 IR 配对，工具账与决策账靠 `decision_ref` 互查。
    `message_tool_delivery.v1` 的成功状态、当前 owner 标记、receipt、用户投影、附件引用和有界
    `evidence_refs`，以及
+   `plugin_gate_decisions`：B5 第 5 段每次收紧征询写出的一条决定事实（设计第 9 节 15 字段，无 message、无工具参数），
+   由 `tool_runtime_ledger` 逐条写进 runtime_events 的 `plugin_gate.decided`；该键是唯一从 `ToolResult.metadata` 顶层读取的白名单例外。
    `tool_search` 的已加载工具名列表。参数审计只接受 `input_sources`、`input_coercions` 和不可逆
    `input_facts`，其中只有路径、来源引用、类型和 hash，不含任何参数值。工具搜索事实只供同一工具循环
    重建下一次模型可见 schema，不携带 Skill 正文、工具输出或权限事实。

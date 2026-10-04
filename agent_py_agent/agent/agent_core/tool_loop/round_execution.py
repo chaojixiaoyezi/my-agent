@@ -34,6 +34,11 @@ from ...memory_archive import estimate_tokens
 from ...tooling.action_policy import ActionDecision
 from ...tooling.concurrency import ToolConcurrencyDescriptor, describe_tool_concurrency
 from ...tooling.executor import ToolExecution
+from ...tooling.plugin_gate_policy import (
+    plugin_gate_approval_request,
+    plugin_gate_approval_unavailable,
+    plugin_gate_rejection_message,
+)
 from ...tooling.runtime_contracts import (
     AppliedToolApproval,
     ToolCall,
@@ -482,7 +487,7 @@ def _owner_grant_key(request: ToolRoundExecutionRequest, call: ToolCall) -> str:
     return operation_grant_key(call.tool_name, call.arguments, getattr(policy, "owner_grant_parameters", ()))
 
 
-# LLM: 审批 consumer 是 effective_on_chunk 上的宿主能力；无 consumer/unavailable 保留旧 approval_required 终态，绝不擅自批准。
+# LLM: 插件引用来自执行器，算好旧ID后附加同源前缀/两选项；无 consumer/unavailable 返回插件无人审批码，普通调用保持旧合同。
 #   本进程准入读两次（_closed_admission_execution）：发审批请求前已关门的不再询问，免得停机后在 TUI/IM 多弹一张没用的审批卡
 #   （9b 复核）；批准之后、重新执行之前再读一次，等审批期间关门的不执行、不记批准绑定（I3 复审必须修）。两处都配停机结果。
 # 函数用途: 等待一条审批决定，并在批准时用原 call identity 重新执行同一工具调用。
@@ -499,7 +504,7 @@ def _resolve_tool_approval(
     on_chunk = getattr(request.params, "effective_on_chunk", None)
     consumer = getattr(on_chunk, "request_permission", None)
     if not callable(consumer):
-        return execution
+        return plugin_gate_approval_unavailable(execution)
     approval_request = build_tool_approval_request(
         execution.call,
         request_id=request.params.request_id,
@@ -509,6 +514,7 @@ def _resolve_tool_approval(
         grant_key=_owner_grant_key(request, execution.call),
     )
     approval_request = _with_request_actor(approval_request, request)
+    approval_request = plugin_gate_approval_request(execution, approval_request)
     prior_rejection = _matching_runtime_rejection(request.params, approval_request.binding)
     if prior_rejection is not None:
         prior_decision = str(prior_rejection.get("decision") or "denied")
@@ -568,15 +574,15 @@ def _resolve_tool_approval(
                 )
         return resumed
     if decision.decision == "unavailable":
-        return execution
+        return plugin_gate_approval_unavailable(execution)
     rejected_actions = getattr(request.params, "runtime_rejected_actions", None)
     if isinstance(rejected_actions, list):
         rejected_actions.append(approval_request.rejected_binding(decision))
     return _rejected_approval_execution(execution, decision)
 
 
-# LLM: A resumed exact call must carry the host-owned approval outcome into the canonical result.
-# The provider may describe it, but it cannot infer or overwrite this fact from timing or prose.
+# LLM: 精确重跑裁决allow才附宿主批准事实；等待中换代导致ask/deny不贴已应用，原批准后precheck拒绝也保留未执行。
+# 模型不能从话术或时序覆盖本事实；联测主/子换代、新确认及原批准后工具可用性。
 # 函数用途: 给审批后执行的同一工具结果附上已应用的批准事实，供后续模型和审计准确区分“待审批”与“已执行”。
 def _with_applied_approval_fact(
     execution: ToolExecution,
@@ -584,7 +590,7 @@ def _with_applied_approval_fact(
     approval_request: object,
     decision: ToolApprovalDecision,
 ) -> ToolExecution:
-    if str(execution.decision.evidence.get("precheck") or "") == "post_approval":
+    if not execution.decision.allowed or str(execution.decision.evidence.get("precheck") or "") == "post_approval":
         # 批准后、执行前复核已把调用拦下：不能贴"已批准且已应用"的事实，否则模型会以为执行过；结果文案已说明原因。
         return execution
     applied = AppliedToolApproval(
@@ -635,7 +641,7 @@ def _approval_description(
     return f"{call.tool_name}({public_detail})" if public_detail else call.tool_name
 
 
-# LLM: 拒绝/取消必须形成与原 tool_use 配对的单一终态结果，handler_executed=False；repeated 仅改变说明，授权仍来自结构化决定。
+# LLM: 拒绝/取消配原tool_use终态、handler=False；插件前缀同源清洗且不授权，原错误码/重复拒绝语义保持。
 # 函数用途: 把首次或重复的用户拒绝/取消转换为标准 ToolExecution，并明确告知模型不要重试相同调用。
 def _rejected_approval_execution(
     execution: ToolExecution,
@@ -677,7 +683,7 @@ def _rejected_approval_execution(
     )
     result = ToolResult.failed(
         execution.call,
-        message,
+        plugin_gate_rejection_message(execution, message),
         error_code=code,
         failure_stage="authorization",
         facts=ToolFailureFacts(

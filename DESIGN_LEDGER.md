@@ -1,5 +1,25 @@
 # 设计台账
 
+## B5 第5段叠到17j、组合转正与六条小项（b5s5，2026-10-04，worker/m1-b5-on17j，已并入 step17j，9b 终审待做）
+
+- **来源**：在b5r交付 `65f47f2c6a45ee13f35318c7837993fcccf58581` 上三方应用 `git diff ff5d761d9 d517a8b7b | git apply -3 --index`；源第5段两个提交 `0e1a9550b` / `d517a8b7b` 属 `worker/m1-b5-seg5-on-s3`，不是本次迁移SHA。本轮迁移/行为提交为 `f86e9b141bd7a8509964d591a9b458b1679807e4`（2026-10-04 10:52 PDT，中文WIP提交，20文件+1012/-39）；本次补记只改文档，不改变已验证产品。
+- **冲突**：`executor.py` 两个import都保留，B4 `EventPointContext/on_handler_started` 不删；DESIGN_LEDGER/TESTS以17j完整内容为底，保留b5r与源第3/4段历史，再追加本轮第5段来源、当前验证及修正取舍。常数目录产品脚本重新生成899项，未手合。
+- **组合实际暴露并修复**：源第5段只从 `merged.requirements`（仅ask）生成条目，直接deny/allow会丢；源reader又读归档顶层，但真实builder把专键放进 `tool_result_envelope`。组合去xfail后有有效业务红（实读0条），改为所有review生成决定且排除 `approval_applied=True`，writer只读canonical信封，不给假顶层数据补旁路。收尾另有有效红：不可交互混合ask/deny的真实拒绝被账本错记无法审批，投影条件补“最终仍为ask”，保留实际deny和B6计数口径。拒绝/允许/混合门及不可交互终态都有断言。
+- **写入边界**：归档只复制executor metadata中的专键，其余仍走原白名单；原 `persist_tool_runtime_ledger` 唯一调用点追加 `plugin_gate.decided`，每门一条，无门不写。AST实际核对只有一个 `append_plugin_gate_decision` 调用；新增第二调用点前必须先加幂等键。精确批准跳门没有协议征询，绝不当作决定入账，不新增批准账或共用池。
+- **六条初审小项**：①主claim换轮/子DONE后scope失效，零轮询立即unavailable并清精确旧行；②直接resolve换claim/attempt，不借展示或wait校验，旧行字节不变；③I4门引用每个字段及参数哈希相等，传输调用除新call_id外逐字段相等（恢复的call_id必须是新身份，不强塞旧ID）；④同activation/version/gate仅换plugin_id仍重新ask；⑤注释说明外层五字段约束宿主批准归属、内层四字段约束插件征询身份，两层缺一不可；⑥write_boundary异形安全退化为不跳门、重新征询。
+- **实际验证**：当前版本27显式文件 **563 passed**，0 failed/errors/skipped/xfail；其中完整guards9现场11文件187项。组合三项均转正，删除零handler/零工具事件且真正由归档/持久化写一条决定并被B6 info读到，允许更新仍真执行并发成对事件。第4段六变异与第5段三变异全部业务杀死；另n3、停止分支、只漏plugin_id、两写账接缝及混合终态六项反证均有效，终态修正后十五项全部重跑，产品字节前后不变。尺寸差异最初新增2个测试函数告警，原样抽出等待/引用断言和假传输准备后消除；未升baseline，报告还原不提交。Ruff/import/strict/常数与尺寸门禁结果及原XML见TESTS；中间版本91/19/562与最终563重叠、不相加。
+- **边界与下一步**：源第5段16项/三变异只作ds2来源交付事实，不代本树563项。sol2/b4g保留点核对仍与17j相同，由3a先挑b4g再挑本线；9b终审、18项真实宿主准备失败的外部复验、B7真沙箱、真实TUI/IM/Gateway及12片Linux全量仍未验证。本线不部署、不push、不改STATUS/ROADMAP/COMPLETED。下方保留各历史时点。
+
+## B5 第1–4段搬到17j（b5r，2026-10-04，worker/m1-b5-on17j，已并入 step17j，9b 终审待做）
+
+- **来源与基线**：17j 真正基线 `ebe621d8714e4e04c9c0a02c592e0328dd2d579e`；应用 `git diff b6ede99e0 ff5d761d9` 的第1–4段，来源头 `ff5d761d91142b6283864fedd6fb13a9c2885d00`。采用 `git apply -3`，不是把源分支提交号当本次迁移号；迁移产品提交：`d793da549707157d6f5e53754cd1937150d04e01`（2026-10-04 08:43 PDT，中文WIP提交；第5段和外部验收仍待叠入），本段提交号补记仅改文档，不改变已验证产品字节。
+- **产品冲突**：`gateway_parts/plugin_panels_http.py` 保留17j的B3/B4唯一 hub、发布与停机逻辑，仅追加当前共用池读取入口；`tooling/registry.py` 保留唯一 `_registry_approval_mode` 和B4宿主事件上下文，追加B5 reviewer，不重复读取审批模式；`tooling/executor.py` 同时保留B4真实handler回调与B5宿主来源/征询字段。`agent_core/tool_loop/round_execution.py` 保留17j停机前后复核及原审批事实，在原流程上附加插件审批引用和拒绝说明；`tool_call_runtime.py` 只追加宿主 interactive 事实。
+- **不可改变的顺序**：B5在宿主 `ActionPolicy.decide` 之后、原审批之前只能收紧；B4工具事件仍只在handler真正开始时发。插件直接拒绝返回 `handler_executed=False / not_started`，不发工具started/finished。sol2负责的 `_tool_event_context` 和 `event_points.prompt_queued` 的 `agent.config` 读取保持17j原样，后续由3a叠修复。
+- **生成与文档冲突**：常数目录不手合，用产品 `scripts/build_constants_catalog.py` 重生并核对899项；文档保留17j条目与B5历史说明，TESTS以17j为底重新记录本次验证，避免旧测试结果覆盖新基线。
+- **组合证据**：新增 `test_plugin_gate_event_combination.py`，真实rm-guard样例协议、原注册表和执行器，临时安装、不启用，激活及传输使用隔离替身。拒绝删除零handler/零事件、允许更新真实handler并发成对事件，2 passed；实际 `/plugins info` 决定读取单独 `xfail(strict=True)` 等第5段，绝不手插账本行。
+- **回归**：26相关文件及完整10文件guards9联合697项：678 passed、13 failed、5 errors、1 strict xfailed。18个失败/错误在真正基线 `ebe621d87` 的detach临时worktree复跑，失败身份完全一致：13项停在插件启用准备 `outcome_unknown`，5项为 `managed background launcher identity unavailable`；不将这些业务入口写为通过，不仅凭无响应归因沙箱。临时worktree已移除。
+- **后续**：第5段由ds2在 `worker/m1-b5-seg5-on-s3` 接源 `ff5d761d9` 搬移，3a再叠到本分支，不等待、不代做；安全复审、真实宿主启用/沙箱、TUI/IM/Gateway和12片Linux全量仍未验证。本轮只本地提交，不部署，不碰STATUS/ROADMAP/COMPLETED。门禁命令与结果见TESTS本节。
+
 ## 插件使用说明改成"合入后目标状态"（guidefix，2026-10-04，分支 `worker/17j-plugin-guide`，基于 `eca1d3dd8`；只改文档；已并入 step17j，连同 guide17j，3a 核对差异）
 
 - **这份说明描述什么**：`docs/guides/PLUGIN_GUIDE.md` 写的是 **B5（工具把关）、B7（插件总开关与隔离底座）、obsset（观察开关进用户可写白名单）** 三件事**合入后**的目标状态，不是 17j 现状。各段落的生效条件在文中逐条标明：第四节（工具把关）标注"B5 合入后生效"，第六节（总开关与隔离底座）标注"B7 合入后生效"，第七节第 2 步（怎么打开只看档）标注"obsset 合入后生效；要不要重启以 obsset 结论为准（3a 挑入时补）"，第十二节列清哪些还没生效。
@@ -812,6 +832,66 @@
 - **验证**：临时目录的 0600/0700、旧 latest 收紧、重写与字节稳定性、三项变异及所有门禁见 TESTS.md 同名节；未读取真实 owner home。
 - **9b 复审补正**：memory_archive 根或其下任一级遇到符号链接时，跳过链接所在级及下级目录 chmod，以结构化 warning 记录 `reason_code=private_directory_symlink_skipped`；四个快照/latest 文件仍用私有原子写为 0600，回合不因链接抛错。
 - **目录锚点**：build_main_context_bundle 的保存入口只准备一次目录链；显式携带 archive root、目标目录与是否跳过权限收紧的结果供首次写入、latest 刷新及合同字段重写复用，不再按 `parents[]` 反推。复审后的红绿、C1–C6 与门禁回执见 TESTS.md 同名节。
+## M1 B5 第4段精确批准重跑（2026-10-04，m1b5，接 `471b7b4fc`，整体 WIP）
+
+- 第3段主/子与隔离I4已提交 `471b7b4fc4ef47a284925ad43da89edccefd1b2f`，父 `57f465dca`。本段只读原宿主write_boundary.approved_actions，外层APPROVED/approval_id/tool/run身份与内层六身份逐字段核对；auto/宿主不要求确认时也能精确跳门，不另建批准源。
+- 共用池原review循环每轮复读安装；只跳已批准的当前插件/version/activation/gate，其它门继续征询。版本鲜活复核红测修正去重/撤销身份；主/子等审批时换代仍ask，不能贴已应用批准事实；用户拒绝保留APPROVAL_REJECTED并带同源插件/原因前缀。
+- 十四相关文件+当前完整十守卫 **539 passed in 75.83s**；六本段变异均有效AssertionError、原pytest exit=1/errors=0。具体红绿/误用与静态证据见TESTS，不把组件或隔离链当生产验收。
+- 合并判定函数签名不变；GateCall新增尾字段approved_gate_refs、GateReview新增尾字段approval_applied。后者True是宿主已批准跳门、没有协议征询，ds2第5段决定账本应排除这类投影，不虚构plugin_gate.decided。第5/B6实读仍归ds2/3a，B7关闭门保持，完整复审/上线未做。
+
+## M1 B5 第3段主/子消费者与 I4（2026-10-04，m1b5，接 `57f465dca`，本地隔离验证、整体 WIP）
+
+- 网络恢复后核对原树原分支，HEAD 仍为 `57f465dca`，没有未提交遗留可丢弃。
+- 原执行器引用经原轮审批进入真实隔离 ConversationStore、主 claim、子 attempt、notices 与用户决定入口；两身份各覆盖旧会话缓存、owner 长期授权、等待切 auto、auto 强制确认，handler 未执行且旧授权不写回。无人接收返回独立权限码。
+- 有效红测发现子代理旧插件审批仍出现在恢复后的新 attempt；原 ToolApprovalScope 及原审批行补冻结 `execution_attempt_id`，展示、决定、等待共同逐字段核对，旧记录不跨轮。main claim 合同不变，不新建批准账或 schema。
+- I4 走隔离真实 Gateway 请求处理和恢复入口：首次挂确认时注入宿主停机异常，重建宿主对象/死 claim 观察后原请求重排，再征询插件并等待新的决定。供应商与插件传输是假线路，不是实际 Gateway 重启、TUI/IM 验收。
+- 联合十三相关文件与当前完整十守卫 489 项通过；两新增变异及静态收尾见 TESTS。第4六身份批准重跑仍未做，批准后仍可能重新 ask。3a 已把第5账本/final_status/B6 实读改派 ds2 独立树，本线不重复实现；B7 关闭门保持，不可上线。
+
+## M1 B5 第3段执行端续接（2026-10-03，m1b5，接 `c70c895a6`，部署窗口WIP）
+
+- 执行器生成稳定JSON引用，原审批ID算完后再附binding；前缀同源清洗放最前，只“仅本次/拒绝”。Gateway请求固定选项，五点注释“守门永远是第一句”。
+- luna6拒绝码在本树唯一contracts/error_taxonomy.py修复：DENIED与APPROVAL_UNAVAILABLE均不可重试权限类；实际ToolExecutor不再UNKNOWN_ERROR。full带arguments_truncated，none不带；设计要求截断ask，B8/B9不改。200ms慢启动隔离用例验证原deadline收口timeout/ask。
+- 执行器→原轮审批→Gateway隔离链接通，十一相关文件+完整十守卫首次468通过；后续变异/静态按TESTS实录，不等同真实消费者验收。
+- **断点**：第3段真实主/子消费者引用集成与I4恢复未验；第4段六身份批准重跑未实施，当前批准后仍可能重新ask；第5段决定账本未做。B6固定be00891b8查询位置已定位，尚未写行/兼容实读。B7关闭门不改，不可上线。
+- 3a外部七文件228通过，已确认invocation启用失败为环境原因，不再作为当前待处理项；下文保留旧发生时记录。
+
+## M1 B5 第 3 段消费端守门（2026-10-03，m1b5，接 `6ec0fc7f3`，部分已实现、整体 WIP）
+
+- 单一 `plugin_gate_required` 供 Gateway/主子后台两请求入口、两等待入口及自主提供者使用；先于会话缓存、owner 长期授权和自主轮询，不读写旧授权。
+- 九条业务红测钉住已有缓存/长期批准和两个等待提供者仍会放行；已补消费端守门。等待参数收成 `ToolApprovalWaitOptions`，不引入任意关键字接口，旧默认仍读各入口原常量。
+- **未完成**：执行端尚未附加 plugin_gate_ref，审批前缀与选项收窄、I4、不可交互错误码、精确批准重跑及 runtime_events 未做；消费端用隔离请求反证不等于完整执行链已接通，不能上线。
+- 外部 guards9 曾新增四文件，本树缺 `test_gateway_client_credentials.py`，收集 exit=4、无测试执行；未改外部清单或其他分支。收尾读取清单已回到十文件且无缺失，当前完整复跑 172 passed；此前失败保留，聚焦回归与变异见 TESTS。
+
+## M1 B5 第 2 段 ds10 初审修正（2026-10-03，m1b5，接 `3771f67ca`，组件已修、整体 WIP）
+
+- 3a 采纳 ds10 三条：故障统一 `failure_review`，构造时保证非 ok 必须 ask、revoked 不参与合并；直接 GateReply 与解码同用 `clean_gate_message`，审批前缀后续也同源。
+- 新增 24 条有效红测后修复，三文件 129 passed；不弱化断言，原启用准备 13 失败仍保留，原因未确认，交 3a 外部复核。
+- 设计 8.5/13 点名 Gateway `permission_bridge.wait_for_gateway_permission_decision`，第 3 段必须和主/子请求、主/子等待及自主提供者共用守门。构造与清洗两条变异本段执行，等待绕过变异随第 3 段。
+- 第 3–5 段尚未实现；B7 前 v8 关闭门不改，不能上线。当前阶段门禁和真实变异结果见 TESTS 顶部。
+
+## M1 B5 第 2 段：共用池征询与超时边界（2026-10-03，m1b5，`worker/m1-b5-tool-gate`，本段组件已实现，整体 WIP，待交叉初审及 9b 终审）
+
+- **来源/解决问题**：续接合同头 `b531c5fab`，将纯收紧合同挂在宿主 decide 后、审批前；用户宿主命令不被插件挡住，模型不能伪造来源或延长等待预算。
+- **接线**：registry/自检默认 model，仅 management/invocation 两个宿主构造显式设 host_command。组合根注入 owner、配置和征询回调，权限视图共用；实际请求按 acquire→request 复用 Gateway 原 B2 池，不建立第二连接池。
+- **期限/撤销**：匹配插件并行，同插件排队由 B2 单在途保证；排队、启动、回应和换代共用一次总预算。握手缺失、超时、错误、非法回复均 ask；只依据当前安装快照撤销旧代，通道关闭但激活仍有效不能误作停用而放行。
+- **配置归属（3a 新裁定）**：`plugin_tool_gate_timeout_ms` 从 B7 移到 B5，默认 2000、范围 200–10000；YAML、dataclass、规范化及参数中心同时登记，并显式加入 `_BOUNDARY_NAMES`，模型 user_config 修改被拒，保留 PARAMETER_BOUNDARY 结构化事实。
+- **证据/边界**：当前组件三文件 105 passed、完整 guards9 十文件 172 passed；其他回归和门禁见 TESTS。第 3–5 段的强制审批、精确批准重跑、拒绝模型回执和 runtime_events 未实施，不能上线；B7 前 v8 关闭门未改。复审按最新安排：非作者 my-agent 交叉初审 → 9b 安全终审 → 3a 沙箱外复跑。
+
+## M1 B5 备审补充：审批双入口与可信来源（2026-10-03，m1b5，`worker/m1-b5-tool-gate`，补充合同已纳入，代码待第 2–4 段）
+
+- **来源/解决问题**：3a 转述 ae 备审补充；只守 Gateway 会漏掉子代理/后台主代理的缓存、长期授权及自主轮询，错误的宿主构造点会使用户 `/plugins@` 被收紧。静态核对当前头 `4738fc659`，不是运行验收。
+- **合同**：两条审批入口在缓存/长期授权前共用 `plugin_gate_required(request)`，等待自主提供者也共用；插件批准仅本次，不写会话或长期授权。`plugin_gate_ref` 用稳定 JSON 字符串，先按旧算法计算 `permission_id` 再附加引用；原 `grant_key` 哈希顺序不改。
+- **来源与重跑**：`plugin_management._prepare` 和 `plugin_invocation._prepare_invocation` 显式设 `host_command`，registry 默认 `model`；host_command_execution 的 replace 只保留来源，不新增豁免权。另有 foundation 合同自检构造，保持默认 model。自主模式宿主 allow 仍须收紧成强制 ask；收紧门自行从原 `approved_actions` 核对已批准引用的完整身份，不能依赖宿主 `approval_applied`。
+- **验收队列**：Gateway、子代理/后台主代理各覆盖旧同参缓存、长期授权、等待切自主与无授权写回；字符串往返/旧 ID 不变；auto 强制 ask 到精确批准重跑。详见 [M1 设计第 8/13 节](docs/design/PLUGIN_EVENT_HOOKS.md) 和 TESTS 顶部待实施矩阵。
+- **边界**：本次只补设计、验证说明与原待办，未改产品/测试代码，不推进安全裁定；B5 仍仅第 1 段已实现，第 2–5 段未接线，B7 前 v8 拒绝门保持。
+
+## M1 B5 第 1 段：收紧纯合同（2026-10-03，m1b5，`worker/m1-b5-tool-gate`，功能提交 `9cf60731d`，本段已实现，整体 WIP，待 be、ae 复审）
+
+- **解决问题**：先固定只能比宿主更严的合并合同，避免后续执行/审批接线时将插件回复误当授权或参数修改。
+- **实现范围**：`plugin_events/tool_gate.py` 的 `PluginToolGate` 仅做精确工具/效果匹配、规范请求投影、严格回复解析与稳定最严合并。原 `ToolCall` 仍是调用身份权威，激活对象只是只读投影，本段不读安装表、不使用连接、不执行、不批准、不写账。
+- **投影**：完整参数先递归去掉全部 `__` 内部键，再复用统一脱敏；4000 字符按紧凑 JSON 总量计费，保持合法对象、保留能容纳的成员及字符串前缀，不新增伪参数。插件消息最多 80 字符，去控制符、双向控制字符及 Unicode 换行。回复额外字段全部忽略。
+- **验证**：七种宿主/插件组合、所有返回排列的最严与主因稳定、撤销回答不算、参数不变/哈希同源、严格回复和投影边界已做组件测试；本段五个真实内存变异被抓到。命令、数字和门禁见 TESTS。
+- **未完成**：第 2–5 段（B2 共用池征询、来源、总预算、执行器、审批防自动批准、精确重跑、拒绝回执、账本及错误码）尚未接线；不能将纯合同视作 B5 已端到端实施。安全裁定仅交 be、ae，不提前实施 B7 或宣称真实 v8 启用。
 
 ## Gateway 本机来源信任收紧（be，2026-10-03，分支 `claude/be-gateway-local-trust`，基于 `claude/3a-step17h` `a602d6ad6`，9b、ae 评审通过，3a 2026-10-03 定稿，实施中，并入 step17i）
 

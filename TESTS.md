@@ -1,5 +1,164 @@
 # 测试与发布验收
 
+## b5s5：第5段叠上、组合用例转正、六条初审小项（2026-10-04，worker/m1-b5-on17j，已并入 step17j，9b 终审待做）
+
+- 来源：接本树b5r交付 `65f47f2c6`，三方应用源 `ff5d761d9..d517a8b7b`（ds2的 `0e1a9550b` / `d517a8b7b`）；executor保B4事件上下文及第5段专键，文档保17j历史后补当前事实，常数目录产品脚本重生899项。本树迁移/行为提交为 `f86e9b141bd7a8509964d591a9b458b1679807e4`，源提交号不替代本地交付号；随后SHA补记仅改TESTS/DESIGN_LEDGER，产品与验证输入不变。
+- 有效红→绿：去组合strict xfail并接原 `archive_tool_call_record` / `persist_tool_runtime_ledger`，setup纠正后实际业务红为决定列表 `[]`（`tmp/b5s5-red.xml`：1 failed、6 passed、0 errors）。源第5段只记录ask requirements、且reader找顶层而builder放信封，已分别修真实数据源；不手插条目、不把测试改回xfail。聚焦4文件91 passed（`tmp/b5s5-focused.xml`），与下方562重叠不相加。
+- 组合：真正rm-guard声明/协议、原Registry/Executor/apply_patch→原archive builder→唯一writer→真实临时owner RuntimeRepository→B6 `decisions` / `/plugins info`；删除拒绝零handler/零工具事件/文件不变且一条真实决定，更新正对照真写文件与成对事件且有allow决定。3 passed，无xfail。安装未启用，激活/插件传输是替身；不是生产宿主或真实沙箱验收。
+- 六条小项：停止scope失效的main claim换轮/subagent DONE两参数零轮询返回unavailable并清旧行；直接resolve换claim/attempt两参数独立拒旧行且字节不变；I4门引用每字段及args_hash相同、协议除新call_id外逐字段一致（call_id实际是新执行，不能强塞旧身份）；同activation仅换plugin_id仍ask，其余门字段整个字典一致；外五/内四分工与write_boundary异形“不跳门”两处注释已补。
+- 追加写账用例：ask/deny/allow混合每门一条同final_status；非ask也有条目；明确无交互终态按 `PLUGIN_GATE_APPROVAL_UNAVAILABLE` 投影给B6计数；假顶层条目不能替代canonical信封；真实精确批准重跑metadata零决定。白名单仍不容message或工具参数。全生产AST核对 `append_plugin_gate_decision` 只有 `tool_runtime_ledger.py` 的一个调用点，新增第二点先加幂等键。
+- 收尾新增终态反证：`interactive=False`且混合ask/deny时，实际拒绝已是 `PLUGIN_GATE_DENIED`，账本却错记无法审批；独立用例真实1 failed、0 errors（`tmp/b5s5-terminal-red.xml`）。只把无法审批投影条件收窄为“合并后仍为ask且有插件要求”，保留实际最严deny及B6计数口径。修正后同下方27文件清单完整重跑 **563 passed，0 failed/errors/skipped/xfail，73.12秒**（`tmp/b5s5-final-current.xml`）；不是把旧562外推到新版本。
+
+### 显式27文件联合回归（含现场完整11文件guards9）
+
+全部在工作树根、指定Python、禁缓存，同树未并发pytest或code-size。命令实际执行：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_plugin_tool_gate_logic.py \
+  agent_py_agent/tests/test_plugin_tool_gate_execution.py \
+  agent_py_agent/tests/test_plugin_gate_approval.py \
+  agent_py_agent/tests/test_plugin_gate_consumers.py \
+  agent_py_agent/tests/test_plugin_gate_reapproval.py \
+  agent_py_agent/tests/test_plugin_tool_gate_decision_ledger.py \
+  agent_py_agent/tests/test_plugin_gate_event_combination.py \
+  agent_py_agent/tests/test_plugin_event_points.py \
+  agent_py_agent/tests/test_plugin_event_gateway.py \
+  agent_py_agent/tests/test_plugin_event_e2e.py \
+  agent_py_agent/tests/test_plugin_event_display.py \
+  agent_py_agent/tests/test_plugin_m1_b8_samples.py \
+  agent_py_agent/tests/test_tool_round_execution.py \
+  agent_py_agent/tests/test_tool_display_archive.py \
+  agent_py_agent/tests/test_compact_tool_ref_archive_chain.py \
+  agent_py_agent/tests/test_shutdown_turn_resume.py \
+  agent_py_agent/tests/test_architecture_guardrails.py \
+  agent_py_agent/tests/test_config_field_readers.py \
+  agent_py_agent/tests/test_constant_names_unique.py \
+  agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+  agent_py_agent/tests/test_parameter_registry.py \
+  agent_py_agent/tests/test_recovery_actions.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+  agent_py_agent/tests/test_subagent_config_inheritance.py \
+  agent_py_agent/tests/test_packaging.py \
+  agent_py_agent/tests/test_constants_catalog.py \
+  -q --tb=short -p no:cacheprovider -o addopts='' \
+  --basetemp=/private/tmp/claude-501/m-b5s5 --junitxml=tmp/b5s5-final.xml
+```
+
+实际 **562 passed、0 failed、0 errors、0 skipped、0 xfailed，60.70秒**。同份JUnit核对完整11文件guards **187** 项（常数目录11项已在其中，不额外累加）；B5五文件、B4三文件、B6展示、B8样例、组合、账本及额外归档/恢复回归均覆盖。源第5段16项和旧b5r697项均不是本轮总数。随后尺寸差异报两个新增测试函数告警，原样抽出I4等待/引用断言与组合传输准备，不放宽任何业务断言；仅改动的consumers/combination两文件同入口复跑 **19 passed，12.32秒**（`tmp/b5s5-size-refactor.xml`，basetemp=`/private/tmp/claude-501/m-b5s5-size-refactor`）。产品版本、其余输入和观察点未变，复用既有结果；19与562重叠不相加，不声称重新跑了全27文件。
+
+上述是中间版本的真实记录。最终加入混合门终态修正后，原样使用这份显式清单与参数、仅把`--junitxml`改为`tmp/b5s5-final-current.xml`，完整27文件 **563 passed**；完整11文件guards仍187项，组合三项全绿，新增终态用例真实执行到。当前交付采用这一份结果；91/19/562均与563重叠，不相加。
+
+### 指定第4段六变异、第5段三变异与五个新增反证
+
+独立解释器里改真实函数内存，原pytest显式列文件并生成JUnit；不改产品文件。可单项原样复现（把NAME换成下表名字）：
+
+```bash
+NAME=reapproval-call-only
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY \
+  agent_py_agent/tests/fixtures/plugin_tool_gate_mutation_probe.py "$NAME" \
+  --basetemp=/private/tmp/claude-501/m-b5s5 \
+  --junitxml="tmp/b5s5-mutations/$NAME.xml"
+```
+
+| 变异名 | tests / 业务failures |
+| --- | --- |
+| reapproval-call-only | 6 / 3 |
+| reapproval-target-ignored | 23 / 11 |
+| reapproval-status-ignored | 9 / 2 |
+| reapproval-version-stale | 2 / 1 |
+| rejection-unexplained | 2 / 2 |
+| reapproval-false-applied | 2 / 2 |
+| ledger-latency-missing | 1 / 1 |
+| ledger-first-gate-only | 1 / 1 |
+| ledger-applied-recorded | 1 / 1 |
+| resolve-skips-record-check（初审n3） | 2 / 2 |
+| wait-scope-valid-off | 2 / 2 |
+| reapproval-plugin-id-ignored | 1 / 1 |
+| ledger-only-ask-evidence | 1 / 1 |
+| ledger-wrong-archive-level | 1 / 1 |
+| ledger-noninteractive-deny-misclassified（收尾新增） | 1 / 1 |
+
+每项原pytest exit=1、errors=0、skipped=0，均为业务断言或预期拒绝未抛的失败，不是setup/import/launcher红。n3单独选择新resolve用例，两个参数只由这条针对性断言抓住；不依靠旧list_pending断言。产品字节未变，运行数据和逐失败身份在 `tmp/b5s5-mutations/summary.json`，各XML/txt同目录。汇总器曾把pytest的简写 `assert` 误分类为非业务失败而停止，本轮只纠正XML证据分类并续跑最后一项，没有放宽业务断言或重复已有有效变异；随后联合正常入口562绿。组合fixture拆小后，两个受影响的写账接缝变异再次各1项业务失败（`ledger-only-ask-evidence-size-refactor.xml` / `ledger-wrong-archive-level-size-refactor.xml`，同目录），都断在真实info实读0条而非1条；两次独立解释器退出1、0 errors/skip，全部产品文件sha256前后相同。其余十二项观察点不变，复用原有效结果。
+
+终态产品修正后，最终重新执行整张表 **15个变异**（第4六个、第5三个、新增六个）；每个原解释器exit=1、业务failures>0、errors/skipped=0，产品sha256前后相同。当前回执为`tmp/b5s5-mutations-current/summary.json`和同名XML/txt；单项复现仍用上方fixture命令，把XML路径改到该目录即可。停止分支的主动`raise AssertionError("失效作用域不得进入审批轮询")`是零轮询契约的业务失败，不是setup/import错误；不得仅凭输出是否有小写`assert`误判。
+
+### 门禁与未验边界
+
+全范围Ruff **All checks passed**、import boundaries **findings=0**；常数目录产品生成并`--check`一致 **899项**。strict code-size **blocked=False**：strict_scope_total=2201、hard=0、high-risk=1504、soft=697、test_advisory=1234；报告 `tmp/b5s5-code-size-report.md`，原始摘要 `tmp/b5s5-strict.txt`。指定size_diff最初实际失败（新增2：I4测试和组合fixture），拆小后实际 **新增0、消失42**（`tmp/b5s5-size.txt`）；未提升baseline。doc-sync `--base 65f47f2c6`、diff检查和clean-package已实际成功，收尾仅在文档变更后再核文档/diff，不用旧结果替代新版本；生成CODE_SIZE_REPORT还原到HEAD、不随功能提交。
+
+本轮未重跑旧b5r的13启用准备失败+5launcher setup错误，不把它们记通过；旧真正17j基线相同失败的证据保留在下方b5r节。全仓pytest、真实宿主v8启用/沙箱、生产Gateway/TUI/IM、12片Linux全量和9b安全终审仍未验证。sol2/b4g两保留点已核对保持17j，3a先挑b4g，再挑本线后安排外部复验；不部署，不改STATUS/ROADMAP/COMPLETED，不新增交接文档。
+
+最后仅补齐本次触及函数与源第5段测试的中文双层注释（含装饰器前说明）；对11个改动Python文件逐一比较`ast.dump(include_attributes=False)`，与最终563/15变异后、补注释前完全一致（`tmp/b5s5-comment-ast-before.json`为对照）。无行为、输入或目标观察点改变，复用当前563与15项有效回执，不为了注释重复跑业务测试；Ruff、常数与尺寸门禁在补注释后仍实际通过。
+
+## B5 第1–4段搬到17j（b5r，2026-10-04，worker/m1-b5-on17j，已并入 step17j，9b 终审待做）
+
+- **来源**：3a指定17j基线 `ebe621d8714e4e04c9c0a02c592e0328dd2d579e`，`git diff b6ede99e0 ff5d761d9` 经 `git apply -3` 迁移；B4/B5共用执行缝隙逐处保留两侧语义。原B5第4段的539及六个变异只属原源头，不充当17j组合后的结果。
+- **组合新用例**：`test_plugin_gate_event_combination.py` 用真正 `plugins/rm-guard` 的声明/协议、原 `ToolRegistry` / `ToolExecutor` / 内置 `apply_patch`。临时安装、不启用，激活表和通道传输是隔离替身；不启动Gateway或嵌套沙箱。拒绝删除断言deny、PLUGIN_GATE_DENIED、零handler、零工具事件、文件不变；允许更新的正对照断言真实handler一次、文件已更新和started/finished成对，防止“观察始终关闭”的假绿。第三项实际读取B6决定与 `/plugins info`，`xfail(strict=True)` 明示等第5段写账，不手插行。
+- **组合命令**：以下所有pytest均在工作树根、指定Python、禁缓存；原全仓测试未运行。
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_plugin_gate_event_combination.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b5r \
+  -o addopts='' --junitxml=tmp/b5r-combination.xml
+```
+
+结果：**2 passed、1 strict xfailed**；注释收尾和两项内存变异还原后再跑同入口仍为2 passed、1 strict xfailed（`tmp/b5r-combination-final.xml`）。`--runxfail`单独执行账本项真实失败在 `len(rows)==1`、实读为 `[]`，无setup/import错误（`tmp/b5r-ledger-pending.xml`）。联合回归命令（B5全部五专门文件、B4/B3事件文件、B6、B8、原审批及关闭重入、通道、宿主调用、常数目录、完整guards9十文件）：
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_plugin_tool_gate_logic.py \
+  agent_py_agent/tests/test_plugin_tool_gate_execution.py \
+  agent_py_agent/tests/test_plugin_gate_approval.py \
+  agent_py_agent/tests/test_plugin_gate_consumers.py \
+  agent_py_agent/tests/test_plugin_gate_reapproval.py \
+  agent_py_agent/tests/test_plugin_gate_event_combination.py \
+  agent_py_agent/tests/test_plugin_event_points.py \
+  agent_py_agent/tests/test_plugin_event_gateway.py \
+  agent_py_agent/tests/test_plugin_event_e2e.py \
+  agent_py_agent/tests/test_plugin_event_display.py \
+  agent_py_agent/tests/test_plugin_m1_b8_samples.py \
+  agent_py_agent/tests/test_tool_round_execution.py \
+  agent_py_agent/tests/test_gateway_agent_control_service.py \
+  agent_py_agent/tests/test_gateway_approval_mode.py \
+  agent_py_agent/tests/test_owner_approval_mode.py \
+  agent_py_agent/tests/test_background_tool_approval.py \
+  agent_py_agent/tests/test_approval_gate_contract.py \
+  agent_py_agent/tests/test_constants_catalog.py \
+  agent_py_agent/tests/test_executor_decision_message.py \
+  agent_py_agent/tests/test_shutdown_turn_resume.py \
+  agent_py_agent/tests/test_plugin_event_hub.py \
+  agent_py_agent/tests/test_plugin_event_runtime.py \
+  agent_py_agent/tests/test_plugin_channel_pool.py \
+  agent_py_agent/tests/test_plugin_channel_lifecycle.py \
+  agent_py_agent/tests/test_plugin_tool_approval_recheck.py \
+  agent_py_agent/tests/test_plugin_invocation.py \
+  agent_py_agent/tests/test_architecture_guardrails.py \
+  agent_py_agent/tests/test_config_field_readers.py \
+  agent_py_agent/tests/test_constant_names_unique.py \
+  agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+  agent_py_agent/tests/test_parameter_registry.py \
+  agent_py_agent/tests/test_recovery_actions.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+  agent_py_agent/tests/test_subagent_config_inheritance.py \
+  agent_py_agent/tests/test_packaging.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b5r \
+  -o addopts='' --junitxml=tmp/b5r-final.xml
+```
+
+- **真实结果**：**678 passed、13 failed、5 errors、1 strict xfailed，697项，82.57秒**；先前首十文件264通过是重叠阶段证据，不与此相加。错误只来自 `test_plugin_tool_approval_recheck.py` 五个setup（MCP server启动：`managed background launcher identity unavailable`）；13失败只来自 `test_plugin_invocation.py`，均在 `enabled_plugin` 期待启用 `succeeded` 却读到 `outcome_unknown`，业务测试未执行到目标观察点。
+- **联合范围内分组**（从同份JUnit逐用例计算，不额外相加）：B5五文件204通过、B4三文件44通过、B6十二通过、B8四通过、常数十一通过；完整guards9十文件（含packaging）176通过。
+- **新组合两项有效内存变异**：旁路 `tighten_plugin_decision` → 删除拒绝用例在 `allow != deny` 业务断言失败；丢弃Registry的B4事件上下文 → 更新正对照在 `[] != [started, finished]` 失败。两次原pytest均exit=1、各1 failure/0 errors，不是setup/import失败；仅进程内替换，未写产品文件。JUnit为 `tmp/b5r-mutation-b5-bypass.xml` / `tmp/b5r-mutation-b4-drop-event.xml`。这是新增组合反证，不把源第4段六项算成本次重新执行。
+- **真正基线复核**：`git worktree add --detach /private/tmp/claude-501/b5r-baseline-17j ebe621d87` 后在该树根用同Python/选项、`--basetemp=/private/tmp/claude-501/m-b5r-baseline`，只跑上述两个失败文件，JUnit落回本树 `tmp/b5r-baseline.xml`：**13 failed、5 errors**；两版失败身份及错误种类集合逐项比较相同。临时worktree已按 `git worktree remove` 移除。不删测试、不改skip/xfail；这里只证实该17j基线同样失败，不据此宣布宿主启用链通过，也不无证据断言环境根因。
+- **静态实际已验**：全范围 `$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_import_boundaries.py` → findings=0；`$PY scripts/build_constants_catalog.py --check` →899一致；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2201、hard=0、high-risk=1504、soft=697、test_advisory=1234、blocked=False。`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → **新增告警: 0 / 消失告警: 42**。基线未抬高，`git checkout -- CODE_SIZE_REPORT.md` 已还原。`$PY scripts/check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check`、`git diff --cached --check` →干净；`$PY scripts/check_clean_package.py .` → OK、无发布阻塞项。
+- **未做/未验**：第5段写账由ds2在 `worker/m1-b5-seg5-on-s3` 迁移、3a后叠；sol2事件装配保护仍由3a后叠，本线保持17j写法。B7真正启用/沙箱、真实TUI/IM/Gateway与12片Linux全量未验证，无生产数据、配置、进程或远端变更。
+
+
 ## 执行器请求替身补 on_handler_started（3a，2026-10-04，17j）
 
 - 17j Linux 全量车道（33d903aab）唯一剩下的新失败：`test_orchestration_create_subagents_tool_coordinator_seed.py::TestResourceScopePolicyNormalizationPerSeq269::test_executor_entry_read_only_bypasses_resource_scope_resolution` 报 `'types.SimpleNamespace' object has no attribute 'on_handler_started'`（`tooling/executor.py:726`）。B4（73de50cb8）给真实 `ToolExecutionRequest` 加了可选观察钩子 `on_handler_started`（默认 None），这条用例手拼的请求替身没跟上；上一次车道（ebe621d87）也有这条，当时 3a 提取失败清单的脚本漏了它。

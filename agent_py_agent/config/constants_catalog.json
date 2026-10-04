@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 897,
+  "count": 899,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4450,6 +4450,22 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "自由文本引用字段（渠道名、会话哈希）的长度上界，防止调用方把大段正文塞进公共字段。"
+    },
+    {
+      "name": "MAX_PLUGIN_GATE_ARGUMENT_CHARS",
+      "file": "agent_py_agent/agent/plugin_events/tool_gate.py",
+      "value": 4000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "完整参数最多四千个字符，遵循一期公开投影预算；先脱敏再截，避免在截断边缘露出半个秘密。"
+    },
+    {
+      "name": "MAX_PLUGIN_GATE_MESSAGE_CHARS",
+      "file": "agent_py_agent/agent/plugin_events/tool_gate.py",
+      "value": 80,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "插件消息最多八十个字符，为审批前缀保留可见空间，不让插件消息淹没宿主要求。"
     },
     {
       "name": "_DATA_MODE",

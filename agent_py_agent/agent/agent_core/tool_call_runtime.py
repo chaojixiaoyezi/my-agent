@@ -136,7 +136,7 @@ def _audit_source_worker_tool_scope_result(
     )
 
 
-# LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙；事件身份只取宿主请求和作用域，不读工具参数。
+# LLM: 最终 Tool Gateway 携带同一 run 快照、宿主审批消费者存在事实和事件身份；interactive/actor 不从模型参数读，不能扩大工具宇宙。
 # 首个工作工具在权限快照前登记运行身份，供归档与停止查询使用；晋升前后 cwd 和 owner 文件范围不变。
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
@@ -175,6 +175,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
         trusted_run_context={
+            "interactive": callable(getattr(getattr(runtime_request.request.params, "effective_on_chunk", None), "request_permission", None)),
             "process_completion_target": process_completion_target(runtime_request.agent, runtime_request.request.params),
             "task_attributes": dict(
                 runtime_request.request.params.task_attributes

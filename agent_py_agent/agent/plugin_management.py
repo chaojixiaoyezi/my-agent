@@ -401,7 +401,7 @@ class PluginManagement:
             return PluginRemoveTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)
         return PluginDisableTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)
 
-    # LLM: 管理工具共用原快照/权限/操作账；构造计划在 claim 前声明，装卸不豁免工具禁用或运行身份。
+    # LLM: 用户管理入口显式设 host_command 免插件收紧，但仍共用原快照/权限/操作账，不豁免宿主禁用与身份。
     # 函数用途: 将冻结的管理工具接到唯一 ToolExecutor，不创建普通代理或另一执行链。
     def _prepare(self, repo: RuntimeRepository, binding, arguments: dict) -> ToolExecutorRequest:
         context = self.context
@@ -422,6 +422,7 @@ class PluginManagement:
             owner_scope_root=str(policy.owner_scope_root or ""), operation_owner_id=context.owner.owner_id,
             operation_store=ManagedOperationStore(repo), operation_store_required=True,
             trusted_run_context={"run_scope": {"task_id": binding.task_id}},
+            call_origin="host_command",
         )
 
     # LLM: 装卸与启停权限各取宿主既有 owner 策略，不由动作可用性或包自述推断；未知内部工具关闭。
