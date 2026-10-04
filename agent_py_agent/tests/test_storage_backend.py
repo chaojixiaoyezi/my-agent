@@ -12,6 +12,7 @@ import pytest
 
 sqlalchemy = pytest.importorskip("sqlalchemy")  # scale extra 未装则整文件 skip
 from sqlalchemy import Column, Integer, MetaData, String, Table, insert, select, text  # noqa: E402
+from sqlalchemy.exc import InterfaceError, OperationalError  # noqa: E402
 
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 
@@ -39,7 +40,7 @@ def _pg_backend() -> StorageBackend:
         with db.connect() as conn:
             conn.execute(text("SELECT 1"))
         return db
-    except Exception as exc:  # 无可用 PG → 跳过真测(不假装)
+    except (OperationalError, InterfaceError) as exc:  # 无可用 PG → 跳过真测(不假装)
         pytest.skip(f"无可用 PostgreSQL 实例做真测: {type(exc).__name__}")
 
 
@@ -85,7 +86,7 @@ def test_postgres_pool_is_tuned_real() -> None:
         db = StorageBackend(url, pool_size=7, max_overflow=12)
         with db.connect() as conn:
             conn.execute(text("SELECT 1"))
-    except Exception as exc:
+    except (OperationalError, InterfaceError) as exc:
         pytest.skip(f"无可用 PostgreSQL: {type(exc).__name__}")
     try:
         assert db.engine.pool.size() == 7  # 池大小生效(非 SQLAlchemy 默认 5)

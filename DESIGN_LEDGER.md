@@ -1,5 +1,22 @@
 # 设计台账
 
+## 补上 `POST /stop` 用例的前置条件（skipfix2，2026-10-04，分支 `worker/skipfix`，接在 `65366d700` 之后；3a 复审通过，已并入 step17j）
+
+- **背景**：skipfix 收窄宽 except 后暴露出 `test_stop_endpoint` 一直吃 `HTTP Error 409`。**这是测试缺前置条件，不是产品问题**：`MockGatewayPaths` 从不登记 gateway 进程身份，`handle_stop` 拿不到身份就按设计回 409（`http_handlers.py` 的 `POST /stop`：先 `get_running_pid`，再 `write_targeted_gateway_stop_request`，拿不到身份回 `409 gateway process identity unavailable`）。
+- **改法**：只改测试，**产品代码一行未改**。用例改用产品自己的写 pid 入口 `write_pid_record(mock_paths.pid)` 登记身份，再断言 200 + `{"status": "stopping"}` + 停止请求文件写在 `mock_paths.stop_request` 且 `target_process.pid` 等于登记进程；另加一条对照用例钉住"没有身份时回 409 且不写文件"这一有意的 fail-closed 行为。
+- **安全核实（写之前先核）**：`POST /stop` **不发信号**——`handle_stop` 只写"定向停止请求"JSON 文件，`write_targeted_gateway_stop_request` 体内无 `os.kill`/`signal.`；**唯一会消费该文件的进程是 supervisor**（`gateway_parts/supervisor.py`），而 `run_supervisor` 只能从 `cli/supervisor.py` 进入；**测试路径不起 supervisor**——`GatewayHTTPServer.start()` 只起 HTTP serve 线程，`test_gateway_http.py` 里也没有任何 supervisor 引用。因此这个文件写完没有监视循环去读，不会给 pytest 或任何真实进程发信号，**不需要**替换型替身。
+- **验证**：`test_gateway_http.py` 整文件 **24 passed、0 failed、0 skipped**（skipfix 时是 1 failed）；guards9 全过；ruff / import boundaries=0 / DOC_SYNC_PASS / `git diff --check` / strict code-size hard=0 / size_diff 新增 0 / clean-package 全过。变异两个（不写停止请求直接回 200、把 409 改成 200）**全部 KILLED**。
+- **未验证**：真实 Gateway 进程的端到端停机（规则禁止连真实 Gateway），本用例只覆盖到"写停止请求文件"这一段。详见 TESTS。
+
+## 测试卫生：收窄"环境不可用才跳过"的宽 except（skipfix，2026-10-04，分支 `worker/skipfix`，基于 17j 头 `1e1aadb80`；3a 复审通过，已并入 step17j）
+
+- **来源**：9b 终审顺带指出：有些用例用 `except Exception: pytest.skip(...)` 包住整段，**断言失败也会被显示成"跳过"**，把真实失败藏起来；`test_gateway_http` 那条 409 的跳过就是这种。
+- **改法**：只动测试，10 个文件 16 处宽 except 收窄成"环境真的不可用"的精确类型（连接类 errno 白名单 / SQLAlchemy `OperationalError`+`InterfaceError` / `SandboxUnavailableError`）。**不新增 skip、不放宽断言、不改用例原意**；跳过的原因词（"无可用 PostgreSQL""HTTP server not reachable"）与原来一致，只是判定变严。
+- **为什么不用一个共享 helper**：`OSError` 覆盖面太宽（含 ENOSPC/EIO 这类与"连不上"无关的失败），把判定集中成"凡是 OSError 都算"等于换个方式继续藏问题。所以 gateway 两文件按 **errno 白名单**逐条列出可跳的 errno，PG 组用驱动层的连接类包装异常。
+- **收窄暴露出的真失败（1 条，只报告不修）**：`test_gateway_http.py::test_stop_endpoint` 实际拿到 `HTTP Error 409: Conflict`。**既有失败**——基线 `1e1aadb80` 上同一条的跳过原因原文就是 `HTTP Error 409: Conflict`，同一个 409 一直在，只是被宽 except 显示成"跳过"。根因在 `gateway_parts/http_handlers.py:1827`：`POST /stop` 拿不到 gateway 进程身份时返回 `409 gateway process identity unavailable`，而测试的 `MockGatewayPaths` 不提供 PID 文件。修它要补测试前置条件（产品或测试改动），不在本任务范围。
+- **未改**：`test_tool_operation_managed_gate.py` 的 `except OSError`（只包 `os.symlink`、try 内无断言）本来就对；`test_gateway_http.py:458` 那个 `except Exception` 只是收集错误进 list，不 skip，也不动。
+- **验证**：改进文件 90 passed / 1 failed（即上面那条 409）；PG 组 21 passed（本机有 PG，真跑）；guards9 全过；ruff / import boundaries=0 / DOC_SYNC_PASS / `git diff --check` / strict code-size hard=0 / size_diff 新增 0 / clean-package 全过。变异：在 try 内注入 `assert False`，收窄后会报 `AssertionError`，换回旧宽 except 则显示 `SKIPPED`——证明收窄真的堵住了"吞断言"。详见 TESTS。
+
 ## G2b 拒绝路径的结构化类别判据（g2bfix2b，2026-10-04，分支 `worker/g2b-denial-client-fix`，基于 `3e698eb88`；9b 终审通过，已并入 step17j）
 
 - **9b 终审必须改（3a 挑入时修）**：飞书 `/ask` 被拒时 `_submit_gateway_payload` 调了两次 `_gateway_http_error_code(exc)`，响应体只能读一次，第二次读空，用户看到通用文案而不是“本机凭据无效或缺失”。改为先读一次存下原因码，码和文案共用；用例断言改为专用文案，并补“无码 401 走通用文案”的对照。9b 的进度游标落盘探针转正为 `test_progress_cursor_commit_failure_once_still_delivers_final`，钉住 g2bfix2b 新捕获面（底版异常会逃出 run_once）。

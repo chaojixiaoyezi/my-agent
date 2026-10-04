@@ -2,7 +2,9 @@ from __future__ import annotations
 
 """Runtime error visibility tests for gateway HTTP diagnostics."""
 
+import errno
 import json
+import socket
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -11,6 +13,26 @@ import pytest
 
 from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer
 from agent_py_agent.tests.test_gateway_http import MockGatewayPaths, find_free_port
+
+
+# LLM: 只允许"连不上刚起的回环 HTTP 服务"跳过；之前用 except Exception 会把断言失败也算成
+#   "跳过"，真实失败被藏起来。按 errno 白名单钉死，不把 ENOSPC 之类无关的 OSError 也算成环境原因。
+# 函数用途: 判断连回环 HTTP 失败是否属于本机环境不可用。
+def _connection_unavailable(exc: BaseException) -> bool:
+    if isinstance(exc, AssertionError):
+        return False
+    cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(cause, (socket.timeout, TimeoutError)):
+        return True
+    return getattr(cause, "errno", None) in _CONNECTION_ERRNOS
+
+
+#: 与 test_gateway_http 同口径：这些 errno 才代表"本机连不上回环服务"。
+_CONNECTION_ERRNOS = frozenset({
+    errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT,
+    errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT,
+    errno.EACCES, errno.EPERM,
+})
 
 
 @pytest.fixture
@@ -29,11 +51,8 @@ def http_server(mock_paths: MockGatewayPaths):
 
 def _read_status(port: int) -> dict:
     url = f"http://localhost:{port}/status"
-    try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            raw = response.read()
-    except Exception as exc:
-        pytest.skip(f"HTTP server not reachable: {exc}")
+    with urllib.request.urlopen(url, timeout=5) as response:
+        raw = response.read()
     return json.loads(raw.decode("utf-8"))
 
 
@@ -43,8 +62,11 @@ def _read_result(port: int, request_id: str) -> tuple[int, dict]:
         with urllib.request.urlopen(url, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        # 期望分支：非 2xx 也算"能连上服务"，读它的结构化错误体。
         return exc.code, json.loads(exc.read().decode("utf-8"))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 由 _connection_unavailable 收窄，断言失败照常报红
+        if not _connection_unavailable(exc):
+            raise
         pytest.skip(f"HTTP server not reachable: {exc}")
 
 

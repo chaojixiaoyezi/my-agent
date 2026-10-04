@@ -32,7 +32,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
+from agent_py_agent.agent.attempt.sandbox import (
+    AttemptExecutionSandbox,
+    AttemptSandboxSpec,
+    SandboxUnavailableError,
+)
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 from agent_py_agent.agent.workspace_read_context import WorkspaceReadContext
 
@@ -538,7 +542,8 @@ def test_real_network_off_readonly_and_ancestor_rules_hold_together(tmp_path):
         pytest.skip("平台沙箱不可用")
     try:
         sandbox.require_ready()
-    except Exception:
+    except SandboxUnavailableError:
+        # 只有"沙箱明确报告自己不可用"才算环境原因跳过；其它异常（含断言失败）照常报红。
         pytest.skip("本机沙箱无法切断网络")
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

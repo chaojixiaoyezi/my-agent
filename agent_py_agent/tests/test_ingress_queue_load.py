@@ -20,6 +20,7 @@ import pytest
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("psycopg")
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import InterfaceError, OperationalError  # noqa: E402
 
 from agent_py_agent.agent.ingress_queue import (  # noqa: E402
     IngressQueue,
@@ -36,7 +37,7 @@ def _fresh_queue(cfg: QueueConfig) -> IngressQueue:
         backend = StorageBackend(isolated_postgres_url())
         with backend.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS ingress_messages"))
-    except Exception as exc:  # pragma: no cover - 无 PG 环境
+    except (OperationalError, InterfaceError) as exc:  # pragma: no cover - 无 PG 环境
         pytest.skip(f"无可用 PostgreSQL: {type(exc).__name__}")
     queue = IngressQueue(backend, cfg)
     queue.ensure_schema()

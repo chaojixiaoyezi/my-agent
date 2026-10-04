@@ -1,5 +1,54 @@
 # 测试与发布验收
 
+## 补上 `POST /stop` 的前置条件（skipfix2，2026-10-04，同一分支 `worker/skipfix`，接在 `65366d700` 之后；已并入 step17j）
+
+- 3a 挑入后在沙箱外复跑改过的 10 个测试文件：216 passed、0 skipped（含整文件 test_host_files_access.py 与本机 PostgreSQL 那组）。
+
+- **为什么**：skipfix 收窄宽 except 后暴露出 `test_stop_endpoint` 一直拿 `HTTP Error 409`。**根因是测试缺前置条件，不是产品问题**——`MockGatewayPaths` 从不登记 gateway 进程身份，`handle_stop` 取不到身份就按设计回 409。不补的话 skipfix 一合进去车道就变红。
+- **改了什么**：只改 `agent_py_agent/tests/test_gateway_http.py`，**产品代码一行未改**。
+  1. `test_stop_endpoint` 重写成真正验证 `POST /stop`：先用产品自己的写 pid 入口 `write_pid_record(mock_paths.pid)` 登记身份（不手写文件格式），断言 `get_running_pid(...) == os.getpid()`；再请求并断言 200 与 `{"status": "stopping"}`；最后断言停止请求文件写在 `mock_paths.stop_request`、`target_process.pid` 等于登记的那个进程、`source == "gateway_http"`。
+  2. 新增对照用例 `test_stop_endpoint_without_process_identity_returns_409`：不写 pid 记录，断言回 **409**、响应体精确等于 `{"error": "gateway process identity unavailable"}`，且**不写**停止请求文件。这是有意的 fail-closed 产品行为，钉住它。
+- **安全前提（先核实再写，3a 点名要先核）**：
+  - `POST /stop` 自己**不发信号**：`handle_stop`（`http_handlers.py`）只调 `write_targeted_gateway_stop_request` 写一个"定向停止请求"JSON 文件；我 `inspect.getsource` 核过该函数体里**没有** `os.kill` / `signal.`。
+  - **唯一消费该文件的进程是 supervisor**：全仓 grep `stop_request`，读它的生产代码只有 `gateway_parts/supervisor.py`（`_monitor_until_stopped` / `_write_supervisor_stop_request`）与 `daemon_control.remove_gateway_stop_request_if_owned`；而 `run_supervisor` 只能从 `cli/supervisor.py` 进入（另两个调用点是 `supervisor.run()` 自身与 `cli`）。
+  - **测试路径不会起 supervisor**：`GatewayHTTPServer.start()` 只起一个 `ThreadingHTTPServer` 的 serve 线程（`http_service.py:391`），不启 supervisor；`test_gateway_http.py` 里 grep 不到任何 supervisor 引用。
+  - 结论：本用例写出的停止请求文件**没有任何监视循环去读**，不会给 pytest 或任何真实进程发信号，因此**不需要**替换型替身。运行时探针也复核过：写完定向停止请求后当前进程仍然活着。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds4-*`）：
+  - `agent_py_agent/tests/test_gateway_http.py` 整个文件：**24 passed、0 failed、0 skipped**（skipfix 时这里是 1 failed）。
+  - guards9（11 文件）全过；ruff All checks passed；`check_import_boundaries.py` findings=0；`check_doc_sync.py --base 1e1aadb80` DOC_SYNC_PASS；`git diff --check` 干净；strict code-size `hard=0 blocked=False`；size_diff **新增告警 0 / 消失 43**；clean-package OK。
+- **变异 2 个，全 KILLED**（脚本 `/private/tmp/claude-501/skipfix2/mutate.py`，只改 `http_handlers.py` 一处、跑完按原字节还原并校验一致）：
+  1. `handle_stop` 不写停止请求文件、直接回 200 → `test_stop_endpoint` 与 409 对照用例**都变红**。
+  2. 把 409 改成 200 → 409 对照用例**变红**。
+- **未验证**：真实 Gateway 进程的 `POST /stop` 端到端（规则禁止连真实 Gateway）；本用例只覆盖到"写文件"这一段，真实停机由 supervisor 消费，未在沙箱内触发。
+
+## 测试卫生：把"环境不可用才跳过"的宽 except 收窄（skipfix，2026-10-04，分支 `worker/skipfix`，基于 17j 头 `1e1aadb80`）
+
+- **来源**：9b 终审顺带指出——有些用例用 `except Exception: pytest.skip(...)` 包住整段，连断言失败（`AssertionError`）也会被显示成"跳过"，把真实失败藏起来。`test_gateway_http` 里那条 409 的跳过就是这种。
+- **改法**：逐处把宽 except 收窄成"环境真的不可用"的精确类型，**不新增 skip、不放宽断言、不改用例原意**。10 个文件、16 处。
+
+| 文件 | 原宽 except | 收窄成 |
+| --- | --- | --- |
+| `test_gateway_http.py`（5 处） | `except Exception as e: pytest.skip(...)` | `except Exception` + `_connection_unavailable(e)` 判定，否则 `raise`；按 errno 白名单（ECONNREFUSED/ECONNRESET/ECONNABORTED/ETIMEDOUT/EHOSTUNREACH/ENETUNREACH/EADDRNOTAVAIL/EAFNOSUPPORT/EACCES/EPERM）与 `socket.timeout` |
+| `test_gateway_http_runtime_errors.py`（2 处） | 同上 | `_read_status` 去掉 try（直接抛）；`_read_result` 保留 `HTTPError` 期望分支，其余同上门限 |
+| `test_host_files_access.py`（1 处） | `except Exception: pytest.skip("本机沙箱无法切断网络")` | `except SandboxUnavailableError`（`require_ready()` 唯一会抛的类型） |
+| `test_pg_rls.py` / `test_pgvector_store.py` / `test_migrations.py` / `test_storage_backend.py`（2 处）/ `test_ingress_queue.py` / `test_ingress_queue_load.py` / `test_distributed_lock.py`（共 8 处） | `except Exception as exc: pytest.skip("无可用 PostgreSQL...")` | `except (OperationalError, InterfaceError) as exc`（SQLAlchemy 对"连不上库/驱动层失败"的包装；断言与 SQL 逻辑错误不在其中） |
+
+- **顺带**：`test_gateway_http.py` 里 7 处函数内 `import urllib.request` 提到模块顶部（同一模块已用），去掉重复导入。
+- **未改**：`test_tool_operation_managed_gate.py:1013` 本来是 `except OSError`（只包 `os.symlink`、try 内无断言），已经正确，不动。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds4-*`）：
+  - 改进后的 10 个文件（除 `test_host_files_access.py` 与 `test_ingress_queue_load.py` 单独跑）：**90 passed、1 failed**。
+  - PG 组（`test_pg_rls` + `test_pgvector_store` + `test_migrations` + `test_storage_backend` + `test_distributed_lock`）：**21 passed**（本机有 PostgreSQL，真跑不 skip）。
+  - `test_ingress_queue.py` 15 passed；`test_ingress_queue_load.py` 4 passed；`test_host_files_access.py` 目标用例仍按窄口径正确跳过（"本机沙箱无法切断网络"）。
+  - guards9（11 文件）全过；ruff All checks passed；`check_import_boundaries.py` findings=0；`check_doc_sync.py --base 1e1aadb80` DOC_SYNC_PASS；`git diff --check` 干净；strict code-size `hard=0 blocked=False`；`size_diff.sh` **新增告警 0 / 消失 43**；clean-package OK。
+- **收窄暴露出来的失败（1 条，真失败，本任务只报告不修）**：
+  - `test_gateway_http.py::TestGatewayHTTPIntegration::test_stop_endpoint` → **`urllib.error.HTTPError: HTTP Error 409: Conflict`**。
+  - **这是既有失败，不是本次引入**：在基线 `1e1aadb80` 上用宽 except 跑同一条，跳过原因原文就是 `HTTP server not reachable: HTTP Error 409: Conflict`——同一个 409 一直存在，只是被宽 except 显示成了"跳过"。
+  - 根因（只读核对）：`gateway_parts/http_handlers.py:1827`，`POST /stop` 在拿不到 gateway 进程身份（`server.paths.pid` 没有可用的运行中 PID）时返回 `409 {"error": "gateway process identity unavailable"}`。测试用的 `MockGatewayPaths` 不提供 PID 文件，所以这条用例在本机必然命中 409；要让它变绿需要给测试补进程身份前置条件（产品或用例改动，超出"测试卫生"范围）。
+  - **后续（skipfix2，同一分支）：已修**。**是测试缺前置条件，不是产品问题**——`MockGatewayPaths` 从来没有登记过 gateway 进程身份，所以 `handle_stop` 取不到身份、按设计回 409。修法是让用例用产品自己的写 pid 入口登记身份（见下节），产品代码一行未改。
+- **变异验证**（证明收窄真的起作用）：在 `test_status_endpoint` 的 try 内注入 `assert False`——
+  - 收窄后：**报 `AssertionError`，真失败**；
+  - 换回原来那句 `except Exception: pytest.skip(...)`：**显示 `SKIPPED ... HTTP server not reachable: 注入的必然失败断言`**——断言失败被吞成跳过，正是本任务要修的行为。
+
 ## G2b 拒绝路径的结构化类别判据（g2bfix2b，2026-10-04，分支 `worker/g2b-denial-client-fix`，基于 `3e698eb88`；9b 终审通过，已并入 step17j）
 
 - 3a 挑入时按 9b 必须改修 `/ask` 读两次响应体：`test_ask_submission_auth_denial_becomes_credential_error` 断言改为“本机凭据无效或缺失”，`test_ask_submission_401_without_code_uses_generic_denial_code` 补通用文案对照；新增 `test_progress_cursor_commit_failure_once_still_delivers_final`（9b 探针转正）。

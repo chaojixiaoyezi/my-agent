@@ -21,6 +21,7 @@ from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
 
 def _pg_backend() -> StorageBackend:
     from sqlalchemy import text
+    from sqlalchemy.exc import InterfaceError, OperationalError
 
     from agent_py_agent.tests._postgres_test_schema import isolated_postgres_url
 
@@ -29,7 +30,7 @@ def _pg_backend() -> StorageBackend:
         with db.connect() as conn:
             conn.execute(text("SELECT 1"))
         return db
-    except Exception as exc:
+    except (OperationalError, InterfaceError) as exc:
         pytest.skip(f"无可用 PostgreSQL: {type(exc).__name__}")
 
 

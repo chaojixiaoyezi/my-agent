@@ -12,6 +12,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import InterfaceError, OperationalError  # noqa: E402
 
 from agent_py_agent.agent.migrations import Migration, MigrationError, MigrationRunner  # noqa: E402
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
@@ -83,7 +84,7 @@ def test_migration_on_real_postgres() -> None:
         db = StorageBackend(url)
         with db.connect() as conn:
             conn.execute(text("SELECT 1"))
-    except Exception as exc:
+    except (OperationalError, InterfaceError) as exc:
         pytest.skip(f"无可用 PostgreSQL 做真测: {type(exc).__name__}")
     tbl = "test_mig_items_tier0"
     with db.begin() as conn:

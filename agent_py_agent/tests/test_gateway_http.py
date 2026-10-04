@@ -7,11 +7,37 @@ import json
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+
+# LLM: 这几个用例要连自己刚起的回环 HTTP 服务；唯一允许"跳过"的原因是本机环境连不上
+#   （端口没监听 / 连接被拒 / 连接超时 / 回环地址不可用 / 权限不允许建连）。之前写成 except Exception，
+#   连 assert 失败（AssertionError）都会被吞成"跳过"，把真实失败藏起来——9b 终审点出的正是这种。
+#   这里按 **errno 白名单**钉死，而不是"凡是 OSError 都算"：OSError 还包括 ENOSPC（写满）、
+#   EIO 之类与"连不上"无关的失败，把它们也算成环境原因等于换个方式继续藏问题。
+# 函数用途: 判断连回环 HTTP 服务失败的异常是否属于"本机连不上"，供 skip 分支使用。
+#: 只认这些 errno 代表"本机环境连不上回环服务"；其余 OSError 一律当真实失败抛出。
+_CONNECTION_ERRNOS = frozenset({
+    errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT,
+    errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT,
+    errno.EACCES, errno.EPERM,
+})
+
+
+def _connection_unavailable(exc: BaseException) -> bool:
+    if isinstance(exc, AssertionError):
+        return False
+    # URLError 把底层原因放在 .reason 里（urlopen 连不上时就是 ConnectionRefusedError）；先剥一层。
+    cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(cause, (socket.timeout, TimeoutError)):
+        return True
+    err = getattr(cause, "errno", None)
+    return err in _CONNECTION_ERRNOS
 
 
 # Mock GatewayPaths for testing
@@ -248,7 +274,6 @@ class TestGatewayHTTPIntegration:
 
     def test_status_endpoint(self, http_server, mock_paths: MockGatewayPaths):
         """GET /status returns gateway status."""
-        import urllib.request
 
         server, port = http_server
         url = f"http://localhost:{port}/status"
@@ -260,12 +285,13 @@ class TestGatewayHTTPIntegration:
                 data = json.loads(response.read().decode("utf-8"))
                 assert "status" in data
                 assert "requests" in data
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 由 _connection_unavailable 收窄，断言失败照常报红
+            if not _connection_unavailable(e):
+                raise
             pytest.skip(f"HTTP server not reachable: {e}")
 
     def test_metrics_endpoint_exposes_concurrency_probes(self, http_server):
         """GET /metrics 暴露 Prometheus 文本(§6-A 量化端点):并发探针指标名可被抓取。"""
-        import urllib.request
 
         from agent_py_agent.agent.observability.concurrency_metrics import gateway_worker_busy
 
@@ -282,7 +308,6 @@ class TestGatewayHTTPIntegration:
 
     def test_status_endpoint_uses_hot_request_counts(self, http_server, mock_paths: MockGatewayPaths):
         """GET /status only reports hot queue counts for frequent polling."""
-        import urllib.request
 
         _, port = http_server
         mock_paths.inbox.mkdir(parents=True, exist_ok=True)
@@ -303,7 +328,6 @@ class TestGatewayHTTPIntegration:
 
     def test_ask_endpoint(self, http_server, mock_paths: MockGatewayPaths):
         """POST /ask creates a pending request."""
-        import urllib.request
 
         server, port = http_server
         url = f"http://localhost:{port}/ask"
@@ -316,12 +340,13 @@ class TestGatewayHTTPIntegration:
                 data = json.loads(response.read().decode("utf-8"))
                 assert "request_id" in data
                 assert data["status"] == "queued"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 由 _connection_unavailable 收窄，断言失败照常报红
+            if not _connection_unavailable(e):
+                raise
             pytest.skip(f"HTTP server not reachable: {e}")
 
     def test_result_not_found(self, http_server, mock_paths: MockGatewayPaths):
         """GET /result/<id> returns 404 for unknown request."""
-        import urllib.request
 
         server, port = http_server
         url = f"http://localhost:{port}/result/nonexistent_id"
@@ -331,15 +356,27 @@ class TestGatewayHTTPIntegration:
                 assert response.status == 404
         except urllib.error.HTTPError as e:
             assert e.code == 404
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 由 _connection_unavailable 收窄，断言失败照常报红
+            if not _connection_unavailable(e):
+                raise
             pytest.skip(f"HTTP server not reachable: {e}")
 
     def test_stop_endpoint(self, http_server, mock_paths: MockGatewayPaths):
-        """POST /stop initiates graceful shutdown."""
-        import urllib.request
+        """POST /stop：有进程身份时回 200 并写出定向停止请求（自己不发信号）。"""
+        import os
+
+        from agent_py_agent.agent.gateway_parts.daemon_control import (
+            get_running_pid,
+            write_pid_record,
+        )
 
         server, port = http_server
         url = f"http://localhost:{port}/stop"
+
+        # 用产品自己的写 pid 入口登记身份（不手写格式）：handle_stop 据它取当前 Gateway 的进程身份。
+        write_pid_record(mock_paths.pid)
+        assert get_running_pid(mock_paths.pid, cleanup_stale=False) == os.getpid()
+        assert not mock_paths.stop_request.exists(), "前置：本次调用前不该有停止请求文件"
 
         try:
             req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"})
@@ -347,13 +384,36 @@ class TestGatewayHTTPIntegration:
                 assert response.status == 200
                 data = json.loads(response.read().decode("utf-8"))
                 assert data["status"] == "stopping"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 由 _connection_unavailable 收窄，断言失败照常报红
+            if not _connection_unavailable(e):
+                raise
             pytest.skip(f"HTTP server not reachable: {e}")
+
+        # 停止请求确实写在 mock_paths 下，且目标进程就是刚登记的那个——服务端只写文件，不发信号。
+        assert mock_paths.stop_request.exists(), "POST /stop 应写出定向停止请求文件"
+        payload = json.loads(mock_paths.stop_request.read_text(encoding="utf-8"))
+        assert payload["target_process"]["pid"] == os.getpid()
+        assert payload["source"] == "gateway_http"
+
+    def test_stop_endpoint_without_process_identity_returns_409(self, http_server, mock_paths: MockGatewayPaths):
+        """没有进程身份时 POST /stop 回 409：这是有意的产品行为（宁可拒绝也不发无定向的停止请求）。"""
+        server, port = http_server
+        url = f"http://localhost:{port}/stop"
+
+        # 不写 pid 记录：handle_stop 拿不到当前 Gateway 身份，必须 fail-closed。
+        assert not mock_paths.pid.exists(), "前置：本用例必须不带进程身份"
+
+        req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req, timeout=5)
+        assert exc_info.value.code == 409
+        body = json.loads(exc_info.value.read().decode("utf-8"))
+        assert body == {"error": "gateway process identity unavailable"}
+        assert not mock_paths.stop_request.exists(), "被拒绝时不该写出停止请求文件"
 
     def test_unknown_endpoint_returns_404(self, http_server, mock_paths: MockGatewayPaths):
         """Unknown endpoints return 404."""
         import urllib.error
-        import urllib.request
 
         server, port = http_server
         url = f"http://localhost:{port}/unknown"
@@ -362,7 +422,9 @@ class TestGatewayHTTPIntegration:
             with pytest.raises(urllib.error.HTTPError) as exc_info:
                 urllib.request.urlopen(url, timeout=5)
             assert exc_info.value.code == 404
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 由 _connection_unavailable 收窄，断言失败照常报红
+            if not _connection_unavailable(e):
+                raise
             pytest.skip(f"HTTP server not reachable: {e}")
 
 

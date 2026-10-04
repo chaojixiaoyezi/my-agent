@@ -12,6 +12,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import InterfaceError, OperationalError  # noqa: E402
 
 from agent_py_agent.agent.pg_rls import enable_tenant_rls  # noqa: E402
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
@@ -27,7 +28,7 @@ def _pg() -> StorageBackend:
         with db.connect() as conn:
             conn.execute(text("SELECT 1"))
         return db
-    except Exception as exc:
+    except (OperationalError, InterfaceError) as exc:
         pytest.skip(f"无可用 PostgreSQL 做 RLS 真测: {type(exc).__name__}")
 
 

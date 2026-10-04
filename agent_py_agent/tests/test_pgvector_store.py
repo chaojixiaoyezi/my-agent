@@ -12,6 +12,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import InterfaceError, OperationalError  # noqa: E402
 
 from agent_py_agent.agent.retrieval.pgvector_store import PgVectorStore  # noqa: E402
 from agent_py_agent.agent.storage_backend import StorageBackend  # noqa: E402
@@ -26,7 +27,7 @@ def _pg_with_vector() -> StorageBackend:
         with db.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         return db
-    except Exception as exc:  # 无 PG / 无 pgvector / 无建扩展权限 → 跳过(不假测)
+    except (OperationalError, InterfaceError) as exc:  # 无 PG / 无 pgvector / 无建扩展权限 → 跳过(不假测)
         pytest.skip(f"无可用 PostgreSQL+pgvector 做真测: {type(exc).__name__}")
 
 
