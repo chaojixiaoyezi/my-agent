@@ -26,14 +26,22 @@ _HOST_PATH_TOKEN = re.compile(r"(?:^|[^\w.\-]|(?<=\.\.))(~[/\\]|[A-Za-z]:[\\/]|/
 
 
 # LLM: 只在有错误样例时才计算替换表；target / inputs 的相对形式沿用运行器入账口径（工作区外的只留文件名）。
-# 函数用途: 返回 location 已脱敏的检查结果。
+#   hint 与 location 同源同类（检查程序写的任意文字），用同一替换表脱敏；两个字段之外不保留其它键。
+# 函数用途: 返回 location 与 hint 都已脱敏的检查结果。
 def redact_error_samples(result: object, request: object, temp_dir: str) -> object:
     samples = getattr(result, "error_samples", ())
     if not samples:
         return result
     replacements = _path_replacements(request, temp_dir)
-    return replace(result, error_samples=tuple(
-        {"code": item["code"], "location": redact_location(item["location"], replacements)} for item in samples))
+    return replace(result, error_samples=tuple(_redact_sample(item, replacements) for item in samples))
+
+
+# 函数用途: 脱敏一条错误样例的位置和可选修改提示，其余键不保留。
+def _redact_sample(item: dict, replacements: list[tuple[str, str]]) -> dict:
+    row = {"code": item["code"], "location": redact_location(item["location"], replacements)}
+    if item.get("hint"):
+        row["hint"] = redact_location(item["hint"], replacements)
+    return row
 
 
 # 函数用途: 按替换表逐个替换，再把仍含宿主路径的整条置成 <redacted>。

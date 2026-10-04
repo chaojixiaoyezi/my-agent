@@ -72,9 +72,10 @@ v7 能力包可选块，由 `agent/capability_verification_manifest.py` 校验�
   - 宿主触发检查程序前先显式调用 `require_ready()`，不就绪时一个进程都不起。
   - 检查程序只由宿主触发，模型只看到结论摘要。插件管理工具对模型不可见，模型拿不到确认码。
 - **成员原件**：从已安装的包 blob 按 sha256 读出成员字节（`read_capability_member` 一类入口，核对激活代次），放进宿主临时目录，用宿主自己的 Python（`-I -S`）运行。工作区里的副本一律不用。
-- **输出合同**：stdout 是一个 JSON 对象（不超过 1 MB，日志写 stderr），`schema=pack_verifier_result.v1`，内容 `{valid, errors[{code, location}], warnings[{code, location}], metrics}`。
+- **输出合同**：stdout 是一个 JSON 对象（不超过 1 MB，日志写 stderr），`schema=pack_verifier_result.v1`，内容 `{valid, errors[{code, location, hint?}], warnings[{code, location}], metrics}`。
   - 宿主只读 `valid`、code 和计数，不解释 message，也不读 `metrics`。code 是非空字符串，不超过 128 字符；不同 code 最多 64 个，超出的计入 `_other`。
   - 为了让返工提示能定位，宿主保留前 10 条错误的 code 和 `location`（去掉控制字符、截到 128 字符），转给模型，自己不解释。
+  - 错误项可以带一个可选字段 `hint`（字符串，检查程序写的修改提示；3a 2026-10-04 统一合同，ds7 的 B 包 0.3.2 按同一合同输出）：宿主只转这一个自由文本字段，别的自由文本字段（如 message）一律不转；转给模型前换行压成空格、去掉控制字符和双向控制符、最多 200 个字符（超了截到 199 个字符加省略号）；清洗后为空的 hint 不出现；hint 与 `location` 同源同类，走同一套宿主路径脱敏（`pack_verifier_redaction.py`），并且不参与判定和计数——判定只看 code。宿主通知（HostNotice）不带 hint，hint 只进给模型的返工提示（附在对应错误后面）。
   - `location` 是检查程序写的任意文字，转给模型前宿主先脱敏宿主路径（9b 复审 F4，`capability/pack_verifier_redaction.py`）：
     - 目标和输入换成工作区相对路径，工作区根前缀去掉；
     - 本次临时目录换成 `<verifier>`，宿主解释器换成 `<python>`；

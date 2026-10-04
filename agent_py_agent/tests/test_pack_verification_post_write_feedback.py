@@ -10,10 +10,14 @@
 from __future__ import annotations
 
 import json
+import types
+from pathlib import Path
 
 import pytest
 
 from agent_py_agent.agent.capability import pack_verification_service as service
+from agent_py_agent.agent.capability import pack_verifier_redaction as redaction
+from agent_py_agent.agent.capability import pack_verifier_runner as runner
 from agent_py_agent.agent.capability.pack_verification_hooks import (
     attach_post_write_verification,
     capture_baseline_before_tool,
@@ -192,3 +196,83 @@ def test_error_and_not_run_results_do_not_count_toward_the_streak(env, monkeypat
     paused = _write(env.workspace / "out/d.json", {"schema": "delivery.v1", "outcome": "failed", "v": "paused"})
     assert _post_write(env, paused)["reason_code"] == "post_write_feedback_limit", "凑够 6 次真实失败才暂停"
     assert len(calls) == len(sequence) + 1
+
+
+# ---- 检查程序修改提示（hint）转进返工提示（3a 2026-10-04 统一合同）----
+
+
+# 函数用途: 造一个错误样例带可选 hint 的失败结果（不经过解析层，直接测返工提示拼装）。
+def _hinted_result(samples: list) -> PackVerificationResult:
+    return PackVerificationResult("check", "story-content", "failed", target="out/d.json", valid=False,
+                                  error_counts={"pointer_mismatch": 1}, error_samples=tuple(samples))
+
+
+def test_rework_text_keeps_old_text_without_hint_and_appends_hint_with_it():
+    plain = _hinted_result([{"code": "pointer_mismatch", "location": "/shots/0/reference_ids"}])
+    expected = ("宿主用钉住的能力包原版检查程序核验了本回合写出的交付物，下面这些仍有错误：\n"
+                "- out/d.json（story-content  · check）：错误 1 条：pointer_mismatch @ /shots/0/reference_ids\n"
+                "请按这些错误码和位置修正交付物，再结束本回合。检查结论以宿主为准；不要复制、改写或自己编写检查程序来代替。")
+    assert service._rework_text([plain]) == expected, "没有 hint 时与旧格式逐字相同"
+    hinted = _hinted_result([{"code": "pointer_mismatch", "location": "/shots/0/reference_ids",
+                              "hint": "所在对象是 SH01，这里写的是 reference_ids"}])
+    assert ("pointer_mismatch @ /shots/0/reference_ids"
+            "（所在对象是 SH01，这里写的是 reference_ids）") in service._rework_text([hinted])
+
+
+def test_error_samples_clean_and_truncate_hint():
+    raw = "第一行\n第二行\r\n第三行\u2028四行\x07\x1b[31m红\u202e反向\u200f"
+    [sample] = runner._error_samples([{"code": "c1", "location": "L", "hint": raw}])
+    assert sample["hint"] == "第一行 第二行 第三行 四行[31m红反向"
+    [long] = runner._error_samples([{"code": "c1", "location": "L",
+                                     "hint": "长" * (runner.MAX_VERIFIER_HINT_CHARS + 50)}])
+    assert len(long["hint"]) == runner.MAX_VERIFIER_HINT_CHARS and long["hint"].endswith("…")
+    [bare] = runner._error_samples([{"code": "c1", "location": "L"}])
+    assert "hint" not in bare, "没有 hint 时不写键，旧形状逐字不变"
+    [blank] = runner._error_samples([{"code": "c1", "location": "L", "hint": "\x00\x07"}])
+    assert "hint" not in blank, "清洗后为空的 hint 不写键"
+
+
+def test_hint_does_not_change_verdict_or_counts():
+    def stdout(hint):
+        error = {"code": "pointer_mismatch", "location": "/shots/0/x"}
+        if hint is not None:
+            error["hint"] = hint
+        return json.dumps({"schema": "pack_verifier_result.v1", "valid": False, "errors": [error], "warnings": []})
+
+    base = {"verifier_id": "check", "package_id": "story-content"}
+    plain = runner._parsed_result(stdout(None), dict(base))
+    hinted = runner._parsed_result(stdout("期望是 SH01"), dict(base))
+    assert (plain.status, plain.valid, plain.error_counts, plain.warning_counts) == (
+        hinted.status, hinted.valid, hinted.error_counts, hinted.warning_counts), "判定与计数只看 code"
+    assert plain.error_samples[0].get("hint") is None and hinted.error_samples[0]["hint"] == "期望是 SH01"
+
+
+def test_hint_is_redacted_with_the_same_host_path_replacements():
+    request = types.SimpleNamespace(workspace_root="/w/ws", target=Path("/w/ws/out/d.json"), inputs=())
+    result = PackVerificationResult("check", "story-content", "failed", error_samples=(
+        {"code": "c1", "location": "L", "hint": "文件 /w/ws/out/d.json 里的字段错了"},
+        {"code": "c2", "location": "L2", "hint": "期望是 SH01"},
+    ))
+    redacted = redaction.redact_error_samples(result, request, "/tmp/pack-verifier-abc")
+    assert redacted.error_samples[0]["hint"] == "文件 out/d.json 里的字段错了"
+    assert redacted.error_samples[1]["hint"] == "期望是 SH01"
+
+
+def test_closeout_rework_text_carries_hint_end_to_end(env, monkeypatch):
+    def run(request):
+        bad = json.loads(request.target.read_text()).get("bad") is True
+        target = request.target.relative_to(request.workspace_root).as_posix()
+        samples = ({"code": "pointer_mismatch", "location": "/shots/0/reference_ids",
+                    "hint": "所在对象是 SH01，这里写的是 reference_ids"},) if bad else ()
+        return PackVerificationResult(request.verifier_id, request.installation.manifest.plugin_id,
+                                      "failed" if bad else "passed",
+                                      package_version=request.installation.manifest.version,
+                                      member="scripts/check.py", target=target, valid=not bad,
+                                      error_counts={"pointer_mismatch": 1} if bad else {}, error_samples=samples)
+
+    monkeypatch.setattr(service, "run_pack_verifier", run)
+    _write_bad(env, 0)
+    text = closeout_rework_block(env.agent, env.params)
+    assert "pointer_mismatch @ /shots/0/reference_ids（所在对象是 SH01，这里写的是 reference_ids）" in text
+    last = [row for row in env.ledger.records() if row["kind"] == "result"][-1]
+    assert last["fact"]["error_samples"][0]["hint"] == "所在对象是 SH01，这里写的是 reference_ids"

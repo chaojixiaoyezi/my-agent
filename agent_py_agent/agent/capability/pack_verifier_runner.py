@@ -49,6 +49,10 @@ MAX_VERIFIER_SUMMARY_CODES_COUNT = 5
 MAX_VERIFIER_ERROR_SAMPLES_COUNT = 10
 # 错误样例里位置文字的字符上限；位置由检查程序给出，宿主不解释，只截断后转给模型定位。
 MAX_VERIFIER_LOCATION_CHARS = 128
+# 错误样例里修改提示（hint）的字符上限（3a 2026-10-04 统一合同）：超了截到上限-1 加省略号，总长不超上限。
+MAX_VERIFIER_HINT_CHARS = 200
+# 双向控制符：可能颠倒显示顺序或伪装文本，转给模型前必须去掉（与换行、控制字符同批清洗）。
+_BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 # 沙箱超时回收后返回的退出码（AttemptExecutionSandbox.run 的 TERM→KILL 约定）。
 _SANDBOX_TIMEOUT_EXIT_CODE = 143
 
@@ -284,14 +288,34 @@ def _parsed_result(stdout: str, base: dict) -> PackVerificationResult:
 
 
 # LLM: 只在 _code_counts 已确认每项都有合法 code 之后调用；location 不是字符串就记空串，去掉控制字符并截断。
-# 函数用途: 取前几条错误的 code 和位置，供返工提示定位。
+#   hint 是检查程序给的修改提示（可选、字符串，3a 2026-10-04 统一合同）：只取这一个自由文本字段，别的键一律不转；
+#   先按 _clean_hint 清洗（换行压空格、去控制字符和双向控制符、最多 MAX_VERIFIER_HINT_CHARS 个字符），清洗后为空不写键；
+#   hint 不参与判定与计数（判定只看 code，见 _code_counts）；宿主路径脱敏由 pack_verifier_redaction 在结果入账前统一做。
+# 函数用途: 取前几条错误的 code、位置和可选修改提示，供返工提示定位。
 def _error_samples(items: list) -> tuple[dict, ...]:
     samples = []
     for item in items[:MAX_VERIFIER_ERROR_SAMPLES_COUNT]:
         location = item.get("location") if isinstance(item.get("location"), str) else ""
         cleaned = "".join(char for char in location if ord(char) >= 32 and ord(char) != 127)
-        samples.append({"code": item["code"], "location": cleaned[:MAX_VERIFIER_LOCATION_CHARS]})
+        sample = {"code": item["code"], "location": cleaned[:MAX_VERIFIER_LOCATION_CHARS]}
+        hint = _clean_hint(item.get("hint") if isinstance(item.get("hint"), str) else "")
+        if hint:
+            sample["hint"] = hint
+        samples.append(sample)
     return tuple(samples)
+
+
+# LLM: hint 与 location 同源（检查程序写的任意文字），转给模型前按统一合同机械清洗：\r\n、\r、\n 和 Unicode 行分隔符
+#   （U+2028/U+2029）压成空格，再去掉其余控制字符（C0、DEL、C1）和双向控制符；最多 MAX_VERIFIER_HINT_CHARS 个字符，
+#   超了取前 MAX_VERIFIER_HINT_CHARS-1 个加省略号（总长不超上限）。不做路径脱敏（redaction 统一做）、不解释内容。
+# 函数用途: 把检查程序给的修改提示清成可安全转给模型的一行文本。
+def _clean_hint(text: str) -> str:
+    spaced = text
+    for newline in ("\r\n", "\r", "\n", "\u2028", "\u2029"):
+        spaced = spaced.replace(newline, " ")
+    cleaned = "".join(char for char in spaced
+                      if not (ord(char) < 32 or 0x7F <= ord(char) <= 0x9F) and char not in _BIDI_CONTROLS)
+    return cleaned if len(cleaned) <= MAX_VERIFIER_HINT_CHARS else cleaned[: MAX_VERIFIER_HINT_CHARS - 1] + "…"
 
 
 # 函数用途: 在字节上限内把 stdout 解析成 JSON 对象，失败返回 None。

@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，待复审）
+
+- **改了什么**：检查程序每条错误可选带 `hint`（字符串）；宿主只转这一个自由文本字段——换行压空格、去控制字符和双向控制符、最多 200 个字符（超了截到 199 加省略号）；无 hint 照旧；hint 走与 location 相同的宿主路径脱敏；判定与计数只看 code。改动：`pack_verifier_runner.py`（`_error_samples` / `_clean_hint` / 两个新常数）、`pack_verifier_redaction.py`（`_redact_sample`）、`pack_verification_service.py`（`_sample_text`）；合同写进 `docs/design/CAPABILITY_PACKS_V2.md` 第 3 节输出合同。
+- **用例**（`agent_py_agent/tests/test_pack_verification_post_write_feedback.py` 新增 5 条）：
+  - `test_rework_text_keeps_old_text_without_hint_and_appends_hint_with_it`：无 hint 时返工提示与旧格式逐字相同；有 hint 附在对应错误后面（`code @ location（hint）`）。
+  - `test_error_samples_clean_and_truncate_hint`：换行（含 U+2028）压成空格、控制字符和双向控制符去掉；超长截到 200（含省略号）；无 hint / 清洗后为空不写键（旧形状逐字不变）。
+  - `test_hint_does_not_change_verdict_or_counts`：同样 code，有没有 hint 的 status/valid/计数相同。
+  - `test_hint_is_redacted_with_the_same_host_path_replacements`：hint 里工作区绝对路径换成相对路径，普通文本原样。
+  - `test_closeout_rework_text_carries_hint_end_to_end`：走收尾核验链路，返工提示和账本里都带 hint。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-phh`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_pack_verification_post_write_feedback.py agent_py_agent/tests/test_pack_verification_service.py -q --tb=short -p no:cacheprovider` → **66 passed, 2 skipped**（2 条真实沙箱用例按环境限制 skip：本机沙箱不允许嵌套 Seatbelt，3a 在沙箱外复核）。
+  - guards9（10 文件）→ **173 passed**；`check_import_boundaries.py` → findings=0；ruff → All checks passed；`check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check` 干净；strict code-size → hard=0 blocked=False（报告已还原不提交）；size_diff → **新增告警 0 / 消失 31**；clean-package → OK。
+- **变异 3 个（全 KILLED，按原字节还原）**：M1 去掉截断 → 截断断言失败（250≠200）；M2 去掉清洗 → 清洗断言失败（换行/控制符原样）；M3 把 hint 当判定条件（有 hint 判 `verifier_output_invalid`）→ 判定用例失败（failed vs error）。
+- **未验证**：真实沙箱链路（见上）；ds7 新检查程序（B 包 0.3.2）端到端未跑。
+
 ## 屏幕观察只看档（vho，2026-10-04，分支 `worker/vh-observe-only`，基于 `d05a0d075`）
 
 - 改了什么：`computer_use_mcp_servers` 新增结构化档位参数 `observe_only`（只看档用单独一份声明表，只含 `observe_window`），`core.py` 由两个开关派生档位；适配器把上游 import 收进 `_load_upstream()` 只在完整档调用，`build_adapter_server` 按标记与档位只注册 `observe_window`；新增 `OBSERVE_ONLY_ENV_FLAG`。`agent_config.yaml` 与 `AgentConfig` 注释改写为四档语义并同步前端配置目录。

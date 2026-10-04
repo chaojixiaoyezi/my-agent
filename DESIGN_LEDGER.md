@@ -1,5 +1,18 @@
 # 设计台账
 
+## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，ds7 初审可以交终审（变异 5/5），9b 看脱敏与清洗两处，已并入 step17j）
+
+- **背景**：能力包重跑里 B 包两例不合格，都是交接文件的一个字段填错；检查程序报了错、宿主核验判失败、返工了好几次，模型还是改不对——返工提示里每条错误只有 code 和 location，看不出“应该填什么”。ds7 在做 B 包 0.3.2：检查程序的报错会带上期望值（hint），宿主不转模型就看不到。
+- **统一合同（3a 2026-10-04 定，ds7 按同一合同改检查程序）**：检查程序 host JSON 输出里，每条错误可以带一个可选字段 `hint`（字符串）；宿主生成返工提示时，有 hint 就附在这条错误后面——去掉控制字符和双向控制符、换行压成空格、最多 200 个字符（超了截到 199 加省略号）；没有 hint 的错误照旧；只转 hint 这一个自由文本字段，别的自由文本一律不转；判定和计数照旧只看 code，不看 hint。
+- **改了什么**：
+  - `capability/pack_verifier_runner.py`：`_error_samples` 读取可选 `hint`，经 `_clean_hint` 清洗+截断后存进错误样例（无 hint 或清洗后为空不写键，旧形状逐字不变）；hint 不参与判定（`_code_counts`/`valid` 逻辑不动）；`MAX_VERIFIER_HINT_CHARS=200`、`_BIDI_CONTROLS` 为新常数。
+  - `capability/pack_verifier_redaction.py`：`redact_error_samples` 对 hint 复用与 location 相同的宿主路径替换表（新 `_redact_sample`），仍含宿主路径的整条置 `<redacted>`（与 location 同口径；hint 与 location 同源同类，不能开新泄露口）。
+  - `capability/pack_verification_service.py`：`_rework_text` 用新 `_sample_text` 把 hint 附在对应错误后面（`code @ location（hint）`）。
+  - 宿主通知（HostNotice）不带 hint：`pack_verification_notice_text` 只读计数/状态字段、不读 error_samples，本批不改它。
+- **处理位置说明**：清洗与截断放在解析层（`_error_samples`）而不是提示拼装层——hint 与 location 一样会进账本、写工具回执和返工提示，入口统一规范化可避免同一字段四处各自处理；判定/计数仍只看 code。
+- **验证**：见 TESTS.md 同名节（新增 5 条用例，变异 3 个全 KILLED）。
+- **未验证**：真实沙箱链路（本机沙箱不允许嵌套 Seatbelt，两条真实沙箱用例 skip，3a 在沙箱外复核）；ds7 的新检查程序端到端（B 包 0.3.2 重跑时看）。
+
 ## 屏幕观察只看档（vho，2026-10-04，分支 `worker/vh-observe-only`，基于生产版 `d05a0d075`；3a 真机实测通过（全新环境按清单安装、只交 observe_window、解锁时真实观察 44 个候选），待交叉复审与 9b 终审，已并入 step17j）
 
 - **起因**：生产按计划只装了观察要用的依赖（pyobjc 三件套、mss、rapidocr、pillow），没装 pyautogui 与 computer-control-mcp。3a 真机核对发现：按生产开关组合起适配器，`computer_use_server.py` 顶层 `import pyautogui` 直接失败，适配器退出，一个工具都交不出来——观察核心本身没问题。

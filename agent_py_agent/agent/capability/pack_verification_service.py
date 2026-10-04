@@ -353,7 +353,8 @@ def _cache_key(package: PinnedVerificationPackage, verifier: VerifierDeclaration
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()[:32]
 
 
-# LLM: 返工提示只列结构化事实（目标、包、检查程序、错误数、错误码和检查程序给的位置），不复述模型的说法，不给修改方案。
+# LLM: 返工提示只列结构化事实（目标、包、检查程序、错误数、错误码、检查程序给的位置和可选修改提示），不复述模型的说法，不给修改方案。
+#   hint 是检查程序给的修改提示（3a 2026-10-04 统一合同：只转这一个自由文本字段），运行器已清洗、脱敏、截断，这里只附在对应错误后面。
 #   样例列全（最多 MAX_REWORK_SAMPLES_COUNT 条），错误总数更多时写明还有几条没列出。
 # 函数用途: 生成一次返工提示。
 def _rework_text(failed: list[PackVerificationResult]) -> str:
@@ -361,12 +362,19 @@ def _rework_text(failed: list[PackVerificationResult]) -> str:
     for result in failed[:MAX_REWORK_TARGETS_COUNT]:
         shown = result.error_samples[:MAX_REWORK_SAMPLES_COUNT]
         total = sum(result.error_counts.values())
-        samples = "；".join(f"{item['code']} @ {item['location'] or '-'}" for item in shown)
+        samples = "；".join(_sample_text(item) for item in shown)
         more = f"（另有 {total - len(shown)} 条没列出）" if shown and total > len(shown) else ""
         lines.append(f"- {result.target}（{result.package_id} {result.package_version} · {result.verifier_id}）："
                      f"错误 {total} 条：{samples or '、'.join(sorted(result.error_counts))}{more}")
     lines.append("请按这些错误码和位置修正交付物，再结束本回合。检查结论以宿主为准；不要复制、改写或自己编写检查程序来代替。")
     return "\n".join(lines)
+
+
+# 函数用途: 拼一条错误样例文本；有检查程序给的修改提示就附在错误后面。
+def _sample_text(item: dict) -> str:
+    text = f"{item['code']} @ {item['location'] or '-'}"
+    hint = str(item.get("hint") or "")
+    return f"{text}（{hint}）" if hint else text
 
 
 # LLM: runtime_events 是可观测投影，账本才是本模块的权威；没有权威库或没有 run 行时跳过，写失败不打断。
