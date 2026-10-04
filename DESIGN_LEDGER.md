@@ -1,5 +1,16 @@
 # 设计台账
 
+## 17j 代码结构文档修补（cbt，2026-10-04，worker/codebase-tree-17j，基于 17j 头 1a21ae0d9，3a 核对删除行一致，已并入 step17j）
+
+- **背景**：17j 集成分支挑进十几个分支（B4/B6/B8/B9、锁收私与私有写整包、飞书脚本凭据、凭据头守卫、G2b、dsst、只看档、phh）。各分支在自己那里改过 `CODEBASE_TREE.md`，合进来时文档冲突两边都保留，出现漏条目与重复条目。
+- **核对方法**：`git diff --name-status d05a0d075 1a21ae0d9` → **37 个新增、135 个修改、无删除无改名**（所以不存在"删除/改名未同步"的情况）；再逐个把新增文件与 `CODEBASE_TREE.md` 的 Tree 段和关键文件说明段比对。
+- **补了什么**：
+  - Tree 段补 3 条漏条目：`agent_py_agent/tests/test_plugin_event_points.py`（B4 事件点投影）、`agent_py_agent/tests/test_plugin_event_display.py`（B6 账本与展示）、`agent_py_agent/tests/test_private_dirs_policy.py`（pdp 私有目录口径）。
+  - 关键文件说明段补 2 条：B4 事件点投影与 Gateway 装配（`plugin_events/points.py` + `gateway_parts/event_points.py`）及其组件验收；`common/json_io.py` 的私有写与私有锁整包（锁收私 + 私有写入两批 + pdp）及对应测试组。私有写整包此前在说明段**完全没有条目**。
+- **删了什么重复**：Tree 段内 4 条内容完全相同的重复行——`COMPACT_GENERATION_FACTS.md`、`TUI_INPUT_MEDIA.md` 各 1 条重复；`message_scan.py` 1 条（保留说明更完整的那条）。均为同清单段内同名同行文重复。
+- **未改**：`LLM_GUIDE.md` 的结构速览本轮核对后未发现需要修正处；其它同名条目（各目录下的 `__init__.py`、`declaration.json`、`README.md` 等）是不同目录的各自文件，不是重复。
+- **验证**：`check_doc_sync.py --base 1a21ae0d9` → DOC_SYNC_PASS；`git diff --check` 干净；ruff / import boundaries=0 / strict code-size hard=0 / size_diff 新增 0 / clean-package OK。只改文档，未跑测试。
+
 ## 插件门截断只能更严（trs，2026-10-04，3a 裁定；分支 `worker/truncation-stricter`，基于 17j 集成头 `1d394a308`；含 trs2 原因码口径和真值判断，luna2 复审中，已并入 step17j）
 
 - **起因**：b8tr 的“截断就直接 ask”把看得到片段里已有的拒绝也降成了确认——补丁删除段（本应 `deny`）被截断标记一冲就变 `ask`，判定被放松。3a 新裁定：截断只能更严，不能更松。

@@ -31,6 +31,8 @@
 |-- agent_py_agent/tests/test_plugin_event_gateway.py # B4 真实队列/控制回执/Gateway 请求观察与发布故障隔离
 |-- agent_py_agent/tests/test_plugin_event_runtime.py # B4 生产 Registry/宿主自动执行与真实子代理父链的三身份观察
 |-- agent_py_agent/tests/test_plugin_event_e2e.py # B4 假模型、真 Gateway/Agent/工具链与握手假插件六事件；拒绝组合待核对
+|-- agent_py_agent/tests/test_plugin_event_points.py # B4 事件点投影：字段白名单与默认不带正文、提示脱敏与截断、只授权信封才带 content、actors、关闭不投影不发布、发布异常不外泄、真实 handler 前后成对
+|-- agent_py_agent/tests/test_plugin_event_display.py # B6 事件账本与展示合同：plugin_gate.decided 只读查询、观察计数、/plugins info 四段、TUI/HTTP/IM 同文渲染与跨 owner 隔离
 |-- LICENSE                              # 主项目许可证
 |-- NOTICE                               # 适用的第三方版权与许可说明，随包发布
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
@@ -79,6 +81,7 @@
 |-- agent_py_agent/tests/test_memory_archive_permissions.py # memory_archive 写入 600/目录 700、已有文件收紧（不跟随符号链接）、失败计数与 owner 维护回执
 |-- agent_py_agent/tests/test_private_lock_permissions.py # 三套锁写法统一私有：json/jsonl/派工锁 600、父目录 700、存量 644 自愈、符号链接被拒、blocking=False 不变
 |-- agent_py_agent/tests/test_global_index_permissions.py # global_index 数据文件与目录私有：新建 600/700、预置 644 下次追加收紧且内容逐字节不变
+|-- agent_py_agent/tests/test_private_dirs_policy.py # pdp：_ensure_private_dir 缺失按 0700 建、已存在目录（含符号链接）一位不动、可配置路径指向用户目录时只新增 0600 文件、建目录点 umask 022 下仍 0700
 |-- agent_py_agent/tests/test_private_writes_conversation.py # 会话/用量宿主数据私有写入：0600/0700、存量收紧、内容逐字节不变
 |-- agent_py_agent/tests/test_private_writes_audit_events.py # 审计/事件/Gateway 历史私有写入与第四处锁写法：0600/700、存量锁自愈
 |-- agent_py_agent/tests/test_private_writes_collaboration.py # 协作账与 run workspace 私有写入：0600/0700、存量收紧、内容不变
@@ -183,10 +186,8 @@
     |-- DECISION_MODEL_INTEGRATION.md    # 可选决策模型的短期限、失败隔离、接入点、缓存与并行实施计划
     |-- DECISION_AUDIT_AND_ADMIN_CONTROLS.md # 决策点开关、超时自调上下限、选模型输入精简、统计行、统一审计与管理员管控
     |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
-    |-- COMPACT_GENERATION_FACTS.md      # 摘要生成来源、请求关联及旧检查点未知诊断边界（待实施）
     |-- COMPACT_MEDIA_POLICY.md          # 媒体会话压缩策略：归档引用主链、视觉摘要按结构化能力事实开启
     |-- TOOL_LOOP_DEPENDENCY_SPLIT.md   # 第8步模型响应、工具轮与Compact职责边界及参考核对
-    |-- COMPACT_GENERATION_FACTS.md    # 摘要生成来源、请求关联及旧检查点未知诊断边界
     |-- PLUGIN_LIFECYCLE.md              # 可装卸插件、动态命令、版本切换与故障回收的待实施方案
     |-- PLUGIN_PACKAGES.md               # 本地包静态校验与待接线的安装事实、隔离和撤销边界
     |-- PLUGIN_WORKSPACE_CONTEXT.md      # 逐次只读工作区协议、路径裁决与轻量 SDK 构建边界
@@ -203,7 +204,6 @@
     |-- MANAGED_PROCESS_STDIO.md         # 原 host 字节管道、激活资源归属及旧版本恢复边界
     |-- HOST_COMMAND_EXECUTION.md        # 显式命令复用原运行链的请求身份、重送和结果回读合同
     |-- PLUGIN_SAMPLE_ACCEPTANCE.md      # 10 个自有简易插件的来源、功能范围及真实 TUI 验收计划
-    |-- TUI_INPUT_MEDIA.md               # TUI 图片视频输入、owner 原件与发送预算合同
     |-- TUI_RESOURCE_LIFETIME.md         # TUI、HTTP 和空闲 owner 的资源寿命与规模验收边界
     |-- TUI_DESIGN.md                    # 终端布局、事件、输入与生命周期规范
     |-- SUBAGENT_PARALLEL_EXECUTION.md   # 父子独立工作、逐项交付与慢任务诊断边界
@@ -584,9 +584,8 @@ agent_py_agent/
 |   |   |-- store_io.py                 # 无 Store 依赖的 JSONL 读取、错误报告、路径与文件归档原语
 |   |   |-- store_layout.py             # 统一持久目录和路径、只读打开及扫描上下文组装
 |   |   |-- store_threads.py            # 线程身份、通道绑定、默认模型解析与 Compact 原子更新
-|   |   |-- message_scan.py             # 固定完整尾界、有字节预算的消息页和流式幂等查找
+|   |   |-- message_scan.py             # 同 canonical 文件的固定尾界分页、字节限额与流式幂等扫描
 |   |   |-- store_messages.py           # 消息幂等追加、展示检查点及字节游标读取
-|   |   |-- message_scan.py             # 同canonical文件的固定尾界分页、字节限额与流式幂等扫描
 |   |   |-- message_selection.py        # 固定EOF两遍来源校验与逐行范围/覆盖筛选，无第二消息存储
 |   |   |-- message_replay.py           # 固定原文件身份及行地址/hash的只读消息重放，切片不驻留正文
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
@@ -1702,6 +1701,8 @@ docs/
 - `agent_py_agent/agent/plugin_manifest.py` 与 `plugin_package.py`：只读校验包并保留同一字节快照；不接受宿主身份，不代表已安装、已授权或已隔离。
 - `agent_py_agent/agent/plugin_events/declarations.py` 与 `confirmation.py`：v8 订阅与网络需求的唯一不可变声明及同源确认投影；不含通道、投递、钩子或实际沙箱，不改变旧包确认。
 - `agent_py_agent/agent/plugin_events/protocol.py` 与 `hub.py`（M 线 B3）：观察事件的公共字段与握手能力门；事件中心按 owner 分区、按类型只留最新（`dropped_before`）、单在途、发送前后由共用通道复核代次，连接回收只碰自己 acquire 过的激活；publish 永不阻塞、永不抛异常，投递与计数都在后台，不写盘。
+- `agent_py_agent/agent/plugin_events/points.py` 与 `agent_py_agent/agent/gateway_parts/event_points.py`（M 线 B4）：事件点投影与 Gateway 装配。投影只按白名单给字段、默认不带正文（只有 `prompt_submitted` 在授权信封里带 content）、提示字段先脱敏再截断、会话标识只留哈希；开关关闭时既不投影也不发布，投影或发布抛异常不外泄；Gateway 侧按提示/回合/控制回执装配最小事件，关闭时零安装表读取。
+- `agent_py_agent/tests/test_plugin_event_points.py` 与 `test_plugin_event_display.py`：B4 投影与 B6 账本展示的组件验收——前者钉字段白名单、脱敏截断、授权信封、关闭短路与真实 handler 前后成对；后者直接插入临时 owner 的 `runtime.db` 行，钉 `plugin_gate.decided` 只读查询、观察计数、`/plugins info` 四段与 TUI/HTTP/IM 同文渲染、跨 owner 隔离，不启动插件进程或 Gateway。
 - `agent_py_agent/tests/test_plugin_manifest_v8.py`：B1 静态规则、旧字节、同摘要确认和构建，含真实临时安装、原命令 v8 拒绝及 v6 确认路径兼容；`tests/fixtures/plugin_manifest_v1_v7.json` 固定基线字节，变异探针仅进程内变异、不改产品文件。
 - `docs/tasks/M1_B1_HANDOFF.md`：B1 分支交接、真实验证/失败/未验边界与四个变异复现方法。
 - `agent_py_agent/agent/plugin_wheels.py` 与 `plugin_wheel_layout.py`：标准元数据和固定依赖集合预检、环境内目标保护及安装后宿主读回；不运行插件或替代 pip 安装器。
@@ -1735,6 +1736,8 @@ docs/
 - `agent_py_agent/agent/common/nofollow_tree.py`：使用已验证父目录描述符递归删除固定目录，不沿链接越界；调用方负责先确认原进程和执行器已退出。
 - `agent_py_agent/agent/common/cancellation.py`：原取消令牌、异常、ContextVar 和回调的唯一实现；全部调用方直接依赖公共层，旧 tooling 入口删除，不管理持久任务或 OS 资源。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
+- `agent_py_agent/agent/common/json_io.py` 的私有写与私有锁（锁收私 + 私有写入两批 + pdp）：新建文件出生 0600、缺失目录经 no-follow 原语按 0700 建（`mkdir` 的 mode 不受 umask 放宽），存量宽权限文件下次写入收紧；**已存在的目录一律不改权限**（只动自己建的东西），符号链接段被拒。锁与数据文件同口径（0600/0700、不跟随符号链接、`blocking=False` 语义不变），覆盖 `locked_json_path` / `io/jsonl` / 派工锁 / Gateway 文件锁四处写法。宿主数据写入点（审计、协作账、run workspace、子代理账与工作日志、记忆候选/日事件/lesson/HOT、global_index、会话与用量）统一走这些原语；存量宿主目录的收紧归 owner 维护，不在每次写入时做。
+- `agent_py_agent/tests/test_private_lock_permissions.py`、`test_private_writes_*.py`（conversation / audit_events / collaboration / subagents / memory / batch2）与 `test_private_dirs_policy.py`：私有写与私有锁的组件验收。前几组钉「新文件 0600、新目录 0700、存量宽权限下次写入收紧且内容逐字节不变、既有 0755 目录不再被收紧」；`test_private_dirs_policy.py`（pdp）钉 `_ensure_private_dir` 缺失按 0700 建、已存在目录（含符号链接）一位不动、可配置路径指向用户目录时只新增 0600 文件、umask 022 下建目录点仍 0700。运行时生成物不逐条列，位置见同目录 Tree 段。
 - `agent_py_agent/agent/plugin_command_service.py`：从原安装表生成静态命令目录，旧或缺失版本明确拒绝；显式业务动作尚未接执行，普通工具贡献归 Registry。
 - `agent_py_agent/agent/plugin_display/`：插件面板只读取已有公开活动投影，经固定代次连接调用只读 `display.render`，结果按类型校验截断；停用/换代即丢弃结果并关闭连接，见 [插件展示](docs/design/PLUGIN_DISPLAY.md)。
 - `agent_py_agent/agent/gateway_parts/plugin_command_service.py`：三个 HTTP 入口共用原管理员与可信 owner；只读不初始化冷用户，获授权安装才登记原独立运行。

@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## 17j 代码结构文档修补（cbt，2026-10-04，worker/codebase-tree-17j，基于 17j 头 1a21ae0d9，待复审）
+
+- **改了什么**：只改文档。`CODEBASE_TREE.md` 补 3 条 Tree 漏条目（`test_plugin_event_points.py`、`test_plugin_event_display.py`、`test_private_dirs_policy.py`）、2 条关键文件说明（B4 事件点投影与 Gateway 装配；`common/json_io.py` 私有写与私有锁整包），删 4 条同清单段内完全重复的行（`COMPACT_GENERATION_FACTS.md`、`TUI_INPUT_MEDIA.md`、`message_scan.py`）；`DESIGN_LEDGER.md` 顶部加同名一段。`LLM_GUIDE.md` 核对后未改。
+- **输入**：`git diff --name-status d05a0d075 1a21ae0d9` → 37 新增、135 修改、**0 删除、0 改名**（故无删除/改名同步项）。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD $PY scripts/check_doc_sync.py --base 1a21ae0d9` → **DOC_SYNC_PASS**
+  - `git diff --check` → 干净
+  - `$PY -m ruff check agent_py_agent scripts` → All checks passed
+  - `PYTHONPATH=$PWD $PY scripts/check_import_boundaries.py` → findings=0
+  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → hard=0 blocked=False（报告已还原不提交）
+  - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → **新增告警 0 / 消失 36**
+  - `PYTHONPATH=$PWD $PY scripts/check_clean_package.py .` → OK
+- **一致性自查**：脚本比对 Tree 段条目，内容完全相同的重复条目 **0**；37 个新增文件逐个核对，除目录级条目已覆盖者外无遗漏。
+- **未验证**：未跑 pytest（纯文档改动，无产品代码变化）。
+
 ## 历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，基于 `d97bb2687`，已实现，待复审）
 
 - 来源：rco 交付的台账后续项「把生产里已经停在 created 的历史悬挂记录补收口」。
