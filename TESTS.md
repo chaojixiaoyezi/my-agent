@@ -1,6 +1,16 @@
 # 测试与发布验收
 
-## 17j 代码结构文档修补（cbt，2026-10-04，worker/codebase-tree-17j，基于 17j 头 1a21ae0d9，待复审）
+## B9 模板补参数级 deny 示例（tdeny，2026-10-04，worker/b9-template-deny-example，基于 17j 头 477611a6d，待复审）
+
+- **改了什么**：两个技能模板各加一个通用参数级 deny 示例（NUL 空字节 → `deny` + `MALFORMED_ARGUMENTS`）；技能测试加两帧断言（无截断 / 有截断都 deny）；B8 样例测试的 `_assert_truncation_behavior` 补 `# LLM:` 契约注释；author-contract 补一句指向新示例。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-tdeny`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_m1_b8_samples.py agent_py_agent/tests/test_write_my_agent_plugin_skill.py -q --tb=short -p no:cacheprovider` → **42 passed, 1 skipped**（`test_templates_execute_packaged_stdio[node]` 在本机无 Node 时按既有逻辑 skip；Node 模板的打包/清单仍由 `test_templates_build_and_validate` 覆盖）。
+  - guards9（10 文件）→ **176 passed**。
+  - ruff → All checks passed；import boundaries → findings=0；`check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check` 干净；strict code-size → hard=0 blocked=False（报告已还原不提交）；size_diff → **新增告警 0 / 消失 39**；clean-package → OK。
+- **变异 1 个（KILLED）**：删掉两个模板 `review_visible` 里的参数级 deny（退回"截断直接 ask"的旧形态）→ `test_templates_execute_packaged_stdio[python]` 与 `[node]` 都失败（`deny`→`allow_as_is`、`MALFORMED_ARGUMENTS`→`NO_MATCH`）；按原字节还原后复跑 42 passed。
+- **未验证**：真实宿主启用链与真实 Gateway（规则禁止）；Node 用例在本机跳过（无 node），3a 在装载 node 的车道复核。
+
+## 17j 代码结构文档修补（cbt，2026-10-04，worker/codebase-tree-17j，基于 17j 头 1a21ae0d9，已挑进 17j（c94ade8f2））
 
 - **改了什么**：只改文档。`CODEBASE_TREE.md` 补 3 条 Tree 漏条目（`test_plugin_event_points.py`、`test_plugin_event_display.py`、`test_private_dirs_policy.py`）、2 条关键文件说明（B4 事件点投影与 Gateway 装配；`common/json_io.py` 私有写与私有锁整包），删 4 条同清单段内完全重复的行（`COMPACT_GENERATION_FACTS.md`、`TUI_INPUT_MEDIA.md`、`message_scan.py`）；`DESIGN_LEDGER.md` 顶部加同名一段。`LLM_GUIDE.md` 核对后未改。
 - **输入**：`git diff --name-status d05a0d075 1a21ae0d9` → 37 新增、135 修改、**0 删除、0 改名**（故无删除/改名同步项）。

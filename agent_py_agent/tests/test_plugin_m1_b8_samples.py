@@ -196,6 +196,12 @@ def _assert_review_behavior(host: _FakeHost) -> None:
     _assert_truncation_behavior(host)
 
 
+# LLM: B8 样例的截断合同验收，与 B5 的 tool_gate 语义同源（trs/b8tr 定）：标记只认布尔 true——false、缺失（旧宿主）
+#   和 1/"true" 这类真值一律照原判定走；true 时只能更严——片段已 deny 保持 deny（原原因码，如 guard-delete 的
+#   DELETE_FILE_BLOCKED）、片段本来就 ask 保留原原因码并把消息补成"…；参数还被截断了"、只有片段可放行才升到
+#   ask + ARGUMENTS_TRUNCATED。每条都同时校验回复形状（裁决枚举、原因码格式、消息长度与控制字符）和两条消息文案。
+#   改动同步：样例插件 plugins/{rm-guard,rm-guard-node} 的 reviewGate、_TRUNCATION_CASES 表、_TRUNCATED_MESSAGE/
+#   _TRUNCATED_NOTE 文案，以及技能模板 templates/{python,node} 的同名写法（test_write_my_agent_plugin_skill.py 覆盖后者）。
 # 函数用途: 断言截断只能更严——片段已 deny 保持、ask 保留原原因码、可放行才升 ask；false/缺失/非布尔真值走原判定。
 def _assert_truncation_behavior(host: _FakeHost) -> None:
     for gate_id, tool, payload, plain, truncated in _TRUNCATION_CASES:

@@ -1,5 +1,14 @@
 # 设计台账
 
+## B9 模板补参数级 deny 示例（tdeny，2026-10-04，worker/b9-template-deny-example，基于 17j 头 477611a6d；3a 复审通过，已并入 step17j）
+
+- **背景**：luna2 对 trs 的初审建议——B9 写插件技能的两个模板只有"看到 `rm -rf` 升 ask"的示例，没有"看参数就直接拒绝"的示例，所以"截断不能把看到的拒绝降级"这条规则在模板上体现不出来（两种结构在模板上等价已由 luna2、ds6 确认）。
+- **改了什么**：两个模板（`templates/python/src/server.py`、`templates/node/src/server.js`）的 `review_visible`/`reviewVisible` 各加一个**通用参数级 deny 示例**：命令参数里出现 NUL 空字节这类畸形内容时直接 `deny` + `MALFORMED_ARGUMENTS`。选它与现有门无关（任何精确工具参数都适用）、不照抄 rm-guard 的规则，且正好演示"看到就必须拒绝"的量级——`deny` 在截断合并前早返回，标记不会把拒绝降成 `ask`。
+- **用例**：`test_write_my_agent_plugin_skill.py` 的 `_hook_requests()` 加两帧（无截断 / 带 `arguments_truncated: true`），断言都回 `deny` + `MALFORMED_ARGUMENTS`；`test_plugin_m1_b8_samples.py` 的 `_assert_truncation_behavior` 补齐 `# LLM:` 契约注释（说明截断语义、与 B5 同源、以及改动时要同步哪些文件）。
+- **文档**：`references/author-contract.md` 的"截断只能更严"推荐做法补一句指向新示例。
+- **变异**：删掉两个模板里的参数级 deny（退回"截断直接 ask"的旧形态）→ python/node 两条用例都变红（`deny`→`allow_as_is`）；还原后 42 passed。
+- **验证**：技能测试 + B8 样例测试 42 passed / 1 skipped（作者沙箱无 node，跳过 Node 用例）；3a 沙箱外（有 node v25）技能测试 37 passed / 1 skipped，Node 模板用例真跑通过，跳过的是“B5 未合入时自动跳过”的那条；guards9 176 passed；静态门禁与 size_diff（新增 0）全过。见 TESTS。
+
 ## 17j 代码结构文档修补（cbt，2026-10-04，worker/codebase-tree-17j，基于 17j 头 1a21ae0d9，3a 核对删除行一致，已并入 step17j）
 
 - **背景**：17j 集成分支挑进十几个分支（B4/B6/B8/B9、锁收私与私有写整包、飞书脚本凭据、凭据头守卫、G2b、dsst、只看档、phh）。各分支在自己那里改过 `CODEBASE_TREE.md`，合进来时文档冲突两边都保留，出现漏条目与重复条目。

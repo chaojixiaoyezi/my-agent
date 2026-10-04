@@ -317,7 +317,7 @@ def test_templates_execute_packaged_stdio(built_template, author_workspace):
             pytest.skip("本机无 Node；v8 打包/清单仍由独立测试覆盖")
         command = [node, str(unpacked / "src/server.js")]
     replies = [json.loads(line) for line in _run(command, author_workspace, _requests() + _hook_requests()).splitlines()]
-    assert [reply["id"] for reply in replies] == [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    assert [reply["id"] for reply in replies] == [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
     assert replies[0]["result"]["protocolVersion"] == "2024-11-05"
     assert replies[0]["result"]["capabilities"]["experimental"] == {
         "my-agent/events": {"versions": ["1"]}, "my-agent/tool-gate": {"versions": ["1"]}}
@@ -341,6 +341,9 @@ def test_templates_execute_packaged_stdio(built_template, author_workspace):
     assert replies[17]["result"] == {"verdict": "deny", "reason_code": "OUT_OF_SCOPE"}
     assert replies[18]["result"] == {"verdict": "allow_as_is", "reason_code": "NO_MATCH"}
     assert replies[19]["result"] == {"verdict": "allow_as_is", "reason_code": "NO_MATCH"}
+    # 参数级 deny 示例：看到畸形参数（空字节）就拒绝；打了截断标记也不降级（deny 早返回，不参与截断合并）。
+    assert replies[20]["result"] == {"verdict": "deny", "reason_code": "MALFORMED_ARGUMENTS"}
+    assert replies[21]["result"] == {"verdict": "deny", "reason_code": "MALFORMED_ARGUMENTS"}
 
 
 # LLM: 只发送合成提示/结构化事实与精确工具参数；危险命令只是 JSON 数据，绝不执行。
@@ -371,6 +374,10 @@ def _hook_requests():
             "call": {**call, "arguments_truncated": 1, "arguments": {"command": "printf safe"}}}},
         {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
             "call": {**call, "arguments_truncated": "true", "arguments": {"command": "printf safe"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments": {"command": "printf a\x00b"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments_truncated": True, "arguments": {"command": "printf a\x00b"}}}},
     ]
     return "".join(json.dumps({"jsonrpc": "2.0", "id": index + 10, **frame}) + "\n"
                    for index, frame in enumerate(frames))

@@ -62,7 +62,9 @@ v8 两语言启用都要求用户本人确认入口/文件/解释器、订阅正
 也不要假装截断部分不存在，或让截断放松你已经能做出的拒绝。
 字段缺失、`false`、以及 `1`、`"true"` 这类真值都照旧按完整参数判断（`false` 就是完整；标记只认布尔 `true`，
 不要用普通真值判断收下别的值）。
-两个语言模板的 `review_gate`/`reviewGate` 都演示了这个"先判后并"的写法，可直接抄。
+两个语言模板的 `review_gate`/`reviewGate` 都演示了这个"先判后并"的写法，可直接抄；模板里还各有一个**参数级 deny 示例**
+（`review_visible`/`reviewVisible` 里看到参数含 NUL 空字节这类畸形内容就直接回 `deny`、原因码 `MALFORMED_ARGUMENTS`）——
+它演示"看到就必须拒绝"的量级：`deny` 在合并前早返回，截断标记不会把拒绝降成 `ask`。
 
 `initialize` 回复必须声明相应 `capabilities.experimental`：
 ```json

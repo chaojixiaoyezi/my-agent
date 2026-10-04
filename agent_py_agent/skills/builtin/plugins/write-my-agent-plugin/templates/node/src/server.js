@@ -66,7 +66,7 @@ function handle(request) {
 //   片段本来就 ask 时保留它自己的原因码、消息补半句"参数还被截断了"；只有片段可放行才升到
 //   ask + ARGUMENTS_TRUNCATED（宿主只在 arguments: full 时给标记，且必须是布尔 true）；参数缺失宁严按 ask。
 //   绝不改参数、不执行命令、不放宽宿主。
-// 函数用途: 演示 rm -rf 字面模式加确认；不是完整 shell 分析器，不替代宿主审批与沙箱。
+// 函数用途: 演示 rm -rf 字面模式加确认、参数里的空字节直接拒绝；不是完整 shell 分析器，不替代宿主审批与沙箱。
 function reviewGate(params) {
   const gate = declaration.tool_gates.find(item => item.id === params.gate_id);
   const call = params.call && typeof params.call === "object" ? params.call : {};
@@ -80,6 +80,9 @@ function reviewGate(params) {
 }
 
 // LLM: 只看得到的片段做原判定：门不匹配一律 deny，参数缺失宁严按 ask；截断合并由 reviewGate 统一处理。
+//   参数级 deny 示例（与 rm 规则无关，任何工具参数都适用）：命令字符串里出现 NUL 空字节这类畸形内容时直接拒绝——
+//   它不是"要求确认"的量级，下游 shell 与解析器对它的处理各不相同，看到就必须拒绝；截断也不能把它降成 ask
+//   （reviewGate 对 deny 早返回，不参与截断合并）。
 // 函数用途: 对看到的调用片段给出 allow_as_is / ask / deny 三种裁决之一。
 function reviewVisible(call, gate) {
   if (!gate || !gate.tools.includes(call.tool)) return { verdict: "deny", reason_code: "OUT_OF_SCOPE" };
@@ -87,6 +90,7 @@ function reviewVisible(call, gate) {
   if (!args || typeof args !== "object" || Array.isArray(args) || typeof args.command !== "string") {
     return { verdict: "ask", reason_code: "ARGUMENTS_UNAVAILABLE" };
   }
+  if (args.command.includes("\u0000")) return { verdict: "deny", reason_code: "MALFORMED_ARGUMENTS" };
   if (/\brm\s+-rf\b/u.test(args.command)) {
     return { verdict: "ask", reason_code: "RM_RF", message: "要删除整个目录，先确认一次" };
   }
