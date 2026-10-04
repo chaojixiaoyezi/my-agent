@@ -86,6 +86,36 @@ _KNOWN_SECRET_RE = re.compile(
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
 )
+# LLM: 打码要隐藏的是秘密本身；变量引用不是秘密，只是"值在别处"的写法。整段恰好是一个纯变量引用
+#   时保留原文，否则复审会看到 <redacted> 而误判正确的脚本"没带凭据"，模型照抄还可能把字面量
+#   <redacted> 写进文件。带默认值、命令替换、拼接、引号包裹等都不算纯引用，照旧打码。
+#   注意 Authorization 头那条正则会把结尾引号一起captured 进来（`Bearer $TOKEN"`），所以判定前只脱掉
+#   一层引号（成对或只在结尾一个）；引号本身不是值的一部分，脱掉后仍是纯引用才保留。
+# 9b 终审必须修：变量名原来收 [A-Za-z_][A-Za-z0-9_]*，于是 "$Summer2024"、"$uper_Secret_1"、
+#   "$abcDEF123xyz" 这些以 $ 开头的真密码会被当变量引用放行。改成只认环境变量写法（全大写
+#   [A-Z_][A-Z0-9_]*，`$NAME` 与 `${NAME}` 两种），大小写混合与全小写一律打码。两边代价不对等：
+#   多打一次码最多让复审误会，少打一次码凭据就进了模型上下文和日志。
+#   已知残留边界（有意接受，见 DESIGN_LEDGER）：全大写的 $ 开头字面量（如 $ADMIN123）形状上与变量
+#   引用分不开，仍会被保留；不接受任何"只对工具输出例外"的第二套口径。
+# 常量用途: 判定一个被打码的值是否恰好只是纯变量引用（全大写环境变量写法，不含任何字面量）。
+_PURE_VARIABLE_REFERENCE_RE = re.compile(r"\$(?:[A-Z_][A-Z0-9_]*|\{[A-Z_][A-Z0-9_]*\})\Z")
+
+
+# LLM: Authorization 正则把结尾引号一起 captured（值形如 `$TOKEN"`），那层引号不是秘密内容；
+#   只脱掉一层成对引号或一个结尾引号，其它位置原样保留，避免把 `"$A$B"` 之类放宽。
+# 函数用途: 去掉值外层可能被正则带进来的一层引号，用于判定"是否纯变量引用"。
+def _strip_wrapping_quote(value: str) -> str:
+    if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+        return value[1:-1]
+    if value and value[-1] in "\"'":
+        return value[:-1]
+    return value
+
+
+# LLM: 调用方决定是否为源码；插值内字面量和实际 URL 凭证仍须遮蔽，已知密钥扫描始终执行。
+# 函数用途: 打码一个被赋值/跟随的秘密值；整段只是纯变量引用时原样返回，其余照旧遮蔽。
+def _mask_secret_value(value: str, marker: str) -> str:
+    return value if _PURE_VARIABLE_REFERENCE_RE.fullmatch(_strip_wrapping_quote(value)) else marker
 
 
 # LLM: 调用方决定是否为源码；插值内字面量和实际 URL 凭证仍须遮蔽，已知密钥扫描始终执行。
@@ -122,7 +152,7 @@ def redact_sensitive_text(
         lambda match: (
             redacted_marker
             if redact_assignment_labels
-            else match.group(1) + redacted_marker
+            else match.group(1) + _mask_secret_value(match.group(2), redacted_marker)
         ),
         text,
     )
@@ -131,7 +161,7 @@ def redact_sensitive_text(
             lambda match: (
                 redacted_marker
                 if redact_assignment_labels
-                else match.group(1) + match.group(2) + redacted_marker + match.group(4)
+                else match.group(1) + match.group(2) + _mask_secret_value(match.group(3), redacted_marker) + match.group(4)
             ),
             text,
         )
@@ -139,7 +169,7 @@ def redact_sensitive_text(
             lambda match: (
                 redacted_marker
                 if redact_assignment_labels
-                else match.group(1) + match.group(2) + redacted_marker + match.group(4)
+                else match.group(1) + match.group(2) + _mask_secret_value(match.group(3), redacted_marker) + match.group(4)
             ),
             text,
         )

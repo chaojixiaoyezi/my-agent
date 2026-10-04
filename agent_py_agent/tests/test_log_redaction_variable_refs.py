@@ -1,0 +1,259 @@
+# LLM: 这一整改的是"打码误伤纯变量引用"：工具输出里的 $NAME / ${NAME}（环境变量写法，全大写）被换成
+#   <redacted>，会让复审把正确脚本读成"请求头写死了占位符"，模型照抄还可能把字面量写进文件。
+#   9b 终审必须修：变量名原来收 [A-Za-z_][A-Za-z0-9_]*，于是 "$Summer2024"、"$uper_Secret_1"、
+#   "$abcDEF123xyz" 这些以 $ 开头的真密码被当变量引用放过。现在只认全大写环境变量写法，大小写混合与
+#   全小写一律打码；残留边界是全大写 $ 开头字面量（如 $ADMIN123），有意接受并有用例钉住。
+#   用例字面量一律用拼接构造，避免本文件自身在被写入/查看时就被打码，导致"测的是已打码的字符串"这种假绿。
+# 模块用途: 钉住纯变量引用保留口径（只认全大写）、其余写法照旧打码，以及真实密钥没有任何新路径泄漏。
+from __future__ import annotations
+
+import pytest
+
+from agent_py_agent.agent.common.log_redaction import (
+    _mask_secret_value,
+    _strip_wrapping_quote,
+    redact_sensitive_text,
+)
+from agent_py_agent.agent.tooling.output_projection import redact_tool_output_text
+
+D = "$"
+MARKER = "<red" + "acted>"
+GW_HEADER = "X-Gateway-" + "Token"
+DELETED = "<red" + "acted-private-key>"
+
+# 真密钥样本：按已知密钥形状构造，避免写成完整字面量被扫掉后失去测试意义。
+FAKE_KEY = "sk-" + "abcdefghijklmnopqrstuvwx"
+
+
+def _gw(value: str) -> str:
+    return f"{GW_HEADER}: {value}"
+
+
+def test_pure_variable_references_are_kept_verbatim() -> None:
+    """恰好是 $NAME 或 ${NAME} 的纯变量引用不是秘密，保留原文（只认环境变量写法：全大写）。"""
+
+    for value in (D + "GW_TOKEN", D + "{GW_TOKEN}", D + "_A1", D + "{_A1}", D + "TOKEN", D + "{TOKEN}"):
+        text = _gw(value)
+        for code_file in (False, True):
+            safe = redact_sensitive_text(text, code_file=code_file)
+            assert safe == text, (value, code_file, safe)
+            assert MARKER not in safe
+
+
+# LLM: 9b 终审必须修：变量名原来收 [A-Za-z_][A-Za-z0-9_]*，"以 $ 开头、后面只有字母数字下划线"的真密码
+#   会被当变量引用放过。这里钉住新口径——只有全大写环境变量写法（$NAME / ${NAME}）保留，大小写混合与
+#   全小写一律打码；两边代价不对等：多打一次最多让复审误会，少打一次凭据就进模型上下文和日志。
+# 函数用途: 断言大小写混合、全小写、数字结尾的 $ 开头值都照旧打码。
+@pytest.mark.parametrize(
+    "value",
+    [
+        D + "Summer2024",        # YAML password: 以 $ 开头的真密码
+        D + "uper_Secret_1",     # Python api_key
+        D + "abcDEF123xyz",      # Authorization: Bearer 里的混合大小写值
+        D + "token",             # 全小写
+        D + "admin",             # 全小写
+        D + "_lower",            # 下划线开头但含小写
+        D + "{token}",           # 花括号写法同样只认全大写
+    ],
+)
+def test_mixed_or_lowercase_dollar_values_are_still_redacted(value: str) -> None:
+    text = _gw(value)
+    safe = redact_sensitive_text(text)
+    assert value not in safe
+    assert MARKER in safe
+
+
+# LLM: 有意接受的已知边界（3a 裁定，2026-10-04）：全大写的 $ 开头字面量（如 $ADMIN123）形状上与变量
+#   引用完全一致，打码分不出"值在别处"还是"值就是这个"。这里把它钉成"当前会保留"，不是为了将来修它——
+#   真要在这一档更严，会把 $GW_TOKEN 这类正确脚本一起打掉，代价方向相反。记录在案，改动须同步 DESIGN_LEDGER。
+# 函数用途: 锁住"全大写 $ 开头字面量当前保留"这一已知边界，防止它被当成回归悄悄改掉。
+def test_all_caps_dollar_literal_is_a_known_accepted_boundary() -> None:
+    value = D + "ADMIN" + "123"
+    text = _gw(value)
+    safe = redact_sensitive_text(text)
+    assert safe == text, "全大写 $ 开头值当前会保留：这是有意接受的边界，不是回归"
+    assert MARKER not in safe
+
+
+# LLM: 9b 建议 1：判定层的两条防线（正则 \Z 与 _mask_secret_value 的 fullmatch）必须同时生效——
+#   "引用 + 字面量"混写（$TOKEN:abc、${TOKEN}abc、$TOKEN$OTHER）既不是纯引用，就必须打码；
+#   这里直接喂 _mask_secret_value，绕开上层正则匹配，专门钉这两层。
+# 函数用途: 断言带字面量尾巴或拼接的引用一定被打码，不能靠外层正则不匹配来"碰巧"安全。
+@pytest.mark.parametrize(
+    "value",
+    [
+        D + "TOKEN:abc",         # 引用后跟冒号与字面量
+        D + "{TOKEN}abc",        # 花括号引用后跟字面量
+        D + "TOKEN" + D + "OTHER",  # 两个引用拼在一起
+        D + "TOKEN" + "abc",     # 引用后直接跟字面量
+        D + "{TOKEN" + "}abc",   # 花括号形态带尾巴
+    ],
+)
+def test_reference_plus_literal_never_passes_the_pure_reference_gate(value: str) -> None:
+    assert _mask_secret_value(value, MARKER) == MARKER, value
+    assert _mask_secret_value(_strip_wrapping_quote(value), MARKER) == MARKER, value
+
+
+# LLM: 上面那条参数化只走 _mask_secret_value；\Z 与 fullmatch 两层都得单独钉，否则把 \Z 删掉、
+#   或把 fullmatch 换成 match（前缀匹配）时，用例可能因为上游正则本来就不匹配而"碰巧"全绿。
+#   这里用 _PURE_VARIABLE_REFERENCE_RE 自己的 finditer 复现两条防线：\Z 要求匹配吃完整串，
+#   fullmatch 要求锚在开头；两者任一放松，下面的断言都会失败。
+# 函数用途: 直接钉住正则的 \Z 与 fullmatch 两层，防止它们被悄悄放宽。
+def test_regex_anchors_and_fullmatch_are_both_required() -> None:
+    from agent_py_agent.agent.common.log_redaction import _PURE_VARIABLE_REFERENCE_RE
+
+    pure = D + "TOKEN"
+    # 纯引用本身必须被两种判定同时接受（否则规则根本不会生效）。
+    assert _PURE_VARIABLE_REFERENCE_RE.search(pure)
+    assert _PURE_VARIABLE_REFERENCE_RE.fullmatch(pure)
+    assert _PURE_VARIABLE_REFERENCE_RE.search(pure).end() == len(pure), "\\Z 必须吃完整串"
+
+    # 带尾巴/前缀的形状：两条防线里至少一条会挡住；改坏任一条都会让这里失败。
+    # `search` 会在串内任意位置找匹配（可能先命中末尾那段 `$OTHER`），所以 \Z 的效果要这样核：
+    # 只要整串不是纯引用，`fullmatch` 必须为 None；而 `match`（锚定开头的前缀匹配）在去掉 \Z 后
+    # 会命中 `$TOKEN` 前缀——这里显式对比两者的差异，删掉 \Z 时下面第一条断言会失败。
+    for value in (D + "TOKEN:abc", D + "{TOKEN}abc", D + "TOKEN" + "abc"):
+        assert not _PURE_VARIABLE_REFERENCE_RE.fullmatch(value), value
+        assert not _PURE_VARIABLE_REFERENCE_RE.match(value), f"\\Z 必须拒绝带尾巴的值：{value}"
+
+
+# LLM: fullmatch 那一层要单独钉：把 `.fullmatch(` 换成 `.match(`（前缀匹配）时，**只有正则内部已经带 \Z
+#   才会两种等价**（那时两者都要求吃到串尾）。所以真正要防的是"两层同时被放松"——只要 \Z 去掉，
+#   match 与 fullmatch 立刻分叉。这条同时核 `_mask_secret_value` 的实际行为，并把"正则里必须有 \Z"
+#   写成结构化断言：将来谁把 \Z 挪走、又没换成 fullmatch，这里会红。
+# 函数用途: 断言 _mask_secret_value 拒收带尾巴的值，且判定依赖整串锚（\Z 或 fullmatch 至少有一层）。
+def test_mask_secret_value_requires_a_whole_string_match() -> None:
+    from agent_py_agent.agent.common.log_redaction import _PURE_VARIABLE_REFERENCE_RE
+
+    assert _mask_secret_value(D + "TOKEN:abc", MARKER) == MARKER
+    assert _mask_secret_value(D + "{TOKEN}abc", MARKER) == MARKER
+    assert _mask_secret_value(D + "TOKENabc", MARKER) == MARKER
+    assert _mask_secret_value(D + "TOKEN", MARKER) == D + "TOKEN"
+    # 两层锚至少留一层：去掉 \Z 后，前缀匹配必须仍被 fullmatch 挡住（或反之）。
+    tailed = D + "TOKEN" + "abc"
+    assert not _PURE_VARIABLE_REFERENCE_RE.fullmatch(tailed)
+    assert _PURE_VARIABLE_REFERENCE_RE.pattern.endswith("\\Z")
+
+
+def test_bearer_pure_variable_reference_is_kept() -> None:
+    """真实形状 curl -H "Authorization: Bearer $TOKEN" 里，值也只是纯变量引用。"""
+
+    text = 'curl -H "' + "Authorization: Bearer " + D + 'TOKEN" http://127.0.0.1:8420/ask'
+    safe = redact_sensitive_text(text)
+    assert safe == text
+    assert MARKER not in safe
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        D + "{TOKEN:-literal-default}",      # 带字面量默认值
+        D + "(cat /tmp/secret)",             # 命令替换
+        D + "{TOKEN}suffix",                 # 拼接字面量
+        D + "A" + D + "B",                   # 多个变量拼在一起
+        D + "{TOKEN",                        # 未闭合
+        D + "1BAD",                          # 名字不以字母/下划线开头
+        D + "{1BAD}",
+        D + "lowercase",                     # 全小写：按新口径不算环境变量写法
+        D + "{mixedCase}",                   # 大小写混合
+        "literal-value",                     # 普通字面量
+        FAKE_KEY,                            # 真密钥形状
+    ],
+)
+def test_other_shapes_are_still_redacted(value: str) -> None:
+    """只要不是"整段一个纯变量引用"，一律照旧打码。"""
+
+    text = _gw(value)
+    safe = redact_sensitive_text(text)
+    assert value not in safe
+    assert MARKER in safe
+
+
+def test_real_secret_in_bearer_header_is_still_redacted() -> None:
+    """Authorization: Bearer 后面跟真值时照旧打码。"""
+
+    text = "Authorization: Bearer " + FAKE_KEY
+    safe = redact_sensitive_text(text)
+    assert FAKE_KEY not in safe
+    assert MARKER in safe
+
+
+def test_written_key_literal_is_never_preserved_by_the_variable_rule() -> None:
+    """字面量 <redacted> 本身不是变量引用，不会因为这条规则被放行。"""
+
+    text = _gw(MARKER)
+    safe = redact_sensitive_text(text)
+    assert safe == text  # 值本来就已经是占位符，保持原样即可
+    assert D not in safe
+
+
+def test_real_marker_shifted_written_script_shape_is_kept_via_projection() -> None:
+    """真实形状：ds10 复审看到的那两行脚本，经过工具输出投影后变量引用保留。"""
+
+    token_var = D + "GW_TOKEN"
+    braced = D + "{GW_TOKEN}"
+    text = (
+        "GW_AUTH_HEADER=(-H \"" + GW_HEADER + ": " + token_var + "\")\n"
+        'curl -H "' + GW_HEADER + ": " + braced + '" http://127.0.0.1:8420/ask\n'
+    )
+    for redaction in ("default", "source_code"):
+        safe = redact_tool_output_text(text, redaction=redaction)
+        assert token_var in safe
+        assert braced in safe
+        assert MARKER not in safe
+
+
+def test_projection_still_redacts_real_secret_in_same_shape() -> None:
+    """同一形状里放真值，投影后照旧打码，没有新路径把真值漏出去。"""
+
+    text = "GW_AUTH_HEADER=(-H \"" + GW_HEADER + ": " + FAKE_KEY + "\")"
+    for redaction in ("default", "source_code"):
+        safe = redact_tool_output_text(text, redaction=redaction)
+        assert FAKE_KEY not in safe
+        assert MARKER in safe
+
+
+def test_json_form_field_still_redacts_unless_pure_variable() -> None:
+    """JSON 字段形态同样只保留纯变量引用。"""
+
+    token_key = "to" + "ken"
+    json_var = '{"' + token_key + '": "' + D + "{API_TOKEN}\"}"
+    json_literal = '{"' + token_key + '": "' + FAKE_KEY + '"}'
+    assert D + "{API_TOKEN}" in redact_sensitive_text(json_var)
+    assert FAKE_KEY not in redact_sensitive_text(json_literal)
+
+
+def test_known_secret_scan_still_applies_after_variable_exemption() -> None:
+    """纯变量保留后仍要过已知密钥扫描：真密钥不会被这条新规则带出去。"""
+
+    text = "note: " + FAKE_KEY + " and " + _gw(D + "GW_TOKEN")
+    safe = redact_sensitive_text(text)
+    assert FAKE_KEY not in safe
+    assert D + "GW_TOKEN" in safe
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        D + 'TOKEN"x',              # 尾引号后还有字面量
+        D + "TOKEN'suffix'",        # 引号后面拖着字面量
+        '"' + D + "TOKEN",          # 只有开头一个引号（不是值的一部分）
+    ],
+)
+def test_quoting_only_strips_one_wrapping_quote(value: str) -> None:
+    """剥离引号只允许"一层外层引号"：值里再拖字面量时必须照旧打码。
+
+    这条钉住 M5 变异（把所有引号删掉再判定）——它会把 __TOKEN"x 这类值误判成纯引用。
+    只断言到辅助函数层：这些形状在 _SECRET_ASSIGNMENT_RE 那里本来就不匹配，整串不会被打码，
+    基线（d05a0d075）行为相同，不能拿整串断言当这条规则的效果。
+    """
+
+    assert _mask_secret_value(value, MARKER) == MARKER
+    assert _mask_secret_value(D + "GW_TOKEN", MARKER) == D + "GW_TOKEN"
+
+
+def test_one_wrapping_quote_is_still_enough_for_a_pure_reference() -> None:
+    """只脱一层引号：`$TOKEN"` 这种（正则把结尾引号带进来）仍算纯引用。"""
+
+    assert _mask_secret_value(D + 'TOKEN"', MARKER) == D + 'TOKEN"'
+    assert _mask_secret_value('"' + D + 'TOKEN"', MARKER) == '"' + D + 'TOKEN"'

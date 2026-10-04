@@ -1,5 +1,25 @@
 # 设计台账
 
+## 打码变量引用收口（rdv2，2026-10-04，worker/redaction-var-refs-v2，基于 rdv `a5143365b`；9b 复跑 9 样本探针通过，已并入 step17j）
+
+- **背景**：rdv 让整段值恰好是纯变量引用（`$NAME` / `${NAME}`）时保留原文，免得复审把 `$GW_TOKEN` 看成 `<redacted>` 而误判脚本没带凭据。9b 终审查出必须改的一条：变量名原来收 `[A-Za-z_][A-Za-z0-9_]*`，于是 `$Summer2024`、`$uper_Secret_1`、`$abcDEF123xyz` 这类**以 `$` 开头、后面只有字母数字下划线**的真密码也被当变量引用放过了（4 个样本：YAML `password: "$Summer2024"`、Python `api_key = '$uper_Secret_1'`、`Authorization: Bearer $abcDEF123xyz`、`token=$ADMIN123`）。
+- **3a 裁定与改动**：变量名只认**环境变量写法**（全大写 `[A-Z_][A-Z0-9_]*`，`$NAME` 与 `${NAME}` 两种）。`$GW_TOKEN`、`${GW_TOKEN}`、`$TOKEN` 照样保留；大小写混合与全小写（含 `$token`）一律打码。不另开"只对工具输出例外"的第二套口径——判定只在 `_PURE_VARIABLE_REFERENCE_RE` 一处，走全部调用方。
+- **两边代价不对等**：多打一次码，最多让复审误会；少打一次码，凭据就进了模型上下文和日志。所以这一档取严。
+- **已知残留边界（有意接受）**：全大写的 `$` 开头字面量（如 `$ADMIN123`）形状上与变量引用完全一致，打码分不出"值在别处"还是"值就是这个"，**当前会保留**。要在这档更严会把 `$GW_TOKEN` 这类正确脚本一起打掉，代价方向相反。由 `test_all_caps_dollar_literal_is_a_known_accepted_boundary` 钉住。
+- **原交付说明需更正**：rdv 交接里"没有新增任何放行真值的路径"这句**不成立**——唯一放宽的是"整段为全大写纯变量引用"，残留边界就是上面那条全大写 `$` 开头字面量。
+- **9b 建议 1 已补**：直接把"引用 + 字面量"（`$TOKEN:abc`、`${TOKEN}abc`、`$TOKEN$OTHER`）喂 `_mask_secret_value`，两层防线都钉住——`\Z` 与 `fullmatch`。要注意正则内部已带 `\Z` 时，`.match(` 与 `.fullmatch(` 语义等价（都要求吃到串尾），单独把 fullmatch 换成 match **抓不到**；真正要防的是两层同时放松，用例同时核 `pattern.endswith("\\Z")` 与 fullmatch 行为。
+- **9b 建议 2（只记账，不改代码）**：JSON 字段名那条路径（`_SECRET_JSON_FIELD_RE`）是**精确字段名**匹配，与文本规则（`_SECRET_ASSIGNMENT_RE`）的"末尾片段"口径不一致——`{"db_password": "..."}` 这类带前缀的 JSON 键不在 JSON 规则命中范围。原样如此，本次不动；记在此供后续统一。
+- **验证**：`test_log_redaction_variable_refs.py` 51 passed；全部 `test_log_redaction*.py` + 审计/IM 脱敏 129 passed；变异 m1（变量名退回 `[A-Za-z_]`）抓到 6 条、m2（去掉 `\Z`）抓到 2 条；m3（fullmatch→match）经查证为**等价变异**（正则自带 `\Z`），已在上文说明。见 TESTS。
+
+## 工具输出打码不再误伤纯变量引用（rdv，2026-10-04，分支 `worker/redaction-var-refs`；ds1 初审、9b 终审必须修 1 条已由 rdv2 修好，已并入 step17j）
+
+- **现象与根因（文件:行）**：ds10 复审 `scripts/feishu_limit/*.sh` 时读到 `GW_AUTH_HEADER=(-H "X-Gateway-Token: <redacted>")`，判成"请求头写死占位符、凭据没带上"；实际文件里是 `X-Gateway-Token: $GW_TOKEN`（3a 已用 `git show` 核实）。工具输出（读文件、跑命令）经过的统一打码路径是 `agent/tooling/output_projection.py:45` → `redact_sensitive_text(text, code_file=…)`；命中变量的两条规则都在 `agent/common/log_redaction.py`：`_AUTHORIZATION_RE`（:61，`Authorization: Bearer <值>`）和 `_SECRET_ASSIGNMENT_RE`（:62-66，`…Token: <值>` 这类赋值），两处都无条件把值替成 `<redacted>`。
+- **危害不只是难看**：变量名不是秘密，被打码后复审会话会误判正确代码；模型照着看到的内容改文件，还可能把字面量 `<redacted>` 真写进去。本轮做这个修复时，我自己的多个探针脚本就因为这个机制在写入/回读时被改写，一度把结论带偏（见 TESTS 记录）。
+- **改法（很窄）**：只有被打码的"值"整段恰好是一个纯变量引用——`$NAME` 或 `${NAME}`（NAME 为 `[A-Za-z_][A-Za-z0-9_]*`）——才保留原文；其余一律照旧打码，包括 `${TOKEN:-默认值}`、`$(cmd)`、`${TOKEN}abc`、`"$A$B"`、普通字面量和真密钥。新增 `_PURE_VARIABLE_REFERENCE_RE`、`_mask_secret_value`、`_strip_wrapping_quote`，接进上面三处替换点。`_strip_wrapping_quote` 只因 `Authorization` 那条正则会把结尾引号一起 captured（值形如 `$TOKEN"`），只脱一层引号，不是值的一部分；值里再拖字面量（`$TOKEN"x`）仍打码。
+- **边界未变**：`code_file=True`（源码模式）本来就跳过赋值类规则，本次不动；已知密钥扫描（`_KNOWN_SECRET_RE`）、私钥、URL 明文凭证、查询串规则全部保持原样，仍在所有替换之后执行。没有新增任何放行真值的路径。
+- **验证**：新增 `agent_py_agent/tests/test_log_redaction_variable_refs.py` 共 17 点（正例保留、反例照旧打码、真实形状 `curl -H "Authorization: Bearer $TOKEN"` 与 `X-Gateway-Token: ${GW_TOKEN}` 保留、真密钥仍打码、字面量 `<redacted>` 不被这条规则放行）；相关 4 个测试文件 92 passed；变异 5 个全部被杀（含额外两个：去掉引号剥离、引号剥离放宽）。命令与结果见 TESTS。
+- **未验证**：真实宿主工具输出在 TUI/飞书里的最终呈现未跑（规则禁止连真实 Gateway）；`source_code` 模式下"${TOKEN:-默认值}"这类本来就不过赋值规则，属于既有口径，本次未改也不声称修好。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04，分支 `worker/private-bundle-fixes`，基于 17j 头 `312a4fec4`；9b 复核通过，已并入 step17j）
 
 9b 终审结论：两条裁定（只动自己建的、有效目录链接跟随一次）在实现里都成立，5 个变异全杀，no-follow 与 TOCTOU 成立；以下 2 条必须修。

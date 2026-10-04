@@ -1,5 +1,31 @@
 # 测试与发布验收
 
+## 打码变量引用收口（rdv2，2026-10-04，worker/redaction-var-refs-v2，基于 rdv `a5143365b`，待复审）
+
+- **改了什么**：`agent/common/log_redaction.py` 的 `_PURE_VARIABLE_REFERENCE_RE` 从 `[A-Za-z_][A-Za-z0-9_]*` 收紧为**全大写环境变量写法** `[A-Z_][A-Z0-9_]*`（`$NAME` / `${NAME}` 两种）；大小写混合、全小写一律打码。用例补：混合/全小写样本必须打码、全大写 `$` 开头字面量（`$ADMIN123`）作为**已知边界**钉住、引用+字面量直喂 `_mask_secret_value`、以及 `\Z`/fullmatch 两层锚的结构断言。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds4`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction_variable_refs.py -q --tb=short -p no:cacheprovider` → **51 passed**
+  - 全部 `test_log_redaction*.py` + `test_audit_redaction.py` + `test_im_path_redaction_note.py` → **129 passed**
+- **变异 3 个**：
+  - m1 变量名退回 `[A-Za-z_][A-Za-z0-9_]*` → **KILLED**（6 条混合/小写用例变红）。
+  - m2 去掉 `\Z` → **KILLED**（`test_regex_anchors_and_fullmatch_are_both_required`、`test_mask_secret_value_requires_a_whole_string_match` 变红）。
+  - m3 `.fullmatch(` 换成 `.match(` → **存活，但属等价变异**：正则内部已带 `\Z` 时两者结果相同（实测逐样本一致）；真正的风险是"两层同时放松"，m2 已覆盖。如实记录。
+
+## 工具输出打码不再误伤纯变量引用（rdv，2026-10-04，分支 `worker/redaction-var-refs`，待复审）
+
+- 来源：ds10 复审 `scripts/feishu_limit/*.sh` 时读到请求头值被打成占位符，判成"凭据没带上"；实际是纯变量引用（3a 用 `git show` 核实）。
+- 根因：工具输出经 `agent/tooling/output_projection.py:45` → `redact_sensitive_text(code_file=…)`；`agent/common/log_redaction.py` 的 `_AUTHORIZATION_RE`（:61）与 `_SECRET_ASSIGNMENT_RE`（:62-66）无条件替值。
+- 改动：新增 `_PURE_VARIABLE_REFERENCE_RE` / `_mask_secret_value` / `_strip_wrapping_quote`，只对"整段恰好是 `$NAME` 或 `${NAME}`"的值保留原文；其余（带默认值、命令替换、拼接、多变量、真密钥）照旧打码。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-rdv`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction_variable_refs.py agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_audit_redaction.py agent_py_agent/tests/test_im_path_redaction_note.py -q --tb=line -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-rdv
+  ```
+  结果：**92 passed**（含新文件 17 点）。
+- 变异 5 个（驱动脚本 `/private/tmp/rdv_mutate.py`，不入库；每次按备份原字节还原）：① 放宽成"以 `$` 开头就保留"；② 用前缀匹配替代整段匹配；③ 对所有值都不打码；④ 去掉引号剥离（Bearer 形态不再认出）；⑤ 引号剥离放宽成"删掉所有引号再判定"。**五个全部被抓**，还原后 sha256 与工作区一致。
+- **过程记录（重要，说明这个 bug 会骗人）**：本轮我自己的多个临时探针脚本在写入/回读时就被这同一机制改写——磁盘上写的是拼接构造的变量引用，工具回给我的**显示**里是 `<redacted>`，一度让我误判"改动没生效"。核对方式是改看布尔量（`out == text`、长度、`marker in out`）而不是看渲染后的字符串。给后续复核的提示：验证这条规则时不要直接比对回显文本。
+- 基线核对：`source_code` 模式下"带默认值/命令替换/拼接"这几类本来就不过赋值规则（`if not code_file:` 跳过），属 `d05a0d075` 既有口径，本次未改也不声称修好；它们仍会被 Authorization、查询串、已知密钥等其它规则处理。
+- 未验证：真实 TUI/飞书里工具输出的最终呈现未跑（规则禁止连真实 Gateway）。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04，分支 `worker/private-bundle-fixes`）
 
 - **改了什么**：①删 `memory_archive/tokens.py` 的普通 mkdir、`retention_apply._trash_conversation` 3 处改 `ensure_private_dir`；②公开 `nofollow_fs.ensure_private_dir`，34 处建目录点改用它或删掉紧跟私有写的 mkdir；③`open_private_lock_beneath_tightened` 加 `hasattr(os, "fchmod")` 守卫；④注释改准确、`split_existing_anchor` 收拢 6 处循环、删除无调用方的 `append_line_locked`。
