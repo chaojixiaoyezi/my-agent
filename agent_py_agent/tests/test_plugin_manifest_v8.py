@@ -377,6 +377,8 @@ def test_builder_does_not_publish_bad_v8_or_silently_downgrade(tmp_path, changes
     assert not target.exists()
 
 
+# LLM: 静态新订阅事实与旧码不同；真正执行入口仍须在确认前拒绝且不调用启用。
+# 函数用途: 比较订阅事实，不为关闭的 v8 构造老格式授权。
 def test_v8_disabled_rejects_code_from_previous_subscriptions(monkeypatch):
     from agent_py_agent.agent import plugin_enable_tool as enable
 
@@ -386,6 +388,7 @@ def test_v8_disabled_rejects_code_from_previous_subscriptions(monkeypatch):
     tool = enable.PluginEnableTool.__new__(enable.PluginEnableTool)
     tool.owner = object()
     tool.installation = SimpleNamespace(manifest=current_package.manifest)
+    tool.previous_cleanup = None
     tool.runtime = PluginRuntimeFacts("executable", "test-platform")
     tool.runtime_error, tool.plan, tool.catalog_revision = "", None, "fixed-revision"
     # B7：v8 事件插件；总开关关着（events_enabled=False）→ 启用被拒，旧确认码更不可能兑现。
@@ -393,7 +396,8 @@ def test_v8_disabled_rejects_code_from_previous_subscriptions(monkeypatch):
     store = SimpleNamespace(package_bytes=lambda installation: current_bytes)
     monkeypatch.setattr(enable, "PluginInstallStore", lambda owner: store)
     monkeypatch.setattr(tool, "_enable", lambda: pytest.fail("旧确认码不得执行启用"))
-    current = tool._confirmation()
+    current = confirmation_details(current_package.manifest, current_package.sha256, tool.runtime,
+                                   inspect_plugin_files(current_package))
     assert current["network"] is True and current["sandbox"] == "required"
     outcome = tool.execute({"plugin": "sample-any", "catalog_revision": "fixed-revision",
                             "confirm": confirmation_code(old_details)})
@@ -406,6 +410,8 @@ def test_v8_disabled_rejects_code_from_previous_subscriptions(monkeypatch):
 
 @pytest.mark.parametrize("options", tuple(product((False, True), repeat=3)),
                          ids=lambda row: f"confirm-{row[0]}-network-{row[1]}-sandbox-{row[2]}")
+# LLM: 仅适配统一上下文构造，原八组合关闭门、零启动和字节不变断言全部保留。
+# 函数用途: 核对新启用执行器不把 v8 当老格式旁路。
 def test_v8_disabled_before_confirmation_keeps_real_installation_unchanged(tmp_path, monkeypatch, options):
     from agent_py_agent.agent import plugin_enable_tool as enable
     from agent_py_agent.agent.plugin_management import PluginManagement
@@ -511,23 +517,33 @@ def test_v8_enable_fails_closed_when_hidden_root_cannot_be_derived(tmp_path, mon
 
 
 @pytest.mark.parametrize("confirmed", [False, True], ids=["no-code", "correct-code"])
-def test_v6_original_confirmation_path_is_not_disabled(monkeypatch, confirmed):
+# LLM: 实际构造完整授权而非 __new__ 跳过，新确认还需身份；外部启用继续用替身。
+# 函数用途: 核对 v6 未确认零调用，完整确认恰好调用一次。
+def test_v6_original_confirmation_path_is_not_disabled(tmp_path, monkeypatch, confirmed):
     from agent_py_agent.agent import plugin_enable_tool as enable
+    from agent_py_agent.agent.runtime_db.host_commands import HostCommandIdentity
+    from agent_py_agent.tests.test_plugin_management import manager
 
     package_bytes = _bundle(legacy_payload(6))
     manifest = inspect_plugin_package(package_bytes).manifest
-    tool = enable.PluginEnableTool.__new__(enable.PluginEnableTool)
-    tool.owner, tool.installation = object(), SimpleNamespace(manifest=manifest, activation=None)
-    tool.runtime = PluginRuntimeFacts("executable", "test-platform")
-    tool.runtime_error, tool.plan, tool.catalog_revision = "", None, "fixed"
-    tool._is_v8, tool.events_enabled, tool.events_owner_allowed = False, False, False  # v6 旧版不走 v8 门
-    monkeypatch.setattr(enable, "PluginInstallStore", lambda owner: SimpleNamespace(package_bytes=lambda entry: package_bytes))
+    service, source = manager(tmp_path)
+    source.write_bytes(package_bytes)
+    installed = service.command(f'/plugins install "{source}"', revision=service.catalog().revision, request_id="install-v6")
+    assert installed["state"] == "succeeded", installed
+    owner = service.context.owner
+    binding = SimpleNamespace(request=HostCommandIdentity(owner.owner_id, "tester", "chat", "fixture", "v6-enable"))
+    policy = enable.PluginEnablePolicy(legacy_arguments={}, legacy_sandbox_default=False)
+    tool = enable.PluginEnableTool(owner, object(), binding, service.installations.snapshot()[0], "fixed", policy=policy)
     calls = []
     monkeypatch.setattr(tool, "_enable", lambda: calls.append("enable") or {"enabled": True})
     confirmation = tool._confirmation()
     outcome = tool.execute({"plugin": manifest.plugin_id, "catalog_revision": "fixed",
-                            "confirm": confirmation["confirm_code"] if confirmed else ""})
+                            "confirm": confirmation["confirm_code"] if confirmed else "",
+                            "authorization": confirmation["authorization_id"] if confirmed else ""})
     assert manifest.permissions is None
+    package = inspect_plugin_package(package_bytes)
+    assert confirmation["runtime"] == confirmation_details(manifest, package.sha256, tool.runtime, inspect_plugin_files(package))
+    assert confirmation["mode"] == "wide" and confirmation["runtime"]["files"]
     assert calls == (["enable"] if confirmed else [])
     assert outcome.ok is confirmed
     assert outcome.result_envelope[enable.PLUGIN_ENABLE_TOOL] == (

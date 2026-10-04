@@ -36,6 +36,7 @@ from agent_py_agent.agent.plugin_runtime_facts import (
 )
 from agent_py_agent.agent.plugin_skills import enabled_plugin_skill_roots
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
+from agent_py_agent.tests.plugin_enable_fixtures import confirm_enable
 from agent_py_agent.tests.plugin_environment_fixtures import (
     environment_operation,
     prepare_environment,
@@ -100,9 +101,10 @@ def _package(tmp_path, declaration: dict, contents: dict[str, bytes], name: str 
     return build_files_package(declaration, root, tmp_path / name)
 
 
-# 函数用途: 在临时 owner 里安装一个 v6 包，返回管理服务。
+# LLM: 这些用例验原真实环境/程序链，显式选择 wide；产品默认 true 和 restricted 拒绝由 legacy 用例保护。
+# 函数用途: 在临时 owner 安装 v6 包，不改变共用 manager 或产品默认，不替换真实准备和候选。
 def _installed(tmp_path, declaration: dict, contents: dict[str, bytes]):
-    service, _ = manager(tmp_path)
+    service, _ = manager(tmp_path, legacy_sandbox_default=False)
     source = _package(tmp_path, declaration, contents)
     result = service.command(f'/plugins install "{source}"', revision=service.catalog().revision, request_id="install")
     assert result["state"] == "succeeded", result
@@ -263,23 +265,25 @@ def test_executable_plugin_needs_user_confirmation_then_runs_and_releases(tmp_pa
     owner = service.context.owner
     first = _enable(service, "enable")
     assert first["state"] == "failed", first
-    confirmation = first["details"]["confirmation"]
+    permission = first["details"]["confirmation"]
+    confirmation = permission["runtime"]
     assert first["details"]["reason"] == "confirmation_required"
-    code = confirmation["confirm_code"]
+    code = permission["confirm_code"]
     assert re.fullmatch(r"[0-9a-f]{12}", code)
     assert confirmation["platform"] == host_platform_tag() and "interpreter" not in confirmation
     assert confirmation["files"] == [{"path": "bin/server.py", "sha256": hashlib.sha256(_SERVER).hexdigest(),
                                       "size": len(_SERVER), "executable": True, "shebang": "#!/usr/bin/env python3"}]
-    assert f"/plugins enable {PLUGIN_ID} --confirm {code}" in first["message"]
+    assert permission["mode"] == "wide" and permission["confirm_command"] in first["message"]
     # 未确认前不准备环境、不启动任何随包程序
     assert service.installations.snapshot()[0].activation is None
     assert not (owner.plugins_dir / "environments").exists() or not any((owner.plugins_dir / "environments").iterdir())
     assert not (owner.plugins_dir / "data" / PLUGIN_ID / "started").exists()
     wrong = _enable(service, "wrong", "0" * 12)
     assert wrong["state"] == "failed" and wrong["details"]["reason"] == "confirmation_required", wrong
-    enabled = _enable(service, "confirmed", code)
+    enabled = confirm_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     entry = service.installations.snapshot()[0]
+    assert entry.enabled and entry.activation.phase == "active" and entry.activation_id == permission["activation_id"]
     environment = owner.plugins_dir / "environments" / entry.activation.plan.environment_ref
     assert stat.S_IMODE((environment / "files" / "bin" / "server.py").stat().st_mode) == 0o500
     assert not (environment / RUNTIME_PIN_FILE).exists()
@@ -301,23 +305,25 @@ def test_executable_plugin_needs_user_confirmation_then_runs_and_releases(tmp_pa
         registry.close_mcp_clients()
 
 
-# 函数用途: 用临时 PATH 上的解释器安装并带码启用 interpreter 类型插件，返回 (服务, 解释器文件, 第一次回执)。
+# LLM: 完整预览绑定未来 authorization_id；只更换测试确认运输，解释器与真实 MCP 准备仍由原产品核验。
+# 函数用途: 用临时解释器安装并按完整确认命令启用，返回服务、解释器文件和原预览。
 def _enabled_interpreter_plugin(tmp_path, monkeypatch):
     interpreter = _fake_interpreter(tmp_path, monkeypatch)
     service = _installed(tmp_path, _declaration("interpreter", interpreter="fixture-python"), {"server.py": _SERVER})
     first = _enable(service, "enable")
-    enabled = _enable(service, "confirmed", first["details"]["confirmation"]["confirm_code"])
+    enabled = confirm_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     return service, interpreter, first
 
 
 def test_interpreter_plugin_pins_interpreter_and_runs_script(tmp_path, monkeypatch):
     service, interpreter, first = _enabled_interpreter_plugin(tmp_path, monkeypatch)
-    confirmation = first["details"]["confirmation"]
+    permission = first["details"]["confirmation"]
+    confirmation = permission["runtime"]
     assert confirmation["interpreter"] == {"name": "fixture-python", "path": os.path.realpath(interpreter),
                                            "sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest()}
     assert confirmation["files"][0]["executable"] is False
-    assert "用系统解释器 fixture-python" in first["message"]
+    assert confirmation["entry"]["interpreter"] == "fixture-python" and permission["confirm_command"] in first["message"]
     entry = service.installations.snapshot()[0]
     environment = service.context.owner.plugins_dir / "environments" / entry.activation.plan.environment_ref
     assert stat.S_IMODE((environment / "files" / "server.py").stat().st_mode) == 0o400
@@ -367,8 +373,8 @@ def test_changed_interpreter_refuses_launch_until_confirmed_again(tmp_path, monk
 def test_launch_rehashes_only_when_interpreter_stat_changes(tmp_path, monkeypatch):
     interpreter = _fake_interpreter(tmp_path, monkeypatch)
     service = _installed(tmp_path, _declaration("interpreter", interpreter="fixture-python"), {"server.py": _SERVER})
-    code = _enable(service, "enable")["details"]["confirmation"]["confirm_code"]
-    assert _enable(service, "confirmed", code)["state"] == "succeeded"
+    first = _enable(service, "enable")
+    assert confirm_enable(service, first)["state"] == "succeeded"
     owner, entry = service.context.owner, service.installations.snapshot()[0]
     environment = owner.plugins_dir / "environments" / entry.activation.plan.environment_ref
     fingerprint = entry.activation.plan.interpreter_fingerprint
@@ -401,8 +407,8 @@ def test_launch_rehashes_only_when_interpreter_stat_changes(tmp_path, monkeypatc
 
 def test_executable_environment_refuses_other_platform(tmp_path, monkeypatch):
     service = _installed(tmp_path, _declaration(), {"bin/server.py": _SERVER})
-    code = _enable(service, "enable")["details"]["confirmation"]["confirm_code"]
-    assert _enable(service, "confirmed", code)["state"] == "succeeded"
+    first = _enable(service, "enable")
+    assert confirm_enable(service, first)["state"] == "succeeded"
     monkeypatch.setattr(plugin_runtime_facts, "host_platform_tag", lambda: "plan9-mips")
     with pytest.raises(PluginRuntimeError) as changed:
         PluginMCPClient(service.context.owner, service.installations.snapshot()[0])
@@ -451,8 +457,8 @@ def test_prepared_files_match_declaration_and_skills_are_exposed(tmp_path):
         target = environment / "files" / path
         assert target.read_bytes() == content
         assert stat.S_IMODE(target.stat().st_mode) == (0o500 if path == "bin/server.py" else 0o400)
-    code = _enable(service, "enable")["details"]["confirmation"]["confirm_code"]
-    assert _enable(service, "confirmed", code)["state"] == "succeeded"
+    first = _enable(service, "enable")
+    assert confirm_enable(service, first)["state"] == "succeeded"
     entry = service.installations.snapshot()[0]
     roots = enabled_plugin_skill_roots(owner)
     expected = owner.plugins_dir / "environments" / entry.activation.plan.environment_ref / "files" / "skills"

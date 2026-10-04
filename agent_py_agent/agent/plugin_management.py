@@ -35,7 +35,12 @@ from .plugin_invocation import (
     execute_plugin_invocation,
     plugin_invocation_context,
 )
+from .plugin_permissions.confirmation import (
+    permission_confirmation_message,
+    permission_problem_message,
+)
 from .plugin_permissions.display import permission_listing, permission_summary
+from .plugin_permissions.enable import unconfirmed_reenable_observation
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
@@ -210,6 +215,9 @@ class PluginManagement:
             return self._reply(self._query(values["request"]), values["request"])
         if parsed.action.name in _MANAGEMENT_TOOLS:
             tool_name = _MANAGEMENT_TOOLS[parsed.action.name]
+            if tool_name == PLUGIN_ENABLE_TOOL and values.get("authorization") and self.context.is_admin:
+                # 下一确认请求已在完整预览冻结，运输重送不改变已确认的激活代。
+                request_id = values["authorization"]
             return self._reply(self._submit(tool_name, dict(values), revision, request_id,
                                            request_permission, cancellation_token), request_id)
         entries = self.installations.snapshot()
@@ -423,14 +431,17 @@ class PluginManagement:
             raise RuntimeConflictError("原会话不属于当前 owner")
         return thread
 
-    # LLM: 摘要覆盖明确参数、目录版本、工作根和当前工具权限；配置正文留在 handler 内，不能进入参数。
-    # 函数用途: 固定原请求全部工具参数，重送无需重新读取配置或包来源。
+    # LLM: 摘要覆盖明确参数、目录/工作根和工具权限；多值元组按原 JSON 工具协议转列表，私有配置正文不进入参数。
+    # 函数用途: 冻结可被真实 ToolExecutor 验证的管理参数，重送无需重新读配置或包来源。
     def _arguments(self, tool_name: str, values: dict, revision: str) -> dict:
         policy = self.context.path_policy
         permission = {"mode": policy.mode, "owner_root": str(policy.owner_scope_root or ""),
                       "dangerous_roots": [str(path) for path in policy.dangerous_roots],
                       "tool_allowed": self._allowed(tool_name)}
-        return {**values, "catalog_revision": revision, "workspace": str(self.context.workspace),
+        normalized = json.loads(json.dumps(values, ensure_ascii=False, allow_nan=False))
+        if tool_name == PLUGIN_ENABLE_TOOL and values.get("authorization") and values.get("authorization_revision"):
+            revision = values["authorization_revision"]
+        return {**normalized, "catalog_revision": revision, "workspace": str(self.context.workspace),
                 "permission_digest": tool_arguments_hash(permission)}
 
     # LLM: 原身份字段仅取宿主上下文；查询编号不会覆盖 owner/channel/actor。
@@ -446,8 +457,8 @@ class PluginManagement:
                                   command_name=tool_name,
                                   input_digest=tool_arguments_hash(arguments).removeprefix("sha256:"))
 
-    # LLM: 原目录与安装同读，构造阶段不执行管理动作；启用工具在这里固定原计划，卸载工具只取得旧记录。
-    # 函数用途: 为已登记的明确动作选择唯一管理工具，并冻结它实际需要的依赖。
+    # LLM: 原目录/安装同读；启用实际消费新默认、四维参数和宿主保护根，构造不启动程序。
+    # 函数用途: 将同源管理员入口接到统一权限上下文，不从正文取管理员或 owner 身份。
     def _management_tool(self, repo: RuntimeRepository, binding, arguments: dict):
         context = self.context
         tool_name = binding.request.command_name
@@ -465,9 +476,13 @@ class PluginManagement:
             return PluginConfigureTool(self.installations, context.path_policy, context.workspace,
                                        binding.request.operation_id, existing, catalog_revision)
         if tool_name == PLUGIN_ENABLE_TOOL:
+            roots = tuple(path for path in (context.owner.root, context.path_policy.agent_home_root) if path)
             policy = PluginEnablePolicy(process_sandbox=context.process_sandbox,
                                         events_enabled=context.plugin_events_enabled,
-                                        events_owner_allowed=context.events_owner_allowed)
+                                        events_owner_allowed=context.events_owner_allowed,
+                                        legacy_arguments=arguments,
+                                        legacy_sandbox_default=context.legacy_sandbox_default,
+                                        legacy_forbidden_roots=roots)
             return PluginEnableTool(context.owner, repo, binding, existing, catalog_revision, policy=policy)
         if tool_name == PLUGIN_REMOVE_TOOL:
             return PluginRemoveTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)
@@ -508,10 +523,10 @@ class PluginManagement:
                 PLUGIN_ENABLE_TOOL: self.context.enable_allowed,
                 PLUGIN_REMOVE_TOOL: self.context.remove_allowed}.get(tool_name, False)
 
-    # LLM: 展示只读原结果；成功启用卡片只投影当前安装声明，finalization_pending 优先于可用文案。
-    # 函数用途: 分开展示业务结果与运行收尾，启用确实完成时告知使用方法并保留原查询编号。
+    # LLM: 原 UNKNOWN 不暴露未经确认工具结果；重新启用仅附同表原撤权的有限观察，仍 UNKNOWN；成功卡需原结果确认。
+    # 函数用途: 分开原结果、已观察撤权和未验证清理，保留原查询编号与授权身份。
     def _reply(self, payload: dict, request_id: str = "") -> dict:
-        payload = dict(payload)
+        payload = unconfirmed_reenable_observation(self.installations, dict(payload))
         envelope = payload.pop("result", {})
         if envelope:
             payload["details"] = next((envelope[key] for key in _MANAGEMENT_TOOLS.values() if key in envelope), {})
@@ -570,8 +585,8 @@ _PLUGIN_BUSINESS_REPLY_MESSAGES = {
 }
 
 
-# LLM: 只按回执结构化 reason 选专用说明，不读输出文本；没有专用说明时返回空串，交 _reply 用状态默认说明。
-# 函数用途: 给确认预览、来源越权、运行环境问题三类原因选具体说明。
+# LLM: 原结构化 kind 决定确认投影；完整 R/W/N/E 同源运输，中文文案不参与授权判断。
+# 函数用途: 展示管理员完整确认、来源越权和运行环境问题，不截断授权内容。
 def _reason_message(details: dict) -> str:
     reason = details.get("reason")
     if reason == "confirmation_required" and isinstance(details.get("confirmation"), dict):
@@ -579,12 +594,14 @@ def _reason_message(details: dict) -> str:
         confirmation = details["confirmation"]
         if confirmation.get("kind") == CONSENT_KIND:
             return verifier_confirmation_message(confirmation)
+        if confirmation.get("kind") == "plugin_legacy_permissions":
+            return permission_confirmation_message(confirmation)
         return confirmation_message(confirmation)
     if reason == "source_unauthorized":
         # 来源在当前 owner 范围外：按信封里的 allowed_root/source_base 告诉用户包该放哪里，不读输出文本
         return source_unauthorized_message(details)
     # 平台不符、解释器缺失或被替换：按结构化原因码给出具体说明与下一步（没有对应说明时为空串）
-    return runtime_reason_message(reason) or ""
+    return permission_problem_message(reason) or runtime_reason_message(reason) or ""
 
 
 # LLM: 只读回执里的结构化状态与收尾字段选说明，不解析正文；业务调用的输出只经可读化投影后附在说明后面。

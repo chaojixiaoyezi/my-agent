@@ -321,7 +321,7 @@ def test_real_host_install_confirmation_and_all_five_registered_tools(tmp_path):
     _workspace(tmp_path)
     service, plugin_id, confirmation = _install_and_confirm(tmp_path, package)
     assert plugin_id == "shuohao-novel-gates"
-    assert confirmation["interpreter"]["path"] == os.path.realpath(NODE)
+    assert confirmation["mode"] == "wide" and confirmation["runtime"]["interpreter"]["path"] == os.path.realpath(NODE)
     registry = plugin_registry(service)
     try:
         registry.prepare_for_run()

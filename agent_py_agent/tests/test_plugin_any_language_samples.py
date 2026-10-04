@@ -21,6 +21,7 @@ from agent_py_agent.agent.plugin_entry import host_platform_tag
 from agent_py_agent.agent.plugin_runtime import plugin_tool_name
 from agent_py_agent.agent.workspace_read_context import WorkspaceReadContext
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
+from agent_py_agent.tests.plugin_enable_fixtures import confirm_enable, preview_enable
 from agent_py_agent.tests.test_plugin_management import manager
 from scripts.build_plugin_api import ROOT
 from scripts.build_plugin_files_package import build_files_package
@@ -98,18 +99,19 @@ def test_node_port_matches_every_conformance_case(tmp_path):
     assert result["invalid"] == [True] * len(vectors["invalid_contexts"])
 
 
-# 函数用途: 安装一个样例包并完成"看回执 → 带确认码启用"，返回管理服务与第一次回执。
+# LLM: 样例真实环境/MCP 在明确 wide 下回归，确认走原管理链；不改产品默认，不只回填旧码。
+# 函数用途: 安装样例并按完整命令/授权请求确认，返回完整预览供调用方核对嵌套运行事实。
 def _install_and_confirm(tmp_path, package):
-    service, _ = manager(tmp_path)
+    service, _ = manager(tmp_path, legacy_sandbox_default=False)
     result = service.command(f'/plugins install "{package}"', revision=service.catalog().revision, request_id="install")
     assert result["state"] == "succeeded", result
     plugin_id = service.installations.snapshot()[0].manifest.plugin_id
-    first = service.command(f"/plugins enable {plugin_id}", revision=service.catalog().revision, request_id="enable")
-    assert first["details"]["reason"] == "confirmation_required", first
-    code = first["details"]["confirmation"]["confirm_code"]
-    enabled = service.command(f"/plugins enable {plugin_id} --confirm {code}", revision=service.catalog().revision,
-                              request_id="confirmed")
+    first = preview_enable(service, plugin_id)
+    enabled = confirm_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
+    entry = service.installations.snapshot()[0]
+    assert entry.enabled and entry.activation.phase == "active"
+    assert entry.activation_id == first["details"]["confirmation"]["activation_id"]
     return service, plugin_id, first["details"]["confirmation"]
 
 
@@ -119,7 +121,7 @@ def test_node_sample_runs_through_host_and_honors_read_context(tmp_path):
     declaration = json.loads((project / "declaration.json").read_text(encoding="utf-8"))
     package = build_files_package(declaration, project, tmp_path / "hello-node.zip")
     service, plugin_id, confirmation = _install_and_confirm(tmp_path, package)
-    assert confirmation["interpreter"]["path"] == os.path.realpath(NODE)
+    assert confirmation["mode"] == "wide" and confirmation["runtime"]["interpreter"]["path"] == os.path.realpath(NODE)
     registry = plugin_registry(service)
     try:
         registry.prepare_for_run()
@@ -147,7 +149,8 @@ def test_go_sample_builds_and_runs_through_host(tmp_path):
     declaration = json.loads((project / "declaration.json").read_text(encoding="utf-8"))
     package = build_files_package(declaration, staging, tmp_path / "hello-go.zip", (host_platform_tag(),))
     service, plugin_id, confirmation = _install_and_confirm(tmp_path, package)
-    assert confirmation["platform"] == host_platform_tag() and confirmation["files"][0]["executable"] is True
+    assert confirmation["mode"] == "wide"
+    assert confirmation["runtime"]["platform"] == host_platform_tag() and confirmation["runtime"]["files"][0]["executable"] is True
     registry = plugin_registry(service)
     try:
         registry.prepare_for_run()

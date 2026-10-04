@@ -18,18 +18,26 @@ from agent_py_agent.tests.plugin_activation_fixtures import (
     invoke_registered_tool,
     plugin_registry,
 )
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    confirm_enable,
+    preview_enable,
+    unrestricted_service,
+)
 
 
 def test_enable_active_is_unchanged_and_missing_plugin_has_explicit_failure(tmp_path, monkeypatch):
-    service = installed_runtime_plugin(tmp_path)
-    initial = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
+    service = unrestricted_service(installed_runtime_plugin(tmp_path))
+    initial = confirm_enable(service, preview_enable(service, "sample-peek"))
     assert initial["state"] == "succeeded", initial
     before = service.installations.snapshot()
+    assert before[0].enabled and before[0].activation.phase == "active"
     def unexpected(*args, **kwargs):
         pytest.fail("已启用或不存在的插件不得准备新环境或连接")
     monkeypatch.setattr(PluginMCPClient, "__init__", unexpected)
     repeated = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="repeat")
-    assert repeated["state"] == "succeeded" and repeated["details"]["outcome"] == "unchanged", repeated
+    # 原 enabled 免确认旁路已删除：重新启用先预览，未确认仍保持旧 active，不能准备或连接新候选。
+    assert repeated["state"] == "failed" and repeated["details"]["reason"] == "confirmation_required", repeated
+    assert repeated["details"]["confirmation"]["previous_activation_id"] == before[0].activation_id
     assert service.installations.snapshot() == before
     missing = service.command("/plugins enable missing-peek", revision=service.catalog().revision, request_id="missing")
     assert missing["state"] == "failed" and missing["details"]["reason"] == "plugin_missing", missing
@@ -37,16 +45,18 @@ def test_enable_active_is_unchanged_and_missing_plugin_has_explicit_failure(tmp_
 
 
 def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
-    service = installed_runtime_plugin(tmp_path, configure=True)
+    service = unrestricted_service(installed_runtime_plugin(tmp_path, configure=True))
     registry = plugin_registry(service)
     view = registry.with_access_policy(access_mode="full-access", path_access_mode="full", owner_scope_root="")
     assert registry._mcp_clients == [] and view._mcp_clients is registry._mcp_clients
-    revision = service.catalog().revision
-    enabled = service.command("/plugins enable sample-peek", revision=revision, request_id="enable")
+    first = preview_enable(service, "sample-peek")
+    enabled = confirm_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     assert enabled["details"]["candidate_cleanup"]["confirmed"]
     assert "private-settings-value" not in json.dumps(enabled)
-    replay = service.command("/plugins enable sample-peek", revision=revision, request_id="enable")
+    entry = service.installations.snapshot()[0]
+    assert entry.enabled and entry.activation.phase == "active"
+    replay = confirm_enable(service, first)
     assert replay["details"] == enabled["details"]
     owner = service.context.owner
     store = ProcessSessionStore(process_session_store_root(owner.home_dir, owner.home_dir))
@@ -87,7 +97,7 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
         registry.prepare_for_run()
         assert name not in view.tools and name not in registry.tools
         assert "read_file" in registry.tools
-        new = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="reenable")
+        new = confirm_enable(service, preview_enable(service, "sample-peek", "reenable"))
         assert new["state"] == "succeeded", new
         assert service.installations.snapshot()[0].activation_id != old_entry.activation_id
         replay = service.command("/plugins disable sample-peek", revision=disable_revision, request_id="disable")
@@ -120,9 +130,9 @@ def test_bad_complete_directory_never_publishes(tmp_path, change):
         tool["description"] = "另一个工具"
     elif change == "schema":
         tool["inputSchema"]["properties"]["path"] = {"type": "integer"}
-    service = installed_runtime_plugin(tmp_path, tools_override=tools,
-        module_source="raise RuntimeError('fixture startup failure')" if change == "startup" else None)
-    result = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
+    service = unrestricted_service(installed_runtime_plugin(tmp_path, tools_override=tools,
+        module_source="raise RuntimeError('fixture startup failure')" if change == "startup" else None))
+    result = confirm_enable(service, preview_enable(service, "sample-peek"))
     assert result["state"] != "succeeded", result
     entry = service.installations.snapshot()[0]
     assert not entry.enabled and entry.activation.phase == "preparing"
@@ -160,7 +170,8 @@ def test_candidate_cleanup_storage_failure_prevents_active(tmp_path, monkeypatch
     from agent_py_agent.agent.tooling.process_session_records import PROCESS_TERMINAL_STATUSES
     from agent_py_agent.agent.tooling.process_session_store import ProcessSessionTransaction
 
-    service = installed_runtime_plugin(tmp_path)
+    service = unrestricted_service(installed_runtime_plugin(tmp_path))
+    first = preview_enable(service, "sample-peek")
     original = ProcessSessionTransaction.write
     initialize, clients = PluginMCPClient.__init__, []
 
@@ -178,7 +189,7 @@ def test_candidate_cleanup_storage_failure_prevents_active(tmp_path, monkeypatch
     try:
         with monkeypatch.context() as patch:
             patch.setattr(ProcessSessionTransaction, "write", fail_candidate_cleanup)
-            result = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
+            result = confirm_enable(service, first)
         assert result["state"] == "outcome_unknown", result
         entry = service.installations.snapshot()[0]
         assert not entry.enabled and entry.activation.phase == "preparing"
@@ -198,7 +209,8 @@ def test_candidate_cleanup_storage_failure_prevents_active(tmp_path, monkeypatch
             assert not registry._mcp_clients and "read_file" in registry.tools
         finally:
             registry.close_mcp_clients()
-        assert service.command("/plugins status enable", revision="", request_id="query")["state"] == "outcome_unknown"
+        identity = first["details"]["confirmation"]["authorization_id"]
+        assert service.command(f"/plugins status {identity}", revision="", request_id="query")["state"] == "outcome_unknown"
     finally:
         for client in clients:
             # 只移除已确认测试原生资源退出后的 atexit 重复回调；持久 UNKNOWN 和原异常都不修改。

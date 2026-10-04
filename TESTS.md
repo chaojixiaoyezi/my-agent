@@ -1529,6 +1529,41 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   ```
 - **复核结论**：3a最后user后全部assistant的规则在所测协议入口成立，本轮缺思考仍安全降为关闭；旧无思考答复不再连累下一轮，档位max在常规路径不丢。none/required/specific的现有强制关闭及线程读取回退仍可能换分区，本线未改。实际N轮落盘→N+1轮宿主恢复、真实自然答复/续跑全链、官网命中率/费用改善均未验证；压缩/重载分别归luna3/ds7，不以这些局部全绿宣称跨轮问题全部解决。
 
+## 老格式插件启用协议回归尾补（opp4，2026-10-04，WIP，B7 接线另派）
+
+- 来源：3a 转述 9b 第三段终审通过及五文件 21 条旧协议失败；补 ds8 的 M1/M3 时序缺口。沿 `3578038b5` 续作，本轮产品只补有意刷新授权事实的注释，不改默认值、不提前接 B7、不启动真实 Gateway、不安装依赖。整个 opp 系列仍不能单独部署，等正式 B7 接线后整批进入 17j，赶不上则整体 17k。
+- 两版真实对照：在 `/private/tmp/claude-501/opp4-base22` 和 `opp4-baseb33` 用 `git worktree add --detach` 分别检出用户指定的 **22e02c668b88a4685738d43e0b02f53d4fb1675f** 和 **b33175b41fe9e55f672e72e9a522be2607cb6a15**，主工作树未切提交。每个检出均从自身根目录执行下列五文件命令，JUnit 分别写回本树 `tmp/opp4/base22.xml`、`baseb33.xml`；跑完确认临时树无改动后 `git worktree remove`，两处均已删除。
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_any_language.py agent_py_agent/tests/test_plugin_any_language_samples.py agent_py_agent/tests/test_plugin_enable.py agent_py_agent/tests/test_plugin_sandbox.py agent_py_agent/tests/test_shuohao_novel_gates.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp4 --junitxml=<本树tmp/opp4下本次独立XML>
+  ```
+- 本机 22e 五文件 **79 passed / 16 failed / 0 errors / 1 skipped**；b331 **74 passed / 21 failed / 0 errors / 1 skipped**，都退出1。b331 的 21 个失败节点与 9b 原日志完全相同；其中 16 个节点在本机真正 22e 基线也失败，只有5个节点是本机对照新增。**没有复现“22e 全过”**：那是 9b 沙箱外证据，不冒充本机结果。相同失败节点也不证明底层原因相同。精确集合及差集：`tmp/opp4/baseline-comparison.json`。
+- 五文件保留全部原测试函数及 skip/xfail 标记，没有删用例、没有新增跳过。新 `plugin_enable_fixtures.py` 仅在原真实环境准备用例中显式选择 unrestricted，保留原 `plugin_process_sandbox` 开关；完整预览后原样提交 `confirm_command`、目录 revision 和 `authorization_id`，不直调执行器、不用假进程洗绿。原运行事实从完整权限的 `runtime` 读取；原启用成功、active、固定激活代、解释器/文件、业务调用、沙箱隔离、候选清理和 UNKNOWN 断言仍在。旧 active 重复 enable 改为先完整预览且未确认不动旧代，不恢复旧免确认旁路。
+- 最终相关17文件（五文件、十个 legacy 文件、management/chat_control）**257 passed / 16 failed / 0 errors / 1 skipped**，退出1，执行至100%。五文件子集 **79 passed / 16 failed / 0 errors / 1 skipped**，失败节点集合与真正22e基线相同；其余12文件 **178 passed / 0 failed / 0 errors / 0 skipped**。完整日志/XML及精确汇总：`tmp/opp4/related-final.log`、`related-final.xml`、`verification.json`。失败主要停在启用结果不为 succeeded，候选清理一例未取得候选记录；不能据此声称后续真实业务或沙箱链路已通过。原 report 子进程用例跳过原因明确为 Seatbelt exit71，子进程尚未执行，仍是未验证；其余失败未逐条确认底层原因，不统一归因沙箱。
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_any_language.py agent_py_agent/tests/test_plugin_any_language_samples.py agent_py_agent/tests/test_plugin_enable.py agent_py_agent/tests/test_plugin_sandbox.py agent_py_agent/tests/test_shuohao_novel_gates.py agent_py_agent/tests/test_plugin_legacy_candidate.py agent_py_agent/tests/test_plugin_legacy_config.py agent_py_agent/tests/test_plugin_legacy_drift.py agent_py_agent/tests/test_plugin_legacy_management.py agent_py_agent/tests/test_plugin_legacy_permissions.py agent_py_agent/tests/test_plugin_legacy_records.py agent_py_agent/tests/test_plugin_legacy_rollback.py agent_py_agent/tests/test_plugin_legacy_state.py agent_py_agent/tests/test_plugin_legacy_transitions.py agent_py_agent/tests/test_plugin_legacy_transport.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugins_chat_control.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp4 --junitxml=tmp/opp4/related-final.xml
+  ```
+- ds8 M1：真实 preparing 提交之后、prepare 之前，四个权限维度精确漂移并要求零 prepare/零候选；独立删除最后 prepare 前的授权复核，**4 failed / 0 errors / 0 skipped**，因 prepare 真被调用而红；立即恢复原字节，同四项 **4 passed**。M3：确认检查后、撤旧前读到合法并发安装快照，严格要求 revision_conflict、零 retire、原 active 表不变；独立删除快照相等守卫，**1 failed / 0 errors / 0 skipped**，实际变成 succeeded 被捕获；立即恢复原字节，同目标 **1 passed**。初版 M3 夹具的非法 revision 与响应再次读取假设已修正，不放宽业务断言。各 XML 为 `tmp/opp4/M1-red.xml`、`M1-green.xml`、`M3-red.xml`、`M3-green.xml`；最终产品原字节与两次变异前备份相同。
+- guards9 按实时清单完整十一文件（含 packaging/constants_catalog）**184 passed / 0 failed / 0 errors / 0 skipped**，退出0，`tmp/opp4/guards.xml`。与相关 pytest 串行，不跑全仓 pytest：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp4 --junitxml=tmp/opp4/guards.xml
+  ```
+- 当前产品/测试版本静态已实跑：全范围 ruff 通过；import boundaries `findings=0`；strict-size 退出0、`blocked=False`（strict_scope_total=2213、hard=0、high-risk=1513、soft=700、test_advisory=1237）。size_diff 原输出 **新增告警: 0 / 消失告警: 24**，不是本段整改24条；`CODE_SIZE_REPORT.md` 已还原，baseline 不改，临时证据不入提交。最终14文件暂存后 doc-sync 普通及 `--staged` 两入口均 DOC_SYNC_PASS，clean-package 未发现发布阻塞项，普通/cached diff-check 与报告/baseline相对HEAD无差异检查均退出0。未变版本/input/观察点的有效 pytest/尺寸结果复用，不为文档重复跑。静态与最终暂存命令：
+  ```bash
+  $PY -m ruff check agent_py_agent scripts
+  $PY scripts/check_import_boundaries.py
+  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+  git checkout HEAD -- CODE_SIZE_REPORT.md
+  bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
+  $PY scripts/check_doc_sync.py --staged
+  $PY scripts/check_doc_sync.py
+  $PY scripts/check_clean_package.py .
+  git diff --check
+  git diff --cached --check
+  git diff --exit-code HEAD -- CODE_SIZE_REPORT.md CODE_SIZE_BASELINE.json
+  ```
+- 9b 注释和后续验收已同步：有意刷新后旧确认码只能重预览，走到 `_enable` 时消费的是最后确认的同一授权；B7 第四段必须在 restricted 的每次实际启动核对完整授权事实与固定激活 `permission_json`，候选/业务/面板/重连均覆盖，不能只在 enable 核。本轮仅登记验收项，**B7 接线、真实链探针、真实 OS/用户通道、外部复审仍未验证**。下一步由9b在沙箱外只复跑五文件及真实链探针，3a安排正式接线，不先把默认改false或分批上线。
+
 ## G2b 读路径补最后一处：归档读不出的 403 也带缺凭据码（g2bfix1c，2026-10-04，worker/g2b-denial-server-fix2；基于 g2bfix1b 头 e8c4b6d2d）
 
 - 来源：g2bfix1br 初审在全面 grep 时查出——`_send_archived_terminal_result` 的 `load_error` 分支（归档文件存在但读不出）也是裸 `_send_json(status, body)`；它在同一条"降匿名读路径"上，普通用户拿 403 却仍不带码。已实测：匿名请求一个结构损坏的归档 → 403 无码；包上 `_denial_body` 后 → 403 带 `LOCAL_CREDENTIAL_REQUIRED`。
@@ -3351,6 +3386,45 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - 静态门禁：import boundaries=0、ruff 全范围通过、DOC_SYNC_PASS、`git diff --check` 干净、clean-package 通过、strict code-size 退出 0（strict_scope_total=2214、hard=0、blocked=False，报告已 `git checkout` 还原不提交）；size_diff **新增告警 0 / 消失告警 23**。
 - 已知环境失败（未删改、未伪造）：`test_host_command_stream.py` 8 项在 `enabled_plugin` 的 `plugin_enable` 夹具失败（`outcome_unknown`，插件宿主启用类，工作规则第 8 条的沙箱限制），与本次改动无关，交 3a 沙箱外复核。
 - 未验证：真实 Gateway/TUI/IM、生产旧客户端迁移与 `/status` 计数归零、真实插件进程、跨平台；未启动 Gateway、未连真实网络。
+
+## 老格式插件权限第三段（opp，2026-10-04，确认漂移与 ds1 意见，WIP）
+
+- 来源：断网恢复后从 `b33175b41` 续作；开工 `git status --short` 为空、最近三次提交未变化。3a 转述 ds1 第二段初审的必须改及四项建议，本段一起处理；未启停真实 Gateway、未读生产安装表、未安装联网依赖、未复制 B7 OS 规则。
+- 真实入口新增失败先行：22 条初次漂移用例中 13 条失败（0 errors/skipped）；其中 11 条复现构造后/准备期间仍沿旧事实启用或撤旧的竞态，另 2 条是新测试对跨 channel/conversation 错误分类的错误假设。按原目录绑定合同明确断言 `PLUGIN_CATALOG_STALE`，另严格核对新身份完整预览换码、零启动与安装不变；没有放宽有效拒绝断言。执行前刷新同一授权事实，准备/候选连接/目录发现/清理后发布前再次核对，不自动换绑新事实；链接/缺失先拒，旧代保持，准备后漂移保留 preparing 而不发布。
+- **ds1 必须改已处理**：选择“产品保留旧首句再追加新段”。完整 R/W/N/E 预览仍保留，首行恢复 `启用前需要你确认：`，不修改原 `test_plugins_chat_control.py` 断言。亲自算得 `git merge-base origin/main HEAD` = `22e02c668b88a4685738d43e0b02f53d4fb1675f`，`git archive` 导出到本树 `tmp/opp-mergebase/`（未切分支/建其它工作树）。完全相同两例在基线通过、改前本树失败，**不是既有失败**；最终相关范围含该文件全部用例通过。定向基线/改前命令仅工作目录与 JUnit 地址不同：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugins_chat_control.py -k real_confirmation_gate_stays_closed_before_explicit_user_confirmation -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp --junitxml=<本树tmp下的独立XML>
+  ```
+- ds1 建议：独立用例直接验证显式 authorization 必须等于本次 request_id 且带 permit 前缀，不依赖确认码兜底；非管理员带 authorization 明确拒绝、保留原运输编号且零 owner 创建；两处 retirement_operation 有意独立计算，完整实际记录与预测目标相等是守卫，已补注释；commit_state 改读旧激活及同撤旧子提交 release 回执，不再由“有一份报告”推断。报告存在但无旧代的失败断言先红，修后绿；实际释放正例保留。
+- 最终相关 15 文件：**337 passed / 0 failed / 0 errors / 0 skipped**，退出0；包括原 11 文件、新漂移/候选/运输三文件及 C10 全文件。原客户端和 IM/HTTP handler 经真实管理/HostCommand/Store 的长预览与确认重送合同通过：32 个中文空格长路径、完整结构化事实、网络参数、原授权请求/激活代不丢。外部准备/MCP/退出及 HTTP 运输为替身，只证明这些观察点，**真实 TUI 渲染、飞书分段送达和送达门未验证**。
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_legacy_drift.py agent_py_agent/tests/test_plugin_legacy_candidate.py agent_py_agent/tests/test_plugin_legacy_transport.py agent_py_agent/tests/test_plugins_chat_control.py agent_py_agent/tests/test_plugin_legacy_management.py agent_py_agent/tests/test_plugin_legacy_rollback.py agent_py_agent/tests/test_plugin_legacy_transitions.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugin_legacy_permissions.py agent_py_agent/tests/test_plugin_legacy_config.py agent_py_agent/tests/test_plugin_legacy_state.py agent_py_agent/tests/test_plugin_legacy_records.py agent_py_agent/tests/test_plugin_activation.py agent_py_agent/tests/test_plugin_catalog_digest_stability.py agent_py_agent/tests/test_plugin_manifest_v8.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp --junitxml=tmp/opp-stage3-related.xml
+  ```
+- guards9 完整十文件按第二段清单/同参数串行执行，JUnit 改为 `tmp/opp-stage3-guards.xml`：**173 passed / 0 failed / 0 errors / 0 skipped**。JUnit 精确汇总与断言保存在 `tmp/opp-stage3-verification.json`。未跑无清单全仓 pytest；未把 ds1 转述的 deactivation/activation_ref launcher 失败直接当成本线已复核的既有环境失败。
+- 本段 **8 个独立单处变异全部 KILLED**，每项行为红 exit1、0 errors/skipped（非 ImportError），原字节 SHA 恢复后同目标绿 exit0，最终 git diff 字节相等：显式请求/前缀绑定（ds1 原存活点）、确认码旁路、构造事实缓存、准备中漂移旁路、旧退出 UNKNOWN 错洗为 failed、确认命令丢 N、原 release 回执丢 committed、C10 预览前缀。临时驱动 `tmp/opp_stage3_mutations.py`，逐项输出/XML/SHA/原字节及总表 `tmp/opp-stage3-mutations/summary.json`，不随功能提交；第一段六处不充作这八处。
+- 静态：全范围 ruff、import boundaries `findings=0`、strict-size `blocked=False`（strict_scope_total=2213、hard=0、high-risk=1513、soft=700、test_advisory=1237）。size_diff 首次新增 1 条测试 helper nesting，改为等价平分支并复验相关范围；最终原输出 **新增告警: 0 / 消失告警: 24**，不是本段整改24条。CODE_SIZE_REPORT 已还原，baseline 不改。
+- 提交前按最终暂存 12 文件执行 `scripts/check_doc_sync.py --staged`（DOC_SYNC_PASS）、`scripts/check_clean_package.py .`（未发现发布阻塞项）、`git diff --check` 与 `git diff --cached --check`，均退出0。当前三个产品文件 SHA 与八处变异恢复 SHA 一致，逐份 XML 核对数字与总表一致；本段仅同步文档后复用该版本有效产品验证，不重复运行未变化的 pytest/尺寸入口。CODE_SIZE_REPORT 与 baseline 相对 HEAD 无差异，临时证据不入提交。
+- 本段产品/合同已验证，B7 仍未接，restricted 仍明确拒候选；业务/面板统一底座、真实 macOS/Linux/样例/桌面/G2b/渠道、生产回滚及本段非作者/9b 终审仍是断点，不可直接部署。
+
+## 老格式插件权限第二段（opp，2026-10-03，部署窗口 WIP，未接 B7）
+
+- 来源：3a 第二段四项要求及回滚裁定；沿原管理/HostCommand/ToolExecutor/唯一安装表接四维授权、完整确认身份与码、撤旧代及真实配置消费。外部候选/MCP/退出证明仅测试替身；没有启动真实 Gateway、没有安装联网依赖或验证 OS 隔离/真实用户通道。
+- 相关回归 **262 passed / 0 failed / 0 errors / 0 skipped**，JUnit `tmp/opp-stage2-related.xml`，退出0。包括：YAML真消费开/关/字符串false；restricted不降级；旧代退出未知仍UNKNOWN且零新启动；兼容/restricted/wide更新重装及重新授权；v1/v2/v3来源持久v4再导出v3；CLI完整损失确认、源漂移、坏表/链接/已有输出/同源拒绝；原v8关闭门、旧v1–v7字节与目录摘要。命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_legacy_management.py agent_py_agent/tests/test_plugin_legacy_rollback.py agent_py_agent/tests/test_plugin_legacy_transitions.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugin_legacy_permissions.py agent_py_agent/tests/test_plugin_legacy_config.py agent_py_agent/tests/test_plugin_legacy_state.py agent_py_agent/tests/test_plugin_legacy_records.py agent_py_agent/tests/test_plugin_activation.py agent_py_agent/tests/test_plugin_catalog_digest_stability.py agent_py_agent/tests/test_plugin_manifest_v8.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp --junitxml=tmp/opp-stage2-related.xml
+  ```
+- v8相关首次11个夹具失败：旧构造参数/`__new__`绕过初始化不再符合新统一上下文；改为正式构造或补固定关闭门夹具字段，v6原程序事实嵌入完整权限预览。原“不索码、不启动、不改原表”及未确认零调用/确认一次断言均保留，另严格比较原v6运行事实；没有删除、跳过、放宽有效失败来变绿。
+- 17i复核：测试用 `git show 22e02c668:...` 加载原读取函数及其真实依赖。直接读v4抛“安装表协议无效”，旧Store为`invalid_state`，原字节不变；导出v3能被该原函数读回、插件不丢、enabled/激活代不变。**v4表对17i不可读，会fail-closed**；实际生产启动/回滚未验证，操作步骤及授权损失见设计稿6.4。
+- guards9完整十文件 **173 passed / 0 failed / 0 errors / 0 skipped**，退出0，JUnit `tmp/opp-stage2-guards.xml`；与相关pytest串行，未跑无清单全仓pytest：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp --junitxml=tmp/opp-stage2-guards.xml
+  ```
+- 静态已验证：全范围ruff通过、import boundaries `findings=0`、strict-size `blocked=False`（strict_scope_total=2213，hard=0，high-risk=1513，soft=700，test_advisory=1237）。size_diff先真实报两条新nesting，已把确认判定独立成方法、坏输入夹具分支拆平，同目标262项重跑全绿；最后原输出为 **新增告警: 0 / 消失告警: 24**。差集不是本段整改24条。CODE_SIZE_REPORT生成物须还原，不改baseline。
+- 提交前执行：`git diff --check`、`scripts/check_doc_sync.py --staged`、`scripts/check_clean_package.py .`；实际退出码随本轮交接，不把前一次未包含新文件的检查当本提交检查。
+- 断点：部署窗口按3a要求先WIP提交结束；本段新增行为的独立变异/非作者审查、真实完整TUI/飞书运输、启动时路径/程序漂移复核与B7候选/业务/面板统一接线仍待。第一段六处变异及ds4初审不冒充本段验证；OS/生产回滚/9b终审均未做，不可直接部署。
+
 ## 老格式插件权限第一段（opp，2026-10-03，WIP）
 
 - 来源：3a 第 6.1 节五项裁定；仅静态 R/W/N/E、原安装/激活持久合同、配置边界与同源文字，不运行真实插件/网关/沙箱。

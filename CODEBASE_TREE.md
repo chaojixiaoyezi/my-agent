@@ -70,10 +70,21 @@
 |-- agent_py_agent/agent/capability/pack_verification_deliverables.py # 交付存在：本回合改过工作区时查必需交付物缺失或打不开，返工提示
 |-- agent_py_agent/agent/plugin_content_activation.py # 内容包无进程激活身份
 |-- agent_py_agent/agent/plugin_permissions/ # 老格式 R/W/N/E 静态授权、路径身份、原激活记录与一次性兼容、同源文字、B7 构造器接缝（WIP，非 OS 规则）
+|   |-- confirmation.py # 完整四维确认/授权身份/确认命令、拒启动原因的同源文字
+|   |-- enable.py # 单一模式来源、原确认身份、撤旧代预测/回执守卫与执行边界权限漂移复验
+|   |-- rollback.py # 严格 v4→v3 独立导出及授权损失报告，不覆盖原表
+|-- scripts/export_plugin_installations_v3.py # 新运行时回滚两步预览/确认，排他创建0600独立v3文件
 |-- agent_py_agent/tests/test_plugin_legacy_permissions.py # 授权形状/有限根/确认变化/开关不降级/B7 接缝合同
 |-- agent_py_agent/tests/test_plugin_legacy_config.py # 默认与参数边界、认证 settings 作用域
 |-- agent_py_agent/tests/test_plugin_legacy_state.py # 显式 v3→v4 一次性兼容、无缺字段旁路、撤销结束豁免
 |-- agent_py_agent/tests/test_plugin_legacy_records.py # 新授权随原激活摘要持久化、同代不可变、同源文字和普通身份不泄路径
+|-- agent_py_agent/tests/test_plugin_legacy_management.py # 原管理/HostCommand/执行器、完整参数/确认、撤旧未知与YAML真消费（外部进程替身）
+|-- agent_py_agent/tests/test_plugin_legacy_transitions.py # 兼容/restricted/wide 更新重装与重新授权矩阵，旧授权/旧码不复活
+|-- agent_py_agent/tests/test_plugin_legacy_rollback.py # 固定17i原读取函数、v4 fail-closed、导出保安装/启用、CLI损失/确认/拒覆盖
+|-- agent_py_agent/tests/test_plugin_legacy_drift.py # 真实权限维度/根inode/程序内容/身份漂移、授权绑定与撤旧提交事实（外部进程替身）
+|-- agent_py_agent/tests/plugin_enable_fixtures.py # 真实启用回归的完整预览/授权命令与显式测试wide模式，不替换准备或MCP
+|-- agent_py_agent/tests/test_plugin_legacy_candidate.py # 候选异常/退出未知、各候选边界漂移、并发配置与解释器替换拒发布
+|-- agent_py_agent/tests/test_plugin_legacy_transport.py # 原客户端/IM/HTTP handler长完整预览、回填确认/重送与UNKNOWN有限观察；非真实网络
 |-- agent_py_agent/agent/plugin_content_lifecycle.py # 原安装库中的内容激活迁移
 |-- agent_py_agent/agent/capability/package_snapshot.py # 包级快照及绑定内容与激活代次的读取参数
 |-- agent_py_agent/agent/capability/package_provider.py # 从原安装表发现并复核内容包
@@ -1223,6 +1234,7 @@ agent_py_agent/
 |   |-- test_plugin_deactivation.py   # 管理停用、原请求重放、准备取消、权限和未知清理保留
 |   |-- test_plugin_deactivation_races.py # 阻塞业务停用、另一插件/任务隔离与独立 host 创建交错
 |   |-- plugin_activation_fixtures.py # 实际临时 wheel/MCP、原管理链和业务工具执行夹具
+|   |-- plugin_enable_fixtures.py # 真实启用回归按完整确认命令/授权请求运行，测试wide不改变产品默认
 |   |-- test_plugin_enable.py         # 实际启用、坏目录、原执行器调用与旧快照停用验证
 |   |-- test_tool_call_precheck.py    # 审批前/批准后执行前复核：代理 opt-in、TOOL_UNAVAILABLE 提前拦下、内置工具不复核
 |   |-- test_background_extension_tools.py # 后台续跑白名单按注册表代理类型并入插件/MCP 工具；显式配置/任务名单不并入；真实插件启停跟随
@@ -1769,7 +1781,8 @@ docs/
 - `docs/design/MANAGED_PROCESS_STDIO.md`：原托管器的字节通道、v4 显式保留和激活归属，旧 v2/v3 原版本恢复边界。
 - `agent_py_agent/agent/plugin_configure_tool.py` 与 `plugin_sources.py`：隐藏管理工具通过原执行链读取授权来源，配置值只进 owner 私有安装表；包与配置共用有界安全读取。
 - `agent_py_agent/agent/plugin_install_tool.py` 与 `plugin_management.py`：管理服务核对原授权并走唯一执行器；安装默认停用，配置与启停同源，列表／详情投影当前安装快照，查询只读原请求。
-- `agent_py_agent/agent/plugin_enable_tool.py`：B7 前在确认码之前以 `plugin_events_disabled` 拒绝 v8，不解析运行时/生成计划；旧版仍沿原操作准备、完整验证候选目录并在确认退出后发布同代 active。
+- `agent_py_agent/agent/plugin_enable_tool.py`：B7 前在确认码之前以 `plugin_events_disabled` 拒绝 v8；旧版沿原操作完整确认/精确撤旧，执行、准备、候选连接/发现/清理后发布前复核原授权，漂移不发布，restricted 未接底座拒启动。
+- `agent_py_agent/tests/test_plugin_legacy_drift.py`、`test_plugin_legacy_candidate.py`、`test_plugin_legacy_transport.py`：原管理/Store/HostCommand 的漂移、候选失败、请求绑定、提交事实和长预览回填合同；外部进程/运输为替身，不证明 OS 或真实用户接收端。
 - `agent_py_agent/agent/plugin_runtime.py` 与 `tooling/plugin_registration.py`：固定激活的 MCP 适配和新运行组合；原客户端共享连接，权限视图单独生成目录，不新建激活缓存权威。
 - `agent_py_agent/tests/test_mcp_operation_outcomes.py`：通过原执行器和临时 RuntimeDB 区分完整失败回执与未知结果，核对重放及逻辑资源释放。
 - `agent_py_agent/agent/workspace_read_context.py` 与 `tooling/workspace_read_scope.py`：纯读取协议和宿主组装分开，插件复用唯一 `path_access_policy.py` 裁决；范围为空明确拒绝，不从隔离进程环境补权限。

@@ -30,6 +30,7 @@ from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.config import AgentConfig, normalize_agent_config
 from agent_py_agent.agent.tooling.sandbox import SandboxSpec, build_bwrap_argv
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
+from agent_py_agent.tests.plugin_enable_fixtures import confirm_enable, preview_enable
 from agent_py_agent.tests.test_plugin_any_language import (
     _TOOL,
     PLUGIN_ID,
@@ -75,16 +76,18 @@ for line in sys.stdin:
                                for tool in (_TOOL, _WRITE_TOOL)])).encode()
 
 
-# 函数用途: 在临时 owner 里安装并带码启用写读两用的测试插件；process_sandbox 决定管理上下文的沙箱开关。
+# LLM: 明确 wide 仅用于原写限制沙箱回归；process_sandbox 仍真实控制包装，准备/候选/业务进程不替换。
+# 函数用途: 在临时 owner 安装并按完整权限命令确认，保留原沙箱写限制而不修改产品默认。
 def _enabled_writer(tmp_path, *, process_sandbox: bool):
-    service, _ = manager(tmp_path, process_sandbox=process_sandbox)
+    service, _ = manager(tmp_path, process_sandbox=process_sandbox, legacy_sandbox_default=False)
     source = _package(tmp_path, _declaration(tools=[_TOOL, _WRITE_TOOL]), {"bin/server.py": _WRITER})
     installed = service.command(f'/plugins install "{source}"', revision=service.catalog().revision, request_id="install")
     assert installed["state"] == "succeeded", installed
     first = _enable(service, "enable")
     assert first["details"]["reason"] == "confirmation_required", first
-    enabled = _enable(service, "confirmed", first["details"]["confirmation"]["confirm_code"])
+    enabled = confirm_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
+    assert service.installations.snapshot()[0].activation.phase == "active"
     return service
 
 
@@ -137,19 +140,20 @@ def test_unavailable_sandbox_refuses_enable_and_explicit_calls(tmp_path, monkeyp
     unavailable = lambda enabled, home: "sandbox_unavailable" if enabled else ""  # noqa: E731
     monkeypatch.setattr(plugin_enable_tool, "plugin_sandbox_problem", unavailable)
     monkeypatch.setattr(plugin_management, "plugin_sandbox_problem", unavailable)
-    service, _ = manager(tmp_path, process_sandbox=True)
+    service, _ = manager(tmp_path, process_sandbox=True, legacy_sandbox_default=False)
     source = _package(tmp_path, _declaration(tools=[_TOOL, _WRITE_TOOL]), {"bin/server.py": _WRITER})
     assert service.command(f'/plugins install "{source}"', revision=service.catalog().revision,
                            request_id="install")["state"] == "succeeded"
-    refused = _enable(service, "enable")
+    first = preview_enable(service, PLUGIN_ID)
+    refused = confirm_enable(service, first)
     assert refused["state"] == "failed" and refused["details"]["reason"] == "sandbox_unavailable", refused
     assert "沙箱不可用" in refused["message"]
     assert service.installations.snapshot()[0].activation is None
     environments = service.context.owner.plugins_dir / "environments"
     assert not environments.exists() or not any(environments.iterdir())
     relaxed = PluginManagement(replace(service.context, process_sandbox=False))
-    code = _enable(relaxed, "enable-off")["details"]["confirmation"]["confirm_code"]
-    assert _enable(relaxed, "confirmed-off", code)["state"] == "succeeded"
+    off = preview_enable(relaxed, PLUGIN_ID, "enable-off")
+    assert confirm_enable(relaxed, off)["state"] == "succeeded"
     (tmp_path / "input.txt").write_text("x")
     call = service.command(f'/plugins@{PLUGIN_ID} read "{tmp_path / "input.txt"}"', revision=service.catalog().revision,
                            request_id="call")
@@ -201,15 +205,14 @@ def test_node_sample_runs_inside_the_platform_sandbox(tmp_path):
         pytest.skip("本机平台沙箱不可用（Linux 需要可用的 bwrap，macOS 需要 sandbox-exec）")
     project = Path(__file__).parents[2] / "plugins" / "hello-node"
     declaration = json.loads((project / "declaration.json").read_text(encoding="utf-8"))
-    service, _ = manager(tmp_path, process_sandbox=True)
+    service, _ = manager(tmp_path, process_sandbox=True, legacy_sandbox_default=False)
     package = build_files_package(declaration, project, tmp_path / "hello-node.zip")
     assert service.command(f'/plugins install "{package}"', revision=service.catalog().revision,
                            request_id="install")["state"] == "succeeded"
-    first = service.command("/plugins enable hello-node", revision=service.catalog().revision, request_id="enable")
-    code = first["details"]["confirmation"]["confirm_code"]
-    enabled = service.command(f"/plugins enable hello-node --confirm {code}", revision=service.catalog().revision,
-                              request_id="confirmed")
+    first = preview_enable(service, "hello-node")
+    enabled = confirm_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
+    assert service.installations.snapshot()[0].activation.phase == "active"
     (tmp_path / "notes.txt").write_text("沙箱里的笔记", encoding="utf-8")
     registry = plugin_registry(service, plugin_process_sandbox=True)
     try:

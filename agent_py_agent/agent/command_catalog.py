@@ -290,8 +290,14 @@ COMMAND_CATALOG = (
             CommandActionSpec("status", "查询当前会话的管理请求", (
                 ArgumentSpec("request", "原请求编号", required=True),
             ), available=False),
-            CommandActionSpec("enable", "启用已安装插件", (
+            CommandActionSpec("enable", "管理员确认授权后启用；重新启用先撤销并清理旧代", (
                 ArgumentSpec("plugin", "插件 ID", required=True),
+                ArgumentSpec("read_roots", "授权读取的规范绝对目录，可重复", options=("--read-root",), multiple=True, path=True),
+                ArgumentSpec("write_roots", "授权写入的规范绝对目录，可重复；包含目录内其它子项", options=("--write-root",), multiple=True, path=True),
+                ArgumentSpec("network", "授权全部网络：回环、公网和监听", options=("--network",), value_type="boolean"),
+                ArgumentSpec("program_roots", "额外程序文件或有限目录前缀，可重复", options=("--program-root",), multiple=True, path=True),
+                ArgumentSpec("authorization", "原完整预览给出的确认请求编号，按确认命令原样填写", options=("--authorization",)),
+                ArgumentSpec("authorization_revision", "原完整预览的目录摘要，重送时保持原值", options=("--authorization-revision",)),
                 ArgumentSpec("confirm", "确认码：启用含可执行文件或外部解释器的插件时，先看回执再原样填入",
                              options=("--confirm",)),
             ), available=False),
