@@ -1,5 +1,186 @@
 # 测试与发布验收
 
+## B9 模板处理参数截断标记（b9tr，2026-10-04，分支 `worker/b9-facts-table`）
+
+- **来源**：B5（sol3 `57f465dca`）给收紧请求加 `arguments_truncated`；B9 两个作者模板此前不看该字段，会拿被截断的残片放行。
+- **改动**：Python/Node 模板的 `review_gate`/`reviewGate` 加早返回（`true` → `ask` / `ARGUMENTS_TRUNCATED`）；`references/author-contract.md` 新增「参数截断标记 `arguments_truncated`」一节；`SKILL.md` 加一句指路；测试加三处覆盖。产品代码一行未动。
+- **命令（工作树根）**：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_write_my_agent_plugin_skill.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b9tr
+  ```
+  结果：**34 passed, 2 skipped**（skip = 本机 pytest 进程无 Node 解释器、B5 的 `plugin_events/tool_gate.py` 未合入本分支）。
+- **新增断言**：`_hook_requests` 加 id 15/16 两条 review 请求；`replies[14]` 期望 `{"verdict":"ask","reason_code":"ARGUMENTS_TRUNCATED","message":"参数被截断，看不全命令内容，先确认一次"}`，`replies[15]`（`arguments_truncated: false`）仍回 `RM_RF`，证明 `false` 不误伤完整参数路径。
+- **变异三个**（按原字节备份还原，未用 git stash/checkout）：
+  - M1 删掉 Python 模板的截断分支 → `test_templates_execute_packaged_stdio[python]` 失败：实际 `{'reason_code': 'RM_RF'}` ≠ 期望 `ARGUMENTS_TRUNCATED`；还原后复绿。
+  - M2 临时树放入 B5 的 `tool_gate.py` 模拟合入（`git worktree add --detach /private/tmp/claude-501/b9tr/wt HEAD`，HEAD=`10c40256f`，再拷入我的模板/文档/测试）→ 新用例从 `skip` 变**通过**，证明合入 B5 后真会比对。
+  - M3 同临时树把文档里的 `call.arguments_truncated` 改成 `arguments_cut` → 该用例失败（`作者合同缺截断字段的读法`）；临时树 `git worktree remove --force` 删除，主树无残留。
+- **Node 模板**：pytest 进程内 `shutil.which("node")` 取不到，stdio 用例按原设计 skip；单独跑 `node --check templates/node/src/server.js` 通过，文件级断言由新增用例覆盖。
+
+## B9 事件字段表与 B4 白名单的一致性用例（b9ft，2026-10-03，分支 `worker/b9-facts-table`）
+
+- **改动**：`references/author-contract.md` 新增观察事件字段表（九个公共字段 + 六类事件的 `facts` + 正文规则）；`SKILL.md` 加一句指路与向前兼容要求；`test_write_my_agent_plugin_skill.py` 新增 `test_author_contract_event_table_matches_event_point_projection`。产品代码一行未动。
+- **用例怎么工作**：`ast` 解析 `agent_py_agent/agent/plugin_events/points.py` 的 `_EVENT_FACT_FIELDS` 取白名单，再从 `author-contract.md` 解析事件表，逐类逐字段断言相等。`points.py` 不存在时 `pytest.skip("B4 的 plugin_events/points.py 尚未合入本分支；17j 合入后本用例自动生效")`。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-b9ft`）：
+  - 本分支：`test_write_my_agent_plugin_skill.py` + `test_plugin_skills.py` → **44 项，43 passed / 1 skipped**（跳过的正是新用例，符合设计）。
+  - **模拟 17j 合并**：`git worktree add --detach` 到 `/private/tmp/claude-501` 下临时树，放入 `worker/m1-b4-event-points` 的 `points.py` 与 step17i 的 `protocol.py`，再拷入本次改的表与用例 → 该用例 **passed**（证明合入 B4 后真的会严格比对，不是永远跳过）。跑完 `git worktree remove --force`，临时树已清理。
+  - **变异**（在临时树里改表、逐次还原）：①把 `tool_call_started` 的 `args_hash` 写成 `arg_hash` → **用例变红**；②删掉 `command_executed` 整行 → **用例变红**；还原后复绿。
+  - guards9 清单 **10 个文件全部存在、实跑 10 个 → 全部通过**（清单含 `test_packaging.py`）。
+  - `check_import_boundaries.py` findings=0；ruff `All checks passed`；`check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` 干净；`check_clean_package.py .` OK；strict code-size hard=0 blocked=False；`size_diff.sh` 新增告警 0 / 消失 13。
+- **没验证**：用例在本分支按设计跳过，**它的严格比对只在临时树里验过**，正式生效要等 17j 合入 B4；`facts` 各字段的语义描述是按 `points.py` 的取值逻辑写的，其中「`occurred_at` 是 Unix 秒」按 `protocol.py` 的 `EventEnvelope.occurred_at: float` 与设计第 6 节记。
+
+## M1 B9：be 通过后的两处文案尾补（2026-10-03，m1b9，`worker/sol2-m5`）
+
+- **来源与做法**：be 对 `11427c22c` 复审通过，无必须改；3a 接受 wheel 作者构建范围的有意放宽。脚本模块 docstring、双层注释和 pack-and-verify 明确构建钩子执行及调用方/会话沙箱的路径责任；SKILL 明确无需提示文字时将 content 改 none，只收事实、缩小确认范围。构建函数、模板和默认声明未改。
+- **定向核对**：AST 检查去掉新增模块 docstring 后与 `11427c22c` 的执行 AST 相同；真实模块 docstring/双层注释及参考均包含责任说明。新技能按需降正文的提醒由随后复现入口一并核对，不把静态文案检查当宿主隔离实测。
+- **技能查阅摸底**：旧正文原话反馈“没有无需提示文字时缩小订阅及确认范围的具体提醒”；旧材料也未明确围栏责任。旧版已能自行推断选择 none，不能虚构越权失败或把本轮文案改动说成修复运行缺陷。新版同场景仅核材料是否可查，不调用工具，不算真实插件制作。
+
+```sh
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_write_my_agent_plugin_skill.py $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-m1b9 -o addopts=''
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m ruff check agent_py_agent scripts
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_doc_sync.py
+git diff --check
+```
+
+**本轮结果**：上述当前版本串行命令退出 0，**206 passed，0 failed，0 skipped**（52.27 秒），Ruff `All checks passed!`、`DOC_SYNC_PASS`、`git diff --check` 均通过，不沿用原绿灯。新版查阅复测可直接引用“content 改成 none”及“会话沙箱和调用方的责任，脚本不做路径围栏”，两条资料缺口已补齐；纯对话不算构建或隔离实测。clean-package 按 3a 指示不重跑；已知 `.background_jobs/` 运行产物阻塞原样保留，不删除、不忽略、不提交。未运行全仓测试、my-agent 或真实 Gateway，宿主安装启用和 B7 隔离未验证。
+
+## M1 B9：插件作者技能 v8（2026-10-03，m1b9，`worker/sol2-m5`，已实现，待 be 复审）
+
+**来源与做法**：将原 M5 变基到 B1 `add244a92`，旧两提交对应 `7e15153d5`、`5c57964d7`；区间逐提交 `git diff --check` 通过。v8 实现提交为 `de395322e`（10:22:41 PDT）；本次后续仅补文档中的真实提交与结果，不更换受测产品字节。
+技能讲清工具/面板、观察和工具收紧；Python/Node 统一 v8 文件包、仅提示带正文、精确 full 门、默认断网、双能力握手与用户安装确认边界。
+新测试只用合成提示/命令与工作树临时副本，不安装启用插件，不读真实 owner 数据。
+`test_templates_build_and_validate` 走真实文件构建 CLI 和 `inspect_plugin_package`，`test_templates_execute_packaged_stdio` 从最终包解出的入口核握手、工具、空观察回执及 ask/allow_as_is/deny，危险命令仅作 JSON 数据。
+另外核合法纯观察/纯收紧包、非法订阅不发布、实际管理 runtime 的模型不可见位，并保留原生产 wheel 资源原字节与九个既有包的旧新构建器最终字节回归。
+
+**先红后绿**：迁移测试先报 1 failed/1 error（Node 仍 v6、Python 缺根声明）；升级后核心 6 passed。
+扩充整文件时 33 passed/1 failed，原因是新辅助测试误读 `snapshot`；已按真实 `ToolExecutorRequest.runtime_snapshot` 修正，不改业务断言。
+修正后当前版本的本文件与 guards9 十文件串行合跑 **206 passed，0 failed，0 skipped**（46.67 秒，退出 0）；包括生产 wheel 资源与九包字节回归，不沿用原 M5 绿灯。
+`IMPORT_BOUNDARIES findings=0`、Ruff `All checks passed!`、`DOC_SYNC_PASS`、`git diff --check` 均退出 0。
+严格尺寸输出 `strict_scope_total=2222 hard=0 high-risk=1518 soft=704 test_advisory=1241 blocked=False`；报告已按要求恢复，不提交。
+尺寸差集原输出：`新增告警: 0` / `消失告警: 13`（退出 0）。
+**唯一未通过的规定门禁**：`check_clean_package.py .` 退出 1，两个 `UNTRACKED_FILE` 为 `.background_jobs/registry.jsonl`（830 字节）和 `.background_jobs/registry.jsonl.lock`（0 字节）。按本轮指令留着不管，不提交、不删除、不改忽略配置；不把工作树 cleanliness 写成通过。真实生产 wheel 成员 cleanliness 在上述测试中通过，不能据此替代工作树失败。
+
+**复现命令**（工作树根，指定解释器；pytest 与 code-size 串行，`-o addopts=''` 仅显示完整计数）：
+
+```sh
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_write_my_agent_plugin_skill.py $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-m1b9 -o addopts=''
+$PY scripts/check_import_boundaries.py
+$PY -m ruff check agent_py_agent scripts
+$PY scripts/check_doc_sync.py
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
+git diff --check
+$PY scripts/check_clean_package.py .
+```
+
+**真实变异**：在工作树 `tmp/` 复制原测试和模板，仅重绑定副本路径后调用相同两个包/stdio 测试（同解释器及上述 pytest flags）。
+基线 4 passed，恢复后 4 passed；原模板所有文件 sha256 一致。四类在 Python/Node 各执行一次，共 **8/8 抓到**，每项目标 pytest 退出 1：
+
+| 变异 | 目标观察点及实际失败 |
+| --- | --- |
+| tool_call_started 配 text | 真构建/真读包拒绝，原因“这类事件不提供正文” |
+| arguments: full 配 dangerous effects | 真构建/真读包拒绝 full 与 effects 的非法组合 |
+| 握手漏 my-agent/tool-gate 位 | 最终包 stdio 的 experimental 精确结构断言失败 |
+| 模板 network 默认 true | 合法 v8 包读回后默认 false 断言失败；不是声称产品禁止授权联网 |
+
+复核方法：只改副本 `declaration.json` 或 `src/server.*`，分别跑 `::test_templates_build_and_validate[python/node]` 或 `::test_templates_execute_packaged_stdio[python/node]`；副本 ROOT 指向当前仓库，SKILL 指向副本，不改产品、模板原件或其它工作树。
+压力摸底原话“这些信息不足以确定……完整需求应使用哪个版本”；新版同场景复测准确给出 v8、精确 full/空 effects、两能力位、默认断网及 B7 前关闭，并拒绝代装/代填。纯对话无工具执行，不算实际模型制作或宿主端到端。
+
+**未验证/纪律**：没有运行 my-agent、启停 Gateway、联网安装依赖、读取真实会话/记忆或修改真实 home；未部署、未验证宿主安装启用、沙箱/断网/收窄读及真实 TUI/IM。B7 前不能把独立 stdio 写成生产可启用。
+不跑全仓 pytest/线上 CI，交 3a 十二片 Linux 车道与沙箱外复核；原 M5 扩展运行失败保留为历史观察，不无证据归因。
+`.background_jobs/` 按 3a 指令原样留着，不提交、不删除、不加入忽略配置；工作树 clean-package 若因此失败如实保留。
+
+## M5：插件作者技能和双语言模板（2026-10-03，sol2，`worker/sol2-m5`，本地候选，待复审/集成）
+
+**续作补证（2026-10-03，提交时限更新为 05:05）**：在 `35f445792` 上继续，不重做技能/模板实现。
+新增两个回归：`test_production_wheel_keeps_all_author_assets` 从当前 Git 纳管的产品源码准备工作区副本，
+走原标准后端实际构建完整生产 wheel，逐字节核对本技能全部模板/参考，并检查发布禁带成员、缺失资源、源码字节差异及归档 cleanliness。
+`test_existing_packages_match_baseline_bytes` 从固定开工提交 `b453f8883` 读取原构建器，
+对上述九个既有插件工程在同一源码、解释器和本地 SDK 下各构建旧/新最终包，断言全部 ZIP 字节一致；不回滚工作树、不切分支、不安装/启动插件。
+同一复现命令的当前结果为 **196 passed，0 failed，0 skipped**（80.15 秒，退出 0）。
+生产 wheel 新资源验证缺项已关闭；它是工作区临时标准构建的证据，不是生产部署或真实宿主验收。
+九包字节一致证明本次构建器改动没有改变这些受测制品；原 12 个运行失败仍保留，未重跑原构建器下的失败入口，不能因此定性为旧失败或沙箱原因。
+技能/模板/产品构建器本轮未修改，原 stdio 与 import 有效证据复用。
+本轮 Ruff 首次报新测试的 I001，已只调整 import 排版；随后两个新增测试再次 **2 passed，22 deselected**（13.17 秒），不是整套重跑或跳过失败。
+最终 Ruff `All checks passed!`、strict size `hard=0 blocked=False`、尺寸差集 `新增告警: 0 / 消失告警: 9`、`DOC_SYNC_PASS`、`git diff --check` 均退出 0。
+CODE_SIZE_REPORT 已恢复到 HEAD。clean-package 工作树的原两个运行控制记录阻塞未变，保留原失败，不重复改写或忽略绕过。
+最终复验工具回执时间为 **05:22:13 PDT**，本次也未满足更新后的 05:05 先提交时限；马上按 WIP 提交增量，不声称按时或完整验收完成。
+
+**来源与做法**：3a 的 M 线第一期 M5；新增插件作者三层 Skill、Python v1/Node v6 单只读工具模板。
+Python 构建器接受显式受信本地工程，保留本地许可，通用结构化版本选择与产品校验不变；不安装、不启用、不代输入确认码。
+新文件 `agent_py_agent/tests/test_write_my_agent_plugin_skill.py` 覆盖真实 SkillsService 索引/正文/镜像、工作树内临时模板构建、
+最终包产品检查、Python wheels、两种包内独立 MCP 初始化/目录/Unicode/空文本/错误后恢复、虚构审批字段拒绝、v1–v5 选择、许可字节保留、Node 可重复且不覆盖。
+
+**复现**（指定解释器、工作树根，单条 pytest/size 串行；`-o addopts=''` 仅恢复完整计数展示）：
+
+```sh
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_write_my_agent_plugin_skill.py $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol2 -o addopts=''
+$PY scripts/check_import_boundaries.py
+$PY -m ruff check agent_py_agent scripts
+$PY scripts/check_doc_sync.py
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout HEAD -- CODE_SIZE_REPORT.md
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
+git diff --check
+$PY scripts/check_clean_package.py .
+```
+
+**已观察结果与真实失败**：最初资产未实现为 4 failed/10 errors，初版定向 14 项通过；后补 8 项不沿用旧绿灯。
+扩展运行还加入 activity-line/context-inspector/browser-lite/design-lite/desktop-lite/drama-media-shell/genui-lite/harness-console/image-text 的九个包文件及 guards9：
+退出 1，失败为 browser-lite 的 9 个 `BROWSER_DISCONNECTED`、desktop-lite 的 `test_timeout_kills_program`（`ps` 明示 `PermissionError: Operation not permitted`）、
+harness-console 的 `test_missing_host_api_env_reports_unavailable` 和 `test_desktop_launches_app_window_and_stop_closes_it`（退出后的端口/进程断言失败）。
+没有干净基线对比，不能断言这些都属于旧失败或沙箱；不删、不跳过、不放宽断言，交 3a 复核。
+第一次独立新测试+guards9 为 194 passed/1 teardown error：我在另一命令同时生成/恢复 CODE_SIZE_REPORT 导致防线检测到修改；
+这是收尾调度错误，不是业务绿灯。随后拆平新模板目录投影与许可测试的嵌套，改为 size→恢复→pytest 串行复验。
+**最终当前代码结果**：新测试及 guards9 全部文件合跑 **194 passed，0 failed，0 skipped**（61.32 秒，退出 0）；
+`IMPORT_BOUNDARIES findings=0`、Ruff `All checks passed!`、`DOC_SYNC_PASS`、strict size `hard=0 blocked=False`、`git diff --check` 均退出 0。
+尺寸差集真实输出：`新增告警: 0` / `消失告警: 9`；生成 CODE_SIZE_REPORT 已恢复到 HEAD，不随提交。
+串行复验结束为 04:45:09 PDT，已超过 04:45 的先提交时限；未按时提交是本线收尾调度失误，不声称按时完成。
+扩展九包的 12 个失败仍保留、未做干净基线归因，故本次按 WIP 交接；生产 wheel 新资源逐字节核对未做。
+`check_clean_package.py .` 真实退出 1：工具后台执行器留下 `.background_jobs/registry.jsonl`（830 字节）和 `.background_jobs/registry.jsonl.lock`（0 字节）两项 `UNTRACKED_FILE`。
+不删除/改写宿主控制记录、不加忽略规则骗过 gate，不将其提交。此前两个 pytest 原日志已移到工作树 `tmp/m5-validation/` 保留；
+整理命令遇到 registry 时明确失败并停止，没有清空该目录。源码交付不包含这些运行记录，但当前工作树 clean-package 仍未通过。
+
+**技能摸底/复测**：未加载时原话“现在我不知道应选 v1–v6 中哪个版本”，但已拒代确认，不能虚构越权失败。
+加载正文与参考后的纯对话复测明确基础 Python v1、Node v6、`requested_effect` 三枚举、dangerous 默认不可下调、工作区构建和规定交付原话；
+没有工具执行，不能算真实模型制作插件或产品端到端测试。
+
+**未验证/边界**：未运行 my-agent、未启停 Gateway、未改真实 owner 配置/安装表、未部署；宿主安装/启用/确认与真实 TUI/模型调用未验证。
+生产 wheel 新资源逐字节核对已在本节续作补证中通过，发布正式制品仍应沿原发布门禁核对；包内独立 stdio 不证明宿主和真实客户端入口通过。全仓 pytest/线上 CI 未运行。
+
+## J16 片 G：macOS 无障碍候选 + `type_into_candidate`（75，2026-10-02，分支 `claude/75-j16-slice-g`）
+
+- **新增 `test_screen_ui_candidates.py`**（核心，无桌面依赖）：
+  - 合并去重：截图像素换算与裁剪；OCR 落在两层控件里归最里层；恰好一半算重复、少一点不算；label 控件优先、其次被吸收的 OCR、再次 role；
+    禁用 / 既不能按也不能编辑的控件不出候选（它的 OCR 照常单列）；密码框只给点击；key 前缀与顺序、合计 64 个上限；不合宿主短标识规则的 role 丢掉；像素区域相同的控件留更深的。
+  - 观察：合并后的载荷宿主照常接受（带冒号的 key、系统角色）；快照里控件候选不存像素摘要、OCR 候选不存控件事实；控件树截断 / 没授权 / 后端抛错 / 形状不对 4 种都降级为 OCR 候选并带顶层 `ui_tree`（不进载荷与 frame）。
+  - 复核：控件候选不比像素（输入框里多一根光标照样能点），role、enabled、外框、名称 sha、值可写任一项变了或控件没了都 `stale`。
+  - 输入：点击 → 等焦点 → 全选 → 打字的顺序，结果不回显文字、`application_verified=False`；空文字 + 清空 = 全选后按删除键；正好 500 字可以；
+    超长、换行、Tab、NUL、DEL、C1、孤立代理码点、空文字不清空、类型不对 10 种都在复核和点击之前拒绝；按钮和 OCR 候选不能输入；选区不可写时 `clear_unsupported` 且一下都不点；
+    拿不到焦点 / 全选失败 / 打字出错都带 `clicked: true` 且不打字；复核期间、焦点确认后、全选后三个时点取消都一个字不打；
+    （ae 复审补）点击之后等焦点、全选时后端抛非结构化异常仍报 `focus_not_acquired` / `clear_failed` 且带 `clicked: true`，复核时读控件事实抛异常判 `stale`、不点，结构化错误原样透传。
+- **新增 `test_computer_use_macos_ax.py`**（假 AX 在 `tests/_fake_macos_ax.py`，绝不弹授权框、不执行 AX 动作）：
+  - 没授权一个属性都不读；绑定缺失 `ax_unavailable`；窗口按外框再按标题匹配，外框和标题都一样的两个窗口不猜，读窗口列表超时 / 出错分开报。
+  - 广度优先读出按钮、输入框、密码框（静态文字不出候选），事实与复核同源，设了 0.5 秒消息超时，遍历期间零写入。
+  - **密码框不读值**：读取记录里没有密码框的 `AXValue`，静态文字的值也没读；观察结果与快照里找不到任何控件的值（密码、邮箱、说明文字）；值变了不算控件变了。
+  - 屏外分组和滚出可见范围的子树连子节点都不读；可见范围 = 窗口 ∩ 各级祖先外框。深度 16 读到、17 不读；连窗口共 600 个节点；时间预算用尽截断。
+  - 复核 / 焦点 / 全选辅助函数：失效元素没有事实；唯一的写是选区；设不上、读不到字符数都算失败。
+  - （ae 复审补）点击之后假 AX 的 `AXValueCreate` 抛 `TypeError`（pyobjc 转换失败的情形）→ `clear_failed`、`clicked: true`、一个字没打。
+  - MacBackend 端到端：Retina 上控件区域换算正确、OCR 的“提交”被按钮吸收、密码框只给点击；输入走键盘路径、先 AX 全选；清空 = 删除键（键码 51 按下 + 抬起）；没授权时只出 OCR 候选、点击报 `accessibility_not_permitted`；控件移动、禁用、改角色、改名、失效 5 种都在点击之前 `stale`。
+- **改了的旧用例**：核心与接入层用例的 key 改成 `ocr:<n>`（`test_mcp_observation_binding.py` 的屏幕提供方样例也改成 `ocr:1` / `ocr:2`，顺带证明宿主接受带冒号的 key）；
+  接入层加三条声明、`type_into` 只在后端声明能力时注册（Linux 情形只记 notice）、处理分支透传 `clicked`、schema 里 text 必填；
+  防线自检加片 G 的 6 个 macOS 入口；片 E 的 macOS 用例改用假 AX 模块。
+- **变异**：24 个全部抓到（复审补了“点击后的异常不包”“读控件事实的异常不按 stale”两个）。ae 点名的 16 项对应 17 个变异（去重判反、不可编辑也给输入、不等焦点、超长没被拒、控制字符放行、读树前不查权限、外框不进复核事实、
+  禁用控件出候选、值当 label、深度上限失效、节点上限失效、text 不必填、全选失败照打字、读密码框的值、密码框给输入、打字前不再查取消、控件候选还用像素摘要），
+  另加 5 个（屏外子树照读、不报 `ui_tree`、不看能力就注册、分不清的窗口取第一个、点击后的失败丢了 `clicked`）。
+- **Linux 车道**（Docker `my-agent-linux-test:py312-desktop`，Xvfb 只在容器里）：车道 7 项真适配器用例 + 新核心、接入层、防线、核心用例共 89 项通过，
+  5 项 X11 防线自检在车道里按设计跳过；真链路点击用的 key 是 `ocr:1`（宿主接受带冒号的 key），改内容、移窗后照常 `stale`。
+- **门禁**：变基到含片 D 的 `afb15947b` 后，相关测试 31 个文件（另加片 D 的 `test_decision_action_execute.py`）694 项通过、7 项车道用例在 Mac 上按设计跳过；严格门禁全部通过，size diff 新增 0。
+
 ## feishu_limit 脚本补本机凭据 + scripts 守卫（2026-10-03，flc，worker/feishu-limit-creds，待复审）
 
 - 来源：凭据盘点（credinv）第 3 条——`scripts/feishu_limit/` 四个脚本 11 处 curl 调 Gateway 不带 `X-Gateway-Token`，G2b 打开后会变成匿名/被拒，且 G2a 计数永远归不了零。

@@ -303,7 +303,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | B6 账本与展示（查询与展示半，已实施：`worker/m1-b6-ledger-display`，m1b6，提交 `d9f158e8d`、文档补丁 `e80db5918`，基于 B3 返工头 `0a3064078`；写账半待 B5 合入） | 不依赖 B5 的部分：`plugin_gate_decisions`（最近 N 条、默认 10、`seq` 倒序、字段白名单，`message` 不外泄）、`plugin_gate_unavailable_count`（累计，不设窗口）、`/plugins info` 四段（订阅/收紧/网络沙箱/最近决定+计数）、观察计数读 B3 `hub.stats`（缺 hub 或读失败写“暂无记录”）、hub 经 `plugin_command_service → control_service → control_operation_service → http_handlers` 全链透传 | `runtime_db/repository.py`、`plugin_commands.py`、`plugin_management.py`、`plugin_events/confirmation.py`、`gateway_parts/{plugin_command_service,control_service,control_operation_service,http_handlers}.py` | 见 `tests/test_plugin_event_display.py` 12 项与 6 个变异；测试库直插第 9 节字段代 B5 写入 | B5（仅写账半） |
 | B7 安全底座 | 将 B1 暂时拒绝与构造期 v8 计划排除换成真正总开关、local/main 和强制沙箱判定，不能只删关闭门；v8 强制沙箱、断网、收窄读（Linux 挂法先实测，macOS 沿用 `_ancestor_metadata_rules`）；开关关时拒绝启用；沙箱不可用时失败；两个配置项进管理员边界项 | `plugin_sandbox.py`、`plugin_runtime.py`、`plugin_enable_tool.py`、`settings/config.py`、`settings/user_config_capability.py`、`config/agent_config.yaml` | 真实沙箱（macOS / Linux 车道）真进程，布局为“放行目录嵌在拒读根里”：Python、node 解释器启动和 realpath 成功，读得到自己的包和数据目录、读不到会话和记忆；`network: false` 连外网和本机回环都被拒；`network: true` 能连 Gateway 端口但读不到令牌、调不了要令牌的接口，不要令牌的接口列清单；开关关 → `plugin_events_disabled`；模型经 `user_config` 改两个配置被拒（`PARAMETER_BOUNDARY`）；非 local/main 启用被拒（`plugin_events_owner_not_allowed`） | B1；H3 已合入 |
 | B8 样例与验收 | 样例 A：观察全部 6 类事件并在面板显示计数；样例 B：`run_command` 含 `rm -rf` 时要求确认、对 `delete_file` 直接拒绝；Python 和 Node 各一份 | `plugins/event-watch/`、`plugins/rm-guard/`、`plugins/rm-guard-node/` | 假模型真进程：TUI 与 IM 都看到“插件 X 要求确认 / 拒绝”；真实验收见第 14 节 | B3–B7 |
-| B9 写插件的技能（M5） | 内置“写 my-agent 插件”技能和模板（Python、Node 各一个）；安装启用仍只能由用户输确认码 | `agent_py_agent/skills/builtin/…`、`plugins/sdk` 模板 | 技能产出的包能通过 v8 校验和构建；模型不能自行启用 | B1 |
+| B9 写插件的技能（M5；已实现（`worker/sol2-m5`，`de395322e`），待 be 复审） | 内置“写 my-agent 插件”技能、作者合同和 v8 文件模板（Python、Node 各一个）；安装启用仍只能由用户输确认码 | `agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/`、`test_write_my_agent_plugin_skill.py` | 两语言 v8 ZIP 真构建/读回/包内 stdio；只订阅合法、模型管理入口不可见；四类双语言变异全部抓到；旧新构建器字节回归保留。B7 生产启用与隔离未验证，门禁例外见 TESTS | B1 `add244a92` |
 
 ## 14. 验收（goal 第四节）
 
@@ -377,7 +377,7 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 | B6 账本与展示 | `worker/m1-b6-ledger-display`（查询与展示半已实施，头 `d9f158e8d`、文档补丁 `e80db5918`，基于 B3 返工头 `0a3064078`；写账半等 B5 合入后接） | B5 合入（写账半）；查询与展示半已先行实施 | 9b |
 | B7 安全底座 | `worker/m1-b7-sandbox` | B1、H3 合入 | 9b、ae |
 | B8 样例与验收 | `worker/m1-b8-samples` | B3–B7 合入 | be（真实验收 be 做，TUI 和飞书各一遍） |
-| B9 写插件的技能 | `worker/m1-b9-plugin-skill` | B1 合入 | be |
+| B9 写插件的技能 | `worker/sol2-m5`（已实现（`worker/sol2-m5`，`de395322e`）） | 已变基到 B1 合入头 `add244a92`；独立包/stdio 已验，生产启用仍由 B7 接线 | be（待复审；clean-package 运行产物例外见 TESTS） |
 
 ## 19. B2 实施记录（ds1，2026-10-03，分支 `worker/ds1-b2-channel`，提交 `e62593fc6`；复审返工见第 20 节）
 

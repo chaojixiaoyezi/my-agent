@@ -1,5 +1,43 @@
 # 设计台账
 
+## B9 模板处理截断标记（b9tr，2026-10-04，分支 `worker/b9-facts-table`，基于 B9 头 `10c40256f`；已并入 step17j，luna6 复审中）
+
+- **起因**：B5（sol3 的 `57f465dca`）给收紧请求加了截断标记——声明 `arguments: full` 的门，参数超出 4000 字预算时宿主在请求的 `call` 里带 `arguments_truncated: true`，完整是 `false`，`arguments: none` 的门没有这个字段（`plugin_events/tool_gate.py` 的 `PluginToolGate.request_payload`）。B9 的两个作者模板此前不看这个字段，会拿被截断的残片做判断并放行，形成绕过面。
+- **改了什么（产品代码一行未动，只动技能资产与用例）**：
+  - Python `templates/python/src/server.py` 的 `review_gate`、Node `templates/node/src/server.js` 的 `reviewGate`：在 `OUT_OF_SCOPE` 之后、`ARGUMENTS_UNAVAILABLE` 之前加一个早返回——`arguments_truncated` 严格为 `true` 时回 `{verdict: "ask", reason_code: "ARGUMENTS_TRUNCATED", message: "参数被截断，看不全命令内容，先确认一次"}`；字段缺失或 `false` 走原路径，行为不变。
+  - `references/author-contract.md` 新增「参数截断标记 `arguments_truncated`」一节：三态表格（`true`=看不全 / `false`=完整 / 字段不存在=该门不是 full），并写明推荐做法——依赖完整参数的门截断时必须回 `ask`，否则别人可以用填充内容把危险参数挤到 4000 字之后绕过；字段缺失或 `false` 照旧（`false` 就是完整，不必额外保守）。
+  - `SKILL.md` 速查表下加一句指路，让写 `tool_gates` 的作者知道要处理这个字段。
+- **用例**：`test_write_my_agent_plugin_skill.py` 两处——①`_hook_requests` 追加 id 15/16 两条 review 请求（截断 `true`、`false`），`test_templates_execute_packaged_stdio` 断言前者回 `ARGUMENTS_TRUNCATED`、后者仍按 `rm -rf` 回 `RM_RF`（证明 `false` 不误伤）；②新增 `test_author_contract_truncation_field_matches_tool_gate_implementation`，校验文档字段名、推荐原因码和两个模板分支都与 B5 实现同源，**B5 的 `tool_gate.py` 未合入本分支时 `pytest.skip`**（分支差异不是错），合入后自动生效。
+- **验证**：本分支 34 passed / 2 skipped（跳过的是 Node 无解释器、B5 文件缺失）；PY 模板去掉截断分支 → stdio 用例失败并精确报出 `ARGUMENTS_TRUNCATED` 期望值与 `RM_RF` 实际值；在临时 worktree 放入 B5 的 `tool_gate.py` 后，那条 skip 的用例真跑**通过**；再把文档字段名改成 `arguments_cut` → 用例失败。还原后复绿，临时树已删。命令与结果见 TESTS。
+- **未验证**：模板的实际宿主联调（B5 打开 `arguments: full` 截断后真实插件进程收到 `true`）本轮没跑——B5 不在本分支、也不启动 Gateway；由 3a 在 17j 合入后于沙箱外按真实链路复核。Node 模板的 stdio 执行在本机 pytest 环境被跳过（`shutil.which("node")` 找不到），只做了 `node --check` 语法验证与文件级断言。
+
+## B9 补事件字段表（b9ft，2026-10-03，分支 `worker/b9-facts-table`，基于 B9 头 `cd9e678f6`；已并入 step17j）
+
+- **起因**：b9align 的 B9↔B3/B4/B5 对接核对里第 2 条改进（3a 采纳）——技能正文没有逐字段列观察事件的字段名，模型写插件时容易自己猜，猜错就读不到数据。
+- **改了什么**：`references/author-contract.md` 新增「观察事件字段表（别猜字段名）」一节，三块内容：①九个公共字段（`event_id`/`type`/`seq`/`occurred_at`/`dropped_before`/`channel`/`thread_ref`/`actor`/`facts`）各自含义；②六类事件各自的 `facts` 字段与逐字段含义；③正文（`content`）规则——只有 `prompt_submitted` 可能带正文，需清单声明 `content: "text"` + 用户在确认码里同意，脱敏后截 4000 字，其余五类一律无正文、工具调用只给 `args_hash`。表里注明**以实现为准**（公共字段来源 `plugin_events/protocol.py`，`facts` 来源 `points.py` 的 `_EVENT_FACT_FIELDS`），并写明 B4 定稿后 3a 再核一次。`SKILL.md` 速查表下加一句指路：写观察事件插件先看这张表、不要猜字段名，且**不认识的 `type` 要跳过、不认识的字段要忽略**（向前兼容）。
+- **用例**：`test_write_my_agent_plugin_skill.py` 新增 `test_author_contract_event_table_matches_event_point_projection`——用 AST 读 `points.py` 的 `_EVENT_FACT_FIELDS`，与从 `author-contract.md` 解析出的表逐类逐字段比对。B4 的 `points.py` 未合入本分支时 `pytest.skip`（分支差异不是错），17j 合入后自动开始严格比对。
+- **验证**：本分支该用例跳过、其余 43 项通过；另在 `git worktree` 临时树里放入 B4 的 `points.py` 模拟 17j 合并，用例**通过**（证明合入后真的会比对）；两个变异（把表里 `args_hash` 写成 `arg_hash`、删掉 `command_executed` 整行）**均被用例抓到**，还原后复绿。命令与结果见 TESTS。
+- **未落地**：表的正确性依赖 B4 的 `points.py` 最终定稿；**B4 定稿后要重跑这条用例确认仍绿**，若 B4 改了字段，本表与用例会同时红，按实现改表即可。
+
+## M1 B9：插件作者技能按清单 v8 完成（2026-10-03，m1b9，`worker/sol2-m5`，实现 `de395322e`，已实现，主体 be 复审通过，文案尾补 3a 已核；已并入 step17j）
+
+- **be 复审后尾补（3a，2026-10-03）**：`11427c22c` 无必须改项。按 3a 接受的两条说明，明确 v1–v5 wheel 构建期工具有意允许仓外本地工程、后端会执行构建钩子；授权工作区由会话沙箱和调用方保证，脚本不做路径围栏，安装/启用不用它。同时提醒不需提示文字时将该事件 content 降为 none，缩小确认范围。只补模块注释/docstring、技能及参考，不改构建门或模板默认值；验证见 TESTS。
+
+- **来源**：原 M5 两个 WIP 变基到 B1 已合入的 `add244a92`；B9 只升级作者合同、模板与验收，不实现 B7 宿主接线。
+- **实现**：工具/面板与观察/工具收紧三类指引；Python、Node 同为 v8 文件入口。正文仅提示事件，工具开始只给结构化事实；full 只订精确工具、空 effects；network 默认 false。双能力握手、观察空回执及三个合法裁决均有包内协议测试。
+- **边界**：B7 前 v8 不能生产启用，返回 `plugin_events_disabled`；强制沙箱、默认断网、收窄读及仅 local/main 是启用前置合同。模型不安装、不启用、不取码代填；用户本人确认范围包括网络与订阅，不能借 shell、内部 API、界面或子代理绕过。
+- **验收**：真实构建/读包/包内 stdio、纯订阅合法包、模型管理快照不可见；保留生产 wheel 资源原字节及九包旧新构建器字节回归。四类双语言真实副本变异全部抓到，同场景纸上复测补齐旧技能的 v8 知识缺口。
+- **证据与未验**：命令、结果及工作树 cleanliness 例外见 [TESTS](TESTS.md)；协议与 B9 状态见 [事件设计](docs/design/PLUGIN_EVENT_HOOKS.md)。未安装启用到真实 home，未验证 B7 隔离、真实 Gateway/TUI/IM 或生产部署，交 be 复审和 3a 沙箱外复核。
+
+## M5：内置插件作者技能与双语言模板（2026-10-03，sol2，`worker/sol2-m5`，早期记录，已由上面 M1 B9 段取代；已并入 step17j）
+
+- **解决问题**：用户描述需要的工具后，模型缺少插件清单、打包和审批的作者指引。新增 `write-my-agent-plugin`，采用索引→正文→模板/参考三层读取，不增加管理工具或运行时分支。
+- **实现**：Python 标准 wheel/v1 和 Node v6 `entry/files` 各一个只读 `count_text`；目录与声明同源，Unicode 码点统计，不读用户文件、不联网、不写业务数据。
+- **构建**：Python 构建器接受显式受信的本地 `pyproject.toml + src` 工程；只在作者授权范围内执行离线后端，保留本地许可，版本仍按结构化扩展选 v1–v5。输出与 `TMPDIR` 放工作区，最终包由产品读包器判定。
+- **安全边界**：`requested_effect` 不是免审批或 OS 沙箱；包不能下调宿主默认要求。安装、启用与确认码只由用户操作，不通过 shell、内部函数或其它代理绕过；不新增配置。
+- **续作补证**：生产 wheel 实际构建后，新技能全部资源与源码原字节一致；九个既有插件工程用原/新构建器的最终包字节一致。当前新测试及 guards9 共 196 项通过；运行失败与 clean-package 工作树阻塞仍保留，详见 TESTS。
+- **验证范围**：真实索引、镜像、双模板构建和包内 stdio；纸上压力复测仅证明合同知识补齐，不代表产品端到端。命令及当前结果见 [TESTS](TESTS.md)，作者合同见 [插件包文档](docs/design/PLUGIN_PACKAGES.md#m5内置插件作者技能2026-10-03)。宿主安装/启用、真实模型/TUI、Gateway 和生产部署未验证。
+
 ## feishu_limit 脚本补本机凭据（flc，2026-10-03，分支 `worker/feishu-limit-creds`，基于 step17i 头 `de87ff62a`；ds10 初审通过（其“请求头写死成占位符”一条经 3a 核原文为工具输出打码误判），已并入 step17j）
 
 - **起因**：G2b 前置盘点（credinv）发现 `scripts/feishu_limit/` 四个脚本的 11 处 curl（`/ask`、`/result`）不带本机客户端凭据；G2b 打开后回环不再自带信任，这些脚本会被降匿名。

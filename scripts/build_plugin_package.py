@@ -1,5 +1,12 @@
-# LLM: 只构建仓内自有受信插件；标准后端生产 wheel，原包/依赖校验器判定发布归档，不在产品安装期执行。
-# 模块用途: 从包内唯一声明和已构建依赖生成可交给现有安装器的本地插件 ZIP。
+# LLM: 有意为 v1–v5 wheel 作者放宽本地工程范围；后端会执行工程代码，授权工作区由会话沙箱和调用方约束，脚本不做路径围栏。
+# 模块用途: 有意允许 v1–v5 作者构建仓外受信本地工程；后端会执行构建钩子，授权工作区由会话沙箱和调用方守住，脚本不做路径围栏，安装/启用不用它。
+
+"""为 v1–v5 wheel 插件作者构建受信本地工程。
+
+有意将目标放宽为任意带 pyproject.toml 和 src 的本地工程，而非仅仓内 plugins/。
+wheel 构建后端会执行工程代码和构建钩子；把工程限制在授权工作区内，是会话沙箱
+和调用方的责任，本脚本不做路径围栏。这是构建期开发工具，安装和启用时不调用。
+"""
 
 from __future__ import annotations
 
@@ -32,20 +39,15 @@ from scripts.plugin_build import build_wheel, publish_artifact, wheel_metadata
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
-# LLM: project 限定仓内 plugins 的直属自有工程；仅复制 pyproject/src/统一许可，不打入工作区日志或缓存。
-# 函数用途: 构建实际插件 wheel，读取声明、填入标准元数据后验证完整依赖并独占发布 ZIP。
+# LLM: project 是开发者显式指定的受信本地工程，必须有 pyproject/src；不从插件声明选择宿主路径，不扩大模型路径授权。
+#   wheel 后端会执行源码；仅构建期使用。包版本选择、依赖闭包、独占发布沿原合同，联测作者模板和既有插件包测试。
+# 函数用途: 构建实际插件 wheel，验证完整依赖并独占发布 ZIP；TMPDIR 由调用方选在工作区内。
 def build_plugin_package(project: Path, declaration_path: str, dependencies: tuple[Path, ...], output: Path) -> Path:
     project = project.resolve()
-    if project.parent != ROOT / "plugins" or not (project / "src").is_dir():
-        raise ValueError("只允许构建仓内自有插件工程")
+    if not (project / "pyproject.toml").is_file() or not (project / "src").is_dir():
+        raise ValueError("本地插件工程必须包含 pyproject.toml 和 src 目录")
     with tempfile.TemporaryDirectory(prefix="my-agent-plugin-build-") as temporary:
-        staging = Path(temporary) / "source"
-        staging.mkdir()
-        shutil.copyfile(project / "pyproject.toml", staging / "pyproject.toml")
-        shutil.copytree(project / "src", staging / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"))
-        for name in ("LICENSE", "NOTICE"):
-            shutil.copyfile(ROOT / name, staging / name)
-        wheel = build_wheel(staging, Path(temporary) / "wheels")
+        wheel = _build_source_wheel(project, Path(temporary))
         with ZipFile(wheel) as archive:
             manifest = json.loads(archive.read(declaration_path))
             wheel_names = archive.namelist()
@@ -55,41 +57,59 @@ def build_plugin_package(project: Path, declaration_path: str, dependencies: tup
         wheel_bytes = {"wheels/" + item.name: item.read_bytes() for item in (wheel, *dependencies)}
         if len(wheel_bytes) != len(dependencies) + 1:
             raise ValueError("依赖 wheel 文件重名")
-        # 声明了观察/观察引用的包用 v5，声明了宿主 API 权限的包用 v4，声明了随包 Skill 的包用 v3，声明了面板的包用 v2；
-        # 其余保持 v1，已发布包重建后的描述不变
-        tools = manifest.get("tools") if isinstance(manifest.get("tools"), list) else []
-        if any(isinstance(tool, dict) and ("observation" in tool or "observation_ref" in tool) for tool in tools):
-            if manifest.get("skills"):
-                _check_declared_skills(manifest, wheel_names)
-            manifest.setdefault("panels", [])
-            manifest.setdefault("skills", [])
-            manifest.setdefault("host_api", [])
-            schema = PLUGIN_PACKAGE_SCHEMA_V5
-        elif manifest.get("host_api"):
-            if manifest.get("skills"):
-                _check_declared_skills(manifest, wheel_names)
-            manifest.setdefault("panels", [])
-            manifest.setdefault("skills", [])
-            schema = PLUGIN_PACKAGE_SCHEMA_V4
-        elif manifest.get("skills"):
-            _check_declared_skills(manifest, wheel_names)
-            manifest.setdefault("panels", [])
-            schema = PLUGIN_PACKAGE_SCHEMA_V3
-        else:
-            schema = PLUGIN_PACKAGE_SCHEMA_V2 if manifest.get("panels") else PLUGIN_PACKAGE_SCHEMA
+        schema = _manifest_schema(manifest, wheel_names)
         manifest.update(schema_version=schema, version=wheel_metadata(wheel)["Version"],
                         entry_wheel="wheels/" + wheel.name,
                         wheels=[{"path": name, "sha256": hashlib.sha256(content).hexdigest()} for name, content in wheel_bytes.items()])
-        buffer = io.BytesIO()
-        with ZipFile(buffer, "w") as archive:
-            _add_member(archive, "plugin.json", json.dumps(
-                manifest, ensure_ascii=False, sort_keys=True).encode())
-            for name, content in wheel_bytes.items():
-                _add_member(archive, name, content)
-        payload = buffer.getvalue()
+        payload = _package_payload(manifest, wheel_bytes)
         package = inspect_plugin_package(payload)
         inspect_plugin_wheels(package)
         return publish_artifact(output.resolve(), payload)
+
+
+# LLM: 仅复制标准构建输入；自有仓内插件沿原统一许可，本地作者工程带有许可时原样保留，不把缓存/日志收进包。
+# 函数用途: 在临时目录构建一个真实 wheel；有副作用：复制输入并执行离线构建后端。
+def _build_source_wheel(project: Path, temporary: Path) -> Path:
+    staging = temporary / "source"
+    staging.mkdir()
+    shutil.copyfile(project / "pyproject.toml", staging / "pyproject.toml")
+    shutil.copytree(project / "src", staging / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"))
+    for name in ("LICENSE", "NOTICE"):
+        source = project / name if (project / name).is_file() else ROOT / name
+        shutil.copyfile(source, staging / name)
+    return build_wheel(staging, temporary / "wheels")
+
+
+# LLM: 只按结构化扩展字段决定 v1–v5；补空扩展及 Skill 一致性规则与旧构建路径相同，不按样例名字选版本。
+# 函数用途: 给声明选择最小适用 Python 清单版本，并补齐该版本必需的扩展字段。
+def _manifest_schema(manifest: dict, wheel_names: list[str]) -> str:
+    if manifest.get("skills"):
+        _check_declared_skills(manifest, wheel_names)
+    tools = manifest.get("tools") if isinstance(manifest.get("tools"), list) else []
+    if any(isinstance(tool, dict) and ("observation" in tool or "observation_ref" in tool) for tool in tools):
+        manifest.setdefault("panels", [])
+        manifest.setdefault("skills", [])
+        manifest.setdefault("host_api", [])
+        return PLUGIN_PACKAGE_SCHEMA_V5
+    if manifest.get("host_api"):
+        manifest.setdefault("panels", [])
+        manifest.setdefault("skills", [])
+        return PLUGIN_PACKAGE_SCHEMA_V4
+    if manifest.get("skills"):
+        manifest.setdefault("panels", [])
+        return PLUGIN_PACKAGE_SCHEMA_V3
+    return PLUGIN_PACKAGE_SCHEMA_V2 if manifest.get("panels") else PLUGIN_PACKAGE_SCHEMA
+
+
+# LLM: ZIP 元数据和排序保持原实现；归档字节返回后仍必须经产品读包/依赖校验，不能跳过验证直接发布。
+# 函数用途: 编码包描述和已构建 wheel，不写最终产物。
+def _package_payload(manifest: dict, wheel_bytes: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        _add_member(archive, "plugin.json", json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode())
+        for name, content in wheel_bytes.items():
+            _add_member(archive, name, content)
+    return buffer.getvalue()
 
 
 # LLM: Python 插件外层包和 wheel 一样必须固定归档元数据，否则同一源码会因构建时钟产生不同摘要。
@@ -116,9 +136,9 @@ def _check_declared_skills(manifest: dict, wheel_names: list[str]) -> None:
 
 
 # LLM: 开发者显式指定全部本地 wheel 与输出；不自动联网补依赖，也不改变宿主插件安装表。
-# 函数用途: 从命令行生成自有插件安装包。
+# 函数用途: 从命令行构建显式受信本地工程；不安装、不启用、不调用 my-agent 命令。
 def main() -> None:
-    parser = argparse.ArgumentParser(description="构建仓内自有插件安装包")
+    parser = argparse.ArgumentParser(description="构建显式指定的受信本地 Python 插件安装包")
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--declaration", required=True, help="wheel 内声明 JSON 的路径")
     parser.add_argument("--wheel", type=Path, action="append", default=[], help="已构建依赖，可重复")

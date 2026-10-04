@@ -1,5 +1,35 @@
 # 本地插件包与安装事实
 
+## M5：内置插件作者技能（2026-10-03）
+
+`agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/` 提供三层作者入口：索引注明用户想做 my-agent 插件时使用，
+正文按需引用 `references/` 和 `templates/`。M1 B9（m1b9，2026-10-03）按已合入 B1 的 v8 完成升级：
+工具/面板 v6 已有；Python 和 Node 模板都用 v8 `entry/files/platforms`，保留纯文本只读工具及同源 MCP 目录。
+观察 `prompt_submitted:text`、`tool_call_started:none`；精确 `run_command` 收紧为 `arguments:full/effects:[]`，
+`permissions.network=false`。两能力位声明版本 1，观察回 `{}`，字面 `rm -rf` 回 ask，普通命令 allow_as_is，
+未知门 deny、缺参数 ask。裁决不能改参数、执行命令或降低宿主要求；字面模式不是完整 shell 安全分析器。
+
+两模板使用源码 `scripts/build_plugin_files_package.py`，真实产品读包器校验后独占发布，不执行插件入口。
+v8 允许只贡献观察或收紧，不硬塞工具/面板，第一期不可与 `host_api` 混用。
+只有旧 v1–v5 wheel 工程才用 `scripts/build_plugin_package.py`，不能通过 wheel 开订阅路径。
+原 Python wheel 构建器接受开发者显式指定、含 `pyproject.toml` 和 `src` 的受信工程，不再限于仓内 `plugins/` 直属项目；
+构建后端会执行源码，入口不授予模型新路径权限，不用于探查不可信源码。复制标准构建输入，优先保留工程自己的 LICENSE/NOTICE，
+缺少时沿产品许可；依赖只用显式本地 wheel。临时文件由调用方设置工作区 `TMPDIR`，最终包独占发布后由用户取用。
+脚本不随普通安装 wheel 提供；没有获授权的源码入口时如实报告，不借内部管理函数替代打包。
+
+清单只接受 `requested_effect=read_only|mutating|dangerous`，不接受自造 `approval/effect/auto_approve`。
+效果请求不是授权：插件代理当前保留外部 MCP 的 dangerous 默认，审批只能等于或严于默认，不从包字段下调。
+安装/启用/输入确认码只由用户本人执行；技能的工具依赖不含插件管理入口，也不许通过 shell、界面、安装表或委派绕过。
+交付必须提示：“请用 /plugins install <路径> 安装，启用时按界面提示输确认码”。
+网络默认关闭，确需联网必须声明 true 并进入本人确认码，不为演示默认开网。B7 前 v8 生产启用返回
+`plugin_events_disabled`，不能改门或降级绕过；B7 必须同时保证仅 local/main、强制沙箱（不可用拒绝）、
+默认断网及收窄读，读不到宿主配置、会话和记忆。B9 没有实施或实测这些宿主安全接线。
+
+验证顺序为真实 Skill 索引/镜像、临时工作区模板构建、产品最终包检查、从包中启动独立 MCP stdio；
+生产 wheel 用完整纳管源码的工作区副本实际构建，核对技能所有资源原字节、无禁带/缺失/旧源码成员；
+既有插件工程还与固定开工提交的原构建器比较最终包原字节，不通过制品一致推断运行失败原因。
+这些组件证据不代表宿主安装/启用或真实 TUI/模型调用通过。当前命令、结果和未验边界见 [TESTS](../../TESTS.md)。
+
 ## IM 命令入口（2026-10-01，C10，本地实现，待集成）
 
 IM 可以发送 `/plugins [动作]` 或 `/plugins@<插件ID> [动作]`，与 TUI 复用同一插件命令服务、

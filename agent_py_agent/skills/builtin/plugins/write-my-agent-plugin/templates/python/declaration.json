@@ -1,0 +1,39 @@
+{
+  "plugin_id": "text-count-python",
+  "version": "0.1.0",
+  "summary": "Python v8 只读文本、观察回执与命令收紧模板",
+  "entry": {"kind": "interpreter", "interpreter": "python3", "command": "src/server.py", "args": []},
+  "files": [
+    {"path": "declaration.json", "executable": false},
+    {"path": "src/server.py", "executable": false}
+  ],
+  "platforms": ["any"],
+  "events": [
+    {"type": "prompt_submitted", "content": "text"},
+    {"type": "tool_call_started", "content": "none"}
+  ],
+  "tool_gates": [{"id": "guard-rm", "tools": ["run_command"], "effects": [], "arguments": "full"}],
+  "permissions": {"network": false},
+  "default_action": "count",
+  "actions": [
+    {
+      "name": "count", "summary": "统计输入文本的 Unicode 字符数",
+      "arguments": [
+        {"name": "text", "summary": "待统计文本", "options": [], "value_type": "string", "required": true,
+         "multiple": false, "default": null, "choices": [], "path": false}
+      ],
+      "kind": "tool", "target": "count_text", "available": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "count_text", "description": "统计输入文本的 Unicode 码点数；不读取文件、不联网、不写入。",
+      "requested_effect": "read_only",
+      "input_schema": {
+        "type": "object", "properties": {"text": {"type": "string", "maxLength": 4096}},
+        "required": ["text"], "additionalProperties": false
+      }
+    }
+  ],
+  "settings_schema": {"type": "object", "properties": {}, "additionalProperties": false}
+}

@@ -1,0 +1,454 @@
+# LLM: B9 的 v8 索引、真实文件包/stdio 与旧 wheel 回归；全部样本只在工作树副本，不调用管理入口。
+# 模块用途: 验证双语言作者模板的事件与收紧协议，保留用户确认边界和旧构建器字节对照。
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from zipfile import ZipFile
+
+import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+from agent_py_agent.agent.capability.skills import parse_skill_file
+from agent_py_agent.agent.plugin_manifest import PluginManifest, PluginPackageError
+from agent_py_agent.agent.plugin_package import inspect_plugin_package
+from agent_py_agent.agent.plugin_wheels import inspect_plugin_wheels
+from scripts.build_plugin_files_package import build_files_package
+from scripts.build_plugin_package import _manifest_schema, build_plugin_package
+from scripts.plugin_build import build_wheel
+
+ROOT = Path(__file__).resolve().parents[2]
+SKILL = ROOT / "agent_py_agent/skills/builtin/plugins/write-my-agent-plugin"
+
+
+# LLM: pytest basetemp 按车道规则保留；本组业务样本、wheel 和 pip 临时目录全部放工作树 tmp，结束自动清理。
+# 函数用途: 隔离模板构建副本，避免修改随包原件或在工作树外生成插件产物。
+@pytest.fixture
+def author_workspace(monkeypatch):
+    scratch = ROOT / "tmp"
+    scratch.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="b9-m1b9-", dir=scratch) as directory:
+        root = Path(directory)
+        monkeypatch.setattr(tempfile, "tempdir", str(root))
+        monkeypatch.setenv("TMPDIR", str(root))
+        yield root
+
+
+# LLM: 复用产品 CLI，不替换构建后端或读包器；失败要带完整 stderr/stdout，不洗成成功。
+# 函数用途: 执行一次离线构建命令，返回真实标准输出。
+def _run(command: list[str], workspace: Path, input_text: str | None = None):
+    result = subprocess.run(command, cwd=ROOT, input=input_text, capture_output=True,
+                            text=True, timeout=120, env={"PATH": os.defpath, "TMPDIR": str(workspace),
+                                                       "PYTHONDONTWRITEBYTECODE": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not result.stderr, result.stderr
+    return result.stdout
+
+
+# LLM: 固定一组协议请求验证初始化、单工具目录、Unicode/空值、错误及错误后的继续调用；无宿主、无安装表。
+# 函数用途: 生成两个模板共享的真实 stdio 冒烟输入。
+def _requests():
+    calls = [
+        {"method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+        {"method": "notifications/initialized"},
+        {"method": "tools/list"},
+        {"method": "tools/call", "params": {"name": "count_text", "arguments": {"text": "哥哥🙂\n"}}},
+        {"method": "tools/call", "params": {"name": "count_text", "arguments": {"text": ""}}},
+        {"method": "tools/call", "params": {"name": "count_text", "arguments": {"text": 9}}},
+        {"method": "tools/call", "params": {"name": "absent", "arguments": {}}},
+        {"method": "tools/call", "params": {"name": "count_text", "arguments": {"text": "x", "path": "secret"}}},
+        {"method": "tools/call", "params": {"name": "count_text", "arguments": {"text": "x" * 4097}}},
+        {"method": "tools/call", "params": {"name": "count_text", "arguments": {"text": "正常"}}},
+    ]
+    return "".join(json.dumps({"jsonrpc": "2.0", **call, **({"id": index} if index != 1 else {})},
+                              ensure_ascii=False) + "\n" for index, call in enumerate(calls))
+
+
+def test_skill_is_indexed_and_body_loads(author_workspace, skill_catalog_factory):
+    builtin = author_workspace / "catalog/builtin/plugins/write-my-agent-plugin"
+    shutil.copytree(SKILL, builtin)
+    catalog = skill_catalog_factory(author_workspace / "catalog")
+    snapshot = catalog.service.snapshot_for(catalog.workspace, force_reload=True)
+    entry = snapshot.resolve("builtin:write-my-agent-plugin")
+    assert entry is not None, snapshot.errors
+    assert entry.name == "write-my-agent-plugin"
+    assert entry.source == "builtin"
+    assert entry.category == "plugins"
+    assert "插件" in entry.description
+    assert "用户" in entry.when_to_use and "my-agent 插件" in entry.when_to_use
+    assert snapshot.read_body(entry.stable_id) == (SKILL / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_skill_only_requires_authoring_tools():
+    card = parse_skill_file(SKILL / "SKILL.md", source="builtin", require_frontmatter=True)
+    assert card.tools_required
+    assert set(card.tools_required) <= {"skill_search", "list_files", "read_file", "write_file",
+                                        "edit_file", "apply_patch", "run_command"}
+    body = card.path.read_text(encoding="utf-8")
+    assert "请用 /plugins install <路径> 安装，启用时按界面提示输确认码" in body
+    assert "不能替用户输确认码" in body
+    assert "只能等于或严于默认" in body
+
+
+def test_skill_documents_v8_and_production_boundary():
+    body = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert all(token in body for token in ("v8", "events", "tool_gates", "permissions.network",
+        "allow_as_is", "ask", "deny", "arguments: full", "plugin_events_disabled",
+        "my-agent/events", "my-agent/tool-gate", "local/main", "强制沙箱", "会话和记忆"))
+    assert "不能自行安装、启用" in body and "默认 `false`" in body
+
+
+# LLM: 事件字段表是给模型读的合同，写错字段名会直接造出读不到数据的插件；这里让表与 B4 的唯一白名单同源比对。
+#   B4 的 points.py 尚未合入本分支时不能凭缺失判失败（那是分支差异不是错），因此先按文件存在与否决定跳过，
+#   17j 合入 B4 后同一用例会自动开始严格比对。
+# 函数用途: 校验 author-contract 的事件字段表与 points.py 的 _EVENT_FACT_FIELDS 逐类逐字段一致。
+def test_author_contract_event_table_matches_event_point_projection():
+    points_path = ROOT / "agent_py_agent/agent/plugin_events/points.py"
+    if not points_path.exists():
+        pytest.skip("B4 的 plugin_events/points.py 尚未合入本分支；17j 合入后本用例自动生效")
+
+    import ast
+
+    tree = ast.parse(points_path.read_text(encoding="utf-8"))
+    expected: dict[str, tuple[str, ...]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "_EVENT_FACT_FIELDS" for target in node.targets):
+            continue
+        expected = {key.value: tuple(item.value for item in value.elts)
+                    for key, value in zip(node.value.keys, node.value.values)}
+    assert expected, "points.py 里找不到 _EVENT_FACT_FIELDS"
+
+    table = (SKILL / "references/author-contract.md").read_text(encoding="utf-8")
+    documented: dict[str, tuple[str, ...]] = {}
+    for line in table.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or not cells[0].startswith("`"):
+            continue
+        name = cells[0].strip("` ")
+        if name not in expected:
+            continue
+        documented[name] = tuple(part.strip("` ") for part in cells[1].split("、"))
+
+    assert set(documented) == set(expected), f"表里缺或多：{sorted(set(expected) ^ set(documented))}"
+    for event_type, fields in expected.items():
+        assert documented[event_type] == fields, f"{event_type} 字段不一致：表 {documented[event_type]} vs 实现 {fields}"
+
+
+# LLM: 截断标记是 B5 宿主给的结构化事实，文档和模板都得用同一个字段名，写错了门就永远看不到截断；
+#   B5 的 tool_gate.py 尚未合入本分支时不能凭缺失判失败（那是分支差异不是错），因此先按文件存在与否跳过，
+#   合入 B5 后同一用例会自动开始严格比对。
+# 函数用途: 校验文档写的字段名与 B5 实现同源，并确认两个模板都按它早返回 ask。
+def test_author_contract_truncation_field_matches_tool_gate_implementation():
+    gate_path = ROOT / "agent_py_agent/agent/plugin_events/tool_gate.py"
+    if not gate_path.exists():
+        pytest.skip("B5 的 plugin_events/tool_gate.py 尚未合入本分支；合入后本用例自动生效")
+
+    source = gate_path.read_text(encoding="utf-8")
+    assert 'facts["arguments_truncated"]' in source, "B5 实现未写入 arguments_truncated；字段名已变，请先对齐文档"
+
+    contract = (SKILL / "references/author-contract.md").read_text(encoding="utf-8")
+    assert "`call.arguments_truncated`" in contract, "作者合同缺截断字段的读法"
+    assert "ARGUMENTS_TRUNCATED" in contract, "作者合同缺推荐原因码"
+
+    for language, path in (("python", "templates/python/src/server.py"), ("node", "templates/node/src/server.js")):
+        template = (SKILL / path).read_text(encoding="utf-8")
+        assert "arguments_truncated" in template, f"{language} 模板未处理截断标记"
+        assert "ARGUMENTS_TRUNCATED" in template, f"{language} 模板缺截断原因码"
+
+
+def test_management_runtime_is_hidden_from_model(author_workspace, monkeypatch):
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+    from agent_py_agent.agent.plugin_enable_tool import PluginEnableTool
+    from agent_py_agent.agent.plugin_management import PluginManagement
+
+    tool = PluginEnableTool(object(), object(), object(), None, "synthetic-catalog")
+    service = PluginManagement.__new__(PluginManagement)
+    service.context = SimpleNamespace(workspace=author_workspace, enable_allowed=True,
+        path_policy=PathAccessPolicy.from_values(mode="workspace"), owner=SimpleNamespace(owner_id="local/main"))
+    monkeypatch.setattr(service, "_management_tool", lambda *args: tool)
+    monkeypatch.setattr(service, "_allowed", lambda name: True)
+    request = SimpleNamespace(command_name=tool.model_spec.name, request_id="synthetic-request", operation_id="synthetic-operation")
+    binding = SimpleNamespace(request=request, run_id="synthetic-run", attempt_id="synthetic-attempt", task_id="synthetic-task")
+    prepared = service._prepare(object(), binding, {})
+    assert prepared.runtime_snapshot.runtimes[0].exposure.model_visible is False
+
+
+@pytest.fixture(params=["python", "node"])
+def built_template(request, author_workspace):
+    language = request.param
+    project = author_workspace / language
+    shutil.copytree(SKILL / "templates" / language, project)
+    bundle = author_workspace / f"{language}.zip"
+    _run([sys.executable, str(ROOT / "scripts/build_plugin_files_package.py"), "--declaration",
+          str(project / "declaration.json"), "--files-root", str(project), "--output", str(bundle)], author_workspace)
+    package = inspect_plugin_package(bundle.read_bytes())
+    return language, project, bundle, package
+
+
+def test_templates_build_and_validate(built_template):
+    language, project, bundle, package = built_template
+    payload = package.manifest.to_payload()
+    assert bundle.is_relative_to(ROOT)
+    assert project.is_relative_to(ROOT)
+    assert len(package.manifest.tools) == 1
+    assert package.manifest.tools[0].requested_effect == "read_only"
+    assert package.manifest.default_action == "count"
+    assert PluginManifest.from_payload(payload).to_payload() == payload
+    assert payload["schema_version"] == "plugin_package.v8"
+    interpreter, script = ("python3", "src/server.py") if language == "python" else ("node", "src/server.js")
+    assert payload["entry"] == {"kind": "interpreter", "interpreter": interpreter, "command": script, "args": []}
+    assert {item["path"] for item in payload["files"]} == {"declaration.json", script}
+    assert payload["permissions"] == {"network": False}
+    assert payload["host_api"] == []
+    assert payload["events"] == [{"type": "prompt_submitted", "content": "text"},
+                                 {"type": "tool_call_started", "content": "none"}]
+    assert payload["tool_gates"] == [{"id": "guard-rm", "tools": ["run_command"], "effects": [], "arguments": "full"}]
+
+
+def test_templates_execute_packaged_stdio(built_template, author_workspace):
+    language, project, bundle, package = built_template
+    unpacked = author_workspace / "unpacked"
+    with ZipFile(bundle) as archive:
+        archive.extractall(unpacked)
+    if language == "python":
+        command = [sys.executable, "-I", str(unpacked / "src/server.py")]
+    else:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("本机无 Node；v8 打包/清单仍由独立测试覆盖")
+        command = [node, str(unpacked / "src/server.js")]
+    replies = [json.loads(line) for line in _run(command, author_workspace, _requests() + _hook_requests()).splitlines()]
+    assert [reply["id"] for reply in replies] == [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    assert replies[0]["result"]["protocolVersion"] == "2024-11-05"
+    assert replies[0]["result"]["capabilities"]["experimental"] == {
+        "my-agent/events": {"versions": ["1"]}, "my-agent/tool-gate": {"versions": ["1"]}}
+    tool = package.manifest.tools[0]
+    assert replies[1]["result"]["tools"] == [{"name": tool.name, "description": tool.description,
+                                               "inputSchema": tool.input_schema}]
+    assert json.loads(replies[2]["result"]["content"][0]["text"]) == {"characters": 4}
+    assert json.loads(replies[3]["result"]["content"][0]["text"]) == {"characters": 0}
+    assert all(reply["result"]["isError"] is True for reply in replies[4:8])
+    assert json.loads(replies[8]["result"]["content"][0]["text"]) == {"characters": 2}
+    assert replies[9]["result"] == {}
+    assert replies[10]["result"] == {"verdict": "ask", "reason_code": "RM_RF", "message": "要删除整个目录，先确认一次"}
+    assert replies[11]["result"] == {"verdict": "allow_as_is", "reason_code": "NO_MATCH"}
+    assert replies[12]["result"] == {"verdict": "deny", "reason_code": "OUT_OF_SCOPE"}
+    assert replies[13]["result"] == {"verdict": "ask", "reason_code": "ARGUMENTS_UNAVAILABLE"}
+    assert replies[14]["result"] == {"verdict": "ask", "reason_code": "ARGUMENTS_TRUNCATED",
+                                     "message": "参数被截断，看不全命令内容，先确认一次"}
+    assert replies[15]["result"] == {"verdict": "ask", "reason_code": "RM_RF", "message": "要删除整个目录，先确认一次"}
+
+
+# LLM: 只发送合成提示/结构化事实与精确工具参数；危险命令只是 JSON 数据，绝不执行。
+# 函数用途: 对最终包验证观察空回执、三种合法裁决及参数缺失时宁严勿松。
+def _hook_requests():
+    call = {"call_id": "synthetic-call", "tool": "run_command", "effect": "dangerous", "actor": "main",
+            "interactive": True, "args_hash": "synthetic-hash"}
+    frames = [
+        {"method": "my-agent/events.observe", "params": {"events": [
+            {"type": "prompt_submitted", "facts": {"chars": 4}, "text": "合成提示"},
+            {"type": "tool_call_started", "facts": {"tool": "run_command", "args_hash": "synthetic-hash"}}]}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments": {"command": "rm -rf build"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments": {"command": "printf safe"}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "unknown", "call": call}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm", "call": call}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments_truncated": True, "arguments": {"command": "rm -rf " + "x" * 4000}}}},
+        {"method": "my-agent/tool-gate.review", "params": {"gate_id": "guard-rm",
+            "call": {**call, "arguments_truncated": False, "arguments": {"command": "rm -rf build"}}}},
+    ]
+    return "".join(json.dumps({"jsonrpc": "2.0", "id": index + 10, **frame}) + "\n"
+                   for index, frame in enumerate(frames))
+
+
+@pytest.mark.parametrize("key,value", [("approval", "never"), ("effect", "read_only"), ("auto_approve", True)])
+def test_manifest_does_not_accept_invented_approval_fields(built_template, key, value):
+    payload = built_template[3].manifest.to_payload()
+    payload["tools"][0][key] = value
+    with pytest.raises(PluginPackageError) as error:
+        PluginManifest.from_payload(payload)
+    assert error.value.reason == "invalid_manifest"
+
+
+@pytest.mark.parametrize("bad_part", ["tool_event_text", "full_effects"])
+def test_templates_reject_illegal_subscriptions(built_template, author_workspace, bad_part):
+    project = built_template[1]
+    declaration = json.loads((project / "declaration.json").read_text(encoding="utf-8"))
+    if bad_part == "tool_event_text":
+        declaration["events"][1]["content"] = "text"
+    else:
+        declaration["tool_gates"][0]["effects"] = ["dangerous"]
+    output = author_workspace / "invalid.zip"
+    with pytest.raises(PluginPackageError) as error:
+        build_files_package(declaration, project, output)
+    assert error.value.reason == "invalid_manifest"
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("only", ["events", "tool_gates"])
+def test_templates_allow_subscription_only_packages(built_template, author_workspace, only):
+    project = built_template[1]
+    declaration = json.loads((project / "declaration.json").read_text(encoding="utf-8"))
+    declaration.update(tools=[], actions=[], default_action="", panels=[])
+    declaration["tool_gates" if only == "events" else "events"] = []
+    (project / "declaration.json").write_text(json.dumps(declaration), encoding="utf-8")
+    output = build_files_package(declaration, project, author_workspace / "subscription-only.zip")
+    manifest = inspect_plugin_package(output.read_bytes()).manifest
+    assert manifest.to_payload()["schema_version"] == "plugin_package.v8"
+    assert manifest.tools == () and manifest.panels == () and manifest.actions == ()
+    assert manifest.events or manifest.tool_gates
+
+
+def test_python_builder_rejects_missing_project_layout(author_workspace):
+    project = author_workspace / "empty"
+    project.mkdir()
+    with pytest.raises(ValueError, match="pyproject.toml.*src"):
+        build_plugin_package(project, "plugin_template/declaration.json", (), author_workspace / "empty.zip")
+
+
+def test_node_package_is_reproducible_and_not_overwritten(author_workspace):
+    project = author_workspace / "node"
+    shutil.copytree(SKILL / "templates/node", project)
+    declaration = json.loads((project / "declaration.json").read_text(encoding="utf-8"))
+    first = build_files_package(declaration, project, author_workspace / "first.zip")
+    second = build_files_package(declaration, project, author_workspace / "second.zip")
+    assert first.read_bytes() == second.read_bytes()
+    with pytest.raises(FileExistsError):
+        build_files_package(declaration, project, first)
+
+
+@pytest.mark.parametrize("extensions,expected", [
+    ({}, "plugin_package.v1"),
+    ({"panels": [{"id": "panel"}]}, "plugin_package.v2"),
+    ({"skills": ["guide"]}, "plugin_package.v3"),
+    ({"host_api": ["read"]}, "plugin_package.v4"),
+    ({"tools": [{"observation": {"target_kind": "sample"}}]}, "plugin_package.v5"),
+    ({"skills": ["guide"], "host_api": ["read"],
+      "tools": [{"observation_ref": {"target_kind": "sample", "param": "candidate"}}]}, "plugin_package.v5"),
+])
+def test_python_version_selection_remains_structural(extensions, expected):
+    manifest = {"entry_module": "plugin_template", **extensions}
+    schema = _manifest_schema(manifest, ["plugin_template/skills/guide/SKILL.md"])
+    assert schema == expected
+    if expected in {"plugin_package.v3", "plugin_package.v4", "plugin_package.v5"}:
+        assert "panels" in manifest
+    if expected in {"plugin_package.v4", "plugin_package.v5"}:
+        assert "skills" in manifest
+    if expected == "plugin_package.v5":
+        assert "host_api" in manifest
+
+
+def test_builtin_seed_keeps_templates_and_references(author_workspace, monkeypatch, skill_catalog_factory):
+    from agent_py_agent.agent.capability import builtin_seed
+
+    root = author_workspace / "seed"
+    monkeypatch.setattr(builtin_seed, "_BUILTIN_SRC", SKILL.parent)
+    builtin_seed.sync_skill_index(root / "builtin", root / "shared", root / "indexes/skills.jsonl", root / "cache/fingerprint")
+    seeded = root / "builtin/write-my-agent-plugin"
+    originals = [path for path in SKILL.rglob("*") if path.is_file()]
+    assert all((seeded / path.relative_to(SKILL)).read_bytes() == path.read_bytes() for path in originals)
+    catalog = skill_catalog_factory(root)
+    entry = catalog.snapshot.resolve("builtin:write-my-agent-plugin")
+    assert entry is not None and entry.when_to_use
+
+
+def test_python_builder_preserves_project_license(author_workspace):
+    project = author_workspace / "python"
+    _legacy_python_project(project)
+    for name in ("LICENSE", "NOTICE"):
+        (project / name).write_bytes((ROOT / name).read_bytes() + b"\nM5 local project fixture\n")
+    bundle = build_plugin_package(project, "plugin_template/declaration.json", (), author_workspace / "licensed.zip")
+    package = inspect_plugin_package(bundle.read_bytes())
+    inspect_plugin_wheels(package)
+    with ZipFile(bundle) as archive:
+        wheel_bytes = archive.read(package.manifest.entry_wheel)
+    with ZipFile(__import__("io").BytesIO(wheel_bytes)) as wheel:
+        for name in ("LICENSE", "NOTICE"):
+            member = next(path for path in wheel.namelist() if path.endswith("/licenses/" + name))
+            assert wheel.read(member) == (project / name).read_bytes()
+
+
+# LLM: 保留旧 wheel 构建器的许可回归；输入锁在原 M5 提交，只读 Git 字节，绝不让 v8 混入 wheel 路径。
+# 函数用途: 在工作区准备历史 Python 工程以继续测试原来已覆盖的 LICENSE/NOTICE 保留行为。
+def _legacy_python_project(project: Path) -> None:
+    prefix = SKILL.relative_to(ROOT).as_posix() + "/templates/python/"
+    names = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", "35f445792", "--", prefix], cwd=ROOT)
+    for name in names.decode().splitlines():
+        target = project / name.removeprefix(prefix)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(subprocess.check_output(["git", "show", "35f445792:" + name], cwd=ROOT))
+
+
+# LLM: 构建输入仅来自 Git 纳管的当前源码字节，不读取未纳管运行目录；构建副本、pip 临时文件都在测试工作区。
+# 函数用途: 准备完整产品 wheel 工程，不在原仓库留下 build 或 egg-info。
+def _production_source(workspace: Path) -> Path:
+    source = workspace / "release-source"
+    inputs = subprocess.check_output(["git", "ls-files", "-z", "--", "agent_py_agent",
+                                      "pyproject.toml", "setup.py", "package_boundary_policy.py",
+                                      "README.md", "LICENSE", "NOTICE"], cwd=ROOT)
+    for name in inputs.decode().split("\0"):
+        if not name or name.startswith("agent_py_agent/tests/"):
+            continue
+        target = source / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    return source
+
+
+def test_production_wheel_keeps_all_author_assets(author_workspace):
+    from scripts.check_clean_package import check_zip_findings
+    from scripts.check_distribution_boundary import (
+        forbidden_members,
+        missing_runtime_resource_members,
+        source_mismatched_members,
+    )
+
+    source = _production_source(author_workspace)
+    wheel = build_wheel(source, author_workspace / "release-wheels")
+    assert not forbidden_members(wheel)
+    assert not missing_runtime_resource_members(wheel, source)
+    assert not source_mismatched_members(wheel, source)
+    assert not check_zip_findings(wheel)
+    with ZipFile(wheel) as archive:
+        originals = [path for path in SKILL.rglob("*") if path.is_file()]
+        assert all(archive.read(path.relative_to(ROOT).as_posix()) == path.read_bytes() for path in originals)
+
+
+# LLM: 只从固定开工提交读取原构建器，在同一工作树源码/解释器/依赖下比较最终包字节；不改分支或还原产品文件。
+# 函数用途: 加载原构建函数作为对照，不启动插件、不安装或修改宿主状态。
+def _baseline_builder():
+    source = subprocess.check_output(["git", "show", "b453f8883:scripts/build_plugin_package.py"], cwd=ROOT)
+    namespace = {"__file__": str(ROOT / "scripts/build_plugin_package.py"), "__name__": "m5_baseline_builder"}
+    exec(compile(source, namespace["__file__"], "exec"), namespace)
+    return namespace["build_plugin_package"]
+
+
+def test_existing_packages_match_baseline_bytes(author_workspace):
+    from scripts.build_plugin_api import build_plugin_api
+
+    baseline = _baseline_builder()
+    sdk = build_plugin_api(author_workspace / "sdk")
+    names = ("activity-line", "context-inspector", "browser-lite", "design-lite", "desktop-lite",
+             "drama-media-shell", "genui-lite", "harness-console", "image-text")
+    for name in names:
+        project = ROOT / "plugins" / name
+        metadata = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
+        dependencies = (sdk,) if metadata["project"].get("dependencies") else ()
+        declaration = next((project / "src").glob("*/declaration.json")).relative_to(project / "src").as_posix()
+        before = baseline(project, declaration, dependencies, author_workspace / (name + "-before.zip"))
+        after = build_plugin_package(project, declaration, dependencies, author_workspace / (name + "-after.zip"))
+        assert before.read_bytes() == after.read_bytes(), name

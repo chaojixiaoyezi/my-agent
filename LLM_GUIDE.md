@@ -1,5 +1,13 @@
 # LLM_GUIDE
 
+M1 B9（原 M5，2026-10-03，m1b9，`worker/sol2-m5`，已实现，待 be 复审）：用户想做 my-agent 插件时读取
+内置 `write-my-agent-plugin` 正文，再按需读模板与参考。工具/面板 v6 已有；两语言模板采用 B1 的 v8 文件入口，
+正文只允许 prompt_submitted，full 收紧只列精确工具名且 effects 为空，network 默认 false。握手双能力位、观察空回执，
+裁决仅 allow_as_is/ask/deny，不能改参数或降低宿主审批。B7 前生产启用返回 plugin_events_disabled；仅 local/main、
+强制沙箱、默认断网和收窄读是 B7 的前置合同，不是本模板 stdio 已验证的保障。模型只交包，不安装、启用、取码或代填。
+v8 用源码文件构建器，旧 v1–v5 wheel 才走 wheel 构建器；只构建受信授权源码，中间文件留工作区，缺入口如实报告。
+当前测试及未验边界见 TESTS；宿主安装启用、隔离与真实客户端由 3a 后续复核。
+
 M1 B1（2026-10-03，m1b1，`worker/m1-b1`，两条裁定与 ae 意见已实施，ae 复审通过，并入 step17i）：v8 只扩 v6 文件入口的静态声明，
 事件/收紧/网络/强制沙箱要求进入原启用确认码；旧 v1–v7 固定序列化字节不变，不另开 Python 轮子订阅路径。
 B7 就绪前 B1 先在确认码之前以 `plugin_events_disabled` 拒绝全部 v8 启用，不生成运行时或候选计划，但安装允许。B7 再将暂时拒绝及计划排除换成真正总开关、local/main 与强制沙箱；`sandbox=required` 不是已经隔离的证据。

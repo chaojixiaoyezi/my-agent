@@ -1,5 +1,29 @@
 # Codebase Tree
 
+## M1 B9（原 M5）插件作者入口
+
+```text
+|-- agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/
+|   |-- SKILL.md                          # 工具/面板、v8 观察/收紧指引，安装启用仍由用户确认
+|   |-- references/
+|   |   |-- author-contract.md            # v8 订阅、握手、审批及 B7 前关闭/安全前置合同
+|   |   `-- pack-and-verify.md             # 文件构建器、真实 v8 读回和包内 stdio 验证
+|   `-- templates/
+|       |-- python/
+|       |   |-- declaration.json           # v8 entry/files、合法观察/精确 full 收紧、默认断网
+|       |   `-- src/server.py              # 标准库 MCP：count_text、观察空回执、字面命令收紧
+|       `-- node/
+|           |-- declaration.json           # 与 Python 相同的 v8 订阅及网络权限合同
+|           `-- src/server.js              # 无 npm 依赖，同样的三个方法及双能力握手
+|-- agent_py_agent/tests/test_write_my_agent_plugin_skill.py # 真包/stdio、纯订阅、模型边界及旧新字节回归
+|-- scripts/build_plugin_files_package.py  # B1 同源 v8 文件包构建，不执行入口
+`-- scripts/build_plugin_package.py        # 原受信 wheel 构建路径，保持 v1–v5 回归
+```
+
+关键职责：作者入口只交付代码、包和证据，不提供宿主管理通道；
+模板、参考随内置 Skill 镜像/发布，详细合同见 `docs/design/PLUGIN_PACKAGES.md` 的 M5 节及
+`docs/design/PLUGIN_EVENT_HOOKS.md`；B9 独立 stdio 不证明 B7 宿主隔离或生产启用。
+
 ## 发布与开发入口
 
 ```text
