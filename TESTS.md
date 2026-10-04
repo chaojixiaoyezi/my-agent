@@ -152,7 +152,7 @@
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_m1_b8_samples.py agent_py_agent/tests/test_write_my_agent_plugin_skill.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-trs -o addopts=""
   ```
   → **38 passed, 2 skipped**（2 skip 为 B4/B5 未合入的条件跳过）。
-- **相关回归**（7 文件：B8 样例、B9 技能、`test_plugin_any_language_samples.py`、`test_plugin_any_language.py`、`test_plugin_manifest_v8.py`、`test_plugin_package.py`、`test_plugin_api_build.py`）：**8 failed, 301 passed, 2 skipped**；8 个失败全部是"带确认码启用"的 `plugin_enable` 端点建立失败。已在基线 `1d394a308`（`git worktree add --detach` 临时工作树，用完 remove）复跑同一组：**8 failed, 301 passed, 2 skipped，失败清单逐条一致**——既有环境限制，不是本轮引入；交 3a 沙箱外复核。
+- **相关回归**（7 文件：B8 样例、B9 技能、`test_plugin_any_language_samples.py`、`test_plugin_any_language.py`、`test_plugin_manifest_v8.py`、`test_plugin_package.py`、`test_plugin_api_build.py`）：**8 failed, 301 passed, 2 skipped**；8 个失败全部是"带确认码启用"的 `plugin_enable` 端点建立失败。已在基线 `1d394a308`（`git worktree add --detach` 临时工作树，用完 remove）复跑同一组：**8 failed, 301 passed, 2 skipped，失败清单逐条一致**——是作者沙箱环境的限制（沙箱里建不了插件宿主端点），不是本轮引入。**3a 沙箱外复核（10-04，luna2 初审指出基线应为 merge-base d05a0d075 而非 1d394a308）**：17j 上 B8 样例、B9 技能等 16 个文件 450 passed，挑入 trs 后 B8/B9 两文件加守卫 70 passed、1 skipped，这 8 个用例在沙箱外全过。
 - **变异**（cp 备份原字节还原、sha256 校验一致；共 8 个全部被抓 + 1 组补充实测）：
   - 主变异"截断无条件降级"（去掉"片段已 deny 保持"）4 处全红：样例由"截断+删除段"用例、模板由"截断+门不匹配"用例。
   - **原因码变异"截断一律 `ARGUMENTS_TRUNCATED`"**（3a 补充裁定后新增）4 处全红：样例由"截断+rm-rf→`RM_RF`"条（`ARGUMENTS_TRUNCATED` ≠ `RM_RF`）、模板由 `replies[14]` 红。
