@@ -1,5 +1,18 @@
 # Verification：结构
 
+## M1 B4 真实 HTTP 认领证据（m1b4，2026-10-04）
+
+`test_plugin_event_e2e` 新增回环 HTTP 组合保留真实 AuthMiddleware、请求 worker 扫描/claim、owner 解析、Agent 回合和 canonical terminal。认领探针仅记录真实 attempt/lease_epoch；不手动搬 inbox、不写假终态。提示归属复用 worker 解析，关闭零解析、解析未知零提示；原唯一执行器/被动核验链未变，真实生产边界见 TESTS。
+
+## M1 B4 canonical 拒绝观察（m1b4，2026-10-03）
+
+隔离测试只被动记录 round_execution._record_execution 的 ToolExecution，不替换裁决或 handler；三类拒绝读 error_code/failure_stage/handler_executed 与 ActionDecision。客户端经原文件桥写 denied，真实审批链转换为 APPROVAL_REJECTED，原核验顺序不变。
+
+## M1 B4 在核验链旁的被动事件（2026-10-03，m1b4，WIP）
+
+`agent_core/tool_call_runtime.execute_traced_tool_call` 先沿原权限链得到 RunScope，再以宿主不可变执行请求的 actor 形成类型化观察上下文。Registry 只转交 EventPointContext，既有唯一执行器在真实 handler 开始及 canonical 结果收口时发布；原被动核验、写后核验与审计调用仍在原位置。
+观察不从工具参数取身份、不重复读取库、不产生第二条工具执行或验证路径。隔离三来源测试已验证；假插件六事件正常回合已验证，拒绝组合与正式非作者初审仍未完成，具体失败和命令见 TESTS.md。
+
 ## 能力包 v2 块 6a 取消边界（2026-10-03，已实现，9b 复核通过（沙箱侧 + 补充用例 dbccc1d14），并入 step17i）
 
 `pack_verification_hooks` 在 executor 外绑定当前 run 令牌；`pack_verification_service._run_once` 的取消优先于缓存，未运行检查直接记 cancelled。

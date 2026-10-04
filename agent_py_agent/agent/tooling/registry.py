@@ -745,7 +745,7 @@ class ToolRegistry:
         )
 
     # LLM: Every gate and handler in one invocation must receive the same host-authored effective
-    # cwd/root set. 审批模式在工具边界读取 owner 唯一策略；读取错误不得放行，也不能由模型参数覆盖。
+    # cwd/root set. 审批模式在工具边界读取 owner 唯一策略；事件只接宿主结构化上下文，读取错误不得放行，也不能由模型参数覆盖。
     # 函数用途: 在本轮统一工作目录和授权根下执行工具，并返回可审计的标准执行结果。
     def execute_tool(
         self,
@@ -767,10 +767,6 @@ class ToolRegistry:
         )
         boundary = write_boundary if isinstance(write_boundary, dict) else {}
         effective_owner_scope = effective_owner_scope_root(write_boundary=boundary, registry_scope=self.owner_scope_root)
-        try:
-            approval_mode = self.approval_mode_reader() if self.approval_mode_reader else "ask"
-        except (OSError, ValueError):
-            approval_mode = "unavailable"
         return ToolExecutor().execute(
             ToolExecutorRequest(
                 call=call,
@@ -782,7 +778,7 @@ class ToolRegistry:
                 owner_scope_root=effective_owner_scope,
                 write_boundary=write_boundary,
                 runtime_guard_policy=self.runtime_guard_policy,
-                approval_mode=approval_mode,
+                approval_mode=_registry_approval_mode(self),
                 operation_store=self.operation_store,
                 operation_store_required=self.operation_store_required,
                 operation_owner_id=self.operation_owner_id,
@@ -792,8 +788,27 @@ class ToolRegistry:
                 cancellation_token=cancellation_token,
                 pre_handler_gate=pre_handler_gate,
                 output_archiver=output_archiver,
+                event_context=_host_event_context(trusted_run_context),
             )
         )
+
+
+# LLM: 原审批读取语义独立于事件观察；保持错误时 unavailable，不让拆分改变授权或扩大异常吞并范围。
+# 函数用途: 在工具边界读取唯一审批模式，将读取失败原样交给执行器保守拒绝。
+def _registry_approval_mode(registry):
+    try:
+        return registry.approval_mode_reader() if registry.approval_mode_reader else "ask"
+    except (OSError, ValueError):
+        return "unavailable"
+
+
+# LLM: 上下文由宿主请求装配；只接严格类型的观察对象，不从 ToolCall.arguments 或内部工具参数找身份。
+# 函数用途: 在注册表转交执行器时保留可信的事件接缝，裸注册表调用默认没有观察。
+def _host_event_context(trusted_run_context):
+    from ..plugin_events.points import EventPointContext
+
+    context = (trusted_run_context or {}).get("plugin_event_context")
+    return context if isinstance(context, EventPointContext) else None
 
 
 # LLM: Tool authorization, resource locks, filesystem aliases and shell handlers must receive the

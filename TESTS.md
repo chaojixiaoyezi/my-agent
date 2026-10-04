@@ -701,6 +701,64 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   退出0，JUnit **33 passed / 0 failed / 0 skipped**；常数目录888项。G1 guards9全部十文件（含packaging）退出0；import boundaries=0、ruff通过、strict size hard=0 blocked=False、size_diff新增0/消失9、doc-sync与staged diff-check及clean-package通过，报告已恢复。五项变异与G2a最终门禁随后单列，批次不相加。
 - H2声明不代表真实 Seatbelt/bwrap 已验证；Full Access 模型可读数据根，插件沙箱关闭时与宿主同信任域。G3客户端附凭据、G2b强制及真实产品验收尚未做。
 
+## M1 B4 真实 HTTP / worker 与提示 owner 隔离（m1b4，2026-10-04，已实施，待复审）
+
+- **来源 / 根因**：luna6 完整初审、3a 核实。旧组合用假 handler，手工构造 processing 后直接调用回合入口，缺 HTTP 服务与 worker 认领覆盖；`prompt_queued` 的频道白名单又把 `alice/local` 和 `alice/tui` 提示错投给基础 owner。频道名不是 owner 权威。
+- **修法 / 取舍**：保持提示首次成功入队点，先检查严格 True 的事件开关，再复用 `request_worker._resolve_request_owner_identity`（不创建 scoped Agent）。只在结果等于 `owner_identity_from_config(agent.config)` 时发布；解析异常不发、业务仍走原 worker。避免挪到 worker 后使未认领请求缺提示或恢复认领重发；不另写频道/用户映射，管理员绑定仍沿既有解析规则。
+- **真实入口与边界**：`test_plugin_event_e2e.py::test_real_http_worker_claim_and_prompt_owner_isolation` 用隔离 home、真实 `GatewayHTTPServer(port=0)`、真实回环 HTTP `/ask` 和 `/result`、`AuthMiddleware`、真实扫描 worker `_process_gateway_requests`→原子 claim→owner Agent→`_handle_gateway_request`→原终态归档；不手改队列、attempt 或结果。模型为离线 echo；B3 与共用池真实，安装读取和插件客户端是原握手能力假插件，只有基础 owner 有安装记录。
+- **正负断言**：可信 HTTP 头身份覆盖正文里伪装的主用户/频道。`local-agent/local` 得基础 owner，prompt/start/end 按顺序各一，公共九键与各 facts 精确、序号 1/2/3、默认无正文；`alice/local`、`alice/tui` 由真实 worker 分别解析为独立 owner，业务仍完成，但不发布提示且主用户假插件零事件。canonical terminal、claim 的 attempt/lease_epoch 及队列清空均核对。另两例锁定解析失败不发与关闭零解析。
+- **清理**：仅绑定 `127.0.0.1` 的系统随机端口，断言不为 8420；短 HTTP 连接必关。线程退出和所有新线程消失按单调期限轮询，finally join worker、stop 测试服务并验证句柄清空；不用固定 sleep，不连接或启停生产 Gateway、不 kill 进程。
+- **TDD 与变异**：修前真实 HTTP 三例 `2 failed, 1 passed in 4.02s`，两失败都在跨 owner 提示断言；正例三事件链原已通过，不人为造红。修后两直接文件 `19 passed in 5.64s`。独立固定 Python 进程 compile/exec 生产源码副本，将 owner 判定改为恒真；同 HTTP 三例 `2 failed, 1 passed in 4.70s`，两负例均抓到，磁盘源码 SHA256 前后不变（非参数化坏值冒充源码变异）。
+- **聚焦复现命令**（工作树根，同树 pytest/code-size 串行）：
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_e2e.py agent_py_agent/tests/test_plugin_event_gateway.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-m1b4
+  ```
+- **最终扩展回归**：本轮 28 个明确文件（原 B4 26 文件含完整 guards9/packaging，加 owner 隔离与有界 HTTP 服务两文件）：`588 passed in 58.31s`，无失败/跳过，stderr 空。
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_hub.py agent_py_agent/tests/test_plugin_channel_pool.py agent_py_agent/tests/test_plugin_channel_lifecycle.py agent_py_agent/tests/test_plugin_display_service.py agent_py_agent/tests/test_gateway_request_runtime_errors.py agent_py_agent/tests/test_gateway_strict_request.py agent_py_agent/tests/test_gateway_control_operation.py agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_tool_runtime_scope.py agent_py_agent/tests/test_executor_decision_message.py agent_py_agent/tests/test_executor_exit_recovery.py agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_runtime.py agent_py_agent/tests/test_plugin_event_e2e.py agent_py_agent/tests/test_decision_action_execute.py agent_py_agent/tests/test_gateway_per_user_scoping.py agent_py_agent/tests/test_gateway_bounded_http_server.py agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-m1b4
+  ```
+- **最终门禁实输**：固定 CI Python 的 `scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`-m ruff check agent_py_agent scripts` → `All checks passed!`（初次新增测试 I001 已修）；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2218 hard=0 high-risk=1517 soft=701 test_advisory=1241 blocked=False`；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0 / 消失告警: 17`；`git diff --check` 无错误；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。生成 CODE_SIZE_REPORT 恢复 HEAD，不提交。全仓 pytest、线上 CI 未作为本轮验收来源。
+- **未验证**：生产 Gateway、真实模型/TUI/IM、B7 安装启用/沙箱断网、授权 text 确认链未验。luna6 的 conversation_control 三条资源控制失败本轮未复核，不定性为既有或环境原因；3a 已安排沙箱外核对。原旧段按其时点保留。
+
+## M1 B4 拒绝组合及 ds9 尾补（m1b4，2026-10-03，待非作者初审）
+
+- **来源 / 根因**：3a 续派、ds9 提前初审。真实执行器只加被动结构探针，旧拒绝回合实测 `TOOL_PARAMETER_TYPE_INVALID / validation / handler_executed=false / status=failed / decision=deny`；原用例假设了通用 `TOOL_INVALID_ARGUMENTS`。修用例，未改执行器错误码或授权逻辑。
+- **定码依据**：`contracts/tool_input_schema.py:96-104` 对 type issue 分类；`tooling/action_policy.py:229-275` 消费 primary_error_code；`tooling/executor.py:416-436` 将裁决首个 reason_code 与 failure_stage 写 canonical ToolResult。断言读结构，不搜索文案。
+- **新组合**：正常、原类型错误、危险命令策略拒绝、要求确认后用户拒绝四例。命令只交计数假 handler，不执行命令；客户端经原 `write_gateway_permission_decision` 写精确 denied 文件，真实 StreamApproval 发布、等待、核 binding，真实工具轮定 `APPROVAL_REJECTED`。被动记录 `_record_execution` 处的 canonical 结果。三条拒绝均必须零 handler 且握手假插件没有两种工具事件；精确公共键/facts、默认无正文/参数/输出标记断言保持。
+- **两类拒绝定码**：`contracts/gates/command_policy.py:366-375` 的保护目标门定 `COMMAND_DANGEROUS_PATTERN_BLOCKED`，ActionPolicy 转为 authorization 拒绝；`agent_core/tool_loop/round_execution.py:640-700` 依结构化 denied 定 `APPROVAL_REJECTED`。二者均 status=failed、handler_executed=false。
+- **ds9 三项**：装配层关闭独立断言返回 None、零上下文构造，不借 emit_event 兜底；观察层直接捕获给投影的输入并断精确键、无 arguments/输出；B3 仅改 `normalize_event_fact`，非 prompt 剥 content，六类型用例保留 prompt 正文。协议改前五条 content 断言有效失败；观察新测的早期 schema_hash 准备失败不算有效红灯。
+- **本轮聚焦与最终回归**：固定 CI Python、根目录、原参数，四文件 `test_plugin_event_e2e.py test_plugin_event_gateway.py test_plugin_event_points.py test_plugin_event_hub.py`：`78 passed in 5.45s`。尺寸首次新增两项（长组合函数、观察代理参数）；抽单层准备/断言 helper 后，当前版本完整 26 文件（含全部 guards9 和 packaging）最终 `567 passed in 51.49s`。中间 567 项绿及新增一项尺寸告警仅为阶段结果，以上最终结果覆盖最后测试拆分。旧失败保留为当时记录。
+- **独立真实源码变异**：分别只删 gateway 装配开关而保留 emit_event 兜底、只在观察输入加 arguments 而保留投影白名单、只取消协议非 prompt 剥 content。每项读取生产模块完整源码副本、改源、compile 后在独立 CI Python 进程运行对应测试；均 exit=1 且为预期测试 FAILED，无收集错误，`MUTATIONS_CAUGHT 3/3`。三份磁盘源码 SHA256 前后不变；不是把参数化负例算作变异。
+- **最终门禁实输**：`IMPORT_BOUNDARIES findings=0`；全 `agent_py_agent scripts` Ruff `All checks passed!`；`DOC_SYNC_PASS`；strict `strict_scope_total=2218 hard=0 high-risk=1517 soft=701 test_advisory=1241 blocked=False`；size_diff `新增告警: 0 / 消失告警: 17`；diff-check 及 clean-package `OK: . 未发现发布阻塞项`。生成 CODE_SIZE_REPORT 已恢复 HEAD，不提交。
+- **复现参数**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 ~/.my-agent/releases/claude-tools/ci-venv-312/bin/python -m pytest <上述四文件或下方原22文件加四个新相关文件的完整清单> -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-m1b4`，同树串行。
+- **重启与边界**：每次真实执行一对 turn；重启片 interrupted 收口后续跑另发一对，不做跨重启去重。B7 测试开关、假模型/客户端/握手插件，不连接生产；真实 TUI/IM/网络/隔离、text 清单＋本人确认码未验证。本轮完整改动待非作者初审，不改写 ds9 仅审前三提交的范围。
+
+## M1 B4 三来源装配与隔离组合（m1b4，2026-10-03，WIP，待交叉初审）
+
+- **来源 / 做法**：3a 第 2/3 步续派。`ToolCallExecuteParams.actor` 只由宿主自动执行及审批重入请求传递；主/子身份读已经冻结的 RunScope，Registry 只转交类型正确的 EventPointContext。没有再改 `tooling/executor.py`。原审批读取抽为单层函数，保留原错误语义以消除新增尺寸告警。
+- **有效红灯**：修正测试 run/snapshot 与真实 attempt 登记后，三个生产入口用例均因零工具事件失败；接线后通过。早先 snapshot/authority/selection 准备失败不算事件断言红灯。
+- **生产身份用例**：新 `test_plugin_event_runtime.py` 不直接构造执行器请求；子代理真实 create_run、create_attempt 后由生产 recovery 读取父链，决策由真实 `_execute_host_action` 转交唯一执行入口。
+- **定向与全部 guards9**：固定 CI Python，在根目录执行原 22 文件清单，加 `test_plugin_event_gateway.py`、`test_plugin_event_runtime.py`、`test_plugin_event_e2e.py`、`test_decision_action_execute.py`；参数仍为 `-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-m1b4`。输出 `1 failed, 555 passed in 51.18s`；唯一失败为组合测试。不能写成全绿。
+- **六事件已执行到的观察点**：换成离线计数工具（不读外部文件）后，真实 handle_ask → 队列 → Gateway → SimpleAgent.run → 原生工具循环 → Registry/handler → 控制回执 → B3 Hub/Pool → 握手声明 events 的假插件收到六类事件，精确公共键/facts、默认无正文/参数/输出标记，`1 passed in 3.65s`。
+- **最新组合范围**：`test_plugin_event_runtime.py test_plugin_event_e2e.py` 输出 `1 failed, 4 passed in 3.30s`。拒绝分支在假模型断言 `TOOL_INVALID_ARGUMENTS` 出现在原生结果时失败，尚未核对实际 canonical 错误码；保留失败用例，不以删除/跳过换绿。因此六事件正常回合已验证，拒绝组合仍未完成；此前执行器拒绝单测证据不能冒充该组合已验。
+- **尺寸**：本段 strict 实输 `strict_scope_total=2218 hard=0 high-risk=1517 soft=701 test_advisory=1241 blocked=False`；差集实输 `新增告警: 0`、`消失告警: 17`。生成报告已恢复。B7 未合入，本测试用类级测试开关覆盖配置副本；不宣称生产开关/真插件/真实 Gateway/TUI/IM 可用。
+- **本段静态收尾**：规定 CI Python 跑 `scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`-m ruff check agent_py_agent scripts` → `All checks passed!`；补齐 verification 两份维护文档后 `scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`git diff --check`、暂存 diff-check 与 `git diff --check 0ae0efe5e HEAD` 全过。`scripts/check_clean_package.py .` 首次因为两份新测试未跟踪而拒绝，纳入提交后重跑输出 `OK: . 未发现发布阻塞项`。上述门禁成功不代替仍失败的拒绝组合。
+
+## M1 B4 续做：变基与 Gateway 事件点（m1b4，2026-10-03，WIP，待复审）
+
+- **来源 / 做法**：3a 续派；指定 `git rebase --onto 0ae0efe5e d8970996c`，加 `--exec 'git diff --check HEAD~1 HEAD'` 检查每个重放提交。四处文档冲突保留双方有效内容，未改 B3 产品文件。
+- **第 0 步**：原 22 文件清单（下方原 B4 节完整命令）在新基线上 `492 passed in 46.80s`；多出的 1 项是 B3 默认线程数用例。`size_diff.sh` 实输为 `新增告警: 0`、`消失告警: 17`，`CODE_SIZE_REPORT.md` 已恢复。
+- **Gateway 新测**：`test_plugin_event_gateway.py` 走真实 HTTP handler、队列、控制操作回执与 `_handle_gateway_request`；提示/控制新断言先失败（0 个事件），回合用例初版缺 claimed attempt 字段导致业务准备失败，修正输入后才覆盖真实回合事件，不能把该准备失败算成事件缺失的有效 TDD 红灯。
+- **回归**：固定 CI Python、树根、`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`；`-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-m1b4`。
+  ```sh
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_gateway_control_operation.py agent_py_agent/tests/test_gateway_request_runtime_errors.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-m1b4
+  ```
+  结果 `121 passed in 7.15s`，包括关闭、入队失败、发布异常、控制重放、回合成功/失败。此前 `1 failed, 115 passed` 保留为缺 claimed attempt 的测试输入失败，未删除断言或放宽业务成功条件。
+- **尚未验**：生产三来源 actor、六事件假插件组合、清单/确认码最终组合、真实 Gateway/TUI/IM/沙箱；第 0 步门禁结果不替代后续改动的最终门禁。
+
 ## 回合失败后收回在途模型调用（luna3a，2026-10-03，待初审/9b 终审）
 
 - **现象**：9b 只读结构化证据显示，两次 `openai_responses` 主调用分别在回合以 `PROVIDERTIMEOUTERROR` 结束后仍停在网络读取，首 token 均未见、各经历 4 次 provider 尝试；直到 Gateway 停机才记成 `MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN`，耗时约 12,000 秒。没有 token 花费，但线程、连接和在途账本未及时释放。
@@ -779,6 +837,46 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **未运行**：全仓 pytest 与 Linux 车道留给集成者。
 
 ## B3 事件中心：观察投递（m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`，待 9b 复审）
+## M1 B4 事件点（m1b4，2026-10-03，分支 `worker/m1-b4-event-points`，待复审）
+
+- **投影段**：`test_plugin_event_points.py` 先在空实现上运行，14 failed / 1 passed，均为预期断言失败；实现精确六类 facts、哈希引用、宿主 actor、提示统一脱敏和 4000 字上界后，与 B3 合跑 **47 passed in 0.56s**，无失败/跳过。
+- **命令**：在工作树根运行 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 ~/.my-agent/releases/claude-tools/ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_hub.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-m1b4 -o addopts=''`。
+- **执行器 TDD**：真实 handler 三种 actor 用例先红 **3 failed / 2 passed**；接上 handler 回调后含 B3 的小集 **52 passed**。独立文本评审指出命令参数/嵌套值和 handler 参数准备时序，新增两项反例先 **2 failed**，修正后通过。当前参数准备失败不进入 handler，也不发事件；实际 handler 的发布异常不改变成功结果。
+- **最终定向回归 + guards9**：固定 Python、根目录、禁缓存、独占 basetemp，以下命令 **491 passed in 49.99s**，无失败/跳过（不和前几轮数字重复相加）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_hub.py \
+    agent_py_agent/tests/test_plugin_channel_pool.py agent_py_agent/tests/test_plugin_channel_lifecycle.py \
+    agent_py_agent/tests/test_plugin_display_service.py agent_py_agent/tests/test_gateway_request_runtime_errors.py \
+    agent_py_agent/tests/test_gateway_strict_request.py agent_py_agent/tests/test_gateway_control_operation.py \
+    agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_tool_runtime_scope.py \
+    agent_py_agent/tests/test_executor_decision_message.py agent_py_agent/tests/test_executor_exit_recovery.py \
+    agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py \
+    agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+    agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py \
+    agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+    agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-m1b4 -o addopts=''
+  ```
+
+- **变异 6/6 被抓到**：将 `points.py` 当前源码读成内存副本，逐个替换一处、以同名模块编译加载，分别运行本文件对应 `-k` 用例；仅退出码 1 且出现 FAILED（排除收集错误）算杀死。原源码 SHA-256 前后一致，不改 B3 或真实源文件，不落交接/变异脚本。
+
+  | 变异 | 被哪个断言抓到 | 结果 |
+  | --- | --- | --- |
+  | M1 去开关检查 | `disabled_never_projects_or_publishes`、真实执行器关闭用例 | 抓到，2 failed |
+  | M2 不脱敏提示 | `prompt_redacted_then_capped...` | 抓到，1 failed |
+  | M3 把参数加进 facts | 六类精确字段集合 | 抓到，6 failed |
+  | M4 actor 写死 main | 宿主 actor 及真实执行器 subagent/decision | 抓到，4 failed |
+  | M5 不截 4000 | 提示长度断言 | 抓到，1 failed |
+  | M6 不捕获发布异常 | 三种发布异常及真实执行器成功结果 | 抓到，4 failed |
+
+- **静态命令**：`$PY scripts/check_import_boundaries.py` → findings=0；`$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check` → 通过；`$PY scripts/check_clean_package.py .` → OK（首次因新文件未跟踪失败，git add 后复核通过）。
+- **尺寸命令**：`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2219 / hard=0 / high-risk=1518 / soft=701 / blocked=False，随后 `git checkout -- CODE_SIZE_REPORT.md` 已恢复；报告不提交。`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` **未通过**：新增告警 1，`('class', 'agent_py_agent/agent/plugin_events/hub.py', 'PluginEventHub', 'high-risk')`；消失 17。B4 自己产生的 `_execute_authorized` 参数新告警已拆除。剩余 hub 文件与基线 `d8970996c` 的 git blob 均为 `3e0105df46bf7a9d82f0b78064a7f433a0f6c2ec`，diff 为空，属继承 B3 与线上尺寸比较的差异；本任务禁止修改 B3，留给 3a 处理，不伪称新增 0。
+- **WIP / 未验证**：90 分钟交接点保留阶段实现；未接 Gateway 提示/回合/命令和生产 Registry 上下文，没有真实声明+确认码组合、真实用户拒绝审批、真实主/子/决策模型装配或假插件端到端事件点测试。B4 不可判“已实施”。本轮未运行全仓 pytest、未启停 Gateway、未安装/启用真实插件，真实沙箱/TUI/IM 未验证；不把这些缺口归因于环境。
+
+## B3 事件中心：观察投递（m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`，基于 step17i `b6ede99e0`，待 9b 复审）
 
 - **起因**：M 线第一期 B3（设计稿第 7 节）：按 owner 分区把宿主事件合并投给「已启用 + 清单订阅 + 握手声明 `my-agent/events`」的插件；投递走 B2 共用通道；事件点接线在 B4，本块只提供 publish 入口与组装。
 - **实现**：新 `agent_py_agent/agent/plugin_events/protocol.py`（公共字段/握手门/payload 组装）、`hub.py`（`PluginEventHub`）；`gateway_parts/plugin_panels_http.py` 加 `plugin_event_hub(server)`、`publish_plugin_event(server, owner, event)`，`close_plugin_channel` 停机时关闭 hub。

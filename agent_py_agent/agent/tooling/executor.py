@@ -18,11 +18,13 @@ _LOGGER = logging.getLogger(__name__)
 
 from ..common.cancellation import CancellationToken
 from ..local_storage import ToolOperationRecord
+from ..plugin_events.points import EventPointContext
 from ..runtime_db.managed_operation_store import (
     AuthorityContextMissing,
     ToolOperationAuthorityRequest,
 )
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
+from .event_observation import ToolEventObservation
 from .models import (
     ResourceScopeResolutionError,
     ToolAvailability,
@@ -76,7 +78,7 @@ class ToolExecution:
     states: tuple[str, ...]
 
 
-# LLM: 模型参数与宿主配置分离；审批和模型可见性检查由可信调用方设置，不能从 ToolCall 参数提权。
+# LLM: 模型参数与宿主配置分离；审批、模型可见性及事件身份由可信调用方设置，不能从 ToolCall 参数提权或伪造 actor。
 # 类用途: 汇总本次调用、权限、账本和取消上下文，供唯一执行器使用。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
@@ -100,23 +102,27 @@ class ToolExecutorRequest:
     pre_handler_gate: Callable[[ToolCall], ToolHandlerOutcome | None] | None = None
     output_archiver: Callable[[ToolCall, object], ToolOutputProjection] | None = None
     require_model_visibility: bool = True
+    event_context: EventPointContext | None = None
+    on_handler_started: Callable[[], None] | None = None
 
 
-# LLM: Pre-handler exits reuse the authorized call's immutable input sources/start time and the
-# mutable lifecycle trace. Bundling them prevents the failure helper from becoming a parallel API.
-# 类用途: 保存一次已授权工具执行在进入 handler 前共用的计时、输入来源和状态轨迹。
+# LLM: 同一授权裁决、输入来源和计时沿执行和前置失败出口共用；成组传递避免另建授权或多参数接口。
+# 类用途: 保存一次已授权工具执行共用的裁决、计时、输入来源和状态轨迹。
 @dataclass(frozen=True)
 class _AuthorizedExecutionProgress:
     sources: tuple[ToolInputSource, ...]
     started_at: float
     states: list[str]
+    decision: ActionDecision
 
 
+# LLM: 所有宿主和模型工具共用同一授权状态机，观察只跟随真实 handler，不改变执行裁决。
+# 类用途: 统一工具准入、实际执行和结果收口，未执行调用不伪造观察事件。
 class ToolExecutor:
     def __init__(self, policy: ActionPolicy | None = None) -> None:
         self.policy = policy or ActionPolicy()
 
-    # LLM: 宿主显式管理只可解除模型暴露检查，其余快照、参数、权限、取消及原操作持久门均沿同一顺序。
+    # LLM: 宿主显式管理只可解除模型暴露检查，其余快照、参数、权限、取消及原操作持久门均沿同一顺序；前置拒绝不触发观察。
     # 函数用途: 校验一次工具请求并执行或返回前置拒绝，副作用始终通过原操作协调器登记。
     def execute(self, request: ToolExecutorRequest) -> ToolExecution:
         started_at = time.monotonic()
@@ -199,24 +205,21 @@ class ToolExecutor:
         return _execute_authorized(
             request,
             call,
-            runtime,
-            decision,
-            sources,
-            started_at,
-            states,
+            _AuthorizedExecutionProgress(sources, started_at, states, decision),
         )
 
 
+# LLM: 授权后仍可能被 validator、权限复核或幂等重放拦住；事件开始回调只沿真实 handler 入口传递，不提前发布。
+# 函数用途: 执行已放行调用并收口结果，观察故障不改变授权、操作账本或返回值。
 def _execute_authorized(
     request: ToolExecutorRequest,
     call: ToolCall,
-    runtime: ToolRuntime,
-    decision: ActionDecision,
-    sources: tuple[ToolInputSource, ...],
-    started_at: float,
-    states: list[str],
+    progress: _AuthorizedExecutionProgress,
 ) -> ToolExecution:
     """Execute a call only after normalization and ActionPolicy authorization."""
+    runtime = request.runtime_snapshot.runtime(call.tool_name)
+    decision = progress.decision
+    sources, started_at, states = progress.sources, progress.started_at, progress.states
     # 只对"经过用户审批"的调用在 claim 之前再复核一次，覆盖审批等待期间被停用的时序；免审批调用沿冻结快照，不逐次复核。
     if decision.evidence.get("approval_applied") is True:
         availability = _pre_execution_precheck(runtime)
@@ -225,7 +228,6 @@ def _execute_authorized(
             states.append("failed")
             return ToolExecution(call, denial, _decision_result(call, denial, started_at, input_sources=sources),
                                  (*states, "persisted", "projected"))
-    progress = _AuthorizedExecutionProgress(sources, started_at, states)
     states.append("approved")
     if decision.sandbox_plan:
         states.append("sandbox_prepared")
@@ -251,7 +253,9 @@ def _execute_authorized(
                 gate_outcome,
             )
     states.append("running")
-    outcome = _invoke_with_operation_policy(request, call, runtime, decision)
+    observation = ToolEventObservation(request.event_context, call, decision.resolved_effect)
+    observed_request = replace(request, on_handler_started=observation.start)
+    outcome = _invoke_with_operation_policy(observed_request, call, runtime, decision)
     states.append("succeeded" if outcome.ok else _outcome_state(outcome))
     states.append("reconciled")
     projection = _project_output(request, call, runtime, outcome)
@@ -267,6 +271,7 @@ def _execute_authorized(
     if result.failure_stage == ToolFailureStage.PERSISTENCE.value:
         states.append("persistence_failed")
     states.extend(("persisted", "projected"))
+    observation.finish(result)
     return ToolExecution(call, decision, result, tuple(states))
 
 
@@ -684,9 +689,7 @@ def _durable_operation_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
-# LLM: Handler invocation must receive the exact owner wall already authorized by ActionPolicy;
-# it cannot fall back to mutable registry state. operation_managed is the host decision that tells
-# recovery-aware handlers whether the generic operation store will send a later settlement notice.
+# LLM: handler 必须读取原快照及已授权 owner 墙；operation_managed 和开始观察回调均由执行器注入，不从参数或可变注册表恢复。
 # 函数用途: 把已通过权限门的调用和是否进入副作用账本的事实转成不可变 registry 执行请求。
 def _invoke_request(
     request: ToolExecutorRequest,
@@ -720,6 +723,7 @@ def _invoke_request(
         runtime=runtime,
         cancellation_token=request.cancellation_token,
         execution_authority_check=_operation_authority_check(request, call),
+        on_handler_started=request.on_handler_started,
     )
 
 

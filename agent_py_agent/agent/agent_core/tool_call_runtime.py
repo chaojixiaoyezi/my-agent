@@ -136,7 +136,7 @@ def _audit_source_worker_tool_scope_result(
     )
 
 
-# LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙。
+# LLM: 最终 Tool Gateway 调用必须携带模型看到的同一 run 快照，不能在执行时重新扩大工具宇宙；事件身份只取宿主请求和作用域，不读工具参数。
 # 首个工作工具在权限快照前登记运行身份，供归档与停止查询使用；晋升前后 cwd 和 owner 文件范围不变。
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
@@ -169,6 +169,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         )
 
     one_shot_keys = _one_shot_tool_call_keys(runtime_request.payload)
+    run_scope = runtime_run_scope(runtime_request.agent, runtime_request.request.params)
     execution = runtime_request.agent.tools.execute_tool(
         runtime_request.call,
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
@@ -180,10 +181,8 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
                 if isinstance(runtime_request.request.params.task_attributes, dict)
                 else {}
             ),
-            "run_scope": runtime_run_scope(
-                runtime_request.agent,
-                runtime_request.request.params,
-            ).to_dict(),
+            "run_scope": run_scope.to_dict(),
+            "plugin_event_context": _tool_event_context(runtime_request, run_scope),
         },
         cancellation_token=getattr(runtime_request.request.params, "cancellation_token", None),
         required_action=_required_action_for_call(runtime_request),
@@ -211,6 +210,23 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return execution
+
+
+# LLM: 关闭先返回；只读宿主不可变请求的 actor 与 RunScope，沿 Gateway 唯一发布口装配，不从 arguments 或正文推断身份。
+# 函数用途: 将真实主、子代理与决策自动执行请求的身份传到已有执行器事件接缝。
+def _tool_event_context(runtime_request: ToolCallRuntimeRequest, scope):
+    agent = runtime_request.agent
+    if getattr(agent.config, "plugin_events_enabled", False) is not True:
+        return None
+    from ..gateway_parts.event_points import gateway_event_context
+
+    request = runtime_request.request
+    attrs = request.params.task_attributes or {}
+    actor = "subagent" if scope.agent_kind in {"subagent", "child_agent", "grandchild_agent"} else "main"
+    if request.actor == "decision":
+        actor = "decision"
+    return gateway_event_context(agent, {"actor": actor, "thread_id": scope.session_id,
+        "channel": attrs.get("plugin_event_channel") or "local"})
 
 
 # LLM: 工具参数是原始请求事实；任务晋升只登记运行身份，不重写路径、内容或 cwd。

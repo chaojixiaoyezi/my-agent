@@ -31,6 +31,7 @@ from .control_service import (
     execute_gateway_conversation_control,
     reconcile_gateway_steer_delivery,
 )
+from .event_points import command_completed
 from .io import (
     gateway_turn_transition,
     read_json_file_report,
@@ -308,7 +309,7 @@ def execute_gateway_control_operation(
 # LLM: This helper is entered only by the C-lock winner. It writes executing before the generic
 # effect and is the only path allowed to invoke the command service.
 #   event_hub 随 scope 带下来（HTTP 入口从 server 取到）；回执里不存 hub，恢复 scope 时由调用方再传。
-# 函数用途: 在已持控制操作锁时推进 prepared、执行一次副作用并保存 completed/unknown。
+# 函数用途: 在已持控制操作锁时推进 prepared、执行一次副作用并保存 completed/unknown；新 completed 提交后才发布观察，重放不重复发。
 def _execute_gateway_control_operation_locked(
     agent: object,
     paths: GatewayPaths,
@@ -379,6 +380,7 @@ def _execute_gateway_control_operation_locked(
         gateway_control_operation_path(paths, operation_id),
         completed.to_dict(),
     )
+    command_completed(agent, completed)
     return completed
 
 

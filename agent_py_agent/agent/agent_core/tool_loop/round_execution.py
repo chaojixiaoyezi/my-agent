@@ -121,8 +121,7 @@ class ToolCallRecordParams:
         return _tool_call_payload(self.model_visible_call)
 
 
-# LLM: This immutable execution request carries the admitted call identity into the sole executor;
-# callers must not mutate it while approval or parallel scheduling is in flight.
+# LLM: 本不可变请求将获准调用和宿主 actor 传入唯一执行器；审批与并行在途不得改写，模型参数不能替代 actor。
 # 类用途: 固定一条即将执行的工具调用及其轮次位置，供权限、并发和执行链共用。
 @dataclass(frozen=True)
 class ToolCallExecuteParams:
@@ -133,6 +132,7 @@ class ToolCallExecuteParams:
     idx: int
     call: ToolCall
     model_call: ToolCall | None = None
+    actor: str = "model"
 
 
 @dataclass(frozen=True)
@@ -551,6 +551,7 @@ def _resolve_tool_approval(
                 idx,
                 original_call,
                 model_call=_model_visible_call(request, idx, original_call),
+                actor=request.actor,
             )
         )
         resumed = _with_applied_approval_fact(
@@ -931,7 +932,7 @@ def _run_host_actions(request: ToolRoundExecutionRequest, idx: int) -> None:
             _execute_host_action(request, idx, action)
 
 
-# LLM: 宿主动作走模型调用同一条链：同一 execute_one（ActionPolicy、绑定新鲜度、适配器复核）、同一审批（binding 带 actor=decision
+# LLM: 宿主动作的 actor 同时传入不可变执行请求和记账请求，走模型调用同一条链：同一 execute_one（ActionPolicy、绑定新鲜度、适配器复核）、同一审批（binding 带 actor=decision
 #   与 decision_ref，用户拒绝只记录不重试）、同一 _record_execution（归档/工具账 actor=decision）；索引取 len(calls)+观察调用
 #   索引，不与本轮模型调用撞号。执行前已中断/取消就不执行，只记决策账 interrupted；执行后把结果写进决策账补充行。
 # 函数用途: 执行并记录一条 action_candidate 自动执行计划。
@@ -945,7 +946,7 @@ def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: H
     started_at = time.monotonic()
     _emit_tool_progress(ToolProgressEvent(host_request, host_idx, call, "started", "开始"))
     execution = host_request.execute_one(
-        ToolCallExecuteParams(host_request.params, host_request.tool_rounds, host_idx, call)
+        ToolCallExecuteParams(host_request.params, host_request.tool_rounds, host_idx, call, actor=host_request.actor)
     )
     execution = _resolve_tool_approval(host_request, host_idx, call, execution)
     _record_execution(host_request, host_idx, started_at, execution)

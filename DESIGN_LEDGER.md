@@ -253,6 +253,30 @@
 - `http_routes.py` 是 26 条实际分发的唯一结构化表；只计 credential/admin 两档，public/plugin_token 不计。`/status` 的 `uncredentialed_loopback_by_endpoint` 只含模板 → `{count,last_at}`，进程内加锁、不存请求编号/身份/凭据，重启清零。
 - G2b/G3/G4/G5/G6 不在本片；G2a 并未关闭“无凭据回环仍是管理员”的过渡缺口。临时数据/随机端口组件验证不代替真实客户端或平台隔离。详见 GATEWAY_LOCAL_TRUST 与 TESTS。
 
+## M1 B4 HTTP 覆盖与提示 owner 安全尾补（m1b4，2026-10-04，已实施，已并入 step17j；luna6 复核中，9b 随 B5 终审）
+
+- luna6 完整初审与 3a 核实：频道白名单不能证明主 owner，local 非当前用户/tui 可解析为独立 owner。保持原 HTTP 入队事件点，复用 worker 的唯一 owner 解析，仅基础 owner 可发；未知失败不发、严格关闭零解析，不创建 scoped Agent 或另写身份映射。
+- 新真实随机回环 HTTP 服务→请求 worker 认领/owner 解析→隔离 echo 回合→终态链覆盖三事件顺序、精确字段；实际 local-agent 正例、alice local/tui 负例及清线程断言。修前两负例有效红、修后两文件 19 项绿；去掉 owner 判定的生产源码副本变异被两负例抓到。最终回归和边界见 TESTS。
+- 保留入队语义避免提示延后到认领或恢复重发；不将本机测试服务扩大为生产 Gateway、插件启用或 TUI/IM 验收。设计第 13/18 节 B4 两表已对齐“已实施，待复审”。
+
+## M1 B4 拒绝组合及提前初审尾补（m1b4，2026-10-03，luna6 完整初审过，已并入 step17j）
+
+- 真实 canonical 证明原 schema 类型错误应为 TOOL_PARAMETER_TYPE_INVALID，修用例不改执行器；另补保护目标策略拒绝、真实审批文件桥用户拒绝，核心为零 handler、零两种工具事件。聚焦四文件 78 项通过；最终扩展范围含完整 guards9 共 567 项通过，三项独立源变异杀死，全部静态门禁通过、尺寸新增 0，收尾见 TESTS。
+- ds9 对 ce10d5fde..68c82ed07 提前初审“可以交终审”，无必须改；按 3a 转述补装配关闭、观察输入无参数独立检查。B3 normalize_event_fact 仅提示可保留正文，非提示剥除作为纵深防御，不扩大 text 授权。
+- turn 按每次真实执行一对，重启 interrupted 后续跑另发一对，不新增跨重启去重。不等于完整 B4 生产启用，未验边界保持。
+
+## M1 B4 真实工具请求装配续段（m1b4，2026-10-03，已完成，已并入 step17j）
+
+- 主/子身份来自已有宿主 RunScope；决策 actor 从 J16 自动执行的不可变请求传入，审批重入保留该身份，不读工具参数。Registry 接上原事件接缝，未扩改 B5 正在修改的执行器。
+- Gateway 只转交已解析会话的通道；工具观察复用原权限链已生成的 RunScope，不重复读取任务库。审批模式拆成独立单层读取器，原错误仍保守 unavailable。
+- 主/子/决策真实入口测试通过；假模型与计数工具的真实 Gateway/Agent 回合及控制命令已向握手假插件送齐六事件。拒绝组合的假模型错误码断言仍失败，待核对 canonical 结果；代码和正式非作者交叉初审仍按 WIP 交接，不标完整 B4 已实施。
+
+## M1 B4 事件点续做（m1b4，2026-10-03，已完成，已并入 step17j）
+
+- **基线**：按 3a 指定变基至 step17i `0ae0efe5e`，原两提交变为 `ce10d5fde`、`0c4355469`；文档保留双方有效内容，逐提交 diff-check 通过。原清单当前为 492 项（上游补一条默认线程数用例），全部通过；尺寸差集新增 0、消失 17。
+- **Gateway 段**：队列首次成功写入后发布提示，幂等重放和活动插话不重复发；实际请求执行前/收口发布回合观察，重启接续投影 interrupted；新控制 completed 回执落定后发布命令观察，不重复副作用或观察。新增 `gateway_parts/event_points.py`，关闭先返回，复用已冻结 owner 路径与 B3 发布口，不读安装表或等待插件。
+- **验证边界**：真实队列/控制回执/Gateway 执行入口、故障隔离用例通过；模型边界使用离线替身。多用户提示入队还没有冻结规范 owner 时保守不发布，不能把渠道身份猜成基础 owner。工具三来源生产装配和六事件假插件组合仍待下一段；B7 开关与真实隔离不在本块。
+
 ## 模型回合放弃时回收在途调用（luna3a，2026-10-03，分支 `worker/luna3-abandoned-calls`，提交 `a250c3936`，luna2 初审通过，DNS 与握手两处边界 3a 接受，并入 step17i）
 
 - **现象与根因**：9b 的结构化只读证据显示，回合已报 `PROVIDERTIMEOUTERROR` 后，Responses 模型 worker 仍留在无首包的网络读取里；墙钟守卫此前只放弃账本句柄，没有把取消传给 worker/传输层。
@@ -296,6 +320,14 @@
 - **决策设置撤销批次直接用提交的返回**（`agent_py_agent/agent/conversation/decision_policy.py`，提交 `e0354302e`）：`_try_commit_collected` 复核通过时把 `_commit_batch` 标记出的撤销请求直接带出来（`tuple | None`），不通过返回 `None` 交给调用方整批重算；`_mark_settings_batch` 的复核通过路径与重算用尽路径都直接用 `_commit_batch` 的返回，不再出锁后重读 `settings_cancelled`。删除 `_batched_cancels`（原注释写“调用方持 `_LOCK`”但调用点已出锁，合同与用法对不上）。行为不变：取消哪些句柄、顺序、结果码都与改前一致；新增用例钉住“返回的就是本批被标成撤销的那些”。
 - **上下文快照补“符号链接 + 当天目录不存在”用例**（`agent_py_agent/tests/test_main_context_bundle_contract.py`，不改产品代码）：归档根是符号链接、当天日期目录还不存在时，目录链准备阶段就要建好目录、首写成功（文件 0600）、链接目标权限不变、记一条 `private_directory_symlink_skipped` 警告；删掉 `_skip_private_directory_chain` 里 `target.mkdir` 的变异会被该用例抓到。
 - 详见 TESTS.md 同名小节。
+
+## M1 B4 事件点（m1b4，2026-10-03，`worker/m1-b4-event-points`，基于 `d8970996c`，已并入 step17j）
+
+- **解决问题**：把宿主六类事件减量成精确字段，防止观察接口泄露参数、输出和路径；事件点关闭时零发布，观察故障不反噬业务。
+- **投影段**：新增 `plugin_events/points.py`，固定 facts 白名单、会话 SHA-256 引用和三种宿主 actor；提示走现有统一脱敏后截 4000 字。B3 在后台按已确认激活的清单订阅决定是否给该插件正文，事件点不读安装表。
+- **实施计划**：投影合同先红后绿并提交；再按 Gateway 提示/回合/控制回执和执行器实际 handler 入口分别接线、补真实入口回归并提交。最后做至少六个源副本变异及规定门禁。禁止新增仓库交接文件，本段兼作实施导航。
+- **执行器阶段**：`ToolExecutorRequest.event_context` 只由宿主注入，观察回调在 registry 参数准备完成后的实际 handler 边界触发；拒绝、审批等待、准备失败和幂等重放不发；只读重试只发一对。收口只复制 canonical 结果标量，不带参数/输出。独立文本评审指出嵌套事实值和参数准备时序缺口，已补反例并修正。
+- **边界 / WIP**：尚未接 Gateway 提示、回合、控制命令，也尚未把生产 Registry、主/子/决策模型请求上下文装配到 B3 发布口。当前仅投影和执行器接缝完成，不能作为完整 B4 合入；第 13/18 节按 WIP 同步，不虚标“已实施”。B7 总开关配置及真实隔离不在本块，不声称生产启用。
 
 ## B3 事件中心：观察投递（M 线第一期，m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`，9b 两轮复审、ds2 初审通过，并入 step17i）
 

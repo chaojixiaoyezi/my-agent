@@ -67,6 +67,7 @@ from .audit_service import (
     audit_request_completed,
     audit_request_processing,
 )
+from .event_points import turn_ended, turn_started
 from .io import (
     gateway_response_path,
     read_json_file_report,
@@ -171,7 +172,7 @@ def _build_gateway_response_base(context: _GatewayResponseBaseContext) -> dict:
 
 
 # LLM: Gateway 对外 response 只放 user-facing projection；模型 token 只转发结构化账本，供应商错误和空正文截断保持 typed 终态。
-# 函数用途: 整理最终响应；模型未完整返回时结束本轮等待并给出准确原因，不改变已有工作或自动重跑。
+# 函数用途: 整理最终响应和 canonical 工具调用数；失败保持 typed 终态，不拿工具轮数冒充调用数。
 def _update_response_from_result(response: dict, result, request: dict) -> None:
     channel_delivery = dict(getattr(result, "channel_delivery", {}) or {})
     public_delivery = _public_channel_delivery(channel_delivery)
@@ -193,6 +194,7 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
             "backend": result.backend,
             "used_memories": result.used_memories,
             "tool_rounds": result.tool_rounds,
+            "tool_calls": len(getattr(result, 'archive_tool_calls', ()) or ()),
             "prompt": result.prompt if request.get("include_prompt") else "",
             "current_context_token_estimate": result.prompt_token_estimate,
             "prompt_token_estimate": result.prompt_token_estimate,
@@ -964,7 +966,7 @@ def _apply_system_task_attributes(
 
 
 # LLM: 活动回合只由 request_binding 校验；Audit 范围沿准备轮原绑定投影，不从线程旧指针推断执行权。
-# 函数用途: 汇总当前会话、工作模式和精确回合归属，交给运行器执行。
+# 函数用途: 汇总当前会话、工作模式、事件通道和精确回合归属，交给运行器执行。
 def _gateway_run_task_attributes(
     conversation: request_context.GatewayConversationContext,
     request: dict,
@@ -975,6 +977,10 @@ def _gateway_run_task_attributes(
         _gateway_task_attributes(conversation),
         request.get("system_task"),
     )
+    # 只转交会话准备已冻结的通道，不读客户端额外字段或模型工具参数。
+    if conversation.scope is not None:
+        attrs = dict(attrs or {})
+        attrs["plugin_event_channel"] = conversation.scope.channel
     if request_binding.gateway_request_owns_active_task_turn(attrs, request, request_id):
         attrs = dict(attrs or {})
         attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
@@ -1170,7 +1176,7 @@ def _executing_owner_id(agent: object) -> str:
 
 # LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities 或服务端核实的管理员 IM 私聊，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
 #   带续跑标记的请求在执行前经同一 writer 写一次 turn_resumed 边界；取消提前返回时不写。
-# 函数用途: 执行一条 Gateway 请求、维护 lease/chunk，并保存已有执行与本次失败的真实响应。
+# 函数用途: 执行一条 Gateway 请求并发布开始/收口观察；提前拒绝不冒充执行，观察不改 lease 和业务响应。
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -1215,6 +1221,7 @@ def _handle_gateway_request(
     )
 
     execution_started_mono = time.monotonic()
+    event_context = turn_started(agent, context['request'])
     failure: Exception | None = None
     try:
         _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
@@ -1250,12 +1257,14 @@ def _handle_gateway_request(
     if resume_marker is not None:
         # I4：不写终态、不记审计，请求原样留在 processing；worker 收尾见 request_worker._finish_claimed_gateway_request。
         response["restart_resume"] = resume_marker
+        turn_ended(event_context, response, (time.monotonic() - execution_started_mono) * 1000)
         return response
     _project_observed_gateway_run_facts(response, chunk_writer)
     if request_binding.gateway_cancel_requested(request_path, context["request_id"]):
         _apply_cancelled_gateway_response(response)
     _finalize_gateway_response(context, response)
     _complete_gateway_request_audit(agent, context, request_path, response)
+    turn_ended(event_context, response, (time.monotonic() - execution_started_mono) * 1000)
     return response
 
 

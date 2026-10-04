@@ -26,12 +26,28 @@
 - `http_routes.GATEWAY_HTTP_ROUTES` 同时决定 GET/POST 的处理器及观察模板/档位；`GatewayHTTPHandler._dispatch_route` 在原业务处理前观察一次，原处理器内部的权限判定不变。守卫用随机端口遍历全部路由的真实分发，不维护另一份计数白名单。
 - `AuthMiddleware.observe_loopback_request` 仅计未携合法凭据的真实回环 credential/admin 请求；线程锁保护计数和只读快照，`http_handlers.handle_status` 仅投影模板/count/last_at。无中间件和未知peer旧行为保持，不做G2b强制。
 
+## M1 B4 HTTP / owner 安全边界（m1b4，2026-10-04）
+
+- `event_points._prompt_has_base_owner` 复用 `request_worker._resolve_request_owner_identity`，和 worker 同一身份规则；等于基础 owner 才发，解析异常不发。prompt_queued 严格开关先返回，保留首次入队时点，不新增 owner 映射或 scoped Agent。
+- `test_plugin_event_e2e` 的新增路径为真 GatewayHTTPServer→HTTP /ask→真 worker 扫描/claim→owner 装配→回合→canonical terminal→HTTP /result；安装表仅基础 owner 有假插件。正例三事件有顺序与精确集合，两个负例定位跨 owner 错投；清理只关闭本测试句柄，不操作生产 Gateway。
+
+## M1 B4 尾补边界（m1b4，2026-10-03）
+
+- gateway_event_context 与 emit_event 各有独立关闭断言；观察输入隐私检查不依赖投影白名单。protocol.normalize_event_fact 在发布入口剥非提示 content，不增加正文许可或池。
+- test_plugin_event_e2e 在客户端边界写原审批文件，保留真实发布/等待/核 binding；canonical 被动记录，策略与用户拒绝须零工具事件。重启每次真实执行一对 turn；生产未验范围见 TESTS。
+
 ## 模型调用在途状态与 /status 投影（luna3a，2026-10-03）
 
 - `gateway_parts/http_handlers.handle_status` 直接调用 `contracts.model_call_ledger.model_call_inflight_snapshot()`；该函数快照进程原有准入注册表里的账本，只统计 `started` / `first_token`，按账本同源单调时钟计算最老年龄。
 - 响应只增加 `in_flight_model_call_count` 和 `oldest_in_flight_model_call_age_seconds` 两个数值字段；不投影模型名、请求号、run/thread 身份或正文，不新建计数器/持久状态。
 - 调用结算由原账本终态字段自然移出在途统计；墙钟守卫仍在 `tool_model_generation` 负责 abandon 与 timeout，具体传输取消由 SSE response guard、Responses WebSocket `close_socket()` 作用于当前连接。
 - 传输等待边界、DNS 解析的 OS 级限制和本地假服务验证范围见 `DESIGN_LEDGER.md` 顶部及 `docs/design/MODEL_OAUTH.md`。
+## M1 B4 阶段实现（m1b4，2026-10-03，WIP，待复审；续做已变基 step17i）
+
+- `plugin_events/points` 提供精确六类事实投影、会话哈希和宿主 actor；关闭先返回，不读安装表，发布异常不反噬业务。
+- `tooling/event_observation` 在唯一执行器真实 handler 开始/结果收口观察；本次开始位区分重放，参数准备失败不发，内部重试只发一对。
+- `gateway_parts/event_points` 已将提示首次成功排队、请求执行/收口、新控制 completed 回执接到 B3 发布口；关闭先返回，只用宿主已冻结路径，不读安装表。幂等重放/活动插话不重复发提示；控制重放不重复发观察。
+- `agent_core/tool_call_runtime` 复用已冻结 RunScope 装配主/子身份；`ToolCallExecuteParams.actor` 由宿主自动执行与审批重入传决策身份，Registry 严格接类型正确的事件对象，不从工具参数选身份。三来源入口和六事件正常回合的握手假插件链已验证，拒绝组合仍有一个假模型断言失败。多用户入队尚无冻结 owner 时保守不发布提示；正文清单与真实确认码组合未验，不可声称完整 B4 或生产启用。
 
 ## 续跑上限收口时的插话结算（step17h，分支 `claude/38-limit-steer-note`，9b 复审补本节）
 

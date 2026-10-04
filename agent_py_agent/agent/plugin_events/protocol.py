@@ -70,8 +70,8 @@ def require_events_capability(client) -> None:
 
 
 # LLM: 归一化在发布入口做（坏输入丢弃而不是抛给调用方）；字符串字段截断、actor 只认白名单、
-#   facts 必须是字典否则置空；content 只在提示事件上保留，其余类型即使传了也丢掉。
-# 函数用途: 把调用方输入归一成不可变 EventFact，类型无效或不是 EventFact 时返回 None。
+#   facts 必须是字典否则置空；content 只在提示事件上保留，纵深防御不依赖 B4 投影先过滤。
+# 函数用途: 纯计算归一不可变事件并剥离非提示正文，发布入口调用；不读写磁盘或改变正文许可。
 def normalize_event_fact(value) -> EventFact | None:
     if not isinstance(value, EventFact) or value.type not in PLUGIN_EVENT_TYPES:
         return None
@@ -82,7 +82,7 @@ def normalize_event_fact(value) -> EventFact | None:
         channel=_ref(value.channel),
         thread_ref=_ref(value.thread_ref),
         actor=actor,
-        content=_ref(value.content, MAX_PROMPT_CONTENT_CHARS),
+        content=_ref(value.content, MAX_PROMPT_CONTENT_CHARS) if value.type == "prompt_submitted" else "",
     )
 
 

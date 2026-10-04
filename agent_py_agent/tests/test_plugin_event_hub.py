@@ -25,6 +25,14 @@ from agent_py_agent.agent.plugin_events.protocol import EVENTS_EXTENSION, EventF
 OWNER_A = "/tmp/owner-a"
 
 
+@pytest.mark.parametrize('kind', ['prompt_submitted', 'turn_started', 'turn_ended', 'tool_call_started', 'tool_call_finished', 'command_executed'])
+def test_normalization_only_retains_prompt_content(kind):
+    from agent_py_agent.agent.plugin_events.protocol import normalize_event_fact
+
+    fact = normalize_event_fact(EventFact(kind, content='private-marker'))
+    assert fact.content == ('private-marker' if kind == 'prompt_submitted' else '')
+
+
 class _ManualExecutor:
     def __init__(self):
         self.jobs = []

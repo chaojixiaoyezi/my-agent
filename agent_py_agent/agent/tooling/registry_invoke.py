@@ -55,7 +55,7 @@ _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES = {"run_command", "terminal_session", "lsp"}
 _BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
 
 
-# LLM: 每次调用冻结权限及只读 execution 复查；不能修改共享 handler，复查不重跑审批或预算。
+# LLM: 每次调用冻结权限及只读 execution 复查；不能修改共享 handler，复查不重跑审批或预算；观察回调只沿宿主字段传递。
 # 类用途: 固定工具参数、工作区、owner 墙和当前执行权威，在真正启动与交接时仍可核对原调用。
 @dataclass(frozen=True)
 class RegistryToolInvokeRequest:
@@ -76,8 +76,11 @@ class RegistryToolInvokeRequest:
     # Canonical executor supplies the exact immutable binding selected from the
     # run snapshot. Missing bindings fail closed; this is not a public adapter.
     runtime: ToolRuntime | None = None
+    on_handler_started: Callable[[], None] | None = None
 
 
+# LLM: 只有通过 registry 路径和快照门的宿主请求才能到这里；观察回调不接收参数，也不是授权来源。
+# 类用途: 固定真实 handler 派发所需的数据及开始观察回调。
 @dataclass(frozen=True)
 class AuthorizedToolDispatchRequest:
     tool_name: str
@@ -87,6 +90,7 @@ class AuthorizedToolDispatchRequest:
     write_boundary: dict[str, object] | None
     sandbox_read_roots: tuple[Path, ...] = ()
     invocation_context: ToolInvocationContext | None = None
+    on_handler_started: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -146,7 +150,7 @@ def _read_boundary_denied(
     )
 
 
-# LLM: invoke 位于统一权限门之后，只消费已冻结的 runtime/handler；不重新调用 availability，也不从当前注册表替换实现。调整时保持 ToolExecutor、ActionPolicy 和 test_tool_runtime_scope 的同快照合同。
+# LLM: invoke 位于统一权限门之后，只消费已冻结的 runtime/handler；观察回调透传到所有边界门之后，不替换实现或重选授权。调整时保持 ToolExecutor、ActionPolicy 和 test_tool_runtime_scope 的同快照合同。
 # 函数用途: 核对调用绑定、收窄工作目录与读写边界，再执行真实工具；取消上下文随调用传入，实际掉线由绑定的工具返回，不把可用性探针当作撤销。
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutcome:
     request = _with_effective_registry_workspace(request)
@@ -215,6 +219,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
                 write_boundary=request.write_boundary,
                 sandbox_read_roots=sandbox_read_roots,
                 invocation_context=_invocation_context(request),
+                on_handler_started=request.on_handler_started,
             )
         ),
     )
@@ -539,8 +544,8 @@ def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
     return str(value).strip().lower() in {"1", "true"}
 
 
-# LLM: 授权后的普通工具只有一个执行分支；scoped 默认委托 execute，目录工具才读取请求快照。
-# 函数用途: 执行已通过权限和边界门的工具，并把实现异常统一收敛为结构化失败。
+# LLM: 授权后的普通工具只有一个执行分支；开始观察在真实派发前触发，观察故障不能成为工具失败。
+# 函数用途: 执行已通过权限和边界门的工具，并把实现异常统一收敛为结构化失败，不将未派发调用记成工具事件。
 def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandlerOutcome:
     if request.invocation_context is None:
         return apply_tool_execution_facts(
@@ -553,6 +558,7 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
         )
+    handler_started = False
     try:
         token = request.invocation_context.cancellation_token
         cancel = getattr(token, "cancel", None)
@@ -563,6 +569,8 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
             interrupt_callback
         ):
             if request.tool_name == "controlled_exec":
+                handler_started = True
+                _notify_handler_started(request)
                 result = execute_controlled_exec_tool(
                     ControlledExecToolRequest(
                         params=request.tool_params,
@@ -572,6 +580,8 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
                 )
             else:
                 params = _tool_params_with_runtime_boundary(request)
+                handler_started = True
+                _notify_handler_started(request)
                 result = request.tool.execute_scoped(params, request.invocation_context)
     except ToolCancelled as exc:
         result = structured_tool_error(
@@ -592,10 +602,20 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
         failure_stage=(
             None
             if result.ok or result.failure_stage
-            else ToolFailureStage.EXECUTION
+            else (ToolFailureStage.EXECUTION if handler_started else ToolFailureStage.RUNTIME_GATE)
         ),
-        handler_executed=True,
+        handler_executed=handler_started,
     )
+
+
+# LLM: 回调只由执行器注入且不接收 arguments；捕获观察异常是保主流程，不绕过任何权限门。
+# 函数用途: 真正派发前通知观察者，发布口故障时照常执行工具。
+def _notify_handler_started(request: AuthorizedToolDispatchRequest) -> None:
+    try:
+        if request.on_handler_started is not None:
+            request.on_handler_started()
+    except Exception:  # noqa: BLE001 观察不能影响工具业务
+        return
 
 
 # LLM: 只认写边界里宿主写入的结构化 task_root（tool_runtime_ledger._attach_task_workspace_roots），不读模型参数；没有就返回空。

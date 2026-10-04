@@ -27,6 +27,10 @@
 ## 发布与开发入口
 
 ```text
+|-- agent_py_agent/agent/gateway_parts/event_points.py # B4 Gateway 提示/回合/控制回执的最小事件投影装配；关闭零安装读取
+|-- agent_py_agent/tests/test_plugin_event_gateway.py # B4 真实队列/控制回执/Gateway 请求观察与发布故障隔离
+|-- agent_py_agent/tests/test_plugin_event_runtime.py # B4 生产 Registry/宿主自动执行与真实子代理父链的三身份观察
+|-- agent_py_agent/tests/test_plugin_event_e2e.py # B4 假模型、真 Gateway/Agent/工具链与握手假插件六事件；拒绝组合待核对
 |-- LICENSE                              # 主项目许可证
 |-- NOTICE                               # 适用的第三方版权与许可说明，随包发布
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
@@ -333,7 +337,8 @@ agent_py_agent/
 |   |   |-- declarations.py            # v8 事件、工具收紧门、网络权限的不可变声明与严格校验
 |   |   |-- confirmation.py            # 同源四项确认事实和中文正文/参数/网络/强制沙箱需求预览
 |   |   |-- protocol.py                # 事件公共字段、握手能力门与线上 payload 组装，纯协议无 IO
-|   |   `-- hub.py                     # 事件中心：按 owner 分区、只留最新、单在途、回收与计数；投递走 plugin_channel
+|   |   |-- hub.py                     # 事件中心：按 owner 分区、只留最新、单在途、回收与计数；投递走 plugin_channel
+|   |   `-- points.py                  # B4 事件白名单投影、提示脱敏、会话哈希与开关/异常短路；不读安装表
 |   |-- plugin_observation.py          # 观察候选宿主合同（插件与 MCP 共用）：声明类型与配对规则、载荷整份校验（含几何 frame/region）、宿主铸 ID、模型投影、按 runtime_events 序判定新鲜度与候选复核
 |   |-- plugin_display/                # 插件声明式面板与只读订阅（第 9 步）
 |   |   |-- protocol.py                # 面板声明、公开主题与展示描述校验/截断，纯协议无 IO
@@ -786,6 +791,7 @@ agent_py_agent/
 |   |   |-- input_schema.py           # 唯一 input_schema 规范化、强类型纠正和完整执行前校验
 |   |   |-- action_policy.py          # 副作用前唯一 allow/ask/deny 聚合决策
 |   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
+|   |   |-- event_observation.py      # B4 单次工具真实 handler 观察状态；拒绝/重放不发，重试只发一对
 |   |   |-- runtime_boundary.py       # task 相对路径归一与精确读边界检查
 |   |   |-- workspace_read_scope.py   # 沿原 exact 与墙外授权生成本次 cwd 内的读取上界
 |   |   |-- workspace_write_scope.py  # 按原写入边界解析生成本次写入范围，无范围时只允许 cwd

@@ -71,6 +71,7 @@ from .control_service import (
     steer_active_conversation_if_running,
 )
 from .daemon_control import get_running_pid, write_targeted_gateway_stop_request
+from .event_points import prompt_queued
 from .input_delivery_service import (
     bind_gateway_input_active_locked,
     gateway_input_guidance_binding,
@@ -584,7 +585,7 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
 
 
 # LLM: 鉴权后所有会话命令（含插件）共用持久控制回执；独立 TUI 插件目录仍走 /client/plugins，普通请求沿原作用域绑定。
-# 函数用途: 接收消息与系统命令，避免参数错误成为活动插话或模型任务。
+# 函数用途: 接收消息与系统命令，避免参数错误成为模型任务；提示观察仅在队列写入成功后发布。
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if require_trusted_source(handler):
         return  # 不可信来源(远程无 token)拒绝派工:已发 403(回环本机/单机放行,渠道用户经适配器可提交)
@@ -714,12 +715,13 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     except OSError as exc:
         handler._send_json(500, {"error": f"failed to write request: {exc}"})
         return
+    prompt_queued(server, request_data)
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
 
 
 # LLM: One stable ingress receipt decides active-turn versus queued disposition before any retry
 # reruns routing. The receipt lock is outside the exact active-turn lock, giving one lock order.
-# 函数用途: 幂等处理普通消息，在当前回合补充和下一轮排队之间只选择一次并可断线恢复。
+# 函数用途: 幂等处理普通消息，首次成功排队才发布提示观察，重放和活动插话不重复发。
 def _handle_idempotent_ordinary_ask(
     handler,
     server,
@@ -842,6 +844,8 @@ def _handle_idempotent_ordinary_ask(
             receipt = read_gateway_input_receipt(server.paths, request_id) or receipt
         except Exception:
             pass
+    if created and receipt.state == 'queued':
+        prompt_queued(server, receipt.prepared_request)
     handler._send_json(202, gateway_input_status_payload(receipt))
 
 
