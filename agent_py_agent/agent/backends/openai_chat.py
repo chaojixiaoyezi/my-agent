@@ -632,14 +632,21 @@ def _openai_reasoning_from_completion(completion: StreamCompletion) -> str | Non
 
 
 # LLM: Chat 工具调用回放保持原调用 ID、工具名和 JSON 参数；需同步工具结果配对测试。
-# 函数用途: 将一个规范工具调用块转换为供应商 function call。
+#   参数 JSON 必须用稳定键序（sort_keys=True）：同一调用在本进程内是 dict 插入序，
+#   落盘 transcript 时 store_messages 会按字母序重排键（append_private_jsonl_records 的
+#   sort_keys=True），重新加载后插入序不同；不排序会让「重载前后同一历史」出站字节不同，
+#   使 DeepSeek 等按前缀匹配的 KV 缓存从该条 tool_call 起整段失效。排序与磁盘序一致，
+#   两个来源因此可复现同一字节。
+# 函数用途: 将一个规范工具调用块转换为供应商 function call，参数序列化与磁盘重放一致。
 def _openai_function_call(block: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(block.get("id") or ""),
         "type": "function",
         "function": {
             "name": str(block.get("name") or ""),
-            "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+            "arguments": json.dumps(
+                block.get("input") or {}, ensure_ascii=False, sort_keys=True,
+            ),
         },
     }
 

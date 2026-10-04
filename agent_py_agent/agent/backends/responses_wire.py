@@ -51,8 +51,10 @@ def message_items(message: dict, model: str) -> list[dict]:
             result.append(item)
             continue
         if role == "assistant" and kind == "tool_use":
+            # LLM: arguments 用稳定键序；理由同 openai_chat._openai_function_call——
+            # transcript 落盘按字母序重排键，重载后插入序不同，不排序会让重载前后出站字节不同。
             result.append({"type": "function_call", "call_id": block["id"], "name": block["name"],
-                           "arguments": json.dumps(block["input"], ensure_ascii=False)})
+                           "arguments": json.dumps(block["input"], ensure_ascii=False, sort_keys=True)})
             continue
         if role == "user" and kind == "tool_result":
             result.append({"type": "function_call_output", "call_id": block["tool_use_id"],

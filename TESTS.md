@@ -1,5 +1,34 @@
 # 测试与发布验收
 
+## 磁盘重载后 provider payload 逐字一致（cachereload，2026-10-04，worker/cache-reload；基于 17j 头 f8858179c；已并入 step17j）
+
+**来源**：DeepSeek 官网实测服务端 KV 缓存按前缀匹配，历史里任何一处字节变化都会让该点之后整段未命中。本轮查「会话从磁盘重新加载后，下一轮请求的历史是否与上一轮实际发出的逐字一致」。
+
+**做法（不联网、不连真实接口）**：把「同进程续跑」与「磁盘重载」两条路径的第 N+1 轮出站 payload 逐字节比对。重载走产品真实链路：`ConversationStore`（新开实例读磁盘）→ `conversation_history_rows` → `_gateway_history_source` → `seed_provider_history_messages`；同进程路径用写盘时同一份投影结果；两边都与本轮 IR 拼接后过 `OpenAICompatibleBackend._request_payload`。
+
+**查到的分叉点**：工具调用参数的 JSON 键序。`store_messages.MessageStore.append` 写 transcript 用 `append_private_jsonl_records(..., sort_keys=True)`，把 `canonical_native_messages` envelope 里 `tool_use.input` 的键按字母序重排；进程内是 dict 插入序（`{"path","content"}`），重载后变 `{"content","path"}`，出站 `arguments` 字符串随之不同。
+
+**修复**：`backends/openai_chat.py::_openai_function_call` 与 `backends/responses_wire.py::message_items` 的 `function_call` 序列化改用 `sort_keys=True`；不改存储层。
+
+**新增测试**：`agent_py_agent/tests/test_backends_provider_history_reload_identical.py`（4 条）——
+1. `test_reloaded_history_payload_matches_in_process_payload_byte_for_byte`：两条路径 payload 逐字相等；
+2. `test_reloaded_tool_call_arguments_keep_stable_key_order`：工具参数稳定键序；
+3. `test_reloaded_history_keeps_assistant_reasoning_content`：重载后 `reasoning_content` 逐条保留（`["先读文件","再写","总结"]`）；
+4. `test_responses_path_live_and_reloaded_arguments_match`：Responses 路径 live/重载参数逐字一致。
+
+**命令与结果**：
+- 新增文件 4 passed。
+- 相关回归（新增文件 + `test_backends_message_adapter.py` + `test_backends_openai_native_tool_use.py` + `test_conversation_history_seed.py` + `test_native_history_projection_memory.py` + `test_private_writes_conversation.py` + `test_responses_backend.py` + `test_responses_reasoning.py` + `test_conversation_store.py`）：**186 passed**。
+- guards9（清单 11 个文件）：**全通过**（`...` ×3 行 100%）。
+- `check_import_boundaries.py`：findings=0；`ruff check agent_py_agent scripts`：All checks passed；`check_doc_sync.py`：DOC_SYNC_PASS；strict code-size：hard=0 blocked=False；`git diff --check` 干净；`check_clean_package.py .` 只报新增测试文件未跟踪（提交后消失）；`size_diff.sh` 新增告警 **0**、消失 40。
+- 变异 2 个（每次只改一处，跑完原样还原，还原后 sha256 与原始一致）：**M1**（openai_chat 去掉 `sort_keys`）KILLED；**M2**（responses_wire 去掉 `sort_keys`）KILLED——M2 第一版用例只断言「重载后键序稳定」而存活（磁盘本来就排序），补上「同进程 vs 重载逐字对照」后才抓到。
+
+**过程记录（探针，未进仓库）**：`/private/tmp/claude-501/cachereload_probe*.py`（11 个），覆盖思考/工具往返/插话/运行事实/外置工具结果/CompactionSummary/40 轮长历史/真实 store 端到端。
+
+**已报告、未在本轮修改的现象**（交 sol1）：`_thinking_mode_supported` 要求历史里每条 assistant 都有非空 `reasoning_content`，而 DeepSeek 服务端只要求「最后一条 user 之后、带 tool_calls 的 assistant」有；一条无思考的最终答复就会让请求写成 `thinking={"type":"disabled"}`（同时丢掉 `reasoning_effort`）并切到另一缓存分区。实测**与重载无关**，同进程每轮都发生。
+
+**未验证**：真实模型/真实 Gateway 上的端到端命中率改善（需联网与真实 DeepSeek 账号）；重启/换版、内存淘汰、子代理续跑、TUI 重连四种触发方式在真实进程上的表现只用了同一套重建链路推断。
+
 ## DeepSeek 思考开关只看本轮（thinking-rule，3a，2026-10-04，`claude/3a-thinking-rule`）
 
 - `test_backends_openai_native_tool_use.py` 新增 3 条：

@@ -1,5 +1,18 @@
 # 设计台账
 
+## DeepSeek 缓存：磁盘重载后历史逐字一致的修复（cachereload，2026-10-04，分支 `worker/cache-reload`，基于 `f8858179c`；3a 初审通过（去掉排序的变异被抓住），已并入 step17j）
+
+- **问题**：DeepSeek 官网实测显示服务端 KV 缓存按前缀匹配；历史里任何一处字节变化都会让该点之后整段未命中。3a 观察到主对话每轮约一笔固定 16 万 token 的未命中。本轮只查一个分支：**会话从磁盘重新加载后，下一轮请求的历史是否与上一轮实际发出的逐字一致**（触发场景：Gateway 重启/换版、内存淘汰、子代理续跑、TUI 重连）。
+- **查法**：不联网、不连真实接口；用真实读出链路（`ConversationStore` → `conversation_history_rows` → `_gateway_history_source` → `seed_provider_history_messages`）与真实后端 `_request_payload`，把「同进程续跑」和「磁盘重载」两条路径的第 N+1 轮 payload 逐字节比对。
+- **找到的分叉点**：**工具调用参数的 JSON 键序**。`store_messages.MessageStore.append` 写 transcript 时用 `append_private_jsonl_records(..., sort_keys=True)`，会把 `canonical_native_messages` envelope 里 `tool_use.input` 的键按字母序重排。同一调用在进程内是 dict 插入序（如 `{"path","content"}`），落盘重载后变成 `{"content","path"}`；出站 `arguments` 字符串随之不同，前缀缓存从该条 tool_call 起整段失效。其余观察点（工具结果截短/归档引用、`reasoning_content`、tool_call id、`RuntimeFactsTurn` 位置、content 的 list/str 形态、CompactionSummary、插话位置、40 轮长历史）**实测逐字一致**。
+- **修复**（最小、通用，不改存储格式）：出站序列化统一用稳定键序，使两条来源可复现同一字节。
+  - `backends/openai_chat.py::_openai_function_call`：`json.dumps(..., sort_keys=True)`。
+  - `backends/responses_wire.py::message_items` 的 `function_call`：同上（Responses 路径走同一份落盘历史）。
+  - `backends/message_adapter.py` 未改：它只产出 dict，不产生字节。
+- **注意**：`_clean_hint`/`store_messages` 的 `sort_keys=True` 本身是刻意的字节稳定设计（`test_private_writes_conversation.py` 有依赖），本轮**不改存储层**，只让出站对键序不敏感。
+- **另一条已报告、不在本轮范围的现象**（交 sol1）：`_thinking_mode_supported` 要求历史里**每条** assistant 都有非空 `reasoning_content`，而 DeepSeek 服务端只要求「最后一条 user 之后、带 tool_calls 的 assistant」必须有。一条无思考的最终答复（常见）会让后续请求被写成 `thinking={"type":"disabled"}`：既丢掉 `reasoning_effort`，也切到服务端另一个缓存分区。实测该现象**与重载无关**，同进程每轮都发生；本轮只报告，不改 `openai_chat.py` 的该判定。
+- **测试**：`agent_py_agent/tests/test_backends_provider_history_reload_identical.py`（4 条：payload 逐字一致、工具参数稳定键序、`reasoning_content` 保留、Responses 路径 live/重载一致）。结果见 TESTS。
+
 ## 9b 终审 pw3r 的必须修：只改用例（pw3t2，2026-10-04，分支 `worker/pw3r-tests`，基于 pw3t `bb476bd33`；只改用例；9b 复跑通过，已并入 step17j）
 
 - **来源**：9b 对 pw3r（`5f34d1548`）+ pw3t（`bb476bd33`）的安全终审结论——产品代码没问题，1 条必须修，只改用例。证据 `~/.my-agent/decision-evidence/review-pw3r-5f34d1548/9b/`。
