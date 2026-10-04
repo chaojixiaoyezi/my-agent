@@ -887,7 +887,8 @@ def test_gateway_session_approval_cache_survives_request_writer_turns(
     monkeypatch.setattr(
         stream_approval,
         "wait_for_gateway_permission_decision",
-        lambda chunk_path, req, cancellation_token=None, mode_decision_provider=None: ToolApprovalDecision(
+        # 替身签名与 permission_bridge.wait_for_gateway_permission_decision 一致（B5 起等待参数走 options）。
+        lambda chunk_path, req, *, cancellation_token=None, options=None: ToolApprovalDecision(
             req.permission_id, "approved_session"
         ),
     )
@@ -897,7 +898,7 @@ def test_gateway_session_approval_cache_survives_request_writer_turns(
     # 第二个 Gateway request 会创建新 writer；同会话同目录同参数仍应直接放行。
     calls: list[str] = []
 
-    def fail_wait(chunk_path, req, cancellation_token=None, mode_decision_provider=None):
+    def fail_wait(chunk_path, req, *, cancellation_token=None, options=None):
         calls.append("wait")
         raise AssertionError("session-approved call must not wait")
 
