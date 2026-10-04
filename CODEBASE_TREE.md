@@ -130,6 +130,7 @@
 |-- docs/design/FILE_SYNTAX_DIAGNOSTICS.md # 文件原子发布的有界语法观察及工具反馈边界
 |-- docs/guides/MODEL_GUIDE.md        # 给用户的模型管理使用说明：新增/切换/默认/effort/删除/共享/派子代理选模
 |-- docs/guides/CAPABILITY_PACK_GUIDE.md # 给用户的能力包使用说明：装/启用/停用/更新/回退/卸载/发现使用/派子代理授权/自制包/安全边界
+|-- docs/guides/PLUGIN_GUIDE.md       # 给用户的插件与安全开关使用说明：命令清单、/plugins info 四段、样例插件与写插件技能、屏幕观察只看档、G2b 本机凭据强制、锁与私有文件口径
 |-- docs/guides/FEISHU_QUICK_CHECK.md # 给用户的飞书 5 分钟手测清单：普通回复、系统命令、后台完成主动送达、Goal 熔断提示、私聊闲置锁
 |-- agent_py_agent/tests/test_capability_package_native_pipeline.py # 模型替身沿原生循环读取和精确落盘
 |-- agent_py_agent/tests/test_capability_package_prompt_guidance.py # 包采用与资源复用软规则、空选择和旧提示不变
@@ -1566,6 +1567,7 @@ docs/
 - `docs/guides/MODEL_GUIDE.md`：给用户的模型管理使用说明，覆盖新增（含 ChatGPT 订阅登录勾选）、切换与默认、`/effort` 智能程度、删除、管理员共享与初始模型、派子代理选模与 `manage_models` 对话式管理。
 - `docs/guides/FEISHU_QUICK_CHECK.md`：给用户本人在真实飞书上 5 分钟内做完的手测清单，每项写明发什么、看到什么算通过、出问题提供什么；与 C11 自动化验收互补，不挡收口。
 - `docs/guides/CAPABILITY_PACK_GUIDE.md`：给用户的能力包使用说明，覆盖装/启用/停用/更新/回退/卸载（TUI、IM 的 `/plugins`，管理仅管理员）、按任务发现与使用、版本固定、派子代理授权、自制包与安全边界。
+- `docs/guides/PLUGIN_GUIDE.md`：给用户的插件与安全开关使用说明，覆盖插件命令（TUI 与飞书共用入口）、`/plugins info` 四段（事件订阅、收紧工具、网络与沙箱、最近决定与观察计数）、随包样例插件与写插件内置技能、屏幕观察只看档的开关组合与锁屏行为、G2b 本机凭据强制开关（默认关、打开前先看 `/status` 计数）、锁与私有文件"只动自己建的东西"的口径。
 - `agent_py_agent/tests/test_plugins_chat_control.py`：IM 与 TUI 的共享插件服务回归；用假渠道及真实持久回执核对路由、原参数、管理员权限、文本错误码和非 Python 启用预览，不替代真实 IM 收发验收。
 - `docs/tasks/C10_IM_PLUGINS_HANDOFF.md`：C10 的文件范围、开发测试、独立变异、未验证边界与集成复查入口。
 - `docs/design/COMPACT_GENERATION_FACTS.md`：摘要来源与请求关联的交接设计，明确旧检查点未知和诊断不参与恢复权威。

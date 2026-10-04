@@ -66,12 +66,15 @@ my-agent 把这些当成底座问题来解：
 
 ### 插件系统
 
+- 完整用法（命令清单、`/plugins info` 四段、样例插件与写插件技能、屏幕观察只看档、G2b 本机凭据开关、锁与私有文件口径）见给用户的 [插件与安全开关使用说明](docs/guides/PLUGIN_GUIDE.md)。
 - 插件是独立 MCP 进程，通过本地包安装：Python 包用隔离 venv 运行；任意语言（Go、Node、脚本、可执行文件）用 v6 包格式，启用前给出确认码，解释器路径与哈希被钉住，被替换即拒绝启动。
 - 逐次下发工作区读写范围，插件拿不到宿主其他目录；可选的进程级 OS 沙箱试点（`plugin_process_sandbox`，默认关）。
 - 插件可以带 Skill、显示面板、调用宿主只读 API；停用、卸载、换代后下一次快照自然生效。
 - 自带 13 个插件：`workspace-peek`（工作区预览）、`genui-lite`（表格与图表）、`browser-lite`（受控无头浏览器）、`image-text`（本地 OCR）、
   `savepoint-lite`（文件快照）、`design-lite`（HTML 设计稿）、`desktop-lite`（系统通知/剪贴板）、`harness-console`（工作台网页）、
   `context-inspector`、`activity-line`、`status-pet`、`worktable-lite`、`web-board`；另有 `hello-go`、`hello-node` 两个跨语言示例。
+- 新版（v8）插件可以**订阅宿主事件**（提示提交、回合开始/结束、工具开始/结束、命令执行共六类），也可以**在工具执行前收紧一次**：要求确认或直接拒绝；它只能更严，不能放宽权限、改参数或替你执行。`event-watch`、`rm-guard`、`rm-guard-node` 是随包的三个样例，写插件的内置技能是 `write-my-agent-plugin`。
+- 屏幕观察有"只看档"：`computer_use_enabled` 保持关、只开 `computer_use_observation_enabled`，就只交出 `observe_window`——能看不能点，适配器进程不加载鼠标键盘依赖；锁屏时返回 `screen_locked`。
 - 插件 SDK 与一致性测试套件见 [plugins/sdk](plugins/sdk/)，打包与生命周期见 [插件包](docs/design/PLUGIN_PACKAGES.md)、[任意语言插件](docs/design/PLUGIN_ANY_LANGUAGE.md)。
 
 ### 能力包（开发候选）
@@ -300,6 +303,7 @@ python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q # 架�
 | [docs/design/TUI_MODEL_PROFILES.md](docs/design/TUI_MODEL_PROFILES.md) | 模型目录、会话选择与代理自助管理 |
 | [docs/design/GATEWAY_DESIGN.md](docs/design/GATEWAY_DESIGN.md) | Gateway 设计 |
 | [docs/modules/subagent/SUBAGENT_RUNBOOK.md](docs/modules/subagent/SUBAGENT_RUNBOOK.md) | 子代理、能力路由与 runner 手册 |
+| [docs/guides/PLUGIN_GUIDE.md](docs/guides/PLUGIN_GUIDE.md) | 插件命令、`/plugins info` 四段、屏幕观察只看档、G2b 本机凭据开关 |
 | [docs/design/PLUGIN_PACKAGES.md](docs/design/PLUGIN_PACKAGES.md) · [PLUGIN_ANY_LANGUAGE.md](docs/design/PLUGIN_ANY_LANGUAGE.md) | 插件包、任意语言插件与沙箱 |
 | [docs/architecture/MY_AGENT_HOME_LAYOUT.md](docs/architecture/MY_AGENT_HOME_LAYOUT.md) | `~/.my-agent` 家目录布局 |
 | [DESIGN_LEDGER.md](DESIGN_LEDGER.md) | 设计想法、落地状态与后续方向 |

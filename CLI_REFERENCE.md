@@ -123,6 +123,8 @@ Gateway 管理员的 `my-agent gateway stop` / HTTP `POST /stop` 是服务生命
 
 ## 插件命令入口
 
+面向用户的完整用法（命令清单、`/plugins info` 四段、样例插件与写插件技能、屏幕观察只看档、G2b 本机凭据开关、锁与私有文件口径）见 [插件与安全开关使用说明](docs/guides/PLUGIN_GUIDE.md)。
+
 公共目录使用 `/plugins [管理动作]` 与 `/plugins@<插件ID> [动作] [参数]`。安装、列表、信息、请求查询、配置、启停、调用和卸载已有本地源码，尚未发布部署；已安装版本能力以 STATUS 为准。
 `/plugins configure <插件ID> --file ./settings.json` 从授权路径读取完整 JSON，严格按插件设置声明验证，保存在用户私有目录，保持插件停用。
 配置不是增量补丁；值不进入公共目录或工具回执。`/plugins status <原请求编号>` 可在来源删除后查询原结果，超时不自动重送。
