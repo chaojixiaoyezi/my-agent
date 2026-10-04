@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-10-04（rco，分支 `worker/run-closeout`，基于 step17i 头 `ce646f783`，已实现待复审）：子代理收口 `closeout_target_run_status` 补失败族映射——BLOCKED/CHANNEL_ERROR/TIMEOUT（与 `SUBAGENT_FAILURE_STATUSES` 同口径）随 FAILED 收口 run=failed，杜绝 runner 已退出而 run 停在 created；PENDING/RUNNING/PLANNING/PAUSED 等可恢复形态仍不收口。同批主代理侧 `_settle_main_agent_run_status` 非终态统一分族（不可续跑族收口 failed、可续跑族保留），见 TESTS.md 顶部与设计台账。
+
 2026-10-03（mtc，3a 挑入）：子代理解析缓存的指纹与 2 秒窗口阈值改为引用 `common/cache_freshness` 的共享实现；命中与“窗口内读到的不入缓存”行为不变（luna6 口径）。
 
 ## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）

@@ -5,6 +5,12 @@
 - 真实 `home_paths` 合同作为凭据根来源；路径只经 `agent_home_root_for_owner` 从 owner home 推导并与 `home_paths.root` 核对。缺失属性是 `agent_contract`，没有 Agent 则 `LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`，不会从队列目录写入。
 - G1 写锁、目录校验、读与原子写复用 no-follow 文件系统原语；目录符号链接在生成、锁文件写入或 chmod 前拒绝，既有权限错误不自动修复。验证命令与未覆盖边界见 TESTS.md 同名节。
 
+## owner 维护挂历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，已实现，待复审）
+
+- Gateway 的 owner-maintenance 循环（`cli/gateway_loops._start_owner_maintenance_loop` → `user_space/owner_maintenance.run_owner_retention_if_due`）在跑 retention 的同时多做一步：对每个 owner home 的 runtime.db 执行一次历史悬挂 run 补收口迁移（`runtime_db/run_closeout_backfill.apply_run_closeout_backfill`）——把 rco 修好主链路前停在 created 的 run/task_run 按结构化分族补到终态。
+- 迁移只执行一次（记录写 runtime.db metadata 的 `run_closeout_backfill.v1`，重复调用空操作；处理幂等，崩溃后重跑只补剩余）；判定与分族只读结构化字段（attempt 静止、无未结算操作、无活跃锁、结束超过 6 小时宽限；不可续跑族→failed、取消族→cancelled、可续跑/等用户族不动；recovered→cancelled、runtime_reason=attempt_recovered）；每条写 `run_closeout.backfilled` 审计事件，task_run 用树终态 CAS 补关。
+- 回执写进 `O/data/maintenance.json` 的 `run_closeout_backfill` 键；只读预览 `preview_run_closeout_backfill(db_path)` 供生产副本核对数字。测试与门禁见 TESTS.md 顶部。
+
 ## 宿主侧抓取工具屏蔽本机 Gateway（G6，2026-10-03，luna1g6，`worker/luna1-g6-fetch-port`，ae 复审修正中，待复审/9b 终审）
 
 - `tooling.web` 每跳读取 G4 的 `gateway_bound_ports()`，并合并正数 `gateway_port` 配置后备；端口 0 或无端口事实时 G6 不适用，端口无法读取/不合法时只拒确认的本机目标。

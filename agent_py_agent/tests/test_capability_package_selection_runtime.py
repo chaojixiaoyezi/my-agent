@@ -12,6 +12,7 @@ from agent_py_agent.agent.agent_core import _tool_loop_service as loop_service
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime_mixin import (
+    RunCloseoutFacts,
     _bind_main_agent_authority,
     _settle_main_agent_run_status,
 )
@@ -257,8 +258,12 @@ def test_late_selection_after_stop_or_attempt_change_never_reads_pins_or_injects
         elif change == "new_attempt":
             fixture.agent._current_run_params = replace(fixture.params, attempt_id="replacement-attempt")
         else:
-            _settle_main_agent_run_status(fixture.agent, run_id=fixture.params.run_id,
-                                         attempt_id=fixture.params.attempt_id, runtime_status="cancelled")
+            _settle_main_agent_run_status(
+                fixture.agent,
+                run_id=fixture.params.run_id,
+                attempt_id=fixture.params.attempt_id,
+                facts=RunCloseoutFacts(runtime_status="cancelled"),
+            )
 
     fixture.agent.backend.before_response = stop_before_response
     with pytest.raises(ToolCancelled):

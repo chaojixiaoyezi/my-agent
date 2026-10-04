@@ -269,6 +269,7 @@ def test_followup_selects_only_active_goal_without_changing_it(tmp_path, status)
 def test_followup_runtime_attempt_reuses_goal_and_settles_by_attempt(tmp_path):
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
     from agent_py_agent.agent.agent_core.runtime_mixin import (
+        RunCloseoutFacts,
         _bind_main_agent_authority,
         _settle_main_agent_run_status,
     )
@@ -278,13 +279,19 @@ def test_followup_runtime_attempt_reuses_goal_and_settles_by_attempt(tmp_path):
     first = _bind_main_agent_authority(agent, RunParams(
         run_id="first-turn", task_id=goal.task_id, task_attributes={"conversation_thread_id": thread.thread_id},
     ))
-    _settle_main_agent_run_status(agent, run_id="first-turn", attempt_id=first.attempt_id, runtime_status="cancelled")
+    _settle_main_agent_run_status(
+        agent, run_id="first-turn", attempt_id=first.attempt_id,
+        facts=RunCloseoutFacts(runtime_status="cancelled"),
+    )
     second = _bind_main_agent_authority(agent, replace(first, run_id="followup-turn"))
     repo = agent.subagents.runtime_db
     row = repo.main_agent_run_for_task(goal.task_id)
     assert row["current_attempt_id"] == second.attempt_id != first.attempt_id
     assert repo.agent_run_for_run_id("followup-turn") is None
-    _settle_main_agent_run_status(agent, run_id="followup-turn", attempt_id=second.attempt_id, runtime_status="ok")
+    _settle_main_agent_run_status(
+        agent, run_id="followup-turn", attempt_id=second.attempt_id,
+        facts=RunCloseoutFacts(runtime_status="ok"),
+    )
     assert repo.main_agent_run_for_task(goal.task_id)["status"] == "done"
     assert not repo.has_active_exec_lock(row["agent_run_id"])
 

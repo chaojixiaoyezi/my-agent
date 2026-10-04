@@ -92,6 +92,20 @@
 - 该步不改变维护状态旧口径（`status`/`last_success_at`/`apply_outcome` 等键含义不变，只加键）；抛异常时回执里带 `error`，维护照常写状态。
 - 调用链：`cli/gateway_loops._GatewayOwnerMaintenanceController.tick` → `run_owner_retention_if_due` → `memory_archive.storage`。
 
+## owner 维护里的历史悬挂 run 补收口迁移（rcb，2026-10-04，待复审）
+
+- `user_space/owner_maintenance.run_owner_retention_if_due` 在 retention 与权限收紧之后新增一步：
+  `_backfill_hung_runs(home)` 调 `runtime_db/run_closeout_backfill.apply_run_closeout_backfill`，
+  对当前 owner 的 runtime.db 执行一次性补收口迁移（记录写 `metadata` 键 `run_closeout_backfill.v1`，
+  重复调用空操作；处理幂等，崩溃后重跑只补剩余）。
+- 判定只读结构化字段：run 未终态 + attempt 已静止（终态去掉 unknown）+ 无未结算操作
+  （`unsettled_attempt_operations`）+ 无活跃执行权锁（`has_active_exec_lock`）+ 结束超过 6 小时宽限；
+  分族与 rco 同口径（不可续跑族→failed、取消族→cancelled、可续跑/等用户族不动）；recovered
+  （人工处置过 unknown）且无未结算操作/无锁/超宽限时补成 cancelled（runtime_reason=attempt_recovered）。
+  每条补收口写 `agent_run.completed` 与 `run_closeout.backfilled` 事件；task_run 用树终态 CAS 补关（link 闸留给发现层）。
+- 只读预览 `preview_run_closeout_backfill(db_path)` 用 `RuntimeRepository(read_only=True)` 只读打开、
+  不改任何字节；回执写维护状态文件的 `run_closeout_backfill` 键（只加键，旧口径不变）。测试与门禁见 TESTS.md 顶部。
+
 ## 没有入口回执的插话在收口时的两级出口（step17i，2026-10-03，分支 `worker/ds2-steer-noreceipt`）
 
 - 上面那条“拒收后由入口回执排成备用下一轮”只对有 `gateway_input_request_id` 的插话成立；`/steer` 控制命令且 scope 里没带

@@ -102,6 +102,9 @@ def run_owner_retention_if_due(
         # memory_archive 的已有文件靠 S2/S3 的"下次写入收紧"覆盖不到，挂进这里在 owner 维护
         # （默认每天一次）里收口；只收紧不放松、不跟随符号链接，结果原样写进维护状态。
         permissions = _tighten_archive_permissions(home)
+        # rcb：历史悬挂 run 一次性补收口迁移（幂等；迁移记录写 runtime.db metadata，
+        # 重复调用是空操作）。失败只记结构化回执，绝不影响保留主流程。
+        run_closeout_backfill = _backfill_hung_runs(home, now=current)
         previous = read_json_object_report(
             state_path,
             context="owner_maintenance.state",
@@ -121,6 +124,8 @@ def run_owner_retention_if_due(
             "indexes_compact_failed": compact_failed,
             # 归档目录树已有文件的收紧回执：收紧数（文件/目录分开）、失败数与原因码、跳过符号链接数。
             "memory_archive_permissions": permissions,
+            # rcb 迁移回执：executed/reason/分类计数；无库、已迁移、失败都在这里说清。
+            "run_closeout_backfill": run_closeout_backfill,
         }
         write_json_file_atomic_unlocked(state_path, payload)
         return OwnerMaintenanceResult(
@@ -241,6 +246,24 @@ def _apply_outcome(retention: OwnerRetentionPlan) -> str:
 
 def _maintenance_state_path(owner_home: Path) -> Path:
     return owner_home / "data" / "maintenance.json"
+
+
+# LLM: rcb 迁移的维护侧入口：只接 owner home，自己定位 runtime.db（延迟导入 runtime_db，
+#   保持本模块加载面不变）；无库、库坏或迁移失败都返回结构化回执（error_type），
+#   绝不让迁移拖垮 retention 主流程。
+# 函数用途: 在 owner 维护里对当前 owner 的 runtime.db 执行一次历史悬挂补收口迁移。
+def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float) -> dict[str, Any]:
+    try:
+        from ..runtime_db.repository import RuntimeRepository
+        from ..runtime_db.run_closeout_backfill import apply_run_closeout_backfill
+        from ..runtime_db.schema import runtime_db_path
+
+        db_path = runtime_db_path(Path(home.owner_home_dir))
+        if not db_path.exists():
+            return {"executed": False, "reason": "no_runtime_db"}
+        return apply_run_closeout_backfill(RuntimeRepository(db_path), now=now)
+    except Exception as exc:  # noqa: BLE001 迁移失败不反噬保留主流程
+        return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
 
 
 def _positive_interval(value: object) -> int:

@@ -446,11 +446,12 @@ def test_nonterminal_child_keeps_completed_conversation_task_run_open(repo):
     assert settled["status"] == "done"
 
 
-def test_main_settle_unfinished_not_terminal(repo):
-    """R1-03：unfinished 只关闭当前 attempt，不把任务 run 写成终态。
+def test_main_settle_unfinished_non_continuable_maps_failed(repo):
+    """rco 修订（3a 裁定）：不可续跑族 unfinished（返工门已从生产移除、共享 gate
+    判定 False）尝试结束时收口 failed——不再把 attempt 已结束的 run 留在 created。
 
-    run 保持 created，发现层下轮显式创建新 attempt；旧轮释放执行权，
-    不写 agent_run.completed 或 status_conflict。
+    原始 runtime_status/reason 保留在 payload 证据；可续跑族保留语义见
+    test_cli_resume_contract 的 settle 用例。
     """
     rec = _record(repo)
     result = SimpleNamespace(
@@ -460,18 +461,16 @@ def test_main_settle_unfinished_not_terminal(repo):
         tool_rounds=0,
     )
     _settle_main_agent_run(_agent(repo), _params(run_id="run-1", attempt_id=rec["attempt_id"]), result)
-    assert _run_row(repo, rec["agent_run_id"])["status"] == "created"
-    assert _completed_events(repo, rec["agent_run_id"]) == []
-    assert len(_attempts(repo, rec["agent_run_id"])) == 1
-    assert _attempts(repo, rec["agent_run_id"])[0]["status"] == "done"
-    assert _attempts(repo, rec["agent_run_id"])[0]["ended_at"] > 0
-    event = repo._runtime_connect().execute(
-        "SELECT * FROM runtime_events WHERE agent_run_id = ? "
-        "AND event_type = 'agent_attempt.completed'",
-        (rec["agent_run_id"],),
-    ).fetchone()
-    assert event is not None
-    assert event["attempt_id"] == rec["attempt_id"]
+    assert _run_row(repo, rec["agent_run_id"])["status"] == "failed"
+    attempts = _attempts(repo, rec["agent_run_id"])
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "failed"
+    assert attempts[0]["ended_at"] > 0
+    events = _completed_events(repo, rec["agent_run_id"])
+    assert len(events) == 1
+    payload = events[0]["payload_json"]
+    assert '"runtime_status": "unfinished"' in payload
+    assert '"runtime_reason": "REQUIRED_ACTION_HAS_NO_EVIDENCE"' in payload
 
 
 def test_resumable_attempt_close_allows_explicit_next_attempt(repo):

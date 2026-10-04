@@ -28,7 +28,6 @@ from ..runtime_db.run_takeover import TAKEOVER_RUNTIME_SOURCE
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
 from .cli_run_conversation import (
-    _is_cli_run,
     bind_cli_run_conversation,
     persist_cli_run_assistant,
 )
@@ -390,8 +389,10 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
             # 这时模型尚未进入；沿用精确 attempt 收口，不能把未开始的轮次留成永远 running。
             _settle_main_agent_run_status(
                 agent, run_id=authority_run_id, attempt_id=attempt_id,
-                runtime_status="cancelled" if isinstance(exc, InterruptedError) else "failed",
-                runtime_reason="runtime_authority_publish_failed",
+                facts=RunCloseoutFacts(
+                    runtime_status="cancelled" if isinstance(exc, InterruptedError) else "failed",
+                    runtime_reason="runtime_authority_publish_failed",
+                ),
             )
             raise
     return replace(params, run_id=authority_run_id, attempt_id=attempt_id)
@@ -401,6 +402,52 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
 _RUN_STATUS_ALIASES = {"ok": "done", "user_stop": "cancelled", "conversation_control": "cancelled"}
 
 
+# LLM: 收口判定与 payload 证据共用的结构化事实包；把一组同源参数收成小数据类，避免逐参透传。
+# 类用途: 承载一次执行轮结束时的运行事实（状态/原因/来源/工具轮数），只读结构化字段。
+@dataclass(frozen=True)
+class RunCloseoutFacts:
+    runtime_status: str
+    runtime_reason: str = ""
+    runtime_source: str = ""
+    tool_rounds: int = 0
+
+
+# 等待用户族（3a 裁定，rco）：这类 runtime_status 是任务级可恢复语义，保留 run 非终态
+# 等用户动作驱动续跑；只认结构化状态串，不解析文案。
+_WAITING_USER_RUNTIME_STATUSES = frozenset({"needs_user_input", "approval_required"})
+
+
+# LLM: 非终态收口的唯一分族点（3a 裁定：统一收口、不为单条路径打补丁）。等用户族保留；
+#   其余非终态用共享技术续跑 gate（should_continue_task）分族——可续跑族保留非终态等续跑，
+#   不可续跑族（blocked/协议违规/UNKNOWN 等）收口 failed，杜绝 attempt 已结束而 run 停在 created。
+#   分族主键是 runtime_reason（TOOL_CALL_UNCLOSED / 截断 / 超窗三项再按 runtime_source/runtime_status
+#   精确核对）；runtime_status 字面不单独决定分族——status=blocked 但 reason=TOOL_ROUND_LIMIT_REACHED
+#   的轮次按 reason 保留非终态是正确的（初审 rco-f3）。
+#   判据不可用时（导入或调用异常）不静默悬挂：记结构化 error 日志并按不可续跑收口 failed——
+#   收口可逆（create_attempt 对终态放行、会重开），悬挂没有任何机制能救（初审 rco-f4）。
+# 函数用途: 把非终态 runtime_status 映射成 run 收口终态；返回空串表示保留非终态。
+def _nonterminal_run_closeout_status(runtime_status: str, runtime_reason: str, runtime_source: str) -> str:
+    if runtime_status in _WAITING_USER_RUNTIME_STATUSES:
+        return ""
+    try:
+        from ..turn_end import should_continue_task
+
+        should, _ = should_continue_task(
+            SimpleNamespace(
+                runtime_status=runtime_status,
+                runtime_reason=runtime_reason,
+                runtime_source=runtime_source,
+            )
+        )
+    except Exception:  # noqa: BLE001 分族判据故障必须可见且不悬挂（初审 rco-f4）
+        logging.getLogger(__name__).error(
+            "run 收口分族判据不可用，按不可续跑收口 failed：runtime_status=%s runtime_reason=%s runtime_source=%s",
+            runtime_status, runtime_reason, runtime_source, exc_info=True,
+        )
+        return "failed"
+    return "" if should else "failed"
+
+
 # LLM: 收口按权威 attempt 定位 AgentRun，技术续跑共用 turn_end；临时 run_id 不得导致漏记或误关别人的轮次。
 # 函数用途: 结束精确执行代次并释放执行权；旧 attempt 的 CAS 不能覆盖新 attempt。
 def _settle_main_agent_run_status(
@@ -408,12 +455,7 @@ def _settle_main_agent_run_status(
     *,
     run_id: str,
     attempt_id: str,
-    runtime_status: str,
-    runtime_reason: str = "",
-    runtime_source: str = "",
-    tool_rounds: int = 0,
-    cli_one_shot: bool = False,
-    continuation_seq: int = 0,
+    facts: RunCloseoutFacts,
 ) -> None:
     """把主代理 run 的真实终态落进权威审计账本（fail-silent）。
 
@@ -422,52 +464,29 @@ def _settle_main_agent_run_status(
     结构化字段收口：runtime_status=='ok' → 'done'；cancelled 族
     （user_stop/conversation_control）→ 'cancelled'；failed 等直接落账。
 
-    R1-03（收口闸）：unfinished/blocked/needs_user_input/approval_required
-    等是任务级可恢复 runtime_status（返工门/等待用户输入后还会续跑），
-    不是 agent_runs.status 合法终态；它们只关闭本次 AgentAttempt、释放工具
-    权限，run 保持 created，发现层下轮显式 create_attempt 后再继续。
+    R1-03（收口闸，2026-10-04 rco 修订）：unfinished/blocked/needs_user_input/
+    approval_required 等是任务级可恢复 runtime_status，不是 agent_runs.status
+    合法终态；它们只关闭本次 AgentAttempt、释放工具权限。修订点（3a 裁定）：
+    非终态统一分族（_nonterminal_run_closeout_status）——不可续跑族（blocked/
+    协议违规/UNKNOWN 等，共享 gate should_continue_task 判定 False）的尝试
+    结束时 run 收口 failed（把 CLI one-shot 兜底口径推广到所有路径，杜绝
+    attempt 已结束而 run 永远停在 created）；可续跑族保留 run 非终态等续跑
+    ——技术续跑族由 resume/Goal 驱动，等用户族（needs_user_input/
+    approval_required）由用户动作驱动。原始 runtime_status/runtime_reason
+    保留在 payload 证据，绝不写 DONE 撒谎。
     LOCAL_UNMANAGED（无 repo）/查无 run → noop。
     审计是附加保证，任何失败绝不反噬执行路径。
-
-    CLI 一次性 run 例外（问题C同族, 2026-08-14 真机）：source=cli_run 的
-    one-shot run 结束后**没有** gateway 发现层/wake 循环再驱动它。此前
-    blocked/unfinished 等非终态不 settle → attempt 永卡 running/ended_at=0
-    （测试机 local/main 遗留 20+ 条 created/running，aiohttp 首轮 break 后
-    无 ended_at）。CLI 一次性 run 真实结束即兜底落 failed 终态，原始
-    runtime_status/runtime_reason 保留在 payload 证据，绝不写 DONE 撒谎；
-    gateway 等可续跑路径行为完全不变。
-
-    2026-08-14 根因3 设计 v2（审查意见3）轮/任务终态分层：**续跑轮**
-    （continuation_seq>0）的 unfinished/blocked 是任务级可恢复语义——由
-    resume_loop 决定是否继续，此处不落 failed（保留任务级非终态）；仅首轮
-    （seq=0）保持 one-shot 兜底。首轮失败账完整保留，续跑轮不覆盖。
     """
+    runtime_status = facts.runtime_status
     terminal = _RUN_STATUS_ALIASES.get(runtime_status, runtime_status or "")
     if not terminal or terminal in ("", "created", "running"):
         return
     if terminal not in AGENT_RUN_TERMINAL_STATUSES:
-        # 缺口E(双席复核 seq1835): 首轮可续跑族 unfinished 也保留任务级非终态
-        # (resume_loop 会续跑), 不落 failed——仅不可续跑族(blocked/协议违规/
-        # UNKNOWN, 共享 gate 判定 False)才 one-shot 兜底 failed(问题C同族
-        # 兜底保留)。续跑轮非终态一律不落账。
-        if cli_one_shot and runtime_status and int(continuation_seq or 0) <= 0:
-            from ..turn_end import should_continue_task
-
-            # 共享 gate: 可续跑族(True) → 不落 failed(保留任务级非终态);
-            # 不可续跑族(False) → 兜底 failed。
-            should, _ = should_continue_task(
-                SimpleNamespace(
-                    runtime_status=runtime_status,
-                    runtime_reason=runtime_reason,
-                    runtime_source=runtime_source,
-                )
-            )
-            if not should:
-                terminal = "failed"
-            else:
-                terminal = ""  # 可续跑族只关闭 attempt，run 留给 resume_loop
-        else:
-            terminal = ""  # 非终态只关闭 attempt，避免 status_conflict 噪音
+        # 统一分族（3a 裁定，rco）：不可续跑族收口 failed（CLI one-shot 兜底口径
+        # 推广到所有路径）；可续跑族只关闭 attempt，run 留给续跑。
+        terminal = _nonterminal_run_closeout_status(
+            runtime_status, facts.runtime_reason, facts.runtime_source
+        )
     if not run_id or not attempt_id:
         return
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -481,9 +500,9 @@ def _settle_main_agent_run_status(
         payload = {
             "status": terminal or "attempt_done",
             "runtime_status": runtime_status,
-            "runtime_reason": runtime_reason,
-            "runtime_source": runtime_source,
-            "tool_rounds": int(tool_rounds or 0),
+            "runtime_reason": facts.runtime_reason,
+            "runtime_source": facts.runtime_source,
+            "tool_rounds": int(facts.tool_rounds or 0),
         }
         if terminal:
             repo.settle_agent_run(
@@ -524,8 +543,8 @@ def _task_local_continuation_keeps_attempt_open(agent, params: RunParams, result
 def _settle_main_agent_run(agent, params: RunParams, result) -> None:
     """正常返回路径收口：runtime_status=='ok' → 'done'，否则透传终态。
 
-    CLI 一次性 run（source=cli_run）结束后非终态（blocked/unfinished 等）兜底
-    落 failed，杜绝 attempt 悬挂——见 _settle_main_agent_run_status 注释。
+    非终态统一分族收口（不可续跑族落 failed、可续跑族保留），杜绝 attempt
+    悬挂——见 _settle_main_agent_run_status 注释。
     """
     if _task_local_continuation_keeps_attempt_open(agent, params, result):
         return
@@ -534,12 +553,12 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
         agent,
         run_id=str(params.run_id or "").strip(),
         attempt_id=str(params.attempt_id or "").strip(),
-        runtime_status=runtime_status,
-        runtime_reason=str(getattr(result, "runtime_reason", "") or "").strip(),
-        runtime_source=str(getattr(result, "runtime_source", "") or "").strip(),
-        tool_rounds=int(getattr(result, "tool_rounds", 0) or 0),
-        cli_one_shot=_is_cli_run(params),
-        continuation_seq=int(getattr(params, "continuation_seq", 0) or 0),
+        facts=RunCloseoutFacts(
+            runtime_status=runtime_status,
+            runtime_reason=str(getattr(result, "runtime_reason", "") or "").strip(),
+            runtime_source=str(getattr(result, "runtime_source", "") or "").strip(),
+            tool_rounds=int(getattr(result, "tool_rounds", 0) or 0),
+        ),
     )
     _settle_terminal_conversation_task_run(agent, params)
 
@@ -569,9 +588,9 @@ def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseExceptio
         agent,
         run_id=str(params.run_id or "").strip(),
         attempt_id=str(params.attempt_id or "").strip(),
-        runtime_status=status,
-        runtime_reason=reason,
-        runtime_source=source,
+        facts=RunCloseoutFacts(
+            runtime_status=status, runtime_reason=reason, runtime_source=source
+        ),
     )
     _settle_terminal_conversation_task_run(agent, params)
 
@@ -618,8 +637,10 @@ def _bind_main_agent_turn_params(
             if bound.attempt_id and bound.attempt_id != params.attempt_id:
                 _settle_main_agent_run_status(
                     agent, run_id=bound.run_id, attempt_id=bound.attempt_id,
-                    runtime_status="cancelled" if isinstance(exc, InterruptedError) else "failed",
-                    runtime_reason="workspace_preparation_failed",
+                    facts=RunCloseoutFacts(
+                        runtime_status="cancelled" if isinstance(exc, InterruptedError) else "failed",
+                        runtime_reason="workspace_preparation_failed",
+                    ),
                 )
             raise
 

@@ -1,5 +1,36 @@
 # 测试与发布验收
 
+## 历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，基于 `d97bb2687`，已实现，待复审）
+
+- 来源：rco 交付的台账后续项「把生产里已经停在 created 的历史悬挂记录补收口」。
+- 改动：新增 `agent_py_agent/agent/runtime_db/run_closeout_backfill.py`（一次性迁移：候选扫描 / 结构化分族 / settle CAS 补收口 / `run_closeout.backfilled` 事件 / 迁移记录写 metadata / 只读预览）；`agent_py_agent/agent/user_space/owner_maintenance.py` 在 owner 维护里挂迁移（回执写 maintenance.json 的 `run_closeout_backfill` 键）。
+- 新增 `agent_py_agent/tests/test_run_closeout_backfill.py`（9 项）：三条悬挂按分族补收口（blocked→failed、user_stop→cancelled、ok→done）+ 事件 + 迁移记录 + task_run 关闭；可续跑族/等用户族/最近活动不动；未结算操作/活跃锁/unknown attempt/无结束事实不动；**recovered（人工处置过 unknown）→ cancelled、runtime_reason=attempt_recovered，recovered 有未结算操作或执行锁时不动**（rcb-v1 修订，3a 裁定）；一次性（第二次空操作、记录不变）；预览只读（字节与 mtime 不变）且计数与应用一致（含 `recovered_cancelled` 细分）；分族与 runtime_mixin 对拍；owner 维护集成（首轮迁移、次轮空操作）。命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_run_closeout_backfill.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-rcb
+  ```
+  结果：**9 passed**。
+- 相关回归：test_run_closeout_backfill + test_owner_maintenance + test_gateway_owner_maintenance → **19 passed**。
+- 变异（各自原样还原 + cmp 校验）：① 去掉在途操作检查 → 跳过用例红（未结算的 run 被误补）；② 去掉执行锁检查 → 红；③ 去掉时间下限 → 红（最近活动被误补）；④ 迁移记录不写 → 记录/一次性/维护集成 3 用例红；⑤（rcb-v1）去掉 recovered 路径的无未结算操作检查 → recovered+未结算与普通未结算两用例红。全部 killed。
+- guards9（十文件）**173 passed**；静态门禁：import boundaries=0、ruff 全过、strict code-size 退出 0（strict_scope_total=2209、hard=0、blocked=False，报告已还原不提交）、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失 34**（首轮曾新增 2 个测试文件告警——函数近限与参数近限档，拆平后归零）。
+- 未验证：生产库实际数字与执行未跑（本分支不碰生产数据）；真实 Gateway 维护循环端到端由 3a 沙箱外复核。
+
+## 回合收口统一推进 agent_run/task_run（rco，2026-10-04，分支 `worker/run-closeout`，基于 step17i 头 `ce646f783`，已实现，待复审）
+
+- 来源：3a 工单「回合的尝试（agent_attempt）已经结束，但对应的 agent_run 和 task_run 一直停在 created」。隔离试次（协议违规 blocked）runtime.db 逐行核对 + 生产副本统计（agent_runs 停 created 94 条、task_runs 停 created 超 1 小时 119 条）确认多路径复现。
+- 改动：① 主代理 `_settle_main_agent_run_status`（`agent_core/runtime_mixin.py`）非终态统一分族——新辅助 `_nonterminal_run_closeout_status`：不可续跑族（blocked/协议违规/UNKNOWN 等，共享 gate `should_continue_task` 判定 False）收口 failed；可续跑族保留非终态等续跑（技术续跑族 + 等用户族 `needs_user_input`/`approval_required`；runtime_db 无 waiting 类状态、不新造）。结束事实收成 `RunCloseoutFacts` 小数据类（参数 7→4）。② 子代理 `closeout_target_run_status`（`subagents/services/runtime_closeout.py`）失败族 BLOCKED/CHANNEL_ERROR/TIMEOUT 随 FAILED 收口 failed。判定只读结构化字段。
+- 新增 `agent_py_agent/tests/test_run_closeout_settlement.py`（9 项）：Gateway 回合走真实 `_run_with_params` 收口链路（source=gateway，"假模型"结果由 `_run_once_with_params` 替身按脚本产出，沿用 test_r103_run_reuse_no_split 的成熟模式）——正常完成→done、协议违规 blocked→failed、取消→cancelled、执行错误→failed（真实 `_run_once_with_params` 异常分支）、等用户族×2 保留 created、可续跑族保留；子代理映射表与 BLOCKED 端到端（`settle_runtime_run_for_result` → run failed + `agent_run.completed`）。命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_run_closeout_settlement.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-rco
+  ```
+  结果：**9 passed**。
+- 相关回归 15 文件：test_run_closeout_settlement / test_run_audit_terminal / test_cli_resume_contract / test_r103_run_reuse_no_split / test_task_run_close_without_conversation_task / test_task_run_settle_quiescent_children / test_owner_wake_discovery_task_run_no_link / test_r103_ledger_selfheal / test_runtime_run_cancellation / test_subagent_takeover_runtime_closeout / test_gateway_unpromoted_stop / test_end_task_control / test_runtime_gate_ledger / test_goal_lifecycle_recovery / test_capability_package_selection_runtime → **303 passed**。
+- 行为变更一处：`test_run_audit_terminal.py::test_main_settle_unfinished_not_terminal` 改名 `test_main_settle_unfinished_non_continuable_maps_failed` 并改断言——REQUIRED_ACTION_HAS_NO_EVIDENCE（返工门已从生产移除、共享 gate False）从"保留 created"改为"收口 failed"，是新口径的直接体现。
+- 变异（各自原样还原 + cmp 校验）：① 去掉统一收口（不可续跑族不落 failed）→ 协议违规用例 1 failed；② 去掉 BLOCKED 映射 → 子代理 2 用例 failed。均 killed。
+- guards9（十文件）**173 passed**；静态门禁：import boundaries=0、ruff 全过、strict code-size 退出 0（strict_scope_total=2209、hard=0、blocked=False，报告已还原不提交）、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失 34**。
+- 未验证：真实 Gateway/TUI/IM 端到端与生产历史悬挂记录补收口未跑（规则禁止连真实 Gateway、不读生产数据）；交 3a/9b 复核。
+
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，待复审）
 
 - **改了什么**：检查程序每条错误可选带 `hint`（字符串）；宿主只转这一个自由文本字段——换行压空格、去控制字符和双向控制符、最多 200 个字符（超了截到 199 加省略号）；无 hint 照旧；hint 走与 location 相同的宿主路径脱敏；判定与计数只看 code。改动：`pack_verifier_runner.py`（`_error_samples` / `_clean_hint` / 两个新常数）、`pack_verifier_redaction.py`（`_redact_sample`）、`pack_verification_service.py`（`_sample_text`）；合同写进 `docs/design/CAPABILITY_PACKS_V2.md` 第 3 节输出合同。

@@ -526,6 +526,7 @@ agent_py_agent/
 |   |   |-- operation_resources.py      # 同次只读核对原操作、holder/代数/epoch 与已领取资源锁
 |   |   |-- run_cancellation.py         # 精确 task/run/attempt 的共用取消权限合同，UNKNOWN 保留锁与恢复障碍
 |   |   |-- run_takeover.py             # 被接替（TAKEN_OVER）的子代理运行收口为 cancelled：只在执行轮已静止时，CAS 核对 attempt 状态
+|   |   |-- run_closeout_backfill.py    # 历史悬挂 run 一次性补收口迁移（rcb）：结构化判定（attempt 静止/无未结算操作/无活跃锁/6h 宽限）分族补终态，迁移记录写 metadata、可只读预览
 |   |   |-- user_interrupt.py           # 用户 Esc／/interrupt 中断事实：记到被中断的执行代次，账本自愈据此在续接窗口内不收口
 |   |   |-- child_recovery.py           # /recover 线程分支：列出 unknown 子代理；带编号时事务内复核根/子目标范围后恢复
 |   |   |-- owner_recovery.py           # /recover owner：空 thread 历史 unknown 只读投影、集合确认码、批量共享 CAS 与幂等回执
@@ -1042,6 +1043,8 @@ agent_py_agent/
 |   |-- test_host_files_access.py # H3：宿主配置、运行状态、任务核验记录对模型只读，凭据对文件工具不可读：逐项文件工具与真实 Shell、A/B 两类、上级目录改名、大小写
 |   |-- test_task_run_settle_quiescent_children.py # TaskRun 收口：静止但未终态的子 run（attempt 终态且无锁）不再拦住父 TaskRun，closed 带证据、reopened 可逆、发现扫描能关存量
 |   |-- test_owner_wake_discovery_task_run_no_link.py # 发现层补关没有会话任务的 TaskRun（C12c）：关联文件确实不存在才按代理树关，读坏/active/根在跑/目录列不全都不关
+|   |-- test_run_closeout_settlement.py # 回合收口统一推进 agent_run/task_run（rco）：Gateway 真实收口链路四条结束路径（完成/blocked/取消/错误）+ 等用户族与可续跑族保留 + 子代理失败族映射与端到端
+|   |-- test_run_closeout_backfill.py # 历史悬挂 run 一次性补收口迁移（rcb）：分族补收口/六类不动/一次性/预览只读/分族对拍/维护集成
 |   |-- _postgres_test_schema.py       # 测试专用：每个 pytest 进程一个 PostgreSQL schema（URL options 设 search_path），并行分片不互删表
 |   |-- test_compact_calibrated_candidate_gate.py # 候选接受门按预检校准口径：纯函数、宿主冻结、两条门、触发来源、两回合假LLM复现
 |   |-- test_compact_trigger_cap.py # 触发线绝对上限：0/非法不变、封顶后触发线/尾部/recovery、配置解析、请求前预检、后台定时回合先压缩、finalization token 触发线、/context 说明
@@ -1672,6 +1675,7 @@ docs/
 
 - `agent_py_agent/agent/runtime_db/run_cancellation.py`：在原 RuntimeDB 上核对 task/run/agent run/attempt 四个身份并关闭执行权；原 UNKNOWN 不恢复、不释放锁，旧控制不能追随新的执行轮。
 - `agent_py_agent/agent/runtime_db/run_takeover.py`：子代理被接替转 TAKEN_OVER 后的运行账收口。只在当前 attempt 已静止时用 `settle_agent_run` 写 cancelled（读到的 attempt 状态作 CAS 条件），仍在运行／排队／unknown 不动；由 `services/base.record_takeover` 在接替落账后尽力调用，失败不影响接替。
+- `agent_py_agent/agent/runtime_db/run_closeout_backfill.py`：历史悬挂 run 一次性补收口迁移（rcb）。候选=run 未终态+attempt 已结束超过 6 小时宽限；逐条排除 attempt 不静止（unknown 等人工恢复）/有未结算操作/有活跃执行权锁/无 `agent_attempt.completed` 结束事实（recovered 例外：人工处置过 unknown 且无未结算操作/无锁/超宽限时补 cancelled、runtime_reason=attempt_recovered）；分族与 runtime_mixin 同口径（ok→done、取消族→cancelled、等用户/可续跑族不动、其余→failed，对拍用例钉住一致）。每条用 `settle_agent_run` 精确 CAS 补收口并写 `run_closeout.backfilled` 审计事件，task_run 用树终态 CAS 补关；迁移记录写 metadata 键 `run_closeout_backfill.v1`（重复调用空操作、处理幂等）；`preview_run_closeout_backfill(db_path)` 只读预览不改字节。由 owner_maintenance 在维护循环里调用。
 - `agent_py_agent/agent/runtime_db/user_interrupt.py`：用户中断的唯一结构化事实。Gateway 与本地入口中断到一轮时追加 `agent_run.user_interrupted`（绑定被中断的执行代次），发现层账本自愈在 24 小时窗口内不把任务收成 cancelled，过期按原规则收口（原因 `user_interrupt_expired`）。
 - `agent_py_agent/agent/runtime_db/run_creation.py`：在调用方原事务内创建 Task→TaskRun→AgentRun→首次 Attempt 及委托/事件，普通调用与显式宿主命令共用，不能另开事务。
 - `agent_py_agent/agent/runtime_db/host_commands.py`：原事件索引与 TaskRun 冻结请求共同绑定唯一运行；本身不授予权限、不启动模型或任务调度。
@@ -2119,6 +2123,8 @@ docs/
 - `agent_py_agent/tests/test_compact_capacity_host_chain.py`：走真实 `PreparedCompactRecovery` 两个入口（三宿主 transcript、联合来源、活动回合），只替身摘要与末端 HTTP；锁固定开销经宿主只计量入口只在失败时量一次、测不出缺失，保留 IR 按候选实际发送材料计，以及与候选替换规则的等价。
 - `agent_py_agent/tests/test_task_run_settle_quiescent_children.py`：`settle_task_run_if_agent_tree_terminal` 的树判定回归：根终态 + BLOCKED 子 run 能关 TaskRun 并在 `task_run.closed` 留静止子 run 证据；子 run 再起 attempt 经 `task_run.reopened` 重开；attempt 在跑/仍持锁/根未终态/无 attempt 都保持开放；发现扫描能关掉存量；pending 激活的 started 事件按各自列写。
 - `agent_py_agent/tests/test_owner_wake_discovery_task_run_no_link.py`：发现层 TaskRun 重放的"没有会话任务"分支（C12c）：只有规范关联目录列全、任何目录都没有 `<task_id>.json`、根执行轮已终态时才按 `no_conversation_task` 走树终态 CAS。
+- `agent_py_agent/tests/test_run_closeout_settlement.py`：回合收口统一推进 agent_run/task_run（rco）。Gateway 回合走真实 `_run_with_params` 收口链路（只替换 `_run_once_with_params` 等外围副作用），四条结束路径逐条断言 run/task_run 终态与事件：正常完成→done、协议违规 blocked→failed、取消→cancelled、执行错误→failed；等用户族（needs_user_input/approval_required）保留 created 只关 attempt（runtime_db 无 waiting 状态、不新造）；可续跑族保留非终态；子代理失败族映射（BLOCKED/CHANNEL_ERROR/TIMEOUT→failed）与 BLOCKED 端到端（settle_runtime_run_for_result→run failed + agent_run.completed）。去掉统一收口或 BLOCKED 映射的变异分别被对应用例杀死。
+- `agent_py_agent/tests/test_run_closeout_backfill.py`：rcb 迁移用例——三条悬挂按分族补收口（blocked→failed、user_stop→cancelled、ok→done）并核对事件/迁移记录/task_run 关闭；可续跑族、等用户族、最近活动、未结算操作、活跃执行锁、unknown attempt、无结束事实七类不动；recovered→cancelled（runtime_reason=attempt_recovered）且 recovered 有未结算操作/执行锁时不动；迁移只执行一次（第二次空操作、记录不变）；预览只读（库文件字节与 mtime 不变）且计数与应用一致（含 recovered_cancelled 细分）；分族与 runtime_mixin 对拍；owner 维护集成（首轮迁移、次轮 already_migrated）。
 - `agent_py_agent/tests/test_compact_calibrated_candidate_gate.py`：候选接受门与预检同一校准口径的回归：纯校准函数与预检逐项相等、宿主边界按 fingerprint/代次冻结观测、transcript 与活动回合两条门在估算偏高 43% 时接受候选且恰好等于上限仍拒绝、进度事件的结构化触发来源，以及隔离 home 两回合假 LLM 复现（接受后下一次真实预检与接受基准一致、失败路径线程快照不被原始值误导、无观测行为不变）。
 - `agent_py_agent/tests/test_compact_output_reserve.py`：真实冻结请求与本地输出预留门组合，当前要求和工具schema保留，过界零业务发送/覆盖提交，Responses普通及OAuth未知上限分开验证。
 - `agent_py_agent/tests/test_session_task_real_chain.py`：会话互通的真实链路门禁，每次交付先用它把关。前台走真实 Gateway ask，后台走 Gateway 同款调度器，唤醒、认领、run_claimed、回合装配都是真实的，只替换供应商传输；覆盖派活与消息唤醒的正向对照、list_owner_sessions 列会话后按清单派活或发消息（不含别的 owner、不含正文）、取消的四个窗口（调用中打断两窗、后端不响应停止、停止旗丢失）、同一对会话连发三条（按单条消息去重）、空转回归与兜底、默认链深 4，已知未修项用 strict xfail（只接受 AssertionError，链路断掉抛 RealChainBroken）。

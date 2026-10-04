@@ -43,6 +43,17 @@
 重投策略或状态存储，不声称完整审阅。验收覆盖当前状态矩阵、同片子状态变化、空载荷与重复提交；
 真实同版 TUI 复验由发布主线执行，旧 TUI212 的准备失误与交付失败证据保留。
 
+## 回合收口与运行账终态（2026-10-04，rco）
+
+主代理尝试（agent_attempt）结束时非终态统一分族：不可续跑族（blocked / 协议违规 / 执行错误 /
+超时 / UNKNOWN 等，共享 gate `should_continue_task` 判定 False）收口 `failed` 并写
+`agent_run.completed`，run 终态后整棵 TaskRun 由原树终态 CAS 关闭（`settle_terminal_task_run`
+的 run 闸自然放行）；可续跑族保留非终态等续跑——技术续跑族由 resume/Goal 驱动，等用户族
+（`needs_user_input`/`approval_required`）由用户动作驱动，`runtime.db` 没有 waiting 类状态、
+如实保持 `created`、不新造。子代理 runner 以失败族（BLOCKED/CHANNEL_ERROR/TIMEOUT）结束时
+同口径收口 `failed`。终态收口不破坏续跑：`create_attempt` 对终态放行并重开已关闭 TaskRun。
+历史悬挂记录（attempt 已终态、run 仍 `created`）的补收口列为后续项，本批不修数据。
+
 ## 后台通知快照与当前完成事实
 
 调度 tick 选出的 wake 只是当时的队列快照。能力预扫可能同步续跑孩子，此时前台也可能已经接收并确认

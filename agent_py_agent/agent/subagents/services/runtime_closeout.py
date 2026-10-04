@@ -18,6 +18,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ..models import SUBAGENT_FAILURE_STATUSES
+
 if TYPE_CHECKING:
     from ...runtime_db.repository import RuntimeRepository
     from ..models import SubAgentRunnerResult, SubAgentTask
@@ -59,10 +61,13 @@ REJECTED_CLOSEOUT_STATES = frozenset({
     CLOSEOUT_STALE_ATTEMPT,
 })
 
+# LLM: 失败族从 subagents.models 的共享集合派生（初审 rco-f2）：BLOCKED/FAILED/CHANNEL_ERROR/TIMEOUT
+#   以后在 models 增删时这里自动跟随，不会一边加状态另一边悄悄漂开；DONE/CANCELLED 单列。
+# 字段用途: runner 结论 → runtime.db run 终态的映射表。
 _RUN_STATUS_FOR_TASK_STATUS = {
-    "FAILED": "failed",
-    "CANCELLED": "cancelled",
     "DONE": "done",
+    "CANCELLED": "cancelled",
+    **dict.fromkeys(SUBAGENT_FAILURE_STATUSES, "failed"),
 }
 _DELIVERY_PENDING = "pending"
 _DELIVERY_DELIVERED = "delivered"
@@ -85,8 +90,10 @@ def _noop_outcome(state: str, reason: str) -> dict[str, Any]:
     return {"state": state, "reason": reason, "target_run_status": "", "retryable": False}
 
 
-# LLM: 目标 run 终态只从 runner 的结构化结论推导；PENDING/BLOCKED/RUNNING 等可恢复形态
-# 一律不收口，避免把等待/待续跑误判成结束。返回空串表示"本次不需要 run 级收口"。
+# LLM: 目标 run 终态只从 runner 的结构化结论推导；3a 裁定（rco，2026-10-04）后失败族
+#   （FAILED/BLOCKED/CHANNEL_ERROR/TIMEOUT）一律收口 failed——runner 已退出时 run 必须有账；
+#   PENDING/RUNNING/PLANNING/PAUSED 等可恢复形态仍不收口，避免把等待/待续跑误判成结束。
+#   返回空串表示"本次不需要 run 级收口"。
 # 函数用途: 把 runner 结论映射成 runtime.db 的 run 终态，或表示无需收口。
 def closeout_target_run_status(params: Any, result: Any, task: Any) -> str:
     raw = str(

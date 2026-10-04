@@ -1,5 +1,38 @@
 # 设计台账
 
+## 历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，基于 rco 头 `d97bb2687`；已实现，ds2 初审可以交终审，已并入 step17j）
+
+- **做什么**：把 rco 修好主链路之前已经停在 created 的历史悬挂记录（attempt 已结束、run/task_run 未收口）做**一次性结构化迁移**补收口——不是永久兜底清扫：迁移记录写 runtime.db 的 metadata（key=`run_closeout_backfill.v1`，含迁移 ID/执行时间/分类计数），处理完成后同一库重复调用是空操作；处理本身幂等（已补的 run 不再满足候选条件），中途崩溃后重跑只补剩余。
+- **触发点**：Gateway 的 owner 维护循环（`cli/gateway_loops.py` 的 `_start_owner_maintenance_loop` → `user_space/owner_maintenance.py::run_owner_retention_if_due`），对每个 owner home 的 runtime.db 各执行一次；回执写进 maintenance.json 的 `run_closeout_backfill` 键（只加键，不改旧键）。
+- **判定（只读结构化字段）**：候选 = run 未终态（''/created）+ current attempt 已结束（ended_at>0）且结束时间超过宽限下限（`RUN_CLOSEOUT_BACKFILL_GRACE_SECONDS` = 6 小时；理由：维护默认每天一次，6h 足以让真实收口/续跑/重试先完成，又远小于"隔夜悬挂"）。逐条排除：attempt 不在静止集（终态去掉 unknown——结果不明必须等人工恢复）、有未结算操作（`unsettled_attempt_operations`）、有活跃执行权锁（`has_active_exec_lock`，持主存活即视为在跑）、无 `agent_attempt.completed` 结束事实（不新造分族判据，保守跳过——recovered 例外见下）。
+- **分族（与 rco 同口径）**：ok→done、取消族（user_stop/conversation_control）→cancelled、等用户族（needs_user_input/approval_required）与可续跑族（共享 gate `should_continue_task` True）→ 不动、其余不可续跑族 → failed。rcb 侧独立实现（避免 runtime_db → agent_core 跨层 import），与 `runtime_mixin._nonterminal_run_closeout_status` 的一致性由对拍用例钉住。
+- **recovered 口径（rcb-v1 修订，2026-10-04，3a 裁定）**：attempt 状态是 recovered（人工处置过 unknown、没有正常完成）且无未结算操作/无活跃锁/超宽限 → 补收口成 cancelled、runtime_reason 记 `attempt_recovered`（与 run_takeover 的 TAKEN_OVER→cancelled 同族）；判定只看 attempt 的结构化状态，不看任何文案；其余没有结束事实的记录仍跳过。迁移 ID **不升版本**（直接改 v1 规则）：生产 21 个 owner 与开发环境都没有库执行过 v1、v1 尚未并入任何部署分支，升 v2 只会留下"v1 键在但规则已变"的歧义。预览与迁移记录新增 `recovered_cancelled` 细分计数。
+- **写账**：每条补收口用 `settle_agent_run` 精确 CAS（expected_attempt_status）收口 run（写 `agent_run.completed`），随后追加 `run_closeout.backfilled` 审计事件（run_id/旧状态/新状态/依据的结构化原因）；涉及的 task_run 用树终态 CAS 补关（link 闸留给发现层的补关通道——本模块没有会话存储访问，活跃 link 的 task_run 由发现层按原口径处理）。
+- **只读预览**：`preview_run_closeout_backfill(db_path)` 用 `RuntimeRepository(read_only=True)`（SQLite URI mode=ro）只读打开，返回会补哪些类、各多少条、哪些跳过；不改任何字节（用例断言文件字节与 mtime 不变）。供 3a 在生产只读副本上核对数字后再决定上线。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「历史悬挂 run 一次性补收口迁移（rcb）」小节。9 项用例（含 recovered→cancelled 与 recovered+未结算/锁不动）+ 5 个定点变异（去掉在途操作检查/执行锁检查/时间下限/迁移记录/recovered 的无未结算操作检查）全部被抓住；guards9 与静态门禁全过；size_diff 新增告警 0。
+- **未验证**：生产库的实际数字与执行未跑（本分支不碰生产数据）；真实 Gateway 维护循环的端到端由 3a 沙箱外复核。
+- **已知边界（ds2 初审，3a 接受，不改行为）**：
+  - 迁移只保证可逆，不保证不与延后续跑发生一次“终态—重开”往返：attempt 已结束、锁已释放、超过 6 小时宽限、但发现层稍后才 create_attempt 续跑的 run，会先被收成终态，续跑时由 create_attempt 重开（终态 run 不拦截）。
+  - _scan_candidates 没有专门索引，owner 历史很大时按 ended_at 加索引再跑。
+  - 结束事实只认 agent_attempt.completed 一种事件类型；task_run 补关的会话 link 闸留给发现层的补关通道。
+  - 生产只读副本预览（10-04）：local/main 68 条候选 → failed 43、cancelled 22（recovered）、跳过 3（有未结算操作），其它 20 个 owner 都是 0。
+
+## 回合收口不推进 agent_run/task_run（rco，2026-10-04，分支 `worker/run-closeout`，基于 step17i 头 `ce646f783`，已实现，ds1 初审 4 条小修已落实，已并入 step17j）
+
+- **现象（结构化证据）**：隔离测试 home 的试次 runtime.db 里，主回合 Gateway 已 done（turn_end_reason=blocked，模型连续 3 次工具协议违规），但 `agent_run` 与 `task_run` 都停在 `created`；attempt 已 `done`（有 `agent_attempt.completed`，无 `agent_run.completed` / `task_run.closed`）。等 task_run 收口的测试工具等到超时。3a 在生产副本统计：agent_runs 停 created 94 条（84 条超 1 小时）、task_runs 停 created 超 1 小时 119 条，分布在 blocked / 恢复后 / 仅创建等多条路径。
+- **根因（两层叠加）**：
+  1. `_settle_main_agent_run_status`（`agent_core/runtime_mixin.py`）：非终态 `runtime_status`（blocked / unfinished / needs_user_input / approval_required 等）→ `terminal=""` → 只调 `settle_agent_attempt` 关 attempt，**run 保持 created**；不可续跑族的 `failed` 兜底此前只存在于 CLI 一次性 run 分支。
+  2. `settle_terminal_task_run`（`conversation/task_run_closeout.py`）：run 不是终态就直接 return——**run 非终态就不关 task_run**。
+  3. 子代理侧同病：`closeout_target_run_status`（`subagents/services/runtime_closeout.py`）此前只映射 DONE / FAILED / CANCELLED，BLOCKED / CHANNEL_ERROR / TIMEOUT 一律不收口。
+- **修法（已实施，统一收口，不为单条路径打补丁；3a 裁定 2026-10-04）**：
+  - 主代理 `_settle_main_agent_run_status`：非终态统一分族（新辅助 `_nonterminal_run_closeout_status`）——不可续跑族（blocked / 协议违规 / 执行错误 / 超时 / UNKNOWN 等，共享 gate `should_continue_task` 判定 False）尝试结束时收口 failed，把 CLI one-shot 兜底口径推广到所有路径；可续跑族保留非终态等续跑——技术续跑族（TOOL_ROUND_LIMIT_REACHED 等）由 resume/Goal 驱动，等用户族（`needs_user_input`/`approval_required`）由用户动作驱动。`runtime.db` 没有 waiting 类状态，等用户族如实保持 created，不新造状态。结束事实收成 `RunCloseoutFacts` 小数据类（只读结构化字段；参数 7→4，size_diff 原 params 告警档位变化归零）。
+  - 子代理 `closeout_target_run_status`：失败族（BLOCKED / CHANNEL_ERROR / TIMEOUT，与 `subagents.models.SUBAGENT_FAILURE_STATUSES` 同口径）随 FAILED 收口 failed。
+  - 判定只读结构化字段（runtime_status / runtime_reason / runtime_source 与共享 gate），不解析文案。
+- **收口成终态不破坏续跑（已核）**：`create_attempt` 对终态放行（`runtime_db/repository.py`，docstring 明确"run 级终态不拦截，任务级生命周期闸才是该不该重跑的裁决者"），同事务重开已关闭 task_run（`task_run.reopened` 事件）；现有测试 `test_run_audit_terminal.py`、`test_r103_run_reuse_no_split.py` 已钉住终态重开；发现层未完成扫描用任务层大写词表（`owner_wake_discovery.py`）不依赖 run 的 created；task_run 关闭另有会话 link 闸与树终态 CAS。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「回合收口统一推进（rco）」小节。四条结束路径（正常完成 / 协议违规 blocked / 取消 / 执行错误）+ 等用户族 + 可续跑族 + 子代理映射与端到端共 9 项用例；两个定点变异（去掉统一收口、去掉 BLOCKED 映射）均被抓住；相关回归 15 文件 303 项全绿；guards9 与静态门禁全过；size_diff 新增告警 0。
+- **历史记录（不修数据，后续项）**：已经停在 created 的历史悬挂记录（判定条件：attempt 已终态（`ended_at>0` 且无在途操作）且 `agent_run.status ∈ {'', 'created'}` 且无执行权锁）由 owner 维护 / 发现层补收口为对应终态（failed / cancelled 按结构化 `runtime_reason` 选），判定只读结构化字段，不解析文案；本分支不修数据。
+- **未验证**：真实 Gateway / TUI / IM 端到端与生产历史悬挂记录补收口未跑（规则禁止连真实 Gateway、不读生产数据）；留给 3a/9b 复核。
+
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，ds7 初审可以交终审（变异 5/5），9b 看脱敏与清洗两处，已并入 step17j）
 
 - **背景**：能力包重跑里 B 包两例不合格，都是交接文件的一个字段填错；检查程序报了错、宿主核验判失败、返工了好几次，模型还是改不对——返工提示里每条错误只有 code 和 location，看不出“应该填什么”。ds7 在做 B 包 0.3.2：检查程序的报错会带上期望值（hint），宿主不转模型就看不到。
