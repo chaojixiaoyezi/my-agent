@@ -365,9 +365,41 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 
 - **未验证**：写账方（B5）未合入，账本写入路径未联测；v8 启用门未开（B7 前），未启用真实 v8 插件；真实 TUI、飞书客户端、真实 Gateway 未跑（本沙箱不启动 Gateway）；观察计数只在 Gateway 进程内存里，TUI 直连入口没有 hub，按“暂无记录”降级已覆盖，但真实 Gateway 里同一 hub 的计数未在真进程复核。
 
+## Gateway G2b 启动预检补齐（g2bf2，2026-10-04，worker/g2b-enforce，待 9b 复核）
+
+- 9b 复核唯一遗留必须改：预检误用客户端只读逻辑，导致（1）凭据缺失时直接退出、不生成，Gateway 永远起不来；（2）配了 `gateway_auth_token` 时预检形同放行，仍在启动恢复之后才拒绝。
+- 改法：抽模块级 `prepare_local_client_credential` / `local_credential_data_root`（只依赖 agent），预检与 `start()` 共用；缺失时生成、不看配置 token。
+- 新用例 2 条（`test_gateway_local_trust_enforcement.py`）：`test_gateway_run_preflight_generates_missing_credential_and_reaches_setup`（走到 setup、凭据 0600）、`test_gateway_run_preflight_refuses_even_with_configured_token`（exit 2、setup 未调用）。
+- 该文件 **29 passed**；相关 3 文件 **59 passed**。
+- 变异 2/2 KILLED（每次只改一处、跑完原样还原）：预检退回 `gateway_client_credentials(agent).headers()`、预检只推数据根不调 `ensure`。
+- 门禁见下方“g2bf2 收尾”。
+
+### g2bf2 收尾
+
+- guards9（含 `test_packaging.py`）**172 passed / 0 failed**。
+- 静态门禁：Ruff 全过；import boundaries `findings=0`；doc sync `DOC_SYNC_PASS`；strict code-size `hard=0 blocked=False`（报告已还原）；`git diff --check` 干净；clean-package OK；size_diff **新增告警 0**。
+- 既有失败复核沿用上一轮结论：`test_gateway_port_deny.py` 在本沙箱失败属环境原因（9b 在沙箱外 21 过 1 跳过）。
+- 未验证：真实 Gateway/TUI/IM 端到端未跑（规则禁止启停 Gateway）。
+
+## Gateway G2b 服务端强制开关（2026-10-04，g2bf，worker/g2b-enforce，待 9b 复核必须修 1、2）
+
+- 变基到 77be520f1 后按 luna4 的 G1 合同改用例（伪造 Agent 带 `owner_home_dir`；缺 `home_paths` 报 `agent_contract`），原因码统一为 `LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`。
+- 新增/相关用例：`test_gateway_local_trust_enforcement.py`（插件令牌回环 4 条、启动前预检 2 条、两处接线 2 条、G2b 既有 21 条）与 `test_gateway_local_client_token.py`（N2/N4 各 1 条）。
+- 变异 6 个全 KILLED（跑完原样还原）：M1 去掉插件令牌回环检查、M2 去掉启动前预检、R5 中间件接线写死 False、R6 HTTP 服务接线写死 False、N2 去掉 root 一致性检查、N4 推不出数据根时退回 home_paths.root。
+- 门禁与回归结果见下方“g2bf 收尾”小节（提交后填写）。
+
+### g2bf 收尾
+
+- 相关回归 11 个文件（信任强制、客户端凭据、观察、G3 客户端凭据、鉴权加固、身份信任、gateway 命令、就绪代次、插件 Host API、TUI 客户端上下文、转向投递恢复）**215 passed / 0 failed**。
+- `test_gateway_port_deny.py` 8 个失败为既有失败：在基线 77be520f1 的临时工作树上同样 8 个失败（`.......FFFFFFsFF......`），沙箱内端口规则不可用，非本次改动引入。
+- guards9（含 `test_packaging.py`）**173 passed / 0 failed**。
+- 静态门禁：Ruff `All checks passed!`；import boundaries `findings=0`；doc sync（`--base 77be520f1`）`DOC_SYNC_PASS`；strict code-size `strict_scope_total=2211 hard=0 hard-risk=1511 soft=700 blocked=False`（`CODE_SIZE_REPORT.md` 已还原）；`sync-backend-config.mjs --check` 通过（258 字段）；`git diff --check` 干净；clean-package `OK: 未发现发布阻塞项`；size_diff **新增告警 0 / 消失告警 31**。
+- 环境限制：`/bin/ps` 与嵌套 Seatbelt 不可用；插件沙箱类测试照实记录、未伪造或删除。
+- 未验证：真实 TUI/飞书/Gateway 端到端未跑（规则禁止启停 Gateway）。
+
 ## Gateway G1 加固（2026-10-03，g1h，worker/g1-hardening，待 9b 核对）
 
-- Agent 凭据根由 `agent_home_root_for_owner(home_paths.owner_home_dir)` 推导，并与 `home_paths.root` 核对；缺少 Agent 合同报 `unavailable:agent_contract`。`agent=None` 报 `unavailable:no_data_root`，不从队列路径回退或创建凭据。
+- Agent 凭据根由 `agent_home_root_for_owner(home_paths.owner_home_dir)` 推导，并与 `home_paths.root` 核对；缺少 Agent 合同报 `unavailable:agent_contract`。`agent=None` 报 `unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`，不从队列路径回退或创建凭据。
 - G1 锁、目录检查、读取与原子写复用 no-follow 文件系统原语；目录符号链接在生成/权限操作前拒绝，链接目标不落锁文件或凭据。测试假 Agent 使用规范 `home_paths(...)`。
 - 直接相关 15 个测试文件（G1/G2a/G3、Gateway 状态与 HTTP、鉴权、插件 Host API、路径 I/O）退出 0、运行到 100%；完整命令：
   ```bash
@@ -375,7 +407,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_local_client_token.py agent_py_agent/tests/test_gateway_local_trust_observation.py agent_py_agent/tests/test_gateway_client_credentials.py agent_py_agent/tests/test_gateway_auth_hardening.py agent_py_agent/tests/test_gateway_identity_trust.py agent_py_agent/tests/test_auth.py agent_py_agent/tests/test_gateway_status_runtime_errors.py agent_py_agent/tests/test_gateway_runtime_status_errors.py agent_py_agent/tests/test_gateway_http_runtime_errors.py agent_py_agent/tests/test_gateway_commands.py agent_py_agent/tests/test_gateway_status_tool.py agent_py_agent/tests/test_plugin_host_api.py agent_py_agent/tests/test_display_archive.py agent_py_agent/tests/test_gateway_client_service.py agent_py_agent/tests/test_nofollow_binary_io.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g1h-related2
   ```
 - guards9（含 `test_packaging.py`）从 `~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt` 读取清单执行，退出 0、到达 100%。
-- 三个单点变异均被相应用例抓到且已逐一还原：缺属性静默降级成 `no_data_root`；`agent=None` 回退 `paths.root.parent`（状态误成 `ok`）；no-follow 目录打开跟随符号链接（目标中实见 `.lock` 与凭据文件）。
+- 三个单点变异均被相应用例抓到且已逐一还原：缺属性静默降级成 `LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`；`agent=None` 回退 `paths.root.parent`（状态误成 `ok`）；no-follow 目录打开跟随符号链接（目标中实见 `.lock` 与凭据文件）。
 - 一次扩展回归还执行了 `test_plugin_sandbox.py` 与 `test_directory_lock_wait.py`：插件沙箱文件有 4 项在启用阶段观察到 `state=failed`，包括 `process_sandbox=False` 的测试；目录锁等待文件有 1 项失败并返回 `managed background launcher identity unavailable`。这些输出未确认根因或是否与本改动/宿主限制有关，不计为通过，也未修改或删除对应测试。
 - 静态门禁：Ruff `All checks passed!`；import boundaries `findings=0`；doc sync `DOC_SYNC_PASS`；strict code-size 退出 0（`strict_scope_total=2214 hard=0 high-risk=1514 soft=700 test_advisory=1237 blocked=False`），生成的 `CODE_SIZE_REPORT.md` 已恢复；size_diff `新增告警: 0 / 消失告警: 23`；clean-package `OK: . 未发现发布阻塞项`；`git diff --check` 与 staged diff-check 退出 0。
 
@@ -749,6 +781,22 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **变异（提交 2 实际只有 1 个被抓住；计数已更正）**：追加退回 `append_jsonl` → 2 条用例失败。原文写「2 个，全部被抓到」又把第 2 条标「不适用」，实际提交 2 只做了 1 个变异，daily 那条不成立（daily 本次未改，见上）。初审复跑时把 `common/json_io._tighten_private_file` 改成 no-op（等价于「存量数据文件不收紧」）也被这条用例抓住，可作为提交 2 的第 2 个有效变异补记。
 - **跑过的命令**：`test_global_index_permissions` + `test_private_lock_permissions` + `test_memory_file_permissions` + `test_memory_store_jsonl{, _class}` + `test_store_scan_indexes` + `test_jsonl_capped_append` + `test_home_index_*.py`。
 - **其它同类未修（列给 3a 定，不在本次范围）**：仍走跟随 umask 的 `append_jsonl` 的还有——`collaboration/store.py`（参与者/证据/裁决/请求）、`user_space/identity_store.py`、`user_space/run_workspace.py`、`user_space/owner_lifecycle.py`、`conversation/store_usage.py`、`conversation/agent_transcript.py`、`conversation/store_guidance.py`、`gateway_parts/io.py`、`audit/logger.py`、`local_storage/events.py`、`memory_store/retention_apply.py`、`memory_archive/compact_apply`、`subagents/**`（dispatch/capability/patch/debug_trace/recovery）。这些目录大多父目录已是 0700，且不在 be 本次点名范围。
+
+## G2b 服务端强制：开关打开时回环无凭据按匿名（2026-10-03，g2b，worker/g2b-enforce，已实现，开关默认关，待 9b 终审）
+
+- 来源：3a 的 G2b 工单与 GATEWAY_LOCAL_TRUST 的 G2b 行/1.4/1.5/3.1/第 4 节；be 四条注意事项（插件令牌豁免、`submit_gateway_ask` 文件队列边界、peer_ip=None 不可信、文案不写「有凭据就全挡住」）与 3a 插话两条（TUI 启动预检、warning 去重有意）已落实。
+- 产品改动：`auth/middleware.py`（`require_local_credential` 分档）、`gateway_parts/http_service.py`（params 字段 + `GatewayLocalCredentialRequired` + `_degrade_or_refuse`）、`cli/gateway_process.py`（两处读开关传入）、`agent/plugin_host_api.py`（先验插件令牌）、`cli/chat_client_context.py`（`preflight_gateway_credential`）；文案：`config/agent_config.yaml`、`settings/config.py`、`gateway_parts/client_credentials.py`（三处改回「两边同时生效」）。
+- 新测试 `agent_py_agent/tests/test_gateway_local_trust_enforcement.py` **19 项全部通过**：开关开无凭据回环=匿名（含无头、伪造 admin）、错/空凭据=匿名、对的凭据保留身份与 admin、peer_ip=None 不可信、require_trusted_source 拒绝/放行、启动 fail-closed（数据根被文件占住/损坏/权限/无数据根各有结构化原因码；坏文件不被覆盖不轮换）、缺失凭据正常生成并启动（status ok）、有效凭据启动 ok、HTTP 端到端（enforced_listener：无凭据匿名/有效凭据保身份/错与空凭据匿名）、插件令牌路由带有效 X-Plugin-Host-Token 且无客户端凭据时 200、无效插件令牌仍 403、TUI 启动预检三例（开关开+凭据缺失→LocalClientCredentialError 且 reason_code==LOCAL_CLIENT_CREDENTIAL_MISSING；开关关→降级正常返回；开关开+凭据可用→正常返回）。命令（工作树根）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_local_trust_enforcement.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g2b
+  ```
+- 相关回归 13 文件 **退出码 0**（含 1 个既有 skip）：test_auth、test_auth_class、test_gateway_auth_hardening、test_gateway_identity_trust、test_gateway_http、test_gateway_http_runtime_errors、test_gateway_bounded_http_server、test_gateway_local_client_token、test_gateway_local_trust_observation、test_gateway_local_trust_enforcement、test_gateway_client_credentials、test_chat_client_context、test_plugin_host_api（同 basetemp）。
+- guards9 十文件（含 test_packaging）**退出码 0**。
+- 五项独立变异，每个只改产品一处、跑后按备份原字节还原（`cmp` 校验 restored=ok），全部被真实用例抓到：①开关关也强制（`if True:`）→ observation 2 项失败；②空凭据当有效（空 token 返回 True）→ 10 项失败（observation/identity_trust/enforcement）；③插件令牌路由也要凭据（恢复先 require_trusted_source）→ `test_enforced_plugin_token_route_passes_without_client_credential` 403≠200；④peer_ip=None 当回环 → `test_enforced_unknown_peer_is_not_trusted` 失败；⑤按原始路径而不是路由模板 → observation 2 项失败。还原后复跑全绿。
+- 静态门禁：import boundaries=0、ruff 全范围通过、DOC_SYNC_PASS、`git diff --check` 干净、clean-package 通过、strict code-size 退出 0（strict_scope_total=2214、hard=0、blocked=False，报告已 `git checkout` 还原不提交）；size_diff **新增告警 0 / 消失告警 23**。
+- 已知环境失败（未删改、未伪造）：`test_host_command_stream.py` 8 项在 `enabled_plugin` 的 `plugin_enable` 夹具失败（`outcome_unknown`，插件宿主启用类，工作规则第 8 条的沙箱限制），与本次改动无关，交 3a 沙箱外复核。
+- 未验证：真实 Gateway/TUI/IM、生产旧客户端迁移与 `/status` 计数归零、真实插件进程、跨平台；未启动 Gateway、未连真实网络。
 
 ## G3 返工：凭据读不到时按 gateway_require_local_credential 降级或拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 

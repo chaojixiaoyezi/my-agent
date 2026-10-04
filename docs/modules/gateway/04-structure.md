@@ -14,6 +14,15 @@
 - `gateway_parts/io.write_json_file_atomic` / `update_json_file_atomic` / `write_gateway_request` 现在委托给 `common/json_io` 的私有原子写原语；原函数签名、锁协议与序列化格式不变，只有落盘权限收紧到 0600/0700。
 - 队列文件、状态文件、会话/任务存储都属宿主数据；`locked_file_transition` 等锁路径此前已私有，本次补齐数据文件一侧。
 
+## G2b 服务端强制（2026-10-03，g2b，待 9b 终审）
+
+- `agent/auth/middleware.py`：`AuthMiddleware` 新增 `require_local_credential` 参数；`_peer_trusted` 分档——强制档只认 `has_gateway_credential`（回环不带信任、`peer_ip=None` 不放行），迁移档保持 G2a 旧分支；`observe_loopback_request` 只按路由模板计数。
+- `agent/gateway_parts/http_service.py`：`GatewayHTTPServerParams` 新增 `require_local_credential`；新增 `GatewayLocalCredentialRequired(RuntimeError)`（带 reason_code）；`_degrade_or_refuse` 在开关开且凭据不可用时拒绝启动，开关关走原降级。
+- `cli/gateway_process.py`：`_build_gateway_auth_middleware` 与 `_start_gateway_http` 从同一份 AgentConfig 读开关传入。
+- `agent/plugin_host_api.py`：`handle_plugin_host_query` 先验插件令牌，有效即放行，令牌无效才回落 `require_trusted_source`。
+- `cli/chat_client_context.py`：新增 `preflight_gateway_credential(agent)`，`make_gateway_chat_client` 构造后调用（TUI 启动预检）。
+- 开关 `gateway_require_local_credential`（默认 false，服务端与客户端两边同时生效）在 `settings/config.py` 与 `config/agent_config.yaml` 登记。
+
 ## G3 返工：凭据降级与 G2b 开关（2026-10-03，g3f，待复审）
 
 - `gateway_parts/client_credentials.py`：新增 `GatewayClientCredentials.require_local_credential`（从同一份 AgentConfig 的 `gateway_require_local_credential` 取，默认 False）与 `_warn_credential_degraded`（模块级去重集合 + 锁，同一原因只记一次）。配置 token 非空仍优先且不读文件；本机凭据失败时开关关返回 `{}`、开关开抛 G1 原因码。
@@ -31,7 +40,7 @@
 ## G1+G2a 宿主凭据与同源路由观察（2026-10-03，sol1g，待初审/9b 终审）
 
 - gateway_parts/local_client_token.py 是凭据路径、生成与读取的唯一权威；common/directory_lock 与 common/nofollow_fs 提供 no-follow 锁、逐层读取和原子写，目录/文件符号链接拒绝，权限错误不静默修复。
-- GatewayHTTPServer.start → _prepare_local_credential → ensure_local_client_credential；真实 Agent 的 owner_home_dir 经 agent_home_root_for_owner 推导，并与 home_paths.root 校验，不随队列/执行 cwd 移动。缺少 Agent 合同记 agent_contract；agent=None 记 no_data_root、照常启动但不创建凭据，不从队列路径回退。
+- GatewayHTTPServer.start → _prepare_local_credential → ensure_local_client_credential；真实 Agent 的 owner_home_dir 经 agent_home_root_for_owner 推导，并与 home_paths.root 校验，不随队列/执行 cwd 移动。缺少 Agent 合同记 agent_contract；agent=None 记 LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT、照常启动但不创建凭据，不从队列路径回退。
 - plugin_sandbox_spec 从可信 owner 路径反推数据根，登记凭据文件和 secrets 父目录；Linux目录空覆盖/macOS拒读写都由原H2实现。Full Access 和关闭插件沙箱的边界见 GATEWAY_LOCAL_TRUST。
 - `_prepare_local_credential` 把严读凭据绑定到 `AuthMiddleware`，与原配置凭据常量时间比较，不进入模型环境、命令参数或状态对象。
 - `http_routes.GATEWAY_HTTP_ROUTES` 同时决定 GET/POST 的处理器及观察模板/档位；`GatewayHTTPHandler._dispatch_route` 在原业务处理前观察一次，原处理器内部的权限判定不变。守卫用随机端口遍历全部路由的真实分发，不维护另一份计数白名单。

@@ -41,6 +41,7 @@ from ..agent.gateway_parts.background_resource_report import (
     list_running_background_processes,
     stop_background_processes,
 )
+from ..agent.gateway_parts.client_credentials import gateway_client_credentials
 from ..agent.gateway_parts.daemon_control import (
     _get_process_start_time,
     _utc_now_iso,
@@ -56,6 +57,8 @@ from ..agent.gateway_parts.daemon_control import (
 from ..agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
+    GatewayLocalCredentialRequired,
+    prepare_local_client_credential,
     start_http_server,
 )
 from ..agent.gateway_parts.io import read_json_file, read_json_file_report, write_json_file_atomic
@@ -411,6 +414,9 @@ def _cmd_gateway_run_setup(agent, paths):
     return requeued, pid
 
 
+# LLM: 唯一鉴权接线点；auth_enabled=False 时返回 None（配合绑定守卫只允许回环）。G2b 开关随同一份 config 传入，
+#   打开后中间件对回环也要求有效凭据；改这里要同步 _start_gateway_http 的启动侧（同一开关决定凭据不可用时是否拒绝启动）。
+# 函数用途: 按配置构造鉴权中间件；关闭鉴权时返回 None。
 def _build_gateway_auth_middleware(config) -> AuthMiddleware | None:
     """按 config 接线鉴权:auth_enabled 时返回强制鉴权的中间件;关闭则返回 None。
 
@@ -420,7 +426,8 @@ def _build_gateway_auth_middleware(config) -> AuthMiddleware | None:
     if not getattr(config, "auth_enabled", True):
         return None
     manager = AuthManager(admin_user_id=getattr(config, "admin_user_id", "admin"), auth_enabled=True)
-    return AuthMiddleware(manager, auth_token=getattr(config, "gateway_auth_token", ""))
+    return AuthMiddleware(manager, auth_token=getattr(config, "gateway_auth_token", ""),
+                          require_local_credential=bool(getattr(config, "gateway_require_local_credential", False)))
 
 
 def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
@@ -473,6 +480,7 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
 
 # LLM: G4：绑定失败时注销 _cmd_gateway_run_threads 预登记的端口（否则漏给同进程后续的模型命令沙箱）；
 #   http_port=0（不开 HTTP）返回 None。调用方已在起线程前预登记了配置端口，这里只负责绑定与失败回滚。有副作用：绑定监听套接字。
+#   G2b 开关与客户端读同一份配置：打开后凭据不可用时 server.start() 抛 GatewayLocalCredentialRequired，绑定不会发生。
 # 函数用途: 按配置端口启动 Gateway HTTP 服务，绑定失败时回滚端口预登记。
 def _start_gateway_http(agent, paths, http_port: int) -> GatewayHTTPServer | None:
     if http_port <= 0:
@@ -481,6 +489,7 @@ def _start_gateway_http(agent, paths, http_port: int) -> GatewayHTTPServer | Non
         auth_middleware=_build_gateway_auth_middleware(agent.config),
         bind_host=getattr(agent.config, "gateway_bind_host", "127.0.0.1"),
         agent=agent,
+        require_local_credential=bool(getattr(agent.config, "gateway_require_local_credential", False)),
     )
     try:
         return start_http_server(http_port, paths, params=http_params)
@@ -980,6 +989,23 @@ def cmd_gateway_start(args) -> int:
     return 0
 
 
+# LLM: 必须修 2（9b 终审）+ g2bf2：凭据预检必须发生在任何启动副作用之前，且必须与服务端用同一份"准备凭据"逻辑——
+#   _cmd_gateway_run_setup 会做启动恢复（中断请求重新排队、卡住的 attempt 恢复），恢复的回合会立即续跑（花 token、可能执行工具）；
+#   起线程更在其后。上一版误用客户端的只读逻辑：配了 gateway_auth_token 时根本不读本机凭据（预检形同放行），
+#   凭据缺失时也不生成（Gateway 永远起不来，违背"缺了就生成"）。现在复用 prepare_local_client_credential。
+# 函数用途: 开关打开时在启动任何副作用前预检（并按需生成）本机凭据；不可用则抛带原因码的错误，让调用方零副作用退出。
+def _preflight_required_local_credential(agent) -> None:
+    from ..agent.gateway_parts.local_client_token import LocalClientCredentialError
+
+    config = getattr(agent, "config", None)
+    if not bool(getattr(config, "gateway_require_local_credential", False)):
+        return
+    try:
+        prepare_local_client_credential(agent)
+    except LocalClientCredentialError as exc:
+        raise GatewayLocalCredentialRequired(exc.reason_code) from None
+
+
 # LLM: 服务进程入口先写托管标记，再创建 Agent/线程/工具；所有子进程继承它，生命周期命令据此拒绝自停。
 #   --after-pid 由安全重启的旧进程传入：先等旧进程退出再启动恢复；planned_restart 收尾后交给接班进程或服务管理器。
 # 函数用途: 前台运行 Gateway 服务循环，负责启动、分类退出原因、收尾清理，以及安全重启时的换进程。
@@ -990,6 +1016,12 @@ def cmd_gateway_run(args) -> int:
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
     run_context = _gateway_run_context_from_args(_GatewayRunBuildRequest(agent, paths, args))
+    # 必须修 2：开关打开且凭据不可用时，在这里就退出——此时还没做启动恢复、没起线程；start() 里那道检查保留。
+    try:
+        _preflight_required_local_credential(agent)
+    except GatewayLocalCredentialRequired as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     requeued, pid = _cmd_gateway_run_setup(agent, paths)
     http_port = getattr(agent.config, "gateway_port", 0) or 0
     stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(

@@ -101,10 +101,26 @@
   `field(compare=False, hash=False, repr=False)`（展示依赖不参与相等/哈希/repr）。**教训**：
   核对“是不是既有失败”必须用 `git merge-base` 作基线，不能用带改动的交付头自证（我上一轮就是拿 `1a4860903` 当基线，结论错了一半）。
 
+## Gateway G2b 启动预检补齐（g2bf2，2026-10-04，worker/g2b-enforce，9b 复核通过，已并入 step17j）
+
+- 9b 复核指出唯一遗留必须改：启动预检用的是**客户端只读**凭据逻辑（`gateway_client_credentials(agent).headers()`）——配了 `gateway_auth_token` 时根本不读本机凭据（预检形同放行），凭据缺失时也不生成（Gateway 永远起不来，违背"缺了就生成"）。
+- 修法（提交 90a73b2ca）：把 `GatewayHTTPServer._prepare_local_credential` 里"推数据根 + `ensure_local_client_credential`"抽成模块级 `prepare_local_client_credential` / `local_credential_data_root`（只依赖 agent）；启动预检与 `start()` 都调它。缺失时生成、不看配置 token、只有凭据确实用不了才拒绝；`ensure` 幂等。
+- 新用例 2 条：开关开+凭据缺失 → 走到 setup 且凭据已生成、权限 0600；开关开+配 token+凭据坏 → exit 2 且 setup 未被调用。
+- 变异 2/2 KILLED：预检退回只读客户端逻辑、预检不调 ensure。
+
+## Gateway G2b 服务端强制开关（g2bf，2026-10-03/04，worker/g2b-enforce，9b 复核通过，已并入 step17j）
+
+- 变基到 77be520f1（luna4 的 G1 加固）：用例按新合同对齐（伪造 Agent 需带 `owner_home_dir`、缺 `home_paths` 报 `agent_contract`），原因码统一为 `LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`（提交 ad0d8a41e）。
+- 必须修 1（提交 8a6507b3c）：`/plugin-host/query` 的有效令牌必须同时来自本机回环，开关开、关同一口径；远程来源一律 403。9b 探针曾证改前远程+有效令牌开关关也 200。
+- 必须修 2 + 3（提交 88fb6536e）：`cmd_gateway_run` 在 `_cmd_gateway_run_setup`（启动恢复、重新排队、起线程）之前预检凭据，不可用即带原因码 exit 2；补 `_build_gateway_auth_middleware`（R5）与 `_start_gateway_http`（R6）两条接线用例，两个变异都被杀。
+- 必须修 4（提交 8c48b7733）：重新生成前端配置目录，`sync-backend-config.mjs --check` 通过。
+- G1 加固补用例（同 8c48b7733）：N2（root 与推导数据根不一致 → `agent_contract` 且两边都不写凭据）、N4（推不出数据根 → 不可用且不写凭据，不退回落盘）；两个变异都被杀。
+- 变异汇总：M1（去掉回环检查）、M2（去掉启动前预检）、R5、R6、N2、N4 全 KILLED，跑完原样还原。
+
 ## Gateway G1 加固（g1h，2026-10-03，worker/g1-hardening，已并入 step17i：luna4 初审提出的 3 条由 luna4 修复，3a 沙箱外 20 个相关文件 432 passed，作者沙箱里 test_plugin_sandbox 和 test_directory_lock_wait 的 5 个失败在沙箱外都过；9b 核对这 3 处）
 
 - 真 Agent 的凭据数据根从 `home_paths.owner_home_dir` 经 `agent_home_root_for_owner` 推导，并校验等于 `home_paths.root`；非空 Agent 缺失/不符合同属性时报 `unavailable:agent_contract`，不把合同破坏伪装成正常无根降级。
-- `agent=None` 没有可信 `home_paths`，记 `unavailable:no_data_root`，G2a 仍启动和观察回环请求，但不从队列目录猜根、不创建凭据文件。有效 owner 布局下凭据路径与插件沙箱 H2 隐藏路径同源。
+- `agent=None` 没有可信 `home_paths`，记 `unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`，G2a 仍启动和观察回环请求，但不从队列目录猜根、不创建凭据文件。有效 owner 布局下凭据路径与插件沙箱 H2 隐藏路径同源。
 - 生成前用 no-follow 目录锁、读取与原子写逐级守住数据根下的 `secrets/`；目录/文件符号链接拒绝为结构化 invalid，父目录权限不合规则拒绝而非静默修复。
 - G2a 语义不变：本机凭据准备失败只投影原因码、匿名回环照常放行并计数；G2b 服务端强制不在本次范围。测试、变异及门禁结果见 TESTS。
 
@@ -226,6 +242,17 @@
 - **行为影响（需要集成者知道）**：`json_io` 行缓存命中的前提从“append 会变 size”变成“代次指纹相同且文件已离开窗口”，纯追加场景的首次命中会比以前晚最多 2 秒；response_renderer 两个入口在窗口内会对同一代文件重复读取一次（调用方是幂等覆盖，不会重复展示或重复收口）。
 - **证据**：三个新测试文件（共享 helper、response 轮询去重、json_io 扩用例）；5 个变异全部被杀（含“只修 json_io、response_renderer 退回 mtime+size”这一跨点变异）；命令与结果见 `TESTS.md` 顶部同名节，变异。
 - **未验证**：真实 Gateway/TUI/飞书轮询、Linux 车道（本机只在 macOS 跑）。全仓 pytest 由 3a 的车道跑。
+
+## G2b 服务端强制：开关打开后回环无凭据按匿名（2026-10-03，g2b，worker/g2b-enforce，已实现，开关默认关，9b 终审通过，已并入 step17j；生产打开要等 /status 无凭据计数归零）
+
+- **范围（设计 G2b 行）**：开关 `gateway_require_local_credential` 打开后，鉴权只认有效本机/配置凭据——回环不再自带信任、拿不到对端地址（`peer_ip=None`）按不可信；不带/错/空凭据的回环请求降匿名（`extract_identity` 原分支，不认身份头、绝不给管理员），要身份的接口照原规则拒绝。开关关时行为与 G2a 完全一致（只计数）。
+- **启动 fail-closed**：`GatewayHTTPServer._prepare_local_credential` 在开关开且凭据不可用（损坏/权限/数据根不可读或不可生成）时拒绝启动，抛 `GatewayLocalCredentialRequired`（reason_code 带 G1 原因码）；凭据缺失仍是 G1 的「缺则生成」正常路径、照常启动；开关关保持 G1 返工后的降级启动。
+- **判定只读结构化事实**：按 `http_routes` 路由模板（不是原始路径）计数与判定；令牌用 `hmac.compare_digest` 常数时间比较；不解析文案。
+- **插件令牌豁免**：`handle_plugin_host_query` 先验 `X-Plugin-Host-Token`，有效即满足这条路（不要求客户端凭据、不看回环），令牌无效才回落 `require_trusted_source`——开关打开时插件不断。
+- **TUI 启动预检（3a 插话①）**：`make_gateway_chat_client` 构造后调 `preflight_gateway_credential`（只读凭据、不发请求），开关开且凭据不可用时拒绝启动并给原因码；开关关保持降级。选「启动时先检查一次」这一支（「GatewayChatClientAgent 统一接住」未做，其余调用点行为不变）。
+- **降级 warning 去重（3a 插话②）**：`_warn_credential_degraded` 的去重是进程级、有意的——凭据修好又坏时同一原因不再重复提示；当前状态从 `/status` 的 `local_credential` 看。注释已写明。
+- **已知边界（be 四条）**：①凭据文件 0600，同一系统用户本来就读得到——它多挡住的是非 Full Access 的模型命令（沙箱读不到 `secrets/`）与其它系统用户，不写成「有凭据就全挡住」；②`submit_gateway_ask` 是文件队列入口、不走 HTTP 端口，端口凭据门管不到它，靠文件权限自己把关，本次不改；③插件令牌路由不受影响（见上）；④`peer_ip=None` 按不可信。
+- **验证**：新 `test_gateway_local_trust_enforcement.py` 19 项；相关回归 13 文件全绿 + guards9 全绿；五项变异（开关关也强制/空凭据当有效/插件令牌要凭据/None 当回环/按原始路径）全部被抓并原字节还原；静态门禁与 size_diff 见 TESTS.md。未验证：真实 Gateway/TUI/IM、生产迁移与计数归零、跨平台。
 
 ## G3 本机客户端附带凭据：返工为「读不到即降级，只在 G2b 开关打开时拒绝」（2026-10-03，g3f，worker/sol1-g3-clients，已并入 step17i（2adfd8518；9b 集成终审通过））
 

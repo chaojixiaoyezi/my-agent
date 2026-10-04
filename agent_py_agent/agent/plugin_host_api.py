@@ -137,16 +137,21 @@ def query_host(base_agent, grant: _Grant, body: dict, *, gateway_status: dict | 
     return result
 
 
-# LLM: 回环来源检查先于读正文；令牌放在 X-Plugin-Host-Token 头，不接受查询参数；错误不回显令牌。
+# LLM: 插件令牌档（G2b）：有效令牌必须同时来自本机回环（插件进程从 127.0.0.1 连入），开关开、关同一口径；
+#   令牌无效时才回落原来源检查（非回环来源仍被拒）；令牌只在头部，不接受查询参数；错误不回显令牌。
 # 函数用途: 处理 POST /plugin-host/query。
 def handle_plugin_host_query(handler, server) -> None:
+    from .auth.middleware import _handler_peer_ip, _is_loopback_peer
     from .gateway_parts.http_handlers import require_trusted_source
 
-    if require_trusted_source(handler):
-        return
     grant = verify_host_api_token(str(handler.headers.get("X-Plugin-Host-Token") or ""))
     if grant is None:
+        if require_trusted_source(handler):
+            return
         handler._send_json(403, {"ok": False, "error": "宿主 API 令牌无效或插件已停用"})
+        return
+    if not _is_loopback_peer(_handler_peer_ip(handler) or ""):
+        handler._send_json(403, {"ok": False, "error": "宿主 API 仅限本机回环访问"})
         return
     try:
         body = handler._read_json()

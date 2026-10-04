@@ -40,6 +40,7 @@
 |-- agent_py_agent/agent/attempt/landlock_launcher.py # G5：Linux Landlock 端口拒绝启动器（exec bwrap 前按端口拒绝连本机 Gateway；自包含、fail-closed）
 |-- agent_py_agent/tests/test_pack_verification_cancellation.py # 块 6a：预取消零启动、真实父子组回收、取消入账和不返工，保留平台外复跑
 |-- agent_py_agent/tests/test_gateway_client_credentials.py # G3：随机端口假服务验证三类客户端、插件流、故障拒绝、单token与不泄漏
+|-- agent_py_agent/tests/test_gateway_local_trust_enforcement.py # G2b：强制档回环无凭据匿名、启动 fail-closed、插件令牌豁免、未知对端不可信、TUI 预检与五项变异
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
 |-- agent_py_agent/agent/capability_verification_manifest.py # 能力包 v2 可选核验声明：交付物识别、钉住的检查程序、输入策略
 |-- agent_py_agent/agent/capability_verifier_consent.py # 检查程序启用前确认、确认码与写入内容激活的同意摘要

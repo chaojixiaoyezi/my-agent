@@ -1,6 +1,7 @@
 # LLM: G3 宿主客户端的凭据选择；本机凭据只经 G1 load 读取，配置 token 优先且只发一个头，不创建或修复凭据。
 #   凭据读不到时按 G2b 开关 gateway_require_local_credential 分流：开关关（默认，G2a 阶段）降级为不带凭据继续发送，
-#   只记一次结构化 warning；开关开才维持原行为——在网络请求前抛 G1 原因码。目前只有客户端读这个开关，服务端强制属于 G2b（未落地）。
+#   只记一次结构化 warning；开关开才维持原行为——在网络请求前抛 G1 原因码。同一开关在 Gateway 服务端也生效
+#   （回环不再自带信任、凭据不可用拒绝启动），客户端与 Gateway 读同一份配置，两边口径一致。
 # 模块用途: 给 TUI、CLI 和 IM 的现有身份头入口提供同一凭据；读取失败按 G2b 开关决定降级或拒绝。
 from __future__ import annotations
 
@@ -16,6 +17,8 @@ from .local_client_token import LocalClientCredentialError, load_local_client_cr
 logger = logging.getLogger(__name__)
 
 # 同一进程内同一原因只记一次 warning，避免 TUI/适配器高频轮询刷屏；锁保护集合的读写。
+# 去重是进程级、有意的：凭据修好又坏时同一原因不再重复提示（宿主可从 /status 的 local_credential 看当前状态），
+# 只有不同原因码才各记一次。
 _WARNED_CREDENTIAL_REASONS: set[str] = set()
 _CREDENTIAL_WARNINGS_LOCK = threading.Lock()
 
@@ -46,6 +49,7 @@ class GatewayClientCredentials:
 
 
 # LLM: 结构化 warning 只带 G1 原因码，不带凭据内容、路径或底层异常；同一进程同一原因只记一次（线程安全）。
+#   去重是进程级、有意的：凭据修好又坏时同一原因不重复提示，宿主从 /status 的 local_credential 看当前状态。
 #   本函数只写日志，不改请求、不写状态；开关开时不会走到这里（那条路直接抛错）。
 # 函数用途: 凭据不可用时提示一次宿主原因，但不打断本次请求；首次之后静默，避免轮询刷屏。
 def _warn_credential_degraded(reason_code: str) -> None:

@@ -244,12 +244,51 @@ def test_agent_none_has_no_data_root_and_never_creates_credentials(tmp_path, mon
                                params=GatewayHTTPServerParams(agent=None, auth_middleware=middleware))
     server.start()
     try:
-        assert server.local_credential_status == "unavailable:no_data_root"
+        assert server.local_credential_status == "unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
         port = server.server.server_address[1]
-        assert _get(port, "/status")[1]["local_credential"] == "unavailable:no_data_root"
+        assert _get(port, "/status")[1]["local_credential"] == "unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
         assert _get(port, "/result/fixture-request")[0] == 200
         facts = _get(port, "/status")[1]["uncredentialed_loopback_by_endpoint"]
         assert facts.get("/result/*", {}).get("count") == 1
+    finally:
+        server.stop()
+    assert not list(root.rglob("gateway-local-client-token"))
+
+
+def test_n2_root_mismatch_with_derived_data_root_is_agent_contract(tmp_path, monkeypatch):
+    # N2（luna4 G1 加固，9b 指出无用例）：home_paths.root 与由 owner_home_dir 推出的数据根不一致时，
+    # 必须报合同违反，且两边 secrets/ 都不写任何凭据（不能悄悄按其中一边落盘）。
+    monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result",
+                        lambda handler: handler._send_json(200, {"ok": True}))
+    data_root = tmp_path / "data-root"
+    owner_home = data_root / "owners" / "local" / "main"
+    owner_home.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    agent = SimpleNamespace(home_paths=SimpleNamespace(root=elsewhere, owner_home_dir=owner_home))
+    server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
+                               params=GatewayHTTPServerParams(agent=agent))
+    server.start()
+    try:
+        assert server.local_credential_status == "unavailable:agent_contract"
+    finally:
+        server.stop()
+    assert not (data_root / "secrets").exists()
+    assert not (elsewhere / "secrets").exists()
+
+
+def test_n4_unresolvable_data_root_is_unavailable_and_writes_nothing(tmp_path, monkeypatch):
+    # N4（luna4 G1 加固，9b 指出无用例）：owner home 不在任何 owners/ 布局下时推不出数据根，
+    # 必须不可用且一个凭据文件都不写——不得退回 home_paths.root（那样凭据会落到插件沙箱不隐藏的位置）。
+    monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result",
+                        lambda handler: handler._send_json(200, {"ok": True}))
+    root = tmp_path / "not-a-owner-layout"
+    root.mkdir()
+    agent = SimpleNamespace(home_paths=SimpleNamespace(root=root, owner_home_dir=root / "somewhere"))
+    server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
+                               params=GatewayHTTPServerParams(agent=agent))
+    server.start()
+    try:
+        assert server.local_credential_status == "unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
     finally:
         server.stop()
     assert not list(root.rglob("gateway-local-client-token"))

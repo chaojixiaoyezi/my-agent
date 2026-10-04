@@ -1,5 +1,6 @@
 
-# LLM: G2a保持回环/未知来源旧信任，仅加本机凭据识别与路由观察，不实施G2b强制；计数不存用户、请求头或凭据。
+# LLM: G2a 默认保持回环/未知来源旧信任并只观察；G2b 开关（gateway_require_local_credential）打开后回环不再自带信任、
+#   来源未知不再放行，可信只由有效本机/配置凭据决定。计数不存用户、请求头或凭据；改判定须同步 test_gateway_local_trust_*。
 # 模块用途: 从请求提取可信身份，并观察未迁移的旧本机客户端。
 """HTTP 请求鉴权中间件 — 从请求中提取身份并进行权限检查。
 
@@ -49,14 +50,14 @@ def _header_value(headers: dict[str, str], name: str) -> str:
 
 
 def _handler_peer_ip(handler) -> str | None:
-    """从 HTTP handler 取对端 IP;取不到返回 None(视为可信,保持既有/单测行为)。"""
+    """从 HTTP handler 取对端 IP;取不到返回 None,由 _peer_trusted 按当前档位判定(强制档不再当可信)。"""
     addr = getattr(handler, "client_address", None)
     if isinstance(addr, (tuple, list)) and addr:
         return str(addr[0])
     return None
 
 
-# LLM: 身份判定与观察分离；G2a不改变无凭据回环权限，秘密只留内存，不输出。
+# LLM: 身份判定与观察分离；迁移档（默认）不改变无凭据回环权限，强制档按开关收紧；秘密只留内存，不输出。
 # 类用途: 为Gateway提供身份鉴权和迁移阶段的有界观察。
 class AuthMiddleware:
     """Gateway HTTP 请求鉴权中间件。"""
@@ -65,11 +66,14 @@ class AuthMiddleware:
     HEADER_CHANNEL = "X-Channel"
     HEADER_TOKEN = "X-Gateway-Token"
 
-    # LLM: 本机凭据由启动钩子绑定；构造不读文件、不导出环境，观察账仅存进程内。
+    # LLM: 本机凭据由启动钩子绑定；构造不读文件、不导出环境，观察账仅存进程内。require_local_credential 是 G2b 上线闸：
+    #   打开后回环不再自带信任、来源未知不放行，可信只由有效凭据决定；默认 False 保持 G2a 行为（服务端与客户端读同一份配置）。
     # 函数用途: 初始化原鉴权服务和旧客户端观察账。
-    def __init__(self, auth_manager: AuthManager, auth_token: str = "") -> None:
+    def __init__(self, auth_manager: AuthManager, auth_token: str = "",
+                 require_local_credential: bool = False) -> None:
         self.auth_manager = auth_manager
         self.auth_token = auth_token  # 暴露部署的局部信任 token(空=只靠回环 peer 信任)
+        self._require_local_credential = bool(require_local_credential)
         self._local_client_credential = ""
         self._observation_lock = threading.Lock()
         self._uncredentialed_loopback_by_endpoint: dict[str, dict[str, int | float]] = {}
@@ -106,10 +110,13 @@ class AuthMiddleware:
         with self._observation_lock:
             return {key: dict(value) for key, value in self._uncredentialed_loopback_by_endpoint.items()}
 
-    # LLM: G2a保留回环/未知来源旧分支，其它peer持两种宿主凭据之一才可信，不提前强制。
-    # 函数用途: 判定请求来源在当前迁移档是否可信。
+    # LLM: 强制档（G2b）可信只由有效凭据决定——回环不再自带信任，来源未知（peer_ip=None）不再放行；
+    #   迁移档（G2a）保持回环/未知来源旧分支，其它 peer 持两种宿主凭据之一才可信。
+    # 函数用途: 判定请求来源在当前档位是否可信。
     def _peer_trusted(self, peer_ip: str | None, headers: dict[str, str]) -> bool:
-        """来源是否可信:回环本机(或来源未知)可信;否则须携带合法 X-Gateway-Token。"""
+        """来源是否可信:强制档须携带合法凭据;迁移档回环本机(或来源未知)可信,否则须凭据。"""
+        if self._require_local_credential:
+            return self.has_gateway_credential(headers)
         if peer_ip is None or _is_loopback_peer(peer_ip):
             return True
         return self.has_gateway_credential(headers)
@@ -162,7 +169,7 @@ class AuthMiddleware:
         return (True, self.get_permission(headers, peer_ip), 200, {})
 
     def check_trusted(self, headers: dict[str, str], peer_ip: str | None = None) -> bool:
-        """来源是否可信(回环本机/合法 token)。不可信来源不得提交任务/驱动 agent。"""
+        """来源是否可信(按当前档位:强制档须合法凭据;迁移档回环本机/合法 token)。不可信来源不得提交任务/驱动 agent。"""
         return self._peer_trusted(peer_ip, headers)
 
 

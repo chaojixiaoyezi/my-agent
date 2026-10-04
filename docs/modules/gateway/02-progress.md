@@ -2,7 +2,7 @@
 
 ## G1 加固（2026-10-03，g1h，worker/g1-hardening，待 9b 核对）
 
-- 真实 `home_paths` 合同作为凭据根来源；路径只经 `agent_home_root_for_owner` 从 owner home 推导并与 `home_paths.root` 核对。缺失属性是 `agent_contract`，没有 Agent 则 `no_data_root`，不会从队列目录写入。
+- 真实 `home_paths` 合同作为凭据根来源；路径只经 `agent_home_root_for_owner` 从 owner home 推导并与 `home_paths.root` 核对。缺失属性是 `agent_contract`，没有 Agent 则 `LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`，不会从队列目录写入。
 - G1 写锁、目录校验、读与原子写复用 no-follow 文件系统原语；目录符号链接在生成、锁文件写入或 chmod 前拒绝，既有权限错误不自动修复。验证命令与未覆盖边界见 TESTS.md 同名节。
 
 ## 宿主侧抓取工具屏蔽本机 Gateway（G6，2026-10-03，luna1g6，`worker/luna1-g6-fetch-port`，ae 复审修正中，待复审/9b 终审）
@@ -59,6 +59,16 @@
     但因此「自愈没生效」在运行时完全不可观测——存量锁有没有真的收敛、下一次启动是否仍是 0644，没有任何埋点或 `/status` 口径能回答。
     只看最终收敛效果时需要另加只读计数。
 - 测试与变异结果见 TESTS.md「三套锁写法统一成私有」一节的补充段。
+
+## G2b 服务端强制：开关打开时回环无凭据按匿名（2026-10-03，g2b，worker/g2b-enforce，已实现，开关默认关，待 9b 终审）
+
+- 开关 `gateway_require_local_credential` 打开后，鉴权只认有效本机/配置凭据：回环不再自带信任、`peer_ip` 拿不到按不可信、不带/错/空凭据回环请求降匿名（不认身份头、绝不给管理员），要身份的接口照原规则拒绝；开关关行为与 G2a 完全一致。
+- 启动 fail-closed：凭据不可用（损坏/权限/数据根不可读或不可生成）时拒绝启动并给结构化原因码（`GatewayLocalCredentialRequired`）；凭据缺失仍是 G1 的「缺则生成」正常路径；开关关保持降级启动。
+- 插件令牌路由（`/plugin-host/query`）先验 `X-Plugin-Host-Token`，有效即放行、不要求客户端凭据；令牌无效才回落原来源检查。
+- TUI 启动预检（3a 插话）：`make_gateway_chat_client` 构造后调 `preflight_gateway_credential`，开关开且凭据不可用时拒绝启动并给原因码；开关关保持降级。
+- 判定按路由模板（不是原始路径）、令牌常数时间比较；降级 warning 去重是进程级、有意的（凭据修好又坏时同一原因不再重复提示）。
+- 已知边界（be 四条）：0600 凭据多挡的是非 Full Access 模型命令与其它系统用户；`submit_gateway_ask` 文件队列入口端口门管不到、靠文件权限自己把关、本次不改；插件令牌路由不受影响；`peer_ip=None` 不可信。详见 GATEWAY_LOCAL_TRUST 第 4 节与 DESIGN_LEDGER。
+- 测试：19 项新用例 + 相关回归 13 文件 + guards9 全绿 + 5 项变异全抓；命令与结果见 TESTS.md 同名节。真实 Gateway/TUI/IM 与生产迁移未验证。
 
 ## G3 返工：凭据读不到时按 G2b 开关降级，不再提前拒绝（2026-10-03，g3f，worker/sol1-g3-clients，返工完成，待复审）
 

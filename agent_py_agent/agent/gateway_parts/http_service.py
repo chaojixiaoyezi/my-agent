@@ -71,6 +71,8 @@ class GatewayHTTPServerParams:
     auth_middleware: AuthMiddleware | None = None
     bind_host: str = "127.0.0.1"  # 默认仅本机可达;暴露到网络须配鉴权(见 _guard_network_exposure)
     agent: SimpleAgent | None = None
+    # G2b 上线闸：true 时本机凭据不可用拒绝启动（fail-closed），由 gateway_process 从与客户端同一份配置读入。
+    require_local_credential: bool = False
 
 
 # 回环地址:仅本机可达。空串/0.0.0.0/::/LAN IP 一律判非回环(=暴露到网络,须鉴权)。默认仅监听回环地址。
@@ -280,6 +282,48 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         handle_admin_summary(self, _server_instance)
 
 
+# LLM: G2b 强制阶段凭据不可用时拒绝启动的结构化错误；reason_code 是机器合同（G1 原因码，含 LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT），
+#   消息不含路径、内容或凭据，调用方（gateway_process 启动链）据此给出可诊断的失败。
+# 类用途: 表示"已开启强制开关但本机凭据不可用"，让宿主启动 fail-closed。
+class GatewayLocalCredentialRequired(RuntimeError):
+    # LLM: 只接受内部生成的原因码；不包装底层异常，避免路径或内容进入错误链。
+    # 函数用途: 构造只含原因码的启动拒绝错误。
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(f"网关拒绝启动: 已开启 gateway_require_local_credential，但本机客户端凭据不可用（{reason_code}）")
+
+
+# LLM: G2b 启动预检与 GatewayHTTPServer.start() 必须用同一份"服务端准备凭据"逻辑：缺失时生成、坏文件不改写、
+#   推不出数据根或合同不符时抛结构化原因码。预检先用它，才能既在副作用之前拒绝，又不把"缺了就生成"误判成失败。
+#   不看 gateway_auth_token（那是部署 token，不是本机凭据）；ensure 幂等，预检与 start() 各调一次没问题。
+# 函数用途: 按真实 Agent 的 home 合同准备本机凭据，返回凭据内容或抛出结构化原因码。
+def prepare_local_client_credential(agent: object) -> str:
+    root = local_credential_data_root(agent)
+    if root is None:
+        raise LocalClientCredentialError("LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT")
+    return ensure_local_client_credential(root)
+
+
+# LLM: Agent.home_paths 是 SimpleAgent 必有合同；其 owner_home_dir 经插件沙箱同一 helper 推根，并校验 root 投影一致。
+#   agent=None 表示没有 canonical home 权威，不能从队列位置推测写入目标。
+# 函数用途: 从可信 Agent 的真实 home 路径解析凭据数据根，合同错误抛原因码，缺少 Agent 根时返回 None。
+def local_credential_data_root(agent: object) -> Path | None:
+    if agent is None:
+        return None
+    try:
+        home_paths = agent.home_paths
+        owner_home = Path(home_paths.owner_home_dir)
+        declared_root = Path(home_paths.root).expanduser().resolve()
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        raise LocalClientCredentialError("agent_contract") from None
+    data_root = agent_home_root_for_owner(owner_home)
+    if data_root is None:
+        return None
+    if declared_root != data_root:
+        raise LocalClientCredentialError("agent_contract")
+    return data_root
+
+
 # LLM: This wrapper owns the lifecycle of exactly one concurrent HTTP listener. Changes must keep
 # exposure checks before bind, preserve the module-global handler context, and stop cleanly without
 # changing request/owner serialization inside Gateway services.
@@ -311,7 +355,8 @@ class GatewayHTTPServer:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
-        # G2a 阶段凭据不可用只降级为状态、不拦启动；状态串只给 ok / unavailable:原因码，不给路径或内容。
+        # G2b 开关：true 时凭据不可用拒绝启动；false（G2a）只降级为状态。状态串只给 ok / unavailable:原因码，不给路径或内容。
+        self.require_local_credential = bool(server_params.require_local_credential)
         self.local_credential_status = "unavailable:not_prepared"
         self._local_client_credential = ""
         # 插件展示服务与共用插件通道池都由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
@@ -326,7 +371,8 @@ class GatewayHTTPServer:
                 "请置 auth_enabled=True,或把 gateway_bind_host 设回 127.0.0.1。"
             )
 
-    # LLM: 唯一监听启动点，暴露检查先于 bind/全局指针；G2a 阶段凭据准备失败降级为状态不拦启动（G2b 才 fail-closed），停机不删凭据。
+    # LLM: 唯一监听启动点，暴露检查先于 bind/全局指针；G2a 档凭据准备失败降级为状态不拦启动，G2b 开关打开时 fail-closed 拒绝启动，
+    #   拒绝发生在设置全局指针与 bind 之前；停机不删凭据。
     # 函数用途: 检查暴露边界、准备本机凭据状态后启动 HTTP 服务线程。
     def start(self) -> None:
         self._guard_network_exposure()  # fail-closed 必须先于任何全局副作用(拒绝时不污染 _server_instance)
@@ -356,38 +402,23 @@ class GatewayHTTPServer:
         register_gateway_bound_port(bound_port)
 
     # LLM: 数据根只从真实 Agent.home_paths.owner_home_dir 经共享 canonical 推导取得；缺失属性是合同错误，None Agent 不授权队列路径写凭据。
-    #   G2a 阶段准备失败只降级为结构化状态、不拦启动；凭据不进入状态或 env。
-    # 函数用途: 准备持久本机客户端凭据，失败时记录不可用状态。
+    #   凭据准备失败走 _degrade_or_refuse：G2a 档只降级为结构化状态、不拦启动；G2b 强制档拒绝启动。凭据不进入状态或 env。
+    # 函数用途: 准备持久本机客户端凭据，失败时降级记录或按开关拒绝启动。
     def _prepare_local_credential(self) -> None:
         try:
-            root = self._local_credential_data_root()
-            if root is None:
-                self._apply_local_credential("", "unavailable:no_data_root")
-                return
-            credential = ensure_local_client_credential(root)
+            credential = prepare_local_client_credential(self.agent)
         except LocalClientCredentialError as exc:
-            self._apply_local_credential("", f"unavailable:{exc.reason_code}")
+            self._degrade_or_refuse(exc.reason_code)
             return
         self._apply_local_credential(credential, "ok")
 
-    # LLM: Agent.home_paths 是 SimpleAgent 必有合同；其 owner_home_dir 经插件沙箱同一 helper 推根，并校验 root 投影一致。
-    #   agent=None 表示没有 canonical home 权威，不能从队列位置推测写入目标。
-    # 函数用途: 从可信 Agent 的真实 home 路径解析凭据数据根，合同错误抛原因码，缺少 Agent 根时返回 None。
-    def _local_credential_data_root(self) -> Path | None:
-        if self.agent is None:
-            return None
-        try:
-            home_paths = self.agent.home_paths
-            owner_home = Path(home_paths.owner_home_dir)
-            declared_root = Path(home_paths.root).expanduser().resolve()
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
-            raise LocalClientCredentialError("agent_contract") from None
-        data_root = agent_home_root_for_owner(owner_home)
-        if data_root is None:
-            return None
-        if declared_root != data_root:
-            raise LocalClientCredentialError("agent_contract")
-        return data_root
+    # LLM: 强制档（开关打开）凭据不可用必须 fail-closed：抛结构化错误，调用方拒绝启动且不 bind 端口；
+    #   迁移档只把原因写成公开降级状态（unavailable:原因码），照常启动，不覆盖坏文件、不轮换。
+    # 函数用途: 按当前档位处理"凭据不可用"——降级记状态或拒绝启动。
+    def _degrade_or_refuse(self, reason_code: str) -> None:
+        self._apply_local_credential("", f"unavailable:{reason_code}")
+        if self.require_local_credential:
+            raise GatewayLocalCredentialRequired(reason_code)
 
     # LLM: 凭据值、公开状态与中间件绑定必须同步更新；失败时清空绑定，避免上一轮或坏文件残留可用凭据的错觉。
     # 函数用途: 写入凭据与状态，并同步给鉴权中间件。

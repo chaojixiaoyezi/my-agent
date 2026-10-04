@@ -39,7 +39,8 @@ from .workspace_resolution import (
 )
 
 # LLM: Gateway HTTP 在原身份头加 G3 唯一凭据，读取失败按 G2b 开关分流——开关关（默认）降级不带凭据发送并记一次
-#   warning，开关开才抛 G1 码；凭据不写日志、环境或可见状态。
+#   warning，开关开才抛 G1 码；TUI 启动（make_gateway_chat_client）按同一开关预检一次，开关开且不可用即拒绝启动；
+#   凭据不写日志、环境或可见状态。
 # Gateway chat clients need config, owner-scoped paths, and UI metadata—not a model backend,
 # tool registry, scheduler, memory curator, or subagent runtime. Every operation stays on an
 # explicit Gateway HTTP/file contract; this process must never promote itself to SimpleAgent.
@@ -618,9 +619,18 @@ def _http_error_json(exc: urllib.error.HTTPError) -> tuple[int, dict[str, object
     return int(exc.code), payload if isinstance(payload, dict) else {}
 
 
+# LLM: G2b 开关打开时 TUI 启动即预检本机凭据（与 IM 适配器 configure_gateway_client 同一口径）：凭据不可用
+#   直接抛 G1 原因码拒绝启动，不让错误在十几个请求方法里裸抛到后台轮询和启动调用方；开关关时预检走降级路径
+#   （不拦启动、只记一次 warning），预检与请求时读的是同一个 gateway_client_credentials。
+# 函数用途: 在 TUI 启动阶段确认凭据可用性；只读凭据文件，不发送网络请求。
+def preflight_gateway_credential(agent: object) -> None:
+    gateway_client_credentials(agent).headers()
+
+
 # LLM: Reuse canonical config layers and owner paths, but bind all thin clients to the local-main
 # process service. The scoped owner still owns sessions/workspace/memory and travels in HTTP auth.
 # This function may create the workspace directory but must not initialize model/tool services.
+# G2b：构造后立即预检凭据——开关开且不可用时在这里拒绝启动，不让首个请求才报错。
 # 函数用途: 构造连接同一个后台 Gateway、但会话和工作目录属于当前用户的轻量客户端。
 def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     config = apply_runtime_config_environment(load_config(args.config))
@@ -651,7 +661,7 @@ def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     resolution = resolve_runtime_paths_for_agent(config, root, scoped_home)
     apply_runtime_paths_to_config(config, resolution)
     config.gateway_workspace = str(shared_gateway_workspace)
-    return GatewayChatClientAgent(
+    client = GatewayChatClientAgent(
         args,
         config,
         root,
@@ -659,6 +669,8 @@ def make_gateway_chat_client(args) -> GatewayChatClientAgent:
         scoped_home,
         owner_identity=owner_identity,
     )
+    preflight_gateway_credential(client)
+    return client
 
 
 __all__ = [
@@ -666,4 +678,5 @@ __all__ = [
     "ActiveTurnInputResult",
     "GatewayChatClientAgent",
     "make_gateway_chat_client",
+    "preflight_gateway_credential",
 ]
