@@ -6,14 +6,14 @@
 - 记忆侧建目录点（candidates / lessons / daily / jsonl / curator_commit / runtime_fact_source / task_workspace / agent_run_workspace）统一改 `nofollow_fs.ensure_private_dir`：缺失段**逐级** 0700（原 `mkdir(parents=True, mode=0o700)` 只保最后一级）、已存在一律不动。
 - 详见 `02-progress.md` 同名节与 `TESTS.md`。
 
-## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）
+## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - `common/json_io._ensure_private_dir` 改口径（3a 裁定，与锁收私 ds8 同口径）：缺失目录按 0700 新建（沿用 no-follow 原语逐段创建、不跟随符号链接），**已存在的目录一律不改权限**；不再对已存在目录 chmod。文件本身仍出生 0600、存量宽权限下次写入收紧。
 - 记忆侧建目录点跟着改成 0700 建：`memory_store/candidates`（候选仓库）、`memory_store/lessons`（lesson 目录 + routing 目录 + HOT 目录）、`memory_store/curator_commit`（事务目录与每个 run 的事务子目录）、`memory_store/daily`（daily 分片目录，原为普通 mkdir 靠首次写入收紧）。
 - 可配置路径边界：目录被指到已存在的用户目录时，写入只新增 0600 文件、目录与兄弟文件一位不动；存量宿主目录的收紧归 owner 维护负责，不在每次写入时做。
 - 用例与变异见 [TESTS](../../../TESTS.md) 的 pdp 节。
 
-## 记忆操作审计账本私有写入（pw2，2026-10-03，分支 `worker/private-writes-batch2`，待复审）
+## 记忆操作审计账本私有写入（pw2，2026-10-03，分支 `worker/private-writes-batch2`，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - `memory_store/operations` 的 `ops.jsonl`（无正文的形式变更审计与硬删除墓碑）从 `append_jsonl_capped` 改走 `append_private_jsonl_capped`：目录 0700、新文件 0600、已有宽权限文件下次写入收紧；有界保留语义与写入格式逐字节不变。
 - 用例与变异见 [TESTS](../../../TESTS.md) 的 pw2 节。

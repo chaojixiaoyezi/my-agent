@@ -19,7 +19,7 @@
 - 真实 `home_paths` 合同作为凭据根来源；路径只经 `agent_home_root_for_owner` 从 owner home 推导并与 `home_paths.root` 核对。缺失属性是 `agent_contract`，没有 Agent 则 `LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`，不会从队列目录写入。
 - G1 写锁、目录校验、读与原子写复用 no-follow 文件系统原语；目录符号链接在生成、锁文件写入或 chmod 前拒绝，既有权限错误不自动修复。验证命令与未覆盖边界见 TESTS.md 同名节。
 
-## owner 维护挂历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，已实现，待复审）
+## owner 维护挂历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，已实现，已并入 step17j `39350230a`）
 
 - Gateway 的 owner-maintenance 循环（`cli/gateway_loops._start_owner_maintenance_loop` → `user_space/owner_maintenance.run_owner_retention_if_due`）在跑 retention 的同时多做一步：对每个 owner home 的 runtime.db 执行一次历史悬挂 run 补收口迁移（`runtime_db/run_closeout_backfill.apply_run_closeout_backfill`）——把 rco 修好主链路前停在 created 的 run/task_run 按结构化分族补到终态。
 - 迁移只执行一次（记录写 runtime.db metadata 的 `run_closeout_backfill.v1`，重复调用空操作；处理幂等，崩溃后重跑只补剩余）；判定与分族只读结构化字段（attempt 静止、无未结算操作、无活跃锁、结束超过 6 小时宽限；不可续跑族→failed、取消族→cancelled、可续跑/等用户族不动；recovered→cancelled、runtime_reason=attempt_recovered）；每条写 `run_closeout.backfilled` 审计事件，task_run 用树终态 CAS 补关。
@@ -42,19 +42,19 @@
 - 已知边界：窗口内对同一代文件会多读一次（代价是一次文件读取），换来确定性；窗口外行为与原来一致。
 - 测试与变异见 `TESTS.md` 顶部同名节；真实 Gateway/TUI/飞书轮询未验证。
 
-## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）
+## 私有写只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - `common/json_io._ensure_private_dir` 改口径（3a 裁定，与锁收私 ds8 同口径）：缺失目录按 0700 新建（no-follow 逐段），已存在的目录一律不改权限。
 - `gateway_parts/io.write_json_file`、`scheduler/repository` 的建目录点改 `mkdir(..., mode=0o700)`；Gateway 队列目录（inbox/responses/history 等）此前由普通 mkdir 先建、靠私有写收紧，现在建出来即 0700；已存在的目录（含用户指定路径）不再被收紧。
 - 已知边界：inbox 的 `.lock` 文件会随请求累积，本次不改，清理留给 owner 维护后续项。
 
-## Gateway 队列与通用 JSON 写入口私有写入（pw2，2026-10-03，分支 `worker/private-writes-batch2`，待复审）
+## Gateway 队列与通用 JSON 写入口私有写入（pw2，2026-10-03，分支 `worker/private-writes-batch2`，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - `gateway_parts/io` 的三个通用写函数 `write_json_file_atomic` / `update_json_file_atomic` / `write_gateway_request` 改走私有原子写（目录 0700、文件 0600、存量宽权限下次写入收紧），内容逐字节不变（新增不带尾换行的私有原语以保持原格式）。
 - 42 个调用方已逐个核对，写的是 Gateway 根下的宿主运行数据：请求队列（inbox/processing/done/failed/responses）、会话与任务存储、控制面/租约/实验记录状态、adapter 状态、停启请求与交接状态。读写方（TUI、适配器、派活工具、后台服务）都是同一个系统用户，收紧到 0600 不影响它们。
 - 调度器历史账本 `scheduler/repository` 与任务 `timeline.jsonl` 同批改私有追加。用例与变异见 [TESTS](../../../TESTS.md)。
 
-## 写锁 sidecar（.wlock）同批收私 + 初审三条小问题（lkf，2026-10-03，分支 `worker/ds3-lock-private`，基于 `199879045`，已实现，待 9b 安全终审）
+## 写锁 sidecar（.wlock）同批收私 + 初审三条小问题（lkf，2026-10-03，分支 `worker/ds3-lock-private`，基于 `199879045`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **背景**：ds1（lockr）对 ds3 的锁收私交付做初审，结论「必须改 1 + 小问题 4」。3a 采纳后范围收缩：
   `gateway_parts/io.py` 的 `_locked_file_path`/`_open_lock_handle` 由 **ds9 的 `worker/private-writes-followup` `17dc9781b`** 负责，
@@ -80,7 +80,7 @@
     只看最终收敛效果时需要另加只读计数。
 - 测试与变异结果见 TESTS.md「三套锁写法统一成私有」一节的补充段。
 
-## G2b 服务端强制：开关打开时回环无凭据按匿名（2026-10-03，g2b，worker/g2b-enforce，已实现，开关默认关，待 9b 终审）
+## G2b 服务端强制：开关打开时回环无凭据按匿名（2026-10-03，g2b，worker/g2b-enforce，已实现，开关默认关，9b 终审通过，已并入 step17j `32551798d`）
 
 - 开关 `gateway_require_local_credential` 打开后，鉴权只认有效本机/配置凭据：回环不再自带信任、`peer_ip` 拿不到按不可信、不带/错/空凭据回环请求降匿名（不认身份头、绝不给管理员），要身份的接口照原规则拒绝；开关关行为与 G2a 完全一致。
 - 启动 fail-closed：凭据不可用（损坏/权限/数据根不可读或不可生成）时拒绝启动并给结构化原因码（`GatewayLocalCredentialRequired`）；凭据缺失仍是 G1 的「缺则生成」正常路径；开关关保持降级启动。
@@ -1335,7 +1335,7 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **边界**：判断只看结构化字段，不解析文案；文案单一来源（request_errors 已登记）；未跑真实 TUI/飞书渲染与真实 Gateway 请求。测试与变异见 [TESTS](../../../TESTS.md) 顶部「修法 B 收口提示结构化」小节。
 - **初审补齐（rfsf，分支 `worker/rfs-followups`）**：状态行收口短句统一登记 `request_errors.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT`（`agent_activity`/`main_activity` 引用，不再各自硬编码）；补 3 条用例（agent_activity 状态行、main_activity 状态行、foreground 转发）把初审 3 个存活变异全部转红；回退文本断言升级为完整字符串逐字 `==`；新增 ast 守卫用例（扫产品代码所有 `write_provider_retry` 实现方，必须显式声明 `params`、不得用 `**kwargs` 静默收下），协议约定写进发布方注释；命令与结果见 TESTS.md「修法 B 收口提示结构化」小节。
 
-## 插件账本与展示 B6（M 线第一期，m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，头 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，待复审）
+## 插件账本与展示 B6（M 线第一期，m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，头 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，已并入 step17j `24c3aec0f`）
 
 - **起因**：设计稿 [插件事件与收紧钩子](../../design/PLUGIN_EVENT_HOOKS.md) 第 9 节与第 13 节 B6 行。B6 分两半：B5 写 `plugin_gate.decided` 账本，B6 做查询与 `/plugins info` 四段展示；本轮先做不依赖 B5 的查询与展示半。
 - **改动**（Gateway 侧只做只读穿透，不改任何控制语义）：

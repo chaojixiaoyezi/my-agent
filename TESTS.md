@@ -99,7 +99,7 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
   - m2 去掉 `\Z` → **KILLED**（`test_regex_anchors_and_fullmatch_are_both_required`、`test_mask_secret_value_requires_a_whole_string_match` 变红）。
   - m3 `.fullmatch(` 换成 `.match(` → **存活，但属等价变异**：正则内部已带 `\Z` 时两者结果相同（实测逐样本一致）；真正的风险是"两层同时放松"，m2 已覆盖。如实记录。
 
-## 工具输出打码不再误伤纯变量引用（rdv，2026-10-04，分支 `worker/redaction-var-refs`，待复审）
+## 工具输出打码不再误伤纯变量引用（rdv，2026-10-04，分支 `worker/redaction-var-refs`，9b 终审通过，已并入 step17j `a67c5df3b`）
 
 - 来源：ds10 复审 `scripts/feishu_limit/*.sh` 时读到请求头值被打成占位符，判成"凭据没带上"；实际是纯变量引用（3a 用 `git show` 核实）。
 - 根因：工具输出经 `agent/tooling/output_projection.py:45` → `redact_sensitive_text(code_file=…)`；`agent/common/log_redaction.py` 的 `_AUTHORIZATION_RE`（:61）与 `_SECRET_ASSIGNMENT_RE`（:62-66）无条件替值。
@@ -156,7 +156,7 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
 - 变异（`tasks/2026-10-04/sclk-scoped-locks-private/mutations.py` + 单点补跑）：锁文件 mode 放宽到 0666 → 杀；目录 mode 放宽到 0777 → 杀；改回裸 `os.open` → 杀；丢掉 `exclusive` 分支（已存在也成功）→ 杀。
 - **既有失败（非本次引入）**：`test_directory_lock_wait.py::test_store_recovery_and_commit_are_not_interrupted_after_lock_admission` 报 `managed background launcher identity unavailable`。在基线 worktree（`312a4fec4`，`git merge-base claude/3a-step17i` 即该提交）上跑同一文件得到**同样 1 failed / 3 passed**，确认既有（沙箱里没有受管后台启动器身份）。
 
-## B9 模板补参数级 deny 示例（tdeny，2026-10-04，worker/b9-template-deny-example，基于 17j 头 477611a6d，待复审）
+## B9 模板补参数级 deny 示例（tdeny，2026-10-04，worker/b9-template-deny-example，基于 17j 头 477611a6d，已并入 step17j `2fb2eb718`）
 
 - **改了什么**：两个技能模板各加一个通用参数级 deny 示例（NUL 空字节 → `deny` + `MALFORMED_ARGUMENTS`）；技能测试加两帧断言（无截断 / 有截断都 deny）；B8 样例测试的 `_assert_truncation_behavior` 补 `# LLM:` 契约注释；author-contract 补一句指向新示例。
 - **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-tdeny`）：
@@ -181,7 +181,7 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
 - **一致性自查**：脚本比对 Tree 段条目，内容完全相同的重复条目 **0**；37 个新增文件逐个核对，除目录级条目已覆盖者外无遗漏。
 - **未验证**：未跑 pytest（纯文档改动，无产品代码变化）。
 
-## 历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，基于 `d97bb2687`，已实现，待复审）
+## 历史悬挂 run 一次性补收口迁移（rcb，2026-10-04，分支 `worker/run-closeout-backfill`，基于 `d97bb2687`，已实现，已并入 step17j `39350230a`）
 
 - 来源：rco 交付的台账后续项「把生产里已经停在 created 的历史悬挂记录补收口」。
 - 改动：新增 `agent_py_agent/agent/runtime_db/run_closeout_backfill.py`（一次性迁移：候选扫描 / 结构化分族 / settle CAS 补收口 / `run_closeout.backfilled` 事件 / 迁移记录写 metadata / 只读预览）；`agent_py_agent/agent/user_space/owner_maintenance.py` 在 owner 维护里挂迁移（回执写 maintenance.json 的 `run_closeout_backfill` 键）。
@@ -196,7 +196,7 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
 - guards9（十文件）**173 passed**；静态门禁：import boundaries=0、ruff 全过、strict code-size 退出 0（strict_scope_total=2209、hard=0、blocked=False，报告已还原不提交）、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失 34**（首轮曾新增 2 个测试文件告警——函数近限与参数近限档，拆平后归零）。
 - 未验证：生产库实际数字与执行未跑（本分支不碰生产数据）；真实 Gateway 维护循环端到端由 3a 沙箱外复核。
 
-## 回合收口统一推进 agent_run/task_run（rco，2026-10-04，分支 `worker/run-closeout`，基于 step17i 头 `ce646f783`，已实现，待复审）
+## 回合收口统一推进 agent_run/task_run（rco，2026-10-04，分支 `worker/run-closeout`，基于 step17i 头 `ce646f783`，已实现，已并入 step17j `39350230a`）
 
 - 来源：3a 工单「回合的尝试（agent_attempt）已经结束，但对应的 agent_run 和 task_run 一直停在 created」。隔离试次（协议违规 blocked）runtime.db 逐行核对 + 生产副本统计（agent_runs 停 created 94 条、task_runs 停 created 超 1 小时 119 条）确认多路径复现。
 - 改动：① 主代理 `_settle_main_agent_run_status`（`agent_core/runtime_mixin.py`）非终态统一分族——新辅助 `_nonterminal_run_closeout_status`：不可续跑族（blocked/协议违规/UNKNOWN 等，共享 gate `should_continue_task` 判定 False）收口 failed；可续跑族保留非终态等续跑（技术续跑族 + 等用户族 `needs_user_input`/`approval_required`；runtime_db 无 waiting 类状态、不新造）。结束事实收成 `RunCloseoutFacts` 小数据类（参数 7→4）。② 子代理 `closeout_target_run_status`（`subagents/services/runtime_closeout.py`）失败族 BLOCKED/CHANNEL_ERROR/TIMEOUT 随 FAILED 收口 failed。判定只读结构化字段。
@@ -220,7 +220,7 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
 - **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-rcob`）：`test_dispatch_liveness_and_revive.py` + `test_run_closeout_settlement.py` + `test_run_closeout_backfill.py` → **70 passed, 1 skipped**；老测试 `test_blocked_runner_result_does_not_settle_runtime_run` 红转绿。guards9 → **176 passed**；import boundaries=0、ruff、doc_sync、strict code-size（2204/hard=0/blocked=False，报告已还原）、`git diff --check`、clean-package 全过；size_diff **新增告警 0 / 消失 39**。
 - **基线复核**：`test_supervision_kills_fully_stalled_source_worker_host` 在基线 `39350230a`（临时 worktree 复核）同样失败——环境相关既有失败，非本修正引入。
 
-## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，待复审）
+## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，已并入 step17j `1a21ae0d9`）
 
 - **改了什么**：检查程序每条错误可选带 `hint`（字符串）；宿主只转这一个自由文本字段——换行压空格、去控制字符和双向控制符、最多 200 个字符（超了截到 199 加省略号）；无 hint 照旧；hint 走与 location 相同的宿主路径脱敏；判定与计数只看 code。改动：`pack_verifier_runner.py`（`_error_samples` / `_clean_hint` / 两个新常数）、`pack_verifier_redaction.py`（`_redact_sample`）、`pack_verification_service.py`（`_sample_text`）；合同写进 `docs/design/CAPABILITY_PACKS_V2.md` 第 3 节输出合同。
 - **用例**（`agent_py_agent/tests/test_pack_verification_post_write_feedback.py` 新增 5 条）：
@@ -591,7 +591,7 @@ harness-console 的 `test_missing_host_api_env_reports_unavailable` 和 `test_de
   5 项 X11 防线自检在车道里按设计跳过；真链路点击用的 key 是 `ocr:1`（宿主接受带冒号的 key），改内容、移窗后照常 `stale`。
 - **门禁**：变基到含片 D 的 `afb15947b` 后，相关测试 31 个文件（另加片 D 的 `test_decision_action_execute.py`）694 项通过、7 项车道用例在 Mac 上按设计跳过；严格门禁全部通过，size diff 新增 0。
 
-## feishu_limit 脚本补本机凭据 + scripts 守卫（2026-10-03，flc，worker/feishu-limit-creds，待复审）
+## feishu_limit 脚本补本机凭据 + scripts 守卫（2026-10-03，flc，worker/feishu-limit-creds，已并入 step17j `cb16433d7`）
 
 - 来源：凭据盘点（credinv）第 3 条——`scripts/feishu_limit/` 四个脚本 11 处 curl 调 Gateway 不带 `X-Gateway-Token`，G2b 打开后会变成匿名/被拒，且 G2a 计数永远归不了零。
 - 改动：
@@ -609,7 +609,9 @@ harness-console 的 `test_missing_host_api_env_reports_unavailable` 和 `test_de
 - 收尾门禁（工作树根，全部通过）：guards9 清单 **175 passed**；`check_import_boundaries.py` findings=0；`ruff check agent_py_agent scripts` All checks passed；`check_doc_sync.py` DOC_SYNC_PASS；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` blocked=False（跑后 `git checkout -- CODE_SIZE_REPORT.md`）；`git diff --check` 干净；`check_clean_package.py .` OK。
 - 未验证：四个脚本要真实 Gateway 才能跑，本轮没跑（按分工由 3a 在沙箱外复核）；脚本的实际 HTTP 行为未实测，只验证了语法与守卫。
 
-## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，基于 B3 返工后的头 `0a3064078`，已实施，待复审；**查询与展示完成，写账待 B5**）
+## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，基于 B3 返工后的头 `0a3064078`，已并入 step17j `24c3aec0f`；**查询与展示完成，写账待 B5**）
+
+**展示层归属更正（audit17j 核实）**：B6 的展示层已完整并入 step17j（`24c3aec0f`）。四段详情的唯一渲染点是 `agent_py_agent/agent/plugin_commands.py` 的 `render_plugin_event_details`（事件订阅、收紧工具、网络与沙箱、最近决定与观察计数），数据装配在 `plugin_management.py` 的 `_event_details`/`_gate_ledger`/`_observed_counts`，账本查询与字段白名单在 `agent_py_agent/agent/runtime_db/repository.py` 的 `plugin_gate_decisions` / `_PLUGIN_GATE_DECISION_FIELDS`。TUI 与飞书走同一入口（`gateway_parts/plugin_command_service.py` 的 `_scope_management`），是同一份输出。有人在 `plugin_commands.py` 里 grep `plugin_gate` 得到 0 计数并据此说"B6 展示层没进 17j"——**该判据不成立**（查询不写在展示层文件里，展示层只消费结构化结果）。**真正缺的是 B5 写入方**：没有它就没有 `plugin_gate.decided` 行，真实运行里 `/plugins info` 第 4 段会显示"暂无记录"、无法审批计数为 0。
 
 ### B6 二次修复：确认门回归（b6f，2026-10-03）
 
@@ -965,7 +967,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **静态门禁**：`ruff check agent_py_agent scripts` → `All checks passed`（首次 4 个 I001 导入排序，`--fix` 后复跑通过）；`check_import_boundaries.py`、`check_doc_sync.py`、strict code-size、`check_clean_package.py`、`git diff --check`、guards9 结果见交接报告与提交信息。
 - **未验证**：真实 Gateway/TUI/飞书轮询语义（组件级用例只能证明接口层）、Linux 车道（本机为 macOS）、全仓 pytest（由 3a 车道跑）。
 
-## 私有写/私有锁符号链接锚点跟随一次（pdp 后续，2026-10-04，待复审）
+## 私有写/私有锁符号链接锚点跟随一次（pdp 后续，2026-10-04，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **改了什么**：新增 `nofollow_fs.resolve_existing_symlink_anchor`；`json_io._ensure_private_dir` 与 `open_private_lock_beneath` 在「最近已存在祖先」是符号链接时解析到真实目录再建缺失段；断链/指向文件保持拒绝。另修 `test_gateway_model_adoption` 的故障注入点（pw2 后挪到 `common.json_io._replace_with_retry`）与 ds4 点名的两个函数注释。
 - **新增用例**（`test_private_dirs_policy.py`，共 13 条）：
@@ -986,7 +988,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **未验证**：真实 owner home 的符号链接布局、真实 Gateway 链路。
 
 
-## 私有写也只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，待复审）
+## 私有写也只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **改了什么**：`_ensure_private_dir` 对已存在目录不再 chmod、缺失目录经 no-follow 原语按 0700 新建；26 处「先普通 mkdir 再私有写」的建目录点改 `mkdir(..., mode=0o700)`；第一批（ds9）39 个改动函数补双层注释；subagent/memory/gateway 三模块文档同步；顺带修复 pw2 的 `execution/report.py` 导入点数（基线复核为既有失败）。
 - **新增用例**：`tests/test_private_dirs_policy.py`（10 条）
@@ -1019,7 +1021,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **未验证**：真实 home 权限、真实 Gateway/CLI 链路、owner 维护侧的存量收紧（明确不在本批范围）。
 
 
-## 宿主数据私有写入第二批（pw2，2026-10-03，分支 `worker/private-writes-batch2`，基于 pwf 头 `9bd2fc318`，已实现，待复审）
+## 宿主数据私有写入第二批（pw2，2026-10-03，分支 `worker/private-writes-batch2`，基于 pwf 头 `9bd2fc318`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **改了什么**：pwf 列给 3a 定的三类（append 家族剩余调用点、`gateway_parts/io` 三个通用 JSON 写函数、subagents 剩余整份写）全部改走私有原语；新文件 0600、新目录 0700、已有宽权限文件下次写入收紧，内容与调用方接口逐字节不变。新增三个私有原语：`append_private_jsonl_capped`、`write_private_json_file_atomic_no_newline[_unlocked]`、`write_private_json_object`。逐处核对表与 42 个调用方核对见 DESIGN_LEDGER 同名条目。
 - **提交**：`d4cb0cdb7` A 组（append 家族 7 点）、`3a7cfd60e` B 组（`gateway_parts/io` 三函数）、`bca523459` C 组（subagents 9 文件）。
@@ -1057,7 +1059,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；`git diff --check` → 干净；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`size_diff.sh` → **新增告警 0 / 消失告警 16**。
 - **未验证**：与 step17i 合跑的两条符号链接用例由 3a 沙箱外验证；真实快照链路与真实 Gateway 未跑。
 
-## 宿主数据私有写入后续（pwf，2026-10-03，分支 `worker/private-writes-followup`，基于 ds3 头 `199879045`，已实现，待复审）
+## 宿主数据私有写入后续（pwf，2026-10-03，分支 `worker/private-writes-followup`，基于 ds3 头 `199879045`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **改了什么**：ds3 清单里仍跟随 umask 的宿主数据写入统一改走私有原语（`append_private_jsonl_records` / `append_private_text` / `write_private_text_file_atomic` / `write_private_json_file_atomic(_unlocked)`）：新文件 0600、新目录 0700、已有宽权限文件下次写入即收紧；调用方接口与序列化内容逐字节不变（`sort_keys` 语义原样保留，例如审计账仍不排序键）。另补 `gateway_parts/io._open_lock_handle` 这第四处锁写法（ds3 遗漏）。逐处核对表、边界与未改清单见 DESIGN_LEDGER 同名条目。
 - **提交**：`80488a043` 会话与用量、`17dc9781b` 审计与事件、`c87cd9396` 协作与身份/工作区、`5b2b9a919` 子代理（`9cb5a03fe` 补一处）、`1b2803e16` 记忆 retention。
@@ -1073,7 +1075,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **收尾门禁**：guards9（10 文件）→ **172 passed**；`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `hard=0 blocked=False`（`CODE_SIZE_REPORT.md` 已还原不提交）；`git diff --check` → 干净；`size_diff.sh` → **新增告警 0 / 消失告警 16**（首跑曾因测试 helper 参数超 4 个新增 1 条，已拆平）；`check_clean_package.py .` → `OK: 未发现发布阻塞项`。
 - **环境限制**：本机未跑全仓 pytest（按规则只跑直接相关文件与 guards9）；真实 Gateway、TUI、IM 与真实 home 权限未验证。
 
-## 写锁 sidecar（.wlock）同批收私（lkf，2026-10-03，同一分支，基于 `199879045`，已实现，待 9b 安全终审）
+## 写锁 sidecar（.wlock）同批收私（lkf，2026-10-03，同一分支，基于 `199879045`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **改了什么**：`gateway_parts/daemon_metadata._flocked_sidecar` 的 `.wlock` 从 `lock_path.open("a+")`（按 umask 落成 0644）改成经 `_open_private_wlock_descriptor` → `nofollow_fs.open_private_lock_beneath_tightened` 拿 fd：文件 0600、缺失目录按 0700 新建、已存在的目录一律不动（lkp 2026-10-03 修正，见顶部条目）、符号链接/硬链接锁抛 `NoFollowPathError`、存量 0644 自愈收紧，只在 fd 上 flock。`_flock` 改名 `_flock_descriptor`（改收 fd 而非文件对象），阻塞语义与 Windows 降级告警不变。
 - **范围说明**：`gateway_parts/io.py` 的 `_locked_file_path`/`_open_lock_handle`（初审必须改 1 的另一半）由 **ds9 的 `worker/private-writes-followup` `17dc9781b`** 负责，本分支未改，3a 合并时用 ds9 的版本。
@@ -1125,7 +1127,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **跑过的命令**：`test_global_index_permissions` + `test_private_lock_permissions` + `test_memory_file_permissions` + `test_memory_store_jsonl{, _class}` + `test_store_scan_indexes` + `test_jsonl_capped_append` + `test_home_index_*.py`。
 - **其它同类未修（列给 3a 定，不在本次范围）**：仍走跟随 umask 的 `append_jsonl` 的还有——`collaboration/store.py`（参与者/证据/裁决/请求）、`user_space/identity_store.py`、`user_space/run_workspace.py`、`user_space/owner_lifecycle.py`、`conversation/store_usage.py`、`conversation/agent_transcript.py`、`conversation/store_guidance.py`、`gateway_parts/io.py`、`audit/logger.py`、`local_storage/events.py`、`memory_store/retention_apply.py`、`memory_archive/compact_apply`、`subagents/**`（dispatch/capability/patch/debug_trace/recovery）。这些目录大多父目录已是 0700，且不在 be 本次点名范围。
 
-## G2b 服务端强制：开关打开时回环无凭据按匿名（2026-10-03，g2b，worker/g2b-enforce，已实现，开关默认关，待 9b 终审）
+## G2b 服务端强制：开关打开时回环无凭据按匿名（2026-10-03，g2b，worker/g2b-enforce，已实现，开关默认关，9b 终审通过，已并入 step17j `32551798d`）
 
 - 来源：3a 的 G2b 工单与 GATEWAY_LOCAL_TRUST 的 G2b 行/1.4/1.5/3.1/第 4 节；be 四条注意事项（插件令牌豁免、`submit_gateway_ask` 文件队列边界、peer_ip=None 不可信、文案不写「有凭据就全挡住」）与 3a 插话两条（TUI 启动预检、warning 去重有意）已落实。
 - 产品改动：`auth/middleware.py`（`require_local_credential` 分档）、`gateway_parts/http_service.py`（params 字段 + `GatewayLocalCredentialRequired` + `_degrade_or_refuse`）、`cli/gateway_process.py`（两处读开关传入）、`agent/plugin_host_api.py`（先验插件令牌）、`cli/chat_client_context.py`（`preflight_gateway_credential`）；文案：`config/agent_config.yaml`、`settings/config.py`、`gateway_parts/client_credentials.py`（三处改回「两边同时生效」）。

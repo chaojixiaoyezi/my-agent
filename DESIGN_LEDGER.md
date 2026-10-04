@@ -1,5 +1,15 @@
 # 设计台账
 
+## 17j 状态字校正（stfix，2026-10-04，分支 `worker/17j-status-fix`，基于 17j 头 `f9a6f6c6e`；只改状态字与措辞，不改正文）
+
+- **为什么**：audit17j 只读核对发现，一批已经并入 step17j 的改动，状态字仍停在"待复审/待 9b 终审/WIP"，与 17j 实际状态不符；另外 ds2 的上线清单用"`plugin_commands.py` 里 grep `plugin_gate` 计数为 0"断言 B6 展示层没进 17j，该判据不成立。
+- **改了什么**（只改状态那一句和一处归属说明，正文与段落顺序不动）：
+  - A 类 11 处改成"已并入 step17j + 提交号"：TESTS 的 rdv(9b 终审通过 `a67c5df3b`)、tdeny(`2fb2eb718`)、rcb/rco(`39350230a`)、phh(`1a21ae0d9`)、flc(`cb16433d7`)、B6(`24c3aec0f`)、G2b(9b 终审通过 `32551798d`)；gateway 02-progress 的 rcb/G2b/B6 三条。
+  - B 类私有写整包（pdp、pw2、pwf、lkp、lkf、ds3l）改成"9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`"，证据 `~/.my-agent/decision-evidence/review-private-bundle-2ad257314/`；DESIGN_LEDGER 8 处、TESTS 5 处、gateway/memory/subagent 三个 02-progress 共 7 处。
+  - C 类：trs 改"luna2 初审通过（TESTS 归因已修 477611a6d），已并入 step17j `c74bf5893`"；b9tr 改"luna6 初审小问题已随 trs2 补，已并入 step17j"。
+  - B6 归属更正：展示层已并入 step17j `24c3aec0f`，四段渲染 `plugin_commands.py:render_plugin_event_details`、查询 `runtime_db/repository.py:plugin_gate_decisions`、TUI 与飞书同一份输出；缺的是 B5 写入方，真实 `/plugins info` 第 4 段暂显示"暂无记录"。
+- **未验证**：只改文档，没有跑产品代码测试；手册/台账本身不是运行证据。
+
 ## 活动回合插话不重复发 prompt_submitted 的回归用例（st2，2026-10-04，分支 `worker/17j-small-tests-2`，基于 17j 头 `f9a6f6c6e`；3a 复审，已并入 step17j）
 
 - **起因**：luna6 复审 B4 owner 修复时提出——活动回合里成功插话（`/ask` 返回 `active_turn_input`）不能发布 `prompt_submitted`。实现靠 `gateway_parts/http_handlers.py::_handle_idempotent_ordinary_ask` 的"只有 `created and receipt.state == 'queued'` 才调 `prompt_queued`"，但没有专门用例钉住；ds8 试过两条路都造不出活动回合。
@@ -91,7 +101,7 @@
 - **未改**：`LLM_GUIDE.md` 的结构速览本轮核对后未发现需要修正处；其它同名条目（各目录下的 `__init__.py`、`declaration.json`、`README.md` 等）是不同目录的各自文件，不是重复。
 - **验证**：`check_doc_sync.py --base 1a21ae0d9` → DOC_SYNC_PASS；`git diff --check` 干净；ruff / import boundaries=0 / strict code-size hard=0 / size_diff 新增 0 / clean-package OK。只改文档，未跑测试。
 
-## 插件门截断只能更严（trs，2026-10-04，3a 裁定；分支 `worker/truncation-stricter`，基于 17j 集成头 `1d394a308`；含 trs2 原因码口径和真值判断，luna2 复审中，已并入 step17j）
+## 插件门截断只能更严（trs，2026-10-04，3a 裁定；分支 `worker/truncation-stricter`，基于 17j 集成头 `1d394a308`；含 trs2 原因码口径和真值判断，luna2 初审通过（TESTS 归因已修 477611a6d），已并入 step17j `c74bf5893`）
 
 - **起因**：b8tr 的“截断就直接 ask”把看得到片段里已有的拒绝也降成了确认——补丁删除段（本应 `deny`）被截断标记一冲就变 `ask`，判定被放松。3a 新裁定：截断只能更严，不能更松。
 - **规则**：最终结论 = 按看得到的片段正常判出的结论，与 `ask` 两者中更严的那个（`deny` > `ask` > `allow_as_is`）。片段已 `deny` → 保持 `deny`（原原因码）；片段本来就 `ask` → **保留原原因码**、消息补半句“参数还被截断了”（3a 补充裁定：用户看到“看到了什么”比“被截断”更有用）；只有片段可放行才升到 `ask` + `ARGUMENTS_TRUNCATED`；字段缺失、`false` 或 `1`/`"true"` 这类真值（只认布尔 `true`）→ 完全照旧。
@@ -202,7 +212,7 @@
 - **初审补强（b8t，2026-10-03，只改测试）**：采纳 b8r 初审两条补强——①共享用例表补 `rm -Rf` 大写变体（Python/Node 同时覆盖）；②三个样例握手断言改精确集合比较（多声明未实现的能力位也会被抓到）。两条各一个提交；对应变异复跑均被抓（见 TESTS.md）。
 - **边界**：本分支不含 B3–B7，**真实验收（TUI、飞书各一遍）待 B3–B7 合入后另派**；启用链在命令沙箱里因 `plugin_endpoint_failed` 失败（已知环境限制，交 3a 沙箱外复核）。详见 TESTS.md 同名小节。
 
-## B9 模板处理截断标记（b9tr，2026-10-04，分支 `worker/b9-facts-table`，基于 B9 头 `10c40256f`；已并入 step17j，luna6 复审中）
+## B9 模板处理截断标记（b9tr，2026-10-04，分支 `worker/b9-facts-table`，基于 B9 头 `10c40256f`；luna6 初审小问题已随 trs2 补，已并入 step17j）
 
 - **起因**：B5（sol3 的 `57f465dca`）给收紧请求加了截断标记——声明 `arguments: full` 的门，参数超出 4000 字预算时宿主在请求的 `call` 里带 `arguments_truncated: true`，完整是 `false`，`arguments: none` 的门没有这个字段（`plugin_events/tool_gate.py` 的 `PluginToolGate.request_payload`）。B9 的两个作者模板此前不看这个字段，会拿被截断的残片做判断并放行，形成绕过面。
 - **改了什么（产品代码一行未动，只动技能资产与用例）**：
@@ -250,6 +260,7 @@
 ## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、**初审 M1 已修（b6f）**、**确认门回归已修（b6f）**，基于 B3 返工后的头 `0a3064078`，已实施，**已并入 step17j（3a 沙箱外复跑 491 passed）；查询与展示完成，写账待 B5 第 5 段**）
 
 - **起因**：设计稿 [插件事件与收紧钩子](docs/design/PLUGIN_EVENT_HOOKS.md) 第 9 节（账本与展示）与第 13 节 B6 行。B6 原依赖 B5（收紧钩子）写入 `plugin_gate.decided`；本轮先做不依赖 B5 的部分：查询、观察计数读取与 `/plugins info` 四段展示，B5 合入后接上写入方。
+- **展示层归属更正（audit17j 核实）**：展示层已完整并入 step17j（`24c3aec0f`）——四段渲染在 `plugin_commands.py:render_plugin_event_details`，账本查询与字段白名单在 `runtime_db/repository.py:plugin_gate_decisions` / `_PLUGIN_GATE_DECISION_FIELDS`，TUI 与飞书走同一入口（`plugin_command_service._scope_management`）是同一份输出。在 `plugin_commands.py` 里 grep `plugin_gate` 得 0 不能证明 B6 缺失（查询不写在该文件）。缺的是 B5 写入方：没有它，真实 `/plugins info` 第 4 段显示“暂无记录”。
 - **做了什么**：
   - `runtime_db/repository.py` 新增只读查询 `plugin_gate_decisions(plugin_id, limit=10)`（按 `plugin_id` 取最近 N 条 `plugin_gate.decided`，按 `seq` 倒序；投影只经 `_PLUGIN_GATE_DECISION_FIELDS` 白名单，`message` 等 payload 其它键不外泄）与 `plugin_gate_unavailable_count(plugin_id)`（累计 `final_status = PLUGIN_GATE_APPROVAL_UNAVAILABLE`，不设窗口）。owner 隔离由“一 owner 一 runtime.db”本身承担。
   - `plugin_commands.py` 新增 `PluginEventDetails` 与 `render_plugin_event_details`：订阅（含正文范围）、收紧工具（含参数范围）、网络与沙箱、最近 10 次收紧决定＋“无法审批”计数＋观察计数四段；措辞复用 `plugin_events/confirmation.py` 的同一函数（`event_description` / `gate_description` 由私有改公开名），确认码与展示不会各写一套说法。
@@ -429,7 +440,7 @@
 - **验证**：三类原因 × 开关关降级（请求照发、无令牌头、warning 只记一次）/ 开关开拒绝（零请求 + 原因码）× TUI/CLI/IM 全绿；原有“附上凭据”用例全部保留。变异与命令见 TESTS。
 - **未验证**：真实 Gateway、真实 TUI/飞书渠道、旧客户端迁移与 `/status` 计数归零仍未做；G2b 强制的服务端半边仍归 G2b 那一块。
 
-## 私有写/私有锁的符号链接锚点：允许跟随一次（pdp 后续，2026-10-04，分支 `worker/private-dirs-policy`，ds4 初审、3a 裁定已落实，已并入 step17j，待 9b 安全终审）
+## 私有写/私有锁的符号链接锚点：允许跟随一次（pdp 后续，2026-10-04，分支 `worker/private-dirs-policy`，ds4 初审、3a 裁定已落实，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **背景**：ds4 初审小问题——「最近的已存在祖先本身是符号链接、下面要新建子目录」时私有写直接抛 NoFollowPathError；用户的项目目录很可能就是符号链接（指到外置盘），`tooling/shell.py` 在工作区下建 `.background_jobs` 会失败，后台任务起不来。生产 owner home 里也确实有目录链接。
 - **3a 裁定（与「只动自己建的东西」一致）**：最近的已存在祖先可以**跟随一次**（它是已存在的目录，权限照旧一位不动），从它的真实目录往下新建缺失的各段；新建段不跟随符号链接、按 0700 建。私有锁 `open_private_lock_beneath` 同一口径（两边一个规则）。
@@ -438,7 +449,7 @@
 - **验证**：见 TESTS.md 同名节（3 个失败文件 56 passed、29 相关文件 323 passed、guards9 172 passed、门禁全过、变异 2 KILLED + 1 等价存活说明）。
 
 
-## 私有写也只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，ds4 初审，已并入 step17j，待 9b 安全终审）
+## 私有写也只动自己建的东西（pdp，2026-10-03，分支 `worker/private-dirs-policy`，基于集成头 `3a42f457d`，ds4 初审，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **背景**：pw2 初审（pw2r）检查 4 发现口径冲突——私有写会顺带把直接父目录收紧到 0700（`_ensure_private_dir` 对已存在目录 chmod），而锁收私（lkp/ds8）已定为「只动自己建的东西」；同一次写入里锁不动、写却动。3a 裁定两处统一。
 - **3a 裁定**：
@@ -474,7 +485,7 @@
 - **验证**：见 TESTS.md 同名节。
 
 
-## 宿主数据私有写入第二批（pw2，2026-10-03，分支 `worker/private-writes-batch2`，基于 pwf 头 `9bd2fc318`，已实现，ds3 初审，已并入 step17j，待 9b 安全终审）
+## 宿主数据私有写入第二批（pw2，2026-10-03，分支 `worker/private-writes-batch2`，基于 pwf 头 `9bd2fc318`，已实现，ds3 初审，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **背景**：pwf 把 ds9 清单里能明确判定的宿主数据写入点收成了私有原语，并把三类拿不准的列出来交 3a 定。3a 裁定三类**全部要收**：①`append_jsonl_records` / `append_jsonl_capped` 家族剩余调用点；②`gateway_parts/io` 的通用 JSON 写函数；③subagents 里剩余的整份报告 / 任务文件 `write_text`。
 - **口径**（与第一批相同）：新文件 0600、新目录 0700、已有宽权限文件下次写入收紧；**内容逐字节不变、调用方接口不变**；用户工作区里的文件（模型交付物、`output/`、用户项目文件）不动。
@@ -518,7 +529,7 @@
 - **语义保持的细节**：`_write_if_missing` / `_write_json_if_missing` 的"文件已存在就不碰"语义不变（因此已存在的宽权限文件不会被这两个函数收紧，只有新建走私有）；`update_json_file_atomic` 的读-改-写仍在一把锁内完成。
 - **验证**：新增 `tests/test_private_writes_batch2.py`（18 条，A/B/C 三组）；7 个变异（A 组 2 个、B 组 3 个、C 组 2 个，均为"退回跟随 umask 的公开写法"）全部被抓；相关回归与门禁结果见 TESTS.md。
 
-## 私有锁只动自己建的东西（lkp，2026-10-03，同一分支 `worker/ds3-lock-private`，基于 `459354e1b`，已实现，已并入 step17j，待 9b 安全终审）
+## 私有锁只动自己建的东西（lkp，2026-10-03，同一分支 `worker/ds3-lock-private`，基于 `459354e1b`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **背景**：锁收私与 step17i 上下文快照口径相撞。快照的私有写入要拿 json_io 的锁，而 `open_private_lock_beneath` 会把锁所在的、**已经存在**的目录 `fchmod(0o700)`；快照的口径是「归档目录是符号链接时，链接所在级和下级目录的权限不动」，于是链接目标里的日期目录被从 0755 改成 0700，两条符号链接用例失败（3a 沙箱外实测）。
 - **3a 裁定（私有锁只动自己建的东西）**：
@@ -540,7 +551,7 @@
 - **验证**：17 文件 222 passed / 1 failed（唯一失败为沙箱环境限制，基线同样失败）；guards9 172 passed；静态门禁全过。详见 TESTS.md「私有锁只动自己建的东西」。
 - **未验证**：与 step17i 合跑的两条符号链接用例由 3a 沙箱外验证；真实快照链路与真实 Gateway 未跑。
 
-## 宿主数据私有写入后续（pwf，2026-10-03，分支 `worker/private-writes-followup`，基于 ds3 头 `199879045`，已实现，已并入 step17j，待 9b 安全终审）
+## 宿主数据私有写入后续（pwf，2026-10-03，分支 `worker/private-writes-followup`，基于 ds3 头 `199879045`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **背景**：ds3 锁收私后，仍有一批宿主运行数据走跟随 umask 的 `append_jsonl` / `write_text` / `write_json_file_atomic`（新建 0644 文件、0755 目录）。本次把写宿主数据的地方统一收成私有原语：新文件 0600、新目录 0700、已有宽权限文件下次写入时收紧；只改写入方式，调用方接口与内容逐字节不变（`sort_keys` 语义原样保留，例如审计账仍不排序键）。
 - **逐个核对表**（写什么数据 / 目录 / 父目录改前状态，按代码事实；本轮不读真实 owner home，未做 lstat 复核）：
@@ -570,7 +581,7 @@
   - subagents 里剩余的整份报告 / 任务文件 `write_text`（patch_service、patch_apply_task、execution/report、hierarchy/service、result_processors、probe、task_trash、manager_work_orders、shell_gateway_execution 等）；`patch_file_ops` 写的是用户补丁目标文件，按规则不动。
 - **验证**：新增 5 个测试文件（umask 0o022 断言 0600/0700、存量收紧、内容逐字节不变）；每组 1 个变异（退回 `append_jsonl`）全部被抓到；相关回归、guards9 与静态门禁结果见 TESTS.md。
 
-## 写锁 sidecar（.wlock）同批收私（lkf，2026-10-03，同一分支 `worker/ds3-lock-private`，基于 `199879045`，已实现，已并入 step17j，待 9b 安全终审）
+## 写锁 sidecar（.wlock）同批收私（lkf，2026-10-03，同一分支 `worker/ds3-lock-private`，基于 `199879045`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **起因**：ds1（lockr）初审了 ds3 的锁收私交付，结论「必须改 1 + 小问题 4」。3a 采纳后把范围收缩：初审的必须改 1 是 `gateway_parts/io.py` 自带的 `_locked_file_path`/`_open_lock_handle`（仍是 `mkdir` + `open("a+")`，0644 且会静默跟随符号链接），但**那处已由 ds9 在 `worker/private-writes-followup` `17dc9781b` 修改，本分支不再碰 io.py 的锁，3a 合并时用 ds9 的版本**；本轮只收本分支归属的同类旧写法。
 - **本轮的必须改**：`gateway_parts/daemon_metadata._flocked_sidecar` 的 `.wlock` 原来用 `lock_path.open("a+")`（初审实测 0644）。现经 `_open_private_wlock_descriptor` → `common/nofollow_fs.open_private_lock_beneath_tightened` 拿 fd：文件 0600、缺失目录按 0700 新建、已存在的目录一律不动（lkp 2026-10-03 修正，见顶部条目）、符号链接/硬链接锁抛 `NoFollowPathError`、存量 0644 下次加锁即自愈；只 flock 不写内容，阻塞语义与 Windows 降级告警不变。`.wlock` 后缀刻意避开 `scoped_locks` 的 `glob("*.lock")` 扫描，不改。
@@ -587,7 +598,7 @@
   - `open_private_lock_beneath_tightened` 的 `fchmod` 失败被 `except OSError: pass` 吞掉：宁可「收紧失败不拦业务」是有意的，但「自愈没生效」运行时不可观测，没有埋点或 `/status` 口径；要看最终收敛效果得另加只读计数。
 - **验证**：新增 6 条用例（wlock 三项 + 非阻塞三项）；变异 4 个全部被抓到；直接相关 26 文件 329 passed / 4 xfailed，guards9 172 passed，静态门禁全过。详见 TESTS.md「写锁 sidecar（.wlock）同批收私」。
 
-## 三套锁写法统一成私有（ds3l，2026-10-03，分支 `worker/ds3-lock-private`，基于 `claude/3a-step17i` `b6ede99e0`，已实现，ds1 初审，已并入 step17j，待 9b 安全终审）
+## 三套锁写法统一成私有（ds3l，2026-10-03，分支 `worker/ds3-lock-private`，基于 `claude/3a-step17i` `b6ede99e0`，已实现，ds1 初审，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **问题**（be 2026-10-03 只读评估）：本仓库建锁文件有三套写法，权限口径不统一。
   - A（对）`open_private_lock_beneath`：文件 0600、缺失目录按 0700 新建、O_NOFOLLOW/O_EXCL、空内容。
@@ -602,7 +613,7 @@
 - **边界**：只动这三处已知锁路径；不碰 Windows msvcrt 回退分支的既有行为；`global_index/*.jsonl`、`memory/daily/*.jsonl` 的数据与目录权限是提交 2。
 - **验证**：新增 `tests/test_private_lock_permissions.py`（8 项，umask 固定 0o022）；4 个变异全部被抓到。**lkp 修正后**为 12 项、变异重跑（含「对已存在目录 chmod」）全部被抓到，见顶部条目；详见 TESTS.md 同名条目。
 
-## global_index 数据文件和目录收私（ds3l，2026-10-03，同一分支，已实现，已并入 step17j，待 9b 安全终审）
+## global_index 数据文件和目录收私（ds3l，2026-10-03，同一分支，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
 
 - **问题**：be 顺带发现 `global_index/*.jsonl` 的**数据文件**（不只是锁）是 0644、目录 0755。它的追加还在走跟随 umask 的 `append_jsonl`。
 - **改法**：`user_space/home_indexes.py` 的追加改走 `append_private_jsonl_records`，整份重建改走 `write_private_text_file_atomic_unlocked`；文件 0600、目录 0700、已有 0644 下次写入即收紧，内容逐字节不变。
