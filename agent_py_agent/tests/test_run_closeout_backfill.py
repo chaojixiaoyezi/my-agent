@@ -260,7 +260,10 @@ def test_preview_is_read_only_and_counts_agree(repo):
 
 def test_backfill_family_matches_runtime_mixin_nonterminal_closeout():
     """分族对拍：非终态域内与 runtime_mixin._nonterminal_run_closeout_status 逐例一致
-    （rcb 独立实现只为避免跨层 import，口径漂移必须被这里抓住）。"""
+    （rcb 独立实现只为避免跨层 import，口径漂移必须被这里抓住）。
+    rcob 核对：这里的 "blocked" 是主代理收口写入的 runtime_status 域（协议违规等，照旧收
+    failed）；子代理 BLOCKED 是可恢复等待，不写 agent_attempt.completed 事实、attempt 也不
+    终态，天然不在本对拍域与候选内（见 test_apply_skips_waiting_attempt_without_end）。"""
     from agent_py_agent.agent.agent_core import runtime_mixin
     from agent_py_agent.agent.runtime_db.run_closeout_backfill import _backfill_target_status
 
@@ -282,6 +285,17 @@ def test_backfill_family_matches_runtime_mixin_nonterminal_closeout():
     assert _backfill_target_status("ok", "", "") == "done"
     assert _backfill_target_status("user_stop", "", "") == "cancelled"
     assert _backfill_target_status("conversation_control", "", "") == "cancelled"
+
+
+def test_apply_skips_waiting_attempt_without_end(repo):
+    """rcob：可恢复等待的真实形态——run created、attempt 仍在跑（ended_at=0，子代理
+    BLOCKED 等批复就是这个形态）不在候选，不会被补收口。"""
+    repo.record_run_creation(owner_id="local/main", goal="blocked-wait", run_id="hung-waiting", role="worker")
+
+    result = apply_run_closeout_backfill(repo, now=NOW)
+
+    assert result["candidates"] == 0
+    assert result["settled"] == {"failed": 0, "cancelled": 0, "done": 0}
 
 
 def test_owner_maintenance_runs_backfill_once(tmp_path):

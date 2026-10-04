@@ -1,5 +1,7 @@
 # 子代理维护状态
 
+2026-10-04（rcob，分支 `worker/rco-blocked-resumable`，基于 17j 头 `39350230a`）：修正 `closeout_target_run_status` 的失败族——BLOCKED 是可恢复等待（等能力批复/续派/外部输入），不随 FAILED 收口：失败族 = `SUBAGENT_FAILURE_STATUSES` 减去具名常量 `_RESUMABLE_WAIT_TASK_STATUSES`（{BLOCKED}），FAILED/CHANNEL_ERROR/TIMEOUT 照旧收 failed。沙箱外 46 文件跑出的 `test_dispatch_liveness_and_revive.py::test_blocked_runner_result_does_not_settle_runtime_run` 红转绿；rcb 迁移同步核对（子代理 BLOCKED 不产生结束事实、attempt 也不终态，天然不在候选）。
+
 2026-10-04（rco，分支 `worker/run-closeout`，基于 step17i 头 `ce646f783`，已实现待复审）：子代理收口 `closeout_target_run_status` 补失败族映射——BLOCKED/CHANNEL_ERROR/TIMEOUT（与 `SUBAGENT_FAILURE_STATUSES` 同口径）随 FAILED 收口 run=failed，杜绝 runner 已退出而 run 停在 created；PENDING/RUNNING/PLANNING/PAUSED 等可恢复形态仍不收口。同批主代理侧 `_settle_main_agent_run_status` 非终态统一分族（不可续跑族收口 failed、可续跑族保留），见 TESTS.md 顶部与设计台账。
 
 2026-10-03（mtc，3a 挑入）：子代理解析缓存的指纹与 2 秒窗口阈值改为引用 `common/cache_freshness` 的共享实现；命中与“窗口内读到的不入缓存”行为不变（luna6 口径）。

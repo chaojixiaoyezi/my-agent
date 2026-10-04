@@ -18,7 +18,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ..models import SUBAGENT_FAILURE_STATUSES
+from ..models import SUBAGENT_FAILURE_STATUSES, TaskStatus
 
 if TYPE_CHECKING:
     from ...runtime_db.repository import RuntimeRepository
@@ -61,13 +61,20 @@ REJECTED_CLOSEOUT_STATES = frozenset({
     CLOSEOUT_STALE_ATTEMPT,
 })
 
-# LLM: 失败族从 subagents.models 的共享集合派生（初审 rco-f2）：BLOCKED/FAILED/CHANNEL_ERROR/TIMEOUT
-#   以后在 models 增删时这里自动跟随，不会一边加状态另一边悄悄漂开；DONE/CANCELLED 单列。
+# 可恢复等待（rcob 2026-10-04，3a 裁定）：BLOCKED 是"等能力批复/续派/外部输入"的可恢复等待，
+#   不是最终失败——把它收口会把等待误判成结束（test_dispatch_liveness_and_revive.py::
+#   test_blocked_runner_result_does_not_settle_runtime_run 钉住：非终态结论必须"什么都不做"，
+#   run 与 attempt 都保持原状）。与主代理侧"可续跑保持非终态"同一口径。
+_RESUMABLE_WAIT_TASK_STATUSES = frozenset({TaskStatus.BLOCKED.value})
+# LLM: 失败族从 subagents.models 的共享集合派生（初审 rco-f2）再减去可恢复等待（rcob）：
+#   FAILED/CHANNEL_ERROR/TIMEOUT 照旧收 failed；以后 models 增删状态时这里自动跟随，
+#   不会一边加状态另一边悄悄漂开；DONE/CANCELLED 单列。
 # 字段用途: runner 结论 → runtime.db run 终态的映射表。
+_RUN_FAILURE_TASK_STATUSES = SUBAGENT_FAILURE_STATUSES - _RESUMABLE_WAIT_TASK_STATUSES
 _RUN_STATUS_FOR_TASK_STATUS = {
     "DONE": "done",
     "CANCELLED": "cancelled",
-    **dict.fromkeys(SUBAGENT_FAILURE_STATUSES, "failed"),
+    **dict.fromkeys(_RUN_FAILURE_TASK_STATUSES, "failed"),
 }
 _DELIVERY_PENDING = "pending"
 _DELIVERY_DELIVERED = "delivered"
@@ -90,9 +97,9 @@ def _noop_outcome(state: str, reason: str) -> dict[str, Any]:
     return {"state": state, "reason": reason, "target_run_status": "", "retryable": False}
 
 
-# LLM: 目标 run 终态只从 runner 的结构化结论推导；3a 裁定（rco，2026-10-04）后失败族
-#   （FAILED/BLOCKED/CHANNEL_ERROR/TIMEOUT）一律收口 failed——runner 已退出时 run 必须有账；
-#   PENDING/RUNNING/PLANNING/PAUSED 等可恢复形态仍不收口，避免把等待/待续跑误判成结束。
+# LLM: 目标 run 终态只从 runner 的结构化结论推导；失败族（FAILED/CHANNEL_ERROR/TIMEOUT）
+#   一律收口 failed——runner 已退出时 run 必须有账；BLOCKED 是可恢复等待（rcob 修正），
+#   PENDING/RUNNING/PLANNING/PAUSED 等可恢复形态同样不收口，避免把等待/待续跑误判成结束。
 #   返回空串表示"本次不需要 run 级收口"。
 # 函数用途: 把 runner 结论映射成 runtime.db 的 run 终态，或表示无需收口。
 def closeout_target_run_status(params: Any, result: Any, task: Any) -> str:

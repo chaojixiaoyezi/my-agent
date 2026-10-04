@@ -46,6 +46,14 @@
 - guards9（十文件）**173 passed**；静态门禁：import boundaries=0、ruff 全过、strict code-size 退出 0（strict_scope_total=2209、hard=0、blocked=False，报告已还原不提交）、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失 34**。
 - 未验证：真实 Gateway/TUI/IM 端到端与生产历史悬挂记录补收口未跑（规则禁止连真实 Gateway、不读生产数据）；交 3a/9b 复核。
 
+### rcob 修正：BLOCKED 是可恢复等待，保持非终态（2026-10-04，3a 裁定，分支 `worker/rco-blocked-resumable`，基于 17j 头 `39350230a`）
+
+- **问题**：3a 沙箱外跑相关 46 文件，`test_dispatch_liveness_and_revive.py::test_blocked_runner_result_does_not_settle_runtime_run` 失败（"可恢复等待不得被收口成任何终态（观测到 'failed'）"）：rco 小修把子代理失败族改成从 `SUBAGENT_FAILURE_STATUSES` 派生，该集合含 BLOCKED，于是子代理 BLOCKED 被收成 failed。
+- **修法**：`closeout_target_run_status` 的失败族改为 `SUBAGENT_FAILURE_STATUSES` 减去可恢复等待——具名常量 `_RESUMABLE_WAIT_TASK_STATUSES = frozenset({TaskStatus.BLOCKED.value})`、`_RUN_FAILURE_TASK_STATUSES = SUBAGENT_FAILURE_STATUSES - _RESUMABLE_WAIT_TASK_STATUSES`；FAILED / CHANNEL_ERROR / TIMEOUT 照旧收 failed。rcb 迁移同步核对：子代理 BLOCKED 不产生 `agent_attempt.completed` 事实、attempt 也不终态，天然不在候选（对拍用例的 "blocked" 是主代理收口事实域）。
+- **用例**：`test_subagent_closeout_maps_failure_family_to_failed` 改为"失败族 = `SUBAGENT_FAILURE_STATUSES` 减去可恢复等待"逐项断言 + BLOCKED 不收口；`test_subagent_blocked_result_settles_run_failed` 改为 `test_subagent_blocked_result_keeps_run_nonterminal`（BLOCKED 不收口、不写 `agent_run.completed`、run 非终态）；rcb 加 `test_apply_skips_waiting_attempt_without_end`（等待形态不在候选）。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-rcob`）：`test_dispatch_liveness_and_revive.py` + `test_run_closeout_settlement.py` + `test_run_closeout_backfill.py` → **70 passed, 1 skipped**；老测试 `test_blocked_runner_result_does_not_settle_runtime_run` 红转绿。guards9 → **176 passed**；import boundaries=0、ruff、doc_sync、strict code-size（2204/hard=0/blocked=False，报告已还原）、`git diff --check`、clean-package 全过；size_diff **新增告警 0 / 消失 39**。
+- **基线复核**：`test_supervision_kills_fully_stalled_source_worker_host` 在基线 `39350230a`（临时 worktree 复核）同样失败——环境相关既有失败，非本修正引入。
+
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，待复审）
 
 - **改了什么**：检查程序每条错误可选带 `hint`（字符串）；宿主只转这一个自由文本字段——换行压空格、去控制字符和双向控制符、最多 200 个字符（超了截到 199 加省略号）；无 hint 照旧；hint 走与 location 相同的宿主路径脱敏；判定与计数只看 code。改动：`pack_verifier_runner.py`（`_error_samples` / `_clean_hint` / 两个新常数）、`pack_verifier_redaction.py`（`_redact_sample`）、`pack_verification_service.py`（`_sample_text`）；合同写进 `docs/design/CAPABILITY_PACKS_V2.md` 第 3 节输出合同。

@@ -197,7 +197,7 @@ worker/run_id/准确 attempt，读取 canonical 后复用原 auto-start，不再
 - `runner_completion_payload.py` 是完成内容的只读投影，根父通知、直属父等待和递归父级快照共用；`runner_completion_wake.py` 只拥有原状态更新、投递、去重和错误记录，不再导出完成内容构造函数。
 - 完成通知向 `store.wakes.append_observation` 显式传 `retain_handled=True`，由 `conversation/store_wake_publication.py` 在原锁内冻结完整负载、补齐配对并裁决旧消费事实；前置查询不承担去重权威。原 WAL 重试通路不增加新服务，通用 Goal 保持 handled 后新代。
 - `runner_result_admission.py` 显式接收原 `RuntimeRepository | None` 与 canonical task，在结果落盘前裁决 exact run／attempt 的接管、废弃、换代及终态冲突；拒绝诊断写同一运行账，不接收完整 manager，原结果服务不再保留旧私有准入函数。
-- `services/runner_result_service.py` 负责准入后的结果文件和任务投影；`services/runner_result_commit.py` 按原先后编排 WAL、RuntimeDB 结算与直属父级通知；`services/runtime_closeout.py` 仍是 WAL 原语、恢复扫描与已交付标记的权威实现；其 `closeout_target_run_status` 的目标终态从 runner 结构化结论映射——失败族（`SUBAGENT_FAILURE_STATUSES`：BLOCKED/FAILED/CHANNEL_ERROR/TIMEOUT）随 FAILED 收口 `failed`，PENDING/RUNNING 等可恢复形态不收口（rco，2026-10-04，防 run 停在 created）。
+- `services/runner_result_service.py` 负责准入后的结果文件和任务投影；`services/runner_result_commit.py` 按原先后编排 WAL、RuntimeDB 结算与直属父级通知；`services/runtime_closeout.py` 仍是 WAL 原语、恢复扫描与已交付标记的权威实现；其 `closeout_target_run_status` 的目标终态从 runner 结构化结论映射——失败族（`SUBAGENT_FAILURE_STATUSES` 减去可恢复等待 BLOCKED：FAILED/CHANNEL_ERROR/TIMEOUT）随 FAILED 收口 `failed`；BLOCKED（等批复/续派）与 PENDING/RUNNING 等可恢复形态不收口（rco 2026-10-04 建映射，rcob 2026-10-04 修正 BLOCKED 归属，防把可恢复等待误判成结束）。
 - 终态冲突由同一服务拒绝后，诊断必须写到 manager 持有的 RuntimeDB；只补原 `closeout_blocked` 事件，不让诊断成功与否改变原拒绝结果。
 - 结果链拆分不改 canonical run／attempt、锁或 WAL 格式；本地通知修复只将原 dedupe 记录显式升级为可恢复的 v2，旧 v1 在写入口迁移。详细边界见[发布恢复合同](../../design/closeout_state_machine.md#唤醒配对发布的半写恢复第-7-步本地实现)及[并行执行设计](../../design/SUBAGENT_PARALLEL_EXECUTION.md#第-7-步结果链迁移边界进行中)。
 

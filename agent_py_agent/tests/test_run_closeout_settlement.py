@@ -5,8 +5,8 @@
   协议违规/执行错误/超时等，共享 gate `should_continue_task` 判定 False）收口
   failed；可续跑族（技术续跑 + 等用户族 needs_user_input/approval_required）
   保留非终态等续跑。runtime_db 没有 waiting 类状态，等用户族如实保持 created。
-- 子代理 `closeout_target_run_status`：失败族（BLOCKED/CHANNEL_ERROR/TIMEOUT）
-  随 FAILED 一并收口 failed。
+- 子代理 `closeout_target_run_status`：失败族（`SUBAGENT_FAILURE_STATUSES` 减去可恢复
+  等待 BLOCKED）随 FAILED 一并收口 failed；BLOCKED 是可恢复等待，保持非终态（rcob 修正）。
 
 用例层次：Gateway 回合走真实 `_run_with_params` 收口链路（source=gateway），
 "假模型"结果由 `_run_once_with_params` 替身按脚本产出（沿用
@@ -25,6 +25,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core import runtime_mixin
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
 
@@ -219,8 +220,10 @@ def test_gateway_continuable_unfinished_keeps_run_nonterminal(repo, monkeypatch)
 
 
 def test_subagent_closeout_maps_failure_family_to_failed():
-    """子代理 runner 结论：失败族（BLOCKED/CHANNEL_ERROR/TIMEOUT/FAILED）→ failed；
-    取消 → cancelled；完成 → done；可恢复形态（PENDING/RUNNING 等）不收口。"""
+    """子代理 runner 结论：失败族 = `SUBAGENT_FAILURE_STATUSES` 减去可恢复等待（BLOCKED）
+    → failed（rcob：BLOCKED 是可恢复等待，保持非终态）；取消 → cancelled；完成 → done；
+    其余可恢复形态（BLOCKED/PENDING/RUNNING 等）不收口。"""
+    from agent_py_agent.agent.subagents.models import SUBAGENT_FAILURE_STATUSES
     from agent_py_agent.agent.subagents.services.runtime_closeout import closeout_target_run_status
 
     params = SimpleNamespace(status="", dry_run=False)
@@ -229,10 +232,11 @@ def test_subagent_closeout_maps_failure_family_to_failed():
     def mapped(status):
         return closeout_target_run_status(params, SimpleNamespace(status=status), task)
 
-    assert mapped("BLOCKED") == "failed"
-    assert mapped("CHANNEL_ERROR") == "failed"
-    assert mapped("TIMEOUT") == "failed"
-    assert mapped("FAILED") == "failed"
+    failure_family = SUBAGENT_FAILURE_STATUSES - {"BLOCKED"}
+    assert failure_family == {"FAILED", "CHANNEL_ERROR", "TIMEOUT"}
+    for status in sorted(failure_family):
+        assert mapped(status) == "failed", status
+    assert mapped("BLOCKED") == ""  # 可恢复等待：等批复/续派，不是最终失败（rcob）
     assert mapped("CANCELLED") == "cancelled"
     assert mapped("DONE") == "done"
     assert mapped("PENDING") == ""
@@ -241,9 +245,10 @@ def test_subagent_closeout_maps_failure_family_to_failed():
     assert mapped("PAUSED") == ""
 
 
-def test_subagent_blocked_result_settles_run_failed(repo):
-    """子代理端到端：runner 以 BLOCKED 结束，settle_runtime_run_for_result 收口
-    run=failed 并写 agent_run.completed。"""
+def test_subagent_blocked_result_keeps_run_nonterminal(repo):
+    """rcob：子代理 runner 以 BLOCKED 结束（可恢复等待）——settle_runtime_run_for_result
+    不收口、不写 agent_run.completed，run 保持非终态（与 test_dispatch_liveness_and_revive
+    的可恢复等待口径一致）。"""
     from agent_py_agent.agent.subagents.services.runtime_closeout import (
         settle_runtime_run_for_result,
     )
@@ -257,11 +262,11 @@ def test_subagent_blocked_result_settles_run_failed(repo):
 
     outcome = settle_runtime_run_for_result(repo, task, params, result)
 
-    assert outcome["state"] == "settled"
-    assert outcome["target_run_status"] == "failed"
+    assert outcome["state"] == "not_applicable"
+    assert outcome["target_run_status"] == ""
     run = repo.agent_run_for_run_id("child-rco")
-    assert str(run["status"]) == "failed"
-    assert len(_events(repo, str(run["agent_run_id"]), "agent_run.completed")) == 1
+    assert str(run["status"]) not in AGENT_RUN_TERMINAL_STATUSES
+    assert _events(repo, str(run["agent_run_id"]), "agent_run.completed") == []
 
 
 def test_nonterminal_judgement_failure_logs_and_settles_failed(repo, monkeypatch, caplog):

@@ -45,7 +45,7 @@
   3. 子代理侧同病：`closeout_target_run_status`（`subagents/services/runtime_closeout.py`）此前只映射 DONE / FAILED / CANCELLED，BLOCKED / CHANNEL_ERROR / TIMEOUT 一律不收口。
 - **修法（已实施，统一收口，不为单条路径打补丁；3a 裁定 2026-10-04）**：
   - 主代理 `_settle_main_agent_run_status`：非终态统一分族（新辅助 `_nonterminal_run_closeout_status`）——不可续跑族（blocked / 协议违规 / 执行错误 / 超时 / UNKNOWN 等，共享 gate `should_continue_task` 判定 False）尝试结束时收口 failed，把 CLI one-shot 兜底口径推广到所有路径；可续跑族保留非终态等续跑——技术续跑族（TOOL_ROUND_LIMIT_REACHED 等）由 resume/Goal 驱动，等用户族（`needs_user_input`/`approval_required`）由用户动作驱动。`runtime.db` 没有 waiting 类状态，等用户族如实保持 created，不新造状态。结束事实收成 `RunCloseoutFacts` 小数据类（只读结构化字段；参数 7→4，size_diff 原 params 告警档位变化归零）。
-  - 子代理 `closeout_target_run_status`：失败族（BLOCKED / CHANNEL_ERROR / TIMEOUT，与 `subagents.models.SUBAGENT_FAILURE_STATUSES` 同口径）随 FAILED 收口 failed。
+  - 子代理 `closeout_target_run_status`：失败族（`SUBAGENT_FAILURE_STATUSES` 减去可恢复等待 BLOCKED，即 FAILED / CHANNEL_ERROR / TIMEOUT）随 FAILED 收口 failed；**rcob 修正（2026-10-04，3a 裁定）**：BLOCKED 是可恢复等待（等批复/续派/外部输入），收口会把等待误判成结束，保持非终态——与"可续跑保持非终态"同一口径；rcb 迁移与对拍用例同步核对（子代理 BLOCKED 不产生 `agent_attempt.completed` 事实、attempt 也不终态，天然不在候选）。
   - 判定只读结构化字段（runtime_status / runtime_reason / runtime_source 与共享 gate），不解析文案。
 - **收口成终态不破坏续跑（已核）**：`create_attempt` 对终态放行（`runtime_db/repository.py`，docstring 明确"run 级终态不拦截，任务级生命周期闸才是该不该重跑的裁决者"），同事务重开已关闭 task_run（`task_run.reopened` 事件）；现有测试 `test_run_audit_terminal.py`、`test_r103_run_reuse_no_split.py` 已钉住终态重开；发现层未完成扫描用任务层大写词表（`owner_wake_discovery.py`）不依赖 run 的 created；task_run 关闭另有会话 link 闸与树终态 CAS。
 - **验证与变异**：见 [TESTS](TESTS.md) 顶部「回合收口统一推进（rco）」小节。四条结束路径（正常完成 / 协议违规 blocked / 取消 / 执行错误）+ 等用户族 + 可续跑族 + 子代理映射与端到端共 9 项用例；两个定点变异（去掉统一收口、去掉 BLOCKED 映射）均被抓住；相关回归 15 文件 303 项全绿；guards9 与静态门禁全过；size_diff 新增告警 0。
