@@ -1242,3 +1242,30 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
   - `background_transcript`（`_retry_notice_text`）、`agent_activity`、`foreground_transcript`（`_retry_forward_params`）、`main_activity`（`_retry_activity`）按结构化字段显示收口信息，不再显示「N 秒后重连」。
 - **边界**：判断只看结构化字段，不解析文案；文案单一来源（request_errors 已登记）；未跑真实 TUI/飞书渲染与真实 Gateway 请求。测试与变异见 [TESTS](../../../TESTS.md) 顶部「修法 B 收口提示结构化」小节。
 - **初审补齐（rfsf，分支 `worker/rfs-followups`）**：状态行收口短句统一登记 `request_errors.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT`（`agent_activity`/`main_activity` 引用，不再各自硬编码）；补 3 条用例（agent_activity 状态行、main_activity 状态行、foreground 转发）把初审 3 个存活变异全部转红；回退文本断言升级为完整字符串逐字 `==`；新增 ast 守卫用例（扫产品代码所有 `write_provider_retry` 实现方，必须显式声明 `params`、不得用 `**kwargs` 静默收下），协议约定写进发布方注释；命令与结果见 TESTS.md「修法 B 收口提示结构化」小节。
+
+## 插件账本与展示 B6（M 线第一期，m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，头 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，待复审）
+
+- **起因**：设计稿 [插件事件与收紧钩子](../../design/PLUGIN_EVENT_HOOKS.md) 第 9 节与第 13 节 B6 行。B6 分两半：B5 写 `plugin_gate.decided` 账本，B6 做查询与 `/plugins info` 四段展示；本轮先做不依赖 B5 的查询与展示半。
+- **改动**（Gateway 侧只做只读穿透，不改任何控制语义）：
+  - `gateway_parts/plugin_command_service.py`：`_scope_management` 从 `scope.event_hub` 取只读事件中心并写进 `PluginManagementContext`；TUI 的 `/client/plugins` 入口（`plugin_http_response` / `_management`）取 `getattr(server, "plugin_event_hub", None)` 放进 scope，读不到就按“暂无记录”展示，不新建 hub。
+  - `gateway_parts/control_service.py`、`gateway_parts/control_operation_service.py`、`gateway_parts/http_handlers.py`：`/plugins` 控制分派与幂等执行链把 hub 随 `GatewayControlScope.event_hub` 带下去（不改位置参数顺序、不给内部函数加必传关键字，见下方二次修复）。
+- **边界**：hub 由 TUI 的 HTTP 插件入口或事件中心懒建在 Gateway server 上，全进程只有这一个来源；真进程里两条入口的计数共享未在沙箱内复核，只做了组件级逐字同文用例。
+- **验证**：`tests/test_plugin_event_display.py` 12 项与 6 个变异见 [TESTS](../../../TESTS.md) 顶部「M1 B6 账本与展示」小节。
+
+### B6 二次修复：确认门回归（b6f，2026-10-03）
+
+- **真回归**：`test_plugins_chat_control.py::test_real_confirmation_gate_stays_closed_before_explicit_user_confirmation`（`[executable]` / `[interpreter]`）在 `d9f158e8d` 之后失败，返回 `PLUGIN_COMMAND_OUTCOME_UNKNOWN` 而不是要求 `--confirm` 的提示。3a 在沙箱外逐提交核对过：`b6ede99e0` / `0a3064078` / step17i 头都是 38 passed，`1a4860903` 起 2 failed。
+- **根因（文件:行）**：`agent_py_agent/agent/gateway_parts/plugin_command_service.py:155`，
+  `manager = _scope_management(base, scope, event_hub=...)`——**给一个会被测试打桩的内部函数加了必传关键字参数**。用例在 `test_plugins_chat_control.py:196` 打了 `monkeypatch.setattr(module, "_scope_management", lambda *_: service)`，这个替身**只收位置参数**，多传 `event_hub` 就抛 `TypeError`；`execute_plugin_control` 紧邻的 `except Exception` 把它吞成 `plugin_command_unknown(request_id)` → 命令根本没走到插件服务，用户看到“未能确认插件请求结果”。**注意这与 M1 是同一个改动面**：M1 之前（`1a4860903`）那行传的是 `event_hub=_hub_for_control(base)`，同样带关键字，所以两条用例在修复前就已经红了——不是我的 M1 修复引入的，但确实是 B6 引入的。
+- **修法**：`_scope_management` **去掉 `event_hub` 形参**，hub 从 `scope.event_hub` 取（调用方把 hub 放进 scope）；`execute_plugin_control` 改成 `_scope_management(base, replace(scope, event_hub=hub))`——**调用点不再传任何关键字**，老替身/老调用方形态都能正常工作。`_management`（HTTP 目录入口）同样把 hub 放进 scope 后按位置参数调。
+- **补的不依赖真宿主的用例**：`test_scope_management_stub_without_keyword_args_is_not_turned_into_outcome_unknown`——用**与真宿主用例完全相同的替身形态**（只收位置参数）跑一次真实控制链，断言命令走到了服务、错误码是 `PLUGIN_CONFIRMATION_REQUIRED` 而不是 `PLUGIN_COMMAND_OUTCOME_UNKNOWN`。变异“调用点退回传 `event_hub` 关键字” → **KILLED**（这条新用例 + 5 条既有用例一起红）。
+- **顺带（3a 定）**：`GatewayControlScope.event_hub` 改成 `field(default=None, compare=False, hash=False, repr=False)`——展示依赖不该参与相等、哈希和 repr。补 `test_scope_equality_and_hash_ignore_display_only_event_hub`。**如实说明一处**：`GatewayControlScope` 的 `metadata` 是 dict，这个类整体本来就不可 `hash()`，所以该用例只断言相等与 repr（`hash=False` 声明本身仍是对的，保证 hub 不会进某个可哈希字段集合）。
+
+### B6 初审 M1 修复（b6f，2026-10-03）
+
+- **问题（初审 b6r 的必须改 1）**：hub 挂在 Gateway server 上（`plugin_panels_http.plugin_event_hub` 写 `server.plugin_event_hub`），TUI 入口从 server 取到；IM 链却从 `server.agent` 取——而 `http_service.GatewayHTTPServer` 的 `self.agent = server_params.agent` 说明 **server 与 server.agent 是两个不同对象**。IM 永远拿不到 hub，`/plugins info` 的“观察计数”恒显示“暂无记录”。
+- **修法（单一来源）**：删掉 `_hub_for_control(base)`（避免第二个取用口）；`execute_plugin_control(base, command, scope, *, event_hub=None)`、`execute_gateway_conversation_control(..., *, event_hub=None)`、`execute_gateway_control_operation(..., *, event_hub=None)`、`_execute_gateway_control_operation_locked(..., event_hub=None)` 一律按关键字参数透传；唯一取 hub 的地方是 `http_handlers._handle_persistent_control_operation` 的 `event_hub=getattr(server, "plugin_event_hub", None)`（那里是唯一能拿到 server 的位置）。**不把 hub 再挂一份到 agent 上**——那样就有两个来源。
+- **用例改成真实拓扑**：`test_tui_http_and_im_render_byte_identical_text` 里 TUI 走 `/client/plugins` HTTP 路由，IM 走真实 IM 链 `http_handlers._handle_persistent_control_operation`（不再用 `/client/plugins` 假装 IM 入口，那也是初审指出的“用例名不副实”）；只在 server 上挂 hub、`server.agent` 上什么都不挂；断言 IM 计数不是“暂无记录”、且与 TUI 逐字相同；另加反向断言：server 上没挂 hub 时同一条 IM 链降级成“暂无记录”，不报错、不新建 hub。
+- **变异**：把 IM 链的 hub 退回从 `server.agent` 取（`http_handlers.py` 的 `event_hub=getattr(server.agent, "plugin_event_hub", None)`），**被 `test_tui_http_and_im_render_byte_identical_text` 抓到**（IM 变“暂无记录”、与 TUI 不再逐字相同）。
+- **给 B5 的接缝（payload 形状）**：`plugin_gate.decided` 行的字段必须写在 `payload_json` 里（`plugin_id`/`version`/`activation_id`/`gate_id`/`tool`/`call_id`/`operation_id`/`args_hash`/`actor`/`outcome`/`verdict`/`reason_code`/`latency_ms`/`host_status`/`final_status`），查询用 `json_extract(payload_json, '$.plugin_id')` 过滤。**B5 必须照这个形状写，否则查询会静默返回空**。
+- **已知边界（只增不减）**：“无法审批”计数不设窗口、只增不减（`plugin_gate_unavailable_count` 全表统计，不受最近 10 条窗口影响）。以后再定要不要改成“最近 N 天”或“本激活代次内”。

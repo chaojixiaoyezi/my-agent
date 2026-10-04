@@ -110,6 +110,9 @@ def _management(handler, server, body: dict) -> PluginManagement:
                     and peer is not None and _is_loopback_peer(peer))
     scope = _gateway_control_scope(handler, body, user_id=actor, channel=channel)
     scope = replace(scope, user_id=actor, channel=channel)
+    # 事件中心与 TUI 的 HTTP 目录入口共用 server 上的同一个 hub（没有就按“暂无记录”展示，不新建）；
+    # 放进 scope 而不是额外形参：_scope_management 是会被测试打桩的内部函数，多一个必传关键字会让老替身直接 TypeError。
+    scope = replace(scope, event_hub=getattr(server, "plugin_event_hub", None))
     return _scope_management(base, scope, is_admin)
 
 
@@ -117,6 +120,7 @@ def _management(handler, server, body: dict) -> PluginManagement:
 #   IM 路径的管理员判定用 owner_access.is_complete_local_admin_owner(home)，与 /settings 同一条规则、同一种 home。
 #   /plugins list 的 MCP 段只借用已经加载的 owner 实例（resolve_loaded_gateway_scope_agent 的被动查找），冷 owner 保持冷、
 #   段里如实写“未加载”。
+#   event_hub 从 scope.event_hub 取（调用方即 Gateway 入口把它放进 scope）：只读展示依赖，缺省 None 时展示“暂无记录”。
 # 函数用途: 为两个入口组装同一 PluginManagement，显式工作目录仍经原 Gateway 路径权限门。
 def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManagement:
     from .workspace_scope import gateway_request_workspace_scope
@@ -131,7 +135,8 @@ def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManage
         conversation_id=scope.conversation_id, is_admin=is_admin,
     )
     loaded = resolve_loaded_gateway_scope_agent(base, scope)
-    context = replace(context, live_registry=getattr(loaded, "tools", None))
+    context = replace(context, live_registry=getattr(loaded, "tools", None),
+                      event_hub=getattr(scope, "event_hub", None))
     if scope.workspace is not None:
         narrow_host = SimpleNamespace(
             config=SimpleNamespace(my_agent_owner_provider=owner.identity.provider),
@@ -144,11 +149,16 @@ def _scope_management(base, scope, is_admin: bool | None = None) -> PluginManage
 
 # LLM: IM 没有 Tab 目录握手，因此宿主冻结本次目录版本；解析、权限、原 HostCommand 和 --confirm 均沿同一管理服务。
 #   同消息重送由调用方的持久控制回执去重；异常保留原插件请求编号，不能重跑或宣称没有执行。
+#   event_hub 由调用方沿控制链透传：事件中心挂在 Gateway server 上（唯一来源），IM 没有 handler，
+#   由 http_handlers 从 server 取到后放进 scope.event_hub 带下来；缺省 None 时展示“暂无记录”，绝不为了展示新建 hub。
 # 函数用途: 把会话插件命令交给 TUI 的同一服务，投影为纯文本回执，不调用模型或新建审批通道。
-def execute_plugin_control(base, command: ConversationControlCommand, scope) -> ConversationControlResult:
+def execute_plugin_control(base, command: ConversationControlCommand, scope, *, event_hub=None) -> ConversationControlResult:
     request_id = uuid.uuid4().hex
     try:
-        manager = _scope_management(base, scope)
+        # hub 优先取显式入参（后台/无 scope 的调用），否则取 scope 上带下来的；两者都为空就按“暂无记录”展示。
+        # 这里只补 scope 上的展示依赖，不改身份字段；scope 不是本模块的 dataclass 时也不许因此报错。
+        hub = event_hub if event_hub is not None else getattr(scope, "event_hub", None)
+        manager = _scope_management(base, replace(scope, event_hub=hub))
         result = manager.command(command.value, revision=manager.catalog().revision, request_id=request_id)
     except Exception:  # noqa: BLE001 副作用可能已发生；不泄露内部路径，不自动重试。
         result = plugin_command_unknown(request_id)

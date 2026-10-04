@@ -91,6 +91,16 @@ BINDING_ROOT_OVERLAP = "BINDING_ROOT_OVERLAP"
 #: D.5：同一物理写根已被其他 binding 声明 → 冲突。
 ROOT_CLAIM_CONFLICT = "ROOT_CLAIM_CONFLICT"
 
+#: B5 收紧钩子写入的“无法审批”终态（设计第 8.5/9 节）；B6 只按它单独计数。
+#: B5 合入后若错误合同已有同源常量，统一引用那一处，勿保留两个字符串。
+PLUGIN_GATE_APPROVAL_UNAVAILABLE = "PLUGIN_GATE_APPROVAL_UNAVAILABLE"
+
+#: 设计第 9 节 plugin_gate.decided 的字段白名单；展示层只消费这些键，message 等其它 payload 键不外泄。
+_PLUGIN_GATE_DECISION_FIELDS = (
+    "plugin_id", "version", "activation_id", "gate_id", "tool", "call_id", "operation_id", "args_hash",
+    "actor", "outcome", "verdict", "reason_code", "latency_ms", "host_status", "final_status",
+)
+
 # RuntimeConflictError 统一由 operations 模块定义（本模块 import 复用，
 # 勿重复定义同名类——会遮蔽 operations 抛出的异常类导致调用方捕获不到）。
 
@@ -3046,6 +3056,32 @@ class RuntimeRepository(
             ).fetchall()
         return [conn_row_to_event(row) for row in rows]
 
+    # LLM: 只读投影：payload 白名单只取设计第 9 节字段（message 等键绝不外泄），owner 隔离由本库自身保证
+    #   （一 owner 一库）；按 seq 倒序取最近 limit 条（seq 单调，等价时间倒序）。改字段集合时联测 B6 展示合同测试。
+    # 函数用途: 取某个插件最近的收紧决定，供 /plugins info 展示；默认 10 条。
+    def plugin_gate_decisions(self, plugin_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT seq, payload_json, created_at FROM runtime_events "
+                "WHERE event_type = 'plugin_gate.decided' AND json_extract(payload_json, '$.plugin_id') = ? "
+                "ORDER BY seq DESC LIMIT ?",
+                (str(plugin_id), max(1, int(limit))),
+            ).fetchall()
+        return [_plugin_gate_decision(row) for row in rows]
+
+    # LLM: “无法审批”计数不设窗口：被插件挡住而无人能批是安全事实，最近 10 条窗口外的也不能漏；
+    #   与 plugin_gate_decisions 共用同一事件类型和插件匹配口径，不读消息或其它 payload 键。
+    # 函数用途: 统计某个插件累计“无法审批”的收紧决定条数（final_status = PLUGIN_GATE_APPROVAL_UNAVAILABLE）。
+    def plugin_gate_unavailable_count(self, plugin_id: str) -> int:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM runtime_events WHERE event_type = 'plugin_gate.decided' "
+                "AND json_extract(payload_json, '$.plugin_id') = ? "
+                "AND json_extract(payload_json, '$.final_status') = ?",
+                (str(plugin_id), PLUGIN_GATE_APPROVAL_UNAVAILABLE),
+            ).fetchone()
+        return int(row[0] or 0)
+
     # LLM: 恢复游标只决定扫描顺序，不代表消费；消费由同 agent_run/attempt 的独立回执决定。
     # 每页在未消费集合内按 seq 前进，到尾部再绕回，坏记录不会饿死后面的记录；不删除事件。
     # 函数用途: 分页轮转读取待恢复事实，并持久化下一次扫描位置；同一身份只返回最新事实。
@@ -3096,6 +3132,21 @@ def conn_row_to_event(row: sqlite3.Row) -> dict[str, Any]:
         "payload": json.loads(row["payload_json"] or "{}"),
         "created_at": row["created_at"],
     }
+
+
+# LLM: 白名单投影只在数据层做一次：字段缺失保持 None（由展示层兜底），绝不把 payload 原文（含 message）交给调用方；
+#   created_at 取事件行自身的写入时间，不从 payload 里的任何字段推断。改白名单时同步设计第 9 节与 B6 测试。
+# 函数用途: 把一条 plugin_gate.decided 行投影成设计第 9 节列出的结构化字段。
+def _plugin_gate_decision(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    decision = {field: payload.get(field) for field in _PLUGIN_GATE_DECISION_FIELDS}
+    decision["created_at"] = float(row["created_at"] or 0.0)
+    return decision
 
 
 def _binding_id() -> str:

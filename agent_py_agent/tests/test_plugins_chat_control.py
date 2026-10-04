@@ -179,6 +179,60 @@ def test_plugin_control_cannot_fall_into_local_stop_and_round_trips_raw_text():
     assert not result.ok and result.kind == "plugins" and "Gateway" in result.message
 
 
+def test_scope_equality_and_hash_ignore_display_only_event_hub():
+    """event_hub 是只读展示依赖，不参与身份：两个只差 hub 的 scope 必须相等。
+
+    它若参与相等，同一条命令在“有 hub”和“没 hub”两条路径上会被当成不同作用域，
+    控制回执的幂等身份也会随之漂移；所以 scope 的相等必须与展示依赖无关。
+    注：`GatewayControlScope` 的 `metadata` 是 dict，**这个类整体本来就不可 hash**
+    （`hash(scope)` 在任何构造下都抛 TypeError），所以这里只钉相等与 repr，
+    另有 `hash=False` 声明保证 hub 将来也不会被加进某个可哈希字段集合里。
+    """
+    base = _scope(admin=True)
+    with_hub = replace(base, event_hub=object())
+    other_hub = replace(base, event_hub=object())
+    assert with_hub == base
+    assert with_hub == other_hub
+    # repr 也不该带出 hub 的对象地址（排查日志时每次打印都不同会误导）。
+    assert "event_hub" not in repr(with_hub)
+    # 反向：真正的身份/会话字段仍然参与相等判定。
+    assert replace(base, conversation_id="session-b") != base
+    assert replace(base, user_id="bob") != base
+
+
+def test_scope_management_stub_without_keyword_args_is_not_turned_into_outcome_unknown(monkeypatch):
+    """钉住：execute_plugin_control 不许给可打桩的 _scope_management 传必传关键字。
+
+    真插件宿主用例（test_real_confirmation_gate_...）在开发沙箱里跑不了，但那条链路上真正出过一次回归：
+    execute_plugin_control 调 `_scope_management(base, scope, event_hub=...)`，而按老签名写死的测试替身
+    `lambda *_: service` 不接受关键字 → TypeError 被 `except Exception` 吞掉 → 整条命令变成
+    PLUGIN_COMMAND_OUTCOME_UNKNOWN，用户看到“未能确认插件请求结果”，确认提示再也不会出现。
+    这里用同样的替身形态（只收位置参数）跑一次真实控制链，断言命令走到了服务、没有被打成 unknown。
+    """
+    seen = []
+    service = SimpleNamespace(
+        catalog=lambda: SimpleNamespace(revision="rev-1"),
+        command=lambda text, revision=None, request_id="": seen.append((text, revision)) or {
+            "ok": False, "state": "rejected", "error_code": "PLUGIN_CONFIRMATION_REQUIRED",
+            "message": "启用前需要你确认\n--confirm 000000000000",
+        },
+    )
+
+    def stub(*args):
+        # 只接受位置参数：多传任何关键字都会 TypeError，正是那条回归的触发条件。
+        assert args, "替身至少要拿到 base 与 scope"
+        return service
+
+    monkeypatch.setattr(module, "_scope_management", stub)
+    result = _run(None, "/plugins enable Demo", _scope(admin=True))
+    assert seen, "命令没有走到插件服务"
+    assert result.error_code != "PLUGIN_COMMAND_OUTCOME_UNKNOWN", (
+        "内部替身不接受关键字就把整条控制链打成 outcome unknown，正是 d9f158e8d 引入的回归"
+    )
+    assert result.error_code == "PLUGIN_CONFIRMATION_REQUIRED"
+    assert "--confirm " in result.message
+
+
 @pytest.mark.parametrize("kind", ["executable", "interpreter"])
 def test_real_confirmation_gate_stays_closed_before_explicit_user_confirmation(tmp_path, monkeypatch, kind):
     from agent_py_agent.tests.test_plugin_any_language import (

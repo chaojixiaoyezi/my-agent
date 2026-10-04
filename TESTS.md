@@ -1,5 +1,104 @@
 # 测试与发布验收
 
+## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，基于 B3 返工后的头 `0a3064078`，已实施，待复审；**查询与展示完成，写账待 B5**）
+
+### B6 二次修复：确认门回归（b6f，2026-10-03）
+
+- **真回归**：`test_plugins_chat_control.py::test_real_confirmation_gate_stays_closed_before_explicit_user_confirmation`
+  的 `[executable]` / `[interpreter]` 两条，在 `d9f158e8d` 起返回 `PLUGIN_COMMAND_OUTCOME_UNKNOWN`，不再是要求 `--confirm` 的提示。
+  3a 沙箱外逐提交核对：`b6ede99e0` / `0a3064078` / step17i 头 **38 passed**，`1a4860903` 起 **2 failed**。
+- **根因**：`plugin_command_service.py:155` 的 `_scope_management(base, scope, event_hub=...)` 给一个会被打桩的内部函数传了关键字；
+  用例 `test_plugins_chat_control.py:196` 的替身 `lambda *_: service` 只收位置参数 → `TypeError` → 被紧邻的
+  `except Exception` 吞成 `plugin_command_unknown` → 命令没走到插件服务。
+  （M1 之前那行传的是 `event_hub=_hub_for_control(base)`，同样带关键字，所以是 B6 引入、不是 M1 修复引入。）
+- **修法**：`_scope_management` 去掉 `event_hub` 形参，hub 从 `scope.event_hub` 取；`execute_plugin_control` 用
+  `_scope_management(base, replace(scope, event_hub=hub))`——调用点不传任何关键字。
+- **命令与结果**：
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugins_chat_control.py agent_py_agent/tests/test_plugin_event_display.py -q --tb=short -p no:cacheprovider
+# 52 passed
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest "agent_py_agent/tests/test_plugins_chat_control.py::test_real_confirmation_gate_stays_closed_before_explicit_user_confirmation" -q --tb=line -p no:cacheprovider
+# 2 passed（两条真宿主用例现在在沙箱里也能过）
+```
+
+- **变异（每条跑完按 sha256 还原一致）**：
+
+| 变异 | 注入点 | 结果 |
+| --- | --- | --- |
+| 调用点退回传 `event_hub` 关键字 | `plugin_command_service.execute_plugin_control` | KILLED（新用例 + 5 条既有用例红） |
+| `_scope_management` 签名加回带默认值的关键字参数 | 同上 | SURVIVED（等价变异：签名有默认值、调用点不传就不触发，故不算有效变异） |
+| IM 链 hub 退回从 `server.agent` 取 | `http_handlers` | KILLED（`test_tui_http_and_im_render_byte_identical_text` 红） |
+
+- **顺带用例**：`test_scope_management_stub_without_keyword_args_is_not_turned_into_outcome_unknown`（不依赖真宿主，沙箱可跑）、
+  `test_scope_equality_and_hash_ignore_display_only_event_hub`（只断言相等与 repr；**如实说明**：`GatewayControlScope` 的 `metadata` 是 dict，该类整体本来就不可 `hash()`）。
+
+### B6 初审 M1 修复（b6f，2026-10-03）
+
+- **问题**：IM 链从 `server.agent` 取事件中心；hub 实际挂在 Gateway server 上，而 `server` 与 `server.agent` 是两个不同对象 → IM 的“观察计数”恒为“暂无记录”。
+- **修法**：删 `_hub_for_control`；`event_hub` 从 `http_handlers._handle_persistent_control_operation`（唯一拿到 server 的地方）按关键字参数沿控制链透传到 `execute_plugin_control`。不把 hub 再挂一份到 agent 上（保持单一来源）。
+- **用例改真实拓扑**：`test_tui_http_and_im_render_byte_identical_text` 中 TUI 走 `/client/plugins` HTTP 路由、IM 走 `http_handlers._handle_persistent_control_operation`；只在 server 上挂 hub；断言 IM 计数不是“暂无记录”且与 TUI 逐字相同；另加反向断言（server 没挂 hub 时 IM 链降级成“暂无记录”，不报错、不新建 hub）。
+- **变异（b6f 新增 1 个）**：`http_handlers` 的 `event_hub=getattr(server.agent, "plugin_event_hub", None)`（IM 链退回从 agent 取）→ **KILLED**（`test_tui_http_and_im_render_byte_identical_text` 红：IM 变“暂无记录”、与 TUI 不再逐字相同）；脚本 `/private/tmp/claude-501/b6f-scratch/mut_m1.py`，跑完按 sha256 还原一致。
+- **命令与结果**：
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_display.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b6f
+# 12 passed
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_display.py agent_py_agent/tests/test_plugin_commands.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugin_manifest_v8.py agent_py_agent/tests/test_gateway_plugin_commands.py agent_py_agent/tests/test_gateway_plugin_management.py agent_py_agent/tests/test_gateway_plugin_panels.py agent_py_agent/tests/test_plugin_event_hub.py agent_py_agent/tests/test_plugins_chat_control.py agent_py_agent/tests/test_gateway_conversation_control.py -q --tb=no -p no:cacheprovider
+# 约 468 项，5 个失败，全部是既有沙箱限制、与本次改动无关（已在 HEAD 1a4860903 基线临时工作树复核同样失败）：
+#   test_plugins_chat_control 的 confirmation gate 两条（需要真插件宿主，PLUGIN_COMMAND_OUTCOME_UNKNOWN）；
+#   test_gateway_conversation_control::test_goal_and_task_resource_controls_are_independent 三条（sandbox-exec 返回 71，不允许嵌套 Seatbelt）。
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <guards9 清单 10 个文件> -q --tb=short -p no:cacheprovider
+# 172 passed
+```
+
+- **起因**：设计稿第 9 节与第 13 节 B6 行。B6 分两半：B5 写 `plugin_gate.decided` 账本，B6 做查询与 `/plugins info` 四段展示。本轮只做不依赖 B5 的部分，账本行由测试按第 9 节字段直插临时库。
+
+- **命令与结果**（都在工作目录根跑，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_display.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-m1b6
+# 12 passed
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_commands.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugin_manifest_v8.py -q --tb=short -p no:cacheprovider
+# 191 passed（product 侧回归：行情命令、管理服务、v8 清单与确认措辞）
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_plugin_commands.py agent_py_agent/tests/test_gateway_plugin_management.py -q --tb=short -p no:cacheprovider
+# 见「收尾合并回归」小节
+PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，不入库）
+```
+
+- **覆盖**（`tests/test_plugin_event_display.py`，12 项）：
+  1. `test_each_outcome_row_keeps_all_structured_fields`：`ok / timeout / error / malformed / unavailable / revoked` 每种一条，展示里工具、结果、原因码、时间齐全；
+  2. `test_recent_ten_newest_first_and_eleventh_hidden`：11 条时第 11 条（最旧）不显示，新的排前面，库里仍有 11 条；
+  3. `test_unavailable_counted_separately_even_outside_recent_window`：窗口外的“无法审批”不显示行但计入计数；
+  4. `test_message_body_never_leaks_into_query_or_display`：投影键集合固定为设计第 9 节字段，带 `message` 的行原文不出现在展示里；
+  5. `test_unavailable_count_only_for_the_matching_plugin`：计数与查询都按插件过滤；
+  6. `test_tui_http_and_im_render_byte_identical_text`：按真实拓扑——TUI 走 `/client/plugins` HTTP 路由、IM 走 `http_handlers._handle_persistent_control_operation`，只在 server 上挂 hub；断言两条入口的“观察计数”逐字相同、且不是“暂无记录”；并反向断言 server 没挂 hub 时 IM 链降级成“暂无记录”。
+  7. `test_other_owner_records_and_counts_never_appear`：A 的记录与计数不出现在 B 的 `/plugins info`；
+  8. `test_hub_stats_read_with_owner_home_key`：计数按 owner home 取分区键，两个 owner 各自一次；
+  9. `test_legacy_plugin_and_empty_v8_show_placeholders`：v6/v7 老插件写“没有订阅 / 没有收紧 / 不适用 / 暂无记录”，空记录 v8 照常显示四段；
+  10. `test_observed_counts_rendered_and_missing_hub_degrades`：有计数就渲染四项计数、错误码与最近送达时间，没有 hub 就写“暂无记录”；
+  11. `test_broken_hub_or_ledger_read_never_breaks_info`：hub 抛异常时仍正常出四段；
+  12. `test_info_for_unknown_plugin_still_reports_not_found`：未知插件保持原“未找到该插件。”回执。
+
+- **变异（6 个，全部被检出；脚本 `tmp/mut/run_mutations.py`，跑完从备份还原并核对哈希）**：
+
+| 变异 | 注入点 | 结果 |
+| --- | --- | --- |
+| 不按时间倒序（`ORDER BY seq ASC`） | `repository.plugin_gate_decisions` | 检出（第 2、3 项测试红） |
+| 默认窗口改 11 条 | 同上默认参数 | 检出（第 2 项红） |
+| 把 `message` 原文带出来 | `_plugin_gate_decision` 多投影一个键 | 检出（第 4 项红） |
+| 查询不分 owner/插件 | 去掉 `plugin_id` 过滤 | 检出（第 5 项红） |
+| 展示不读事件中心计数 | `plugin_management._event_details` 传 `None` | 检出（第 8、10 项红） |
+| 无法审批恒记 0 | 计数条件改成不匹配的值 | 检出（第 3、5、7 项红） |
+
+- **收尾 gate 结果**（工作目录根，全部通过）：
+  - B6 定向 + 相邻回归 9 个文件：`371 passed`（`test_plugin_event_display` / `plugin_commands` / `plugin_management` / `plugin_manifest_v8` / `gateway_plugin_commands` / `gateway_plugin_management` / `gateway_plugin_panels` / `plugin_event_hub` / `runtime_db`）。
+  - guards9 清单全部测试文件：`172 passed`。
+  - `scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py` → DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict` → hard=0、blocked=False；`git diff --check` 干净；`scripts/check_clean_package.py .` → 未发现发布阻塞项；`size_diff.sh` → **新增告警 0**（消失 16）。
+  - `test_plugin_any_language.py` 6 项失败与 `test_plugins_chat_control.py` 2 项失败：本机命令沙箱限制（v6 宿主启用链/子进程），已在 HEAD 基线临时工作树复核过是既有失败，与本次改动无关；沙箱外由 3a 复核。
+
+- **未验证**：写账方（B5）未合入，账本写入路径未联测；v8 启用门未开（B7 前），未启用真实 v8 插件；真实 TUI、飞书客户端、真实 Gateway 未跑（本沙箱不启动 Gateway）；观察计数只在 Gateway 进程内存里，TUI 直连入口没有 hub，按“暂无记录”降级已覆盖，但真实 Gateway 里同一 hub 的计数未在真进程复核。
+
 ## Gateway G1 加固（2026-10-03，g1h，worker/g1-hardening，待 9b 核对）
 
 - Agent 凭据根由 `agent_home_root_for_owner(home_paths.owner_home_dir)` 推导，并与 `home_paths.root` 核对；缺少 Agent 合同报 `unavailable:agent_contract`。`agent=None` 报 `unavailable:no_data_root`，不从队列路径回退或创建凭据。

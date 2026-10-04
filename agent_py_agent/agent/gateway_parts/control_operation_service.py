@@ -261,6 +261,7 @@ def gateway_control_operation_identity(
 # LLM: The prepare row is committed before the executing marker and before any command-specific
 # mutation. Existing completed/unknown rows are replayed without touching the effect service.
 # /admin、/approve 的密码在写回执、算摘要之前就换成脱敏正文；明文只随内存中的 command 交给执行服务一次。
+# 事件中心（B6 观察计数）由调用方放进 scope.event_hub 带进来；它是只读展示依赖，不落盘、不参与身份判定。
 # 函数用途: 幂等执行一条控制命令，并把崩溃边界保存为 completed 或 terminal_unknown。
 def execute_gateway_control_operation(
     agent: object,
@@ -306,6 +307,7 @@ def execute_gateway_control_operation(
 
 # LLM: This helper is entered only by the C-lock winner. It writes executing before the generic
 # effect and is the only path allowed to invoke the command service.
+#   event_hub 随 scope 带下来（HTTP 入口从 server 取到）；回执里不存 hub，恢复 scope 时由调用方再传。
 # 函数用途: 在已持控制操作锁时推进 prepared、执行一次副作用并保存 completed/unknown。
 def _execute_gateway_control_operation_locked(
     agent: object,
@@ -352,7 +354,7 @@ def _execute_gateway_control_operation_locked(
             agent,
             paths,
             command,
-            _receipt_scope(receipt),
+            _receipt_scope(receipt, scope.event_hub),
         )
     except Exception as exc:  # noqa: BLE001 - any partial command effect must remain unknown.
         uncertain = replace(
@@ -575,8 +577,9 @@ def _load_or_prepare_control_operation_locked(
 
 
 # LLM: 从已校验回执恢复首次身份、目录和目标，供执行及只读对账；当前 HTTP 输入不能重定向旧操作。
+#   event_hub 是只读展示依赖、不落盘，恢复时从本次调用传进来（缺省 None→展示“暂无记录”）。
 # 函数用途: 从控制回执恢复最小、固定的 Gateway 控制作用域。
-def _receipt_scope(receipt: GatewayControlOperationReceipt) -> GatewayControlScope:
+def _receipt_scope(receipt: GatewayControlOperationReceipt, event_hub: object | None = None) -> GatewayControlScope:
     return GatewayControlScope(
         user_id=receipt.user_id,
         channel=receipt.channel,
@@ -591,6 +594,7 @@ def _receipt_scope(receipt: GatewayControlOperationReceipt) -> GatewayControlSco
         all_user_access=receipt.all_user_access,
         resolved_owner=_receipt_owner_identity(receipt),
         workspace=receipt.workspace,
+        event_hub=event_hub,
     )
 
 

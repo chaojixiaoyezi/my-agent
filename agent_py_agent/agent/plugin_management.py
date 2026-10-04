@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -16,10 +17,12 @@ from .path_access_policy import PathAccessPolicy, agent_home_root_for_owner
 from .plugin_cleanup import consume_plugin_cleanup
 from .plugin_command_service import execute_plugin_command, read_plugin_catalog
 from .plugin_commands import (
+    PluginEventDetails,
     parse_plugin_command,
     plugin_command_response,
     plugin_namespace,
     render_mcp_server_section,
+    render_plugin_event_details,
     render_plugin_use_card,
 )
 from .plugin_configure_tool import PLUGIN_CONFIGURE_TOOL, PluginConfigureTool
@@ -82,6 +85,9 @@ class PluginManagementContext:
     # 当前 owner 已加载实例的工具注册表（只读，给 /plugins list 的 MCP 段投影运行与发布事实）；冷入口/未加载为 None，
     # 绝不为了这一段去初始化实例。
     live_registry: object | None = None
+    # 插件事件中心（B3，只读统计入口 stats(owner_key)）；Gateway 路径注入进程内唯一 hub，TUI 直连没有 hub 时为 None，
+    # 展示层按“暂无记录”降级，绝不为了展示创建 hub 或触发投递。
+    event_hub: object | None = None
 
 
 # LLM: 冷入口与完整代理共用 owner 权限和审批配置；管理/业务分别受工具禁用约束，查询仍绑定原身份。
@@ -197,9 +203,11 @@ class PluginManagement:
         if parsed.action.name == "info":
             plugin = next((item for item in catalog.plugins if item.plugin_id == values["plugin"]), None)
             entry = next((item for item in entries if item.manifest.plugin_id == values["plugin"]), None)
-            return self._reply({"ok": plugin is not None and entry is not None, "message": (
-                render_plugin_use_card(plugin, entry.manifest.settings_schema)
-                if plugin is not None and entry is not None else "未找到该插件。")})
+            if plugin is None or entry is None:
+                return self._reply({"ok": False, "message": "未找到该插件。"})
+            message = (render_plugin_use_card(plugin, entry.manifest.settings_schema)
+                       + "\n\n" + render_plugin_event_details(self._event_details(entry)))
+            return self._reply({"ok": True, "message": message})
         return execute_plugin_command(catalog, text, revision=revision)
 
     # LLM: 先按原身份查冻结请求，再解释当前目录；旧终态不启动新连接，原 pending 只能在原选择仍成立时执行。
@@ -462,6 +470,16 @@ class PluginManagement:
         if card:
             result["message"] += "\n" + card
 
+    # LLM: 第四段的两个查询都在这里：runtime.db 只读投影 + 事件中心计数快照；任一不可得都降级为“暂无记录”，
+    #   不能让只读展示把 /plugins info 弄失败。owner 隔离：库按 owner home 打开、计数按 owner home 取分区键。
+    # 函数用途: 组装某插件四段展示里的事件与账本事实（订阅、收紧、网络、决定、计数）。
+    def _event_details(self, entry) -> PluginEventDetails:
+        manifest = entry.manifest
+        decisions, unavailable = _gate_ledger(runtime_db_path(self.context.owner.home_dir), manifest.plugin_id)
+        observed = _observed_counts(self.context.event_hub, self.context.owner, manifest.plugin_id)
+        return PluginEventDetails(manifest.events, manifest.tool_gates, manifest.permissions,
+                                  tuple(decisions), unavailable, observed)
+
 
 # 常量用途: 插件管理请求各结构化状态的默认中文说明；不在表里的状态用通用说明。
 _PLUGIN_REPLY_STATE_MESSAGES = {
@@ -513,6 +531,36 @@ def _reply_message(payload: dict, state: str, business: bool) -> str:
     if payload.get("connection_cleanup", {}).get("confirmed") is False:
         message += "\n本次插件连接退出尚未确认；原调用结果保持，请核对资源。"
     return message
+
+
+# LLM: 账本读取只读打开 owner 的 runtime.db（mode=ro，不初始化、不迁移、不写盘）；文件不存在（冷 owner）或读取失败
+#   都返回空结果，由展示层写“暂无记录”。查询异常不能抛给 /plugins info。
+# 函数用途: 读取某插件的最近决定与“无法审批”计数；不可得时返回空列表和 0。
+def _gate_ledger(path: Path, plugin_id: str) -> tuple[list, int]:
+    if not path.is_file():
+        return [], 0
+    try:
+        repo = RuntimeRepository(path, read_only=True)
+        return repo.plugin_gate_decisions(plugin_id), repo.plugin_gate_unavailable_count(plugin_id)
+    except (OSError, sqlite3.Error, ValueError):
+        return [], 0
+
+
+# LLM: 计数只在事件中心内存里（不写盘）；hub 缺失（TUI 直连没有 Gateway）或读取失败一律按“暂无记录”展示，
+#   只读 stats 快照，绝不创建 hub、不触发投递。owner 分区键与事件中心一致（owner home 字符串）。
+# 函数用途: 取某 owner 某插件的观察计数快照；不可得时返回 None。
+def _observed_counts(hub, owner, plugin_id: str) -> dict | None:
+    if hub is None:
+        return None
+    try:
+        snapshot = hub.stats(str(owner.home_dir))
+    except Exception:  # noqa: BLE001 展示旁路失败不阻断 info
+        return None
+    stats = snapshot.get(plugin_id) if isinstance(snapshot, dict) else None
+    if not isinstance(stats, dict):
+        return None
+    cleaned = {str(event_type): dict(counts) for event_type, counts in stats.items() if isinstance(counts, dict)}
+    return cleaned or None
 
 
 # LLM: 只按成功回执里的卸载/停用释放结构化字段选择说明，先命中者优先；都不满足时返回空串交调用方沿用默认说明。

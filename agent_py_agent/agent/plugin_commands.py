@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 
 from .command_arguments import (
@@ -19,6 +20,7 @@ from .command_binding import (
     render_action_usage,
 )
 from .command_catalog import COMMAND_INDEX, system_slash_command_name
+from .plugin_events.confirmation import event_description, gate_description
 
 _PLUGIN_ID = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}\Z")
 
@@ -237,6 +239,96 @@ def render_plugin_use_card(plugin: PluginCommandSpec, settings_schema: dict) -> 
     lines.append(f"修改配置：先 /plugins disable {plugin.plugin_id}，再 /plugins configure {plugin.plugin_id} --file <JSON文件>。")
     lines.append(f"停用：/plugins disable {plugin.plugin_id}；卸载：/plugins remove {plugin.plugin_id}。")
     return "\n".join(lines)
+
+
+# LLM: 事件展示输入打包：订阅声明、收紧门、网络权限、决定行、无法审批计数、观察计数；
+#   全部来自 B1 清单与 B6 查询，不含消息原文或私有配置。新增字段时同步 render_plugin_event_details 与展示测试。
+# 类用途: 承载 /plugins info 四段展示所需的只读事实。
+@dataclass(frozen=True)
+class PluginEventDetails:
+    events: tuple = ()
+    tool_gates: tuple = ()
+    permissions: object | None = None
+    decisions: tuple = ()
+    unavailable_count: int = 0
+    observed: dict | None = None
+
+
+# LLM: 四段展示的唯一渲染点：TUI 直连、TUI 经 Gateway、IM 三条入口都调这里，保证同一份文字；
+#   只读结构化事实，不读消息原文、不翻译错误码。格式变化时联测展示合同测试的逐字断言。
+# 函数用途: 渲染 /plugins info 的事件订阅、收紧工具、网络沙箱、最近决定与观察计数四段。
+def render_plugin_event_details(details: PluginEventDetails) -> str:
+    lines = ["事件订阅：" + _events_line(details.events),
+             "收紧工具：" + _gates_line(details.tool_gates),
+             _network_sandbox_line(details.permissions)]
+    lines.extend(_decision_lines(details.decisions, details.unavailable_count, details.observed))
+    return "\n".join(lines)
+
+
+# 函数用途: 一行订阅说明；没有声明时说“没有订阅”，不报错。
+def _events_line(events: tuple) -> str:
+    if not events:
+        return "没有订阅"
+    return "；".join(event_description(event.to_payload()) for event in events)
+
+
+# 函数用途: 一行收紧说明；没有声明时说“没有收紧”，不报错。
+def _gates_line(tool_gates: tuple) -> str:
+    if not tool_gates:
+        return "没有收紧"
+    return "；".join(gate_description(gate.to_payload()) for gate in tool_gates)
+
+
+# 函数用途: 网络与沙箱状态行；v8（有 permissions）显示声明与强制沙箱要求，旧版插件说明不适用。
+def _network_sandbox_line(permissions: object | None) -> str:
+    if permissions is None:
+        return "网络与沙箱：旧版插件没有事件与收紧声明，不适用。"
+    network = "允许联网" if permissions.network else "禁止联网（含本机回环）"
+    return f"网络与沙箱：{network}；沙箱要求强制使用插件进程沙箱，不可用时不得启用。"
+
+
+# 函数用途: 最近决定与计数段；决定按查询给出的新到旧顺序逐行渲染，无记录时写“暂无记录”。
+def _decision_lines(decisions: tuple, unavailable_count: int, observed: dict | None) -> list[str]:
+    lines = ["最近收紧决定（最多 10 次，新到旧）："]
+    if decisions:
+        lines.extend("  " + _decision_line(item) for item in decisions)
+    else:
+        lines.append("  暂无记录")
+    lines.append(f"无法审批：{int(unavailable_count)} 次")
+    if not observed:
+        lines.append("观察计数：暂无记录")
+        return lines
+    lines.append("观察计数：")
+    lines.extend("  " + _observed_line(event_type, counts) for event_type, counts in observed.items())
+    return lines
+
+
+# 函数用途: 一条决定行：本地时间、工具、征询结果、合并结论、原因码；缺字段时写“未知/无”。
+def _decision_line(item: dict) -> str:
+    return "{}  {}  征询 {}，结论 {}，原因码 {}".format(
+        _display_time(item.get("created_at")), item.get("tool") or "未知",
+        item.get("outcome") or "未知", item.get("final_status") or "未知", item.get("reason_code") or "无")
+
+
+# 函数用途: 一条观察计数行：送达、合并、失败、不可用，有值时附最近错误码与最近送达时间。
+def _observed_line(event_type: str, counts: dict) -> str:
+    text = (f"{event_type}：送达 {int(counts.get('delivered') or 0)}、合并 {int(counts.get('coalesced') or 0)}、"
+            f"失败 {int(counts.get('failed') or 0)}、不可用 {int(counts.get('unavailable') or 0)}")
+    extras = []
+    code = str(counts.get("last_error_code") or "")
+    if code:
+        extras.append(f"最近错误码 {code}")
+    if counts.get("last_delivered_at"):
+        extras.append(f"最近送达 {_display_time(counts.get('last_delivered_at'))}")
+    return text + (f"（{'；'.join(extras)}）" if extras else "")
+
+
+# 函数用途: 把事件时间戳转成本地可读时间；缺失或非法值显示“时间未知”。
+def _display_time(value: object) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(value)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "时间未知"
 
 
 # LLM: 当前只处理静态帮助与拒绝结果；未来业务执行应消费 ParsedPluginCommand 并接原工具链，不能在这里另造执行器。

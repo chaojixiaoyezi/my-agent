@@ -19,24 +19,25 @@ def event_confirmation_facts(manifest) -> dict:
 def event_confirmation_lines(confirmation: dict) -> list[str]:
     if "events" not in confirmation:
         return []
-    events = "、".join(_event_description(event) for event in confirmation["events"]) or "无"
+    events = "、".join(event_description(event) for event in confirmation["events"]) or "无"
     return ["订阅事件：" + events,
-            *[_gate_description(gate) for gate in confirmation["tool_gates"]],
+            *[gate_description(gate) for gate in confirmation["tool_gates"]],
             "网络权限：" + ("允许联网" if confirmation["network"] else "禁止联网（含本机回环）"),
             "沙箱要求：强制使用插件进程沙箱；不可用时不得启用。"]
 
 
 # LLM: 第一期只有提示观察允许 text；非提示即使收到旧式 text 事实也不展示参数承诺，不影响授权或确认码事实。
+#   B6 的 /plugins info 展示复用本函数，保证确认码与展示同一措辞；改文案时联测 test_plugin_manifest_v8 与 B6 展示测试。
 # 函数用途: 只为提示提交展示正文范围，其余观察事件统一说明不含正文。
-def _event_description(event: dict) -> str:
+def event_description(event: dict) -> str:
     if event["content"] != "text" or event["type"] != "prompt_submitted":
         return event["type"] + "（不含正文）"
     return event["type"] + "（可看提示文字，最多4000字）"
 
 
-# LLM: full 已保证不含 effects；按效果订阅不交付完整参数，不猜当前工具存在性。
+# LLM: full 已保证不含 effects；按效果订阅不交付完整参数，不猜当前工具存在性。B6 展示复用同一措辞。
 # 函数用途: 展示一个收紧门的命中范围和可见参数。
-def _gate_description(gate: dict) -> str:
+def gate_description(gate: dict) -> str:
     scope = "、".join([*gate["tools"], *gate["effects"]])
     if gate["arguments"] == "full":
         return f"收紧门 {gate['id']}：能看到这些工具的完整参数：{scope}（脱敏后最多4000字）。"

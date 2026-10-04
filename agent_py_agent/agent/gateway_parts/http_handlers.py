@@ -18,7 +18,7 @@ import hashlib
 import json
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -966,6 +966,8 @@ def handle_control(handler, server) -> None:
 
 # LLM: Both HTTP control entrypoints must prepare the same durable operation before invoking any
 # command service. Response loss therefore replays the stored result instead of repeating effects.
+#   事件中心（B6 观察计数）只有一个来源：本处从 server 取到后放进 scope.event_hub 沿控制链带下去；
+#   绝不从 server.agent 取，也不为了展示新建 hub。
 # 函数用途: 持久、幂等地执行一条 HTTP 控制命令，并返回独立 operation_id 供客户端对账。
 def _handle_persistent_control_operation(
     handler,
@@ -980,7 +982,7 @@ def _handle_persistent_control_operation(
             server.agent,
             server.paths,
             command,
-            scope,
+            replace(scope, event_hub=getattr(server, "plugin_event_hub", None)),
             command_text=command_text,
         )
     except GatewayControlOperationIdentityRequired as exc:

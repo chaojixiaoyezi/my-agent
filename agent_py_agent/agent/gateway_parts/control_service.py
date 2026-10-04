@@ -93,7 +93,10 @@ class _SubagentStatusCounts(NamedTuple):
 # LLM: Authenticated issuer facts and a once-resolved owner are separate. Durable control receipts
 # persist both; callers must never derive owner authority from command text or a later config read.
 # workspace 是未校验的客户端 JSON，必须经过共享目录校验才可写入线程，不能据此取得权限。
-# 类用途: 保存一条控制命令的可信来源、会话定位和可选的固定 owner 身份。
+# event_hub 是 B6 观察计数用的只读事件中心句柄，全进程只有 Gateway server 一个来源；
+#   它是纯展示依赖，不参与身份、权限或 owner 判定，缺省 None 时展示“暂无记录”。
+#   因此从相等、哈希和 repr 里排除：两个只差 hub 的 scope 必须相等、哈希相同，打印 scope 也不该带出对象地址。
+# 类用途: 保存一条控制命令的可信来源、会话定位、可选的固定 owner 身份，以及只读展示依赖。
 @dataclass(frozen=True)
 class GatewayControlScope:
     user_id: str
@@ -103,6 +106,7 @@ class GatewayControlScope:
     all_user_access: bool = False
     resolved_owner: OwnerIdentity | None = None
     workspace: object = None
+    event_hub: object | None = field(default=None, compare=False, hash=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -347,6 +351,9 @@ def reconcile_gateway_steer_delivery(
 # /admin、/approve、/deny 交给 admin_control_service：只读 base agent 的 home/config 与 Gateway 队列，不构造 scoped Agent。
 # /skills 交给 skill_control_service：只读写当前范围 owner 的技能提案与自动 Skill，必须在 steer/stop 默认路径之前分派。
 # /plugins 交给 plugin_command_service：与 TUI 同一管理服务，IM 权限取已解析 owner，不能落入 steer/stop 默认路径。
+#   事件中心（B6 观察计数）只有一个来源，就挂在 Gateway server 上：调用方（http_handlers 拿到 server）把它放进
+#   scope.event_hub 带下来，本函数只转发、不自己去找；为空（如无 handler 的调用）就按“暂无记录”展示。
+#   用 scope 承载而不新增形参：本函数已有四个位置参数，再加会触发尺寸守卫的参数告警。
 # 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
 def execute_gateway_conversation_control(
     agent: object,
@@ -399,7 +406,7 @@ def execute_gateway_conversation_control(
     if command.kind == "plugins":
         from .plugin_command_service import execute_plugin_control
 
-        return execute_plugin_control(agent, command, scope)
+        return execute_plugin_control(agent, command, scope, event_hub=scope.event_hub)
     steer_receipt: _SteerReceiptState | None = None
     if command.kind == "steer":
         try:

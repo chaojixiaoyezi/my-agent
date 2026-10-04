@@ -75,6 +75,16 @@
   `_apply_limit_settlement` 一并写进答复 `guidance_settlement`。
 - 回归：`test_steer_closeout_replay.py`（含 `host_notices_from` 认 `HostNotice` 的渲染回归）。
 
+## M1 B6：插件账本与展示（2026-10-03，分支 `worker/m1-b6-ledger-display`，初审 M1 修复 `b6f`，待复审）
+
+- `plugin_management` 的 `PluginManagementContext.event_hub` 是展示用的只读事件中心句柄；`runtime_db/repository` 的 `plugin_gate_decisions(plugin_id, limit=10)` 只投影设计第 9 节的 15 个字段（+`created_at`），`plugin_gate_unavailable_count(plugin_id)` 单独统计“无法审批”次数。
+- **事件中心只有一个来源**：hub 由 `gateway_parts/plugin_panels_http.plugin_event_hub(server)` 懒建并挂在 **Gateway server** 上（`server.plugin_event_hub`）；`http_service.GatewayHTTPServer.self.agent` 是另一个对象，**不许再挂一份**。
+  - TUI 入口 `plugin_command_service.plugin_http_response` / `_management` 从 `getattr(server, "plugin_event_hub", None)` 取，**放进 `GatewayControlScope.event_hub`**。
+  - IM 链从 `http_handlers._handle_persistent_control_operation` 取同一个 server 属性放进 scope，经 `execute_gateway_control_operation` → `_receipt_scope` → `execute_gateway_conversation_control` → `execute_plugin_control` 带下去（原先的 `_hub_for_control(base)` 已删）。缺省 `None` 时展示“暂无记录”，**绝不为了展示新建 hub**。
+  - **不许给 `_scope_management` 之类的可打桩内部函数加必传关键字参数**：`execute_plugin_control` 曾传 `event_hub=` 关键字，打桩替身（`lambda *_: service`，只收位置参数）直接 `TypeError`，又被紧邻的 `except Exception` 吞成 `PLUGIN_COMMAND_OUTCOME_UNKNOWN`——命令根本没走到插件服务。现在 hub 一律走 `scope.event_hub`，调用点不传关键字。
+  - `GatewayControlScope.event_hub` 声明 `compare=False, hash=False, repr=False`：展示依赖不参与相等、哈希和 repr。
+- 回归：`test_plugin_event_display.py`（12 项；其中 `test_tui_http_and_im_render_byte_identical_text` 按真实拓扑——TUI 走 `/client/plugins`、IM 走 `_handle_persistent_control_operation`，只在 server 上挂 hub——断言两条入口计数逐字相同且不是“暂无记录”，并反向断言没挂 hub 时降级不报错）；`test_plugins_chat_control.py` 的 `test_scope_management_stub_without_keyword_args_is_not_turned_into_outcome_unknown`（用只收位置参数的替身跑真实控制链，钉住确认门不再被打成 unknown）与 `test_scope_equality_and_hash_ignore_display_only_event_hub`。
+
 ## M1 B3：插件事件中心（2026-10-03，分支 `worker/m1-b3-event-hub`，待 9b 复审）
 
 - `plugin_events/protocol` 固定观察事件的公共字段与 `my-agent/events` 握手能力门（`MAX_BATCH_EVENTS` 直接引用清单的订阅类型上限）；`plugin_events/hub` 的 `PluginEventHub` 按 owner 分区、按事件类型只留最新（`dropped_before` 只算槽建立之后被合并的条数；`seq` 按（owner, 插件激活）各自计数、换代从 1 重新开始）、一批最多 6 条一次 `events.observe`、每个（owner, 激活）同时只有一个发送任务（单在途；线程池 4 个、与面板服务同档，一个插件挂住不拖别的插件）；publish 永不阻塞、永不抛异常，投递在后台线程池；hub 每轮顺手对自管连接做空闲关闭；发送/收尾/记账与池维护拆成模块级函数（首参 hub，`815151369` 拆平、行为不变），类保留发布/调度/收集/生命周期核心。
@@ -2558,3 +2568,9 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - typed sink 协议（`write_provider_retry`）新增可选收口参数包 `params={"final": True, "error_code": ...}`：正常重试不传（老 sink 照常工作），收口时传；不认识的旧签名会因未知参数抛 TypeError，由 `provider_transient_auto_resume` 吞掉并退回文本回调。
 - 消费方：TUI 读 chunk 的 `runtime_progress.text`（`tui_runtime._publish_runtime_progress`）；前台转录 `GatewayForegroundTranscriptSink._consume_event` 把 `retry` 转给 `BackgroundTranscriptSink.write_provider_retry`；`GatewayMainActivitySink.__call__` 的状态行按 `retry.final` 显示收口文案。
 - 初审补齐（rfsf）：状态行收口短句统一登记 `request_errors.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT`（`AgentActivity`/`GatewayMainActivitySink` 引用）；ast 守卫用例（`tests/test_provider_retry_final_sink.py`）扫产品代码所有 `write_provider_retry` 实现方，必须显式声明 `params`、不得用 `**kwargs` 静默收下；协议约定写在 `provider_transient_auto_resume._publish_typed_retry_notice` 注释。
+
+## 插件账本与展示 B6（2026-10-03，m1b6，`worker/m1-b6-ledger-display`）
+
+- `plugin_command_service._scope_management(base, scope, is_admin=None, *, event_hub=None)`：`event_hub` 是唯一新增的只读依赖，写进 `PluginManagementContext.event_hub`；TUI 的 `/client/plugins` 从 `server.plugin_event_hub` 取（没有就是 None）。
+- `plugin_command_service._hub_for_control(base)`：IM 控制链（`execute_plugin_control`）读 `base.plugin_event_hub`；IM 没有 handler，只能读已有实例，不新建。
+- `control_service.execute_gateway_conversation_control` / `control_operation_service.execute_gateway_control_operation` / `http_handlers._handle_persistent_control_operation`：签名与语义不变，B6 未在这三处加参数（尺寸守卫限制，且 hub 可从 base 取到）。

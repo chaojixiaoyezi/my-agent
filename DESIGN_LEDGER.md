@@ -1,5 +1,26 @@
 # 设计台账
 
+## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、**初审 M1 已修（b6f）**、**确认门回归已修（b6f）**，基于 B3 返工后的头 `0a3064078`，已实施，**已并入 step17j（3a 沙箱外复跑 491 passed）；查询与展示完成，写账待 B5 第 5 段**）
+
+- **起因**：设计稿 [插件事件与收紧钩子](docs/design/PLUGIN_EVENT_HOOKS.md) 第 9 节（账本与展示）与第 13 节 B6 行。B6 原依赖 B5（收紧钩子）写入 `plugin_gate.decided`；本轮先做不依赖 B5 的部分：查询、观察计数读取与 `/plugins info` 四段展示，B5 合入后接上写入方。
+- **做了什么**：
+  - `runtime_db/repository.py` 新增只读查询 `plugin_gate_decisions(plugin_id, limit=10)`（按 `plugin_id` 取最近 N 条 `plugin_gate.decided`，按 `seq` 倒序；投影只经 `_PLUGIN_GATE_DECISION_FIELDS` 白名单，`message` 等 payload 其它键不外泄）与 `plugin_gate_unavailable_count(plugin_id)`（累计 `final_status = PLUGIN_GATE_APPROVAL_UNAVAILABLE`，不设窗口）。owner 隔离由“一 owner 一 runtime.db”本身承担。
+  - `plugin_commands.py` 新增 `PluginEventDetails` 与 `render_plugin_event_details`：订阅（含正文范围）、收紧工具（含参数范围）、网络与沙箱、最近 10 次收紧决定＋“无法审批”计数＋观察计数四段；措辞复用 `plugin_events/confirmation.py` 的同一函数（`event_description` / `gate_description` 由私有改公开名），确认码与展示不会各写一套说法。
+  - `plugin_management.py`：`/plugins info` 在使用卡后追加四段；`PluginManagementContext` 新增只读 `event_hub` 字段；模块级 `_gate_ledger`（库不存在或读取失败按“暂无记录”）与 `_observed_counts`（hub 为 None 或读取异常按“暂无记录”）。
+  - Gateway 侧 hub 穿透（**初审 M1 修复后**）：事件中心的唯一来源是 Gateway server 上的 `plugin_event_hub`。TUI 的 `/client/plugins` 在 `plugin_command_service` 里取；IM 链在 `http_handlers._handle_persistent_control_operation` 取（那里是唯一能拿到 server 的位置），经 `control_operation_service` → `control_service` → `execute_plugin_control` 按 `event_hub` 关键字参数透传（原 `_hub_for_control(base)` 已删，**不再从 `server.agent` 取**——server 与 server.agent 是两个不同对象）。读不到就是 `None`，按“暂无记录”展示，不新建 hub、不触发投递。
+  - **初审 M1（b6f 修）**：原实现让 IM 链读 `server.agent.plugin_event_hub`，而 hub 挂在 server 上，IM 的观察计数恒“暂无记录”；现在两条链共用 server 上的同一个 hub。用例按真实拓扑（TUI 走 `/client/plugins`、IM 走 `_handle_persistent_control_operation`，只在 server 上挂 hub）断言计数逐字相同、且不是“暂无记录”；另加反向断言（server 没挂 hub 时 IM 链降级成“暂无记录”，不报错、不新建 hub）。
+- **边界与未验证**：写账方（B5）未合入，账本行由测试按第 9 节字段直接插入；v8 启用门未开（B7 前），展示靠直接构造的 list/direct 入口验证，未启用真实 v8 插件。真实 TUI、飞书 IM 客户端与真实 Gateway 未验证；观察计数只在 Gateway 进程内存里，TUI 直连（direct 入口）没有 hub，按“暂无记录”展示。
+- **验证与变异**：`tests/test_plugin_event_display.py` 12 项通过（含真实拓扑下 TUI/IM 两条入口计数逐字相同、跨 owner 不串、message 不外泄、老插件与空记录降级）；6 个原变异全部被检出，b6f 另加 1 个（IM 链退回从 `server.agent` 取 hub）被检出，命令与结果见 [TESTS](TESTS.md) 顶部「M1 B6 账本与展示」小节。
+- **给 B5 的接缝（payload 形状，必须照做）**：B5 写 `runtime_events(event_type="plugin_gate.decided")` 时，第 9 节的字段要放进 **`payload_json`**（`plugin_id`/`version`/`activation_id`/`gate_id`/`tool`/`call_id`/`operation_id`/`args_hash`/`actor`/`outcome`/`verdict`/`reason_code`/`latency_ms`/`host_status`/`final_status`）；查询用 `json_extract(payload_json, '$.plugin_id')` 过滤。**形状不对查询会静默返回空**。错误合同里已有的 `PLUGIN_GATE_APPROVAL_UNAVAILABLE` 若与 `runtime_db/repository.py` 的同名常量重复，合并时统一引用一处。
+- **已知边界**：“无法审批”计数（`plugin_gate_unavailable_count`）不设窗口、只增不减（全表统计，不受最近 10 条展示窗口影响）。以后再定要不要改成“最近 N 天”或“本激活代次内”。
+- **二次修复（b6f）：确认门回归**。`plugin_command_service.py:155` 曾用 `_scope_management(base, scope, event_hub=...)`
+  给一个会被测试打桩的内部函数传关键字，替身 `lambda *_: service` 只收位置参数 → `TypeError` → 被紧邻的
+  `except Exception` 吞成 `PLUGIN_COMMAND_OUTCOME_UNKNOWN`，`test_real_confirmation_gate_*` 两条真宿主用例从
+  `d9f158e8d` 起变红（3a 沙箱外逐提交核对：基线 38 passed，`1a4860903` 起 2 failed）。修法是 hub 一律走
+  `scope.event_hub`、调用点不传关键字。另把 `GatewayControlScope.event_hub` 声明为
+  `field(compare=False, hash=False, repr=False)`（展示依赖不参与相等/哈希/repr）。**教训**：
+  核对“是不是既有失败”必须用 `git merge-base` 作基线，不能用带改动的交付头自证（我上一轮就是拿 `1a4860903` 当基线，结论错了一半）。
+
 ## Gateway G1 加固（g1h，2026-10-03，worker/g1-hardening，已并入 step17i：luna4 初审提出的 3 条由 luna4 修复，3a 沙箱外 20 个相关文件 432 passed，作者沙箱里 test_plugin_sandbox 和 test_directory_lock_wait 的 5 个失败在沙箱外都过；9b 核对这 3 处）
 
 - 真 Agent 的凭据数据根从 `home_paths.owner_home_dir` 经 `agent_home_root_for_owner` 推导，并校验等于 `home_paths.root`；非空 Agent 缺失/不符合同属性时报 `unavailable:agent_contract`，不把合同破坏伪装成正常无根降级。
