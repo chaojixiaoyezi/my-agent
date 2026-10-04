@@ -18,7 +18,13 @@ import pytest
 
 from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus, LogParams
 from agent_py_agent.agent.common.json_io import append_private_jsonl_capped, locked_json_path
-from agent_py_agent.agent.common.nofollow_fs import ensure_private_dir, open_directory_beneath
+from agent_py_agent.agent.common.nofollow_fs import (
+    NoFollowPathError,
+    ensure_private_dir,
+    open_directory_beneath,
+    resolve_existing_symlink_anchor,
+    split_existing_anchor,
+)
 from agent_py_agent.agent.gateway_parts.io import write_json_file
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.memory_store.candidates import CandidateService
@@ -167,6 +173,56 @@ def test_private_lock_beneath_symlinked_anchor_creates_lock_in_target(tmp_path: 
 
     assert _mode(real) == 0o755, "链接目标目录权限一位不动"
     assert link.is_symlink()
+
+
+# ---- 1b. split_existing_anchor 停在断链符号链接处（st1 2026-10-04，pbfixr 初审 M2 缺口）----
+
+
+@_POSIX_ONLY
+def test_split_existing_anchor_stops_at_broken_symlink_ancestor(tmp_path: Path) -> None:
+    """断链符号链接祖先必须被当作"最近已存在祖先"停下，不能因为 exists() 为假就继续往上找。
+
+    pbfix 把 6 处内联循环收进 split_existing_anchor 后没有专门用例；循环条件一旦丢掉
+    `and not anchor.is_symlink()`，断链会被跳过、锚点跑到更上层，私有写就会在错误的位置建目录
+    （断链本身也该按 fail-closed 拒绝，而不是被绕过）。
+    """
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    broken = outer / "broken-link"
+    broken.symlink_to(outer / "missing-target", target_is_directory=True)
+
+    anchor, parts = split_existing_anchor(broken / "leaf" / "deep")
+
+    assert anchor == broken, "必须停在断链这一级（不是 outer，也不是更上层）"
+    assert parts == ("leaf", "deep"), "断链以下才是缺失段"
+
+    # 实际使用它的私有写入口必须拒绝，而不是在断链上方悄悄建目录。
+    with pytest.raises(NoFollowPathError):
+        ensure_private_dir(broken / "leaf" / "deep")
+    assert not (outer / "leaf").exists(), "拒绝就不能在错误位置留下目录"
+
+    # 同一断链交给锚点解析同样拒绝（ensure_private_dir 内部正是这么用的）。
+    with pytest.raises(NoFollowPathError):
+        resolve_existing_symlink_anchor(broken)
+
+
+@_POSIX_ONLY
+def test_split_existing_anchor_stops_at_file_symlink_ancestor(tmp_path: Path) -> None:
+    """指向文件的符号链接祖先同样停下并拒绝，不继续向上找。"""
+    outer = tmp_path / "outer2"
+    outer.mkdir()
+    target_file = tmp_path / "plain.txt"
+    target_file.write_text("x", encoding="utf-8")
+    link = outer / "file-link"
+    link.symlink_to(target_file)
+
+    anchor, parts = split_existing_anchor(link / "leaf")
+
+    assert anchor == link and parts == ("leaf",)
+    with pytest.raises(NoFollowPathError):
+        resolve_existing_symlink_anchor(link)
+    with pytest.raises(NoFollowPathError):
+        ensure_private_dir(link / "leaf")
 
 
 # ---- 2. 可配置路径指向已存在用户目录 ----

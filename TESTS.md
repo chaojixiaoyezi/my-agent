@@ -1,5 +1,33 @@
 # 测试与发布验收
 
+## 17j 补两条小用例：断链锚点 + 插话不发 prompt_submitted（st1，2026-10-04；第 1 条 3a 复审后并入 step17j，第 2 条由 ds10 的 st2 用现成写法补上）
+
+- **来源**：①pbfixr 初审的 M2 缺口（`split_existing_anchor` 遇断链符号链接祖先没有用例）；②luna6 复审 B4 owner 修复时提的"活动回合里成功插话不应发布 `prompt_submitted`，现只靠 `http_handlers.py` 的 `if created and receipt.state == 'queued'` 保证，无专门回归"。
+
+### 1. 断链锚点用例 —— **已完成并验证**
+
+- 新增 `test_private_dirs_policy.py::test_split_existing_anchor_stops_at_broken_symlink_ancestor` 与 `::test_split_existing_anchor_stops_at_file_symlink_ancestor`：断言 `split_existing_anchor` **停在断链/指向文件的符号链接这一级**（不继续向上找），随后 `resolve_existing_symlink_anchor` 与 `ensure_private_dir` 都抛 `NoFollowPathError`，且拒绝时不在错误位置留下目录。
+- **变异实测（KILLED）**：把 `split_existing_anchor` 的循环条件从 `while not anchor.exists() and not anchor.is_symlink()` 改成 `while not anchor.exists()` → 新用例失败并精确报出锚点跑到了上层：
+  `assert PosixPath('.../outer') == PosixPath('.../outer/broken-link')`。按原字节备份还原后复绿。
+- 这正是 pbfixr 初审 M2 变异此前**存活**的那条缺口，现已补上。
+
+### 2. 插话不发 prompt_submitted 的用例 —— **未完成（WIP，如实记录）**
+
+- 已核实的机制：插话成功时回执 `receipt.state == "active_pending"`（`input_delivery_service.py:255/520`），**不是 `queued`**，所以 `http_handlers.py:847` 的 `if created and receipt.state == 'queued'` 不成立 → 不调 `prompt_queued`（`:848`）。判据本身是清楚的结构化条件。
+- **未完成的原因**：在沙箱隔离环境里**没能稳定构造出"活动回合"**。尝试过：
+  1. 用假模型 `generate` 让回合卡住——**echo 后端在这条链上根本不调用 `generate`**（实测 `generate calls: 0`，但请求确实进 `processing` 目录）；
+  2. 改拦 `request_worker._handle_gateway_request` 让文件停在 `processing`——活动态谓词能等到，但此时插话回执是 `{'request_id': ..., 'status': 'queued'}`，**落回了排队分支**（`steer_active_conversation_if_running` 需要真实的活动回合记录，单纯让文件停在 processing 不构成这个结构化事实）。
+- **本轮未产出该用例**（草稿已撤回，未留红用例）。写这条需要先弄清"活动回合"在隔离环境里如何真实建立（可能要跑到真实模型生成中，或构造会话运行时的活动记录），**超出本轮 90 分钟预算**，交回 3a 决定是加时间还是换办法。
+
+### 门禁结果（工作树根）
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_private_dirs_policy.py agent_py_agent/tests/test_plugin_event_e2e.py -q --tb=line -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-st1-final
+```
+→ **23 passed**（新用例 2 条 + 既有 21 条）。
+
+guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部通过**；`ruff` All checks passed；`check_import_boundaries.py` findings=0；`check_doc_sync.py` DOC_SYNC_PASS；strict code-size `blocked=False`；`check_clean_package.py .` OK；`git diff --check` 干净；`size_diff.sh` **新增告警 0**（消失 39）。
 ## B9 的测试期望跟上新技能（b9fix，2026-10-04，worker/b9-seed-fix；ds4 初审可以挑入，已并入 step17j）
 
 - 来源：B9 新增内置技能 `plugins/write-my-agent-plugin`（带 `references/`、`templates/`）后，17j 上 7 条老断言过时。
