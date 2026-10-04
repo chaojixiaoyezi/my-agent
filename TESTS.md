@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3，待 9b 复核）
+## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3；9b 复跑通过，已并入 step17j）
 
 - **命令**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_scoped_lock_private_permissions.py -q -p no:cacheprovider` → **9 passed**（新增 2 条：刷新后仍 0600；直接写记录的文件与目录权限）。
 - **变异**：`_write_json_file` 临时文件退回 `tmp.write_text` → 刷新用例红（rc=1）；上级目录退回裸 `mkdir` → 目录权限用例红（rc=1）；还原后 sha256 与改动版一致。

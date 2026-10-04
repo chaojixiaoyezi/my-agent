@@ -1,6 +1,6 @@
 # 设计台账
 
-## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3，基于 17j `a67c5df3b`，3a 实现，待 9b 复核）
+## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3，基于 17j `a67c5df3b`，3a 实现；9b 复跑通过，已并入 step17j）
 
 - **背景**：9b 复核 sclk2 时发现，同一进程再次抢同一把 scoped lock 会走刷新分支，`daemon_metadata._write_json_file` 用 `tmp.write_text` 再 `os.replace`，新文件按 umask 落成 0644；心跳定期刷新，所以抢到锁几秒后锁文件就变回世界可读。只泄露 pid 和元数据，别人卡不住锁，但 sclk 这一包的目标就是锁文件收私。
 - **改动**：临时文件改用 `os.open(O_CREAT|O_EXCL|O_WRONLY, 0o600)` 新建再替换（新增 `_write_private_tmp`），替换后的正式文件就是 0600；上级目录从裸 `mkdir(parents=True, exist_ok=True)` 改成 `nofollow_fs.ensure_private_dir`（缺失各级 0700，已存在的不动）。仍在 `_flocked_sidecar` 锁内，不再套 json_io 的锁。同一函数也写 PID 记录、运行时状态、停止请求，一起收私。
@@ -39,7 +39,7 @@
 - **scoped_locks 的同类点由 ds10 在另一分支处理**，本批不碰。
 - **验证**：见 TESTS.md 同名节。
 
-## Gateway scoped lock 收私（sclk2，2026-10-04，分支 `worker/scoped-locks-private-v2`，在 pbfix `3b5144114` 之上重做；含 ds1 必须改；已并入 step17j，待 9b 复核）
+## Gateway scoped lock 收私（sclk2，2026-10-04，分支 `worker/scoped-locks-private-v2`，在 pbfix `3b5144114` 之上重做；含 ds1 必须改；9b 复核通过，已并入 step17j；刷新后 0644 由 sclk3 修）
 
 - **起因**：ds3 给 9b 写终审简报时扫出 `gateway_parts/scoped_locks.py` 建锁文件用裸 `os.open(O_CREAT|O_EXCL|O_WRONLY)`（不带 mode），`mkdir` 也不带 mode，权限跟着 umask 走（umask 022 下世界可读 0644）。整包其它锁都已走 `common/nofollow_fs` 的私有锁原语。
 - **改法**：`open_private_lock_beneath` 加显式 `exclusive` 参数（任务书授权在统一函数里加参数，不另写一套）：`exclusive=True` 保持 `O_CREAT|O_EXCL` 的"已存在抛 FileExistsError"语义（不打开、不改权限），默认 `False` 维持原 flock 语义。`scoped_locks._create_lock_file` 改走它（新文件 0600、新目录 0700 由原语保证），`acquire_scoped_lock` 里的裸 `mkdir` 删除（目录创建交给原语；已存在的目录一律不改权限）。portable 分支同步支持 `exclusive`。
