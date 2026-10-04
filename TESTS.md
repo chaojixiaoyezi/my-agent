@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## M 线真实验收手册改到能用（rb2，2026-10-04，分支 `worker/m1-acceptance-runbook-v2`）
+
+- **来源**：luna3 的手册（`4ffb9c69f`）经 `git diff ea574ce26 4ffb9c69f | git apply -3` 引入；luna4 初审"必须改"四条由 rb2 落实。**本分支只改文档，没跑任何一步真实验收。**
+- **luna4 四条的处理**：
+  1. **补 allow_as_is 与截断**：§5 联合冒烟表加两行（`ls -la` → `verdict=allow_as_is`、`reason_code=NO_MATCH`、无审批、handler 执行；超长参数 → 无害但截断升 `ARGUMENTS_TRUNCATED`、已 deny 保持 `DELETE_FILE_BLOCKED`、已 ask 保留原 `RM_RF` 只补消息）。表后加"三条裁决的完整口径"块，口径取自 `plugins/rm-guard/src/server.py::review_gate`（`arguments_truncated` 严格布尔 `true` 才生效）。
+  2. **新增 §6.5 B7 断网与收窄读探针**：明确 `read_file` 等**宿主工具代证无效**，必须由插件进程自己探测；给出五项探针（外网 / 本机回环 / 宿主敏感区 → 必须 `blocked`；自己的包与数据目录 / 解释器 → 必须 `allowed`）与"五项一起判"的通过条件；强调探针插件要走正常 install/enable 流程、用完停用并删除。
+  3. **新增 §6.6 非 local/main 负例**：第二身份 `/plugins enable` 预期被拒、码为 `plugin_events_owner_not_allowed`、无新 `plugin_gate.decided` 行、原 local/main 状态未变。
+  4. **tmux 私有套接字**：§2 环境变量加 `M1_TMUX_SOCKET_DIR`（`$M1_ROOT/tmux`，0700），启动/建窗口/清理全部带 `-L "$M1_TMUX_SOCKET_DIR/default"`；§9 收尾改为先关会话再删隔离目录，并明确禁止 `tmux kill-server`。
+- **其余调整**：版本前置写成 17j 并列出三个「没就位就停」前提（B5、B7、老插件权限）；重申只 MiniMax-M2.7、绝不碰 8420；新增 §6.7 区分联合冒烟与逐渠道矩阵；§8 通过矩阵补四行。
+- **附录 A**：插件之外的七项（G2b、锁与私有写、数据根收紧、屏幕观察只看档、飞书限流脚本、后台收尾、能力包 hint）并进同一份手册，含前提/入口/结构化判据/token 与等待估算、执行顺序、各项不通过写法。
+- **门禁结果**（工作树根，本分支只改文档）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD $PY scripts/check_doc_sync.py        # DOC_SYNC_PASS
+  PATHS: git diff --check                              # 干净
+  PYTHONPATH=$PWD $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json   # blocked=False
+  PYTHONPATH=$PWD $PY scripts/check_clean_package.py . # OK
+  bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"  # 新增告警 0
+  ```
+
+- **未验证**：手册是操作指引，**本轮没有执行任何一步真实验收**；§6.5 的探针插件只是设计描述，尚未写出实际插件代码。
+
 ## 活动回合插话不重复发布 prompt_submitted（st2，2026-10-04，分支 `worker/17j-small-tests-2`，基于 17j 头 `f9a6f6c6e`）
 
 - 来源：luna6 复审 B4 owner 修复时提出——活动回合里成功插话（`/ask` 返回 `active_turn_input`）时不得发布 `prompt_submitted`；现在靠 `gateway_parts/http_handlers.py` 的"只有 `created and receipt.state == 'queued'` 才调 `prompt_queued`"保证，缺专门回归用例。ds8 试过两条路都没造出活动回合（echo 假后端不调 generate；只把请求停进 processing 不够，因为 `steer_active_conversation_if_running` 要真实活动回合记录）。
@@ -917,6 +940,51 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - 结果：**16 passed**（含新增的 `test_computer_use_observe_extra_pins_platform_dependencies`）；guards9 清单 **172 passed**；`check_import_boundaries.py` findings=0；ruff `All checks passed`；`check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` 干净；`check_clean_package.py .` OK；strict code-size hard=0 blocked=False；`size_diff.sh` 新增告警 0 / 消失 23。
 - 变异（脚本 `/private/tmp/claude-501/cux_mutate.py`，不进仓库）：①删掉 Linux 的 python-xlib ②去掉 mss 的平台标记 ③把 pillow 钉放宽成 `>=` ④把 pyautogui 塞进观察 extra —— **四个全被杀**，还原后守卫复跑通过。
 - 没验证：没在真实 macOS 上按这个 extra 装一遍并跑截图/AX；没按新 extra 重建 Linux 车道镜像（镜像仍由上游整包带入这些库）；`pip install -e ".[computer-use-observe]"` 未实际执行过解析。
+## M 线第一期真实验收手册（m1ar，2026-10-03，文档；真实验收待执行）
+
+- 新手册：`docs/design/PLUGIN_EVENT_HOOKS_ACCEPTANCE.md`，覆盖 17j 前置、隔离 home/私有端口、三样例联合冒烟、TUI/飞书场景、`runtime_events` 结构化字段、`/plugins info`、`/status` 与隔离收尾。
+- **本轮仅写文档**：没有启动 Gateway、真实模型或 Feishu，也没有声称真实场景通过。必须待 B3–B9 合入 17j；特别等 ds2 把 B8 的 rm-guard 删除门从旧 `delete_file` 更新为 `apply_patch` 删除段后再按手册执行。另：`plugin_events_enabled` 要等 B7 合入（它负责登记进 `AgentConfig`/`agent_config.yaml`，17j 里 `/settings` 还不认识这个键），`plugin_tool_gate_timeout_ms` 要等 B5 合入；两者未合入时手册第 2 节配置块与第 7.1 节整节都只能记「未执行」。
+- 文档检查：`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python; PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`git diff --check` → 退出码 0；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` → 新增告警 0、消失告警 23。仅验证文档同步/格式和代码尺寸基线；没有运行 Gateway、真实模型、飞书或真实验收。
+
+### 手册第四版（rb4，2026-10-04，补全探针声明 + 加 §6.8）
+
+- 来源：rb3r 复审第三版的两条结论——①§6.5 的 `declaration.json` 只给"关键片段"，照抄打包失败；②建议新增"活动回合插话"的验收项。
+- 改动（只改文档）：
+  - **§6.5 声明补全**：`probe-net/declaration.json` 从"关键片段"改为**完整声明**，补 `summary`/`default_action`/`actions`/`tools`/`settings_schema`；引导语从"关键片段"改成"完整可用的声明"并注明这五个是清单校验必需字段。
+  - **新增 §6.8「活动回合里插话（prompt_submitted 只记一次）」**：TUI、飞书各一遍；通过条件是 `prompt_submitted` 只 1 条且 `facts.request_id` 属原回合、插话 `disposition == active_turn_input`、原回合 `turn_started`/`turn_ended` 各一次；**插话落成 `queued` 时记「未命中」不算通过**（否则"只有 1 条"会假通过）；§6.7 补一句说明 6.8 是唯一要两渠道各做一遍的。
+  - **§8 通过矩阵**补"活动回合插话"一行。
+  - DESIGN_LEDGER 的 m1ar 段状态改成"rb4：补全探针声明，加 §6.8（rb4 收口）"并加 rb4 补充说明。
+- **验证（工作树根）**：
+  ```bash
+  # 从手册原样抽出骨架的 server.py 与 declaration.json，照手册命令打包
+  python3 scripts/build_plugin_files_package.py --declaration "$R/probe-net/declaration.json" \
+    --files-root "$R/probe-net" --output "$R/packages/probe-net.zip"
+  ```
+  → **exit=0**（打包成功）；抽出的声明含全部 13 个键、五个必需字段齐；`server.py` 52 行完整抽出。**改前实测同一份片段会报 `PluginPackageError: 插件包描述无效`**（rb3r 记录），补全后通过。
+  `$PY scripts/check_doc_sync.py --base 7b86fe7dc` → `DOC_SYNC_PASS`；`git diff --check` → 干净；`check_code_size.py --mode strict` blocked=False；`check_clean_package.py .` OK；`size_diff.sh` 新增告警 0。
+- **未验证**：手册本身仍未真实验收（待 B3–B9 与 B5/B7 合入后按手册执行）；§6.8 只能在真渠道核对，本轮只写了判据、没跑。
+
+
+### 手册第五版（rb5，2026-10-04，§6.5 改结果通道、加宿主侧对照、收窄异常）
+
+- 来源：3a 终审第三/四版时发现 §6.5 探针"照现在的写法跑不通"，四条必改。
+- 改动（只改文档）：
+  1. **结果通道换掉**：原设计从账本读 `message` 走不通——B5 把回执 `message` 截到 80 字（`tool_gate.py:17`），且 `plugin_gate.decided` 的字段白名单（`runtime_db/repository.py` 的 `_PLUGIN_GATE_DECISION_FIELDS`，15 个字段）**根本没有 `message`**。改成：**结论走 `reason_code`**（全符合 `PROBE_ALL_PASS`，否则 `PROBE_FAIL_<第一个不符合的项名大写>`，两形态都匹配 `[A-Z0-9_]{1,40}`）；**逐项明细写进插件自己的数据目录** `probe-result.json`，路径按 `plugin_data_dir(owner, plugin_id) = owner.plugins_dir / "data" / plugin_id`（B7 把该目录列为插件可写根），隔离环境即 `$M1_HOME/owners/local/main/data/plugins/data/probe-net/probe-result.json`。
+  2. **目标路径不用环境变量**：插件在沙箱里读不到宿主 env，顶层读 `os.environ["M1_PROBE_SENTINEL"]` 会在导入时直接失败。改成打包前把绝对路径写进包内的 `probe_target.txt`（0600），`declaration.json` 的 `files` 列表加它；探针从自己的包里读。
+  3. **异常收窄**：原来 `except BaseException` 把一切失败算 blocked，路径写错也会被当成"沙箱挡住了"。改成只把 `ConnectionRefusedError`/`TimeoutError`/`socket.gaierror`/`PermissionError` 算 blocked；目标文件不存在时**故意抛 `RuntimeError`**（不是 OSError 子类，不会被上面的捕获清单接住），插件回失败、不算通过。
+  4. **宿主侧对照（必须先做）**：启用探针前先在宿主 shell 跑三件事——直连 example.com:443、确认 18420 在监听、读得到哨兵；三条都成功沙箱里的 blocked 才算数；**外网直连本来就不通时那一项记「对照不成立、未执行」，不能把沙箱里的失败当通过**；没做对照却判通过 = 不通过项。
+  5. §8 的 B7 行按上面重写，不通过列补"从账本读 `message`"和"没做对照或对照不成立却判了通过"。
+- **验证（工作树根，临时目录里跑完已清）**：
+  - 从手册原样抽出 `server.py` + `declaration.json`（`files` 含 `probe_target.txt`），照手册命令 `build_plugin_files_package.py` → **exit=0**。
+  - 本机自测（不经宿主，直接跑抽出的 `server.py` 造 `review_gate` 请求）：
+    - 门不匹配 → `deny` / `OUT_OF_SCOPE`；
+    - 门匹配（本机无沙箱）→ `allow_as_is` / **`PROBE_FAIL_EXTERNAL_NETWORK`**（外网通了 = 不符预期），`reason_code` 正则合规（27 字符）、`message` 20 字符（≤80）；
+    - `probe-result.json` 正常写出，`probe_errors` 只含错误类型名；
+    - **把 `probe_target.txt` 改成不存在的路径 → 正确抛 `RuntimeError`**（不是被吞成 blocked），证明"路径写错"不会再假通过。
+  - 宿主侧对照实测（本机）：直连 `example.com:443` **成功**（脚本输出 `external OK`）；本机有 2 个代理环境变量，但探针用 socket 直连不走代理，所以直连成功才是有效对照——这一点已写进手册。
+  - `check_doc_sync.py --base 7b86fe7dc` → DOC_SYNC_PASS；`git diff --check` 干净；strict code-size blocked=False；`check_clean_package.py .` OK；`size_diff.sh` 新增告警 0。
+- **未验证**：手册本身仍未真实验收（待 B3–B9 与 B5/B7 合入后按手册执行）；§6.5 的沙箱内行为（真正的 blocked 判定）本轮没跑，探针在本机是"无沙箱"环境下自测的；§6.8 同样只在真渠道能核对。
+
 
 ## J16 macOS 叠放顺序与程序坞遮挡（j16f，2026-10-03，待复审）
 

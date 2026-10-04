@@ -1,5 +1,14 @@
 # 设计台账
 
+## M 线真实验收手册改到能用（rb2，2026-10-04，待复审）
+
+- **来源**：luna3 的手册（`worker/m1-acceptance-runbook` 的 `4ffb9c69f`）经 `git diff ea574ce26 4ffb9c69f | git apply -3` 引入本分支；luna4 初审结论"必须改"四条由 rb2 落实。
+- **四条必须改**：① 补 `allow_as_is`（`NO_MATCH`）安全命令照常放行场景与超长参数截断场景（含"已 deny 仍 deny、已 ask 保留原码"的完整口径）；② 新增 §6.5 B7 断网/收窄读探针——**用插件进程自己的探针**，五项一起判（外网/回环/宿主敏感区 blocked，自己的包与数据目录、解释器 allowed），明确 `read_file` 等宿主工具代证无效；③ 新增 §6.6 非 local/main 身份负例（预期 `plugin_events_owner_not_allowed`）；④ tmux 全程改用私有套接字（`-L "$M1_TMUX_SOCKET_DIR/default"`，目录 0700），启动/发命令/清理都用它，收尾先关会话再删隔离目录。
+- **其余调整**：版本前置明确写成 17j，并在开头列出三个「没就位就停」的前提（B5、B7、老插件权限）；真实模型固定 MiniMax-M2.7；重申绝不碰 8420；新增 §6.7 说明联合冒烟与逐渠道矩阵的关系；§8 通过矩阵补四行（三裁决齐全、截断只加严、B7 探针、非 local/main 负例）。
+- **附录 A**：把 3a/acc 写的 17j 验收清单里插件之外的七项并进同一份手册（G2b、锁与私有写、数据根收紧、屏幕观察只看档、飞书限流脚本、后台收尾、能力包 hint），带前提/入口/结构化判据/token 与等待估算，以及"最快暴露问题"的执行顺序和各项不通过写法。
+- **验证**：本分支只改文档。`check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` 干净；strict code-size blocked=False；`check_clean_package.py .` OK；`size_diff.sh` 新增告警 0。手册未执行（真实验收待 B5/B7/老插件权限合入后由 3a/9b 在隔离环境执行）。
+- **未验证**：手册本身是操作指引，本轮没有跑任何一步真实验收；§6.5 的探针插件是设计描述，尚未写出实际插件代码。
+
 ## 17j 状态字校正（stfix，2026-10-04，分支 `worker/17j-status-fix`，基于 17j 头 `f9a6f6c6e`；只改状态字与措辞，不改正文）
 
 - **为什么**：audit17j 只读核对发现，一批已经并入 step17j 的改动，状态字仍停在"待复审/待 9b 终审/WIP"，与 17j 实际状态不符；另外 ds2 的上线清单用"`plugin_commands.py` 里 grep `plugin_gate` 计数为 0"断言 B6 展示层没进 17j，该判据不成立。
@@ -397,6 +406,13 @@
 - **文档**：`docs/design/computer-use.md` 顶部加“怎么装（管理员）”：两个 extra 各装什么、何时用哪个，以及**屏幕录制**与**辅助功能**两个系统权限要给“启动 Gateway 的那个终端程序”（权限认进程，换终端要重授权）。
 - **验证**：新增 `test_packaging.py::test_computer_use_observe_extra_pins_platform_dependencies`（解析 TOML，逐条核对名称/版本/平台标记，并要求无 pyautogui）；命令与结果见 TESTS。
 - **未验证**：没有真的在 macOS 上按这个 extra 装一遍并跑通截图/AX；Linux 侧也没有按新 extra（而非上游整包）重建过车道镜像。
+## M 线第一期真实验收手册（m1ar，2026-10-03；手册已写，真实验收待执行）
+
+- 状态：**3a 终审通过，已并入 step17j；等 B5、B7（以及第 6.6 节要的老插件权限）合入后在沙箱外执行**。rb5：§6.5 改结果通道、加宿主侧对照、收窄异常（rb5 收口）；rb4 补全探针声明 + §6.8；rb3 落实 ds1 复审 3 条必须改**。rb3 做的是手册第三版：tmux 从 `-L` 全改 `-S`（`-L` 收名字不收路径，会把路径拼到 `/tmp/tmux-<uid>/` 下直接报错，已实地验证 `-S` 的套接字落在隔离目录且 `srw-------`）；§2 脚本加 `umask 077` 并补 macOS/Linux 两套 `stat` 权限核对（配置/三哨兵/三 zip 须 `-rw-------`、目录 `drwx------`）；版本前置统一为 B3–B9（补 B9 行）；把 `plugin_events_enabled`（B7 提供）与 `plugin_tool_gate_timeout_ms`（B5 提供）挪进 §1.1 前提清单——这两个键在 17j 里**根本不存在**，`/settings` 也管不了，只有对应分支合入后本节才成立；§6.5 附可直接复制的探针插件骨架（以 B9 Python 模板为底）。之前 rb2 段落的"待 17j 合入 B3–B8"写法随之作废。
+  - **rb4 补充（2026-10-04）**：①§6.5 的 `probe-net/declaration.json` 从"关键片段"改成**完整声明**，补 `summary`/`default_action`/`actions`/`tools`/`settings_schema`；原片段照抄会打包失败（rb3r 实测 `PluginPackageError: 插件包描述无效`），补全后 `build_plugin_files_package.py` exit=0（rb4 又实测一次）。②新增 **§6.8「活动回合里插话（prompt_submitted 只记一次）」**：TUI 与飞书各一遍，通过条件是 `prompt_submitted` 只 1 条且 `facts.request_id` 属原回合、插话 `disposition` 为 `active_turn_input`、原回合 `turn_started`/`turn_ended` 各一次；**插话落成 `queued` 时记「未命中」不算通过**（否则"只有 1 条"会假通过）。§8 通过矩阵补对应行。
+- 手册：[PLUGIN_EVENT_HOOKS_ACCEPTANCE.md](docs/design/PLUGIN_EVENT_HOOKS_ACCEPTANCE.md)，覆盖 17j 前置、隔离 home/专用端口、三样例联合冒烟、TUI/飞书矩阵、结构化账本核对与收尾。
+- B8 的 rm-guard 删除门由 ds2 更新为 `apply_patch` 删除段 → `deny / DELETE_FILE_BLOCKED`；README/声明尚未随本手册现场验证，最终构件不匹配时不得开始。
+
 
 ## 能力包 v2 块 6b：写后核验复用已知工作区候选（p6b，2026-10-03，分支 `worker/pack-6b-scan-reuse`，基于 `c47d023b6`，3a 复审并入 step17i）
 
