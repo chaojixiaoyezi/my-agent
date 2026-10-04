@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## B9 的测试期望跟上新技能（b9fix，2026-10-04，worker/b9-seed-fix；ds4 初审可以挑入，已并入 step17j）
+
+- 来源：B9 新增内置技能 `plugins/write-my-agent-plugin`（带 `references/`、`templates/`）后，17j 上 7 条老断言过时。
+- 改动：`agent_py_agent/tests/test_skill_tree_and_recall.py` 把写死的数量换成 `builtin_seed._skill_dirs(builtin_seed._BUILTIN_SRC)` 的长度（路由预期未动）；`agent_py_agent/tests/test_builtin_seed.py` 把"除 SKILL.md 外不能有文件"换成 `_assert_builtin_mirror_is_complete` 三层核对（位置合规 / 与源逐字节一致且不漏拷 / 无临时与隐藏文件）。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds5`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_builtin_seed.py agent_py_agent/tests/test_skill_tree_and_recall.py agent_py_agent/tests/test_write_my_agent_plugin_skill.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds5
+  ```
+  结果：**62 passed / 1 skipped**（跳过的是与本改动无关的既有 node 跳过）。
+- guards9（含 packaging）：**176 passed / 0 failed**。
+- 变异 3 个（驱动脚本 `/private/tmp/b9fix_mutate.py`，不入库，按备份原字节还原）：
+  ① 数量源换回写死的 27 → 6 条路由用例红；② 镜像目录里多一个 `.tmp` 文件 → seed 用例红；
+  ③ 镜像里某文件与源不一致 → seed 用例红。**三个全部被抓**，还原后 sha256 与工作区一致。
+- 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、strict code-size `hard=0`、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失告警 39**。
+- 未验证：未改产品代码，无真实链路需要复核。
+
 ## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3；9b 复跑通过，已并入 step17j）
 
 - **命令**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_scoped_lock_private_permissions.py -q -p no:cacheprovider` → **9 passed**（新增 2 条：刷新后仍 0600；直接写记录的文件与目录权限）。

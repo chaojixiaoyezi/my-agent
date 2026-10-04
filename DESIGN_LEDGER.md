@@ -1,5 +1,13 @@
 # 设计台账
 
+## B9 的测试期望跟上新技能（b9fix，2026-10-04，worker/b9-seed-fix；ds4 初审可以挑入，已并入 step17j）
+
+- **起因**：B9 新增内置技能 `plugins/write-my-agent-plugin`（按 Skill 设计带 `references/`、`templates/`），17j 上两条老断言过时，7 条用例从合入点起失败：`test_skill_tree_and_recall` 写死 `len(snapshot.entries) == 27`（实际 28），`test_builtin_seed` 断言 `shared/builtin` 下除 `SKILL.md` 外没有任何文件（实际多了该技能的 6 个附属文件）。
+- **改法一（数量同源）**：把写死的 27 换成 `builtin_seed._skill_dirs(builtin_seed._BUILTIN_SRC)` 的长度，以后再加内置技能不用改数字。**路由预期一个字没动**——6 条代表任务的路由断言本身仍然全过，说明新技能的 description / when_to_use 没有抢走原有路由，不需要收窄技能元数据。
+- **改法二（保住原意）**：原断言想防的是"复制完留中间态"。改成调 `_assert_builtin_mirror_is_complete`，三层核对：① 除 `SKILL.md` 外的文件只能落在某个技能目录的 `references/`、`templates/`、`scripts/` 子树里（允许再往下分层，如 `templates/python/src/`）；② 每个镜像文件都在源里存在且逐字节一致，源里的文件也都要被镜像（不漏拷）；③ 没有隐藏文件，也没有 `.tmp`/`.part`/`.swp`/`.bak` 这类临时或半截文件。
+- **验证**：`test_builtin_seed.py` + `test_skill_tree_and_recall.py` 23 passed；加 `test_write_my_agent_plugin_skill.py` 共 62 passed（1 skipped，与本改动无关的既有跳过）；guards9 176 passed；静态门禁全过。变异 3 个全被抓：数量源换回写死 27（6 条路由用例红）、镜像里多一个临时文件（seed 用例红）、镜像文件与源不一致（seed 用例红）。命令与结果见 TESTS。
+- **未验证**：没有改产品代码，所以没有真实链路要复核；沙箱外行为与沙箱内一致（纯文件系统断言）。
+
 ## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04，claude/3a-sclk3，基于 17j `a67c5df3b`，3a 实现；9b 复跑通过，已并入 step17j）
 
 - **背景**：9b 复核 sclk2 时发现，同一进程再次抢同一把 scoped lock 会走刷新分支，`daemon_metadata._write_json_file` 用 `tmp.write_text` 再 `os.replace`，新文件按 umask 落成 0644；心跳定期刷新，所以抢到锁几秒后锁文件就变回世界可读。只泄露 pid 和元数据，别人卡不住锁，但 sclk 这一包的目标就是锁文件收私。

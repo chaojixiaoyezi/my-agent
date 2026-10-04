@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 
 from agent_py_agent.agent.capability import builtin_seed
 from agent_py_agent.agent.capability.builtin_seed import sync_skill_index
@@ -131,14 +132,42 @@ def test_real_builtin_smoke():
     assert "deep-security-scan" in names
 
 
+# LLM: 镜像完不能留中间态，也不能漏拷或多拷。断言分三层：① 除了 SKILL.md，其它文件只能落在某个
+#   技能目录的 references/、templates/、scripts/ 子目录里（按 AGENTS.md 的 Skill 设计，这几层是按需
+#   读取的附属资料）；② 每个文件都和内置源逐字节一致；③ 不允许临时/隐藏的半截文件。
+# 函数用途: 核对镜像目录的文件集合与内容与内置源一致，没有多余文件也没有残留中间态。
+def _assert_builtin_mirror_is_complete(mirror_dir: Path, src_dir: Path) -> None:
+    allowed_containers = {"references", "templates", "scripts"}
+    temp_suffixes = (".tmp", ".part", ".partial", ".swp", ".swx", ".bak", ".orig", "~")
+    for path in mirror_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(mirror_dir)
+        assert not path.name.startswith("."), f"镜像目录里出现隐藏文件: {relative}"
+        assert not path.name.endswith(temp_suffixes), f"镜像目录里出现临时/半截文件: {relative}"
+        if path.name == "SKILL.md":
+            continue
+        # 非 SKILL.md 的文件必须落在某个技能目录下的 references/、templates/、scripts/ 子树里
+        # （这几层是按需读取的附属资料，允许再往下分层，例如 templates/python/src/…）。
+        assert allowed_containers & {part.name for part in relative.parents}, (
+            f"非 SKILL.md 文件位置不合规: {relative}"
+        )
+        source = src_dir / relative
+        assert source.is_file(), f"镜像里有源里不存在的文件: {relative}"
+        assert path.read_bytes() == source.read_bytes(), f"镜像文件与源不一致: {relative}"
+    # 反向核对：源里的每个文件都要镜像到，不能漏拷。
+    for source in src_dir.rglob("*"):
+        if source.is_file():
+            assert (mirror_dir / source.relative_to(src_dir)).is_file(), f"源文件没被镜像: {source.name}"
+
+
 def test_ensure_home_seeds_and_indexes(tmp_path):
     """端到端:ensure_my_agent_home 后 home/shared/builtin 有内置 skill、索引非空、零中间态。"""
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
     paths = ensure_my_agent_home(tmp_path / "myhome")
     assert len(list(paths.shared_builtin_dir.rglob("SKILL.md"))) >= 20
-    non_skill = [p for p in paths.shared_builtin_dir.rglob("*") if p.is_file() and p.name != "SKILL.md"]
-    assert non_skill == []
+    _assert_builtin_mirror_is_complete(paths.shared_builtin_dir, builtin_seed._BUILTIN_SRC)
     lines = [
         line for line in paths.shared_indexes_skills_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()
     ]

@@ -25,7 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.capability import CapabilityRouter
+from agent_py_agent.agent.capability import CapabilityRouter, builtin_seed
 from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
 from agent_py_agent.agent.memory_push import push_relevant_memories
 from agent_py_agent.agent.prompting_parts.builder import _skill_context_chunks
@@ -202,8 +202,9 @@ def test_builtin_skill_search_routes_representative_tasks_to_expected_method(
     snapshot = catalog.service.snapshot_for(catalog.workspace, force_reload=True)
     router = CapabilityRouter(skill_snapshot=snapshot)
 
-    # 27 = 26 原内置 + log-incident-triage（S2-14 噪声修复新增）
-    assert len(snapshot.entries) == 27
+    # 数量与内置源目录同源：以后再加内置技能不用跟着改这个数字。
+    # 这里只钉"源里有几个技能目录、快照就该装载几个"，路由是否被抢走由下面的断言单独把关。
+    assert len(snapshot.entries) == len(builtin_seed._skill_dirs(builtin_seed._BUILTIN_SRC))
     assert snapshot.errors == ()
     hits = router.search(query, kinds={"skill"}, limit=5)
 
