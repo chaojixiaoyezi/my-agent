@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## B5×B7 跨件：收紧征询遇上插件进程慢/起不来（b5x，2026-10-04，分支 `worker/b5x`，基于 17j 头 `1e1aadb80`）
+
+- 来源：b5b7x 只读交叉审查里列的三条跨件缝隙（B5 的加固门与 B7 的沙箱底座一直分开审）。本次只做其中**不依赖 B7 接线**的三条：冷启动撞预算、运行中沙箱起不来、进程被杀后的下一次征询；"总开关关掉就不再征询"要等 B7 挑入后接线时一起做。
+- 只加测试，不改产品代码。新文件 `agent_py_agent/tests/test_plugin_gate_cross_bfail.py`（6 条）：真 B2 池（启动/单在途/代次核对都是真的）+ 假 client/transport + 真 `PluginGateReviewer` + 真 `PluginToolGate.merge` + 真 `ToolExecutor`；被替换的只有"插件进程"这一层。
+- 三条结论（都是 ask，绝不放行）：
+  1. **冷启动撞预算**：首次 request 比 `plugin_tool_gate_timeout_ms` 还慢 → `outcome="timeout"` → 合并成 ask，handler 未执行；预算走配置的同一条读取路径，不绕过。
+  2. **沙箱起不来**：池把启动失败包成 `PluginChannelStartFailed` → 征询记 `PLUGIN_GATE_*` 原因码 → ask，账本 `plugin_gate_decisions` 有对应行且 `final_status="ask"`。
+  3. **进程被杀后**：连接已建、transport 失效抛连接类错误 → 池标退避 → **下一次**征询回到 ask（第一次进程活着时插件答 allow_as_is 所以是 allow，这是正确行为，用例两个状态都钉住）。
+  4. 另加一条合并方向：插件回 `allow_as_is`、宿主原本 ask 时最终仍是 ask（反向对照证明不是恒真判据）。
+- 命令（工作树根，代号 ds10）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugin_gate_cross_bfail.py <TESTS.md b5s5 节列出的 34 个文件> \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-b5x
+  ```
+  结果：**723 passed**。guards9（11 个文件）：**187 passed**。
+- 变异（脚本 `tasks/2026-10-04/b5x-cross-gate-failures/mutations.py`，逐个跑完按 sha256 还原，基线 6 passed）：
+  1. `_failure_reply` 改成返回 `allow_as_is` → 杀（5 failed）
+  2. `merge` 改成取更松（同时去掉两处"宿主 ask 不许被插件放宽"的钳制）→ 杀（1 failed，正是新加的合并方向用例）
+- **发现（不改产品代码）**：`merge` 里"宿主 ask 时不许被插件放宽"有**两处**独立钳制（`status` 计算 + 最后 `GateDecision` 的 `if`）。只改一处会被另一处兜住——这是防御纵深，不是缺陷；变异脚本因此要同时去掉两处才能证明用例有效。
+- 未验证：真实插件子进程、真实沙箱冷启动耗时由 3a 在沙箱外核；本组用例覆盖的是征询侧结论（坏了就收紧成 ask）。
+
 ## 磁盘重载后 provider payload 逐字一致（cachereload，2026-10-04，worker/cache-reload；基于 17j 头 f8858179c；已并入 step17j）
 
 **来源**：DeepSeek 官网实测服务端 KV 缓存按前缀匹配，历史里任何一处字节变化都会让该点之后整段未命中。本轮查「会话从磁盘重新加载后，下一轮请求的历史是否与上一轮实际发出的逐字一致」。

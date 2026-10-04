@@ -47,6 +47,7 @@
 |-- agent_py_agent/tests/test_plugin_tool_gate_execution.py # B5 执行器/共用池、预算和引用到Gateway审批隔离联测；不启用真实插件
 |-- agent_py_agent/tests/test_plugin_gate_approval.py # B5 消费端四审批入口与自主提供者反绕过；隔离标记请求，不代替完整执行链
 |-- agent_py_agent/tests/test_plugin_gate_consumers.py # B5真实隔离主/子消费者与I4恢复重问，旧子审批不可跨attempt；不启停真实Gateway
+|-- agent_py_agent/tests/test_plugin_gate_cross_bfail.py # B5×B7跨件：冷启动撞预算/沙箱起不来/进程被杀都收紧成ask；只替插件进程
 |-- agent_py_agent/tests/test_plugin_gate_reapproval.py # B5六身份精确批准重跑、主子实际批准/再问/拒绝及鲜活换代，不读真实owner
 |-- agent_py_agent/tests/test_plugin_gate_event_combination.py # 17j B5/B4/B8组合：拒绝零handler/零工具事件，原归档/唯一写账→真实临时库→B6 info；三项转正
 |-- agent_py_agent/tests/test_plugin_tool_gate_decision_ledger.py # B5决定字段/全部review/批准排除/单门多门与canonical信封组件反证
